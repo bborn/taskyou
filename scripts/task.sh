@@ -230,8 +230,9 @@ list_tasks() {
         fi
 
         # Make issue number a clickable link (OSC 8 hyperlink)
-        LINK="\033]8;;${url}\033\\#${num}\033]8;;\033\\"
-        printf "${STATUS_COLOR}${STATUS_ICON}${NC} ${DIM}${LINK}${NC}  ${PRIORITY_IND}${PROJECT_TAG}%s ${TYPE_TAG}\n" "$title"
+        # Format: ESC ] 8 ; ; URL ESC \ TEXT ESC ] 8 ; ; ESC \
+        printf "%b%s%b %b\033]8;;%s\033\\\\#%s\033]8;;\033\\\\%b  %b%b%s %b\n" \
+            "$STATUS_COLOR" "$STATUS_ICON" "$NC" "$DIM" "$url" "$num" "$NC" "$PRIORITY_IND" "$PROJECT_TAG" "$title" "$TYPE_TAG"
     done
 
     echo ""
