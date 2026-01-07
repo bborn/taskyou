@@ -586,40 +586,22 @@ watch_claude() {
         return
     fi
 
-    # SSH and tail -F, parsing stream-json to show readable output
-    # Format: show assistant text and tool calls in a readable way
-    ssh "$RUNNER_HOST" "tail -F /tmp/claude_output.txt 2>/dev/null" 2>/dev/null | while IFS= read -r line; do
-        # Skip empty lines
-        [[ -z "$line" ]] && continue
-
-        # Try to parse as JSON
-        TYPE=$(echo "$line" | jq -r '.type // empty' 2>/dev/null)
-        [[ -z "$TYPE" ]] && continue
-
-        case "$TYPE" in
-            system)
-                # Init message - show session start
-                SUBTYPE=$(echo "$line" | jq -r '.subtype // empty' 2>/dev/null)
-                if [[ "$SUBTYPE" == "init" ]]; then
-                    echo -e "${BLUE}━━━ Session started ━━━${NC}"
-                fi
-                ;;
-            assistant)
-                # Claude's response - show text and tool calls
-                CONTENT=$(echo "$line" | jq -r '.message.content[]? | if .type == "text" then .text elif .type == "tool_use" then "🔧 " + .name + ": " + (.input | tostring | .[0:100]) else empty end' 2>/dev/null)
-                if [[ -n "$CONTENT" ]]; then
-                    echo -e "${GREEN}Claude:${NC} $CONTENT"
-                fi
-                ;;
-            user)
-                # Tool results - show briefly
-                TOOL_RESULT=$(echo "$line" | jq -r '.tool_use_result.stdout // .tool_use_result.result // empty' 2>/dev/null | head -c 200)
-                if [[ -n "$TOOL_RESULT" ]]; then
-                    echo -e "${DIM}  → ${TOOL_RESULT:0:150}...${NC}"
-                fi
-                ;;
-        esac
-    done
+    # SSH and tail -F, with server-side jq parsing for speed
+    # Using stdbuf to disable buffering
+    ssh "$RUNNER_HOST" 'tail -F /tmp/claude_output.txt 2>/dev/null | while IFS= read -r line; do
+      echo "$line" | jq -r "
+        if .type == \"system\" and .subtype == \"init\" then
+          \"\\n━━━ Session started ━━━\"
+        elif .type == \"assistant\" then
+          .message.content[]? |
+          if .type == \"text\" then
+            \"Claude: \" + (.text | split(\"\n\")[0] | .[0:200])
+          elif .type == \"tool_use\" then
+            \"  🔧 \" + .name
+          else empty end
+        else empty end
+      " 2>/dev/null | grep -v "^$"
+    done' 2>/dev/null
 
     echo -e "${YELLOW}Connection closed. Reconnecting in 2s...${NC}"
     sleep 2
