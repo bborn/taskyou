@@ -147,7 +147,6 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.REPO_ACCESS_TOKEN }}
           ISSUE_NUMBER: ${{ github.event.issue.number }}
-          LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
         run: |
           PROMPT="You are working on: ${{ steps.project.outputs.name }}
 
@@ -307,7 +306,6 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           ISSUE_NUMBER: ${{ github.event.issue.number }}
-          LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
         run: |
           PROMPT="You are a skilled writer. Please complete this task:
 
@@ -381,7 +379,6 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           ISSUE_NUMBER: ${{ github.event.issue.number }}
-          LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
         run: |
           PROMPT="You are a strategic advisor. Analyze this thoroughly:
 
@@ -453,8 +450,6 @@ jobs:
 
       - name: Triage with Claude Code
         id: triage
-        env:
-          LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
         run: |
           PROMPT="You are a task triage assistant. Review this task and provide structured output.
 

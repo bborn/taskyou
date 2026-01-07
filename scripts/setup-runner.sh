@@ -120,22 +120,11 @@ echo -e "${GREEN}✓ Project directories created at $PROJECTS_DIR${NC}"
 # ============================================
 echo -e "${YELLOW}[9/9] Configuring MCP servers...${NC}"
 
-# Configure Linear MCP for the runner user
-# The LINEAR_API_KEY env var must be set in runner's environment
-sudo -u runner mkdir -p /home/runner/.claude
-sudo -u runner tee /home/runner/.claude/settings.json > /dev/null <<'MCPEOF'
-{
-  "mcpServers": {
-    "linear": {
-      "command": "npx",
-      "args": ["-y", "@linear/mcp-server"]
-    }
-  }
-}
-MCPEOF
+# Configure Linear MCP (official remote server)
+sudo -u runner claude mcp add --transport http linear https://mcp.linear.app/mcp 2>/dev/null || true
 
-echo -e "${GREEN}✓ MCP servers configured (Linear)${NC}"
-echo -e "${YELLOW}  Note: Set LINEAR_API_KEY in runner environment${NC}"
+echo -e "${GREEN}✓ Linear MCP server configured${NC}"
+echo -e "${YELLOW}  Note: Run 'claude' then '/mcp' to authenticate with Linear${NC}"
 
 # ============================================
 # Step 10: Print Next Steps
@@ -174,10 +163,9 @@ echo "7. Authenticate Claude Code:"
 echo -e "   ${BLUE}claude auth login${NC}"
 echo "   (Follow the browser prompts to log in with your Claude Max account)"
 echo ""
-echo "8. Set Linear API key (for MCP):"
-echo "   Get your key from: https://linear.app/settings/api"
-echo -e "   ${BLUE}echo 'export LINEAR_API_KEY=\"your_key_here\"' >> ~/.bashrc${NC}"
-echo -e "   ${BLUE}source ~/.bashrc${NC}"
+echo "8. Authenticate Linear MCP:"
+echo -e "   ${BLUE}claude${NC}"
+echo -e "   ${BLUE}/mcp${NC}  (select Linear, follow OAuth flow)"
 echo ""
 echo "9. Verify Claude Code works:"
 echo -e "   ${BLUE}claude -p 'Say hello'${NC}"
