@@ -46,6 +46,12 @@ CLOSE OPTIONS:
     task close NUMBER     Close task by issue number
     task done NUMBER      Alias for close
 
+REVIEW OPTIONS:
+    task review           List tasks ready for review
+    task review -p NAME   Filter by project
+    task review --open    Open all ready tasks in browser
+    task review NUMBER    Open specific task in browser
+
 EXAMPLES:
     task "Fix login redirect bug"
     task "Add Stripe webhook" -p offerlab -t code
@@ -278,6 +284,98 @@ create_task() {
     fi
 }
 
+# Review ready tasks
+review_tasks() {
+    local PROJECT="" OPEN_ALL="" ISSUE_NUM=""
+
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            -p|--project) PROJECT="$2"; shift 2 ;;
+            -o|--open) OPEN_ALL="1"; shift ;;
+            -h|--help) show_help; exit 0 ;;
+            [0-9]*)
+                ISSUE_NUM="$1"
+                shift
+                ;;
+            *) shift ;;
+        esac
+    done
+
+    # If a specific issue number given, open it directly
+    if [[ -n "$ISSUE_NUM" ]]; then
+        echo -e "${BLUE}Opening task #${ISSUE_NUM}...${NC}"
+        gh issue view "$ISSUE_NUM" --repo "$TASK_REPO" --web
+        exit 0
+    fi
+
+    # Build label filters
+    LABEL_ARGS=("--label" "status:ready")
+    [[ -n "$PROJECT" ]] && LABEL_ARGS+=("--label" "$(normalize_project "$PROJECT")")
+
+    echo -e "${BLUE}Tasks ready for review${NC}"
+    echo ""
+
+    # Get ready issues
+    ISSUES=$(gh issue list \
+        --repo "$TASK_REPO" \
+        --state open \
+        --limit 30 \
+        "${LABEL_ARGS[@]}" \
+        --json number,title,labels,url \
+        2>&1) || { echo -e "${RED}Failed to fetch tasks${NC}"; exit 1; }
+
+    # Check if empty
+    if [[ "$ISSUES" == "[]" ]]; then
+        echo -e "${DIM}No tasks ready for review${NC}"
+        exit 0
+    fi
+
+    COUNT=$(echo "$ISSUES" | jq length)
+
+    # If --open flag, open all in browser
+    if [[ -n "$OPEN_ALL" ]]; then
+        echo -e "${YELLOW}Opening $COUNT tasks in browser...${NC}"
+        echo "$ISSUES" | jq -r '.[].url' | while read -r url; do
+            open "$url" 2>/dev/null || xdg-open "$url" 2>/dev/null || echo "$url"
+            sleep 0.3  # Small delay to not overwhelm browser
+        done
+        exit 0
+    fi
+
+    # Display ready tasks
+    echo "$ISSUES" | jq -r '.[] | "\(.number)|\(.title)|\(.labels | map(.name) | join(","))|\(.url)"' | while IFS='|' read -r num title labels url; do
+        # Extract project
+        PROJECT_TAG=""
+        if [[ "$labels" == *"project:offerlab"* ]]; then
+            PROJECT_TAG="${CYAN}[offerlab]${NC} "
+        elif [[ "$labels" == *"project:influencekit"* ]]; then
+            PROJECT_TAG="${CYAN}[ik]${NC} "
+        elif [[ "$labels" == *"project:personal"* ]]; then
+            PROJECT_TAG="${CYAN}[personal]${NC} "
+        fi
+
+        # Type indicator
+        TYPE_TAG=""
+        if [[ "$labels" == *"type:code"* ]]; then
+            TYPE_TAG="${DIM}code${NC}"
+        elif [[ "$labels" == *"type:writing"* ]]; then
+            TYPE_TAG="${DIM}write${NC}"
+        elif [[ "$labels" == *"type:thinking"* ]]; then
+            TYPE_TAG="${DIM}think${NC}"
+        fi
+
+        printf "${GREEN}✓${NC} ${DIM}#%-4s${NC} ${PROJECT_TAG}%s ${TYPE_TAG}\n" "$num" "$title"
+    done
+
+    echo ""
+    echo -e "${DIM}${COUNT} tasks ready for review${NC}"
+    echo ""
+    echo -e "${DIM}Commands:${NC}"
+    echo -e "  task review NUMBER    ${DIM}# Open specific task${NC}"
+    echo -e "  task review --open    ${DIM}# Open all in browser${NC}"
+    echo -e "  task close NUMBER     ${DIM}# Mark as reviewed${NC}"
+}
+
 # Close task
 close_task() {
     local ISSUE_NUM="$1"
@@ -313,7 +411,11 @@ case "${1:-}" in
         shift
         list_tasks "$@"
         ;;
-    close|done|c|d)
+    review|rev|r)
+        shift
+        review_tasks "$@"
+        ;;
+    close|done)
         shift
         close_task "$@"
         ;;

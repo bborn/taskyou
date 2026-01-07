@@ -403,8 +403,8 @@ jobs:
               labels: ['status:ready']
             });
 
-  # Auto-classify tasks without a type
-  classify-and-process:
+  # Triage tasks without a type - Claude reviews, refines, and classifies
+  triage:
     needs: [should-process, start-processing]
     if: needs.should-process.outputs.task_type == 'auto'
     runs-on: ubuntu-latest
@@ -415,24 +415,37 @@ jobs:
         with:
           script: |
             const issue = context.payload.issue;
+            const labels = issue.labels.map(l => l.name).join(', ');
             core.setOutput('title', issue.title);
             core.setOutput('body', issue.body || '');
+            core.setOutput('labels', labels);
             return issue;
 
-      - name: Classify task
-        id: classify
+      - name: Triage with Claude
+        id: triage
         run: |
-          PROMPT="Classify this task into exactly one category:
+          PROMPT="You are a task triage assistant. Review this task and provide structured output.
 
-          Task: ${{ steps.task.outputs.title }}
-          Details: ${{ steps.task.outputs.body }}
+          Task Title: ${{ steps.task.outputs.title }}
+          Task Body: ${{ steps.task.outputs.body }}
+          Existing Labels: ${{ steps.task.outputs.labels }}
 
-          Categories:
-          - CODE: Software development, bug fixes, features, refactoring
-          - WRITING: Emails, blog posts, documentation, content
-          - THINKING: Analysis, research, strategy, planning
+          Analyze the task and respond in this EXACT format (each field on its own line):
 
-          Respond with only one word: CODE, WRITING, or THINKING"
+          REFINED_TITLE: <A clearer, more actionable title, or KEEP if the original is good>
+          REFINED_DESCRIPTION: <Enhanced description with clear scope and acceptance criteria, or KEEP if good>
+          TYPE: <code|writing|thinking>
+          PROJECT: <offerlab|influencekit|personal|unknown>
+          CLARITY: <clear|needs_info>
+          REASONING: <Brief 1-2 sentence explanation of your classification>
+
+          Guidelines:
+          - TYPE must be exactly one of: code, writing, thinking
+          - code = software dev, bugs, features, refactoring
+          - writing = emails, docs, blog posts, content creation
+          - thinking = analysis, research, strategy, planning
+          - PROJECT: infer from context if not labeled, use 'unknown' if unclear
+          - CLARITY: 'needs_info' if the task is too vague to act on"
 
           RESPONSE=$(curl -s https://api.anthropic.com/v1/messages \
             -H "Content-Type: application/json" \
@@ -440,38 +453,128 @@ jobs:
             -H "anthropic-version: 2023-06-01" \
             -d "{
               \"model\": \"claude-sonnet-4-20250514\",
-              \"max_tokens\": 10,
+              \"max_tokens\": 1024,
               \"messages\": [{\"role\": \"user\", \"content\": $(echo "$PROMPT" | jq -Rs .)}]
             }")
 
-          TYPE=$(echo "$RESPONSE" | jq -r '.content[0].text' | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')
-          echo "type=$TYPE" >> $GITHUB_OUTPUT
+          CONTENT=$(echo "$RESPONSE" | jq -r '.content[0].text')
 
-      - name: Add type label and re-trigger
+          # Parse structured response
+          TYPE=$(echo "$CONTENT" | grep -i "^TYPE:" | sed 's/TYPE:[[:space:]]*//' | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')
+          PROJECT=$(echo "$CONTENT" | grep -i "^PROJECT:" | sed 's/PROJECT:[[:space:]]*//' | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')
+          CLARITY=$(echo "$CONTENT" | grep -i "^CLARITY:" | sed 's/CLARITY:[[:space:]]*//' | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')
+          REFINED_TITLE=$(echo "$CONTENT" | grep -i "^REFINED_TITLE:" | sed 's/REFINED_TITLE:[[:space:]]*//')
+          REASONING=$(echo "$CONTENT" | grep -i "^REASONING:" | sed 's/REASONING:[[:space:]]*//')
+
+          # Extract refined description (may be multiline, so handle differently)
+          REFINED_DESC=$(echo "$CONTENT" | sed -n '/^REFINED_DESCRIPTION:/,/^TYPE:/p' | head -n -1 | sed 's/REFINED_DESCRIPTION:[[:space:]]*//')
+
+          # Defaults
+          [[ -z "$TYPE" || ! "$TYPE" =~ ^(code|writing|thinking)$ ]] && TYPE="thinking"
+          [[ -z "$CLARITY" ]] && CLARITY="clear"
+
+          echo "type=$TYPE" >> $GITHUB_OUTPUT
+          echo "project=$PROJECT" >> $GITHUB_OUTPUT
+          echo "clarity=$CLARITY" >> $GITHUB_OUTPUT
+          echo "reasoning=$REASONING" >> $GITHUB_OUTPUT
+
+          # Handle multiline for refined title/desc
+          echo "refined_title<<EOF" >> $GITHUB_OUTPUT
+          echo "$REFINED_TITLE" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+          echo "refined_desc<<EOF" >> $GITHUB_OUTPUT
+          echo "$REFINED_DESC" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+          # Full response for comment
+          echo "full_response<<EOF" >> $GITHUB_OUTPUT
+          echo "$CONTENT" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Post triage comment
         uses: actions/github-script@v7
         with:
           script: |
-            const type = '${{ steps.classify.outputs.type }}';
-            const labelMap = {
-              'code': 'type:code',
-              'writing': 'type:writing', 
-              'thinking': 'type:thinking'
-            };
-            
-            const label = labelMap[type] || 'type:thinking';
-            
-            // Add the type label - this will re-trigger the workflow
+            const type = '${{ steps.triage.outputs.type }}';
+            const project = '${{ steps.triage.outputs.project }}';
+            const clarity = '${{ steps.triage.outputs.clarity }}';
+            const reasoning = `${{ steps.triage.outputs.reasoning }}`;
+            const refinedTitle = `${{ steps.triage.outputs.refined_title }}`;
+            const refinedDesc = `${{ steps.triage.outputs.refined_desc }}`;
+
+            let comment = `🤖 **Task Triaged**\n\n`;
+            comment += `**Type:** \`${type}\`\n`;
+            comment += `**Project:** \`${project}\`\n`;
+            comment += `**Clarity:** ${clarity === 'clear' ? '✅ Clear' : '⚠️ Needs more info'}\n\n`;
+
+            if (refinedTitle && refinedTitle !== 'KEEP') {
+              comment += `**Suggested Title:**\n> ${refinedTitle}\n\n`;
+            }
+
+            if (refinedDesc && refinedDesc !== 'KEEP') {
+              comment += `**Suggested Description:**\n${refinedDesc}\n\n`;
+            }
+
+            comment += `**Reasoning:** ${reasoning}\n\n`;
+            comment += `---\n*Proceeding to ${type} agent...*`;
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: comment
+            });
+
+      - name: Handle unclear tasks
+        if: steps.triage.outputs.clarity == 'needs_info'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            // Mark as blocked if task needs clarification
+            await github.rest.issues.removeLabel({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              name: 'status:processing'
+            }).catch(() => {});
+
             await github.rest.issues.addLabels({
               owner: context.repo.owner,
               repo: context.repo.repo,
               issue_number: context.issue.number,
-              labels: [label, 'status:queued']  // Re-queue with type
+              labels: ['status:blocked']
             });
-            
+
+      - name: Add labels and re-queue
+        if: steps.triage.outputs.clarity != 'needs_info'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const type = '${{ steps.triage.outputs.type }}';
+            const project = '${{ steps.triage.outputs.project }}';
+            const existingProject = '${{ needs.should-process.outputs.project }}';
+
+            const typeLabel = `type:${type}`;
+            const labelsToAdd = [typeLabel, 'status:queued'];
+
+            // Add project label if we determined one and there isn't one already
+            if (project && project !== 'unknown' && existingProject === 'unknown') {
+              labelsToAdd.push(`project:${project}`);
+            }
+
+            // Add the labels - this will re-trigger the workflow with the type
+            await github.rest.issues.addLabels({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              labels: labelsToAdd
+            });
+
             // Remove processing
             await github.rest.issues.removeLabel({
               owner: context.repo.owner,
               repo: context.repo.repo,
               issue_number: context.issue.number,
               name: 'status:processing'
-            });
+            }).catch(() => {});
