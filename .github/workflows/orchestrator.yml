@@ -164,9 +164,13 @@ jobs:
           - Commit your changes with clear messages
           - You have full access to all tools - use whatever you need
 
-          When finished:
-          - If complete: output TASK_COMPLETE on its own line
-          - If you need input from me: output NEEDS_INPUT: followed by your question"
+          When finished successfully, output these lines:
+          TASK_COMPLETE
+          PR_TITLE: <concise title describing what changed, e.g. 'Add dark mode toggle to settings page'>
+          PR_SUMMARY: <2-4 bullet points summarizing the key changes you made>
+          PR_TEST_PLAN: <how to test these changes, bullet points>
+
+          If you need input from me: output NEEDS_INPUT: followed by your question"
 
           # Setup logging
           LOG_DIR="/home/runner/logs"
@@ -186,12 +190,39 @@ jobs:
 
           echo "log_file=$LOG_FILE" >> $GITHUB_OUTPUT
 
+          # Extract the last assistant message for parsing
+          FINAL_MSG=$(grep '"type":"assistant"' "$LOG_FILE" | tail -1 | jq -r '.message.content[]?.text // empty' 2>/dev/null || cat "$LOG_FILE")
+
           # Check result
-          if grep -q "TASK_COMPLETE" "$LOG_FILE"; then
+          if echo "$FINAL_MSG" | grep -q "TASK_COMPLETE"; then
             echo "result=complete" >> $GITHUB_OUTPUT
-          elif grep -q "NEEDS_INPUT" "$LOG_FILE"; then
+
+            # Parse PR details from Claude's output
+            PR_TITLE=$(echo "$FINAL_MSG" | grep -i "^PR_TITLE:" | sed 's/PR_TITLE:[[:space:]]*//' | head -1)
+            PR_SUMMARY=$(echo "$FINAL_MSG" | sed -n '/^PR_SUMMARY:/,/^PR_TEST_PLAN:/p' | grep -v "^PR_TEST_PLAN:" | sed 's/PR_SUMMARY:[[:space:]]*//')
+            PR_TEST_PLAN=$(echo "$FINAL_MSG" | sed -n '/^PR_TEST_PLAN:/,$p' | sed 's/PR_TEST_PLAN:[[:space:]]*//')
+
+            # Use task title as fallback
+            [ -z "$PR_TITLE" ] && PR_TITLE="${{ steps.task.outputs.title }}"
+            [ -z "$PR_SUMMARY" ] && PR_SUMMARY="Implements: ${{ steps.task.outputs.title }}"
+            [ -z "$PR_TEST_PLAN" ] && PR_TEST_PLAN="- Manual testing"
+
+            # Output PR details (using heredoc for multiline)
+            echo "pr_title<<EOF" >> $GITHUB_OUTPUT
+            echo "$PR_TITLE" >> $GITHUB_OUTPUT
+            echo "EOF" >> $GITHUB_OUTPUT
+
+            echo "pr_summary<<EOF" >> $GITHUB_OUTPUT
+            echo "$PR_SUMMARY" >> $GITHUB_OUTPUT
+            echo "EOF" >> $GITHUB_OUTPUT
+
+            echo "pr_test_plan<<EOF" >> $GITHUB_OUTPUT
+            echo "$PR_TEST_PLAN" >> $GITHUB_OUTPUT
+            echo "EOF" >> $GITHUB_OUTPUT
+
+          elif echo "$FINAL_MSG" | grep -q "NEEDS_INPUT"; then
             echo "result=needs_input" >> $GITHUB_OUTPUT
-            grep "NEEDS_INPUT" "$LOG_FILE" | head -1 | sed 's/NEEDS_INPUT://' > /tmp/question.txt
+            echo "$FINAL_MSG" | grep "NEEDS_INPUT" | head -1 | sed 's/NEEDS_INPUT://' > /tmp/question.txt
           else
             echo "result=error" >> $GITHUB_OUTPUT
           fi
@@ -202,19 +233,35 @@ jobs:
         working-directory: ${{ steps.project.outputs.dir }}
         env:
           GH_TOKEN: ${{ secrets.REPO_ACCESS_TOKEN }}
+          PR_TITLE: ${{ steps.claude.outputs.pr_title }}
+          PR_SUMMARY: ${{ steps.claude.outputs.pr_summary }}
+          PR_TEST_PLAN: ${{ steps.claude.outputs.pr_test_plan }}
+          TASK_URL: https://github.com/${{ github.repository }}/issues/${{ github.event.issue.number }}
         run: |
           # Push the branch
           git push -u origin "${{ steps.workspace.outputs.branch }}"
 
-          # Create PR (no reference to workflow repo)
+          # Build PR body
+          cat > /tmp/pr_body.md << EOF
+## Summary
+
+${PR_SUMMARY}
+
+## Test Plan
+
+${PR_TEST_PLAN}
+
+---
+
+🔗 Task: ${TASK_URL}
+
+🤖 *Automated by [Claude Code](https://claude.com/claude-code)*
+EOF
+
+          # Create PR with Claude-generated title and description
           PR_URL=$(gh pr create \
-            --title "${{ steps.task.outputs.title }}" \
-            --body "## Summary
-
-          ${{ steps.task.outputs.body }}
-
-          ---
-          *Automated PR*" \
+            --title "$PR_TITLE" \
+            --body-file /tmp/pr_body.md \
             --head "${{ steps.workspace.outputs.branch }}")
 
           echo "url=$PR_URL" >> $GITHUB_OUTPUT
