@@ -459,6 +459,13 @@ jobs:
 
           CONTENT=$(echo "$RESPONSE" | jq -r '.content[0].text')
 
+          # Debug: show response
+          echo "=== API Response ==="
+          echo "$RESPONSE" | jq '.' || echo "$RESPONSE"
+          echo "=== Content ==="
+          echo "$CONTENT"
+          echo "================"
+
           # Parse structured response
           TYPE=$(echo "$CONTENT" | grep -i "^TYPE:" | sed 's/TYPE:[[:space:]]*//' | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')
           PROJECT=$(echo "$CONTENT" | grep -i "^PROJECT:" | sed 's/PROJECT:[[:space:]]*//' | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')
@@ -472,6 +479,14 @@ jobs:
           # Defaults
           [[ -z "$TYPE" || ! "$TYPE" =~ ^(code|writing|thinking)$ ]] && TYPE="thinking"
           [[ -z "$CLARITY" ]] && CLARITY="clear"
+
+          # Debug parsed values
+          echo "=== Parsed Values ==="
+          echo "TYPE: $TYPE"
+          echo "PROJECT: $PROJECT"
+          echo "CLARITY: $CLARITY"
+          echo "REASONING: $REASONING"
+          echo "===================="
 
           echo "type=$TYPE" >> $GITHUB_OUTPUT
           echo "project=$PROJECT" >> $GITHUB_OUTPUT
