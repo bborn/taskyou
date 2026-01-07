@@ -28,21 +28,23 @@ jobs:
         with:
           script: |
             const labels = context.payload.issue.labels.map(l => l.name);
-            
-            // Only process queued tasks
-            if (!labels.includes('status:queued')) {
+            const triggeringLabel = context.payload.label?.name;
+
+            // Only process when status:queued is the triggering label
+            // This prevents duplicate runs when multiple labels are added at once
+            if (triggeringLabel !== 'status:queued') {
               core.setOutput('should_run', 'false');
               return;
             }
-            
+
             // Don't re-process
-            if (labels.includes('status:processing') || 
+            if (labels.includes('status:processing') ||
                 labels.includes('status:ready') ||
                 labels.includes('status:blocked')) {
               core.setOutput('should_run', 'false');
               return;
             }
-            
+
             core.setOutput('should_run', 'true');
             
             // Determine type
