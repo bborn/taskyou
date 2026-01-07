@@ -56,6 +56,11 @@ WATCH OPTIONS:
     task watch            Watch Claude working on Hetzner (live tail)
     task w                Alias for watch
 
+REQUEUE OPTIONS:
+    task requeue NUMBER              Requeue a blocked task
+    task requeue NUMBER -m "info"    Requeue with additional context
+    task rq NUMBER "more details"    Shorthand
+
 EXAMPLES:
     task "Fix login redirect bug"
     task "Add Stripe webhook" -p offerlab -t code
@@ -428,6 +433,66 @@ close_task() {
     fi
 }
 
+# Requeue a blocked task
+requeue_task() {
+    local ISSUE_NUM="" COMMENT=""
+
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            -m|--message) COMMENT="$2"; shift 2 ;;
+            -h|--help)
+                echo "Usage: task requeue NUMBER [-m \"additional context\"]"
+                exit 0
+                ;;
+            [0-9]*)
+                ISSUE_NUM="$1"
+                shift
+                ;;
+            *)
+                # Treat as comment if no flag
+                if [[ -z "$COMMENT" ]]; then
+                    COMMENT="$1"
+                fi
+                shift
+                ;;
+        esac
+    done
+
+    if [[ -z "$ISSUE_NUM" ]]; then
+        echo -e "${RED}Error: Issue number required${NC}"
+        echo "Usage: task requeue NUMBER [-m \"additional context\"]"
+        exit 1
+    fi
+
+    # Validate it's a number
+    if ! [[ "$ISSUE_NUM" =~ ^[0-9]+$ ]]; then
+        echo -e "${RED}Error: Invalid issue number${NC}"
+        exit 1
+    fi
+
+    echo -e "${BLUE}Requeuing task #${ISSUE_NUM}...${NC}"
+
+    # Add comment if provided
+    if [[ -n "$COMMENT" ]]; then
+        gh issue comment "$ISSUE_NUM" --repo "$TASK_REPO" --body "$COMMENT" > /dev/null 2>&1
+        echo -e "${DIM}Added comment: ${COMMENT}${NC}"
+    fi
+
+    # Remove blocked/ready, add queued
+    gh issue edit "$ISSUE_NUM" --repo "$TASK_REPO" \
+        --remove-label "status:blocked" \
+        --remove-label "status:ready" \
+        --add-label "status:queued" \
+        > /dev/null 2>&1
+
+    if [[ $? -eq 0 ]]; then
+        echo -e "${GREEN}✓ Task #${ISSUE_NUM} requeued${NC}"
+    else
+        echo -e "${RED}✗ Failed to requeue task${NC}"
+        exit 1
+    fi
+}
+
 # Watch Claude working on Hetzner
 watch_claude() {
     local RUNNER_HOST="${RUNNER_HOST:-cloud-claude}"
@@ -476,6 +541,10 @@ case "${1:-}" in
     watch|w)
         shift
         watch_claude "$@"
+        ;;
+    requeue|rq)
+        shift
+        requeue_task "$@"
         ;;
     close|done)
         shift
