@@ -109,6 +109,17 @@ normalize_priority() {
     esac
 }
 
+# Detect project from current directory
+detect_project() {
+    local cwd="$(pwd)"
+    case "$cwd" in
+        */offerlab*) echo "offerlab" ;;
+        */influencekit*) echo "influencekit" ;;
+        */workflow*) echo "personal" ;;
+        *) echo "" ;;
+    esac
+}
+
 # List tasks
 list_tasks() {
     local PROJECT="" TYPE="" STATUS="" PRIORITY="" SHOW_ALL="" LIMIT="30"
@@ -236,6 +247,14 @@ create_task() {
         echo ""
         show_help
         exit 1
+    fi
+
+    # Auto-detect project from current directory if not specified
+    if [[ -z "$PROJECT" ]]; then
+        PROJECT=$(detect_project)
+        if [[ -n "$PROJECT" ]]; then
+            echo -e "${DIM}Auto-detected project: ${PROJECT}${NC}"
+        fi
     fi
 
     # Build label arguments
