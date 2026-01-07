@@ -279,8 +279,8 @@ jobs:
           Write the requested content. Be professional, clear, and match the appropriate tone.
           Output only the final content, no meta-commentary."
 
-          # Run Claude Code
-          CONTENT=$(claude -p "$PROMPT" --max-turns 1 2>&1) || true
+          # Run Claude Code (--max-turns 3 allows for response)
+          CONTENT=$(claude -p "$PROMPT" --max-turns 3 2>&1) || true
 
           # Save for comment
           echo "content<<EOF" >> $GITHUB_OUTPUT
@@ -348,8 +348,8 @@ jobs:
 
           Think deeply but be actionable."
 
-          # Run Claude Code
-          CONTENT=$(claude -p "$PROMPT" --max-turns 1 2>&1) || true
+          # Run Claude Code (--max-turns 3 allows for response)
+          CONTENT=$(claude -p "$PROMPT" --max-turns 3 2>&1) || true
 
           echo "content<<EOF" >> $GITHUB_OUTPUT
           echo "$CONTENT" >> $GITHUB_OUTPUT
@@ -426,8 +426,8 @@ jobs:
           - PROJECT: infer from context if not labeled, use 'unknown' if unclear
           - CLARITY: 'needs_info' if the task is too vague to act on"
 
-          # Run Claude Code
-          CONTENT=$(claude -p "$PROMPT" --max-turns 1 2>&1) || true
+          # Run Claude Code (--max-turns 3 allows for response)
+          CONTENT=$(claude -p "$PROMPT" --max-turns 3 2>&1) || true
 
           # Debug: show response
           echo "=== Claude Response ==="
