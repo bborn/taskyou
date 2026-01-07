@@ -33,6 +33,7 @@ CREATE OPTIONS:
     -t, --type TYPE       Type: code (c), writing (w), thinking (t)
     -P, --priority LEVEL  Priority: high (h), low (l)
     -b, --body TEXT       Additional details
+    -                     Read from stdin (first line = title, rest = body)
 
 LIST OPTIONS:
     -p, --project NAME    Filter by project
@@ -225,7 +226,7 @@ list_tasks() {
 
 # Create task
 create_task() {
-    local PROJECT="" TYPE="" PRIORITY="" BODY="" TITLE=""
+    local PROJECT="" TYPE="" PRIORITY="" BODY="" TITLE="" FROM_STDIN=""
 
     while [[ $# -gt 0 ]]; do
         case $1 in
@@ -234,6 +235,10 @@ create_task() {
             -P|--priority) PRIORITY="$2"; shift 2 ;;
             -b|--body) BODY="$2"; shift 2 ;;
             -h|--help) show_help; exit 0 ;;
+            -)
+                FROM_STDIN="1"
+                shift
+                ;;
             -*)
                 echo -e "${RED}Unknown option: $1${NC}"
                 show_help
@@ -249,6 +254,15 @@ create_task() {
                 ;;
         esac
     done
+
+    # Read from stdin if - flag was passed
+    if [[ -n "$FROM_STDIN" ]]; then
+        echo -e "${DIM}Reading from stdin (first line = title, rest = body)...${NC}"
+        echo -e "${DIM}Paste content, then Ctrl+D when done:${NC}"
+        local INPUT=$(cat)
+        TITLE=$(echo "$INPUT" | head -n 1)
+        BODY=$(echo "$INPUT" | tail -n +2)
+    fi
 
     # Validate
     if [[ -z "$TITLE" ]]; then
