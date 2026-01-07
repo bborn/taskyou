@@ -42,13 +42,17 @@ LIST OPTIONS:
     -a, --all             Include closed tasks
     -l, --limit NUM       Max results (default: 30)
 
+CLOSE OPTIONS:
+    task close NUMBER     Close task by issue number
+    task done NUMBER      Alias for close
+
 EXAMPLES:
     task "Fix login redirect bug"
     task "Add Stripe webhook" -p offerlab -t code
     task list
     task list -p offerlab -s queued
-    task list -t code -s ready
-    task list --all
+    task close 42
+    task done 15
 
 SHORTCUTS:
     alias tq='task'
@@ -274,11 +278,44 @@ create_task() {
     fi
 }
 
+# Close task
+close_task() {
+    local ISSUE_NUM="$1"
+
+    if [[ -z "$ISSUE_NUM" ]]; then
+        echo -e "${RED}Error: Issue number required${NC}"
+        echo "Usage: task close NUMBER"
+        exit 1
+    fi
+
+    # Validate it's a number
+    if ! [[ "$ISSUE_NUM" =~ ^[0-9]+$ ]]; then
+        echo -e "${RED}Error: Invalid issue number${NC}"
+        exit 1
+    fi
+
+    echo -e "${BLUE}Closing task #${ISSUE_NUM}...${NC}"
+
+    RESULT=$(gh issue close "$ISSUE_NUM" --repo "$TASK_REPO" 2>&1)
+
+    if [[ $? -eq 0 ]]; then
+        echo -e "${GREEN}✓ Closed task #${ISSUE_NUM}${NC}"
+    else
+        echo -e "${RED}✗ Failed to close task${NC}"
+        echo "$RESULT"
+        exit 1
+    fi
+}
+
 # Main routing
 case "${1:-}" in
     list|ls|l)
         shift
         list_tasks "$@"
+        ;;
+    close|done|c|d)
+        shift
+        close_task "$@"
         ;;
     help|--help|-h)
         show_help
