@@ -497,7 +497,9 @@ requeue_task() {
 watch_claude() {
     local RUNNER_HOST="${RUNNER_HOST:-cloud-claude}"
 
-    echo -e "${BLUE}Checking processing tasks...${NC}"
+    echo -e "${BLUE}Watching Claude on ${RUNNER_HOST}...${NC}"
+    echo -e "${DIM}(Ctrl+C to exit)${NC}"
+    echo ""
 
     # Show tasks currently processing
     PROCESSING=$(gh issue list \
@@ -506,26 +508,23 @@ watch_claude() {
         --label "status:processing" \
         --json number,title \
         --limit 5 \
-        2>&1) || { echo -e "${RED}Failed to fetch tasks${NC}"; exit 1; }
+        2>&1)
 
-    if [[ "$PROCESSING" == "[]" ]]; then
-        echo -e "${DIM}No tasks currently processing${NC}"
+    if [[ "$PROCESSING" != "[]" ]]; then
+        echo -e "${GREEN}Currently processing:${NC}"
+        echo "$PROCESSING" | jq -r '.[] | "  #\(.number): \(.title)"'
         echo ""
-        echo -e "${YELLOW}Check queued tasks:${NC}"
-        echo -e "  ${BLUE}task list -s queued${NC}"
-        exit 0
+    else
+        echo -e "${DIM}No tasks currently processing - waiting...${NC}"
+        echo ""
     fi
 
-    echo -e "${GREEN}Currently processing:${NC}"
-    echo "$PROCESSING" | jq -r '.[] | "  #\(.number): \(.title)"'
-    echo ""
-
-    echo -e "${YELLOW}Connecting to ${RUNNER_HOST}...${NC}"
-    echo -e "${DIM}(Ctrl+C to exit)${NC}"
-    echo ""
-
-    # SSH and tail the output
-    ssh "$RUNNER_HOST" "tail -f /tmp/claude_output.txt 2>/dev/null || echo 'No active Claude session'"
+    # SSH and tail -F (capital F follows by name, waits for file to appear)
+    ssh "$RUNNER_HOST" "tail -F /tmp/claude_output.txt 2>/dev/null" || {
+        echo -e "${YELLOW}Connection closed. Reconnecting...${NC}"
+        sleep 2
+        watch_claude
+    }
 }
 
 # Main routing
