@@ -52,6 +52,10 @@ REVIEW OPTIONS:
     task review --open    Open all ready tasks in browser
     task review NUMBER    Open specific task in browser
 
+WATCH OPTIONS:
+    task watch            Watch Claude working on Hetzner (live tail)
+    task w                Alias for watch
+
 EXAMPLES:
     task "Fix login redirect bug"
     task "Add Stripe webhook" -p offerlab -t code
@@ -424,6 +428,41 @@ close_task() {
     fi
 }
 
+# Watch Claude working on Hetzner
+watch_claude() {
+    local RUNNER_HOST="${RUNNER_HOST:-cloud-claude}"
+
+    echo -e "${BLUE}Checking processing tasks...${NC}"
+
+    # Show tasks currently processing
+    PROCESSING=$(gh issue list \
+        --repo "$TASK_REPO" \
+        --state open \
+        --label "status:processing" \
+        --json number,title \
+        --limit 5 \
+        2>&1) || { echo -e "${RED}Failed to fetch tasks${NC}"; exit 1; }
+
+    if [[ "$PROCESSING" == "[]" ]]; then
+        echo -e "${DIM}No tasks currently processing${NC}"
+        echo ""
+        echo -e "${YELLOW}Check queued tasks:${NC}"
+        echo -e "  ${BLUE}task list -s queued${NC}"
+        exit 0
+    fi
+
+    echo -e "${GREEN}Currently processing:${NC}"
+    echo "$PROCESSING" | jq -r '.[] | "  #\(.number): \(.title)"'
+    echo ""
+
+    echo -e "${YELLOW}Connecting to ${RUNNER_HOST}...${NC}"
+    echo -e "${DIM}(Ctrl+C to exit)${NC}"
+    echo ""
+
+    # SSH and tail the output
+    ssh "$RUNNER_HOST" "tail -f /tmp/claude_output.txt 2>/dev/null || echo 'No active Claude session'"
+}
+
 # Main routing
 case "${1:-}" in
     list|ls|l)
@@ -433,6 +472,10 @@ case "${1:-}" in
     review|rev|r)
         shift
         review_tasks "$@"
+        ;;
+    watch|w)
+        shift
+        watch_claude "$@"
         ;;
     close|done)
         shift
