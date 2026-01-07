@@ -13,9 +13,6 @@ permissions:
   issues: write
   contents: read
 
-env:
-  ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-
 jobs:
   # Only run on queued tasks
   should-process:
@@ -254,11 +251,11 @@ jobs:
               labels: ['status:blocked']
             });
 
-  # Writing tasks - use Claude API
+  # Writing tasks - use Claude Code
   process-writing:
     needs: [should-process, start-processing]
     if: needs.should-process.outputs.task_type == 'writing'
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     steps:
       - name: Get task details
         id: task
@@ -270,7 +267,7 @@ jobs:
             core.setOutput('body', issue.body || '');
             return issue;
 
-      - name: Generate content
+      - name: Generate content with Claude Code
         id: generate
         run: |
           PROMPT="You are a skilled writer. Please complete this task:
@@ -282,19 +279,10 @@ jobs:
           Write the requested content. Be professional, clear, and match the appropriate tone.
           Output only the final content, no meta-commentary."
 
-          RESPONSE=$(curl -s https://api.anthropic.com/v1/messages \
-            -H "Content-Type: application/json" \
-            -H "x-api-key: $ANTHROPIC_API_KEY" \
-            -H "anthropic-version: 2023-06-01" \
-            -d "{
-              \"model\": \"claude-sonnet-4-20250514\",
-              \"max_tokens\": 4096,
-              \"messages\": [{\"role\": \"user\", \"content\": $(echo "$PROMPT" | jq -Rs .)}]
-            }")
+          # Run Claude Code
+          CONTENT=$(claude -p "$PROMPT" --max-turns 1 2>&1) || true
 
-          CONTENT=$(echo "$RESPONSE" | jq -r '.content[0].text')
-          
-          # Save for comment (escape for GitHub)
+          # Save for comment
           echo "content<<EOF" >> $GITHUB_OUTPUT
           echo "$CONTENT" >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
@@ -327,11 +315,11 @@ jobs:
               labels: ['status:ready']
             });
 
-  # Thinking tasks - analysis with extended thinking
+  # Thinking tasks - analysis with Claude Code
   process-thinking:
     needs: [should-process, start-processing]
     if: needs.should-process.outputs.task_type == 'thinking'
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     steps:
       - name: Get task details
         id: task
@@ -343,7 +331,7 @@ jobs:
             core.setOutput('body', issue.body || '');
             return issue;
 
-      - name: Analyze
+      - name: Analyze with Claude Code
         id: analyze
         run: |
           PROMPT="You are a strategic advisor. Analyze this thoroughly:
@@ -354,24 +342,15 @@ jobs:
 
           Provide:
           1. Clear analysis of the question/problem
-          2. Key considerations and tradeoffs  
+          2. Key considerations and tradeoffs
           3. Recommended approach
           4. Concrete next steps
 
           Think deeply but be actionable."
 
-          RESPONSE=$(curl -s https://api.anthropic.com/v1/messages \
-            -H "Content-Type: application/json" \
-            -H "x-api-key: $ANTHROPIC_API_KEY" \
-            -H "anthropic-version: 2023-06-01" \
-            -d "{
-              \"model\": \"claude-sonnet-4-20250514\",
-              \"max_tokens\": 4096,
-              \"messages\": [{\"role\": \"user\", \"content\": $(echo "$PROMPT" | jq -Rs .)}]
-            }")
+          # Run Claude Code
+          CONTENT=$(claude -p "$PROMPT" --max-turns 1 2>&1) || true
 
-          CONTENT=$(echo "$RESPONSE" | jq -r '.content[0].text')
-          
           echo "content<<EOF" >> $GITHUB_OUTPUT
           echo "$CONTENT" >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
@@ -403,11 +382,11 @@ jobs:
               labels: ['status:ready']
             });
 
-  # Triage tasks without a type - Claude reviews, refines, and classifies
+  # Triage tasks without a type - Claude Code reviews, refines, and classifies
   triage:
     needs: [should-process, start-processing]
     if: needs.should-process.outputs.task_type == 'auto'
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     steps:
       - name: Get task details
         id: task
@@ -421,7 +400,7 @@ jobs:
             core.setOutput('labels', labels);
             return issue;
 
-      - name: Triage with Claude
+      - name: Triage with Claude Code
         id: triage
         run: |
           PROMPT="You are a task triage assistant. Review this task and provide structured output.
@@ -447,24 +426,13 @@ jobs:
           - PROJECT: infer from context if not labeled, use 'unknown' if unclear
           - CLARITY: 'needs_info' if the task is too vague to act on"
 
-          RESPONSE=$(curl -s https://api.anthropic.com/v1/messages \
-            -H "Content-Type: application/json" \
-            -H "x-api-key: $ANTHROPIC_API_KEY" \
-            -H "anthropic-version: 2023-06-01" \
-            -d "{
-              \"model\": \"claude-sonnet-4-20250514\",
-              \"max_tokens\": 1024,
-              \"messages\": [{\"role\": \"user\", \"content\": $(echo "$PROMPT" | jq -Rs .)}]
-            }")
-
-          CONTENT=$(echo "$RESPONSE" | jq -r '.content[0].text')
+          # Run Claude Code
+          CONTENT=$(claude -p "$PROMPT" --max-turns 1 2>&1) || true
 
           # Debug: show response
-          echo "=== API Response ==="
-          echo "$RESPONSE" | jq '.' || echo "$RESPONSE"
-          echo "=== Content ==="
+          echo "=== Claude Response ==="
           echo "$CONTENT"
-          echo "================"
+          echo "======================="
 
           # Parse structured response
           TYPE=$(echo "$CONTENT" | grep -i "^TYPE:" | sed 's/TYPE:[[:space:]]*//' | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')
