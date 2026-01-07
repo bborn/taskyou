@@ -176,11 +176,12 @@ jobs:
           # Symlink for task watch
           ln -sf "$LOG_FILE" /tmp/claude_output.txt
 
-          # Run Claude with full permissions
+          # Run Claude with full permissions (stream-json for full conversation log)
           claude -p "$PROMPT" \
             --dangerously-skip-permissions \
             --max-turns 50 \
-            > "$LOG_FILE" 2>&1 || true
+            --output-format stream-json \
+            2>&1 | tee "$LOG_FILE" || true
 
           echo "log_file=$LOG_FILE" >> $GITHUB_OUTPUT
 
@@ -335,9 +336,11 @@ jobs:
           LOG_FILE="$LOG_DIR/task-${{ github.event.issue.number }}-$(date +%Y%m%d-%H%M%S).txt"
           ln -sf "$LOG_FILE" /tmp/claude_output.txt
 
-          # Run Claude Code (--max-turns 3 allows for response)
-          claude -p "$PROMPT" --max-turns 3 > "$LOG_FILE" 2>&1 || true
-          cp "$LOG_FILE" /tmp/content.txt
+          # Run Claude Code (stream-json for full conversation log)
+          claude -p "$PROMPT" --max-turns 3 --output-format stream-json 2>&1 | tee "$LOG_FILE" || true
+
+          # Extract text content from stream-json for the comment
+          grep '"type":"text"' "$LOG_FILE" | jq -r '.content // empty' > /tmp/content.txt 2>/dev/null || cp "$LOG_FILE" /tmp/content.txt
 
           # Build comment body
           {
@@ -420,9 +423,11 @@ jobs:
           LOG_FILE="$LOG_DIR/task-${{ github.event.issue.number }}-$(date +%Y%m%d-%H%M%S).txt"
           ln -sf "$LOG_FILE" /tmp/claude_output.txt
 
-          # Run Claude Code (--max-turns 3 allows for response)
-          claude -p "$PROMPT" --max-turns 3 > "$LOG_FILE" 2>&1 || true
-          cp "$LOG_FILE" /tmp/content.txt
+          # Run Claude Code (stream-json for full conversation log)
+          claude -p "$PROMPT" --max-turns 3 --output-format stream-json 2>&1 | tee "$LOG_FILE" || true
+
+          # Extract text content from stream-json for the comment
+          grep '"type":"text"' "$LOG_FILE" | jq -r '.content // empty' > /tmp/content.txt 2>/dev/null || cp "$LOG_FILE" /tmp/content.txt
 
           # Build comment body
           {
@@ -509,9 +514,11 @@ jobs:
           LOG_FILE="$LOG_DIR/triage-${{ github.event.issue.number }}-$(date +%Y%m%d-%H%M%S).txt"
           ln -sf "$LOG_FILE" /tmp/claude_output.txt
 
-          # Run Claude Code (--max-turns 10 allows for MCP calls + response)
-          claude -p "$PROMPT" --max-turns 10 > "$LOG_FILE" 2>&1 || true
-          CONTENT=$(cat "$LOG_FILE")
+          # Run Claude Code (stream-json for full conversation log)
+          claude -p "$PROMPT" --max-turns 10 --output-format stream-json 2>&1 | tee "$LOG_FILE" || true
+
+          # Extract text content from stream-json
+          CONTENT=$(grep '"type":"text"' "$LOG_FILE" | jq -r '.content // empty' 2>/dev/null | tr '\n' ' ' || cat "$LOG_FILE")
 
           # Debug: show response
           echo "=== Claude Response ==="
