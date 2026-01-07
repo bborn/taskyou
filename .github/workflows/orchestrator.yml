@@ -283,21 +283,24 @@ jobs:
           Output only the final content, no meta-commentary."
 
           # Run Claude Code (--max-turns 3 allows for response)
-          CONTENT=$(claude -p "$PROMPT" --max-turns 3 2>&1) || true
+          claude -p "$PROMPT" --max-turns 3 > /tmp/content.txt 2>&1 || true
 
-          # Post comment directly via gh cli (avoids escaping issues)
-          BODY="✅ **Content generated:**
+          # Build comment body
+          {
+            echo "✅ **Content generated:**"
+            echo ""
+            echo "---"
+            echo ""
+            cat /tmp/content.txt
+            echo ""
+            echo "---"
+            echo ""
+            echo "*Copy the above content to use it.*"
+          } > /tmp/body.txt
 
----
-
-$CONTENT
-
----
-
-*Copy the above content to use it.*"
-
+          # Post comment using file input
           gh api repos/${{ github.repository }}/issues/${ISSUE_NUMBER}/comments \
-            -f body="$BODY"
+            -f body=@/tmp/body.txt
 
       - name: Update labels
         uses: actions/github-script@v7
@@ -354,15 +357,18 @@ $CONTENT
           Think deeply but be actionable."
 
           # Run Claude Code (--max-turns 3 allows for response)
-          CONTENT=$(claude -p "$PROMPT" --max-turns 3 2>&1) || true
+          claude -p "$PROMPT" --max-turns 3 > /tmp/content.txt 2>&1 || true
 
-          # Post comment directly via gh cli (avoids escaping issues)
-          BODY="✅ **Analysis complete:**
+          # Build comment body
+          {
+            echo "✅ **Analysis complete:**"
+            echo ""
+            cat /tmp/content.txt
+          } > /tmp/body.txt
 
-          $CONTENT"
-
+          # Post comment using file input
           gh api repos/${{ github.repository }}/issues/${ISSUE_NUMBER}/comments \
-            -f body="$BODY"
+            -f body=@/tmp/body.txt
 
       - name: Update labels
         uses: actions/github-script@v7
