@@ -237,9 +237,8 @@ create_task() {
     # Always add queued status
     LABELS+=("--label" "status:queued")
 
-    # Build body argument
-    BODY_ARG=()
-    [[ -n "$BODY" ]] && BODY_ARG=("--body" "$BODY")
+    # Body is required for non-interactive mode
+    [[ -z "$BODY" ]] && BODY=" "
 
     # Create the issue
     echo -e "${BLUE}Creating task...${NC}"
@@ -247,8 +246,8 @@ create_task() {
     RESULT=$(gh issue create \
         --repo "$TASK_REPO" \
         --title "$TITLE" \
+        --body "$BODY" \
         "${LABELS[@]}" \
-        "${BODY_ARG[@]}" \
         2>&1)
 
     if [[ $? -eq 0 ]]; then
