@@ -548,7 +548,12 @@ jobs:
             }
 
             comment += `**Reasoning:** ${reasoning}\n\n`;
-            comment += `---\n*Proceeding to ${type} agent...*`;
+
+            if (clarity === 'clear') {
+              comment += `---\n*Proceeding to ${type} agent...*`;
+            } else {
+              comment += `---\n*⏸️ Marked as blocked - please add more details, then use \`task requeue ${context.issue.number}\`*`;
+            }
 
             await github.rest.issues.createComment({
               owner: context.repo.owner,
