@@ -457,10 +457,12 @@ jobs:
           Task Body: ${{ steps.task.outputs.body }}
           Existing Labels: ${{ steps.task.outputs.labels }}
 
-          Analyze the task and respond in this EXACT format (each field on its own line):
+          IMPORTANT: If the title or body contains a Linear URL (linear.app/...), use your Linear MCP tools to fetch the full issue details FIRST. Use the issue ID from the URL (e.g., OL-2647) to get the title, description, and any other relevant context.
 
-          REFINED_TITLE: <A clearer, more actionable title, or KEEP if the original is good>
-          REFINED_DESCRIPTION: <Enhanced description with clear scope and acceptance criteria, or KEEP if good>
+          After gathering all context, respond in this EXACT format (each field on its own line):
+
+          REFINED_TITLE: <A clearer, more actionable title based on the actual issue>
+          REFINED_DESCRIPTION: <Full description with context from Linear if available>
           TYPE: <code|writing|thinking>
           PROJECT: <offerlab|influencekit|personal|unknown>
           CLARITY: <clear|needs_info>
@@ -472,10 +474,10 @@ jobs:
           - writing = emails, docs, blog posts, content creation
           - thinking = analysis, research, strategy, planning
           - PROJECT: infer from context if not labeled, use 'unknown' if unclear
-          - CLARITY: 'needs_info' if the task is too vague to act on"
+          - CLARITY: 'clear' if you have enough info to act (including from Linear), 'needs_info' only if truly vague"
 
-          # Run Claude Code (--max-turns 3 allows for response)
-          CONTENT=$(claude -p "$PROMPT" --max-turns 3 2>&1) || true
+          # Run Claude Code (--max-turns 10 allows for MCP calls + response)
+          CONTENT=$(claude -p "$PROMPT" --max-turns 10 2>&1) || true
 
           # Debug: show response
           echo "=== Claude Response ==="
