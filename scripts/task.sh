@@ -34,7 +34,12 @@ CREATE OPTIONS:
     -t, --type TYPE       Type: code (c), writing (w), thinking (t)
     -P, --priority LEVEL  Priority: high (h), low (l)
     -b, --body TEXT       Additional details
+    -x, --execute         Queue task for immediate execution
     -                     Read from stdin (first line = title, rest = body)
+
+QUEUE OPTIONS:
+    task queue NUMBER     Queue a task for Claude to execute
+    task q NUMBER         Alias for queue
 
 LIST OPTIONS:
     -p, --project NAME    Filter by project
@@ -235,7 +240,7 @@ list_tasks() {
 
 # Create task
 create_task() {
-    local PROJECT="" TYPE="" PRIORITY="" BODY="" TITLE="" FROM_STDIN=""
+    local PROJECT="" TYPE="" PRIORITY="" BODY="" TITLE="" FROM_STDIN="" EXECUTE=""
 
     while [[ $# -gt 0 ]]; do
         case $1 in
@@ -243,6 +248,7 @@ create_task() {
             -t|--type) TYPE="$2"; shift 2 ;;
             -P|--priority) PRIORITY="$2"; shift 2 ;;
             -b|--body) BODY="$2"; shift 2 ;;
+            -x|--execute) EXECUTE="1"; shift ;;
             -h|--help) show_help; exit 0 ;;
             -)
                 FROM_STDIN="1"
@@ -295,8 +301,8 @@ create_task() {
     [[ -n "$TYPE" ]] && LABELS+=("--label" "$(normalize_type "$TYPE")")
     [[ -n "$PRIORITY" ]] && LABELS+=("--label" "$(normalize_priority "$PRIORITY")")
 
-    # Always add queued status
-    LABELS+=("--label" "status:queued")
+    # Only queue for execution if -x flag passed
+    [[ -n "$EXECUTE" ]] && LABELS+=("--label" "status:queued")
 
     # Body is required for non-interactive mode
     [[ -z "$BODY" ]] && BODY=" "
@@ -315,13 +321,13 @@ create_task() {
         ISSUE_URL=$(echo "$RESULT" | grep -o 'https://github.com/[^ ]*')
         ISSUE_NUM=$(echo "$ISSUE_URL" | grep -o '[0-9]*$')
 
-        echo -e "${GREEN}✓ Created task #${ISSUE_NUM}${NC}"
-        echo -e "  ${BLUE}${ISSUE_URL}${NC}"
-
-        # Show labels applied
-        if [[ ${#LABELS[@]} -gt 2 ]]; then
-            echo -e "  ${YELLOW}Labels: ${LABELS[*]/--label /}${NC}"
+        if [[ -n "$EXECUTE" ]]; then
+            echo -e "${GREEN}✓ Created and queued task #${ISSUE_NUM}${NC}"
+        else
+            echo -e "${GREEN}✓ Created task #${ISSUE_NUM}${NC}"
+            echo -e "  ${DIM}Run 'task queue ${ISSUE_NUM}' to start execution${NC}"
         fi
+        echo -e "  ${BLUE}${ISSUE_URL}${NC}"
 
         # Copy to clipboard on macOS
         if command -v pbcopy &> /dev/null; then
@@ -518,6 +524,38 @@ requeue_task() {
     fi
 }
 
+# Queue a task for execution
+queue_task() {
+    local ISSUE_NUM="$1"
+
+    if [[ -z "$ISSUE_NUM" ]]; then
+        echo -e "${RED}Error: Issue number required${NC}"
+        echo "Usage: task queue NUMBER"
+        exit 1
+    fi
+
+    # Validate it's a number
+    if ! [[ "$ISSUE_NUM" =~ ^[0-9]+$ ]]; then
+        echo -e "${RED}Error: Invalid issue number${NC}"
+        exit 1
+    fi
+
+    echo -e "${BLUE}Queueing task #${ISSUE_NUM} for execution...${NC}"
+
+    # Add queued label
+    gh issue edit "$ISSUE_NUM" --repo "$TASK_REPO" \
+        --add-label "status:queued" \
+        > /dev/null 2>&1
+
+    if [[ $? -eq 0 ]]; then
+        echo -e "${GREEN}✓ Task #${ISSUE_NUM} queued${NC}"
+        echo -e "${DIM}Claude will pick it up shortly. Run 'task w' to watch.${NC}"
+    else
+        echo -e "${RED}✗ Failed to queue task${NC}"
+        exit 1
+    fi
+}
+
 # View task logs
 view_logs() {
     local RUNNER_HOST="${RUNNER_HOST:-root@cloud-claude}"
@@ -586,21 +624,36 @@ watch_claude() {
         return
     fi
 
-    # SSH and tail -F, with server-side jq parsing for speed
-    # Using stdbuf to disable buffering
-    ssh "$RUNNER_HOST" 'tail -F /tmp/claude_output.txt 2>/dev/null | while IFS= read -r line; do
-      echo "$line" | jq -r "
-        if .type == \"system\" and .subtype == \"init\" then
-          \"\\n━━━ Session started ━━━\"
-        elif .type == \"assistant\" then
-          .message.content[]? |
-          if .type == \"text\" then
-            \"Claude: \" + (.text | split(\"\n\")[0] | .[0:200])
-          elif .type == \"tool_use\" then
-            \"  🔧 \" + .name
-          else empty end
-        else empty end
-      " 2>/dev/null | grep -v "^$"
+    # SSH and watch for new log files, then tail them
+    ssh "$RUNNER_HOST" 'LOG_DIR=/home/runner/logs
+    LAST_FILE=""
+    while true; do
+      # Find the most recent log file
+      CURRENT_FILE=$(ls -t "$LOG_DIR"/*.txt 2>/dev/null | head -1)
+
+      # If new file appeared, tail it
+      if [[ -n "$CURRENT_FILE" && "$CURRENT_FILE" != "$LAST_FILE" ]]; then
+        LAST_FILE="$CURRENT_FILE"
+        echo "━━━ Watching: $(basename "$CURRENT_FILE") ━━━"
+
+        # Tail with parsing until file stops growing
+        tail -f "$CURRENT_FILE" 2>/dev/null | while IFS= read -r line; do
+          echo "$line" | jq -r "
+            if .type == \"system\" and .subtype == \"init\" then
+              \"[session start]\"
+            elif .type == \"assistant\" then
+              .message.content[]? |
+              if .type == \"text\" then
+                \"💬 \" + (.text | split(\"\n\")[0] | .[0:150])
+              elif .type == \"tool_use\" then
+                \"🔧 \" + .name
+              else empty end
+            else empty end
+          " 2>/dev/null | grep -v "^$"
+        done &
+        TAIL_PID=$!
+      fi
+      sleep 1
     done' 2>/dev/null
 
     echo -e "${YELLOW}Connection closed. Reconnecting in 2s...${NC}"
@@ -633,6 +686,10 @@ case "${1:-}" in
     requeue|rq)
         shift
         requeue_task "$@"
+        ;;
+    queue|q)
+        shift
+        queue_task "$@"
         ;;
     close|done)
         shift
