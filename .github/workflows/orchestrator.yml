@@ -242,21 +242,7 @@ jobs:
           git push -u origin "${{ steps.workspace.outputs.branch }}"
 
           # Build PR body
-          cat > /tmp/pr_body.md << EOF
-## Summary
-
-${PR_SUMMARY}
-
-## Test Plan
-
-${PR_TEST_PLAN}
-
----
-
-🔗 Task: ${TASK_URL}
-
-🤖 *Automated by [Claude Code](https://claude.com/claude-code)*
-EOF
+          printf '%s\n' "## Summary" "" "$PR_SUMMARY" "" "## Test Plan" "" "$PR_TEST_PLAN" "" "---" "" "🔗 Task: $TASK_URL" "" "🤖 *Automated by [Claude Code](https://claude.com/claude-code)*" > /tmp/pr_body.md
 
           # Create PR with Claude-generated title and description
           PR_URL=$(gh pr create \
