@@ -1,48 +1,36 @@
 # Bruno's Task Queue
 
-A personal task queue using GitHub Issues as the single source of truth.
+A personal task queue using GitHub Issues + Claude Code on a self-hosted runner.
 
-## Why GitHub Issues?
-
-- **Already everywhere**: CLI (`gh`), mobile app, web, Claude MCP
-- **One inbox**: All tasks regardless of project (Offerlab, InfluenceKit, personal)
-- **Labels for routing**: `project:offerlab`, `project:influencekit`, `type:code`, `type:writing`
-- **Built-in automation**: Actions trigger on issue creation
-- **Free**: Unlimited private repo issues
-
-## Architecture
+## How It Works
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │                         INPUT                                    │
 │                                                                  │
-│   Terminal        Phone           Web            Claude          │
-│   gh issue        GitHub App      github.com     "check my       │
-│   create          + Siri          issues page    task queue"     │
-│      │               │               │               │           │
-│      └───────────────┴───────────────┴───────────────┘           │
+│   Terminal           Phone            Web            Claude      │
+│   task "..."         GitHub App       github.com     Desktop     │
+│      │                  │                │              │        │
+│      └──────────────────┴────────────────┴──────────────┘        │
 │                              │                                   │
 │                              ▼                                   │
 │                    ┌──────────────────┐                          │
-│                    │   task-queue     │                          │
+│                    │  bborn/workflow  │                          │
 │                    │   GitHub Repo    │                          │
-│                    │                  │                          │
 │                    │  Issues = Tasks  │                          │
 │                    └────────┬─────────┘                          │
 │                             │                                    │
 └─────────────────────────────┼────────────────────────────────────┘
-                              │
-                              │ on: issues: opened
+                              │ on: issues: labeled
                               ▼
 ┌─────────────────────────────────────────────────────────────────┐
 │                      PROCESSING                                  │
 │                                                                  │
 │    ┌────────────────────────────────────────────────────────┐   │
-│    │              GitHub Actions Workflow                    │   │
+│    │           Self-Hosted Runner (Hetzner VPS)             │   │
 │    │                                                         │   │
-│    │  1. Classify task (code/writing/thinking)              │   │
-│    │  2. Identify target project from labels                │   │
-│    │  3. Dispatch to appropriate handler                    │   │
+│    │  Claude Code processes tasks using Claude Max sub      │   │
+│    │  No API costs - just ~€4/month for the server          │   │
 │    │                                                         │   │
 │    └────────────────────────────────────────────────────────┘   │
 │                             │                                    │
@@ -54,126 +42,152 @@ A personal task queue using GitHub Issues as the single source of truth.
 │    └────┬────┘        └────┬────┘        └────┬────┘           │
 │         │                  │                  │                 │
 │         ▼                  ▼                  ▼                 │
-│    PR in target       Comment on         Comment on            │
-│    repo (Offerlab,    issue with         issue with            │
-│    InfluenceKit)      content            analysis              │
+│    PR in target       Comment with       Comment with          │
+│    repo               content            analysis              │
 │                                                                  │
 └─────────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                        REVIEW                                    │
-│                                                                  │
-│    GitHub Issues filtered by label:                             │
-│    • "status:ready" — completed, needs review                   │
-│    • "status:blocked" — needs clarification                     │
-│    • Group by project label for batch review                    │
-│                                                                  │
-└─────────────────────────────────────────────────────────────────┘
+```
+
+## Usage
+
+### Create Tasks
+
+```bash
+# Simple task (auto-triaged by Claude)
+task "Add dark mode to the app"
+
+# With type
+task "Fix the login redirect bug" -t code -p offerlab
+task "Write investor update email" -t writing
+task "Should we use Redis or Postgres for caching?" -t thinking
+
+# With priority
+task "Server is down" -t code -p offerlab -P high
+
+# With details
+task "Write welcome email" -t writing -b "For new users, friendly tone, mention key features"
+```
+
+### List Tasks
+
+```bash
+task list                      # All open tasks
+task list -p offerlab          # Filter by project
+task list -s ready             # Filter by status
+task list -t code              # Filter by type
+task list -a                   # Include closed
+```
+
+### Review & Close
+
+```bash
+task review                    # List tasks ready for review
+task review --open             # Open all ready tasks in browser
+task review 42                 # Open specific task in browser
+task close 42                  # Close a task
 ```
 
 ## Labels
 
-### Project Labels (where does this belong?)
-- `project:offerlab` — Offerlab work
-- `project:influencekit` — InfluenceKit work  
-- `project:personal` — Personal projects
-- `project:learning` — Learning/exploration
+| Label | Purpose |
+|-------|---------|
+| `project:offerlab` | Offerlab work |
+| `project:influencekit` | InfluenceKit work |
+| `project:personal` | Personal projects |
+| `type:code` | Creates PRs in target repo |
+| `type:writing` | Generates content |
+| `type:thinking` | Analysis & strategy |
+| `status:queued` | Waiting to be processed |
+| `status:processing` | Claude working on it |
+| `status:ready` | Done, needs review |
+| `status:blocked` | Needs clarification |
+| `priority:high` | Do soon |
+| `priority:low` | Whenever |
 
-### Type Labels (what kind of task?)
-- `type:code` — Software engineering, creates PRs
-- `type:writing` — Content, emails, docs
-- `type:thinking` — Analysis, research, strategy
+## Setup
 
-### Status Labels (where is it?)
-- `status:queued` — Waiting for processing (default)
-- `status:processing` — Agent working on it
-- `status:ready` — Done, needs human review
-- `status:blocked` — Agent needs help
+### 1. Provision Server
 
-### Priority Labels
-- `priority:high` — Do soon
-- `priority:low` — Whenever
+Create a Hetzner VPS (CX22, ~€4/month, Ubuntu 24.04).
 
-## Quick Start
+### 2. Run Setup Script
 
-### 1. Create the repo
 ```bash
-gh repo create task-queue --private --description "Personal task queue"
-cd task-queue
+ssh root@YOUR_SERVER_IP
+
+# Install everything (Node.js, Claude Code, GitHub Runner, Tailscale)
+curl -fsSL https://raw.githubusercontent.com/bborn/workflow/main/scripts/setup-runner.sh | bash
 ```
 
-### 2. Create labels
+Or if repo is private, copy and run `scripts/setup-runner.sh` manually.
+
+### 3. Connect Tailscale
+
 ```bash
-# Project labels
-gh label create "project:offerlab" --color 0366d6 --description "Offerlab work"
-gh label create "project:influencekit" --color 28a745 --description "InfluenceKit work"
-gh label create "project:personal" --color 6f42c1 --description "Personal projects"
-
-# Type labels
-gh label create "type:code" --color fbca04 --description "Code task, creates PR"
-gh label create "type:writing" --color d93f0b --description "Writing task"
-gh label create "type:thinking" --color 0e8a16 --description "Analysis/research task"
-
-# Status labels
-gh label create "status:queued" --color ededed --description "Waiting for processing"
-gh label create "status:processing" --color 1d76db --description "Agent working"
-gh label create "status:ready" --color 0e8a16 --description "Ready for review"
-gh label create "status:blocked" --color d93f0b --description "Needs clarification"
-
-# Priority
-gh label create "priority:high" --color b60205 --description "High priority"
-gh label create "priority:low" --color c5def5 --description "Low priority"
+sudo tailscale up
+# Open the auth link and approve
 ```
 
-### 3. Add the shell alias
+### 4. Configure GitHub Runner
+
+Get a token from: https://github.com/bborn/workflow/settings/actions/runners/new
+
+```bash
+sudo su - runner
+cd ~/actions-runner
+./config.sh --url https://github.com/bborn/workflow --token YOUR_TOKEN
+sudo ./svc.sh install
+sudo ./svc.sh start
+```
+
+### 5. Authenticate Claude
+
+```bash
+claude auth login
+# Follow browser prompts with your Claude Max account
+```
+
+### 6. Add CLI to Your Path
+
+On your local machine:
+
 ```bash
 # Add to ~/.zshrc or ~/.bashrc
 export PATH="$PATH:/path/to/workflow/scripts"
-# Or create an alias:
-alias task='/path/to/workflow/scripts/task.sh'
 ```
 
-### 4. Use it
-```bash
-# Simple task
-task "Fix login bug in auth module"
+## Cost
 
-# With labels
-task "Add Stripe webhook" --label "project:offerlab" --label "type:code"
-
-# With body
-task "Write investor update email" --label "type:writing" --body "Q4 results, new features, roadmap"
-```
-
-## Installation
-
-See **[SETUP.md](SETUP.md)** for complete installation instructions including:
-- GitHub secrets configuration (Anthropic API key, repo access token)
-- Label setup
-- CLI installation
-- Claude Code commands
-- Self-hosted runner setup for code tasks
+| Item | Cost |
+|------|------|
+| Hetzner CX22 | ~€4/month |
+| Claude Max | Your existing subscription |
+| GitHub | Free (private repo) |
+| **Total** | **~€4/month** |
 
 ## Files
 
 ```
 workflow/
-├── README.md                    # This file
-├── SETUP.md                     # Complete installation guide
-├── QUICKSTART.md                # Quick 15-minute setup
+├── README.md                        # This file
 ├── .github/
 │   ├── workflows/
-│   │   └── orchestrator.yml     # Main automation
+│   │   └── orchestrator.yml         # Main automation
 │   └── ISSUE_TEMPLATE/
-│       ├── code.yml             # Code task template
-│       ├── writing.yml          # Writing task template
-│       ├── thinking.yml         # Thinking task template
-│       └── config.yml
-├── scripts/
-│   ├── task.sh                  # CLI for creating tasks
-│   └── setup-labels.sh          # One-time label setup
-└── claude-commands/
-    ├── task.md                  # /task command for Claude Code
-    └── tasks.md                 # /tasks command for Claude Code
+│       ├── code.yml
+│       ├── writing.yml
+│       └── thinking.yml
+└── scripts/
+    ├── task.sh                      # CLI tool
+    ├── setup-runner.sh              # Server provisioning
+    └── setup-labels.sh              # One-time label setup
+```
+
+## Remote Access
+
+After Tailscale setup, access your runner from anywhere:
+
+```bash
+ssh cloud-claude                     # From laptop
+# Or use Termius/SSH app on phone
 ```
