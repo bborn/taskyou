@@ -32,14 +32,14 @@ fi
 # ============================================
 # Step 1: System Update
 # ============================================
-echo -e "${YELLOW}[1/7] Updating system...${NC}"
+echo -e "${YELLOW}[1/8] Updating system...${NC}"
 apt update && apt upgrade -y
 echo -e "${GREEN}✓ System updated${NC}"
 
 # ============================================
 # Step 2: Install Dependencies
 # ============================================
-echo -e "${YELLOW}[2/7] Installing dependencies...${NC}"
+echo -e "${YELLOW}[2/8] Installing dependencies...${NC}"
 apt install -y curl git jq build-essential
 
 # Install Node.js 20
@@ -50,14 +50,14 @@ echo -e "${GREEN}✓ Node.js $(node --version) installed${NC}"
 # ============================================
 # Step 3: Install Claude Code
 # ============================================
-echo -e "${YELLOW}[3/7] Installing Claude Code...${NC}"
+echo -e "${YELLOW}[3/8] Installing Claude Code...${NC}"
 npm install -g @anthropic-ai/claude-code
 echo -e "${GREEN}✓ Claude Code installed${NC}"
 
 # ============================================
 # Step 4: Create Runner User
 # ============================================
-echo -e "${YELLOW}[4/7] Creating runner user...${NC}"
+echo -e "${YELLOW}[4/8] Creating runner user...${NC}"
 if id "runner" &>/dev/null; then
     echo "User 'runner' already exists"
 else
@@ -69,7 +69,7 @@ echo -e "${GREEN}✓ Runner user created${NC}"
 # ============================================
 # Step 5: Download GitHub Actions Runner
 # ============================================
-echo -e "${YELLOW}[5/7] Downloading GitHub Actions Runner...${NC}"
+echo -e "${YELLOW}[5/8] Downloading GitHub Actions Runner...${NC}"
 RUNNER_VERSION="2.321.0"
 RUNNER_DIR="/home/runner/actions-runner"
 
@@ -86,12 +86,37 @@ echo -e "${GREEN}✓ GitHub Actions Runner downloaded${NC}"
 # ============================================
 # Step 6: Install Tailscale (remote access)
 # ============================================
-echo -e "${YELLOW}[6/7] Installing Tailscale...${NC}"
+echo -e "${YELLOW}[6/8] Installing Tailscale...${NC}"
 curl -fsSL https://tailscale.com/install.sh | sh
 echo -e "${GREEN}✓ Tailscale installed${NC}"
 
 # ============================================
-# Step 7: Print Next Steps
+# Step 7: Install GitHub CLI
+# ============================================
+echo -e "${YELLOW}[7/8] Installing GitHub CLI...${NC}"
+curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
+chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | tee /etc/apt/sources.list.d/github-cli.list > /dev/null
+apt update
+apt install gh -y
+echo -e "${GREEN}✓ GitHub CLI installed${NC}"
+
+# ============================================
+# Step 8: Create Project Directories
+# ============================================
+echo -e "${YELLOW}[8/8] Creating project directories...${NC}"
+PROJECTS_DIR="/home/runner/projects"
+sudo -u runner mkdir -p "$PROJECTS_DIR"
+
+# Set up git config for runner
+sudo -u runner git config --global user.name "Bruno's Runner"
+sudo -u runner git config --global user.email "runner@bborn.dev"
+sudo -u runner git config --global init.defaultBranch main
+
+echo -e "${GREEN}✓ Project directories created at $PROJECTS_DIR${NC}"
+
+# ============================================
+# Step 9: Print Next Steps
 # ============================================
 echo ""
 echo -e "${BLUE}=== Setup Complete ===${NC}"
@@ -114,11 +139,20 @@ echo "4. Install and start as a service:"
 echo -e "   ${BLUE}sudo ./svc.sh install${NC}"
 echo -e "   ${BLUE}sudo ./svc.sh start${NC}"
 echo ""
-echo "5. Authenticate Claude Code:"
+echo "5. Authenticate GitHub CLI (as runner user):"
+echo -e "   ${BLUE}gh auth login${NC}"
+echo "   (Select HTTPS, authenticate with browser)"
+echo ""
+echo "6. Clone project repos:"
+echo -e "   ${BLUE}cd ~/projects${NC}"
+echo -e "   ${BLUE}gh repo clone bborn/offerlab${NC}"
+echo -e "   ${BLUE}gh repo clone bborn/influencekit${NC}"
+echo ""
+echo "7. Authenticate Claude Code:"
 echo -e "   ${BLUE}claude auth login${NC}"
 echo "   (Follow the browser prompts to log in with your Claude Max account)"
 echo ""
-echo "6. Verify Claude Code works:"
+echo "8. Verify Claude Code works:"
 echo -e "   ${BLUE}claude -p 'Say hello'${NC}"
 echo ""
 echo -e "${GREEN}Public IP: $(curl -s ifconfig.me)${NC}"
