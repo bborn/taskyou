@@ -7,7 +7,7 @@ name: Task Orchestrator
 
 on:
   issues:
-    types: [opened, labeled]
+    types: [labeled]
 
 permissions:
   issues: write
