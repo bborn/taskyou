@@ -25,7 +25,8 @@ show_help() {
 task - Manage your GitHub Issues task queue
 
 USAGE:
-    task "description"                      # Create a task
+    task c "description"                    # Create a task
+    task create "description"               # Create a task (alias)
     task list [options]                     # List tasks
 
 CREATE OPTIONS:
@@ -67,8 +68,9 @@ REQUEUE OPTIONS:
     task rq NUMBER "more details"    Shorthand
 
 EXAMPLES:
-    task "Fix login redirect bug"
-    task "Add Stripe webhook" -p offerlab -t code
+    task c "Fix login redirect bug"
+    task c "Add Stripe webhook" -p offerlab -t code
+    task create - (then paste multiline, Ctrl+D)
     task list
     task list -p offerlab -s queued
     task close 42
@@ -571,6 +573,10 @@ watch_claude() {
 
 # Main routing
 case "${1:-}" in
+    create|c|new|add)
+        shift
+        create_task "$@"
+        ;;
     list|ls|l)
         shift
         list_tasks "$@"
@@ -602,6 +608,11 @@ case "${1:-}" in
         show_help
         ;;
     *)
-        create_task "$@"
+        echo -e "${RED}Unknown command: $1${NC}"
+        echo ""
+        echo "Did you mean: task c \"$*\""
+        echo ""
+        echo "Run 'task help' for usage"
+        exit 1
         ;;
 esac
