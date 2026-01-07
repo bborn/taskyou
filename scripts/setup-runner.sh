@@ -32,14 +32,14 @@ fi
 # ============================================
 # Step 1: System Update
 # ============================================
-echo -e "${YELLOW}[1/6] Updating system...${NC}"
+echo -e "${YELLOW}[1/7] Updating system...${NC}"
 apt update && apt upgrade -y
 echo -e "${GREEN}✓ System updated${NC}"
 
 # ============================================
 # Step 2: Install Dependencies
 # ============================================
-echo -e "${YELLOW}[2/6] Installing dependencies...${NC}"
+echo -e "${YELLOW}[2/7] Installing dependencies...${NC}"
 apt install -y curl git jq build-essential
 
 # Install Node.js 20
@@ -50,14 +50,14 @@ echo -e "${GREEN}✓ Node.js $(node --version) installed${NC}"
 # ============================================
 # Step 3: Install Claude Code
 # ============================================
-echo -e "${YELLOW}[3/6] Installing Claude Code...${NC}"
+echo -e "${YELLOW}[3/7] Installing Claude Code...${NC}"
 npm install -g @anthropic-ai/claude-code
 echo -e "${GREEN}✓ Claude Code installed${NC}"
 
 # ============================================
 # Step 4: Create Runner User
 # ============================================
-echo -e "${YELLOW}[4/6] Creating runner user...${NC}"
+echo -e "${YELLOW}[4/7] Creating runner user...${NC}"
 if id "runner" &>/dev/null; then
     echo "User 'runner' already exists"
 else
@@ -69,7 +69,7 @@ echo -e "${GREEN}✓ Runner user created${NC}"
 # ============================================
 # Step 5: Download GitHub Actions Runner
 # ============================================
-echo -e "${YELLOW}[5/6] Downloading GitHub Actions Runner...${NC}"
+echo -e "${YELLOW}[5/7] Downloading GitHub Actions Runner...${NC}"
 RUNNER_VERSION="2.321.0"
 RUNNER_DIR="/home/runner/actions-runner"
 
@@ -84,30 +84,42 @@ rm actions-runner.tar.gz
 echo -e "${GREEN}✓ GitHub Actions Runner downloaded${NC}"
 
 # ============================================
-# Step 6: Print Next Steps
+# Step 6: Install Tailscale (remote access)
+# ============================================
+echo -e "${YELLOW}[6/7] Installing Tailscale...${NC}"
+curl -fsSL https://tailscale.com/install.sh | sh
+echo -e "${GREEN}✓ Tailscale installed${NC}"
+
+# ============================================
+# Step 7: Print Next Steps
 # ============================================
 echo ""
 echo -e "${BLUE}=== Setup Complete ===${NC}"
 echo ""
 echo -e "${YELLOW}Next steps:${NC}"
 echo ""
-echo "1. Get a runner registration token from GitHub:"
+echo "1. Connect Tailscale (for remote access):"
+echo -e "   ${BLUE}sudo tailscale up${NC}"
+echo "   Open the auth link and approve on your tailnet"
+echo ""
+echo "2. Get a runner registration token from GitHub:"
 echo "   https://github.com/bborn/workflow/settings/actions/runners/new"
 echo ""
-echo "2. Configure the runner (as runner user):"
+echo "3. Configure the runner (as runner user):"
 echo -e "   ${BLUE}sudo su - runner${NC}"
 echo -e "   ${BLUE}cd ~/actions-runner${NC}"
 echo -e "   ${BLUE}./config.sh --url https://github.com/bborn/workflow --token YOUR_TOKEN${NC}"
 echo ""
-echo "3. Install and start as a service:"
+echo "4. Install and start as a service:"
 echo -e "   ${BLUE}sudo ./svc.sh install${NC}"
 echo -e "   ${BLUE}sudo ./svc.sh start${NC}"
 echo ""
-echo "4. Authenticate Claude Code:"
+echo "5. Authenticate Claude Code:"
 echo -e "   ${BLUE}claude auth login${NC}"
 echo "   (Follow the browser prompts to log in with your Claude Max account)"
 echo ""
-echo "5. Verify Claude Code works:"
+echo "6. Verify Claude Code works:"
 echo -e "   ${BLUE}claude -p 'Say hello'${NC}"
 echo ""
-echo -e "${GREEN}Runner IP: $(curl -s ifconfig.me)${NC}"
+echo -e "${GREEN}Public IP: $(curl -s ifconfig.me)${NC}"
+echo -e "${DIM}After Tailscale: ssh root@<tailscale-hostname>${NC}"
