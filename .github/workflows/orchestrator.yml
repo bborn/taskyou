@@ -154,7 +154,10 @@ jobs:
 
           ${{ steps.task.outputs.body }}
 
+          IMPORTANT: If the task contains a Linear URL (linear.app/...), use your Linear MCP tools to fetch the full issue details FIRST. Get the title, description, acceptance criteria, and any comments to fully understand what needs to be done.
+
           Instructions:
+          - Fetch Linear issue details if a Linear URL is present
           - Explore the codebase to understand the context
           - Implement the solution
           - Write tests if applicable
