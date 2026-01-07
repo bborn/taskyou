@@ -55,7 +55,8 @@ REVIEW OPTIONS:
     task review NUMBER    Open specific task in browser
 
 WATCH OPTIONS:
-    task watch            Watch Claude working on Hetzner (live tail)
+    task watch            Watch Claude working on Hetzner (parsed output)
+    task watch --raw      Show raw JSON stream
     task w                Alias for watch
 
 LOGS OPTIONS:
@@ -519,7 +520,7 @@ requeue_task() {
 
 # View task logs
 view_logs() {
-    local RUNNER_HOST="${RUNNER_HOST:-cloud-claude}"
+    local RUNNER_HOST="${RUNNER_HOST:-root@cloud-claude}"
     local ISSUE_NUM="$1"
 
     if [[ -n "$ISSUE_NUM" ]]; then
@@ -543,7 +544,15 @@ view_logs() {
 
 # Watch Claude working on Hetzner
 watch_claude() {
-    local RUNNER_HOST="${RUNNER_HOST:-cloud-claude}"
+    local RUNNER_HOST="${RUNNER_HOST:-root@cloud-claude}"
+    local RAW_MODE=""
+
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            -r|--raw) RAW_MODE="1"; shift ;;
+            *) shift ;;
+        esac
+    done
 
     echo -e "${BLUE}Watching Claude on ${RUNNER_HOST}...${NC}"
     echo -e "${DIM}(Ctrl+C to exit)${NC}"
@@ -567,12 +576,54 @@ watch_claude() {
         echo ""
     fi
 
-    # SSH and tail -F (capital F follows by name, waits for file to appear)
-    ssh "$RUNNER_HOST" "tail -F /tmp/claude_output.txt 2>/dev/null" || {
-        echo -e "${YELLOW}Connection closed. Reconnecting...${NC}"
-        sleep 2
-        watch_claude
-    }
+    # Raw mode - just tail the file directly
+    if [[ -n "$RAW_MODE" ]]; then
+        ssh "$RUNNER_HOST" "tail -F /tmp/claude_output.txt 2>/dev/null" || {
+            echo -e "${YELLOW}Connection closed. Reconnecting in 2s...${NC}"
+            sleep 2
+            watch_claude --raw
+        }
+        return
+    fi
+
+    # SSH and tail -F, parsing stream-json to show readable output
+    # Format: show assistant text and tool calls in a readable way
+    ssh "$RUNNER_HOST" "tail -F /tmp/claude_output.txt 2>/dev/null" 2>/dev/null | while IFS= read -r line; do
+        # Skip empty lines
+        [[ -z "$line" ]] && continue
+
+        # Try to parse as JSON
+        TYPE=$(echo "$line" | jq -r '.type // empty' 2>/dev/null)
+        [[ -z "$TYPE" ]] && continue
+
+        case "$TYPE" in
+            system)
+                # Init message - show session start
+                SUBTYPE=$(echo "$line" | jq -r '.subtype // empty' 2>/dev/null)
+                if [[ "$SUBTYPE" == "init" ]]; then
+                    echo -e "${BLUE}━━━ Session started ━━━${NC}"
+                fi
+                ;;
+            assistant)
+                # Claude's response - show text and tool calls
+                CONTENT=$(echo "$line" | jq -r '.message.content[]? | if .type == "text" then .text elif .type == "tool_use" then "🔧 " + .name + ": " + (.input | tostring | .[0:100]) else empty end' 2>/dev/null)
+                if [[ -n "$CONTENT" ]]; then
+                    echo -e "${GREEN}Claude:${NC} $CONTENT"
+                fi
+                ;;
+            user)
+                # Tool results - show briefly
+                TOOL_RESULT=$(echo "$line" | jq -r '.tool_use_result.stdout // .tool_use_result.result // empty' 2>/dev/null | head -c 200)
+                if [[ -n "$TOOL_RESULT" ]]; then
+                    echo -e "${DIM}  → ${TOOL_RESULT:0:150}...${NC}"
+                fi
+                ;;
+        esac
+    done
+
+    echo -e "${YELLOW}Connection closed. Reconnecting in 2s...${NC}"
+    sleep 2
+    watch_claude
 }
 
 # Main routing
