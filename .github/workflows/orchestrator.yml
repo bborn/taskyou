@@ -9,6 +9,10 @@ on:
   issues:
     types: [opened, labeled]
 
+permissions:
+  issues: write
+  contents: read
+
 env:
   ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
 
