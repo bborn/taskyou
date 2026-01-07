@@ -120,11 +120,8 @@ echo -e "${GREEN}✓ Project directories created at $PROJECTS_DIR${NC}"
 # ============================================
 echo -e "${YELLOW}[9/9] Configuring MCP servers...${NC}"
 
-# Configure Linear MCP (official remote server)
-sudo -u runner claude mcp add --transport http linear https://mcp.linear.app/mcp 2>/dev/null || true
-
-echo -e "${GREEN}✓ Linear MCP server configured${NC}"
-echo -e "${YELLOW}  Note: Run 'claude' then '/mcp' to authenticate with Linear${NC}"
+# Linear MCP requires an API token - skip auto-config, add to manual steps
+echo -e "${YELLOW}  Linear MCP will be configured manually with API token${NC}"
 
 # ============================================
 # Step 10: Print Next Steps
@@ -163,9 +160,8 @@ echo "7. Authenticate Claude Code:"
 echo -e "   ${BLUE}claude auth login${NC}"
 echo "   (Follow the browser prompts to log in with your Claude Max account)"
 echo ""
-echo "8. Authenticate Linear MCP:"
-echo -e "   ${BLUE}claude${NC}"
-echo -e "   ${BLUE}/mcp${NC}  (select Linear, follow OAuth flow)"
+echo "8. Configure Linear MCP (get API key from Linear Settings > API):"
+echo -e "   ${BLUE}claude mcp add linear https://mcp.linear.app/mcp --scope user --transport http -H \"Authorization: Bearer YOUR_LINEAR_API_KEY\"${NC}"
 echo ""
 echo "9. Verify Claude Code works:"
 echo -e "   ${BLUE}claude -p 'Say hello'${NC}"
