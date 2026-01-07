@@ -173,7 +173,7 @@ list_tasks() {
         ${STATE_ARG} \
         --limit "$LIMIT" \
         "${LABEL_ARGS[@]}" \
-        --json number,title,labels,state,createdAt \
+        --json number,title,labels,state,url \
         2>&1) || { echo -e "${RED}Failed to fetch tasks${NC}"; exit 1; }
 
     # Check if empty
@@ -183,7 +183,7 @@ list_tasks() {
     fi
 
     # Parse and display
-    echo "$ISSUES" | jq -r '.[] | "\(.number)|\(.title)|\(.labels | map(.name) | join(","))|\(.state)"' | while IFS='|' read -r num title labels state; do
+    echo "$ISSUES" | jq -r '.[] | "\(.number)|\(.title)|\(.labels | map(.name) | join(","))|\(.state)|\(.url)"' | while IFS='|' read -r num title labels state url; do
         # Color based on status
         if [[ "$labels" == *"status:ready"* ]]; then
             STATUS_COLOR="$GREEN"
@@ -223,7 +223,9 @@ list_tasks() {
             TYPE_TAG="${DIM}think${NC}"
         fi
 
-        printf "${STATUS_COLOR}${STATUS_ICON}${NC} ${DIM}#%-4s${NC} ${PRIORITY_IND}${PROJECT_TAG}%s ${TYPE_TAG}\n" "$num" "$title"
+        # Make issue number a clickable link (OSC 8 hyperlink)
+        LINK="\033]8;;${url}\033\\#${num}\033]8;;\033\\"
+        printf "${STATUS_COLOR}${STATUS_ICON}${NC} ${DIM}${LINK}${NC}  ${PRIORITY_IND}${PROJECT_TAG}%s ${TYPE_TAG}\n" "$title"
     done
 
     echo ""
@@ -412,7 +414,9 @@ review_tasks() {
             TYPE_TAG="${DIM}think${NC}"
         fi
 
-        printf "${GREEN}✓${NC} ${DIM}#%-4s${NC} ${PROJECT_TAG}%s ${TYPE_TAG}\n" "$num" "$title"
+        # Make issue number a clickable link (OSC 8 hyperlink)
+        LINK="\033]8;;${url}\033\\#${num}\033]8;;\033\\"
+        printf "${GREEN}✓${NC} ${DIM}${LINK}${NC}  ${PROJECT_TAG}%s ${TYPE_TAG}\n" "$title"
     done
 
     echo ""
