@@ -106,7 +106,9 @@ echo -e "${GREEN}✓ GitHub CLI installed${NC}"
 # ============================================
 echo -e "${YELLOW}[8/9] Creating project directories...${NC}"
 PROJECTS_DIR="/home/runner/projects"
+WORKTREES_DIR="/home/runner/worktrees"
 sudo -u runner mkdir -p "$PROJECTS_DIR"
+sudo -u runner mkdir -p "$WORKTREES_DIR"
 
 # Set up git config for runner
 sudo -u runner git config --global user.name "Bruno's Runner"
@@ -114,6 +116,7 @@ sudo -u runner git config --global user.email "runner@bborn.dev"
 sudo -u runner git config --global init.defaultBranch main
 
 echo -e "${GREEN}✓ Project directories created at $PROJECTS_DIR${NC}"
+echo -e "${GREEN}✓ Worktrees directory created at $WORKTREES_DIR${NC}"
 
 # ============================================
 # Step 9: Configure MCP Servers

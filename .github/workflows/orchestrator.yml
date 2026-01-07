@@ -131,19 +131,33 @@ jobs:
         id: workspace
         working-directory: ${{ steps.project.outputs.dir }}
         run: |
-          # Ensure we're on main and up to date
+          # Ensure main is up to date
           git checkout main
           git pull origin main
 
-          # Create task branch
+          # Create task branch and worktree
           BRANCH="task-${{ steps.task.outputs.number }}"
-          git checkout -b "$BRANCH" || git checkout "$BRANCH"
+          WORKTREE_DIR="/home/runner/worktrees/${{ steps.project.outputs.name }}-task-${{ steps.task.outputs.number }}"
+
+          # Clean up any existing worktree for this task
+          if [ -d "$WORKTREE_DIR" ]; then
+            git worktree remove "$WORKTREE_DIR" --force 2>/dev/null || rm -rf "$WORKTREE_DIR"
+          fi
+          git worktree prune
+
+          # Delete the branch if it exists (to start fresh from main)
+          git branch -D "$BRANCH" 2>/dev/null || true
+
+          # Create new worktree with task branch based on main
+          git worktree add -b "$BRANCH" "$WORKTREE_DIR" main
+
           echo "branch=$BRANCH" >> $GITHUB_OUTPUT
+          echo "worktree_dir=$WORKTREE_DIR" >> $GITHUB_OUTPUT
 
       - name: Run Claude Code
         if: steps.project.outputs.dir != ''
         id: claude
-        working-directory: ${{ steps.project.outputs.dir }}
+        working-directory: ${{ steps.workspace.outputs.worktree_dir }}
         env:
           GH_TOKEN: ${{ secrets.REPO_ACCESS_TOKEN }}
           ISSUE_NUMBER: ${{ github.event.issue.number }}
@@ -230,7 +244,7 @@ jobs:
       - name: Push and create PR
         if: steps.claude.outputs.result == 'complete'
         id: pr
-        working-directory: ${{ steps.project.outputs.dir }}
+        working-directory: ${{ steps.workspace.outputs.worktree_dir }}
         env:
           GH_TOKEN: ${{ secrets.REPO_ACCESS_TOKEN }}
           PR_TITLE: ${{ steps.claude.outputs.pr_title }}
@@ -252,8 +266,13 @@ jobs:
 
           echo "url=$PR_URL" >> $GITHUB_OUTPUT
 
-          # Return to main
-          git checkout main
+      - name: Cleanup worktree
+        if: always() && steps.workspace.outputs.worktree_dir != ''
+        working-directory: ${{ steps.project.outputs.dir }}
+        run: |
+          # Remove the worktree
+          git worktree remove "${{ steps.workspace.outputs.worktree_dir }}" --force 2>/dev/null || rm -rf "${{ steps.workspace.outputs.worktree_dir }}"
+          git worktree prune
 
       - name: Update issue - success
         if: steps.claude.outputs.result == 'complete'
