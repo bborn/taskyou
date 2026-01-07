@@ -181,6 +181,7 @@ jobs:
             --dangerously-skip-permissions \
             --max-turns 50 \
             --output-format stream-json \
+            --verbose \
             2>&1 | tee "$LOG_FILE" || true
 
           echo "log_file=$LOG_FILE" >> $GITHUB_OUTPUT
@@ -337,10 +338,10 @@ jobs:
           ln -sf "$LOG_FILE" /tmp/claude_output.txt
 
           # Run Claude Code (stream-json for full conversation log)
-          claude -p "$PROMPT" --max-turns 3 --output-format stream-json 2>&1 | tee "$LOG_FILE" || true
+          claude -p "$PROMPT" --max-turns 3 --output-format stream-json --verbose 2>&1 | tee "$LOG_FILE" || true
 
           # Extract text content from stream-json for the comment
-          grep '"type":"text"' "$LOG_FILE" | jq -r '.content // empty' > /tmp/content.txt 2>/dev/null || cp "$LOG_FILE" /tmp/content.txt
+          grep '"type":"assistant"' "$LOG_FILE" | jq -r '.message.content[]?.text // empty' > /tmp/content.txt 2>/dev/null || cp "$LOG_FILE" /tmp/content.txt
 
           # Build comment body
           {
@@ -424,10 +425,10 @@ jobs:
           ln -sf "$LOG_FILE" /tmp/claude_output.txt
 
           # Run Claude Code (stream-json for full conversation log)
-          claude -p "$PROMPT" --max-turns 3 --output-format stream-json 2>&1 | tee "$LOG_FILE" || true
+          claude -p "$PROMPT" --max-turns 3 --output-format stream-json --verbose 2>&1 | tee "$LOG_FILE" || true
 
           # Extract text content from stream-json for the comment
-          grep '"type":"text"' "$LOG_FILE" | jq -r '.content // empty' > /tmp/content.txt 2>/dev/null || cp "$LOG_FILE" /tmp/content.txt
+          grep '"type":"assistant"' "$LOG_FILE" | jq -r '.message.content[]?.text // empty' > /tmp/content.txt 2>/dev/null || cp "$LOG_FILE" /tmp/content.txt
 
           # Build comment body
           {
@@ -515,10 +516,10 @@ jobs:
           ln -sf "$LOG_FILE" /tmp/claude_output.txt
 
           # Run Claude Code (stream-json for full conversation log)
-          claude -p "$PROMPT" --max-turns 10 --output-format stream-json 2>&1 | tee "$LOG_FILE" || true
+          claude -p "$PROMPT" --max-turns 10 --output-format stream-json --verbose 2>&1 | tee "$LOG_FILE" || true
 
           # Extract text content from stream-json
-          CONTENT=$(grep '"type":"text"' "$LOG_FILE" | jq -r '.content // empty' 2>/dev/null | tr '\n' ' ' || cat "$LOG_FILE")
+          CONTENT=$(grep '"type":"assistant"' "$LOG_FILE" | tail -1 | jq -r '.message.content[]?.text // empty' 2>/dev/null || cat "$LOG_FILE")
 
           # Debug: show response
           echo "=== Claude Response ==="
