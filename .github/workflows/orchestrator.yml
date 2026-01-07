@@ -588,25 +588,37 @@ jobs:
             const existingProject = '${{ needs.should-process.outputs.project }}';
 
             const typeLabel = `type:${type}`;
-            const labelsToAdd = [typeLabel, 'status:queued'];
+            const labelsToAdd = [typeLabel];
 
             // Add project label if we determined one and there isn't one already
             if (project && project !== 'unknown' && existingProject === 'unknown') {
               labelsToAdd.push(`project:${project}`);
             }
 
-            // Add the labels - this will re-trigger the workflow with the type
-            await github.rest.issues.addLabels({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: context.issue.number,
-              labels: labelsToAdd
-            });
-
-            // Remove processing
+            // IMPORTANT: Remove processing FIRST, before adding status:queued
+            // Otherwise, when status:queued triggers the workflow, it will see
+            // status:processing and bail out
             await github.rest.issues.removeLabel({
               owner: context.repo.owner,
               repo: context.repo.repo,
               issue_number: context.issue.number,
               name: 'status:processing'
             }).catch(() => {});
+
+            // Add the type/project labels first
+            if (labelsToAdd.length > 0) {
+              await github.rest.issues.addLabels({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                labels: labelsToAdd
+              });
+            }
+
+            // Now add status:queued - this re-triggers the workflow
+            await github.rest.issues.addLabels({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              labels: ['status:queued']
+            });
