@@ -146,11 +146,22 @@ task "Add Stripe webhook" --label "project:offerlab" --label "type:code"
 task "Write investor update email" --label "type:writing" --body "Q4 results, new features, roadmap"
 ```
 
+## Installation
+
+See **[SETUP.md](SETUP.md)** for complete installation instructions including:
+- GitHub secrets configuration (Anthropic API key, repo access token)
+- Label setup
+- CLI installation
+- Claude Code commands
+- Self-hosted runner setup for code tasks
+
 ## Files
 
 ```
 workflow/
 ├── README.md                    # This file
+├── SETUP.md                     # Complete installation guide
+├── QUICKSTART.md                # Quick 15-minute setup
 ├── .github/
 │   ├── workflows/
 │   │   └── orchestrator.yml     # Main automation
@@ -159,7 +170,10 @@ workflow/
 │       ├── writing.yml          # Writing task template
 │       ├── thinking.yml         # Thinking task template
 │       └── config.yml
-└── scripts/
-    ├── task.sh                  # CLI for creating tasks
-    └── setup-labels.sh          # One-time label setup
+├── scripts/
+│   ├── task.sh                  # CLI for creating tasks
+│   └── setup-labels.sh          # One-time label setup
+└── claude-commands/
+    ├── task.md                  # /task command for Claude Code
+    └── tasks.md                 # /tasks command for Claude Code
 ```
