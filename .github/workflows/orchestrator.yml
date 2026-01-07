@@ -298,9 +298,13 @@ jobs:
             echo "*Copy the above content to use it.*"
           } > /tmp/body.txt
 
-          # Post comment using file input
-          gh api repos/${{ github.repository }}/issues/${ISSUE_NUMBER}/comments \
-            -f body=@/tmp/body.txt
+          # Post comment using curl
+          jq -n --rawfile body /tmp/body.txt '{"body": $body}' > /tmp/payload.json
+          curl -s -X POST \
+            -H "Authorization: token ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            -d @/tmp/payload.json \
+            "https://api.github.com/repos/${{ github.repository }}/issues/${ISSUE_NUMBER}/comments"
 
       - name: Update labels
         uses: actions/github-script@v7
@@ -366,9 +370,13 @@ jobs:
             cat /tmp/content.txt
           } > /tmp/body.txt
 
-          # Post comment using file input
-          gh api repos/${{ github.repository }}/issues/${ISSUE_NUMBER}/comments \
-            -f body=@/tmp/body.txt
+          # Post comment using curl
+          jq -n --rawfile body /tmp/body.txt '{"body": $body}' > /tmp/payload.json
+          curl -s -X POST \
+            -H "Authorization: token ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            -d @/tmp/payload.json \
+            "https://api.github.com/repos/${{ github.repository }}/issues/${ISSUE_NUMBER}/comments"
 
       - name: Update labels
         uses: actions/github-script@v7
