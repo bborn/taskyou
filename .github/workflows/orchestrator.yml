@@ -550,6 +550,7 @@ jobs:
         if: steps.triage.outputs.clarity != 'needs_info'
         uses: actions/github-script@v7
         with:
+          github-token: ${{ secrets.REPO_ACCESS_TOKEN }}
           script: |
             const type = '${{ steps.triage.outputs.type }}';
             const project = '${{ steps.triage.outputs.project }}';
