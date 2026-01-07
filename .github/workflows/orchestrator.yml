@@ -91,7 +91,7 @@ jobs:
   process-code:
     needs: [should-process, start-processing]
     if: needs.should-process.outputs.task_type == 'code'
-    runs-on: self-hosted  # Needs Claude Code installed
+    runs-on: self-hosted
     steps:
       - name: Get task details
         id: task
@@ -104,153 +104,185 @@ jobs:
             core.setOutput('number', issue.number);
             return issue;
 
-      - name: Determine target repo
-        id: repo
+      - name: Determine target project
+        id: project
         run: |
           PROJECT="${{ needs.should-process.outputs.project }}"
           case "$PROJECT" in
             offerlab)
+              echo "dir=/home/runner/projects/offerlab" >> $GITHUB_OUTPUT
               echo "repo=bborn/offerlab" >> $GITHUB_OUTPUT
               echo "name=offerlab" >> $GITHUB_OUTPUT
               ;;
             influencekit)
+              echo "dir=/home/runner/projects/influencekit" >> $GITHUB_OUTPUT
               echo "repo=bborn/influencekit" >> $GITHUB_OUTPUT
               echo "name=influencekit" >> $GITHUB_OUTPUT
               ;;
             *)
+              echo "dir=" >> $GITHUB_OUTPUT
               echo "repo=" >> $GITHUB_OUTPUT
               echo "name=unknown" >> $GITHUB_OUTPUT
               ;;
           esac
 
-      - name: Checkout target repo
-        if: steps.repo.outputs.repo != ''
-        uses: actions/checkout@v4
-        with:
-          repository: ${{ steps.repo.outputs.repo }}
-          token: ${{ secrets.REPO_ACCESS_TOKEN }}
-          fetch-depth: 0
-          path: workspace
-
-      - name: Create worktree
-        if: steps.repo.outputs.repo != ''
-        id: worktree
-        working-directory: workspace
+      - name: Prepare workspace
+        if: steps.project.outputs.dir != ''
+        id: workspace
+        working-directory: ${{ steps.project.outputs.dir }}
         run: |
+          # Ensure we're on main and up to date
+          git checkout main
+          git pull origin main
+
+          # Create task branch
           BRANCH="task-${{ steps.task.outputs.number }}"
-          git checkout -b "$BRANCH"
+          git checkout -b "$BRANCH" || git checkout "$BRANCH"
           echo "branch=$BRANCH" >> $GITHUB_OUTPUT
 
       - name: Run Claude Code
-        if: steps.repo.outputs.repo != ''
+        if: steps.project.outputs.dir != ''
         id: claude
-        working-directory: workspace
+        working-directory: ${{ steps.project.outputs.dir }}
+        env:
+          GH_TOKEN: ${{ secrets.REPO_ACCESS_TOKEN }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
         run: |
-          PROMPT="Task #${{ steps.task.outputs.number }}: ${{ steps.task.outputs.title }}
+          PROMPT="You are working on: ${{ steps.project.outputs.name }}
+
+          Task: ${{ steps.task.outputs.title }}
 
           ${{ steps.task.outputs.body }}
 
           Instructions:
-          1. Understand the task
-          2. Explore relevant code
-          3. Implement the solution
-          4. Write tests if applicable
-          5. Commit with a clear message
+          - Explore the codebase to understand the context
+          - Implement the solution
+          - Write tests if applicable
+          - Commit your changes with clear messages
+          - You have full access to all tools - use whatever you need
 
-          When complete, output: TASK_COMPLETE
-          If you need clarification, output: NEEDS_CLARIFICATION: <question>
-          If blocked, output: TASK_BLOCKED: <reason>"
+          When finished:
+          - If complete: output TASK_COMPLETE on its own line
+          - If you need input from me: output NEEDS_INPUT: followed by your question"
 
-          # Run Claude Code
-          OUTPUT=$(claude -p "$PROMPT" \
-            --allowedTools "Read,Edit,Write,Bash(git:*),Bash(npm:*),Bash(yarn:*),Bash(bundle:*),Bash(rails:*),Bash(rspec:*)" \
-            --max-turns 30 \
-            2>&1) || true
+          # Run Claude with full permissions
+          claude -p "$PROMPT" \
+            --dangerously-skip-permissions \
+            --max-turns 50 \
+            > /tmp/claude_output.txt 2>&1 || true
 
-          # Determine result
-          if echo "$OUTPUT" | grep -q "TASK_COMPLETE"; then
+          # Check result
+          if grep -q "TASK_COMPLETE" /tmp/claude_output.txt; then
             echo "result=complete" >> $GITHUB_OUTPUT
-          elif echo "$OUTPUT" | grep -q "NEEDS_CLARIFICATION"; then
-            echo "result=blocked" >> $GITHUB_OUTPUT
-            echo "message=$(echo "$OUTPUT" | grep 'NEEDS_CLARIFICATION' | head -1)" >> $GITHUB_OUTPUT
+          elif grep -q "NEEDS_INPUT" /tmp/claude_output.txt; then
+            echo "result=needs_input" >> $GITHUB_OUTPUT
+            grep "NEEDS_INPUT" /tmp/claude_output.txt | head -1 | sed 's/NEEDS_INPUT://' > /tmp/question.txt
           else
-            echo "result=blocked" >> $GITHUB_OUTPUT
-            echo "message=Task did not complete successfully" >> $GITHUB_OUTPUT
+            echo "result=error" >> $GITHUB_OUTPUT
           fi
 
       - name: Push and create PR
-        if: steps.claude.outputs.result == 'complete' && steps.repo.outputs.repo != ''
+        if: steps.claude.outputs.result == 'complete'
         id: pr
-        working-directory: workspace
+        working-directory: ${{ steps.project.outputs.dir }}
         env:
           GH_TOKEN: ${{ secrets.REPO_ACCESS_TOKEN }}
         run: |
-          git push -u origin "${{ steps.worktree.outputs.branch }}"
-          
+          # Push the branch
+          git push -u origin "${{ steps.workspace.outputs.branch }}"
+
+          # Create PR (no reference to workflow repo)
           PR_URL=$(gh pr create \
             --title "${{ steps.task.outputs.title }}" \
-            --body "Closes bborn/workflow#${{ steps.task.outputs.number }}
+            --body "## Summary
+
+          ${{ steps.task.outputs.body }}
 
           ---
-          *Automated by Task Orchestrator*" \
-            --head "${{ steps.worktree.outputs.branch }}")
-          
+          *Automated PR*" \
+            --head "${{ steps.workspace.outputs.branch }}")
+
           echo "url=$PR_URL" >> $GITHUB_OUTPUT
+
+          # Return to main
+          git checkout main
 
       - name: Update issue - success
         if: steps.claude.outputs.result == 'complete'
-        uses: actions/github-script@v7
-        with:
-          script: |
-            // Add comment with PR link
-            await github.rest.issues.createComment({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: context.issue.number,
-              body: `✅ **Task completed!**\n\nPR created: ${{ steps.pr.outputs.url }}`
-            });
-            
-            // Update labels
-            await github.rest.issues.removeLabel({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: context.issue.number,
-              name: 'status:processing'
-            });
-            
-            await github.rest.issues.addLabels({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: context.issue.number,
-              labels: ['status:ready']
-            });
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Post success comment
+          BODY="✅ **Task completed!**
 
-      - name: Update issue - blocked
-        if: steps.claude.outputs.result == 'blocked' || steps.repo.outputs.repo == ''
+          PR created: ${{ steps.pr.outputs.url }}"
+
+          jq -n --arg body "$BODY" '{"body": $body}' > /tmp/payload.json
+          curl -s -X POST \
+            -H "Authorization: token ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            -d @/tmp/payload.json \
+            "https://api.github.com/repos/${{ github.repository }}/issues/${{ github.event.issue.number }}/comments"
+
+      - name: Update issue - needs input
+        if: steps.claude.outputs.result == 'needs_input'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          QUESTION=$(cat /tmp/question.txt 2>/dev/null || echo "Claude needs clarification")
+
+          BODY="❓ **@bborn - Input needed**
+
+          $QUESTION"
+
+          jq -n --arg body "$BODY" '{"body": $body}' > /tmp/payload.json
+          curl -s -X POST \
+            -H "Authorization: token ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            -d @/tmp/payload.json \
+            "https://api.github.com/repos/${{ github.repository }}/issues/${{ github.event.issue.number }}/comments"
+
+      - name: Update issue - error
+        if: steps.claude.outputs.result == 'error' || steps.project.outputs.dir == ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ -z "${{ steps.project.outputs.dir }}" ]; then
+            MSG="Could not determine target project. Add a project label (e.g. project:offerlab)"
+          else
+            MSG="Task did not complete. Check runner logs for details."
+          fi
+
+          BODY="⚠️ **@bborn - Error**
+
+          $MSG"
+
+          jq -n --arg body "$BODY" '{"body": $body}' > /tmp/payload.json
+          curl -s -X POST \
+            -H "Authorization: token ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            -d @/tmp/payload.json \
+            "https://api.github.com/repos/${{ github.repository }}/issues/${{ github.event.issue.number }}/comments"
+
+      - name: Update labels
         uses: actions/github-script@v7
         with:
           script: |
-            const message = `${{ steps.claude.outputs.message }}` || 'Could not determine target repository';
-            
-            await github.rest.issues.createComment({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: context.issue.number,
-              body: `❓ **Need clarification**\n\n${message}`
-            });
-            
+            const result = '${{ steps.claude.outputs.result }}';
+            const newLabel = result === 'complete' ? 'status:ready' : 'status:blocked';
+
             await github.rest.issues.removeLabel({
               owner: context.repo.owner,
               repo: context.repo.repo,
               issue_number: context.issue.number,
               name: 'status:processing'
-            });
-            
+            }).catch(() => {});
+
             await github.rest.issues.addLabels({
               owner: context.repo.owner,
               repo: context.repo.repo,
               issue_number: context.issue.number,
-              labels: ['status:blocked']
+              labels: [newLabel]
             });
 
   # Writing tasks - use Claude Code
