@@ -1,0 +1,46 @@
+name: Code Task
+description: Development work - features, bugs, refactoring
+labels: ["type:code", "status:queued"]
+body:
+  - type: input
+    id: project
+    attributes:
+      label: Project
+      description: Which project is this for?
+      placeholder: offerlab, influencekit, or personal
+    validations:
+      required: true
+
+  - type: dropdown
+    id: priority
+    attributes:
+      label: Priority
+      options:
+        - normal
+        - high
+        - low
+    validations:
+      required: false
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Task Description
+      description: What needs to be done?
+      placeholder: |
+        Describe the feature, bug fix, or refactoring needed.
+        Include relevant file paths or components if known.
+    validations:
+      required: true
+
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance Criteria
+      description: How do we know this is done?
+      placeholder: |
+        - [ ] Feature works as expected
+        - [ ] Tests pass
+        - [ ] No regressions
+    validations:
+      required: false

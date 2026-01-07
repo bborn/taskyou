@@ -1,0 +1,18 @@
+# macOS
+.DS_Store
+
+# Editor
+*.swp
+*.swo
+*~
+
+# Environment
+.env
+.env.local
+
+# Claude Code
+.claude/
+
+# Archives
+*.tar.gz
+*.zip

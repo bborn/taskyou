@@ -1,0 +1,38 @@
+name: Thinking Task
+description: Analysis, research, strategy, planning
+labels: ["type:thinking", "status:queued"]
+body:
+  - type: dropdown
+    id: priority
+    attributes:
+      label: Priority
+      options:
+        - normal
+        - high
+        - low
+    validations:
+      required: false
+
+  - type: textarea
+    id: question
+    attributes:
+      label: Question or Problem
+      description: What do you need analyzed or figured out?
+      placeholder: |
+        What decision needs to be made?
+        What problem needs to be solved?
+        What options are you considering?
+    validations:
+      required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Context & Constraints
+      description: Background information and any constraints
+      placeholder: |
+        Relevant background info
+        Constraints (budget, time, technical)
+        Previous attempts or considerations
+    validations:
+      required: false
