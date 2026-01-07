@@ -168,18 +168,28 @@ jobs:
           - If complete: output TASK_COMPLETE on its own line
           - If you need input from me: output NEEDS_INPUT: followed by your question"
 
+          # Setup logging
+          LOG_DIR="/home/runner/logs"
+          mkdir -p "$LOG_DIR"
+          LOG_FILE="$LOG_DIR/task-${{ github.event.issue.number }}-$(date +%Y%m%d-%H%M%S).txt"
+
+          # Symlink for task watch
+          ln -sf "$LOG_FILE" /tmp/claude_output.txt
+
           # Run Claude with full permissions
           claude -p "$PROMPT" \
             --dangerously-skip-permissions \
             --max-turns 50 \
-            > /tmp/claude_output.txt 2>&1 || true
+            > "$LOG_FILE" 2>&1 || true
+
+          echo "log_file=$LOG_FILE" >> $GITHUB_OUTPUT
 
           # Check result
-          if grep -q "TASK_COMPLETE" /tmp/claude_output.txt; then
+          if grep -q "TASK_COMPLETE" "$LOG_FILE"; then
             echo "result=complete" >> $GITHUB_OUTPUT
-          elif grep -q "NEEDS_INPUT" /tmp/claude_output.txt; then
+          elif grep -q "NEEDS_INPUT" "$LOG_FILE"; then
             echo "result=needs_input" >> $GITHUB_OUTPUT
-            grep "NEEDS_INPUT" /tmp/claude_output.txt | head -1 | sed 's/NEEDS_INPUT://' > /tmp/question.txt
+            grep "NEEDS_INPUT" "$LOG_FILE" | head -1 | sed 's/NEEDS_INPUT://' > /tmp/question.txt
           else
             echo "result=error" >> $GITHUB_OUTPUT
           fi
@@ -319,8 +329,15 @@ jobs:
           Write the requested content. Be professional, clear, and match the appropriate tone.
           Output only the final content, no meta-commentary."
 
+          # Setup logging
+          LOG_DIR="/home/runner/logs"
+          mkdir -p "$LOG_DIR"
+          LOG_FILE="$LOG_DIR/task-${{ github.event.issue.number }}-$(date +%Y%m%d-%H%M%S).txt"
+          ln -sf "$LOG_FILE" /tmp/claude_output.txt
+
           # Run Claude Code (--max-turns 3 allows for response)
-          claude -p "$PROMPT" --max-turns 3 > /tmp/content.txt 2>&1 || true
+          claude -p "$PROMPT" --max-turns 3 > "$LOG_FILE" 2>&1 || true
+          cp "$LOG_FILE" /tmp/content.txt
 
           # Build comment body
           {
@@ -397,8 +414,15 @@ jobs:
 
           Think deeply but be actionable."
 
+          # Setup logging
+          LOG_DIR="/home/runner/logs"
+          mkdir -p "$LOG_DIR"
+          LOG_FILE="$LOG_DIR/task-${{ github.event.issue.number }}-$(date +%Y%m%d-%H%M%S).txt"
+          ln -sf "$LOG_FILE" /tmp/claude_output.txt
+
           # Run Claude Code (--max-turns 3 allows for response)
-          claude -p "$PROMPT" --max-turns 3 > /tmp/content.txt 2>&1 || true
+          claude -p "$PROMPT" --max-turns 3 > "$LOG_FILE" 2>&1 || true
+          cp "$LOG_FILE" /tmp/content.txt
 
           # Build comment body
           {
@@ -479,8 +503,15 @@ jobs:
           - PROJECT: infer from context if not labeled, use 'unknown' if unclear
           - CLARITY: 'clear' if you have enough info to act (including from Linear), 'needs_info' only if truly vague"
 
+          # Setup logging
+          LOG_DIR="/home/runner/logs"
+          mkdir -p "$LOG_DIR"
+          LOG_FILE="$LOG_DIR/triage-${{ github.event.issue.number }}-$(date +%Y%m%d-%H%M%S).txt"
+          ln -sf "$LOG_FILE" /tmp/claude_output.txt
+
           # Run Claude Code (--max-turns 10 allows for MCP calls + response)
-          CONTENT=$(claude -p "$PROMPT" --max-turns 10 2>&1) || true
+          claude -p "$PROMPT" --max-turns 10 > "$LOG_FILE" 2>&1 || true
+          CONTENT=$(cat "$LOG_FILE")
 
           # Debug: show response
           echo "=== Claude Response ==="

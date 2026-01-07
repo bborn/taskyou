@@ -57,6 +57,10 @@ WATCH OPTIONS:
     task watch            Watch Claude working on Hetzner (live tail)
     task w                Alias for watch
 
+LOGS OPTIONS:
+    task logs             List recent task logs
+    task logs NUMBER      View log for specific task
+
 REQUEUE OPTIONS:
     task requeue NUMBER              Requeue a blocked task
     task requeue NUMBER -m "info"    Requeue with additional context
@@ -507,6 +511,30 @@ requeue_task() {
     fi
 }
 
+# View task logs
+view_logs() {
+    local RUNNER_HOST="${RUNNER_HOST:-cloud-claude}"
+    local ISSUE_NUM="$1"
+
+    if [[ -n "$ISSUE_NUM" ]]; then
+        # View specific task log
+        echo -e "${BLUE}Fetching log for task #${ISSUE_NUM}...${NC}"
+        ssh "$RUNNER_HOST" "ls -t /home/runner/logs/*task-${ISSUE_NUM}-* /home/runner/logs/*triage-${ISSUE_NUM}-* 2>/dev/null | head -1 | xargs cat" 2>/dev/null || {
+            echo -e "${RED}No log found for task #${ISSUE_NUM}${NC}"
+            exit 1
+        }
+    else
+        # List recent logs
+        echo -e "${BLUE}Recent task logs on ${RUNNER_HOST}:${NC}"
+        echo ""
+        ssh "$RUNNER_HOST" "ls -lht /home/runner/logs/*.txt 2>/dev/null | head -20" || {
+            echo -e "${DIM}No logs found${NC}"
+        }
+        echo ""
+        echo -e "${DIM}View specific log: task logs NUMBER${NC}"
+    fi
+}
+
 # Watch Claude working on Hetzner
 watch_claude() {
     local RUNNER_HOST="${RUNNER_HOST:-cloud-claude}"
@@ -554,6 +582,10 @@ case "${1:-}" in
     watch|w)
         shift
         watch_claude "$@"
+        ;;
+    logs|log)
+        shift
+        view_logs "$@"
         ;;
     requeue|rq)
         shift
