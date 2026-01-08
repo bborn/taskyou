@@ -9,17 +9,19 @@ import (
 
 // Task represents a task in the database.
 type Task struct {
-	ID          int64
-	Title       string
-	Body        string
-	Status      string
-	Type        string
-	Project     string
-	Priority    string
-	CreatedAt   LocalTime
-	UpdatedAt   LocalTime
-	StartedAt   *LocalTime
-	CompletedAt *LocalTime
+	ID           int64
+	Title        string
+	Body         string
+	Status       string
+	Type         string
+	Project      string
+	Priority     string
+	WorktreePath string
+	BranchName   string
+	CreatedAt    LocalTime
+	UpdatedAt    LocalTime
+	StartedAt    *LocalTime
+	CompletedAt  *LocalTime
 }
 
 // Task statuses
@@ -67,10 +69,12 @@ func (db *DB) GetTask(id int64) (*Task, error) {
 	t := &Task{}
 	err := db.QueryRow(`
 		SELECT id, title, body, status, type, project, priority,
+		       worktree_path, branch_name,
 		       created_at, updated_at, started_at, completed_at
 		FROM tasks WHERE id = ?
 	`, id).Scan(
 		&t.ID, &t.Title, &t.Body, &t.Status, &t.Type, &t.Project, &t.Priority,
+		&t.WorktreePath, &t.BranchName,
 		&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
 	)
 	if err == sql.ErrNoRows {
@@ -97,6 +101,7 @@ type ListTasksOptions struct {
 func (db *DB) ListTasks(opts ListTasksOptions) ([]*Task, error) {
 	query := `
 		SELECT id, title, body, status, type, project, priority,
+		       worktree_path, branch_name,
 		       created_at, updated_at, started_at, completed_at
 		FROM tasks WHERE 1=1
 	`
@@ -146,6 +151,7 @@ func (db *DB) ListTasks(opts ListTasksOptions) ([]*Task, error) {
 		t := &Task{}
 		err := rows.Scan(
 			&t.ID, &t.Title, &t.Body, &t.Status, &t.Type, &t.Project, &t.Priority,
+			&t.WorktreePath, &t.BranchName,
 			&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
 		)
 		if err != nil {
@@ -184,9 +190,11 @@ func (db *DB) UpdateTask(t *Task) error {
 	_, err := db.Exec(`
 		UPDATE tasks SET
 			title = ?, body = ?, status = ?, type = ?, project = ?, priority = ?,
+			worktree_path = ?, branch_name = ?,
 			updated_at = CURRENT_TIMESTAMP
 		WHERE id = ?
-	`, t.Title, t.Body, t.Status, t.Type, t.Project, t.Priority, t.ID)
+	`, t.Title, t.Body, t.Status, t.Type, t.Project, t.Priority,
+		t.WorktreePath, t.BranchName, t.ID)
 	if err != nil {
 		return fmt.Errorf("update task: %w", err)
 	}
@@ -221,6 +229,7 @@ func (db *DB) GetNextQueuedTask() (*Task, error) {
 	t := &Task{}
 	err := db.QueryRow(`
 		SELECT id, title, body, status, type, project, priority,
+		       worktree_path, branch_name,
 		       created_at, updated_at, started_at, completed_at
 		FROM tasks
 		WHERE status = ?
@@ -228,6 +237,7 @@ func (db *DB) GetNextQueuedTask() (*Task, error) {
 		LIMIT 1
 	`, StatusQueued).Scan(
 		&t.ID, &t.Title, &t.Body, &t.Status, &t.Type, &t.Project, &t.Priority,
+		&t.WorktreePath, &t.BranchName,
 		&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
 	)
 	if err == sql.ErrNoRows {
@@ -243,6 +253,7 @@ func (db *DB) GetNextQueuedTask() (*Task, error) {
 func (db *DB) GetQueuedTasks() ([]*Task, error) {
 	rows, err := db.Query(`
 		SELECT id, title, body, status, type, project, priority,
+		       worktree_path, branch_name,
 		       created_at, updated_at, started_at, completed_at
 		FROM tasks
 		WHERE status = ?
@@ -260,6 +271,7 @@ func (db *DB) GetQueuedTasks() ([]*Task, error) {
 		t := &Task{}
 		if err := rows.Scan(
 			&t.ID, &t.Title, &t.Body, &t.Status, &t.Type, &t.Project, &t.Priority,
+			&t.WorktreePath, &t.BranchName,
 			&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
 		); err != nil {
 			return nil, fmt.Errorf("scan task: %w", err)

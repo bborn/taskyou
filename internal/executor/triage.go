@@ -148,11 +148,10 @@ Respond with ONLY the JSON object, no other text.`)
 
 // runTriageClaude runs a quick Claude call for triage.
 func (e *Executor) runTriageClaude(ctx context.Context, taskID int64, prompt string) (*TriageResult, error) {
-	// Use crush with a shorter timeout for triage
+	// Use crush with quiet mode for triage
 	args := []string{
 		"run",
 		"-q", // quiet mode
-		"--max-turns", "1", // single turn for triage
 		prompt,
 	}
 

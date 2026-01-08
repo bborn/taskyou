@@ -6,7 +6,9 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -349,14 +351,22 @@ func (e *Executor) executeTask(ctx context.Context, task *db.Task) {
 	e.logLine(task.ID, "system", startMsg)
 	e.hooks.OnStatusChange(task, db.StatusProcessing, startMsg)
 
-	// Determine project directory
-	projectDir := e.getProjectDir(task.Project)
+	// Setup worktree for isolated execution
+	workDir, err := e.setupWorktree(task)
+	if err != nil {
+		e.logger.Error("Failed to setup worktree", "error", err)
+		// Fall back to project directory
+		workDir = e.getProjectDir(task.Project)
+		if workDir == "" {
+			workDir, _ = os.Getwd()
+		}
+	}
 
 	// Build prompt based on task type
 	prompt := e.buildPrompt(task)
 
 	// Run Crush
-	result := e.runCrush(taskCtx, task.ID, projectDir, prompt)
+	result := e.runCrush(taskCtx, task.ID, workDir, prompt)
 
 	// Update final status and trigger hooks
 	if result.Interrupted {
@@ -387,6 +397,11 @@ func (e *Executor) executeTask(ctx context.Context, task *db.Task) {
 	}
 
 	e.logger.Info("Task finished", "id", task.ID, "success", result.Success)
+}
+
+// GetProjectDir returns the directory for a project (exported for UI).
+func (e *Executor) GetProjectDir(project string) string {
+	return e.config.GetProjectDir(project)
 }
 
 func (e *Executor) getProjectDir(project string) string {
@@ -869,4 +884,184 @@ func (e *Executor) getConversationHistory(taskID int64) string {
 
 	sb.WriteString("Please continue with this context in mind.\n\n")
 	return sb.String()
+}
+
+// setupWorktree creates a git worktree for the task if the project is a git repo.
+// Returns the working directory to use (worktree path or project path).
+func (e *Executor) setupWorktree(task *db.Task) (string, error) {
+	// Get project directory
+	projectDir := e.getProjectDir(task.Project)
+	if projectDir == "" {
+		// No project, use current directory
+		cwd, _ := os.Getwd()
+		return cwd, nil
+	}
+
+	// Check if project is a git repo
+	gitDir := filepath.Join(projectDir, ".git")
+	if _, err := os.Stat(gitDir); os.IsNotExist(err) {
+		// Not a git repo, use project dir directly
+		return projectDir, nil
+	}
+
+	// Create worktree directory in task data folder (not in project)
+	home, _ := os.UserHomeDir()
+	projectName := task.Project
+	if projectName == "" {
+		projectName = filepath.Base(projectDir)
+	}
+	worktreesDir := filepath.Join(home, ".local", "share", "task", "worktrees", projectName)
+	if err := os.MkdirAll(worktreesDir, 0755); err != nil {
+		return "", fmt.Errorf("create worktrees dir: %w", err)
+	}
+
+	// Generate slug from title (e.g., "Add contact email" -> "add-contact-email")
+	slug := slugify(task.Title, 40)
+	branchName := fmt.Sprintf("task/%d-%s", task.ID, slug)
+	dirName := fmt.Sprintf("%d-%s", task.ID, slug)
+	worktreePath := filepath.Join(worktreesDir, dirName)
+
+	// Check if worktree already exists
+	if _, err := os.Stat(worktreePath); err == nil {
+		// Worktree exists, reuse it
+		task.WorktreePath = worktreePath
+		task.BranchName = branchName
+		e.db.UpdateTask(task)
+		return worktreePath, nil
+	}
+
+	// Get default branch name
+	defaultBranch := e.getDefaultBranch(projectDir)
+
+	// Create new branch and worktree
+	cmd := exec.Command("git", "worktree", "add", "-b", branchName, worktreePath, defaultBranch)
+	cmd.Dir = projectDir
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		// Check if branch already exists
+		if strings.Contains(string(output), "already exists") {
+			// Try using existing branch
+			cmd = exec.Command("git", "worktree", "add", worktreePath, branchName)
+			cmd.Dir = projectDir
+			output2, err2 := cmd.CombinedOutput()
+			if err2 != nil {
+				// Check if worktree was created by another process
+				if strings.Contains(string(output2), "already checked out") {
+					// Worktree exists, reuse it
+					task.WorktreePath = worktreePath
+					task.BranchName = branchName
+					e.db.UpdateTask(task)
+					return worktreePath, nil
+				}
+				return "", fmt.Errorf("create worktree: %v\n%s\n%s", err, string(output), string(output2))
+			}
+		} else {
+			return "", fmt.Errorf("create worktree: %v\n%s", err, string(output))
+		}
+	}
+
+	// Update task with worktree info
+	task.WorktreePath = worktreePath
+	task.BranchName = branchName
+	e.db.UpdateTask(task)
+
+	e.logLine(task.ID, "system", fmt.Sprintf("Created worktree at %s (branch: %s)", worktreePath, branchName))
+
+	return worktreePath, nil
+}
+
+// getDefaultBranch returns the default branch name for a git repo.
+func (e *Executor) getDefaultBranch(projectDir string) string {
+	// Try to get default branch from remote
+	cmd := exec.Command("git", "symbolic-ref", "refs/remotes/origin/HEAD")
+	cmd.Dir = projectDir
+	if output, err := cmd.Output(); err == nil {
+		ref := strings.TrimSpace(string(output))
+		// refs/remotes/origin/main -> main
+		parts := strings.Split(ref, "/")
+		if len(parts) > 0 {
+			return parts[len(parts)-1]
+		}
+	}
+
+	// Fallback: check if main or master exists
+	for _, branch := range []string{"main", "master"} {
+		cmd := exec.Command("git", "rev-parse", "--verify", branch)
+		cmd.Dir = projectDir
+		if err := cmd.Run(); err == nil {
+			return branch
+		}
+	}
+
+	return "main" // Default to main
+}
+
+// CleanupWorktree removes a task's worktree.
+func (e *Executor) CleanupWorktree(task *db.Task) error {
+	if task.WorktreePath == "" {
+		return nil
+	}
+
+	// Get project directory to run git commands from
+	projectDir := e.getProjectDir(task.Project)
+	if projectDir == "" {
+		return nil
+	}
+
+	// Remove worktree
+	cmd := exec.Command("git", "worktree", "remove", "--force", task.WorktreePath)
+	cmd.Dir = projectDir
+	if output, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("remove worktree: %v\n%s", err, string(output))
+	}
+
+	// Optionally delete the branch too
+	if task.BranchName != "" {
+		cmd = exec.Command("git", "branch", "-D", task.BranchName)
+		cmd.Dir = projectDir
+		cmd.Run() // Ignore errors - branch might have been merged/deleted
+	}
+
+	// Clear worktree info from task
+	task.WorktreePath = ""
+	task.BranchName = ""
+	e.db.UpdateTask(task)
+
+	return nil
+}
+
+// slugify converts a string to a URL/branch-friendly slug.
+func slugify(s string, maxLen int) string {
+	// Convert to lowercase
+	s = strings.ToLower(s)
+
+	// Replace spaces and underscores with hyphens
+	s = strings.ReplaceAll(s, " ", "-")
+	s = strings.ReplaceAll(s, "_", "-")
+
+	// Remove non-alphanumeric characters (except hyphens)
+	var result strings.Builder
+	for _, r := range s {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' {
+			result.WriteRune(r)
+		}
+	}
+	s = result.String()
+
+	// Collapse multiple hyphens
+	for strings.Contains(s, "--") {
+		s = strings.ReplaceAll(s, "--", "-")
+	}
+
+	// Trim hyphens from ends
+	s = strings.Trim(s, "-")
+
+	// Truncate to maxLen
+	if len(s) > maxLen {
+		s = s[:maxLen]
+		// Don't end with a hyphen
+		s = strings.TrimRight(s, "-")
+	}
+
+	return s
 }

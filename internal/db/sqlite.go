@@ -160,6 +160,8 @@ func (db *DB) migrate() error {
 	// Run ALTER TABLE migrations separately (they may fail if column already exists)
 	alterMigrations := []string{
 		`ALTER TABLE projects ADD COLUMN instructions TEXT DEFAULT ''`,
+		`ALTER TABLE tasks ADD COLUMN worktree_path TEXT DEFAULT ''`,
+		`ALTER TABLE tasks ADD COLUMN branch_name TEXT DEFAULT ''`,
 	}
 
 	for _, m := range alterMigrations {

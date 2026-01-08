@@ -2,6 +2,7 @@ package ui
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
 	"time"
 
@@ -47,6 +48,7 @@ type KeyMap struct {
 	Refresh      key.Binding
 	Settings     key.Binding
 	Memories     key.Binding
+	Open         key.Binding
 	Help         key.Binding
 	Quit         key.Binding
 }
@@ -62,7 +64,7 @@ func (k KeyMap) FullHelp() [][]key.Binding {
 		{k.Left, k.Right, k.Up, k.Down},
 		{k.Enter, k.New, k.Queue, k.Close},
 		{k.Retry, k.Watch, k.Attach, k.Interrupt, k.Delete},
-		{k.Filter, k.Settings, k.Memories},
+		{k.Filter, k.Settings, k.Memories, k.Open},
 		{k.Refresh, k.Help, k.Quit},
 	}
 }
@@ -141,6 +143,10 @@ func DefaultKeyMap() KeyMap {
 		Memories: key.NewBinding(
 			key.WithKeys("m"),
 			key.WithHelp("m", "memories"),
+		),
+		Open: key.NewBinding(
+			key.WithKeys("o"),
+			key.WithHelp("o", "open dir"),
 		),
 		Help: key.NewBinding(
 			key.WithKeys("?"),
@@ -697,6 +703,11 @@ func (m *AppModel) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.loading = true
 		return m, m.loadTasks()
 
+	case key.Matches(msg, m.keys.Open):
+		if task := m.kanban.SelectedTask(); task != nil {
+			return m, m.openTaskDir(task)
+		}
+
 	case key.Matches(msg, m.keys.Help):
 		m.help.ShowAll = !m.help.ShowAll
 		return m, nil
@@ -760,6 +771,9 @@ func (m *AppModel) updateDetail(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if db.IsInProgress(m.selectedTask.Status) || m.executor.IsRunning(m.selectedTask.ID) {
 			return m, m.interruptTask(m.selectedTask.ID)
 		}
+	}
+	if key.Matches(msg, m.keys.Open) && m.selectedTask != nil {
+		return m, m.openTaskDir(m.selectedTask)
 	}
 
 	if m.detailView != nil {
@@ -930,6 +944,10 @@ type attachDoneMsg struct {
 	err error
 }
 
+type openDirDoneMsg struct {
+	err error
+}
+
 type tickMsg time.Time
 
 func (m *AppModel) loadTasks() tea.Cmd {
@@ -1004,6 +1022,61 @@ func (m *AppModel) interruptTask(id int64) tea.Cmd {
 		m.executor.Interrupt(id)
 		return taskInterruptedMsg{}
 	}
+}
+
+func (m *AppModel) openTaskDir(task *db.Task) tea.Cmd {
+	// Determine directory to open: worktree > project > cwd
+	dir := task.WorktreePath
+	if dir == "" {
+		dir = m.executor.GetProjectDir(task.Project)
+	}
+	if dir == "" {
+		return nil
+	}
+
+	// Open in new terminal tab using current terminal
+	termProgram := os.Getenv("TERM_PROGRAM")
+	var script string
+	switch termProgram {
+	case "iTerm.app":
+		script = fmt.Sprintf(`tell application "iTerm"
+			activate
+			tell current window
+				create tab with default profile
+				tell current session
+					write text "cd %q && clear"
+				end tell
+			end tell
+		end tell`, dir)
+	case "Apple_Terminal":
+		script = fmt.Sprintf(`tell application "Terminal"
+			activate
+			tell application "System Events" to keystroke "t" using command down
+			delay 0.3
+			do script "cd %q && clear" in front window
+		end tell`, dir)
+	case "ghostty":
+		script = fmt.Sprintf(`tell application "Ghostty" to activate
+		tell application "System Events"
+			tell process "Ghostty"
+				keystroke "t" using command down
+				delay 0.3
+				keystroke "cd %q && clear"
+				key code 36
+			end tell
+		end tell`, dir)
+	default:
+		// Fallback: try to open via generic "open new tab" keystroke
+		script = fmt.Sprintf(`tell application "System Events"
+			keystroke "t" using command down
+			delay 0.3
+			keystroke "cd %q && clear"
+			key code 36
+		end tell`, dir)
+	}
+	cmd := exec.Command("osascript", "-e", script)
+	go cmd.Run()
+	return func() tea.Msg { return openDirDoneMsg{} }
 }
 
 func (m *AppModel) waitForTaskEvent() tea.Cmd {

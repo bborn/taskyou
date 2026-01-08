@@ -260,6 +260,26 @@ func stopDaemon() error {
 
 // runDaemon runs the background executor that processes queued tasks.
 func runDaemon() error {
+	pidFile := getPidFilePath()
+
+	// Acquire exclusive lock on PID file to prevent duplicates
+	lockFile, err := os.OpenFile(pidFile+".lock", os.O_CREATE|os.O_RDWR, 0644)
+	if err != nil {
+		return fmt.Errorf("open lock file: %w", err)
+	}
+	defer lockFile.Close()
+
+	if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		return fmt.Errorf("daemon already running (could not acquire lock)")
+	}
+	defer syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN)
+
+	// Write our PID file
+	if err := writePidFile(pidFile, os.Getpid()); err != nil {
+		return fmt.Errorf("write pid file: %w", err)
+	}
+	defer os.Remove(pidFile)
+
 	// Setup logger
 	logger := log.NewWithOptions(os.Stderr, log.Options{
 		ReportTimestamp: true,
