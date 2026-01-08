@@ -22,25 +22,28 @@ const (
 	ViewWatch
 	ViewSettings
 	ViewRetry
+	ViewMemories
 )
 
 // KeyMap defines key bindings.
 type KeyMap struct {
-	Up       key.Binding
-	Down     key.Binding
-	Enter    key.Binding
-	Back     key.Binding
-	New      key.Binding
-	Queue    key.Binding
-	Retry    key.Binding
-	Close    key.Binding
-	Delete   key.Binding
-	Watch    key.Binding
-	Filter   key.Binding
-	Refresh  key.Binding
-	Settings key.Binding
-	Help     key.Binding
-	Quit     key.Binding
+	Up        key.Binding
+	Down      key.Binding
+	Enter     key.Binding
+	Back      key.Binding
+	New       key.Binding
+	Queue     key.Binding
+	Retry     key.Binding
+	Close     key.Binding
+	Delete    key.Binding
+	Watch     key.Binding
+	Interrupt key.Binding
+	Filter    key.Binding
+	Refresh   key.Binding
+	Settings  key.Binding
+	Memories  key.Binding
+	Help      key.Binding
+	Quit      key.Binding
 }
 
 // DefaultKeyMap returns the default key bindings.
@@ -86,6 +89,10 @@ func DefaultKeyMap() KeyMap {
 			key.WithKeys("w"),
 			key.WithHelp("w", "watch"),
 		),
+		Interrupt: key.NewBinding(
+			key.WithKeys("i"),
+			key.WithHelp("i", "interrupt"),
+		),
 		Filter: key.NewBinding(
 			key.WithKeys("/"),
 			key.WithHelp("/", "filter"),
@@ -97,6 +104,10 @@ func DefaultKeyMap() KeyMap {
 		Settings: key.NewBinding(
 			key.WithKeys("s"),
 			key.WithHelp("s", "settings"),
+		),
+		Memories: key.NewBinding(
+			key.WithKeys("m"),
+			key.WithHelp("m", "memories"),
 		),
 		Help: key.NewBinding(
 			key.WithKeys("?"),
@@ -119,10 +130,15 @@ type AppModel struct {
 	previousView View
 
 	// Dashboard state
-	tasks   []*db.Task
-	list    list.Model
-	loading bool
-	err     error
+	tasks        []*db.Task
+	list         list.Model
+	loading      bool
+	err          error
+	notification string    // Notification banner text
+	notifyUntil  time.Time // When to hide notification
+
+	// Track task statuses to detect changes
+	prevStatuses map[int64]string
 
 	// Detail view state
 	selectedTask *db.Task
@@ -139,6 +155,9 @@ type AppModel struct {
 
 	// Retry view state
 	retryView *RetryModel
+
+	// Memories view state
+	memoriesView *MemoriesModel
 
 	// Window size
 	width  int
@@ -172,14 +191,15 @@ func NewAppModel(database *db.DB, exec *executor.Executor, width, height int) *A
 	l.Styles.Title = Header
 
 	return &AppModel{
-		db:          database,
-		executor:    exec,
-		keys:        DefaultKeyMap(),
-		currentView: ViewDashboard,
-		list:        l,
-		loading:     true,
-		width:       width,
-		height:      height,
+		db:           database,
+		executor:     exec,
+		keys:         DefaultKeyMap(),
+		currentView:  ViewDashboard,
+		list:         l,
+		loading:      true,
+		width:        width,
+		height:       height,
+		prevStatuses: make(map[int64]string),
 	}
 }
 
@@ -218,6 +238,8 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.updateDetail(msg)
 		case ViewWatch:
 			return m.updateWatch(msg)
+		case ViewMemories:
+			return m.updateMemories(msg)
 		}
 
 	case tea.WindowSizeMsg:
@@ -241,6 +263,25 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.loading = false
 		m.tasks = msg.tasks
 		m.err = msg.err
+
+		// Check for newly blocked/ready tasks and notify
+		for _, t := range m.tasks {
+			prevStatus := m.prevStatuses[t.ID]
+			if prevStatus != "" && prevStatus != t.Status {
+				if t.Status == db.StatusBlocked {
+					// Task just became blocked - ring bell and show notification
+					m.notification = fmt.Sprintf("⚠ Task #%d needs input: %s", t.ID, t.Title)
+					m.notifyUntil = time.Now().Add(10 * time.Second)
+					fmt.Print("\a") // Ring terminal bell
+				} else if t.Status == db.StatusReady && prevStatus == db.StatusProcessing {
+					// Task completed
+					m.notification = fmt.Sprintf("✓ Task #%d complete: %s", t.ID, t.Title)
+					m.notifyUntil = time.Now().Add(5 * time.Second)
+				}
+			}
+			m.prevStatuses[t.ID] = t.Status
+		}
+
 		items := make([]list.Item, len(m.tasks))
 		for i, t := range m.tasks {
 			items[i] = TaskItem{task: t}
@@ -266,7 +307,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.err = msg.err
 		}
 
-	case taskQueuedMsg, taskClosedMsg, taskDeletedMsg, taskRetriedMsg:
+	case taskQueuedMsg, taskClosedMsg, taskDeletedMsg, taskRetriedMsg, taskInterruptedMsg:
 		cmds = append(cmds, m.loadTasks())
 
 	case tickMsg:
@@ -317,22 +358,33 @@ func (m *AppModel) View() string {
 }
 
 func (m *AppModel) viewDashboard() string {
-	// Show current processing tasks if any
-	var statusBar string
-	if runningIDs := m.executor.RunningTasks(); len(runningIDs) > 0 {
-		statusBar = lipgloss.NewStyle().
-			Foreground(ColorProcessing).
-			Render(fmt.Sprintf("⋯ Processing %d task(s)", len(runningIDs)))
-		statusBar = lipgloss.NewStyle().Padding(0, 2).Render(statusBar)
+	var parts []string
+
+	// Show notification banner if active
+	if m.notification != "" && time.Now().Before(m.notifyUntil) {
+		notifyStyle := lipgloss.NewStyle().
+			Background(lipgloss.Color("#FFCC00")).
+			Foreground(lipgloss.Color("#000000")).
+			Bold(true).
+			Padding(0, 2).
+			Width(m.width)
+		parts = append(parts, notifyStyle.Render(m.notification))
+	} else {
+		m.notification = "" // Clear expired notification
 	}
 
-	help := m.renderHelp()
+	// Show current processing tasks if any
+	if runningIDs := m.executor.RunningTasks(); len(runningIDs) > 0 {
+		statusBar := lipgloss.NewStyle().
+			Foreground(ColorProcessing).
+			Render(fmt.Sprintf("⋯ Processing %d task(s)", len(runningIDs)))
+		parts = append(parts, lipgloss.NewStyle().Padding(0, 2).Render(statusBar))
+	}
 
-	return lipgloss.JoinVertical(lipgloss.Left,
-		statusBar,
-		m.list.View(),
-		help,
-	)
+	parts = append(parts, m.list.View())
+	parts = append(parts, m.renderHelp())
+
+	return lipgloss.JoinVertical(lipgloss.Left, parts...)
 }
 
 func (m *AppModel) renderHelp() string {
@@ -347,6 +399,7 @@ func (m *AppModel) renderHelp() string {
 		{"r", "retry"},
 		{"c", "close"},
 		{"w", "watch"},
+		{"i", "interrupt"},
 		{"s", "settings"},
 		{"q", "quit"},
 	}
@@ -391,10 +444,11 @@ func (m *AppModel) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, m.keys.Retry):
 		if item, ok := m.list.SelectedItem().(TaskItem); ok {
 			task := item.task
-			// Only allow retry for blocked/ready/pending tasks
-			if task.Status == db.StatusBlocked || task.Status == db.StatusReady || task.Status == db.StatusPending {
+			// Allow retry for blocked, ready, pending, or stuck processing tasks
+			if task.Status == db.StatusBlocked || task.Status == db.StatusReady ||
+				task.Status == db.StatusPending || task.Status == db.StatusProcessing {
 				m.selectedTask = task
-				m.retryView = NewRetryModel(task, m.width, m.height)
+				m.retryView = NewRetryModel(task, m.db, m.width, m.height)
 				m.previousView = m.currentView
 				m.currentView = ViewRetry
 				return m, m.retryView.Init()
@@ -419,6 +473,14 @@ func (m *AppModel) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.previousView = m.currentView
 				m.currentView = ViewWatch
 				return m, m.watchView.Init()
+			}
+		}
+
+	case key.Matches(msg, m.keys.Interrupt):
+		// Interrupt the selected task if it's processing
+		if item, ok := m.list.SelectedItem().(TaskItem); ok {
+			if m.executor.IsRunning(item.task.ID) {
+				return m, m.interruptTask(item.task.ID)
 			}
 		}
 
@@ -454,8 +516,9 @@ func (m *AppModel) updateDetail(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 	if key.Matches(msg, m.keys.Retry) && m.selectedTask != nil {
 		task := m.selectedTask
-		if task.Status == db.StatusBlocked || task.Status == db.StatusReady || task.Status == db.StatusPending {
-			m.retryView = NewRetryModel(task, m.width, m.height)
+		if task.Status == db.StatusBlocked || task.Status == db.StatusReady ||
+			task.Status == db.StatusPending || task.Status == db.StatusProcessing {
+			m.retryView = NewRetryModel(task, m.db, m.width, m.height)
 			m.previousView = m.currentView
 			m.currentView = ViewRetry
 			return m, m.retryView.Init()
@@ -604,6 +667,10 @@ type taskRetriedMsg struct {
 	err error
 }
 
+type taskInterruptedMsg struct {
+	err error
+}
+
 type tickMsg time.Time
 
 func (m *AppModel) loadTasks() tea.Cmd {
@@ -652,6 +719,13 @@ func (m *AppModel) retryTask(id int64, feedback string) tea.Cmd {
 	return func() tea.Msg {
 		err := m.db.RetryTask(id, feedback)
 		return taskRetriedMsg{err: err}
+	}
+}
+
+func (m *AppModel) interruptTask(id int64) tea.Cmd {
+	return func() tea.Msg {
+		m.executor.Interrupt(id)
+		return taskInterruptedMsg{}
 	}
 }
 
