@@ -190,3 +190,93 @@ func TestRunningTasks(t *testing.T) {
 		t.Errorf("expected 2 running tasks, got %d", len(running))
 	}
 }
+
+func TestConversationHistory(t *testing.T) {
+	// Create temp database
+	tmpFile, err := os.CreateTemp("", "test-*.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(tmpFile.Name())
+	tmpFile.Close()
+
+	database, err := db.Open(tmpFile.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+
+	cfg := &config.Config{}
+	exec := New(database, cfg)
+
+	// Create a test task
+	task := &db.Task{
+		Title:   "Test task",
+		Status:  db.StatusPending,
+		Type:    db.TypeCode,
+		Project: "test",
+	}
+	if err := database.CreateTask(task); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("no history for fresh task", func(t *testing.T) {
+		prompt := exec.buildPrompt(task)
+		if strings.Contains(prompt, "Previous Conversation") {
+			t.Error("fresh task should not have conversation history")
+		}
+	})
+
+	t.Run("history after retry with feedback", func(t *testing.T) {
+		// Simulate a first run with a question
+		database.AppendTaskLog(task.ID, "system", "Starting task #1: Test task")
+		database.AppendTaskLog(task.ID, "output", "Looking at the code...")
+		database.AppendTaskLog(task.ID, "question", "What database name should I use?")
+		database.AppendTaskLog(task.ID, "system", "Task needs input - use 'r' to retry with your answer")
+
+		// Simulate retry with feedback
+		database.RetryTask(task.ID, "Use 'myapp_production' as the database name")
+
+		prompt := exec.buildPrompt(task)
+
+		if !strings.Contains(prompt, "Previous Conversation") {
+			t.Error("retry should include conversation history")
+		}
+		if !strings.Contains(prompt, "What database name should I use?") {
+			t.Error("retry should include the original question")
+		}
+		if !strings.Contains(prompt, "myapp_production") {
+			t.Error("retry should include user's feedback")
+		}
+	})
+
+	t.Run("multiple continuations", func(t *testing.T) {
+		// Clear logs for fresh test
+		database.ClearTaskLogs(task.ID)
+
+		// First run
+		database.AppendTaskLog(task.ID, "question", "First question?")
+		database.AppendTaskLog(task.ID, "system", "--- Continuation ---")
+		database.AppendTaskLog(task.ID, "text", "Feedback: First answer")
+
+		// Second run
+		database.AppendTaskLog(task.ID, "question", "Second question?")
+		database.AppendTaskLog(task.ID, "system", "--- Continuation ---")
+		database.AppendTaskLog(task.ID, "text", "Feedback: Second answer")
+
+		prompt := exec.buildPrompt(task)
+
+		if !strings.Contains(prompt, "First question?") {
+			t.Error("should include first question")
+		}
+		if !strings.Contains(prompt, "First answer") {
+			t.Error("should include first answer")
+		}
+		if !strings.Contains(prompt, "Second question?") {
+			t.Error("should include second question")
+		}
+		if !strings.Contains(prompt, "Second answer") {
+			t.Error("should include second answer")
+		}
+	})
+}

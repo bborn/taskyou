@@ -298,6 +298,9 @@ func (e *Executor) buildPrompt(task *db.Task) string {
 	// Add project memories if available
 	memories := e.getProjectMemoriesSection(task.Project)
 
+	// Check for conversation history (from previous runs/retries)
+	conversationHistory := e.getConversationHistory(task.ID)
+
 	switch task.Type {
 	case db.TypeCode:
 		prompt.WriteString(fmt.Sprintf("You are working on: %s\n\n", task.Project))
@@ -307,6 +310,9 @@ func (e *Executor) buildPrompt(task *db.Task) string {
 		prompt.WriteString(fmt.Sprintf("Task: %s\n\n", task.Title))
 		if task.Body != "" {
 			prompt.WriteString(fmt.Sprintf("%s\n\n", task.Body))
+		}
+		if conversationHistory != "" {
+			prompt.WriteString(conversationHistory)
 		}
 		prompt.WriteString(`Instructions:
 - Explore the codebase to understand the context
@@ -326,6 +332,9 @@ If you need input from me: output NEEDS_INPUT: followed by your question`)
 		if task.Body != "" {
 			prompt.WriteString(fmt.Sprintf("Details: %s\n\n", task.Body))
 		}
+		if conversationHistory != "" {
+			prompt.WriteString(conversationHistory)
+		}
 		prompt.WriteString("Write the requested content. Be professional, clear, and match the appropriate tone.\n")
 		prompt.WriteString("Output only the final content, no meta-commentary.\n")
 		prompt.WriteString("When finished, output: TASK_COMPLETE")
@@ -338,6 +347,9 @@ If you need input from me: output NEEDS_INPUT: followed by your question`)
 		prompt.WriteString(fmt.Sprintf("Question: %s\n\n", task.Title))
 		if task.Body != "" {
 			prompt.WriteString(fmt.Sprintf("Context: %s\n\n", task.Body))
+		}
+		if conversationHistory != "" {
+			prompt.WriteString(conversationHistory)
 		}
 		prompt.WriteString(`Provide:
 1. Clear analysis of the question/problem
@@ -356,6 +368,9 @@ When finished, output: TASK_COMPLETE`)
 		prompt.WriteString(fmt.Sprintf("Task: %s\n\n", task.Title))
 		if task.Body != "" {
 			prompt.WriteString(fmt.Sprintf("%s\n\n", task.Body))
+		}
+		if conversationHistory != "" {
+			prompt.WriteString(conversationHistory)
 		}
 		prompt.WriteString("When finished, output: TASK_COMPLETE\n")
 		prompt.WriteString("If you need input, output: NEEDS_INPUT: followed by your question")
@@ -565,5 +580,50 @@ func (e *Executor) getProjectMemoriesSection(project string) string {
 		sb.WriteString("\n")
 	}
 
+	return sb.String()
+}
+
+// getConversationHistory builds a context section from previous task runs.
+// This includes questions asked, user responses, and continuation markers.
+func (e *Executor) getConversationHistory(taskID int64) string {
+	logs, err := e.db.GetTaskLogs(taskID, 500)
+	if err != nil || len(logs) == 0 {
+		return ""
+	}
+
+	// Look for continuation markers - if none, this is a fresh run
+	hasContinuation := false
+	for _, log := range logs {
+		if log.LineType == "system" && strings.Contains(log.Content, "--- Continuation ---") {
+			hasContinuation = true
+			break
+		}
+	}
+	if !hasContinuation {
+		return ""
+	}
+
+	var sb strings.Builder
+	sb.WriteString("## Previous Conversation\n\n")
+	sb.WriteString("This task was previously attempted. Here is the relevant history:\n\n")
+
+	// Extract questions and feedback from logs
+	for _, log := range logs {
+		switch log.LineType {
+		case "question":
+			sb.WriteString(fmt.Sprintf("**Your question:** %s\n\n", log.Content))
+		case "text":
+			if strings.HasPrefix(log.Content, "Feedback: ") {
+				feedback := strings.TrimPrefix(log.Content, "Feedback: ")
+				sb.WriteString(fmt.Sprintf("**User's response:** %s\n\n", feedback))
+			}
+		case "system":
+			if strings.Contains(log.Content, "--- Continuation ---") {
+				sb.WriteString("---\n\n")
+			}
+		}
+	}
+
+	sb.WriteString("Please continue with this context in mind.\n\n")
 	return sb.String()
 }
