@@ -4,7 +4,6 @@ import (
 	"database/sql"
 	"fmt"
 	"strings"
-	"time"
 )
 
 // Task represents a task in the database.
@@ -16,21 +15,21 @@ type Task struct {
 	Type        string
 	Project     string
 	Priority    string
-	Model       string // claude, crush, codex, gemini
-	CreatedAt   time.Time
-	UpdatedAt   time.Time
-	StartedAt   *time.Time
-	CompletedAt *time.Time
+	CreatedAt   LocalTime
+	UpdatedAt   LocalTime
+	StartedAt   *LocalTime
+	CompletedAt *LocalTime
 }
 
 // Task statuses
 const (
-	StatusPending    = "pending"    // Created but not queued
-	StatusQueued     = "queued"     // Waiting to be processed
-	StatusProcessing = "processing" // Currently being worked on
-	StatusReady      = "ready"      // Completed successfully
-	StatusBlocked    = "blocked"    // Needs input/clarification
-	StatusClosed     = "closed"     // Done and closed
+	StatusPending     = "pending"     // Created but not queued
+	StatusQueued      = "queued"      // Waiting to be processed
+	StatusProcessing  = "processing"  // Currently being worked on
+	StatusReady       = "ready"       // Completed successfully
+	StatusBlocked     = "blocked"     // Needs input/clarification
+	StatusInterrupted = "interrupted" // Cancelled by user
+	StatusClosed      = "closed"      // Done and closed
 )
 
 // Task types
@@ -40,23 +39,12 @@ const (
 	TypeThinking = "thinking"
 )
 
-// Model options
-const (
-	ModelClaude = "claude"
-	ModelCrush  = "crush"
-	ModelCodex  = "codex"
-	ModelGemini = "gemini"
-)
-
 // CreateTask creates a new task.
 func (db *DB) CreateTask(t *Task) error {
-	if t.Model == "" {
-		t.Model = ModelClaude // default
-	}
 	result, err := db.Exec(`
-		INSERT INTO tasks (title, body, status, type, project, priority, model)
-		VALUES (?, ?, ?, ?, ?, ?, ?)
-	`, t.Title, t.Body, t.Status, t.Type, t.Project, t.Priority, t.Model)
+		INSERT INTO tasks (title, body, status, type, project, priority)
+		VALUES (?, ?, ?, ?, ?, ?)
+	`, t.Title, t.Body, t.Status, t.Type, t.Project, t.Priority)
 	if err != nil {
 		return fmt.Errorf("insert task: %w", err)
 	}
@@ -282,7 +270,7 @@ type TaskLog struct {
 	TaskID    int64
 	LineType  string // "output", "tool", "error", "system"
 	Content   string
-	CreatedAt time.Time
+	CreatedAt LocalTime
 }
 
 // AppendTaskLog appends a log entry to a task.
@@ -363,6 +351,25 @@ func (db *DB) ClearTaskLogs(taskID int64) error {
 	return nil
 }
 
+// GetLastQuestion retrieves the most recent question log for a task.
+func (db *DB) GetLastQuestion(taskID int64) (string, error) {
+	var content string
+	err := db.QueryRow(`
+		SELECT content
+		FROM task_logs
+		WHERE task_id = ? AND line_type = 'question'
+		ORDER BY id DESC
+		LIMIT 1
+	`, taskID).Scan(&content)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("query last question: %w", err)
+	}
+	return content, nil
+}
+
 // Project represents a configured project.
 type Project struct {
 	ID           int64
@@ -370,7 +377,7 @@ type Project struct {
 	Path         string
 	Aliases      string // comma-separated
 	Instructions string // project-specific instructions for AI
-	CreatedAt    time.Time
+	CreatedAt    LocalTime
 }
 
 // CreateProject creates a new project.
@@ -522,4 +529,136 @@ func (db *DB) GetAllSettings() (map[string]string, error) {
 		settings[key] = value
 	}
 	return settings, nil
+}
+
+// ProjectMemory represents a stored learning/context for a project.
+type ProjectMemory struct {
+	ID           int64
+	Project      string
+	Category     string // "pattern", "context", "decision", "gotcha", etc.
+	Content      string
+	SourceTaskID *int64 // Task that generated this memory (optional)
+	CreatedAt    LocalTime
+	UpdatedAt    LocalTime
+}
+
+// Memory categories
+const (
+	MemoryCategoryPattern  = "pattern"  // Code patterns, conventions
+	MemoryCategoryContext  = "context"  // Project-specific context
+	MemoryCategoryDecision = "decision" // Architectural decisions
+	MemoryCategoryGotcha   = "gotcha"   // Known pitfalls, workarounds
+	MemoryCategoryGeneral  = "general"  // General learnings
+)
+
+// CreateMemory creates a new project memory.
+func (db *DB) CreateMemory(m *ProjectMemory) error {
+	result, err := db.Exec(`
+		INSERT INTO project_memories (project, category, content, source_task_id)
+		VALUES (?, ?, ?, ?)
+	`, m.Project, m.Category, m.Content, m.SourceTaskID)
+	if err != nil {
+		return fmt.Errorf("insert memory: %w", err)
+	}
+	id, _ := result.LastInsertId()
+	m.ID = id
+	return nil
+}
+
+// UpdateMemory updates an existing memory.
+func (db *DB) UpdateMemory(m *ProjectMemory) error {
+	_, err := db.Exec(`
+		UPDATE project_memories 
+		SET content = ?, category = ?, updated_at = CURRENT_TIMESTAMP
+		WHERE id = ?
+	`, m.Content, m.Category, m.ID)
+	if err != nil {
+		return fmt.Errorf("update memory: %w", err)
+	}
+	return nil
+}
+
+// DeleteMemory deletes a memory by ID.
+func (db *DB) DeleteMemory(id int64) error {
+	_, err := db.Exec("DELETE FROM project_memories WHERE id = ?", id)
+	if err != nil {
+		return fmt.Errorf("delete memory: %w", err)
+	}
+	return nil
+}
+
+// GetMemory retrieves a memory by ID.
+func (db *DB) GetMemory(id int64) (*ProjectMemory, error) {
+	m := &ProjectMemory{}
+	err := db.QueryRow(`
+		SELECT id, project, category, content, source_task_id, created_at, updated_at
+		FROM project_memories WHERE id = ?
+	`, id).Scan(&m.ID, &m.Project, &m.Category, &m.Content, &m.SourceTaskID, &m.CreatedAt, &m.UpdatedAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("query memory: %w", err)
+	}
+	return m, nil
+}
+
+// ListMemoriesOptions defines options for listing memories.
+type ListMemoriesOptions struct {
+	Project  string
+	Category string
+	Limit    int
+}
+
+// ListMemories retrieves memories with optional filters.
+func (db *DB) ListMemories(opts ListMemoriesOptions) ([]*ProjectMemory, error) {
+	query := `
+		SELECT id, project, category, content, source_task_id, created_at, updated_at
+		FROM project_memories WHERE 1=1
+	`
+	args := []interface{}{}
+
+	if opts.Project != "" {
+		query += " AND project = ?"
+		args = append(args, opts.Project)
+	}
+	if opts.Category != "" {
+		query += " AND category = ?"
+		args = append(args, opts.Category)
+	}
+
+	query += " ORDER BY updated_at DESC"
+
+	if opts.Limit > 0 {
+		query += fmt.Sprintf(" LIMIT %d", opts.Limit)
+	} else {
+		query += " LIMIT 50"
+	}
+
+	rows, err := db.Query(query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("query memories: %w", err)
+	}
+	defer rows.Close()
+
+	var memories []*ProjectMemory
+	for rows.Next() {
+		m := &ProjectMemory{}
+		if err := rows.Scan(&m.ID, &m.Project, &m.Category, &m.Content, &m.SourceTaskID, &m.CreatedAt, &m.UpdatedAt); err != nil {
+			return nil, fmt.Errorf("scan memory: %w", err)
+		}
+		memories = append(memories, m)
+	}
+	return memories, nil
+}
+
+// GetProjectMemories retrieves all memories for a project (for use in prompts).
+func (db *DB) GetProjectMemories(project string, limit int) ([]*ProjectMemory, error) {
+	if limit <= 0 {
+		limit = 20
+	}
+	return db.ListMemories(ListMemoriesOptions{
+		Project: project,
+		Limit:   limit,
+	})
 }

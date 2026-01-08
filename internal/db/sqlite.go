@@ -3,12 +3,57 @@ package db
 
 import (
 	"database/sql"
+	"database/sql/driver"
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	_ "modernc.org/sqlite"
 )
+
+// LocalTime wraps time.Time and converts from UTC to local timezone when scanning.
+type LocalTime struct {
+	time.Time
+}
+
+// Scan implements sql.Scanner, converting scanned time to local timezone.
+func (lt *LocalTime) Scan(value interface{}) error {
+	if value == nil {
+		lt.Time = time.Time{}
+		return nil
+	}
+	switch v := value.(type) {
+	case time.Time:
+		lt.Time = v.Local()
+		return nil
+	case string:
+		// Parse common SQLite datetime formats
+		formats := []string{
+			"2006-01-02 15:04:05",
+			"2006-01-02T15:04:05Z",
+			"2006-01-02T15:04:05",
+			"2006-01-02",
+		}
+		for _, format := range formats {
+			if t, err := time.Parse(format, v); err == nil {
+				lt.Time = t.Local()
+				return nil
+			}
+		}
+		return fmt.Errorf("cannot parse time string: %s", v)
+	default:
+		return fmt.Errorf("cannot scan type %T into LocalTime", value)
+	}
+}
+
+// Value implements driver.Valuer for inserting LocalTime into database.
+func (lt LocalTime) Value() (driver.Value, error) {
+	if lt.Time.IsZero() {
+		return nil, nil
+	}
+	return lt.Time.UTC(), nil
+}
 
 // DB wraps the SQLite database connection.
 type DB struct {
@@ -91,6 +136,19 @@ func (db *DB) migrate() error {
 		`CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status)`,
 		`CREATE INDEX IF NOT EXISTS idx_tasks_project ON tasks(project)`,
 		`CREATE INDEX IF NOT EXISTS idx_task_logs_task_id ON task_logs(task_id)`,
+
+		`CREATE TABLE IF NOT EXISTS project_memories (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			project TEXT NOT NULL,
+			category TEXT NOT NULL DEFAULT 'general',
+			content TEXT NOT NULL,
+			source_task_id INTEGER REFERENCES tasks(id) ON DELETE SET NULL,
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+		)`,
+
+		`CREATE INDEX IF NOT EXISTS idx_project_memories_project ON project_memories(project)`,
+		`CREATE INDEX IF NOT EXISTS idx_project_memories_category ON project_memories(category)`,
 	}
 
 	for _, m := range migrations {
@@ -100,9 +158,7 @@ func (db *DB) migrate() error {
 	}
 
 	// Run ALTER TABLE migrations separately (they may fail if column already exists)
-	alterMigrations := []string{
-		`ALTER TABLE tasks ADD COLUMN model TEXT DEFAULT 'claude'`,
-	}
+	alterMigrations := []string{}
 
 	for _, m := range alterMigrations {
 		// Ignore "duplicate column" errors for idempotent migrations
