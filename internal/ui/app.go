@@ -635,6 +635,22 @@ func (m *AppModel) updateRetry(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
+func (m *AppModel) updateMemories(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if key.Matches(msg, m.keys.Back) {
+		m.currentView = ViewDashboard
+		m.memoriesView = nil
+		return m, nil
+	}
+
+	if m.memoriesView != nil {
+		var cmd tea.Cmd
+		m.memoriesView, cmd = m.memoriesView.Update(msg)
+		return m, cmd
+	}
+
+	return m, nil
+}
+
 // Messages
 type tasksLoadedMsg struct {
 	tasks []*db.Task

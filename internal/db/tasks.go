@@ -80,12 +80,13 @@ func (db *DB) GetTask(id int64) (*Task, error) {
 
 // ListTasksOptions defines options for listing tasks.
 type ListTasksOptions struct {
-	Status   string
-	Type     string
-	Project  string
-	Priority string
-	Limit    int
-	Offset   int
+	Status        string
+	Type          string
+	Project       string
+	Priority      string
+	Limit         int
+	Offset        int
+	IncludeClosed bool // Include closed tasks even when Status is empty
 }
 
 // ListTasks retrieves tasks with optional filters.
@@ -114,8 +115,8 @@ func (db *DB) ListTasks(opts ListTasksOptions) ([]*Task, error) {
 		args = append(args, opts.Priority)
 	}
 
-	// Exclude closed by default unless specifically querying for them
-	if opts.Status == "" {
+	// Exclude closed by default unless specifically querying for them or includeClosed is set
+	if opts.Status == "" && !opts.IncludeClosed {
 		query += " AND status != 'closed'"
 	}
 
