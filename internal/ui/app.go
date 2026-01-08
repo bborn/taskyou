@@ -479,6 +479,8 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if !m.notifyUntil.IsZero() && time.Now().After(m.notifyUntil) {
 			m.notification = ""
 		}
+		// Poll database for task changes (daemon runs in separate process)
+		cmds = append(cmds, m.pollTaskChanges())
 		cmds = append(cmds, m.tick())
 	}
 
@@ -1292,6 +1294,18 @@ func (m *AppModel) tick() tea.Cmd {
 	return tea.Tick(1*time.Second, func(t time.Time) tea.Msg {
 		return tickMsg(t)
 	})
+}
+
+// pollTaskChanges checks for task changes from the daemon (separate process).
+func (m *AppModel) pollTaskChanges() tea.Cmd {
+	database := m.db
+	return func() tea.Msg {
+		tasks, err := database.ListTasks(db.ListTasksOptions{Limit: 50, IncludeClosed: true})
+		if err != nil {
+			return nil
+		}
+		return tasksLoadedMsg{tasks: tasks, err: nil}
+	}
 }
 
 // updateInterruptKey enables or disables the interrupt key based on whether any task is executing.
