@@ -286,6 +286,8 @@ func NewAppModel(database *db.DB, exec *executor.Executor, workingDir string) *A
 func (m *AppModel) Init() tea.Cmd {
 	// Subscribe to real-time task events
 	m.eventCh = m.executor.SubscribeTaskEvents()
+	// Initialize interrupt key state (disabled until we know tasks are executing)
+	m.keys.Interrupt.SetEnabled(len(m.executor.RunningTasks()) > 0)
 	return tea.Batch(m.loadTasks(), m.waitForTaskEvent(), m.tick())
 }
 
@@ -349,6 +351,9 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.loading = false
 		m.tasks = msg.tasks
 		m.err = msg.err
+
+		// Update interrupt key state based on whether any task is executing
+		m.updateInterruptKey()
 
 		// Check for newly blocked/done tasks and notify
 		for _, t := range m.tasks {
@@ -433,6 +438,9 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 			m.kanban.SetTasks(m.tasks)
+			
+			// Update interrupt key state based on whether any task is executing
+			m.updateInterruptKey()
 			
 			// Update detail view if showing this task
 			if m.selectedTask != nil && m.selectedTask.ID == event.TaskID {
@@ -1132,4 +1140,19 @@ func (m *AppModel) tick() tea.Cmd {
 	return tea.Tick(1*time.Second, func(t time.Time) tea.Msg {
 		return tickMsg(t)
 	})
+}
+
+// updateInterruptKey enables or disables the interrupt key based on whether any task is executing.
+func (m *AppModel) updateInterruptKey() {
+	hasExecuting := len(m.executor.RunningTasks()) > 0
+	if !hasExecuting {
+		// Also check if any task in the list is in progress status
+		for _, t := range m.tasks {
+			if db.IsInProgress(t.Status) {
+				hasExecuting = true
+				break
+			}
+		}
+	}
+	m.keys.Interrupt.SetEnabled(hasExecuting)
 }
