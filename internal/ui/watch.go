@@ -177,7 +177,7 @@ func (m *WatchModel) View() string {
 	box := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(ColorPrimary).
-		Width(m.width - 2).
+		Width(m.width-2).
 		Padding(0, 1)
 
 	return lipgloss.JoinVertical(lipgloss.Left,
@@ -208,6 +208,9 @@ func (m *WatchModel) renderHelp() string {
 }
 
 func (m *WatchModel) updateViewport() {
+	// Check if user is at bottom before updating content
+	wasAtBottom := m.viewport.AtBottom()
+
 	var b strings.Builder
 	for _, log := range m.logs {
 		icon := "  "
@@ -240,7 +243,11 @@ func (m *WatchModel) updateViewport() {
 		b.WriteString("\n")
 	}
 	m.viewport.SetContent(b.String())
-	m.viewport.GotoBottom()
+
+	// Only auto-scroll if user was already at the bottom
+	if wasAtBottom {
+		m.viewport.GotoBottom()
+	}
 }
 
 // Messages
