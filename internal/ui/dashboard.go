@@ -78,6 +78,8 @@ func (d TaskDelegate) Render(w io.Writer, m list.Model, index int, item list.Ite
 		b.WriteString(lipgloss.NewStyle().Foreground(ColorBlocked).Render("!"))
 	case db.StatusInterrupted:
 		b.WriteString(lipgloss.NewStyle().Foreground(ColorWarning).Render("⊘"))
+	case db.StatusClosed:
+		b.WriteString(lipgloss.NewStyle().Foreground(ColorMuted).Render("×"))
 	default:
 		b.WriteString(lipgloss.NewStyle().Foreground(ColorMuted).Render("·"))
 	}

@@ -406,6 +406,7 @@ func (m *AppModel) renderHelp() string {
 		{"c", "close"},
 		{"w", "watch"},
 		{"i", "interrupt"},
+		{"a", "all"},
 		{"s", "settings"},
 		{"q", "quit"},
 	}
