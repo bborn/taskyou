@@ -2,6 +2,7 @@ package ui
 
 import (
 	"fmt"
+	"os/exec"
 	"time"
 
 	"github.com/bborn/workflow/internal/db"
@@ -40,6 +41,7 @@ type KeyMap struct {
 	Close        key.Binding
 	Delete       key.Binding
 	Watch        key.Binding
+	Attach       key.Binding
 	Interrupt    key.Binding
 	Filter       key.Binding
 	Refresh      key.Binding
@@ -59,7 +61,7 @@ func (k KeyMap) FullHelp() [][]key.Binding {
 	return [][]key.Binding{
 		{k.Left, k.Right, k.Up, k.Down},
 		{k.Enter, k.New, k.Queue, k.Close},
-		{k.Retry, k.Watch, k.Interrupt, k.Delete},
+		{k.Retry, k.Watch, k.Attach, k.Interrupt, k.Delete},
 		{k.Filter, k.Settings, k.Memories},
 		{k.Refresh, k.Help, k.Quit},
 	}
@@ -115,6 +117,10 @@ func DefaultKeyMap() KeyMap {
 		Watch: key.NewBinding(
 			key.WithKeys("w"),
 			key.WithHelp("w", "watch"),
+		),
+		Attach: key.NewBinding(
+			key.WithKeys("a"),
+			key.WithHelp("a", "attach"),
 		),
 		Interrupt: key.NewBinding(
 			key.WithKeys("i"),
@@ -364,6 +370,10 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case taskQueuedMsg, taskClosedMsg, taskDeletedMsg, taskRetriedMsg, taskInterruptedMsg:
+		cmds = append(cmds, m.loadTasks())
+
+	case attachDoneMsg:
+		// Returned from tmux attach - refresh tasks
 		cmds = append(cmds, m.loadTasks())
 
 	case taskEventMsg:
@@ -646,6 +656,18 @@ func (m *AppModel) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 		}
 
+	case key.Matches(msg, m.keys.Attach):
+		// Attach to tmux session for selected task
+		if task := m.kanban.SelectedTask(); task != nil {
+			if db.IsInProgress(task.Status) {
+				sessionName := executor.TmuxSessionName(task.ID)
+				return m, tea.ExecProcess(
+					exec.Command("tmux", "attach-session", "-t", sessionName),
+					func(err error) tea.Msg { return attachDoneMsg{err: err} },
+				)
+			}
+		}
+
 	case key.Matches(msg, m.keys.Interrupt):
 		// Interrupt the selected task if it's in progress
 		if task := m.kanban.SelectedTask(); task != nil {
@@ -888,6 +910,10 @@ type taskInterruptedMsg struct {
 
 type taskEventMsg struct {
 	event executor.TaskEvent
+}
+
+type attachDoneMsg struct {
+	err error
 }
 
 type tickMsg time.Time

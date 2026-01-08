@@ -167,10 +167,10 @@ func (db *DB) migrate() error {
 		db.Exec(m)
 	}
 
-	// Migrate old status values to new simplified statuses
+	// Migrate old status values to new statuses
 	statusMigrations := []string{
 		`UPDATE tasks SET status = 'backlog' WHERE status IN ('pending', 'interrupted')`,
-		`UPDATE tasks SET status = 'in_progress' WHERE status IN ('queued', 'triaging', 'processing')`,
+		`UPDATE tasks SET status = 'queued' WHERE status = 'in_progress'`,
 		`UPDATE tasks SET status = 'done' WHERE status IN ('ready', 'closed')`,
 	}
 

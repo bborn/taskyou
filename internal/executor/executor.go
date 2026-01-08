@@ -522,12 +522,119 @@ type execResult struct {
 	Message     string
 }
 
-// runCrush runs a task using Crush CLI
+// TmuxSessionName returns the tmux session name for a task.
+func TmuxSessionName(taskID int64) string {
+	return fmt.Sprintf("task-%d", taskID)
+}
+
+// runCrush runs a task using Crush CLI in a tmux session for easy attachment
 func (e *Executor) runCrush(ctx context.Context, taskID int64, workDir, prompt string) execResult {
+	sessionName := TmuxSessionName(taskID)
+
+	// Check if tmux is available
+	if _, err := exec.LookPath("tmux"); err != nil {
+		// Fall back to direct execution
+		return e.runCrushDirect(ctx, taskID, workDir, prompt)
+	}
+
+	// Kill any existing session with this name
+	exec.Command("tmux", "kill-session", "-t", sessionName).Run()
+
+	// Create a script that runs crush and signals completion
+	script := fmt.Sprintf(`crush run -c %q -q %q; echo ":::TASK_EXIT_CODE:$?"`, workDir, prompt)
+
+	// Start tmux session
+	tmuxCmd := exec.Command("tmux", "new-session", "-d", "-s", sessionName, "-c", workDir, "sh", "-c", script)
+	if err := tmuxCmd.Run(); err != nil {
+		e.logger.Warn("tmux failed, falling back to direct", "error", err)
+		return e.runCrushDirect(ctx, taskID, workDir, prompt)
+	}
+
+	e.logLine(taskID, "system", fmt.Sprintf("Running in tmux session '%s' - press 'a' to attach", sessionName))
+
+	// Poll for output and completion
+	return e.pollTmuxSession(ctx, taskID, sessionName)
+}
+
+// pollTmuxSession monitors a tmux session for completion
+func (e *Executor) pollTmuxSession(ctx context.Context, taskID int64, sessionName string) execResult {
+	var allOutput strings.Builder
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+
+	lastLineCount := 0
+
+	for {
+		select {
+		case <-ctx.Done():
+			exec.Command("tmux", "kill-session", "-t", sessionName).Run()
+			return execResult{Interrupted: true}
+
+		case <-ticker.C:
+			// Check if session still exists
+			if err := exec.Command("tmux", "has-session", "-t", sessionName).Run(); err != nil {
+				// Session ended
+				output := allOutput.String()
+				return e.parseOutputMarkers(output)
+			}
+
+			// Capture pane content
+			captureCmd := exec.Command("tmux", "capture-pane", "-t", sessionName, "-p", "-S", "-1000")
+			output, err := captureCmd.Output()
+			if err != nil {
+				continue
+			}
+
+			lines := strings.Split(string(output), "\n")
+			// Log new lines
+			if len(lines) > lastLineCount {
+				for i := lastLineCount; i < len(lines); i++ {
+					line := strings.TrimSpace(lines[i])
+					if line != "" && !strings.HasPrefix(line, ":::TASK_EXIT") {
+						e.logLine(taskID, "output", line)
+						allOutput.WriteString(line + "\n")
+					}
+				}
+				lastLineCount = len(lines)
+			}
+
+			// Check for completion marker
+			if strings.Contains(string(output), ":::TASK_EXIT_CODE:") {
+				exec.Command("tmux", "kill-session", "-t", sessionName).Run()
+				return e.parseOutputMarkers(allOutput.String())
+			}
+
+			// Check for DB-based interrupt
+			task, err := e.db.GetTask(taskID)
+			if err == nil && task != nil && task.Status == db.StatusBacklog {
+				exec.Command("tmux", "kill-session", "-t", sessionName).Run()
+				return execResult{Interrupted: true}
+			}
+		}
+	}
+}
+
+// parseOutputMarkers checks output for completion markers
+func (e *Executor) parseOutputMarkers(output string) execResult {
+	if strings.Contains(output, "TASK_COMPLETE") {
+		return execResult{Success: true}
+	}
+	if idx := strings.Index(output, "NEEDS_INPUT:"); idx >= 0 {
+		rest := output[idx+len("NEEDS_INPUT:"):]
+		if newline := strings.Index(rest, "\n"); newline >= 0 {
+			rest = rest[:newline]
+		}
+		return execResult{NeedsInput: true, Message: strings.TrimSpace(rest)}
+	}
+	return execResult{Success: true}
+}
+
+// runCrushDirect runs crush directly without tmux (fallback)
+func (e *Executor) runCrushDirect(ctx context.Context, taskID int64, workDir, prompt string) execResult {
 	args := []string{
 		"run",
 		"-c", workDir,
-		"-q", // quiet mode (hide spinner)
+		"-q",
 		prompt,
 	}
 
