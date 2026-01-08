@@ -385,7 +385,7 @@ func TestProjectInstructionsInPrompt(t *testing.T) {
 		Type:    "code",
 	}
 
-	prompt := exec.buildPrompt(task)
+	prompt := exec.buildPrompt(task, nil)
 
 	// Should include project instructions
 	if !strings.Contains(prompt, "Project Instructions") {

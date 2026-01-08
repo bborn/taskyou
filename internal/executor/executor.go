@@ -362,8 +362,12 @@ func (e *Executor) executeTask(ctx context.Context, task *db.Task) {
 		}
 	}
 
+	// Prepare attachments (write to temp files)
+	attachmentPaths, cleanupAttachments := e.prepareAttachments(task.ID)
+	defer cleanupAttachments()
+
 	// Build prompt based on task type
-	prompt := e.buildPrompt(task)
+	prompt := e.buildPrompt(task, attachmentPaths)
 
 	// Run Crush
 	result := e.runCrush(taskCtx, task.ID, workDir, prompt)
@@ -420,7 +424,54 @@ func (e *Executor) getProjectInstructions(project string) string {
 	return p.Instructions
 }
 
-func (e *Executor) buildPrompt(task *db.Task) string {
+// prepareAttachments writes task attachments to temp files and returns paths.
+// Returns a list of file paths and a cleanup function.
+func (e *Executor) prepareAttachments(taskID int64) ([]string, func()) {
+	attachments, err := e.db.ListAttachmentsWithData(taskID)
+	if err != nil || len(attachments) == 0 {
+		return nil, func() {}
+	}
+
+	var paths []string
+	tempDir, err := os.MkdirTemp("", fmt.Sprintf("task-%d-attachments-", taskID))
+	if err != nil {
+		e.logger.Error("Failed to create temp dir for attachments", "error", err)
+		return nil, func() {}
+	}
+
+	for _, a := range attachments {
+		path := filepath.Join(tempDir, a.Filename)
+		if err := os.WriteFile(path, a.Data, 0644); err != nil {
+			e.logger.Error("Failed to write attachment", "file", a.Filename, "error", err)
+			continue
+		}
+		paths = append(paths, path)
+	}
+
+	cleanup := func() {
+		os.RemoveAll(tempDir)
+	}
+
+	return paths, cleanup
+}
+
+// getAttachmentsSection returns a prompt section describing attachments.
+func (e *Executor) getAttachmentsSection(taskID int64, paths []string) string {
+	if len(paths) == 0 {
+		return ""
+	}
+
+	var section strings.Builder
+	section.WriteString("\n## Attachments\n\n")
+	section.WriteString("The following files are attached to this task:\n")
+	for _, p := range paths {
+		section.WriteString(fmt.Sprintf("- %s\n", p))
+	}
+	section.WriteString("\nYou can view these files using the View tool.\n\n")
+	return section.String()
+}
+
+func (e *Executor) buildPrompt(task *db.Task, attachmentPaths []string) string {
 	var prompt strings.Builder
 
 	// Add project memories if available
@@ -431,6 +482,9 @@ func (e *Executor) buildPrompt(task *db.Task) string {
 
 	// Check for conversation history (from previous runs/retries)
 	conversationHistory := e.getConversationHistory(task.ID)
+
+	// Get attachments section
+	attachments := e.getAttachmentsSection(task.ID, attachmentPaths)
 
 	switch task.Type {
 	case db.TypeCode:
@@ -444,6 +498,9 @@ func (e *Executor) buildPrompt(task *db.Task) string {
 		prompt.WriteString(fmt.Sprintf("Task: %s\n\n", task.Title))
 		if task.Body != "" {
 			prompt.WriteString(fmt.Sprintf("%s\n\n", task.Body))
+		}
+		if attachments != "" {
+			prompt.WriteString(attachments)
 		}
 		if conversationHistory != "" {
 			prompt.WriteString(conversationHistory)
@@ -476,6 +533,9 @@ If you need input from me: output NEEDS_INPUT: followed by your question`)
 		if task.Body != "" {
 			prompt.WriteString(fmt.Sprintf("Details: %s\n\n", task.Body))
 		}
+		if attachments != "" {
+			prompt.WriteString(attachments)
+		}
 		if conversationHistory != "" {
 			prompt.WriteString(conversationHistory)
 		}
@@ -494,6 +554,9 @@ If you need input from me: output NEEDS_INPUT: followed by your question`)
 		prompt.WriteString(fmt.Sprintf("Question: %s\n\n", task.Title))
 		if task.Body != "" {
 			prompt.WriteString(fmt.Sprintf("Context: %s\n\n", task.Body))
+		}
+		if attachments != "" {
+			prompt.WriteString(attachments)
 		}
 		if conversationHistory != "" {
 			prompt.WriteString(conversationHistory)
@@ -518,6 +581,9 @@ When finished, output: TASK_COMPLETE`)
 		prompt.WriteString(fmt.Sprintf("Task: %s\n\n", task.Title))
 		if task.Body != "" {
 			prompt.WriteString(fmt.Sprintf("%s\n\n", task.Body))
+		}
+		if attachments != "" {
+			prompt.WriteString(attachments)
 		}
 		if conversationHistory != "" {
 			prompt.WriteString(conversationHistory)

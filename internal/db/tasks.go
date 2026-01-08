@@ -781,3 +781,26 @@ func (db *DB) CountAttachments(taskID int64) (int, error) {
 	err := db.QueryRow("SELECT COUNT(*) FROM task_attachments WHERE task_id = ?", taskID).Scan(&count)
 	return count, err
 }
+
+// ListAttachmentsWithData retrieves all attachments for a task including data.
+func (db *DB) ListAttachmentsWithData(taskID int64) ([]*Attachment, error) {
+	rows, err := db.Query(`
+		SELECT id, task_id, filename, mime_type, size, data, created_at
+		FROM task_attachments WHERE task_id = ?
+		ORDER BY created_at ASC
+	`, taskID)
+	if err != nil {
+		return nil, fmt.Errorf("list attachments with data: %w", err)
+	}
+	defer rows.Close()
+
+	var attachments []*Attachment
+	for rows.Next() {
+		a := &Attachment{}
+		if err := rows.Scan(&a.ID, &a.TaskID, &a.Filename, &a.MimeType, &a.Size, &a.Data, &a.CreatedAt); err != nil {
+			return nil, fmt.Errorf("scan attachment: %w", err)
+		}
+		attachments = append(attachments, a)
+	}
+	return attachments, nil
+}

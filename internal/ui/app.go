@@ -13,6 +13,7 @@ import (
 	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/huh"
 	"github.com/charmbracelet/lipgloss"
 )
 
@@ -23,6 +24,7 @@ const (
 	ViewDashboard View = iota
 	ViewDetail
 	ViewNewTask
+	ViewNewTaskConfirm
 	ViewWatch
 	ViewSettings
 	ViewRetry
@@ -227,7 +229,11 @@ type AppModel struct {
 	detailView   *DetailModel
 
 	// New task form state
-	newTaskForm *FormModel
+	newTaskForm       *FormModel
+	pendingTask       *db.Task
+	pendingAttachment string
+	queueConfirm      *huh.Form
+	queueValue        bool
 
 	// Watch view state
 	watchView *WatchModel
@@ -308,6 +314,9 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// Handle form updates first (needs all message types)
 	if m.currentView == ViewNewTask && m.newTaskForm != nil {
 		return m.updateNewTaskForm(msg)
+	}
+	if m.currentView == ViewNewTaskConfirm && m.queueConfirm != nil {
+		return m.updateNewTaskConfirm(msg)
 	}
 	if m.currentView == ViewSettings && m.settingsView != nil {
 		return m.updateSettings(msg)
@@ -502,6 +511,8 @@ func (m *AppModel) View() string {
 		if m.newTaskForm != nil {
 			return m.newTaskForm.View()
 		}
+	case ViewNewTaskConfirm:
+		return m.viewNewTaskConfirm()
 	case ViewWatch:
 		if m.watchView != nil {
 			return m.watchView.View()
@@ -525,6 +536,28 @@ func (m *AppModel) View() string {
 	}
 
 	return ""
+}
+
+func (m *AppModel) viewNewTaskConfirm() string {
+	if m.queueConfirm == nil {
+		return ""
+	}
+
+	header := lipgloss.NewStyle().
+		Bold(true).
+		Foreground(ColorPrimary).
+		MarginBottom(1).
+		Render("New Task")
+
+	formView := m.queueConfirm.View()
+
+	box := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(ColorPrimary).
+		Padding(1, 2).
+		Width(m.width - 4)
+
+	return box.Render(lipgloss.JoinVertical(lipgloss.Left, header, formView))
 }
 
 func (m *AppModel) viewDashboard() string {
@@ -869,12 +902,25 @@ func (m *AppModel) updateNewTaskForm(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if form, ok := model.(*FormModel); ok {
 		m.newTaskForm = form
 		if form.submitted {
-			// Capture task and attachment path, nil out form immediately
-			task := form.GetDBTask()
-			attachmentPath := form.GetAttachment()
-			m.newTaskForm = nil
-			m.currentView = ViewDashboard
-			return m, m.createTaskWithAttachment(task, attachmentPath)
+			// Store pending task and create confirmation form
+			m.pendingTask = form.GetDBTask()
+			m.pendingAttachment = form.GetAttachment()
+			m.queueValue = false
+			m.queueConfirm = huh.NewForm(
+				huh.NewGroup(
+					huh.NewConfirm().
+						Key("queue").
+						Title("Queue for execution?").
+						Description("Start processing immediately").
+						Affirmative("Yes").
+						Negative("No").
+						Value(&m.queueValue),
+				),
+			).WithTheme(huh.ThemeDracula()).
+				WithWidth(m.width - 4).
+				WithShowHelp(true)
+			m.currentView = ViewNewTaskConfirm
+			return m, m.queueConfirm.Init()
 		}
 		if form.cancelled {
 			m.currentView = ViewDashboard
@@ -882,6 +928,44 @@ func (m *AppModel) updateNewTaskForm(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 	}
+	return m, cmd
+}
+
+func (m *AppModel) updateNewTaskConfirm(msg tea.Msg) (tea.Model, tea.Cmd) {
+	// Handle escape to go back
+	if keyMsg, ok := msg.(tea.KeyMsg); ok {
+		if keyMsg.String() == "esc" {
+			m.currentView = ViewNewTask
+			m.queueConfirm = nil
+			return m, nil
+		}
+	}
+
+	// Update the huh form
+	form, cmd := m.queueConfirm.Update(msg)
+	if f, ok := form.(*huh.Form); ok {
+		m.queueConfirm = f
+	}
+
+	// Check if form completed
+	if m.queueConfirm.State == huh.StateCompleted {
+		if m.pendingTask != nil {
+			if m.queueValue {
+				m.pendingTask.Status = db.StatusQueued
+			} else {
+				m.pendingTask.Status = db.StatusBacklog
+			}
+			task := m.pendingTask
+			attachment := m.pendingAttachment
+			m.pendingTask = nil
+			m.pendingAttachment = ""
+			m.newTaskForm = nil
+			m.queueConfirm = nil
+			m.currentView = ViewDashboard
+			return m, m.createTaskWithAttachment(task, attachment)
+		}
+	}
+
 	return m, cmd
 }
 

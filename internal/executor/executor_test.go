@@ -221,7 +221,7 @@ func TestConversationHistory(t *testing.T) {
 	}
 
 	t.Run("no history for fresh task", func(t *testing.T) {
-		prompt := exec.buildPrompt(task)
+		prompt := exec.buildPrompt(task, nil)
 		if strings.Contains(prompt, "Previous Conversation") {
 			t.Error("fresh task should not have conversation history")
 		}
@@ -237,7 +237,7 @@ func TestConversationHistory(t *testing.T) {
 		// Simulate retry with feedback
 		database.RetryTask(task.ID, "Use 'myapp_production' as the database name")
 
-		prompt := exec.buildPrompt(task)
+		prompt := exec.buildPrompt(task, nil)
 
 		if !strings.Contains(prompt, "Previous Conversation") {
 			t.Error("retry should include conversation history")
@@ -264,7 +264,7 @@ func TestConversationHistory(t *testing.T) {
 		database.AppendTaskLog(task.ID, "system", "--- Continuation ---")
 		database.AppendTaskLog(task.ID, "text", "Feedback: Second answer")
 
-		prompt := exec.buildPrompt(task)
+		prompt := exec.buildPrompt(task, nil)
 
 		if !strings.Contains(prompt, "First question?") {
 			t.Error("should include first question")
