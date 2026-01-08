@@ -78,7 +78,7 @@ func (e *Executor) taskIsWellDefined(task *db.Task) bool {
 func (e *Executor) buildTriagePrompt(task *db.Task) string {
 	var sb strings.Builder
 
-	sb.WriteString("You are a task triage assistant. Analyze this task and provide classification and enhancement.\n\n")
+	sb.WriteString("Help me categorize and enhance this task.\n\n")
 
 	// Add available projects context
 	projects, _ := e.db.ListProjects()
@@ -119,6 +119,15 @@ func (e *Executor) buildTriagePrompt(task *db.Task) string {
 		sb.WriteString(fmt.Sprintf("**Current Priority:** %s\n", task.Priority))
 	}
 
+	// Add attachment info
+	attachments, _ := e.db.ListAttachments(task.ID)
+	if len(attachments) > 0 {
+		sb.WriteString("\n**Attachments:**\n")
+		for _, a := range attachments {
+			sb.WriteString(fmt.Sprintf("- %s (%s, %d bytes)\n", a.Filename, a.MimeType, a.Size))
+		}
+	}
+
 	sb.WriteString("\n## Instructions\n\n")
 	sb.WriteString(`Analyze the task and respond with a JSON object containing your decisions:
 
@@ -139,7 +148,8 @@ Rules:
 3. If the task is clearly code/writing/thinking, set type
 4. If the description is vague (< 50 chars, no clear deliverable), enhance it
 5. If you can't determine key info, set needs_more_info=true with a specific question
-6. Check project instructions for any orchestration/processing requirements
+6. If the task has attachments, assume they provide the needed context - don't ask for more info unless truly necessary
+7. Check project instructions for any orchestration/processing requirements
 
 Respond with ONLY the JSON object, no other text.`)
 
