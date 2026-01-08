@@ -24,6 +24,7 @@ type Task struct {
 // Task statuses
 const (
 	StatusPending     = "pending"     // Created but not queued
+	StatusTriaging    = "triaging"    // Being preprocessed by Claude
 	StatusQueued      = "queued"      // Waiting to be processed
 	StatusProcessing  = "processing"  // Currently being worked on
 	StatusReady       = "ready"       // Completed successfully

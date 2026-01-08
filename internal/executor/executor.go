@@ -244,6 +244,23 @@ func (e *Executor) executeTask(ctx context.Context, task *db.Task) {
 
 	e.logger.Info("Processing task", "id", task.ID, "title", task.Title)
 
+	// Run triage if needed
+	if NeedsTriage(task) {
+		triageResult, err := e.TriageTask(taskCtx, task)
+		if err != nil {
+			e.logger.Error("Triage failed", "error", err)
+			// Continue with execution anyway
+		}
+
+		// If triage determined we need more info, block the task
+		if triageResult != nil && triageResult.NeedsMoreInfo {
+			e.db.UpdateTaskStatus(task.ID, db.StatusBlocked)
+			e.logLine(task.ID, "system", "Task blocked - needs more information")
+			e.hooks.OnStatusChange(task, db.StatusBlocked, triageResult.Question)
+			return
+		}
+	}
+
 	// Update status to processing
 	if err := e.db.UpdateTaskStatus(task.ID, db.StatusProcessing); err != nil {
 		e.logger.Error("Failed to update status", "error", err)
@@ -292,11 +309,26 @@ func (e *Executor) getProjectDir(project string) string {
 	return e.config.GetProjectDir(project)
 }
 
+// getProjectInstructions returns the custom instructions for a project.
+func (e *Executor) getProjectInstructions(project string) string {
+	if project == "" {
+		return ""
+	}
+	p, err := e.db.GetProjectByName(project)
+	if err != nil || p == nil {
+		return ""
+	}
+	return p.Instructions
+}
+
 func (e *Executor) buildPrompt(task *db.Task) string {
 	var prompt strings.Builder
 
 	// Add project memories if available
 	memories := e.getProjectMemoriesSection(task.Project)
+
+	// Get project-specific instructions
+	projectInstructions := e.getProjectInstructions(task.Project)
 
 	// Check for conversation history (from previous runs/retries)
 	conversationHistory := e.getConversationHistory(task.ID)
@@ -304,6 +336,9 @@ func (e *Executor) buildPrompt(task *db.Task) string {
 	switch task.Type {
 	case db.TypeCode:
 		prompt.WriteString(fmt.Sprintf("You are working on: %s\n\n", task.Project))
+		if projectInstructions != "" {
+			prompt.WriteString(fmt.Sprintf("## Project Instructions\n\n%s\n\n", projectInstructions))
+		}
 		if memories != "" {
 			prompt.WriteString(memories)
 		}
@@ -325,6 +360,9 @@ If you need input from me: output NEEDS_INPUT: followed by your question`)
 
 	case db.TypeWriting:
 		prompt.WriteString("You are a skilled writer. Please complete this task:\n\n")
+		if projectInstructions != "" {
+			prompt.WriteString(fmt.Sprintf("## Project Instructions\n\n%s\n\n", projectInstructions))
+		}
 		if memories != "" {
 			prompt.WriteString(memories)
 		}
@@ -341,6 +379,9 @@ If you need input from me: output NEEDS_INPUT: followed by your question`)
 
 	case db.TypeThinking:
 		prompt.WriteString("You are a strategic advisor. Analyze this thoroughly:\n\n")
+		if projectInstructions != "" {
+			prompt.WriteString(fmt.Sprintf("## Project Instructions\n\n%s\n\n", projectInstructions))
+		}
 		if memories != "" {
 			prompt.WriteString(memories)
 		}
@@ -362,6 +403,9 @@ When finished, output: TASK_COMPLETE`)
 
 	default:
 		// Generic task
+		if projectInstructions != "" {
+			prompt.WriteString(fmt.Sprintf("## Project Instructions\n\n%s\n\n", projectInstructions))
+		}
 		if memories != "" {
 			prompt.WriteString(memories)
 		}

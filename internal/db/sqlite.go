@@ -158,7 +158,9 @@ func (db *DB) migrate() error {
 	}
 
 	// Run ALTER TABLE migrations separately (they may fail if column already exists)
-	alterMigrations := []string{}
+	alterMigrations := []string{
+		`ALTER TABLE projects ADD COLUMN instructions TEXT DEFAULT ''`,
+	}
 
 	for _, m := range alterMigrations {
 		// Ignore "duplicate column" errors for idempotent migrations
