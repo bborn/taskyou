@@ -603,9 +603,9 @@ func (m *AppModel) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 
 	case key.Matches(msg, m.keys.Watch):
-		// Watch the selected task if it's processing
+		// Watch the selected task if it's in progress
 		if task := m.kanban.SelectedTask(); task != nil {
-			if m.executor.IsRunning(task.ID) {
+			if task.Status == db.StatusInProgress || m.executor.IsRunning(task.ID) {
 				m.watchView = NewWatchModel(m.db, m.executor, task.ID, m.width, m.height)
 				m.previousView = m.currentView
 				m.currentView = ViewWatch
@@ -614,9 +614,9 @@ func (m *AppModel) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 
 	case key.Matches(msg, m.keys.Interrupt):
-		// Interrupt the selected task if it's processing
+		// Interrupt the selected task if it's in progress
 		if task := m.kanban.SelectedTask(); task != nil {
-			if m.executor.IsRunning(task.ID) {
+			if task.Status == db.StatusInProgress || m.executor.IsRunning(task.ID) {
 				return m, m.interruptTask(task.ID)
 			}
 		}

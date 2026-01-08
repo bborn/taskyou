@@ -14,7 +14,7 @@ var (
 	ColorMuted     = lipgloss.Color("#6B7280") // Gray
 
 	// Status colors
-	ColorInProgress = lipgloss.Color("#FCD34D") // Yellow
+	ColorInProgress = lipgloss.Color("#9C9265") // Muted olive
 	ColorDone       = lipgloss.Color("#10B981") // Green
 	ColorBlocked    = lipgloss.Color("#EF4444") // Red
 
