@@ -102,7 +102,7 @@ func (db *DB) migrate() error {
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			title TEXT NOT NULL,
 			body TEXT DEFAULT '',
-			status TEXT DEFAULT 'pending',
+			status TEXT DEFAULT 'backlog',
 			type TEXT DEFAULT '',
 			project TEXT DEFAULT '',
 			priority TEXT DEFAULT 'normal',
@@ -164,6 +164,17 @@ func (db *DB) migrate() error {
 
 	for _, m := range alterMigrations {
 		// Ignore "duplicate column" errors for idempotent migrations
+		db.Exec(m)
+	}
+
+	// Migrate old status values to new simplified statuses
+	statusMigrations := []string{
+		`UPDATE tasks SET status = 'backlog' WHERE status IN ('pending', 'interrupted')`,
+		`UPDATE tasks SET status = 'in_progress' WHERE status IN ('queued', 'triaging', 'processing')`,
+		`UPDATE tasks SET status = 'done' WHERE status IN ('ready', 'closed')`,
+	}
+
+	for _, m := range statusMigrations {
 		db.Exec(m)
 	}
 

@@ -162,9 +162,9 @@ func (m *FormModel) View() string {
 
 // GetDBTask returns a db.Task from the form values.
 func (m *FormModel) GetDBTask() *db.Task {
-	status := db.StatusPending
+	status := db.StatusBacklog
 	if m.queue {
-		status = db.StatusQueued
+		status = db.StatusInProgress
 	}
 
 	return &db.Task{

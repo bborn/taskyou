@@ -23,14 +23,10 @@ type Task struct {
 
 // Task statuses
 const (
-	StatusPending     = "pending"     // Created but not queued
-	StatusTriaging    = "triaging"    // Being preprocessed by Claude
-	StatusQueued      = "queued"      // Waiting to be processed
-	StatusProcessing  = "processing"  // Currently being worked on
-	StatusReady       = "ready"       // Completed successfully
-	StatusBlocked     = "blocked"     // Needs input/clarification
-	StatusInterrupted = "interrupted" // Cancelled by user
-	StatusClosed      = "closed"      // Done and closed
+	StatusBacklog    = "backlog"     // Created but not yet started
+	StatusInProgress = "in_progress" // Being worked on (queued, triaging, or processing)
+	StatusBlocked    = "blocked"     // Needs input/clarification
+	StatusDone       = "done"        // Completed
 )
 
 // Task types
@@ -116,9 +112,9 @@ func (db *DB) ListTasks(opts ListTasksOptions) ([]*Task, error) {
 		args = append(args, opts.Priority)
 	}
 
-	// Exclude closed by default unless specifically querying for them or includeClosed is set
+	// Exclude done by default unless specifically querying for them or includeClosed is set
 	if opts.Status == "" && !opts.IncludeClosed {
-		query += " AND status != 'closed'"
+		query += " AND status != 'done'"
 	}
 
 	query += " ORDER BY CASE priority WHEN 'high' THEN 0 WHEN 'normal' THEN 1 ELSE 2 END, created_at DESC"
@@ -160,9 +156,9 @@ func (db *DB) UpdateTaskStatus(id int64, status string) error {
 	args := []interface{}{status}
 
 	switch status {
-	case StatusProcessing:
+	case StatusInProgress:
 		query += ", started_at = CURRENT_TIMESTAMP"
-	case StatusReady, StatusBlocked, StatusClosed:
+	case StatusDone, StatusBlocked:
 		query += ", completed_at = CURRENT_TIMESTAMP"
 	}
 
@@ -210,7 +206,7 @@ func (db *DB) RetryTask(id int64, feedback string) error {
 	}
 
 	// Re-queue the task
-	return db.UpdateTaskStatus(id, StatusQueued)
+	return db.UpdateTaskStatus(id, StatusInProgress)
 }
 
 // GetNextQueuedTask returns the next task to process.
@@ -223,7 +219,7 @@ func (db *DB) GetNextQueuedTask() (*Task, error) {
 		WHERE status = ?
 		ORDER BY CASE priority WHEN 'high' THEN 0 WHEN 'normal' THEN 1 ELSE 2 END, created_at ASC
 		LIMIT 1
-	`, StatusQueued).Scan(
+	`, StatusInProgress).Scan(
 		&t.ID, &t.Title, &t.Body, &t.Status, &t.Type, &t.Project, &t.Priority,
 		&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
 	)
@@ -236,7 +232,7 @@ func (db *DB) GetNextQueuedTask() (*Task, error) {
 	return t, nil
 }
 
-// GetQueuedTasks returns all queued tasks.
+// GetQueuedTasks returns all in-progress tasks.
 func (db *DB) GetQueuedTasks() ([]*Task, error) {
 	rows, err := db.Query(`
 		SELECT id, title, body, status, type, project, priority,
@@ -246,7 +242,7 @@ func (db *DB) GetQueuedTasks() ([]*Task, error) {
 		ORDER BY 
 			CASE priority WHEN 'high' THEN 0 WHEN 'normal' THEN 1 ELSE 2 END,
 			created_at ASC
-	`, StatusQueued)
+	`, StatusInProgress)
 	if err != nil {
 		return nil, fmt.Errorf("query queued tasks: %w", err)
 	}

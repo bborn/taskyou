@@ -17,6 +17,13 @@ import (
 	"github.com/charmbracelet/log"
 )
 
+// TaskEvent represents a change to a task.
+type TaskEvent struct {
+	Type   string   // "created", "updated", "deleted", "status_changed"
+	Task   *db.Task // The task (may be nil for deleted)
+	TaskID int64    // Always set
+}
+
 // Executor manages background task execution.
 type Executor struct {
 	db     *db.DB
@@ -30,9 +37,13 @@ type Executor struct {
 	running      bool
 	stopCh       chan struct{}
 
-	// Subscribers for real-time updates
+	// Subscribers for real-time log updates (per-task)
 	subsMu sync.RWMutex
 	subs   map[int64][]chan *db.TaskLog
+
+	// Subscribers for task events (global)
+	taskSubsMu sync.RWMutex
+	taskSubs   []chan TaskEvent
 
 	// Silent mode suppresses log output (for TUI embedding)
 	silent bool
@@ -47,6 +58,7 @@ func New(database *db.DB, cfg *config.Config) *Executor {
 		hooks:        hooks.NewSilent(hooks.DefaultHooksDir()),
 		stopCh:       make(chan struct{}),
 		subs:         make(map[int64][]chan *db.TaskLog),
+		taskSubs:     make([]chan TaskEvent, 0),
 		runningTasks: make(map[int64]bool),
 		cancelFuncs:  make(map[int64]context.CancelFunc),
 		silent:       true,
@@ -62,6 +74,7 @@ func NewWithLogging(database *db.DB, cfg *config.Config, w io.Writer) *Executor 
 		hooks:        hooks.New(hooks.DefaultHooksDir()),
 		stopCh:       make(chan struct{}),
 		subs:         make(map[int64][]chan *db.TaskLog),
+		taskSubs:     make([]chan TaskEvent, 0),
 		runningTasks: make(map[int64]bool),
 		cancelFuncs:  make(map[int64]context.CancelFunc),
 		silent:       false,
@@ -118,8 +131,8 @@ func (e *Executor) IsRunning(taskID int64) bool {
 // Interrupt cancels a running task.
 // If running in this process, cancels directly. Also marks in DB for cross-process interrupt.
 func (e *Executor) Interrupt(taskID int64) bool {
-	// Mark as interrupted in database (for cross-process communication)
-	e.db.UpdateTaskStatus(taskID, db.StatusInterrupted)
+	// Mark as backlog in database (for cross-process communication)
+	e.updateStatus(taskID, db.StatusBacklog)
 	e.logLine(taskID, "system", "Task interrupted by user")
 
 	// If running locally, cancel the context
@@ -167,6 +180,70 @@ func (e *Executor) broadcast(taskID int64, log *db.TaskLog) {
 			// Channel full, skip
 		}
 	}
+}
+
+// SubscribeTaskEvents subscribes to task change events (status changes, etc.).
+func (e *Executor) SubscribeTaskEvents() chan TaskEvent {
+	ch := make(chan TaskEvent, 100)
+	e.taskSubsMu.Lock()
+	e.taskSubs = append(e.taskSubs, ch)
+	e.taskSubsMu.Unlock()
+	return ch
+}
+
+// UnsubscribeTaskEvents unsubscribes from task events.
+func (e *Executor) UnsubscribeTaskEvents(ch chan TaskEvent) {
+	e.taskSubsMu.Lock()
+	defer e.taskSubsMu.Unlock()
+
+	for i, sub := range e.taskSubs {
+		if sub == ch {
+			e.taskSubs = append(e.taskSubs[:i], e.taskSubs[i+1:]...)
+			close(ch)
+			break
+		}
+	}
+}
+
+// broadcastTaskEvent sends a task event to all subscribers.
+func (e *Executor) broadcastTaskEvent(event TaskEvent) {
+	e.taskSubsMu.RLock()
+	defer e.taskSubsMu.RUnlock()
+
+	for _, ch := range e.taskSubs {
+		select {
+		case ch <- event:
+		default:
+			// Channel full, skip
+		}
+	}
+}
+
+// NotifyTaskChange notifies subscribers of a task change (for use by UI/other components).
+func (e *Executor) NotifyTaskChange(eventType string, task *db.Task) {
+	event := TaskEvent{
+		Type:   eventType,
+		Task:   task,
+		TaskID: task.ID,
+	}
+	e.broadcastTaskEvent(event)
+}
+
+// updateStatus updates task status in DB and broadcasts the change.
+func (e *Executor) updateStatus(taskID int64, status string) error {
+	if err := e.db.UpdateTaskStatus(taskID, status); err != nil {
+		return err
+	}
+	// Fetch updated task and broadcast
+	task, err := e.db.GetTask(taskID)
+	if err == nil && task != nil {
+		e.broadcastTaskEvent(TaskEvent{
+			Type:   "status_changed",
+			Task:   task,
+			TaskID: taskID,
+		})
+	}
+	return nil
 }
 
 func (e *Executor) worker(ctx context.Context) {
@@ -254,23 +331,17 @@ func (e *Executor) executeTask(ctx context.Context, task *db.Task) {
 
 		// If triage determined we need more info, block the task
 		if triageResult != nil && triageResult.NeedsMoreInfo {
-			e.db.UpdateTaskStatus(task.ID, db.StatusBlocked)
+			e.updateStatus(task.ID, db.StatusBlocked)
 			e.logLine(task.ID, "system", "Task blocked - needs more information")
 			e.hooks.OnStatusChange(task, db.StatusBlocked, triageResult.Question)
 			return
 		}
 	}
 
-	// Update status to processing
-	if err := e.db.UpdateTaskStatus(task.ID, db.StatusProcessing); err != nil {
-		e.logger.Error("Failed to update status", "error", err)
-		return
-	}
-
 	// Log start and trigger hook
 	startMsg := fmt.Sprintf("Starting task #%d: %s", task.ID, task.Title)
 	e.logLine(task.ID, "system", startMsg)
-	e.hooks.OnStatusChange(task, db.StatusProcessing, startMsg)
+	e.hooks.OnStatusChange(task, db.StatusInProgress, startMsg)
 
 	// Determine project directory
 	projectDir := e.getProjectDir(task.Project)
@@ -284,19 +355,26 @@ func (e *Executor) executeTask(ctx context.Context, task *db.Task) {
 	// Update final status and trigger hooks
 	if result.Interrupted {
 		// Status already set by Interrupt(), just run hook
-		e.hooks.OnStatusChange(task, db.StatusInterrupted, "Task interrupted by user")
+		e.hooks.OnStatusChange(task, db.StatusBacklog, "Task interrupted by user")
 	} else if result.Success {
-		e.db.UpdateTaskStatus(task.ID, db.StatusReady)
+		e.updateStatus(task.ID, db.StatusDone)
 		e.logLine(task.ID, "system", "Task completed successfully")
-		e.hooks.OnStatusChange(task, db.StatusReady, "Task completed successfully")
+		e.hooks.OnStatusChange(task, db.StatusDone, "Task completed successfully")
+
+		// Extract memories from successful task
+		go func() {
+			if err := e.ExtractMemories(context.Background(), task); err != nil {
+				e.logger.Error("Memory extraction failed", "task", task.ID, "error", err)
+			}
+		}()
 	} else if result.NeedsInput {
-		e.db.UpdateTaskStatus(task.ID, db.StatusBlocked)
+		e.updateStatus(task.ID, db.StatusBlocked)
 		// Log the question with special type so UI can display it
 		e.logLine(task.ID, "question", result.Message)
 		e.logLine(task.ID, "system", "Task needs input - use 'r' to retry with your answer")
 		e.hooks.OnStatusChange(task, db.StatusBlocked, result.Message)
 	} else {
-		e.db.UpdateTaskStatus(task.ID, db.StatusBlocked)
+		e.updateStatus(task.ID, db.StatusBlocked)
 		msg := fmt.Sprintf("Task failed: %s", result.Message)
 		e.logLine(task.ID, "error", msg)
 		e.hooks.OnStatusChange(task, db.StatusBlocked, msg)
@@ -355,7 +433,14 @@ func (e *Executor) buildPrompt(task *db.Task) string {
 - Write tests if applicable
 - Commit your changes with clear messages
 
-When finished successfully, output: TASK_COMPLETE
+When finished, provide a summary of what you did:
+- List files changed/created
+- Describe the key changes made
+- Include any relevant links (PRs, commits, etc.)
+- Note any follow-up items or concerns
+
+Then output: TASK_COMPLETE
+
 If you need input from me: output NEEDS_INPUT: followed by your question`)
 
 	case db.TypeWriting:
@@ -374,7 +459,7 @@ If you need input from me: output NEEDS_INPUT: followed by your question`)
 			prompt.WriteString(conversationHistory)
 		}
 		prompt.WriteString("Write the requested content. Be professional, clear, and match the appropriate tone.\n")
-		prompt.WriteString("Output only the final content, no meta-commentary.\n")
+		prompt.WriteString("Output the final content, then summarize what you created.\n")
 		prompt.WriteString("When finished, output: TASK_COMPLETE")
 
 	case db.TypeThinking:
@@ -398,7 +483,7 @@ If you need input from me: output NEEDS_INPUT: followed by your question`)
 3. Recommended approach
 4. Concrete next steps
 
-Think deeply but be actionable.
+Think deeply but be actionable. Summarize your conclusions clearly.
 When finished, output: TASK_COMPLETE`)
 
 	default:
@@ -416,7 +501,8 @@ When finished, output: TASK_COMPLETE`)
 		if conversationHistory != "" {
 			prompt.WriteString(conversationHistory)
 		}
-		prompt.WriteString("When finished, output: TASK_COMPLETE\n")
+		prompt.WriteString("When finished, summarize what you did and any relevant details (files, links, etc.)\n")
+		prompt.WriteString("Then output: TASK_COMPLETE\n")
 		prompt.WriteString("If you need input, output: NEEDS_INPUT: followed by your question")
 	}
 
@@ -467,7 +553,7 @@ func (e *Executor) runCrush(ctx context.Context, taskID int64, workDir, prompt s
 				return
 			case <-ticker.C:
 				task, err := e.db.GetTask(taskID)
-				if err == nil && task != nil && task.Status == db.StatusInterrupted {
+				if err == nil && task != nil && task.Status == db.StatusBacklog {
 					// Kill the process
 					if cmd.Process != nil {
 						cmd.Process.Kill()

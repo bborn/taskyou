@@ -238,7 +238,7 @@ func TestMemoryWithSourceTask(t *testing.T) {
 	task := &Task{
 		Title:    "Source Task",
 		Body:     "Task body",
-		Status:   StatusPending,
+		Status:   StatusBacklog,
 		Type:     TypeCode,
 		Project:  "testproject",
 		Priority: "normal",

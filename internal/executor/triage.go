@@ -40,11 +40,6 @@ func (e *Executor) TriageTask(ctx context.Context, task *db.Task) (*TriageResult
 
 	e.logLine(task.ID, "system", "Starting task triage...")
 
-	// Update status to triaging
-	if err := e.db.UpdateTaskStatus(task.ID, db.StatusTriaging); err != nil {
-		return nil, fmt.Errorf("update status: %w", err)
-	}
-
 	// Build triage prompt
 	prompt := e.buildTriagePrompt(task)
 

@@ -22,7 +22,7 @@ func TestGetLastQuestion(t *testing.T) {
 	task := &Task{
 		Title:    "Test Task",
 		Body:     "Test body",
-		Status:   StatusPending,
+		Status:   StatusBacklog,
 		Type:     TypeCode,
 		Project:  "test",
 		Priority: "normal",
@@ -83,7 +83,7 @@ func TestTaskLogsWithQuestion(t *testing.T) {
 	task := &Task{
 		Title:    "Test Task",
 		Body:     "Test body",
-		Status:   StatusPending,
+		Status:   StatusBacklog,
 		Type:     TypeCode,
 		Project:  "test",
 		Priority: "normal",

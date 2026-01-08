@@ -104,7 +104,7 @@ CREATE TABLE tasks (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     title TEXT NOT NULL,
     body TEXT DEFAULT '',
-    status TEXT DEFAULT 'pending',   -- pending, queued, processing, ready, blocked, closed
+    status TEXT DEFAULT 'backlog',   -- backlog, in_progress, blocked, done
     type TEXT DEFAULT '',            -- code, writing, thinking
     project TEXT DEFAULT '',         -- offerlab, influencekit, personal
     priority TEXT DEFAULT 'normal',  -- high, normal, low
@@ -138,18 +138,14 @@ Database location: `~/.local/share/task/tasks.db` (configurable via `TASK_DB_PAT
 ## Task Lifecycle
 
 ```
-pending → queued → processing → ready
-                 ↘ blocked (needs input)
-                 
-Any state → closed (manual)
+backlog → in_progress → done
+                ↘ blocked (needs input)
 ```
 
-1. **pending** - Created but not queued
-2. **queued** - Waiting in background queue
-3. **processing** - Executor is running Claude
-4. **ready** - Completed successfully
-5. **blocked** - Needs clarification/input
-6. **closed** - Done and archived
+1. **backlog** - Created but not started
+2. **in_progress** - Executor is running Claude
+3. **blocked** - Needs clarification/input
+4. **done** - Completed
 
 ## Key Bindings (TUI)
 
@@ -180,7 +176,7 @@ Any state → closed (manual)
 ## Executor
 
 The background executor (`internal/executor/executor.go`):
-- Polls for `queued` tasks every 2 seconds
+- Polls for `in_progress` tasks every 2 seconds
 - Runs Claude Code with task-specific prompts
 - Streams output to `task_logs` table
 - Supports real-time watching via subscriptions

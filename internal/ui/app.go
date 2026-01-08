@@ -2,14 +2,13 @@ package ui
 
 import (
 	"fmt"
-	"strconv"
-	"strings"
 	"time"
 
 	"github.com/bborn/workflow/internal/db"
 	"github.com/bborn/workflow/internal/executor"
+	"github.com/charmbracelet/bubbles/help"
 	"github.com/charmbracelet/bubbles/key"
-	"github.com/charmbracelet/bubbles/list"
+	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
@@ -29,6 +28,8 @@ const (
 
 // KeyMap defines key bindings.
 type KeyMap struct {
+	Left         key.Binding
+	Right        key.Binding
 	Up           key.Binding
 	Down         key.Binding
 	Enter        key.Binding
@@ -49,9 +50,33 @@ type KeyMap struct {
 	Quit         key.Binding
 }
 
+// ShortHelp returns key bindings to show in the mini help.
+func (k KeyMap) ShortHelp() []key.Binding {
+	return []key.Binding{k.Left, k.Right, k.Up, k.Down, k.Enter, k.New, k.Queue, k.Filter, k.Quit}
+}
+
+// FullHelp returns keybindings for the expanded help view.
+func (k KeyMap) FullHelp() [][]key.Binding {
+	return [][]key.Binding{
+		{k.Left, k.Right, k.Up, k.Down},
+		{k.Enter, k.New, k.Queue, k.Close},
+		{k.Retry, k.Watch, k.Interrupt, k.Delete},
+		{k.Filter, k.ToggleClosed, k.Settings, k.Memories},
+		{k.Refresh, k.Help, k.Quit},
+	}
+}
+
 // DefaultKeyMap returns the default key bindings.
 func DefaultKeyMap() KeyMap {
 	return KeyMap{
+		Left: key.NewBinding(
+			key.WithKeys("left", "h"),
+			key.WithHelp("←/h", "prev col"),
+		),
+		Right: key.NewBinding(
+			key.WithKeys("right", "l"),
+			key.WithHelp("→/l", "next col"),
+		),
 		Up: key.NewBinding(
 			key.WithKeys("up", "k"),
 			key.WithHelp("↑/k", "up"),
@@ -66,7 +91,7 @@ func DefaultKeyMap() KeyMap {
 		),
 		Back: key.NewBinding(
 			key.WithKeys("esc", "q"),
-			key.WithHelp("esc/q", "back"),
+			key.WithHelp("q/esc", "back"),
 		),
 		New: key.NewBinding(
 			key.WithKeys("n"),
@@ -132,13 +157,14 @@ type AppModel struct {
 	db       *db.DB
 	executor *executor.Executor
 	keys     KeyMap
+	help     help.Model
 
 	currentView  View
 	previousView View
 
 	// Dashboard state
 	tasks        []*db.Task
-	list         list.Model
+	kanban       *KanbanBoard
 	loading      bool
 	showClosed   bool // Show closed tasks in the list
 	err          error
@@ -148,8 +174,15 @@ type AppModel struct {
 	// Track task statuses to detect changes
 	prevStatuses map[int64]string
 
+	// Real-time event subscription
+	eventCh chan executor.TaskEvent
+
 	// Number filter for quick task ID jump
 	numberFilter string
+
+	// Text filter input
+	filterInput  textinput.Model
+	filtering    bool
 
 	// Detail view state
 	selectedTask *db.Task
@@ -175,48 +208,41 @@ type AppModel struct {
 	height int
 }
 
-// TaskItem wraps a task for the list.
-type TaskItem struct {
-	task *db.Task
-}
 
-func (t TaskItem) Title() string {
-	return t.task.Title
-}
-
-func (t TaskItem) Description() string {
-	return ""
-}
-
-func (t TaskItem) FilterValue() string {
-	return fmt.Sprintf("%d %s", t.task.ID, t.task.Title)
-}
 
 // NewAppModel creates a new application model.
-func NewAppModel(database *db.DB, exec *executor.Executor, width, height int) *AppModel {
-	delegate := NewTaskDelegate()
-	l := list.New([]list.Item{}, delegate, width, height-4)
-	l.Title = "Tasks"
-	l.SetShowStatusBar(false)
-	l.SetShowHelp(false)
-	l.Styles.Title = Header
+func NewAppModel(database *db.DB, exec *executor.Executor) *AppModel {
+	// Start with zero size - will be set by WindowSizeMsg
+	kanban := NewKanbanBoard(0, 0)
+
+	// Setup filter input
+	fi := textinput.New()
+	fi.Placeholder = "Filter tasks..."
+	fi.CharLimit = 50
+	fi.Width = 30
+
+	// Setup help
+	h := help.New()
+	h.ShowAll = false
 
 	return &AppModel{
 		db:           database,
 		executor:     exec,
 		keys:         DefaultKeyMap(),
+		help:         h,
 		currentView:  ViewDashboard,
-		list:         l,
+		kanban:       kanban,
+		filterInput:  fi,
 		loading:      true,
-		width:        width,
-		height:       height,
 		prevStatuses: make(map[int64]string),
 	}
 }
 
 // Init initializes the model.
 func (m *AppModel) Init() tea.Cmd {
-	return m.loadTasks()
+	// Subscribe to real-time task events
+	m.eventCh = m.executor.SubscribeTaskEvents()
+	return tea.Batch(m.loadTasks(), m.waitForTaskEvent(), m.tick())
 }
 
 // Update handles messages.
@@ -238,6 +264,10 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		// Global keys
 		if key.Matches(msg, m.keys.Quit) {
+			// Cleanup subscription
+			if m.eventCh != nil {
+				m.executor.UnsubscribeTaskEvents(m.eventCh)
+			}
 			return m, tea.Quit
 		}
 
@@ -256,7 +286,8 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
-		m.list.SetSize(msg.Width, msg.Height-4)
+		m.help.Width = msg.Width
+		m.kanban.SetSize(msg.Width, msg.Height-4)
 		if m.detailView != nil {
 			m.detailView.SetSize(msg.Width, msg.Height)
 		}
@@ -275,7 +306,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.tasks = msg.tasks
 		m.err = msg.err
 
-		// Check for newly blocked/ready tasks and notify
+		// Check for newly blocked/done tasks and notify
 		for _, t := range m.tasks {
 			prevStatus := m.prevStatuses[t.ID]
 			if prevStatus != "" && prevStatus != t.Status {
@@ -284,7 +315,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.notification = fmt.Sprintf("⚠ Task #%d needs input: %s", t.ID, t.Title)
 					m.notifyUntil = time.Now().Add(10 * time.Second)
 					fmt.Print("\a") // Ring terminal bell
-				} else if t.Status == db.StatusReady && prevStatus == db.StatusProcessing {
+				} else if t.Status == db.StatusDone && prevStatus == db.StatusInProgress {
 					// Task completed
 					m.notification = fmt.Sprintf("✓ Task #%d complete: %s", t.ID, t.Title)
 					m.notifyUntil = time.Now().Add(5 * time.Second)
@@ -293,11 +324,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.prevStatuses[t.ID] = t.Status
 		}
 
-		items := make([]list.Item, len(m.tasks))
-		for i, t := range m.tasks {
-			items[i] = TaskItem{task: t}
-		}
-		m.list.SetItems(items)
+		m.kanban.SetTasks(m.tasks)
 
 	case taskLoadedMsg:
 		if msg.err == nil {
@@ -321,9 +348,44 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case taskQueuedMsg, taskClosedMsg, taskDeletedMsg, taskRetriedMsg, taskInterruptedMsg:
 		cmds = append(cmds, m.loadTasks())
 
+	case taskEventMsg:
+		// Real-time task update from executor
+		event := msg.event
+		if event.Task != nil {
+			// Update task in our list
+			for i, t := range m.tasks {
+				if t.ID == event.TaskID {
+					prevStatus := t.Status
+					m.tasks[i] = event.Task
+					
+					// Show notification for status changes
+					if prevStatus != event.Task.Status {
+						if event.Task.Status == db.StatusBlocked {
+							m.notification = fmt.Sprintf("⚠ Task #%d needs input: %s", event.TaskID, event.Task.Title)
+							m.notifyUntil = time.Now().Add(10 * time.Second)
+							fmt.Print("\a") // Ring terminal bell
+						} else if event.Task.Status == db.StatusDone && prevStatus == db.StatusInProgress {
+							m.notification = fmt.Sprintf("✓ Task #%d complete: %s", event.TaskID, event.Task.Title)
+							m.notifyUntil = time.Now().Add(5 * time.Second)
+						} else if event.Task.Status == db.StatusInProgress {
+							m.notification = fmt.Sprintf("▶ Task #%d started: %s", event.TaskID, event.Task.Title)
+							m.notifyUntil = time.Now().Add(3 * time.Second)
+						}
+						m.prevStatuses[event.TaskID] = event.Task.Status
+					}
+					break
+				}
+			}
+			m.kanban.SetTasks(m.tasks)
+		}
+		// Wait for next event
+		cmds = append(cmds, m.waitForTaskEvent())
+
 	case tickMsg:
-		// Periodic refresh for status updates
-		cmds = append(cmds, m.loadTasks())
+		// Clear expired notifications
+		if !m.notifyUntil.IsZero() && time.Now().After(m.notifyUntil) {
+			m.notification = ""
+		}
 		cmds = append(cmds, m.tick())
 	}
 
@@ -332,12 +394,17 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 // View renders the current view.
 func (m *AppModel) View() string {
+	// Wait for window size
+	if m.width == 0 || m.height == 0 {
+		return "Initializing..."
+	}
+
 	if m.loading {
-		return "\n  Loading tasks..."
+		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, "Loading tasks...")
 	}
 
 	if m.err != nil {
-		return fmt.Sprintf("\n  Error: %s", m.err)
+		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, fmt.Sprintf("Error: %s", m.err))
 	}
 
 	switch m.currentView {
@@ -373,7 +440,7 @@ func (m *AppModel) View() string {
 }
 
 func (m *AppModel) viewDashboard() string {
-	var parts []string
+	var headerParts []string
 
 	// Show notification banner if active
 	if m.notification != "" && time.Now().Before(m.notifyUntil) {
@@ -381,9 +448,8 @@ func (m *AppModel) viewDashboard() string {
 			Background(lipgloss.Color("#FFCC00")).
 			Foreground(lipgloss.Color("#000000")).
 			Bold(true).
-			Padding(0, 2).
-			Width(m.width)
-		parts = append(parts, notifyStyle.Render(m.notification))
+			Padding(0, 2)
+		headerParts = append(headerParts, notifyStyle.Render(m.notification))
 	} else {
 		m.notification = "" // Clear expired notification
 	}
@@ -391,82 +457,115 @@ func (m *AppModel) viewDashboard() string {
 	// Show current processing tasks if any
 	if runningIDs := m.executor.RunningTasks(); len(runningIDs) > 0 {
 		statusBar := lipgloss.NewStyle().
-			Foreground(ColorProcessing).
+			Foreground(ColorInProgress).
 			Render(fmt.Sprintf("⋯ Processing %d task(s)", len(runningIDs)))
-		parts = append(parts, lipgloss.NewStyle().Padding(0, 2).Render(statusBar))
+		headerParts = append(headerParts, statusBar)
 	}
 
-	parts = append(parts, m.list.View())
-	parts = append(parts, m.renderHelp())
+	// Filter display
+	if m.filtering {
+		filterStyle := lipgloss.NewStyle().Foreground(ColorSecondary)
+		headerParts = append(headerParts, filterStyle.Render("Filter: ")+m.filterInput.View())
+	} else if m.kanban.GetFilter() != "" {
+		filterStyle := lipgloss.NewStyle().Foreground(ColorMuted)
+		headerParts = append(headerParts, filterStyle.Render(fmt.Sprintf("Filter: %s", m.kanban.GetFilter())))
+	}
 
-	return lipgloss.JoinVertical(lipgloss.Left, parts...)
+	// Calculate heights
+	headerHeight := len(headerParts)
+	if headerHeight == 0 {
+		headerHeight = 0
+	}
+	helpHeight := 2
+	kanbanHeight := m.height - headerHeight - helpHeight
+
+	// Update kanban size
+	m.kanban.SetSize(m.width, kanbanHeight)
+
+	// Build the view
+	header := ""
+	if len(headerParts) > 0 {
+		header = lipgloss.JoinVertical(lipgloss.Left, headerParts...)
+	}
+
+	content := lipgloss.JoinVertical(lipgloss.Left,
+		header,
+		m.kanban.View(),
+		m.renderHelp(),
+	)
+
+	// Use Place to fill the entire terminal
+	return lipgloss.Place(m.width, m.height, lipgloss.Left, lipgloss.Top, content)
 }
 
 func (m *AppModel) renderHelp() string {
-	keys := []struct {
-		key  string
-		desc string
-	}{
-		{"↑/↓", "navigate"},
-		{"enter", "view"},
-		{"n", "new"},
-		{"x", "execute"},
-		{"r", "retry"},
-		{"c", "close"},
-		{"w", "watch"},
-		{"i", "interrupt"},
-		{"a", "all"},
-		{"m", "memories"},
-		{"s", "settings"},
-		{"q", "quit"},
-	}
-
-	var help string
-	for i, k := range keys {
-		if i > 0 {
-			help += "  "
-		}
-		help += HelpKey.Render(k.key) + " " + HelpDesc.Render(k.desc)
-	}
-
-	return HelpBar.Render(help)
+	return m.help.View(m.keys)
 }
 
 func (m *AppModel) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	// If the list is filtering, let it handle all key events
-	// This prevents shortcuts like 's' from triggering while typing in the filter
-	if m.list.SettingFilter() {
-		var cmd tea.Cmd
-		m.list, cmd = m.list.Update(msg)
-		return m, cmd
+	// Handle filter input mode
+	if m.filtering {
+		switch msg.String() {
+		case "esc":
+			m.filtering = false
+			m.filterInput.SetValue("")
+			m.kanban.SetFilter("")
+			return m, nil
+		case "enter":
+			m.filtering = false
+			return m, nil
+		default:
+			var cmd tea.Cmd
+			m.filterInput, cmd = m.filterInput.Update(msg)
+			m.kanban.SetFilter(m.filterInput.Value())
+			return m, cmd
+		}
 	}
 
 	// Handle number filter input
 	keyStr := msg.String()
 	if len(keyStr) == 1 && keyStr[0] >= '0' && keyStr[0] <= '9' {
 		m.numberFilter += keyStr
-		m.applyNumberFilter()
+		m.kanban.ApplyNumberFilter(m.numberFilter)
 		return m, nil
 	}
 
 	// Handle backspace for number filter
 	if keyStr == "backspace" && m.numberFilter != "" {
 		m.numberFilter = m.numberFilter[:len(m.numberFilter)-1]
-		m.applyNumberFilter()
+		m.kanban.ApplyNumberFilter(m.numberFilter)
 		return m, nil
 	}
 
 	// Clear number filter on escape (but don't quit)
 	if keyStr == "esc" && m.numberFilter != "" {
 		m.numberFilter = ""
-		m.applyNumberFilter()
+		m.kanban.ApplyNumberFilter("")
 		return m, nil
 	}
 
 	switch {
+	// Column navigation
+	case key.Matches(msg, m.keys.Left):
+		m.kanban.MoveLeft()
+		return m, nil
+
+	case key.Matches(msg, m.keys.Right):
+		m.kanban.MoveRight()
+		return m, nil
+
+	// Task navigation within column
+	case key.Matches(msg, m.keys.Up):
+		m.kanban.MoveUp()
+		return m, nil
+
+	case key.Matches(msg, m.keys.Down):
+		m.kanban.MoveDown()
+		return m, nil
+
 	case key.Matches(msg, m.keys.Enter):
-		if item, ok := m.list.SelectedItem().(TaskItem); ok {
-			return m, m.loadTask(item.task.ID)
+		if task := m.kanban.SelectedTask(); task != nil {
+			return m, m.loadTask(task.ID)
 		}
 
 	case key.Matches(msg, m.keys.New):
@@ -476,16 +575,15 @@ func (m *AppModel) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, m.newTaskForm.Init()
 
 	case key.Matches(msg, m.keys.Queue):
-		if item, ok := m.list.SelectedItem().(TaskItem); ok {
-			return m, m.queueTask(item.task.ID)
+		if task := m.kanban.SelectedTask(); task != nil {
+			return m, m.queueTask(task.ID)
 		}
 
 	case key.Matches(msg, m.keys.Retry):
-		if item, ok := m.list.SelectedItem().(TaskItem); ok {
-			task := item.task
-			// Allow retry for blocked, ready, pending, or stuck processing tasks
-			if task.Status == db.StatusBlocked || task.Status == db.StatusReady ||
-				task.Status == db.StatusPending || task.Status == db.StatusProcessing {
+		if task := m.kanban.SelectedTask(); task != nil {
+			// Allow retry for blocked, done, or backlog tasks
+			if task.Status == db.StatusBlocked || task.Status == db.StatusDone ||
+				task.Status == db.StatusBacklog {
 				m.selectedTask = task
 				m.retryView = NewRetryModel(task, m.db, m.width, m.height)
 				m.previousView = m.currentView
@@ -495,20 +593,20 @@ func (m *AppModel) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 
 	case key.Matches(msg, m.keys.Close):
-		if item, ok := m.list.SelectedItem().(TaskItem); ok {
-			return m, m.closeTask(item.task.ID)
+		if task := m.kanban.SelectedTask(); task != nil {
+			return m, m.closeTask(task.ID)
 		}
 
 	case key.Matches(msg, m.keys.Delete):
-		if item, ok := m.list.SelectedItem().(TaskItem); ok {
-			return m, m.deleteTask(item.task.ID)
+		if task := m.kanban.SelectedTask(); task != nil {
+			return m, m.deleteTask(task.ID)
 		}
 
 	case key.Matches(msg, m.keys.Watch):
 		// Watch the selected task if it's processing
-		if item, ok := m.list.SelectedItem().(TaskItem); ok {
-			if m.executor.IsRunning(item.task.ID) {
-				m.watchView = NewWatchModel(m.db, m.executor, item.task.ID, m.width, m.height)
+		if task := m.kanban.SelectedTask(); task != nil {
+			if m.executor.IsRunning(task.ID) {
+				m.watchView = NewWatchModel(m.db, m.executor, task.ID, m.width, m.height)
 				m.previousView = m.currentView
 				m.currentView = ViewWatch
 				return m, m.watchView.Init()
@@ -517,11 +615,16 @@ func (m *AppModel) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case key.Matches(msg, m.keys.Interrupt):
 		// Interrupt the selected task if it's processing
-		if item, ok := m.list.SelectedItem().(TaskItem); ok {
-			if m.executor.IsRunning(item.task.ID) {
-				return m, m.interruptTask(item.task.ID)
+		if task := m.kanban.SelectedTask(); task != nil {
+			if m.executor.IsRunning(task.ID) {
+				return m, m.interruptTask(task.ID)
 			}
 		}
+
+	case key.Matches(msg, m.keys.Filter):
+		m.filtering = true
+		m.filterInput.Focus()
+		return m, textinput.Blink
 
 	case key.Matches(msg, m.keys.Settings):
 		m.settingsView = NewSettingsModel(m.db, m.width, m.height)
@@ -542,16 +645,18 @@ func (m *AppModel) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, m.keys.ToggleClosed):
 		m.showClosed = !m.showClosed
 		m.numberFilter = "" // Clear number filter when toggling
-		m.updateListTitle()
+		m.kanban.SetShowClosed(m.showClosed)
 		return m, m.loadTasks()
+
+	case key.Matches(msg, m.keys.Help):
+		m.help.ShowAll = !m.help.ShowAll
+		return m, nil
 
 	case key.Matches(msg, m.keys.Back):
 		return m, tea.Quit
 	}
 
-	var cmd tea.Cmd
-	m.list, cmd = m.list.Update(msg)
-	return m, cmd
+	return m, nil
 }
 
 func (m *AppModel) updateDetail(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -567,8 +672,8 @@ func (m *AppModel) updateDetail(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 	if key.Matches(msg, m.keys.Retry) && m.selectedTask != nil {
 		task := m.selectedTask
-		if task.Status == db.StatusBlocked || task.Status == db.StatusReady ||
-			task.Status == db.StatusPending || task.Status == db.StatusProcessing {
+		if task.Status == db.StatusBlocked || task.Status == db.StatusDone ||
+			task.Status == db.StatusBacklog {
 			m.retryView = NewRetryModel(task, m.db, m.width, m.height)
 			m.previousView = m.currentView
 			m.currentView = ViewRetry
@@ -738,6 +843,10 @@ type taskInterruptedMsg struct {
 	err error
 }
 
+type taskEventMsg struct {
+	event executor.TaskEvent
+}
+
 type tickMsg time.Time
 
 func (m *AppModel) loadTasks() tea.Cmd {
@@ -756,22 +865,40 @@ func (m *AppModel) loadTask(id int64) tea.Cmd {
 }
 
 func (m *AppModel) createTask(t *db.Task) tea.Cmd {
+	exec := m.executor
 	return func() tea.Msg {
 		err := m.db.CreateTask(t)
+		if err == nil {
+			exec.NotifyTaskChange("created", t)
+		}
 		return taskCreatedMsg{task: t, err: err}
 	}
 }
 
 func (m *AppModel) queueTask(id int64) tea.Cmd {
+	database := m.db
+	exec := m.executor
 	return func() tea.Msg {
-		err := m.db.UpdateTaskStatus(id, db.StatusQueued)
+		err := database.UpdateTaskStatus(id, db.StatusInProgress)
+		if err == nil {
+			if task, _ := database.GetTask(id); task != nil {
+				exec.NotifyTaskChange("status_changed", task)
+			}
+		}
 		return taskQueuedMsg{err: err}
 	}
 }
 
 func (m *AppModel) closeTask(id int64) tea.Cmd {
+	database := m.db
+	exec := m.executor
 	return func() tea.Msg {
-		err := m.db.UpdateTaskStatus(id, db.StatusClosed)
+		err := database.UpdateTaskStatus(id, db.StatusDone)
+		if err == nil {
+			if task, _ := database.GetTask(id); task != nil {
+				exec.NotifyTaskChange("status_changed", task)
+			}
+		}
 		return taskClosedMsg{err: err}
 	}
 }
@@ -797,69 +924,18 @@ func (m *AppModel) interruptTask(id int64) tea.Cmd {
 	}
 }
 
+func (m *AppModel) waitForTaskEvent() tea.Cmd {
+	return func() tea.Msg {
+		event, ok := <-m.eventCh
+		if !ok {
+			return nil // Channel closed
+		}
+		return taskEventMsg{event: event}
+	}
+}
+
 func (m *AppModel) tick() tea.Cmd {
-	return tea.Tick(5*time.Second, func(t time.Time) tea.Msg {
+	return tea.Tick(1*time.Second, func(t time.Time) tea.Msg {
 		return tickMsg(t)
 	})
-}
-
-// applyNumberFilter filters the task list to show only tasks matching the number filter.
-// If a task ID matches exactly, it jumps to that task.
-// Otherwise, it filters to show tasks whose ID starts with the filter.
-func (m *AppModel) applyNumberFilter() {
-	if m.numberFilter == "" {
-		// Restore all tasks
-		items := make([]list.Item, len(m.tasks))
-		for i, t := range m.tasks {
-			items[i] = TaskItem{task: t}
-		}
-		m.list.SetItems(items)
-		m.updateListTitle()
-		return
-	}
-
-	filterNum, err := strconv.ParseInt(m.numberFilter, 10, 64)
-	if err != nil {
-		return
-	}
-
-	// Check for exact match first - jump to that task
-	for i, t := range m.tasks {
-		if t.ID == filterNum {
-			// Restore all items but select the matching one
-			items := make([]list.Item, len(m.tasks))
-			for j, task := range m.tasks {
-				items[j] = TaskItem{task: task}
-			}
-			m.list.SetItems(items)
-			m.list.Select(i)
-			m.updateListTitle()
-			return
-		}
-	}
-
-	// Filter to tasks whose ID starts with the filter
-	var filtered []list.Item
-	filterStr := m.numberFilter
-	for _, t := range m.tasks {
-		idStr := strconv.FormatInt(t.ID, 10)
-		if strings.HasPrefix(idStr, filterStr) {
-			filtered = append(filtered, TaskItem{task: t})
-		}
-	}
-
-	m.list.SetItems(filtered)
-	m.updateListTitle()
-}
-
-// updateListTitle updates the list title based on current state.
-func (m *AppModel) updateListTitle() {
-	title := "Tasks"
-	if m.showClosed {
-		title = "Tasks (all)"
-	}
-	if m.numberFilter != "" {
-		title = fmt.Sprintf("Tasks [#%s]", m.numberFilter)
-	}
-	m.list.Title = title
 }

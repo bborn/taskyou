@@ -109,7 +109,7 @@ func TestInterrupt(t *testing.T) {
 	// Create a test task
 	task := &db.Task{
 		Title:   "Test task",
-		Status:  db.StatusProcessing,
+		Status:  db.StatusInProgress,
 		Project: "test",
 	}
 	if err := database.CreateTask(task); err != nil {
@@ -150,8 +150,8 @@ func TestInterrupt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if updatedTask.Status != db.StatusInterrupted {
-		t.Errorf("expected status %q, got %q", db.StatusInterrupted, updatedTask.Status)
+	if updatedTask.Status != db.StatusBacklog {
+		t.Errorf("expected status %q, got %q", db.StatusBacklog, updatedTask.Status)
 	}
 }
 
@@ -212,7 +212,7 @@ func TestConversationHistory(t *testing.T) {
 	// Create a test task
 	task := &db.Task{
 		Title:   "Test task",
-		Status:  db.StatusPending,
+		Status:  db.StatusBacklog,
 		Type:    db.TypeCode,
 		Project: "test",
 	}

@@ -155,14 +155,12 @@ func (m *WatchModel) View() string {
 	var header string
 	if m.task != nil {
 		status := m.task.Status
-		if status == db.StatusProcessing {
+		if status == db.StatusInProgress {
 			header = m.spinner.View() + " Processing: " + Bold.Render(m.task.Title)
-		} else if status == db.StatusReady {
+		} else if status == db.StatusDone {
 			header = Success.Render("✓ Completed: ") + Bold.Render(m.task.Title)
 		} else if status == db.StatusBlocked {
 			header = Error.Render("! Blocked: ") + Bold.Render(m.task.Title)
-		} else if status == db.StatusInterrupted {
-			header = Warning.Render("⊘ Interrupted: ") + Bold.Render(m.task.Title)
 		} else {
 			header = Dim.Render(fmt.Sprintf("Task #%d: ", m.taskID)) + Bold.Render(m.task.Title)
 		}

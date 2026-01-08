@@ -13,9 +13,9 @@ import (
 
 // SettingsModel represents the settings view.
 type SettingsModel struct {
-	db       *db.DB
-	width    int
-	height   int
+	db     *db.DB
+	width  int
+	height int
 
 	// Projects
 	projects []*db.Project
