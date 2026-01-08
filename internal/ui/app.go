@@ -205,7 +205,16 @@ type AppModel struct {
 	height int
 }
 
-
+// updateTaskInList updates a task in the tasks list and refreshes the kanban.
+func (m *AppModel) updateTaskInList(task *db.Task) {
+	for i, t := range m.tasks {
+		if t.ID == task.ID {
+			m.tasks[i] = task
+			break
+		}
+	}
+	m.kanban.SetTasks(m.tasks)
+}
 
 // NewAppModel creates a new application model.
 func NewAppModel(database *db.DB, exec *executor.Executor, workingDir string) *AppModel {
@@ -591,6 +600,9 @@ func (m *AppModel) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case key.Matches(msg, m.keys.Queue):
 		if task := m.kanban.SelectedTask(); task != nil {
+			// Immediately update UI for responsiveness
+			task.Status = db.StatusQueued
+			m.updateTaskInList(task)
 			return m, m.queueTask(task.ID)
 		}
 
@@ -609,6 +621,9 @@ func (m *AppModel) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case key.Matches(msg, m.keys.Close):
 		if task := m.kanban.SelectedTask(); task != nil {
+			// Immediately update UI for responsiveness
+			task.Status = db.StatusDone
+			m.updateTaskInList(task)
 			return m, m.closeTask(task.ID)
 		}
 
@@ -677,6 +692,13 @@ func (m *AppModel) updateDetail(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	// Handle queue/close/retry from detail view
 	if key.Matches(msg, m.keys.Queue) && m.selectedTask != nil {
+		// Immediately update UI for responsiveness
+		m.selectedTask.Status = db.StatusQueued
+		if m.detailView != nil {
+			m.detailView.UpdateTask(m.selectedTask)
+		}
+		// Update task in the list and kanban
+		m.updateTaskInList(m.selectedTask)
 		return m, m.queueTask(m.selectedTask.ID)
 	}
 	if key.Matches(msg, m.keys.Retry) && m.selectedTask != nil {
@@ -690,6 +712,13 @@ func (m *AppModel) updateDetail(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 	if key.Matches(msg, m.keys.Close) && m.selectedTask != nil {
+		// Immediately update UI for responsiveness
+		m.selectedTask.Status = db.StatusDone
+		if m.detailView != nil {
+			m.detailView.UpdateTask(m.selectedTask)
+		}
+		// Update task in the list and kanban
+		m.updateTaskInList(m.selectedTask)
 		m.currentView = ViewDashboard
 		return m, m.closeTask(m.selectedTask.ID)
 	}

@@ -121,3 +121,91 @@ func TestTaskLogsWithQuestion(t *testing.T) {
 		t.Error("question log not found")
 	}
 }
+
+func TestGetProjectByPath(t *testing.T) {
+	// Create temporary database
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	db, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer db.Close()
+	defer os.Remove(dbPath)
+
+	// Create test projects
+	proj1 := &Project{
+		Name: "myproject",
+		Path: "/Users/test/Projects/myproject",
+	}
+	proj2 := &Project{
+		Name: "another",
+		Path: "/Users/test/Work/another",
+	}
+	if err := db.CreateProject(proj1); err != nil {
+		t.Fatalf("failed to create project: %v", err)
+	}
+	if err := db.CreateProject(proj2); err != nil {
+		t.Fatalf("failed to create project: %v", err)
+	}
+
+	tests := []struct {
+		name     string
+		cwd      string
+		wantProj string
+		wantNil  bool
+	}{
+		{
+			name:     "exact match",
+			cwd:      "/Users/test/Projects/myproject",
+			wantProj: "myproject",
+		},
+		{
+			name:     "subdirectory match",
+			cwd:      "/Users/test/Projects/myproject/src/internal",
+			wantProj: "myproject",
+		},
+		{
+			name:     "another project exact",
+			cwd:      "/Users/test/Work/another",
+			wantProj: "another",
+		},
+		{
+			name:     "no match",
+			cwd:      "/Users/test/Other/something",
+			wantNil:  true,
+		},
+		{
+			name:     "partial path no match",
+			cwd:      "/Users/test/Projects/myproj", // not myproject
+			wantNil:  true,
+		},
+		{
+			name:    "empty cwd",
+			cwd:     "",
+			wantNil: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			proj, err := db.GetProjectByPath(tt.cwd)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if tt.wantNil {
+				if proj != nil {
+					t.Errorf("expected nil, got project %q", proj.Name)
+				}
+			} else {
+				if proj == nil {
+					t.Fatalf("expected project %q, got nil", tt.wantProj)
+				}
+				if proj.Name != tt.wantProj {
+					t.Errorf("expected project %q, got %q", tt.wantProj, proj.Name)
+				}
+			}
+		})
+	}
+}
