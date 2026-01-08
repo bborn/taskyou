@@ -17,12 +17,13 @@ type FormModel struct {
 	cancelled bool
 
 	// Form values
-	title    string
-	body     string
-	project  string
-	taskType string
-	priority string
-	queue    bool
+	title      string
+	body       string
+	project    string
+	taskType   string
+	priority   string
+	queue      bool
+	attachment string // Single file path from picker
 }
 
 // NewFormModel creates a new form model.
@@ -95,6 +96,13 @@ func (m *FormModel) initForm() {
 		),
 
 		huh.NewGroup(
+			huh.NewFilePicker().
+				Key("attachment").
+				Title("Attachment").
+				Description("Optional file to attach").
+				AllowedTypes([]string{".png", ".jpg", ".jpeg", ".gif", ".pdf", ".md", ".txt", ".json", ".go", ".py", ".rb", ".rs", ".js", ".ts"}).
+				Value(&m.attachment),
+
 			huh.NewConfirm().
 				Key("queue").
 				Title("Queue for execution?").
@@ -184,4 +192,9 @@ func (m *FormModel) GetDBTask() *db.Task {
 		Project:  m.project,
 		Priority: m.priority,
 	}
+}
+
+// GetAttachment returns the selected attachment file path, if any.
+func (m *FormModel) GetAttachment() string {
+	return m.attachment
 }

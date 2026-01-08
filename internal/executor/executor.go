@@ -588,8 +588,12 @@ func (e *Executor) pollTmuxSession(ctx context.Context, taskID int64, sessionNam
 		case <-ticker.C:
 			// Check if session still exists
 			if err := exec.Command("tmux", "has-session", "-t", sessionName).Run(); err != nil {
-				// Session ended
+				// Session ended unexpectedly (e.g., Ctrl+C killed the process)
+				// If we didn't see the exit code marker, treat as interrupted
 				output := allOutput.String()
+				if !strings.Contains(output, ":::TASK_EXIT_CODE:") {
+					return execResult{Interrupted: true}
+				}
 				return e.parseOutputMarkers(output)
 			}
 

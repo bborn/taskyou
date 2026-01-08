@@ -149,6 +149,18 @@ func (db *DB) migrate() error {
 
 		`CREATE INDEX IF NOT EXISTS idx_project_memories_project ON project_memories(project)`,
 		`CREATE INDEX IF NOT EXISTS idx_project_memories_category ON project_memories(category)`,
+
+		`CREATE TABLE IF NOT EXISTS task_attachments (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+			filename TEXT NOT NULL,
+			mime_type TEXT DEFAULT '',
+			size INTEGER DEFAULT 0,
+			data BLOB NOT NULL,
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+		)`,
+
+		`CREATE INDEX IF NOT EXISTS idx_task_attachments_task_id ON task_attachments(task_id)`,
 	}
 
 	for _, m := range migrations {

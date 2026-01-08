@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"time"
 
 	"github.com/bborn/workflow/internal/db"
@@ -26,6 +27,7 @@ const (
 	ViewSettings
 	ViewRetry
 	ViewMemories
+	ViewAttachments
 )
 
 // KeyMap defines key bindings.
@@ -49,6 +51,7 @@ type KeyMap struct {
 	Settings     key.Binding
 	Memories     key.Binding
 	Open         key.Binding
+	Files        key.Binding
 	Help         key.Binding
 	Quit         key.Binding
 	// Column focus shortcuts
@@ -70,7 +73,7 @@ func (k KeyMap) FullHelp() [][]key.Binding {
 		{k.FocusBacklog, k.FocusInProgress, k.FocusBlocked, k.FocusDone},
 		{k.Enter, k.New, k.Queue, k.Close},
 		{k.Retry, k.Watch, k.Attach, k.Interrupt, k.Delete},
-		{k.Filter, k.Settings, k.Memories, k.Open},
+		{k.Filter, k.Settings, k.Memories, k.Open, k.Files},
 		{k.Refresh, k.Help, k.Quit},
 	}
 }
@@ -154,6 +157,10 @@ func DefaultKeyMap() KeyMap {
 			key.WithKeys("o"),
 			key.WithHelp("o", "open dir"),
 		),
+		Files: key.NewBinding(
+			key.WithKeys("f"),
+			key.WithHelp("f", "files"),
+		),
 		Help: key.NewBinding(
 			key.WithKeys("?"),
 			key.WithHelp("?", "help"),
@@ -233,6 +240,9 @@ type AppModel struct {
 
 	// Memories view state
 	memoriesView *MemoriesModel
+
+	// Attachments view state
+	attachmentsView *AttachmentsModel
 
 	// Window size
 	width  int
@@ -327,6 +337,8 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.updateWatch(msg)
 		case ViewMemories:
 			return m.updateMemories(msg)
+		case ViewAttachments:
+			return m.updateAttachments(msg)
 		}
 
 	case tea.WindowSizeMsg:
@@ -505,6 +517,10 @@ func (m *AppModel) View() string {
 	case ViewMemories:
 		if m.memoriesView != nil {
 			return m.memoriesView.View()
+		}
+	case ViewAttachments:
+		if m.attachmentsView != nil {
+			return m.attachmentsView.View()
 		}
 	}
 
@@ -822,6 +838,12 @@ func (m *AppModel) updateDetail(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if key.Matches(msg, m.keys.Open) && m.selectedTask != nil {
 		return m, m.openTaskDir(m.selectedTask)
 	}
+	if key.Matches(msg, m.keys.Files) && m.selectedTask != nil {
+		m.attachmentsView = NewAttachmentsModel(m.selectedTask, m.db, m.width, m.height)
+		m.previousView = m.currentView
+		m.currentView = ViewAttachments
+		return m, nil
+	}
 
 	if m.detailView != nil {
 		var cmd tea.Cmd
@@ -847,11 +869,12 @@ func (m *AppModel) updateNewTaskForm(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if form, ok := model.(*FormModel); ok {
 		m.newTaskForm = form
 		if form.submitted {
-			// Capture task and nil out form immediately to prevent duplicate submissions
+			// Capture task and attachment path, nil out form immediately
 			task := form.GetDBTask()
+			attachmentPath := form.GetAttachment()
 			m.newTaskForm = nil
 			m.currentView = ViewDashboard
-			return m, m.createTask(task)
+			return m, m.createTaskWithAttachment(task, attachmentPath)
 		}
 		if form.cancelled {
 			m.currentView = ViewDashboard
@@ -921,11 +944,12 @@ func (m *AppModel) updateRetry(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	if m.retryView.submitted {
 		feedback := m.retryView.GetFeedback()
+		attachment := m.retryView.GetAttachment()
 		taskID := m.retryView.task.ID
 		m.currentView = ViewDashboard
 		m.retryView = nil
 		m.detailView = nil
-		return m, m.retryTask(taskID, feedback)
+		return m, m.retryTaskWithAttachment(taskID, feedback, attachment)
 	}
 
 	return m, cmd
@@ -941,6 +965,22 @@ func (m *AppModel) updateMemories(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.memoriesView != nil {
 		var cmd tea.Cmd
 		m.memoriesView, cmd = m.memoriesView.Update(msg)
+		return m, cmd
+	}
+
+	return m, nil
+}
+
+func (m *AppModel) updateAttachments(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if key.Matches(msg, m.keys.Back) {
+		m.currentView = m.previousView
+		m.attachmentsView = nil
+		return m, nil
+	}
+
+	if m.attachmentsView != nil {
+		var cmd tea.Cmd
+		m.attachmentsView, cmd = m.attachmentsView.Update(msg)
 		return m, cmd
 	}
 
@@ -1022,6 +1062,29 @@ func (m *AppModel) createTask(t *db.Task) tea.Cmd {
 	}
 }
 
+func (m *AppModel) createTaskWithAttachment(t *db.Task, attachmentPath string) tea.Cmd {
+	exec := m.executor
+	database := m.db
+	return func() tea.Msg {
+		err := database.CreateTask(t)
+		if err != nil {
+			return taskCreatedMsg{task: t, err: err}
+		}
+
+		// Add attachment if provided
+		if attachmentPath != "" {
+			data, readErr := os.ReadFile(attachmentPath)
+			if readErr == nil {
+				mimeType := detectMimeType(attachmentPath)
+				database.AddAttachment(t.ID, filepath.Base(attachmentPath), mimeType, data)
+			}
+		}
+
+		exec.NotifyTaskChange("created", t)
+		return taskCreatedMsg{task: t, err: nil}
+	}
+}
+
 func (m *AppModel) queueTask(id int64) tea.Cmd {
 	database := m.db
 	exec := m.executor
@@ -1060,6 +1123,23 @@ func (m *AppModel) deleteTask(id int64) tea.Cmd {
 func (m *AppModel) retryTask(id int64, feedback string) tea.Cmd {
 	return func() tea.Msg {
 		err := m.db.RetryTask(id, feedback)
+		return taskRetriedMsg{err: err}
+	}
+}
+
+func (m *AppModel) retryTaskWithAttachment(id int64, feedback string, attachmentPath string) tea.Cmd {
+	database := m.db
+	return func() tea.Msg {
+		// Add attachment first if provided
+		if attachmentPath != "" {
+			data, readErr := os.ReadFile(attachmentPath)
+			if readErr == nil {
+				mimeType := detectMimeType(attachmentPath)
+				database.AddAttachment(id, filepath.Base(attachmentPath), mimeType, data)
+			}
+		}
+
+		err := database.RetryTask(id, feedback)
 		return taskRetriedMsg{err: err}
 	}
 }

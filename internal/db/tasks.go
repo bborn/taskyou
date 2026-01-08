@@ -700,3 +700,84 @@ func (db *DB) GetProjectMemories(project string, limit int) ([]*ProjectMemory, e
 		Limit:   limit,
 	})
 }
+
+// Attachment represents a file attached to a task.
+type Attachment struct {
+	ID        int64
+	TaskID    int64
+	Filename  string
+	MimeType  string
+	Size      int64
+	Data      []byte
+	CreatedAt LocalTime
+}
+
+// AddAttachment adds a file attachment to a task.
+func (db *DB) AddAttachment(taskID int64, filename, mimeType string, data []byte) (*Attachment, error) {
+	result, err := db.Exec(`
+		INSERT INTO task_attachments (task_id, filename, mime_type, size, data)
+		VALUES (?, ?, ?, ?, ?)
+	`, taskID, filename, mimeType, len(data), data)
+	if err != nil {
+		return nil, fmt.Errorf("insert attachment: %w", err)
+	}
+
+	id, _ := result.LastInsertId()
+	return &Attachment{
+		ID:       id,
+		TaskID:   taskID,
+		Filename: filename,
+		MimeType: mimeType,
+		Size:     int64(len(data)),
+		Data:     data,
+	}, nil
+}
+
+// GetAttachment retrieves an attachment by ID.
+func (db *DB) GetAttachment(id int64) (*Attachment, error) {
+	a := &Attachment{}
+	err := db.QueryRow(`
+		SELECT id, task_id, filename, mime_type, size, data, created_at
+		FROM task_attachments WHERE id = ?
+	`, id).Scan(&a.ID, &a.TaskID, &a.Filename, &a.MimeType, &a.Size, &a.Data, &a.CreatedAt)
+	if err != nil {
+		return nil, fmt.Errorf("get attachment: %w", err)
+	}
+	return a, nil
+}
+
+// ListAttachments retrieves all attachments for a task (without data for efficiency).
+func (db *DB) ListAttachments(taskID int64) ([]*Attachment, error) {
+	rows, err := db.Query(`
+		SELECT id, task_id, filename, mime_type, size, created_at
+		FROM task_attachments WHERE task_id = ?
+		ORDER BY created_at ASC
+	`, taskID)
+	if err != nil {
+		return nil, fmt.Errorf("list attachments: %w", err)
+	}
+	defer rows.Close()
+
+	var attachments []*Attachment
+	for rows.Next() {
+		a := &Attachment{}
+		if err := rows.Scan(&a.ID, &a.TaskID, &a.Filename, &a.MimeType, &a.Size, &a.CreatedAt); err != nil {
+			return nil, fmt.Errorf("scan attachment: %w", err)
+		}
+		attachments = append(attachments, a)
+	}
+	return attachments, nil
+}
+
+// DeleteAttachment removes an attachment.
+func (db *DB) DeleteAttachment(id int64) error {
+	_, err := db.Exec("DELETE FROM task_attachments WHERE id = ?", id)
+	return err
+}
+
+// CountAttachments returns the number of attachments for a task.
+func (db *DB) CountAttachments(taskID int64) (int, error) {
+	var count int
+	err := db.QueryRow("SELECT COUNT(*) FROM task_attachments WHERE task_id = ?", taskID).Scan(&count)
+	return count, err
+}

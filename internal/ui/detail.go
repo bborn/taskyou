@@ -150,6 +150,16 @@ func (m *DetailModel) renderHeader() string {
 			Background(ColorError).
 			Foreground(lipgloss.Color("#FFFFFF"))
 		meta.WriteString(priorityStyle.Render("high priority"))
+		meta.WriteString("  ")
+	}
+
+	// Attachment count
+	if count, err := m.database.CountAttachments(t.ID); err == nil && count > 0 {
+		attachStyle := lipgloss.NewStyle().
+			Padding(0, 1).
+			Background(lipgloss.Color("#666666")).
+			Foreground(lipgloss.Color("#FFFFFF"))
+		meta.WriteString(attachStyle.Render(fmt.Sprintf("📎 %d", count)))
 	}
 
 	timeStr := Dim.Render(fmt.Sprintf("Created %s", humanizeTime(t.CreatedAt.Time)))
@@ -240,6 +250,7 @@ func (m *DetailModel) renderHelp() string {
 	}{
 		{"r", "retry"},
 		{"c", "close"},
+		{"o", "open dir"},
 		{"q/esc", "back"},
 	}...)
 
