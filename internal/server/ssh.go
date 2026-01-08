@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/bborn/workflow/internal/db"
 	"github.com/bborn/workflow/internal/executor"
@@ -90,11 +91,22 @@ func (s *Server) Shutdown(ctx context.Context) error {
 
 // teaHandler returns the Bubble Tea program for each SSH session.
 func (s *Server) teaHandler(sess ssh.Session) (tea.Model, []tea.ProgramOption) {
-	// SSH sessions don't have a meaningful working directory context
-	model := ui.NewAppModel(s.db, s.executor, "")
+	workingDir := GetEnvValue(sess.Environ(), "TASK_CWD")
+	model := ui.NewAppModel(s.db, s.executor, workingDir)
 
 	return model, []tea.ProgramOption{
 		tea.WithAltScreen(),
 		tea.WithMouseCellMotion(),
 	}
+}
+
+// GetEnvValue extracts a value from an environment variable list (key=value format).
+func GetEnvValue(environ []string, key string) string {
+	prefix := key + "="
+	for _, env := range environ {
+		if strings.HasPrefix(env, prefix) {
+			return strings.TrimPrefix(env, prefix)
+		}
+	}
+	return ""
 }

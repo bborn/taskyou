@@ -368,6 +368,11 @@ func connectRemote(host, port string) error {
 	session.Stdout = os.Stdout
 	session.Stderr = os.Stderr
 
+	// Send current working directory for project detection
+	if cwd, err := os.Getwd(); err == nil {
+		session.Setenv("TASK_CWD", cwd)
+	}
+
 	// Start shell (taskd serves TUI directly)
 	if err := session.Shell(); err != nil {
 		return fmt.Errorf("shell: %w", err)
