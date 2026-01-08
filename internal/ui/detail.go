@@ -47,6 +47,7 @@ func (m *DetailModel) initViewport() {
 	m.viewport = viewport.New(m.width-4, m.height-headerHeight-footerHeight)
 	m.viewport.YPosition = headerHeight
 	m.viewport.SetContent(m.renderContent())
+	m.viewport.GotoBottom()
 	m.ready = true
 }
 
@@ -60,6 +61,7 @@ func (m *DetailModel) SetSize(width, height int) {
 		m.viewport.Width = width - 4
 		m.viewport.Height = height - headerHeight - footerHeight
 		m.viewport.SetContent(m.renderContent())
+		m.viewport.GotoBottom()
 	}
 }
 
@@ -83,7 +85,7 @@ func (m *DetailModel) View() string {
 	box := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(ColorPrimary).
-		Width(m.width - 2).
+		Width(m.width-2).
 		Padding(0, 1)
 
 	return lipgloss.JoinVertical(lipgloss.Left,
