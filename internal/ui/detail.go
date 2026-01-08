@@ -23,6 +23,19 @@ type DetailModel struct {
 	ready    bool
 }
 
+// UpdateTask updates the task and refreshes the view.
+func (m *DetailModel) UpdateTask(t *db.Task) {
+	m.task = t
+	if m.ready {
+		m.viewport.SetContent(m.renderContent())
+	}
+}
+
+// Task returns the current task.
+func (m *DetailModel) Task() *db.Task {
+	return m.task
+}
+
 // NewDetailModel creates a new detail model.
 func NewDetailModel(t *db.Task, database *db.DB, width, height int) *DetailModel {
 	m := &DetailModel{

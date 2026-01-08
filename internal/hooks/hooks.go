@@ -88,7 +88,7 @@ func (r *Runner) Run(event string, task *db.Task, message string) {
 // OnStatusChange triggers appropriate hooks based on status transition.
 func (r *Runner) OnStatusChange(task *db.Task, newStatus, message string) {
 	switch newStatus {
-	case db.StatusInProgress:
+	case db.StatusQueued, db.StatusProcessing:
 		r.Run(EventTaskStarted, task, message)
 	case db.StatusDone:
 		r.Run(EventTaskDone, task, message)

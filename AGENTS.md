@@ -8,7 +8,7 @@ This is **Bruno's Task Queue** - a personal task management system with:
 - **SQLite storage** for tasks
 - **SSH-accessible TUI** via Wish
 - **Background executor** running Claude Code for task processing
-- **Beautiful terminal UI** built with Charm libraries
+- **Beautiful terminal UI** built with Charm libraries (Kanban board)
 
 ## Architecture
 
@@ -41,25 +41,33 @@ Access: ssh -p 2222 user@server
 workflow/
 ├── cmd/
 │   ├── task/
-│   │   └── main.go              # Local CLI
+│   │   └── main.go              # Local CLI + TUI
 │   └── taskd/
 │       └── main.go              # SSH daemon + executor
 ├── internal/
+│   ├── config/
+│   │   └── config.go            # Configuration management
 │   ├── db/
 │   │   ├── sqlite.go            # Database connection, migrations
 │   │   └── tasks.go             # Task CRUD operations
 │   ├── executor/
-│   │   └── executor.go          # Background Claude runner
+│   │   ├── executor.go          # Background Claude runner
+│   │   └── triage.go            # Task pre-processing
+│   ├── hooks/
+│   │   └── hooks.go             # Task lifecycle hooks
 │   ├── server/
 │   │   └── ssh.go               # Wish SSH server
 │   └── ui/
 │       ├── app.go               # Main Bubble Tea app
-│       ├── dashboard.go         # Task list view
+│       ├── kanban.go            # Kanban board view
 │       ├── detail.go            # Task detail with logs
 │       ├── form.go              # New task form (Huh)
 │       ├── watch.go             # Real-time execution watcher
+│       ├── memories.go          # Project memories view
+│       ├── settings.go          # Settings view
 │       └── styles.go            # Lip Gloss styles
-├── scripts/                     # Legacy bash scripts
+├── scripts/
+│   └── install-service.sh       # Systemd service installer
 ├── go.mod
 ├── go.sum
 └── Makefile
@@ -72,17 +80,17 @@ make build          # Build bin/task and bin/taskd
 make build-task     # Build just the CLI
 make build-taskd    # Build just the daemon
 make install        # Install to ~/go/bin
+make test           # Run tests
 ```
 
 ## Running
 
 ### Local CLI
 ```bash
-./bin/task                           # Launch TUI
-./bin/task list                      # List tasks
-./bin/task create "Fix bug" -p ol    # Create task
-./bin/task queue 42                  # Queue for execution
-./bin/task run 42                    # Run immediately (blocking)
+./bin/task -l                        # Launch TUI locally
+./bin/task daemon                    # Start background executor
+./bin/task daemon stop               # Stop daemon
+./bin/task daemon status             # Check daemon status
 ```
 
 ### Daemon (on server)
@@ -104,7 +112,7 @@ CREATE TABLE tasks (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     title TEXT NOT NULL,
     body TEXT DEFAULT '',
-    status TEXT DEFAULT 'backlog',   -- backlog, in_progress, blocked, done
+    status TEXT DEFAULT 'pending',   -- pending, queued, processing, ready, blocked, closed
     type TEXT DEFAULT '',            -- code, writing, thinking
     project TEXT DEFAULT '',         -- offerlab, influencekit, personal
     priority TEXT DEFAULT 'normal',  -- high, normal, low
@@ -122,14 +130,28 @@ CREATE TABLE task_logs (
     created_at DATETIME
 );
 
+CREATE TABLE projects (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL UNIQUE,
+    path TEXT NOT NULL,
+    aliases TEXT DEFAULT '',
+    instructions TEXT DEFAULT '',
+    created_at DATETIME
+);
+
 CREATE TABLE project_memories (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     project TEXT NOT NULL,
-    category TEXT NOT NULL DEFAULT 'general',  -- pattern, context, decision, gotcha, general
+    category TEXT NOT NULL DEFAULT 'general',
     content TEXT NOT NULL,
     source_task_id INTEGER REFERENCES tasks(id) ON DELETE SET NULL,
     created_at DATETIME,
     updated_at DATETIME
+);
+
+CREATE TABLE settings (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
 );
 ```
 
@@ -138,19 +160,24 @@ Database location: `~/.local/share/task/tasks.db` (configurable via `TASK_DB_PAT
 ## Task Lifecycle
 
 ```
-backlog → in_progress → done
-                ↘ blocked (needs input)
+pending → queued → processing → ready
+                 ↘ blocked (needs input)
+                 
+Any state → closed (manual)
 ```
 
-1. **backlog** - Created but not started
-2. **in_progress** - Executor is running Claude
-3. **blocked** - Needs clarification/input
-4. **done** - Completed
+1. **pending** - Created but not queued
+2. **queued** - Waiting in background queue
+3. **processing** - Executor is running Claude
+4. **ready** - Completed successfully
+5. **blocked** - Needs clarification/input
+6. **closed** - Done and archived
 
 ## Key Bindings (TUI)
 
 | Key | Action |
 |-----|--------|
+| `←/→` or `h/l` | Navigate columns |
 | `↑/↓` or `j/k` | Navigate tasks |
 | `Enter` | View task details |
 | `n` | New task |
@@ -158,17 +185,20 @@ backlog → in_progress → done
 | `c` | Close selected task |
 | `d` | Delete selected task |
 | `w` | Watch current execution |
+| `i` | Interrupt execution |
+| `/` | Filter tasks |
 | `m` | Project memories |
 | `s` | Settings |
 | `r` | Retry task |
 | `R` | Refresh list |
+| `?` | Toggle help |
 | `q` | Quit / Back |
 
 ## Charm Libraries Used
 
 - **Bubble Tea** - TUI framework (Elm architecture)
-- **Bubbles** - Components (list, viewport, spinner)
-- **Lip Gloss** - Styling
+- **Bubbles** - Components (help, textinput, viewport)
+- **Lip Gloss** - Styling and layout
 - **Glamour** - Markdown rendering
 - **Huh** - Forms
 - **Wish** - SSH server
@@ -176,7 +206,7 @@ backlog → in_progress → done
 ## Executor
 
 The background executor (`internal/executor/executor.go`):
-- Polls for `in_progress` tasks every 2 seconds
+- Polls for `queued` tasks every 2 seconds
 - Runs Claude Code with task-specific prompts
 - Streams output to `task_logs` table
 - Supports real-time watching via subscriptions
@@ -200,43 +230,24 @@ Project memories provide persistent context that carries across tasks. When a ta
 - `gotcha` - Known pitfalls and workarounds
 - `general` - General notes
 
-**Managing memories:**
-- Press `m` in the TUI to open the memories view
-- Filter by project using `p` or `tab`
-- Create (`n`), edit (`e`), or delete (`d`) memories
-- Memories are automatically included in executor prompts
-
 ## Deployment
 
 ### On Hetzner VPS
 
 1. Build for Linux:
    ```bash
-   make release
-   scp bin/taskd-linux-amd64 server:~/taskd
+   GOOS=linux GOARCH=amd64 go build -o bin/taskd-linux ./cmd/taskd
+   scp bin/taskd-linux server:~/taskd
    ```
 
-2. Create systemd service:
-   ```ini
-   [Unit]
-   Description=Task Queue Daemon
-   After=network.target
-
-   [Service]
-   ExecStart=/home/runner/taskd
-   WorkingDirectory=/home/runner
-   User=runner
-   Restart=always
-
-   [Install]
-   WantedBy=multi-user.target
+2. Install systemd service:
+   ```bash
+   ./scripts/install-service.sh
    ```
-
-3. Configure SSH keys for auth (in `internal/server/ssh.go`)
 
 ### SSH Key Auth
 
-Currently accepts all keys. To restrict:
+Currently accepts all keys. To restrict, edit `internal/server/ssh.go`:
 ```go
 wish.WithPublicKeyAuth(func(ctx ssh.Context, key ssh.PublicKey) bool {
     // Compare key fingerprint against allowed list
@@ -249,12 +260,3 @@ wish.WithPublicKeyAuth(func(ctx ssh.Context, key ssh.PublicKey) bool {
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `TASK_DB_PATH` | SQLite database path | `~/.local/share/task/tasks.db` |
-
-## Legacy Files
-
-The `scripts/` directory contains the old bash implementation:
-- `task.sh` - Original CLI (uses GitHub Issues)
-- `setup-runner.sh` - Server provisioning
-- `setup-labels.sh` - GitHub label setup
-
-These are kept for reference but no longer used.

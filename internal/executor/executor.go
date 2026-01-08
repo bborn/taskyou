@@ -338,10 +338,16 @@ func (e *Executor) executeTask(ctx context.Context, task *db.Task) {
 		}
 	}
 
+	// Update status to processing
+	if err := e.updateStatus(task.ID, db.StatusProcessing); err != nil {
+		e.logger.Error("Failed to update status", "error", err)
+		return
+	}
+
 	// Log start and trigger hook
 	startMsg := fmt.Sprintf("Starting task #%d: %s", task.ID, task.Title)
 	e.logLine(task.ID, "system", startMsg)
-	e.hooks.OnStatusChange(task, db.StatusInProgress, startMsg)
+	e.hooks.OnStatusChange(task, db.StatusProcessing, startMsg)
 
 	// Determine project directory
 	projectDir := e.getProjectDir(task.Project)

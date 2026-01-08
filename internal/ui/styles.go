@@ -14,7 +14,7 @@ var (
 	ColorMuted     = lipgloss.Color("#6B7280") // Gray
 
 	// Status colors
-	ColorInProgress = lipgloss.Color("#9C9265") // Muted olive
+	ColorInProgress = lipgloss.Color("#9A9463") // Subtler muted yellow
 	ColorDone       = lipgloss.Color("#10B981") // Green
 	ColorBlocked    = lipgloss.Color("#EF4444") // Red
 
@@ -108,7 +108,7 @@ var (
 // StatusStyle returns the style for a given status.
 func StatusStyle(status string) lipgloss.Style {
 	switch status {
-	case "in_progress":
+	case "queued", "processing":
 		return StatusInProgress
 	case "done":
 		return StatusDone
@@ -122,7 +122,9 @@ func StatusStyle(status string) lipgloss.Style {
 // StatusIcon returns the icon for a given status.
 func StatusIcon(status string) string {
 	switch status {
-	case "in_progress":
+	case "queued":
+		return "◦"
+	case "processing":
 		return "⋯"
 	case "done":
 		return "✓"
@@ -150,7 +152,7 @@ func ProjectColor(project string) lipgloss.Color {
 // StatusColor returns the background color for a status.
 func StatusColor(status string) lipgloss.Color {
 	switch status {
-	case "in_progress":
+	case "queued", "processing":
 		return ColorInProgress
 	case "done":
 		return ColorDone

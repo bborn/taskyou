@@ -45,7 +45,6 @@ type KeyMap struct {
 	Refresh      key.Binding
 	Settings     key.Binding
 	Memories     key.Binding
-	ToggleClosed key.Binding
 	Help         key.Binding
 	Quit         key.Binding
 }
@@ -61,7 +60,7 @@ func (k KeyMap) FullHelp() [][]key.Binding {
 		{k.Left, k.Right, k.Up, k.Down},
 		{k.Enter, k.New, k.Queue, k.Close},
 		{k.Retry, k.Watch, k.Interrupt, k.Delete},
-		{k.Filter, k.ToggleClosed, k.Settings, k.Memories},
+		{k.Filter, k.Settings, k.Memories},
 		{k.Refresh, k.Help, k.Quit},
 	}
 }
@@ -137,10 +136,6 @@ func DefaultKeyMap() KeyMap {
 			key.WithKeys("m"),
 			key.WithHelp("m", "memories"),
 		),
-		ToggleClosed: key.NewBinding(
-			key.WithKeys("a"),
-			key.WithHelp("a", "show all"),
-		),
 		Help: key.NewBinding(
 			key.WithKeys("?"),
 			key.WithHelp("?", "help"),
@@ -159,6 +154,9 @@ type AppModel struct {
 	keys     KeyMap
 	help     help.Model
 
+	// Working directory context (for project detection)
+	workingDir string
+
 	currentView  View
 	previousView View
 
@@ -166,7 +164,6 @@ type AppModel struct {
 	tasks        []*db.Task
 	kanban       *KanbanBoard
 	loading      bool
-	showClosed   bool // Show closed tasks in the list
 	err          error
 	notification string    // Notification banner text
 	notifyUntil  time.Time // When to hide notification
@@ -211,7 +208,7 @@ type AppModel struct {
 
 
 // NewAppModel creates a new application model.
-func NewAppModel(database *db.DB, exec *executor.Executor) *AppModel {
+func NewAppModel(database *db.DB, exec *executor.Executor, workingDir string) *AppModel {
 	// Start with zero size - will be set by WindowSizeMsg
 	kanban := NewKanbanBoard(0, 0)
 
@@ -228,6 +225,7 @@ func NewAppModel(database *db.DB, exec *executor.Executor) *AppModel {
 	return &AppModel{
 		db:           database,
 		executor:     exec,
+		workingDir:   workingDir,
 		keys:         DefaultKeyMap(),
 		help:         h,
 		currentView:  ViewDashboard,
@@ -315,13 +313,21 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.notification = fmt.Sprintf("⚠ Task #%d needs input: %s", t.ID, t.Title)
 					m.notifyUntil = time.Now().Add(10 * time.Second)
 					fmt.Print("\a") // Ring terminal bell
-				} else if t.Status == db.StatusDone && prevStatus == db.StatusInProgress {
+				} else if t.Status == db.StatusDone && db.IsInProgress(prevStatus) {
 					// Task completed
 					m.notification = fmt.Sprintf("✓ Task #%d complete: %s", t.ID, t.Title)
 					m.notifyUntil = time.Now().Add(5 * time.Second)
 				}
 			}
 			m.prevStatuses[t.ID] = t.Status
+			
+			// Update detail view if showing this task
+			if m.selectedTask != nil && m.selectedTask.ID == t.ID {
+				m.selectedTask = t
+				if m.detailView != nil {
+					m.detailView.UpdateTask(t)
+				}
+			}
 		}
 
 		m.kanban.SetTasks(m.tasks)
@@ -364,10 +370,10 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 							m.notification = fmt.Sprintf("⚠ Task #%d needs input: %s", event.TaskID, event.Task.Title)
 							m.notifyUntil = time.Now().Add(10 * time.Second)
 							fmt.Print("\a") // Ring terminal bell
-						} else if event.Task.Status == db.StatusDone && prevStatus == db.StatusInProgress {
+						} else if event.Task.Status == db.StatusDone && db.IsInProgress(prevStatus) {
 							m.notification = fmt.Sprintf("✓ Task #%d complete: %s", event.TaskID, event.Task.Title)
 							m.notifyUntil = time.Now().Add(5 * time.Second)
-						} else if event.Task.Status == db.StatusInProgress {
+						} else if db.IsInProgress(event.Task.Status) {
 							m.notification = fmt.Sprintf("▶ Task #%d started: %s", event.TaskID, event.Task.Title)
 							m.notifyUntil = time.Now().Add(3 * time.Second)
 						}
@@ -377,6 +383,14 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 			m.kanban.SetTasks(m.tasks)
+			
+			// Update detail view if showing this task
+			if m.selectedTask != nil && m.selectedTask.ID == event.TaskID {
+				m.selectedTask = event.Task
+				if m.detailView != nil {
+					m.detailView.UpdateTask(event.Task)
+				}
+			}
 		}
 		// Wait for next event
 		cmds = append(cmds, m.waitForTaskEvent())
@@ -471,12 +485,13 @@ func (m *AppModel) viewDashboard() string {
 		headerParts = append(headerParts, filterStyle.Render(fmt.Sprintf("Filter: %s", m.kanban.GetFilter())))
 	}
 
-	// Calculate heights
+	// Calculate heights dynamically
 	headerHeight := len(headerParts)
-	if headerHeight == 0 {
-		headerHeight = 0
-	}
-	helpHeight := 2
+
+	// Render help to measure its actual height
+	helpView := m.renderHelp()
+	helpHeight := lipgloss.Height(helpView)
+
 	kanbanHeight := m.height - headerHeight - helpHeight
 
 	// Update kanban size
@@ -491,7 +506,7 @@ func (m *AppModel) viewDashboard() string {
 	content := lipgloss.JoinVertical(lipgloss.Left,
 		header,
 		m.kanban.View(),
-		m.renderHelp(),
+		helpView,
 	)
 
 	// Use Place to fill the entire terminal
@@ -569,7 +584,7 @@ func (m *AppModel) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 
 	case key.Matches(msg, m.keys.New):
-		m.newTaskForm = NewFormModel(m.db, m.width, m.height)
+		m.newTaskForm = NewFormModel(m.db, m.width, m.height, m.workingDir)
 		m.previousView = m.currentView
 		m.currentView = ViewNewTask
 		return m, m.newTaskForm.Init()
@@ -605,7 +620,7 @@ func (m *AppModel) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, m.keys.Watch):
 		// Watch the selected task if it's in progress
 		if task := m.kanban.SelectedTask(); task != nil {
-			if task.Status == db.StatusInProgress || m.executor.IsRunning(task.ID) {
+			if db.IsInProgress(task.Status) || m.executor.IsRunning(task.ID) {
 				m.watchView = NewWatchModel(m.db, m.executor, task.ID, m.width, m.height)
 				m.previousView = m.currentView
 				m.currentView = ViewWatch
@@ -616,7 +631,7 @@ func (m *AppModel) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, m.keys.Interrupt):
 		// Interrupt the selected task if it's in progress
 		if task := m.kanban.SelectedTask(); task != nil {
-			if task.Status == db.StatusInProgress || m.executor.IsRunning(task.ID) {
+			if db.IsInProgress(task.Status) || m.executor.IsRunning(task.ID) {
 				return m, m.interruptTask(task.ID)
 			}
 		}
@@ -640,12 +655,6 @@ func (m *AppModel) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case key.Matches(msg, m.keys.Refresh):
 		m.loading = true
-		return m, m.loadTasks()
-
-	case key.Matches(msg, m.keys.ToggleClosed):
-		m.showClosed = !m.showClosed
-		m.numberFilter = "" // Clear number filter when toggling
-		m.kanban.SetShowClosed(m.showClosed)
 		return m, m.loadTasks()
 
 	case key.Matches(msg, m.keys.Help):
@@ -850,9 +859,8 @@ type taskEventMsg struct {
 type tickMsg time.Time
 
 func (m *AppModel) loadTasks() tea.Cmd {
-	showClosed := m.showClosed
 	return func() tea.Msg {
-		tasks, err := m.db.ListTasks(db.ListTasksOptions{Limit: 50, IncludeClosed: showClosed})
+		tasks, err := m.db.ListTasks(db.ListTasksOptions{Limit: 50, IncludeClosed: true})
 		return tasksLoadedMsg{tasks: tasks, err: err}
 	}
 }
@@ -879,7 +887,7 @@ func (m *AppModel) queueTask(id int64) tea.Cmd {
 	database := m.db
 	exec := m.executor
 	return func() tea.Msg {
-		err := database.UpdateTaskStatus(id, db.StatusInProgress)
+		err := database.UpdateTaskStatus(id, db.StatusQueued)
 		if err == nil {
 			if task, _ := database.GetTask(id); task != nil {
 				exec.NotifyTaskChange("status_changed", task)

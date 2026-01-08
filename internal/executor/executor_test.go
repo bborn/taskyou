@@ -109,7 +109,7 @@ func TestInterrupt(t *testing.T) {
 	// Create a test task
 	task := &db.Task{
 		Title:   "Test task",
-		Status:  db.StatusInProgress,
+		Status:  db.StatusProcessing,
 		Project: "test",
 	}
 	if err := database.CreateTask(task); err != nil {

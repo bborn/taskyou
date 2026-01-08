@@ -23,7 +23,6 @@ type KanbanBoard struct {
 	selectedRow   int
 	width         int
 	height        int
-	showClosed    bool
 	numberFilter  string
 	allTasks      []*db.Task // All tasks for filtering
 	filteredTasks []*db.Task // Tasks after applying text filter
@@ -35,7 +34,7 @@ func NewKanbanBoard(width, height int) *KanbanBoard {
 	return &KanbanBoard{
 		columns: []KanbanColumn{
 			{Title: "Backlog", Status: db.StatusBacklog, Color: ColorMuted},
-			{Title: "In Progress", Status: db.StatusInProgress, Color: ColorInProgress},
+			{Title: "In Progress", Status: db.StatusQueued, Color: ColorInProgress}, // Also shows processing
 			{Title: "Blocked", Status: db.StatusBlocked, Color: ColorBlocked},
 			{Title: "Done", Status: db.StatusDone, Color: ColorDone},
 		},
@@ -73,10 +72,21 @@ func (k *KanbanBoard) applyFilter() {
 
 	// Distribute tasks to columns
 	for _, task := range k.filteredTasks {
+		placed := false
 		for i := range k.columns {
 			if k.columns[i].Status == task.Status {
 				k.columns[i].Tasks = append(k.columns[i].Tasks, task)
+				placed = true
 				break
+			}
+		}
+		// Map processing tasks to In Progress column (which uses StatusQueued)
+		if !placed && task.Status == db.StatusProcessing {
+			for i := range k.columns {
+				if k.columns[i].Status == db.StatusQueued {
+					k.columns[i].Tasks = append(k.columns[i].Tasks, task)
+					break
+				}
 			}
 		}
 	}
@@ -94,12 +104,6 @@ func (k *KanbanBoard) SetFilter(filter string) {
 // GetFilter returns the current text filter.
 func (k *KanbanBoard) GetFilter() string {
 	return k.textFilter
-}
-
-// SetShowClosed sets whether to show closed tasks.
-func (k *KanbanBoard) SetShowClosed(show bool) {
-	k.showClosed = show
-	k.applyFilter()
 }
 
 // SetSize updates the board dimensions.

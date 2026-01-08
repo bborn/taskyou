@@ -26,12 +26,21 @@ type FormModel struct {
 }
 
 // NewFormModel creates a new form model.
-func NewFormModel(database *db.DB, width, height int) *FormModel {
+// workingDir is used to detect the default project based on the current directory.
+func NewFormModel(database *db.DB, width, height int, workingDir string) *FormModel {
 	m := &FormModel{
 		db:     database,
 		width:  width,
 		height: height,
 	}
+
+	// Detect default project from working directory
+	if workingDir != "" && database != nil {
+		if proj, err := database.GetProjectByPath(workingDir); err == nil && proj != nil {
+			m.project = proj.Name
+		}
+	}
+
 	m.initForm()
 	return m
 }
@@ -164,7 +173,7 @@ func (m *FormModel) View() string {
 func (m *FormModel) GetDBTask() *db.Task {
 	status := db.StatusBacklog
 	if m.queue {
-		status = db.StatusInProgress
+		status = db.StatusQueued
 	}
 
 	return &db.Task{

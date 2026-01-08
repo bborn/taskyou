@@ -143,8 +143,11 @@ func runLocal() error {
 	// The actual execution happens in the daemon process
 	exec := executor.New(database, cfg)
 
+	// Get current working directory for project detection
+	cwd, _ := os.Getwd()
+
 	// Create and run TUI
-	model := ui.NewAppModel(database, exec)
+	model := ui.NewAppModel(database, exec, cwd)
 	p := tea.NewProgram(
 		model,
 		tea.WithAltScreen(),

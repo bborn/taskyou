@@ -3,6 +3,7 @@ package db
 import (
 	"database/sql"
 	"fmt"
+	"path/filepath"
 	"strings"
 )
 
@@ -23,11 +24,17 @@ type Task struct {
 
 // Task statuses
 const (
-	StatusBacklog    = "backlog"     // Created but not yet started
-	StatusInProgress = "in_progress" // Being worked on (queued, triaging, or processing)
-	StatusBlocked    = "blocked"     // Needs input/clarification
-	StatusDone       = "done"        // Completed
+	StatusBacklog    = "backlog"    // Created but not yet started
+	StatusQueued     = "queued"     // Waiting to be processed
+	StatusProcessing = "processing" // Currently being executed
+	StatusBlocked    = "blocked"    // Needs input/clarification
+	StatusDone       = "done"       // Completed
 )
+
+// IsInProgress returns true if the task is actively being worked on.
+func IsInProgress(status string) bool {
+	return status == StatusQueued || status == StatusProcessing
+}
 
 // Task types
 const (
@@ -156,7 +163,7 @@ func (db *DB) UpdateTaskStatus(id int64, status string) error {
 	args := []interface{}{status}
 
 	switch status {
-	case StatusInProgress:
+	case StatusProcessing:
 		query += ", started_at = CURRENT_TIMESTAMP"
 	case StatusDone, StatusBlocked:
 		query += ", completed_at = CURRENT_TIMESTAMP"
@@ -206,7 +213,7 @@ func (db *DB) RetryTask(id int64, feedback string) error {
 	}
 
 	// Re-queue the task
-	return db.UpdateTaskStatus(id, StatusInProgress)
+	return db.UpdateTaskStatus(id, StatusQueued)
 }
 
 // GetNextQueuedTask returns the next task to process.
@@ -219,7 +226,7 @@ func (db *DB) GetNextQueuedTask() (*Task, error) {
 		WHERE status = ?
 		ORDER BY CASE priority WHEN 'high' THEN 0 WHEN 'normal' THEN 1 ELSE 2 END, created_at ASC
 		LIMIT 1
-	`, StatusInProgress).Scan(
+	`, StatusQueued).Scan(
 		&t.ID, &t.Title, &t.Body, &t.Status, &t.Type, &t.Project, &t.Priority,
 		&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
 	)
@@ -232,7 +239,7 @@ func (db *DB) GetNextQueuedTask() (*Task, error) {
 	return t, nil
 }
 
-// GetQueuedTasks returns all in-progress tasks.
+// GetQueuedTasks returns all queued tasks (waiting to be processed).
 func (db *DB) GetQueuedTasks() ([]*Task, error) {
 	rows, err := db.Query(`
 		SELECT id, title, body, status, type, project, priority,
@@ -242,7 +249,7 @@ func (db *DB) GetQueuedTasks() ([]*Task, error) {
 		ORDER BY 
 			CASE priority WHEN 'high' THEN 0 WHEN 'normal' THEN 1 ELSE 2 END,
 			created_at ASC
-	`, StatusInProgress)
+	`, StatusQueued)
 	if err != nil {
 		return nil, fmt.Errorf("query queued tasks: %w", err)
 	}
@@ -483,6 +490,27 @@ func splitAliases(aliases string) []string {
 		}
 	}
 	return result
+}
+
+// GetProjectByPath returns a project whose path matches the given directory.
+// It checks if cwd equals or is a subdirectory of any project's path.
+func (db *DB) GetProjectByPath(cwd string) (*Project, error) {
+	projects, err := db.ListProjects()
+	if err != nil {
+		return nil, fmt.Errorf("list projects: %w", err)
+	}
+
+	// Clean the cwd for consistent matching
+	cwd = filepath.Clean(cwd)
+
+	for _, p := range projects {
+		projectPath := filepath.Clean(p.Path)
+		// Check if cwd equals or is under the project path
+		if cwd == projectPath || strings.HasPrefix(cwd, projectPath+string(filepath.Separator)) {
+			return p, nil
+		}
+	}
+	return nil, nil
 }
 
 // GetSetting returns a setting value.

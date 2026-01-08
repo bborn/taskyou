@@ -155,7 +155,7 @@ func (m *WatchModel) View() string {
 	var header string
 	if m.task != nil {
 		status := m.task.Status
-		if status == db.StatusInProgress {
+		if db.IsInProgress(status) {
 			header = m.spinner.View() + " Processing: " + Bold.Render(m.task.Title)
 		} else if status == db.StatusDone {
 			header = Success.Render("✓ Completed: ") + Bold.Render(m.task.Title)
