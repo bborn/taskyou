@@ -12,7 +12,18 @@
 
 # Claude Code
 .claude/
+.crush/
 
 # Archives
 *.tar.gz
 *.zip
+
+# Go
+bin/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out

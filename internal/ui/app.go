@@ -1,0 +1,1009 @@
+package ui
+
+import (
+	"fmt"
+	"os/exec"
+	"time"
+
+	"github.com/bborn/workflow/internal/db"
+	"github.com/bborn/workflow/internal/executor"
+	"github.com/charmbracelet/bubbles/help"
+	"github.com/charmbracelet/bubbles/key"
+	"github.com/charmbracelet/bubbles/textinput"
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
+)
+
+// View represents the current view.
+type View int
+
+const (
+	ViewDashboard View = iota
+	ViewDetail
+	ViewNewTask
+	ViewWatch
+	ViewSettings
+	ViewRetry
+	ViewMemories
+)
+
+// KeyMap defines key bindings.
+type KeyMap struct {
+	Left         key.Binding
+	Right        key.Binding
+	Up           key.Binding
+	Down         key.Binding
+	Enter        key.Binding
+	Back         key.Binding
+	New          key.Binding
+	Queue        key.Binding
+	Retry        key.Binding
+	Close        key.Binding
+	Delete       key.Binding
+	Watch        key.Binding
+	Attach       key.Binding
+	Interrupt    key.Binding
+	Filter       key.Binding
+	Refresh      key.Binding
+	Settings     key.Binding
+	Memories     key.Binding
+	Help         key.Binding
+	Quit         key.Binding
+}
+
+// ShortHelp returns key bindings to show in the mini help.
+func (k KeyMap) ShortHelp() []key.Binding {
+	return []key.Binding{k.Left, k.Right, k.Up, k.Down, k.Enter, k.New, k.Queue, k.Filter, k.Quit}
+}
+
+// FullHelp returns keybindings for the expanded help view.
+func (k KeyMap) FullHelp() [][]key.Binding {
+	return [][]key.Binding{
+		{k.Left, k.Right, k.Up, k.Down},
+		{k.Enter, k.New, k.Queue, k.Close},
+		{k.Retry, k.Watch, k.Attach, k.Interrupt, k.Delete},
+		{k.Filter, k.Settings, k.Memories},
+		{k.Refresh, k.Help, k.Quit},
+	}
+}
+
+// DefaultKeyMap returns the default key bindings.
+func DefaultKeyMap() KeyMap {
+	return KeyMap{
+		Left: key.NewBinding(
+			key.WithKeys("left", "h"),
+			key.WithHelp("←/h", "prev col"),
+		),
+		Right: key.NewBinding(
+			key.WithKeys("right", "l"),
+			key.WithHelp("→/l", "next col"),
+		),
+		Up: key.NewBinding(
+			key.WithKeys("up", "k"),
+			key.WithHelp("↑/k", "up"),
+		),
+		Down: key.NewBinding(
+			key.WithKeys("down", "j"),
+			key.WithHelp("↓/j", "down"),
+		),
+		Enter: key.NewBinding(
+			key.WithKeys("enter"),
+			key.WithHelp("enter", "view"),
+		),
+		Back: key.NewBinding(
+			key.WithKeys("esc", "q"),
+			key.WithHelp("q/esc", "back"),
+		),
+		New: key.NewBinding(
+			key.WithKeys("n"),
+			key.WithHelp("n", "new"),
+		),
+		Queue: key.NewBinding(
+			key.WithKeys("x"),
+			key.WithHelp("x", "execute"),
+		),
+		Retry: key.NewBinding(
+			key.WithKeys("r"),
+			key.WithHelp("r", "retry"),
+		),
+		Close: key.NewBinding(
+			key.WithKeys("c"),
+			key.WithHelp("c", "close"),
+		),
+		Delete: key.NewBinding(
+			key.WithKeys("d"),
+			key.WithHelp("d", "delete"),
+		),
+		Watch: key.NewBinding(
+			key.WithKeys("w"),
+			key.WithHelp("w", "watch"),
+		),
+		Attach: key.NewBinding(
+			key.WithKeys("a"),
+			key.WithHelp("a", "attach"),
+		),
+		Interrupt: key.NewBinding(
+			key.WithKeys("i"),
+			key.WithHelp("i", "interrupt"),
+		),
+		Filter: key.NewBinding(
+			key.WithKeys("/"),
+			key.WithHelp("/", "filter"),
+		),
+		Refresh: key.NewBinding(
+			key.WithKeys("R"),
+			key.WithHelp("R", "refresh"),
+		),
+		Settings: key.NewBinding(
+			key.WithKeys("s"),
+			key.WithHelp("s", "settings"),
+		),
+		Memories: key.NewBinding(
+			key.WithKeys("m"),
+			key.WithHelp("m", "memories"),
+		),
+		Help: key.NewBinding(
+			key.WithKeys("?"),
+			key.WithHelp("?", "help"),
+		),
+		Quit: key.NewBinding(
+			key.WithKeys("ctrl+c"),
+			key.WithHelp("ctrl+c", "quit"),
+		),
+	}
+}
+
+// AppModel is the main application model.
+type AppModel struct {
+	db       *db.DB
+	executor *executor.Executor
+	keys     KeyMap
+	help     help.Model
+
+	// Working directory context (for project detection)
+	workingDir string
+
+	currentView  View
+	previousView View
+
+	// Dashboard state
+	tasks        []*db.Task
+	kanban       *KanbanBoard
+	loading      bool
+	err          error
+	notification string    // Notification banner text
+	notifyUntil  time.Time // When to hide notification
+
+	// Track task statuses to detect changes
+	prevStatuses map[int64]string
+
+	// Real-time event subscription
+	eventCh chan executor.TaskEvent
+
+	// Number filter for quick task ID jump
+	numberFilter string
+
+	// Text filter input
+	filterInput  textinput.Model
+	filtering    bool
+
+	// Detail view state
+	selectedTask *db.Task
+	detailView   *DetailModel
+
+	// New task form state
+	newTaskForm *FormModel
+
+	// Watch view state
+	watchView *WatchModel
+
+	// Settings view state
+	settingsView *SettingsModel
+
+	// Retry view state
+	retryView *RetryModel
+
+	// Memories view state
+	memoriesView *MemoriesModel
+
+	// Window size
+	width  int
+	height int
+}
+
+// updateTaskInList updates a task in the tasks list and refreshes the kanban.
+func (m *AppModel) updateTaskInList(task *db.Task) {
+	for i, t := range m.tasks {
+		if t.ID == task.ID {
+			m.tasks[i] = task
+			break
+		}
+	}
+	m.kanban.SetTasks(m.tasks)
+}
+
+// NewAppModel creates a new application model.
+func NewAppModel(database *db.DB, exec *executor.Executor, workingDir string) *AppModel {
+	// Load saved theme from database
+	LoadThemeFromDB(database.GetSetting)
+
+	// Start with zero size - will be set by WindowSizeMsg
+	kanban := NewKanbanBoard(0, 0)
+
+	// Setup filter input
+	fi := textinput.New()
+	fi.Placeholder = "Filter tasks..."
+	fi.CharLimit = 50
+	fi.Width = 30
+
+	// Setup help
+	h := help.New()
+	h.ShowAll = false
+
+	return &AppModel{
+		db:           database,
+		executor:     exec,
+		workingDir:   workingDir,
+		keys:         DefaultKeyMap(),
+		help:         h,
+		currentView:  ViewDashboard,
+		kanban:       kanban,
+		filterInput:  fi,
+		loading:      true,
+		prevStatuses: make(map[int64]string),
+	}
+}
+
+// Init initializes the model.
+func (m *AppModel) Init() tea.Cmd {
+	// Subscribe to real-time task events
+	m.eventCh = m.executor.SubscribeTaskEvents()
+	return tea.Batch(m.loadTasks(), m.waitForTaskEvent(), m.tick())
+}
+
+// Update handles messages.
+func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	var cmds []tea.Cmd
+
+	// Handle form updates first (needs all message types)
+	if m.currentView == ViewNewTask && m.newTaskForm != nil {
+		return m.updateNewTaskForm(msg)
+	}
+	if m.currentView == ViewSettings && m.settingsView != nil {
+		return m.updateSettings(msg)
+	}
+	if m.currentView == ViewRetry && m.retryView != nil {
+		return m.updateRetry(msg)
+	}
+
+	switch msg := msg.(type) {
+	case tea.KeyMsg:
+		// Global keys
+		if key.Matches(msg, m.keys.Quit) {
+			// Cleanup subscription
+			if m.eventCh != nil {
+				m.executor.UnsubscribeTaskEvents(m.eventCh)
+			}
+			return m, tea.Quit
+		}
+
+		// Route to current view
+		switch m.currentView {
+		case ViewDashboard:
+			return m.updateDashboard(msg)
+		case ViewDetail:
+			return m.updateDetail(msg)
+		case ViewWatch:
+			return m.updateWatch(msg)
+		case ViewMemories:
+			return m.updateMemories(msg)
+		}
+
+	case tea.WindowSizeMsg:
+		m.width = msg.Width
+		m.height = msg.Height
+		m.help.Width = msg.Width
+		m.kanban.SetSize(msg.Width, msg.Height-4)
+		if m.detailView != nil {
+			m.detailView.SetSize(msg.Width, msg.Height)
+		}
+		if m.watchView != nil {
+			m.watchView.SetSize(msg.Width, msg.Height)
+		}
+		if m.settingsView != nil {
+			m.settingsView.SetSize(msg.Width, msg.Height)
+		}
+		if m.retryView != nil {
+			m.retryView.SetSize(msg.Width, msg.Height)
+		}
+
+	case tasksLoadedMsg:
+		m.loading = false
+		m.tasks = msg.tasks
+		m.err = msg.err
+
+		// Check for newly blocked/done tasks and notify
+		for _, t := range m.tasks {
+			prevStatus := m.prevStatuses[t.ID]
+			if prevStatus != "" && prevStatus != t.Status {
+				if t.Status == db.StatusBlocked {
+					// Task just became blocked - ring bell and show notification
+					m.notification = fmt.Sprintf("⚠ Task #%d needs input: %s", t.ID, t.Title)
+					m.notifyUntil = time.Now().Add(10 * time.Second)
+					fmt.Print("\a") // Ring terminal bell
+				} else if t.Status == db.StatusDone && db.IsInProgress(prevStatus) {
+					// Task completed
+					m.notification = fmt.Sprintf("✓ Task #%d complete: %s", t.ID, t.Title)
+					m.notifyUntil = time.Now().Add(5 * time.Second)
+				}
+			}
+			m.prevStatuses[t.ID] = t.Status
+			
+			// Update detail view if showing this task
+			if m.selectedTask != nil && m.selectedTask.ID == t.ID {
+				m.selectedTask = t
+				if m.detailView != nil {
+					m.detailView.UpdateTask(t)
+				}
+			}
+		}
+
+		m.kanban.SetTasks(m.tasks)
+
+	case taskLoadedMsg:
+		if msg.err == nil {
+			m.selectedTask = msg.task
+			m.detailView = NewDetailModel(msg.task, m.db, m.width, m.height)
+			m.previousView = m.currentView
+			m.currentView = ViewDetail
+		} else {
+			m.err = msg.err
+		}
+
+	case taskCreatedMsg:
+		if msg.err == nil {
+			m.currentView = ViewDashboard
+			m.newTaskForm = nil
+			cmds = append(cmds, m.loadTasks())
+		} else {
+			m.err = msg.err
+		}
+
+	case taskQueuedMsg, taskClosedMsg, taskDeletedMsg, taskRetriedMsg, taskInterruptedMsg:
+		cmds = append(cmds, m.loadTasks())
+
+	case attachDoneMsg:
+		// Returned from tmux attach - refresh tasks
+		cmds = append(cmds, m.loadTasks())
+
+	case taskEventMsg:
+		// Real-time task update from executor
+		event := msg.event
+		if event.Task != nil {
+			// Update task in our list
+			for i, t := range m.tasks {
+				if t.ID == event.TaskID {
+					prevStatus := t.Status
+					m.tasks[i] = event.Task
+					
+					// Show notification for status changes
+					if prevStatus != event.Task.Status {
+						if event.Task.Status == db.StatusBlocked {
+							m.notification = fmt.Sprintf("⚠ Task #%d needs input: %s", event.TaskID, event.Task.Title)
+							m.notifyUntil = time.Now().Add(10 * time.Second)
+							fmt.Print("\a") // Ring terminal bell
+						} else if event.Task.Status == db.StatusDone && db.IsInProgress(prevStatus) {
+							m.notification = fmt.Sprintf("✓ Task #%d complete: %s", event.TaskID, event.Task.Title)
+							m.notifyUntil = time.Now().Add(5 * time.Second)
+						} else if db.IsInProgress(event.Task.Status) {
+							m.notification = fmt.Sprintf("▶ Task #%d started: %s", event.TaskID, event.Task.Title)
+							m.notifyUntil = time.Now().Add(3 * time.Second)
+						}
+						m.prevStatuses[event.TaskID] = event.Task.Status
+					}
+					break
+				}
+			}
+			m.kanban.SetTasks(m.tasks)
+			
+			// Update detail view if showing this task
+			if m.selectedTask != nil && m.selectedTask.ID == event.TaskID {
+				m.selectedTask = event.Task
+				if m.detailView != nil {
+					m.detailView.UpdateTask(event.Task)
+				}
+			}
+		}
+		// Wait for next event
+		cmds = append(cmds, m.waitForTaskEvent())
+
+	case tickMsg:
+		// Clear expired notifications
+		if !m.notifyUntil.IsZero() && time.Now().After(m.notifyUntil) {
+			m.notification = ""
+		}
+		cmds = append(cmds, m.tick())
+	}
+
+	return m, tea.Batch(cmds...)
+}
+
+// View renders the current view.
+func (m *AppModel) View() string {
+	// Wait for window size
+	if m.width == 0 || m.height == 0 {
+		return "Initializing..."
+	}
+
+	if m.loading {
+		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, "Loading tasks...")
+	}
+
+	if m.err != nil {
+		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, fmt.Sprintf("Error: %s", m.err))
+	}
+
+	switch m.currentView {
+	case ViewDashboard:
+		return m.viewDashboard()
+	case ViewDetail:
+		if m.detailView != nil {
+			return m.detailView.View()
+		}
+	case ViewNewTask:
+		if m.newTaskForm != nil {
+			return m.newTaskForm.View()
+		}
+	case ViewWatch:
+		if m.watchView != nil {
+			return m.watchView.View()
+		}
+	case ViewSettings:
+		if m.settingsView != nil {
+			return m.settingsView.View()
+		}
+	case ViewRetry:
+		if m.retryView != nil {
+			return m.retryView.View()
+		}
+	case ViewMemories:
+		if m.memoriesView != nil {
+			return m.memoriesView.View()
+		}
+	}
+
+	return ""
+}
+
+func (m *AppModel) viewDashboard() string {
+	var headerParts []string
+
+	// Show notification banner if active
+	if m.notification != "" && time.Now().Before(m.notifyUntil) {
+		notifyStyle := lipgloss.NewStyle().
+			Background(lipgloss.Color("#FFCC00")).
+			Foreground(lipgloss.Color("#000000")).
+			Bold(true).
+			Padding(0, 2)
+		headerParts = append(headerParts, notifyStyle.Render(m.notification))
+	} else {
+		m.notification = "" // Clear expired notification
+	}
+
+	// Show current processing tasks if any
+	if runningIDs := m.executor.RunningTasks(); len(runningIDs) > 0 {
+		statusBar := lipgloss.NewStyle().
+			Foreground(ColorInProgress).
+			Render(fmt.Sprintf("⋯ Processing %d task(s)", len(runningIDs)))
+		headerParts = append(headerParts, statusBar)
+	}
+
+	// Filter display
+	if m.filtering {
+		filterStyle := lipgloss.NewStyle().Foreground(ColorSecondary)
+		headerParts = append(headerParts, filterStyle.Render("Filter: ")+m.filterInput.View())
+	} else if m.kanban.GetFilter() != "" {
+		filterStyle := lipgloss.NewStyle().Foreground(ColorMuted)
+		headerParts = append(headerParts, filterStyle.Render(fmt.Sprintf("Filter: %s", m.kanban.GetFilter())))
+	}
+
+	// Calculate heights dynamically
+	headerHeight := len(headerParts)
+
+	// Render help to measure its actual height
+	helpView := m.renderHelp()
+	helpHeight := lipgloss.Height(helpView)
+
+	kanbanHeight := m.height - headerHeight - helpHeight
+
+	// Update kanban size
+	m.kanban.SetSize(m.width, kanbanHeight)
+
+	// Build the view
+	header := ""
+	if len(headerParts) > 0 {
+		header = lipgloss.JoinVertical(lipgloss.Left, headerParts...)
+	}
+
+	content := lipgloss.JoinVertical(lipgloss.Left,
+		header,
+		m.kanban.View(),
+		helpView,
+	)
+
+	// Use Place to fill the entire terminal
+	return lipgloss.Place(m.width, m.height, lipgloss.Left, lipgloss.Top, content)
+}
+
+func (m *AppModel) renderHelp() string {
+	return m.help.View(m.keys)
+}
+
+func (m *AppModel) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// Handle filter input mode
+	if m.filtering {
+		switch msg.String() {
+		case "esc":
+			m.filtering = false
+			m.filterInput.SetValue("")
+			m.kanban.SetFilter("")
+			return m, nil
+		case "enter":
+			m.filtering = false
+			return m, nil
+		default:
+			var cmd tea.Cmd
+			m.filterInput, cmd = m.filterInput.Update(msg)
+			m.kanban.SetFilter(m.filterInput.Value())
+			return m, cmd
+		}
+	}
+
+	// Handle number filter input
+	keyStr := msg.String()
+	if len(keyStr) == 1 && keyStr[0] >= '0' && keyStr[0] <= '9' {
+		m.numberFilter += keyStr
+		m.kanban.ApplyNumberFilter(m.numberFilter)
+		return m, nil
+	}
+
+	// Handle backspace for number filter
+	if keyStr == "backspace" && m.numberFilter != "" {
+		m.numberFilter = m.numberFilter[:len(m.numberFilter)-1]
+		m.kanban.ApplyNumberFilter(m.numberFilter)
+		return m, nil
+	}
+
+	// Clear number filter on escape (but don't quit)
+	if keyStr == "esc" && m.numberFilter != "" {
+		m.numberFilter = ""
+		m.kanban.ApplyNumberFilter("")
+		return m, nil
+	}
+
+	switch {
+	// Column navigation
+	case key.Matches(msg, m.keys.Left):
+		m.kanban.MoveLeft()
+		return m, nil
+
+	case key.Matches(msg, m.keys.Right):
+		m.kanban.MoveRight()
+		return m, nil
+
+	// Task navigation within column
+	case key.Matches(msg, m.keys.Up):
+		m.kanban.MoveUp()
+		return m, nil
+
+	case key.Matches(msg, m.keys.Down):
+		m.kanban.MoveDown()
+		return m, nil
+
+	case key.Matches(msg, m.keys.Enter):
+		if task := m.kanban.SelectedTask(); task != nil {
+			return m, m.loadTask(task.ID)
+		}
+
+	case key.Matches(msg, m.keys.New):
+		m.newTaskForm = NewFormModel(m.db, m.width, m.height, m.workingDir)
+		m.previousView = m.currentView
+		m.currentView = ViewNewTask
+		return m, m.newTaskForm.Init()
+
+	case key.Matches(msg, m.keys.Queue):
+		if task := m.kanban.SelectedTask(); task != nil {
+			// Immediately update UI for responsiveness
+			task.Status = db.StatusQueued
+			m.updateTaskInList(task)
+			return m, m.queueTask(task.ID)
+		}
+
+	case key.Matches(msg, m.keys.Retry):
+		if task := m.kanban.SelectedTask(); task != nil {
+			// Allow retry for blocked, done, or backlog tasks
+			if task.Status == db.StatusBlocked || task.Status == db.StatusDone ||
+				task.Status == db.StatusBacklog {
+				m.selectedTask = task
+				m.retryView = NewRetryModel(task, m.db, m.width, m.height)
+				m.previousView = m.currentView
+				m.currentView = ViewRetry
+				return m, m.retryView.Init()
+			}
+		}
+
+	case key.Matches(msg, m.keys.Close):
+		if task := m.kanban.SelectedTask(); task != nil {
+			// Immediately update UI for responsiveness
+			task.Status = db.StatusDone
+			m.updateTaskInList(task)
+			return m, m.closeTask(task.ID)
+		}
+
+	case key.Matches(msg, m.keys.Delete):
+		if task := m.kanban.SelectedTask(); task != nil {
+			return m, m.deleteTask(task.ID)
+		}
+
+	case key.Matches(msg, m.keys.Watch):
+		// Watch the selected task if it's in progress
+		if task := m.kanban.SelectedTask(); task != nil {
+			if db.IsInProgress(task.Status) || m.executor.IsRunning(task.ID) {
+				m.watchView = NewWatchModel(m.db, m.executor, task.ID, m.width, m.height)
+				m.previousView = m.currentView
+				m.currentView = ViewWatch
+				return m, m.watchView.Init()
+			}
+		}
+
+	case key.Matches(msg, m.keys.Attach):
+		// Attach to tmux session for selected task
+		if task := m.kanban.SelectedTask(); task != nil {
+			if db.IsInProgress(task.Status) {
+				sessionName := executor.TmuxSessionName(task.ID)
+				return m, tea.ExecProcess(
+					exec.Command("tmux", "attach-session", "-t", sessionName),
+					func(err error) tea.Msg { return attachDoneMsg{err: err} },
+				)
+			}
+		}
+
+	case key.Matches(msg, m.keys.Interrupt):
+		// Interrupt the selected task if it's in progress
+		if task := m.kanban.SelectedTask(); task != nil {
+			if db.IsInProgress(task.Status) || m.executor.IsRunning(task.ID) {
+				return m, m.interruptTask(task.ID)
+			}
+		}
+
+	case key.Matches(msg, m.keys.Filter):
+		m.filtering = true
+		m.filterInput.Focus()
+		return m, textinput.Blink
+
+	case key.Matches(msg, m.keys.Settings):
+		m.settingsView = NewSettingsModel(m.db, m.width, m.height)
+		m.previousView = m.currentView
+		m.currentView = ViewSettings
+		return m, m.settingsView.Init()
+
+	case key.Matches(msg, m.keys.Memories):
+		m.memoriesView = NewMemoriesModel(m.db, m.width, m.height)
+		m.previousView = m.currentView
+		m.currentView = ViewMemories
+		return m, nil
+
+	case key.Matches(msg, m.keys.Refresh):
+		m.loading = true
+		return m, m.loadTasks()
+
+	case key.Matches(msg, m.keys.Help):
+		m.help.ShowAll = !m.help.ShowAll
+		return m, nil
+
+	case key.Matches(msg, m.keys.Back):
+		return m, tea.Quit
+	}
+
+	return m, nil
+}
+
+func (m *AppModel) updateDetail(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if key.Matches(msg, m.keys.Back) {
+		m.currentView = ViewDashboard
+		m.detailView = nil
+		return m, nil
+	}
+
+	// Handle queue/close/retry from detail view
+	if key.Matches(msg, m.keys.Queue) && m.selectedTask != nil {
+		// Immediately update UI for responsiveness
+		m.selectedTask.Status = db.StatusQueued
+		if m.detailView != nil {
+			m.detailView.UpdateTask(m.selectedTask)
+		}
+		// Update task in the list and kanban
+		m.updateTaskInList(m.selectedTask)
+		return m, m.queueTask(m.selectedTask.ID)
+	}
+	if key.Matches(msg, m.keys.Retry) && m.selectedTask != nil {
+		task := m.selectedTask
+		if task.Status == db.StatusBlocked || task.Status == db.StatusDone ||
+			task.Status == db.StatusBacklog {
+			m.retryView = NewRetryModel(task, m.db, m.width, m.height)
+			m.previousView = m.currentView
+			m.currentView = ViewRetry
+			return m, m.retryView.Init()
+		}
+	}
+	if key.Matches(msg, m.keys.Close) && m.selectedTask != nil {
+		// Immediately update UI for responsiveness
+		m.selectedTask.Status = db.StatusDone
+		if m.detailView != nil {
+			m.detailView.UpdateTask(m.selectedTask)
+		}
+		// Update task in the list and kanban
+		m.updateTaskInList(m.selectedTask)
+		m.currentView = ViewDashboard
+		return m, m.closeTask(m.selectedTask.ID)
+	}
+
+	if m.detailView != nil {
+		var cmd tea.Cmd
+		m.detailView, cmd = m.detailView.Update(msg)
+		return m, cmd
+	}
+
+	return m, nil
+}
+
+func (m *AppModel) updateNewTaskForm(msg tea.Msg) (tea.Model, tea.Cmd) {
+	// Handle escape to cancel
+	if keyMsg, ok := msg.(tea.KeyMsg); ok {
+		if keyMsg.String() == "esc" {
+			m.currentView = ViewDashboard
+			m.newTaskForm = nil
+			return m, nil
+		}
+	}
+
+	// Pass all messages to the form
+	model, cmd := m.newTaskForm.Update(msg)
+	if form, ok := model.(*FormModel); ok {
+		m.newTaskForm = form
+		if form.submitted {
+			// Capture task and nil out form immediately to prevent duplicate submissions
+			task := form.GetDBTask()
+			m.newTaskForm = nil
+			m.currentView = ViewDashboard
+			return m, m.createTask(task)
+		}
+		if form.cancelled {
+			m.currentView = ViewDashboard
+			m.newTaskForm = nil
+			return m, nil
+		}
+	}
+	return m, cmd
+}
+
+func (m *AppModel) updateWatch(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if key.Matches(msg, m.keys.Back) {
+		m.currentView = ViewDashboard
+		if m.watchView != nil {
+			m.watchView.Cleanup()
+		}
+		m.watchView = nil
+		return m, nil
+	}
+
+	if m.watchView != nil {
+		var cmd tea.Cmd
+		m.watchView, cmd = m.watchView.Update(msg)
+		return m, cmd
+	}
+
+	return m, nil
+}
+
+func (m *AppModel) updateSettings(msg tea.Msg) (tea.Model, tea.Cmd) {
+	// Handle escape to go back
+	if keyMsg, ok := msg.(tea.KeyMsg); ok {
+		if keyMsg.String() == "q" || keyMsg.String() == "esc" {
+			// Only exit if not in edit mode or browsing
+			if m.settingsView != nil && !m.settingsView.editing && !m.settingsView.browsing {
+				m.currentView = ViewDashboard
+				m.settingsView = nil
+				// Refresh kanban theme colors after settings change
+				m.kanban.RefreshTheme()
+				return m, nil
+			}
+		}
+	}
+
+	if m.settingsView != nil {
+		var cmd tea.Cmd
+		m.settingsView, cmd = m.settingsView.Update(msg)
+		return m, cmd
+	}
+
+	return m, nil
+}
+
+func (m *AppModel) updateRetry(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if m.retryView == nil {
+		return m, nil
+	}
+
+	var cmd tea.Cmd
+	m.retryView, cmd = m.retryView.Update(msg)
+
+	if m.retryView.cancelled {
+		m.currentView = m.previousView
+		m.retryView = nil
+		return m, nil
+	}
+
+	if m.retryView.submitted {
+		feedback := m.retryView.GetFeedback()
+		taskID := m.retryView.task.ID
+		m.currentView = ViewDashboard
+		m.retryView = nil
+		m.detailView = nil
+		return m, m.retryTask(taskID, feedback)
+	}
+
+	return m, cmd
+}
+
+func (m *AppModel) updateMemories(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if key.Matches(msg, m.keys.Back) {
+		m.currentView = ViewDashboard
+		m.memoriesView = nil
+		return m, nil
+	}
+
+	if m.memoriesView != nil {
+		var cmd tea.Cmd
+		m.memoriesView, cmd = m.memoriesView.Update(msg)
+		return m, cmd
+	}
+
+	return m, nil
+}
+
+// Messages
+type tasksLoadedMsg struct {
+	tasks []*db.Task
+	err   error
+}
+
+type taskLoadedMsg struct {
+	task *db.Task
+	err  error
+}
+
+type taskCreatedMsg struct {
+	task *db.Task
+	err  error
+}
+
+type taskQueuedMsg struct {
+	err error
+}
+
+type taskClosedMsg struct {
+	err error
+}
+
+type taskDeletedMsg struct {
+	err error
+}
+
+type taskRetriedMsg struct {
+	err error
+}
+
+type taskInterruptedMsg struct {
+	err error
+}
+
+type taskEventMsg struct {
+	event executor.TaskEvent
+}
+
+type attachDoneMsg struct {
+	err error
+}
+
+type tickMsg time.Time
+
+func (m *AppModel) loadTasks() tea.Cmd {
+	return func() tea.Msg {
+		tasks, err := m.db.ListTasks(db.ListTasksOptions{Limit: 50, IncludeClosed: true})
+		return tasksLoadedMsg{tasks: tasks, err: err}
+	}
+}
+
+func (m *AppModel) loadTask(id int64) tea.Cmd {
+	return func() tea.Msg {
+		task, err := m.db.GetTask(id)
+		return taskLoadedMsg{task: task, err: err}
+	}
+}
+
+func (m *AppModel) createTask(t *db.Task) tea.Cmd {
+	exec := m.executor
+	return func() tea.Msg {
+		err := m.db.CreateTask(t)
+		if err == nil {
+			exec.NotifyTaskChange("created", t)
+		}
+		return taskCreatedMsg{task: t, err: err}
+	}
+}
+
+func (m *AppModel) queueTask(id int64) tea.Cmd {
+	database := m.db
+	exec := m.executor
+	return func() tea.Msg {
+		err := database.UpdateTaskStatus(id, db.StatusQueued)
+		if err == nil {
+			if task, _ := database.GetTask(id); task != nil {
+				exec.NotifyTaskChange("status_changed", task)
+			}
+		}
+		return taskQueuedMsg{err: err}
+	}
+}
+
+func (m *AppModel) closeTask(id int64) tea.Cmd {
+	database := m.db
+	exec := m.executor
+	return func() tea.Msg {
+		err := database.UpdateTaskStatus(id, db.StatusDone)
+		if err == nil {
+			if task, _ := database.GetTask(id); task != nil {
+				exec.NotifyTaskChange("status_changed", task)
+			}
+		}
+		return taskClosedMsg{err: err}
+	}
+}
+
+func (m *AppModel) deleteTask(id int64) tea.Cmd {
+	return func() tea.Msg {
+		err := m.db.DeleteTask(id)
+		return taskDeletedMsg{err: err}
+	}
+}
+
+func (m *AppModel) retryTask(id int64, feedback string) tea.Cmd {
+	return func() tea.Msg {
+		err := m.db.RetryTask(id, feedback)
+		return taskRetriedMsg{err: err}
+	}
+}
+
+func (m *AppModel) interruptTask(id int64) tea.Cmd {
+	return func() tea.Msg {
+		m.executor.Interrupt(id)
+		return taskInterruptedMsg{}
+	}
+}
+
+func (m *AppModel) waitForTaskEvent() tea.Cmd {
+	return func() tea.Msg {
+		event, ok := <-m.eventCh
+		if !ok {
+			return nil // Channel closed
+		}
+		return taskEventMsg{event: event}
+	}
+}
+
+func (m *AppModel) tick() tea.Cmd {
+	return tea.Tick(1*time.Second, func(t time.Time) tea.Msg {
+		return tickMsg(t)
+	})
+}

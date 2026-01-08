@@ -1,193 +1,173 @@
-# Bruno's Task Queue
+# Task You
 
-A personal task queue using GitHub Issues + Claude Code on a self-hosted runner.
+A personal task management system with a beautiful terminal UI, SQLite storage, and background task execution via Claude Code.
 
-## How It Works
+## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                         INPUT                                    │
-│                                                                  │
-│   Terminal           Phone            Web            Claude      │
-│   task "..."         GitHub App       github.com     Desktop     │
-│      │                  │                │              │        │
-│      └──────────────────┴────────────────┴──────────────┘        │
-│                              │                                   │
-│                              ▼                                   │
-│                    ┌──────────────────┐                          │
-│                    │  bborn/workflow  │                          │
-│                    │   GitHub Repo    │                          │
-│                    │  Issues = Tasks  │                          │
-│                    └────────┬─────────┘                          │
-│                             │                                    │
-└─────────────────────────────┼────────────────────────────────────┘
-                              │ on: issues: labeled
-                              ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                      PROCESSING                                  │
-│                                                                  │
-│    ┌────────────────────────────────────────────────────────┐   │
-│    │           Self-Hosted Runner (Hetzner VPS)             │   │
-│    │                                                         │   │
-│    │  Claude Code processes tasks using Claude Max sub      │   │
-│    │  No API costs - just ~€4/month for the server          │   │
-│    │                                                         │   │
-│    └────────────────────────────────────────────────────────┘   │
-│                             │                                    │
-│         ┌───────────────────┼───────────────────┐               │
-│         ▼                   ▼                   ▼               │
-│    ┌─────────┐        ┌─────────┐        ┌─────────┐           │
-│    │  Code   │        │ Writing │        │Thinking │           │
-│    │  Agent  │        │  Agent  │        │  Agent  │           │
-│    └────┬────┘        └────┬────┘        └────┬────┘           │
-│         │                  │                  │                 │
-│         ▼                  ▼                  ▼                 │
-│    PR in target       Comment with       Comment with          │
-│    repo               content            analysis              │
-│                                                                  │
-└─────────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────┐
+│                      Local Machine                           │
+│                                                              │
+│  ┌──────────────┐                                           │
+│  │  task -l     │ ──► Local TUI + SQLite                    │
+│  │  (local)     │     ~/.local/share/task/tasks.db          │
+│  └──────────────┘                                           │
+│                                                              │
+│  ┌──────────────┐    ┌──────────────────────────────────┐  │
+│  │  task        │    │        Hetzner Server             │  │
+│  │  (remote)    │───►│  SSH :2222 ──► Bubble Tea TUI    │  │
+│  └──────────────┘    │              ──► SQLite DB        │  │
+│                      │              ──► Background        │  │
+│                      │                  Executor          │  │
+│                      │                  (Claude Code)     │  │
+│                      └──────────────────────────────────────┘  │
+└─────────────────────────────────────────────────────────────┘
+```
+
+## Features
+
+- **Kanban Board** - Visual task management with 4 columns (Backlog, In Progress, Blocked, Done)
+- **SSH Access** - Connect from anywhere via `ssh -p 2222 server`
+- **Background Executor** - Claude Code processes tasks automatically
+- **Project Memories** - Persistent context that carries across tasks
+- **Real-time Updates** - Watch tasks execute live
+
+## Installation
+
+### Build from source
+
+```bash
+git clone https://github.com/bborn/workflow
+cd workflow
+make build
+```
+
+### Run locally
+
+```bash
+# Start the daemon (background executor)
+./bin/task daemon &
+
+# Launch the TUI
+./bin/task -l
+```
+
+### Run on server
+
+```bash
+# Start the SSH server + executor
+./bin/taskd -addr :2222
+
+# Connect from anywhere
+ssh -p 2222 your-server
 ```
 
 ## Usage
 
-### Create Tasks
+### Keyboard Shortcuts
+
+| Key | Action |
+|-----|--------|
+| `←/→` or `h/l` | Navigate columns |
+| `↑/↓` or `j/k` | Navigate tasks |
+| `Enter` | View task details |
+| `n` | Create new task |
+| `x` | Execute (queue) task |
+| `r` | Retry task with feedback |
+| `c` | Close task |
+| `d` | Delete task |
+| `w` | Watch execution |
+| `i` | Interrupt execution |
+| `/` | Filter tasks |
+| `m` | Project memories |
+| `s` | Settings |
+| `?` | Toggle help |
+| `q` | Quit |
+
+### Task Statuses
+
+| Status | Description | Kanban Column |
+|--------|-------------|---------------|
+| `backlog` | Created but not started | Backlog |
+| `queued` | Waiting to be processed | In Progress |
+| `processing` | Currently being executed | In Progress |
+| `blocked` | Needs input/clarification | Blocked |
+| `done` | Completed | Done |
+
+### Task Lifecycle
+
+```
+backlog → queued → processing → done
+                 ↘ blocked (needs input)
+```
+
+## Configuration
+
+### Environment Variables
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `TASK_DB_PATH` | SQLite database path | `~/.local/share/task/tasks.db` |
+
+### Projects
+
+Configure projects in Settings (`s`):
+- **Name** - Project identifier (e.g., `offerlab`)
+- **Path** - Local filesystem path
+- **Aliases** - Short names (e.g., `ol` for `offerlab`)
+- **Instructions** - Project-specific AI instructions
+
+### Memories
+
+Project memories provide persistent context for the AI. Press `m` to manage.
+
+**Categories:**
+- `pattern` - Code patterns and conventions
+- `context` - Project-specific context
+- `decision` - Architectural decisions
+- `gotcha` - Known pitfalls and workarounds
+
+## Deployment
+
+### Systemd Service
 
 ```bash
-# Simple task (auto-triaged by Claude)
-task "Add dark mode to the app"
+# Install service (creates taskd.service)
+./scripts/install-service.sh
 
-# With type
-task "Fix the login redirect bug" -t code -p offerlab
-task "Write investor update email" -t writing
-task "Should we use Redis or Postgres for caching?" -t thinking
-
-# With priority
-task "Server is down" -t code -p offerlab -P high
-
-# With details
-task "Write welcome email" -t writing -b "For new users, friendly tone, mention key features"
+# Manage
+sudo systemctl start taskd
+sudo systemctl enable taskd
+sudo systemctl status taskd
 ```
 
-### List Tasks
+### SSH Key Authentication
+
+Edit `internal/server/ssh.go` to restrict access:
+
+```go
+wish.WithPublicKeyAuth(func(ctx ssh.Context, key ssh.PublicKey) bool {
+    allowed := map[string]bool{
+        "SHA256:...": true,  // Your key fingerprint
+    }
+    return allowed[ssh.FingerprintSHA256(key)]
+})
+```
+
+## Development
 
 ```bash
-task list                      # All open tasks
-task list -p offerlab          # Filter by project
-task list -s ready             # Filter by status
-task list -t code              # Filter by type
-task list -a                   # Include closed
+make build        # Build binaries
+make test         # Run tests
+make install      # Install to ~/go/bin
 ```
 
-### Review & Close
+## Tech Stack
 
-```bash
-task review                    # List tasks ready for review
-task review --open             # Open all ready tasks in browser
-task review 42                 # Open specific task in browser
-task close 42                  # Close a task
-```
-
-## Labels
-
-| Label | Purpose |
-|-------|---------|
-| `project:offerlab` | Offerlab work |
-| `project:influencekit` | InfluenceKit work |
-| `project:personal` | Personal projects |
-| `type:code` | Creates PRs in target repo |
-| `type:writing` | Generates content |
-| `type:thinking` | Analysis & strategy |
-| `status:queued` | Waiting to be processed |
-| `status:processing` | Claude working on it |
-| `status:ready` | Done, needs review |
-| `status:blocked` | Needs clarification |
-| `priority:high` | Do soon |
-| `priority:low` | Whenever |
-
-## Setup
-
-### 1. Provision Server
-
-Create a Hetzner VPS (CX22, ~€4/month, Ubuntu 24.04).
-
-### 2. Run Setup Script
-
-```bash
-ssh root@YOUR_SERVER_IP
-
-# Install everything (Node.js, Claude Code, GitHub Runner, Tailscale)
-curl -fsSL https://raw.githubusercontent.com/bborn/workflow/main/scripts/setup-runner.sh | bash
-```
-
-Or if repo is private, copy and run `scripts/setup-runner.sh` manually.
-
-### 3. Connect Tailscale
-
-```bash
-sudo tailscale up
-# Open the auth link and approve
-```
-
-### 4. Configure GitHub Runner
-
-Get a token from: https://github.com/bborn/workflow/settings/actions/runners/new
-
-```bash
-sudo su - runner
-cd ~/actions-runner
-./config.sh --url https://github.com/bborn/workflow --token YOUR_TOKEN
-sudo ./svc.sh install
-sudo ./svc.sh start
-```
-
-### 5. Authenticate Claude
-
-```bash
-claude auth login
-# Follow browser prompts with your Claude Max account
-```
-
-### 6. Add CLI to Your Path
-
-On your local machine:
-
-```bash
-# Add to ~/.zshrc or ~/.bashrc
-export PATH="$PATH:/path/to/workflow/scripts"
-```
-
-## Cost
-
-| Item | Cost |
-|------|------|
-| Hetzner CX22 | ~€4/month |
-| Claude Max | Your existing subscription |
-| GitHub | Free (private repo) |
-| **Total** | **~€4/month** |
-
-## Files
-
-```
-workflow/
-├── README.md                        # This file
-├── .github/
-│   ├── workflows/
-│   │   └── orchestrator.yml         # Main automation
-│   └── ISSUE_TEMPLATE/
-│       ├── code.yml
-│       ├── writing.yml
-│       └── thinking.yml
-└── scripts/
-    ├── task.sh                      # CLI tool
-    ├── setup-runner.sh              # Server provisioning
-    └── setup-labels.sh              # One-time label setup
-```
-
-## Remote Access
-
-After Tailscale setup, access your runner from anywhere:
-
-```bash
-ssh cloud-claude                     # From laptop
-# Or use Termius/SSH app on phone
-```
+- **Go** - Core application
+- **Bubble Tea** - TUI framework (Elm architecture)
+- **Bubbles** - TUI components (help, textinput, viewport)
+- **Lip Gloss** - Terminal styling
+- **Huh** - Form components
+- **Wish** - SSH server
+- **SQLite** - Local database (via modernc.org/sqlite)
