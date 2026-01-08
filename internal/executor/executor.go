@@ -4,7 +4,6 @@ package executor
 import (
 	"bufio"
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -607,35 +606,125 @@ type execResult struct {
 	Message     string
 }
 
-// claudeStreamEvent represents a JSON event from claude --output-format stream-json
-type claudeStreamEvent struct {
-	Type    string `json:"type"`
-	Subtype string `json:"subtype,omitempty"`
-
-	// For assistant messages
-	Message *struct {
-		Content []struct {
-			Type string `json:"type"`
-			Text string `json:"text,omitempty"`
-			Name string `json:"name,omitempty"` // for tool_use
-		} `json:"content"`
-	} `json:"message,omitempty"`
-
-	// For result
-	Result  string `json:"result,omitempty"`
-	IsError bool   `json:"is_error,omitempty"`
+// TmuxSessionName returns the tmux session name for a task.
+func TmuxSessionName(taskID int64) string {
+	return fmt.Sprintf("task-%d", taskID)
 }
 
-// runClaude runs a task using Claude CLI with streaming JSON output
+// runClaude runs a task using Claude CLI in a tmux session for interactive access
 func (e *Executor) runClaude(ctx context.Context, taskID int64, workDir, prompt string) execResult {
-	args := []string{
-		"--print",
-		"--output-format", "stream-json",
-		"--verbose",
-		prompt,
+	// Check if tmux is available
+	if _, err := exec.LookPath("tmux"); err != nil {
+		return e.runClaudeDirect(ctx, taskID, workDir, prompt)
 	}
 
-	cmd := exec.CommandContext(ctx, "claude", args...)
+	sessionName := TmuxSessionName(taskID)
+
+	// Kill any existing session with this name
+	exec.Command("tmux", "kill-session", "-t", sessionName).Run()
+
+	// Create a temp file for the prompt (avoids quoting issues)
+	promptFile, err := os.CreateTemp("", "task-prompt-*.txt")
+	if err != nil {
+		return e.runClaudeDirect(ctx, taskID, workDir, prompt)
+	}
+	promptFile.WriteString(prompt)
+	promptFile.Close()
+	defer os.Remove(promptFile.Name())
+
+	// Script that runs claude and signals completion
+	script := fmt.Sprintf(`cd %q && claude "$(cat %q)"; echo ":::TASK_EXIT_CODE:$?"`, workDir, promptFile.Name())
+
+	// Start tmux session
+	tmuxCmd := exec.Command("tmux", "new-session", "-d", "-s", sessionName, "-c", workDir, "sh", "-c", script)
+	if err := tmuxCmd.Run(); err != nil {
+		e.logger.Warn("tmux failed, falling back to direct", "error", err)
+		return e.runClaudeDirect(ctx, taskID, workDir, prompt)
+	}
+
+	e.logLine(taskID, "system", fmt.Sprintf("Running in tmux session '%s' - press 'a' to attach", sessionName))
+
+	// Poll for output and completion
+	return e.pollTmuxSession(ctx, taskID, sessionName)
+}
+
+// pollTmuxSession monitors a tmux session for completion
+func (e *Executor) pollTmuxSession(ctx context.Context, taskID int64, sessionName string) execResult {
+	var allOutput strings.Builder
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+
+	lastLineCount := 0
+
+	for {
+		select {
+		case <-ctx.Done():
+			exec.Command("tmux", "kill-session", "-t", sessionName).Run()
+			return execResult{Interrupted: true}
+
+		case <-ticker.C:
+			// Check if session still exists
+			if err := exec.Command("tmux", "has-session", "-t", sessionName).Run(); err != nil {
+				output := allOutput.String()
+				if !strings.Contains(output, ":::TASK_EXIT_CODE:") {
+					return execResult{Interrupted: true}
+				}
+				return e.parseOutputMarkers(output)
+			}
+
+			// Capture pane content
+			captureCmd := exec.Command("tmux", "capture-pane", "-t", sessionName, "-p", "-S", "-1000")
+			output, err := captureCmd.Output()
+			if err != nil {
+				continue
+			}
+
+			lines := strings.Split(string(output), "\n")
+			if len(lines) > lastLineCount {
+				for i := lastLineCount; i < len(lines); i++ {
+					line := strings.TrimSpace(lines[i])
+					if line != "" && !strings.HasPrefix(line, ":::TASK_EXIT") {
+						e.logLine(taskID, "output", line)
+						allOutput.WriteString(line + "\n")
+					}
+				}
+				lastLineCount = len(lines)
+			}
+
+			// Check for completion marker
+			if strings.Contains(string(output), ":::TASK_EXIT_CODE:") {
+				exec.Command("tmux", "kill-session", "-t", sessionName).Run()
+				return e.parseOutputMarkers(allOutput.String())
+			}
+
+			// Check for DB-based interrupt
+			task, err := e.db.GetTask(taskID)
+			if err == nil && task != nil && task.Status == db.StatusBacklog {
+				exec.Command("tmux", "kill-session", "-t", sessionName).Run()
+				return execResult{Interrupted: true}
+			}
+		}
+	}
+}
+
+// parseOutputMarkers checks output for completion markers
+func (e *Executor) parseOutputMarkers(output string) execResult {
+	if strings.Contains(output, "TASK_COMPLETE") {
+		return execResult{Success: true}
+	}
+	if idx := strings.Index(output, "NEEDS_INPUT:"); idx >= 0 {
+		rest := output[idx+len("NEEDS_INPUT:"):]
+		if newline := strings.Index(rest, "\n"); newline >= 0 {
+			rest = rest[:newline]
+		}
+		return execResult{NeedsInput: true, Message: strings.TrimSpace(rest)}
+	}
+	return execResult{Success: true}
+}
+
+// runClaudeDirect runs claude directly without tmux (fallback)
+func (e *Executor) runClaudeDirect(ctx context.Context, taskID int64, workDir, prompt string) execResult {
+	cmd := exec.CommandContext(ctx, "claude", prompt)
 	cmd.Dir = workDir
 
 	stdout, err := cmd.StdoutPipe()
@@ -674,73 +763,26 @@ func (e *Executor) runClaude(ctx context.Context, taskID int64, workDir, prompt 
 		}
 	}()
 
-	// Process streaming JSON output
 	var mu sync.Mutex
-	var finalResult string
-	var isError bool
+	var allOutput []string
 	var foundComplete bool
 	var needsInputMsg string
 
 	go func() {
 		scanner := bufio.NewScanner(stdout)
-		// Increase buffer for large JSON lines
-		buf := make([]byte, 0, 256*1024)
-		scanner.Buffer(buf, 1024*1024)
-
 		for scanner.Scan() {
 			line := scanner.Text()
-			if line == "" {
-				continue
-			}
+			e.logLine(taskID, "output", line)
 
-			var event claudeStreamEvent
-			if err := json.Unmarshal([]byte(line), &event); err != nil {
-				// Not JSON, log as raw output
-				e.logLine(taskID, "output", line)
-				continue
+			mu.Lock()
+			allOutput = append(allOutput, line)
+			if strings.Contains(line, "TASK_COMPLETE") {
+				foundComplete = true
 			}
-
-			switch event.Type {
-			case "system":
-				// Init message, ignore
-			case "assistant":
-				// Log assistant content
-				if event.Message != nil {
-					for _, content := range event.Message.Content {
-						switch content.Type {
-						case "text":
-							if content.Text != "" {
-								e.logLine(taskID, "output", content.Text)
-								// Check for markers
-								mu.Lock()
-								if strings.Contains(content.Text, "TASK_COMPLETE") {
-									foundComplete = true
-								}
-								if idx := strings.Index(content.Text, "NEEDS_INPUT:"); idx >= 0 {
-									needsInputMsg = strings.TrimSpace(content.Text[idx+len("NEEDS_INPUT:"):])
-								}
-								mu.Unlock()
-							}
-						case "tool_use":
-							if content.Name != "" {
-								e.logLine(taskID, "tool", fmt.Sprintf("Using tool: %s", content.Name))
-							}
-						}
-					}
-				}
-			case "result":
-				mu.Lock()
-				finalResult = event.Result
-				isError = event.IsError
-				// Check final result for markers too
-				if strings.Contains(finalResult, "TASK_COMPLETE") {
-					foundComplete = true
-				}
-				if idx := strings.Index(finalResult, "NEEDS_INPUT:"); idx >= 0 {
-					needsInputMsg = strings.TrimSpace(finalResult[idx+len("NEEDS_INPUT:"):])
-				}
-				mu.Unlock()
+			if idx := strings.Index(line, "NEEDS_INPUT:"); idx >= 0 {
+				needsInputMsg = strings.TrimSpace(line[idx+len("NEEDS_INPUT:"):])
 			}
+			mu.Unlock()
 		}
 	}()
 
@@ -753,7 +795,6 @@ func (e *Executor) runClaude(ctx context.Context, taskID int64, workDir, prompt 
 
 	err = cmd.Wait()
 
-	// Check if interrupted
 	select {
 	case <-interruptCh:
 		return execResult{Interrupted: true}
@@ -766,9 +807,6 @@ func (e *Executor) runClaude(ctx context.Context, taskID int64, workDir, prompt 
 	mu.Lock()
 	defer mu.Unlock()
 
-	if isError {
-		return execResult{Message: finalResult}
-	}
 	if foundComplete {
 		return execResult{Success: true}
 	}

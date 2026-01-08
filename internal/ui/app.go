@@ -761,8 +761,16 @@ func (m *AppModel) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 
 	case key.Matches(msg, m.keys.Attach):
-		// No longer using tmux - claude runs directly with streaming output
-		// The 'w' key (watch) shows real-time logs instead
+		// Attach to tmux session for selected task
+		if task := m.kanban.SelectedTask(); task != nil {
+			if db.IsInProgress(task.Status) {
+				sessionName := executor.TmuxSessionName(task.ID)
+				return m, tea.ExecProcess(
+					exec.Command("tmux", "attach-session", "-t", sessionName),
+					func(err error) tea.Msg { return attachDoneMsg{err: err} },
+				)
+			}
+		}
 
 	case key.Matches(msg, m.keys.Interrupt):
 		// Interrupt the selected task if it's in progress
@@ -849,7 +857,13 @@ func (m *AppModel) updateDetail(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, m.closeTask(m.selectedTask.ID)
 	}
 	if key.Matches(msg, m.keys.Attach) && m.selectedTask != nil {
-		// No longer using tmux - use 'w' to watch real-time logs instead
+		if db.IsInProgress(m.selectedTask.Status) {
+			sessionName := executor.TmuxSessionName(m.selectedTask.ID)
+			return m, tea.ExecProcess(
+				exec.Command("tmux", "attach-session", "-t", sessionName),
+				func(err error) tea.Msg { return attachDoneMsg{err: err} },
+			)
+		}
 	}
 	if key.Matches(msg, m.keys.Interrupt) && m.selectedTask != nil {
 		if db.IsInProgress(m.selectedTask.Status) || m.executor.IsRunning(m.selectedTask.ID) {
