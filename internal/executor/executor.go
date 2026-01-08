@@ -4,6 +4,7 @@ package executor
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -323,6 +324,9 @@ func (e *Executor) executeTask(ctx context.Context, task *db.Task) {
 
 	e.logger.Info("Processing task", "id", task.ID, "title", task.Title)
 
+	// Mark task as started (so we know triage has run on retry)
+	e.db.MarkTaskStarted(task.ID)
+
 	// Run triage if needed
 	if NeedsTriage(task) {
 		triageResult, err := e.TriageTask(taskCtx, task)
@@ -351,7 +355,7 @@ func (e *Executor) executeTask(ctx context.Context, task *db.Task) {
 	e.logLine(task.ID, "system", startMsg)
 	e.hooks.OnStatusChange(task, db.StatusProcessing, startMsg)
 
-	// Setup worktree for isolated execution
+	// Setup worktree for isolated execution (symlinks claude config from project)
 	workDir, err := e.setupWorktree(task)
 	if err != nil {
 		e.logger.Error("Failed to setup worktree", "error", err)
@@ -369,11 +373,21 @@ func (e *Executor) executeTask(ctx context.Context, task *db.Task) {
 		e.logLine(task.ID, "system", fmt.Sprintf("Task has %d attachment(s)", len(attachmentPaths)))
 	}
 
+	// Check if this is a retry (has previous session to resume)
+	retryFeedback, _ := e.db.GetRetryFeedback(task.ID)
+	isRetry := retryFeedback != ""
+
 	// Build prompt based on task type
 	prompt := e.buildPrompt(task, attachmentPaths)
 
 	// Run Claude
-	result := e.runClaude(taskCtx, task.ID, workDir, prompt)
+	var result execResult
+	if isRetry {
+		e.logLine(task.ID, "system", "Resuming previous session with feedback")
+		result = e.runClaudeResume(taskCtx, task.ID, workDir, prompt, retryFeedback)
+	} else {
+		result = e.runClaude(taskCtx, task.ID, workDir, prompt)
+	}
 
 	// Update final status and trigger hooks
 	if result.Interrupted {
@@ -519,10 +533,7 @@ When finished, provide a summary of what you did:
 - Describe the key changes made
 - Include any relevant links (PRs, commits, etc.)
 - Note any follow-up items or concerns
-
-Then output: TASK_COMPLETE
-
-If you need input from me: output NEEDS_INPUT: followed by your question`)
+`)
 
 	case db.TypeWriting:
 		prompt.WriteString("You are a skilled writer. Please complete this task:\n\n")
@@ -544,7 +555,6 @@ If you need input from me: output NEEDS_INPUT: followed by your question`)
 		}
 		prompt.WriteString("Write the requested content. Be professional, clear, and match the appropriate tone.\n")
 		prompt.WriteString("Output the final content, then summarize what you created.\n")
-		prompt.WriteString("When finished, output: TASK_COMPLETE")
 
 	case db.TypeThinking:
 		prompt.WriteString("You are a strategic advisor. Analyze this thoroughly:\n\n")
@@ -571,7 +581,7 @@ If you need input from me: output NEEDS_INPUT: followed by your question`)
 4. Concrete next steps
 
 Think deeply but be actionable. Summarize your conclusions clearly.
-When finished, output: TASK_COMPLETE`)
+`)
 
 	default:
 		// Generic task
@@ -591,10 +601,26 @@ When finished, output: TASK_COMPLETE`)
 		if conversationHistory != "" {
 			prompt.WriteString(conversationHistory)
 		}
-		prompt.WriteString("When finished, summarize what you did and any relevant details (files, links, etc.)\n")
-		prompt.WriteString("Then output: TASK_COMPLETE\n")
-		prompt.WriteString("If you need input, output: NEEDS_INPUT: followed by your question")
+		prompt.WriteString("Complete this task and summarize what you did.\n")
 	}
+
+	// Add response protocol to ALL task types - prefer MCP tools, text fallback
+	prompt.WriteString(`
+═══════════════════════════════════════════════════════════════
+                      WORKFLOW TOOLS
+═══════════════════════════════════════════════════════════════
+
+You have access to workflow tools via MCP. Use these to signal task status:
+
+✓ WHEN TASK IS COMPLETE:
+  Call the workflow_complete tool with a brief summary
+
+✓ WHEN YOU NEED INPUT/CLARIFICATION:
+  Call the workflow_needs_input tool with your question
+
+These tools update the task status directly. The user will be notified.
+═══════════════════════════════════════════════════════════════
+`)
 
 	return prompt.String()
 }
@@ -611,6 +637,61 @@ func TmuxSessionName(taskID int64) string {
 	return fmt.Sprintf("task-%d", taskID)
 }
 
+// setupMCPConfig creates an .mcp.json file in workDir to give Claude access to workflow tools.
+func (e *Executor) setupMCPConfig(workDir string, taskID int64) (cleanup func(), err error) {
+	mcpPath := filepath.Join(workDir, ".mcp.json")
+
+	// Find the task binary path
+	taskBin, err := exec.LookPath("task")
+	if err != nil {
+		// Fall back to assuming it's in PATH
+		taskBin = "task"
+	}
+
+	config := map[string]interface{}{
+		"mcpServers": map[string]interface{}{
+			"workflow": map[string]interface{}{
+				"command": taskBin,
+				"args":    []string{"mcp", "--task", fmt.Sprintf("%d", taskID)},
+			},
+		},
+	}
+
+	data, err := json.MarshalIndent(config, "", "  ")
+	if err != nil {
+		return nil, err
+	}
+
+	// Check if .mcp.json already exists (from project)
+	existingData, existingErr := os.ReadFile(mcpPath)
+	if existingErr == nil {
+		// Merge our config with existing
+		var existing map[string]interface{}
+		if json.Unmarshal(existingData, &existing) == nil {
+			if servers, ok := existing["mcpServers"].(map[string]interface{}); ok {
+				servers["workflow"] = config["mcpServers"].(map[string]interface{})["workflow"]
+				data, _ = json.MarshalIndent(existing, "", "  ")
+			}
+		}
+	}
+
+	if err := os.WriteFile(mcpPath, data, 0644); err != nil {
+		return nil, err
+	}
+
+	cleanup = func() {
+		if existingErr == nil {
+			// Restore original file
+			os.WriteFile(mcpPath, existingData, 0644)
+		} else {
+			// Remove our file
+			os.Remove(mcpPath)
+		}
+	}
+
+	return cleanup, nil
+}
+
 // runClaude runs a task using Claude CLI in a tmux session for interactive access
 func (e *Executor) runClaude(ctx context.Context, taskID int64, workDir, prompt string) execResult {
 	// Check if tmux is available
@@ -623,52 +704,189 @@ func (e *Executor) runClaude(ctx context.Context, taskID int64, workDir, prompt 
 	// Kill any existing session with this name
 	exec.Command("tmux", "kill-session", "-t", sessionName).Run()
 
+	// Setup MCP config for workflow tools
+	cleanupMCP, err := e.setupMCPConfig(workDir, taskID)
+	if err != nil {
+		e.logger.Warn("could not setup MCP config", "error", err)
+	}
+	// Note: we don't clean up MCP config immediately - it needs to persist for the session
+
 	// Create a temp file for the prompt (avoids quoting issues)
 	promptFile, err := os.CreateTemp("", "task-prompt-*.txt")
 	if err != nil {
+		if cleanupMCP != nil {
+			cleanupMCP()
+		}
 		return e.runClaudeDirect(ctx, taskID, workDir, prompt)
 	}
 	promptFile.WriteString(prompt)
 	promptFile.Close()
 	defer os.Remove(promptFile.Name())
 
-	// Script that runs claude and signals completion
-	script := fmt.Sprintf(`cd %q && claude "$(cat %q)"; echo ":::TASK_EXIT_CODE:$?"`, workDir, promptFile.Name())
+	// Script that runs claude interactively
+	// Note: tmux starts in workDir (-c flag), so claude inherits proper permissions and MCP config
+	// Run interactively (no -p) so user can attach and see/interact in real-time
+	// Use --dangerously-skip-permissions since tasks run in isolated worktrees
+	script := fmt.Sprintf(`claude --dangerously-skip-permissions "$(cat %q)"`, promptFile.Name())
 
-	// Start tmux session
+	// Start tmux session in the project directory
 	tmuxCmd := exec.Command("tmux", "new-session", "-d", "-s", sessionName, "-c", workDir, "sh", "-c", script)
 	if err := tmuxCmd.Run(); err != nil {
 		e.logger.Warn("tmux failed, falling back to direct", "error", err)
+		if cleanupMCP != nil {
+			cleanupMCP()
+		}
 		return e.runClaudeDirect(ctx, taskID, workDir, prompt)
 	}
+
+	// Configure tmux with helpful status bar and attach message
+	e.configureTmuxSession(sessionName)
 
 	e.logLine(taskID, "system", fmt.Sprintf("Running in tmux session '%s' - press 'a' to attach", sessionName))
 
 	// Poll for output and completion
-	return e.pollTmuxSession(ctx, taskID, sessionName)
+	result := e.pollTmuxSession(ctx, taskID, sessionName)
+
+	// Clean up MCP config after session ends
+	if cleanupMCP != nil {
+		cleanupMCP()
+	}
+
+	return result
 }
 
-// pollTmuxSession monitors a tmux session for completion
+// runClaudeResume resumes a previous Claude session with feedback.
+// If no previous session exists, starts fresh with the full prompt + feedback.
+func (e *Executor) runClaudeResume(ctx context.Context, taskID int64, workDir, prompt, feedback string) execResult {
+	// Find the most recent claude session ID for this workDir
+	sessionID := e.findClaudeSessionID(workDir)
+	if sessionID == "" {
+		e.logLine(taskID, "system", "No previous session found, starting fresh")
+		// Build a combined prompt with the feedback included
+		fullPrompt := prompt + "\n\n## User Feedback\n\n" + feedback
+		return e.runClaude(ctx, taskID, workDir, fullPrompt)
+	}
+
+	// Check if tmux is available
+	if _, err := exec.LookPath("tmux"); err != nil {
+		return e.runClaudeDirect(ctx, taskID, workDir, feedback)
+	}
+
+	tmuxSession := TmuxSessionName(taskID)
+
+	// Kill any existing session with this name
+	exec.Command("tmux", "kill-session", "-t", tmuxSession).Run()
+
+	// Create a temp file for the feedback (avoids quoting issues)
+	feedbackFile, err := os.CreateTemp("", "task-feedback-*.txt")
+	if err != nil {
+		return e.runClaudeDirect(ctx, taskID, workDir, feedback)
+	}
+	feedbackFile.WriteString(feedback)
+	feedbackFile.Close()
+	defer os.Remove(feedbackFile.Name())
+
+	// Script that resumes claude with session ID (interactive mode)
+	script := fmt.Sprintf(`claude --resume %s --dangerously-skip-permissions "$(cat %q)"`, sessionID, feedbackFile.Name())
+
+	// Start tmux session in the project directory
+	tmuxCmd := exec.Command("tmux", "new-session", "-d", "-s", tmuxSession, "-c", workDir, "sh", "-c", script)
+	if err := tmuxCmd.Run(); err != nil {
+		e.logger.Warn("tmux failed, falling back to direct", "error", err)
+		return e.runClaudeDirect(ctx, taskID, workDir, feedback)
+	}
+
+	// Configure tmux with helpful status bar and attach message
+	e.configureTmuxSession(tmuxSession)
+
+	e.logLine(taskID, "system", fmt.Sprintf("Resuming session %s in tmux '%s' - press 'a' to attach", sessionID[:8], tmuxSession))
+
+	// Poll for output and completion
+	return e.pollTmuxSession(ctx, taskID, tmuxSession)
+}
+
+// findClaudeSessionID finds the most recent claude session ID for a workDir
+func (e *Executor) findClaudeSessionID(workDir string) string {
+	// Claude stores sessions in ~/.claude/projects/<escaped-path>/
+	// The path is escaped: /Users/bruno/foo -> -Users-bruno-foo
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+
+	// Escape the workDir path (replace / with -)
+	escapedPath := strings.ReplaceAll(workDir, "/", "-")
+	if strings.HasPrefix(escapedPath, "-") {
+		escapedPath = escapedPath[1:] // Remove leading dash
+	}
+
+	projectDir := filepath.Join(home, ".claude", "projects", escapedPath)
+
+	// Find the most recent UUID.jsonl file (not agent-*.jsonl)
+	entries, err := os.ReadDir(projectDir)
+	if err != nil {
+		return ""
+	}
+
+	var latestTime time.Time
+	var latestSession string
+
+	for _, entry := range entries {
+		name := entry.Name()
+		// Skip agent files and non-jsonl files
+		if strings.HasPrefix(name, "agent-") || !strings.HasSuffix(name, ".jsonl") {
+			continue
+		}
+
+		// Extract UUID (filename without .jsonl)
+		sessionID := strings.TrimSuffix(name, ".jsonl")
+
+		// Check if it looks like a UUID (contains dashes)
+		if !strings.Contains(sessionID, "-") {
+			continue
+		}
+
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+
+		if info.ModTime().After(latestTime) {
+			latestTime = info.ModTime()
+			latestSession = sessionID
+		}
+	}
+
+	return latestSession
+}
+
+// pollTmuxSession monitors a tmux session for completion.
+// It never kills the tmux session automatically - only on explicit user interrupt.
 func (e *Executor) pollTmuxSession(ctx context.Context, taskID int64, sessionName string) execResult {
 	var allOutput strings.Builder
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
 
 	lastLineCount := 0
+	waitingForInput := false
+	idleNotified := false
+	lastOutputTime := time.Now()
+
+	// Idle threshold - how long with no output before we consider claude idle
+	const idleThreshold = 30 * time.Second
 
 	for {
 		select {
 		case <-ctx.Done():
-			exec.Command("tmux", "kill-session", "-t", sessionName).Run()
+			// Context cancelled (user interrupt) - kill the session
+			e.killTmuxSession(sessionName)
 			return execResult{Interrupted: true}
 
 		case <-ticker.C:
 			// Check if session still exists
 			if err := exec.Command("tmux", "has-session", "-t", sessionName).Run(); err != nil {
+				// Session ended naturally (claude exited)
 				output := allOutput.String()
-				if !strings.Contains(output, ":::TASK_EXIT_CODE:") {
-					return execResult{Interrupted: true}
-				}
 				return e.parseOutputMarkers(output)
 			}
 
@@ -679,7 +897,10 @@ func (e *Executor) pollTmuxSession(ctx context.Context, taskID int64, sessionNam
 				continue
 			}
 
-			lines := strings.Split(string(output), "\n")
+			outputStr := string(output)
+			lines := strings.Split(outputStr, "\n")
+
+			// Log new lines
 			if len(lines) > lastLineCount {
 				for i := lastLineCount; i < len(lines); i++ {
 					line := strings.TrimSpace(lines[i])
@@ -689,22 +910,198 @@ func (e *Executor) pollTmuxSession(ctx context.Context, taskID int64, sessionNam
 					}
 				}
 				lastLineCount = len(lines)
+				lastOutputTime = time.Now()
+				// Reset idle notification if we got new output
+				if idleNotified {
+					idleNotified = false
+				}
 			}
 
-			// Check for completion marker
-			if strings.Contains(string(output), ":::TASK_EXIT_CODE:") {
-				exec.Command("tmux", "kill-session", "-t", sessionName).Run()
+			// Check for completion marker - must be on its own line (not in the prompt text)
+			// Look for a line that IS "TASK_COMPLETE" (Claude's output), not just contains it
+			if hasCompletionMarker(lines) {
+				return execResult{Success: true}
+			}
+
+			// Check for explicit NEEDS_INPUT from our prompt (marks as blocked, returns)
+			if strings.Contains(outputStr, "NEEDS_INPUT:") {
 				return e.parseOutputMarkers(allOutput.String())
 			}
 
-			// Check for DB-based interrupt
+			// Detect if claude is waiting for input (permission prompts, questions, etc.)
+			if e.isWaitingForInput(outputStr, lastOutputTime) {
+				if !waitingForInput {
+					waitingForInput = true
+					e.updateStatus(taskID, db.StatusBlocked)
+					e.logLine(taskID, "system", fmt.Sprintf("Waiting for input - attach with: tmux attach -t %s", sessionName))
+					e.hooks.OnStatusChange(nil, db.StatusBlocked, "Claude waiting for input")
+				}
+			} else if waitingForInput {
+				// Output changed, claude might be working again
+				waitingForInput = false
+				e.updateStatus(taskID, db.StatusProcessing)
+				e.logLine(taskID, "system", "Resumed processing")
+			}
+
+			// Detect idle state - claude shows ❯ prompt with no activity for a while
+			// This is a fallback in case claude forgets to output TASK_COMPLETE
+			if !waitingForInput && !idleNotified && time.Since(lastOutputTime) > idleThreshold {
+				if e.isClaudeIdle(outputStr) {
+					idleNotified = true
+					e.updateStatus(taskID, db.StatusBlocked)
+					e.logLine(taskID, "system", "Claude appears idle - task may be complete. Review and mark as done, or send more instructions.")
+					e.hooks.OnStatusChange(nil, db.StatusBlocked, "Claude idle - task may be complete")
+				}
+			}
+
+			// Check for DB-based status changes (from user, MCP tools, etc.)
 			task, err := e.db.GetTask(taskID)
-			if err == nil && task != nil && task.Status == db.StatusBacklog {
-				exec.Command("tmux", "kill-session", "-t", sessionName).Run()
-				return execResult{Interrupted: true}
+			if err == nil && task != nil {
+				if task.Status == db.StatusBacklog {
+					e.killTmuxSession(sessionName)
+					return execResult{Interrupted: true}
+				}
+				// Task marked as done (by user or MCP workflow_complete tool)
+				if task.Status == db.StatusDone {
+					e.killTmuxSession(sessionName)
+					return execResult{Success: true}
+				}
+				// Task marked as blocked (by MCP workflow_needs_input tool)
+				// Only return if we weren't already tracking this as blocked
+				if task.Status == db.StatusBlocked && !waitingForInput && !idleNotified {
+					// Get the question from recent logs
+					logs, _ := e.db.GetTaskLogs(taskID, 5)
+					var question string
+					for _, l := range logs {
+						if l.LineType == "question" {
+							question = l.Content
+							break
+						}
+					}
+					return execResult{NeedsInput: true, Message: question}
+				}
 			}
 		}
 	}
+}
+
+// killTmuxSession kills a tmux session if it exists.
+func (e *Executor) killTmuxSession(sessionName string) {
+	exec.Command("tmux", "kill-session", "-t", sessionName).Run()
+}
+
+// configureTmuxSession sets up helpful UI elements for users who attach to the session.
+func (e *Executor) configureTmuxSession(sessionName string) {
+	// Add status bar with detach instructions
+	exec.Command("tmux", "set-option", "-t", sessionName, "status", "on").Run()
+	exec.Command("tmux", "set-option", "-t", sessionName, "status-style", "bg=yellow,fg=black").Run()
+	exec.Command("tmux", "set-option", "-t", sessionName, "status-left", "").Run()
+	exec.Command("tmux", "set-option", "-t", sessionName, "status-right", " Detach: Ctrl+B D | Ctrl+C kills Claude ").Run()
+	exec.Command("tmux", "set-option", "-t", sessionName, "status-right-length", "40").Run()
+
+	// Display a message when someone attaches to the session
+	exec.Command("tmux", "set-hook", "-t", sessionName, "client-attached",
+		`display-message -d 5000 "Detach: Ctrl+B then D | Ctrl+C will kill this Claude session"`).Run()
+}
+
+// isClaudeIdle checks if claude appears to be idle (showing prompt with no activity).
+// This detects when claude has finished but didn't output TASK_COMPLETE.
+func (e *Executor) isClaudeIdle(output string) bool {
+	// Get the last few lines of output
+	lines := strings.Split(output, "\n")
+	var recentLines []string
+	start := len(lines) - 10
+	if start < 0 {
+		start = 0
+	}
+	for i := start; i < len(lines); i++ {
+		line := strings.TrimSpace(lines[i])
+		if line != "" {
+			recentLines = append(recentLines, line)
+		}
+	}
+
+	if len(recentLines) == 0 {
+		return false
+	}
+
+	// Check for Claude Code prompt indicator (❯) in recent lines
+	// The prompt typically looks like: "❯" or contains the chevron
+	lastLine := recentLines[len(recentLines)-1]
+
+	// Claude Code shows ❯ when waiting for input at its prompt
+	if strings.Contains(lastLine, "❯") {
+		return true
+	}
+
+	// Also check for common shell prompts that might indicate claude exited
+	// and we're back at a shell prompt
+	if strings.HasSuffix(lastLine, "$") || strings.HasSuffix(lastLine, "%") {
+		return true
+	}
+
+	return false
+}
+
+// isWaitingForInput checks if claude appears to be waiting for user input.
+func (e *Executor) isWaitingForInput(output string, lastOutputTime time.Time) bool {
+	// Only consider waiting if no new output for a while
+	if time.Since(lastOutputTime) < 3*time.Second {
+		return false
+	}
+
+	// Get the last few lines of output (the prompt area)
+	lines := strings.Split(output, "\n")
+	var recentLines string
+	start := len(lines) - 15
+	if start < 0 {
+		start = 0
+	}
+	recentLines = strings.Join(lines[start:], "\n")
+	recentLower := strings.ToLower(recentLines)
+
+	// Permission prompts
+	if strings.Contains(recentLower, "allow") && strings.Contains(recentLower, "?") {
+		if strings.Contains(recentLower, "[y/n") || strings.Contains(recentLower, "(y/n") ||
+			strings.Contains(recentLower, "yes/no") {
+			return true
+		}
+	}
+
+	// Yes/no prompts
+	if strings.Contains(recentLower, "[y/n]") || strings.Contains(recentLower, "(yes/no)") {
+		return true
+	}
+
+	// Press enter prompts
+	if strings.Contains(recentLower, "press enter") || strings.Contains(recentLower, "press any key") {
+		return true
+	}
+
+	// Common input prompts
+	if strings.Contains(recentLower, "enter your") || strings.Contains(recentLower, "type your") ||
+		strings.Contains(recentLower, "please provide") || strings.Contains(recentLower, "please enter") {
+		return true
+	}
+
+	return false
+}
+
+// hasCompletionMarker checks if any line in the output is the completion marker.
+// This avoids false positives from the prompt text which contains "TASK_COMPLETE" in instructions.
+func hasCompletionMarker(lines []string) bool {
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		// Check for exact match or line starting with TASK_COMPLETE
+		// (Claude might add punctuation or emoji after it)
+		if trimmed == "TASK_COMPLETE" || strings.HasPrefix(trimmed, "TASK_COMPLETE") {
+			// Make sure it's not part of the instruction text (which has quotes around it)
+			if !strings.Contains(line, `"TASK_COMPLETE"`) && !strings.Contains(line, "output") {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // parseOutputMarkers checks output for completion markers
@@ -724,7 +1121,7 @@ func (e *Executor) parseOutputMarkers(output string) execResult {
 
 // runClaudeDirect runs claude directly without tmux (fallback)
 func (e *Executor) runClaudeDirect(ctx context.Context, taskID int64, workDir, prompt string) execResult {
-	cmd := exec.CommandContext(ctx, "claude", prompt)
+	cmd := exec.CommandContext(ctx, "claude", "-p", "--dangerously-skip-permissions", prompt)
 	cmd.Dir = workDir
 
 	stdout, err := cmd.StdoutPipe()
@@ -939,10 +1336,18 @@ func (e *Executor) getConversationHistory(taskID int64) string {
 func (e *Executor) setupWorktree(task *db.Task) (string, error) {
 	// Get project directory
 	projectDir := e.getProjectDir(task.Project)
+	
+	home, _ := os.UserHomeDir()
+	
 	if projectDir == "" {
-		// No project, use current directory
-		cwd, _ := os.Getwd()
-		return cwd, nil
+		// No project - use default tasks directory with per-task subdirs
+		tasksDir := filepath.Join(home, ".local", "share", "task", "tasks")
+		slug := slugify(task.Title, 40)
+		taskDir := filepath.Join(tasksDir, fmt.Sprintf("%d-%s", task.ID, slug))
+		if err := os.MkdirAll(taskDir, 0755); err != nil {
+			return "", fmt.Errorf("create task dir: %w", err)
+		}
+		return taskDir, nil
 	}
 
 	// Check if project is a git repo
@@ -952,16 +1357,15 @@ func (e *Executor) setupWorktree(task *db.Task) (string, error) {
 		return projectDir, nil
 	}
 
-	// Create worktree directory in task data folder (not in project)
-	home, _ := os.UserHomeDir()
-	projectName := task.Project
-	if projectName == "" {
-		projectName = filepath.Base(projectDir)
-	}
-	worktreesDir := filepath.Join(home, ".local", "share", "task", "worktrees", projectName)
+	// Create worktree directory inside the project
+	// This allows Claude to inherit the project's MCP config and settings
+	worktreesDir := filepath.Join(projectDir, ".task-worktrees")
 	if err := os.MkdirAll(worktreesDir, 0755); err != nil {
 		return "", fmt.Errorf("create worktrees dir: %w", err)
 	}
+
+	// Ensure .task-worktrees is in .gitignore
+	e.ensureGitignore(projectDir, ".task-worktrees")
 
 	// Generate slug from title (e.g., "Add contact email" -> "add-contact-email")
 	slug := slugify(task.Title, 40)
@@ -1016,6 +1420,38 @@ func (e *Executor) setupWorktree(task *db.Task) (string, error) {
 	e.logLine(task.ID, "system", fmt.Sprintf("Created worktree at %s (branch: %s)", worktreePath, branchName))
 
 	return worktreePath, nil
+}
+
+// ensureGitignore adds an entry to .gitignore if not already present.
+func (e *Executor) ensureGitignore(projectDir, entry string) {
+	gitignorePath := filepath.Join(projectDir, ".gitignore")
+
+	// Read existing content
+	content, err := os.ReadFile(gitignorePath)
+	if err != nil && !os.IsNotExist(err) {
+		return
+	}
+
+	// Check if entry already exists
+	lines := strings.Split(string(content), "\n")
+	for _, line := range lines {
+		if strings.TrimSpace(line) == entry {
+			return // Already present
+		}
+	}
+
+	// Append entry
+	f, err := os.OpenFile(gitignorePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+
+	// Add newline before entry if file doesn't end with one
+	if len(content) > 0 && content[len(content)-1] != '\n' {
+		f.WriteString("\n")
+	}
+	f.WriteString(entry + "\n")
 }
 
 // getDefaultBranch returns the default branch name for a git repo.

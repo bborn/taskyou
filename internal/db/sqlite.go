@@ -58,6 +58,12 @@ func (lt LocalTime) Value() (driver.Value, error) {
 // DB wraps the SQLite database connection.
 type DB struct {
 	*sql.DB
+	path string
+}
+
+// Path returns the path to the database file.
+func (db *DB) Path() string {
+	return db.path
 }
 
 // Open opens or creates a SQLite database at the given path.
@@ -85,7 +91,7 @@ func Open(path string) (*DB, error) {
 		return nil, fmt.Errorf("enable foreign keys: %w", err)
 	}
 
-	wrapped := &DB{db}
+	wrapped := &DB{DB: db, path: path}
 
 	// Run migrations
 	if err := wrapped.migrate(); err != nil {

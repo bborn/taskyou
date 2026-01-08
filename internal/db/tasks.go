@@ -163,6 +163,15 @@ func (db *DB) ListTasks(opts ListTasksOptions) ([]*Task, error) {
 	return tasks, nil
 }
 
+// MarkTaskStarted sets the started_at timestamp if not already set.
+func (db *DB) MarkTaskStarted(id int64) error {
+	_, err := db.Exec(`
+		UPDATE tasks SET started_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+		WHERE id = ? AND started_at IS NULL
+	`, id)
+	return err
+}
+
 // UpdateTaskStatus updates a task's status.
 func (db *DB) UpdateTaskStatus(id int64, status string) error {
 	query := "UPDATE tasks SET status = ?, updated_at = CURRENT_TIMESTAMP"
@@ -385,6 +394,44 @@ func (db *DB) GetLastQuestion(taskID int64) (string, error) {
 		return "", fmt.Errorf("query last question: %w", err)
 	}
 	return content, nil
+}
+
+// GetRetryFeedback returns the feedback from the most recent retry, or empty string if not a retry.
+// Looks for "Feedback: ..." log entry after "--- Continuation ---" marker.
+func (db *DB) GetRetryFeedback(taskID int64) (string, error) {
+	// Check if there's a continuation marker
+	var hasContinuation int
+	err := db.QueryRow(`
+		SELECT COUNT(*) FROM task_logs
+		WHERE task_id = ? AND content = '--- Continuation ---'
+	`, taskID).Scan(&hasContinuation)
+	if err != nil || hasContinuation == 0 {
+		return "", err
+	}
+
+	// Get the feedback after the last continuation marker
+	var content string
+	err = db.QueryRow(`
+		SELECT content FROM task_logs
+		WHERE task_id = ? AND content LIKE 'Feedback: %'
+		AND id > (
+			SELECT MAX(id) FROM task_logs
+			WHERE task_id = ? AND content = '--- Continuation ---'
+		)
+		ORDER BY id DESC LIMIT 1
+	`, taskID, taskID).Scan(&content)
+	if err == sql.ErrNoRows {
+		return "", nil // Retry without feedback
+	}
+	if err != nil {
+		return "", err
+	}
+
+	// Strip "Feedback: " prefix
+	if len(content) > 10 {
+		return content[10:], nil
+	}
+	return "", nil
 }
 
 // Project represents a configured project.

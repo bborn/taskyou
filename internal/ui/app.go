@@ -15,6 +15,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/huh"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/fsnotify/fsnotify"
 )
 
 // View represents the current view.
@@ -217,6 +218,10 @@ type AppModel struct {
 	// Real-time event subscription
 	eventCh chan executor.TaskEvent
 
+	// File watcher for database changes
+	watcher   *fsnotify.Watcher
+	dbChangeCh chan struct{}
+
 	// Number filter for quick task ID jump
 	numberFilter string
 
@@ -284,6 +289,10 @@ func NewAppModel(database *db.DB, exec *executor.Executor, workingDir string) *A
 	h := help.New()
 	h.ShowAll = false
 
+	// Setup file watcher for database changes
+	watcher, _ := fsnotify.NewWatcher()
+	dbChangeCh := make(chan struct{}, 1)
+
 	return &AppModel{
 		db:           database,
 		executor:     exec,
@@ -295,6 +304,8 @@ func NewAppModel(database *db.DB, exec *executor.Executor, workingDir string) *A
 		filterInput:  fi,
 		loading:      true,
 		prevStatuses: make(map[int64]string),
+		watcher:      watcher,
+		dbChangeCh:   dbChangeCh,
 	}
 }
 
@@ -304,7 +315,11 @@ func (m *AppModel) Init() tea.Cmd {
 	m.eventCh = m.executor.SubscribeTaskEvents()
 	// Initialize interrupt key state (disabled until we know tasks are executing)
 	m.keys.Interrupt.SetEnabled(len(m.executor.RunningTasks()) > 0)
-	return tea.Batch(m.loadTasks(), m.waitForTaskEvent(), m.tick())
+
+	// Start watching database file for changes
+	m.startDatabaseWatcher()
+
+	return tea.Batch(m.loadTasks(), m.waitForTaskEvent(), m.waitForDBChange(), m.tick())
 }
 
 // Update handles messages.
@@ -324,15 +339,20 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if m.currentView == ViewRetry && m.retryView != nil {
 		return m.updateRetry(msg)
 	}
+	// Handle detail view feedback mode (needs all message types for text input)
+	if m.currentView == ViewDetail && m.detailView != nil && m.detailView.InFeedbackMode() {
+		return m.updateDetail(msg)
+	}
 
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
 		// Global keys
 		if key.Matches(msg, m.keys.Quit) {
-			// Cleanup subscription
+			// Cleanup subscriptions and watchers
 			if m.eventCh != nil {
 				m.executor.UnsubscribeTaskEvents(m.eventCh)
 			}
+			m.stopDatabaseWatcher()
 			return m, tea.Quit
 		}
 
@@ -386,9 +406,10 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.notifyUntil = time.Now().Add(10 * time.Second)
 					fmt.Print("\a") // Ring terminal bell
 				} else if t.Status == db.StatusDone && db.IsInProgress(prevStatus) {
-					// Task completed
+					// Task completed - ring bell and show notification
 					m.notification = fmt.Sprintf("✓ Task #%d complete: %s", t.ID, t.Title)
 					m.notifyUntil = time.Now().Add(5 * time.Second)
+					fmt.Print("\a") // Ring terminal bell
 				}
 			}
 			m.prevStatuses[t.ID] = t.Status
@@ -449,6 +470,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						} else if event.Task.Status == db.StatusDone && db.IsInProgress(prevStatus) {
 							m.notification = fmt.Sprintf("✓ Task #%d complete: %s", event.TaskID, event.Task.Title)
 							m.notifyUntil = time.Now().Add(5 * time.Second)
+							fmt.Print("\a") // Ring terminal bell
 						} else if db.IsInProgress(event.Task.Status) {
 							m.notification = fmt.Sprintf("▶ Task #%d started: %s", event.TaskID, event.Task.Title)
 							m.notifyUntil = time.Now().Add(3 * time.Second)
@@ -479,9 +501,17 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if !m.notifyUntil.IsZero() && time.Now().After(m.notifyUntil) {
 			m.notification = ""
 		}
-		// Poll database for task changes (daemon runs in separate process)
-		cmds = append(cmds, m.pollTaskChanges())
+		// Refresh detail view if active (for logs which may update frequently)
+		if m.currentView == ViewDetail && m.detailView != nil {
+			m.detailView.Refresh()
+		}
 		cmds = append(cmds, m.tick())
+
+	case dbChangeMsg:
+		// Database file changed - reload tasks
+		cmds = append(cmds, m.loadTasks())
+		// Continue watching for more changes
+		cmds = append(cmds, m.waitForDBChange())
 	}
 
 	return m, tea.Batch(cmds...)
@@ -817,15 +847,34 @@ func (m *AppModel) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m *AppModel) updateDetail(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	if key.Matches(msg, m.keys.Back) {
+func (m *AppModel) updateDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
+	// If detail view is in feedback mode, route all messages there
+	if m.detailView != nil && m.detailView.InFeedbackMode() {
+		var cmd tea.Cmd
+		m.detailView, cmd = m.detailView.Update(msg)
+		return m, cmd
+	}
+
+	// Handle key messages
+	keyMsg, ok := msg.(tea.KeyMsg)
+	if !ok {
+		// Non-key messages go to detail view
+		if m.detailView != nil {
+			var cmd tea.Cmd
+			m.detailView, cmd = m.detailView.Update(msg)
+			return m, cmd
+		}
+		return m, nil
+	}
+
+	if key.Matches(keyMsg, m.keys.Back) {
 		m.currentView = ViewDashboard
 		m.detailView = nil
 		return m, nil
 	}
 
 	// Handle queue/close/retry from detail view
-	if key.Matches(msg, m.keys.Queue) && m.selectedTask != nil {
+	if key.Matches(keyMsg, m.keys.Queue) && m.selectedTask != nil {
 		// Immediately update UI for responsiveness
 		m.selectedTask.Status = db.StatusQueued
 		if m.detailView != nil {
@@ -835,7 +884,7 @@ func (m *AppModel) updateDetail(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.updateTaskInList(m.selectedTask)
 		return m, m.queueTask(m.selectedTask.ID)
 	}
-	if key.Matches(msg, m.keys.Retry) && m.selectedTask != nil {
+	if key.Matches(keyMsg, m.keys.Retry) && m.selectedTask != nil {
 		task := m.selectedTask
 		if task.Status == db.StatusBlocked || task.Status == db.StatusDone ||
 			task.Status == db.StatusBacklog {
@@ -845,7 +894,7 @@ func (m *AppModel) updateDetail(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, m.retryView.Init()
 		}
 	}
-	if key.Matches(msg, m.keys.Close) && m.selectedTask != nil {
+	if key.Matches(keyMsg, m.keys.Close) && m.selectedTask != nil {
 		// Immediately update UI for responsiveness
 		m.selectedTask.Status = db.StatusDone
 		if m.detailView != nil {
@@ -856,24 +905,27 @@ func (m *AppModel) updateDetail(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.currentView = ViewDashboard
 		return m, m.closeTask(m.selectedTask.ID)
 	}
-	if key.Matches(msg, m.keys.Attach) && m.selectedTask != nil {
-		if db.IsInProgress(m.selectedTask.Status) {
-			sessionName := executor.TmuxSessionName(m.selectedTask.ID)
+	if key.Matches(keyMsg, m.keys.Attach) && m.selectedTask != nil {
+		// Attach if tmux session exists
+		sessionName := executor.TmuxSessionName(m.selectedTask.ID)
+		if exec.Command("tmux", "has-session", "-t", sessionName).Run() == nil {
 			return m, tea.ExecProcess(
 				exec.Command("tmux", "attach-session", "-t", sessionName),
 				func(err error) tea.Msg { return attachDoneMsg{err: err} },
 			)
 		}
 	}
-	if key.Matches(msg, m.keys.Interrupt) && m.selectedTask != nil {
-		if db.IsInProgress(m.selectedTask.Status) || m.executor.IsRunning(m.selectedTask.ID) {
+	if key.Matches(keyMsg, m.keys.Interrupt) && m.selectedTask != nil {
+		// Interrupt if tmux session exists or executor is running
+		sessionName := executor.TmuxSessionName(m.selectedTask.ID)
+		if exec.Command("tmux", "has-session", "-t", sessionName).Run() == nil || m.executor.IsRunning(m.selectedTask.ID) {
 			return m, m.interruptTask(m.selectedTask.ID)
 		}
 	}
-	if key.Matches(msg, m.keys.Open) && m.selectedTask != nil {
+	if key.Matches(keyMsg, m.keys.Open) && m.selectedTask != nil {
 		return m, m.openTaskDir(m.selectedTask)
 	}
-	if key.Matches(msg, m.keys.Files) && m.selectedTask != nil {
+	if key.Matches(keyMsg, m.keys.Files) && m.selectedTask != nil {
 		m.attachmentsView = NewAttachmentsModel(m.selectedTask, m.db, m.width, m.height)
 		m.previousView = m.currentView
 		m.currentView = ViewAttachments
@@ -1123,6 +1175,8 @@ type openDirDoneMsg struct {
 
 type tickMsg time.Time
 
+type dbChangeMsg struct{}
+
 func (m *AppModel) loadTasks() tea.Cmd {
 	return func() tea.Msg {
 		tasks, err := m.db.ListTasks(db.ListTasksOptions{Limit: 50, IncludeClosed: true})
@@ -1229,6 +1283,20 @@ func (m *AppModel) retryTaskWithAttachments(id int64, feedback string, attachmen
 			}
 		}
 
+		// Check if tmux session is still alive
+		sessionName := executor.TmuxSessionName(id)
+		if err := exec.Command("tmux", "has-session", "-t", sessionName).Run(); err == nil {
+			// Session alive - just send feedback via send-keys
+			if feedback != "" {
+				database.AppendTaskLog(id, "text", "Feedback: "+feedback)
+				exec.Command("tmux", "send-keys", "-t", sessionName, feedback, "Enter").Run()
+			}
+			// Update status to processing
+			database.UpdateTaskStatus(id, db.StatusProcessing)
+			return taskRetriedMsg{err: nil}
+		}
+
+		// Session dead - re-queue for executor to pick up with --resume
 		err := database.RetryTask(id, feedback)
 		return taskRetriedMsg{err: err}
 	}
@@ -1251,49 +1319,64 @@ func (m *AppModel) openTaskDir(task *db.Task) tea.Cmd {
 		return nil
 	}
 
-	// Open in new terminal tab using current terminal
+	// Use tmux to create a new window in the task directory
+	if os.Getenv("TMUX") != "" {
+		cmd := exec.Command("tmux", "new-window", "-c", dir)
+		go cmd.Run()
+		return func() tea.Msg { return openDirDoneMsg{} }
+	}
+
+	// Detect terminal emulator and open new window
 	termProgram := os.Getenv("TERM_PROGRAM")
-	var script string
 	switch termProgram {
 	case "iTerm.app":
-		script = fmt.Sprintf(`tell application "iTerm"
-			activate
+		script := fmt.Sprintf(`tell application "iTerm2"
 			tell current window
 				create tab with default profile
 				tell current session
-					write text "cd %q && clear"
+					write text "cd %q"
 				end tell
 			end tell
 		end tell`, dir)
+		cmd := exec.Command("osascript", "-e", script)
+		go cmd.Run()
+		return func() tea.Msg { return openDirDoneMsg{} }
 	case "Apple_Terminal":
-		script = fmt.Sprintf(`tell application "Terminal"
-			activate
-			tell application "System Events" to keystroke "t" using command down
-			delay 0.3
-			do script "cd %q && clear" in front window
-		end tell`, dir)
-	case "ghostty":
-		script = fmt.Sprintf(`tell application "Ghostty" to activate
-		tell application "System Events"
-			tell process "Ghostty"
-				keystroke "t" using command down
-				delay 0.3
-				keystroke "cd %q && clear"
-				key code 36
-			end tell
-		end tell`, dir)
-	default:
-		// Fallback: try to open via generic "open new tab" keystroke
-		script = fmt.Sprintf(`tell application "System Events"
-			keystroke "t" using command down
-			delay 0.3
-			keystroke "cd %q && clear"
-			key code 36
-		end tell`, dir)
+		cmd := exec.Command("open", "-a", "Terminal", dir)
+		go cmd.Run()
+		return func() tea.Msg { return openDirDoneMsg{} }
+	case "WezTerm":
+		cmd := exec.Command("wezterm", "cli", "spawn", "--cwd", dir)
+		go cmd.Run()
+		return func() tea.Msg { return openDirDoneMsg{} }
+	case "Alacritty":
+		cmd := exec.Command("alacritty", "--working-directory", dir)
+		go cmd.Run()
+		return func() tea.Msg { return openDirDoneMsg{} }
+	case "kitty":
+		// kitty requires remote control to be enabled; spawn new instance otherwise
+		cmd := exec.Command("kitty", "--directory", dir)
+		go cmd.Run()
+		return func() tea.Msg { return openDirDoneMsg{} }
 	}
-	cmd := exec.Command("osascript", "-e", script)
-	go cmd.Run()
-	return func() tea.Msg { return openDirDoneMsg{} }
+
+	// Check for GNOME Terminal
+	if os.Getenv("GNOME_TERMINAL_SERVICE") != "" {
+		cmd := exec.Command("gnome-terminal", "--working-directory", dir)
+		go cmd.Run()
+		return func() tea.Msg { return openDirDoneMsg{} }
+	}
+
+	// Fallback: spawn shell in-place (user exits to return to TUI)
+	shell := os.Getenv("SHELL")
+	if shell == "" {
+		shell = "sh"
+	}
+	cmd := exec.Command(shell)
+	cmd.Dir = dir
+	return tea.ExecProcess(cmd, func(err error) tea.Msg {
+		return openDirDoneMsg{err: err}
+	})
 }
 
 func (m *AppModel) waitForTaskEvent() tea.Cmd {
@@ -1312,15 +1395,65 @@ func (m *AppModel) tick() tea.Cmd {
 	})
 }
 
-// pollTaskChanges checks for task changes from the daemon (separate process).
-func (m *AppModel) pollTaskChanges() tea.Cmd {
-	database := m.db
+// startDatabaseWatcher starts watching the database file for changes.
+func (m *AppModel) startDatabaseWatcher() {
+	if m.watcher == nil {
+		return
+	}
+
+	dbPath := m.db.Path()
+	if dbPath == "" {
+		return
+	}
+
+	// Watch both the main database file and the WAL file (SQLite WAL mode)
+	m.watcher.Add(dbPath)
+	m.watcher.Add(dbPath + "-wal")
+
+	// Start goroutine to forward fsnotify events to the channel
+	go func() {
+		for {
+			select {
+			case event, ok := <-m.watcher.Events:
+				if !ok {
+					return
+				}
+				// Only trigger on write events
+				if event.Op&fsnotify.Write == fsnotify.Write {
+					// Non-blocking send to debounce rapid changes
+					select {
+					case m.dbChangeCh <- struct{}{}:
+					default:
+					}
+				}
+			case _, ok := <-m.watcher.Errors:
+				if !ok {
+					return
+				}
+				// Ignore errors, just keep watching
+			}
+		}
+	}()
+}
+
+// waitForDBChange returns a command that waits for database file changes.
+func (m *AppModel) waitForDBChange() tea.Cmd {
 	return func() tea.Msg {
-		tasks, err := database.ListTasks(db.ListTasksOptions{Limit: 50, IncludeClosed: true})
-		if err != nil {
+		_, ok := <-m.dbChangeCh
+		if !ok {
 			return nil
 		}
-		return tasksLoadedMsg{tasks: tasks, err: nil}
+		return dbChangeMsg{}
+	}
+}
+
+// stopDatabaseWatcher stops the file watcher.
+func (m *AppModel) stopDatabaseWatcher() {
+	if m.watcher != nil {
+		m.watcher.Close()
+	}
+	if m.dbChangeCh != nil {
+		close(m.dbChangeCh)
 	}
 }
 

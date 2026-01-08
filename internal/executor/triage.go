@@ -295,6 +295,11 @@ func (e *Executor) applyTriageResult(task *db.Task, result *TriageResult) {
 
 // NeedsTriage returns true if the task should go through triage before execution.
 func NeedsTriage(task *db.Task) bool {
+	// Skip triage if task was already started (this is a retry)
+	if task.StartedAt != nil {
+		return false
+	}
+
 	// Empty project or type needs triage
 	if task.Project == "" || task.Type == "" {
 		return true

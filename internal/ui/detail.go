@@ -2,10 +2,13 @@ package ui
 
 import (
 	"fmt"
+	"os/exec"
 	"strings"
 	"time"
 
 	"github.com/bborn/workflow/internal/db"
+	"github.com/bborn/workflow/internal/executor"
+	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/glamour"
@@ -21,6 +24,10 @@ type DetailModel struct {
 	width    int
 	height   int
 	ready    bool
+
+	// Feedback input for sending to claude
+	feedbackInput textinput.Model
+	feedbackMode  bool
 }
 
 // UpdateTask updates the task and refreshes the view.
@@ -31,6 +38,35 @@ func (m *DetailModel) UpdateTask(t *db.Task) {
 	}
 }
 
+// Refresh reloads task and logs from database.
+func (m *DetailModel) Refresh() {
+	if m.task == nil || m.database == nil {
+		return
+	}
+
+	// Reload task
+	task, err := m.database.GetTask(m.task.ID)
+	if err == nil && task != nil {
+		m.task = task
+	}
+
+	// Reload logs
+	logs, err := m.database.GetTaskLogs(m.task.ID, 500)
+	if err == nil {
+		wasAtBottom := m.viewport.AtBottom()
+		prevLogCount := len(m.logs)
+		m.logs = logs
+
+		if m.ready {
+			m.viewport.SetContent(m.renderContent())
+			// Auto-scroll to bottom if we were at bottom or new logs arrived
+			if wasAtBottom || len(logs) > prevLogCount {
+				m.viewport.GotoBottom()
+			}
+		}
+	}
+}
+
 // Task returns the current task.
 func (m *DetailModel) Task() *db.Task {
 	return m.task
@@ -38,11 +74,18 @@ func (m *DetailModel) Task() *db.Task {
 
 // NewDetailModel creates a new detail model.
 func NewDetailModel(t *db.Task, database *db.DB, width, height int) *DetailModel {
+	// Setup feedback input
+	fi := textinput.New()
+	fi.Placeholder = "Type feedback for claude..."
+	fi.CharLimit = 500
+	fi.Width = width - 20
+
 	m := &DetailModel{
-		task:     t,
-		database: database,
-		width:    width,
-		height:   height,
+		task:          t,
+		database:      database,
+		width:         width,
+		height:        height,
+		feedbackInput: fi,
 	}
 
 	// Load logs
@@ -54,7 +97,7 @@ func NewDetailModel(t *db.Task, database *db.DB, width, height int) *DetailModel
 }
 
 func (m *DetailModel) initViewport() {
-	headerHeight := 8
+	headerHeight := 9
 	footerHeight := 3
 
 	m.viewport = viewport.New(m.width-4, m.height-headerHeight-footerHeight)
@@ -69,7 +112,7 @@ func (m *DetailModel) SetSize(width, height int) {
 	m.width = width
 	m.height = height
 	if m.ready {
-		headerHeight := 8
+		headerHeight := 9
 		footerHeight := 3
 		m.viewport.Width = width - 4
 		m.viewport.Height = height - headerHeight - footerHeight
@@ -79,10 +122,90 @@ func (m *DetailModel) SetSize(width, height int) {
 }
 
 // Update handles messages.
-func (m *DetailModel) Update(msg tea.KeyMsg) (*DetailModel, tea.Cmd) {
+func (m *DetailModel) Update(msg tea.Msg) (*DetailModel, tea.Cmd) {
 	var cmd tea.Cmd
-	m.viewport, cmd = m.viewport.Update(msg)
+
+	// Handle feedback mode
+	if m.feedbackMode {
+		switch msg := msg.(type) {
+		case tea.KeyMsg:
+			switch msg.Type {
+			case tea.KeyEsc:
+				m.feedbackMode = false
+				m.feedbackInput.Blur()
+				return m, nil
+			case tea.KeyEnter:
+				feedback := m.feedbackInput.Value()
+				if feedback != "" {
+					m.sendFeedbackToTmux(feedback)
+					m.feedbackInput.SetValue("")
+				}
+				m.feedbackMode = false
+				m.feedbackInput.Blur()
+				return m, nil
+			}
+		}
+		m.feedbackInput, cmd = m.feedbackInput.Update(msg)
+		return m, cmd
+	}
+
+	// Normal mode - handle key messages
+	if keyMsg, ok := msg.(tea.KeyMsg); ok {
+		hasSession := m.hasActiveTmuxSession()
+
+		// 's' to enter feedback/send mode (only when tmux session is active)
+		if keyMsg.String() == "s" && hasSession {
+			m.feedbackMode = true
+			m.feedbackInput.Focus()
+			return m, textinput.Blink
+		}
+
+		// 'k' to kill the tmux session
+		if keyMsg.String() == "k" && hasSession {
+			m.killTmuxSession()
+			return m, nil
+		}
+
+		m.viewport, cmd = m.viewport.Update(keyMsg)
+	}
+
 	return m, cmd
+}
+
+// InFeedbackMode returns true if the detail view is in feedback input mode.
+func (m *DetailModel) InFeedbackMode() bool {
+	return m.feedbackMode
+}
+
+// hasActiveTmuxSession checks if this task has an active tmux session.
+func (m *DetailModel) hasActiveTmuxSession() bool {
+	sessionName := executor.TmuxSessionName(m.task.ID)
+	err := exec.Command("tmux", "has-session", "-t", sessionName).Run()
+	return err == nil
+}
+
+// sendFeedbackToTmux sends text to the task's tmux session and submits it.
+func (m *DetailModel) sendFeedbackToTmux(feedback string) {
+	sessionName := executor.TmuxSessionName(m.task.ID)
+	// Log the interaction
+	m.database.AppendTaskLog(m.task.ID, "user", fmt.Sprintf("→ %s", feedback))
+	// Send the feedback text as literal (-l) to avoid special char interpretation
+	exec.Command("tmux", "send-keys", "-t", sessionName, "-l", feedback).Run()
+	// Send Enter key to submit
+	exec.Command("tmux", "send-keys", "-t", sessionName, "Enter").Run()
+	// Refresh to show the new log entry
+	m.Refresh()
+}
+
+// killTmuxSession kills the Claude tmux session for this task.
+func (m *DetailModel) killTmuxSession() {
+	sessionName := executor.TmuxSessionName(m.task.ID)
+	// Log the interaction
+	m.database.AppendTaskLog(m.task.ID, "user", "→ [Kill] Session terminated")
+	// Kill the tmux session
+	exec.Command("tmux", "kill-session", "-t", sessionName).Run()
+	// Refresh to show the new log entry
+	m.Refresh()
 }
 
 // View renders the detail view.
@@ -93,7 +216,6 @@ func (m *DetailModel) View() string {
 
 	header := m.renderHeader()
 	content := m.viewport.View()
-	help := m.renderHelp()
 
 	box := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
@@ -101,6 +223,25 @@ func (m *DetailModel) View() string {
 		Width(m.width-2).
 		Padding(0, 1)
 
+	// Show feedback input when in feedback mode
+	if m.feedbackMode {
+		inputStyle := lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(ColorSecondary).
+			Padding(0, 1).
+			Width(m.width - 4)
+
+		feedbackBar := inputStyle.Render(
+			Bold.Render("Send to claude: ") + m.feedbackInput.View(),
+		)
+
+		return lipgloss.JoinVertical(lipgloss.Left,
+			box.Render(lipgloss.JoinVertical(lipgloss.Left, header, content)),
+			feedbackBar,
+		)
+	}
+
+	help := m.renderHelp()
 	return lipgloss.JoinVertical(lipgloss.Left,
 		box.Render(lipgloss.JoinVertical(lipgloss.Left, header, content)),
 		help,
@@ -211,6 +352,10 @@ func (m *DetailModel) renderContent() string {
 				icon = "❌"
 			case "question":
 				icon = "❓"
+			case "user":
+				icon = "👤"
+			case "output":
+				icon = "📤"
 			}
 
 			line := fmt.Sprintf("%s %s %s",
@@ -233,15 +378,23 @@ func (m *DetailModel) renderHelp() string {
 	}{
 		{"↑/↓", "scroll"},
 		{"x", "execute"},
-		{"a", "attach"},
 	}
 
-	// Only show interrupt if task is executing
-	if db.IsInProgress(m.task.Status) {
+	// Show tmux-related options if session is active
+	hasSession := m.hasActiveTmuxSession()
+	if hasSession {
 		keys = append(keys, struct {
 			key  string
 			desc string
-		}{"i", "interrupt"})
+		}{"a", "attach"})
+		keys = append(keys, struct {
+			key  string
+			desc string
+		}{"s", "send"})
+		keys = append(keys, struct {
+			key  string
+			desc string
+		}{"k", "kill"})
 	}
 
 	keys = append(keys, []struct {

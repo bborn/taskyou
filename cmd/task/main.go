@@ -3,19 +3,25 @@
 package main
 
 import (
+	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
 	"os/signal"
 	"os/user"
 	"path/filepath"
+	"strings"
 	"syscall"
+	"time"
 
 	"github.com/bborn/workflow/internal/config"
 	"github.com/bborn/workflow/internal/db"
 	"github.com/bborn/workflow/internal/executor"
+	"github.com/bborn/workflow/internal/mcp"
 	"github.com/bborn/workflow/internal/ui"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -112,6 +118,40 @@ func main() {
 	daemonCmd.AddCommand(daemonStatusCmd)
 
 	rootCmd.AddCommand(daemonCmd)
+
+	// Logs subcommand - tail claude session logs
+	logsCmd := &cobra.Command{
+		Use:   "logs",
+		Short: "Tail claude session logs for debugging",
+		Long:  "Streams all claude session logs across all projects in real-time.",
+		Run: func(cmd *cobra.Command, args []string) {
+			if err := tailClaudeLogs(); err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+		},
+	}
+	rootCmd.AddCommand(logsCmd)
+
+	// MCP subcommand - run MCP server for Claude integration (internal use)
+	mcpCmd := &cobra.Command{
+		Use:    "mcp",
+		Short:  "Run MCP server for Claude integration",
+		Hidden: true, // Internal use only
+		Run: func(cmd *cobra.Command, args []string) {
+			taskID, _ := cmd.Flags().GetInt64("task")
+			if taskID == 0 {
+				fmt.Fprintln(os.Stderr, "Error: --task flag required")
+				os.Exit(1)
+			}
+			if err := runMCPServer(taskID); err != nil {
+				fmt.Fprintln(os.Stderr, "Error: "+err.Error())
+				os.Exit(1)
+			}
+		},
+	}
+	mcpCmd.Flags().Int64("task", 0, "Task ID for this MCP server")
+	rootCmd.AddCommand(mcpCmd)
 
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
@@ -442,4 +482,192 @@ func loadPrivateKey(path string) (ssh.Signer, error) {
 		return nil, err
 	}
 	return ssh.ParsePrivateKey(data)
+}
+
+// runMCPServer runs the MCP server for Claude integration.
+// This is invoked by Claude as its MCP server for workflow tools.
+func runMCPServer(taskID int64) error {
+	// Open database
+	dbPath := db.DefaultPath()
+	database, err := db.Open(dbPath)
+	if err != nil {
+		return fmt.Errorf("open database: %w", err)
+	}
+	defer database.Close()
+
+	// Create and run MCP server
+	server := mcp.NewServer(database, taskID)
+	return server.Run()
+}
+
+// tailClaudeLogs tails all claude session logs for debugging.
+func tailClaudeLogs() error {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("get home dir: %w", err)
+	}
+
+	projectsDir := filepath.Join(home, ".claude", "projects")
+
+	// Find all .jsonl files
+	pattern := filepath.Join(projectsDir, "*", "*.jsonl")
+	files, err := filepath.Glob(pattern)
+	if err != nil {
+		return fmt.Errorf("glob: %w", err)
+	}
+
+	if len(files) == 0 {
+		return fmt.Errorf("no claude session files found in %s", projectsDir)
+	}
+
+	fmt.Fprintf(os.Stderr, "%s\n", dimStyle.Render(fmt.Sprintf("Watching %d session files...", len(files))))
+	fmt.Fprintf(os.Stderr, "%s\n\n", dimStyle.Render("Press Ctrl+C to stop"))
+
+	// Track file positions
+	positions := make(map[string]int64)
+
+	// Initialize positions to end of file (only show new content)
+	for _, f := range files {
+		info, err := os.Stat(f)
+		if err == nil {
+			positions[f] = info.Size()
+		}
+	}
+
+	// Handle interrupt
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+
+	ticker := time.NewTicker(200 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-sigCh:
+			fmt.Println()
+			return nil
+		case <-ticker.C:
+			// Re-glob to catch new files
+			files, _ = filepath.Glob(pattern)
+
+			for _, f := range files {
+				// Skip internal agent files (Claude Code sub-agents)
+				if strings.HasPrefix(filepath.Base(f), "agent-") {
+					continue
+				}
+				pos := positions[f]
+				newPos, err := tailFile(f, pos)
+				if err == nil {
+					positions[f] = newPos
+				}
+			}
+		}
+	}
+}
+
+// tailFile reads new content from a file starting at the given position.
+func tailFile(path string, pos int64) (int64, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return pos, err
+	}
+	defer file.Close()
+
+	info, err := file.Stat()
+	if err != nil {
+		return pos, err
+	}
+
+	// File was truncated or rotated
+	if info.Size() < pos {
+		pos = 0
+	}
+
+	// No new content
+	if info.Size() == pos {
+		return pos, nil
+	}
+
+	// Seek to last position
+	if _, err := file.Seek(pos, io.SeekStart); err != nil {
+		return pos, err
+	}
+
+	// Extract project name from path for display
+	project := filepath.Base(filepath.Dir(path))
+	projectStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#888888"))
+
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if line == "" {
+			continue
+		}
+
+		// Parse JSON and extract useful content
+		var entry map[string]interface{}
+		if err := json.Unmarshal([]byte(line), &entry); err != nil {
+			continue
+		}
+
+		// Format output based on entry type
+		output := formatLogEntry(entry)
+		if output != "" {
+			fmt.Printf("%s %s\n", projectStyle.Render("["+project+"]"), output)
+		}
+	}
+
+	return info.Size(), nil
+}
+
+// formatLogEntry formats a claude log entry for display.
+// Only shows meaningful content: user input and claude's text responses.
+// Tool calls and results are hidden - attach to tmux or view claude logs for details.
+func formatLogEntry(entry map[string]interface{}) string {
+	msgType, _ := entry["type"].(string)
+
+	switch msgType {
+	case "user":
+		if msg, ok := entry["message"].(map[string]interface{}); ok {
+			if content, ok := msg["content"].(string); ok {
+				return boldStyle.Render("USER: ") + truncate(content, 200)
+			}
+		}
+	case "assistant":
+		if msg, ok := entry["message"].(map[string]interface{}); ok {
+			if content, ok := msg["content"].([]interface{}); ok {
+				// Only extract text blocks, skip tool calls
+				var textParts []string
+				for _, c := range content {
+					if block, ok := c.(map[string]interface{}); ok {
+						if text, ok := block["text"].(string); ok {
+							text = strings.TrimSpace(text)
+							if text != "" {
+								textParts = append(textParts, text)
+							}
+						}
+						// Skip tool_use blocks entirely - they're noise
+					}
+				}
+				if len(textParts) > 0 {
+					return successStyle.Render("CLAUDE: ") + truncate(strings.Join(textParts, " "), 200)
+				}
+			}
+		}
+	// Skip "result" type - tool results are noise for high-level view
+	}
+
+	return ""
+}
+
+// truncate shortens a string to maxLen, adding ellipsis if needed.
+func truncate(s string, maxLen int) string {
+	// Replace newlines with spaces for single-line display
+	s = strings.ReplaceAll(s, "\n", " ")
+	s = strings.ReplaceAll(s, "\r", "")
+
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen-3] + "..."
 }

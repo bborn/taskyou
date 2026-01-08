@@ -27,3 +27,11 @@ bin/
 *.dylib
 *.test
 *.out
+.task-worktrees
+
+# Build output
+task
+taskd
+
+# Database
+*.db
