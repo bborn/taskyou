@@ -2,6 +2,8 @@ package ui
 
 import (
 	"fmt"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/bborn/workflow/internal/db"
@@ -138,13 +140,16 @@ type AppModel struct {
 	tasks        []*db.Task
 	list         list.Model
 	loading      bool
-	showClosed   bool      // Show closed tasks in the list
+	showClosed   bool // Show closed tasks in the list
 	err          error
 	notification string    // Notification banner text
 	notifyUntil  time.Time // When to hide notification
 
 	// Track task statuses to detect changes
 	prevStatuses map[int64]string
+
+	// Number filter for quick task ID jump
+	numberFilter string
 
 	// Detail view state
 	selectedTask *db.Task
@@ -184,7 +189,7 @@ func (t TaskItem) Description() string {
 }
 
 func (t TaskItem) FilterValue() string {
-	return t.task.Title
+	return fmt.Sprintf("%d %s", t.task.ID, t.task.Title)
 }
 
 // NewAppModel creates a new application model.
@@ -358,6 +363,10 @@ func (m *AppModel) View() string {
 		if m.retryView != nil {
 			return m.retryView.View()
 		}
+	case ViewMemories:
+		if m.memoriesView != nil {
+			return m.memoriesView.View()
+		}
 	}
 
 	return ""
@@ -407,6 +416,7 @@ func (m *AppModel) renderHelp() string {
 		{"w", "watch"},
 		{"i", "interrupt"},
 		{"a", "all"},
+		{"m", "memories"},
 		{"s", "settings"},
 		{"q", "quit"},
 	}
@@ -429,6 +439,28 @@ func (m *AppModel) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		var cmd tea.Cmd
 		m.list, cmd = m.list.Update(msg)
 		return m, cmd
+	}
+
+	// Handle number filter input
+	keyStr := msg.String()
+	if len(keyStr) == 1 && keyStr[0] >= '0' && keyStr[0] <= '9' {
+		m.numberFilter += keyStr
+		m.applyNumberFilter()
+		return m, nil
+	}
+
+	// Handle backspace for number filter
+	if keyStr == "backspace" && m.numberFilter != "" {
+		m.numberFilter = m.numberFilter[:len(m.numberFilter)-1]
+		m.applyNumberFilter()
+		return m, nil
+	}
+
+	// Clear number filter on escape (but don't quit)
+	if keyStr == "esc" && m.numberFilter != "" {
+		m.numberFilter = ""
+		m.applyNumberFilter()
+		return m, nil
 	}
 
 	switch {
@@ -497,17 +529,20 @@ func (m *AppModel) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.currentView = ViewSettings
 		return m, m.settingsView.Init()
 
+	case key.Matches(msg, m.keys.Memories):
+		m.memoriesView = NewMemoriesModel(m.db, m.width, m.height)
+		m.previousView = m.currentView
+		m.currentView = ViewMemories
+		return m, nil
+
 	case key.Matches(msg, m.keys.Refresh):
 		m.loading = true
 		return m, m.loadTasks()
 
 	case key.Matches(msg, m.keys.ToggleClosed):
 		m.showClosed = !m.showClosed
-		if m.showClosed {
-			m.list.Title = "Tasks (all)"
-		} else {
-			m.list.Title = "Tasks"
-		}
+		m.numberFilter = "" // Clear number filter when toggling
+		m.updateListTitle()
 		return m, m.loadTasks()
 
 	case key.Matches(msg, m.keys.Back):
@@ -766,4 +801,65 @@ func (m *AppModel) tick() tea.Cmd {
 	return tea.Tick(5*time.Second, func(t time.Time) tea.Msg {
 		return tickMsg(t)
 	})
+}
+
+// applyNumberFilter filters the task list to show only tasks matching the number filter.
+// If a task ID matches exactly, it jumps to that task.
+// Otherwise, it filters to show tasks whose ID starts with the filter.
+func (m *AppModel) applyNumberFilter() {
+	if m.numberFilter == "" {
+		// Restore all tasks
+		items := make([]list.Item, len(m.tasks))
+		for i, t := range m.tasks {
+			items[i] = TaskItem{task: t}
+		}
+		m.list.SetItems(items)
+		m.updateListTitle()
+		return
+	}
+
+	filterNum, err := strconv.ParseInt(m.numberFilter, 10, 64)
+	if err != nil {
+		return
+	}
+
+	// Check for exact match first - jump to that task
+	for i, t := range m.tasks {
+		if t.ID == filterNum {
+			// Restore all items but select the matching one
+			items := make([]list.Item, len(m.tasks))
+			for j, task := range m.tasks {
+				items[j] = TaskItem{task: task}
+			}
+			m.list.SetItems(items)
+			m.list.Select(i)
+			m.updateListTitle()
+			return
+		}
+	}
+
+	// Filter to tasks whose ID starts with the filter
+	var filtered []list.Item
+	filterStr := m.numberFilter
+	for _, t := range m.tasks {
+		idStr := strconv.FormatInt(t.ID, 10)
+		if strings.HasPrefix(idStr, filterStr) {
+			filtered = append(filtered, TaskItem{task: t})
+		}
+	}
+
+	m.list.SetItems(filtered)
+	m.updateListTitle()
+}
+
+// updateListTitle updates the list title based on current state.
+func (m *AppModel) updateListTitle() {
+	title := "Tasks"
+	if m.showClosed {
+		title = "Tasks (all)"
+	}
+	if m.numberFilter != "" {
+		title = fmt.Sprintf("Tasks [#%s]", m.numberFilter)
+	}
+	m.list.Title = title
 }
