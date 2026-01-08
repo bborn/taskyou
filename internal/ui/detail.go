@@ -224,11 +224,24 @@ func (m *DetailModel) renderHelp() string {
 		{"↑/↓", "scroll"},
 		{"x", "execute"},
 		{"a", "attach"},
-		{"i", "interrupt"},
+	}
+
+	// Only show interrupt if task is executing
+	if db.IsInProgress(m.task.Status) {
+		keys = append(keys, struct {
+			key  string
+			desc string
+		}{"i", "interrupt"})
+	}
+
+	keys = append(keys, []struct {
+		key  string
+		desc string
+	}{
 		{"r", "retry"},
 		{"c", "close"},
 		{"q/esc", "back"},
-	}
+	}...)
 
 	var help string
 	for i, k := range keys {
