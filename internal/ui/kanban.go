@@ -253,9 +253,10 @@ func (k *KanbanBoard) View() string {
 		colContent := lipgloss.JoinVertical(lipgloss.Left, header, taskContent)
 
 		// Column container with border
-		borderColor := ColorMuted
+		normalBorder, highlightBorder := GetThemeBorderColors()
+		borderColor := normalBorder
 		if isSelectedCol {
-			borderColor = ColorPrimary
+			borderColor = highlightBorder
 		}
 
 		colStyle := lipgloss.NewStyle().
@@ -323,10 +324,11 @@ func (k *KanbanBoard) renderTaskCard(task *db.Task, width int, isSelected bool) 
 		Padding(0, 1)
 
 	if isSelected {
+		cardBg, cardFg := GetThemeCardColors()
 		cardStyle = cardStyle.
 			Bold(true).
-			Background(lipgloss.Color("#333333")).
-			Foreground(lipgloss.Color("#FFFFFF"))
+			Background(cardBg).
+			Foreground(cardFg)
 	}
 
 	content := idLine + "\n" + titleLine

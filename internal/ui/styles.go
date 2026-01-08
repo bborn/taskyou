@@ -3,33 +3,33 @@ package ui
 
 import "github.com/charmbracelet/lipgloss"
 
-// Colors
+// Colors - these are updated by refreshStyles() when theme changes
 var (
 	// Primary colors
-	ColorPrimary   = lipgloss.Color("#7C3AED") // Purple
-	ColorSecondary = lipgloss.Color("#06B6D4") // Cyan
-	ColorSuccess   = lipgloss.Color("#10B981") // Green
-	ColorWarning   = lipgloss.Color("#F59E0B") // Amber
-	ColorError     = lipgloss.Color("#EF4444") // Red
-	ColorMuted     = lipgloss.Color("#6B7280") // Gray
+	ColorPrimary   = lipgloss.Color("#61AFEF") // Soft blue (OneDark default)
+	ColorSecondary = lipgloss.Color("#56B6C2") // Cyan
+	ColorSuccess   = lipgloss.Color("#98C379") // Green
+	ColorWarning   = lipgloss.Color("#E5C07B") // Yellow
+	ColorError     = lipgloss.Color("#E06C75") // Red
+	ColorMuted     = lipgloss.Color("#5C6370") // Gray
 
 	// Status colors
-	ColorInProgress = lipgloss.Color("#9A9463") // Subtler muted yellow
-	ColorDone       = lipgloss.Color("#10B981") // Green
-	ColorBlocked    = lipgloss.Color("#EF4444") // Red
+	ColorInProgress = lipgloss.Color("#D19A66") // Orange
+	ColorDone       = lipgloss.Color("#98C379") // Green
+	ColorBlocked    = lipgloss.Color("#E06C75") // Red
 
-	// Project colors
-	ColorOfferlab     = lipgloss.Color("#0052CC") // Blue
-	ColorInfluenceKit = lipgloss.Color("#0366D6") // Blue
-	ColorPersonal     = lipgloss.Color("#1D76DB") // Blue
+	// Project colors (fixed, not theme-dependent)
+	ColorOfferlab     = lipgloss.Color("#61AFEF") // Blue
+	ColorInfluenceKit = lipgloss.Color("#56B6C2") // Cyan
+	ColorPersonal     = lipgloss.Color("#C678DD") // Purple
 
-	// Type colors
-	ColorCode     = lipgloss.Color("#5319E7") // Purple
-	ColorWriting  = lipgloss.Color("#7057FF") // Purple
-	ColorThinking = lipgloss.Color("#8B5CF6") // Purple
+	// Type colors (fixed, not theme-dependent)
+	ColorCode     = lipgloss.Color("#C678DD") // Purple
+	ColorWriting  = lipgloss.Color("#E5C07B") // Yellow
+	ColorThinking = lipgloss.Color("#56B6C2") // Cyan
 )
 
-// Base styles
+// Base styles - these are updated by refreshStyles() when theme changes
 var (
 	// Text styles
 	Bold     = lipgloss.NewStyle().Bold(true)
