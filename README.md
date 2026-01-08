@@ -24,10 +24,7 @@ make build
 ### Run locally
 
 ```bash
-# Start the daemon (background executor)
-./bin/task daemon &
-
-# Launch the TUI
+# Launch the TUI (auto-starts background daemon)
 ./bin/task -l
 ```
 
@@ -39,6 +36,14 @@ make build
 
 # Connect from anywhere
 ssh -p 2222 your-server
+```
+
+### Daemon management
+
+```bash
+./bin/task daemon         # Start daemon manually
+./bin/task daemon stop    # Stop the daemon
+./bin/task daemon status  # Check daemon status
 ```
 
 ## Keyboard Shortcuts
@@ -56,6 +61,7 @@ ssh -p 2222 your-server
 | `w` | Watch execution |
 | `a` | Attach to tmux session |
 | `o` | Open task's working directory |
+| `f` | View/manage attachments |
 | `i` | Interrupt execution |
 | `/` | Filter tasks |
 | `m` | Project memories |
@@ -97,7 +103,7 @@ Configure projects in Settings (`s`):
 
 ### Worktrees
 
-Tasks run in isolated git worktrees at `~/.local/share/task/worktrees/{project}/{id}-{slug}`. This allows multiple tasks to run in parallel without conflicts. Press `o` to open a task's worktree.
+Tasks run in isolated git worktrees at `~/.local/share/task/worktrees/{project}/task-{id}`. This allows multiple tasks to run in parallel without conflicts. Press `o` to open a task's worktree.
 
 ### Memories
 
