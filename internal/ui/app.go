@@ -27,23 +27,24 @@ const (
 
 // KeyMap defines key bindings.
 type KeyMap struct {
-	Up        key.Binding
-	Down      key.Binding
-	Enter     key.Binding
-	Back      key.Binding
-	New       key.Binding
-	Queue     key.Binding
-	Retry     key.Binding
-	Close     key.Binding
-	Delete    key.Binding
-	Watch     key.Binding
-	Interrupt key.Binding
-	Filter    key.Binding
-	Refresh   key.Binding
-	Settings  key.Binding
-	Memories  key.Binding
-	Help      key.Binding
-	Quit      key.Binding
+	Up           key.Binding
+	Down         key.Binding
+	Enter        key.Binding
+	Back         key.Binding
+	New          key.Binding
+	Queue        key.Binding
+	Retry        key.Binding
+	Close        key.Binding
+	Delete       key.Binding
+	Watch        key.Binding
+	Interrupt    key.Binding
+	Filter       key.Binding
+	Refresh      key.Binding
+	Settings     key.Binding
+	Memories     key.Binding
+	ToggleClosed key.Binding
+	Help         key.Binding
+	Quit         key.Binding
 }
 
 // DefaultKeyMap returns the default key bindings.
@@ -109,6 +110,10 @@ func DefaultKeyMap() KeyMap {
 			key.WithKeys("m"),
 			key.WithHelp("m", "memories"),
 		),
+		ToggleClosed: key.NewBinding(
+			key.WithKeys("a"),
+			key.WithHelp("a", "show all"),
+		),
 		Help: key.NewBinding(
 			key.WithKeys("?"),
 			key.WithHelp("?", "help"),
@@ -133,6 +138,7 @@ type AppModel struct {
 	tasks        []*db.Task
 	list         list.Model
 	loading      bool
+	showClosed   bool      // Show closed tasks in the list
 	err          error
 	notification string    // Notification banner text
 	notifyUntil  time.Time // When to hide notification
@@ -494,6 +500,15 @@ func (m *AppModel) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.loading = true
 		return m, m.loadTasks()
 
+	case key.Matches(msg, m.keys.ToggleClosed):
+		m.showClosed = !m.showClosed
+		if m.showClosed {
+			m.list.Title = "Tasks (all)"
+		} else {
+			m.list.Title = "Tasks"
+		}
+		return m, m.loadTasks()
+
 	case key.Matches(msg, m.keys.Back):
 		return m, tea.Quit
 	}
@@ -690,8 +705,9 @@ type taskInterruptedMsg struct {
 type tickMsg time.Time
 
 func (m *AppModel) loadTasks() tea.Cmd {
+	showClosed := m.showClosed
 	return func() tea.Msg {
-		tasks, err := m.db.ListTasks(db.ListTasksOptions{Limit: 50})
+		tasks, err := m.db.ListTasks(db.ListTasksOptions{Limit: 50, IncludeClosed: showClosed})
 		return tasksLoadedMsg{tasks: tasks, err: err}
 	}
 }
