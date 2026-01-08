@@ -51,6 +51,11 @@ type KeyMap struct {
 	Open         key.Binding
 	Help         key.Binding
 	Quit         key.Binding
+	// Column focus shortcuts
+	FocusBacklog     key.Binding
+	FocusInProgress  key.Binding
+	FocusBlocked     key.Binding
+	FocusDone        key.Binding
 }
 
 // ShortHelp returns key bindings to show in the mini help.
@@ -62,6 +67,7 @@ func (k KeyMap) ShortHelp() []key.Binding {
 func (k KeyMap) FullHelp() [][]key.Binding {
 	return [][]key.Binding{
 		{k.Left, k.Right, k.Up, k.Down},
+		{k.FocusBacklog, k.FocusInProgress, k.FocusBlocked, k.FocusDone},
 		{k.Enter, k.New, k.Queue, k.Close},
 		{k.Retry, k.Watch, k.Attach, k.Interrupt, k.Delete},
 		{k.Filter, k.Settings, k.Memories, k.Open},
@@ -155,6 +161,22 @@ func DefaultKeyMap() KeyMap {
 		Quit: key.NewBinding(
 			key.WithKeys("ctrl+c"),
 			key.WithHelp("ctrl+c", "quit"),
+		),
+		FocusBacklog: key.NewBinding(
+			key.WithKeys("B"),
+			key.WithHelp("B", "backlog"),
+		),
+		FocusInProgress: key.NewBinding(
+			key.WithKeys("P"),
+			key.WithHelp("P", "in progress"),
+		),
+		FocusBlocked: key.NewBinding(
+			key.WithKeys("L"),
+			key.WithHelp("L", "blocked"),
+		),
+		FocusDone: key.NewBinding(
+			key.WithKeys("D"),
+			key.WithHelp("D", "done"),
 		),
 	}
 }
@@ -604,6 +626,23 @@ func (m *AppModel) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case key.Matches(msg, m.keys.Down):
 		m.kanban.MoveDown()
+		return m, nil
+
+	// Column focus shortcuts
+	case key.Matches(msg, m.keys.FocusBacklog):
+		m.kanban.FocusColumn(0)
+		return m, nil
+
+	case key.Matches(msg, m.keys.FocusInProgress):
+		m.kanban.FocusColumn(1)
+		return m, nil
+
+	case key.Matches(msg, m.keys.FocusBlocked):
+		m.kanban.FocusColumn(2)
+		return m, nil
+
+	case key.Matches(msg, m.keys.FocusDone):
+		m.kanban.FocusColumn(3)
 		return m, nil
 
 	case key.Matches(msg, m.keys.Enter):

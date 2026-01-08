@@ -376,3 +376,16 @@ func (k *KanbanBoard) ApplyNumberFilter(filter string) {
 func (k *KanbanBoard) GetNumberFilter() string {
 	return k.numberFilter
 }
+
+// FocusColumn moves selection to a specific column by index.
+func (k *KanbanBoard) FocusColumn(colIdx int) {
+	if colIdx >= 0 && colIdx < len(k.columns) {
+		k.selectedCol = colIdx
+		k.clampSelection()
+	}
+}
+
+// ColumnCount returns the number of columns.
+func (k *KanbanBoard) ColumnCount() int {
+	return len(k.columns)
+}
