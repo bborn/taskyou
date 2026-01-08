@@ -158,33 +158,45 @@ Respond with ONLY the JSON object, no other text.`)
 
 // runTriageClaude runs a quick Claude call for triage.
 func (e *Executor) runTriageClaude(ctx context.Context, taskID int64, prompt string) (*TriageResult, error) {
-	// Use crush with quiet mode for triage
+	// Use claude CLI with JSON output, no tools for speed
 	args := []string{
-		"run",
-		"-q", // quiet mode
+		"--print",
+		"--output-format", "json",
+		"--tools", "",       // disable tools for faster triage
+		"--model", "sonnet", // use sonnet for speed/cost
 		prompt,
 	}
 
-	cmd := exec.CommandContext(ctx, "crush", args...)
-
-	output, err := cmd.Output()
+	cmd := exec.CommandContext(ctx, "claude", args...)
+	output, err := cmd.CombinedOutput()
 	if err != nil {
-		return nil, fmt.Errorf("crush triage: %w", err)
+		return nil, fmt.Errorf("claude triage: %w: %s", err, string(output))
 	}
 
-	// Parse JSON from output
-	result := &TriageResult{}
-	outputStr := string(output)
+	// Parse the claude JSON response
+	var claudeResult struct {
+		Type    string `json:"type"`
+		Result  string `json:"result"`
+		IsError bool   `json:"is_error"`
+	}
+	if err := json.Unmarshal(output, &claudeResult); err != nil {
+		return nil, fmt.Errorf("parse claude response: %w", err)
+	}
 
-	// Find JSON in output (may be wrapped in markdown code blocks)
-	jsonStr := extractJSON(outputStr)
+	if claudeResult.IsError {
+		return nil, fmt.Errorf("claude error: %s", claudeResult.Result)
+	}
+
+	// Parse triage JSON from Claude's result
+	result := &TriageResult{}
+	jsonStr := extractJSON(claudeResult.Result)
 	if jsonStr == "" {
-		e.logLine(taskID, "text", "Triage output: "+outputStr)
+		e.logLine(taskID, "text", "Triage output: "+claudeResult.Result)
 		return nil, nil // No valid JSON, skip triage
 	}
 
 	if err := json.Unmarshal([]byte(jsonStr), result); err != nil {
-		e.logLine(taskID, "text", "Triage output: "+outputStr)
+		e.logLine(taskID, "text", "Triage output: "+claudeResult.Result)
 		return nil, nil // Invalid JSON, skip triage
 	}
 
