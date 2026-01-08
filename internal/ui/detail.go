@@ -223,6 +223,8 @@ func (m *DetailModel) renderHelp() string {
 	}{
 		{"↑/↓", "scroll"},
 		{"x", "execute"},
+		{"a", "attach"},
+		{"i", "interrupt"},
 		{"r", "retry"},
 		{"c", "close"},
 		{"q/esc", "back"},

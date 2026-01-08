@@ -53,7 +53,7 @@ type KeyMap struct {
 
 // ShortHelp returns key bindings to show in the mini help.
 func (k KeyMap) ShortHelp() []key.Binding {
-	return []key.Binding{k.Left, k.Right, k.Up, k.Down, k.Enter, k.New, k.Queue, k.Filter, k.Quit}
+	return []key.Binding{k.Left, k.Right, k.Up, k.Down, k.Enter, k.New, k.Queue, k.Attach, k.Filter, k.Quit}
 }
 
 // FullHelp returns keybindings for the expanded help view.
@@ -746,6 +746,20 @@ func (m *AppModel) updateDetail(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.updateTaskInList(m.selectedTask)
 		m.currentView = ViewDashboard
 		return m, m.closeTask(m.selectedTask.ID)
+	}
+	if key.Matches(msg, m.keys.Attach) && m.selectedTask != nil {
+		if db.IsInProgress(m.selectedTask.Status) {
+			sessionName := executor.TmuxSessionName(m.selectedTask.ID)
+			return m, tea.ExecProcess(
+				exec.Command("tmux", "attach-session", "-t", sessionName),
+				func(err error) tea.Msg { return attachDoneMsg{err: err} },
+			)
+		}
+	}
+	if key.Matches(msg, m.keys.Interrupt) && m.selectedTask != nil {
+		if db.IsInProgress(m.selectedTask.Status) || m.executor.IsRunning(m.selectedTask.ID) {
+			return m, m.interruptTask(m.selectedTask.ID)
+		}
 	}
 
 	if m.detailView != nil {
