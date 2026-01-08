@@ -32,14 +32,29 @@ type KanbanBoard struct {
 // NewKanbanBoard creates a new kanban board.
 func NewKanbanBoard(width, height int) *KanbanBoard {
 	return &KanbanBoard{
-		columns: []KanbanColumn{
-			{Title: "Backlog", Status: db.StatusBacklog, Color: ColorMuted},
-			{Title: "In Progress", Status: db.StatusQueued, Color: ColorInProgress}, // Also shows processing
-			{Title: "Blocked", Status: db.StatusBlocked, Color: ColorBlocked},
-			{Title: "Done", Status: db.StatusDone, Color: ColorDone},
-		},
-		width:  width,
-		height: height,
+		columns: makeKanbanColumns(),
+		width:   width,
+		height:  height,
+	}
+}
+
+// makeKanbanColumns creates columns with current theme colors.
+func makeKanbanColumns() []KanbanColumn {
+	return []KanbanColumn{
+		{Title: "Backlog", Status: db.StatusBacklog, Color: ColorMuted},
+		{Title: "In Progress", Status: db.StatusQueued, Color: ColorInProgress}, // Also shows processing
+		{Title: "Blocked", Status: db.StatusBlocked, Color: ColorBlocked},
+		{Title: "Done", Status: db.StatusDone, Color: ColorDone},
+	}
+}
+
+// RefreshTheme updates column colors after a theme change.
+func (k *KanbanBoard) RefreshTheme() {
+	newCols := makeKanbanColumns()
+	for i := range k.columns {
+		if i < len(newCols) {
+			k.columns[i].Color = newCols[i].Color
+		}
 	}
 }
 

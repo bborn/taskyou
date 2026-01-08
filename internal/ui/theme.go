@@ -233,13 +233,10 @@ func ThemeToJSON(theme Theme) (string, error) {
 	return string(data), nil
 }
 
-// ListThemes returns the names of all built-in themes.
+// ListThemes returns the names of all built-in themes (sorted).
 func ListThemes() []string {
-	names := make([]string, 0, len(BuiltinThemes))
-	for name := range BuiltinThemes {
-		names = append(names, name)
-	}
-	return names
+	// Return in a nice order
+	return []string{"onedark", "nord", "gruvbox", "catppuccin", "default"}
 }
 
 // refreshStyles updates all lipgloss styles after a theme change.
@@ -338,4 +335,16 @@ func GetThemeCardColors() (bg, fg lipgloss.Color) {
 // GetThemeBorderColors returns border colors from the current theme.
 func GetThemeBorderColors() (normal, highlighted lipgloss.Color) {
 	return lipgloss.Color(currentTheme.ColumnBorder), lipgloss.Color(currentTheme.ColumnBorderHi)
+}
+
+// LoadThemeFromDB loads and applies the saved theme from the database.
+// If no theme is saved or the theme is invalid, OneDark is used as the default.
+func LoadThemeFromDB(getSetting func(string) (string, error)) {
+	themeName, err := getSetting("theme")
+	if err != nil || themeName == "" {
+		// Use default (OneDark is already set)
+		return
+	}
+	// Apply the saved theme (ignore errors - will use default)
+	SetTheme(themeName)
 }

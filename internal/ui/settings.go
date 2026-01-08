@@ -17,6 +17,13 @@ type SettingsModel struct {
 	width  int
 	height int
 
+	// Section focus: 0=theme, 1=projects
+	section int
+
+	// Theme selection
+	themes        []string
+	selectedTheme int
+
 	// Projects
 	projects []*db.Project
 	selected int
@@ -55,10 +62,23 @@ func NewSettingsModel(database *db.DB, width, height int) *SettingsModel {
 	instructionsInput.SetWidth(width - 20)
 	instructionsInput.SetHeight(5)
 
+	// Get available themes and current selection
+	themes := ListThemes()
+	currentThemeName := CurrentTheme().Name
+	selectedTheme := 0
+	for i, t := range themes {
+		if t == currentThemeName {
+			selectedTheme = i
+			break
+		}
+	}
+
 	m := &SettingsModel{
 		db:                database,
 		width:             width,
 		height:            height,
+		themes:            themes,
+		selectedTheme:     selectedTheme,
 		nameInput:         nameInput,
 		aliasInput:        aliasInput,
 		instructionsInput: instructionsInput,
@@ -102,27 +122,64 @@ func (m *SettingsModel) Update(msg tea.Msg) (*SettingsModel, tea.Cmd) {
 		}
 
 		switch msg.String() {
+		case "tab":
+			// Switch between sections
+			m.section = (m.section + 1) % 2
+			return m, nil
+		case "shift+tab":
+			m.section = (m.section + 1) % 2
+			return m, nil
 		case "up", "k":
-			if m.selected > 0 {
-				m.selected--
+			if m.section == 0 {
+				// Theme section
+				if m.selectedTheme > 0 {
+					m.selectedTheme--
+					m.applyTheme()
+				}
+			} else {
+				// Projects section
+				if m.selected > 0 {
+					m.selected--
+				}
 			}
 		case "down", "j":
-			if m.selected < len(m.projects)-1 {
-				m.selected++
+			if m.section == 0 {
+				// Theme section
+				if m.selectedTheme < len(m.themes)-1 {
+					m.selectedTheme++
+					m.applyTheme()
+				}
+			} else {
+				// Projects section
+				if m.selected < len(m.projects)-1 {
+					m.selected++
+				}
+			}
+		case "left", "h":
+			if m.section == 0 && m.selectedTheme > 0 {
+				m.selectedTheme--
+				m.applyTheme()
+			}
+		case "right", "l":
+			if m.section == 0 && m.selectedTheme < len(m.themes)-1 {
+				m.selectedTheme++
+				m.applyTheme()
 			}
 		case "n":
-			// New project
-			m.editing = true
-			m.editProject = &db.Project{}
-			m.nameInput.SetValue("")
-			m.aliasInput.SetValue("")
-			m.instructionsInput.SetValue("")
-			m.nameInput.Focus()
-			m.formFocus = 0
-			return m, textinput.Blink
+			// New project (only in projects section)
+			if m.section == 1 {
+				m.editing = true
+				m.editProject = &db.Project{}
+				m.nameInput.SetValue("")
+				m.aliasInput.SetValue("")
+				m.instructionsInput.SetValue("")
+				m.nameInput.Focus()
+				m.formFocus = 0
+				return m, textinput.Blink
+			}
 		case "e":
-			// Edit selected project
-			if len(m.projects) > 0 && m.selected < len(m.projects) {
+			// Edit selected project (only in projects section)
+			if m.section == 1 && len(m.projects) > 0 && m.selected < len(m.projects) {
 				m.editing = true
 				m.editProject = m.projects[m.selected]
 				m.nameInput.SetValue(m.editProject.Name)
@@ -133,8 +190,8 @@ func (m *SettingsModel) Update(msg tea.Msg) (*SettingsModel, tea.Cmd) {
 				return m, textinput.Blink
 			}
 		case "d":
-			// Delete selected project
-			if len(m.projects) > 0 && m.selected < len(m.projects) {
+			// Delete selected project (only in projects section)
+			if m.section == 1 && len(m.projects) > 0 && m.selected < len(m.projects) {
 				m.db.DeleteProject(m.projects[m.selected].ID)
 				m.loadSettings()
 				if m.selected >= len(m.projects) && m.selected > 0 {
@@ -151,6 +208,16 @@ func (m *SettingsModel) Update(msg tea.Msg) (*SettingsModel, tea.Cmd) {
 	}
 
 	return m, nil
+}
+
+// applyTheme sets the selected theme and persists it.
+func (m *SettingsModel) applyTheme() {
+	if m.selectedTheme < len(m.themes) {
+		themeName := m.themes[m.selectedTheme]
+		if err := SetTheme(themeName); err == nil {
+			m.db.SetSetting("theme", themeName)
+		}
+	}
 }
 
 func (m *SettingsModel) updateBrowser(msg tea.Msg) (*SettingsModel, tea.Cmd) {
@@ -348,6 +415,18 @@ func (m *SettingsModel) View() string {
 	b.WriteString(lipgloss.NewStyle().Padding(1, 2).Render(header))
 	b.WriteString("\n")
 
+	// Theme section
+	themeHeader := "Theme"
+	if m.section == 0 {
+		themeHeader = Bold.Foreground(ColorPrimary).Render("Theme")
+	} else {
+		themeHeader = Bold.Render("Theme")
+	}
+	b.WriteString(lipgloss.NewStyle().Padding(0, 2).Render(themeHeader))
+	b.WriteString("\n")
+	b.WriteString(lipgloss.NewStyle().Padding(0, 2).Render(m.renderThemeSelector()))
+	b.WriteString("\n\n")
+
 	// Projects directory
 	dirLabel := Dim.Render("Projects Directory: ")
 	dirValue := m.projectsDir + Dim.Render("  [p to browse]")
@@ -355,7 +434,13 @@ func (m *SettingsModel) View() string {
 	b.WriteString("\n\n")
 
 	// Projects section
-	b.WriteString(lipgloss.NewStyle().Padding(0, 2).Render(Bold.Render("Projects")))
+	projectsHeader := "Projects"
+	if m.section == 1 {
+		projectsHeader = Bold.Foreground(ColorPrimary).Render("Projects")
+	} else {
+		projectsHeader = Bold.Render("Projects")
+	}
+	b.WriteString(lipgloss.NewStyle().Padding(0, 2).Render(projectsHeader))
 	b.WriteString("\n")
 
 	if m.editing {
@@ -369,7 +454,7 @@ func (m *SettingsModel) View() string {
 			for i, p := range m.projects {
 				prefix := "  "
 				style := lipgloss.NewStyle()
-				if i == m.selected {
+				if m.section == 1 && i == m.selected {
 					prefix = "> "
 					style = style.Foreground(ColorPrimary)
 				}
@@ -403,6 +488,26 @@ func (m *SettingsModel) View() string {
 		Padding(0)
 
 	return box.Render(b.String())
+}
+
+// renderThemeSelector renders the horizontal theme picker.
+func (m *SettingsModel) renderThemeSelector() string {
+	var parts []string
+	for i, theme := range m.themes {
+		style := lipgloss.NewStyle().Padding(0, 1)
+		if i == m.selectedTheme {
+			// Selected theme - show with theme's primary color as background
+			t := BuiltinThemes[theme]
+			style = style.
+				Background(lipgloss.Color(t.Primary)).
+				Foreground(lipgloss.Color("#000000")).
+				Bold(true)
+		} else {
+			style = style.Foreground(ColorMuted)
+		}
+		parts = append(parts, style.Render(theme))
+	}
+	return lipgloss.JoinHorizontal(lipgloss.Center, parts...)
 }
 
 func (m *SettingsModel) renderForm() string {
@@ -483,6 +588,8 @@ func (m *SettingsModel) renderHelp() string {
 			key  string
 			desc string
 		}{
+			{"tab", "section"},
+			{"←/→", "theme"},
 			{"↑/↓", "navigate"},
 			{"n", "new"},
 			{"e", "edit"},

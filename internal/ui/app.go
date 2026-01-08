@@ -218,6 +218,9 @@ func (m *AppModel) updateTaskInList(task *db.Task) {
 
 // NewAppModel creates a new application model.
 func NewAppModel(database *db.DB, exec *executor.Executor, workingDir string) *AppModel {
+	// Load saved theme from database
+	LoadThemeFromDB(database.GetSetting)
+
 	// Start with zero size - will be set by WindowSizeMsg
 	kanban := NewKanbanBoard(0, 0)
 
@@ -789,6 +792,8 @@ func (m *AppModel) updateSettings(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.settingsView != nil && !m.settingsView.editing && !m.settingsView.browsing {
 				m.currentView = ViewDashboard
 				m.settingsView = nil
+				// Refresh kanban theme colors after settings change
+				m.kanban.RefreshTheme()
 				return m, nil
 			}
 		}
