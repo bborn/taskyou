@@ -365,6 +365,9 @@ func (e *Executor) executeTask(ctx context.Context, task *db.Task) {
 	// Prepare attachments (write to temp files)
 	attachmentPaths, cleanupAttachments := e.prepareAttachments(task.ID)
 	defer cleanupAttachments()
+	if len(attachmentPaths) > 0 {
+		e.logLine(task.ID, "system", fmt.Sprintf("Task has %d attachment(s)", len(attachmentPaths)))
+	}
 
 	// Build prompt based on task type
 	prompt := e.buildPrompt(task, attachmentPaths)

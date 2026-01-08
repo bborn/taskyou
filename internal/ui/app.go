@@ -229,11 +229,11 @@ type AppModel struct {
 	detailView   *DetailModel
 
 	// New task form state
-	newTaskForm       *FormModel
-	pendingTask       *db.Task
-	pendingAttachment string
-	queueConfirm      *huh.Form
-	queueValue        bool
+	newTaskForm        *FormModel
+	pendingTask        *db.Task
+	pendingAttachments []string
+	queueConfirm       *huh.Form
+	queueValue         bool
 
 	// Watch view state
 	watchView *WatchModel
@@ -904,7 +904,7 @@ func (m *AppModel) updateNewTaskForm(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if form.submitted {
 			// Store pending task and create confirmation form
 			m.pendingTask = form.GetDBTask()
-			m.pendingAttachment = form.GetAttachment()
+			m.pendingAttachments = form.GetAttachments()
 			m.queueValue = false
 			m.queueConfirm = huh.NewForm(
 				huh.NewGroup(
@@ -956,13 +956,13 @@ func (m *AppModel) updateNewTaskConfirm(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.pendingTask.Status = db.StatusBacklog
 			}
 			task := m.pendingTask
-			attachment := m.pendingAttachment
+			attachments := m.pendingAttachments
 			m.pendingTask = nil
-			m.pendingAttachment = ""
+			m.pendingAttachments = nil
 			m.newTaskForm = nil
 			m.queueConfirm = nil
 			m.currentView = ViewDashboard
-			return m, m.createTaskWithAttachment(task, attachment)
+			return m, m.createTaskWithAttachments(task, attachments)
 		}
 	}
 
@@ -1146,7 +1146,7 @@ func (m *AppModel) createTask(t *db.Task) tea.Cmd {
 	}
 }
 
-func (m *AppModel) createTaskWithAttachment(t *db.Task, attachmentPath string) tea.Cmd {
+func (m *AppModel) createTaskWithAttachments(t *db.Task, attachmentPaths []string) tea.Cmd {
 	exec := m.executor
 	database := m.db
 	return func() tea.Msg {
@@ -1155,12 +1155,14 @@ func (m *AppModel) createTaskWithAttachment(t *db.Task, attachmentPath string) t
 			return taskCreatedMsg{task: t, err: err}
 		}
 
-		// Add attachment if provided
-		if attachmentPath != "" {
-			data, readErr := os.ReadFile(attachmentPath)
-			if readErr == nil {
-				mimeType := detectMimeType(attachmentPath)
-				database.AddAttachment(t.ID, filepath.Base(attachmentPath), mimeType, data)
+		// Add attachments if provided
+		for _, attachmentPath := range attachmentPaths {
+			if attachmentPath != "" {
+				data, readErr := os.ReadFile(attachmentPath)
+				if readErr == nil {
+					mimeType := detectMimeType(attachmentPath)
+					database.AddAttachment(t.ID, filepath.Base(attachmentPath), mimeType, data)
+				}
 			}
 		}
 
