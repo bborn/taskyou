@@ -1016,12 +1016,12 @@ func (m *AppModel) updateRetry(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	if m.retryView.submitted {
 		feedback := m.retryView.GetFeedback()
-		attachment := m.retryView.GetAttachment()
+		attachments := m.retryView.GetAttachments()
 		taskID := m.retryView.task.ID
 		m.currentView = ViewDashboard
 		m.retryView = nil
 		m.detailView = nil
-		return m, m.retryTaskWithAttachment(taskID, feedback, attachment)
+		return m, m.retryTaskWithAttachments(taskID, feedback, attachments)
 	}
 
 	return m, cmd
@@ -1201,15 +1201,17 @@ func (m *AppModel) retryTask(id int64, feedback string) tea.Cmd {
 	}
 }
 
-func (m *AppModel) retryTaskWithAttachment(id int64, feedback string, attachmentPath string) tea.Cmd {
+func (m *AppModel) retryTaskWithAttachments(id int64, feedback string, attachmentPaths []string) tea.Cmd {
 	database := m.db
 	return func() tea.Msg {
-		// Add attachment first if provided
-		if attachmentPath != "" {
-			data, readErr := os.ReadFile(attachmentPath)
-			if readErr == nil {
-				mimeType := detectMimeType(attachmentPath)
-				database.AddAttachment(id, filepath.Base(attachmentPath), mimeType, data)
+		// Add attachments first if provided
+		for _, attachmentPath := range attachmentPaths {
+			if attachmentPath != "" {
+				data, readErr := os.ReadFile(attachmentPath)
+				if readErr == nil {
+					mimeType := detectMimeType(attachmentPath)
+					database.AddAttachment(id, filepath.Base(attachmentPath), mimeType, data)
+				}
 			}
 		}
 

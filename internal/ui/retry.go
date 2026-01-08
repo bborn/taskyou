@@ -6,112 +6,86 @@ import (
 	"strings"
 
 	"github.com/bborn/workflow/internal/db"
+	"github.com/charmbracelet/bubbles/textarea"
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/huh"
 	"github.com/charmbracelet/lipgloss"
 )
 
 // RetryModel handles retrying a blocked/failed task with optional feedback.
 type RetryModel struct {
-	task       *db.Task
-	db         *db.DB
-	form       *huh.Form
-	width      int
-	height     int
-	submitted  bool
-	cancelled  bool
+	task      *db.Task
+	db        *db.DB
+	width     int
+	height    int
+	submitted bool
+	cancelled bool
 
-	// Form values
-	feedback   string
-	attachment string
+	// Form inputs
+	textarea    textarea.Model
+	question    string
+	attachments []string
 }
 
 // NewRetryModel creates a new retry model.
 func NewRetryModel(task *db.Task, database *db.DB, width, height int) *RetryModel {
-	m := &RetryModel{
-		task:   task,
-		db:     database,
-		width:  width,
-		height: height,
-	}
-	m.initForm()
-	return m
-}
-
-func (m *RetryModel) initForm() {
 	// Get the last question for context
-	question, _ := m.db.GetLastQuestion(m.task.ID)
+	question, _ := database.GetLastQuestion(task.ID)
 
-	var fields []huh.Field
+	ta := textarea.New()
+	ta.Placeholder = "Enter your response..."
+	ta.Focus()
+	ta.SetWidth(width - 12)
+	ta.SetHeight(6)
+	ta.CharLimit = 2000
 
-	// Show question if there is one
-	if question != "" {
-		fields = append(fields,
-			huh.NewNote().
-				Title("Question from agent").
-				Description(question),
-		)
+	return &RetryModel{
+		task:     task,
+		db:       database,
+		width:    width,
+		height:   height,
+		textarea: ta,
+		question: question,
 	}
-
-	fields = append(fields,
-		huh.NewText().
-			Key("feedback").
-			Title("Your response").
-			Placeholder("Enter feedback or answer...").
-			CharLimit(2000).
-			Value(&m.feedback),
-
-		huh.NewFilePicker().
-			Key("attachment").
-			Title("Attachment").
-			Description("Optional file to attach").
-			AllowedTypes([]string{".png", ".jpg", ".jpeg", ".gif", ".pdf", ".md", ".txt", ".json", ".go", ".py", ".rb", ".rs", ".js", ".ts"}).
-			Value(&m.attachment),
-	)
-
-	m.form = huh.NewForm(
-		huh.NewGroup(fields...),
-	).WithTheme(huh.ThemeDracula()).
-		WithWidth(m.width - 8).
-		WithShowHelp(true).
-		WithShowErrors(true)
 }
 
 // Init initializes the model.
 func (m *RetryModel) Init() tea.Cmd {
-	return m.form.Init()
+	return textarea.Blink
 }
 
 // Update handles messages.
 func (m *RetryModel) Update(msg tea.Msg) (*RetryModel, tea.Cmd) {
-	if keyMsg, ok := msg.(tea.KeyMsg); ok {
-		if keyMsg.String() == "esc" {
-			m.cancelled = true
-			return m, nil
-		}
+	var cmd tea.Cmd
+
+	switch msg := msg.(type) {
+	case tea.KeyMsg:
 		// Handle bracketed paste (file drag-drop)
-		if keyMsg.Paste && keyMsg.Type == tea.KeyRunes {
-			path := strings.TrimSpace(string(keyMsg.Runes))
+		if msg.Paste && msg.Type == tea.KeyRunes {
+			path := strings.TrimSpace(string(msg.Runes))
 			path = strings.Trim(path, "\"'")
 			path = strings.ReplaceAll(path, "\\", "")
 			if absPath, err := filepath.Abs(path); err == nil {
 				if _, statErr := os.Stat(absPath); statErr == nil {
-					m.attachment = absPath
+					m.attachments = append(m.attachments, absPath)
 					return m, nil
 				}
 			}
+			// Not a file, insert as text
+			m.textarea.InsertString(string(msg.Runes))
+			return m, nil
+		}
+
+		switch msg.String() {
+		case "esc":
+			m.cancelled = true
+			return m, nil
+		case "ctrl+s":
+			m.submitted = true
+			return m, nil
 		}
 	}
 
-	form, cmd := m.form.Update(msg)
-	if f, ok := form.(*huh.Form); ok {
-		m.form = f
-	}
-
-	if m.form.State == huh.StateCompleted {
-		m.submitted = true
-	}
-
+	m.textarea, cmd = m.textarea.Update(msg)
 	return m, cmd
 }
 
@@ -129,7 +103,42 @@ func (m *RetryModel) View() string {
 	}
 	subtitle := Dim.Render(title)
 
-	formView := m.form.View()
+	var content strings.Builder
+
+	// Show question if there is one
+	if m.question != "" {
+		questionStyle := lipgloss.NewStyle().
+			Foreground(lipgloss.Color("229")).
+			Bold(true)
+		content.WriteString(questionStyle.Render("Question from agent:"))
+		content.WriteString("\n")
+		content.WriteString(Dim.Render(m.question))
+		content.WriteString("\n\n")
+	}
+
+	// Response label
+	labelStyle := lipgloss.NewStyle().Bold(true).Foreground(ColorPrimary)
+	content.WriteString(labelStyle.Render("Your response"))
+	content.WriteString("\n")
+	content.WriteString(m.textarea.View())
+	content.WriteString("\n\n")
+
+	// Attachments
+	if len(m.attachments) > 0 {
+		var fileNames []string
+		for _, path := range m.attachments {
+			fileNames = append(fileNames, filepath.Base(path))
+		}
+		content.WriteString(lipgloss.NewStyle().Foreground(ColorPrimary).Render("📎 " + strings.Join(fileNames, ", ")))
+		content.WriteString("\n\n")
+	} else {
+		content.WriteString(Dim.Render("Drag files here to attach"))
+		content.WriteString("\n\n")
+	}
+
+	// Help
+	helpText := "ctrl+s submit • esc cancel"
+	content.WriteString(Dim.Render(helpText))
 
 	box := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
@@ -137,23 +146,32 @@ func (m *RetryModel) View() string {
 		Padding(1, 2).
 		Width(m.width - 4)
 
-	return box.Render(lipgloss.JoinVertical(lipgloss.Left, header, subtitle, "", formView))
+	return box.Render(lipgloss.JoinVertical(lipgloss.Left, header, subtitle, "", content.String()))
 }
 
 // GetFeedback returns the feedback text.
 func (m *RetryModel) GetFeedback() string {
-	return m.feedback
+	return strings.TrimSpace(m.textarea.Value())
 }
 
-// GetAttachment returns the selected attachment path.
+// GetAttachment returns the first attachment path.
 func (m *RetryModel) GetAttachment() string {
-	return m.attachment
+	if len(m.attachments) > 0 {
+		return m.attachments[0]
+	}
+	return ""
+}
+
+// GetAttachments returns all attachment paths.
+func (m *RetryModel) GetAttachments() []string {
+	return m.attachments
 }
 
 // SetSize updates the size.
 func (m *RetryModel) SetSize(width, height int) {
 	m.width = width
 	m.height = height
+	m.textarea.SetWidth(width - 12)
 }
 
 // itoa converts int to string without importing strconv
