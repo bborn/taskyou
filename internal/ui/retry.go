@@ -1,6 +1,10 @@
 package ui
 
 import (
+	"os"
+	"path/filepath"
+	"strings"
+
 	"github.com/bborn/workflow/internal/db"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/huh"
@@ -84,6 +88,18 @@ func (m *RetryModel) Update(msg tea.Msg) (*RetryModel, tea.Cmd) {
 		if keyMsg.String() == "esc" {
 			m.cancelled = true
 			return m, nil
+		}
+		// Handle bracketed paste (file drag-drop)
+		if keyMsg.Paste && keyMsg.Type == tea.KeyRunes {
+			path := strings.TrimSpace(string(keyMsg.Runes))
+			path = strings.Trim(path, "\"'")
+			path = strings.ReplaceAll(path, "\\", "")
+			if absPath, err := filepath.Abs(path); err == nil {
+				if _, statErr := os.Stat(absPath); statErr == nil {
+					m.attachment = absPath
+					return m, nil
+				}
+			}
 		}
 	}
 

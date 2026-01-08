@@ -125,6 +125,33 @@ func (m *FormModel) Init() tea.Cmd {
 func (m *FormModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
+		// Handle bracketed paste (file drag-drop)
+		if msg.Paste && msg.Type == tea.KeyRunes {
+			path := strings.TrimSpace(string(msg.Runes))
+			// Remove quotes and escape chars that terminals may add
+			path = strings.Trim(path, "\"'")
+			path = strings.ReplaceAll(path, "\\", "")
+			// Check if it's a valid file path
+			if absPath, err := filepath.Abs(path); err == nil {
+				if _, statErr := os.Stat(absPath); statErr == nil {
+					// It's a real file - add as attachment
+					m.attachments = append(m.attachments, absPath)
+					return m, nil
+				}
+			}
+			// Not a file path - treat as regular paste into focused field
+			pastedText := string(msg.Runes)
+			switch m.focused {
+			case FieldTitle:
+				m.titleInput.SetValue(m.titleInput.Value() + pastedText)
+			case FieldBody:
+				m.bodyInput.SetValue(m.bodyInput.Value() + pastedText)
+			case FieldAttachments:
+				m.attachmentsInput.SetValue(m.attachmentsInput.Value() + pastedText)
+			}
+			return m, nil
+		}
+
 		switch msg.String() {
 		case "ctrl+c", "esc":
 			m.cancelled = true
@@ -379,7 +406,16 @@ func (m *FormModel) View() string {
 	if m.focused == FieldAttachments {
 		cursor = cursorStyle.Render("▸")
 	}
-	b.WriteString(cursor + " " + labelStyle.Render("Attachments") + m.attachmentsInput.View())
+	attachmentLine := m.attachmentsInput.View()
+	// Show attached files
+	if len(m.attachments) > 0 {
+		var fileNames []string
+		for _, path := range m.attachments {
+			fileNames = append(fileNames, filepath.Base(path))
+		}
+		attachmentLine = lipgloss.NewStyle().Foreground(ColorPrimary).Render("📎 "+strings.Join(fileNames, ", ")) + "  " + m.attachmentsInput.View()
+	}
+	b.WriteString(cursor + " " + labelStyle.Render("Attachments") + attachmentLine)
 	b.WriteString("\n\n")
 
 	// Help
