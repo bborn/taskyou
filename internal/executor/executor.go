@@ -116,14 +116,19 @@ func (e *Executor) IsRunning(taskID int64) bool {
 }
 
 // Interrupt cancels a running task.
+// If running in this process, cancels directly. Also marks in DB for cross-process interrupt.
 func (e *Executor) Interrupt(taskID int64) bool {
+	// Mark as interrupted in database (for cross-process communication)
+	e.db.UpdateTaskStatus(taskID, db.StatusInterrupted)
+	e.logLine(taskID, "system", "Task interrupted by user")
+
+	// If running locally, cancel the context
 	e.mu.RLock()
 	cancel, ok := e.cancelFuncs[taskID]
 	e.mu.RUnlock()
-	if !ok {
-		return false
+	if ok {
+		cancel()
 	}
-	cancel()
 	return true
 }
 
@@ -261,8 +266,7 @@ func (e *Executor) executeTask(ctx context.Context, task *db.Task) {
 
 	// Update final status and trigger hooks
 	if result.Interrupted {
-		e.db.UpdateTaskStatus(task.ID, db.StatusInterrupted)
-		e.logLine(task.ID, "system", "Task interrupted by user")
+		// Status already set by Interrupt(), just run hook
 		e.hooks.OnStatusChange(task, db.StatusInterrupted, "Task interrupted by user")
 	} else if result.Success {
 		e.db.UpdateTaskStatus(task.ID, db.StatusReady)
@@ -393,6 +397,29 @@ func (e *Executor) runCrush(ctx context.Context, taskID int64, workDir, prompt s
 		return execResult{Message: fmt.Sprintf("start: %v", err)}
 	}
 
+	// Monitor for DB-based interrupt (cross-process)
+	interruptCh := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(500 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				task, err := e.db.GetTask(taskID)
+				if err == nil && task != nil && task.Status == db.StatusInterrupted {
+					// Kill the process
+					if cmd.Process != nil {
+						cmd.Process.Kill()
+					}
+					close(interruptCh)
+					return
+				}
+			}
+		}
+	}()
+
 	// Track output for marker detection
 	var mu sync.Mutex
 	var allOutput []string
@@ -430,7 +457,12 @@ func (e *Executor) runCrush(ctx context.Context, taskID int64, workDir, prompt s
 
 	err = cmd.Wait()
 
-	// Check if context was cancelled (user interrupted)
+	// Check if interrupted (via context or DB status)
+	select {
+	case <-interruptCh:
+		return execResult{Interrupted: true}
+	default:
+	}
 	if ctx.Err() == context.Canceled {
 		return execResult{Interrupted: true}
 	}
