@@ -27,6 +27,7 @@ const (
 	ViewNewTask
 	ViewNewTaskConfirm
 	ViewDeleteConfirm
+	ViewQuitConfirm
 	ViewWatch
 	ViewSettings
 	ViewRetry
@@ -246,6 +247,10 @@ type AppModel struct {
 	deleteConfirmValue bool
 	pendingDeleteTask  *db.Task
 
+	// Quit confirmation state
+	quitConfirm      *huh.Form
+	quitConfirmValue bool
+
 	// Watch view state
 	watchView *WatchModel
 
@@ -346,6 +351,9 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 	if m.currentView == ViewDeleteConfirm && m.deleteConfirm != nil {
 		return m.updateDeleteConfirm(msg)
+	}
+	if m.currentView == ViewQuitConfirm && m.quitConfirm != nil {
+		return m.updateQuitConfirm(msg)
 	}
 	if m.currentView == ViewSettings && m.settingsView != nil {
 		return m.updateSettings(msg)
@@ -569,6 +577,8 @@ func (m *AppModel) View() string {
 		return m.viewNewTaskConfirm()
 	case ViewDeleteConfirm:
 		return m.viewDeleteConfirm()
+	case ViewQuitConfirm:
+		return m.viewQuitConfirm()
 	case ViewWatch:
 		if m.watchView != nil {
 			return m.watchView.View()
@@ -865,7 +875,7 @@ func (m *AppModel) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case key.Matches(msg, m.keys.Back):
-		return m, tea.Quit
+		return m.showQuitConfirm()
 	}
 
 	return m, nil
@@ -1061,6 +1071,7 @@ func (m *AppModel) updateNewTaskConfirm(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m *AppModel) showDeleteConfirm(task *db.Task) (tea.Model, tea.Cmd) {
 	m.pendingDeleteTask = task
 	m.deleteConfirmValue = false
+	modalWidth := min(50, m.width-8)
 	m.deleteConfirm = huh.NewForm(
 		huh.NewGroup(
 			huh.NewConfirm().
@@ -1072,7 +1083,7 @@ func (m *AppModel) showDeleteConfirm(task *db.Task) (tea.Model, tea.Cmd) {
 				Value(&m.deleteConfirmValue),
 		),
 	).WithTheme(huh.ThemeDracula()).
-		WithWidth(m.width - 4).
+		WithWidth(modalWidth - 6). // Account for modal padding and border
 		WithShowHelp(true)
 	m.currentView = ViewDeleteConfirm
 	return m, m.deleteConfirm.Init()
@@ -1083,13 +1094,31 @@ func (m *AppModel) viewDeleteConfirm() string {
 		return ""
 	}
 
+	// Modal header with warning icon
+	header := lipgloss.NewStyle().
+		Bold(true).
+		Foreground(ColorError).
+		MarginBottom(1).
+		Render("⚠ Confirm Delete")
+
 	formView := m.deleteConfirm.View()
 
+	// Modal box with border
+	modalWidth := min(50, m.width-8)
+	modalBox := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(ColorError).
+		Padding(1, 2).
+		Width(modalWidth)
+
+	modalContent := modalBox.Render(lipgloss.JoinVertical(lipgloss.Center, header, formView))
+
+	// Center the modal on screen
 	return lipgloss.NewStyle().
 		Width(m.width).
 		Height(m.height).
 		Align(lipgloss.Center, lipgloss.Center).
-		Render(formView)
+		Render(modalContent)
 }
 
 func (m *AppModel) updateDeleteConfirm(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -1121,6 +1150,74 @@ func (m *AppModel) updateDeleteConfirm(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Cancelled
 		m.pendingDeleteTask = nil
 		m.deleteConfirm = nil
+		m.currentView = ViewDashboard
+		return m, nil
+	}
+
+	return m, cmd
+}
+
+func (m *AppModel) showQuitConfirm() (tea.Model, tea.Cmd) {
+	m.quitConfirmValue = false
+	m.quitConfirm = huh.NewForm(
+		huh.NewGroup(
+			huh.NewConfirm().
+				Key("quit").
+				Title("Quit Tasks?").
+				Description("Are you sure you want to exit the application?").
+				Affirmative("Quit").
+				Negative("Cancel").
+				Value(&m.quitConfirmValue),
+		),
+	).WithTheme(huh.ThemeDracula()).
+		WithWidth(m.width - 4).
+		WithShowHelp(true)
+	m.currentView = ViewQuitConfirm
+	return m, m.quitConfirm.Init()
+}
+
+func (m *AppModel) viewQuitConfirm() string {
+	if m.quitConfirm == nil {
+		return ""
+	}
+
+	formView := m.quitConfirm.View()
+
+	return lipgloss.NewStyle().
+		Width(m.width).
+		Height(m.height).
+		Align(lipgloss.Center, lipgloss.Center).
+		Render(formView)
+}
+
+func (m *AppModel) updateQuitConfirm(msg tea.Msg) (tea.Model, tea.Cmd) {
+	// Handle escape to cancel
+	if keyMsg, ok := msg.(tea.KeyMsg); ok {
+		if keyMsg.String() == "esc" {
+			m.currentView = ViewDashboard
+			m.quitConfirm = nil
+			return m, nil
+		}
+	}
+
+	// Update the huh form
+	form, cmd := m.quitConfirm.Update(msg)
+	if f, ok := form.(*huh.Form); ok {
+		m.quitConfirm = f
+	}
+
+	// Check if form completed
+	if m.quitConfirm.State == huh.StateCompleted {
+		if m.quitConfirmValue {
+			// User confirmed quit - cleanup and exit
+			if m.eventCh != nil {
+				m.executor.UnsubscribeTaskEvents(m.eventCh)
+			}
+			m.stopDatabaseWatcher()
+			return m, tea.Quit
+		}
+		// Cancelled
+		m.quitConfirm = nil
 		m.currentView = ViewDashboard
 		return m, nil
 	}
