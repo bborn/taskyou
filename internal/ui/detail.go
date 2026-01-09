@@ -4,9 +4,11 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/bborn/workflow/internal/config"
 	"github.com/bborn/workflow/internal/db"
 	"github.com/bborn/workflow/internal/executor"
 	"github.com/bborn/workflow/internal/github"
@@ -165,6 +167,12 @@ func (m *DetailModel) Update(msg tea.Msg) (*DetailModel, tea.Cmd) {
 // Cleanup should be called when leaving detail view.
 func (m *DetailModel) Cleanup() {
 	if m.claudePaneID != "" || m.workdirPaneID != "" {
+		// Save the current pane height before breaking panes
+		currentPaneCmd := exec.Command("tmux", "display-message", "-p", "#{pane_id}")
+		if currentPaneOut, err := currentPaneCmd.Output(); err == nil {
+			tuiPaneID := strings.TrimSpace(string(currentPaneOut))
+			m.saveDetailPaneHeight(tuiPaneID)
+		}
 		m.breakTmuxPanes()
 	}
 }
@@ -206,10 +214,61 @@ func (m *DetailModel) focusDetailsPane() {
 	}
 }
 
+// getDetailPaneHeight returns the configured detail pane height percentage.
+// Default is 18% (increased from 15% for better visibility).
+func (m *DetailModel) getDetailPaneHeight() string {
+	heightStr, err := m.database.GetSetting(config.SettingDetailPaneHeight)
+	if err != nil || heightStr == "" {
+		return "18%"
+	}
+	// Validate the height is a valid percentage (1-50%)
+	if strings.HasSuffix(heightStr, "%") {
+		percentStr := strings.TrimSuffix(heightStr, "%")
+		if percent, err := strconv.Atoi(percentStr); err == nil && percent >= 1 && percent <= 50 {
+			return heightStr
+		}
+	}
+	return "18%"
+}
+
+// saveDetailPaneHeight saves the current detail pane height to settings.
+func (m *DetailModel) saveDetailPaneHeight(tuiPaneID string) {
+	// Get the current height of the TUI pane
+	cmd := exec.Command("tmux", "display-message", "-p", "-t", tuiPaneID, "#{pane_height}")
+	heightOut, err := cmd.Output()
+	if err != nil {
+		return
+	}
+
+	paneHeight, err := strconv.Atoi(strings.TrimSpace(string(heightOut)))
+	if err != nil || paneHeight <= 0 {
+		return
+	}
+
+	// Get the total window height
+	cmd = exec.Command("tmux", "display-message", "-p", "#{window_height}")
+	totalHeightOut, err := cmd.Output()
+	if err != nil {
+		return
+	}
+
+	totalHeight, err := strconv.Atoi(strings.TrimSpace(string(totalHeightOut)))
+	if err != nil || totalHeight <= 0 {
+		return
+	}
+
+	// Calculate the percentage
+	percentage := (paneHeight * 100) / totalHeight
+	if percentage >= 1 && percentage <= 50 {
+		heightStr := fmt.Sprintf("%d%%", percentage)
+		m.database.SetSetting(config.SettingDetailPaneHeight, heightStr)
+	}
+}
+
 // joinTmuxPanes joins the task's Claude pane and creates a workdir shell pane.
 // Layout:
-//   - Top (15%): Task details (TUI)
-//   - Bottom (85%): Claude Code (left) + Workdir shell (right) side-by-side
+//   - Top (configurable, default 18%): Task details (TUI)
+//   - Bottom: Claude Code (left) + Workdir shell (right) side-by-side
 func (m *DetailModel) joinTmuxPanes() {
 	windowTarget := executor.TmuxSessionName(m.task.ID)
 
@@ -272,8 +331,9 @@ func (m *DetailModel) joinTmuxPanes() {
 	exec.Command("tmux", "set-option", "-t", "task-ui", "pane-border-style", "fg=#374151").Run()
 	exec.Command("tmux", "set-option", "-t", "task-ui", "pane-active-border-style", "fg=#61AFEF").Run()
 
-	// Resize TUI pane to 15%, leaving 85% for Claude + Shell side-by-side
-	exec.Command("tmux", "resize-pane", "-t", tuiPaneID, "-y", "15%").Run()
+	// Resize TUI pane to configured height (default 18%)
+	detailHeight := m.getDetailPaneHeight()
+	exec.Command("tmux", "resize-pane", "-t", tuiPaneID, "-y", detailHeight).Run()
 }
 
 // joinTmuxPane is a compatibility wrapper for joinTmuxPanes.
@@ -293,6 +353,13 @@ func (m *DetailModel) getWorkdir() string {
 
 // breakTmuxPanes breaks both joined panes - kills workdir, returns Claude to task-daemon.
 func (m *DetailModel) breakTmuxPanes() {
+	// Save the current detail pane height before breaking
+	currentPaneCmd := exec.Command("tmux", "display-message", "-p", "#{pane_id}")
+	if currentPaneOut, err := currentPaneCmd.Output(); err == nil {
+		tuiPaneID := strings.TrimSpace(string(currentPaneOut))
+		m.saveDetailPaneHeight(tuiPaneID)
+	}
+
 	// Reset status bar and pane styling
 	exec.Command("tmux", "set-option", "-t", "task-ui", "status-right", " ").Run()
 	exec.Command("tmux", "set-option", "-t", "task-ui", "pane-border-style", "fg=#374151").Run()
