@@ -540,3 +540,76 @@ func (k *KanbanBoard) FocusColumn(colIdx int) {
 func (k *KanbanBoard) ColumnCount() int {
 	return len(k.columns)
 }
+
+// HandleClick handles a mouse click at the given coordinates.
+// Returns the clicked task if a task card was clicked, nil otherwise.
+// Also updates the selection to the clicked task.
+func (k *KanbanBoard) HandleClick(x, y int) *db.Task {
+	if k.width < 40 || k.height < 10 {
+		return nil
+	}
+
+	// Calculate column layout (same as View())
+	numCols := len(k.columns)
+	availableWidth := k.width - (numCols * 2) - (numCols - 1)
+	colWidth := availableWidth / numCols
+	if colWidth < 20 {
+		colWidth = 20
+	}
+
+	// Each column has: 1 border + colWidth content + 1 border = colWidth + 2
+	// Columns are joined with no gap between them in lipgloss.JoinHorizontal
+	colTotalWidth := colWidth + 2
+
+	// Determine which column was clicked
+	colIdx := x / colTotalWidth
+	if colIdx >= numCols {
+		colIdx = numCols - 1
+	}
+	if colIdx < 0 {
+		return nil
+	}
+
+	// Check if click is within column bounds (not on border)
+	colStartX := colIdx * colTotalWidth
+	relX := x - colStartX
+	if relX < 1 || relX > colWidth {
+		// Clicked on border
+		return nil
+	}
+
+	// Calculate Y position within column
+	// Column structure: 1 border line, then header (2 lines with margin), then task cards
+	// Border is 1 line at top
+	headerLines := 3 // Header text + margin
+	taskCardHeight := 3
+
+	// relY is position within the column content (after top border)
+	relY := y - 1 // -1 for top border
+
+	// Skip header area
+	taskAreaY := relY - headerLines
+	if taskAreaY < 0 {
+		// Clicked on header
+		return nil
+	}
+
+	// Calculate which task was clicked
+	col := k.columns[colIdx]
+	colHeight := k.height - 2
+	maxTasks := (colHeight - 4) / taskCardHeight
+	if maxTasks < 1 {
+		maxTasks = 1
+	}
+
+	taskIdx := taskAreaY / taskCardHeight
+	if taskIdx >= len(col.Tasks) || taskIdx >= maxTasks {
+		return nil
+	}
+
+	// Update selection
+	k.selectedCol = colIdx
+	k.selectedRow = taskIdx
+
+	return col.Tasks[taskIdx]
+}

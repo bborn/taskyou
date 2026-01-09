@@ -399,7 +399,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case tea.MouseMsg:
-		// Handle notification click on dashboard
+		// Handle mouse clicks on dashboard view
 		if m.currentView == ViewDashboard && msg.Action == tea.MouseActionRelease && msg.Button == tea.MouseButtonLeft {
 			// Check if notification banner is visible and click is on it (row 0)
 			if m.notification != "" && time.Now().Before(m.notifyUntil) && m.notificationTaskID > 0 {
@@ -407,6 +407,10 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					// Click on notification banner - open task detail view
 					return m, m.loadTask(m.notificationTaskID)
 				}
+			}
+			// Check if clicking on a task card
+			if task := m.kanban.HandleClick(msg.X, msg.Y); task != nil {
+				return m, m.loadTask(task.ID)
 			}
 		}
 
