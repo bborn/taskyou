@@ -977,6 +977,10 @@ func (m *AppModel) updateDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
 		task := m.selectedTask
 		if task.Status == db.StatusBlocked || task.Status == db.StatusDone ||
 			task.Status == db.StatusBacklog {
+			// Clean up panes before leaving detail view
+			if m.detailView != nil {
+				m.detailView.Cleanup()
+			}
 			m.retryView = NewRetryModel(task, m.db, m.width, m.height)
 			m.previousView = m.currentView
 			m.currentView = ViewRetry
@@ -988,6 +992,9 @@ func (m *AppModel) updateDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.selectedTask.Status = db.StatusDone
 		if m.detailView != nil {
 			m.detailView.UpdateTask(m.selectedTask)
+			// Clean up panes before leaving detail view
+			m.detailView.Cleanup()
+			m.detailView = nil
 		}
 		// Update task in the list and kanban
 		m.updateTaskInList(m.selectedTask)
@@ -1023,6 +1030,10 @@ func (m *AppModel) updateDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.openTaskDir(m.selectedTask)
 	}
 	if key.Matches(keyMsg, m.keys.Files) && m.selectedTask != nil {
+		// Clean up panes before leaving detail view
+		if m.detailView != nil {
+			m.detailView.Cleanup()
+		}
 		m.attachmentsView = NewAttachmentsModel(m.selectedTask, m.db, m.width, m.height)
 		m.previousView = m.currentView
 		m.currentView = ViewAttachments
