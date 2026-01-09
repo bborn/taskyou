@@ -191,6 +191,94 @@ func TestRunningTasks(t *testing.T) {
 	}
 }
 
+func TestAttachmentsInPrompt(t *testing.T) {
+	// Create temp database
+	tmpFile, err := os.CreateTemp("", "test-*.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(tmpFile.Name())
+	tmpFile.Close()
+
+	database, err := db.Open(tmpFile.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+
+	cfg := &config.Config{}
+	exec := New(database, cfg)
+
+	// Create a test task
+	task := &db.Task{
+		Title:   "Test task with attachments",
+		Status:  db.StatusQueued,
+		Type:    db.TypeCode,
+		Project: "test",
+	}
+	if err := database.CreateTask(task); err != nil {
+		t.Fatal(err)
+	}
+
+	// Add attachments
+	_, err = database.AddAttachment(task.ID, "notes.txt", "text/plain", []byte("test notes content"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = database.AddAttachment(task.ID, "data.json", "application/json", []byte(`{"key":"value"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("prepareAttachments creates temp files", func(t *testing.T) {
+		paths, cleanup := exec.prepareAttachments(task.ID)
+		defer cleanup()
+
+		if len(paths) != 2 {
+			t.Errorf("expected 2 attachment paths, got %d", len(paths))
+		}
+
+		// Verify files exist and have correct content
+		for _, path := range paths {
+			if _, err := os.Stat(path); os.IsNotExist(err) {
+				t.Errorf("attachment file does not exist: %s", path)
+			}
+		}
+	})
+
+	t.Run("getAttachmentsSection uses Read tool", func(t *testing.T) {
+		paths := []string{"/tmp/test/notes.txt", "/tmp/test/data.json"}
+		section := exec.getAttachmentsSection(task.ID, paths)
+
+		if !strings.Contains(section, "## Attachments") {
+			t.Error("section should contain Attachments header")
+		}
+		if !strings.Contains(section, "Read tool") {
+			t.Error("section should mention Read tool (not View tool)")
+		}
+		if strings.Contains(section, "View tool") {
+			t.Error("section should NOT mention View tool")
+		}
+		if !strings.Contains(section, "/tmp/test/notes.txt") {
+			t.Error("section should contain file path")
+		}
+	})
+
+	t.Run("buildPrompt includes attachments section", func(t *testing.T) {
+		paths, cleanup := exec.prepareAttachments(task.ID)
+		defer cleanup()
+
+		prompt := exec.buildPrompt(task, paths)
+
+		if !strings.Contains(prompt, "## Attachments") {
+			t.Error("prompt should include attachments section")
+		}
+		if !strings.Contains(prompt, "Read tool") {
+			t.Error("prompt should mention Read tool")
+		}
+	})
+}
+
 func TestConversationHistory(t *testing.T) {
 	// Create temp database
 	tmpFile, err := os.CreateTemp("", "test-*.db")

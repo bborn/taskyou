@@ -299,3 +299,88 @@ func TestGetProjectByPath(t *testing.T) {
 		})
 	}
 }
+
+func TestDeletePersonalProject(t *testing.T) {
+	// Create temporary database
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	db, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer db.Close()
+	defer os.Remove(dbPath)
+
+	// The personal project should be created automatically by ensurePersonalProject
+	projects, err := db.ListProjects()
+	if err != nil {
+		t.Fatalf("failed to list projects: %v", err)
+	}
+
+	// Find the personal project
+	var personalProject *Project
+	for _, p := range projects {
+		if p.Name == "personal" {
+			personalProject = p
+			break
+		}
+	}
+
+	if personalProject == nil {
+		t.Fatal("personal project not found")
+	}
+
+	// Try to delete the personal project - should fail
+	err = db.DeleteProject(personalProject.ID)
+	if err == nil {
+		t.Error("expected error when deleting personal project, got nil")
+	}
+	if err != nil && err.Error() != "cannot delete the personal project" {
+		t.Errorf("expected 'cannot delete the personal project' error, got %q", err.Error())
+	}
+
+	// Verify the personal project still exists
+	projects, err = db.ListProjects()
+	if err != nil {
+		t.Fatalf("failed to list projects: %v", err)
+	}
+
+	found := false
+	for _, p := range projects {
+		if p.Name == "personal" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("personal project was deleted despite protection")
+	}
+
+	// Create another project and verify it CAN be deleted
+	otherProject := &Project{
+		Name: "other-project",
+		Path: filepath.Join(tmpDir, "other"),
+	}
+	if err := db.CreateProject(otherProject); err != nil {
+		t.Fatalf("failed to create other project: %v", err)
+	}
+
+	// Delete the other project - should succeed
+	err = db.DeleteProject(otherProject.ID)
+	if err != nil {
+		t.Errorf("expected no error when deleting other project, got %v", err)
+	}
+
+	// Verify it was deleted
+	projects, err = db.ListProjects()
+	if err != nil {
+		t.Fatalf("failed to list projects: %v", err)
+	}
+
+	for _, p := range projects {
+		if p.Name == "other-project" {
+			t.Error("other project was not deleted")
+		}
+	}
+}
