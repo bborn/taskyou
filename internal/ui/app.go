@@ -3,7 +3,7 @@ package ui
 import (
 	"fmt"
 	"os"
-	"os/exec"
+	osExec "os/exec"
 	"path/filepath"
 	"time"
 
@@ -338,7 +338,7 @@ func (m *AppModel) Init() tea.Cmd {
 
 	// Enable mouse support for click-to-focus on tmux panes
 	if os.Getenv("TMUX") != "" {
-		exec.Command("tmux", "set-option", "-t", "task-ui", "mouse", "on").Run()
+		osExec.Command("tmux", "set-option", "-t", "task-ui", "mouse", "on").Run()
 	}
 
 	return tea.Batch(m.loadTasks(), m.waitForTaskEvent(), m.waitForDBChange(), m.tick())
@@ -876,7 +876,7 @@ func (m *AppModel) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if db.IsInProgress(task.Status) {
 				sessionName := executor.TmuxSessionName(task.ID)
 				return m, tea.ExecProcess(
-					exec.Command("tmux", "attach-session", "-t", sessionName),
+					osExec.Command("tmux", "attach-session", "-t", sessionName),
 					func(err error) tea.Msg { return attachDoneMsg{err: err} },
 				)
 			}
@@ -991,9 +991,9 @@ func (m *AppModel) updateDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if key.Matches(keyMsg, m.keys.Attach) && m.selectedTask != nil {
 		// Attach if tmux session exists
 		sessionName := executor.TmuxSessionName(m.selectedTask.ID)
-		if exec.Command("tmux", "has-session", "-t", sessionName).Run() == nil {
+		if osExec.Command("tmux", "has-session", "-t", sessionName).Run() == nil {
 			return m, tea.ExecProcess(
-				exec.Command("tmux", "attach-session", "-t", sessionName),
+				osExec.Command("tmux", "attach-session", "-t", sessionName),
 				func(err error) tea.Msg { return attachDoneMsg{err: err} },
 			)
 		}
@@ -1001,7 +1001,7 @@ func (m *AppModel) updateDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if key.Matches(keyMsg, m.keys.Interrupt) && m.selectedTask != nil {
 		// Interrupt if tmux session exists or executor is running
 		sessionName := executor.TmuxSessionName(m.selectedTask.ID)
-		if exec.Command("tmux", "has-session", "-t", sessionName).Run() == nil || m.executor.IsRunning(m.selectedTask.ID) {
+		if osExec.Command("tmux", "has-session", "-t", sessionName).Run() == nil || m.executor.IsRunning(m.selectedTask.ID) {
 			return m, m.interruptTask(m.selectedTask.ID)
 		}
 	}
@@ -1521,7 +1521,7 @@ func (m *AppModel) deleteTask(id int64) tea.Cmd {
 
 		// Kill Claude session if running (ignore errors)
 		windowTarget := executor.TmuxSessionName(id)
-		exec.Command("tmux", "kill-window", "-t", windowTarget).Run()
+		osExec.Command("tmux", "kill-window", "-t", windowTarget).Run()
 
 		// Clean up worktree if it exists
 		if task != nil && task.WorktreePath != "" {
@@ -1543,8 +1543,12 @@ func (m *AppModel) retryTask(id int64, feedback string) tea.Cmd {
 
 func (m *AppModel) retryTaskWithAttachments(id int64, feedback string, attachmentPaths []string) tea.Cmd {
 	database := m.db
+	exec := m.executor
 	return func() tea.Msg {
-		// Add attachments first if provided
+		// Get task to find worktree path
+		task, _ := database.GetTask(id)
+
+		// Add attachments to database first
 		for _, attachmentPath := range attachmentPaths {
 			if attachmentPath != "" {
 				data, readErr := os.ReadFile(attachmentPath)
@@ -1557,11 +1561,51 @@ func (m *AppModel) retryTaskWithAttachments(id int64, feedback string, attachmen
 
 		// Check if tmux session is still alive
 		sessionName := executor.TmuxSessionName(id)
-		if err := exec.Command("tmux", "has-session", "-t", sessionName).Run(); err == nil {
-			// Session alive - just send feedback via send-keys
-			if feedback != "" {
-				database.AppendTaskLog(id, "text", "Feedback: "+feedback)
-				exec.Command("tmux", "send-keys", "-t", sessionName, feedback, "Enter").Run()
+		if err := osExec.Command("tmux", "has-session", "-t", sessionName).Run(); err == nil {
+			// Session alive - prepare attachments and send feedback via send-keys
+			feedbackToSend := feedback
+
+			// If there are new attachments, write them to files and include paths in feedback
+			if len(attachmentPaths) > 0 && task != nil {
+				// Determine directory for attachments
+				attachDir := ""
+				if task.WorktreePath != "" {
+					// Use a subdirectory within the worktree
+					attachDir = filepath.Join(task.WorktreePath, ".task-attachments")
+				} else if projectDir := exec.GetProjectDir(task.Project); projectDir != "" {
+					attachDir = filepath.Join(projectDir, ".task-attachments")
+				}
+
+				if attachDir != "" {
+					os.MkdirAll(attachDir, 0755)
+					var writtenPaths []string
+					for _, attachmentPath := range attachmentPaths {
+						if attachmentPath != "" {
+							data, readErr := os.ReadFile(attachmentPath)
+							if readErr == nil {
+								destPath := filepath.Join(attachDir, filepath.Base(attachmentPath))
+								if writeErr := os.WriteFile(destPath, data, 0644); writeErr == nil {
+									writtenPaths = append(writtenPaths, destPath)
+								}
+							}
+						}
+					}
+
+					// Append attachment info to feedback
+					if len(writtenPaths) > 0 {
+						attachmentInfo := "\n\n[New attachments added - you can read these files using the Read tool:\n"
+						for _, p := range writtenPaths {
+							attachmentInfo += "- " + p + "\n"
+						}
+						attachmentInfo += "]"
+						feedbackToSend = feedback + attachmentInfo
+					}
+				}
+			}
+
+			if feedbackToSend != "" {
+				database.AppendTaskLog(id, "text", "Feedback: "+feedbackToSend)
+				osExec.Command("tmux", "send-keys", "-t", sessionName, feedbackToSend, "Enter").Run()
 			}
 			// Update status to processing
 			database.UpdateTaskStatus(id, db.StatusProcessing)
@@ -1594,7 +1638,7 @@ func (m *AppModel) openTaskDir(task *db.Task) tea.Cmd {
 	// Use tmux to create a new window in the task directory
 	// Explicitly target task-ui session to avoid opening in task-daemon
 	if os.Getenv("TMUX") != "" {
-		cmd := exec.Command("tmux", "new-window", "-t", "task-ui", "-c", dir)
+		cmd := osExec.Command("tmux", "new-window", "-t", "task-ui", "-c", dir)
 		go cmd.Run()
 		return func() tea.Msg { return openDirDoneMsg{} }
 	}
@@ -1611,31 +1655,31 @@ func (m *AppModel) openTaskDir(task *db.Task) tea.Cmd {
 				end tell
 			end tell
 		end tell`, dir)
-		cmd := exec.Command("osascript", "-e", script)
+		cmd := osExec.Command("osascript", "-e", script)
 		go cmd.Run()
 		return func() tea.Msg { return openDirDoneMsg{} }
 	case "Apple_Terminal":
-		cmd := exec.Command("open", "-a", "Terminal", dir)
+		cmd := osExec.Command("open", "-a", "Terminal", dir)
 		go cmd.Run()
 		return func() tea.Msg { return openDirDoneMsg{} }
 	case "WezTerm":
-		cmd := exec.Command("wezterm", "cli", "spawn", "--cwd", dir)
+		cmd := osExec.Command("wezterm", "cli", "spawn", "--cwd", dir)
 		go cmd.Run()
 		return func() tea.Msg { return openDirDoneMsg{} }
 	case "Alacritty":
-		cmd := exec.Command("alacritty", "--working-directory", dir)
+		cmd := osExec.Command("alacritty", "--working-directory", dir)
 		go cmd.Run()
 		return func() tea.Msg { return openDirDoneMsg{} }
 	case "kitty":
 		// kitty requires remote control to be enabled; spawn new instance otherwise
-		cmd := exec.Command("kitty", "--directory", dir)
+		cmd := osExec.Command("kitty", "--directory", dir)
 		go cmd.Run()
 		return func() tea.Msg { return openDirDoneMsg{} }
 	}
 
 	// Check for GNOME Terminal
 	if os.Getenv("GNOME_TERMINAL_SERVICE") != "" {
-		cmd := exec.Command("gnome-terminal", "--working-directory", dir)
+		cmd := osExec.Command("gnome-terminal", "--working-directory", dir)
 		go cmd.Run()
 		return func() tea.Msg { return openDirDoneMsg{} }
 	}
@@ -1645,7 +1689,7 @@ func (m *AppModel) openTaskDir(task *db.Task) tea.Cmd {
 	if shell == "" {
 		shell = "sh"
 	}
-	cmd := exec.Command(shell)
+	cmd := osExec.Command(shell)
 	cmd.Dir = dir
 	return tea.ExecProcess(cmd, func(err error) tea.Msg {
 		return openDirDoneMsg{err: err}
