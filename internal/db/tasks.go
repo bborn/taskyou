@@ -48,6 +48,11 @@ const (
 
 // CreateTask creates a new task.
 func (db *DB) CreateTask(t *Task) error {
+	// Default to 'personal' project if not specified
+	if t.Project == "" {
+		t.Project = "personal"
+	}
+
 	result, err := db.Exec(`
 		INSERT INTO tasks (title, body, status, type, project, priority)
 		VALUES (?, ?, ?, ?, ?, ?)
