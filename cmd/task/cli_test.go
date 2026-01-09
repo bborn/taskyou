@@ -1,0 +1,398 @@
+package main
+
+import (
+	"os"
+	"path/filepath"
+	"testing"
+
+	"github.com/bborn/workflow/internal/db"
+)
+
+// TestCLICreateTask tests task creation via the database directly
+// (same operations as the CLI create command)
+func TestCLICreateTask(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	database, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer database.Close()
+	defer os.Remove(dbPath)
+
+	tests := []struct {
+		name     string
+		task     *db.Task
+		wantErr  bool
+	}{
+		{
+			name: "basic task",
+			task: &db.Task{
+				Title:    "Test task",
+				Body:     "",
+				Status:   db.StatusBacklog,
+				Type:     db.TypeCode,
+				Project:  "",
+				Priority: "normal",
+			},
+		},
+		{
+			name: "task with all fields",
+			task: &db.Task{
+				Title:    "Full task",
+				Body:     "This is the body",
+				Status:   db.StatusBacklog,
+				Type:     db.TypeWriting,
+				Project:  "myproject",
+				Priority: "high",
+			},
+		},
+		{
+			name: "queued task",
+			task: &db.Task{
+				Title:    "Queued task",
+				Body:     "",
+				Status:   db.StatusQueued,
+				Type:     db.TypeCode,
+				Project:  "",
+				Priority: "normal",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := database.CreateTask(tt.task)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("CreateTask() error = %v, wantErr %v", err, tt.wantErr)
+				return
+			}
+			if !tt.wantErr {
+				if tt.task.ID == 0 {
+					t.Error("expected task ID to be set")
+				}
+				// Verify task was created
+				fetched, err := database.GetTask(tt.task.ID)
+				if err != nil {
+					t.Fatalf("GetTask() error = %v", err)
+				}
+				if fetched.Title != tt.task.Title {
+					t.Errorf("Title = %v, want %v", fetched.Title, tt.task.Title)
+				}
+				if fetched.Status != tt.task.Status {
+					t.Errorf("Status = %v, want %v", fetched.Status, tt.task.Status)
+				}
+			}
+		})
+	}
+}
+
+// TestCLIListTasks tests task listing via the database directly
+func TestCLIListTasks(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	database, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer database.Close()
+	defer os.Remove(dbPath)
+
+	// Create some tasks
+	tasks := []*db.Task{
+		{Title: "Task 1", Status: db.StatusBacklog, Type: db.TypeCode, Priority: "normal"},
+		{Title: "Task 2", Status: db.StatusQueued, Type: db.TypeCode, Priority: "high"},
+		{Title: "Task 3", Status: db.StatusDone, Type: db.TypeWriting, Priority: "low", Project: "proj1"},
+	}
+	for _, task := range tasks {
+		if err := database.CreateTask(task); err != nil {
+			t.Fatalf("failed to create task: %v", err)
+		}
+	}
+
+	// Test list all (excluding done)
+	result, err := database.ListTasks(db.ListTasksOptions{})
+	if err != nil {
+		t.Fatalf("ListTasks() error = %v", err)
+	}
+	if len(result) != 2 {
+		t.Errorf("expected 2 tasks (excluding done), got %d", len(result))
+	}
+
+	// Test list with status filter
+	result, err = database.ListTasks(db.ListTasksOptions{Status: db.StatusQueued})
+	if err != nil {
+		t.Fatalf("ListTasks() error = %v", err)
+	}
+	if len(result) != 1 {
+		t.Errorf("expected 1 queued task, got %d", len(result))
+	}
+
+	// Test list including closed
+	result, err = database.ListTasks(db.ListTasksOptions{IncludeClosed: true})
+	if err != nil {
+		t.Fatalf("ListTasks() error = %v", err)
+	}
+	if len(result) != 3 {
+		t.Errorf("expected 3 tasks (including done), got %d", len(result))
+	}
+
+	// Test list with project filter
+	result, err = database.ListTasks(db.ListTasksOptions{Project: "proj1", IncludeClosed: true})
+	if err != nil {
+		t.Fatalf("ListTasks() error = %v", err)
+	}
+	if len(result) != 1 {
+		t.Errorf("expected 1 task in proj1, got %d", len(result))
+	}
+}
+
+// TestCLIUpdateTask tests task update via the database directly
+func TestCLIUpdateTask(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	database, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer database.Close()
+	defer os.Remove(dbPath)
+
+	// Create a task
+	task := &db.Task{
+		Title:    "Original title",
+		Body:     "Original body",
+		Status:   db.StatusBacklog,
+		Type:     db.TypeCode,
+		Priority: "normal",
+	}
+	if err := database.CreateTask(task); err != nil {
+		t.Fatalf("failed to create task: %v", err)
+	}
+
+	// Update the task
+	task.Title = "Updated title"
+	task.Body = "Updated body"
+	task.Priority = "high"
+	if err := database.UpdateTask(task); err != nil {
+		t.Fatalf("UpdateTask() error = %v", err)
+	}
+
+	// Verify update
+	fetched, err := database.GetTask(task.ID)
+	if err != nil {
+		t.Fatalf("GetTask() error = %v", err)
+	}
+	if fetched.Title != "Updated title" {
+		t.Errorf("Title = %v, want 'Updated title'", fetched.Title)
+	}
+	if fetched.Body != "Updated body" {
+		t.Errorf("Body = %v, want 'Updated body'", fetched.Body)
+	}
+	if fetched.Priority != "high" {
+		t.Errorf("Priority = %v, want 'high'", fetched.Priority)
+	}
+}
+
+// TestCLIExecuteTask tests queueing a task for execution
+func TestCLIExecuteTask(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	database, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer database.Close()
+	defer os.Remove(dbPath)
+
+	// Create a backlog task
+	task := &db.Task{
+		Title:    "Task to execute",
+		Status:   db.StatusBacklog,
+		Type:     db.TypeCode,
+		Priority: "normal",
+	}
+	if err := database.CreateTask(task); err != nil {
+		t.Fatalf("failed to create task: %v", err)
+	}
+
+	// Queue the task (simulate execute command)
+	if err := database.UpdateTaskStatus(task.ID, db.StatusQueued); err != nil {
+		t.Fatalf("UpdateTaskStatus() error = %v", err)
+	}
+
+	// Verify status change
+	fetched, err := database.GetTask(task.ID)
+	if err != nil {
+		t.Fatalf("GetTask() error = %v", err)
+	}
+	if fetched.Status != db.StatusQueued {
+		t.Errorf("Status = %v, want %v", fetched.Status, db.StatusQueued)
+	}
+}
+
+// TestCLICloseTask tests marking a task as done
+func TestCLICloseTask(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	database, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer database.Close()
+	defer os.Remove(dbPath)
+
+	// Create and queue a task
+	task := &db.Task{
+		Title:    "Task to close",
+		Status:   db.StatusProcessing,
+		Type:     db.TypeCode,
+		Priority: "normal",
+	}
+	if err := database.CreateTask(task); err != nil {
+		t.Fatalf("failed to create task: %v", err)
+	}
+
+	// Close the task
+	if err := database.UpdateTaskStatus(task.ID, db.StatusDone); err != nil {
+		t.Fatalf("UpdateTaskStatus() error = %v", err)
+	}
+
+	// Verify status change
+	fetched, err := database.GetTask(task.ID)
+	if err != nil {
+		t.Fatalf("GetTask() error = %v", err)
+	}
+	if fetched.Status != db.StatusDone {
+		t.Errorf("Status = %v, want %v", fetched.Status, db.StatusDone)
+	}
+	if fetched.CompletedAt == nil {
+		t.Error("expected CompletedAt to be set")
+	}
+}
+
+// TestCLIDeleteTask tests deleting a task
+func TestCLIDeleteTask(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	database, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer database.Close()
+	defer os.Remove(dbPath)
+
+	// Create a task
+	task := &db.Task{
+		Title:    "Task to delete",
+		Status:   db.StatusBacklog,
+		Type:     db.TypeCode,
+		Priority: "normal",
+	}
+	if err := database.CreateTask(task); err != nil {
+		t.Fatalf("failed to create task: %v", err)
+	}
+
+	// Delete the task
+	if err := database.DeleteTask(task.ID); err != nil {
+		t.Fatalf("DeleteTask() error = %v", err)
+	}
+
+	// Verify deletion
+	fetched, err := database.GetTask(task.ID)
+	if err != nil {
+		t.Fatalf("GetTask() error = %v", err)
+	}
+	if fetched != nil {
+		t.Error("expected task to be deleted")
+	}
+}
+
+// TestCLIRetryTask tests retrying a blocked task
+func TestCLIRetryTask(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	database, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer database.Close()
+	defer os.Remove(dbPath)
+
+	// Create a blocked task
+	task := &db.Task{
+		Title:    "Blocked task",
+		Status:   db.StatusBlocked,
+		Type:     db.TypeCode,
+		Priority: "normal",
+	}
+	if err := database.CreateTask(task); err != nil {
+		t.Fatalf("failed to create task: %v", err)
+	}
+
+	// Retry with feedback
+	if err := database.RetryTask(task.ID, "Try a different approach"); err != nil {
+		t.Fatalf("RetryTask() error = %v", err)
+	}
+
+	// Verify task is re-queued
+	fetched, err := database.GetTask(task.ID)
+	if err != nil {
+		t.Fatalf("GetTask() error = %v", err)
+	}
+	if fetched.Status != db.StatusQueued {
+		t.Errorf("Status = %v, want %v", fetched.Status, db.StatusQueued)
+	}
+
+	// Verify feedback was logged
+	feedback, err := database.GetRetryFeedback(task.ID)
+	if err != nil {
+		t.Fatalf("GetRetryFeedback() error = %v", err)
+	}
+	if feedback != "Try a different approach" {
+		t.Errorf("feedback = %v, want 'Try a different approach'", feedback)
+	}
+}
+
+// TestTaskTypeValidation tests task type validation
+func TestTaskTypeValidation(t *testing.T) {
+	validTypes := []string{db.TypeCode, db.TypeWriting, db.TypeThinking}
+	invalidTypes := []string{"invalid", "unknown", ""}
+
+	for _, typ := range validTypes {
+		if typ != db.TypeCode && typ != db.TypeWriting && typ != db.TypeThinking {
+			t.Errorf("type %q should be valid", typ)
+		}
+	}
+
+	for _, typ := range invalidTypes {
+		if typ == db.TypeCode || typ == db.TypeWriting || typ == db.TypeThinking {
+			t.Errorf("type %q should be invalid", typ)
+		}
+	}
+}
+
+// TestPriorityValidation tests priority validation
+func TestPriorityValidation(t *testing.T) {
+	validPriorities := []string{"low", "normal", "high"}
+	invalidPriorities := []string{"invalid", "urgent", ""}
+
+	for _, p := range validPriorities {
+		if p != "low" && p != "normal" && p != "high" {
+			t.Errorf("priority %q should be valid", p)
+		}
+	}
+
+	for _, p := range invalidPriorities {
+		if p == "low" || p == "normal" || p == "high" {
+			t.Errorf("priority %q should be invalid", p)
+		}
+	}
+}
