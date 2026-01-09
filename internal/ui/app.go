@@ -26,6 +26,7 @@ const (
 	ViewDetail
 	ViewNewTask
 	ViewNewTaskConfirm
+	ViewDeleteConfirm
 	ViewWatch
 	ViewSettings
 	ViewRetry
@@ -240,6 +241,11 @@ type AppModel struct {
 	queueConfirm       *huh.Form
 	queueValue         bool
 
+	// Delete confirmation state
+	deleteConfirm      *huh.Form
+	deleteConfirmValue bool
+	pendingDeleteTask  *db.Task
+
 	// Watch view state
 	watchView *WatchModel
 
@@ -319,6 +325,11 @@ func (m *AppModel) Init() tea.Cmd {
 	// Start watching database file for changes
 	m.startDatabaseWatcher()
 
+	// Enable mouse support for click-to-focus on tmux panes
+	if os.Getenv("TMUX") != "" {
+		exec.Command("tmux", "set-option", "-t", "task-ui", "mouse", "on").Run()
+	}
+
 	return tea.Batch(m.loadTasks(), m.waitForTaskEvent(), m.waitForDBChange(), m.tick())
 }
 
@@ -332,6 +343,9 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 	if m.currentView == ViewNewTaskConfirm && m.queueConfirm != nil {
 		return m.updateNewTaskConfirm(msg)
+	}
+	if m.currentView == ViewDeleteConfirm && m.deleteConfirm != nil {
+		return m.updateDeleteConfirm(msg)
 	}
 	if m.currentView == ViewSettings && m.settingsView != nil {
 		return m.updateSettings(msg)
@@ -509,6 +523,10 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.currentView == ViewDetail && m.detailView != nil {
 			m.detailView.Refresh()
 		}
+		// Poll database for task changes (hooks run in separate process)
+		if m.currentView == ViewDashboard && !m.loading {
+			cmds = append(cmds, m.loadTasks())
+		}
 		cmds = append(cmds, m.tick())
 
 	case dbChangeMsg:
@@ -549,6 +567,8 @@ func (m *AppModel) View() string {
 		}
 	case ViewNewTaskConfirm:
 		return m.viewNewTaskConfirm()
+	case ViewDeleteConfirm:
+		return m.viewDeleteConfirm()
 	case ViewWatch:
 		if m.watchView != nil {
 			return m.watchView.View()
@@ -780,7 +800,7 @@ func (m *AppModel) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case key.Matches(msg, m.keys.Delete):
 		if task := m.kanban.SelectedTask(); task != nil {
-			return m, m.deleteTask(task.ID)
+			return m.showDeleteConfirm(task)
 		}
 
 	case key.Matches(msg, m.keys.Watch):
@@ -930,13 +950,12 @@ func (m *AppModel) updateDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	}
 	if key.Matches(keyMsg, m.keys.Delete) && m.selectedTask != nil {
-		taskID := m.selectedTask.ID
-		m.currentView = ViewDashboard
+		// Clean up detail view first
 		if m.detailView != nil {
 			m.detailView.Cleanup()
 			m.detailView = nil
 		}
-		return m, m.deleteTask(taskID)
+		return m.showDeleteConfirm(m.selectedTask)
 	}
 	if key.Matches(keyMsg, m.keys.Open) && m.selectedTask != nil {
 		return m, m.openTaskDir(m.selectedTask)
@@ -1034,6 +1053,76 @@ func (m *AppModel) updateNewTaskConfirm(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.currentView = ViewDashboard
 			return m, m.createTaskWithAttachments(task, attachments)
 		}
+	}
+
+	return m, cmd
+}
+
+func (m *AppModel) showDeleteConfirm(task *db.Task) (tea.Model, tea.Cmd) {
+	m.pendingDeleteTask = task
+	m.deleteConfirmValue = false
+	m.deleteConfirm = huh.NewForm(
+		huh.NewGroup(
+			huh.NewConfirm().
+				Key("delete").
+				Title(fmt.Sprintf("Delete task #%d?", task.ID)).
+				Description(task.Title).
+				Affirmative("Delete").
+				Negative("Cancel").
+				Value(&m.deleteConfirmValue),
+		),
+	).WithTheme(huh.ThemeDracula()).
+		WithWidth(m.width - 4).
+		WithShowHelp(true)
+	m.currentView = ViewDeleteConfirm
+	return m, m.deleteConfirm.Init()
+}
+
+func (m *AppModel) viewDeleteConfirm() string {
+	if m.deleteConfirm == nil {
+		return ""
+	}
+
+	formView := m.deleteConfirm.View()
+
+	return lipgloss.NewStyle().
+		Width(m.width).
+		Height(m.height).
+		Align(lipgloss.Center, lipgloss.Center).
+		Render(formView)
+}
+
+func (m *AppModel) updateDeleteConfirm(msg tea.Msg) (tea.Model, tea.Cmd) {
+	// Handle escape to cancel
+	if keyMsg, ok := msg.(tea.KeyMsg); ok {
+		if keyMsg.String() == "esc" {
+			m.currentView = ViewDashboard
+			m.deleteConfirm = nil
+			m.pendingDeleteTask = nil
+			return m, nil
+		}
+	}
+
+	// Update the huh form
+	form, cmd := m.deleteConfirm.Update(msg)
+	if f, ok := form.(*huh.Form); ok {
+		m.deleteConfirm = f
+	}
+
+	// Check if form completed
+	if m.deleteConfirm.State == huh.StateCompleted {
+		if m.pendingDeleteTask != nil && m.deleteConfirmValue {
+			taskID := m.pendingDeleteTask.ID
+			m.pendingDeleteTask = nil
+			m.deleteConfirm = nil
+			m.currentView = ViewDashboard
+			return m, m.deleteTask(taskID)
+		}
+		// Cancelled
+		m.pendingDeleteTask = nil
+		m.deleteConfirm = nil
+		m.currentView = ViewDashboard
+		return m, nil
 	}
 
 	return m, cmd
