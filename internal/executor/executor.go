@@ -716,8 +716,19 @@ type execResult struct {
 	Message     string
 }
 
-// TmuxDaemonSession is the session that holds all Claude task windows.
+// TmuxDaemonSession is the default session name that holds all Claude task windows.
+// This is now deprecated - use getDaemonSessionName() for instance-specific names.
 const TmuxDaemonSession = "task-daemon"
+
+// getDaemonSessionName returns the task-daemon session name for this instance.
+func getDaemonSessionName() string {
+	// Check if SESSION_ID is set (for child processes)
+	if sid := os.Getenv("TASK_SESSION_ID"); sid != "" {
+		return fmt.Sprintf("task-daemon-%s", sid)
+	}
+	// Generate new session ID based on PID
+	return fmt.Sprintf("task-daemon-%d", os.Getpid())
+}
 
 // TmuxWindowName returns the window name for a task.
 func TmuxWindowName(taskID int64) string {
@@ -726,17 +737,18 @@ func TmuxWindowName(taskID int64) string {
 
 // TmuxSessionName returns the full tmux target for a task (session:window).
 func TmuxSessionName(taskID int64) string {
-	return fmt.Sprintf("%s:%s", TmuxDaemonSession, TmuxWindowName(taskID))
+	return fmt.Sprintf("%s:%s", getDaemonSessionName(), TmuxWindowName(taskID))
 }
 
 // ensureTmuxDaemon ensures the task-daemon session exists.
 func ensureTmuxDaemon() error {
+	daemonSession := getDaemonSessionName()
 	// Check if session exists
-	if exec.Command("tmux", "has-session", "-t", TmuxDaemonSession).Run() == nil {
+	if exec.Command("tmux", "has-session", "-t", daemonSession).Run() == nil {
 		return nil
 	}
 	// Create it with a placeholder window that we'll kill later
-	return exec.Command("tmux", "new-session", "-d", "-s", TmuxDaemonSession, "-n", "_placeholder").Run()
+	return exec.Command("tmux", "new-session", "-d", "-s", daemonSession, "-n", "_placeholder").Run()
 }
 
 // setupClaudeHooks creates a .claude/settings.local.json in workDir to configure hooks.
@@ -889,14 +901,19 @@ func (e *Executor) runClaude(ctx context.Context, taskID int64, workDir, prompt 
 	promptFile.Close()
 	defer os.Remove(promptFile.Name())
 
-	// Script that runs claude interactively with TASK_ID env var
+	// Script that runs claude interactively with TASK_ID and TASK_SESSION_ID env vars
 	// Note: tmux starts in workDir (-c flag), so claude inherits proper permissions and hooks config
 	// Run interactively (no -p) so user can attach and see/interact in real-time
 	// TASK_ID is passed so hooks know which task to update
-	script := fmt.Sprintf(`TASK_ID=%d claude --dangerously-skip-permissions --chrome "$(cat %q)"`, taskID, promptFile.Name())
+	// TASK_SESSION_ID ensures consistent session naming across all processes
+	sessionID := os.Getenv("TASK_SESSION_ID")
+	if sessionID == "" {
+		sessionID = fmt.Sprintf("%d", os.Getpid())
+	}
+	script := fmt.Sprintf(`TASK_ID=%d TASK_SESSION_ID=%s claude --dangerously-skip-permissions --chrome "$(cat %q)"`, taskID, sessionID, promptFile.Name())
 
 	// Create new window in task-daemon session
-	tmuxCmd := exec.Command("tmux", "new-window", "-d", "-t", TmuxDaemonSession, "-n", windowName, "-c", workDir, "sh", "-c", script)
+	tmuxCmd := exec.Command("tmux", "new-window", "-d", "-t", getDaemonSessionName(), "-n", windowName, "-c", workDir, "sh", "-c", script)
 	if err := tmuxCmd.Run(); err != nil {
 		e.logger.Warn("tmux failed, falling back to direct", "error", err)
 		if cleanupHooks != nil {
@@ -968,10 +985,15 @@ func (e *Executor) runClaudeResume(ctx context.Context, taskID int64, workDir, p
 
 	// Script that resumes claude with session ID (interactive mode)
 	// TASK_ID is passed so hooks know which task to update
-	script := fmt.Sprintf(`TASK_ID=%d claude --dangerously-skip-permissions --chrome --resume %s "$(cat %q)"`, taskID, sessionID, feedbackFile.Name())
+	// TASK_SESSION_ID ensures consistent session naming across all processes
+	taskSessionID := os.Getenv("TASK_SESSION_ID")
+	if taskSessionID == "" {
+		taskSessionID = fmt.Sprintf("%d", os.Getpid())
+	}
+	script := fmt.Sprintf(`TASK_ID=%d TASK_SESSION_ID=%s claude --dangerously-skip-permissions --chrome --resume %s "$(cat %q)"`, taskID, taskSessionID, sessionID, feedbackFile.Name())
 
 	// Create new window in task-daemon session
-	tmuxCmd := exec.Command("tmux", "new-window", "-d", "-t", TmuxDaemonSession, "-n", windowName, "-c", workDir, "sh", "-c", script)
+	tmuxCmd := exec.Command("tmux", "new-window", "-d", "-t", getDaemonSessionName(), "-n", windowName, "-c", workDir, "sh", "-c", script)
 	if err := tmuxCmd.Run(); err != nil {
 		e.logger.Warn("tmux failed, falling back to direct", "error", err)
 		if cleanupHooks != nil {
@@ -1117,11 +1139,12 @@ func (e *Executor) killTmuxSession(sessionName string) {
 func (e *Executor) configureTmuxWindow(windowTarget string) {
 	// Window-specific options are limited; most styling is session-wide
 	// Just ensure the daemon session has good defaults
-	exec.Command("tmux", "set-option", "-t", TmuxDaemonSession, "status", "on").Run()
-	exec.Command("tmux", "set-option", "-t", TmuxDaemonSession, "status-style", "bg=#f59e0b,fg=black").Run()
-	exec.Command("tmux", "set-option", "-t", TmuxDaemonSession, "status-left", " TASK DAEMON ").Run()
-	exec.Command("tmux", "set-option", "-t", TmuxDaemonSession, "status-right", " Ctrl+C kills Claude ").Run()
-	exec.Command("tmux", "set-option", "-t", TmuxDaemonSession, "status-right-length", "30").Run()
+	daemonSession := getDaemonSessionName()
+	exec.Command("tmux", "set-option", "-t", daemonSession, "status", "on").Run()
+	exec.Command("tmux", "set-option", "-t", daemonSession, "status-style", "bg=#f59e0b,fg=black").Run()
+	exec.Command("tmux", "set-option", "-t", daemonSession, "status-left", " TASK DAEMON ").Run()
+	exec.Command("tmux", "set-option", "-t", daemonSession, "status-right", " Ctrl+C kills Claude ").Run()
+	exec.Command("tmux", "set-option", "-t", daemonSession, "status-right-length", "30").Run()
 }
 
 // isClaudeIdle checks if claude appears to be idle (showing prompt with no activity).
