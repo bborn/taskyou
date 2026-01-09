@@ -1071,6 +1071,7 @@ func (m *AppModel) updateNewTaskConfirm(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m *AppModel) showDeleteConfirm(task *db.Task) (tea.Model, tea.Cmd) {
 	m.pendingDeleteTask = task
 	m.deleteConfirmValue = false
+	modalWidth := min(50, m.width-8)
 	m.deleteConfirm = huh.NewForm(
 		huh.NewGroup(
 			huh.NewConfirm().
@@ -1082,7 +1083,7 @@ func (m *AppModel) showDeleteConfirm(task *db.Task) (tea.Model, tea.Cmd) {
 				Value(&m.deleteConfirmValue),
 		),
 	).WithTheme(huh.ThemeDracula()).
-		WithWidth(m.width - 4).
+		WithWidth(modalWidth - 6). // Account for modal padding and border
 		WithShowHelp(true)
 	m.currentView = ViewDeleteConfirm
 	return m, m.deleteConfirm.Init()
@@ -1093,13 +1094,31 @@ func (m *AppModel) viewDeleteConfirm() string {
 		return ""
 	}
 
+	// Modal header with warning icon
+	header := lipgloss.NewStyle().
+		Bold(true).
+		Foreground(ColorError).
+		MarginBottom(1).
+		Render("⚠ Confirm Delete")
+
 	formView := m.deleteConfirm.View()
 
+	// Modal box with border
+	modalWidth := min(50, m.width-8)
+	modalBox := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(ColorError).
+		Padding(1, 2).
+		Width(modalWidth)
+
+	modalContent := modalBox.Render(lipgloss.JoinVertical(lipgloss.Center, header, formView))
+
+	// Center the modal on screen
 	return lipgloss.NewStyle().
 		Width(m.width).
 		Height(m.height).
 		Align(lipgloss.Center, lipgloss.Center).
-		Render(formView)
+		Render(modalContent)
 }
 
 func (m *AppModel) updateDeleteConfirm(msg tea.Msg) (tea.Model, tea.Cmd) {
