@@ -185,12 +185,12 @@ func (m *DetailModel) joinTmuxPane() {
 	currentPaneOut, _ := currentPaneCmd.Output()
 	currentPaneID := strings.TrimSpace(string(currentPaneOut))
 
-	// Join the task window's pane into our window as a horizontal split on the right
-	// -h: horizontal split (right side)
-	// -l 35%: new pane takes 35% of width (smaller since it's just a driver)
+	// Join the task window's pane into our window as a vertical split at bottom
+	// -v: vertical split (pane below)
+	// -l 25%: Claude pane takes only 25% of height (task details get more space)
 	// -s: source pane (from task-daemon window)
 	err := exec.Command("tmux", "join-pane",
-		"-h", "-l", "35%",
+		"-v", "-l", "25%",
 		"-s", windowTarget+".0").Run()
 	if err != nil {
 		return
@@ -210,7 +210,7 @@ func (m *DetailModel) joinTmuxPane() {
 	exec.Command("tmux", "set-option", "-t", "task-ui", "status", "on").Run()
 	exec.Command("tmux", "set-option", "-t", "task-ui", "status-style", "bg=#3b82f6,fg=white").Run()
 	exec.Command("tmux", "set-option", "-t", "task-ui", "status-left", " TASK UI ").Run()
-	exec.Command("tmux", "set-option", "-t", "task-ui", "status-right", " Ctrl+B ←→ switch panes │ Ctrl+B D detach ").Run()
+	exec.Command("tmux", "set-option", "-t", "task-ui", "status-right", " Ctrl+B ↑↓ switch panes │ Ctrl+B D detach ").Run()
 	exec.Command("tmux", "set-option", "-t", "task-ui", "status-right-length", "50").Run()
 
 	// Style pane borders - active pane gets theme color outline
@@ -335,7 +335,7 @@ func (m *DetailModel) renderHeader() string {
 		meta.WriteString("  ")
 		tmuxHint := lipgloss.NewStyle().
 			Foreground(ColorSecondary).
-			Render("(Ctrl+B → to interact with Claude)")
+			Render("(Ctrl+B ↓ to interact with Claude)")
 		meta.WriteString(tmuxHint)
 	}
 
