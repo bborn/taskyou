@@ -924,11 +924,21 @@ func execInTmux() error {
 	osexec.Command("tmux", "set-option", "-t", "task-ui", "status-left", " ").Run()
 	osexec.Command("tmux", "set-option", "-t", "task-ui", "status-right", " Ctrl+B ↑↓ switch panes ").Run()
 
+	// Enable pane border labels
+	osexec.Command("tmux", "set-option", "-t", "task-ui", "pane-border-status", "top").Run()
+	osexec.Command("tmux", "set-option", "-t", "task-ui", "pane-border-format", " #{pane_title} ").Run()
+	osexec.Command("tmux", "set-option", "-t", "task-ui", "pane-border-style", "fg=#374151").Run()
+	osexec.Command("tmux", "set-option", "-t", "task-ui", "pane-active-border-style", "fg=#61AFEF").Run()
+
 	// Split pane vertically - Claude runs in the bottom pane (40% height)
 	// The -c flag sets the working directory for the new pane
 	// Launch Claude with copilot system prompt and permissions
 	claudeCmd := buildCopilotClaudeCommand()
 	osexec.Command("tmux", "split-window", "-t", "task-ui", "-v", "-l", "40%", "-c", cwd, claudeCmd).Run()
+
+	// Set pane titles for labels
+	osexec.Command("tmux", "select-pane", "-t", "task-ui:.0", "-T", "Tasks").Run()
+	osexec.Command("tmux", "select-pane", "-t", "task-ui:.1", "-T", "Copilot").Run()
 
 	// Select the top pane (task TUI) so it has focus when we attach
 	osexec.Command("tmux", "select-pane", "-t", "task-ui:.0").Run()
