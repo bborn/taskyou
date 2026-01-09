@@ -335,7 +335,7 @@ func (m *DetailModel) renderHeader() string {
 		meta.WriteString("  ")
 		tmuxHint := lipgloss.NewStyle().
 			Foreground(ColorSecondary).
-			Render("(Ctrl+B ↓ to interact with Claude)")
+			Render("(Ctrl+B → to interact with Claude)")
 		meta.WriteString(tmuxHint)
 	}
 
