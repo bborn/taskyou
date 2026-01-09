@@ -206,31 +206,16 @@ func (m *DetailModel) joinTmuxPane() {
 		exec.Command("tmux", "select-pane", "-t", currentPaneID).Run()
 	}
 
-	// Enable mouse support for click-to-focus on panes
-	exec.Command("tmux", "set-option", "-t", "task-ui", "mouse", "on").Run()
-
 	// Update status bar with navigation hints
 	exec.Command("tmux", "set-option", "-t", "task-ui", "status", "on").Run()
 	exec.Command("tmux", "set-option", "-t", "task-ui", "status-style", "bg=#3b82f6,fg=white").Run()
 	exec.Command("tmux", "set-option", "-t", "task-ui", "status-left", " TASK UI ").Run()
-	exec.Command("tmux", "set-option", "-t", "task-ui", "status-right", " Click or Ctrl+B ←→ to switch │ Ctrl+B D detach ").Run()
+	exec.Command("tmux", "set-option", "-t", "task-ui", "status-right", " Ctrl+B ←→ switch panes │ Ctrl+B D detach ").Run()
 	exec.Command("tmux", "set-option", "-t", "task-ui", "status-right-length", "50").Run()
 
 	// Style pane borders - active pane gets theme color outline
 	exec.Command("tmux", "set-option", "-t", "task-ui", "pane-border-style", "fg=#374151").Run()
 	exec.Command("tmux", "set-option", "-t", "task-ui", "pane-active-border-style", "fg=#61AFEF").Run()
-
-	// Show pane titles on the border with click hint
-	exec.Command("tmux", "set-option", "-t", "task-ui", "pane-border-status", "top").Run()
-	exec.Command("tmux", "set-option", "-t", "task-ui", "pane-border-format", " #{pane_title} │ Click to focus ").Run()
-
-	// Set title for the Claude pane
-	exec.Command("tmux", "select-pane", "-t", m.joinedPaneID, "-T", "Claude").Run()
-
-	// Set title for the TUI pane and select it back
-	if currentPaneID != "" {
-		exec.Command("tmux", "select-pane", "-t", currentPaneID, "-T", "Task UI").Run()
-	}
 }
 
 // breakTmuxPane breaks the joined pane back to task-daemon.
@@ -239,7 +224,6 @@ func (m *DetailModel) breakTmuxPane() {
 	exec.Command("tmux", "set-option", "-t", "task-ui", "status-right", "").Run()
 	exec.Command("tmux", "set-option", "-t", "task-ui", "pane-border-style", "default").Run()
 	exec.Command("tmux", "set-option", "-t", "task-ui", "pane-active-border-style", "default").Run()
-	exec.Command("tmux", "set-option", "-t", "task-ui", "pane-border-status", "off").Run()
 
 	if m.joinedPaneID == "" {
 		return
@@ -270,7 +254,6 @@ func (m *DetailModel) killTmuxSession() {
 	exec.Command("tmux", "set-option", "-t", "task-ui", "status-right", "").Run()
 	exec.Command("tmux", "set-option", "-t", "task-ui", "pane-border-style", "default").Run()
 	exec.Command("tmux", "set-option", "-t", "task-ui", "pane-active-border-style", "default").Run()
-	exec.Command("tmux", "set-option", "-t", "task-ui", "pane-border-status", "off").Run()
 
 	// If we have a joined pane, it will be killed with the window
 	m.joinedPaneID = ""
@@ -352,7 +335,7 @@ func (m *DetailModel) renderHeader() string {
 		meta.WriteString("  ")
 		tmuxHint := lipgloss.NewStyle().
 			Foreground(ColorSecondary).
-			Render("(Click pane below to interact with Claude)")
+			Render("(Ctrl+B → to interact with Claude)")
 		meta.WriteString(tmuxHint)
 	}
 
