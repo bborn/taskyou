@@ -293,8 +293,7 @@ func (k *KanbanBoard) View() string {
 			Background(col.Color).
 			Foreground(lipgloss.Color("#000000")).
 			Bold(true).
-			Align(lipgloss.Center).
-			Padding(0, 1)
+			Align(lipgloss.Center)
 
 		headerText := fmt.Sprintf("%s %s (%d)", col.Icon, col.Title, len(col.Tasks))
 		headerBar := headerBarStyle.Render(headerText)
