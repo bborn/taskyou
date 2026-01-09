@@ -547,6 +547,9 @@ func (e *Executor) buildPrompt(task *db.Task, attachmentPaths []string) string {
 - Implement the solution
 - Write tests if applicable
 - Commit your changes with clear messages
+- Submit a pull request when your work is complete
+
+IMPORTANT: Your objective is to submit a PR to complete this task. Always remember to create and submit a pull request as the final step of your work. This is how you signal that the implementation is ready for review and merging.
 
 When finished, provide a summary of what you did:
 - List files changed/created
