@@ -27,8 +27,9 @@ type DetailModel struct {
 	ready    bool
 	prInfo   *github.PRInfo
 
-	// Track if we've joined the tmux pane
-	joinedPaneID string
+	// Track joined tmux panes
+	claudePaneID  string // The Claude Code pane (middle-left)
+	workdirPaneID string // The workdir shell pane (middle-right)
 }
 
 // UpdateTask updates the task and refreshes the view.
@@ -107,9 +108,9 @@ func (m *DetailModel) initViewport() {
 	headerHeight := 6
 	footerHeight := 2
 
-	// If we have a joined pane, we have less height (tmux split takes space)
+	// If we have joined panes, we have less height (tmux split takes space)
 	vpHeight := m.height - headerHeight - footerHeight
-	if m.joinedPaneID != "" {
+	if m.claudePaneID != "" || m.workdirPaneID != "" {
 		// The tmux split takes roughly half, but we don't control that here
 		// Just use full height - the TUI pane will be resized by tmux
 	}
@@ -160,8 +161,8 @@ func (m *DetailModel) Update(msg tea.Msg) (*DetailModel, tea.Cmd) {
 
 // Cleanup should be called when leaving detail view.
 func (m *DetailModel) Cleanup() {
-	if m.joinedPaneID != "" {
-		m.breakTmuxPane()
+	if m.claudePaneID != "" || m.workdirPaneID != "" {
+		m.breakTmuxPanes()
 	}
 }
 
@@ -186,56 +187,104 @@ func (m *DetailModel) hasActiveTmuxSession() bool {
 	return err == nil
 }
 
-// joinTmuxPane joins the task's tmux pane into the current window as a split.
-func (m *DetailModel) joinTmuxPane() {
+// joinTmuxPanes joins the task's Claude pane and creates a workdir shell pane.
+// Layout:
+//   - Top: Task details (TUI) - compact header area
+//   - Middle-left: Claude Code pane (task's running Claude instance)
+//   - Middle-right: Workdir shell pane (opened in task's worktree directory)
+func (m *DetailModel) joinTmuxPanes() {
 	windowTarget := executor.TmuxSessionName(m.task.ID)
 
 	// Get current pane ID before joining (so we can select it after)
 	currentPaneCmd := exec.Command("tmux", "display-message", "-p", "#{pane_id}")
 	currentPaneOut, _ := currentPaneCmd.Output()
-	currentPaneID := strings.TrimSpace(string(currentPaneOut))
+	tuiPaneID := strings.TrimSpace(string(currentPaneOut))
 
-	// Join the task window's pane into our window as a vertical split at bottom
-	// -v: vertical split (pane below)
-	// -l 25%: Claude pane takes only 25% of height (task details get more space)
+	// Step 1: Join the Claude pane below the TUI pane (vertical split)
+	// -v: vertical split (below)
+	// -l 60%: Claude/workdir area takes 60% of height (leaving room for copilot below)
 	// -s: source pane (from task-daemon window)
 	err := exec.Command("tmux", "join-pane",
-		"-v", "-l", "25%",
+		"-v", "-l", "60%",
 		"-s", windowTarget+".0").Run()
 	if err != nil {
 		return
 	}
 
-	// Get the new pane ID (it's now the active pane after join)
-	newPaneCmd := exec.Command("tmux", "display-message", "-p", "#{pane_id}")
-	newPaneOut, _ := newPaneCmd.Output()
-	m.joinedPaneID = strings.TrimSpace(string(newPaneOut))
+	// Get the Claude pane ID (it's now the active pane after join)
+	claudePaneCmd := exec.Command("tmux", "display-message", "-p", "#{pane_id}")
+	claudePaneOut, _ := claudePaneCmd.Output()
+	m.claudePaneID = strings.TrimSpace(string(claudePaneOut))
 
-	// Select back to the TUI pane (join-pane switches focus to the new pane)
-	if currentPaneID != "" {
-		exec.Command("tmux", "select-pane", "-t", currentPaneID).Run()
+	// Step 2: Create a new pane to the right of Claude for the workdir
+	// -h: horizontal split (right side)
+	// -l 50%: workdir takes 50% of the middle area
+	// -t: target pane (the Claude pane)
+	workdir := m.getWorkdir()
+	err = exec.Command("tmux", "split-window",
+		"-h", "-l", "50%",
+		"-t", m.claudePaneID,
+		"-c", workdir).Run()
+	if err != nil {
+		// If we can't create workdir pane, still keep Claude pane
+		m.workdirPaneID = ""
+	} else {
+		// Get the workdir pane ID (it's now active after split)
+		workdirPaneCmd := exec.Command("tmux", "display-message", "-p", "#{pane_id}")
+		workdirPaneOut, _ := workdirPaneCmd.Output()
+		m.workdirPaneID = strings.TrimSpace(string(workdirPaneOut))
+	}
+
+	// Select back to the TUI pane
+	if tuiPaneID != "" {
+		exec.Command("tmux", "select-pane", "-t", tuiPaneID).Run()
 	}
 
 	// Update status bar with navigation hints
 	exec.Command("tmux", "set-option", "-t", "task-ui", "status", "on").Run()
 	exec.Command("tmux", "set-option", "-t", "task-ui", "status-style", "bg=#3b82f6,fg=white").Run()
 	exec.Command("tmux", "set-option", "-t", "task-ui", "status-left", " TASK UI ").Run()
-	exec.Command("tmux", "set-option", "-t", "task-ui", "status-right", " Ctrl+B ↑↓ switch panes │ Ctrl+B D detach ").Run()
-	exec.Command("tmux", "set-option", "-t", "task-ui", "status-right-length", "50").Run()
+	exec.Command("tmux", "set-option", "-t", "task-ui", "status-right", " Ctrl+B ↑↓←→ switch panes │ click to focus ").Run()
+	exec.Command("tmux", "set-option", "-t", "task-ui", "status-right-length", "60").Run()
 
 	// Style pane borders - active pane gets theme color outline
 	exec.Command("tmux", "set-option", "-t", "task-ui", "pane-border-style", "fg=#374151").Run()
 	exec.Command("tmux", "set-option", "-t", "task-ui", "pane-active-border-style", "fg=#61AFEF").Run()
+
+	// Resize task-ui pane to take 75% of window height (makes copilot shorter)
+	exec.Command("tmux", "resize-pane", "-t", tuiPaneID, "-y", "75%").Run()
 }
 
-// breakTmuxPane breaks the joined pane back to task-daemon.
-func (m *DetailModel) breakTmuxPane() {
+// joinTmuxPane is a compatibility wrapper for joinTmuxPanes.
+func (m *DetailModel) joinTmuxPane() {
+	m.joinTmuxPanes()
+}
+
+// getWorkdir returns the working directory for the task.
+func (m *DetailModel) getWorkdir() string {
+	if m.task.WorktreePath != "" {
+		return m.task.WorktreePath
+	}
+	// Fallback to home directory
+	home, _ := os.UserHomeDir()
+	return home
+}
+
+// breakTmuxPanes breaks both joined panes - kills workdir, returns Claude to task-daemon.
+func (m *DetailModel) breakTmuxPanes() {
 	// Reset status bar and pane styling
 	exec.Command("tmux", "set-option", "-t", "task-ui", "status-right", "").Run()
 	exec.Command("tmux", "set-option", "-t", "task-ui", "pane-border-style", "default").Run()
 	exec.Command("tmux", "set-option", "-t", "task-ui", "pane-active-border-style", "default").Run()
 
-	if m.joinedPaneID == "" {
+	// Kill the workdir pane first (it's not from task-daemon, just a shell we created)
+	if m.workdirPaneID != "" {
+		exec.Command("tmux", "kill-pane", "-t", m.workdirPaneID).Run()
+		m.workdirPaneID = ""
+	}
+
+	// Break the Claude pane back to task-daemon
+	if m.claudePaneID == "" {
 		return
 	}
 
@@ -248,14 +297,19 @@ func (m *DetailModel) breakTmuxPane() {
 	// -n: name for the new window
 	exec.Command("tmux", "break-pane",
 		"-d",
-		"-s", m.joinedPaneID,
+		"-s", m.claudePaneID,
 		"-t", executor.TmuxDaemonSession+":",
 		"-n", windowName).Run()
 
-	m.joinedPaneID = ""
+	m.claudePaneID = ""
 }
 
-// killTmuxSession kills the Claude tmux window.
+// breakTmuxPane is a compatibility wrapper for breakTmuxPanes.
+func (m *DetailModel) breakTmuxPane() {
+	m.breakTmuxPanes()
+}
+
+// killTmuxSession kills the Claude tmux window and workdir pane.
 func (m *DetailModel) killTmuxSession() {
 	windowTarget := executor.TmuxSessionName(m.task.ID)
 	m.database.AppendTaskLog(m.task.ID, "user", "→ [Kill] Session terminated")
@@ -265,22 +319,33 @@ func (m *DetailModel) killTmuxSession() {
 	exec.Command("tmux", "set-option", "-t", "task-ui", "pane-border-style", "default").Run()
 	exec.Command("tmux", "set-option", "-t", "task-ui", "pane-active-border-style", "default").Run()
 
-	// If we have a joined pane, it will be killed with the window
-	m.joinedPaneID = ""
+	// Kill the workdir pane first (it's a separate pane we created)
+	if m.workdirPaneID != "" {
+		exec.Command("tmux", "kill-pane", "-t", m.workdirPaneID).Run()
+		m.workdirPaneID = ""
+	}
+
+	// If we have a joined Claude pane, it will be killed with the window
+	m.claudePaneID = ""
 
 	exec.Command("tmux", "kill-window", "-t", windowTarget).Run()
 	m.Refresh()
 }
 
-// toggleTmuxPane toggles the Claude pane visibility.
-func (m *DetailModel) toggleTmuxPane() {
-	if m.joinedPaneID != "" {
-		// Pane is open, close it
-		m.breakTmuxPane()
+// toggleTmuxPanes toggles the Claude and workdir pane visibility.
+func (m *DetailModel) toggleTmuxPanes() {
+	if m.claudePaneID != "" || m.workdirPaneID != "" {
+		// Panes are open, close them
+		m.breakTmuxPanes()
 	} else {
-		// Pane is closed, open it
-		m.joinTmuxPane()
+		// Panes are closed, open them
+		m.joinTmuxPanes()
 	}
+}
+
+// toggleTmuxPane is a compatibility wrapper for toggleTmuxPanes.
+func (m *DetailModel) toggleTmuxPane() {
+	m.toggleTmuxPanes()
 }
 
 // View renders the detail view.
@@ -352,7 +417,7 @@ func (m *DetailModel) renderHeader() string {
 	}
 
 	// Tmux hint if session is active
-	if m.joinedPaneID != "" {
+	if m.claudePaneID != "" {
 		meta.WriteString("  ")
 		tmuxHint := lipgloss.NewStyle().
 			Foreground(ColorSecondary).
@@ -442,9 +507,9 @@ func (m *DetailModel) renderHelp() string {
 
 	hasSession := m.hasActiveTmuxSession()
 	if hasSession && os.Getenv("TMUX") != "" {
-		toggleDesc := "show pane"
-		if m.joinedPaneID != "" {
-			toggleDesc = "hide pane"
+		toggleDesc := "show panes"
+		if m.claudePaneID != "" || m.workdirPaneID != "" {
+			toggleDesc = "hide panes"
 		}
 		keys = append(keys, struct {
 			key  string
