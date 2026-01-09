@@ -14,6 +14,7 @@ type KanbanColumn struct {
 	Status string // The status this column represents
 	Tasks  []*db.Task
 	Color  lipgloss.Color
+	Icon   string // Visual icon for the column
 }
 
 // KanbanBoard manages the kanban board state.
@@ -41,10 +42,10 @@ func NewKanbanBoard(width, height int) *KanbanBoard {
 // makeKanbanColumns creates columns with current theme colors.
 func makeKanbanColumns() []KanbanColumn {
 	return []KanbanColumn{
-		{Title: "Backlog", Status: db.StatusBacklog, Color: ColorMuted},
-		{Title: "In Progress", Status: db.StatusQueued, Color: ColorInProgress}, // Also shows processing
-		{Title: "Blocked", Status: db.StatusBlocked, Color: ColorBlocked},
-		{Title: "Done", Status: db.StatusDone, Color: ColorDone},
+		{Title: "Backlog", Status: db.StatusBacklog, Color: ColorMuted, Icon: "◦"},
+		{Title: "In Progress", Status: db.StatusQueued, Color: ColorInProgress, Icon: "▶"}, // Also shows processing
+		{Title: "Blocked", Status: db.StatusBlocked, Color: ColorBlocked, Icon: "⚠"},
+		{Title: "Done", Status: db.StatusDone, Color: ColorDone, Icon: "✓"},
 	}
 }
 
@@ -54,6 +55,7 @@ func (k *KanbanBoard) RefreshTheme() {
 	for i := range k.columns {
 		if i < len(newCols) {
 			k.columns[i].Color = newCols[i].Color
+			k.columns[i].Icon = newCols[i].Icon
 		}
 	}
 }
@@ -210,14 +212,14 @@ func (k *KanbanBoard) View() string {
 
 	// Calculate column width (subtract borders and gaps)
 	numCols := len(k.columns)
-	// Account for borders (2 chars per column) and gaps between columns
+	// Account for borders (2 chars per column) and gaps between columns (1 char each)
 	availableWidth := k.width - (numCols * 2) - (numCols - 1)
 	colWidth := availableWidth / numCols
 	if colWidth < 20 {
 		colWidth = 20
 	}
 
-	// Calculate available height for tasks (subtract borders)
+	// Calculate available height for tasks (subtract borders and header bar)
 	colHeight := k.height - 2
 
 	// Build columns
@@ -225,20 +227,21 @@ func (k *KanbanBoard) View() string {
 	for colIdx, col := range k.columns {
 		isSelectedCol := colIdx == k.selectedCol
 
-		// Column header
-		headerStyle := lipgloss.NewStyle().
-			Bold(true).
-			Foreground(col.Color).
+		// Colored header bar at top of column
+		headerBarStyle := lipgloss.NewStyle().
 			Width(colWidth).
+			Background(col.Color).
+			Foreground(lipgloss.Color("#000000")).
+			Bold(true).
 			Align(lipgloss.Center).
-			MarginBottom(1)
+			Padding(0, 1)
 
-		countStr := fmt.Sprintf(" (%d)", len(col.Tasks))
-		header := headerStyle.Render(col.Title + countStr)
+		headerText := fmt.Sprintf("%s %s (%d)", col.Icon, col.Title, len(col.Tasks))
+		headerBar := headerBarStyle.Render(headerText)
 
 		// Task cards - calculate how many fit (each card is ~3 lines with margin)
-		cardHeight := 3
-		maxTasks := (colHeight - 4) / cardHeight // -4 for header and padding
+		cardHeight := 4 // Increased for better spacing
+		maxTasks := (colHeight - 5) / cardHeight // -5 for header bar and padding
 		if maxTasks < 1 {
 			maxTasks = 1
 		}
@@ -259,32 +262,60 @@ func (k *KanbanBoard) View() string {
 			overflowStyle := lipgloss.NewStyle().
 				Foreground(ColorMuted).
 				Width(colWidth - 2).
-				Align(lipgloss.Center)
-			taskViews = append(taskViews, overflowStyle.Render(fmt.Sprintf("+%d more", len(col.Tasks)-maxTasks)))
+				Align(lipgloss.Center).
+				Italic(true)
+			taskViews = append(taskViews, overflowStyle.Render(fmt.Sprintf("↓ %d more", len(col.Tasks)-maxTasks)))
 		}
 
-		// Combine header and tasks
+		// Empty column placeholder
+		if len(col.Tasks) == 0 {
+			emptyStyle := lipgloss.NewStyle().
+				Foreground(ColorMuted).
+				Width(colWidth - 2).
+				Align(lipgloss.Center).
+				Italic(true).
+				MarginTop(1)
+			taskViews = append(taskViews, emptyStyle.Render("No tasks"))
+		}
+
+		// Combine tasks with spacing
 		taskContent := lipgloss.JoinVertical(lipgloss.Left, taskViews...)
-		colContent := lipgloss.JoinVertical(lipgloss.Left, header, taskContent)
 
 		// Column container with border
-		normalBorder, highlightBorder := GetThemeBorderColors()
-		borderColor := normalBorder
+		_, highlightBorder := GetThemeBorderColors()
+		borderColor := col.Color // Use column color for border
+		borderStyle := lipgloss.NormalBorder()
 		if isSelectedCol {
 			borderColor = highlightBorder
+			borderStyle = lipgloss.ThickBorder()
 		}
 
 		colStyle := lipgloss.NewStyle().
 			Width(colWidth).
-			Height(colHeight).
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(borderColor)
+			Height(colHeight - 1). // -1 for header bar
+			Border(borderStyle).
+			BorderForeground(borderColor).
+			BorderTop(false) // No top border since we have the header bar
 
-		columnViews = append(columnViews, colStyle.Render(colContent))
+		// Stack header bar on top of column content
+		columnView := lipgloss.JoinVertical(lipgloss.Left,
+			headerBar,
+			colStyle.Render(taskContent),
+		)
+
+		columnViews = append(columnViews, columnView)
 	}
 
-	// Join columns horizontally with small gap
-	board := lipgloss.JoinHorizontal(lipgloss.Top, columnViews...)
+	// Join columns horizontally with gap
+	gapStyle := lipgloss.NewStyle().Width(1)
+	var parts []string
+	for i, cv := range columnViews {
+		parts = append(parts, cv)
+		if i < len(columnViews)-1 {
+			parts = append(parts, gapStyle.Render(" "))
+		}
+	}
+	board := lipgloss.JoinHorizontal(lipgloss.Top, parts...)
 
 	return board
 }
@@ -297,7 +328,12 @@ func (k *KanbanBoard) renderTaskCard(task *db.Task, width int, isSelected bool) 
 
 	var b strings.Builder
 
-	// Task ID
+	// Task ID with status indicator
+	statusIcon := StatusIcon(task.Status)
+	statusColor := StatusColor(task.Status)
+	statusStyle := lipgloss.NewStyle().Foreground(statusColor)
+	b.WriteString(statusStyle.Render(statusIcon))
+	b.WriteString(" ")
 	b.WriteString(Dim.Render(fmt.Sprintf("#%d", task.ID)))
 
 	// Priority indicator
@@ -322,7 +358,7 @@ func (k *KanbanBoard) renderTaskCard(task *db.Task, width int, isSelected bool) 
 
 	// Title (truncate if needed)
 	title := task.Title
-	maxTitleLen := width - 8
+	maxTitleLen := width - 4
 	if maxTitleLen < 10 {
 		maxTitleLen = 10
 	}
@@ -333,17 +369,29 @@ func (k *KanbanBoard) renderTaskCard(task *db.Task, width int, isSelected bool) 
 	idLine := b.String()
 	titleLine := title
 
-	// Card style
+	// Card style with bottom margin for separation
 	cardStyle := lipgloss.NewStyle().
 		Width(width).
-		Padding(0, 1)
+		Padding(0, 1).
+		MarginBottom(1)
 
 	if isSelected {
 		cardBg, cardFg := GetThemeCardColors()
+		// Selected card has border and background
 		cardStyle = cardStyle.
 			Bold(true).
 			Background(cardBg).
-			Foreground(cardFg)
+			Foreground(cardFg).
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(lipgloss.Color(currentTheme.CardBorderHi)).
+			MarginBottom(0) // Border adds visual separation
+	} else {
+		// Non-selected cards have a subtle bottom border for separation
+		cardStyle = cardStyle.
+			BorderBottom(true).
+			BorderStyle(lipgloss.NormalBorder()).
+			BorderForeground(ColorMuted).
+			MarginBottom(0)
 	}
 
 	content := idLine + "\n" + titleLine
