@@ -259,6 +259,627 @@ func main() {
 	deleteCmd.Flags().BoolP("force", "f", false, "Skip confirmation prompt")
 	rootCmd.AddCommand(deleteCmd)
 
+	// Create subcommand - create a new task from command line
+	createCmd := &cobra.Command{
+		Use:   "create <title>",
+		Short: "Create a new task",
+		Long: `Create a new task from the command line.
+
+Examples:
+  task create "Fix login bug"
+  task create "Add dark mode" --type code --priority high --project myapp
+  task create "Write documentation" --body "Document the API endpoints" --execute`,
+		Args: cobra.ExactArgs(1),
+		Run: func(cmd *cobra.Command, args []string) {
+			title := args[0]
+			body, _ := cmd.Flags().GetString("body")
+			taskType, _ := cmd.Flags().GetString("type")
+			project, _ := cmd.Flags().GetString("project")
+			priority, _ := cmd.Flags().GetString("priority")
+			execute, _ := cmd.Flags().GetBool("execute")
+			outputJSON, _ := cmd.Flags().GetBool("json")
+
+			// Set defaults
+			if taskType == "" {
+				taskType = db.TypeCode
+			}
+			if priority == "" {
+				priority = "normal"
+			}
+
+			// Validate task type
+			if taskType != db.TypeCode && taskType != db.TypeWriting && taskType != db.TypeThinking {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Invalid type. Must be: code, writing, or thinking"))
+				os.Exit(1)
+			}
+
+			// Validate priority
+			if priority != "low" && priority != "normal" && priority != "high" {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Invalid priority. Must be: low, normal, or high"))
+				os.Exit(1)
+			}
+
+			// Open database
+			dbPath := db.DefaultPath()
+			database, err := db.Open(dbPath)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+			defer database.Close()
+
+			// If project not specified, try to detect from cwd
+			if project == "" {
+				if cwd, err := os.Getwd(); err == nil {
+					if p, err := database.GetProjectByPath(cwd); err == nil && p != nil {
+						project = p.Name
+					}
+				}
+			}
+
+			// Set initial status
+			status := db.StatusBacklog
+			if execute {
+				status = db.StatusQueued
+			}
+
+			// Create the task
+			task := &db.Task{
+				Title:    title,
+				Body:     body,
+				Status:   status,
+				Type:     taskType,
+				Project:  project,
+				Priority: priority,
+			}
+
+			if err := database.CreateTask(task); err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+
+			if outputJSON {
+				output := map[string]interface{}{
+					"id":       task.ID,
+					"title":    task.Title,
+					"status":   task.Status,
+					"type":     task.Type,
+					"project":  task.Project,
+					"priority": task.Priority,
+				}
+				jsonBytes, _ := json.Marshal(output)
+				fmt.Println(string(jsonBytes))
+			} else {
+				msg := fmt.Sprintf("Created task #%d: %s", task.ID, task.Title)
+				if execute {
+					msg += " (queued for execution)"
+				}
+				fmt.Println(successStyle.Render(msg))
+			}
+		},
+	}
+	createCmd.Flags().String("body", "", "Task body/description")
+	createCmd.Flags().StringP("type", "t", "", "Task type: code, writing, thinking (default: code)")
+	createCmd.Flags().StringP("project", "p", "", "Project name (auto-detected from cwd if not specified)")
+	createCmd.Flags().String("priority", "", "Priority: low, normal, high (default: normal)")
+	createCmd.Flags().BoolP("execute", "x", false, "Queue task for immediate execution")
+	createCmd.Flags().Bool("json", false, "Output in JSON format")
+	rootCmd.AddCommand(createCmd)
+
+	// List subcommand - list tasks
+	listCmd := &cobra.Command{
+		Use:   "list",
+		Short: "List tasks",
+		Long: `List tasks with optional filtering.
+
+Examples:
+  task list
+  task list --status queued
+  task list --project myapp --priority high
+  task list --all --json`,
+		Run: func(cmd *cobra.Command, args []string) {
+			status, _ := cmd.Flags().GetString("status")
+			project, _ := cmd.Flags().GetString("project")
+			priority, _ := cmd.Flags().GetString("priority")
+			taskType, _ := cmd.Flags().GetString("type")
+			all, _ := cmd.Flags().GetBool("all")
+			limit, _ := cmd.Flags().GetInt("limit")
+			outputJSON, _ := cmd.Flags().GetBool("json")
+
+			// Open database
+			dbPath := db.DefaultPath()
+			database, err := db.Open(dbPath)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+			defer database.Close()
+
+			opts := db.ListTasksOptions{
+				Status:        status,
+				Project:       project,
+				Priority:      priority,
+				Type:          taskType,
+				Limit:         limit,
+				IncludeClosed: all,
+			}
+
+			tasks, err := database.ListTasks(opts)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+
+			if outputJSON {
+				var output []map[string]interface{}
+				for _, t := range tasks {
+					output = append(output, map[string]interface{}{
+						"id":         t.ID,
+						"title":      t.Title,
+						"status":     t.Status,
+						"type":       t.Type,
+						"project":    t.Project,
+						"priority":   t.Priority,
+						"created_at": t.CreatedAt.Time.Format(time.RFC3339),
+					})
+				}
+				jsonBytes, _ := json.Marshal(output)
+				fmt.Println(string(jsonBytes))
+			} else {
+				if len(tasks) == 0 {
+					fmt.Println(dimStyle.Render("No tasks found"))
+					return
+				}
+
+				// Define status colors
+				statusStyle := func(status string) lipgloss.Style {
+					switch status {
+					case db.StatusQueued:
+						return lipgloss.NewStyle().Foreground(lipgloss.Color("#F59E0B"))
+					case db.StatusProcessing:
+						return lipgloss.NewStyle().Foreground(lipgloss.Color("#3B82F6"))
+					case db.StatusBlocked:
+						return lipgloss.NewStyle().Foreground(lipgloss.Color("#EF4444"))
+					case db.StatusDone:
+						return lipgloss.NewStyle().Foreground(lipgloss.Color("#10B981"))
+					default:
+						return lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280"))
+					}
+				}
+
+				priorityIndicator := func(priority string) string {
+					switch priority {
+					case "high":
+						return lipgloss.NewStyle().Foreground(lipgloss.Color("#EF4444")).Render("!")
+					case "low":
+						return lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280")).Render("↓")
+					default:
+						return " "
+					}
+				}
+
+				for _, t := range tasks {
+					id := dimStyle.Render(fmt.Sprintf("#%-4d", t.ID))
+					status := statusStyle(t.Status).Render(fmt.Sprintf("%-10s", t.Status))
+					priority := priorityIndicator(t.Priority)
+					project := ""
+					if t.Project != "" {
+						project = dimStyle.Render(fmt.Sprintf("[%s] ", t.Project))
+					}
+					fmt.Printf("%s %s %s %s%s\n", id, status, priority, project, t.Title)
+				}
+			}
+		},
+	}
+	listCmd.Flags().StringP("status", "s", "", "Filter by status: backlog, queued, processing, blocked, done")
+	listCmd.Flags().StringP("project", "p", "", "Filter by project")
+	listCmd.Flags().String("priority", "", "Filter by priority: low, normal, high")
+	listCmd.Flags().StringP("type", "t", "", "Filter by type: code, writing, thinking")
+	listCmd.Flags().BoolP("all", "a", false, "Include completed tasks")
+	listCmd.Flags().IntP("limit", "n", 50, "Maximum number of tasks to return")
+	listCmd.Flags().Bool("json", false, "Output in JSON format")
+	rootCmd.AddCommand(listCmd)
+
+	// Show subcommand - show task details
+	showCmd := &cobra.Command{
+		Use:   "show <task-id>",
+		Short: "Show task details",
+		Long: `Show detailed information about a task.
+
+Examples:
+  task show 42
+  task show 42 --json
+  task show 42 --logs`,
+		Args: cobra.ExactArgs(1),
+		Run: func(cmd *cobra.Command, args []string) {
+			var taskID int64
+			if _, err := fmt.Sscanf(args[0], "%d", &taskID); err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Invalid task ID: "+args[0]))
+				os.Exit(1)
+			}
+
+			outputJSON, _ := cmd.Flags().GetBool("json")
+			showLogs, _ := cmd.Flags().GetBool("logs")
+
+			// Open database
+			dbPath := db.DefaultPath()
+			database, err := db.Open(dbPath)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+			defer database.Close()
+
+			task, err := database.GetTask(taskID)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+			if task == nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render(fmt.Sprintf("Task #%d not found", taskID)))
+				os.Exit(1)
+			}
+
+			if outputJSON {
+				output := map[string]interface{}{
+					"id":           task.ID,
+					"title":        task.Title,
+					"body":         task.Body,
+					"status":       task.Status,
+					"type":         task.Type,
+					"project":      task.Project,
+					"priority":     task.Priority,
+					"worktree":     task.WorktreePath,
+					"branch":       task.BranchName,
+					"created_at":   task.CreatedAt.Time.Format(time.RFC3339),
+					"updated_at":   task.UpdatedAt.Time.Format(time.RFC3339),
+				}
+				if task.StartedAt != nil {
+					output["started_at"] = task.StartedAt.Time.Format(time.RFC3339)
+				}
+				if task.CompletedAt != nil {
+					output["completed_at"] = task.CompletedAt.Time.Format(time.RFC3339)
+				}
+				if showLogs {
+					logs, _ := database.GetTaskLogs(taskID, 1000)
+					var logEntries []map[string]interface{}
+					for _, l := range logs {
+						logEntries = append(logEntries, map[string]interface{}{
+							"type":       l.LineType,
+							"content":    l.Content,
+							"created_at": l.CreatedAt.Time.Format(time.RFC3339),
+						})
+					}
+					output["logs"] = logEntries
+				}
+				jsonBytes, _ := json.MarshalIndent(output, "", "  ")
+				fmt.Println(string(jsonBytes))
+			} else {
+				// Header
+				fmt.Printf("%s %s\n", boldStyle.Render(fmt.Sprintf("Task #%d:", task.ID)), task.Title)
+				fmt.Println(strings.Repeat("─", 50))
+
+				// Status line
+				statusColor := lipgloss.Color("#6B7280")
+				switch task.Status {
+				case db.StatusQueued:
+					statusColor = lipgloss.Color("#F59E0B")
+				case db.StatusProcessing:
+					statusColor = lipgloss.Color("#3B82F6")
+				case db.StatusBlocked:
+					statusColor = lipgloss.Color("#EF4444")
+				case db.StatusDone:
+					statusColor = lipgloss.Color("#10B981")
+				}
+				fmt.Printf("Status:   %s\n", lipgloss.NewStyle().Foreground(statusColor).Render(task.Status))
+				fmt.Printf("Type:     %s\n", task.Type)
+				fmt.Printf("Priority: %s\n", task.Priority)
+				if task.Project != "" {
+					fmt.Printf("Project:  %s\n", task.Project)
+				}
+
+				// Timestamps
+				fmt.Printf("Created:  %s\n", task.CreatedAt.Time.Format("2006-01-02 15:04:05"))
+				if task.StartedAt != nil {
+					fmt.Printf("Started:  %s\n", task.StartedAt.Time.Format("2006-01-02 15:04:05"))
+				}
+				if task.CompletedAt != nil {
+					fmt.Printf("Completed: %s\n", task.CompletedAt.Time.Format("2006-01-02 15:04:05"))
+				}
+
+				// Worktree info
+				if task.WorktreePath != "" {
+					fmt.Printf("Worktree: %s\n", task.WorktreePath)
+				}
+				if task.BranchName != "" {
+					fmt.Printf("Branch:   %s\n", task.BranchName)
+				}
+
+				// Body
+				if task.Body != "" {
+					fmt.Println()
+					fmt.Println(boldStyle.Render("Description:"))
+					fmt.Println(task.Body)
+				}
+
+				// Logs
+				if showLogs {
+					logs, _ := database.GetTaskLogs(taskID, 100)
+					if len(logs) > 0 {
+						fmt.Println()
+						fmt.Println(boldStyle.Render("Recent Logs:"))
+						for _, l := range logs {
+							prefix := ""
+							switch l.LineType {
+							case "system":
+								prefix = dimStyle.Render("[system] ")
+							case "error":
+								prefix = errorStyle.Render("[error] ")
+							case "tool":
+								prefix = lipgloss.NewStyle().Foreground(lipgloss.Color("#8B5CF6")).Render("[tool] ")
+							}
+							fmt.Printf("%s%s\n", prefix, truncate(l.Content, 100))
+						}
+					}
+				}
+			}
+		},
+	}
+	showCmd.Flags().Bool("json", false, "Output in JSON format")
+	showCmd.Flags().BoolP("logs", "l", false, "Show task logs")
+	rootCmd.AddCommand(showCmd)
+
+	// Update subcommand - update task fields
+	updateCmd := &cobra.Command{
+		Use:   "update <task-id>",
+		Short: "Update a task",
+		Long: `Update task fields.
+
+Examples:
+  task update 42 --title "New title"
+  task update 42 --priority high
+  task update 42 --body "Updated description"`,
+		Args: cobra.ExactArgs(1),
+		Run: func(cmd *cobra.Command, args []string) {
+			var taskID int64
+			if _, err := fmt.Sscanf(args[0], "%d", &taskID); err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Invalid task ID: "+args[0]))
+				os.Exit(1)
+			}
+
+			title, _ := cmd.Flags().GetString("title")
+			body, _ := cmd.Flags().GetString("body")
+			taskType, _ := cmd.Flags().GetString("type")
+			project, _ := cmd.Flags().GetString("project")
+			priority, _ := cmd.Flags().GetString("priority")
+
+			// Validate task type if provided
+			if taskType != "" && taskType != db.TypeCode && taskType != db.TypeWriting && taskType != db.TypeThinking {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Invalid type. Must be: code, writing, or thinking"))
+				os.Exit(1)
+			}
+
+			// Validate priority if provided
+			if priority != "" && priority != "low" && priority != "normal" && priority != "high" {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Invalid priority. Must be: low, normal, or high"))
+				os.Exit(1)
+			}
+
+			// Open database
+			dbPath := db.DefaultPath()
+			database, err := db.Open(dbPath)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+			defer database.Close()
+
+			task, err := database.GetTask(taskID)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+			if task == nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render(fmt.Sprintf("Task #%d not found", taskID)))
+				os.Exit(1)
+			}
+
+			// Update fields if specified
+			if title != "" {
+				task.Title = title
+			}
+			if cmd.Flags().Changed("body") {
+				task.Body = body
+			}
+			if taskType != "" {
+				task.Type = taskType
+			}
+			if cmd.Flags().Changed("project") {
+				task.Project = project
+			}
+			if priority != "" {
+				task.Priority = priority
+			}
+
+			if err := database.UpdateTask(task); err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+
+			fmt.Println(successStyle.Render(fmt.Sprintf("Updated task #%d", taskID)))
+		},
+	}
+	updateCmd.Flags().String("title", "", "Update task title")
+	updateCmd.Flags().String("body", "", "Update task body/description")
+	updateCmd.Flags().StringP("type", "t", "", "Update task type: code, writing, thinking")
+	updateCmd.Flags().StringP("project", "p", "", "Update project name")
+	updateCmd.Flags().String("priority", "", "Update priority: low, normal, high")
+	rootCmd.AddCommand(updateCmd)
+
+	// Execute subcommand - queue a task for execution
+	executeCmd := &cobra.Command{
+		Use:     "execute <task-id>",
+		Aliases: []string{"queue", "run"},
+		Short:   "Queue a task for execution",
+		Long: `Queue a task to be executed by the daemon.
+
+Examples:
+  task execute 42
+  task queue 42
+  task run 42`,
+		Args: cobra.ExactArgs(1),
+		Run: func(cmd *cobra.Command, args []string) {
+			var taskID int64
+			if _, err := fmt.Sscanf(args[0], "%d", &taskID); err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Invalid task ID: "+args[0]))
+				os.Exit(1)
+			}
+
+			// Open database
+			dbPath := db.DefaultPath()
+			database, err := db.Open(dbPath)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+			defer database.Close()
+
+			task, err := database.GetTask(taskID)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+			if task == nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render(fmt.Sprintf("Task #%d not found", taskID)))
+				os.Exit(1)
+			}
+
+			// Check if already queued/processing
+			if task.Status == db.StatusQueued {
+				fmt.Println(dimStyle.Render(fmt.Sprintf("Task #%d is already queued", taskID)))
+				return
+			}
+			if task.Status == db.StatusProcessing {
+				fmt.Println(dimStyle.Render(fmt.Sprintf("Task #%d is already processing", taskID)))
+				return
+			}
+
+			if err := database.UpdateTaskStatus(taskID, db.StatusQueued); err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+
+			fmt.Println(successStyle.Render(fmt.Sprintf("Queued task #%d: %s", taskID, task.Title)))
+		},
+	}
+	rootCmd.AddCommand(executeCmd)
+
+	// Close subcommand - mark a task as done
+	closeCmd := &cobra.Command{
+		Use:     "close <task-id>",
+		Aliases: []string{"done", "complete"},
+		Short:   "Mark a task as done",
+		Long: `Mark a task as completed.
+
+Examples:
+  task close 42
+  task done 42
+  task complete 42`,
+		Args: cobra.ExactArgs(1),
+		Run: func(cmd *cobra.Command, args []string) {
+			var taskID int64
+			if _, err := fmt.Sscanf(args[0], "%d", &taskID); err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Invalid task ID: "+args[0]))
+				os.Exit(1)
+			}
+
+			// Open database
+			dbPath := db.DefaultPath()
+			database, err := db.Open(dbPath)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+			defer database.Close()
+
+			task, err := database.GetTask(taskID)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+			if task == nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render(fmt.Sprintf("Task #%d not found", taskID)))
+				os.Exit(1)
+			}
+
+			if task.Status == db.StatusDone {
+				fmt.Println(dimStyle.Render(fmt.Sprintf("Task #%d is already done", taskID)))
+				return
+			}
+
+			// Kill Claude session if running
+			killClaudeSession(int(taskID))
+
+			if err := database.UpdateTaskStatus(taskID, db.StatusDone); err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+
+			fmt.Println(successStyle.Render(fmt.Sprintf("Closed task #%d: %s", taskID, task.Title)))
+		},
+	}
+	rootCmd.AddCommand(closeCmd)
+
+	// Retry subcommand - retry a blocked/failed task
+	retryCmd := &cobra.Command{
+		Use:   "retry <task-id>",
+		Short: "Retry a blocked or failed task",
+		Long: `Retry a task that is blocked or failed, optionally with feedback.
+
+Examples:
+  task retry 42
+  task retry 42 --feedback "Try a different approach"
+  task retry 42 -m "Focus on the error handling"`,
+		Args: cobra.ExactArgs(1),
+		Run: func(cmd *cobra.Command, args []string) {
+			var taskID int64
+			if _, err := fmt.Sscanf(args[0], "%d", &taskID); err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Invalid task ID: "+args[0]))
+				os.Exit(1)
+			}
+
+			feedback, _ := cmd.Flags().GetString("feedback")
+
+			// Open database
+			dbPath := db.DefaultPath()
+			database, err := db.Open(dbPath)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+			defer database.Close()
+
+			task, err := database.GetTask(taskID)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+			if task == nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render(fmt.Sprintf("Task #%d not found", taskID)))
+				os.Exit(1)
+			}
+
+			if err := database.RetryTask(taskID, feedback); err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+
+			fmt.Println(successStyle.Render(fmt.Sprintf("Retrying task #%d: %s", taskID, task.Title)))
+		},
+	}
+	retryCmd.Flags().StringP("feedback", "m", "", "Feedback for the retry")
+	rootCmd.AddCommand(retryCmd)
+
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
 		os.Exit(1)
