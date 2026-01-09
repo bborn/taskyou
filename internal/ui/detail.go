@@ -251,8 +251,8 @@ func (m *DetailModel) joinTmuxPanes() {
 	exec.Command("tmux", "set-option", "-t", "task-ui", "pane-border-style", "fg=#374151").Run()
 	exec.Command("tmux", "set-option", "-t", "task-ui", "pane-active-border-style", "fg=#61AFEF").Run()
 
-	// Resize task-ui pane to take 75% of window height (makes copilot shorter)
-	exec.Command("tmux", "resize-pane", "-t", tuiPaneID, "-y", "75%").Run()
+	// Resize task-ui pane to take 35% of window height (gives more room to Claude/shell panes)
+	exec.Command("tmux", "resize-pane", "-t", tuiPaneID, "-y", "35%").Run()
 }
 
 // joinTmuxPane is a compatibility wrapper for joinTmuxPanes.
