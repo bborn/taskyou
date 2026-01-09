@@ -744,8 +744,33 @@ func (e *Executor) setupClaudeHooks(workDir string, taskID int64) (cleanup func(
 
 	// Configure hooks to call our task binary
 	// The TASK_ID env var is set when launching Claude
+	// We use multiple hook types to ensure accurate task state tracking:
+	// - PreToolUse: Fires before tool execution - ensures task is "processing"
+	// - PostToolUse: Fires after tool completes - ensures task stays "processing"
+	// - Notification: Fires when Claude is idle or needs permission - marks task "blocked"
+	// - Stop: Fires when Claude finishes responding - marks task "blocked" when waiting for input
 	hooksConfig := map[string]interface{}{
 		"hooks": map[string]interface{}{
+			"PreToolUse": []map[string]interface{}{
+				{
+					"hooks": []map[string]interface{}{
+						{
+							"type":    "command",
+							"command": fmt.Sprintf("%s claude-hook --event PreToolUse", taskBin),
+						},
+					},
+				},
+			},
+			"PostToolUse": []map[string]interface{}{
+				{
+					"hooks": []map[string]interface{}{
+						{
+							"type":    "command",
+							"command": fmt.Sprintf("%s claude-hook --event PostToolUse", taskBin),
+						},
+					},
+				},
+			},
 			"Notification": []map[string]interface{}{
 				{
 					"matcher": "idle_prompt|permission_prompt",

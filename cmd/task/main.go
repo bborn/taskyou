@@ -757,6 +757,10 @@ func handleClaudeHook(hookEvent string) error {
 
 	// Handle based on hook event type
 	switch hookEvent {
+	case "PreToolUse":
+		return handlePreToolUseHook(database, taskID, &input)
+	case "PostToolUse":
+		return handlePostToolUseHook(database, taskID, &input)
 	case "Notification":
 		return handleNotificationHook(database, taskID, &input)
 	case "Stop":
@@ -790,8 +794,11 @@ func handleNotificationHook(database *db.DB, taskID int64, input *ClaudeHookInpu
 }
 
 // handleStopHook handles Stop hooks from Claude (agent finished responding).
+// The Stop hook fires when Claude Code finishes a response, with stop_reason indicating why:
+// - "end_turn": Claude finished and is waiting for user input → task should be "blocked"
+// - "tool_use": Claude finished with a tool call that's about to execute → task stays "processing"
+//   (PreToolUse/PostToolUse hooks handle the actual tool execution state tracking)
 func handleStopHook(database *db.DB, taskID int64, input *ClaudeHookInput) error {
-	// When Claude stops, update status based on what it's doing
 	task, err := database.GetTask(taskID)
 	if err != nil {
 		return err
@@ -802,18 +809,60 @@ func handleStopHook(database *db.DB, taskID int64, input *ClaudeHookInput) error
 
 	switch input.StopReason {
 	case "end_turn":
-		// Normal completion - Claude finished its turn and is waiting for input
+		// Claude finished its turn and is waiting for user input
+		// This is the key transition: processing → blocked (needs input)
 		if task.Status == db.StatusProcessing {
 			database.UpdateTaskStatus(taskID, db.StatusBlocked)
-			database.AppendTaskLog(taskID, "system", "Claude finished turn - waiting for input")
+			database.AppendTaskLog(taskID, "system", "Waiting for user input")
 		}
 	case "tool_use":
-		// Claude is using a tool - actively working
-		// If task was blocked (waiting for input), it's now processing again
-		if task.Status == db.StatusBlocked {
-			database.UpdateTaskStatus(taskID, db.StatusProcessing)
-			database.AppendTaskLog(taskID, "system", "Claude resumed processing")
-		}
+		// Claude stopped because it's about to execute a tool
+		// The PreToolUse hook will handle ensuring the task is in "processing" state
+		// No state change needed here - task should already be or will be "processing"
+	}
+
+	return nil
+}
+
+// handlePreToolUseHook handles PreToolUse hooks from Claude (before tool execution).
+// This is the most reliable indicator that Claude is actively working.
+func handlePreToolUseHook(database *db.DB, taskID int64, input *ClaudeHookInput) error {
+	task, err := database.GetTask(taskID)
+	if err != nil {
+		return err
+	}
+	if task == nil {
+		return nil
+	}
+
+	// When Claude is about to use a tool, the task should be "processing"
+	// This handles the case where:
+	// 1. Task was blocked (waiting for input) and user responded
+	// 2. Task was in any other state but Claude is now actively working
+	if task.Status == db.StatusBlocked {
+		database.UpdateTaskStatus(taskID, db.StatusProcessing)
+		database.AppendTaskLog(taskID, "system", "Claude resumed working")
+	}
+
+	return nil
+}
+
+// handlePostToolUseHook handles PostToolUse hooks from Claude (after tool execution).
+// This confirms Claude is still actively working after a tool completes.
+func handlePostToolUseHook(database *db.DB, taskID int64, input *ClaudeHookInput) error {
+	task, err := database.GetTask(taskID)
+	if err != nil {
+		return err
+	}
+	if task == nil {
+		return nil
+	}
+
+	// After a tool completes, Claude is still working (will process tool results)
+	// Ensure task remains in "processing" state
+	if task.Status == db.StatusBlocked {
+		database.UpdateTaskStatus(taskID, db.StatusProcessing)
+		database.AppendTaskLog(taskID, "system", "Claude processing tool results")
 	}
 
 	return nil
