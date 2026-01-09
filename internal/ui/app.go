@@ -954,6 +954,11 @@ func (m *AppModel) updateDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	if key.Matches(keyMsg, m.keys.Back) {
+		// Check PR state when closing task view
+		if m.selectedTask != nil {
+			m.executor.CheckPRStateAndUpdateTask(m.selectedTask.ID)
+		}
+
 		m.currentView = ViewDashboard
 		if m.detailView != nil {
 			m.detailView.Cleanup()
@@ -988,6 +993,9 @@ func (m *AppModel) updateDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	}
 	if key.Matches(keyMsg, m.keys.Close) && m.selectedTask != nil {
+		// Check PR state before closing
+		m.executor.CheckPRStateAndUpdateTask(m.selectedTask.ID)
+
 		// Immediately update UI for responsiveness
 		m.selectedTask.Status = db.StatusDone
 		if m.detailView != nil {
@@ -1500,11 +1508,25 @@ type prInfoMsg struct {
 func (m *AppModel) loadTasks() tea.Cmd {
 	return func() tea.Msg {
 		tasks, err := m.db.ListTasks(db.ListTasksOptions{Limit: 50, IncludeClosed: true})
+
+		// Check PR state for all tasks with branches in the background
+		// This ensures we detect merged PRs when returning to the dashboard
+		go func() {
+			for _, task := range tasks {
+				if task.BranchName != "" && task.Status != db.StatusDone {
+					m.executor.CheckPRStateAndUpdateTask(task.ID)
+				}
+			}
+		}()
+
 		return tasksLoadedMsg{tasks: tasks, err: err}
 	}
 }
 
 func (m *AppModel) loadTask(id int64) tea.Cmd {
+	// Check PR state when opening task view
+	m.executor.CheckPRStateAndUpdateTask(id)
+
 	return func() tea.Msg {
 		task, err := m.db.GetTask(id)
 		return taskLoadedMsg{task: task, err: err}
