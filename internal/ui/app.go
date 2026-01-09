@@ -9,6 +9,7 @@ import (
 
 	"github.com/bborn/workflow/internal/db"
 	"github.com/bborn/workflow/internal/executor"
+	"github.com/bborn/workflow/internal/github"
 	"github.com/charmbracelet/bubbles/help"
 	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/textinput"
@@ -225,6 +226,9 @@ type AppModel struct {
 	watcher   *fsnotify.Watcher
 	dbChangeCh chan struct{}
 
+	// PR status cache
+	prCache *github.PRCache
+
 	// Number filter for quick task ID jump
 	numberFilter string
 
@@ -318,6 +322,7 @@ func NewAppModel(database *db.DB, exec *executor.Executor, workingDir string) *A
 		prevStatuses: make(map[int64]string),
 		watcher:      watcher,
 		dbChangeCh:   dbChangeCh,
+		prCache:      github.NewPRCache(),
 	}
 }
 
@@ -450,7 +455,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 			m.prevStatuses[t.ID] = t.Status
-			
+
 			// Update detail view if showing this task
 			if m.selectedTask != nil && m.selectedTask.ID == t.ID {
 				m.selectedTask = t
@@ -462,6 +467,9 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		m.kanban.SetTasks(m.tasks)
 
+		// Fetch PR info for tasks with branches
+		cmds = append(cmds, m.fetchAllPRInfo()...)
+
 	case taskLoadedMsg:
 		if msg.err == nil {
 			m.selectedTask = msg.task
@@ -472,8 +480,22 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if tickerCmd := m.detailView.StartTmuxTicker(); tickerCmd != nil {
 				cmds = append(cmds, tickerCmd)
 			}
+			// Fetch PR info for the task
+			if prCmd := m.fetchPRInfo(msg.task); prCmd != nil {
+				cmds = append(cmds, prCmd)
+			}
 		} else {
 			m.err = msg.err
+		}
+
+	case prInfoMsg:
+		// Update PR info in kanban and detail view
+		if msg.info != nil {
+			m.kanban.SetPRInfo(msg.taskID, msg.info)
+			// Update detail view if showing this task
+			if m.detailView != nil && m.selectedTask != nil && m.selectedTask.ID == msg.taskID {
+				m.detailView.SetPRInfo(msg.info)
+			}
 		}
 
 	case taskCreatedMsg:
@@ -1406,6 +1428,11 @@ type tickMsg time.Time
 
 type dbChangeMsg struct{}
 
+type prInfoMsg struct {
+	taskID int64
+	info   *github.PRInfo
+}
+
 func (m *AppModel) loadTasks() tea.Cmd {
 	return func() tea.Msg {
 		tasks, err := m.db.ListTasks(db.ListTasksOptions{Limit: 50, IncludeClosed: true})
@@ -1639,6 +1666,42 @@ func (m *AppModel) tick() tea.Cmd {
 	return tea.Tick(1*time.Second, func(t time.Time) tea.Msg {
 		return tickMsg(t)
 	})
+}
+
+// fetchPRInfo fetches PR info for a single task.
+func (m *AppModel) fetchPRInfo(task *db.Task) tea.Cmd {
+	if task.BranchName == "" || m.prCache == nil {
+		return nil
+	}
+
+	// Get the worktree or project directory for gh CLI
+	repoDir := task.WorktreePath
+	if repoDir == "" {
+		repoDir = m.executor.GetProjectDir(task.Project)
+	}
+	if repoDir == "" {
+		return nil
+	}
+
+	prCache := m.prCache
+	taskID := task.ID
+	branchName := task.BranchName
+
+	return func() tea.Msg {
+		info := prCache.GetPRForBranch(repoDir, branchName)
+		return prInfoMsg{taskID: taskID, info: info}
+	}
+}
+
+// fetchAllPRInfo returns commands to fetch PR info for all tasks with branches.
+func (m *AppModel) fetchAllPRInfo() []tea.Cmd {
+	var cmds []tea.Cmd
+	for _, task := range m.tasks {
+		if cmd := m.fetchPRInfo(task); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+	}
+	return cmds
 }
 
 // startDatabaseWatcher starts watching the database file for changes.

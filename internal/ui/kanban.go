@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/bborn/workflow/internal/db"
+	"github.com/bborn/workflow/internal/github"
 	"github.com/charmbracelet/lipgloss"
 )
 
@@ -28,6 +29,7 @@ type KanbanBoard struct {
 	allTasks      []*db.Task // All tasks for filtering
 	filteredTasks []*db.Task // Tasks after applying text filter
 	textFilter    string     // Current text filter
+	prInfo        map[int64]*github.PRInfo // PR info by task ID
 }
 
 // NewKanbanBoard creates a new kanban board.
@@ -36,6 +38,7 @@ func NewKanbanBoard(width, height int) *KanbanBoard {
 		columns: makeKanbanColumns(),
 		width:   width,
 		height:  height,
+		prInfo:  make(map[int64]*github.PRInfo),
 	}
 }
 
@@ -64,6 +67,22 @@ func (k *KanbanBoard) RefreshTheme() {
 func (k *KanbanBoard) SetTasks(tasks []*db.Task) {
 	k.allTasks = tasks
 	k.applyFilter()
+}
+
+// SetPRInfo updates the PR info for a task.
+func (k *KanbanBoard) SetPRInfo(taskID int64, info *github.PRInfo) {
+	if k.prInfo == nil {
+		k.prInfo = make(map[int64]*github.PRInfo)
+	}
+	k.prInfo[taskID] = info
+}
+
+// GetPRInfo returns the PR info for a task.
+func (k *KanbanBoard) GetPRInfo(taskID int64) *github.PRInfo {
+	if k.prInfo == nil {
+		return nil
+	}
+	return k.prInfo[taskID]
 }
 
 // applyFilter filters tasks and distributes them to columns.
@@ -354,6 +373,12 @@ func (k *KanbanBoard) renderTaskCard(task *db.Task, width int, isSelected bool) 
 		}
 		b.WriteString(" ")
 		b.WriteString(projectStyle.Render("[" + shortProject + "]"))
+	}
+
+	// PR status indicator
+	if prInfo := k.prInfo[task.ID]; prInfo != nil {
+		b.WriteString(" ")
+		b.WriteString(PRStatusBadge(prInfo))
 	}
 
 	// Title (truncate if needed)

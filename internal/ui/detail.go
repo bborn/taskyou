@@ -9,6 +9,7 @@ import (
 
 	"github.com/bborn/workflow/internal/db"
 	"github.com/bborn/workflow/internal/executor"
+	"github.com/bborn/workflow/internal/github"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/glamour"
@@ -24,6 +25,7 @@ type DetailModel struct {
 	width    int
 	height   int
 	ready    bool
+	prInfo   *github.PRInfo
 
 	// Track if we've joined the tmux pane
 	joinedPaneID string
@@ -32,6 +34,14 @@ type DetailModel struct {
 // UpdateTask updates the task and refreshes the view.
 func (m *DetailModel) UpdateTask(t *db.Task) {
 	m.task = t
+	if m.ready {
+		m.viewport.SetContent(m.renderContent())
+	}
+}
+
+// SetPRInfo sets the PR info for this task.
+func (m *DetailModel) SetPRInfo(prInfo *github.PRInfo) {
+	m.prInfo = prInfo
 	if m.ready {
 		m.viewport.SetContent(m.renderContent())
 	}
@@ -330,6 +340,17 @@ func (m *DetailModel) renderHeader() string {
 		meta.WriteString(typeStyle.Render(t.Type))
 	}
 
+	// PR status
+	if m.prInfo != nil {
+		meta.WriteString("  ")
+		meta.WriteString(PRStatusBadge(m.prInfo))
+		meta.WriteString(" ")
+		prDesc := lipgloss.NewStyle().
+			Foreground(ColorMuted).
+			Render(m.prInfo.StatusDescription())
+		meta.WriteString(prDesc)
+	}
+
 	// Tmux hint if session is active
 	if m.joinedPaneID != "" {
 		meta.WriteString("  ")
@@ -339,12 +360,19 @@ func (m *DetailModel) renderHeader() string {
 		meta.WriteString(tmuxHint)
 	}
 
-	return lipgloss.JoinVertical(lipgloss.Left,
-		title,
-		subtitle,
-		meta.String(),
-		"",
-	)
+	// PR link if available
+	var prLine string
+	if m.prInfo != nil && m.prInfo.URL != "" {
+		prLine = Dim.Render(fmt.Sprintf("PR #%d: %s", m.prInfo.Number, m.prInfo.URL))
+	}
+
+	lines := []string{title, subtitle, meta.String()}
+	if prLine != "" {
+		lines = append(lines, prLine)
+	}
+	lines = append(lines, "")
+
+	return lipgloss.JoinVertical(lipgloss.Left, lines...)
 }
 
 func (m *DetailModel) renderContent() string {
