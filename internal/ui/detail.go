@@ -522,7 +522,6 @@ func (m *DetailModel) renderHelp() string {
 		{"r", "retry"},
 		{"c", "close"},
 		{"d", "delete"},
-		{"o", "open dir"},
 		{"q/esc", "back"},
 	}...)
 
