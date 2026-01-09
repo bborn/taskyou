@@ -7,8 +7,8 @@ import (
 
 func TestListThemes(t *testing.T) {
 	themes := ListThemes()
-	if len(themes) != 5 {
-		t.Errorf("expected 5 themes, got %d", len(themes))
+	if len(themes) != 6 {
+		t.Errorf("expected 6 themes, got %d", len(themes))
 	}
 
 	// Check expected themes are present
@@ -17,6 +17,7 @@ func TestListThemes(t *testing.T) {
 		"nord":       true,
 		"gruvbox":    true,
 		"catppuccin": true,
+		"dracula":    true,
 		"default":    true,
 	}
 	for _, theme := range themes {
