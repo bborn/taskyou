@@ -215,11 +215,11 @@ func (m *DetailModel) focusDetailsPane() {
 }
 
 // getDetailPaneHeight returns the configured detail pane height percentage.
-// Default is 18% (increased from 15% for better visibility).
+// Default is 20% for better visibility of task details.
 func (m *DetailModel) getDetailPaneHeight() string {
 	heightStr, err := m.database.GetSetting(config.SettingDetailPaneHeight)
 	if err != nil || heightStr == "" {
-		return "18%"
+		return "20%"
 	}
 	// Validate the height is a valid percentage (1-50%)
 	if strings.HasSuffix(heightStr, "%") {
@@ -228,7 +228,7 @@ func (m *DetailModel) getDetailPaneHeight() string {
 			return heightStr
 		}
 	}
-	return "18%"
+	return "20%"
 }
 
 // saveDetailPaneHeight saves the current detail pane height to settings.
@@ -267,7 +267,7 @@ func (m *DetailModel) saveDetailPaneHeight(tuiPaneID string) {
 
 // joinTmuxPanes joins the task's Claude pane and creates a workdir shell pane.
 // Layout:
-//   - Top (configurable, default 18%): Task details (TUI)
+//   - Top (configurable, default 20%): Task details (TUI)
 //   - Bottom: Claude Code (left) + Workdir shell (right) side-by-side
 func (m *DetailModel) joinTmuxPanes() {
 	windowTarget := executor.TmuxSessionName(m.task.ID)
