@@ -39,11 +39,12 @@ type Theme struct {
 
 // BuiltinThemes contains all built-in themes.
 var BuiltinThemes = map[string]Theme{
-	"onedark": OneDarkTheme,
-	"default": DefaultTheme,
-	"nord":    NordTheme,
-	"gruvbox": GruvboxTheme,
+	"onedark":    OneDarkTheme,
+	"default":    DefaultTheme,
+	"nord":       NordTheme,
+	"gruvbox":    GruvboxTheme,
 	"catppuccin": CatppuccinTheme,
+	"dracula":    DraculaTheme,
 }
 
 // OneDarkTheme is inspired by Atom's One Dark theme - subtle and easy on the eyes.
@@ -191,6 +192,35 @@ var CatppuccinTheme = Theme{
 	ColumnBorderHi: "#CBA6F7", // Mauve
 }
 
+// DraculaTheme is inspired by the Dracula color scheme - vibrant purples and pinks.
+var DraculaTheme = Theme{
+	Name: "dracula",
+
+	// Core
+	Primary:   "#BD93F9", // Purple
+	Secondary: "#8BE9FD", // Cyan
+	Muted:     "#6272A4", // Comment
+
+	// Semantic
+	Success: "#50FA7B", // Green
+	Warning: "#F1FA8C", // Yellow
+	Error:   "#FF5555", // Red
+
+	// Status
+	InProgress: "#FFB86C", // Orange
+	Done:       "#50FA7B", // Green
+	Blocked:    "#FF5555", // Red
+	Backlog:    "#6272A4", // Comment
+
+	// Cards
+	CardBg:         "#44475A", // Current Line
+	CardFg:         "#F8F8F2", // Foreground
+	CardBorder:     "#6272A4", // Comment
+	CardBorderHi:   "#BD93F9", // Purple
+	ColumnBorder:   "#6272A4", // Comment
+	ColumnBorderHi: "#BD93F9", // Purple
+}
+
 // currentTheme is the active theme (defaults to OneDark).
 var currentTheme = OneDarkTheme
 
@@ -236,7 +266,7 @@ func ThemeToJSON(theme Theme) (string, error) {
 // ListThemes returns the names of all built-in themes (sorted).
 func ListThemes() []string {
 	// Return in a nice order
-	return []string{"onedark", "nord", "gruvbox", "catppuccin", "default"}
+	return []string{"onedark", "nord", "gruvbox", "catppuccin", "dracula", "default"}
 }
 
 // refreshStyles updates all lipgloss styles after a theme change.
