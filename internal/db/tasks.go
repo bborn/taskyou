@@ -267,12 +267,43 @@ func (db *DB) GetQueuedTasks() ([]*Task, error) {
 		       created_at, updated_at, started_at, completed_at
 		FROM tasks
 		WHERE status = ?
-		ORDER BY 
+		ORDER BY
 			CASE priority WHEN 'high' THEN 0 WHEN 'normal' THEN 1 ELSE 2 END,
 			created_at ASC
 	`, StatusQueued)
 	if err != nil {
 		return nil, fmt.Errorf("query queued tasks: %w", err)
+	}
+	defer rows.Close()
+
+	var tasks []*Task
+	for rows.Next() {
+		t := &Task{}
+		if err := rows.Scan(
+			&t.ID, &t.Title, &t.Body, &t.Status, &t.Type, &t.Project, &t.Priority,
+			&t.WorktreePath, &t.BranchName,
+			&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
+		); err != nil {
+			return nil, fmt.Errorf("scan task: %w", err)
+		}
+		tasks = append(tasks, t)
+	}
+	return tasks, nil
+}
+
+// GetTasksWithBranches returns tasks that have a branch name and aren't done.
+// These are candidates for automatic closure when their PR is merged.
+func (db *DB) GetTasksWithBranches() ([]*Task, error) {
+	rows, err := db.Query(`
+		SELECT id, title, body, status, type, project, priority,
+		       worktree_path, branch_name,
+		       created_at, updated_at, started_at, completed_at
+		FROM tasks
+		WHERE branch_name != '' AND status != ?
+		ORDER BY created_at DESC
+	`, StatusDone)
+	if err != nil {
+		return nil, fmt.Errorf("query tasks with branches: %w", err)
 	}
 	defer rows.Close()
 

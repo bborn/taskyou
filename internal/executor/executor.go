@@ -253,6 +253,10 @@ func (e *Executor) worker(ctx context.Context) {
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
 
+	// Check merged branches every 30 seconds (15 ticks)
+	tickCount := 0
+	const mergeCheckInterval = 15
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -261,6 +265,13 @@ func (e *Executor) worker(ctx context.Context) {
 			return
 		case <-ticker.C:
 			e.processNextTask(ctx)
+
+			// Periodically check for merged branches
+			tickCount++
+			if tickCount >= mergeCheckInterval {
+				tickCount = 0
+				e.checkMergedBranches()
+			}
 		}
 	}
 }
@@ -1453,6 +1464,113 @@ func (e *Executor) getConversationHistory(taskID int64) string {
 
 	sb.WriteString("Please continue with this context in mind.\n\n")
 	return sb.String()
+}
+
+// checkMergedBranches checks for tasks whose branches have been merged into the default branch.
+// If a task's branch is merged, it automatically closes the task.
+func (e *Executor) checkMergedBranches() {
+	// Get all tasks that have branches and aren't done
+	tasks, err := e.db.GetTasksWithBranches()
+	if err != nil {
+		e.logger.Debug("Failed to get tasks with branches", "error", err)
+		return
+	}
+
+	for _, task := range tasks {
+		// Skip tasks currently being processed
+		e.mu.RLock()
+		isRunning := e.runningTasks[task.ID]
+		e.mu.RUnlock()
+		if isRunning {
+			continue
+		}
+
+		// Check if the branch has been merged
+		if e.isBranchMerged(task) {
+			e.logger.Info("Branch merged, closing task", "id", task.ID, "branch", task.BranchName)
+			e.logLine(task.ID, "system", fmt.Sprintf("Branch %s has been merged - automatically closing task", task.BranchName))
+			e.updateStatus(task.ID, db.StatusDone)
+			e.hooks.OnStatusChange(task, db.StatusDone, "PR merged")
+		}
+	}
+}
+
+// isBranchMerged checks if a task's branch has been merged into the default branch.
+func (e *Executor) isBranchMerged(task *db.Task) bool {
+	projectDir := e.getProjectDir(task.Project)
+	if projectDir == "" {
+		return false
+	}
+
+	// Check if it's a git repo
+	gitDir := filepath.Join(projectDir, ".git")
+	if _, err := os.Stat(gitDir); os.IsNotExist(err) {
+		return false
+	}
+
+	// Get the default branch
+	defaultBranch := e.getDefaultBranch(projectDir)
+
+	// Fetch from remote to get latest state (ignore errors - might be offline)
+	fetchCmd := exec.Command("git", "fetch", "--quiet")
+	fetchCmd.Dir = projectDir
+	fetchCmd.Run()
+
+	// Check if the branch has been merged into the default branch
+	// Use git branch --merged to see which branches have been merged
+	cmd := exec.Command("git", "branch", "-r", "--merged", defaultBranch)
+	cmd.Dir = projectDir
+	output, err := cmd.Output()
+	if err != nil {
+		return false
+	}
+
+	// Look for our branch in the merged list
+	// Branches appear as "  origin/branch-name" or "* origin/branch-name"
+	mergedBranches := strings.Split(string(output), "\n")
+	for _, branch := range mergedBranches {
+		branch = strings.TrimSpace(branch)
+		branch = strings.TrimPrefix(branch, "* ")
+
+		// Check both with and without origin/ prefix
+		branchName := task.BranchName
+		if strings.Contains(branch, branchName) ||
+			strings.HasSuffix(branch, "/"+branchName) ||
+			branch == "origin/"+branchName {
+			return true
+		}
+	}
+
+	// Also check if the branch no longer exists on remote (was deleted after merge)
+	// This is common when PRs are merged and branches are auto-deleted
+	lsRemoteCmd := exec.Command("git", "ls-remote", "--heads", "origin", task.BranchName)
+	lsRemoteCmd.Dir = projectDir
+	lsOutput, err := lsRemoteCmd.Output()
+	if err == nil && len(strings.TrimSpace(string(lsOutput))) == 0 {
+		// Branch doesn't exist on remote - check if it ever had commits
+		// that are now part of the default branch
+		logCmd := exec.Command("git", "log", "--oneline", "-1", "origin/"+defaultBranch, "--grep="+task.BranchName)
+		logCmd.Dir = projectDir
+		logOutput, err := logCmd.Output()
+		if err == nil && len(strings.TrimSpace(string(logOutput))) > 0 {
+			return true
+		}
+
+		// Alternative: check if local branch exists and its tip is reachable from default
+		localLogCmd := exec.Command("git", "branch", "--list", task.BranchName)
+		localLogCmd.Dir = projectDir
+		localOutput, _ := localLogCmd.Output()
+		if len(strings.TrimSpace(string(localOutput))) > 0 {
+			// Local branch exists - check if its commits are in default branch
+			mergeBaseCmd := exec.Command("git", "merge-base", "--is-ancestor", task.BranchName, defaultBranch)
+			mergeBaseCmd.Dir = projectDir
+			if mergeBaseCmd.Run() == nil {
+				return true
+			}
+		}
+	}
+
+	return false
 }
 
 // setupWorktree creates a git worktree for the task if the project is a git repo.
