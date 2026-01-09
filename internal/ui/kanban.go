@@ -23,6 +23,7 @@ type KanbanBoard struct {
 	columns       []KanbanColumn
 	selectedCol   int
 	selectedRow   int
+	scrollOffsets []int      // Scroll offset per column
 	width         int
 	height        int
 	numberFilter  string
@@ -34,11 +35,13 @@ type KanbanBoard struct {
 
 // NewKanbanBoard creates a new kanban board.
 func NewKanbanBoard(width, height int) *KanbanBoard {
+	columns := makeKanbanColumns()
 	return &KanbanBoard{
-		columns: makeKanbanColumns(),
-		width:   width,
-		height:  height,
-		prInfo:  make(map[int64]*github.PRInfo),
+		columns:       columns,
+		scrollOffsets: make([]int, len(columns)),
+		width:         width,
+		height:        height,
+		prInfo:        make(map[int64]*github.PRInfo),
 	}
 }
 
@@ -153,6 +156,7 @@ func (k *KanbanBoard) MoveLeft() {
 	if k.selectedCol > 0 {
 		k.selectedCol--
 		k.clampSelection()
+		k.ensureSelectedVisible()
 	}
 }
 
@@ -161,6 +165,7 @@ func (k *KanbanBoard) MoveRight() {
 	if k.selectedCol < len(k.columns)-1 {
 		k.selectedCol++
 		k.clampSelection()
+		k.ensureSelectedVisible()
 	}
 }
 
@@ -168,6 +173,7 @@ func (k *KanbanBoard) MoveRight() {
 func (k *KanbanBoard) MoveUp() {
 	if k.selectedRow > 0 {
 		k.selectedRow--
+		k.ensureSelectedVisible()
 	}
 }
 
@@ -176,6 +182,39 @@ func (k *KanbanBoard) MoveDown() {
 	col := k.columns[k.selectedCol]
 	if k.selectedRow < len(col.Tasks)-1 {
 		k.selectedRow++
+		k.ensureSelectedVisible()
+	}
+}
+
+// ensureSelectedVisible adjusts scroll offset so the selected task is visible.
+func (k *KanbanBoard) ensureSelectedVisible() {
+	if k.selectedCol < 0 || k.selectedCol >= len(k.columns) {
+		return
+	}
+
+	// Ensure scrollOffsets slice is properly sized
+	for len(k.scrollOffsets) < len(k.columns) {
+		k.scrollOffsets = append(k.scrollOffsets, 0)
+	}
+
+	// Calculate how many tasks fit in the visible area
+	colHeight := k.height - 2
+	cardHeight := 4
+	maxVisible := (colHeight - 5) / cardHeight
+	if maxVisible < 1 {
+		maxVisible = 1
+	}
+
+	offset := k.scrollOffsets[k.selectedCol]
+
+	// If selected row is above visible area, scroll up
+	if k.selectedRow < offset {
+		k.scrollOffsets[k.selectedCol] = k.selectedRow
+	}
+
+	// If selected row is below visible area, scroll down
+	if k.selectedRow >= offset+maxVisible {
+		k.scrollOffsets[k.selectedCol] = k.selectedRow - maxVisible + 1
 	}
 }
 
@@ -216,6 +255,7 @@ func (k *KanbanBoard) SelectTask(id int64) bool {
 			if task.ID == id {
 				k.selectedCol = colIdx
 				k.selectedRow = rowIdx
+				k.ensureSelectedVisible()
 				return true
 			}
 		}
@@ -264,26 +304,61 @@ func (k *KanbanBoard) View() string {
 		if maxTasks < 1 {
 			maxTasks = 1
 		}
-		displayTasks := col.Tasks
-		if len(displayTasks) > maxTasks {
-			displayTasks = displayTasks[:maxTasks]
+
+		// Get scroll offset for this column
+		scrollOffset := 0
+		if colIdx < len(k.scrollOffsets) {
+			scrollOffset = k.scrollOffsets[colIdx]
+		}
+
+		// Clamp scroll offset to valid range
+		maxOffset := len(col.Tasks) - maxTasks
+		if maxOffset < 0 {
+			maxOffset = 0
+		}
+		if scrollOffset > maxOffset {
+			scrollOffset = maxOffset
+		}
+		if scrollOffset < 0 {
+			scrollOffset = 0
+		}
+
+		// Calculate visible task range
+		startIdx := scrollOffset
+		endIdx := scrollOffset + maxTasks
+		if endIdx > len(col.Tasks) {
+			endIdx = len(col.Tasks)
 		}
 
 		var taskViews []string
-		for taskIdx, task := range displayTasks {
-			isSelected := isSelectedCol && taskIdx == k.selectedRow
-			taskView := k.renderTaskCard(task, colWidth-2, isSelected)
-			taskViews = append(taskViews, taskView)
-		}
 
-		// Show overflow indicator
-		if len(col.Tasks) > maxTasks {
-			overflowStyle := lipgloss.NewStyle().
+		// Show "more above" indicator
+		if scrollOffset > 0 {
+			scrollIndicatorStyle := lipgloss.NewStyle().
 				Foreground(ColorMuted).
 				Width(colWidth - 2).
 				Align(lipgloss.Center).
 				Italic(true)
-			taskViews = append(taskViews, overflowStyle.Render(fmt.Sprintf("↓ %d more", len(col.Tasks)-maxTasks)))
+			taskViews = append(taskViews, scrollIndicatorStyle.Render(fmt.Sprintf("↑ %d more", scrollOffset)))
+		}
+
+		// Render visible tasks
+		for i := startIdx; i < endIdx; i++ {
+			task := col.Tasks[i]
+			isSelected := isSelectedCol && i == k.selectedRow
+			taskView := k.renderTaskCard(task, colWidth-2, isSelected)
+			taskViews = append(taskViews, taskView)
+		}
+
+		// Show "more below" indicator
+		remainingBelow := len(col.Tasks) - endIdx
+		if remainingBelow > 0 {
+			scrollIndicatorStyle := lipgloss.NewStyle().
+				Foreground(ColorMuted).
+				Width(colWidth - 2).
+				Align(lipgloss.Center).
+				Italic(true)
+			taskViews = append(taskViews, scrollIndicatorStyle.Render(fmt.Sprintf("↓ %d more", remainingBelow)))
 		}
 
 		// Empty column placeholder
@@ -437,6 +512,7 @@ func (k *KanbanBoard) ApplyNumberFilter(filter string) {
 			if fmt.Sprintf("%d", task.ID) == filter {
 				k.selectedCol = colIdx
 				k.selectedRow = rowIdx
+				k.ensureSelectedVisible()
 				return
 			}
 		}
@@ -455,6 +531,7 @@ func (k *KanbanBoard) FocusColumn(colIdx int) {
 	if colIdx >= 0 && colIdx < len(k.columns) {
 		k.selectedCol = colIdx
 		k.clampSelection()
+		k.ensureSelectedVisible()
 	}
 }
 
