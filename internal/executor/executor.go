@@ -726,8 +726,7 @@ func (e *Executor) runClaude(ctx context.Context, taskID int64, workDir, prompt 
 	// Script that runs claude interactively
 	// Note: tmux starts in workDir (-c flag), so claude inherits proper permissions and MCP config
 	// Run interactively (no -p) so user can attach and see/interact in real-time
-	// Use --dangerously-skip-permissions since tasks run in isolated worktrees
-	script := fmt.Sprintf(`claude --dangerously-skip-permissions "$(cat %q)"`, promptFile.Name())
+	script := fmt.Sprintf(`claude "$(cat %q)"`, promptFile.Name())
 
 	// Start tmux session in the project directory
 	tmuxCmd := exec.Command("tmux", "new-session", "-d", "-s", sessionName, "-c", workDir, "sh", "-c", script)
@@ -787,7 +786,7 @@ func (e *Executor) runClaudeResume(ctx context.Context, taskID int64, workDir, p
 	defer os.Remove(feedbackFile.Name())
 
 	// Script that resumes claude with session ID (interactive mode)
-	script := fmt.Sprintf(`claude --resume %s --dangerously-skip-permissions "$(cat %q)"`, sessionID, feedbackFile.Name())
+	script := fmt.Sprintf(`claude --resume %s "$(cat %q)"`, sessionID, feedbackFile.Name())
 
 	// Start tmux session in the project directory
 	tmuxCmd := exec.Command("tmux", "new-session", "-d", "-s", tmuxSession, "-c", workDir, "sh", "-c", script)
@@ -1121,7 +1120,7 @@ func (e *Executor) parseOutputMarkers(output string) execResult {
 
 // runClaudeDirect runs claude directly without tmux (fallback)
 func (e *Executor) runClaudeDirect(ctx context.Context, taskID int64, workDir, prompt string) execResult {
-	cmd := exec.CommandContext(ctx, "claude", "-p", "--dangerously-skip-permissions", prompt)
+	cmd := exec.CommandContext(ctx, "claude", "-p", prompt)
 	cmd.Dir = workDir
 
 	stdout, err := cmd.StdoutPipe()

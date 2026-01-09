@@ -431,6 +431,10 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.detailView = NewDetailModel(msg.task, m.db, m.width, m.height)
 			m.previousView = m.currentView
 			m.currentView = ViewDetail
+			// Start tmux output ticker if session is active
+			if tickerCmd := m.detailView.StartTmuxTicker(); tickerCmd != nil {
+				cmds = append(cmds, tickerCmd)
+			}
 		} else {
 			m.err = msg.err
 		}
@@ -869,7 +873,10 @@ func (m *AppModel) updateDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	if key.Matches(keyMsg, m.keys.Back) {
 		m.currentView = ViewDashboard
-		m.detailView = nil
+		if m.detailView != nil {
+			m.detailView.Cleanup()
+			m.detailView = nil
+		}
 		return m, nil
 	}
 
@@ -1086,7 +1093,10 @@ func (m *AppModel) updateRetry(msg tea.Msg) (tea.Model, tea.Cmd) {
 		taskID := m.retryView.task.ID
 		m.currentView = ViewDashboard
 		m.retryView = nil
-		m.detailView = nil
+		if m.detailView != nil {
+			m.detailView.Cleanup()
+			m.detailView = nil
+		}
 		return m, m.retryTaskWithAttachments(taskID, feedback, attachments)
 	}
 

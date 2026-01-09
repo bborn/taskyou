@@ -2,13 +2,13 @@ package ui
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 	"time"
 
 	"github.com/bborn/workflow/internal/db"
 	"github.com/bborn/workflow/internal/executor"
-	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/glamour"
@@ -25,9 +25,8 @@ type DetailModel struct {
 	height   int
 	ready    bool
 
-	// Feedback input for sending to claude
-	feedbackInput textinput.Model
-	feedbackMode  bool
+	// Track if we've joined the tmux pane
+	joinedPaneID string
 }
 
 // UpdateTask updates the task and refreshes the view.
@@ -59,7 +58,6 @@ func (m *DetailModel) Refresh() {
 
 		if m.ready {
 			m.viewport.SetContent(m.renderContent())
-			// Auto-scroll to bottom if we were at bottom or new logs arrived
 			if wasAtBottom || len(logs) > prevLogCount {
 				m.viewport.GotoBottom()
 			}
@@ -74,18 +72,11 @@ func (m *DetailModel) Task() *db.Task {
 
 // NewDetailModel creates a new detail model.
 func NewDetailModel(t *db.Task, database *db.DB, width, height int) *DetailModel {
-	// Setup feedback input
-	fi := textinput.New()
-	fi.Placeholder = "Type feedback for claude..."
-	fi.CharLimit = 500
-	fi.Width = width - 20
-
 	m := &DetailModel{
-		task:          t,
-		database:      database,
-		width:         width,
-		height:        height,
-		feedbackInput: fi,
+		task:     t,
+		database: database,
+		width:    width,
+		height:   height,
 	}
 
 	// Load logs
@@ -93,15 +84,27 @@ func NewDetailModel(t *db.Task, database *db.DB, width, height int) *DetailModel
 	m.logs = logs
 
 	m.initViewport()
+
+	// If we're in tmux and task has active session, join it as a split pane
+	if os.Getenv("TMUX") != "" && m.hasActiveTmuxSession() {
+		m.joinTmuxPane()
+	}
+
 	return m
 }
 
 func (m *DetailModel) initViewport() {
-	headerHeight := 9
-	footerHeight := 3
+	headerHeight := 6
+	footerHeight := 2
 
-	m.viewport = viewport.New(m.width-4, m.height-headerHeight-footerHeight)
-	m.viewport.YPosition = headerHeight
+	// If we have a joined pane, we have less height (tmux split takes space)
+	vpHeight := m.height - headerHeight - footerHeight
+	if m.joinedPaneID != "" {
+		// The tmux split takes roughly half, but we don't control that here
+		// Just use full height - the TUI pane will be resized by tmux
+	}
+
+	m.viewport = viewport.New(m.width-4, vpHeight)
 	m.viewport.SetContent(m.renderContent())
 	m.viewport.GotoBottom()
 	m.ready = true
@@ -112,12 +115,11 @@ func (m *DetailModel) SetSize(width, height int) {
 	m.width = width
 	m.height = height
 	if m.ready {
-		headerHeight := 9
-		footerHeight := 3
+		headerHeight := 6
+		footerHeight := 2
 		m.viewport.Width = width - 4
 		m.viewport.Height = height - headerHeight - footerHeight
 		m.viewport.SetContent(m.renderContent())
-		m.viewport.GotoBottom()
 	}
 }
 
@@ -125,40 +127,8 @@ func (m *DetailModel) SetSize(width, height int) {
 func (m *DetailModel) Update(msg tea.Msg) (*DetailModel, tea.Cmd) {
 	var cmd tea.Cmd
 
-	// Handle feedback mode
-	if m.feedbackMode {
-		switch msg := msg.(type) {
-		case tea.KeyMsg:
-			switch msg.Type {
-			case tea.KeyEsc:
-				m.feedbackMode = false
-				m.feedbackInput.Blur()
-				return m, nil
-			case tea.KeyEnter:
-				feedback := m.feedbackInput.Value()
-				if feedback != "" {
-					m.sendFeedbackToTmux(feedback)
-					m.feedbackInput.SetValue("")
-				}
-				m.feedbackMode = false
-				m.feedbackInput.Blur()
-				return m, nil
-			}
-		}
-		m.feedbackInput, cmd = m.feedbackInput.Update(msg)
-		return m, cmd
-	}
-
-	// Normal mode - handle key messages
 	if keyMsg, ok := msg.(tea.KeyMsg); ok {
 		hasSession := m.hasActiveTmuxSession()
-
-		// 's' to enter feedback/send mode (only when tmux session is active)
-		if keyMsg.String() == "s" && hasSession {
-			m.feedbackMode = true
-			m.feedbackInput.Focus()
-			return m, textinput.Blink
-		}
 
 		// 'k' to kill the tmux session
 		if keyMsg.String() == "k" && hasSession {
@@ -172,39 +142,110 @@ func (m *DetailModel) Update(msg tea.Msg) (*DetailModel, tea.Cmd) {
 	return m, cmd
 }
 
-// InFeedbackMode returns true if the detail view is in feedback input mode.
+// Cleanup should be called when leaving detail view.
+func (m *DetailModel) Cleanup() {
+	if m.joinedPaneID != "" {
+		m.breakTmuxPane()
+	}
+}
+
+// InFeedbackMode returns false - use tmux pane for interaction.
 func (m *DetailModel) InFeedbackMode() bool {
-	return m.feedbackMode
+	return false
+}
+
+// StartTmuxTicker is no longer needed - real tmux pane handles display.
+func (m *DetailModel) StartTmuxTicker() tea.Cmd {
+	return nil
 }
 
 // hasActiveTmuxSession checks if this task has an active tmux session.
 func (m *DetailModel) hasActiveTmuxSession() bool {
+	if m.task == nil {
+		return false
+	}
 	sessionName := executor.TmuxSessionName(m.task.ID)
 	err := exec.Command("tmux", "has-session", "-t", sessionName).Run()
 	return err == nil
 }
 
-// sendFeedbackToTmux sends text to the task's tmux session and submits it.
-func (m *DetailModel) sendFeedbackToTmux(feedback string) {
+// joinTmuxPane joins the task's tmux pane into the current window as a split.
+func (m *DetailModel) joinTmuxPane() {
 	sessionName := executor.TmuxSessionName(m.task.ID)
-	// Log the interaction
-	m.database.AppendTaskLog(m.task.ID, "user", fmt.Sprintf("→ %s", feedback))
-	// Send the feedback text as literal (-l) to avoid special char interpretation
-	exec.Command("tmux", "send-keys", "-t", sessionName, "-l", feedback).Run()
-	// Send Enter key to submit
-	exec.Command("tmux", "send-keys", "-t", sessionName, "Enter").Run()
-	// Refresh to show the new log entry
-	m.Refresh()
+
+	// Get current pane ID before joining (so we can select it after)
+	currentPaneCmd := exec.Command("tmux", "display-message", "-p", "#{pane_id}")
+	currentPaneOut, _ := currentPaneCmd.Output()
+	currentPaneID := strings.TrimSpace(string(currentPaneOut))
+
+	// Join the task session's pane into our window as a vertical split below
+	// -v: vertical split (below)
+	// -l 60%: new pane takes 60% of height
+	// -s: source pane (from task session)
+	err := exec.Command("tmux", "join-pane",
+		"-v", "-l", "60%",
+		"-s", sessionName+":0.0").Run()
+	if err != nil {
+		return
+	}
+
+	// Get the new pane ID (it's now the active pane after join)
+	newPaneCmd := exec.Command("tmux", "display-message", "-p", "#{pane_id}")
+	newPaneOut, _ := newPaneCmd.Output()
+	m.joinedPaneID = strings.TrimSpace(string(newPaneOut))
+
+	// Select back to the TUI pane (join-pane switches focus to the new pane)
+	if currentPaneID != "" {
+		exec.Command("tmux", "select-pane", "-t", currentPaneID).Run()
+	}
+
+	// Update status bar with navigation hints
+	exec.Command("tmux", "set-option", "-t", "task-ui", "status", "on").Run()
+	exec.Command("tmux", "set-option", "-t", "task-ui", "status-style", "bg=#3b82f6,fg=white").Run()
+	exec.Command("tmux", "set-option", "-t", "task-ui", "status-left", " TASK UI ").Run()
+	exec.Command("tmux", "set-option", "-t", "task-ui", "status-right", " Ctrl+B ↑↓ switch panes │ Ctrl+B D detach ").Run()
+	exec.Command("tmux", "set-option", "-t", "task-ui", "status-right-length", "50").Run()
+
+	// Make active pane border very obvious
+	exec.Command("tmux", "set-option", "-t", "task-ui", "pane-border-style", "fg=#374151").Run()
+	exec.Command("tmux", "set-option", "-t", "task-ui", "pane-active-border-style", "fg=#22c55e,bg=#22c55e").Run()
+	exec.Command("tmux", "set-option", "-t", "task-ui", "pane-border-lines", "heavy").Run()
 }
 
-// killTmuxSession kills the Claude tmux session for this task.
+// breakTmuxPane breaks the joined pane back to its own session.
+func (m *DetailModel) breakTmuxPane() {
+	// Reset status bar and pane styling
+	exec.Command("tmux", "set-option", "-t", "task-ui", "status-right", "").Run()
+	exec.Command("tmux", "set-option", "-t", "task-ui", "pane-border-style", "default").Run()
+	exec.Command("tmux", "set-option", "-t", "task-ui", "pane-active-border-style", "default").Run()
+
+	if m.joinedPaneID == "" {
+		return
+	}
+
+	sessionName := executor.TmuxSessionName(m.task.ID)
+
+	// Break the pane back to the task's session
+	// -d: don't switch to the new window
+	// -s: source pane (the one we joined)
+	// -t: target session
+	exec.Command("tmux", "break-pane",
+		"-d",
+		"-s", m.joinedPaneID,
+		"-t", sessionName+":").Run()
+
+	m.joinedPaneID = ""
+}
+
+// killTmuxSession kills the Claude tmux session.
 func (m *DetailModel) killTmuxSession() {
 	sessionName := executor.TmuxSessionName(m.task.ID)
-	// Log the interaction
 	m.database.AppendTaskLog(m.task.ID, "user", "→ [Kill] Session terminated")
-	// Kill the tmux session
+
+	// If we have a joined pane, it will be killed with the session
+	m.joinedPaneID = ""
+
 	exec.Command("tmux", "kill-session", "-t", sessionName).Run()
-	// Refresh to show the new log entry
 	m.Refresh()
 }
 
@@ -220,26 +261,8 @@ func (m *DetailModel) View() string {
 	box := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(ColorPrimary).
-		Width(m.width-2).
+		Width(m.width - 2).
 		Padding(0, 1)
-
-	// Show feedback input when in feedback mode
-	if m.feedbackMode {
-		inputStyle := lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(ColorSecondary).
-			Padding(0, 1).
-			Width(m.width - 4)
-
-		feedbackBar := inputStyle.Render(
-			Bold.Render("Send to claude: ") + m.feedbackInput.View(),
-		)
-
-		return lipgloss.JoinVertical(lipgloss.Left,
-			box.Render(lipgloss.JoinVertical(lipgloss.Left, header, content)),
-			feedbackBar,
-		)
-	}
 
 	help := m.renderHelp()
 	return lipgloss.JoinVertical(lipgloss.Left,
@@ -281,36 +304,21 @@ func (m *DetailModel) renderHeader() string {
 			Background(ColorCode).
 			Foreground(lipgloss.Color("#FFFFFF"))
 		meta.WriteString(typeStyle.Render(t.Type))
+	}
+
+	// Tmux hint if session is active
+	if m.joinedPaneID != "" {
 		meta.WriteString("  ")
+		tmuxHint := lipgloss.NewStyle().
+			Foreground(ColorSecondary).
+			Render("(Ctrl+B ↓ to interact with Claude)")
+		meta.WriteString(tmuxHint)
 	}
-
-	// Priority
-	if t.Priority == "high" {
-		priorityStyle := lipgloss.NewStyle().
-			Padding(0, 1).
-			Background(ColorError).
-			Foreground(lipgloss.Color("#FFFFFF"))
-		meta.WriteString(priorityStyle.Render("high priority"))
-		meta.WriteString("  ")
-	}
-
-	// Attachment count
-	if count, err := m.database.CountAttachments(t.ID); err == nil && count > 0 {
-		attachStyle := lipgloss.NewStyle().
-			Padding(0, 1).
-			Background(lipgloss.Color("#666666")).
-			Foreground(lipgloss.Color("#FFFFFF"))
-		meta.WriteString(attachStyle.Render(fmt.Sprintf("📎 %d", count)))
-	}
-
-	timeStr := Dim.Render(fmt.Sprintf("Created %s", humanizeTime(t.CreatedAt.Time)))
 
 	return lipgloss.JoinVertical(lipgloss.Left,
 		title,
 		subtitle,
-		"",
 		meta.String(),
-		timeStr,
 		"",
 	)
 }
@@ -380,17 +388,8 @@ func (m *DetailModel) renderHelp() string {
 		{"x", "execute"},
 	}
 
-	// Show tmux-related options if session is active
 	hasSession := m.hasActiveTmuxSession()
 	if hasSession {
-		keys = append(keys, struct {
-			key  string
-			desc string
-		}{"a", "attach"})
-		keys = append(keys, struct {
-			key  string
-			desc string
-		}{"s", "send"})
 		keys = append(keys, struct {
 			key  string
 			desc string
