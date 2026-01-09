@@ -99,6 +99,9 @@ func NewDetailModel(t *db.Task, database *db.DB, width, height int) *DetailModel
 	// If we're in tmux and task has active session, join it as a split pane
 	if os.Getenv("TMUX") != "" && m.hasActiveTmuxSession() {
 		m.joinTmuxPane()
+	} else if os.Getenv("TMUX") != "" {
+		// Even without joined panes, ensure Details pane has focus
+		m.focusDetailsPane()
 	}
 
 	return m
@@ -187,6 +190,22 @@ func (m *DetailModel) hasActiveTmuxSession() bool {
 	return err == nil
 }
 
+// focusDetailsPane sets focus to the current TUI pane (Details pane).
+func (m *DetailModel) focusDetailsPane() {
+	// Get current pane ID
+	currentPaneCmd := exec.Command("tmux", "display-message", "-p", "#{pane_id}")
+	currentPaneOut, err := currentPaneCmd.Output()
+	if err != nil {
+		return
+	}
+	tuiPaneID := strings.TrimSpace(string(currentPaneOut))
+
+	// Set the pane title to "Details" and ensure it has focus
+	if tuiPaneID != "" {
+		exec.Command("tmux", "select-pane", "-t", tuiPaneID, "-T", "Details").Run()
+	}
+}
+
 // joinTmuxPanes joins the task's Claude pane and creates a workdir shell pane.
 // Layout:
 //   - Top (15%): Task details (TUI)
@@ -235,9 +254,11 @@ func (m *DetailModel) joinTmuxPanes() {
 		exec.Command("tmux", "select-pane", "-t", m.workdirPaneID, "-T", "Shell").Run()
 	}
 
-	// Select back to the TUI pane and set its title
+	// Select back to the TUI pane, set its title, and ensure it has focus
 	if tuiPaneID != "" {
 		exec.Command("tmux", "select-pane", "-t", tuiPaneID, "-T", "Details").Run()
+		// Ensure the TUI pane has focus for keyboard interaction
+		exec.Command("tmux", "select-pane", "-t", tuiPaneID).Run()
 	}
 
 	// Update status bar with navigation hints
@@ -273,13 +294,12 @@ func (m *DetailModel) getWorkdir() string {
 // breakTmuxPanes breaks both joined panes - kills workdir, returns Claude to task-daemon.
 func (m *DetailModel) breakTmuxPanes() {
 	// Reset status bar and pane styling
-	exec.Command("tmux", "set-option", "-t", "task-ui", "status-right", " Ctrl+B ↑↓ switch panes ").Run()
+	exec.Command("tmux", "set-option", "-t", "task-ui", "status-right", " ").Run()
 	exec.Command("tmux", "set-option", "-t", "task-ui", "pane-border-style", "fg=#374151").Run()
 	exec.Command("tmux", "set-option", "-t", "task-ui", "pane-active-border-style", "fg=#61AFEF").Run()
 
-	// Reset pane titles back to main view labels
+	// Reset pane title back to main view label
 	exec.Command("tmux", "select-pane", "-t", "task-ui:.0", "-T", "Tasks").Run()
-	exec.Command("tmux", "select-pane", "-t", "task-ui:.1", "-T", "Copilot").Run()
 
 	// Kill the workdir pane first (it's not from task-daemon, just a shell we created)
 	if m.workdirPaneID != "" {
@@ -319,13 +339,12 @@ func (m *DetailModel) killTmuxSession() {
 	m.database.AppendTaskLog(m.task.ID, "user", "→ [Kill] Session terminated")
 
 	// Reset pane styling first
-	exec.Command("tmux", "set-option", "-t", "task-ui", "status-right", " Ctrl+B ↑↓ switch panes ").Run()
+	exec.Command("tmux", "set-option", "-t", "task-ui", "status-right", " ").Run()
 	exec.Command("tmux", "set-option", "-t", "task-ui", "pane-border-style", "fg=#374151").Run()
 	exec.Command("tmux", "set-option", "-t", "task-ui", "pane-active-border-style", "fg=#61AFEF").Run()
 
-	// Reset pane titles back to main view labels
+	// Reset pane title back to main view label
 	exec.Command("tmux", "select-pane", "-t", "task-ui:.0", "-T", "Tasks").Run()
-	exec.Command("tmux", "select-pane", "-t", "task-ui:.1", "-T", "Copilot").Run()
 
 	// Kill the workdir pane first (it's a separate pane we created)
 	if m.workdirPaneID != "" {

@@ -950,7 +950,7 @@ func execInTmux() error {
 	osexec.Command("tmux", "set-option", "-t", sessionName, "status", "on").Run()
 	osexec.Command("tmux", "set-option", "-t", sessionName, "status-style", "bg=#1e293b,fg=#94a3b8").Run()
 	osexec.Command("tmux", "set-option", "-t", sessionName, "status-left", " ").Run()
-	osexec.Command("tmux", "set-option", "-t", sessionName, "status-right", " Ctrl+B ↑↓ switch panes ").Run()
+	osexec.Command("tmux", "set-option", "-t", sessionName, "status-right", " ").Run()
 
 	// Enable pane border labels
 	osexec.Command("tmux", "set-option", "-t", sessionName, "pane-border-status", "top").Run()
@@ -958,18 +958,8 @@ func execInTmux() error {
 	osexec.Command("tmux", "set-option", "-t", sessionName, "pane-border-style", "fg=#374151").Run()
 	osexec.Command("tmux", "set-option", "-t", sessionName, "pane-active-border-style", "fg=#61AFEF").Run()
 
-	// Split pane vertically - Claude runs in the bottom pane (40% height)
-	// The -c flag sets the working directory for the new pane
-	// Launch Claude with copilot system prompt and permissions
-	claudeCmd := buildCopilotClaudeCommand(sessionName)
-	osexec.Command("tmux", "split-window", "-t", sessionName, "-v", "-l", "40%", "-c", cwd, claudeCmd).Run()
-
-	// Set pane titles for labels
+	// Set pane title for the task TUI
 	osexec.Command("tmux", "select-pane", "-t", sessionName+":.0", "-T", "Tasks").Run()
-	osexec.Command("tmux", "select-pane", "-t", sessionName+":.1", "-T", "Copilot").Run()
-
-	// Select the top pane (task TUI) so it has focus when we attach
-	osexec.Command("tmux", "select-pane", "-t", sessionName+":.0").Run()
 
 	// Now attach to the session
 	cmd := osexec.Command("tmux", "attach-session", "-t", sessionName)
@@ -977,66 +967,6 @@ func execInTmux() error {
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
-}
-
-// buildCopilotClaudeCommand builds the claude command with copilot system prompt and permissions.
-func buildCopilotClaudeCommand(sessionName string) string {
-	systemPrompt := fmt.Sprintf(`You are the Task App Copilot - an AI assistant integrated into the task management application.
-
-## Your Role
-You help users manage their task queue by driving the task app UI in the tmux pane above you.
-The task app is a terminal-based kanban board for managing AI coding tasks.
-
-## Tmux Layout
-- Session: %s
-- Pane 0.0 (above): The task app TUI - a kanban board showing tasks in columns (Backlog, In Progress, Blocked, Done)
-- Pane 0.1 (this pane): You, the copilot
-
-## How to Control the Task App
-Send keystrokes to the task app using: tmux send-keys -t %s:0.0 '<keys>'
-
-### Key Bindings
-- n: Create new task (opens form, type title, ctrl+s to submit)
-- Enter: Open task details
-- q/Esc: Go back / close
-- h/l or Left/Right: Move between columns
-- j/k or Down/Up: Move between tasks in a column
-- Q: Queue selected task for execution
-- r: Retry failed task
-- d: Delete task (with confirmation)
-- /: Filter tasks
-- s: Open settings
-- ?: Show help
-
-### Creating a Task
-1. tmux send-keys -t %s:0.0 'n'        # Open new task form
-2. tmux send-keys -t %s:0.0 'Task title here'  # Type title
-3. tmux send-keys -t %s:0.0 C-s        # Submit (Ctrl+S)
-4. tmux send-keys -t %s:0.0 Enter      # Confirm (don't queue) or 'y' then Enter to queue
-
-### Navigating
-- To select a task: Use arrow keys or hjkl to navigate the kanban board
-- To view details: Press Enter on selected task
-- To go back: Press q or Esc
-
-## Important Notes
-- Always add small delays between commands (sleep 0.3) to let the UI update
-- The task app polls for updates, so changes you make will appear shortly
-- You can also directly interact with the SQLite database at ~/.local/share/task/tasks.db for queries
-- Tasks are executed by Claude instances in separate tmux windows in the task-daemon session
-
-## Be Helpful
-- When users ask to create tasks, do it for them
-- When users ask about task status, navigate to show them or query the database
-- Offer suggestions for task management
-- Be concise in your responses`, sessionName, sessionName, sessionName, sessionName, sessionName, sessionName)
-
-	// Escape single quotes in system prompt for shell
-	escapedPrompt := strings.ReplaceAll(systemPrompt, "'", "'\"'\"'")
-
-	// Build claude command with system prompt and dangerously skip permissions for Bash
-	// This allows the copilot to send tmux commands without permission prompts
-	return fmt.Sprintf("claude --system-prompt '%s' --dangerously-skip-permissions", escapedPrompt)
 }
 
 // runLocal runs the TUI locally with a local SQLite database.

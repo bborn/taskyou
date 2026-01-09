@@ -188,6 +188,10 @@ func (db *DB) migrate() error {
 		db.Exec(m)
 	}
 
+	// Note: SQLite doesn't support ALTER COLUMN DEFAULT directly
+	// The default value change for project column will be handled in the application layer
+	// New tasks will get 'personal' as default through the form and executor logic
+
 	// Migrate old status values to new statuses
 	statusMigrations := []string{
 		`UPDATE tasks SET status = 'backlog' WHERE status IN ('pending', 'interrupted')`,
@@ -197,6 +201,111 @@ func (db *DB) migrate() error {
 
 	for _, m := range statusMigrations {
 		db.Exec(m)
+	}
+
+	// Ensure 'personal' project exists
+	if err := db.ensurePersonalProject(); err != nil {
+		return fmt.Errorf("ensure personal project: %w", err)
+	}
+
+	// Migrate tasks with empty project to 'personal'
+	db.Exec(`UPDATE tasks SET project = 'personal' WHERE project = ''`)
+
+	return nil
+}
+
+// ensurePersonalProject creates the 'personal' project if it doesn't exist.
+// It also creates and initializes the default worktree directory as a git repo.
+func (db *DB) ensurePersonalProject() error {
+	// Check if personal project already exists
+	var count int
+	err := db.QueryRow(`SELECT COUNT(*) FROM projects WHERE name = 'personal'`).Scan(&count)
+	if err != nil {
+		return fmt.Errorf("check personal project: %w", err)
+	}
+
+	if count > 0 {
+		return nil // Already exists
+	}
+
+	// Create personal project directory
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("get home dir: %w", err)
+	}
+
+	personalDir := filepath.Join(home, ".local", "share", "task", "personal")
+
+	// Create directory
+	if err := os.MkdirAll(personalDir, 0755); err != nil {
+		return fmt.Errorf("create personal dir: %w", err)
+	}
+
+	// Initialize as git repo if not already
+	gitDir := filepath.Join(personalDir, ".git")
+	if _, err := os.Stat(gitDir); os.IsNotExist(err) {
+		// Initialize git repo
+		if err := initGitRepo(personalDir); err != nil {
+			return fmt.Errorf("init git repo: %w", err)
+		}
+	}
+
+	// Create the personal project in database
+	_, err = db.Exec(`
+		INSERT INTO projects (name, path, aliases, instructions)
+		VALUES ('personal', ?, '', 'Default project for personal tasks')
+	`, personalDir)
+	if err != nil {
+		return fmt.Errorf("insert personal project: %w", err)
+	}
+
+	return nil
+}
+
+// initGitRepo initializes a git repository at the given path.
+func initGitRepo(path string) error {
+	// Create .git directory
+	gitDir := filepath.Join(path, ".git")
+	if err := os.MkdirAll(gitDir, 0755); err != nil {
+		return fmt.Errorf("create .git dir: %w", err)
+	}
+
+	// Write minimal git config
+	configPath := filepath.Join(gitDir, "config")
+	config := `[core]
+	repositoryformatversion = 0
+	filemode = true
+	bare = false
+	logallrefupdates = true
+[init]
+	defaultBranch = main
+`
+	if err := os.WriteFile(configPath, []byte(config), 0644); err != nil {
+		return fmt.Errorf("write git config: %w", err)
+	}
+
+	// Create HEAD
+	headPath := filepath.Join(gitDir, "HEAD")
+	if err := os.WriteFile(headPath, []byte("ref: refs/heads/main\n"), 0644); err != nil {
+		return fmt.Errorf("write HEAD: %w", err)
+	}
+
+	// Create objects and refs directories
+	if err := os.MkdirAll(filepath.Join(gitDir, "objects"), 0755); err != nil {
+		return fmt.Errorf("create objects dir: %w", err)
+	}
+	if err := os.MkdirAll(filepath.Join(gitDir, "refs", "heads"), 0755); err != nil {
+		return fmt.Errorf("create refs dir: %w", err)
+	}
+
+	// Create initial README
+	readmePath := filepath.Join(path, "README.md")
+	readme := `# Personal Tasks
+
+This is the default workspace for personal tasks.
+`
+	if err := os.WriteFile(readmePath, []byte(readme), 0644); err != nil {
+		return fmt.Errorf("write README: %w", err)
 	}
 
 	return nil

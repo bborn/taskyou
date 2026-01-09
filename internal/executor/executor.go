@@ -16,6 +16,7 @@ import (
 
 	"github.com/bborn/workflow/internal/config"
 	"github.com/bborn/workflow/internal/db"
+	"github.com/bborn/workflow/internal/github"
 	"github.com/bborn/workflow/internal/hooks"
 	"github.com/charmbracelet/log"
 )
@@ -29,10 +30,11 @@ type TaskEvent struct {
 
 // Executor manages background task execution.
 type Executor struct {
-	db     *db.DB
-	config *config.Config
-	logger *log.Logger
-	hooks  *hooks.Runner
+	db      *db.DB
+	config  *config.Config
+	logger  *log.Logger
+	hooks   *hooks.Runner
+	prCache *github.PRCache
 
 	mu           sync.RWMutex
 	runningTasks map[int64]bool               // tracks which tasks are currently executing
@@ -59,6 +61,7 @@ func New(database *db.DB, cfg *config.Config) *Executor {
 		config:       cfg,
 		logger:       log.NewWithOptions(io.Discard, log.Options{Prefix: "executor"}),
 		hooks:        hooks.NewSilent(hooks.DefaultHooksDir()),
+		prCache:      github.NewPRCache(),
 		stopCh:       make(chan struct{}),
 		subs:         make(map[int64][]chan *db.TaskLog),
 		taskSubs:     make([]chan TaskEvent, 0),
@@ -75,6 +78,7 @@ func NewWithLogging(database *db.DB, cfg *config.Config, w io.Writer) *Executor 
 		config:       cfg,
 		logger:       log.NewWithOptions(w, log.Options{Prefix: "executor"}),
 		hooks:        hooks.New(hooks.DefaultHooksDir()),
+		prCache:      github.NewPRCache(),
 		stopCh:       make(chan struct{}),
 		subs:         make(map[int64][]chan *db.TaskLog),
 		taskSubs:     make([]chan TaskEvent, 0),
@@ -906,7 +910,7 @@ func (e *Executor) runClaude(ctx context.Context, taskID int64, workDir, prompt 
 	if sessionID == "" {
 		sessionID = fmt.Sprintf("%d", os.Getpid())
 	}
-	script := fmt.Sprintf(`TASK_ID=%d TASK_SESSION_ID=%s claude --dangerously-skip-permissions "$(cat %q)"`, taskID, sessionID, promptFile.Name())
+	script := fmt.Sprintf(`TASK_ID=%d TASK_SESSION_ID=%s claude --dangerously-skip-permissions --chrome "$(cat %q)"`, taskID, sessionID, promptFile.Name())
 
 	// Create new window in task-daemon session
 	tmuxCmd := exec.Command("tmux", "new-window", "-d", "-t", getDaemonSessionName(), "-n", windowName, "-c", workDir, "sh", "-c", script)
@@ -986,7 +990,7 @@ func (e *Executor) runClaudeResume(ctx context.Context, taskID int64, workDir, p
 	if taskSessionID == "" {
 		taskSessionID = fmt.Sprintf("%d", os.Getpid())
 	}
-	script := fmt.Sprintf(`TASK_ID=%d TASK_SESSION_ID=%s claude --dangerously-skip-permissions --resume %s "$(cat %q)"`, taskID, taskSessionID, sessionID, feedbackFile.Name())
+	script := fmt.Sprintf(`TASK_ID=%d TASK_SESSION_ID=%s claude --dangerously-skip-permissions --chrome --resume %s "$(cat %q)"`, taskID, taskSessionID, sessionID, feedbackFile.Name())
 
 	// Create new window in task-daemon session
 	tmuxCmd := exec.Command("tmux", "new-window", "-d", "-t", getDaemonSessionName(), "-n", windowName, "-c", workDir, "sh", "-c", script)
@@ -1266,7 +1270,7 @@ func (e *Executor) parseOutputMarkers(output string) execResult {
 
 // runClaudeDirect runs claude directly without tmux (fallback)
 func (e *Executor) runClaudeDirect(ctx context.Context, taskID int64, workDir, prompt string) execResult {
-	cmd := exec.CommandContext(ctx, "claude", "--dangerously-skip-permissions", "-p", prompt)
+	cmd := exec.CommandContext(ctx, "claude", "--dangerously-skip-permissions", "--chrome", "-p", prompt)
 	cmd.Dir = workDir
 	// Pass TASK_ID so hooks know which task to update
 	cmd.Env = append(os.Environ(), fmt.Sprintf("TASK_ID=%d", taskID))
@@ -1492,8 +1496,39 @@ func (e *Executor) getConversationHistory(taskID int64) string {
 	return sb.String()
 }
 
+// CheckPRStateAndUpdateTask checks the PR state for a specific task and updates it if merged.
+// This is called reactively when task views are opened/closed.
+func (e *Executor) CheckPRStateAndUpdateTask(taskID int64) {
+	task, err := e.db.GetTask(taskID)
+	if err != nil || task == nil {
+		return
+	}
+
+	// Only check tasks that aren't done and have a branch
+	if task.Status == db.StatusDone || task.BranchName == "" {
+		return
+	}
+
+	// Skip tasks currently being processed
+	e.mu.RLock()
+	isRunning := e.runningTasks[task.ID]
+	e.mu.RUnlock()
+	if isRunning {
+		return
+	}
+
+	// Check if the branch has been merged (via git or PR status)
+	if e.isBranchMerged(task) {
+		e.logger.Info("Branch merged, closing task", "id", task.ID, "branch", task.BranchName)
+		e.logLine(task.ID, "system", fmt.Sprintf("Branch %s has been merged - automatically closing task", task.BranchName))
+		e.updateStatus(task.ID, db.StatusDone)
+		e.hooks.OnStatusChange(task, db.StatusDone, "PR merged")
+	}
+}
+
 // checkMergedBranches checks for tasks whose branches have been merged into the default branch.
 // If a task's branch is merged, it automatically closes the task.
+// This checks both via GitHub PR status (if available) and git merge detection.
 func (e *Executor) checkMergedBranches() {
 	// Get all tasks that have branches and aren't done
 	tasks, err := e.db.GetTasksWithBranches()
@@ -1511,7 +1546,7 @@ func (e *Executor) checkMergedBranches() {
 			continue
 		}
 
-		// Check if the branch has been merged
+		// Check if the branch has been merged (via git or PR status)
 		if e.isBranchMerged(task) {
 			e.logger.Info("Branch merged, closing task", "id", task.ID, "branch", task.BranchName)
 			e.logLine(task.ID, "system", fmt.Sprintf("Branch %s has been merged - automatically closing task", task.BranchName))
@@ -1522,6 +1557,7 @@ func (e *Executor) checkMergedBranches() {
 }
 
 // isBranchMerged checks if a task's branch has been merged into the default branch.
+// This checks both via GitHub PR status (if available) and git merge detection.
 func (e *Executor) isBranchMerged(task *db.Task) bool {
 	projectDir := e.getProjectDir(task.Project)
 	if projectDir == "" {
@@ -1532,6 +1568,13 @@ func (e *Executor) isBranchMerged(task *db.Task) bool {
 	gitDir := filepath.Join(projectDir, ".git")
 	if _, err := os.Stat(gitDir); os.IsNotExist(err) {
 		return false
+	}
+
+	// First, try checking via GitHub PR status (faster and more reliable)
+	if prInfo := e.prCache.GetPRForBranch(projectDir, task.BranchName); prInfo != nil {
+		if prInfo.State == github.PRStateMerged {
+			return true
+		}
 	}
 
 	// Get the default branch
@@ -1602,20 +1645,17 @@ func (e *Executor) isBranchMerged(task *db.Task) bool {
 // setupWorktree creates a git worktree for the task if the project is a git repo.
 // Returns the working directory to use (worktree path or project path).
 func (e *Executor) setupWorktree(task *db.Task) (string, error) {
+	// Ensure task has a project (default to 'personal' if empty)
+	if task.Project == "" {
+		task.Project = "personal"
+		e.db.UpdateTask(task)
+	}
+
 	// Get project directory
 	projectDir := e.getProjectDir(task.Project)
-	
-	home, _ := os.UserHomeDir()
-	
+
 	if projectDir == "" {
-		// No project - use default tasks directory with per-task subdirs
-		tasksDir := filepath.Join(home, ".local", "share", "task", "tasks")
-		slug := slugify(task.Title, 40)
-		taskDir := filepath.Join(tasksDir, fmt.Sprintf("%d-%s", task.ID, slug))
-		if err := os.MkdirAll(taskDir, 0755); err != nil {
-			return "", fmt.Errorf("create task dir: %w", err)
-		}
-		return taskDir, nil
+		return "", fmt.Errorf("project directory not found for project: %s", task.Project)
 	}
 
 	// Check if project is a git repo

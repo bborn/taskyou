@@ -146,7 +146,7 @@ func NewFormModel(database *db.DB, width, height int, workingDir string) *FormMo
 	}
 
 	// Load projects
-	m.projects = []string{""}
+	m.projects = []string{}
 	if database != nil {
 		if projs, err := database.ListProjects(); err == nil {
 			for _, p := range projs {
@@ -155,7 +155,16 @@ func NewFormModel(database *db.DB, width, height int, workingDir string) *FormMo
 		}
 	}
 
-	// Detect default project from working directory
+	// Default to 'personal' project
+	m.project = "personal"
+	for i, p := range m.projects {
+		if p == "personal" {
+			m.projectIdx = i
+			break
+		}
+	}
+
+	// Detect project from working directory (overrides default)
 	if workingDir != "" && database != nil {
 		if proj, err := database.GetProjectByPath(workingDir); err == nil && proj != nil {
 			m.project = proj.Name
