@@ -28,8 +28,9 @@ type DetailModel struct {
 	prInfo   *github.PRInfo
 
 	// Track joined tmux panes
-	claudePaneID  string // The Claude Code pane (middle-left)
-	workdirPaneID string // The workdir shell pane (middle-right)
+	claudePaneID    string // The Claude Code pane (middle-left)
+	workdirPaneID   string // The workdir shell pane (middle-right)
+	daemonSessionID string // The daemon session the Claude pane came from
 }
 
 // UpdateTask updates the task and refreshes the view.
@@ -179,15 +180,33 @@ func (m *DetailModel) StartTmuxTicker() tea.Cmd {
 	return nil
 }
 
-// hasActiveTmuxSession checks if this task has an active tmux window in task-daemon.
-func (m *DetailModel) hasActiveTmuxSession() bool {
+// findTaskWindow searches all tmux sessions for a window matching this task.
+// Returns the full window target (session:window) or empty string if not found.
+func (m *DetailModel) findTaskWindow() string {
 	if m.task == nil {
-		return false
+		return ""
 	}
-	windowTarget := executor.TmuxSessionName(m.task.ID)
-	// Check if the window exists by trying to get info about it
-	err := exec.Command("tmux", "list-panes", "-t", windowTarget).Run()
-	return err == nil
+	windowName := executor.TmuxWindowName(m.task.ID)
+
+	// List all windows across all sessions
+	out, err := exec.Command("tmux", "list-windows", "-a", "-F", "#{session_name}:#{window_name}").Output()
+	if err != nil {
+		return ""
+	}
+
+	// Search for our window
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		parts := strings.SplitN(line, ":", 2)
+		if len(parts) == 2 && parts[1] == windowName {
+			return line // Returns session:window
+		}
+	}
+	return ""
+}
+
+// hasActiveTmuxSession checks if this task has an active tmux window in any task-daemon session.
+func (m *DetailModel) hasActiveTmuxSession() bool {
+	return m.findTaskWindow() != ""
 }
 
 // focusDetailsPane sets focus to the current TUI pane (Details pane).
@@ -211,7 +230,16 @@ func (m *DetailModel) focusDetailsPane() {
 //   - Top (15%): Task details (TUI)
 //   - Bottom (85%): Claude Code (left) + Workdir shell (right) side-by-side
 func (m *DetailModel) joinTmuxPanes() {
-	windowTarget := executor.TmuxSessionName(m.task.ID)
+	windowTarget := m.findTaskWindow()
+	if windowTarget == "" {
+		return
+	}
+
+	// Extract the daemon session name from the window target (session:window)
+	parts := strings.SplitN(windowTarget, ":", 2)
+	if len(parts) >= 1 {
+		m.daemonSessionID = parts[0]
+	}
 
 	// Get current pane ID before joining (so we can select it after)
 	currentPaneCmd := exec.Command("tmux", "display-message", "-p", "#{pane_id}")
@@ -314,6 +342,13 @@ func (m *DetailModel) breakTmuxPanes() {
 
 	windowName := executor.TmuxWindowName(m.task.ID)
 
+	// Determine the daemon session to break back to
+	daemonSession := m.daemonSessionID
+	if daemonSession == "" {
+		// Fallback to the constant if we don't have a stored session
+		daemonSession = executor.TmuxDaemonSession
+	}
+
 	// Break the pane back to task-daemon as a new window with the task name
 	// -d: don't switch to the new window
 	// -s: source pane (the one we joined)
@@ -322,10 +357,11 @@ func (m *DetailModel) breakTmuxPanes() {
 	exec.Command("tmux", "break-pane",
 		"-d",
 		"-s", m.claudePaneID,
-		"-t", executor.TmuxDaemonSession+":",
+		"-t", daemonSession+":",
 		"-n", windowName).Run()
 
 	m.claudePaneID = ""
+	m.daemonSessionID = ""
 }
 
 // breakTmuxPane is a compatibility wrapper for breakTmuxPanes.
@@ -335,7 +371,10 @@ func (m *DetailModel) breakTmuxPane() {
 
 // killTmuxSession kills the Claude tmux window and workdir pane.
 func (m *DetailModel) killTmuxSession() {
-	windowTarget := executor.TmuxSessionName(m.task.ID)
+	windowTarget := m.findTaskWindow()
+	if windowTarget == "" {
+		return
+	}
 	m.database.AppendTaskLog(m.task.ID, "user", "→ [Kill] Session terminated")
 
 	// Reset pane styling first

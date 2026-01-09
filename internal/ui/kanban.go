@@ -278,8 +278,8 @@ func (k *KanbanBoard) View() string {
 		colWidth = 20
 	}
 
-	// Calculate available height for tasks
-	colHeight := k.height
+	// Calculate available height for tasks (subtract 1 for header bar)
+	colHeight := k.height - 1
 
 	// Build columns
 	var columnViews []string
