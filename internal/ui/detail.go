@@ -185,12 +185,12 @@ func (m *DetailModel) joinTmuxPane() {
 	currentPaneOut, _ := currentPaneCmd.Output()
 	currentPaneID := strings.TrimSpace(string(currentPaneOut))
 
-	// Join the task window's pane into our window as a vertical split below
-	// -v: vertical split (below)
-	// -l 50%: new pane takes 50% of height
+	// Join the task window's pane into our window as a horizontal split on the right
+	// -h: horizontal split (right side)
+	// -l 35%: new pane takes 35% of width (smaller since it's just a driver)
 	// -s: source pane (from task-daemon window)
 	err := exec.Command("tmux", "join-pane",
-		"-v", "-l", "50%",
+		"-h", "-l", "35%",
 		"-s", windowTarget+".0").Run()
 	if err != nil {
 		return
@@ -213,7 +213,7 @@ func (m *DetailModel) joinTmuxPane() {
 	exec.Command("tmux", "set-option", "-t", "task-ui", "status", "on").Run()
 	exec.Command("tmux", "set-option", "-t", "task-ui", "status-style", "bg=#3b82f6,fg=white").Run()
 	exec.Command("tmux", "set-option", "-t", "task-ui", "status-left", " TASK UI ").Run()
-	exec.Command("tmux", "set-option", "-t", "task-ui", "status-right", " Click pane or Ctrl+B ↑↓ to switch ").Run()
+	exec.Command("tmux", "set-option", "-t", "task-ui", "status-right", " Click or Ctrl+B ←→ to switch │ Ctrl+B D detach ").Run()
 	exec.Command("tmux", "set-option", "-t", "task-ui", "status-right-length", "50").Run()
 
 	// Style pane borders - active pane gets theme color outline
