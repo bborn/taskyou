@@ -192,10 +192,15 @@ func (m *SettingsModel) Update(msg tea.Msg) (*SettingsModel, tea.Cmd) {
 		case "d":
 			// Delete selected project (only in projects section)
 			if m.section == 1 && len(m.projects) > 0 && m.selected < len(m.projects) {
-				m.db.DeleteProject(m.projects[m.selected].ID)
-				m.loadSettings()
-				if m.selected >= len(m.projects) && m.selected > 0 {
-					m.selected--
+				err := m.db.DeleteProject(m.projects[m.selected].ID)
+				if err != nil {
+					m.err = err
+				} else {
+					m.err = nil
+					m.loadSettings()
+					if m.selected >= len(m.projects) && m.selected > 0 {
+						m.selected--
+					}
 				}
 			}
 		case "p":

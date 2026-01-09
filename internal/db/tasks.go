@@ -528,7 +528,19 @@ func (db *DB) UpdateProject(p *Project) error {
 
 // DeleteProject deletes a project.
 func (db *DB) DeleteProject(id int64) error {
-	_, err := db.Exec("DELETE FROM projects WHERE id = ?", id)
+	// Get the project name to check if it's the personal project
+	var name string
+	err := db.QueryRow("SELECT name FROM projects WHERE id = ?", id).Scan(&name)
+	if err != nil {
+		return fmt.Errorf("get project: %w", err)
+	}
+
+	// Prevent deletion of the personal project
+	if name == "personal" {
+		return fmt.Errorf("cannot delete the personal project")
+	}
+
+	_, err = db.Exec("DELETE FROM projects WHERE id = ?", id)
 	if err != nil {
 		return fmt.Errorf("delete project: %w", err)
 	}
