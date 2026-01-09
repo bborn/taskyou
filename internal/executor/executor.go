@@ -494,7 +494,7 @@ func (e *Executor) getAttachmentsSection(taskID int64, paths []string) string {
 	for _, p := range paths {
 		section.WriteString(fmt.Sprintf("- %s\n", p))
 	}
-	section.WriteString("\nYou can view these files using the View tool.\n\n")
+	section.WriteString("\nYou can read these files using the Read tool.\n\n")
 	return section.String()
 }
 
