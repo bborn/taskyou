@@ -886,7 +886,7 @@ func (e *Executor) runClaude(ctx context.Context, taskID int64, workDir, prompt 
 	// Note: tmux starts in workDir (-c flag), so claude inherits proper permissions and hooks config
 	// Run interactively (no -p) so user can attach and see/interact in real-time
 	// TASK_ID is passed so hooks know which task to update
-	script := fmt.Sprintf(`TASK_ID=%d claude "$(cat %q)"`, taskID, promptFile.Name())
+	script := fmt.Sprintf(`TASK_ID=%d claude --dangerously-skip-permissions "$(cat %q)"`, taskID, promptFile.Name())
 
 	// Create new window in task-daemon session
 	tmuxCmd := exec.Command("tmux", "new-window", "-d", "-t", TmuxDaemonSession, "-n", windowName, "-c", workDir, "sh", "-c", script)
@@ -961,7 +961,7 @@ func (e *Executor) runClaudeResume(ctx context.Context, taskID int64, workDir, p
 
 	// Script that resumes claude with session ID (interactive mode)
 	// TASK_ID is passed so hooks know which task to update
-	script := fmt.Sprintf(`TASK_ID=%d claude --resume %s "$(cat %q)"`, taskID, sessionID, feedbackFile.Name())
+	script := fmt.Sprintf(`TASK_ID=%d claude --dangerously-skip-permissions --resume %s "$(cat %q)"`, taskID, sessionID, feedbackFile.Name())
 
 	// Create new window in task-daemon session
 	tmuxCmd := exec.Command("tmux", "new-window", "-d", "-t", TmuxDaemonSession, "-n", windowName, "-c", workDir, "sh", "-c", script)
@@ -1240,7 +1240,7 @@ func (e *Executor) parseOutputMarkers(output string) execResult {
 
 // runClaudeDirect runs claude directly without tmux (fallback)
 func (e *Executor) runClaudeDirect(ctx context.Context, taskID int64, workDir, prompt string) execResult {
-	cmd := exec.CommandContext(ctx, "claude", "-p", prompt)
+	cmd := exec.CommandContext(ctx, "claude", "--dangerously-skip-permissions", "-p", prompt)
 	cmd.Dir = workDir
 	// Pass TASK_ID so hooks know which task to update
 	cmd.Env = append(os.Environ(), fmt.Sprintf("TASK_ID=%d", taskID))
