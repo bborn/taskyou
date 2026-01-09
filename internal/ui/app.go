@@ -212,9 +212,8 @@ type AppModel struct {
 	kanban       *KanbanBoard
 	loading      bool
 	err          error
-	notification       string    // Notification banner text
-	notifyUntil        time.Time // When to hide notification
-	notificationTaskID int64     // Task ID associated with current notification (for click navigation)
+	notification string    // Notification banner text
+	notifyUntil  time.Time // When to hide notification
 
 	// Track task statuses to detect changes
 	prevStatuses map[int64]string
@@ -403,13 +402,6 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.MouseMsg:
 		// Handle mouse clicks on dashboard view
 		if m.currentView == ViewDashboard && msg.Action == tea.MouseActionRelease && msg.Button == tea.MouseButtonLeft {
-			// Check if notification banner is visible and click is on it (row 0)
-			if m.notification != "" && time.Now().Before(m.notifyUntil) && m.notificationTaskID > 0 {
-				if msg.Y == 0 {
-					// Click on notification banner - open task detail view
-					return m, m.loadTask(m.notificationTaskID)
-				}
-			}
 			// Check if clicking on a task card
 			if task := m.kanban.HandleClick(msg.X, msg.Y); task != nil {
 				return m, m.loadTask(task.ID)
@@ -450,13 +442,11 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					// Task just became blocked - ring bell and show notification
 					m.notification = fmt.Sprintf("⚠ Task #%d needs input: %s", t.ID, t.Title)
 					m.notifyUntil = time.Now().Add(10 * time.Second)
-					m.notificationTaskID = t.ID
 					fmt.Print("\a") // Ring terminal bell
 				} else if t.Status == db.StatusDone && db.IsInProgress(prevStatus) {
 					// Task completed - ring bell and show notification
 					m.notification = fmt.Sprintf("✓ Task #%d complete: %s", t.ID, t.Title)
 					m.notifyUntil = time.Now().Add(5 * time.Second)
-					m.notificationTaskID = t.ID
 					fmt.Print("\a") // Ring terminal bell
 				}
 			}
@@ -535,17 +525,14 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						if event.Task.Status == db.StatusBlocked {
 							m.notification = fmt.Sprintf("⚠ Task #%d needs input: %s", event.TaskID, event.Task.Title)
 							m.notifyUntil = time.Now().Add(10 * time.Second)
-							m.notificationTaskID = event.TaskID
 							fmt.Print("\a") // Ring terminal bell
 						} else if event.Task.Status == db.StatusDone && db.IsInProgress(prevStatus) {
 							m.notification = fmt.Sprintf("✓ Task #%d complete: %s", event.TaskID, event.Task.Title)
 							m.notifyUntil = time.Now().Add(5 * time.Second)
-							m.notificationTaskID = event.TaskID
 							fmt.Print("\a") // Ring terminal bell
 						} else if db.IsInProgress(event.Task.Status) {
 							m.notification = fmt.Sprintf("▶ Task #%d started: %s", event.TaskID, event.Task.Title)
 							m.notifyUntil = time.Now().Add(3 * time.Second)
-							m.notificationTaskID = event.TaskID
 						}
 						m.prevStatuses[event.TaskID] = event.Task.Status
 					}
@@ -572,7 +559,6 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Clear expired notifications
 		if !m.notifyUntil.IsZero() && time.Now().After(m.notifyUntil) {
 			m.notification = ""
-			m.notificationTaskID = 0
 		}
 		// Refresh detail view if active (for logs which may update frequently)
 		if m.currentView == ViewDetail && m.detailView != nil {
@@ -683,12 +669,7 @@ func (m *AppModel) viewDashboard() string {
 			Foreground(lipgloss.Color("#000000")).
 			Bold(true).
 			Padding(0, 2)
-		notifyText := m.notification
-		// Add click hint if notification has associated task
-		if m.notificationTaskID > 0 {
-			notifyText += " (click to view)"
-		}
-		headerParts = append(headerParts, notifyStyle.Render(notifyText))
+		headerParts = append(headerParts, notifyStyle.Render(m.notification))
 	} else {
 		m.notification = "" // Clear expired notification
 	}
