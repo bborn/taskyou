@@ -339,8 +339,8 @@ func (m *AppModel) Init() tea.Cmd {
 	// Enable mouse support for click-to-focus on tmux panes
 	if os.Getenv("TMUX") != "" {
 		osExec.Command("tmux", "set-option", "-t", "task-ui", "mouse", "on").Run()
-		// Resize task-ui pane to take 75% of window height (makes copilot shorter)
-		osExec.Command("tmux", "resize-pane", "-y", "75%").Run()
+		// Resize task-ui pane to take 85% of window height (copilot gets 15%)
+		osExec.Command("tmux", "resize-pane", "-y", "85%").Run()
 	}
 
 	return tea.Batch(m.loadTasks(), m.waitForTaskEvent(), m.waitForDBChange(), m.tick())

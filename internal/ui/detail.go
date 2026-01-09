@@ -189,9 +189,8 @@ func (m *DetailModel) hasActiveTmuxSession() bool {
 
 // joinTmuxPanes joins the task's Claude pane and creates a workdir shell pane.
 // Layout:
-//   - Top: Task details (TUI) - compact header area
-//   - Middle-left: Claude Code pane (task's running Claude instance)
-//   - Middle-right: Workdir shell pane (opened in task's worktree directory)
+//   - Top (15%): Task details (TUI)
+//   - Bottom (85%): Claude Code (left) + Workdir shell (right) side-by-side
 func (m *DetailModel) joinTmuxPanes() {
 	windowTarget := executor.TmuxSessionName(m.task.ID)
 
@@ -201,11 +200,8 @@ func (m *DetailModel) joinTmuxPanes() {
 	tuiPaneID := strings.TrimSpace(string(currentPaneOut))
 
 	// Step 1: Join the Claude pane below the TUI pane (vertical split)
-	// -v: vertical split (below)
-	// -l 60%: Claude/workdir area takes 60% of height (leaving room for copilot below)
-	// -s: source pane (from task-daemon window)
 	err := exec.Command("tmux", "join-pane",
-		"-v", "-l", "60%",
+		"-v",
 		"-s", windowTarget+".0").Run()
 	if err != nil {
 		return
@@ -218,15 +214,13 @@ func (m *DetailModel) joinTmuxPanes() {
 
 	// Step 2: Create a new pane to the right of Claude for the workdir
 	// -h: horizontal split (right side)
-	// -l 50%: workdir takes 50% of the middle area
-	// -t: target pane (the Claude pane)
+	// -l 50%: workdir takes 50% of the bottom area
 	workdir := m.getWorkdir()
 	err = exec.Command("tmux", "split-window",
 		"-h", "-l", "50%",
 		"-t", m.claudePaneID,
 		"-c", workdir).Run()
 	if err != nil {
-		// If we can't create workdir pane, still keep Claude pane
 		m.workdirPaneID = ""
 	} else {
 		// Get the workdir pane ID (it's now active after split)
@@ -244,15 +238,15 @@ func (m *DetailModel) joinTmuxPanes() {
 	exec.Command("tmux", "set-option", "-t", "task-ui", "status", "on").Run()
 	exec.Command("tmux", "set-option", "-t", "task-ui", "status-style", "bg=#3b82f6,fg=white").Run()
 	exec.Command("tmux", "set-option", "-t", "task-ui", "status-left", " TASK UI ").Run()
-	exec.Command("tmux", "set-option", "-t", "task-ui", "status-right", " Ctrl+B ↑↓←→ switch panes │ click to focus ").Run()
+	exec.Command("tmux", "set-option", "-t", "task-ui", "status-right", " Ctrl+B ↑↓←→ switch panes │ drag borders to resize ").Run()
 	exec.Command("tmux", "set-option", "-t", "task-ui", "status-right-length", "60").Run()
 
 	// Style pane borders - active pane gets theme color outline
 	exec.Command("tmux", "set-option", "-t", "task-ui", "pane-border-style", "fg=#374151").Run()
 	exec.Command("tmux", "set-option", "-t", "task-ui", "pane-active-border-style", "fg=#61AFEF").Run()
 
-	// Resize task-ui pane to take 35% of window height (gives more room to Claude/shell panes)
-	exec.Command("tmux", "resize-pane", "-t", tuiPaneID, "-y", "35%").Run()
+	// Resize TUI pane to 15%, leaving 85% for Claude + Shell side-by-side
+	exec.Command("tmux", "resize-pane", "-t", tuiPaneID, "-y", "15%").Run()
 }
 
 // joinTmuxPane is a compatibility wrapper for joinTmuxPanes.
