@@ -206,11 +206,14 @@ func (m *DetailModel) joinTmuxPane() {
 		exec.Command("tmux", "select-pane", "-t", currentPaneID).Run()
 	}
 
+	// Enable mouse support for click-to-focus on panes
+	exec.Command("tmux", "set-option", "-t", "task-ui", "mouse", "on").Run()
+
 	// Update status bar with navigation hints
 	exec.Command("tmux", "set-option", "-t", "task-ui", "status", "on").Run()
 	exec.Command("tmux", "set-option", "-t", "task-ui", "status-style", "bg=#3b82f6,fg=white").Run()
 	exec.Command("tmux", "set-option", "-t", "task-ui", "status-left", " TASK UI ").Run()
-	exec.Command("tmux", "set-option", "-t", "task-ui", "status-right", " Ctrl+B ↑↓ switch panes │ Ctrl+B D detach ").Run()
+	exec.Command("tmux", "set-option", "-t", "task-ui", "status-right", " Click pane or Ctrl+B ↑↓ to switch ").Run()
 	exec.Command("tmux", "set-option", "-t", "task-ui", "status-right-length", "50").Run()
 
 	// Style pane borders - active pane gets theme color outline
@@ -335,7 +338,7 @@ func (m *DetailModel) renderHeader() string {
 		meta.WriteString("  ")
 		tmuxHint := lipgloss.NewStyle().
 			Foreground(ColorSecondary).
-			Render("(Ctrl+B ↓ to interact with Claude)")
+			Render("(Click pane below to interact with Claude)")
 		meta.WriteString(tmuxHint)
 	}
 
