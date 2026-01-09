@@ -221,6 +221,34 @@ func main() {
 				fmt.Fprintln(os.Stderr, errorStyle.Render("Invalid task ID: "+args[0]))
 				os.Exit(1)
 			}
+
+			// Get task info for confirmation
+			dbPath := db.DefaultPath()
+			database, err := db.Open(dbPath)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+			task, err := database.GetTask(taskID)
+			database.Close()
+			if err != nil || task == nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render(fmt.Sprintf("Task #%d not found", taskID)))
+				os.Exit(1)
+			}
+
+			// Confirm unless --force flag is set
+			force, _ := cmd.Flags().GetBool("force")
+			if !force {
+				fmt.Printf("Delete task #%d: %s? [y/N] ", taskID, task.Title)
+				reader := bufio.NewReader(os.Stdin)
+				response, _ := reader.ReadString('\n')
+				response = strings.TrimSpace(strings.ToLower(response))
+				if response != "y" && response != "yes" {
+					fmt.Println("Cancelled")
+					return
+				}
+			}
+
 			if err := deleteTask(taskID); err != nil {
 				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
 				os.Exit(1)
@@ -228,6 +256,7 @@ func main() {
 			fmt.Println(successStyle.Render(fmt.Sprintf("Deleted task #%d", taskID)))
 		},
 	}
+	deleteCmd.Flags().BoolP("force", "f", false, "Skip confirmation prompt")
 	rootCmd.AddCommand(deleteCmd)
 
 	if err := rootCmd.Execute(); err != nil {
@@ -237,6 +266,7 @@ func main() {
 }
 
 // execInTmux re-executes the current command inside a new tmux session.
+// Creates a split-pane layout with the task TUI on top and Claude on bottom.
 func execInTmux() error {
 	// Get the executable and rebuild the command
 	executable, err := os.Executable()
@@ -258,8 +288,12 @@ func execInTmux() error {
 		return cmd.Run()
 	}
 
+	// Get current working directory for Claude
+	cwd, _ := os.Getwd()
+
 	// Create detached session first so we can configure it
-	if err := osexec.Command("tmux", "new-session", "-d", "-s", "task-ui", cmdStr).Run(); err != nil {
+	// The task TUI runs in the main (top) pane
+	if err := osexec.Command("tmux", "new-session", "-d", "-s", "task-ui", "-c", cwd, cmdStr).Run(); err != nil {
 		return fmt.Errorf("create tmux session: %w", err)
 	}
 
@@ -267,7 +301,16 @@ func execInTmux() error {
 	osexec.Command("tmux", "set-option", "-t", "task-ui", "status", "on").Run()
 	osexec.Command("tmux", "set-option", "-t", "task-ui", "status-style", "bg=#1e293b,fg=#94a3b8").Run()
 	osexec.Command("tmux", "set-option", "-t", "task-ui", "status-left", " ").Run()
-	osexec.Command("tmux", "set-option", "-t", "task-ui", "status-right", "").Run()
+	osexec.Command("tmux", "set-option", "-t", "task-ui", "status-right", " Ctrl+B ↑↓ switch panes ").Run()
+
+	// Split pane vertically - Claude runs in the bottom pane (40% height)
+	// The -c flag sets the working directory for the new pane
+	// Launch Claude with copilot system prompt and permissions
+	claudeCmd := buildCopilotClaudeCommand()
+	osexec.Command("tmux", "split-window", "-t", "task-ui", "-v", "-l", "40%", "-c", cwd, claudeCmd).Run()
+
+	// Select the top pane (task TUI) so it has focus when we attach
+	osexec.Command("tmux", "select-pane", "-t", "task-ui:.0").Run()
 
 	// Now attach to the session
 	cmd := osexec.Command("tmux", "attach-session", "-t", "task-ui")
@@ -275,6 +318,66 @@ func execInTmux() error {
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
+}
+
+// buildCopilotClaudeCommand builds the claude command with copilot system prompt and permissions.
+func buildCopilotClaudeCommand() string {
+	systemPrompt := `You are the Task App Copilot - an AI assistant integrated into the task management application.
+
+## Your Role
+You help users manage their task queue by driving the task app UI in the tmux pane above you.
+The task app is a terminal-based kanban board for managing AI coding tasks.
+
+## Tmux Layout
+- Session: task-ui
+- Pane 0.0 (above): The task app TUI - a kanban board showing tasks in columns (Backlog, In Progress, Blocked, Done)
+- Pane 0.1 (this pane): You, the copilot
+
+## How to Control the Task App
+Send keystrokes to the task app using: tmux send-keys -t task-ui:0.0 '<keys>'
+
+### Key Bindings
+- n: Create new task (opens form, type title, ctrl+s to submit)
+- Enter: Open task details
+- q/Esc: Go back / close
+- h/l or Left/Right: Move between columns
+- j/k or Down/Up: Move between tasks in a column
+- Q: Queue selected task for execution
+- r: Retry failed task
+- d: Delete task (with confirmation)
+- /: Filter tasks
+- s: Open settings
+- ?: Show help
+
+### Creating a Task
+1. tmux send-keys -t task-ui:0.0 'n'        # Open new task form
+2. tmux send-keys -t task-ui:0.0 'Task title here'  # Type title
+3. tmux send-keys -t task-ui:0.0 C-s        # Submit (Ctrl+S)
+4. tmux send-keys -t task-ui:0.0 Enter      # Confirm (don't queue) or 'y' then Enter to queue
+
+### Navigating
+- To select a task: Use arrow keys or hjkl to navigate the kanban board
+- To view details: Press Enter on selected task
+- To go back: Press q or Esc
+
+## Important Notes
+- Always add small delays between commands (sleep 0.3) to let the UI update
+- The task app polls for updates, so changes you make will appear shortly
+- You can also directly interact with the SQLite database at ~/.local/share/task/tasks.db for queries
+- Tasks are executed by Claude instances in separate tmux windows in the task-daemon session
+
+## Be Helpful
+- When users ask to create tasks, do it for them
+- When users ask about task status, navigate to show them or query the database
+- Offer suggestions for task management
+- Be concise in your responses`
+
+	// Escape single quotes in system prompt for shell
+	escapedPrompt := strings.ReplaceAll(systemPrompt, "'", "'\"'\"'")
+
+	// Build claude command with system prompt and dangerously skip permissions for Bash
+	// This allows the copilot to send tmux commands without permission prompts
+	return fmt.Sprintf("claude --system-prompt '%s' --dangerously-skip-permissions", escapedPrompt)
 }
 
 // runLocal runs the TUI locally with a local SQLite database.
@@ -688,29 +791,29 @@ func handleNotificationHook(database *db.DB, taskID int64, input *ClaudeHookInpu
 
 // handleStopHook handles Stop hooks from Claude (agent finished responding).
 func handleStopHook(database *db.DB, taskID int64, input *ClaudeHookInput) error {
-	// When Claude stops, check if we should mark as blocked (waiting for input)
-	// The stop_reason tells us why Claude stopped
+	// When Claude stops, update status based on what it's doing
 	task, err := database.GetTask(taskID)
 	if err != nil {
 		return err
 	}
-
-	// Only act if task is still processing
-	if task == nil || task.Status != db.StatusProcessing {
+	if task == nil {
 		return nil
 	}
 
-	// If Claude stopped and is waiting at the prompt, mark as blocked
-	// This is a fallback - ideally Claude uses the workflow tools
 	switch input.StopReason {
 	case "end_turn":
-		// Normal completion - Claude finished its turn
-		// Mark as blocked since it's waiting for user input
-		database.UpdateTaskStatus(taskID, db.StatusBlocked)
-		database.AppendTaskLog(taskID, "system", "Claude finished turn - waiting for input")
+		// Normal completion - Claude finished its turn and is waiting for input
+		if task.Status == db.StatusProcessing {
+			database.UpdateTaskStatus(taskID, db.StatusBlocked)
+			database.AppendTaskLog(taskID, "system", "Claude finished turn - waiting for input")
+		}
 	case "tool_use":
-		// Claude is using a tool, still working
-		// Keep as processing
+		// Claude is using a tool - actively working
+		// If task was blocked (waiting for input), it's now processing again
+		if task.Status == db.StatusBlocked {
+			database.UpdateTaskStatus(taskID, db.StatusProcessing)
+			database.AppendTaskLog(taskID, "system", "Claude resumed processing")
+		}
 	}
 
 	return nil

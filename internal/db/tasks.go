@@ -2,6 +2,7 @@ package db
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -434,22 +435,40 @@ func (db *DB) GetRetryFeedback(taskID int64) (string, error) {
 	return "", nil
 }
 
+// ProjectAction defines an action that runs on tasks for a project.
+type ProjectAction struct {
+	Trigger      string `json:"trigger"`      // "on_create", "on_status:queued", etc.
+	Instructions string `json:"instructions"` // prompt/instructions for this action
+}
+
 // Project represents a configured project.
 type Project struct {
 	ID           int64
 	Name         string
 	Path         string
-	Aliases      string // comma-separated
-	Instructions string // project-specific instructions for AI
+	Aliases      string          // comma-separated
+	Instructions string          // project-specific instructions for AI
+	Actions      []ProjectAction // actions triggered on task events (stored as JSON)
 	CreatedAt    LocalTime
+}
+
+// GetAction returns the action for a given trigger, or nil if not found.
+func (p *Project) GetAction(trigger string) *ProjectAction {
+	for i := range p.Actions {
+		if p.Actions[i].Trigger == trigger {
+			return &p.Actions[i]
+		}
+	}
+	return nil
 }
 
 // CreateProject creates a new project.
 func (db *DB) CreateProject(p *Project) error {
+	actionsJSON, _ := json.Marshal(p.Actions)
 	result, err := db.Exec(`
-		INSERT INTO projects (name, path, aliases, instructions)
-		VALUES (?, ?, ?, ?)
-	`, p.Name, p.Path, p.Aliases, p.Instructions)
+		INSERT INTO projects (name, path, aliases, instructions, actions)
+		VALUES (?, ?, ?, ?, ?)
+	`, p.Name, p.Path, p.Aliases, p.Instructions, string(actionsJSON))
 	if err != nil {
 		return fmt.Errorf("insert project: %w", err)
 	}
@@ -460,10 +479,11 @@ func (db *DB) CreateProject(p *Project) error {
 
 // UpdateProject updates a project.
 func (db *DB) UpdateProject(p *Project) error {
+	actionsJSON, _ := json.Marshal(p.Actions)
 	_, err := db.Exec(`
-		UPDATE projects SET name = ?, path = ?, aliases = ?, instructions = ?
+		UPDATE projects SET name = ?, path = ?, aliases = ?, instructions = ?, actions = ?
 		WHERE id = ?
-	`, p.Name, p.Path, p.Aliases, p.Instructions, p.ID)
+	`, p.Name, p.Path, p.Aliases, p.Instructions, string(actionsJSON), p.ID)
 	if err != nil {
 		return fmt.Errorf("update project: %w", err)
 	}
@@ -482,7 +502,7 @@ func (db *DB) DeleteProject(id int64) error {
 // ListProjects returns all projects.
 func (db *DB) ListProjects() ([]*Project, error) {
 	rows, err := db.Query(`
-		SELECT id, name, path, aliases, instructions, created_at
+		SELECT id, name, path, aliases, instructions, COALESCE(actions, '[]'), created_at
 		FROM projects ORDER BY name
 	`)
 	if err != nil {
@@ -493,9 +513,11 @@ func (db *DB) ListProjects() ([]*Project, error) {
 	var projects []*Project
 	for rows.Next() {
 		p := &Project{}
-		if err := rows.Scan(&p.ID, &p.Name, &p.Path, &p.Aliases, &p.Instructions, &p.CreatedAt); err != nil {
+		var actionsJSON string
+		if err := rows.Scan(&p.ID, &p.Name, &p.Path, &p.Aliases, &p.Instructions, &actionsJSON, &p.CreatedAt); err != nil {
 			return nil, fmt.Errorf("scan project: %w", err)
 		}
+		json.Unmarshal([]byte(actionsJSON), &p.Actions)
 		projects = append(projects, p)
 	}
 	return projects, nil
@@ -505,11 +527,13 @@ func (db *DB) ListProjects() ([]*Project, error) {
 func (db *DB) GetProjectByName(name string) (*Project, error) {
 	// First try exact name match
 	p := &Project{}
+	var actionsJSON string
 	err := db.QueryRow(`
-		SELECT id, name, path, aliases, instructions, created_at
+		SELECT id, name, path, aliases, instructions, COALESCE(actions, '[]'), created_at
 		FROM projects WHERE name = ?
-	`, name).Scan(&p.ID, &p.Name, &p.Path, &p.Aliases, &p.Instructions, &p.CreatedAt)
+	`, name).Scan(&p.ID, &p.Name, &p.Path, &p.Aliases, &p.Instructions, &actionsJSON, &p.CreatedAt)
 	if err == nil {
+		json.Unmarshal([]byte(actionsJSON), &p.Actions)
 		return p, nil
 	}
 	if err != sql.ErrNoRows {
@@ -517,7 +541,7 @@ func (db *DB) GetProjectByName(name string) (*Project, error) {
 	}
 
 	// Try alias match
-	rows, err := db.Query(`SELECT id, name, path, aliases, instructions, created_at FROM projects`)
+	rows, err := db.Query(`SELECT id, name, path, aliases, instructions, COALESCE(actions, '[]'), created_at FROM projects`)
 	if err != nil {
 		return nil, fmt.Errorf("query projects: %w", err)
 	}
@@ -525,9 +549,10 @@ func (db *DB) GetProjectByName(name string) (*Project, error) {
 
 	for rows.Next() {
 		p := &Project{}
-		if err := rows.Scan(&p.ID, &p.Name, &p.Path, &p.Aliases, &p.Instructions, &p.CreatedAt); err != nil {
+		if err := rows.Scan(&p.ID, &p.Name, &p.Path, &p.Aliases, &p.Instructions, &actionsJSON, &p.CreatedAt); err != nil {
 			return nil, fmt.Errorf("scan project: %w", err)
 		}
+		json.Unmarshal([]byte(actionsJSON), &p.Actions)
 		for _, alias := range splitAliases(p.Aliases) {
 			if alias == name {
 				return p, nil

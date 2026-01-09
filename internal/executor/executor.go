@@ -324,25 +324,8 @@ func (e *Executor) executeTask(ctx context.Context, task *db.Task) {
 
 	e.logger.Info("Processing task", "id", task.ID, "title", task.Title)
 
-	// Mark task as started (so we know triage has run on retry)
+	// Mark task as started
 	e.db.MarkTaskStarted(task.ID)
-
-	// Run triage if needed
-	if NeedsTriage(task) {
-		triageResult, err := e.TriageTask(taskCtx, task)
-		if err != nil {
-			e.logger.Error("Triage failed", "error", err)
-			// Continue with execution anyway
-		}
-
-		// If triage determined we need more info, block the task
-		if triageResult != nil && triageResult.NeedsMoreInfo {
-			e.updateStatus(task.ID, db.StatusBlocked)
-			e.logLine(task.ID, "system", "Task blocked - needs more information")
-			e.hooks.OnStatusChange(task, db.StatusBlocked, triageResult.Question)
-			return
-		}
-	}
 
 	// Update status to processing
 	if err := e.updateStatus(task.ID, db.StatusProcessing); err != nil {
@@ -389,10 +372,26 @@ func (e *Executor) executeTask(ctx context.Context, task *db.Task) {
 		result = e.runClaude(taskCtx, task.ID, workDir, prompt)
 	}
 
+	// Check current status - hooks may have already set it
+	currentTask, _ := e.db.GetTask(task.ID)
+	currentStatus := ""
+	if currentTask != nil {
+		currentStatus = currentTask.Status
+	}
+
 	// Update final status and trigger hooks
+	// Respect status set by hooks - don't override blocked with done
 	if result.Interrupted {
 		// Status already set by Interrupt(), just run hook
 		e.hooks.OnStatusChange(task, db.StatusBacklog, "Task interrupted by user")
+	} else if currentStatus == db.StatusBlocked {
+		// Hooks already marked as blocked - respect that
+		e.logLine(task.ID, "system", "Task waiting for input")
+		e.hooks.OnStatusChange(task, db.StatusBlocked, "Task waiting for input")
+	} else if currentStatus == db.StatusDone {
+		// Hooks/MCP already marked as done - respect that
+		e.logLine(task.ID, "system", "Task completed")
+		e.hooks.OnStatusChange(task, db.StatusDone, "Task completed")
 	} else if result.Success {
 		e.updateStatus(task.ID, db.StatusDone)
 		e.logLine(task.ID, "system", "Task completed successfully")
@@ -490,6 +489,16 @@ func (e *Executor) getAttachmentsSection(taskID int64, paths []string) string {
 
 func (e *Executor) buildPrompt(task *db.Task, attachmentPaths []string) string {
 	var prompt strings.Builder
+
+	// Check for on_create action (triage/preprocessing)
+	// Only run on first execution, not retries
+	if task.StartedAt == nil {
+		if onCreateInstructions := e.getOnCreateInstructions(task); onCreateInstructions != "" {
+			prompt.WriteString("## Pre-Task Instructions\n\n")
+			prompt.WriteString(onCreateInstructions)
+			prompt.WriteString("\n\n---\n\n")
+		}
+	}
 
 	// Add project memories if available
 	memories := e.getProjectMemoriesSection(task.Project)
@@ -626,6 +635,62 @@ The task system will automatically detect your status.
 	return prompt.String()
 }
 
+// getOnCreateInstructions returns instructions to prepend for new tasks.
+// Returns the project's on_create action if set, or default triage instructions
+// if the task needs basic triage (missing project/type or very short description).
+func (e *Executor) getOnCreateInstructions(task *db.Task) string {
+	// Check if project has an on_create action
+	if task.Project != "" {
+		project, _ := e.db.GetProjectByName(task.Project)
+		if project != nil {
+			if action := project.GetAction("on_create"); action != nil {
+				return action.Instructions
+			}
+		}
+	}
+
+	// Check if task needs default triage (missing info or very short)
+	needsDefaultTriage := task.Project == "" || task.Type == "" ||
+		(len(task.Body) < 20 && len(task.Title) < 30)
+
+	if needsDefaultTriage {
+		return e.getDefaultTriageInstructions(task)
+	}
+
+	return ""
+}
+
+// getDefaultTriageInstructions returns basic triage instructions for underspecified tasks.
+func (e *Executor) getDefaultTriageInstructions(task *db.Task) string {
+	var sb strings.Builder
+
+	sb.WriteString("Before starting, please review this task and ask for any clarification needed.\n\n")
+
+	if task.Project == "" {
+		projects, _ := e.db.ListProjects()
+		if len(projects) > 0 {
+			sb.WriteString("Available projects:\n")
+			for _, p := range projects {
+				sb.WriteString(fmt.Sprintf("- %s (%s)\n", p.Name, p.Path))
+			}
+			sb.WriteString("\nPlease confirm which project this task is for.\n\n")
+		}
+	}
+
+	if task.Type == "" {
+		sb.WriteString("Task types: code, writing, thinking\n")
+		sb.WriteString("Please confirm what type of task this is.\n\n")
+	}
+
+	if len(task.Body) < 20 && len(task.Title) < 30 {
+		sb.WriteString("The task description is brief. If you need more details to proceed, please ask.\n\n")
+	}
+
+	sb.WriteString("Once you have the information you need, proceed with the task.\n")
+
+	return sb.String()
+}
+
 type execResult struct {
 	Success     bool
 	NeedsInput  bool
@@ -667,11 +732,14 @@ func (e *Executor) setupClaudeHooks(workDir string, taskID int64) (cleanup func(
 
 	settingsPath := filepath.Join(claudeDir, "settings.local.json")
 
-	// Find the task binary path
-	taskBin, err := exec.LookPath("task")
+	// Find the task binary path - use absolute path for hooks
+	taskBin, err := os.Executable()
 	if err != nil {
-		// Fall back to assuming it's in PATH
-		taskBin = "task"
+		// Fall back to PATH lookup
+		taskBin, _ = exec.LookPath("task")
+		if taskBin == "" {
+			taskBin = "task"
+		}
 	}
 
 	// Configure hooks to call our task binary
@@ -938,141 +1006,59 @@ func (e *Executor) findClaudeSessionID(workDir string) string {
 	return latestSession
 }
 
-// pollTmuxSession monitors a tmux session for completion.
-// It never kills the tmux session automatically - only on explicit user interrupt.
+// pollTmuxSession waits for the tmux session to end.
+// Status is managed entirely by Claude hooks - we just wait and check the result.
+// Task only goes to "done" if user/MCP explicitly marks it done.
 func (e *Executor) pollTmuxSession(ctx context.Context, taskID int64, sessionName string) execResult {
-	var allOutput strings.Builder
-	ticker := time.NewTicker(500 * time.Millisecond)
+	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
-
-	lastLineCount := 0
-	waitingForInput := false
-	idleNotified := false
-	lastOutputTime := time.Now()
-
-	// Idle threshold - how long with no output before we consider claude idle
-	const idleThreshold = 30 * time.Second
 
 	for {
 		select {
 		case <-ctx.Done():
-			// Context cancelled (user interrupt) - kill the session
 			e.killTmuxSession(sessionName)
 			return execResult{Interrupted: true}
 
 		case <-ticker.C:
-			// Check if session still exists
-			if err := exec.Command("tmux", "has-session", "-t", sessionName).Run(); err != nil {
-				// Session ended naturally (claude exited)
-				// First check if task was marked as blocked via MCP (workflow_needs_input)
-				task, dbErr := e.db.GetTask(taskID)
-				if dbErr == nil && task != nil && task.Status == db.StatusBlocked {
-					// Get the question from recent logs
-					logs, _ := e.db.GetTaskLogs(taskID, 5)
-					var question string
-					for _, l := range logs {
-						if l.LineType == "question" {
-							question = l.Content
-							break
-						}
-					}
-					return execResult{NeedsInput: true, Message: question}
-				}
-				// Otherwise parse output markers
-				output := allOutput.String()
-				return e.parseOutputMarkers(output)
-			}
-
-			// Capture pane content
-			captureCmd := exec.Command("tmux", "capture-pane", "-t", sessionName, "-p", "-S", "-1000")
-			output, err := captureCmd.Output()
-			if err != nil {
-				continue
-			}
-
-			outputStr := string(output)
-			lines := strings.Split(outputStr, "\n")
-
-			// Log new lines
-			if len(lines) > lastLineCount {
-				for i := lastLineCount; i < len(lines); i++ {
-					line := strings.TrimSpace(lines[i])
-					if line != "" && !strings.HasPrefix(line, ":::TASK_EXIT") {
-						e.logLine(taskID, "output", line)
-						allOutput.WriteString(line + "\n")
-					}
-				}
-				lastLineCount = len(lines)
-				lastOutputTime = time.Now()
-				// Reset idle notification if we got new output
-				if idleNotified {
-					idleNotified = false
-				}
-			}
-
-			// Check for completion marker - must be on its own line (not in the prompt text)
-			// Look for a line that IS "TASK_COMPLETE" (Claude's output), not just contains it
-			if hasCompletionMarker(lines) {
-				return execResult{Success: true}
-			}
-
-			// Check for explicit NEEDS_INPUT from our prompt (marks as blocked, returns)
-			if strings.Contains(outputStr, "NEEDS_INPUT:") {
-				return e.parseOutputMarkers(allOutput.String())
-			}
-
-			// Detect if claude is waiting for input (permission prompts, questions, etc.)
-			if e.isWaitingForInput(outputStr, lastOutputTime) {
-				if !waitingForInput {
-					waitingForInput = true
-					e.updateStatus(taskID, db.StatusBlocked)
-					e.logLine(taskID, "system", fmt.Sprintf("Waiting for input - attach with: tmux attach -t %s", sessionName))
-					e.hooks.OnStatusChange(nil, db.StatusBlocked, "Claude waiting for input")
-				}
-			} else if waitingForInput {
-				// Output changed, claude might be working again
-				waitingForInput = false
-				e.updateStatus(taskID, db.StatusProcessing)
-				e.logLine(taskID, "system", "Resumed processing")
-			}
-
-			// Detect idle state - claude shows ❯ prompt with no activity for a while
-			// This is a fallback in case claude forgets to output TASK_COMPLETE
-			if !waitingForInput && !idleNotified && time.Since(lastOutputTime) > idleThreshold {
-				if e.isClaudeIdle(outputStr) {
-					idleNotified = true
-					e.updateStatus(taskID, db.StatusBlocked)
-					e.logLine(taskID, "system", "Claude appears idle - task may be complete. Review and mark as done, or send more instructions.")
-					e.hooks.OnStatusChange(nil, db.StatusBlocked, "Claude idle - task may be complete")
-				}
-			}
-
-			// Check for DB-based status changes (from user, MCP tools, etc.)
+			// Check DB status (set by hooks, user, or MCP)
 			task, err := e.db.GetTask(taskID)
 			if err == nil && task != nil {
 				if task.Status == db.StatusBacklog {
 					e.killTmuxSession(sessionName)
 					return execResult{Interrupted: true}
 				}
-				// Task marked as done (by user or MCP workflow_complete tool)
 				if task.Status == db.StatusDone {
 					e.killTmuxSession(sessionName)
 					return execResult{Success: true}
 				}
-				// Task marked as blocked (by MCP workflow_needs_input tool)
-				// Only return if we weren't already tracking this as blocked
-				if task.Status == db.StatusBlocked && !waitingForInput && !idleNotified {
-					// Get the question from recent logs
-					logs, _ := e.db.GetTaskLogs(taskID, 5)
-					var question string
-					for _, l := range logs {
-						if l.LineType == "question" {
-							question = l.Content
-							break
-						}
+			}
+
+			// Check if tmux window still exists
+			windowExists := exec.Command("tmux", "list-panes", "-t", sessionName).Run() == nil
+
+			// Also check task-ui (pane might be joined there)
+			if !windowExists {
+				checkCmd := exec.Command("tmux", "list-panes", "-t", "task-ui", "-F", "#{pane_current_command}")
+				if out, err := checkCmd.Output(); err == nil {
+					if strings.Contains(string(out), "claude") {
+						windowExists = true
 					}
-					return execResult{NeedsInput: true, Message: question}
 				}
+			}
+
+			if !windowExists {
+				// Window closed - check final status from hooks
+				task, _ := e.db.GetTask(taskID)
+				if task != nil {
+					if task.Status == db.StatusDone {
+						return execResult{Success: true}
+					}
+					if task.Status == db.StatusBacklog {
+						return execResult{Interrupted: true}
+					}
+				}
+				// Default: blocked (user must mark done or retry)
+				return execResult{NeedsInput: true, Message: "Task needs review"}
 			}
 		}
 	}
@@ -1080,7 +1066,8 @@ func (e *Executor) pollTmuxSession(ctx context.Context, taskID int64, sessionNam
 
 // killTmuxSession kills a tmux session if it exists.
 func (e *Executor) killTmuxSession(sessionName string) {
-	exec.Command("tmux", "kill-session", "-t", sessionName).Run()
+	// Kill the window (we use windows in task-daemon, not separate sessions)
+	exec.Command("tmux", "kill-window", "-t", sessionName).Run()
 }
 
 // configureTmuxWindow sets up helpful UI elements for a task window.
@@ -1156,6 +1143,12 @@ func (e *Executor) isWaitingForInput(output string, lastOutputTime time.Time) bo
 			strings.Contains(recentLower, "yes/no") {
 			return true
 		}
+	}
+
+	// Claude Code permission prompts (numbered options with "do you want to proceed")
+	if strings.Contains(recentLower, "do you want to proceed") ||
+		(strings.Contains(recentLower, "esc to cancel") && strings.Contains(recentLower, "1.")) {
+		return true
 	}
 
 	// Yes/no prompts
@@ -1486,6 +1479,7 @@ func (e *Executor) setupWorktree(task *db.Task) (string, error) {
 		task.BranchName = branchName
 		e.db.UpdateTask(task)
 		trustMiseConfig(worktreePath)
+		copyMCPConfig(projectDir, worktreePath)
 		return worktreePath, nil
 	}
 
@@ -1511,6 +1505,7 @@ func (e *Executor) setupWorktree(task *db.Task) (string, error) {
 					task.BranchName = branchName
 					e.db.UpdateTask(task)
 					trustMiseConfig(worktreePath)
+					copyMCPConfig(projectDir, worktreePath)
 					return worktreePath, nil
 				}
 				return "", fmt.Errorf("create worktree: %v\n%s\n%s", err, string(output), string(output2))
@@ -1528,6 +1523,7 @@ func (e *Executor) setupWorktree(task *db.Task) (string, error) {
 	e.logLine(task.ID, "system", fmt.Sprintf("Created worktree at %s (branch: %s)", worktreePath, branchName))
 
 	trustMiseConfig(worktreePath)
+	copyMCPConfig(projectDir, worktreePath)
 
 	return worktreePath, nil
 }
@@ -1537,6 +1533,92 @@ func trustMiseConfig(dir string) {
 	if _, err := exec.LookPath("mise"); err == nil {
 		exec.Command("mise", "trust", dir).Run()
 	}
+}
+
+// copyMCPConfig copies the MCP server configuration from the source project to the worktree
+// in ~/.claude.json so that Claude Code in the worktree has the same MCP servers available.
+func copyMCPConfig(srcDir, dstDir string) error {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("get home dir: %w", err)
+	}
+
+	claudeConfigPath := filepath.Join(home, ".claude.json")
+
+	// Read existing config
+	data, err := os.ReadFile(claudeConfigPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil // No config file, nothing to copy
+		}
+		return fmt.Errorf("read claude config: %w", err)
+	}
+
+	// Parse as generic JSON to preserve all fields
+	var config map[string]interface{}
+	if err := json.Unmarshal(data, &config); err != nil {
+		return fmt.Errorf("parse claude config: %w", err)
+	}
+
+	// Get projects map
+	projectsRaw, ok := config["projects"]
+	if !ok {
+		return nil // No projects configured
+	}
+	projects, ok := projectsRaw.(map[string]interface{})
+	if !ok {
+		return nil // Invalid projects format
+	}
+
+	// Get source project config
+	srcConfigRaw, ok := projects[srcDir]
+	if !ok {
+		return nil // Source project not configured
+	}
+	srcConfig, ok := srcConfigRaw.(map[string]interface{})
+	if !ok {
+		return nil // Invalid source config format
+	}
+
+	// Get MCP servers from source
+	mcpServersRaw, ok := srcConfig["mcpServers"]
+	if !ok {
+		return nil // No MCP servers configured
+	}
+
+	// Get or create destination project config
+	dstConfigRaw, ok := projects[dstDir]
+	var dstConfig map[string]interface{}
+	if ok {
+		dstConfig, _ = dstConfigRaw.(map[string]interface{})
+	}
+	if dstConfig == nil {
+		dstConfig = make(map[string]interface{})
+	}
+
+	// Copy MCP servers to destination
+	dstConfig["mcpServers"] = mcpServersRaw
+
+	// Also copy hasTrustDialogAccepted if present
+	if trusted, ok := srcConfig["hasTrustDialogAccepted"]; ok {
+		dstConfig["hasTrustDialogAccepted"] = trusted
+	}
+
+	// Update projects map
+	projects[dstDir] = dstConfig
+	config["projects"] = projects
+
+	// Write back config
+	newData, err := json.MarshalIndent(config, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal claude config: %w", err)
+	}
+
+	if err := os.WriteFile(claudeConfigPath, newData, 0644); err != nil {
+		return fmt.Errorf("write claude config: %w", err)
+	}
+
+	return nil
 }
 
 // ensureGitignore adds an entry to .gitignore if not already present.
