@@ -32,6 +32,7 @@ type FormModel struct {
 	height    int
 	submitted bool
 	cancelled bool
+	isEdit    bool // true when editing an existing task
 
 	// Current field
 	focused FormField
@@ -53,6 +54,83 @@ type FormModel struct {
 	priorities   []string
 	queue        bool
 	attachments  []string // Parsed file paths
+}
+
+// NewEditFormModel creates a form model pre-populated with an existing task's data for editing.
+func NewEditFormModel(database *db.DB, task *db.Task, width, height int) *FormModel {
+	m := &FormModel{
+		db:         database,
+		width:      width,
+		height:     height,
+		focused:    FieldTitle,
+		types:      []string{"", "code", "writing", "thinking"},
+		priorities: []string{"normal", "high", "low"},
+		priority:   task.Priority,
+		taskType:   task.Type,
+		project:    task.Project,
+		isEdit:     true,
+	}
+
+	// Set priority index
+	for i, p := range m.priorities {
+		if p == task.Priority {
+			m.priorityIdx = i
+			break
+		}
+	}
+
+	// Set type index
+	for i, t := range m.types {
+		if t == task.Type {
+			m.typeIdx = i
+			break
+		}
+	}
+
+	// Load projects
+	m.projects = []string{""}
+	if database != nil {
+		if projs, err := database.ListProjects(); err == nil {
+			for _, p := range projs {
+				m.projects = append(m.projects, p.Name)
+			}
+		}
+	}
+
+	// Set project index
+	for i, p := range m.projects {
+		if p == task.Project {
+			m.projectIdx = i
+			break
+		}
+	}
+
+	// Title input - pre-populate with existing title
+	m.titleInput = textinput.New()
+	m.titleInput.Placeholder = "What needs to be done?"
+	m.titleInput.Prompt = ""
+	m.titleInput.Focus()
+	m.titleInput.Width = width - 24
+	m.titleInput.SetValue(task.Title)
+
+	// Body textarea - pre-populate with existing body
+	m.bodyInput = textarea.New()
+	m.bodyInput.Placeholder = "Additional context (optional)"
+	m.bodyInput.Prompt = ""
+	m.bodyInput.ShowLineNumbers = false
+	m.bodyInput.SetWidth(width - 24)
+	m.bodyInput.SetHeight(4)
+	m.bodyInput.FocusedStyle.CursorLine = lipgloss.NewStyle()
+	m.bodyInput.BlurredStyle.CursorLine = lipgloss.NewStyle()
+	m.bodyInput.SetValue(task.Body)
+
+	// Attachments input
+	m.attachmentsInput = textinput.New()
+	m.attachmentsInput.Placeholder = "Drag files here"
+	m.attachmentsInput.Prompt = ""
+	m.attachmentsInput.Width = width - 24
+
+	return m
 }
 
 // NewFormModel creates a new form model.
@@ -347,10 +425,14 @@ func (m *FormModel) View() string {
 	cursorStyle := lipgloss.NewStyle().Foreground(ColorPrimary)
 
 	// Header
+	headerText := "New Task"
+	if m.isEdit {
+		headerText = "Edit Task"
+	}
 	header := lipgloss.NewStyle().
 		Bold(true).
 		Foreground(ColorPrimary).
-		Render("New Task")
+		Render(headerText)
 	b.WriteString(header)
 	b.WriteString("\n\n")
 

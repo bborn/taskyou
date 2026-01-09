@@ -27,6 +27,7 @@ const (
 	ViewDetail
 	ViewNewTask
 	ViewNewTaskConfirm
+	ViewEditTask
 	ViewDeleteConfirm
 	ViewQuitConfirm
 	ViewWatch
@@ -45,6 +46,7 @@ type KeyMap struct {
 	Enter        key.Binding
 	Back         key.Binding
 	New          key.Binding
+	Edit         key.Binding
 	Queue        key.Binding
 	Retry        key.Binding
 	Close        key.Binding
@@ -114,6 +116,10 @@ func DefaultKeyMap() KeyMap {
 		New: key.NewBinding(
 			key.WithKeys("n"),
 			key.WithHelp("n", "new"),
+		),
+		Edit: key.NewBinding(
+			key.WithKeys("e"),
+			key.WithHelp("e", "edit"),
 		),
 		Queue: key.NewBinding(
 			key.WithKeys("x"),
@@ -247,6 +253,10 @@ type AppModel struct {
 	queueConfirm       *huh.Form
 	queueValue         bool
 
+	// Edit task form state
+	editTaskForm *FormModel
+	editingTask  *db.Task
+
 	// Delete confirmation state
 	deleteConfirm      *huh.Form
 	deleteConfirmValue bool
@@ -351,6 +361,9 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// Handle form updates first (needs all message types)
 	if m.currentView == ViewNewTask && m.newTaskForm != nil {
 		return m.updateNewTaskForm(msg)
+	}
+	if m.currentView == ViewEditTask && m.editTaskForm != nil {
+		return m.updateEditTaskForm(msg)
 	}
 	if m.currentView == ViewNewTaskConfirm && m.queueConfirm != nil {
 		return m.updateNewTaskConfirm(msg)
@@ -511,6 +524,20 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.err = msg.err
 		}
 
+	case taskUpdatedMsg:
+		if msg.err == nil {
+			// Update the selected task if we're in detail view
+			if m.selectedTask != nil && msg.task != nil && m.selectedTask.ID == msg.task.ID {
+				m.selectedTask = msg.task
+				if m.detailView != nil {
+					m.detailView.UpdateTask(msg.task)
+				}
+			}
+			cmds = append(cmds, m.loadTasks())
+		} else {
+			m.err = msg.err
+		}
+
 	case taskQueuedMsg, taskClosedMsg, taskDeletedMsg, taskRetriedMsg, taskInterruptedMsg:
 		cmds = append(cmds, m.loadTasks())
 
@@ -617,6 +644,10 @@ func (m *AppModel) View() string {
 	case ViewNewTask:
 		if m.newTaskForm != nil {
 			return m.newTaskForm.View()
+		}
+	case ViewEditTask:
+		if m.editTaskForm != nil {
+			return m.editTaskForm.View()
 		}
 	case ViewNewTaskConfirm:
 		return m.viewNewTaskConfirm()
@@ -1026,6 +1057,13 @@ func (m *AppModel) updateDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.currentView = ViewAttachments
 		return m, nil
 	}
+	if key.Matches(keyMsg, m.keys.Edit) && m.selectedTask != nil {
+		m.editingTask = m.selectedTask
+		m.editTaskForm = NewEditFormModel(m.db, m.selectedTask, m.width, m.height)
+		m.previousView = m.currentView
+		m.currentView = ViewEditTask
+		return m, m.editTaskForm.Init()
+	}
 
 	if m.detailView != nil {
 		var cmd tea.Cmd
@@ -1115,6 +1153,48 @@ func (m *AppModel) updateNewTaskConfirm(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	}
 
+	return m, cmd
+}
+
+func (m *AppModel) updateEditTaskForm(msg tea.Msg) (tea.Model, tea.Cmd) {
+	// Handle escape to cancel
+	if keyMsg, ok := msg.(tea.KeyMsg); ok {
+		if keyMsg.String() == "esc" {
+			m.currentView = m.previousView
+			m.editTaskForm = nil
+			m.editingTask = nil
+			return m, nil
+		}
+	}
+
+	// Pass all messages to the form
+	model, cmd := m.editTaskForm.Update(msg)
+	if form, ok := model.(*FormModel); ok {
+		m.editTaskForm = form
+		if form.submitted {
+			// Get updated task data from form
+			updatedTask := form.GetDBTask()
+			// Preserve the original task's ID and other fields
+			updatedTask.ID = m.editingTask.ID
+			updatedTask.Status = m.editingTask.Status
+			updatedTask.WorktreePath = m.editingTask.WorktreePath
+			updatedTask.BranchName = m.editingTask.BranchName
+			updatedTask.CreatedAt = m.editingTask.CreatedAt
+			updatedTask.StartedAt = m.editingTask.StartedAt
+			updatedTask.CompletedAt = m.editingTask.CompletedAt
+
+			m.editTaskForm = nil
+			m.editingTask = nil
+			m.currentView = m.previousView
+			return m, m.updateTask(updatedTask)
+		}
+		if form.cancelled {
+			m.currentView = m.previousView
+			m.editTaskForm = nil
+			m.editingTask = nil
+			return m, nil
+		}
+	}
 	return m, cmd
 }
 
@@ -1396,6 +1476,11 @@ type taskCreatedMsg struct {
 	err  error
 }
 
+type taskUpdatedMsg struct {
+	task *db.Task
+	err  error
+}
+
 type taskQueuedMsg struct {
 	err error
 }
@@ -1459,6 +1544,18 @@ func (m *AppModel) createTask(t *db.Task) tea.Cmd {
 			exec.NotifyTaskChange("created", t)
 		}
 		return taskCreatedMsg{task: t, err: err}
+	}
+}
+
+func (m *AppModel) updateTask(t *db.Task) tea.Cmd {
+	database := m.db
+	exec := m.executor
+	return func() tea.Msg {
+		err := database.UpdateTask(t)
+		if err == nil {
+			exec.NotifyTaskChange("updated", t)
+		}
+		return taskUpdatedMsg{task: t, err: err}
 	}
 }
 
