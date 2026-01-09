@@ -3,7 +3,7 @@ package ui
 import (
 	"fmt"
 	"os"
-	"os/exec"
+	osExec "os/exec"
 	"path/filepath"
 	"time"
 
@@ -27,6 +27,7 @@ const (
 	ViewDetail
 	ViewNewTask
 	ViewNewTaskConfirm
+	ViewEditTask
 	ViewDeleteConfirm
 	ViewQuitConfirm
 	ViewWatch
@@ -45,6 +46,7 @@ type KeyMap struct {
 	Enter        key.Binding
 	Back         key.Binding
 	New          key.Binding
+	Edit         key.Binding
 	Queue        key.Binding
 	Retry        key.Binding
 	Close        key.Binding
@@ -56,7 +58,6 @@ type KeyMap struct {
 	Refresh      key.Binding
 	Settings     key.Binding
 	Memories     key.Binding
-	Open         key.Binding
 	Files        key.Binding
 	Help         key.Binding
 	Quit         key.Binding
@@ -79,7 +80,7 @@ func (k KeyMap) FullHelp() [][]key.Binding {
 		{k.FocusBacklog, k.FocusInProgress, k.FocusBlocked, k.FocusDone},
 		{k.Enter, k.New, k.Queue, k.Close},
 		{k.Retry, k.Watch, k.Attach, k.Interrupt, k.Delete},
-		{k.Filter, k.Settings, k.Memories, k.Open, k.Files},
+		{k.Filter, k.Settings, k.Memories, k.Files},
 		{k.Refresh, k.Help, k.Quit},
 	}
 }
@@ -114,6 +115,10 @@ func DefaultKeyMap() KeyMap {
 		New: key.NewBinding(
 			key.WithKeys("n"),
 			key.WithHelp("n", "new"),
+		),
+		Edit: key.NewBinding(
+			key.WithKeys("e"),
+			key.WithHelp("e", "edit"),
 		),
 		Queue: key.NewBinding(
 			key.WithKeys("x"),
@@ -158,10 +163,6 @@ func DefaultKeyMap() KeyMap {
 		Memories: key.NewBinding(
 			key.WithKeys("m"),
 			key.WithHelp("m", "memories"),
-		),
-		Open: key.NewBinding(
-			key.WithKeys("o"),
-			key.WithHelp("o", "open dir"),
 		),
 		Files: key.NewBinding(
 			key.WithKeys("f"),
@@ -212,9 +213,8 @@ type AppModel struct {
 	kanban       *KanbanBoard
 	loading      bool
 	err          error
-	notification       string    // Notification banner text
-	notifyUntil        time.Time // When to hide notification
-	notificationTaskID int64     // Task ID associated with current notification (for click navigation)
+	notification string    // Notification banner text
+	notifyUntil  time.Time // When to hide notification
 
 	// Track task statuses to detect changes
 	prevStatuses map[int64]string
@@ -246,6 +246,10 @@ type AppModel struct {
 	pendingAttachments []string
 	queueConfirm       *huh.Form
 	queueValue         bool
+
+	// Edit task form state
+	editTaskForm *FormModel
+	editingTask  *db.Task
 
 	// Delete confirmation state
 	deleteConfirm      *huh.Form
@@ -338,7 +342,7 @@ func (m *AppModel) Init() tea.Cmd {
 
 	// Enable mouse support for click-to-focus on tmux panes
 	if os.Getenv("TMUX") != "" {
-		exec.Command("tmux", "set-option", "-t", "task-ui", "mouse", "on").Run()
+		osExec.Command("tmux", "set-option", "-t", "task-ui", "mouse", "on").Run()
 	}
 
 	return tea.Batch(m.loadTasks(), m.waitForTaskEvent(), m.waitForDBChange(), m.tick())
@@ -351,6 +355,9 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// Handle form updates first (needs all message types)
 	if m.currentView == ViewNewTask && m.newTaskForm != nil {
 		return m.updateNewTaskForm(msg)
+	}
+	if m.currentView == ViewEditTask && m.editTaskForm != nil {
+		return m.updateEditTaskForm(msg)
 	}
 	if m.currentView == ViewNewTaskConfirm && m.queueConfirm != nil {
 		return m.updateNewTaskConfirm(msg)
@@ -401,13 +408,6 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.MouseMsg:
 		// Handle mouse clicks on dashboard view
 		if m.currentView == ViewDashboard && msg.Action == tea.MouseActionRelease && msg.Button == tea.MouseButtonLeft {
-			// Check if notification banner is visible and click is on it (row 0)
-			if m.notification != "" && time.Now().Before(m.notifyUntil) && m.notificationTaskID > 0 {
-				if msg.Y == 0 {
-					// Click on notification banner - open task detail view
-					return m, m.loadTask(m.notificationTaskID)
-				}
-			}
 			// Check if clicking on a task card
 			if task := m.kanban.HandleClick(msg.X, msg.Y); task != nil {
 				return m, m.loadTask(task.ID)
@@ -448,13 +448,11 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					// Task just became blocked - ring bell and show notification
 					m.notification = fmt.Sprintf("⚠ Task #%d needs input: %s", t.ID, t.Title)
 					m.notifyUntil = time.Now().Add(10 * time.Second)
-					m.notificationTaskID = t.ID
 					fmt.Print("\a") // Ring terminal bell
 				} else if t.Status == db.StatusDone && db.IsInProgress(prevStatus) {
 					// Task completed - ring bell and show notification
 					m.notification = fmt.Sprintf("✓ Task #%d complete: %s", t.ID, t.Title)
 					m.notifyUntil = time.Now().Add(5 * time.Second)
-					m.notificationTaskID = t.ID
 					fmt.Print("\a") // Ring terminal bell
 				}
 			}
@@ -511,6 +509,20 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.err = msg.err
 		}
 
+	case taskUpdatedMsg:
+		if msg.err == nil {
+			// Update the selected task if we're in detail view
+			if m.selectedTask != nil && msg.task != nil && m.selectedTask.ID == msg.task.ID {
+				m.selectedTask = msg.task
+				if m.detailView != nil {
+					m.detailView.UpdateTask(msg.task)
+				}
+			}
+			cmds = append(cmds, m.loadTasks())
+		} else {
+			m.err = msg.err
+		}
+
 	case taskQueuedMsg, taskClosedMsg, taskDeletedMsg, taskRetriedMsg, taskInterruptedMsg:
 		cmds = append(cmds, m.loadTasks())
 
@@ -533,17 +545,14 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						if event.Task.Status == db.StatusBlocked {
 							m.notification = fmt.Sprintf("⚠ Task #%d needs input: %s", event.TaskID, event.Task.Title)
 							m.notifyUntil = time.Now().Add(10 * time.Second)
-							m.notificationTaskID = event.TaskID
 							fmt.Print("\a") // Ring terminal bell
 						} else if event.Task.Status == db.StatusDone && db.IsInProgress(prevStatus) {
 							m.notification = fmt.Sprintf("✓ Task #%d complete: %s", event.TaskID, event.Task.Title)
 							m.notifyUntil = time.Now().Add(5 * time.Second)
-							m.notificationTaskID = event.TaskID
 							fmt.Print("\a") // Ring terminal bell
 						} else if db.IsInProgress(event.Task.Status) {
 							m.notification = fmt.Sprintf("▶ Task #%d started: %s", event.TaskID, event.Task.Title)
 							m.notifyUntil = time.Now().Add(3 * time.Second)
-							m.notificationTaskID = event.TaskID
 						}
 						m.prevStatuses[event.TaskID] = event.Task.Status
 					}
@@ -570,7 +579,6 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Clear expired notifications
 		if !m.notifyUntil.IsZero() && time.Now().After(m.notifyUntil) {
 			m.notification = ""
-			m.notificationTaskID = 0
 		}
 		// Refresh detail view if active (for logs which may update frequently)
 		if m.currentView == ViewDetail && m.detailView != nil {
@@ -617,6 +625,10 @@ func (m *AppModel) View() string {
 	case ViewNewTask:
 		if m.newTaskForm != nil {
 			return m.newTaskForm.View()
+		}
+	case ViewEditTask:
+		if m.editTaskForm != nil {
+			return m.editTaskForm.View()
 		}
 	case ViewNewTaskConfirm:
 		return m.viewNewTaskConfirm()
@@ -681,12 +693,7 @@ func (m *AppModel) viewDashboard() string {
 			Foreground(lipgloss.Color("#000000")).
 			Bold(true).
 			Padding(0, 2)
-		notifyText := m.notification
-		// Add click hint if notification has associated task
-		if m.notificationTaskID > 0 {
-			notifyText += " (click to view)"
-		}
-		headerParts = append(headerParts, notifyStyle.Render(notifyText))
+		headerParts = append(headerParts, notifyStyle.Render(m.notification))
 	} else {
 		m.notification = "" // Clear expired notification
 	}
@@ -880,7 +887,7 @@ func (m *AppModel) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if db.IsInProgress(task.Status) {
 				sessionName := executor.TmuxSessionName(task.ID)
 				return m, tea.ExecProcess(
-					exec.Command("tmux", "attach-session", "-t", sessionName),
+					osExec.Command("tmux", "attach-session", "-t", sessionName),
 					func(err error) tea.Msg { return attachDoneMsg{err: err} },
 				)
 			}
@@ -915,11 +922,6 @@ func (m *AppModel) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.loading = true
 		return m, m.loadTasks()
 
-	case key.Matches(msg, m.keys.Open):
-		if task := m.kanban.SelectedTask(); task != nil {
-			return m, m.openTaskDir(task)
-		}
-
 	case key.Matches(msg, m.keys.Help):
 		m.help.ShowAll = !m.help.ShowAll
 		return m, nil
@@ -952,6 +954,11 @@ func (m *AppModel) updateDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	if key.Matches(keyMsg, m.keys.Back) {
+		// Check PR state when closing task view
+		if m.selectedTask != nil {
+			m.executor.CheckPRStateAndUpdateTask(m.selectedTask.ID)
+		}
+
 		m.currentView = ViewDashboard
 		if m.detailView != nil {
 			m.detailView.Cleanup()
@@ -975,6 +982,10 @@ func (m *AppModel) updateDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
 		task := m.selectedTask
 		if task.Status == db.StatusBlocked || task.Status == db.StatusDone ||
 			task.Status == db.StatusBacklog {
+			// Clean up panes before leaving detail view
+			if m.detailView != nil {
+				m.detailView.Cleanup()
+			}
 			m.retryView = NewRetryModel(task, m.db, m.width, m.height)
 			m.previousView = m.currentView
 			m.currentView = ViewRetry
@@ -982,10 +993,16 @@ func (m *AppModel) updateDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	}
 	if key.Matches(keyMsg, m.keys.Close) && m.selectedTask != nil {
+		// Check PR state before closing
+		m.executor.CheckPRStateAndUpdateTask(m.selectedTask.ID)
+
 		// Immediately update UI for responsiveness
 		m.selectedTask.Status = db.StatusDone
 		if m.detailView != nil {
 			m.detailView.UpdateTask(m.selectedTask)
+			// Clean up panes before leaving detail view
+			m.detailView.Cleanup()
+			m.detailView = nil
 		}
 		// Update task in the list and kanban
 		m.updateTaskInList(m.selectedTask)
@@ -995,9 +1012,9 @@ func (m *AppModel) updateDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if key.Matches(keyMsg, m.keys.Attach) && m.selectedTask != nil {
 		// Attach if tmux session exists
 		sessionName := executor.TmuxSessionName(m.selectedTask.ID)
-		if exec.Command("tmux", "has-session", "-t", sessionName).Run() == nil {
+		if osExec.Command("tmux", "has-session", "-t", sessionName).Run() == nil {
 			return m, tea.ExecProcess(
-				exec.Command("tmux", "attach-session", "-t", sessionName),
+				osExec.Command("tmux", "attach-session", "-t", sessionName),
 				func(err error) tea.Msg { return attachDoneMsg{err: err} },
 			)
 		}
@@ -1005,7 +1022,7 @@ func (m *AppModel) updateDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if key.Matches(keyMsg, m.keys.Interrupt) && m.selectedTask != nil {
 		// Interrupt if tmux session exists or executor is running
 		sessionName := executor.TmuxSessionName(m.selectedTask.ID)
-		if exec.Command("tmux", "has-session", "-t", sessionName).Run() == nil || m.executor.IsRunning(m.selectedTask.ID) {
+		if osExec.Command("tmux", "has-session", "-t", sessionName).Run() == nil || m.executor.IsRunning(m.selectedTask.ID) {
 			return m, m.interruptTask(m.selectedTask.ID)
 		}
 	}
@@ -1017,14 +1034,22 @@ func (m *AppModel) updateDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m.showDeleteConfirm(m.selectedTask)
 	}
-	if key.Matches(keyMsg, m.keys.Open) && m.selectedTask != nil {
-		return m, m.openTaskDir(m.selectedTask)
-	}
 	if key.Matches(keyMsg, m.keys.Files) && m.selectedTask != nil {
+		// Clean up panes before leaving detail view
+		if m.detailView != nil {
+			m.detailView.Cleanup()
+		}
 		m.attachmentsView = NewAttachmentsModel(m.selectedTask, m.db, m.width, m.height)
 		m.previousView = m.currentView
 		m.currentView = ViewAttachments
 		return m, nil
+	}
+	if key.Matches(keyMsg, m.keys.Edit) && m.selectedTask != nil {
+		m.editingTask = m.selectedTask
+		m.editTaskForm = NewEditFormModel(m.db, m.selectedTask, m.width, m.height)
+		m.previousView = m.currentView
+		m.currentView = ViewEditTask
+		return m, m.editTaskForm.Init()
 	}
 
 	if m.detailView != nil {
@@ -1115,6 +1140,48 @@ func (m *AppModel) updateNewTaskConfirm(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	}
 
+	return m, cmd
+}
+
+func (m *AppModel) updateEditTaskForm(msg tea.Msg) (tea.Model, tea.Cmd) {
+	// Handle escape to cancel
+	if keyMsg, ok := msg.(tea.KeyMsg); ok {
+		if keyMsg.String() == "esc" {
+			m.currentView = m.previousView
+			m.editTaskForm = nil
+			m.editingTask = nil
+			return m, nil
+		}
+	}
+
+	// Pass all messages to the form
+	model, cmd := m.editTaskForm.Update(msg)
+	if form, ok := model.(*FormModel); ok {
+		m.editTaskForm = form
+		if form.submitted {
+			// Get updated task data from form
+			updatedTask := form.GetDBTask()
+			// Preserve the original task's ID and other fields
+			updatedTask.ID = m.editingTask.ID
+			updatedTask.Status = m.editingTask.Status
+			updatedTask.WorktreePath = m.editingTask.WorktreePath
+			updatedTask.BranchName = m.editingTask.BranchName
+			updatedTask.CreatedAt = m.editingTask.CreatedAt
+			updatedTask.StartedAt = m.editingTask.StartedAt
+			updatedTask.CompletedAt = m.editingTask.CompletedAt
+
+			m.editTaskForm = nil
+			m.editingTask = nil
+			m.currentView = m.previousView
+			return m, m.updateTask(updatedTask)
+		}
+		if form.cancelled {
+			m.currentView = m.previousView
+			m.editTaskForm = nil
+			m.editingTask = nil
+			return m, nil
+		}
+	}
 	return m, cmd
 }
 
@@ -1396,6 +1463,11 @@ type taskCreatedMsg struct {
 	err  error
 }
 
+type taskUpdatedMsg struct {
+	task *db.Task
+	err  error
+}
+
 type taskQueuedMsg struct {
 	err error
 }
@@ -1424,10 +1496,6 @@ type attachDoneMsg struct {
 	err error
 }
 
-type openDirDoneMsg struct {
-	err error
-}
-
 type tickMsg time.Time
 
 type dbChangeMsg struct{}
@@ -1440,11 +1508,25 @@ type prInfoMsg struct {
 func (m *AppModel) loadTasks() tea.Cmd {
 	return func() tea.Msg {
 		tasks, err := m.db.ListTasks(db.ListTasksOptions{Limit: 50, IncludeClosed: true})
+
+		// Check PR state for all tasks with branches in the background
+		// This ensures we detect merged PRs when returning to the dashboard
+		go func() {
+			for _, task := range tasks {
+				if task.BranchName != "" && task.Status != db.StatusDone {
+					m.executor.CheckPRStateAndUpdateTask(task.ID)
+				}
+			}
+		}()
+
 		return tasksLoadedMsg{tasks: tasks, err: err}
 	}
 }
 
 func (m *AppModel) loadTask(id int64) tea.Cmd {
+	// Check PR state when opening task view
+	m.executor.CheckPRStateAndUpdateTask(id)
+
 	return func() tea.Msg {
 		task, err := m.db.GetTask(id)
 		return taskLoadedMsg{task: task, err: err}
@@ -1459,6 +1541,18 @@ func (m *AppModel) createTask(t *db.Task) tea.Cmd {
 			exec.NotifyTaskChange("created", t)
 		}
 		return taskCreatedMsg{task: t, err: err}
+	}
+}
+
+func (m *AppModel) updateTask(t *db.Task) tea.Cmd {
+	database := m.db
+	exec := m.executor
+	return func() tea.Msg {
+		err := database.UpdateTask(t)
+		if err == nil {
+			exec.NotifyTaskChange("updated", t)
+		}
+		return taskUpdatedMsg{task: t, err: err}
 	}
 }
 
@@ -1525,7 +1619,7 @@ func (m *AppModel) deleteTask(id int64) tea.Cmd {
 
 		// Kill Claude session if running (ignore errors)
 		windowTarget := executor.TmuxSessionName(id)
-		exec.Command("tmux", "kill-window", "-t", windowTarget).Run()
+		osExec.Command("tmux", "kill-window", "-t", windowTarget).Run()
 
 		// Clean up worktree if it exists
 		if task != nil && task.WorktreePath != "" {
@@ -1547,8 +1641,12 @@ func (m *AppModel) retryTask(id int64, feedback string) tea.Cmd {
 
 func (m *AppModel) retryTaskWithAttachments(id int64, feedback string, attachmentPaths []string) tea.Cmd {
 	database := m.db
+	exec := m.executor
 	return func() tea.Msg {
-		// Add attachments first if provided
+		// Get task to find worktree path
+		task, _ := database.GetTask(id)
+
+		// Add attachments to database first
 		for _, attachmentPath := range attachmentPaths {
 			if attachmentPath != "" {
 				data, readErr := os.ReadFile(attachmentPath)
@@ -1561,11 +1659,51 @@ func (m *AppModel) retryTaskWithAttachments(id int64, feedback string, attachmen
 
 		// Check if tmux session is still alive
 		sessionName := executor.TmuxSessionName(id)
-		if err := exec.Command("tmux", "has-session", "-t", sessionName).Run(); err == nil {
-			// Session alive - just send feedback via send-keys
-			if feedback != "" {
-				database.AppendTaskLog(id, "text", "Feedback: "+feedback)
-				exec.Command("tmux", "send-keys", "-t", sessionName, feedback, "Enter").Run()
+		if err := osExec.Command("tmux", "has-session", "-t", sessionName).Run(); err == nil {
+			// Session alive - prepare attachments and send feedback via send-keys
+			feedbackToSend := feedback
+
+			// If there are new attachments, write them to files and include paths in feedback
+			if len(attachmentPaths) > 0 && task != nil {
+				// Determine directory for attachments
+				attachDir := ""
+				if task.WorktreePath != "" {
+					// Use a subdirectory within the worktree
+					attachDir = filepath.Join(task.WorktreePath, ".task-attachments")
+				} else if projectDir := exec.GetProjectDir(task.Project); projectDir != "" {
+					attachDir = filepath.Join(projectDir, ".task-attachments")
+				}
+
+				if attachDir != "" {
+					os.MkdirAll(attachDir, 0755)
+					var writtenPaths []string
+					for _, attachmentPath := range attachmentPaths {
+						if attachmentPath != "" {
+							data, readErr := os.ReadFile(attachmentPath)
+							if readErr == nil {
+								destPath := filepath.Join(attachDir, filepath.Base(attachmentPath))
+								if writeErr := os.WriteFile(destPath, data, 0644); writeErr == nil {
+									writtenPaths = append(writtenPaths, destPath)
+								}
+							}
+						}
+					}
+
+					// Append attachment info to feedback
+					if len(writtenPaths) > 0 {
+						attachmentInfo := "\n\n[New attachments added - you can read these files using the Read tool:\n"
+						for _, p := range writtenPaths {
+							attachmentInfo += "- " + p + "\n"
+						}
+						attachmentInfo += "]"
+						feedbackToSend = feedback + attachmentInfo
+					}
+				}
+			}
+
+			if feedbackToSend != "" {
+				database.AppendTaskLog(id, "text", "Feedback: "+feedbackToSend)
+				osExec.Command("tmux", "send-keys", "-t", sessionName, feedbackToSend, "Enter").Run()
 			}
 			// Update status to processing
 			database.UpdateTaskStatus(id, db.StatusProcessing)
@@ -1583,77 +1721,6 @@ func (m *AppModel) interruptTask(id int64) tea.Cmd {
 		m.executor.Interrupt(id)
 		return taskInterruptedMsg{}
 	}
-}
-
-func (m *AppModel) openTaskDir(task *db.Task) tea.Cmd {
-	// Determine directory to open: worktree > project > cwd
-	dir := task.WorktreePath
-	if dir == "" {
-		dir = m.executor.GetProjectDir(task.Project)
-	}
-	if dir == "" {
-		return nil
-	}
-
-	// Use tmux to create a new window in the task directory
-	// Explicitly target task-ui session to avoid opening in task-daemon
-	if os.Getenv("TMUX") != "" {
-		cmd := exec.Command("tmux", "new-window", "-t", "task-ui", "-c", dir)
-		go cmd.Run()
-		return func() tea.Msg { return openDirDoneMsg{} }
-	}
-
-	// Detect terminal emulator and open new window
-	termProgram := os.Getenv("TERM_PROGRAM")
-	switch termProgram {
-	case "iTerm.app":
-		script := fmt.Sprintf(`tell application "iTerm2"
-			tell current window
-				create tab with default profile
-				tell current session
-					write text "cd %q"
-				end tell
-			end tell
-		end tell`, dir)
-		cmd := exec.Command("osascript", "-e", script)
-		go cmd.Run()
-		return func() tea.Msg { return openDirDoneMsg{} }
-	case "Apple_Terminal":
-		cmd := exec.Command("open", "-a", "Terminal", dir)
-		go cmd.Run()
-		return func() tea.Msg { return openDirDoneMsg{} }
-	case "WezTerm":
-		cmd := exec.Command("wezterm", "cli", "spawn", "--cwd", dir)
-		go cmd.Run()
-		return func() tea.Msg { return openDirDoneMsg{} }
-	case "Alacritty":
-		cmd := exec.Command("alacritty", "--working-directory", dir)
-		go cmd.Run()
-		return func() tea.Msg { return openDirDoneMsg{} }
-	case "kitty":
-		// kitty requires remote control to be enabled; spawn new instance otherwise
-		cmd := exec.Command("kitty", "--directory", dir)
-		go cmd.Run()
-		return func() tea.Msg { return openDirDoneMsg{} }
-	}
-
-	// Check for GNOME Terminal
-	if os.Getenv("GNOME_TERMINAL_SERVICE") != "" {
-		cmd := exec.Command("gnome-terminal", "--working-directory", dir)
-		go cmd.Run()
-		return func() tea.Msg { return openDirDoneMsg{} }
-	}
-
-	// Fallback: spawn shell in-place (user exits to return to TUI)
-	shell := os.Getenv("SHELL")
-	if shell == "" {
-		shell = "sh"
-	}
-	cmd := exec.Command(shell)
-	cmd.Dir = dir
-	return tea.ExecProcess(cmd, func(err error) tea.Msg {
-		return openDirDoneMsg{err: err}
-	})
 }
 
 func (m *AppModel) waitForTaskEvent() tea.Cmd {
