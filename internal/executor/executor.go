@@ -1576,20 +1576,17 @@ func (e *Executor) isBranchMerged(task *db.Task) bool {
 // setupWorktree creates a git worktree for the task if the project is a git repo.
 // Returns the working directory to use (worktree path or project path).
 func (e *Executor) setupWorktree(task *db.Task) (string, error) {
+	// Ensure task has a project (default to 'personal' if empty)
+	if task.Project == "" {
+		task.Project = "personal"
+		e.db.UpdateTask(task)
+	}
+
 	// Get project directory
 	projectDir := e.getProjectDir(task.Project)
-	
-	home, _ := os.UserHomeDir()
-	
+
 	if projectDir == "" {
-		// No project - use default tasks directory with per-task subdirs
-		tasksDir := filepath.Join(home, ".local", "share", "task", "tasks")
-		slug := slugify(task.Title, 40)
-		taskDir := filepath.Join(tasksDir, fmt.Sprintf("%d-%s", task.ID, slug))
-		if err := os.MkdirAll(taskDir, 0755); err != nil {
-			return "", fmt.Errorf("create task dir: %w", err)
-		}
-		return taskDir, nil
+		return "", fmt.Errorf("project directory not found for project: %s", task.Project)
 	}
 
 	// Check if project is a git repo
