@@ -273,13 +273,12 @@ func (m *DetailModel) getWorkdir() string {
 // breakTmuxPanes breaks both joined panes - kills workdir, returns Claude to task-daemon.
 func (m *DetailModel) breakTmuxPanes() {
 	// Reset status bar and pane styling
-	exec.Command("tmux", "set-option", "-t", "task-ui", "status-right", " Ctrl+B ↑↓ switch panes ").Run()
+	exec.Command("tmux", "set-option", "-t", "task-ui", "status-right", " ").Run()
 	exec.Command("tmux", "set-option", "-t", "task-ui", "pane-border-style", "fg=#374151").Run()
 	exec.Command("tmux", "set-option", "-t", "task-ui", "pane-active-border-style", "fg=#61AFEF").Run()
 
-	// Reset pane titles back to main view labels
+	// Reset pane title back to main view label
 	exec.Command("tmux", "select-pane", "-t", "task-ui:.0", "-T", "Tasks").Run()
-	exec.Command("tmux", "select-pane", "-t", "task-ui:.1", "-T", "Copilot").Run()
 
 	// Kill the workdir pane first (it's not from task-daemon, just a shell we created)
 	if m.workdirPaneID != "" {
@@ -319,13 +318,12 @@ func (m *DetailModel) killTmuxSession() {
 	m.database.AppendTaskLog(m.task.ID, "user", "→ [Kill] Session terminated")
 
 	// Reset pane styling first
-	exec.Command("tmux", "set-option", "-t", "task-ui", "status-right", " Ctrl+B ↑↓ switch panes ").Run()
+	exec.Command("tmux", "set-option", "-t", "task-ui", "status-right", " ").Run()
 	exec.Command("tmux", "set-option", "-t", "task-ui", "pane-border-style", "fg=#374151").Run()
 	exec.Command("tmux", "set-option", "-t", "task-ui", "pane-active-border-style", "fg=#61AFEF").Run()
 
-	// Reset pane titles back to main view labels
+	// Reset pane title back to main view label
 	exec.Command("tmux", "select-pane", "-t", "task-ui:.0", "-T", "Tasks").Run()
-	exec.Command("tmux", "select-pane", "-t", "task-ui:.1", "-T", "Copilot").Run()
 
 	// Kill the workdir pane first (it's a separate pane we created)
 	if m.workdirPaneID != "" {
