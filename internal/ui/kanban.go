@@ -198,9 +198,9 @@ func (k *KanbanBoard) ensureSelectedVisible() {
 	}
 
 	// Calculate how many tasks fit in the visible area
-	colHeight := k.height - 2
+	colHeight := k.height
 	cardHeight := 4
-	maxVisible := (colHeight - 5) / cardHeight
+	maxVisible := (colHeight - 3) / cardHeight // -3 for header bar and minimal padding
 	if maxVisible < 1 {
 		maxVisible = 1
 	}
@@ -278,8 +278,8 @@ func (k *KanbanBoard) View() string {
 		colWidth = 20
 	}
 
-	// Calculate available height for tasks (subtract borders and header bar)
-	colHeight := k.height - 2
+	// Calculate available height for tasks
+	colHeight := k.height
 
 	// Build columns
 	var columnViews []string
@@ -301,7 +301,7 @@ func (k *KanbanBoard) View() string {
 
 		// Task cards - calculate how many fit (each card is ~3 lines with margin)
 		cardHeight := 4 // Increased for better spacing
-		maxTasks := (colHeight - 5) / cardHeight // -5 for header bar and padding
+		maxTasks := (colHeight - 3) / cardHeight // -3 for header bar and minimal padding
 		if maxTasks < 1 {
 			maxTasks = 1
 		}
@@ -387,7 +387,7 @@ func (k *KanbanBoard) View() string {
 
 		colStyle := lipgloss.NewStyle().
 			Width(colWidth).
-			Height(colHeight - 1). // -1 for header bar
+			Height(colHeight). // Use full height, header is separate
 			Border(borderStyle).
 			BorderForeground(borderColor).
 			BorderTop(false) // No top border since we have the header bar
@@ -596,8 +596,8 @@ func (k *KanbanBoard) HandleClick(x, y int) *db.Task {
 
 	// Calculate which task was clicked
 	col := k.columns[colIdx]
-	colHeight := k.height - 2
-	maxTasks := (colHeight - 4) / taskCardHeight
+	colHeight := k.height
+	maxTasks := (colHeight - 3) / taskCardHeight // -3 for header bar and minimal padding
 	if maxTasks < 1 {
 		maxTasks = 1
 	}
