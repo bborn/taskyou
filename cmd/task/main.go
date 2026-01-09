@@ -43,6 +43,27 @@ var (
 	boldStyle    = lipgloss.NewStyle().Bold(true)
 )
 
+// getSessionID returns a unique session identifier for this instance.
+// Uses PID to ensure each task instance gets its own tmux sessions.
+func getSessionID() string {
+	// Check if SESSION_ID is already set (for child processes)
+	if sid := os.Getenv("TASK_SESSION_ID"); sid != "" {
+		return sid
+	}
+	// Generate new session ID based on PID
+	return fmt.Sprintf("%d", os.Getpid())
+}
+
+// getUISessionName returns the task-ui session name for this instance.
+func getUISessionName() string {
+	return fmt.Sprintf("task-ui-%s", getSessionID())
+}
+
+// getDaemonSessionName returns the task-daemon session name for this instance.
+func getDaemonSessionName() string {
+	return fmt.Sprintf("task-daemon-%s", getSessionID())
+}
+
 func main() {
 	var (
 		host  string
@@ -895,14 +916,21 @@ func execInTmux() error {
 		return fmt.Errorf("get executable: %w", err)
 	}
 
+	// Get unique session name for this instance
+	sessionName := getUISessionName()
+	sessionID := getSessionID()
+
 	// Build command with all original args
 	args := append([]string{executable}, os.Args[1:]...)
 	cmdStr := strings.Join(args, " ")
 
+	// Set TASK_SESSION_ID env var so child processes use the same session ID
+	envCmd := fmt.Sprintf("TASK_SESSION_ID=%s %s", sessionID, cmdStr)
+
 	// Check if session already exists
-	if osexec.Command("tmux", "has-session", "-t", "task-ui").Run() == nil {
+	if osexec.Command("tmux", "has-session", "-t", sessionName).Run() == nil {
 		// Session exists, attach to it instead
-		cmd := osexec.Command("tmux", "attach-session", "-t", "task-ui")
+		cmd := osexec.Command("tmux", "attach-session", "-t", sessionName)
 		cmd.Stdin = os.Stdin
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
@@ -914,37 +942,37 @@ func execInTmux() error {
 
 	// Create detached session first so we can configure it
 	// The task TUI runs in the main (top) pane
-	if err := osexec.Command("tmux", "new-session", "-d", "-s", "task-ui", "-c", cwd, cmdStr).Run(); err != nil {
+	if err := osexec.Command("tmux", "new-session", "-d", "-s", sessionName, "-c", cwd, envCmd).Run(); err != nil {
 		return fmt.Errorf("create tmux session: %w", err)
 	}
 
 	// Configure status bar
-	osexec.Command("tmux", "set-option", "-t", "task-ui", "status", "on").Run()
-	osexec.Command("tmux", "set-option", "-t", "task-ui", "status-style", "bg=#1e293b,fg=#94a3b8").Run()
-	osexec.Command("tmux", "set-option", "-t", "task-ui", "status-left", " ").Run()
-	osexec.Command("tmux", "set-option", "-t", "task-ui", "status-right", " Ctrl+B ↑↓ switch panes ").Run()
+	osexec.Command("tmux", "set-option", "-t", sessionName, "status", "on").Run()
+	osexec.Command("tmux", "set-option", "-t", sessionName, "status-style", "bg=#1e293b,fg=#94a3b8").Run()
+	osexec.Command("tmux", "set-option", "-t", sessionName, "status-left", " ").Run()
+	osexec.Command("tmux", "set-option", "-t", sessionName, "status-right", " Ctrl+B ↑↓ switch panes ").Run()
 
 	// Enable pane border labels
-	osexec.Command("tmux", "set-option", "-t", "task-ui", "pane-border-status", "top").Run()
-	osexec.Command("tmux", "set-option", "-t", "task-ui", "pane-border-format", " #{pane_title} ").Run()
-	osexec.Command("tmux", "set-option", "-t", "task-ui", "pane-border-style", "fg=#374151").Run()
-	osexec.Command("tmux", "set-option", "-t", "task-ui", "pane-active-border-style", "fg=#61AFEF").Run()
+	osexec.Command("tmux", "set-option", "-t", sessionName, "pane-border-status", "top").Run()
+	osexec.Command("tmux", "set-option", "-t", sessionName, "pane-border-format", " #{pane_title} ").Run()
+	osexec.Command("tmux", "set-option", "-t", sessionName, "pane-border-style", "fg=#374151").Run()
+	osexec.Command("tmux", "set-option", "-t", sessionName, "pane-active-border-style", "fg=#61AFEF").Run()
 
 	// Split pane vertically - Claude runs in the bottom pane (40% height)
 	// The -c flag sets the working directory for the new pane
 	// Launch Claude with copilot system prompt and permissions
-	claudeCmd := buildCopilotClaudeCommand()
-	osexec.Command("tmux", "split-window", "-t", "task-ui", "-v", "-l", "40%", "-c", cwd, claudeCmd).Run()
+	claudeCmd := buildCopilotClaudeCommand(sessionName)
+	osexec.Command("tmux", "split-window", "-t", sessionName, "-v", "-l", "40%", "-c", cwd, claudeCmd).Run()
 
 	// Set pane titles for labels
-	osexec.Command("tmux", "select-pane", "-t", "task-ui:.0", "-T", "Tasks").Run()
-	osexec.Command("tmux", "select-pane", "-t", "task-ui:.1", "-T", "Copilot").Run()
+	osexec.Command("tmux", "select-pane", "-t", sessionName+":.0", "-T", "Tasks").Run()
+	osexec.Command("tmux", "select-pane", "-t", sessionName+":.1", "-T", "Copilot").Run()
 
 	// Select the top pane (task TUI) so it has focus when we attach
-	osexec.Command("tmux", "select-pane", "-t", "task-ui:.0").Run()
+	osexec.Command("tmux", "select-pane", "-t", sessionName+":.0").Run()
 
 	// Now attach to the session
-	cmd := osexec.Command("tmux", "attach-session", "-t", "task-ui")
+	cmd := osexec.Command("tmux", "attach-session", "-t", sessionName)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -952,20 +980,20 @@ func execInTmux() error {
 }
 
 // buildCopilotClaudeCommand builds the claude command with copilot system prompt and permissions.
-func buildCopilotClaudeCommand() string {
-	systemPrompt := `You are the Task App Copilot - an AI assistant integrated into the task management application.
+func buildCopilotClaudeCommand(sessionName string) string {
+	systemPrompt := fmt.Sprintf(`You are the Task App Copilot - an AI assistant integrated into the task management application.
 
 ## Your Role
 You help users manage their task queue by driving the task app UI in the tmux pane above you.
 The task app is a terminal-based kanban board for managing AI coding tasks.
 
 ## Tmux Layout
-- Session: task-ui
+- Session: %s
 - Pane 0.0 (above): The task app TUI - a kanban board showing tasks in columns (Backlog, In Progress, Blocked, Done)
 - Pane 0.1 (this pane): You, the copilot
 
 ## How to Control the Task App
-Send keystrokes to the task app using: tmux send-keys -t task-ui:0.0 '<keys>'
+Send keystrokes to the task app using: tmux send-keys -t %s:0.0 '<keys>'
 
 ### Key Bindings
 - n: Create new task (opens form, type title, ctrl+s to submit)
@@ -981,10 +1009,10 @@ Send keystrokes to the task app using: tmux send-keys -t task-ui:0.0 '<keys>'
 - ?: Show help
 
 ### Creating a Task
-1. tmux send-keys -t task-ui:0.0 'n'        # Open new task form
-2. tmux send-keys -t task-ui:0.0 'Task title here'  # Type title
-3. tmux send-keys -t task-ui:0.0 C-s        # Submit (Ctrl+S)
-4. tmux send-keys -t task-ui:0.0 Enter      # Confirm (don't queue) or 'y' then Enter to queue
+1. tmux send-keys -t %s:0.0 'n'        # Open new task form
+2. tmux send-keys -t %s:0.0 'Task title here'  # Type title
+3. tmux send-keys -t %s:0.0 C-s        # Submit (Ctrl+S)
+4. tmux send-keys -t %s:0.0 Enter      # Confirm (don't queue) or 'y' then Enter to queue
 
 ### Navigating
 - To select a task: Use arrow keys or hjkl to navigate the kanban board
@@ -1001,7 +1029,7 @@ Send keystrokes to the task app using: tmux send-keys -t task-ui:0.0 '<keys>'
 - When users ask to create tasks, do it for them
 - When users ask about task status, navigate to show them or query the database
 - Offer suggestions for task management
-- Be concise in your responses`
+- Be concise in your responses`, sessionName, sessionName, sessionName, sessionName, sessionName, sessionName)
 
 	// Escape single quotes in system prompt for shell
 	escapedPrompt := strings.ReplaceAll(systemPrompt, "'", "'\"'\"'")
@@ -1053,11 +1081,12 @@ func runLocal() error {
 	// Kill task-ui tmux session on exit (if we're in it)
 	// This cleans up the session that was created by execInTmux()
 	if os.Getenv("TMUX") != "" {
-		// Check if we're in the task-ui session
+		sessionName := getUISessionName()
+		// Check if we're in this instance's session
 		tmuxCmd := osexec.Command("tmux", "display-message", "-p", "#{session_name}")
 		out, err := tmuxCmd.Output()
-		if err == nil && strings.TrimSpace(string(out)) == "task-ui" {
-			osexec.Command("tmux", "kill-session", "-t", "task-ui").Run()
+		if err == nil && strings.TrimSpace(string(out)) == sessionName {
+			osexec.Command("tmux", "kill-session", "-t", sessionName).Run()
 		}
 	}
 
@@ -1087,6 +1116,8 @@ func ensureDaemonRunning() error {
 	cmd.Stdout = nil
 	cmd.Stderr = nil
 	cmd.Stdin = nil
+	// Pass session ID to daemon so it uses the same tmux sessions
+	cmd.Env = append(os.Environ(), fmt.Sprintf("TASK_SESSION_ID=%s", getSessionID()))
 	// Detach from parent process
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		Setsid: true,
@@ -1694,8 +1725,9 @@ type claudeSession struct {
 
 // getClaudeSessions returns all running task-* windows in task-daemon session.
 func getClaudeSessions() []claudeSession {
-	// List all windows in task-daemon session
-	cmd := osexec.Command("tmux", "list-windows", "-t", executor.TmuxDaemonSession, "-F", "#{window_name}:#{window_activity}")
+	// List all windows in task-daemon session for this instance
+	daemonSession := getDaemonSessionName()
+	cmd := osexec.Command("tmux", "list-windows", "-t", daemonSession, "-F", "#{window_name}:#{window_activity}")
 	output, err := cmd.Output()
 	if err != nil {
 		return nil
@@ -1747,7 +1779,9 @@ func getClaudeSessions() []claudeSession {
 
 // killClaudeSession kills a specific task's tmux window in task-daemon.
 func killClaudeSession(taskID int) error {
-	windowTarget := executor.TmuxSessionName(int64(taskID))
+	daemonSession := getDaemonSessionName()
+	windowName := fmt.Sprintf("task-%d", taskID)
+	windowTarget := fmt.Sprintf("%s:%s", daemonSession, windowName)
 
 	// Check if window exists
 	if err := osexec.Command("tmux", "list-panes", "-t", windowTarget).Run(); err != nil {
