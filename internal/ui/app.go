@@ -56,7 +56,6 @@ type KeyMap struct {
 	Refresh      key.Binding
 	Settings     key.Binding
 	Memories     key.Binding
-	Open         key.Binding
 	Files        key.Binding
 	Help         key.Binding
 	Quit         key.Binding
@@ -79,7 +78,7 @@ func (k KeyMap) FullHelp() [][]key.Binding {
 		{k.FocusBacklog, k.FocusInProgress, k.FocusBlocked, k.FocusDone},
 		{k.Enter, k.New, k.Queue, k.Close},
 		{k.Retry, k.Watch, k.Attach, k.Interrupt, k.Delete},
-		{k.Filter, k.Settings, k.Memories, k.Open, k.Files},
+		{k.Filter, k.Settings, k.Memories, k.Files},
 		{k.Refresh, k.Help, k.Quit},
 	}
 }
@@ -158,10 +157,6 @@ func DefaultKeyMap() KeyMap {
 		Memories: key.NewBinding(
 			key.WithKeys("m"),
 			key.WithHelp("m", "memories"),
-		),
-		Open: key.NewBinding(
-			key.WithKeys("o"),
-			key.WithHelp("o", "open dir"),
 		),
 		Files: key.NewBinding(
 			key.WithKeys("f"),
@@ -917,11 +912,6 @@ func (m *AppModel) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.loading = true
 		return m, m.loadTasks()
 
-	case key.Matches(msg, m.keys.Open):
-		if task := m.kanban.SelectedTask(); task != nil {
-			return m, m.openTaskDir(task)
-		}
-
 	case key.Matches(msg, m.keys.Help):
 		m.help.ShowAll = !m.help.ShowAll
 		return m, nil
@@ -1018,9 +1008,6 @@ func (m *AppModel) updateDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.detailView = nil
 		}
 		return m.showDeleteConfirm(m.selectedTask)
-	}
-	if key.Matches(keyMsg, m.keys.Open) && m.selectedTask != nil {
-		return m, m.openTaskDir(m.selectedTask)
 	}
 	if key.Matches(keyMsg, m.keys.Files) && m.selectedTask != nil {
 		m.attachmentsView = NewAttachmentsModel(m.selectedTask, m.db, m.width, m.height)
@@ -1426,10 +1413,6 @@ type attachDoneMsg struct {
 	err error
 }
 
-type openDirDoneMsg struct {
-	err error
-}
-
 type tickMsg time.Time
 
 type dbChangeMsg struct{}
@@ -1629,77 +1612,6 @@ func (m *AppModel) interruptTask(id int64) tea.Cmd {
 		m.executor.Interrupt(id)
 		return taskInterruptedMsg{}
 	}
-}
-
-func (m *AppModel) openTaskDir(task *db.Task) tea.Cmd {
-	// Determine directory to open: worktree > project > cwd
-	dir := task.WorktreePath
-	if dir == "" {
-		dir = m.executor.GetProjectDir(task.Project)
-	}
-	if dir == "" {
-		return nil
-	}
-
-	// Use tmux to create a new window in the task directory
-	// Explicitly target task-ui session to avoid opening in task-daemon
-	if os.Getenv("TMUX") != "" {
-		cmd := osExec.Command("tmux", "new-window", "-t", "task-ui", "-c", dir)
-		go cmd.Run()
-		return func() tea.Msg { return openDirDoneMsg{} }
-	}
-
-	// Detect terminal emulator and open new window
-	termProgram := os.Getenv("TERM_PROGRAM")
-	switch termProgram {
-	case "iTerm.app":
-		script := fmt.Sprintf(`tell application "iTerm2"
-			tell current window
-				create tab with default profile
-				tell current session
-					write text "cd %q"
-				end tell
-			end tell
-		end tell`, dir)
-		cmd := osExec.Command("osascript", "-e", script)
-		go cmd.Run()
-		return func() tea.Msg { return openDirDoneMsg{} }
-	case "Apple_Terminal":
-		cmd := osExec.Command("open", "-a", "Terminal", dir)
-		go cmd.Run()
-		return func() tea.Msg { return openDirDoneMsg{} }
-	case "WezTerm":
-		cmd := osExec.Command("wezterm", "cli", "spawn", "--cwd", dir)
-		go cmd.Run()
-		return func() tea.Msg { return openDirDoneMsg{} }
-	case "Alacritty":
-		cmd := osExec.Command("alacritty", "--working-directory", dir)
-		go cmd.Run()
-		return func() tea.Msg { return openDirDoneMsg{} }
-	case "kitty":
-		// kitty requires remote control to be enabled; spawn new instance otherwise
-		cmd := osExec.Command("kitty", "--directory", dir)
-		go cmd.Run()
-		return func() tea.Msg { return openDirDoneMsg{} }
-	}
-
-	// Check for GNOME Terminal
-	if os.Getenv("GNOME_TERMINAL_SERVICE") != "" {
-		cmd := osExec.Command("gnome-terminal", "--working-directory", dir)
-		go cmd.Run()
-		return func() tea.Msg { return openDirDoneMsg{} }
-	}
-
-	// Fallback: spawn shell in-place (user exits to return to TUI)
-	shell := os.Getenv("SHELL")
-	if shell == "" {
-		shell = "sh"
-	}
-	cmd := osExec.Command(shell)
-	cmd.Dir = dir
-	return tea.ExecProcess(cmd, func(err error) tea.Msg {
-		return openDirDoneMsg{err: err}
-	})
 }
 
 func (m *AppModel) waitForTaskEvent() tea.Cmd {
