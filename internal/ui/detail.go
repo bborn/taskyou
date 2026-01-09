@@ -519,6 +519,7 @@ func (m *DetailModel) renderHelp() string {
 		key  string
 		desc string
 	}{
+		{"e", "edit"},
 		{"r", "retry"},
 		{"c", "close"},
 		{"d", "delete"},
