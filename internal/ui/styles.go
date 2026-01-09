@@ -1,7 +1,10 @@
 // Package ui provides the terminal user interface.
 package ui
 
-import "github.com/charmbracelet/lipgloss"
+import (
+	"github.com/bborn/workflow/internal/github"
+	"github.com/charmbracelet/lipgloss"
+)
 
 // Colors - these are updated by refreshStyles() when theme changes
 var (
@@ -161,4 +164,75 @@ func StatusColor(status string) lipgloss.Color {
 	default:
 		return ColorMuted
 	}
+}
+
+// PR status colors
+var (
+	ColorPROpen    = lipgloss.Color("#98C379") // Green - ready to merge
+	ColorPRDraft   = lipgloss.Color("#5C6370") // Gray - draft
+	ColorPRMerged  = lipgloss.Color("#C678DD") // Purple - merged
+	ColorPRClosed  = lipgloss.Color("#E06C75") // Red - closed
+	ColorPRPending = lipgloss.Color("#E5C07B") // Yellow - checks running
+	ColorPRFailing = lipgloss.Color("#E06C75") // Red - checks failing
+)
+
+// PRStatusBadge returns a styled badge for a PR status.
+func PRStatusBadge(pr *github.PRInfo) string {
+	if pr == nil {
+		return ""
+	}
+
+	var icon string
+	var color lipgloss.Color
+
+	switch pr.State {
+	case github.PRStateMerged:
+		icon = "M"
+		color = ColorPRMerged
+	case github.PRStateClosed:
+		icon = "X"
+		color = ColorPRClosed
+	case github.PRStateDraft:
+		icon = "D"
+		color = ColorPRDraft
+	case github.PRStateOpen:
+		switch pr.CheckState {
+		case github.CheckStatePassing:
+			if pr.Mergeable == "MERGEABLE" {
+				icon = "R" // Ready to merge
+				color = ColorPROpen
+			} else if pr.Mergeable == "CONFLICTING" {
+				icon = "C" // Conflicts
+				color = ColorPRFailing
+			} else {
+				icon = "P" // Passing
+				color = ColorPROpen
+			}
+		case github.CheckStateFailing:
+			icon = "F" // Failing
+			color = ColorPRFailing
+		case github.CheckStatePending:
+			icon = "W" // Waiting/running
+			color = ColorPRPending
+		default:
+			icon = "O" // Open, no checks
+			color = ColorPROpen
+		}
+	}
+
+	style := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#FFFFFF")).
+		Background(color).
+		Padding(0, 0).
+		Bold(true)
+
+	return style.Render(icon)
+}
+
+// PRStatusDescription returns a human-readable description of PR status.
+func PRStatusDescription(pr *github.PRInfo) string {
+	if pr == nil {
+		return ""
+	}
+	return pr.StatusDescription()
 }
