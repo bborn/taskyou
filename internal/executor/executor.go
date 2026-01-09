@@ -604,21 +604,22 @@ Think deeply but be actionable. Summarize your conclusions clearly.
 		prompt.WriteString("Complete this task and summarize what you did.\n")
 	}
 
-	// Add response protocol to ALL task types - prefer MCP tools, text fallback
+	// Add response guidance to ALL task types
+	// Note: Task status is now managed automatically via Claude hooks
 	prompt.WriteString(`
 ═══════════════════════════════════════════════════════════════
-                      WORKFLOW TOOLS
+                      TASK GUIDANCE
 ═══════════════════════════════════════════════════════════════
 
-You have access to workflow tools via MCP. Use these to signal task status:
+Work on this task until completion. When you're done or need input:
 
 ✓ WHEN TASK IS COMPLETE:
-  Call the workflow_complete tool with a brief summary
+  Provide a clear summary of what was accomplished
 
 ✓ WHEN YOU NEED INPUT/CLARIFICATION:
-  Call the workflow_needs_input tool with your question
+  Ask your question clearly and wait for a response
 
-These tools update the task status directly. The user will be notified.
+The task system will automatically detect your status.
 ═══════════════════════════════════════════════════════════════
 `)
 
@@ -632,14 +633,39 @@ type execResult struct {
 	Message     string
 }
 
-// TmuxSessionName returns the tmux session name for a task.
-func TmuxSessionName(taskID int64) string {
+// TmuxDaemonSession is the session that holds all Claude task windows.
+const TmuxDaemonSession = "task-daemon"
+
+// TmuxWindowName returns the window name for a task.
+func TmuxWindowName(taskID int64) string {
 	return fmt.Sprintf("task-%d", taskID)
 }
 
-// setupMCPConfig creates an .mcp.json file in workDir to give Claude access to workflow tools.
-func (e *Executor) setupMCPConfig(workDir string, taskID int64) (cleanup func(), err error) {
-	mcpPath := filepath.Join(workDir, ".mcp.json")
+// TmuxSessionName returns the full tmux target for a task (session:window).
+func TmuxSessionName(taskID int64) string {
+	return fmt.Sprintf("%s:%s", TmuxDaemonSession, TmuxWindowName(taskID))
+}
+
+// ensureTmuxDaemon ensures the task-daemon session exists.
+func ensureTmuxDaemon() error {
+	// Check if session exists
+	if exec.Command("tmux", "has-session", "-t", TmuxDaemonSession).Run() == nil {
+		return nil
+	}
+	// Create it with a placeholder window that we'll kill later
+	return exec.Command("tmux", "new-session", "-d", "-s", TmuxDaemonSession, "-n", "_placeholder").Run()
+}
+
+// setupClaudeHooks creates a .claude/settings.local.json in workDir to configure hooks.
+// The hooks call back to `task claude-hook` to update task status.
+func (e *Executor) setupClaudeHooks(workDir string, taskID int64) (cleanup func(), err error) {
+	// Create .claude directory if it doesn't exist
+	claudeDir := filepath.Join(workDir, ".claude")
+	if err := os.MkdirAll(claudeDir, 0755); err != nil {
+		return nil, fmt.Errorf("create .claude dir: %w", err)
+	}
+
+	settingsPath := filepath.Join(claudeDir, "settings.local.json")
 
 	// Find the task binary path
 	taskBin, err := exec.LookPath("task")
@@ -648,74 +674,103 @@ func (e *Executor) setupMCPConfig(workDir string, taskID int64) (cleanup func(),
 		taskBin = "task"
 	}
 
-	config := map[string]interface{}{
-		"mcpServers": map[string]interface{}{
-			"workflow": map[string]interface{}{
-				"command": taskBin,
-				"args":    []string{"mcp", "--task", fmt.Sprintf("%d", taskID)},
+	// Configure hooks to call our task binary
+	// The TASK_ID env var is set when launching Claude
+	hooksConfig := map[string]interface{}{
+		"hooks": map[string]interface{}{
+			"Notification": []map[string]interface{}{
+				{
+					"matcher": "idle_prompt|permission_prompt",
+					"hooks": []map[string]interface{}{
+						{
+							"type":    "command",
+							"command": fmt.Sprintf("%s claude-hook --event Notification", taskBin),
+						},
+					},
+				},
+			},
+			"Stop": []map[string]interface{}{
+				{
+					"hooks": []map[string]interface{}{
+						{
+							"type":    "command",
+							"command": fmt.Sprintf("%s claude-hook --event Stop", taskBin),
+						},
+					},
+				},
 			},
 		},
 	}
 
-	data, err := json.MarshalIndent(config, "", "  ")
+	// Check if settings.local.json already exists
+	existingData, existingErr := os.ReadFile(settingsPath)
+	var finalConfig map[string]interface{}
+
+	if existingErr == nil {
+		// Merge our hooks with existing settings
+		if json.Unmarshal(existingData, &finalConfig) != nil {
+			finalConfig = hooksConfig
+		} else {
+			// Merge hooks into existing config
+			finalConfig["hooks"] = hooksConfig["hooks"]
+		}
+	} else {
+		finalConfig = hooksConfig
+	}
+
+	data, err := json.MarshalIndent(finalConfig, "", "  ")
 	if err != nil {
 		return nil, err
 	}
 
-	// Check if .mcp.json already exists (from project)
-	existingData, existingErr := os.ReadFile(mcpPath)
-	if existingErr == nil {
-		// Merge our config with existing
-		var existing map[string]interface{}
-		if json.Unmarshal(existingData, &existing) == nil {
-			if servers, ok := existing["mcpServers"].(map[string]interface{}); ok {
-				servers["workflow"] = config["mcpServers"].(map[string]interface{})["workflow"]
-				data, _ = json.MarshalIndent(existing, "", "  ")
-			}
-		}
-	}
-
-	if err := os.WriteFile(mcpPath, data, 0644); err != nil {
+	if err := os.WriteFile(settingsPath, data, 0644); err != nil {
 		return nil, err
 	}
 
 	cleanup = func() {
 		if existingErr == nil {
 			// Restore original file
-			os.WriteFile(mcpPath, existingData, 0644)
+			os.WriteFile(settingsPath, existingData, 0644)
 		} else {
 			// Remove our file
-			os.Remove(mcpPath)
+			os.Remove(settingsPath)
 		}
 	}
 
 	return cleanup, nil
 }
 
-// runClaude runs a task using Claude CLI in a tmux session for interactive access
+// runClaude runs a task using Claude CLI in a tmux window for interactive access
 func (e *Executor) runClaude(ctx context.Context, taskID int64, workDir, prompt string) execResult {
 	// Check if tmux is available
 	if _, err := exec.LookPath("tmux"); err != nil {
 		return e.runClaudeDirect(ctx, taskID, workDir, prompt)
 	}
 
-	sessionName := TmuxSessionName(taskID)
-
-	// Kill any existing session with this name
-	exec.Command("tmux", "kill-session", "-t", sessionName).Run()
-
-	// Setup MCP config for workflow tools
-	cleanupMCP, err := e.setupMCPConfig(workDir, taskID)
-	if err != nil {
-		e.logger.Warn("could not setup MCP config", "error", err)
+	// Ensure task-daemon session exists
+	if err := ensureTmuxDaemon(); err != nil {
+		e.logger.Warn("could not create task-daemon session", "error", err)
+		return e.runClaudeDirect(ctx, taskID, workDir, prompt)
 	}
-	// Note: we don't clean up MCP config immediately - it needs to persist for the session
+
+	windowName := TmuxWindowName(taskID)
+	windowTarget := TmuxSessionName(taskID)
+
+	// Kill any existing window with this name
+	exec.Command("tmux", "kill-window", "-t", windowTarget).Run()
+
+	// Setup Claude hooks for status updates
+	cleanupHooks, err := e.setupClaudeHooks(workDir, taskID)
+	if err != nil {
+		e.logger.Warn("could not setup Claude hooks", "error", err)
+	}
+	// Note: we don't clean up hooks config immediately - it needs to persist for the session
 
 	// Create a temp file for the prompt (avoids quoting issues)
 	promptFile, err := os.CreateTemp("", "task-prompt-*.txt")
 	if err != nil {
-		if cleanupMCP != nil {
-			cleanupMCP()
+		if cleanupHooks != nil {
+			cleanupHooks()
 		}
 		return e.runClaudeDirect(ctx, taskID, workDir, prompt)
 	}
@@ -723,32 +778,31 @@ func (e *Executor) runClaude(ctx context.Context, taskID int64, workDir, prompt 
 	promptFile.Close()
 	defer os.Remove(promptFile.Name())
 
-	// Script that runs claude interactively
-	// Note: tmux starts in workDir (-c flag), so claude inherits proper permissions and MCP config
+	// Script that runs claude interactively with TASK_ID env var
+	// Note: tmux starts in workDir (-c flag), so claude inherits proper permissions and hooks config
 	// Run interactively (no -p) so user can attach and see/interact in real-time
-	script := fmt.Sprintf(`claude "$(cat %q)"`, promptFile.Name())
+	// TASK_ID is passed so hooks know which task to update
+	script := fmt.Sprintf(`TASK_ID=%d claude "$(cat %q)"`, taskID, promptFile.Name())
 
-	// Start tmux session in the project directory
-	tmuxCmd := exec.Command("tmux", "new-session", "-d", "-s", sessionName, "-c", workDir, "sh", "-c", script)
+	// Create new window in task-daemon session
+	tmuxCmd := exec.Command("tmux", "new-window", "-d", "-t", TmuxDaemonSession, "-n", windowName, "-c", workDir, "sh", "-c", script)
 	if err := tmuxCmd.Run(); err != nil {
 		e.logger.Warn("tmux failed, falling back to direct", "error", err)
-		if cleanupMCP != nil {
-			cleanupMCP()
+		if cleanupHooks != nil {
+			cleanupHooks()
 		}
 		return e.runClaudeDirect(ctx, taskID, workDir, prompt)
 	}
 
-	// Configure tmux with helpful status bar and attach message
-	e.configureTmuxSession(sessionName)
-
-	e.logLine(taskID, "system", fmt.Sprintf("Running in tmux session '%s' - press 'a' to attach", sessionName))
+	// Configure tmux window with helpful status bar
+	e.configureTmuxWindow(windowTarget)
 
 	// Poll for output and completion
-	result := e.pollTmuxSession(ctx, taskID, sessionName)
+	result := e.pollTmuxSession(ctx, taskID, windowTarget)
 
-	// Clean up MCP config after session ends
-	if cleanupMCP != nil {
-		cleanupMCP()
+	// Clean up hooks config after session ends
+	if cleanupHooks != nil {
+		cleanupHooks()
 	}
 
 	return result
@@ -771,14 +825,30 @@ func (e *Executor) runClaudeResume(ctx context.Context, taskID int64, workDir, p
 		return e.runClaudeDirect(ctx, taskID, workDir, feedback)
 	}
 
-	tmuxSession := TmuxSessionName(taskID)
+	// Ensure task-daemon session exists
+	if err := ensureTmuxDaemon(); err != nil {
+		e.logger.Warn("could not create task-daemon session", "error", err)
+		return e.runClaudeDirect(ctx, taskID, workDir, feedback)
+	}
 
-	// Kill any existing session with this name
-	exec.Command("tmux", "kill-session", "-t", tmuxSession).Run()
+	windowName := TmuxWindowName(taskID)
+	windowTarget := TmuxSessionName(taskID)
+
+	// Kill any existing window with this name
+	exec.Command("tmux", "kill-window", "-t", windowTarget).Run()
+
+	// Setup Claude hooks for status updates
+	cleanupHooks, err := e.setupClaudeHooks(workDir, taskID)
+	if err != nil {
+		e.logger.Warn("could not setup Claude hooks", "error", err)
+	}
 
 	// Create a temp file for the feedback (avoids quoting issues)
 	feedbackFile, err := os.CreateTemp("", "task-feedback-*.txt")
 	if err != nil {
+		if cleanupHooks != nil {
+			cleanupHooks()
+		}
 		return e.runClaudeDirect(ctx, taskID, workDir, feedback)
 	}
 	feedbackFile.WriteString(feedback)
@@ -786,22 +856,31 @@ func (e *Executor) runClaudeResume(ctx context.Context, taskID int64, workDir, p
 	defer os.Remove(feedbackFile.Name())
 
 	// Script that resumes claude with session ID (interactive mode)
-	script := fmt.Sprintf(`claude --resume %s "$(cat %q)"`, sessionID, feedbackFile.Name())
+	// TASK_ID is passed so hooks know which task to update
+	script := fmt.Sprintf(`TASK_ID=%d claude --resume %s "$(cat %q)"`, taskID, sessionID, feedbackFile.Name())
 
-	// Start tmux session in the project directory
-	tmuxCmd := exec.Command("tmux", "new-session", "-d", "-s", tmuxSession, "-c", workDir, "sh", "-c", script)
+	// Create new window in task-daemon session
+	tmuxCmd := exec.Command("tmux", "new-window", "-d", "-t", TmuxDaemonSession, "-n", windowName, "-c", workDir, "sh", "-c", script)
 	if err := tmuxCmd.Run(); err != nil {
 		e.logger.Warn("tmux failed, falling back to direct", "error", err)
+		if cleanupHooks != nil {
+			cleanupHooks()
+		}
 		return e.runClaudeDirect(ctx, taskID, workDir, feedback)
 	}
 
-	// Configure tmux with helpful status bar and attach message
-	e.configureTmuxSession(tmuxSession)
-
-	e.logLine(taskID, "system", fmt.Sprintf("Resuming session %s in tmux '%s' - press 'a' to attach", sessionID[:8], tmuxSession))
+	// Configure tmux window with helpful status bar
+	e.configureTmuxWindow(windowTarget)
 
 	// Poll for output and completion
-	return e.pollTmuxSession(ctx, taskID, tmuxSession)
+	result := e.pollTmuxSession(ctx, taskID, windowTarget)
+
+	// Clean up hooks config after session ends
+	if cleanupHooks != nil {
+		cleanupHooks()
+	}
+
+	return result
 }
 
 // findClaudeSessionID finds the most recent claude session ID for a workDir
@@ -885,6 +964,21 @@ func (e *Executor) pollTmuxSession(ctx context.Context, taskID int64, sessionNam
 			// Check if session still exists
 			if err := exec.Command("tmux", "has-session", "-t", sessionName).Run(); err != nil {
 				// Session ended naturally (claude exited)
+				// First check if task was marked as blocked via MCP (workflow_needs_input)
+				task, dbErr := e.db.GetTask(taskID)
+				if dbErr == nil && task != nil && task.Status == db.StatusBlocked {
+					// Get the question from recent logs
+					logs, _ := e.db.GetTaskLogs(taskID, 5)
+					var question string
+					for _, l := range logs {
+						if l.LineType == "question" {
+							question = l.Content
+							break
+						}
+					}
+					return execResult{NeedsInput: true, Message: question}
+				}
+				// Otherwise parse output markers
 				output := allOutput.String()
 				return e.parseOutputMarkers(output)
 			}
@@ -989,18 +1083,15 @@ func (e *Executor) killTmuxSession(sessionName string) {
 	exec.Command("tmux", "kill-session", "-t", sessionName).Run()
 }
 
-// configureTmuxSession sets up helpful UI elements for users who attach to the session.
-func (e *Executor) configureTmuxSession(sessionName string) {
-	// Add status bar with detach instructions
-	exec.Command("tmux", "set-option", "-t", sessionName, "status", "on").Run()
-	exec.Command("tmux", "set-option", "-t", sessionName, "status-style", "bg=yellow,fg=black").Run()
-	exec.Command("tmux", "set-option", "-t", sessionName, "status-left", "").Run()
-	exec.Command("tmux", "set-option", "-t", sessionName, "status-right", " Detach: Ctrl+B D | Ctrl+C kills Claude ").Run()
-	exec.Command("tmux", "set-option", "-t", sessionName, "status-right-length", "40").Run()
-
-	// Display a message when someone attaches to the session
-	exec.Command("tmux", "set-hook", "-t", sessionName, "client-attached",
-		`display-message -d 5000 "Detach: Ctrl+B then D | Ctrl+C will kill this Claude session"`).Run()
+// configureTmuxWindow sets up helpful UI elements for a task window.
+func (e *Executor) configureTmuxWindow(windowTarget string) {
+	// Window-specific options are limited; most styling is session-wide
+	// Just ensure the daemon session has good defaults
+	exec.Command("tmux", "set-option", "-t", TmuxDaemonSession, "status", "on").Run()
+	exec.Command("tmux", "set-option", "-t", TmuxDaemonSession, "status-style", "bg=#f59e0b,fg=black").Run()
+	exec.Command("tmux", "set-option", "-t", TmuxDaemonSession, "status-left", " TASK DAEMON ").Run()
+	exec.Command("tmux", "set-option", "-t", TmuxDaemonSession, "status-right", " Ctrl+C kills Claude ").Run()
+	exec.Command("tmux", "set-option", "-t", TmuxDaemonSession, "status-right-length", "30").Run()
 }
 
 // isClaudeIdle checks if claude appears to be idle (showing prompt with no activity).
@@ -1122,6 +1213,8 @@ func (e *Executor) parseOutputMarkers(output string) execResult {
 func (e *Executor) runClaudeDirect(ctx context.Context, taskID int64, workDir, prompt string) execResult {
 	cmd := exec.CommandContext(ctx, "claude", "-p", prompt)
 	cmd.Dir = workDir
+	// Pass TASK_ID so hooks know which task to update
+	cmd.Env = append(os.Environ(), fmt.Sprintf("TASK_ID=%d", taskID))
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -1212,6 +1305,20 @@ func (e *Executor) runClaudeDirect(ctx context.Context, taskID int64, workDir, p
 
 	if err != nil {
 		return execResult{Message: fmt.Sprintf("claude exited: %v", err)}
+	}
+
+	// Check if task was marked as blocked via MCP (workflow_needs_input)
+	task, dbErr := e.db.GetTask(taskID)
+	if dbErr == nil && task != nil && task.Status == db.StatusBlocked {
+		logs, _ := e.db.GetTaskLogs(taskID, 5)
+		var question string
+		for _, l := range logs {
+			if l.LineType == "question" {
+				question = l.Content
+				break
+			}
+		}
+		return execResult{NeedsInput: true, Message: question}
 	}
 
 	return execResult{Success: true}
@@ -1378,6 +1485,7 @@ func (e *Executor) setupWorktree(task *db.Task) (string, error) {
 		task.WorktreePath = worktreePath
 		task.BranchName = branchName
 		e.db.UpdateTask(task)
+		trustMiseConfig(worktreePath)
 		return worktreePath, nil
 	}
 
@@ -1402,6 +1510,7 @@ func (e *Executor) setupWorktree(task *db.Task) (string, error) {
 					task.WorktreePath = worktreePath
 					task.BranchName = branchName
 					e.db.UpdateTask(task)
+					trustMiseConfig(worktreePath)
 					return worktreePath, nil
 				}
 				return "", fmt.Errorf("create worktree: %v\n%s\n%s", err, string(output), string(output2))
@@ -1418,7 +1527,16 @@ func (e *Executor) setupWorktree(task *db.Task) (string, error) {
 
 	e.logLine(task.ID, "system", fmt.Sprintf("Created worktree at %s (branch: %s)", worktreePath, branchName))
 
+	trustMiseConfig(worktreePath)
+
 	return worktreePath, nil
+}
+
+// trustMiseConfig trusts mise config files in a directory (no-op if mise not installed).
+func trustMiseConfig(dir string) {
+	if _, err := exec.LookPath("mise"); err == nil {
+		exec.Command("mise", "trust", dir).Run()
+	}
 }
 
 // ensureGitignore adds an entry to .gitignore if not already present.

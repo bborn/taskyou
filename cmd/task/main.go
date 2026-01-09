@@ -10,7 +10,7 @@ import (
 	"io"
 	"net"
 	"os"
-	"os/exec"
+	osexec "os/exec"
 	"os/signal"
 	"os/user"
 	"path/filepath"
@@ -21,7 +21,6 @@ import (
 	"github.com/bborn/workflow/internal/config"
 	"github.com/bborn/workflow/internal/db"
 	"github.com/bborn/workflow/internal/executor"
-	"github.com/bborn/workflow/internal/mcp"
 	"github.com/bborn/workflow/internal/ui"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -142,25 +141,21 @@ func main() {
 	}
 	rootCmd.AddCommand(logsCmd)
 
-	// MCP subcommand - run MCP server for Claude integration (internal use)
-	mcpCmd := &cobra.Command{
-		Use:    "mcp",
-		Short:  "Run MCP server for Claude integration",
+	// Claude hook subcommand - handles Claude Code hook callbacks (internal use)
+	claudeHookCmd := &cobra.Command{
+		Use:    "claude-hook",
+		Short:  "Handle Claude Code hook callbacks",
 		Hidden: true, // Internal use only
 		Run: func(cmd *cobra.Command, args []string) {
-			taskID, _ := cmd.Flags().GetInt64("task")
-			if taskID == 0 {
-				fmt.Fprintln(os.Stderr, "Error: --task flag required")
-				os.Exit(1)
-			}
-			if err := runMCPServer(taskID); err != nil {
-				fmt.Fprintln(os.Stderr, "Error: "+err.Error())
+			hookEvent, _ := cmd.Flags().GetString("event")
+			if err := handleClaudeHook(hookEvent); err != nil {
+				// Don't print errors - hooks should be silent
 				os.Exit(1)
 			}
 		},
 	}
-	mcpCmd.Flags().Int64("task", 0, "Task ID for this MCP server")
-	rootCmd.AddCommand(mcpCmd)
+	claudeHookCmd.Flags().String("event", "", "Hook event type (Notification, Stop, etc.)")
+	rootCmd.AddCommand(claudeHookCmd)
 
 	// Claudes subcommand - manage running Claude sessions
 	claudesCmd := &cobra.Command{
@@ -215,6 +210,26 @@ func main() {
 
 	rootCmd.AddCommand(claudesCmd)
 
+	// Delete subcommand - delete a task, kill its Claude session, and remove worktree
+	deleteCmd := &cobra.Command{
+		Use:   "delete <task-id>",
+		Short: "Delete a task, kill its Claude session, and remove its worktree",
+		Args:  cobra.ExactArgs(1),
+		Run: func(cmd *cobra.Command, args []string) {
+			var taskID int64
+			if _, err := fmt.Sscanf(args[0], "%d", &taskID); err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Invalid task ID: "+args[0]))
+				os.Exit(1)
+			}
+			if err := deleteTask(taskID); err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+			fmt.Println(successStyle.Render(fmt.Sprintf("Deleted task #%d", taskID)))
+		},
+	}
+	rootCmd.AddCommand(deleteCmd)
+
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
 		os.Exit(1)
@@ -234,9 +249,9 @@ func execInTmux() error {
 	cmdStr := strings.Join(args, " ")
 
 	// Check if session already exists
-	if exec.Command("tmux", "has-session", "-t", "task-ui").Run() == nil {
+	if osexec.Command("tmux", "has-session", "-t", "task-ui").Run() == nil {
 		// Session exists, attach to it instead
-		cmd := exec.Command("tmux", "attach-session", "-t", "task-ui")
+		cmd := osexec.Command("tmux", "attach-session", "-t", "task-ui")
 		cmd.Stdin = os.Stdin
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
@@ -244,18 +259,18 @@ func execInTmux() error {
 	}
 
 	// Create detached session first so we can configure it
-	if err := exec.Command("tmux", "new-session", "-d", "-s", "task-ui", cmdStr).Run(); err != nil {
+	if err := osexec.Command("tmux", "new-session", "-d", "-s", "task-ui", cmdStr).Run(); err != nil {
 		return fmt.Errorf("create tmux session: %w", err)
 	}
 
 	// Configure status bar
-	exec.Command("tmux", "set-option", "-t", "task-ui", "status", "on").Run()
-	exec.Command("tmux", "set-option", "-t", "task-ui", "status-style", "bg=#1e293b,fg=#94a3b8").Run()
-	exec.Command("tmux", "set-option", "-t", "task-ui", "status-left", " ").Run()
-	exec.Command("tmux", "set-option", "-t", "task-ui", "status-right", "").Run()
+	osexec.Command("tmux", "set-option", "-t", "task-ui", "status", "on").Run()
+	osexec.Command("tmux", "set-option", "-t", "task-ui", "status-style", "bg=#1e293b,fg=#94a3b8").Run()
+	osexec.Command("tmux", "set-option", "-t", "task-ui", "status-left", " ").Run()
+	osexec.Command("tmux", "set-option", "-t", "task-ui", "status-right", "").Run()
 
 	// Now attach to the session
-	cmd := exec.Command("tmux", "attach-session", "-t", "task-ui")
+	cmd := osexec.Command("tmux", "attach-session", "-t", "task-ui")
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -301,6 +316,17 @@ func runLocal() error {
 		return fmt.Errorf("run TUI: %w", err)
 	}
 
+	// Kill task-ui tmux session on exit (if we're in it)
+	// This cleans up the session that was created by execInTmux()
+	if os.Getenv("TMUX") != "" {
+		// Check if we're in the task-ui session
+		tmuxCmd := osexec.Command("tmux", "display-message", "-p", "#{session_name}")
+		out, err := tmuxCmd.Output()
+		if err == nil && strings.TrimSpace(string(out)) == "task-ui" {
+			osexec.Command("tmux", "kill-session", "-t", "task-ui").Run()
+		}
+	}
+
 	return nil
 }
 
@@ -323,7 +349,7 @@ func ensureDaemonRunning() error {
 		return fmt.Errorf("get executable: %w", err)
 	}
 
-	cmd := exec.Command(executable, "daemon")
+	cmd := osexec.Command(executable, "daemon")
 	cmd.Stdout = nil
 	cmd.Stderr = nil
 	cmd.Stdin = nil
@@ -587,9 +613,37 @@ func loadPrivateKey(path string) (ssh.Signer, error) {
 	return ssh.ParsePrivateKey(data)
 }
 
-// runMCPServer runs the MCP server for Claude integration.
-// This is invoked by Claude as its MCP server for workflow tools.
-func runMCPServer(taskID int64) error {
+// ClaudeHookInput is the JSON structure Claude sends to hooks via stdin.
+type ClaudeHookInput struct {
+	SessionID        string `json:"session_id"`
+	TranscriptPath   string `json:"transcript_path"`
+	Cwd              string `json:"cwd"`
+	HookEventName    string `json:"hook_event_name"`
+	NotificationType string `json:"notification_type,omitempty"` // For Notification hooks
+	Message          string `json:"message,omitempty"`
+	StopReason       string `json:"stop_reason,omitempty"` // For Stop hooks
+}
+
+// handleClaudeHook processes Claude Code hook callbacks.
+// It reads hook data from stdin and updates task status accordingly.
+func handleClaudeHook(hookEvent string) error {
+	// Get task ID from environment (set by executor when launching Claude)
+	taskIDStr := os.Getenv("TASK_ID")
+	if taskIDStr == "" {
+		return fmt.Errorf("TASK_ID not set")
+	}
+	var taskID int64
+	if _, err := fmt.Sscanf(taskIDStr, "%d", &taskID); err != nil {
+		return fmt.Errorf("invalid TASK_ID: %s", taskIDStr)
+	}
+
+	// Read hook input from stdin
+	var input ClaudeHookInput
+	decoder := json.NewDecoder(os.Stdin)
+	if err := decoder.Decode(&input); err != nil {
+		return fmt.Errorf("decode hook input: %w", err)
+	}
+
 	// Open database
 	dbPath := db.DefaultPath()
 	database, err := db.Open(dbPath)
@@ -598,9 +652,68 @@ func runMCPServer(taskID int64) error {
 	}
 	defer database.Close()
 
-	// Create and run MCP server
-	server := mcp.NewServer(database, taskID)
-	return server.Run()
+	// Handle based on hook event type
+	switch hookEvent {
+	case "Notification":
+		return handleNotificationHook(database, taskID, &input)
+	case "Stop":
+		return handleStopHook(database, taskID, &input)
+	default:
+		// Unknown hook type, ignore
+		return nil
+	}
+}
+
+// handleNotificationHook handles Notification hooks from Claude.
+func handleNotificationHook(database *db.DB, taskID int64, input *ClaudeHookInput) error {
+	switch input.NotificationType {
+	case "idle_prompt", "permission_prompt":
+		// Claude is waiting for input - mark task as blocked
+		task, err := database.GetTask(taskID)
+		if err != nil {
+			return err
+		}
+		// Only update if currently processing (avoid overwriting other states)
+		if task != nil && task.Status == db.StatusProcessing {
+			database.UpdateTaskStatus(taskID, db.StatusBlocked)
+			msg := "Waiting for user input"
+			if input.NotificationType == "permission_prompt" {
+				msg = "Waiting for permission"
+			}
+			database.AppendTaskLog(taskID, "system", msg)
+		}
+	}
+	return nil
+}
+
+// handleStopHook handles Stop hooks from Claude (agent finished responding).
+func handleStopHook(database *db.DB, taskID int64, input *ClaudeHookInput) error {
+	// When Claude stops, check if we should mark as blocked (waiting for input)
+	// The stop_reason tells us why Claude stopped
+	task, err := database.GetTask(taskID)
+	if err != nil {
+		return err
+	}
+
+	// Only act if task is still processing
+	if task == nil || task.Status != db.StatusProcessing {
+		return nil
+	}
+
+	// If Claude stopped and is waiting at the prompt, mark as blocked
+	// This is a fallback - ideally Claude uses the workflow tools
+	switch input.StopReason {
+	case "end_turn":
+		// Normal completion - Claude finished its turn
+		// Mark as blocked since it's waiting for user input
+		database.UpdateTaskStatus(taskID, db.StatusBlocked)
+		database.AppendTaskLog(taskID, "system", "Claude finished turn - waiting for input")
+	case "tool_use":
+		// Claude is using a tool, still working
+		// Keep as processing
+	}
+
+	return nil
 }
 
 // tailClaudeLogs tails all claude session logs for debugging.
@@ -775,7 +888,7 @@ func truncate(s string, maxLen int) string {
 	return s[:maxLen-3] + "..."
 }
 
-// listClaudeSessions lists all running Claude tmux sessions for tasks.
+// listClaudeSessions lists all running Claude task windows in task-daemon.
 func listClaudeSessions() {
 	sessions := getClaudeSessions()
 	if len(sessions) == 0 {
@@ -783,7 +896,7 @@ func listClaudeSessions() {
 		return
 	}
 
-	fmt.Printf("%s\n\n", boldStyle.Render("Running Claude Sessions:"))
+	fmt.Printf("%s\n\n", boldStyle.Render("Running Claude Sessions (in task-daemon):"))
 	for _, s := range sessions {
 		fmt.Printf("  %s  %s\n",
 			successStyle.Render(fmt.Sprintf("task-%d", s.taskID)),
@@ -796,10 +909,10 @@ type claudeSession struct {
 	info   string
 }
 
-// getClaudeSessions returns all running task-* tmux sessions.
+// getClaudeSessions returns all running task-* windows in task-daemon session.
 func getClaudeSessions() []claudeSession {
-	// List all tmux sessions
-	cmd := exec.Command("tmux", "list-sessions", "-F", "#{session_name}:#{session_created}:#{session_windows}")
+	// List all windows in task-daemon session
+	cmd := osexec.Command("tmux", "list-windows", "-t", executor.TmuxDaemonSession, "-F", "#{window_name}:#{window_activity}")
 	output, err := cmd.Output()
 	if err != nil {
 		return nil
@@ -812,12 +925,17 @@ func getClaudeSessions() []claudeSession {
 			continue
 		}
 
-		parts := strings.SplitN(line, ":", 3)
+		parts := strings.SplitN(line, ":", 2)
 		if len(parts) < 1 {
 			continue
 		}
 
 		name := parts[0]
+		// Skip placeholder window
+		if name == "_placeholder" {
+			continue
+		}
+
 		if !strings.HasPrefix(name, "task-") {
 			continue
 		}
@@ -828,13 +946,13 @@ func getClaudeSessions() []claudeSession {
 		}
 
 		info := ""
-		if len(parts) >= 3 {
-			// Parse created timestamp
-			var created int64
-			fmt.Sscanf(parts[1], "%d", &created)
-			if created > 0 {
-				t := time.Unix(created, 0)
-				info = fmt.Sprintf("started %s, %s windows", t.Format("15:04:05"), parts[2])
+		if len(parts) >= 2 {
+			// Parse activity timestamp
+			var activity int64
+			fmt.Sscanf(parts[1], "%d", &activity)
+			if activity > 0 {
+				t := time.Unix(activity, 0)
+				info = fmt.Sprintf("last activity %s", t.Format("15:04:05"))
 			}
 		}
 
@@ -844,24 +962,24 @@ func getClaudeSessions() []claudeSession {
 	return sessions
 }
 
-// killClaudeSession kills a specific task's tmux session.
+// killClaudeSession kills a specific task's tmux window in task-daemon.
 func killClaudeSession(taskID int) error {
-	sessionName := fmt.Sprintf("task-%d", taskID)
+	windowTarget := executor.TmuxSessionName(int64(taskID))
 
-	// Check if session exists
-	if err := exec.Command("tmux", "has-session", "-t", sessionName).Run(); err != nil {
-		return fmt.Errorf("no session for task %d", taskID)
+	// Check if window exists
+	if err := osexec.Command("tmux", "list-panes", "-t", windowTarget).Run(); err != nil {
+		return fmt.Errorf("no window for task %d", taskID)
 	}
 
-	// Kill the session
-	if err := exec.Command("tmux", "kill-session", "-t", sessionName).Run(); err != nil {
-		return fmt.Errorf("failed to kill session: %w", err)
+	// Kill the window
+	if err := osexec.Command("tmux", "kill-window", "-t", windowTarget).Run(); err != nil {
+		return fmt.Errorf("failed to kill window: %w", err)
 	}
 
 	return nil
 }
 
-// killAllClaudeSessions kills all task-* tmux sessions.
+// killAllClaudeSessions kills all task-* tmux windows in task-daemon.
 func killAllClaudeSessions() int {
 	sessions := getClaudeSessions()
 	count := 0
@@ -871,4 +989,44 @@ func killAllClaudeSessions() int {
 		}
 	}
 	return count
+}
+
+// deleteTask deletes a task, its Claude session, and its worktree.
+func deleteTask(taskID int64) error {
+	// Open database
+	dbPath := db.DefaultPath()
+	database, err := db.Open(dbPath)
+	if err != nil {
+		return fmt.Errorf("open database: %w", err)
+	}
+	defer database.Close()
+
+	// Get task to check for worktree
+	task, err := database.GetTask(taskID)
+	if err != nil {
+		return fmt.Errorf("get task: %w", err)
+	}
+	if task == nil {
+		return fmt.Errorf("task #%d not found", taskID)
+	}
+
+	// Kill Claude session if running (ignore errors - session may not exist)
+	killClaudeSession(int(taskID))
+
+	// Clean up worktree if it exists
+	if task.WorktreePath != "" {
+		cfg := config.New(database)
+		exec := executor.New(database, cfg)
+		if err := exec.CleanupWorktree(task); err != nil {
+			// Log warning but continue with deletion
+			fmt.Fprintln(os.Stderr, dimStyle.Render(fmt.Sprintf("Warning: could not remove worktree: %v", err)))
+		}
+	}
+
+	// Delete from database
+	if err := database.DeleteTask(taskID); err != nil {
+		return fmt.Errorf("delete task: %w", err)
+	}
+
+	return nil
 }

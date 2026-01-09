@@ -136,6 +136,12 @@ func (m *DetailModel) Update(msg tea.Msg) (*DetailModel, tea.Cmd) {
 			return m, nil
 		}
 
+		// 't' to toggle the Claude pane
+		if keyMsg.String() == "t" && hasSession && os.Getenv("TMUX") != "" {
+			m.toggleTmuxPane()
+			return m, nil
+		}
+
 		m.viewport, cmd = m.viewport.Update(keyMsg)
 	}
 
@@ -159,32 +165,33 @@ func (m *DetailModel) StartTmuxTicker() tea.Cmd {
 	return nil
 }
 
-// hasActiveTmuxSession checks if this task has an active tmux session.
+// hasActiveTmuxSession checks if this task has an active tmux window in task-daemon.
 func (m *DetailModel) hasActiveTmuxSession() bool {
 	if m.task == nil {
 		return false
 	}
-	sessionName := executor.TmuxSessionName(m.task.ID)
-	err := exec.Command("tmux", "has-session", "-t", sessionName).Run()
+	windowTarget := executor.TmuxSessionName(m.task.ID)
+	// Check if the window exists by trying to get info about it
+	err := exec.Command("tmux", "list-panes", "-t", windowTarget).Run()
 	return err == nil
 }
 
 // joinTmuxPane joins the task's tmux pane into the current window as a split.
 func (m *DetailModel) joinTmuxPane() {
-	sessionName := executor.TmuxSessionName(m.task.ID)
+	windowTarget := executor.TmuxSessionName(m.task.ID)
 
 	// Get current pane ID before joining (so we can select it after)
 	currentPaneCmd := exec.Command("tmux", "display-message", "-p", "#{pane_id}")
 	currentPaneOut, _ := currentPaneCmd.Output()
 	currentPaneID := strings.TrimSpace(string(currentPaneOut))
 
-	// Join the task session's pane into our window as a vertical split below
+	// Join the task window's pane into our window as a vertical split below
 	// -v: vertical split (below)
-	// -l 60%: new pane takes 60% of height
-	// -s: source pane (from task session)
+	// -l 50%: new pane takes 50% of height
+	// -s: source pane (from task-daemon window)
 	err := exec.Command("tmux", "join-pane",
-		"-v", "-l", "60%",
-		"-s", sessionName+":0.0").Run()
+		"-v", "-l", "50%",
+		"-s", windowTarget+".0").Run()
 	if err != nil {
 		return
 	}
@@ -206,13 +213,12 @@ func (m *DetailModel) joinTmuxPane() {
 	exec.Command("tmux", "set-option", "-t", "task-ui", "status-right", " Ctrl+B ↑↓ switch panes │ Ctrl+B D detach ").Run()
 	exec.Command("tmux", "set-option", "-t", "task-ui", "status-right-length", "50").Run()
 
-	// Make active pane border very obvious
+	// Style pane borders - active pane gets theme color outline
 	exec.Command("tmux", "set-option", "-t", "task-ui", "pane-border-style", "fg=#374151").Run()
-	exec.Command("tmux", "set-option", "-t", "task-ui", "pane-active-border-style", "fg=#22c55e,bg=#22c55e").Run()
-	exec.Command("tmux", "set-option", "-t", "task-ui", "pane-border-lines", "heavy").Run()
+	exec.Command("tmux", "set-option", "-t", "task-ui", "pane-active-border-style", "fg=#61AFEF").Run()
 }
 
-// breakTmuxPane breaks the joined pane back to its own session.
+// breakTmuxPane breaks the joined pane back to task-daemon.
 func (m *DetailModel) breakTmuxPane() {
 	// Reset status bar and pane styling
 	exec.Command("tmux", "set-option", "-t", "task-ui", "status-right", "").Run()
@@ -223,30 +229,48 @@ func (m *DetailModel) breakTmuxPane() {
 		return
 	}
 
-	sessionName := executor.TmuxSessionName(m.task.ID)
+	windowName := executor.TmuxWindowName(m.task.ID)
 
-	// Break the pane back to the task's session
+	// Break the pane back to task-daemon as a new window with the task name
 	// -d: don't switch to the new window
 	// -s: source pane (the one we joined)
 	// -t: target session
+	// -n: name for the new window
 	exec.Command("tmux", "break-pane",
 		"-d",
 		"-s", m.joinedPaneID,
-		"-t", sessionName+":").Run()
+		"-t", executor.TmuxDaemonSession+":",
+		"-n", windowName).Run()
 
 	m.joinedPaneID = ""
 }
 
-// killTmuxSession kills the Claude tmux session.
+// killTmuxSession kills the Claude tmux window.
 func (m *DetailModel) killTmuxSession() {
-	sessionName := executor.TmuxSessionName(m.task.ID)
+	windowTarget := executor.TmuxSessionName(m.task.ID)
 	m.database.AppendTaskLog(m.task.ID, "user", "→ [Kill] Session terminated")
 
-	// If we have a joined pane, it will be killed with the session
+	// Reset pane styling first
+	exec.Command("tmux", "set-option", "-t", "task-ui", "status-right", "").Run()
+	exec.Command("tmux", "set-option", "-t", "task-ui", "pane-border-style", "default").Run()
+	exec.Command("tmux", "set-option", "-t", "task-ui", "pane-active-border-style", "default").Run()
+
+	// If we have a joined pane, it will be killed with the window
 	m.joinedPaneID = ""
 
-	exec.Command("tmux", "kill-session", "-t", sessionName).Run()
+	exec.Command("tmux", "kill-window", "-t", windowTarget).Run()
 	m.Refresh()
+}
+
+// toggleTmuxPane toggles the Claude pane visibility.
+func (m *DetailModel) toggleTmuxPane() {
+	if m.joinedPaneID != "" {
+		// Pane is open, close it
+		m.breakTmuxPane()
+	} else {
+		// Pane is closed, open it
+		m.joinTmuxPane()
+	}
 }
 
 // View renders the detail view.
@@ -389,7 +413,15 @@ func (m *DetailModel) renderHelp() string {
 	}
 
 	hasSession := m.hasActiveTmuxSession()
-	if hasSession {
+	if hasSession && os.Getenv("TMUX") != "" {
+		toggleDesc := "show pane"
+		if m.joinedPaneID != "" {
+			toggleDesc = "hide pane"
+		}
+		keys = append(keys, struct {
+			key  string
+			desc string
+		}{"t", toggleDesc})
 		keys = append(keys, struct {
 			key  string
 			desc string
@@ -402,6 +434,7 @@ func (m *DetailModel) renderHelp() string {
 	}{
 		{"r", "retry"},
 		{"c", "close"},
+		{"d", "delete"},
 		{"o", "open dir"},
 		{"q/esc", "back"},
 	}...)

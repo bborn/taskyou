@@ -929,6 +929,15 @@ func (m *AppModel) updateDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.interruptTask(m.selectedTask.ID)
 		}
 	}
+	if key.Matches(keyMsg, m.keys.Delete) && m.selectedTask != nil {
+		taskID := m.selectedTask.ID
+		m.currentView = ViewDashboard
+		if m.detailView != nil {
+			m.detailView.Cleanup()
+			m.detailView = nil
+		}
+		return m, m.deleteTask(taskID)
+	}
 	if key.Matches(keyMsg, m.keys.Open) && m.selectedTask != nil {
 		return m, m.openTaskDir(m.selectedTask)
 	}
@@ -1267,7 +1276,23 @@ func (m *AppModel) closeTask(id int64) tea.Cmd {
 
 func (m *AppModel) deleteTask(id int64) tea.Cmd {
 	return func() tea.Msg {
-		err := m.db.DeleteTask(id)
+		// Get task to check for worktree
+		task, err := m.db.GetTask(id)
+		if err != nil {
+			return taskDeletedMsg{err: err}
+		}
+
+		// Kill Claude session if running (ignore errors)
+		windowTarget := executor.TmuxSessionName(id)
+		exec.Command("tmux", "kill-window", "-t", windowTarget).Run()
+
+		// Clean up worktree if it exists
+		if task != nil && task.WorktreePath != "" {
+			m.executor.CleanupWorktree(task)
+		}
+
+		// Delete from database
+		err = m.db.DeleteTask(id)
 		return taskDeletedMsg{err: err}
 	}
 }
@@ -1330,8 +1355,9 @@ func (m *AppModel) openTaskDir(task *db.Task) tea.Cmd {
 	}
 
 	// Use tmux to create a new window in the task directory
+	// Explicitly target task-ui session to avoid opening in task-daemon
 	if os.Getenv("TMUX") != "" {
-		cmd := exec.Command("tmux", "new-window", "-c", dir)
+		cmd := exec.Command("tmux", "new-window", "-t", "task-ui", "-c", dir)
 		go cmd.Run()
 		return func() tea.Msg { return openDirDoneMsg{} }
 	}
