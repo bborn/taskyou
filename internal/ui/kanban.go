@@ -247,8 +247,9 @@ func (k *KanbanBoard) View() string {
 		isSelectedCol := colIdx == k.selectedCol
 
 		// Colored header bar at top of column
+		// Width is colWidth + 2 to match the column's total width (content + left/right borders)
 		headerBarStyle := lipgloss.NewStyle().
-			Width(colWidth).
+			Width(colWidth + 2).
 			Background(col.Color).
 			Foreground(lipgloss.Color("#000000")).
 			Bold(true).
