@@ -153,11 +153,7 @@ func (m *DetailModel) Update(msg tea.Msg) (*DetailModel, tea.Cmd) {
 	if keyMsg, ok := msg.(tea.KeyMsg); ok {
 		hasSession := m.hasActiveTmuxSession()
 
-		// 'k' to kill the tmux session
-		if keyMsg.String() == "k" && hasSession {
-			m.killTmuxSession()
-			return m, nil
-		}
+		// 'k' is now handled by app.go with confirmation dialog
 
 		// 't' to toggle the Claude pane
 		if keyMsg.String() == "t" && hasSession && os.Getenv("TMUX") != "" {
