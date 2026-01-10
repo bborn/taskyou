@@ -349,7 +349,7 @@ func (m *AppModel) Init() tea.Cmd {
 		osExec.Command("tmux", "set-option", "-t", "task-ui", "mouse", "on").Run()
 	}
 
-	return tea.Batch(m.loadTasks(), m.waitForTaskEvent(), m.waitForDBChange(), m.tick())
+	return tea.Batch(m.loadTasks(), m.waitForTaskEvent(), m.waitForDBChange(), m.tick(), m.prRefreshTick(), m.refreshAllPRs())
 }
 
 // Update handles messages.
@@ -473,8 +473,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		m.kanban.SetTasks(m.tasks)
 
-		// Fetch PR info for tasks with branches
-		cmds = append(cmds, m.fetchAllPRInfo()...)
+		// PR info is fetched separately via prRefreshTick, not on every task load
 
 	case taskLoadedMsg:
 		if msg.err == nil {
@@ -503,6 +502,25 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.detailView.SetPRInfo(msg.info)
 			}
 		}
+
+	case prBatchMsg:
+		// Batch PR update from refreshAllPRs
+		for _, result := range msg.results {
+			if result.info != nil {
+				m.kanban.SetPRInfo(result.taskID, result.info)
+				// Update detail view if showing this task
+				if m.detailView != nil && m.selectedTask != nil && m.selectedTask.ID == result.taskID {
+					m.detailView.SetPRInfo(result.info)
+				}
+			}
+		}
+
+	case prRefreshTickMsg:
+		// Periodically refresh PR info (every 30 seconds)
+		if m.currentView == ViewDashboard {
+			cmds = append(cmds, m.refreshAllPRs())
+		}
+		cmds = append(cmds, m.prRefreshTick())
 
 	case taskCreatedMsg:
 		if msg.err == nil {
@@ -1615,6 +1633,8 @@ type attachDoneMsg struct {
 
 type tickMsg time.Time
 
+type prRefreshTickMsg time.Time
+
 type dbChangeMsg struct{}
 
 type prInfoMsg struct {
@@ -1625,15 +1645,8 @@ type prInfoMsg struct {
 func (m *AppModel) loadTasks() tea.Cmd {
 	return func() tea.Msg {
 		tasks, err := m.db.ListTasks(db.ListTasksOptions{Limit: 50, IncludeClosed: true})
-
-		// Check merged branch state for all tasks in parallel (non-blocking)
-		// Each check runs in its own goroutine to avoid sequential network calls
-		for _, task := range tasks {
-			if task.BranchName != "" && task.Status != db.StatusDone {
-				go m.executor.CheckPRStateAndUpdateTask(task.ID)
-			}
-		}
-
+		// Note: PR/merge status is now checked via batch refresh (prRefreshTick)
+		// to avoid spawning processes for every task on every tick
 		return tasksLoadedMsg{tasks: tasks, err: err}
 	}
 }
@@ -1863,17 +1876,20 @@ func (m *AppModel) tick() tea.Cmd {
 	})
 }
 
-// fetchPRInfo fetches PR info for a single task.
+func (m *AppModel) prRefreshTick() tea.Cmd {
+	return tea.Tick(30*time.Second, func(t time.Time) tea.Msg {
+		return prRefreshTickMsg(t)
+	})
+}
+
+// fetchPRInfo fetches PR info for a single task (used for detail view).
 func (m *AppModel) fetchPRInfo(task *db.Task) tea.Cmd {
 	if task.BranchName == "" || m.prCache == nil {
 		return nil
 	}
 
-	// Get the worktree or project directory for gh CLI
-	repoDir := task.WorktreePath
-	if repoDir == "" {
-		repoDir = m.executor.GetProjectDir(task.Project)
-	}
+	// Get the repo directory for gh CLI (use project dir, not worktree)
+	repoDir := m.executor.GetProjectDir(task.Project)
 	if repoDir == "" {
 		return nil
 	}
@@ -1883,20 +1899,73 @@ func (m *AppModel) fetchPRInfo(task *db.Task) tea.Cmd {
 	branchName := task.BranchName
 
 	return func() tea.Msg {
-		info := prCache.GetPRForBranch(repoDir, branchName)
+		// Try cache first, fall back to single fetch if needed
+		info := prCache.GetCachedPR(repoDir, branchName)
+		if info == nil {
+			info = prCache.GetPRForBranch(repoDir, branchName)
+		}
 		return prInfoMsg{taskID: taskID, info: info}
 	}
 }
 
-// fetchAllPRInfo returns commands to fetch PR info for all tasks with branches.
-func (m *AppModel) fetchAllPRInfo() []tea.Cmd {
-	var cmds []tea.Cmd
-	for _, task := range m.tasks {
-		if cmd := m.fetchPRInfo(task); cmd != nil {
-			cmds = append(cmds, cmd)
-		}
+// refreshAllPRs fetches PR info for all repos in batch (much more efficient).
+// Instead of N gh calls for N tasks, this makes M calls for M unique repos.
+func (m *AppModel) refreshAllPRs() tea.Cmd {
+	if m.prCache == nil {
+		return nil
 	}
-	return cmds
+
+	// Group tasks by repo directory
+	repoTasks := make(map[string][]*db.Task)
+	for _, task := range m.tasks {
+		if task.BranchName == "" {
+			continue
+		}
+		repoDir := m.executor.GetProjectDir(task.Project)
+		if repoDir == "" {
+			continue
+		}
+		repoTasks[repoDir] = append(repoTasks[repoDir], task)
+	}
+
+	if len(repoTasks) == 0 {
+		return nil
+	}
+
+	prCache := m.prCache
+	// Copy the map to avoid race conditions
+	repoTasksCopy := make(map[string][]*db.Task)
+	for k, v := range repoTasks {
+		tasksCopy := make([]*db.Task, len(v))
+		copy(tasksCopy, v)
+		repoTasksCopy[k] = tasksCopy
+	}
+
+	return func() tea.Msg {
+		var results []prInfoMsg
+
+		// Fetch PRs for each repo sequentially (avoids memory spikes)
+		for repoDir, tasks := range repoTasksCopy {
+			prsByBranch := github.FetchAllPRsForRepo(repoDir)
+			if prsByBranch != nil {
+				// Update cache with batch results
+				prCache.UpdateCacheForRepo(repoDir, prsByBranch)
+
+				// Create messages for tasks in this repo
+				for _, task := range tasks {
+					info := prsByBranch[task.BranchName]
+					results = append(results, prInfoMsg{taskID: task.ID, info: info})
+				}
+			}
+		}
+
+		return prBatchMsg{results: results}
+	}
+}
+
+// prBatchMsg contains PR info for multiple tasks (from batch fetch).
+type prBatchMsg struct {
+	results []prInfoMsg
 }
 
 // startDatabaseWatcher starts watching the database file for changes.

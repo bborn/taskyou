@@ -286,3 +286,153 @@ func (p *PRInfo) StatusDescription() string {
 	}
 	return ""
 }
+
+// ghPRListResponse is a single PR from gh pr list.
+type ghPRListResponse struct {
+	Number            int       `json:"number"`
+	URL               string    `json:"url"`
+	State             string    `json:"state"`
+	IsDraft           bool      `json:"isDraft"`
+	Title             string    `json:"title"`
+	HeadRefName       string    `json:"headRefName"`
+	MergeStateStatus  string    `json:"mergeStateStatus"`
+	StatusCheckRollup []ghCheck `json:"statusCheckRollup"`
+	UpdatedAt         string    `json:"updatedAt"`
+}
+
+// FetchAllPRsForRepo fetches all open and recently merged PRs for a repo in a single API call.
+// Returns a map of branch name -> PRInfo. This is much more efficient than fetching per-branch.
+func FetchAllPRsForRepo(repoDir string) map[string]*PRInfo {
+	if _, err := exec.LookPath("gh"); err != nil {
+		return nil
+	}
+
+	result := make(map[string]*PRInfo)
+
+	// Fetch open PRs
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	// Get all open PRs in one call
+	cmd := exec.CommandContext(ctx, "gh", "pr", "list",
+		"--state", "open",
+		"--json", "number,url,state,isDraft,title,headRefName,mergeStateStatus,statusCheckRollup,updatedAt",
+		"--limit", "100")
+	cmd.Dir = repoDir
+
+	output, err := cmd.Output()
+	if err != nil {
+		return result
+	}
+
+	var prs []ghPRListResponse
+	if err := json.Unmarshal(output, &prs); err != nil {
+		return result
+	}
+
+	for _, pr := range prs {
+		info := parsePRListResponse(&pr)
+		if info != nil && pr.HeadRefName != "" {
+			result[pr.HeadRefName] = info
+		}
+	}
+
+	// Also fetch recently merged PRs (last 20) to catch merges
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel2()
+
+	cmd2 := exec.CommandContext(ctx2, "gh", "pr", "list",
+		"--state", "merged",
+		"--json", "number,url,state,isDraft,title,headRefName,mergeStateStatus,updatedAt",
+		"--limit", "20")
+	cmd2.Dir = repoDir
+
+	output2, err := cmd2.Output()
+	if err == nil {
+		var mergedPRs []ghPRListResponse
+		if json.Unmarshal(output2, &mergedPRs) == nil {
+			for _, pr := range mergedPRs {
+				// Only add if not already present (open PR takes precedence)
+				if _, exists := result[pr.HeadRefName]; !exists && pr.HeadRefName != "" {
+					info := parsePRListResponse(&pr)
+					if info != nil {
+						result[pr.HeadRefName] = info
+					}
+				}
+			}
+		}
+	}
+
+	return result
+}
+
+// parsePRListResponse converts a gh pr list response to PRInfo.
+func parsePRListResponse(pr *ghPRListResponse) *PRInfo {
+	info := &PRInfo{
+		Number:    pr.Number,
+		URL:       pr.URL,
+		Title:     pr.Title,
+		IsDraft:   pr.IsDraft,
+		Mergeable: pr.MergeStateStatus,
+	}
+
+	// Parse state
+	switch strings.ToUpper(pr.State) {
+	case "OPEN":
+		if pr.IsDraft {
+			info.State = PRStateDraft
+		} else {
+			info.State = PRStateOpen
+		}
+	case "CLOSED":
+		info.State = PRStateClosed
+	case "MERGED":
+		info.State = PRStateMerged
+	default:
+		info.State = PRStateOpen
+	}
+
+	// Parse check state
+	info.CheckState = parseCheckState(pr.StatusCheckRollup)
+
+	// Parse updated time
+	if t, err := time.Parse(time.RFC3339, pr.UpdatedAt); err == nil {
+		info.UpdatedAt = t
+	}
+
+	return info
+}
+
+// UpdateCacheForRepo updates the cache with batch-fetched PR data for a repo.
+// This is more efficient than individual fetches.
+func (c *PRCache) UpdateCacheForRepo(repoDir string, prsByBranch map[string]*PRInfo) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	now := time.Now()
+	for branchName, info := range prsByBranch {
+		cacheKey := repoDir + ":" + branchName
+		c.cache[cacheKey] = &cacheEntry{
+			info:      info,
+			fetchedAt: now,
+		}
+	}
+}
+
+// GetCachedPR returns cached PR info without fetching. Returns nil if not cached or expired.
+func (c *PRCache) GetCachedPR(repoDir, branchName string) *PRInfo {
+	if branchName == "" {
+		return nil
+	}
+
+	cacheKey := repoDir + ":" + branchName
+
+	c.mu.RLock()
+	entry, ok := c.cache[cacheKey]
+	c.mu.RUnlock()
+
+	if ok && time.Since(entry.fetchedAt) < cacheTTL {
+		return entry.info
+	}
+	return nil
+}
