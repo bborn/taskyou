@@ -53,7 +53,6 @@ type KeyMap struct {
 	Delete       key.Binding
 	Watch        key.Binding
 	Attach       key.Binding
-	Interrupt    key.Binding
 	Filter       key.Binding
 	Refresh      key.Binding
 	Settings     key.Binding
@@ -79,7 +78,7 @@ func (k KeyMap) FullHelp() [][]key.Binding {
 		{k.Left, k.Right, k.Up, k.Down},
 		{k.FocusBacklog, k.FocusInProgress, k.FocusBlocked, k.FocusDone},
 		{k.Enter, k.New, k.Queue, k.Close},
-		{k.Retry, k.Watch, k.Attach, k.Interrupt, k.Delete},
+		{k.Retry, k.Watch, k.Attach, k.Delete},
 		{k.Filter, k.Settings, k.Memories, k.Files},
 		{k.Refresh, k.Help, k.Quit},
 	}
@@ -143,10 +142,6 @@ func DefaultKeyMap() KeyMap {
 		Attach: key.NewBinding(
 			key.WithKeys("a"),
 			key.WithHelp("a", "attach"),
-		),
-		Interrupt: key.NewBinding(
-			key.WithKeys("i"),
-			key.WithHelp("i", "interrupt"),
 		),
 		Filter: key.NewBinding(
 			key.WithKeys("/"),
@@ -334,8 +329,6 @@ func NewAppModel(database *db.DB, exec *executor.Executor, workingDir string) *A
 func (m *AppModel) Init() tea.Cmd {
 	// Subscribe to real-time task events
 	m.eventCh = m.executor.SubscribeTaskEvents()
-	// Initialize interrupt key state (disabled until we know tasks are executing)
-	m.keys.Interrupt.SetEnabled(len(m.executor.RunningTasks()) > 0)
 
 	// Start watching database file for changes
 	m.startDatabaseWatcher()
@@ -437,9 +430,6 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.tasks = msg.tasks
 		m.err = msg.err
 
-		// Update interrupt key state based on whether any task is executing
-		m.updateInterruptKey()
-
 		// Check for newly blocked/done tasks and notify
 		for _, t := range m.tasks {
 			prevStatus := m.prevStatuses[t.ID]
@@ -523,7 +513,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.err = msg.err
 		}
 
-	case taskQueuedMsg, taskClosedMsg, taskDeletedMsg, taskRetriedMsg, taskInterruptedMsg:
+	case taskQueuedMsg, taskClosedMsg, taskDeletedMsg, taskRetriedMsg:
 		cmds = append(cmds, m.loadTasks())
 
 	case attachDoneMsg:
@@ -560,10 +550,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 			m.kanban.SetTasks(m.tasks)
-			
-			// Update interrupt key state based on whether any task is executing
-			m.updateInterruptKey()
-			
+
 			// Update detail view if showing this task
 			if m.selectedTask != nil && m.selectedTask.ID == event.TaskID {
 				m.selectedTask = event.Task
@@ -893,14 +880,6 @@ func (m *AppModel) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 		}
 
-	case key.Matches(msg, m.keys.Interrupt):
-		// Interrupt the selected task if it's in progress
-		if task := m.kanban.SelectedTask(); task != nil {
-			if db.IsInProgress(task.Status) || m.executor.IsRunning(task.ID) {
-				return m, m.interruptTask(task.ID)
-			}
-		}
-
 	case key.Matches(msg, m.keys.Filter):
 		m.filtering = true
 		m.filterInput.Focus()
@@ -1019,13 +998,6 @@ func (m *AppModel) updateDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
 				osExec.Command("tmux", "attach-session", "-t", sessionName),
 				func(err error) tea.Msg { return attachDoneMsg{err: err} },
 			)
-		}
-	}
-	if key.Matches(keyMsg, m.keys.Interrupt) && m.selectedTask != nil {
-		// Interrupt if tmux session exists or executor is running
-		sessionName := executor.TmuxSessionName(m.selectedTask.ID)
-		if osExec.Command("tmux", "has-session", "-t", sessionName).Run() == nil || m.executor.IsRunning(m.selectedTask.ID) {
-			return m, m.interruptTask(m.selectedTask.ID)
 		}
 	}
 	if key.Matches(keyMsg, m.keys.Delete) && m.selectedTask != nil {
@@ -1505,10 +1477,6 @@ type taskRetriedMsg struct {
 	err error
 }
 
-type taskInterruptedMsg struct {
-	err error
-}
-
 type taskEventMsg struct {
 	event executor.TaskEvent
 }
@@ -1737,13 +1705,6 @@ func (m *AppModel) retryTaskWithAttachments(id int64, feedback string, attachmen
 	}
 }
 
-func (m *AppModel) interruptTask(id int64) tea.Cmd {
-	return func() tea.Msg {
-		m.executor.Interrupt(id)
-		return taskInterruptedMsg{}
-	}
-}
-
 func (m *AppModel) waitForTaskEvent() tea.Cmd {
 	return func() tea.Msg {
 		event, ok := <-m.eventCh
@@ -1856,19 +1817,4 @@ func (m *AppModel) stopDatabaseWatcher() {
 	if m.dbChangeCh != nil {
 		close(m.dbChangeCh)
 	}
-}
-
-// updateInterruptKey enables or disables the interrupt key based on whether any task is executing.
-func (m *AppModel) updateInterruptKey() {
-	hasExecuting := len(m.executor.RunningTasks()) > 0
-	if !hasExecuting {
-		// Also check if any task in the list is in progress status
-		for _, t := range m.tasks {
-			if db.IsInProgress(t.Status) {
-				hasExecuting = true
-				break
-			}
-		}
-	}
-	m.keys.Interrupt.SetEnabled(hasExecuting)
 }
