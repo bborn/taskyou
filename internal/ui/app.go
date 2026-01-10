@@ -29,6 +29,7 @@ const (
 	ViewNewTaskConfirm
 	ViewEditTask
 	ViewDeleteConfirm
+	ViewKillConfirm
 	ViewQuitConfirm
 	ViewWatch
 	ViewSettings
@@ -51,9 +52,9 @@ type KeyMap struct {
 	Retry        key.Binding
 	Close        key.Binding
 	Delete       key.Binding
+	Kill         key.Binding
 	Watch        key.Binding
 	Attach       key.Binding
-	Interrupt    key.Binding
 	Filter       key.Binding
 	Refresh      key.Binding
 	Settings     key.Binding
@@ -79,7 +80,7 @@ func (k KeyMap) FullHelp() [][]key.Binding {
 		{k.Left, k.Right, k.Up, k.Down},
 		{k.FocusBacklog, k.FocusInProgress, k.FocusBlocked, k.FocusDone},
 		{k.Enter, k.New, k.Queue, k.Close},
-		{k.Retry, k.Watch, k.Attach, k.Interrupt, k.Delete},
+		{k.Retry, k.Watch, k.Attach, k.Delete},
 		{k.Filter, k.Settings, k.Memories, k.Files},
 		{k.Refresh, k.Help, k.Quit},
 	}
@@ -136,6 +137,10 @@ func DefaultKeyMap() KeyMap {
 			key.WithKeys("d"),
 			key.WithHelp("d", "delete"),
 		),
+		Kill: key.NewBinding(
+			key.WithKeys("k"),
+			key.WithHelp("k", "kill"),
+		),
 		Watch: key.NewBinding(
 			key.WithKeys("w"),
 			key.WithHelp("w", "watch"),
@@ -143,10 +148,6 @@ func DefaultKeyMap() KeyMap {
 		Attach: key.NewBinding(
 			key.WithKeys("a"),
 			key.WithHelp("a", "attach"),
-		),
-		Interrupt: key.NewBinding(
-			key.WithKeys("i"),
-			key.WithHelp("i", "interrupt"),
 		),
 		Filter: key.NewBinding(
 			key.WithKeys("/"),
@@ -256,6 +257,11 @@ type AppModel struct {
 	deleteConfirmValue bool
 	pendingDeleteTask  *db.Task
 
+	// Kill confirmation state
+	killConfirm      *huh.Form
+	killConfirmValue bool
+	pendingKillTask  *db.Task
+
 	// Quit confirmation state
 	quitConfirm      *huh.Form
 	quitConfirmValue bool
@@ -334,8 +340,6 @@ func NewAppModel(database *db.DB, exec *executor.Executor, workingDir string) *A
 func (m *AppModel) Init() tea.Cmd {
 	// Subscribe to real-time task events
 	m.eventCh = m.executor.SubscribeTaskEvents()
-	// Initialize interrupt key state (disabled until we know tasks are executing)
-	m.keys.Interrupt.SetEnabled(len(m.executor.RunningTasks()) > 0)
 
 	// Start watching database file for changes
 	m.startDatabaseWatcher()
@@ -364,6 +368,9 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 	if m.currentView == ViewDeleteConfirm && m.deleteConfirm != nil {
 		return m.updateDeleteConfirm(msg)
+	}
+	if m.currentView == ViewKillConfirm && m.killConfirm != nil {
+		return m.updateKillConfirm(msg)
 	}
 	if m.currentView == ViewQuitConfirm && m.quitConfirm != nil {
 		return m.updateQuitConfirm(msg)
@@ -436,9 +443,6 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.loading = false
 		m.tasks = msg.tasks
 		m.err = msg.err
-
-		// Update interrupt key state based on whether any task is executing
-		m.updateInterruptKey()
 
 		// Check for newly blocked/done tasks and notify
 		for _, t := range m.tasks {
@@ -523,7 +527,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.err = msg.err
 		}
 
-	case taskQueuedMsg, taskClosedMsg, taskDeletedMsg, taskRetriedMsg, taskInterruptedMsg:
+	case taskQueuedMsg, taskClosedMsg, taskDeletedMsg, taskRetriedMsg, taskKilledMsg:
 		cmds = append(cmds, m.loadTasks())
 
 	case attachDoneMsg:
@@ -560,10 +564,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 			m.kanban.SetTasks(m.tasks)
-			
-			// Update interrupt key state based on whether any task is executing
-			m.updateInterruptKey()
-			
+
 			// Update detail view if showing this task
 			if m.selectedTask != nil && m.selectedTask.ID == event.TaskID {
 				m.selectedTask = event.Task
@@ -634,6 +635,8 @@ func (m *AppModel) View() string {
 		return m.viewNewTaskConfirm()
 	case ViewDeleteConfirm:
 		return m.viewDeleteConfirm()
+	case ViewKillConfirm:
+		return m.viewKillConfirm()
 	case ViewQuitConfirm:
 		return m.viewQuitConfirm()
 	case ViewWatch:
@@ -838,6 +841,10 @@ func (m *AppModel) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case key.Matches(msg, m.keys.Queue):
 		if task := m.kanban.SelectedTask(); task != nil {
+			// Don't allow queueing if task is already processing
+			if task.Status == db.StatusProcessing {
+				return m, nil
+			}
 			// Immediately update UI for responsiveness
 			task.Status = db.StatusQueued
 			m.updateTaskInList(task)
@@ -890,14 +897,6 @@ func (m *AppModel) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					osExec.Command("tmux", "attach-session", "-t", sessionName),
 					func(err error) tea.Msg { return attachDoneMsg{err: err} },
 				)
-			}
-		}
-
-	case key.Matches(msg, m.keys.Interrupt):
-		// Interrupt the selected task if it's in progress
-		if task := m.kanban.SelectedTask(); task != nil {
-			if db.IsInProgress(task.Status) || m.executor.IsRunning(task.ID) {
-				return m, m.interruptTask(task.ID)
 			}
 		}
 
@@ -970,6 +969,10 @@ func (m *AppModel) updateDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	// Handle queue/close/retry from detail view
 	if key.Matches(keyMsg, m.keys.Queue) && m.selectedTask != nil {
+		// Don't allow queueing if task is already processing
+		if m.selectedTask.Status == db.StatusProcessing {
+			return m, nil
+		}
 		// Immediately update UI for responsiveness
 		m.selectedTask.Status = db.StatusQueued
 		if m.detailView != nil {
@@ -1021,13 +1024,6 @@ func (m *AppModel) updateDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
 			)
 		}
 	}
-	if key.Matches(keyMsg, m.keys.Interrupt) && m.selectedTask != nil {
-		// Interrupt if tmux session exists or executor is running
-		sessionName := executor.TmuxSessionName(m.selectedTask.ID)
-		if osExec.Command("tmux", "has-session", "-t", sessionName).Run() == nil || m.executor.IsRunning(m.selectedTask.ID) {
-			return m, m.interruptTask(m.selectedTask.ID)
-		}
-	}
 	if key.Matches(keyMsg, m.keys.Delete) && m.selectedTask != nil {
 		// Clean up detail view first
 		if m.detailView != nil {
@@ -1035,6 +1031,13 @@ func (m *AppModel) updateDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.detailView = nil
 		}
 		return m.showDeleteConfirm(m.selectedTask)
+	}
+	if key.Matches(keyMsg, m.keys.Kill) && m.selectedTask != nil {
+		// Only allow kill if there's an active tmux session
+		sessionName := executor.TmuxSessionName(m.selectedTask.ID)
+		if osExec.Command("tmux", "has-session", "-t", sessionName).Run() == nil {
+			return m.showKillConfirm(m.selectedTask)
+		}
 	}
 	if key.Matches(keyMsg, m.keys.Files) && m.selectedTask != nil {
 		// Clean up panes before leaving detail view
@@ -1276,6 +1279,99 @@ func (m *AppModel) updateDeleteConfirm(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
+func (m *AppModel) showKillConfirm(task *db.Task) (tea.Model, tea.Cmd) {
+	m.pendingKillTask = task
+	m.killConfirmValue = false
+	modalWidth := min(50, m.width-8)
+	m.killConfirm = huh.NewForm(
+		huh.NewGroup(
+			huh.NewConfirm().
+				Key("kill").
+				Title(fmt.Sprintf("Kill task #%d?", task.ID)).
+				Description("This will stop the Claude session and move task to backlog").
+				Affirmative("Kill").
+				Negative("Cancel").
+				Value(&m.killConfirmValue),
+		),
+	).WithTheme(huh.ThemeDracula()).
+		WithWidth(modalWidth - 6). // Account for modal padding and border
+		WithShowHelp(true)
+	m.currentView = ViewKillConfirm
+	return m, m.killConfirm.Init()
+}
+
+func (m *AppModel) viewKillConfirm() string {
+	if m.killConfirm == nil {
+		return ""
+	}
+
+	// Modal header with warning icon
+	header := lipgloss.NewStyle().
+		Bold(true).
+		Foreground(ColorWarning).
+		MarginBottom(1).
+		Render("⚠ Confirm Kill")
+
+	formView := m.killConfirm.View()
+
+	// Modal box with border
+	modalWidth := min(50, m.width-8)
+	modalBox := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(ColorWarning).
+		Padding(1, 2).
+		Width(modalWidth)
+
+	modalContent := modalBox.Render(lipgloss.JoinVertical(lipgloss.Center, header, formView))
+
+	// Center the modal on screen
+	return lipgloss.NewStyle().
+		Width(m.width).
+		Height(m.height).
+		Align(lipgloss.Center, lipgloss.Center).
+		Render(modalContent)
+}
+
+func (m *AppModel) updateKillConfirm(msg tea.Msg) (tea.Model, tea.Cmd) {
+	// Handle escape to cancel
+	if keyMsg, ok := msg.(tea.KeyMsg); ok {
+		if keyMsg.String() == "esc" {
+			m.currentView = ViewDetail
+			m.killConfirm = nil
+			m.pendingKillTask = nil
+			return m, nil
+		}
+	}
+
+	// Update the huh form
+	form, cmd := m.killConfirm.Update(msg)
+	if f, ok := form.(*huh.Form); ok {
+		m.killConfirm = f
+	}
+
+	// Check if form completed
+	if m.killConfirm.State == huh.StateCompleted {
+		if m.pendingKillTask != nil && m.killConfirmValue {
+			taskID := m.pendingKillTask.ID
+			// Clean up detail view panes before killing
+			if m.detailView != nil {
+				m.detailView.Cleanup()
+			}
+			m.pendingKillTask = nil
+			m.killConfirm = nil
+			m.currentView = ViewDetail
+			return m, m.killTask(taskID)
+		}
+		// Cancelled
+		m.pendingKillTask = nil
+		m.killConfirm = nil
+		m.currentView = ViewDetail
+		return m, nil
+	}
+
+	return m, cmd
+}
+
 func (m *AppModel) showQuitConfirm() (tea.Model, tea.Cmd) {
 	m.quitConfirmValue = false
 	modalWidth := min(50, m.width-8)
@@ -1505,7 +1601,7 @@ type taskRetriedMsg struct {
 	err error
 }
 
-type taskInterruptedMsg struct {
+type taskKilledMsg struct {
 	err error
 }
 
@@ -1530,15 +1626,13 @@ func (m *AppModel) loadTasks() tea.Cmd {
 	return func() tea.Msg {
 		tasks, err := m.db.ListTasks(db.ListTasksOptions{Limit: 50, IncludeClosed: true})
 
-		// Check PR state for all tasks with branches in the background
-		// This ensures we detect merged PRs when returning to the dashboard
-		go func() {
-			for _, task := range tasks {
-				if task.BranchName != "" && task.Status != db.StatusDone {
-					m.executor.CheckPRStateAndUpdateTask(task.ID)
-				}
+		// Check merged branch state for all tasks in parallel (non-blocking)
+		// Each check runs in its own goroutine to avoid sequential network calls
+		for _, task := range tasks {
+			if task.BranchName != "" && task.Status != db.StatusDone {
+				go m.executor.CheckPRStateAndUpdateTask(task.ID)
 			}
-		}()
+		}
 
 		return tasksLoadedMsg{tasks: tasks, err: err}
 	}
@@ -1737,10 +1831,19 @@ func (m *AppModel) retryTaskWithAttachments(id int64, feedback string, attachmen
 	}
 }
 
-func (m *AppModel) interruptTask(id int64) tea.Cmd {
+func (m *AppModel) killTask(id int64) tea.Cmd {
 	return func() tea.Msg {
+		// Interrupt the task (sets status to backlog)
 		m.executor.Interrupt(id)
-		return taskInterruptedMsg{}
+
+		// Log the kill action
+		m.db.AppendTaskLog(id, "user", "→ [Kill] Session terminated")
+
+		// Kill the tmux window
+		windowTarget := executor.TmuxSessionName(id)
+		osExec.Command("tmux", "kill-window", "-t", windowTarget).Run()
+
+		return taskKilledMsg{}
 	}
 }
 
@@ -1856,19 +1959,4 @@ func (m *AppModel) stopDatabaseWatcher() {
 	if m.dbChangeCh != nil {
 		close(m.dbChangeCh)
 	}
-}
-
-// updateInterruptKey enables or disables the interrupt key based on whether any task is executing.
-func (m *AppModel) updateInterruptKey() {
-	hasExecuting := len(m.executor.RunningTasks()) > 0
-	if !hasExecuting {
-		// Also check if any task in the list is in progress status
-		for _, t := range m.tasks {
-			if db.IsInProgress(t.Status) {
-				hasExecuting = true
-				break
-			}
-		}
-	}
-	m.keys.Interrupt.SetEnabled(hasExecuting)
 }

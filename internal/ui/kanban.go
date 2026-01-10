@@ -199,7 +199,7 @@ func (k *KanbanBoard) ensureSelectedVisible() {
 
 	// Calculate how many tasks fit in the visible area
 	colHeight := k.height
-	cardHeight := 4
+	cardHeight := 3 // Most cards are 3 lines (2 content + 1 border)
 	maxVisible := (colHeight - 3) / cardHeight // -3 for header bar and minimal padding
 	if maxVisible < 1 {
 		maxVisible = 1
@@ -288,9 +288,9 @@ func (k *KanbanBoard) View() string {
 		isSelectedCol := colIdx == k.selectedCol
 
 		// Colored header bar at top of column
-		// Width is colWidth + 2 to match the column's total width (content + left/right borders)
+		// Width matches the column content width (will be inside the border)
 		headerBarStyle := lipgloss.NewStyle().
-			Width(colWidth + 2).
+			Width(colWidth).
 			Background(col.Color).
 			Foreground(lipgloss.Color("#000000")).
 			Bold(true).
@@ -299,9 +299,10 @@ func (k *KanbanBoard) View() string {
 		headerText := fmt.Sprintf("%s %s (%d)", col.Icon, col.Title, len(col.Tasks))
 		headerBar := headerBarStyle.Render(headerText)
 
-		// Task cards - calculate how many fit (each card is ~3 lines with margin)
-		cardHeight := 4 // Increased for better spacing
-		maxTasks := (colHeight - 3) / cardHeight // -3 for header bar and minimal padding
+		// Task cards - calculate how many fit
+		// Non-selected cards: 2 lines content + 1 line border = 3 lines
+		cardHeight := 3
+		maxTasks := (colHeight - 3) / cardHeight // -3 for scroll indicators and padding
 		if maxTasks < 1 {
 			maxTasks = 1
 		}
@@ -385,18 +386,20 @@ func (k *KanbanBoard) View() string {
 			borderStyle = lipgloss.ThickBorder()
 		}
 
+		// Combine header and tasks, then wrap with border
+		// Header is inside the border so they align perfectly
+		fullContent := lipgloss.JoinVertical(lipgloss.Left,
+			headerBar,
+			taskContent,
+		)
+
 		colStyle := lipgloss.NewStyle().
 			Width(colWidth).
-			Height(colHeight). // Use full height, header is separate
+			Height(colHeight). // Full height including header
 			Border(borderStyle).
-			BorderForeground(borderColor).
-			BorderTop(false) // No top border since we have the header bar
+			BorderForeground(borderColor)
 
-		// Stack header bar on top of column content
-		columnView := lipgloss.JoinVertical(lipgloss.Left,
-			headerBar,
-			colStyle.Render(taskContent),
-		)
+		columnView := colStyle.Render(fullContent)
 
 		columnViews = append(columnViews, columnView)
 	}

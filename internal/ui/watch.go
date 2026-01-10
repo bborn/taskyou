@@ -15,19 +15,18 @@ import (
 
 // WatchModel represents the task watch view.
 type WatchModel struct {
-	database    *db.DB
-	executor    *executor.Executor
-	taskID      int64
-	task        *db.Task
-	logs        []*db.TaskLog
-	lastLogID   int64
-	viewport    viewport.Model
-	spinner     spinner.Model
-	width       int
-	height      int
-	ready       bool
-	logCh       chan *db.TaskLog
-	interrupted bool
+	database  *db.DB
+	executor  *executor.Executor
+	taskID    int64
+	task      *db.Task
+	logs      []*db.TaskLog
+	lastLogID int64
+	viewport  viewport.Model
+	spinner   spinner.Model
+	width     int
+	height    int
+	ready     bool
+	logCh     chan *db.TaskLog
 }
 
 // NewWatchModel creates a new watch model.
@@ -107,13 +106,6 @@ func (m *WatchModel) Update(msg tea.Msg) (*WatchModel, tea.Cmd) {
 
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
-		// Handle interrupt key
-		if msg.String() == "i" {
-			m.executor.Interrupt(m.taskID)
-			m.interrupted = true
-			return m, nil
-		}
-
 		var cmd tea.Cmd
 		m.viewport, cmd = m.viewport.Update(msg)
 		cmds = append(cmds, cmd)
@@ -190,7 +182,6 @@ func (m *WatchModel) renderHelp() string {
 		desc string
 	}{
 		{"↑/↓", "scroll"},
-		{"i", "interrupt"},
 		{"q/esc", "back"},
 	}
 
