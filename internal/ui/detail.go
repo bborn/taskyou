@@ -33,6 +33,9 @@ type DetailModel struct {
 	claudePaneID    string // The Claude Code pane (middle-left)
 	workdirPaneID   string // The workdir shell pane (middle-right)
 	daemonSessionID string // The daemon session the Claude pane came from
+
+	// Cached tmux window target (set once on creation, cleared on kill)
+	cachedWindowTarget string
 }
 
 // UpdateTask updates the task and refreshes the view.
@@ -99,8 +102,11 @@ func NewDetailModel(t *db.Task, database *db.DB, width, height int) *DetailModel
 
 	m.initViewport()
 
+	// Cache the tmux window target once (expensive operation)
+	m.cachedWindowTarget = m.findTaskWindow()
+
 	// If we're in tmux and task has active session, join it as a split pane
-	if os.Getenv("TMUX") != "" && m.hasActiveTmuxSession() {
+	if os.Getenv("TMUX") != "" && m.cachedWindowTarget != "" {
 		m.joinTmuxPane()
 	} else if os.Getenv("TMUX") != "" {
 		// Even without joined panes, ensure Details pane has focus
@@ -168,12 +174,7 @@ func (m *DetailModel) Update(msg tea.Msg) (*DetailModel, tea.Cmd) {
 // Cleanup should be called when leaving detail view.
 func (m *DetailModel) Cleanup() {
 	if m.claudePaneID != "" || m.workdirPaneID != "" {
-		// Save the current pane height before breaking panes
-		currentPaneCmd := exec.Command("tmux", "display-message", "-p", "#{pane_id}")
-		if currentPaneOut, err := currentPaneCmd.Output(); err == nil {
-			tuiPaneID := strings.TrimSpace(string(currentPaneOut))
-			m.saveDetailPaneHeight(tuiPaneID)
-		}
+		// breakTmuxPanes saves pane positions before breaking
 		m.breakTmuxPanes()
 	}
 }
@@ -213,8 +214,9 @@ func (m *DetailModel) findTaskWindow() string {
 }
 
 // hasActiveTmuxSession checks if this task has an active tmux window in any task-daemon session.
+// Uses cached value for performance (set on creation, cleared on kill).
 func (m *DetailModel) hasActiveTmuxSession() bool {
-	return m.findTaskWindow() != ""
+	return m.cachedWindowTarget != ""
 }
 
 // focusDetailsPane sets focus to the current TUI pane (Details pane).
@@ -248,6 +250,23 @@ func (m *DetailModel) getDetailPaneHeight() string {
 		}
 	}
 	return "20%"
+}
+
+// getShellPaneWidth returns the configured shell pane width percentage.
+// Default is 50% for equal split between Claude and Shell panes.
+func (m *DetailModel) getShellPaneWidth() string {
+	widthStr, err := m.database.GetSetting(config.SettingShellPaneWidth)
+	if err != nil || widthStr == "" {
+		return "50%"
+	}
+	// Validate the width is a valid percentage (10-90%)
+	if strings.HasSuffix(widthStr, "%") {
+		percentStr := strings.TrimSuffix(widthStr, "%")
+		if percent, err := strconv.Atoi(percentStr); err == nil && percent >= 10 && percent <= 90 {
+			return widthStr
+		}
+	}
+	return "50%"
 }
 
 // saveDetailPaneHeight saves the current detail pane height to settings.
@@ -284,12 +303,52 @@ func (m *DetailModel) saveDetailPaneHeight(tuiPaneID string) {
 	}
 }
 
+// saveShellPaneWidth saves the current shell pane width to settings.
+func (m *DetailModel) saveShellPaneWidth() {
+	if m.workdirPaneID == "" || m.claudePaneID == "" {
+		return
+	}
+
+	// Get the width of the shell pane
+	cmd := exec.Command("tmux", "display-message", "-p", "-t", m.workdirPaneID, "#{pane_width}")
+	shellWidthOut, err := cmd.Output()
+	if err != nil {
+		return
+	}
+
+	shellWidth, err := strconv.Atoi(strings.TrimSpace(string(shellWidthOut)))
+	if err != nil || shellWidth <= 0 {
+		return
+	}
+
+	// Get the width of the claude pane
+	cmd = exec.Command("tmux", "display-message", "-p", "-t", m.claudePaneID, "#{pane_width}")
+	claudeWidthOut, err := cmd.Output()
+	if err != nil {
+		return
+	}
+
+	claudeWidth, err := strconv.Atoi(strings.TrimSpace(string(claudeWidthOut)))
+	if err != nil || claudeWidth <= 0 {
+		return
+	}
+
+	// Calculate total width and shell percentage
+	totalWidth := shellWidth + claudeWidth
+	percentage := (shellWidth * 100) / totalWidth
+	if percentage >= 10 && percentage <= 90 {
+		widthStr := fmt.Sprintf("%d%%", percentage)
+		m.database.SetSetting(config.SettingShellPaneWidth, widthStr)
+	}
+}
+
 // joinTmuxPanes joins the task's Claude pane and creates a workdir shell pane.
 // Layout:
 //   - Top (configurable, default 20%): Task details (TUI)
 //   - Bottom: Claude Code (left) + Workdir shell (right) side-by-side
 func (m *DetailModel) joinTmuxPanes() {
-	windowTarget := m.findTaskWindow()
+	// Use cached window target to avoid expensive tmux lookup
+	windowTarget := m.cachedWindowTarget
 	if windowTarget == "" {
 		return
 	}
@@ -323,10 +382,11 @@ func (m *DetailModel) joinTmuxPanes() {
 
 	// Step 2: Create a new pane to the right of Claude for the workdir
 	// -h: horizontal split (right side)
-	// -l 50%: workdir takes 50% of the bottom area
+	// -l: workdir takes the configured percentage of the bottom area
 	workdir := m.getWorkdir()
+	shellWidth := m.getShellPaneWidth()
 	err = exec.Command("tmux", "split-window",
-		"-h", "-l", "50%",
+		"-h", "-l", shellWidth,
 		"-t", m.claudePaneID,
 		"-c", workdir).Run()
 	if err != nil {
@@ -381,7 +441,8 @@ func (m *DetailModel) getWorkdir() string {
 
 // breakTmuxPanes breaks both joined panes - kills workdir, returns Claude to task-daemon.
 func (m *DetailModel) breakTmuxPanes() {
-	// Save the current detail pane height before breaking
+	// Save pane positions before breaking (must save width before killing workdir pane)
+	m.saveShellPaneWidth()
 	currentPaneCmd := exec.Command("tmux", "display-message", "-p", "#{pane_id}")
 	if currentPaneOut, err := currentPaneCmd.Output(); err == nil {
 		tuiPaneID := strings.TrimSpace(string(currentPaneOut))
@@ -438,10 +499,19 @@ func (m *DetailModel) breakTmuxPane() {
 
 // killTmuxSession kills the Claude tmux window and workdir pane.
 func (m *DetailModel) killTmuxSession() {
-	windowTarget := m.findTaskWindow()
+	windowTarget := m.cachedWindowTarget
 	if windowTarget == "" {
 		return
 	}
+
+	// Save pane positions before killing (must save before panes are destroyed)
+	m.saveShellPaneWidth()
+	currentPaneCmd := exec.Command("tmux", "display-message", "-p", "#{pane_id}")
+	if currentPaneOut, err := currentPaneCmd.Output(); err == nil {
+		tuiPaneID := strings.TrimSpace(string(currentPaneOut))
+		m.saveDetailPaneHeight(tuiPaneID)
+	}
+
 	m.database.AppendTaskLog(m.task.ID, "user", "→ [Kill] Session terminated")
 
 	// Reset pane styling first
@@ -462,6 +532,10 @@ func (m *DetailModel) killTmuxSession() {
 	m.claudePaneID = ""
 
 	exec.Command("tmux", "kill-window", "-t", windowTarget).Run()
+
+	// Clear cached window target since session is now killed
+	m.cachedWindowTarget = ""
+
 	m.Refresh()
 }
 

@@ -38,12 +38,23 @@ func IsInProgress(status string) bool {
 	return status == StatusQueued || status == StatusProcessing
 }
 
-// Task types
+// Task types (default values, actual types are stored in task_types table)
 const (
 	TypeCode     = "code"
 	TypeWriting  = "writing"
 	TypeThinking = "thinking"
 )
+
+// TaskType represents a configurable task type with its prompt instructions.
+type TaskType struct {
+	ID           int64
+	Name         string // e.g., "code", "writing", "thinking"
+	Label        string // Display label
+	Instructions string // Prompt template for this type
+	SortOrder    int    // For UI ordering
+	IsBuiltin    bool   // Protect default types from deletion
+	CreatedAt    LocalTime
+}
 
 // CreateTask creates a new task.
 func (db *DB) CreateTask(t *Task) error {
@@ -679,6 +690,105 @@ func (db *DB) GetAllSettings() (map[string]string, error) {
 		settings[key] = value
 	}
 	return settings, nil
+}
+
+// CreateTaskType creates a new task type.
+func (db *DB) CreateTaskType(t *TaskType) error {
+	result, err := db.Exec(`
+		INSERT INTO task_types (name, label, instructions, sort_order, is_builtin)
+		VALUES (?, ?, ?, ?, ?)
+	`, t.Name, t.Label, t.Instructions, t.SortOrder, t.IsBuiltin)
+	if err != nil {
+		return fmt.Errorf("insert task type: %w", err)
+	}
+	id, _ := result.LastInsertId()
+	t.ID = id
+	return nil
+}
+
+// UpdateTaskType updates a task type.
+func (db *DB) UpdateTaskType(t *TaskType) error {
+	_, err := db.Exec(`
+		UPDATE task_types SET name = ?, label = ?, instructions = ?, sort_order = ?
+		WHERE id = ?
+	`, t.Name, t.Label, t.Instructions, t.SortOrder, t.ID)
+	if err != nil {
+		return fmt.Errorf("update task type: %w", err)
+	}
+	return nil
+}
+
+// DeleteTaskType deletes a task type (only non-builtin types can be deleted).
+func (db *DB) DeleteTaskType(id int64) error {
+	// Check if it's a builtin type
+	var isBuiltin bool
+	err := db.QueryRow("SELECT is_builtin FROM task_types WHERE id = ?", id).Scan(&isBuiltin)
+	if err != nil {
+		return fmt.Errorf("get task type: %w", err)
+	}
+	if isBuiltin {
+		return fmt.Errorf("cannot delete builtin task type")
+	}
+
+	_, err = db.Exec("DELETE FROM task_types WHERE id = ?", id)
+	if err != nil {
+		return fmt.Errorf("delete task type: %w", err)
+	}
+	return nil
+}
+
+// ListTaskTypes returns all task types ordered by sort_order.
+func (db *DB) ListTaskTypes() ([]*TaskType, error) {
+	rows, err := db.Query(`
+		SELECT id, name, label, instructions, sort_order, is_builtin, created_at
+		FROM task_types ORDER BY sort_order, name
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("query task types: %w", err)
+	}
+	defer rows.Close()
+
+	var types []*TaskType
+	for rows.Next() {
+		t := &TaskType{}
+		if err := rows.Scan(&t.ID, &t.Name, &t.Label, &t.Instructions, &t.SortOrder, &t.IsBuiltin, &t.CreatedAt); err != nil {
+			return nil, fmt.Errorf("scan task type: %w", err)
+		}
+		types = append(types, t)
+	}
+	return types, nil
+}
+
+// GetTaskType retrieves a task type by ID.
+func (db *DB) GetTaskType(id int64) (*TaskType, error) {
+	t := &TaskType{}
+	err := db.QueryRow(`
+		SELECT id, name, label, instructions, sort_order, is_builtin, created_at
+		FROM task_types WHERE id = ?
+	`, id).Scan(&t.ID, &t.Name, &t.Label, &t.Instructions, &t.SortOrder, &t.IsBuiltin, &t.CreatedAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("query task type: %w", err)
+	}
+	return t, nil
+}
+
+// GetTaskTypeByName retrieves a task type by name.
+func (db *DB) GetTaskTypeByName(name string) (*TaskType, error) {
+	t := &TaskType{}
+	err := db.QueryRow(`
+		SELECT id, name, label, instructions, sort_order, is_builtin, created_at
+		FROM task_types WHERE name = ?
+	`, name).Scan(&t.ID, &t.Name, &t.Label, &t.Instructions, &t.SortOrder, &t.IsBuiltin, &t.CreatedAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("query task type: %w", err)
+	}
+	return t, nil
 }
 
 // ProjectMemory represents a stored learning/context for a project.
