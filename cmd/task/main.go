@@ -101,9 +101,9 @@ func main() {
 		},
 	}
 
-	rootCmd.Flags().StringVarP(&host, "host", "H", defaultHost, "Remote server host")
-	rootCmd.Flags().StringVarP(&port, "port", "p", defaultPort, "Remote server port")
-	rootCmd.Flags().BoolVarP(&local, "local", "l", false, "Run locally (use local database)")
+	rootCmd.PersistentFlags().StringVarP(&host, "host", "H", defaultHost, "Remote server host")
+	rootCmd.PersistentFlags().StringVar(&port, "port", defaultPort, "Remote server port")
+	rootCmd.PersistentFlags().BoolVarP(&local, "local", "l", false, "Run locally (use local database)")
 
 	// Daemon subcommand - runs executor in background
 	daemonCmd := &cobra.Command{
