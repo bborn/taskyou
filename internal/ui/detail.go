@@ -412,7 +412,7 @@ func (m *DetailModel) joinTmuxPanes() {
 	exec.Command("tmux", "set-option", "-t", "task-ui", "status", "on").Run()
 	exec.Command("tmux", "set-option", "-t", "task-ui", "status-style", "bg=#3b82f6,fg=white").Run()
 	exec.Command("tmux", "set-option", "-t", "task-ui", "status-left", " TASK UI ").Run()
-	exec.Command("tmux", "set-option", "-t", "task-ui", "status-right", " Ctrl+B ↑↓←→ switch panes │ drag borders to resize ").Run()
+	exec.Command("tmux", "set-option", "-t", "task-ui", "status-right", " Click to focus panes │ drag borders to resize ").Run()
 	exec.Command("tmux", "set-option", "-t", "task-ui", "status-right-length", "60").Run()
 
 	// Style pane borders - active pane gets theme color outline
@@ -628,7 +628,7 @@ func (m *DetailModel) renderHeader() string {
 		meta.WriteString("  ")
 		tmuxHint := lipgloss.NewStyle().
 			Foreground(ColorSecondary).
-			Render("(Ctrl+B ↓ to interact with Claude)")
+			Render("(Click to interact with Claude)")
 		meta.WriteString(tmuxHint)
 	}
 
