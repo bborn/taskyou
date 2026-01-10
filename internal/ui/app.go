@@ -841,6 +841,10 @@ func (m *AppModel) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case key.Matches(msg, m.keys.Queue):
 		if task := m.kanban.SelectedTask(); task != nil {
+			// Don't allow queueing if task is already processing
+			if task.Status == db.StatusProcessing {
+				return m, nil
+			}
 			// Immediately update UI for responsiveness
 			task.Status = db.StatusQueued
 			m.updateTaskInList(task)
@@ -965,6 +969,10 @@ func (m *AppModel) updateDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	// Handle queue/close/retry from detail view
 	if key.Matches(keyMsg, m.keys.Queue) && m.selectedTask != nil {
+		// Don't allow queueing if task is already processing
+		if m.selectedTask.Status == db.StatusProcessing {
+			return m, nil
+		}
 		// Immediately update UI for responsiveness
 		m.selectedTask.Status = db.StatusQueued
 		if m.detailView != nil {

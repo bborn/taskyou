@@ -735,7 +735,15 @@ func (m *DetailModel) renderHelp() string {
 		desc string
 	}{
 		{"↑/↓", "scroll"},
-		{"x", "execute"},
+	}
+
+	// Only show execute when task is not currently processing
+	isProcessing := m.task != nil && m.task.Status == db.StatusProcessing
+	if !isProcessing {
+		keys = append(keys, struct {
+			key  string
+			desc string
+		}{"x", "execute"})
 	}
 
 	hasSession := m.hasActiveTmuxSession()
@@ -754,12 +762,23 @@ func (m *DetailModel) renderHelp() string {
 		}{"k", "kill"})
 	}
 
+	keys = append(keys, struct {
+		key  string
+		desc string
+	}{"e", "edit"})
+
+	// Only show retry when task is not currently processing
+	if !isProcessing {
+		keys = append(keys, struct {
+			key  string
+			desc string
+		}{"r", "retry"})
+	}
+
 	keys = append(keys, []struct {
 		key  string
 		desc string
 	}{
-		{"e", "edit"},
-		{"r", "retry"},
 		{"c", "close"},
 		{"d", "delete"},
 		{"q/esc", "back"},
