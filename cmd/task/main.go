@@ -67,9 +67,10 @@ func getDaemonSessionName() string {
 
 func main() {
 	var (
-		host  string
-		port  string
-		local bool
+		host      string
+		port      string
+		local     bool
+		dangerous bool
 	)
 
 	rootCmd := &cobra.Command{
@@ -87,7 +88,7 @@ func main() {
 			}
 
 			if local {
-				if err := runLocal(); err != nil {
+				if err := runLocal(dangerous); err != nil {
 					fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
 					os.Exit(1)
 				}
@@ -104,6 +105,7 @@ func main() {
 	rootCmd.PersistentFlags().StringVarP(&host, "host", "H", defaultHost, "Remote server host")
 	rootCmd.PersistentFlags().StringVar(&port, "port", defaultPort, "Remote server port")
 	rootCmd.PersistentFlags().BoolVarP(&local, "local", "l", false, "Run locally (use local database)")
+	rootCmd.PersistentFlags().BoolVar(&dangerous, "dangerous", false, "Run Claude with --dangerously-skip-permissions (for sandboxed environments)")
 
 	// Daemon subcommand - runs executor in background
 	daemonCmd := &cobra.Command{
@@ -143,8 +145,9 @@ func main() {
 			// Small delay to ensure clean shutdown
 			time.Sleep(100 * time.Millisecond)
 
-			// Start daemon
-			if err := ensureDaemonRunning(); err != nil {
+			// Start daemon (inherit dangerous mode from environment if set)
+			dangerousMode := os.Getenv("TASK_DANGEROUS_MODE") == "1"
+			if err := ensureDaemonRunning(dangerousMode); err != nil {
 				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
 				os.Exit(1)
 			}
@@ -1152,9 +1155,9 @@ func execInTmux() error {
 }
 
 // runLocal runs the TUI locally with a local SQLite database.
-func runLocal() error {
+func runLocal(dangerousMode bool) error {
 	// Ensure daemon is running
-	if err := ensureDaemonRunning(); err != nil {
+	if err := ensureDaemonRunning(dangerousMode); err != nil {
 		fmt.Fprintln(os.Stderr, dimStyle.Render("Warning: could not start daemon: "+err.Error()))
 	}
 
@@ -1206,16 +1209,33 @@ func runLocal() error {
 }
 
 // ensureDaemonRunning starts the daemon if it's not already running.
-func ensureDaemonRunning() error {
+// If dangerousMode is true, sets TASK_DANGEROUS_MODE=1 for the daemon.
+// If the daemon is running with a different mode, it will be restarted.
+func ensureDaemonRunning(dangerousMode bool) error {
 	pidFile := getPidFilePath()
+	modeFile := pidFile + ".mode"
 
 	// Check if daemon is already running
 	if pid, err := readPidFile(pidFile); err == nil {
 		if processExists(pid) {
-			return nil // Already running
+			// Check if running with correct mode
+			currentMode, _ := os.ReadFile(modeFile)
+			wantMode := "safe"
+			if dangerousMode {
+				wantMode = "dangerous"
+			}
+			if string(currentMode) == wantMode {
+				return nil // Already running with correct mode
+			}
+			// Mode mismatch - restart daemon
+			fmt.Fprintln(os.Stderr, dimStyle.Render(fmt.Sprintf("Restarting daemon (switching to %s mode)...", wantMode)))
+			stopDaemon()
+			time.Sleep(100 * time.Millisecond)
+		} else {
+			// Stale pid file, remove it
+			os.Remove(pidFile)
+			os.Remove(modeFile)
 		}
-		// Stale pid file, remove it
-		os.Remove(pidFile)
 	}
 
 	// Start daemon as background process
@@ -1230,6 +1250,10 @@ func ensureDaemonRunning() error {
 	cmd.Stdin = nil
 	// Pass session ID to daemon so it uses the same tmux sessions
 	cmd.Env = append(os.Environ(), fmt.Sprintf("TASK_SESSION_ID=%s", getSessionID()))
+	// Pass dangerous mode flag if enabled
+	if dangerousMode {
+		cmd.Env = append(cmd.Env, "TASK_DANGEROUS_MODE=1")
+	}
 	// Detach from parent process
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		Setsid: true,
@@ -1244,7 +1268,14 @@ func ensureDaemonRunning() error {
 		return fmt.Errorf("write pid file: %w", err)
 	}
 
-	fmt.Fprintln(os.Stderr, dimStyle.Render(fmt.Sprintf("Started daemon (pid %d)", cmd.Process.Pid)))
+	// Write mode file so we know what mode the daemon is running in
+	modeStr := "safe"
+	if dangerousMode {
+		modeStr = "dangerous"
+	}
+	os.WriteFile(modeFile, []byte(modeStr), 0644)
+
+	fmt.Fprintln(os.Stderr, dimStyle.Render(fmt.Sprintf("Started daemon (pid %d, %s mode)", cmd.Process.Pid, modeStr)))
 	return nil
 }
 
@@ -1281,6 +1312,7 @@ func processExists(pid int) bool {
 
 func stopDaemon() error {
 	pidFile := getPidFilePath()
+	modeFile := pidFile + ".mode"
 	pid, err := readPidFile(pidFile)
 	if err != nil {
 		return fmt.Errorf("daemon not running (no pid file)")
@@ -1288,6 +1320,7 @@ func stopDaemon() error {
 
 	if !processExists(pid) {
 		os.Remove(pidFile)
+		os.Remove(modeFile)
 		return fmt.Errorf("daemon not running (stale pid file)")
 	}
 
@@ -1301,6 +1334,7 @@ func stopDaemon() error {
 	}
 
 	os.Remove(pidFile)
+	os.Remove(modeFile)
 	return nil
 }
 

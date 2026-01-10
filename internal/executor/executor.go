@@ -904,7 +904,12 @@ func (e *Executor) runClaude(ctx context.Context, taskID int64, workDir, prompt 
 	if sessionID == "" {
 		sessionID = fmt.Sprintf("%d", os.Getpid())
 	}
-	script := fmt.Sprintf(`TASK_ID=%d TASK_SESSION_ID=%s claude --dangerously-skip-permissions --chrome "$(cat %q)"`, taskID, sessionID, promptFile.Name())
+	// Only use --dangerously-skip-permissions if TASK_DANGEROUS_MODE is set
+	dangerousFlag := ""
+	if os.Getenv("TASK_DANGEROUS_MODE") == "1" {
+		dangerousFlag = "--dangerously-skip-permissions "
+	}
+	script := fmt.Sprintf(`TASK_ID=%d TASK_SESSION_ID=%s claude %s--chrome "$(cat %q)"`, taskID, sessionID, dangerousFlag, promptFile.Name())
 
 	// Create new window in task-daemon session (with timeout for tmux overhead)
 	newWinCtx, newWinCancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -989,7 +994,12 @@ func (e *Executor) runClaudeResume(ctx context.Context, taskID int64, workDir, p
 	if taskSessionID == "" {
 		taskSessionID = fmt.Sprintf("%d", os.Getpid())
 	}
-	script := fmt.Sprintf(`TASK_ID=%d TASK_SESSION_ID=%s claude --dangerously-skip-permissions --chrome --resume %s "$(cat %q)"`, taskID, taskSessionID, sessionID, feedbackFile.Name())
+	// Only use --dangerously-skip-permissions if TASK_DANGEROUS_MODE is set
+	dangerousFlag := ""
+	if os.Getenv("TASK_DANGEROUS_MODE") == "1" {
+		dangerousFlag = "--dangerously-skip-permissions "
+	}
+	script := fmt.Sprintf(`TASK_ID=%d TASK_SESSION_ID=%s claude %s--chrome --resume %s "$(cat %q)"`, taskID, taskSessionID, dangerousFlag, sessionID, feedbackFile.Name())
 
 	// Create new window in task-daemon session (with timeout for tmux overhead)
 	newWinCtx, newWinCancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -1283,7 +1293,13 @@ func (e *Executor) parseOutputMarkers(output string) execResult {
 
 // runClaudeDirect runs claude directly without tmux (fallback)
 func (e *Executor) runClaudeDirect(ctx context.Context, taskID int64, workDir, prompt string) execResult {
-	cmd := exec.CommandContext(ctx, "claude", "--dangerously-skip-permissions", "--chrome", "-p", prompt)
+	// Build command args - only include --dangerously-skip-permissions if TASK_DANGEROUS_MODE is set
+	args := []string{}
+	if os.Getenv("TASK_DANGEROUS_MODE") == "1" {
+		args = append(args, "--dangerously-skip-permissions")
+	}
+	args = append(args, "--chrome", "-p", prompt)
+	cmd := exec.CommandContext(ctx, "claude", args...)
 	cmd.Dir = workDir
 	// Pass TASK_ID so hooks know which task to update
 	cmd.Env = append(os.Environ(), fmt.Sprintf("TASK_ID=%d", taskID))
@@ -1743,6 +1759,7 @@ func (e *Executor) setupWorktree(task *db.Task) (string, error) {
 		task.BranchName = branchName
 		e.db.UpdateTask(task)
 		trustMiseConfig(worktreePath)
+		symlinkClaudeConfig(projectDir, worktreePath)
 		copyMCPConfig(projectDir, worktreePath)
 		return worktreePath, nil
 	}
@@ -1787,6 +1804,7 @@ func (e *Executor) setupWorktree(task *db.Task) (string, error) {
 	e.logLine(task.ID, "system", fmt.Sprintf("Created worktree at %s (branch: %s)", worktreePath, branchName))
 
 	trustMiseConfig(worktreePath)
+	symlinkClaudeConfig(projectDir, worktreePath)
 	copyMCPConfig(projectDir, worktreePath)
 
 	return worktreePath, nil
@@ -1797,6 +1815,35 @@ func trustMiseConfig(dir string) {
 	if _, err := exec.LookPath("mise"); err == nil {
 		exec.Command("mise", "trust", dir).Run()
 	}
+}
+
+// symlinkClaudeConfig symlinks the worktree's .claude directory to the main project's .claude.
+// This ensures permissions granted in any worktree are shared across all worktrees and the main project.
+func symlinkClaudeConfig(projectDir, worktreePath string) error {
+	mainClaudeDir := filepath.Join(projectDir, ".claude")
+	worktreeClaudeDir := filepath.Join(worktreePath, ".claude")
+
+	// Ensure main project has .claude directory
+	if err := os.MkdirAll(mainClaudeDir, 0755); err != nil {
+		return fmt.Errorf("create main .claude dir: %w", err)
+	}
+
+	// Check if worktree .claude is already a symlink to the right place
+	if target, err := os.Readlink(worktreeClaudeDir); err == nil {
+		if target == mainClaudeDir {
+			return nil // Already correctly symlinked
+		}
+	}
+
+	// Remove any existing .claude in worktree (file, dir, or wrong symlink)
+	os.RemoveAll(worktreeClaudeDir)
+
+	// Create symlink: worktree/.claude -> project/.claude
+	if err := os.Symlink(mainClaudeDir, worktreeClaudeDir); err != nil {
+		return fmt.Errorf("create .claude symlink: %w", err)
+	}
+
+	return nil
 }
 
 // copyMCPConfig copies the MCP server configuration from the source project to the worktree
