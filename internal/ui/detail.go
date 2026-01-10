@@ -82,6 +82,9 @@ func (m *DetailModel) Refresh() {
 			}
 		}
 	}
+
+	// Ensure tmux panes are joined if available (handles external close/detach)
+	m.ensureTmuxPanesJoined()
 }
 
 // Task returns the current task.
@@ -153,16 +156,9 @@ func (m *DetailModel) Update(msg tea.Msg) (*DetailModel, tea.Cmd) {
 	var cmd tea.Cmd
 
 	if keyMsg, ok := msg.(tea.KeyMsg); ok {
-		hasSession := m.hasActiveTmuxSession()
 		hasPanes := m.claudePaneID != "" || m.workdirPaneID != ""
 
 		// 'k' is now handled by app.go with confirmation dialog
-
-		// 't' to toggle the Claude pane
-		if keyMsg.String() == "t" && hasSession && os.Getenv("TMUX") != "" {
-			m.toggleTmuxPane()
-			return m, nil
-		}
 
 		// Tab to cycle to next pane (Details -> Claude -> Shell -> Details)
 		if keyMsg.String() == "tab" && hasPanes && os.Getenv("TMUX") != "" {
@@ -230,6 +226,48 @@ func (m *DetailModel) findTaskWindow() string {
 // Uses cached value for performance (set on creation, cleared on kill).
 func (m *DetailModel) hasActiveTmuxSession() bool {
 	return m.cachedWindowTarget != ""
+}
+
+// refreshTmuxWindowTarget re-checks for available tmux sessions.
+// This is useful when the user wants to open tmux panes that were created
+// after the detail view was opened, or if panes were closed externally.
+func (m *DetailModel) refreshTmuxWindowTarget() bool {
+	m.cachedWindowTarget = m.findTaskWindow()
+	return m.cachedWindowTarget != ""
+}
+
+// ensureTmuxPanesJoined checks if tmux panes should be joined and joins them if needed.
+// This handles cases where panes were externally closed or a session was created after opening the view.
+func (m *DetailModel) ensureTmuxPanesJoined() {
+	if os.Getenv("TMUX") == "" {
+		return
+	}
+
+	// Check if we think we have panes joined but they no longer exist
+	if m.claudePaneID != "" {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		// Verify the pane still exists
+		err := exec.CommandContext(ctx, "tmux", "display-message", "-t", m.claudePaneID, "-p", "#{pane_id}").Run()
+		if err != nil {
+			// Pane no longer exists, clear our state
+			m.claudePaneID = ""
+			m.workdirPaneID = ""
+		}
+	}
+
+	// If panes are already joined and valid, nothing to do
+	if m.claudePaneID != "" {
+		return
+	}
+
+	// Refresh the cache to check for available sessions
+	m.refreshTmuxWindowTarget()
+
+	// If we have a session available, join it
+	if m.hasActiveTmuxSession() {
+		m.joinTmuxPanes()
+	}
 }
 
 // focusDetailsPane sets focus to the current TUI pane (Details pane).
@@ -580,22 +618,6 @@ func (m *DetailModel) killTmuxSession() {
 	m.Refresh()
 }
 
-// toggleTmuxPanes toggles the Claude and workdir pane visibility.
-func (m *DetailModel) toggleTmuxPanes() {
-	if m.claudePaneID != "" || m.workdirPaneID != "" {
-		// Panes are open, close them
-		m.breakTmuxPanes()
-	} else {
-		// Panes are closed, open them
-		m.joinTmuxPanes()
-	}
-}
-
-// toggleTmuxPane is a compatibility wrapper for toggleTmuxPanes.
-func (m *DetailModel) toggleTmuxPane() {
-	m.toggleTmuxPanes()
-}
-
 // focusNextPane cycles focus to the next pane: Details -> Claude -> Shell -> Details.
 func (m *DetailModel) focusNextPane() {
 	if m.claudePaneID == "" && m.workdirPaneID == "" {
@@ -861,15 +883,8 @@ func (m *DetailModel) renderHelp() string {
 
 	hasSession := m.hasActiveTmuxSession()
 	hasPanes := m.claudePaneID != "" || m.workdirPaneID != ""
-	if hasSession && os.Getenv("TMUX") != "" {
-		toggleDesc := "show panes"
-		if hasPanes {
-			toggleDesc = "hide panes"
-		}
-		keys = append(keys, struct {
-			key  string
-			desc string
-		}{"t", toggleDesc})
+	// Show kill option if there's an active tmux session
+	if hasSession {
 		keys = append(keys, struct {
 			key  string
 			desc string
