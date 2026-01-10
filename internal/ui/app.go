@@ -954,9 +954,10 @@ func (m *AppModel) updateDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	if key.Matches(keyMsg, m.keys.Back) {
-		// Check PR state when closing task view
+		// Check PR state asynchronously (don't block UI)
 		if m.selectedTask != nil {
-			m.executor.CheckPRStateAndUpdateTask(m.selectedTask.ID)
+			taskID := m.selectedTask.ID
+			go m.executor.CheckPRStateAndUpdateTask(taskID)
 		}
 
 		m.currentView = ViewDashboard
@@ -993,8 +994,9 @@ func (m *AppModel) updateDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	}
 	if key.Matches(keyMsg, m.keys.Close) && m.selectedTask != nil {
-		// Check PR state before closing
-		m.executor.CheckPRStateAndUpdateTask(m.selectedTask.ID)
+		// Check PR state asynchronously (don't block UI)
+		taskID := m.selectedTask.ID
+		go m.executor.CheckPRStateAndUpdateTask(taskID)
 
 		// Immediately update UI for responsiveness
 		m.selectedTask.Status = db.StatusDone
@@ -1543,8 +1545,8 @@ func (m *AppModel) loadTasks() tea.Cmd {
 }
 
 func (m *AppModel) loadTask(id int64) tea.Cmd {
-	// Check PR state when opening task view
-	m.executor.CheckPRStateAndUpdateTask(id)
+	// Check PR state asynchronously (don't block UI)
+	go m.executor.CheckPRStateAndUpdateTask(id)
 
 	return func() tea.Msg {
 		task, err := m.db.GetTask(id)
