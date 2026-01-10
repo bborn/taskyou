@@ -34,6 +34,7 @@ type DetailModel struct {
 	claudePaneID    string // The Claude Code pane (middle-left)
 	workdirPaneID   string // The workdir shell pane (middle-right)
 	daemonSessionID string // The daemon session the Claude pane came from
+	tuiPaneID       string // The TUI/Details pane (top)
 
 	// Cached tmux window target (set once on creation, cleared on kill)
 	cachedWindowTarget string
@@ -153,12 +154,25 @@ func (m *DetailModel) Update(msg tea.Msg) (*DetailModel, tea.Cmd) {
 
 	if keyMsg, ok := msg.(tea.KeyMsg); ok {
 		hasSession := m.hasActiveTmuxSession()
+		hasPanes := m.claudePaneID != "" || m.workdirPaneID != ""
 
 		// 'k' is now handled by app.go with confirmation dialog
 
 		// 't' to toggle the Claude pane
 		if keyMsg.String() == "t" && hasSession && os.Getenv("TMUX") != "" {
 			m.toggleTmuxPane()
+			return m, nil
+		}
+
+		// Tab to cycle to next pane (Details -> Claude -> Shell -> Details)
+		if keyMsg.String() == "tab" && hasPanes && os.Getenv("TMUX") != "" {
+			m.focusNextPane()
+			return m, nil
+		}
+
+		// Shift+Tab to cycle to previous pane (Details -> Shell -> Claude -> Details)
+		if keyMsg.String() == "shift+tab" && hasPanes && os.Getenv("TMUX") != "" {
+			m.focusPrevPane()
 			return m, nil
 		}
 
@@ -374,6 +388,7 @@ func (m *DetailModel) joinTmuxPanes() {
 	currentPaneCmd := exec.CommandContext(ctx, "tmux", "display-message", "-p", "#{pane_id}")
 	currentPaneOut, _ := currentPaneCmd.Output()
 	tuiPaneID := strings.TrimSpace(string(currentPaneOut))
+	m.tuiPaneID = tuiPaneID
 
 	// Step 1: Join the Claude pane below the TUI pane (vertical split)
 	err := exec.CommandContext(ctx, "tmux", "join-pane",
@@ -423,7 +438,7 @@ func (m *DetailModel) joinTmuxPanes() {
 	exec.CommandContext(ctx, "tmux", "set-option", "-t", "task-ui", "status", "on").Run()
 	exec.CommandContext(ctx, "tmux", "set-option", "-t", "task-ui", "status-style", "bg=#3b82f6,fg=white").Run()
 	exec.CommandContext(ctx, "tmux", "set-option", "-t", "task-ui", "status-left", " TASK UI ").Run()
-	exec.CommandContext(ctx, "tmux", "set-option", "-t", "task-ui", "status-right", " Click to focus panes │ drag borders to resize ").Run()
+	exec.CommandContext(ctx, "tmux", "set-option", "-t", "task-ui", "status-right", " Tab to switch panes │ drag borders to resize ").Run()
 	exec.CommandContext(ctx, "tmux", "set-option", "-t", "task-ui", "status-right-length", "60").Run()
 
 	// Style pane borders - active pane gets theme color outline
@@ -581,6 +596,104 @@ func (m *DetailModel) toggleTmuxPane() {
 	m.toggleTmuxPanes()
 }
 
+// focusNextPane cycles focus to the next pane: Details -> Claude -> Shell -> Details.
+func (m *DetailModel) focusNextPane() {
+	if m.claudePaneID == "" && m.workdirPaneID == "" {
+		return // No panes to cycle through
+	}
+
+	// Get the currently focused pane
+	currentCmd := exec.Command("tmux", "display-message", "-p", "#{pane_id}")
+	currentOut, err := currentCmd.Output()
+	if err != nil {
+		return
+	}
+	currentPane := strings.TrimSpace(string(currentOut))
+
+	// Determine the next pane in cycle: Details -> Claude -> Shell -> Details
+	var nextPane string
+	switch currentPane {
+	case m.tuiPaneID:
+		if m.claudePaneID != "" {
+			nextPane = m.claudePaneID
+		} else if m.workdirPaneID != "" {
+			nextPane = m.workdirPaneID
+		}
+	case m.claudePaneID:
+		if m.workdirPaneID != "" {
+			nextPane = m.workdirPaneID
+		} else if m.tuiPaneID != "" {
+			nextPane = m.tuiPaneID
+		}
+	case m.workdirPaneID:
+		if m.tuiPaneID != "" {
+			nextPane = m.tuiPaneID
+		} else if m.claudePaneID != "" {
+			nextPane = m.claudePaneID
+		}
+	default:
+		// Unknown pane, go to Claude or Shell
+		if m.claudePaneID != "" {
+			nextPane = m.claudePaneID
+		} else if m.workdirPaneID != "" {
+			nextPane = m.workdirPaneID
+		}
+	}
+
+	if nextPane != "" {
+		exec.Command("tmux", "select-pane", "-t", nextPane).Run()
+	}
+}
+
+// focusPrevPane cycles focus to the previous pane: Details -> Shell -> Claude -> Details.
+func (m *DetailModel) focusPrevPane() {
+	if m.claudePaneID == "" && m.workdirPaneID == "" {
+		return // No panes to cycle through
+	}
+
+	// Get the currently focused pane
+	currentCmd := exec.Command("tmux", "display-message", "-p", "#{pane_id}")
+	currentOut, err := currentCmd.Output()
+	if err != nil {
+		return
+	}
+	currentPane := strings.TrimSpace(string(currentOut))
+
+	// Determine the previous pane in cycle: Details -> Shell -> Claude -> Details
+	var prevPane string
+	switch currentPane {
+	case m.tuiPaneID:
+		if m.workdirPaneID != "" {
+			prevPane = m.workdirPaneID
+		} else if m.claudePaneID != "" {
+			prevPane = m.claudePaneID
+		}
+	case m.claudePaneID:
+		if m.tuiPaneID != "" {
+			prevPane = m.tuiPaneID
+		} else if m.workdirPaneID != "" {
+			prevPane = m.workdirPaneID
+		}
+	case m.workdirPaneID:
+		if m.claudePaneID != "" {
+			prevPane = m.claudePaneID
+		} else if m.tuiPaneID != "" {
+			prevPane = m.tuiPaneID
+		}
+	default:
+		// Unknown pane, go to Shell or Claude
+		if m.workdirPaneID != "" {
+			prevPane = m.workdirPaneID
+		} else if m.claudePaneID != "" {
+			prevPane = m.claudePaneID
+		}
+	}
+
+	if prevPane != "" {
+		exec.Command("tmux", "select-pane", "-t", prevPane).Run()
+	}
+}
+
 // View renders the detail view.
 func (m *DetailModel) View() string {
 	if !m.ready {
@@ -654,7 +767,7 @@ func (m *DetailModel) renderHeader() string {
 		meta.WriteString("  ")
 		tmuxHint := lipgloss.NewStyle().
 			Foreground(ColorSecondary).
-			Render("(Click to interact with Claude)")
+			Render("(Tab to interact with Claude)")
 		meta.WriteString(tmuxHint)
 	}
 
@@ -747,9 +860,10 @@ func (m *DetailModel) renderHelp() string {
 	}
 
 	hasSession := m.hasActiveTmuxSession()
+	hasPanes := m.claudePaneID != "" || m.workdirPaneID != ""
 	if hasSession && os.Getenv("TMUX") != "" {
 		toggleDesc := "show panes"
-		if m.claudePaneID != "" || m.workdirPaneID != "" {
+		if hasPanes {
 			toggleDesc = "hide panes"
 		}
 		keys = append(keys, struct {
@@ -773,6 +887,14 @@ func (m *DetailModel) renderHelp() string {
 			key  string
 			desc string
 		}{"r", "retry"})
+	}
+
+	// Show Tab shortcut when panes are visible
+	if hasPanes && os.Getenv("TMUX") != "" {
+		keys = append(keys, struct {
+			key  string
+			desc string
+		}{"Tab", "switch pane"})
 	}
 
 	keys = append(keys, []struct {
