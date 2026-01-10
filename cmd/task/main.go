@@ -1423,8 +1423,10 @@ func handleNotificationHook(database *db.DB, taskID int64, input *ClaudeHookInpu
 		if err != nil {
 			return err
 		}
-		// Only update if currently processing (avoid overwriting other states)
-		if task != nil && task.Status == db.StatusProcessing {
+		// Only update if:
+		// 1. Task has actually started (StartedAt is set)
+		// 2. Currently processing (avoid overwriting other states)
+		if task != nil && task.StartedAt != nil && task.Status == db.StatusProcessing {
 			database.UpdateTaskStatus(taskID, db.StatusBlocked)
 			msg := "Waiting for user input"
 			if input.NotificationType == "permission_prompt" {
@@ -1447,6 +1449,12 @@ func handleStopHook(database *db.DB, taskID int64, input *ClaudeHookInput) error
 		return err
 	}
 	if task == nil {
+		return nil
+	}
+
+	// Only manage status if the task has actually started (StartedAt is set)
+	// This prevents status changes for tasks that are new or in backlog/queued
+	if task.StartedAt == nil {
 		return nil
 	}
 
@@ -1478,6 +1486,12 @@ func handlePreToolUseHook(database *db.DB, taskID int64, input *ClaudeHookInput)
 		return nil
 	}
 
+	// Only manage status if the task has actually started (StartedAt is set)
+	// This prevents status changes for tasks that are new or in backlog/queued
+	if task.StartedAt == nil {
+		return nil
+	}
+
 	// When Claude is about to use a tool, the task should be "processing"
 	// This handles the case where:
 	// 1. Task was blocked (waiting for input) and user responded
@@ -1498,6 +1512,12 @@ func handlePostToolUseHook(database *db.DB, taskID int64, input *ClaudeHookInput
 		return err
 	}
 	if task == nil {
+		return nil
+	}
+
+	// Only manage status if the task has actually started (StartedAt is set)
+	// This prevents status changes for tasks that are new or in backlog/queued
+	if task.StartedAt == nil {
 		return nil
 	}
 
