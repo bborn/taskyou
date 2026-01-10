@@ -2,6 +2,7 @@
 package github
 
 import (
+	"context"
 	"encoding/json"
 	"os/exec"
 	"strings"
@@ -127,15 +128,19 @@ func fetchPRInfo(repoDir, branchName string) *PRInfo {
 		return nil
 	}
 
+	// Use timeout to prevent blocking on slow network or GitHub API
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
 	// Query for PR associated with this branch
 	// gh pr view <branch> --json number,url,state,isDraft,title,mergeStateStatus,statusCheckRollup,updatedAt
-	cmd := exec.Command("gh", "pr", "view", branchName,
+	cmd := exec.CommandContext(ctx, "gh", "pr", "view", branchName,
 		"--json", "number,url,state,isDraft,title,mergeStateStatus,statusCheckRollup,updatedAt")
 	cmd.Dir = repoDir
 
 	output, err := cmd.Output()
 	if err != nil {
-		// No PR exists for this branch or other error
+		// No PR exists for this branch, timeout, or other error
 		return nil
 	}
 
