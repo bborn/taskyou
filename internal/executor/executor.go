@@ -1549,7 +1549,11 @@ func (e *Executor) checkMergedBranches() {
 }
 
 // isBranchMerged checks if a task's branch has been merged into the default branch.
+<<<<<<< Updated upstream
 // Uses git commands with a fetch to ensure we have the latest remote state.
+=======
+// Uses git commands to detect merged branches.
+>>>>>>> Stashed changes
 func (e *Executor) isBranchMerged(task *db.Task) bool {
 	projectDir := e.getProjectDir(task.Project)
 	if projectDir == "" {

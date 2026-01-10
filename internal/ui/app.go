@@ -1498,15 +1498,13 @@ func (m *AppModel) loadTasks() tea.Cmd {
 	return func() tea.Msg {
 		tasks, err := m.db.ListTasks(db.ListTasksOptions{Limit: 50, IncludeClosed: true})
 
-		// Check PR state for all tasks with branches in the background
-		// This ensures we detect merged PRs when returning to the dashboard
-		go func() {
-			for _, task := range tasks {
-				if task.BranchName != "" && task.Status != db.StatusDone {
-					m.executor.CheckPRStateAndUpdateTask(task.ID)
-				}
+		// Check merged branch state for all tasks in parallel (non-blocking)
+		// Each check runs in its own goroutine to avoid sequential network calls
+		for _, task := range tasks {
+			if task.BranchName != "" && task.Status != db.StatusDone {
+				go m.executor.CheckPRStateAndUpdateTask(task.ID)
 			}
-		}()
+		}
 
 		return tasksLoadedMsg{tasks: tasks, err: err}
 	}
