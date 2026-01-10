@@ -54,11 +54,6 @@ var (
 			Foreground(ColorBlocked).
 			SetString("!")
 
-	// Priority
-	PriorityHigh = lipgloss.NewStyle().
-			Foreground(ColorError).
-			SetString("↑")
-
 	// Box styles
 	Box = lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).

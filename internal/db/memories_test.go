@@ -237,11 +237,10 @@ func TestMemoryWithSourceTask(t *testing.T) {
 	// Create a task first
 	task := &Task{
 		Title:    "Source Task",
-		Body:     "Task body",
-		Status:   StatusBacklog,
-		Type:     TypeCode,
-		Project:  "testproject",
-		Priority: "normal",
+		Body:    "Task body",
+		Status:  StatusBacklog,
+		Type:    TypeCode,
+		Project: "testproject",
 	}
 	if err := db.CreateTask(task); err != nil {
 		t.Fatalf("failed to create task: %v", err)

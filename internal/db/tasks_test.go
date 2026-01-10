@@ -25,8 +25,7 @@ func TestGetLastQuestion(t *testing.T) {
 		Status:   StatusBacklog,
 		Type:     TypeCode,
 		Project:  "test",
-		Priority: "normal",
-	}
+			}
 	if err := db.CreateTask(task); err != nil {
 		t.Fatalf("failed to create task: %v", err)
 	}
@@ -86,8 +85,7 @@ func TestTaskLogsWithQuestion(t *testing.T) {
 		Status:   StatusBacklog,
 		Type:     TypeCode,
 		Project:  "test",
-		Priority: "normal",
-	}
+			}
 	if err := db.CreateTask(task); err != nil {
 		t.Fatalf("failed to create task: %v", err)
 	}
@@ -139,27 +137,23 @@ func TestGetTasksWithBranches(t *testing.T) {
 		Title:    "Task without branch",
 		Status:   StatusBacklog,
 		Type:     TypeCode,
-		Priority: "normal",
-	}
+			}
 	taskWithBranch := &Task{
 		Title:      "Task with branch",
 		Status:     StatusBlocked,
 		Type:       TypeCode,
-		Priority:   "normal",
 		BranchName: "task/1-task-with-branch",
 	}
 	taskDoneWithBranch := &Task{
 		Title:      "Done task with branch",
 		Status:     StatusDone,
 		Type:       TypeCode,
-		Priority:   "normal",
 		BranchName: "task/2-done-task",
 	}
 	taskProcessingWithBranch := &Task{
 		Title:      "Processing task with branch",
 		Status:     StatusProcessing,
 		Type:       TypeCode,
-		Priority:   "normal",
 		BranchName: "task/3-processing-task",
 	}
 

@@ -111,7 +111,6 @@ func (db *DB) migrate() error {
 			status TEXT DEFAULT 'backlog',
 			type TEXT DEFAULT '',
 			project TEXT DEFAULT '',
-			priority TEXT DEFAULT 'normal',
 			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 			started_at DATETIME,
@@ -210,6 +209,9 @@ func (db *DB) migrate() error {
 
 	// Migrate tasks with empty project to 'personal'
 	db.Exec(`UPDATE tasks SET project = 'personal' WHERE project = ''`)
+
+	// Drop priority column if it exists (SQLite 3.35.0+ supports DROP COLUMN)
+	db.Exec(`ALTER TABLE tasks DROP COLUMN priority`)
 
 	return nil
 }
