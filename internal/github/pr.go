@@ -266,13 +266,14 @@ func (p *PRInfo) StatusDescription() string {
 	case PRStateDraft:
 		return "Draft PR"
 	case PRStateOpen:
+		// Check for merge conflicts first - this takes priority over check status
+		if p.Mergeable == "CONFLICTING" {
+			return "Has conflicts"
+		}
 		switch p.CheckState {
 		case CheckStatePassing:
 			if p.Mergeable == "MERGEABLE" {
 				return "Ready to merge"
-			}
-			if p.Mergeable == "CONFLICTING" {
-				return "Has conflicts"
 			}
 			return "Checks passing"
 		case CheckStateFailing:

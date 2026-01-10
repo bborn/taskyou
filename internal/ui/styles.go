@@ -191,27 +191,30 @@ func PRStatusBadge(pr *github.PRInfo) string {
 		icon = "D"
 		color = ColorPRDraft
 	case github.PRStateOpen:
-		switch pr.CheckState {
-		case github.CheckStatePassing:
-			if pr.Mergeable == "MERGEABLE" {
-				icon = "R" // Ready to merge
-				color = ColorPROpen
-			} else if pr.Mergeable == "CONFLICTING" {
-				icon = "C" // Conflicts
+		// Check for merge conflicts first - this takes priority over check status
+		if pr.Mergeable == "CONFLICTING" {
+			icon = "C" // Conflicts
+			color = ColorPRFailing
+		} else {
+			switch pr.CheckState {
+			case github.CheckStatePassing:
+				if pr.Mergeable == "MERGEABLE" {
+					icon = "R" // Ready to merge
+					color = ColorPROpen
+				} else {
+					icon = "P" // Passing
+					color = ColorPROpen
+				}
+			case github.CheckStateFailing:
+				icon = "F" // Failing
 				color = ColorPRFailing
-			} else {
-				icon = "P" // Passing
+			case github.CheckStatePending:
+				icon = "W" // Waiting/running
+				color = ColorPRPending
+			default:
+				icon = "O" // Open, no checks
 				color = ColorPROpen
 			}
-		case github.CheckStateFailing:
-			icon = "F" // Failing
-			color = ColorPRFailing
-		case github.CheckStatePending:
-			icon = "W" // Waiting/running
-			color = ColorPRPending
-		default:
-			icon = "O" // Open, no checks
-			color = ColorPROpen
 		}
 	}
 
