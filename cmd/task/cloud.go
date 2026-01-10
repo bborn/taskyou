@@ -125,8 +125,20 @@ func waitForEnter(message string) {
 	reader.ReadString('\n')
 }
 
+// expandPath expands ~ to the user's home directory.
+func expandPath(path string) string {
+	if strings.HasPrefix(path, "~/") {
+		home, err := os.UserHomeDir()
+		if err == nil {
+			return filepath.Join(home, path[2:])
+		}
+	}
+	return path
+}
+
 // getGitRemote returns the git remote URL for a directory.
 func getGitRemote(path string) (string, error) {
+	path = expandPath(path)
 	cmd := osexec.Command("git", "-C", path, "remote", "get-url", "origin")
 	output, err := cmd.Output()
 	if err != nil {
@@ -373,53 +385,8 @@ func runCloudInit() error {
 	}
 	fmt.Println()
 
-	// Step 3: Claude Authentication
-	fmt.Println(cloudHeaderStyle.Render("3. Claude Authentication"))
-	fmt.Println()
-	fmt.Println("   [1] Claude Max/Pro (subscription) - recommended")
-	fmt.Println("   [2] API key")
-	fmt.Println()
-
-	choice := prompt("Select authentication method", "1")
-
-	if choice == "2" {
-		// API key flow
-		apiKey := prompt("Enter your Anthropic API key", "")
-		if apiKey != "" {
-			fmt.Print("   Configuring Claude... ")
-			_, err := sshRun(server, fmt.Sprintf("sudo -u runner claude config set apiKey '%s'", apiKey))
-			if err != nil {
-				fmt.Println(cloudPendingStyle.Render("warning: could not configure"))
-			} else {
-				fmt.Println(cloudCheckStyle.Render("Done"))
-			}
-		}
-	} else {
-		// OAuth flow for Claude Max
-		fmt.Println()
-		fmt.Println("   Run this in another terminal to authenticate Claude:")
-		fmt.Println()
-		fmt.Println(cloudBoxStyle.Render(fmt.Sprintf("ssh %s 'sudo -u runner claude auth login'", server)))
-		fmt.Println()
-		fmt.Println("   This will open a browser for OAuth authentication.")
-
-		waitForEnter("Press Enter when authentication is complete")
-	}
-
-	// Verify Claude auth
-	fmt.Print("   Verifying Claude... ")
-	output, err = sshRun(server, "sudo -u runner claude --version 2>/dev/null || echo 'not installed'")
-	if strings.Contains(output, "not installed") {
-		fmt.Println(cloudPendingStyle.Render("Claude CLI not installed"))
-		fmt.Println("   Installing Claude CLI...")
-		sshRun(server, "sudo -u runner npm install -g @anthropic-ai/claude-code 2>/dev/null || true")
-	} else {
-		fmt.Println(cloudCheckStyle.Render("Installed"))
-	}
-	fmt.Println()
-
-	// Step 4: Projects
-	fmt.Println(cloudHeaderStyle.Render("4. Projects"))
+	// Step 3: Projects
+	fmt.Println(cloudHeaderStyle.Render("3. Projects"))
 
 	projects, err := database.ListProjects()
 	if err != nil {
@@ -510,8 +477,8 @@ func runCloudInit() error {
 	}
 	fmt.Println()
 
-	// Step 5: Deploy
-	fmt.Println(cloudHeaderStyle.Render("5. Deploy"))
+	// Step 4: Deploy
+	fmt.Println(cloudHeaderStyle.Render("4. Deploy"))
 
 	// Build for Linux
 	fmt.Print("   Building taskd for linux/amd64... ")
@@ -529,12 +496,12 @@ func runCloudInit() error {
 
 	fmt.Print("   Deploying binary... ")
 	binPath := filepath.Join(getProjectRoot(), "bin", "taskd-linux")
-	remotePath := fmt.Sprintf("%s:%s/taskd", server, remoteDir)
-	if err := scpFile(binPath, remotePath); err != nil {
+	// scp to temp location first, then move (handles ownership issues)
+	if err := scpFile(binPath, fmt.Sprintf("%s:/tmp/taskd", server)); err != nil {
 		fmt.Println(errorStyle.Render("failed"))
 		return fmt.Errorf("deploy binary: %w", err)
 	}
-	sshRun(server, fmt.Sprintf("chmod +x %s/taskd && chown %s:%s %s/taskd", remoteDir, remoteUser, remoteUser, remoteDir))
+	sshRun(server, fmt.Sprintf("mv /tmp/taskd %s/taskd && chmod +x %s/taskd && chown %s:%s %s/taskd", remoteDir, remoteDir, remoteUser, remoteUser, remoteDir))
 	fmt.Println(cloudCheckStyle.Render("Done"))
 
 	// Install systemd service
@@ -569,6 +536,16 @@ WantedBy=multi-user.target
 	database.SetSetting(SettingCloudTaskPort, defaultCloudTaskPort)
 	database.SetSetting(SettingCloudRemoteUser, remoteUser)
 	database.SetSetting(SettingCloudRemoteDir, remoteDir)
+	fmt.Println()
+
+	// Step 5: Claude Authentication
+	fmt.Println(cloudHeaderStyle.Render("5. Claude Authentication"))
+	fmt.Println()
+	fmt.Println("   SSH to the server and authenticate Claude as the runner user:")
+	fmt.Println()
+	fmt.Println(cloudBoxStyle.Render(fmt.Sprintf("ssh %s\nsudo -iu runner\nclaude", server)))
+
+	waitForEnter("Press Enter when authentication is complete")
 
 	fmt.Println()
 	fmt.Println(strings.Repeat("─", 40))
