@@ -77,6 +77,11 @@ func (db *DB) CreateTask(t *Task) error {
 	}
 	t.ID = id
 
+	// Save the last used task type for this project
+	if t.Type != "" {
+		db.SetLastTaskTypeForProject(t.Project, t.Type)
+	}
+
 	return nil
 }
 
@@ -550,11 +555,11 @@ func (db *DB) DeleteProject(id int64) error {
 	return nil
 }
 
-// ListProjects returns all projects.
+// ListProjects returns all projects, with "personal" always first.
 func (db *DB) ListProjects() ([]*Project, error) {
 	rows, err := db.Query(`
 		SELECT id, name, path, aliases, instructions, COALESCE(actions, '[]'), created_at
-		FROM projects ORDER BY name
+		FROM projects ORDER BY CASE WHEN name = 'personal' THEN 0 ELSE 1 END, name
 	`)
 	if err != nil {
 		return nil, fmt.Errorf("query projects: %w", err)
@@ -690,6 +695,16 @@ func (db *DB) GetAllSettings() (map[string]string, error) {
 		settings[key] = value
 	}
 	return settings, nil
+}
+
+// GetLastTaskTypeForProject returns the last used task type for a project.
+func (db *DB) GetLastTaskTypeForProject(project string) (string, error) {
+	return db.GetSetting("last_type_" + project)
+}
+
+// SetLastTaskTypeForProject saves the last used task type for a project.
+func (db *DB) SetLastTaskTypeForProject(project, taskType string) error {
+	return db.SetSetting("last_type_"+project, taskType)
 }
 
 // CreateTaskType creates a new task type.
