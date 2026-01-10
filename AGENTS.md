@@ -185,7 +185,6 @@ Any state → closed (manual)
 | `c` | Close selected task |
 | `d` | Delete selected task |
 | `w` | Watch current execution |
-| `i` | Interrupt execution |
 | `/` | Filter tasks |
 | `m` | Project memories |
 | `s` | Settings |
