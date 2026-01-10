@@ -143,12 +143,27 @@ func TestPRInfoStatusDescription(t *testing.T) {
 			expected: "Ready to merge",
 		},
 		{
-			name:     "open PR with conflicts",
+			name:     "open PR with conflicts and passing checks",
 			prInfo:   &PRInfo{State: PRStateOpen, CheckState: CheckStatePassing, Mergeable: "CONFLICTING"},
 			expected: "Has conflicts",
 		},
 		{
-			name:     "open PR with failing checks",
+			name:     "open PR with conflicts and failing checks",
+			prInfo:   &PRInfo{State: PRStateOpen, CheckState: CheckStateFailing, Mergeable: "CONFLICTING"},
+			expected: "Has conflicts",
+		},
+		{
+			name:     "open PR with conflicts and pending checks",
+			prInfo:   &PRInfo{State: PRStateOpen, CheckState: CheckStatePending, Mergeable: "CONFLICTING"},
+			expected: "Has conflicts",
+		},
+		{
+			name:     "open PR with conflicts and no checks",
+			prInfo:   &PRInfo{State: PRStateOpen, CheckState: CheckStateNone, Mergeable: "CONFLICTING"},
+			expected: "Has conflicts",
+		},
+		{
+			name:     "open PR with failing checks (no conflicts)",
 			prInfo:   &PRInfo{State: PRStateOpen, CheckState: CheckStateFailing},
 			expected: "Checks failing",
 		},

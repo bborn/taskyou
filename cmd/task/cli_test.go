@@ -366,3 +366,264 @@ func TestTaskTypeValidation(t *testing.T) {
 		}
 	}
 }
+
+// TestClaudeHookStatusHandling tests that Claude hooks only change status for started tasks
+func TestClaudeHookStatusHandling(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	database, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer database.Close()
+	defer os.Remove(dbPath)
+
+	// Test 1: NotificationHook should NOT change status for task without StartedAt
+	t.Run("NotificationHook ignores unstarted task", func(t *testing.T) {
+		task := &db.Task{
+			Title:  "Unstarted task",
+			Status: db.StatusProcessing, // Even if processing status, no StartedAt
+			Type:   db.TypeCode,
+		}
+		if err := database.CreateTask(task); err != nil {
+			t.Fatalf("failed to create task: %v", err)
+		}
+
+		// Simulate idle_prompt notification
+		input := &ClaudeHookInput{NotificationType: "idle_prompt"}
+		err := handleNotificationHook(database, task.ID, input)
+		if err != nil {
+			t.Fatalf("handleNotificationHook() error = %v", err)
+		}
+
+		// Status should NOT have changed because StartedAt is nil
+		fetched, err := database.GetTask(task.ID)
+		if err != nil {
+			t.Fatalf("GetTask() error = %v", err)
+		}
+		if fetched.Status != db.StatusProcessing {
+			t.Errorf("Status = %v, want %v (should not change for unstarted task)", fetched.Status, db.StatusProcessing)
+		}
+	})
+
+	// Test 2: NotificationHook SHOULD change status for started task
+	t.Run("NotificationHook changes status for started task", func(t *testing.T) {
+		task := &db.Task{
+			Title:  "Started task",
+			Status: db.StatusProcessing,
+			Type:   db.TypeCode,
+		}
+		if err := database.CreateTask(task); err != nil {
+			t.Fatalf("failed to create task: %v", err)
+		}
+
+		// Mark the task as started
+		if err := database.MarkTaskStarted(task.ID); err != nil {
+			t.Fatalf("MarkTaskStarted() error = %v", err)
+		}
+
+		// Simulate idle_prompt notification
+		input := &ClaudeHookInput{NotificationType: "idle_prompt"}
+		err := handleNotificationHook(database, task.ID, input)
+		if err != nil {
+			t.Fatalf("handleNotificationHook() error = %v", err)
+		}
+
+		// Status SHOULD change to blocked because task was started
+		fetched, err := database.GetTask(task.ID)
+		if err != nil {
+			t.Fatalf("GetTask() error = %v", err)
+		}
+		if fetched.Status != db.StatusBlocked {
+			t.Errorf("Status = %v, want %v", fetched.Status, db.StatusBlocked)
+		}
+	})
+
+	// Test 3: StopHook should NOT change status for task without StartedAt
+	t.Run("StopHook ignores unstarted task", func(t *testing.T) {
+		task := &db.Task{
+			Title:  "Unstarted task for stop",
+			Status: db.StatusProcessing,
+			Type:   db.TypeCode,
+		}
+		if err := database.CreateTask(task); err != nil {
+			t.Fatalf("failed to create task: %v", err)
+		}
+
+		// Simulate end_turn stop
+		input := &ClaudeHookInput{StopReason: "end_turn"}
+		err := handleStopHook(database, task.ID, input)
+		if err != nil {
+			t.Fatalf("handleStopHook() error = %v", err)
+		}
+
+		// Status should NOT have changed
+		fetched, err := database.GetTask(task.ID)
+		if err != nil {
+			t.Fatalf("GetTask() error = %v", err)
+		}
+		if fetched.Status != db.StatusProcessing {
+			t.Errorf("Status = %v, want %v (should not change for unstarted task)", fetched.Status, db.StatusProcessing)
+		}
+	})
+
+	// Test 4: StopHook SHOULD change status for started task
+	t.Run("StopHook changes status for started task", func(t *testing.T) {
+		task := &db.Task{
+			Title:  "Started task for stop",
+			Status: db.StatusProcessing,
+			Type:   db.TypeCode,
+		}
+		if err := database.CreateTask(task); err != nil {
+			t.Fatalf("failed to create task: %v", err)
+		}
+
+		// Mark the task as started
+		if err := database.MarkTaskStarted(task.ID); err != nil {
+			t.Fatalf("MarkTaskStarted() error = %v", err)
+		}
+
+		// Simulate end_turn stop
+		input := &ClaudeHookInput{StopReason: "end_turn"}
+		err := handleStopHook(database, task.ID, input)
+		if err != nil {
+			t.Fatalf("handleStopHook() error = %v", err)
+		}
+
+		// Status SHOULD change to blocked
+		fetched, err := database.GetTask(task.ID)
+		if err != nil {
+			t.Fatalf("GetTask() error = %v", err)
+		}
+		if fetched.Status != db.StatusBlocked {
+			t.Errorf("Status = %v, want %v", fetched.Status, db.StatusBlocked)
+		}
+	})
+
+	// Test 5: PreToolUseHook should NOT change status for task without StartedAt
+	t.Run("PreToolUseHook ignores unstarted task", func(t *testing.T) {
+		task := &db.Task{
+			Title:  "Unstarted task for tool",
+			Status: db.StatusBlocked,
+			Type:   db.TypeCode,
+		}
+		if err := database.CreateTask(task); err != nil {
+			t.Fatalf("failed to create task: %v", err)
+		}
+
+		// Simulate PreToolUse
+		input := &ClaudeHookInput{}
+		err := handlePreToolUseHook(database, task.ID, input)
+		if err != nil {
+			t.Fatalf("handlePreToolUseHook() error = %v", err)
+		}
+
+		// Status should NOT have changed
+		fetched, err := database.GetTask(task.ID)
+		if err != nil {
+			t.Fatalf("GetTask() error = %v", err)
+		}
+		if fetched.Status != db.StatusBlocked {
+			t.Errorf("Status = %v, want %v (should not change for unstarted task)", fetched.Status, db.StatusBlocked)
+		}
+	})
+
+	// Test 6: PreToolUseHook SHOULD change blocked→processing for started task
+	t.Run("PreToolUseHook resumes started task", func(t *testing.T) {
+		task := &db.Task{
+			Title:  "Started blocked task",
+			Status: db.StatusBlocked,
+			Type:   db.TypeCode,
+		}
+		if err := database.CreateTask(task); err != nil {
+			t.Fatalf("failed to create task: %v", err)
+		}
+
+		// Mark the task as started (this also sets status to processing, so we need to set it back)
+		if err := database.MarkTaskStarted(task.ID); err != nil {
+			t.Fatalf("MarkTaskStarted() error = %v", err)
+		}
+		// Set status back to blocked to simulate waiting for input
+		if err := database.UpdateTaskStatus(task.ID, db.StatusBlocked); err != nil {
+			t.Fatalf("UpdateTaskStatus() error = %v", err)
+		}
+
+		// Simulate PreToolUse (Claude resumed working)
+		input := &ClaudeHookInput{}
+		err := handlePreToolUseHook(database, task.ID, input)
+		if err != nil {
+			t.Fatalf("handlePreToolUseHook() error = %v", err)
+		}
+
+		// Status SHOULD change to processing
+		fetched, err := database.GetTask(task.ID)
+		if err != nil {
+			t.Fatalf("GetTask() error = %v", err)
+		}
+		if fetched.Status != db.StatusProcessing {
+			t.Errorf("Status = %v, want %v", fetched.Status, db.StatusProcessing)
+		}
+	})
+
+	// Test 7: PostToolUseHook should NOT change status for task without StartedAt
+	t.Run("PostToolUseHook ignores unstarted task", func(t *testing.T) {
+		task := &db.Task{
+			Title:  "Unstarted task for post tool",
+			Status: db.StatusBlocked,
+			Type:   db.TypeCode,
+		}
+		if err := database.CreateTask(task); err != nil {
+			t.Fatalf("failed to create task: %v", err)
+		}
+
+		// Simulate PostToolUse
+		input := &ClaudeHookInput{}
+		err := handlePostToolUseHook(database, task.ID, input)
+		if err != nil {
+			t.Fatalf("handlePostToolUseHook() error = %v", err)
+		}
+
+		// Status should NOT have changed
+		fetched, err := database.GetTask(task.ID)
+		if err != nil {
+			t.Fatalf("GetTask() error = %v", err)
+		}
+		if fetched.Status != db.StatusBlocked {
+			t.Errorf("Status = %v, want %v (should not change for unstarted task)", fetched.Status, db.StatusBlocked)
+		}
+	})
+
+	// Test 8: tool_use stop reason should NOT change status
+	t.Run("StopHook with tool_use does not change status", func(t *testing.T) {
+		task := &db.Task{
+			Title:  "Task with tool_use stop",
+			Status: db.StatusProcessing,
+			Type:   db.TypeCode,
+		}
+		if err := database.CreateTask(task); err != nil {
+			t.Fatalf("failed to create task: %v", err)
+		}
+
+		// Mark the task as started
+		if err := database.MarkTaskStarted(task.ID); err != nil {
+			t.Fatalf("MarkTaskStarted() error = %v", err)
+		}
+
+		// Simulate tool_use stop (should NOT change status)
+		input := &ClaudeHookInput{StopReason: "tool_use"}
+		err := handleStopHook(database, task.ID, input)
+		if err != nil {
+			t.Fatalf("handleStopHook() error = %v", err)
+		}
+
+		// Status should remain processing
+		fetched, err := database.GetTask(task.ID)
+		if err != nil {
+			t.Fatalf("GetTask() error = %v", err)
+		}
+		if fetched.Status != db.StatusProcessing {
+			t.Errorf("Status = %v, want %v (tool_use should not change status)", fetched.Status, db.StatusProcessing)
+		}
+	})
+}

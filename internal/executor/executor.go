@@ -733,12 +733,14 @@ func TmuxSessionName(taskID int64) string {
 // ensureTmuxDaemon ensures the task-daemon session exists.
 func ensureTmuxDaemon() error {
 	daemonSession := getDaemonSessionName()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 	// Check if session exists
-	if exec.Command("tmux", "has-session", "-t", daemonSession).Run() == nil {
+	if exec.CommandContext(ctx, "tmux", "has-session", "-t", daemonSession).Run() == nil {
 		return nil
 	}
 	// Create it with a placeholder window that we'll kill later
-	return exec.Command("tmux", "new-session", "-d", "-s", daemonSession, "-n", "_placeholder").Run()
+	return exec.CommandContext(ctx, "tmux", "new-session", "-d", "-s", daemonSession, "-n", "_placeholder").Run()
 }
 
 // setupClaudeHooks creates a .claude/settings.local.json in workDir to configure hooks.
@@ -869,8 +871,10 @@ func (e *Executor) runClaude(ctx context.Context, taskID int64, workDir, prompt 
 	windowName := TmuxWindowName(taskID)
 	windowTarget := TmuxSessionName(taskID)
 
-	// Kill any existing window with this name
-	exec.Command("tmux", "kill-window", "-t", windowTarget).Run()
+	// Kill any existing window with this name (with timeout)
+	killCtx, killCancel := context.WithTimeout(context.Background(), 3*time.Second)
+	exec.CommandContext(killCtx, "tmux", "kill-window", "-t", windowTarget).Run()
+	killCancel()
 
 	// Setup Claude hooks for status updates
 	cleanupHooks, err := e.setupClaudeHooks(workDir, taskID)
@@ -900,12 +904,20 @@ func (e *Executor) runClaude(ctx context.Context, taskID int64, workDir, prompt 
 	if sessionID == "" {
 		sessionID = fmt.Sprintf("%d", os.Getpid())
 	}
-	script := fmt.Sprintf(`TASK_ID=%d TASK_SESSION_ID=%s claude --dangerously-skip-permissions --chrome "$(cat %q)"`, taskID, sessionID, promptFile.Name())
+	// Only use --dangerously-skip-permissions if TASK_DANGEROUS_MODE is set
+	dangerousFlag := ""
+	if os.Getenv("TASK_DANGEROUS_MODE") == "1" {
+		dangerousFlag = "--dangerously-skip-permissions "
+	}
+	script := fmt.Sprintf(`TASK_ID=%d TASK_SESSION_ID=%s claude %s--chrome "$(cat %q)"`, taskID, sessionID, dangerousFlag, promptFile.Name())
 
-	// Create new window in task-daemon session
-	tmuxCmd := exec.Command("tmux", "new-window", "-d", "-t", getDaemonSessionName(), "-n", windowName, "-c", workDir, "sh", "-c", script)
-	if err := tmuxCmd.Run(); err != nil {
-		e.logger.Warn("tmux failed, falling back to direct", "error", err)
+	// Create new window in task-daemon session (with timeout for tmux overhead)
+	newWinCtx, newWinCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	tmuxCmd := exec.CommandContext(newWinCtx, "tmux", "new-window", "-d", "-t", getDaemonSessionName(), "-n", windowName, "-c", workDir, "sh", "-c", script)
+	tmuxErr := tmuxCmd.Run()
+	newWinCancel()
+	if tmuxErr != nil {
+		e.logger.Warn("tmux failed, falling back to direct", "error", tmuxErr)
 		if cleanupHooks != nil {
 			cleanupHooks()
 		}
@@ -952,8 +964,10 @@ func (e *Executor) runClaudeResume(ctx context.Context, taskID int64, workDir, p
 	windowName := TmuxWindowName(taskID)
 	windowTarget := TmuxSessionName(taskID)
 
-	// Kill any existing window with this name
-	exec.Command("tmux", "kill-window", "-t", windowTarget).Run()
+	// Kill any existing window with this name (with timeout)
+	killCtx, killCancel := context.WithTimeout(context.Background(), 3*time.Second)
+	exec.CommandContext(killCtx, "tmux", "kill-window", "-t", windowTarget).Run()
+	killCancel()
 
 	// Setup Claude hooks for status updates
 	cleanupHooks, err := e.setupClaudeHooks(workDir, taskID)
@@ -980,12 +994,20 @@ func (e *Executor) runClaudeResume(ctx context.Context, taskID int64, workDir, p
 	if taskSessionID == "" {
 		taskSessionID = fmt.Sprintf("%d", os.Getpid())
 	}
-	script := fmt.Sprintf(`TASK_ID=%d TASK_SESSION_ID=%s claude --dangerously-skip-permissions --chrome --resume %s "$(cat %q)"`, taskID, taskSessionID, sessionID, feedbackFile.Name())
+	// Only use --dangerously-skip-permissions if TASK_DANGEROUS_MODE is set
+	dangerousFlag := ""
+	if os.Getenv("TASK_DANGEROUS_MODE") == "1" {
+		dangerousFlag = "--dangerously-skip-permissions "
+	}
+	script := fmt.Sprintf(`TASK_ID=%d TASK_SESSION_ID=%s claude %s--chrome --resume %s "$(cat %q)"`, taskID, taskSessionID, dangerousFlag, sessionID, feedbackFile.Name())
 
-	// Create new window in task-daemon session
-	tmuxCmd := exec.Command("tmux", "new-window", "-d", "-t", getDaemonSessionName(), "-n", windowName, "-c", workDir, "sh", "-c", script)
-	if err := tmuxCmd.Run(); err != nil {
-		e.logger.Warn("tmux failed, falling back to direct", "error", err)
+	// Create new window in task-daemon session (with timeout for tmux overhead)
+	newWinCtx, newWinCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	tmuxCmd := exec.CommandContext(newWinCtx, "tmux", "new-window", "-d", "-t", getDaemonSessionName(), "-n", windowName, "-c", workDir, "sh", "-c", script)
+	tmuxErr := tmuxCmd.Run()
+	newWinCancel()
+	if tmuxErr != nil {
+		e.logger.Warn("tmux failed, falling back to direct", "error", tmuxErr)
 		if cleanupHooks != nil {
 			cleanupHooks()
 		}
@@ -1090,17 +1112,21 @@ func (e *Executor) pollTmuxSession(ctx context.Context, taskID int64, sessionNam
 				}
 			}
 
-			// Check if tmux window still exists
-			windowExists := exec.Command("tmux", "list-panes", "-t", sessionName).Run() == nil
+			// Check if tmux window still exists (with timeout to prevent blocking)
+			tmuxCtx, tmuxCancel := context.WithTimeout(context.Background(), 3*time.Second)
+			windowExists := exec.CommandContext(tmuxCtx, "tmux", "list-panes", "-t", sessionName).Run() == nil
+			tmuxCancel()
 
 			// Also check task-ui (pane might be joined there)
 			if !windowExists {
-				checkCmd := exec.Command("tmux", "list-panes", "-t", "task-ui", "-F", "#{pane_current_command}")
+				checkCtx, checkCancel := context.WithTimeout(context.Background(), 3*time.Second)
+				checkCmd := exec.CommandContext(checkCtx, "tmux", "list-panes", "-t", "task-ui", "-F", "#{pane_current_command}")
 				if out, err := checkCmd.Output(); err == nil {
 					if strings.Contains(string(out), "claude") {
 						windowExists = true
 					}
 				}
+				checkCancel()
 			}
 
 			if !windowExists {
@@ -1124,19 +1150,24 @@ func (e *Executor) pollTmuxSession(ctx context.Context, taskID int64, sessionNam
 // killTmuxSession kills a tmux session if it exists.
 func (e *Executor) killTmuxSession(sessionName string) {
 	// Kill the window (we use windows in task-daemon, not separate sessions)
-	exec.Command("tmux", "kill-window", "-t", sessionName).Run()
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	exec.CommandContext(ctx, "tmux", "kill-window", "-t", sessionName).Run()
 }
 
 // configureTmuxWindow sets up helpful UI elements for a task window.
 func (e *Executor) configureTmuxWindow(windowTarget string) {
 	// Window-specific options are limited; most styling is session-wide
 	// Just ensure the daemon session has good defaults
+	// Use timeout to prevent blocking if tmux is unresponsive
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 	daemonSession := getDaemonSessionName()
-	exec.Command("tmux", "set-option", "-t", daemonSession, "status", "on").Run()
-	exec.Command("tmux", "set-option", "-t", daemonSession, "status-style", "bg=#f59e0b,fg=black").Run()
-	exec.Command("tmux", "set-option", "-t", daemonSession, "status-left", " TASK DAEMON ").Run()
-	exec.Command("tmux", "set-option", "-t", daemonSession, "status-right", " Ctrl+C kills Claude ").Run()
-	exec.Command("tmux", "set-option", "-t", daemonSession, "status-right-length", "30").Run()
+	exec.CommandContext(ctx, "tmux", "set-option", "-t", daemonSession, "status", "on").Run()
+	exec.CommandContext(ctx, "tmux", "set-option", "-t", daemonSession, "status-style", "bg=#f59e0b,fg=black").Run()
+	exec.CommandContext(ctx, "tmux", "set-option", "-t", daemonSession, "status-left", " TASK DAEMON ").Run()
+	exec.CommandContext(ctx, "tmux", "set-option", "-t", daemonSession, "status-right", " Ctrl+C kills Claude ").Run()
+	exec.CommandContext(ctx, "tmux", "set-option", "-t", daemonSession, "status-right-length", "30").Run()
 }
 
 // isClaudeIdle checks if claude appears to be idle (showing prompt with no activity).
@@ -1262,7 +1293,13 @@ func (e *Executor) parseOutputMarkers(output string) execResult {
 
 // runClaudeDirect runs claude directly without tmux (fallback)
 func (e *Executor) runClaudeDirect(ctx context.Context, taskID int64, workDir, prompt string) execResult {
-	cmd := exec.CommandContext(ctx, "claude", "--dangerously-skip-permissions", "--chrome", "-p", prompt)
+	// Build command args - only include --dangerously-skip-permissions if TASK_DANGEROUS_MODE is set
+	args := []string{}
+	if os.Getenv("TASK_DANGEROUS_MODE") == "1" {
+		args = append(args, "--dangerously-skip-permissions")
+	}
+	args = append(args, "--chrome", "-p", prompt)
+	cmd := exec.CommandContext(ctx, "claude", args...)
 	cmd.Dir = workDir
 	// Pass TASK_ID so hooks know which task to update
 	cmd.Env = append(os.Environ(), fmt.Sprintf("TASK_ID=%d", taskID))
@@ -1549,7 +1586,7 @@ func (e *Executor) checkMergedBranches() {
 }
 
 // isBranchMerged checks if a task's branch has been merged into the default branch.
-// Uses git commands with a fetch to ensure we have the latest remote state.
+// Uses git commands to detect merged branches. All commands have timeouts to prevent blocking.
 func (e *Executor) isBranchMerged(task *db.Task) bool {
 	projectDir := e.getProjectDir(task.Project)
 	if projectDir == "" {
@@ -1565,14 +1602,22 @@ func (e *Executor) isBranchMerged(task *db.Task) bool {
 	// Get the default branch
 	defaultBranch := e.getDefaultBranch(projectDir)
 
-	// Fetch from remote to get latest state
-	fetchCmd := exec.Command("git", "fetch", "--quiet", "origin")
+	// Timeouts for git operations
+	const networkTimeout = 10 * time.Second // For network ops (fetch, ls-remote)
+	const localTimeout = 5 * time.Second    // For local ops
+
+	// Fetch from remote to get latest state (with timeout)
+	fetchCtx, fetchCancel := context.WithTimeout(context.Background(), networkTimeout)
+	defer fetchCancel()
+	fetchCmd := exec.CommandContext(fetchCtx, "git", "fetch", "--quiet", "origin")
 	fetchCmd.Dir = projectDir
-	fetchCmd.Run() // Ignore errors - might be offline
+	fetchCmd.Run() // Ignore errors - might be offline or timeout
 
 	// Check if the branch has been merged into the default branch
 	// Use git branch --merged to see which branches have been merged
-	cmd := exec.Command("git", "branch", "-r", "--merged", defaultBranch)
+	branchCtx, branchCancel := context.WithTimeout(context.Background(), localTimeout)
+	defer branchCancel()
+	cmd := exec.CommandContext(branchCtx, "git", "branch", "-r", "--merged", defaultBranch)
 	cmd.Dir = projectDir
 	output, err := cmd.Output()
 	if err != nil {
@@ -1597,13 +1642,17 @@ func (e *Executor) isBranchMerged(task *db.Task) bool {
 
 	// Also check if the branch no longer exists on remote (was deleted after merge)
 	// This is common when PRs are merged and branches are auto-deleted
-	lsRemoteCmd := exec.Command("git", "ls-remote", "--heads", "origin", task.BranchName)
+	lsCtx, lsCancel := context.WithTimeout(context.Background(), networkTimeout)
+	defer lsCancel()
+	lsRemoteCmd := exec.CommandContext(lsCtx, "git", "ls-remote", "--heads", "origin", task.BranchName)
 	lsRemoteCmd.Dir = projectDir
 	lsOutput, err := lsRemoteCmd.Output()
 	if err == nil && len(strings.TrimSpace(string(lsOutput))) == 0 {
 		// Branch doesn't exist on remote - check if it ever had commits
 		// that are now part of the default branch
-		logCmd := exec.Command("git", "log", "--oneline", "-1", "origin/"+defaultBranch, "--grep="+task.BranchName)
+		logCtx, logCancel := context.WithTimeout(context.Background(), localTimeout)
+		defer logCancel()
+		logCmd := exec.CommandContext(logCtx, "git", "log", "--oneline", "-1", "origin/"+defaultBranch, "--grep="+task.BranchName)
 		logCmd.Dir = projectDir
 		logOutput, err := logCmd.Output()
 		if err == nil && len(strings.TrimSpace(string(logOutput))) > 0 {
@@ -1611,7 +1660,9 @@ func (e *Executor) isBranchMerged(task *db.Task) bool {
 		}
 
 		// Check if local branch exists
-		localLogCmd := exec.Command("git", "branch", "--list", task.BranchName)
+		listCtx, listCancel := context.WithTimeout(context.Background(), localTimeout)
+		defer listCancel()
+		localLogCmd := exec.CommandContext(listCtx, "git", "branch", "--list", task.BranchName)
 		localLogCmd.Dir = projectDir
 		localOutput, _ := localLogCmd.Output()
 		if len(strings.TrimSpace(string(localOutput))) > 0 {
@@ -1622,7 +1673,9 @@ func (e *Executor) isBranchMerged(task *db.Task) bool {
 			// 2. AND all those commits are now in the default branch
 
 			// Get branch tip commit
-			branchTipCmd := exec.Command("git", "rev-parse", task.BranchName)
+			tipCtx, tipCancel := context.WithTimeout(context.Background(), localTimeout)
+			defer tipCancel()
+			branchTipCmd := exec.CommandContext(tipCtx, "git", "rev-parse", task.BranchName)
 			branchTipCmd.Dir = projectDir
 			branchTip, err := branchTipCmd.Output()
 			if err != nil {
@@ -1630,7 +1683,9 @@ func (e *Executor) isBranchMerged(task *db.Task) bool {
 			}
 
 			// Get merge-base with default branch
-			mergeBaseRevCmd := exec.Command("git", "merge-base", task.BranchName, defaultBranch)
+			mbCtx, mbCancel := context.WithTimeout(context.Background(), localTimeout)
+			defer mbCancel()
+			mergeBaseRevCmd := exec.CommandContext(mbCtx, "git", "merge-base", task.BranchName, defaultBranch)
 			mergeBaseRevCmd.Dir = projectDir
 			mergeBase, err := mergeBaseRevCmd.Output()
 			if err != nil {
@@ -1645,7 +1700,9 @@ func (e *Executor) isBranchMerged(task *db.Task) bool {
 
 			// Branch has unique commits - check if they're all in default branch now
 			// (meaning the branch was merged)
-			mergeCheckCmd := exec.Command("git", "merge-base", "--is-ancestor", task.BranchName, defaultBranch)
+			ancestorCtx, ancestorCancel := context.WithTimeout(context.Background(), localTimeout)
+			defer ancestorCancel()
+			mergeCheckCmd := exec.CommandContext(ancestorCtx, "git", "merge-base", "--is-ancestor", task.BranchName, defaultBranch)
 			mergeCheckCmd.Dir = projectDir
 			if mergeCheckCmd.Run() == nil {
 				return true
@@ -1702,6 +1759,7 @@ func (e *Executor) setupWorktree(task *db.Task) (string, error) {
 		task.BranchName = branchName
 		e.db.UpdateTask(task)
 		trustMiseConfig(worktreePath)
+		symlinkClaudeConfig(projectDir, worktreePath)
 		copyMCPConfig(projectDir, worktreePath)
 		return worktreePath, nil
 	}
@@ -1746,6 +1804,7 @@ func (e *Executor) setupWorktree(task *db.Task) (string, error) {
 	e.logLine(task.ID, "system", fmt.Sprintf("Created worktree at %s (branch: %s)", worktreePath, branchName))
 
 	trustMiseConfig(worktreePath)
+	symlinkClaudeConfig(projectDir, worktreePath)
 	copyMCPConfig(projectDir, worktreePath)
 
 	return worktreePath, nil
@@ -1756,6 +1815,35 @@ func trustMiseConfig(dir string) {
 	if _, err := exec.LookPath("mise"); err == nil {
 		exec.Command("mise", "trust", dir).Run()
 	}
+}
+
+// symlinkClaudeConfig symlinks the worktree's .claude directory to the main project's .claude.
+// This ensures permissions granted in any worktree are shared across all worktrees and the main project.
+func symlinkClaudeConfig(projectDir, worktreePath string) error {
+	mainClaudeDir := filepath.Join(projectDir, ".claude")
+	worktreeClaudeDir := filepath.Join(worktreePath, ".claude")
+
+	// Ensure main project has .claude directory
+	if err := os.MkdirAll(mainClaudeDir, 0755); err != nil {
+		return fmt.Errorf("create main .claude dir: %w", err)
+	}
+
+	// Check if worktree .claude is already a symlink to the right place
+	if target, err := os.Readlink(worktreeClaudeDir); err == nil {
+		if target == mainClaudeDir {
+			return nil // Already correctly symlinked
+		}
+	}
+
+	// Remove any existing .claude in worktree (file, dir, or wrong symlink)
+	os.RemoveAll(worktreeClaudeDir)
+
+	// Create symlink: worktree/.claude -> project/.claude
+	if err := os.Symlink(mainClaudeDir, worktreeClaudeDir); err != nil {
+		return fmt.Errorf("create .claude symlink: %w", err)
+	}
+
+	return nil
 }
 
 // copyMCPConfig copies the MCP server configuration from the source project to the worktree

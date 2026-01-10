@@ -21,6 +21,7 @@ import (
 	"github.com/bborn/workflow/internal/config"
 	"github.com/bborn/workflow/internal/db"
 	"github.com/bborn/workflow/internal/executor"
+	"github.com/bborn/workflow/internal/github"
 	"github.com/bborn/workflow/internal/ui"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -66,9 +67,10 @@ func getDaemonSessionName() string {
 
 func main() {
 	var (
-		host  string
-		port  string
-		local bool
+		host      string
+		port      string
+		local     bool
+		dangerous bool
 	)
 
 	rootCmd := &cobra.Command{
@@ -86,7 +88,7 @@ func main() {
 			}
 
 			if local {
-				if err := runLocal(); err != nil {
+				if err := runLocal(dangerous); err != nil {
 					fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
 					os.Exit(1)
 				}
@@ -100,9 +102,10 @@ func main() {
 		},
 	}
 
-	rootCmd.Flags().StringVarP(&host, "host", "H", defaultHost, "Remote server host")
-	rootCmd.Flags().StringVarP(&port, "port", "p", defaultPort, "Remote server port")
-	rootCmd.Flags().BoolVarP(&local, "local", "l", false, "Run locally (use local database)")
+	rootCmd.PersistentFlags().StringVarP(&host, "host", "H", defaultHost, "Remote server host")
+	rootCmd.PersistentFlags().StringVar(&port, "port", defaultPort, "Remote server port")
+	rootCmd.PersistentFlags().BoolVarP(&local, "local", "l", false, "Run locally (use local database)")
+	rootCmd.PersistentFlags().BoolVar(&dangerous, "dangerous", false, "Run Claude with --dangerously-skip-permissions (for sandboxed environments)")
 
 	// Daemon subcommand - runs executor in background
 	daemonCmd := &cobra.Command{
@@ -142,8 +145,9 @@ func main() {
 			// Small delay to ensure clean shutdown
 			time.Sleep(100 * time.Millisecond)
 
-			// Start daemon
-			if err := ensureDaemonRunning(); err != nil {
+			// Start daemon (inherit dangerous mode from environment if set)
+			dangerousMode := os.Getenv("TASK_DANGEROUS_MODE") == "1"
+			if err := ensureDaemonRunning(dangerousMode); err != nil {
 				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
 				os.Exit(1)
 			}
@@ -462,6 +466,7 @@ Examples:
   task list
   task list --status queued
   task list --project myapp
+  task list --pr           # Show PR/CI status
   task list --all --json`,
 		Run: func(cmd *cobra.Command, args []string) {
 			status, _ := cmd.Flags().GetString("status")
@@ -470,6 +475,7 @@ Examples:
 			all, _ := cmd.Flags().GetBool("all")
 			limit, _ := cmd.Flags().GetInt("limit")
 			outputJSON, _ := cmd.Flags().GetBool("json")
+			showPR, _ := cmd.Flags().GetBool("pr")
 
 			// Open database
 			dbPath := db.DefaultPath()
@@ -494,17 +500,48 @@ Examples:
 				os.Exit(1)
 			}
 
+			// Fetch PR info if requested
+			var prCache *github.PRCache
+			var cfg *config.Config
+			prInfoMap := make(map[int64]*github.PRInfo)
+			if showPR {
+				prCache = github.NewPRCache()
+				cfg = config.New(database)
+				for _, t := range tasks {
+					if t.BranchName != "" {
+						repoDir := t.WorktreePath
+						if repoDir == "" {
+							repoDir = cfg.GetProjectDir(t.Project)
+						}
+						if prInfo := prCache.GetPRForBranch(repoDir, t.BranchName); prInfo != nil {
+							prInfoMap[t.ID] = prInfo
+						}
+					}
+				}
+			}
+
 			if outputJSON {
 				var output []map[string]interface{}
 				for _, t := range tasks {
-					output = append(output, map[string]interface{}{
+					item := map[string]interface{}{
 						"id":         t.ID,
 						"title":      t.Title,
 						"status":     t.Status,
 						"type":       t.Type,
 						"project":    t.Project,
 						"created_at": t.CreatedAt.Time.Format(time.RFC3339),
-					})
+					}
+					// Add PR info to JSON output if available
+					if prInfo, ok := prInfoMap[t.ID]; ok {
+						item["pr"] = map[string]interface{}{
+							"number":       prInfo.Number,
+							"url":          prInfo.URL,
+							"state":        string(prInfo.State),
+							"check_state":  string(prInfo.CheckState),
+							"description":  prInfo.StatusDescription(),
+						}
+					}
+					output = append(output, item)
 				}
 				jsonBytes, _ := json.Marshal(output)
 				fmt.Println(string(jsonBytes))
@@ -530,6 +567,47 @@ Examples:
 					}
 				}
 
+				// PR status styling
+				prStatusStyle := func(prInfo *github.PRInfo) string {
+					if prInfo == nil {
+						return ""
+					}
+					var icon, desc string
+					var color lipgloss.Color
+					switch prInfo.State {
+					case github.PRStateMerged:
+						icon, desc, color = "M", "merged", lipgloss.Color("#C678DD")
+					case github.PRStateClosed:
+						icon, desc, color = "X", "closed", lipgloss.Color("#EF4444")
+					case github.PRStateDraft:
+						icon, desc, color = "D", "draft", lipgloss.Color("#6B7280")
+					case github.PRStateOpen:
+						switch prInfo.CheckState {
+						case github.CheckStatePassing:
+							if prInfo.Mergeable == "MERGEABLE" {
+								icon, desc, color = "R", "ready", lipgloss.Color("#10B981")
+							} else if prInfo.Mergeable == "CONFLICTING" {
+								icon, desc, color = "C", "conflicts", lipgloss.Color("#EF4444")
+							} else {
+								icon, desc, color = "P", "passing", lipgloss.Color("#10B981")
+							}
+						case github.CheckStateFailing:
+							icon, desc, color = "F", "failing", lipgloss.Color("#EF4444")
+						case github.CheckStatePending:
+							icon, desc, color = "W", "running", lipgloss.Color("#F59E0B")
+						default:
+							icon, desc, color = "O", "open", lipgloss.Color("#10B981")
+						}
+					}
+					badge := lipgloss.NewStyle().
+						Foreground(lipgloss.Color("#FFFFFF")).
+						Background(color).
+						Bold(true).
+						Render(icon)
+					descStyled := lipgloss.NewStyle().Foreground(color).Render(desc)
+					return fmt.Sprintf(" %s %s", badge, descStyled)
+				}
+
 				for _, t := range tasks {
 					id := dimStyle.Render(fmt.Sprintf("#%-4d", t.ID))
 					status := statusStyle(t.Status).Render(fmt.Sprintf("%-10s", t.Status))
@@ -537,7 +615,11 @@ Examples:
 					if t.Project != "" {
 						project = dimStyle.Render(fmt.Sprintf("[%s] ", t.Project))
 					}
-					fmt.Printf("%s %s %s%s\n", id, status, project, t.Title)
+					prStatus := ""
+					if showPR {
+						prStatus = prStatusStyle(prInfoMap[t.ID])
+					}
+					fmt.Printf("%s %s %s%s%s\n", id, status, project, t.Title, prStatus)
 				}
 			}
 		},
@@ -548,6 +630,7 @@ Examples:
 	listCmd.Flags().BoolP("all", "a", false, "Include completed tasks")
 	listCmd.Flags().IntP("limit", "n", 50, "Maximum number of tasks to return")
 	listCmd.Flags().Bool("json", false, "Output in JSON format")
+	listCmd.Flags().Bool("pr", false, "Show PR/CI status (requires network)")
 	rootCmd.AddCommand(listCmd)
 
 	// Show subcommand - show task details
@@ -590,6 +673,18 @@ Examples:
 				os.Exit(1)
 			}
 
+			// Fetch PR info if task has a branch
+			var prInfo *github.PRInfo
+			if task.BranchName != "" {
+				cfg := config.New(database)
+				repoDir := task.WorktreePath
+				if repoDir == "" {
+					repoDir = cfg.GetProjectDir(task.Project)
+				}
+				prCache := github.NewPRCache()
+				prInfo = prCache.GetPRForBranch(repoDir, task.BranchName)
+			}
+
 			if outputJSON {
 				output := map[string]interface{}{
 					"id":         task.ID,
@@ -608,6 +703,17 @@ Examples:
 				}
 				if task.CompletedAt != nil {
 					output["completed_at"] = task.CompletedAt.Time.Format(time.RFC3339)
+				}
+				// Add PR info to JSON output
+				if prInfo != nil {
+					output["pr"] = map[string]interface{}{
+						"number":       prInfo.Number,
+						"url":          prInfo.URL,
+						"state":        string(prInfo.State),
+						"check_state":  string(prInfo.CheckState),
+						"description":  prInfo.StatusDescription(),
+						"mergeable":    prInfo.Mergeable,
+					}
 				}
 				if showLogs {
 					logs, _ := database.GetTaskLogs(taskID, 1000)
@@ -661,6 +767,34 @@ Examples:
 				}
 				if task.BranchName != "" {
 					fmt.Printf("Branch:   %s\n", task.BranchName)
+				}
+
+				// PR info
+				if prInfo != nil {
+					fmt.Printf("PR:       #%d %s\n", prInfo.Number, prInfo.URL)
+					// PR status with color
+					var prStatusColor lipgloss.Color
+					switch prInfo.State {
+					case github.PRStateMerged:
+						prStatusColor = lipgloss.Color("#C678DD")
+					case github.PRStateClosed:
+						prStatusColor = lipgloss.Color("#EF4444")
+					case github.PRStateDraft:
+						prStatusColor = lipgloss.Color("#6B7280")
+					case github.PRStateOpen:
+						switch prInfo.CheckState {
+						case github.CheckStatePassing:
+							prStatusColor = lipgloss.Color("#10B981")
+						case github.CheckStateFailing:
+							prStatusColor = lipgloss.Color("#EF4444")
+						case github.CheckStatePending:
+							prStatusColor = lipgloss.Color("#F59E0B")
+						default:
+							prStatusColor = lipgloss.Color("#10B981")
+						}
+					}
+					prStatusStyled := lipgloss.NewStyle().Foreground(prStatusColor).Render(prInfo.StatusDescription())
+					fmt.Printf("CI:       %s\n", prStatusStyled)
 				}
 
 				// Body
@@ -1024,9 +1158,9 @@ func execInTmux() error {
 }
 
 // runLocal runs the TUI locally with a local SQLite database.
-func runLocal() error {
+func runLocal(dangerousMode bool) error {
 	// Ensure daemon is running
-	if err := ensureDaemonRunning(); err != nil {
+	if err := ensureDaemonRunning(dangerousMode); err != nil {
 		fmt.Fprintln(os.Stderr, dimStyle.Render("Warning: could not start daemon: "+err.Error()))
 	}
 
@@ -1078,16 +1212,33 @@ func runLocal() error {
 }
 
 // ensureDaemonRunning starts the daemon if it's not already running.
-func ensureDaemonRunning() error {
+// If dangerousMode is true, sets TASK_DANGEROUS_MODE=1 for the daemon.
+// If the daemon is running with a different mode, it will be restarted.
+func ensureDaemonRunning(dangerousMode bool) error {
 	pidFile := getPidFilePath()
+	modeFile := pidFile + ".mode"
 
 	// Check if daemon is already running
 	if pid, err := readPidFile(pidFile); err == nil {
 		if processExists(pid) {
-			return nil // Already running
+			// Check if running with correct mode
+			currentMode, _ := os.ReadFile(modeFile)
+			wantMode := "safe"
+			if dangerousMode {
+				wantMode = "dangerous"
+			}
+			if string(currentMode) == wantMode {
+				return nil // Already running with correct mode
+			}
+			// Mode mismatch - restart daemon
+			fmt.Fprintln(os.Stderr, dimStyle.Render(fmt.Sprintf("Restarting daemon (switching to %s mode)...", wantMode)))
+			stopDaemon()
+			time.Sleep(100 * time.Millisecond)
+		} else {
+			// Stale pid file, remove it
+			os.Remove(pidFile)
+			os.Remove(modeFile)
 		}
-		// Stale pid file, remove it
-		os.Remove(pidFile)
 	}
 
 	// Start daemon as background process
@@ -1102,6 +1253,10 @@ func ensureDaemonRunning() error {
 	cmd.Stdin = nil
 	// Pass session ID to daemon so it uses the same tmux sessions
 	cmd.Env = append(os.Environ(), fmt.Sprintf("TASK_SESSION_ID=%s", getSessionID()))
+	// Pass dangerous mode flag if enabled
+	if dangerousMode {
+		cmd.Env = append(cmd.Env, "TASK_DANGEROUS_MODE=1")
+	}
 	// Detach from parent process
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		Setsid: true,
@@ -1116,7 +1271,14 @@ func ensureDaemonRunning() error {
 		return fmt.Errorf("write pid file: %w", err)
 	}
 
-	fmt.Fprintln(os.Stderr, dimStyle.Render(fmt.Sprintf("Started daemon (pid %d)", cmd.Process.Pid)))
+	// Write mode file so we know what mode the daemon is running in
+	modeStr := "safe"
+	if dangerousMode {
+		modeStr = "dangerous"
+	}
+	os.WriteFile(modeFile, []byte(modeStr), 0644)
+
+	fmt.Fprintln(os.Stderr, dimStyle.Render(fmt.Sprintf("Started daemon (pid %d, %s mode)", cmd.Process.Pid, modeStr)))
 	return nil
 }
 
@@ -1153,6 +1315,7 @@ func processExists(pid int) bool {
 
 func stopDaemon() error {
 	pidFile := getPidFilePath()
+	modeFile := pidFile + ".mode"
 	pid, err := readPidFile(pidFile)
 	if err != nil {
 		return fmt.Errorf("daemon not running (no pid file)")
@@ -1160,6 +1323,7 @@ func stopDaemon() error {
 
 	if !processExists(pid) {
 		os.Remove(pidFile)
+		os.Remove(modeFile)
 		return fmt.Errorf("daemon not running (stale pid file)")
 	}
 
@@ -1173,6 +1337,7 @@ func stopDaemon() error {
 	}
 
 	os.Remove(pidFile)
+	os.Remove(modeFile)
 	return nil
 }
 
@@ -1426,8 +1591,10 @@ func handleNotificationHook(database *db.DB, taskID int64, input *ClaudeHookInpu
 		if err != nil {
 			return err
 		}
-		// Only update if currently processing (avoid overwriting other states)
-		if task != nil && task.Status == db.StatusProcessing {
+		// Only update if:
+		// 1. Task has actually started (StartedAt is set)
+		// 2. Currently processing (avoid overwriting other states)
+		if task != nil && task.StartedAt != nil && task.Status == db.StatusProcessing {
 			database.UpdateTaskStatus(taskID, db.StatusBlocked)
 			msg := "Waiting for user input"
 			if input.NotificationType == "permission_prompt" {
@@ -1450,6 +1617,12 @@ func handleStopHook(database *db.DB, taskID int64, input *ClaudeHookInput) error
 		return err
 	}
 	if task == nil {
+		return nil
+	}
+
+	// Only manage status if the task has actually started (StartedAt is set)
+	// This prevents status changes for tasks that are new or in backlog/queued
+	if task.StartedAt == nil {
 		return nil
 	}
 
@@ -1481,6 +1654,12 @@ func handlePreToolUseHook(database *db.DB, taskID int64, input *ClaudeHookInput)
 		return nil
 	}
 
+	// Only manage status if the task has actually started (StartedAt is set)
+	// This prevents status changes for tasks that are new or in backlog/queued
+	if task.StartedAt == nil {
+		return nil
+	}
+
 	// When Claude is about to use a tool, the task should be "processing"
 	// This handles the case where:
 	// 1. Task was blocked (waiting for input) and user responded
@@ -1501,6 +1680,12 @@ func handlePostToolUseHook(database *db.DB, taskID int64, input *ClaudeHookInput
 		return err
 	}
 	if task == nil {
+		return nil
+	}
+
+	// Only manage status if the task has actually started (StartedAt is set)
+	// This prevents status changes for tasks that are new or in backlog/queued
+	if task.StartedAt == nil {
 		return nil
 	}
 

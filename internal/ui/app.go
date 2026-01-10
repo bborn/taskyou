@@ -29,6 +29,7 @@ const (
 	ViewNewTaskConfirm
 	ViewEditTask
 	ViewDeleteConfirm
+	ViewKillConfirm
 	ViewQuitConfirm
 	ViewWatch
 	ViewSettings
@@ -51,6 +52,7 @@ type KeyMap struct {
 	Retry        key.Binding
 	Close        key.Binding
 	Delete       key.Binding
+	Kill         key.Binding
 	Watch        key.Binding
 	Attach       key.Binding
 	Filter       key.Binding
@@ -134,6 +136,10 @@ func DefaultKeyMap() KeyMap {
 		Delete: key.NewBinding(
 			key.WithKeys("d"),
 			key.WithHelp("d", "delete"),
+		),
+		Kill: key.NewBinding(
+			key.WithKeys("k"),
+			key.WithHelp("k", "kill"),
 		),
 		Watch: key.NewBinding(
 			key.WithKeys("w"),
@@ -251,6 +257,11 @@ type AppModel struct {
 	deleteConfirmValue bool
 	pendingDeleteTask  *db.Task
 
+	// Kill confirmation state
+	killConfirm      *huh.Form
+	killConfirmValue bool
+	pendingKillTask  *db.Task
+
 	// Quit confirmation state
 	quitConfirm      *huh.Form
 	quitConfirmValue bool
@@ -338,7 +349,7 @@ func (m *AppModel) Init() tea.Cmd {
 		osExec.Command("tmux", "set-option", "-t", "task-ui", "mouse", "on").Run()
 	}
 
-	return tea.Batch(m.loadTasks(), m.waitForTaskEvent(), m.waitForDBChange(), m.tick())
+	return tea.Batch(m.loadTasks(), m.waitForTaskEvent(), m.waitForDBChange(), m.tick(), m.prRefreshTick(), m.refreshAllPRs())
 }
 
 // Update handles messages.
@@ -357,6 +368,9 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 	if m.currentView == ViewDeleteConfirm && m.deleteConfirm != nil {
 		return m.updateDeleteConfirm(msg)
+	}
+	if m.currentView == ViewKillConfirm && m.killConfirm != nil {
+		return m.updateKillConfirm(msg)
 	}
 	if m.currentView == ViewQuitConfirm && m.quitConfirm != nil {
 		return m.updateQuitConfirm(msg)
@@ -459,8 +473,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		m.kanban.SetTasks(m.tasks)
 
-		// Fetch PR info for tasks with branches
-		cmds = append(cmds, m.fetchAllPRInfo()...)
+		// PR info is fetched separately via prRefreshTick, not on every task load
 
 	case taskLoadedMsg:
 		if msg.err == nil {
@@ -490,6 +503,25 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
+	case prBatchMsg:
+		// Batch PR update from refreshAllPRs
+		for _, result := range msg.results {
+			if result.info != nil {
+				m.kanban.SetPRInfo(result.taskID, result.info)
+				// Update detail view if showing this task
+				if m.detailView != nil && m.selectedTask != nil && m.selectedTask.ID == result.taskID {
+					m.detailView.SetPRInfo(result.info)
+				}
+			}
+		}
+
+	case prRefreshTickMsg:
+		// Periodically refresh PR info (every 30 seconds)
+		if m.currentView == ViewDashboard {
+			cmds = append(cmds, m.refreshAllPRs())
+		}
+		cmds = append(cmds, m.prRefreshTick())
+
 	case taskCreatedMsg:
 		if msg.err == nil {
 			m.currentView = ViewDashboard
@@ -513,7 +545,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.err = msg.err
 		}
 
-	case taskQueuedMsg, taskClosedMsg, taskDeletedMsg, taskRetriedMsg:
+	case taskQueuedMsg, taskClosedMsg, taskDeletedMsg, taskRetriedMsg, taskKilledMsg:
 		cmds = append(cmds, m.loadTasks())
 
 	case attachDoneMsg:
@@ -621,6 +653,8 @@ func (m *AppModel) View() string {
 		return m.viewNewTaskConfirm()
 	case ViewDeleteConfirm:
 		return m.viewDeleteConfirm()
+	case ViewKillConfirm:
+		return m.viewKillConfirm()
 	case ViewQuitConfirm:
 		return m.viewQuitConfirm()
 	case ViewWatch:
@@ -825,6 +859,10 @@ func (m *AppModel) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case key.Matches(msg, m.keys.Queue):
 		if task := m.kanban.SelectedTask(); task != nil {
+			// Don't allow queueing if task is already processing
+			if task.Status == db.StatusProcessing {
+				return m, nil
+			}
 			// Immediately update UI for responsiveness
 			task.Status = db.StatusQueued
 			m.updateTaskInList(task)
@@ -949,6 +987,10 @@ func (m *AppModel) updateDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	// Handle queue/close/retry from detail view
 	if key.Matches(keyMsg, m.keys.Queue) && m.selectedTask != nil {
+		// Don't allow queueing if task is already processing
+		if m.selectedTask.Status == db.StatusProcessing {
+			return m, nil
+		}
 		// Immediately update UI for responsiveness
 		m.selectedTask.Status = db.StatusQueued
 		if m.detailView != nil {
@@ -1007,6 +1049,13 @@ func (m *AppModel) updateDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.detailView = nil
 		}
 		return m.showDeleteConfirm(m.selectedTask)
+	}
+	if key.Matches(keyMsg, m.keys.Kill) && m.selectedTask != nil {
+		// Only allow kill if there's an active tmux session
+		sessionName := executor.TmuxSessionName(m.selectedTask.ID)
+		if osExec.Command("tmux", "has-session", "-t", sessionName).Run() == nil {
+			return m.showKillConfirm(m.selectedTask)
+		}
 	}
 	if key.Matches(keyMsg, m.keys.Files) && m.selectedTask != nil {
 		// Clean up panes before leaving detail view
@@ -1248,6 +1297,99 @@ func (m *AppModel) updateDeleteConfirm(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
+func (m *AppModel) showKillConfirm(task *db.Task) (tea.Model, tea.Cmd) {
+	m.pendingKillTask = task
+	m.killConfirmValue = false
+	modalWidth := min(50, m.width-8)
+	m.killConfirm = huh.NewForm(
+		huh.NewGroup(
+			huh.NewConfirm().
+				Key("kill").
+				Title(fmt.Sprintf("Kill task #%d?", task.ID)).
+				Description("This will stop the Claude session and move task to backlog").
+				Affirmative("Kill").
+				Negative("Cancel").
+				Value(&m.killConfirmValue),
+		),
+	).WithTheme(huh.ThemeDracula()).
+		WithWidth(modalWidth - 6). // Account for modal padding and border
+		WithShowHelp(true)
+	m.currentView = ViewKillConfirm
+	return m, m.killConfirm.Init()
+}
+
+func (m *AppModel) viewKillConfirm() string {
+	if m.killConfirm == nil {
+		return ""
+	}
+
+	// Modal header with warning icon
+	header := lipgloss.NewStyle().
+		Bold(true).
+		Foreground(ColorWarning).
+		MarginBottom(1).
+		Render("⚠ Confirm Kill")
+
+	formView := m.killConfirm.View()
+
+	// Modal box with border
+	modalWidth := min(50, m.width-8)
+	modalBox := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(ColorWarning).
+		Padding(1, 2).
+		Width(modalWidth)
+
+	modalContent := modalBox.Render(lipgloss.JoinVertical(lipgloss.Center, header, formView))
+
+	// Center the modal on screen
+	return lipgloss.NewStyle().
+		Width(m.width).
+		Height(m.height).
+		Align(lipgloss.Center, lipgloss.Center).
+		Render(modalContent)
+}
+
+func (m *AppModel) updateKillConfirm(msg tea.Msg) (tea.Model, tea.Cmd) {
+	// Handle escape to cancel
+	if keyMsg, ok := msg.(tea.KeyMsg); ok {
+		if keyMsg.String() == "esc" {
+			m.currentView = ViewDetail
+			m.killConfirm = nil
+			m.pendingKillTask = nil
+			return m, nil
+		}
+	}
+
+	// Update the huh form
+	form, cmd := m.killConfirm.Update(msg)
+	if f, ok := form.(*huh.Form); ok {
+		m.killConfirm = f
+	}
+
+	// Check if form completed
+	if m.killConfirm.State == huh.StateCompleted {
+		if m.pendingKillTask != nil && m.killConfirmValue {
+			taskID := m.pendingKillTask.ID
+			// Clean up detail view panes before killing
+			if m.detailView != nil {
+				m.detailView.Cleanup()
+			}
+			m.pendingKillTask = nil
+			m.killConfirm = nil
+			m.currentView = ViewDetail
+			return m, m.killTask(taskID)
+		}
+		// Cancelled
+		m.pendingKillTask = nil
+		m.killConfirm = nil
+		m.currentView = ViewDetail
+		return m, nil
+	}
+
+	return m, cmd
+}
+
 func (m *AppModel) showQuitConfirm() (tea.Model, tea.Cmd) {
 	m.quitConfirmValue = false
 	modalWidth := min(50, m.width-8)
@@ -1477,6 +1619,10 @@ type taskRetriedMsg struct {
 	err error
 }
 
+type taskKilledMsg struct {
+	err error
+}
+
 type taskEventMsg struct {
 	event executor.TaskEvent
 }
@@ -1486,6 +1632,8 @@ type attachDoneMsg struct {
 }
 
 type tickMsg time.Time
+
+type prRefreshTickMsg time.Time
 
 type dbChangeMsg struct{}
 
@@ -1497,15 +1645,8 @@ type prInfoMsg struct {
 func (m *AppModel) loadTasks() tea.Cmd {
 	return func() tea.Msg {
 		tasks, err := m.db.ListTasks(db.ListTasksOptions{Limit: 50, IncludeClosed: true})
-
-		// Check merged branch state for all tasks in parallel (non-blocking)
-		// Each check runs in its own goroutine to avoid sequential network calls
-		for _, task := range tasks {
-			if task.BranchName != "" && task.Status != db.StatusDone {
-				go m.executor.CheckPRStateAndUpdateTask(task.ID)
-			}
-		}
-
+		// Note: PR/merge status is now checked via batch refresh (prRefreshTick)
+		// to avoid spawning processes for every task on every tick
 		return tasksLoadedMsg{tasks: tasks, err: err}
 	}
 }
@@ -1703,6 +1844,22 @@ func (m *AppModel) retryTaskWithAttachments(id int64, feedback string, attachmen
 	}
 }
 
+func (m *AppModel) killTask(id int64) tea.Cmd {
+	return func() tea.Msg {
+		// Interrupt the task (sets status to backlog)
+		m.executor.Interrupt(id)
+
+		// Log the kill action
+		m.db.AppendTaskLog(id, "user", "→ [Kill] Session terminated")
+
+		// Kill the tmux window
+		windowTarget := executor.TmuxSessionName(id)
+		osExec.Command("tmux", "kill-window", "-t", windowTarget).Run()
+
+		return taskKilledMsg{}
+	}
+}
+
 func (m *AppModel) waitForTaskEvent() tea.Cmd {
 	return func() tea.Msg {
 		event, ok := <-m.eventCh
@@ -1719,17 +1876,20 @@ func (m *AppModel) tick() tea.Cmd {
 	})
 }
 
-// fetchPRInfo fetches PR info for a single task.
+func (m *AppModel) prRefreshTick() tea.Cmd {
+	return tea.Tick(30*time.Second, func(t time.Time) tea.Msg {
+		return prRefreshTickMsg(t)
+	})
+}
+
+// fetchPRInfo fetches PR info for a single task (used for detail view).
 func (m *AppModel) fetchPRInfo(task *db.Task) tea.Cmd {
 	if task.BranchName == "" || m.prCache == nil {
 		return nil
 	}
 
-	// Get the worktree or project directory for gh CLI
-	repoDir := task.WorktreePath
-	if repoDir == "" {
-		repoDir = m.executor.GetProjectDir(task.Project)
-	}
+	// Get the repo directory for gh CLI (use project dir, not worktree)
+	repoDir := m.executor.GetProjectDir(task.Project)
 	if repoDir == "" {
 		return nil
 	}
@@ -1739,20 +1899,73 @@ func (m *AppModel) fetchPRInfo(task *db.Task) tea.Cmd {
 	branchName := task.BranchName
 
 	return func() tea.Msg {
-		info := prCache.GetPRForBranch(repoDir, branchName)
+		// Try cache first, fall back to single fetch if needed
+		info := prCache.GetCachedPR(repoDir, branchName)
+		if info == nil {
+			info = prCache.GetPRForBranch(repoDir, branchName)
+		}
 		return prInfoMsg{taskID: taskID, info: info}
 	}
 }
 
-// fetchAllPRInfo returns commands to fetch PR info for all tasks with branches.
-func (m *AppModel) fetchAllPRInfo() []tea.Cmd {
-	var cmds []tea.Cmd
-	for _, task := range m.tasks {
-		if cmd := m.fetchPRInfo(task); cmd != nil {
-			cmds = append(cmds, cmd)
-		}
+// refreshAllPRs fetches PR info for all repos in batch (much more efficient).
+// Instead of N gh calls for N tasks, this makes M calls for M unique repos.
+func (m *AppModel) refreshAllPRs() tea.Cmd {
+	if m.prCache == nil {
+		return nil
 	}
-	return cmds
+
+	// Group tasks by repo directory
+	repoTasks := make(map[string][]*db.Task)
+	for _, task := range m.tasks {
+		if task.BranchName == "" {
+			continue
+		}
+		repoDir := m.executor.GetProjectDir(task.Project)
+		if repoDir == "" {
+			continue
+		}
+		repoTasks[repoDir] = append(repoTasks[repoDir], task)
+	}
+
+	if len(repoTasks) == 0 {
+		return nil
+	}
+
+	prCache := m.prCache
+	// Copy the map to avoid race conditions
+	repoTasksCopy := make(map[string][]*db.Task)
+	for k, v := range repoTasks {
+		tasksCopy := make([]*db.Task, len(v))
+		copy(tasksCopy, v)
+		repoTasksCopy[k] = tasksCopy
+	}
+
+	return func() tea.Msg {
+		var results []prInfoMsg
+
+		// Fetch PRs for each repo sequentially (avoids memory spikes)
+		for repoDir, tasks := range repoTasksCopy {
+			prsByBranch := github.FetchAllPRsForRepo(repoDir)
+			if prsByBranch != nil {
+				// Update cache with batch results
+				prCache.UpdateCacheForRepo(repoDir, prsByBranch)
+
+				// Create messages for tasks in this repo
+				for _, task := range tasks {
+					info := prsByBranch[task.BranchName]
+					results = append(results, prInfoMsg{taskID: task.ID, info: info})
+				}
+			}
+		}
+
+		return prBatchMsg{results: results}
+	}
+}
+
+// prBatchMsg contains PR info for multiple tasks (from batch fetch).
+type prBatchMsg struct {
+	results []prInfoMsg
 }
 
 // startDatabaseWatcher starts watching the database file for changes.
