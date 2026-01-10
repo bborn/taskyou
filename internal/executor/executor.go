@@ -527,108 +527,21 @@ func (e *Executor) buildPrompt(task *db.Task, attachmentPaths []string) string {
 	// Get attachments section
 	attachments := e.getAttachmentsSection(task.ID, attachmentPaths)
 
-	switch task.Type {
-	case db.TypeCode:
-		prompt.WriteString(fmt.Sprintf("You are working on: %s\n\n", task.Project))
-		if projectInstructions != "" {
-			prompt.WriteString(fmt.Sprintf("## Project Instructions\n\n%s\n\n", projectInstructions))
+	// Look up task type instructions from database
+	if task.Type != "" {
+		taskType, err := e.db.GetTaskTypeByName(task.Type)
+		if err == nil && taskType != nil {
+			// Apply template substitutions
+			instructions := e.applyTemplateSubstitutions(taskType.Instructions, task, projectInstructions, memories, attachments, conversationHistory)
+			prompt.WriteString(instructions)
+			prompt.WriteString("\n")
+		} else {
+			// Fallback to generic task if type not found
+			prompt.WriteString(e.buildGenericPrompt(task, projectInstructions, memories, attachments, conversationHistory))
 		}
-		if memories != "" {
-			prompt.WriteString(memories)
-		}
-		prompt.WriteString(fmt.Sprintf("Task: %s\n\n", task.Title))
-		if task.Body != "" {
-			prompt.WriteString(fmt.Sprintf("%s\n\n", task.Body))
-		}
-		if attachments != "" {
-			prompt.WriteString(attachments)
-		}
-		if conversationHistory != "" {
-			prompt.WriteString(conversationHistory)
-		}
-		prompt.WriteString(`Instructions:
-- Explore the codebase to understand the context
-- Implement the solution
-- Write tests if applicable
-- Commit your changes with clear messages
-- Submit a pull request when your work is complete
-
-IMPORTANT: Your objective is to submit a PR to complete this task. Always remember to create and submit a pull request as the final step of your work. This is how you signal that the implementation is ready for review and merging.
-
-When finished, provide a summary of what you did:
-- List files changed/created
-- Describe the key changes made
-- Include any relevant links (PRs, commits, etc.)
-- Note any follow-up items or concerns
-`)
-
-	case db.TypeWriting:
-		prompt.WriteString("You are a skilled writer. Please complete this task:\n\n")
-		if projectInstructions != "" {
-			prompt.WriteString(fmt.Sprintf("## Project Instructions\n\n%s\n\n", projectInstructions))
-		}
-		if memories != "" {
-			prompt.WriteString(memories)
-		}
-		prompt.WriteString(fmt.Sprintf("Task: %s\n\n", task.Title))
-		if task.Body != "" {
-			prompt.WriteString(fmt.Sprintf("Details: %s\n\n", task.Body))
-		}
-		if attachments != "" {
-			prompt.WriteString(attachments)
-		}
-		if conversationHistory != "" {
-			prompt.WriteString(conversationHistory)
-		}
-		prompt.WriteString("Write the requested content. Be professional, clear, and match the appropriate tone.\n")
-		prompt.WriteString("Output the final content, then summarize what you created.\n")
-
-	case db.TypeThinking:
-		prompt.WriteString("You are a strategic advisor. Analyze this thoroughly:\n\n")
-		if projectInstructions != "" {
-			prompt.WriteString(fmt.Sprintf("## Project Instructions\n\n%s\n\n", projectInstructions))
-		}
-		if memories != "" {
-			prompt.WriteString(memories)
-		}
-		prompt.WriteString(fmt.Sprintf("Question: %s\n\n", task.Title))
-		if task.Body != "" {
-			prompt.WriteString(fmt.Sprintf("Context: %s\n\n", task.Body))
-		}
-		if attachments != "" {
-			prompt.WriteString(attachments)
-		}
-		if conversationHistory != "" {
-			prompt.WriteString(conversationHistory)
-		}
-		prompt.WriteString(`Provide:
-1. Clear analysis of the question/problem
-2. Key considerations and tradeoffs
-3. Recommended approach
-4. Concrete next steps
-
-Think deeply but be actionable. Summarize your conclusions clearly.
-`)
-
-	default:
-		// Generic task
-		if projectInstructions != "" {
-			prompt.WriteString(fmt.Sprintf("## Project Instructions\n\n%s\n\n", projectInstructions))
-		}
-		if memories != "" {
-			prompt.WriteString(memories)
-		}
-		prompt.WriteString(fmt.Sprintf("Task: %s\n\n", task.Title))
-		if task.Body != "" {
-			prompt.WriteString(fmt.Sprintf("%s\n\n", task.Body))
-		}
-		if attachments != "" {
-			prompt.WriteString(attachments)
-		}
-		if conversationHistory != "" {
-			prompt.WriteString(conversationHistory)
-		}
-		prompt.WriteString("Complete this task and summarize what you did.\n")
+	} else {
+		// No type specified - use generic prompt
+		prompt.WriteString(e.buildGenericPrompt(task, projectInstructions, memories, attachments, conversationHistory))
 	}
 
 	// Add response guidance to ALL task types
@@ -649,6 +562,73 @@ Work on this task until completion. When you're done or need input:
 The task system will automatically detect your status.
 ═══════════════════════════════════════════════════════════════
 `)
+
+	return prompt.String()
+}
+
+// applyTemplateSubstitutions replaces template placeholders in task type instructions.
+func (e *Executor) applyTemplateSubstitutions(template string, task *db.Task, projectInstructions, memories, attachments, conversationHistory string) string {
+	result := template
+
+	// Replace placeholders
+	result = strings.ReplaceAll(result, "{{project}}", task.Project)
+	result = strings.ReplaceAll(result, "{{title}}", task.Title)
+	result = strings.ReplaceAll(result, "{{body}}", task.Body)
+
+	// For conditional sections, only include if non-empty
+	if projectInstructions != "" {
+		result = strings.ReplaceAll(result, "{{project_instructions}}", fmt.Sprintf("## Project Instructions\n\n%s", projectInstructions))
+	} else {
+		result = strings.ReplaceAll(result, "{{project_instructions}}", "")
+	}
+
+	if memories != "" {
+		result = strings.ReplaceAll(result, "{{memories}}", memories)
+	} else {
+		result = strings.ReplaceAll(result, "{{memories}}", "")
+	}
+
+	if attachments != "" {
+		result = strings.ReplaceAll(result, "{{attachments}}", attachments)
+	} else {
+		result = strings.ReplaceAll(result, "{{attachments}}", "")
+	}
+
+	if conversationHistory != "" {
+		result = strings.ReplaceAll(result, "{{history}}", conversationHistory)
+	} else {
+		result = strings.ReplaceAll(result, "{{history}}", "")
+	}
+
+	// Clean up any resulting double blank lines
+	for strings.Contains(result, "\n\n\n") {
+		result = strings.ReplaceAll(result, "\n\n\n", "\n\n")
+	}
+
+	return result
+}
+
+// buildGenericPrompt builds a generic prompt for tasks without a specific type.
+func (e *Executor) buildGenericPrompt(task *db.Task, projectInstructions, memories, attachments, conversationHistory string) string {
+	var prompt strings.Builder
+
+	if projectInstructions != "" {
+		prompt.WriteString(fmt.Sprintf("## Project Instructions\n\n%s\n\n", projectInstructions))
+	}
+	if memories != "" {
+		prompt.WriteString(memories)
+	}
+	prompt.WriteString(fmt.Sprintf("Task: %s\n\n", task.Title))
+	if task.Body != "" {
+		prompt.WriteString(fmt.Sprintf("%s\n\n", task.Body))
+	}
+	if attachments != "" {
+		prompt.WriteString(attachments)
+	}
+	if conversationHistory != "" {
+		prompt.WriteString(conversationHistory)
+	}
+	prompt.WriteString("Complete this task and summarize what you did.\n")
 
 	return prompt.String()
 }
@@ -696,7 +676,17 @@ func (e *Executor) getDefaultTriageInstructions(task *db.Task) string {
 	}
 
 	if task.Type == "" {
-		sb.WriteString("Task types: code, writing, thinking\n")
+		// Load task types from database
+		taskTypes, _ := e.db.ListTaskTypes()
+		if len(taskTypes) > 0 {
+			var typeNames []string
+			for _, t := range taskTypes {
+				typeNames = append(typeNames, t.Name)
+			}
+			sb.WriteString(fmt.Sprintf("Task types: %s\n", strings.Join(typeNames, ", ")))
+		} else {
+			sb.WriteString("Task types: code, writing, thinking\n")
+		}
 		sb.WriteString("Please confirm what type of task this is.\n\n")
 	}
 
@@ -1071,9 +1061,11 @@ func (e *Executor) findClaudeSessionID(workDir string) string {
 	return latestSession
 }
 
-// pollTmuxSession waits for the tmux session to end.
+// pollTmuxSession waits for the tmux session to end or task status to change.
 // Status is managed entirely by Claude hooks - we just wait and check the result.
 // Task only goes to "done" if user/MCP explicitly marks it done.
+// NOTE: We intentionally do NOT kill tmux windows here - they're kept around so
+// users can review Claude's work. Windows are only killed on task deletion.
 func (e *Executor) pollTmuxSession(ctx context.Context, taskID int64, sessionName string) execResult {
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
@@ -1081,7 +1073,7 @@ func (e *Executor) pollTmuxSession(ctx context.Context, taskID int64, sessionNam
 	for {
 		select {
 		case <-ctx.Done():
-			e.killTmuxSession(sessionName)
+			// Don't kill window - user may want to review what happened
 			return execResult{Interrupted: true}
 
 		case <-ticker.C:
@@ -1089,11 +1081,11 @@ func (e *Executor) pollTmuxSession(ctx context.Context, taskID int64, sessionNam
 			task, err := e.db.GetTask(taskID)
 			if err == nil && task != nil {
 				if task.Status == db.StatusBacklog {
-					e.killTmuxSession(sessionName)
+					// Don't kill window - keep it for review
 					return execResult{Interrupted: true}
 				}
 				if task.Status == db.StatusDone {
-					e.killTmuxSession(sessionName)
+					// Don't kill window - keep it so user can review Claude's work
 					return execResult{Success: true}
 				}
 			}
@@ -1625,15 +1617,44 @@ func (e *Executor) isBranchMerged(task *db.Task) bool {
 			return true
 		}
 
-		// Alternative: check if local branch exists and its tip is reachable from default
+		// Check if local branch exists
 		localLogCmd := exec.Command("git", "branch", "--list", task.BranchName)
 		localLogCmd.Dir = projectDir
 		localOutput, _ := localLogCmd.Output()
 		if len(strings.TrimSpace(string(localOutput))) > 0 {
-			// Local branch exists - check if its commits are in default branch
-			mergeBaseCmd := exec.Command("git", "merge-base", "--is-ancestor", task.BranchName, defaultBranch)
-			mergeBaseCmd.Dir = projectDir
-			if mergeBaseCmd.Run() == nil {
+			// Local branch exists - but we need to be careful not to flag newly created branches
+			// A newly created branch from main has no unique commits, so its tip equals merge-base
+			// Only consider it merged if:
+			// 1. The branch has unique commits (tip != merge-base with default)
+			// 2. AND all those commits are now in the default branch
+
+			// Get branch tip commit
+			branchTipCmd := exec.Command("git", "rev-parse", task.BranchName)
+			branchTipCmd.Dir = projectDir
+			branchTip, err := branchTipCmd.Output()
+			if err != nil {
+				return false
+			}
+
+			// Get merge-base with default branch
+			mergeBaseRevCmd := exec.Command("git", "merge-base", task.BranchName, defaultBranch)
+			mergeBaseRevCmd.Dir = projectDir
+			mergeBase, err := mergeBaseRevCmd.Output()
+			if err != nil {
+				return false
+			}
+
+			// If branch tip equals merge-base, the branch has no unique commits
+			// This means it's a newly created branch, NOT a merged branch
+			if strings.TrimSpace(string(branchTip)) == strings.TrimSpace(string(mergeBase)) {
+				return false // Newly created branch, not merged
+			}
+
+			// Branch has unique commits - check if they're all in default branch now
+			// (meaning the branch was merged)
+			mergeCheckCmd := exec.Command("git", "merge-base", "--is-ancestor", task.BranchName, defaultBranch)
+			mergeCheckCmd.Dir = projectDir
+			if mergeCheckCmd.Run() == nil {
 				return true
 			}
 		}

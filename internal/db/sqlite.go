@@ -166,6 +166,16 @@ func (db *DB) migrate() error {
 		)`,
 
 		`CREATE INDEX IF NOT EXISTS idx_task_attachments_task_id ON task_attachments(task_id)`,
+
+		`CREATE TABLE IF NOT EXISTS task_types (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			name TEXT NOT NULL UNIQUE,
+			label TEXT NOT NULL,
+			instructions TEXT DEFAULT '',
+			sort_order INTEGER DEFAULT 0,
+			is_builtin INTEGER DEFAULT 0,
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+		)`,
 	}
 
 	for _, m := range migrations {
@@ -212,6 +222,11 @@ func (db *DB) migrate() error {
 
 	// Drop priority column if it exists (SQLite 3.35.0+ supports DROP COLUMN)
 	db.Exec(`ALTER TABLE tasks DROP COLUMN priority`)
+
+	// Ensure default task types exist
+	if err := db.ensureDefaultTaskTypes(); err != nil {
+		return fmt.Errorf("ensure default task types: %w", err)
+	}
 
 	return nil
 }
@@ -308,6 +323,121 @@ This is the default workspace for personal tasks.
 `
 	if err := os.WriteFile(readmePath, []byte(readme), 0644); err != nil {
 		return fmt.Errorf("write README: %w", err)
+	}
+
+	return nil
+}
+
+// ensureDefaultTaskTypes creates the default task types if they don't exist.
+func (db *DB) ensureDefaultTaskTypes() error {
+	// Check if task types already exist
+	var count int
+	err := db.QueryRow(`SELECT COUNT(*) FROM task_types`).Scan(&count)
+	if err != nil {
+		return fmt.Errorf("check task types: %w", err)
+	}
+
+	if count > 0 {
+		return nil // Types already exist
+	}
+
+	// Default task type instructions using template placeholders
+	defaults := []struct {
+		Name         string
+		Label        string
+		Instructions string
+		SortOrder    int
+	}{
+		{
+			Name:  "code",
+			Label: "Code",
+			Instructions: `You are working on: {{project}}
+
+{{project_instructions}}
+
+{{memories}}
+
+Task: {{title}}
+
+{{body}}
+
+{{attachments}}
+
+{{history}}
+
+Instructions:
+- Explore the codebase to understand the context
+- Implement the solution
+- Write tests if applicable
+- Commit your changes with clear messages
+- Submit a pull request when your work is complete
+
+IMPORTANT: Your objective is to submit a PR to complete this task. Always remember to create and submit a pull request as the final step of your work. This is how you signal that the implementation is ready for review and merging.
+
+When finished, provide a summary of what you did:
+- List files changed/created
+- Describe the key changes made
+- Include any relevant links (PRs, commits, etc.)
+- Note any follow-up items or concerns`,
+			SortOrder: 1,
+		},
+		{
+			Name:  "writing",
+			Label: "Writing",
+			Instructions: `You are a skilled writer. Please complete this task:
+
+{{project_instructions}}
+
+{{memories}}
+
+Task: {{title}}
+
+Details: {{body}}
+
+{{attachments}}
+
+{{history}}
+
+Write the requested content. Be professional, clear, and match the appropriate tone.
+Output the final content, then summarize what you created.`,
+			SortOrder: 2,
+		},
+		{
+			Name:  "thinking",
+			Label: "Thinking",
+			Instructions: `You are a strategic advisor. Analyze this thoroughly:
+
+{{project_instructions}}
+
+{{memories}}
+
+Question: {{title}}
+
+Context: {{body}}
+
+{{attachments}}
+
+{{history}}
+
+Provide:
+1. Clear analysis of the question/problem
+2. Key considerations and tradeoffs
+3. Recommended approach
+4. Concrete next steps
+
+Think deeply but be actionable. Summarize your conclusions clearly.`,
+			SortOrder: 3,
+		},
+	}
+
+	for _, d := range defaults {
+		_, err := db.Exec(`
+			INSERT INTO task_types (name, label, instructions, sort_order, is_builtin)
+			VALUES (?, ?, ?, ?, 1)
+		`, d.Name, d.Label, d.Instructions, d.SortOrder)
+		if err != nil {
+			return fmt.Errorf("insert task type %s: %w", d.Name, err)
+		}
 	}
 
 	return nil

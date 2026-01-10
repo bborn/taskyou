@@ -1385,7 +1385,7 @@ func (m *AppModel) updateSettings(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if keyMsg, ok := msg.(tea.KeyMsg); ok {
 		if keyMsg.String() == "q" || keyMsg.String() == "esc" {
 			// Only exit if not in edit mode or browsing
-			if m.settingsView != nil && !m.settingsView.editing && !m.settingsView.browsing {
+			if m.settingsView != nil && !m.settingsView.editingProject && !m.settingsView.editingTaskType && !m.settingsView.browsing {
 				m.currentView = ViewDashboard
 				m.settingsView = nil
 				// Refresh kanban theme colors after settings change

@@ -59,10 +59,23 @@ func NewEditFormModel(database *db.DB, task *db.Task, width, height int) *FormMo
 		width:    width,
 		height:   height,
 		focused:  FieldTitle,
-		types:    []string{"", "code", "writing", "thinking"},
 		taskType: task.Type,
 		project:  task.Project,
 		isEdit:   true,
+	}
+
+	// Load task types from database
+	m.types = []string{""}
+	if database != nil {
+		if types, err := database.ListTaskTypes(); err == nil {
+			for _, t := range types {
+				m.types = append(m.types, t.Name)
+			}
+		}
+	}
+	// Fallback if no types loaded
+	if len(m.types) == 1 {
+		m.types = []string{"", "code", "writing", "thinking"}
 	}
 
 	// Set type index
@@ -126,7 +139,20 @@ func NewFormModel(database *db.DB, width, height int, workingDir string) *FormMo
 		width:   width,
 		height:  height,
 		focused: FieldTitle,
-		types:   []string{"", "code", "writing", "thinking"},
+	}
+
+	// Load task types from database
+	m.types = []string{""}
+	if database != nil {
+		if types, err := database.ListTaskTypes(); err == nil {
+			for _, t := range types {
+				m.types = append(m.types, t.Name)
+			}
+		}
+	}
+	// Fallback if no types loaded
+	if len(m.types) == 1 {
+		m.types = []string{"", "code", "writing", "thinking"}
 	}
 
 	// Load projects
@@ -446,7 +472,15 @@ func (m *FormModel) View() string {
 	if m.focused == FieldType {
 		cursor = cursorStyle.Render("▸")
 	}
-	typeLabels := []string{"none", "code", "writing", "thinking"}
+	// Build type labels from m.types (replace empty string with "none")
+	typeLabels := make([]string, len(m.types))
+	for i, t := range m.types {
+		if t == "" {
+			typeLabels[i] = "none"
+		} else {
+			typeLabels[i] = t
+		}
+	}
 	b.WriteString(cursor + " " + labelStyle.Render("Type") + m.renderSelector(typeLabels, m.typeIdx, m.focused == FieldType, selectedStyle, optionStyle, dimStyle))
 	b.WriteString("\n\n")
 

@@ -131,6 +131,27 @@ func main() {
 	}
 	daemonCmd.AddCommand(daemonStopCmd)
 
+	// Daemon restart subcommand
+	daemonRestartCmd := &cobra.Command{
+		Use:   "restart",
+		Short: "Restart the daemon",
+		Run: func(cmd *cobra.Command, args []string) {
+			// Stop if running (ignore errors - might not be running)
+			stopDaemon()
+
+			// Small delay to ensure clean shutdown
+			time.Sleep(100 * time.Millisecond)
+
+			// Start daemon
+			if err := ensureDaemonRunning(); err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+			fmt.Println(successStyle.Render("Daemon restarted"))
+		},
+	}
+	daemonCmd.AddCommand(daemonRestartCmd)
+
 	// Daemon status subcommand
 	daemonStatusCmd := &cobra.Command{
 		Use:   "status",
@@ -147,6 +168,47 @@ func main() {
 	daemonCmd.AddCommand(daemonStatusCmd)
 
 	rootCmd.AddCommand(daemonCmd)
+
+	// Restart subcommand - full restart (daemon + tmux sessions)
+	restartCmd := &cobra.Command{
+		Use:   "restart",
+		Short: "Full restart - stops daemon, kills tmux sessions, and relaunches",
+		Long:  "Performs a complete restart: stops the daemon, kills all task-related tmux sessions, and relaunches the TUI fresh.",
+		Run: func(cmd *cobra.Command, args []string) {
+			fmt.Println(dimStyle.Render("Stopping daemon..."))
+			stopDaemon()
+
+			fmt.Println(dimStyle.Render("Killing tmux sessions..."))
+			// Kill all task-daemon-* sessions
+			out, _ := osexec.Command("tmux", "list-sessions", "-F", "#{session_name}").Output()
+			for _, session := range strings.Split(string(out), "\n") {
+				session = strings.TrimSpace(session)
+				if strings.HasPrefix(session, "task-daemon-") || strings.HasPrefix(session, "task-ui-") {
+					osexec.Command("tmux", "kill-session", "-t", session).Run()
+				}
+			}
+
+			fmt.Println(successStyle.Render("Restarting..."))
+			time.Sleep(200 * time.Millisecond)
+
+			// Re-exec task command
+			executable, err := os.Executable()
+			if err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+
+			// Pass through -l flag if we're in local mode
+			execArgs := []string{executable}
+			if local {
+				execArgs = append(execArgs, "-l")
+			}
+
+			syscall.Exec(executable, execArgs, os.Environ())
+		},
+	}
+	restartCmd.Flags().BoolVarP(&local, "local", "l", false, "Run locally")
+	rootCmd.AddCommand(restartCmd)
 
 	// Logs subcommand - tail claude session logs
 	logsCmd := &cobra.Command{
@@ -304,12 +366,6 @@ Examples:
 				taskType = db.TypeCode
 			}
 
-			// Validate task type
-			if taskType != db.TypeCode && taskType != db.TypeWriting && taskType != db.TypeThinking {
-				fmt.Fprintln(os.Stderr, errorStyle.Render("Invalid type. Must be: code, writing, or thinking"))
-				os.Exit(1)
-			}
-
 			// Open database
 			dbPath := db.DefaultPath()
 			database, err := db.Open(dbPath)
@@ -318,6 +374,28 @@ Examples:
 				os.Exit(1)
 			}
 			defer database.Close()
+
+			// Validate task type against database types
+			if taskType == "" {
+				taskType = db.TypeCode // Default to code if not specified
+			}
+			taskTypes, _ := database.ListTaskTypes()
+			validType := false
+			var typeNames []string
+			for _, t := range taskTypes {
+				typeNames = append(typeNames, t.Name)
+				if t.Name == taskType {
+					validType = true
+				}
+			}
+			if !validType {
+				if len(typeNames) > 0 {
+					fmt.Fprintln(os.Stderr, errorStyle.Render("Invalid type. Must be one of: "+strings.Join(typeNames, ", ")))
+				} else {
+					fmt.Fprintln(os.Stderr, errorStyle.Render("Invalid type. Must be: code, writing, or thinking"))
+				}
+				os.Exit(1)
+			}
 
 			// If project not specified, try to detect from cwd
 			if project == "" {
@@ -641,12 +719,6 @@ Examples:
 			taskType, _ := cmd.Flags().GetString("type")
 			project, _ := cmd.Flags().GetString("project")
 
-			// Validate task type if provided
-			if taskType != "" && taskType != db.TypeCode && taskType != db.TypeWriting && taskType != db.TypeThinking {
-				fmt.Fprintln(os.Stderr, errorStyle.Render("Invalid type. Must be: code, writing, or thinking"))
-				os.Exit(1)
-			}
-
 			// Open database
 			dbPath := db.DefaultPath()
 			database, err := db.Open(dbPath)
@@ -655,6 +727,27 @@ Examples:
 				os.Exit(1)
 			}
 			defer database.Close()
+
+			// Validate task type against database types if provided
+			if taskType != "" {
+				taskTypes, _ := database.ListTaskTypes()
+				validType := false
+				var typeNames []string
+				for _, t := range taskTypes {
+					typeNames = append(typeNames, t.Name)
+					if t.Name == taskType {
+						validType = true
+					}
+				}
+				if !validType {
+					if len(typeNames) > 0 {
+						fmt.Fprintln(os.Stderr, errorStyle.Render("Invalid type. Must be one of: "+strings.Join(typeNames, ", ")))
+					} else {
+						fmt.Fprintln(os.Stderr, errorStyle.Render("Invalid type. Must be: code, writing, or thinking"))
+					}
+					os.Exit(1)
+				}
+			}
 
 			task, err := database.GetTask(taskID)
 			if err != nil {
@@ -795,8 +888,9 @@ Examples:
 				return
 			}
 
-			// Kill Claude session if running
-			killClaudeSession(int(taskID))
+			// Note: We intentionally do NOT kill the Claude session when closing a task.
+			// The tmux window is kept around so users can review Claude's work.
+			// Use 'task claudes kill <id>' or 'task delete <id>' to clean up windows.
 
 			if err := database.UpdateTaskStatus(taskID, db.StatusDone); err != nil {
 				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))

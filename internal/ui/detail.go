@@ -33,6 +33,9 @@ type DetailModel struct {
 	claudePaneID    string // The Claude Code pane (middle-left)
 	workdirPaneID   string // The workdir shell pane (middle-right)
 	daemonSessionID string // The daemon session the Claude pane came from
+
+	// Cached tmux window target (set once on creation, cleared on kill)
+	cachedWindowTarget string
 }
 
 // UpdateTask updates the task and refreshes the view.
@@ -99,8 +102,11 @@ func NewDetailModel(t *db.Task, database *db.DB, width, height int) *DetailModel
 
 	m.initViewport()
 
+	// Cache the tmux window target once (expensive operation)
+	m.cachedWindowTarget = m.findTaskWindow()
+
 	// If we're in tmux and task has active session, join it as a split pane
-	if os.Getenv("TMUX") != "" && m.hasActiveTmuxSession() {
+	if os.Getenv("TMUX") != "" && m.cachedWindowTarget != "" {
 		m.joinTmuxPane()
 	} else if os.Getenv("TMUX") != "" {
 		// Even without joined panes, ensure Details pane has focus
@@ -213,8 +219,9 @@ func (m *DetailModel) findTaskWindow() string {
 }
 
 // hasActiveTmuxSession checks if this task has an active tmux window in any task-daemon session.
+// Uses cached value for performance (set on creation, cleared on kill).
 func (m *DetailModel) hasActiveTmuxSession() bool {
-	return m.findTaskWindow() != ""
+	return m.cachedWindowTarget != ""
 }
 
 // focusDetailsPane sets focus to the current TUI pane (Details pane).
@@ -289,7 +296,8 @@ func (m *DetailModel) saveDetailPaneHeight(tuiPaneID string) {
 //   - Top (configurable, default 20%): Task details (TUI)
 //   - Bottom: Claude Code (left) + Workdir shell (right) side-by-side
 func (m *DetailModel) joinTmuxPanes() {
-	windowTarget := m.findTaskWindow()
+	// Use cached window target to avoid expensive tmux lookup
+	windowTarget := m.cachedWindowTarget
 	if windowTarget == "" {
 		return
 	}
@@ -438,7 +446,7 @@ func (m *DetailModel) breakTmuxPane() {
 
 // killTmuxSession kills the Claude tmux window and workdir pane.
 func (m *DetailModel) killTmuxSession() {
-	windowTarget := m.findTaskWindow()
+	windowTarget := m.cachedWindowTarget
 	if windowTarget == "" {
 		return
 	}
@@ -462,6 +470,10 @@ func (m *DetailModel) killTmuxSession() {
 	m.claudePaneID = ""
 
 	exec.Command("tmux", "kill-window", "-t", windowTarget).Run()
+
+	// Clear cached window target since session is now killed
+	m.cachedWindowTarget = ""
+
 	m.Refresh()
 }
 

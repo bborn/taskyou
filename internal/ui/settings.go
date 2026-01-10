@@ -17,7 +17,7 @@ type SettingsModel struct {
 	width  int
 	height int
 
-	// Section focus: 0=theme, 1=projects
+	// Section focus: 0=theme, 1=projects, 2=task types
 	section int
 
 	// Theme selection
@@ -25,16 +25,28 @@ type SettingsModel struct {
 	selectedTheme int
 
 	// Projects
-	projects []*db.Project
-	selected int
+	projects        []*db.Project
+	selectedProject int
 
 	// Project form
-	editing           bool
+	editingProject    bool
 	editProject       *db.Project
 	nameInput         textinput.Model
 	aliasInput        textinput.Model
 	instructionsInput textarea.Model
-	formFocus         int // 0=name, 1=path (browser), 2=aliases, 3=instructions
+	projectFormFocus  int // 0=name, 1=path (browser), 2=aliases, 3=instructions
+
+	// Task Types
+	taskTypes        []*db.TaskType
+	selectedTaskType int
+
+	// Task Type form
+	editingTaskType       bool
+	editTaskType          *db.TaskType
+	typeNameInput         textinput.Model
+	typeLabelInput        textinput.Model
+	typeInstructionsInput textarea.Model
+	typeFormFocus         int // 0=name, 1=label, 2=instructions
 
 	// File browser for path selection
 	browsing    bool
@@ -49,6 +61,7 @@ type SettingsModel struct {
 
 // NewSettingsModel creates a new settings model.
 func NewSettingsModel(database *db.DB, width, height int) *SettingsModel {
+	// Project form inputs
 	nameInput := textinput.New()
 	nameInput.Placeholder = "Project name"
 	nameInput.CharLimit = 50
@@ -62,6 +75,20 @@ func NewSettingsModel(database *db.DB, width, height int) *SettingsModel {
 	instructionsInput.SetWidth(width - 20)
 	instructionsInput.SetHeight(5)
 
+	// Task type form inputs
+	typeNameInput := textinput.New()
+	typeNameInput.Placeholder = "type-name (lowercase, no spaces)"
+	typeNameInput.CharLimit = 30
+
+	typeLabelInput := textinput.New()
+	typeLabelInput.Placeholder = "Display Label"
+	typeLabelInput.CharLimit = 50
+
+	typeInstructionsInput := textarea.New()
+	typeInstructionsInput.Placeholder = "Prompt template for this task type...\nUse {{title}}, {{body}}, {{project}}, {{project_instructions}}, {{memories}}, {{attachments}}, {{history}}"
+	typeInstructionsInput.SetWidth(width - 20)
+	typeInstructionsInput.SetHeight(10)
+
 	// Get available themes and current selection
 	themes := ListThemes()
 	currentThemeName := CurrentTheme().Name
@@ -74,14 +101,17 @@ func NewSettingsModel(database *db.DB, width, height int) *SettingsModel {
 	}
 
 	m := &SettingsModel{
-		db:                database,
-		width:             width,
-		height:            height,
-		themes:            themes,
-		selectedTheme:     selectedTheme,
-		nameInput:         nameInput,
-		aliasInput:        aliasInput,
-		instructionsInput: instructionsInput,
+		db:                    database,
+		width:                 width,
+		height:                height,
+		themes:                themes,
+		selectedTheme:         selectedTheme,
+		nameInput:             nameInput,
+		aliasInput:            aliasInput,
+		instructionsInput:     instructionsInput,
+		typeNameInput:         typeNameInput,
+		typeLabelInput:        typeLabelInput,
+		typeInstructionsInput: typeInstructionsInput,
 	}
 	m.loadSettings()
 	return m
@@ -94,6 +124,13 @@ func (m *SettingsModel) loadSettings() {
 		return
 	}
 	m.projects = projects
+
+	taskTypes, err := m.db.ListTaskTypes()
+	if err != nil {
+		m.err = err
+		return
+	}
+	m.taskTypes = taskTypes
 
 	dir, _ := m.db.GetSetting("projects_dir")
 	m.projectsDir = dir
@@ -117,42 +154,51 @@ func (m *SettingsModel) Update(msg tea.Msg) (*SettingsModel, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
 		// Handle editing mode
-		if m.editing {
-			return m.updateForm(msg)
+		if m.editingProject {
+			return m.updateProjectForm(msg)
+		}
+		if m.editingTaskType {
+			return m.updateTaskTypeForm(msg)
 		}
 
 		switch msg.String() {
 		case "tab":
-			// Switch between sections
-			m.section = (m.section + 1) % 2
+			// Switch between sections (0=theme, 1=projects, 2=task types)
+			m.section = (m.section + 1) % 3
 			return m, nil
 		case "shift+tab":
-			m.section = (m.section + 1) % 2
+			m.section = (m.section + 2) % 3
 			return m, nil
 		case "up", "k":
-			if m.section == 0 {
-				// Theme section
+			switch m.section {
+			case 0: // Theme section
 				if m.selectedTheme > 0 {
 					m.selectedTheme--
 					m.applyTheme()
 				}
-			} else {
-				// Projects section
-				if m.selected > 0 {
-					m.selected--
+			case 1: // Projects section
+				if m.selectedProject > 0 {
+					m.selectedProject--
+				}
+			case 2: // Task types section
+				if m.selectedTaskType > 0 {
+					m.selectedTaskType--
 				}
 			}
 		case "down", "j":
-			if m.section == 0 {
-				// Theme section
+			switch m.section {
+			case 0: // Theme section
 				if m.selectedTheme < len(m.themes)-1 {
 					m.selectedTheme++
 					m.applyTheme()
 				}
-			} else {
-				// Projects section
-				if m.selected < len(m.projects)-1 {
-					m.selected++
+			case 1: // Projects section
+				if m.selectedProject < len(m.projects)-1 {
+					m.selectedProject++
+				}
+			case 2: // Task types section
+				if m.selectedTaskType < len(m.taskTypes)-1 {
+					m.selectedTaskType++
 				}
 			}
 		case "left", "h":
@@ -166,40 +212,69 @@ func (m *SettingsModel) Update(msg tea.Msg) (*SettingsModel, tea.Cmd) {
 				m.applyTheme()
 			}
 		case "n":
-			// New project (only in projects section)
+			// New item (projects or task types section)
 			if m.section == 1 {
-				m.editing = true
+				m.editingProject = true
 				m.editProject = &db.Project{}
 				m.nameInput.SetValue("")
 				m.aliasInput.SetValue("")
 				m.instructionsInput.SetValue("")
 				m.nameInput.Focus()
-				m.formFocus = 0
+				m.projectFormFocus = 0
+				return m, textinput.Blink
+			} else if m.section == 2 {
+				m.editingTaskType = true
+				m.editTaskType = &db.TaskType{}
+				m.typeNameInput.SetValue("")
+				m.typeLabelInput.SetValue("")
+				m.typeInstructionsInput.SetValue("")
+				m.typeNameInput.Focus()
+				m.typeFormFocus = 0
 				return m, textinput.Blink
 			}
 		case "e":
-			// Edit selected project (only in projects section)
-			if m.section == 1 && len(m.projects) > 0 && m.selected < len(m.projects) {
-				m.editing = true
-				m.editProject = m.projects[m.selected]
+			// Edit selected item
+			if m.section == 1 && len(m.projects) > 0 && m.selectedProject < len(m.projects) {
+				m.editingProject = true
+				m.editProject = m.projects[m.selectedProject]
 				m.nameInput.SetValue(m.editProject.Name)
 				m.aliasInput.SetValue(m.editProject.Aliases)
 				m.instructionsInput.SetValue(m.editProject.Instructions)
 				m.nameInput.Focus()
-				m.formFocus = 0
+				m.projectFormFocus = 0
+				return m, textinput.Blink
+			} else if m.section == 2 && len(m.taskTypes) > 0 && m.selectedTaskType < len(m.taskTypes) {
+				m.editingTaskType = true
+				m.editTaskType = m.taskTypes[m.selectedTaskType]
+				m.typeNameInput.SetValue(m.editTaskType.Name)
+				m.typeLabelInput.SetValue(m.editTaskType.Label)
+				m.typeInstructionsInput.SetValue(m.editTaskType.Instructions)
+				m.typeNameInput.Focus()
+				m.typeFormFocus = 0
 				return m, textinput.Blink
 			}
 		case "d":
-			// Delete selected project (only in projects section)
-			if m.section == 1 && len(m.projects) > 0 && m.selected < len(m.projects) {
-				err := m.db.DeleteProject(m.projects[m.selected].ID)
+			// Delete selected item
+			if m.section == 1 && len(m.projects) > 0 && m.selectedProject < len(m.projects) {
+				err := m.db.DeleteProject(m.projects[m.selectedProject].ID)
 				if err != nil {
 					m.err = err
 				} else {
 					m.err = nil
 					m.loadSettings()
-					if m.selected >= len(m.projects) && m.selected > 0 {
-						m.selected--
+					if m.selectedProject >= len(m.projects) && m.selectedProject > 0 {
+						m.selectedProject--
+					}
+				}
+			} else if m.section == 2 && len(m.taskTypes) > 0 && m.selectedTaskType < len(m.taskTypes) {
+				err := m.db.DeleteTaskType(m.taskTypes[m.selectedTaskType].ID)
+				if err != nil {
+					m.err = err
+				} else {
+					m.err = nil
+					m.loadSettings()
+					if m.selectedTaskType >= len(m.taskTypes) && m.selectedTaskType > 0 {
+						m.selectedTaskType--
 					}
 				}
 			}
@@ -254,23 +329,23 @@ func (m *SettingsModel) updateBrowser(msg tea.Msg) (*SettingsModel, tea.Cmd) {
 	return m, cmd
 }
 
-func (m *SettingsModel) updateForm(msg tea.KeyMsg) (*SettingsModel, tea.Cmd) {
+func (m *SettingsModel) updateProjectForm(msg tea.KeyMsg) (*SettingsModel, tea.Cmd) {
 	switch msg.String() {
 	case "esc":
-		m.editing = false
+		m.editingProject = false
 		m.editProject = nil
 		return m, nil
 	case "tab":
 		// Tab moves forward through fields (unless in textarea)
-		if m.formFocus == 3 {
+		if m.projectFormFocus == 3 {
 			// In instructions textarea, tab inserts tab character
 			var cmd tea.Cmd
 			m.instructionsInput, cmd = m.instructionsInput.Update(msg)
 			return m, cmd
 		}
-		m.formFocus = (m.formFocus + 1) % 4
-		m.updateFormFocus()
-		if m.formFocus == 1 {
+		m.projectFormFocus = (m.projectFormFocus + 1) % 4
+		m.updateProjectFormFocus()
+		if m.projectFormFocus == 1 {
 			// Open file browser for path
 			startPath := m.projectsDir
 			if m.editProject != nil && m.editProject.Path != "" {
@@ -281,14 +356,14 @@ func (m *SettingsModel) updateForm(msg tea.KeyMsg) (*SettingsModel, tea.Cmd) {
 			m.fileBrowser = NewFileBrowserModel(startPath, m.width, m.height)
 			return m, nil
 		}
-		if m.formFocus == 3 {
+		if m.projectFormFocus == 3 {
 			return m, textarea.Blink
 		}
 		return m, nil
 	case "shift+tab":
-		m.formFocus = (m.formFocus + 3) % 4
-		m.updateFormFocus()
-		if m.formFocus == 1 {
+		m.projectFormFocus = (m.projectFormFocus + 3) % 4
+		m.updateProjectFormFocus()
+		if m.projectFormFocus == 1 {
 			// Open file browser for path
 			startPath := m.projectsDir
 			if m.editProject != nil && m.editProject.Path != "" {
@@ -299,12 +374,12 @@ func (m *SettingsModel) updateForm(msg tea.KeyMsg) (*SettingsModel, tea.Cmd) {
 			m.fileBrowser = NewFileBrowserModel(startPath, m.width, m.height)
 			return m, nil
 		}
-		if m.formFocus == 3 {
+		if m.projectFormFocus == 3 {
 			return m, textarea.Blink
 		}
 		return m, nil
 	case "enter":
-		if m.formFocus == 1 {
+		if m.projectFormFocus == 1 {
 			// Open file browser
 			startPath := m.projectsDir
 			if m.editProject != nil && m.editProject.Path != "" {
@@ -315,15 +390,15 @@ func (m *SettingsModel) updateForm(msg tea.KeyMsg) (*SettingsModel, tea.Cmd) {
 			m.fileBrowser = NewFileBrowserModel(startPath, m.width, m.height)
 			return m, nil
 		}
-		if m.formFocus == 3 {
+		if m.projectFormFocus == 3 {
 			// In instructions textarea, enter inserts newline
 			var cmd tea.Cmd
 			m.instructionsInput, cmd = m.instructionsInput.Update(msg)
 			return m, cmd
 		}
-		m.formFocus = (m.formFocus + 1) % 4
-		m.updateFormFocus()
-		if m.formFocus == 1 {
+		m.projectFormFocus = (m.projectFormFocus + 1) % 4
+		m.updateProjectFormFocus()
+		if m.projectFormFocus == 1 {
 			// Open file browser for path
 			startPath := m.projectsDir
 			if m.editProject != nil && m.editProject.Path != "" {
@@ -334,7 +409,7 @@ func (m *SettingsModel) updateForm(msg tea.KeyMsg) (*SettingsModel, tea.Cmd) {
 			m.fileBrowser = NewFileBrowserModel(startPath, m.width, m.height)
 			return m, nil
 		}
-		if m.formFocus == 3 {
+		if m.projectFormFocus == 3 {
 			return m, textarea.Blink
 		}
 		return m, nil
@@ -344,7 +419,7 @@ func (m *SettingsModel) updateForm(msg tea.KeyMsg) (*SettingsModel, tea.Cmd) {
 
 	// Update focused input
 	var cmd tea.Cmd
-	switch m.formFocus {
+	switch m.projectFormFocus {
 	case 0:
 		m.nameInput, cmd = m.nameInput.Update(msg)
 	case 2:
@@ -355,17 +430,88 @@ func (m *SettingsModel) updateForm(msg tea.KeyMsg) (*SettingsModel, tea.Cmd) {
 	return m, cmd
 }
 
-func (m *SettingsModel) updateFormFocus() {
+func (m *SettingsModel) updateProjectFormFocus() {
 	m.nameInput.Blur()
 	m.aliasInput.Blur()
 	m.instructionsInput.Blur()
-	switch m.formFocus {
+	switch m.projectFormFocus {
 	case 0:
 		m.nameInput.Focus()
 	case 2:
 		m.aliasInput.Focus()
 	case 3:
 		m.instructionsInput.Focus()
+	}
+}
+
+func (m *SettingsModel) updateTaskTypeForm(msg tea.KeyMsg) (*SettingsModel, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
+		m.editingTaskType = false
+		m.editTaskType = nil
+		return m, nil
+	case "tab":
+		// Tab moves forward through fields (unless in textarea)
+		if m.typeFormFocus == 2 {
+			// In instructions textarea, tab inserts tab character
+			var cmd tea.Cmd
+			m.typeInstructionsInput, cmd = m.typeInstructionsInput.Update(msg)
+			return m, cmd
+		}
+		m.typeFormFocus = (m.typeFormFocus + 1) % 3
+		m.updateTaskTypeFormFocus()
+		if m.typeFormFocus == 2 {
+			return m, textarea.Blink
+		}
+		return m, nil
+	case "shift+tab":
+		m.typeFormFocus = (m.typeFormFocus + 2) % 3
+		m.updateTaskTypeFormFocus()
+		if m.typeFormFocus == 2 {
+			return m, textarea.Blink
+		}
+		return m, nil
+	case "enter":
+		if m.typeFormFocus == 2 {
+			// In instructions textarea, enter inserts newline
+			var cmd tea.Cmd
+			m.typeInstructionsInput, cmd = m.typeInstructionsInput.Update(msg)
+			return m, cmd
+		}
+		m.typeFormFocus = (m.typeFormFocus + 1) % 3
+		m.updateTaskTypeFormFocus()
+		if m.typeFormFocus == 2 {
+			return m, textarea.Blink
+		}
+		return m, nil
+	case "ctrl+s":
+		return m.saveTaskType()
+	}
+
+	// Update focused input
+	var cmd tea.Cmd
+	switch m.typeFormFocus {
+	case 0:
+		m.typeNameInput, cmd = m.typeNameInput.Update(msg)
+	case 1:
+		m.typeLabelInput, cmd = m.typeLabelInput.Update(msg)
+	case 2:
+		m.typeInstructionsInput, cmd = m.typeInstructionsInput.Update(msg)
+	}
+	return m, cmd
+}
+
+func (m *SettingsModel) updateTaskTypeFormFocus() {
+	m.typeNameInput.Blur()
+	m.typeLabelInput.Blur()
+	m.typeInstructionsInput.Blur()
+	switch m.typeFormFocus {
+	case 0:
+		m.typeNameInput.Focus()
+	case 1:
+		m.typeLabelInput.Focus()
+	case 2:
+		m.typeInstructionsInput.Focus()
 	}
 }
 
@@ -399,8 +545,45 @@ func (m *SettingsModel) saveProject() (*SettingsModel, tea.Cmd) {
 		return m, nil
 	}
 
-	m.editing = false
+	m.editingProject = false
 	m.editProject = nil
+	m.err = nil
+	m.loadSettings()
+	return m, nil
+}
+
+func (m *SettingsModel) saveTaskType() (*SettingsModel, tea.Cmd) {
+	name := strings.TrimSpace(m.typeNameInput.Value())
+	label := strings.TrimSpace(m.typeLabelInput.Value())
+	instructions := strings.TrimSpace(m.typeInstructionsInput.Value())
+
+	if name == "" {
+		m.err = fmt.Errorf("name is required")
+		return m, nil
+	}
+	if label == "" {
+		m.err = fmt.Errorf("label is required")
+		return m, nil
+	}
+
+	m.editTaskType.Name = name
+	m.editTaskType.Label = label
+	m.editTaskType.Instructions = instructions
+
+	var err error
+	if m.editTaskType.ID == 0 {
+		err = m.db.CreateTaskType(m.editTaskType)
+	} else {
+		err = m.db.UpdateTaskType(m.editTaskType)
+	}
+
+	if err != nil {
+		m.err = err
+		return m, nil
+	}
+
+	m.editingTaskType = false
+	m.editTaskType = nil
 	m.err = nil
 	m.loadSettings()
 	return m, nil
@@ -448,18 +631,18 @@ func (m *SettingsModel) View() string {
 	b.WriteString(lipgloss.NewStyle().Padding(0, 2).Render(projectsHeader))
 	b.WriteString("\n")
 
-	if m.editing {
-		// Show form
-		b.WriteString(m.renderForm())
+	if m.editingProject {
+		// Show project form
+		b.WriteString(m.renderProjectForm())
 	} else {
-		// Show list
+		// Show project list
 		if len(m.projects) == 0 {
 			b.WriteString(lipgloss.NewStyle().Padding(0, 2).Render(Dim.Render("No projects configured. Press 'n' to add one.")))
 		} else {
 			for i, p := range m.projects {
 				prefix := "  "
 				style := lipgloss.NewStyle()
-				if m.section == 1 && i == m.selected {
+				if m.section == 1 && i == m.selectedProject {
 					prefix = "> "
 					style = style.Foreground(ColorPrimary)
 				}
@@ -468,6 +651,44 @@ func (m *SettingsModel) View() string {
 				line += Dim.Render(fmt.Sprintf(" → %s", p.Path))
 				if p.Aliases != "" {
 					line += Dim.Render(fmt.Sprintf(" (%s)", p.Aliases))
+				}
+				b.WriteString(lipgloss.NewStyle().Padding(0, 2).Render(style.Render(line)))
+				b.WriteString("\n")
+			}
+		}
+	}
+	b.WriteString("\n")
+
+	// Task Types section
+	taskTypesHeader := "Task Types"
+	if m.section == 2 {
+		taskTypesHeader = Bold.Foreground(ColorPrimary).Render("Task Types")
+	} else {
+		taskTypesHeader = Bold.Render("Task Types")
+	}
+	b.WriteString(lipgloss.NewStyle().Padding(0, 2).Render(taskTypesHeader))
+	b.WriteString("\n")
+
+	if m.editingTaskType {
+		// Show task type form
+		b.WriteString(m.renderTaskTypeForm())
+	} else {
+		// Show task type list
+		if len(m.taskTypes) == 0 {
+			b.WriteString(lipgloss.NewStyle().Padding(0, 2).Render(Dim.Render("No task types configured.")))
+		} else {
+			for i, t := range m.taskTypes {
+				prefix := "  "
+				style := lipgloss.NewStyle()
+				if m.section == 2 && i == m.selectedTaskType {
+					prefix = "> "
+					style = style.Foreground(ColorPrimary)
+				}
+
+				line := fmt.Sprintf("%s%s", prefix, t.Label)
+				line += Dim.Render(fmt.Sprintf(" (%s)", t.Name))
+				if t.IsBuiltin {
+					line += Dim.Render(" [builtin]")
 				}
 				b.WriteString(lipgloss.NewStyle().Padding(0, 2).Render(style.Render(line)))
 				b.WriteString("\n")
@@ -515,7 +736,7 @@ func (m *SettingsModel) renderThemeSelector() string {
 	return lipgloss.JoinHorizontal(lipgloss.Center, parts...)
 }
 
-func (m *SettingsModel) renderForm() string {
+func (m *SettingsModel) renderProjectForm() string {
 	var b strings.Builder
 
 	title := "New Project"
@@ -527,7 +748,7 @@ func (m *SettingsModel) renderForm() string {
 
 	// Name field
 	nameLabel := Dim.Render("Name:         ")
-	if m.formFocus == 0 {
+	if m.projectFormFocus == 0 {
 		nameLabel = Bold.Render("Name:         ")
 	}
 	b.WriteString(lipgloss.NewStyle().Padding(0, 2).Render(nameLabel + m.nameInput.View()))
@@ -535,7 +756,7 @@ func (m *SettingsModel) renderForm() string {
 
 	// Path field (shows current path or prompt to browse)
 	pathLabel := Dim.Render("Path:         ")
-	if m.formFocus == 1 {
+	if m.projectFormFocus == 1 {
 		pathLabel = Bold.Render("Path:         ")
 	}
 	pathValue := Dim.Render("[press Enter to browse]")
@@ -543,7 +764,7 @@ func (m *SettingsModel) renderForm() string {
 		pathValue = m.editProject.Path
 	}
 	pathLine := pathLabel + pathValue
-	if m.formFocus == 1 {
+	if m.projectFormFocus == 1 {
 		pathLine = lipgloss.NewStyle().Foreground(ColorPrimary).Render(pathLine)
 	}
 	b.WriteString(lipgloss.NewStyle().Padding(0, 2).Render(pathLine))
@@ -551,7 +772,7 @@ func (m *SettingsModel) renderForm() string {
 
 	// Aliases field
 	aliasLabel := Dim.Render("Aliases:      ")
-	if m.formFocus == 2 {
+	if m.projectFormFocus == 2 {
 		aliasLabel = Bold.Render("Aliases:      ")
 	}
 	b.WriteString(lipgloss.NewStyle().Padding(0, 2).Render(aliasLabel + m.aliasInput.View()))
@@ -559,7 +780,7 @@ func (m *SettingsModel) renderForm() string {
 
 	// Instructions field
 	instructionsLabel := Dim.Render("Instructions: ")
-	if m.formFocus == 3 {
+	if m.projectFormFocus == 3 {
 		instructionsLabel = Bold.Render("Instructions: ")
 	}
 	b.WriteString(lipgloss.NewStyle().Padding(0, 2).Render(instructionsLabel))
@@ -573,13 +794,57 @@ func (m *SettingsModel) renderForm() string {
 	return b.String()
 }
 
+func (m *SettingsModel) renderTaskTypeForm() string {
+	var b strings.Builder
+
+	title := "New Task Type"
+	if m.editTaskType.ID != 0 {
+		title = "Edit Task Type"
+	}
+	b.WriteString(lipgloss.NewStyle().Padding(1, 2).Render(Bold.Render(title)))
+	b.WriteString("\n")
+
+	// Name field
+	nameLabel := Dim.Render("Name:         ")
+	if m.typeFormFocus == 0 {
+		nameLabel = Bold.Render("Name:         ")
+	}
+	b.WriteString(lipgloss.NewStyle().Padding(0, 2).Render(nameLabel + m.typeNameInput.View()))
+	b.WriteString("\n")
+
+	// Label field
+	labelLabel := Dim.Render("Label:        ")
+	if m.typeFormFocus == 1 {
+		labelLabel = Bold.Render("Label:        ")
+	}
+	b.WriteString(lipgloss.NewStyle().Padding(0, 2).Render(labelLabel + m.typeLabelInput.View()))
+	b.WriteString("\n\n")
+
+	// Instructions field
+	instructionsLabel := Dim.Render("Instructions: ")
+	if m.typeFormFocus == 2 {
+		instructionsLabel = Bold.Render("Instructions: ")
+	}
+	b.WriteString(lipgloss.NewStyle().Padding(0, 2).Render(instructionsLabel))
+	b.WriteString("\n")
+	b.WriteString(lipgloss.NewStyle().Padding(0, 2).Render(m.typeInstructionsInput.View()))
+	b.WriteString("\n")
+
+	b.WriteString("\n")
+	b.WriteString(lipgloss.NewStyle().Padding(0, 2).Render(Dim.Render("Placeholders: {{title}}, {{body}}, {{project}}, {{project_instructions}}, {{memories}}, {{attachments}}, {{history}}")))
+	b.WriteString("\n")
+	b.WriteString(lipgloss.NewStyle().Padding(0, 2).Render(Dim.Render("Tab: next field • Ctrl+S: save • Esc: cancel")))
+
+	return b.String()
+}
+
 func (m *SettingsModel) renderHelp() string {
 	var keys []struct {
 		key  string
 		desc string
 	}
 
-	if m.editing {
+	if m.editingProject || m.editingTaskType {
 		keys = []struct {
 			key  string
 			desc string
@@ -620,4 +885,5 @@ func (m *SettingsModel) SetSize(width, height int) {
 	m.width = width
 	m.height = height
 	m.instructionsInput.SetWidth(width - 20)
+	m.typeInstructionsInput.SetWidth(width - 20)
 }
