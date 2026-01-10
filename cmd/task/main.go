@@ -21,6 +21,7 @@ import (
 	"github.com/bborn/workflow/internal/config"
 	"github.com/bborn/workflow/internal/db"
 	"github.com/bborn/workflow/internal/executor"
+	"github.com/bborn/workflow/internal/github"
 	"github.com/bborn/workflow/internal/ui"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -900,6 +901,149 @@ Examples:
 	}
 	retryCmd.Flags().StringP("feedback", "m", "", "Feedback for the retry")
 	rootCmd.AddCommand(retryCmd)
+
+	// PRs subcommand - list open PRs for tasks
+	prsCmd := &cobra.Command{
+		Use:   "prs",
+		Short: "List open PRs for tasks",
+		Long: `List all open pull requests associated with tasks.
+
+Examples:
+  task prs
+  task prs --project myapp
+  task prs --all`,
+		Run: func(cmd *cobra.Command, args []string) {
+			project, _ := cmd.Flags().GetString("project")
+			all, _ := cmd.Flags().GetBool("all")
+			outputJSON, _ := cmd.Flags().GetBool("json")
+
+			// Open database
+			dbPath := db.DefaultPath()
+			database, err := db.Open(dbPath)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+			defer database.Close()
+
+			// Get tasks with branches
+			opts := db.ListTasksOptions{
+				Project:       project,
+				IncludeClosed: all,
+			}
+
+			tasks, err := database.ListTasks(opts)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+
+			// Filter to tasks with branches and fetch PR info
+			prCache := github.NewPRCache()
+			var prs []struct {
+				Task   *db.Task
+				PRInfo *github.PRInfo
+			}
+
+			for _, task := range tasks {
+				if task.BranchName == "" {
+					continue
+				}
+
+				// Get project path for gh CLI
+				projectPath := ""
+				if task.Project != "" {
+					if p, err := database.GetProjectByName(task.Project); err == nil && p != nil {
+						projectPath = p.Path
+					}
+				}
+				if projectPath == "" {
+					// Fallback to worktree path or cwd
+					if task.WorktreePath != "" {
+						projectPath = task.WorktreePath
+					} else {
+						projectPath, _ = os.Getwd()
+					}
+				}
+
+				prInfo := prCache.GetPRForBranch(projectPath, task.BranchName)
+				if prInfo != nil {
+					// Only include open PRs (or all if --all flag)
+					if all || prInfo.State == github.PRStateOpen || prInfo.State == github.PRStateDraft {
+						prs = append(prs, struct {
+							Task   *db.Task
+							PRInfo *github.PRInfo
+						}{Task: task, PRInfo: prInfo})
+					}
+				}
+			}
+
+			if outputJSON {
+				var output []map[string]interface{}
+				for _, pr := range prs {
+					output = append(output, map[string]interface{}{
+						"task_id":     pr.Task.ID,
+						"task_title":  pr.Task.Title,
+						"task_status": pr.Task.Status,
+						"project":     pr.Task.Project,
+						"branch":      pr.Task.BranchName,
+						"pr_number":   pr.PRInfo.Number,
+						"pr_url":      pr.PRInfo.URL,
+						"pr_title":    pr.PRInfo.Title,
+						"pr_state":    pr.PRInfo.State,
+						"check_state": pr.PRInfo.CheckState,
+						"mergeable":   pr.PRInfo.Mergeable,
+					})
+				}
+				jsonBytes, _ := json.Marshal(output)
+				fmt.Println(string(jsonBytes))
+			} else {
+				if len(prs) == 0 {
+					fmt.Println(dimStyle.Render("No open PRs found"))
+					return
+				}
+
+				// Define PR state colors
+				prStateStyle := func(pr *github.PRInfo) lipgloss.Style {
+					switch pr.State {
+					case github.PRStateMerged:
+						return lipgloss.NewStyle().Foreground(lipgloss.Color("#A855F7")) // Purple
+					case github.PRStateClosed:
+						return lipgloss.NewStyle().Foreground(lipgloss.Color("#EF4444")) // Red
+					case github.PRStateDraft:
+						return lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280")) // Gray
+					default:
+						// Open - color by check state
+						switch pr.CheckState {
+						case github.CheckStatePassing:
+							return lipgloss.NewStyle().Foreground(lipgloss.Color("#10B981")) // Green
+						case github.CheckStateFailing:
+							return lipgloss.NewStyle().Foreground(lipgloss.Color("#EF4444")) // Red
+						case github.CheckStatePending:
+							return lipgloss.NewStyle().Foreground(lipgloss.Color("#F59E0B")) // Yellow
+						default:
+							return lipgloss.NewStyle().Foreground(lipgloss.Color("#10B981")) // Green
+						}
+					}
+				}
+
+				for _, pr := range prs {
+					taskID := dimStyle.Render(fmt.Sprintf("#%-4d", pr.Task.ID))
+					prNum := prStateStyle(pr.PRInfo).Render(fmt.Sprintf("PR #%-4d", pr.PRInfo.Number))
+					status := pr.PRInfo.StatusDescription()
+					project := ""
+					if pr.Task.Project != "" {
+						project = dimStyle.Render(fmt.Sprintf("[%s] ", pr.Task.Project))
+					}
+					fmt.Printf("%s %s %-16s %s%s\n", taskID, prNum, status, project, pr.Task.Title)
+				}
+			}
+		},
+	}
+	prsCmd.Flags().StringP("project", "p", "", "Filter by project")
+	prsCmd.Flags().BoolP("all", "a", false, "Include closed/merged PRs")
+	prsCmd.Flags().Bool("json", false, "Output in JSON format")
+	rootCmd.AddCommand(prsCmd)
 
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
