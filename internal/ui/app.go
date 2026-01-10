@@ -29,6 +29,7 @@ const (
 	ViewNewTaskConfirm
 	ViewEditTask
 	ViewDeleteConfirm
+	ViewKillConfirm
 	ViewQuitConfirm
 	ViewWatch
 	ViewSettings
@@ -51,6 +52,7 @@ type KeyMap struct {
 	Retry        key.Binding
 	Close        key.Binding
 	Delete       key.Binding
+	Kill         key.Binding
 	Watch        key.Binding
 	Attach       key.Binding
 	Filter       key.Binding
@@ -134,6 +136,10 @@ func DefaultKeyMap() KeyMap {
 		Delete: key.NewBinding(
 			key.WithKeys("d"),
 			key.WithHelp("d", "delete"),
+		),
+		Kill: key.NewBinding(
+			key.WithKeys("k"),
+			key.WithHelp("k", "kill"),
 		),
 		Watch: key.NewBinding(
 			key.WithKeys("w"),
@@ -251,6 +257,11 @@ type AppModel struct {
 	deleteConfirmValue bool
 	pendingDeleteTask  *db.Task
 
+	// Kill confirmation state
+	killConfirm      *huh.Form
+	killConfirmValue bool
+	pendingKillTask  *db.Task
+
 	// Quit confirmation state
 	quitConfirm      *huh.Form
 	quitConfirmValue bool
@@ -357,6 +368,9 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 	if m.currentView == ViewDeleteConfirm && m.deleteConfirm != nil {
 		return m.updateDeleteConfirm(msg)
+	}
+	if m.currentView == ViewKillConfirm && m.killConfirm != nil {
+		return m.updateKillConfirm(msg)
 	}
 	if m.currentView == ViewQuitConfirm && m.quitConfirm != nil {
 		return m.updateQuitConfirm(msg)
@@ -513,7 +527,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.err = msg.err
 		}
 
-	case taskQueuedMsg, taskClosedMsg, taskDeletedMsg, taskRetriedMsg:
+	case taskQueuedMsg, taskClosedMsg, taskDeletedMsg, taskRetriedMsg, taskKilledMsg:
 		cmds = append(cmds, m.loadTasks())
 
 	case attachDoneMsg:
@@ -621,6 +635,8 @@ func (m *AppModel) View() string {
 		return m.viewNewTaskConfirm()
 	case ViewDeleteConfirm:
 		return m.viewDeleteConfirm()
+	case ViewKillConfirm:
+		return m.viewKillConfirm()
 	case ViewQuitConfirm:
 		return m.viewQuitConfirm()
 	case ViewWatch:
@@ -1016,6 +1032,13 @@ func (m *AppModel) updateDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m.showDeleteConfirm(m.selectedTask)
 	}
+	if key.Matches(keyMsg, m.keys.Kill) && m.selectedTask != nil {
+		// Only allow kill if there's an active tmux session
+		sessionName := executor.TmuxSessionName(m.selectedTask.ID)
+		if osExec.Command("tmux", "has-session", "-t", sessionName).Run() == nil {
+			return m.showKillConfirm(m.selectedTask)
+		}
+	}
 	if key.Matches(keyMsg, m.keys.Files) && m.selectedTask != nil {
 		// Clean up panes before leaving detail view
 		if m.detailView != nil {
@@ -1256,6 +1279,99 @@ func (m *AppModel) updateDeleteConfirm(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
+func (m *AppModel) showKillConfirm(task *db.Task) (tea.Model, tea.Cmd) {
+	m.pendingKillTask = task
+	m.killConfirmValue = false
+	modalWidth := min(50, m.width-8)
+	m.killConfirm = huh.NewForm(
+		huh.NewGroup(
+			huh.NewConfirm().
+				Key("kill").
+				Title(fmt.Sprintf("Kill task #%d?", task.ID)).
+				Description("This will stop the Claude session and move task to backlog").
+				Affirmative("Kill").
+				Negative("Cancel").
+				Value(&m.killConfirmValue),
+		),
+	).WithTheme(huh.ThemeDracula()).
+		WithWidth(modalWidth - 6). // Account for modal padding and border
+		WithShowHelp(true)
+	m.currentView = ViewKillConfirm
+	return m, m.killConfirm.Init()
+}
+
+func (m *AppModel) viewKillConfirm() string {
+	if m.killConfirm == nil {
+		return ""
+	}
+
+	// Modal header with warning icon
+	header := lipgloss.NewStyle().
+		Bold(true).
+		Foreground(ColorWarning).
+		MarginBottom(1).
+		Render("⚠ Confirm Kill")
+
+	formView := m.killConfirm.View()
+
+	// Modal box with border
+	modalWidth := min(50, m.width-8)
+	modalBox := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(ColorWarning).
+		Padding(1, 2).
+		Width(modalWidth)
+
+	modalContent := modalBox.Render(lipgloss.JoinVertical(lipgloss.Center, header, formView))
+
+	// Center the modal on screen
+	return lipgloss.NewStyle().
+		Width(m.width).
+		Height(m.height).
+		Align(lipgloss.Center, lipgloss.Center).
+		Render(modalContent)
+}
+
+func (m *AppModel) updateKillConfirm(msg tea.Msg) (tea.Model, tea.Cmd) {
+	// Handle escape to cancel
+	if keyMsg, ok := msg.(tea.KeyMsg); ok {
+		if keyMsg.String() == "esc" {
+			m.currentView = ViewDetail
+			m.killConfirm = nil
+			m.pendingKillTask = nil
+			return m, nil
+		}
+	}
+
+	// Update the huh form
+	form, cmd := m.killConfirm.Update(msg)
+	if f, ok := form.(*huh.Form); ok {
+		m.killConfirm = f
+	}
+
+	// Check if form completed
+	if m.killConfirm.State == huh.StateCompleted {
+		if m.pendingKillTask != nil && m.killConfirmValue {
+			taskID := m.pendingKillTask.ID
+			// Clean up detail view panes before killing
+			if m.detailView != nil {
+				m.detailView.Cleanup()
+			}
+			m.pendingKillTask = nil
+			m.killConfirm = nil
+			m.currentView = ViewDetail
+			return m, m.killTask(taskID)
+		}
+		// Cancelled
+		m.pendingKillTask = nil
+		m.killConfirm = nil
+		m.currentView = ViewDetail
+		return m, nil
+	}
+
+	return m, cmd
+}
+
 func (m *AppModel) showQuitConfirm() (tea.Model, tea.Cmd) {
 	m.quitConfirmValue = false
 	modalWidth := min(50, m.width-8)
@@ -1485,6 +1601,10 @@ type taskRetriedMsg struct {
 	err error
 }
 
+type taskKilledMsg struct {
+	err error
+}
+
 type taskEventMsg struct {
 	event executor.TaskEvent
 }
@@ -1708,6 +1828,22 @@ func (m *AppModel) retryTaskWithAttachments(id int64, feedback string, attachmen
 		// Session dead - re-queue for executor to pick up with --resume
 		err := database.RetryTask(id, feedback)
 		return taskRetriedMsg{err: err}
+	}
+}
+
+func (m *AppModel) killTask(id int64) tea.Cmd {
+	return func() tea.Msg {
+		// Interrupt the task (sets status to backlog)
+		m.executor.Interrupt(id)
+
+		// Log the kill action
+		m.db.AppendTaskLog(id, "user", "→ [Kill] Session terminated")
+
+		// Kill the tmux window
+		windowTarget := executor.TmuxSessionName(id)
+		osExec.Command("tmux", "kill-window", "-t", windowTarget).Run()
+
+		return taskKilledMsg{}
 	}
 }
 

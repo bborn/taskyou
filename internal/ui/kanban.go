@@ -288,9 +288,9 @@ func (k *KanbanBoard) View() string {
 		isSelectedCol := colIdx == k.selectedCol
 
 		// Colored header bar at top of column
-		// Width is colWidth + 2 to match the column's total width (content + left/right borders)
+		// Width matches the column content width (will be inside the border)
 		headerBarStyle := lipgloss.NewStyle().
-			Width(colWidth + 2).
+			Width(colWidth).
 			Background(col.Color).
 			Foreground(lipgloss.Color("#000000")).
 			Bold(true).
@@ -385,18 +385,20 @@ func (k *KanbanBoard) View() string {
 			borderStyle = lipgloss.ThickBorder()
 		}
 
+		// Combine header and tasks, then wrap with border
+		// Header is inside the border so they align perfectly
+		fullContent := lipgloss.JoinVertical(lipgloss.Left,
+			headerBar,
+			taskContent,
+		)
+
 		colStyle := lipgloss.NewStyle().
 			Width(colWidth).
-			Height(colHeight). // Use full height, header is separate
+			Height(colHeight). // Full height including header
 			Border(borderStyle).
-			BorderForeground(borderColor).
-			BorderTop(false) // No top border since we have the header bar
+			BorderForeground(borderColor)
 
-		// Stack header bar on top of column content
-		columnView := lipgloss.JoinVertical(lipgloss.Left,
-			headerBar,
-			colStyle.Render(taskContent),
-		)
+		columnView := colStyle.Render(fullContent)
 
 		columnViews = append(columnViews, columnView)
 	}
