@@ -29,34 +29,31 @@ func TestCLICreateTask(t *testing.T) {
 		{
 			name: "basic task",
 			task: &db.Task{
-				Title:    "Test task",
-				Body:     "",
-				Status:   db.StatusBacklog,
-				Type:     db.TypeCode,
-				Project:  "",
-				Priority: "normal",
+				Title:   "Test task",
+				Body:    "",
+				Status:  db.StatusBacklog,
+				Type:    db.TypeCode,
+				Project: "",
 			},
 		},
 		{
 			name: "task with all fields",
 			task: &db.Task{
-				Title:    "Full task",
-				Body:     "This is the body",
-				Status:   db.StatusBacklog,
-				Type:     db.TypeWriting,
-				Project:  "myproject",
-				Priority: "high",
+				Title:   "Full task",
+				Body:    "This is the body",
+				Status:  db.StatusBacklog,
+				Type:    db.TypeWriting,
+				Project: "myproject",
 			},
 		},
 		{
 			name: "queued task",
 			task: &db.Task{
-				Title:    "Queued task",
-				Body:     "",
-				Status:   db.StatusQueued,
-				Type:     db.TypeCode,
-				Project:  "",
-				Priority: "normal",
+				Title:   "Queued task",
+				Body:    "",
+				Status:  db.StatusQueued,
+				Type:    db.TypeCode,
+				Project: "",
 			},
 		},
 	}
@@ -102,9 +99,9 @@ func TestCLIListTasks(t *testing.T) {
 
 	// Create some tasks
 	tasks := []*db.Task{
-		{Title: "Task 1", Status: db.StatusBacklog, Type: db.TypeCode, Priority: "normal"},
-		{Title: "Task 2", Status: db.StatusQueued, Type: db.TypeCode, Priority: "high"},
-		{Title: "Task 3", Status: db.StatusDone, Type: db.TypeWriting, Priority: "low", Project: "proj1"},
+		{Title: "Task 1", Status: db.StatusBacklog, Type: db.TypeCode},
+		{Title: "Task 2", Status: db.StatusQueued, Type: db.TypeCode},
+		{Title: "Task 3", Status: db.StatusDone, Type: db.TypeWriting, Project: "proj1"},
 	}
 	for _, task := range tasks {
 		if err := database.CreateTask(task); err != nil {
@@ -163,11 +160,10 @@ func TestCLIUpdateTask(t *testing.T) {
 
 	// Create a task
 	task := &db.Task{
-		Title:    "Original title",
-		Body:     "Original body",
-		Status:   db.StatusBacklog,
-		Type:     db.TypeCode,
-		Priority: "normal",
+		Title:  "Original title",
+		Body:   "Original body",
+		Status: db.StatusBacklog,
+		Type:   db.TypeCode,
 	}
 	if err := database.CreateTask(task); err != nil {
 		t.Fatalf("failed to create task: %v", err)
@@ -176,7 +172,6 @@ func TestCLIUpdateTask(t *testing.T) {
 	// Update the task
 	task.Title = "Updated title"
 	task.Body = "Updated body"
-	task.Priority = "high"
 	if err := database.UpdateTask(task); err != nil {
 		t.Fatalf("UpdateTask() error = %v", err)
 	}
@@ -191,9 +186,6 @@ func TestCLIUpdateTask(t *testing.T) {
 	}
 	if fetched.Body != "Updated body" {
 		t.Errorf("Body = %v, want 'Updated body'", fetched.Body)
-	}
-	if fetched.Priority != "high" {
-		t.Errorf("Priority = %v, want 'high'", fetched.Priority)
 	}
 }
 
@@ -211,10 +203,9 @@ func TestCLIExecuteTask(t *testing.T) {
 
 	// Create a backlog task
 	task := &db.Task{
-		Title:    "Task to execute",
-		Status:   db.StatusBacklog,
-		Type:     db.TypeCode,
-		Priority: "normal",
+		Title:  "Task to execute",
+		Status: db.StatusBacklog,
+		Type:   db.TypeCode,
 	}
 	if err := database.CreateTask(task); err != nil {
 		t.Fatalf("failed to create task: %v", err)
@@ -249,10 +240,9 @@ func TestCLICloseTask(t *testing.T) {
 
 	// Create and queue a task
 	task := &db.Task{
-		Title:    "Task to close",
-		Status:   db.StatusProcessing,
-		Type:     db.TypeCode,
-		Priority: "normal",
+		Title:  "Task to close",
+		Status: db.StatusProcessing,
+		Type:   db.TypeCode,
 	}
 	if err := database.CreateTask(task); err != nil {
 		t.Fatalf("failed to create task: %v", err)
@@ -290,10 +280,9 @@ func TestCLIDeleteTask(t *testing.T) {
 
 	// Create a task
 	task := &db.Task{
-		Title:    "Task to delete",
-		Status:   db.StatusBacklog,
-		Type:     db.TypeCode,
-		Priority: "normal",
+		Title:  "Task to delete",
+		Status: db.StatusBacklog,
+		Type:   db.TypeCode,
 	}
 	if err := database.CreateTask(task); err != nil {
 		t.Fatalf("failed to create task: %v", err)
@@ -328,10 +317,9 @@ func TestCLIRetryTask(t *testing.T) {
 
 	// Create a blocked task
 	task := &db.Task{
-		Title:    "Blocked task",
-		Status:   db.StatusBlocked,
-		Type:     db.TypeCode,
-		Priority: "normal",
+		Title:  "Blocked task",
+		Status: db.StatusBlocked,
+		Type:   db.TypeCode,
 	}
 	if err := database.CreateTask(task); err != nil {
 		t.Fatalf("failed to create task: %v", err)
@@ -375,24 +363,6 @@ func TestTaskTypeValidation(t *testing.T) {
 	for _, typ := range invalidTypes {
 		if typ == db.TypeCode || typ == db.TypeWriting || typ == db.TypeThinking {
 			t.Errorf("type %q should be invalid", typ)
-		}
-	}
-}
-
-// TestPriorityValidation tests priority validation
-func TestPriorityValidation(t *testing.T) {
-	validPriorities := []string{"low", "normal", "high"}
-	invalidPriorities := []string{"invalid", "urgent", ""}
-
-	for _, p := range validPriorities {
-		if p != "low" && p != "normal" && p != "high" {
-			t.Errorf("priority %q should be valid", p)
-		}
-	}
-
-	for _, p := range invalidPriorities {
-		if p == "low" || p == "normal" || p == "high" {
-			t.Errorf("priority %q should be invalid", p)
 		}
 	}
 }

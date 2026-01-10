@@ -69,7 +69,6 @@ func (r *Runner) Run(event string, task *db.Task, message string) {
 		fmt.Sprintf("TASK_STATUS=%s", task.Status),
 		fmt.Sprintf("TASK_PROJECT=%s", task.Project),
 		fmt.Sprintf("TASK_TYPE=%s", task.Type),
-		fmt.Sprintf("TASK_PRIORITY=%s", task.Priority),
 		fmt.Sprintf("TASK_MESSAGE=%s", message),
 		fmt.Sprintf("TASK_EVENT=%s", event),
 	)

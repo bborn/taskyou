@@ -21,7 +21,6 @@ const (
 	FieldBody
 	FieldProject
 	FieldType
-	FieldPriority
 	FieldAttachments
 )
 
@@ -43,40 +42,27 @@ type FormModel struct {
 	attachmentsInput textinput.Model
 
 	// Select values
-	project      string
-	projectIdx   int
-	projects     []string
-	taskType     string
-	typeIdx      int
-	types        []string
-	priority     string
-	priorityIdx  int
-	priorities   []string
-	queue        bool
-	attachments  []string // Parsed file paths
+	project     string
+	projectIdx  int
+	projects    []string
+	taskType    string
+	typeIdx     int
+	types       []string
+	queue       bool
+	attachments []string // Parsed file paths
 }
 
 // NewEditFormModel creates a form model pre-populated with an existing task's data for editing.
 func NewEditFormModel(database *db.DB, task *db.Task, width, height int) *FormModel {
 	m := &FormModel{
-		db:         database,
-		width:      width,
-		height:     height,
-		focused:    FieldTitle,
-		types:      []string{"", "code", "writing", "thinking"},
-		priorities: []string{"normal", "high", "low"},
-		priority:   task.Priority,
-		taskType:   task.Type,
-		project:    task.Project,
-		isEdit:     true,
-	}
-
-	// Set priority index
-	for i, p := range m.priorities {
-		if p == task.Priority {
-			m.priorityIdx = i
-			break
-		}
+		db:       database,
+		width:    width,
+		height:   height,
+		focused:  FieldTitle,
+		types:    []string{"", "code", "writing", "thinking"},
+		taskType: task.Type,
+		project:  task.Project,
+		isEdit:   true,
 	}
 
 	// Set type index
@@ -136,13 +122,11 @@ func NewEditFormModel(database *db.DB, task *db.Task, width, height int) *FormMo
 // NewFormModel creates a new form model.
 func NewFormModel(database *db.DB, width, height int, workingDir string) *FormModel {
 	m := &FormModel{
-		db:         database,
-		width:      width,
-		height:     height,
-		focused:    FieldTitle,
-		types:      []string{"", "code", "writing", "thinking"},
-		priorities: []string{"normal", "high", "low"},
-		priority:   "normal",
+		db:      database,
+		width:   width,
+		height:  height,
+		focused: FieldTitle,
+		types:   []string{"", "code", "writing", "thinking"},
 	}
 
 	// Load projects
@@ -284,11 +268,6 @@ func (m *FormModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.taskType = m.types[m.typeIdx]
 				return m, nil
 			}
-			if m.focused == FieldPriority {
-				m.priorityIdx = (m.priorityIdx - 1 + len(m.priorities)) % len(m.priorities)
-				m.priority = m.priorities[m.priorityIdx]
-				return m, nil
-			}
 
 		case "right":
 			if m.focused == FieldProject {
@@ -301,15 +280,10 @@ func (m *FormModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.taskType = m.types[m.typeIdx]
 				return m, nil
 			}
-			if m.focused == FieldPriority {
-				m.priorityIdx = (m.priorityIdx + 1) % len(m.priorities)
-				m.priority = m.priorities[m.priorityIdx]
-				return m, nil
-			}
 
 		default:
 			// Type-to-select for selector fields
-			if m.focused == FieldProject || m.focused == FieldType || m.focused == FieldPriority {
+			if m.focused == FieldProject || m.focused == FieldType {
 				key := msg.String()
 				if len(key) == 1 && unicode.IsLetter(rune(key[0])) {
 					m.selectByPrefix(strings.ToLower(key))
@@ -352,14 +326,6 @@ func (m *FormModel) selectByPrefix(prefix string) {
 			if strings.HasPrefix(strings.ToLower(label), prefix) {
 				m.typeIdx = i
 				m.taskType = t
-				return
-			}
-		}
-	case FieldPriority:
-		for i, p := range m.priorities {
-			if strings.HasPrefix(strings.ToLower(p), prefix) {
-				m.priorityIdx = i
-				m.priority = p
 				return
 			}
 		}
@@ -484,14 +450,6 @@ func (m *FormModel) View() string {
 	b.WriteString(cursor + " " + labelStyle.Render("Type") + m.renderSelector(typeLabels, m.typeIdx, m.focused == FieldType, selectedStyle, optionStyle, dimStyle))
 	b.WriteString("\n\n")
 
-	// Priority selector
-	cursor = " "
-	if m.focused == FieldPriority {
-		cursor = cursorStyle.Render("▸")
-	}
-	b.WriteString(cursor + " " + labelStyle.Render("Priority") + m.renderSelector(m.priorities, m.priorityIdx, m.focused == FieldPriority, selectedStyle, optionStyle, dimStyle))
-	b.WriteString("\n\n")
-
 	// Attachments
 	cursor = " "
 	if m.focused == FieldAttachments {
@@ -551,12 +509,11 @@ func (m *FormModel) GetDBTask() *db.Task {
 	}
 
 	return &db.Task{
-		Title:    m.titleInput.Value(),
-		Body:     m.bodyInput.Value(),
-		Status:   status,
-		Type:     m.taskType,
-		Project:  m.project,
-		Priority: m.priority,
+		Title:   m.titleInput.Value(),
+		Body:    m.bodyInput.Value(),
+		Status:  status,
+		Type:    m.taskType,
+		Project: m.project,
 	}
 }
 

@@ -303,11 +303,6 @@ func refreshStyles() {
 		Foreground(ColorBlocked).
 		SetString("!")
 
-	// Update priority
-	PriorityHigh = lipgloss.NewStyle().
-		Foreground(ColorError).
-		SetString("↑")
-
 	// Update box styles
 	Box = lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).

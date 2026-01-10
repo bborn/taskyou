@@ -288,7 +288,7 @@ func main() {
 
 Examples:
   task create "Fix login bug"
-  task create "Add dark mode" --type code --priority high --project myapp
+  task create "Add dark mode" --type code --project myapp
   task create "Write documentation" --body "Document the API endpoints" --execute`,
 		Args: cobra.ExactArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
@@ -296,7 +296,6 @@ Examples:
 			body, _ := cmd.Flags().GetString("body")
 			taskType, _ := cmd.Flags().GetString("type")
 			project, _ := cmd.Flags().GetString("project")
-			priority, _ := cmd.Flags().GetString("priority")
 			execute, _ := cmd.Flags().GetBool("execute")
 			outputJSON, _ := cmd.Flags().GetBool("json")
 
@@ -304,19 +303,10 @@ Examples:
 			if taskType == "" {
 				taskType = db.TypeCode
 			}
-			if priority == "" {
-				priority = "normal"
-			}
 
 			// Validate task type
 			if taskType != db.TypeCode && taskType != db.TypeWriting && taskType != db.TypeThinking {
 				fmt.Fprintln(os.Stderr, errorStyle.Render("Invalid type. Must be: code, writing, or thinking"))
-				os.Exit(1)
-			}
-
-			// Validate priority
-			if priority != "low" && priority != "normal" && priority != "high" {
-				fmt.Fprintln(os.Stderr, errorStyle.Render("Invalid priority. Must be: low, normal, or high"))
 				os.Exit(1)
 			}
 
@@ -346,12 +336,11 @@ Examples:
 
 			// Create the task
 			task := &db.Task{
-				Title:    title,
-				Body:     body,
-				Status:   status,
-				Type:     taskType,
-				Project:  project,
-				Priority: priority,
+				Title:   title,
+				Body:    body,
+				Status:  status,
+				Type:    taskType,
+				Project: project,
 			}
 
 			if err := database.CreateTask(task); err != nil {
@@ -361,12 +350,11 @@ Examples:
 
 			if outputJSON {
 				output := map[string]interface{}{
-					"id":       task.ID,
-					"title":    task.Title,
-					"status":   task.Status,
-					"type":     task.Type,
-					"project":  task.Project,
-					"priority": task.Priority,
+					"id":      task.ID,
+					"title":   task.Title,
+					"status":  task.Status,
+					"type":    task.Type,
+					"project": task.Project,
 				}
 				jsonBytes, _ := json.Marshal(output)
 				fmt.Println(string(jsonBytes))
@@ -382,7 +370,6 @@ Examples:
 	createCmd.Flags().String("body", "", "Task body/description")
 	createCmd.Flags().StringP("type", "t", "", "Task type: code, writing, thinking (default: code)")
 	createCmd.Flags().StringP("project", "p", "", "Project name (auto-detected from cwd if not specified)")
-	createCmd.Flags().String("priority", "", "Priority: low, normal, high (default: normal)")
 	createCmd.Flags().BoolP("execute", "x", false, "Queue task for immediate execution")
 	createCmd.Flags().Bool("json", false, "Output in JSON format")
 	rootCmd.AddCommand(createCmd)
@@ -396,12 +383,11 @@ Examples:
 Examples:
   task list
   task list --status queued
-  task list --project myapp --priority high
+  task list --project myapp
   task list --all --json`,
 		Run: func(cmd *cobra.Command, args []string) {
 			status, _ := cmd.Flags().GetString("status")
 			project, _ := cmd.Flags().GetString("project")
-			priority, _ := cmd.Flags().GetString("priority")
 			taskType, _ := cmd.Flags().GetString("type")
 			all, _ := cmd.Flags().GetBool("all")
 			limit, _ := cmd.Flags().GetInt("limit")
@@ -419,7 +405,6 @@ Examples:
 			opts := db.ListTasksOptions{
 				Status:        status,
 				Project:       project,
-				Priority:      priority,
 				Type:          taskType,
 				Limit:         limit,
 				IncludeClosed: all,
@@ -440,7 +425,6 @@ Examples:
 						"status":     t.Status,
 						"type":       t.Type,
 						"project":    t.Project,
-						"priority":   t.Priority,
 						"created_at": t.CreatedAt.Time.Format(time.RFC3339),
 					})
 				}
@@ -468,33 +452,20 @@ Examples:
 					}
 				}
 
-				priorityIndicator := func(priority string) string {
-					switch priority {
-					case "high":
-						return lipgloss.NewStyle().Foreground(lipgloss.Color("#EF4444")).Render("!")
-					case "low":
-						return lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280")).Render("↓")
-					default:
-						return " "
-					}
-				}
-
 				for _, t := range tasks {
 					id := dimStyle.Render(fmt.Sprintf("#%-4d", t.ID))
 					status := statusStyle(t.Status).Render(fmt.Sprintf("%-10s", t.Status))
-					priority := priorityIndicator(t.Priority)
 					project := ""
 					if t.Project != "" {
 						project = dimStyle.Render(fmt.Sprintf("[%s] ", t.Project))
 					}
-					fmt.Printf("%s %s %s %s%s\n", id, status, priority, project, t.Title)
+					fmt.Printf("%s %s %s%s\n", id, status, project, t.Title)
 				}
 			}
 		},
 	}
 	listCmd.Flags().StringP("status", "s", "", "Filter by status: backlog, queued, processing, blocked, done")
 	listCmd.Flags().StringP("project", "p", "", "Filter by project")
-	listCmd.Flags().String("priority", "", "Filter by priority: low, normal, high")
 	listCmd.Flags().StringP("type", "t", "", "Filter by type: code, writing, thinking")
 	listCmd.Flags().BoolP("all", "a", false, "Include completed tasks")
 	listCmd.Flags().IntP("limit", "n", 50, "Maximum number of tasks to return")
@@ -543,17 +514,16 @@ Examples:
 
 			if outputJSON {
 				output := map[string]interface{}{
-					"id":           task.ID,
-					"title":        task.Title,
-					"body":         task.Body,
-					"status":       task.Status,
-					"type":         task.Type,
-					"project":      task.Project,
-					"priority":     task.Priority,
-					"worktree":     task.WorktreePath,
-					"branch":       task.BranchName,
-					"created_at":   task.CreatedAt.Time.Format(time.RFC3339),
-					"updated_at":   task.UpdatedAt.Time.Format(time.RFC3339),
+					"id":         task.ID,
+					"title":      task.Title,
+					"body":       task.Body,
+					"status":     task.Status,
+					"type":       task.Type,
+					"project":    task.Project,
+					"worktree":   task.WorktreePath,
+					"branch":     task.BranchName,
+					"created_at": task.CreatedAt.Time.Format(time.RFC3339),
+					"updated_at": task.UpdatedAt.Time.Format(time.RFC3339),
 				}
 				if task.StartedAt != nil {
 					output["started_at"] = task.StartedAt.Time.Format(time.RFC3339)
@@ -594,7 +564,6 @@ Examples:
 				}
 				fmt.Printf("Status:   %s\n", lipgloss.NewStyle().Foreground(statusColor).Render(task.Status))
 				fmt.Printf("Type:     %s\n", task.Type)
-				fmt.Printf("Priority: %s\n", task.Priority)
 				if task.Project != "" {
 					fmt.Printf("Project:  %s\n", task.Project)
 				}
@@ -658,7 +627,6 @@ Examples:
 
 Examples:
   task update 42 --title "New title"
-  task update 42 --priority high
   task update 42 --body "Updated description"`,
 		Args: cobra.ExactArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
@@ -672,17 +640,10 @@ Examples:
 			body, _ := cmd.Flags().GetString("body")
 			taskType, _ := cmd.Flags().GetString("type")
 			project, _ := cmd.Flags().GetString("project")
-			priority, _ := cmd.Flags().GetString("priority")
 
 			// Validate task type if provided
 			if taskType != "" && taskType != db.TypeCode && taskType != db.TypeWriting && taskType != db.TypeThinking {
 				fmt.Fprintln(os.Stderr, errorStyle.Render("Invalid type. Must be: code, writing, or thinking"))
-				os.Exit(1)
-			}
-
-			// Validate priority if provided
-			if priority != "" && priority != "low" && priority != "normal" && priority != "high" {
-				fmt.Fprintln(os.Stderr, errorStyle.Render("Invalid priority. Must be: low, normal, or high"))
 				os.Exit(1)
 			}
 
@@ -718,9 +679,6 @@ Examples:
 			if cmd.Flags().Changed("project") {
 				task.Project = project
 			}
-			if priority != "" {
-				task.Priority = priority
-			}
 
 			if err := database.UpdateTask(task); err != nil {
 				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
@@ -734,7 +692,6 @@ Examples:
 	updateCmd.Flags().String("body", "", "Update task body/description")
 	updateCmd.Flags().StringP("type", "t", "", "Update task type: code, writing, thinking")
 	updateCmd.Flags().StringP("project", "p", "", "Update project name")
-	updateCmd.Flags().String("priority", "", "Update priority: low, normal, high")
 	rootCmd.AddCommand(updateCmd)
 
 	// Execute subcommand - queue a task for execution

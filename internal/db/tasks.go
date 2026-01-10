@@ -16,7 +16,6 @@ type Task struct {
 	Status       string
 	Type         string
 	Project      string
-	Priority     string
 	WorktreePath string
 	BranchName   string
 	CreatedAt    LocalTime
@@ -54,9 +53,9 @@ func (db *DB) CreateTask(t *Task) error {
 	}
 
 	result, err := db.Exec(`
-		INSERT INTO tasks (title, body, status, type, project, priority)
-		VALUES (?, ?, ?, ?, ?, ?)
-	`, t.Title, t.Body, t.Status, t.Type, t.Project, t.Priority)
+		INSERT INTO tasks (title, body, status, type, project)
+		VALUES (?, ?, ?, ?, ?)
+	`, t.Title, t.Body, t.Status, t.Type, t.Project)
 	if err != nil {
 		return fmt.Errorf("insert task: %w", err)
 	}
@@ -74,12 +73,12 @@ func (db *DB) CreateTask(t *Task) error {
 func (db *DB) GetTask(id int64) (*Task, error) {
 	t := &Task{}
 	err := db.QueryRow(`
-		SELECT id, title, body, status, type, project, priority,
+		SELECT id, title, body, status, type, project,
 		       worktree_path, branch_name,
 		       created_at, updated_at, started_at, completed_at
 		FROM tasks WHERE id = ?
 	`, id).Scan(
-		&t.ID, &t.Title, &t.Body, &t.Status, &t.Type, &t.Project, &t.Priority,
+		&t.ID, &t.Title, &t.Body, &t.Status, &t.Type, &t.Project,
 		&t.WorktreePath, &t.BranchName,
 		&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
 	)
@@ -97,7 +96,6 @@ type ListTasksOptions struct {
 	Status        string
 	Type          string
 	Project       string
-	Priority      string
 	Limit         int
 	Offset        int
 	IncludeClosed bool // Include closed tasks even when Status is empty
@@ -106,7 +104,7 @@ type ListTasksOptions struct {
 // ListTasks retrieves tasks with optional filters.
 func (db *DB) ListTasks(opts ListTasksOptions) ([]*Task, error) {
 	query := `
-		SELECT id, title, body, status, type, project, priority,
+		SELECT id, title, body, status, type, project,
 		       worktree_path, branch_name,
 		       created_at, updated_at, started_at, completed_at
 		FROM tasks WHERE 1=1
@@ -125,17 +123,13 @@ func (db *DB) ListTasks(opts ListTasksOptions) ([]*Task, error) {
 		query += " AND project = ?"
 		args = append(args, opts.Project)
 	}
-	if opts.Priority != "" {
-		query += " AND priority = ?"
-		args = append(args, opts.Priority)
-	}
 
 	// Exclude done by default unless specifically querying for them or includeClosed is set
 	if opts.Status == "" && !opts.IncludeClosed {
 		query += " AND status != 'done'"
 	}
 
-	query += " ORDER BY CASE priority WHEN 'high' THEN 0 WHEN 'normal' THEN 1 ELSE 2 END, created_at DESC"
+	query += " ORDER BY created_at DESC"
 
 	if opts.Limit > 0 {
 		query += fmt.Sprintf(" LIMIT %d", opts.Limit)
@@ -156,7 +150,7 @@ func (db *DB) ListTasks(opts ListTasksOptions) ([]*Task, error) {
 	for rows.Next() {
 		t := &Task{}
 		err := rows.Scan(
-			&t.ID, &t.Title, &t.Body, &t.Status, &t.Type, &t.Project, &t.Priority,
+			&t.ID, &t.Title, &t.Body, &t.Status, &t.Type, &t.Project,
 			&t.WorktreePath, &t.BranchName,
 			&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
 		)
@@ -204,11 +198,11 @@ func (db *DB) UpdateTaskStatus(id int64, status string) error {
 func (db *DB) UpdateTask(t *Task) error {
 	_, err := db.Exec(`
 		UPDATE tasks SET
-			title = ?, body = ?, status = ?, type = ?, project = ?, priority = ?,
+			title = ?, body = ?, status = ?, type = ?, project = ?,
 			worktree_path = ?, branch_name = ?,
 			updated_at = CURRENT_TIMESTAMP
 		WHERE id = ?
-	`, t.Title, t.Body, t.Status, t.Type, t.Project, t.Priority,
+	`, t.Title, t.Body, t.Status, t.Type, t.Project,
 		t.WorktreePath, t.BranchName, t.ID)
 	if err != nil {
 		return fmt.Errorf("update task: %w", err)
@@ -243,15 +237,15 @@ func (db *DB) RetryTask(id int64, feedback string) error {
 func (db *DB) GetNextQueuedTask() (*Task, error) {
 	t := &Task{}
 	err := db.QueryRow(`
-		SELECT id, title, body, status, type, project, priority,
+		SELECT id, title, body, status, type, project,
 		       worktree_path, branch_name,
 		       created_at, updated_at, started_at, completed_at
 		FROM tasks
 		WHERE status = ?
-		ORDER BY CASE priority WHEN 'high' THEN 0 WHEN 'normal' THEN 1 ELSE 2 END, created_at ASC
+		ORDER BY created_at ASC
 		LIMIT 1
 	`, StatusQueued).Scan(
-		&t.ID, &t.Title, &t.Body, &t.Status, &t.Type, &t.Project, &t.Priority,
+		&t.ID, &t.Title, &t.Body, &t.Status, &t.Type, &t.Project,
 		&t.WorktreePath, &t.BranchName,
 		&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
 	)
@@ -267,14 +261,12 @@ func (db *DB) GetNextQueuedTask() (*Task, error) {
 // GetQueuedTasks returns all queued tasks (waiting to be processed).
 func (db *DB) GetQueuedTasks() ([]*Task, error) {
 	rows, err := db.Query(`
-		SELECT id, title, body, status, type, project, priority,
+		SELECT id, title, body, status, type, project,
 		       worktree_path, branch_name,
 		       created_at, updated_at, started_at, completed_at
 		FROM tasks
 		WHERE status = ?
-		ORDER BY
-			CASE priority WHEN 'high' THEN 0 WHEN 'normal' THEN 1 ELSE 2 END,
-			created_at ASC
+		ORDER BY created_at ASC
 	`, StatusQueued)
 	if err != nil {
 		return nil, fmt.Errorf("query queued tasks: %w", err)
@@ -285,7 +277,7 @@ func (db *DB) GetQueuedTasks() ([]*Task, error) {
 	for rows.Next() {
 		t := &Task{}
 		if err := rows.Scan(
-			&t.ID, &t.Title, &t.Body, &t.Status, &t.Type, &t.Project, &t.Priority,
+			&t.ID, &t.Title, &t.Body, &t.Status, &t.Type, &t.Project,
 			&t.WorktreePath, &t.BranchName,
 			&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
 		); err != nil {
@@ -300,7 +292,7 @@ func (db *DB) GetQueuedTasks() ([]*Task, error) {
 // These are candidates for automatic closure when their PR is merged.
 func (db *DB) GetTasksWithBranches() ([]*Task, error) {
 	rows, err := db.Query(`
-		SELECT id, title, body, status, type, project, priority,
+		SELECT id, title, body, status, type, project,
 		       worktree_path, branch_name,
 		       created_at, updated_at, started_at, completed_at
 		FROM tasks
@@ -316,7 +308,7 @@ func (db *DB) GetTasksWithBranches() ([]*Task, error) {
 	for rows.Next() {
 		t := &Task{}
 		if err := rows.Scan(
-			&t.ID, &t.Title, &t.Body, &t.Status, &t.Type, &t.Project, &t.Priority,
+			&t.ID, &t.Title, &t.Body, &t.Status, &t.Type, &t.Project,
 			&t.WorktreePath, &t.BranchName,
 			&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
 		); err != nil {

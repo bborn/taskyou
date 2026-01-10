@@ -26,8 +26,7 @@ func TestTimestampLocalization(t *testing.T) {
 		Status:   StatusBacklog,
 		Type:     TypeCode,
 		Project:  "test",
-		Priority: "normal",
-	}
+			}
 	if err := db.CreateTask(task); err != nil {
 		t.Fatalf("failed to create task: %v", err)
 	}
@@ -83,8 +82,7 @@ func TestPersonalProjectCreation(t *testing.T) {
 		Status:   StatusBacklog,
 		Type:     TypeCode,
 		Project:  "", // Empty project
-		Priority: "normal",
-	}
+			}
 	if err := db.CreateTask(task); err != nil {
 		t.Fatalf("failed to create task: %v", err)
 	}

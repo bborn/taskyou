@@ -430,12 +430,6 @@ func (k *KanbanBoard) renderTaskCard(task *db.Task, width int, isSelected bool) 
 	b.WriteString(" ")
 	b.WriteString(Dim.Render(fmt.Sprintf("#%d", task.ID)))
 
-	// Priority indicator
-	if task.Priority == "high" {
-		b.WriteString(" ")
-		b.WriteString(PriorityHigh.Render())
-	}
-
 	// Project tag
 	if task.Project != "" {
 		projectStyle := lipgloss.NewStyle().Foreground(ProjectColor(task.Project))
