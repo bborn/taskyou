@@ -1276,6 +1276,7 @@ func (m *AppModel) updateDeleteConfirm(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m *AppModel) showQuitConfirm() (tea.Model, tea.Cmd) {
 	m.quitConfirmValue = false
+	modalWidth := min(50, m.width-8)
 	m.quitConfirm = huh.NewForm(
 		huh.NewGroup(
 			huh.NewConfirm().
@@ -1287,7 +1288,7 @@ func (m *AppModel) showQuitConfirm() (tea.Model, tea.Cmd) {
 				Value(&m.quitConfirmValue),
 		),
 	).WithTheme(huh.ThemeDracula()).
-		WithWidth(m.width - 4).
+		WithWidth(modalWidth - 6). // Account for modal padding and border
 		WithShowHelp(true)
 	m.currentView = ViewQuitConfirm
 	return m, m.quitConfirm.Init()
@@ -1298,13 +1299,31 @@ func (m *AppModel) viewQuitConfirm() string {
 		return ""
 	}
 
+	// Modal header with exit icon
+	header := lipgloss.NewStyle().
+		Bold(true).
+		Foreground(ColorWarning).
+		MarginBottom(1).
+		Render("⏻ Confirm Exit")
+
 	formView := m.quitConfirm.View()
 
+	// Modal box with border
+	modalWidth := min(50, m.width-8)
+	modalBox := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(ColorWarning).
+		Padding(1, 2).
+		Width(modalWidth)
+
+	modalContent := modalBox.Render(lipgloss.JoinVertical(lipgloss.Center, header, formView))
+
+	// Center the modal on screen
 	return lipgloss.NewStyle().
 		Width(m.width).
 		Height(m.height).
 		Align(lipgloss.Center, lipgloss.Center).
-		Render(formView)
+		Render(modalContent)
 }
 
 func (m *AppModel) updateQuitConfirm(msg tea.Msg) (tea.Model, tea.Cmd) {
