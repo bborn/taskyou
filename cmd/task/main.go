@@ -952,6 +952,9 @@ Examples:
 	retryCmd.Flags().StringP("feedback", "m", "", "Feedback for the retry")
 	rootCmd.AddCommand(retryCmd)
 
+	// Cloud subcommand - manage cloud server deployment
+	rootCmd.AddCommand(createCloudCmd())
+
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
 		os.Exit(1)

@@ -29,9 +29,9 @@ bin/
 *.out
 .task-worktrees
 
-# Build output
-task
-taskd
+# Build output (binary files in root)
+/task
+/taskd
 
 # Database
 *.db
