@@ -199,7 +199,7 @@ func (k *KanbanBoard) ensureSelectedVisible() {
 
 	// Calculate how many tasks fit in the visible area
 	colHeight := k.height
-	cardHeight := 4
+	cardHeight := 3 // Most cards are 3 lines (2 content + 1 border)
 	maxVisible := (colHeight - 3) / cardHeight // -3 for header bar and minimal padding
 	if maxVisible < 1 {
 		maxVisible = 1
@@ -299,9 +299,10 @@ func (k *KanbanBoard) View() string {
 		headerText := fmt.Sprintf("%s %s (%d)", col.Icon, col.Title, len(col.Tasks))
 		headerBar := headerBarStyle.Render(headerText)
 
-		// Task cards - calculate how many fit (each card is ~3 lines with margin)
-		cardHeight := 4 // Increased for better spacing
-		maxTasks := (colHeight - 3) / cardHeight // -3 for header bar and minimal padding
+		// Task cards - calculate how many fit
+		// Non-selected cards: 2 lines content + 1 line border = 3 lines
+		cardHeight := 3
+		maxTasks := (colHeight - 3) / cardHeight // -3 for scroll indicators and padding
 		if maxTasks < 1 {
 			maxTasks = 1
 		}
