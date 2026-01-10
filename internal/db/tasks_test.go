@@ -378,3 +378,193 @@ func TestDeletePersonalProject(t *testing.T) {
 		}
 	}
 }
+
+func TestListProjectsPersonalFirst(t *testing.T) {
+	// Create temporary database
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	db, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer db.Close()
+	defer os.Remove(dbPath)
+
+	// Create additional projects (personal is created automatically)
+	for _, name := range []string{"alpha", "beta", "zebra"} {
+		proj := &Project{
+			Name: name,
+			Path: filepath.Join(tmpDir, name),
+		}
+		if err := db.CreateProject(proj); err != nil {
+			t.Fatalf("failed to create project %s: %v", name, err)
+		}
+	}
+
+	// List projects - personal should be first
+	projects, err := db.ListProjects()
+	if err != nil {
+		t.Fatalf("failed to list projects: %v", err)
+	}
+
+	if len(projects) < 4 {
+		t.Fatalf("expected at least 4 projects, got %d", len(projects))
+	}
+
+	// Personal should always be first
+	if projects[0].Name != "personal" {
+		t.Errorf("expected 'personal' to be first, got %q", projects[0].Name)
+	}
+
+	// Rest should be sorted alphabetically
+	for i := 2; i < len(projects); i++ {
+		if projects[i].Name < projects[i-1].Name {
+			t.Errorf("projects not sorted: %q should come before %q", projects[i].Name, projects[i-1].Name)
+		}
+	}
+}
+
+func TestLastTaskTypeForProject(t *testing.T) {
+	// Create temporary database
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	db, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer db.Close()
+	defer os.Remove(dbPath)
+
+	// Get last type for non-existent project - should return empty
+	lastType, err := db.GetLastTaskTypeForProject("personal")
+	if err != nil {
+		t.Fatalf("failed to get last task type: %v", err)
+	}
+	if lastType != "" {
+		t.Errorf("expected empty string, got %q", lastType)
+	}
+
+	// Set last type for personal
+	if err := db.SetLastTaskTypeForProject("personal", "code"); err != nil {
+		t.Fatalf("failed to set last task type: %v", err)
+	}
+
+	// Get it back
+	lastType, err = db.GetLastTaskTypeForProject("personal")
+	if err != nil {
+		t.Fatalf("failed to get last task type: %v", err)
+	}
+	if lastType != "code" {
+		t.Errorf("expected 'code', got %q", lastType)
+	}
+
+	// Set different type for another project
+	if err := db.SetLastTaskTypeForProject("work", "writing"); err != nil {
+		t.Fatalf("failed to set last task type: %v", err)
+	}
+
+	// Verify both are independent
+	lastType, err = db.GetLastTaskTypeForProject("personal")
+	if err != nil {
+		t.Fatalf("failed to get last task type: %v", err)
+	}
+	if lastType != "code" {
+		t.Errorf("expected 'code' for personal, got %q", lastType)
+	}
+
+	lastType, err = db.GetLastTaskTypeForProject("work")
+	if err != nil {
+		t.Fatalf("failed to get last task type: %v", err)
+	}
+	if lastType != "writing" {
+		t.Errorf("expected 'writing' for work, got %q", lastType)
+	}
+
+	// Update the type for personal
+	if err := db.SetLastTaskTypeForProject("personal", "thinking"); err != nil {
+		t.Fatalf("failed to update last task type: %v", err)
+	}
+
+	lastType, err = db.GetLastTaskTypeForProject("personal")
+	if err != nil {
+		t.Fatalf("failed to get last task type: %v", err)
+	}
+	if lastType != "thinking" {
+		t.Errorf("expected 'thinking' after update, got %q", lastType)
+	}
+}
+
+func TestCreateTaskSavesLastType(t *testing.T) {
+	// Create temporary database
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	db, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer db.Close()
+	defer os.Remove(dbPath)
+
+	// Create a task with a type
+	task := &Task{
+		Title:   "Test Task",
+		Status:  StatusBacklog,
+		Type:    "code",
+		Project: "personal",
+	}
+	if err := db.CreateTask(task); err != nil {
+		t.Fatalf("failed to create task: %v", err)
+	}
+
+	// Verify last type was saved
+	lastType, err := db.GetLastTaskTypeForProject("personal")
+	if err != nil {
+		t.Fatalf("failed to get last task type: %v", err)
+	}
+	if lastType != "code" {
+		t.Errorf("expected 'code', got %q", lastType)
+	}
+
+	// Create another task with a different type
+	task2 := &Task{
+		Title:   "Test Task 2",
+		Status:  StatusBacklog,
+		Type:    "writing",
+		Project: "personal",
+	}
+	if err := db.CreateTask(task2); err != nil {
+		t.Fatalf("failed to create task: %v", err)
+	}
+
+	// Verify last type was updated
+	lastType, err = db.GetLastTaskTypeForProject("personal")
+	if err != nil {
+		t.Fatalf("failed to get last task type: %v", err)
+	}
+	if lastType != "writing" {
+		t.Errorf("expected 'writing', got %q", lastType)
+	}
+
+	// Create task with empty type - should not update
+	task3 := &Task{
+		Title:   "Test Task 3",
+		Status:  StatusBacklog,
+		Type:    "",
+		Project: "personal",
+	}
+	if err := db.CreateTask(task3); err != nil {
+		t.Fatalf("failed to create task: %v", err)
+	}
+
+	// Verify last type was NOT updated
+	lastType, err = db.GetLastTaskTypeForProject("personal")
+	if err != nil {
+		t.Fatalf("failed to get last task type: %v", err)
+	}
+	if lastType != "writing" {
+		t.Errorf("expected 'writing' (unchanged), got %q", lastType)
+	}
+}

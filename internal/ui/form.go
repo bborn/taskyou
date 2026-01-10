@@ -187,6 +187,9 @@ func NewFormModel(database *db.DB, width, height int, workingDir string) *FormMo
 		}
 	}
 
+	// Load last used task type for the selected project
+	m.loadLastTaskTypeForProject()
+
 	// Title input
 	m.titleInput = textinput.New()
 	m.titleInput.Placeholder = "What needs to be done?"
@@ -287,6 +290,7 @@ func (m *FormModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.focused == FieldProject {
 				m.projectIdx = (m.projectIdx - 1 + len(m.projects)) % len(m.projects)
 				m.project = m.projects[m.projectIdx]
+				m.loadLastTaskTypeForProject()
 				return m, nil
 			}
 			if m.focused == FieldType {
@@ -299,6 +303,7 @@ func (m *FormModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.focused == FieldProject {
 				m.projectIdx = (m.projectIdx + 1) % len(m.projects)
 				m.project = m.projects[m.projectIdx]
+				m.loadLastTaskTypeForProject()
 				return m, nil
 			}
 			if m.focused == FieldType {
@@ -340,6 +345,7 @@ func (m *FormModel) selectByPrefix(prefix string) {
 			if strings.HasPrefix(strings.ToLower(p), prefix) {
 				m.projectIdx = i
 				m.project = p
+				m.loadLastTaskTypeForProject()
 				return
 			}
 		}
@@ -354,6 +360,27 @@ func (m *FormModel) selectByPrefix(prefix string) {
 				m.taskType = t
 				return
 			}
+		}
+	}
+}
+
+// loadLastTaskTypeForProject loads and sets the last used task type for the current project.
+func (m *FormModel) loadLastTaskTypeForProject() {
+	if m.db == nil || m.project == "" {
+		return
+	}
+
+	lastType, err := m.db.GetLastTaskTypeForProject(m.project)
+	if err != nil || lastType == "" {
+		return
+	}
+
+	// Find the type in the list and set it
+	for i, t := range m.types {
+		if t == lastType {
+			m.typeIdx = i
+			m.taskType = t
+			return
 		}
 	}
 }
