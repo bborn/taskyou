@@ -30,8 +30,8 @@ bin/
 .task-worktrees
 
 # Build output
-task
-taskd
+/task
+/taskd
 
 # Database
 *.db
