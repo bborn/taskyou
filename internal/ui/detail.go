@@ -416,6 +416,9 @@ func (m *DetailModel) joinTmuxPanes() {
 	exec.Command("tmux", "set-option", "-t", "task-ui", "status-right-length", "60").Run()
 
 	// Style pane borders - active pane gets theme color outline
+	// Use heavy border lines to make them more visible and indicate they're draggable
+	exec.Command("tmux", "set-option", "-t", "task-ui", "pane-border-lines", "heavy").Run()
+	exec.Command("tmux", "set-option", "-t", "task-ui", "pane-border-indicators", "arrows").Run()
 	exec.Command("tmux", "set-option", "-t", "task-ui", "pane-border-style", "fg=#374151").Run()
 	exec.Command("tmux", "set-option", "-t", "task-ui", "pane-active-border-style", "fg=#61AFEF").Run()
 
@@ -451,6 +454,8 @@ func (m *DetailModel) breakTmuxPanes() {
 
 	// Reset status bar and pane styling
 	exec.Command("tmux", "set-option", "-t", "task-ui", "status-right", " ").Run()
+	exec.Command("tmux", "set-option", "-t", "task-ui", "pane-border-lines", "single").Run()
+	exec.Command("tmux", "set-option", "-t", "task-ui", "pane-border-indicators", "off").Run()
 	exec.Command("tmux", "set-option", "-t", "task-ui", "pane-border-style", "fg=#374151").Run()
 	exec.Command("tmux", "set-option", "-t", "task-ui", "pane-active-border-style", "fg=#61AFEF").Run()
 
@@ -516,6 +521,8 @@ func (m *DetailModel) killTmuxSession() {
 
 	// Reset pane styling first
 	exec.Command("tmux", "set-option", "-t", "task-ui", "status-right", " ").Run()
+	exec.Command("tmux", "set-option", "-t", "task-ui", "pane-border-lines", "single").Run()
+	exec.Command("tmux", "set-option", "-t", "task-ui", "pane-border-indicators", "off").Run()
 	exec.Command("tmux", "set-option", "-t", "task-ui", "pane-border-style", "fg=#374151").Run()
 	exec.Command("tmux", "set-option", "-t", "task-ui", "pane-active-border-style", "fg=#61AFEF").Run()
 
