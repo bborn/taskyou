@@ -21,6 +21,7 @@ import (
 	"github.com/bborn/workflow/internal/config"
 	"github.com/bborn/workflow/internal/db"
 	"github.com/bborn/workflow/internal/executor"
+	"github.com/bborn/workflow/internal/github"
 	"github.com/bborn/workflow/internal/ui"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -462,6 +463,7 @@ Examples:
   task list
   task list --status queued
   task list --project myapp
+  task list --pr           # Show PR/CI status
   task list --all --json`,
 		Run: func(cmd *cobra.Command, args []string) {
 			status, _ := cmd.Flags().GetString("status")
@@ -470,6 +472,7 @@ Examples:
 			all, _ := cmd.Flags().GetBool("all")
 			limit, _ := cmd.Flags().GetInt("limit")
 			outputJSON, _ := cmd.Flags().GetBool("json")
+			showPR, _ := cmd.Flags().GetBool("pr")
 
 			// Open database
 			dbPath := db.DefaultPath()
@@ -494,17 +497,48 @@ Examples:
 				os.Exit(1)
 			}
 
+			// Fetch PR info if requested
+			var prCache *github.PRCache
+			var cfg *config.Config
+			prInfoMap := make(map[int64]*github.PRInfo)
+			if showPR {
+				prCache = github.NewPRCache()
+				cfg = config.New(database)
+				for _, t := range tasks {
+					if t.BranchName != "" {
+						repoDir := t.WorktreePath
+						if repoDir == "" {
+							repoDir = cfg.GetProjectDir(t.Project)
+						}
+						if prInfo := prCache.GetPRForBranch(repoDir, t.BranchName); prInfo != nil {
+							prInfoMap[t.ID] = prInfo
+						}
+					}
+				}
+			}
+
 			if outputJSON {
 				var output []map[string]interface{}
 				for _, t := range tasks {
-					output = append(output, map[string]interface{}{
+					item := map[string]interface{}{
 						"id":         t.ID,
 						"title":      t.Title,
 						"status":     t.Status,
 						"type":       t.Type,
 						"project":    t.Project,
 						"created_at": t.CreatedAt.Time.Format(time.RFC3339),
-					})
+					}
+					// Add PR info to JSON output if available
+					if prInfo, ok := prInfoMap[t.ID]; ok {
+						item["pr"] = map[string]interface{}{
+							"number":       prInfo.Number,
+							"url":          prInfo.URL,
+							"state":        string(prInfo.State),
+							"check_state":  string(prInfo.CheckState),
+							"description":  prInfo.StatusDescription(),
+						}
+					}
+					output = append(output, item)
 				}
 				jsonBytes, _ := json.Marshal(output)
 				fmt.Println(string(jsonBytes))
@@ -530,6 +564,47 @@ Examples:
 					}
 				}
 
+				// PR status styling
+				prStatusStyle := func(prInfo *github.PRInfo) string {
+					if prInfo == nil {
+						return ""
+					}
+					var icon, desc string
+					var color lipgloss.Color
+					switch prInfo.State {
+					case github.PRStateMerged:
+						icon, desc, color = "M", "merged", lipgloss.Color("#C678DD")
+					case github.PRStateClosed:
+						icon, desc, color = "X", "closed", lipgloss.Color("#EF4444")
+					case github.PRStateDraft:
+						icon, desc, color = "D", "draft", lipgloss.Color("#6B7280")
+					case github.PRStateOpen:
+						switch prInfo.CheckState {
+						case github.CheckStatePassing:
+							if prInfo.Mergeable == "MERGEABLE" {
+								icon, desc, color = "R", "ready", lipgloss.Color("#10B981")
+							} else if prInfo.Mergeable == "CONFLICTING" {
+								icon, desc, color = "C", "conflicts", lipgloss.Color("#EF4444")
+							} else {
+								icon, desc, color = "P", "passing", lipgloss.Color("#10B981")
+							}
+						case github.CheckStateFailing:
+							icon, desc, color = "F", "failing", lipgloss.Color("#EF4444")
+						case github.CheckStatePending:
+							icon, desc, color = "W", "running", lipgloss.Color("#F59E0B")
+						default:
+							icon, desc, color = "O", "open", lipgloss.Color("#10B981")
+						}
+					}
+					badge := lipgloss.NewStyle().
+						Foreground(lipgloss.Color("#FFFFFF")).
+						Background(color).
+						Bold(true).
+						Render(icon)
+					descStyled := lipgloss.NewStyle().Foreground(color).Render(desc)
+					return fmt.Sprintf(" %s %s", badge, descStyled)
+				}
+
 				for _, t := range tasks {
 					id := dimStyle.Render(fmt.Sprintf("#%-4d", t.ID))
 					status := statusStyle(t.Status).Render(fmt.Sprintf("%-10s", t.Status))
@@ -537,7 +612,11 @@ Examples:
 					if t.Project != "" {
 						project = dimStyle.Render(fmt.Sprintf("[%s] ", t.Project))
 					}
-					fmt.Printf("%s %s %s%s\n", id, status, project, t.Title)
+					prStatus := ""
+					if showPR {
+						prStatus = prStatusStyle(prInfoMap[t.ID])
+					}
+					fmt.Printf("%s %s %s%s%s\n", id, status, project, t.Title, prStatus)
 				}
 			}
 		},
@@ -548,6 +627,7 @@ Examples:
 	listCmd.Flags().BoolP("all", "a", false, "Include completed tasks")
 	listCmd.Flags().IntP("limit", "n", 50, "Maximum number of tasks to return")
 	listCmd.Flags().Bool("json", false, "Output in JSON format")
+	listCmd.Flags().Bool("pr", false, "Show PR/CI status (requires network)")
 	rootCmd.AddCommand(listCmd)
 
 	// Show subcommand - show task details
@@ -590,6 +670,18 @@ Examples:
 				os.Exit(1)
 			}
 
+			// Fetch PR info if task has a branch
+			var prInfo *github.PRInfo
+			if task.BranchName != "" {
+				cfg := config.New(database)
+				repoDir := task.WorktreePath
+				if repoDir == "" {
+					repoDir = cfg.GetProjectDir(task.Project)
+				}
+				prCache := github.NewPRCache()
+				prInfo = prCache.GetPRForBranch(repoDir, task.BranchName)
+			}
+
 			if outputJSON {
 				output := map[string]interface{}{
 					"id":         task.ID,
@@ -608,6 +700,17 @@ Examples:
 				}
 				if task.CompletedAt != nil {
 					output["completed_at"] = task.CompletedAt.Time.Format(time.RFC3339)
+				}
+				// Add PR info to JSON output
+				if prInfo != nil {
+					output["pr"] = map[string]interface{}{
+						"number":       prInfo.Number,
+						"url":          prInfo.URL,
+						"state":        string(prInfo.State),
+						"check_state":  string(prInfo.CheckState),
+						"description":  prInfo.StatusDescription(),
+						"mergeable":    prInfo.Mergeable,
+					}
 				}
 				if showLogs {
 					logs, _ := database.GetTaskLogs(taskID, 1000)
@@ -661,6 +764,34 @@ Examples:
 				}
 				if task.BranchName != "" {
 					fmt.Printf("Branch:   %s\n", task.BranchName)
+				}
+
+				// PR info
+				if prInfo != nil {
+					fmt.Printf("PR:       #%d %s\n", prInfo.Number, prInfo.URL)
+					// PR status with color
+					var prStatusColor lipgloss.Color
+					switch prInfo.State {
+					case github.PRStateMerged:
+						prStatusColor = lipgloss.Color("#C678DD")
+					case github.PRStateClosed:
+						prStatusColor = lipgloss.Color("#EF4444")
+					case github.PRStateDraft:
+						prStatusColor = lipgloss.Color("#6B7280")
+					case github.PRStateOpen:
+						switch prInfo.CheckState {
+						case github.CheckStatePassing:
+							prStatusColor = lipgloss.Color("#10B981")
+						case github.CheckStateFailing:
+							prStatusColor = lipgloss.Color("#EF4444")
+						case github.CheckStatePending:
+							prStatusColor = lipgloss.Color("#F59E0B")
+						default:
+							prStatusColor = lipgloss.Color("#10B981")
+						}
+					}
+					prStatusStyled := lipgloss.NewStyle().Foreground(prStatusColor).Render(prInfo.StatusDescription())
+					fmt.Printf("CI:       %s\n", prStatusStyled)
 				}
 
 				// Body
