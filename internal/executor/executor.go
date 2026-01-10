@@ -1549,7 +1549,7 @@ func (e *Executor) checkMergedBranches() {
 }
 
 // isBranchMerged checks if a task's branch has been merged into the default branch.
-// This checks both via GitHub PR status (if available) and git merge detection.
+// Uses git commands with a fetch to ensure we have the latest remote state.
 func (e *Executor) isBranchMerged(task *db.Task) bool {
 	projectDir := e.getProjectDir(task.Project)
 	if projectDir == "" {
@@ -1562,20 +1562,13 @@ func (e *Executor) isBranchMerged(task *db.Task) bool {
 		return false
 	}
 
-	// First, try checking via GitHub PR status (faster and more reliable)
-	if prInfo := e.prCache.GetPRForBranch(projectDir, task.BranchName); prInfo != nil {
-		if prInfo.State == github.PRStateMerged {
-			return true
-		}
-	}
-
 	// Get the default branch
 	defaultBranch := e.getDefaultBranch(projectDir)
 
-	// Fetch from remote to get latest state (ignore errors - might be offline)
-	fetchCmd := exec.Command("git", "fetch", "--quiet")
+	// Fetch from remote to get latest state
+	fetchCmd := exec.Command("git", "fetch", "--quiet", "origin")
 	fetchCmd.Dir = projectDir
-	fetchCmd.Run()
+	fetchCmd.Run() // Ignore errors - might be offline
 
 	// Check if the branch has been merged into the default branch
 	// Use git branch --merged to see which branches have been merged
