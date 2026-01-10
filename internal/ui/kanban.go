@@ -198,9 +198,11 @@ func (k *KanbanBoard) ensureSelectedVisible() {
 	}
 
 	// Calculate how many tasks fit in the visible area
-	// Subtract 1 for header bar, then 2 for column borders
+	// Subtract 1 for header bar
 	colHeight := k.height - 1
-	cardHeight := 4
+	// Most cards are 3 lines (non-selected), selected card is 4 lines
+	cardHeight := 3
+	// Subtract 2: 1 for scroll indicator, 1 for selected card's extra line
 	maxVisible := (colHeight - 2) / cardHeight
 	if maxVisible < 1 {
 		maxVisible = 1
@@ -300,9 +302,12 @@ func (k *KanbanBoard) View() string {
 		headerText := fmt.Sprintf("%s %s (%d)", col.Icon, col.Title, len(col.Tasks))
 		headerBar := headerBarStyle.Render(headerText)
 
-		// Task cards - calculate how many fit (each card is ~3-4 lines)
-		cardHeight := 4
-		// Subtract 2 for top/bottom column borders, then divide by card height
+		// Task cards - calculate how many fit
+		// Non-selected cards: 2 lines content + 1 line border = 3 lines
+		// Selected card: 2 lines content + 2 lines border = 4 lines
+		// Use 3 as base since most cards are non-selected
+		cardHeight := 3
+		// Subtract 1 for scroll indicator, 1 for the selected card's extra line
 		maxTasks := (colHeight - 2) / cardHeight
 		if maxTasks < 1 {
 			maxTasks = 1
@@ -592,8 +597,9 @@ func (k *KanbanBoard) HandleClick(x, y int) *db.Task {
 
 	// Calculate which task was clicked
 	col := k.columns[colIdx]
-	// Subtract 1 for header bar, then 2 for column borders
+	// Subtract 1 for header bar
 	colHeight := k.height - 1
+	// Most cards are 3 lines; subtract 2 for scroll indicator + selected card extra
 	maxTasks := (colHeight - 2) / taskCardHeight
 	if maxTasks < 1 {
 		maxTasks = 1
