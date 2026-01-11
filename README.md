@@ -102,6 +102,38 @@ Configure projects in Settings (`s`):
 
 Tasks run in isolated git worktrees at `~/.local/share/task/worktrees/{project}/task-{id}`. This allows multiple tasks to run in parallel without conflicts. Press `o` to open a task's worktree.
 
+### Running Applications in Worktrees
+
+Each task provides environment variables that applications can use to run in isolation:
+
+| Variable | Description | Example |
+|----------|-------------|---------|
+| `TASK_ID` | Unique task identifier | `207` |
+| `TASK_PORT` | Unique port (3100-4099) | `3100` |
+| `TASK_WORKTREE_PATH` | Path to the worktree | `/path/to/project/.task-worktrees/207-my-task` |
+
+#### Rails Example
+
+Configure your Rails app to use these variables for port and database isolation:
+
+**config/puma.rb:**
+```ruby
+port ENV.fetch("TASK_PORT", 3000)
+```
+
+**config/database.yml:**
+```yaml
+development:
+  database: myapp_dev<%= ENV['TASK_ID'] ? "_task#{ENV['TASK_ID']}" : "" %>
+```
+
+**Procfile.dev (with foreman/overmind):**
+```
+web: bin/rails server -p ${TASK_PORT:-3000}
+```
+
+Now Claude can run your app with `bin/dev` and interact with it via curl or browser at `http://localhost:$TASK_PORT`.
+
 ### Memories
 
 Project memories provide persistent context for the AI. Press `m` to manage.

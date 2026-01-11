@@ -931,3 +931,222 @@ func TestCompactionSummariesCascadeDelete(t *testing.T) {
 		t.Errorf("expected 0 summaries after task delete, got %d", count)
 	}
 }
+
+func TestPortAllocation(t *testing.T) {
+	// Create temporary database
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	db, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer db.Close()
+	defer os.Remove(dbPath)
+
+	// Create a task
+	task1 := &Task{
+		Title:   "Task 1",
+		Status:  StatusBacklog,
+		Type:    TypeCode,
+		Project: "personal",
+	}
+	if err := db.CreateTask(task1); err != nil {
+		t.Fatalf("failed to create task: %v", err)
+	}
+
+	// Allocate port for task1
+	port1, err := db.AllocatePort(task1.ID)
+	if err != nil {
+		t.Fatalf("failed to allocate port: %v", err)
+	}
+
+	// Verify port is in valid range
+	if port1 < PortRangeStart || port1 > PortRangeEnd {
+		t.Errorf("allocated port %d outside valid range %d-%d", port1, PortRangeStart, PortRangeEnd)
+	}
+
+	// First port should be the start of range
+	if port1 != PortRangeStart {
+		t.Errorf("expected first port to be %d, got %d", PortRangeStart, port1)
+	}
+
+	// Verify task was updated with port
+	task1, err = db.GetTask(task1.ID)
+	if err != nil {
+		t.Fatalf("failed to get task: %v", err)
+	}
+	if task1.Port != port1 {
+		t.Errorf("task port not updated: expected %d, got %d", port1, task1.Port)
+	}
+
+	// Create and allocate port for another task
+	task2 := &Task{
+		Title:   "Task 2",
+		Status:  StatusProcessing,
+		Type:    TypeCode,
+		Project: "personal",
+	}
+	if err := db.CreateTask(task2); err != nil {
+		t.Fatalf("failed to create task: %v", err)
+	}
+
+	port2, err := db.AllocatePort(task2.ID)
+	if err != nil {
+		t.Fatalf("failed to allocate port: %v", err)
+	}
+
+	// Second port should be different from first
+	if port2 == port1 {
+		t.Errorf("second port should be different from first: both are %d", port1)
+	}
+
+	// Second port should be next in sequence
+	if port2 != PortRangeStart+1 {
+		t.Errorf("expected second port to be %d, got %d", PortRangeStart+1, port2)
+	}
+}
+
+func TestPortAllocationReusesFreedPorts(t *testing.T) {
+	// Create temporary database
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	db, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer db.Close()
+	defer os.Remove(dbPath)
+
+	// Create and allocate port for task1
+	task1 := &Task{
+		Title:   "Task 1",
+		Status:  StatusProcessing,
+		Type:    TypeCode,
+		Project: "personal",
+	}
+	if err := db.CreateTask(task1); err != nil {
+		t.Fatalf("failed to create task: %v", err)
+	}
+	port1, err := db.AllocatePort(task1.ID)
+	if err != nil {
+		t.Fatalf("failed to allocate port: %v", err)
+	}
+
+	// Create and allocate port for task2
+	task2 := &Task{
+		Title:   "Task 2",
+		Status:  StatusProcessing,
+		Type:    TypeCode,
+		Project: "personal",
+	}
+	if err := db.CreateTask(task2); err != nil {
+		t.Fatalf("failed to create task: %v", err)
+	}
+	port2, err := db.AllocatePort(task2.ID)
+	if err != nil {
+		t.Fatalf("failed to allocate port: %v", err)
+	}
+
+	// Mark task1 as done - this frees its port
+	if err := db.UpdateTaskStatus(task1.ID, StatusDone); err != nil {
+		t.Fatalf("failed to update task status: %v", err)
+	}
+
+	// Create task3 and allocate port
+	task3 := &Task{
+		Title:   "Task 3",
+		Status:  StatusProcessing,
+		Type:    TypeCode,
+		Project: "personal",
+	}
+	if err := db.CreateTask(task3); err != nil {
+		t.Fatalf("failed to create task: %v", err)
+	}
+	port3, err := db.AllocatePort(task3.ID)
+	if err != nil {
+		t.Fatalf("failed to allocate port: %v", err)
+	}
+
+	// Task3 should get task1's freed port
+	if port3 != port1 {
+		t.Errorf("expected task3 to reuse freed port %d, got %d", port1, port3)
+	}
+
+	// Verify port2 is still in use
+	ports, err := db.GetActiveTaskPorts()
+	if err != nil {
+		t.Fatalf("failed to get active ports: %v", err)
+	}
+	if !ports[port2] {
+		t.Errorf("port %d should still be marked as in use", port2)
+	}
+}
+
+func TestGetActiveTaskPorts(t *testing.T) {
+	// Create temporary database
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	db, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer db.Close()
+	defer os.Remove(dbPath)
+
+	// Initially no ports in use
+	ports, err := db.GetActiveTaskPorts()
+	if err != nil {
+		t.Fatalf("failed to get active ports: %v", err)
+	}
+	if len(ports) != 0 {
+		t.Errorf("expected no active ports, got %d", len(ports))
+	}
+
+	// Create tasks with different statuses
+	statuses := []struct {
+		status   string
+		expected bool // whether port should be considered "in use"
+	}{
+		{StatusBacklog, true},
+		{StatusQueued, true},
+		{StatusProcessing, true},
+		{StatusBlocked, true},
+		{StatusDone, false},
+	}
+
+	for i, tc := range statuses {
+		task := &Task{
+			Title:   "Task",
+			Status:  tc.status,
+			Type:    TypeCode,
+			Project: "personal",
+		}
+		if err := db.CreateTask(task); err != nil {
+			t.Fatalf("failed to create task: %v", err)
+		}
+		if _, err := db.AllocatePort(task.ID); err != nil {
+			t.Fatalf("failed to allocate port: %v", err)
+		}
+
+		// Count active ports
+		ports, err := db.GetActiveTaskPorts()
+		if err != nil {
+			t.Fatalf("failed to get active ports: %v", err)
+		}
+
+		expectedCount := 0
+		for j := 0; j <= i; j++ {
+			if statuses[j].expected {
+				expectedCount++
+			}
+		}
+
+		if len(ports) != expectedCount {
+			t.Errorf("after creating task with status %q: expected %d active ports, got %d",
+				tc.status, expectedCount, len(ports))
+		}
+	}
+}
