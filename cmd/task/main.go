@@ -1089,6 +1089,9 @@ Examples:
 	// Cloud subcommand
 	rootCmd.AddCommand(createCloudCommand())
 
+	// Sprite subcommand (cloud execution via Fly.io Sprites)
+	rootCmd.AddCommand(createSpriteCommand())
+
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
 		os.Exit(1)
