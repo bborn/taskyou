@@ -176,6 +176,20 @@ func (db *DB) migrate() error {
 			is_builtin INTEGER DEFAULT 0,
 			created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 		)`,
+
+		// Compaction summaries table - stores context summaries when Claude compacts
+		`CREATE TABLE IF NOT EXISTS task_compaction_summaries (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+			session_id TEXT NOT NULL,
+			trigger TEXT NOT NULL,
+			pre_tokens INTEGER DEFAULT 0,
+			summary TEXT NOT NULL,
+			custom_instructions TEXT DEFAULT '',
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+		)`,
+
+		`CREATE INDEX IF NOT EXISTS idx_task_compaction_summaries_task_id ON task_compaction_summaries(task_id)`,
 	}
 
 	for _, m := range migrations {
