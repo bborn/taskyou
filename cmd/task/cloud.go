@@ -60,7 +60,10 @@ func sshRunInteractive(server, command string) error {
 
 // scpFile copies a local file to the remote server.
 func scpFile(local, remote string) error {
-	return osexec.Command("scp", local, remote).Run()
+	cmd := osexec.Command("scp", "-C", local, remote)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
 }
 
 // getCloudSettings retrieves all cloud settings from the database.
@@ -329,7 +332,7 @@ func runCloudInit() error {
 
 	// Install dependencies
 	fmt.Print("   Installing dependencies... ")
-	if _, err := sshRun(server, "apt update -qq && apt install -y -qq tmux git curl jq"); err != nil {
+	if _, err := sshRun(server, "apt update -qq && apt install -y -qq tmux git curl jq golang-go make"); err != nil {
 		fmt.Println(errorStyle.Render("failed"))
 		return fmt.Errorf("could not install dependencies: %w", err)
 	}
@@ -480,28 +483,27 @@ func runCloudInit() error {
 	// Step 4: Deploy
 	fmt.Println(cloudHeaderStyle.Render("4. Deploy"))
 
-	// Build for Linux
-	fmt.Print("   Building taskd for linux/amd64... ")
-	buildCmd := osexec.Command("make", "build-linux")
-	buildCmd.Dir = getProjectRoot()
-	if err := buildCmd.Run(); err != nil {
+	remoteDir := defaultCloudRemoteDir
+	remoteUser := defaultCloudRemoteUser
+	workflowDir := "/home/runner/Projects/tasks"
+
+	// Pull latest and build on server
+	fmt.Print("   Pulling latest code... ")
+	if _, err := sshRun(server, fmt.Sprintf("cd %s && sudo -u %s git pull --ff-only", workflowDir, remoteUser)); err != nil {
+		fmt.Println(errorStyle.Render("failed"))
+		return fmt.Errorf("git pull failed: %w", err)
+	}
+	fmt.Println(cloudCheckStyle.Render("Done"))
+
+	fmt.Print("   Building on server... ")
+	if _, err := sshRun(server, fmt.Sprintf("cd %s && sudo -u %s make build", workflowDir, remoteUser)); err != nil {
 		fmt.Println(errorStyle.Render("failed"))
 		return fmt.Errorf("build failed: %w", err)
 	}
 	fmt.Println(cloudCheckStyle.Render("Done"))
 
-	// Deploy binary
-	remoteDir := defaultCloudRemoteDir
-	remoteUser := defaultCloudRemoteUser
-
-	fmt.Print("   Deploying binary... ")
-	binPath := filepath.Join(getProjectRoot(), "bin", "taskd-linux")
-	// scp to temp location first, then move (handles ownership issues)
-	if err := scpFile(binPath, fmt.Sprintf("%s:/tmp/taskd", server)); err != nil {
-		fmt.Println(errorStyle.Render("failed"))
-		return fmt.Errorf("deploy binary: %w", err)
-	}
-	sshRun(server, fmt.Sprintf("mv /tmp/taskd %s/taskd && chmod +x %s/taskd && chown %s:%s %s/taskd", remoteDir, remoteDir, remoteUser, remoteUser, remoteDir))
+	fmt.Print("   Installing binary... ")
+	sshRun(server, fmt.Sprintf("cp %s/bin/taskd %s/taskd && chmod +x %s/taskd && chown %s:%s %s/taskd", workflowDir, remoteDir, remoteDir, remoteUser, remoteUser, remoteDir))
 	fmt.Println(cloudCheckStyle.Render("Done"))
 
 	// Install systemd service
@@ -637,24 +639,21 @@ func syncCloud(deploy bool) error {
 		fmt.Println()
 		fmt.Println(cloudHeaderStyle.Render("Redeploying binary..."))
 
-		// Build for Linux
-		fmt.Print("  Building... ")
-		buildCmd := osexec.Command("make", "build-linux")
-		buildCmd.Dir = getProjectRoot()
-		if err := buildCmd.Run(); err != nil {
+		remoteUser := settings[SettingCloudRemoteUser]
+		remoteDir := settings[SettingCloudRemoteDir]
+		workflowDir := "/home/runner/Projects/tasks"
+
+		// Build on server
+		fmt.Print("  Building on server... ")
+		if _, err := sshRun(server, fmt.Sprintf("cd %s && sudo -u %s make build", workflowDir, remoteUser)); err != nil {
 			fmt.Println(errorStyle.Render("failed"))
 			return fmt.Errorf("build failed: %w", err)
 		}
 		fmt.Println(cloudCheckStyle.Render("Done"))
 
-		// Deploy
-		fmt.Print("  Deploying... ")
-		binPath := filepath.Join(getProjectRoot(), "bin", "taskd-linux")
-		remotePath := fmt.Sprintf("%s:%s/taskd", server, settings[SettingCloudRemoteDir])
-		if err := scpFile(binPath, remotePath); err != nil {
-			fmt.Println(errorStyle.Render("failed"))
-			return fmt.Errorf("deploy: %w", err)
-		}
+		// Install binary
+		fmt.Print("  Installing... ")
+		sshRun(server, fmt.Sprintf("cp %s/bin/taskd %s/taskd && chmod +x %s/taskd", workflowDir, remoteDir, remoteDir))
 		fmt.Println(cloudCheckStyle.Render("Done"))
 
 		// Restart service
