@@ -557,8 +557,29 @@ func (k *KanbanBoard) HandleClick(x, y int) *db.Task {
 		maxTasks = 1
 	}
 
-	taskIdx := taskAreaY / taskCardHeight
-	if taskIdx >= len(col.Tasks) || taskIdx >= maxTasks {
+	// Get scroll offset for this column
+	scrollOffset := 0
+	if colIdx < len(k.scrollOffsets) {
+		scrollOffset = k.scrollOffsets[colIdx]
+	}
+
+	// Account for scroll indicator line when scrolled
+	if scrollOffset > 0 {
+		taskAreaY -= 1 // Subtract 1 for the "↑ N more" indicator line
+		if taskAreaY < 0 {
+			// Clicked on scroll indicator
+			return nil
+		}
+	}
+
+	visibleTaskIdx := taskAreaY / taskCardHeight
+	if visibleTaskIdx >= maxTasks {
+		return nil
+	}
+
+	// Convert visible index to actual task index
+	taskIdx := scrollOffset + visibleTaskIdx
+	if taskIdx >= len(col.Tasks) {
 		return nil
 	}
 
