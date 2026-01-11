@@ -1070,16 +1070,23 @@ func (e *Executor) runClaude(ctx context.Context, taskID int64, workDir, prompt 
 	// Run interactively (no -p) so user can attach and see/interact in real-time
 	// TASK_ID is passed so hooks know which task to update
 	// TASK_SESSION_ID ensures consistent session naming across all processes
-	sessionID := os.Getenv("TASK_SESSION_ID")
-	if sessionID == "" {
-		sessionID = fmt.Sprintf("%d", os.Getpid())
+	taskSessionID := os.Getenv("TASK_SESSION_ID")
+	if taskSessionID == "" {
+		taskSessionID = fmt.Sprintf("%d", os.Getpid())
 	}
 	// Only use --dangerously-skip-permissions if TASK_DANGEROUS_MODE is set
 	dangerousFlag := ""
 	if os.Getenv("TASK_DANGEROUS_MODE") == "1" {
 		dangerousFlag = "--dangerously-skip-permissions "
 	}
-	script := fmt.Sprintf(`TASK_ID=%d TASK_SESSION_ID=%s claude %s--chrome "$(cat %q)"`, taskID, sessionID, dangerousFlag, promptFile.Name())
+	// Check for existing Claude session to resume instead of starting fresh
+	var script string
+	if existingSessionID := e.findClaudeSessionID(workDir); existingSessionID != "" {
+		e.logLine(taskID, "system", fmt.Sprintf("Resuming existing session %s", existingSessionID))
+		script = fmt.Sprintf(`TASK_ID=%d TASK_SESSION_ID=%s claude %s--chrome --resume %s "$(cat %q)"`, taskID, taskSessionID, dangerousFlag, existingSessionID, promptFile.Name())
+	} else {
+		script = fmt.Sprintf(`TASK_ID=%d TASK_SESSION_ID=%s claude %s--chrome "$(cat %q)"`, taskID, taskSessionID, dangerousFlag, promptFile.Name())
+	}
 
 	// Create new window in task-daemon session (with timeout for tmux overhead)
 	newWinCtx, newWinCancel := context.WithTimeout(context.Background(), 5*time.Second)
