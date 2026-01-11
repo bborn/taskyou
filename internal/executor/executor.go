@@ -10,8 +10,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/bborn/workflow/internal/config"
@@ -42,6 +44,9 @@ type Executor struct {
 	running      bool
 	stopCh       chan struct{}
 
+	// Suspended task tracking
+	suspendedTasks map[int64]time.Time // taskID -> time when suspended
+
 	// Subscribers for real-time log updates (per-task)
 	subsMu sync.RWMutex
 	subs   map[int64][]chan *db.TaskLog
@@ -54,37 +59,42 @@ type Executor struct {
 	silent bool
 }
 
+// SuspendIdleTimeout is how long a blocked task must be idle before being suspended.
+const SuspendIdleTimeout = 5 * time.Minute
+
 // New creates a new executor.
 func New(database *db.DB, cfg *config.Config) *Executor {
 	return &Executor{
-		db:           database,
-		config:       cfg,
-		logger:       log.NewWithOptions(io.Discard, log.Options{Prefix: "executor"}),
-		hooks:        hooks.NewSilent(hooks.DefaultHooksDir()),
-		prCache:      github.NewPRCache(),
-		stopCh:       make(chan struct{}),
-		subs:         make(map[int64][]chan *db.TaskLog),
-		taskSubs:     make([]chan TaskEvent, 0),
-		runningTasks: make(map[int64]bool),
-		cancelFuncs:  make(map[int64]context.CancelFunc),
-		silent:       true,
+		db:             database,
+		config:         cfg,
+		logger:         log.NewWithOptions(io.Discard, log.Options{Prefix: "executor"}),
+		hooks:          hooks.NewSilent(hooks.DefaultHooksDir()),
+		prCache:        github.NewPRCache(),
+		stopCh:         make(chan struct{}),
+		subs:           make(map[int64][]chan *db.TaskLog),
+		taskSubs:       make([]chan TaskEvent, 0),
+		runningTasks:   make(map[int64]bool),
+		cancelFuncs:    make(map[int64]context.CancelFunc),
+		suspendedTasks: make(map[int64]time.Time),
+		silent:         true,
 	}
 }
 
 // NewWithLogging creates an executor that logs to stderr (for daemon mode).
 func NewWithLogging(database *db.DB, cfg *config.Config, w io.Writer) *Executor {
 	return &Executor{
-		db:           database,
-		config:       cfg,
-		logger:       log.NewWithOptions(w, log.Options{Prefix: "executor"}),
-		hooks:        hooks.New(hooks.DefaultHooksDir()),
-		prCache:      github.NewPRCache(),
-		stopCh:       make(chan struct{}),
-		subs:         make(map[int64][]chan *db.TaskLog),
-		taskSubs:     make([]chan TaskEvent, 0),
-		runningTasks: make(map[int64]bool),
-		cancelFuncs:  make(map[int64]context.CancelFunc),
-		silent:       false,
+		db:             database,
+		config:         cfg,
+		logger:         log.NewWithOptions(w, log.Options{Prefix: "executor"}),
+		hooks:          hooks.New(hooks.DefaultHooksDir()),
+		prCache:        github.NewPRCache(),
+		stopCh:         make(chan struct{}),
+		subs:           make(map[int64][]chan *db.TaskLog),
+		taskSubs:       make([]chan TaskEvent, 0),
+		runningTasks:   make(map[int64]bool),
+		cancelFuncs:    make(map[int64]context.CancelFunc),
+		suspendedTasks: make(map[int64]time.Time),
+		silent:         false,
 	}
 }
 
@@ -150,6 +160,124 @@ func (e *Executor) Interrupt(taskID int64) bool {
 		cancel()
 	}
 	return true
+}
+
+// SuspendTask suspends a task's Claude process using SIGTSTP (same as Ctrl+Z) to save memory.
+// Returns true if successfully suspended.
+func (e *Executor) SuspendTask(taskID int64) bool {
+	pid := e.getClaudePID(taskID)
+	if pid == 0 {
+		return false
+	}
+
+	// Send SIGTSTP to suspend the process (same as Ctrl+Z, allows Claude to handle gracefully)
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		e.logger.Debug("Failed to find process", "pid", pid, "error", err)
+		return false
+	}
+
+	if err := proc.Signal(syscall.SIGTSTP); err != nil {
+		e.logger.Debug("Failed to suspend process", "pid", pid, "error", err)
+		return false
+	}
+
+	e.mu.Lock()
+	e.suspendedTasks[taskID] = time.Now()
+	e.mu.Unlock()
+
+	e.logger.Info("Suspended Claude process", "task", taskID, "pid", pid)
+	e.logLine(taskID, "system", "Claude suspended (idle timeout)")
+	return true
+}
+
+// ResumeTask resumes a suspended task's Claude process using SIGCONT.
+// Returns true if successfully resumed.
+func (e *Executor) ResumeTask(taskID int64) bool {
+	e.mu.RLock()
+	_, isSuspended := e.suspendedTasks[taskID]
+	e.mu.RUnlock()
+
+	if !isSuspended {
+		return false
+	}
+
+	pid := e.getClaudePID(taskID)
+	if pid == 0 {
+		// Process gone, clean up suspended state
+		e.mu.Lock()
+		delete(e.suspendedTasks, taskID)
+		e.mu.Unlock()
+		return false
+	}
+
+	// Send SIGCONT to resume the process
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		e.mu.Lock()
+		delete(e.suspendedTasks, taskID)
+		e.mu.Unlock()
+		return false
+	}
+
+	if err := proc.Signal(syscall.SIGCONT); err != nil {
+		e.logger.Debug("Failed to resume process", "pid", pid, "error", err)
+		return false
+	}
+
+	e.mu.Lock()
+	delete(e.suspendedTasks, taskID)
+	e.mu.Unlock()
+
+	e.logger.Info("Resumed Claude process", "task", taskID, "pid", pid)
+	e.logLine(taskID, "system", "Claude resumed")
+	return true
+}
+
+// IsSuspended checks if a task is currently suspended.
+func (e *Executor) IsSuspended(taskID int64) bool {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	_, suspended := e.suspendedTasks[taskID]
+	return suspended
+}
+
+// getClaudePID finds the PID of the Claude process in a task's tmux window.
+func (e *Executor) getClaudePID(taskID int64) int {
+	windowTarget := TmuxSessionName(taskID)
+
+	// Get the PID of the process running in the tmux pane
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	// First check if the window exists
+	if exec.CommandContext(ctx, "tmux", "list-panes", "-t", windowTarget).Run() != nil {
+		return 0
+	}
+
+	// Get the PID of the active process in the pane
+	out, err := exec.CommandContext(ctx, "tmux", "display-message", "-t", windowTarget, "-p", "#{pane_pid}").Output()
+	if err != nil {
+		return 0
+	}
+
+	pid, err := strconv.Atoi(strings.TrimSpace(string(out)))
+	if err != nil {
+		return 0
+	}
+
+	// The pane_pid is the shell PID - we need to find the claude child process
+	// Look for claude process that's a child of this shell
+	childOut, err := exec.CommandContext(ctx, "pgrep", "-P", strconv.Itoa(pid), "claude").Output()
+	if err == nil && len(childOut) > 0 {
+		childPid, err := strconv.Atoi(strings.TrimSpace(string(childOut)))
+		if err == nil {
+			return childPid
+		}
+	}
+
+	// Fallback: return the shell PID (suspending the shell will suspend claude too)
+	return pid
 }
 
 // Subscribe to log updates for a task.
@@ -258,8 +386,10 @@ func (e *Executor) worker(ctx context.Context) {
 	defer ticker.Stop()
 
 	// Check merged branches every 30 seconds (15 ticks)
+	// Check for idle blocked tasks to suspend every 60 seconds (30 ticks)
 	tickCount := 0
 	const mergeCheckInterval = 15
+	const suspendCheckInterval = 30
 
 	for {
 		select {
@@ -270,11 +400,50 @@ func (e *Executor) worker(ctx context.Context) {
 		case <-ticker.C:
 			e.processNextTask(ctx)
 
-			// Periodically check for merged branches
 			tickCount++
-			if tickCount >= mergeCheckInterval {
-				tickCount = 0
+
+			// Periodically check for merged branches
+			if tickCount%mergeCheckInterval == 0 {
 				e.checkMergedBranches()
+			}
+
+			// Periodically check for idle blocked tasks to suspend
+			if tickCount%suspendCheckInterval == 0 {
+				e.suspendIdleBlockedTasks()
+			}
+		}
+	}
+}
+
+// suspendIdleBlockedTasks finds blocked tasks that have been idle and suspends their Claude processes.
+func (e *Executor) suspendIdleBlockedTasks() {
+	tasks, err := e.db.ListTasks(db.ListTasksOptions{Status: db.StatusBlocked, Limit: 100})
+	if err != nil {
+		return
+	}
+
+	for _, task := range tasks {
+		// Skip if already suspended
+		e.mu.RLock()
+		_, alreadySuspended := e.suspendedTasks[task.ID]
+		e.mu.RUnlock()
+		if alreadySuspended {
+			continue
+		}
+
+		// Check if task has been blocked for long enough
+		// Use UpdatedAt as proxy for when it became blocked
+		if task.UpdatedAt.Time.IsZero() {
+			continue
+		}
+
+		idleDuration := time.Since(task.UpdatedAt.Time)
+		if idleDuration >= SuspendIdleTimeout {
+			// Check if there's actually a Claude process to suspend
+			pid := e.getClaudePID(task.ID)
+			if pid > 0 {
+				e.logger.Info("Suspending idle blocked task", "task", task.ID, "idle", idleDuration.Round(time.Second))
+				e.SuspendTask(task.ID)
 			}
 		}
 	}
@@ -384,6 +553,7 @@ func (e *Executor) executeTask(ctx context.Context, task *db.Task) {
 		e.logLine(task.ID, "system", "Resuming previous session with feedback")
 		result = e.runClaudeResume(taskCtx, task.ID, workDir, prompt, retryFeedback)
 	} else {
+		e.logLine(task.ID, "system", "Starting new Claude session")
 		result = e.runClaude(taskCtx, task.ID, workDir, prompt)
 	}
 
@@ -950,6 +1120,8 @@ func (e *Executor) runClaudeResume(ctx context.Context, taskID int64, workDir, p
 		return e.runClaude(ctx, taskID, workDir, fullPrompt)
 	}
 
+	e.logLine(taskID, "system", fmt.Sprintf("Resuming session %s", sessionID))
+
 	// Check if tmux is available
 	if _, err := exec.LookPath("tmux"); err != nil {
 		return e.runClaudeDirect(ctx, taskID, workDir, feedback)
@@ -1028,8 +1200,19 @@ func (e *Executor) runClaudeResume(ctx context.Context, taskID int64, workDir, p
 	return result
 }
 
+// FindClaudeSessionID finds the most recent claude session ID for a workDir.
+// Exported for use by the UI to check for resumable sessions.
+func FindClaudeSessionID(workDir string) string {
+	return findClaudeSessionIDImpl(workDir)
+}
+
 // findClaudeSessionID finds the most recent claude session ID for a workDir
 func (e *Executor) findClaudeSessionID(workDir string) string {
+	return findClaudeSessionIDImpl(workDir)
+}
+
+// findClaudeSessionIDImpl is the shared implementation
+func findClaudeSessionIDImpl(workDir string) string {
 	// Claude stores sessions in ~/.claude/projects/<escaped-path>/
 	// The path is escaped: /Users/bruno/foo -> -Users-bruno-foo
 	home, err := os.UserHomeDir()

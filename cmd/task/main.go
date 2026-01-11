@@ -173,22 +173,37 @@ func main() {
 
 	rootCmd.AddCommand(daemonCmd)
 
-	// Restart subcommand - full restart (daemon + tmux sessions)
+	// Restart subcommand - restart daemon and TUI (preserves Claude sessions by default)
+	var hardRestart bool
 	restartCmd := &cobra.Command{
 		Use:   "restart",
-		Short: "Full restart - stops daemon, kills tmux sessions, and relaunches",
-		Long:  "Performs a complete restart: stops the daemon, kills all task-related tmux sessions, and relaunches the TUI fresh.",
+		Short: "Restart the daemon and TUI (preserves Claude sessions)",
+		Long: `Restarts the daemon and TUI while preserving running Claude sessions.
+Use --hard to kill all tmux sessions for a complete reset.`,
 		Run: func(cmd *cobra.Command, args []string) {
 			fmt.Println(dimStyle.Render("Stopping daemon..."))
 			stopDaemon()
 
-			fmt.Println(dimStyle.Render("Killing tmux sessions..."))
-			// Kill all task-daemon-* sessions
-			out, _ := osexec.Command("tmux", "list-sessions", "-F", "#{session_name}").Output()
-			for _, session := range strings.Split(string(out), "\n") {
-				session = strings.TrimSpace(session)
-				if strings.HasPrefix(session, "task-daemon-") || strings.HasPrefix(session, "task-ui-") {
-					osexec.Command("tmux", "kill-session", "-t", session).Run()
+			if hardRestart {
+				fmt.Println(dimStyle.Render("Killing tmux sessions..."))
+				// Kill all task-daemon-* and task-ui-* sessions
+				out, _ := osexec.Command("tmux", "list-sessions", "-F", "#{session_name}").Output()
+				for _, session := range strings.Split(string(out), "\n") {
+					session = strings.TrimSpace(session)
+					if strings.HasPrefix(session, "task-daemon-") || strings.HasPrefix(session, "task-ui-") {
+						osexec.Command("tmux", "kill-session", "-t", session).Run()
+					}
+				}
+			} else {
+				// Soft restart: only kill the task-ui session, preserve task-daemon sessions with Claude windows
+				fmt.Println(dimStyle.Render("Preserving Claude sessions..."))
+				out, _ := osexec.Command("tmux", "list-sessions", "-F", "#{session_name}").Output()
+				for _, session := range strings.Split(string(out), "\n") {
+					session = strings.TrimSpace(session)
+					// Only kill task-ui sessions, keep task-daemon sessions with Claude windows
+					if strings.HasPrefix(session, "task-ui-") {
+						osexec.Command("tmux", "kill-session", "-t", session).Run()
+					}
 				}
 			}
 
@@ -212,6 +227,7 @@ func main() {
 		},
 	}
 	restartCmd.Flags().BoolVarP(&local, "local", "l", false, "Run locally")
+	restartCmd.Flags().BoolVar(&hardRestart, "hard", false, "Kill all tmux sessions (full reset)")
 	rootCmd.AddCommand(restartCmd)
 
 	// Logs subcommand - tail claude session logs
@@ -828,7 +844,7 @@ Examples:
 		},
 	}
 	showCmd.Flags().Bool("json", false, "Output in JSON format")
-	showCmd.Flags().BoolP("logs", "l", false, "Show task logs")
+	showCmd.Flags().Bool("logs", false, "Show task logs")
 	rootCmd.AddCommand(showCmd)
 
 	// Update subcommand - update task fields

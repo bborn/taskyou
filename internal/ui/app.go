@@ -478,6 +478,10 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case taskLoadedMsg:
 		if msg.err == nil {
 			m.selectedTask = msg.task
+			// Resume task if it was suspended (blocked idle tasks get suspended to save memory)
+			if m.executor.IsSuspended(msg.task.ID) {
+				m.executor.ResumeTask(msg.task.ID)
+			}
 			m.detailView = NewDetailModel(msg.task, m.db, m.width, m.height)
 			m.previousView = m.currentView
 			m.currentView = ViewDetail

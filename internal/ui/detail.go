@@ -114,8 +114,23 @@ func NewDetailModel(t *db.Task, database *db.DB, width, height int) *DetailModel
 	if os.Getenv("TMUX") != "" && m.cachedWindowTarget != "" {
 		m.joinTmuxPane()
 	} else if os.Getenv("TMUX") != "" {
+		// No active tmux window - check if we can resume a previous session
+		if m.task.WorktreePath != "" {
+			sessionID := executor.FindClaudeSessionID(m.task.WorktreePath)
+			if sessionID != "" {
+				// Start a new tmux window resuming the previous session
+				m.startResumableSession(sessionID)
+				// Refresh the cached window target
+				m.cachedWindowTarget = m.findTaskWindow()
+				if m.cachedWindowTarget != "" {
+					m.joinTmuxPane()
+				}
+			}
+		}
 		// Even without joined panes, ensure Details pane has focus
-		m.focusDetailsPane()
+		if m.claudePaneID == "" {
+			m.focusDetailsPane()
+		}
 	}
 
 	return m
@@ -220,6 +235,73 @@ func (m *DetailModel) findTaskWindow() string {
 		}
 	}
 	return ""
+}
+
+// startResumableSession starts a new tmux window with claude --resume for a previous session.
+// This reconnects to a Claude session that was previously running but whose tmux window was killed.
+func (m *DetailModel) startResumableSession(sessionID string) {
+	if m.task == nil || m.task.WorktreePath == "" || sessionID == "" {
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// Find or create a task-daemon session to put the window in
+	// First, look for any existing task-daemon-* session
+	out, err := exec.CommandContext(ctx, "tmux", "list-sessions", "-F", "#{session_name}").Output()
+	if err != nil {
+		return
+	}
+
+	var daemonSession string
+	for _, session := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if strings.HasPrefix(session, "task-daemon-") {
+			daemonSession = session
+			break
+		}
+	}
+
+	// If no daemon session exists, create one
+	if daemonSession == "" {
+		daemonSession = fmt.Sprintf("task-daemon-%d", os.Getpid())
+		err := exec.CommandContext(ctx, "tmux", "new-session", "-d", "-s", daemonSession, "-n", "_placeholder").Run()
+		if err != nil {
+			return
+		}
+	}
+
+	windowName := executor.TmuxWindowName(m.task.ID)
+	workDir := m.task.WorktreePath
+
+	// Build the claude command with --resume
+	// Check for dangerous mode
+	dangerousFlag := ""
+	if os.Getenv("TASK_DANGEROUS_MODE") == "1" {
+		dangerousFlag = "--dangerously-skip-permissions "
+	}
+
+	// Get the session ID for environment
+	taskSessionID := strings.TrimPrefix(daemonSession, "task-daemon-")
+
+	script := fmt.Sprintf(`TASK_ID=%d TASK_SESSION_ID=%s claude %s--chrome --resume %s`,
+		m.task.ID, taskSessionID, dangerousFlag, sessionID)
+
+	// Log the reconnection
+	m.database.AppendTaskLog(m.task.ID, "system", fmt.Sprintf("Reconnecting to session %s", sessionID))
+
+	// Create new window in the daemon session
+	err = exec.CommandContext(ctx, "tmux", "new-window", "-d",
+		"-t", daemonSession,
+		"-n", windowName,
+		"-c", workDir,
+		"sh", "-c", script).Run()
+	if err != nil {
+		return
+	}
+
+	// Give tmux a moment to create the window
+	time.Sleep(100 * time.Millisecond)
 }
 
 // hasActiveTmuxSession checks if this task has an active tmux window in any task-daemon session.
