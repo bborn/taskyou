@@ -671,59 +671,6 @@ func (m *DetailModel) breakTmuxPanes() {
 	m.daemonSessionID = ""
 }
 
-// breakTmuxPane is a compatibility wrapper for breakTmuxPanes.
-func (m *DetailModel) breakTmuxPane() {
-	m.breakTmuxPanes()
-}
-
-// killTmuxSession kills the Claude tmux window and workdir pane.
-func (m *DetailModel) killTmuxSession() {
-	windowTarget := m.cachedWindowTarget
-	if windowTarget == "" {
-		return
-	}
-
-	// Use timeout for all tmux operations to prevent blocking UI
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	// Save pane positions before killing (must save before panes are destroyed)
-	m.saveShellPaneWidth()
-	currentPaneCmd := exec.CommandContext(ctx, "tmux", "display-message", "-p", "#{pane_id}")
-	if currentPaneOut, err := currentPaneCmd.Output(); err == nil {
-		tuiPaneID := strings.TrimSpace(string(currentPaneOut))
-		m.saveDetailPaneHeight(tuiPaneID)
-	}
-
-	m.database.AppendTaskLog(m.task.ID, "user", "→ [Kill] Session terminated")
-
-	// Reset pane styling first
-	exec.CommandContext(ctx, "tmux", "set-option", "-t", "task-ui", "status-right", " ").Run()
-	exec.CommandContext(ctx, "tmux", "set-option", "-t", "task-ui", "pane-border-lines", "single").Run()
-	exec.CommandContext(ctx, "tmux", "set-option", "-t", "task-ui", "pane-border-indicators", "off").Run()
-	exec.CommandContext(ctx, "tmux", "set-option", "-t", "task-ui", "pane-border-style", "fg=#374151").Run()
-	exec.CommandContext(ctx, "tmux", "set-option", "-t", "task-ui", "pane-active-border-style", "fg=#61AFEF").Run()
-
-	// Reset pane title back to main view label
-	exec.CommandContext(ctx, "tmux", "select-pane", "-t", "task-ui:.0", "-T", "Tasks").Run()
-
-	// Kill the workdir pane first (it's a separate pane we created)
-	if m.workdirPaneID != "" {
-		exec.CommandContext(ctx, "tmux", "kill-pane", "-t", m.workdirPaneID).Run()
-		m.workdirPaneID = ""
-	}
-
-	// If we have a joined Claude pane, it will be killed with the window
-	m.claudePaneID = ""
-
-	exec.CommandContext(ctx, "tmux", "kill-window", "-t", windowTarget).Run()
-
-	// Clear cached window target since session is now killed
-	m.cachedWindowTarget = ""
-
-	m.Refresh()
-}
-
 // focusNextPane cycles focus to the next pane: Details -> Claude -> Shell -> Details.
 func (m *DetailModel) focusNextPane() {
 	if m.claudePaneID == "" && m.workdirPaneID == "" {
@@ -1091,36 +1038,3 @@ func (m *DetailModel) getClaudeMemoryMB() int {
 	return rssKB / 1024 // Convert to MB
 }
 
-func humanizeTime(t time.Time) string {
-	if t.IsZero() {
-		return ""
-	}
-
-	now := time.Now()
-	diff := now.Sub(t)
-
-	switch {
-	case diff < time.Minute:
-		return "just now"
-	case diff < time.Hour:
-		mins := int(diff.Minutes())
-		if mins == 1 {
-			return "1 minute ago"
-		}
-		return fmt.Sprintf("%d minutes ago", mins)
-	case diff < 24*time.Hour:
-		hours := int(diff.Hours())
-		if hours == 1 {
-			return "1 hour ago"
-		}
-		return fmt.Sprintf("%d hours ago", hours)
-	case diff < 7*24*time.Hour:
-		days := int(diff.Hours() / 24)
-		if days == 1 {
-			return "yesterday"
-		}
-		return fmt.Sprintf("%d days ago", days)
-	default:
-		return t.Format("Jan 2, 2006")
-	}
-}

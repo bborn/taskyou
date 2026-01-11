@@ -1849,9 +1849,7 @@ type taskRetriedMsg struct {
 	err error
 }
 
-type taskKilledMsg struct {
-	err error
-}
+type taskKilledMsg struct{}
 
 type taskEventMsg struct {
 	event executor.TaskEvent
@@ -1888,17 +1886,6 @@ func (m *AppModel) loadTask(id int64) tea.Cmd {
 	return func() tea.Msg {
 		task, err := m.db.GetTask(id)
 		return taskLoadedMsg{task: task, err: err}
-	}
-}
-
-func (m *AppModel) createTask(t *db.Task) tea.Cmd {
-	exec := m.executor
-	return func() tea.Msg {
-		err := m.db.CreateTask(t)
-		if err == nil {
-			exec.NotifyTaskChange("created", t)
-		}
-		return taskCreatedMsg{task: t, err: err}
 	}
 }
 
@@ -1987,13 +1974,6 @@ func (m *AppModel) deleteTask(id int64) tea.Cmd {
 		// Delete from database
 		err = m.db.DeleteTask(id)
 		return taskDeletedMsg{err: err}
-	}
-}
-
-func (m *AppModel) retryTask(id int64, feedback string) tea.Cmd {
-	return func() tea.Msg {
-		err := m.db.RetryTask(id, feedback)
-		return taskRetriedMsg{err: err}
 	}
 }
 
