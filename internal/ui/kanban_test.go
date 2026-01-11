@@ -151,6 +151,99 @@ func TestKanbanBoard_HandleClick(t *testing.T) {
 	}
 }
 
+func TestKanbanBoard_MoveUpWrapsAround(t *testing.T) {
+	board := NewKanbanBoard(100, 50)
+
+	// Set up tasks in the first column
+	tasks := []*db.Task{
+		{ID: 1, Title: "Task 1", Status: db.StatusBacklog},
+		{ID: 2, Title: "Task 2", Status: db.StatusBacklog},
+		{ID: 3, Title: "Task 3", Status: db.StatusBacklog},
+	}
+	board.SetTasks(tasks)
+
+	// Verify we start at row 0
+	if board.selectedRow != 0 {
+		t.Fatalf("Expected to start at row 0, got %d", board.selectedRow)
+	}
+
+	// MoveUp at top should wrap to bottom
+	board.MoveUp()
+	if board.selectedRow != 2 {
+		t.Errorf("MoveUp at top: selectedRow = %d, want 2", board.selectedRow)
+	}
+
+	// MoveUp again should go to row 1
+	board.MoveUp()
+	if board.selectedRow != 1 {
+		t.Errorf("MoveUp: selectedRow = %d, want 1", board.selectedRow)
+	}
+}
+
+func TestKanbanBoard_MoveDownWrapsAround(t *testing.T) {
+	board := NewKanbanBoard(100, 50)
+
+	// Set up tasks in the first column
+	tasks := []*db.Task{
+		{ID: 1, Title: "Task 1", Status: db.StatusBacklog},
+		{ID: 2, Title: "Task 2", Status: db.StatusBacklog},
+		{ID: 3, Title: "Task 3", Status: db.StatusBacklog},
+	}
+	board.SetTasks(tasks)
+
+	// Move to last task
+	board.MoveDown() // row 1
+	board.MoveDown() // row 2
+
+	if board.selectedRow != 2 {
+		t.Fatalf("Expected to be at row 2, got %d", board.selectedRow)
+	}
+
+	// MoveDown at bottom should wrap to top
+	board.MoveDown()
+	if board.selectedRow != 0 {
+		t.Errorf("MoveDown at bottom: selectedRow = %d, want 0", board.selectedRow)
+	}
+}
+
+func TestKanbanBoard_MoveUpDownEmptyColumn(t *testing.T) {
+	board := NewKanbanBoard(100, 50)
+
+	// No tasks - all columns empty
+	board.SetTasks([]*db.Task{})
+
+	// These should not panic
+	board.MoveUp()
+	board.MoveDown()
+
+	// Selection should stay at 0
+	if board.selectedRow != 0 {
+		t.Errorf("selectedRow = %d, want 0", board.selectedRow)
+	}
+}
+
+func TestKanbanBoard_MoveUpDownSingleTask(t *testing.T) {
+	board := NewKanbanBoard(100, 50)
+
+	// Single task in column
+	tasks := []*db.Task{
+		{ID: 1, Title: "Task 1", Status: db.StatusBacklog},
+	}
+	board.SetTasks(tasks)
+
+	// MoveUp should wrap around to same position (row 0)
+	board.MoveUp()
+	if board.selectedRow != 0 {
+		t.Errorf("MoveUp with single task: selectedRow = %d, want 0", board.selectedRow)
+	}
+
+	// MoveDown should also wrap around to same position
+	board.MoveDown()
+	if board.selectedRow != 0 {
+		t.Errorf("MoveDown with single task: selectedRow = %d, want 0", board.selectedRow)
+	}
+}
+
 func TestKanbanBoard_HandleClickUpdatesSelection(t *testing.T) {
 	board := NewKanbanBoard(100, 50)
 
