@@ -1919,6 +1919,20 @@ func (e *Executor) setupWorktree(task *db.Task) (string, error) {
 		return projectDir, nil
 	}
 
+	// If task already has a worktree path, reuse it (don't recalculate from title)
+	// This prevents creating duplicate worktrees when a task is renamed
+	if task.WorktreePath != "" {
+		if _, err := os.Stat(task.WorktreePath); err == nil {
+			trustMiseConfig(task.WorktreePath)
+			symlinkClaudeConfig(projectDir, task.WorktreePath)
+			copyMCPConfig(projectDir, task.WorktreePath)
+			return task.WorktreePath, nil
+		}
+		// Worktree path was set but directory doesn't exist, clear it and create fresh
+		task.WorktreePath = ""
+		task.BranchName = ""
+	}
+
 	// Create worktree directory inside the project
 	// This allows Claude to inherit the project's MCP config and settings
 	worktreesDir := filepath.Join(projectDir, ".task-worktrees")
