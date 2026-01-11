@@ -407,10 +407,16 @@ func (e *Executor) executeTask(ctx context.Context, task *db.Task) {
 		// Hooks/MCP already marked as done - respect that
 		e.logLine(task.ID, "system", "Task completed")
 		e.hooks.OnStatusChange(task, db.StatusDone, "Task completed")
+
+		// Save transcript on completion
+		e.saveTranscriptOnCompletion(task.ID, workDir)
 	} else if result.Success {
 		e.updateStatus(task.ID, db.StatusDone)
 		e.logLine(task.ID, "system", "Task completed successfully")
 		e.hooks.OnStatusChange(task, db.StatusDone, "Task completed successfully")
+
+		// Save transcript on completion
+		e.saveTranscriptOnCompletion(task.ID, workDir)
 
 		// Extract memories from successful task
 		go func() {
@@ -1092,6 +1098,87 @@ func (e *Executor) findClaudeSessionID(workDir string) string {
 	}
 
 	return latestSession
+}
+
+// saveTranscriptOnCompletion saves the Claude conversation transcript to the database
+// when a task completes. This ensures we have a persistent record of the full
+// conversation even if Claude's session files are cleaned up later.
+func (e *Executor) saveTranscriptOnCompletion(taskID int64, workDir string) {
+	// Find the Claude session directory
+	home, err := os.UserHomeDir()
+	if err != nil {
+		e.logger.Debug("Could not get home dir for transcript save", "error", err)
+		return
+	}
+
+	escapedPath := strings.ReplaceAll(workDir, "/", "-")
+	if strings.HasPrefix(escapedPath, "-") {
+		escapedPath = escapedPath[1:]
+	}
+
+	projectDir := filepath.Join(home, ".claude", "projects", escapedPath)
+
+	// Find the most recent transcript file
+	entries, err := os.ReadDir(projectDir)
+	if err != nil {
+		e.logger.Debug("Could not read Claude project dir", "path", projectDir, "error", err)
+		return
+	}
+
+	var latestTime time.Time
+	var latestPath string
+	var latestSessionID string
+
+	for _, entry := range entries {
+		name := entry.Name()
+		if strings.HasPrefix(name, "agent-") || !strings.HasSuffix(name, ".jsonl") {
+			continue
+		}
+
+		sessionID := strings.TrimSuffix(name, ".jsonl")
+		if !strings.Contains(sessionID, "-") {
+			continue
+		}
+
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+
+		if info.ModTime().After(latestTime) {
+			latestTime = info.ModTime()
+			latestPath = filepath.Join(projectDir, name)
+			latestSessionID = sessionID
+		}
+	}
+
+	if latestPath == "" {
+		e.logger.Debug("No transcript file found", "projectDir", projectDir)
+		return
+	}
+
+	// Read the transcript content
+	content, err := os.ReadFile(latestPath)
+	if err != nil {
+		e.logger.Debug("Could not read transcript file", "path", latestPath, "error", err)
+		return
+	}
+
+	// Save to database
+	summary := &db.CompactionSummary{
+		TaskID:    taskID,
+		SessionID: latestSessionID,
+		Trigger:   "completion", // Special trigger type for task completion
+		PreTokens: len(content) / 4,
+		Summary:   string(content),
+	}
+
+	if err := e.db.SaveCompactionSummary(summary); err != nil {
+		e.logger.Debug("Could not save completion transcript", "error", err)
+		return
+	}
+
+	e.logLine(taskID, "system", fmt.Sprintf("Saved conversation transcript (%d bytes)", len(content)))
 }
 
 // pollTmuxSession waits for the tmux session to end or task status to change.
