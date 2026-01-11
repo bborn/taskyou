@@ -387,9 +387,11 @@ func (e *Executor) worker(ctx context.Context) {
 
 	// Check merged branches every 30 seconds (15 ticks)
 	// Check for idle blocked tasks to suspend every 60 seconds (30 ticks)
+	// Check for due scheduled tasks every 10 seconds (5 ticks)
 	tickCount := 0
 	const mergeCheckInterval = 15
 	const suspendCheckInterval = 30
+	const scheduleCheckInterval = 5
 
 	for {
 		select {
@@ -402,6 +404,11 @@ func (e *Executor) worker(ctx context.Context) {
 
 			tickCount++
 
+			// Periodically check for due scheduled tasks and queue them
+			if tickCount%scheduleCheckInterval == 0 {
+				e.queueDueScheduledTasks()
+			}
+
 			// Periodically check for merged branches
 			if tickCount%mergeCheckInterval == 0 {
 				e.checkMergedBranches()
@@ -411,6 +418,83 @@ func (e *Executor) worker(ctx context.Context) {
 			if tickCount%suspendCheckInterval == 0 {
 				e.suspendIdleBlockedTasks()
 			}
+		}
+	}
+}
+
+// handleRecurringTaskCompletion resets a recurring task to backlog after it completes.
+// This allows it to be picked up again at the next scheduled time.
+func (e *Executor) handleRecurringTaskCompletion(task *db.Task) {
+	// Reload task to get current state
+	currentTask, err := e.db.GetTask(task.ID)
+	if err != nil || currentTask == nil {
+		return
+	}
+
+	// Only handle recurring tasks
+	if !currentTask.IsRecurring() {
+		return
+	}
+
+	// Calculate next run time if not already set
+	if currentTask.ScheduledAt == nil {
+		nextRun := db.CalculateNextRunTime(currentTask.Recurrence, time.Now())
+		currentTask.ScheduledAt = nextRun
+	}
+
+	// Reset to backlog so it can be queued again at next scheduled time
+	currentTask.Status = db.StatusBacklog
+	currentTask.LastRunAt = &db.LocalTime{Time: time.Now()}
+
+	if err := e.db.UpdateTask(currentTask); err != nil {
+		e.logger.Error("Failed to reset recurring task", "id", task.ID, "error", err)
+		return
+	}
+
+	e.logLine(task.ID, "system", fmt.Sprintf("Recurring task (%s) will run again at %s",
+		currentTask.Recurrence,
+		currentTask.ScheduledAt.Format("Jan 2 3:04pm")))
+
+	// Broadcast the status change
+	e.broadcastTaskEvent(TaskEvent{
+		Type:   "status_changed",
+		Task:   currentTask,
+		TaskID: task.ID,
+	})
+}
+
+// queueDueScheduledTasks checks for scheduled tasks that are due and queues them.
+func (e *Executor) queueDueScheduledTasks() {
+	tasks, err := e.db.GetDueScheduledTasks()
+	if err != nil {
+		e.logger.Debug("Failed to get due scheduled tasks", "error", err)
+		return
+	}
+
+	for _, task := range tasks {
+		e.logger.Info("Queuing scheduled task", "id", task.ID, "title", task.Title, "scheduled_at", task.ScheduledAt)
+
+		// Log the scheduled execution
+		msg := "Scheduled task triggered"
+		if task.IsRecurring() {
+			msg = fmt.Sprintf("Recurring task triggered (%s)", task.Recurrence)
+		}
+		e.logLine(task.ID, "system", msg)
+
+		// Queue the task (this also updates the next run time for recurring tasks)
+		if err := e.db.QueueScheduledTask(task.ID); err != nil {
+			e.logger.Error("Failed to queue scheduled task", "id", task.ID, "error", err)
+			continue
+		}
+
+		// Broadcast the status change
+		updatedTask, _ := e.db.GetTask(task.ID)
+		if updatedTask != nil {
+			e.broadcastTaskEvent(TaskEvent{
+				Type:   "status_changed",
+				Task:   updatedTask,
+				TaskID: task.ID,
+			})
 		}
 	}
 }
@@ -580,6 +664,9 @@ func (e *Executor) executeTask(ctx context.Context, task *db.Task) {
 
 		// Save transcript on completion
 		e.saveTranscriptOnCompletion(task.ID, workDir)
+
+		// Handle recurring task: reset to backlog for next run
+		e.handleRecurringTaskCompletion(task)
 	} else if result.Success {
 		e.updateStatus(task.ID, db.StatusDone)
 		e.logLine(task.ID, "system", "Task completed successfully")
@@ -594,6 +681,9 @@ func (e *Executor) executeTask(ctx context.Context, task *db.Task) {
 				e.logger.Error("Memory extraction failed", "task", task.ID, "error", err)
 			}
 		}()
+
+		// Handle recurring task: reset to backlog for next run
+		e.handleRecurringTaskCompletion(task)
 	} else if result.NeedsInput {
 		e.updateStatus(task.ID, db.StatusBlocked)
 		// Log the question with special type so UI can display it

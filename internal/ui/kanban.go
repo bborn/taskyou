@@ -3,6 +3,7 @@ package ui
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/bborn/workflow/internal/db"
 	"github.com/bborn/workflow/internal/github"
@@ -440,6 +441,17 @@ func (k *KanbanBoard) renderTaskCard(task *db.Task, width int, isSelected bool) 
 		b.WriteString(PRStatusBadge(prInfo))
 	}
 
+	// Schedule indicator
+	if task.IsScheduled() {
+		scheduleStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("214")) // Orange for schedule
+		scheduleText := formatScheduleTime(task.ScheduledAt.Time)
+		if task.IsRecurring() {
+			scheduleText = task.Recurrence[0:1] + ":" + scheduleText // e.g., "h:2:30pm" for hourly
+		}
+		b.WriteString(" ")
+		b.WriteString(scheduleStyle.Render("⏰" + scheduleText))
+	}
+
 	// Title (truncate if needed)
 	title := task.Title
 	maxTitleLen := width - 4
@@ -588,4 +600,45 @@ func (k *KanbanBoard) HandleClick(x, y int) *db.Task {
 	k.selectedRow = taskIdx
 
 	return col.Tasks[taskIdx]
+}
+
+// formatScheduleTime formats a scheduled time for display.
+func formatScheduleTime(t time.Time) string {
+	now := time.Now()
+	diff := t.Sub(now)
+
+	// If in the past
+	if diff < 0 {
+		return "overdue"
+	}
+
+	// If less than an hour away
+	if diff < time.Hour {
+		mins := int(diff.Minutes())
+		if mins <= 0 {
+			return "now"
+		}
+		return fmt.Sprintf("%dm", mins)
+	}
+
+	// If less than 24 hours away
+	if diff < 24*time.Hour {
+		hours := int(diff.Hours())
+		return fmt.Sprintf("%dh", hours)
+	}
+
+	// If today or tomorrow
+	if t.Day() == now.Day() && t.Month() == now.Month() && t.Year() == now.Year() {
+		return t.Format("3:04pm")
+	}
+	tomorrow := now.AddDate(0, 0, 1)
+	if t.Day() == tomorrow.Day() && t.Month() == tomorrow.Month() && t.Year() == tomorrow.Year() {
+		return "tmrw " + t.Format("3pm")
+	}
+
+	// Otherwise show date
+	if t.Year() == now.Year() {
+		return t.Format("Jan 2")
+	}
+	return t.Format("Jan 2 '06")
 }
