@@ -1762,7 +1762,8 @@ func (e *Executor) checkMergedBranches() {
 }
 
 // isBranchMerged checks if a task's branch has been merged into the default branch.
-// Uses git commands to detect merged branches. All commands have timeouts to prevent blocking.
+// First checks GitHub API for PR merge status (most reliable), then falls back to git commands.
+// All commands have timeouts to prevent blocking.
 func (e *Executor) isBranchMerged(task *db.Task) bool {
 	projectDir := e.getProjectDir(task.Project)
 	if projectDir == "" {
@@ -1773,6 +1774,16 @@ func (e *Executor) isBranchMerged(task *db.Task) bool {
 	gitDir := filepath.Join(projectDir, ".git")
 	if _, err := os.Stat(gitDir); os.IsNotExist(err) {
 		return false
+	}
+
+	// First, check GitHub API for PR merge status (most reliable method)
+	// This directly tells us if the PR was merged, regardless of branch deletion
+	if e.prCache != nil && task.BranchName != "" {
+		prInfo := e.prCache.GetPRForBranch(projectDir, task.BranchName)
+		if prInfo != nil && prInfo.State == github.PRStateMerged {
+			e.logger.Debug("PR detected as merged via GitHub API", "branch", task.BranchName, "pr", prInfo.Number)
+			return true
+		}
 	}
 
 	// Get the default branch
