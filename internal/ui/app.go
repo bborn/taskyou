@@ -31,7 +31,6 @@ const (
 	ViewDeleteConfirm
 	ViewKillConfirm
 	ViewQuitConfirm
-	ViewWatch
 	ViewSettings
 	ViewRetry
 	ViewMemories
@@ -54,8 +53,6 @@ type KeyMap struct {
 	Close        key.Binding
 	Delete       key.Binding
 	Kill         key.Binding
-	Watch        key.Binding
-	Attach       key.Binding
 	Filter       key.Binding
 	Refresh      key.Binding
 	Settings     key.Binding
@@ -73,7 +70,7 @@ type KeyMap struct {
 
 // ShortHelp returns key bindings to show in the mini help.
 func (k KeyMap) ShortHelp() []key.Binding {
-	return []key.Binding{k.Left, k.Right, k.Up, k.Down, k.Enter, k.New, k.Queue, k.Attach, k.Filter, k.Quit}
+	return []key.Binding{k.Left, k.Right, k.Up, k.Down, k.Enter, k.New, k.Queue, k.Filter, k.Quit}
 }
 
 // FullHelp returns keybindings for the expanded help view.
@@ -82,7 +79,7 @@ func (k KeyMap) FullHelp() [][]key.Binding {
 		{k.Left, k.Right, k.Up, k.Down},
 		{k.FocusBacklog, k.FocusInProgress, k.FocusBlocked, k.FocusDone},
 		{k.Enter, k.New, k.Queue, k.Close},
-		{k.Retry, k.Watch, k.Attach, k.Delete},
+		{k.Retry, k.Delete, k.Kill},
 		{k.Filter, k.Settings, k.Memories, k.Files},
 		{k.ChangeStatus, k.Refresh, k.Help, k.Quit},
 	}
@@ -142,14 +139,6 @@ func DefaultKeyMap() KeyMap {
 		Kill: key.NewBinding(
 			key.WithKeys("k"),
 			key.WithHelp("k", "kill"),
-		),
-		Watch: key.NewBinding(
-			key.WithKeys("w"),
-			key.WithHelp("w", "watch"),
-		),
-		Attach: key.NewBinding(
-			key.WithKeys("a"),
-			key.WithHelp("a", "attach"),
 		),
 		Filter: key.NewBinding(
 			key.WithKeys("/"),
@@ -275,9 +264,6 @@ type AppModel struct {
 	// Quit confirmation state
 	quitConfirm      *huh.Form
 	quitConfirmValue bool
-
-	// Watch view state
-	watchView *WatchModel
 
 	// Settings view state
 	settingsView *SettingsModel
@@ -422,8 +408,6 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.updateDashboard(msg)
 		case ViewDetail:
 			return m.updateDetail(msg)
-		case ViewWatch:
-			return m.updateWatch(msg)
 		case ViewMemories:
 			return m.updateMemories(msg)
 		case ViewAttachments:
@@ -446,9 +430,6 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.kanban.SetSize(msg.Width, msg.Height-4)
 		if m.detailView != nil {
 			m.detailView.SetSize(msg.Width, msg.Height)
-		}
-		if m.watchView != nil {
-			m.watchView.SetSize(msg.Width, msg.Height)
 		}
 		if m.settingsView != nil {
 			m.settingsView.SetSize(msg.Width, msg.Height)
@@ -570,10 +551,6 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case taskQueuedMsg, taskClosedMsg, taskDeletedMsg, taskRetriedMsg, taskKilledMsg, taskStatusChangedMsg:
 		cmds = append(cmds, m.loadTasks())
 
-	case attachDoneMsg:
-		// Returned from tmux attach - refresh tasks
-		cmds = append(cmds, m.loadTasks())
-
 	case taskEventMsg:
 		// Real-time task update from executor
 		event := msg.event
@@ -679,10 +656,6 @@ func (m *AppModel) View() string {
 		return m.viewKillConfirm()
 	case ViewQuitConfirm:
 		return m.viewQuitConfirm()
-	case ViewWatch:
-		if m.watchView != nil {
-			return m.watchView.View()
-		}
 	case ViewSettings:
 		if m.settingsView != nil {
 			return m.settingsView.View()
@@ -968,29 +941,6 @@ func (m *AppModel) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m.showDeleteConfirm(task)
 		}
 
-	case key.Matches(msg, m.keys.Watch):
-		// Watch the selected task if it's in progress
-		if task := m.kanban.SelectedTask(); task != nil {
-			if db.IsInProgress(task.Status) || m.executor.IsRunning(task.ID) {
-				m.watchView = NewWatchModel(m.db, m.executor, task.ID, m.width, m.height)
-				m.previousView = m.currentView
-				m.currentView = ViewWatch
-				return m, m.watchView.Init()
-			}
-		}
-
-	case key.Matches(msg, m.keys.Attach):
-		// Attach to tmux session for selected task
-		if task := m.kanban.SelectedTask(); task != nil {
-			if db.IsInProgress(task.Status) {
-				sessionName := executor.TmuxSessionName(task.ID)
-				return m, tea.ExecProcess(
-					osExec.Command("tmux", "attach-session", "-t", sessionName),
-					func(err error) tea.Msg { return attachDoneMsg{err: err} },
-				)
-			}
-		}
-
 	case key.Matches(msg, m.keys.Filter):
 		m.filtering = true
 		m.filterInput.Focus()
@@ -1113,16 +1063,6 @@ func (m *AppModel) updateDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.updateTaskInList(m.selectedTask)
 		m.currentView = ViewDashboard
 		return m, m.closeTask(m.selectedTask.ID)
-	}
-	if key.Matches(keyMsg, m.keys.Attach) && m.selectedTask != nil {
-		// Attach if tmux session exists
-		sessionName := executor.TmuxSessionName(m.selectedTask.ID)
-		if osExec.Command("tmux", "has-session", "-t", sessionName).Run() == nil {
-			return m, tea.ExecProcess(
-				osExec.Command("tmux", "attach-session", "-t", sessionName),
-				func(err error) tea.Msg { return attachDoneMsg{err: err} },
-			)
-		}
 	}
 	if key.Matches(keyMsg, m.keys.Delete) && m.selectedTask != nil {
 		// Clean up detail view first
@@ -1707,25 +1647,6 @@ type taskStatusChangedMsg struct {
 	err error
 }
 
-func (m *AppModel) updateWatch(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	if key.Matches(msg, m.keys.Back) {
-		m.currentView = ViewDashboard
-		if m.watchView != nil {
-			m.watchView.Cleanup()
-		}
-		m.watchView = nil
-		return m, nil
-	}
-
-	if m.watchView != nil {
-		var cmd tea.Cmd
-		m.watchView, cmd = m.watchView.Update(msg)
-		return m, cmd
-	}
-
-	return m, nil
-}
-
 func (m *AppModel) updateSettings(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// Handle escape to go back
 	if keyMsg, ok := msg.(tea.KeyMsg); ok {
@@ -1853,10 +1774,6 @@ type taskKilledMsg struct{}
 
 type taskEventMsg struct {
 	event executor.TaskEvent
-}
-
-type attachDoneMsg struct {
-	err error
 }
 
 type tickMsg time.Time

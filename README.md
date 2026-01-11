@@ -58,8 +58,6 @@ ssh -p 2222 your-server
 | `r` | Retry task with feedback |
 | `c` | Close task |
 | `d` | Delete task |
-| `w` | Watch execution |
-| `a` | Attach to tmux session |
 | `o` | Open task's working directory |
 | `f` | View/manage attachments |
 | `/` | Filter tasks |
