@@ -1043,8 +1043,12 @@ func (m *DetailModel) getClaudeMemoryMB() int {
 		return 0
 	}
 
-	windowTarget := m.cachedWindowTarget
-	if windowTarget == "" {
+	// Use joined pane ID if available, otherwise fall back to cached window target
+	paneTarget := m.claudePaneID
+	if paneTarget == "" {
+		paneTarget = m.cachedWindowTarget
+	}
+	if paneTarget == "" {
 		return 0
 	}
 
@@ -1052,7 +1056,7 @@ func (m *DetailModel) getClaudeMemoryMB() int {
 	defer cancel()
 
 	// Get the shell PID from the tmux pane
-	out, err := exec.CommandContext(ctx, "tmux", "display-message", "-t", windowTarget, "-p", "#{pane_pid}").Output()
+	out, err := exec.CommandContext(ctx, "tmux", "display-message", "-t", paneTarget, "-p", "#{pane_pid}").Output()
 	if err != nil {
 		return 0
 	}
