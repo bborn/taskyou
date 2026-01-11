@@ -547,9 +547,20 @@ func (e *Executor) executeTask(ctx context.Context, task *db.Task) {
 	// Build prompt based on task type
 	prompt := e.buildPrompt(task, attachmentPaths)
 
+	// Check if project has a sprite configured for cloud execution
+	var project *db.Project
+	if task.Project != "" {
+		project, _ = e.db.GetProjectByName(task.Project)
+	}
+	useSprite := project != nil && project.SpriteName != "" &&
+		(project.SpriteStatus == "ready" || project.SpriteStatus == "checkpointed")
+
 	// Run Claude
 	var result execResult
-	if isRetry {
+	if useSprite {
+		// Run on sprite (cloud execution with dangerous mode)
+		result = e.runClaudeOnSprite(taskCtx, task, project, workDir, prompt)
+	} else if isRetry {
 		e.logLine(task.ID, "system", "Resuming previous session with feedback")
 		result = e.runClaudeResume(taskCtx, task.ID, workDir, prompt, retryFeedback)
 	} else {
