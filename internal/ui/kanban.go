@@ -26,10 +26,7 @@ type KanbanBoard struct {
 	scrollOffsets []int      // Scroll offset per column
 	width         int
 	height        int
-	numberFilter  string
-	allTasks      []*db.Task // All tasks for filtering
-	filteredTasks []*db.Task // Tasks after applying text filter
-	textFilter    string     // Current text filter
+	allTasks      []*db.Task // All tasks
 	prInfo        map[int64]*github.PRInfo // PR info by task ID
 }
 
@@ -69,7 +66,7 @@ func (k *KanbanBoard) RefreshTheme() {
 // SetTasks updates the tasks in the kanban board.
 func (k *KanbanBoard) SetTasks(tasks []*db.Task) {
 	k.allTasks = tasks
-	k.applyFilter()
+	k.distributeTasksToColumns()
 }
 
 // SetPRInfo updates the PR info for a task.
@@ -88,29 +85,15 @@ func (k *KanbanBoard) GetPRInfo(taskID int64) *github.PRInfo {
 	return k.prInfo[taskID]
 }
 
-// applyFilter filters tasks and distributes them to columns.
-func (k *KanbanBoard) applyFilter() {
-	// Apply text filter
-	if k.textFilter == "" {
-		k.filteredTasks = k.allTasks
-	} else {
-		k.filteredTasks = nil
-		filter := strings.ToLower(k.textFilter)
-		for _, t := range k.allTasks {
-			if strings.Contains(strings.ToLower(t.Title), filter) ||
-				strings.Contains(fmt.Sprintf("%d", t.ID), filter) {
-				k.filteredTasks = append(k.filteredTasks, t)
-			}
-		}
-	}
-
+// distributeTasksToColumns distributes tasks to their respective columns.
+func (k *KanbanBoard) distributeTasksToColumns() {
 	// Clear all columns
 	for i := range k.columns {
 		k.columns[i].Tasks = nil
 	}
 
 	// Distribute tasks to columns
-	for _, task := range k.filteredTasks {
+	for _, task := range k.allTasks {
 		placed := false
 		for i := range k.columns {
 			if k.columns[i].Status == task.Status {
@@ -132,17 +115,6 @@ func (k *KanbanBoard) applyFilter() {
 
 	// Ensure selected position is valid
 	k.clampSelection()
-}
-
-// SetFilter sets the text filter.
-func (k *KanbanBoard) SetFilter(filter string) {
-	k.textFilter = filter
-	k.applyFilter()
-}
-
-// GetFilter returns the current text filter.
-func (k *KanbanBoard) GetFilter() string {
-	return k.textFilter
 }
 
 // SetSize updates the board dimensions.
@@ -508,34 +480,6 @@ func (k *KanbanBoard) renderTaskCard(task *db.Task, width int, isSelected bool) 
 
 	content := idLine + "\n" + titleLine
 	return cardStyle.Render(content)
-}
-
-// ApplyNumberFilter filters by task ID prefix.
-func (k *KanbanBoard) ApplyNumberFilter(filter string) {
-	k.numberFilter = filter
-	if filter == "" {
-		k.applyFilter()
-		return
-	}
-
-	// Try to find exact match first
-	for colIdx, col := range k.columns {
-		for rowIdx, task := range col.Tasks {
-			if fmt.Sprintf("%d", task.ID) == filter {
-				k.selectedCol = colIdx
-				k.selectedRow = rowIdx
-				k.ensureSelectedVisible()
-				return
-			}
-		}
-	}
-
-	// Otherwise just keep current selection
-}
-
-// GetNumberFilter returns the current number filter.
-func (k *KanbanBoard) GetNumberFilter() string {
-	return k.numberFilter
 }
 
 // FocusColumn moves selection to a specific column by index.
