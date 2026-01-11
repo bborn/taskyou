@@ -103,6 +103,11 @@ func TestInterrupt(t *testing.T) {
 	}
 	defer database.Close()
 
+	// Create the test project first
+	if err := database.CreateProject(&db.Project{Name: "test", Path: "/tmp/test"}); err != nil {
+		t.Fatal(err)
+	}
+
 	cfg := &config.Config{}
 	exec := New(database, cfg)
 
@@ -206,6 +211,11 @@ func TestAttachmentsInPrompt(t *testing.T) {
 	}
 	defer database.Close()
 
+	// Create the test project first
+	if err := database.CreateProject(&db.Project{Name: "test", Path: "/tmp/test"}); err != nil {
+		t.Fatal(err)
+	}
+
 	cfg := &config.Config{}
 	exec := New(database, cfg)
 
@@ -293,6 +303,11 @@ func TestConversationHistory(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer database.Close()
+
+	// Create the test project first
+	if err := database.CreateProject(&db.Project{Name: "test", Path: "/tmp/test"}); err != nil {
+		t.Fatal(err)
+	}
 
 	cfg := &config.Config{}
 	exec := New(database, cfg)

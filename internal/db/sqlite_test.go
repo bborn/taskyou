@@ -19,6 +19,11 @@ func TestTimestampLocalization(t *testing.T) {
 	defer db.Close()
 	defer os.Remove(dbPath)
 
+	// Create the test project first
+	if err := db.CreateProject(&Project{Name: "test", Path: tmpDir}); err != nil {
+		t.Fatalf("failed to create test project: %v", err)
+	}
+
 	// Create a task
 	task := &Task{
 		Title:    "Test Task",

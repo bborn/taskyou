@@ -21,6 +21,11 @@ func TestCLICreateTask(t *testing.T) {
 	defer database.Close()
 	defer os.Remove(dbPath)
 
+	// Create the myproject project for testing
+	if err := database.CreateProject(&db.Project{Name: "myproject", Path: tmpDir}); err != nil {
+		t.Fatalf("failed to create myproject: %v", err)
+	}
+
 	tests := []struct {
 		name     string
 		task     *db.Task
@@ -96,6 +101,11 @@ func TestCLIListTasks(t *testing.T) {
 	}
 	defer database.Close()
 	defer os.Remove(dbPath)
+
+	// Create the proj1 project for testing
+	if err := database.CreateProject(&db.Project{Name: "proj1", Path: tmpDir}); err != nil {
+		t.Fatalf("failed to create proj1: %v", err)
+	}
 
 	// Create some tasks
 	tasks := []*db.Task{
