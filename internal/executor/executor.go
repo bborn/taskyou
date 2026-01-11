@@ -735,6 +735,10 @@ Work on this task until completion. When you're done or need input:
 ✓ WHEN YOU NEED INPUT/CLARIFICATION:
   Ask your question clearly and wait for a response
 
+✓ FOR VISUAL/FRONTEND WORK:
+  Use the workflow_screenshot MCP tool to take screenshots of the
+  screen. This helps verify correctness and document changes.
+
 The task system will automatically detect your status.
 ═══════════════════════════════════════════════════════════════
 `)

@@ -9,7 +9,11 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
+	"runtime"
+	"strings"
 	"sync"
+	"time"
 
 	"github.com/bborn/workflow/internal/db"
 )
@@ -169,6 +173,23 @@ func (s *Server) handleRequest(req *jsonRPCRequest) {
 						"required": []string{"question"},
 					},
 				},
+				{
+					Name:        "workflow_screenshot",
+					Description: "Take a screenshot of the entire screen and save it as an attachment to the current task. Use this to capture visual output of your work, especially for frontend/UI tasks. Screenshots are saved and can be reviewed by the user or included in PRs.",
+					InputSchema: map[string]interface{}{
+						"type": "object",
+						"properties": map[string]interface{}{
+							"filename": map[string]interface{}{
+								"type":        "string",
+								"description": "Optional filename for the screenshot (defaults to screenshot-{timestamp}.png)",
+							},
+							"description": map[string]interface{}{
+								"type":        "string",
+								"description": "Optional description of what the screenshot shows",
+							},
+						},
+					},
+				},
 			},
 		})
 
@@ -224,6 +245,87 @@ func (s *Server) handleToolCall(id interface{}, params *toolCallParams) {
 		s.sendResult(id, toolCallResult{
 			Content: []contentBlock{
 				{Type: "text", Text: "Input requested. The user will be notified."},
+			},
+		})
+
+	case "workflow_screenshot":
+		filename, _ := params.Arguments["filename"].(string)
+		description, _ := params.Arguments["description"].(string)
+
+		// Create temp file for screenshot
+		tmpFile, err := os.CreateTemp("", "screenshot-*.png")
+		if err != nil {
+			s.sendError(id, -32603, fmt.Sprintf("Failed to create temp file: %v", err))
+			return
+		}
+		tmpPath := tmpFile.Name()
+		tmpFile.Close()
+		defer os.Remove(tmpPath)
+
+		// Take screenshot based on OS
+		var cmd *exec.Cmd
+		switch runtime.GOOS {
+		case "darwin":
+			// macOS: use screencapture -x (silent, no sound)
+			cmd = exec.Command("screencapture", "-x", tmpPath)
+		case "linux":
+			// Linux: try various screenshot tools
+			// First try gnome-screenshot, then scrot, then import (ImageMagick)
+			if _, err := exec.LookPath("gnome-screenshot"); err == nil {
+				cmd = exec.Command("gnome-screenshot", "-f", tmpPath)
+			} else if _, err := exec.LookPath("scrot"); err == nil {
+				cmd = exec.Command("scrot", tmpPath)
+			} else if _, err := exec.LookPath("import"); err == nil {
+				cmd = exec.Command("import", "-window", "root", tmpPath)
+			} else {
+				s.sendError(id, -32603, "No screenshot tool found. Install gnome-screenshot, scrot, or imagemagick.")
+				return
+			}
+		default:
+			s.sendError(id, -32603, fmt.Sprintf("Screenshot not supported on %s", runtime.GOOS))
+			return
+		}
+
+		// Run the screenshot command
+		if output, err := cmd.CombinedOutput(); err != nil {
+			s.sendError(id, -32603, fmt.Sprintf("Failed to take screenshot: %v - %s", err, string(output)))
+			return
+		}
+
+		// Read the screenshot file
+		data, err := os.ReadFile(tmpPath)
+		if err != nil {
+			s.sendError(id, -32603, fmt.Sprintf("Failed to read screenshot: %v", err))
+			return
+		}
+
+		// Generate filename if not provided
+		if filename == "" {
+			filename = fmt.Sprintf("screenshot-%s.png", time.Now().Format("20060102-150405"))
+		} else {
+			// Ensure the filename has .png extension
+			if !strings.HasSuffix(strings.ToLower(filename), ".png") {
+				filename += ".png"
+			}
+		}
+
+		// Save as attachment
+		attachment, err := s.db.AddAttachment(s.taskID, filename, "image/png", data)
+		if err != nil {
+			s.sendError(id, -32603, fmt.Sprintf("Failed to save screenshot: %v", err))
+			return
+		}
+
+		// Log the screenshot
+		logMsg := fmt.Sprintf("Screenshot captured: %s (%d bytes)", filename, len(data))
+		if description != "" {
+			logMsg = fmt.Sprintf("Screenshot captured: %s - %s (%d bytes)", filename, description, len(data))
+		}
+		s.db.AppendTaskLog(s.taskID, "system", logMsg)
+
+		s.sendResult(id, toolCallResult{
+			Content: []contentBlock{
+				{Type: "text", Text: fmt.Sprintf("Screenshot captured and saved as attachment #%d: %s (%d bytes)", attachment.ID, filename, len(data))},
 			},
 		})
 
