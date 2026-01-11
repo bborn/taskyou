@@ -1560,9 +1560,10 @@ type ClaudeHookInput struct {
 // It reads hook data from stdin and updates task status accordingly.
 func handleClaudeHook(hookEvent string) error {
 	// Get task ID from environment (set by executor when launching Claude)
+	// If not set, this Claude session predates the task tracking system - silently succeed
 	taskIDStr := os.Getenv("WORKTREE_TASK_ID")
 	if taskIDStr == "" {
-		return fmt.Errorf("WORKTREE_TASK_ID not set")
+		return nil
 	}
 	var taskID int64
 	if _, err := fmt.Sscanf(taskIDStr, "%d", &taskID); err != nil {
