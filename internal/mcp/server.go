@@ -5,12 +5,12 @@ package mcp
 
 import (
 	"bufio"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
+	"os/exec"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -174,15 +174,11 @@ func (s *Server) handleRequest(req *jsonRPCRequest) {
 					},
 				},
 				{
-					Name:        "workflow_save_screenshot",
-					Description: "Save a screenshot as an attachment to the current task. Use this to capture visual output of your work, especially for frontend/UI tasks. Screenshots are saved and can be reviewed by the user or included in PRs.",
+					Name:        "workflow_screenshot",
+					Description: "Take a screenshot of the entire screen and save it as an attachment to the current task. Use this to capture visual output of your work, especially for frontend/UI tasks. Screenshots are saved and can be reviewed by the user or included in PRs.",
 					InputSchema: map[string]interface{}{
 						"type": "object",
 						"properties": map[string]interface{}{
-							"image_data": map[string]interface{}{
-								"type":        "string",
-								"description": "Base64-encoded image data (PNG or JPEG format)",
-							},
 							"filename": map[string]interface{}{
 								"type":        "string",
 								"description": "Optional filename for the screenshot (defaults to screenshot-{timestamp}.png)",
@@ -192,7 +188,6 @@ func (s *Server) handleRequest(req *jsonRPCRequest) {
 								"description": "Optional description of what the screenshot shows",
 							},
 						},
-						"required": []string{"image_data"},
 					},
 				},
 			},
@@ -253,86 +248,84 @@ func (s *Server) handleToolCall(id interface{}, params *toolCallParams) {
 			},
 		})
 
-	case "workflow_save_screenshot":
-		imageData, _ := params.Arguments["image_data"].(string)
+	case "workflow_screenshot":
 		filename, _ := params.Arguments["filename"].(string)
 		description, _ := params.Arguments["description"].(string)
 
-		if imageData == "" {
-			s.sendError(id, -32602, "image_data is required")
+		// Create temp file for screenshot
+		tmpFile, err := os.CreateTemp("", "screenshot-*.png")
+		if err != nil {
+			s.sendError(id, -32603, fmt.Sprintf("Failed to create temp file: %v", err))
+			return
+		}
+		tmpPath := tmpFile.Name()
+		tmpFile.Close()
+		defer os.Remove(tmpPath)
+
+		// Take screenshot based on OS
+		var cmd *exec.Cmd
+		switch runtime.GOOS {
+		case "darwin":
+			// macOS: use screencapture -x (silent, no sound)
+			cmd = exec.Command("screencapture", "-x", tmpPath)
+		case "linux":
+			// Linux: try various screenshot tools
+			// First try gnome-screenshot, then scrot, then import (ImageMagick)
+			if _, err := exec.LookPath("gnome-screenshot"); err == nil {
+				cmd = exec.Command("gnome-screenshot", "-f", tmpPath)
+			} else if _, err := exec.LookPath("scrot"); err == nil {
+				cmd = exec.Command("scrot", tmpPath)
+			} else if _, err := exec.LookPath("import"); err == nil {
+				cmd = exec.Command("import", "-window", "root", tmpPath)
+			} else {
+				s.sendError(id, -32603, "No screenshot tool found. Install gnome-screenshot, scrot, or imagemagick.")
+				return
+			}
+		default:
+			s.sendError(id, -32603, fmt.Sprintf("Screenshot not supported on %s", runtime.GOOS))
 			return
 		}
 
-		// Handle data URI format (data:image/png;base64,...)
-		base64Data := imageData
-		mimeType := "image/png"
-		if strings.HasPrefix(imageData, "data:") {
-			parts := strings.SplitN(imageData, ",", 2)
-			if len(parts) == 2 {
-				base64Data = parts[1]
-				// Extract MIME type from data URI
-				header := parts[0] // e.g., "data:image/png;base64"
-				if strings.Contains(header, "image/jpeg") || strings.Contains(header, "image/jpg") {
-					mimeType = "image/jpeg"
-				} else if strings.Contains(header, "image/gif") {
-					mimeType = "image/gif"
-				} else if strings.Contains(header, "image/webp") {
-					mimeType = "image/webp"
-				}
-			}
+		// Run the screenshot command
+		if output, err := cmd.CombinedOutput(); err != nil {
+			s.sendError(id, -32603, fmt.Sprintf("Failed to take screenshot: %v - %s", err, string(output)))
+			return
 		}
 
-		// Decode the base64 image data
-		data, err := base64.StdEncoding.DecodeString(base64Data)
+		// Read the screenshot file
+		data, err := os.ReadFile(tmpPath)
 		if err != nil {
-			s.sendError(id, -32602, fmt.Sprintf("Failed to decode base64 image data: %v", err))
+			s.sendError(id, -32603, fmt.Sprintf("Failed to read screenshot: %v", err))
 			return
 		}
 
 		// Generate filename if not provided
 		if filename == "" {
-			ext := ".png"
-			if mimeType == "image/jpeg" {
-				ext = ".jpg"
-			} else if mimeType == "image/gif" {
-				ext = ".gif"
-			} else if mimeType == "image/webp" {
-				ext = ".webp"
-			}
-			filename = fmt.Sprintf("screenshot-%s%s", time.Now().Format("20060102-150405"), ext)
+			filename = fmt.Sprintf("screenshot-%s.png", time.Now().Format("20060102-150405"))
 		} else {
-			// Ensure the filename has an appropriate extension
-			ext := filepath.Ext(filename)
-			if ext == "" {
-				if mimeType == "image/jpeg" {
-					filename += ".jpg"
-				} else if mimeType == "image/gif" {
-					filename += ".gif"
-				} else if mimeType == "image/webp" {
-					filename += ".webp"
-				} else {
-					filename += ".png"
-				}
+			// Ensure the filename has .png extension
+			if !strings.HasSuffix(strings.ToLower(filename), ".png") {
+				filename += ".png"
 			}
 		}
 
 		// Save as attachment
-		attachment, err := s.db.AddAttachment(s.taskID, filename, mimeType, data)
+		attachment, err := s.db.AddAttachment(s.taskID, filename, "image/png", data)
 		if err != nil {
 			s.sendError(id, -32603, fmt.Sprintf("Failed to save screenshot: %v", err))
 			return
 		}
 
-		// Log the screenshot save
-		logMsg := fmt.Sprintf("Screenshot saved: %s (%d bytes)", filename, len(data))
+		// Log the screenshot
+		logMsg := fmt.Sprintf("Screenshot captured: %s (%d bytes)", filename, len(data))
 		if description != "" {
-			logMsg = fmt.Sprintf("Screenshot saved: %s - %s (%d bytes)", filename, description, len(data))
+			logMsg = fmt.Sprintf("Screenshot captured: %s - %s (%d bytes)", filename, description, len(data))
 		}
 		s.db.AppendTaskLog(s.taskID, "system", logMsg)
 
 		s.sendResult(id, toolCallResult{
 			Content: []contentBlock{
-				{Type: "text", Text: fmt.Sprintf("Screenshot saved as attachment #%d: %s", attachment.ID, filename)},
+				{Type: "text", Text: fmt.Sprintf("Screenshot captured and saved as attachment #%d: %s (%d bytes)", attachment.ID, filename, len(data))},
 			},
 		})
 
