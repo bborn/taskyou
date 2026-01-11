@@ -18,6 +18,10 @@ type KanbanColumn struct {
 	Icon   string // Visual icon for the column
 }
 
+// MobileWidthThreshold is the minimum width for showing all columns.
+// Below this, only the selected column is shown.
+const MobileWidthThreshold = 80
+
 // KanbanBoard manages the kanban board state.
 type KanbanBoard struct {
 	columns       []KanbanColumn
@@ -28,6 +32,11 @@ type KanbanBoard struct {
 	height        int
 	allTasks      []*db.Task // All tasks
 	prInfo        map[int64]*github.PRInfo // PR info by task ID
+}
+
+// IsMobileMode returns true if the board should show single-column mode.
+func (k *KanbanBoard) IsMobileMode() bool {
+	return k.width < MobileWidthThreshold
 }
 
 // NewKanbanBoard creates a new kanban board.
@@ -256,6 +265,16 @@ func (k *KanbanBoard) View() string {
 		return lipgloss.Place(k.width, k.height, lipgloss.Center, lipgloss.Center, "Terminal too small")
 	}
 
+	// Use mobile view for narrow terminals
+	if k.IsMobileMode() {
+		return k.viewMobile()
+	}
+
+	return k.viewDesktop()
+}
+
+// viewDesktop renders the full kanban board with all columns side by side.
+func (k *KanbanBoard) viewDesktop() string {
 	// Calculate column width (subtract borders and gaps)
 	numCols := len(k.columns)
 	// Account for borders (2 chars per column) and gaps between columns (1 char each)
@@ -404,6 +423,194 @@ func (k *KanbanBoard) View() string {
 	return board
 }
 
+// viewMobile renders a single-column view with tab navigation for narrow terminals.
+func (k *KanbanBoard) viewMobile() string {
+	// Render tab bar for column navigation
+	tabBar := k.renderColumnTabs()
+
+	// Use full width for single column (minus borders)
+	colWidth := k.width - 2
+	if colWidth < 20 {
+		colWidth = 20
+	}
+
+	// Calculate available height for tasks (subtract tab bar height and column border)
+	tabBarHeight := 2 // Tab bar takes 2 lines (content + margin)
+	colHeight := k.height - tabBarHeight - 2
+
+	col := k.columns[k.selectedCol]
+
+	// Colored header bar at top of column
+	headerBarStyle := lipgloss.NewStyle().
+		Width(colWidth).
+		Background(col.Color).
+		Foreground(lipgloss.Color("#000000")).
+		Bold(true).
+		Align(lipgloss.Center)
+
+	headerText := fmt.Sprintf("%s %s (%d)", col.Icon, col.Title, len(col.Tasks))
+	headerBar := headerBarStyle.Render(headerText)
+
+	// Task cards - calculate how many fit
+	cardHeight := 3
+	maxTasks := (colHeight - 3) / cardHeight
+	if maxTasks < 1 {
+		maxTasks = 1
+	}
+
+	// Get scroll offset for this column
+	scrollOffset := 0
+	if k.selectedCol < len(k.scrollOffsets) {
+		scrollOffset = k.scrollOffsets[k.selectedCol]
+	}
+
+	// Clamp scroll offset to valid range
+	maxOffset := len(col.Tasks) - maxTasks
+	if maxOffset < 0 {
+		maxOffset = 0
+	}
+	if scrollOffset > maxOffset {
+		scrollOffset = maxOffset
+	}
+	if scrollOffset < 0 {
+		scrollOffset = 0
+	}
+
+	// Calculate visible task range
+	startIdx := scrollOffset
+	endIdx := scrollOffset + maxTasks
+	if endIdx > len(col.Tasks) {
+		endIdx = len(col.Tasks)
+	}
+
+	var taskViews []string
+
+	// Show "more above" indicator
+	if scrollOffset > 0 {
+		scrollIndicatorStyle := lipgloss.NewStyle().
+			Foreground(ColorMuted).
+			Width(colWidth - 2).
+			Align(lipgloss.Center).
+			Italic(true)
+		taskViews = append(taskViews, scrollIndicatorStyle.Render(fmt.Sprintf("↑ %d more", scrollOffset)))
+	}
+
+	// Render visible tasks
+	for i := startIdx; i < endIdx; i++ {
+		task := col.Tasks[i]
+		isSelected := i == k.selectedRow
+		taskView := k.renderTaskCard(task, colWidth-2, isSelected)
+		taskViews = append(taskViews, taskView)
+	}
+
+	// Show "more below" indicator
+	remainingBelow := len(col.Tasks) - endIdx
+	if remainingBelow > 0 {
+		scrollIndicatorStyle := lipgloss.NewStyle().
+			Foreground(ColorMuted).
+			Width(colWidth - 2).
+			Align(lipgloss.Center).
+			Italic(true)
+		taskViews = append(taskViews, scrollIndicatorStyle.Render(fmt.Sprintf("↓ %d more", remainingBelow)))
+	}
+
+	// Empty column placeholder
+	if len(col.Tasks) == 0 {
+		emptyStyle := lipgloss.NewStyle().
+			Foreground(ColorMuted).
+			Width(colWidth - 2).
+			Align(lipgloss.Center).
+			Italic(true).
+			MarginTop(1)
+		taskViews = append(taskViews, emptyStyle.Render("No tasks"))
+	}
+
+	// Combine tasks with spacing
+	taskContent := lipgloss.JoinVertical(lipgloss.Left, taskViews...)
+
+	// Column container with border
+	_, highlightBorder := GetThemeBorderColors()
+	borderStyle := lipgloss.RoundedBorder()
+
+	fullContent := lipgloss.JoinVertical(lipgloss.Left,
+		headerBar,
+		taskContent,
+	)
+
+	colStyle := lipgloss.NewStyle().
+		Width(colWidth).
+		Height(colHeight).
+		Border(borderStyle).
+		BorderForeground(highlightBorder)
+
+	columnView := colStyle.Render(fullContent)
+
+	// Combine tab bar and column
+	return lipgloss.JoinVertical(lipgloss.Left, tabBar, columnView)
+}
+
+// renderColumnTabs renders the tab bar for mobile column navigation.
+func (k *KanbanBoard) renderColumnTabs() string {
+	var tabs []string
+
+	for i, col := range k.columns {
+		isSelected := i == k.selectedCol
+
+		// Calculate tab width to fit all tabs
+		tabWidth := (k.width - len(k.columns) - 1) / len(k.columns)
+		if tabWidth < 8 {
+			tabWidth = 8
+		}
+
+		// Short column names for mobile
+		name := col.Icon
+		switch col.Title {
+		case "Backlog":
+			name += " Back"
+		case "In Progress":
+			name += " Prog"
+		case "Blocked":
+			name += " Block"
+		case "Done":
+			name += " Done"
+		default:
+			name += " " + col.Title
+		}
+
+		// Add task count
+		name += fmt.Sprintf(" %d", len(col.Tasks))
+
+		tabStyle := lipgloss.NewStyle().
+			Width(tabWidth).
+			Align(lipgloss.Center).
+			Padding(0, 0)
+
+		if isSelected {
+			// Selected tab has background color matching column
+			tabStyle = tabStyle.
+				Background(col.Color).
+				Foreground(lipgloss.Color("#000000")).
+				Bold(true)
+		} else {
+			// Unselected tabs are dimmed
+			tabStyle = tabStyle.
+				Foreground(ColorMuted)
+		}
+
+		tabs = append(tabs, tabStyle.Render(name))
+	}
+
+	// Join tabs with separator
+	tabBar := lipgloss.JoinHorizontal(lipgloss.Top, tabs...)
+
+	// Add a subtle bottom border
+	tabBarStyle := lipgloss.NewStyle().
+		Width(k.width).
+		MarginBottom(1)
+
+	return tabBarStyle.Render(tabBar)
+}
+
 // renderTaskCard renders a single task card.
 func (k *KanbanBoard) renderTaskCard(task *db.Task, width int, isSelected bool) string {
 	if width < 10 {
@@ -504,7 +711,17 @@ func (k *KanbanBoard) HandleClick(x, y int) *db.Task {
 		return nil
 	}
 
-	// Calculate column layout (same as View())
+	// Use mobile click handling for narrow terminals
+	if k.IsMobileMode() {
+		return k.handleClickMobile(x, y)
+	}
+
+	return k.handleClickDesktop(x, y)
+}
+
+// handleClickDesktop handles clicks in desktop (multi-column) mode.
+func (k *KanbanBoard) handleClickDesktop(x, y int) *db.Task {
+	// Calculate column layout (same as viewDesktop())
 	numCols := len(k.columns)
 	availableWidth := k.width - (numCols * 2) - (numCols - 1)
 	colWidth := availableWidth / numCols
@@ -585,6 +802,90 @@ func (k *KanbanBoard) HandleClick(x, y int) *db.Task {
 
 	// Update selection
 	k.selectedCol = colIdx
+	k.selectedRow = taskIdx
+
+	return col.Tasks[taskIdx]
+}
+
+// handleClickMobile handles clicks in mobile (single-column) mode.
+func (k *KanbanBoard) handleClickMobile(x, y int) *db.Task {
+	// Check if click is on the tab bar (first 2 lines)
+	tabBarHeight := 2
+	if y < tabBarHeight {
+		// Clicked on tab bar - determine which tab
+		numCols := len(k.columns)
+		tabWidth := (k.width - numCols - 1) / numCols
+		if tabWidth < 8 {
+			tabWidth = 8
+		}
+
+		colIdx := x / tabWidth
+		if colIdx >= numCols {
+			colIdx = numCols - 1
+		}
+		if colIdx >= 0 && colIdx < numCols {
+			k.selectedCol = colIdx
+			k.clampSelection()
+			k.ensureSelectedVisible()
+		}
+		return nil
+	}
+
+	// Click is in the column content area
+	colWidth := k.width - 2
+	if colWidth < 20 {
+		colWidth = 20
+	}
+
+	// Column layout: tab bar (2 lines), then border (1 line), header (1 line), task cards
+	colHeight := k.height - tabBarHeight - 2
+	headerLines := 3 // Header text + margin
+	taskCardHeight := 3
+
+	// relY is position within the column content (after tab bar and top border)
+	relY := y - tabBarHeight - 1 // -1 for top border
+
+	// Skip header area
+	taskAreaY := relY - headerLines
+	if taskAreaY < 0 {
+		// Clicked on header
+		return nil
+	}
+
+	// Calculate which task was clicked
+	col := k.columns[k.selectedCol]
+	maxTasks := (colHeight - 3) / taskCardHeight
+	if maxTasks < 1 {
+		maxTasks = 1
+	}
+
+	// Get scroll offset for this column
+	scrollOffset := 0
+	if k.selectedCol < len(k.scrollOffsets) {
+		scrollOffset = k.scrollOffsets[k.selectedCol]
+	}
+
+	// Account for scroll indicator line when scrolled
+	if scrollOffset > 0 {
+		taskAreaY -= 1 // Subtract 1 for the "↑ N more" indicator line
+		if taskAreaY < 0 {
+			// Clicked on scroll indicator
+			return nil
+		}
+	}
+
+	visibleTaskIdx := taskAreaY / taskCardHeight
+	if visibleTaskIdx >= maxTasks {
+		return nil
+	}
+
+	// Convert visible index to actual task index
+	taskIdx := scrollOffset + visibleTaskIdx
+	if taskIdx >= len(col.Tasks) {
+		return nil
+	}
+
+	// Update selection
 	k.selectedRow = taskIdx
 
 	return col.Tasks[taskIdx]

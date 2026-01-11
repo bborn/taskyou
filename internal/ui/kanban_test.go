@@ -282,3 +282,178 @@ func TestKanbanBoard_HandleClickUpdatesSelection(t *testing.T) {
 		t.Errorf("SelectedTask() = %v, want task %d", selectedTask, task.ID)
 	}
 }
+
+func TestKanbanBoard_IsMobileMode(t *testing.T) {
+	tests := []struct {
+		name     string
+		width    int
+		expected bool
+	}{
+		{"narrow terminal is mobile", 60, true},
+		{"threshold boundary is mobile", 79, true},
+		{"at threshold is desktop", 80, false},
+		{"wide terminal is desktop", 120, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			board := NewKanbanBoard(tt.width, 50)
+			if got := board.IsMobileMode(); got != tt.expected {
+				t.Errorf("IsMobileMode() = %v, want %v for width %d", got, tt.expected, tt.width)
+			}
+		})
+	}
+}
+
+func TestKanbanBoard_MobileView(t *testing.T) {
+	// Create a narrow board that triggers mobile mode
+	board := NewKanbanBoard(60, 30)
+
+	tasks := []*db.Task{
+		{ID: 1, Title: "Backlog Task", Status: db.StatusBacklog},
+		{ID: 2, Title: "In Progress Task", Status: db.StatusQueued},
+		{ID: 3, Title: "Blocked Task", Status: db.StatusBlocked},
+		{ID: 4, Title: "Done Task", Status: db.StatusDone},
+	}
+	board.SetTasks(tasks)
+
+	// Verify mobile mode is active
+	if !board.IsMobileMode() {
+		t.Fatal("Expected mobile mode to be active")
+	}
+
+	// Render the view - should not panic
+	view := board.View()
+	if view == "" {
+		t.Error("View() returned empty string")
+	}
+
+	// Verify we can navigate columns with MoveLeft/MoveRight
+	board.FocusColumn(0) // Start at backlog
+	if board.selectedCol != 0 {
+		t.Errorf("FocusColumn(0): selectedCol = %d, want 0", board.selectedCol)
+	}
+
+	board.MoveRight()
+	if board.selectedCol != 1 {
+		t.Errorf("MoveRight: selectedCol = %d, want 1", board.selectedCol)
+	}
+
+	board.MoveLeft()
+	if board.selectedCol != 0 {
+		t.Errorf("MoveLeft: selectedCol = %d, want 0", board.selectedCol)
+	}
+}
+
+func TestKanbanBoard_MobileTabClick(t *testing.T) {
+	// Create a narrow board that triggers mobile mode
+	board := NewKanbanBoard(60, 30)
+
+	tasks := []*db.Task{
+		{ID: 1, Title: "Backlog Task", Status: db.StatusBacklog},
+		{ID: 2, Title: "In Progress Task", Status: db.StatusQueued},
+	}
+	board.SetTasks(tasks)
+
+	// Start at first column
+	board.FocusColumn(0)
+
+	// Calculate tab width
+	numCols := 4
+	tabWidth := (60 - numCols - 1) / numCols
+
+	// Click on second tab (In Progress)
+	x := tabWidth + tabWidth/2 // Middle of second tab
+	y := 0                      // Tab bar area
+
+	task := board.HandleClick(x, y)
+
+	// Clicking on tab should change column but not select a task
+	if task != nil {
+		t.Errorf("HandleClick on tab returned task, expected nil")
+	}
+
+	// Verify column changed
+	if board.selectedCol != 1 {
+		t.Errorf("selectedCol = %d, want 1 after clicking tab", board.selectedCol)
+	}
+}
+
+func TestKanbanBoard_MobileTaskClick(t *testing.T) {
+	// Create a narrow board that triggers mobile mode
+	board := NewKanbanBoard(60, 30)
+
+	tasks := []*db.Task{
+		{ID: 1, Title: "Backlog Task 1", Status: db.StatusBacklog},
+		{ID: 2, Title: "Backlog Task 2", Status: db.StatusBacklog},
+	}
+	board.SetTasks(tasks)
+
+	// Start at first column
+	board.FocusColumn(0)
+
+	// Click on first task in the column
+	// Mobile layout: tab bar (2 lines), border (1), header (3), task area
+	x := 30 // Middle of column
+	y := 7  // After tab bar (2) + border (1) + header (3) = 6, so y=7 is first task
+
+	task := board.HandleClick(x, y)
+
+	// Should select the first task
+	if task == nil {
+		t.Error("HandleClick on task returned nil, expected task")
+	} else if task.ID != 1 {
+		t.Errorf("HandleClick returned task %d, want 1", task.ID)
+	}
+
+	// Verify selection was updated
+	if board.selectedRow != 0 {
+		t.Errorf("selectedRow = %d, want 0", board.selectedRow)
+	}
+}
+
+func TestKanbanBoard_MobileViewRendersCorrectly(t *testing.T) {
+	board := NewKanbanBoard(60, 30)
+
+	tasks := []*db.Task{
+		{ID: 1, Title: "Task 1", Status: db.StatusBacklog},
+		{ID: 2, Title: "Task 2", Status: db.StatusBacklog},
+		{ID: 3, Title: "Task 3", Status: db.StatusQueued},
+	}
+	board.SetTasks(tasks)
+
+	// Should be in mobile mode
+	if !board.IsMobileMode() {
+		t.Fatal("Expected mobile mode")
+	}
+
+	// Navigate to each column and verify view renders
+	for i := 0; i < board.ColumnCount(); i++ {
+		board.FocusColumn(i)
+		view := board.View()
+		if view == "" {
+			t.Errorf("View() at column %d returned empty string", i)
+		}
+	}
+}
+
+func TestKanbanBoard_DesktopViewAtThreshold(t *testing.T) {
+	// At exactly the threshold, should use desktop view
+	board := NewKanbanBoard(MobileWidthThreshold, 30)
+
+	tasks := []*db.Task{
+		{ID: 1, Title: "Task 1", Status: db.StatusBacklog},
+	}
+	board.SetTasks(tasks)
+
+	// Should NOT be in mobile mode
+	if board.IsMobileMode() {
+		t.Error("Expected desktop mode at threshold width")
+	}
+
+	// View should render without panic
+	view := board.View()
+	if view == "" {
+		t.Error("View() returned empty string")
+	}
+}
