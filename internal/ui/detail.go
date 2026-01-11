@@ -845,6 +845,20 @@ func (m *DetailModel) renderHeader() string {
 		meta.WriteString(prDesc)
 	}
 
+	// Schedule info
+	if t.IsScheduled() {
+		meta.WriteString("  ")
+		scheduleStyle := lipgloss.NewStyle().
+			Padding(0, 1).
+			Background(lipgloss.Color("214")). // Orange
+			Foreground(lipgloss.Color("#000000"))
+		scheduleText := "⏰ " + formatScheduleTime(t.ScheduledAt.Time)
+		if t.IsRecurring() {
+			scheduleText += " (" + t.Recurrence + ")"
+		}
+		meta.WriteString(scheduleStyle.Render(scheduleText))
+	}
+
 	// Tmux hint if session is active
 	if m.claudePaneID != "" {
 		meta.WriteString("  ")

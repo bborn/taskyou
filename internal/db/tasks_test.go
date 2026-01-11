@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestGetLastQuestion(t *testing.T) {
@@ -873,6 +874,237 @@ func TestCompactionSummaries(t *testing.T) {
 	}
 	if len(summaries) != 0 {
 		t.Errorf("expected 0 summaries after clear, got %d", len(summaries))
+	}
+}
+
+func TestScheduledTasks(t *testing.T) {
+	// Create temporary database
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	db, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer db.Close()
+	defer os.Remove(dbPath)
+
+	// Create a scheduled task
+	now := time.Now()
+	scheduledTime := now.Add(1 * time.Hour)
+	task := &Task{
+		Title:       "Scheduled Task",
+		Body:        "This task should run in 1 hour",
+		Status:      StatusBacklog,
+		Type:        TypeCode,
+		Project:     "personal",
+		ScheduledAt: &LocalTime{Time: scheduledTime},
+		Recurrence:  RecurrenceDaily,
+	}
+	if err := db.CreateTask(task); err != nil {
+		t.Fatalf("failed to create task: %v", err)
+	}
+
+	// Verify task was saved with schedule fields
+	retrieved, err := db.GetTask(task.ID)
+	if err != nil {
+		t.Fatalf("failed to get task: %v", err)
+	}
+	if !retrieved.IsScheduled() {
+		t.Error("expected task to be scheduled")
+	}
+	if !retrieved.IsRecurring() {
+		t.Error("expected task to be recurring")
+	}
+	if retrieved.Recurrence != RecurrenceDaily {
+		t.Errorf("expected recurrence %q, got %q", RecurrenceDaily, retrieved.Recurrence)
+	}
+}
+
+func TestGetDueScheduledTasks(t *testing.T) {
+	// Create temporary database
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	db, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer db.Close()
+	defer os.Remove(dbPath)
+
+	now := time.Now()
+
+	// Create a task scheduled in the past (should be due)
+	pastTask := &Task{
+		Title:       "Past Task",
+		Status:      StatusBacklog,
+		Type:        TypeCode,
+		Project:     "personal",
+		ScheduledAt: &LocalTime{Time: now.Add(-1 * time.Hour)},
+	}
+	if err := db.CreateTask(pastTask); err != nil {
+		t.Fatalf("failed to create past task: %v", err)
+	}
+
+	// Create a task scheduled in the future (should not be due)
+	futureTask := &Task{
+		Title:       "Future Task",
+		Status:      StatusBacklog,
+		Type:        TypeCode,
+		Project:     "personal",
+		ScheduledAt: &LocalTime{Time: now.Add(1 * time.Hour)},
+	}
+	if err := db.CreateTask(futureTask); err != nil {
+		t.Fatalf("failed to create future task: %v", err)
+	}
+
+	// Create a task scheduled now that is already processing (should not be due)
+	processingTask := &Task{
+		Title:       "Processing Task",
+		Status:      StatusProcessing,
+		Type:        TypeCode,
+		Project:     "personal",
+		ScheduledAt: &LocalTime{Time: now.Add(-30 * time.Minute)},
+	}
+	if err := db.CreateTask(processingTask); err != nil {
+		t.Fatalf("failed to create processing task: %v", err)
+	}
+
+	// Get due scheduled tasks
+	dueTasks, err := db.GetDueScheduledTasks()
+	if err != nil {
+		t.Fatalf("failed to get due scheduled tasks: %v", err)
+	}
+
+	// Should only return the past task
+	if len(dueTasks) != 1 {
+		t.Fatalf("expected 1 due task, got %d", len(dueTasks))
+	}
+	if dueTasks[0].ID != pastTask.ID {
+		t.Errorf("expected task ID %d, got %d", pastTask.ID, dueTasks[0].ID)
+	}
+}
+
+func TestQueueScheduledTask(t *testing.T) {
+	// Create temporary database
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	db, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer db.Close()
+	defer os.Remove(dbPath)
+
+	now := time.Now()
+
+	// Test one-time scheduled task
+	oneTimeTask := &Task{
+		Title:       "One-Time Task",
+		Status:      StatusBacklog,
+		Type:        TypeCode,
+		Project:     "personal",
+		ScheduledAt: &LocalTime{Time: now},
+		Recurrence:  RecurrenceNone,
+	}
+	if err := db.CreateTask(oneTimeTask); err != nil {
+		t.Fatalf("failed to create one-time task: %v", err)
+	}
+
+	// Queue the one-time task
+	if err := db.QueueScheduledTask(oneTimeTask.ID); err != nil {
+		t.Fatalf("failed to queue scheduled task: %v", err)
+	}
+
+	// Verify it was queued and schedule cleared
+	retrieved, err := db.GetTask(oneTimeTask.ID)
+	if err != nil {
+		t.Fatalf("failed to get task: %v", err)
+	}
+	if retrieved.Status != StatusQueued {
+		t.Errorf("expected status %q, got %q", StatusQueued, retrieved.Status)
+	}
+	if retrieved.ScheduledAt != nil {
+		t.Error("expected scheduled_at to be cleared for one-time task")
+	}
+	if retrieved.LastRunAt == nil {
+		t.Error("expected last_run_at to be set")
+	}
+
+	// Test recurring scheduled task
+	recurringTask := &Task{
+		Title:       "Recurring Task",
+		Status:      StatusBacklog,
+		Type:        TypeCode,
+		Project:     "personal",
+		ScheduledAt: &LocalTime{Time: now},
+		Recurrence:  RecurrenceHourly,
+	}
+	if err := db.CreateTask(recurringTask); err != nil {
+		t.Fatalf("failed to create recurring task: %v", err)
+	}
+
+	// Queue the recurring task
+	if err := db.QueueScheduledTask(recurringTask.ID); err != nil {
+		t.Fatalf("failed to queue recurring task: %v", err)
+	}
+
+	// Verify it was queued and next schedule set
+	retrieved, err = db.GetTask(recurringTask.ID)
+	if err != nil {
+		t.Fatalf("failed to get task: %v", err)
+	}
+	if retrieved.Status != StatusQueued {
+		t.Errorf("expected status %q, got %q", StatusQueued, retrieved.Status)
+	}
+	if retrieved.ScheduledAt == nil {
+		t.Error("expected scheduled_at to be set for next run")
+	} else {
+		// Next run should be approximately 1 hour in the future
+		expectedNext := now.Add(1 * time.Hour)
+		diff := retrieved.ScheduledAt.Time.Sub(expectedNext)
+		if diff > 5*time.Second || diff < -5*time.Second {
+			t.Errorf("expected next schedule ~%v, got %v", expectedNext, retrieved.ScheduledAt.Time)
+		}
+	}
+	if retrieved.LastRunAt == nil {
+		t.Error("expected last_run_at to be set")
+	}
+}
+
+func TestCalculateNextRunTime(t *testing.T) {
+	now := time.Date(2024, 6, 15, 10, 30, 0, 0, time.Local)
+
+	tests := []struct {
+		recurrence string
+		expected   time.Time
+		nilResult  bool
+	}{
+		{RecurrenceNone, time.Time{}, true},
+		{RecurrenceHourly, now.Add(1 * time.Hour), false},
+		{RecurrenceDaily, now.AddDate(0, 0, 1), false},
+		{RecurrenceWeekly, now.AddDate(0, 0, 7), false},
+		{RecurrenceMonthly, now.AddDate(0, 1, 0), false},
+		{"unknown", time.Time{}, true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.recurrence, func(t *testing.T) {
+			result := CalculateNextRunTime(tc.recurrence, now)
+			if tc.nilResult {
+				if result != nil {
+					t.Errorf("expected nil, got %v", result)
+				}
+			} else {
+				if result == nil {
+					t.Error("expected non-nil result")
+				} else if !result.Time.Equal(tc.expected) {
+					t.Errorf("expected %v, got %v", tc.expected, result.Time)
+				}
+			}
+		})
 	}
 }
 

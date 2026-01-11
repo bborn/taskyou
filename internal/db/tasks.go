@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // Task represents a task in the database.
@@ -23,6 +24,10 @@ type Task struct {
 	UpdatedAt    LocalTime
 	StartedAt    *LocalTime
 	CompletedAt  *LocalTime
+	// Schedule fields for recurring/scheduled tasks
+	ScheduledAt *LocalTime // When to next run (nil = not scheduled)
+	Recurrence  string     // Recurrence pattern: "", "hourly", "daily", "weekly", "monthly", or cron expression
+	LastRunAt   *LocalTime // When last executed (for recurring tasks)
 }
 
 // Task statuses
@@ -45,6 +50,25 @@ const (
 	TypeWriting  = "writing"
 	TypeThinking = "thinking"
 )
+
+// Recurrence patterns for scheduled tasks
+const (
+	RecurrenceNone    = ""        // One-time scheduled task (or not scheduled)
+	RecurrenceHourly  = "hourly"  // Run every hour
+	RecurrenceDaily   = "daily"   // Run every day
+	RecurrenceWeekly  = "weekly"  // Run every week
+	RecurrenceMonthly = "monthly" // Run every month
+)
+
+// IsScheduled returns true if the task has a scheduled time set.
+func (t *Task) IsScheduled() bool {
+	return t.ScheduledAt != nil && !t.ScheduledAt.Time.IsZero()
+}
+
+// IsRecurring returns true if the task has a recurrence pattern.
+func (t *Task) IsRecurring() bool {
+	return t.Recurrence != ""
+}
 
 // Port allocation constants
 const (
@@ -71,9 +95,9 @@ func (db *DB) CreateTask(t *Task) error {
 	}
 
 	result, err := db.Exec(`
-		INSERT INTO tasks (title, body, status, type, project)
-		VALUES (?, ?, ?, ?, ?)
-	`, t.Title, t.Body, t.Status, t.Type, t.Project)
+		INSERT INTO tasks (title, body, status, type, project, scheduled_at, recurrence, last_run_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+	`, t.Title, t.Body, t.Status, t.Type, t.Project, t.ScheduledAt, t.Recurrence, t.LastRunAt)
 	if err != nil {
 		return fmt.Errorf("insert task: %w", err)
 	}
@@ -98,12 +122,14 @@ func (db *DB) GetTask(id int64) (*Task, error) {
 	err := db.QueryRow(`
 		SELECT id, title, body, status, type, project,
 		       worktree_path, branch_name, port,
-		       created_at, updated_at, started_at, completed_at
+		       created_at, updated_at, started_at, completed_at,
+		       scheduled_at, recurrence, last_run_at
 		FROM tasks WHERE id = ?
 	`, id).Scan(
 		&t.ID, &t.Title, &t.Body, &t.Status, &t.Type, &t.Project,
 		&t.WorktreePath, &t.BranchName, &t.Port,
 		&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
+		&t.ScheduledAt, &t.Recurrence, &t.LastRunAt,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -129,7 +155,8 @@ func (db *DB) ListTasks(opts ListTasksOptions) ([]*Task, error) {
 	query := `
 		SELECT id, title, body, status, type, project,
 		       worktree_path, branch_name, port,
-		       created_at, updated_at, started_at, completed_at
+		       created_at, updated_at, started_at, completed_at,
+		       scheduled_at, recurrence, last_run_at
 		FROM tasks WHERE 1=1
 	`
 	args := []interface{}{}
@@ -179,6 +206,7 @@ func (db *DB) ListTasks(opts ListTasksOptions) ([]*Task, error) {
 			&t.ID, &t.Title, &t.Body, &t.Status, &t.Type, &t.Project,
 			&t.WorktreePath, &t.BranchName, &t.Port,
 			&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
+			&t.ScheduledAt, &t.Recurrence, &t.LastRunAt,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("scan task: %w", err)
@@ -226,10 +254,12 @@ func (db *DB) UpdateTask(t *Task) error {
 		UPDATE tasks SET
 			title = ?, body = ?, status = ?, type = ?, project = ?,
 			worktree_path = ?, branch_name = ?, port = ?,
+			scheduled_at = ?, recurrence = ?, last_run_at = ?,
 			updated_at = CURRENT_TIMESTAMP
 		WHERE id = ?
 	`, t.Title, t.Body, t.Status, t.Type, t.Project,
-		t.WorktreePath, t.BranchName, t.Port, t.ID)
+		t.WorktreePath, t.BranchName, t.Port,
+		t.ScheduledAt, t.Recurrence, t.LastRunAt, t.ID)
 	if err != nil {
 		return fmt.Errorf("update task: %w", err)
 	}
@@ -311,7 +341,8 @@ func (db *DB) GetNextQueuedTask() (*Task, error) {
 	err := db.QueryRow(`
 		SELECT id, title, body, status, type, project,
 		       worktree_path, branch_name, port,
-		       created_at, updated_at, started_at, completed_at
+		       created_at, updated_at, started_at, completed_at,
+		       scheduled_at, recurrence, last_run_at
 		FROM tasks
 		WHERE status = ?
 		ORDER BY created_at ASC
@@ -320,6 +351,7 @@ func (db *DB) GetNextQueuedTask() (*Task, error) {
 		&t.ID, &t.Title, &t.Body, &t.Status, &t.Type, &t.Project,
 		&t.WorktreePath, &t.BranchName, &t.Port,
 		&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
+		&t.ScheduledAt, &t.Recurrence, &t.LastRunAt,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -335,7 +367,8 @@ func (db *DB) GetQueuedTasks() ([]*Task, error) {
 	rows, err := db.Query(`
 		SELECT id, title, body, status, type, project,
 		       worktree_path, branch_name, port,
-		       created_at, updated_at, started_at, completed_at
+		       created_at, updated_at, started_at, completed_at,
+		       scheduled_at, recurrence, last_run_at
 		FROM tasks
 		WHERE status = ?
 		ORDER BY created_at ASC
@@ -352,6 +385,7 @@ func (db *DB) GetQueuedTasks() ([]*Task, error) {
 			&t.ID, &t.Title, &t.Body, &t.Status, &t.Type, &t.Project,
 			&t.WorktreePath, &t.BranchName, &t.Port,
 			&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
+			&t.ScheduledAt, &t.Recurrence, &t.LastRunAt,
 		); err != nil {
 			return nil, fmt.Errorf("scan task: %w", err)
 		}
@@ -366,7 +400,8 @@ func (db *DB) GetTasksWithBranches() ([]*Task, error) {
 	rows, err := db.Query(`
 		SELECT id, title, body, status, type, project,
 		       worktree_path, branch_name, port,
-		       created_at, updated_at, started_at, completed_at
+		       created_at, updated_at, started_at, completed_at,
+		       scheduled_at, recurrence, last_run_at
 		FROM tasks
 		WHERE branch_name != '' AND status != ?
 		ORDER BY created_at DESC
@@ -383,12 +418,156 @@ func (db *DB) GetTasksWithBranches() ([]*Task, error) {
 			&t.ID, &t.Title, &t.Body, &t.Status, &t.Type, &t.Project,
 			&t.WorktreePath, &t.BranchName, &t.Port,
 			&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
+			&t.ScheduledAt, &t.Recurrence, &t.LastRunAt,
 		); err != nil {
 			return nil, fmt.Errorf("scan task: %w", err)
 		}
 		tasks = append(tasks, t)
 	}
 	return tasks, nil
+}
+
+// GetDueScheduledTasks returns all scheduled tasks that are due to run.
+// A task is due if:
+// - It has a scheduled_at time that is <= now
+// - It is in 'backlog' status (ready to be queued)
+// - It is not currently processing
+func (db *DB) GetDueScheduledTasks() ([]*Task, error) {
+	rows, err := db.Query(`
+		SELECT id, title, body, status, type, project,
+		       worktree_path, branch_name, port,
+		       created_at, updated_at, started_at, completed_at,
+		       scheduled_at, recurrence, last_run_at
+		FROM tasks
+		WHERE scheduled_at IS NOT NULL
+		  AND scheduled_at <= CURRENT_TIMESTAMP
+		  AND status = ?
+		ORDER BY scheduled_at ASC
+	`, StatusBacklog)
+	if err != nil {
+		return nil, fmt.Errorf("query due scheduled tasks: %w", err)
+	}
+	defer rows.Close()
+
+	var tasks []*Task
+	for rows.Next() {
+		t := &Task{}
+		if err := rows.Scan(
+			&t.ID, &t.Title, &t.Body, &t.Status, &t.Type, &t.Project,
+			&t.WorktreePath, &t.BranchName, &t.Port,
+			&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
+			&t.ScheduledAt, &t.Recurrence, &t.LastRunAt,
+		); err != nil {
+			return nil, fmt.Errorf("scan task: %w", err)
+		}
+		tasks = append(tasks, t)
+	}
+	return tasks, nil
+}
+
+// GetScheduledTasks returns all tasks that have a scheduled time set (regardless of status).
+func (db *DB) GetScheduledTasks() ([]*Task, error) {
+	rows, err := db.Query(`
+		SELECT id, title, body, status, type, project,
+		       worktree_path, branch_name, port,
+		       created_at, updated_at, started_at, completed_at,
+		       scheduled_at, recurrence, last_run_at
+		FROM tasks
+		WHERE scheduled_at IS NOT NULL
+		ORDER BY scheduled_at ASC
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("query scheduled tasks: %w", err)
+	}
+	defer rows.Close()
+
+	var tasks []*Task
+	for rows.Next() {
+		t := &Task{}
+		if err := rows.Scan(
+			&t.ID, &t.Title, &t.Body, &t.Status, &t.Type, &t.Project,
+			&t.WorktreePath, &t.BranchName, &t.Port,
+			&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
+			&t.ScheduledAt, &t.Recurrence, &t.LastRunAt,
+		); err != nil {
+			return nil, fmt.Errorf("scan task: %w", err)
+		}
+		tasks = append(tasks, t)
+	}
+	return tasks, nil
+}
+
+// CalculateNextRunTime calculates the next scheduled time based on recurrence pattern.
+// Returns nil if recurrence is empty (one-time task).
+func CalculateNextRunTime(recurrence string, fromTime time.Time) *LocalTime {
+	if recurrence == "" {
+		return nil
+	}
+
+	var nextTime time.Time
+	switch recurrence {
+	case RecurrenceHourly:
+		nextTime = fromTime.Add(1 * time.Hour)
+	case RecurrenceDaily:
+		nextTime = fromTime.AddDate(0, 0, 1)
+	case RecurrenceWeekly:
+		nextTime = fromTime.AddDate(0, 0, 7)
+	case RecurrenceMonthly:
+		nextTime = fromTime.AddDate(0, 1, 0)
+	default:
+		// Unknown recurrence pattern
+		return nil
+	}
+
+	return &LocalTime{Time: nextTime}
+}
+
+// UpdateTaskSchedule updates only the schedule-related fields of a task.
+func (db *DB) UpdateTaskSchedule(taskID int64, scheduledAt *LocalTime, recurrence string, lastRunAt *LocalTime) error {
+	_, err := db.Exec(`
+		UPDATE tasks SET
+			scheduled_at = ?,
+			recurrence = ?,
+			last_run_at = ?,
+			updated_at = CURRENT_TIMESTAMP
+		WHERE id = ?
+	`, scheduledAt, recurrence, lastRunAt, taskID)
+	if err != nil {
+		return fmt.Errorf("update task schedule: %w", err)
+	}
+	return nil
+}
+
+// QueueScheduledTask queues a scheduled task and updates its schedule for recurring tasks.
+// For recurring tasks, it sets the next scheduled_at time; for one-time tasks, it clears scheduled_at.
+func (db *DB) QueueScheduledTask(taskID int64) error {
+	// Get the task first
+	task, err := db.GetTask(taskID)
+	if err != nil {
+		return fmt.Errorf("get task: %w", err)
+	}
+	if task == nil {
+		return fmt.Errorf("task %d not found", taskID)
+	}
+
+	now := time.Now()
+
+	// Calculate next run time for recurring tasks
+	if task.IsRecurring() {
+		nextRun := CalculateNextRunTime(task.Recurrence, now)
+		task.ScheduledAt = nextRun
+		task.LastRunAt = &LocalTime{Time: now}
+	} else {
+		// One-time task - clear the schedule after queuing
+		task.ScheduledAt = nil
+		task.LastRunAt = &LocalTime{Time: now}
+	}
+
+	// Update status to queued
+	task.Status = StatusQueued
+
+	// Save all changes
+	return db.UpdateTask(task)
 }
 
 // TaskLog represents a log entry for a task.

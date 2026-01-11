@@ -3,7 +3,10 @@ package ui
 import (
 	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
+	"time"
 	"unicode"
 
 	"github.com/bborn/workflow/internal/db"
@@ -21,6 +24,8 @@ const (
 	FieldBody
 	FieldProject
 	FieldType
+	FieldSchedule
+	FieldRecurrence
 	FieldAttachments
 )
 
@@ -40,28 +45,34 @@ type FormModel struct {
 	titleInput       textinput.Model
 	bodyInput        textarea.Model
 	attachmentsInput textinput.Model
+	scheduleInput    textinput.Model // For entering schedule time (e.g., "1h", "2h30m", "tomorrow 9am")
 
 	// Select values
-	project     string
-	projectIdx  int
-	projects    []string
-	taskType    string
-	typeIdx     int
-	types       []string
-	queue       bool
-	attachments []string // Parsed file paths
+	project       string
+	projectIdx    int
+	projects      []string
+	taskType      string
+	typeIdx       int
+	types         []string
+	queue         bool
+	attachments   []string // Parsed file paths
+	recurrence    string   // "", "hourly", "daily", "weekly", "monthly"
+	recurrenceIdx int
+	recurrences   []string
 }
 
 // NewEditFormModel creates a form model pre-populated with an existing task's data for editing.
 func NewEditFormModel(database *db.DB, task *db.Task, width, height int) *FormModel {
 	m := &FormModel{
-		db:       database,
-		width:    width,
-		height:   height,
-		focused:  FieldTitle,
-		taskType: task.Type,
-		project:  task.Project,
-		isEdit:   true,
+		db:          database,
+		width:       width,
+		height:      height,
+		focused:     FieldTitle,
+		taskType:    task.Type,
+		project:     task.Project,
+		isEdit:      true,
+		recurrence:  task.Recurrence,
+		recurrences: []string{"", db.RecurrenceHourly, db.RecurrenceDaily, db.RecurrenceWeekly, db.RecurrenceMonthly},
 	}
 
 	// Load task types from database
@@ -123,6 +134,24 @@ func NewEditFormModel(database *db.DB, task *db.Task, width, height int) *FormMo
 	m.bodyInput.BlurredStyle.CursorLine = lipgloss.NewStyle()
 	m.bodyInput.SetValue(task.Body)
 
+	// Schedule input - pre-populate if task has a scheduled time
+	m.scheduleInput = textinput.New()
+	m.scheduleInput.Placeholder = "e.g., 1h, 2h30m, tomorrow 9am"
+	m.scheduleInput.Prompt = ""
+	m.scheduleInput.Width = width - 24
+	if task.ScheduledAt != nil && !task.ScheduledAt.IsZero() {
+		// Show relative time or formatted time
+		m.scheduleInput.SetValue(task.ScheduledAt.Format("2006-01-02 15:04"))
+	}
+
+	// Set recurrence index
+	for i, r := range m.recurrences {
+		if r == task.Recurrence {
+			m.recurrenceIdx = i
+			break
+		}
+	}
+
 	// Attachments input
 	m.attachmentsInput = textinput.New()
 	m.attachmentsInput.Placeholder = "Drag files here"
@@ -135,10 +164,11 @@ func NewEditFormModel(database *db.DB, task *db.Task, width, height int) *FormMo
 // NewFormModel creates a new form model.
 func NewFormModel(database *db.DB, width, height int, workingDir string) *FormModel {
 	m := &FormModel{
-		db:      database,
-		width:   width,
-		height:  height,
-		focused: FieldTitle,
+		db:          database,
+		width:       width,
+		height:      height,
+		focused:     FieldTitle,
+		recurrences: []string{"", db.RecurrenceHourly, db.RecurrenceDaily, db.RecurrenceWeekly, db.RecurrenceMonthly},
 	}
 
 	// Load task types from database
@@ -206,6 +236,12 @@ func NewFormModel(database *db.DB, width, height int, workingDir string) *FormMo
 	m.bodyInput.SetHeight(4)
 	m.bodyInput.FocusedStyle.CursorLine = lipgloss.NewStyle()
 	m.bodyInput.BlurredStyle.CursorLine = lipgloss.NewStyle()
+
+	// Schedule input
+	m.scheduleInput = textinput.New()
+	m.scheduleInput.Placeholder = "e.g., 1h, 2h30m, tomorrow 9am"
+	m.scheduleInput.Prompt = ""
+	m.scheduleInput.Width = width - 24
 
 	// Attachments input
 	m.attachmentsInput = textinput.New()
@@ -298,6 +334,11 @@ func (m *FormModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.taskType = m.types[m.typeIdx]
 				return m, nil
 			}
+			if m.focused == FieldRecurrence {
+				m.recurrenceIdx = (m.recurrenceIdx - 1 + len(m.recurrences)) % len(m.recurrences)
+				m.recurrence = m.recurrences[m.recurrenceIdx]
+				return m, nil
+			}
 
 		case "right":
 			if m.focused == FieldProject {
@@ -311,10 +352,15 @@ func (m *FormModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.taskType = m.types[m.typeIdx]
 				return m, nil
 			}
+			if m.focused == FieldRecurrence {
+				m.recurrenceIdx = (m.recurrenceIdx + 1) % len(m.recurrences)
+				m.recurrence = m.recurrences[m.recurrenceIdx]
+				return m, nil
+			}
 
 		default:
 			// Type-to-select for selector fields
-			if m.focused == FieldProject || m.focused == FieldType {
+			if m.focused == FieldProject || m.focused == FieldType || m.focused == FieldRecurrence {
 				key := msg.String()
 				if len(key) == 1 && unicode.IsLetter(rune(key[0])) {
 					m.selectByPrefix(strings.ToLower(key))
@@ -331,6 +377,8 @@ func (m *FormModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.titleInput, cmd = m.titleInput.Update(msg)
 	case FieldBody:
 		m.bodyInput, cmd = m.bodyInput.Update(msg)
+	case FieldSchedule:
+		m.scheduleInput, cmd = m.scheduleInput.Update(msg)
 	case FieldAttachments:
 		m.attachmentsInput, cmd = m.attachmentsInput.Update(msg)
 	}
@@ -358,6 +406,18 @@ func (m *FormModel) selectByPrefix(prefix string) {
 			if strings.HasPrefix(strings.ToLower(label), prefix) {
 				m.typeIdx = i
 				m.taskType = t
+				return
+			}
+		}
+	case FieldRecurrence:
+		for i, r := range m.recurrences {
+			label := r
+			if label == "" {
+				label = "none"
+			}
+			if strings.HasPrefix(strings.ToLower(label), prefix) {
+				m.recurrenceIdx = i
+				m.recurrence = r
 				return
 			}
 		}
@@ -400,6 +460,7 @@ func (m *FormModel) focusPrev() {
 func (m *FormModel) blurAll() {
 	m.titleInput.Blur()
 	m.bodyInput.Blur()
+	m.scheduleInput.Blur()
 	m.attachmentsInput.Blur()
 }
 
@@ -409,6 +470,8 @@ func (m *FormModel) focusCurrent() {
 		m.titleInput.Focus()
 	case FieldBody:
 		m.bodyInput.Focus()
+	case FieldSchedule:
+		m.scheduleInput.Focus()
 	case FieldAttachments:
 		m.attachmentsInput.Focus()
 	}
@@ -511,6 +574,31 @@ func (m *FormModel) View() string {
 	b.WriteString(cursor + " " + labelStyle.Render("Type") + m.renderSelector(typeLabels, m.typeIdx, m.focused == FieldType, selectedStyle, optionStyle, dimStyle))
 	b.WriteString("\n\n")
 
+	// Schedule input
+	cursor = " "
+	if m.focused == FieldSchedule {
+		cursor = cursorStyle.Render("▸")
+	}
+	b.WriteString(cursor + " " + labelStyle.Render("Schedule") + m.scheduleInput.View())
+	b.WriteString("\n\n")
+
+	// Recurrence selector
+	cursor = " "
+	if m.focused == FieldRecurrence {
+		cursor = cursorStyle.Render("▸")
+	}
+	// Build recurrence labels from m.recurrences (replace empty string with "none")
+	recurrenceLabels := make([]string, len(m.recurrences))
+	for i, r := range m.recurrences {
+		if r == "" {
+			recurrenceLabels[i] = "none"
+		} else {
+			recurrenceLabels[i] = r
+		}
+	}
+	b.WriteString(cursor + " " + labelStyle.Render("Recurrence") + m.renderSelector(recurrenceLabels, m.recurrenceIdx, m.focused == FieldRecurrence, selectedStyle, optionStyle, dimStyle))
+	b.WriteString("\n\n")
+
 	// Attachments
 	cursor = " "
 	if m.focused == FieldAttachments {
@@ -523,7 +611,7 @@ func (m *FormModel) View() string {
 		for _, path := range m.attachments {
 			fileNames = append(fileNames, filepath.Base(path))
 		}
-		attachmentLine = lipgloss.NewStyle().Foreground(ColorPrimary).Render("📎 "+strings.Join(fileNames, ", ")) + "  " + m.attachmentsInput.View()
+		attachmentLine = lipgloss.NewStyle().Foreground(ColorPrimary).Render(strings.Join(fileNames, ", ")) + "  " + m.attachmentsInput.View()
 	}
 	b.WriteString(cursor + " " + labelStyle.Render("Attachments") + attachmentLine)
 	b.WriteString("\n\n")
@@ -569,13 +657,135 @@ func (m *FormModel) GetDBTask() *db.Task {
 		status = db.StatusQueued
 	}
 
-	return &db.Task{
-		Title:   m.titleInput.Value(),
-		Body:    m.bodyInput.Value(),
-		Status:  status,
-		Type:    m.taskType,
-		Project: m.project,
+	task := &db.Task{
+		Title:      m.titleInput.Value(),
+		Body:       m.bodyInput.Value(),
+		Status:     status,
+		Type:       m.taskType,
+		Project:    m.project,
+		Recurrence: m.recurrence,
 	}
+
+	// Parse schedule time
+	if scheduledAt := m.parseScheduleTime(); scheduledAt != nil {
+		task.ScheduledAt = scheduledAt
+	}
+
+	return task
+}
+
+// parseScheduleTime parses the schedule input and returns a LocalTime.
+// Supports formats like: "1h", "2h30m", "30m", "tomorrow 9am", "2024-01-15 14:00"
+func (m *FormModel) parseScheduleTime() *db.LocalTime {
+	input := strings.TrimSpace(m.scheduleInput.Value())
+	if input == "" {
+		return nil
+	}
+
+	now := time.Now()
+
+	// Try to parse duration format (e.g., "1h", "2h30m", "30m")
+	if duration := parseDuration(input); duration > 0 {
+		scheduledTime := now.Add(duration)
+		return &db.LocalTime{Time: scheduledTime}
+	}
+
+	// Try "tomorrow" with optional time
+	if strings.HasPrefix(strings.ToLower(input), "tomorrow") {
+		tomorrow := now.AddDate(0, 0, 1)
+		timeStr := strings.TrimSpace(strings.TrimPrefix(strings.ToLower(input), "tomorrow"))
+		if timeStr == "" {
+			// Default to 9am
+			scheduled := time.Date(tomorrow.Year(), tomorrow.Month(), tomorrow.Day(), 9, 0, 0, 0, now.Location())
+			return &db.LocalTime{Time: scheduled}
+		}
+		// Parse time like "9am", "2pm", "14:00"
+		if t := parseTimeOfDay(timeStr, tomorrow); t != nil {
+			return t
+		}
+	}
+
+	// Try "today" with time
+	if strings.HasPrefix(strings.ToLower(input), "today") {
+		timeStr := strings.TrimSpace(strings.TrimPrefix(strings.ToLower(input), "today"))
+		if t := parseTimeOfDay(timeStr, now); t != nil {
+			return t
+		}
+	}
+
+	// Try full datetime format (e.g., "2024-01-15 14:00")
+	if t, err := time.ParseInLocation("2006-01-02 15:04", input, now.Location()); err == nil {
+		return &db.LocalTime{Time: t}
+	}
+
+	// Try date only (e.g., "2024-01-15") - defaults to 9am
+	if t, err := time.ParseInLocation("2006-01-02", input, now.Location()); err == nil {
+		scheduled := time.Date(t.Year(), t.Month(), t.Day(), 9, 0, 0, 0, now.Location())
+		return &db.LocalTime{Time: scheduled}
+	}
+
+	return nil
+}
+
+// parseDuration parses duration strings like "1h", "30m", "2h30m"
+func parseDuration(s string) time.Duration {
+	// Try standard duration parsing first
+	if d, err := time.ParseDuration(s); err == nil {
+		return d
+	}
+
+	// Handle shorthand like "1h30m" or "2h"
+	re := regexp.MustCompile(`(?i)^(\d+)h(?:(\d+)m)?$`)
+	if matches := re.FindStringSubmatch(s); matches != nil {
+		hours, _ := strconv.Atoi(matches[1])
+		minutes := 0
+		if matches[2] != "" {
+			minutes, _ = strconv.Atoi(matches[2])
+		}
+		return time.Duration(hours)*time.Hour + time.Duration(minutes)*time.Minute
+	}
+
+	// Handle just minutes like "30m"
+	re = regexp.MustCompile(`(?i)^(\d+)m$`)
+	if matches := re.FindStringSubmatch(s); matches != nil {
+		minutes, _ := strconv.Atoi(matches[1])
+		return time.Duration(minutes) * time.Minute
+	}
+
+	return 0
+}
+
+// parseTimeOfDay parses time strings like "9am", "2pm", "14:00"
+func parseTimeOfDay(s string, date time.Time) *db.LocalTime {
+	s = strings.ToLower(strings.TrimSpace(s))
+
+	// Parse 12-hour format like "9am", "2pm", "11:30am"
+	re := regexp.MustCompile(`^(\d{1,2})(?::(\d{2}))?\s*(am|pm)$`)
+	if matches := re.FindStringSubmatch(s); matches != nil {
+		hour, _ := strconv.Atoi(matches[1])
+		minutes := 0
+		if matches[2] != "" {
+			minutes, _ = strconv.Atoi(matches[2])
+		}
+		if matches[3] == "pm" && hour != 12 {
+			hour += 12
+		} else if matches[3] == "am" && hour == 12 {
+			hour = 0
+		}
+		scheduled := time.Date(date.Year(), date.Month(), date.Day(), hour, minutes, 0, 0, date.Location())
+		return &db.LocalTime{Time: scheduled}
+	}
+
+	// Parse 24-hour format like "14:00", "9:30"
+	re = regexp.MustCompile(`^(\d{1,2}):(\d{2})$`)
+	if matches := re.FindStringSubmatch(s); matches != nil {
+		hour, _ := strconv.Atoi(matches[1])
+		minutes, _ := strconv.Atoi(matches[2])
+		scheduled := time.Date(date.Year(), date.Month(), date.Day(), hour, minutes, 0, 0, date.Location())
+		return &db.LocalTime{Time: scheduled}
+	}
+
+	return nil
 }
 
 // SetQueue sets whether to queue the task.
