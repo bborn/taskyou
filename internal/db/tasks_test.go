@@ -496,6 +496,96 @@ func TestLastTaskTypeForProject(t *testing.T) {
 	}
 }
 
+func TestUpdateTaskStatus(t *testing.T) {
+	// Create temporary database
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	db, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer db.Close()
+	defer os.Remove(dbPath)
+
+	// Create a task starting in done status
+	task := &Task{
+		Title:   "Test Task",
+		Status:  StatusDone,
+		Type:    TypeCode,
+		Project: "personal",
+	}
+	if err := db.CreateTask(task); err != nil {
+		t.Fatalf("failed to create task: %v", err)
+	}
+
+	// Verify initial status is done
+	retrieved, err := db.GetTask(task.ID)
+	if err != nil {
+		t.Fatalf("failed to get task: %v", err)
+	}
+	if retrieved.Status != StatusDone {
+		t.Errorf("expected status %q, got %q", StatusDone, retrieved.Status)
+	}
+
+	// Change status to backlog (the feature we're implementing)
+	if err := db.UpdateTaskStatus(task.ID, StatusBacklog); err != nil {
+		t.Fatalf("failed to update task status: %v", err)
+	}
+
+	// Verify status was changed
+	retrieved, err = db.GetTask(task.ID)
+	if err != nil {
+		t.Fatalf("failed to get task: %v", err)
+	}
+	if retrieved.Status != StatusBacklog {
+		t.Errorf("expected status %q, got %q", StatusBacklog, retrieved.Status)
+	}
+
+	// Change status to queued
+	if err := db.UpdateTaskStatus(task.ID, StatusQueued); err != nil {
+		t.Fatalf("failed to update task status: %v", err)
+	}
+
+	retrieved, err = db.GetTask(task.ID)
+	if err != nil {
+		t.Fatalf("failed to get task: %v", err)
+	}
+	if retrieved.Status != StatusQueued {
+		t.Errorf("expected status %q, got %q", StatusQueued, retrieved.Status)
+	}
+
+	// Change status to blocked
+	if err := db.UpdateTaskStatus(task.ID, StatusBlocked); err != nil {
+		t.Fatalf("failed to update task status: %v", err)
+	}
+
+	retrieved, err = db.GetTask(task.ID)
+	if err != nil {
+		t.Fatalf("failed to get task: %v", err)
+	}
+	if retrieved.Status != StatusBlocked {
+		t.Errorf("expected status %q, got %q", StatusBlocked, retrieved.Status)
+	}
+	// Blocked sets completed_at
+	if retrieved.CompletedAt == nil {
+		t.Error("expected completed_at to be set for blocked status")
+	}
+
+	// Change back to backlog
+	if err := db.UpdateTaskStatus(task.ID, StatusBacklog); err != nil {
+		t.Fatalf("failed to update task status: %v", err)
+	}
+
+	retrieved, err = db.GetTask(task.ID)
+	if err != nil {
+		t.Fatalf("failed to get task: %v", err)
+	}
+	if retrieved.Status != StatusBacklog {
+		t.Errorf("expected status %q, got %q", StatusBacklog, retrieved.Status)
+	}
+}
+
 func TestCreateTaskSavesLastType(t *testing.T) {
 	// Create temporary database
 	tmpDir := t.TempDir()

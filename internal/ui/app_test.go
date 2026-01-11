@@ -20,4 +20,8 @@ func TestDefaultKeyMap(t *testing.T) {
 	if keys.New.Help().Key != "n" {
 		t.Error("New key should have help text 'n'")
 	}
+
+	if keys.ChangeStatus.Help().Key != "S" {
+		t.Error("ChangeStatus key should have help text 'S'")
+	}
 }
