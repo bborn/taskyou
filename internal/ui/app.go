@@ -414,6 +414,14 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 		}
 
+		// Command palette works from any view
+		if key.Matches(msg, m.keys.CommandPalette) {
+			m.commandPaletteView = NewCommandPaletteModel(m.db, m.tasks, m.width, m.height)
+			m.previousView = m.currentView
+			m.currentView = ViewCommandPalette
+			return m, m.commandPaletteView.Init()
+		}
+
 		// Route to current view
 		switch m.currentView {
 		case ViewDashboard:
@@ -976,12 +984,6 @@ func (m *AppModel) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.previousView = m.currentView
 		m.currentView = ViewMemories
 		return m, nil
-
-	case key.Matches(msg, m.keys.CommandPalette):
-		m.commandPaletteView = NewCommandPaletteModel(m.db, m.tasks, m.width, m.height)
-		m.previousView = m.currentView
-		m.currentView = ViewCommandPalette
-		return m, m.commandPaletteView.Init()
 
 	case key.Matches(msg, m.keys.Refresh):
 		m.loading = true
