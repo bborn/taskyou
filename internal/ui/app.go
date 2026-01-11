@@ -452,12 +452,12 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					// Task just became blocked - ring bell and show notification
 					m.notification = fmt.Sprintf("⚠ Task #%d needs input: %s", t.ID, t.Title)
 					m.notifyUntil = time.Now().Add(10 * time.Second)
-					fmt.Print("\a") // Ring terminal bell
+					RingBell() // Ring terminal bell (writes to /dev/tty to bypass TUI)
 				} else if t.Status == db.StatusDone && db.IsInProgress(prevStatus) {
 					// Task completed - ring bell and show notification
 					m.notification = fmt.Sprintf("✓ Task #%d complete: %s", t.ID, t.Title)
 					m.notifyUntil = time.Now().Add(5 * time.Second)
-					fmt.Print("\a") // Ring terminal bell
+					RingBell() // Ring terminal bell (writes to /dev/tty to bypass TUI)
 				}
 			}
 			m.prevStatuses[t.ID] = t.Status
@@ -567,11 +567,11 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						if event.Task.Status == db.StatusBlocked {
 							m.notification = fmt.Sprintf("⚠ Task #%d needs input: %s", event.TaskID, event.Task.Title)
 							m.notifyUntil = time.Now().Add(10 * time.Second)
-							fmt.Print("\a") // Ring terminal bell
+							RingBell() // Ring terminal bell (writes to /dev/tty to bypass TUI)
 						} else if event.Task.Status == db.StatusDone && db.IsInProgress(prevStatus) {
 							m.notification = fmt.Sprintf("✓ Task #%d complete: %s", event.TaskID, event.Task.Title)
 							m.notifyUntil = time.Now().Add(5 * time.Second)
-							fmt.Print("\a") // Ring terminal bell
+							RingBell() // Ring terminal bell (writes to /dev/tty to bypass TUI)
 						} else if db.IsInProgress(event.Task.Status) {
 							m.notification = fmt.Sprintf("▶ Task #%d started: %s", event.TaskID, event.Task.Title)
 							m.notifyUntil = time.Now().Add(3 * time.Second)
