@@ -38,6 +38,9 @@ type DetailModel struct {
 
 	// Cached tmux window target (set once on creation, cleared on kill)
 	cachedWindowTarget string
+
+	// Cached Claude process memory (updated on Refresh)
+	claudeMemoryMB int
 }
 
 // UpdateTask updates the task and refreshes the view.
@@ -83,6 +86,9 @@ func (m *DetailModel) Refresh() {
 		}
 	}
 
+	// Update Claude memory usage
+	m.claudeMemoryMB = m.getClaudeMemoryMB()
+
 	// Ensure tmux panes are joined if available (handles external close/detach)
 	m.ensureTmuxPanesJoined()
 }
@@ -109,6 +115,9 @@ func NewDetailModel(t *db.Task, database *db.DB, width, height int) *DetailModel
 
 	// Cache the tmux window target once (expensive operation)
 	m.cachedWindowTarget = m.findTaskWindow()
+
+	// Fetch initial memory usage
+	m.claudeMemoryMB = m.getClaudeMemoryMB()
 
 	// If we're in tmux and task has active session, join it as a split pane
 	if os.Getenv("TMUX") != "" && m.cachedWindowTarget != "" {
@@ -866,6 +875,19 @@ func (m *DetailModel) renderHeader() string {
 		meta.WriteString(prDesc)
 	}
 
+	// Memory usage if Claude is running
+	if m.claudeMemoryMB > 0 {
+		meta.WriteString("  ")
+		memColor := ColorMuted
+		if m.claudeMemoryMB > 1000 {
+			memColor = lipgloss.Color("#EF4444") // red for >1GB
+		} else if m.claudeMemoryMB > 500 {
+			memColor = lipgloss.Color("#F59E0B") // amber for >500MB
+		}
+		memStyle := lipgloss.NewStyle().Foreground(memColor)
+		meta.WriteString(memStyle.Render(fmt.Sprintf("%dMB", m.claudeMemoryMB)))
+	}
+
 	// Tmux hint if session is active
 	if m.claudePaneID != "" {
 		meta.WriteString("  ")
@@ -1012,6 +1034,55 @@ func (m *DetailModel) renderHelp() string {
 	}
 
 	return HelpBar.Render(help)
+}
+
+// getClaudeMemoryMB returns the memory usage in MB for the Claude process running this task.
+// Returns 0 if no process is found or on error.
+func (m *DetailModel) getClaudeMemoryMB() int {
+	if m.task == nil {
+		return 0
+	}
+
+	windowTarget := m.cachedWindowTarget
+	if windowTarget == "" {
+		return 0
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	// Get the shell PID from the tmux pane
+	out, err := exec.CommandContext(ctx, "tmux", "display-message", "-t", windowTarget, "-p", "#{pane_pid}").Output()
+	if err != nil {
+		return 0
+	}
+
+	shellPID := strings.TrimSpace(string(out))
+	if shellPID == "" {
+		return 0
+	}
+
+	// Find claude child process
+	childOut, err := exec.CommandContext(ctx, "pgrep", "-P", shellPID, "claude").Output()
+	var pid string
+	if err == nil && len(childOut) > 0 {
+		pid = strings.TrimSpace(string(childOut))
+	} else {
+		pid = shellPID // fallback to shell
+	}
+
+	// Get RSS in KB from ps
+	psOut, err := exec.CommandContext(ctx, "ps", "-o", "rss=", "-p", pid).Output()
+	if err != nil {
+		return 0
+	}
+
+	rssKB, err := strconv.Atoi(strings.TrimSpace(string(psOut)))
+	if err != nil {
+		return 0
+	}
+
+	return rssKB / 1024 // Convert to MB
 }
 
 func humanizeTime(t time.Time) string {
