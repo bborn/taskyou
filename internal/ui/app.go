@@ -36,36 +36,38 @@ const (
 	ViewMemories
 	ViewAttachments
 	ViewChangeStatus
+	ViewCommandPalette
 )
 
 // KeyMap defines key bindings.
 type KeyMap struct {
-	Left         key.Binding
-	Right        key.Binding
-	Up           key.Binding
-	Down         key.Binding
-	Enter        key.Binding
-	Back         key.Binding
-	New          key.Binding
-	Edit         key.Binding
-	Queue        key.Binding
-	Retry        key.Binding
-	Close        key.Binding
-	Delete       key.Binding
-	Kill         key.Binding
-	Filter       key.Binding
-	Refresh      key.Binding
-	Settings     key.Binding
-	Memories     key.Binding
-	Files        key.Binding
-	Help         key.Binding
-	Quit         key.Binding
-	ChangeStatus key.Binding
+	Left           key.Binding
+	Right          key.Binding
+	Up             key.Binding
+	Down           key.Binding
+	Enter          key.Binding
+	Back           key.Binding
+	New            key.Binding
+	Edit           key.Binding
+	Queue          key.Binding
+	Retry          key.Binding
+	Close          key.Binding
+	Delete         key.Binding
+	Kill           key.Binding
+	Filter         key.Binding
+	Refresh        key.Binding
+	Settings       key.Binding
+	Memories       key.Binding
+	Files          key.Binding
+	Help           key.Binding
+	Quit           key.Binding
+	ChangeStatus   key.Binding
+	CommandPalette key.Binding
 	// Column focus shortcuts
-	FocusBacklog     key.Binding
-	FocusInProgress  key.Binding
-	FocusBlocked     key.Binding
-	FocusDone        key.Binding
+	FocusBacklog    key.Binding
+	FocusInProgress key.Binding
+	FocusBlocked    key.Binding
+	FocusDone       key.Binding
 }
 
 // ShortHelp returns key bindings to show in the mini help.
@@ -80,8 +82,8 @@ func (k KeyMap) FullHelp() [][]key.Binding {
 		{k.FocusBacklog, k.FocusInProgress, k.FocusBlocked, k.FocusDone},
 		{k.Enter, k.New, k.Queue, k.Close},
 		{k.Retry, k.Delete, k.Kill},
-		{k.Filter, k.Settings, k.Memories, k.Files},
-		{k.ChangeStatus, k.Refresh, k.Help, k.Quit},
+		{k.Filter, k.CommandPalette, k.Settings, k.Memories},
+		{k.Files, k.ChangeStatus, k.Refresh, k.Help, k.Quit},
 	}
 }
 
@@ -171,6 +173,10 @@ func DefaultKeyMap() KeyMap {
 		ChangeStatus: key.NewBinding(
 			key.WithKeys("S"),
 			key.WithHelp("S", "status"),
+		),
+		CommandPalette: key.NewBinding(
+			key.WithKeys("p", "ctrl+p"),
+			key.WithHelp("p/ctrl+p", "go to task"),
 		),
 		FocusBacklog: key.NewBinding(
 			key.WithKeys("B"),
@@ -282,6 +288,9 @@ type AppModel struct {
 	changeStatusValue       string
 	pendingChangeStatusTask *db.Task
 
+	// Command palette view state
+	commandPaletteView *CommandPaletteModel
+
 	// Window size
 	width  int
 	height int
@@ -385,6 +394,9 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if m.currentView == ViewChangeStatus && m.changeStatusForm != nil {
 		return m.updateChangeStatus(msg)
 	}
+	if m.currentView == ViewCommandPalette && m.commandPaletteView != nil {
+		return m.updateCommandPalette(msg)
+	}
 	// Handle detail view feedback mode (needs all message types for text input)
 	if m.currentView == ViewDetail && m.detailView != nil && m.detailView.InFeedbackMode() {
 		return m.updateDetail(msg)
@@ -436,6 +448,9 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if m.retryView != nil {
 			m.retryView.SetSize(msg.Width, msg.Height)
+		}
+		if m.commandPaletteView != nil {
+			m.commandPaletteView.SetSize(msg.Width, msg.Height)
 		}
 
 	case tasksLoadedMsg:
@@ -674,6 +689,10 @@ func (m *AppModel) View() string {
 		}
 	case ViewChangeStatus:
 		return m.viewChangeStatus()
+	case ViewCommandPalette:
+		if m.commandPaletteView != nil {
+			return m.commandPaletteView.View()
+		}
 	}
 
 	return ""
@@ -957,6 +976,12 @@ func (m *AppModel) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.previousView = m.currentView
 		m.currentView = ViewMemories
 		return m, nil
+
+	case key.Matches(msg, m.keys.CommandPalette):
+		m.commandPaletteView = NewCommandPaletteModel(m.db, m.tasks, m.width, m.height)
+		m.previousView = m.currentView
+		m.currentView = ViewCommandPalette
+		return m, m.commandPaletteView.Init()
 
 	case key.Matches(msg, m.keys.Refresh):
 		m.loading = true
@@ -1731,6 +1756,32 @@ func (m *AppModel) updateAttachments(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	return m, nil
+}
+
+func (m *AppModel) updateCommandPalette(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if m.commandPaletteView == nil {
+		return m, nil
+	}
+
+	var cmd tea.Cmd
+	m.commandPaletteView, cmd = m.commandPaletteView.Update(msg)
+
+	// Check if user cancelled
+	if m.commandPaletteView.IsCancelled() {
+		m.currentView = ViewDashboard
+		m.commandPaletteView = nil
+		return m, nil
+	}
+
+	// Check if user selected a task
+	if selectedTask := m.commandPaletteView.SelectedTask(); selectedTask != nil {
+		m.commandPaletteView = nil
+		// Select the task on the kanban board and load its detail view
+		m.kanban.SelectTask(selectedTask.ID)
+		return m, m.loadTask(selectedTask.ID)
+	}
+
+	return m, cmd
 }
 
 // Messages
