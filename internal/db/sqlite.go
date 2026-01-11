@@ -461,7 +461,7 @@ Think deeply but be actionable. Summarize your conclusions clearly.`,
 // DefaultPath returns the default database path.
 func DefaultPath() string {
 	// Check for explicit path
-	if p := os.Getenv("TASK_DB_PATH"); p != "" {
+	if p := os.Getenv("WORKTREE_DB_PATH"); p != "" {
 		return p
 	}
 

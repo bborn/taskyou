@@ -155,7 +155,7 @@ CREATE TABLE settings (
 );
 ```
 
-Database location: `~/.local/share/task/tasks.db` (configurable via `TASK_DB_PATH`)
+Database location: `~/.local/share/task/tasks.db` (configurable via `WORKTREE_DB_PATH`)
 
 ## Task Lifecycle
 
@@ -258,4 +258,4 @@ wish.WithPublicKeyAuth(func(ctx ssh.Context, key ssh.PublicKey) bool {
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `TASK_DB_PATH` | SQLite database path | `~/.local/share/task/tasks.db` |
+| `WORKTREE_DB_PATH` | SQLite database path | `~/.local/share/task/tasks.db` |

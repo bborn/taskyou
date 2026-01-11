@@ -87,7 +87,7 @@ backlog → queued → processing → done
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `TASK_DB_PATH` | SQLite database path | `~/.local/share/task/tasks.db` |
+| `WORKTREE_DB_PATH` | SQLite database path | `~/.local/share/task/tasks.db` |
 
 ### Projects
 
@@ -108,9 +108,9 @@ Each task provides environment variables that applications can use to run in iso
 
 | Variable | Description | Example |
 |----------|-------------|---------|
-| `TASK_ID` | Unique task identifier | `207` |
-| `TASK_PORT` | Unique port (3100-4099) | `3100` |
-| `TASK_WORKTREE_PATH` | Path to the worktree | `/path/to/project/.task-worktrees/207-my-task` |
+| `WORKTREE_TASK_ID` | Unique task identifier | `207` |
+| `WORKTREE_PORT` | Unique port (3100-4099) | `3100` |
+| `WORKTREE_PATH` | Path to the worktree | `/path/to/project/.task-worktrees/207-my-task` |
 
 #### Rails Example
 
@@ -118,21 +118,21 @@ Configure your Rails app to use these variables for port and database isolation:
 
 **config/puma.rb:**
 ```ruby
-port ENV.fetch("TASK_PORT", 3000)
+port ENV.fetch("WORKTREE_PORT", 3000)
 ```
 
 **config/database.yml:**
 ```yaml
 development:
-  database: myapp_dev<%= ENV['TASK_ID'] ? "_task#{ENV['TASK_ID']}" : "" %>
+  database: myapp_dev<%= ENV['WORKTREE_TASK_ID'] ? "_task#{ENV['WORKTREE_TASK_ID']}" : "" %>
 ```
 
 **Procfile.dev (with foreman/overmind):**
 ```
-web: bin/rails server -p ${TASK_PORT:-3000}
+web: bin/rails server -p ${WORKTREE_PORT:-3000}
 ```
 
-Now Claude can run your app with `bin/dev` and interact with it via curl or browser at `http://localhost:$TASK_PORT`.
+Now Claude can run your app with `bin/dev` and interact with it via curl or browser at `http://localhost:$WORKTREE_PORT`.
 
 ### Memories
 
