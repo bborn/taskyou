@@ -5,11 +5,15 @@ package mcp
 
 import (
 	"bufio"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
+	"strings"
 	"sync"
+	"time"
 
 	"github.com/bborn/workflow/internal/db"
 )
@@ -169,6 +173,28 @@ func (s *Server) handleRequest(req *jsonRPCRequest) {
 						"required": []string{"question"},
 					},
 				},
+				{
+					Name:        "workflow_save_screenshot",
+					Description: "Save a screenshot as an attachment to the current task. Use this to capture visual output of your work, especially for frontend/UI tasks. Screenshots are saved and can be reviewed by the user or included in PRs.",
+					InputSchema: map[string]interface{}{
+						"type": "object",
+						"properties": map[string]interface{}{
+							"image_data": map[string]interface{}{
+								"type":        "string",
+								"description": "Base64-encoded image data (PNG or JPEG format)",
+							},
+							"filename": map[string]interface{}{
+								"type":        "string",
+								"description": "Optional filename for the screenshot (defaults to screenshot-{timestamp}.png)",
+							},
+							"description": map[string]interface{}{
+								"type":        "string",
+								"description": "Optional description of what the screenshot shows",
+							},
+						},
+						"required": []string{"image_data"},
+					},
+				},
 			},
 		})
 
@@ -224,6 +250,89 @@ func (s *Server) handleToolCall(id interface{}, params *toolCallParams) {
 		s.sendResult(id, toolCallResult{
 			Content: []contentBlock{
 				{Type: "text", Text: "Input requested. The user will be notified."},
+			},
+		})
+
+	case "workflow_save_screenshot":
+		imageData, _ := params.Arguments["image_data"].(string)
+		filename, _ := params.Arguments["filename"].(string)
+		description, _ := params.Arguments["description"].(string)
+
+		if imageData == "" {
+			s.sendError(id, -32602, "image_data is required")
+			return
+		}
+
+		// Handle data URI format (data:image/png;base64,...)
+		base64Data := imageData
+		mimeType := "image/png"
+		if strings.HasPrefix(imageData, "data:") {
+			parts := strings.SplitN(imageData, ",", 2)
+			if len(parts) == 2 {
+				base64Data = parts[1]
+				// Extract MIME type from data URI
+				header := parts[0] // e.g., "data:image/png;base64"
+				if strings.Contains(header, "image/jpeg") || strings.Contains(header, "image/jpg") {
+					mimeType = "image/jpeg"
+				} else if strings.Contains(header, "image/gif") {
+					mimeType = "image/gif"
+				} else if strings.Contains(header, "image/webp") {
+					mimeType = "image/webp"
+				}
+			}
+		}
+
+		// Decode the base64 image data
+		data, err := base64.StdEncoding.DecodeString(base64Data)
+		if err != nil {
+			s.sendError(id, -32602, fmt.Sprintf("Failed to decode base64 image data: %v", err))
+			return
+		}
+
+		// Generate filename if not provided
+		if filename == "" {
+			ext := ".png"
+			if mimeType == "image/jpeg" {
+				ext = ".jpg"
+			} else if mimeType == "image/gif" {
+				ext = ".gif"
+			} else if mimeType == "image/webp" {
+				ext = ".webp"
+			}
+			filename = fmt.Sprintf("screenshot-%s%s", time.Now().Format("20060102-150405"), ext)
+		} else {
+			// Ensure the filename has an appropriate extension
+			ext := filepath.Ext(filename)
+			if ext == "" {
+				if mimeType == "image/jpeg" {
+					filename += ".jpg"
+				} else if mimeType == "image/gif" {
+					filename += ".gif"
+				} else if mimeType == "image/webp" {
+					filename += ".webp"
+				} else {
+					filename += ".png"
+				}
+			}
+		}
+
+		// Save as attachment
+		attachment, err := s.db.AddAttachment(s.taskID, filename, mimeType, data)
+		if err != nil {
+			s.sendError(id, -32603, fmt.Sprintf("Failed to save screenshot: %v", err))
+			return
+		}
+
+		// Log the screenshot save
+		logMsg := fmt.Sprintf("Screenshot saved: %s (%d bytes)", filename, len(data))
+		if description != "" {
+			logMsg = fmt.Sprintf("Screenshot saved: %s - %s (%d bytes)", filename, description, len(data))
+		}
+		s.db.AppendTaskLog(s.taskID, "system", logMsg)
+
+		s.sendResult(id, toolCallResult{
+			Content: []contentBlock{
+				{Type: "text", Text: fmt.Sprintf("Screenshot saved as attachment #%d: %s", attachment.ID, filename)},
 			},
 		})
 
