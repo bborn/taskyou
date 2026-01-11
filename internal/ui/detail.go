@@ -24,6 +24,7 @@ type DetailModel struct {
 	task     *db.Task
 	logs     []*db.TaskLog
 	database *db.DB
+	executor *executor.Executor
 	viewport viewport.Model
 	width    int
 	height   int
@@ -110,10 +111,11 @@ func (m *DetailModel) Task() *db.Task {
 }
 
 // NewDetailModel creates a new detail model.
-func NewDetailModel(t *db.Task, database *db.DB, width, height int) *DetailModel {
+func NewDetailModel(t *db.Task, database *db.DB, exec *executor.Executor, width, height int) *DetailModel {
 	m := &DetailModel{
 		task:     t,
 		database: database,
+		executor: exec,
 		width:    width,
 		height:   height,
 	}
@@ -606,6 +608,12 @@ func (m *DetailModel) joinTmuxPane() {
 func (m *DetailModel) getWorkdir() string {
 	if m.task.WorktreePath != "" {
 		return m.task.WorktreePath
+	}
+	// Try project directory if task has a project
+	if m.task.Project != "" && m.executor != nil {
+		if projectDir := m.executor.GetProjectDir(m.task.Project); projectDir != "" {
+			return projectDir
+		}
 	}
 	// Fallback to home directory
 	home, _ := os.UserHomeDir()

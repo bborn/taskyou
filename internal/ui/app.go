@@ -481,7 +481,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.executor.IsSuspended(msg.task.ID) {
 				m.executor.ResumeTask(msg.task.ID)
 			}
-			m.detailView = NewDetailModel(msg.task, m.db, m.width, m.height)
+			m.detailView = NewDetailModel(msg.task, m.db, m.executor, m.width, m.height)
 			m.previousView = m.currentView
 			m.currentView = ViewDetail
 			// Start tmux output ticker if session is active
