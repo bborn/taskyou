@@ -89,6 +89,17 @@ func (m *DetailModel) Refresh() {
 	// Update Claude memory usage
 	m.claudeMemoryMB = m.getClaudeMemoryMB()
 
+	// Update Claude pane title with memory info
+	if m.claudePaneID != "" {
+		title := "Claude"
+		if m.claudeMemoryMB > 0 {
+			title = fmt.Sprintf("Claude (%d MB)", m.claudeMemoryMB)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+		exec.CommandContext(ctx, "tmux", "select-pane", "-t", m.claudePaneID, "-T", title).Run()
+		cancel()
+	}
+
 	// Ensure tmux panes are joined if available (handles external close/detach)
 	m.ensureTmuxPanesJoined()
 }
@@ -532,8 +543,12 @@ func (m *DetailModel) joinTmuxPanes() {
 	claudePaneOut, _ := claudePaneCmd.Output()
 	m.claudePaneID = strings.TrimSpace(string(claudePaneOut))
 
-	// Set Claude pane title
-	exec.CommandContext(ctx, "tmux", "select-pane", "-t", m.claudePaneID, "-T", "Claude").Run()
+	// Set Claude pane title with memory info
+	claudeTitle := "Claude"
+	if m.claudeMemoryMB > 0 {
+		claudeTitle = fmt.Sprintf("Claude (%d MB)", m.claudeMemoryMB)
+	}
+	exec.CommandContext(ctx, "tmux", "select-pane", "-t", m.claudePaneID, "-T", claudeTitle).Run()
 
 	// Step 2: Create a new pane to the right of Claude for the workdir
 	// -h: horizontal split (right side)
@@ -873,19 +888,6 @@ func (m *DetailModel) renderHeader() string {
 			Foreground(ColorMuted).
 			Render(m.prInfo.StatusDescription())
 		meta.WriteString(prDesc)
-	}
-
-	// Memory usage if Claude is running
-	if m.claudeMemoryMB > 0 {
-		meta.WriteString("  ")
-		memColor := ColorMuted
-		if m.claudeMemoryMB > 1000 {
-			memColor = lipgloss.Color("#EF4444") // red for >1GB
-		} else if m.claudeMemoryMB > 500 {
-			memColor = lipgloss.Color("#F59E0B") // amber for >500MB
-		}
-		memStyle := lipgloss.NewStyle().Foreground(memColor)
-		meta.WriteString(memStyle.Render(fmt.Sprintf("%dMB", m.claudeMemoryMB)))
 	}
 
 	// Tmux hint if session is active
