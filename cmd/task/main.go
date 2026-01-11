@@ -1582,6 +1582,9 @@ func handleClaudeHook(hookEvent string) error {
 	}
 	defer database.Close()
 
+	// Log session ID once (on first hook call for this task)
+	logSessionIDOnce(database, taskID, &input)
+
 	// Handle based on hook event type
 	switch hookEvent {
 	case "PreToolUse":
@@ -1596,6 +1599,31 @@ func handleClaudeHook(hookEvent string) error {
 		// Unknown hook type, ignore
 		return nil
 	}
+}
+
+// logSessionIDOnce logs the Claude session ID for a task, but only once.
+// It checks if a session ID log already exists to avoid duplicate entries.
+func logSessionIDOnce(database *db.DB, taskID int64, input *ClaudeHookInput) {
+	if input.SessionID == "" {
+		return
+	}
+
+	// Check if we've already logged a session ID for this task
+	logs, err := database.GetTaskLogs(taskID, 50)
+	if err != nil {
+		return
+	}
+
+	sessionPrefix := "Claude session: "
+	for _, log := range logs {
+		if log.LineType == "system" && strings.HasPrefix(log.Content, sessionPrefix) {
+			// Already logged
+			return
+		}
+	}
+
+	// Log the session ID
+	database.AppendTaskLog(taskID, "system", sessionPrefix+input.SessionID)
 }
 
 // handleNotificationHook handles Notification hooks from Claude.
