@@ -145,7 +145,10 @@ func (db *DB) ListTasks(opts ListTasksOptions) ([]*Task, error) {
 		query += " AND status != 'done'"
 	}
 
-	query += " ORDER BY created_at DESC"
+	// Sort done/blocked tasks by completed_at (most recently closed first),
+	// other tasks by created_at (newest first).
+	// Use id DESC as secondary sort for consistent ordering when timestamps are equal.
+	query += " ORDER BY CASE WHEN status IN ('done', 'blocked') THEN completed_at ELSE created_at END DESC, id DESC"
 
 	if opts.Limit > 0 {
 		query += fmt.Sprintf(" LIMIT %d", opts.Limit)
