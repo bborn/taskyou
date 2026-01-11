@@ -48,7 +48,7 @@ var (
 // Uses PID to ensure each task instance gets its own tmux sessions.
 func getSessionID() string {
 	// Check if SESSION_ID is already set (for child processes)
-	if sid := os.Getenv("TASK_SESSION_ID"); sid != "" {
+	if sid := os.Getenv("WORKTREE_SESSION_ID"); sid != "" {
 		return sid
 	}
 	// Generate new session ID based on PID
@@ -146,7 +146,7 @@ func main() {
 			time.Sleep(100 * time.Millisecond)
 
 			// Start daemon (inherit dangerous mode from environment if set)
-			dangerousMode := os.Getenv("TASK_DANGEROUS_MODE") == "1"
+			dangerousMode := os.Getenv("WORKTREE_DANGEROUS_MODE") == "1"
 			if err := ensureDaemonRunning(dangerousMode); err != nil {
 				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
 				os.Exit(1)
@@ -1128,8 +1128,8 @@ func execInTmux() error {
 	args := append([]string{executable}, os.Args[1:]...)
 	cmdStr := strings.Join(args, " ")
 
-	// Set TASK_SESSION_ID env var so child processes use the same session ID
-	envCmd := fmt.Sprintf("TASK_SESSION_ID=%s %s", sessionID, cmdStr)
+	// Set WORKTREE_SESSION_ID env var so child processes use the same session ID
+	envCmd := fmt.Sprintf("WORKTREE_SESSION_ID=%s %s", sessionID, cmdStr)
 
 	// Check if session already exists
 	if osexec.Command("tmux", "has-session", "-t", sessionName).Run() == nil {
@@ -1228,7 +1228,7 @@ func runLocal(dangerousMode bool) error {
 }
 
 // ensureDaemonRunning starts the daemon if it's not already running.
-// If dangerousMode is true, sets TASK_DANGEROUS_MODE=1 for the daemon.
+// If dangerousMode is true, sets WORKTREE_DANGEROUS_MODE=1 for the daemon.
 // If the daemon is running with a different mode, it will be restarted.
 func ensureDaemonRunning(dangerousMode bool) error {
 	pidFile := getPidFilePath()
@@ -1268,10 +1268,10 @@ func ensureDaemonRunning(dangerousMode bool) error {
 	cmd.Stderr = nil
 	cmd.Stdin = nil
 	// Pass session ID to daemon so it uses the same tmux sessions
-	cmd.Env = append(os.Environ(), fmt.Sprintf("TASK_SESSION_ID=%s", getSessionID()))
+	cmd.Env = append(os.Environ(), fmt.Sprintf("WORKTREE_SESSION_ID=%s", getSessionID()))
 	// Pass dangerous mode flag if enabled
 	if dangerousMode {
-		cmd.Env = append(cmd.Env, "TASK_DANGEROUS_MODE=1")
+		cmd.Env = append(cmd.Env, "WORKTREE_DANGEROUS_MODE=1")
 	}
 	// Detach from parent process
 	cmd.SysProcAttr = &syscall.SysProcAttr{
@@ -1489,7 +1489,7 @@ func connectRemote(host, port string) error {
 
 	// Send current working directory for project detection
 	if cwd, err := os.Getwd(); err == nil {
-		session.Setenv("TASK_CWD", cwd)
+		session.Setenv("WORKTREE_CWD", cwd)
 	}
 
 	// Start shell (taskd serves TUI directly)
@@ -1560,13 +1560,13 @@ type ClaudeHookInput struct {
 // It reads hook data from stdin and updates task status accordingly.
 func handleClaudeHook(hookEvent string) error {
 	// Get task ID from environment (set by executor when launching Claude)
-	taskIDStr := os.Getenv("TASK_ID")
+	taskIDStr := os.Getenv("WORKTREE_TASK_ID")
 	if taskIDStr == "" {
-		return fmt.Errorf("TASK_ID not set")
+		return fmt.Errorf("WORKTREE_TASK_ID not set")
 	}
 	var taskID int64
 	if _, err := fmt.Sscanf(taskIDStr, "%d", &taskID); err != nil {
-		return fmt.Errorf("invalid TASK_ID: %s", taskIDStr)
+		return fmt.Errorf("invalid WORKTREE_TASK_ID: %s", taskIDStr)
 	}
 
 	// Read hook input from stdin

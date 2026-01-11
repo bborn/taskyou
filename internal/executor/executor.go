@@ -893,7 +893,7 @@ const TmuxDaemonSession = "task-daemon"
 // getDaemonSessionName returns the task-daemon session name for this instance.
 func getDaemonSessionName() string {
 	// Check if SESSION_ID is set (for child processes)
-	if sid := os.Getenv("TASK_SESSION_ID"); sid != "" {
+	if sid := os.Getenv("WORKTREE_SESSION_ID"); sid != "" {
 		return fmt.Sprintf("task-daemon-%s", sid)
 	}
 	// Generate new session ID based on PID
@@ -945,7 +945,7 @@ func (e *Executor) setupClaudeHooks(workDir string, taskID int64) (cleanup func(
 	}
 
 	// Configure hooks to call our task binary
-	// The TASK_ID env var is set when launching Claude
+	// The WORKTREE_TASK_ID env var is set when launching Claude
 	// We use multiple hook types to ensure accurate task state tracking:
 	// - PreToolUse: Fires before tool execution - ensures task is "processing"
 	// - PostToolUse: Fires after tool completes - ensures task stays "processing"
@@ -1086,31 +1086,31 @@ func (e *Executor) runClaude(ctx context.Context, task *db.Task, workDir, prompt
 	promptFile.Close()
 	defer os.Remove(promptFile.Name())
 
-	// Script that runs claude interactively with task environment variables
+	// Script that runs claude interactively with worktree environment variables
 	// Note: tmux starts in workDir (-c flag), so claude inherits proper permissions and hooks config
 	// Run interactively (no -p) so user can attach and see/interact in real-time
 	// Environment variables passed:
-	// - TASK_ID: Task identifier for hooks
-	// - TASK_SESSION_ID: Consistent session naming across processes
-	// - TASK_PORT: Unique port for running the application
-	// - TASK_WORKTREE_PATH: Path to the task's git worktree
-	sessionID := os.Getenv("TASK_SESSION_ID")
+	// - WORKTREE_TASK_ID: Task identifier for hooks
+	// - WORKTREE_SESSION_ID: Consistent session naming across processes
+	// - WORKTREE_PORT: Unique port for running the application
+	// - WORKTREE_PATH: Path to the task's git worktree
+	sessionID := os.Getenv("WORKTREE_SESSION_ID")
 	if sessionID == "" {
 		sessionID = fmt.Sprintf("%d", os.Getpid())
 	}
-	// Only use --dangerously-skip-permissions if TASK_DANGEROUS_MODE is set
+	// Only use --dangerously-skip-permissions if WORKTREE_DANGEROUS_MODE is set
 	dangerousFlag := ""
-	if os.Getenv("TASK_DANGEROUS_MODE") == "1" {
+	if os.Getenv("WORKTREE_DANGEROUS_MODE") == "1" {
 		dangerousFlag = "--dangerously-skip-permissions "
 	}
 	// Check for existing Claude session to resume instead of starting fresh
 	var script string
 	if existingSessionID := e.findClaudeSessionID(workDir); existingSessionID != "" {
 		e.logLine(task.ID, "system", fmt.Sprintf("Resuming existing session %s", existingSessionID))
-		script = fmt.Sprintf(`TASK_ID=%d TASK_SESSION_ID=%s TASK_PORT=%d TASK_WORKTREE_PATH=%q claude %s--chrome --resume %s "$(cat %q)"`,
+		script = fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q claude %s--chrome --resume %s "$(cat %q)"`,
 			task.ID, sessionID, task.Port, task.WorktreePath, dangerousFlag, existingSessionID, promptFile.Name())
 	} else {
-		script = fmt.Sprintf(`TASK_ID=%d TASK_SESSION_ID=%s TASK_PORT=%d TASK_WORKTREE_PATH=%q claude %s--chrome "$(cat %q)"`,
+		script = fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q claude %s--chrome "$(cat %q)"`,
 			task.ID, sessionID, task.Port, task.WorktreePath, dangerousFlag, promptFile.Name())
 	}
 
@@ -1194,20 +1194,20 @@ func (e *Executor) runClaudeResume(ctx context.Context, task *db.Task, workDir, 
 
 	// Script that resumes claude with session ID (interactive mode)
 	// Environment variables passed:
-	// - TASK_ID: Task identifier for hooks
-	// - TASK_SESSION_ID: Consistent session naming across processes
-	// - TASK_PORT: Unique port for running the application
-	// - TASK_WORKTREE_PATH: Path to the task's git worktree
-	taskSessionID := os.Getenv("TASK_SESSION_ID")
+	// - WORKTREE_TASK_ID: Task identifier for hooks
+	// - WORKTREE_SESSION_ID: Consistent session naming across processes
+	// - WORKTREE_PORT: Unique port for running the application
+	// - WORKTREE_PATH: Path to the task's git worktree
+	taskSessionID := os.Getenv("WORKTREE_SESSION_ID")
 	if taskSessionID == "" {
 		taskSessionID = fmt.Sprintf("%d", os.Getpid())
 	}
-	// Only use --dangerously-skip-permissions if TASK_DANGEROUS_MODE is set
+	// Only use --dangerously-skip-permissions if WORKTREE_DANGEROUS_MODE is set
 	dangerousFlag := ""
-	if os.Getenv("TASK_DANGEROUS_MODE") == "1" {
+	if os.Getenv("WORKTREE_DANGEROUS_MODE") == "1" {
 		dangerousFlag = "--dangerously-skip-permissions "
 	}
-	script := fmt.Sprintf(`TASK_ID=%d TASK_SESSION_ID=%s TASK_PORT=%d TASK_WORKTREE_PATH=%q claude %s--chrome --resume %s "$(cat %q)"`,
+	script := fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q claude %s--chrome --resume %s "$(cat %q)"`,
 		task.ID, taskSessionID, task.Port, task.WorktreePath, dangerousFlag, claudeSessionID, feedbackFile.Name())
 
 	// Create new window in task-daemon session (with timeout for tmux overhead)
@@ -1465,19 +1465,19 @@ func (e *Executor) configureTmuxWindow(windowTarget string) {
 
 // runClaudeDirect runs claude directly without tmux (fallback)
 func (e *Executor) runClaudeDirect(ctx context.Context, task *db.Task, workDir, prompt string) execResult {
-	// Build command args - only include --dangerously-skip-permissions if TASK_DANGEROUS_MODE is set
+	// Build command args - only include --dangerously-skip-permissions if WORKTREE_DANGEROUS_MODE is set
 	args := []string{}
-	if os.Getenv("TASK_DANGEROUS_MODE") == "1" {
+	if os.Getenv("WORKTREE_DANGEROUS_MODE") == "1" {
 		args = append(args, "--dangerously-skip-permissions")
 	}
 	args = append(args, "--chrome", "-p", prompt)
 	cmd := exec.CommandContext(ctx, "claude", args...)
 	cmd.Dir = workDir
-	// Pass task environment variables so hooks and applications know the task context
+	// Pass worktree environment variables so hooks and applications know the task context
 	cmd.Env = append(os.Environ(),
-		fmt.Sprintf("TASK_ID=%d", task.ID),
-		fmt.Sprintf("TASK_PORT=%d", task.Port),
-		fmt.Sprintf("TASK_WORKTREE_PATH=%s", task.WorktreePath),
+		fmt.Sprintf("WORKTREE_TASK_ID=%d", task.ID),
+		fmt.Sprintf("WORKTREE_PORT=%d", task.Port),
+		fmt.Sprintf("WORKTREE_PATH=%s", task.WorktreePath),
 	)
 
 	stdout, err := cmd.StdoutPipe()

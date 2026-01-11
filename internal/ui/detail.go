@@ -299,15 +299,15 @@ func (m *DetailModel) startResumableSession(sessionID string) {
 	// Build the claude command with --resume
 	// Check for dangerous mode
 	dangerousFlag := ""
-	if os.Getenv("TASK_DANGEROUS_MODE") == "1" {
+	if os.Getenv("WORKTREE_DANGEROUS_MODE") == "1" {
 		dangerousFlag = "--dangerously-skip-permissions "
 	}
 
 	// Get the session ID for environment
-	taskSessionID := strings.TrimPrefix(daemonSession, "task-daemon-")
+	worktreeSessionID := strings.TrimPrefix(daemonSession, "task-daemon-")
 
-	script := fmt.Sprintf(`TASK_ID=%d TASK_SESSION_ID=%s claude %s--chrome --resume %s`,
-		m.task.ID, taskSessionID, dangerousFlag, sessionID)
+	script := fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s claude %s--chrome --resume %s`,
+		m.task.ID, worktreeSessionID, dangerousFlag, sessionID)
 
 	// Log the reconnection
 	m.database.AppendTaskLog(m.task.ID, "system", fmt.Sprintf("Reconnecting to session %s", sessionID))
