@@ -577,10 +577,16 @@ func (e *Executor) executeTask(ctx context.Context, task *db.Task) {
 		// Hooks/MCP already marked as done - respect that
 		e.logLine(task.ID, "system", "Task completed")
 		e.hooks.OnStatusChange(task, db.StatusDone, "Task completed")
+
+		// Save transcript on completion
+		e.saveTranscriptOnCompletion(task.ID, workDir)
 	} else if result.Success {
 		e.updateStatus(task.ID, db.StatusDone)
 		e.logLine(task.ID, "system", "Task completed successfully")
 		e.hooks.OnStatusChange(task, db.StatusDone, "Task completed successfully")
+
+		// Save transcript on completion
+		e.saveTranscriptOnCompletion(task.ID, workDir)
 
 		// Extract memories from successful task
 		go func() {
@@ -941,6 +947,7 @@ func (e *Executor) setupClaudeHooks(workDir string, taskID int64) (cleanup func(
 	// - PostToolUse: Fires after tool completes - ensures task stays "processing"
 	// - Notification: Fires when Claude is idle or needs permission - marks task "blocked"
 	// - Stop: Fires when Claude finishes responding - marks task "blocked" when waiting for input
+	// - PreCompact: Fires before Claude compacts context - saves summary to DB for persistence
 	hooksConfig := map[string]interface{}{
 		"hooks": map[string]interface{}{
 			"PreToolUse": []map[string]interface{}{
@@ -980,6 +987,16 @@ func (e *Executor) setupClaudeHooks(workDir string, taskID int64) (cleanup func(
 						{
 							"type":    "command",
 							"command": fmt.Sprintf("%s claude-hook --event Stop", taskBin),
+						},
+					},
+				},
+			},
+			"PreCompact": []map[string]interface{}{
+				{
+					"hooks": []map[string]interface{}{
+						{
+							"type":    "command",
+							"command": fmt.Sprintf("%s claude-hook --event PreCompact", taskBin),
 						},
 					},
 				},
@@ -1271,6 +1288,87 @@ func findClaudeSessionIDImpl(workDir string) string {
 	}
 
 	return latestSession
+}
+
+// saveTranscriptOnCompletion saves the Claude conversation transcript to the database
+// when a task completes. This ensures we have a persistent record of the full
+// conversation even if Claude's session files are cleaned up later.
+func (e *Executor) saveTranscriptOnCompletion(taskID int64, workDir string) {
+	// Find the Claude session directory
+	home, err := os.UserHomeDir()
+	if err != nil {
+		e.logger.Debug("Could not get home dir for transcript save", "error", err)
+		return
+	}
+
+	escapedPath := strings.ReplaceAll(workDir, "/", "-")
+	if strings.HasPrefix(escapedPath, "-") {
+		escapedPath = escapedPath[1:]
+	}
+
+	projectDir := filepath.Join(home, ".claude", "projects", escapedPath)
+
+	// Find the most recent transcript file
+	entries, err := os.ReadDir(projectDir)
+	if err != nil {
+		e.logger.Debug("Could not read Claude project dir", "path", projectDir, "error", err)
+		return
+	}
+
+	var latestTime time.Time
+	var latestPath string
+	var latestSessionID string
+
+	for _, entry := range entries {
+		name := entry.Name()
+		if strings.HasPrefix(name, "agent-") || !strings.HasSuffix(name, ".jsonl") {
+			continue
+		}
+
+		sessionID := strings.TrimSuffix(name, ".jsonl")
+		if !strings.Contains(sessionID, "-") {
+			continue
+		}
+
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+
+		if info.ModTime().After(latestTime) {
+			latestTime = info.ModTime()
+			latestPath = filepath.Join(projectDir, name)
+			latestSessionID = sessionID
+		}
+	}
+
+	if latestPath == "" {
+		e.logger.Debug("No transcript file found", "projectDir", projectDir)
+		return
+	}
+
+	// Read the transcript content
+	content, err := os.ReadFile(latestPath)
+	if err != nil {
+		e.logger.Debug("Could not read transcript file", "path", latestPath, "error", err)
+		return
+	}
+
+	// Save to database
+	summary := &db.CompactionSummary{
+		TaskID:    taskID,
+		SessionID: latestSessionID,
+		Trigger:   "completion", // Special trigger type for task completion
+		PreTokens: len(content) / 4,
+		Summary:   string(content),
+	}
+
+	if err := e.db.SaveCompactionSummary(summary); err != nil {
+		e.logger.Debug("Could not save completion transcript", "error", err)
+		return
+	}
+
+	e.logLine(taskID, "system", fmt.Sprintf("Saved conversation transcript (%d bytes)", len(content)))
 }
 
 // pollTmuxSession waits for the tmux session to end or task status to change.
@@ -1672,6 +1770,13 @@ func (e *Executor) getProjectMemoriesSection(project string) string {
 
 // getConversationHistory builds a context section from previous task runs.
 // This includes questions asked, user responses, and continuation markers.
+//
+// Note: Full conversation transcripts are saved to the database during compaction
+// events (via PreCompact hook) but are not injected here. Claude maintains its
+// own compacted summary internally. The saved transcripts serve as:
+// - A persistent backup that survives Claude session cleanup
+// - An audit trail for debugging
+// - A source for future re-summarization if needed
 func (e *Executor) getConversationHistory(taskID int64) string {
 	logs, err := e.db.GetTaskLogs(taskID, 500)
 	if err != nil || len(logs) == 0 {
@@ -1693,6 +1798,12 @@ func (e *Executor) getConversationHistory(taskID int64) string {
 	var sb strings.Builder
 	sb.WriteString("## Previous Conversation\n\n")
 	sb.WriteString("This task was previously attempted. Here is the relevant history:\n\n")
+
+	// Check if we have saved transcripts from compaction events
+	compactionSummaries, err := e.db.GetCompactionSummaries(taskID)
+	if err == nil && len(compactionSummaries) > 0 {
+		sb.WriteString(fmt.Sprintf("*Note: %d conversation transcript(s) saved from previous compaction events.*\n\n", len(compactionSummaries)))
+	}
 
 	// Extract questions and feedback from logs
 	for _, log := range logs {

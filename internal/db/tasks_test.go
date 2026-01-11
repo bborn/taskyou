@@ -586,6 +586,90 @@ func TestUpdateTaskStatus(t *testing.T) {
 	}
 }
 
+func TestListTasksClosedSortedByCompletedAt(t *testing.T) {
+	// Create temporary database
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	database, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer database.Close()
+	defer os.Remove(dbPath)
+
+	// Create tasks in specific order - older tasks first
+	task1 := &Task{
+		Title:   "First task - closed early",
+		Status:  StatusBacklog,
+		Type:    TypeCode,
+		Project: "test",
+	}
+	task2 := &Task{
+		Title:   "Second task - closed late",
+		Status:  StatusBacklog,
+		Type:    TypeCode,
+		Project: "test",
+	}
+	task3 := &Task{
+		Title:   "Third task - not closed",
+		Status:  StatusBacklog,
+		Type:    TypeCode,
+		Project: "test",
+	}
+
+	// Create tasks
+	if err := database.CreateTask(task1); err != nil {
+		t.Fatalf("failed to create task1: %v", err)
+	}
+	if err := database.CreateTask(task2); err != nil {
+		t.Fatalf("failed to create task2: %v", err)
+	}
+	if err := database.CreateTask(task3); err != nil {
+		t.Fatalf("failed to create task3: %v", err)
+	}
+
+	// Close task1 first
+	if err := database.UpdateTaskStatus(task1.ID, StatusDone); err != nil {
+		t.Fatalf("failed to close task1: %v", err)
+	}
+
+	// Then close task2 (so task2 has later completed_at)
+	if err := database.UpdateTaskStatus(task2.ID, StatusDone); err != nil {
+		t.Fatalf("failed to close task2: %v", err)
+	}
+
+	// List all tasks including closed
+	tasks, err := database.ListTasks(ListTasksOptions{IncludeClosed: true})
+	if err != nil {
+		t.Fatalf("failed to list tasks: %v", err)
+	}
+
+	if len(tasks) != 3 {
+		t.Fatalf("expected 3 tasks, got %d", len(tasks))
+	}
+
+	// Find done tasks - the one closed most recently (task2) should appear before task1
+	var doneTasks []*Task
+	for _, task := range tasks {
+		if task.Status == StatusDone {
+			doneTasks = append(doneTasks, task)
+		}
+	}
+
+	if len(doneTasks) != 2 {
+		t.Fatalf("expected 2 done tasks, got %d", len(doneTasks))
+	}
+
+	// task2 (closed later) should be first
+	if doneTasks[0].ID != task2.ID {
+		t.Errorf("expected task2 (most recently closed) to be first, got task%d", doneTasks[0].ID)
+	}
+	if doneTasks[1].ID != task1.ID {
+		t.Errorf("expected task1 (closed earlier) to be second, got task%d", doneTasks[1].ID)
+	}
+}
+
 func TestCreateTaskSavesLastType(t *testing.T) {
 	// Create temporary database
 	tmpDir := t.TempDir()
@@ -656,5 +740,194 @@ func TestCreateTaskSavesLastType(t *testing.T) {
 	}
 	if lastType != "writing" {
 		t.Errorf("expected 'writing' (unchanged), got %q", lastType)
+	}
+}
+
+func TestCompactionSummaries(t *testing.T) {
+	// Create temporary database
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	db, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer db.Close()
+	defer os.Remove(dbPath)
+
+	// Create a task
+	task := &Task{
+		Title:   "Test Task for Compaction",
+		Body:    "Test body",
+		Status:  StatusProcessing,
+		Type:    TypeCode,
+		Project: "test",
+	}
+	if err := db.CreateTask(task); err != nil {
+		t.Fatalf("failed to create task: %v", err)
+	}
+
+	// Test getting summaries when none exist
+	summaries, err := db.GetCompactionSummaries(task.ID)
+	if err != nil {
+		t.Fatalf("failed to get compaction summaries: %v", err)
+	}
+	if len(summaries) != 0 {
+		t.Errorf("expected 0 summaries, got %d", len(summaries))
+	}
+
+	// Test getting latest summary when none exist
+	latest, err := db.GetLatestCompactionSummary(task.ID)
+	if err != nil {
+		t.Fatalf("failed to get latest compaction summary: %v", err)
+	}
+	if latest != nil {
+		t.Error("expected nil latest summary when none exist")
+	}
+
+	// Save a compaction summary
+	summary1 := &CompactionSummary{
+		TaskID:             task.ID,
+		SessionID:          "session-123",
+		Trigger:            "auto",
+		PreTokens:          50000,
+		Summary:            "This is the first compaction summary with important context.",
+		CustomInstructions: "",
+	}
+	if err := db.SaveCompactionSummary(summary1); err != nil {
+		t.Fatalf("failed to save compaction summary: %v", err)
+	}
+
+	// Verify we can retrieve it
+	summaries, err = db.GetCompactionSummaries(task.ID)
+	if err != nil {
+		t.Fatalf("failed to get compaction summaries: %v", err)
+	}
+	if len(summaries) != 1 {
+		t.Fatalf("expected 1 summary, got %d", len(summaries))
+	}
+	if summaries[0].SessionID != "session-123" {
+		t.Errorf("expected session-123, got %s", summaries[0].SessionID)
+	}
+	if summaries[0].Trigger != "auto" {
+		t.Errorf("expected trigger 'auto', got %s", summaries[0].Trigger)
+	}
+	if summaries[0].PreTokens != 50000 {
+		t.Errorf("expected 50000 pre-tokens, got %d", summaries[0].PreTokens)
+	}
+
+	// Save another compaction summary (manual this time)
+	summary2 := &CompactionSummary{
+		TaskID:             task.ID,
+		SessionID:          "session-456",
+		Trigger:            "manual",
+		PreTokens:          75000,
+		Summary:            "Second compaction with custom instructions.",
+		CustomInstructions: "Focus on the API changes",
+	}
+	if err := db.SaveCompactionSummary(summary2); err != nil {
+		t.Fatalf("failed to save second compaction summary: %v", err)
+	}
+
+	// Verify both summaries exist in order
+	summaries, err = db.GetCompactionSummaries(task.ID)
+	if err != nil {
+		t.Fatalf("failed to get compaction summaries: %v", err)
+	}
+	if len(summaries) != 2 {
+		t.Fatalf("expected 2 summaries, got %d", len(summaries))
+	}
+	if summaries[0].SessionID != "session-123" {
+		t.Error("first summary should be session-123")
+	}
+	if summaries[1].SessionID != "session-456" {
+		t.Error("second summary should be session-456")
+	}
+
+	// Test getting latest summary
+	latest, err = db.GetLatestCompactionSummary(task.ID)
+	if err != nil {
+		t.Fatalf("failed to get latest compaction summary: %v", err)
+	}
+	if latest == nil {
+		t.Fatal("expected non-nil latest summary")
+	}
+	if latest.SessionID != "session-456" {
+		t.Errorf("expected latest to be session-456, got %s", latest.SessionID)
+	}
+	if latest.Trigger != "manual" {
+		t.Errorf("expected trigger 'manual', got %s", latest.Trigger)
+	}
+	if latest.CustomInstructions != "Focus on the API changes" {
+		t.Errorf("expected custom instructions, got %q", latest.CustomInstructions)
+	}
+
+	// Test clearing compaction summaries
+	if err := db.ClearCompactionSummaries(task.ID); err != nil {
+		t.Fatalf("failed to clear compaction summaries: %v", err)
+	}
+
+	summaries, err = db.GetCompactionSummaries(task.ID)
+	if err != nil {
+		t.Fatalf("failed to get compaction summaries after clear: %v", err)
+	}
+	if len(summaries) != 0 {
+		t.Errorf("expected 0 summaries after clear, got %d", len(summaries))
+	}
+}
+
+func TestCompactionSummariesCascadeDelete(t *testing.T) {
+	// Create temporary database
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	db, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer db.Close()
+	defer os.Remove(dbPath)
+
+	// Create a task
+	task := &Task{
+		Title:   "Task for Cascade Delete Test",
+		Status:  StatusProcessing,
+		Project: "test",
+	}
+	if err := db.CreateTask(task); err != nil {
+		t.Fatalf("failed to create task: %v", err)
+	}
+
+	// Save a compaction summary
+	summary := &CompactionSummary{
+		TaskID:    task.ID,
+		SessionID: "session-cascade-test",
+		Trigger:   "auto",
+		PreTokens: 10000,
+		Summary:   "Test summary for cascade delete",
+	}
+	if err := db.SaveCompactionSummary(summary); err != nil {
+		t.Fatalf("failed to save compaction summary: %v", err)
+	}
+
+	// Verify it exists
+	summaries, _ := db.GetCompactionSummaries(task.ID)
+	if len(summaries) != 1 {
+		t.Fatal("expected 1 summary before delete")
+	}
+
+	// Delete the task - should cascade delete the compaction summary
+	if err := db.DeleteTask(task.ID); err != nil {
+		t.Fatalf("failed to delete task: %v", err)
+	}
+
+	// Verify summary is also deleted (using direct query since task is gone)
+	var count int
+	err = db.QueryRow("SELECT COUNT(*) FROM task_compaction_summaries WHERE task_id = ?", task.ID).Scan(&count)
+	if err != nil {
+		t.Fatalf("failed to count summaries: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("expected 0 summaries after task delete, got %d", count)
 	}
 }

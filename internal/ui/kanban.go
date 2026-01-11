@@ -170,20 +170,35 @@ func (k *KanbanBoard) MoveRight() {
 }
 
 // MoveUp moves selection up within the current column.
+// If at the top, wraps around to the bottom.
 func (k *KanbanBoard) MoveUp() {
+	col := k.columns[k.selectedCol]
+	if len(col.Tasks) == 0 {
+		return
+	}
 	if k.selectedRow > 0 {
 		k.selectedRow--
-		k.ensureSelectedVisible()
+	} else {
+		// Wrap around to bottom
+		k.selectedRow = len(col.Tasks) - 1
 	}
+	k.ensureSelectedVisible()
 }
 
 // MoveDown moves selection down within the current column.
+// If at the bottom, wraps around to the top.
 func (k *KanbanBoard) MoveDown() {
 	col := k.columns[k.selectedCol]
+	if len(col.Tasks) == 0 {
+		return
+	}
 	if k.selectedRow < len(col.Tasks)-1 {
 		k.selectedRow++
-		k.ensureSelectedVisible()
+	} else {
+		// Wrap around to top
+		k.selectedRow = 0
 	}
+	k.ensureSelectedVisible()
 }
 
 // ensureSelectedVisible adjusts scroll offset so the selected task is visible.

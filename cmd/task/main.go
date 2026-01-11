@@ -1545,13 +1545,15 @@ func loadPrivateKey(path string) (ssh.Signer, error) {
 
 // ClaudeHookInput is the JSON structure Claude sends to hooks via stdin.
 type ClaudeHookInput struct {
-	SessionID        string `json:"session_id"`
-	TranscriptPath   string `json:"transcript_path"`
-	Cwd              string `json:"cwd"`
-	HookEventName    string `json:"hook_event_name"`
-	NotificationType string `json:"notification_type,omitempty"` // For Notification hooks
-	Message          string `json:"message,omitempty"`
-	StopReason       string `json:"stop_reason,omitempty"` // For Stop hooks
+	SessionID          string `json:"session_id"`
+	TranscriptPath     string `json:"transcript_path"`
+	Cwd                string `json:"cwd"`
+	HookEventName      string `json:"hook_event_name"`
+	NotificationType   string `json:"notification_type,omitempty"`   // For Notification hooks
+	Message            string `json:"message,omitempty"`             // General message field
+	StopReason         string `json:"stop_reason,omitempty"`         // For Stop hooks
+	Trigger            string `json:"trigger,omitempty"`             // For PreCompact hooks: "manual" or "auto"
+	CustomInstructions string `json:"custom_instructions,omitempty"` // For PreCompact hooks: user-specified compaction instructions
 }
 
 // handleClaudeHook processes Claude Code hook callbacks.
@@ -1582,6 +1584,9 @@ func handleClaudeHook(hookEvent string) error {
 	}
 	defer database.Close()
 
+	// Log session ID once (on first hook call for this task)
+	logSessionIDOnce(database, taskID, &input)
+
 	// Handle based on hook event type
 	switch hookEvent {
 	case "PreToolUse":
@@ -1592,10 +1597,37 @@ func handleClaudeHook(hookEvent string) error {
 		return handleNotificationHook(database, taskID, &input)
 	case "Stop":
 		return handleStopHook(database, taskID, &input)
+	case "PreCompact":
+		return handlePreCompactHook(database, taskID, &input)
 	default:
 		// Unknown hook type, ignore
 		return nil
 	}
+}
+
+// logSessionIDOnce logs the Claude session ID for a task, but only once.
+// It checks if a session ID log already exists to avoid duplicate entries.
+func logSessionIDOnce(database *db.DB, taskID int64, input *ClaudeHookInput) {
+	if input.SessionID == "" {
+		return
+	}
+
+	// Check if we've already logged a session ID for this task
+	logs, err := database.GetTaskLogs(taskID, 50)
+	if err != nil {
+		return
+	}
+
+	sessionPrefix := "Claude session: "
+	for _, log := range logs {
+		if log.LineType == "system" && strings.HasPrefix(log.Content, sessionPrefix) {
+			// Already logged
+			return
+		}
+	}
+
+	// Log the session ID
+	database.AppendTaskLog(taskID, "system", sessionPrefix+input.SessionID)
 }
 
 // handleNotificationHook handles Notification hooks from Claude.
@@ -1713,6 +1745,74 @@ func handlePostToolUseHook(database *db.DB, taskID int64, input *ClaudeHookInput
 	}
 
 	return nil
+}
+
+// handlePreCompactHook handles PreCompact hooks from Claude (before context compaction).
+// This hook fires when Claude is about to compact its context, either manually (/compact)
+// or automatically when the context window approaches its limit.
+//
+// We use this to:
+// 1. Read the current conversation from the transcript file
+// 2. Extract key context that should persist across compaction
+// 3. Store it in the database for retrieval on task resume
+//
+// This is better than letting Claude's normal compaction proceed alone because:
+// - We can persist important task context in our database
+// - We can provide this context back when the task resumes
+// - We can supplement Claude's summary with task-specific metadata
+// - The saved context survives Claude session cleanup
+func handlePreCompactHook(database *db.DB, taskID int64, input *ClaudeHookInput) error {
+	// Read the full transcript content before compaction
+	transcript, preTokens, err := readTranscriptContent(input.TranscriptPath)
+	if err != nil {
+		// Log error but don't fail - compaction should still proceed
+		database.AppendTaskLog(taskID, "system", fmt.Sprintf("Warning: Could not read transcript: %v", err))
+		return nil
+	}
+
+	// Store the full transcript in the database
+	compactionSummary := &db.CompactionSummary{
+		TaskID:             taskID,
+		SessionID:          input.SessionID,
+		Trigger:            input.Trigger,
+		PreTokens:          preTokens,
+		Summary:            transcript, // Full JSONL transcript content
+		CustomInstructions: input.CustomInstructions,
+	}
+
+	if err := database.SaveCompactionSummary(compactionSummary); err != nil {
+		database.AppendTaskLog(taskID, "system", fmt.Sprintf("Warning: Could not save transcript: %v", err))
+		return nil
+	}
+
+	// Log the compaction event
+	triggerType := "auto"
+	if input.Trigger == "manual" {
+		triggerType = "manual (/compact)"
+	}
+	database.AppendTaskLog(taskID, "system", fmt.Sprintf("Context compacted (%s) - saved %d bytes of transcript", triggerType, len(transcript)))
+
+	return nil
+}
+
+// readTranscriptContent reads the full Claude transcript file content.
+// Returns the complete JSONL content and estimated token count.
+// Saving the full transcript preserves all context without arbitrary truncation,
+// allowing us to reconstruct or re-summarize the conversation later if needed.
+func readTranscriptContent(transcriptPath string) (string, int, error) {
+	if transcriptPath == "" {
+		return "", 0, fmt.Errorf("no transcript path provided")
+	}
+
+	content, err := os.ReadFile(transcriptPath)
+	if err != nil {
+		return "", 0, fmt.Errorf("read transcript: %w", err)
+	}
+
+	// Estimate tokens (rough: ~4 chars per token)
+	preTokens := len(content) / 4
+
+	return string(content), preTokens, nil
 }
 
 // tailClaudeLogs tails all claude session logs for debugging.

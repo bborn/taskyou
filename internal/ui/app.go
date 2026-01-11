@@ -239,6 +239,10 @@ type AppModel struct {
 	// Number filter for quick task ID jump
 	numberFilter string
 
+	// Shortcut mode for #<id> direct task jump
+	shortcutMode   bool
+	shortcutBuffer string
+
 	// Text filter input
 	filterInput  textinput.Model
 	filtering    bool
@@ -747,6 +751,12 @@ func (m *AppModel) viewDashboard() string {
 		headerParts = append(headerParts, statusBar)
 	}
 
+	// Shortcut mode display (#<id> jump)
+	if m.shortcutMode {
+		shortcutStyle := lipgloss.NewStyle().Foreground(ColorSecondary).Bold(true)
+		headerParts = append(headerParts, shortcutStyle.Render(fmt.Sprintf("Jump to: #%s_", m.shortcutBuffer)))
+	}
+
 	// Filter display
 	if m.filtering {
 		filterStyle := lipgloss.NewStyle().Foreground(ColorSecondary)
@@ -808,8 +818,51 @@ func (m *AppModel) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 
-	// Handle number filter input
 	keyStr := msg.String()
+
+	// Handle shortcut mode (#<id> to jump directly to task)
+	if m.shortcutMode {
+		// Accumulate digits
+		if len(keyStr) == 1 && keyStr[0] >= '0' && keyStr[0] <= '9' {
+			m.shortcutBuffer += keyStr
+			return m, nil
+		}
+		// Backspace removes last digit
+		if keyStr == "backspace" && m.shortcutBuffer != "" {
+			m.shortcutBuffer = m.shortcutBuffer[:len(m.shortcutBuffer)-1]
+			return m, nil
+		}
+		// Enter confirms and loads the task
+		if keyStr == "enter" && m.shortcutBuffer != "" {
+			var taskID int64
+			if _, err := fmt.Sscanf(m.shortcutBuffer, "%d", &taskID); err == nil {
+				m.shortcutMode = false
+				m.shortcutBuffer = ""
+				return m, m.loadTask(taskID)
+			}
+		}
+		// Escape cancels shortcut mode
+		if keyStr == "esc" {
+			m.shortcutMode = false
+			m.shortcutBuffer = ""
+			return m, nil
+		}
+		// Any other key cancels shortcut mode
+		m.shortcutMode = false
+		m.shortcutBuffer = ""
+		// Fall through to normal key handling
+	}
+
+	// Start shortcut mode with '#'
+	if keyStr == "#" {
+		m.shortcutMode = true
+		m.shortcutBuffer = ""
+		m.numberFilter = "" // Clear any existing number filter
+		m.kanban.ApplyNumberFilter("")
+		return m, nil
+	}
+
+	// Handle number filter input
 	if len(keyStr) == 1 && keyStr[0] >= '0' && keyStr[0] <= '9' {
 		m.numberFilter += keyStr
 		m.kanban.ApplyNumberFilter(m.numberFilter)

@@ -145,7 +145,10 @@ func (db *DB) ListTasks(opts ListTasksOptions) ([]*Task, error) {
 		query += " AND status != 'done'"
 	}
 
-	query += " ORDER BY created_at DESC"
+	// Sort done/blocked tasks by completed_at (most recently closed first),
+	// other tasks by created_at (newest first).
+	// Use id DESC as secondary sort for consistent ordering when timestamps are equal.
+	query += " ORDER BY CASE WHEN status IN ('done', 'blocked') THEN completed_at ELSE created_at END DESC, id DESC"
 
 	if opts.Limit > 0 {
 		query += fmt.Sprintf(" LIMIT %d", opts.Limit)
@@ -1040,4 +1043,85 @@ func (db *DB) ListAttachmentsWithData(taskID int64) ([]*Attachment, error) {
 		attachments = append(attachments, a)
 	}
 	return attachments, nil
+}
+
+// CompactionSummary represents a saved transcript from Claude compaction.
+// When Claude compacts its context, we save the full transcript to our database
+// so we can preserve the complete conversation history even after Claude's
+// internal context is summarized.
+type CompactionSummary struct {
+	ID                 int64
+	TaskID             int64
+	SessionID          string
+	Trigger            string    // "manual" or "auto"
+	PreTokens          int       // Estimated tokens before compaction
+	Summary            string    // Full JSONL transcript content (named "summary" for schema compatibility)
+	CustomInstructions string    // For manual /compact with custom instructions
+	CreatedAt          LocalTime
+}
+
+// SaveCompactionSummary stores a compaction summary for a task.
+func (db *DB) SaveCompactionSummary(summary *CompactionSummary) error {
+	_, err := db.Exec(`
+		INSERT INTO task_compaction_summaries
+		(task_id, session_id, trigger, pre_tokens, summary, custom_instructions)
+		VALUES (?, ?, ?, ?, ?, ?)
+	`, summary.TaskID, summary.SessionID, summary.Trigger, summary.PreTokens, summary.Summary, summary.CustomInstructions)
+	if err != nil {
+		return fmt.Errorf("insert compaction summary: %w", err)
+	}
+	return nil
+}
+
+// GetCompactionSummaries retrieves all compaction summaries for a task.
+func (db *DB) GetCompactionSummaries(taskID int64) ([]*CompactionSummary, error) {
+	rows, err := db.Query(`
+		SELECT id, task_id, session_id, trigger, pre_tokens, summary, custom_instructions, created_at
+		FROM task_compaction_summaries
+		WHERE task_id = ?
+		ORDER BY id ASC
+	`, taskID)
+	if err != nil {
+		return nil, fmt.Errorf("query compaction summaries: %w", err)
+	}
+	defer rows.Close()
+
+	var summaries []*CompactionSummary
+	for rows.Next() {
+		s := &CompactionSummary{}
+		err := rows.Scan(&s.ID, &s.TaskID, &s.SessionID, &s.Trigger, &s.PreTokens, &s.Summary, &s.CustomInstructions, &s.CreatedAt)
+		if err != nil {
+			return nil, fmt.Errorf("scan compaction summary: %w", err)
+		}
+		summaries = append(summaries, s)
+	}
+	return summaries, nil
+}
+
+// GetLatestCompactionSummary retrieves the most recent compaction summary for a task.
+func (db *DB) GetLatestCompactionSummary(taskID int64) (*CompactionSummary, error) {
+	s := &CompactionSummary{}
+	err := db.QueryRow(`
+		SELECT id, task_id, session_id, trigger, pre_tokens, summary, custom_instructions, created_at
+		FROM task_compaction_summaries
+		WHERE task_id = ?
+		ORDER BY id DESC
+		LIMIT 1
+	`, taskID).Scan(&s.ID, &s.TaskID, &s.SessionID, &s.Trigger, &s.PreTokens, &s.Summary, &s.CustomInstructions, &s.CreatedAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("query latest compaction summary: %w", err)
+	}
+	return s, nil
+}
+
+// ClearCompactionSummaries clears all compaction summaries for a task.
+func (db *DB) ClearCompactionSummaries(taskID int64) error {
+	_, err := db.Exec("DELETE FROM task_compaction_summaries WHERE task_id = ?", taskID)
+	if err != nil {
+		return fmt.Errorf("clear compaction summaries: %w", err)
+	}
+	return nil
 }
