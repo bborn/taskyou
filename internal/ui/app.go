@@ -12,7 +12,6 @@ import (
 	"github.com/bborn/workflow/internal/github"
 	"github.com/charmbracelet/bubbles/help"
 	"github.com/charmbracelet/bubbles/key"
-	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/huh"
 	"github.com/charmbracelet/lipgloss"
@@ -54,7 +53,6 @@ type KeyMap struct {
 	Close          key.Binding
 	Delete         key.Binding
 	Kill           key.Binding
-	Filter         key.Binding
 	Refresh        key.Binding
 	Settings       key.Binding
 	Memories       key.Binding
@@ -72,7 +70,7 @@ type KeyMap struct {
 
 // ShortHelp returns key bindings to show in the mini help.
 func (k KeyMap) ShortHelp() []key.Binding {
-	return []key.Binding{k.Left, k.Right, k.Up, k.Down, k.Enter, k.New, k.Queue, k.Filter, k.Quit}
+	return []key.Binding{k.Left, k.Right, k.Up, k.Down, k.Enter, k.New, k.Queue, k.CommandPalette, k.Quit}
 }
 
 // FullHelp returns keybindings for the expanded help view.
@@ -82,7 +80,7 @@ func (k KeyMap) FullHelp() [][]key.Binding {
 		{k.FocusBacklog, k.FocusInProgress, k.FocusBlocked, k.FocusDone},
 		{k.Enter, k.New, k.Queue, k.Close},
 		{k.Retry, k.Delete, k.Kill},
-		{k.Filter, k.CommandPalette, k.Settings, k.Memories},
+		{k.CommandPalette, k.Settings, k.Memories},
 		{k.Files, k.ChangeStatus, k.Refresh, k.Help, k.Quit},
 	}
 }
@@ -141,10 +139,6 @@ func DefaultKeyMap() KeyMap {
 		Kill: key.NewBinding(
 			key.WithKeys("k"),
 			key.WithHelp("k", "kill"),
-		),
-		Filter: key.NewBinding(
-			key.WithKeys("/"),
-			key.WithHelp("/", "filter"),
 		),
 		Refresh: key.NewBinding(
 			key.WithKeys("R"),
@@ -231,17 +225,6 @@ type AppModel struct {
 	// PR status cache
 	prCache *github.PRCache
 
-	// Number filter for quick task ID jump
-	numberFilter string
-
-	// Shortcut mode for #<id> direct task jump
-	shortcutMode   bool
-	shortcutBuffer string
-
-	// Text filter input
-	filterInput  textinput.Model
-	filtering    bool
-
 	// Detail view state
 	selectedTask *db.Task
 	detailView   *DetailModel
@@ -315,12 +298,6 @@ func NewAppModel(database *db.DB, exec *executor.Executor, workingDir string) *A
 	// Start with zero size - will be set by WindowSizeMsg
 	kanban := NewKanbanBoard(0, 0)
 
-	// Setup filter input
-	fi := textinput.New()
-	fi.Placeholder = "Filter tasks..."
-	fi.CharLimit = 50
-	fi.Width = 30
-
 	// Setup help
 	h := help.New()
 	h.ShowAll = false
@@ -337,7 +314,6 @@ func NewAppModel(database *db.DB, exec *executor.Executor, workingDir string) *A
 		help:         h,
 		currentView:  ViewDashboard,
 		kanban:       kanban,
-		filterInput:  fi,
 		loading:      true,
 		prevStatuses: make(map[int64]string),
 		watcher:      watcher,
@@ -743,21 +719,6 @@ func (m *AppModel) viewDashboard() string {
 		headerParts = append(headerParts, statusBar)
 	}
 
-	// Shortcut mode display (#<id> jump)
-	if m.shortcutMode {
-		shortcutStyle := lipgloss.NewStyle().Foreground(ColorSecondary).Bold(true)
-		headerParts = append(headerParts, shortcutStyle.Render(fmt.Sprintf("Jump to: #%s_", m.shortcutBuffer)))
-	}
-
-	// Filter display
-	if m.filtering {
-		filterStyle := lipgloss.NewStyle().Foreground(ColorSecondary)
-		headerParts = append(headerParts, filterStyle.Render("Filter: ")+m.filterInput.View())
-	} else if m.kanban.GetFilter() != "" {
-		filterStyle := lipgloss.NewStyle().Foreground(ColorMuted)
-		headerParts = append(headerParts, filterStyle.Render(fmt.Sprintf("Filter: %s", m.kanban.GetFilter())))
-	}
-
 	// Calculate heights dynamically
 	headerHeight := len(headerParts)
 
@@ -791,90 +752,6 @@ func (m *AppModel) renderHelp() string {
 }
 
 func (m *AppModel) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	// Handle filter input mode
-	if m.filtering {
-		switch msg.String() {
-		case "esc":
-			m.filtering = false
-			m.filterInput.SetValue("")
-			m.kanban.SetFilter("")
-			return m, nil
-		case "enter":
-			m.filtering = false
-			return m, nil
-		default:
-			var cmd tea.Cmd
-			m.filterInput, cmd = m.filterInput.Update(msg)
-			m.kanban.SetFilter(m.filterInput.Value())
-			return m, cmd
-		}
-	}
-
-	keyStr := msg.String()
-
-	// Handle shortcut mode (#<id> to jump directly to task)
-	if m.shortcutMode {
-		// Accumulate digits
-		if len(keyStr) == 1 && keyStr[0] >= '0' && keyStr[0] <= '9' {
-			m.shortcutBuffer += keyStr
-			return m, nil
-		}
-		// Backspace removes last digit
-		if keyStr == "backspace" && m.shortcutBuffer != "" {
-			m.shortcutBuffer = m.shortcutBuffer[:len(m.shortcutBuffer)-1]
-			return m, nil
-		}
-		// Enter confirms and loads the task
-		if keyStr == "enter" && m.shortcutBuffer != "" {
-			var taskID int64
-			if _, err := fmt.Sscanf(m.shortcutBuffer, "%d", &taskID); err == nil {
-				m.shortcutMode = false
-				m.shortcutBuffer = ""
-				return m, m.loadTask(taskID)
-			}
-		}
-		// Escape cancels shortcut mode
-		if keyStr == "esc" {
-			m.shortcutMode = false
-			m.shortcutBuffer = ""
-			return m, nil
-		}
-		// Any other key cancels shortcut mode
-		m.shortcutMode = false
-		m.shortcutBuffer = ""
-		// Fall through to normal key handling
-	}
-
-	// Start shortcut mode with '#'
-	if keyStr == "#" {
-		m.shortcutMode = true
-		m.shortcutBuffer = ""
-		m.numberFilter = "" // Clear any existing number filter
-		m.kanban.ApplyNumberFilter("")
-		return m, nil
-	}
-
-	// Handle number filter input
-	if len(keyStr) == 1 && keyStr[0] >= '0' && keyStr[0] <= '9' {
-		m.numberFilter += keyStr
-		m.kanban.ApplyNumberFilter(m.numberFilter)
-		return m, nil
-	}
-
-	// Handle backspace for number filter
-	if keyStr == "backspace" && m.numberFilter != "" {
-		m.numberFilter = m.numberFilter[:len(m.numberFilter)-1]
-		m.kanban.ApplyNumberFilter(m.numberFilter)
-		return m, nil
-	}
-
-	// Clear number filter on escape (but don't quit)
-	if keyStr == "esc" && m.numberFilter != "" {
-		m.numberFilter = ""
-		m.kanban.ApplyNumberFilter("")
-		return m, nil
-	}
-
 	switch {
 	// Column navigation
 	case key.Matches(msg, m.keys.Left):
@@ -959,11 +836,6 @@ func (m *AppModel) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if task := m.kanban.SelectedTask(); task != nil {
 			return m.showDeleteConfirm(task)
 		}
-
-	case key.Matches(msg, m.keys.Filter):
-		m.filtering = true
-		m.filterInput.Focus()
-		return m, textinput.Blink
 
 	case key.Matches(msg, m.keys.Settings):
 		m.settingsView = NewSettingsModel(m.db, m.width, m.height)
