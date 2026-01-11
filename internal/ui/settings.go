@@ -759,7 +759,7 @@ func (m *SettingsModel) renderProjectForm() string {
 	if m.projectFormFocus == 1 {
 		pathLabel = Bold.Render("Path:         ")
 	}
-	pathValue := Dim.Render("[press Enter to browse]")
+	pathValue := Dim.Render(fmt.Sprintf("[optional - defaults to %s/<name>]", m.projectsDir))
 	if m.editProject != nil && m.editProject.Path != "" {
 		pathValue = m.editProject.Path
 	}
