@@ -604,7 +604,7 @@ func (m *SettingsModel) View() string {
 	b.WriteString("\n")
 
 	// Theme section
-	themeHeader := "Theme"
+	var themeHeader string
 	if m.section == 0 {
 		themeHeader = Bold.Foreground(ColorPrimary).Render("Theme")
 	} else {
@@ -622,7 +622,7 @@ func (m *SettingsModel) View() string {
 	b.WriteString("\n\n")
 
 	// Projects section
-	projectsHeader := "Projects"
+	var projectsHeader string
 	if m.section == 1 {
 		projectsHeader = Bold.Foreground(ColorPrimary).Render("Projects")
 	} else {
@@ -660,7 +660,7 @@ func (m *SettingsModel) View() string {
 	b.WriteString("\n")
 
 	// Task Types section
-	taskTypesHeader := "Task Types"
+	var taskTypesHeader string
 	if m.section == 2 {
 		taskTypesHeader = Bold.Foreground(ColorPrimary).Render("Task Types")
 	} else {

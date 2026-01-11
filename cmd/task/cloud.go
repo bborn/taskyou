@@ -58,14 +58,6 @@ func sshRunInteractive(server, command string) error {
 	return cmd.Run()
 }
 
-// scpFile copies a local file to the remote server.
-func scpFile(local, remote string) error {
-	cmd := osexec.Command("scp", "-C", local, remote)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	return cmd.Run()
-}
-
 // getCloudSettings retrieves all cloud settings from the database.
 func getCloudSettings(database *db.DB) (map[string]string, error) {
 	settings := make(map[string]string)

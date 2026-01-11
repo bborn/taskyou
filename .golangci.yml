@@ -1,0 +1,21 @@
+linters:
+  disable:
+    # Disable errcheck - this codebase intentionally ignores many error returns
+    # for logging, cleanup operations, and fire-and-forget calls
+    - errcheck
+
+linters-settings:
+  staticcheck:
+    checks:
+      - all
+      - -SA9003  # Empty branch - sometimes used for clarity
+
+  gosimple:
+    checks:
+      - all
+      - -S1017  # TrimPrefix suggestion - keep explicit for readability
+
+issues:
+  # Don't limit the number of issues per linter
+  max-issues-per-linter: 0
+  max-same-issues: 0
