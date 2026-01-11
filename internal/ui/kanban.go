@@ -392,13 +392,12 @@ func (k *KanbanBoard) View() string {
 		// Combine tasks with spacing
 		taskContent := lipgloss.JoinVertical(lipgloss.Left, taskViews...)
 
-		// Column container with border
+		// Column container with border (rounded to match active task card style)
 		_, highlightBorder := GetThemeBorderColors()
 		borderColor := col.Color // Use column color for border
-		borderStyle := lipgloss.NormalBorder()
+		borderStyle := lipgloss.RoundedBorder()
 		if isSelectedCol {
 			borderColor = highlightBorder
-			borderStyle = lipgloss.ThickBorder()
 		}
 
 		// Combine header and tasks, then wrap with border
