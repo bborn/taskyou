@@ -551,10 +551,10 @@ func (e *Executor) executeTask(ctx context.Context, task *db.Task) {
 	var result execResult
 	if isRetry {
 		e.logLine(task.ID, "system", "Resuming previous session with feedback")
-		result = e.runClaudeResume(taskCtx, task.ID, workDir, prompt, retryFeedback)
+		result = e.runClaudeResume(taskCtx, task, workDir, prompt, retryFeedback)
 	} else {
 		e.logLine(task.ID, "system", "Starting new Claude session")
-		result = e.runClaude(taskCtx, task.ID, workDir, prompt)
+		result = e.runClaude(taskCtx, task, workDir, prompt)
 	}
 
 	// Check current status - hooks may have already set it
@@ -1047,20 +1047,20 @@ func (e *Executor) setupClaudeHooks(workDir string, taskID int64) (cleanup func(
 }
 
 // runClaude runs a task using Claude CLI in a tmux window for interactive access
-func (e *Executor) runClaude(ctx context.Context, taskID int64, workDir, prompt string) execResult {
+func (e *Executor) runClaude(ctx context.Context, task *db.Task, workDir, prompt string) execResult {
 	// Check if tmux is available
 	if _, err := exec.LookPath("tmux"); err != nil {
-		return e.runClaudeDirect(ctx, taskID, workDir, prompt)
+		return e.runClaudeDirect(ctx, task, workDir, prompt)
 	}
 
 	// Ensure task-daemon session exists
 	if err := ensureTmuxDaemon(); err != nil {
 		e.logger.Warn("could not create task-daemon session", "error", err)
-		return e.runClaudeDirect(ctx, taskID, workDir, prompt)
+		return e.runClaudeDirect(ctx, task, workDir, prompt)
 	}
 
-	windowName := TmuxWindowName(taskID)
-	windowTarget := TmuxSessionName(taskID)
+	windowName := TmuxWindowName(task.ID)
+	windowTarget := TmuxSessionName(task.ID)
 
 	// Kill any existing window with this name (with timeout)
 	killCtx, killCancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -1068,7 +1068,7 @@ func (e *Executor) runClaude(ctx context.Context, taskID int64, workDir, prompt 
 	killCancel()
 
 	// Setup Claude hooks for status updates
-	cleanupHooks, err := e.setupClaudeHooks(workDir, taskID)
+	cleanupHooks, err := e.setupClaudeHooks(workDir, task.ID)
 	if err != nil {
 		e.logger.Warn("could not setup Claude hooks", "error", err)
 	}
@@ -1080,20 +1080,23 @@ func (e *Executor) runClaude(ctx context.Context, taskID int64, workDir, prompt 
 		if cleanupHooks != nil {
 			cleanupHooks()
 		}
-		return e.runClaudeDirect(ctx, taskID, workDir, prompt)
+		return e.runClaudeDirect(ctx, task, workDir, prompt)
 	}
 	promptFile.WriteString(prompt)
 	promptFile.Close()
 	defer os.Remove(promptFile.Name())
 
-	// Script that runs claude interactively with TASK_ID and TASK_SESSION_ID env vars
+	// Script that runs claude interactively with task environment variables
 	// Note: tmux starts in workDir (-c flag), so claude inherits proper permissions and hooks config
 	// Run interactively (no -p) so user can attach and see/interact in real-time
-	// TASK_ID is passed so hooks know which task to update
-	// TASK_SESSION_ID ensures consistent session naming across all processes
-	taskSessionID := os.Getenv("TASK_SESSION_ID")
-	if taskSessionID == "" {
-		taskSessionID = fmt.Sprintf("%d", os.Getpid())
+	// Environment variables passed:
+	// - TASK_ID: Task identifier for hooks
+	// - TASK_SESSION_ID: Consistent session naming across processes
+	// - TASK_PORT: Unique port for running the application
+	// - TASK_WORKTREE_PATH: Path to the task's git worktree
+	sessionID := os.Getenv("TASK_SESSION_ID")
+	if sessionID == "" {
+		sessionID = fmt.Sprintf("%d", os.Getpid())
 	}
 	// Only use --dangerously-skip-permissions if TASK_DANGEROUS_MODE is set
 	dangerousFlag := ""
@@ -1103,10 +1106,12 @@ func (e *Executor) runClaude(ctx context.Context, taskID int64, workDir, prompt 
 	// Check for existing Claude session to resume instead of starting fresh
 	var script string
 	if existingSessionID := e.findClaudeSessionID(workDir); existingSessionID != "" {
-		e.logLine(taskID, "system", fmt.Sprintf("Resuming existing session %s", existingSessionID))
-		script = fmt.Sprintf(`TASK_ID=%d TASK_SESSION_ID=%s claude %s--chrome --resume %s "$(cat %q)"`, taskID, taskSessionID, dangerousFlag, existingSessionID, promptFile.Name())
+		e.logLine(task.ID, "system", fmt.Sprintf("Resuming existing session %s", existingSessionID))
+		script = fmt.Sprintf(`TASK_ID=%d TASK_SESSION_ID=%s TASK_PORT=%d TASK_WORKTREE_PATH=%q claude %s--chrome --resume %s "$(cat %q)"`,
+			task.ID, sessionID, task.Port, task.WorktreePath, dangerousFlag, existingSessionID, promptFile.Name())
 	} else {
-		script = fmt.Sprintf(`TASK_ID=%d TASK_SESSION_ID=%s claude %s--chrome "$(cat %q)"`, taskID, taskSessionID, dangerousFlag, promptFile.Name())
+		script = fmt.Sprintf(`TASK_ID=%d TASK_SESSION_ID=%s TASK_PORT=%d TASK_WORKTREE_PATH=%q claude %s--chrome "$(cat %q)"`,
+			task.ID, sessionID, task.Port, task.WorktreePath, dangerousFlag, promptFile.Name())
 	}
 
 	// Create new window in task-daemon session (with timeout for tmux overhead)
@@ -1119,14 +1124,14 @@ func (e *Executor) runClaude(ctx context.Context, taskID int64, workDir, prompt 
 		if cleanupHooks != nil {
 			cleanupHooks()
 		}
-		return e.runClaudeDirect(ctx, taskID, workDir, prompt)
+		return e.runClaudeDirect(ctx, task, workDir, prompt)
 	}
 
 	// Configure tmux window with helpful status bar
 	e.configureTmuxWindow(windowTarget)
 
 	// Poll for output and completion
-	result := e.pollTmuxSession(ctx, taskID, windowTarget)
+	result := e.pollTmuxSession(ctx, task.ID, windowTarget)
 
 	// Clean up hooks config after session ends
 	if cleanupHooks != nil {
@@ -1138,31 +1143,31 @@ func (e *Executor) runClaude(ctx context.Context, taskID int64, workDir, prompt 
 
 // runClaudeResume resumes a previous Claude session with feedback.
 // If no previous session exists, starts fresh with the full prompt + feedback.
-func (e *Executor) runClaudeResume(ctx context.Context, taskID int64, workDir, prompt, feedback string) execResult {
+func (e *Executor) runClaudeResume(ctx context.Context, task *db.Task, workDir, prompt, feedback string) execResult {
 	// Find the most recent claude session ID for this workDir
-	sessionID := e.findClaudeSessionID(workDir)
-	if sessionID == "" {
-		e.logLine(taskID, "system", "No previous session found, starting fresh")
+	claudeSessionID := e.findClaudeSessionID(workDir)
+	if claudeSessionID == "" {
+		e.logLine(task.ID, "system", "No previous session found, starting fresh")
 		// Build a combined prompt with the feedback included
 		fullPrompt := prompt + "\n\n## User Feedback\n\n" + feedback
-		return e.runClaude(ctx, taskID, workDir, fullPrompt)
+		return e.runClaude(ctx, task, workDir, fullPrompt)
 	}
 
-	e.logLine(taskID, "system", fmt.Sprintf("Resuming session %s", sessionID))
+	e.logLine(task.ID, "system", fmt.Sprintf("Resuming session %s", claudeSessionID))
 
 	// Check if tmux is available
 	if _, err := exec.LookPath("tmux"); err != nil {
-		return e.runClaudeDirect(ctx, taskID, workDir, feedback)
+		return e.runClaudeDirect(ctx, task, workDir, feedback)
 	}
 
 	// Ensure task-daemon session exists
 	if err := ensureTmuxDaemon(); err != nil {
 		e.logger.Warn("could not create task-daemon session", "error", err)
-		return e.runClaudeDirect(ctx, taskID, workDir, feedback)
+		return e.runClaudeDirect(ctx, task, workDir, feedback)
 	}
 
-	windowName := TmuxWindowName(taskID)
-	windowTarget := TmuxSessionName(taskID)
+	windowName := TmuxWindowName(task.ID)
+	windowTarget := TmuxSessionName(task.ID)
 
 	// Kill any existing window with this name (with timeout)
 	killCtx, killCancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -1170,7 +1175,7 @@ func (e *Executor) runClaudeResume(ctx context.Context, taskID int64, workDir, p
 	killCancel()
 
 	// Setup Claude hooks for status updates
-	cleanupHooks, err := e.setupClaudeHooks(workDir, taskID)
+	cleanupHooks, err := e.setupClaudeHooks(workDir, task.ID)
 	if err != nil {
 		e.logger.Warn("could not setup Claude hooks", "error", err)
 	}
@@ -1181,15 +1186,18 @@ func (e *Executor) runClaudeResume(ctx context.Context, taskID int64, workDir, p
 		if cleanupHooks != nil {
 			cleanupHooks()
 		}
-		return e.runClaudeDirect(ctx, taskID, workDir, feedback)
+		return e.runClaudeDirect(ctx, task, workDir, feedback)
 	}
 	feedbackFile.WriteString(feedback)
 	feedbackFile.Close()
 	defer os.Remove(feedbackFile.Name())
 
 	// Script that resumes claude with session ID (interactive mode)
-	// TASK_ID is passed so hooks know which task to update
-	// TASK_SESSION_ID ensures consistent session naming across all processes
+	// Environment variables passed:
+	// - TASK_ID: Task identifier for hooks
+	// - TASK_SESSION_ID: Consistent session naming across processes
+	// - TASK_PORT: Unique port for running the application
+	// - TASK_WORKTREE_PATH: Path to the task's git worktree
 	taskSessionID := os.Getenv("TASK_SESSION_ID")
 	if taskSessionID == "" {
 		taskSessionID = fmt.Sprintf("%d", os.Getpid())
@@ -1199,7 +1207,8 @@ func (e *Executor) runClaudeResume(ctx context.Context, taskID int64, workDir, p
 	if os.Getenv("TASK_DANGEROUS_MODE") == "1" {
 		dangerousFlag = "--dangerously-skip-permissions "
 	}
-	script := fmt.Sprintf(`TASK_ID=%d TASK_SESSION_ID=%s claude %s--chrome --resume %s "$(cat %q)"`, taskID, taskSessionID, dangerousFlag, sessionID, feedbackFile.Name())
+	script := fmt.Sprintf(`TASK_ID=%d TASK_SESSION_ID=%s TASK_PORT=%d TASK_WORKTREE_PATH=%q claude %s--chrome --resume %s "$(cat %q)"`,
+		task.ID, taskSessionID, task.Port, task.WorktreePath, dangerousFlag, claudeSessionID, feedbackFile.Name())
 
 	// Create new window in task-daemon session (with timeout for tmux overhead)
 	newWinCtx, newWinCancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -1211,14 +1220,14 @@ func (e *Executor) runClaudeResume(ctx context.Context, taskID int64, workDir, p
 		if cleanupHooks != nil {
 			cleanupHooks()
 		}
-		return e.runClaudeDirect(ctx, taskID, workDir, feedback)
+		return e.runClaudeDirect(ctx, task, workDir, feedback)
 	}
 
 	// Configure tmux window with helpful status bar
 	e.configureTmuxWindow(windowTarget)
 
 	// Poll for output and completion
-	result := e.pollTmuxSession(ctx, taskID, windowTarget)
+	result := e.pollTmuxSession(ctx, task.ID, windowTarget)
 
 	// Clean up hooks config after session ends
 	if cleanupHooks != nil {
@@ -1455,7 +1464,7 @@ func (e *Executor) configureTmuxWindow(windowTarget string) {
 }
 
 // runClaudeDirect runs claude directly without tmux (fallback)
-func (e *Executor) runClaudeDirect(ctx context.Context, taskID int64, workDir, prompt string) execResult {
+func (e *Executor) runClaudeDirect(ctx context.Context, task *db.Task, workDir, prompt string) execResult {
 	// Build command args - only include --dangerously-skip-permissions if TASK_DANGEROUS_MODE is set
 	args := []string{}
 	if os.Getenv("TASK_DANGEROUS_MODE") == "1" {
@@ -1464,8 +1473,12 @@ func (e *Executor) runClaudeDirect(ctx context.Context, taskID int64, workDir, p
 	args = append(args, "--chrome", "-p", prompt)
 	cmd := exec.CommandContext(ctx, "claude", args...)
 	cmd.Dir = workDir
-	// Pass TASK_ID so hooks know which task to update
-	cmd.Env = append(os.Environ(), fmt.Sprintf("TASK_ID=%d", taskID))
+	// Pass task environment variables so hooks and applications know the task context
+	cmd.Env = append(os.Environ(),
+		fmt.Sprintf("TASK_ID=%d", task.ID),
+		fmt.Sprintf("TASK_PORT=%d", task.Port),
+		fmt.Sprintf("TASK_WORKTREE_PATH=%s", task.WorktreePath),
+	)
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -1491,8 +1504,8 @@ func (e *Executor) runClaudeDirect(ctx context.Context, taskID int64, workDir, p
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				task, err := e.db.GetTask(taskID)
-				if err == nil && task != nil && task.Status == db.StatusBacklog {
+				currentTask, err := e.db.GetTask(task.ID)
+				if err == nil && currentTask != nil && currentTask.Status == db.StatusBacklog {
 					if cmd.Process != nil {
 						cmd.Process.Kill()
 					}
@@ -1512,7 +1525,7 @@ func (e *Executor) runClaudeDirect(ctx context.Context, taskID int64, workDir, p
 		scanner := bufio.NewScanner(stdout)
 		for scanner.Scan() {
 			line := scanner.Text()
-			e.logLine(taskID, "output", line)
+			e.logLine(task.ID, "output", line)
 
 			mu.Lock()
 			allOutput = append(allOutput, line)
@@ -1529,7 +1542,7 @@ func (e *Executor) runClaudeDirect(ctx context.Context, taskID int64, workDir, p
 	go func() {
 		scanner := bufio.NewScanner(stderr)
 		for scanner.Scan() {
-			e.logLine(taskID, "error", scanner.Text())
+			e.logLine(task.ID, "error", scanner.Text())
 		}
 	}()
 
@@ -1559,9 +1572,9 @@ func (e *Executor) runClaudeDirect(ctx context.Context, taskID int64, workDir, p
 	}
 
 	// Check if task was marked as blocked via MCP (workflow_needs_input)
-	task, dbErr := e.db.GetTask(taskID)
-	if dbErr == nil && task != nil && task.Status == db.StatusBlocked {
-		logs, _ := e.db.GetTaskLogs(taskID, 5)
+	finalTask, dbErr := e.db.GetTask(task.ID)
+	if dbErr == nil && finalTask != nil && finalTask.Status == db.StatusBlocked {
+		logs, _ := e.db.GetTaskLogs(task.ID, 5)
 		var question string
 		for _, l := range logs {
 			if l.LineType == "question" {
@@ -1959,6 +1972,15 @@ func (e *Executor) setupWorktree(task *db.Task) (string, error) {
 		task.WorktreePath = worktreePath
 		task.BranchName = branchName
 		e.db.UpdateTask(task)
+		// Allocate a port if not already assigned
+		if task.Port == 0 {
+			port, err := e.db.AllocatePort(task.ID)
+			if err != nil {
+				e.logger.Warn("could not allocate port", "error", err)
+			} else {
+				task.Port = port
+			}
+		}
 		trustMiseConfig(worktreePath)
 		symlinkClaudeConfig(projectDir, worktreePath)
 		copyMCPConfig(projectDir, worktreePath)
@@ -1986,6 +2008,15 @@ func (e *Executor) setupWorktree(task *db.Task) (string, error) {
 					task.WorktreePath = worktreePath
 					task.BranchName = branchName
 					e.db.UpdateTask(task)
+					// Allocate a port if not already assigned
+					if task.Port == 0 {
+						port, err := e.db.AllocatePort(task.ID)
+						if err != nil {
+							e.logger.Warn("could not allocate port", "error", err)
+						} else {
+							task.Port = port
+						}
+					}
 					trustMiseConfig(worktreePath)
 					copyMCPConfig(projectDir, worktreePath)
 					return worktreePath, nil
@@ -2003,6 +2034,17 @@ func (e *Executor) setupWorktree(task *db.Task) (string, error) {
 	e.db.UpdateTask(task)
 
 	e.logLine(task.ID, "system", fmt.Sprintf("Created worktree at %s (branch: %s)", worktreePath, branchName))
+
+	// Allocate a port if not already assigned
+	if task.Port == 0 {
+		port, err := e.db.AllocatePort(task.ID)
+		if err != nil {
+			e.logger.Warn("could not allocate port", "error", err)
+		} else {
+			task.Port = port
+			e.logLine(task.ID, "system", fmt.Sprintf("Allocated port %d for application", port))
+		}
+	}
 
 	trustMiseConfig(worktreePath)
 	symlinkClaudeConfig(projectDir, worktreePath)

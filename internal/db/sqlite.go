@@ -204,6 +204,7 @@ func (db *DB) migrate() error {
 		`ALTER TABLE projects ADD COLUMN actions TEXT DEFAULT '[]'`,
 		`ALTER TABLE tasks ADD COLUMN worktree_path TEXT DEFAULT ''`,
 		`ALTER TABLE tasks ADD COLUMN branch_name TEXT DEFAULT ''`,
+		`ALTER TABLE tasks ADD COLUMN port INTEGER DEFAULT 0`,
 	}
 
 	for _, m := range alterMigrations {

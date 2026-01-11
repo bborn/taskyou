@@ -18,6 +18,7 @@ type Task struct {
 	Project      string
 	WorktreePath string
 	BranchName   string
+	Port         int // Unique port for running the application in this task's worktree
 	CreatedAt    LocalTime
 	UpdatedAt    LocalTime
 	StartedAt    *LocalTime
@@ -43,6 +44,12 @@ const (
 	TypeCode     = "code"
 	TypeWriting  = "writing"
 	TypeThinking = "thinking"
+)
+
+// Port allocation constants
+const (
+	PortRangeStart = 3100 // First port in the allocation range
+	PortRangeEnd   = 4099 // Last port in the allocation range (1000 ports total)
 )
 
 // TaskType represents a configurable task type with its prompt instructions.
@@ -90,12 +97,12 @@ func (db *DB) GetTask(id int64) (*Task, error) {
 	t := &Task{}
 	err := db.QueryRow(`
 		SELECT id, title, body, status, type, project,
-		       worktree_path, branch_name,
+		       worktree_path, branch_name, port,
 		       created_at, updated_at, started_at, completed_at
 		FROM tasks WHERE id = ?
 	`, id).Scan(
 		&t.ID, &t.Title, &t.Body, &t.Status, &t.Type, &t.Project,
-		&t.WorktreePath, &t.BranchName,
+		&t.WorktreePath, &t.BranchName, &t.Port,
 		&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
 	)
 	if err == sql.ErrNoRows {
@@ -121,7 +128,7 @@ type ListTasksOptions struct {
 func (db *DB) ListTasks(opts ListTasksOptions) ([]*Task, error) {
 	query := `
 		SELECT id, title, body, status, type, project,
-		       worktree_path, branch_name,
+		       worktree_path, branch_name, port,
 		       created_at, updated_at, started_at, completed_at
 		FROM tasks WHERE 1=1
 	`
@@ -170,7 +177,7 @@ func (db *DB) ListTasks(opts ListTasksOptions) ([]*Task, error) {
 		t := &Task{}
 		err := rows.Scan(
 			&t.ID, &t.Title, &t.Body, &t.Status, &t.Type, &t.Project,
-			&t.WorktreePath, &t.BranchName,
+			&t.WorktreePath, &t.BranchName, &t.Port,
 			&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
 		)
 		if err != nil {
@@ -218,11 +225,11 @@ func (db *DB) UpdateTask(t *Task) error {
 	_, err := db.Exec(`
 		UPDATE tasks SET
 			title = ?, body = ?, status = ?, type = ?, project = ?,
-			worktree_path = ?, branch_name = ?,
+			worktree_path = ?, branch_name = ?, port = ?,
 			updated_at = CURRENT_TIMESTAMP
 		WHERE id = ?
 	`, t.Title, t.Body, t.Status, t.Type, t.Project,
-		t.WorktreePath, t.BranchName, t.ID)
+		t.WorktreePath, t.BranchName, t.Port, t.ID)
 	if err != nil {
 		return fmt.Errorf("update task: %w", err)
 	}
@@ -236,6 +243,52 @@ func (db *DB) DeleteTask(id int64) error {
 		return fmt.Errorf("delete task: %w", err)
 	}
 	return nil
+}
+
+// GetActiveTaskPorts returns all ports currently in use by active (non-done) tasks.
+func (db *DB) GetActiveTaskPorts() (map[int]bool, error) {
+	rows, err := db.Query(`
+		SELECT port FROM tasks
+		WHERE port > 0 AND status != ?
+	`, StatusDone)
+	if err != nil {
+		return nil, fmt.Errorf("query active ports: %w", err)
+	}
+	defer rows.Close()
+
+	ports := make(map[int]bool)
+	for rows.Next() {
+		var port int
+		if err := rows.Scan(&port); err != nil {
+			return nil, fmt.Errorf("scan port: %w", err)
+		}
+		ports[port] = true
+	}
+	return ports, nil
+}
+
+// AllocatePort assigns an available port to a task.
+// Returns the allocated port, or an error if no ports are available.
+func (db *DB) AllocatePort(taskID int64) (int, error) {
+	// Get currently used ports
+	usedPorts, err := db.GetActiveTaskPorts()
+	if err != nil {
+		return 0, fmt.Errorf("get active ports: %w", err)
+	}
+
+	// Find first available port in range
+	for port := PortRangeStart; port <= PortRangeEnd; port++ {
+		if !usedPorts[port] {
+			// Update task with allocated port
+			_, err := db.Exec(`UPDATE tasks SET port = ? WHERE id = ?`, port, taskID)
+			if err != nil {
+				return 0, fmt.Errorf("update task port: %w", err)
+			}
+			return port, nil
+		}
+	}
+
+	return 0, fmt.Errorf("no available ports in range %d-%d", PortRangeStart, PortRangeEnd)
 }
 
 // RetryTask clears logs, appends feedback to body, and re-queues a task.
@@ -257,7 +310,7 @@ func (db *DB) GetNextQueuedTask() (*Task, error) {
 	t := &Task{}
 	err := db.QueryRow(`
 		SELECT id, title, body, status, type, project,
-		       worktree_path, branch_name,
+		       worktree_path, branch_name, port,
 		       created_at, updated_at, started_at, completed_at
 		FROM tasks
 		WHERE status = ?
@@ -265,7 +318,7 @@ func (db *DB) GetNextQueuedTask() (*Task, error) {
 		LIMIT 1
 	`, StatusQueued).Scan(
 		&t.ID, &t.Title, &t.Body, &t.Status, &t.Type, &t.Project,
-		&t.WorktreePath, &t.BranchName,
+		&t.WorktreePath, &t.BranchName, &t.Port,
 		&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
 	)
 	if err == sql.ErrNoRows {
@@ -281,7 +334,7 @@ func (db *DB) GetNextQueuedTask() (*Task, error) {
 func (db *DB) GetQueuedTasks() ([]*Task, error) {
 	rows, err := db.Query(`
 		SELECT id, title, body, status, type, project,
-		       worktree_path, branch_name,
+		       worktree_path, branch_name, port,
 		       created_at, updated_at, started_at, completed_at
 		FROM tasks
 		WHERE status = ?
@@ -297,7 +350,7 @@ func (db *DB) GetQueuedTasks() ([]*Task, error) {
 		t := &Task{}
 		if err := rows.Scan(
 			&t.ID, &t.Title, &t.Body, &t.Status, &t.Type, &t.Project,
-			&t.WorktreePath, &t.BranchName,
+			&t.WorktreePath, &t.BranchName, &t.Port,
 			&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
 		); err != nil {
 			return nil, fmt.Errorf("scan task: %w", err)
@@ -312,7 +365,7 @@ func (db *DB) GetQueuedTasks() ([]*Task, error) {
 func (db *DB) GetTasksWithBranches() ([]*Task, error) {
 	rows, err := db.Query(`
 		SELECT id, title, body, status, type, project,
-		       worktree_path, branch_name,
+		       worktree_path, branch_name, port,
 		       created_at, updated_at, started_at, completed_at
 		FROM tasks
 		WHERE branch_name != '' AND status != ?
@@ -328,7 +381,7 @@ func (db *DB) GetTasksWithBranches() ([]*Task, error) {
 		t := &Task{}
 		if err := rows.Scan(
 			&t.ID, &t.Title, &t.Body, &t.Status, &t.Type, &t.Project,
-			&t.WorktreePath, &t.BranchName,
+			&t.WorktreePath, &t.BranchName, &t.Port,
 			&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
 		); err != nil {
 			return nil, fmt.Errorf("scan task: %w", err)
