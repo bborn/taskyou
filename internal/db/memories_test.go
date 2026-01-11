@@ -234,6 +234,11 @@ func TestMemoryWithSourceTask(t *testing.T) {
 	defer db.Close()
 	defer os.Remove(dbPath)
 
+	// Create the project first
+	if err := db.CreateProject(&Project{Name: "testproject", Path: tmpDir}); err != nil {
+		t.Fatalf("failed to create project: %v", err)
+	}
+
 	// Create a task first
 	task := &Task{
 		Title:    "Source Task",

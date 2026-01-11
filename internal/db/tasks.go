@@ -63,11 +63,23 @@ type TaskType struct {
 	CreatedAt    LocalTime
 }
 
+// ErrProjectNotFound is returned when a task is created with a non-existent project.
+var ErrProjectNotFound = fmt.Errorf("project not found")
+
 // CreateTask creates a new task.
 func (db *DB) CreateTask(t *Task) error {
 	// Default to 'personal' project if not specified
 	if t.Project == "" {
 		t.Project = "personal"
+	}
+
+	// Validate that the project exists
+	project, err := db.GetProjectByName(t.Project)
+	if err != nil {
+		return fmt.Errorf("validate project: %w", err)
+	}
+	if project == nil {
+		return fmt.Errorf("%w: %s", ErrProjectNotFound, t.Project)
 	}
 
 	result, err := db.Exec(`

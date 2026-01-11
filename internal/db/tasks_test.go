@@ -3,6 +3,7 @@ package db
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -17,6 +18,11 @@ func TestGetLastQuestion(t *testing.T) {
 	}
 	defer db.Close()
 	defer os.Remove(dbPath)
+
+	// Create the test project first
+	if err := db.CreateProject(&Project{Name: "test", Path: tmpDir}); err != nil {
+		t.Fatalf("failed to create test project: %v", err)
+	}
 
 	// Create a task
 	task := &Task{
@@ -77,6 +83,11 @@ func TestTaskLogsWithQuestion(t *testing.T) {
 	}
 	defer db.Close()
 	defer os.Remove(dbPath)
+
+	// Create the test project first
+	if err := db.CreateProject(&Project{Name: "test", Path: tmpDir}); err != nil {
+		t.Fatalf("failed to create test project: %v", err)
+	}
 
 	// Create a task
 	task := &Task{
@@ -598,6 +609,11 @@ func TestListTasksClosedSortedByCompletedAt(t *testing.T) {
 	defer database.Close()
 	defer os.Remove(dbPath)
 
+	// Create the test project first
+	if err := database.CreateProject(&Project{Name: "test", Path: tmpDir}); err != nil {
+		t.Fatalf("failed to create test project: %v", err)
+	}
+
 	// Create tasks in specific order - older tasks first
 	task1 := &Task{
 		Title:   "First task - closed early",
@@ -755,6 +771,11 @@ func TestCompactionSummaries(t *testing.T) {
 	defer db.Close()
 	defer os.Remove(dbPath)
 
+	// Create the test project first
+	if err := db.CreateProject(&Project{Name: "test", Path: tmpDir}); err != nil {
+		t.Fatalf("failed to create test project: %v", err)
+	}
+
 	// Create a task
 	task := &Task{
 		Title:   "Test Task for Compaction",
@@ -887,6 +908,11 @@ func TestCompactionSummariesCascadeDelete(t *testing.T) {
 	}
 	defer db.Close()
 	defer os.Remove(dbPath)
+
+	// Create the test project first
+	if err := db.CreateProject(&Project{Name: "test", Path: tmpDir}); err != nil {
+		t.Fatalf("failed to create test project: %v", err)
+	}
 
 	// Create a task
 	task := &Task{
@@ -1148,5 +1174,171 @@ func TestGetActiveTaskPorts(t *testing.T) {
 			t.Errorf("after creating task with status %q: expected %d active ports, got %d",
 				tc.status, expectedCount, len(ports))
 		}
+	}
+}
+
+func TestCreateTaskRejectsNonExistentProject(t *testing.T) {
+	// Create temporary database
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	db, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer db.Close()
+	defer os.Remove(dbPath)
+
+	// Try to create a task with a non-existent project
+	task := &Task{
+		Title:   "Test Task",
+		Status:  StatusBacklog,
+		Type:    TypeCode,
+		Project: "nonexistent-project",
+	}
+	err = db.CreateTask(task)
+
+	// Should fail with project not found error
+	if err == nil {
+		t.Fatal("expected error when creating task with non-existent project, got nil")
+	}
+	if !strings.Contains(err.Error(), "project not found") {
+		t.Errorf("expected 'project not found' error, got: %v", err)
+	}
+
+	// Verify task was not created
+	tasks, err := db.ListTasks(ListTasksOptions{IncludeClosed: true})
+	if err != nil {
+		t.Fatalf("failed to list tasks: %v", err)
+	}
+	if len(tasks) != 0 {
+		t.Errorf("expected 0 tasks after failed creation, got %d", len(tasks))
+	}
+}
+
+func TestCreateTaskAllowsExistingProject(t *testing.T) {
+	// Create temporary database
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	db, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer db.Close()
+	defer os.Remove(dbPath)
+
+	// Create a project first
+	project := &Project{
+		Name: "my-project",
+		Path: tmpDir,
+	}
+	if err := db.CreateProject(project); err != nil {
+		t.Fatalf("failed to create project: %v", err)
+	}
+
+	// Now create a task with that project
+	task := &Task{
+		Title:   "Test Task",
+		Status:  StatusBacklog,
+		Type:    TypeCode,
+		Project: "my-project",
+	}
+	err = db.CreateTask(task)
+
+	// Should succeed
+	if err != nil {
+		t.Fatalf("expected task creation to succeed, got error: %v", err)
+	}
+
+	// Verify task was created with correct project
+	retrieved, err := db.GetTask(task.ID)
+	if err != nil {
+		t.Fatalf("failed to get task: %v", err)
+	}
+	if retrieved.Project != "my-project" {
+		t.Errorf("expected project 'my-project', got '%s'", retrieved.Project)
+	}
+}
+
+func TestCreateTaskAllowsProjectAlias(t *testing.T) {
+	// Create temporary database
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	db, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer db.Close()
+	defer os.Remove(dbPath)
+
+	// Create a project with an alias
+	project := &Project{
+		Name:    "my-long-project-name",
+		Path:    tmpDir,
+		Aliases: "myproj, proj",
+	}
+	if err := db.CreateProject(project); err != nil {
+		t.Fatalf("failed to create project: %v", err)
+	}
+
+	// Create a task using the alias
+	task := &Task{
+		Title:   "Test Task",
+		Status:  StatusBacklog,
+		Type:    TypeCode,
+		Project: "myproj",
+	}
+	err = db.CreateTask(task)
+
+	// Should succeed
+	if err != nil {
+		t.Fatalf("expected task creation with alias to succeed, got error: %v", err)
+	}
+
+	// Verify task was created with the alias (not the full name)
+	retrieved, err := db.GetTask(task.ID)
+	if err != nil {
+		t.Fatalf("failed to get task: %v", err)
+	}
+	if retrieved.Project != "myproj" {
+		t.Errorf("expected project 'myproj', got '%s'", retrieved.Project)
+	}
+}
+
+func TestCreateTaskDefaultsToPersonal(t *testing.T) {
+	// Create temporary database
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	db, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer db.Close()
+	defer os.Remove(dbPath)
+
+	// Create a task with empty project (should default to 'personal')
+	task := &Task{
+		Title:   "Test Task",
+		Status:  StatusBacklog,
+		Type:    TypeCode,
+		Project: "",
+	}
+	err = db.CreateTask(task)
+
+	// Should succeed because 'personal' project is auto-created
+	if err != nil {
+		t.Fatalf("expected task creation to succeed with default project, got error: %v", err)
+	}
+
+	// Verify task was created with 'personal' project
+	retrieved, err := db.GetTask(task.ID)
+	if err != nil {
+		t.Fatalf("failed to get task: %v", err)
+	}
+	if retrieved.Project != "personal" {
+		t.Errorf("expected project 'personal', got '%s'", retrieved.Project)
 	}
 }

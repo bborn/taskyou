@@ -32,6 +32,11 @@ func testDB(t *testing.T) *db.DB {
 
 // createTestTask creates a task for testing.
 func createTestTask(t *testing.T, database *db.DB) *db.Task {
+	// First create the test-project
+	if err := database.CreateProject(&db.Project{Name: "test-project", Path: "/tmp/test-project"}); err != nil {
+		t.Fatalf("failed to create test-project: %v", err)
+	}
+
 	task := &db.Task{
 		Title:   "Test Task",
 		Status:  db.StatusProcessing,
