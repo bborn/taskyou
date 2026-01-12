@@ -87,6 +87,24 @@ func main() {
 				return
 			}
 
+			// Check for sprite token - if set and not --local, run on sprite
+			if !local {
+				dbPath := db.DefaultPath()
+				database, _ := db.Open(dbPath)
+				if database != nil {
+					if token := getSpriteToken(database); token != "" {
+						database.Close()
+						if err := runOnSprite(); err != nil {
+							fmt.Fprintln(os.Stderr, errorStyle.Render("Sprite error: "+err.Error()))
+							fmt.Fprintln(os.Stderr, dimStyle.Render("Use --local to run locally"))
+							os.Exit(1)
+						}
+						return
+					}
+					database.Close()
+				}
+			}
+
 			if local {
 				if err := runLocal(dangerous); err != nil {
 					fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
@@ -1528,6 +1546,36 @@ func loadPrivateKey(path string) (ssh.Signer, error) {
 		return nil, err
 	}
 	return ssh.ParsePrivateKey(data)
+}
+
+// runOnSprite runs the task TUI on a cloud sprite.
+// The sprite runs task in dangerous mode (safe because it's isolated).
+func runOnSprite() error {
+	// Open database to get sprite settings
+	dbPath := db.DefaultPath()
+	database, err := db.Open(dbPath)
+	if err != nil {
+		return fmt.Errorf("open database: %w", err)
+	}
+	defer database.Close()
+
+	// Ensure sprite is running (creates/restores as needed)
+	_, sprite, err := ensureSpriteRunning(database)
+	if err != nil {
+		return err
+	}
+
+	fmt.Println(dimStyle.Render("Connecting to sprite..."))
+
+	// Run task in local + dangerous mode on the sprite
+	// We use tmux on the sprite so Claude windows work properly
+	cmd := sprite.Command("task", "-l", "--dangerous")
+	cmd.SetTTY(true)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+
+	return cmd.Run()
 }
 
 // ClaudeHookInput is the JSON structure Claude sends to hooks via stdin.
