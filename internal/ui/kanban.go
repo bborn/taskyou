@@ -757,6 +757,19 @@ func (k *KanbanBoard) ColumnCount() int {
 	return len(k.columns)
 }
 
+// GetTaskPosition returns the position of the currently selected task in its column.
+// Returns (position, total) where position is 1-indexed, or (0, 0) if no task is selected.
+func (k *KanbanBoard) GetTaskPosition() (int, int) {
+	if k.selectedCol < 0 || k.selectedCol >= len(k.columns) {
+		return 0, 0
+	}
+	col := k.columns[k.selectedCol]
+	if len(col.Tasks) == 0 || k.selectedRow < 0 || k.selectedRow >= len(col.Tasks) {
+		return 0, 0
+	}
+	return k.selectedRow + 1, len(col.Tasks) // 1-indexed position
+}
+
 // HandleClick handles a mouse click at the given coordinates.
 // Returns the clicked task if a task card was clicked, nil otherwise.
 // Also updates the selection to the clicked task.
