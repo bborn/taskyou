@@ -1121,10 +1121,13 @@ func (m *AppModel) updateEditTaskForm(msg tea.Msg) (tea.Model, tea.Cmd) {
 			updatedTask.StartedAt = m.editingTask.StartedAt
 			updatedTask.CompletedAt = m.editingTask.CompletedAt
 
+			// Capture old title before clearing editingTask
+			oldTitle := m.editingTask.Title
+
 			m.editTaskForm = nil
 			m.editingTask = nil
 			m.currentView = m.previousView
-			return m, m.updateTask(updatedTask)
+			return m, m.updateTaskWithRename(updatedTask, oldTitle)
 		}
 		if form.cancelled {
 			m.currentView = m.previousView
@@ -1740,6 +1743,24 @@ func (m *AppModel) updateTask(t *db.Task) tea.Cmd {
 			exec.NotifyTaskChange("updated", t)
 		}
 		return taskUpdatedMsg{task: t, err: err}
+	}
+}
+
+// updateTaskWithRename updates a task and renames the Claude session if the title changed.
+func (m *AppModel) updateTaskWithRename(newTask *db.Task, oldTitle string) tea.Cmd {
+	database := m.db
+	exec := m.executor
+	return func() tea.Msg {
+		err := database.UpdateTask(newTask)
+		if err == nil {
+			exec.NotifyTaskChange("updated", newTask)
+
+			// If title changed and task has a worktree, rename the Claude session
+			if oldTitle != newTask.Title && newTask.WorktreePath != "" {
+				exec.RenameClaudeSessionForTask(newTask, newTask.Title)
+			}
+		}
+		return taskUpdatedMsg{task: newTask, err: err}
 	}
 }
 

@@ -289,6 +289,94 @@ func TestAttachmentsInPrompt(t *testing.T) {
 	})
 }
 
+func TestFindClaudeSessionID(t *testing.T) {
+	// Create a temporary directory structure mimicking Claude's session storage
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Skip("Could not get home directory")
+	}
+
+	// Create a unique test directory
+	testWorkDir := "/tmp/test-claude-session-" + time.Now().Format("20060102150405")
+	escapedPath := strings.ReplaceAll(testWorkDir, "/", "-")[1:] // Remove leading -
+	projectDir := home + "/.claude/projects/" + escapedPath
+
+	// Create the project directory
+	if err := os.MkdirAll(projectDir, 0755); err != nil {
+		t.Fatalf("Could not create project directory: %v", err)
+	}
+	defer os.RemoveAll(projectDir)
+
+	t.Run("no session files", func(t *testing.T) {
+		result := FindClaudeSessionID(testWorkDir)
+		if result != "" {
+			t.Errorf("expected empty string, got %q", result)
+		}
+	})
+
+	t.Run("finds most recent session", func(t *testing.T) {
+		// Create some session files with different timestamps
+		session1 := projectDir + "/abc12345-1234-5678-abcd-123456789abc.jsonl"
+		session2 := projectDir + "/def67890-1234-5678-abcd-123456789def.jsonl"
+
+		// Create first session (older)
+		if err := os.WriteFile(session1, []byte(`{"test":"data"}`), 0644); err != nil {
+			t.Fatalf("Could not create session file: %v", err)
+		}
+		time.Sleep(10 * time.Millisecond)
+
+		// Create second session (newer)
+		if err := os.WriteFile(session2, []byte(`{"test":"data2"}`), 0644); err != nil {
+			t.Fatalf("Could not create session file: %v", err)
+		}
+
+		result := FindClaudeSessionID(testWorkDir)
+		if result != "def67890-1234-5678-abcd-123456789def" {
+			t.Errorf("expected most recent session, got %q", result)
+		}
+
+		// Clean up
+		os.Remove(session1)
+		os.Remove(session2)
+	})
+
+	t.Run("ignores agent files", func(t *testing.T) {
+		// Create an agent file and a regular session file
+		agentFile := projectDir + "/agent-abc12345-1234-5678-abcd-123456789abc.jsonl"
+		sessionFile := projectDir + "/xyz99999-1234-5678-abcd-123456789xyz.jsonl"
+
+		if err := os.WriteFile(agentFile, []byte(`{"agent":"data"}`), 0644); err != nil {
+			t.Fatalf("Could not create agent file: %v", err)
+		}
+		if err := os.WriteFile(sessionFile, []byte(`{"session":"data"}`), 0644); err != nil {
+			t.Fatalf("Could not create session file: %v", err)
+		}
+
+		result := FindClaudeSessionID(testWorkDir)
+		if result != "xyz99999-1234-5678-abcd-123456789xyz" {
+			t.Errorf("expected regular session, got %q (should ignore agent files)", result)
+		}
+
+		// Clean up
+		os.Remove(agentFile)
+		os.Remove(sessionFile)
+	})
+}
+
+func TestRenameClaudeSession(t *testing.T) {
+	t.Run("returns nil for non-existent workdir", func(t *testing.T) {
+		// Test with a workdir that doesn't have any Claude sessions
+		err := RenameClaudeSession("/tmp/non-existent-workdir-12345", "New Name")
+		if err != nil {
+			t.Errorf("expected nil error for non-existent session, got: %v", err)
+		}
+	})
+
+	// Note: We can't easily test the actual rename without mocking the claude CLI
+	// The function will return an error if claude isn't installed or if the session
+	// doesn't exist, but we handle that gracefully
+}
+
 func TestConversationHistory(t *testing.T) {
 	// Create temp database
 	tmpFile, err := os.CreateTemp("", "test-*.db")

@@ -1393,6 +1393,42 @@ func findClaudeSessionIDImpl(workDir string) string {
 	return latestSession
 }
 
+// RenameClaudeSession renames the Claude session for a given workDir to the new name.
+// It uses Claude's /rename slash command via print mode.
+// This is useful when a task title changes and we want the Claude session to reflect it.
+func RenameClaudeSession(workDir, newName string) error {
+	sessionID := findClaudeSessionIDImpl(workDir)
+	if sessionID == "" {
+		return nil // No session to rename
+	}
+
+	// Use claude --resume <session-id> -p "/rename <new-name>" to rename the session
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "claude", "--resume", sessionID, "-p", "/rename "+newName)
+	cmd.Dir = workDir
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		// Log but don't fail - renaming is a nice-to-have
+		return fmt.Errorf("rename session %s: %w (output: %s)", sessionID, err, string(output))
+	}
+
+	return nil
+}
+
+// RenameClaudeSessionForTask renames the Claude session for a task if it has a worktree.
+// This is a convenience method that handles the common case of renaming based on task.
+func (e *Executor) RenameClaudeSessionForTask(task *db.Task, newName string) {
+	if task.WorktreePath == "" {
+		return
+	}
+
+	if err := RenameClaudeSession(task.WorktreePath, newName); err != nil {
+		e.logger.Debug("Could not rename Claude session", "taskID", task.ID, "error", err)
+	}
+}
+
 // saveTranscriptOnCompletion saves the Claude conversation transcript to the database
 // when a task completes. This ensures we have a persistent record of the full
 // conversation even if Claude's session files are cleaned up later.
