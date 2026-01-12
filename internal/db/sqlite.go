@@ -205,6 +205,10 @@ func (db *DB) migrate() error {
 		`ALTER TABLE tasks ADD COLUMN worktree_path TEXT DEFAULT ''`,
 		`ALTER TABLE tasks ADD COLUMN branch_name TEXT DEFAULT ''`,
 		`ALTER TABLE tasks ADD COLUMN port INTEGER DEFAULT 0`,
+		// Scheduled task columns
+		`ALTER TABLE tasks ADD COLUMN scheduled_at DATETIME`,   // When to next run (null = not scheduled)
+		`ALTER TABLE tasks ADD COLUMN recurrence TEXT DEFAULT ''`, // Recurrence pattern (empty = one-time)
+		`ALTER TABLE tasks ADD COLUMN last_run_at DATETIME`,    // When last executed (for recurring tasks)
 	}
 
 	for _, m := range alterMigrations {
