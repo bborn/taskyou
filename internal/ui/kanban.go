@@ -844,11 +844,6 @@ func (k *KanbanBoard) handleClickMobile(x, y int) *db.Task {
 	}
 
 	// Click is in the column content area
-	colWidth := k.width - 2
-	if colWidth < 20 {
-		colWidth = 20
-	}
-
 	// Column layout: tab bar (2 lines), then border (1 line), header (1 line), task cards
 	colHeight := k.height - tabBarHeight - 2
 	headerLines := 3 // Header text + margin
