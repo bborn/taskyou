@@ -7,19 +7,11 @@ import (
 	"time"
 
 	"github.com/bborn/workflow/internal/db"
+	"github.com/bborn/workflow/internal/sprites"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/spf13/cobra"
-	sprites "github.com/superfly/sprites-go"
+	sdk "github.com/superfly/sprites-go"
 )
-
-// Sprite settings keys
-const (
-	SettingSpriteToken = "sprite_token" // Sprites API token
-	SettingSpriteName  = "sprite_name"  // Name of the daemon sprite
-)
-
-// Default sprite name
-const defaultSpriteName = "task-daemon"
 
 // Styles for sprite command output
 var (
@@ -28,41 +20,6 @@ var (
 	spritePendingStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#F59E0B"))
 	spriteErrorStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("#EF4444"))
 )
-
-// getSpriteToken returns the Sprites API token from env or database.
-func getSpriteToken(database *db.DB) string {
-	// First try environment variable
-	token := os.Getenv("SPRITES_TOKEN")
-	if token != "" {
-		return token
-	}
-
-	// Fall back to database setting
-	if database != nil {
-		token, _ = database.GetSetting(SettingSpriteToken)
-	}
-	return token
-}
-
-// getSpriteClient creates a Sprites API client.
-func getSpriteClient(database *db.DB) (*sprites.Client, error) {
-	token := getSpriteToken(database)
-	if token == "" {
-		return nil, fmt.Errorf("no Sprites token configured. Set SPRITES_TOKEN env var or run: task config set sprite_token <token>")
-	}
-	return sprites.New(token), nil
-}
-
-// getSpriteName returns the name of the daemon sprite.
-func getSpriteName(database *db.DB) string {
-	if database != nil {
-		name, _ := database.GetSetting(SettingSpriteName)
-		if name != "" {
-			return name
-		}
-	}
-	return defaultSpriteName
-}
 
 // createSpriteCommand creates the sprite subcommand with all its children.
 func createSpriteCommand() *cobra.Command {
@@ -183,8 +140,8 @@ func showSpriteStatus() {
 	}
 	defer database.Close()
 
-	token := getSpriteToken(database)
-	spriteName := getSpriteName(database)
+	token := sprites.GetToken(database)
+	spriteName := sprites.GetName(database)
 
 	fmt.Println(spriteTitleStyle.Render("Sprite Status"))
 	fmt.Println()
@@ -199,7 +156,7 @@ func showSpriteStatus() {
 	fmt.Printf("  Name:  %s\n", spriteName)
 
 	// Try to get sprite status from API
-	client, err := getSpriteClient(database)
+	client, err := sprites.NewClient(database)
 	if err != nil {
 		fmt.Printf("  Status: %s\n", spriteErrorStyle.Render("error - "+err.Error()))
 		return
@@ -232,12 +189,12 @@ func runSpriteUp() error {
 	}
 	defer database.Close()
 
-	client, err := getSpriteClient(database)
+	client, err := sprites.NewClient(database)
 	if err != nil {
 		return err
 	}
 
-	spriteName := getSpriteName(database)
+	spriteName := sprites.GetName(database)
 	ctx := context.Background()
 
 	// Check if sprite exists
@@ -252,7 +209,7 @@ func runSpriteUp() error {
 		fmt.Println(spriteCheckStyle.Render("✓ Sprite created"))
 
 		// Save sprite name to database
-		database.SetSetting(SettingSpriteName, spriteName)
+		database.SetSetting(sprites.SettingName, spriteName)
 
 		// Set up the sprite with task daemon
 		if err := setupSprite(client, sprite); err != nil {
@@ -271,7 +228,7 @@ func runSpriteUp() error {
 			return fmt.Errorf("restore checkpoint: %w", err)
 		}
 
-		if err := restoreStream.ProcessAll(func(msg *sprites.StreamMessage) error {
+		if err := restoreStream.ProcessAll(func(msg *sdk.StreamMessage) error {
 			return nil
 		}); err != nil {
 			return fmt.Errorf("restore failed: %w", err)
@@ -284,8 +241,8 @@ func runSpriteUp() error {
 	return nil
 }
 
-// setupSprite installs dependencies and task daemon on a new sprite.
-func setupSprite(client *sprites.Client, sprite *sprites.Sprite) error {
+// setupSprite installs dependencies and configures Claude hooks on a new sprite.
+func setupSprite(client *sdk.Client, sprite *sdk.Sprite) error {
 	ctx := context.Background()
 
 	fmt.Println("Setting up sprite...")
@@ -295,8 +252,7 @@ func setupSprite(client *sprites.Client, sprite *sprites.Sprite) error {
 		desc string
 		cmd  string
 	}{
-		{"Installing tmux", "apt-get update && apt-get install -y tmux git"},
-		{"Installing Go", "curl -L https://go.dev/dl/go1.22.0.linux-amd64.tar.gz | tar -C /usr/local -xzf - && echo 'export PATH=$PATH:/usr/local/go/bin' >> ~/.bashrc"},
+		{"Installing packages", "apt-get update && apt-get install -y tmux git curl"},
 		{"Creating workspace", "mkdir -p /workspace"},
 		{"Installing Node.js", "curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && apt-get install -y nodejs"},
 		{"Installing Claude CLI", "npm install -g @anthropic-ai/claude-code"},
@@ -311,19 +267,50 @@ func setupSprite(client *sprites.Client, sprite *sprites.Sprite) error {
 		}
 	}
 
-	// Clone and build task
-	fmt.Println("  Building task daemon...")
-	buildCmd := `
-		cd /workspace &&
-		git clone https://github.com/bborn/taskyou.git task 2>/dev/null || (cd task && git pull) &&
-		cd task &&
-		/usr/local/go/bin/go build -o /usr/local/bin/task ./cmd/task &&
-		/usr/local/go/bin/go build -o /usr/local/bin/taskd ./cmd/taskd
-	`
-	cmd := sprite.CommandContext(ctx, "sh", "-c", buildCmd)
+	// Install the hook script that writes to a file for streaming back
+	fmt.Println("  Installing hook script...")
+	hookScript := `#!/bin/bash
+# task-sprite-hook: Writes Claude hook events to a file for streaming
+# The task executor on the local machine tails this file
+input=$(cat)
+printf '{"task_id":%s,"event":"%s","data":%s}\n' "$TASK_ID" "$1" "$input" >> /tmp/task-hooks.jsonl
+`
+	installHookCmd := fmt.Sprintf(`cat > /usr/local/bin/task-sprite-hook << 'HOOKEOF'
+%s
+HOOKEOF
+chmod +x /usr/local/bin/task-sprite-hook`, hookScript)
+
+	cmd := sprite.CommandContext(ctx, "sh", "-c", installHookCmd)
 	if output, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("build task: %w\n%s", err, string(output))
+		return fmt.Errorf("install hook script: %w\n%s", err, string(output))
 	}
+
+	// Configure Claude to use our hook script
+	fmt.Println("  Configuring Claude hooks...")
+	claudeSettings := `{
+  "permissions": {
+    "allow": ["Bash(*)", "Read(*)", "Write(*)", "Edit(*)", "Grep(*)", "Glob(*)", "WebFetch(*)", "Task(*)", "TodoWrite(*)"],
+    "deny": []
+  },
+  "hooks": {
+    "PreToolUse": ["/usr/local/bin/task-sprite-hook PreToolUse"],
+    "PostToolUse": ["/usr/local/bin/task-sprite-hook PostToolUse"],
+    "Notification": ["/usr/local/bin/task-sprite-hook Notification"],
+    "Stop": ["/usr/local/bin/task-sprite-hook Stop"]
+  }
+}`
+	configureClaudeCmd := fmt.Sprintf(`mkdir -p ~/.claude && cat > ~/.claude/settings.json << 'SETTINGSEOF'
+%s
+SETTINGSEOF`, claudeSettings)
+
+	cmd = sprite.CommandContext(ctx, "sh", "-c", configureClaudeCmd)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("configure claude: %w\n%s", err, string(output))
+	}
+
+	// Initialize the hooks file
+	cmd = sprite.CommandContext(ctx, "sh", "-c", "touch /tmp/task-hooks.jsonl")
+	cmd.Run()
 
 	// Create initial checkpoint
 	fmt.Println("  Creating checkpoint...")
@@ -331,7 +318,7 @@ func setupSprite(client *sprites.Client, sprite *sprites.Sprite) error {
 	if err != nil {
 		fmt.Printf("    %s: %s\n", spriteErrorStyle.Render("Warning"), err.Error())
 	} else {
-		checkpointStream.ProcessAll(func(msg *sprites.StreamMessage) error { return nil })
+		checkpointStream.ProcessAll(func(msg *sdk.StreamMessage) error { return nil })
 	}
 
 	fmt.Println(spriteCheckStyle.Render("✓ Sprite setup complete"))
@@ -347,12 +334,12 @@ func runSpriteDown() error {
 	}
 	defer database.Close()
 
-	client, err := getSpriteClient(database)
+	client, err := sprites.NewClient(database)
 	if err != nil {
 		return err
 	}
 
-	spriteName := getSpriteName(database)
+	spriteName := sprites.GetName(database)
 	ctx := context.Background()
 
 	sprite, err := client.GetSprite(ctx, spriteName)
@@ -366,7 +353,7 @@ func runSpriteDown() error {
 		return fmt.Errorf("checkpoint failed: %w", err)
 	}
 
-	if err := checkpointStream.ProcessAll(func(msg *sprites.StreamMessage) error {
+	if err := checkpointStream.ProcessAll(func(msg *sdk.StreamMessage) error {
 		return nil
 	}); err != nil {
 		return fmt.Errorf("checkpoint failed: %w", err)
@@ -386,12 +373,12 @@ func runSpriteAttach() error {
 	}
 	defer database.Close()
 
-	client, err := getSpriteClient(database)
+	client, err := sprites.NewClient(database)
 	if err != nil {
 		return err
 	}
 
-	spriteName := getSpriteName(database)
+	spriteName := sprites.GetName(database)
 	sprite := client.Sprite(spriteName)
 
 	fmt.Println("Attaching to sprite...")
@@ -416,12 +403,12 @@ func runSpriteDestroy() error {
 	}
 	defer database.Close()
 
-	client, err := getSpriteClient(database)
+	client, err := sprites.NewClient(database)
 	if err != nil {
 		return err
 	}
 
-	spriteName := getSpriteName(database)
+	spriteName := sprites.GetName(database)
 	ctx := context.Background()
 
 	fmt.Printf("Destroying sprite: %s\n", spriteName)
@@ -432,7 +419,7 @@ func runSpriteDestroy() error {
 	}
 
 	// Clear sprite name from database
-	database.SetSetting(SettingSpriteName, "")
+	database.SetSetting(sprites.SettingName, "")
 
 	return nil
 }
@@ -447,7 +434,7 @@ func showSpriteToken() {
 	}
 	defer database.Close()
 
-	token := getSpriteToken(database)
+	token := sprites.GetToken(database)
 	if token == "" {
 		fmt.Println(dimStyle.Render("No Sprites token configured."))
 		fmt.Println(dimStyle.Render("Set with: task sprite token <token>"))
@@ -467,54 +454,10 @@ func setSpriteToken(token string) error {
 	}
 	defer database.Close()
 
-	if err := database.SetSetting(SettingSpriteToken, token); err != nil {
+	if err := database.SetSetting(sprites.SettingToken, token); err != nil {
 		return fmt.Errorf("save token: %w", err)
 	}
 
 	fmt.Println(spriteCheckStyle.Render("✓ Sprites token saved"))
 	return nil
-}
-
-// ensureSpriteRunning ensures the sprite is running and returns the sprite reference.
-// This is called automatically when task starts with SPRITES_TOKEN set.
-func ensureSpriteRunning(database *db.DB) (*sprites.Client, *sprites.Sprite, error) {
-	client, err := getSpriteClient(database)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	spriteName := getSpriteName(database)
-	ctx := context.Background()
-
-	// Check if sprite exists
-	sprite, err := client.GetSprite(ctx, spriteName)
-	if err != nil {
-		// Create sprite
-		fmt.Println("Creating sprite...")
-		sprite, err = client.CreateSprite(ctx, spriteName, nil)
-		if err != nil {
-			return nil, nil, fmt.Errorf("create sprite: %w", err)
-		}
-
-		// Save name and set up
-		database.SetSetting(SettingSpriteName, spriteName)
-		if err := setupSprite(client, sprite); err != nil {
-			return nil, nil, err
-		}
-	} else if sprite.Status == "suspended" || sprite.Status == "stopped" {
-		// Restore
-		fmt.Println("Restoring sprite...")
-		checkpoints, err := sprite.ListCheckpoints(ctx, "")
-		if err != nil || len(checkpoints) == 0 {
-			return nil, nil, fmt.Errorf("no checkpoints to restore")
-		}
-
-		restoreStream, err := sprite.RestoreCheckpoint(ctx, checkpoints[0].ID)
-		if err != nil {
-			return nil, nil, err
-		}
-		restoreStream.ProcessAll(func(msg *sprites.StreamMessage) error { return nil })
-	}
-
-	return client, sprite, nil
 }
