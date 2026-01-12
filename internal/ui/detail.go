@@ -944,7 +944,7 @@ func (m *DetailModel) renderHelp() string {
 		key  string
 		desc string
 	}{
-		{"↑/↓", "scroll"},
+		{"↑/↓", "prev/next task"},
 	}
 
 	// Only show execute when task is not currently processing
