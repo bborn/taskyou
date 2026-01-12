@@ -31,6 +31,10 @@ type DetailModel struct {
 	ready    bool
 	prInfo   *github.PRInfo
 
+	// Task position in column (1-indexed)
+	positionInColumn int
+	totalInColumn    int
+
 	// Track joined tmux panes
 	claudePaneID    string // The Claude Code pane (middle-left)
 	workdirPaneID   string // The workdir shell pane (middle-right)
@@ -50,6 +54,14 @@ func (m *DetailModel) UpdateTask(t *db.Task) {
 	if m.ready {
 		m.viewport.SetContent(m.renderContent())
 	}
+}
+
+// SetPosition updates the task's position in its column.
+func (m *DetailModel) SetPosition(position, total int) {
+	m.positionInColumn = position
+	m.totalInColumn = total
+	// Update tmux pane title when position changes
+	m.updateTmuxPaneTitle()
 }
 
 // SetPRInfo sets the PR info for this task.
@@ -374,6 +386,28 @@ func (m *DetailModel) ensureTmuxPanesJoined() {
 	}
 }
 
+// getPaneTitle returns the title for the detail pane (e.g., "Task 123 (2/5)").
+func (m *DetailModel) getPaneTitle() string {
+	if m.task == nil {
+		return "Task"
+	}
+	title := fmt.Sprintf("Task %d", m.task.ID)
+	if m.positionInColumn > 0 && m.totalInColumn > 0 {
+		title += fmt.Sprintf(" (%d/%d)", m.positionInColumn, m.totalInColumn)
+	}
+	return title
+}
+
+// updateTmuxPaneTitle updates the tmux pane title to show task info.
+func (m *DetailModel) updateTmuxPaneTitle() {
+	if m.tuiPaneID == "" || os.Getenv("TMUX") == "" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	exec.CommandContext(ctx, "tmux", "select-pane", "-t", m.tuiPaneID, "-T", m.getPaneTitle()).Run()
+}
+
 // focusDetailsPane sets focus to the current TUI pane (Details pane).
 func (m *DetailModel) focusDetailsPane() {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -386,9 +420,10 @@ func (m *DetailModel) focusDetailsPane() {
 	}
 	tuiPaneID := strings.TrimSpace(string(currentPaneOut))
 
-	// Set the pane title to "Details" and ensure it has focus
+	// Set the pane title and ensure it has focus
 	if tuiPaneID != "" {
-		exec.CommandContext(ctx, "tmux", "select-pane", "-t", tuiPaneID, "-T", "Details").Run()
+		m.tuiPaneID = tuiPaneID
+		exec.CommandContext(ctx, "tmux", "select-pane", "-t", tuiPaneID, "-T", m.getPaneTitle()).Run()
 	}
 }
 
@@ -575,7 +610,8 @@ func (m *DetailModel) joinTmuxPanes() {
 
 	// Select back to the TUI pane, set its title, and ensure it has focus
 	if tuiPaneID != "" {
-		exec.CommandContext(ctx, "tmux", "select-pane", "-t", tuiPaneID, "-T", "Details").Run()
+		m.tuiPaneID = tuiPaneID
+		exec.CommandContext(ctx, "tmux", "select-pane", "-t", tuiPaneID, "-T", m.getPaneTitle()).Run()
 		// Ensure the TUI pane has focus for keyboard interaction
 		exec.CommandContext(ctx, "tmux", "select-pane", "-t", tuiPaneID).Run()
 	}
@@ -802,7 +838,12 @@ func (m *DetailModel) View() string {
 func (m *DetailModel) renderHeader() string {
 	t := m.task
 
-	title := Title.Render(fmt.Sprintf("Task #%d", t.ID))
+	// Build title with task ID and position indicator
+	titleText := fmt.Sprintf("Task %d", t.ID)
+	if m.positionInColumn > 0 && m.totalInColumn > 0 {
+		titleText += fmt.Sprintf("  (%d/%d)", m.positionInColumn, m.totalInColumn)
+	}
+	title := Title.Render(titleText)
 	subtitle := Bold.Render(t.Title)
 
 	var meta strings.Builder

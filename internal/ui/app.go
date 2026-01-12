@@ -465,6 +465,9 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.executor.ResumeTask(msg.task.ID)
 			}
 			m.detailView = NewDetailModel(msg.task, m.db, m.executor, m.width, m.height)
+			// Set task position in column for display
+			pos, total := m.kanban.GetTaskPosition()
+			m.detailView.SetPosition(pos, total)
 			m.previousView = m.currentView
 			m.currentView = ViewDetail
 			// Start tmux output ticker if session is active
