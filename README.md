@@ -59,7 +59,6 @@ ssh -p 2222 your-server
 | `c` | Close task |
 | `d` | Delete task |
 | `o` | Open task's working directory |
-| `f` | View/manage attachments |
 | `/` | Filter tasks |
 | `m` | Project memories |
 | `s` | Settings |

@@ -56,7 +56,6 @@ type KeyMap struct {
 	Refresh        key.Binding
 	Settings       key.Binding
 	Memories       key.Binding
-	Files          key.Binding
 	Help           key.Binding
 	Quit           key.Binding
 	ChangeStatus   key.Binding
@@ -81,7 +80,7 @@ func (k KeyMap) FullHelp() [][]key.Binding {
 		{k.Enter, k.New, k.Queue, k.Close},
 		{k.Retry, k.Delete, k.Kill},
 		{k.CommandPalette, k.Settings, k.Memories},
-		{k.Files, k.ChangeStatus, k.Refresh, k.Help, k.Quit},
+		{k.ChangeStatus, k.Refresh, k.Help, k.Quit},
 	}
 }
 
@@ -151,10 +150,6 @@ func DefaultKeyMap() KeyMap {
 		Memories: key.NewBinding(
 			key.WithKeys("m"),
 			key.WithHelp("m", "memories"),
-		),
-		Files: key.NewBinding(
-			key.WithKeys("f"),
-			key.WithHelp("f", "files"),
 		),
 		Help: key.NewBinding(
 			key.WithKeys("?"),
@@ -977,16 +972,6 @@ func (m *AppModel) updateDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if osExec.Command("tmux", "has-session", "-t", sessionName).Run() == nil {
 			return m.showKillConfirm(m.selectedTask)
 		}
-	}
-	if key.Matches(keyMsg, m.keys.Files) && m.selectedTask != nil {
-		// Clean up panes before leaving detail view
-		if m.detailView != nil {
-			m.detailView.Cleanup()
-		}
-		m.attachmentsView = NewAttachmentsModel(m.selectedTask, m.db, m.width, m.height)
-		m.previousView = m.currentView
-		m.currentView = ViewAttachments
-		return m, nil
 	}
 	if key.Matches(keyMsg, m.keys.Edit) && m.selectedTask != nil {
 		m.editingTask = m.selectedTask
