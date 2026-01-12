@@ -457,3 +457,93 @@ func TestKanbanBoard_DesktopViewAtThreshold(t *testing.T) {
 		t.Error("View() returned empty string")
 	}
 }
+
+func TestKanbanBoard_RecurringTasksAtBottom(t *testing.T) {
+	board := NewKanbanBoard(100, 50)
+
+	// Mix of recurring and non-recurring tasks in the same column
+	tasks := []*db.Task{
+		{ID: 1, Title: "Regular Task 1", Status: db.StatusBacklog, Recurrence: ""},
+		{ID: 2, Title: "Recurring Task (daily)", Status: db.StatusBacklog, Recurrence: "daily"},
+		{ID: 3, Title: "Regular Task 2", Status: db.StatusBacklog, Recurrence: ""},
+		{ID: 4, Title: "Recurring Task (weekly)", Status: db.StatusBacklog, Recurrence: "weekly"},
+		{ID: 5, Title: "Regular Task 3", Status: db.StatusBacklog, Recurrence: ""},
+	}
+	board.SetTasks(tasks)
+
+	// Get the backlog column (index 0)
+	col := board.columns[0]
+
+	// Verify order: all non-recurring tasks should come before recurring tasks
+	// Expected order: 1, 3, 5 (non-recurring) then 2, 4 (recurring)
+	expectedOrder := []int64{1, 3, 5, 2, 4}
+
+	if len(col.Tasks) != len(expectedOrder) {
+		t.Fatalf("Expected %d tasks in backlog, got %d", len(expectedOrder), len(col.Tasks))
+	}
+
+	for i, task := range col.Tasks {
+		if task.ID != expectedOrder[i] {
+			t.Errorf("Task at position %d: expected ID %d, got %d", i, expectedOrder[i], task.ID)
+		}
+	}
+
+	// Verify that recurring tasks are at the end
+	nonRecurringCount := 0
+	for _, task := range col.Tasks {
+		if !task.IsRecurring() {
+			nonRecurringCount++
+		}
+	}
+
+	// All non-recurring tasks should be in the first positions
+	for i := 0; i < nonRecurringCount; i++ {
+		if col.Tasks[i].IsRecurring() {
+			t.Errorf("Expected non-recurring task at position %d, but found recurring task (ID %d)", i, col.Tasks[i].ID)
+		}
+	}
+
+	// All recurring tasks should be at the end
+	for i := nonRecurringCount; i < len(col.Tasks); i++ {
+		if !col.Tasks[i].IsRecurring() {
+			t.Errorf("Expected recurring task at position %d, but found non-recurring task (ID %d)", i, col.Tasks[i].ID)
+		}
+	}
+}
+
+func TestKanbanBoard_RecurringTasksSortingAcrossColumns(t *testing.T) {
+	board := NewKanbanBoard(100, 50)
+
+	// Tasks in multiple columns with recurring ones
+	tasks := []*db.Task{
+		{ID: 1, Title: "Backlog Regular", Status: db.StatusBacklog, Recurrence: ""},
+		{ID: 2, Title: "Backlog Recurring", Status: db.StatusBacklog, Recurrence: "daily"},
+		{ID: 3, Title: "InProgress Regular", Status: db.StatusQueued, Recurrence: ""},
+		{ID: 4, Title: "InProgress Recurring", Status: db.StatusQueued, Recurrence: "weekly"},
+	}
+	board.SetTasks(tasks)
+
+	// Check backlog column (index 0)
+	backlogCol := board.columns[0]
+	if len(backlogCol.Tasks) != 2 {
+		t.Fatalf("Expected 2 tasks in backlog, got %d", len(backlogCol.Tasks))
+	}
+	if backlogCol.Tasks[0].ID != 1 {
+		t.Errorf("Backlog first task: expected ID 1, got %d", backlogCol.Tasks[0].ID)
+	}
+	if backlogCol.Tasks[1].ID != 2 {
+		t.Errorf("Backlog second task: expected ID 2, got %d", backlogCol.Tasks[1].ID)
+	}
+
+	// Check in-progress column (index 1)
+	inProgressCol := board.columns[1]
+	if len(inProgressCol.Tasks) != 2 {
+		t.Fatalf("Expected 2 tasks in in-progress, got %d", len(inProgressCol.Tasks))
+	}
+	if inProgressCol.Tasks[0].ID != 3 {
+		t.Errorf("InProgress first task: expected ID 3, got %d", inProgressCol.Tasks[0].ID)
+	}
+	if inProgressCol.Tasks[1].ID != 4 {
+		t.Errorf("InProgress second task: expected ID 4, got %d", inProgressCol.Tasks[1].ID)
+	}
+}
