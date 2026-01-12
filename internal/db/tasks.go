@@ -802,6 +802,26 @@ func (db *DB) DeleteProject(id int64) error {
 	return nil
 }
 
+// CountTasksByProject returns the number of tasks associated with a project name.
+func (db *DB) CountTasksByProject(projectName string) (int, error) {
+	var count int
+	err := db.QueryRow("SELECT COUNT(*) FROM tasks WHERE project = ?", projectName).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("count tasks: %w", err)
+	}
+	return count, nil
+}
+
+// CountMemoriesByProject returns the number of memories associated with a project name.
+func (db *DB) CountMemoriesByProject(projectName string) (int, error) {
+	var count int
+	err := db.QueryRow("SELECT COUNT(*) FROM project_memories WHERE project = ?", projectName).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("count memories: %w", err)
+	}
+	return count, nil
+}
+
 // ListProjects returns all projects, with "personal" always first.
 func (db *DB) ListProjects() ([]*Project, error) {
 	rows, err := db.Query(`

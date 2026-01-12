@@ -8,6 +8,7 @@ import (
 	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/huh"
 	"github.com/charmbracelet/lipgloss"
 )
 
@@ -55,6 +56,12 @@ type SettingsModel struct {
 
 	// Settings
 	projectsDir string
+
+	// Delete project confirmation
+	confirmingDeleteProject bool
+	pendingDeleteProject    *db.Project
+	deleteProjectConfirm    *huh.Form
+	deleteProjectValue      bool
 
 	err error
 }
@@ -146,6 +153,11 @@ func (m *SettingsModel) Init() tea.Cmd {
 
 // Update handles messages.
 func (m *SettingsModel) Update(msg tea.Msg) (*SettingsModel, tea.Cmd) {
+	// Handle delete project confirmation
+	if m.confirmingDeleteProject && m.deleteProjectConfirm != nil {
+		return m.updateDeleteProjectConfirm(msg)
+	}
+
 	// Handle file browser mode
 	if m.browsing && m.fileBrowser != nil {
 		return m.updateBrowser(msg)
@@ -256,16 +268,7 @@ func (m *SettingsModel) Update(msg tea.Msg) (*SettingsModel, tea.Cmd) {
 		case "d":
 			// Delete selected item
 			if m.section == 1 && len(m.projects) > 0 && m.selectedProject < len(m.projects) {
-				err := m.db.DeleteProject(m.projects[m.selectedProject].ID)
-				if err != nil {
-					m.err = err
-				} else {
-					m.err = nil
-					m.loadSettings()
-					if m.selectedProject >= len(m.projects) && m.selectedProject > 0 {
-						m.selectedProject--
-					}
-				}
+				return m.showDeleteProjectConfirm(m.projects[m.selectedProject])
 			} else if m.section == 2 && len(m.taskTypes) > 0 && m.selectedTaskType < len(m.taskTypes) {
 				err := m.db.DeleteTaskType(m.taskTypes[m.selectedTaskType].ID)
 				if err != nil {
@@ -589,8 +592,137 @@ func (m *SettingsModel) saveTaskType() (*SettingsModel, tea.Cmd) {
 	return m, nil
 }
 
+// showDeleteProjectConfirm shows the delete project confirmation dialog.
+func (m *SettingsModel) showDeleteProjectConfirm(project *db.Project) (*SettingsModel, tea.Cmd) {
+	// Don't allow deleting the personal project
+	if project.Name == "personal" {
+		m.err = fmt.Errorf("cannot delete the personal project")
+		return m, nil
+	}
+
+	m.pendingDeleteProject = project
+	m.deleteProjectValue = false
+	m.confirmingDeleteProject = true
+
+	// Count associated tasks and memories
+	taskCount, _ := m.db.CountTasksByProject(project.Name)
+	memoryCount, _ := m.db.CountMemoriesByProject(project.Name)
+
+	// Build description with warning about what will happen
+	var description strings.Builder
+	description.WriteString("This will permanently delete the project configuration.\n")
+	if taskCount > 0 || memoryCount > 0 {
+		description.WriteString("\n")
+		if taskCount > 0 {
+			description.WriteString(fmt.Sprintf("• %d task(s) will become orphaned\n", taskCount))
+		}
+		if memoryCount > 0 {
+			description.WriteString(fmt.Sprintf("• %d memory(ies) will become orphaned\n", memoryCount))
+		}
+		description.WriteString("\nOrphaned items will still exist but won't be associated with any project.")
+	}
+
+	modalWidth := min(60, m.width-8)
+	m.deleteProjectConfirm = huh.NewForm(
+		huh.NewGroup(
+			huh.NewConfirm().
+				Key("delete").
+				Title(fmt.Sprintf("Delete project \"%s\"?", project.Name)).
+				Description(description.String()).
+				Affirmative("Delete").
+				Negative("Cancel").
+				Value(&m.deleteProjectValue),
+		),
+	).WithTheme(huh.ThemeDracula()).
+		WithWidth(modalWidth - 6).
+		WithShowHelp(true)
+
+	return m, m.deleteProjectConfirm.Init()
+}
+
+// updateDeleteProjectConfirm handles the delete project confirmation dialog.
+func (m *SettingsModel) updateDeleteProjectConfirm(msg tea.Msg) (*SettingsModel, tea.Cmd) {
+	// Handle escape to cancel
+	if keyMsg, ok := msg.(tea.KeyMsg); ok {
+		if keyMsg.String() == "esc" {
+			m.confirmingDeleteProject = false
+			m.deleteProjectConfirm = nil
+			m.pendingDeleteProject = nil
+			return m, nil
+		}
+	}
+
+	// Update the huh form
+	form, cmd := m.deleteProjectConfirm.Update(msg)
+	if f, ok := form.(*huh.Form); ok {
+		m.deleteProjectConfirm = f
+	}
+
+	// Check if form completed
+	if m.deleteProjectConfirm.State == huh.StateCompleted {
+		if m.pendingDeleteProject != nil && m.deleteProjectValue {
+			// User confirmed - delete the project
+			err := m.db.DeleteProject(m.pendingDeleteProject.ID)
+			if err != nil {
+				m.err = err
+			} else {
+				m.err = nil
+				m.loadSettings()
+				if m.selectedProject >= len(m.projects) && m.selectedProject > 0 {
+					m.selectedProject--
+				}
+			}
+		}
+		// Clean up confirmation state
+		m.confirmingDeleteProject = false
+		m.deleteProjectConfirm = nil
+		m.pendingDeleteProject = nil
+		return m, nil
+	}
+
+	return m, cmd
+}
+
+// viewDeleteProjectConfirm renders the delete project confirmation dialog.
+func (m *SettingsModel) viewDeleteProjectConfirm() string {
+	if m.deleteProjectConfirm == nil {
+		return ""
+	}
+
+	// Modal header with warning icon
+	header := lipgloss.NewStyle().
+		Bold(true).
+		Foreground(ColorError).
+		MarginBottom(1).
+		Render("⚠ Confirm Delete Project")
+
+	formView := m.deleteProjectConfirm.View()
+
+	// Modal box with border
+	modalWidth := min(60, m.width-8)
+	modalBox := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(ColorError).
+		Padding(1, 2).
+		Width(modalWidth)
+
+	modalContent := modalBox.Render(lipgloss.JoinVertical(lipgloss.Center, header, formView))
+
+	// Center the modal on screen
+	return lipgloss.NewStyle().
+		Width(m.width).
+		Height(m.height).
+		Align(lipgloss.Center, lipgloss.Center).
+		Render(modalContent)
+}
+
 // View renders the settings view.
 func (m *SettingsModel) View() string {
+	// Show delete project confirmation if active
+	if m.confirmingDeleteProject && m.deleteProjectConfirm != nil {
+		return m.viewDeleteProjectConfirm()
+	}
+
 	// Show file browser if active
 	if m.browsing && m.fileBrowser != nil {
 		return m.fileBrowser.View()
