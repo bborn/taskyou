@@ -32,14 +32,22 @@ const (
 
 // PRInfo contains information about a pull request.
 type PRInfo struct {
-	Number     int        `json:"number"`
-	URL        string     `json:"url"`
-	State      PRState    `json:"state"`
-	IsDraft    bool       `json:"isDraft"`
-	Title      string     `json:"title"`
-	CheckState CheckState `json:"checkState"`
-	Mergeable  string     `json:"mergeable"` // "MERGEABLE", "CONFLICTING", "UNKNOWN"
-	UpdatedAt  time.Time  `json:"updatedAt"`
+	Number       int           `json:"number"`
+	URL          string        `json:"url"`
+	State        PRState       `json:"state"`
+	IsDraft      bool          `json:"isDraft"`
+	Title        string        `json:"title"`
+	CheckState   CheckState    `json:"checkState"`
+	Mergeable    string        `json:"mergeable"` // "MERGEABLE", "CONFLICTING", "UNKNOWN"
+	UpdatedAt    time.Time     `json:"updatedAt"`
+	FailedChecks []FailedCheck `json:"failedChecks,omitempty"` // Details of failed checks
+}
+
+// FailedCheck contains details about a failed CI check.
+type FailedCheck struct {
+	Name       string `json:"name"`
+	Conclusion string `json:"conclusion"` // FAILURE, ERROR, TIMED_OUT, CANCELLED
+	DetailsURL string `json:"detailsUrl,omitempty"`
 }
 
 // ghPRResponse is the JSON response from gh pr view.
@@ -55,9 +63,11 @@ type ghPRResponse struct {
 }
 
 type ghCheck struct {
+	Name       string `json:"name"`
 	State      string `json:"state"`
 	Status     string `json:"status"`
 	Conclusion string `json:"conclusion"`
+	DetailsURL string `json:"detailsUrl"`
 }
 
 // PRCache caches PR information to avoid repeated API calls.
@@ -175,7 +185,7 @@ func fetchPRInfo(repoDir, branchName string) *PRInfo {
 	}
 
 	// Parse check state from statusCheckRollup
-	info.CheckState = parseCheckState(resp.StatusCheckRollup)
+	info.CheckState, info.FailedChecks = parseCheckStateWithDetails(resp.StatusCheckRollup)
 
 	// Parse updated time
 	if t, err := time.Parse(time.RFC3339, resp.UpdatedAt); err == nil {
@@ -186,13 +196,21 @@ func fetchPRInfo(repoDir, branchName string) *PRInfo {
 }
 
 // parseCheckState determines the overall check state from individual checks.
+// Deprecated: Use parseCheckStateWithDetails for new code.
 func parseCheckState(checks []ghCheck) CheckState {
+	state, _ := parseCheckStateWithDetails(checks)
+	return state
+}
+
+// parseCheckStateWithDetails determines the overall check state and returns details of failed checks.
+func parseCheckStateWithDetails(checks []ghCheck) (CheckState, []FailedCheck) {
 	if len(checks) == 0 {
-		return CheckStateNone
+		return CheckStateNone, nil
 	}
 
 	hasFailure := false
 	hasPending := false
+	var failedChecks []FailedCheck
 
 	for _, check := range checks {
 		// For status checks, look at state
@@ -212,16 +230,21 @@ func parseCheckState(checks []ghCheck) CheckState {
 		if conclusion == "FAILURE" || conclusion == "ERROR" || conclusion == "TIMED_OUT" ||
 			conclusion == "CANCELLED" || state == "FAILURE" || state == "ERROR" {
 			hasFailure = true
+			failedChecks = append(failedChecks, FailedCheck{
+				Name:       check.Name,
+				Conclusion: conclusion,
+				DetailsURL: check.DetailsURL,
+			})
 		}
 	}
 
 	if hasFailure {
-		return CheckStateFailing
+		return CheckStateFailing, failedChecks
 	}
 	if hasPending {
-		return CheckStatePending
+		return CheckStatePending, nil
 	}
-	return CheckStatePassing
+	return CheckStatePassing, nil
 }
 
 // StatusIcon returns a unicode icon representing the PR state.
@@ -393,7 +416,7 @@ func parsePRListResponse(pr *ghPRListResponse) *PRInfo {
 	}
 
 	// Parse check state
-	info.CheckState = parseCheckState(pr.StatusCheckRollup)
+	info.CheckState, info.FailedChecks = parseCheckStateWithDetails(pr.StatusCheckRollup)
 
 	// Parse updated time
 	if t, err := time.Parse(time.RFC3339, pr.UpdatedAt); err == nil {
@@ -435,4 +458,31 @@ func (c *PRCache) GetCachedPR(repoDir, branchName string) *PRInfo {
 		return entry.info
 	}
 	return nil
+}
+
+// GetPRModifiedFiles returns the list of files modified in a PR.
+// This is useful for determining if CI failures are related to the PR's changes.
+func GetPRModifiedFiles(repoDir, branchName string) ([]string, error) {
+	if _, err := exec.LookPath("gh"); err != nil {
+		return nil, err
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "gh", "pr", "view", branchName, "--json", "files", "-q", ".files[].path")
+	cmd.Dir = repoDir
+
+	output, err := cmd.Output()
+	if err != nil {
+		return nil, err
+	}
+
+	var files []string
+	for _, line := range strings.Split(strings.TrimSpace(string(output)), "\n") {
+		if line != "" {
+			files = append(files, line)
+		}
+	}
+	return files, nil
 }

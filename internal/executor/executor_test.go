@@ -9,6 +9,7 @@ import (
 
 	"github.com/bborn/workflow/internal/config"
 	"github.com/bborn/workflow/internal/db"
+	"github.com/bborn/workflow/internal/github"
 )
 
 func TestNeedsInputDetection(t *testing.T) {
@@ -287,6 +288,181 @@ func TestAttachmentsInPrompt(t *testing.T) {
 			t.Error("prompt should mention Read tool")
 		}
 	})
+}
+
+func TestIsCIFailureTaskRelated(t *testing.T) {
+	// Create temp database
+	tmpFile, err := os.CreateTemp("", "test-*.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(tmpFile.Name())
+	tmpFile.Close()
+
+	database, err := db.Open(tmpFile.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+
+	// Create the test project first
+	if err := database.CreateProject(&db.Project{Name: "test", Path: "/tmp/test"}); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.Config{}
+	exec := New(database, cfg)
+
+	// Create a test task
+	task := &db.Task{
+		Title:      "Test task",
+		Status:     db.StatusDone,
+		Project:    "test",
+		BranchName: "task/1-test",
+	}
+	if err := database.CreateTask(task); err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name         string
+		failedChecks []github.FailedCheck
+		expected     bool
+		reason       string
+	}{
+		{
+			name:         "empty failed checks",
+			failedChecks: []github.FailedCheck{},
+			expected:     false,
+			reason:       "no failures to analyze",
+		},
+		{
+			name: "test failures are task-related",
+			failedChecks: []github.FailedCheck{
+				{Name: "Test Suite", Conclusion: "FAILURE"},
+			},
+			expected: true,
+			reason:   "test failures should be fixable",
+		},
+		{
+			name: "lint failures are task-related",
+			failedChecks: []github.FailedCheck{
+				{Name: "ESLint", Conclusion: "FAILURE"},
+			},
+			expected: true,
+			reason:   "lint failures should be fixable",
+		},
+		{
+			name: "build failures are task-related",
+			failedChecks: []github.FailedCheck{
+				{Name: "Build", Conclusion: "FAILURE"},
+			},
+			expected: true,
+			reason:   "build failures should be fixable",
+		},
+		{
+			name: "typecheck failures are task-related",
+			failedChecks: []github.FailedCheck{
+				{Name: "TypeCheck", Conclusion: "FAILURE"},
+			},
+			expected: true,
+			reason:   "typecheck failures should be fixable",
+		},
+		{
+			name: "CI failures are task-related",
+			failedChecks: []github.FailedCheck{
+				{Name: "CI", Conclusion: "FAILURE"},
+			},
+			expected: true,
+			reason:   "CI failures should be analyzed",
+		},
+		{
+			name: "deploy failures are not task-related",
+			failedChecks: []github.FailedCheck{
+				{Name: "Deploy to Production", Conclusion: "FAILURE"},
+			},
+			expected: false,
+			reason:   "deploy is infrastructure",
+		},
+		{
+			name: "terraform failures are not task-related",
+			failedChecks: []github.FailedCheck{
+				{Name: "Terraform Plan", Conclusion: "FAILURE"},
+			},
+			expected: false,
+			reason:   "terraform is infrastructure",
+		},
+		{
+			name: "kubernetes failures are not task-related",
+			failedChecks: []github.FailedCheck{
+				{Name: "K8s Deploy", Conclusion: "FAILURE"},
+			},
+			expected: false,
+			reason:   "k8s is infrastructure",
+		},
+		{
+			name: "mixed failures - at least one fixable",
+			failedChecks: []github.FailedCheck{
+				{Name: "Deploy", Conclusion: "FAILURE"},
+				{Name: "Test Suite", Conclusion: "FAILURE"},
+			},
+			expected: true,
+			reason:   "test failure is fixable",
+		},
+		{
+			name: "jest failures are task-related",
+			failedChecks: []github.FailedCheck{
+				{Name: "Jest Unit Tests", Conclusion: "FAILURE"},
+			},
+			expected: true,
+			reason:   "jest is a test framework",
+		},
+		{
+			name: "rspec failures are task-related",
+			failedChecks: []github.FailedCheck{
+				{Name: "RSpec", Conclusion: "FAILURE"},
+			},
+			expected: true,
+			reason:   "rspec is a test framework",
+		},
+		{
+			name: "pytest failures are task-related",
+			failedChecks: []github.FailedCheck{
+				{Name: "Pytest", Conclusion: "FAILURE"},
+			},
+			expected: true,
+			reason:   "pytest is a test framework",
+		},
+		{
+			name: "golint failures are task-related",
+			failedChecks: []github.FailedCheck{
+				{Name: "GolangCI-Lint", Conclusion: "FAILURE"},
+			},
+			expected: true,
+			reason:   "golint is a linter",
+		},
+		{
+			name: "prettier failures are task-related",
+			failedChecks: []github.FailedCheck{
+				{Name: "Prettier Check", Conclusion: "FAILURE"},
+			},
+			expected: true,
+			reason:   "prettier is a formatter",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			prInfo := &github.PRInfo{
+				CheckState:   github.CheckStateFailing,
+				FailedChecks: tt.failedChecks,
+			}
+			got := exec.isCIFailureTaskRelated(task, "/tmp/test", prInfo)
+			if got != tt.expected {
+				t.Errorf("isCIFailureTaskRelated() = %v, want %v (%s)", got, tt.expected, tt.reason)
+			}
+		})
+	}
 }
 
 func TestConversationHistory(t *testing.T) {

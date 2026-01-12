@@ -279,3 +279,140 @@ func TestPRCacheInvalidate(t *testing.T) {
 		t.Error("cache should be empty after invalidation")
 	}
 }
+
+func TestParseCheckStateWithDetails(t *testing.T) {
+	tests := []struct {
+		name           string
+		checks         []ghCheck
+		expectedState  CheckState
+		expectedFailed []FailedCheck
+	}{
+		{
+			name:           "no checks",
+			checks:         nil,
+			expectedState:  CheckStateNone,
+			expectedFailed: nil,
+		},
+		{
+			name:           "empty checks",
+			checks:         []ghCheck{},
+			expectedState:  CheckStateNone,
+			expectedFailed: nil,
+		},
+		{
+			name: "all passing",
+			checks: []ghCheck{
+				{Name: "test", Conclusion: "SUCCESS"},
+				{Name: "lint", Conclusion: "SUCCESS"},
+			},
+			expectedState:  CheckStatePassing,
+			expectedFailed: nil,
+		},
+		{
+			name: "one failing with details",
+			checks: []ghCheck{
+				{Name: "test", Conclusion: "SUCCESS"},
+				{Name: "lint", Conclusion: "FAILURE", DetailsURL: "https://example.com/lint"},
+			},
+			expectedState: CheckStateFailing,
+			expectedFailed: []FailedCheck{
+				{Name: "lint", Conclusion: "FAILURE", DetailsURL: "https://example.com/lint"},
+			},
+		},
+		{
+			name: "multiple failing",
+			checks: []ghCheck{
+				{Name: "test", Conclusion: "FAILURE", DetailsURL: "https://example.com/test"},
+				{Name: "lint", Conclusion: "ERROR", DetailsURL: "https://example.com/lint"},
+				{Name: "build", Conclusion: "SUCCESS"},
+			},
+			expectedState: CheckStateFailing,
+			expectedFailed: []FailedCheck{
+				{Name: "test", Conclusion: "FAILURE", DetailsURL: "https://example.com/test"},
+				{Name: "lint", Conclusion: "ERROR", DetailsURL: "https://example.com/lint"},
+			},
+		},
+		{
+			name: "pending - no failed checks returned",
+			checks: []ghCheck{
+				{Name: "test", Status: "IN_PROGRESS"},
+				{Name: "lint", Conclusion: "SUCCESS"},
+			},
+			expectedState:  CheckStatePending,
+			expectedFailed: nil,
+		},
+		{
+			name: "failure and pending - failure wins, failed checks returned",
+			checks: []ghCheck{
+				{Name: "test", Status: "IN_PROGRESS"},
+				{Name: "lint", Conclusion: "FAILURE"},
+			},
+			expectedState: CheckStateFailing,
+			expectedFailed: []FailedCheck{
+				{Name: "lint", Conclusion: "FAILURE", DetailsURL: ""},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotState, gotFailed := parseCheckStateWithDetails(tt.checks)
+			if gotState != tt.expectedState {
+				t.Errorf("parseCheckStateWithDetails() state = %v, want %v", gotState, tt.expectedState)
+			}
+			if len(gotFailed) != len(tt.expectedFailed) {
+				t.Errorf("parseCheckStateWithDetails() failed count = %d, want %d", len(gotFailed), len(tt.expectedFailed))
+				return
+			}
+			for i, fc := range gotFailed {
+				if fc.Name != tt.expectedFailed[i].Name {
+					t.Errorf("failed[%d].Name = %q, want %q", i, fc.Name, tt.expectedFailed[i].Name)
+				}
+				if fc.Conclusion != tt.expectedFailed[i].Conclusion {
+					t.Errorf("failed[%d].Conclusion = %q, want %q", i, fc.Conclusion, tt.expectedFailed[i].Conclusion)
+				}
+				if fc.DetailsURL != tt.expectedFailed[i].DetailsURL {
+					t.Errorf("failed[%d].DetailsURL = %q, want %q", i, fc.DetailsURL, tt.expectedFailed[i].DetailsURL)
+				}
+			}
+		})
+	}
+}
+
+func TestFailedCheckStruct(t *testing.T) {
+	fc := FailedCheck{
+		Name:       "test-suite",
+		Conclusion: "FAILURE",
+		DetailsURL: "https://github.com/org/repo/actions/runs/123",
+	}
+
+	if fc.Name != "test-suite" {
+		t.Errorf("Name = %q, want %q", fc.Name, "test-suite")
+	}
+	if fc.Conclusion != "FAILURE" {
+		t.Errorf("Conclusion = %q, want %q", fc.Conclusion, "FAILURE")
+	}
+	if fc.DetailsURL != "https://github.com/org/repo/actions/runs/123" {
+		t.Errorf("DetailsURL = %q, want correct URL", fc.DetailsURL)
+	}
+}
+
+func TestPRInfoWithFailedChecks(t *testing.T) {
+	pr := &PRInfo{
+		Number:     42,
+		URL:        "https://github.com/org/repo/pull/42",
+		State:      PRStateOpen,
+		CheckState: CheckStateFailing,
+		FailedChecks: []FailedCheck{
+			{Name: "tests", Conclusion: "FAILURE"},
+			{Name: "lint", Conclusion: "ERROR"},
+		},
+	}
+
+	if len(pr.FailedChecks) != 2 {
+		t.Errorf("FailedChecks count = %d, want 2", len(pr.FailedChecks))
+	}
+	if pr.FailedChecks[0].Name != "tests" {
+		t.Errorf("FailedChecks[0].Name = %q, want %q", pr.FailedChecks[0].Name, "tests")
+	}
+}

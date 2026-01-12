@@ -388,10 +388,12 @@ func (e *Executor) worker(ctx context.Context) {
 	// Check merged branches every 30 seconds (15 ticks)
 	// Check for idle blocked tasks to suspend every 60 seconds (30 ticks)
 	// Check for due scheduled tasks every 10 seconds (5 ticks)
+	// Check for CI failures every 30 seconds (15 ticks)
 	tickCount := 0
 	const mergeCheckInterval = 15
 	const suspendCheckInterval = 30
 	const scheduleCheckInterval = 5
+	const ciFailureCheckInterval = 15
 
 	for {
 		select {
@@ -412,6 +414,11 @@ func (e *Executor) worker(ctx context.Context) {
 			// Periodically check for merged branches
 			if tickCount%mergeCheckInterval == 0 {
 				e.checkMergedBranches()
+			}
+
+			// Periodically check for CI failures on task PRs
+			if tickCount%ciFailureCheckInterval == 0 {
+				e.checkCIFailures()
 			}
 
 			// Periodically check for idle blocked tasks to suspend
@@ -1862,6 +1869,200 @@ func (e *Executor) checkMergedBranches() {
 			e.hooks.OnStatusChange(task, db.StatusDone, "PR merged")
 		}
 	}
+}
+
+// checkCIFailures checks for tasks whose PR CI has failed and triggers automatic remediation.
+// For task-related failures (tests, linting in files the PR modified), it queues the task
+// for automatic fixes. For unrelated failures, it marks the task as blocked.
+func (e *Executor) checkCIFailures() {
+	// Get all tasks that have branches and are done or blocked (completed work, waiting for CI)
+	tasks, err := e.db.GetTasksWithBranches()
+	if err != nil {
+		e.logger.Debug("Failed to get tasks with branches for CI check", "error", err)
+		return
+	}
+
+	for _, task := range tasks {
+		// Only check done/blocked tasks that aren't currently running
+		if task.Status != db.StatusDone && task.Status != db.StatusBlocked {
+			continue
+		}
+
+		// Skip tasks currently being processed
+		e.mu.RLock()
+		isRunning := e.runningTasks[task.ID]
+		e.mu.RUnlock()
+		if isRunning {
+			continue
+		}
+
+		// Check PR status
+		projectDir := e.getProjectDir(task.Project)
+		if projectDir == "" {
+			continue
+		}
+
+		prInfo := e.prCache.GetPRForBranch(projectDir, task.BranchName)
+		if prInfo == nil || prInfo.State != github.PRStateOpen {
+			continue
+		}
+
+		// If checks are failing, handle it
+		if prInfo.CheckState == github.CheckStateFailing {
+			e.handleCIFailure(task, projectDir, prInfo)
+		}
+	}
+}
+
+// handleCIFailure processes a CI failure for a task's PR.
+// It determines if the failure is likely task-related and either queues the task
+// for automatic fixes or marks it as blocked for manual review.
+func (e *Executor) handleCIFailure(task *db.Task, projectDir string, prInfo *github.PRInfo) {
+	// Check if we've already handled this failure (avoid re-triggering)
+	// Look for a recent "CI failure" log entry
+	logs, _ := e.db.GetTaskLogs(task.ID, 20)
+	for _, log := range logs {
+		if log.LineType == "system" && strings.Contains(log.Content, "CI checks failing") {
+			// Already notified about this failure, skip
+			// Only re-trigger if task was manually re-queued or status changed
+			if task.Status == db.StatusDone || task.Status == db.StatusBlocked {
+				return
+			}
+		}
+	}
+
+	// Build description of failed checks
+	var failedCheckNames []string
+	for _, fc := range prInfo.FailedChecks {
+		failedCheckNames = append(failedCheckNames, fc.Name)
+	}
+	failureDesc := strings.Join(failedCheckNames, ", ")
+	if failureDesc == "" {
+		failureDesc = "unknown checks"
+	}
+
+	e.logger.Info("CI failure detected", "task", task.ID, "branch", task.BranchName, "checks", failureDesc)
+	e.logLine(task.ID, "system", fmt.Sprintf("CI checks failing: %s", failureDesc))
+
+	// Determine if failures are likely task-related
+	isTaskRelated := e.isCIFailureTaskRelated(task, projectDir, prInfo)
+
+	if isTaskRelated {
+		// Queue the task for automatic CI fix
+		e.queueTaskForCIFix(task, prInfo)
+	} else {
+		// Mark as blocked - needs manual review
+		e.logLine(task.ID, "system", "CI failures appear unrelated to this task's changes - marking as blocked for manual review")
+		if task.Status != db.StatusBlocked {
+			e.updateStatus(task.ID, db.StatusBlocked)
+		}
+		e.hooks.OnStatusChange(task, db.StatusBlocked, fmt.Sprintf("CI failures (unrelated): %s", failureDesc))
+	}
+}
+
+// isCIFailureTaskRelated determines if CI failures are likely related to the task's changes.
+// It uses heuristics like:
+// - Check names containing "test", "lint", "build" are likely fixable
+// - Failures in files modified by the PR are likely task-related
+// - Known flaky test patterns suggest unrelated failures
+func (e *Executor) isCIFailureTaskRelated(task *db.Task, projectDir string, prInfo *github.PRInfo) bool {
+	if len(prInfo.FailedChecks) == 0 {
+		return false
+	}
+
+	// Heuristic 1: Check types that are typically fixable by the task
+	fixableCheckTypes := []string{
+		"test", "lint", "build", "typecheck", "format", "eslint", "prettier",
+		"rubocop", "golint", "gofmt", "mypy", "pylint", "flake8", "jest",
+		"rspec", "pytest", "mocha", "vitest", "ci", "check",
+	}
+
+	for _, fc := range prInfo.FailedChecks {
+		checkNameLower := strings.ToLower(fc.Name)
+		for _, fixableType := range fixableCheckTypes {
+			if strings.Contains(checkNameLower, fixableType) {
+				// This looks like a fixable check type
+				e.logger.Debug("CI failure looks task-related", "check", fc.Name, "reason", "fixable check type")
+				return true
+			}
+		}
+	}
+
+	// Heuristic 2: Infrastructure/deployment failures are typically not task-related
+	infraCheckTypes := []string{
+		"deploy", "release", "publish", "infrastructure", "terraform",
+		"aws", "gcp", "azure", "kubernetes", "k8s", "docker",
+	}
+
+	allInfra := true
+	for _, fc := range prInfo.FailedChecks {
+		checkNameLower := strings.ToLower(fc.Name)
+		isInfra := false
+		for _, infraType := range infraCheckTypes {
+			if strings.Contains(checkNameLower, infraType) {
+				isInfra = true
+				break
+			}
+		}
+		if !isInfra {
+			allInfra = false
+			break
+		}
+	}
+	if allInfra {
+		e.logger.Debug("CI failure looks unrelated", "reason", "all infrastructure checks")
+		return false
+	}
+
+	// Default: assume it's task-related and let Claude try to fix it
+	// Claude can determine if it's actually fixable when it runs
+	return true
+}
+
+// queueTaskForCIFix queues a task for automatic CI failure remediation.
+func (e *Executor) queueTaskForCIFix(task *db.Task, prInfo *github.PRInfo) {
+	// Build feedback message for Claude
+	var feedback strings.Builder
+	feedback.WriteString("The PR's CI checks are failing. Please investigate and fix the issues.\n\n")
+	feedback.WriteString("Failed checks:\n")
+	for _, fc := range prInfo.FailedChecks {
+		feedback.WriteString(fmt.Sprintf("- %s (%s)", fc.Name, fc.Conclusion))
+		if fc.DetailsURL != "" {
+			feedback.WriteString(fmt.Sprintf(" - Details: %s", fc.DetailsURL))
+		}
+		feedback.WriteString("\n")
+	}
+	feedback.WriteString("\nPlease:\n")
+	feedback.WriteString("1. Run the failing checks locally to reproduce the issue\n")
+	feedback.WriteString("2. Identify and fix the root cause\n")
+	feedback.WriteString("3. Commit your fixes and push to the PR branch\n")
+	feedback.WriteString("4. Verify the fix resolves the CI failures\n")
+	feedback.WriteString("\nIf the failures are not related to your changes (e.g., flaky tests, infrastructure issues), ")
+	feedback.WriteString("explain why and mark the task as needing manual review.\n")
+
+	e.logLine(task.ID, "system", "Queueing task to fix CI failures automatically")
+
+	// Add continuation marker and feedback
+	e.db.AppendTaskLog(task.ID, "system", "--- Continuation (CI Fix) ---")
+	e.db.AppendTaskLog(task.ID, "text", "Feedback: "+feedback.String())
+
+	// Queue the task
+	if err := e.db.UpdateTaskStatus(task.ID, db.StatusQueued); err != nil {
+		e.logger.Error("Failed to queue task for CI fix", "task", task.ID, "error", err)
+		return
+	}
+
+	// Broadcast the status change
+	updatedTask, _ := e.db.GetTask(task.ID)
+	if updatedTask != nil {
+		e.broadcastTaskEvent(TaskEvent{
+			Type:   "status_changed",
+			Task:   updatedTask,
+			TaskID: task.ID,
+		})
+	}
+
+	e.hooks.OnStatusChange(task, db.StatusQueued, "CI fix triggered")
 }
 
 // isBranchMerged checks if a task's branch has been merged into the default branch.
