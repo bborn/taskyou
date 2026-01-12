@@ -548,6 +548,11 @@ func (m *SettingsModel) saveProject() (*SettingsModel, tea.Cmd) {
 		return m, nil
 	}
 
+	// Update the project color cache
+	if m.editProject.Color != "" {
+		SetProjectColor(m.editProject.Name, m.editProject.Color)
+	}
+
 	m.editingProject = false
 	m.editProject = nil
 	m.err = nil

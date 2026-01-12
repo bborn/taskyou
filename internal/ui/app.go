@@ -295,6 +295,9 @@ func NewAppModel(database *db.DB, exec *executor.Executor, workingDir string) *A
 	// Load saved theme from database
 	LoadThemeFromDB(database.GetSetting)
 
+	// Load project colors into cache
+	LoadProjectColors(database)
+
 	// Start with zero size - will be set by WindowSizeMsg
 	kanban := NewKanbanBoard(0, 0)
 
