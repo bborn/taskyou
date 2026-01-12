@@ -1574,3 +1574,126 @@ func TestCreateTaskDefaultsToPersonal(t *testing.T) {
 		t.Errorf("expected project 'personal', got '%s'", retrieved.Project)
 	}
 }
+
+func TestCountTasksByProject(t *testing.T) {
+	// Create temporary database
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	db, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer db.Close()
+	defer os.Remove(dbPath)
+
+	// Create a test project
+	project := &Project{
+		Name: "test-project",
+		Path: tmpDir,
+	}
+	if err := db.CreateProject(project); err != nil {
+		t.Fatalf("failed to create project: %v", err)
+	}
+
+	// Initially no tasks for project
+	count, err := db.CountTasksByProject("test-project")
+	if err != nil {
+		t.Fatalf("failed to count tasks: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("expected 0 tasks, got %d", count)
+	}
+
+	// Create tasks for the project
+	for i := 0; i < 3; i++ {
+		task := &Task{
+			Title:   "Test Task",
+			Status:  StatusBacklog,
+			Type:    TypeCode,
+			Project: "test-project",
+		}
+		if err := db.CreateTask(task); err != nil {
+			t.Fatalf("failed to create task: %v", err)
+		}
+	}
+
+	// Count should now be 3
+	count, err = db.CountTasksByProject("test-project")
+	if err != nil {
+		t.Fatalf("failed to count tasks: %v", err)
+	}
+	if count != 3 {
+		t.Errorf("expected 3 tasks, got %d", count)
+	}
+
+	// Count for non-existent project should be 0
+	count, err = db.CountTasksByProject("nonexistent-project")
+	if err != nil {
+		t.Fatalf("failed to count tasks: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("expected 0 tasks for nonexistent project, got %d", count)
+	}
+}
+
+func TestCountMemoriesByProject(t *testing.T) {
+	// Create temporary database
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	db, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer db.Close()
+	defer os.Remove(dbPath)
+
+	// Create a test project
+	project := &Project{
+		Name: "test-project",
+		Path: tmpDir,
+	}
+	if err := db.CreateProject(project); err != nil {
+		t.Fatalf("failed to create project: %v", err)
+	}
+
+	// Initially no memories for project
+	count, err := db.CountMemoriesByProject("test-project")
+	if err != nil {
+		t.Fatalf("failed to count memories: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("expected 0 memories, got %d", count)
+	}
+
+	// Create memories for the project
+	for i := 0; i < 2; i++ {
+		memory := &ProjectMemory{
+			Project:  "test-project",
+			Category: MemoryCategoryGeneral,
+			Content:  "Test memory content",
+		}
+		if err := db.CreateMemory(memory); err != nil {
+			t.Fatalf("failed to create memory: %v", err)
+		}
+	}
+
+	// Count should now be 2
+	count, err = db.CountMemoriesByProject("test-project")
+	if err != nil {
+		t.Fatalf("failed to count memories: %v", err)
+	}
+	if count != 2 {
+		t.Errorf("expected 2 memories, got %d", count)
+	}
+
+	// Count for non-existent project should be 0
+	count, err = db.CountMemoriesByProject("nonexistent-project")
+	if err != nil {
+		t.Fatalf("failed to count memories: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("expected 0 memories for nonexistent project, got %d", count)
+	}
+}
