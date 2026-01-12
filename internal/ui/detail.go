@@ -151,8 +151,12 @@ func NewDetailModel(t *db.Task, database *db.DB, exec *executor.Executor, width,
 		// No active tmux window - check if we can resume a previous session
 		// First check stored session ID, then fall back to file-based lookup
 		sessionID := m.task.ClaudeSessionID
-		if sessionID == "" && m.task.WorktreePath != "" {
-			sessionID = executor.FindClaudeSessionID(m.task.WorktreePath)
+		if sessionID == "" {
+			// Fall back to file-based lookup using worktree or project directory
+			workDir := m.getWorkdir()
+			if workDir != "" {
+				sessionID = executor.FindClaudeSessionID(workDir)
+			}
 		}
 		if sessionID != "" {
 			// Start a new tmux window resuming the previous session
@@ -276,7 +280,7 @@ func (m *DetailModel) findTaskWindow() string {
 // startResumableSession starts a new tmux window with claude --resume for a previous session.
 // This reconnects to a Claude session that was previously running but whose tmux window was killed.
 func (m *DetailModel) startResumableSession(sessionID string) {
-	if m.task == nil || m.task.WorktreePath == "" || sessionID == "" {
+	if m.task == nil || sessionID == "" {
 		return
 	}
 
@@ -308,7 +312,7 @@ func (m *DetailModel) startResumableSession(sessionID string) {
 	}
 
 	windowName := executor.TmuxWindowName(m.task.ID)
-	workDir := m.task.WorktreePath
+	workDir := m.getWorkdir()
 
 	// Build the claude command with --resume
 	// Check for dangerous mode
