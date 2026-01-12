@@ -838,12 +838,7 @@ func (m *DetailModel) View() string {
 func (m *DetailModel) renderHeader() string {
 	t := m.task
 
-	// Build title with task ID and position indicator
-	titleText := fmt.Sprintf("Task %d", t.ID)
-	if m.positionInColumn > 0 && m.totalInColumn > 0 {
-		titleText += fmt.Sprintf("  (%d/%d)", m.positionInColumn, m.totalInColumn)
-	}
-	title := Title.Render(titleText)
+	// Task title (ID and position are shown in the panel border)
 	subtitle := Bold.Render(t.Title)
 
 	var meta strings.Builder
@@ -919,7 +914,7 @@ func (m *DetailModel) renderHeader() string {
 		prLine = Dim.Render(fmt.Sprintf("PR #%d: %s", m.prInfo.Number, m.prInfo.URL))
 	}
 
-	lines := []string{title, subtitle, meta.String()}
+	lines := []string{subtitle, meta.String()}
 	if prLine != "" {
 		lines = append(lines, prLine)
 	}
