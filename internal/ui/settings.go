@@ -339,13 +339,7 @@ func (m *SettingsModel) updateProjectForm(msg tea.KeyMsg) (*SettingsModel, tea.C
 		m.editProject = nil
 		return m, nil
 	case "tab":
-		// Tab moves forward through fields (unless in textarea)
-		if m.projectFormFocus == 3 {
-			// In instructions textarea, tab inserts tab character
-			var cmd tea.Cmd
-			m.instructionsInput, cmd = m.instructionsInput.Update(msg)
-			return m, cmd
-		}
+		// Tab moves forward through fields
 		m.projectFormFocus = (m.projectFormFocus + 1) % 4
 		m.updateProjectFormFocus()
 		if m.projectFormFocus == 1 {
@@ -454,13 +448,7 @@ func (m *SettingsModel) updateTaskTypeForm(msg tea.KeyMsg) (*SettingsModel, tea.
 		m.editTaskType = nil
 		return m, nil
 	case "tab":
-		// Tab moves forward through fields (unless in textarea)
-		if m.typeFormFocus == 2 {
-			// In instructions textarea, tab inserts tab character
-			var cmd tea.Cmd
-			m.typeInstructionsInput, cmd = m.typeInstructionsInput.Update(msg)
-			return m, cmd
-		}
+		// Tab moves forward through fields
 		m.typeFormFocus = (m.typeFormFocus + 1) % 3
 		m.updateTaskTypeFormFocus()
 		if m.typeFormFocus == 2 {
