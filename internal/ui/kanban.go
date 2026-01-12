@@ -123,8 +123,38 @@ func (k *KanbanBoard) distributeTasksToColumns() {
 		}
 	}
 
+	// Sort each column to put recurring tasks at the bottom
+	for i := range k.columns {
+		k.sortColumnTasks(i)
+	}
+
 	// Ensure selected position is valid
 	k.clampSelection()
+}
+
+// sortColumnTasks sorts tasks within a column, putting recurring tasks at the bottom.
+// Non-recurring tasks maintain their original order (by creation date from DB query).
+func (k *KanbanBoard) sortColumnTasks(colIdx int) {
+	if colIdx < 0 || colIdx >= len(k.columns) {
+		return
+	}
+	tasks := k.columns[colIdx].Tasks
+	if len(tasks) <= 1 {
+		return
+	}
+
+	// Stable sort: recurring tasks go to bottom, preserving relative order within groups
+	var nonRecurring, recurring []*db.Task
+	for _, task := range tasks {
+		if task.IsRecurring() {
+			recurring = append(recurring, task)
+		} else {
+			nonRecurring = append(nonRecurring, task)
+		}
+	}
+
+	// Reconstruct the slice with non-recurring first, then recurring
+	k.columns[colIdx].Tasks = append(nonRecurring, recurring...)
 }
 
 // SetSize updates the board dimensions.
@@ -678,6 +708,9 @@ func (k *KanbanBoard) renderTaskCard(task *db.Task, width int, isSelected bool) 
 		Padding(0, 1).
 		MarginBottom(1)
 
+	// Recurring tasks are de-emphasized visually (dimmed) when not selected
+	isRecurring := task.IsRecurring()
+
 	if isSelected {
 		cardBg, cardFg := GetThemeCardColors()
 		// Selected card has border and background
@@ -688,6 +721,14 @@ func (k *KanbanBoard) renderTaskCard(task *db.Task, width int, isSelected bool) 
 			Border(lipgloss.RoundedBorder()).
 			BorderForeground(lipgloss.Color(currentTheme.CardBorderHi)).
 			MarginBottom(0) // Border adds visual separation
+	} else if isRecurring {
+		// Recurring tasks are dimmed to de-emphasize them
+		cardStyle = cardStyle.
+			Foreground(ColorMuted).
+			BorderBottom(true).
+			BorderStyle(lipgloss.NormalBorder()).
+			BorderForeground(ColorMuted).
+			MarginBottom(0)
 	} else {
 		// Non-selected cards have a subtle bottom border for separation
 		cardStyle = cardStyle.
