@@ -209,6 +209,8 @@ func (db *DB) migrate() error {
 		`ALTER TABLE tasks ADD COLUMN scheduled_at DATETIME`,   // When to next run (null = not scheduled)
 		`ALTER TABLE tasks ADD COLUMN recurrence TEXT DEFAULT ''`, // Recurrence pattern (empty = one-time)
 		`ALTER TABLE tasks ADD COLUMN last_run_at DATETIME`,    // When last executed (for recurring tasks)
+		// Project color column
+		`ALTER TABLE projects ADD COLUMN color TEXT DEFAULT ''`, // Hex color for project label (e.g., "#61AFEF")
 	}
 
 	for _, m := range alterMigrations {
@@ -245,6 +247,11 @@ func (db *DB) migrate() error {
 	// Ensure default task types exist
 	if err := db.ensureDefaultTaskTypes(); err != nil {
 		return fmt.Errorf("ensure default task types: %w", err)
+	}
+
+	// Assign default colors to projects without colors
+	if err := db.ensureProjectColors(); err != nil {
+		return fmt.Errorf("ensure project colors: %w", err)
 	}
 
 	return nil
@@ -342,6 +349,55 @@ This is the default workspace for personal tasks.
 `
 	if err := os.WriteFile(readmePath, []byte(readme), 0644); err != nil {
 		return fmt.Errorf("write README: %w", err)
+	}
+
+	return nil
+}
+
+// DefaultProjectColors is a palette of distinct colors for projects.
+// These are assigned to projects that don't have a color set.
+var DefaultProjectColors = []string{
+	"#C678DD", // Purple
+	"#61AFEF", // Blue
+	"#56B6C2", // Cyan
+	"#98C379", // Green
+	"#E5C07B", // Yellow
+	"#E06C75", // Red/Pink
+	"#D19A66", // Orange
+	"#ABB2BF", // Gray
+}
+
+// ensureProjectColors assigns default colors to projects that don't have colors.
+func (db *DB) ensureProjectColors() error {
+	// Get all projects without colors
+	rows, err := db.Query(`SELECT id, name FROM projects WHERE color = '' OR color IS NULL ORDER BY id`)
+	if err != nil {
+		return fmt.Errorf("query projects without colors: %w", err)
+	}
+	defer rows.Close()
+
+	var projects []struct {
+		ID   int64
+		Name string
+	}
+	for rows.Next() {
+		var p struct {
+			ID   int64
+			Name string
+		}
+		if err := rows.Scan(&p.ID, &p.Name); err != nil {
+			return fmt.Errorf("scan project: %w", err)
+		}
+		projects = append(projects, p)
+	}
+
+	// Assign colors to projects
+	for i, p := range projects {
+		color := DefaultProjectColors[i%len(DefaultProjectColors)]
+		_, err := db.Exec(`UPDATE projects SET color = ? WHERE id = ?`, color, p.ID)
+		if err != nil {
+			return fmt.Errorf("update project color: %w", err)
+		}
 	}
 
 	return nil
