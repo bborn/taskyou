@@ -1010,13 +1010,11 @@ func (m *DetailModel) renderHelp() string {
 		}{"r", "retry"})
 	}
 
-	// Only show status change when task is not currently processing
-	if !isProcessing {
-		keys = append(keys, struct {
-			key  string
-			desc string
-		}{"S", "status"})
-	}
+	// Always show status change option
+	keys = append(keys, struct {
+		key  string
+		desc string
+	}{"S", "status"})
 
 	// Show Tab shortcut when panes are visible
 	if hasPanes && os.Getenv("TMUX") != "" {
