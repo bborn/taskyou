@@ -2140,6 +2140,9 @@ func (e *Executor) setupWorktree(task *db.Task) (string, error) {
 	symlinkClaudeConfig(projectDir, worktreePath)
 	copyMCPConfig(projectDir, worktreePath)
 
+	// Run worktree init script if configured (only for newly created worktrees)
+	e.runWorktreeInitScript(projectDir, worktreePath, task)
+
 	return worktreePath, nil
 }
 
@@ -2263,6 +2266,47 @@ func copyMCPConfig(srcDir, dstDir string) error {
 	}
 
 	return nil
+}
+
+// runWorktreeInitScript runs the worktree init script if configured or conventionally present.
+// It sets environment variables WORKTREE_TASK_ID, WORKTREE_PORT, and WORKTREE_PATH.
+// Non-zero exit codes are logged as warnings but do not cause the worktree setup to fail.
+func (e *Executor) runWorktreeInitScript(projectDir, worktreePath string, task *db.Task) {
+	scriptPath := GetWorktreeInitScript(projectDir)
+	if scriptPath == "" {
+		return
+	}
+
+	e.logLine(task.ID, "system", fmt.Sprintf("Running worktree init script: %s", scriptPath))
+
+	cmd := exec.Command(scriptPath)
+	cmd.Dir = worktreePath
+
+	// Set environment variables as specified in the feature request
+	cmd.Env = append(os.Environ(),
+		fmt.Sprintf("WORKTREE_TASK_ID=%d", task.ID),
+		fmt.Sprintf("WORKTREE_PORT=%d", task.Port),
+		fmt.Sprintf("WORKTREE_PATH=%s", worktreePath),
+	)
+
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		e.logger.Warn("worktree init script failed",
+			"script", scriptPath,
+			"error", err,
+			"output", string(output),
+		)
+		e.logLine(task.ID, "system", fmt.Sprintf("Warning: worktree init script failed: %v", err))
+		if len(output) > 0 {
+			e.logLine(task.ID, "system", fmt.Sprintf("Script output: %s", string(output)))
+		}
+		return
+	}
+
+	if len(output) > 0 {
+		e.logLine(task.ID, "system", fmt.Sprintf("Init script output: %s", string(output)))
+	}
+	e.logLine(task.ID, "system", "Worktree init script completed successfully")
 }
 
 // ensureGitignore adds an entry to .gitignore if not already present.
