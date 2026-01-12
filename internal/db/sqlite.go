@@ -213,6 +213,9 @@ func (db *DB) migrate() error {
 		`ALTER TABLE tasks ADD COLUMN claude_session_id TEXT DEFAULT ''`, // Claude session ID for resuming conversations
 		// Project color column
 		`ALTER TABLE projects ADD COLUMN color TEXT DEFAULT ''`, // Hex color for project label (e.g., "#61AFEF")
+		// PR tracking columns
+		`ALTER TABLE tasks ADD COLUMN pr_url TEXT DEFAULT ''`,     // Pull request URL (if associated with a PR)
+		`ALTER TABLE tasks ADD COLUMN pr_number INTEGER DEFAULT 0`, // Pull request number (if associated with a PR)
 	}
 
 	for _, m := range alterMigrations {

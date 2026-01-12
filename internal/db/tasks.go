@@ -21,6 +21,8 @@ type Task struct {
 	BranchName      string
 	Port            int    // Unique port for running the application in this task's worktree
 	ClaudeSessionID string // Claude session ID for resuming conversations
+	PRURL           string // Pull request URL (if associated with a PR)
+	PRNumber        int    // Pull request number (if associated with a PR)
 	CreatedAt       LocalTime
 	UpdatedAt       LocalTime
 	StartedAt       *LocalTime
@@ -135,12 +137,14 @@ func (db *DB) GetTask(id int64) (*Task, error) {
 	err := db.QueryRow(`
 		SELECT id, title, body, status, type, project,
 		       worktree_path, branch_name, port, claude_session_id,
+		       COALESCE(pr_url, ''), COALESCE(pr_number, 0),
 		       created_at, updated_at, started_at, completed_at,
 		       scheduled_at, recurrence, last_run_at
 		FROM tasks WHERE id = ?
 	`, id).Scan(
 		&t.ID, &t.Title, &t.Body, &t.Status, &t.Type, &t.Project,
 		&t.WorktreePath, &t.BranchName, &t.Port, &t.ClaudeSessionID,
+		&t.PRURL, &t.PRNumber,
 		&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
 		&t.ScheduledAt, &t.Recurrence, &t.LastRunAt,
 	)
@@ -168,6 +172,7 @@ func (db *DB) ListTasks(opts ListTasksOptions) ([]*Task, error) {
 	query := `
 		SELECT id, title, body, status, type, project,
 		       worktree_path, branch_name, port, claude_session_id,
+		       COALESCE(pr_url, ''), COALESCE(pr_number, 0),
 		       created_at, updated_at, started_at, completed_at,
 		       scheduled_at, recurrence, last_run_at
 		FROM tasks WHERE 1=1
@@ -218,6 +223,7 @@ func (db *DB) ListTasks(opts ListTasksOptions) ([]*Task, error) {
 		err := rows.Scan(
 			&t.ID, &t.Title, &t.Body, &t.Status, &t.Type, &t.Project,
 			&t.WorktreePath, &t.BranchName, &t.Port, &t.ClaudeSessionID,
+			&t.PRURL, &t.PRNumber,
 			&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
 			&t.ScheduledAt, &t.Recurrence, &t.LastRunAt,
 		)
@@ -267,11 +273,13 @@ func (db *DB) UpdateTask(t *Task) error {
 		UPDATE tasks SET
 			title = ?, body = ?, status = ?, type = ?, project = ?,
 			worktree_path = ?, branch_name = ?, port = ?, claude_session_id = ?,
+			pr_url = ?, pr_number = ?,
 			scheduled_at = ?, recurrence = ?, last_run_at = ?,
 			updated_at = CURRENT_TIMESTAMP
 		WHERE id = ?
 	`, t.Title, t.Body, t.Status, t.Type, t.Project,
 		t.WorktreePath, t.BranchName, t.Port, t.ClaudeSessionID,
+		t.PRURL, t.PRNumber,
 		t.ScheduledAt, t.Recurrence, t.LastRunAt, t.ID)
 	if err != nil {
 		return fmt.Errorf("update task: %w", err)
@@ -366,6 +374,7 @@ func (db *DB) GetNextQueuedTask() (*Task, error) {
 	err := db.QueryRow(`
 		SELECT id, title, body, status, type, project,
 		       worktree_path, branch_name, port, claude_session_id,
+		       COALESCE(pr_url, ''), COALESCE(pr_number, 0),
 		       created_at, updated_at, started_at, completed_at,
 		       scheduled_at, recurrence, last_run_at
 		FROM tasks
@@ -375,6 +384,7 @@ func (db *DB) GetNextQueuedTask() (*Task, error) {
 	`, StatusQueued).Scan(
 		&t.ID, &t.Title, &t.Body, &t.Status, &t.Type, &t.Project,
 		&t.WorktreePath, &t.BranchName, &t.Port, &t.ClaudeSessionID,
+		&t.PRURL, &t.PRNumber,
 		&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
 		&t.ScheduledAt, &t.Recurrence, &t.LastRunAt,
 	)
@@ -392,6 +402,7 @@ func (db *DB) GetQueuedTasks() ([]*Task, error) {
 	rows, err := db.Query(`
 		SELECT id, title, body, status, type, project,
 		       worktree_path, branch_name, port, claude_session_id,
+		       COALESCE(pr_url, ''), COALESCE(pr_number, 0),
 		       created_at, updated_at, started_at, completed_at,
 		       scheduled_at, recurrence, last_run_at
 		FROM tasks
@@ -409,6 +420,7 @@ func (db *DB) GetQueuedTasks() ([]*Task, error) {
 		if err := rows.Scan(
 			&t.ID, &t.Title, &t.Body, &t.Status, &t.Type, &t.Project,
 			&t.WorktreePath, &t.BranchName, &t.Port, &t.ClaudeSessionID,
+			&t.PRURL, &t.PRNumber,
 			&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
 			&t.ScheduledAt, &t.Recurrence, &t.LastRunAt,
 		); err != nil {
@@ -425,6 +437,7 @@ func (db *DB) GetTasksWithBranches() ([]*Task, error) {
 	rows, err := db.Query(`
 		SELECT id, title, body, status, type, project,
 		       worktree_path, branch_name, port, claude_session_id,
+		       COALESCE(pr_url, ''), COALESCE(pr_number, 0),
 		       created_at, updated_at, started_at, completed_at,
 		       scheduled_at, recurrence, last_run_at
 		FROM tasks
@@ -442,6 +455,7 @@ func (db *DB) GetTasksWithBranches() ([]*Task, error) {
 		if err := rows.Scan(
 			&t.ID, &t.Title, &t.Body, &t.Status, &t.Type, &t.Project,
 			&t.WorktreePath, &t.BranchName, &t.Port, &t.ClaudeSessionID,
+			&t.PRURL, &t.PRNumber,
 			&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
 			&t.ScheduledAt, &t.Recurrence, &t.LastRunAt,
 		); err != nil {
@@ -461,6 +475,7 @@ func (db *DB) GetDueScheduledTasks() ([]*Task, error) {
 	rows, err := db.Query(`
 		SELECT id, title, body, status, type, project,
 		       worktree_path, branch_name, port, claude_session_id,
+		       COALESCE(pr_url, ''), COALESCE(pr_number, 0),
 		       created_at, updated_at, started_at, completed_at,
 		       scheduled_at, recurrence, last_run_at
 		FROM tasks
@@ -480,6 +495,7 @@ func (db *DB) GetDueScheduledTasks() ([]*Task, error) {
 		if err := rows.Scan(
 			&t.ID, &t.Title, &t.Body, &t.Status, &t.Type, &t.Project,
 			&t.WorktreePath, &t.BranchName, &t.Port, &t.ClaudeSessionID,
+			&t.PRURL, &t.PRNumber,
 			&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
 			&t.ScheduledAt, &t.Recurrence, &t.LastRunAt,
 		); err != nil {
@@ -495,6 +511,7 @@ func (db *DB) GetScheduledTasks() ([]*Task, error) {
 	rows, err := db.Query(`
 		SELECT id, title, body, status, type, project,
 		       worktree_path, branch_name, port, claude_session_id,
+		       COALESCE(pr_url, ''), COALESCE(pr_number, 0),
 		       created_at, updated_at, started_at, completed_at,
 		       scheduled_at, recurrence, last_run_at
 		FROM tasks
@@ -512,6 +529,7 @@ func (db *DB) GetScheduledTasks() ([]*Task, error) {
 		if err := rows.Scan(
 			&t.ID, &t.Title, &t.Body, &t.Status, &t.Type, &t.Project,
 			&t.WorktreePath, &t.BranchName, &t.Port, &t.ClaudeSessionID,
+			&t.PRURL, &t.PRNumber,
 			&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
 			&t.ScheduledAt, &t.Recurrence, &t.LastRunAt,
 		); err != nil {

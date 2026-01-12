@@ -2,7 +2,6 @@ package ui
 
 import (
 	"fmt"
-	"regexp"
 	"strings"
 
 	"github.com/bborn/workflow/internal/db"
@@ -31,7 +30,7 @@ type CommandPaletteModel struct {
 // NewCommandPaletteModel creates a new command palette model.
 func NewCommandPaletteModel(database *db.DB, tasks []*db.Task, width, height int) *CommandPaletteModel {
 	searchInput := textinput.New()
-	searchInput.Placeholder = "Search tasks by title, ID, project, or PR URL..."
+	searchInput.Placeholder = "Search tasks by title, ID, project, or PR URL/number..."
 	searchInput.Focus()
 	searchInput.CharLimit = 100
 	searchInput.Width = min(60, width-10)
@@ -147,13 +146,6 @@ func (m *CommandPaletteModel) matchesQuery(task *db.Task, query string) bool {
 			return true
 		}
 	}
-	// Check for PR URL or PR number in query
-	if prNumber := extractPRNumber(query); prNumber != "" {
-		// Check if task body or title contains this PR URL/number
-		if matchesPRNumber(task, prNumber) {
-			return true
-		}
-	}
 	// Check title
 	if strings.Contains(strings.ToLower(task.Title), query) {
 		return true
@@ -165,6 +157,24 @@ func (m *CommandPaletteModel) matchesQuery(task *db.Task, query string) bool {
 	// Check status
 	if strings.Contains(strings.ToLower(task.Status), query) {
 		return true
+	}
+	// Check PR URL (e.g., "https://github.com/offerlab/offerlab/pull/2382")
+	if task.PRURL != "" && strings.Contains(strings.ToLower(task.PRURL), query) {
+		return true
+	}
+	// Check PR number (e.g., "2382" or "#2382")
+	if task.PRNumber > 0 {
+		prNumStr := fmt.Sprintf("%d", task.PRNumber)
+		if strings.Contains(prNumStr, query) {
+			return true
+		}
+		// Also match with # prefix
+		if strings.HasPrefix(query, "#") {
+			prQuery := strings.TrimPrefix(query, "#")
+			if strings.Contains(prNumStr, prQuery) {
+				return true
+			}
+		}
 	}
 	// Fuzzy match: check if all characters in query appear in order in title
 	if fuzzyMatch(strings.ToLower(task.Title), query) {
@@ -377,66 +387,4 @@ func (m *CommandPaletteModel) SetSize(width, height int) {
 	m.width = width
 	m.height = height
 	m.searchInput.Width = min(60, width-10)
-}
-
-// extractPRNumber extracts a PR number from various formats:
-// - Full GitHub URL: https://github.com/owner/repo/pull/123
-// - Short URL: github.com/owner/repo/pull/123
-// - Just PR number: 123 (only if it looks like a PR number - all digits)
-// Returns empty string if no PR number is found.
-func extractPRNumber(query string) string {
-	// Try to match GitHub PR URL pattern
-	// Matches: github.com/owner/repo/pull/NUMBER
-	re := regexp.MustCompile(`github\.com/[^/]+/[^/]+/pull/(\d+)`)
-	matches := re.FindStringSubmatch(query)
-	if len(matches) > 1 {
-		return matches[1]
-	}
-
-	// If the query is just digits and 1-6 characters long, treat it as a potential PR number
-	// This avoids matching task IDs (which are also searched separately)
-	if regexp.MustCompile(`^\d{1,6}$`).MatchString(query) {
-		return query
-	}
-
-	return ""
-}
-
-// matchesPRNumber checks if a task matches the given PR number.
-// It checks:
-// 1. Task body contains the PR URL with this number
-// 2. Task title contains the PR URL with this number
-func matchesPRNumber(task *db.Task, prNumber string) bool {
-	// Create patterns to search for
-	// Pattern 1: /pull/NUMBER (most specific - includes the slash after to ensure exact match)
-	pullPattern := "/pull/" + prNumber
-
-	// Check body
-	bodyLower := strings.ToLower(task.Body)
-	if containsPRPattern(bodyLower, pullPattern, prNumber) {
-		return true
-	}
-
-	// Check title
-	titleLower := strings.ToLower(task.Title)
-	if containsPRPattern(titleLower, pullPattern, prNumber) {
-		return true
-	}
-
-	return false
-}
-
-// containsPRPattern checks if text contains either the pull URL pattern or a PR reference (#NUMBER)
-// with word boundaries to avoid partial matches.
-func containsPRPattern(text, pullPattern, prNumber string) bool {
-	// Check for /pull/NUMBER pattern (from GitHub URLs)
-	if strings.Contains(text, pullPattern) {
-		return true
-	}
-
-	// Check for #NUMBER pattern with word boundaries
-	// Use regex to ensure we match #NUMBER but not #NUMBER as part of a larger number
-	refPattern := `#` + prNumber + `\b`
-	matched, _ := regexp.MatchString(refPattern, text)
-	return matched
 }
