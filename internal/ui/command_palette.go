@@ -30,7 +30,7 @@ type CommandPaletteModel struct {
 // NewCommandPaletteModel creates a new command palette model.
 func NewCommandPaletteModel(database *db.DB, tasks []*db.Task, width, height int) *CommandPaletteModel {
 	searchInput := textinput.New()
-	searchInput.Placeholder = "Search tasks by title, ID, or project..."
+	searchInput.Placeholder = "Search tasks by title, ID, project, or PR URL/number..."
 	searchInput.Focus()
 	searchInput.CharLimit = 100
 	searchInput.Width = min(60, width-10)
@@ -157,6 +157,24 @@ func (m *CommandPaletteModel) matchesQuery(task *db.Task, query string) bool {
 	// Check status
 	if strings.Contains(strings.ToLower(task.Status), query) {
 		return true
+	}
+	// Check PR URL (e.g., "https://github.com/offerlab/offerlab/pull/2382")
+	if task.PRURL != "" && strings.Contains(strings.ToLower(task.PRURL), query) {
+		return true
+	}
+	// Check PR number (e.g., "2382" or "#2382")
+	if task.PRNumber > 0 {
+		prNumStr := fmt.Sprintf("%d", task.PRNumber)
+		if strings.Contains(prNumStr, query) {
+			return true
+		}
+		// Also match with # prefix
+		if strings.HasPrefix(query, "#") {
+			prQuery := strings.TrimPrefix(query, "#")
+			if strings.Contains(prNumStr, prQuery) {
+				return true
+			}
+		}
 	}
 	// Fuzzy match: check if all characters in query appear in order in title
 	if fuzzyMatch(strings.ToLower(task.Title), query) {
