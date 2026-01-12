@@ -852,7 +852,11 @@ func (m *DetailModel) renderHeader() string {
 			Padding(0, 1).
 			Background(lipgloss.Color("214")). // Orange
 			Foreground(lipgloss.Color("#000000"))
-		scheduleText := "⏰ " + formatScheduleTime(t.ScheduledAt.Time)
+		icon := "⏰"
+		if t.IsRecurring() {
+			icon = "🔁"
+		}
+		scheduleText := icon + " " + formatScheduleTime(t.ScheduledAt.Time)
 		if t.IsRecurring() {
 			scheduleText += " (" + t.Recurrence + ")"
 		}
