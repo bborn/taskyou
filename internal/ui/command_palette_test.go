@@ -109,3 +109,58 @@ func TestMatchesQuery(t *testing.T) {
 		})
 	}
 }
+
+func TestMatchesQueryPRSearch(t *testing.T) {
+	taskWithPR := &db.Task{
+		ID:       42,
+		Title:    "Fix authentication bug",
+		Project:  "webapp",
+		Status:   db.StatusProcessing,
+		PRURL:    "https://github.com/offerlab/offerlab/pull/2382",
+		PRNumber: 2382,
+	}
+
+	taskWithoutPR := &db.Task{
+		ID:      43,
+		Title:   "Add feature",
+		Project: "webapp",
+		Status:  db.StatusBacklog,
+	}
+
+	m := &CommandPaletteModel{}
+
+	tests := []struct {
+		name  string
+		task  *db.Task
+		query string
+		want  bool
+	}{
+		// Task with PR - should match
+		{"match by PR number", taskWithPR, "2382", true},
+		{"match by PR number with hash", taskWithPR, "#2382", true},
+		{"match by partial PR number", taskWithPR, "238", true},
+		{"match by PR URL full", taskWithPR, "https://github.com/offerlab/offerlab/pull/2382", true},
+		{"match by PR URL partial", taskWithPR, "offerlab/pull/2382", true},
+		{"match by PR URL path", taskWithPR, "pull/2382", true},
+		{"match by PR URL repo", taskWithPR, "offerlab", true},
+		{"match by PR URL github", taskWithPR, "github.com", true},
+
+		// Task without PR - should not match PR-specific queries
+		{"no PR number match when no PR", taskWithoutPR, "2382", false},
+		{"no PR URL match when no PR", taskWithoutPR, "pull/", false},
+
+		// Task with PR - should still match other fields
+		{"match by task ID", taskWithPR, "42", true},
+		{"match by title", taskWithPR, "auth", true},
+		{"match by project", taskWithPR, "webapp", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := m.matchesQuery(tt.task, tt.query)
+			if got != tt.want {
+				t.Errorf("matchesQuery(%+v, %q) = %v, want %v", tt.task, tt.query, got, tt.want)
+			}
+		})
+	}
+}
