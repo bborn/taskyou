@@ -956,15 +956,7 @@ func (m *DetailModel) renderHelp() string {
 		}{"x", "execute"})
 	}
 
-	hasSession := m.hasActiveTmuxSession()
 	hasPanes := m.claudePaneID != "" || m.workdirPaneID != ""
-	// Show kill option if there's an active tmux session
-	if hasSession {
-		keys = append(keys, struct {
-			key  string
-			desc string
-		}{"k", "kill"})
-	}
 
 	keys = append(keys, struct {
 		key  string

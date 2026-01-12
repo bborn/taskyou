@@ -278,39 +278,6 @@ Use --hard to kill all tmux sessions for a complete reset.`,
 	}
 	claudesCmd.AddCommand(claudesListCmd)
 
-	claudesKillCmd := &cobra.Command{
-		Use:   "kill <task-id>",
-		Short: "Kill a Claude session by task ID",
-		Args:  cobra.ExactArgs(1),
-		Run: func(cmd *cobra.Command, args []string) {
-			var taskID int
-			if _, err := fmt.Sscanf(args[0], "%d", &taskID); err != nil {
-				fmt.Fprintln(os.Stderr, errorStyle.Render("Invalid task ID: "+args[0]))
-				os.Exit(1)
-			}
-			if err := killClaudeSession(taskID); err != nil {
-				fmt.Fprintln(os.Stderr, errorStyle.Render(err.Error()))
-				os.Exit(1)
-			}
-			fmt.Println(successStyle.Render(fmt.Sprintf("Killed session for task %d", taskID)))
-		},
-	}
-	claudesCmd.AddCommand(claudesKillCmd)
-
-	claudesKillallCmd := &cobra.Command{
-		Use:   "killall",
-		Short: "Kill all Claude sessions",
-		Run: func(cmd *cobra.Command, args []string) {
-			count := killAllClaudeSessions()
-			if count == 0 {
-				fmt.Println(dimStyle.Render("No Claude sessions running"))
-			} else {
-				fmt.Println(successStyle.Render(fmt.Sprintf("Killed %d session(s)", count)))
-			}
-		},
-	}
-	claudesCmd.AddCommand(claudesKillallCmd)
-
 	rootCmd.AddCommand(claudesCmd)
 
 	// Delete subcommand - delete a task, kill its Claude session, and remove worktree
@@ -2080,18 +2047,6 @@ func killClaudeSession(taskID int) error {
 	}
 
 	return nil
-}
-
-// killAllClaudeSessions kills all task-* tmux windows in task-daemon.
-func killAllClaudeSessions() int {
-	sessions := getClaudeSessions()
-	count := 0
-	for _, s := range sessions {
-		if err := killClaudeSession(s.taskID); err == nil {
-			count++
-		}
-	}
-	return count
 }
 
 // deleteTask deletes a task, its Claude session, and its worktree.
