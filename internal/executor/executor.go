@@ -1379,11 +1379,10 @@ func findClaudeSessionIDImpl(workDir string) string {
 		return ""
 	}
 
-	// Escape the workDir path (replace / with -)
+	// Escape the workDir path to match Claude's project directory naming
+	// Claude replaces / with - and . with - (keeps leading dash)
 	escapedPath := strings.ReplaceAll(workDir, "/", "-")
-	if strings.HasPrefix(escapedPath, "-") {
-		escapedPath = escapedPath[1:] // Remove leading dash
-	}
+	escapedPath = strings.ReplaceAll(escapedPath, ".", "-")
 
 	projectDir := filepath.Join(home, ".claude", "projects", escapedPath)
 
@@ -1472,10 +1471,10 @@ func (e *Executor) saveTranscriptOnCompletion(taskID int64, workDir string) {
 		return
 	}
 
+	// Escape the workDir path to match Claude's project directory naming
+	// Claude replaces / with - and . with - (keeps leading dash)
 	escapedPath := strings.ReplaceAll(workDir, "/", "-")
-	if strings.HasPrefix(escapedPath, "-") {
-		escapedPath = escapedPath[1:]
-	}
+	escapedPath = strings.ReplaceAll(escapedPath, ".", "-")
 
 	projectDir := filepath.Join(home, ".claude", "projects", escapedPath)
 

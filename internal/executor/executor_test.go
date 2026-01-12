@@ -298,7 +298,9 @@ func TestFindClaudeSessionID(t *testing.T) {
 
 	// Create a unique test directory
 	testWorkDir := "/tmp/test-claude-session-" + time.Now().Format("20060102150405")
-	escapedPath := strings.ReplaceAll(testWorkDir, "/", "-")[1:] // Remove leading -
+	// Match Claude's escaping: replace / with -, replace . with -, keep leading -
+	escapedPath := strings.ReplaceAll(testWorkDir, "/", "-")
+	escapedPath = strings.ReplaceAll(escapedPath, ".", "-")
 	projectDir := home + "/.claude/projects/" + escapedPath
 
 	// Create the project directory
