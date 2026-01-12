@@ -682,11 +682,12 @@ func (k *KanbanBoard) renderTaskCard(task *db.Task, width int, isSelected bool) 
 	if task.IsScheduled() {
 		scheduleStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("214")) // Orange for schedule
 		scheduleText := formatScheduleTime(task.ScheduledAt.Time)
+		icon := "⏰"
 		if task.IsRecurring() {
-			scheduleText = task.Recurrence[0:1] + ":" + scheduleText // e.g., "h:2:30pm" for hourly
+			icon = "🔁" // Use repeat icon to indicate recurring task
 		}
 		b.WriteString(" ")
-		b.WriteString(scheduleStyle.Render("⏰" + scheduleText))
+		b.WriteString(scheduleStyle.Render(icon + scheduleText))
 	}
 
 	// Title (truncate if needed)
