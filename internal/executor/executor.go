@@ -110,6 +110,10 @@ func (e *Executor) Start(ctx context.Context) {
 
 	e.logger.Info("Background executor started")
 
+	// Check for overdue scheduled tasks immediately on startup
+	// (handles tasks that were due while app wasn't running)
+	e.queueDueScheduledTasks()
+
 	go e.worker(ctx)
 }
 
@@ -628,6 +632,9 @@ func (e *Executor) executeTask(ctx context.Context, task *db.Task) {
 	retryFeedback, _ := e.db.GetRetryFeedback(task.ID)
 	isRetry := retryFeedback != ""
 
+	// Check if this is a recurring task that has run before
+	isRecurringRun := task.IsRecurring() && task.LastRunAt != nil
+
 	// Build prompt based on task type
 	prompt := e.buildPrompt(task, attachmentPaths)
 
@@ -636,6 +643,11 @@ func (e *Executor) executeTask(ctx context.Context, task *db.Task) {
 	if isRetry {
 		e.logLine(task.ID, "system", "Resuming previous session with feedback")
 		result = e.runClaudeResume(taskCtx, task, workDir, prompt, retryFeedback)
+	} else if isRecurringRun {
+		// Resume session with recurring message that includes full task details
+		recurringPrompt := e.buildRecurringPrompt(task, attachmentPaths)
+		e.logLine(task.ID, "system", fmt.Sprintf("Recurring task (%s) - resuming session", task.Recurrence))
+		result = e.runClaudeResume(taskCtx, task, workDir, prompt, recurringPrompt)
 	} else {
 		e.logLine(task.ID, "system", "Starting new Claude session")
 		result = e.runClaude(taskCtx, task, workDir, prompt)
@@ -834,6 +846,26 @@ The task system will automatically detect your status.
 `)
 
 	return prompt.String()
+}
+
+// buildRecurringPrompt builds a message for recurring task runs.
+// Includes full task details since the session history may be long.
+func (e *Executor) buildRecurringPrompt(task *db.Task, attachmentPaths []string) string {
+	var sb strings.Builder
+
+	sb.WriteString(fmt.Sprintf("=== Recurring Task Triggered (%s) ===\n\n", task.Recurrence))
+	sb.WriteString(fmt.Sprintf("It's time for your %s task.\n", task.Recurrence))
+	if task.LastRunAt != nil {
+		sb.WriteString(fmt.Sprintf("Last run: %s\n\n", task.LastRunAt.Format("2006-01-02 15:04")))
+	}
+
+	// Include full task details (since history may be long)
+	sb.WriteString("--- Task Details ---\n\n")
+	sb.WriteString(e.buildPrompt(task, attachmentPaths))
+
+	sb.WriteString("\n\nPlease work on this task now.")
+
+	return sb.String()
 }
 
 // applyTemplateSubstitutions replaces template placeholders in task type instructions.
