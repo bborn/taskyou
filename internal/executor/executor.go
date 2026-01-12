@@ -1226,12 +1226,9 @@ func (e *Executor) runClaude(ctx context.Context, task *db.Task, workDir, prompt
 		dangerousFlag = "--dangerously-skip-permissions "
 	}
 	// Check for existing Claude session to resume instead of starting fresh
-	// First check if task has a stored session ID, then fall back to file-based lookup
+	// Only use stored session ID - no file-based fallback to avoid cross-task contamination
 	var script string
 	existingSessionID := task.ClaudeSessionID
-	if existingSessionID == "" {
-		existingSessionID = e.findClaudeSessionID(workDir)
-	}
 	if existingSessionID != "" {
 		e.logLine(task.ID, "system", fmt.Sprintf("Resuming existing session %s", existingSessionID))
 		script = fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q claude %s--chrome --resume %s "$(cat %q)"`,
@@ -1271,11 +1268,8 @@ func (e *Executor) runClaude(ctx context.Context, task *db.Task, workDir, prompt
 // runClaudeResume resumes a previous Claude session with feedback.
 // If no previous session exists, starts fresh with the full prompt + feedback.
 func (e *Executor) runClaudeResume(ctx context.Context, task *db.Task, workDir, prompt, feedback string) execResult {
-	// First check if task has a stored session ID, then fall back to file-based lookup
+	// Only use stored session ID - no file-based fallback to avoid cross-task contamination
 	claudeSessionID := task.ClaudeSessionID
-	if claudeSessionID == "" {
-		claudeSessionID = e.findClaudeSessionID(workDir)
-	}
 	if claudeSessionID == "" {
 		e.logLine(task.ID, "system", "No previous session found, starting fresh")
 		// Build a combined prompt with the feedback included
@@ -2136,6 +2130,10 @@ func (e *Executor) setupWorktree(task *db.Task) (string, error) {
 		// Worktree exists, reuse it
 		task.WorktreePath = worktreePath
 		task.BranchName = branchName
+
+		// Fetch PR information if available
+		e.updateTaskPRInfo(task, projectDir)
+
 		e.db.UpdateTask(task)
 		// Allocate a port if not already assigned
 		if task.Port == 0 {
@@ -2172,6 +2170,10 @@ func (e *Executor) setupWorktree(task *db.Task) (string, error) {
 					// Worktree exists, reuse it
 					task.WorktreePath = worktreePath
 					task.BranchName = branchName
+
+					// Fetch PR information if available
+					e.updateTaskPRInfo(task, projectDir)
+
 					e.db.UpdateTask(task)
 					// Allocate a port if not already assigned
 					if task.Port == 0 {
@@ -2196,6 +2198,10 @@ func (e *Executor) setupWorktree(task *db.Task) (string, error) {
 	// Update task with worktree info
 	task.WorktreePath = worktreePath
 	task.BranchName = branchName
+
+	// Fetch PR information if available
+	e.updateTaskPRInfo(task, projectDir)
+
 	e.db.UpdateTask(task)
 
 	e.logLine(task.ID, "system", fmt.Sprintf("Created worktree at %s (branch: %s)", worktreePath, branchName))
@@ -2440,6 +2446,20 @@ func (e *Executor) getDefaultBranch(projectDir string) string {
 	}
 
 	return "main" // Default to main
+}
+
+// updateTaskPRInfo fetches and updates PR information for a task if a PR exists for the branch.
+func (e *Executor) updateTaskPRInfo(task *db.Task, projectDir string) {
+	if task.BranchName == "" || e.prCache == nil {
+		return
+	}
+
+	// Fetch PR info for the branch
+	prInfo := e.prCache.GetPRForBranch(projectDir, task.BranchName)
+	if prInfo != nil {
+		task.PRURL = prInfo.URL
+		task.PRNumber = prInfo.Number
+	}
 }
 
 // CleanupWorktree removes a task's worktree.

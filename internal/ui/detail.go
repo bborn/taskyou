@@ -149,15 +149,8 @@ func NewDetailModel(t *db.Task, database *db.DB, exec *executor.Executor, width,
 		m.joinTmuxPane()
 	} else if os.Getenv("TMUX") != "" {
 		// No active tmux window - check if we can resume a previous session
-		// First check stored session ID, then fall back to file-based lookup
+		// Only use stored session ID - no file-based fallback to avoid cross-task contamination
 		sessionID := m.task.ClaudeSessionID
-		if sessionID == "" {
-			// Fall back to file-based lookup using worktree or project directory
-			workDir := m.getWorkdir()
-			if workDir != "" {
-				sessionID = executor.FindClaudeSessionID(workDir)
-			}
-		}
 		if sessionID != "" {
 			// Start a new tmux window resuming the previous session
 			m.startResumableSession(sessionID)
