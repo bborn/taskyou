@@ -1734,18 +1734,6 @@ func (m *AppModel) loadTask(id int64) tea.Cmd {
 	}
 }
 
-func (m *AppModel) updateTask(t *db.Task) tea.Cmd {
-	database := m.db
-	exec := m.executor
-	return func() tea.Msg {
-		err := database.UpdateTask(t)
-		if err == nil {
-			exec.NotifyTaskChange("updated", t)
-		}
-		return taskUpdatedMsg{task: t, err: err}
-	}
-}
-
 // updateTaskWithRename updates a task and renames the Claude session if the title changed.
 func (m *AppModel) updateTaskWithRename(newTask *db.Task, oldTitle string) tea.Cmd {
 	database := m.db
