@@ -149,16 +149,18 @@ func NewDetailModel(t *db.Task, database *db.DB, exec *executor.Executor, width,
 		m.joinTmuxPane()
 	} else if os.Getenv("TMUX") != "" {
 		// No active tmux window - check if we can resume a previous session
-		if m.task.WorktreePath != "" {
-			sessionID := executor.FindClaudeSessionID(m.task.WorktreePath)
-			if sessionID != "" {
-				// Start a new tmux window resuming the previous session
-				m.startResumableSession(sessionID)
-				// Refresh the cached window target
-				m.cachedWindowTarget = m.findTaskWindow()
-				if m.cachedWindowTarget != "" {
-					m.joinTmuxPane()
-				}
+		// First check stored session ID, then fall back to file-based lookup
+		sessionID := m.task.ClaudeSessionID
+		if sessionID == "" && m.task.WorktreePath != "" {
+			sessionID = executor.FindClaudeSessionID(m.task.WorktreePath)
+		}
+		if sessionID != "" {
+			// Start a new tmux window resuming the previous session
+			m.startResumableSession(sessionID)
+			// Refresh the cached window target
+			m.cachedWindowTarget = m.findTaskWindow()
+			if m.cachedWindowTarget != "" {
+				m.joinTmuxPane()
 			}
 		}
 		// Even without joined panes, ensure Details pane has focus

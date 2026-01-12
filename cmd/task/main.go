@@ -1575,6 +1575,7 @@ func handleClaudeHook(hookEvent string) error {
 
 // logSessionIDOnce logs the Claude session ID for a task, but only once.
 // It checks if a session ID log already exists to avoid duplicate entries.
+// Also persists the session ID to the task record for reliable resumption.
 func logSessionIDOnce(database *db.DB, taskID int64, input *ClaudeHookInput) {
 	if input.SessionID == "" {
 		return
@@ -1596,6 +1597,9 @@ func logSessionIDOnce(database *db.DB, taskID int64, input *ClaudeHookInput) {
 
 	// Log the session ID
 	database.AppendTaskLog(taskID, "system", sessionPrefix+input.SessionID)
+
+	// Persist session ID to task record for reliable resumption
+	database.UpdateTaskClaudeSessionID(taskID, input.SessionID)
 }
 
 // handleNotificationHook handles Notification hooks from Claude.

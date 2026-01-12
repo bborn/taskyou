@@ -1226,8 +1226,13 @@ func (e *Executor) runClaude(ctx context.Context, task *db.Task, workDir, prompt
 		dangerousFlag = "--dangerously-skip-permissions "
 	}
 	// Check for existing Claude session to resume instead of starting fresh
+	// First check if task has a stored session ID, then fall back to file-based lookup
 	var script string
-	if existingSessionID := e.findClaudeSessionID(workDir); existingSessionID != "" {
+	existingSessionID := task.ClaudeSessionID
+	if existingSessionID == "" {
+		existingSessionID = e.findClaudeSessionID(workDir)
+	}
+	if existingSessionID != "" {
 		e.logLine(task.ID, "system", fmt.Sprintf("Resuming existing session %s", existingSessionID))
 		script = fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q claude %s--chrome --resume %s "$(cat %q)"`,
 			task.ID, sessionID, task.Port, task.WorktreePath, dangerousFlag, existingSessionID, promptFile.Name())
@@ -1266,8 +1271,11 @@ func (e *Executor) runClaude(ctx context.Context, task *db.Task, workDir, prompt
 // runClaudeResume resumes a previous Claude session with feedback.
 // If no previous session exists, starts fresh with the full prompt + feedback.
 func (e *Executor) runClaudeResume(ctx context.Context, task *db.Task, workDir, prompt, feedback string) execResult {
-	// Find the most recent claude session ID for this workDir
-	claudeSessionID := e.findClaudeSessionID(workDir)
+	// First check if task has a stored session ID, then fall back to file-based lookup
+	claudeSessionID := task.ClaudeSessionID
+	if claudeSessionID == "" {
+		claudeSessionID = e.findClaudeSessionID(workDir)
+	}
 	if claudeSessionID == "" {
 		e.logLine(task.ID, "system", "No previous session found, starting fresh")
 		// Build a combined prompt with the feedback included

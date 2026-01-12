@@ -11,19 +11,20 @@ import (
 
 // Task represents a task in the database.
 type Task struct {
-	ID           int64
-	Title        string
-	Body         string
-	Status       string
-	Type         string
-	Project      string
-	WorktreePath string
-	BranchName   string
-	Port         int // Unique port for running the application in this task's worktree
-	CreatedAt    LocalTime
-	UpdatedAt    LocalTime
-	StartedAt    *LocalTime
-	CompletedAt  *LocalTime
+	ID              int64
+	Title           string
+	Body            string
+	Status          string
+	Type            string
+	Project         string
+	WorktreePath    string
+	BranchName      string
+	Port            int    // Unique port for running the application in this task's worktree
+	ClaudeSessionID string // Claude session ID for resuming conversations
+	CreatedAt       LocalTime
+	UpdatedAt       LocalTime
+	StartedAt       *LocalTime
+	CompletedAt     *LocalTime
 	// Schedule fields for recurring/scheduled tasks
 	ScheduledAt *LocalTime // When to next run (nil = not scheduled)
 	Recurrence  string     // Recurrence pattern: "", "hourly", "daily", "weekly", "monthly", or cron expression
@@ -133,13 +134,13 @@ func (db *DB) GetTask(id int64) (*Task, error) {
 	t := &Task{}
 	err := db.QueryRow(`
 		SELECT id, title, body, status, type, project,
-		       worktree_path, branch_name, port,
+		       worktree_path, branch_name, port, claude_session_id,
 		       created_at, updated_at, started_at, completed_at,
 		       scheduled_at, recurrence, last_run_at
 		FROM tasks WHERE id = ?
 	`, id).Scan(
 		&t.ID, &t.Title, &t.Body, &t.Status, &t.Type, &t.Project,
-		&t.WorktreePath, &t.BranchName, &t.Port,
+		&t.WorktreePath, &t.BranchName, &t.Port, &t.ClaudeSessionID,
 		&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
 		&t.ScheduledAt, &t.Recurrence, &t.LastRunAt,
 	)
@@ -166,7 +167,7 @@ type ListTasksOptions struct {
 func (db *DB) ListTasks(opts ListTasksOptions) ([]*Task, error) {
 	query := `
 		SELECT id, title, body, status, type, project,
-		       worktree_path, branch_name, port,
+		       worktree_path, branch_name, port, claude_session_id,
 		       created_at, updated_at, started_at, completed_at,
 		       scheduled_at, recurrence, last_run_at
 		FROM tasks WHERE 1=1
@@ -216,7 +217,7 @@ func (db *DB) ListTasks(opts ListTasksOptions) ([]*Task, error) {
 		t := &Task{}
 		err := rows.Scan(
 			&t.ID, &t.Title, &t.Body, &t.Status, &t.Type, &t.Project,
-			&t.WorktreePath, &t.BranchName, &t.Port,
+			&t.WorktreePath, &t.BranchName, &t.Port, &t.ClaudeSessionID,
 			&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
 			&t.ScheduledAt, &t.Recurrence, &t.LastRunAt,
 		)
@@ -265,15 +266,27 @@ func (db *DB) UpdateTask(t *Task) error {
 	_, err := db.Exec(`
 		UPDATE tasks SET
 			title = ?, body = ?, status = ?, type = ?, project = ?,
-			worktree_path = ?, branch_name = ?, port = ?,
+			worktree_path = ?, branch_name = ?, port = ?, claude_session_id = ?,
 			scheduled_at = ?, recurrence = ?, last_run_at = ?,
 			updated_at = CURRENT_TIMESTAMP
 		WHERE id = ?
 	`, t.Title, t.Body, t.Status, t.Type, t.Project,
-		t.WorktreePath, t.BranchName, t.Port,
+		t.WorktreePath, t.BranchName, t.Port, t.ClaudeSessionID,
 		t.ScheduledAt, t.Recurrence, t.LastRunAt, t.ID)
 	if err != nil {
 		return fmt.Errorf("update task: %w", err)
+	}
+	return nil
+}
+
+// UpdateTaskClaudeSessionID updates only the Claude session ID for a task.
+func (db *DB) UpdateTaskClaudeSessionID(taskID int64, sessionID string) error {
+	_, err := db.Exec(`
+		UPDATE tasks SET claude_session_id = ?, updated_at = CURRENT_TIMESTAMP
+		WHERE id = ?
+	`, sessionID, taskID)
+	if err != nil {
+		return fmt.Errorf("update task claude session id: %w", err)
 	}
 	return nil
 }
@@ -352,7 +365,7 @@ func (db *DB) GetNextQueuedTask() (*Task, error) {
 	t := &Task{}
 	err := db.QueryRow(`
 		SELECT id, title, body, status, type, project,
-		       worktree_path, branch_name, port,
+		       worktree_path, branch_name, port, claude_session_id,
 		       created_at, updated_at, started_at, completed_at,
 		       scheduled_at, recurrence, last_run_at
 		FROM tasks
@@ -361,7 +374,7 @@ func (db *DB) GetNextQueuedTask() (*Task, error) {
 		LIMIT 1
 	`, StatusQueued).Scan(
 		&t.ID, &t.Title, &t.Body, &t.Status, &t.Type, &t.Project,
-		&t.WorktreePath, &t.BranchName, &t.Port,
+		&t.WorktreePath, &t.BranchName, &t.Port, &t.ClaudeSessionID,
 		&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
 		&t.ScheduledAt, &t.Recurrence, &t.LastRunAt,
 	)
@@ -378,7 +391,7 @@ func (db *DB) GetNextQueuedTask() (*Task, error) {
 func (db *DB) GetQueuedTasks() ([]*Task, error) {
 	rows, err := db.Query(`
 		SELECT id, title, body, status, type, project,
-		       worktree_path, branch_name, port,
+		       worktree_path, branch_name, port, claude_session_id,
 		       created_at, updated_at, started_at, completed_at,
 		       scheduled_at, recurrence, last_run_at
 		FROM tasks
@@ -395,7 +408,7 @@ func (db *DB) GetQueuedTasks() ([]*Task, error) {
 		t := &Task{}
 		if err := rows.Scan(
 			&t.ID, &t.Title, &t.Body, &t.Status, &t.Type, &t.Project,
-			&t.WorktreePath, &t.BranchName, &t.Port,
+			&t.WorktreePath, &t.BranchName, &t.Port, &t.ClaudeSessionID,
 			&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
 			&t.ScheduledAt, &t.Recurrence, &t.LastRunAt,
 		); err != nil {
@@ -411,7 +424,7 @@ func (db *DB) GetQueuedTasks() ([]*Task, error) {
 func (db *DB) GetTasksWithBranches() ([]*Task, error) {
 	rows, err := db.Query(`
 		SELECT id, title, body, status, type, project,
-		       worktree_path, branch_name, port,
+		       worktree_path, branch_name, port, claude_session_id,
 		       created_at, updated_at, started_at, completed_at,
 		       scheduled_at, recurrence, last_run_at
 		FROM tasks
@@ -428,7 +441,7 @@ func (db *DB) GetTasksWithBranches() ([]*Task, error) {
 		t := &Task{}
 		if err := rows.Scan(
 			&t.ID, &t.Title, &t.Body, &t.Status, &t.Type, &t.Project,
-			&t.WorktreePath, &t.BranchName, &t.Port,
+			&t.WorktreePath, &t.BranchName, &t.Port, &t.ClaudeSessionID,
 			&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
 			&t.ScheduledAt, &t.Recurrence, &t.LastRunAt,
 		); err != nil {
@@ -447,7 +460,7 @@ func (db *DB) GetTasksWithBranches() ([]*Task, error) {
 func (db *DB) GetDueScheduledTasks() ([]*Task, error) {
 	rows, err := db.Query(`
 		SELECT id, title, body, status, type, project,
-		       worktree_path, branch_name, port,
+		       worktree_path, branch_name, port, claude_session_id,
 		       created_at, updated_at, started_at, completed_at,
 		       scheduled_at, recurrence, last_run_at
 		FROM tasks
@@ -466,7 +479,7 @@ func (db *DB) GetDueScheduledTasks() ([]*Task, error) {
 		t := &Task{}
 		if err := rows.Scan(
 			&t.ID, &t.Title, &t.Body, &t.Status, &t.Type, &t.Project,
-			&t.WorktreePath, &t.BranchName, &t.Port,
+			&t.WorktreePath, &t.BranchName, &t.Port, &t.ClaudeSessionID,
 			&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
 			&t.ScheduledAt, &t.Recurrence, &t.LastRunAt,
 		); err != nil {
@@ -481,7 +494,7 @@ func (db *DB) GetDueScheduledTasks() ([]*Task, error) {
 func (db *DB) GetScheduledTasks() ([]*Task, error) {
 	rows, err := db.Query(`
 		SELECT id, title, body, status, type, project,
-		       worktree_path, branch_name, port,
+		       worktree_path, branch_name, port, claude_session_id,
 		       created_at, updated_at, started_at, completed_at,
 		       scheduled_at, recurrence, last_run_at
 		FROM tasks
@@ -498,7 +511,7 @@ func (db *DB) GetScheduledTasks() ([]*Task, error) {
 		t := &Task{}
 		if err := rows.Scan(
 			&t.ID, &t.Title, &t.Body, &t.Status, &t.Type, &t.Project,
-			&t.WorktreePath, &t.BranchName, &t.Port,
+			&t.WorktreePath, &t.BranchName, &t.Port, &t.ClaudeSessionID,
 			&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
 			&t.ScheduledAt, &t.Recurrence, &t.LastRunAt,
 		); err != nil {
