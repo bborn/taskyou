@@ -217,6 +217,8 @@ type AppModel struct {
 	// Detail view state
 	selectedTask *db.Task
 	detailView   *DetailModel
+	// Prevent rapid arrow key navigation from causing duplicate panes
+	taskTransitionInProgress bool
 
 	// New task form state
 	newTaskForm        *FormModel
@@ -458,6 +460,8 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// PR info is fetched separately via prRefreshTick, not on every task load
 
 	case taskLoadedMsg:
+		// Reset transition flag now that task is loaded
+		m.taskTransitionInProgress = false
 		if msg.err == nil {
 			m.selectedTask = msg.task
 			// Resume task if it was suspended (blocked idle tasks get suspended to save memory)
@@ -973,6 +977,11 @@ func (m *AppModel) updateDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	// Arrow key navigation to prev/next task in the same column
 	if key.Matches(keyMsg, m.keys.Up) {
+		// Ignore if transition already in progress to prevent duplicate panes
+		if m.taskTransitionInProgress {
+			return m, nil
+		}
+		m.taskTransitionInProgress = true
 		// Clean up current detail view before switching
 		if m.detailView != nil {
 			m.detailView.Cleanup()
@@ -984,9 +993,15 @@ func (m *AppModel) updateDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if task := m.kanban.SelectedTask(); task != nil {
 			return m, m.loadTask(task.ID)
 		}
+		m.taskTransitionInProgress = false
 		return m, nil
 	}
 	if key.Matches(keyMsg, m.keys.Down) {
+		// Ignore if transition already in progress to prevent duplicate panes
+		if m.taskTransitionInProgress {
+			return m, nil
+		}
+		m.taskTransitionInProgress = true
 		// Clean up current detail view before switching
 		if m.detailView != nil {
 			m.detailView.Cleanup()
@@ -998,6 +1013,7 @@ func (m *AppModel) updateDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if task := m.kanban.SelectedTask(); task != nil {
 			return m, m.loadTask(task.ID)
 		}
+		m.taskTransitionInProgress = false
 		return m, nil
 	}
 
