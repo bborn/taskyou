@@ -59,6 +59,10 @@ type FormModel struct {
 	recurrence    string   // "", "hourly", "daily", "weekly", "monthly"
 	recurrenceIdx int
 	recurrences   []string
+
+	// Magic paste fields (populated when pasting URLs)
+	prURL    string // GitHub PR URL if pasted
+	prNumber int    // GitHub PR number if pasted
 }
 
 // NewEditFormModel creates a form model pre-populated with an existing task's data for editing.
@@ -73,6 +77,8 @@ func NewEditFormModel(database *db.DB, task *db.Task, width, height int) *FormMo
 		isEdit:      true,
 		recurrence:  task.Recurrence,
 		recurrences: []string{"", db.RecurrenceHourly, db.RecurrenceDaily, db.RecurrenceWeekly, db.RecurrenceMonthly},
+		prURL:       task.PRURL,
+		prNumber:    task.PRNumber,
 	}
 
 	// Load task types from database
@@ -275,8 +281,26 @@ func (m *FormModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return m, nil
 				}
 			}
-			// Not a file path - treat as regular paste into focused field
+			// Not a file path - check for magic paste URLs
 			pastedText := string(msg.Runes)
+
+			// Magic paste: parse URLs (GitHub PR, GitHub Issues, Linear) when pasting into title
+			if m.focused == FieldTitle {
+				if parsedURL := ParseURL(pastedText); parsedURL != nil {
+					// Use the formatted title from the parsed URL
+					m.titleInput.SetValue(parsedURL.Title)
+
+					// Store PR info if it's a GitHub PR
+					if parsedURL.Type == "github_pr" {
+						m.prURL = parsedURL.PRURL
+						m.prNumber = parsedURL.PRNumber
+					}
+
+					return m, nil
+				}
+			}
+
+			// Not a recognized URL - treat as regular paste into focused field
 			switch m.focused {
 			case FieldTitle:
 				m.titleInput.SetValue(m.titleInput.Value() + pastedText)
@@ -664,6 +688,8 @@ func (m *FormModel) GetDBTask() *db.Task {
 		Type:       m.taskType,
 		Project:    m.project,
 		Recurrence: m.recurrence,
+		PRURL:      m.prURL,
+		PRNumber:   m.prNumber,
 	}
 
 	// Parse schedule time
