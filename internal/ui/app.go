@@ -1326,14 +1326,14 @@ func (m *AppModel) showChangeStatus(task *db.Task) (tea.Model, tea.Cmd) {
 	m.changeStatusValue = task.Status
 
 	// Build status options - exclude the current status
+	// Only include statuses that map to Kanban columns (Processing is system-managed)
 	statusOptions := []huh.Option[string]{}
 	allStatuses := []struct {
 		value string
 		label string
 	}{
 		{db.StatusBacklog, "◦ Backlog"},
-		{db.StatusQueued, "▶ Queued"},
-		{db.StatusProcessing, "▶ Processing"},
+		{db.StatusQueued, "▶ In Progress"},
 		{db.StatusBlocked, "⚠ Blocked"},
 		{db.StatusDone, "✓ Done"},
 	}
