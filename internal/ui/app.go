@@ -968,6 +968,36 @@ func (m *AppModel) updateDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.showChangeStatus(m.selectedTask)
 	}
 
+	// Arrow key navigation to prev/next task in the same column
+	if key.Matches(keyMsg, m.keys.Up) {
+		// Clean up current detail view before switching
+		if m.detailView != nil {
+			m.detailView.Cleanup()
+			m.detailView = nil
+		}
+		// Move selection up in the kanban
+		m.kanban.MoveUp()
+		// Load the new task
+		if task := m.kanban.SelectedTask(); task != nil {
+			return m, m.loadTask(task.ID)
+		}
+		return m, nil
+	}
+	if key.Matches(keyMsg, m.keys.Down) {
+		// Clean up current detail view before switching
+		if m.detailView != nil {
+			m.detailView.Cleanup()
+			m.detailView = nil
+		}
+		// Move selection down in the kanban
+		m.kanban.MoveDown()
+		// Load the new task
+		if task := m.kanban.SelectedTask(); task != nil {
+			return m, m.loadTask(task.ID)
+		}
+		return m, nil
+	}
+
 	if m.detailView != nil {
 		var cmd tea.Cmd
 		m.detailView, cmd = m.detailView.Update(msg)
