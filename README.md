@@ -88,6 +88,27 @@ backlog → queued → processing → done
 |----------|-------------|---------|
 | `WORKTREE_DB_PATH` | SQLite database path | `~/.local/share/task/tasks.db` |
 
+### `.taskyou.yml` Configuration
+
+You can configure per-project settings by creating a `.taskyou.yml` file in your project root:
+
+```yaml
+worktree:
+  init_script: bin/worktree-setup
+```
+
+**Supported filenames** (in order of precedence):
+- `.taskyou.yml`
+- `.taskyou.yaml`
+- `taskyou.yml`
+- `taskyou.yaml`
+
+**Configuration options:**
+
+| Field | Description | Example |
+|-------|-------------|---------|
+| `worktree.init_script` | Path to script that runs after worktree creation (relative or absolute) | `bin/worktree-setup` |
+
 ### Projects
 
 Configure projects in Settings (`s`):
@@ -101,6 +122,32 @@ Configure projects in Settings (`s`):
 
 Tasks run in isolated git worktrees at `~/.local/share/task/worktrees/{project}/task-{id}`. This allows multiple tasks to run in parallel without conflicts. Press `o` to open a task's worktree.
 
+#### Worktree Setup Script
+
+You can configure a script to run automatically after each worktree is created. This is useful for:
+- Installing dependencies
+- Setting up databases
+- Copying configuration files
+- Running migrations
+
+**Two ways to configure:**
+
+1. **Conventional location** - Create an executable script at `bin/worktree-setup`:
+```bash
+#!/bin/bash
+# Example: bin/worktree-setup
+bundle install
+cp config/database.yml.example config/database.yml
+```
+
+2. **Custom location** - Specify in `.taskyou.yml`:
+```yaml
+worktree:
+  init_script: scripts/my-setup.sh
+```
+
+The script runs in the worktree directory and has access to all worktree environment variables (`WORKTREE_TASK_ID`, `WORKTREE_PORT`, `WORKTREE_PATH`).
+
 ### Running Applications in Worktrees
 
 Each task provides environment variables that applications can use to run in isolation:
@@ -111,9 +158,11 @@ Each task provides environment variables that applications can use to run in iso
 | `WORKTREE_PORT` | Unique port (3100-4099) | `3100` |
 | `WORKTREE_PATH` | Path to the worktree | `/path/to/project/.task-worktrees/207-my-task` |
 
-#### Rails Example
+These variables allow multiple tasks to run simultaneously without conflicts on ports or databases.
 
-Configure your Rails app to use these variables for port and database isolation:
+#### Example: Rails Application
+
+Configure your Rails app to use worktree variables for complete isolation:
 
 **config/puma.rb:**
 ```ruby
@@ -126,12 +175,45 @@ development:
   database: myapp_dev<%= ENV['WORKTREE_TASK_ID'] ? "_task#{ENV['WORKTREE_TASK_ID']}" : "" %>
 ```
 
-**Procfile.dev (with foreman/overmind):**
+**Procfile.dev:**
 ```
 web: bin/rails server -p ${WORKTREE_PORT:-3000}
 ```
 
-Now Claude can run your app with `bin/dev` and interact with it via curl or browser at `http://localhost:$WORKTREE_PORT`.
+**bin/worktree-setup:**
+```bash
+#!/bin/bash
+set -e
+
+# Install dependencies
+bundle install
+
+# Create isolated database for this task
+bin/rails db:create db:migrate
+```
+
+Now Claude can:
+- Run your app with `bin/dev`
+- Access it at `http://localhost:$WORKTREE_PORT`
+- Work on multiple tasks in parallel without database or port conflicts
+
+#### Example: Node.js Application
+
+**package.json:**
+```json
+{
+  "scripts": {
+    "dev": "next dev -p ${WORKTREE_PORT:-3000}"
+  }
+}
+```
+
+**bin/worktree-setup:**
+```bash
+#!/bin/bash
+npm install
+cp .env.example .env.local
+```
 
 ### Memories
 
