@@ -14,6 +14,7 @@ import (
 	"os/signal"
 	"os/user"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -277,6 +278,15 @@ Use --hard to kill all tmux sessions for a complete reset.`,
 		},
 	}
 	claudesCmd.AddCommand(claudesListCmd)
+
+	claudesCleanupCmd := &cobra.Command{
+		Use:   "cleanup",
+		Short: "Kill orphaned Claude processes not tied to active task windows",
+		Run: func(cmd *cobra.Command, args []string) {
+			cleanupOrphanedClaudes()
+		},
+	}
+	claudesCmd.AddCommand(claudesCleanupCmd)
 
 	rootCmd.AddCommand(claudesCmd)
 
@@ -2051,6 +2061,115 @@ func killClaudeSession(taskID int) error {
 	}
 
 	return nil
+}
+
+// cleanupOrphanedClaudes kills Claude processes that aren't tied to any active task windows.
+func cleanupOrphanedClaudes() {
+	// Step 1: Get all task windows across ALL task-daemon-* sessions
+	activeTaskIDs := make(map[int]bool)
+
+	// List all tmux sessions
+	sessionsOut, err := osexec.Command("tmux", "list-sessions", "-F", "#{session_name}").Output()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, errorStyle.Render("Error listing tmux sessions: "+err.Error()))
+		return
+	}
+
+	for _, session := range strings.Split(string(sessionsOut), "\n") {
+		session = strings.TrimSpace(session)
+		if !strings.HasPrefix(session, "task-daemon-") {
+			continue
+		}
+
+		// List windows in this daemon session
+		windowsOut, err := osexec.Command("tmux", "list-windows", "-t", session, "-F", "#{window_name}").Output()
+		if err != nil {
+			continue
+		}
+
+		for _, window := range strings.Split(string(windowsOut), "\n") {
+			window = strings.TrimSpace(window)
+			if !strings.HasPrefix(window, "task-") {
+				continue
+			}
+			var taskID int
+			if _, err := fmt.Sscanf(window, "task-%d", &taskID); err == nil {
+				activeTaskIDs[taskID] = true
+			}
+		}
+	}
+
+	// Step 2: Get all Claude processes running in tmux
+	pgrepOut, err := osexec.Command("pgrep", "-f", "claude.*TERM_PROGRAM=tmux").Output()
+	if err != nil {
+		// No Claude processes found
+		fmt.Println(successStyle.Render("No orphaned Claude processes found"))
+		return
+	}
+
+	var orphanedPIDs []int
+	for _, pidStr := range strings.Split(string(pgrepOut), "\n") {
+		pidStr = strings.TrimSpace(pidStr)
+		if pidStr == "" {
+			continue
+		}
+		pid, err := strconv.Atoi(pidStr)
+		if err != nil {
+			continue
+		}
+
+		// Check if this PID's environment has WORKTREE_TASK_ID
+		// and if that task ID is in our active set
+		envOut, err := osexec.Command("ps", "-p", strconv.Itoa(pid), "-o", "command=").Output()
+		if err != nil {
+			orphanedPIDs = append(orphanedPIDs, pid)
+			continue
+		}
+
+		env := string(envOut)
+		isOrphaned := true
+
+		// Try to extract WORKTREE_TASK_ID from the command line
+		if idx := strings.Index(env, "WORKTREE_TASK_ID="); idx >= 0 {
+			var taskID int
+			if _, err := fmt.Sscanf(env[idx:], "WORKTREE_TASK_ID=%d", &taskID); err == nil {
+				if activeTaskIDs[taskID] {
+					isOrphaned = false
+				}
+			}
+		}
+
+		if isOrphaned {
+			orphanedPIDs = append(orphanedPIDs, pid)
+		}
+	}
+
+	if len(orphanedPIDs) == 0 {
+		fmt.Println(successStyle.Render("No orphaned Claude processes found"))
+		return
+	}
+
+	// Step 3: Kill orphaned processes
+	fmt.Printf("%s\n\n", boldStyle.Render(fmt.Sprintf("Found %d orphaned Claude processes:", len(orphanedPIDs))))
+
+	killed := 0
+	for _, pid := range orphanedPIDs {
+		proc, err := os.FindProcess(pid)
+		if err != nil {
+			fmt.Printf("  %s PID %d: %s\n", errorStyle.Render("✗"), pid, err.Error())
+			continue
+		}
+
+		if err := proc.Signal(syscall.SIGTERM); err != nil {
+			fmt.Printf("  %s PID %d: %s\n", errorStyle.Render("✗"), pid, err.Error())
+			continue
+		}
+
+		fmt.Printf("  %s PID %d\n", successStyle.Render("✓ Killed"), pid)
+		killed++
+	}
+
+	fmt.Printf("\n%s\n", dimStyle.Render(fmt.Sprintf("Killed %d/%d orphaned processes", killed, len(orphanedPIDs))))
 }
 
 // deleteTask deletes a task, its Claude session, and its worktree.
