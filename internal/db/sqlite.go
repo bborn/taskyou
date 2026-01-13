@@ -216,6 +216,8 @@ func (db *DB) migrate() error {
 		// PR tracking columns
 		`ALTER TABLE tasks ADD COLUMN pr_url TEXT DEFAULT ''`,      // Pull request URL (if associated with a PR)
 		`ALTER TABLE tasks ADD COLUMN pr_number INTEGER DEFAULT 0`, // Pull request number (if associated with a PR)
+		// Daemon session tracking for process management
+		`ALTER TABLE tasks ADD COLUMN daemon_session TEXT DEFAULT ''`, // tmux daemon session name for killing Claude
 	}
 
 	for _, m := range alterMigrations {

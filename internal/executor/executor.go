@@ -247,7 +247,16 @@ func (e *Executor) IsSuspended(taskID int64) bool {
 
 // getClaudePID finds the PID of the Claude process in a task's tmux window.
 func (e *Executor) getClaudePID(taskID int64) int {
-	windowTarget := TmuxSessionName(taskID)
+	// First try to get the stored daemon session from the database
+	daemonSession := ""
+	if task, err := e.db.GetTask(taskID); err == nil && task != nil && task.DaemonSession != "" {
+		daemonSession = task.DaemonSession
+	} else {
+		// Fall back to current session (for backwards compatibility)
+		daemonSession = getDaemonSessionName()
+	}
+
+	windowTarget := fmt.Sprintf("%s:%s", daemonSession, TmuxWindowName(taskID))
 
 	// Get the PID of the process running in the tmux pane
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -1297,6 +1306,12 @@ func (e *Executor) runClaude(ctx context.Context, task *db.Task, workDir, prompt
 	// Give tmux a moment to fully create the window and start the Claude process
 	time.Sleep(200 * time.Millisecond)
 
+	// Save which daemon session owns this task's window (for kill logic)
+	daemonSession := getDaemonSessionName()
+	if err := e.db.UpdateTaskDaemonSession(task.ID, daemonSession); err != nil {
+		e.logger.Warn("failed to save daemon session", "task", task.ID, "error", err)
+	}
+
 	// Ensure shell pane exists alongside Claude pane
 	e.ensureShellPane(windowTarget, workDir)
 
@@ -1404,6 +1419,12 @@ func (e *Executor) runClaudeResume(ctx context.Context, task *db.Task, workDir, 
 	// Give tmux a moment to fully create the window and start the Claude process
 	time.Sleep(200 * time.Millisecond)
 
+	// Save which daemon session owns this task's window (for kill logic)
+	daemonSession := getDaemonSessionName()
+	if err := e.db.UpdateTaskDaemonSession(task.ID, daemonSession); err != nil {
+		e.logger.Warn("failed to save daemon session", "task", task.ID, "error", err)
+	}
+
 	// Ensure shell pane exists alongside Claude pane
 	e.ensureShellPane(windowTarget, workDir)
 
@@ -1503,6 +1524,12 @@ func (e *Executor) ResumeDangerous(taskID int64) bool {
 
 	// Give tmux a moment to fully create the window and start the Claude process
 	time.Sleep(200 * time.Millisecond)
+
+	// Save which daemon session owns this task's window (for kill logic)
+	daemonSession := getDaemonSessionName()
+	if err := e.db.UpdateTaskDaemonSession(taskID, daemonSession); err != nil {
+		e.logger.Warn("failed to save daemon session", "task", taskID, "error", err)
+	}
 
 	// Ensure shell pane exists alongside Claude pane
 	e.ensureShellPane(windowTarget, workDir)
