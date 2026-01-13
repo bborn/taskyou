@@ -2,6 +2,8 @@
 
 Guide for AI agents working in this repository.
 
+**See also:** [DEVELOPMENT.md](DEVELOPMENT.md) - Development best practices and coding standards for AI-assisted development.
+
 ## Project Overview
 
 This is **Bruno's Task Queue** - a personal task management system with:
