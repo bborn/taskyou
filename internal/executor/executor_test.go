@@ -704,3 +704,71 @@ exit 1
 		}
 	})
 }
+
+func TestCleanupClaudeSessions(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Skip("Could not get home directory")
+	}
+
+	t.Run("returns nil for empty worktree path", func(t *testing.T) {
+		err := CleanupClaudeSessions("")
+		if err != nil {
+			t.Errorf("expected nil error for empty path, got: %v", err)
+		}
+	})
+
+	t.Run("returns nil for non-existent session directory", func(t *testing.T) {
+		err := CleanupClaudeSessions("/tmp/non-existent-worktree-12345")
+		if err != nil {
+			t.Errorf("expected nil error for non-existent directory, got: %v", err)
+		}
+	})
+
+	t.Run("removes existing session directory", func(t *testing.T) {
+		// Create a unique test worktree path
+		testWorkDir := "/tmp/test-cleanup-sessions-" + time.Now().Format("20060102150405")
+		// Match Claude's escaping: replace / with -, replace . with -, keep leading -
+		escapedPath := strings.ReplaceAll(testWorkDir, "/", "-")
+		escapedPath = strings.ReplaceAll(escapedPath, ".", "-")
+		projectDir := home + "/.claude/projects/" + escapedPath
+
+		// Create the project directory with some session files
+		if err := os.MkdirAll(projectDir, 0755); err != nil {
+			t.Fatalf("Could not create project directory: %v", err)
+		}
+
+		// Create some session files
+		session1 := projectDir + "/abc12345-1234-5678-abcd-123456789abc.jsonl"
+		session2 := projectDir + "/def67890-1234-5678-abcd-123456789def.jsonl"
+		agentFile := projectDir + "/agent-xyz99999.jsonl"
+
+		if err := os.WriteFile(session1, []byte(`{"test":"data"}`), 0644); err != nil {
+			t.Fatalf("Could not create session file: %v", err)
+		}
+		if err := os.WriteFile(session2, []byte(`{"test":"data2"}`), 0644); err != nil {
+			t.Fatalf("Could not create session file: %v", err)
+		}
+		if err := os.WriteFile(agentFile, []byte(`{"agent":"data"}`), 0644); err != nil {
+			t.Fatalf("Could not create agent file: %v", err)
+		}
+
+		// Verify files exist
+		if _, err := os.Stat(projectDir); os.IsNotExist(err) {
+			t.Fatal("Project directory should exist before cleanup")
+		}
+
+		// Run cleanup
+		err := CleanupClaudeSessions(testWorkDir)
+		if err != nil {
+			t.Errorf("CleanupClaudeSessions failed: %v", err)
+		}
+
+		// Verify directory was removed
+		if _, err := os.Stat(projectDir); !os.IsNotExist(err) {
+			t.Error("Project directory should not exist after cleanup")
+			// Clean up manually if test failed
+			os.RemoveAll(projectDir)
+		}
+	})
+}
