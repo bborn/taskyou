@@ -1367,11 +1367,6 @@ func FindClaudeSessionID(workDir string) string {
 	return findClaudeSessionIDImpl(workDir)
 }
 
-// findClaudeSessionID finds the most recent claude session ID for a workDir
-func (e *Executor) findClaudeSessionID(workDir string) string {
-	return findClaudeSessionIDImpl(workDir)
-}
-
 // findClaudeSessionIDImpl is the shared implementation
 func findClaudeSessionIDImpl(workDir string) string {
 	// Claude stores sessions in ~/.claude/projects/<escaped-path>/
