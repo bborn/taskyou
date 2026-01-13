@@ -1990,55 +1990,81 @@ type claudeSession struct {
 	info   string
 }
 
-// getClaudeSessions returns all running task-* windows in task-daemon session.
+// getClaudeSessions returns all running task-* windows across all task-daemon-* sessions.
 func getClaudeSessions() []claudeSession {
-	// List all windows in task-daemon session for this instance
-	daemonSession := getDaemonSessionName()
-	cmd := osexec.Command("tmux", "list-windows", "-t", daemonSession, "-F", "#{window_name}:#{window_activity}")
-	output, err := cmd.Output()
+	// First, get all task-daemon-* sessions
+	sessionsCmd := osexec.Command("tmux", "list-sessions", "-F", "#{session_name}")
+	sessionsOut, err := sessionsCmd.Output()
 	if err != nil {
 		return nil
 	}
 
+	var daemonSessions []string
+	for _, session := range strings.Split(strings.TrimSpace(string(sessionsOut)), "\n") {
+		if strings.HasPrefix(session, "task-daemon-") {
+			daemonSessions = append(daemonSessions, session)
+		}
+	}
+
+	if len(daemonSessions) == 0 {
+		return nil
+	}
+
 	var sessions []claudeSession
-	for _, line := range strings.Split(string(output), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
+	seen := make(map[int]bool) // Avoid duplicates if same task appears in multiple sessions
+
+	for _, daemonSession := range daemonSessions {
+		cmd := osexec.Command("tmux", "list-windows", "-t", daemonSession, "-F", "#{window_name}:#{window_activity}")
+		output, err := cmd.Output()
+		if err != nil {
 			continue
 		}
 
-		parts := strings.SplitN(line, ":", 2)
-		if len(parts) < 1 {
-			continue
-		}
-
-		name := parts[0]
-		// Skip placeholder window
-		if name == "_placeholder" {
-			continue
-		}
-
-		if !strings.HasPrefix(name, "task-") {
-			continue
-		}
-
-		var taskID int
-		if _, err := fmt.Sscanf(name, "task-%d", &taskID); err != nil {
-			continue
-		}
-
-		info := ""
-		if len(parts) >= 2 {
-			// Parse activity timestamp
-			var activity int64
-			fmt.Sscanf(parts[1], "%d", &activity)
-			if activity > 0 {
-				t := time.Unix(activity, 0)
-				info = fmt.Sprintf("last activity %s", t.Format("15:04:05"))
+		for _, line := range strings.Split(string(output), "\n") {
+			line = strings.TrimSpace(line)
+			if line == "" {
+				continue
 			}
-		}
 
-		sessions = append(sessions, claudeSession{taskID: taskID, info: info})
+			parts := strings.SplitN(line, ":", 2)
+			if len(parts) < 1 {
+				continue
+			}
+
+			name := parts[0]
+			// Skip placeholder window
+			if name == "_placeholder" {
+				continue
+			}
+
+			if !strings.HasPrefix(name, "task-") {
+				continue
+			}
+
+			var taskID int
+			if _, err := fmt.Sscanf(name, "task-%d", &taskID); err != nil {
+				continue
+			}
+
+			// Skip if already seen (prefer first occurrence)
+			if seen[taskID] {
+				continue
+			}
+			seen[taskID] = true
+
+			info := daemonSession
+			if len(parts) >= 2 {
+				// Parse activity timestamp
+				var activity int64
+				fmt.Sscanf(parts[1], "%d", &activity)
+				if activity > 0 {
+					t := time.Unix(activity, 0)
+					info = fmt.Sprintf("%s, last activity %s", daemonSession, t.Format("15:04:05"))
+				}
+			}
+
+			sessions = append(sessions, claudeSession{taskID: taskID, info: info})
+		}
 	}
 
 	return sessions
