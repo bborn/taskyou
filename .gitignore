@@ -35,3 +35,6 @@ bin/
 
 # Database
 *.db
+
+# Tmux
+tmux-*.log
