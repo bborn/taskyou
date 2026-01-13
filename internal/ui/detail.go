@@ -87,15 +87,10 @@ func (m *DetailModel) Refresh() {
 	// Reload logs
 	logs, err := m.database.GetTaskLogs(m.task.ID, 500)
 	if err == nil {
-		wasAtBottom := m.viewport.AtBottom()
-		prevLogCount := len(m.logs)
 		m.logs = logs
 
 		if m.ready {
 			m.viewport.SetContent(m.renderContent())
-			if wasAtBottom || len(logs) > prevLogCount {
-				m.viewport.GotoBottom()
-			}
 		}
 	}
 
@@ -182,7 +177,6 @@ func (m *DetailModel) initViewport() {
 
 	m.viewport = viewport.New(m.width-4, vpHeight)
 	m.viewport.SetContent(m.renderContent())
-	m.viewport.GotoBottom()
 	m.ready = true
 }
 

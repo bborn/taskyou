@@ -686,7 +686,7 @@ func (db *DB) GetTaskLogs(taskID int64, limit int) ([]*TaskLog, error) {
 		SELECT id, task_id, line_type, content, created_at
 		FROM task_logs
 		WHERE task_id = ?
-		ORDER BY id ASC
+		ORDER BY id DESC
 		LIMIT ?
 	`, taskID, limit)
 	if err != nil {
