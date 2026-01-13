@@ -13,6 +13,12 @@ A personal task management system with a beautiful terminal UI, SQLite storage, 
 
 ## Installation
 
+### Prerequisites
+
+- **Go**: this repo targets the Go version declared in `go.mod`.
+  - If you have Go **1.21+**, you can usually rely on toolchain auto-download (it will fetch the required version).
+- **tmux**: required for the local TUI experience (split panes for Claude interaction).
+
 ```bash
 git clone https://github.com/bborn/workflow
 cd workflow
