@@ -1396,8 +1396,8 @@ func (e *Executor) runClaude(ctx context.Context, task *db.Task, workDir, prompt
 		e.logger.Warn("failed to save daemon session", "task", task.ID, "error", err)
 	}
 
-	// Ensure shell pane exists alongside Claude pane
-	e.ensureShellPane(windowTarget, workDir)
+	// Ensure shell pane exists alongside Claude pane with environment variables
+	e.ensureShellPane(windowTarget, workDir, task.ID, task.Port, task.WorktreePath)
 
 	// Configure tmux window with helpful status bar
 	e.configureTmuxWindow(windowTarget)
@@ -1512,8 +1512,8 @@ func (e *Executor) runClaudeResume(ctx context.Context, task *db.Task, workDir, 
 		e.logger.Warn("failed to save daemon session", "task", task.ID, "error", err)
 	}
 
-	// Ensure shell pane exists alongside Claude pane
-	e.ensureShellPane(windowTarget, workDir)
+	// Ensure shell pane exists alongside Claude pane with environment variables
+	e.ensureShellPane(windowTarget, workDir, task.ID, task.Port, task.WorktreePath)
 
 	// Configure tmux window with helpful status bar
 	e.configureTmuxWindow(windowTarget)
@@ -1621,8 +1621,8 @@ func (e *Executor) ResumeDangerous(taskID int64) bool {
 		e.logger.Warn("failed to save daemon session", "task", taskID, "error", err)
 	}
 
-	// Ensure shell pane exists alongside Claude pane
-	e.ensureShellPane(windowTarget, workDir)
+	// Ensure shell pane exists alongside Claude pane with environment variables
+	e.ensureShellPane(windowTarget, workDir, task.ID, task.Port, task.WorktreePath)
 
 	// Configure tmux window with helpful status bar
 	e.configureTmuxWindow(windowTarget)
@@ -1718,6 +1718,18 @@ func (e *Executor) ResumeSafe(taskID int64) bool {
 		}
 		return false
 	}
+
+	// Give tmux a moment to fully create the window and start the Claude process
+	time.Sleep(200 * time.Millisecond)
+
+	// Save which daemon session owns this task's window (for kill logic)
+	daemonSession := getDaemonSessionName()
+	if err := e.db.UpdateTaskDaemonSession(taskID, daemonSession); err != nil {
+		e.logger.Warn("failed to save daemon session", "task", taskID, "error", err)
+	}
+
+	// Ensure shell pane exists alongside Claude pane with environment variables
+	e.ensureShellPane(windowTarget, workDir, task.ID, task.Port, task.WorktreePath)
 
 	// Configure tmux window with helpful status bar
 	e.configureTmuxWindow(windowTarget)
@@ -1977,7 +1989,8 @@ func (e *Executor) pollTmuxSession(ctx context.Context, taskID int64, sessionNam
 
 // ensureShellPane creates a shell pane alongside the Claude pane in the daemon window.
 // This ensures every task always has a persistent shell pane that survives navigation.
-func (e *Executor) ensureShellPane(windowTarget, workDir string) {
+// It also sets environment variables (WORKTREE_TASK_ID, WORKTREE_PORT, WORKTREE_PATH) in the shell.
+func (e *Executor) ensureShellPane(windowTarget, workDir string, taskID int64, port int, worktreePath string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -1987,8 +2000,12 @@ func (e *Executor) ensureShellPane(windowTarget, workDir string) {
 	countCmd := exec.CommandContext(ctx, "tmux", "display-message", "-t", windowTarget, "-p", "#{window_panes}")
 	countOut, err := countCmd.Output()
 	if err == nil && strings.TrimSpace(string(countOut)) == "2" {
-		// Pane .1 already exists, just ensure it's in the right directory
+		// Pane .1 already exists, just ensure it's in the right directory and has env vars set
 		exec.CommandContext(ctx, "tmux", "send-keys", "-t", windowTarget+".1", fmt.Sprintf("cd %q", workDir), "Enter").Run()
+		// Set environment variables in the existing shell pane
+		envCmd := fmt.Sprintf("export WORKTREE_TASK_ID=%d WORKTREE_PORT=%d WORKTREE_PATH=%q", taskID, port, worktreePath)
+		exec.CommandContext(ctx, "tmux", "send-keys", "-t", windowTarget+".1", envCmd, "Enter").Run()
+		exec.CommandContext(ctx, "tmux", "send-keys", "-t", windowTarget+".1", "clear", "Enter").Run()
 		exec.CommandContext(ctx, "tmux", "select-pane", "-t", windowTarget+".1", "-T", "Shell").Run()
 		return
 	}
@@ -2023,10 +2040,17 @@ func (e *Executor) ensureShellPane(windowTarget, workDir string) {
 	exec.CommandContext(ctx, "tmux", "select-pane", "-t", windowTarget+".0", "-T", "Claude").Run()
 	exec.CommandContext(ctx, "tmux", "select-pane", "-t", windowTarget+".1", "-T", "Shell").Run()
 
+	// Set environment variables in the shell pane
+	// Use export commands so they persist for all commands in the shell
+	envCmd := fmt.Sprintf("export WORKTREE_TASK_ID=%d WORKTREE_PORT=%d WORKTREE_PATH=%q", taskID, port, worktreePath)
+	exec.CommandContext(ctx, "tmux", "send-keys", "-t", windowTarget+".1", envCmd, "Enter").Run()
+	// Clear the screen so the export command doesn't clutter the shell
+	exec.CommandContext(ctx, "tmux", "send-keys", "-t", windowTarget+".1", "clear", "Enter").Run()
+
 	// Select Claude pane so it's active (user sees Claude output)
 	exec.CommandContext(ctx, "tmux", "select-pane", "-t", windowTarget+".0").Run()
 
-	e.logger.Info("created shell pane", "window", windowTarget)
+	e.logger.Info("created shell pane with env vars", "window", windowTarget, "taskID", taskID, "port", port)
 }
 
 // configureTmuxWindow sets up helpful UI elements for a task window.

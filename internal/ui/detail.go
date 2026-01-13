@@ -666,6 +666,10 @@ func (m *DetailModel) joinTmuxPanes() {
 			workdirPaneOut, _ := workdirPaneCmd.Output()
 			m.workdirPaneID = strings.TrimSpace(string(workdirPaneOut))
 			exec.CommandContext(ctx, "tmux", "select-pane", "-t", m.workdirPaneID, "-T", "Shell").Run()
+			// Set environment variables in the shell pane (they should already be set from daemon, but ensure they're fresh)
+			envCmd := fmt.Sprintf("export WORKTREE_TASK_ID=%d WORKTREE_PORT=%d WORKTREE_PATH=%q", m.task.ID, m.task.Port, m.task.WorktreePath)
+			exec.CommandContext(ctx, "tmux", "send-keys", "-t", m.workdirPaneID, envCmd, "Enter").Run()
+			exec.CommandContext(ctx, "tmux", "send-keys", "-t", m.workdirPaneID, "clear", "Enter").Run()
 		}
 	} else {
 		// Daemon only had Claude pane (old task). Create shell pane directly in task-ui
@@ -688,6 +692,10 @@ func (m *DetailModel) joinTmuxPanes() {
 			workdirPaneOut, _ := workdirPaneCmd.Output()
 			m.workdirPaneID = strings.TrimSpace(string(workdirPaneOut))
 			exec.CommandContext(ctx, "tmux", "select-pane", "-t", m.workdirPaneID, "-T", "Shell").Run()
+			// Set environment variables in the newly created shell pane
+			envCmd := fmt.Sprintf("export WORKTREE_TASK_ID=%d WORKTREE_PORT=%d WORKTREE_PATH=%q", m.task.ID, m.task.Port, m.task.WorktreePath)
+			exec.CommandContext(ctx, "tmux", "send-keys", "-t", m.workdirPaneID, envCmd, "Enter").Run()
+			exec.CommandContext(ctx, "tmux", "send-keys", "-t", m.workdirPaneID, "clear", "Enter").Run()
 		}
 	}
 
