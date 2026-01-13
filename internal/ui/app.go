@@ -1724,7 +1724,10 @@ func (m *AppModel) deleteTask(id int64) tea.Cmd {
 			return taskDeletedMsg{err: err}
 		}
 
-		// Kill Claude session if running (ignore errors)
+		// Kill Claude process to free memory
+		m.executor.KillClaudeProcess(id)
+
+		// Kill tmux window (ignore errors)
 		windowTarget := executor.TmuxSessionName(id)
 		osExec.Command("tmux", "kill-window", "-t", windowTarget).Run()
 

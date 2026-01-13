@@ -284,6 +284,37 @@ func (e *Executor) getClaudePID(taskID int64) int {
 	return pid
 }
 
+// KillClaudeProcess terminates the Claude process for a task to free up memory.
+// This is called when a task is completed, closed, or deleted.
+// Exported for use by the UI when deleting tasks.
+func (e *Executor) KillClaudeProcess(taskID int64) bool {
+	pid := e.getClaudePID(taskID)
+	if pid == 0 {
+		return false
+	}
+
+	// Send SIGTERM for graceful shutdown
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		e.logger.Debug("Failed to find Claude process", "pid", pid, "error", err)
+		return false
+	}
+
+	if err := proc.Signal(syscall.SIGTERM); err != nil {
+		e.logger.Debug("Failed to terminate Claude process", "pid", pid, "error", err)
+		return false
+	}
+
+	e.logger.Info("Terminated Claude process", "task", taskID, "pid", pid)
+
+	// Clean up suspended task tracking if present
+	e.mu.Lock()
+	delete(e.suspendedTasks, taskID)
+	e.mu.Unlock()
+
+	return true
+}
+
 // Subscribe to log updates for a task.
 func (e *Executor) Subscribe(taskID int64) chan *db.TaskLog {
 	ch := make(chan *db.TaskLog, 100)
@@ -665,6 +696,8 @@ func (e *Executor) executeTask(ctx context.Context, task *db.Task) {
 	if result.Interrupted {
 		// Status already set by Interrupt(), just run hook
 		e.hooks.OnStatusChange(task, db.StatusBacklog, "Task interrupted by user")
+		// Kill Claude process to free memory when task is interrupted
+		e.KillClaudeProcess(task.ID)
 	} else if currentStatus == db.StatusBlocked {
 		// Hooks already marked as blocked - respect that
 		e.logLine(task.ID, "system", "Task waiting for input")
@@ -677,6 +710,9 @@ func (e *Executor) executeTask(ctx context.Context, task *db.Task) {
 		// Save transcript on completion
 		e.saveTranscriptOnCompletion(task.ID, workDir)
 
+		// Kill Claude process to free memory when task is done
+		e.KillClaudeProcess(task.ID)
+
 		// Handle recurring task: reset to backlog for next run
 		e.handleRecurringTaskCompletion(task)
 	} else if result.Success {
@@ -686,6 +722,9 @@ func (e *Executor) executeTask(ctx context.Context, task *db.Task) {
 
 		// Save transcript on completion
 		e.saveTranscriptOnCompletion(task.ID, workDir)
+
+		// Kill Claude process to free memory when task is done
+		e.KillClaudeProcess(task.ID)
 
 		// Extract memories from successful task
 		go func() {
