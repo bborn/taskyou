@@ -1671,7 +1671,7 @@ func (e *Executor) ResumeSafe(taskID int64) bool {
 	}
 
 	// Ensure task-daemon session exists
-	if err := ensureTmuxDaemon(); err != nil {
+	if _, err := ensureTmuxDaemon(); err != nil {
 		e.logger.Warn("could not create task-daemon session", "error", err)
 		return false
 	}
