@@ -244,17 +244,36 @@ func (m *DetailModel) StartTmuxTicker() tea.Cmd {
 	return nil
 }
 
-// findTaskWindow searches all tmux sessions for a window matching this task.
+// findTaskWindow searches tmux sessions for a window matching this task.
 // Returns the full window target (session:window) or empty string if not found.
+// Prefers the task's stored daemon_session if available, to avoid connecting to stale windows.
 func (m *DetailModel) findTaskWindow() string {
 	if m.task == nil {
 		return ""
 	}
 	windowName := executor.TmuxWindowName(m.task.ID)
 
-	// List all windows across all sessions (with timeout to prevent blocking UI)
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
+
+	// If task has a stored daemon session, check there first
+	if m.task.DaemonSession != "" {
+		target := m.task.DaemonSession + ":" + windowName
+		err := exec.CommandContext(ctx, "tmux", "has-session", "-t", target).Run()
+		if err == nil {
+			// Verify window exists in this session
+			out, err := exec.CommandContext(ctx, "tmux", "list-windows", "-t", m.task.DaemonSession, "-F", "#{window_name}").Output()
+			if err == nil {
+				for _, name := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+					if name == windowName {
+						return target
+					}
+				}
+			}
+		}
+	}
+
+	// Fall back to searching all sessions (for backwards compatibility or if stored session is gone)
 	out, err := exec.CommandContext(ctx, "tmux", "list-windows", "-a", "-F", "#{session_name}:#{window_name}").Output()
 	if err != nil {
 		return ""
