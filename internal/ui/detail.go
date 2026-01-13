@@ -824,7 +824,7 @@ func (m *DetailModel) View() string {
 	box := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(ColorPrimary).
-		Width(m.width - 2).
+		Width(m.width-2).
 		Padding(0, 1)
 
 	help := m.renderHelp()
@@ -1096,4 +1096,3 @@ func (m *DetailModel) getClaudeMemoryMB() int {
 
 	return rssKB / 1024 // Convert to MB
 }
-

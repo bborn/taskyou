@@ -241,7 +241,7 @@ func TestMemoryWithSourceTask(t *testing.T) {
 
 	// Create a task first
 	task := &Task{
-		Title:    "Source Task",
+		Title:   "Source Task",
 		Body:    "Task body",
 		Status:  StatusBacklog,
 		Type:    TypeCode,

@@ -44,14 +44,14 @@ type PRInfo struct {
 
 // ghPRResponse is the JSON response from gh pr view.
 type ghPRResponse struct {
-	Number              int    `json:"number"`
-	URL                 string `json:"url"`
-	State               string `json:"state"`
-	IsDraft             bool   `json:"isDraft"`
-	Title               string `json:"title"`
-	Mergeable           string `json:"mergeable"`
-	StatusCheckRollup   []ghCheck `json:"statusCheckRollup"`
-	UpdatedAt           string `json:"updatedAt"`
+	Number            int       `json:"number"`
+	URL               string    `json:"url"`
+	State             string    `json:"state"`
+	IsDraft           bool      `json:"isDraft"`
+	Title             string    `json:"title"`
+	Mergeable         string    `json:"mergeable"`
+	StatusCheckRollup []ghCheck `json:"statusCheckRollup"`
+	UpdatedAt         string    `json:"updatedAt"`
 }
 
 type ghCheck struct {

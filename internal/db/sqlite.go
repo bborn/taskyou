@@ -206,15 +206,15 @@ func (db *DB) migrate() error {
 		`ALTER TABLE tasks ADD COLUMN branch_name TEXT DEFAULT ''`,
 		`ALTER TABLE tasks ADD COLUMN port INTEGER DEFAULT 0`,
 		// Scheduled task columns
-		`ALTER TABLE tasks ADD COLUMN scheduled_at DATETIME`,   // When to next run (null = not scheduled)
+		`ALTER TABLE tasks ADD COLUMN scheduled_at DATETIME`,      // When to next run (null = not scheduled)
 		`ALTER TABLE tasks ADD COLUMN recurrence TEXT DEFAULT ''`, // Recurrence pattern (empty = one-time)
-		`ALTER TABLE tasks ADD COLUMN last_run_at DATETIME`,    // When last executed (for recurring tasks)
+		`ALTER TABLE tasks ADD COLUMN last_run_at DATETIME`,       // When last executed (for recurring tasks)
 		// Claude session tracking
 		`ALTER TABLE tasks ADD COLUMN claude_session_id TEXT DEFAULT ''`, // Claude session ID for resuming conversations
 		// Project color column
 		`ALTER TABLE projects ADD COLUMN color TEXT DEFAULT ''`, // Hex color for project label (e.g., "#61AFEF")
 		// PR tracking columns
-		`ALTER TABLE tasks ADD COLUMN pr_url TEXT DEFAULT ''`,     // Pull request URL (if associated with a PR)
+		`ALTER TABLE tasks ADD COLUMN pr_url TEXT DEFAULT ''`,      // Pull request URL (if associated with a PR)
 		`ALTER TABLE tasks ADD COLUMN pr_number INTEGER DEFAULT 0`, // Pull request number (if associated with a PR)
 	}
 

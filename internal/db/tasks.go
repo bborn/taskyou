@@ -1349,10 +1349,10 @@ type CompactionSummary struct {
 	ID                 int64
 	TaskID             int64
 	SessionID          string
-	Trigger            string    // "manual" or "auto"
-	PreTokens          int       // Estimated tokens before compaction
-	Summary            string    // Full JSONL transcript content (named "summary" for schema compatibility)
-	CustomInstructions string    // For manual /compact with custom instructions
+	Trigger            string // "manual" or "auto"
+	PreTokens          int    // Estimated tokens before compaction
+	Summary            string // Full JSONL transcript content (named "summary" for schema compatibility)
+	CustomInstructions string // For manual /compact with custom instructions
 	CreatedAt          LocalTime
 }
 

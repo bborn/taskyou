@@ -208,7 +208,7 @@ type AppModel struct {
 	eventCh chan executor.TaskEvent
 
 	// File watcher for database changes
-	watcher   *fsnotify.Watcher
+	watcher    *fsnotify.Watcher
 	dbChangeCh chan struct{}
 
 	// PR status cache
@@ -550,7 +550,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if t.ID == event.TaskID {
 					prevStatus := t.Status
 					m.tasks[i] = event.Task
-					
+
 					// Show notification for status changes
 					if prevStatus != event.Task.Status {
 						if event.Task.Status == db.StatusBlocked {

@@ -27,9 +27,9 @@ func TestCLICreateTask(t *testing.T) {
 	}
 
 	tests := []struct {
-		name     string
-		task     *db.Task
-		wantErr  bool
+		name    string
+		task    *db.Task
+		wantErr bool
 	}{
 		{
 			name: "basic task",

@@ -517,11 +517,11 @@ Examples:
 					// Add PR info to JSON output if available
 					if prInfo, ok := prInfoMap[t.ID]; ok {
 						item["pr"] = map[string]interface{}{
-							"number":       prInfo.Number,
-							"url":          prInfo.URL,
-							"state":        string(prInfo.State),
-							"check_state":  string(prInfo.CheckState),
-							"description":  prInfo.StatusDescription(),
+							"number":      prInfo.Number,
+							"url":         prInfo.URL,
+							"state":       string(prInfo.State),
+							"check_state": string(prInfo.CheckState),
+							"description": prInfo.StatusDescription(),
 						}
 					}
 					output = append(output, item)
@@ -690,12 +690,12 @@ Examples:
 				// Add PR info to JSON output
 				if prInfo != nil {
 					output["pr"] = map[string]interface{}{
-						"number":       prInfo.Number,
-						"url":          prInfo.URL,
-						"state":        string(prInfo.State),
-						"check_state":  string(prInfo.CheckState),
-						"description":  prInfo.StatusDescription(),
-						"mergeable":    prInfo.Mergeable,
+						"number":      prInfo.Number,
+						"url":         prInfo.URL,
+						"state":       string(prInfo.State),
+						"check_state": string(prInfo.CheckState),
+						"description": prInfo.StatusDescription(),
+						"mergeable":   prInfo.Mergeable,
 					}
 				}
 				if showLogs {
@@ -1628,9 +1628,9 @@ func handleNotificationHook(database *db.DB, taskID int64, input *ClaudeHookInpu
 
 // handleStopHook handles Stop hooks from Claude (agent finished responding).
 // The Stop hook fires when Claude Code finishes a response, with stop_reason indicating why:
-// - "end_turn": Claude finished and is waiting for user input → task should be "blocked"
-// - "tool_use": Claude finished with a tool call that's about to execute → task stays "processing"
-//   (PreToolUse/PostToolUse hooks handle the actual tool execution state tracking)
+//   - "end_turn": Claude finished and is waiting for user input → task should be "blocked"
+//   - "tool_use": Claude finished with a tool call that's about to execute → task stays "processing"
+//     (PreToolUse/PostToolUse hooks handle the actual tool execution state tracking)
 func handleStopHook(database *db.DB, taskID int64, input *ClaudeHookInput) error {
 	task, err := database.GetTask(taskID)
 	if err != nil {
@@ -1941,7 +1941,7 @@ func formatLogEntry(entry map[string]interface{}) string {
 				}
 			}
 		}
-	// Skip "result" type - tool results are noise for high-level view
+		// Skip "result" type - tool results are noise for high-level view
 	}
 
 	return ""

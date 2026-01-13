@@ -71,9 +71,9 @@ func TestLoadThemeFromDB(t *testing.T) {
 	defer SetTheme("onedark")
 
 	tests := []struct {
-		name        string
-		getSetting  func(string) (string, error)
-		wantTheme   string
+		name       string
+		getSetting func(string) (string, error)
+		wantTheme  string
 	}{
 		{
 			name: "loads saved theme",
@@ -112,7 +112,7 @@ func TestLoadThemeFromDB(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			// Reset to onedark first
 			SetTheme("onedark")
-			
+
 			LoadThemeFromDB(tt.getSetting)
 			if CurrentTheme().Name != tt.wantTheme {
 				t.Errorf("got theme %q, want %q", CurrentTheme().Name, tt.wantTheme)

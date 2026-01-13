@@ -26,12 +26,12 @@ func TestTimestampLocalization(t *testing.T) {
 
 	// Create a task
 	task := &Task{
-		Title:    "Test Task",
-		Body:     "Test body",
-		Status:   StatusBacklog,
-		Type:     TypeCode,
-		Project:  "test",
-			}
+		Title:   "Test Task",
+		Body:    "Test body",
+		Status:  StatusBacklog,
+		Type:    TypeCode,
+		Project: "test",
+	}
 	if err := db.CreateTask(task); err != nil {
 		t.Fatalf("failed to create task: %v", err)
 	}
@@ -82,12 +82,12 @@ func TestPersonalProjectCreation(t *testing.T) {
 
 	// Verify that creating a task with empty project defaults to 'personal'
 	task := &Task{
-		Title:    "Test Task",
-		Body:     "Test body",
-		Status:   StatusBacklog,
-		Type:     TypeCode,
-		Project:  "", // Empty project
-			}
+		Title:   "Test Task",
+		Body:    "Test body",
+		Status:  StatusBacklog,
+		Type:    TypeCode,
+		Project: "", // Empty project
+	}
 	if err := db.CreateTask(task); err != nil {
 		t.Fatalf("failed to create task: %v", err)
 	}

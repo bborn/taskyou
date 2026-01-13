@@ -27,12 +27,12 @@ func TestGetLastQuestion(t *testing.T) {
 
 	// Create a task
 	task := &Task{
-		Title:    "Test Task",
-		Body:     "Test body",
-		Status:   StatusBacklog,
-		Type:     TypeCode,
-		Project:  "test",
-			}
+		Title:   "Test Task",
+		Body:    "Test body",
+		Status:  StatusBacklog,
+		Type:    TypeCode,
+		Project: "test",
+	}
 	if err := db.CreateTask(task); err != nil {
 		t.Fatalf("failed to create task: %v", err)
 	}
@@ -92,12 +92,12 @@ func TestTaskLogsWithQuestion(t *testing.T) {
 
 	// Create a task
 	task := &Task{
-		Title:    "Test Task",
-		Body:     "Test body",
-		Status:   StatusBacklog,
-		Type:     TypeCode,
-		Project:  "test",
-			}
+		Title:   "Test Task",
+		Body:    "Test body",
+		Status:  StatusBacklog,
+		Type:    TypeCode,
+		Project: "test",
+	}
 	if err := db.CreateTask(task); err != nil {
 		t.Fatalf("failed to create task: %v", err)
 	}
@@ -146,10 +146,10 @@ func TestGetTasksWithBranches(t *testing.T) {
 
 	// Create tasks with various states
 	taskNoBranch := &Task{
-		Title:    "Task without branch",
-		Status:   StatusBacklog,
-		Type:     TypeCode,
-			}
+		Title:  "Task without branch",
+		Status: StatusBacklog,
+		Type:   TypeCode,
+	}
 	taskWithBranch := &Task{
 		Title:      "Task with branch",
 		Status:     StatusBlocked,
@@ -268,14 +268,14 @@ func TestGetProjectByPath(t *testing.T) {
 			wantProj: "another",
 		},
 		{
-			name:     "no match",
-			cwd:      "/Users/test/Other/something",
-			wantNil:  true,
+			name:    "no match",
+			cwd:     "/Users/test/Other/something",
+			wantNil: true,
 		},
 		{
-			name:     "partial path no match",
-			cwd:      "/Users/test/Projects/myproj", // not myproject
-			wantNil:  true,
+			name:    "partial path no match",
+			cwd:     "/Users/test/Projects/myproj", // not myproject
+			wantNil: true,
 		},
 		{
 			name:    "empty cwd",

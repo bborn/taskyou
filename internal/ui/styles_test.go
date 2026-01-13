@@ -9,10 +9,10 @@ import (
 
 func TestPRStatusBadge(t *testing.T) {
 	tests := []struct {
-		name         string
-		prInfo       *github.PRInfo
-		expectEmpty  bool
-		expectIcon   string
+		name        string
+		prInfo      *github.PRInfo
+		expectEmpty bool
+		expectIcon  string
 	}{
 		{
 			name:        "nil PR returns empty",

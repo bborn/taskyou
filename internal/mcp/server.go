@@ -74,8 +74,8 @@ type serverInfo struct {
 }
 
 type initializeResult struct {
-	ProtocolVersion string            `json:"protocolVersion"`
-	ServerInfo      serverInfo        `json:"serverInfo"`
+	ProtocolVersion string                 `json:"protocolVersion"`
+	ServerInfo      serverInfo             `json:"serverInfo"`
 	Capabilities    map[string]interface{} `json:"capabilities"`
 }
 

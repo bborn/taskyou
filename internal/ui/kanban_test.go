@@ -19,9 +19,9 @@ func TestKanbanBoard_FocusColumn(t *testing.T) {
 	board.SetTasks(tasks)
 
 	tests := []struct {
-		name     string
-		colIdx   int
-		wantCol  int
+		name    string
+		colIdx  int
+		wantCol int
 	}{
 		{"focus backlog", 0, 0},
 		{"focus in progress", 1, 1},
@@ -77,14 +77,14 @@ func TestKanbanBoard_HandleClick(t *testing.T) {
 	}{
 		{
 			name:       "click on first task in backlog column",
-			x:          colTotalWidth/2,           // Middle of first column
-			y:          5,                          // After header (1 border + 3 header = 4, so y=5 is first task)
+			x:          colTotalWidth / 2, // Middle of first column
+			y:          5,                 // After header (1 border + 3 header = 4, so y=5 is first task)
 			wantTaskID: 1,
 		},
 		{
 			name:       "click on second task in backlog column",
-			x:          colTotalWidth/2,           // Middle of first column
-			y:          8,                          // Second task (card height = 3)
+			x:          colTotalWidth / 2, // Middle of first column
+			y:          8,                 // Second task (card height = 3)
 			wantTaskID: 2,
 		},
 		{
@@ -260,7 +260,7 @@ func TestKanbanBoard_HandleClickUpdatesSelection(t *testing.T) {
 	colTotalWidth := colWidth + 2
 
 	x := colTotalWidth + colTotalWidth/2 // Middle of second column
-	y := 5                                // First task position
+	y := 5                               // First task position
 
 	task := board.HandleClick(x, y)
 
@@ -364,7 +364,7 @@ func TestKanbanBoard_MobileTabClick(t *testing.T) {
 
 	// Click on second tab (In Progress)
 	x := tabWidth + tabWidth/2 // Middle of second tab
-	y := 0                      // Tab bar area
+	y := 0                     // Tab bar area
 
 	task := board.HandleClick(x, y)
 

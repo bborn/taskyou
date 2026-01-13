@@ -28,10 +28,10 @@ type KanbanBoard struct {
 	columns       []KanbanColumn
 	selectedCol   int
 	selectedRow   int
-	scrollOffsets []int      // Scroll offset per column
+	scrollOffsets []int // Scroll offset per column
 	width         int
 	height        int
-	allTasks      []*db.Task // All tasks
+	allTasks      []*db.Task               // All tasks
 	prInfo        map[int64]*github.PRInfo // PR info by task ID
 }
 
@@ -226,7 +226,7 @@ func (k *KanbanBoard) ensureSelectedVisible() {
 
 	// Calculate how many tasks fit in the visible area
 	colHeight := k.height
-	cardHeight := 3 // Most cards are 3 lines (2 content + 1 border)
+	cardHeight := 3                            // Most cards are 3 lines (2 content + 1 border)
 	maxVisible := (colHeight - 3) / cardHeight // -3 for header bar and minimal padding
 	if maxVisible < 1 {
 		maxVisible = 1
