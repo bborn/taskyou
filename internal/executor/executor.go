@@ -2,7 +2,6 @@
 package executor
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -1211,13 +1210,15 @@ func (e *Executor) setupClaudeHooks(workDir string, taskID int64) (cleanup func(
 func (e *Executor) runClaude(ctx context.Context, task *db.Task, workDir, prompt string) execResult {
 	// Check if tmux is available
 	if _, err := exec.LookPath("tmux"); err != nil {
-		return e.runClaudeDirect(ctx, task, workDir, prompt)
+		e.logLine(task.ID, "error", "tmux is not installed - required for task execution")
+		return execResult{Message: "tmux is not installed"}
 	}
 
 	// Ensure task-daemon session exists
 	if err := ensureTmuxDaemon(); err != nil {
-		e.logger.Warn("could not create task-daemon session", "error", err)
-		return e.runClaudeDirect(ctx, task, workDir, prompt)
+		e.logger.Error("could not create task-daemon session", "error", err)
+		e.logLine(task.ID, "error", fmt.Sprintf("Failed to create tmux daemon: %s", err.Error()))
+		return execResult{Message: fmt.Sprintf("failed to create tmux daemon: %s", err.Error())}
 	}
 
 	windowName := TmuxWindowName(task.ID)
@@ -1238,10 +1239,12 @@ func (e *Executor) runClaude(ctx context.Context, task *db.Task, workDir, prompt
 	// Create a temp file for the prompt (avoids quoting issues)
 	promptFile, err := os.CreateTemp("", "task-prompt-*.txt")
 	if err != nil {
+		e.logger.Error("could not create temp file", "error", err)
+		e.logLine(task.ID, "error", fmt.Sprintf("Failed to create temp file: %s", err.Error()))
 		if cleanupHooks != nil {
 			cleanupHooks()
 		}
-		return e.runClaudeDirect(ctx, task, workDir, prompt)
+		return execResult{Message: fmt.Sprintf("failed to create temp file: %s", err.Error())}
 	}
 	promptFile.WriteString(prompt)
 	promptFile.Close()
@@ -1283,12 +1286,19 @@ func (e *Executor) runClaude(ctx context.Context, task *db.Task, workDir, prompt
 	tmuxErr := tmuxCmd.Run()
 	newWinCancel()
 	if tmuxErr != nil {
-		e.logger.Warn("tmux failed, falling back to direct", "error", tmuxErr)
+		e.logger.Error("tmux new-window failed", "error", tmuxErr)
+		e.logLine(task.ID, "error", fmt.Sprintf("Failed to create tmux window: %s", tmuxErr.Error()))
 		if cleanupHooks != nil {
 			cleanupHooks()
 		}
-		return e.runClaudeDirect(ctx, task, workDir, prompt)
+		return execResult{Message: fmt.Sprintf("failed to create tmux window: %s", tmuxErr.Error())}
 	}
+
+	// Give tmux a moment to fully create the window and start the Claude process
+	time.Sleep(200 * time.Millisecond)
+
+	// Ensure shell pane exists alongside Claude pane
+	e.ensureShellPane(windowTarget, workDir)
 
 	// Configure tmux window with helpful status bar
 	e.configureTmuxWindow(windowTarget)
@@ -1320,13 +1330,15 @@ func (e *Executor) runClaudeResume(ctx context.Context, task *db.Task, workDir, 
 
 	// Check if tmux is available
 	if _, err := exec.LookPath("tmux"); err != nil {
-		return e.runClaudeDirect(ctx, task, workDir, feedback)
+		e.logLine(task.ID, "error", "tmux is not installed - required for task execution")
+		return execResult{Message: "tmux is not installed"}
 	}
 
 	// Ensure task-daemon session exists
 	if err := ensureTmuxDaemon(); err != nil {
-		e.logger.Warn("could not create task-daemon session", "error", err)
-		return e.runClaudeDirect(ctx, task, workDir, feedback)
+		e.logger.Error("could not create task-daemon session", "error", err)
+		e.logLine(task.ID, "error", fmt.Sprintf("Failed to create tmux daemon: %s", err.Error()))
+		return execResult{Message: fmt.Sprintf("failed to create tmux daemon: %s", err.Error())}
 	}
 
 	windowName := TmuxWindowName(task.ID)
@@ -1346,10 +1358,12 @@ func (e *Executor) runClaudeResume(ctx context.Context, task *db.Task, workDir, 
 	// Create a temp file for the feedback (avoids quoting issues)
 	feedbackFile, err := os.CreateTemp("", "task-feedback-*.txt")
 	if err != nil {
+		e.logger.Error("could not create temp file", "error", err)
+		e.logLine(task.ID, "error", fmt.Sprintf("Failed to create temp file: %s", err.Error()))
 		if cleanupHooks != nil {
 			cleanupHooks()
 		}
-		return e.runClaudeDirect(ctx, task, workDir, feedback)
+		return execResult{Message: fmt.Sprintf("failed to create temp file: %s", err.Error())}
 	}
 	feedbackFile.WriteString(feedback)
 	feedbackFile.Close()
@@ -1379,12 +1393,19 @@ func (e *Executor) runClaudeResume(ctx context.Context, task *db.Task, workDir, 
 	tmuxErr := tmuxCmd.Run()
 	newWinCancel()
 	if tmuxErr != nil {
-		e.logger.Warn("tmux failed, falling back to direct", "error", tmuxErr)
+		e.logger.Error("tmux new-window failed", "error", tmuxErr)
+		e.logLine(task.ID, "error", fmt.Sprintf("Failed to create tmux window: %s", tmuxErr.Error()))
 		if cleanupHooks != nil {
 			cleanupHooks()
 		}
-		return e.runClaudeDirect(ctx, task, workDir, feedback)
+		return execResult{Message: fmt.Sprintf("failed to create tmux window: %s", tmuxErr.Error())}
 	}
+
+	// Give tmux a moment to fully create the window and start the Claude process
+	time.Sleep(200 * time.Millisecond)
+
+	// Ensure shell pane exists alongside Claude pane
+	e.ensureShellPane(windowTarget, workDir)
 
 	// Configure tmux window with helpful status bar
 	e.configureTmuxWindow(windowTarget)
@@ -1479,6 +1500,12 @@ func (e *Executor) ResumeDangerous(taskID int64) bool {
 		}
 		return false
 	}
+
+	// Give tmux a moment to fully create the window and start the Claude process
+	time.Sleep(200 * time.Millisecond)
+
+	// Ensure shell pane exists alongside Claude pane
+	e.ensureShellPane(windowTarget, workDir)
 
 	// Configure tmux window with helpful status bar
 	e.configureTmuxWindow(windowTarget)
@@ -1731,6 +1758,54 @@ func (e *Executor) pollTmuxSession(ctx context.Context, taskID int64, sessionNam
 	}
 }
 
+// ensureShellPane creates a shell pane alongside the Claude pane in the daemon window.
+// This ensures every task always has a persistent shell pane that survives navigation.
+func (e *Executor) ensureShellPane(windowTarget, workDir string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// Check if pane .1 already exists by counting panes (shell might already be there from previous session)
+	// IMPORTANT: We can't just try to access .1 because tmux returns success even if .1 doesn't exist!
+	// It just returns the ID of pane .0 instead. We must check window_panes count.
+	countCmd := exec.CommandContext(ctx, "tmux", "display-message", "-t", windowTarget, "-p", "#{window_panes}")
+	countOut, err := countCmd.Output()
+	if err == nil && strings.TrimSpace(string(countOut)) == "2" {
+		// Pane .1 already exists, just ensure it's in the right directory
+		exec.CommandContext(ctx, "tmux", "send-keys", "-t", windowTarget+".1", fmt.Sprintf("cd %q", workDir), "Enter").Run()
+		exec.CommandContext(ctx, "tmux", "select-pane", "-t", windowTarget+".1", "-T", "Shell").Run()
+		return
+	}
+
+	// Create shell pane to the right of Claude (horizontal split, 50/50)
+	splitCmd := exec.CommandContext(ctx, "tmux", "split-window",
+		"-h",           // horizontal split (side by side)
+		"-t", windowTarget+".0",  // split from Claude pane
+		"-c", workDir,  // start in task workdir
+	)
+	splitOut, splitErr := splitCmd.CombinedOutput()
+	if splitErr != nil {
+		e.logger.Warn("failed to create shell pane", "window", windowTarget, "error", splitErr, "output", string(splitOut))
+		return
+	}
+
+	// Verify the split actually created a second pane
+	verifyCmd := exec.CommandContext(ctx, "tmux", "display-message", "-t", windowTarget, "-p", "#{window_panes}")
+	verifyOut, _ := verifyCmd.Output()
+	if strings.TrimSpace(string(verifyOut)) != "2" {
+		e.logger.Warn("split-window did not create a second pane", "windowTarget", windowTarget)
+		return
+	}
+
+	// Set pane titles
+	exec.CommandContext(ctx, "tmux", "select-pane", "-t", windowTarget+".0", "-T", "Claude").Run()
+	exec.CommandContext(ctx, "tmux", "select-pane", "-t", windowTarget+".1", "-T", "Shell").Run()
+
+	// Select Claude pane so it's active (user sees Claude output)
+	exec.CommandContext(ctx, "tmux", "select-pane", "-t", windowTarget+".0").Run()
+
+	e.logger.Info("created shell pane", "window", windowTarget)
+}
+
 // configureTmuxWindow sets up helpful UI elements for a task window.
 func (e *Executor) configureTmuxWindow(windowTarget string) {
 	// Window-specific options are limited; most styling is session-wide
@@ -1746,130 +1821,6 @@ func (e *Executor) configureTmuxWindow(windowTarget string) {
 	exec.CommandContext(ctx, "tmux", "set-option", "-t", daemonSession, "status-right-length", "30").Run()
 }
 
-// runClaudeDirect runs claude directly without tmux (fallback)
-func (e *Executor) runClaudeDirect(ctx context.Context, task *db.Task, workDir, prompt string) execResult {
-	// Build command args - only include --dangerously-skip-permissions if WORKTREE_DANGEROUS_MODE is set
-	args := []string{}
-	if os.Getenv("WORKTREE_DANGEROUS_MODE") == "1" {
-		args = append(args, "--dangerously-skip-permissions")
-	}
-	args = append(args, "--chrome", "-p", prompt)
-	cmd := exec.CommandContext(ctx, "claude", args...)
-	cmd.Dir = workDir
-	// Pass worktree environment variables so hooks and applications know the task context
-	cmd.Env = append(os.Environ(),
-		fmt.Sprintf("WORKTREE_TASK_ID=%d", task.ID),
-		fmt.Sprintf("WORKTREE_PORT=%d", task.Port),
-		fmt.Sprintf("WORKTREE_PATH=%s", task.WorktreePath),
-	)
-
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return execResult{Message: fmt.Sprintf("stdout pipe: %v", err)}
-	}
-
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		return execResult{Message: fmt.Sprintf("stderr pipe: %v", err)}
-	}
-
-	if err := cmd.Start(); err != nil {
-		return execResult{Message: fmt.Sprintf("start: %v", err)}
-	}
-
-	// Monitor for DB-based interrupt
-	interruptCh := make(chan struct{})
-	go func() {
-		ticker := time.NewTicker(500 * time.Millisecond)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				currentTask, err := e.db.GetTask(task.ID)
-				if err == nil && currentTask != nil && currentTask.Status == db.StatusBacklog {
-					if cmd.Process != nil {
-						cmd.Process.Kill()
-					}
-					close(interruptCh)
-					return
-				}
-			}
-		}
-	}()
-
-	var mu sync.Mutex
-	var allOutput []string
-	var foundComplete bool
-	var needsInputMsg string
-
-	go func() {
-		scanner := bufio.NewScanner(stdout)
-		for scanner.Scan() {
-			line := scanner.Text()
-			e.logLine(task.ID, "output", line)
-
-			mu.Lock()
-			allOutput = append(allOutput, line)
-			if strings.Contains(line, "TASK_COMPLETE") {
-				foundComplete = true
-			}
-			if idx := strings.Index(line, "NEEDS_INPUT:"); idx >= 0 {
-				needsInputMsg = strings.TrimSpace(line[idx+len("NEEDS_INPUT:"):])
-			}
-			mu.Unlock()
-		}
-	}()
-
-	go func() {
-		scanner := bufio.NewScanner(stderr)
-		for scanner.Scan() {
-			e.logLine(task.ID, "error", scanner.Text())
-		}
-	}()
-
-	err = cmd.Wait()
-
-	select {
-	case <-interruptCh:
-		return execResult{Interrupted: true}
-	default:
-	}
-	if ctx.Err() == context.Canceled {
-		return execResult{Interrupted: true}
-	}
-
-	mu.Lock()
-	defer mu.Unlock()
-
-	if foundComplete {
-		return execResult{Success: true}
-	}
-	if needsInputMsg != "" {
-		return execResult{NeedsInput: true, Message: needsInputMsg}
-	}
-
-	if err != nil {
-		return execResult{Message: fmt.Sprintf("claude exited: %v", err)}
-	}
-
-	// Check if task was marked as blocked via MCP (workflow_needs_input)
-	finalTask, dbErr := e.db.GetTask(task.ID)
-	if dbErr == nil && finalTask != nil && finalTask.Status == db.StatusBlocked {
-		logs, _ := e.db.GetTaskLogs(task.ID, 5)
-		var question string
-		for _, l := range logs {
-			if l.LineType == "question" {
-				question = l.Content
-				break
-			}
-		}
-		return execResult{NeedsInput: true, Message: question}
-	}
-
-	return execResult{Success: true}
-}
 
 func (e *Executor) logLine(taskID int64, lineType, content string) {
 	// Store in database
