@@ -328,9 +328,9 @@ func (m *DetailModel) startResumableSession(sessionID string) {
 	workDir := m.getWorkdir()
 
 	// Build the claude command with --resume
-	// Check for dangerous mode
+	// Check for dangerous mode - prefer task's stored mode, fall back to global env var
 	dangerousFlag := ""
-	if os.Getenv("WORKTREE_DANGEROUS_MODE") == "1" {
+	if m.task.DangerousMode || os.Getenv("WORKTREE_DANGEROUS_MODE") == "1" {
 		dangerousFlag = "--dangerously-skip-permissions "
 	}
 
@@ -952,6 +952,17 @@ func (m *DetailModel) renderHeader() string {
 	meta.WriteString(statusStyle.Render(t.Status))
 	meta.WriteString("  ")
 
+	// Dangerous mode badge (only shown when in dangerous mode and task is active)
+	if t.DangerousMode && (t.Status == db.StatusProcessing || t.Status == db.StatusBlocked) {
+		dangerousStyle := lipgloss.NewStyle().
+			Padding(0, 1).
+			Background(lipgloss.Color("196")). // Red
+			Foreground(lipgloss.Color("#FFFFFF")).
+			Bold(true)
+		meta.WriteString(dangerousStyle.Render("DANGEROUS"))
+		meta.WriteString("  ")
+	}
+
 	// Project
 	if t.Project != "" {
 		projectStyle := lipgloss.NewStyle().
@@ -1120,10 +1131,14 @@ func (m *DetailModel) renderHelp() string {
 
 	// Show dangerous mode toggle when task is processing or blocked
 	if m.task != nil && (m.task.Status == db.StatusProcessing || m.task.Status == db.StatusBlocked) {
+		toggleDesc := "dangerous mode"
+		if m.task.DangerousMode {
+			toggleDesc = "safe mode"
+		}
 		keys = append(keys, struct {
 			key  string
 			desc string
-		}{"!", "dangerous mode"})
+		}{"!", toggleDesc})
 	}
 
 	// Show Tab shortcut when panes are visible
