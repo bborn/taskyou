@@ -281,26 +281,8 @@ func (m *FormModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return m, nil
 				}
 			}
-			// Not a file path - check for magic paste URLs
+			// Not a file path - treat as regular paste into focused field
 			pastedText := string(msg.Runes)
-
-			// Magic paste: parse URLs (GitHub PR, GitHub Issues, Linear) when pasting into title
-			if m.focused == FieldTitle {
-				if parsedURL := ParseURL(pastedText); parsedURL != nil {
-					// Use the formatted title from the parsed URL
-					m.titleInput.SetValue(parsedURL.Title)
-
-					// Store PR info if it's a GitHub PR
-					if parsedURL.Type == "github_pr" {
-						m.prURL = parsedURL.PRURL
-						m.prNumber = parsedURL.PRNumber
-					}
-
-					return m, nil
-				}
-			}
-
-			// Not a recognized URL - treat as regular paste into focused field
 			switch m.focused {
 			case FieldTitle:
 				m.titleInput.SetValue(m.titleInput.Value() + pastedText)
