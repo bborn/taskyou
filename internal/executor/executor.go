@@ -1561,20 +1561,29 @@ func (e *Executor) ResumeDangerous(taskID int64) bool {
 		return false
 	}
 
-	// Ensure task-daemon session exists
+	// Use task's stored daemon session for killing existing window
+	// Fall back to current session if not stored (for backwards compatibility)
+	oldDaemonSession := task.DaemonSession
+	if oldDaemonSession == "" {
+		oldDaemonSession = getDaemonSessionName()
+	}
+
+	windowName := TmuxWindowName(taskID)
+	oldWindowTarget := fmt.Sprintf("%s:%s", oldDaemonSession, windowName)
+
+	// Kill any existing window with this name (with timeout)
+	killCtx, killCancel := context.WithTimeout(context.Background(), 3*time.Second)
+	exec.CommandContext(killCtx, "tmux", "kill-window", "-t", oldWindowTarget).Run()
+	killCancel()
+
+	// Ensure task-daemon session exists for creating new window
 	daemonSession, err := ensureTmuxDaemon()
 	if err != nil {
 		e.logger.Warn("could not create task-daemon session", "error", err)
 		return false
 	}
 
-	windowName := TmuxWindowName(taskID)
 	windowTarget := fmt.Sprintf("%s:%s", daemonSession, windowName)
-
-	// Kill any existing window with this name (with timeout)
-	killCtx, killCancel := context.WithTimeout(context.Background(), 3*time.Second)
-	exec.CommandContext(killCtx, "tmux", "kill-window", "-t", windowTarget).Run()
-	killCancel()
 
 	// Setup Claude hooks for status updates
 	cleanupHooks, err := e.setupClaudeHooks(workDir, taskID)
@@ -1671,19 +1680,29 @@ func (e *Executor) ResumeSafe(taskID int64) bool {
 		return false
 	}
 
-	// Ensure task-daemon session exists
-	if _, err := ensureTmuxDaemon(); err != nil {
+	// Use task's stored daemon session for killing existing window
+	// Fall back to current session if not stored (for backwards compatibility)
+	oldDaemonSession := task.DaemonSession
+	if oldDaemonSession == "" {
+		oldDaemonSession = getDaemonSessionName()
+	}
+
+	windowName := TmuxWindowName(taskID)
+	oldWindowTarget := fmt.Sprintf("%s:%s", oldDaemonSession, windowName)
+
+	// Kill any existing window with this name (with timeout)
+	killCtx, killCancel := context.WithTimeout(context.Background(), 3*time.Second)
+	exec.CommandContext(killCtx, "tmux", "kill-window", "-t", oldWindowTarget).Run()
+	killCancel()
+
+	// Ensure task-daemon session exists for creating new window
+	daemonSession, err := ensureTmuxDaemon()
+	if err != nil {
 		e.logger.Warn("could not create task-daemon session", "error", err)
 		return false
 	}
 
-	windowName := TmuxWindowName(taskID)
-	windowTarget := TmuxSessionName(taskID)
-
-	// Kill any existing window with this name (with timeout)
-	killCtx, killCancel := context.WithTimeout(context.Background(), 3*time.Second)
-	exec.CommandContext(killCtx, "tmux", "kill-window", "-t", windowTarget).Run()
-	killCancel()
+	windowTarget := fmt.Sprintf("%s:%s", daemonSession, windowName)
 
 	// Setup Claude hooks for status updates
 	cleanupHooks, err := e.setupClaudeHooks(workDir, taskID)
@@ -1706,24 +1725,26 @@ func (e *Executor) ResumeSafe(taskID int64) bool {
 	script := fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q claude --chrome --resume %s`,
 		taskID, taskSessionID, task.Port, task.WorktreePath, claudeSessionID)
 
-	// Create new window in task-daemon session (with timeout for tmux overhead)
-	newWinCtx, newWinCancel := context.WithTimeout(context.Background(), 5*time.Second)
-	tmuxCmd := exec.CommandContext(newWinCtx, "tmux", "new-window", "-d", "-t", getDaemonSessionName(), "-n", windowName, "-c", workDir, "sh", "-c", script)
-	tmuxErr := tmuxCmd.Run()
-	newWinCancel()
+	// Create new window in task-daemon session (with retry logic for race conditions)
+	actualSession, tmuxErr := createTmuxWindow(daemonSession, windowName, workDir, script)
 	if tmuxErr != nil {
-		e.logger.Warn("tmux failed to create window", "error", tmuxErr)
+		e.logger.Warn("tmux failed to create window", "error", tmuxErr, "session", daemonSession)
 		if cleanupHooks != nil {
 			cleanupHooks()
 		}
 		return false
 	}
 
+	// Update windowTarget if session changed during retry
+	if actualSession != daemonSession {
+		windowTarget = fmt.Sprintf("%s:%s", actualSession, windowName)
+		daemonSession = actualSession
+	}
+
 	// Give tmux a moment to fully create the window and start the Claude process
 	time.Sleep(200 * time.Millisecond)
 
 	// Save which daemon session owns this task's window (for kill logic)
-	daemonSession := getDaemonSessionName()
 	if err := e.db.UpdateTaskDaemonSession(taskID, daemonSession); err != nil {
 		e.logger.Warn("failed to save daemon session", "task", taskID, "error", err)
 	}
