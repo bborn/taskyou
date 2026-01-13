@@ -28,6 +28,7 @@ const (
 	ViewNewTaskConfirm
 	ViewEditTask
 	ViewDeleteConfirm
+	ViewCloseConfirm
 	ViewQuitConfirm
 	ViewSettings
 	ViewRetry
@@ -245,6 +246,11 @@ type AppModel struct {
 	quitConfirm      *huh.Form
 	quitConfirmValue bool
 
+	// Close confirmation state
+	closeConfirm      *huh.Form
+	closeConfirmValue bool
+	pendingCloseTask  *db.Task
+
 	// Settings view state
 	settingsView *SettingsModel
 
@@ -348,6 +354,9 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 	if m.currentView == ViewDeleteConfirm && m.deleteConfirm != nil {
 		return m.updateDeleteConfirm(msg)
+	}
+	if m.currentView == ViewCloseConfirm && m.closeConfirm != nil {
+		return m.updateCloseConfirm(msg)
 	}
 	if m.currentView == ViewQuitConfirm && m.quitConfirm != nil {
 		return m.updateQuitConfirm(msg)
@@ -647,6 +656,8 @@ func (m *AppModel) View() string {
 		return m.viewNewTaskConfirm()
 	case ViewDeleteConfirm:
 		return m.viewDeleteConfirm()
+	case ViewCloseConfirm:
+		return m.viewCloseConfirm()
 	case ViewQuitConfirm:
 		return m.viewQuitConfirm()
 	case ViewSettings:
@@ -828,10 +839,7 @@ func (m *AppModel) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case key.Matches(msg, m.keys.Close):
 		if task := m.kanban.SelectedTask(); task != nil {
-			// Immediately update UI for responsiveness
-			task.Status = db.StatusDone
-			m.updateTaskInList(task)
-			return m, m.closeTask(task.ID)
+			return m.showCloseConfirm(task)
 		}
 
 	case key.Matches(msg, m.keys.Delete):
@@ -936,22 +944,12 @@ func (m *AppModel) updateDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	}
 	if key.Matches(keyMsg, m.keys.Close) && m.selectedTask != nil {
-		// Check PR state asynchronously (don't block UI)
-		taskID := m.selectedTask.ID
-		go m.executor.CheckPRStateAndUpdateTask(taskID)
-
-		// Immediately update UI for responsiveness
-		m.selectedTask.Status = db.StatusDone
+		// Clean up detail view first
 		if m.detailView != nil {
-			m.detailView.UpdateTask(m.selectedTask)
-			// Clean up panes before leaving detail view
 			m.detailView.Cleanup()
 			m.detailView = nil
 		}
-		// Update task in the list and kanban
-		m.updateTaskInList(m.selectedTask)
-		m.currentView = ViewDashboard
-		return m, m.closeTask(m.selectedTask.ID)
+		return m.showCloseConfirm(m.selectedTask)
 	}
 	if key.Matches(keyMsg, m.keys.Delete) && m.selectedTask != nil {
 		// Clean up detail view first
@@ -1325,6 +1323,95 @@ func (m *AppModel) updateQuitConfirm(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		// Cancelled
 		m.quitConfirm = nil
+		m.currentView = ViewDashboard
+		return m, nil
+	}
+
+	return m, cmd
+}
+
+func (m *AppModel) showCloseConfirm(task *db.Task) (tea.Model, tea.Cmd) {
+	m.pendingCloseTask = task
+	m.closeConfirmValue = false
+	modalWidth := min(50, m.width-8)
+	m.closeConfirm = huh.NewForm(
+		huh.NewGroup(
+			huh.NewConfirm().
+				Key("close").
+				Title(fmt.Sprintf("Close task #%d?", task.ID)).
+				Description(task.Title).
+				Affirmative("Close").
+				Negative("Cancel").
+				Value(&m.closeConfirmValue),
+		),
+	).WithTheme(huh.ThemeDracula()).
+		WithWidth(modalWidth - 6). // Account for modal padding and border
+		WithShowHelp(true)
+	m.currentView = ViewCloseConfirm
+	return m, m.closeConfirm.Init()
+}
+
+func (m *AppModel) viewCloseConfirm() string {
+	if m.closeConfirm == nil {
+		return ""
+	}
+
+	// Modal header with checkmark icon
+	header := lipgloss.NewStyle().
+		Bold(true).
+		Foreground(ColorSuccess).
+		MarginBottom(1).
+		Render("✓ Confirm Close")
+
+	formView := m.closeConfirm.View()
+
+	// Modal box with border
+	modalWidth := min(50, m.width-8)
+	modalBox := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(ColorSuccess).
+		Padding(1, 2).
+		Width(modalWidth)
+
+	modalContent := modalBox.Render(lipgloss.JoinVertical(lipgloss.Center, header, formView))
+
+	// Center the modal on screen
+	return lipgloss.NewStyle().
+		Width(m.width).
+		Height(m.height).
+		Align(lipgloss.Center, lipgloss.Center).
+		Render(modalContent)
+}
+
+func (m *AppModel) updateCloseConfirm(msg tea.Msg) (tea.Model, tea.Cmd) {
+	// Handle escape to cancel
+	if keyMsg, ok := msg.(tea.KeyMsg); ok {
+		if keyMsg.String() == "esc" {
+			m.currentView = ViewDashboard
+			m.closeConfirm = nil
+			m.pendingCloseTask = nil
+			return m, nil
+		}
+	}
+
+	// Update the huh form
+	form, cmd := m.closeConfirm.Update(msg)
+	if f, ok := form.(*huh.Form); ok {
+		m.closeConfirm = f
+	}
+
+	// Check if form completed
+	if m.closeConfirm.State == huh.StateCompleted {
+		if m.pendingCloseTask != nil && m.closeConfirmValue {
+			taskID := m.pendingCloseTask.ID
+			m.pendingCloseTask = nil
+			m.closeConfirm = nil
+			m.currentView = ViewDashboard
+			return m, m.closeTask(taskID)
+		}
+		// Cancelled
+		m.pendingCloseTask = nil
+		m.closeConfirm = nil
 		m.currentView = ViewDashboard
 		return m, nil
 	}
@@ -1737,6 +1824,9 @@ func (m *AppModel) closeTask(id int64) tea.Cmd {
 	database := m.db
 	exec := m.executor
 	return func() tea.Msg {
+		// Check PR state asynchronously (don't block UI)
+		go exec.CheckPRStateAndUpdateTask(id)
+
 		err := database.UpdateTaskStatus(id, db.StatusDone)
 		if err == nil {
 			if task, _ := database.GetTask(id); task != nil {

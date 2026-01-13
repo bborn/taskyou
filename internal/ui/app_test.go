@@ -114,3 +114,82 @@ func TestShowChangeStatus_ExcludesCurrentStatus(t *testing.T) {
 		})
 	}
 }
+
+func TestShowCloseConfirm_SetsUpConfirmation(t *testing.T) {
+	// Create a minimal app model
+	m := &AppModel{
+		width: 100,
+	}
+
+	// Create a test task
+	task := &db.Task{
+		ID:     42,
+		Title:  "Test Task to Close",
+		Status: db.StatusQueued,
+	}
+
+	// Call showCloseConfirm
+	m.showCloseConfirm(task)
+
+	// Verify that the close confirmation form was created
+	if m.closeConfirm == nil {
+		t.Fatal("closeConfirm form was not created")
+	}
+
+	// Verify that the current view is set to ViewCloseConfirm
+	if m.currentView != ViewCloseConfirm {
+		t.Errorf("currentView = %v, want %v", m.currentView, ViewCloseConfirm)
+	}
+
+	// Verify that the pending close task is set correctly
+	if m.pendingCloseTask != task {
+		t.Error("pendingCloseTask was not set correctly")
+	}
+
+	// Verify that the confirm value starts as false (user hasn't confirmed yet)
+	if m.closeConfirmValue != false {
+		t.Error("closeConfirmValue should be false initially")
+	}
+}
+
+func TestShowCloseConfirm_DifferentTasks(t *testing.T) {
+	m := &AppModel{
+		width: 100,
+	}
+
+	tests := []struct {
+		name   string
+		taskID int64
+		title  string
+		status string
+	}{
+		{"backlog task", 1, "Backlog Task", db.StatusBacklog},
+		{"queued task", 2, "In Progress Task", db.StatusQueued},
+		{"processing task", 3, "Processing Task", db.StatusProcessing},
+		{"blocked task", 4, "Blocked Task", db.StatusBlocked},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			task := &db.Task{
+				ID:     tt.taskID,
+				Title:  tt.title,
+				Status: tt.status,
+			}
+
+			m.showCloseConfirm(task)
+
+			if m.closeConfirm == nil {
+				t.Fatal("closeConfirm form was not created")
+			}
+
+			if m.currentView != ViewCloseConfirm {
+				t.Errorf("currentView = %v, want %v", m.currentView, ViewCloseConfirm)
+			}
+
+			if m.pendingCloseTask != task {
+				t.Error("pendingCloseTask was not set correctly")
+			}
+		})
+	}
+}
