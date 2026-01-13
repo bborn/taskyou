@@ -983,9 +983,10 @@ func (m *AppModel) updateDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.taskTransitionInProgress = true
-		// Clean up current detail view before switching
+		// Clean up current detail view before switching (without saving height
+		// to avoid rounding error accumulation that causes pane to shrink)
 		if m.detailView != nil {
-			m.detailView.Cleanup()
+			m.detailView.CleanupWithoutSaving()
 			m.detailView = nil
 		}
 		// Move selection up in the kanban
@@ -1003,9 +1004,10 @@ func (m *AppModel) updateDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.taskTransitionInProgress = true
-		// Clean up current detail view before switching
+		// Clean up current detail view before switching (without saving height
+		// to avoid rounding error accumulation that causes pane to shrink)
 		if m.detailView != nil {
-			m.detailView.Cleanup()
+			m.detailView.CleanupWithoutSaving()
 			m.detailView = nil
 		}
 		// Move selection down in the kanban

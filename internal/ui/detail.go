@@ -221,10 +221,19 @@ func (m *DetailModel) Update(msg tea.Msg) (*DetailModel, tea.Cmd) {
 }
 
 // Cleanup should be called when leaving detail view.
+// It saves the current pane height before breaking the panes.
 func (m *DetailModel) Cleanup() {
 	if m.claudePaneID != "" || m.workdirPaneID != "" {
-		// breakTmuxPanes saves pane positions before breaking
-		m.breakTmuxPanes()
+		m.breakTmuxPanes(true)
+	}
+}
+
+// CleanupWithoutSaving cleans up panes without saving the height.
+// Use this during task transitions (prev/next) to avoid rounding errors
+// that accumulate with each transition and cause the pane to shrink.
+func (m *DetailModel) CleanupWithoutSaving() {
+	if m.claudePaneID != "" || m.workdirPaneID != "" {
+		m.breakTmuxPanes(false)
 	}
 }
 
@@ -742,17 +751,24 @@ func (m *DetailModel) getWorkdir() string {
 }
 
 // breakTmuxPanes breaks both joined panes - kills workdir, returns Claude to task-daemon.
-func (m *DetailModel) breakTmuxPanes() {
+// If saveHeight is true, the current pane height is saved to settings.
+// Pass false during task transitions to avoid rounding error accumulation.
+func (m *DetailModel) breakTmuxPanes(saveHeight bool) {
 	// Use timeout for all tmux operations to prevent blocking UI
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	// Save pane positions before breaking (must save width before killing workdir pane)
+	// Only save shell width - it doesn't have the same rounding accumulation issue
 	m.saveShellPaneWidth()
-	currentPaneCmd := exec.CommandContext(ctx, "tmux", "display-message", "-p", "#{pane_id}")
-	if currentPaneOut, err := currentPaneCmd.Output(); err == nil {
-		tuiPaneID := strings.TrimSpace(string(currentPaneOut))
-		m.saveDetailPaneHeight(tuiPaneID)
+	// Only save detail pane height when explicitly requested (e.g., leaving detail view)
+	// Skip during task transitions to avoid rounding errors that accumulate
+	if saveHeight {
+		currentPaneCmd := exec.CommandContext(ctx, "tmux", "display-message", "-p", "#{pane_id}")
+		if currentPaneOut, err := currentPaneCmd.Output(); err == nil {
+			tuiPaneID := strings.TrimSpace(string(currentPaneOut))
+			m.saveDetailPaneHeight(tuiPaneID)
+		}
 	}
 
 	// Reset status bar and pane styling
