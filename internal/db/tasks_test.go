@@ -1637,6 +1637,140 @@ func TestCountTasksByProject(t *testing.T) {
 	}
 }
 
+func TestUpdateTaskDangerousMode(t *testing.T) {
+	// Create temporary database
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	db, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer db.Close()
+	defer os.Remove(dbPath)
+
+	// Create a task (dangerous_mode defaults to false)
+	task := &Task{
+		Title:   "Test Task",
+		Status:  StatusProcessing,
+		Type:    TypeCode,
+		Project: "personal",
+	}
+	if err := db.CreateTask(task); err != nil {
+		t.Fatalf("failed to create task: %v", err)
+	}
+
+	// Verify initial dangerous mode is false
+	retrieved, err := db.GetTask(task.ID)
+	if err != nil {
+		t.Fatalf("failed to get task: %v", err)
+	}
+	if retrieved.DangerousMode {
+		t.Error("expected DangerousMode to be false initially")
+	}
+
+	// Enable dangerous mode
+	if err := db.UpdateTaskDangerousMode(task.ID, true); err != nil {
+		t.Fatalf("failed to update dangerous mode: %v", err)
+	}
+
+	// Verify dangerous mode is now true
+	retrieved, err = db.GetTask(task.ID)
+	if err != nil {
+		t.Fatalf("failed to get task: %v", err)
+	}
+	if !retrieved.DangerousMode {
+		t.Error("expected DangerousMode to be true after enabling")
+	}
+
+	// Disable dangerous mode
+	if err := db.UpdateTaskDangerousMode(task.ID, false); err != nil {
+		t.Fatalf("failed to update dangerous mode: %v", err)
+	}
+
+	// Verify dangerous mode is now false
+	retrieved, err = db.GetTask(task.ID)
+	if err != nil {
+		t.Fatalf("failed to get task: %v", err)
+	}
+	if retrieved.DangerousMode {
+		t.Error("expected DangerousMode to be false after disabling")
+	}
+}
+
+func TestTaskDangerousModeInListTasks(t *testing.T) {
+	// Create temporary database
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	db, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer db.Close()
+	defer os.Remove(dbPath)
+
+	// Create tasks with different dangerous mode states
+	task1 := &Task{
+		Title:   "Safe Task",
+		Status:  StatusProcessing,
+		Type:    TypeCode,
+		Project: "personal",
+	}
+	if err := db.CreateTask(task1); err != nil {
+		t.Fatalf("failed to create task: %v", err)
+	}
+
+	task2 := &Task{
+		Title:   "Dangerous Task",
+		Status:  StatusProcessing,
+		Type:    TypeCode,
+		Project: "personal",
+	}
+	if err := db.CreateTask(task2); err != nil {
+		t.Fatalf("failed to create task: %v", err)
+	}
+
+	// Enable dangerous mode for task2
+	if err := db.UpdateTaskDangerousMode(task2.ID, true); err != nil {
+		t.Fatalf("failed to update dangerous mode: %v", err)
+	}
+
+	// List tasks and verify dangerous mode is correctly returned
+	tasks, err := db.ListTasks(ListTasksOptions{})
+	if err != nil {
+		t.Fatalf("failed to list tasks: %v", err)
+	}
+
+	if len(tasks) != 2 {
+		t.Fatalf("expected 2 tasks, got %d", len(tasks))
+	}
+
+	// Find each task and verify dangerous mode
+	var foundSafe, foundDangerous bool
+	for _, task := range tasks {
+		if task.ID == task1.ID {
+			foundSafe = true
+			if task.DangerousMode {
+				t.Error("expected task1 to have DangerousMode=false")
+			}
+		}
+		if task.ID == task2.ID {
+			foundDangerous = true
+			if !task.DangerousMode {
+				t.Error("expected task2 to have DangerousMode=true")
+			}
+		}
+	}
+
+	if !foundSafe {
+		t.Error("safe task not found in list")
+	}
+	if !foundDangerous {
+		t.Error("dangerous task not found in list")
+	}
+}
+
 func TestCountMemoriesByProject(t *testing.T) {
 	// Create temporary database
 	tmpDir := t.TempDir()

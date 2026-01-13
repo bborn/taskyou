@@ -1483,7 +1483,107 @@ func (e *Executor) ResumeDangerous(taskID int64) bool {
 	// Configure tmux window with helpful status bar
 	e.configureTmuxWindow(windowTarget)
 
+	// Update the task's dangerous mode flag in the database
+	if err := e.db.UpdateTaskDangerousMode(taskID, true); err != nil {
+		e.logger.Warn("could not update task dangerous mode", "error", err)
+	}
+
 	e.logLine(taskID, "system", "Claude restarted in dangerous mode (--dangerously-skip-permissions enabled)")
+
+	// Don't poll for completion here - the process will continue running in tmux
+	// The existing polling infrastructure will handle it
+	return true
+}
+
+// ResumeSafe kills the current Claude process and restarts it without --dangerously-skip-permissions.
+// This allows switching a running task back from dangerous mode to safe mode.
+// Returns true if successfully restarted, false otherwise.
+func (e *Executor) ResumeSafe(taskID int64) bool {
+	// Get the task to access session ID and work directory
+	task, err := e.db.GetTask(taskID)
+	if err != nil || task == nil {
+		e.logger.Error("Failed to get task", "taskID", taskID, "error", err)
+		return false
+	}
+
+	claudeSessionID := task.ClaudeSessionID
+	if claudeSessionID == "" {
+		e.logLine(taskID, "system", "No Claude session found - cannot resume in safe mode")
+		return false
+	}
+
+	workDir := task.WorktreePath
+	if workDir == "" {
+		e.logger.Error("Task has no worktree path", "taskID", taskID)
+		return false
+	}
+
+	// Log the action
+	e.logLine(taskID, "system", "Restarting Claude in safe mode (permissions enabled)")
+
+	// Check if tmux is available
+	if _, err := exec.LookPath("tmux"); err != nil {
+		e.logLine(taskID, "system", "Tmux not available - cannot resume")
+		return false
+	}
+
+	// Ensure task-daemon session exists
+	if err := ensureTmuxDaemon(); err != nil {
+		e.logger.Warn("could not create task-daemon session", "error", err)
+		return false
+	}
+
+	windowName := TmuxWindowName(taskID)
+	windowTarget := TmuxSessionName(taskID)
+
+	// Kill any existing window with this name (with timeout)
+	killCtx, killCancel := context.WithTimeout(context.Background(), 3*time.Second)
+	exec.CommandContext(killCtx, "tmux", "kill-window", "-t", windowTarget).Run()
+	killCancel()
+
+	// Setup Claude hooks for status updates
+	cleanupHooks, err := e.setupClaudeHooks(workDir, taskID)
+	if err != nil {
+		e.logger.Warn("could not setup Claude hooks", "error", err)
+	}
+
+	// Script that resumes claude with session ID in safe mode (without dangerous flag)
+	// Environment variables passed:
+	// - WORKTREE_TASK_ID: Task identifier for hooks
+	// - WORKTREE_SESSION_ID: Consistent session naming across processes
+	// - WORKTREE_PORT: Unique port for running the application
+	// - WORKTREE_PATH: Path to the task's git worktree
+	taskSessionID := os.Getenv("WORKTREE_SESSION_ID")
+	if taskSessionID == "" {
+		taskSessionID = fmt.Sprintf("%d", os.Getpid())
+	}
+
+	// Resume without --dangerously-skip-permissions (safe mode)
+	script := fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q claude --chrome --resume %s`,
+		taskID, taskSessionID, task.Port, task.WorktreePath, claudeSessionID)
+
+	// Create new window in task-daemon session (with timeout for tmux overhead)
+	newWinCtx, newWinCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	tmuxCmd := exec.CommandContext(newWinCtx, "tmux", "new-window", "-d", "-t", getDaemonSessionName(), "-n", windowName, "-c", workDir, "sh", "-c", script)
+	tmuxErr := tmuxCmd.Run()
+	newWinCancel()
+	if tmuxErr != nil {
+		e.logger.Warn("tmux failed to create window", "error", tmuxErr)
+		if cleanupHooks != nil {
+			cleanupHooks()
+		}
+		return false
+	}
+
+	// Configure tmux window with helpful status bar
+	e.configureTmuxWindow(windowTarget)
+
+	// Update the task's dangerous mode flag in the database
+	if err := e.db.UpdateTaskDangerousMode(taskID, false); err != nil {
+		e.logger.Warn("could not update task dangerous mode", "error", err)
+	}
+
+	e.logLine(taskID, "system", "Claude restarted in safe mode (permissions enabled)")
 
 	// Don't poll for completion here - the process will continue running in tmux
 	// The existing polling infrastructure will handle it

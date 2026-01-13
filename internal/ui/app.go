@@ -1764,11 +1764,27 @@ func (m *AppModel) deleteTask(id int64) tea.Cmd {
 
 func (m *AppModel) toggleDangerousMode(id int64) tea.Cmd {
 	exec := m.executor
+	database := m.db
 	return func() tea.Msg {
-		// Call the executor to resume the task with dangerous flag
-		success := exec.ResumeDangerous(id)
-		if !success {
-			return taskDangerousModeToggledMsg{err: fmt.Errorf("failed to restart Claude in dangerous mode")}
+		// Get the task to check current dangerous mode state
+		task, err := database.GetTask(id)
+		if err != nil || task == nil {
+			return taskDangerousModeToggledMsg{err: fmt.Errorf("failed to get task")}
+		}
+
+		var success bool
+		if task.DangerousMode {
+			// Currently in dangerous mode, switch to safe mode
+			success = exec.ResumeSafe(id)
+			if !success {
+				return taskDangerousModeToggledMsg{err: fmt.Errorf("failed to restart Claude in safe mode")}
+			}
+		} else {
+			// Currently in safe mode, switch to dangerous mode
+			success = exec.ResumeDangerous(id)
+			if !success {
+				return taskDangerousModeToggledMsg{err: fmt.Errorf("failed to restart Claude in dangerous mode")}
+			}
 		}
 		return taskDangerousModeToggledMsg{err: nil}
 	}

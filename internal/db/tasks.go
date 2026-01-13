@@ -23,6 +23,7 @@ type Task struct {
 	ClaudeSessionID string // Claude session ID for resuming conversations
 	PRURL           string // Pull request URL (if associated with a PR)
 	PRNumber        int    // Pull request number (if associated with a PR)
+	DangerousMode   bool   // Whether task is running in dangerous mode (--dangerously-skip-permissions)
 	CreatedAt       LocalTime
 	UpdatedAt       LocalTime
 	StartedAt       *LocalTime
@@ -138,6 +139,7 @@ func (db *DB) GetTask(id int64) (*Task, error) {
 		SELECT id, title, body, status, type, project,
 		       worktree_path, branch_name, port, claude_session_id,
 		       COALESCE(pr_url, ''), COALESCE(pr_number, 0),
+		       COALESCE(dangerous_mode, 0),
 		       created_at, updated_at, started_at, completed_at,
 		       scheduled_at, recurrence, last_run_at
 		FROM tasks WHERE id = ?
@@ -145,6 +147,7 @@ func (db *DB) GetTask(id int64) (*Task, error) {
 		&t.ID, &t.Title, &t.Body, &t.Status, &t.Type, &t.Project,
 		&t.WorktreePath, &t.BranchName, &t.Port, &t.ClaudeSessionID,
 		&t.PRURL, &t.PRNumber,
+		&t.DangerousMode,
 		&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
 		&t.ScheduledAt, &t.Recurrence, &t.LastRunAt,
 	)
@@ -173,6 +176,7 @@ func (db *DB) ListTasks(opts ListTasksOptions) ([]*Task, error) {
 		SELECT id, title, body, status, type, project,
 		       worktree_path, branch_name, port, claude_session_id,
 		       COALESCE(pr_url, ''), COALESCE(pr_number, 0),
+		       COALESCE(dangerous_mode, 0),
 		       created_at, updated_at, started_at, completed_at,
 		       scheduled_at, recurrence, last_run_at
 		FROM tasks WHERE 1=1
@@ -224,6 +228,7 @@ func (db *DB) ListTasks(opts ListTasksOptions) ([]*Task, error) {
 			&t.ID, &t.Title, &t.Body, &t.Status, &t.Type, &t.Project,
 			&t.WorktreePath, &t.BranchName, &t.Port, &t.ClaudeSessionID,
 			&t.PRURL, &t.PRNumber,
+			&t.DangerousMode,
 			&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
 			&t.ScheduledAt, &t.Recurrence, &t.LastRunAt,
 		)
@@ -273,13 +278,13 @@ func (db *DB) UpdateTask(t *Task) error {
 		UPDATE tasks SET
 			title = ?, body = ?, status = ?, type = ?, project = ?,
 			worktree_path = ?, branch_name = ?, port = ?, claude_session_id = ?,
-			pr_url = ?, pr_number = ?,
+			pr_url = ?, pr_number = ?, dangerous_mode = ?,
 			scheduled_at = ?, recurrence = ?, last_run_at = ?,
 			updated_at = CURRENT_TIMESTAMP
 		WHERE id = ?
 	`, t.Title, t.Body, t.Status, t.Type, t.Project,
 		t.WorktreePath, t.BranchName, t.Port, t.ClaudeSessionID,
-		t.PRURL, t.PRNumber,
+		t.PRURL, t.PRNumber, t.DangerousMode,
 		t.ScheduledAt, t.Recurrence, t.LastRunAt, t.ID)
 	if err != nil {
 		return fmt.Errorf("update task: %w", err)
@@ -295,6 +300,18 @@ func (db *DB) UpdateTaskClaudeSessionID(taskID int64, sessionID string) error {
 	`, sessionID, taskID)
 	if err != nil {
 		return fmt.Errorf("update task claude session id: %w", err)
+	}
+	return nil
+}
+
+// UpdateTaskDangerousMode updates only the dangerous_mode flag for a task.
+func (db *DB) UpdateTaskDangerousMode(taskID int64, dangerousMode bool) error {
+	_, err := db.Exec(`
+		UPDATE tasks SET dangerous_mode = ?, updated_at = CURRENT_TIMESTAMP
+		WHERE id = ?
+	`, dangerousMode, taskID)
+	if err != nil {
+		return fmt.Errorf("update task dangerous mode: %w", err)
 	}
 	return nil
 }
@@ -375,6 +392,7 @@ func (db *DB) GetNextQueuedTask() (*Task, error) {
 		SELECT id, title, body, status, type, project,
 		       worktree_path, branch_name, port, claude_session_id,
 		       COALESCE(pr_url, ''), COALESCE(pr_number, 0),
+		       COALESCE(dangerous_mode, 0),
 		       created_at, updated_at, started_at, completed_at,
 		       scheduled_at, recurrence, last_run_at
 		FROM tasks
@@ -385,6 +403,7 @@ func (db *DB) GetNextQueuedTask() (*Task, error) {
 		&t.ID, &t.Title, &t.Body, &t.Status, &t.Type, &t.Project,
 		&t.WorktreePath, &t.BranchName, &t.Port, &t.ClaudeSessionID,
 		&t.PRURL, &t.PRNumber,
+		&t.DangerousMode,
 		&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
 		&t.ScheduledAt, &t.Recurrence, &t.LastRunAt,
 	)
@@ -403,6 +422,7 @@ func (db *DB) GetQueuedTasks() ([]*Task, error) {
 		SELECT id, title, body, status, type, project,
 		       worktree_path, branch_name, port, claude_session_id,
 		       COALESCE(pr_url, ''), COALESCE(pr_number, 0),
+		       COALESCE(dangerous_mode, 0),
 		       created_at, updated_at, started_at, completed_at,
 		       scheduled_at, recurrence, last_run_at
 		FROM tasks
@@ -421,6 +441,7 @@ func (db *DB) GetQueuedTasks() ([]*Task, error) {
 			&t.ID, &t.Title, &t.Body, &t.Status, &t.Type, &t.Project,
 			&t.WorktreePath, &t.BranchName, &t.Port, &t.ClaudeSessionID,
 			&t.PRURL, &t.PRNumber,
+			&t.DangerousMode,
 			&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
 			&t.ScheduledAt, &t.Recurrence, &t.LastRunAt,
 		); err != nil {
@@ -438,6 +459,7 @@ func (db *DB) GetTasksWithBranches() ([]*Task, error) {
 		SELECT id, title, body, status, type, project,
 		       worktree_path, branch_name, port, claude_session_id,
 		       COALESCE(pr_url, ''), COALESCE(pr_number, 0),
+		       COALESCE(dangerous_mode, 0),
 		       created_at, updated_at, started_at, completed_at,
 		       scheduled_at, recurrence, last_run_at
 		FROM tasks
@@ -456,6 +478,7 @@ func (db *DB) GetTasksWithBranches() ([]*Task, error) {
 			&t.ID, &t.Title, &t.Body, &t.Status, &t.Type, &t.Project,
 			&t.WorktreePath, &t.BranchName, &t.Port, &t.ClaudeSessionID,
 			&t.PRURL, &t.PRNumber,
+			&t.DangerousMode,
 			&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
 			&t.ScheduledAt, &t.Recurrence, &t.LastRunAt,
 		); err != nil {
@@ -476,6 +499,7 @@ func (db *DB) GetDueScheduledTasks() ([]*Task, error) {
 		SELECT id, title, body, status, type, project,
 		       worktree_path, branch_name, port, claude_session_id,
 		       COALESCE(pr_url, ''), COALESCE(pr_number, 0),
+		       COALESCE(dangerous_mode, 0),
 		       created_at, updated_at, started_at, completed_at,
 		       scheduled_at, recurrence, last_run_at
 		FROM tasks
@@ -496,6 +520,7 @@ func (db *DB) GetDueScheduledTasks() ([]*Task, error) {
 			&t.ID, &t.Title, &t.Body, &t.Status, &t.Type, &t.Project,
 			&t.WorktreePath, &t.BranchName, &t.Port, &t.ClaudeSessionID,
 			&t.PRURL, &t.PRNumber,
+			&t.DangerousMode,
 			&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
 			&t.ScheduledAt, &t.Recurrence, &t.LastRunAt,
 		); err != nil {
@@ -512,6 +537,7 @@ func (db *DB) GetScheduledTasks() ([]*Task, error) {
 		SELECT id, title, body, status, type, project,
 		       worktree_path, branch_name, port, claude_session_id,
 		       COALESCE(pr_url, ''), COALESCE(pr_number, 0),
+		       COALESCE(dangerous_mode, 0),
 		       created_at, updated_at, started_at, completed_at,
 		       scheduled_at, recurrence, last_run_at
 		FROM tasks
@@ -530,6 +556,7 @@ func (db *DB) GetScheduledTasks() ([]*Task, error) {
 			&t.ID, &t.Title, &t.Body, &t.Status, &t.Type, &t.Project,
 			&t.WorktreePath, &t.BranchName, &t.Port, &t.ClaudeSessionID,
 			&t.PRURL, &t.PRNumber,
+			&t.DangerousMode,
 			&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
 			&t.ScheduledAt, &t.Recurrence, &t.LastRunAt,
 		); err != nil {
