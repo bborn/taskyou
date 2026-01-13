@@ -2882,6 +2882,39 @@ func (e *Executor) CleanupWorktree(task *db.Task) error {
 	return nil
 }
 
+// CleanupClaudeSessions removes Claude session files for a given worktree path.
+// Claude stores sessions in ~/.claude/projects/<escaped-path>/.
+// This should be called when deleting a task to clean up session data.
+func CleanupClaudeSessions(worktreePath string) error {
+	if worktreePath == "" {
+		return nil
+	}
+
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("get home dir: %w", err)
+	}
+
+	// Escape the worktree path to match Claude's project directory naming
+	// Claude replaces / with - and . with - (keeps leading dash)
+	escapedPath := strings.ReplaceAll(worktreePath, "/", "-")
+	escapedPath = strings.ReplaceAll(escapedPath, ".", "-")
+
+	projectDir := filepath.Join(home, ".claude", "projects", escapedPath)
+
+	// Check if directory exists
+	if _, err := os.Stat(projectDir); os.IsNotExist(err) {
+		return nil // Nothing to clean up
+	}
+
+	// Remove the entire project directory
+	if err := os.RemoveAll(projectDir); err != nil {
+		return fmt.Errorf("remove claude session dir %s: %w", projectDir, err)
+	}
+
+	return nil
+}
+
 // slugify converts a string to a URL/branch-friendly slug.
 func slugify(s string, maxLen int) string {
 	// Convert to lowercase
