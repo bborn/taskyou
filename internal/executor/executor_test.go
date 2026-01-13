@@ -473,3 +473,234 @@ func TestConversationHistory(t *testing.T) {
 		}
 	})
 }
+
+func TestRunWorktreeInitScriptStreaming(t *testing.T) {
+	// Create temp database
+	tmpFile, err := os.CreateTemp("", "test-*.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(tmpFile.Name())
+	tmpFile.Close()
+
+	database, err := db.Open(tmpFile.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+
+	// Create the test project
+	if err := database.CreateProject(&db.Project{Name: "test", Path: "/tmp/test"}); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.Config{}
+	exec := New(database, cfg)
+
+	// Create a test task
+	task := &db.Task{
+		Title:   "Test streaming task",
+		Status:  db.StatusProcessing,
+		Project: "test",
+		Port:    3100,
+	}
+	if err := database.CreateTask(task); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create a temp worktree directory
+	worktreeDir, err := os.MkdirTemp("", "test-worktree-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(worktreeDir)
+
+	// Create a temp project directory with a test init script
+	projectDir, err := os.MkdirTemp("", "test-project-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(projectDir)
+
+	// Create bin directory
+	binDir := projectDir + "/bin"
+	if err := os.MkdirAll(binDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Subscribe to task logs to capture streaming output
+	logCh := exec.Subscribe(task.ID)
+	defer exec.Unsubscribe(task.ID, logCh)
+
+	t.Run("streams output line by line", func(t *testing.T) {
+		// Create a test script that outputs multiple lines with delays
+		scriptContent := `#!/bin/bash
+echo "Line 1: Starting setup"
+echo "Line 2: Installing dependencies"
+echo "Line 3: Completed"
+`
+		scriptPath := binDir + "/worktree-setup"
+		if err := os.WriteFile(scriptPath, []byte(scriptContent), 0755); err != nil {
+			t.Fatal(err)
+		}
+
+		// Collect logs in the background
+		var collectedLogs []string
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			timeout := time.After(5 * time.Second)
+			expectedCount := 5 // "Running worktree init script", 3 lines, "completed successfully"
+			for {
+				select {
+				case log := <-logCh:
+					collectedLogs = append(collectedLogs, log.Content)
+					if len(collectedLogs) >= expectedCount {
+						return
+					}
+				case <-timeout:
+					return
+				}
+			}
+		}()
+
+		// Run the script
+		exec.runWorktreeInitScript(projectDir, worktreeDir, task)
+
+		// Wait for log collection to complete
+		<-done
+
+		// Verify the logs were streamed
+		if len(collectedLogs) < 4 {
+			t.Errorf("expected at least 4 log entries, got %d: %v", len(collectedLogs), collectedLogs)
+		}
+
+		// Check that each line was logged individually with [init] prefix
+		var foundLine1, foundLine2, foundLine3 bool
+		for _, log := range collectedLogs {
+			if strings.Contains(log, "[init] Line 1:") {
+				foundLine1 = true
+			}
+			if strings.Contains(log, "[init] Line 2:") {
+				foundLine2 = true
+			}
+			if strings.Contains(log, "[init] Line 3:") {
+				foundLine3 = true
+			}
+		}
+
+		if !foundLine1 || !foundLine2 || !foundLine3 {
+			t.Errorf("expected all three lines to be logged individually, got logs: %v", collectedLogs)
+		}
+	})
+
+	t.Run("handles stderr output", func(t *testing.T) {
+		// Clear previous logs
+		collectedLogs := []string{}
+
+		// Create a script that outputs to stderr
+		scriptContent := `#!/bin/bash
+echo "stdout message"
+echo "stderr message" >&2
+`
+		scriptPath := binDir + "/worktree-setup"
+		if err := os.WriteFile(scriptPath, []byte(scriptContent), 0755); err != nil {
+			t.Fatal(err)
+		}
+
+		// Collect logs in the background
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			timeout := time.After(5 * time.Second)
+			expectedCount := 4 // "Running worktree init script", stdout, stderr, "completed successfully"
+			for {
+				select {
+				case log := <-logCh:
+					collectedLogs = append(collectedLogs, log.Content)
+					if len(collectedLogs) >= expectedCount {
+						return
+					}
+				case <-timeout:
+					return
+				}
+			}
+		}()
+
+		// Run the script
+		exec.runWorktreeInitScript(projectDir, worktreeDir, task)
+
+		// Wait for log collection to complete
+		<-done
+
+		// Verify both stdout and stderr were captured
+		var foundStdout, foundStderr bool
+		for _, log := range collectedLogs {
+			if strings.Contains(log, "stdout message") {
+				foundStdout = true
+			}
+			if strings.Contains(log, "stderr message") {
+				foundStderr = true
+			}
+		}
+
+		if !foundStdout {
+			t.Error("expected stdout to be captured")
+		}
+		if !foundStderr {
+			t.Error("expected stderr to be captured")
+		}
+	})
+
+	t.Run("handles script failure", func(t *testing.T) {
+		// Clear previous logs
+		collectedLogs := []string{}
+
+		// Create a script that fails
+		scriptContent := `#!/bin/bash
+echo "Starting..."
+exit 1
+`
+		scriptPath := binDir + "/worktree-setup"
+		if err := os.WriteFile(scriptPath, []byte(scriptContent), 0755); err != nil {
+			t.Fatal(err)
+		}
+
+		// Collect logs in the background
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			timeout := time.After(5 * time.Second)
+			expectedCount := 3 // "Running worktree init script", "Starting...", "Warning: ... failed"
+			for {
+				select {
+				case log := <-logCh:
+					collectedLogs = append(collectedLogs, log.Content)
+					if len(collectedLogs) >= expectedCount {
+						return
+					}
+				case <-timeout:
+					return
+				}
+			}
+		}()
+
+		// Run the script
+		exec.runWorktreeInitScript(projectDir, worktreeDir, task)
+
+		// Wait for log collection to complete
+		<-done
+
+		// Verify failure was logged
+		var foundFailure bool
+		for _, log := range collectedLogs {
+			if strings.Contains(log, "Warning: worktree init script failed") {
+				foundFailure = true
+			}
+		}
+
+		if !foundFailure {
+			t.Errorf("expected failure message, got logs: %v", collectedLogs)
+		}
+	})
+}

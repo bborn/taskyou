@@ -2,6 +2,7 @@
 package executor
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -2649,6 +2650,7 @@ func copyMCPConfig(srcDir, dstDir string) error {
 // runWorktreeInitScript runs the worktree init script if configured or conventionally present.
 // It sets environment variables WORKTREE_TASK_ID, WORKTREE_PORT, and WORKTREE_PATH.
 // Non-zero exit codes are logged as warnings but do not cause the worktree setup to fail.
+// Output is streamed line-by-line in real-time to provide feedback during long-running scripts.
 func (e *Executor) runWorktreeInitScript(projectDir, worktreePath string, task *db.Task) {
 	scriptPath := GetWorktreeInitScript(projectDir)
 	if scriptPath == "" {
@@ -2667,23 +2669,65 @@ func (e *Executor) runWorktreeInitScript(projectDir, worktreePath string, task *
 		fmt.Sprintf("WORKTREE_PATH=%s", worktreePath),
 	)
 
-	output, err := cmd.CombinedOutput()
+	// Set up pipes for streaming output in real-time
+	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		e.logger.Warn("worktree init script failed",
-			"script", scriptPath,
-			"error", err,
-			"output", string(output),
-		)
-		e.logLine(task.ID, "system", fmt.Sprintf("Warning: worktree init script failed: %v", err))
-		if len(output) > 0 {
-			e.logLine(task.ID, "system", fmt.Sprintf("Script output: %s", string(output)))
-		}
+		e.logger.Warn("failed to create stdout pipe for worktree init script", "error", err)
+		e.logLine(task.ID, "system", fmt.Sprintf("Warning: failed to set up script output: %v", err))
 		return
 	}
 
-	if len(output) > 0 {
-		e.logLine(task.ID, "system", fmt.Sprintf("Init script output: %s", string(output)))
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		e.logger.Warn("failed to create stderr pipe for worktree init script", "error", err)
+		e.logLine(task.ID, "system", fmt.Sprintf("Warning: failed to set up script output: %v", err))
+		return
 	}
+
+	// Start the command
+	if err := cmd.Start(); err != nil {
+		e.logger.Warn("failed to start worktree init script", "script", scriptPath, "error", err)
+		e.logLine(task.ID, "system", fmt.Sprintf("Warning: failed to start worktree init script: %v", err))
+		return
+	}
+
+	// Stream output from both stdout and stderr concurrently
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	// Stream stdout
+	go func() {
+		defer wg.Done()
+		scanner := bufio.NewScanner(stdout)
+		for scanner.Scan() {
+			line := scanner.Text()
+			e.logLine(task.ID, "system", fmt.Sprintf("[init] %s", line))
+		}
+	}()
+
+	// Stream stderr
+	go func() {
+		defer wg.Done()
+		scanner := bufio.NewScanner(stderr)
+		for scanner.Scan() {
+			line := scanner.Text()
+			e.logLine(task.ID, "system", fmt.Sprintf("[init] %s", line))
+		}
+	}()
+
+	// Wait for all output to be read
+	wg.Wait()
+
+	// Wait for the command to finish
+	if err := cmd.Wait(); err != nil {
+		e.logger.Warn("worktree init script failed",
+			"script", scriptPath,
+			"error", err,
+		)
+		e.logLine(task.ID, "system", fmt.Sprintf("Warning: worktree init script failed: %v", err))
+		return
+	}
+
 	e.logLine(task.ID, "system", "Worktree init script completed successfully")
 }
 
