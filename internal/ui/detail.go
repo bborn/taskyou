@@ -317,7 +317,8 @@ func (m *DetailModel) startResumableSession(sessionID string) {
 	// If no daemon session exists, create one
 	if daemonSession == "" {
 		daemonSession = fmt.Sprintf("task-daemon-%d", os.Getpid())
-		err := exec.CommandContext(ctx, "tmux", "new-session", "-d", "-s", daemonSession, "-n", "_placeholder").Run()
+		// Use "tail -f /dev/null" to keep placeholder alive (empty windows exit immediately)
+		err := exec.CommandContext(ctx, "tmux", "new-session", "-d", "-s", daemonSession, "-n", "_placeholder", "tail", "-f", "/dev/null").Run()
 		if err != nil {
 			return
 		}
@@ -356,11 +357,17 @@ func (m *DetailModel) startResumableSession(sessionID string) {
 	time.Sleep(100 * time.Millisecond)
 
 	// Create shell pane alongside Claude
+	// Use user's default shell, fallback to zsh
+	shell := os.Getenv("SHELL")
+	if shell == "" {
+		shell = "/bin/zsh"
+	}
 	windowTarget := daemonSession + ":" + windowName
 	exec.CommandContext(ctx, "tmux", "split-window",
 		"-h",                  // horizontal split
 		"-t", windowTarget+".0", // split from Claude pane
-		"-c", workDir).Run()   // start in task workdir
+		"-c", workDir,         // start in task workdir
+		shell).Run()           // user's shell to prevent immediate exit
 
 	// Set pane titles
 	exec.CommandContext(ctx, "tmux", "select-pane", "-t", windowTarget+".0", "-T", "Claude").Run()
@@ -663,10 +670,16 @@ func (m *DetailModel) joinTmuxPanes() {
 	} else {
 		// Daemon only had Claude pane (old task). Create shell pane directly in task-ui
 		workdir := m.getWorkdir()
+		// Use user's default shell, fallback to zsh
+		userShell := os.Getenv("SHELL")
+		if userShell == "" {
+			userShell = "/bin/zsh"
+		}
 		err = exec.CommandContext(ctx, "tmux", "split-window",
 			"-h", "-l", shellWidth,
 			"-t", m.claudePaneID,
-			"-c", workdir).Run()
+			"-c", workdir,
+			userShell).Run() // user's shell to prevent immediate exit
 		if err != nil {
 			m.workdirPaneID = ""
 		} else {
