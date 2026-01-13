@@ -218,6 +218,8 @@ func (db *DB) migrate() error {
 		`ALTER TABLE tasks ADD COLUMN pr_number INTEGER DEFAULT 0`, // Pull request number (if associated with a PR)
 		// Dangerous mode tracking
 		`ALTER TABLE tasks ADD COLUMN dangerous_mode INTEGER DEFAULT 0`, // Whether running with --dangerously-skip-permissions
+		// Daemon session tracking for process management
+		`ALTER TABLE tasks ADD COLUMN daemon_session TEXT DEFAULT ''`, // tmux daemon session name for killing Claude
 	}
 
 	for _, m := range alterMigrations {

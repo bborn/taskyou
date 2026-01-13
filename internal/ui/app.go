@@ -1459,7 +1459,23 @@ func (m *AppModel) changeTaskStatus(id int64, status string) tea.Cmd {
 	database := m.db
 	exec := m.executor
 	return func() tea.Msg {
-		err := database.UpdateTaskStatus(id, status)
+		// Get current task to check if we're moving from done to active
+		task, err := database.GetTask(id)
+		if err != nil {
+			return taskStatusChangedMsg{err: err}
+		}
+
+		// If moving from done to any active status (except backlog), set to queued
+		// so the executor can resume Claude with the stored session
+		actualStatus := status
+		if task.Status == db.StatusDone && status != db.StatusBacklog && status != db.StatusDone {
+			// If task has a Claude session, queue it so executor resumes Claude
+			if task.ClaudeSessionID != "" {
+				actualStatus = db.StatusQueued
+			}
+		}
+
+		err = database.UpdateTaskStatus(id, actualStatus)
 		if err == nil {
 			if task, _ := database.GetTask(id); task != nil {
 				exec.NotifyTaskChange("status_changed", task)
