@@ -587,9 +587,12 @@ func (m *DetailModel) joinTmuxPanes() {
 	exec.CommandContext(ctx, "tmux", "select-pane", "-t", m.claudePaneID, "-T", claudeTitle).Run()
 
 	// Step 2: Join or create the workdir pane
-	// First, check if a workdir pane already exists in the task-daemon window (pane .1)
-	// This preserves shell processes across navigation
-	checkPaneCmd := exec.CommandContext(ctx, "tmux", "display-message", "-p", "-t", windowTarget+".1", "#{pane_id}")
+	// First, check if a workdir pane already exists in THIS task's daemon window
+	// We need to verify it's actually in the correct task window, not some other task
+	windowName := executor.TmuxWindowName(m.task.ID)
+	daemonWindowTarget := strings.SplitN(windowTarget, ":", 2)[0] + ":" + windowName
+
+	checkPaneCmd := exec.CommandContext(ctx, "tmux", "display-message", "-p", "-t", daemonWindowTarget+".1", "#{pane_id}")
 	checkPaneOut, checkErr := checkPaneCmd.Output()
 
 	var existingWorkdirPane string
@@ -611,6 +614,19 @@ func (m *DetailModel) joinTmuxPanes() {
 			workdirPaneCmd := exec.CommandContext(ctx, "tmux", "display-message", "-p", "#{pane_id}")
 			workdirPaneOut, _ := workdirPaneCmd.Output()
 			m.workdirPaneID = strings.TrimSpace(string(workdirPaneOut))
+
+			// Check if the pane is already in the correct directory
+			// Only send cd command if it's not, to avoid interrupting running processes
+			workdir := m.getWorkdir()
+			currentPathCmd := exec.CommandContext(ctx, "tmux", "display-message", "-p", "-t", m.workdirPaneID, "#{pane_current_path}")
+			if currentPathOut, err := currentPathCmd.Output(); err == nil {
+				currentPath := strings.TrimSpace(string(currentPathOut))
+				if currentPath != workdir {
+					// Directory doesn't match, send cd command
+					exec.CommandContext(ctx, "tmux", "send-keys", "-t", m.workdirPaneID, fmt.Sprintf("cd %q", workdir), "Enter").Run()
+				}
+				// If directory matches, don't send anything - preserves running processes
+			}
 
 			// Set Shell pane title
 			exec.CommandContext(ctx, "tmux", "select-pane", "-t", m.workdirPaneID, "-T", "Shell").Run()
