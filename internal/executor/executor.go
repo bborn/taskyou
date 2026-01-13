@@ -1620,8 +1620,8 @@ func (e *Executor) ResumeDangerous(taskID int64) bool {
 		e.logger.Warn("failed to save daemon session", "task", taskID, "error", err)
 	}
 
-	// Ensure shell pane exists alongside Claude pane
-	e.ensureShellPane(windowTarget, workDir)
+	// Ensure shell pane exists alongside Claude pane with environment variables
+	e.ensureShellPane(windowTarget, workDir, task.ID, task.Port, task.WorktreePath)
 
 	// Configure tmux window with helpful status bar
 	e.configureTmuxWindow(windowTarget)
