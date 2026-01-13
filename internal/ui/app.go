@@ -1727,6 +1727,11 @@ func (m *AppModel) closeTask(id int64) tea.Cmd {
 				exec.NotifyTaskChange("status_changed", task)
 			}
 		}
+
+		// Kill the task window to clean up both Claude and workdir panes
+		windowTarget := executor.TmuxSessionName(id)
+		osExec.Command("tmux", "kill-window", "-t", windowTarget).Run()
+
 		return taskClosedMsg{err: err}
 	}
 }
