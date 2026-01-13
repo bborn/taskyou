@@ -1361,6 +1361,96 @@ func (e *Executor) runClaudeResume(ctx context.Context, task *db.Task, workDir, 
 	return result
 }
 
+// ResumeDangerous kills the current Claude process and restarts it with --dangerously-skip-permissions.
+// This allows switching a running task to dangerous mode without restarting the daemon.
+// Returns true if successfully restarted, false otherwise.
+func (e *Executor) ResumeDangerous(taskID int64) bool {
+	// Get the task to access session ID and work directory
+	task, err := e.db.GetTask(taskID)
+	if err != nil || task == nil {
+		e.logger.Error("Failed to get task", "taskID", taskID, "error", err)
+		return false
+	}
+
+	claudeSessionID := task.ClaudeSessionID
+	if claudeSessionID == "" {
+		e.logLine(taskID, "system", "No Claude session found - cannot resume in dangerous mode")
+		return false
+	}
+
+	workDir := task.WorktreePath
+	if workDir == "" {
+		e.logger.Error("Task has no worktree path", "taskID", taskID)
+		return false
+	}
+
+	// Log the action
+	e.logLine(taskID, "system", "Restarting Claude with --dangerously-skip-permissions")
+
+	// Check if tmux is available
+	if _, err := exec.LookPath("tmux"); err != nil {
+		e.logLine(taskID, "system", "Tmux not available - cannot resume")
+		return false
+	}
+
+	// Ensure task-daemon session exists
+	if err := ensureTmuxDaemon(); err != nil {
+		e.logger.Warn("could not create task-daemon session", "error", err)
+		return false
+	}
+
+	windowName := TmuxWindowName(taskID)
+	windowTarget := TmuxSessionName(taskID)
+
+	// Kill any existing window with this name (with timeout)
+	killCtx, killCancel := context.WithTimeout(context.Background(), 3*time.Second)
+	exec.CommandContext(killCtx, "tmux", "kill-window", "-t", windowTarget).Run()
+	killCancel()
+
+	// Setup Claude hooks for status updates
+	cleanupHooks, err := e.setupClaudeHooks(workDir, taskID)
+	if err != nil {
+		e.logger.Warn("could not setup Claude hooks", "error", err)
+	}
+
+	// Script that resumes claude with session ID in dangerous mode (interactive mode)
+	// Environment variables passed:
+	// - WORKTREE_TASK_ID: Task identifier for hooks
+	// - WORKTREE_SESSION_ID: Consistent session naming across processes
+	// - WORKTREE_PORT: Unique port for running the application
+	// - WORKTREE_PATH: Path to the task's git worktree
+	taskSessionID := os.Getenv("WORKTREE_SESSION_ID")
+	if taskSessionID == "" {
+		taskSessionID = fmt.Sprintf("%d", os.Getpid())
+	}
+
+	// Force dangerous mode regardless of WORKTREE_DANGEROUS_MODE setting
+	script := fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q claude --dangerously-skip-permissions --chrome --resume %s`,
+		taskID, taskSessionID, task.Port, task.WorktreePath, claudeSessionID)
+
+	// Create new window in task-daemon session (with timeout for tmux overhead)
+	newWinCtx, newWinCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	tmuxCmd := exec.CommandContext(newWinCtx, "tmux", "new-window", "-d", "-t", getDaemonSessionName(), "-n", windowName, "-c", workDir, "sh", "-c", script)
+	tmuxErr := tmuxCmd.Run()
+	newWinCancel()
+	if tmuxErr != nil {
+		e.logger.Warn("tmux failed to create window", "error", tmuxErr)
+		if cleanupHooks != nil {
+			cleanupHooks()
+		}
+		return false
+	}
+
+	// Configure tmux window with helpful status bar
+	e.configureTmuxWindow(windowTarget)
+
+	e.logLine(taskID, "system", "Claude restarted in dangerous mode (--dangerously-skip-permissions enabled)")
+
+	// Don't poll for completion here - the process will continue running in tmux
+	// The existing polling infrastructure will handle it
+	return true
+}
+
 // FindClaudeSessionID finds the most recent claude session ID for a workDir.
 // Exported for use by the UI to check for resumable sessions.
 func FindClaudeSessionID(workDir string) string {

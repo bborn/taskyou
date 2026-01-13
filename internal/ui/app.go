@@ -55,9 +55,10 @@ type KeyMap struct {
 	Settings       key.Binding
 	Memories       key.Binding
 	Help           key.Binding
-	Quit           key.Binding
-	ChangeStatus   key.Binding
-	CommandPalette key.Binding
+	Quit            key.Binding
+	ChangeStatus    key.Binding
+	CommandPalette  key.Binding
+	ToggleDangerous key.Binding
 	// Column focus shortcuts
 	FocusBacklog    key.Binding
 	FocusInProgress key.Binding
@@ -160,6 +161,10 @@ func DefaultKeyMap() KeyMap {
 		CommandPalette: key.NewBinding(
 			key.WithKeys("p", "ctrl+p"),
 			key.WithHelp("p/ctrl+p", "go to task"),
+		),
+		ToggleDangerous: key.NewBinding(
+			key.WithKeys("!"),
+			key.WithHelp("!", "dangerous mode"),
 		),
 		FocusBacklog: key.NewBinding(
 			key.WithKeys("B"),
@@ -538,7 +543,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.err = msg.err
 		}
 
-	case taskQueuedMsg, taskClosedMsg, taskDeletedMsg, taskRetriedMsg, taskStatusChangedMsg:
+	case taskQueuedMsg, taskClosedMsg, taskDeletedMsg, taskRetriedMsg, taskStatusChangedMsg, taskDangerousModeToggledMsg:
 		cmds = append(cmds, m.loadTasks())
 
 	case taskEventMsg:
@@ -965,6 +970,12 @@ func (m *AppModel) updateDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 	if key.Matches(keyMsg, m.keys.ChangeStatus) && m.selectedTask != nil {
 		return m.showChangeStatus(m.selectedTask)
+	}
+	if key.Matches(keyMsg, m.keys.ToggleDangerous) && m.selectedTask != nil {
+		// Only allow toggling dangerous mode if task is processing or blocked
+		if m.selectedTask.Status == db.StatusProcessing || m.selectedTask.Status == db.StatusBlocked {
+			return m, m.toggleDangerousMode(m.selectedTask.ID)
+		}
 	}
 
 	// Arrow key navigation to prev/next task in the same column
@@ -1607,6 +1618,10 @@ type taskDeletedMsg struct {
 	err error
 }
 
+type taskDangerousModeToggledMsg struct {
+	err error
+}
+
 type taskRetriedMsg struct {
 	err error
 }
@@ -1736,6 +1751,18 @@ func (m *AppModel) deleteTask(id int64) tea.Cmd {
 		// Delete from database
 		err = m.db.DeleteTask(id)
 		return taskDeletedMsg{err: err}
+	}
+}
+
+func (m *AppModel) toggleDangerousMode(id int64) tea.Cmd {
+	exec := m.executor
+	return func() tea.Msg {
+		// Call the executor to resume the task with dangerous flag
+		success := exec.ResumeDangerous(id)
+		if !success {
+			return taskDangerousModeToggledMsg{err: fmt.Errorf("failed to restart Claude in dangerous mode")}
+		}
+		return taskDangerousModeToggledMsg{err: nil}
 	}
 }
 

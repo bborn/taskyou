@@ -1016,6 +1016,14 @@ func (m *DetailModel) renderHelp() string {
 		desc string
 	}{"S", "status"})
 
+	// Show dangerous mode toggle when task is processing or blocked
+	if m.task != nil && (m.task.Status == db.StatusProcessing || m.task.Status == db.StatusBlocked) {
+		keys = append(keys, struct {
+			key  string
+			desc string
+		}{"!", "dangerous mode"})
+	}
+
 	// Show Tab shortcut when panes are visible
 	if hasPanes && os.Getenv("TMUX") != "" {
 		keys = append(keys, struct {
