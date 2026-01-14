@@ -2089,7 +2089,8 @@ func killClaudeSession(taskID int) error {
 	return nil
 }
 
-// cleanupOrphanedClaudes kills Claude processes that aren't tied to any active task windows.
+// cleanupOrphanedClaudes kills Claude processes that aren't tied to any active task windows
+// or belong to done tasks older than 2 hours.
 func cleanupOrphanedClaudes() {
 	// Step 1: Get all task windows across ALL task-daemon-* sessions
 	activeTaskIDs := make(map[int]bool)
@@ -2125,6 +2126,26 @@ func cleanupOrphanedClaudes() {
 		}
 	}
 
+	// Step 1b: Get task IDs of done tasks older than 2 hours - these should be killed
+	doneOldTaskIDs := make(map[int]bool)
+	dbPath := db.DefaultPath()
+	database, err := db.Open(dbPath)
+	if err == nil {
+		defer database.Close()
+		twoHoursAgo := time.Now().Add(-2 * time.Hour)
+		// Get done tasks completed more than 2 hours ago
+		tasks, err := database.ListTasks(db.ListTasksOptions{
+			Status: db.StatusDone,
+		})
+		if err == nil {
+			for _, task := range tasks {
+				if task.CompletedAt != nil && task.CompletedAt.Before(twoHoursAgo) {
+					doneOldTaskIDs[int(task.ID)] = true
+				}
+			}
+		}
+	}
+
 	// Step 2: Get all Claude processes running in tmux
 	pgrepOut, err := osexec.Command("pgrep", "-f", "claude.*TERM_PROGRAM=tmux").Output()
 	if err != nil {
@@ -2134,6 +2155,7 @@ func cleanupOrphanedClaudes() {
 	}
 
 	var orphanedPIDs []int
+	var oldDonePIDs []int
 	for _, pidStr := range strings.Split(string(pgrepOut), "\n") {
 		pidStr = strings.TrimSpace(pidStr)
 		if pidStr == "" {
@@ -2154,15 +2176,21 @@ func cleanupOrphanedClaudes() {
 
 		env := string(envOut)
 		isOrphaned := true
+		var extractedTaskID int
 
 		// Try to extract WORKTREE_TASK_ID from the command line
 		if idx := strings.Index(env, "WORKTREE_TASK_ID="); idx >= 0 {
-			var taskID int
-			if _, err := fmt.Sscanf(env[idx:], "WORKTREE_TASK_ID=%d", &taskID); err == nil {
-				if activeTaskIDs[taskID] {
+			if _, err := fmt.Sscanf(env[idx:], "WORKTREE_TASK_ID=%d", &extractedTaskID); err == nil {
+				if activeTaskIDs[extractedTaskID] {
 					isOrphaned = false
 				}
 			}
+		}
+
+		// Check if this is from an old done task
+		if !isOrphaned && extractedTaskID > 0 && doneOldTaskIDs[extractedTaskID] {
+			oldDonePIDs = append(oldDonePIDs, pid)
+			continue
 		}
 
 		if isOrphaned {
@@ -2170,16 +2198,23 @@ func cleanupOrphanedClaudes() {
 		}
 	}
 
-	if len(orphanedPIDs) == 0 {
+	totalToKill := len(orphanedPIDs) + len(oldDonePIDs)
+	if totalToKill == 0 {
 		fmt.Println(successStyle.Render("No orphaned Claude processes found"))
 		return
 	}
 
 	// Step 3: Kill orphaned processes
-	fmt.Printf("%s\n\n", boldStyle.Render(fmt.Sprintf("Found %d orphaned Claude processes:", len(orphanedPIDs))))
+	if len(orphanedPIDs) > 0 {
+		fmt.Printf("%s\n\n", boldStyle.Render(fmt.Sprintf("Found %d orphaned Claude processes:", len(orphanedPIDs))))
+	}
+	if len(oldDonePIDs) > 0 {
+		fmt.Printf("%s\n\n", boldStyle.Render(fmt.Sprintf("Found %d Claude processes from done tasks (>2h old):", len(oldDonePIDs))))
+	}
 
 	killed := 0
-	for _, pid := range orphanedPIDs {
+	allPIDs := append(orphanedPIDs, oldDonePIDs...)
+	for _, pid := range allPIDs {
 		proc, err := os.FindProcess(pid)
 		if err != nil {
 			fmt.Printf("  %s PID %d: %s\n", errorStyle.Render("✗"), pid, err.Error())
@@ -2195,7 +2230,7 @@ func cleanupOrphanedClaudes() {
 		killed++
 	}
 
-	fmt.Printf("\n%s\n", dimStyle.Render(fmt.Sprintf("Killed %d/%d orphaned processes", killed, len(orphanedPIDs))))
+	fmt.Printf("\n%s\n", dimStyle.Render(fmt.Sprintf("Killed %d/%d processes", killed, totalToKill)))
 }
 
 // deleteTask deletes a task, its Claude session, and its worktree.

@@ -117,6 +117,11 @@ func (m *DetailModel) Task() *db.Task {
 	return m.task
 }
 
+// ClaudePaneID returns the tmux pane ID where Claude is running.
+func (m *DetailModel) ClaudePaneID() string {
+	return m.claudePaneID
+}
+
 // NewDetailModel creates a new detail model.
 func NewDetailModel(t *db.Task, database *db.DB, exec *executor.Executor, width, height int) *DetailModel {
 	m := &DetailModel{
@@ -1157,9 +1162,9 @@ func (m *DetailModel) renderHelp() string {
 		{"↑/↓", "prev/next task"},
 	}
 
-	// Only show execute when task is not currently processing
-	isProcessing := m.task != nil && m.task.Status == db.StatusProcessing
-	if !isProcessing {
+	// Only show execute/retry when Claude is not running
+	claudeRunning := m.claudeMemoryMB > 0
+	if !claudeRunning {
 		keys = append(keys, struct {
 			key  string
 			desc string
@@ -1173,8 +1178,8 @@ func (m *DetailModel) renderHelp() string {
 		desc string
 	}{"e", "edit"})
 
-	// Only show retry when task is not currently processing
-	if !isProcessing {
+	// Only show retry when Claude is not running
+	if !claudeRunning {
 		keys = append(keys, struct {
 			key  string
 			desc string
@@ -1197,6 +1202,14 @@ func (m *DetailModel) renderHelp() string {
 			key  string
 			desc string
 		}{"!", toggleDesc})
+	}
+
+	// Show Claude resume shortcut only when Claude is not running but has a session
+	if m.task != nil && m.task.ClaudeSessionID != "" && m.claudeMemoryMB == 0 {
+		keys = append(keys, struct {
+			key  string
+			desc string
+		}{"R", "resume claude"})
 	}
 
 	// Show Tab shortcut when panes are visible

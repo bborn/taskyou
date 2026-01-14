@@ -246,30 +246,76 @@ func (e *Executor) IsSuspended(taskID int64) bool {
 	return suspended
 }
 
-// getClaudePID finds the PID of the Claude process in a task's tmux window.
+// getClaudePID finds the PID of the Claude process for a task.
+// It first checks the stored daemon session, then searches all sessions for the task window.
 func (e *Executor) getClaudePID(taskID int64) int {
-	// First try to get the stored daemon session from the database
-	daemonSession := ""
-	if task, err := e.db.GetTask(taskID); err == nil && task != nil && task.DaemonSession != "" {
-		daemonSession = task.DaemonSession
-	} else {
-		// Fall back to current session (for backwards compatibility)
-		daemonSession = getDaemonSessionName()
-	}
-
-	windowTarget := fmt.Sprintf("%s:%s", daemonSession, TmuxWindowName(taskID))
-
-	// Get the PID of the process running in the tmux pane
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
-	// First check if the window exists
-	if exec.CommandContext(ctx, "tmux", "list-panes", "-t", windowTarget).Run() != nil {
+	windowName := TmuxWindowName(taskID)
+
+	// Search all tmux sessions for a window with this task's name
+	out, err := exec.CommandContext(ctx, "tmux", "list-panes", "-a", "-F", "#{session_name}:#{window_name}:#{pane_index} #{pane_pid}").Output()
+	if err != nil {
 		return 0
 	}
 
-	// Get the PID of the active process in the pane
-	out, err := exec.CommandContext(ctx, "tmux", "display-message", "-t", windowTarget, "-p", "#{pane_pid}").Output()
+	for _, line := range strings.Split(string(out), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+
+		// Parse "session:window:pane pid"
+		parts := strings.Fields(line)
+		if len(parts) != 2 {
+			continue
+		}
+
+		target := parts[0]
+		pidStr := parts[1]
+
+		// Only match panes in windows named after this task
+		if !strings.Contains(target, windowName) {
+			continue
+		}
+
+		pid, err := strconv.Atoi(pidStr)
+		if err != nil {
+			continue
+		}
+
+		// Check if this is a Claude process or has Claude as child
+		cmdOut, _ := exec.CommandContext(ctx, "ps", "-p", strconv.Itoa(pid), "-o", "comm=").Output()
+		if strings.Contains(string(cmdOut), "claude") {
+			return pid
+		}
+
+		// Check for claude child process
+		childOut, err := exec.CommandContext(ctx, "pgrep", "-P", strconv.Itoa(pid), "claude").Output()
+		if err == nil && len(childOut) > 0 {
+			childPid, err := strconv.Atoi(strings.TrimSpace(string(childOut)))
+			if err == nil {
+				return childPid
+			}
+		}
+	}
+
+	return 0
+}
+
+// GetClaudePIDFromPane returns the Claude PID for a specific tmux pane.
+// This is used by the UI when it knows the exact pane ID.
+func GetClaudePIDFromPane(paneID string) int {
+	if paneID == "" {
+		return 0
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	// Get the PID of the process in this pane
+	out, err := exec.CommandContext(ctx, "tmux", "display-message", "-t", paneID, "-p", "#{pane_pid}").Output()
 	if err != nil {
 		return 0
 	}
@@ -279,8 +325,13 @@ func (e *Executor) getClaudePID(taskID int64) int {
 		return 0
 	}
 
-	// The pane_pid is the shell PID - we need to find the claude child process
-	// Look for claude process that's a child of this shell
+	// Check if this is Claude
+	cmdOut, _ := exec.CommandContext(ctx, "ps", "-p", strconv.Itoa(pid), "-o", "comm=").Output()
+	if strings.Contains(string(cmdOut), "claude") {
+		return pid
+	}
+
+	// Check for claude child
 	childOut, err := exec.CommandContext(ctx, "pgrep", "-P", strconv.Itoa(pid), "claude").Output()
 	if err == nil && len(childOut) > 0 {
 		childPid, err := strconv.Atoi(strings.TrimSpace(string(childOut)))
@@ -289,8 +340,7 @@ func (e *Executor) getClaudePID(taskID int64) int {
 		}
 	}
 
-	// Fallback: return the shell PID (suspending the shell will suspend claude too)
-	return pid
+	return pid // Return the pane PID as fallback
 }
 
 // KillClaudeProcess terminates the Claude process for a task to free up memory.
@@ -322,6 +372,11 @@ func (e *Executor) KillClaudeProcess(taskID int64) bool {
 	e.mu.Unlock()
 
 	return true
+}
+
+// IsClaudeRunning checks if a Claude process is running for a task.
+func (e *Executor) IsClaudeRunning(taskID int64) bool {
+	return e.getClaudePID(taskID) != 0
 }
 
 // Subscribe to log updates for a task.
