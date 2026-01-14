@@ -824,9 +824,9 @@ func (m *AppModel) renderFilterBar() string {
 	// Help hint
 	helpStyle := lipgloss.NewStyle().Foreground(ColorMuted).Italic(true)
 	if m.filterActive {
-		parts = append(parts, helpStyle.Render("  (Esc: clear, Enter: keep, ↑↓←→: navigate)"))
-	} else {
-		parts = append(parts, helpStyle.Render("  (Esc: clear filter)"))
+		parts = append(parts, helpStyle.Render("  (⌫: clear, Enter: select, ↑↓←→: navigate)"))
+	} else if m.filterText != "" {
+		parts = append(parts, helpStyle.Render("  (/: edit, Esc: clear)"))
 	}
 
 	filterContent := lipgloss.JoinHorizontal(lipgloss.Center, parts...)
@@ -976,7 +976,8 @@ func (m *AppModel) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 // updateFilterMode handles input when filter mode is active.
-// Navigation keys work while typing, Esc clears filter and exits filter mode.
+// Navigation keys work while typing. The filter stays applied when you navigate away.
+// Esc or backspace on empty clears filter and hides the filter bar.
 func (m *AppModel) updateFilterMode(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
@@ -988,8 +989,31 @@ func (m *AppModel) updateFilterMode(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.filterInput.SetValue("")
 			m.filterInput.Blur()
 			return m, m.loadTasks()
+		case "backspace":
+			// If filter is empty, clear and exit
+			if m.filterInput.Value() == "" {
+				m.filterActive = false
+				m.filterText = ""
+				m.filterInput.Blur()
+				return m, m.loadTasks()
+			}
+			// Otherwise, let the text input handle backspace
+			var cmd tea.Cmd
+			m.filterInput, cmd = m.filterInput.Update(msg)
+			newFilterText := m.filterInput.Value()
+			if newFilterText != m.filterText {
+				m.filterText = newFilterText
+				m.applyFilter()
+			}
+			return m, cmd
 		case "enter":
-			// Exit filter mode but keep filter applied
+			// Select task if one is highlighted
+			if task := m.kanban.SelectedTask(); task != nil {
+				m.filterActive = false
+				m.filterInput.Blur()
+				return m, m.loadTask(task.ID)
+			}
+			// Otherwise just exit filter mode
 			m.filterActive = false
 			m.filterInput.Blur()
 			return m, nil
