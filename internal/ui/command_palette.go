@@ -113,16 +113,34 @@ func (m *CommandPaletteModel) Update(msg tea.Msg) (*CommandPaletteModel, tea.Cmd
 }
 
 // filterTasks filters tasks based on the search query.
+// When a query is provided, it searches the database directly to find all matching tasks,
+// not just the preloaded ones. This allows finding older/done tasks that aren't in the main list.
 func (m *CommandPaletteModel) filterTasks() {
-	query := strings.ToLower(strings.TrimSpace(m.searchInput.Value()))
+	query := strings.TrimSpace(m.searchInput.Value())
 
 	if query == "" {
 		m.filteredTasks = m.allTasks
 	} else {
-		m.filteredTasks = nil
-		for _, task := range m.allTasks {
-			if m.matchesQuery(task, query) {
-				m.filteredTasks = append(m.filteredTasks, task)
+		queryLower := strings.ToLower(query)
+		useLocalFilter := true
+
+		// Search database directly to find all matching tasks (including older/done ones)
+		// Fall back to local filtering if db is nil or on error
+		if m.db != nil {
+			searchResults, err := m.db.SearchTasks(query, 50)
+			if err == nil {
+				m.filteredTasks = searchResults
+				useLocalFilter = false
+			}
+		}
+
+		// Fallback to local filtering
+		if useLocalFilter {
+			m.filteredTasks = nil
+			for _, task := range m.allTasks {
+				if m.matchesQuery(task, queryLower) {
+					m.filteredTasks = append(m.filteredTasks, task)
+				}
 			}
 		}
 	}

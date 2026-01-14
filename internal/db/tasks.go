@@ -242,6 +242,60 @@ func (db *DB) ListTasks(opts ListTasksOptions) ([]*Task, error) {
 	return tasks, nil
 }
 
+// SearchTasks searches for tasks by query string across title, project, ID, and PR number.
+// This is used by the command palette to search all tasks, not just the preloaded ones.
+func (db *DB) SearchTasks(query string, limit int) ([]*Task, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+
+	// Build search query with LIKE clauses
+	sqlQuery := `
+		SELECT id, title, body, status, type, project,
+		       worktree_path, branch_name, port, claude_session_id,
+		       COALESCE(daemon_session, ''), COALESCE(pr_url, ''), COALESCE(pr_number, 0),
+		       COALESCE(dangerous_mode, 0),
+		       created_at, updated_at, started_at, completed_at,
+		       scheduled_at, recurrence, last_run_at
+		FROM tasks
+		WHERE (
+			title LIKE ? COLLATE NOCASE
+			OR project LIKE ? COLLATE NOCASE
+			OR CAST(id AS TEXT) LIKE ?
+			OR CAST(pr_number AS TEXT) LIKE ?
+			OR pr_url LIKE ? COLLATE NOCASE
+		)
+		ORDER BY CASE WHEN status IN ('done', 'blocked') THEN completed_at ELSE created_at END DESC, id DESC
+		LIMIT ?
+	`
+
+	searchPattern := "%" + query + "%"
+	rows, err := db.Query(sqlQuery, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, limit)
+	if err != nil {
+		return nil, fmt.Errorf("search tasks: %w", err)
+	}
+	defer rows.Close()
+
+	var tasks []*Task
+	for rows.Next() {
+		t := &Task{}
+		err := rows.Scan(
+			&t.ID, &t.Title, &t.Body, &t.Status, &t.Type, &t.Project,
+			&t.WorktreePath, &t.BranchName, &t.Port, &t.ClaudeSessionID,
+			&t.DaemonSession, &t.PRURL, &t.PRNumber,
+			&t.DangerousMode,
+			&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
+			&t.ScheduledAt, &t.Recurrence, &t.LastRunAt,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("scan task: %w", err)
+		}
+		tasks = append(tasks, t)
+	}
+
+	return tasks, nil
+}
+
 // MarkTaskStarted sets the started_at timestamp if not already set.
 func (db *DB) MarkTaskStarted(id int64) error {
 	_, err := db.Exec(`
