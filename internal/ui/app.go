@@ -1160,19 +1160,13 @@ func (m *AppModel) updateDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	}
 	if key.Matches(keyMsg, m.keys.Close) && m.selectedTask != nil {
-		// Clean up detail view first
-		if m.detailView != nil {
-			m.detailView.Cleanup()
-			m.detailView = nil
-		}
+		// Don't cleanup detail view yet - wait for confirmation
+		// If user cancels, we need to return to detail view
 		return m.showCloseConfirm(m.selectedTask)
 	}
 	if key.Matches(keyMsg, m.keys.Delete) && m.selectedTask != nil {
-		// Clean up detail view first
-		if m.detailView != nil {
-			m.detailView.Cleanup()
-			m.detailView = nil
-		}
+		// Don't cleanup detail view yet - wait for confirmation
+		// If user cancels, we need to return to detail view
 		return m.showDeleteConfirm(m.selectedTask)
 	}
 	if key.Matches(keyMsg, m.keys.Edit) && m.selectedTask != nil {
@@ -1389,6 +1383,7 @@ func (m *AppModel) showDeleteConfirm(task *db.Task) (tea.Model, tea.Cmd) {
 	).WithTheme(huh.ThemeDracula()).
 		WithWidth(modalWidth - 6). // Account for modal padding and border
 		WithShowHelp(true)
+	m.previousView = m.currentView
 	m.currentView = ViewDeleteConfirm
 	return m, m.deleteConfirm.Init()
 }
@@ -1429,7 +1424,7 @@ func (m *AppModel) updateDeleteConfirm(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// Handle escape to cancel
 	if keyMsg, ok := msg.(tea.KeyMsg); ok {
 		if keyMsg.String() == "esc" {
-			m.currentView = ViewDashboard
+			m.currentView = m.previousView
 			m.deleteConfirm = nil
 			m.pendingDeleteTask = nil
 			return m, nil
@@ -1448,13 +1443,18 @@ func (m *AppModel) updateDeleteConfirm(msg tea.Msg) (tea.Model, tea.Cmd) {
 			taskID := m.pendingDeleteTask.ID
 			m.pendingDeleteTask = nil
 			m.deleteConfirm = nil
+			// Clean up detail view now that delete is confirmed
+			if m.detailView != nil {
+				m.detailView.Cleanup()
+				m.detailView = nil
+			}
 			m.currentView = ViewDashboard
 			return m, m.deleteTask(taskID)
 		}
-		// Cancelled
+		// Cancelled - return to previous view
 		m.pendingDeleteTask = nil
 		m.deleteConfirm = nil
-		m.currentView = ViewDashboard
+		m.currentView = m.previousView
 		return m, nil
 	}
 
@@ -1565,6 +1565,7 @@ func (m *AppModel) showCloseConfirm(task *db.Task) (tea.Model, tea.Cmd) {
 	).WithTheme(huh.ThemeDracula()).
 		WithWidth(modalWidth - 6). // Account for modal padding and border
 		WithShowHelp(true)
+	m.previousView = m.currentView
 	m.currentView = ViewCloseConfirm
 	return m, m.closeConfirm.Init()
 }
@@ -1605,7 +1606,7 @@ func (m *AppModel) updateCloseConfirm(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// Handle escape to cancel
 	if keyMsg, ok := msg.(tea.KeyMsg); ok {
 		if keyMsg.String() == "esc" {
-			m.currentView = ViewDashboard
+			m.currentView = m.previousView
 			m.closeConfirm = nil
 			m.pendingCloseTask = nil
 			return m, nil
@@ -1624,13 +1625,18 @@ func (m *AppModel) updateCloseConfirm(msg tea.Msg) (tea.Model, tea.Cmd) {
 			taskID := m.pendingCloseTask.ID
 			m.pendingCloseTask = nil
 			m.closeConfirm = nil
+			// Clean up detail view now that close is confirmed
+			if m.detailView != nil {
+				m.detailView.Cleanup()
+				m.detailView = nil
+			}
 			m.currentView = ViewDashboard
 			return m, m.closeTask(taskID)
 		}
-		// Cancelled
+		// Cancelled - return to previous view
 		m.pendingCloseTask = nil
 		m.closeConfirm = nil
-		m.currentView = ViewDashboard
+		m.currentView = m.previousView
 		return m, nil
 	}
 
