@@ -1859,8 +1859,12 @@ func (m *AppModel) deleteTask(id int64) tea.Cmd {
 		windowTarget := executor.TmuxSessionName(id)
 		osExec.Command("tmux", "kill-window", "-t", windowTarget).Run()
 
-		// Clean up worktree if it exists
+		// Clean up worktree and Claude sessions if they exist
 		if task != nil && task.WorktreePath != "" {
+			// Clean up Claude session files first (before worktree is removed)
+			executor.CleanupClaudeSessions(task.WorktreePath)
+
+			// Clean up worktree
 			m.executor.CleanupWorktree(task)
 		}
 

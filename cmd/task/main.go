@@ -2220,8 +2220,14 @@ func deleteTask(taskID int64) error {
 	// Kill Claude session if running (ignore errors - session may not exist)
 	killClaudeSession(int(taskID))
 
-	// Clean up worktree if it exists
+	// Clean up worktree and Claude sessions if they exist
 	if task.WorktreePath != "" {
+		// Clean up Claude session files first (before worktree is removed)
+		if err := executor.CleanupClaudeSessions(task.WorktreePath); err != nil {
+			fmt.Fprintln(os.Stderr, dimStyle.Render(fmt.Sprintf("Warning: could not remove Claude sessions: %v", err)))
+		}
+
+		// Clean up worktree
 		cfg := config.New(database)
 		exec := executor.New(database, cfg)
 		if err := exec.CleanupWorktree(task); err != nil {
