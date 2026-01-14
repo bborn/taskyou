@@ -470,6 +470,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		m.kanban.SetTasks(m.tasks)
+		m.kanban.SetHiddenDoneCount(msg.hiddenDoneCount)
 
 		// PR info is fetched separately via prRefreshTick, not on every task load
 
@@ -1692,8 +1693,9 @@ func (m *AppModel) updateCommandPalette(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 // Messages
 type tasksLoadedMsg struct {
-	tasks []*db.Task
-	err   error
+	tasks           []*db.Task
+	err             error
+	hiddenDoneCount int // Number of done tasks not shown in kanban (older ones)
 }
 
 type taskLoadedMsg struct {
@@ -1746,12 +1748,38 @@ type prInfoMsg struct {
 	info   *github.PRInfo
 }
 
+const maxDoneTasksInKanban = 20
+
 func (m *AppModel) loadTasks() tea.Cmd {
 	return func() tea.Msg {
-		tasks, err := m.db.ListTasks(db.ListTasksOptions{Limit: 50, IncludeClosed: true})
+		// Load all non-done tasks (no limit)
+		activeTasks, err := m.db.ListTasks(db.ListTasksOptions{Limit: 0, IncludeClosed: false})
+		if err != nil {
+			return tasksLoadedMsg{err: err}
+		}
+
+		// Load limited done tasks (most recent)
+		doneTasks, err := m.db.ListTasks(db.ListTasksOptions{Status: db.StatusDone, Limit: maxDoneTasksInKanban})
+		if err != nil {
+			return tasksLoadedMsg{err: err}
+		}
+
+		// Count total done tasks to show "more" message
+		totalDone, err := m.db.CountTasksByStatus(db.StatusDone)
+		if err != nil {
+			return tasksLoadedMsg{err: err}
+		}
+
+		// Combine active + limited done tasks
+		tasks := append(activeTasks, doneTasks...)
+		hiddenDone := totalDone - len(doneTasks)
+		if hiddenDone < 0 {
+			hiddenDone = 0
+		}
+
 		// Note: PR/merge status is now checked via batch refresh (prRefreshTick)
 		// to avoid spawning processes for every task on every tick
-		return tasksLoadedMsg{tasks: tasks, err: err}
+		return tasksLoadedMsg{tasks: tasks, err: err, hiddenDoneCount: hiddenDone}
 	}
 }
 

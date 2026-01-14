@@ -25,14 +25,15 @@ const MobileWidthThreshold = 80
 
 // KanbanBoard manages the kanban board state.
 type KanbanBoard struct {
-	columns       []KanbanColumn
-	selectedCol   int
-	selectedRow   int
-	scrollOffsets []int // Scroll offset per column
-	width         int
-	height        int
-	allTasks      []*db.Task               // All tasks
-	prInfo        map[int64]*github.PRInfo // PR info by task ID
+	columns         []KanbanColumn
+	selectedCol     int
+	selectedRow     int
+	scrollOffsets   []int // Scroll offset per column
+	width           int
+	height          int
+	allTasks        []*db.Task               // All tasks
+	prInfo          map[int64]*github.PRInfo // PR info by task ID
+	hiddenDoneCount int                      // Number of done tasks not shown (older ones)
 }
 
 // IsMobileMode returns true if the board should show single-column mode.
@@ -77,6 +78,11 @@ func (k *KanbanBoard) RefreshTheme() {
 func (k *KanbanBoard) SetTasks(tasks []*db.Task) {
 	k.allTasks = tasks
 	k.distributeTasksToColumns()
+}
+
+// SetHiddenDoneCount sets the number of done tasks not shown in the kanban.
+func (k *KanbanBoard) SetHiddenDoneCount(count int) {
+	k.hiddenDoneCount = count
 }
 
 // SetPRInfo updates the PR info for a task.
@@ -389,15 +395,27 @@ func (k *KanbanBoard) viewDesktop() string {
 			taskViews = append(taskViews, taskView)
 		}
 
-		// Show "more below" indicator
+		// Show "more below" indicator (combined with hidden done count for Done column)
 		remainingBelow := len(col.Tasks) - endIdx
-		if remainingBelow > 0 {
+		isDoneCol := col.Status == db.StatusDone
+		hasHiddenDone := isDoneCol && k.hiddenDoneCount > 0
+
+		if remainingBelow > 0 || hasHiddenDone {
 			scrollIndicatorStyle := lipgloss.NewStyle().
 				Foreground(ColorMuted).
 				Width(colWidth - 2).
 				Align(lipgloss.Center).
 				Italic(true)
-			taskViews = append(taskViews, scrollIndicatorStyle.Render(fmt.Sprintf("↓ %d more", remainingBelow)))
+
+			var indicatorText string
+			if remainingBelow > 0 && hasHiddenDone {
+				indicatorText = fmt.Sprintf("↓ %d more (+%d older)", remainingBelow, k.hiddenDoneCount)
+			} else if remainingBelow > 0 {
+				indicatorText = fmt.Sprintf("↓ %d more", remainingBelow)
+			} else {
+				indicatorText = fmt.Sprintf("+%d older (Ctrl+P)", k.hiddenDoneCount)
+			}
+			taskViews = append(taskViews, scrollIndicatorStyle.Render(indicatorText))
 		}
 
 		// Empty column placeholder
@@ -534,15 +552,27 @@ func (k *KanbanBoard) viewMobile() string {
 		taskViews = append(taskViews, taskView)
 	}
 
-	// Show "more below" indicator
+	// Show "more below" indicator (combined with hidden done count for Done column)
 	remainingBelow := len(col.Tasks) - endIdx
-	if remainingBelow > 0 {
+	isDoneCol := col.Status == db.StatusDone
+	hasHiddenDone := isDoneCol && k.hiddenDoneCount > 0
+
+	if remainingBelow > 0 || hasHiddenDone {
 		scrollIndicatorStyle := lipgloss.NewStyle().
 			Foreground(ColorMuted).
 			Width(colWidth - 2).
 			Align(lipgloss.Center).
 			Italic(true)
-		taskViews = append(taskViews, scrollIndicatorStyle.Render(fmt.Sprintf("↓ %d more", remainingBelow)))
+
+		var indicatorText string
+		if remainingBelow > 0 && hasHiddenDone {
+			indicatorText = fmt.Sprintf("↓ %d more (+%d older)", remainingBelow, k.hiddenDoneCount)
+		} else if remainingBelow > 0 {
+			indicatorText = fmt.Sprintf("↓ %d more", remainingBelow)
+		} else {
+			indicatorText = fmt.Sprintf("+%d older (Ctrl+P)", k.hiddenDoneCount)
+		}
+		taskViews = append(taskViews, scrollIndicatorStyle.Render(indicatorText))
 	}
 
 	// Empty column placeholder

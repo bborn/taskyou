@@ -296,6 +296,16 @@ func (db *DB) SearchTasks(query string, limit int) ([]*Task, error) {
 	return tasks, nil
 }
 
+// CountTasksByStatus returns the count of tasks with a given status.
+func (db *DB) CountTasksByStatus(status string) (int, error) {
+	var count int
+	err := db.QueryRow("SELECT COUNT(*) FROM tasks WHERE status = ?", status).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("count tasks: %w", err)
+	}
+	return count, nil
+}
+
 // MarkTaskStarted sets the started_at timestamp if not already set.
 func (db *DB) MarkTaskStarted(id int64) error {
 	_, err := db.Exec(`
