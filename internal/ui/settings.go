@@ -307,7 +307,7 @@ func (m *SettingsModel) updateBrowser(msg tea.Msg) (*SettingsModel, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
 		switch msg.String() {
-		case "esc", "q":
+		case "esc":
 			m.browsing = false
 			m.fileBrowser = nil
 			return m, nil
@@ -990,7 +990,7 @@ func (m *SettingsModel) renderHelp() string {
 			{"e", "edit"},
 			{"d", "delete"},
 			{"p", "projects dir"},
-			{"q/esc", "back"},
+			{"esc", "back"},
 		}
 	}
 
