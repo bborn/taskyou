@@ -1,3 +1,5 @@
+version: "2"
+
 linters:
   disable:
     # Disable errcheck - this codebase intentionally ignores many error returns

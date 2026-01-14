@@ -802,7 +802,7 @@ func (m *AppModel) renderFilterBar() string {
 	var parts []string
 
 	// Filter icon and label
-	filterIcon := "/"
+	var filterIcon string
 	if m.filterActive {
 		filterIcon = lipgloss.NewStyle().Bold(true).Foreground(ColorPrimary).Render("/")
 	} else {
