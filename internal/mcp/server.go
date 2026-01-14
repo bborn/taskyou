@@ -391,7 +391,7 @@ func (s *Server) handleToolCall(id interface{}, params *toolCallParams) {
 		}
 
 		// Search within the same project only
-		results, err := s.db.SearchTasks(db.SearchTasksOptions{
+		results, err := s.db.SearchTasksFTS(db.FTSSearchOptions{
 			Query:   query,
 			Project: currentTask.Project,
 			Limit:   limit,

@@ -1569,16 +1569,17 @@ func (db *DB) RemoveTaskFromSearch(taskID int64) error {
 	return nil
 }
 
-// SearchTasksOptions defines options for searching tasks.
-type SearchTasksOptions struct {
+// FTSSearchOptions defines options for FTS5 full-text search.
+type FTSSearchOptions struct {
 	Query   string // The search query (FTS5 syntax supported)
 	Project string // Optional: filter by project
 	Limit   int    // Maximum results (default 10)
 }
 
-// SearchTasks performs a full-text search on the task index.
+// SearchTasksFTS performs a full-text search on the FTS5 task index.
 // Returns matching tasks ordered by relevance (best matches first).
-func (db *DB) SearchTasks(opts SearchTasksOptions) ([]*TaskSearchResult, error) {
+// Note: This is different from SearchTasks which does simple LIKE matching.
+func (db *DB) SearchTasksFTS(opts FTSSearchOptions) ([]*TaskSearchResult, error) {
 	if opts.Query == "" {
 		return nil, nil
 	}
@@ -1662,7 +1663,7 @@ func (db *DB) FindSimilarTasks(task *Task, limit int) ([]*TaskSearchResult, erro
 	// Create FTS5 OR query
 	ftsQuery := strings.Join(escapedWords, " OR ")
 
-	return db.SearchTasks(SearchTasksOptions{
+	return db.SearchTasksFTS(FTSSearchOptions{
 		Query:   ftsQuery,
 		Project: task.Project,
 		Limit:   limit + 1, // Get one extra to exclude current task
