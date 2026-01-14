@@ -25,6 +25,7 @@ type Task struct {
 	PRURL           string // Pull request URL (if associated with a PR)
 	PRNumber        int    // Pull request number (if associated with a PR)
 	DangerousMode   bool   // Whether task is running in dangerous mode (--dangerously-skip-permissions)
+	Tags            string // Comma-separated tags for categorization (e.g., "customer-support,email,influence-kit")
 	CreatedAt       LocalTime
 	UpdatedAt       LocalTime
 	StartedAt       *LocalTime
@@ -140,7 +141,7 @@ func (db *DB) GetTask(id int64) (*Task, error) {
 		SELECT id, title, body, status, type, project,
 		       worktree_path, branch_name, port, claude_session_id,
 		       COALESCE(daemon_session, ''), COALESCE(pr_url, ''), COALESCE(pr_number, 0),
-		       COALESCE(dangerous_mode, 0),
+		       COALESCE(dangerous_mode, 0), COALESCE(tags, ''),
 		       created_at, updated_at, started_at, completed_at,
 		       scheduled_at, recurrence, last_run_at
 		FROM tasks WHERE id = ?
@@ -148,7 +149,7 @@ func (db *DB) GetTask(id int64) (*Task, error) {
 		&t.ID, &t.Title, &t.Body, &t.Status, &t.Type, &t.Project,
 		&t.WorktreePath, &t.BranchName, &t.Port, &t.ClaudeSessionID,
 		&t.DaemonSession, &t.PRURL, &t.PRNumber,
-		&t.DangerousMode,
+		&t.DangerousMode, &t.Tags,
 		&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
 		&t.ScheduledAt, &t.Recurrence, &t.LastRunAt,
 	)
@@ -177,7 +178,7 @@ func (db *DB) ListTasks(opts ListTasksOptions) ([]*Task, error) {
 		SELECT id, title, body, status, type, project,
 		       worktree_path, branch_name, port, claude_session_id,
 		       COALESCE(daemon_session, ''), COALESCE(pr_url, ''), COALESCE(pr_number, 0),
-		       COALESCE(dangerous_mode, 0),
+		       COALESCE(dangerous_mode, 0), COALESCE(tags, ''),
 		       created_at, updated_at, started_at, completed_at,
 		       scheduled_at, recurrence, last_run_at
 		FROM tasks WHERE 1=1
@@ -229,7 +230,7 @@ func (db *DB) ListTasks(opts ListTasksOptions) ([]*Task, error) {
 			&t.ID, &t.Title, &t.Body, &t.Status, &t.Type, &t.Project,
 			&t.WorktreePath, &t.BranchName, &t.Port, &t.ClaudeSessionID,
 			&t.DaemonSession, &t.PRURL, &t.PRNumber,
-			&t.DangerousMode,
+			&t.DangerousMode, &t.Tags,
 			&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
 			&t.ScheduledAt, &t.Recurrence, &t.LastRunAt,
 		)
@@ -344,13 +345,13 @@ func (db *DB) UpdateTask(t *Task) error {
 			title = ?, body = ?, status = ?, type = ?, project = ?,
 			worktree_path = ?, branch_name = ?, port = ?, claude_session_id = ?,
 			daemon_session = ?, pr_url = ?, pr_number = ?, dangerous_mode = ?,
-			scheduled_at = ?, recurrence = ?, last_run_at = ?,
+			tags = ?, scheduled_at = ?, recurrence = ?, last_run_at = ?,
 			updated_at = CURRENT_TIMESTAMP
 		WHERE id = ?
 	`, t.Title, t.Body, t.Status, t.Type, t.Project,
 		t.WorktreePath, t.BranchName, t.Port, t.ClaudeSessionID,
 		t.DaemonSession, t.PRURL, t.PRNumber, t.DangerousMode,
-		t.ScheduledAt, t.Recurrence, t.LastRunAt, t.ID)
+		t.Tags, t.ScheduledAt, t.Recurrence, t.LastRunAt, t.ID)
 	if err != nil {
 		return fmt.Errorf("update task: %w", err)
 	}
@@ -471,7 +472,7 @@ func (db *DB) GetNextQueuedTask() (*Task, error) {
 		SELECT id, title, body, status, type, project,
 		       worktree_path, branch_name, port, claude_session_id,
 		       COALESCE(daemon_session, ''), COALESCE(pr_url, ''), COALESCE(pr_number, 0),
-		       COALESCE(dangerous_mode, 0),
+		       COALESCE(dangerous_mode, 0), COALESCE(tags, ''),
 		       created_at, updated_at, started_at, completed_at,
 		       scheduled_at, recurrence, last_run_at
 		FROM tasks
@@ -501,7 +502,7 @@ func (db *DB) GetQueuedTasks() ([]*Task, error) {
 		SELECT id, title, body, status, type, project,
 		       worktree_path, branch_name, port, claude_session_id,
 		       COALESCE(daemon_session, ''), COALESCE(pr_url, ''), COALESCE(pr_number, 0),
-		       COALESCE(dangerous_mode, 0),
+		       COALESCE(dangerous_mode, 0), COALESCE(tags, ''),
 		       created_at, updated_at, started_at, completed_at,
 		       scheduled_at, recurrence, last_run_at
 		FROM tasks
@@ -520,7 +521,7 @@ func (db *DB) GetQueuedTasks() ([]*Task, error) {
 			&t.ID, &t.Title, &t.Body, &t.Status, &t.Type, &t.Project,
 			&t.WorktreePath, &t.BranchName, &t.Port, &t.ClaudeSessionID,
 			&t.DaemonSession, &t.PRURL, &t.PRNumber,
-			&t.DangerousMode,
+			&t.DangerousMode, &t.Tags,
 			&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
 			&t.ScheduledAt, &t.Recurrence, &t.LastRunAt,
 		); err != nil {
@@ -538,7 +539,7 @@ func (db *DB) GetTasksWithBranches() ([]*Task, error) {
 		SELECT id, title, body, status, type, project,
 		       worktree_path, branch_name, port, claude_session_id,
 		       COALESCE(daemon_session, ''), COALESCE(pr_url, ''), COALESCE(pr_number, 0),
-		       COALESCE(dangerous_mode, 0),
+		       COALESCE(dangerous_mode, 0), COALESCE(tags, ''),
 		       created_at, updated_at, started_at, completed_at,
 		       scheduled_at, recurrence, last_run_at
 		FROM tasks
@@ -557,7 +558,7 @@ func (db *DB) GetTasksWithBranches() ([]*Task, error) {
 			&t.ID, &t.Title, &t.Body, &t.Status, &t.Type, &t.Project,
 			&t.WorktreePath, &t.BranchName, &t.Port, &t.ClaudeSessionID,
 			&t.DaemonSession, &t.PRURL, &t.PRNumber,
-			&t.DangerousMode,
+			&t.DangerousMode, &t.Tags,
 			&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
 			&t.ScheduledAt, &t.Recurrence, &t.LastRunAt,
 		); err != nil {
@@ -578,7 +579,7 @@ func (db *DB) GetDueScheduledTasks() ([]*Task, error) {
 		SELECT id, title, body, status, type, project,
 		       worktree_path, branch_name, port, claude_session_id,
 		       COALESCE(daemon_session, ''), COALESCE(pr_url, ''), COALESCE(pr_number, 0),
-		       COALESCE(dangerous_mode, 0),
+		       COALESCE(dangerous_mode, 0), COALESCE(tags, ''),
 		       created_at, updated_at, started_at, completed_at,
 		       scheduled_at, recurrence, last_run_at
 		FROM tasks
@@ -599,7 +600,7 @@ func (db *DB) GetDueScheduledTasks() ([]*Task, error) {
 			&t.ID, &t.Title, &t.Body, &t.Status, &t.Type, &t.Project,
 			&t.WorktreePath, &t.BranchName, &t.Port, &t.ClaudeSessionID,
 			&t.DaemonSession, &t.PRURL, &t.PRNumber,
-			&t.DangerousMode,
+			&t.DangerousMode, &t.Tags,
 			&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
 			&t.ScheduledAt, &t.Recurrence, &t.LastRunAt,
 		); err != nil {
@@ -616,7 +617,7 @@ func (db *DB) GetScheduledTasks() ([]*Task, error) {
 		SELECT id, title, body, status, type, project,
 		       worktree_path, branch_name, port, claude_session_id,
 		       COALESCE(daemon_session, ''), COALESCE(pr_url, ''), COALESCE(pr_number, 0),
-		       COALESCE(dangerous_mode, 0),
+		       COALESCE(dangerous_mode, 0), COALESCE(tags, ''),
 		       created_at, updated_at, started_at, completed_at,
 		       scheduled_at, recurrence, last_run_at
 		FROM tasks
@@ -635,7 +636,7 @@ func (db *DB) GetScheduledTasks() ([]*Task, error) {
 			&t.ID, &t.Title, &t.Body, &t.Status, &t.Type, &t.Project,
 			&t.WorktreePath, &t.BranchName, &t.Port, &t.ClaudeSessionID,
 			&t.DaemonSession, &t.PRURL, &t.PRNumber,
-			&t.DangerousMode,
+			&t.DangerousMode, &t.Tags,
 			&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
 			&t.ScheduledAt, &t.Recurrence, &t.LastRunAt,
 		); err != nil {
@@ -1526,4 +1527,174 @@ func (db *DB) ClearCompactionSummaries(taskID int64) error {
 		return fmt.Errorf("clear compaction summaries: %w", err)
 	}
 	return nil
+}
+
+// TaskSearchResult represents a search result from the FTS5 index.
+type TaskSearchResult struct {
+	TaskID            int64
+	Project           string
+	Title             string
+	Body              string
+	Tags              string
+	TranscriptExcerpt string
+	Rank              float64 // FTS5 rank score (lower is better match)
+}
+
+// IndexTaskForSearch adds or updates a task in the FTS5 search index.
+// Call this after task completion to make it searchable.
+func (db *DB) IndexTaskForSearch(taskID int64, project, title, body, tags, transcriptExcerpt string) error {
+	// First delete any existing entry
+	_, err := db.Exec(`DELETE FROM task_search WHERE task_id = ?`, taskID)
+	if err != nil {
+		return fmt.Errorf("delete existing search entry: %w", err)
+	}
+
+	// Insert new entry
+	_, err = db.Exec(`
+		INSERT INTO task_search (task_id, project, title, body, tags, transcript_excerpt)
+		VALUES (?, ?, ?, ?, ?, ?)
+	`, taskID, project, title, body, tags, transcriptExcerpt)
+	if err != nil {
+		return fmt.Errorf("insert search entry: %w", err)
+	}
+	return nil
+}
+
+// RemoveTaskFromSearch removes a task from the FTS5 search index.
+func (db *DB) RemoveTaskFromSearch(taskID int64) error {
+	_, err := db.Exec(`DELETE FROM task_search WHERE task_id = ?`, taskID)
+	if err != nil {
+		return fmt.Errorf("delete search entry: %w", err)
+	}
+	return nil
+}
+
+// FTSSearchOptions defines options for FTS5 full-text search.
+type FTSSearchOptions struct {
+	Query   string // The search query (FTS5 syntax supported)
+	Project string // Optional: filter by project
+	Limit   int    // Maximum results (default 10)
+}
+
+// SearchTasksFTS performs a full-text search on the FTS5 task index.
+// Returns matching tasks ordered by relevance (best matches first).
+// Note: This is different from SearchTasks which does simple LIKE matching.
+func (db *DB) SearchTasksFTS(opts FTSSearchOptions) ([]*TaskSearchResult, error) {
+	if opts.Query == "" {
+		return nil, nil
+	}
+	if opts.Limit <= 0 {
+		opts.Limit = 10
+	}
+
+	query := `
+		SELECT task_id, project, title, body, tags, transcript_excerpt, rank
+		FROM task_search
+		WHERE task_search MATCH ?
+	`
+	args := []interface{}{opts.Query}
+
+	if opts.Project != "" {
+		query += ` AND project = ?`
+		args = append(args, opts.Project)
+	}
+
+	query += ` ORDER BY rank LIMIT ?`
+	args = append(args, opts.Limit)
+
+	rows, err := db.Query(query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("search tasks: %w", err)
+	}
+	defer rows.Close()
+
+	var results []*TaskSearchResult
+	for rows.Next() {
+		r := &TaskSearchResult{}
+		if err := rows.Scan(&r.TaskID, &r.Project, &r.Title, &r.Body, &r.Tags, &r.TranscriptExcerpt, &r.Rank); err != nil {
+			return nil, fmt.Errorf("scan search result: %w", err)
+		}
+		results = append(results, r)
+	}
+	return results, nil
+}
+
+// FindSimilarTasks searches for completed tasks similar to the given task.
+// Uses the task's title, body, and tags to find relevant past work.
+func (db *DB) FindSimilarTasks(task *Task, limit int) ([]*TaskSearchResult, error) {
+	if limit <= 0 {
+		limit = 5
+	}
+
+	// Build search query from task title and first part of body
+	searchTerms := task.Title
+	if task.Tags != "" {
+		searchTerms += " " + strings.ReplaceAll(task.Tags, ",", " ")
+	}
+	// Add first 100 chars of body for context
+	if len(task.Body) > 0 {
+		bodySnippet := task.Body
+		if len(bodySnippet) > 100 {
+			bodySnippet = bodySnippet[:100]
+		}
+		searchTerms += " " + bodySnippet
+	}
+
+	// Escape special FTS5 characters and create OR query for flexibility
+	words := strings.Fields(searchTerms)
+	var escapedWords []string
+	for _, w := range words {
+		// Remove special characters that could break FTS5
+		w = strings.Map(func(r rune) rune {
+			if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') {
+				return r
+			}
+			return -1
+		}, w)
+		if len(w) >= 3 { // Only include words with 3+ chars
+			escapedWords = append(escapedWords, w)
+		}
+	}
+
+	if len(escapedWords) == 0 {
+		return nil, nil
+	}
+
+	// Create FTS5 OR query
+	ftsQuery := strings.Join(escapedWords, " OR ")
+
+	return db.SearchTasksFTS(FTSSearchOptions{
+		Query:   ftsQuery,
+		Project: task.Project,
+		Limit:   limit + 1, // Get one extra to exclude current task
+	})
+}
+
+// GetTagsList returns all unique tags used across all tasks.
+func (db *DB) GetTagsList() ([]string, error) {
+	rows, err := db.Query(`SELECT DISTINCT tags FROM tasks WHERE tags != ''`)
+	if err != nil {
+		return nil, fmt.Errorf("query tags: %w", err)
+	}
+	defer rows.Close()
+
+	tagSet := make(map[string]bool)
+	for rows.Next() {
+		var tags string
+		if err := rows.Scan(&tags); err != nil {
+			return nil, fmt.Errorf("scan tags: %w", err)
+		}
+		for _, tag := range strings.Split(tags, ",") {
+			tag = strings.TrimSpace(tag)
+			if tag != "" {
+				tagSet[tag] = true
+			}
+		}
+	}
+
+	var result []string
+	for tag := range tagSet {
+		result = append(result, tag)
+	}
+	return result, nil
 }

@@ -190,6 +190,42 @@ func (s *Server) handleRequest(req *jsonRPCRequest) {
 						},
 					},
 				},
+				{
+					Name:        "workflow_search_tasks",
+					Description: "Search for similar past tasks within this project. Use this to find how similar work was done before. Results are scoped to the current project for isolation.",
+					InputSchema: map[string]interface{}{
+						"type": "object",
+						"properties": map[string]interface{}{
+							"query": map[string]interface{}{
+								"type":        "string",
+								"description": "Search query - keywords to find relevant past tasks (e.g., 'customer email reply', 'bug fix authentication')",
+							},
+							"limit": map[string]interface{}{
+								"type":        "integer",
+								"description": "Maximum number of results to return (default: 5, max: 10)",
+							},
+						},
+						"required": []string{"query"},
+					},
+				},
+				{
+					Name:        "workflow_show_task",
+					Description: "Get details of a specific past task by ID. Use this after workflow_search_tasks to get full details of a relevant task. Only works for tasks in the same project.",
+					InputSchema: map[string]interface{}{
+						"type": "object",
+						"properties": map[string]interface{}{
+							"task_id": map[string]interface{}{
+								"type":        "integer",
+								"description": "The ID of the task to retrieve",
+							},
+							"include_transcript": map[string]interface{}{
+								"type":        "boolean",
+								"description": "Whether to include the conversation transcript (default: false, can be large)",
+							},
+						},
+						"required": []string{"task_id"},
+					},
+				},
 			},
 		})
 
@@ -326,6 +362,170 @@ func (s *Server) handleToolCall(id interface{}, params *toolCallParams) {
 		s.sendResult(id, toolCallResult{
 			Content: []contentBlock{
 				{Type: "text", Text: fmt.Sprintf("Screenshot captured and saved as attachment #%d: %s (%d bytes)", attachment.ID, filename, len(data))},
+			},
+		})
+
+	case "workflow_search_tasks":
+		query, _ := params.Arguments["query"].(string)
+		if query == "" {
+			s.sendError(id, -32602, "query is required")
+			return
+		}
+
+		limit := 5
+		if l, ok := params.Arguments["limit"].(float64); ok {
+			limit = int(l)
+			if limit > 10 {
+				limit = 10
+			}
+			if limit < 1 {
+				limit = 1
+			}
+		}
+
+		// Get current task's project for scoping
+		currentTask, err := s.db.GetTask(s.taskID)
+		if err != nil || currentTask == nil {
+			s.sendError(id, -32603, "Failed to get current task")
+			return
+		}
+
+		// Search within the same project only
+		results, err := s.db.SearchTasksFTS(db.FTSSearchOptions{
+			Query:   query,
+			Project: currentTask.Project,
+			Limit:   limit,
+		})
+		if err != nil {
+			s.sendError(id, -32603, fmt.Sprintf("Search failed: %v", err))
+			return
+		}
+
+		// Filter out current task from results
+		var filtered []*db.TaskSearchResult
+		for _, r := range results {
+			if r.TaskID != s.taskID {
+				filtered = append(filtered, r)
+			}
+		}
+
+		if len(filtered) == 0 {
+			s.sendResult(id, toolCallResult{
+				Content: []contentBlock{
+					{Type: "text", Text: "No similar past tasks found in this project."},
+				},
+			})
+			return
+		}
+
+		// Format results
+		var sb strings.Builder
+		sb.WriteString(fmt.Sprintf("Found %d similar past task(s) in project '%s':\n\n", len(filtered), currentTask.Project))
+		for i, r := range filtered {
+			sb.WriteString(fmt.Sprintf("**Task #%d: %s**\n", r.TaskID, r.Title))
+			if r.Tags != "" {
+				sb.WriteString(fmt.Sprintf("  Tags: %s\n", r.Tags))
+			}
+			// Show snippet of body
+			if len(r.Body) > 0 {
+				bodySnippet := r.Body
+				if len(bodySnippet) > 150 {
+					bodySnippet = bodySnippet[:150] + "..."
+				}
+				sb.WriteString(fmt.Sprintf("  Description: %s\n", bodySnippet))
+			}
+			if i < len(filtered)-1 {
+				sb.WriteString("\n")
+			}
+		}
+		sb.WriteString("\nUse workflow_show_task with task_id to get full details of any task.")
+
+		s.sendResult(id, toolCallResult{
+			Content: []contentBlock{
+				{Type: "text", Text: sb.String()},
+			},
+		})
+
+	case "workflow_show_task":
+		taskIDFloat, ok := params.Arguments["task_id"].(float64)
+		if !ok {
+			s.sendError(id, -32602, "task_id is required")
+			return
+		}
+		targetTaskID := int64(taskIDFloat)
+
+		includeTranscript := false
+		if inc, ok := params.Arguments["include_transcript"].(bool); ok {
+			includeTranscript = inc
+		}
+
+		// Get current task's project for access control
+		currentTask, err := s.db.GetTask(s.taskID)
+		if err != nil || currentTask == nil {
+			s.sendError(id, -32603, "Failed to get current task")
+			return
+		}
+
+		// Get the requested task
+		targetTask, err := s.db.GetTask(targetTaskID)
+		if err != nil {
+			s.sendError(id, -32603, fmt.Sprintf("Failed to get task: %v", err))
+			return
+		}
+		if targetTask == nil {
+			s.sendError(id, -32602, fmt.Sprintf("Task #%d not found", targetTaskID))
+			return
+		}
+
+		// Enforce project isolation
+		if targetTask.Project != currentTask.Project {
+			s.sendError(id, -32602, fmt.Sprintf("Task #%d is in a different project and cannot be accessed", targetTaskID))
+			return
+		}
+
+		// Build response
+		var sb strings.Builder
+		sb.WriteString(fmt.Sprintf("# Task #%d: %s\n\n", targetTask.ID, targetTask.Title))
+		sb.WriteString(fmt.Sprintf("**Status:** %s\n", targetTask.Status))
+		sb.WriteString(fmt.Sprintf("**Type:** %s\n", targetTask.Type))
+		sb.WriteString(fmt.Sprintf("**Project:** %s\n", targetTask.Project))
+		if targetTask.Tags != "" {
+			sb.WriteString(fmt.Sprintf("**Tags:** %s\n", targetTask.Tags))
+		}
+		sb.WriteString(fmt.Sprintf("**Created:** %s\n", targetTask.CreatedAt.Format("2006-01-02 15:04")))
+		if targetTask.CompletedAt != nil {
+			sb.WriteString(fmt.Sprintf("**Completed:** %s\n", targetTask.CompletedAt.Format("2006-01-02 15:04")))
+		}
+
+		sb.WriteString("\n## Description\n\n")
+		if targetTask.Body != "" {
+			sb.WriteString(targetTask.Body)
+		} else {
+			sb.WriteString("(no description)")
+		}
+		sb.WriteString("\n")
+
+		// Include transcript if requested
+		if includeTranscript {
+			summary, err := s.db.GetLatestCompactionSummary(targetTaskID)
+			if err == nil && summary != nil && len(summary.Summary) > 0 {
+				sb.WriteString("\n## Conversation Transcript\n\n")
+				// Limit transcript size
+				transcript := summary.Summary
+				if len(transcript) > 5000 {
+					transcript = transcript[:5000] + "\n\n... (transcript truncated, " + fmt.Sprintf("%d", len(summary.Summary)) + " bytes total)"
+				}
+				sb.WriteString("```\n")
+				sb.WriteString(transcript)
+				sb.WriteString("\n```\n")
+			} else {
+				sb.WriteString("\n## Conversation Transcript\n\n(no transcript available)\n")
+			}
+		}
+
+		s.sendResult(id, toolCallResult{
+			Content: []contentBlock{
+				{Type: "text", Text: sb.String()},
 			},
 		})
 

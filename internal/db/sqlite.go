@@ -190,6 +190,19 @@ func (db *DB) migrate() error {
 		)`,
 
 		`CREATE INDEX IF NOT EXISTS idx_task_compaction_summaries_task_id ON task_compaction_summaries(task_id)`,
+
+		// FTS5 virtual table for full-text search on tasks
+		// This enables searching task title, body, tags, and transcript excerpts
+		// Uses standalone table (not content-sync) for flexibility
+		`CREATE VIRTUAL TABLE IF NOT EXISTS task_search USING fts5(
+			task_id UNINDEXED,
+			project,
+			title,
+			body,
+			tags,
+			transcript_excerpt,
+			tokenize='porter unicode61'
+		)`,
 	}
 
 	for _, m := range migrations {
@@ -220,6 +233,8 @@ func (db *DB) migrate() error {
 		`ALTER TABLE tasks ADD COLUMN dangerous_mode INTEGER DEFAULT 0`, // Whether running with --dangerously-skip-permissions
 		// Daemon session tracking for process management
 		`ALTER TABLE tasks ADD COLUMN daemon_session TEXT DEFAULT ''`, // tmux daemon session name for killing Claude
+		// Task tagging for categorization and search
+		`ALTER TABLE tasks ADD COLUMN tags TEXT DEFAULT ''`, // comma-separated tags for categorization (e.g., "customer-support,email,influence-kit")
 	}
 
 	for _, m := range alterMigrations {

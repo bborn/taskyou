@@ -732,6 +732,9 @@ func (e *Executor) executeTask(ctx context.Context, task *db.Task) {
 		// Save transcript on completion
 		e.saveTranscriptOnCompletion(task.ID, workDir)
 
+		// Index task for future search/retrieval
+		e.indexTaskForSearch(task)
+
 		// Kill Claude process to free memory when task is done
 		e.KillClaudeProcess(task.ID)
 
@@ -844,6 +847,9 @@ func (e *Executor) buildPrompt(task *db.Task, attachmentPaths []string) string {
 	// Add project memories if available
 	memories := e.getProjectMemoriesSection(task.Project)
 
+	// Get similar past tasks for reference
+	similarTasks := e.getSimilarTasksSection(task)
+
 	// Get project-specific instructions
 	projectInstructions := e.getProjectInstructions(task.Project)
 
@@ -858,16 +864,16 @@ func (e *Executor) buildPrompt(task *db.Task, attachmentPaths []string) string {
 		taskType, err := e.db.GetTaskTypeByName(task.Type)
 		if err == nil && taskType != nil {
 			// Apply template substitutions
-			instructions := e.applyTemplateSubstitutions(taskType.Instructions, task, projectInstructions, memories, attachments, conversationHistory)
+			instructions := e.applyTemplateSubstitutions(taskType.Instructions, task, projectInstructions, memories, similarTasks, attachments, conversationHistory)
 			prompt.WriteString(instructions)
 			prompt.WriteString("\n")
 		} else {
 			// Fallback to generic task if type not found
-			prompt.WriteString(e.buildGenericPrompt(task, projectInstructions, memories, attachments, conversationHistory))
+			prompt.WriteString(e.buildGenericPrompt(task, projectInstructions, memories, similarTasks, attachments, conversationHistory))
 		}
 	} else {
 		// No type specified - use generic prompt
-		prompt.WriteString(e.buildGenericPrompt(task, projectInstructions, memories, attachments, conversationHistory))
+		prompt.WriteString(e.buildGenericPrompt(task, projectInstructions, memories, similarTasks, attachments, conversationHistory))
 	}
 
 	// Add response guidance to ALL task types
@@ -917,7 +923,7 @@ func (e *Executor) buildRecurringPrompt(task *db.Task, attachmentPaths []string)
 }
 
 // applyTemplateSubstitutions replaces template placeholders in task type instructions.
-func (e *Executor) applyTemplateSubstitutions(template string, task *db.Task, projectInstructions, memories, attachments, conversationHistory string) string {
+func (e *Executor) applyTemplateSubstitutions(template string, task *db.Task, projectInstructions, memories, similarTasks, attachments, conversationHistory string) string {
 	result := template
 
 	// Replace placeholders
@@ -936,6 +942,17 @@ func (e *Executor) applyTemplateSubstitutions(template string, task *db.Task, pr
 		result = strings.ReplaceAll(result, "{{memories}}", memories)
 	} else {
 		result = strings.ReplaceAll(result, "{{memories}}", "")
+	}
+
+	// Similar tasks are injected after memories (no template placeholder for now)
+	if similarTasks != "" {
+		result = strings.ReplaceAll(result, "{{similar_tasks}}", similarTasks)
+		// Also append after memories if no placeholder
+		if !strings.Contains(template, "{{similar_tasks}}") && memories != "" {
+			result = strings.ReplaceAll(result, memories, memories+"\n"+similarTasks)
+		}
+	} else {
+		result = strings.ReplaceAll(result, "{{similar_tasks}}", "")
 	}
 
 	if attachments != "" {
@@ -959,7 +976,7 @@ func (e *Executor) applyTemplateSubstitutions(template string, task *db.Task, pr
 }
 
 // buildGenericPrompt builds a generic prompt for tasks without a specific type.
-func (e *Executor) buildGenericPrompt(task *db.Task, projectInstructions, memories, attachments, conversationHistory string) string {
+func (e *Executor) buildGenericPrompt(task *db.Task, projectInstructions, memories, similarTasks, attachments, conversationHistory string) string {
 	var prompt strings.Builder
 
 	if projectInstructions != "" {
@@ -967,6 +984,9 @@ func (e *Executor) buildGenericPrompt(task *db.Task, projectInstructions, memori
 	}
 	if memories != "" {
 		prompt.WriteString(memories)
+	}
+	if similarTasks != "" {
+		prompt.WriteString(similarTasks)
 	}
 	prompt.WriteString(fmt.Sprintf("Task: %s\n\n", task.Title))
 	if task.Body != "" {
@@ -2156,6 +2176,69 @@ func (e *Executor) getProjectMemoriesSection(project string) string {
 	}
 
 	return sb.String()
+}
+
+// indexTaskForSearch indexes a completed task in the FTS5 search table.
+// This enables future tasks to find and reference similar past work.
+func (e *Executor) indexTaskForSearch(task *db.Task) {
+	// Get transcript excerpt (first ~2000 chars of the most recent transcript)
+	var transcriptExcerpt string
+	summary, err := e.db.GetLatestCompactionSummary(task.ID)
+	if err == nil && summary != nil && len(summary.Summary) > 0 {
+		transcriptExcerpt = summary.Summary
+		if len(transcriptExcerpt) > 2000 {
+			transcriptExcerpt = transcriptExcerpt[:2000]
+		}
+	}
+
+	// Index the task
+	if err := e.db.IndexTaskForSearch(
+		task.ID,
+		task.Project,
+		task.Title,
+		task.Body,
+		task.Tags,
+		transcriptExcerpt,
+	); err != nil {
+		e.logger.Debug("Failed to index task for search", "task", task.ID, "error", err)
+	} else {
+		e.logger.Debug("Indexed task for search", "task", task.ID)
+	}
+}
+
+// getSimilarTasksSection checks if similar past tasks exist and returns a hint.
+// Instead of injecting full content, we just notify Claude that the search tools are available.
+// Claude can then use workflow_search_tasks and workflow_show_task MCP tools on-demand.
+func (e *Executor) getSimilarTasksSection(task *db.Task) string {
+	if task.Project == "" {
+		return ""
+	}
+
+	// Quick check if any similar tasks exist
+	results, err := e.db.FindSimilarTasks(task, 1)
+	if err != nil || len(results) == 0 {
+		return ""
+	}
+
+	// Filter out the current task
+	hasSimilar := false
+	for _, r := range results {
+		if r.TaskID != task.ID {
+			hasSimilar = true
+			break
+		}
+	}
+
+	if !hasSimilar {
+		return ""
+	}
+
+	// Just return a hint - Claude can use MCP tools to look up details
+	return `## Past Task Reference
+
+Similar tasks have been completed in this project before. If you need to reference how similar work was done, use the workflow_search_tasks tool to find relevant past tasks, then workflow_show_task to get details.
+
+`
 }
 
 // getConversationHistory builds a context section from previous task runs.
