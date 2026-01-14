@@ -1,23 +1,21 @@
-version: "2"
-
 linters:
   disable:
     # Disable errcheck - this codebase intentionally ignores many error returns
     # for logging, cleanup operations, and fire-and-forget calls
     - errcheck
 
-  settings:
-    staticcheck:
-      checks:
-        - all
-        - -SA9003  # Empty branch - sometimes used for clarity
-        - -QF1003  # Tagged switch suggestion - keep explicit for readability
-        - -QF1008  # Embedded field selector - keep explicit for clarity
+linters-settings:
+  staticcheck:
+    checks:
+      - all
+      - -SA9003  # Empty branch - sometimes used for clarity
+      - -QF1003  # Tagged switch suggestion - keep explicit for readability
+      - -QF1008  # Embedded field selector - keep explicit for clarity
 
-    gosimple:
-      checks:
-        - all
-        - -S1017  # TrimPrefix suggestion - keep explicit for readability
+  gosimple:
+    checks:
+      - all
+      - -S1017  # TrimPrefix suggestion - keep explicit for readability
 
 issues:
   # Don't limit the number of issues per linter
