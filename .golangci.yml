@@ -9,6 +9,8 @@ linters-settings:
     checks:
       - all
       - -SA9003  # Empty branch - sometimes used for clarity
+      - -QF1003  # Tagged switch suggestion - keep explicit for readability
+      - -QF1008  # Embedded field selector - keep explicit for clarity
 
   gosimple:
     checks:

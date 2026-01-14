@@ -5,6 +5,7 @@ import (
 	"os"
 	osExec "os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/bborn/workflow/internal/db"
@@ -12,6 +13,7 @@ import (
 	"github.com/bborn/workflow/internal/github"
 	"github.com/charmbracelet/bubbles/help"
 	"github.com/charmbracelet/bubbles/key"
+	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/huh"
 	"github.com/charmbracelet/lipgloss"
@@ -60,6 +62,7 @@ type KeyMap struct {
 	ChangeStatus    key.Binding
 	CommandPalette  key.Binding
 	ToggleDangerous key.Binding
+	Filter          key.Binding
 	// Column focus shortcuts
 	FocusBacklog    key.Binding
 	FocusInProgress key.Binding
@@ -69,7 +72,7 @@ type KeyMap struct {
 
 // ShortHelp returns key bindings to show in the mini help.
 func (k KeyMap) ShortHelp() []key.Binding {
-	return []key.Binding{k.Left, k.Right, k.Up, k.Down, k.Enter, k.New, k.Queue, k.CommandPalette, k.Quit}
+	return []key.Binding{k.Left, k.Right, k.Up, k.Down, k.Enter, k.New, k.Queue, k.Filter, k.CommandPalette, k.Quit}
 }
 
 // FullHelp returns keybindings for the expanded help view.
@@ -79,7 +82,7 @@ func (k KeyMap) FullHelp() [][]key.Binding {
 		{k.FocusBacklog, k.FocusInProgress, k.FocusBlocked, k.FocusDone},
 		{k.Enter, k.New, k.Queue, k.Close},
 		{k.Retry, k.Delete},
-		{k.CommandPalette, k.Settings, k.Memories},
+		{k.Filter, k.CommandPalette, k.Settings, k.Memories},
 		{k.ChangeStatus, k.Refresh, k.Help, k.Quit},
 	}
 }
@@ -166,6 +169,10 @@ func DefaultKeyMap() KeyMap {
 		ToggleDangerous: key.NewBinding(
 			key.WithKeys("!"),
 			key.WithHelp("!", "dangerous mode"),
+		),
+		Filter: key.NewBinding(
+			key.WithKeys("/"),
+			key.WithHelp("/", "filter"),
 		),
 		FocusBacklog: key.NewBinding(
 			key.WithKeys("B"),
@@ -271,6 +278,11 @@ type AppModel struct {
 	// Command palette view state
 	commandPaletteView *CommandPaletteModel
 
+	// Filter state
+	filterInput   textinput.Model
+	filterActive  bool   // Whether filter mode is active (typing in filter)
+	filterText    string // Current filter text (persists when not typing)
+
 	// Window size
 	width  int
 	height int
@@ -306,6 +318,11 @@ func NewAppModel(database *db.DB, exec *executor.Executor, workingDir string) *A
 	watcher, _ := fsnotify.NewWatcher()
 	dbChangeCh := make(chan struct{}, 1)
 
+	// Setup filter input
+	filterInput := textinput.New()
+	filterInput.Placeholder = "Filter by project, type, or text..."
+	filterInput.CharLimit = 50
+
 	return &AppModel{
 		db:           database,
 		executor:     exec,
@@ -319,6 +336,7 @@ func NewAppModel(database *db.DB, exec *executor.Executor, workingDir string) *A
 		watcher:      watcher,
 		dbChangeCh:   dbChangeCh,
 		prCache:      github.NewPRCache(),
+		filterInput:  filterInput,
 	}
 }
 
@@ -376,6 +394,11 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// Handle detail view feedback mode (needs all message types for text input)
 	if m.currentView == ViewDetail && m.detailView != nil && m.detailView.InFeedbackMode() {
 		return m.updateDetail(msg)
+	}
+
+	// Handle filter input mode (needs all message types for text input)
+	if m.currentView == ViewDashboard && m.filterActive {
+		return m.updateFilterMode(msg)
 	}
 
 	switch msg := msg.(type) {
@@ -733,6 +756,14 @@ func (m *AppModel) viewDashboard() string {
 		headerParts = append(headerParts, statusBar)
 	}
 
+	// Show filter bar if filter is active or has text
+	filterBar := ""
+	filterBarHeight := 0
+	if m.filterActive || m.filterText != "" {
+		filterBar = m.renderFilterBar()
+		filterBarHeight = lipgloss.Height(filterBar)
+	}
+
 	// Calculate heights dynamically
 	headerHeight := len(headerParts)
 
@@ -740,7 +771,7 @@ func (m *AppModel) viewDashboard() string {
 	helpView := m.renderHelp()
 	helpHeight := lipgloss.Height(helpView)
 
-	kanbanHeight := m.height - headerHeight - helpHeight
+	kanbanHeight := m.height - headerHeight - filterBarHeight - helpHeight
 
 	// Update kanban size
 	m.kanban.SetSize(m.width, kanbanHeight)
@@ -751,14 +782,67 @@ func (m *AppModel) viewDashboard() string {
 		header = lipgloss.JoinVertical(lipgloss.Left, headerParts...)
 	}
 
-	content := lipgloss.JoinVertical(lipgloss.Left,
-		header,
-		m.kanban.View(),
-		helpView,
-	)
+	var contentParts []string
+	if header != "" {
+		contentParts = append(contentParts, header)
+	}
+	if filterBar != "" {
+		contentParts = append(contentParts, filterBar)
+	}
+	contentParts = append(contentParts, m.kanban.View(), helpView)
+
+	content := lipgloss.JoinVertical(lipgloss.Left, contentParts...)
 
 	// Use Place to fill the entire terminal
 	return lipgloss.Place(m.width, m.height, lipgloss.Left, lipgloss.Top, content)
+}
+
+// renderFilterBar renders the filter input bar.
+func (m *AppModel) renderFilterBar() string {
+	// Build filter bar content
+	var parts []string
+
+	// Filter icon and label
+	var filterIcon string
+	if m.filterActive {
+		filterIcon = lipgloss.NewStyle().Bold(true).Foreground(ColorPrimary).Render("/")
+	} else {
+		filterIcon = lipgloss.NewStyle().Foreground(ColorMuted).Render("/")
+	}
+	parts = append(parts, filterIcon)
+
+	// Filter input or static text
+	if m.filterActive {
+		// Show active input
+		m.filterInput.Width = min(40, m.width-10)
+		parts = append(parts, m.filterInput.View())
+	} else {
+		// Show filter text with indicator that filter is active
+		filterStyle := lipgloss.NewStyle().Foreground(ColorSecondary)
+		parts = append(parts, filterStyle.Render(m.filterText))
+	}
+
+	// Help hint
+	helpStyle := lipgloss.NewStyle().Foreground(ColorMuted).Italic(true)
+	if m.filterActive {
+		parts = append(parts, helpStyle.Render("  (⌫: clear, Enter: select, ↑↓←→: navigate)"))
+	} else if m.filterText != "" {
+		parts = append(parts, helpStyle.Render("  (/: edit, Esc: clear)"))
+	}
+
+	filterContent := lipgloss.JoinHorizontal(lipgloss.Center, parts...)
+
+	// Wrap in a subtle box
+	filterBarStyle := lipgloss.NewStyle().
+		Padding(0, 1).
+		Width(m.width)
+
+	if m.filterActive {
+		filterBarStyle = filterBarStyle.
+			Background(lipgloss.Color("#333333"))
+	}
+
+	return filterBarStyle.Render(filterContent)
 }
 
 func (m *AppModel) renderHelp() string {
@@ -873,11 +957,142 @@ func (m *AppModel) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.help.ShowAll = !m.help.ShowAll
 		return m, nil
 
+	case key.Matches(msg, m.keys.Filter):
+		// Enter filter mode
+		m.filterActive = true
+		m.filterInput.Focus()
+		return m, textinput.Blink
+
 	case key.Matches(msg, m.keys.Back):
+		// If filter is set, clear it first
+		if m.filterText != "" {
+			m.filterText = ""
+			m.filterInput.SetValue("")
+			return m, m.loadTasks()
+		}
 		return m.showQuitConfirm()
 	}
 
 	return m, nil
+}
+
+// updateFilterMode handles input when filter mode is active.
+// Navigation keys work while typing. The filter stays applied when you navigate away.
+// Esc or backspace on empty clears filter and hides the filter bar.
+func (m *AppModel) updateFilterMode(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tea.KeyMsg:
+		switch msg.String() {
+		case "esc":
+			// Exit filter mode and clear filter
+			m.filterActive = false
+			m.filterText = ""
+			m.filterInput.SetValue("")
+			m.filterInput.Blur()
+			return m, m.loadTasks()
+		case "backspace":
+			// If filter is empty, clear and exit
+			if m.filterInput.Value() == "" {
+				m.filterActive = false
+				m.filterText = ""
+				m.filterInput.Blur()
+				return m, m.loadTasks()
+			}
+			// Otherwise, let the text input handle backspace
+			var cmd tea.Cmd
+			m.filterInput, cmd = m.filterInput.Update(msg)
+			newFilterText := m.filterInput.Value()
+			if newFilterText != m.filterText {
+				m.filterText = newFilterText
+				m.applyFilter()
+			}
+			return m, cmd
+		case "enter":
+			// Select task if one is highlighted
+			if task := m.kanban.SelectedTask(); task != nil {
+				m.filterActive = false
+				m.filterInput.Blur()
+				return m, m.loadTask(task.ID)
+			}
+			// Otherwise just exit filter mode
+			m.filterActive = false
+			m.filterInput.Blur()
+			return m, nil
+		case "up":
+			// Navigate while in filter mode (arrow keys only, not hjkl)
+			m.kanban.MoveUp()
+			return m, nil
+		case "down":
+			m.kanban.MoveDown()
+			return m, nil
+		case "left":
+			m.kanban.MoveLeft()
+			return m, nil
+		case "right":
+			m.kanban.MoveRight()
+			return m, nil
+		case "ctrl+c":
+			// Allow quit even in filter mode
+			if m.eventCh != nil {
+				m.executor.UnsubscribeTaskEvents(m.eventCh)
+			}
+			m.stopDatabaseWatcher()
+			return m, tea.Quit
+		}
+	}
+
+	// Update the text input
+	var cmd tea.Cmd
+	m.filterInput, cmd = m.filterInput.Update(msg)
+
+	// If filter text changed, apply filter
+	newFilterText := m.filterInput.Value()
+	if newFilterText != m.filterText {
+		m.filterText = newFilterText
+		m.applyFilter()
+	}
+
+	return m, cmd
+}
+
+// applyFilter filters the tasks based on current filter text.
+func (m *AppModel) applyFilter() {
+	if m.filterText == "" {
+		// No filter, show all tasks
+		m.kanban.SetTasks(m.tasks)
+		return
+	}
+
+	filterLower := strings.ToLower(m.filterText)
+	var filtered []*db.Task
+	for _, task := range m.tasks {
+		// Match by project name
+		if strings.Contains(strings.ToLower(task.Project), filterLower) {
+			filtered = append(filtered, task)
+			continue
+		}
+		// Match by task type
+		if strings.Contains(strings.ToLower(task.Type), filterLower) {
+			filtered = append(filtered, task)
+			continue
+		}
+		// Match by title
+		if strings.Contains(strings.ToLower(task.Title), filterLower) {
+			filtered = append(filtered, task)
+			continue
+		}
+		// Match by task ID
+		if strings.Contains(fmt.Sprintf("%d", task.ID), filterLower) {
+			filtered = append(filtered, task)
+			continue
+		}
+		// Match by status
+		if strings.Contains(strings.ToLower(task.Status), filterLower) {
+			filtered = append(filtered, task)
+			continue
+		}
+	}
+	m.kanban.SetTasks(filtered)
 }
 
 func (m *AppModel) updateDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
