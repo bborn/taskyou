@@ -748,7 +748,7 @@ func (m *DetailModel) joinTmuxPanes() {
 	exec.CommandContext(ctx, "tmux", "set-option", "-t", "task-ui", "pane-border-style", "fg=#374151").Run()
 	exec.CommandContext(ctx, "tmux", "set-option", "-t", "task-ui", "pane-active-border-style", "fg=#61AFEF").Run()
 
-	// Resize TUI pane to configured height (default 18%)
+	// Resize TUI pane to configured height (default 20%)
 	detailHeight := m.getDetailPaneHeight()
 	exec.CommandContext(ctx, "tmux", "resize-pane", "-t", tuiPaneID, "-y", detailHeight).Run()
 }
@@ -787,12 +787,11 @@ func (m *DetailModel) breakTmuxPanes(saveHeight bool) {
 	m.saveShellPaneWidth()
 	// Only save detail pane height when explicitly requested (e.g., leaving detail view)
 	// Skip during task transitions to avoid rounding errors that accumulate
-	if saveHeight {
-		currentPaneCmd := exec.CommandContext(ctx, "tmux", "display-message", "-p", "#{pane_id}")
-		if currentPaneOut, err := currentPaneCmd.Output(); err == nil {
-			tuiPaneID := strings.TrimSpace(string(currentPaneOut))
-			m.saveDetailPaneHeight(tuiPaneID)
-		}
+	if saveHeight && m.tuiPaneID != "" {
+		// Use the stored TUI pane ID, not the currently focused pane.
+		// The user may have Tab'd to Claude or Shell pane before pressing Escape,
+		// so #{pane_id} could return the wrong pane.
+		m.saveDetailPaneHeight(m.tuiPaneID)
 	}
 
 	// Reset status bar and pane styling
