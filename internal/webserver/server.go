@@ -195,7 +195,6 @@ func (s *Server) staticFileHandler() http.Handler {
 					return
 				}
 			}
-			stat, _ = f.Stat()
 		}
 
 		// Set content type based on extension

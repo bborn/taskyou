@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/bborn/workflow/internal/hostdb"
@@ -118,15 +117,6 @@ func getUserFromContext(r *http.Request) *hostdb.User {
 	return user
 }
 
-// getSessionFromContext retrieves the session from the request context.
-func getSessionFromContext(r *http.Request) *hostdb.Session {
-	session, ok := r.Context().Value(sessionContextKey).(*hostdb.Session)
-	if !ok {
-		return nil
-	}
-	return session
-}
-
 // jsonResponse writes a JSON response.
 func jsonResponse(w http.ResponseWriter, data interface{}, status int) {
 	w.Header().Set("Content-Type", "application/json")
@@ -141,17 +131,3 @@ func jsonError(w http.ResponseWriter, message string, status int) {
 	json.NewEncoder(w).Encode(map[string]string{"error": message})
 }
 
-// parseJSON parses a JSON request body.
-func parseJSON(r *http.Request, v interface{}) error {
-	return json.NewDecoder(r.Body).Decode(v)
-}
-
-// getProviderFromPath extracts the OAuth provider from the request path.
-func getProviderFromPath(path string) string {
-	// Path is like /api/auth/google or /api/auth/github
-	parts := strings.Split(path, "/")
-	if len(parts) >= 4 {
-		return parts[3]
-	}
-	return ""
-}
