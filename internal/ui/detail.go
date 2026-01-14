@@ -1226,7 +1226,7 @@ func (m *DetailModel) renderHelp() string {
 	}{
 		{"c", "close"},
 		{"d", "delete"},
-		{"q/esc", "back"},
+		{"esc", "back"},
 	}...)
 
 	var help string

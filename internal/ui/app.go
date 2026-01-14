@@ -113,8 +113,8 @@ func DefaultKeyMap() KeyMap {
 			key.WithHelp("enter", "view"),
 		),
 		Back: key.NewBinding(
-			key.WithKeys("esc", "q"),
-			key.WithHelp("q/esc", "back"),
+			key.WithKeys("esc"),
+			key.WithHelp("esc", "back"),
 		),
 		New: key.NewBinding(
 			key.WithKeys("n"),
