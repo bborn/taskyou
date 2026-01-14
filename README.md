@@ -2,6 +2,20 @@
 
 A personal task management system with a beautiful terminal UI, SQLite storage, and background task execution via Claude Code.
 
+## Screenshots
+
+### Kanban Board
+![Kanban Board](docs/screenshots/kanban-board.jpeg)
+*The main view showing tasks organized across Backlog, In Progress, Blocked, and Done columns*
+
+### Task Detail View
+![Task Detail View](docs/screenshots/task-detail-view.jpeg)
+*Viewing a task with Claude's output and shell access in split panes*
+
+### New Task Form
+![New Task Form](docs/screenshots/new-task-form.png)
+*Creating a new task with project selection, type, scheduling, and attachments*
+
 ## Features
 
 - **Kanban Board** - Visual task management with 4 columns (Backlog, In Progress, Blocked, Done)
