@@ -248,7 +248,8 @@ func (m *DetailModel) StartTmuxTicker() tea.Cmd {
 }
 
 // findTaskWindow searches tmux sessions for a window matching this task.
-// Returns the full window target (session:window) or empty string if not found.
+// Returns the full window target (session:window_index) or empty string if not found.
+// Uses window index instead of name to avoid ambiguity when duplicate names exist.
 // Prefers the task's stored daemon_session if available, to avoid connecting to stale windows.
 func (m *DetailModel) findTaskWindow() string {
 	if m.task == nil {
@@ -261,15 +262,16 @@ func (m *DetailModel) findTaskWindow() string {
 
 	// If task has a stored daemon session, check there first
 	if m.task.DaemonSession != "" {
-		target := m.task.DaemonSession + ":" + windowName
-		err := exec.CommandContext(ctx, "tmux", "has-session", "-t", target).Run()
+		err := exec.CommandContext(ctx, "tmux", "has-session", "-t", m.task.DaemonSession).Run()
 		if err == nil {
-			// Verify window exists in this session
-			out, err := exec.CommandContext(ctx, "tmux", "list-windows", "-t", m.task.DaemonSession, "-F", "#{window_name}").Output()
+			// List windows with index to get unambiguous target
+			out, err := exec.CommandContext(ctx, "tmux", "list-windows", "-t", m.task.DaemonSession, "-F", "#{window_index}:#{window_name}").Output()
 			if err == nil {
-				for _, name := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-					if name == windowName {
-						return target
+				for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+					parts := strings.SplitN(line, ":", 2)
+					if len(parts) == 2 && parts[1] == windowName {
+						// Return session:index format which is unambiguous
+						return m.task.DaemonSession + ":" + parts[0]
 					}
 				}
 			}
@@ -277,16 +279,18 @@ func (m *DetailModel) findTaskWindow() string {
 	}
 
 	// Fall back to searching all sessions (for backwards compatibility or if stored session is gone)
-	out, err := exec.CommandContext(ctx, "tmux", "list-windows", "-a", "-F", "#{session_name}:#{window_name}").Output()
+	// Use session:index:name format to get unambiguous targets
+	out, err := exec.CommandContext(ctx, "tmux", "list-windows", "-a", "-F", "#{session_name}:#{window_index}:#{window_name}").Output()
 	if err != nil {
 		return ""
 	}
 
-	// Search for our window
+	// Search for our window, return session:index format
 	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		parts := strings.SplitN(line, ":", 2)
-		if len(parts) == 2 && parts[1] == windowName {
-			return line // Returns session:window
+		parts := strings.SplitN(line, ":", 3)
+		if len(parts) == 3 && parts[2] == windowName {
+			// Return session:index format which is unambiguous
+			return parts[0] + ":" + parts[1]
 		}
 	}
 	return ""
@@ -301,6 +305,22 @@ func (m *DetailModel) startResumableSession(sessionID string) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
+
+	windowName := executor.TmuxWindowName(m.task.ID)
+
+	// IMPORTANT: Check if a window with this name already exists in ANY daemon session
+	// to avoid creating duplicates. If found, update the cached target and return.
+	existingOut, err := exec.CommandContext(ctx, "tmux", "list-windows", "-a", "-F", "#{session_name}:#{window_index}:#{window_name}").Output()
+	if err == nil {
+		for _, line := range strings.Split(strings.TrimSpace(string(existingOut)), "\n") {
+			parts := strings.SplitN(line, ":", 3)
+			if len(parts) == 3 && parts[2] == windowName && strings.HasPrefix(parts[0], "task-daemon-") {
+				// Window already exists - use session:index format to avoid ambiguity
+				m.cachedWindowTarget = parts[0] + ":" + parts[1]
+				return
+			}
+		}
+	}
 
 	// Find or create a task-daemon session to put the window in
 	// First, look for any existing task-daemon-* session
@@ -327,7 +347,6 @@ func (m *DetailModel) startResumableSession(sessionID string) {
 		}
 	}
 
-	windowName := executor.TmuxWindowName(m.task.ID)
 	workDir := m.getWorkdir()
 
 	// Build the claude command with --resume
@@ -811,7 +830,28 @@ func (m *DetailModel) breakTmuxPanes(saveHeight bool) {
 	// If we have a workdir pane, join it to the task-daemon window alongside Claude
 	// This preserves any running processes (Rails servers, watchers, etc.)
 	if m.workdirPaneID != "" {
-		targetWindow := daemonSession + ":" + windowName
+		// Find the actual window index to avoid ambiguity with duplicate window names
+		// The window we just created should be the one with our name
+		var targetWindow string
+		listOut, listErr := exec.CommandContext(ctx, "tmux", "list-windows", "-t", daemonSession, "-F", "#{window_index}:#{window_name}").Output()
+		if listErr == nil {
+			// Find our window by name and get its index (take the last match as it's the newest)
+			var windowIndex string
+			for _, line := range strings.Split(strings.TrimSpace(string(listOut)), "\n") {
+				parts := strings.SplitN(line, ":", 2)
+				if len(parts) == 2 && parts[1] == windowName {
+					windowIndex = parts[0]
+				}
+			}
+			if windowIndex != "" {
+				targetWindow = daemonSession + ":" + windowIndex
+			}
+		}
+		// Fallback to name-based targeting if we couldn't get the index
+		if targetWindow == "" {
+			targetWindow = daemonSession + ":" + windowName
+		}
+
 		// Join the workdir pane horizontally to the right of the Claude pane
 		// -h: horizontal split (side by side)
 		// -d: don't switch focus
