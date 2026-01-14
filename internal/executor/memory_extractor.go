@@ -174,40 +174,38 @@ func (e *Executor) runMemoryExtraction(ctx context.Context, task *db.Task, promp
 
 	projectDir := e.getProjectDir(task.Project)
 
+	jsonSchema := `{"type":"object","properties":{"memories":{"type":"array","items":{"type":"object","properties":{"category":{"type":"string"},"content":{"type":"string"}},"required":["category","content"]}}},"required":["memories"]}`
+
 	args := []string{
-		"run",
-		"-c", projectDir,
-		"-q",
-		"--output-format", "text",
+		"-p",
+		"--output-format", "json",
+		"--json-schema", jsonSchema,
 		prompt,
 	}
 
-	cmd := exec.CommandContext(ctx, "crush", args...)
+	cmd := exec.CommandContext(ctx, "claude", args...)
 	cmd.Dir = projectDir
 
 	output, err := cmd.Output()
 	if err != nil {
-		return nil, fmt.Errorf("crush execution: %w", err)
+		return nil, fmt.Errorf("claude execution: %w", err)
 	}
 
-	// Parse JSON response
-	outputStr := strings.TrimSpace(string(output))
-
-	// Find JSON in output (may have other text around it)
-	startIdx := strings.Index(outputStr, "{")
-	endIdx := strings.LastIndex(outputStr, "}")
-	if startIdx == -1 || endIdx == -1 || endIdx < startIdx {
-		return nil, fmt.Errorf("no valid JSON in response")
+	// Parse the JSON response - with --output-format json and --json-schema,
+	// Claude returns structured output directly in the structured_output field
+	var response struct {
+		StructuredOutput MemoryExtractionResult `json:"structured_output"`
+		IsError          bool                   `json:"is_error"`
+	}
+	if err := json.Unmarshal(output, &response); err != nil {
+		return nil, fmt.Errorf("parse claude response: %w", err)
 	}
 
-	jsonStr := outputStr[startIdx : endIdx+1]
-
-	var result MemoryExtractionResult
-	if err := json.Unmarshal([]byte(jsonStr), &result); err != nil {
-		return nil, fmt.Errorf("parse JSON: %w (raw: %s)", err, truncate(jsonStr, 200))
+	if response.IsError {
+		return nil, fmt.Errorf("claude returned error")
 	}
 
-	return result.Memories, nil
+	return response.StructuredOutput.Memories, nil
 }
 
 func normalizeCategory(category string) string {
