@@ -2721,6 +2721,17 @@ func symlinkClaudeConfig(projectDir, worktreePath string) error {
 	mainClaudeDir := filepath.Join(projectDir, ".claude")
 	worktreeClaudeDir := filepath.Join(worktreePath, ".claude")
 
+	// Safety check: prevent circular symlinks if paths are the same
+	if mainClaudeDir == worktreeClaudeDir {
+		return fmt.Errorf("projectDir and worktreePath must be different (both resolve to %s)", mainClaudeDir)
+	}
+
+	// If mainClaudeDir exists as a symlink (possibly broken/circular), remove it
+	// The main project's .claude should always be a real directory, never a symlink
+	if info, err := os.Lstat(mainClaudeDir); err == nil && info.Mode()&os.ModeSymlink != 0 {
+		os.RemoveAll(mainClaudeDir)
+	}
+
 	// Ensure main project has .claude directory
 	if err := os.MkdirAll(mainClaudeDir, 0755); err != nil {
 		return fmt.Errorf("create main .claude dir: %w", err)
