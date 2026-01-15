@@ -20,6 +20,7 @@ const (
 	SettingTheme            = "theme"
 	SettingDetailPaneHeight = "detail_pane_height"
 	SettingShellPaneWidth   = "shell_pane_width"
+	SettingKanbanFilter     = "kanban_filter"
 )
 
 // New creates a config from database.
