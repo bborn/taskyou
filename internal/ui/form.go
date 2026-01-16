@@ -135,10 +135,10 @@ func NewEditFormModel(database *db.DB, task *db.Task, width, height int) *FormMo
 	m.bodyInput.Prompt = ""
 	m.bodyInput.ShowLineNumbers = false
 	m.bodyInput.SetWidth(width - 24)
-	m.bodyInput.SetHeight(4)
 	m.bodyInput.FocusedStyle.CursorLine = lipgloss.NewStyle()
 	m.bodyInput.BlurredStyle.CursorLine = lipgloss.NewStyle()
 	m.bodyInput.SetValue(task.Body)
+	m.updateBodyHeight() // Autogrow based on content
 
 	// Schedule input - pre-populate if task has a scheduled time
 	m.scheduleInput = textinput.New()
@@ -239,9 +239,9 @@ func NewFormModel(database *db.DB, width, height int, workingDir string) *FormMo
 	m.bodyInput.Prompt = ""
 	m.bodyInput.ShowLineNumbers = false
 	m.bodyInput.SetWidth(width - 24)
-	m.bodyInput.SetHeight(4)
 	m.bodyInput.FocusedStyle.CursorLine = lipgloss.NewStyle()
 	m.bodyInput.BlurredStyle.CursorLine = lipgloss.NewStyle()
+	m.updateBodyHeight() // Start with minimum height, will autogrow as content is added
 
 	// Schedule input
 	m.scheduleInput = textinput.New()
@@ -288,6 +288,7 @@ func (m *FormModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.titleInput.SetValue(m.titleInput.Value() + pastedText)
 			case FieldBody:
 				m.bodyInput.SetValue(m.bodyInput.Value() + pastedText)
+				m.updateBodyHeight() // Autogrow after paste
 			case FieldAttachments:
 				m.attachmentsInput.SetValue(m.attachmentsInput.Value() + pastedText)
 			}
@@ -383,6 +384,7 @@ func (m *FormModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.titleInput, cmd = m.titleInput.Update(msg)
 	case FieldBody:
 		m.bodyInput, cmd = m.bodyInput.Update(msg)
+		m.updateBodyHeight() // Autogrow as content changes
 	case FieldSchedule:
 		m.scheduleInput, cmd = m.scheduleInput.Update(msg)
 	case FieldAttachments:
@@ -799,6 +801,59 @@ func parseTimeOfDay(s string, date time.Time) *db.LocalTime {
 // SetQueue sets whether to queue the task.
 func (m *FormModel) SetQueue(queue bool) {
 	m.queue = queue
+}
+
+// calculateBodyHeight calculates the appropriate height for the body textarea based on content.
+// Returns a height between minHeight (4) and maxHeight (50% of available screen height).
+func (m *FormModel) calculateBodyHeight() int {
+	content := m.bodyInput.Value()
+
+	// Minimum height
+	minHeight := 4
+
+	// Maximum height is 50% of screen height
+	// Account for other form elements: header(2) + title(2) + body label(1) + project(2) +
+	// type(2) + schedule(2) + recurrence(2) + attachments(2) + help(1) + padding/borders(~6) = ~22 lines
+	formOverhead := 22
+	maxHeight := (m.height - formOverhead) / 2
+	if maxHeight < minHeight {
+		maxHeight = minHeight
+	}
+
+	// Count actual lines needed
+	lines := 1
+	if content != "" {
+		lines = strings.Count(content, "\n") + 1
+	}
+
+	// Account for line wrapping
+	textWidth := m.width - 24 // Same width as used in SetWidth
+	if textWidth > 0 {
+		for _, line := range strings.Split(content, "\n") {
+			// Each line might wrap based on character count
+			lineLen := len(line)
+			if lineLen > textWidth {
+				lines += lineLen / textWidth
+			}
+		}
+	}
+
+	// Apply min/max bounds
+	height := lines
+	if height < minHeight {
+		height = minHeight
+	}
+	if height > maxHeight {
+		height = maxHeight
+	}
+
+	return height
+}
+
+// updateBodyHeight updates the body textarea height based on content.
+func (m *FormModel) updateBodyHeight() {
+	height := m.calculateBodyHeight()
+	m.bodyInput.SetHeight(height)
 }
 
 // GetAttachments returns the parsed attachment file paths.
