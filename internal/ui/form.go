@@ -550,10 +550,15 @@ func (m *FormModel) View() string {
 	}
 	b.WriteString(cursor + " " + labelStyle.Render("Details"))
 	b.WriteString("\n")
-	// Indent the textarea
+	// Indent the textarea and add scrollbar if content overflows
 	bodyLines := strings.Split(m.bodyInput.View(), "\n")
-	for _, line := range bodyLines {
-		b.WriteString("   " + line + "\n")
+	scrollbar := m.renderBodyScrollbar(len(bodyLines))
+	for i, line := range bodyLines {
+		scrollChar := ""
+		if i < len(scrollbar) {
+			scrollChar = scrollbar[i]
+		}
+		b.WriteString("   " + line + scrollChar + "\n")
 	}
 	b.WriteString("\n")
 
@@ -854,6 +859,78 @@ func (m *FormModel) calculateBodyHeight() int {
 func (m *FormModel) updateBodyHeight() {
 	height := m.calculateBodyHeight()
 	m.bodyInput.SetHeight(height)
+}
+
+// renderBodyScrollbar renders a scrollbar for the body textarea if content overflows.
+// Returns a slice of strings, one per visible line, containing the scrollbar character.
+func (m *FormModel) renderBodyScrollbar(visibleLines int) []string {
+	content := m.bodyInput.Value()
+	if content == "" {
+		return nil
+	}
+
+	// Get total content lines from the textarea
+	totalLines := m.bodyInput.LineCount()
+	viewportHeight := visibleLines
+
+	// No scrollbar needed if all content fits
+	if totalLines <= viewportHeight {
+		return nil
+	}
+
+	// Get cursor line to estimate scroll offset
+	// The textarea scrolls to keep the cursor visible
+	cursorLine := m.bodyInput.Line()
+
+	// Estimate the scroll offset: the viewport is positioned to keep cursor visible
+	// The cursor should be somewhere within the visible viewport
+	scrollOffset := 0
+	if cursorLine >= viewportHeight {
+		// Cursor is below initial viewport, so we've scrolled
+		scrollOffset = cursorLine - viewportHeight + 1
+	}
+	// Clamp scroll offset to valid range
+	maxOffset := totalLines - viewportHeight
+	if scrollOffset > maxOffset {
+		scrollOffset = maxOffset
+	}
+	if scrollOffset < 0 {
+		scrollOffset = 0
+	}
+
+	// Calculate scrollbar dimensions
+	// Thumb size is proportional to visible content / total content
+	thumbSize := (viewportHeight * viewportHeight) / totalLines
+	if thumbSize < 1 {
+		thumbSize = 1
+	}
+	if thumbSize > viewportHeight {
+		thumbSize = viewportHeight
+	}
+
+	// Thumb position is proportional to scroll offset
+	scrollRange := totalLines - viewportHeight
+	trackRange := viewportHeight - thumbSize
+	thumbPos := 0
+	if scrollRange > 0 && trackRange > 0 {
+		thumbPos = (scrollOffset * trackRange) / scrollRange
+	}
+
+	// Style the scrollbar
+	trackStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("238"))
+	thumbStyle := lipgloss.NewStyle().Foreground(ColorPrimary)
+
+	// Build the scrollbar
+	scrollbar := make([]string, viewportHeight)
+	for i := 0; i < viewportHeight; i++ {
+		if i >= thumbPos && i < thumbPos+thumbSize {
+			scrollbar[i] = thumbStyle.Render("┃")
+		} else {
+			scrollbar[i] = trackStyle.Render("│")
+		}
+	}
+
+	return scrollbar
 }
 
 // GetAttachments returns the parsed attachment file paths.

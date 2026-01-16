@@ -115,3 +115,76 @@ func TestMaxHeightIs50PercentOfScreen(t *testing.T) {
 		})
 	}
 }
+
+func TestRenderBodyScrollbar(t *testing.T) {
+	tests := []struct {
+		name         string
+		content      string
+		visibleLines int
+		wantScrollbar bool
+	}{
+		{
+			name:          "empty content returns no scrollbar",
+			content:       "",
+			visibleLines:  4,
+			wantScrollbar: false,
+		},
+		{
+			name:          "content fits in viewport returns no scrollbar",
+			content:       "line1\nline2",
+			visibleLines:  4,
+			wantScrollbar: false,
+		},
+		{
+			name:          "content exceeds viewport returns scrollbar",
+			content:       "line1\nline2\nline3\nline4\nline5\nline6\nline7\nline8",
+			visibleLines:  4,
+			wantScrollbar: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := NewFormModel(nil, 100, 50, "")
+			m.bodyInput.SetValue(tt.content)
+			m.bodyInput.SetHeight(tt.visibleLines)
+
+			scrollbar := m.renderBodyScrollbar(tt.visibleLines)
+
+			if tt.wantScrollbar {
+				if scrollbar == nil {
+					t.Error("expected scrollbar but got nil")
+				}
+				if len(scrollbar) != tt.visibleLines {
+					t.Errorf("scrollbar length = %d, want %d", len(scrollbar), tt.visibleLines)
+				}
+				// Verify scrollbar contains expected characters
+				for _, char := range scrollbar {
+					if char != "┃" && char != "│" && !strings.Contains(char, "┃") && !strings.Contains(char, "│") {
+						t.Errorf("unexpected scrollbar character: %q", char)
+					}
+				}
+			} else {
+				if scrollbar != nil {
+					t.Errorf("expected no scrollbar but got %v", scrollbar)
+				}
+			}
+		})
+	}
+}
+
+func TestScrollbarAppearsInFormView(t *testing.T) {
+	m := NewFormModel(nil, 100, 50, "")
+
+	// Add enough content to trigger scrollbar
+	m.bodyInput.SetValue(strings.Repeat("line\n", 20))
+	m.bodyInput.SetHeight(4) // Force small viewport
+
+	view := m.View()
+
+	// The scrollbar characters should appear in the view
+	hasScrollbar := strings.Contains(view, "┃") || strings.Contains(view, "│")
+	if !hasScrollbar {
+		t.Error("expected scrollbar characters in view but found none")
+	}
+}
