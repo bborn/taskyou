@@ -29,22 +29,34 @@ func (e *Executor) ExtractMemories(ctx context.Context, task *db.Task) error {
 		return nil // Can't store memories without a project
 	}
 
-	// Get task logs
-	logs, err := e.db.GetTaskLogs(task.ID, 500)
+	// Get the compaction summary which contains the actual Claude conversation
+	summary, err := e.db.GetLatestCompactionSummary(task.ID)
 	if err != nil {
-		return fmt.Errorf("get task logs: %w", err)
+		return fmt.Errorf("get compaction summary: %w", err)
 	}
 
-	if len(logs) == 0 {
-		return nil
-	}
-
-	// Build context from logs
 	var logContent strings.Builder
-	for _, log := range logs {
-		if log.LineType == "output" || log.LineType == "text" {
-			logContent.WriteString(log.Content)
-			logContent.WriteString("\n")
+
+	// Use compaction summary if available (contains the actual conversation)
+	if summary != nil && len(summary.Summary) > 100 {
+		logContent.WriteString(summary.Summary)
+	} else {
+		// Fallback to task logs if no compaction summary
+		logs, err := e.db.GetTaskLogs(task.ID, 500)
+		if err != nil {
+			return fmt.Errorf("get task logs: %w", err)
+		}
+
+		if len(logs) == 0 {
+			return nil
+		}
+
+		// Build context from logs - include system logs which contain Claude's output
+		for _, log := range logs {
+			if log.LineType == "output" || log.LineType == "text" || log.LineType == "system" {
+				logContent.WriteString(log.Content)
+				logContent.WriteString("\n")
+			}
 		}
 	}
 
