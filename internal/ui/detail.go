@@ -902,7 +902,13 @@ func (m *DetailModel) breakTmuxPanes(saveHeight bool) {
 
 	// Break the Claude pane back to task-daemon
 	if m.claudePaneID == "" {
-		// Even if we don't have panes to break, ensure TUI pane is full size
+		// Even if we don't have a Claude pane, we may have a shell pane that needs cleanup
+		if m.workdirPaneID != "" {
+			// Kill the orphaned shell pane since we have no Claude pane to join it with
+			exec.CommandContext(ctx, "tmux", "kill-pane", "-t", m.workdirPaneID).Run()
+			m.workdirPaneID = ""
+		}
+		// Ensure TUI pane is full size
 		exec.CommandContext(ctx, "tmux", "resize-pane", "-t", "task-ui:.0", "-y", "100%").Run()
 		return
 	}
@@ -921,11 +927,23 @@ func (m *DetailModel) breakTmuxPanes(saveHeight bool) {
 	// -s: source pane (the one we joined)
 	// -t: target session
 	// -n: name for the new window
-	exec.CommandContext(ctx, "tmux", "break-pane",
+	breakErr := exec.CommandContext(ctx, "tmux", "break-pane",
 		"-d",
 		"-s", m.claudePaneID,
 		"-t", daemonSession+":",
 		"-n", windowName).Run()
+	if breakErr != nil {
+		// Break failed - kill both panes to avoid them persisting in task-ui
+		exec.CommandContext(ctx, "tmux", "kill-pane", "-t", m.claudePaneID).Run()
+		if m.workdirPaneID != "" {
+			exec.CommandContext(ctx, "tmux", "kill-pane", "-t", m.workdirPaneID).Run()
+			m.workdirPaneID = ""
+		}
+		m.claudePaneID = ""
+		m.daemonSessionID = ""
+		exec.CommandContext(ctx, "tmux", "resize-pane", "-t", "task-ui:.0", "-y", "100%").Run()
+		return
+	}
 
 	// If we have a workdir pane, join it to the task-daemon window alongside Claude
 	// This preserves any running processes (Rails servers, watchers, etc.)
@@ -957,12 +975,17 @@ func (m *DetailModel) breakTmuxPanes(saveHeight bool) {
 		// -d: don't switch focus
 		// -s: source pane (the workdir pane)
 		// -t: target window (the newly broken Claude window)
-		exec.CommandContext(ctx, "tmux", "join-pane",
+		joinErr := exec.CommandContext(ctx, "tmux", "join-pane",
 			"-h",
 			"-d",
 			"-s", m.workdirPaneID,
 			"-t", targetWindow+".0").Run()
-		// Note: We don't clear m.workdirPaneID here because the pane still exists
+		if joinErr != nil {
+			// Join failed - kill the pane to avoid it persisting in task-ui
+			exec.CommandContext(ctx, "tmux", "kill-pane", "-t", m.workdirPaneID).Run()
+			m.workdirPaneID = ""
+		}
+		// Note: We don't clear m.workdirPaneID on success because the pane still exists
 		// and will be rejoined when we navigate back to this task
 	}
 
