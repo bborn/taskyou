@@ -87,7 +87,7 @@ func TestBuildPrompt_Body(t *testing.T) {
 func TestNewService(t *testing.T) {
 	svc := NewService()
 	if svc == nil {
-		t.Error("NewService() returned nil")
+		t.Fatal("NewService() returned nil")
 	}
 	if svc.debounceDelay == 0 {
 		t.Error("debounceDelay should be set")
