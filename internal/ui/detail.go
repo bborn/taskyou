@@ -46,6 +46,9 @@ type DetailModel struct {
 
 	// Cached Claude process memory (updated on Refresh)
 	claudeMemoryMB int
+
+	// Shell pane visibility state
+	shellPaneHidden bool
 }
 
 // UpdateTask updates the task and refreshes the view.
@@ -998,6 +1001,75 @@ func (m *DetailModel) isTuiPaneFocused() bool {
 	return currentPane == m.tuiPaneID
 }
 
+// ToggleShellPane toggles the visibility of the shell pane.
+// When hidden, the Claude pane expands to full width.
+// When shown, the shell pane is recreated with the saved width.
+func (m *DetailModel) ToggleShellPane() {
+	if os.Getenv("TMUX") == "" || m.claudePaneID == "" {
+		return // Not in tmux or no Claude pane
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if m.shellPaneHidden {
+		// Show the shell pane - create a new one to the right of Claude
+		workdir := m.getWorkdir()
+		userShell := os.Getenv("SHELL")
+		if userShell == "" {
+			userShell = "/bin/zsh"
+		}
+		shellWidth := m.getShellPaneWidth()
+
+		err := exec.CommandContext(ctx, "tmux", "split-window",
+			"-h", "-l", shellWidth,
+			"-t", m.claudePaneID,
+			"-c", workdir,
+			userShell).Run()
+		if err != nil {
+			return
+		}
+
+		// Get the new shell pane ID
+		workdirPaneCmd := exec.CommandContext(ctx, "tmux", "display-message", "-p", "#{pane_id}")
+		workdirPaneOut, _ := workdirPaneCmd.Output()
+		m.workdirPaneID = strings.TrimSpace(string(workdirPaneOut))
+		exec.CommandContext(ctx, "tmux", "select-pane", "-t", m.workdirPaneID, "-T", "Shell").Run()
+
+		// Set environment variables in the shell pane
+		if m.task != nil {
+			envCmd := fmt.Sprintf("export WORKTREE_TASK_ID=%d WORKTREE_PORT=%d WORKTREE_PATH=%q", m.task.ID, m.task.Port, m.task.WorktreePath)
+			exec.CommandContext(ctx, "tmux", "send-keys", "-t", m.workdirPaneID, envCmd, "Enter").Run()
+			exec.CommandContext(ctx, "tmux", "send-keys", "-t", m.workdirPaneID, "clear", "Enter").Run()
+		}
+
+		// Return focus to TUI pane
+		if m.tuiPaneID != "" {
+			exec.CommandContext(ctx, "tmux", "select-pane", "-t", m.tuiPaneID).Run()
+		}
+
+		m.shellPaneHidden = false
+	} else {
+		// Hide the shell pane - save width first, then kill it
+		if m.workdirPaneID != "" {
+			m.saveShellPaneWidth()
+			exec.CommandContext(ctx, "tmux", "kill-pane", "-t", m.workdirPaneID).Run()
+			m.workdirPaneID = ""
+		}
+		m.shellPaneHidden = true
+
+		// Return focus to TUI pane
+		if m.tuiPaneID != "" {
+			exec.CommandContext(ctx, "tmux", "select-pane", "-t", m.tuiPaneID).Run()
+		}
+	}
+}
+
+// IsShellPaneHidden returns true if the shell pane is currently hidden.
+func (m *DetailModel) IsShellPaneHidden() bool {
+	return m.shellPaneHidden
+}
+
 // View renders the detail view.
 func (m *DetailModel) View() string {
 	if !m.ready {
@@ -1243,6 +1315,18 @@ func (m *DetailModel) renderHelp() string {
 			key  string
 			desc string
 		}{"Tab", "switch pane"})
+	}
+
+	// Show toggle shell shortcut when Claude pane is visible
+	if m.claudePaneID != "" && os.Getenv("TMUX") != "" {
+		toggleDesc := "hide shell"
+		if m.shellPaneHidden {
+			toggleDesc = "show shell"
+		}
+		keys = append(keys, struct {
+			key  string
+			desc string
+		}{"\\", toggleDesc})
 	}
 
 	keys = append(keys, []struct {

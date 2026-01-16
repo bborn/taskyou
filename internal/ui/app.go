@@ -73,6 +73,8 @@ type KeyMap struct {
 	FocusInProgress key.Binding
 	FocusBlocked    key.Binding
 	FocusDone       key.Binding
+	// Shell pane toggle
+	ToggleShellPane key.Binding
 }
 
 // ShortHelp returns key bindings to show in the mini help.
@@ -202,6 +204,10 @@ func DefaultKeyMap() KeyMap {
 		FocusDone: key.NewBinding(
 			key.WithKeys("D"),
 			key.WithHelp("D", "done"),
+		),
+		ToggleShellPane: key.NewBinding(
+			key.WithKeys("\\"),
+			key.WithHelp("\\", "toggle shell"),
 		),
 	}
 }
@@ -1243,6 +1249,10 @@ func (m *AppModel) updateDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
 			claudePaneID = m.detailView.ClaudePaneID()
 		}
 		return m, m.resumeClaude(m.selectedTask.ID, claudePaneID)
+	}
+	if key.Matches(keyMsg, m.keys.ToggleShellPane) && m.detailView != nil {
+		m.detailView.ToggleShellPane()
+		return m, nil
 	}
 
 	// Arrow key navigation to prev/next task in the same column
