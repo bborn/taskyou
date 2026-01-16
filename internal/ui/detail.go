@@ -213,8 +213,8 @@ func (m *DetailModel) Update(msg tea.Msg) (*DetailModel, tea.Cmd) {
 			return m, nil
 		}
 
-		// Shift+Tab to cycle to previous pane (Details -> Shell -> Claude -> Details)
-		if keyMsg.String() == "shift+tab" && hasPanes && os.Getenv("TMUX") != "" {
+		// Cmd+Tab (sent as Alt+Tab in terminal) to cycle to previous pane (Details -> Shell -> Claude -> Details)
+		if keyMsg.String() == "alt+tab" && hasPanes && os.Getenv("TMUX") != "" {
 			m.focusPrevPane()
 			return m, nil
 		}
@@ -738,7 +738,7 @@ func (m *DetailModel) joinTmuxPanes() {
 	exec.CommandContext(ctx, "tmux", "set-option", "-t", "task-ui", "status", "on").Run()
 	exec.CommandContext(ctx, "tmux", "set-option", "-t", "task-ui", "status-style", "bg=#3b82f6,fg=white").Run()
 	exec.CommandContext(ctx, "tmux", "set-option", "-t", "task-ui", "status-left", " TASK UI ").Run()
-	exec.CommandContext(ctx, "tmux", "set-option", "-t", "task-ui", "status-right", " Tab to switch panes │ Shift+Tab to focus detail │ drag borders to resize ").Run()
+	exec.CommandContext(ctx, "tmux", "set-option", "-t", "task-ui", "status-right", " Tab to switch panes │ ⌘Tab to focus detail │ drag borders to resize ").Run()
 	exec.CommandContext(ctx, "tmux", "set-option", "-t", "task-ui", "status-right-length", "80").Run()
 
 	// Style pane borders - active pane gets theme color outline
@@ -752,9 +752,9 @@ func (m *DetailModel) joinTmuxPanes() {
 	detailHeight := m.getDetailPaneHeight()
 	exec.CommandContext(ctx, "tmux", "resize-pane", "-t", tuiPaneID, "-y", detailHeight).Run()
 
-	// Bind Shift+Tab to focus the TUI/Details pane from any pane
-	// This allows the user to press shift-tab while in Claude or Shell pane to return to task detail
-	exec.CommandContext(ctx, "tmux", "bind-key", "-T", "root", "BTab", "select-pane", "-t", tuiPaneID).Run()
+	// Bind Cmd+Tab (M-Tab = Meta/Option+Tab) to focus the TUI/Details pane from any pane
+	// This allows the user to press cmd-tab while in Claude or Shell pane to return to task detail
+	exec.CommandContext(ctx, "tmux", "bind-key", "-T", "root", "M-Tab", "select-pane", "-t", tuiPaneID).Run()
 }
 
 // joinTmuxPane is a compatibility wrapper for joinTmuxPanes.
@@ -1100,7 +1100,7 @@ func (m *DetailModel) renderHeader() string {
 		meta.WriteString("  ")
 		hintText := "(Tab to interact with Claude)"
 		if !m.isTuiPaneFocused() {
-			hintText = "(Shift+Tab to return to task detail)"
+			hintText = "(⌘Tab to return to task detail)"
 		}
 		tmuxHint := lipgloss.NewStyle().
 			Foreground(ColorSecondary).
