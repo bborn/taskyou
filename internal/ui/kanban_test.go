@@ -78,37 +78,37 @@ func TestKanbanBoard_HandleClick(t *testing.T) {
 		{
 			name:       "click on first task in backlog column",
 			x:          colTotalWidth / 2, // Middle of first column
-			y:          5,                 // After header (1 border + 3 header = 4, so y=5 is first task)
+			y:          2,                 // After header (1 border + 1 header = 2, so y=2 is first task)
 			wantTaskID: 1,
 		},
 		{
 			name:       "click on second task in backlog column",
 			x:          colTotalWidth / 2, // Middle of first column
-			y:          8,                 // Second task (card height = 3)
+			y:          5,                 // Second task (card height = 3, so y=5 is second task)
 			wantTaskID: 2,
 		},
 		{
 			name:       "click on task in second column (in progress)",
 			x:          colTotalWidth + colTotalWidth/2, // Middle of second column
-			y:          5,
+			y:          2,
 			wantTaskID: 3,
 		},
 		{
 			name:       "click on task in third column (blocked)",
 			x:          2*colTotalWidth + colTotalWidth/2, // Middle of third column
-			y:          5,
+			y:          2,
 			wantTaskID: 4,
 		},
 		{
 			name:       "click on task in fourth column (done)",
 			x:          3*colTotalWidth + colTotalWidth/2, // Middle of fourth column
-			y:          5,
+			y:          2,
 			wantTaskID: 5,
 		},
 		{
 			name:    "click on header area returns nil",
 			x:       colTotalWidth / 2,
-			y:       2, // Header area
+			y:       1, // Header area (y=1 is the header bar)
 			wantNil: true,
 		},
 		{
@@ -260,7 +260,7 @@ func TestKanbanBoard_HandleClickUpdatesSelection(t *testing.T) {
 	colTotalWidth := colWidth + 2
 
 	x := colTotalWidth + colTotalWidth/2 // Middle of second column
-	y := 5                               // First task position
+	y := 2                               // First task position (1 border + 1 header = 2)
 
 	task := board.HandleClick(x, y)
 
@@ -393,9 +393,9 @@ func TestKanbanBoard_MobileTaskClick(t *testing.T) {
 	board.FocusColumn(0)
 
 	// Click on first task in the column
-	// Mobile layout: tab bar (2 lines), border (1), header (3), task area
+	// Mobile layout: tab bar (2 lines), border (1), header (1), task area
 	x := 30 // Middle of column
-	y := 7  // After tab bar (2) + border (1) + header (3) = 6, so y=7 is first task
+	y := 4  // After tab bar (2) + border (1) + header (1) = 4, so y=4 is first task
 
 	task := board.HandleClick(x, y)
 
@@ -545,5 +545,46 @@ func TestKanbanBoard_RecurringTasksSortingAcrossColumns(t *testing.T) {
 	}
 	if inProgressCol.Tasks[1].ID != 4 {
 		t.Errorf("InProgress second task: expected ID 4, got %d", inProgressCol.Tasks[1].ID)
+	}
+}
+
+// TestKanbanBoard_FirstTaskClickable is a regression test for the bug where
+// clicking on the first task in a kanban column did not work because the
+// click handler expected the task area to start at y=4 instead of y=2.
+func TestKanbanBoard_FirstTaskClickable(t *testing.T) {
+	board := NewKanbanBoard(100, 50)
+
+	tasks := []*db.Task{
+		{ID: 1, Title: "First Task", Status: db.StatusBacklog},
+	}
+	board.SetTasks(tasks)
+
+	// Calculate column layout
+	numCols := 4
+	availableWidth := 100 - (numCols * 2) - (numCols - 1)
+	colWidth := availableWidth / numCols
+	colTotalWidth := colWidth + 2
+
+	// The first task should be clickable at y=2, y=3, and y=4
+	// (y=0 is border, y=1 is header, y=2-4 is the first task card)
+	for y := 2; y <= 4; y++ {
+		task := board.HandleClick(colTotalWidth/2, y)
+		if task == nil {
+			t.Errorf("HandleClick at y=%d returned nil, expected task 1", y)
+		} else if task.ID != 1 {
+			t.Errorf("HandleClick at y=%d returned task %d, expected 1", y, task.ID)
+		}
+	}
+
+	// Clicking on header (y=1) should not select a task
+	task := board.HandleClick(colTotalWidth/2, 1)
+	if task != nil {
+		t.Errorf("HandleClick at y=1 (header) returned task %d, expected nil", task.ID)
+	}
+
+	// Clicking on border (y=0) should not select a task
+	task = board.HandleClick(colTotalWidth/2, 0)
+	if task != nil {
+		t.Errorf("HandleClick at y=0 (border) returned task %d, expected nil", task.ID)
 	}
 }

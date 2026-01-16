@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -9,6 +10,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/bborn/workflow/internal/autocomplete"
 	"github.com/bborn/workflow/internal/db"
 	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/textinput"
@@ -67,30 +69,71 @@ type FormModel struct {
 	// Magic paste fields (populated when pasting URLs)
 	prURL    string // GitHub PR URL if pasted
 	prNumber int    // GitHub PR number if pasted
+
+	// Ghost text autocompletion (LLM-powered)
+	ghostText           string                  // The suggested completion text (suffix only)
+	ghostFullText       string                  // The full text that would result from accepting
+	lastTitleValue      string                  // Track title changes for suggestion refresh
+	lastBodyValue       string                  // Track body changes for suggestion refresh
+	autocompleteCtx     context.Context         // Context for cancelling autocomplete requests
+	autocompleteCancel  context.CancelFunc      // Cancel function for current request
+	autocompleteSvc     *autocomplete.Service   // Autocomplete service
+	debounceID          int                     // ID to track debounce requests
+	pendingDebounce     bool                    // Whether we're waiting on a debounce timer
+	loadingAutocomplete bool                    // Whether we're waiting for LLM response
+	autocompleteEnabled bool                    // Whether autocomplete is enabled (from settings)
+}
+
+// Autocomplete message types for async LLM suggestions
+type autocompleteTickMsg struct {
+	debounceID int
+	fieldType  string
+	input      string
+	project    string
+	context    string
+}
+
+type autocompleteSuggestionMsg struct {
+	suggestion *autocomplete.Suggestion
+	fieldType  string
 }
 
 // NewEditFormModel creates a form model pre-populated with an existing task's data for editing.
 func NewEditFormModel(database *db.DB, task *db.Task, width, height int) *FormModel {
+	ctx, cancel := context.WithCancel(context.Background())
+
 	// Set executor to default if not specified
 	executor := task.Executor
 	if executor == "" {
 		executor = db.DefaultExecutor()
 	}
 
+	// Check if autocomplete is enabled (default: true)
+	autocompleteEnabled := true
+	if database != nil {
+		if setting, _ := database.GetSetting("autocomplete_enabled"); setting == "false" {
+			autocompleteEnabled = false
+		}
+	}
+
 	m := &FormModel{
-		db:          database,
-		width:       width,
-		height:      height,
-		focused:     FieldTitle,
-		taskType:    task.Type,
-		project:     task.Project,
-		executor:    executor,
-		executors:   []string{db.ExecutorClaude, db.ExecutorCodex},
-		isEdit:      true,
-		recurrence:  task.Recurrence,
-		recurrences: []string{"", db.RecurrenceHourly, db.RecurrenceDaily, db.RecurrenceWeekly, db.RecurrenceMonthly},
-		prURL:       task.PRURL,
-		prNumber:    task.PRNumber,
+		db:                  database,
+		width:               width,
+		height:              height,
+		focused:             FieldTitle,
+		taskType:            task.Type,
+		project:             task.Project,
+		executor:            executor,
+		executors:           []string{db.ExecutorClaude, db.ExecutorCodex},
+		isEdit:              true,
+		recurrence:          task.Recurrence,
+		recurrences:         []string{"", db.RecurrenceHourly, db.RecurrenceDaily, db.RecurrenceWeekly, db.RecurrenceMonthly},
+		prURL:               task.PRURL,
+		prNumber:            task.PRNumber,
+		autocompleteCtx:     ctx,
+		autocompleteCancel:  cancel,
+		autocompleteSvc:     autocomplete.NewService(),
+		autocompleteEnabled: autocompleteEnabled,
 	}
 
 	// Set executor index
@@ -155,10 +198,10 @@ func NewEditFormModel(database *db.DB, task *db.Task, width, height int) *FormMo
 	m.bodyInput.Prompt = ""
 	m.bodyInput.ShowLineNumbers = false
 	m.bodyInput.SetWidth(width - 24)
-	m.bodyInput.SetHeight(4)
 	m.bodyInput.FocusedStyle.CursorLine = lipgloss.NewStyle()
 	m.bodyInput.BlurredStyle.CursorLine = lipgloss.NewStyle()
 	m.bodyInput.SetValue(task.Body)
+	m.updateBodyHeight() // Autogrow based on content
 
 	// Schedule input - pre-populate if task has a scheduled time
 	m.scheduleInput = textinput.New()
@@ -189,14 +232,28 @@ func NewEditFormModel(database *db.DB, task *db.Task, width, height int) *FormMo
 
 // NewFormModel creates a new form model.
 func NewFormModel(database *db.DB, width, height int, workingDir string) *FormModel {
+	ctx, cancel := context.WithCancel(context.Background())
+
+	// Check if autocomplete is enabled (default: true)
+	autocompleteEnabled := true
+	if database != nil {
+		if setting, _ := database.GetSetting("autocomplete_enabled"); setting == "false" {
+			autocompleteEnabled = false
+		}
+	}
+
 	m := &FormModel{
-		db:          database,
-		width:       width,
-		height:      height,
-		focused:     FieldTitle,
-		executor:    db.DefaultExecutor(),
-		executors:   []string{db.ExecutorClaude, db.ExecutorCodex},
-		recurrences: []string{"", db.RecurrenceHourly, db.RecurrenceDaily, db.RecurrenceWeekly, db.RecurrenceMonthly},
+		db:                  database,
+		width:               width,
+		height:              height,
+		focused:             FieldTitle,
+		executor:            db.DefaultExecutor(),
+		executors:           []string{db.ExecutorClaude, db.ExecutorCodex},
+		recurrences:         []string{"", db.RecurrenceHourly, db.RecurrenceDaily, db.RecurrenceWeekly, db.RecurrenceMonthly},
+		autocompleteCtx:     ctx,
+		autocompleteCancel:  cancel,
+		autocompleteSvc:     autocomplete.NewService(),
+		autocompleteEnabled: autocompleteEnabled,
 	}
 
 	// Load task types from database
@@ -261,9 +318,9 @@ func NewFormModel(database *db.DB, width, height int, workingDir string) *FormMo
 	m.bodyInput.Prompt = ""
 	m.bodyInput.ShowLineNumbers = false
 	m.bodyInput.SetWidth(width - 24)
-	m.bodyInput.SetHeight(4)
 	m.bodyInput.FocusedStyle.CursorLine = lipgloss.NewStyle()
 	m.bodyInput.BlurredStyle.CursorLine = lipgloss.NewStyle()
+	m.updateBodyHeight() // Start with minimum height, will autogrow as content is added
 
 	// Schedule input
 	m.scheduleInput = textinput.New()
@@ -288,6 +345,25 @@ func (m *FormModel) Init() tea.Cmd {
 // Update handles messages.
 func (m *FormModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	// Handle autocomplete debounce tick - fire the LLM request
+	case autocompleteTickMsg:
+		// Only process if this is still the current debounce request
+		if msg.debounceID == m.debounceID && m.pendingDebounce {
+			m.pendingDebounce = false
+			m.loadingAutocomplete = true
+			return m, m.fetchAutocompleteSuggestion(msg.fieldType, msg.input, msg.project, msg.context)
+		}
+		return m, nil
+
+	// Handle autocomplete suggestion result
+	case autocompleteSuggestionMsg:
+		m.loadingAutocomplete = false
+		if msg.suggestion != nil {
+			m.ghostText = msg.suggestion.Text
+			m.ghostFullText = msg.suggestion.FullText
+		}
+		return m, nil
+
 	case tea.KeyMsg:
 		// Handle bracketed paste (file drag-drop)
 		if msg.Paste && msg.Type == tea.KeyRunes {
@@ -310,6 +386,7 @@ func (m *FormModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.titleInput.SetValue(m.titleInput.Value() + pastedText)
 			case FieldBody:
 				m.bodyInput.SetValue(m.bodyInput.Value() + pastedText)
+				m.updateBodyHeight() // Autogrow after paste
 			case FieldAttachments:
 				m.attachmentsInput.SetValue(m.attachmentsInput.Value() + pastedText)
 			}
@@ -317,8 +394,42 @@ func (m *FormModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		switch msg.String() {
-		case "ctrl+c", "esc":
+		case "ctrl+c":
 			m.cancelled = true
+			return m, nil
+
+		case "esc":
+			// If there's a ghost suggestion or loading, dismiss it first
+			if m.ghostText != "" || m.loadingAutocomplete || m.pendingDebounce {
+				m.clearGhostText()
+				if m.autocompleteCancel != nil {
+					m.autocompleteCancel()
+				}
+				return m, nil
+			}
+			// Otherwise cancel the form
+			m.cancelled = true
+			return m, nil
+
+		case "ctrl+ ", "ctrl+space":
+			// Manually trigger autocomplete (if enabled)
+			if m.autocompleteEnabled && (m.focused == FieldTitle || m.focused == FieldBody) {
+				m.clearGhostText()
+				var input, extraContext string
+				var fieldType string
+				if m.focused == FieldTitle {
+					input = m.titleInput.Value()
+					fieldType = "title"
+				} else {
+					input = m.bodyInput.Value()
+					fieldType = "body"
+					extraContext = m.titleInput.Value()
+				}
+				if len(input) >= 2 {
+					m.loadingAutocomplete = true
+					return m, m.fetchAutocompleteSuggestion(fieldType, input, m.project, extraContext)
+				}
+			}
 			return m, nil
 
 		case "ctrl+s":
@@ -328,6 +439,11 @@ func (m *FormModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 
 		case "tab":
+			// If there's ghost text, accept it instead of moving to next field
+			if m.ghostText != "" && (m.focused == FieldTitle || m.focused == FieldBody) {
+				m.acceptGhostText()
+				return m, nil
+			}
 			m.focusNext()
 			return m, nil
 
@@ -413,8 +529,23 @@ func (m *FormModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch m.focused {
 	case FieldTitle:
 		m.titleInput, cmd = m.titleInput.Update(msg)
+		// Trigger debounced autocomplete if title changed
+		if m.titleInput.Value() != m.lastTitleValue {
+			m.lastTitleValue = m.titleInput.Value()
+			m.clearGhostText() // Clear old suggestion immediately
+			debounceCmd := m.scheduleAutocomplete("title", m.titleInput.Value(), m.project, "")
+			return m, tea.Batch(cmd, debounceCmd)
+		}
 	case FieldBody:
 		m.bodyInput, cmd = m.bodyInput.Update(msg)
+		m.updateBodyHeight() // Autogrow as content changes
+		// Trigger debounced autocomplete if body changed
+		if m.bodyInput.Value() != m.lastBodyValue {
+			m.lastBodyValue = m.bodyInput.Value()
+			m.clearGhostText() // Clear old suggestion immediately
+			debounceCmd := m.scheduleAutocomplete("body", m.bodyInput.Value(), m.project, m.titleInput.Value())
+			return m, tea.Batch(cmd, debounceCmd)
+		}
 	case FieldSchedule:
 		m.scheduleInput, cmd = m.scheduleInput.Update(msg)
 	case FieldAttachments:
@@ -422,6 +553,73 @@ func (m *FormModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	return m, cmd
+}
+
+// scheduleAutocomplete schedules a debounced autocomplete request.
+func (m *FormModel) scheduleAutocomplete(fieldType, input, project, extraContext string) tea.Cmd {
+	// Skip if autocomplete is disabled
+	if !m.autocompleteEnabled {
+		return nil
+	}
+
+	// Cancel any pending autocomplete
+	if m.autocompleteCancel != nil {
+		m.autocompleteCancel()
+	}
+	m.autocompleteCtx, m.autocompleteCancel = context.WithCancel(context.Background())
+
+	// Increment debounce ID to invalidate old requests
+	m.debounceID++
+	m.pendingDebounce = true
+	debounceID := m.debounceID
+
+	// Return a tick command that fires after the debounce delay
+	return tea.Tick(350*time.Millisecond, func(t time.Time) tea.Msg {
+		return autocompleteTickMsg{
+			debounceID: debounceID,
+			fieldType:  fieldType,
+			input:      input,
+			project:    project,
+			context:    extraContext,
+		}
+	})
+}
+
+// fetchAutocompleteSuggestion fetches an autocomplete suggestion from the LLM.
+func (m *FormModel) fetchAutocompleteSuggestion(fieldType, input, project, extraContext string) tea.Cmd {
+	if m.autocompleteSvc == nil {
+		return nil
+	}
+
+	ctx := m.autocompleteCtx
+	svc := m.autocompleteSvc
+
+	return func() tea.Msg {
+		suggestion := svc.GetSuggestion(ctx, input, fieldType, project, extraContext)
+		return autocompleteSuggestionMsg{
+			suggestion: suggestion,
+			fieldType:  fieldType,
+		}
+	}
+}
+
+// acceptGhostText accepts the current ghost text suggestion.
+func (m *FormModel) acceptGhostText() {
+	if m.ghostText == "" || m.ghostFullText == "" {
+		return
+	}
+
+	switch m.focused {
+	case FieldTitle:
+		m.titleInput.SetValue(m.ghostFullText)
+		m.lastTitleValue = m.ghostFullText
+	case FieldBody:
+		m.bodyInput.SetValue(m.ghostFullText)
+		m.lastBodyValue = m.ghostFullText
+	}
+
+	m.ghostText = ""
+	m.ghostFullText = ""
 }
 
 func (m *FormModel) selectByPrefix(prefix string) {
@@ -493,14 +691,23 @@ func (m *FormModel) loadLastTaskTypeForProject() {
 
 func (m *FormModel) focusNext() {
 	m.blurAll()
+	m.clearGhostText()
 	m.focused = (m.focused + 1) % (FieldAttachments + 1)
 	m.focusCurrent()
 }
 
 func (m *FormModel) focusPrev() {
 	m.blurAll()
+	m.clearGhostText()
 	m.focused = (m.focused - 1 + FieldAttachments + 1) % (FieldAttachments + 1)
 	m.focusCurrent()
+}
+
+func (m *FormModel) clearGhostText() {
+	m.ghostText = ""
+	m.ghostFullText = ""
+	m.loadingAutocomplete = false
+	m.pendingDebounce = false
 }
 
 func (m *FormModel) blurAll() {
@@ -573,12 +780,25 @@ func (m *FormModel) View() string {
 	b.WriteString(header)
 	b.WriteString("\n\n")
 
+	// Ghost text style for autocomplete suggestions
+	ghostStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Italic(true)
+	loadingStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("243")).Italic(true)
+
 	// Title
 	cursor := " "
 	if m.focused == FieldTitle {
 		cursor = cursorStyle.Render("▸")
 	}
-	b.WriteString(cursor + " " + labelStyle.Render("Title") + m.titleInput.View())
+	titleView := m.titleInput.View()
+	// Add ghost text or loading indicator after title if field is focused
+	if m.focused == FieldTitle {
+		if m.ghostText != "" {
+			titleView = titleView + ghostStyle.Render(m.ghostText)
+		} else if m.loadingAutocomplete {
+			titleView = titleView + loadingStyle.Render(" ...")
+		}
+	}
+	b.WriteString(cursor + " " + labelStyle.Render("Title") + titleView)
 	b.WriteString("\n\n")
 
 	// Body (textarea)
@@ -588,10 +808,24 @@ func (m *FormModel) View() string {
 	}
 	b.WriteString(cursor + " " + labelStyle.Render("Details"))
 	b.WriteString("\n")
-	// Indent the textarea
+	// Indent the textarea and add scrollbar if content overflows
 	bodyLines := strings.Split(m.bodyInput.View(), "\n")
-	for _, line := range bodyLines {
-		b.WriteString("   " + line + "\n")
+	scrollbar := m.renderBodyScrollbar(len(bodyLines))
+	for i, line := range bodyLines {
+		// Add ghost text or loading indicator to the first line when focused
+		if m.focused == FieldBody && i == 0 {
+			bodyContent := m.bodyInput.Value()
+			if m.ghostText != "" && !strings.Contains(bodyContent, "\n") {
+				line = line + ghostStyle.Render(m.ghostText)
+			} else if m.loadingAutocomplete && !strings.Contains(bodyContent, "\n") {
+				line = line + loadingStyle.Render(" ...")
+			}
+		}
+		scrollChar := ""
+		if i < len(scrollbar) {
+			scrollChar = scrollbar[i]
+		}
+		b.WriteString("   " + line + scrollChar + "\n")
 	}
 	b.WriteString("\n")
 
@@ -671,7 +905,7 @@ func (m *FormModel) View() string {
 	b.WriteString("\n\n")
 
 	// Help
-	helpText := "tab navigate • ←→ or type to select • ctrl+s submit • esc cancel"
+	helpText := "tab accept/navigate • ctrl+space suggest • ←→ select • ctrl+s submit • esc dismiss/cancel"
 	b.WriteString("  " + dimStyle.Render(helpText))
 
 	// Wrap in box
@@ -848,6 +1082,131 @@ func parseTimeOfDay(s string, date time.Time) *db.LocalTime {
 // SetQueue sets whether to queue the task.
 func (m *FormModel) SetQueue(queue bool) {
 	m.queue = queue
+}
+
+// calculateBodyHeight calculates the appropriate height for the body textarea based on content.
+// Returns a height between minHeight (4) and maxHeight (50% of available screen height).
+func (m *FormModel) calculateBodyHeight() int {
+	content := m.bodyInput.Value()
+
+	// Minimum height
+	minHeight := 4
+
+	// Maximum height is 50% of screen height
+	// Account for other form elements: header(2) + title(2) + body label(1) + project(2) +
+	// type(2) + schedule(2) + recurrence(2) + attachments(2) + help(1) + padding/borders(~6) = ~22 lines
+	formOverhead := 22
+	maxHeight := (m.height - formOverhead) / 2
+	if maxHeight < minHeight {
+		maxHeight = minHeight
+	}
+
+	// Count actual lines needed
+	lines := 1
+	if content != "" {
+		lines = strings.Count(content, "\n") + 1
+	}
+
+	// Account for line wrapping
+	textWidth := m.width - 24 // Same width as used in SetWidth
+	if textWidth > 0 {
+		for _, line := range strings.Split(content, "\n") {
+			// Each line might wrap based on character count
+			lineLen := len(line)
+			if lineLen > textWidth {
+				lines += lineLen / textWidth
+			}
+		}
+	}
+
+	// Apply min/max bounds
+	height := lines
+	if height < minHeight {
+		height = minHeight
+	}
+	if height > maxHeight {
+		height = maxHeight
+	}
+
+	return height
+}
+
+// updateBodyHeight updates the body textarea height based on content.
+func (m *FormModel) updateBodyHeight() {
+	height := m.calculateBodyHeight()
+	m.bodyInput.SetHeight(height)
+}
+
+// renderBodyScrollbar renders a scrollbar for the body textarea if content overflows.
+// Returns a slice of strings, one per visible line, containing the scrollbar character.
+func (m *FormModel) renderBodyScrollbar(visibleLines int) []string {
+	content := m.bodyInput.Value()
+	if content == "" {
+		return nil
+	}
+
+	// Get total content lines from the textarea
+	totalLines := m.bodyInput.LineCount()
+	viewportHeight := visibleLines
+
+	// No scrollbar needed if all content fits
+	if totalLines <= viewportHeight {
+		return nil
+	}
+
+	// Get cursor line to estimate scroll offset
+	// The textarea scrolls to keep the cursor visible
+	cursorLine := m.bodyInput.Line()
+
+	// Estimate the scroll offset: the viewport is positioned to keep cursor visible
+	// The cursor should be somewhere within the visible viewport
+	scrollOffset := 0
+	if cursorLine >= viewportHeight {
+		// Cursor is below initial viewport, so we've scrolled
+		scrollOffset = cursorLine - viewportHeight + 1
+	}
+	// Clamp scroll offset to valid range
+	maxOffset := totalLines - viewportHeight
+	if scrollOffset > maxOffset {
+		scrollOffset = maxOffset
+	}
+	if scrollOffset < 0 {
+		scrollOffset = 0
+	}
+
+	// Calculate scrollbar dimensions
+	// Thumb size is proportional to visible content / total content
+	thumbSize := (viewportHeight * viewportHeight) / totalLines
+	if thumbSize < 1 {
+		thumbSize = 1
+	}
+	if thumbSize > viewportHeight {
+		thumbSize = viewportHeight
+	}
+
+	// Thumb position is proportional to scroll offset
+	scrollRange := totalLines - viewportHeight
+	trackRange := viewportHeight - thumbSize
+	thumbPos := 0
+	if scrollRange > 0 && trackRange > 0 {
+		thumbPos = (scrollOffset * trackRange) / scrollRange
+	}
+
+	// Style the scrollbar
+	trackStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("238"))
+	thumbStyle := lipgloss.NewStyle().Foreground(ColorPrimary)
+
+	// Build the scrollbar
+	scrollbar := make([]string, viewportHeight)
+	for i := 0; i < viewportHeight; i++ {
+		if i >= thumbPos && i < thumbPos+thumbSize {
+			scrollbar[i] = thumbStyle.Render("┃")
+		} else {
+			scrollbar[i] = trackStyle.Render("│")
+		}
+	}
+
+	return scrollbar
 }
 
 // GetAttachments returns the parsed attachment file paths.
