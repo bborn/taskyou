@@ -29,6 +29,24 @@ A personal task management system with a beautiful terminal UI, SQLite storage, 
 - **Real-time Updates** - Watch tasks execute live
 - **SSH Access** - Connect from anywhere via `ssh -p 2222 server`
 
+## Prerequisites
+
+- **Go 1.24.4+** - Required to build the project
+
+### Using mise (recommended)
+
+If you use [mise](https://mise.jdx.dev/) for dependency management, simply run:
+
+```bash
+mise install
+```
+
+This will install the correct Go version automatically.
+
+### Manual installation
+
+Install Go 1.24.4 or later from [go.dev/dl](https://go.dev/dl/).
+
 ## Installation
 
 ```bash
