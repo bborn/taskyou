@@ -738,7 +738,7 @@ func (m *DetailModel) joinTmuxPanes() {
 	exec.CommandContext(ctx, "tmux", "set-option", "-t", "task-ui", "status", "on").Run()
 	exec.CommandContext(ctx, "tmux", "set-option", "-t", "task-ui", "status-style", "bg=#3b82f6,fg=white").Run()
 	exec.CommandContext(ctx, "tmux", "set-option", "-t", "task-ui", "status-left", " TASK UI ").Run()
-	exec.CommandContext(ctx, "tmux", "set-option", "-t", "task-ui", "status-right", " Tab to switch panes │ ⌘Tab to focus detail │ drag borders to resize ").Run()
+	exec.CommandContext(ctx, "tmux", "set-option", "-t", "task-ui", "status-right", " drag borders to resize ").Run()
 	exec.CommandContext(ctx, "tmux", "set-option", "-t", "task-ui", "status-right-length", "80").Run()
 
 	// Style pane borders - active pane gets theme color outline
@@ -1095,19 +1095,6 @@ func (m *DetailModel) renderHeader() string {
 		meta.WriteString(scheduleStyle.Render(scheduleText))
 	}
 
-	// Tmux hint if session is active - show different hint based on focused pane
-	if m.claudePaneID != "" {
-		meta.WriteString("  ")
-		hintText := "(Tab to interact with Claude)"
-		if !m.isTuiPaneFocused() {
-			hintText = "(⌘Tab to return to task detail)"
-		}
-		tmuxHint := lipgloss.NewStyle().
-			Foreground(ColorSecondary).
-			Render(hintText)
-		meta.WriteString(tmuxHint)
-	}
-
 	// PR link if available
 	var prLine string
 	if m.prInfo != nil && m.prInfo.URL != "" {
@@ -1237,12 +1224,19 @@ func (m *DetailModel) renderHelp() string {
 		}{"R", "resume claude"})
 	}
 
-	// Show Tab shortcut when panes are visible
+	// Show context-aware pane navigation shortcut when panes are visible
 	if hasPanes && os.Getenv("TMUX") != "" {
-		keys = append(keys, struct {
-			key  string
-			desc string
-		}{"Tab", "switch pane"})
+		if m.isTuiPaneFocused() {
+			keys = append(keys, struct {
+				key  string
+				desc string
+			}{"Tab", "focus claude"})
+		} else {
+			keys = append(keys, struct {
+				key  string
+				desc string
+			}{"⌘Tab", "focus details"})
+		}
 	}
 
 	keys = append(keys, []struct {
