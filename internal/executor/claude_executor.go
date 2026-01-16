@@ -37,23 +37,13 @@ func (c *ClaudeExecutor) IsAvailable() bool {
 // Execute runs a task using Claude Code CLI.
 func (c *ClaudeExecutor) Execute(ctx context.Context, task *db.Task, workDir, prompt string) ExecResult {
 	result := c.executor.runClaude(ctx, task, workDir, prompt)
-	return ExecResult{
-		Success:     result.Success,
-		NeedsInput:  result.NeedsInput,
-		Interrupted: result.Interrupted,
-		Message:     result.Message,
-	}
+	return ExecResult(result)
 }
 
 // Resume resumes a previous Claude session with feedback.
 func (c *ClaudeExecutor) Resume(ctx context.Context, task *db.Task, workDir, prompt, feedback string) ExecResult {
 	result := c.executor.runClaudeResume(ctx, task, workDir, prompt, feedback)
-	return ExecResult{
-		Success:     result.Success,
-		NeedsInput:  result.NeedsInput,
-		Interrupted: result.Interrupted,
-		Message:     result.Message,
-	}
+	return ExecResult(result)
 }
 
 // GetProcessID returns the PID of the Claude process for a task.

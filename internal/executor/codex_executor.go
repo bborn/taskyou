@@ -150,12 +150,7 @@ func (c *CodexExecutor) runCodex(ctx context.Context, task *db.Task, workDir, pr
 	// Poll for output and completion
 	result := c.executor.pollTmuxSession(ctx, task.ID, windowTarget)
 
-	return ExecResult{
-		Success:     result.Success,
-		NeedsInput:  result.NeedsInput,
-		Interrupted: result.Interrupted,
-		Message:     result.Message,
-	}
+	return ExecResult(result)
 }
 
 // GetProcessID returns the PID of the Codex process for a task.

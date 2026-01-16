@@ -17,12 +17,7 @@ type ExecResult struct {
 
 // toInternal converts ExecResult to the internal execResult type.
 func (r ExecResult) toInternal() execResult {
-	return execResult{
-		Success:     r.Success,
-		NeedsInput:  r.NeedsInput,
-		Interrupted: r.Interrupted,
-		Message:     r.Message,
-	}
+	return execResult(r)
 }
 
 // TaskExecutor defines the interface for task execution backends.
