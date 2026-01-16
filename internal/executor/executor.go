@@ -2580,10 +2580,12 @@ func (e *Executor) setupWorktree(task *db.Task) (string, error) {
 
 	// Check if project is a git repo, initialize one if not
 	// Git is required for worktree isolation - tasks always run in worktrees
+	// NOTE: This should rarely happen now - git repos are initialized during project creation.
+	// If we get here, it's a legacy project created before that change.
 	gitDir := filepath.Join(projectDir, ".git")
 	if _, err := os.Stat(gitDir); os.IsNotExist(err) {
 		// Initialize git repo so we can create worktrees
-		e.logger.Info("Initializing git repo for worktree support", "project", task.Project, "path", projectDir)
+		e.logger.Warn("Project missing git repo - initializing (legacy project?)", "project", task.Project, "path", projectDir)
 		cmd := exec.Command("git", "init")
 		cmd.Dir = projectDir
 		if output, err := cmd.CombinedOutput(); err != nil {
