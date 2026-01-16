@@ -524,6 +524,16 @@ Examples:
 						"project":    t.Project,
 						"created_at": t.CreatedAt.Time.Format(time.RFC3339),
 					}
+					// Add schedule fields
+					if t.ScheduledAt != nil {
+						item["scheduled_at"] = t.ScheduledAt.Time.Format(time.RFC3339)
+					}
+					if t.Recurrence != "" {
+						item["recurrence"] = t.Recurrence
+					}
+					if t.LastRunAt != nil {
+						item["last_run_at"] = t.LastRunAt.Time.Format(time.RFC3339)
+					}
 					// Add PR info to JSON output if available
 					if prInfo, ok := prInfoMap[t.ID]; ok {
 						item["pr"] = map[string]interface{}{
@@ -608,11 +618,18 @@ Examples:
 					if t.Project != "" {
 						project = dimStyle.Render(fmt.Sprintf("[%s] ", t.Project))
 					}
+					// Schedule indicator
+					scheduleIndicator := ""
+					if t.IsRecurring() {
+						scheduleIndicator = lipgloss.NewStyle().Foreground(lipgloss.Color("#F59E0B")).Render("🔁 ")
+					} else if t.IsScheduled() {
+						scheduleIndicator = lipgloss.NewStyle().Foreground(lipgloss.Color("#F59E0B")).Render("⏰ ")
+					}
 					prStatus := ""
 					if showPR {
 						prStatus = prStatusStyle(prInfoMap[t.ID])
 					}
-					fmt.Printf("%s %s %s%s%s\n", id, status, project, t.Title, prStatus)
+					fmt.Printf("%s %s %s%s%s%s\n", id, status, project, scheduleIndicator, t.Title, prStatus)
 				}
 			}
 		},
@@ -696,6 +713,16 @@ Examples:
 				}
 				if task.CompletedAt != nil {
 					output["completed_at"] = task.CompletedAt.Time.Format(time.RFC3339)
+				}
+				// Add schedule fields
+				if task.ScheduledAt != nil {
+					output["scheduled_at"] = task.ScheduledAt.Time.Format(time.RFC3339)
+				}
+				if task.Recurrence != "" {
+					output["recurrence"] = task.Recurrence
+				}
+				if task.LastRunAt != nil {
+					output["last_run_at"] = task.LastRunAt.Time.Format(time.RFC3339)
 				}
 				// Add PR info to JSON output
 				if prInfo != nil {
@@ -788,6 +815,23 @@ Examples:
 					}
 					prStatusStyled := lipgloss.NewStyle().Foreground(prStatusColor).Render(prInfo.StatusDescription())
 					fmt.Printf("CI:       %s\n", prStatusStyled)
+				}
+
+				// Schedule info
+				scheduleColor := lipgloss.Color("#F59E0B") // Orange for schedule
+				if task.IsRecurring() || task.IsScheduled() {
+					fmt.Println()
+					fmt.Println(boldStyle.Render("Schedule:"))
+					if task.Recurrence != "" {
+						recurrenceStyled := lipgloss.NewStyle().Foreground(scheduleColor).Render(task.Recurrence)
+						fmt.Printf("  Recurrence: %s\n", recurrenceStyled)
+					}
+					if task.ScheduledAt != nil {
+						fmt.Printf("  Next run:   %s\n", task.ScheduledAt.Time.Format("2006-01-02 15:04:05"))
+					}
+					if task.LastRunAt != nil {
+						fmt.Printf("  Last run:   %s\n", task.LastRunAt.Time.Format("2006-01-02 15:04:05"))
+					}
 				}
 
 				// Body

@@ -550,9 +550,12 @@ func (e *Executor) handleRecurringTaskCompletion(task *db.Task) {
 		return
 	}
 
-	e.logLine(task.ID, "system", fmt.Sprintf("Recurring task (%s) will run again at %s",
-		currentTask.Recurrence,
-		currentTask.ScheduledAt.Format("Jan 2 3:04pm")))
+	e.logLine(task.ID, "system", "───────────────────────────────────────────────────────")
+	e.logLine(task.ID, "system", fmt.Sprintf("✅ RECURRING RUN COMPLETED - %s", time.Now().Format("Jan 2, 2006 3:04:05 PM")))
+	e.logLine(task.ID, "system", fmt.Sprintf("   Next run scheduled for: %s (%s)",
+		currentTask.ScheduledAt.Format("Jan 2, 2006 3:04:05 PM"),
+		currentTask.Recurrence))
+	e.logLine(task.ID, "system", "───────────────────────────────────────────────────────")
 
 	// Broadcast the status change
 	e.broadcastTaskEvent(TaskEvent{
@@ -573,12 +576,15 @@ func (e *Executor) queueDueScheduledTasks() {
 	for _, task := range tasks {
 		e.logger.Info("Queuing scheduled task", "id", task.ID, "title", task.Title, "scheduled_at", task.ScheduledAt)
 
-		// Log the scheduled execution
-		msg := "Scheduled task triggered"
+		// Log the scheduled execution with a clear separator
+		e.logLine(task.ID, "system", "")
+		e.logLine(task.ID, "system", "═══════════════════════════════════════════════════════")
 		if task.IsRecurring() {
-			msg = fmt.Sprintf("Recurring task triggered (%s)", task.Recurrence)
+			e.logLine(task.ID, "system", fmt.Sprintf("🔁 RECURRING RUN STARTED (%s) - %s", task.Recurrence, time.Now().Format("Jan 2, 2006 3:04:05 PM")))
+		} else {
+			e.logLine(task.ID, "system", fmt.Sprintf("⏰ SCHEDULED RUN STARTED - %s", time.Now().Format("Jan 2, 2006 3:04:05 PM")))
 		}
-		e.logLine(task.ID, "system", msg)
+		e.logLine(task.ID, "system", "═══════════════════════════════════════════════════════")
 
 		// Queue the task (this also updates the next run time for recurring tasks)
 		if err := e.db.QueueScheduledTask(task.ID); err != nil {

@@ -708,10 +708,13 @@ func (k *KanbanBoard) renderTaskCard(task *db.Task, width int, isSelected bool) 
 		b.WriteString(PRStatusBadge(prInfo))
 	}
 
-	// Schedule indicator
-	if task.IsScheduled() {
+	// Schedule indicator - show if scheduled OR recurring
+	if task.IsScheduled() || task.IsRecurring() {
 		scheduleStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("214")) // Orange for schedule
-		scheduleText := formatScheduleTime(task.ScheduledAt.Time)
+		var scheduleText string
+		if task.IsScheduled() {
+			scheduleText = formatScheduleTime(task.ScheduledAt.Time)
+		}
 		icon := "⏰"
 		if task.IsRecurring() {
 			icon = "🔁" // Use repeat icon to indicate recurring task
