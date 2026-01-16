@@ -1250,6 +1250,7 @@ func (m *DetailModel) renderHelp() string {
 		desc string
 	}{
 		{"c", "close"},
+		{"a", "archive"},
 		{"d", "delete"},
 		{"esc", "back"},
 	}...)
