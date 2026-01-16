@@ -738,8 +738,8 @@ func (m *DetailModel) joinTmuxPanes() {
 	exec.CommandContext(ctx, "tmux", "set-option", "-t", "task-ui", "status", "on").Run()
 	exec.CommandContext(ctx, "tmux", "set-option", "-t", "task-ui", "status-style", "bg=#3b82f6,fg=white").Run()
 	exec.CommandContext(ctx, "tmux", "set-option", "-t", "task-ui", "status-left", " TASK UI ").Run()
-	exec.CommandContext(ctx, "tmux", "set-option", "-t", "task-ui", "status-right", " Tab to switch panes │ drag borders to resize ").Run()
-	exec.CommandContext(ctx, "tmux", "set-option", "-t", "task-ui", "status-right-length", "60").Run()
+	exec.CommandContext(ctx, "tmux", "set-option", "-t", "task-ui", "status-right", " Tab to switch panes │ Shift+Tab to focus detail │ drag borders to resize ").Run()
+	exec.CommandContext(ctx, "tmux", "set-option", "-t", "task-ui", "status-right-length", "80").Run()
 
 	// Style pane borders - active pane gets theme color outline
 	// Use heavy border lines to make them more visible and indicate they're draggable
@@ -751,6 +751,10 @@ func (m *DetailModel) joinTmuxPanes() {
 	// Resize TUI pane to configured height (default 20%)
 	detailHeight := m.getDetailPaneHeight()
 	exec.CommandContext(ctx, "tmux", "resize-pane", "-t", tuiPaneID, "-y", detailHeight).Run()
+
+	// Bind Shift+Tab to focus the TUI/Details pane from any pane
+	// This allows the user to press shift-tab while in Claude or Shell pane to return to task detail
+	exec.CommandContext(ctx, "tmux", "bind-key", "-T", "root", "BTab", "select-pane", "-t", tuiPaneID).Run()
 }
 
 // joinTmuxPane is a compatibility wrapper for joinTmuxPanes.
@@ -800,6 +804,9 @@ func (m *DetailModel) breakTmuxPanes(saveHeight bool) {
 	exec.CommandContext(ctx, "tmux", "set-option", "-t", "task-ui", "pane-border-indicators", "off").Run()
 	exec.CommandContext(ctx, "tmux", "set-option", "-t", "task-ui", "pane-border-style", "fg=#374151").Run()
 	exec.CommandContext(ctx, "tmux", "set-option", "-t", "task-ui", "pane-active-border-style", "fg=#61AFEF").Run()
+
+	// Unbind Shift+Tab keybinding that was set in joinTmuxPanes
+	exec.CommandContext(ctx, "tmux", "unbind-key", "-T", "root", "BTab").Run()
 
 	// Reset pane title back to main view label
 	exec.CommandContext(ctx, "tmux", "select-pane", "-t", "task-ui:.0", "-T", "Tasks").Run()
