@@ -235,6 +235,8 @@ func (db *DB) migrate() error {
 		`ALTER TABLE tasks ADD COLUMN daemon_session TEXT DEFAULT ''`, // tmux daemon session name for killing Claude
 		// Task tagging for categorization and search
 		`ALTER TABLE tasks ADD COLUMN tags TEXT DEFAULT ''`, // comma-separated tags for categorization (e.g., "customer-support,email,influence-kit")
+		// Task executor - which CLI to use for task execution
+		`ALTER TABLE tasks ADD COLUMN executor TEXT DEFAULT 'claude'`, // Task executor: "claude" (default), "codex"
 	}
 
 	for _, m := range alterMigrations {

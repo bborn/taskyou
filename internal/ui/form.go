@@ -26,6 +26,7 @@ const (
 	FieldBody
 	FieldProject
 	FieldType
+	FieldExecutor
 	FieldSchedule
 	FieldRecurrence
 	FieldAttachments
@@ -56,6 +57,9 @@ type FormModel struct {
 	taskType      string
 	typeIdx       int
 	types         []string
+	executor      string // "claude", "codex"
+	executorIdx   int
+	executors     []string
 	queue         bool
 	attachments   []string // Parsed file paths
 	recurrence    string   // "", "hourly", "daily", "weekly", "monthly"
@@ -98,6 +102,12 @@ type autocompleteSuggestionMsg struct {
 func NewEditFormModel(database *db.DB, task *db.Task, width, height int) *FormModel {
 	ctx, cancel := context.WithCancel(context.Background())
 
+	// Set executor to default if not specified
+	executor := task.Executor
+	if executor == "" {
+		executor = db.DefaultExecutor()
+	}
+
 	// Check if autocomplete is enabled (default: true)
 	autocompleteEnabled := true
 	if database != nil {
@@ -113,6 +123,8 @@ func NewEditFormModel(database *db.DB, task *db.Task, width, height int) *FormMo
 		focused:             FieldTitle,
 		taskType:            task.Type,
 		project:             task.Project,
+		executor:            executor,
+		executors:           []string{db.ExecutorClaude, db.ExecutorCodex},
 		isEdit:              true,
 		recurrence:          task.Recurrence,
 		recurrences:         []string{"", db.RecurrenceHourly, db.RecurrenceDaily, db.RecurrenceWeekly, db.RecurrenceMonthly},
@@ -122,6 +134,14 @@ func NewEditFormModel(database *db.DB, task *db.Task, width, height int) *FormMo
 		autocompleteCancel:  cancel,
 		autocompleteSvc:     autocomplete.NewService(),
 		autocompleteEnabled: autocompleteEnabled,
+	}
+
+	// Set executor index
+	for i, e := range m.executors {
+		if e == executor {
+			m.executorIdx = i
+			break
+		}
 	}
 
 	// Load task types from database
@@ -227,6 +247,8 @@ func NewFormModel(database *db.DB, width, height int, workingDir string) *FormMo
 		width:               width,
 		height:              height,
 		focused:             FieldTitle,
+		executor:            db.DefaultExecutor(),
+		executors:           []string{db.ExecutorClaude, db.ExecutorCodex},
 		recurrences:         []string{"", db.RecurrenceHourly, db.RecurrenceDaily, db.RecurrenceWeekly, db.RecurrenceMonthly},
 		autocompleteCtx:     ctx,
 		autocompleteCancel:  cancel,
@@ -456,6 +478,11 @@ func (m *FormModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.taskType = m.types[m.typeIdx]
 				return m, nil
 			}
+			if m.focused == FieldExecutor {
+				m.executorIdx = (m.executorIdx - 1 + len(m.executors)) % len(m.executors)
+				m.executor = m.executors[m.executorIdx]
+				return m, nil
+			}
 			if m.focused == FieldRecurrence {
 				m.recurrenceIdx = (m.recurrenceIdx - 1 + len(m.recurrences)) % len(m.recurrences)
 				m.recurrence = m.recurrences[m.recurrenceIdx]
@@ -474,6 +501,11 @@ func (m *FormModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.taskType = m.types[m.typeIdx]
 				return m, nil
 			}
+			if m.focused == FieldExecutor {
+				m.executorIdx = (m.executorIdx + 1) % len(m.executors)
+				m.executor = m.executors[m.executorIdx]
+				return m, nil
+			}
 			if m.focused == FieldRecurrence {
 				m.recurrenceIdx = (m.recurrenceIdx + 1) % len(m.recurrences)
 				m.recurrence = m.recurrences[m.recurrenceIdx]
@@ -482,7 +514,7 @@ func (m *FormModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		default:
 			// Type-to-select for selector fields
-			if m.focused == FieldProject || m.focused == FieldType || m.focused == FieldRecurrence {
+			if m.focused == FieldProject || m.focused == FieldType || m.focused == FieldExecutor || m.focused == FieldRecurrence {
 				key := msg.String()
 				if len(key) == 1 && unicode.IsLetter(rune(key[0])) {
 					m.selectByPrefix(strings.ToLower(key))
@@ -610,6 +642,14 @@ func (m *FormModel) selectByPrefix(prefix string) {
 			if strings.HasPrefix(strings.ToLower(label), prefix) {
 				m.typeIdx = i
 				m.taskType = t
+				return
+			}
+		}
+	case FieldExecutor:
+		for i, e := range m.executors {
+			if strings.HasPrefix(strings.ToLower(e), prefix) {
+				m.executorIdx = i
+				m.executor = e
 				return
 			}
 		}
@@ -814,6 +854,14 @@ func (m *FormModel) View() string {
 	b.WriteString(cursor + " " + labelStyle.Render("Type") + m.renderSelector(typeLabels, m.typeIdx, m.focused == FieldType, selectedStyle, optionStyle, dimStyle))
 	b.WriteString("\n\n")
 
+	// Executor selector
+	cursor = " "
+	if m.focused == FieldExecutor {
+		cursor = cursorStyle.Render("▸")
+	}
+	b.WriteString(cursor + " " + labelStyle.Render("Executor") + m.renderSelector(m.executors, m.executorIdx, m.focused == FieldExecutor, selectedStyle, optionStyle, dimStyle))
+	b.WriteString("\n\n")
+
 	// Schedule input
 	cursor = " "
 	if m.focused == FieldSchedule {
@@ -903,6 +951,7 @@ func (m *FormModel) GetDBTask() *db.Task {
 		Status:     status,
 		Type:       m.taskType,
 		Project:    m.project,
+		Executor:   m.executor,
 		Recurrence: m.recurrence,
 		PRURL:      m.prURL,
 		PRNumber:   m.prNumber,

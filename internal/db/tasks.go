@@ -17,6 +17,7 @@ type Task struct {
 	Status          string
 	Type            string
 	Project         string
+	Executor        string // Task executor: "claude" (default), "codex"
 	WorktreePath    string
 	BranchName      string
 	Port            int    // Unique port for running the application in this task's worktree
@@ -57,6 +58,17 @@ const (
 	TypeWriting  = "writing"
 	TypeThinking = "thinking"
 )
+
+// Task executors
+const (
+	ExecutorClaude = "claude" // Claude Code CLI (default)
+	ExecutorCodex  = "codex"  // OpenAI Codex CLI
+)
+
+// DefaultExecutor returns the default executor if none is specified.
+func DefaultExecutor() string {
+	return ExecutorClaude
+}
 
 // Recurrence patterns for scheduled tasks
 const (
@@ -104,6 +116,11 @@ func (db *DB) CreateTask(t *Task) error {
 		t.Project = "personal"
 	}
 
+	// Default to 'claude' executor if not specified
+	if t.Executor == "" {
+		t.Executor = DefaultExecutor()
+	}
+
 	// Validate that the project exists
 	project, err := db.GetProjectByName(t.Project)
 	if err != nil {
@@ -114,9 +131,9 @@ func (db *DB) CreateTask(t *Task) error {
 	}
 
 	result, err := db.Exec(`
-		INSERT INTO tasks (title, body, status, type, project, scheduled_at, recurrence, last_run_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-	`, t.Title, t.Body, t.Status, t.Type, t.Project, t.ScheduledAt, t.Recurrence, t.LastRunAt)
+		INSERT INTO tasks (title, body, status, type, project, executor, scheduled_at, recurrence, last_run_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, t.Title, t.Body, t.Status, t.Type, t.Project, t.Executor, t.ScheduledAt, t.Recurrence, t.LastRunAt)
 	if err != nil {
 		return fmt.Errorf("insert task: %w", err)
 	}
@@ -139,7 +156,7 @@ func (db *DB) CreateTask(t *Task) error {
 func (db *DB) GetTask(id int64) (*Task, error) {
 	t := &Task{}
 	err := db.QueryRow(`
-		SELECT id, title, body, status, type, project,
+		SELECT id, title, body, status, type, project, COALESCE(executor, 'claude'),
 		       worktree_path, branch_name, port, claude_session_id,
 		       COALESCE(daemon_session, ''), COALESCE(pr_url, ''), COALESCE(pr_number, 0),
 		       COALESCE(dangerous_mode, 0), COALESCE(tags, ''),
@@ -147,7 +164,7 @@ func (db *DB) GetTask(id int64) (*Task, error) {
 		       scheduled_at, recurrence, last_run_at
 		FROM tasks WHERE id = ?
 	`, id).Scan(
-		&t.ID, &t.Title, &t.Body, &t.Status, &t.Type, &t.Project,
+		&t.ID, &t.Title, &t.Body, &t.Status, &t.Type, &t.Project, &t.Executor,
 		&t.WorktreePath, &t.BranchName, &t.Port, &t.ClaudeSessionID,
 		&t.DaemonSession, &t.PRURL, &t.PRNumber,
 		&t.DangerousMode, &t.Tags,
@@ -176,7 +193,7 @@ type ListTasksOptions struct {
 // ListTasks retrieves tasks with optional filters.
 func (db *DB) ListTasks(opts ListTasksOptions) ([]*Task, error) {
 	query := `
-		SELECT id, title, body, status, type, project,
+		SELECT id, title, body, status, type, project, COALESCE(executor, 'claude'),
 		       worktree_path, branch_name, port, claude_session_id,
 		       COALESCE(daemon_session, ''), COALESCE(pr_url, ''), COALESCE(pr_number, 0),
 		       COALESCE(dangerous_mode, 0), COALESCE(tags, ''),
@@ -228,7 +245,7 @@ func (db *DB) ListTasks(opts ListTasksOptions) ([]*Task, error) {
 	for rows.Next() {
 		t := &Task{}
 		err := rows.Scan(
-			&t.ID, &t.Title, &t.Body, &t.Status, &t.Type, &t.Project,
+			&t.ID, &t.Title, &t.Body, &t.Status, &t.Type, &t.Project, &t.Executor,
 			&t.WorktreePath, &t.BranchName, &t.Port, &t.ClaudeSessionID,
 			&t.DaemonSession, &t.PRURL, &t.PRNumber,
 			&t.DangerousMode, &t.Tags,
@@ -253,10 +270,10 @@ func (db *DB) SearchTasks(query string, limit int) ([]*Task, error) {
 
 	// Build search query with LIKE clauses
 	sqlQuery := `
-		SELECT id, title, body, status, type, project,
+		SELECT id, title, body, status, type, project, COALESCE(executor, 'claude'),
 		       worktree_path, branch_name, port, claude_session_id,
 		       COALESCE(daemon_session, ''), COALESCE(pr_url, ''), COALESCE(pr_number, 0),
-		       COALESCE(dangerous_mode, 0),
+		       COALESCE(dangerous_mode, 0), COALESCE(tags, ''),
 		       created_at, updated_at, started_at, completed_at,
 		       scheduled_at, recurrence, last_run_at
 		FROM tasks
@@ -282,10 +299,10 @@ func (db *DB) SearchTasks(query string, limit int) ([]*Task, error) {
 	for rows.Next() {
 		t := &Task{}
 		err := rows.Scan(
-			&t.ID, &t.Title, &t.Body, &t.Status, &t.Type, &t.Project,
+			&t.ID, &t.Title, &t.Body, &t.Status, &t.Type, &t.Project, &t.Executor,
 			&t.WorktreePath, &t.BranchName, &t.Port, &t.ClaudeSessionID,
 			&t.DaemonSession, &t.PRURL, &t.PRNumber,
-			&t.DangerousMode,
+			&t.DangerousMode, &t.Tags,
 			&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
 			&t.ScheduledAt, &t.Recurrence, &t.LastRunAt,
 		)
@@ -343,13 +360,13 @@ func (db *DB) UpdateTaskStatus(id int64, status string) error {
 func (db *DB) UpdateTask(t *Task) error {
 	_, err := db.Exec(`
 		UPDATE tasks SET
-			title = ?, body = ?, status = ?, type = ?, project = ?,
+			title = ?, body = ?, status = ?, type = ?, project = ?, executor = ?,
 			worktree_path = ?, branch_name = ?, port = ?, claude_session_id = ?,
 			daemon_session = ?, pr_url = ?, pr_number = ?, dangerous_mode = ?,
 			tags = ?, scheduled_at = ?, recurrence = ?, last_run_at = ?,
 			updated_at = CURRENT_TIMESTAMP
 		WHERE id = ?
-	`, t.Title, t.Body, t.Status, t.Type, t.Project,
+	`, t.Title, t.Body, t.Status, t.Type, t.Project, t.Executor,
 		t.WorktreePath, t.BranchName, t.Port, t.ClaudeSessionID,
 		t.DaemonSession, t.PRURL, t.PRNumber, t.DangerousMode,
 		t.Tags, t.ScheduledAt, t.Recurrence, t.LastRunAt, t.ID)
@@ -470,7 +487,7 @@ func (db *DB) RetryTask(id int64, feedback string) error {
 func (db *DB) GetNextQueuedTask() (*Task, error) {
 	t := &Task{}
 	err := db.QueryRow(`
-		SELECT id, title, body, status, type, project,
+		SELECT id, title, body, status, type, project, COALESCE(executor, 'claude'),
 		       worktree_path, branch_name, port, claude_session_id,
 		       COALESCE(daemon_session, ''), COALESCE(pr_url, ''), COALESCE(pr_number, 0),
 		       COALESCE(dangerous_mode, 0), COALESCE(tags, ''),
@@ -481,10 +498,10 @@ func (db *DB) GetNextQueuedTask() (*Task, error) {
 		ORDER BY created_at ASC
 		LIMIT 1
 	`, StatusQueued).Scan(
-		&t.ID, &t.Title, &t.Body, &t.Status, &t.Type, &t.Project,
+		&t.ID, &t.Title, &t.Body, &t.Status, &t.Type, &t.Project, &t.Executor,
 		&t.WorktreePath, &t.BranchName, &t.Port, &t.ClaudeSessionID,
 		&t.DaemonSession, &t.PRURL, &t.PRNumber,
-		&t.DangerousMode,
+		&t.DangerousMode, &t.Tags,
 		&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
 		&t.ScheduledAt, &t.Recurrence, &t.LastRunAt,
 	)
@@ -500,7 +517,7 @@ func (db *DB) GetNextQueuedTask() (*Task, error) {
 // GetQueuedTasks returns all queued tasks (waiting to be processed).
 func (db *DB) GetQueuedTasks() ([]*Task, error) {
 	rows, err := db.Query(`
-		SELECT id, title, body, status, type, project,
+		SELECT id, title, body, status, type, project, COALESCE(executor, 'claude'),
 		       worktree_path, branch_name, port, claude_session_id,
 		       COALESCE(daemon_session, ''), COALESCE(pr_url, ''), COALESCE(pr_number, 0),
 		       COALESCE(dangerous_mode, 0), COALESCE(tags, ''),
@@ -519,7 +536,7 @@ func (db *DB) GetQueuedTasks() ([]*Task, error) {
 	for rows.Next() {
 		t := &Task{}
 		if err := rows.Scan(
-			&t.ID, &t.Title, &t.Body, &t.Status, &t.Type, &t.Project,
+			&t.ID, &t.Title, &t.Body, &t.Status, &t.Type, &t.Project, &t.Executor,
 			&t.WorktreePath, &t.BranchName, &t.Port, &t.ClaudeSessionID,
 			&t.DaemonSession, &t.PRURL, &t.PRNumber,
 			&t.DangerousMode, &t.Tags,
@@ -537,7 +554,7 @@ func (db *DB) GetQueuedTasks() ([]*Task, error) {
 // These are candidates for automatic closure when their PR is merged.
 func (db *DB) GetTasksWithBranches() ([]*Task, error) {
 	rows, err := db.Query(`
-		SELECT id, title, body, status, type, project,
+		SELECT id, title, body, status, type, project, COALESCE(executor, 'claude'),
 		       worktree_path, branch_name, port, claude_session_id,
 		       COALESCE(daemon_session, ''), COALESCE(pr_url, ''), COALESCE(pr_number, 0),
 		       COALESCE(dangerous_mode, 0), COALESCE(tags, ''),
@@ -556,7 +573,7 @@ func (db *DB) GetTasksWithBranches() ([]*Task, error) {
 	for rows.Next() {
 		t := &Task{}
 		if err := rows.Scan(
-			&t.ID, &t.Title, &t.Body, &t.Status, &t.Type, &t.Project,
+			&t.ID, &t.Title, &t.Body, &t.Status, &t.Type, &t.Project, &t.Executor,
 			&t.WorktreePath, &t.BranchName, &t.Port, &t.ClaudeSessionID,
 			&t.DaemonSession, &t.PRURL, &t.PRNumber,
 			&t.DangerousMode, &t.Tags,
@@ -577,7 +594,7 @@ func (db *DB) GetTasksWithBranches() ([]*Task, error) {
 // - It is not currently processing
 func (db *DB) GetDueScheduledTasks() ([]*Task, error) {
 	rows, err := db.Query(`
-		SELECT id, title, body, status, type, project,
+		SELECT id, title, body, status, type, project, COALESCE(executor, 'claude'),
 		       worktree_path, branch_name, port, claude_session_id,
 		       COALESCE(daemon_session, ''), COALESCE(pr_url, ''), COALESCE(pr_number, 0),
 		       COALESCE(dangerous_mode, 0), COALESCE(tags, ''),
@@ -598,7 +615,7 @@ func (db *DB) GetDueScheduledTasks() ([]*Task, error) {
 	for rows.Next() {
 		t := &Task{}
 		if err := rows.Scan(
-			&t.ID, &t.Title, &t.Body, &t.Status, &t.Type, &t.Project,
+			&t.ID, &t.Title, &t.Body, &t.Status, &t.Type, &t.Project, &t.Executor,
 			&t.WorktreePath, &t.BranchName, &t.Port, &t.ClaudeSessionID,
 			&t.DaemonSession, &t.PRURL, &t.PRNumber,
 			&t.DangerousMode, &t.Tags,
@@ -615,7 +632,7 @@ func (db *DB) GetDueScheduledTasks() ([]*Task, error) {
 // GetScheduledTasks returns all tasks that have a scheduled time set (regardless of status).
 func (db *DB) GetScheduledTasks() ([]*Task, error) {
 	rows, err := db.Query(`
-		SELECT id, title, body, status, type, project,
+		SELECT id, title, body, status, type, project, COALESCE(executor, 'claude'),
 		       worktree_path, branch_name, port, claude_session_id,
 		       COALESCE(daemon_session, ''), COALESCE(pr_url, ''), COALESCE(pr_number, 0),
 		       COALESCE(dangerous_mode, 0), COALESCE(tags, ''),
@@ -634,7 +651,7 @@ func (db *DB) GetScheduledTasks() ([]*Task, error) {
 	for rows.Next() {
 		t := &Task{}
 		if err := rows.Scan(
-			&t.ID, &t.Title, &t.Body, &t.Status, &t.Type, &t.Project,
+			&t.ID, &t.Title, &t.Body, &t.Status, &t.Type, &t.Project, &t.Executor,
 			&t.WorktreePath, &t.BranchName, &t.Port, &t.ClaudeSessionID,
 			&t.DaemonSession, &t.PRURL, &t.PRNumber,
 			&t.DangerousMode, &t.Tags,
