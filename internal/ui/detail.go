@@ -46,6 +46,10 @@ type DetailModel struct {
 
 	// Cached Claude process memory (updated on Refresh)
 	claudeMemoryMB int
+
+	// Initial pane dimensions (to detect user resizing)
+	initialDetailHeight int // percentage when panes were joined
+	initialShellWidth   int // percentage when panes were joined
 }
 
 // UpdateTask updates the task and refreshes the view.
@@ -511,6 +515,79 @@ func (m *DetailModel) getShellPaneWidth() string {
 	return "50%"
 }
 
+// getCurrentDetailPaneHeight returns the current detail pane height as a percentage (0-100).
+// Returns 0 on error.
+func (m *DetailModel) getCurrentDetailPaneHeight(tuiPaneID string) int {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	// Get the current height of the TUI pane
+	cmd := exec.CommandContext(ctx, "tmux", "display-message", "-p", "-t", tuiPaneID, "#{pane_height}")
+	heightOut, err := cmd.Output()
+	if err != nil {
+		return 0
+	}
+
+	paneHeight, err := strconv.Atoi(strings.TrimSpace(string(heightOut)))
+	if err != nil || paneHeight <= 0 {
+		return 0
+	}
+
+	// Get the total window height
+	cmd = exec.CommandContext(ctx, "tmux", "display-message", "-p", "#{window_height}")
+	totalHeightOut, err := cmd.Output()
+	if err != nil {
+		return 0
+	}
+
+	totalHeight, err := strconv.Atoi(strings.TrimSpace(string(totalHeightOut)))
+	if err != nil || totalHeight <= 0 {
+		return 0
+	}
+
+	// Calculate the percentage
+	return (paneHeight * 100) / totalHeight
+}
+
+// getCurrentShellPaneWidth returns the current shell pane width as a percentage (0-100).
+// Returns 0 on error.
+func (m *DetailModel) getCurrentShellPaneWidth() int {
+	if m.workdirPaneID == "" || m.claudePaneID == "" {
+		return 0
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	// Get the width of the shell pane
+	cmd := exec.CommandContext(ctx, "tmux", "display-message", "-p", "-t", m.workdirPaneID, "#{pane_width}")
+	shellWidthOut, err := cmd.Output()
+	if err != nil {
+		return 0
+	}
+
+	shellWidth, err := strconv.Atoi(strings.TrimSpace(string(shellWidthOut)))
+	if err != nil || shellWidth <= 0 {
+		return 0
+	}
+
+	// Get the width of the claude pane
+	cmd = exec.CommandContext(ctx, "tmux", "display-message", "-p", "-t", m.claudePaneID, "#{pane_width}")
+	claudeWidthOut, err := cmd.Output()
+	if err != nil {
+		return 0
+	}
+
+	claudeWidth, err := strconv.Atoi(strings.TrimSpace(string(claudeWidthOut)))
+	if err != nil || claudeWidth <= 0 {
+		return 0
+	}
+
+	// Calculate total width and shell percentage
+	totalWidth := shellWidth + claudeWidth
+	return (shellWidth * 100) / totalWidth
+}
+
 // saveDetailPaneHeight saves the current detail pane height to settings.
 func (m *DetailModel) saveDetailPaneHeight(tuiPaneID string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -745,6 +822,11 @@ func (m *DetailModel) joinTmuxPanes() {
 	exec.CommandContext(ctx, "tmux", "bind-key", "-T", "root", "S-Right", "select-pane", "-t", ":.+").Run()
 	exec.CommandContext(ctx, "tmux", "bind-key", "-T", "root", "S-Up", "select-pane", "-t", ":.-").Run()
 	exec.CommandContext(ctx, "tmux", "bind-key", "-T", "root", "S-Left", "select-pane", "-t", ":.-").Run()
+
+	// Capture initial dimensions so we can detect user resizing later
+	// This allows us to save only when the user has actually dragged to resize
+	m.initialDetailHeight = m.getCurrentDetailPaneHeight(tuiPaneID)
+	m.initialShellWidth = m.getCurrentShellPaneWidth()
 }
 
 // joinTmuxPane is a compatibility wrapper for joinTmuxPanes.
@@ -769,19 +851,33 @@ func (m *DetailModel) getWorkdir() string {
 }
 
 // breakTmuxPanes breaks both joined panes - kills workdir, returns Claude to task-daemon.
-// If saveHeight is true, the current pane height is saved to settings.
-// Pass false during task transitions to avoid rounding error accumulation.
+// If saveHeight is true, the current pane height is always saved to settings.
+// If saveHeight is false, dimensions are only saved if the user has resized them
+// (to avoid rounding error accumulation during task transitions when dimensions haven't changed).
 func (m *DetailModel) breakTmuxPanes(saveHeight bool) {
 	// Use timeout for all tmux operations to prevent blocking UI
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
+	// Get current dimensions to check if user has resized
+	currentHeight := m.getCurrentDetailPaneHeight(m.tuiPaneID)
+	currentWidth := m.getCurrentShellPaneWidth()
+
+	// Determine if user has resized the panes (with 2% tolerance for rounding)
+	heightChanged := currentHeight > 0 && m.initialDetailHeight > 0 &&
+		(currentHeight < m.initialDetailHeight-2 || currentHeight > m.initialDetailHeight+2)
+	widthChanged := currentWidth > 0 && m.initialShellWidth > 0 &&
+		(currentWidth < m.initialShellWidth-2 || currentWidth > m.initialShellWidth+2)
+
 	// Save pane positions before breaking (must save width before killing workdir pane)
-	// Only save shell width - it doesn't have the same rounding accumulation issue
-	m.saveShellPaneWidth()
-	// Only save detail pane height when explicitly requested (e.g., leaving detail view)
-	// Skip during task transitions to avoid rounding errors that accumulate
-	if saveHeight && m.tuiPaneID != "" {
+	// Save shell width if explicitly requested OR if user has resized
+	if saveHeight || widthChanged {
+		m.saveShellPaneWidth()
+	}
+
+	// Save detail pane height if explicitly requested OR if user has resized
+	// This ensures user's manual resize is preserved even during task transitions
+	if m.tuiPaneID != "" && (saveHeight || heightChanged) {
 		// Use the stored TUI pane ID, not the currently focused pane.
 		// The user may have Tab'd to Claude or Shell pane before pressing Escape,
 		// so #{pane_id} could return the wrong pane.
