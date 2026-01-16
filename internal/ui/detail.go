@@ -1179,11 +1179,20 @@ func (m *DetailModel) renderContent() string {
 		b.WriteString(Bold.Render("Description"))
 		b.WriteString("\n\n")
 
-		rendered, err := glamour.Render(t.Body, "dark")
+		// Create a renderer with the correct width for the viewport
+		renderer, err := glamour.NewTermRenderer(
+			glamour.WithStylePath("dark"),
+			glamour.WithWordWrap(m.width-4), // Match viewport width
+		)
 		if err != nil {
 			b.WriteString(t.Body)
 		} else {
-			b.WriteString(strings.TrimSpace(rendered))
+			rendered, err := renderer.Render(t.Body)
+			if err != nil {
+				b.WriteString(t.Body)
+			} else {
+				b.WriteString(strings.TrimSpace(rendered))
+			}
 		}
 		b.WriteString("\n")
 	}
