@@ -207,21 +207,8 @@ func (m *DetailModel) Update(msg tea.Msg) (*DetailModel, tea.Cmd) {
 	var cmd tea.Cmd
 
 	if keyMsg, ok := msg.(tea.KeyMsg); ok {
-		hasPanes := m.claudePaneID != "" || m.workdirPaneID != ""
-
 		// 'k' is now handled by app.go with confirmation dialog
-
-		// Tab to cycle to next pane (Details -> Claude -> Shell -> Details)
-		if keyMsg.String() == "tab" && hasPanes && os.Getenv("TMUX") != "" {
-			m.focusNextPane()
-			return m, nil
-		}
-
-		// Shift+Tab to cycle to previous pane (Details -> Shell -> Claude -> Details)
-		if keyMsg.String() == "shift+tab" && hasPanes && os.Getenv("TMUX") != "" {
-			m.focusPrevPane()
-			return m, nil
-		}
+		// Pane switching (Shift+Arrow) is handled by tmux keybindings
 
 		m.viewport, cmd = m.viewport.Update(keyMsg)
 	}
@@ -815,7 +802,7 @@ func (m *DetailModel) joinTmuxPanes() {
 	exec.CommandContext(ctx, "tmux", "set-option", "-t", "task-ui", "status", "on").Run()
 	exec.CommandContext(ctx, "tmux", "set-option", "-t", "task-ui", "status-style", "bg=#3b82f6,fg=white").Run()
 	exec.CommandContext(ctx, "tmux", "set-option", "-t", "task-ui", "status-left", " TASK UI ").Run()
-	exec.CommandContext(ctx, "tmux", "set-option", "-t", "task-ui", "status-right", " Tab to switch panes │ Shift+Tab to focus detail │ drag borders to resize ").Run()
+	exec.CommandContext(ctx, "tmux", "set-option", "-t", "task-ui", "status-right", " drag borders to resize ").Run()
 	exec.CommandContext(ctx, "tmux", "set-option", "-t", "task-ui", "status-right-length", "80").Run()
 
 	// Style pane borders - active pane gets theme color outline
@@ -829,9 +816,12 @@ func (m *DetailModel) joinTmuxPanes() {
 	detailHeight := m.getDetailPaneHeight()
 	exec.CommandContext(ctx, "tmux", "resize-pane", "-t", tuiPaneID, "-y", detailHeight).Run()
 
-	// Bind Shift+Tab to focus the TUI/Details pane from any pane
-	// This allows the user to press shift-tab while in Claude or Shell pane to return to task detail
-	exec.CommandContext(ctx, "tmux", "bind-key", "-T", "root", "BTab", "select-pane", "-t", tuiPaneID).Run()
+	// Bind Shift+Arrow keys to cycle through panes from any pane
+	// Down/Right = next pane, Up/Left = previous pane
+	exec.CommandContext(ctx, "tmux", "bind-key", "-T", "root", "S-Down", "select-pane", "-t", ":.+").Run()
+	exec.CommandContext(ctx, "tmux", "bind-key", "-T", "root", "S-Right", "select-pane", "-t", ":.+").Run()
+	exec.CommandContext(ctx, "tmux", "bind-key", "-T", "root", "S-Up", "select-pane", "-t", ":.-").Run()
+	exec.CommandContext(ctx, "tmux", "bind-key", "-T", "root", "S-Left", "select-pane", "-t", ":.-").Run()
 
 	// Capture initial dimensions so we can detect user resizing later
 	// This allows us to save only when the user has actually dragged to resize
@@ -901,8 +891,11 @@ func (m *DetailModel) breakTmuxPanes(saveHeight bool) {
 	exec.CommandContext(ctx, "tmux", "set-option", "-t", "task-ui", "pane-border-style", "fg=#374151").Run()
 	exec.CommandContext(ctx, "tmux", "set-option", "-t", "task-ui", "pane-active-border-style", "fg=#61AFEF").Run()
 
-	// Unbind Shift+Tab keybinding that was set in joinTmuxPanes
-	exec.CommandContext(ctx, "tmux", "unbind-key", "-T", "root", "BTab").Run()
+	// Unbind Shift+Arrow keybindings that were set in joinTmuxPanes
+	exec.CommandContext(ctx, "tmux", "unbind-key", "-T", "root", "S-Down").Run()
+	exec.CommandContext(ctx, "tmux", "unbind-key", "-T", "root", "S-Right").Run()
+	exec.CommandContext(ctx, "tmux", "unbind-key", "-T", "root", "S-Up").Run()
+	exec.CommandContext(ctx, "tmux", "unbind-key", "-T", "root", "S-Left").Run()
 
 	// Reset pane title back to main view label
 	exec.CommandContext(ctx, "tmux", "select-pane", "-t", "task-ui:.0", "-T", "Tasks").Run()
@@ -1191,19 +1184,6 @@ func (m *DetailModel) renderHeader() string {
 		meta.WriteString(scheduleStyle.Render(scheduleText))
 	}
 
-	// Tmux hint if session is active - show different hint based on focused pane
-	if m.claudePaneID != "" {
-		meta.WriteString("  ")
-		hintText := "(Tab to interact with Claude)"
-		if !m.isTuiPaneFocused() {
-			hintText = "(Shift+Tab to return to task detail)"
-		}
-		tmuxHint := lipgloss.NewStyle().
-			Foreground(ColorSecondary).
-			Render(hintText)
-		meta.WriteString(tmuxHint)
-	}
-
 	// PR link if available
 	var prLine string
 	if m.prInfo != nil && m.prInfo.URL != "" {
@@ -1333,12 +1313,12 @@ func (m *DetailModel) renderHelp() string {
 		}{"R", "resume claude"})
 	}
 
-	// Show Tab shortcut when panes are visible
+	// Show pane navigation shortcut when panes are visible
 	if hasPanes && os.Getenv("TMUX") != "" {
 		keys = append(keys, struct {
 			key  string
 			desc string
-		}{"Tab", "switch pane"})
+		}{"shift+↑↓", "switch pane"})
 	}
 
 	keys = append(keys, []struct {
