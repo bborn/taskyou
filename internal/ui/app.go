@@ -2360,7 +2360,7 @@ func (m *AppModel) resumeClaude(id int64, claudePaneID string) tea.Cmd {
 		if claudePaneID != "" {
 			claudePID := executor.GetClaudePIDFromPane(claudePaneID)
 			if claudePID > 0 {
-				return taskClaudeToggledMsg{err: fmt.Errorf("Claude is already running")}
+				return taskClaudeToggledMsg{err: fmt.Errorf("claude is already running")}
 			}
 		}
 
