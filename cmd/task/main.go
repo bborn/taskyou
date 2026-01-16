@@ -524,6 +524,16 @@ Examples:
 						"project":    t.Project,
 						"created_at": t.CreatedAt.Time.Format(time.RFC3339),
 					}
+					// Add schedule fields
+					if t.ScheduledAt != nil {
+						item["scheduled_at"] = t.ScheduledAt.Time.Format(time.RFC3339)
+					}
+					if t.Recurrence != "" {
+						item["recurrence"] = t.Recurrence
+					}
+					if t.LastRunAt != nil {
+						item["last_run_at"] = t.LastRunAt.Time.Format(time.RFC3339)
+					}
 					// Add PR info to JSON output if available
 					if prInfo, ok := prInfoMap[t.ID]; ok {
 						item["pr"] = map[string]interface{}{
@@ -608,11 +618,18 @@ Examples:
 					if t.Project != "" {
 						project = dimStyle.Render(fmt.Sprintf("[%s] ", t.Project))
 					}
+					// Schedule indicator
+					scheduleIndicator := ""
+					if t.IsRecurring() {
+						scheduleIndicator = lipgloss.NewStyle().Foreground(lipgloss.Color("#F59E0B")).Render("🔁 ")
+					} else if t.IsScheduled() {
+						scheduleIndicator = lipgloss.NewStyle().Foreground(lipgloss.Color("#F59E0B")).Render("⏰ ")
+					}
 					prStatus := ""
 					if showPR {
 						prStatus = prStatusStyle(prInfoMap[t.ID])
 					}
-					fmt.Printf("%s %s %s%s%s\n", id, status, project, t.Title, prStatus)
+					fmt.Printf("%s %s %s%s%s%s\n", id, status, project, scheduleIndicator, t.Title, prStatus)
 				}
 			}
 		},
@@ -696,6 +713,16 @@ Examples:
 				}
 				if task.CompletedAt != nil {
 					output["completed_at"] = task.CompletedAt.Time.Format(time.RFC3339)
+				}
+				// Add schedule fields
+				if task.ScheduledAt != nil {
+					output["scheduled_at"] = task.ScheduledAt.Time.Format(time.RFC3339)
+				}
+				if task.Recurrence != "" {
+					output["recurrence"] = task.Recurrence
+				}
+				if task.LastRunAt != nil {
+					output["last_run_at"] = task.LastRunAt.Time.Format(time.RFC3339)
 				}
 				// Add PR info to JSON output
 				if prInfo != nil {
@@ -788,6 +815,23 @@ Examples:
 					}
 					prStatusStyled := lipgloss.NewStyle().Foreground(prStatusColor).Render(prInfo.StatusDescription())
 					fmt.Printf("CI:       %s\n", prStatusStyled)
+				}
+
+				// Schedule info
+				scheduleColor := lipgloss.Color("#F59E0B") // Orange for schedule
+				if task.IsRecurring() || task.IsScheduled() {
+					fmt.Println()
+					fmt.Println(boldStyle.Render("Schedule:"))
+					if task.Recurrence != "" {
+						recurrenceStyled := lipgloss.NewStyle().Foreground(scheduleColor).Render(task.Recurrence)
+						fmt.Printf("  Recurrence: %s\n", recurrenceStyled)
+					}
+					if task.ScheduledAt != nil {
+						fmt.Printf("  Next run:   %s\n", task.ScheduledAt.Time.Format("2006-01-02 15:04:05"))
+					}
+					if task.LastRunAt != nil {
+						fmt.Printf("  Last run:   %s\n", task.LastRunAt.Time.Format("2006-01-02 15:04:05"))
+					}
 				}
 
 				// Body
@@ -1531,6 +1575,11 @@ type ClaudeHookInput struct {
 	StopReason         string `json:"stop_reason,omitempty"`         // For Stop hooks
 	Trigger            string `json:"trigger,omitempty"`             // For PreCompact hooks: "manual" or "auto"
 	CustomInstructions string `json:"custom_instructions,omitempty"` // For PreCompact hooks: user-specified compaction instructions
+	// Tool use fields (for PreToolUse and PostToolUse hooks)
+	ToolName     string          `json:"tool_name,omitempty"`     // Name of the tool being used
+	ToolInput    json.RawMessage `json:"tool_input,omitempty"`    // Tool-specific input parameters
+	ToolResponse json.RawMessage `json:"tool_response,omitempty"` // Tool result (PostToolUse only)
+	ToolUseID    string          `json:"tool_use_id,omitempty"`   // Unique identifier for this tool call
 }
 
 // handleClaudeHook processes Claude Code hook callbacks.
@@ -1703,7 +1752,7 @@ func handlePreToolUseHook(database *db.DB, taskID int64, input *ClaudeHookInput)
 }
 
 // handlePostToolUseHook handles PostToolUse hooks from Claude (after tool execution).
-// This confirms Claude is still actively working after a tool completes.
+// This confirms Claude is still actively working after a tool completes and logs tool usage.
 func handlePostToolUseHook(database *db.DB, taskID int64, input *ClaudeHookInput) error {
 	task, err := database.GetTask(taskID)
 	if err != nil {
@@ -1719,14 +1768,78 @@ func handlePostToolUseHook(database *db.DB, taskID int64, input *ClaudeHookInput
 		return nil
 	}
 
+	// Log the tool use to the task log
+	if input.ToolName != "" {
+		logMsg := formatToolLogMessage(input)
+		database.AppendTaskLog(taskID, "tool", logMsg)
+	}
+
 	// After a tool completes, Claude is still working (will process tool results)
 	// Ensure task remains in "processing" state
 	if task.Status == db.StatusBlocked {
 		database.UpdateTaskStatus(taskID, db.StatusProcessing)
-		database.AppendTaskLog(taskID, "system", "Claude processing tool results")
 	}
 
 	return nil
+}
+
+// formatToolLogMessage creates a human-readable log message for tool usage.
+// It extracts relevant details from tool_input based on the tool type.
+func formatToolLogMessage(input *ClaudeHookInput) string {
+	toolName := input.ToolName
+
+	// Try to extract meaningful details from tool_input
+	if len(input.ToolInput) > 0 {
+		var toolInput map[string]interface{}
+		if err := json.Unmarshal(input.ToolInput, &toolInput); err == nil {
+			// Extract relevant fields based on tool type
+			switch toolName {
+			case "Bash":
+				if cmd, ok := toolInput["command"].(string); ok {
+					// Truncate long commands
+					if len(cmd) > 100 {
+						cmd = cmd[:100] + "..."
+					}
+					return fmt.Sprintf("Bash: %s", cmd)
+				}
+			case "Read":
+				if path, ok := toolInput["file_path"].(string); ok {
+					return fmt.Sprintf("Read: %s", path)
+				}
+			case "Write":
+				if path, ok := toolInput["file_path"].(string); ok {
+					return fmt.Sprintf("Write: %s", path)
+				}
+			case "Edit":
+				if path, ok := toolInput["file_path"].(string); ok {
+					return fmt.Sprintf("Edit: %s", path)
+				}
+			case "Glob":
+				if pattern, ok := toolInput["pattern"].(string); ok {
+					return fmt.Sprintf("Glob: %s", pattern)
+				}
+			case "Grep":
+				if pattern, ok := toolInput["pattern"].(string); ok {
+					return fmt.Sprintf("Grep: %s", pattern)
+				}
+			case "Task":
+				if desc, ok := toolInput["description"].(string); ok {
+					return fmt.Sprintf("Task: %s", desc)
+				}
+			case "WebFetch":
+				if url, ok := toolInput["url"].(string); ok {
+					return fmt.Sprintf("WebFetch: %s", url)
+				}
+			case "WebSearch":
+				if query, ok := toolInput["query"].(string); ok {
+					return fmt.Sprintf("WebSearch: %s", query)
+				}
+			}
+		}
+	}
+
+	// Default: just the tool name
+	return toolName
 }
 
 // handlePreCompactHook handles PreCompact hooks from Claude (before context compaction).

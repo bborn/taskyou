@@ -178,10 +178,10 @@ func NewEditFormModel(database *db.DB, task *db.Task, width, height int) *FormMo
 	m.bodyInput.Prompt = ""
 	m.bodyInput.ShowLineNumbers = false
 	m.bodyInput.SetWidth(width - 24)
-	m.bodyInput.SetHeight(4)
 	m.bodyInput.FocusedStyle.CursorLine = lipgloss.NewStyle()
 	m.bodyInput.BlurredStyle.CursorLine = lipgloss.NewStyle()
 	m.bodyInput.SetValue(task.Body)
+	m.updateBodyHeight() // Autogrow based on content
 
 	// Schedule input - pre-populate if task has a scheduled time
 	m.scheduleInput = textinput.New()
@@ -296,9 +296,9 @@ func NewFormModel(database *db.DB, width, height int, workingDir string) *FormMo
 	m.bodyInput.Prompt = ""
 	m.bodyInput.ShowLineNumbers = false
 	m.bodyInput.SetWidth(width - 24)
-	m.bodyInput.SetHeight(4)
 	m.bodyInput.FocusedStyle.CursorLine = lipgloss.NewStyle()
 	m.bodyInput.BlurredStyle.CursorLine = lipgloss.NewStyle()
+	m.updateBodyHeight() // Start with minimum height, will autogrow as content is added
 
 	// Schedule input
 	m.scheduleInput = textinput.New()
@@ -364,6 +364,7 @@ func (m *FormModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.titleInput.SetValue(m.titleInput.Value() + pastedText)
 			case FieldBody:
 				m.bodyInput.SetValue(m.bodyInput.Value() + pastedText)
+				m.updateBodyHeight() // Autogrow after paste
 			case FieldAttachments:
 				m.attachmentsInput.SetValue(m.attachmentsInput.Value() + pastedText)
 			}
@@ -505,6 +506,7 @@ func (m *FormModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	case FieldBody:
 		m.bodyInput, cmd = m.bodyInput.Update(msg)
+		m.updateBodyHeight() // Autogrow as content changes
 		// Trigger debounced autocomplete if body changed
 		if m.bodyInput.Value() != m.lastBodyValue {
 			m.lastBodyValue = m.bodyInput.Value()
@@ -766,8 +768,9 @@ func (m *FormModel) View() string {
 	}
 	b.WriteString(cursor + " " + labelStyle.Render("Details"))
 	b.WriteString("\n")
-	// Indent the textarea
+	// Indent the textarea and add scrollbar if content overflows
 	bodyLines := strings.Split(m.bodyInput.View(), "\n")
+	scrollbar := m.renderBodyScrollbar(len(bodyLines))
 	for i, line := range bodyLines {
 		// Add ghost text or loading indicator to the first line when focused
 		if m.focused == FieldBody && i == 0 {
@@ -778,7 +781,11 @@ func (m *FormModel) View() string {
 				line = line + loadingStyle.Render(" ...")
 			}
 		}
-		b.WriteString("   " + line + "\n")
+		scrollChar := ""
+		if i < len(scrollbar) {
+			scrollChar = scrollbar[i]
+		}
+		b.WriteString("   " + line + scrollChar + "\n")
 	}
 	b.WriteString("\n")
 
@@ -1026,6 +1033,131 @@ func parseTimeOfDay(s string, date time.Time) *db.LocalTime {
 // SetQueue sets whether to queue the task.
 func (m *FormModel) SetQueue(queue bool) {
 	m.queue = queue
+}
+
+// calculateBodyHeight calculates the appropriate height for the body textarea based on content.
+// Returns a height between minHeight (4) and maxHeight (50% of available screen height).
+func (m *FormModel) calculateBodyHeight() int {
+	content := m.bodyInput.Value()
+
+	// Minimum height
+	minHeight := 4
+
+	// Maximum height is 50% of screen height
+	// Account for other form elements: header(2) + title(2) + body label(1) + project(2) +
+	// type(2) + schedule(2) + recurrence(2) + attachments(2) + help(1) + padding/borders(~6) = ~22 lines
+	formOverhead := 22
+	maxHeight := (m.height - formOverhead) / 2
+	if maxHeight < minHeight {
+		maxHeight = minHeight
+	}
+
+	// Count actual lines needed
+	lines := 1
+	if content != "" {
+		lines = strings.Count(content, "\n") + 1
+	}
+
+	// Account for line wrapping
+	textWidth := m.width - 24 // Same width as used in SetWidth
+	if textWidth > 0 {
+		for _, line := range strings.Split(content, "\n") {
+			// Each line might wrap based on character count
+			lineLen := len(line)
+			if lineLen > textWidth {
+				lines += lineLen / textWidth
+			}
+		}
+	}
+
+	// Apply min/max bounds
+	height := lines
+	if height < minHeight {
+		height = minHeight
+	}
+	if height > maxHeight {
+		height = maxHeight
+	}
+
+	return height
+}
+
+// updateBodyHeight updates the body textarea height based on content.
+func (m *FormModel) updateBodyHeight() {
+	height := m.calculateBodyHeight()
+	m.bodyInput.SetHeight(height)
+}
+
+// renderBodyScrollbar renders a scrollbar for the body textarea if content overflows.
+// Returns a slice of strings, one per visible line, containing the scrollbar character.
+func (m *FormModel) renderBodyScrollbar(visibleLines int) []string {
+	content := m.bodyInput.Value()
+	if content == "" {
+		return nil
+	}
+
+	// Get total content lines from the textarea
+	totalLines := m.bodyInput.LineCount()
+	viewportHeight := visibleLines
+
+	// No scrollbar needed if all content fits
+	if totalLines <= viewportHeight {
+		return nil
+	}
+
+	// Get cursor line to estimate scroll offset
+	// The textarea scrolls to keep the cursor visible
+	cursorLine := m.bodyInput.Line()
+
+	// Estimate the scroll offset: the viewport is positioned to keep cursor visible
+	// The cursor should be somewhere within the visible viewport
+	scrollOffset := 0
+	if cursorLine >= viewportHeight {
+		// Cursor is below initial viewport, so we've scrolled
+		scrollOffset = cursorLine - viewportHeight + 1
+	}
+	// Clamp scroll offset to valid range
+	maxOffset := totalLines - viewportHeight
+	if scrollOffset > maxOffset {
+		scrollOffset = maxOffset
+	}
+	if scrollOffset < 0 {
+		scrollOffset = 0
+	}
+
+	// Calculate scrollbar dimensions
+	// Thumb size is proportional to visible content / total content
+	thumbSize := (viewportHeight * viewportHeight) / totalLines
+	if thumbSize < 1 {
+		thumbSize = 1
+	}
+	if thumbSize > viewportHeight {
+		thumbSize = viewportHeight
+	}
+
+	// Thumb position is proportional to scroll offset
+	scrollRange := totalLines - viewportHeight
+	trackRange := viewportHeight - thumbSize
+	thumbPos := 0
+	if scrollRange > 0 && trackRange > 0 {
+		thumbPos = (scrollOffset * trackRange) / scrollRange
+	}
+
+	// Style the scrollbar
+	trackStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("238"))
+	thumbStyle := lipgloss.NewStyle().Foreground(ColorPrimary)
+
+	// Build the scrollbar
+	scrollbar := make([]string, viewportHeight)
+	for i := 0; i < viewportHeight; i++ {
+		if i >= thumbPos && i < thumbPos+thumbSize {
+			scrollbar[i] = thumbStyle.Render("┃")
+		} else {
+			scrollbar[i] = trackStyle.Render("│")
+		}
+	}
+
+	return scrollbar
 }
 
 // GetAttachments returns the parsed attachment file paths.

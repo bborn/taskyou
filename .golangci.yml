@@ -1,23 +1,33 @@
+version: "2"
 linters:
   disable:
-    # Disable errcheck - this codebase intentionally ignores many error returns
-    # for logging, cleanup operations, and fire-and-forget calls
     - errcheck
-
-linters-settings:
-  staticcheck:
-    checks:
-      - all
-      - -SA9003  # Empty branch - sometimes used for clarity
-      - -QF1003  # Tagged switch suggestion - keep explicit for readability
-      - -QF1008  # Embedded field selector - keep explicit for clarity
-
-  gosimple:
-    checks:
-      - all
-      - -S1017  # TrimPrefix suggestion - keep explicit for readability
-
+  settings:
+    staticcheck:
+      checks:
+        - all
+        - -QF1003
+        - -QF1008
+        - -S1017
+        - -SA9003
+  exclusions:
+    generated: lax
+    presets:
+      - comments
+      - common-false-positives
+      - legacy
+      - std-error-handling
+    paths:
+      - third_party$
+      - builtin$
+      - examples$
 issues:
-  # Don't limit the number of issues per linter
   max-issues-per-linter: 0
   max-same-issues: 0
+formatters:
+  exclusions:
+    generated: lax
+    paths:
+      - third_party$
+      - builtin$
+      - examples$

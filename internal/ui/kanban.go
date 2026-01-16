@@ -708,10 +708,13 @@ func (k *KanbanBoard) renderTaskCard(task *db.Task, width int, isSelected bool) 
 		b.WriteString(PRStatusBadge(prInfo))
 	}
 
-	// Schedule indicator
-	if task.IsScheduled() {
+	// Schedule indicator - show if scheduled OR recurring
+	if task.IsScheduled() || task.IsRecurring() {
 		scheduleStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("214")) // Orange for schedule
-		scheduleText := formatScheduleTime(task.ScheduledAt.Time)
+		var scheduleText string
+		if task.IsScheduled() {
+			scheduleText = formatScheduleTime(task.ScheduledAt.Time)
+		}
 		icon := "⏰"
 		if task.IsRecurring() {
 			icon = "🔁" // Use repeat icon to indicate recurring task
@@ -848,9 +851,8 @@ func (k *KanbanBoard) handleClickDesktop(x, y int) *db.Task {
 	}
 
 	// Calculate Y position within column
-	// Column structure: 1 border line, then header (2 lines with margin), then task cards
-	// Border is 1 line at top
-	headerLines := 3 // Header text + margin
+	// Column structure: 1 border line at top, then header (1 line), then task cards
+	headerLines := 1 // Header bar is 1 line with no margin
 	taskCardHeight := 3
 
 	// relY is position within the column content (after top border)
@@ -931,7 +933,7 @@ func (k *KanbanBoard) handleClickMobile(x, y int) *db.Task {
 	// Click is in the column content area
 	// Column layout: tab bar (2 lines), then border (1 line), header (1 line), task cards
 	colHeight := k.height - tabBarHeight - 2
-	headerLines := 3 // Header text + margin
+	headerLines := 1 // Header bar is 1 line with no margin
 	taskCardHeight := 3
 
 	// relY is position within the column content (after tab bar and top border)
