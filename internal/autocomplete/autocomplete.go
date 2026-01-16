@@ -28,6 +28,12 @@ type Request struct {
 	CancelFunc context.CancelFunc
 }
 
+// cacheEntry represents a cached autocomplete suggestion.
+type cacheEntry struct {
+	suggestion string
+	timestamp  time.Time
+}
+
 // Service handles autocomplete requests with debouncing and cancellation.
 type Service struct {
 	mu            sync.Mutex
@@ -35,14 +41,56 @@ type Service struct {
 	nextRequestID int64
 	debounceDelay time.Duration
 	timeout       time.Duration
+
+	// LRU cache for suggestions (key: "fieldType:project:input")
+	cache      map[string]*cacheEntry
+	cacheOrder []string // For LRU eviction
+	cacheMu    sync.RWMutex
+	cacheSize  int
+	cacheTTL   time.Duration
+
+	// Warmup state
+	warmedUp bool
 }
 
 // NewService creates a new autocomplete service.
 func NewService() *Service {
 	return &Service{
-		debounceDelay: 350 * time.Millisecond, // Balanced debounce
-		timeout:       4 * time.Second,        // Fast timeout for responsiveness
+		debounceDelay: 100 * time.Millisecond, // Fast debounce for responsiveness
+		timeout:       2 * time.Second,        // Quick timeout - haiku is fast
+		cache:         make(map[string]*cacheEntry),
+		cacheSize:     100,             // Keep last 100 suggestions
+		cacheTTL:      5 * time.Minute, // Cache entries valid for 5 minutes
 	}
+}
+
+// Warmup pre-warms the Claude CLI by running a quick request in the background.
+// This helps reduce latency for the first real autocomplete request.
+func (s *Service) Warmup() {
+	s.mu.Lock()
+	if s.warmedUp {
+		s.mu.Unlock()
+		return
+	}
+	s.warmedUp = true
+	s.mu.Unlock()
+
+	// Run warmup in background - don't block
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+
+		// Simple warmup prompt - just get Claude CLI loaded and ready
+		args := []string{
+			"-p",
+			"--model", "haiku",
+			"--output-format", "json",
+			"hi",
+		}
+		cmd := exec.CommandContext(ctx, "claude", args...)
+		cmd.Dir = "/tmp"
+		_ = cmd.Run() // Ignore result - just warming up
+	}()
 }
 
 // Cancel cancels any pending autocomplete request.
@@ -53,6 +101,61 @@ func (s *Service) Cancel() {
 		s.currentReq.CancelFunc()
 		s.currentReq = nil
 	}
+}
+
+// getFromCache retrieves a cached suggestion if available and not expired.
+func (s *Service) getFromCache(key string) string {
+	s.cacheMu.RLock()
+	defer s.cacheMu.RUnlock()
+
+	entry, ok := s.cache[key]
+	if !ok {
+		return ""
+	}
+
+	// Check if entry has expired
+	if time.Since(entry.timestamp) > s.cacheTTL {
+		return ""
+	}
+
+	return entry.suggestion
+}
+
+// addToCache adds a suggestion to the cache with LRU eviction.
+func (s *Service) addToCache(key, suggestion string) {
+	s.cacheMu.Lock()
+	defer s.cacheMu.Unlock()
+
+	// Check if key already exists (update timestamp)
+	if _, exists := s.cache[key]; exists {
+		s.cache[key] = &cacheEntry{
+			suggestion: suggestion,
+			timestamp:  time.Now(),
+		}
+		// Move to end of order (most recently used)
+		for i, k := range s.cacheOrder {
+			if k == key {
+				s.cacheOrder = append(s.cacheOrder[:i], s.cacheOrder[i+1:]...)
+				s.cacheOrder = append(s.cacheOrder, key)
+				break
+			}
+		}
+		return
+	}
+
+	// Evict oldest entry if cache is full
+	if len(s.cache) >= s.cacheSize && len(s.cacheOrder) > 0 {
+		oldest := s.cacheOrder[0]
+		s.cacheOrder = s.cacheOrder[1:]
+		delete(s.cache, oldest)
+	}
+
+	// Add new entry
+	s.cache[key] = &cacheEntry{
+		suggestion: suggestion,
+		timestamp:  time.Now(),
+	}
+	s.cacheOrder = append(s.cacheOrder, key)
 }
 
 // GetSuggestion gets an autocomplete suggestion for the given input.
@@ -66,6 +169,12 @@ func (s *Service) GetSuggestion(ctx context.Context, input, fieldType, project, 
 	}
 	if len(strings.TrimSpace(input)) < minLen {
 		return nil
+	}
+
+	// Check cache first - instant response for repeated inputs
+	cacheKey := fmt.Sprintf("%s:%s:%s", fieldType, project, input)
+	if cached := s.getFromCache(cacheKey); cached != "" {
+		return s.processSuggestion(cached, input, 0)
 	}
 
 	// Create cancellable context with timeout
@@ -98,6 +207,14 @@ func (s *Service) GetSuggestion(ctx context.Context, input, fieldType, project, 
 		return nil
 	}
 
+	// Cache the result for future use
+	s.addToCache(cacheKey, suggestion)
+
+	return s.processSuggestion(suggestion, input, reqID)
+}
+
+// processSuggestion validates and transforms a raw suggestion into a Suggestion struct.
+func (s *Service) processSuggestion(suggestion, input string, reqID int64) *Suggestion {
 	// Validate the suggestion
 	suggestion = strings.TrimSpace(suggestion)
 	if suggestion == "" {
@@ -199,7 +316,7 @@ func callClaude(ctx context.Context, prompt string) (string, error) {
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
 		if line != "" && !strings.HasPrefix(strings.ToLower(line), "here") &&
-		   !strings.HasPrefix(strings.ToLower(line), "the completed") {
+			!strings.HasPrefix(strings.ToLower(line), "the completed") {
 			return line, nil
 		}
 	}

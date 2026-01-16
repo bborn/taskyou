@@ -116,6 +116,12 @@ func NewEditFormModel(database *db.DB, task *db.Task, width, height int) *FormMo
 		}
 	}
 
+	autocompleteSvc := autocomplete.NewService()
+	// Start warming up the Claude CLI immediately so it's ready when user starts typing
+	if autocompleteEnabled {
+		autocompleteSvc.Warmup()
+	}
+
 	m := &FormModel{
 		db:                  database,
 		width:               width,
@@ -132,7 +138,7 @@ func NewEditFormModel(database *db.DB, task *db.Task, width, height int) *FormMo
 		prNumber:            task.PRNumber,
 		autocompleteCtx:     ctx,
 		autocompleteCancel:  cancel,
-		autocompleteSvc:     autocomplete.NewService(),
+		autocompleteSvc:     autocompleteSvc,
 		autocompleteEnabled: autocompleteEnabled,
 	}
 
@@ -242,6 +248,12 @@ func NewFormModel(database *db.DB, width, height int, workingDir string) *FormMo
 		}
 	}
 
+	autocompleteSvc := autocomplete.NewService()
+	// Start warming up the Claude CLI immediately so it's ready when user starts typing
+	if autocompleteEnabled {
+		autocompleteSvc.Warmup()
+	}
+
 	m := &FormModel{
 		db:                  database,
 		width:               width,
@@ -252,7 +264,7 @@ func NewFormModel(database *db.DB, width, height int, workingDir string) *FormMo
 		recurrences:         []string{"", db.RecurrenceHourly, db.RecurrenceDaily, db.RecurrenceWeekly, db.RecurrenceMonthly},
 		autocompleteCtx:     ctx,
 		autocompleteCancel:  cancel,
-		autocompleteSvc:     autocomplete.NewService(),
+		autocompleteSvc:     autocompleteSvc,
 		autocompleteEnabled: autocompleteEnabled,
 	}
 
@@ -574,7 +586,7 @@ func (m *FormModel) scheduleAutocomplete(fieldType, input, project, extraContext
 	debounceID := m.debounceID
 
 	// Return a tick command that fires after the debounce delay
-	return tea.Tick(350*time.Millisecond, func(t time.Time) tea.Msg {
+	return tea.Tick(100*time.Millisecond, func(t time.Time) tea.Msg {
 		return autocompleteTickMsg{
 			debounceID: debounceID,
 			fieldType:  fieldType,
