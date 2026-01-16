@@ -50,6 +50,9 @@ type DetailModel struct {
 	// Initial pane dimensions (to detect user resizing)
 	initialDetailHeight int // percentage when panes were joined
 	initialShellWidth   int // percentage when panes were joined
+
+	// Shell pane visibility state
+	shellPaneHidden bool
 }
 
 // UpdateTask updates the task and refreshes the view.
@@ -740,10 +743,20 @@ func (m *DetailModel) joinTmuxPanes() {
 	}
 	exec.CommandContext(ctx, "tmux", "select-pane", "-t", m.claudePaneID, "-T", claudeTitle).Run()
 
-	// Step 2: Join or create the Shell pane to the right of Claude
+	// Check if shell pane should be hidden (persisted setting)
+	shellHiddenSetting, _ := m.database.GetSetting(config.SettingShellPaneHidden)
+	m.shellPaneHidden = shellHiddenSetting == "true"
+
+	// Step 2: Join or create the Shell pane to the right of Claude (unless hidden)
 	shellWidth := m.getShellPaneWidth()
 
-	if hasShellPane {
+	if m.shellPaneHidden {
+		// Shell pane is hidden - kill any existing shell pane from daemon
+		if hasShellPane {
+			exec.CommandContext(ctx, "tmux", "kill-pane", "-t", windowTarget+".0").Run()
+		}
+		m.workdirPaneID = ""
+	} else if hasShellPane {
 		// Daemon had 2 panes. After joining Claude (.0), the Shell pane is now .0 in daemon
 		err = exec.CommandContext(ctx, "tmux", "join-pane",
 			"-h", "-l", shellWidth,
@@ -974,117 +987,75 @@ func (m *DetailModel) breakTmuxPanes(saveHeight bool) {
 	m.daemonSessionID = ""
 }
 
-// focusNextPane cycles focus to the next pane: Details -> Claude -> Shell -> Details.
-func (m *DetailModel) focusNextPane() {
-	if m.claudePaneID == "" && m.workdirPaneID == "" {
-		return // No panes to cycle through
+// ToggleShellPane toggles the visibility of the shell pane.
+// When hidden, the Claude pane expands to full width.
+// When shown, the shell pane is recreated with the saved width.
+func (m *DetailModel) ToggleShellPane() {
+	if os.Getenv("TMUX") == "" || m.claudePaneID == "" {
+		return // Not in tmux or no Claude pane
 	}
 
-	// Get the currently focused pane
-	currentCmd := exec.Command("tmux", "display-message", "-p", "#{pane_id}")
-	currentOut, err := currentCmd.Output()
-	if err != nil {
-		return
-	}
-	currentPane := strings.TrimSpace(string(currentOut))
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 
-	// Determine the next pane in cycle: Details -> Claude -> Shell -> Details
-	var nextPane string
-	switch currentPane {
-	case m.tuiPaneID:
-		if m.claudePaneID != "" {
-			nextPane = m.claudePaneID
-		} else if m.workdirPaneID != "" {
-			nextPane = m.workdirPaneID
+	if m.shellPaneHidden {
+		// Show the shell pane - create a new one to the right of Claude
+		workdir := m.getWorkdir()
+		userShell := os.Getenv("SHELL")
+		if userShell == "" {
+			userShell = "/bin/zsh"
 		}
-	case m.claudePaneID:
-		if m.workdirPaneID != "" {
-			nextPane = m.workdirPaneID
-		} else if m.tuiPaneID != "" {
-			nextPane = m.tuiPaneID
+		shellWidth := m.getShellPaneWidth()
+
+		err := exec.CommandContext(ctx, "tmux", "split-window",
+			"-h", "-l", shellWidth,
+			"-t", m.claudePaneID,
+			"-c", workdir,
+			userShell).Run()
+		if err != nil {
+			return
 		}
-	case m.workdirPaneID:
+
+		// Get the new shell pane ID
+		workdirPaneCmd := exec.CommandContext(ctx, "tmux", "display-message", "-p", "#{pane_id}")
+		workdirPaneOut, _ := workdirPaneCmd.Output()
+		m.workdirPaneID = strings.TrimSpace(string(workdirPaneOut))
+		exec.CommandContext(ctx, "tmux", "select-pane", "-t", m.workdirPaneID, "-T", "Shell").Run()
+
+		// Set environment variables in the shell pane
+		if m.task != nil {
+			envCmd := fmt.Sprintf("export WORKTREE_TASK_ID=%d WORKTREE_PORT=%d WORKTREE_PATH=%q", m.task.ID, m.task.Port, m.task.WorktreePath)
+			exec.CommandContext(ctx, "tmux", "send-keys", "-t", m.workdirPaneID, envCmd, "Enter").Run()
+			exec.CommandContext(ctx, "tmux", "send-keys", "-t", m.workdirPaneID, "clear", "Enter").Run()
+		}
+
+		// Return focus to TUI pane
 		if m.tuiPaneID != "" {
-			nextPane = m.tuiPaneID
-		} else if m.claudePaneID != "" {
-			nextPane = m.claudePaneID
+			exec.CommandContext(ctx, "tmux", "select-pane", "-t", m.tuiPaneID).Run()
 		}
-	default:
-		// Unknown pane, go to Claude or Shell
-		if m.claudePaneID != "" {
-			nextPane = m.claudePaneID
-		} else if m.workdirPaneID != "" {
-			nextPane = m.workdirPaneID
-		}
-	}
 
-	if nextPane != "" {
-		exec.Command("tmux", "select-pane", "-t", nextPane).Run()
+		m.shellPaneHidden = false
+		m.database.SetSetting(config.SettingShellPaneHidden, "false")
+	} else {
+		// Hide the shell pane - save width first, then kill it
+		if m.workdirPaneID != "" {
+			m.saveShellPaneWidth()
+			exec.CommandContext(ctx, "tmux", "kill-pane", "-t", m.workdirPaneID).Run()
+			m.workdirPaneID = ""
+		}
+		m.shellPaneHidden = true
+		m.database.SetSetting(config.SettingShellPaneHidden, "true")
+
+		// Return focus to TUI pane
+		if m.tuiPaneID != "" {
+			exec.CommandContext(ctx, "tmux", "select-pane", "-t", m.tuiPaneID).Run()
+		}
 	}
 }
 
-// focusPrevPane cycles focus to the previous pane: Details -> Shell -> Claude -> Details.
-func (m *DetailModel) focusPrevPane() {
-	if m.claudePaneID == "" && m.workdirPaneID == "" {
-		return // No panes to cycle through
-	}
-
-	// Get the currently focused pane
-	currentCmd := exec.Command("tmux", "display-message", "-p", "#{pane_id}")
-	currentOut, err := currentCmd.Output()
-	if err != nil {
-		return
-	}
-	currentPane := strings.TrimSpace(string(currentOut))
-
-	// Determine the previous pane in cycle: Details -> Shell -> Claude -> Details
-	var prevPane string
-	switch currentPane {
-	case m.tuiPaneID:
-		if m.workdirPaneID != "" {
-			prevPane = m.workdirPaneID
-		} else if m.claudePaneID != "" {
-			prevPane = m.claudePaneID
-		}
-	case m.claudePaneID:
-		if m.tuiPaneID != "" {
-			prevPane = m.tuiPaneID
-		} else if m.workdirPaneID != "" {
-			prevPane = m.workdirPaneID
-		}
-	case m.workdirPaneID:
-		if m.claudePaneID != "" {
-			prevPane = m.claudePaneID
-		} else if m.tuiPaneID != "" {
-			prevPane = m.tuiPaneID
-		}
-	default:
-		// Unknown pane, go to Shell or Claude
-		if m.workdirPaneID != "" {
-			prevPane = m.workdirPaneID
-		} else if m.claudePaneID != "" {
-			prevPane = m.claudePaneID
-		}
-	}
-
-	if prevPane != "" {
-		exec.Command("tmux", "select-pane", "-t", prevPane).Run()
-	}
-}
-
-// isTuiPaneFocused returns true if the TUI/Details pane is currently focused.
-func (m *DetailModel) isTuiPaneFocused() bool {
-	if m.tuiPaneID == "" {
-		return true // No panes joined, assume TUI is focused
-	}
-
-	currentCmd := exec.Command("tmux", "display-message", "-p", "#{pane_id}")
-	currentOut, err := currentCmd.Output()
-	if err != nil {
-		return true // On error, assume TUI is focused
-	}
-	currentPane := strings.TrimSpace(string(currentOut))
-	return currentPane == m.tuiPaneID
+// IsShellPaneHidden returns true if the shell pane is currently hidden.
+func (m *DetailModel) IsShellPaneHidden() bool {
+	return m.shellPaneHidden
 }
 
 // View renders the detail view.
@@ -1319,6 +1290,18 @@ func (m *DetailModel) renderHelp() string {
 			key  string
 			desc string
 		}{"shift+↑↓", "switch pane"})
+	}
+
+	// Show toggle shell shortcut when Claude pane is visible
+	if m.claudePaneID != "" && os.Getenv("TMUX") != "" {
+		toggleDesc := "hide shell"
+		if m.shellPaneHidden {
+			toggleDesc = "show shell"
+		}
+		keys = append(keys, struct {
+			key  string
+			desc string
+		}{"\\", toggleDesc})
 	}
 
 	keys = append(keys, []struct {
