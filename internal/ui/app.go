@@ -9,7 +9,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/bborn/workflow/internal/config"
 	"github.com/bborn/workflow/internal/db"
 	"github.com/bborn/workflow/internal/executor"
 	"github.com/bborn/workflow/internal/github"
@@ -45,23 +44,23 @@ const (
 
 // KeyMap defines key bindings.
 type KeyMap struct {
-	Left           key.Binding
-	Right          key.Binding
-	Up             key.Binding
-	Down           key.Binding
-	Enter          key.Binding
-	Back           key.Binding
-	New            key.Binding
-	Edit           key.Binding
-	Queue          key.Binding
-	Retry          key.Binding
-	Close          key.Binding
-	Archive        key.Binding
-	Delete         key.Binding
-	Refresh        key.Binding
-	Settings       key.Binding
-	Memories       key.Binding
-	Help           key.Binding
+	Left            key.Binding
+	Right           key.Binding
+	Up              key.Binding
+	Down            key.Binding
+	Enter           key.Binding
+	Back            key.Binding
+	New             key.Binding
+	Edit            key.Binding
+	Queue           key.Binding
+	Retry           key.Binding
+	Close           key.Binding
+	Archive         key.Binding
+	Delete          key.Binding
+	Refresh         key.Binding
+	Settings        key.Binding
+	Memories        key.Binding
+	Help            key.Binding
 	Quit            key.Binding
 	ChangeStatus    key.Binding
 	CommandPalette  key.Binding
@@ -303,9 +302,9 @@ type AppModel struct {
 	commandPaletteView *CommandPaletteModel
 
 	// Filter state
-	filterInput   textinput.Model
-	filterActive  bool   // Whether filter mode is active (typing in filter)
-	filterText    string // Current filter text (persists when not typing)
+	filterInput  textinput.Model
+	filterActive bool   // Whether filter mode is active (typing in filter)
+	filterText   string // Current filter text (persists when not typing)
 
 	// Window size
 	width  int
@@ -347,9 +346,6 @@ func NewAppModel(database *db.DB, exec *executor.Executor, workingDir string) *A
 	filterInput.Placeholder = "Filter by project, type, or text..."
 	filterInput.CharLimit = 50
 
-	// Load persisted filter from database
-	persistedFilter, _ := database.GetSetting(config.SettingKanbanFilter)
-
 	return &AppModel{
 		db:           database,
 		executor:     exec,
@@ -364,7 +360,7 @@ func NewAppModel(database *db.DB, exec *executor.Executor, workingDir string) *A
 		dbChangeCh:   dbChangeCh,
 		prCache:      github.NewPRCache(),
 		filterInput:  filterInput,
-		filterText:   persistedFilter,
+		filterText:   "",
 	}
 }
 
@@ -1032,7 +1028,6 @@ func (m *AppModel) updateFilterMode(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.filterText = ""
 			m.filterInput.SetValue("")
 			m.filterInput.Blur()
-			m.persistFilter()
 			return m, m.loadTasks()
 		case "backspace":
 			// If filter is empty, clear and exit
@@ -1040,7 +1035,6 @@ func (m *AppModel) updateFilterMode(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.filterActive = false
 				m.filterText = ""
 				m.filterInput.Blur()
-				m.persistFilter()
 				return m, m.loadTasks()
 			}
 			// Otherwise, let the text input handle backspace
@@ -1050,7 +1044,6 @@ func (m *AppModel) updateFilterMode(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if newFilterText != m.filterText {
 				m.filterText = newFilterText
 				m.applyFilter()
-				m.persistFilter()
 			}
 			return m, cmd
 		case "enter":
@@ -1096,16 +1089,9 @@ func (m *AppModel) updateFilterMode(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if newFilterText != m.filterText {
 		m.filterText = newFilterText
 		m.applyFilter()
-		m.persistFilter()
 	}
 
 	return m, cmd
-}
-
-// persistFilter saves the current filter text to the database.
-func (m *AppModel) persistFilter() {
-	// Save filter to database (ignore errors as this is non-critical)
-	_ = m.db.SetSetting(config.SettingKanbanFilter, m.filterText)
 }
 
 // applyFilter filters the tasks based on current filter text.
