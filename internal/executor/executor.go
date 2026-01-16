@@ -774,8 +774,9 @@ func (e *Executor) executeTask(ctx context.Context, task *db.Task) {
 		// Save transcript on completion
 		e.saveTranscriptOnCompletion(task.ID, workDir)
 
-		// Kill Claude process to free memory when task is done
-		e.KillClaudeProcess(task.ID)
+		// NOTE: We intentionally do NOT kill Claude here - keep it running so user can
+		// easily retry/resume the task. Old done task Claudes are cleaned up after 2h
+		// by the cleanupOrphanedClaudes routine.
 
 		// Handle recurring task: reset to backlog for next run
 		e.handleRecurringTaskCompletion(task)
@@ -790,8 +791,9 @@ func (e *Executor) executeTask(ctx context.Context, task *db.Task) {
 		// Index task for future search/retrieval
 		e.indexTaskForSearch(task)
 
-		// Kill Claude process to free memory when task is done
-		e.KillClaudeProcess(task.ID)
+		// NOTE: We intentionally do NOT kill Claude here - keep it running so user can
+		// easily retry/resume the task. Old done task Claudes are cleaned up after 2h
+		// by the cleanupOrphanedClaudes routine.
 
 		// Extract memories from successful task
 		go func() {
@@ -2362,8 +2364,9 @@ func (e *Executor) CheckPRStateAndUpdateTask(taskID int64) {
 		return
 	}
 
-	// Only check tasks that aren't done and have a branch
-	if task.Status == db.StatusDone || task.BranchName == "" {
+	// Only auto-close backlog tasks - if task ever started (queued/processing/blocked),
+	// let user decide what to do with it
+	if task.Status != db.StatusBacklog || task.BranchName == "" {
 		return
 	}
 
@@ -2396,6 +2399,11 @@ func (e *Executor) checkMergedBranches() {
 	}
 
 	for _, task := range tasks {
+		// Only auto-close backlog tasks - if task ever started, let user decide
+		if task.Status != db.StatusBacklog {
+			continue
+		}
+
 		// Skip tasks currently being processed
 		e.mu.RLock()
 		isRunning := e.runningTasks[task.ID]
@@ -2720,6 +2728,17 @@ func trustMiseConfig(dir string) {
 func symlinkClaudeConfig(projectDir, worktreePath string) error {
 	mainClaudeDir := filepath.Join(projectDir, ".claude")
 	worktreeClaudeDir := filepath.Join(worktreePath, ".claude")
+
+	// Safety check: prevent circular symlinks if paths are the same
+	if mainClaudeDir == worktreeClaudeDir {
+		return fmt.Errorf("projectDir and worktreePath must be different (both resolve to %s)", mainClaudeDir)
+	}
+
+	// If mainClaudeDir exists as a symlink (possibly broken/circular), remove it
+	// The main project's .claude should always be a real directory, never a symlink
+	if info, err := os.Lstat(mainClaudeDir); err == nil && info.Mode()&os.ModeSymlink != 0 {
+		os.RemoveAll(mainClaudeDir)
+	}
 
 	// Ensure main project has .claude directory
 	if err := os.MkdirAll(mainClaudeDir, 0755); err != nil {
