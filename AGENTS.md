@@ -367,12 +367,15 @@ wish.WithPublicKeyAuth(func(ctx ssh.Context, key ssh.PublicKey) bool {
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `WORKTREE_DB_PATH` | SQLite database path | `~/.local/share/task/tasks.db` |
+| `TASK_EXECUTOR` | Overrides the executor name shown in the UI (e.g., `codex`) | `Claude` |
 | `WORKTREE_TASK_ID` | Current task ID (set by executor) | - |
 | `WORKTREE_PORT` | Task-specific port | - |
 | `WORKTREE_PATH` | Worktree directory | - |
 | `WORKTREE_SESSION_ID` | tmux session ID | - |
 | `WORKTREE_DANGEROUS_MODE` | Skip Claude permissions | - |
 | `WORKTREE_CWD` | Working directory for project detection | - |
+
+Set `TASK_EXECUTOR` before launching `task -l`/`task daemon` to change the executor label shown in the UI (e.g., `TASK_EXECUTOR=codex`). For compatibility, `WORKFLOW_EXECUTOR`, `TASKYOU_EXECUTOR`, and `WORKTREE_EXECUTOR` are also recognized.
 
 ## Project Configuration
 
