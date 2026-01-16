@@ -1166,8 +1166,8 @@ func (m *DetailModel) renderHeader() string {
 		meta.WriteString(prDesc)
 	}
 
-	// Schedule info
-	if t.IsScheduled() {
+	// Schedule info - show if scheduled OR recurring
+	if t.IsScheduled() || t.IsRecurring() {
 		meta.WriteString("  ")
 		scheduleStyle := lipgloss.NewStyle().
 			Padding(0, 1).
@@ -1177,11 +1177,24 @@ func (m *DetailModel) renderHeader() string {
 		if t.IsRecurring() {
 			icon = "🔁"
 		}
-		scheduleText := icon + " " + formatScheduleTime(t.ScheduledAt.Time)
+		var scheduleText string
+		if t.IsScheduled() {
+			scheduleText = icon + " " + formatScheduleTime(t.ScheduledAt.Time)
+		} else {
+			scheduleText = icon
+		}
 		if t.IsRecurring() {
 			scheduleText += " (" + t.Recurrence + ")"
 		}
 		meta.WriteString(scheduleStyle.Render(scheduleText))
+
+		// Show last run info for recurring tasks
+		if t.LastRunAt != nil {
+			lastRunStyle := lipgloss.NewStyle().
+				Foreground(lipgloss.Color("214"))
+			lastRunText := fmt.Sprintf(" Last: %s", t.LastRunAt.Time.Format("Jan 2 3:04pm"))
+			meta.WriteString(lastRunStyle.Render(lastRunText))
+		}
 	}
 
 	// PR link if available
