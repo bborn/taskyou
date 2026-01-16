@@ -44,6 +44,7 @@ const (
 	StatusProcessing = "processing" // Currently being executed
 	StatusBlocked    = "blocked"    // Needs input/clarification
 	StatusDone       = "done"       // Completed
+	StatusArchived   = "archived"   // Archived (hidden from view)
 )
 
 // IsInProgress returns true if the task is actively being worked on.
@@ -215,9 +216,9 @@ func (db *DB) ListTasks(opts ListTasksOptions) ([]*Task, error) {
 		args = append(args, opts.Project)
 	}
 
-	// Exclude done by default unless specifically querying for them or includeClosed is set
+	// Exclude done and archived by default unless specifically querying for them or includeClosed is set
 	if opts.Status == "" && !opts.IncludeClosed {
-		query += " AND status != 'done'"
+		query += " AND status NOT IN ('done', 'archived')"
 	}
 
 	// Sort done/blocked tasks by completed_at (most recently closed first),
@@ -341,7 +342,7 @@ func (db *DB) UpdateTaskStatus(id int64, status string) error {
 	switch status {
 	case StatusProcessing:
 		query += ", started_at = CURRENT_TIMESTAMP"
-	case StatusDone, StatusBlocked:
+	case StatusDone, StatusBlocked, StatusArchived:
 		query += ", completed_at = CURRENT_TIMESTAMP"
 	}
 
@@ -422,12 +423,12 @@ func (db *DB) DeleteTask(id int64) error {
 	return nil
 }
 
-// GetActiveTaskPorts returns all ports currently in use by active (non-done) tasks.
+// GetActiveTaskPorts returns all ports currently in use by active (non-done, non-archived) tasks.
 func (db *DB) GetActiveTaskPorts() (map[int]bool, error) {
 	rows, err := db.Query(`
 		SELECT port FROM tasks
-		WHERE port > 0 AND status != ?
-	`, StatusDone)
+		WHERE port > 0 AND status NOT IN (?, ?)
+	`, StatusDone, StatusArchived)
 	if err != nil {
 		return nil, fmt.Errorf("query active ports: %w", err)
 	}
@@ -549,7 +550,7 @@ func (db *DB) GetQueuedTasks() ([]*Task, error) {
 	return tasks, nil
 }
 
-// GetTasksWithBranches returns tasks that have a branch name and aren't done.
+// GetTasksWithBranches returns tasks that have a branch name and aren't done or archived.
 // These are candidates for automatic closure when their PR is merged.
 func (db *DB) GetTasksWithBranches() ([]*Task, error) {
 	rows, err := db.Query(`
@@ -560,9 +561,9 @@ func (db *DB) GetTasksWithBranches() ([]*Task, error) {
 		       created_at, updated_at, started_at, completed_at,
 		       scheduled_at, recurrence, last_run_at
 		FROM tasks
-		WHERE branch_name != '' AND status != ?
+		WHERE branch_name != '' AND status NOT IN (?, ?)
 		ORDER BY created_at DESC
-	`, StatusDone)
+	`, StatusDone, StatusArchived)
 	if err != nil {
 		return nil, fmt.Errorf("query tasks with branches: %w", err)
 	}
