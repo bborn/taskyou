@@ -983,6 +983,21 @@ func (m *DetailModel) focusPrevPane() {
 	}
 }
 
+// isTuiPaneFocused returns true if the TUI/Details pane is currently focused.
+func (m *DetailModel) isTuiPaneFocused() bool {
+	if m.tuiPaneID == "" {
+		return true // No panes joined, assume TUI is focused
+	}
+
+	currentCmd := exec.Command("tmux", "display-message", "-p", "#{pane_id}")
+	currentOut, err := currentCmd.Output()
+	if err != nil {
+		return true // On error, assume TUI is focused
+	}
+	currentPane := strings.TrimSpace(string(currentOut))
+	return currentPane == m.tuiPaneID
+}
+
 // View renders the detail view.
 func (m *DetailModel) View() string {
 	if !m.ready {
@@ -1080,12 +1095,16 @@ func (m *DetailModel) renderHeader() string {
 		meta.WriteString(scheduleStyle.Render(scheduleText))
 	}
 
-	// Tmux hint if session is active
+	// Tmux hint if session is active - show different hint based on focused pane
 	if m.claudePaneID != "" {
 		meta.WriteString("  ")
+		hintText := "(Tab to interact with Claude)"
+		if !m.isTuiPaneFocused() {
+			hintText = "(Shift+Tab to return to task detail)"
+		}
 		tmuxHint := lipgloss.NewStyle().
 			Foreground(ColorSecondary).
-			Render("(Tab to interact with Claude)")
+			Render(hintText)
 		meta.WriteString(tmuxHint)
 	}
 
