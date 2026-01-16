@@ -38,6 +38,9 @@ type Executor struct {
 	hooks   *hooks.Runner
 	prCache *github.PRCache
 
+	// Executor factory for pluggable backends
+	executorFactory *ExecutorFactory
+
 	mu           sync.RWMutex
 	runningTasks map[int64]bool               // tracks which tasks are currently executing
 	cancelFuncs  map[int64]context.CancelFunc // cancel functions for running tasks
@@ -64,38 +67,52 @@ const SuspendIdleTimeout = 5 * time.Minute
 
 // New creates a new executor.
 func New(database *db.DB, cfg *config.Config) *Executor {
-	return &Executor{
-		db:             database,
-		config:         cfg,
-		logger:         log.NewWithOptions(io.Discard, log.Options{Prefix: "executor"}),
-		hooks:          hooks.NewSilent(hooks.DefaultHooksDir()),
-		prCache:        github.NewPRCache(),
-		stopCh:         make(chan struct{}),
-		subs:           make(map[int64][]chan *db.TaskLog),
-		taskSubs:       make([]chan TaskEvent, 0),
-		runningTasks:   make(map[int64]bool),
-		cancelFuncs:    make(map[int64]context.CancelFunc),
-		suspendedTasks: make(map[int64]time.Time),
-		silent:         true,
+	e := &Executor{
+		db:              database,
+		config:          cfg,
+		logger:          log.NewWithOptions(io.Discard, log.Options{Prefix: "executor"}),
+		hooks:           hooks.NewSilent(hooks.DefaultHooksDir()),
+		prCache:         github.NewPRCache(),
+		executorFactory: NewExecutorFactory(),
+		stopCh:          make(chan struct{}),
+		subs:            make(map[int64][]chan *db.TaskLog),
+		taskSubs:        make([]chan TaskEvent, 0),
+		runningTasks:    make(map[int64]bool),
+		cancelFuncs:     make(map[int64]context.CancelFunc),
+		suspendedTasks:  make(map[int64]time.Time),
+		silent:          true,
 	}
+
+	// Register available executors
+	e.executorFactory.Register(NewClaudeExecutor(e))
+	e.executorFactory.Register(NewCodexExecutor(e))
+
+	return e
 }
 
 // NewWithLogging creates an executor that logs to stderr (for daemon mode).
 func NewWithLogging(database *db.DB, cfg *config.Config, w io.Writer) *Executor {
-	return &Executor{
-		db:             database,
-		config:         cfg,
-		logger:         log.NewWithOptions(w, log.Options{Prefix: "executor"}),
-		hooks:          hooks.New(hooks.DefaultHooksDir()),
-		prCache:        github.NewPRCache(),
-		stopCh:         make(chan struct{}),
-		subs:           make(map[int64][]chan *db.TaskLog),
-		taskSubs:       make([]chan TaskEvent, 0),
-		runningTasks:   make(map[int64]bool),
-		cancelFuncs:    make(map[int64]context.CancelFunc),
-		suspendedTasks: make(map[int64]time.Time),
-		silent:         false,
+	e := &Executor{
+		db:              database,
+		config:          cfg,
+		logger:          log.NewWithOptions(w, log.Options{Prefix: "executor"}),
+		hooks:           hooks.New(hooks.DefaultHooksDir()),
+		prCache:         github.NewPRCache(),
+		executorFactory: NewExecutorFactory(),
+		stopCh:          make(chan struct{}),
+		subs:            make(map[int64][]chan *db.TaskLog),
+		taskSubs:        make([]chan TaskEvent, 0),
+		runningTasks:    make(map[int64]bool),
+		cancelFuncs:     make(map[int64]context.CancelFunc),
+		suspendedTasks:  make(map[int64]time.Time),
+		silent:          false,
 	}
+
+	// Register available executors
+	e.executorFactory.Register(NewClaudeExecutor(e))
+	e.executorFactory.Register(NewCodexExecutor(e))
+
+	return e
 }
 
 // Start begins the background worker.
@@ -733,19 +750,46 @@ func (e *Executor) executeTask(ctx context.Context, task *db.Task) {
 	// Build prompt based on task type
 	prompt := e.buildPrompt(task, attachmentPaths)
 
-	// Run Claude
+	// Get the appropriate executor for this task
+	executorName := task.Executor
+	if executorName == "" {
+		executorName = db.DefaultExecutor()
+	}
+	taskExecutor := e.executorFactory.Get(executorName)
+	if taskExecutor == nil {
+		// Fall back to default executor if specified executor not found
+		e.logLine(task.ID, "system", fmt.Sprintf("Executor '%s' not found, falling back to '%s'", executorName, db.DefaultExecutor()))
+		taskExecutor = e.executorFactory.Get(db.DefaultExecutor())
+	}
+	if taskExecutor == nil {
+		e.logLine(task.ID, "error", "No executor available")
+		e.updateStatus(task.ID, db.StatusBlocked)
+		return
+	}
+
+	// Check if the executor is available
+	if !taskExecutor.IsAvailable() {
+		e.logLine(task.ID, "error", fmt.Sprintf("Executor '%s' is not installed", executorName))
+		e.updateStatus(task.ID, db.StatusBlocked)
+		return
+	}
+
+	// Run the executor
 	var result execResult
 	if isRetry {
-		e.logLine(task.ID, "system", "Resuming previous session with feedback")
-		result = e.runClaudeResume(taskCtx, task, workDir, prompt, retryFeedback)
+		e.logLine(task.ID, "system", fmt.Sprintf("Resuming previous session with feedback (executor: %s)", executorName))
+		execResult := taskExecutor.Resume(taskCtx, task, workDir, prompt, retryFeedback)
+		result = execResult.toInternal()
 	} else if isRecurringRun {
 		// Resume session with recurring message that includes full task details
 		recurringPrompt := e.buildRecurringPrompt(task, attachmentPaths)
-		e.logLine(task.ID, "system", fmt.Sprintf("Recurring task (%s) - resuming session", task.Recurrence))
-		result = e.runClaudeResume(taskCtx, task, workDir, prompt, recurringPrompt)
+		e.logLine(task.ID, "system", fmt.Sprintf("Recurring task (%s) - resuming session (executor: %s)", task.Recurrence, executorName))
+		execResult := taskExecutor.Resume(taskCtx, task, workDir, prompt, recurringPrompt)
+		result = execResult.toInternal()
 	} else {
-		e.logLine(task.ID, "system", "Starting new Claude session")
-		result = e.runClaude(taskCtx, task, workDir, prompt)
+		e.logLine(task.ID, "system", fmt.Sprintf("Starting new session (executor: %s)", executorName))
+		execResult := taskExecutor.Execute(taskCtx, task, workDir, prompt)
+		result = execResult.toInternal()
 	}
 
 	// Check current status - hooks may have already set it
@@ -760,8 +804,8 @@ func (e *Executor) executeTask(ctx context.Context, task *db.Task) {
 	if result.Interrupted {
 		// Status already set by Interrupt(), just run hook
 		e.hooks.OnStatusChange(task, db.StatusBacklog, "Task interrupted by user")
-		// Kill Claude process to free memory when task is interrupted
-		e.KillClaudeProcess(task.ID)
+		// Kill executor process to free memory when task is interrupted
+		taskExecutor.Kill(task.ID)
 	} else if currentStatus == db.StatusBlocked {
 		// Hooks already marked as blocked - respect that
 		e.logLine(task.ID, "system", "Task waiting for input")
@@ -774,8 +818,8 @@ func (e *Executor) executeTask(ctx context.Context, task *db.Task) {
 		// Save transcript on completion
 		e.saveTranscriptOnCompletion(task.ID, workDir)
 
-		// Kill Claude process to free memory when task is done
-		e.KillClaudeProcess(task.ID)
+		// Kill executor process to free memory when task is done
+		taskExecutor.Kill(task.ID)
 
 		// Handle recurring task: reset to backlog for next run
 		e.handleRecurringTaskCompletion(task)
@@ -790,8 +834,8 @@ func (e *Executor) executeTask(ctx context.Context, task *db.Task) {
 		// Index task for future search/retrieval
 		e.indexTaskForSearch(task)
 
-		// Kill Claude process to free memory when task is done
-		e.KillClaudeProcess(task.ID)
+		// Kill executor process to free memory when task is done
+		taskExecutor.Kill(task.ID)
 
 		// Extract memories from successful task
 		go func() {
@@ -821,6 +865,30 @@ func (e *Executor) executeTask(ctx context.Context, task *db.Task) {
 // GetProjectDir returns the directory for a project (exported for UI).
 func (e *Executor) GetProjectDir(project string) string {
 	return e.config.GetProjectDir(project)
+}
+
+// GetExecutor returns the executor for a task by name.
+func (e *Executor) GetExecutor(name string) TaskExecutor {
+	return e.executorFactory.Get(name)
+}
+
+// GetTaskExecutor returns the executor for a specific task.
+func (e *Executor) GetTaskExecutor(task *db.Task) TaskExecutor {
+	name := task.Executor
+	if name == "" {
+		name = db.DefaultExecutor()
+	}
+	return e.executorFactory.Get(name)
+}
+
+// AvailableExecutors returns the names of all available executors.
+func (e *Executor) AvailableExecutors() []string {
+	return e.executorFactory.Available()
+}
+
+// AllExecutors returns the names of all registered executors.
+func (e *Executor) AllExecutors() []string {
+	return e.executorFactory.All()
 }
 
 func (e *Executor) getProjectDir(project string) string {
