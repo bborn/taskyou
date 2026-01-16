@@ -33,6 +33,7 @@ const (
 	ViewEditTask
 	ViewDeleteConfirm
 	ViewCloseConfirm
+	ViewArchiveConfirm
 	ViewQuitConfirm
 	ViewSettings
 	ViewRetry
@@ -55,6 +56,7 @@ type KeyMap struct {
 	Queue          key.Binding
 	Retry          key.Binding
 	Close          key.Binding
+	Archive        key.Binding
 	Delete         key.Binding
 	Refresh        key.Binding
 	Settings       key.Binding
@@ -84,7 +86,7 @@ func (k KeyMap) FullHelp() [][]key.Binding {
 		{k.Left, k.Right, k.Up, k.Down},
 		{k.FocusBacklog, k.FocusInProgress, k.FocusBlocked, k.FocusDone},
 		{k.Enter, k.New, k.Queue, k.Close},
-		{k.Retry, k.Delete},
+		{k.Retry, k.Archive, k.Delete},
 		{k.Filter, k.CommandPalette, k.Settings, k.Memories},
 		{k.ChangeStatus, k.Refresh, k.Help, k.Quit},
 	}
@@ -136,6 +138,10 @@ func DefaultKeyMap() KeyMap {
 		Close: key.NewBinding(
 			key.WithKeys("c"),
 			key.WithHelp("c", "close"),
+		),
+		Archive: key.NewBinding(
+			key.WithKeys("a"),
+			key.WithHelp("a", "archive"),
 		),
 		Delete: key.NewBinding(
 			key.WithKeys("d"),
@@ -265,6 +271,11 @@ type AppModel struct {
 	closeConfirmValue bool
 	pendingCloseTask  *db.Task
 
+	// Archive confirmation state
+	archiveConfirm      *huh.Form
+	archiveConfirmValue bool
+	pendingArchiveTask  *db.Task
+
 	// Settings view state
 	settingsView *SettingsModel
 
@@ -386,6 +397,9 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 	if m.currentView == ViewCloseConfirm && m.closeConfirm != nil {
 		return m.updateCloseConfirm(msg)
+	}
+	if m.currentView == ViewArchiveConfirm && m.archiveConfirm != nil {
+		return m.updateArchiveConfirm(msg)
 	}
 	if m.currentView == ViewQuitConfirm && m.quitConfirm != nil {
 		return m.updateQuitConfirm(msg)
@@ -588,7 +602,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.err = msg.err
 		}
 
-	case taskQueuedMsg, taskClosedMsg, taskDeletedMsg, taskRetriedMsg, taskStatusChangedMsg, taskDangerousModeToggledMsg:
+	case taskQueuedMsg, taskClosedMsg, taskArchivedMsg, taskDeletedMsg, taskRetriedMsg, taskStatusChangedMsg, taskDangerousModeToggledMsg:
 		cmds = append(cmds, m.loadTasks())
 
 	case taskClaudeToggledMsg:
@@ -698,6 +712,8 @@ func (m *AppModel) View() string {
 		return m.viewDeleteConfirm()
 	case ViewCloseConfirm:
 		return m.viewCloseConfirm()
+	case ViewArchiveConfirm:
+		return m.viewArchiveConfirm()
 	case ViewQuitConfirm:
 		return m.viewQuitConfirm()
 	case ViewSettings:
@@ -941,6 +957,11 @@ func (m *AppModel) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, m.keys.Close):
 		if task := m.kanban.SelectedTask(); task != nil {
 			return m.showCloseConfirm(task)
+		}
+
+	case key.Matches(msg, m.keys.Archive):
+		if task := m.kanban.SelectedTask(); task != nil {
+			return m.showArchiveConfirm(task)
 		}
 
 	case key.Matches(msg, m.keys.Delete):
@@ -1189,6 +1210,11 @@ func (m *AppModel) updateDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Don't cleanup detail view yet - wait for confirmation
 		// If user cancels, we need to return to detail view
 		return m.showCloseConfirm(m.selectedTask)
+	}
+	if key.Matches(keyMsg, m.keys.Archive) && m.selectedTask != nil {
+		// Don't cleanup detail view yet - wait for confirmation
+		// If user cancels, we need to return to detail view
+		return m.showArchiveConfirm(m.selectedTask)
 	}
 	if key.Matches(keyMsg, m.keys.Delete) && m.selectedTask != nil {
 		// Don't cleanup detail view yet - wait for confirmation
@@ -1680,6 +1706,101 @@ func (m *AppModel) updateCloseConfirm(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
+func (m *AppModel) showArchiveConfirm(task *db.Task) (tea.Model, tea.Cmd) {
+	m.pendingArchiveTask = task
+	m.archiveConfirmValue = false
+	modalWidth := min(50, m.width-8)
+	m.archiveConfirm = huh.NewForm(
+		huh.NewGroup(
+			huh.NewConfirm().
+				Key("archive").
+				Title(fmt.Sprintf("Archive task #%d?", task.ID)).
+				Description(task.Title).
+				Affirmative("Archive").
+				Negative("Cancel").
+				Value(&m.archiveConfirmValue),
+		),
+	).WithTheme(huh.ThemeDracula()).
+		WithWidth(modalWidth - 6). // Account for modal padding and border
+		WithShowHelp(true)
+	m.previousView = m.currentView
+	m.currentView = ViewArchiveConfirm
+	return m, m.archiveConfirm.Init()
+}
+
+func (m *AppModel) viewArchiveConfirm() string {
+	if m.archiveConfirm == nil {
+		return ""
+	}
+
+	// Modal header with archive icon
+	header := lipgloss.NewStyle().
+		Bold(true).
+		Foreground(ColorSecondary).
+		MarginBottom(1).
+		Render("📦 Confirm Archive")
+
+	formView := m.archiveConfirm.View()
+
+	// Modal box with border
+	modalWidth := min(50, m.width-8)
+	modalBox := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(ColorSecondary).
+		Padding(1, 2).
+		Width(modalWidth)
+
+	modalContent := modalBox.Render(lipgloss.JoinVertical(lipgloss.Center, header, formView))
+
+	// Center the modal on screen
+	return lipgloss.NewStyle().
+		Width(m.width).
+		Height(m.height).
+		Align(lipgloss.Center, lipgloss.Center).
+		Render(modalContent)
+}
+
+func (m *AppModel) updateArchiveConfirm(msg tea.Msg) (tea.Model, tea.Cmd) {
+	// Handle escape to cancel
+	if keyMsg, ok := msg.(tea.KeyMsg); ok {
+		if keyMsg.String() == "esc" {
+			m.currentView = m.previousView
+			m.archiveConfirm = nil
+			m.pendingArchiveTask = nil
+			return m, nil
+		}
+	}
+
+	// Update the huh form
+	form, cmd := m.archiveConfirm.Update(msg)
+	if f, ok := form.(*huh.Form); ok {
+		m.archiveConfirm = f
+	}
+
+	// Check if form completed
+	if m.archiveConfirm.State == huh.StateCompleted {
+		if m.pendingArchiveTask != nil && m.archiveConfirmValue {
+			taskID := m.pendingArchiveTask.ID
+			m.pendingArchiveTask = nil
+			m.archiveConfirm = nil
+			// Clean up detail view now that archive is confirmed
+			if m.detailView != nil {
+				m.detailView.Cleanup()
+				m.detailView = nil
+			}
+			m.currentView = ViewDashboard
+			return m, m.archiveTask(taskID)
+		}
+		// Cancelled - return to previous view
+		m.pendingArchiveTask = nil
+		m.archiveConfirm = nil
+		m.currentView = m.previousView
+		return m, nil
+	}
+
+	return m, cmd
+}
+
 func (m *AppModel) showChangeStatus(task *db.Task) (tea.Model, tea.Cmd) {
 	m.pendingChangeStatusTask = task
 	m.changeStatusValue = task.Status
@@ -1979,6 +2100,10 @@ type taskClosedMsg struct {
 	err error
 }
 
+type taskArchivedMsg struct {
+	err error
+}
+
 type taskDeletedMsg struct {
 	err error
 }
@@ -2133,6 +2258,25 @@ func (m *AppModel) closeTask(id int64) tea.Cmd {
 		osExec.Command("tmux", "kill-window", "-t", windowTarget).Run()
 
 		return taskClosedMsg{err: err}
+	}
+}
+
+func (m *AppModel) archiveTask(id int64) tea.Cmd {
+	database := m.db
+	exec := m.executor
+	return func() tea.Msg {
+		err := database.UpdateTaskStatus(id, db.StatusArchived)
+		if err == nil {
+			if task, _ := database.GetTask(id); task != nil {
+				exec.NotifyTaskChange("status_changed", task)
+			}
+		}
+
+		// Kill the task window to clean up both Claude and workdir panes
+		windowTarget := executor.TmuxSessionName(id)
+		osExec.Command("tmux", "kill-window", "-t", windowTarget).Run()
+
+		return taskArchivedMsg{err: err}
 	}
 }
 
