@@ -706,14 +706,15 @@ func (e *Executor) executeTask(ctx context.Context, task *db.Task) {
 	e.hooks.OnStatusChange(task, db.StatusProcessing, startMsg)
 
 	// Setup worktree for isolated execution (symlinks claude config from project)
+	// SECURITY: We must have a valid worktree - never fall back to project directory
+	// to prevent Claude from accidentally writing to the main repo
 	workDir, err := e.setupWorktree(task)
 	if err != nil {
 		e.logger.Error("Failed to setup worktree", "error", err)
-		// Fall back to project directory
-		workDir = e.getProjectDir(task.Project)
-		if workDir == "" {
-			workDir, _ = os.Getwd()
-		}
+		e.logLine(task.ID, "error", fmt.Sprintf("Failed to setup worktree: %v", err))
+		_ = e.db.UpdateTaskStatus(task.ID, db.StatusBlocked)
+		e.hooks.OnStatusChange(task, db.StatusBlocked, "Worktree setup failed - cannot execute task safely")
+		return
 	}
 
 	// Prepare attachments (write to temp files)
@@ -1216,7 +1217,15 @@ func ensureTmuxDaemon() (string, error) {
 
 // createTmuxWindow creates a new tmux window in the daemon session with retry logic.
 // If the session doesn't exist, it will re-create it and retry once.
+// SECURITY: workDir must be within a .task-worktrees directory to prevent Claude from
+// accidentally writing to the main project directory.
 func createTmuxWindow(daemonSession, windowName, workDir, script string) (string, error) {
+	// SECURITY: Validate that workDir is within a .task-worktrees directory
+	// This prevents Claude from running in the main project directory
+	if !isValidWorktreePath(workDir) {
+		return "", fmt.Errorf("security: refusing to create tmux window with workDir outside .task-worktrees: %s", workDir)
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -2577,11 +2586,30 @@ func (e *Executor) setupWorktree(task *db.Task) (string, error) {
 		return "", fmt.Errorf("project directory not found for project: %s", task.Project)
 	}
 
-	// Check if project is a git repo
+	// Check if project is a git repo, initialize one if not
+	// Git is required for worktree isolation - tasks always run in worktrees
+	// NOTE: This should rarely happen now - git repos are initialized during project creation.
+	// If we get here, it's a legacy project created before that change.
 	gitDir := filepath.Join(projectDir, ".git")
 	if _, err := os.Stat(gitDir); os.IsNotExist(err) {
-		// Not a git repo, use project dir directly
-		return projectDir, nil
+		// Initialize git repo so we can create worktrees
+		e.logger.Warn("Project missing git repo - initializing (legacy project?)", "project", task.Project, "path", projectDir)
+		cmd := exec.Command("git", "init")
+		cmd.Dir = projectDir
+		if output, err := cmd.CombinedOutput(); err != nil {
+			return "", fmt.Errorf("failed to initialize git repo: %v\n%s", err, string(output))
+		}
+
+		// Create initial commit so we have a branch to create worktrees from
+		cmd = exec.Command("git", "add", "-A")
+		cmd.Dir = projectDir
+		cmd.Run() // Ignore errors - might be empty repo
+
+		cmd = exec.Command("git", "commit", "--allow-empty", "-m", "Initial commit for taskyou worktree support")
+		cmd.Dir = projectDir
+		if output, err := cmd.CombinedOutput(); err != nil {
+			return "", fmt.Errorf("failed to create initial commit: %v\n%s", err, string(output))
+		}
 	}
 
 	// If task already has a worktree path, reuse it (don't recalculate from title)
@@ -3070,6 +3098,33 @@ func CleanupClaudeSessions(worktreePath string) error {
 	}
 
 	return nil
+}
+
+// isValidWorktreePath validates that a working directory is within a .task-worktrees directory.
+// This prevents Claude from accidentally writing to the main project directory.
+// Returns true if the path is valid for task execution.
+func isValidWorktreePath(workDir string) bool {
+	// Empty path is never valid
+	if workDir == "" {
+		return false
+	}
+
+	// Resolve symlinks and clean the path
+	absPath, err := filepath.Abs(workDir)
+	if err != nil {
+		return false
+	}
+
+	// Evaluate any symlinks in the path
+	resolvedPath, err := filepath.EvalSymlinks(absPath)
+	if err != nil {
+		// Path might not exist yet, use the absolute path
+		resolvedPath = absPath
+	}
+
+	// Check that the path contains .task-worktrees
+	// Valid paths look like: /path/to/project/.task-worktrees/123-task-slug
+	return strings.Contains(resolvedPath, string(filepath.Separator)+".task-worktrees"+string(filepath.Separator))
 }
 
 // slugify converts a string to a URL/branch-friendly slug.

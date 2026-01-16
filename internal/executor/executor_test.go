@@ -772,3 +772,112 @@ func TestCleanupClaudeSessions(t *testing.T) {
 		}
 	})
 }
+
+func TestIsValidWorktreePath(t *testing.T) {
+	tests := []struct {
+		name     string
+		path     string
+		wantValid bool
+	}{
+		{
+			name:     "valid worktree path",
+			path:     "/Users/bruno/Projects/myproject/.task-worktrees/123-task-slug",
+			wantValid: true,
+		},
+		{
+			name:     "valid worktree path with nested dirs",
+			path:     "/Users/bruno/Projects/myproject/.task-worktrees/456-another-task/subdir",
+			wantValid: true,
+		},
+		{
+			name:     "main project directory - not valid",
+			path:     "/Users/bruno/Projects/myproject",
+			wantValid: false,
+		},
+		{
+			name:     "project subdirectory - not valid",
+			path:     "/Users/bruno/Projects/myproject/src",
+			wantValid: false,
+		},
+		{
+			name:     "root directory - not valid",
+			path:     "/",
+			wantValid: false,
+		},
+		{
+			name:     "home directory - not valid",
+			path:     "/Users/bruno",
+			wantValid: false,
+		},
+		{
+			name:     "tmp directory - not valid",
+			path:     "/tmp",
+			wantValid: false,
+		},
+		{
+			name:     ".task-worktrees directory itself - not valid (needs subdirectory)",
+			path:     "/Users/bruno/Projects/myproject/.task-worktrees",
+			wantValid: false,
+		},
+		{
+			name:     "empty path - not valid",
+			path:     "",
+			wantValid: false,
+		},
+		{
+			name:     "relative path with .task-worktrees",
+			path:     "project/.task-worktrees/123-task",
+			wantValid: true,
+		},
+		{
+			name:     "path containing task-worktrees without dot - not valid",
+			path:     "/Users/bruno/Projects/task-worktrees/123-task",
+			wantValid: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := isValidWorktreePath(tt.path)
+			if got != tt.wantValid {
+				t.Errorf("isValidWorktreePath(%q) = %v, want %v", tt.path, got, tt.wantValid)
+			}
+		})
+	}
+}
+
+func TestIsValidWorktreePathWithRealDirectory(t *testing.T) {
+	// Create a real temporary directory structure to test with
+	tmpDir, err := os.MkdirTemp("", "test-worktree-validation-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	// Create the .task-worktrees structure
+	worktreesDir := tmpDir + "/.task-worktrees"
+	taskDir := worktreesDir + "/123-test-task"
+	if err := os.MkdirAll(taskDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("real worktree directory is valid", func(t *testing.T) {
+		if !isValidWorktreePath(taskDir) {
+			t.Errorf("isValidWorktreePath(%q) should return true for real worktree directory", taskDir)
+		}
+	})
+
+	t.Run("real project directory is not valid", func(t *testing.T) {
+		if isValidWorktreePath(tmpDir) {
+			t.Errorf("isValidWorktreePath(%q) should return false for project directory", tmpDir)
+		}
+	})
+
+	t.Run("worktrees parent directory is not valid", func(t *testing.T) {
+		// The .task-worktrees directory itself shouldn't be valid
+		// (we need to be inside a specific task worktree)
+		if isValidWorktreePath(worktreesDir) {
+			t.Errorf("isValidWorktreePath(%q) should return false for worktrees parent directory", worktreesDir)
+		}
+	})
+}
