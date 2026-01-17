@@ -922,12 +922,13 @@ func (m *FormModel) View() string {
 	helpText := "tab accept/navigate • ctrl+space suggest • ←→ select • ctrl+s submit • esc dismiss/cancel"
 	b.WriteString("  " + dimStyle.Render(helpText))
 
-	// Wrap in box
+	// Wrap in box - use full height (subtract 2 for border)
 	box := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(ColorPrimary).
 		Padding(1, 2).
-		Width(m.width - 4)
+		Width(m.width - 4).
+		Height(m.height - 2)
 
 	return box.Render(b.String())
 }
@@ -1096,6 +1097,20 @@ func parseTimeOfDay(s string, date time.Time) *db.LocalTime {
 // SetQueue sets whether to queue the task.
 func (m *FormModel) SetQueue(queue bool) {
 	m.queue = queue
+}
+
+// SetSize updates the form dimensions for window resize handling.
+func (m *FormModel) SetSize(width, height int) {
+	m.width = width
+	m.height = height
+	// Update input widths
+	inputWidth := width - 24
+	m.titleInput.Width = inputWidth
+	m.bodyInput.SetWidth(inputWidth)
+	m.scheduleInput.Width = inputWidth
+	m.attachmentsInput.Width = inputWidth
+	// Recalculate body height based on new dimensions
+	m.updateBodyHeight()
 }
 
 // calculateBodyHeight calculates the appropriate height for the body textarea based on content.
