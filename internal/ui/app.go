@@ -497,6 +497,12 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.commandPaletteView != nil {
 			m.commandPaletteView.SetSize(msg.Width, msg.Height)
 		}
+		if m.newTaskForm != nil {
+			m.newTaskForm.SetSize(msg.Width, msg.Height)
+		}
+		if m.editTaskForm != nil {
+			m.editTaskForm.SetSize(msg.Width, msg.Height)
+		}
 
 	case tasksLoadedMsg:
 		m.loading = false
