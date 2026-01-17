@@ -55,6 +55,13 @@ type DetailModel struct {
 	shellPaneHidden bool
 }
 
+func (m *DetailModel) executorDisplayName() string {
+	if m.executor != nil {
+		return m.executor.DisplayName()
+	}
+	return executor.DefaultExecutorName()
+}
+
 // UpdateTask updates the task and refreshes the view.
 func (m *DetailModel) UpdateTask(t *db.Task) {
 	m.task = t
@@ -106,9 +113,9 @@ func (m *DetailModel) Refresh() {
 
 	// Update Claude pane title with memory info
 	if m.claudePaneID != "" {
-		title := "Claude"
+		title := m.executorDisplayName()
 		if m.claudeMemoryMB > 0 {
-			title = fmt.Sprintf("Claude (%d MB)", m.claudeMemoryMB)
+			title = fmt.Sprintf("%s (%d MB)", title, m.claudeMemoryMB)
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 		exec.CommandContext(ctx, "tmux", "select-pane", "-t", m.claudePaneID, "-T", title).Run()
@@ -385,13 +392,13 @@ func (m *DetailModel) startResumableSession(sessionID string) {
 	}
 	windowTarget := daemonSession + ":" + windowName
 	exec.CommandContext(ctx, "tmux", "split-window",
-		"-h",                  // horizontal split
+		"-h",                    // horizontal split
 		"-t", windowTarget+".0", // split from Claude pane
-		"-c", workDir,         // start in task workdir
-		shell).Run()           // user's shell to prevent immediate exit
+		"-c", workDir, // start in task workdir
+		shell).Run() // user's shell to prevent immediate exit
 
 	// Set pane titles
-	exec.CommandContext(ctx, "tmux", "select-pane", "-t", windowTarget+".0", "-T", "Claude").Run()
+	exec.CommandContext(ctx, "tmux", "select-pane", "-t", windowTarget+".0", "-T", m.executorDisplayName()).Run()
 	exec.CommandContext(ctx, "tmux", "select-pane", "-t", windowTarget+".1", "-T", "Shell").Run()
 }
 
@@ -737,9 +744,9 @@ func (m *DetailModel) joinTmuxPanes() {
 	m.claudePaneID = strings.TrimSpace(string(claudePaneOut))
 
 	// Set Claude pane title with memory info
-	claudeTitle := "Claude"
+	claudeTitle := m.executorDisplayName()
 	if m.claudeMemoryMB > 0 {
-		claudeTitle = fmt.Sprintf("Claude (%d MB)", m.claudeMemoryMB)
+		claudeTitle = fmt.Sprintf("%s (%d MB)", claudeTitle, m.claudeMemoryMB)
 	}
 	exec.CommandContext(ctx, "tmux", "select-pane", "-t", m.claudePaneID, "-T", claudeTitle).Run()
 
@@ -1330,12 +1337,12 @@ func (m *DetailModel) renderHelp() string {
 		}{"!", toggleDesc})
 	}
 
-	// Show Claude resume shortcut only when Claude is not running but has a session
+	// Show executor resume shortcut only when the agent is not running but has a session
 	if m.task != nil && m.task.ClaudeSessionID != "" && m.claudeMemoryMB == 0 {
 		keys = append(keys, struct {
 			key  string
 			desc string
-		}{"R", "resume claude"})
+		}{"R", fmt.Sprintf("resume %s", m.executorDisplayName())})
 	}
 
 	// Show pane navigation shortcut when panes are visible

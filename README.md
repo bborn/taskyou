@@ -1,6 +1,6 @@
 # Task You
 
-A personal task management system with a beautiful terminal UI, SQLite storage, and background task execution via Claude Code.
+A personal task management system with a beautiful terminal UI, SQLite storage, and background task execution via pluggable AI agents (Claude Code or OpenAI Codex CLI).
 
 ## Screenshots
 
@@ -24,7 +24,7 @@ A personal task management system with a beautiful terminal UI, SQLite storage, 
 
 - **Kanban Board** - Visual task management with 4 columns (Backlog, In Progress, Blocked, Done)
 - **Git Worktrees** - Each task runs in an isolated worktree, no conflicts between parallel tasks
-- **Background Executor** - Claude Code processes tasks automatically
+- **Pluggable Executors** - Choose between Claude Code or OpenAI Codex CLI per task
 - **Project Memories** - Persistent context that carries across tasks
 - **Real-time Updates** - Watch tasks execute live
 - **SSH Access** - Connect from anywhere via `ssh -p 2222 server`
@@ -116,13 +116,65 @@ backlog → queued → processing → done
 | `blocked` | Needs input/clarification |
 | `done` | Completed |
 
+## Task Executors
+
+Task You supports multiple AI executors for processing tasks. You can choose the executor when creating or editing a task.
+
+| Executor | CLI | Description |
+|----------|-----|-------------|
+| Claude (default) | `claude` | [Claude Code](https://claude.ai/claude-code) - Anthropic's coding agent with session resumption |
+| Codex | `codex` | [OpenAI Codex CLI](https://github.com/openai/codex) - OpenAI's coding assistant |
+
+Both executors run in tmux windows with the same worktree isolation and environment variables. The main differences:
+
+- **Claude Code** supports session resumption - when you retry a task, Claude continues with full conversation history
+- **Codex** starts fresh on each execution but receives the full prompt with any feedback
+
+### Installing Executors
+
+At least one executor CLI must be installed for tasks to run:
+
+```bash
+# Claude Code (recommended)
+# See https://claude.ai/claude-code for installation
+
+# OpenAI Codex CLI
+npm install -g @openai/codex
+```
+
 ## Configuration
+
+### Settings
+
+Manage settings with `task settings`:
+
+```bash
+task settings                              # View all settings
+task settings set <key> <value>            # Set a value
+```
+
+| Setting | Description |
+|---------|-------------|
+| `anthropic_api_key` | API key for ghost text autocomplete (optional, uses API credits) |
+| `autocomplete_enabled` | Enable/disable autocomplete (`true`/`false`) |
+
+### Ghost Text Autocomplete
+
+When creating or editing tasks, ghost text suggestions appear as you type. This feature uses the Anthropic API directly for fast completions.
+
+**Setup:**
+```bash
+task settings set anthropic_api_key sk-ant-your-key-here
+```
+
+Get an API key at [console.anthropic.com](https://console.anthropic.com/). This is optional and uses your API credits.
 
 ### Environment Variables
 
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `WORKTREE_DB_PATH` | SQLite database path | `~/.local/share/task/tasks.db` |
+| `ANTHROPIC_API_KEY` | Fallback for autocomplete if not set in settings | - |
 
 ### `.taskyou.yml` Configuration
 
@@ -228,7 +280,7 @@ bundle install
 bin/rails db:create db:migrate
 ```
 
-Now Claude can:
+Now the AI executor (Claude or Codex) can:
 - Run your app with `bin/dev`
 - Access it at `http://localhost:$WORKTREE_PORT`
 - Work on multiple tasks in parallel without database or port conflicts

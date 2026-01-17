@@ -2,10 +2,13 @@
 package autocomplete
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
-	"os/exec"
+	"io"
+	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -18,16 +21,6 @@ type Suggestion struct {
 	RequestID int64  // To match responses with requests
 }
 
-// Request represents an autocomplete request.
-type Request struct {
-	ID         int64
-	Input      string // Current user input
-	FieldType  string // "title" or "body"
-	Project    string // Project context
-	Context    string // Additional context (e.g., title when completing body)
-	CancelFunc context.CancelFunc
-}
-
 // cacheEntry represents a cached autocomplete suggestion.
 type cacheEntry struct {
 	suggestion string
@@ -37,10 +30,9 @@ type cacheEntry struct {
 // Service handles autocomplete requests with debouncing and cancellation.
 type Service struct {
 	mu            sync.Mutex
-	currentReq    *Request
 	nextRequestID int64
-	debounceDelay time.Duration
-	timeout       time.Duration
+	apiKey        string
+	httpClient    *http.Client
 
 	// LRU cache for suggestions (key: "fieldType:project:input")
 	cache      map[string]*cacheEntry
@@ -48,60 +40,44 @@ type Service struct {
 	cacheMu    sync.RWMutex
 	cacheSize  int
 	cacheTTL   time.Duration
-
-	// Warmup state
-	warmedUp bool
 }
 
 // NewService creates a new autocomplete service.
-func NewService() *Service {
-	return &Service{
-		debounceDelay: 100 * time.Millisecond, // Fast debounce for responsiveness
-		timeout:       2 * time.Second,        // Quick timeout - haiku is fast
-		cache:         make(map[string]*cacheEntry),
-		cacheSize:     100,             // Keep last 100 suggestions
-		cacheTTL:      5 * time.Minute, // Cache entries valid for 5 minutes
+// apiKey can be empty - it will check ANTHROPIC_API_KEY env var.
+func NewService(apiKey string) *Service {
+	if apiKey == "" {
+		apiKey = os.Getenv("ANTHROPIC_API_KEY")
 	}
+
+	s := &Service{
+		apiKey: apiKey,
+		httpClient: &http.Client{
+			Timeout: 30 * time.Second, // Overall HTTP timeout
+		},
+		cache:     make(map[string]*cacheEntry),
+		cacheSize: 100,             // Keep last 100 suggestions
+		cacheTTL:  5 * time.Minute, // Cache entries valid for 5 minutes
+	}
+
+	if apiKey != "" {
+		s.log("Service initialized with API key: %s...%s", apiKey[:7], apiKey[len(apiKey)-4:])
+	} else {
+		s.log("Service initialized WITHOUT API key")
+	}
+
+	return s
 }
 
-// Warmup pre-warms the Claude CLI by running a quick request in the background.
-// This helps reduce latency for the first real autocomplete request.
-func (s *Service) Warmup() {
-	s.mu.Lock()
-	if s.warmedUp {
-		s.mu.Unlock()
-		return
-	}
-	s.warmedUp = true
-	s.mu.Unlock()
-
-	// Run warmup in background - don't block
-	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-		defer cancel()
-
-		// Simple warmup prompt - just get Claude CLI loaded and ready
-		args := []string{
-			"-p",
-			"--model", "haiku",
-			"--output-format", "json",
-			"hi",
-		}
-		cmd := exec.CommandContext(ctx, "claude", args...)
-		cmd.Dir = "/tmp"
-		_ = cmd.Run() // Ignore result - just warming up
-	}()
+// IsAvailable returns true if the autocomplete service has an API key configured.
+func (s *Service) IsAvailable() bool {
+	return s.apiKey != ""
 }
 
-// Cancel cancels any pending autocomplete request.
-func (s *Service) Cancel() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.currentReq != nil && s.currentReq.CancelFunc != nil {
-		s.currentReq.CancelFunc()
-		s.currentReq = nil
-	}
-}
+// Warmup is a no-op for direct API calls (no CLI to warm up).
+func (s *Service) Warmup() {}
+
+// Cancel is a no-op - cancellation is handled via context.
+func (s *Service) Cancel() {}
 
 // getFromCache retrieves a cached suggestion if available and not expired.
 func (s *Service) getFromCache(key string) string {
@@ -161,48 +137,44 @@ func (s *Service) addToCache(key, suggestion string) {
 // GetSuggestion gets an autocomplete suggestion for the given input.
 // This is a blocking call that should be run in a goroutine.
 // Returns nil if cancelled, timed out, or no good suggestion.
-func (s *Service) GetSuggestion(ctx context.Context, input, fieldType, project, extraContext string) *Suggestion {
-	// Don't suggest for very short inputs
-	minLen := 3
-	if fieldType == "title" {
-		minLen = 2
-	}
-	if len(strings.TrimSpace(input)) < minLen {
+// The context should be cancelled if the user continues typing.
+// recentTasks provides context about recent task titles for better suggestions.
+func (s *Service) GetSuggestion(ctx context.Context, input, fieldType, project, extraContext string, recentTasks []string) *Suggestion {
+	s.log("GetSuggestion called: field=%s input=%q", fieldType, input)
+
+	if s.apiKey == "" {
+		s.log("No API key, returning nil")
 		return nil
 	}
 
+	// Don't suggest for very short inputs (except body_suggest which uses title as context)
+	if fieldType != "body_suggest" {
+		minLen := 3
+		if fieldType == "title" {
+			minLen = 2
+		}
+		if len(strings.TrimSpace(input)) < minLen {
+			s.log("Input too short (%d < %d), returning nil", len(strings.TrimSpace(input)), minLen)
+			return nil
+		}
+	}
+
 	// Check cache first - instant response for repeated inputs
-	cacheKey := fmt.Sprintf("%s:%s:%s", fieldType, project, input)
+	// Include extraContext in cache key for body_suggest (title-based suggestions)
+	cacheKey := fmt.Sprintf("%s:%s:%s:%s", fieldType, project, input, extraContext)
 	if cached := s.getFromCache(cacheKey); cached != "" {
-		return s.processSuggestion(cached, input, 0)
+		return s.processSuggestion(cached, input, fieldType, 0)
 	}
 
-	// Create cancellable context with timeout
-	ctx, cancel := context.WithTimeout(ctx, s.timeout)
-	defer cancel()
-
-	// Register this request
+	// Track request ID
 	s.mu.Lock()
-	// Cancel any existing request
-	if s.currentReq != nil && s.currentReq.CancelFunc != nil {
-		s.currentReq.CancelFunc()
-	}
 	s.nextRequestID++
 	reqID := s.nextRequestID
-	s.currentReq = &Request{
-		ID:         reqID,
-		Input:      input,
-		FieldType:  fieldType,
-		Project:    project,
-		CancelFunc: cancel,
-	}
 	s.mu.Unlock()
 
-	// Build prompt based on field type
-	prompt := buildPrompt(input, fieldType, project, extraContext)
-
-	// Call Claude CLI with Haiku for speed
-	suggestion, err := callClaude(ctx, prompt)
+	// Build prompt and call API
+	prompt := buildPrompt(input, fieldType, project, extraContext, recentTasks)
+	suggestion, err := s.callAPI(ctx, prompt)
 	if err != nil {
 		return nil
 	}
@@ -210,11 +182,11 @@ func (s *Service) GetSuggestion(ctx context.Context, input, fieldType, project, 
 	// Cache the result for future use
 	s.addToCache(cacheKey, suggestion)
 
-	return s.processSuggestion(suggestion, input, reqID)
+	return s.processSuggestion(suggestion, input, fieldType, reqID)
 }
 
 // processSuggestion validates and transforms a raw suggestion into a Suggestion struct.
-func (s *Service) processSuggestion(suggestion, input string, reqID int64) *Suggestion {
+func (s *Service) processSuggestion(suggestion, input, fieldType string, reqID int64) *Suggestion {
 	// Validate the suggestion
 	suggestion = strings.TrimSpace(suggestion)
 	if suggestion == "" {
@@ -224,12 +196,22 @@ func (s *Service) processSuggestion(suggestion, input string, reqID int64) *Sugg
 	// Remove any quotes the LLM might have added
 	suggestion = strings.Trim(suggestion, "\"'")
 
+	// For body field, the suggestion IS the continuation (not full text)
+	if fieldType == "body" || fieldType == "body_suggest" {
+		// The API returns only what comes next, use it directly as suffix
+		return &Suggestion{
+			Text:      suggestion,
+			FullText:  input + suggestion,
+			RequestID: reqID,
+		}
+	}
+
+	// For title field: LLM returns full completion, extract the suffix
 	// Check if suggestion equals input (no completion)
 	if strings.EqualFold(suggestion, input) {
 		return nil
 	}
 
-	// The LLM should return the full completion, extract the suffix
 	// Handle case-insensitive prefix matching
 	if !strings.HasPrefix(strings.ToLower(suggestion), strings.ToLower(input)) {
 		// If it doesn't start with our input, it's not a valid continuation
@@ -252,74 +234,130 @@ func (s *Service) processSuggestion(suggestion, input string, reqID int64) *Sugg
 	}
 }
 
-func buildPrompt(input, fieldType, project, extraContext string) string {
+func buildPrompt(input, fieldType, project, extraContext string, recentTasks []string) string {
 	var sb strings.Builder
 
-	// Very focused prompt for quick completions - designed to get a single short completion
 	if fieldType == "title" {
-		sb.WriteString("You are an autocomplete assistant. Complete this partial task title with a natural ending.\n")
-		sb.WriteString("Rules: Output ONLY the completed title. No explanations. No questions. Just the title.\n\n")
+		sb.WriteString("You are an autocomplete system. Complete the partial task title with a natural ending. Output ONLY the completed title text, no explanations.\n")
 		if project != "" && project != "personal" {
-			sb.WriteString(fmt.Sprintf("Project context: %s\n", project))
+			sb.WriteString(fmt.Sprintf("Project: %s\n", project))
 		}
-		sb.WriteString(fmt.Sprintf("Partial title: \"%s\"\n", input))
-		sb.WriteString("Completed title:")
+		if len(recentTasks) > 0 {
+			sb.WriteString("Recent tasks for style:\n")
+			for _, t := range recentTasks {
+				sb.WriteString(fmt.Sprintf("- %s\n", t))
+			}
+		}
+		sb.WriteString(fmt.Sprintf("Partial title: %s", input))
+	} else if fieldType == "body_suggest" {
+		// Suggest a description based on the task title (extraContext contains the title)
+		sb.WriteString("You are an autocomplete system. Suggest a brief 1-sentence task description. Output ONLY the description text, no explanations.\n")
+		sb.WriteString(fmt.Sprintf("Task title: %s\nDescription:", extraContext))
 	} else {
-		sb.WriteString("You are an autocomplete assistant. Complete this partial task description with a natural ending.\n")
-		sb.WriteString("Rules: Output ONLY the completed description. No explanations. No questions. Keep it brief.\n\n")
+		sb.WriteString("You are an autocomplete system. Continue this text briefly (1 sentence max). Output ONLY the continuation text, no explanations.\n")
 		if extraContext != "" {
-			sb.WriteString(fmt.Sprintf("Task title: %s\n", extraContext))
+			sb.WriteString(fmt.Sprintf("Task: %s\n", extraContext))
 		}
-		sb.WriteString(fmt.Sprintf("Partial description: \"%s\"\n", input))
-		sb.WriteString("Completed description:")
+		sb.WriteString(fmt.Sprintf("Text so far: %s\nContinuation:", input))
 	}
 
 	return sb.String()
 }
 
-func callClaude(ctx context.Context, prompt string) (string, error) {
-	// Use haiku for speed, run from /tmp to avoid project context loading
-	args := []string{
-		"-p",
-		"--model", "haiku",
-		"--output-format", "json",
-		prompt,
-	}
+// Anthropic API types
+type anthropicRequest struct {
+	Model     string    `json:"model"`
+	MaxTokens int       `json:"max_tokens"`
+	Messages  []message `json:"messages"`
+}
 
-	cmd := exec.CommandContext(ctx, "claude", args...)
-	cmd.Dir = "/tmp" // Run from neutral directory to avoid loading project context
-	output, err := cmd.Output()
+type message struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
+}
+
+type anthropicResponse struct {
+	Content []contentBlock `json:"content"`
+	Error   *apiError      `json:"error,omitempty"`
+}
+
+type contentBlock struct {
+	Type string `json:"type"`
+	Text string `json:"text"`
+}
+
+type apiError struct {
+	Message string `json:"message"`
+}
+
+func (s *Service) log(format string, args ...interface{}) {
+	f, err := os.OpenFile("/tmp/autocomplete.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
-		return "", fmt.Errorf("claude execution: %w", err)
+		return
+	}
+	defer f.Close()
+	msg := fmt.Sprintf(format, args...)
+	fmt.Fprintf(f, "[%s] %s\n", time.Now().Format("15:04:05"), msg)
+}
+
+func (s *Service) callAPI(ctx context.Context, prompt string) (string, error) {
+	s.log("REQUEST: %s", prompt[:min(80, len(prompt))])
+
+	reqBody := anthropicRequest{
+		Model:     "claude-haiku-4-5-20251001",
+		MaxTokens: 50,
+		Messages: []message{
+			{Role: "user", Content: prompt},
+		},
 	}
 
-	// Parse JSON response - Claude CLI returns {"result": "...", "is_error": bool, ...}
-	var response struct {
-		Result  string `json:"result"`
-		IsError bool   `json:"is_error"`
-	}
-	if err := json.Unmarshal(output, &response); err != nil {
-		// Try to extract text directly if not JSON
-		return strings.TrimSpace(string(output)), nil
+	jsonBody, err := json.Marshal(reqBody)
+	if err != nil {
+		s.log("ERROR marshal: %v", err)
+		return "", err
 	}
 
-	if response.IsError {
-		return "", fmt.Errorf("claude returned error")
+	req, err := http.NewRequestWithContext(ctx, "POST", "https://api.anthropic.com/v1/messages", bytes.NewReader(jsonBody))
+	if err != nil {
+		s.log("ERROR request: %v", err)
+		return "", err
 	}
 
-	// Clean up the result - remove any extra explanation
-	result := strings.TrimSpace(response.Result)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-api-key", s.apiKey)
+	req.Header.Set("anthropic-version", "2023-06-01")
 
-	// If the response contains multiple lines, take just the first meaningful one
-	// (in case the model adds explanations)
-	lines := strings.Split(result, "\n")
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if line != "" && !strings.HasPrefix(strings.ToLower(line), "here") &&
-			!strings.HasPrefix(strings.ToLower(line), "the completed") {
-			return line, nil
-		}
+	start := time.Now()
+	resp, err := s.httpClient.Do(req)
+	if err != nil {
+		s.log("ERROR http: %v", err)
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		s.log("ERROR status: %d body: %s", resp.StatusCode, string(body))
+		return "", fmt.Errorf("API error: %d", resp.StatusCode)
 	}
 
+	var apiResp anthropicResponse
+	if err := json.NewDecoder(resp.Body).Decode(&apiResp); err != nil {
+		s.log("ERROR decode: %v", err)
+		return "", err
+	}
+
+	if apiResp.Error != nil {
+		s.log("ERROR api: %s", apiResp.Error.Message)
+		return "", fmt.Errorf("API error: %s", apiResp.Error.Message)
+	}
+
+	if len(apiResp.Content) == 0 {
+		s.log("ERROR empty response")
+		return "", fmt.Errorf("empty response")
+	}
+
+	result := apiResp.Content[0].Text
+	s.log("RESPONSE (%dms): %s", time.Since(start).Milliseconds(), result[:min(80, len(result))])
 	return result, nil
 }

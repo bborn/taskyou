@@ -2,6 +2,7 @@ package ui
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/bborn/workflow/internal/db"
@@ -112,9 +113,15 @@ func (m *CommandPaletteModel) Update(msg tea.Msg) (*CommandPaletteModel, tea.Cmd
 	return m, nil
 }
 
-// filterTasks filters tasks based on the search query.
-// When a query is provided, it searches the database directly to find all matching tasks,
-// not just the preloaded ones. This allows finding older/done tasks that aren't in the main list.
+// scoredTask holds a task with its fuzzy match score for sorting
+type scoredTask struct {
+	task  *db.Task
+	score int
+}
+
+// filterTasks filters tasks based on the search query using fuzzy matching.
+// Results are sorted by match score, with best matches first.
+// When a query is provided, it also searches the database to find older/done tasks.
 func (m *CommandPaletteModel) filterTasks() {
 	query := strings.TrimSpace(m.searchInput.Value())
 
@@ -122,26 +129,45 @@ func (m *CommandPaletteModel) filterTasks() {
 		m.filteredTasks = m.allTasks
 	} else {
 		queryLower := strings.ToLower(query)
-		useLocalFilter := true
 
-		// Search database directly to find all matching tasks (including older/done ones)
-		// Fall back to local filtering if db is nil or on error
+		// Collect all candidate tasks from local and database
+		candidateTasks := make(map[int64]*db.Task)
+		for _, task := range m.allTasks {
+			candidateTasks[task.ID] = task
+		}
+
+		// Also search database for older/done tasks not in allTasks
 		if m.db != nil {
-			searchResults, err := m.db.SearchTasks(query, 50)
+			// Use a broader search to catch potential fuzzy matches
+			// We'll filter and score them locally
+			searchResults, err := m.db.SearchTasks(query, 100)
 			if err == nil {
-				m.filteredTasks = searchResults
-				useLocalFilter = false
+				for _, task := range searchResults {
+					if _, exists := candidateTasks[task.ID]; !exists {
+						candidateTasks[task.ID] = task
+					}
+				}
 			}
 		}
 
-		// Fallback to local filtering
-		if useLocalFilter {
-			m.filteredTasks = nil
-			for _, task := range m.allTasks {
-				if m.matchesQuery(task, queryLower) {
-					m.filteredTasks = append(m.filteredTasks, task)
-				}
+		// Score all tasks using fuzzy matching
+		var scored []scoredTask
+		for _, task := range candidateTasks {
+			score := m.scoreTask(task, queryLower)
+			if score >= 0 {
+				scored = append(scored, scoredTask{task: task, score: score})
 			}
+		}
+
+		// Sort by score descending (best matches first)
+		sort.Slice(scored, func(i, j int) bool {
+			return scored[i].score > scored[j].score
+		})
+
+		// Extract sorted tasks
+		m.filteredTasks = make([]*db.Task, len(scored))
+		for i, st := range scored {
+			m.filteredTasks[i] = st.task
 		}
 	}
 
@@ -149,6 +175,66 @@ func (m *CommandPaletteModel) filterTasks() {
 	if m.selectedIndex >= len(m.filteredTasks) {
 		m.selectedIndex = max(0, len(m.filteredTasks)-1)
 	}
+}
+
+// scoreTask calculates a fuzzy match score for a task against the query.
+// Returns -1 if the task doesn't match, otherwise returns a positive score.
+// Higher scores indicate better matches.
+func (m *CommandPaletteModel) scoreTask(task *db.Task, query string) int {
+	bestScore := -1
+
+	// Check task ID (exact or prefix match gets high priority)
+	idStr := fmt.Sprintf("%d", task.ID)
+	if strings.HasPrefix(query, "#") {
+		idQuery := strings.TrimPrefix(query, "#")
+		if strings.Contains(idStr, idQuery) {
+			return 1000 // ID matches are highest priority
+		}
+	} else if strings.Contains(idStr, query) {
+		return 1000 // ID matches are highest priority
+	}
+
+	// Check PR number (high priority for specific lookups)
+	if task.PRNumber > 0 {
+		prNumStr := fmt.Sprintf("%d", task.PRNumber)
+		prQuery := query
+		if strings.HasPrefix(query, "#") {
+			prQuery = strings.TrimPrefix(query, "#")
+		}
+		if strings.Contains(prNumStr, prQuery) {
+			return 900 // PR number matches are high priority
+		}
+	}
+
+	// Check PR URL
+	if task.PRURL != "" {
+		if strings.Contains(strings.ToLower(task.PRURL), query) {
+			return 800 // PR URL matches
+		}
+	}
+
+	// Fuzzy match on title (primary search field)
+	titleScore := fuzzyScore(task.Title, query)
+	if titleScore > bestScore {
+		bestScore = titleScore
+	}
+
+	// Also check project name with fuzzy matching
+	projectScore := fuzzyScore(task.Project, query)
+	if projectScore > bestScore {
+		// Project matches get a slight penalty vs title matches
+		bestScore = projectScore - 50
+	}
+
+	// Check status as substring match
+	if strings.Contains(strings.ToLower(task.Status), query) {
+		statusScore := 100
+		if statusScore > bestScore {
+			bestScore = statusScore
+		}
+	}
+
+	return bestScore
 }
 
 // matchesQuery checks if a task matches the search query.
@@ -217,6 +303,146 @@ func fuzzyMatch(str, pattern string) bool {
 		}
 	}
 	return patternIdx == len(pattern)
+}
+
+// fuzzyScore calculates a score for how well a pattern matches a string.
+// Higher scores mean better matches. Returns -1 if pattern doesn't match.
+// This implements VS Code-style fuzzy matching that favors:
+// - Matches at word boundaries (start of words)
+// - Consecutive character matches
+// - Matches earlier in the string
+// - Case-matching characters
+func fuzzyScore(str, pattern string) int {
+	if len(pattern) == 0 {
+		return 0
+	}
+	if len(str) == 0 {
+		return -1
+	}
+
+	strLower := strings.ToLower(str)
+	patternLower := strings.ToLower(pattern)
+
+	// First check if all pattern characters exist in order
+	patternIdx := 0
+	for i := 0; i < len(strLower) && patternIdx < len(patternLower); i++ {
+		if strLower[i] == patternLower[patternIdx] {
+			patternIdx++
+		}
+	}
+	if patternIdx != len(patternLower) {
+		return -1 // Pattern doesn't match
+	}
+
+	// Calculate score using dynamic programming to find the best match
+	// We try to maximize the score by choosing optimal match positions
+	return calculateBestScore(str, strLower, pattern, patternLower)
+}
+
+// calculateBestScore finds the best scoring match using a greedy algorithm
+// that prefers word boundary matches and consecutive sequences
+func calculateBestScore(str, strLower, pattern, patternLower string) int {
+	const (
+		bonusWordStart     = 50  // Match at start of a word
+		bonusConsecutive   = 40  // Consecutive character match
+		bonusFirstChar     = 25  // Match at first character of string
+		bonusCamelCase     = 45  // Match at camelCase boundary
+		bonusCaseMatch     = 5   // Exact case match
+		penaltyUnmatched   = -3  // Each unmatched character before a match
+		penaltyLeading     = -5  // Leading characters before first match (per char, max 3)
+		maxLeadingPenalty  = -15 // Maximum leading penalty
+	)
+
+	score := 100 // Base score for matching
+	patternIdx := 0
+	prevMatchIdx := -1
+	firstMatchIdx := -1
+
+	for i := 0; i < len(strLower) && patternIdx < len(patternLower); i++ {
+		if strLower[i] == patternLower[patternIdx] {
+			// Found a match
+			if firstMatchIdx == -1 {
+				firstMatchIdx = i
+			}
+
+			// Bonus for matching at word start
+			if isWordStart(str, i) {
+				score += bonusWordStart
+			}
+
+			// Bonus for consecutive matches
+			if prevMatchIdx >= 0 && i == prevMatchIdx+1 {
+				score += bonusConsecutive
+			}
+
+			// Bonus for first character match
+			if i == 0 {
+				score += bonusFirstChar
+			}
+
+			// Bonus for camelCase boundary match
+			if i > 0 && isCamelCaseBoundary(str, i) {
+				score += bonusCamelCase
+			}
+
+			// Bonus for exact case match
+			if str[i] == pattern[patternIdx] {
+				score += bonusCaseMatch
+			}
+
+			// Penalty for gap between matches
+			if prevMatchIdx >= 0 && i > prevMatchIdx+1 {
+				gap := i - prevMatchIdx - 1
+				score += gap * penaltyUnmatched
+			}
+
+			prevMatchIdx = i
+			patternIdx++
+		}
+	}
+
+	// Penalty for leading unmatched characters (capped)
+	if firstMatchIdx > 0 {
+		leadingPenalty := firstMatchIdx * penaltyLeading
+		if leadingPenalty < maxLeadingPenalty {
+			leadingPenalty = maxLeadingPenalty
+		}
+		score += leadingPenalty
+	}
+
+	return score
+}
+
+// isWordStart returns true if position i is at the start of a word
+func isWordStart(str string, i int) bool {
+	if i == 0 {
+		return true
+	}
+	prev := str[i-1]
+	curr := str[i]
+	// Word start: after space, underscore, hyphen, or non-alpha followed by alpha
+	if prev == ' ' || prev == '_' || prev == '-' || prev == '/' || prev == '.' {
+		return true
+	}
+	// Start after a digit
+	if prev >= '0' && prev <= '9' && (curr >= 'a' && curr <= 'z' || curr >= 'A' && curr <= 'Z') {
+		return true
+	}
+	return false
+}
+
+// isCamelCaseBoundary returns true if position i is at a camelCase boundary
+func isCamelCaseBoundary(str string, i int) bool {
+	if i == 0 || i >= len(str) {
+		return false
+	}
+	prev := str[i-1]
+	curr := str[i]
+	// Transition from lowercase to uppercase (camelCase)
+	if prev >= 'a' && prev <= 'z' && curr >= 'A' && curr <= 'Z' {
+		return true
+	}
+	return false
 }
 
 // View renders the command palette.

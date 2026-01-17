@@ -15,6 +15,7 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unicode"
 
 	"github.com/bborn/workflow/internal/config"
 	"github.com/bborn/workflow/internal/db"
@@ -60,6 +61,9 @@ type Executor struct {
 
 	// Silent mode suppresses log output (for TUI embedding)
 	silent bool
+
+	executorSlug string
+	executorName string
 }
 
 // SuspendIdleTimeout is how long a blocked task must be idle before being suspended.
@@ -69,8 +73,56 @@ const SuspendIdleTimeout = 5 * time.Minute
 // This gives users time to review output or retry the task before the process is cleaned up.
 const DoneTaskCleanupTimeout = 30 * time.Minute
 
+const (
+	defaultExecutorSlug = "claude"
+	defaultExecutorName = "Claude"
+)
+
+var executorEnvKeys = []string{"TASK_EXECUTOR", "WORKFLOW_EXECUTOR", "TASKYOU_EXECUTOR", "WORKTREE_EXECUTOR"}
+
+// detectExecutorIdentity determines the current executor based on environment variables.
+// It falls back to the default Claude executor when no overrides are provided.
+func detectExecutorIdentity() (slug, display string) {
+	for _, key := range executorEnvKeys {
+		if value := strings.TrimSpace(os.Getenv(key)); value != "" {
+			slug = strings.ToLower(value)
+			return slug, formatExecutorDisplayName(slug, value)
+		}
+	}
+	return defaultExecutorSlug, defaultExecutorName
+}
+
+func formatExecutorDisplayName(slug, raw string) string {
+	switch slug {
+	case "codex":
+		return "Codex"
+	case "claude":
+		return defaultExecutorName
+	}
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return defaultExecutorName
+	}
+	lower := strings.ToLower(trimmed)
+	if trimmed == lower {
+		runes := []rune(lower)
+		if len(runes) == 0 {
+			return defaultExecutorName
+		}
+		runes[0] = unicode.ToUpper(runes[0])
+		return string(runes)
+	}
+	return trimmed
+}
+
+// DefaultExecutorName returns the fallback executor display name.
+func DefaultExecutorName() string {
+	return defaultExecutorName
+}
+
 // New creates a new executor.
 func New(database *db.DB, cfg *config.Config) *Executor {
+	slug, display := detectExecutorIdentity()
 	e := &Executor{
 		db:              database,
 		config:          cfg,
@@ -85,6 +137,8 @@ func New(database *db.DB, cfg *config.Config) *Executor {
 		cancelFuncs:     make(map[int64]context.CancelFunc),
 		suspendedTasks:  make(map[int64]time.Time),
 		silent:          true,
+		executorSlug:    slug,
+		executorName:    display,
 	}
 
 	// Register available executors
@@ -96,6 +150,7 @@ func New(database *db.DB, cfg *config.Config) *Executor {
 
 // NewWithLogging creates an executor that logs to stderr (for daemon mode).
 func NewWithLogging(database *db.DB, cfg *config.Config, w io.Writer) *Executor {
+	slug, display := detectExecutorIdentity()
 	e := &Executor{
 		db:              database,
 		config:          cfg,
@@ -110,6 +165,8 @@ func NewWithLogging(database *db.DB, cfg *config.Config, w io.Writer) *Executor 
 		cancelFuncs:     make(map[int64]context.CancelFunc),
 		suspendedTasks:  make(map[int64]time.Time),
 		silent:          false,
+		executorSlug:    slug,
+		executorName:    display,
 	}
 
 	// Register available executors
@@ -117,6 +174,22 @@ func NewWithLogging(database *db.DB, cfg *config.Config, w io.Writer) *Executor 
 	e.executorFactory.Register(NewCodexExecutor(e))
 
 	return e
+}
+
+// DisplayName returns the configured executor display name.
+func (e *Executor) DisplayName() string {
+	if e == nil || e.executorName == "" {
+		return defaultExecutorName
+	}
+	return e.executorName
+}
+
+// ExecutorSlug returns the normalized identifier for the executor (e.g., "codex").
+func (e *Executor) ExecutorSlug() string {
+	if e == nil || e.executorSlug == "" {
+		return defaultExecutorSlug
+	}
+	return e.executorSlug
 }
 
 // Start begins the background worker.
@@ -2253,10 +2326,10 @@ func (e *Executor) ensureShellPane(windowTarget, workDir string, taskID int64, p
 		shell = "/bin/zsh"
 	}
 	splitCmd := exec.CommandContext(ctx, "tmux", "split-window",
-		"-h",           // horizontal split (side by side)
-		"-t", windowTarget+".0",  // split from Claude pane
-		"-c", workDir,  // start in task workdir
-		shell,          // user's shell to prevent immediate exit
+		"-h",                    // horizontal split (side by side)
+		"-t", windowTarget+".0", // split from Claude pane
+		"-c", workDir, // start in task workdir
+		shell, // user's shell to prevent immediate exit
 	)
 	splitOut, splitErr := splitCmd.CombinedOutput()
 	if splitErr != nil {
@@ -2303,7 +2376,6 @@ func (e *Executor) configureTmuxWindow(windowTarget string) {
 	exec.CommandContext(ctx, "tmux", "set-option", "-t", daemonSession, "status-right", " Ctrl+C kills Claude ").Run()
 	exec.CommandContext(ctx, "tmux", "set-option", "-t", daemonSession, "status-right-length", "30").Run()
 }
-
 
 func (e *Executor) logLine(taskID int64, lineType, content string) {
 	// Store in database
