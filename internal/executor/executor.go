@@ -3205,6 +3205,12 @@ func (e *Executor) CleanupWorktree(task *db.Task) error {
 		cmd.Run() // Ignore errors - branch might have been merged/deleted
 	}
 
+	// Remove project entry from ~/.claude.json
+	if err := RemoveClaudeProjectConfig(task.WorktreePath); err != nil {
+		// Log warning but don't fail - this is cleanup
+		fmt.Fprintf(os.Stderr, "Warning: could not remove Claude project config: %v\n", err)
+	}
+
 	// Clear worktree info from task
 	task.WorktreePath = ""
 	task.BranchName = ""
@@ -3244,6 +3250,130 @@ func CleanupClaudeSessions(worktreePath string) error {
 	}
 
 	return nil
+}
+
+// RemoveClaudeProjectConfig removes a project entry from ~/.claude.json.
+// This should be called when deleting a worktree to clean up stale config entries.
+func RemoveClaudeProjectConfig(projectPath string) error {
+	if projectPath == "" {
+		return nil
+	}
+
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("get home dir: %w", err)
+	}
+
+	claudeConfigPath := filepath.Join(home, ".claude.json")
+
+	// Read existing config
+	data, err := os.ReadFile(claudeConfigPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil // No config file, nothing to remove
+		}
+		return fmt.Errorf("read claude config: %w", err)
+	}
+
+	// Parse as generic JSON to preserve all fields
+	var config map[string]interface{}
+	if err := json.Unmarshal(data, &config); err != nil {
+		return fmt.Errorf("parse claude config: %w", err)
+	}
+
+	// Get projects map
+	projectsRaw, ok := config["projects"]
+	if !ok {
+		return nil // No projects configured
+	}
+	projects, ok := projectsRaw.(map[string]interface{})
+	if !ok {
+		return nil // Invalid projects format
+	}
+
+	// Check if project exists
+	if _, exists := projects[projectPath]; !exists {
+		return nil // Project not in config
+	}
+
+	// Remove the project entry
+	delete(projects, projectPath)
+	config["projects"] = projects
+
+	// Write back config
+	newData, err := json.MarshalIndent(config, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal claude config: %w", err)
+	}
+
+	if err := os.WriteFile(claudeConfigPath, newData, 0644); err != nil {
+		return fmt.Errorf("write claude config: %w", err)
+	}
+
+	return nil
+}
+
+// PurgeStaleClaudeProjectConfigs removes entries from ~/.claude.json for paths that no longer exist.
+// Returns the number of entries removed and any error encountered.
+func PurgeStaleClaudeProjectConfigs() (int, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return 0, fmt.Errorf("get home dir: %w", err)
+	}
+
+	claudeConfigPath := filepath.Join(home, ".claude.json")
+
+	// Read existing config
+	data, err := os.ReadFile(claudeConfigPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, nil // No config file
+		}
+		return 0, fmt.Errorf("read claude config: %w", err)
+	}
+
+	// Parse as generic JSON to preserve all fields
+	var config map[string]interface{}
+	if err := json.Unmarshal(data, &config); err != nil {
+		return 0, fmt.Errorf("parse claude config: %w", err)
+	}
+
+	// Get projects map
+	projectsRaw, ok := config["projects"]
+	if !ok {
+		return 0, nil // No projects configured
+	}
+	projects, ok := projectsRaw.(map[string]interface{})
+	if !ok {
+		return 0, nil // Invalid projects format
+	}
+
+	// Find and remove stale entries
+	removed := 0
+	for path := range projects {
+		// Check if path exists
+		if _, err := os.Stat(path); os.IsNotExist(err) {
+			delete(projects, path)
+			removed++
+		}
+	}
+
+	if removed == 0 {
+		return 0, nil // Nothing to remove
+	}
+
+	// Write back config
+	config["projects"] = projects
+	newData, err := json.MarshalIndent(config, "", "  ")
+	if err != nil {
+		return 0, fmt.Errorf("marshal claude config: %w", err)
+	}
+
+	if err := os.WriteFile(claudeConfigPath, newData, 0644); err != nil {
+		return 0, fmt.Errorf("write claude config: %w", err)
+	}
+
+	return removed, nil
 }
 
 // isValidWorktreePath validates that a working directory is within a .task-worktrees directory.
