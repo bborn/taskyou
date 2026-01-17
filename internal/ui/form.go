@@ -12,6 +12,7 @@ import (
 
 	"github.com/bborn/workflow/internal/autocomplete"
 	"github.com/bborn/workflow/internal/db"
+	"github.com/charmbracelet/bubbles/cursor"
 	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
@@ -71,17 +72,16 @@ type FormModel struct {
 	prNumber int    // GitHub PR number if pasted
 
 	// Ghost text autocompletion (LLM-powered)
-	ghostText           string                  // The suggested completion text (suffix only)
-	ghostFullText       string                  // The full text that would result from accepting
-	lastTitleValue      string                  // Track title changes for suggestion refresh
-	lastBodyValue       string                  // Track body changes for suggestion refresh
-	autocompleteCtx     context.Context         // Context for cancelling autocomplete requests
-	autocompleteCancel  context.CancelFunc      // Cancel function for current request
-	autocompleteSvc     *autocomplete.Service   // Autocomplete service
-	debounceID          int                     // ID to track debounce requests
-	pendingDebounce     bool                    // Whether we're waiting on a debounce timer
-	loadingAutocomplete bool                    // Whether we're waiting for LLM response
-	autocompleteEnabled bool                    // Whether autocomplete is enabled (from settings)
+	ghostText           string                // The suggested completion text (suffix only)
+	ghostFullText       string                // The full text that would result from accepting
+	lastTitleValue      string                // Track title changes for suggestion refresh
+	lastBodyValue       string                // Track body changes for suggestion refresh
+	autocompleteSvc     *autocomplete.Service // Autocomplete service
+	autocompleteCancel  context.CancelFunc    // Cancel function for current request
+	debounceID          int                   // ID to track debounce requests
+	pendingDebounce     bool                  // Whether we're waiting on a debounce timer
+	loadingAutocomplete bool                  // Whether we're waiting for LLM response
+	autocompleteEnabled bool                  // Whether autocomplete is enabled (from settings)
 }
 
 // Autocomplete message types for async LLM suggestions
@@ -96,30 +96,31 @@ type autocompleteTickMsg struct {
 type autocompleteSuggestionMsg struct {
 	suggestion *autocomplete.Suggestion
 	fieldType  string
+	debounceID int // To verify response is still relevant
 }
 
 // NewEditFormModel creates a form model pre-populated with an existing task's data for editing.
 func NewEditFormModel(database *db.DB, task *db.Task, width, height int) *FormModel {
-	ctx, cancel := context.WithCancel(context.Background())
-
 	// Set executor to default if not specified
 	executor := task.Executor
 	if executor == "" {
 		executor = db.DefaultExecutor()
 	}
 
-	// Check if autocomplete is enabled (default: true)
+	// Check if autocomplete is enabled (default: true) and API key is available
 	autocompleteEnabled := true
+	var apiKey string
 	if database != nil {
 		if setting, _ := database.GetSetting("autocomplete_enabled"); setting == "false" {
 			autocompleteEnabled = false
 		}
+		apiKey, _ = database.GetSetting("anthropic_api_key")
 	}
 
-	autocompleteSvc := autocomplete.NewService()
-	// Start warming up the Claude CLI immediately so it's ready when user starts typing
-	if autocompleteEnabled {
-		autocompleteSvc.Warmup()
+	autocompleteSvc := autocomplete.NewService(apiKey)
+	// Only enable if we have an API key
+	if !autocompleteSvc.IsAvailable() {
+		autocompleteEnabled = false
 	}
 
 	m := &FormModel{
@@ -136,8 +137,6 @@ func NewEditFormModel(database *db.DB, task *db.Task, width, height int) *FormMo
 		recurrences:         []string{"", db.RecurrenceHourly, db.RecurrenceDaily, db.RecurrenceWeekly, db.RecurrenceMonthly},
 		prURL:               task.PRURL,
 		prNumber:            task.PRNumber,
-		autocompleteCtx:     ctx,
-		autocompleteCancel:  cancel,
 		autocompleteSvc:     autocompleteSvc,
 		autocompleteEnabled: autocompleteEnabled,
 	}
@@ -194,6 +193,7 @@ func NewEditFormModel(database *db.DB, task *db.Task, width, height int) *FormMo
 	m.titleInput = textinput.New()
 	m.titleInput.Placeholder = "What needs to be done?"
 	m.titleInput.Prompt = ""
+	m.titleInput.Cursor.SetMode(cursor.CursorStatic)
 	m.titleInput.Focus()
 	m.titleInput.Width = width - 24
 	m.titleInput.SetValue(task.Title)
@@ -203,6 +203,7 @@ func NewEditFormModel(database *db.DB, task *db.Task, width, height int) *FormMo
 	m.bodyInput.Placeholder = "Additional context (optional)"
 	m.bodyInput.Prompt = ""
 	m.bodyInput.ShowLineNumbers = false
+	m.bodyInput.Cursor.SetMode(cursor.CursorStatic)
 	m.bodyInput.SetWidth(width - 24)
 	m.bodyInput.FocusedStyle.CursorLine = lipgloss.NewStyle()
 	m.bodyInput.BlurredStyle.CursorLine = lipgloss.NewStyle()
@@ -213,6 +214,7 @@ func NewEditFormModel(database *db.DB, task *db.Task, width, height int) *FormMo
 	m.scheduleInput = textinput.New()
 	m.scheduleInput.Placeholder = "e.g., 1h, 2h30m, tomorrow 9am"
 	m.scheduleInput.Prompt = ""
+	m.scheduleInput.Cursor.SetMode(cursor.CursorStatic)
 	m.scheduleInput.Width = width - 24
 	if task.ScheduledAt != nil && !task.ScheduledAt.IsZero() {
 		// Show relative time or formatted time
@@ -231,6 +233,7 @@ func NewEditFormModel(database *db.DB, task *db.Task, width, height int) *FormMo
 	m.attachmentsInput = textinput.New()
 	m.attachmentsInput.Placeholder = "Drag files here"
 	m.attachmentsInput.Prompt = ""
+	m.attachmentsInput.Cursor.SetMode(cursor.CursorStatic)
 	m.attachmentsInput.Width = width - 24
 
 	return m
@@ -238,20 +241,20 @@ func NewEditFormModel(database *db.DB, task *db.Task, width, height int) *FormMo
 
 // NewFormModel creates a new form model.
 func NewFormModel(database *db.DB, width, height int, workingDir string) *FormModel {
-	ctx, cancel := context.WithCancel(context.Background())
-
-	// Check if autocomplete is enabled (default: true)
+	// Check if autocomplete is enabled (default: true) and API key is available
 	autocompleteEnabled := true
+	var apiKey string
 	if database != nil {
 		if setting, _ := database.GetSetting("autocomplete_enabled"); setting == "false" {
 			autocompleteEnabled = false
 		}
+		apiKey, _ = database.GetSetting("anthropic_api_key")
 	}
 
-	autocompleteSvc := autocomplete.NewService()
-	// Start warming up the Claude CLI immediately so it's ready when user starts typing
-	if autocompleteEnabled {
-		autocompleteSvc.Warmup()
+	autocompleteSvc := autocomplete.NewService(apiKey)
+	// Only enable if we have an API key
+	if !autocompleteSvc.IsAvailable() {
+		autocompleteEnabled = false
 	}
 
 	m := &FormModel{
@@ -262,8 +265,6 @@ func NewFormModel(database *db.DB, width, height int, workingDir string) *FormMo
 		executor:            db.DefaultExecutor(),
 		executors:           []string{db.ExecutorClaude, db.ExecutorCodex},
 		recurrences:         []string{"", db.RecurrenceHourly, db.RecurrenceDaily, db.RecurrenceWeekly, db.RecurrenceMonthly},
-		autocompleteCtx:     ctx,
-		autocompleteCancel:  cancel,
 		autocompleteSvc:     autocompleteSvc,
 		autocompleteEnabled: autocompleteEnabled,
 	}
@@ -321,6 +322,7 @@ func NewFormModel(database *db.DB, width, height int, workingDir string) *FormMo
 	m.titleInput = textinput.New()
 	m.titleInput.Placeholder = "What needs to be done?"
 	m.titleInput.Prompt = ""
+	m.titleInput.Cursor.SetMode(cursor.CursorStatic)
 	m.titleInput.Focus()
 	m.titleInput.Width = width - 24
 
@@ -329,6 +331,7 @@ func NewFormModel(database *db.DB, width, height int, workingDir string) *FormMo
 	m.bodyInput.Placeholder = "Additional context (optional)"
 	m.bodyInput.Prompt = ""
 	m.bodyInput.ShowLineNumbers = false
+	m.bodyInput.Cursor.SetMode(cursor.CursorStatic)
 	m.bodyInput.SetWidth(width - 24)
 	m.bodyInput.FocusedStyle.CursorLine = lipgloss.NewStyle()
 	m.bodyInput.BlurredStyle.CursorLine = lipgloss.NewStyle()
@@ -338,12 +341,14 @@ func NewFormModel(database *db.DB, width, height int, workingDir string) *FormMo
 	m.scheduleInput = textinput.New()
 	m.scheduleInput.Placeholder = "e.g., 1h, 2h30m, tomorrow 9am"
 	m.scheduleInput.Prompt = ""
+	m.scheduleInput.Cursor.SetMode(cursor.CursorStatic)
 	m.scheduleInput.Width = width - 24
 
 	// Attachments input
 	m.attachmentsInput = textinput.New()
 	m.attachmentsInput.Placeholder = "Drag files here"
 	m.attachmentsInput.Prompt = ""
+	m.attachmentsInput.Cursor.SetMode(cursor.CursorStatic)
 	m.attachmentsInput.Width = width - 24
 
 	return m
@@ -363,6 +368,10 @@ func (m *FormModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.debounceID == m.debounceID && m.pendingDebounce {
 			m.pendingDebounce = false
 			m.loadingAutocomplete = true
+			// Cancel any previous in-flight request
+			if m.autocompleteCancel != nil {
+				m.autocompleteCancel()
+			}
 			return m, m.fetchAutocompleteSuggestion(msg.fieldType, msg.input, msg.project, msg.context)
 		}
 		return m, nil
@@ -371,8 +380,28 @@ func (m *FormModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case autocompleteSuggestionMsg:
 		m.loadingAutocomplete = false
 		if msg.suggestion != nil {
-			m.ghostText = msg.suggestion.Text
-			m.ghostFullText = msg.suggestion.FullText
+			// Get current input value to check if suggestion is still relevant
+			var currentInput string
+			switch msg.fieldType {
+			case "title":
+				currentInput = m.titleInput.Value()
+			case "body":
+				currentInput = m.bodyInput.Value()
+			}
+
+			// Check if current input is a prefix of the suggestion (user typed ahead but in same direction)
+			fullText := msg.suggestion.FullText
+			if strings.HasPrefix(strings.ToLower(fullText), strings.ToLower(currentInput)) && len(currentInput) < len(fullText) {
+				// Current input is a valid prefix - show remaining text as ghost
+				suffix := fullText[len(currentInput):]
+				m.ghostText = suffix
+				m.ghostFullText = currentInput + suffix // Preserve user's casing
+			} else if msg.debounceID == m.debounceID {
+				// Exact debounce match - use suggestion as-is
+				m.ghostText = msg.suggestion.Text
+				m.ghostFullText = msg.suggestion.FullText
+			}
+			// Otherwise: user typed something different, discard suggestion
 		}
 		return m, nil
 
@@ -414,9 +443,6 @@ func (m *FormModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// If there's a ghost suggestion or loading, dismiss it first
 			if m.ghostText != "" || m.loadingAutocomplete || m.pendingDebounce {
 				m.clearGhostText()
-				if m.autocompleteCancel != nil {
-					m.autocompleteCancel()
-				}
 				return m, nil
 			}
 			// Otherwise cancel the form
@@ -456,7 +482,13 @@ func (m *FormModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.acceptGhostText()
 				return m, nil
 			}
+			// Check if moving from title to body - auto-suggest description
+			wasOnTitle := m.focused == FieldTitle
 			m.focusNext()
+			if wasOnTitle && m.focused == FieldBody && m.bodyInput.Value() == "" && m.titleInput.Value() != "" {
+				// Trigger autocomplete for empty body based on title
+				return m, m.triggerBodySuggestion()
+			}
 			return m, nil
 
 		case "shift+tab":
@@ -544,7 +576,7 @@ func (m *FormModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Trigger debounced autocomplete if title changed
 		if m.titleInput.Value() != m.lastTitleValue {
 			m.lastTitleValue = m.titleInput.Value()
-			m.clearGhostText() // Clear old suggestion immediately
+			m.cancelAutocomplete() // Cancel any in-flight requests (including body suggestions)
 			debounceCmd := m.scheduleAutocomplete("title", m.titleInput.Value(), m.project, "")
 			return m, tea.Batch(cmd, debounceCmd)
 		}
@@ -574,19 +606,19 @@ func (m *FormModel) scheduleAutocomplete(fieldType, input, project, extraContext
 		return nil
 	}
 
-	// Cancel any pending autocomplete
+	// Cancel any in-flight request immediately when user types more
 	if m.autocompleteCancel != nil {
 		m.autocompleteCancel()
+		m.autocompleteCancel = nil
 	}
-	m.autocompleteCtx, m.autocompleteCancel = context.WithCancel(context.Background())
 
 	// Increment debounce ID to invalidate old requests
 	m.debounceID++
 	m.pendingDebounce = true
 	debounceID := m.debounceID
 
-	// Return a tick command that fires after the debounce delay
-	return tea.Tick(100*time.Millisecond, func(t time.Time) tea.Msg {
+	// Return a tick command that fires after the debounce delay (500ms pause in typing)
+	return tea.Tick(500*time.Millisecond, func(t time.Time) tea.Msg {
 		return autocompleteTickMsg{
 			debounceID: debounceID,
 			fieldType:  fieldType,
@@ -603,14 +635,67 @@ func (m *FormModel) fetchAutocompleteSuggestion(fieldType, input, project, extra
 		return nil
 	}
 
-	ctx := m.autocompleteCtx
+	// Create a cancellable context - store cancel func so we can abort if user types more
+	ctx, cancel := context.WithCancel(context.Background())
+	m.autocompleteCancel = cancel
+
 	svc := m.autocompleteSvc
+	debounceID := m.debounceID // Capture current ID to verify response is still relevant
+
+	// Fetch recent tasks for the current project (context-aware suggestions)
+	var recentTasks []string
+	if m.db != nil {
+		if tasks, err := m.db.ListTasks(db.ListTasksOptions{
+			Project:       project,
+			Limit:         15,
+			IncludeClosed: true,
+		}); err == nil {
+			for _, t := range tasks {
+				recentTasks = append(recentTasks, t.Title)
+			}
+		}
+	}
 
 	return func() tea.Msg {
-		suggestion := svc.GetSuggestion(ctx, input, fieldType, project, extraContext)
+		suggestion := svc.GetSuggestion(ctx, input, fieldType, project, extraContext, recentTasks)
 		return autocompleteSuggestionMsg{
 			suggestion: suggestion,
 			fieldType:  fieldType,
+			debounceID: debounceID,
+		}
+	}
+}
+
+// triggerBodySuggestion triggers an autocomplete suggestion for an empty body based on title.
+func (m *FormModel) triggerBodySuggestion() tea.Cmd {
+	if !m.autocompleteEnabled || m.autocompleteSvc == nil {
+		return nil
+	}
+
+	title := m.titleInput.Value()
+	if title == "" {
+		return nil
+	}
+
+	// Cancel any in-flight request
+	if m.autocompleteCancel != nil {
+		m.autocompleteCancel()
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	m.autocompleteCancel = cancel
+
+	svc := m.autocompleteSvc
+	m.debounceID++
+	debounceID := m.debounceID
+	project := m.project
+
+	return func() tea.Msg {
+		suggestion := svc.GetSuggestion(ctx, "", "body_suggest", project, title, nil)
+		return autocompleteSuggestionMsg{
+			suggestion: suggestion,
+			fieldType:  "body",
+			debounceID: debounceID,
 		}
 	}
 }
@@ -624,9 +709,11 @@ func (m *FormModel) acceptGhostText() {
 	switch m.focused {
 	case FieldTitle:
 		m.titleInput.SetValue(m.ghostFullText)
+		m.titleInput.CursorEnd()
 		m.lastTitleValue = m.ghostFullText
 	case FieldBody:
 		m.bodyInput.SetValue(m.ghostFullText)
+		m.bodyInput.CursorEnd()
 		m.lastBodyValue = m.ghostFullText
 	}
 
@@ -703,14 +790,14 @@ func (m *FormModel) loadLastTaskTypeForProject() {
 
 func (m *FormModel) focusNext() {
 	m.blurAll()
-	m.clearGhostText()
+	m.cancelAutocomplete()
 	m.focused = (m.focused + 1) % (FieldAttachments + 1)
 	m.focusCurrent()
 }
 
 func (m *FormModel) focusPrev() {
 	m.blurAll()
-	m.clearGhostText()
+	m.cancelAutocomplete()
 	m.focused = (m.focused - 1 + FieldAttachments + 1) % (FieldAttachments + 1)
 	m.focusCurrent()
 }
@@ -720,6 +807,15 @@ func (m *FormModel) clearGhostText() {
 	m.ghostFullText = ""
 	m.loadingAutocomplete = false
 	m.pendingDebounce = false
+}
+
+func (m *FormModel) cancelAutocomplete() {
+	m.clearGhostText()
+	m.debounceID++ // Invalidate any in-flight requests
+	if m.autocompleteCancel != nil {
+		m.autocompleteCancel()
+		m.autocompleteCancel = nil
+	}
 }
 
 func (m *FormModel) blurAll() {
@@ -794,7 +890,6 @@ func (m *FormModel) View() string {
 
 	// Ghost text style for autocomplete suggestions
 	ghostStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Italic(true)
-	loadingStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("243")).Italic(true)
 
 	// Title
 	cursor := " "
@@ -804,15 +899,10 @@ func (m *FormModel) View() string {
 	titleView := m.titleInput.View()
 	// Add ghost text after title if field is focused and we have a suggestion
 	if m.focused == FieldTitle && m.ghostText != "" {
-		titleView = titleView + ghostStyle.Render(m.ghostText)
+		// Strip trailing whitespace from the fixed-width view before adding ghost text
+		titleView = strings.TrimRight(titleView, " ") + ghostStyle.Render(m.ghostText)
 	}
-	// Show loading indicator on the right side (similar to body field scrollbar)
-	// Use a fixed-width indicator that doesn't shift layout
-	titleIndicator := " " // Reserve space for indicator
-	if m.focused == FieldTitle && m.loadingAutocomplete && m.ghostText == "" {
-		titleIndicator = loadingStyle.Render("…")
-	}
-	b.WriteString(cursor + " " + labelStyle.Render("Title") + titleView + titleIndicator)
+	b.WriteString(cursor + " " + labelStyle.Render("Title") + titleView)
 	b.WriteString("\n\n")
 
 	// Body (textarea)
@@ -822,18 +912,21 @@ func (m *FormModel) View() string {
 	}
 	b.WriteString(cursor + " " + labelStyle.Render("Details"))
 	b.WriteString("\n")
+	// Hide placeholder when ghost text is showing
+	savedPlaceholder := m.bodyInput.Placeholder
+	if m.focused == FieldBody && m.ghostText != "" && m.bodyInput.Value() == "" {
+		m.bodyInput.Placeholder = ""
+	}
 	// Indent the textarea and add scrollbar if content overflows
 	bodyLines := strings.Split(m.bodyInput.View(), "\n")
+	m.bodyInput.Placeholder = savedPlaceholder // Restore placeholder
 	scrollbar := m.renderBodyScrollbar(len(bodyLines))
+	cursorLine := m.bodyInput.Line() // Get the line where cursor is
 	for i, line := range bodyLines {
-		// Add ghost text or loading indicator to the first line when focused
-		if m.focused == FieldBody && i == 0 {
-			bodyContent := m.bodyInput.Value()
-			if m.ghostText != "" && !strings.Contains(bodyContent, "\n") {
-				line = line + ghostStyle.Render(m.ghostText)
-			} else if m.loadingAutocomplete && !strings.Contains(bodyContent, "\n") {
-				line = line + loadingStyle.Render("…")
-			}
+		// Add ghost text at cursor line when focused
+		if m.focused == FieldBody && i == cursorLine && m.ghostText != "" {
+			// Strip trailing whitespace from the fixed-width line before adding ghost text
+			line = strings.TrimRight(line, " ") + ghostStyle.Render(m.ghostText)
 		}
 		scrollChar := ""
 		if i < len(scrollbar) {
