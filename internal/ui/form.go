@@ -82,6 +82,10 @@ type FormModel struct {
 	pendingDebounce     bool                  // Whether we're waiting on a debounce timer
 	loadingAutocomplete bool                  // Whether we're waiting for LLM response
 	autocompleteEnabled bool                  // Whether autocomplete is enabled (from settings)
+
+	// Task reference autocomplete (for #123 references)
+	taskRefAutocomplete     *TaskRefAutocompleteModel
+	showTaskRefAutocomplete bool
 }
 
 // Autocomplete message types for async LLM suggestions
@@ -139,6 +143,7 @@ func NewEditFormModel(database *db.DB, task *db.Task, width, height int) *FormMo
 		prNumber:            task.PRNumber,
 		autocompleteSvc:     autocompleteSvc,
 		autocompleteEnabled: autocompleteEnabled,
+		taskRefAutocomplete: NewTaskRefAutocompleteModel(database, width-24),
 	}
 
 	// Set executor index
@@ -267,6 +272,7 @@ func NewFormModel(database *db.DB, width, height int, workingDir string) *FormMo
 		recurrences:         []string{"", db.RecurrenceHourly, db.RecurrenceDaily, db.RecurrenceWeekly, db.RecurrenceMonthly},
 		autocompleteSvc:     autocompleteSvc,
 		autocompleteEnabled: autocompleteEnabled,
+		taskRefAutocomplete: NewTaskRefAutocompleteModel(database, width-24),
 	}
 
 	// Load task types from database
@@ -434,12 +440,39 @@ func (m *FormModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
+		// Handle task reference autocomplete when active
+		if m.showTaskRefAutocomplete && m.taskRefAutocomplete != nil && m.taskRefAutocomplete.HasResults() {
+			switch msg.String() {
+			case "up", "ctrl+p", "ctrl+k":
+				m.taskRefAutocomplete.MoveUp()
+				return m, nil
+			case "down", "ctrl+n", "ctrl+j":
+				m.taskRefAutocomplete.MoveDown()
+				return m, nil
+			case "enter", "tab":
+				m.taskRefAutocomplete.Select()
+				m.insertTaskRef()
+				return m, nil
+			case "esc":
+				m.showTaskRefAutocomplete = false
+				m.taskRefAutocomplete.Reset()
+				return m, nil
+			}
+			// Let other keys fall through to update the body input and re-trigger autocomplete
+		}
+
 		switch msg.String() {
 		case "ctrl+c":
 			m.cancelled = true
 			return m, nil
 
 		case "esc":
+			// If task ref autocomplete is showing, dismiss it first
+			if m.showTaskRefAutocomplete {
+				m.showTaskRefAutocomplete = false
+				m.taskRefAutocomplete.Reset()
+				return m, nil
+			}
 			// If there's a ghost suggestion or loading, dismiss it first
 			if m.ghostText != "" || m.loadingAutocomplete || m.pendingDebounce {
 				m.clearGhostText()
@@ -583,12 +616,16 @@ func (m *FormModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case FieldBody:
 		m.bodyInput, cmd = m.bodyInput.Update(msg)
 		m.updateBodyHeight() // Autogrow as content changes
-		// Trigger debounced autocomplete if body changed
+		// Check for task reference autocomplete trigger (#)
+		m.updateTaskRefAutocomplete()
+		// Trigger debounced autocomplete if body changed (but not if task ref autocomplete is active)
 		if m.bodyInput.Value() != m.lastBodyValue {
 			m.lastBodyValue = m.bodyInput.Value()
-			m.clearGhostText() // Clear old suggestion immediately
-			debounceCmd := m.scheduleAutocomplete("body", m.bodyInput.Value(), m.project, m.titleInput.Value())
-			return m, tea.Batch(cmd, debounceCmd)
+			if !m.showTaskRefAutocomplete {
+				m.clearGhostText() // Clear old suggestion immediately
+				debounceCmd := m.scheduleAutocomplete("body", m.bodyInput.Value(), m.project, m.titleInput.Value())
+				return m, tea.Batch(cmd, debounceCmd)
+			}
 		}
 	case FieldSchedule:
 		m.scheduleInput, cmd = m.scheduleInput.Update(msg)
@@ -865,6 +902,123 @@ func (m *FormModel) parseAttachments() {
 	}
 }
 
+// checkTaskRefTrigger checks if the user has typed '#' for task reference autocomplete.
+// Returns the query (text after #) and position of #, or empty string and -1 if not active.
+func (m *FormModel) checkTaskRefTrigger() (query string, hashPos int) {
+	if m.focused != FieldBody {
+		return "", -1
+	}
+
+	text := m.bodyInput.Value()
+
+	// Calculate absolute cursor position from line and column
+	lines := strings.Split(text, "\n")
+	currentLine := m.bodyInput.Line()
+	lineInfo := m.bodyInput.LineInfo()
+	charOffset := lineInfo.CharOffset
+
+	// Calculate absolute position: sum of previous lines + current column
+	cursorPos := 0
+	for i := 0; i < currentLine && i < len(lines); i++ {
+		cursorPos += len(lines[i]) + 1 // +1 for newline
+	}
+	cursorPos += charOffset
+
+	// Make sure cursorPos is within bounds
+	if cursorPos > len(text) {
+		cursorPos = len(text)
+	}
+	if cursorPos < 0 {
+		cursorPos = 0
+	}
+
+	if cursorPos == 0 {
+		return "", -1
+	}
+
+	// Find the # before cursor position
+	// We need to find the last # that is either at the start or preceded by whitespace
+	lastHashPos := -1
+	for i := cursorPos - 1; i >= 0; i-- {
+		if text[i] == '#' {
+			// Check if this # is at start or preceded by whitespace
+			if i == 0 || unicode.IsSpace(rune(text[i-1])) {
+				lastHashPos = i
+				break
+			}
+		}
+		// Stop if we hit a space before finding #
+		if unicode.IsSpace(rune(text[i])) {
+			break
+		}
+	}
+
+	if lastHashPos == -1 {
+		return "", -1
+	}
+
+	// Extract the query (everything after # up to cursor or next whitespace)
+	queryStart := lastHashPos + 1
+	queryEnd := cursorPos
+	for i := queryStart; i < cursorPos; i++ {
+		if unicode.IsSpace(rune(text[i])) {
+			return "", -1 // Space in the middle means it's not a task ref
+		}
+	}
+
+	if queryEnd > len(text) {
+		queryEnd = len(text)
+	}
+
+	return text[queryStart:queryEnd], lastHashPos
+}
+
+// updateTaskRefAutocomplete updates the task reference autocomplete state.
+func (m *FormModel) updateTaskRefAutocomplete() {
+	if m.taskRefAutocomplete == nil {
+		return
+	}
+
+	query, hashPos := m.checkTaskRefTrigger()
+	if hashPos >= 0 {
+		// Show autocomplete
+		m.showTaskRefAutocomplete = true
+		m.taskRefAutocomplete.SetQuery(query, hashPos)
+	} else {
+		// Hide autocomplete
+		m.showTaskRefAutocomplete = false
+		m.taskRefAutocomplete.Reset()
+	}
+}
+
+// insertTaskRef inserts the selected task reference into the body.
+func (m *FormModel) insertTaskRef() {
+	if m.taskRefAutocomplete == nil || m.taskRefAutocomplete.SelectedTask() == nil {
+		return
+	}
+
+	text := m.bodyInput.Value()
+	hashPos := m.taskRefAutocomplete.GetCursorPos()
+	queryLen := m.taskRefAutocomplete.GetQueryLength()
+	ref := m.taskRefAutocomplete.GetReference()
+
+	// Replace #query with #123
+	newText := text[:hashPos] + ref
+	afterQuery := hashPos + queryLen
+	if afterQuery < len(text) {
+		newText += text[afterQuery:]
+	}
+
+	m.bodyInput.SetValue(newText)
+	// Move cursor to after the inserted reference
+	newCursorPos := hashPos + len(ref)
+	m.bodyInput.SetCursor(newCursorPos)
+
+	// Reset autocomplete
+	m.showTaskRefAutocomplete = false
+	m.taskRefAutocomplete.Reset()
+}
+
 // View renders the form.
 func (m *FormModel) View() string {
 	var b strings.Builder
@@ -923,8 +1077,8 @@ func (m *FormModel) View() string {
 	scrollbar := m.renderBodyScrollbar(len(bodyLines))
 	cursorLine := m.bodyInput.Line() // Get the line where cursor is
 	for i, line := range bodyLines {
-		// Add ghost text at cursor line when focused
-		if m.focused == FieldBody && i == cursorLine && m.ghostText != "" {
+		// Add ghost text at cursor line when focused (but not when task ref autocomplete is active)
+		if m.focused == FieldBody && i == cursorLine && m.ghostText != "" && !m.showTaskRefAutocomplete {
 			// Strip trailing whitespace from the fixed-width line before adding ghost text
 			line = strings.TrimRight(line, " ") + ghostStyle.Render(m.ghostText)
 		}
@@ -933,6 +1087,15 @@ func (m *FormModel) View() string {
 			scrollChar = scrollbar[i]
 		}
 		b.WriteString("   " + line + scrollChar + "\n")
+	}
+
+	// Show task reference autocomplete dropdown if active
+	if m.showTaskRefAutocomplete && m.taskRefAutocomplete != nil && m.taskRefAutocomplete.HasResults() {
+		dropdownView := m.taskRefAutocomplete.View()
+		// Indent the dropdown to align with the body content
+		for _, line := range strings.Split(dropdownView, "\n") {
+			b.WriteString("   " + line + "\n")
+		}
 	}
 	b.WriteString("\n")
 
@@ -1012,7 +1175,7 @@ func (m *FormModel) View() string {
 	b.WriteString("\n\n")
 
 	// Help
-	helpText := "tab accept/navigate • ctrl+space suggest • ←→ select • ctrl+s submit • esc dismiss/cancel"
+	helpText := "tab accept/navigate • # ref task • ctrl+space suggest • ←→ select • ctrl+s submit • esc dismiss/cancel"
 	b.WriteString("  " + dimStyle.Render(helpText))
 
 	// Wrap in box - use full height (subtract 2 for border)
