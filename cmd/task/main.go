@@ -262,6 +262,23 @@ Use --hard to kill all tmux sessions for a complete reset.`,
 	claudeHookCmd.Flags().String("event", "", "Hook event type (Notification, Stop, etc.)")
 	rootCmd.AddCommand(claudeHookCmd)
 
+	// Codex hook subcommand - handles Codex CLI notify callbacks (internal use)
+	codexHookCmd := &cobra.Command{
+		Use:    "codex-hook",
+		Short:  "Handle Codex CLI notify callbacks",
+		Hidden: true, // Internal use only
+		Run: func(cmd *cobra.Command, args []string) {
+			// Codex passes JSON payload as first argument
+			if len(args) > 0 {
+				if err := handleCodexHook(args[0]); err != nil {
+					// Don't print errors - hooks should be silent
+					os.Exit(1)
+				}
+			}
+		},
+	}
+	rootCmd.AddCommand(codexHookCmd)
+
 	// Claudes subcommand - manage running Claude sessions
 	claudesCmd := &cobra.Command{
 		Use:   "claudes",
@@ -1815,6 +1832,78 @@ func triggerNeedsInputHook(task *db.Task, reason string) {
 	}
 	runner := hooks.NewSilent(hooksDir)
 	runner.OnNeedsInput(task, reason)
+}
+
+// CodexHookPayload represents the JSON payload sent by Codex notify hooks.
+type CodexHookPayload struct {
+	Type                 string `json:"type"`                   // Event type: "approval-requested", "agent-turn-complete"
+	ThreadID             string `json:"thread-id"`              // Session identifier
+	TurnID               string `json:"turn-id"`                // Turn identifier
+	CWD                  string `json:"cwd"`                    // Working directory
+	LastAssistantMessage string `json:"last-assistant-message"` // Most recent assistant message
+}
+
+// handleCodexHook handles Codex CLI notify callbacks.
+// Codex fires notify hooks for approval-requested and agent-turn-complete events.
+func handleCodexHook(jsonPayload string) error {
+	// Parse the JSON payload
+	var payload CodexHookPayload
+	if err := json.Unmarshal([]byte(jsonPayload), &payload); err != nil {
+		return err
+	}
+
+	// Get task ID from environment (set when launching Codex)
+	taskIDStr := os.Getenv("WORKTREE_TASK_ID")
+	if taskIDStr == "" {
+		return nil
+	}
+	taskID, err := strconv.ParseInt(taskIDStr, 10, 64)
+	if err != nil {
+		return err
+	}
+
+	// Open database
+	dbPath := db.DefaultPath()
+	database, err := db.Open(dbPath)
+	if err != nil {
+		return err
+	}
+	defer database.Close()
+
+	task, err := database.GetTask(taskID)
+	if err != nil || task == nil {
+		return err
+	}
+
+	switch payload.Type {
+	case "approval-requested":
+		// Codex is waiting for user approval - set needs_input
+		if !task.NeedsInput {
+			if err := database.SetTaskNeedsInput(taskID, "permission"); err == nil {
+				// Update status to blocked
+				if task.Status == db.StatusProcessing {
+					database.UpdateTaskStatus(taskID, db.StatusBlocked)
+				}
+				database.AppendTaskLog(taskID, "system", "Codex waiting for approval")
+				// Trigger the needs_input hook for external notifications
+				triggerNeedsInputHook(task, "permission")
+			}
+		}
+
+	case "agent-turn-complete":
+		// Codex finished a turn - check if it's still working or waiting
+		// If the turn completed without approval-requested, it might be done or continuing
+		// Clear needs_input if it was set (agent is responding)
+		if task.NeedsInput {
+			database.ClearTaskNeedsInput(taskID)
+		}
+		// Ensure task is in processing state if it was blocked
+		if task.Status == db.StatusBlocked {
+			database.UpdateTaskStatus(taskID, db.StatusProcessing)
+		}
+	}
+
+	return nil
 }
 
 // formatToolLogMessage creates a human-readable log message for tool usage.

@@ -2104,77 +2104,14 @@ func (e *Executor) saveTranscriptOnCompletion(taskID int64, workDir string) {
 	e.logLine(taskID, "system", fmt.Sprintf("Saved conversation transcript (%d bytes)", len(content)))
 }
 
-// checkCodexNeedsInput captures tmux pane output and checks for Codex approval patterns.
-// Returns (needsInput bool, reason string) - reason is "permission" if approval prompt detected.
-func (e *Executor) checkCodexNeedsInput(sessionName string) (bool, string) {
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-
-	// Capture last 20 lines of the pane output
-	cmd := exec.CommandContext(ctx, "tmux", "capture-pane", "-t", sessionName+".0", "-p", "-S", "-20")
-	output, err := cmd.Output()
-	if err != nil {
-		return false, ""
-	}
-
-	content := strings.ToLower(string(output))
-
-	// Codex approval patterns - these indicate the agent is waiting for user input
-	approvalPatterns := []string{
-		"approve",           // "Do you approve this command?"
-		"[y/n]",             // Yes/No prompt
-		"(y/n)",             // Alternative format
-		"press enter",       // "Press Enter to continue"
-		"waiting for",       // "Waiting for approval"
-		"confirm",           // "Please confirm"
-		"permission",        // "Permission required"
-		"allow this",        // "Allow this action?"
-		"do you want to",    // "Do you want to proceed?"
-		"shall i",           // "Shall I continue?"
-		"? (use arrow",      // Interactive selection prompt
-		"│ ○",               // Checkbox/radio selection UI
-		"│ ●",               // Selected checkbox/radio UI
-	}
-
-	for _, pattern := range approvalPatterns {
-		if strings.Contains(content, pattern) {
-			return true, "permission"
-		}
-	}
-
-	// Check for question patterns (agent asking for clarification)
-	questionPatterns := []string{
-		"what would you",
-		"how should i",
-		"which option",
-		"please specify",
-		"could you clarify",
-		"i need more information",
-	}
-
-	for _, pattern := range questionPatterns {
-		if strings.Contains(content, pattern) {
-			return true, "question"
-		}
-	}
-
-	return false, ""
-}
-
 // pollTmuxSession waits for the tmux session to end or task status to change.
-// Status is managed by Claude hooks for Claude executor, and by output detection for Codex.
+// Status is managed by executor hooks (Claude hooks or Codex notify hooks).
 // Task only goes to "done" if user/MCP explicitly marks it done.
 // NOTE: We intentionally do NOT kill tmux windows here - they're kept around so
 // users can review Claude's work. Windows are only killed on task deletion.
 func (e *Executor) pollTmuxSession(ctx context.Context, taskID int64, sessionName string) execResult {
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
-
-	// Track previous needs_input state to avoid duplicate updates
-	var prevNeedsInput bool
-	// Codex output checks are expensive (subprocess spawn), so we do them less frequently
-	var codexCheckCounter int
-	const codexCheckInterval = 3 // Check every 3 seconds instead of every 1
 
 	for {
 		select {
@@ -2193,30 +2130,6 @@ func (e *Executor) pollTmuxSession(ctx context.Context, taskID int64, sessionNam
 				if task.Status == db.StatusDone {
 					// Don't kill window - keep it so user can review Claude's work
 					return execResult{Success: true}
-				}
-
-				// For Codex executor, detect approval prompts via output parsing
-				// (Claude uses hooks instead, which set needs_input directly)
-				// Only check every codexCheckInterval seconds to reduce subprocess spawning
-				if task.Executor == db.ExecutorCodex {
-					codexCheckCounter++
-					if codexCheckCounter >= codexCheckInterval {
-						codexCheckCounter = 0
-						needsInput, reason := e.checkCodexNeedsInput(sessionName)
-						if needsInput && !prevNeedsInput {
-							// Codex is waiting for approval - set needs_input
-							if err := e.db.SetTaskNeedsInput(taskID, reason); err == nil {
-								// Trigger the needs_input hook for external notifications
-								e.hooks.OnNeedsInput(task, reason)
-								e.logLine(taskID, "system", fmt.Sprintf("Codex waiting for %s", reason))
-							}
-							prevNeedsInput = true
-						} else if !needsInput && prevNeedsInput {
-							// Codex resumed - clear needs_input
-							e.db.ClearTaskNeedsInput(taskID)
-							prevNeedsInput = false
-						}
-					}
 				}
 			}
 
