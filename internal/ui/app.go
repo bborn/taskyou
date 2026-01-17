@@ -311,6 +311,13 @@ type AppModel struct {
 	height int
 }
 
+func (m *AppModel) executorDisplayName() string {
+	if m.executor != nil {
+		return m.executor.DisplayName()
+	}
+	return executor.DefaultExecutorName()
+}
+
 // updateTaskInList updates a task in the tasks list and refreshes the kanban.
 func (m *AppModel) updateTaskInList(task *db.Task) {
 	for i, t := range m.tasks {
@@ -346,7 +353,7 @@ func NewAppModel(database *db.DB, exec *executor.Executor, workingDir string) *A
 	filterInput.Placeholder = "Filter by project, type, or text..."
 	filterInput.CharLimit = 50
 
-	return &AppModel{
+	model := &AppModel{
 		db:           database,
 		executor:     exec,
 		workingDir:   workingDir,
@@ -362,6 +369,10 @@ func NewAppModel(database *db.DB, exec *executor.Executor, workingDir string) *A
 		filterInput:  filterInput,
 		filterText:   "",
 	}
+
+	model.keys.ResumeClaude.SetHelp("R", fmt.Sprintf("resume %s", model.executorDisplayName()))
+
+	return model
 }
 
 // Init initializes the model.
@@ -2316,18 +2327,19 @@ func (m *AppModel) toggleDangerousMode(id int64) tea.Cmd {
 			return taskDangerousModeToggledMsg{err: fmt.Errorf("failed to get task")}
 		}
 
+		executorName := m.executorDisplayName()
 		var success bool
 		if task.DangerousMode {
 			// Currently in dangerous mode, switch to safe mode
 			success = exec.ResumeSafe(id)
 			if !success {
-				return taskDangerousModeToggledMsg{err: fmt.Errorf("failed to restart Claude in safe mode")}
+				return taskDangerousModeToggledMsg{err: fmt.Errorf("failed to restart %s in safe mode", executorName)}
 			}
 		} else {
 			// Currently in safe mode, switch to dangerous mode
 			success = exec.ResumeDangerous(id)
 			if !success {
-				return taskDangerousModeToggledMsg{err: fmt.Errorf("failed to restart Claude in dangerous mode")}
+				return taskDangerousModeToggledMsg{err: fmt.Errorf("failed to restart %s in dangerous mode", executorName)}
 			}
 		}
 		return taskDangerousModeToggledMsg{err: nil}
@@ -2342,17 +2354,19 @@ func (m *AppModel) resumeClaude(id int64, claudePaneID string) tea.Cmd {
 			return taskClaudeToggledMsg{err: fmt.Errorf("failed to get task")}
 		}
 
+		executorName := m.executorDisplayName()
+
 		// Check if Claude is already running
 		if claudePaneID != "" {
 			claudePID := executor.GetClaudePIDFromPane(claudePaneID)
 			if claudePID > 0 {
-				return taskClaudeToggledMsg{err: fmt.Errorf("claude is already running")}
+				return taskClaudeToggledMsg{err: fmt.Errorf("%s is already running", executorName)}
 			}
 		}
 
 		// If no session ID, can't resume
 		if task.ClaudeSessionID == "" {
-			return taskClaudeToggledMsg{err: fmt.Errorf("no Claude session to resume")}
+			return taskClaudeToggledMsg{err: fmt.Errorf("no %s session to resume", executorName)}
 		}
 
 		claudeCmd := fmt.Sprintf("claude --resume %s", task.ClaudeSessionID)
@@ -2363,9 +2377,9 @@ func (m *AppModel) resumeClaude(id int64, claudePaneID string) tea.Cmd {
 			defer cancel()
 			err = osExec.CommandContext(ctx, "tmux", "send-keys", "-t", claudePaneID, claudeCmd, "Enter").Run()
 			if err != nil {
-				return taskClaudeToggledMsg{err: fmt.Errorf("failed to resume Claude: %w", err)}
+				return taskClaudeToggledMsg{err: fmt.Errorf("failed to resume %s: %w", executorName, err)}
 			}
-			return taskClaudeToggledMsg{killed: false, message: "Resuming Claude session"}
+			return taskClaudeToggledMsg{killed: false, message: fmt.Sprintf("Resuming %s session", executorName)}
 		}
 
 		// No pane - create one below the TUI and start Claude
@@ -2395,7 +2409,7 @@ func (m *AppModel) resumeClaude(id int64, claudePaneID string) tea.Cmd {
 		// Select back to the TUI pane
 		osExec.CommandContext(ctx, "tmux", "select-pane", "-t", ":.0").Run()
 
-		return taskClaudeToggledMsg{killed: false, message: "Resuming Claude session in new pane"}
+		return taskClaudeToggledMsg{killed: false, message: fmt.Sprintf("Resuming %s session in new pane", executorName)}
 	}
 }
 
