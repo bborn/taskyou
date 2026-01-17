@@ -35,6 +35,85 @@ func TestFuzzyMatch(t *testing.T) {
 	}
 }
 
+func TestFuzzyScore(t *testing.T) {
+	tests := []struct {
+		name        string
+		str         string
+		pattern     string
+		shouldMatch bool
+	}{
+		{"empty pattern", "hello world", "", true},
+		{"empty string", "", "abc", false},
+		{"exact match", "hello", "hello", true},
+		{"substring at start", "hello", "hel", true},
+		{"substring in middle", "hello", "ell", true},
+		{"non-contiguous chars", "hello world", "hwd", true},
+		{"vscode-style dsno->diseno", "diseno website", "dsno", true},
+		{"vscode-style dsnw->diseno website", "diseno website", "dsnw", true},
+		{"case insensitive", "Hello World", "hw", true},
+		{"case insensitive mixed", "HelloWorld", "helloworld", true},
+		{"no match", "hello", "xyz", false},
+		{"pattern longer than string", "hi", "hello", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			score := fuzzyScore(tt.str, tt.pattern)
+			gotMatch := score >= 0
+			if gotMatch != tt.shouldMatch {
+				t.Errorf("fuzzyScore(%q, %q) = %d, shouldMatch = %v, got match = %v",
+					tt.str, tt.pattern, score, tt.shouldMatch, gotMatch)
+			}
+		})
+	}
+}
+
+func TestFuzzyScoreRanking(t *testing.T) {
+	// Test that better matches get higher scores
+	tests := []struct {
+		name       string
+		pattern    string
+		betterStr  string
+		worseStr   string
+	}{
+		{
+			name:       "word boundary match beats random match",
+			pattern:    "fb",
+			betterStr:  "foo bar",      // matches at word boundaries
+			worseStr:   "foooobar",     // matches randomly
+		},
+		{
+			name:       "consecutive match beats scattered",
+			pattern:    "hello",
+			betterStr:  "hello world",       // consecutive match at start
+			worseStr:   "something hxexlxlxo", // scattered 'h', 'e', 'l', 'l', 'o' in word
+		},
+		{
+			name:       "start of string match beats middle",
+			pattern:    "foo",
+			betterStr:  "foo bar baz",  // matches at start
+			worseStr:   "bar foo baz",  // matches in middle
+		},
+		{
+			name:       "camelCase boundary match is good",
+			pattern:    "gU",
+			betterStr:  "getUser",      // matches at camelCase boundary
+			worseStr:   "configure",    // 'g' then 'u' scattered
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			betterScore := fuzzyScore(tt.betterStr, tt.pattern)
+			worseScore := fuzzyScore(tt.worseStr, tt.pattern)
+			if betterScore <= worseScore {
+				t.Errorf("Expected %q (score=%d) to rank higher than %q (score=%d) for pattern %q",
+					tt.betterStr, betterScore, tt.worseStr, worseScore, tt.pattern)
+			}
+		})
+	}
+}
+
 func TestCommandPaletteFiltering(t *testing.T) {
 	tasks := []*db.Task{
 		{ID: 1, Title: "Implement login feature", Project: "webapp", Status: db.StatusBacklog},
