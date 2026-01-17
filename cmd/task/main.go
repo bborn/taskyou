@@ -14,6 +14,7 @@ import (
 	"os/signal"
 	"os/user"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -1122,6 +1123,55 @@ Examples:
 	}
 	retryCmd.Flags().StringP("feedback", "m", "", "Feedback for the retry")
 	rootCmd.AddCommand(retryCmd)
+
+	// Purge Claude config subcommand - remove stale entries from ~/.claude.json
+	purgeClaudeConfigCmd := &cobra.Command{
+		Use:   "purge-claude-config",
+		Short: "Remove stale project entries from ~/.claude.json",
+		Long: `Remove entries from ~/.claude.json for project paths that no longer exist.
+
+This cleans up stale entries left behind by deleted worktrees, conductor workspaces,
+and other tools that add per-project configuration to the global Claude config.
+
+Examples:
+  task purge-claude-config
+  task purge-claude-config --dry-run`,
+		Run: func(cmd *cobra.Command, args []string) {
+			dryRun, _ := cmd.Flags().GetBool("dry-run")
+
+			if dryRun {
+				// Show what would be removed
+				removed, paths, err := previewStaleClaudeProjectConfigs()
+				if err != nil {
+					fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+					os.Exit(1)
+				}
+				if removed == 0 {
+					fmt.Println(dimStyle.Render("No stale entries found"))
+					return
+				}
+				fmt.Printf("Would remove %d stale entries:\n", removed)
+				for _, p := range paths {
+					fmt.Printf("  %s\n", dimStyle.Render(p))
+				}
+				return
+			}
+
+			removed, err := executor.PurgeStaleClaudeProjectConfigs()
+			if err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+
+			if removed == 0 {
+				fmt.Println(dimStyle.Render("No stale entries found"))
+			} else {
+				fmt.Println(successStyle.Render(fmt.Sprintf("Removed %d stale entries from ~/.claude.json", removed)))
+			}
+		},
+	}
+	purgeClaudeConfigCmd.Flags().Bool("dry-run", false, "Show what would be removed without making changes")
+	rootCmd.AddCommand(purgeClaudeConfigCmd)
 
 	// Cloud subcommand
 	rootCmd.AddCommand(createCloudCommand())
@@ -2482,4 +2532,53 @@ func deleteTask(taskID int64) error {
 	}
 
 	return nil
+}
+
+// previewStaleClaudeProjectConfigs returns the count and paths of stale entries
+// that would be removed from ~/.claude.json without actually removing them.
+func previewStaleClaudeProjectConfigs() (int, []string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return 0, nil, fmt.Errorf("get home dir: %w", err)
+	}
+
+	claudeConfigPath := filepath.Join(home, ".claude.json")
+
+	// Read existing config
+	data, err := os.ReadFile(claudeConfigPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, nil, nil // No config file
+		}
+		return 0, nil, fmt.Errorf("read claude config: %w", err)
+	}
+
+	// Parse as generic JSON
+	var config map[string]interface{}
+	if err := json.Unmarshal(data, &config); err != nil {
+		return 0, nil, fmt.Errorf("parse claude config: %w", err)
+	}
+
+	// Get projects map
+	projectsRaw, ok := config["projects"]
+	if !ok {
+		return 0, nil, nil // No projects configured
+	}
+	projects, ok := projectsRaw.(map[string]interface{})
+	if !ok {
+		return 0, nil, nil // Invalid projects format
+	}
+
+	// Find stale entries
+	var stalePaths []string
+	for path := range projects {
+		if _, err := os.Stat(path); os.IsNotExist(err) {
+			stalePaths = append(stalePaths, path)
+		}
+	}
+
+	// Sort for consistent output
+	sort.Strings(stalePaths)
+
+	return len(stalePaths), stalePaths, nil
 }
