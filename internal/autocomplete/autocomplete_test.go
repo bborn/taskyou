@@ -168,21 +168,21 @@ func TestService_Cache(t *testing.T) {
 	svc := NewService("")
 
 	// Test adding to cache
-	svc.addToCache("title:project:Fix", "Fix the bug")
-	cached := svc.getFromCache("title:project:Fix")
+	svc.addToCache("title:project:fix", "Fix the bug")
+	cached := svc.getFromCache("title:project:fix", "Fix", "title")
 	if cached != "Fix the bug" {
 		t.Errorf("getFromCache() = %q, want %q", cached, "Fix the bug")
 	}
 
 	// Test cache miss
-	cached = svc.getFromCache("title:project:NonExistent")
+	cached = svc.getFromCache("title:project:nonexistent", "NonExistent", "title")
 	if cached != "" {
 		t.Errorf("getFromCache() for non-existent key = %q, want empty string", cached)
 	}
 
 	// Test cache update
-	svc.addToCache("title:project:Fix", "Fix the critical bug")
-	cached = svc.getFromCache("title:project:Fix")
+	svc.addToCache("title:project:fix", "Fix the critical bug")
+	cached = svc.getFromCache("title:project:fix", "Fix", "title")
 	if cached != "Fix the critical bug" {
 		t.Errorf("getFromCache() after update = %q, want %q", cached, "Fix the critical bug")
 	}
@@ -201,19 +201,67 @@ func TestService_CacheEviction(t *testing.T) {
 	svc.addToCache("key4", "value4")
 
 	// key1 should be evicted
-	if svc.getFromCache("key1") != "" {
+	if svc.getFromCache("key1", "input1", "body") != "" {
 		t.Error("key1 should have been evicted")
 	}
 
 	// Other keys should still exist
-	if svc.getFromCache("key2") != "value2" {
+	if svc.getFromCache("key2", "input2", "body") != "value2" {
 		t.Error("key2 should still exist")
 	}
-	if svc.getFromCache("key3") != "value3" {
+	if svc.getFromCache("key3", "input3", "body") != "value3" {
 		t.Error("key3 should still exist")
 	}
-	if svc.getFromCache("key4") != "value4" {
+	if svc.getFromCache("key4", "input4", "body") != "value4" {
 		t.Error("key4 should exist")
+	}
+}
+
+func TestService_CachePrefixMatching(t *testing.T) {
+	svc := NewService("")
+
+	// Add a longer suggestion to cache
+	svc.addToCache("title:project:fix the bug", "Fix the bug in authentication")
+
+	// Should match when input is a prefix of the cached suggestion (title field only)
+	cached := svc.getFromCache("title:project:fix", "Fix", "title")
+	if cached != "Fix the bug in authentication" {
+		t.Errorf("prefix matching returned %q, want %q", cached, "Fix the bug in authentication")
+	}
+
+	// Should still work with different casing
+	cached = svc.getFromCache("title:project:FIX", "FIX", "title")
+	if cached != "Fix the bug in authentication" {
+		t.Errorf("case-insensitive prefix matching returned %q, want %q", cached, "Fix the bug in authentication")
+	}
+
+	// Body field should NOT do prefix matching (only title)
+	cached = svc.getFromCache("body:project:fix", "Fix", "body")
+	if cached != "" {
+		t.Errorf("body field should not do prefix matching, got %q", cached)
+	}
+}
+
+func TestNormalizeInput(t *testing.T) {
+	tests := []struct {
+		input    string
+		expected string
+	}{
+		{"Fix the bug", "fix the bug"},
+		{"Fix the bug ", "fix the bug"},
+		{"Fix the bug  ", "fix the bug"},
+		{"Fix the bug\t", "fix the bug"},
+		{"  Fix  ", "  fix"},
+		{"", ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			result := normalizeInput(tt.input)
+			if result != tt.expected {
+				t.Errorf("normalizeInput(%q) = %q, want %q", tt.input, result, tt.expected)
+			}
+		})
 	}
 }
 
