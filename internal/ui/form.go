@@ -802,15 +802,17 @@ func (m *FormModel) View() string {
 		cursor = cursorStyle.Render("▸")
 	}
 	titleView := m.titleInput.View()
-	// Add ghost text or loading indicator after title if field is focused
-	if m.focused == FieldTitle {
-		if m.ghostText != "" {
-			titleView = titleView + ghostStyle.Render(m.ghostText)
-		} else if m.loadingAutocomplete {
-			titleView = titleView + loadingStyle.Render(" ...")
-		}
+	// Add ghost text after title if field is focused and we have a suggestion
+	if m.focused == FieldTitle && m.ghostText != "" {
+		titleView = titleView + ghostStyle.Render(m.ghostText)
 	}
-	b.WriteString(cursor + " " + labelStyle.Render("Title") + titleView)
+	// Show loading indicator on the right side (similar to body field scrollbar)
+	// Use a fixed-width indicator that doesn't shift layout
+	titleIndicator := " " // Reserve space for indicator
+	if m.focused == FieldTitle && m.loadingAutocomplete && m.ghostText == "" {
+		titleIndicator = loadingStyle.Render("…")
+	}
+	b.WriteString(cursor + " " + labelStyle.Render("Title") + titleView + titleIndicator)
 	b.WriteString("\n\n")
 
 	// Body (textarea)
@@ -830,7 +832,7 @@ func (m *FormModel) View() string {
 			if m.ghostText != "" && !strings.Contains(bodyContent, "\n") {
 				line = line + ghostStyle.Render(m.ghostText)
 			} else if m.loadingAutocomplete && !strings.Contains(bodyContent, "\n") {
-				line = line + loadingStyle.Render(" ...")
+				line = line + loadingStyle.Render("…")
 			}
 		}
 		scrollChar := ""
