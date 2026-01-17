@@ -16,10 +16,11 @@ import (
 
 // Event types for hooks
 const (
-	EventTaskBlocked = "task.blocked"
-	EventTaskDone    = "task.done"
-	EventTaskFailed  = "task.failed"
-	EventTaskStarted = "task.started"
+	EventTaskBlocked    = "task.blocked"
+	EventTaskDone       = "task.done"
+	EventTaskFailed     = "task.failed"
+	EventTaskStarted    = "task.started"
+	EventTaskNeedsInput = "task.needs_input" // Fires when task needs user input (permission, question, etc.)
 )
 
 // Runner executes hooks for task events.
@@ -100,6 +101,12 @@ func (r *Runner) OnStatusChange(task *db.Task, newStatus, message string) {
 			r.Run(EventTaskBlocked, task, message)
 		}
 	}
+}
+
+// OnNeedsInput triggers the task.needs_input hook when a task requires user attention.
+// reason indicates why input is needed: "permission", "question", "error", etc.
+func (r *Runner) OnNeedsInput(task *db.Task, reason string) {
+	r.Run(EventTaskNeedsInput, task, reason)
 }
 
 // EnsureHooksDir creates the hooks directory if it doesn't exist.

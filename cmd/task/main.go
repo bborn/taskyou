@@ -23,6 +23,7 @@ import (
 	"github.com/bborn/workflow/internal/db"
 	"github.com/bborn/workflow/internal/executor"
 	"github.com/bborn/workflow/internal/github"
+	"github.com/bborn/workflow/internal/hooks"
 	"github.com/bborn/workflow/internal/ui"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -1665,7 +1666,7 @@ func logSessionIDOnce(database *db.DB, taskID int64, input *ClaudeHookInput) {
 func handleNotificationHook(database *db.DB, taskID int64, input *ClaudeHookInput) error {
 	switch input.NotificationType {
 	case "idle_prompt", "permission_prompt":
-		// Claude is waiting for input - mark task as blocked
+		// Claude is waiting for input - mark task as blocked and needing input
 		task, err := database.GetTask(taskID)
 		if err != nil {
 			return err
@@ -1675,11 +1676,19 @@ func handleNotificationHook(database *db.DB, taskID int64, input *ClaudeHookInpu
 		// 2. Currently processing (avoid overwriting other states)
 		if task != nil && task.StartedAt != nil && task.Status == db.StatusProcessing {
 			database.UpdateTaskStatus(taskID, db.StatusBlocked)
+
+			// Set needs_input flag with appropriate reason
+			reason := "question"
 			msg := "Waiting for user input"
 			if input.NotificationType == "permission_prompt" {
+				reason = "permission"
 				msg = "Waiting for permission"
 			}
+			database.SetTaskNeedsInput(taskID, reason)
 			database.AppendTaskLog(taskID, "system", msg)
+
+			// Trigger the task.needs_input hook for external notifications
+			triggerNeedsInputHook(task, reason)
 		}
 	}
 	return nil
@@ -1711,7 +1720,11 @@ func handleStopHook(database *db.DB, taskID int64, input *ClaudeHookInput) error
 		// This is the key transition: processing → blocked (needs input)
 		if task.Status == db.StatusProcessing {
 			database.UpdateTaskStatus(taskID, db.StatusBlocked)
+			database.SetTaskNeedsInput(taskID, "question")
 			database.AppendTaskLog(taskID, "system", "Waiting for user input")
+
+			// Trigger the task.needs_input hook for external notifications
+			triggerNeedsInputHook(task, "question")
 		}
 	case "tool_use":
 		// Claude stopped because it's about to execute a tool
@@ -1748,6 +1761,11 @@ func handlePreToolUseHook(database *db.DB, taskID int64, input *ClaudeHookInput)
 		database.AppendTaskLog(taskID, "system", "Claude resumed working")
 	}
 
+	// Clear needs_input since Claude is actively working
+	if task.NeedsInput {
+		database.ClearTaskNeedsInput(taskID)
+	}
+
 	return nil
 }
 
@@ -1780,7 +1798,23 @@ func handlePostToolUseHook(database *db.DB, taskID int64, input *ClaudeHookInput
 		database.UpdateTaskStatus(taskID, db.StatusProcessing)
 	}
 
+	// Clear needs_input since Claude is actively working
+	if task.NeedsInput {
+		database.ClearTaskNeedsInput(taskID)
+	}
+
 	return nil
+}
+
+// triggerNeedsInputHook triggers the task.needs_input hook for external notifications.
+// This allows users to set up notifications (e.g., desktop, Slack) when tasks need their attention.
+func triggerNeedsInputHook(task *db.Task, reason string) {
+	hooksDir := hooks.DefaultHooksDir()
+	if hooksDir == "" {
+		return
+	}
+	runner := hooks.NewSilent(hooksDir)
+	runner.OnNeedsInput(task, reason)
 }
 
 // formatToolLogMessage creates a human-readable log message for tool usage.
