@@ -2172,6 +2172,9 @@ func (e *Executor) pollTmuxSession(ctx context.Context, taskID int64, sessionNam
 
 	// Track previous needs_input state to avoid duplicate updates
 	var prevNeedsInput bool
+	// Codex output checks are expensive (subprocess spawn), so we do them less frequently
+	var codexCheckCounter int
+	const codexCheckInterval = 3 // Check every 3 seconds instead of every 1
 
 	for {
 		select {
@@ -2194,20 +2197,25 @@ func (e *Executor) pollTmuxSession(ctx context.Context, taskID int64, sessionNam
 
 				// For Codex executor, detect approval prompts via output parsing
 				// (Claude uses hooks instead, which set needs_input directly)
+				// Only check every codexCheckInterval seconds to reduce subprocess spawning
 				if task.Executor == db.ExecutorCodex {
-					needsInput, reason := e.checkCodexNeedsInput(sessionName)
-					if needsInput && !prevNeedsInput {
-						// Codex is waiting for approval - set needs_input
-						if err := e.db.SetTaskNeedsInput(taskID, reason); err == nil {
-							// Trigger the needs_input hook for external notifications
-							e.hooks.OnNeedsInput(task, reason)
-							e.logLine(taskID, "system", fmt.Sprintf("Codex waiting for %s", reason))
+					codexCheckCounter++
+					if codexCheckCounter >= codexCheckInterval {
+						codexCheckCounter = 0
+						needsInput, reason := e.checkCodexNeedsInput(sessionName)
+						if needsInput && !prevNeedsInput {
+							// Codex is waiting for approval - set needs_input
+							if err := e.db.SetTaskNeedsInput(taskID, reason); err == nil {
+								// Trigger the needs_input hook for external notifications
+								e.hooks.OnNeedsInput(task, reason)
+								e.logLine(taskID, "system", fmt.Sprintf("Codex waiting for %s", reason))
+							}
+							prevNeedsInput = true
+						} else if !needsInput && prevNeedsInput {
+							// Codex resumed - clear needs_input
+							e.db.ClearTaskNeedsInput(taskID)
+							prevNeedsInput = false
 						}
-						prevNeedsInput = true
-					} else if !needsInput && prevNeedsInput {
-						// Codex resumed - clear needs_input
-						e.db.ClearTaskNeedsInput(taskID)
-						prevNeedsInput = false
 					}
 				}
 			}
