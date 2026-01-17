@@ -1126,6 +1126,98 @@ Examples:
 	// Cloud subcommand
 	rootCmd.AddCommand(createCloudCommand())
 
+	// Settings command
+	settingsCmd := &cobra.Command{
+		Use:   "settings",
+		Short: "View and manage app settings",
+		Run: func(cmd *cobra.Command, args []string) {
+			dbPath := db.DefaultPath()
+			database, err := db.Open(dbPath)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+			defer database.Close()
+
+			// Show all settings
+			fmt.Println(boldStyle.Render("Settings"))
+			fmt.Println()
+
+			// Anthropic API Key
+			apiKey, _ := database.GetSetting("anthropic_api_key")
+			if apiKey != "" {
+				// Mask the key for display
+				masked := apiKey[:7] + "..." + apiKey[len(apiKey)-4:]
+				fmt.Printf("anthropic_api_key: %s\n", masked)
+			} else if os.Getenv("ANTHROPIC_API_KEY") != "" {
+				fmt.Printf("anthropic_api_key: %s\n", dimStyle.Render("(using ANTHROPIC_API_KEY env var)"))
+			} else {
+				fmt.Printf("anthropic_api_key: %s\n", dimStyle.Render("(not set)"))
+			}
+
+			// Autocomplete enabled
+			autocomplete, _ := database.GetSetting("autocomplete_enabled")
+			if autocomplete == "" {
+				autocomplete = "true"
+			}
+			fmt.Printf("autocomplete_enabled: %s\n", autocomplete)
+
+			fmt.Println()
+			fmt.Println(dimStyle.Render("Use 'task settings set <key> <value>' to change settings"))
+		},
+	}
+
+	settingsSetCmd := &cobra.Command{
+		Use:   "set <key> <value>",
+		Short: "Set a setting value",
+		Long: `Set a configuration setting.
+
+Available settings:
+  anthropic_api_key     API key for ghost text autocomplete (uses Anthropic API
+                        directly for speed). Get yours at console.anthropic.com
+  autocomplete_enabled  Enable/disable ghost text autocomplete (true/false)`,
+		Args: cobra.ExactArgs(2),
+		Run: func(cmd *cobra.Command, args []string) {
+			key := args[0]
+			value := args[1]
+
+			// Validate known settings
+			switch key {
+			case "anthropic_api_key":
+				if !strings.HasPrefix(value, "sk-ant-") {
+					fmt.Println(errorStyle.Render("Invalid API key format. Should start with 'sk-ant-'"))
+					return
+				}
+			case "autocomplete_enabled":
+				if value != "true" && value != "false" {
+					fmt.Println(errorStyle.Render("Value must be 'true' or 'false'"))
+					return
+				}
+			default:
+				fmt.Println(errorStyle.Render("Unknown setting: " + key))
+				fmt.Println(dimStyle.Render("Available: anthropic_api_key, autocomplete_enabled"))
+				return
+			}
+
+			dbPath := db.DefaultPath()
+			database, err := db.Open(dbPath)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+			defer database.Close()
+
+			if err := database.SetSetting(key, value); err != nil {
+				fmt.Println(errorStyle.Render("Failed to save setting: " + err.Error()))
+				return
+			}
+			fmt.Println(successStyle.Render("Setting saved: " + key))
+		},
+	}
+
+	settingsCmd.AddCommand(settingsSetCmd)
+	rootCmd.AddCommand(settingsCmd)
+
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
 		os.Exit(1)

@@ -144,11 +144,37 @@ npm install -g @openai/codex
 
 ## Configuration
 
+### Settings
+
+Manage settings with `task settings`:
+
+```bash
+task settings                              # View all settings
+task settings set <key> <value>            # Set a value
+```
+
+| Setting | Description |
+|---------|-------------|
+| `anthropic_api_key` | API key for ghost text autocomplete (optional, uses API credits) |
+| `autocomplete_enabled` | Enable/disable autocomplete (`true`/`false`) |
+
+### Ghost Text Autocomplete
+
+When creating or editing tasks, ghost text suggestions appear as you type. This feature uses the Anthropic API directly for fast completions.
+
+**Setup:**
+```bash
+task settings set anthropic_api_key sk-ant-your-key-here
+```
+
+Get an API key at [console.anthropic.com](https://console.anthropic.com/). This is optional and uses your API credits.
+
 ### Environment Variables
 
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `WORKTREE_DB_PATH` | SQLite database path | `~/.local/share/task/tasks.db` |
+| `ANTHROPIC_API_KEY` | Fallback for autocomplete if not set in settings | - |
 
 ### `.taskyou.yml` Configuration
 

@@ -11,6 +11,7 @@ func TestBuildPrompt_Title(t *testing.T) {
 		input        string
 		project      string
 		extraContext string
+		recentTasks  []string
 		wantContains []string
 	}{
 		{
@@ -18,27 +19,38 @@ func TestBuildPrompt_Title(t *testing.T) {
 			input:        "Fix the",
 			project:      "",
 			extraContext: "",
-			wantContains: []string{"Complete this partial task title", "Fix the"},
+			recentTasks:  nil,
+			wantContains: []string{"Complete", "title", "Fix the"},
 		},
 		{
 			name:         "title with project context",
 			input:        "Add tests",
 			project:      "myproject",
 			extraContext: "",
-			wantContains: []string{"Project context: myproject", "Add tests"},
+			recentTasks:  nil,
+			wantContains: []string{"Project: myproject", "Add tests"},
 		},
 		{
 			name:         "personal project excluded from context",
 			input:        "Update docs",
 			project:      "personal",
 			extraContext: "",
+			recentTasks:  nil,
 			wantContains: []string{"Update docs"},
+		},
+		{
+			name:         "title with recent tasks",
+			input:        "Fix",
+			project:      "",
+			extraContext: "",
+			recentTasks:  []string{"Fix authentication bug", "Add user tests"},
+			wantContains: []string{"Recent tasks", "Fix authentication bug", "Add user tests"},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := buildPrompt(tt.input, "title", tt.project, tt.extraContext)
+			result := buildPrompt(tt.input, "title", tt.project, tt.extraContext, tt.recentTasks)
 			for _, want := range tt.wantContains {
 				if !strings.Contains(result, want) {
 					t.Errorf("buildPrompt() = %q, want to contain %q", result, want)
@@ -61,20 +73,47 @@ func TestBuildPrompt_Body(t *testing.T) {
 			input:        "This task will",
 			project:      "",
 			extraContext: "",
-			wantContains: []string{"Complete this partial task description", "This task will"},
+			wantContains: []string{"Continue", "This task will"},
 		},
 		{
 			name:         "body with task title context",
 			input:        "Users should be able to",
 			project:      "",
 			extraContext: "Add login feature",
-			wantContains: []string{"Task title: Add login feature", "Users should be able to"},
+			wantContains: []string{"Task: Add login feature", "Users should be able to"},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := buildPrompt(tt.input, "body", tt.project, tt.extraContext)
+			result := buildPrompt(tt.input, "body", tt.project, tt.extraContext, nil)
+			for _, want := range tt.wantContains {
+				if !strings.Contains(result, want) {
+					t.Errorf("buildPrompt() = %q, want to contain %q", result, want)
+				}
+			}
+		})
+	}
+}
+
+func TestBuildPrompt_BodySuggest(t *testing.T) {
+	tests := []struct {
+		name         string
+		input        string
+		extraContext string
+		wantContains []string
+	}{
+		{
+			name:         "body_suggest uses title from extraContext",
+			input:        "",
+			extraContext: "Fix authentication bug",
+			wantContains: []string{"Task title: Fix authentication bug", "Description:"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := buildPrompt(tt.input, "body_suggest", "", tt.extraContext, nil)
 			for _, want := range tt.wantContains {
 				if !strings.Contains(result, want) {
 					t.Errorf("buildPrompt() = %q, want to contain %q", result, want)
@@ -85,26 +124,48 @@ func TestBuildPrompt_Body(t *testing.T) {
 }
 
 func TestNewService(t *testing.T) {
-	svc := NewService()
+	svc := NewService("")
 	if svc == nil {
 		t.Fatal("NewService() returned nil")
 	}
-	if svc.debounceDelay == 0 {
-		t.Error("debounceDelay should be set")
+	if svc.cache == nil {
+		t.Error("cache should be initialized")
 	}
-	if svc.timeout == 0 {
-		t.Error("timeout should be set")
+	if svc.cacheSize == 0 {
+		t.Error("cacheSize should be set")
+	}
+}
+
+func TestNewService_WithAPIKey(t *testing.T) {
+	svc := NewService("test-api-key")
+	if svc == nil {
+		t.Fatal("NewService() returned nil")
+	}
+	if svc.apiKey != "test-api-key" {
+		t.Errorf("apiKey = %q, want %q", svc.apiKey, "test-api-key")
+	}
+}
+
+func TestService_IsAvailable(t *testing.T) {
+	svc := NewService("")
+	if svc.IsAvailable() {
+		t.Error("IsAvailable() should return false without API key")
+	}
+
+	svc = NewService("test-key")
+	if !svc.IsAvailable() {
+		t.Error("IsAvailable() should return true with API key")
 	}
 }
 
 func TestService_Cancel(t *testing.T) {
-	svc := NewService()
+	svc := NewService("")
 	// Should not panic when called with no active request
 	svc.Cancel()
 }
 
 func TestService_Cache(t *testing.T) {
-	svc := NewService()
+	svc := NewService("")
 
 	// Test adding to cache
 	svc.addToCache("title:project:Fix", "Fix the bug")
@@ -128,7 +189,7 @@ func TestService_Cache(t *testing.T) {
 }
 
 func TestService_CacheEviction(t *testing.T) {
-	svc := NewService()
+	svc := NewService("")
 	svc.cacheSize = 3 // Small cache for testing eviction
 
 	// Fill the cache
@@ -156,8 +217,8 @@ func TestService_CacheEviction(t *testing.T) {
 	}
 }
 
-func TestService_ProcessSuggestion(t *testing.T) {
-	svc := NewService()
+func TestService_ProcessSuggestion_Title(t *testing.T) {
+	svc := NewService("")
 
 	tests := []struct {
 		name       string
@@ -209,7 +270,62 @@ func TestService_ProcessSuggestion(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := svc.processSuggestion(tt.suggestion, tt.input, 1)
+			result := svc.processSuggestion(tt.suggestion, tt.input, "title", 1)
+			if tt.wantNil {
+				if result != nil {
+					t.Errorf("processSuggestion() = %+v, want nil", result)
+				}
+			} else {
+				if result == nil {
+					t.Fatal("processSuggestion() returned nil, want non-nil")
+				}
+				if result.Text != tt.wantSuffix {
+					t.Errorf("processSuggestion().Text = %q, want %q", result.Text, tt.wantSuffix)
+				}
+			}
+		})
+	}
+}
+
+func TestService_ProcessSuggestion_Body(t *testing.T) {
+	svc := NewService("")
+
+	tests := []struct {
+		name       string
+		suggestion string
+		input      string
+		fieldType  string
+		wantNil    bool
+		wantSuffix string
+	}{
+		{
+			name:       "body suggestion is used directly as suffix",
+			suggestion: "and fix the authentication flow",
+			input:      "Update the login page",
+			fieldType:  "body",
+			wantNil:    false,
+			wantSuffix: "and fix the authentication flow",
+		},
+		{
+			name:       "body_suggest suggestion is used directly",
+			suggestion: "Fix the bug that causes login failures",
+			input:      "",
+			fieldType:  "body_suggest",
+			wantNil:    false,
+			wantSuffix: "Fix the bug that causes login failures",
+		},
+		{
+			name:       "empty body suggestion returns nil",
+			suggestion: "",
+			input:      "Some input",
+			fieldType:  "body",
+			wantNil:    true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := svc.processSuggestion(tt.suggestion, tt.input, tt.fieldType, 1)
 			if tt.wantNil {
 				if result != nil {
 					t.Errorf("processSuggestion() = %+v, want nil", result)
@@ -227,15 +343,11 @@ func TestService_ProcessSuggestion(t *testing.T) {
 }
 
 func TestService_Warmup(t *testing.T) {
-	svc := NewService()
+	svc := NewService("")
 
-	// Should not panic
+	// Should not panic - Warmup is now a no-op for direct API calls
 	svc.Warmup()
 
-	// Calling warmup twice should be safe (only runs once)
+	// Calling warmup twice should be safe
 	svc.Warmup()
-
-	if !svc.warmedUp {
-		t.Error("warmedUp should be true after Warmup()")
-	}
 }
