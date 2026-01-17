@@ -49,14 +49,22 @@ func NewService(apiKey string) *Service {
 		apiKey = os.Getenv("ANTHROPIC_API_KEY")
 	}
 
+	// Create HTTP client with connection pooling for faster subsequent requests
+	transport := &http.Transport{
+		MaxIdleConns:        10,
+		MaxIdleConnsPerHost: 5,
+		IdleConnTimeout:     90 * time.Second,
+	}
+
 	s := &Service{
 		apiKey: apiKey,
 		httpClient: &http.Client{
-			Timeout: 30 * time.Second, // Overall HTTP timeout
+			Transport: transport,
+			Timeout:   30 * time.Second, // Overall HTTP timeout
 		},
 		cache:     make(map[string]*cacheEntry),
-		cacheSize: 100,             // Keep last 100 suggestions
-		cacheTTL:  5 * time.Minute, // Cache entries valid for 5 minutes
+		cacheSize: 200,              // Increased cache for better hit rates
+		cacheTTL:  10 * time.Minute, // Longer TTL for session work
 	}
 
 	if apiKey != "" {
@@ -73,28 +81,76 @@ func (s *Service) IsAvailable() bool {
 	return s.apiKey != ""
 }
 
-// Warmup is a no-op for direct API calls (no CLI to warm up).
-func (s *Service) Warmup() {}
+// Warmup pre-warms the HTTP connection by making a lightweight API request.
+// This establishes the TLS connection so subsequent requests are faster.
+func (s *Service) Warmup() {
+	if s.apiKey == "" {
+		return
+	}
+
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+
+		// Make a lightweight request to establish TLS connection
+		req, err := http.NewRequestWithContext(ctx, "GET", "https://api.anthropic.com/v1/models", nil)
+		if err != nil {
+			return
+		}
+		req.Header.Set("x-api-key", s.apiKey)
+		req.Header.Set("anthropic-version", "2023-06-01")
+
+		resp, err := s.httpClient.Do(req)
+		if err != nil {
+			return
+		}
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+		s.log("Warmup complete")
+	}()
+}
 
 // Cancel is a no-op - cancellation is handled via context.
 func (s *Service) Cancel() {}
 
+// normalizeInput normalizes input for better cache hit rates.
+// Trims trailing whitespace and converts to lowercase for key matching.
+func normalizeInput(input string) string {
+	return strings.ToLower(strings.TrimRight(input, " \t"))
+}
+
 // getFromCache retrieves a cached suggestion if available and not expired.
-func (s *Service) getFromCache(key string) string {
+// Supports prefix matching - if we have a cached suggestion for "Fix the bug in auth",
+// it can match input "Fix the" if the suggestion starts with the input.
+func (s *Service) getFromCache(key, input, fieldType string) string {
 	s.cacheMu.RLock()
 	defer s.cacheMu.RUnlock()
 
+	// Direct match first (most common case)
 	entry, ok := s.cache[key]
-	if !ok {
-		return ""
+	if ok && time.Since(entry.timestamp) <= s.cacheTTL {
+		return entry.suggestion
 	}
 
-	// Check if entry has expired
-	if time.Since(entry.timestamp) > s.cacheTTL {
-		return ""
+	// For title field, try prefix matching - find cached entries that could complete this input
+	if fieldType == "title" {
+		normalizedInput := normalizeInput(input)
+		for _, cachedKey := range s.cacheOrder {
+			entry := s.cache[cachedKey]
+			if entry == nil || time.Since(entry.timestamp) > s.cacheTTL {
+				continue
+			}
+
+			// Check if cached suggestion starts with current input (case-insensitive)
+			normalizedSuggestion := strings.ToLower(entry.suggestion)
+			if strings.HasPrefix(normalizedSuggestion, normalizedInput) {
+				s.log("Cache prefix match: %q -> %q", input, entry.suggestion)
+				return entry.suggestion
+			}
+		}
 	}
 
-	return entry.suggestion
+	return ""
 }
 
 // addToCache adds a suggestion to the cache with LRU eviction.
@@ -161,8 +217,11 @@ func (s *Service) GetSuggestion(ctx context.Context, input, fieldType, project, 
 
 	// Check cache first - instant response for repeated inputs
 	// Include extraContext in cache key for body_suggest (title-based suggestions)
-	cacheKey := fmt.Sprintf("%s:%s:%s:%s", fieldType, project, input, extraContext)
-	if cached := s.getFromCache(cacheKey); cached != "" {
+	// Use normalized input for better cache hit rates
+	normalizedInput := normalizeInput(input)
+	cacheKey := fmt.Sprintf("%s:%s:%s:%s", fieldType, project, normalizedInput, extraContext)
+	if cached := s.getFromCache(cacheKey, input, fieldType); cached != "" {
+		s.log("Cache hit for: %s", cacheKey)
 		return s.processSuggestion(cached, input, fieldType, 0)
 	}
 
