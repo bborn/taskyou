@@ -65,6 +65,10 @@ type Executor struct {
 // SuspendIdleTimeout is how long a blocked task must be idle before being suspended.
 const SuspendIdleTimeout = 5 * time.Minute
 
+// DoneTaskCleanupTimeout is how long after a task is marked done before its Claude process is killed.
+// This gives users time to review output or retry the task before the process is cleaned up.
+const DoneTaskCleanupTimeout = 30 * time.Minute
+
 // New creates a new executor.
 func New(database *db.DB, cfg *config.Config) *Executor {
 	e := &Executor{
@@ -504,10 +508,12 @@ func (e *Executor) worker(ctx context.Context) {
 	// Check merged branches every 30 seconds (15 ticks)
 	// Check for idle blocked tasks to suspend every 60 seconds (30 ticks)
 	// Check for due scheduled tasks every 10 seconds (5 ticks)
+	// Check for inactive done tasks to cleanup every 5 minutes (150 ticks)
 	tickCount := 0
 	const mergeCheckInterval = 15
 	const suspendCheckInterval = 30
 	const scheduleCheckInterval = 5
+	const doneCleanupInterval = 150 // 5 minutes at 2 second ticks
 
 	for {
 		select {
@@ -533,6 +539,11 @@ func (e *Executor) worker(ctx context.Context) {
 			// Periodically check for idle blocked tasks to suspend
 			if tickCount%suspendCheckInterval == 0 {
 				e.suspendIdleBlockedTasks()
+			}
+
+			// Periodically cleanup Claude processes for inactive done tasks
+			if tickCount%doneCleanupInterval == 0 {
+				e.cleanupInactiveDoneTasks()
 			}
 		}
 	}
@@ -652,6 +663,50 @@ func (e *Executor) suspendIdleBlockedTasks() {
 				e.SuspendTask(task.ID)
 			}
 		}
+	}
+}
+
+// cleanupInactiveDoneTasks kills Claude processes for done tasks that have been inactive
+// for longer than DoneTaskCleanupTimeout. This frees up memory from orphaned processes.
+func (e *Executor) cleanupInactiveDoneTasks() {
+	tasks, err := e.db.ListTasks(db.ListTasksOptions{
+		Status:        db.StatusDone,
+		IncludeClosed: true,
+		Limit:         100,
+	})
+	if err != nil {
+		e.logger.Debug("Failed to list done tasks for cleanup", "error", err)
+		return
+	}
+
+	for _, task := range tasks {
+		// Skip if not completed or completed recently
+		if task.CompletedAt == nil {
+			continue
+		}
+
+		doneDuration := time.Since(task.CompletedAt.Time)
+		if doneDuration < DoneTaskCleanupTimeout {
+			continue
+		}
+
+		// Check if there's a Claude process to kill
+		pid := e.getClaudePID(task.ID)
+		if pid == 0 {
+			continue
+		}
+
+		// Kill the Claude process
+		e.logger.Info("Cleaning up inactive done task", "task", task.ID, "done_for", doneDuration.Round(time.Minute))
+		e.KillClaudeProcess(task.ID)
+
+		// Also kill the tmux window to fully clean up
+		windowTarget := TmuxSessionName(task.ID)
+		killCtx, killCancel := context.WithTimeout(context.Background(), 3*time.Second)
+		exec.CommandContext(killCtx, "tmux", "kill-window", "-t", windowTarget).Run()
+		killCancel()
+
+		e.logLine(task.ID, "system", "Claude process cleaned up (inactive done task)")
 	}
 }
 
