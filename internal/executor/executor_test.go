@@ -881,3 +881,84 @@ func TestIsValidWorktreePathWithRealDirectory(t *testing.T) {
 		}
 	})
 }
+
+func TestDoneTaskCleanupTimeout(t *testing.T) {
+	// Verify the cleanup timeout constant is set correctly
+	if DoneTaskCleanupTimeout != 30*time.Minute {
+		t.Errorf("DoneTaskCleanupTimeout = %v, want 30 minutes", DoneTaskCleanupTimeout)
+	}
+}
+
+func TestCleanupInactiveDoneTasksFiltering(t *testing.T) {
+	// Create temp database
+	tmpFile, err := os.CreateTemp("", "test-*.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(tmpFile.Name())
+	tmpFile.Close()
+
+	database, err := db.Open(tmpFile.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+
+	// Create the test project first
+	if err := database.CreateProject(&db.Project{Name: "test", Path: "/tmp/test"}); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.Config{}
+	exec := New(database, cfg)
+
+	now := time.Now()
+
+	t.Run("skips tasks without CompletedAt", func(t *testing.T) {
+		task := &db.Task{
+			Title:   "Task without CompletedAt",
+			Status:  db.StatusDone,
+			Project: "test",
+		}
+		if err := database.CreateTask(task); err != nil {
+			t.Fatal(err)
+		}
+
+		// This should not panic or error - it should just skip the task
+		exec.cleanupInactiveDoneTasks()
+	})
+
+	t.Run("skips recently completed tasks", func(t *testing.T) {
+		recentTime := db.LocalTime{Time: now.Add(-5 * time.Minute)} // 5 minutes ago
+		task := &db.Task{
+			Title:       "Recently completed task",
+			Status:      db.StatusDone,
+			Project:     "test",
+			CompletedAt: &recentTime,
+		}
+		if err := database.CreateTask(task); err != nil {
+			t.Fatal(err)
+		}
+
+		// This should not panic or error - it should just skip the task
+		// (no actual process to kill, but filtering should work)
+		exec.cleanupInactiveDoneTasks()
+	})
+
+	t.Run("identifies old completed tasks", func(t *testing.T) {
+		oldTime := db.LocalTime{Time: now.Add(-2 * time.Hour)} // 2 hours ago
+		task := &db.Task{
+			Title:       "Old completed task",
+			Status:      db.StatusDone,
+			Project:     "test",
+			CompletedAt: &oldTime,
+		}
+		if err := database.CreateTask(task); err != nil {
+			t.Fatal(err)
+		}
+
+		// This should not panic or error
+		// The task would be selected for cleanup if it had a running process
+		exec.cleanupInactiveDoneTasks()
+	})
+}
