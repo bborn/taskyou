@@ -25,12 +25,12 @@ type FormField int
 const (
 	FieldTitle FormField = iota
 	FieldBody
+	FieldAttachments // Moved after body for proximity - drag works from any field
 	FieldProject
 	FieldType
 	FieldExecutor
 	FieldSchedule
 	FieldRecurrence
-	FieldAttachments
 )
 
 // FormModel represents the new task form.
@@ -236,7 +236,7 @@ func NewEditFormModel(database *db.DB, task *db.Task, width, height int) *FormMo
 
 	// Attachments input
 	m.attachmentsInput = textinput.New()
-	m.attachmentsInput.Placeholder = "Drag files here"
+	m.attachmentsInput.Placeholder = "Files (drag anywhere or type paths)"
 	m.attachmentsInput.Prompt = ""
 	m.attachmentsInput.Cursor.SetMode(cursor.CursorStatic)
 	m.attachmentsInput.Width = width - 24
@@ -352,7 +352,7 @@ func NewFormModel(database *db.DB, width, height int, workingDir string) *FormMo
 
 	// Attachments input
 	m.attachmentsInput = textinput.New()
-	m.attachmentsInput.Placeholder = "Drag files here"
+	m.attachmentsInput.Placeholder = "Files (drag anywhere or type paths)"
 	m.attachmentsInput.Prompt = ""
 	m.attachmentsInput.Cursor.SetMode(cursor.CursorStatic)
 	m.attachmentsInput.Width = width - 24
@@ -534,7 +534,7 @@ func (m *FormModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				break
 			}
 			// On last field, submit
-			if m.focused == FieldAttachments {
+			if m.focused == FieldRecurrence {
 				m.parseAttachments()
 				m.submitted = true
 				return m, nil
@@ -828,14 +828,14 @@ func (m *FormModel) loadLastTaskTypeForProject() {
 func (m *FormModel) focusNext() {
 	m.blurAll()
 	m.cancelAutocomplete()
-	m.focused = (m.focused + 1) % (FieldAttachments + 1)
+	m.focused = (m.focused + 1) % (FieldRecurrence + 1)
 	m.focusCurrent()
 }
 
 func (m *FormModel) focusPrev() {
 	m.blurAll()
 	m.cancelAutocomplete()
-	m.focused = (m.focused - 1 + FieldAttachments + 1) % (FieldAttachments + 1)
+	m.focused = (m.focused - 1 + FieldRecurrence + 1) % (FieldRecurrence + 1)
 	m.focusCurrent()
 }
 
@@ -1097,7 +1097,24 @@ func (m *FormModel) View() string {
 			b.WriteString("   " + line + "\n")
 		}
 	}
+
+	// Attachments (positioned after body - drag files from anywhere in the form)
+	cursor = " "
+	if m.focused == FieldAttachments {
+		cursor = cursorStyle.Render("▸")
+	}
+	attachmentLine := m.attachmentsInput.View()
+	// Show attached files
+	if len(m.attachments) > 0 {
+		var fileNames []string
+		for _, path := range m.attachments {
+			fileNames = append(fileNames, filepath.Base(path))
+		}
+		attachmentLine = lipgloss.NewStyle().Foreground(ColorPrimary).Render(strings.Join(fileNames, ", ")) + "  " + m.attachmentsInput.View()
+	}
 	b.WriteString("\n")
+	b.WriteString(cursor + " " + labelStyle.Render("Attachments") + attachmentLine)
+	b.WriteString("\n\n")
 
 	// Project selector
 	cursor = " "
@@ -1155,23 +1172,6 @@ func (m *FormModel) View() string {
 		}
 	}
 	b.WriteString(cursor + " " + labelStyle.Render("Recurrence") + m.renderSelector(recurrenceLabels, m.recurrenceIdx, m.focused == FieldRecurrence, selectedStyle, optionStyle, dimStyle))
-	b.WriteString("\n\n")
-
-	// Attachments
-	cursor = " "
-	if m.focused == FieldAttachments {
-		cursor = cursorStyle.Render("▸")
-	}
-	attachmentLine := m.attachmentsInput.View()
-	// Show attached files
-	if len(m.attachments) > 0 {
-		var fileNames []string
-		for _, path := range m.attachments {
-			fileNames = append(fileNames, filepath.Base(path))
-		}
-		attachmentLine = lipgloss.NewStyle().Foreground(ColorPrimary).Render(strings.Join(fileNames, ", ")) + "  " + m.attachmentsInput.View()
-	}
-	b.WriteString(cursor + " " + labelStyle.Render("Attachments") + attachmentLine)
 	b.WriteString("\n\n")
 
 	// Help
