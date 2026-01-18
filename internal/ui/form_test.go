@@ -3,6 +3,8 @@ package ui
 import (
 	"strings"
 	"testing"
+
+	tea "github.com/charmbracelet/bubbletea"
 )
 
 func TestCalculateBodyHeight(t *testing.T) {
@@ -497,5 +499,202 @@ func TestMoveTitleCursorWordForward(t *testing.T) {
 				t.Errorf("moveTitleCursorWordForward() cursor = %d, want %d", got, tt.expectedCursor)
 			}
 		})
+	}
+}
+
+func TestHasFormData(t *testing.T) {
+	tests := []struct {
+		name     string
+		title    string
+		body     string
+		schedule string
+		expected bool
+	}{
+		{
+			name:     "empty form returns false",
+			title:    "",
+			body:     "",
+			schedule: "",
+			expected: false,
+		},
+		{
+			name:     "whitespace only returns false",
+			title:    "  ",
+			body:     "\n\t",
+			schedule: " ",
+			expected: false,
+		},
+		{
+			name:     "title with content returns true",
+			title:    "My task",
+			body:     "",
+			schedule: "",
+			expected: true,
+		},
+		{
+			name:     "body with content returns true",
+			title:    "",
+			body:     "Some description",
+			schedule: "",
+			expected: true,
+		},
+		{
+			name:     "schedule with content returns true",
+			title:    "",
+			body:     "",
+			schedule: "1h",
+			expected: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := NewFormModel(nil, 100, 50, "")
+			m.titleInput.SetValue(tt.title)
+			m.bodyInput.SetValue(tt.body)
+			m.scheduleInput.SetValue(tt.schedule)
+
+			if got := m.hasFormData(); got != tt.expected {
+				t.Errorf("hasFormData() = %v, want %v", got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestEscapeWithEmptyFormCancelsImmediately(t *testing.T) {
+	m := NewFormModel(nil, 100, 50, "")
+
+	// Press escape on empty form
+	escMsg := tea.KeyMsg{Type: tea.KeyEscape}
+	model, _ := m.Update(escMsg)
+	fm := model.(*FormModel)
+
+	// Form should be cancelled without confirmation
+	if !fm.cancelled {
+		t.Error("expected form to be cancelled when pressing escape on empty form")
+	}
+	if fm.showCancelConfirm {
+		t.Error("expected no confirmation prompt for empty form")
+	}
+}
+
+func TestEscapeWithDataShowsConfirmation(t *testing.T) {
+	m := NewFormModel(nil, 100, 50, "")
+	m.titleInput.SetValue("Some task title")
+
+	// Press escape with data in form
+	escMsg := tea.KeyMsg{Type: tea.KeyEscape}
+	model, _ := m.Update(escMsg)
+	fm := model.(*FormModel)
+
+	// Should show confirmation, not cancel yet
+	if fm.cancelled {
+		t.Error("expected form NOT to be cancelled yet, should show confirmation")
+	}
+	if !fm.showCancelConfirm {
+		t.Error("expected confirmation prompt to be shown")
+	}
+}
+
+func TestConfirmationYesCancelsForm(t *testing.T) {
+	m := NewFormModel(nil, 100, 50, "")
+	m.titleInput.SetValue("Some task title")
+	m.showCancelConfirm = true
+
+	// Press 'y' to confirm
+	yMsg := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}}
+	model, _ := m.Update(yMsg)
+	fm := model.(*FormModel)
+
+	if !fm.cancelled {
+		t.Error("expected form to be cancelled after pressing 'y'")
+	}
+}
+
+func TestConfirmationNoCancelsConfirmation(t *testing.T) {
+	m := NewFormModel(nil, 100, 50, "")
+	m.titleInput.SetValue("Some task title")
+	m.showCancelConfirm = true
+
+	// Press 'n' to decline
+	nMsg := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}}
+	model, _ := m.Update(nMsg)
+	fm := model.(*FormModel)
+
+	if fm.cancelled {
+		t.Error("expected form NOT to be cancelled after pressing 'n'")
+	}
+	if fm.showCancelConfirm {
+		t.Error("expected confirmation prompt to be dismissed")
+	}
+}
+
+func TestConfirmationEscCancelsConfirmation(t *testing.T) {
+	m := NewFormModel(nil, 100, 50, "")
+	m.titleInput.SetValue("Some task title")
+	m.showCancelConfirm = true
+
+	// Press esc to dismiss confirmation
+	escMsg := tea.KeyMsg{Type: tea.KeyEscape}
+	model, _ := m.Update(escMsg)
+	fm := model.(*FormModel)
+
+	if fm.cancelled {
+		t.Error("expected form NOT to be cancelled after pressing escape on confirmation")
+	}
+	if fm.showCancelConfirm {
+		t.Error("expected confirmation prompt to be dismissed")
+	}
+}
+
+func TestEscapeDismissesGhostTextFirst(t *testing.T) {
+	m := NewFormModel(nil, 100, 50, "")
+	m.titleInput.SetValue("Some task title")
+	m.ghostText = "suggestion text"
+	m.ghostFullText = "Some task title suggestion text"
+
+	// Press escape with ghost text showing
+	escMsg := tea.KeyMsg{Type: tea.KeyEscape}
+	model, _ := m.Update(escMsg)
+	fm := model.(*FormModel)
+
+	// Should dismiss ghost text, not show confirmation or cancel
+	if fm.cancelled {
+		t.Error("expected form NOT to be cancelled, should dismiss ghost text first")
+	}
+	if fm.showCancelConfirm {
+		t.Error("expected NO confirmation prompt, should dismiss ghost text first")
+	}
+	if fm.ghostText != "" {
+		t.Error("expected ghost text to be cleared")
+	}
+}
+
+func TestEscapeDismissesTaskRefAutocompleteFirst(t *testing.T) {
+	m := NewFormModel(nil, 100, 50, "")
+	m.titleInput.SetValue("Some task title")
+	m.showTaskRefAutocomplete = true
+	m.taskRefAutocomplete = NewTaskRefAutocompleteModel(nil, 80)
+	// Note: filteredTasks is nil (no results) so HasResults() is false
+
+	// Press escape with autocomplete state active (but no visible results)
+	escMsg := tea.KeyMsg{Type: tea.KeyEscape}
+	model, _ := m.Update(escMsg)
+	fm := model.(*FormModel)
+
+	// Should clear the autocomplete state and show confirmation (since there's data)
+	if fm.showTaskRefAutocomplete {
+		t.Error("expected task ref autocomplete to be dismissed")
+	}
+}
+
+func TestConfirmationMessageAppearsInView(t *testing.T) {
+	m := NewFormModel(nil, 100, 50, "")
+	m.showCancelConfirm = true
+
+	view := m.View()
+
+	if !strings.Contains(view, "Discard changes?") {
+		t.Error("expected confirmation message in view")
 	}
 }

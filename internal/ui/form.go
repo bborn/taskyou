@@ -87,6 +87,9 @@ type FormModel struct {
 	// Task reference autocomplete (for #123 references)
 	taskRefAutocomplete     *TaskRefAutocompleteModel
 	showTaskRefAutocomplete bool
+
+	// Cancel confirmation state
+	showCancelConfirm bool
 }
 
 // Autocomplete message types for async LLM suggestions
@@ -442,6 +445,20 @@ func (m *FormModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
+		// Handle cancel confirmation state
+		if m.showCancelConfirm {
+			switch msg.String() {
+			case "y", "Y", "enter":
+				m.cancelled = true
+				return m, nil
+			case "n", "N", "esc":
+				m.showCancelConfirm = false
+				return m, nil
+			}
+			// Ignore other keys while confirmation is showing
+			return m, nil
+		}
+
 		// Handle task reference autocomplete when active
 		if m.showTaskRefAutocomplete && m.taskRefAutocomplete != nil && m.taskRefAutocomplete.HasResults() {
 			switch msg.String() {
@@ -469,15 +486,27 @@ func (m *FormModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 
 		case "esc":
-			// If task ref autocomplete is showing, dismiss it first
-			if m.showTaskRefAutocomplete {
+			// If task ref autocomplete is showing WITH visible results, dismiss it first
+			if m.showTaskRefAutocomplete && m.taskRefAutocomplete != nil && m.taskRefAutocomplete.HasResults() {
 				m.showTaskRefAutocomplete = false
 				m.taskRefAutocomplete.Reset()
 				return m, nil
 			}
+			// Clean up invisible autocomplete state (no return - continue processing)
+			if m.showTaskRefAutocomplete {
+				m.showTaskRefAutocomplete = false
+				if m.taskRefAutocomplete != nil {
+					m.taskRefAutocomplete.Reset()
+				}
+			}
 			// If there's a ghost suggestion or loading, dismiss it first
 			if m.ghostText != "" || m.loadingAutocomplete || m.pendingDebounce {
 				m.clearGhostText()
+				return m, nil
+			}
+			// If form has data, show confirmation before cancelling
+			if m.hasFormData() {
+				m.showCancelConfirm = true
 				return m, nil
 			}
 			// Otherwise cancel the form
@@ -1216,6 +1245,14 @@ func (m *FormModel) View() string {
 	b.WriteString(cursor + " " + labelStyle.Render("Recurrence") + m.renderSelector(recurrenceLabels, m.recurrenceIdx, m.focused == FieldRecurrence, selectedStyle, optionStyle, dimStyle))
 	b.WriteString("\n\n")
 
+	// Cancel confirmation message
+	if m.showCancelConfirm {
+		confirmStyle := lipgloss.NewStyle().
+			Bold(true).
+			Foreground(lipgloss.Color("214")) // Orange/warning color
+		b.WriteString("  " + confirmStyle.Render("Discard changes? (y/n)") + "\n")
+	}
+
 	// Help
 	helpText := "tab accept/navigate • # ref task • ctrl+space suggest • ←→ select • ctrl+s submit • esc dismiss/cancel"
 	b.WriteString("  " + dimStyle.Render(helpText))
@@ -1249,6 +1286,16 @@ func (m *FormModel) renderSelector(options []string, selected int, focused bool,
 		}
 	}
 	return strings.Join(parts, "  ")
+}
+
+// hasFormData returns true if the form has any user-entered data.
+// This is used to determine if we should show a confirmation before cancelling.
+func (m *FormModel) hasFormData() bool {
+	return strings.TrimSpace(m.titleInput.Value()) != "" ||
+		strings.TrimSpace(m.bodyInput.Value()) != "" ||
+		strings.TrimSpace(m.scheduleInput.Value()) != "" ||
+		strings.TrimSpace(m.attachmentsInput.Value()) != "" ||
+		len(m.attachments) > 0
 }
 
 // GetDBTask returns a db.Task from the form values.
