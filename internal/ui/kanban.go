@@ -138,8 +138,11 @@ func (k *KanbanBoard) distributeTasksToColumns() {
 	k.clampSelection()
 }
 
-// sortColumnTasks sorts tasks within a column, putting recurring tasks at the bottom.
-// Non-recurring tasks maintain their original order (by creation date from DB query).
+// sortColumnTasks sorts tasks within a column with the following priority:
+// 1. Tasks needing input (top) - most urgent, need user attention
+// 2. Non-recurring tasks (middle) - regular tasks
+// 3. Recurring tasks (bottom) - de-emphasized
+// Within each group, tasks maintain their original order (by creation date from DB query).
 func (k *KanbanBoard) sortColumnTasks(colIdx int) {
 	if colIdx < 0 || colIdx >= len(k.columns) {
 		return
@@ -149,18 +152,24 @@ func (k *KanbanBoard) sortColumnTasks(colIdx int) {
 		return
 	}
 
-	// Stable sort: recurring tasks go to bottom, preserving relative order within groups
-	var nonRecurring, recurring []*db.Task
+	// Stable sort: needs_input first, then non-recurring, then recurring
+	var needsInput, nonRecurring, recurring []*db.Task
 	for _, task := range tasks {
-		if task.IsRecurring() {
+		if task.NeedsInput {
+			needsInput = append(needsInput, task)
+		} else if task.IsRecurring() {
 			recurring = append(recurring, task)
 		} else {
 			nonRecurring = append(nonRecurring, task)
 		}
 	}
 
-	// Reconstruct the slice with non-recurring first, then recurring
-	k.columns[colIdx].Tasks = append(nonRecurring, recurring...)
+	// Reconstruct the slice: needs_input first, then non-recurring, then recurring
+	result := make([]*db.Task, 0, len(tasks))
+	result = append(result, needsInput...)
+	result = append(result, nonRecurring...)
+	result = append(result, recurring...)
+	k.columns[colIdx].Tasks = result
 }
 
 // SetSize updates the board dimensions.
@@ -339,7 +348,18 @@ func (k *KanbanBoard) viewDesktop() string {
 			Bold(true).
 			Align(lipgloss.Center)
 
+		// Count tasks needing input in this column
+		needsInputCount := 0
+		for _, task := range col.Tasks {
+			if task.NeedsInput {
+				needsInputCount++
+			}
+		}
+
 		headerText := fmt.Sprintf("%s %s (%d)", col.Icon, col.Title, len(col.Tasks))
+		if needsInputCount > 0 {
+			headerText = fmt.Sprintf("%s %s (%d) ⚡%d", col.Icon, col.Title, len(col.Tasks), needsInputCount)
+		}
 		headerBar := headerBarStyle.Render(headerText)
 
 		// Task cards - calculate how many fit
@@ -497,7 +517,18 @@ func (k *KanbanBoard) viewMobile() string {
 		Bold(true).
 		Align(lipgloss.Center)
 
+	// Count tasks needing input in this column
+	needsInputCount := 0
+	for _, task := range col.Tasks {
+		if task.NeedsInput {
+			needsInputCount++
+		}
+	}
+
 	headerText := fmt.Sprintf("%s %s (%d)", col.Icon, col.Title, len(col.Tasks))
+	if needsInputCount > 0 {
+		headerText = fmt.Sprintf("%s %s (%d) ⚡%d", col.Icon, col.Title, len(col.Tasks), needsInputCount)
+	}
 	headerBar := headerBarStyle.Render(headerText)
 
 	// Task cards - calculate how many fit
@@ -708,6 +739,21 @@ func (k *KanbanBoard) renderTaskCard(task *db.Task, width int, isSelected bool) 
 		b.WriteString(PRStatusBadge(prInfo))
 	}
 
+	// Needs input indicator - prominently show when task needs user attention
+	if task.NeedsInput {
+		needsInputStyle := lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#000000")).
+			Background(lipgloss.Color("#FBBF24")). // Amber/yellow background
+			Bold(true).
+			Padding(0, 1)
+		indicator := "⚡INPUT"
+		if task.NeedsInputReason == "permission" {
+			indicator = "🔐PERM"
+		}
+		b.WriteString(" ")
+		b.WriteString(needsInputStyle.Render(indicator))
+	}
+
 	// Schedule indicator - show if scheduled OR recurring
 	if task.IsScheduled() || task.IsRecurring() {
 		scheduleStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("214")) // Orange for schedule
@@ -788,6 +834,19 @@ func (k *KanbanBoard) FocusColumn(colIdx int) {
 // ColumnCount returns the number of columns.
 func (k *KanbanBoard) ColumnCount() int {
 	return len(k.columns)
+}
+
+// CountTasksNeedingInput returns the total count of tasks that need user input.
+func (k *KanbanBoard) CountTasksNeedingInput() int {
+	count := 0
+	for _, col := range k.columns {
+		for _, task := range col.Tasks {
+			if task.NeedsInput {
+				count++
+			}
+		}
+	}
+	return count
 }
 
 // GetTaskPosition returns the position of the currently selected task in its column.

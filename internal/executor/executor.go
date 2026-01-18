@@ -2233,7 +2233,7 @@ func (e *Executor) saveTranscriptOnCompletion(taskID int64, workDir string) {
 }
 
 // pollTmuxSession waits for the tmux session to end or task status to change.
-// Status is managed entirely by Claude hooks - we just wait and check the result.
+// Status is managed by executor hooks (Claude hooks or Codex notify hooks).
 // Task only goes to "done" if user/MCP explicitly marks it done.
 // NOTE: We intentionally do NOT kill tmux windows here - they're kept around so
 // users can review Claude's work. Windows are only killed on task deletion.

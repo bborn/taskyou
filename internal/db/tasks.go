@@ -35,6 +35,10 @@ type Task struct {
 	ScheduledAt *LocalTime // When to next run (nil = not scheduled)
 	Recurrence  string     // Recurrence pattern: "", "hourly", "daily", "weekly", "monthly", or cron expression
 	LastRunAt   *LocalTime // When last executed (for recurring tasks)
+	// User attention tracking - when task needs input from user
+	NeedsInput       bool       // Whether this task needs user input to continue
+	NeedsInputReason string     // Why input is needed: "permission", "question", "error", etc.
+	NeedsInputAt     *LocalTime // When the task started needing input
 }
 
 // Task statuses
@@ -161,7 +165,8 @@ func (db *DB) GetTask(id int64) (*Task, error) {
 		       COALESCE(daemon_session, ''), COALESCE(pr_url, ''), COALESCE(pr_number, 0),
 		       COALESCE(dangerous_mode, 0), COALESCE(tags, ''),
 		       created_at, updated_at, started_at, completed_at,
-		       scheduled_at, recurrence, last_run_at
+		       scheduled_at, recurrence, last_run_at,
+		       COALESCE(needs_input, 0), COALESCE(needs_input_reason, ''), needs_input_at
 		FROM tasks WHERE id = ?
 	`, id).Scan(
 		&t.ID, &t.Title, &t.Body, &t.Status, &t.Type, &t.Project, &t.Executor,
@@ -170,6 +175,7 @@ func (db *DB) GetTask(id int64) (*Task, error) {
 		&t.DangerousMode, &t.Tags,
 		&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
 		&t.ScheduledAt, &t.Recurrence, &t.LastRunAt,
+		&t.NeedsInput, &t.NeedsInputReason, &t.NeedsInputAt,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -198,7 +204,8 @@ func (db *DB) ListTasks(opts ListTasksOptions) ([]*Task, error) {
 		       COALESCE(daemon_session, ''), COALESCE(pr_url, ''), COALESCE(pr_number, 0),
 		       COALESCE(dangerous_mode, 0), COALESCE(tags, ''),
 		       created_at, updated_at, started_at, completed_at,
-		       scheduled_at, recurrence, last_run_at
+		       scheduled_at, recurrence, last_run_at,
+		       COALESCE(needs_input, 0), COALESCE(needs_input_reason, ''), needs_input_at
 		FROM tasks WHERE 1=1
 	`
 	args := []interface{}{}
@@ -251,6 +258,7 @@ func (db *DB) ListTasks(opts ListTasksOptions) ([]*Task, error) {
 			&t.DangerousMode, &t.Tags,
 			&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
 			&t.ScheduledAt, &t.Recurrence, &t.LastRunAt,
+			&t.NeedsInput, &t.NeedsInputReason, &t.NeedsInputAt,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("scan task: %w", err)
@@ -275,7 +283,8 @@ func (db *DB) SearchTasks(query string, limit int) ([]*Task, error) {
 		       COALESCE(daemon_session, ''), COALESCE(pr_url, ''), COALESCE(pr_number, 0),
 		       COALESCE(dangerous_mode, 0), COALESCE(tags, ''),
 		       created_at, updated_at, started_at, completed_at,
-		       scheduled_at, recurrence, last_run_at
+		       scheduled_at, recurrence, last_run_at,
+		       COALESCE(needs_input, 0), COALESCE(needs_input_reason, ''), needs_input_at
 		FROM tasks
 		WHERE (
 			title LIKE ? COLLATE NOCASE
@@ -305,6 +314,7 @@ func (db *DB) SearchTasks(query string, limit int) ([]*Task, error) {
 			&t.DangerousMode, &t.Tags,
 			&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
 			&t.ScheduledAt, &t.Recurrence, &t.LastRunAt,
+			&t.NeedsInput, &t.NeedsInputReason, &t.NeedsInputAt,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("scan task: %w", err)
@@ -412,6 +422,58 @@ func (db *DB) UpdateTaskDaemonSession(taskID int64, daemonSession string) error 
 		return fmt.Errorf("update task daemon session: %w", err)
 	}
 	return nil
+}
+
+// SetTaskNeedsInput marks a task as needing user input.
+// reason can be: "permission" (waiting for permission), "question" (asking a question),
+// "error" (encountered an error), or any other descriptive string.
+func (db *DB) SetTaskNeedsInput(taskID int64, reason string) error {
+	_, err := db.Exec(`
+		UPDATE tasks SET
+			needs_input = 1,
+			needs_input_reason = ?,
+			needs_input_at = CURRENT_TIMESTAMP,
+			updated_at = CURRENT_TIMESTAMP
+		WHERE id = ?
+	`, reason, taskID)
+	if err != nil {
+		return fmt.Errorf("set task needs input: %w", err)
+	}
+	return nil
+}
+
+// ClearTaskNeedsInput clears the needs_input flag when user has provided input.
+func (db *DB) ClearTaskNeedsInput(taskID int64) error {
+	_, err := db.Exec(`
+		UPDATE tasks SET
+			needs_input = 0,
+			needs_input_reason = '',
+			needs_input_at = NULL,
+			updated_at = CURRENT_TIMESTAMP
+		WHERE id = ?
+	`, taskID)
+	if err != nil {
+		return fmt.Errorf("clear task needs input: %w", err)
+	}
+	return nil
+}
+
+// CountTasksNeedingInput returns the count of tasks that need user input.
+func (db *DB) CountTasksNeedingInput() (int, error) {
+	var count int
+	err := db.QueryRow(`
+		SELECT COUNT(*) FROM tasks
+		WHERE needs_input = 1 AND status NOT IN (?, ?)
+	`, StatusDone, StatusArchived).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("count tasks needing input: %w", err)
+	}
+	return count, nil
+}
+
+// GetTasksNeedingInput returns all tasks that need user input.
+func (db *DB) GetTasksNeedingInput() ([]*Task, error) {
+	return db.ListTasks(ListTasksOptions{})
 }
 
 // DeleteTask deletes a task.

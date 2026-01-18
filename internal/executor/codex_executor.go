@@ -114,10 +114,23 @@ func (c *CodexExecutor) runCodex(ctx context.Context, task *db.Task, workDir, pr
 		dangerousFlag = "--full-auto "
 	}
 
+	// Find the task binary path for notify hook
+	taskBin, err := os.Executable()
+	if err != nil {
+		taskBin, _ = exec.LookPath("task")
+		if taskBin == "" {
+			taskBin = "task"
+		}
+	}
+
+	// Configure notify hook to call task codex-hook when Codex needs input
+	// The notify hook fires for approval-requested and agent-turn-complete events
+	notifyConfig := fmt.Sprintf(`notify=["%s", "codex-hook"]`, taskBin)
+
 	// Note: Codex doesn't have built-in session resume like Claude,
 	// so we always start fresh but include full context
-	script = fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q codex %s"$(cat %q)"`,
-		task.ID, sessionID, task.Port, task.WorktreePath, dangerousFlag, promptFile.Name())
+	script = fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q codex -c '%s' %s"$(cat %q)"`,
+		task.ID, sessionID, task.Port, task.WorktreePath, notifyConfig, dangerousFlag, promptFile.Name())
 
 	// Create new window in task-daemon session
 	actualSession, tmuxErr := createTmuxWindow(daemonSession, windowName, workDir, script)

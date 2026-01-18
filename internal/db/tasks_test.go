@@ -1831,3 +1831,202 @@ func TestCountMemoriesByProject(t *testing.T) {
 		t.Errorf("expected 0 memories for nonexistent project, got %d", count)
 	}
 }
+
+func TestTaskNeedsInput(t *testing.T) {
+	// Create temporary database
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	db, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer db.Close()
+	defer os.Remove(dbPath)
+
+	// Create a task
+	task := &Task{
+		Title:   "Test Task",
+		Status:  StatusProcessing,
+		Type:    TypeCode,
+		Project: "personal",
+	}
+	if err := db.CreateTask(task); err != nil {
+		t.Fatalf("failed to create task: %v", err)
+	}
+
+	// Verify task initially doesn't need input
+	retrieved, err := db.GetTask(task.ID)
+	if err != nil {
+		t.Fatalf("failed to get task: %v", err)
+	}
+	if retrieved.NeedsInput {
+		t.Error("expected NeedsInput to be false initially")
+	}
+	if retrieved.NeedsInputReason != "" {
+		t.Errorf("expected empty NeedsInputReason, got %q", retrieved.NeedsInputReason)
+	}
+	if retrieved.NeedsInputAt != nil {
+		t.Error("expected NeedsInputAt to be nil initially")
+	}
+
+	// Set needs_input with "permission" reason
+	if err := db.SetTaskNeedsInput(task.ID, "permission"); err != nil {
+		t.Fatalf("failed to set needs input: %v", err)
+	}
+
+	// Verify needs_input is now true
+	retrieved, err = db.GetTask(task.ID)
+	if err != nil {
+		t.Fatalf("failed to get task: %v", err)
+	}
+	if !retrieved.NeedsInput {
+		t.Error("expected NeedsInput to be true after setting")
+	}
+	if retrieved.NeedsInputReason != "permission" {
+		t.Errorf("expected NeedsInputReason 'permission', got %q", retrieved.NeedsInputReason)
+	}
+	if retrieved.NeedsInputAt == nil {
+		t.Error("expected NeedsInputAt to be set")
+	}
+
+	// Clear needs_input
+	if err := db.ClearTaskNeedsInput(task.ID); err != nil {
+		t.Fatalf("failed to clear needs input: %v", err)
+	}
+
+	// Verify needs_input is now false
+	retrieved, err = db.GetTask(task.ID)
+	if err != nil {
+		t.Fatalf("failed to get task: %v", err)
+	}
+	if retrieved.NeedsInput {
+		t.Error("expected NeedsInput to be false after clearing")
+	}
+	if retrieved.NeedsInputReason != "" {
+		t.Errorf("expected empty NeedsInputReason after clearing, got %q", retrieved.NeedsInputReason)
+	}
+	if retrieved.NeedsInputAt != nil {
+		t.Error("expected NeedsInputAt to be nil after clearing")
+	}
+}
+
+func TestCountTasksNeedingInput(t *testing.T) {
+	// Create temporary database
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	db, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer db.Close()
+	defer os.Remove(dbPath)
+
+	// Initially no tasks need input
+	count, err := db.CountTasksNeedingInput()
+	if err != nil {
+		t.Fatalf("failed to count tasks: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("expected 0 tasks needing input, got %d", count)
+	}
+
+	// Create tasks with different states
+	task1 := &Task{
+		Title:   "Task 1 - needs input",
+		Status:  StatusBlocked,
+		Type:    TypeCode,
+		Project: "personal",
+	}
+	if err := db.CreateTask(task1); err != nil {
+		t.Fatalf("failed to create task: %v", err)
+	}
+	db.SetTaskNeedsInput(task1.ID, "question")
+
+	task2 := &Task{
+		Title:   "Task 2 - needs permission",
+		Status:  StatusBlocked,
+		Type:    TypeCode,
+		Project: "personal",
+	}
+	if err := db.CreateTask(task2); err != nil {
+		t.Fatalf("failed to create task: %v", err)
+	}
+	db.SetTaskNeedsInput(task2.ID, "permission")
+
+	task3 := &Task{
+		Title:   "Task 3 - doesn't need input",
+		Status:  StatusProcessing,
+		Type:    TypeCode,
+		Project: "personal",
+	}
+	if err := db.CreateTask(task3); err != nil {
+		t.Fatalf("failed to create task: %v", err)
+	}
+
+	// Count should be 2
+	count, err = db.CountTasksNeedingInput()
+	if err != nil {
+		t.Fatalf("failed to count tasks: %v", err)
+	}
+	if count != 2 {
+		t.Errorf("expected 2 tasks needing input, got %d", count)
+	}
+
+	// Mark task1 as done - should not be counted
+	if err := db.UpdateTaskStatus(task1.ID, StatusDone); err != nil {
+		t.Fatalf("failed to update task status: %v", err)
+	}
+
+	// Count should now be 1
+	count, err = db.CountTasksNeedingInput()
+	if err != nil {
+		t.Fatalf("failed to count tasks: %v", err)
+	}
+	if count != 1 {
+		t.Errorf("expected 1 task needing input after marking one as done, got %d", count)
+	}
+}
+
+func TestNeedsInputInListTasks(t *testing.T) {
+	// Create temporary database
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	db, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer db.Close()
+	defer os.Remove(dbPath)
+
+	// Create task that needs input
+	task := &Task{
+		Title:   "Task needing input",
+		Status:  StatusBlocked,
+		Type:    TypeCode,
+		Project: "personal",
+	}
+	if err := db.CreateTask(task); err != nil {
+		t.Fatalf("failed to create task: %v", err)
+	}
+	db.SetTaskNeedsInput(task.ID, "question")
+
+	// List tasks and verify needs_input fields are populated
+	tasks, err := db.ListTasks(ListTasksOptions{})
+	if err != nil {
+		t.Fatalf("failed to list tasks: %v", err)
+	}
+
+	if len(tasks) != 1 {
+		t.Fatalf("expected 1 task, got %d", len(tasks))
+	}
+
+	if !tasks[0].NeedsInput {
+		t.Error("expected NeedsInput to be true in list result")
+	}
+	if tasks[0].NeedsInputReason != "question" {
+		t.Errorf("expected NeedsInputReason 'question', got %q", tasks[0].NeedsInputReason)
+	}
+}

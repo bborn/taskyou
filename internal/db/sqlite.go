@@ -237,6 +237,10 @@ func (db *DB) migrate() error {
 		`ALTER TABLE tasks ADD COLUMN tags TEXT DEFAULT ''`, // comma-separated tags for categorization (e.g., "customer-support,email,influence-kit")
 		// Task executor - which CLI to use for task execution
 		`ALTER TABLE tasks ADD COLUMN executor TEXT DEFAULT 'claude'`, // Task executor: "claude" (default), "codex"
+		// User attention tracking - when task needs input to continue
+		`ALTER TABLE tasks ADD COLUMN needs_input INTEGER DEFAULT 0`,      // Whether this task needs user input
+		`ALTER TABLE tasks ADD COLUMN needs_input_reason TEXT DEFAULT ''`, // Why: "permission", "question", "error"
+		`ALTER TABLE tasks ADD COLUMN needs_input_at DATETIME`,            // When the task started needing input
 	}
 
 	for _, m := range alterMigrations {
