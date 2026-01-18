@@ -573,6 +573,8 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if tickerCmd := m.detailView.StartTmuxTicker(); tickerCmd != nil {
 				cmds = append(cmds, tickerCmd)
 			}
+			// Start fast focus tick for responsive dimming
+			cmds = append(cmds, m.focusTick())
 			// Fetch PR info for the task
 			if prCmd := m.fetchPRInfo(msg.task); prCmd != nil {
 				cmds = append(cmds, prCmd)
@@ -711,6 +713,13 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, m.loadTasks())
 		}
 		cmds = append(cmds, m.tick())
+
+	case focusTickMsg:
+		// Fast tick for responsive focus state changes in detail view
+		if m.currentView == ViewDetail && m.detailView != nil {
+			m.detailView.RefreshFocusState()
+			cmds = append(cmds, m.focusTick())
+		}
 
 	case dbChangeMsg:
 		// Database file changed - reload tasks
@@ -2275,6 +2284,8 @@ type taskEventMsg struct {
 
 type tickMsg time.Time
 
+type focusTickMsg time.Time
+
 type prRefreshTickMsg time.Time
 
 type dbChangeMsg struct{}
@@ -2709,6 +2720,12 @@ func (m *AppModel) waitForTaskEvent() tea.Cmd {
 func (m *AppModel) tick() tea.Cmd {
 	return tea.Tick(1*time.Second, func(t time.Time) tea.Msg {
 		return tickMsg(t)
+	})
+}
+
+func (m *AppModel) focusTick() tea.Cmd {
+	return tea.Tick(200*time.Millisecond, func(t time.Time) tea.Msg {
+		return focusTickMsg(t)
 	})
 }
 

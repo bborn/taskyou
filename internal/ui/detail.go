@@ -1130,6 +1130,12 @@ func (m *DetailModel) IsFocused() bool {
 	return m.focused
 }
 
+// RefreshFocusState is a lightweight refresh that only updates focus state.
+// Used by the fast focus tick for responsive dimming without full refresh overhead.
+func (m *DetailModel) RefreshFocusState() {
+	m.checkFocusState()
+}
+
 // checkFocusState checks if the TUI pane is the active pane in tmux.
 func (m *DetailModel) checkFocusState() {
 	// Default to focused if not in tmux or no panes joined
@@ -1295,12 +1301,13 @@ func (m *DetailModel) renderHeader() string {
 		if m.focused {
 			meta.WriteString(PRStatusBadge(m.prInfo))
 		} else {
-			// Dimmed PR badge
+			// Dimmed PR badge - use same icon as focused, just dimmed
 			prBadgeStyle := lipgloss.NewStyle().
-				Padding(0, 1).
+				Padding(0, 0).
 				Background(dimmedBg).
-				Foreground(dimmedFg)
-			meta.WriteString(prBadgeStyle.Render(string(m.prInfo.State)))
+				Foreground(dimmedFg).
+				Bold(true)
+			meta.WriteString(prBadgeStyle.Render(PRStatusIcon(m.prInfo)))
 		}
 		meta.WriteString(" ")
 		prDesc := lipgloss.NewStyle().
