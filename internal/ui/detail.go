@@ -53,6 +53,9 @@ type DetailModel struct {
 
 	// Shell pane visibility state
 	shellPaneHidden bool
+
+	// Focus state - true when the detail pane is the active tmux pane
+	focused bool
 }
 
 func (m *DetailModel) executorDisplayName() string {
@@ -122,6 +125,9 @@ func (m *DetailModel) Refresh() {
 		cancel()
 	}
 
+	// Check if the detail pane is focused
+	m.checkFocusState()
+
 	// Ensure tmux panes are joined if available (handles external close/detach)
 	m.ensureTmuxPanesJoined()
 }
@@ -144,6 +150,7 @@ func NewDetailModel(t *db.Task, database *db.DB, exec *executor.Executor, width,
 		executor: exec,
 		width:    width,
 		height:   height,
+		focused:  true, // Initially focused when viewing details
 	}
 
 	// Load logs
@@ -816,6 +823,7 @@ func (m *DetailModel) joinTmuxPanes() {
 		exec.CommandContext(ctx, "tmux", "select-pane", "-t", tuiPaneID, "-T", m.getPaneTitle()).Run()
 		// Ensure the TUI pane has focus for keyboard interaction
 		exec.CommandContext(ctx, "tmux", "select-pane", "-t", tuiPaneID).Run()
+		m.focused = true
 	}
 
 	// Update status bar with navigation hints
@@ -1097,6 +1105,33 @@ func (m *DetailModel) IsShellPaneHidden() bool {
 	return m.shellPaneHidden
 }
 
+// IsFocused returns true if the detail pane is the active tmux pane.
+func (m *DetailModel) IsFocused() bool {
+	return m.focused
+}
+
+// checkFocusState checks if the TUI pane is the active pane in tmux.
+func (m *DetailModel) checkFocusState() {
+	// Default to focused if not in tmux or no panes joined
+	if os.Getenv("TMUX") == "" || m.tuiPaneID == "" {
+		m.focused = true
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+
+	// Get the currently active pane ID
+	out, err := exec.CommandContext(ctx, "tmux", "display-message", "-p", "#{pane_id}").Output()
+	if err != nil {
+		m.focused = true // Default to focused on error
+		return
+	}
+
+	activePaneID := strings.TrimSpace(string(out))
+	m.focused = activePaneID == m.tuiPaneID
+}
+
 // View renders the detail view.
 func (m *DetailModel) View() string {
 	if !m.ready {
@@ -1106,9 +1141,15 @@ func (m *DetailModel) View() string {
 	header := m.renderHeader()
 	content := m.viewport.View()
 
+	// Use dimmed border when unfocused
+	borderColor := ColorPrimary
+	if !m.focused {
+		borderColor = lipgloss.Color("#4B5563") // Muted gray
+	}
+
 	box := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
-		BorderForeground(ColorPrimary).
+		BorderForeground(borderColor).
 		Width(m.width-2).
 		Padding(0, 1)
 
@@ -1122,56 +1163,107 @@ func (m *DetailModel) View() string {
 func (m *DetailModel) renderHeader() string {
 	t := m.task
 
+	// When unfocused, use muted styles for badges
+	dimmedBg := lipgloss.Color("#4B5563")     // Muted gray background
+	dimmedFg := lipgloss.Color("#9CA3AF")     // Muted gray foreground
+	dimmedTextFg := lipgloss.Color("#6B7280") // Even more muted for text
+
 	// Task title (ID and position are shown in the panel border)
-	subtitle := Bold.Render(t.Title)
+	var subtitle string
+	if m.focused {
+		subtitle = Bold.Render(t.Title)
+	} else {
+		subtitle = lipgloss.NewStyle().Foreground(dimmedTextFg).Render(t.Title)
+	}
 
 	var meta strings.Builder
 
 	// Status badge
-	statusStyle := lipgloss.NewStyle().
-		Padding(0, 1).
-		Background(StatusColor(t.Status)).
-		Foreground(lipgloss.Color("#FFFFFF"))
+	var statusStyle lipgloss.Style
+	if m.focused {
+		statusStyle = lipgloss.NewStyle().
+			Padding(0, 1).
+			Background(StatusColor(t.Status)).
+			Foreground(lipgloss.Color("#FFFFFF"))
+	} else {
+		statusStyle = lipgloss.NewStyle().
+			Padding(0, 1).
+			Background(dimmedBg).
+			Foreground(dimmedFg)
+	}
 	meta.WriteString(statusStyle.Render(t.Status))
 	meta.WriteString("  ")
 
 	// Dangerous mode badge (only shown when in dangerous mode and task is active)
 	if t.DangerousMode && (t.Status == db.StatusProcessing || t.Status == db.StatusBlocked) {
-		dangerousStyle := lipgloss.NewStyle().
-			Padding(0, 1).
-			Background(lipgloss.Color("196")). // Red
-			Foreground(lipgloss.Color("#FFFFFF")).
-			Bold(true)
+		var dangerousStyle lipgloss.Style
+		if m.focused {
+			dangerousStyle = lipgloss.NewStyle().
+				Padding(0, 1).
+				Background(lipgloss.Color("196")). // Red
+				Foreground(lipgloss.Color("#FFFFFF")).
+				Bold(true)
+		} else {
+			dangerousStyle = lipgloss.NewStyle().
+				Padding(0, 1).
+				Background(dimmedBg).
+				Foreground(dimmedFg)
+		}
 		meta.WriteString(dangerousStyle.Render("DANGEROUS"))
 		meta.WriteString("  ")
 	}
 
 	// Project
 	if t.Project != "" {
-		projectStyle := lipgloss.NewStyle().
-			Padding(0, 1).
-			Background(ProjectColor(t.Project)).
-			Foreground(lipgloss.Color("#FFFFFF"))
+		var projectStyle lipgloss.Style
+		if m.focused {
+			projectStyle = lipgloss.NewStyle().
+				Padding(0, 1).
+				Background(ProjectColor(t.Project)).
+				Foreground(lipgloss.Color("#FFFFFF"))
+		} else {
+			projectStyle = lipgloss.NewStyle().
+				Padding(0, 1).
+				Background(dimmedBg).
+				Foreground(dimmedFg)
+		}
 		meta.WriteString(projectStyle.Render(t.Project))
 		meta.WriteString("  ")
 	}
 
 	// Type
 	if t.Type != "" {
-		typeStyle := lipgloss.NewStyle().
-			Padding(0, 1).
-			Background(ColorCode).
-			Foreground(lipgloss.Color("#FFFFFF"))
+		var typeStyle lipgloss.Style
+		if m.focused {
+			typeStyle = lipgloss.NewStyle().
+				Padding(0, 1).
+				Background(ColorCode).
+				Foreground(lipgloss.Color("#FFFFFF"))
+		} else {
+			typeStyle = lipgloss.NewStyle().
+				Padding(0, 1).
+				Background(dimmedBg).
+				Foreground(dimmedFg)
+		}
 		meta.WriteString(typeStyle.Render(t.Type))
 	}
 
 	// PR status
 	if m.prInfo != nil {
 		meta.WriteString("  ")
-		meta.WriteString(PRStatusBadge(m.prInfo))
+		if m.focused {
+			meta.WriteString(PRStatusBadge(m.prInfo))
+		} else {
+			// Dimmed PR badge
+			prBadgeStyle := lipgloss.NewStyle().
+				Padding(0, 1).
+				Background(dimmedBg).
+				Foreground(dimmedFg)
+			meta.WriteString(prBadgeStyle.Render(string(m.prInfo.State)))
+		}
 		meta.WriteString(" ")
 		prDesc := lipgloss.NewStyle().
-			Foreground(ColorMuted).
+			Foreground(dimmedTextFg).
 			Render(m.prInfo.StatusDescription())
 		meta.WriteString(prDesc)
 	}
@@ -1179,10 +1271,18 @@ func (m *DetailModel) renderHeader() string {
 	// Schedule info - show if scheduled OR recurring
 	if t.IsScheduled() || t.IsRecurring() {
 		meta.WriteString("  ")
-		scheduleStyle := lipgloss.NewStyle().
-			Padding(0, 1).
-			Background(lipgloss.Color("214")). // Orange
-			Foreground(lipgloss.Color("#000000"))
+		var scheduleStyle lipgloss.Style
+		if m.focused {
+			scheduleStyle = lipgloss.NewStyle().
+				Padding(0, 1).
+				Background(lipgloss.Color("214")). // Orange
+				Foreground(lipgloss.Color("#000000"))
+		} else {
+			scheduleStyle = lipgloss.NewStyle().
+				Padding(0, 1).
+				Background(dimmedBg).
+				Foreground(dimmedFg)
+		}
 		icon := "⏰"
 		if t.IsRecurring() {
 			icon = "🔁"
@@ -1200,8 +1300,14 @@ func (m *DetailModel) renderHeader() string {
 
 		// Show last run info for recurring tasks
 		if t.LastRunAt != nil {
-			lastRunStyle := lipgloss.NewStyle().
-				Foreground(lipgloss.Color("214"))
+			var lastRunStyle lipgloss.Style
+			if m.focused {
+				lastRunStyle = lipgloss.NewStyle().
+					Foreground(lipgloss.Color("214"))
+			} else {
+				lastRunStyle = lipgloss.NewStyle().
+					Foreground(dimmedTextFg)
+			}
 			lastRunText := fmt.Sprintf(" Last: %s", t.LastRunAt.Time.Format("Jan 2 3:04pm"))
 			meta.WriteString(lastRunStyle.Render(lastRunText))
 		}
@@ -1210,7 +1316,11 @@ func (m *DetailModel) renderHeader() string {
 	// PR link if available
 	var prLine string
 	if m.prInfo != nil && m.prInfo.URL != "" {
-		prLine = Dim.Render(fmt.Sprintf("PR #%d: %s", m.prInfo.Number, m.prInfo.URL))
+		if m.focused {
+			prLine = Dim.Render(fmt.Sprintf("PR #%d: %s", m.prInfo.Number, m.prInfo.URL))
+		} else {
+			prLine = lipgloss.NewStyle().Foreground(dimmedTextFg).Render(fmt.Sprintf("PR #%d: %s", m.prInfo.Number, m.prInfo.URL))
+		}
 	}
 
 	lines := []string{subtitle, meta.String()}
@@ -1226,24 +1336,49 @@ func (m *DetailModel) renderContent() string {
 	t := m.task
 	var b strings.Builder
 
+	// Dimmed style for unfocused content
+	dimmedStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280"))
+
 	// Description
 	if t.Body != "" && strings.TrimSpace(t.Body) != "" {
-		b.WriteString(Bold.Render("Description"))
+		if m.focused {
+			b.WriteString(Bold.Render("Description"))
+		} else {
+			b.WriteString(dimmedStyle.Render("Description"))
+		}
 		b.WriteString("\n\n")
 
 		// Create a renderer with the correct width for the viewport
+		// Use different style paths for focused vs unfocused
+		stylePath := "dark"
+		if !m.focused {
+			stylePath = "notty" // More muted style for unfocused state
+		}
 		renderer, err := glamour.NewTermRenderer(
-			glamour.WithStylePath("dark"),
+			glamour.WithStylePath(stylePath),
 			glamour.WithWordWrap(m.width-4), // Match viewport width
 		)
 		if err != nil {
-			b.WriteString(t.Body)
+			if m.focused {
+				b.WriteString(t.Body)
+			} else {
+				b.WriteString(dimmedStyle.Render(t.Body))
+			}
 		} else {
 			rendered, err := renderer.Render(t.Body)
 			if err != nil {
-				b.WriteString(t.Body)
+				if m.focused {
+					b.WriteString(t.Body)
+				} else {
+					b.WriteString(dimmedStyle.Render(t.Body))
+				}
 			} else {
-				b.WriteString(strings.TrimSpace(rendered))
+				if m.focused {
+					b.WriteString(strings.TrimSpace(rendered))
+				} else {
+					// Apply dimmed style to the entire rendered content
+					b.WriteString(dimmedStyle.Render(strings.TrimSpace(rendered)))
+				}
 			}
 		}
 		b.WriteString("\n")
@@ -1252,7 +1387,11 @@ func (m *DetailModel) renderContent() string {
 	// Execution logs
 	if len(m.logs) > 0 {
 		b.WriteString("\n")
-		b.WriteString(Bold.Render("Execution Log"))
+		if m.focused {
+			b.WriteString(Bold.Render("Execution Log"))
+		} else {
+			b.WriteString(dimmedStyle.Render("Execution Log"))
+		}
 		b.WriteString("\n\n")
 
 		for _, log := range m.logs {
@@ -1274,11 +1413,20 @@ func (m *DetailModel) renderContent() string {
 				icon = "📤"
 			}
 
-			line := fmt.Sprintf("%s %s %s",
-				Dim.Render(log.CreatedAt.Format("15:04:05")),
-				icon,
-				log.Content,
-			)
+			var line string
+			if m.focused {
+				line = fmt.Sprintf("%s %s %s",
+					Dim.Render(log.CreatedAt.Format("15:04:05")),
+					icon,
+					log.Content,
+				)
+			} else {
+				line = fmt.Sprintf("%s %s %s",
+					dimmedStyle.Render(log.CreatedAt.Format("15:04:05")),
+					icon,
+					dimmedStyle.Render(log.Content),
+				)
+			}
 			b.WriteString(line)
 			b.WriteString("\n")
 		}
@@ -1376,11 +1524,18 @@ func (m *DetailModel) renderHelp() string {
 	}...)
 
 	var help string
+	dimmedKeyStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280"))
+	dimmedDescStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#4B5563"))
+
 	for i, k := range keys {
 		if i > 0 {
 			help += "  "
 		}
-		help += HelpKey.Render(k.key) + " " + HelpDesc.Render(k.desc)
+		if m.focused {
+			help += HelpKey.Render(k.key) + " " + HelpDesc.Render(k.desc)
+		} else {
+			help += dimmedKeyStyle.Render(k.key) + " " + dimmedDescStyle.Render(k.desc)
+		}
 	}
 
 	return HelpBar.Render(help)
