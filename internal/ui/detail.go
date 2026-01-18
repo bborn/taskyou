@@ -1325,6 +1325,12 @@ func (m *DetailModel) renderHelp() string {
 		desc string
 	}{"S", "status"})
 
+	// Always show copy to clipboard option
+	keys = append(keys, struct {
+		key  string
+		desc string
+	}{"y", "copy"})
+
 	// Show dangerous mode toggle when task is processing or blocked
 	if m.task != nil && (m.task.Status == db.StatusProcessing || m.task.Status == db.StatusBlocked) {
 		toggleDesc := "dangerous mode"

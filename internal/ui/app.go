@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/atotto/clipboard"
 	"github.com/bborn/workflow/internal/db"
 	"github.com/bborn/workflow/internal/executor"
 	"github.com/bborn/workflow/internal/github"
@@ -74,6 +75,8 @@ type KeyMap struct {
 	FocusDone       key.Binding
 	// Shell pane toggle
 	ToggleShellPane key.Binding
+	// Copy task content to clipboard
+	CopyToClipboard key.Binding
 }
 
 // ShortHelp returns key bindings to show in the mini help.
@@ -207,6 +210,10 @@ func DefaultKeyMap() KeyMap {
 		ToggleShellPane: key.NewBinding(
 			key.WithKeys("\\"),
 			key.WithHelp("\\", "toggle shell"),
+		),
+		CopyToClipboard: key.NewBinding(
+			key.WithKeys("y"),
+			key.WithHelp("y", "copy"),
 		),
 	}
 }
@@ -1255,6 +1262,16 @@ func (m *AppModel) updateDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 	if key.Matches(keyMsg, m.keys.ToggleShellPane) && m.detailView != nil {
 		m.detailView.ToggleShellPane()
+		return m, nil
+	}
+
+	// Copy task content to clipboard
+	if key.Matches(keyMsg, m.keys.CopyToClipboard) && m.selectedTask != nil {
+		content := m.formatTaskForClipboard(m.selectedTask)
+		if err := clipboard.WriteAll(content); err == nil {
+			m.notification = "Copied to clipboard"
+			m.notifyUntil = time.Now().Add(2 * time.Second)
+		}
 		return m, nil
 	}
 
@@ -2664,4 +2681,48 @@ func (m *AppModel) stopDatabaseWatcher() {
 	if m.dbChangeCh != nil {
 		close(m.dbChangeCh)
 	}
+}
+
+// formatTaskForClipboard formats a task's content for copying to clipboard.
+// Returns plain text with task details that can be easily pasted elsewhere.
+func (m *AppModel) formatTaskForClipboard(task *db.Task) string {
+	var b strings.Builder
+
+	// Task header
+	b.WriteString(fmt.Sprintf("Task #%d: %s\n", task.ID, task.Title))
+	b.WriteString(fmt.Sprintf("Status: %s\n", task.Status))
+
+	if task.Project != "" {
+		b.WriteString(fmt.Sprintf("Project: %s\n", task.Project))
+	}
+	if task.Type != "" {
+		b.WriteString(fmt.Sprintf("Type: %s\n", task.Type))
+	}
+	if task.BranchName != "" {
+		b.WriteString(fmt.Sprintf("Branch: %s\n", task.BranchName))
+	}
+
+	// Description
+	if task.Body != "" && strings.TrimSpace(task.Body) != "" {
+		b.WriteString("\n--- Description ---\n")
+		b.WriteString(task.Body)
+		b.WriteString("\n")
+	}
+
+	// Recent logs if we have access to them via detail view
+	if m.detailView != nil {
+		logs, _ := m.db.GetTaskLogs(task.ID, 50)
+		if len(logs) > 0 {
+			b.WriteString("\n--- Recent Logs ---\n")
+			for _, log := range logs {
+				b.WriteString(fmt.Sprintf("[%s] %s: %s\n",
+					log.CreatedAt.Format("15:04:05"),
+					log.LineType,
+					log.Content,
+				))
+			}
+		}
+	}
+
+	return b.String()
 }
