@@ -848,6 +848,19 @@ func (m *DetailModel) joinTmuxPanes() {
 	exec.CommandContext(ctx, "tmux", "bind-key", "-T", "root", "S-Up", "select-pane", "-t", ":.-").Run()
 	exec.CommandContext(ctx, "tmux", "bind-key", "-T", "root", "S-Left", "select-pane", "-t", ":.-").Run()
 
+	// Bind Shift+X then Arrow to jump to next/prev task while focusing executor pane
+	// This allows quick task navigation from any pane (especially useful from Claude pane):
+	// 1. Shift+X enters "task-nav" key table
+	// 2. Down/Up navigates to next/prev task and focuses executor pane
+	// The sequence: select TUI pane -> send navigation key -> wait for re-join -> select executor pane
+	exec.CommandContext(ctx, "tmux", "bind-key", "-T", "root", "X", "switch-client", "-T", "task-nav").Run()
+	nextTaskCmd := "tmux select-pane -t :.0 && tmux send-keys Down && sleep 0.3 && tmux select-pane -t :.1"
+	exec.CommandContext(ctx, "tmux", "bind-key", "-T", "task-nav", "Down", "run-shell", nextTaskCmd).Run()
+	exec.CommandContext(ctx, "tmux", "bind-key", "-T", "task-nav", "S-Down", "run-shell", nextTaskCmd).Run()
+	prevTaskCmd := "tmux select-pane -t :.0 && tmux send-keys Up && sleep 0.3 && tmux select-pane -t :.1"
+	exec.CommandContext(ctx, "tmux", "bind-key", "-T", "task-nav", "Up", "run-shell", prevTaskCmd).Run()
+	exec.CommandContext(ctx, "tmux", "bind-key", "-T", "task-nav", "S-Up", "run-shell", prevTaskCmd).Run()
+
 	// Capture initial dimensions so we can detect user resizing later
 	// This allows us to save only when the user has actually dragged to resize
 	m.initialDetailHeight = m.getCurrentDetailPaneHeight(tuiPaneID)
@@ -925,6 +938,13 @@ func (m *DetailModel) breakTmuxPanes(saveHeight bool) {
 	exec.CommandContext(ctx, "tmux", "unbind-key", "-T", "root", "S-Right").Run()
 	exec.CommandContext(ctx, "tmux", "unbind-key", "-T", "root", "S-Up").Run()
 	exec.CommandContext(ctx, "tmux", "unbind-key", "-T", "root", "S-Left").Run()
+
+	// Unbind Shift+X task navigation keybindings
+	exec.CommandContext(ctx, "tmux", "unbind-key", "-T", "root", "X").Run()
+	exec.CommandContext(ctx, "tmux", "unbind-key", "-T", "task-nav", "Down").Run()
+	exec.CommandContext(ctx, "tmux", "unbind-key", "-T", "task-nav", "S-Down").Run()
+	exec.CommandContext(ctx, "tmux", "unbind-key", "-T", "task-nav", "Up").Run()
+	exec.CommandContext(ctx, "tmux", "unbind-key", "-T", "task-nav", "S-Up").Run()
 
 	// Reset pane title back to main view label
 	exec.CommandContext(ctx, "tmux", "select-pane", "-t", "task-ui:.0", "-T", "Tasks").Run()
