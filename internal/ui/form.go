@@ -1400,12 +1400,12 @@ func (m *FormModel) SetSize(width, height int) {
 }
 
 // calculateBodyHeight calculates the appropriate height for the body textarea based on content.
-// Returns a height between minHeight (4) and maxHeight (50% of available screen height).
+// Returns a height between minHeight (8) and maxHeight (50% of available screen height).
 func (m *FormModel) calculateBodyHeight() int {
 	content := m.bodyInput.Value()
 
-	// Minimum height
-	minHeight := 4
+	// Minimum height - increased from 4 to 8 to display more content by default
+	minHeight := 8
 
 	// Maximum height is 50% of screen height
 	// Account for other form elements: header(2) + title(2) + body label(1) + project(2) +

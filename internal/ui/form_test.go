@@ -19,31 +19,31 @@ func TestCalculateBodyHeight(t *testing.T) {
 			content:      "",
 			screenHeight: 50,
 			screenWidth:  100,
-			wantMin:      4,
-			wantMax:      4,
+			wantMin:      8,
+			wantMax:      8,
 		},
 		{
 			name:         "single line returns minimum height",
 			content:      "hello world",
 			screenHeight: 50,
 			screenWidth:  100,
-			wantMin:      4,
-			wantMax:      4,
+			wantMin:      8,
+			wantMax:      8,
 		},
 		{
 			name:         "multiple lines grows height",
 			content:      "line1\nline2\nline3\nline4\nline5\nline6",
 			screenHeight: 50,
 			screenWidth:  100,
-			wantMin:      6,
-			wantMax:      6,
+			wantMin:      8,
+			wantMax:      8,
 		},
 		{
 			name:         "many lines capped at max height (50% of screen)",
 			content:      strings.Repeat("line\n", 50),
 			screenHeight: 50,
 			screenWidth:  100,
-			wantMin:      4,  // at least minimum
+			wantMin:      8,  // at least minimum
 			wantMax:      14, // (50-22)/2 = 14
 		},
 		{
@@ -51,8 +51,8 @@ func TestCalculateBodyHeight(t *testing.T) {
 			content:      strings.Repeat("a", 200), // should wrap on ~76 char width
 			screenHeight: 50,
 			screenWidth:  100,
-			wantMin:      4,
-			wantMax:      6, // wrapped lines
+			wantMin:      8,
+			wantMax:      8, // wrapped lines still within minimum
 		},
 	}
 
@@ -76,7 +76,7 @@ func TestCalculateBodyHeight(t *testing.T) {
 func TestUpdateBodyHeightSetsHeight(t *testing.T) {
 	m := NewFormModel(nil, 100, 50, "")
 
-	// Initially should have minimum height of 4
+	// Initially should have minimum height of 8
 	m.updateBodyHeight()
 	// The textarea height is internal, so we just verify no panic
 
@@ -105,8 +105,8 @@ func TestMaxHeightIs50PercentOfScreen(t *testing.T) {
 
 			// formOverhead is 22, so maxHeight = (screenHeight - 22) / 2
 			expectedMax := (screenHeight - 22) / 2
-			if expectedMax < 4 {
-				expectedMax = 4
+			if expectedMax < 8 {
+				expectedMax = 8
 			}
 
 			if height > expectedMax {
