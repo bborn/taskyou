@@ -25,8 +25,12 @@ A personal task management system with a beautiful terminal UI, SQLite storage, 
 - **Kanban Board** - Visual task management with 4 columns (Backlog, In Progress, Blocked, Done)
 - **Git Worktrees** - Each task runs in an isolated worktree, no conflicts between parallel tasks
 - **Pluggable Executors** - Choose between Claude Code or OpenAI Codex CLI per task
+- **Ghost Text Autocomplete** - LLM-powered suggestions for task titles and descriptions as you type
+- **VS Code-style Fuzzy Search** - Quick task navigation with smart matching (e.g., "dsno" matches "diseno website")
+- **Markdown Rendering** - Task descriptions render with proper formatting in the detail view
 - **Project Memories** - Persistent context that carries across tasks
 - **Real-time Updates** - Watch tasks execute live
+- **Auto-cleanup** - Automatic cleanup of Claude processes and config entries for completed tasks
 - **SSH Access** - Connect from anywhere via `ssh -p 2222 server`
 
 ## Prerequisites
@@ -82,7 +86,19 @@ ssh -p 2222 your-server
 ./bin/task daemon status  # Check daemon status
 ```
 
+### Maintenance commands
+
+```bash
+./bin/task purge-claude-config            # Remove stale ~/.claude.json entries
+./bin/task purge-claude-config --dry-run  # Preview what would be removed
+./bin/task claudes cleanup                # Kill orphaned Claude processes
+```
+
+**Auto-cleanup:** The daemon automatically cleans up Claude processes for tasks that have been done for more than 30 minutes, preventing memory bloat from orphaned processes.
+
 ## Keyboard Shortcuts
+
+### Kanban Board
 
 | Key | Action |
 |-----|--------|
@@ -93,13 +109,40 @@ ssh -p 2222 your-server
 | `x` | Execute (queue) task |
 | `r` | Retry task with feedback |
 | `c` | Close task |
+| `a` | Archive task |
 | `d` | Delete task |
 | `o` | Open task's working directory |
+| `p` | Command palette (fuzzy search) |
 | `/` | Filter tasks |
 | `m` | Project memories |
 | `s` | Settings |
 | `?` | Toggle help |
 | `q` | Quit |
+
+### Task Detail View
+
+| Key | Action |
+|-----|--------|
+| `e` | Edit task |
+| `x` | Execute task |
+| `r` | Retry with feedback |
+| `R` | Resume executor session |
+| `S` | Change task status |
+| `!` | Toggle dangerous/safe mode |
+| `\` | Toggle shell pane visibility |
+| `Shift+↑/↓` | Switch between panes |
+| `c` | Close task |
+| `a` | Archive task |
+| `d` | Delete task |
+| `Esc` | Back to kanban |
+
+### Task Form (Autocomplete)
+
+| Key | Action |
+|-----|--------|
+| `Tab` | Accept ghost text suggestion |
+| `Escape` | Dismiss suggestion |
+| `Ctrl+Space` | Manually trigger suggestion |
 
 ## Task Lifecycle
 
@@ -160,12 +203,22 @@ task settings set <key> <value>            # Set a value
 
 ### Ghost Text Autocomplete
 
-When creating or editing tasks, ghost text suggestions appear as you type. This feature uses the Anthropic API directly for fast completions.
+LLM-powered suggestions appear as you type task titles and descriptions, similar to GitHub Copilot:
+
+- **Title suggestions** - Autocomplete as you type the task title
+- **Body suggestions** - Auto-suggest a description when you tab from the title to an empty body field
+- **Cursor-aware** - Ghost text renders at cursor position for natural editing
+- **Smart caching** - Recent completions are cached for instant responses
 
 **Setup:**
 ```bash
 task settings set anthropic_api_key sk-ant-your-key-here
 ```
+
+**Controls:**
+- `Tab` - Accept suggestion
+- `Escape` - Dismiss suggestion
+- `Ctrl+Space` - Manually trigger suggestion
 
 Get an API key at [console.anthropic.com](https://console.anthropic.com/). This is optional and uses your API credits.
 
