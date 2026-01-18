@@ -188,3 +188,314 @@ func TestScrollbarAppearsInFormView(t *testing.T) {
 		t.Error("expected scrollbar characters in view but found none")
 	}
 }
+
+func TestIsWordChar(t *testing.T) {
+	tests := []struct {
+		char rune
+		want bool
+	}{
+		{'a', true},
+		{'Z', true},
+		{'0', true},
+		{'9', true},
+		{'_', true},
+		{' ', false},
+		{'.', false},
+		{'-', false},
+		{'\n', false},
+		{'\t', false},
+	}
+
+	for _, tt := range tests {
+		t.Run(string(tt.char), func(t *testing.T) {
+			got := isWordChar(tt.char)
+			if got != tt.want {
+				t.Errorf("isWordChar(%q) = %v, want %v", tt.char, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestMoveCursorWordBackward(t *testing.T) {
+	tests := []struct {
+		name           string
+		content        string
+		initialCursor  int
+		expectedCursor int
+	}{
+		{
+			name:           "from middle of word to start of word",
+			content:        "hello world",
+			initialCursor:  8, // middle of "world"
+			expectedCursor: 6, // start of "world"
+		},
+		{
+			name:           "from start of word to previous word",
+			content:        "hello world",
+			initialCursor:  6, // start of "world"
+			expectedCursor: 0, // start of "hello"
+		},
+		{
+			name:           "from end of text",
+			content:        "hello world",
+			initialCursor:  11, // end
+			expectedCursor: 6,  // start of "world"
+		},
+		{
+			name:           "from position 0 stays at 0",
+			content:        "hello",
+			initialCursor:  0,
+			expectedCursor: 0,
+		},
+		{
+			name:           "skips punctuation",
+			content:        "hello, world!",
+			initialCursor:  13, // end
+			expectedCursor: 7,  // start of "world"
+		},
+		{
+			name:           "handles multiple spaces",
+			content:        "hello   world",
+			initialCursor:  13, // end
+			expectedCursor: 8,  // start of "world"
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := NewFormModel(nil, 100, 50, "")
+			m.bodyInput.SetValue(tt.content)
+			m.bodyInput.SetCursor(tt.initialCursor)
+			m.focused = FieldBody
+
+			m.moveCursorWordBackward()
+
+			got := m.getCursorPos()
+			if got != tt.expectedCursor {
+				t.Errorf("moveCursorWordBackward() cursor = %d, want %d", got, tt.expectedCursor)
+			}
+		})
+	}
+}
+
+func TestMoveCursorWordForward(t *testing.T) {
+	tests := []struct {
+		name           string
+		content        string
+		initialCursor  int
+		expectedCursor int
+	}{
+		{
+			name:           "from start to end of first word",
+			content:        "hello world",
+			initialCursor:  0,
+			expectedCursor: 6, // start of next word
+		},
+		{
+			name:           "from middle of word to start of next",
+			content:        "hello world",
+			initialCursor:  2, // middle of "hello"
+			expectedCursor: 6, // start of "world"
+		},
+		{
+			name:           "from end stays at end",
+			content:        "hello",
+			initialCursor:  5,
+			expectedCursor: 5,
+		},
+		{
+			name:           "skips punctuation",
+			content:        "hello, world!",
+			initialCursor:  0,
+			expectedCursor: 7, // start of "world"
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := NewFormModel(nil, 100, 50, "")
+			m.bodyInput.SetValue(tt.content)
+			m.bodyInput.SetCursor(tt.initialCursor)
+			m.focused = FieldBody
+
+			m.moveCursorWordForward()
+
+			got := m.getCursorPos()
+			if got != tt.expectedCursor {
+				t.Errorf("moveCursorWordForward() cursor = %d, want %d", got, tt.expectedCursor)
+			}
+		})
+	}
+}
+
+func TestMoveCursorParagraphBackward(t *testing.T) {
+	// Note: Testing paragraph movement with multiline text is tricky because
+	// the bubbles textarea doesn't reliably update Line()/LineInfo() after SetCursor
+	// without going through the full Update cycle. We test single-line cases here.
+	tests := []struct {
+		name           string
+		content        string
+		initialCursor  int
+		expectedCursor int
+	}{
+		{
+			name:           "from position 0 stays at 0",
+			content:        "hello",
+			initialCursor:  0,
+			expectedCursor: 0,
+		},
+		{
+			name:           "from middle of single line to start",
+			content:        "hello world",
+			initialCursor:  6, // start of "world"
+			expectedCursor: 0, // start of text
+		},
+		{
+			name:           "from end of single line to start",
+			content:        "hello",
+			initialCursor:  5,
+			expectedCursor: 0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := NewFormModel(nil, 100, 50, "")
+			m.bodyInput.SetValue(tt.content)
+			m.bodyInput.Focus()
+			m.bodyInput.SetCursor(tt.initialCursor)
+			m.focused = FieldBody
+
+			m.moveCursorParagraphBackward()
+
+			got := m.getCursorPos()
+			if got != tt.expectedCursor {
+				t.Errorf("moveCursorParagraphBackward() cursor = %d, want %d", got, tt.expectedCursor)
+			}
+		})
+	}
+}
+
+func TestMoveCursorParagraphForward(t *testing.T) {
+	// Note: Testing paragraph movement with multiline text is tricky because
+	// the bubbles textarea doesn't reliably update Line()/LineInfo() after SetCursor
+	// without going through the full Update cycle. We test single-line cases here.
+	tests := []struct {
+		name           string
+		content        string
+		initialCursor  int
+		expectedCursor int
+	}{
+		{
+			name:           "from start to end of single line",
+			content:        "hello world",
+			initialCursor:  0,
+			expectedCursor: 11, // end of text
+		},
+		{
+			name:           "from middle to end of single line",
+			content:        "hello",
+			initialCursor:  3,
+			expectedCursor: 5, // end of text
+		},
+		{
+			name:           "from end stays at end",
+			content:        "hello",
+			initialCursor:  5,
+			expectedCursor: 5,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := NewFormModel(nil, 100, 50, "")
+			m.bodyInput.SetValue(tt.content)
+			m.bodyInput.Focus()
+			m.bodyInput.SetCursor(tt.initialCursor)
+			m.focused = FieldBody
+
+			m.moveCursorParagraphForward()
+
+			got := m.getCursorPos()
+			if got != tt.expectedCursor {
+				t.Errorf("moveCursorParagraphForward() cursor = %d, want %d", got, tt.expectedCursor)
+			}
+		})
+	}
+}
+
+func TestMoveTitleCursorWordBackward(t *testing.T) {
+	tests := []struct {
+		name           string
+		content        string
+		initialCursor  int
+		expectedCursor int
+	}{
+		{
+			name:           "from end to start of last word",
+			content:        "hello world",
+			initialCursor:  11,
+			expectedCursor: 6,
+		},
+		{
+			name:           "from start stays at start",
+			content:        "hello",
+			initialCursor:  0,
+			expectedCursor: 0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := NewFormModel(nil, 100, 50, "")
+			m.titleInput.SetValue(tt.content)
+			m.titleInput.SetCursor(tt.initialCursor)
+			m.focused = FieldTitle
+
+			m.moveTitleCursorWordBackward()
+
+			got := m.titleInput.Position()
+			if got != tt.expectedCursor {
+				t.Errorf("moveTitleCursorWordBackward() cursor = %d, want %d", got, tt.expectedCursor)
+			}
+		})
+	}
+}
+
+func TestMoveTitleCursorWordForward(t *testing.T) {
+	tests := []struct {
+		name           string
+		content        string
+		initialCursor  int
+		expectedCursor int
+	}{
+		{
+			name:           "from start to start of next word",
+			content:        "hello world",
+			initialCursor:  0,
+			expectedCursor: 6,
+		},
+		{
+			name:           "from end stays at end",
+			content:        "hello",
+			initialCursor:  5,
+			expectedCursor: 5,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := NewFormModel(nil, 100, 50, "")
+			m.titleInput.SetValue(tt.content)
+			m.titleInput.SetCursor(tt.initialCursor)
+			m.focused = FieldTitle
+
+			m.moveTitleCursorWordForward()
+
+			got := m.titleInput.Position()
+			if got != tt.expectedCursor {
+				t.Errorf("moveTitleCursorWordForward() cursor = %d, want %d", got, tt.expectedCursor)
+			}
+		})
+	}
+}
