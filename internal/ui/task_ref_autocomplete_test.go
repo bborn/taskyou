@@ -116,10 +116,11 @@ func TestTaskRefAutocompleteSelection(t *testing.T) {
 		t.Errorf("selected task ID = %d, want 302", selected.ID)
 	}
 
-	// Check reference format
+	// Check reference format (includes task title)
 	ref := m.GetReference()
-	if ref != "#302" {
-		t.Errorf("GetReference() = %q, want %q", ref, "#302")
+	expectedRef := "#302 (Task reference feature)"
+	if ref != expectedRef {
+		t.Errorf("GetReference() = %q, want %q", ref, expectedRef)
 	}
 
 	// Check query length (includes #)

@@ -161,12 +161,12 @@ func (m *TaskRefAutocompleteModel) HasResults() bool {
 	return len(m.filteredTasks) > 0
 }
 
-// GetReference returns the task reference string (e.g., "#123") for the selected task.
+// GetReference returns the task reference string (e.g., "#123 (Task Title)") for the selected task.
 func (m *TaskRefAutocompleteModel) GetReference() string {
 	if m.selectedTask == nil {
 		return ""
 	}
-	return fmt.Sprintf("#%d", m.selectedTask.ID)
+	return fmt.Sprintf("#%d (%s)", m.selectedTask.ID, m.selectedTask.Title)
 }
 
 // GetCursorPos returns the position where '#' was typed.
