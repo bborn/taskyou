@@ -1831,3 +1831,104 @@ func TestCountMemoriesByProject(t *testing.T) {
 		t.Errorf("expected 0 memories for nonexistent project, got %d", count)
 	}
 }
+
+func TestGetMostRecentlyCreatedTask(t *testing.T) {
+	// Create temporary database
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	db, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer db.Close()
+	defer os.Remove(dbPath)
+
+	// Create test projects
+	if err := db.CreateProject(&Project{Name: "project1", Path: tmpDir}); err != nil {
+		t.Fatalf("failed to create project1: %v", err)
+	}
+	if err := db.CreateProject(&Project{Name: "project2", Path: tmpDir + "/sub"}); err != nil {
+		t.Fatalf("failed to create project2: %v", err)
+	}
+
+	// Test when no tasks exist
+	task, err := db.GetMostRecentlyCreatedTask()
+	if err != nil {
+		t.Fatalf("failed to get most recently created task: %v", err)
+	}
+	if task != nil {
+		t.Errorf("expected nil task when no tasks exist, got %v", task)
+	}
+
+	// Create first task
+	task1 := &Task{
+		Title:   "First Task",
+		Body:    "First task body",
+		Status:  StatusBacklog,
+		Type:    TypeCode,
+		Project: "project1",
+	}
+	if err := db.CreateTask(task1); err != nil {
+		t.Fatalf("failed to create first task: %v", err)
+	}
+
+	// Most recent should be task1
+	mostRecent, err := db.GetMostRecentlyCreatedTask()
+	if err != nil {
+		t.Fatalf("failed to get most recently created task: %v", err)
+	}
+	if mostRecent == nil {
+		t.Fatal("expected non-nil task")
+	}
+	if mostRecent.Title != "First Task" {
+		t.Errorf("expected 'First Task', got %q", mostRecent.Title)
+	}
+	if mostRecent.Project != "project1" {
+		t.Errorf("expected 'project1', got %q", mostRecent.Project)
+	}
+
+	// Wait a bit to ensure different timestamps
+	time.Sleep(10 * time.Millisecond)
+
+	// Create second task with different project
+	task2 := &Task{
+		Title:   "Second Task",
+		Body:    "Second task body",
+		Status:  StatusQueued,
+		Type:    TypeCode,
+		Project: "project2",
+	}
+	if err := db.CreateTask(task2); err != nil {
+		t.Fatalf("failed to create second task: %v", err)
+	}
+
+	// Most recent should now be task2
+	mostRecent, err = db.GetMostRecentlyCreatedTask()
+	if err != nil {
+		t.Fatalf("failed to get most recently created task: %v", err)
+	}
+	if mostRecent == nil {
+		t.Fatal("expected non-nil task")
+	}
+	if mostRecent.Title != "Second Task" {
+		t.Errorf("expected 'Second Task', got %q", mostRecent.Title)
+	}
+	if mostRecent.Project != "project2" {
+		t.Errorf("expected 'project2', got %q", mostRecent.Project)
+	}
+
+	// Mark second task as done - should still be most recently created
+	task2.Status = StatusDone
+	if err := db.UpdateTaskStatus(task2.ID, StatusDone); err != nil {
+		t.Fatalf("failed to update task status: %v", err)
+	}
+
+	mostRecent, err = db.GetMostRecentlyCreatedTask()
+	if err != nil {
+		t.Fatalf("failed to get most recently created task: %v", err)
+	}
+	if mostRecent.Title != "Second Task" {
+		t.Errorf("expected 'Second Task' (completed task should still be returned), got %q", mostRecent.Title)
+	}
+}
