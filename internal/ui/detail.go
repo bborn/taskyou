@@ -223,12 +223,12 @@ func (m *DetailModel) SetSize(width, height int) {
 func (m *DetailModel) Update(msg tea.Msg) (*DetailModel, tea.Cmd) {
 	var cmd tea.Cmd
 
-	if keyMsg, ok := msg.(tea.KeyMsg); ok {
-		// 'k' is now handled by app.go with confirmation dialog
-		// Pane switching (Shift+Arrow) is handled by tmux keybindings
-
-		m.viewport, cmd = m.viewport.Update(keyMsg)
-	}
+	// Pass all messages to viewport for scrolling support
+	// This enables:
+	// - Page Up/Page Down for keyboard scrolling
+	// - Mouse wheel scrolling (tea.MouseMsg)
+	// Note: Up/Down arrow keys are handled by app.go for task navigation
+	m.viewport, cmd = m.viewport.Update(msg)
 
 	return m, cmd
 }
@@ -1173,9 +1173,30 @@ func (m *DetailModel) View() string {
 		Width(m.width-2).
 		Padding(0, 1)
 
+	// Add scroll indicator if content is scrollable
+	var scrollIndicator string
+	if m.viewport.TotalLineCount() > m.viewport.VisibleLineCount() {
+		scrollPercent := 0
+		if m.viewport.TotalLineCount() > 0 {
+			scrollPercent = int(float64(m.viewport.YOffset+m.viewport.VisibleLineCount()) / float64(m.viewport.TotalLineCount()) * 100)
+			if scrollPercent > 100 {
+				scrollPercent = 100
+			}
+		}
+		indicatorStyle := lipgloss.NewStyle().Foreground(ColorMuted)
+		if !m.focused {
+			indicatorStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#4B5563"))
+		}
+		scrollIndicator = indicatorStyle.Render(fmt.Sprintf(" %d%% ", scrollPercent))
+	}
+
 	help := m.renderHelp()
+	boxContent := lipgloss.JoinVertical(lipgloss.Left, header, content)
+	if scrollIndicator != "" {
+		boxContent = lipgloss.JoinVertical(lipgloss.Left, header, content, scrollIndicator)
+	}
 	return lipgloss.JoinVertical(lipgloss.Left,
-		box.Render(lipgloss.JoinVertical(lipgloss.Left, header, content)),
+		box.Render(boxContent),
 		help,
 	)
 }
@@ -1461,6 +1482,14 @@ func (m *DetailModel) renderHelp() string {
 		desc string
 	}{
 		{"↑/↓", "prev/next task"},
+	}
+
+	// Show scroll hint when content is scrollable
+	if m.viewport.TotalLineCount() > m.viewport.VisibleLineCount() {
+		keys = append(keys, struct {
+			key  string
+			desc string
+		}{"PgUp/Dn", "scroll"})
 	}
 
 	// Only show execute/retry when Claude is not running
