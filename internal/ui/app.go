@@ -567,6 +567,8 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.detailView.SetPosition(pos, total)
 			m.previousView = m.currentView
 			m.currentView = ViewDetail
+			// Disable mouse to allow native text selection in detail view
+			cmds = append(cmds, tea.DisableMouse)
 			// Start tmux output ticker if session is active
 			if tickerCmd := m.detailView.StartTmuxTicker(); tickerCmd != nil {
 				cmds = append(cmds, tickerCmd)
@@ -1210,7 +1212,8 @@ func (m *AppModel) updateDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.detailView.Cleanup()
 			m.detailView = nil
 		}
-		return m, nil
+		// Re-enable mouse for dashboard click-to-select
+		return m, tea.EnableMouseCellMotion
 	}
 
 	// Handle queue/close/retry from detail view
