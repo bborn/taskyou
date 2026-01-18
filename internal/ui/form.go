@@ -589,6 +589,36 @@ func (m *FormModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 
+		// Alt+Arrow keys for word/paragraph movement in text fields
+		case "alt+left":
+			if m.focused == FieldBody {
+				m.moveCursorWordBackward()
+				return m, nil
+			}
+			if m.focused == FieldTitle {
+				m.moveTitleCursorWordBackward()
+				return m, nil
+			}
+		case "alt+right":
+			if m.focused == FieldBody {
+				m.moveCursorWordForward()
+				return m, nil
+			}
+			if m.focused == FieldTitle {
+				m.moveTitleCursorWordForward()
+				return m, nil
+			}
+		case "alt+up":
+			if m.focused == FieldBody {
+				m.moveCursorParagraphBackward()
+				return m, nil
+			}
+		case "alt+down":
+			if m.focused == FieldBody {
+				m.moveCursorParagraphForward()
+				return m, nil
+			}
+
 		default:
 			// Type-to-select for selector fields
 			if m.focused == FieldProject || m.focused == FieldType || m.focused == FieldExecutor || m.focused == FieldRecurrence {
@@ -1492,6 +1522,175 @@ func (m *FormModel) renderBodyScrollbar(visibleLines int) []string {
 	}
 
 	return scrollbar
+}
+
+// getCursorPos calculates the absolute cursor position in the body textarea.
+func (m *FormModel) getCursorPos() int {
+	text := m.bodyInput.Value()
+	lines := strings.Split(text, "\n")
+	currentLine := m.bodyInput.Line()
+	lineInfo := m.bodyInput.LineInfo()
+	charOffset := lineInfo.CharOffset
+
+	// Calculate absolute position: sum of previous lines + current column
+	cursorPos := 0
+	for i := 0; i < currentLine && i < len(lines); i++ {
+		cursorPos += len(lines[i]) + 1 // +1 for newline
+	}
+	cursorPos += charOffset
+
+	// Clamp to valid range
+	if cursorPos > len(text) {
+		cursorPos = len(text)
+	}
+	if cursorPos < 0 {
+		cursorPos = 0
+	}
+
+	return cursorPos
+}
+
+// isWordChar returns true if the rune is part of a word (alphanumeric or underscore).
+func isWordChar(r rune) bool {
+	return unicode.IsLetter(r) || unicode.IsDigit(r) || r == '_'
+}
+
+// moveCursorWordBackward moves the cursor to the start of the previous word in the body.
+func (m *FormModel) moveCursorWordBackward() {
+	text := m.bodyInput.Value()
+	pos := m.getCursorPos()
+
+	if pos == 0 {
+		return
+	}
+
+	// Move past any whitespace/non-word chars before cursor
+	for pos > 0 && !isWordChar(rune(text[pos-1])) {
+		pos--
+	}
+
+	// Move to start of the word
+	for pos > 0 && isWordChar(rune(text[pos-1])) {
+		pos--
+	}
+
+	m.bodyInput.SetCursor(pos)
+}
+
+// moveCursorWordForward moves the cursor to the end of the next word in the body.
+func (m *FormModel) moveCursorWordForward() {
+	text := m.bodyInput.Value()
+	pos := m.getCursorPos()
+	length := len(text)
+
+	if pos >= length {
+		return
+	}
+
+	// Skip current word chars
+	for pos < length && isWordChar(rune(text[pos])) {
+		pos++
+	}
+
+	// Skip whitespace/non-word chars
+	for pos < length && !isWordChar(rune(text[pos])) {
+		pos++
+	}
+
+	m.bodyInput.SetCursor(pos)
+}
+
+// moveCursorParagraphBackward moves the cursor to the start of the previous paragraph.
+func (m *FormModel) moveCursorParagraphBackward() {
+	text := m.bodyInput.Value()
+	pos := m.getCursorPos()
+
+	if pos == 0 {
+		return
+	}
+
+	// Move back one character to avoid staying on current position
+	pos--
+
+	// Skip any trailing newlines at current position
+	for pos > 0 && text[pos] == '\n' {
+		pos--
+	}
+
+	// Find the previous newline (start of current paragraph)
+	for pos > 0 && text[pos-1] != '\n' {
+		pos--
+	}
+
+	m.bodyInput.SetCursor(pos)
+}
+
+// moveCursorParagraphForward moves the cursor to the end of the current/next paragraph.
+func (m *FormModel) moveCursorParagraphForward() {
+	text := m.bodyInput.Value()
+	pos := m.getCursorPos()
+	length := len(text)
+
+	if pos >= length {
+		return
+	}
+
+	// Skip any newlines at current position
+	for pos < length && text[pos] == '\n' {
+		pos++
+	}
+
+	// Find the next newline (end of current paragraph)
+	for pos < length && text[pos] != '\n' {
+		pos++
+	}
+
+	m.bodyInput.SetCursor(pos)
+}
+
+// moveTitleCursorWordBackward moves the cursor to the start of the previous word in the title.
+func (m *FormModel) moveTitleCursorWordBackward() {
+	text := m.titleInput.Value()
+	pos := m.titleInput.Position()
+
+	if pos == 0 {
+		return
+	}
+
+	// Move past any whitespace/non-word chars before cursor
+	for pos > 0 && !isWordChar(rune(text[pos-1])) {
+		pos--
+	}
+
+	// Move to start of the word
+	for pos > 0 && isWordChar(rune(text[pos-1])) {
+		pos--
+	}
+
+	m.titleInput.SetCursor(pos)
+}
+
+// moveTitleCursorWordForward moves the cursor to the end of the next word in the title.
+func (m *FormModel) moveTitleCursorWordForward() {
+	text := m.titleInput.Value()
+	pos := m.titleInput.Position()
+	length := len(text)
+
+	if pos >= length {
+		return
+	}
+
+	// Skip current word chars
+	for pos < length && isWordChar(rune(text[pos])) {
+		pos++
+	}
+
+	// Skip whitespace/non-word chars
+	for pos < length && !isWordChar(rune(text[pos])) {
+		pos++
+	}
+
+	m.titleInput.SetCursor(pos)
 }
 
 // GetAttachments returns the parsed attachment file paths.
