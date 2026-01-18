@@ -40,7 +40,8 @@ type FormModel struct {
 	height    int
 	submitted bool
 	cancelled bool
-	isEdit    bool // true when editing an existing task
+	isEdit          bool   // true when editing an existing task
+	originalProject string // original project when editing (to detect project changes)
 
 	// Current field
 	focused FormField
@@ -134,6 +135,7 @@ func NewEditFormModel(database *db.DB, task *db.Task, width, height int) *FormMo
 		focused:             FieldTitle,
 		taskType:            task.Type,
 		project:             task.Project,
+		originalProject:     task.Project, // Track original project for detecting changes
 		executor:            executor,
 		executors:           []string{db.ExecutorClaude, db.ExecutorCodex},
 		isEdit:              true,
@@ -1704,4 +1706,15 @@ func (m *FormModel) GetAttachment() string {
 		return m.attachments[0]
 	}
 	return ""
+}
+
+// ProjectChanged returns true if the project was changed during editing.
+// Only relevant when isEdit is true.
+func (m *FormModel) ProjectChanged() bool {
+	return m.isEdit && m.originalProject != "" && m.project != m.originalProject
+}
+
+// OriginalProject returns the original project when editing.
+func (m *FormModel) OriginalProject() string {
+	return m.originalProject
 }

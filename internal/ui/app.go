@@ -30,6 +30,7 @@ const (
 	ViewNewTask
 	ViewNewTaskConfirm
 	ViewEditTask
+	ViewProjectChangeConfirm // Confirmation when changing a task's project
 	ViewDeleteConfirm
 	ViewCloseConfirm
 	ViewArchiveConfirm
@@ -262,6 +263,12 @@ type AppModel struct {
 	editTaskForm *FormModel
 	editingTask  *db.Task
 
+	// Project change confirmation state (when changing a task's project)
+	projectChangeConfirm      *huh.Form
+	projectChangeConfirmValue bool
+	pendingProjectChangeTask  *db.Task  // The updated task data with new project
+	originalProjectChangeTask *db.Task  // The original task to delete
+
 	// Delete confirmation state
 	deleteConfirm      *huh.Form
 	deleteConfirmValue bool
@@ -404,6 +411,9 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 	if m.currentView == ViewNewTaskConfirm && m.queueConfirm != nil {
 		return m.updateNewTaskConfirm(msg)
+	}
+	if m.currentView == ViewProjectChangeConfirm && m.projectChangeConfirm != nil {
+		return m.updateProjectChangeConfirm(msg)
 	}
 	if m.currentView == ViewDeleteConfirm && m.deleteConfirm != nil {
 		return m.updateDeleteConfirm(msg)
@@ -621,6 +631,21 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.err = msg.err
 		}
 
+	case taskMovedMsg:
+		if msg.err == nil {
+			// Task was moved successfully
+			m.selectedTask = msg.newTask
+			m.notification = fmt.Sprintf("✓ Task moved to %s as #%d", msg.newTask.Project, msg.newTask.ID)
+			m.notifyUntil = time.Now().Add(5 * time.Second)
+			cmds = append(cmds, m.loadTasks())
+			// Navigate to the new task's detail view
+			if m.selectedTask != nil {
+				cmds = append(cmds, m.loadTask(m.selectedTask.ID))
+			}
+		} else {
+			m.err = msg.err
+		}
+
 	case taskQueuedMsg, taskClosedMsg, taskArchivedMsg, taskDeletedMsg, taskRetriedMsg, taskStatusChangedMsg, taskDangerousModeToggledMsg:
 		cmds = append(cmds, m.loadTasks())
 
@@ -727,6 +752,8 @@ func (m *AppModel) View() string {
 		}
 	case ViewNewTaskConfirm:
 		return m.viewNewTaskConfirm()
+	case ViewProjectChangeConfirm:
+		return m.viewProjectChangeConfirm()
 	case ViewDeleteConfirm:
 		return m.viewDeleteConfirm()
 	case ViewCloseConfirm:
@@ -1415,6 +1442,16 @@ func (m *AppModel) updateEditTaskForm(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if form.submitted {
 			// Get updated task data from form
 			updatedTask := form.GetDBTask()
+
+			// Check if project has changed - this requires special handling
+			if form.ProjectChanged() {
+				// Store the original task for the confirmation dialog
+				originalTask := m.editingTask
+				m.editTaskForm = nil
+				m.editingTask = nil
+				return m.showProjectChangeConfirm(updatedTask, originalTask)
+			}
+
 			// Preserve the original task's ID and other fields
 			updatedTask.ID = m.editingTask.ID
 			updatedTask.Status = m.editingTask.Status
@@ -1530,6 +1567,100 @@ func (m *AppModel) updateDeleteConfirm(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Cancelled - return to previous view
 		m.pendingDeleteTask = nil
 		m.deleteConfirm = nil
+		m.currentView = m.previousView
+		return m, nil
+	}
+
+	return m, cmd
+}
+
+func (m *AppModel) showProjectChangeConfirm(updatedTask, originalTask *db.Task) (tea.Model, tea.Cmd) {
+	m.pendingProjectChangeTask = updatedTask
+	m.originalProjectChangeTask = originalTask
+	m.projectChangeConfirmValue = false
+	modalWidth := min(60, m.width-8)
+	m.projectChangeConfirm = huh.NewForm(
+		huh.NewGroup(
+			huh.NewConfirm().
+				Key("project_change").
+				Title(fmt.Sprintf("Move task #%d to %s?", originalTask.ID, updatedTask.Project)).
+				Description(fmt.Sprintf("This will delete task #%d (including its worktree, branch, and executor) and create a new task in the %s project with the same details.\n\nThis action cannot be undone.", originalTask.ID, updatedTask.Project)).
+				Affirmative("Move Task").
+				Negative("Cancel").
+				Value(&m.projectChangeConfirmValue),
+		),
+	).WithTheme(huh.ThemeDracula()).
+		WithWidth(modalWidth - 6). // Account for modal padding and border
+		WithShowHelp(true)
+	m.previousView = m.currentView
+	m.currentView = ViewProjectChangeConfirm
+	return m, m.projectChangeConfirm.Init()
+}
+
+func (m *AppModel) viewProjectChangeConfirm() string {
+	if m.projectChangeConfirm == nil {
+		return ""
+	}
+
+	// Modal header with move icon
+	header := lipgloss.NewStyle().
+		Bold(true).
+		Foreground(ColorWarning).
+		MarginBottom(1).
+		Render("⚠ Move Task to Different Project")
+
+	formView := m.projectChangeConfirm.View()
+
+	// Modal box with border
+	modalWidth := min(60, m.width-8)
+	modalBox := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(ColorWarning).
+		Padding(1, 2).
+		Width(modalWidth)
+
+	modalContent := modalBox.Render(lipgloss.JoinVertical(lipgloss.Center, header, formView))
+
+	// Center the modal on screen
+	return lipgloss.NewStyle().
+		Width(m.width).
+		Height(m.height).
+		Align(lipgloss.Center, lipgloss.Center).
+		Render(modalContent)
+}
+
+func (m *AppModel) updateProjectChangeConfirm(msg tea.Msg) (tea.Model, tea.Cmd) {
+	// Handle escape to cancel
+	if keyMsg, ok := msg.(tea.KeyMsg); ok {
+		if keyMsg.String() == "esc" {
+			m.currentView = m.previousView
+			m.projectChangeConfirm = nil
+			m.pendingProjectChangeTask = nil
+			m.originalProjectChangeTask = nil
+			return m, nil
+		}
+	}
+
+	// Update the form
+	model, cmd := m.projectChangeConfirm.Update(msg)
+	m.projectChangeConfirm = model.(*huh.Form)
+
+	// Check if form completed
+	if m.projectChangeConfirm.State == huh.StateCompleted {
+		if m.pendingProjectChangeTask != nil && m.originalProjectChangeTask != nil && m.projectChangeConfirmValue {
+			// User confirmed - perform the project change
+			newTask := m.pendingProjectChangeTask
+			oldTask := m.originalProjectChangeTask
+			m.pendingProjectChangeTask = nil
+			m.originalProjectChangeTask = nil
+			m.projectChangeConfirm = nil
+			m.currentView = ViewDashboard
+			return m, m.moveTaskToProject(newTask, oldTask)
+		}
+		// Cancelled - return to previous view
+		m.pendingProjectChangeTask = nil
+		m.originalProjectChangeTask = nil
+		m.projectChangeConfirm = nil
 		m.currentView = m.previousView
 		return m, nil
 	}
@@ -2320,6 +2451,72 @@ func (m *AppModel) deleteTask(id int64) tea.Cmd {
 		// Delete from database
 		err = m.db.DeleteTask(id)
 		return taskDeletedMsg{err: err}
+	}
+}
+
+// taskMovedMsg is returned when a task is moved to a different project.
+type taskMovedMsg struct {
+	newTask *db.Task
+	oldID   int64
+	err     error
+}
+
+// moveTaskToProject moves a task to a different project by creating a new task
+// in the target project and deleting the old task (including its worktree).
+func (m *AppModel) moveTaskToProject(newTaskData *db.Task, oldTask *db.Task) tea.Cmd {
+	database := m.db
+	exec := m.executor
+	return func() tea.Msg {
+		// First, clean up the old task's resources
+
+		// Kill Claude process to free memory
+		exec.KillClaudeProcess(oldTask.ID)
+
+		// Kill tmux window (ignore errors)
+		windowTarget := executor.TmuxSessionName(oldTask.ID)
+		osExec.Command("tmux", "kill-window", "-t", windowTarget).Run()
+
+		// Clean up worktree and Claude sessions if they exist
+		if oldTask.WorktreePath != "" {
+			// Clean up Claude session files first (before worktree is removed)
+			executor.CleanupClaudeSessions(oldTask.WorktreePath)
+
+			// Clean up worktree
+			exec.CleanupWorktree(oldTask)
+		}
+
+		// Delete the old task from database
+		err := database.DeleteTask(oldTask.ID)
+		if err != nil {
+			return taskMovedMsg{err: fmt.Errorf("delete old task: %w", err)}
+		}
+
+		// Create the new task in the target project
+		// Reset fields that should be fresh for the new task
+		newTaskData.ID = 0
+		newTaskData.WorktreePath = ""
+		newTaskData.BranchName = ""
+		newTaskData.Port = 0
+		newTaskData.ClaudeSessionID = ""
+		newTaskData.DaemonSession = ""
+		newTaskData.StartedAt = nil
+		newTaskData.CompletedAt = nil
+		// Keep the status - if it was backlog, stay backlog; if queued, stay queued
+		// But if it was processing/blocked, reset to backlog since the work is lost
+		if newTaskData.Status == db.StatusProcessing || newTaskData.Status == db.StatusBlocked {
+			newTaskData.Status = db.StatusBacklog
+		}
+
+		err = database.CreateTask(newTaskData)
+		if err != nil {
+			return taskMovedMsg{err: fmt.Errorf("create new task: %w", err)}
+		}
+
+		// Notify about the changes
+		exec.NotifyTaskChange("deleted", oldTask)
+		exec.NotifyTaskChange("created", newTaskData)
+
+		return taskMovedMsg{newTask: newTaskData, oldID: oldTask.ID, err: nil}
 	}
 }
 
