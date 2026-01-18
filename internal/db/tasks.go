@@ -261,6 +261,37 @@ func (db *DB) ListTasks(opts ListTasksOptions) ([]*Task, error) {
 	return tasks, nil
 }
 
+// GetMostRecentlyCreatedTask returns the task with the most recent created_at timestamp.
+// This is used to get the last task's project for defaulting in new task forms.
+func (db *DB) GetMostRecentlyCreatedTask() (*Task, error) {
+	t := &Task{}
+	err := db.QueryRow(`
+		SELECT id, title, body, status, type, project, COALESCE(executor, 'claude'),
+		       worktree_path, branch_name, port, claude_session_id,
+		       COALESCE(daemon_session, ''), COALESCE(pr_url, ''), COALESCE(pr_number, 0),
+		       COALESCE(dangerous_mode, 0), COALESCE(tags, ''),
+		       created_at, updated_at, started_at, completed_at,
+		       scheduled_at, recurrence, last_run_at
+		FROM tasks
+		ORDER BY created_at DESC, id DESC
+		LIMIT 1
+	`).Scan(
+		&t.ID, &t.Title, &t.Body, &t.Status, &t.Type, &t.Project, &t.Executor,
+		&t.WorktreePath, &t.BranchName, &t.Port, &t.ClaudeSessionID,
+		&t.DaemonSession, &t.PRURL, &t.PRNumber,
+		&t.DangerousMode, &t.Tags,
+		&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
+		&t.ScheduledAt, &t.Recurrence, &t.LastRunAt,
+	)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("query most recently created task: %w", err)
+	}
+	return t, nil
+}
+
 // SearchTasks searches for tasks by query string across title, project, ID, and PR number.
 // This is used by the command palette to search all tasks, not just the preloaded ones.
 func (db *DB) SearchTasks(query string, limit int) ([]*Task, error) {

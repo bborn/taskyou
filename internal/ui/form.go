@@ -301,10 +301,15 @@ func NewFormModel(database *db.DB, width, height int, workingDir string) *FormMo
 		}
 	}
 
-	// Default to 'personal' project
+	// Default to last task's project, or fall back to 'personal'
 	m.project = "personal"
+	if database != nil {
+		if lastTask, err := database.GetMostRecentlyCreatedTask(); err == nil && lastTask != nil && lastTask.Project != "" {
+			m.project = lastTask.Project
+		}
+	}
 	for i, p := range m.projects {
-		if p == "personal" {
+		if p == m.project {
 			m.projectIdx = i
 			break
 		}
