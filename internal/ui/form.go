@@ -1092,9 +1092,19 @@ func (m *FormModel) View() string {
 	// Show task reference autocomplete dropdown if active
 	if m.showTaskRefAutocomplete && m.taskRefAutocomplete != nil && m.taskRefAutocomplete.HasResults() {
 		dropdownView := m.taskRefAutocomplete.View()
-		// Indent the dropdown to align with the body content
+		// Calculate horizontal offset based on cursor position
+		// The dropdown should appear below where the '#' was typed
+		lineInfo := m.bodyInput.LineInfo()
+		queryLen := m.taskRefAutocomplete.GetQueryLength() // includes the '#'
+		// Calculate visual column of '#': current column minus query length
+		// Add 3 for base indent (the "   " before body lines)
+		visualCol := lineInfo.ColumnOffset - queryLen + 3
+		if visualCol < 3 {
+			visualCol = 3 // Minimum indent to align with body content
+		}
+		indent := strings.Repeat(" ", visualCol)
 		for _, line := range strings.Split(dropdownView, "\n") {
-			b.WriteString("   " + line + "\n")
+			b.WriteString(indent + line + "\n")
 		}
 	}
 	b.WriteString("\n")
