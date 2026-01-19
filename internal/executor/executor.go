@@ -3162,6 +3162,90 @@ func (e *Executor) runWorktreeInitScript(projectDir, worktreePath string, task *
 	e.logLine(task.ID, "system", "Worktree init script completed successfully")
 }
 
+// runWorktreeTeardownScript runs the worktree teardown script if configured or conventionally present.
+// It sets environment variables WORKTREE_TASK_ID, WORKTREE_PORT, and WORKTREE_PATH.
+// Non-zero exit codes are logged as warnings but do not cause the worktree cleanup to fail.
+// Output is streamed line-by-line in real-time to provide feedback during long-running scripts.
+func (e *Executor) runWorktreeTeardownScript(projectDir, worktreePath string, task *db.Task) {
+	scriptPath := GetWorktreeTeardownScript(projectDir)
+	if scriptPath == "" {
+		return
+	}
+
+	e.logLine(task.ID, "system", fmt.Sprintf("Running worktree teardown script: %s", scriptPath))
+
+	cmd := exec.Command(scriptPath)
+	cmd.Dir = worktreePath
+
+	// Set environment variables
+	cmd.Env = append(os.Environ(),
+		fmt.Sprintf("WORKTREE_TASK_ID=%d", task.ID),
+		fmt.Sprintf("WORKTREE_PORT=%d", task.Port),
+		fmt.Sprintf("WORKTREE_PATH=%s", worktreePath),
+	)
+
+	// Set up pipes for streaming output in real-time
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		e.logger.Warn("failed to create stdout pipe for worktree teardown script", "error", err)
+		e.logLine(task.ID, "system", fmt.Sprintf("Warning: failed to set up script output: %v", err))
+		return
+	}
+
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		e.logger.Warn("failed to create stderr pipe for worktree teardown script", "error", err)
+		e.logLine(task.ID, "system", fmt.Sprintf("Warning: failed to set up script output: %v", err))
+		return
+	}
+
+	// Start the command
+	if err := cmd.Start(); err != nil {
+		e.logger.Warn("failed to start worktree teardown script", "script", scriptPath, "error", err)
+		e.logLine(task.ID, "system", fmt.Sprintf("Warning: failed to start worktree teardown script: %v", err))
+		return
+	}
+
+	// Stream output from both stdout and stderr concurrently
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	// Stream stdout
+	go func() {
+		defer wg.Done()
+		scanner := bufio.NewScanner(stdout)
+		for scanner.Scan() {
+			line := scanner.Text()
+			e.logLine(task.ID, "system", fmt.Sprintf("[teardown] %s", line))
+		}
+	}()
+
+	// Stream stderr
+	go func() {
+		defer wg.Done()
+		scanner := bufio.NewScanner(stderr)
+		for scanner.Scan() {
+			line := scanner.Text()
+			e.logLine(task.ID, "system", fmt.Sprintf("[teardown] %s", line))
+		}
+	}()
+
+	// Wait for all output to be read
+	wg.Wait()
+
+	// Wait for the command to finish
+	if err := cmd.Wait(); err != nil {
+		e.logger.Warn("worktree teardown script failed",
+			"script", scriptPath,
+			"error", err,
+		)
+		e.logLine(task.ID, "system", fmt.Sprintf("Warning: worktree teardown script failed: %v", err))
+		return
+	}
+
+	e.logLine(task.ID, "system", "Worktree teardown script completed successfully")
+}
+
 // ensureGitignore adds an entry to .gitignore if not already present.
 func (e *Executor) ensureGitignore(projectDir, entry string) {
 	gitignorePath := filepath.Join(projectDir, ".gitignore")
@@ -3245,6 +3329,9 @@ func (e *Executor) CleanupWorktree(task *db.Task) error {
 	if projectDir == "" {
 		return nil
 	}
+
+	// Run teardown script before removing the worktree
+	e.runWorktreeTeardownScript(projectDir, task.WorktreePath, task)
 
 	// Remove worktree
 	cmd := exec.Command("git", "worktree", "remove", "--force", task.WorktreePath)

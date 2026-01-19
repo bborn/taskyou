@@ -250,6 +250,7 @@ worktree:
 | Field | Description | Example |
 |-------|-------------|---------|
 | `worktree.init_script` | Path to script that runs after worktree creation (relative or absolute) | `bin/worktree-setup` |
+| `worktree.teardown_script` | Path to script that runs before worktree deletion (relative or absolute) | `bin/worktree-teardown` |
 
 ### Projects
 
@@ -289,6 +290,31 @@ worktree:
 ```
 
 The script runs in the worktree directory and has access to all worktree environment variables (`WORKTREE_TASK_ID`, `WORKTREE_PORT`, `WORKTREE_PATH`).
+
+#### Worktree Teardown Script
+
+You can configure a script to run automatically before a worktree is deleted. This is useful for:
+- Dropping task-specific databases
+- Stopping background services
+- Cleaning up docker containers
+- Removing temporary files
+
+**Two ways to configure:**
+
+1. **Conventional location** - Create an executable script at `bin/worktree-teardown`:
+```bash
+#!/bin/bash
+# Example: bin/worktree-teardown
+bin/rails db:drop
+```
+
+2. **Custom location** - Specify in `.taskyou.yml`:
+```yaml
+worktree:
+  teardown_script: scripts/my-teardown.sh
+```
+
+The teardown script runs when you delete a task through the app. If you manually remove a worktree via `git worktree remove` or `rm -rf`, the teardown script will not run.
 
 ### Running Applications in Worktrees
 
@@ -332,6 +358,13 @@ bundle install
 
 # Create isolated database for this task
 bin/rails db:create db:migrate
+```
+
+**bin/worktree-teardown:**
+```bash
+#!/bin/bash
+# Drop the task-specific database
+bin/rails db:drop
 ```
 
 Now the AI executor (Claude or Codex) can:
