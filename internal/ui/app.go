@@ -75,6 +75,8 @@ type KeyMap struct {
 	FocusDone       key.Binding
 	// Shell pane toggle
 	ToggleShellPane key.Binding
+	// Open server URL
+	OpenServer key.Binding
 }
 
 // ShortHelp returns key bindings to show in the mini help.
@@ -208,6 +210,10 @@ func DefaultKeyMap() KeyMap {
 		ToggleShellPane: key.NewBinding(
 			key.WithKeys("\\"),
 			key.WithHelp("\\", "toggle shell"),
+		),
+		OpenServer: key.NewBinding(
+			key.WithKeys("o"),
+			key.WithHelp("o", "open server"),
 		),
 	}
 }
@@ -1313,6 +1319,14 @@ func (m *AppModel) updateDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 	if key.Matches(keyMsg, m.keys.ToggleShellPane) && m.detailView != nil {
 		m.detailView.ToggleShellPane()
+		return m, nil
+	}
+	if key.Matches(keyMsg, m.keys.OpenServer) && m.selectedTask != nil {
+		// Open the localhost URL with the task's assigned port
+		if m.selectedTask.Port > 0 {
+			url := fmt.Sprintf("http://localhost:%d", m.selectedTask.Port)
+			osExec.Command("open", url).Start()
+		}
 		return m, nil
 	}
 

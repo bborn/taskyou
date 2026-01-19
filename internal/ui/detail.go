@@ -1703,6 +1703,14 @@ func (m *DetailModel) renderHelp() string {
 		}{"\\", toggleDesc})
 	}
 
+	// Show open server shortcut when task has a port assigned
+	if m.task != nil && m.task.Port > 0 {
+		keys = append(keys, struct {
+			key  string
+			desc string
+		}{"o", fmt.Sprintf("open :%d", m.task.Port)})
+	}
+
 	keys = append(keys, []struct {
 		key  string
 		desc string
