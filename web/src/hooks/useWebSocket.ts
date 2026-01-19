@@ -5,7 +5,7 @@ type MessageHandler = (message: WebSocketMessage) => void;
 
 export function useWebSocket(onMessage?: MessageHandler) {
   const wsRef = useRef<WebSocket | null>(null);
-  const reconnectTimeoutRef = useRef<number>();
+  const reconnectTimeoutRef = useRef<number | undefined>(undefined);
   const onMessageRef = useRef(onMessage);
 
   // Keep callback ref up to date

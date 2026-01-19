@@ -10,56 +10,78 @@
     --card-foreground: 240 10% 3.9%;
     --popover: 0 0% 100%;
     --popover-foreground: 240 10% 3.9%;
-    --primary: 240 5.9% 10%;
-    --primary-foreground: 0 0% 98%;
+    --primary: 262 83% 58%;
+    --primary-foreground: 0 0% 100%;
     --secondary: 240 4.8% 95.9%;
     --secondary-foreground: 240 5.9% 10%;
     --muted: 240 4.8% 95.9%;
     --muted-foreground: 240 3.8% 46.1%;
-    --accent: 240 4.8% 95.9%;
-    --accent-foreground: 240 5.9% 10%;
+    --accent: 262 83% 95%;
+    --accent-foreground: 262 83% 40%;
     --destructive: 0 84.2% 60.2%;
     --destructive-foreground: 0 0% 98%;
     --border: 240 5.9% 90%;
     --input: 240 5.9% 90%;
-    --ring: 240 10% 3.9%;
-    --radius: 0.5rem;
+    --ring: 262 83% 58%;
+    --radius: 0.75rem;
 
     /* Status colors */
-    --status-backlog: 240 3.8% 46.1%;
-    --status-queued: 38 92% 50%;
-    --status-processing: 38 92% 50%;
+    --status-backlog: 240 5% 65%;
+    --status-backlog-bg: 240 5% 96%;
+    --status-queued: 45 93% 47%;
+    --status-queued-bg: 45 93% 95%;
+    --status-processing: 217 91% 60%;
+    --status-processing-bg: 217 91% 95%;
     --status-blocked: 0 84% 60%;
+    --status-blocked-bg: 0 84% 95%;
     --status-done: 142 71% 45%;
+    --status-done-bg: 142 71% 95%;
+
+    /* Glow effects */
+    --glow-primary: 0 0 20px hsla(262, 83%, 58%, 0.3);
+    --glow-success: 0 0 20px hsla(142, 71%, 45%, 0.3);
+    --glow-warning: 0 0 20px hsla(45, 93%, 47%, 0.3);
+    --glow-danger: 0 0 20px hsla(0, 84%, 60%, 0.3);
   }
 
   .dark {
-    --background: 240 10% 3.9%;
+    --background: 240 10% 6%;
     --foreground: 0 0% 98%;
-    --card: 240 10% 3.9%;
+    --card: 240 10% 8%;
     --card-foreground: 0 0% 98%;
-    --popover: 240 10% 3.9%;
+    --popover: 240 10% 8%;
     --popover-foreground: 0 0% 98%;
-    --primary: 0 0% 98%;
-    --primary-foreground: 240 5.9% 10%;
-    --secondary: 240 3.7% 15.9%;
+    --primary: 262 83% 65%;
+    --primary-foreground: 0 0% 100%;
+    --secondary: 240 4% 16%;
     --secondary-foreground: 0 0% 98%;
-    --muted: 240 3.7% 15.9%;
+    --muted: 240 4% 16%;
     --muted-foreground: 240 5% 64.9%;
-    --accent: 240 3.7% 15.9%;
-    --accent-foreground: 0 0% 98%;
-    --destructive: 0 62.8% 30.6%;
+    --accent: 262 40% 20%;
+    --accent-foreground: 262 83% 75%;
+    --destructive: 0 62.8% 50%;
     --destructive-foreground: 0 0% 98%;
-    --border: 240 3.7% 15.9%;
-    --input: 240 3.7% 15.9%;
-    --ring: 240 4.9% 83.9%;
+    --border: 240 4% 18%;
+    --input: 240 4% 18%;
+    --ring: 262 83% 65%;
 
     /* Status colors - dark mode */
-    --status-backlog: 240 5% 65%;
-    --status-queued: 38 92% 50%;
-    --status-processing: 38 92% 50%;
+    --status-backlog: 240 5% 55%;
+    --status-backlog-bg: 240 5% 15%;
+    --status-queued: 45 93% 55%;
+    --status-queued-bg: 45 50% 15%;
+    --status-processing: 217 91% 65%;
+    --status-processing-bg: 217 50% 15%;
     --status-blocked: 0 84% 60%;
-    --status-done: 142 71% 45%;
+    --status-blocked-bg: 0 50% 15%;
+    --status-done: 142 71% 50%;
+    --status-done-bg: 142 40% 15%;
+
+    /* Glow effects - dark mode (more visible) */
+    --glow-primary: 0 0 30px hsla(262, 83%, 65%, 0.4);
+    --glow-success: 0 0 30px hsla(142, 71%, 50%, 0.4);
+    --glow-warning: 0 0 30px hsla(45, 93%, 55%, 0.4);
+    --glow-danger: 0 0 30px hsla(0, 84%, 60%, 0.4);
   }
 }
 
@@ -68,6 +90,117 @@
     @apply border-border;
   }
   body {
-    @apply bg-background text-foreground;
+    @apply bg-background text-foreground antialiased;
+    font-feature-settings: "rlig" 1, "calt" 1;
   }
+}
+
+@layer utilities {
+  /* Smooth scrolling */
+  .scrollbar-thin {
+    scrollbar-width: thin;
+    scrollbar-color: hsl(var(--muted-foreground) / 0.3) transparent;
+  }
+  .scrollbar-thin::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+  .scrollbar-thin::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  .scrollbar-thin::-webkit-scrollbar-thumb {
+    background: hsl(var(--muted-foreground) / 0.3);
+    border-radius: 3px;
+  }
+  .scrollbar-thin::-webkit-scrollbar-thumb:hover {
+    background: hsl(var(--muted-foreground) / 0.5);
+  }
+
+  /* Glass morphism */
+  .glass {
+    background: hsl(var(--card) / 0.8);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+  }
+
+  /* Gradient text */
+  .text-gradient {
+    background: linear-gradient(135deg, hsl(var(--primary)) 0%, hsl(262, 83%, 75%) 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+  }
+
+  /* Processing animation */
+  @keyframes pulse-subtle {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.7; }
+  }
+  .animate-pulse-subtle {
+    animation: pulse-subtle 2s ease-in-out infinite;
+  }
+
+  /* Shimmer effect for loading */
+  @keyframes shimmer {
+    0% { background-position: -200% 0; }
+    100% { background-position: 200% 0; }
+  }
+  .animate-shimmer {
+    background: linear-gradient(
+      90deg,
+      hsl(var(--muted)) 0%,
+      hsl(var(--muted-foreground) / 0.1) 50%,
+      hsl(var(--muted)) 100%
+    );
+    background-size: 200% 100%;
+    animation: shimmer 1.5s infinite;
+  }
+
+  /* Glow effects */
+  .glow-primary {
+    box-shadow: var(--glow-primary);
+  }
+  .glow-success {
+    box-shadow: var(--glow-success);
+  }
+  .glow-warning {
+    box-shadow: var(--glow-warning);
+  }
+  .glow-danger {
+    box-shadow: var(--glow-danger);
+  }
+
+  /* Status border accents */
+  .border-status-backlog {
+    border-left: 3px solid hsl(var(--status-backlog));
+  }
+  .border-status-queued {
+    border-left: 3px solid hsl(var(--status-queued));
+  }
+  .border-status-processing {
+    border-left: 3px solid hsl(var(--status-processing));
+  }
+  .border-status-blocked {
+    border-left: 3px solid hsl(var(--status-blocked));
+  }
+  .border-status-done {
+    border-left: 3px solid hsl(var(--status-done));
+  }
+}
+
+/* Code/terminal styling */
+.font-mono {
+  font-family: 'JetBrains Mono', 'Fira Code', 'SF Mono', Menlo, Monaco, 'Courier New', monospace;
+}
+
+/* Focus visible styling */
+:focus-visible {
+  outline: 2px solid hsl(var(--ring));
+  outline-offset: 2px;
+}
+
+/* Selection styling */
+::selection {
+  background: hsl(var(--primary) / 0.3);
+  color: inherit;
 }

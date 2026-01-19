@@ -8,7 +8,6 @@ const DEV_USER: User = {
   email: 'dev@localhost',
   name: 'Development User',
   avatar_url: '',
-  created_at: new Date().toISOString(),
 };
 
 interface UseAuthReturn {
