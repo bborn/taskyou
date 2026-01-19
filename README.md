@@ -268,7 +268,12 @@ Tasks run in isolated git worktrees at `~/.local/share/task/worktrees/{project}/
 
 #### Worktree Setup Script
 
-You can configure a script to run automatically after each worktree is created. This is useful for:
+You can configure a script to run automatically after each worktree is created. The setup script runs:
+- **After** the git worktree is created
+- **Before** the AI executor (Claude/Codex) starts working on the task
+- When reusing an existing worktree that has already been checked out
+
+This is useful for:
 - Installing dependencies
 - Setting up databases
 - Copying configuration files
@@ -294,7 +299,14 @@ The script runs in the worktree directory and has access to all worktree environ
 
 #### Worktree Teardown Script
 
-You can configure a script to run automatically before a worktree is deleted. This is useful for:
+You can configure a script to run automatically before a worktree is deleted.
+
+**Important:** The teardown script **only runs when a task is deleted** (via the `d` key in the TUI or `task delete` command). It does **not** run when:
+- A task completes (moves to `done` status)
+- A task is archived or closed
+- You manually remove the worktree via `git worktree remove` or `rm -rf`
+
+This is useful for:
 - Dropping task-specific databases
 - Stopping background services
 - Cleaning up docker containers
@@ -315,7 +327,7 @@ worktree:
   teardown_script: scripts/my-teardown.sh
 ```
 
-The teardown script runs when you delete a task through the app. If you manually remove a worktree via `git worktree remove` or `rm -rf`, the teardown script will not run.
+**Note:** If you want automated cleanup when tasks complete (not just when deleted), use [Task Lifecycle Hooks](#task-lifecycle-hooks) to trigger your teardown script on the `task.done` event.
 
 ### Running Applications in Worktrees
 
@@ -397,6 +409,67 @@ Now the AI executor (Claude or Codex) can:
 npm install
 cp .env.example .env.local
 ```
+
+### Task Lifecycle Hooks
+
+Task lifecycle hooks let you run custom scripts when task status changes. This is useful for automation like sending notifications, triggering CI/CD, or running cleanup when tasks complete.
+
+**Hook location:** `~/.config/task/hooks/`
+
+Create an executable script named after the event you want to handle:
+
+| Event | Filename | Triggered When |
+|-------|----------|----------------|
+| `task.started` | `~/.config/task/hooks/task.started` | Task moves to `queued` or `processing` |
+| `task.done` | `~/.config/task/hooks/task.done` | Task completes successfully |
+| `task.blocked` | `~/.config/task/hooks/task.blocked` | Task needs user input |
+| `task.failed` | `~/.config/task/hooks/task.failed` | Task fails with an error |
+
+**Environment variables available to hooks:**
+
+| Variable | Description |
+|----------|-------------|
+| `TASK_ID` | Task ID |
+| `TASK_TITLE` | Task title |
+| `TASK_STATUS` | New task status |
+| `TASK_PROJECT` | Project name |
+| `TASK_TYPE` | Task type |
+| `TASK_MESSAGE` | Status change message |
+| `TASK_EVENT` | Event name (e.g., `task.done`) |
+
+**Example: Run teardown on task completion**
+
+Since the worktree teardown script only runs on task deletion, you can use the `task.done` hook to run cleanup when tasks complete:
+
+```bash
+#!/bin/bash
+# ~/.config/task/hooks/task.done
+
+# Get the worktree path for this task
+WORKTREE_PATH="$HOME/.local/share/task/worktrees/${TASK_PROJECT}/task-${TASK_ID}"
+
+# Run your project's teardown script if it exists
+if [ -x "$WORKTREE_PATH/bin/worktree-teardown" ]; then
+    cd "$WORKTREE_PATH"
+    ./bin/worktree-teardown
+fi
+```
+
+**Example: Send Slack notification**
+
+```bash
+#!/bin/bash
+# ~/.config/task/hooks/task.done
+
+curl -X POST -H 'Content-type: application/json' \
+  --data "{\"text\":\"Task completed: ${TASK_TITLE}\"}" \
+  "$SLACK_WEBHOOK_URL"
+```
+
+**Notes:**
+- Hooks run in the background (non-blocking) with a 30-second timeout
+- Hook failures are logged but don't affect task execution
+- The hooks directory is created automatically at `~/.config/task/hooks/`
 
 ### Memories
 
