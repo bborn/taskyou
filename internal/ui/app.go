@@ -1459,6 +1459,13 @@ func (m *AppModel) updateEditTaskForm(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if form.ProjectChanged() {
 				// Store the original task for the confirmation dialog
 				originalTask := m.editingTask
+
+				// Preserve schedule fields for the new task
+				updatedTask.LastRunAt = originalTask.LastRunAt
+				if updatedTask.ScheduledAt == nil && originalTask.ScheduledAt != nil {
+					updatedTask.ScheduledAt = originalTask.ScheduledAt
+				}
+
 				m.editTaskForm = nil
 				m.editingTask = nil
 				return m.showProjectChangeConfirm(updatedTask, originalTask)
@@ -1472,6 +1479,13 @@ func (m *AppModel) updateEditTaskForm(msg tea.Msg) (tea.Model, tea.Cmd) {
 			updatedTask.CreatedAt = m.editingTask.CreatedAt
 			updatedTask.StartedAt = m.editingTask.StartedAt
 			updatedTask.CompletedAt = m.editingTask.CompletedAt
+			updatedTask.LastRunAt = m.editingTask.LastRunAt
+
+			// Preserve ScheduledAt if form didn't parse a new one but original had one
+			// This handles cases where the schedule input wasn't changed or parsing failed
+			if updatedTask.ScheduledAt == nil && m.editingTask.ScheduledAt != nil {
+				updatedTask.ScheduledAt = m.editingTask.ScheduledAt
+			}
 
 			// Capture old title before clearing editingTask
 			oldTitle := m.editingTask.Title
