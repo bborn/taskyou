@@ -30,6 +30,7 @@ A personal task management system with a beautiful terminal UI, SQLite storage, 
 - **Markdown Rendering** - Task descriptions render with proper formatting in the detail view
 - **Project Memories** - Persistent context that carries across tasks
 - **Real-time Updates** - Watch tasks execute live
+- **Running Process Indicator** - Green dot (`●`) shows which tasks have active shell processes (servers, watchers, etc.)
 - **Auto-cleanup** - Automatic cleanup of Claude processes and config entries for completed tasks
 - **SSH Access** - Connect from anywhere via `ssh -p 2222 server`
 
