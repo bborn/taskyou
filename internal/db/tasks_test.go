@@ -1932,3 +1932,110 @@ func TestGetMostRecentlyCreatedTask(t *testing.T) {
 		t.Errorf("expected 'Second Task' (completed task should still be returned), got %q", mostRecent.Title)
 	}
 }
+
+func TestLastUsedProject(t *testing.T) {
+	// Create temporary database
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	db, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer db.Close()
+	defer os.Remove(dbPath)
+
+	// Get last used project before setting any - should return empty
+	lastProject, err := db.GetLastUsedProject()
+	if err != nil {
+		t.Fatalf("failed to get last used project: %v", err)
+	}
+	if lastProject != "" {
+		t.Errorf("expected empty string, got %q", lastProject)
+	}
+
+	// Set last used project
+	if err := db.SetLastUsedProject("personal"); err != nil {
+		t.Fatalf("failed to set last used project: %v", err)
+	}
+
+	// Get it back
+	lastProject, err = db.GetLastUsedProject()
+	if err != nil {
+		t.Fatalf("failed to get last used project: %v", err)
+	}
+	if lastProject != "personal" {
+		t.Errorf("expected 'personal', got %q", lastProject)
+	}
+
+	// Update to different project
+	if err := db.SetLastUsedProject("work"); err != nil {
+		t.Fatalf("failed to set last used project: %v", err)
+	}
+
+	lastProject, err = db.GetLastUsedProject()
+	if err != nil {
+		t.Fatalf("failed to get last used project: %v", err)
+	}
+	if lastProject != "work" {
+		t.Errorf("expected 'work' after update, got %q", lastProject)
+	}
+}
+
+func TestCreateTaskSavesLastProject(t *testing.T) {
+	// Create temporary database
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	db, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer db.Close()
+	defer os.Remove(dbPath)
+
+	// Create a second project for testing
+	if err := db.CreateProject(&Project{Name: "work", Path: tmpDir + "/work"}); err != nil {
+		t.Fatalf("failed to create work project: %v", err)
+	}
+
+	// Create a task with a project
+	task := &Task{
+		Title:   "Test Task",
+		Status:  StatusBacklog,
+		Type:    "code",
+		Project: "personal",
+	}
+	if err := db.CreateTask(task); err != nil {
+		t.Fatalf("failed to create task: %v", err)
+	}
+
+	// Verify last used project was saved
+	lastProject, err := db.GetLastUsedProject()
+	if err != nil {
+		t.Fatalf("failed to get last used project: %v", err)
+	}
+	if lastProject != "personal" {
+		t.Errorf("expected 'personal', got %q", lastProject)
+	}
+
+	// Create another task with a different project
+	task2 := &Task{
+		Title:   "Test Task 2",
+		Status:  StatusBacklog,
+		Type:    "writing",
+		Project: "work",
+	}
+	if err := db.CreateTask(task2); err != nil {
+		t.Fatalf("failed to create task: %v", err)
+	}
+
+	// Verify last used project was updated
+	lastProject, err = db.GetLastUsedProject()
+	if err != nil {
+		t.Fatalf("failed to get last used project: %v", err)
+	}
+	if lastProject != "work" {
+		t.Errorf("expected 'work', got %q", lastProject)
+	}
+}

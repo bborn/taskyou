@@ -149,6 +149,11 @@ func (db *DB) CreateTask(t *Task) error {
 		db.SetLastTaskTypeForProject(t.Project, t.Type)
 	}
 
+	// Save the last used project
+	if t.Project != "" {
+		db.SetLastUsedProject(t.Project)
+	}
+
 	return nil
 }
 
@@ -1160,6 +1165,16 @@ func (db *DB) GetLastTaskTypeForProject(project string) (string, error) {
 // SetLastTaskTypeForProject saves the last used task type for a project.
 func (db *DB) SetLastTaskTypeForProject(project, taskType string) error {
 	return db.SetSetting("last_type_"+project, taskType)
+}
+
+// GetLastUsedProject returns the last used project name.
+func (db *DB) GetLastUsedProject() (string, error) {
+	return db.GetSetting("last_used_project")
+}
+
+// SetLastUsedProject saves the last used project name.
+func (db *DB) SetLastUsedProject(project string) error {
+	return db.SetSetting("last_used_project", project)
 }
 
 // CreateTaskType creates a new task type.
