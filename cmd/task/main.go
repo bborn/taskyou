@@ -1214,6 +1214,13 @@ Examples:
 			}
 			fmt.Printf("autocomplete_enabled: %s\n", autocomplete)
 
+			// Idle suspend timeout
+			idleTimeout, _ := database.GetSetting("idle_suspend_timeout")
+			if idleTimeout == "" {
+				idleTimeout = "6h (default)"
+			}
+			fmt.Printf("idle_suspend_timeout: %s\n", idleTimeout)
+
 			fmt.Println()
 			fmt.Println(dimStyle.Render("Use 'task settings set <key> <value>' to change settings"))
 		},
@@ -1227,7 +1234,8 @@ Examples:
 Available settings:
   anthropic_api_key     API key for ghost text autocomplete (uses Anthropic API
                         directly for speed). Get yours at console.anthropic.com
-  autocomplete_enabled  Enable/disable ghost text autocomplete (true/false)`,
+  autocomplete_enabled  Enable/disable ghost text autocomplete (true/false)
+  idle_suspend_timeout  How long blocked tasks wait before suspending (e.g. 6h, 30m, 24h)`,
 		Args: cobra.ExactArgs(2),
 		Run: func(cmd *cobra.Command, args []string) {
 			key := args[0]
@@ -1245,9 +1253,14 @@ Available settings:
 					fmt.Println(errorStyle.Render("Value must be 'true' or 'false'"))
 					return
 				}
+			case "idle_suspend_timeout":
+				if _, err := time.ParseDuration(value); err != nil {
+					fmt.Println(errorStyle.Render("Invalid duration format. Examples: 6h, 30m, 24h, 1h30m"))
+					return
+				}
 			default:
 				fmt.Println(errorStyle.Render("Unknown setting: " + key))
-				fmt.Println(dimStyle.Render("Available: anthropic_api_key, autocomplete_enabled"))
+				fmt.Println(dimStyle.Render("Available: anthropic_api_key, autocomplete_enabled, idle_suspend_timeout"))
 				return
 			}
 

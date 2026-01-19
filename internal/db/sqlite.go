@@ -237,6 +237,8 @@ func (db *DB) migrate() error {
 		`ALTER TABLE tasks ADD COLUMN tags TEXT DEFAULT ''`, // comma-separated tags for categorization (e.g., "customer-support,email,influence-kit")
 		// Task executor - which CLI to use for task execution
 		`ALTER TABLE tasks ADD COLUMN executor TEXT DEFAULT 'claude'`, // Task executor: "claude" (default), "codex"
+		// Tmux window ID for unique window identification (avoids duplicate window issues)
+		`ALTER TABLE tasks ADD COLUMN tmux_window_id TEXT DEFAULT ''`, // tmux window ID (e.g., "@1234")
 	}
 
 	for _, m := range alterMigrations {

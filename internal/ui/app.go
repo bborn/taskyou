@@ -579,6 +579,8 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.taskTransitionInProgress = false
 		if msg.err == nil {
 			m.selectedTask = msg.task
+			// Clean up any duplicate tmux windows for this task before switching
+			m.executor.CleanupDuplicateWindows(msg.task.ID)
 			// Resume task if it was suspended (blocked idle tasks get suspended to save memory)
 			if m.executor.IsSuspended(msg.task.ID) {
 				m.executor.ResumeTask(msg.task.ID)

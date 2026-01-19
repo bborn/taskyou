@@ -774,11 +774,9 @@ func (e *Executor) cleanupInactiveDoneTasks() {
 		e.logger.Info("Cleaning up inactive done task", "task", task.ID, "done_for", doneDuration.Round(time.Minute))
 		e.KillClaudeProcess(task.ID)
 
-		// Also kill the tmux window to fully clean up
-		windowTarget := TmuxSessionName(task.ID)
-		killCtx, killCancel := context.WithTimeout(context.Background(), 3*time.Second)
-		exec.CommandContext(killCtx, "tmux", "kill-window", "-t", windowTarget).Run()
-		killCancel()
+		// Also kill the tmux window to fully clean up (kill ALL duplicates)
+		windowName := TmuxWindowName(task.ID)
+		killAllWindowsByNameAllSessions(windowName)
 
 		e.logLine(task.ID, "system", "Claude process cleaned up (inactive done task)")
 	}
@@ -1396,6 +1394,170 @@ func TmuxSessionName(taskID int64) string {
 	return fmt.Sprintf("%s:%s", getDaemonSessionName(), TmuxWindowName(taskID))
 }
 
+// killAllWindowsByName kills ALL windows with a given name in a session.
+// This is necessary because tmux allows duplicate window names, and kill-window
+// by name only kills the first match. This function kills all matches by window ID.
+func killAllWindowsByName(session, windowName string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// List windows with ID and name
+	out, err := exec.CommandContext(ctx, "tmux", "list-windows",
+		"-t", session, "-F", "#{window_id}:#{window_name}").Output()
+	if err != nil {
+		return
+	}
+
+	// Kill each matching window BY ID (unique identifier)
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if line == "" {
+			continue
+		}
+		parts := strings.SplitN(line, ":", 2)
+		if len(parts) == 2 && parts[1] == windowName {
+			exec.CommandContext(ctx, "tmux", "kill-window", "-t", parts[0]).Run()
+		}
+	}
+}
+
+// killAllWindowsByNameAllSessions kills ALL windows with a given name across all daemon sessions.
+// Also kills any -shell variant windows.
+func killAllWindowsByNameAllSessions(windowName string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// List all windows across all sessions
+	out, err := exec.CommandContext(ctx, "tmux", "list-windows",
+		"-a", "-F", "#{session_name}:#{window_id}:#{window_name}").Output()
+	if err != nil {
+		return
+	}
+
+	shellWindowName := windowName + "-shell"
+
+	// Kill matching windows BY ID
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if line == "" {
+			continue
+		}
+		parts := strings.SplitN(line, ":", 3)
+		if len(parts) != 3 {
+			continue
+		}
+		sessionName := parts[0]
+		windowID := parts[1]
+		name := parts[2]
+
+		// Only kill windows in daemon sessions
+		if !strings.HasPrefix(sessionName, "task-daemon-") {
+			continue
+		}
+
+		// Kill if name matches (including -shell variant)
+		if name == windowName || name == shellWindowName {
+			exec.CommandContext(ctx, "tmux", "kill-window", "-t", windowID).Run()
+		}
+	}
+}
+
+// getWindowID returns the window ID for a window with the given name in a session.
+// Returns the LAST match (most recently created) if multiple windows have the same name.
+// Returns empty string if no matching window found.
+func getWindowID(session, windowName string) string {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	out, err := exec.CommandContext(ctx, "tmux", "list-windows",
+		"-t", session, "-F", "#{window_id}:#{window_name}").Output()
+	if err != nil {
+		return ""
+	}
+
+	// Return LAST match (most recently created)
+	var windowID string
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if line == "" {
+			continue
+		}
+		parts := strings.SplitN(line, ":", 2)
+		if len(parts) == 2 && parts[1] == windowName {
+			windowID = parts[0]
+		}
+	}
+	return windowID
+}
+
+// CleanupDuplicateWindows removes duplicate tmux windows for a task, keeping only the canonical one.
+// This prevents window proliferation that can occur from repeated break-pane operations.
+func (e *Executor) CleanupDuplicateWindows(taskID int64) {
+	windowName := TmuxWindowName(taskID)
+
+	// Get task's canonical window ID from DB
+	task, err := e.db.GetTask(taskID)
+	if err != nil {
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// List all windows across all sessions
+	out, err := exec.CommandContext(ctx, "tmux", "list-windows",
+		"-a", "-F", "#{session_name}:#{window_id}:#{window_name}").Output()
+	if err != nil {
+		return
+	}
+
+	var windowsToKill []string
+	var canonicalFound bool
+
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if line == "" {
+			continue
+		}
+		parts := strings.SplitN(line, ":", 3)
+		if len(parts) != 3 {
+			continue
+		}
+		sessionName := parts[0]
+		windowID := parts[1]
+		name := parts[2]
+
+		// Only look at daemon sessions
+		if !strings.HasPrefix(sessionName, "task-daemon-") {
+			continue
+		}
+
+		// Check for matching window name (including -shell variant)
+		if name != windowName && name != windowName+"-shell" {
+			continue
+		}
+
+		// Keep canonical window, kill duplicates
+		if task.TmuxWindowID != "" && windowID == task.TmuxWindowID {
+			canonicalFound = true
+			continue // Keep this one
+		}
+
+		if task.TmuxWindowID == "" && !canonicalFound {
+			// No canonical set - keep first, set it as canonical
+			if name == windowName { // Only set canonical for main window, not -shell
+				e.db.UpdateTaskWindowID(taskID, windowID)
+				canonicalFound = true
+				continue
+			}
+		}
+
+		windowsToKill = append(windowsToKill, windowID)
+	}
+
+	// Kill duplicates
+	for _, windowID := range windowsToKill {
+		e.logger.Debug("Cleaning up duplicate window", "task", taskID, "windowID", windowID)
+		exec.CommandContext(ctx, "tmux", "kill-window", "-t", windowID).Run()
+	}
+}
+
 // GetTasksWithRunningShellProcess returns a map of task IDs that have a running process
 // in their shell pane. A process is considered "running" if the shell pane exists and
 // has a foreground command that differs from the user's default shell.
@@ -1740,10 +1902,8 @@ func (e *Executor) runClaude(ctx context.Context, task *db.Task, workDir, prompt
 	windowName := TmuxWindowName(task.ID)
 	windowTarget := fmt.Sprintf("%s:%s", daemonSession, windowName)
 
-	// Kill any existing window with this name (with timeout)
-	killCtx, killCancel := context.WithTimeout(context.Background(), 3*time.Second)
-	exec.CommandContext(killCtx, "tmux", "kill-window", "-t", windowTarget).Run()
-	killCancel()
+	// Kill ALL existing windows with this name (handles duplicates)
+	killAllWindowsByNameAllSessions(windowName)
 
 	// Setup Claude hooks for status updates
 	cleanupHooks, err := e.setupClaudeHooks(workDir, task.ID)
@@ -1821,6 +1981,13 @@ func (e *Executor) runClaude(ctx context.Context, task *db.Task, workDir, prompt
 		e.logger.Warn("failed to save daemon session", "task", task.ID, "error", err)
 	}
 
+	// Capture and store the window ID for reliable targeting
+	if windowID := getWindowID(daemonSession, windowName); windowID != "" {
+		if err := e.db.UpdateTaskWindowID(task.ID, windowID); err != nil {
+			e.logger.Warn("failed to save window ID", "task", task.ID, "error", err)
+		}
+	}
+
 	// Ensure shell pane exists alongside Claude pane with environment variables
 	e.ensureShellPane(windowTarget, workDir, task.ID, task.Port, task.WorktreePath)
 
@@ -1869,10 +2036,8 @@ func (e *Executor) runClaudeResume(ctx context.Context, task *db.Task, workDir, 
 	windowName := TmuxWindowName(task.ID)
 	windowTarget := fmt.Sprintf("%s:%s", daemonSession, windowName)
 
-	// Kill any existing window with this name (with timeout)
-	killCtx, killCancel := context.WithTimeout(context.Background(), 3*time.Second)
-	exec.CommandContext(killCtx, "tmux", "kill-window", "-t", windowTarget).Run()
-	killCancel()
+	// Kill ALL existing windows with this name (handles duplicates)
+	killAllWindowsByNameAllSessions(windowName)
 
 	// Setup Claude hooks for status updates
 	cleanupHooks, err := e.setupClaudeHooks(workDir, task.ID)
@@ -1937,6 +2102,13 @@ func (e *Executor) runClaudeResume(ctx context.Context, task *db.Task, workDir, 
 		e.logger.Warn("failed to save daemon session", "task", task.ID, "error", err)
 	}
 
+	// Capture and store the window ID for reliable targeting
+	if windowID := getWindowID(daemonSession, windowName); windowID != "" {
+		if err := e.db.UpdateTaskWindowID(task.ID, windowID); err != nil {
+			e.logger.Warn("failed to save window ID", "task", task.ID, "error", err)
+		}
+	}
+
 	// Ensure shell pane exists alongside Claude pane with environment variables
 	e.ensureShellPane(windowTarget, workDir, task.ID, task.Port, task.WorktreePath)
 
@@ -1994,12 +2166,9 @@ func (e *Executor) ResumeDangerous(taskID int64) bool {
 	}
 
 	windowName := TmuxWindowName(taskID)
-	oldWindowTarget := fmt.Sprintf("%s:%s", oldDaemonSession, windowName)
 
-	// Kill any existing window with this name (with timeout)
-	killCtx, killCancel := context.WithTimeout(context.Background(), 3*time.Second)
-	exec.CommandContext(killCtx, "tmux", "kill-window", "-t", oldWindowTarget).Run()
-	killCancel()
+	// Kill ALL existing windows with this name (handles duplicates)
+	killAllWindowsByNameAllSessions(windowName)
 
 	// Ensure task-daemon session exists for creating new window
 	daemonSession, err := ensureTmuxDaemon()
@@ -2053,6 +2222,13 @@ func (e *Executor) ResumeDangerous(taskID int64) bool {
 	// Save which daemon session owns this task's window (for kill logic)
 	if err := e.db.UpdateTaskDaemonSession(taskID, daemonSession); err != nil {
 		e.logger.Warn("failed to save daemon session", "task", taskID, "error", err)
+	}
+
+	// Capture and store the window ID for reliable targeting
+	if windowID := getWindowID(daemonSession, windowName); windowID != "" {
+		if err := e.db.UpdateTaskWindowID(taskID, windowID); err != nil {
+			e.logger.Warn("failed to save window ID", "task", taskID, "error", err)
+		}
 	}
 
 	// Ensure shell pane exists alongside Claude pane with environment variables
@@ -2113,12 +2289,9 @@ func (e *Executor) ResumeSafe(taskID int64) bool {
 	}
 
 	windowName := TmuxWindowName(taskID)
-	oldWindowTarget := fmt.Sprintf("%s:%s", oldDaemonSession, windowName)
 
-	// Kill any existing window with this name (with timeout)
-	killCtx, killCancel := context.WithTimeout(context.Background(), 3*time.Second)
-	exec.CommandContext(killCtx, "tmux", "kill-window", "-t", oldWindowTarget).Run()
-	killCancel()
+	// Kill ALL existing windows with this name (handles duplicates)
+	killAllWindowsByNameAllSessions(windowName)
 
 	// Ensure task-daemon session exists for creating new window
 	daemonSession, err := ensureTmuxDaemon()
@@ -2172,6 +2345,13 @@ func (e *Executor) ResumeSafe(taskID int64) bool {
 	// Save which daemon session owns this task's window (for kill logic)
 	if err := e.db.UpdateTaskDaemonSession(taskID, daemonSession); err != nil {
 		e.logger.Warn("failed to save daemon session", "task", taskID, "error", err)
+	}
+
+	// Capture and store the window ID for reliable targeting
+	if windowID := getWindowID(daemonSession, windowName); windowID != "" {
+		if err := e.db.UpdateTaskWindowID(taskID, windowID); err != nil {
+			e.logger.Warn("failed to save window ID", "task", taskID, "error", err)
+		}
 	}
 
 	// Ensure shell pane exists alongside Claude pane with environment variables

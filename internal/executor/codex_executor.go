@@ -76,10 +76,8 @@ func (c *CodexExecutor) runCodex(ctx context.Context, task *db.Task, workDir, pr
 	windowName := TmuxWindowName(task.ID)
 	windowTarget := fmt.Sprintf("%s:%s", daemonSession, windowName)
 
-	// Kill any existing window with this name
-	killCtx, killCancel := context.WithTimeout(context.Background(), 3*time.Second)
-	exec.CommandContext(killCtx, "tmux", "kill-window", "-t", windowTarget).Run()
-	killCancel()
+	// Kill ALL existing windows with this name (handles duplicates)
+	killAllWindowsByNameAllSessions(windowName)
 
 	// Create a temp file for the prompt
 	promptFile, err := os.CreateTemp("", "task-prompt-*.txt")
@@ -139,6 +137,13 @@ func (c *CodexExecutor) runCodex(ctx context.Context, task *db.Task, workDir, pr
 	// Save which daemon session owns this task's window
 	if err := c.executor.db.UpdateTaskDaemonSession(task.ID, daemonSession); err != nil {
 		c.logger.Warn("failed to save daemon session", "task", task.ID, "error", err)
+	}
+
+	// Capture and store the window ID for reliable targeting
+	if windowID := getWindowID(daemonSession, windowName); windowID != "" {
+		if err := c.executor.db.UpdateTaskWindowID(task.ID, windowID); err != nil {
+			c.logger.Warn("failed to save window ID", "task", task.ID, "error", err)
+		}
 	}
 
 	// Ensure shell pane exists alongside Codex pane
