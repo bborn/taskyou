@@ -528,29 +528,16 @@ func TestRunWorktreeInitScriptStreaming(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Subscribe to task logs to capture streaming output
-	logCh := exec.Subscribe(task.ID)
-	defer exec.Unsubscribe(task.ID, logCh)
+	// Helper function to collect logs with a fresh subscription
+	collectLogs := func(expectedCount int, runFn func()) []string {
+		logCh := exec.Subscribe(task.ID)
+		defer exec.Unsubscribe(task.ID, logCh)
 
-	t.Run("streams output line by line", func(t *testing.T) {
-		// Create a test script that outputs multiple lines with delays
-		scriptContent := `#!/bin/bash
-echo "Line 1: Starting setup"
-echo "Line 2: Installing dependencies"
-echo "Line 3: Completed"
-`
-		scriptPath := binDir + "/worktree-setup"
-		if err := os.WriteFile(scriptPath, []byte(scriptContent), 0755); err != nil {
-			t.Fatal(err)
-		}
-
-		// Collect logs in the background
 		var collectedLogs []string
 		done := make(chan struct{})
 		go func() {
 			defer close(done)
 			timeout := time.After(5 * time.Second)
-			expectedCount := 5 // "Running worktree init script", 3 lines, "completed successfully"
 			for {
 				select {
 				case log := <-logCh:
@@ -564,11 +551,26 @@ echo "Line 3: Completed"
 			}
 		}()
 
-		// Run the script
-		exec.runWorktreeInitScript(projectDir, worktreeDir, task)
-
-		// Wait for log collection to complete
+		runFn()
 		<-done
+		return collectedLogs
+	}
+
+	t.Run("streams output line by line", func(t *testing.T) {
+		// Create a test script that outputs multiple lines
+		scriptContent := `#!/bin/bash
+echo "Line 1: Starting setup"
+echo "Line 2: Installing dependencies"
+echo "Line 3: Completed"
+`
+		scriptPath := binDir + "/worktree-setup"
+		if err := os.WriteFile(scriptPath, []byte(scriptContent), 0755); err != nil {
+			t.Fatal(err)
+		}
+
+		collectedLogs := collectLogs(5, func() {
+			exec.runWorktreeInitScript(projectDir, worktreeDir, task)
+		})
 
 		// Verify the logs were streamed
 		if len(collectedLogs) < 4 {
@@ -595,9 +597,6 @@ echo "Line 3: Completed"
 	})
 
 	t.Run("handles stderr output", func(t *testing.T) {
-		// Clear previous logs
-		collectedLogs := []string{}
-
 		// Create a script that outputs to stderr
 		scriptContent := `#!/bin/bash
 echo "stdout message"
@@ -608,30 +607,9 @@ echo "stderr message" >&2
 			t.Fatal(err)
 		}
 
-		// Collect logs in the background
-		done := make(chan struct{})
-		go func() {
-			defer close(done)
-			timeout := time.After(5 * time.Second)
-			expectedCount := 4 // "Running worktree init script", stdout, stderr, "completed successfully"
-			for {
-				select {
-				case log := <-logCh:
-					collectedLogs = append(collectedLogs, log.Content)
-					if len(collectedLogs) >= expectedCount {
-						return
-					}
-				case <-timeout:
-					return
-				}
-			}
-		}()
-
-		// Run the script
-		exec.runWorktreeInitScript(projectDir, worktreeDir, task)
-
-		// Wait for log collection to complete
-		<-done
+		collectedLogs := collectLogs(4, func() {
+			exec.runWorktreeInitScript(projectDir, worktreeDir, task)
+		})
 
 		// Verify both stdout and stderr were captured
 		var foundStdout, foundStderr bool
@@ -653,9 +631,6 @@ echo "stderr message" >&2
 	})
 
 	t.Run("handles script failure", func(t *testing.T) {
-		// Clear previous logs
-		collectedLogs := []string{}
-
 		// Create a script that fails
 		scriptContent := `#!/bin/bash
 echo "Starting..."
@@ -666,30 +641,9 @@ exit 1
 			t.Fatal(err)
 		}
 
-		// Collect logs in the background
-		done := make(chan struct{})
-		go func() {
-			defer close(done)
-			timeout := time.After(5 * time.Second)
-			expectedCount := 3 // "Running worktree init script", "Starting...", "Warning: ... failed"
-			for {
-				select {
-				case log := <-logCh:
-					collectedLogs = append(collectedLogs, log.Content)
-					if len(collectedLogs) >= expectedCount {
-						return
-					}
-				case <-timeout:
-					return
-				}
-			}
-		}()
-
-		// Run the script
-		exec.runWorktreeInitScript(projectDir, worktreeDir, task)
-
-		// Wait for log collection to complete
-		<-done
+		collectedLogs := collectLogs(3, func() {
+			exec.runWorktreeInitScript(projectDir, worktreeDir, task)
+		})
 
 		// Verify failure was logged
 		var foundFailure bool
