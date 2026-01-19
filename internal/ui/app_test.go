@@ -26,6 +26,10 @@ func TestDefaultKeyMap(t *testing.T) {
 	if keys.ChangeStatus.Help().Key != "S" {
 		t.Error("ChangeStatus key should have help text 'S'")
 	}
+
+	if keys.OpenWorktree.Help().Key != "o" {
+		t.Error("OpenWorktree key should have help text 'o'")
+	}
 }
 
 func TestShowChangeStatus_OnlyIncludesKanbanStatuses(t *testing.T) {
@@ -191,5 +195,51 @@ func TestShowCloseConfirm_DifferentTasks(t *testing.T) {
 				t.Error("pendingCloseTask was not set correctly")
 			}
 		})
+	}
+}
+
+func TestOpenWorktreeInEditor_NoWorktreePath(t *testing.T) {
+	m := &AppModel{}
+
+	// Test task with no worktree path
+	task := &db.Task{
+		ID:           1,
+		Title:        "Test Task",
+		WorktreePath: "",
+	}
+
+	cmd := m.openWorktreeInEditor(task)
+	msg := cmd()
+
+	result, ok := msg.(worktreeOpenedMsg)
+	if !ok {
+		t.Fatal("expected worktreeOpenedMsg")
+	}
+
+	if result.err == nil {
+		t.Error("expected error for task with no worktree path")
+	}
+}
+
+func TestOpenWorktreeInEditor_NonexistentPath(t *testing.T) {
+	m := &AppModel{}
+
+	// Test task with non-existent worktree path
+	task := &db.Task{
+		ID:           1,
+		Title:        "Test Task",
+		WorktreePath: "/nonexistent/path/that/does/not/exist",
+	}
+
+	cmd := m.openWorktreeInEditor(task)
+	msg := cmd()
+
+	result, ok := msg.(worktreeOpenedMsg)
+	if !ok {
+		t.Fatal("expected worktreeOpenedMsg")
+	}
+
+	if result.err == nil {
+		t.Error("expected error for non-existent worktree path")
 	}
 }

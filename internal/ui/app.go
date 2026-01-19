@@ -68,6 +68,7 @@ type KeyMap struct {
 	ToggleDangerous key.Binding
 	Filter          key.Binding
 	ResumeClaude    key.Binding
+	OpenWorktree    key.Binding
 	// Column focus shortcuts
 	FocusBacklog    key.Binding
 	FocusInProgress key.Binding
@@ -88,7 +89,7 @@ func (k KeyMap) FullHelp() [][]key.Binding {
 		{k.Left, k.Right, k.Up, k.Down},
 		{k.FocusBacklog, k.FocusInProgress, k.FocusBlocked, k.FocusDone},
 		{k.Enter, k.New, k.Queue, k.Close},
-		{k.Retry, k.Archive, k.Delete},
+		{k.Retry, k.Archive, k.Delete, k.OpenWorktree},
 		{k.Filter, k.CommandPalette, k.Settings, k.Memories},
 		{k.ChangeStatus, k.Refresh, k.Help, k.Quit},
 	}
@@ -188,6 +189,10 @@ func DefaultKeyMap() KeyMap {
 		ResumeClaude: key.NewBinding(
 			key.WithKeys("R"),
 			key.WithHelp("R", "resume claude"),
+		),
+		OpenWorktree: key.NewBinding(
+			key.WithKeys("o"),
+			key.WithHelp("o", "open in editor"),
 		),
 		FocusBacklog: key.NewBinding(
 			key.WithKeys("B"),
@@ -669,6 +674,15 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Just refresh task list - pane stays open
 		cmds = append(cmds, m.loadTasks())
 
+	case worktreeOpenedMsg:
+		if msg.err != nil {
+			m.notification = fmt.Sprintf("⚠ %s", msg.err.Error())
+			m.notifyUntil = time.Now().Add(5 * time.Second)
+		} else if msg.message != "" {
+			m.notification = fmt.Sprintf("📂 %s", msg.message)
+			m.notifyUntil = time.Now().Add(3 * time.Second)
+		}
+
 	case taskEventMsg:
 		// Real-time task update from executor
 		event := msg.event
@@ -1045,6 +1059,11 @@ func (m *AppModel) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m.showDeleteConfirm(task)
 		}
 
+	case key.Matches(msg, m.keys.OpenWorktree):
+		if task := m.kanban.SelectedTask(); task != nil {
+			return m, m.openWorktreeInEditor(task)
+		}
+
 	case key.Matches(msg, m.keys.Settings):
 		m.settingsView = NewSettingsModel(m.db, m.width, m.height)
 		m.previousView = m.currentView
@@ -1314,6 +1333,9 @@ func (m *AppModel) updateDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if key.Matches(keyMsg, m.keys.ToggleShellPane) && m.detailView != nil {
 		m.detailView.ToggleShellPane()
 		return m, nil
+	}
+	if key.Matches(keyMsg, m.keys.OpenWorktree) && m.selectedTask != nil {
+		return m, m.openWorktreeInEditor(m.selectedTask)
 	}
 
 	// Arrow key navigation to prev/next task in the same column
@@ -2498,6 +2520,47 @@ func (m *AppModel) deleteTask(id int64) tea.Cmd {
 		// Delete from database
 		err = m.db.DeleteTask(id)
 		return taskDeletedMsg{err: err}
+	}
+}
+
+// worktreeOpenedMsg is returned when attempting to open a worktree in the editor.
+type worktreeOpenedMsg struct {
+	message string
+	err     error
+}
+
+// openWorktreeInEditor opens the task's worktree directory in the default editor.
+// It checks VISUAL, then EDITOR environment variables, falling back to "open" on macOS.
+func (m *AppModel) openWorktreeInEditor(task *db.Task) tea.Cmd {
+	return func() tea.Msg {
+		if task.WorktreePath == "" {
+			return worktreeOpenedMsg{err: fmt.Errorf("no worktree for task #%d", task.ID)}
+		}
+
+		// Check if worktree directory exists
+		if _, err := os.Stat(task.WorktreePath); os.IsNotExist(err) {
+			return worktreeOpenedMsg{err: fmt.Errorf("worktree not found: %s", task.WorktreePath)}
+		}
+
+		// Try VISUAL, then EDITOR, then fall back to "open" command
+		editor := os.Getenv("VISUAL")
+		if editor == "" {
+			editor = os.Getenv("EDITOR")
+		}
+
+		var cmd *osExec.Cmd
+		if editor != "" {
+			cmd = osExec.Command(editor, task.WorktreePath)
+		} else {
+			// Fall back to "open" command on macOS (opens in Finder or default app)
+			cmd = osExec.Command("open", task.WorktreePath)
+		}
+
+		if err := cmd.Start(); err != nil {
+			return worktreeOpenedMsg{err: fmt.Errorf("failed to open editor: %w", err)}
+		}
+
+		return worktreeOpenedMsg{message: fmt.Sprintf("Opened %s", filepath.Base(task.WorktreePath))}
 	}
 }
 
