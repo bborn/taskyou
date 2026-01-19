@@ -632,6 +632,31 @@ func (m *DetailModel) getCurrentDetailPaneHeight(tuiPaneID string) int {
 	return (paneHeight * 100) / totalHeight
 }
 
+// getActualPaneHeight returns the actual pane height in lines.
+// Returns 0 on error.
+func (m *DetailModel) getActualPaneHeight(tuiPaneID string) int {
+	if tuiPaneID == "" {
+		return 0
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	// Get the current height of the TUI pane in lines
+	cmd := exec.CommandContext(ctx, "tmux", "display-message", "-p", "-t", tuiPaneID, "#{pane_height}")
+	heightOut, err := cmd.Output()
+	if err != nil {
+		return 0
+	}
+
+	paneHeight, err := strconv.Atoi(strings.TrimSpace(string(heightOut)))
+	if err != nil || paneHeight <= 0 {
+		return 0
+	}
+
+	return paneHeight
+}
+
 // getCurrentShellPaneWidth returns the current shell pane width as a percentage (0-100).
 // Returns 0 on error.
 func (m *DetailModel) getCurrentShellPaneWidth() int {
@@ -1000,6 +1025,19 @@ func (m *DetailModel) joinTmuxPanes() {
 	// This allows us to save only when the user has actually dragged to resize
 	m.initialDetailHeight = m.getCurrentDetailPaneHeight(tuiPaneID)
 	m.initialShellWidth = m.getCurrentShellPaneWidth()
+
+	// Update viewport height to match the actual pane height after resize
+	// This prevents the header (with task title) from being pushed off screen
+	if actualHeight := m.getActualPaneHeight(tuiPaneID); actualHeight > 0 {
+		m.height = actualHeight
+		headerHeight := 6
+		footerHeight := 2
+		vpHeight := m.height - headerHeight - footerHeight
+		if vpHeight > 0 && m.ready {
+			m.viewport.Height = vpHeight
+			m.viewport.SetContent(m.renderContent())
+		}
+	}
 
 	log.Info("joinTmuxPanes: completed for task %d, claudePaneID=%q, workdirPaneID=%q, tuiPaneID=%q",
 		m.task.ID, m.claudePaneID, m.workdirPaneID, m.tuiPaneID)
