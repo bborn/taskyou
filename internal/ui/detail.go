@@ -1179,28 +1179,8 @@ func (m *DetailModel) View() string {
 		Width(m.width-2).
 		Padding(0, 1)
 
-	// Add scroll indicator if content is scrollable
-	var scrollIndicator string
-	if m.viewport.TotalLineCount() > m.viewport.VisibleLineCount() {
-		scrollPercent := 0
-		if m.viewport.TotalLineCount() > 0 {
-			scrollPercent = int(float64(m.viewport.YOffset+m.viewport.VisibleLineCount()) / float64(m.viewport.TotalLineCount()) * 100)
-			if scrollPercent > 100 {
-				scrollPercent = 100
-			}
-		}
-		indicatorStyle := lipgloss.NewStyle().Foreground(ColorMuted)
-		if !m.focused {
-			indicatorStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#4B5563"))
-		}
-		scrollIndicator = indicatorStyle.Render(fmt.Sprintf(" %d%% ", scrollPercent))
-	}
-
 	help := m.renderHelp()
 	boxContent := lipgloss.JoinVertical(lipgloss.Left, header, content)
-	if scrollIndicator != "" {
-		boxContent = lipgloss.JoinVertical(lipgloss.Left, header, content, scrollIndicator)
-	}
 	return lipgloss.JoinVertical(lipgloss.Left,
 		box.Render(boxContent),
 		help,
