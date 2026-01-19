@@ -68,7 +68,7 @@ type Executor struct {
 }
 
 // SuspendIdleTimeout is how long a blocked task must be idle before being suspended.
-const SuspendIdleTimeout = 5 * time.Minute
+const SuspendIdleTimeout = 2 * time.Hour
 
 // DoneTaskCleanupTimeout is how long after a task is marked done before its Claude process is killed.
 // This gives users time to review output or retry the task before the process is cleaned up.
