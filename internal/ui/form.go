@@ -23,10 +23,10 @@ import (
 type FormField int
 
 const (
-	FieldTitle FormField = iota
+	FieldProject FormField = iota // Project first for immediate context
+	FieldTitle
 	FieldBody
 	FieldAttachments // Moved after body for proximity - drag works from any field
-	FieldProject
 	FieldType
 	FieldExecutor
 	FieldSchedule
@@ -135,7 +135,7 @@ func NewEditFormModel(database *db.DB, task *db.Task, width, height int) *FormMo
 		db:                  database,
 		width:               width,
 		height:              height,
-		focused:             FieldTitle,
+		focused:             FieldProject,
 		taskType:            task.Type,
 		project:             task.Project,
 		originalProject:     task.Project, // Track original project for detecting changes
@@ -204,7 +204,6 @@ func NewEditFormModel(database *db.DB, task *db.Task, width, height int) *FormMo
 	m.titleInput.Placeholder = "What needs to be done?"
 	m.titleInput.Prompt = ""
 	m.titleInput.Cursor.SetMode(cursor.CursorStatic)
-	m.titleInput.Focus()
 	m.titleInput.Width = width - 24
 	m.titleInput.SetValue(task.Title)
 
@@ -271,7 +270,7 @@ func NewFormModel(database *db.DB, width, height int, workingDir string) *FormMo
 		db:                  database,
 		width:               width,
 		height:              height,
-		focused:             FieldTitle,
+		focused:             FieldProject,
 		executor:            db.DefaultExecutor(),
 		executors:           []string{db.ExecutorClaude, db.ExecutorCodex},
 		recurrences:         []string{"", db.RecurrenceHourly, db.RecurrenceDaily, db.RecurrenceWeekly, db.RecurrenceMonthly},
@@ -339,7 +338,6 @@ func NewFormModel(database *db.DB, width, height int, workingDir string) *FormMo
 	m.titleInput.Placeholder = "What needs to be done?"
 	m.titleInput.Prompt = ""
 	m.titleInput.Cursor.SetMode(cursor.CursorStatic)
-	m.titleInput.Focus()
 	m.titleInput.Width = width - 24
 
 	// Body textarea
@@ -1111,8 +1109,16 @@ func (m *FormModel) View() string {
 	// Ghost text style for autocomplete suggestions
 	ghostStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Italic(true)
 
-	// Title
+	// Project selector (first for immediate context)
 	cursor := " "
+	if m.focused == FieldProject {
+		cursor = cursorStyle.Render("▸")
+	}
+	b.WriteString(cursor + " " + labelStyle.Render("Project") + m.renderSelector(m.projects, m.projectIdx, m.focused == FieldProject, selectedStyle, optionStyle, dimStyle))
+	b.WriteString("\n\n")
+
+	// Title
+	cursor = " "
 	if m.focused == FieldTitle {
 		cursor = cursorStyle.Render("▸")
 	}
@@ -1190,14 +1196,6 @@ func (m *FormModel) View() string {
 	}
 	b.WriteString("\n")
 	b.WriteString(cursor + " " + labelStyle.Render("Attachments") + attachmentLine)
-	b.WriteString("\n\n")
-
-	// Project selector
-	cursor = " "
-	if m.focused == FieldProject {
-		cursor = cursorStyle.Render("▸")
-	}
-	b.WriteString(cursor + " " + labelStyle.Render("Project") + m.renderSelector(m.projects, m.projectIdx, m.focused == FieldProject, selectedStyle, optionStyle, dimStyle))
 	b.WriteString("\n\n")
 
 	// Type selector
