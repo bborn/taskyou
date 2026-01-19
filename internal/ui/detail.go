@@ -903,9 +903,26 @@ func (m *DetailModel) joinTmuxPanes() {
 	}
 
 	if m.shellPaneHidden {
-		// Shell pane is hidden - leave it in daemon window to preserve any running process
-		// It will be rejoined when the user unhides the shell pane
-		log.Debug("joinTmuxPanes: shell pane hidden, leaving in daemon to preserve process")
+		// Shell pane is hidden - if there's a shell pane in the main daemon window,
+		// move it to a dedicated -shell window to prevent duplicate windows when breaking
+		// Claude back (since break-pane creates a new window with the task name).
+		log.Debug("joinTmuxPanes: shell pane hidden")
+		if hasShellPane && secondPaneIndex != "" {
+			// Shell is in the main daemon window - move it to dedicated -shell window
+			windowName := executor.TmuxWindowName(m.task.ID)
+			shellWindowName := windowName + "-shell"
+			shellSource := windowTarget + "." + secondPaneIndex
+			log.Debug("joinTmuxPanes: moving shell from %q to dedicated window %q", shellSource, shellWindowName)
+			breakErr := exec.CommandContext(ctx, "tmux", "break-pane",
+				"-d",
+				"-s", shellSource,
+				"-t", m.daemonSessionID+":",
+				"-n", shellWindowName).Run()
+			if breakErr != nil {
+				log.Error("joinTmuxPanes: failed to move shell to dedicated window: %v", breakErr)
+				// Fall through - shell stays in daemon window (not ideal but won't crash)
+			}
+		}
 		m.workdirPaneID = ""
 	} else if hasShellPane && secondPaneIndex != "" {
 		// Daemon had 2 panes. After joining Claude, the Shell pane is still at its original index
