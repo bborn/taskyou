@@ -3,8 +3,10 @@
 package webapi
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
+	"net"
 	"net/http"
 	"os"
 	"strconv"
@@ -122,7 +124,11 @@ func (s *Server) Start(ctx context.Context) error {
 // corsMiddleware adds CORS headers for local development.
 func (s *Server) corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		origin := s.devOrigin
+		// In dev mode, allow the actual request origin (Vite may use different ports)
+		origin := r.Header.Get("Origin")
+		if origin == "" {
+			origin = s.devOrigin
+		}
 		if origin == "" {
 			origin = "http://localhost:5173"
 		}
@@ -166,6 +172,14 @@ type responseWriter struct {
 func (rw *responseWriter) WriteHeader(code int) {
 	rw.statusCode = code
 	rw.ResponseWriter.WriteHeader(code)
+}
+
+// Hijack implements http.Hijacker for WebSocket support.
+func (rw *responseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	if hijacker, ok := rw.ResponseWriter.(http.Hijacker); ok {
+		return hijacker.Hijack()
+	}
+	return nil, nil, http.ErrNotSupported
 }
 
 // JSON response helpers

@@ -11,7 +11,7 @@ import {
   ArrowRight,
   Command,
 } from 'lucide-react';
-import type { Task, TaskStatus } from '@/api/types';
+import type { Task } from '@/api/types';
 import { cn } from '@/lib/utils';
 
 interface CommandPaletteProps {
@@ -34,13 +34,15 @@ interface CommandItem {
   action?: () => void;
 }
 
-const statusIcons: Record<TaskStatus, { icon: React.ElementType; color: string }> = {
+const statusIcons: Record<string, { icon: React.ElementType; color: string }> = {
   backlog: { icon: Clock, color: 'text-[hsl(var(--status-backlog))]' },
   queued: { icon: Clock, color: 'text-[hsl(var(--status-queued))]' },
   processing: { icon: Zap, color: 'text-[hsl(var(--status-processing))]' },
   blocked: { icon: AlertCircle, color: 'text-[hsl(var(--status-blocked))]' },
   done: { icon: CheckCircle, color: 'text-[hsl(var(--status-done))]' },
 };
+
+const defaultStatusIcon = { icon: Clock, color: 'text-muted-foreground' };
 
 export function CommandPalette({
   isOpen,
@@ -94,7 +96,7 @@ export function CommandPalette({
     ];
 
     const taskItems: CommandItem[] = tasks.map((task) => {
-      const statusInfo = statusIcons[task.status];
+      const statusInfo = statusIcons[task.status] || defaultStatusIcon;
       return {
         id: `task-${task.id}`,
         type: 'task',
