@@ -549,6 +549,13 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Reapply filter if one is active
 		m.applyFilter()
 		m.kanban.SetHiddenDoneCount(msg.hiddenDoneCount)
+		// Refresh running process indicators for all tasks
+		running := executor.GetTasksWithRunningShellProcess()
+		// Also check currently viewed task (its panes are in task-ui, not daemon)
+		if m.selectedTask != nil && executor.HasRunningProcessInTaskUI() {
+			running[m.selectedTask.ID] = true
+		}
+		m.kanban.SetRunningProcesses(running)
 
 		// PR info is fetched separately via prRefreshTick, not on every task load
 
@@ -711,6 +718,13 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Poll database for task changes (hooks run in separate process)
 		if m.currentView == ViewDashboard && !m.loading {
 			cmds = append(cmds, m.loadTasks())
+			// Refresh running process indicators
+			running := executor.GetTasksWithRunningShellProcess()
+			// Also check currently viewed task (its panes are in task-ui, not daemon)
+			if m.selectedTask != nil && executor.HasRunningProcessInTaskUI() {
+				running[m.selectedTask.ID] = true
+			}
+			m.kanban.SetRunningProcesses(running)
 		}
 		cmds = append(cmds, m.tick())
 

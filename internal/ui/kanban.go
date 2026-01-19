@@ -25,15 +25,16 @@ const MobileWidthThreshold = 80
 
 // KanbanBoard manages the kanban board state.
 type KanbanBoard struct {
-	columns         []KanbanColumn
-	selectedCol     int
-	selectedRow     int
-	scrollOffsets   []int // Scroll offset per column
-	width           int
-	height          int
-	allTasks        []*db.Task               // All tasks
-	prInfo          map[int64]*github.PRInfo // PR info by task ID
-	hiddenDoneCount int                      // Number of done tasks not shown (older ones)
+	columns          []KanbanColumn
+	selectedCol      int
+	selectedRow      int
+	scrollOffsets    []int // Scroll offset per column
+	width            int
+	height           int
+	allTasks         []*db.Task               // All tasks
+	prInfo           map[int64]*github.PRInfo // PR info by task ID
+	runningProcesses map[int64]bool           // Tasks with running shell processes
+	hiddenDoneCount  int                      // Number of done tasks not shown (older ones)
 }
 
 // IsMobileMode returns true if the board should show single-column mode.
@@ -45,11 +46,12 @@ func (k *KanbanBoard) IsMobileMode() bool {
 func NewKanbanBoard(width, height int) *KanbanBoard {
 	columns := makeKanbanColumns()
 	return &KanbanBoard{
-		columns:       columns,
-		scrollOffsets: make([]int, len(columns)),
-		width:         width,
-		height:        height,
-		prInfo:        make(map[int64]*github.PRInfo),
+		columns:          columns,
+		scrollOffsets:    make([]int, len(columns)),
+		width:            width,
+		height:           height,
+		prInfo:           make(map[int64]*github.PRInfo),
+		runningProcesses: make(map[int64]bool),
 	}
 }
 
@@ -99,6 +101,19 @@ func (k *KanbanBoard) GetPRInfo(taskID int64) *github.PRInfo {
 		return nil
 	}
 	return k.prInfo[taskID]
+}
+
+// SetRunningProcesses updates the map of tasks with running shell processes.
+func (k *KanbanBoard) SetRunningProcesses(running map[int64]bool) {
+	k.runningProcesses = running
+}
+
+// HasRunningProcess returns true if the task has a running shell process.
+func (k *KanbanBoard) HasRunningProcess(taskID int64) bool {
+	if k.runningProcesses == nil {
+		return false
+	}
+	return k.runningProcesses[taskID]
 }
 
 // distributeTasksToColumns distributes tasks to their respective columns.
@@ -706,6 +721,13 @@ func (k *KanbanBoard) renderTaskCard(task *db.Task, width int, isSelected bool) 
 	if prInfo := k.prInfo[task.ID]; prInfo != nil {
 		b.WriteString(" ")
 		b.WriteString(PRStatusBadge(prInfo))
+	}
+
+	// Running process indicator
+	if k.HasRunningProcess(task.ID) {
+		processStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("46")) // Bright green
+		b.WriteString(" ")
+		b.WriteString(processStyle.Render("●")) // Green dot for running process
 	}
 
 	// Schedule indicator - show if scheduled OR recurring

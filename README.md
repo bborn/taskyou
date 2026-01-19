@@ -300,6 +300,13 @@ Each task provides environment variables that applications can use to run in iso
 | `WORKTREE_PORT` | Unique port (3100-4099) | `3100` |
 | `WORKTREE_PATH` | Path to the worktree | `/path/to/project/.task-worktrees/207-my-task` |
 
+#### Loading Environment Variables
+
+Each worktree includes a `.envrc` file with these variables. To load them:
+
+- **With [direnv](https://direnv.net/)** (recommended): Variables load automatically when you `cd` into the worktree. Run `direnv allow` the first time.
+- **Without direnv**: Run `source .envrc` manually.
+
 These variables allow multiple tasks to run simultaneously without conflicts on ports or databases.
 
 #### Example: Rails Application

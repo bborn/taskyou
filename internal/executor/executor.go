@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -1382,6 +1383,131 @@ func TmuxWindowName(taskID int64) string {
 // TmuxSessionName returns the full tmux target for a task (session:window).
 func TmuxSessionName(taskID int64) string {
 	return fmt.Sprintf("%s:%s", getDaemonSessionName(), TmuxWindowName(taskID))
+}
+
+// GetTasksWithRunningShellProcess returns a map of task IDs that have a running process
+// in their shell pane. A process is considered "running" if the shell pane exists and
+// has a foreground command that differs from the user's default shell.
+func GetTasksWithRunningShellProcess() map[int64]bool {
+	result := make(map[int64]bool)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	// List all panes across all sessions with their command and window name
+	// Format: session:window:pane_index pane_current_command
+	out, err := exec.CommandContext(ctx, "tmux", "list-panes", "-a", "-F", "#{session_name}:#{window_name}:#{pane_index} #{pane_current_command}").Output()
+	if err != nil {
+		return result
+	}
+
+	// Get user's default shell (basename only for comparison)
+	userShell := os.Getenv("SHELL")
+	if userShell == "" {
+		userShell = "/bin/zsh"
+	}
+	// Extract basename (e.g., "/bin/zsh" -> "zsh")
+	if idx := strings.LastIndex(userShell, "/"); idx >= 0 {
+		userShell = userShell[idx+1:]
+	}
+
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if line == "" {
+			continue
+		}
+
+		// Split into "session:window:index" and "command"
+		parts := strings.SplitN(line, " ", 2)
+		if len(parts) != 2 {
+			continue
+		}
+
+		location := parts[0]
+		command := parts[1]
+
+		// Parse window name to extract task ID
+		// Format: task-daemon-XXX:task-123:1 (pane index 1 is the shell pane)
+		locParts := strings.Split(location, ":")
+		if len(locParts) < 3 {
+			continue
+		}
+
+		windowName := locParts[1]
+		paneIndex := locParts[2]
+
+		// Only check pane index 1 (the shell pane, not the Claude pane at index 0)
+		if paneIndex != "1" {
+			continue
+		}
+
+		// Extract task ID from window name "task-123"
+		if !strings.HasPrefix(windowName, "task-") {
+			continue
+		}
+
+		var taskID int64
+		if _, err := fmt.Sscanf(windowName, "task-%d", &taskID); err != nil {
+			continue
+		}
+
+		// If the command differs from user's shell, a process is running
+		// This catches cases like ./bin/dev (shows as "bash" even if user's shell is zsh)
+		if command != userShell {
+			result[taskID] = true
+		}
+	}
+
+	return result
+}
+
+// HasRunningProcessInTaskUI checks if the task-ui session has a running process
+// in the shell pane (pane index 2). This is used to detect running processes
+// for the currently viewed task, whose panes are joined to task-ui rather than
+// being in the daemon.
+func HasRunningProcessInTaskUI() bool {
+	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+	defer cancel()
+
+	// Find task-ui session
+	out, err := exec.CommandContext(ctx, "tmux", "list-panes", "-a", "-F", "#{session_name}:#{pane_index} #{pane_current_command}").Output()
+	if err != nil {
+		return false
+	}
+
+	// Get user's default shell (basename only for comparison)
+	userShell := os.Getenv("SHELL")
+	if userShell == "" {
+		userShell = "/bin/zsh"
+	}
+	// Extract basename (e.g., "/bin/zsh" -> "zsh")
+	if idx := strings.LastIndex(userShell, "/"); idx >= 0 {
+		userShell = userShell[idx+1:]
+	}
+
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if line == "" {
+			continue
+		}
+
+		parts := strings.SplitN(line, " ", 2)
+		if len(parts) != 2 {
+			continue
+		}
+
+		location := parts[0]
+		command := parts[1]
+
+		// Look for task-ui session, pane index 2 (the shell pane when viewing a task)
+		if strings.HasPrefix(location, "task-ui") && strings.HasSuffix(location, ":2") {
+			// If the command differs from user's shell, a process is running
+			// This catches cases like ./bin/dev (shows as "bash" even if user's shell is zsh)
+			if command != userShell {
+				return true
+			}
+		}
+	}
+
+	return false
 }
 
 // ensureTmuxDaemon ensures the task-daemon session exists.
@@ -2818,6 +2944,7 @@ func (e *Executor) setupWorktree(task *db.Task) (string, error) {
 	if task.WorktreePath != "" {
 		if _, err := os.Stat(task.WorktreePath); err == nil {
 			trustMiseConfig(task.WorktreePath)
+			e.writeWorktreeEnvFile(projectDir, task.WorktreePath, task)
 			symlinkClaudeConfig(projectDir, task.WorktreePath)
 			copyMCPConfig(projectDir, task.WorktreePath)
 			return task.WorktreePath, nil
@@ -2863,8 +2990,10 @@ func (e *Executor) setupWorktree(task *db.Task) (string, error) {
 			}
 		}
 		trustMiseConfig(worktreePath)
+		e.writeWorktreeEnvFile(projectDir, worktreePath, task)
 		symlinkClaudeConfig(projectDir, worktreePath)
 		copyMCPConfig(projectDir, worktreePath)
+		e.runWorktreeInitScript(projectDir, worktreePath, task)
 		return worktreePath, nil
 	}
 
@@ -2903,7 +3032,9 @@ func (e *Executor) setupWorktree(task *db.Task) (string, error) {
 						}
 					}
 					trustMiseConfig(worktreePath)
+					e.writeWorktreeEnvFile(projectDir, worktreePath, task)
 					copyMCPConfig(projectDir, worktreePath)
+					e.runWorktreeInitScript(projectDir, worktreePath, task)
 					return worktreePath, nil
 				}
 				return "", fmt.Errorf("create worktree: %v\n%s\n%s", err, string(output), string(output2))
@@ -2936,13 +3067,101 @@ func (e *Executor) setupWorktree(task *db.Task) (string, error) {
 	}
 
 	trustMiseConfig(worktreePath)
+	e.writeWorktreeEnvFile(projectDir, worktreePath, task)
 	symlinkClaudeConfig(projectDir, worktreePath)
 	copyMCPConfig(projectDir, worktreePath)
 
-	// Run worktree init script if configured (only for newly created worktrees)
+	// Run worktree init script if configured
 	e.runWorktreeInitScript(projectDir, worktreePath, task)
 
 	return worktreePath, nil
+}
+
+// getUserShell returns the login shell for the given username.
+// On macOS it uses dscl, on Linux it reads /etc/passwd.
+func getUserShell(username string) (string, error) {
+	// Try macOS dscl first
+	if output, err := exec.Command("dscl", ".", "-read", "/Users/"+username, "UserShell").Output(); err == nil {
+		line := strings.TrimSpace(string(output))
+		if strings.HasPrefix(line, "UserShell: ") {
+			return strings.TrimPrefix(line, "UserShell: "), nil
+		}
+	}
+
+	// Fall back to /etc/passwd for Linux
+	file, err := os.Open("/etc/passwd")
+	if err != nil {
+		return "", err
+	}
+	defer file.Close()
+
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if strings.HasPrefix(line, username+":") {
+			fields := strings.Split(line, ":")
+			if len(fields) >= 7 {
+				return fields[6], nil
+			}
+		}
+	}
+	return "", fmt.Errorf("user %s shell not found", username)
+}
+
+// writeWorktreeEnvFile creates .envrc with the task's environment variables.
+// This is the standard direnv format - users with direnv get auto-loading,
+// others can manually run "source .envrc".
+// It also adds .envrc to .git/info/exclude so it doesn't pollute git status.
+func (e *Executor) writeWorktreeEnvFile(projectDir, worktreePath string, task *db.Task) error {
+	// Write the .envrc file
+	envContent := fmt.Sprintf(`export WORKTREE_TASK_ID=%d
+export WORKTREE_PORT=%d
+export WORKTREE_PATH=%q
+`, task.ID, task.Port, worktreePath)
+
+	envPath := filepath.Join(worktreePath, ".envrc")
+	if err := os.WriteFile(envPath, []byte(envContent), 0644); err != nil {
+		return fmt.Errorf("write .envrc: %w", err)
+	}
+
+	e.logLine(task.ID, "system", "Created .envrc with WORKTREE_TASK_ID, WORKTREE_PORT, WORKTREE_PATH (use direnv or 'source .envrc')")
+
+	// Add to .git/info/exclude in the main project so it doesn't show in git status
+	excludePath := filepath.Join(projectDir, ".git", "info", "exclude")
+
+	// Create the info directory if it doesn't exist
+	infoDir := filepath.Dir(excludePath)
+	if err := os.MkdirAll(infoDir, 0755); err != nil {
+		return fmt.Errorf("create .git/info directory: %w", err)
+	}
+
+	// Check if .envrc is already in the exclude file
+	excludeEntry := ".envrc"
+	excludeContent, err := os.ReadFile(excludePath)
+	if err == nil {
+		// File exists, check if entry is already there
+		lines := strings.Split(string(excludeContent), "\n")
+		for _, line := range lines {
+			if strings.TrimSpace(line) == excludeEntry {
+				return nil // Already excluded
+			}
+		}
+	}
+
+	// Append the exclude entry
+	f, err := os.OpenFile(excludePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return fmt.Errorf("open exclude file: %w", err)
+	}
+	defer f.Close()
+
+	// Add newline before if file doesn't end with one
+	if len(excludeContent) > 0 && excludeContent[len(excludeContent)-1] != '\n' {
+		f.WriteString("\n")
+	}
+	f.WriteString(excludeEntry + "\n")
+
+	return nil
 }
 
 // trustMiseConfig trusts mise config files in a directory (no-op if mise not installed).
@@ -3083,14 +3302,22 @@ func copyMCPConfig(srcDir, dstDir string) error {
 // Non-zero exit codes are logged as warnings but do not cause the worktree setup to fail.
 // Output is streamed line-by-line in real-time to provide feedback during long-running scripts.
 func (e *Executor) runWorktreeInitScript(projectDir, worktreePath string, task *db.Task) {
-	scriptPath := GetWorktreeInitScript(projectDir)
+	// Look for the init script in the worktree (not projectDir) so that __dir__ resolves correctly in scripts
+	scriptPath := GetWorktreeInitScript(worktreePath)
 	if scriptPath == "" {
 		return
 	}
 
 	e.logLine(task.ID, "system", fmt.Sprintf("Running worktree init script: %s", scriptPath))
 
-	cmd := exec.Command(scriptPath)
+	// Run through user's login shell so that shell init (mise, nvm, etc.) is sourced
+	shell := "bash" // default fallback
+	if currentUser, err := user.Current(); err == nil {
+		if userShell, err := getUserShell(currentUser.Username); err == nil && userShell != "" {
+			shell = userShell
+		}
+	}
+	cmd := exec.Command(shell, "-l", "-c", scriptPath)
 	cmd.Dir = worktreePath
 
 	// Set environment variables as specified in the feature request
@@ -3260,11 +3487,13 @@ func (e *Executor) CleanupWorktree(task *db.Task) error {
 		cmd.Run() // Ignore errors - branch might have been merged/deleted
 	}
 
-	// Remove project entry from ~/.claude.json
-	if err := RemoveClaudeProjectConfig(task.WorktreePath); err != nil {
-		// Log warning but don't fail - this is cleanup
-		fmt.Fprintf(os.Stderr, "Warning: could not remove Claude project config: %v\n", err)
-	}
+	// Remove project entry from ~/.claude.json (run async - this can be slow with large configs)
+	go func(path string) {
+		if err := RemoveClaudeProjectConfig(path); err != nil {
+			// Log warning but don't fail - this is cleanup
+			fmt.Fprintf(os.Stderr, "Warning: could not remove Claude project config: %v\n", err)
+		}
+	}(task.WorktreePath)
 
 	// Clear worktree info from task
 	task.WorktreePath = ""

@@ -1059,34 +1059,82 @@ func (m *DetailModel) ToggleShellPane() {
 	defer cancel()
 
 	if m.shellPaneHidden {
-		// Show the shell pane - create a new one to the right of Claude
-		workdir := m.getWorkdir()
-		userShell := os.Getenv("SHELL")
-		if userShell == "" {
-			userShell = "/bin/zsh"
-		}
+		// Show the shell pane - try to re-join from daemon first, create new only if needed
 		shellWidth := m.getShellPaneWidth()
 
-		err := exec.CommandContext(ctx, "tmux", "split-window",
-			"-h", "-l", shellWidth,
-			"-t", m.claudePaneID,
-			"-c", workdir,
-			userShell).Run()
-		if err != nil {
-			return
+		// Get the daemon session and window name
+		daemonSession := m.daemonSessionID
+		if daemonSession == "" {
+			daemonSession = executor.TmuxDaemonSession
+		}
+		windowName := executor.TmuxWindowName(m.task.ID)
+
+		// Find the task window in the daemon session and check if it has a shell pane
+		var targetWindow string
+		listOut, listErr := exec.CommandContext(ctx, "tmux", "list-windows", "-t", daemonSession, "-F", "#{window_index}:#{window_name}").Output()
+		if listErr == nil {
+			for _, line := range strings.Split(strings.TrimSpace(string(listOut)), "\n") {
+				parts := strings.SplitN(line, ":", 2)
+				if len(parts) == 2 && parts[1] == windowName {
+					targetWindow = daemonSession + ":" + parts[0]
+				}
+			}
+		}
+		if targetWindow == "" {
+			targetWindow = daemonSession + ":" + windowName
 		}
 
-		// Get the new shell pane ID
-		workdirPaneCmd := exec.CommandContext(ctx, "tmux", "display-message", "-p", "#{pane_id}")
-		workdirPaneOut, _ := workdirPaneCmd.Output()
-		m.workdirPaneID = strings.TrimSpace(string(workdirPaneOut))
-		exec.CommandContext(ctx, "tmux", "select-pane", "-t", m.workdirPaneID, "-T", "Shell").Run()
+		// Check if there's a shell pane in the daemon window (pane count > 0)
+		countCmd := exec.CommandContext(ctx, "tmux", "display-message", "-t", targetWindow, "-p", "#{window_panes}")
+		countOut, countErr := countCmd.Output()
+		hasShellPane := countErr == nil && strings.TrimSpace(string(countOut)) == "1" // 1 pane means shell is there
 
-		// Set environment variables in the shell pane
-		if m.task != nil {
-			envCmd := fmt.Sprintf("export WORKTREE_TASK_ID=%d WORKTREE_PORT=%d WORKTREE_PATH=%q", m.task.ID, m.task.Port, m.task.WorktreePath)
-			exec.CommandContext(ctx, "tmux", "send-keys", "-t", m.workdirPaneID, envCmd, "Enter").Run()
-			exec.CommandContext(ctx, "tmux", "send-keys", "-t", m.workdirPaneID, "clear", "Enter").Run()
+		if hasShellPane {
+			// Re-join the shell pane from daemon
+			err := exec.CommandContext(ctx, "tmux", "join-pane",
+				"-h", "-l", shellWidth,
+				"-s", targetWindow+".0",
+				"-t", m.claudePaneID).Run()
+			if err == nil {
+				// Get the joined shell pane ID
+				workdirPaneCmd := exec.CommandContext(ctx, "tmux", "display-message", "-p", "#{pane_id}")
+				workdirPaneOut, _ := workdirPaneCmd.Output()
+				m.workdirPaneID = strings.TrimSpace(string(workdirPaneOut))
+				exec.CommandContext(ctx, "tmux", "select-pane", "-t", m.workdirPaneID, "-T", "Shell").Run()
+			} else {
+				hasShellPane = false // Fall through to create new
+			}
+		}
+
+		if !hasShellPane {
+			// No shell pane in daemon - create a new one
+			workdir := m.getWorkdir()
+			userShell := os.Getenv("SHELL")
+			if userShell == "" {
+				userShell = "/bin/zsh"
+			}
+
+			err := exec.CommandContext(ctx, "tmux", "split-window",
+				"-h", "-l", shellWidth,
+				"-t", m.claudePaneID,
+				"-c", workdir,
+				userShell).Run()
+			if err != nil {
+				return
+			}
+
+			// Get the new shell pane ID
+			workdirPaneCmd := exec.CommandContext(ctx, "tmux", "display-message", "-p", "#{pane_id}")
+			workdirPaneOut, _ := workdirPaneCmd.Output()
+			m.workdirPaneID = strings.TrimSpace(string(workdirPaneOut))
+			exec.CommandContext(ctx, "tmux", "select-pane", "-t", m.workdirPaneID, "-T", "Shell").Run()
+
+			// Set environment variables in the shell pane (only for new shells)
+			if m.task != nil {
+				envCmd := fmt.Sprintf("export WORKTREE_TASK_ID=%d WORKTREE_PORT=%d WORKTREE_PATH=%q", m.task.ID, m.task.Port, m.task.WorktreePath)
+				exec.CommandContext(ctx, "tmux", "send-keys", "-t", m.workdirPaneID, envCmd, "Enter").Run()
+				exec.CommandContext(ctx, "tmux", "send-keys", "-t", m.workdirPaneID, "clear", "Enter").Run()
+			}
 		}
 
 		// Return focus to TUI pane
@@ -1097,10 +1145,46 @@ func (m *DetailModel) ToggleShellPane() {
 		m.shellPaneHidden = false
 		m.database.SetSetting(config.SettingShellPaneHidden, "false")
 	} else {
-		// Hide the shell pane - save width first, then kill it
+		// Hide the shell pane - save width first, then break it back to daemon (preserving processes)
 		if m.workdirPaneID != "" {
 			m.saveShellPaneWidth()
-			exec.CommandContext(ctx, "tmux", "kill-pane", "-t", m.workdirPaneID).Run()
+
+			// Get the daemon session and window name
+			daemonSession := m.daemonSessionID
+			if daemonSession == "" {
+				daemonSession = executor.TmuxDaemonSession
+			}
+			windowName := executor.TmuxWindowName(m.task.ID)
+
+			// Find the task window in the daemon session
+			var targetWindow string
+			listOut, listErr := exec.CommandContext(ctx, "tmux", "list-windows", "-t", daemonSession, "-F", "#{window_index}:#{window_name}").Output()
+			if listErr == nil {
+				for _, line := range strings.Split(strings.TrimSpace(string(listOut)), "\n") {
+					parts := strings.SplitN(line, ":", 2)
+					if len(parts) == 2 && parts[1] == windowName {
+						targetWindow = daemonSession + ":" + parts[0]
+					}
+				}
+			}
+			if targetWindow == "" {
+				targetWindow = daemonSession + ":" + windowName
+			}
+
+			// Break the shell pane back to the daemon window, joining it next to Claude
+			// -h: horizontal split (side by side)
+			// -d: don't switch focus
+			// -s: source pane (the workdir pane)
+			// -t: target window (the daemon window with Claude)
+			joinErr := exec.CommandContext(ctx, "tmux", "join-pane",
+				"-h",
+				"-d",
+				"-s", m.workdirPaneID,
+				"-t", targetWindow+".0").Run()
+			if joinErr != nil {
+				// Join failed - kill the pane as fallback
+				exec.CommandContext(ctx, "tmux", "kill-pane", "-t", m.workdirPaneID).Run()
+			}
 			m.workdirPaneID = ""
 		}
 		m.shellPaneHidden = true
@@ -1116,6 +1200,51 @@ func (m *DetailModel) ToggleShellPane() {
 // IsShellPaneHidden returns true if the shell pane is currently hidden.
 func (m *DetailModel) IsShellPaneHidden() bool {
 	return m.shellPaneHidden
+}
+
+// HasRunningShellProcess returns true if the shell pane has a running process.
+func (m *DetailModel) HasRunningShellProcess() bool {
+	if m.task == nil {
+		return false
+	}
+
+	// Get user's default shell for comparison
+	userShell := os.Getenv("SHELL")
+	if userShell == "" {
+		userShell = "/bin/zsh"
+	}
+	if idx := strings.LastIndex(userShell, "/"); idx >= 0 {
+		userShell = userShell[idx+1:]
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+
+	// Check the shell pane - could be in task-ui (visible) or daemon (hidden)
+	var paneToCheck string
+	if m.workdirPaneID != "" {
+		// Shell pane is visible in task-ui
+		paneToCheck = m.workdirPaneID
+	} else if m.shellPaneHidden {
+		// Shell pane is in daemon - find it
+		daemonSession := m.daemonSessionID
+		if daemonSession == "" {
+			daemonSession = executor.TmuxDaemonSession
+		}
+		windowName := executor.TmuxWindowName(m.task.ID)
+		paneToCheck = daemonSession + ":" + windowName + ".1"
+	} else {
+		return false
+	}
+
+	// Get the current command in the shell pane
+	out, err := exec.CommandContext(ctx, "tmux", "display-message", "-t", paneToCheck, "-p", "#{pane_current_command}").Output()
+	if err != nil {
+		return false
+	}
+
+	command := strings.TrimSpace(string(out))
+	return command != "" && command != userShell
 }
 
 // IsFocused returns true if the detail pane is the active tmux pane.
@@ -1307,6 +1436,18 @@ func (m *DetailModel) renderHeader() string {
 			Foreground(dimmedTextFg).
 			Render(m.prInfo.StatusDescription())
 		meta.WriteString(prDesc)
+	}
+
+	// Running process indicator
+	if m.HasRunningShellProcess() {
+		meta.WriteString("  ")
+		var processStyle lipgloss.Style
+		if m.focused {
+			processStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("46")) // Bright green
+		} else {
+			processStyle = lipgloss.NewStyle().Foreground(dimmedFg)
+		}
+		meta.WriteString(processStyle.Render("●"))
 	}
 
 	// Schedule info - show if scheduled OR recurring
