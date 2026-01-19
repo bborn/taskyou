@@ -131,6 +131,7 @@ ssh -p 2222 your-server
 | `!` | Toggle dangerous/safe mode |
 | `\` | Toggle shell pane visibility |
 | `Shift+↑/↓` | Switch between panes |
+| `Alt+Shift+↑/↓` | Jump to prev/next task (stays in executor pane) |
 | `c` | Close task |
 | `a` | Archive task |
 | `d` | Delete task |
