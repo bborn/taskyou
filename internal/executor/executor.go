@@ -23,6 +23,7 @@ import (
 	"github.com/bborn/workflow/internal/github"
 	"github.com/bborn/workflow/internal/hooks"
 	"github.com/charmbracelet/log"
+	"golang.org/x/term"
 )
 
 // TaskEvent represents a change to a task.
@@ -3311,14 +3312,21 @@ func (e *Executor) runWorktreeInitScript(projectDir, worktreePath string, task *
 	e.logLine(task.ID, "system", fmt.Sprintf("Running worktree init script: %s", scriptPath))
 
 	// Run through user's login shell so that shell init (mise, nvm, etc.) is sourced
-	// Note: We use -l (login) but not -i (interactive) to avoid TTY-related issues in CI
+	// Use -i (interactive) only when a TTY is available to avoid errors in CI
 	shell := "bash" // default fallback
 	if currentUser, err := user.Current(); err == nil {
 		if userShell, err := getUserShell(currentUser.Username); err == nil && userShell != "" {
 			shell = userShell
 		}
 	}
-	cmd := exec.Command(shell, "-l", "-c", scriptPath)
+	var cmd *exec.Cmd
+	if term.IsTerminal(int(os.Stdout.Fd())) {
+		// Interactive shell for local development (sources .bashrc/.zshrc where mise/nvm live)
+		cmd = exec.Command(shell, "-l", "-i", "-c", scriptPath)
+	} else {
+		// Non-interactive for CI environments (no TTY available)
+		cmd = exec.Command(shell, "-l", "-c", scriptPath)
+	}
 	cmd.Dir = worktreePath
 
 	// Set environment variables as specified in the feature request
