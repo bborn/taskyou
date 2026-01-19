@@ -515,15 +515,15 @@ func TestRunWorktreeInitScriptStreaming(t *testing.T) {
 	}
 	defer os.RemoveAll(worktreeDir)
 
-	// Create a temp project directory with a test init script
+	// Create a temp project directory
 	projectDir, err := os.MkdirTemp("", "test-project-*")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer os.RemoveAll(projectDir)
 
-	// Create bin directory
-	binDir := projectDir + "/bin"
+	// Create bin directory in the worktree (runWorktreeInitScript looks for init script in worktreePath)
+	binDir := worktreeDir + "/bin"
 	if err := os.MkdirAll(binDir, 0755); err != nil {
 		t.Fatal(err)
 	}
