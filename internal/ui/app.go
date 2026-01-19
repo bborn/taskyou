@@ -244,7 +244,8 @@ type AppModel struct {
 	dbChangeCh chan struct{}
 
 	// PR status cache
-	prCache *github.PRCache
+	prCache              *github.PRCache
+	initialPRRefreshDone bool // Track if initial PR refresh after load is done
 
 	// Detail view state
 	selectedTask *db.Task
@@ -395,7 +396,7 @@ func (m *AppModel) Init() tea.Cmd {
 		osExec.Command("tmux", "set-option", "-t", "task-ui", "mouse", "on").Run()
 	}
 
-	return tea.Batch(m.loadTasks(), m.waitForTaskEvent(), m.waitForDBChange(), m.tick(), m.prRefreshTick(), m.refreshAllPRs())
+	return tea.Batch(m.loadTasks(), m.waitForTaskEvent(), m.waitForDBChange(), m.tick(), m.prRefreshTick())
 }
 
 // Update handles messages.
@@ -557,7 +558,11 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.kanban.SetRunningProcesses(running)
 
-		// PR info is fetched separately via prRefreshTick, not on every task load
+		// Trigger initial PR refresh after first task load (subsequent refreshes via prRefreshTick)
+		if !m.initialPRRefreshDone {
+			m.initialPRRefreshDone = true
+			cmds = append(cmds, m.refreshAllPRs())
+		}
 
 	case taskLoadedMsg:
 		// Reset transition flag now that task is loaded
