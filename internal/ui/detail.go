@@ -1374,6 +1374,20 @@ func (m *DetailModel) ToggleShellPane() {
 		// Show the shell pane - try to re-join from daemon first, create new only if needed
 		shellWidth := m.getShellPaneWidth()
 
+		// First, check if shell pane already exists in task-ui (might have failed to break out)
+		if m.workdirPaneID != "" {
+			// Verify the pane still exists
+			checkCmd := exec.CommandContext(ctx, "tmux", "display-message", "-t", m.workdirPaneID, "-p", "#{pane_id}")
+			if checkOut, err := checkCmd.Output(); err == nil && strings.TrimSpace(string(checkOut)) == m.workdirPaneID {
+				// Shell pane already exists - just update state and return
+				m.shellPaneHidden = false
+				m.database.SetSetting(config.SettingShellPaneHidden, "false")
+				return
+			}
+			// Pane doesn't exist anymore, clear the ID
+			m.workdirPaneID = ""
+		}
+
 		// Get the daemon session and window name
 		daemonSession := m.daemonSessionID
 		if daemonSession == "" {
@@ -1518,7 +1532,17 @@ func (m *DetailModel) ToggleShellPane() {
 						"-t", targetWindow+".0").Run()
 					if joinErr != nil {
 						// Don't kill the pane - leave it in task-ui rather than lose the process
+						// DON'T clear workdirPaneID so we know it still exists
+						m.shellPaneHidden = true
+						m.database.SetSetting(config.SettingShellPaneHidden, "true")
+						return
 					}
+				} else {
+					// No target window and break failed - shell stays in task-ui
+					// DON'T clear workdirPaneID so we know it still exists
+					m.shellPaneHidden = true
+					m.database.SetSetting(config.SettingShellPaneHidden, "true")
+					return
 				}
 			}
 			m.workdirPaneID = ""
