@@ -67,8 +67,8 @@ type Executor struct {
 	executorName string
 }
 
-// SuspendIdleTimeout is how long a blocked task must be idle before being suspended.
-const SuspendIdleTimeout = 2 * time.Hour
+// DefaultSuspendIdleTimeout is the default time a blocked task must be idle before being suspended.
+const DefaultSuspendIdleTimeout = 6 * time.Hour
 
 // DoneTaskCleanupTimeout is how long after a task is marked done before its Claude process is killed.
 // This gives users time to review output or retry the task before the process is cleaned up.
@@ -729,7 +729,7 @@ func (e *Executor) suspendIdleBlockedTasks() {
 		}
 
 		idleDuration := time.Since(task.UpdatedAt.Time)
-		if idleDuration >= SuspendIdleTimeout {
+		if idleDuration >= e.getSuspendIdleTimeout() {
 			// Check if there's actually a Claude process to suspend
 			pid := e.getClaudePID(task.ID)
 			if pid > 0 {
@@ -1031,6 +1031,17 @@ func (e *Executor) AllExecutors() []string {
 
 func (e *Executor) getProjectDir(project string) string {
 	return e.config.GetProjectDir(project)
+}
+
+// getSuspendIdleTimeout returns the configured idle timeout before suspended blocked tasks.
+// Falls back to DefaultSuspendIdleTimeout if not configured.
+func (e *Executor) getSuspendIdleTimeout() time.Duration {
+	if val, err := e.db.GetSetting(config.SettingIdleSuspendTimeout); err == nil && val != "" {
+		if duration, err := time.ParseDuration(val); err == nil {
+			return duration
+		}
+	}
+	return DefaultSuspendIdleTimeout
 }
 
 // getProjectInstructions returns the custom instructions for a project.
