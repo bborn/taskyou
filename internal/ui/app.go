@@ -339,6 +339,11 @@ func (m *AppModel) updateTaskInList(task *db.Task) {
 
 // NewAppModel creates a new application model.
 func NewAppModel(database *db.DB, exec *executor.Executor, workingDir string) *AppModel {
+	// Initialize logger and log startup
+	log := GetLogger()
+	log.Info("=== TaskYou TUI starting ===")
+	log.Info("NewAppModel: workingDir=%q", workingDir)
+
 	// Load saved theme from database
 	LoadThemeFromDB(database.GetSetting)
 
