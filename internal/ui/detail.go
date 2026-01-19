@@ -1496,11 +1496,12 @@ func (m *DetailModel) renderHeader() string {
 	dimmedTextFg := lipgloss.Color("#6B7280") // Even more muted for text
 
 	// Task title (ID and position are shown in the panel border)
+	// Use dimmedFg (brighter) instead of dimmedTextFg for title to ensure visibility
 	var subtitle string
 	if m.focused {
 		subtitle = Bold.Render(t.Title)
 	} else {
-		subtitle = lipgloss.NewStyle().Foreground(dimmedTextFg).Render(t.Title)
+		subtitle = lipgloss.NewStyle().Foreground(dimmedFg).Render(t.Title)
 	}
 
 	var meta strings.Builder
