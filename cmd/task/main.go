@@ -284,9 +284,11 @@ Use --hard to kill all tmux sessions for a complete reset.`,
 		Use:   "cleanup",
 		Short: "Kill orphaned Claude processes not tied to active task windows",
 		Run: func(cmd *cobra.Command, args []string) {
-			cleanupOrphanedClaudes()
+			force, _ := cmd.Flags().GetBool("force")
+			cleanupOrphanedClaudes(force)
 		},
 	}
+	claudesCleanupCmd.Flags().BoolP("force", "f", false, "Use SIGKILL instead of SIGTERM to force kill processes")
 	claudesCmd.AddCommand(claudesCleanupCmd)
 
 	rootCmd.AddCommand(claudesCmd)
@@ -2232,17 +2234,40 @@ func listClaudeSessions() {
 		return
 	}
 
-	fmt.Printf("%s\n\n", boldStyle.Render("Running Claude Sessions (in task-daemon):"))
+	// Calculate total memory
+	totalMemoryMB := 0
 	for _, s := range sessions {
-		fmt.Printf("  %s  %s\n",
+		totalMemoryMB += s.memoryMB
+	}
+
+	fmt.Printf("%s\n\n", boldStyle.Render(fmt.Sprintf("Running Claude Sessions (%d total, %dMB memory):", len(sessions), totalMemoryMB)))
+	for _, s := range sessions {
+		memStr := ""
+		if s.memoryMB > 0 {
+			memStr = fmt.Sprintf("%dMB", s.memoryMB)
+		}
+		titleStr := ""
+		if s.taskTitle != "" {
+			// Truncate title to 40 chars
+			title := s.taskTitle
+			if len(title) > 40 {
+				title = title[:37] + "..."
+			}
+			titleStr = title
+		}
+		fmt.Printf("  %s  %s  %s  %s\n",
 			successStyle.Render(fmt.Sprintf("task-%d", s.taskID)),
+			dimStyle.Render(fmt.Sprintf("%-6s", memStr)),
+			dimStyle.Render(fmt.Sprintf("%-40s", titleStr)),
 			dimStyle.Render(s.info))
 	}
 }
 
 type claudeSession struct {
-	taskID int
-	info   string
+	taskID    int
+	taskTitle string
+	memoryMB  int // Memory usage in MB
+	info      string
 }
 
 // getClaudeSessions returns all running task-* windows across all task-daemon-* sessions.
@@ -2264,6 +2289,16 @@ func getClaudeSessions() []claudeSession {
 	if len(daemonSessions) == 0 {
 		return nil
 	}
+
+	// Open database to fetch task titles
+	dbPath := db.DefaultPath()
+	database, _ := db.Open(dbPath)
+	if database != nil {
+		defer database.Close()
+	}
+
+	// Build map of task ID -> memory usage
+	taskMemory := getClaudeMemoryByTaskID()
 
 	var sessions []claudeSession
 	seen := make(map[int]bool) // Avoid duplicates if same task appears in multiple sessions
@@ -2318,11 +2353,98 @@ func getClaudeSessions() []claudeSession {
 				}
 			}
 
-			sessions = append(sessions, claudeSession{taskID: taskID, info: info})
+			// Get task title from database
+			var taskTitle string
+			if database != nil {
+				if task, err := database.GetTask(int64(taskID)); err == nil && task != nil {
+					taskTitle = task.Title
+				}
+			}
+
+			// Get memory usage for this task's Claude process
+			memoryMB := taskMemory[taskID]
+
+			sessions = append(sessions, claudeSession{
+				taskID:    taskID,
+				taskTitle: taskTitle,
+				memoryMB:  memoryMB,
+				info:      info,
+			})
 		}
 	}
 
 	return sessions
+}
+
+// getClaudeMemoryByTaskID returns a map of task ID -> memory (MB) for all Claude processes.
+// It identifies task IDs by examining each Claude process's working directory.
+func getClaudeMemoryByTaskID() map[int]int {
+	result := make(map[int]int)
+
+	// Find all Claude processes
+	pgrepOut, err := osexec.Command("pgrep", "-f", "claude").Output()
+	if err != nil {
+		return result
+	}
+
+	for _, pidStr := range strings.Split(string(pgrepOut), "\n") {
+		pidStr = strings.TrimSpace(pidStr)
+		if pidStr == "" {
+			continue
+		}
+		pid, err := strconv.Atoi(pidStr)
+		if err != nil {
+			continue
+		}
+
+		// Get the process's current working directory using lsof
+		lsofOut, err := osexec.Command("lsof", "-p", pidStr, "-Fn").Output()
+		if err != nil {
+			continue
+		}
+
+		// Parse lsof output to find cwd
+		var cwd string
+		lines := strings.Split(string(lsofOut), "\n")
+		for i, line := range lines {
+			if line == "fcwd" && i+1 < len(lines) && strings.HasPrefix(lines[i+1], "n") {
+				cwd = lines[i+1][1:] // Remove 'n' prefix
+				break
+			}
+		}
+
+		if cwd == "" {
+			continue
+		}
+
+		// Extract task ID from worktree path like ".task-worktrees/467-..."
+		if idx := strings.Index(cwd, ".task-worktrees/"); idx >= 0 {
+			pathPart := cwd[idx+len(".task-worktrees/"):]
+			// Parse the task ID from the beginning of the path
+			var taskID int
+			if _, err := fmt.Sscanf(pathPart, "%d-", &taskID); err == nil && taskID > 0 {
+				memMB := getProcessMemoryMB(pid)
+				// If there are multiple Claude processes for the same task, sum them
+				result[taskID] += memMB
+			}
+		}
+	}
+
+	return result
+}
+
+// getProcessMemoryMB returns the memory usage of a process in MB.
+func getProcessMemoryMB(pid int) int {
+	// Use ps to get RSS (resident set size) in KB
+	out, err := osexec.Command("ps", "-p", strconv.Itoa(pid), "-o", "rss=").Output()
+	if err != nil {
+		return 0
+	}
+	rssKB, err := strconv.Atoi(strings.TrimSpace(string(out)))
+	if err != nil {
+		return 0
+	}
+	return rssKB / 1024 // Convert to MB
 }
 
 // killClaudeSession kills a specific task's tmux window in task-daemon.
@@ -2346,7 +2468,7 @@ func killClaudeSession(taskID int) error {
 
 // cleanupOrphanedClaudes kills Claude processes that aren't tied to any active task windows
 // or belong to done tasks older than 2 hours.
-func cleanupOrphanedClaudes() {
+func cleanupOrphanedClaudes(force bool) {
 	// Step 1: Get all task windows across ALL task-daemon-* sessions
 	activeTaskIDs := make(map[int]bool)
 
@@ -2467,6 +2589,13 @@ func cleanupOrphanedClaudes() {
 		fmt.Printf("%s\n\n", boldStyle.Render(fmt.Sprintf("Found %d Claude processes from done tasks (>2h old):", len(oldDonePIDs))))
 	}
 
+	signal := syscall.SIGTERM
+	signalName := "SIGTERM"
+	if force {
+		signal = syscall.SIGKILL
+		signalName = "SIGKILL"
+	}
+
 	killed := 0
 	allPIDs := append(orphanedPIDs, oldDonePIDs...)
 	for _, pid := range allPIDs {
@@ -2476,12 +2605,12 @@ func cleanupOrphanedClaudes() {
 			continue
 		}
 
-		if err := proc.Signal(syscall.SIGTERM); err != nil {
+		if err := proc.Signal(signal); err != nil {
 			fmt.Printf("  %s PID %d: %s\n", errorStyle.Render("✗"), pid, err.Error())
 			continue
 		}
 
-		fmt.Printf("  %s PID %d\n", successStyle.Render("✓ Killed"), pid)
+		fmt.Printf("  %s PID %d (%s)\n", successStyle.Render("✓ Killed"), pid, signalName)
 		killed++
 	}
 
