@@ -867,8 +867,8 @@ func (e *Executor) executeTask(ctx context.Context, task *db.Task) {
 		return
 	}
 
-	// Prepare attachments (write to temp files)
-	attachmentPaths, cleanupAttachments := e.prepareAttachments(task.ID)
+	// Prepare attachments (write to .claude/attachments in worktree)
+	attachmentPaths, cleanupAttachments := e.prepareAttachments(task.ID, workDir)
 	defer cleanupAttachments()
 	if len(attachmentPaths) > 0 {
 		e.logLine(task.ID, "system", fmt.Sprintf("Task has %d attachment(s)", len(attachmentPaths)))
@@ -1054,23 +1054,25 @@ func (e *Executor) getProjectInstructions(project string) string {
 	return p.Instructions
 }
 
-// prepareAttachments writes task attachments to temp files and returns paths.
+// prepareAttachments writes task attachments to the worktree's .claude directory.
+// This allows Claude to read attachments by default without permission prompts.
 // Returns a list of file paths and a cleanup function.
-func (e *Executor) prepareAttachments(taskID int64) ([]string, func()) {
+func (e *Executor) prepareAttachments(taskID int64, workDir string) ([]string, func()) {
 	attachments, err := e.db.ListAttachmentsWithData(taskID)
 	if err != nil || len(attachments) == 0 {
 		return nil, func() {}
 	}
 
-	var paths []string
-	tempDir, err := os.MkdirTemp("", fmt.Sprintf("task-%d-attachments-", taskID))
-	if err != nil {
-		e.logger.Error("Failed to create temp dir for attachments", "error", err)
+	// Use .claude/attachments in the worktree so Claude can read without permission
+	attachDir := filepath.Join(workDir, ".claude", "attachments")
+	if err := os.MkdirAll(attachDir, 0755); err != nil {
+		e.logger.Error("Failed to create attachments dir", "error", err)
 		return nil, func() {}
 	}
 
+	var paths []string
 	for _, a := range attachments {
-		path := filepath.Join(tempDir, a.Filename)
+		path := filepath.Join(attachDir, a.Filename)
 		if err := os.WriteFile(path, a.Data, 0644); err != nil {
 			e.logger.Error("Failed to write attachment", "file", a.Filename, "error", err)
 			continue
@@ -1079,7 +1081,7 @@ func (e *Executor) prepareAttachments(taskID int64) ([]string, func()) {
 	}
 
 	cleanup := func() {
-		os.RemoveAll(tempDir)
+		os.RemoveAll(attachDir)
 	}
 
 	return paths, cleanup

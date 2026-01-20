@@ -3,6 +3,7 @@ package executor
 import (
 	"context"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -240,24 +241,36 @@ func TestAttachmentsInPrompt(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	t.Run("prepareAttachments creates temp files", func(t *testing.T) {
-		paths, cleanup := exec.prepareAttachments(task.ID)
+	t.Run("prepareAttachments creates files in .claude/attachments", func(t *testing.T) {
+		// Create a temp worktree directory
+		workDir, err := os.MkdirTemp("", "test-worktree-")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer os.RemoveAll(workDir)
+
+		paths, cleanup := exec.prepareAttachments(task.ID, workDir)
 		defer cleanup()
 
 		if len(paths) != 2 {
 			t.Errorf("expected 2 attachment paths, got %d", len(paths))
 		}
 
-		// Verify files exist and have correct content
+		// Verify files exist in .claude/attachments directory
 		for _, path := range paths {
 			if _, err := os.Stat(path); os.IsNotExist(err) {
 				t.Errorf("attachment file does not exist: %s", path)
+			}
+			// Verify path is inside .claude/attachments
+			expectedPrefix := filepath.Join(workDir, ".claude", "attachments")
+			if !strings.HasPrefix(path, expectedPrefix) {
+				t.Errorf("expected path to start with %s, got %s", expectedPrefix, path)
 			}
 		}
 	})
 
 	t.Run("getAttachmentsSection uses Read tool", func(t *testing.T) {
-		paths := []string{"/tmp/test/notes.txt", "/tmp/test/data.json"}
+		paths := []string{"/worktree/.claude/attachments/notes.txt", "/worktree/.claude/attachments/data.json"}
 		section := exec.getAttachmentsSection(task.ID, paths)
 
 		if !strings.Contains(section, "## Attachments") {
@@ -269,13 +282,20 @@ func TestAttachmentsInPrompt(t *testing.T) {
 		if strings.Contains(section, "View tool") {
 			t.Error("section should NOT mention View tool")
 		}
-		if !strings.Contains(section, "/tmp/test/notes.txt") {
+		if !strings.Contains(section, "/worktree/.claude/attachments/notes.txt") {
 			t.Error("section should contain file path")
 		}
 	})
 
 	t.Run("buildPrompt includes attachments section", func(t *testing.T) {
-		paths, cleanup := exec.prepareAttachments(task.ID)
+		// Create a temp worktree directory
+		workDir, err := os.MkdirTemp("", "test-worktree-")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer os.RemoveAll(workDir)
+
+		paths, cleanup := exec.prepareAttachments(task.ID, workDir)
 		defer cleanup()
 
 		prompt := exec.buildPrompt(task, paths)
