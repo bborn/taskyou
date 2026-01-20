@@ -3,6 +3,8 @@ package ui
 import (
 	"testing"
 
+	tea "github.com/charmbracelet/bubbletea"
+
 	"github.com/bborn/workflow/internal/db"
 )
 
@@ -241,5 +243,113 @@ func TestOpenWorktreeInEditor_NonexistentPath(t *testing.T) {
 
 	if result.err == nil {
 		t.Error("expected error for non-existent worktree path")
+	}
+}
+
+func TestNewTaskFormEscapeShowsConfirmationWhenHasData(t *testing.T) {
+	// Create app model with new task form
+	m := &AppModel{
+		width:       100,
+		height:      50,
+		currentView: ViewNewTask,
+		newTaskForm: NewFormModel(nil, 100, 50, ""),
+	}
+
+	// Add data to the form
+	m.newTaskForm.titleInput.SetValue("Some task title")
+
+	// Press ESC
+	escMsg := tea.KeyMsg{Type: tea.KeyEscape}
+	model, _ := m.updateNewTaskForm(escMsg)
+	am := model.(*AppModel)
+
+	// Form should still be open with confirmation showing
+	if am.newTaskForm == nil {
+		t.Error("expected form to still be open while showing confirmation")
+	}
+	if am.currentView != ViewNewTask {
+		t.Errorf("expected view to still be ViewNewTask, got %v", am.currentView)
+	}
+	if !am.newTaskForm.showCancelConfirm {
+		t.Error("expected confirmation prompt to be shown")
+	}
+}
+
+func TestNewTaskFormEscapeClosesImmediatelyWhenEmpty(t *testing.T) {
+	// Create app model with empty new task form
+	m := &AppModel{
+		width:       100,
+		height:      50,
+		currentView: ViewNewTask,
+		newTaskForm: NewFormModel(nil, 100, 50, ""),
+	}
+
+	// Press ESC on empty form
+	escMsg := tea.KeyMsg{Type: tea.KeyEscape}
+	model, _ := m.updateNewTaskForm(escMsg)
+	am := model.(*AppModel)
+
+	// Form should be closed immediately
+	if am.newTaskForm != nil {
+		t.Error("expected form to be closed for empty form")
+	}
+	if am.currentView != ViewDashboard {
+		t.Errorf("expected view to be ViewDashboard, got %v", am.currentView)
+	}
+}
+
+func TestEditTaskFormEscapeShowsConfirmationWhenHasData(t *testing.T) {
+	// Create app model with edit task form
+	m := &AppModel{
+		width:        100,
+		height:       50,
+		currentView:  ViewEditTask,
+		previousView: ViewDashboard,
+		editTaskForm: NewFormModel(nil, 100, 50, ""),
+		editingTask:  &db.Task{ID: 1, Title: "Original Title"},
+	}
+
+	// Add data to the form
+	m.editTaskForm.titleInput.SetValue("Modified title")
+
+	// Press ESC
+	escMsg := tea.KeyMsg{Type: tea.KeyEscape}
+	model, _ := m.updateEditTaskForm(escMsg)
+	am := model.(*AppModel)
+
+	// Form should still be open with confirmation showing
+	if am.editTaskForm == nil {
+		t.Error("expected form to still be open while showing confirmation")
+	}
+	if am.currentView != ViewEditTask {
+		t.Errorf("expected view to still be ViewEditTask, got %v", am.currentView)
+	}
+	if !am.editTaskForm.showCancelConfirm {
+		t.Error("expected confirmation prompt to be shown")
+	}
+}
+
+func TestEditTaskFormEscapeClosesImmediatelyWhenEmpty(t *testing.T) {
+	// Create app model with empty edit task form
+	m := &AppModel{
+		width:        100,
+		height:       50,
+		currentView:  ViewEditTask,
+		previousView: ViewDashboard,
+		editTaskForm: NewFormModel(nil, 100, 50, ""),
+		editingTask:  &db.Task{ID: 1, Title: "Original Title"},
+	}
+
+	// Press ESC on empty form
+	escMsg := tea.KeyMsg{Type: tea.KeyEscape}
+	model, _ := m.updateEditTaskForm(escMsg)
+	am := model.(*AppModel)
+
+	// Form should be closed immediately
+	if am.editTaskForm != nil {
+		t.Error("expected form to be closed for empty form")
+	}
+	if am.currentView != ViewDashboard {
+		t.Errorf("expected view to be ViewDashboard, got %v", am.currentView)
 	}
 }

@@ -1407,16 +1407,7 @@ func (m *AppModel) updateDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m *AppModel) updateNewTaskForm(msg tea.Msg) (tea.Model, tea.Cmd) {
-	// Handle escape to cancel
-	if keyMsg, ok := msg.(tea.KeyMsg); ok {
-		if keyMsg.String() == "esc" {
-			m.currentView = ViewDashboard
-			m.newTaskForm = nil
-			return m, nil
-		}
-	}
-
-	// Pass all messages to the form
+	// Pass all messages to the form (form handles ESC with confirmation prompt)
 	model, cmd := m.newTaskForm.Update(msg)
 	if form, ok := model.(*FormModel); ok {
 		m.newTaskForm = form
@@ -1489,17 +1480,7 @@ func (m *AppModel) updateNewTaskConfirm(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m *AppModel) updateEditTaskForm(msg tea.Msg) (tea.Model, tea.Cmd) {
-	// Handle escape to cancel
-	if keyMsg, ok := msg.(tea.KeyMsg); ok {
-		if keyMsg.String() == "esc" {
-			m.currentView = m.previousView
-			m.editTaskForm = nil
-			m.editingTask = nil
-			return m, nil
-		}
-	}
-
-	// Pass all messages to the form
+	// Pass all messages to the form (form handles ESC with confirmation prompt)
 	model, cmd := m.editTaskForm.Update(msg)
 	if form, ok := model.(*FormModel); ok {
 		m.editTaskForm = form
