@@ -76,7 +76,25 @@ type DetailModel struct {
 
 	// Pane join check throttling
 	lastPaneCheck time.Time
+
+	// Async pane loading state
+	paneLoading      bool      // true while panes are being set up asynchronously
+	paneLoadingStart time.Time // when loading started (for spinner animation)
 }
+
+// Message types for async pane loading
+type panesJoinedMsg struct {
+	claudePaneID    string
+	workdirPaneID   string
+	daemonSessionID string
+	windowTarget    string
+	err             error
+}
+
+type spinnerTickMsg struct{}
+
+// Spinner frames for loading animation
+var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 
 func (m *DetailModel) executorDisplayName() string {
 	if m.executor != nil {
@@ -174,7 +192,8 @@ func (m *DetailModel) ClaudePaneID() string {
 }
 
 // NewDetailModel creates a new detail model.
-func NewDetailModel(t *db.Task, database *db.DB, exec *executor.Executor, width, height int) *DetailModel {
+// Returns the model and an optional command for async pane setup.
+func NewDetailModel(t *db.Task, database *db.DB, exec *executor.Executor, width, height int) (*DetailModel, tea.Cmd) {
 	log := GetLogger()
 	log.Info("NewDetailModel: creating for task %d (%s)", t.ID, t.Title)
 	log.Debug("NewDetailModel: TMUX env=%q, DaemonSession=%q, ClaudeSessionID=%q",
@@ -195,48 +214,85 @@ func NewDetailModel(t *db.Task, database *db.DB, exec *executor.Executor, width,
 
 	m.initViewport()
 
+	// Skip initial memory check - it's expensive (3 shell commands)
+	// and will be fetched on the first Refresh() call instead
+	m.claudeMemoryMB = 0
+
+	// Check if we're in tmux
+	if os.Getenv("TMUX") == "" {
+		log.Info("NewDetailModel: not in tmux, skipping pane operations")
+		log.Info("NewDetailModel: completed for task %d", t.ID)
+		return m, nil
+	}
+
 	// Cache the tmux window target once (expensive operation)
 	log.Debug("NewDetailModel: calling findTaskWindow...")
 	m.cachedWindowTarget = m.findTaskWindow()
 	log.Info("NewDetailModel: cachedWindowTarget=%q", m.cachedWindowTarget)
 
-	// Skip initial memory check - it's expensive (3 shell commands)
-	// and will be fetched on the first Refresh() call instead
-	m.claudeMemoryMB = 0
-
-	// If we're in tmux and task has active session, join it as a split pane
-	if os.Getenv("TMUX") != "" && m.cachedWindowTarget != "" {
+	// Fast path: If task has active session, join it synchronously (already running)
+	if m.cachedWindowTarget != "" {
 		log.Info("NewDetailModel: in tmux with active session, calling joinTmuxPane")
 		m.joinTmuxPane()
 		log.Info("NewDetailModel: after joinTmuxPane, claudePaneID=%q, workdirPaneID=%q",
 			m.claudePaneID, m.workdirPaneID)
-	} else if os.Getenv("TMUX") != "" {
-		// No active tmux window - start or resume a Claude session
-		sessionID := m.task.ClaudeSessionID
-		log.Info("NewDetailModel: in tmux but no window target, ClaudeSessionID=%q", sessionID)
-		// Start a new tmux window (resumes if sessionID exists, fresh otherwise)
-		log.Info("NewDetailModel: calling startResumableSession with %q", sessionID)
-		m.startResumableSession(sessionID)
-		// Refresh the cached window target
-		m.cachedWindowTarget = m.findTaskWindow()
-		log.Info("NewDetailModel: after startResumableSession, cachedWindowTarget=%q", m.cachedWindowTarget)
-		if m.cachedWindowTarget != "" {
-			log.Info("NewDetailModel: calling joinTmuxPane after session start")
-			m.joinTmuxPane()
-			log.Info("NewDetailModel: after joinTmuxPane, claudePaneID=%q, workdirPaneID=%q",
-				m.claudePaneID, m.workdirPaneID)
-		}
-		// Even without joined panes, ensure Details pane has focus
-		if m.claudePaneID == "" {
-			log.Debug("NewDetailModel: no claudePaneID, calling focusDetailsPane")
-			m.focusDetailsPane()
-		}
-	} else {
-		log.Info("NewDetailModel: not in tmux, skipping pane operations")
+		log.Info("NewDetailModel: completed for task %d", t.ID)
+		return m, nil
 	}
 
-	log.Info("NewDetailModel: completed for task %d", t.ID)
-	return m
+	// Slow path: No active window - start session asynchronously
+	log.Info("NewDetailModel: no window target, starting async pane setup")
+	m.paneLoading = true
+	m.paneLoadingStart = time.Now()
+
+	// Return immediately with a command to start panes in background
+	log.Info("NewDetailModel: completed for task %d (async pane setup pending)", t.ID)
+	return m, tea.Batch(m.startPanesAsync(), m.spinnerTick())
+}
+
+// startPanesAsync returns a command that starts the Claude session and joins panes in the background.
+func (m *DetailModel) startPanesAsync() tea.Cmd {
+	// Capture values needed for the goroutine
+	taskID := m.task.ID
+	sessionID := m.task.ClaudeSessionID
+
+	return func() tea.Msg {
+		log := GetLogger()
+		log.Info("startPanesAsync: starting for task %d", taskID)
+
+		// Start the Claude session (creates tmux window)
+		m.startResumableSession(sessionID)
+
+		// Find the window target
+		windowTarget := m.findTaskWindow()
+		log.Info("startPanesAsync: after startResumableSession, windowTarget=%q", windowTarget)
+
+		if windowTarget == "" {
+			log.Error("startPanesAsync: failed to find window after starting session")
+			return panesJoinedMsg{err: fmt.Errorf("failed to create Claude session window")}
+		}
+
+		// Join the panes
+		m.cachedWindowTarget = windowTarget
+		m.joinTmuxPane()
+
+		log.Info("startPanesAsync: completed, claudePaneID=%q, workdirPaneID=%q",
+			m.claudePaneID, m.workdirPaneID)
+
+		return panesJoinedMsg{
+			claudePaneID:    m.claudePaneID,
+			workdirPaneID:   m.workdirPaneID,
+			daemonSessionID: m.daemonSessionID,
+			windowTarget:    windowTarget,
+		}
+	}
+}
+
+// spinnerTick returns a command that ticks the loading spinner.
+func (m *DetailModel) spinnerTick() tea.Cmd {
+	return tea.Tick(100*time.Millisecond, func(t time.Time) tea.Msg {
+		return spinnerTickMsg{}
+	})
 }
 
 func (m *DetailModel) initViewport() {
@@ -271,6 +327,33 @@ func (m *DetailModel) SetSize(width, height int) {
 // Update handles messages.
 func (m *DetailModel) Update(msg tea.Msg) (*DetailModel, tea.Cmd) {
 	var cmd tea.Cmd
+
+	switch msg := msg.(type) {
+	case panesJoinedMsg:
+		// Async pane setup completed
+		log := GetLogger()
+		m.paneLoading = false
+		if msg.err != nil {
+			log.Error("panesJoinedMsg: error=%v", msg.err)
+		} else {
+			log.Info("panesJoinedMsg: claudePaneID=%q, workdirPaneID=%q",
+				msg.claudePaneID, msg.workdirPaneID)
+			m.claudePaneID = msg.claudePaneID
+			m.workdirPaneID = msg.workdirPaneID
+			m.daemonSessionID = msg.daemonSessionID
+			m.cachedWindowTarget = msg.windowTarget
+		}
+		m.viewport.SetContent(m.renderContent())
+		return m, nil
+
+	case spinnerTickMsg:
+		// Update spinner animation while loading
+		if m.paneLoading {
+			m.viewport.SetContent(m.renderContent())
+			return m, m.spinnerTick()
+		}
+		return m, nil
+	}
 
 	// Pass all messages to viewport for scrolling support
 	// This enables:
@@ -1632,6 +1715,21 @@ func (m *DetailModel) renderHeader() string {
 			processStyle = lipgloss.NewStyle().Foreground(dimmedFg)
 		}
 		meta.WriteString(processStyle.Render("●"))
+	}
+
+	// Pane loading indicator
+	if m.paneLoading {
+		meta.WriteString("  ")
+		elapsed := time.Since(m.paneLoadingStart)
+		frameIndex := int(elapsed.Milliseconds()/100) % len(spinnerFrames)
+		spinner := spinnerFrames[frameIndex]
+		var loadingStyle lipgloss.Style
+		if m.focused {
+			loadingStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("214")) // Orange
+		} else {
+			loadingStyle = lipgloss.NewStyle().Foreground(dimmedFg)
+		}
+		meta.WriteString(loadingStyle.Render(spinner + " Starting Claude..."))
 	}
 
 	// Schedule info - show if scheduled OR recurring

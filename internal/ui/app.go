@@ -579,7 +579,8 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.executor.IsSuspended(msg.task.ID) {
 				m.executor.ResumeTask(msg.task.ID)
 			}
-			m.detailView = NewDetailModel(msg.task, m.db, m.executor, m.width, m.height)
+			var initCmd tea.Cmd
+			m.detailView, initCmd = NewDetailModel(msg.task, m.db, m.executor, m.width, m.height)
 			// Set task position in column for display
 			pos, total := m.kanban.GetTaskPosition()
 			m.detailView.SetPosition(pos, total)
@@ -587,6 +588,10 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.currentView = ViewDetail
 			// Disable mouse to allow native text selection in detail view
 			cmds = append(cmds, tea.DisableMouse)
+			// Start async pane setup if needed
+			if initCmd != nil {
+				cmds = append(cmds, initCmd)
+			}
 			// Start tmux output ticker if session is active
 			if tickerCmd := m.detailView.StartTmuxTicker(); tickerCmd != nil {
 				cmds = append(cmds, tickerCmd)
@@ -760,6 +765,17 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, m.loadTasks())
 		// Continue watching for more changes
 		cmds = append(cmds, m.waitForDBChange())
+
+	default:
+		// Route unknown messages to detail view if active
+		// This handles async messages like panesJoinedMsg and spinnerTickMsg
+		if m.currentView == ViewDetail && m.detailView != nil {
+			var cmd tea.Cmd
+			m.detailView, cmd = m.detailView.Update(msg)
+			if cmd != nil {
+				cmds = append(cmds, cmd)
+			}
+		}
 	}
 
 	return m, tea.Batch(cmds...)
