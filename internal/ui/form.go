@@ -140,7 +140,7 @@ func NewEditFormModel(database *db.DB, task *db.Task, width, height int) *FormMo
 		project:             task.Project,
 		originalProject:     task.Project, // Track original project for detecting changes
 		executor:            executor,
-		executors:           []string{db.ExecutorClaude, db.ExecutorCodex},
+		executors:           []string{db.ExecutorClaude, db.ExecutorCodex, db.ExecutorRalph},
 		isEdit:              true,
 		recurrence:          task.Recurrence,
 		recurrences:         []string{"", db.RecurrenceHourly, db.RecurrenceDaily, db.RecurrenceWeekly, db.RecurrenceMonthly},
@@ -272,7 +272,7 @@ func NewFormModel(database *db.DB, width, height int, workingDir string) *FormMo
 		height:              height,
 		focused:             FieldProject,
 		executor:            db.DefaultExecutor(),
-		executors:           []string{db.ExecutorClaude, db.ExecutorCodex},
+		executors:           []string{db.ExecutorClaude, db.ExecutorCodex, db.ExecutorRalph},
 		recurrences:         []string{"", db.RecurrenceHourly, db.RecurrenceDaily, db.RecurrenceWeekly, db.RecurrenceMonthly},
 		autocompleteSvc:     autocompleteSvc,
 		autocompleteEnabled: autocompleteEnabled,

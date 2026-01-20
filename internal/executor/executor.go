@@ -145,6 +145,7 @@ func New(database *db.DB, cfg *config.Config) *Executor {
 	// Register available executors
 	e.executorFactory.Register(NewClaudeExecutor(e))
 	e.executorFactory.Register(NewCodexExecutor(e))
+	e.executorFactory.Register(NewRalphExecutor(e))
 
 	return e
 }
@@ -173,6 +174,7 @@ func NewWithLogging(database *db.DB, cfg *config.Config, w io.Writer) *Executor 
 	// Register available executors
 	e.executorFactory.Register(NewClaudeExecutor(e))
 	e.executorFactory.Register(NewCodexExecutor(e))
+	e.executorFactory.Register(NewRalphExecutor(e))
 
 	return e
 }
