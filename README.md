@@ -189,7 +189,7 @@ npm install -g @openai/codex
 
 ### How Task Executors Work
 
-Understanding how Task You manages Claude instances helps you debug issues and work with running tasks.
+Understanding how Task You manages executor processes helps you debug issues and work with running tasks.
 
 #### tmux-Based Architecture
 
@@ -199,7 +199,7 @@ Task executors run inside **tmux windows** within a daemon session:
 task-daemon-{PID}              (tmux session)
 ├── _placeholder               (keeps session alive)
 ├── task-123                   (window for task 123)
-│   ├── pane 0: Claude         (left - executor output)
+│   ├── pane 0: Executor       (left - Claude/Codex output)
 │   └── pane 1: Shell          (right - workdir access)
 ├── task-124                   (window for task 124)
 └── ...
@@ -208,7 +208,7 @@ task-daemon-{PID}              (tmux session)
 When you execute a task:
 1. The daemon ensures a `task-daemon-*` session exists
 2. Creates a new tmux window named `task-{ID}`
-3. Spawns Claude with environment variables and the task prompt
+3. Spawns the configured executor (Claude or Codex) with environment variables and the task prompt
 4. Creates a shell pane for manual intervention
 
 #### Session Tracking
@@ -217,30 +217,30 @@ Each task tracks its executor state in the database:
 
 | Field | Purpose |
 |-------|---------|
-| `ClaudeSessionID` | Claude conversation ID for resumption |
+| `SessionID` | Executor session ID (Claude only, for resumption) |
 | `TmuxWindowID` | Unique window target for tmux commands |
 | `daemon_session` | Which `task-daemon-*` owns this task |
 | `Port` | Unique port (3100-4099) for the worktree |
 
-#### Managing Claude Sessions
+#### Managing Executor Processes
 
 **Inside the TUI:**
-- Press `R` on a task to resume its Claude session (if the process died but the session exists)
+- Press `R` on a task to resume its executor session (Claude only - requires existing session)
 - The green dot (`●`) indicates tasks with active processes
 
 **From the command line:**
 
 ```bash
-# List all running Claude sessions
+# List all running executor processes
 ./bin/task claudes list
 
-# Kill orphaned Claude processes
+# Kill orphaned executor processes
 ./bin/task claudes cleanup
 ```
 
 **Inside a task worktree:**
 
-When working in a task's worktree directory, you can interact with Claude sessions directly:
+When working in a task's worktree directory, you can interact with the executor directly. For Claude tasks:
 
 ```bash
 cd /path/to/project/.task-worktrees/123-my-task/
@@ -255,9 +255,9 @@ claude --resume {session-id}
 The `claude -r` command shows Claude sessions associated with the current directory. This is useful when:
 - Debugging why a task got stuck
 - Continuing work manually after a task completes
-- Checking what Claude was doing in a specific task
+- Checking what the executor was doing in a specific task
 
-#### Session Resumption
+#### Session Resumption (Claude Only)
 
 Claude Code supports **session resumption** - when you retry a task or press `R`, the executor reconnects to the existing conversation:
 
@@ -267,6 +267,8 @@ Claude Code supports **session resumption** - when you retry a task or press `R`
 4. **Full context preserved:** Claude sees the entire conversation history
 
 This means when you retry a blocked task with feedback, Claude doesn't start over—it continues the conversation with full awareness of what it already tried.
+
+**Note:** Codex does not support session resumption. When retrying a Codex task, it receives the full prompt including any feedback, but starts a fresh session.
 
 #### Lifecycle & Cleanup
 
