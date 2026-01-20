@@ -1394,32 +1394,6 @@ func TmuxSessionName(taskID int64) string {
 	return fmt.Sprintf("%s:%s", getDaemonSessionName(), TmuxWindowName(taskID))
 }
 
-// killAllWindowsByName kills ALL windows with a given name in a session.
-// This is necessary because tmux allows duplicate window names, and kill-window
-// by name only kills the first match. This function kills all matches by window ID.
-func killAllWindowsByName(session, windowName string) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	// List windows with ID and name
-	out, err := exec.CommandContext(ctx, "tmux", "list-windows",
-		"-t", session, "-F", "#{window_id}:#{window_name}").Output()
-	if err != nil {
-		return
-	}
-
-	// Kill each matching window BY ID (unique identifier)
-	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		if line == "" {
-			continue
-		}
-		parts := strings.SplitN(line, ":", 2)
-		if len(parts) == 2 && parts[1] == windowName {
-			exec.CommandContext(ctx, "tmux", "kill-window", "-t", parts[0]).Run()
-		}
-	}
-}
-
 // killAllWindowsByNameAllSessions kills ALL windows with a given name across all daemon sessions.
 // Also kills any -shell variant windows.
 func killAllWindowsByNameAllSessions(windowName string) {
@@ -2158,16 +2132,9 @@ func (e *Executor) ResumeDangerous(taskID int64) bool {
 		return false
 	}
 
-	// Use task's stored daemon session for killing existing window
-	// Fall back to current session if not stored (for backwards compatibility)
-	oldDaemonSession := task.DaemonSession
-	if oldDaemonSession == "" {
-		oldDaemonSession = getDaemonSessionName()
-	}
-
 	windowName := TmuxWindowName(taskID)
 
-	// Kill ALL existing windows with this name (handles duplicates)
+	// Kill ALL existing windows with this name across all sessions (handles duplicates)
 	killAllWindowsByNameAllSessions(windowName)
 
 	// Ensure task-daemon session exists for creating new window
@@ -2281,16 +2248,9 @@ func (e *Executor) ResumeSafe(taskID int64) bool {
 		return false
 	}
 
-	// Use task's stored daemon session for killing existing window
-	// Fall back to current session if not stored (for backwards compatibility)
-	oldDaemonSession := task.DaemonSession
-	if oldDaemonSession == "" {
-		oldDaemonSession = getDaemonSessionName()
-	}
-
 	windowName := TmuxWindowName(taskID)
 
-	// Kill ALL existing windows with this name (handles duplicates)
+	// Kill ALL existing windows with this name across all sessions (handles duplicates)
 	killAllWindowsByNameAllSessions(windowName)
 
 	// Ensure task-daemon session exists for creating new window

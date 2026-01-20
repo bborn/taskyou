@@ -648,25 +648,6 @@ func (m *DetailModel) updateTmuxPaneTitle() {
 	exec.CommandContext(ctx, "tmux", "select-pane", "-t", m.tuiPaneID, "-T", m.getPaneTitle()).Run()
 }
 
-// focusDetailsPane sets focus to the current TUI pane (Details pane).
-func (m *DetailModel) focusDetailsPane() {
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-	// Get current pane ID
-	currentPaneCmd := exec.CommandContext(ctx, "tmux", "display-message", "-p", "#{pane_id}")
-	currentPaneOut, err := currentPaneCmd.Output()
-	if err != nil {
-		return
-	}
-	tuiPaneID := strings.TrimSpace(string(currentPaneOut))
-
-	// Set the pane title and ensure it has focus
-	if tuiPaneID != "" {
-		m.tuiPaneID = tuiPaneID
-		exec.CommandContext(ctx, "tmux", "select-pane", "-t", tuiPaneID, "-T", m.getPaneTitle()).Run()
-	}
-}
-
 // getDetailPaneHeight returns the configured detail pane height percentage.
 // Default is 20% for better visibility of task details.
 func (m *DetailModel) getDetailPaneHeight() string {
@@ -1839,7 +1820,7 @@ func (m *DetailModel) computeLogHash() uint64 {
 		return 0
 	}
 	// Use length and last log timestamp as a fast proxy for changes
-	var hash uint64 = uint64(len(m.logs))
+	hash := uint64(len(m.logs))
 	if len(m.logs) > 0 {
 		hash ^= uint64(m.logs[len(m.logs)-1].CreatedAt.UnixNano())
 	}
