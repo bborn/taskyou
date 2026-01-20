@@ -41,6 +41,7 @@ const (
 	ViewAttachments
 	ViewChangeStatus
 	ViewCommandPalette
+	ViewTiledTasks
 )
 
 // KeyMap defines key bindings.
@@ -69,6 +70,7 @@ type KeyMap struct {
 	Filter          key.Binding
 	ResumeClaude    key.Binding
 	OpenWorktree    key.Binding
+	TiledView       key.Binding
 	// Column focus shortcuts
 	FocusBacklog    key.Binding
 	FocusInProgress key.Binding
@@ -89,7 +91,7 @@ func (k KeyMap) FullHelp() [][]key.Binding {
 		{k.Enter, k.New, k.Queue, k.Close},
 		{k.Retry, k.Archive, k.Delete, k.OpenWorktree},
 		{k.Filter, k.CommandPalette, k.Settings, k.Memories},
-		{k.ChangeStatus, k.Refresh, k.Help, k.Quit},
+		{k.TiledView, k.ChangeStatus, k.Refresh, k.Help, k.Quit},
 	}
 }
 
@@ -191,6 +193,10 @@ func DefaultKeyMap() KeyMap {
 		OpenWorktree: key.NewBinding(
 			key.WithKeys("o"),
 			key.WithHelp("o", "open in editor"),
+		),
+		TiledView: key.NewBinding(
+			key.WithKeys("t"),
+			key.WithHelp("t", "tiled view"),
 		),
 		FocusBacklog: key.NewBinding(
 			key.WithKeys("B"),
@@ -307,6 +313,9 @@ type AppModel struct {
 
 	// Command palette view state
 	commandPaletteView *CommandPaletteModel
+
+	// Tiled view state
+	tiledView *TiledModel
 
 	// Filter state
 	filterInput  textinput.Model
@@ -484,6 +493,8 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.updateMemories(msg)
 		case ViewAttachments:
 			return m.updateAttachments(msg)
+		case ViewTiledTasks:
+			return m.updateTiled(msg)
 		}
 
 	case tea.MouseMsg:
@@ -517,6 +528,9 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if m.editTaskForm != nil {
 			m.editTaskForm.SetSize(msg.Width, msg.Height)
+		}
+		if m.tiledView != nil {
+			m.tiledView.SetSize(msg.Width, msg.Height)
 		}
 
 	case tasksLoadedMsg:
@@ -776,6 +790,14 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				cmds = append(cmds, cmd)
 			}
 		}
+		// Route to tiled view if active
+		if m.currentView == ViewTiledTasks && m.tiledView != nil {
+			var cmd tea.Cmd
+			m.tiledView, cmd = m.tiledView.Update(msg)
+			if cmd != nil {
+				cmds = append(cmds, cmd)
+			}
+		}
 	}
 
 	return m, tea.Batch(cmds...)
@@ -844,6 +866,10 @@ func (m *AppModel) View() string {
 	case ViewCommandPalette:
 		if m.commandPaletteView != nil {
 			return m.commandPaletteView.View()
+		}
+	case ViewTiledTasks:
+		if m.tiledView != nil {
+			return m.tiledView.View()
 		}
 	}
 
@@ -1106,6 +1132,19 @@ func (m *AppModel) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.help.ShowAll = !m.help.ShowAll
 		return m, nil
 
+	case key.Matches(msg, m.keys.TiledView):
+		// Open tiled view showing all active tasks
+		m.tiledView = NewTiledModel(m.tasks, m.db, m.width, m.height)
+		if m.tiledView.HasActiveTasks() {
+			m.previousView = m.currentView
+			m.currentView = ViewTiledTasks
+			return m, m.tiledView.Init()
+		}
+		// No active tasks - show notification
+		m.notification = "No active tasks to tile"
+		m.notifyUntil = time.Now().Add(3 * time.Second)
+		return m, nil
+
 	case key.Matches(msg, m.keys.Filter):
 		// Enter filter mode
 		m.filterActive = true
@@ -1120,6 +1159,60 @@ func (m *AppModel) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, m.loadTasks()
 		}
 		return m.showQuitConfirm()
+	}
+
+	return m, nil
+}
+
+// updateTiled handles input in tiled view.
+func (m *AppModel) updateTiled(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.tiledView == nil {
+		return m, nil
+	}
+
+	tiledKeys := DefaultTiledKeyMap()
+
+	switch {
+	case key.Matches(msg, tiledKeys.Back):
+		// Clean up panes and return to dashboard
+		m.tiledView.Cleanup()
+		m.tiledView = nil
+		m.currentView = ViewDashboard
+		// Re-enable mouse for dashboard
+		return m, tea.EnableMouseCellMotion
+
+	case key.Matches(msg, tiledKeys.Enter):
+		// Enter detail view for selected task
+		if task := m.tiledView.SelectedTask(); task != nil {
+			m.tiledView.Cleanup()
+			m.tiledView = nil
+			return m, m.loadTask(task.ID)
+		}
+
+	case key.Matches(msg, tiledKeys.Left):
+		m.tiledView.Update(msg)
+		return m, nil
+
+	case key.Matches(msg, tiledKeys.Right):
+		m.tiledView.Update(msg)
+		return m, nil
+
+	case key.Matches(msg, tiledKeys.Up):
+		m.tiledView.Update(msg)
+		return m, nil
+
+	case key.Matches(msg, tiledKeys.Down):
+		m.tiledView.Update(msg)
+		return m, nil
+
+	default:
+		// Check for number keys 1-9
+		keyStr := msg.String()
+		if len(keyStr) == 1 && keyStr[0] >= '1' && keyStr[0] <= '9' {
+			n := int(keyStr[0] - '0')
+			m.tiledView.SelectByNumber(n)
+			return m, nil
+		}
 	}
 
 	return m, nil
