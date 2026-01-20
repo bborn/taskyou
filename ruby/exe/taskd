@@ -1,0 +1,92 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+require "bundler/setup"
+require "taskyou"
+require "optparse"
+require "logger"
+
+options = {
+  addr: ":2222",
+  db: nil,
+  host_key: nil
+}
+
+OptionParser.new do |opts|
+  opts.banner = "Usage: taskd [options]"
+
+  opts.on("-a", "--addr ADDR", "SSH server address (default: :2222)") do |v|
+    options[:addr] = v
+  end
+
+  opts.on("-d", "--db PATH", "Database path") do |v|
+    options[:db] = v
+  end
+
+  opts.on("-k", "--host-key PATH", "SSH host key path") do |v|
+    options[:host_key] = v
+  end
+end.parse!
+
+# Setup logger
+logger = Logger.new($stderr)
+logger.progname = "taskd"
+
+# Resolve paths
+home = Dir.home
+options[:db] ||= File.join(home, ".local", "share", "task", "tasks.db")
+options[:host_key] ||= File.join(home, ".ssh", "task_ed25519")
+
+logger.info("Starting taskd")
+logger.info("Database: #{options[:db]}")
+logger.info("Address: #{options[:addr]}")
+
+# Open database
+begin
+  database = Taskyou::DB::Database.new(options[:db])
+rescue StandardError => e
+  logger.fatal("Failed to open database: #{e.message}")
+  exit 1
+end
+
+# Load config
+config = Taskyou::Config.new(database)
+
+logger.info("Projects dir: #{config.projects_dir}")
+
+# Create executor with logging
+executor = Taskyou::Executor::Executor.with_logging(database, config, $stderr)
+
+# Start background executor
+executor.start
+
+# Handle signals
+trap("INT") do
+  logger.info("Received SIGINT, shutting down...")
+  executor.stop
+  database.close
+  exit 0
+end
+
+trap("TERM") do
+  logger.info("Received SIGTERM, shutting down...")
+  executor.stop
+  database.close
+  exit 0
+end
+
+# Parse port from address
+port = options[:addr].split(":").last || "2222"
+
+puts ""
+puts "  TaskYou Daemon (Ruby)"
+puts "  Connect with: ssh -p #{port} localhost"
+puts ""
+puts "  Note: SSH TUI server not yet implemented."
+puts "  The executor is running in background mode."
+puts ""
+
+# Keep main thread alive
+loop do
+  sleep 1
+end

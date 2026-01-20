@@ -1,0 +1,32 @@
+# frozen_string_literal: true
+
+require "bundler/gem_tasks"
+require "rspec/core/rake_task"
+require "rubocop/rake_task"
+
+RSpec::Core::RakeTask.new(:spec)
+
+RSpec::Core::RakeTask.new(:spec_unit) do |t|
+  t.pattern = "spec/lib/**/*_spec.rb"
+end
+
+RSpec::Core::RakeTask.new(:spec_integration) do |t|
+  t.pattern = "spec/integration/**/*_spec.rb"
+end
+
+RSpec::Core::RakeTask.new(:spec_parity) do |t|
+  t.pattern = "spec/parity/**/*_spec.rb"
+end
+
+RuboCop::RakeTask.new
+
+task default: %i[spec rubocop]
+
+desc "Run all tests including parity checks against Go implementation"
+task verify: %i[spec_unit spec_integration spec_parity]
+
+desc "Build both Go and Ruby binaries"
+task :build_all do
+  sh "cd .. && make build"
+  sh "bundle exec rake build"
+end

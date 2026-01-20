@@ -1,0 +1,32 @@
+example_id                                    | status | run_time        |
+--------------------------------------------- | ------ | --------------- |
+./spec/lib/taskyou/db/database_spec.rb[1:1:1] | passed | 0.00471 seconds |
+./spec/lib/taskyou/db/database_spec.rb[1:1:2] | passed | 0.00408 seconds |
+./spec/lib/taskyou/db/database_spec.rb[1:1:3] | passed | 0.00402 seconds |
+./spec/lib/taskyou/db/database_spec.rb[1:1:4] | passed | 0.00574 seconds |
+./spec/lib/taskyou/db/database_spec.rb[1:1:5] | passed | 0.00438 seconds |
+./spec/lib/taskyou/db/database_spec.rb[1:2:1] | passed | 0.00512 seconds |
+./spec/lib/taskyou/db/database_spec.rb[1:2:2] | passed | 0.00356 seconds |
+./spec/lib/taskyou/db/task_spec.rb[1:1:1]     | passed | 0.00337 seconds |
+./spec/lib/taskyou/db/task_spec.rb[1:1:2]     | passed | 0.00388 seconds |
+./spec/lib/taskyou/db/task_spec.rb[1:1:3]     | passed | 0.0037 seconds  |
+./spec/lib/taskyou/db/task_spec.rb[1:1:4]     | passed | 0.00472 seconds |
+./spec/lib/taskyou/db/task_spec.rb[1:2:1]     | passed | 0.00326 seconds |
+./spec/lib/taskyou/db/task_spec.rb[1:2:2]     | passed | 0.00333 seconds |
+./spec/lib/taskyou/db/task_spec.rb[1:3:1]     | passed | 0.00595 seconds |
+./spec/lib/taskyou/db/task_spec.rb[1:3:2]     | passed | 0.00387 seconds |
+./spec/lib/taskyou/db/task_spec.rb[1:3:3]     | passed | 0.0036 seconds  |
+./spec/lib/taskyou/db/task_spec.rb[1:3:4]     | passed | 0.0044 seconds  |
+./spec/lib/taskyou/db/task_spec.rb[1:4:1]     | passed | 0.00398 seconds |
+./spec/lib/taskyou/db/task_spec.rb[1:4:2]     | passed | 0.00423 seconds |
+./spec/lib/taskyou/db/task_spec.rb[1:4:3]     | passed | 0.00462 seconds |
+./spec/lib/taskyou/db/task_spec.rb[1:5:1]     | passed | 0.00623 seconds |
+./spec/lib/taskyou/db/task_spec.rb[1:5:2]     | passed | 0.00396 seconds |
+./spec/lib/taskyou/db/task_spec.rb[1:5:3]     | passed | 0.004 seconds   |
+./spec/lib/taskyou/db/task_spec.rb[1:6:1]     | passed | 0.0036 seconds  |
+./spec/lib/taskyou/db/task_spec.rb[1:6:2]     | passed | 0.00348 seconds |
+./spec/lib/taskyou/db/task_spec.rb[1:6:3]     | passed | 0.00354 seconds |
+./spec/lib/taskyou/db/task_spec.rb[1:6:4]     | passed | 0.00404 seconds |
+./spec/lib/taskyou/db/task_spec.rb[1:7:1]     | passed | 0.00399 seconds |
+./spec/lib/taskyou/db/task_spec.rb[1:7:2]     | passed | 0.00806 seconds |
+./spec/lib/taskyou/db/task_spec.rb[1:8:1]     | passed | 0.00351 seconds |
