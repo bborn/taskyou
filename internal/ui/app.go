@@ -74,8 +74,6 @@ type KeyMap struct {
 	FocusInProgress key.Binding
 	FocusBlocked    key.Binding
 	FocusDone       key.Binding
-	// Shell pane toggle
-	ToggleShellPane key.Binding
 }
 
 // ShortHelp returns key bindings to show in the mini help.
@@ -209,10 +207,6 @@ func DefaultKeyMap() KeyMap {
 		FocusDone: key.NewBinding(
 			key.WithKeys("D"),
 			key.WithHelp("D", "done"),
-		),
-		ToggleShellPane: key.NewBinding(
-			key.WithKeys("\\"),
-			key.WithHelp("\\", "toggle shell"),
 		),
 	}
 }
@@ -1337,10 +1331,6 @@ func (m *AppModel) updateDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, m.resumeClaude(m.selectedTask.ID, claudePaneID)
 	}
-	if key.Matches(keyMsg, m.keys.ToggleShellPane) && m.detailView != nil {
-		m.detailView.ToggleShellPane()
-		return m, nil
-	}
 	if key.Matches(keyMsg, m.keys.OpenWorktree) && m.selectedTask != nil {
 		return m, m.openWorktreeInEditor(m.selectedTask)
 	}
@@ -1356,8 +1346,7 @@ func (m *AppModel) updateDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.taskTransitionInProgress = true
-		// Clean up current detail view before switching (without saving height
-		// to avoid rounding error accumulation that causes pane to shrink)
+		// Clean up current detail view before switching (without saving height)
 		if m.detailView != nil {
 			m.detailView.CleanupWithoutSaving()
 			m.detailView = nil
@@ -1377,8 +1366,7 @@ func (m *AppModel) updateDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.taskTransitionInProgress = true
-		// Clean up current detail view before switching (without saving height
-		// to avoid rounding error accumulation that causes pane to shrink)
+		// Clean up current detail view before switching (without saving height)
 		if m.detailView != nil {
 			m.detailView.CleanupWithoutSaving()
 			m.detailView = nil
@@ -2827,7 +2815,7 @@ func (m *AppModel) tick() tea.Cmd {
 }
 
 func (m *AppModel) focusTick() tea.Cmd {
-	return tea.Tick(200*time.Millisecond, func(t time.Time) tea.Msg {
+	return tea.Tick(300*time.Millisecond, func(t time.Time) tea.Msg {
 		return focusTickMsg(t)
 	})
 }

@@ -840,6 +840,17 @@ func (db *DB) GetTaskLogs(taskID int64, limit int) ([]*TaskLog, error) {
 	return logs, nil
 }
 
+// GetTaskLogCount returns the number of logs for a task.
+// This is a fast operation useful for checking if logs have changed.
+func (db *DB) GetTaskLogCount(taskID int64) (int, error) {
+	var count int
+	err := db.QueryRow("SELECT COUNT(*) FROM task_logs WHERE task_id = ?", taskID).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("count task logs: %w", err)
+	}
+	return count, nil
+}
+
 // GetTaskLogsSince retrieves logs after a given ID.
 func (db *DB) GetTaskLogsSince(taskID int64, sinceID int64) ([]*TaskLog, error) {
 	rows, err := db.Query(`
