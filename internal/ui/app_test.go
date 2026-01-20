@@ -353,3 +353,139 @@ func TestEditTaskFormEscapeClosesImmediatelyWhenEmpty(t *testing.T) {
 		t.Errorf("expected view to be ViewDashboard, got %v", am.currentView)
 	}
 }
+
+// TestScoreTaskForFilter tests the fuzzy matching logic for the kanban filter.
+// This should match the behavior of the command palette (Ctrl+P) scoring.
+func TestScoreTaskForFilter(t *testing.T) {
+	tests := []struct {
+		name     string
+		task     *db.Task
+		query    string
+		wantMin  int  // minimum expected score (-1 means no match)
+		wantMax  int  // maximum expected score (use same as min for exact)
+		wantHigh bool // true if this should score higher than baseline
+	}{
+		{
+			name:    "ID exact match gives highest priority",
+			task:    &db.Task{ID: 123, Title: "Some task"},
+			query:   "123",
+			wantMin: 1000,
+			wantMax: 1000,
+		},
+		{
+			name:    "ID with hash prefix",
+			task:    &db.Task{ID: 456, Title: "Another task"},
+			query:   "#456",
+			wantMin: 1000,
+			wantMax: 1000,
+		},
+		{
+			name:    "PR number match",
+			task:    &db.Task{ID: 1, Title: "Fix bug", PRNumber: 789},
+			query:   "789",
+			wantMin: 900,
+			wantMax: 900,
+		},
+		{
+			name:    "PR URL match",
+			task:    &db.Task{ID: 1, Title: "Fix bug", PRURL: "https://github.com/org/repo/pull/123"},
+			query:   "github.com",
+			wantMin: 800,
+			wantMax: 800,
+		},
+		{
+			name:    "title fuzzy match with consecutive chars",
+			task:    &db.Task{ID: 1, Title: "Add authentication feature"},
+			query:   "auth",
+			wantMin: 100, // should get decent score
+			wantMax: 300,
+		},
+		{
+			name:    "title fuzzy match non-consecutive",
+			task:    &db.Task{ID: 1, Title: "design website"},
+			query:   "dsnw",
+			wantMin: 100, // should match with decent score due to word boundary bonuses
+			wantMax: 300,
+		},
+		{
+			name:    "project name fuzzy match",
+			task:    &db.Task{ID: 1, Title: "Some task", Project: "workflow"},
+			query:   "wkflw",
+			wantMin: 100, // matches project (with -50 penalty but still decent)
+			wantMax: 300,
+		},
+		{
+			name:    "status substring match",
+			task:    &db.Task{ID: 1, Title: "Task", Status: "processing"},
+			query:   "process",
+			wantMin: 100,
+			wantMax: 100,
+		},
+		{
+			name:    "type fuzzy match",
+			task:    &db.Task{ID: 1, Title: "Task", Type: "feature"},
+			query:   "feat",
+			wantMin: 100, // good score due to word start bonus
+			wantMax: 300,
+		},
+		{
+			name:    "no match returns -1",
+			task:    &db.Task{ID: 1, Title: "Hello world"},
+			query:   "xyz",
+			wantMin: -1,
+			wantMax: -1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			score := scoreTaskForFilter(tt.task, tt.query)
+			if score < tt.wantMin || score > tt.wantMax {
+				t.Errorf("scoreTaskForFilter() = %d, want between %d and %d", score, tt.wantMin, tt.wantMax)
+			}
+		})
+	}
+}
+
+// TestScoreTaskForFilterRanking verifies that better matches score higher.
+func TestScoreTaskForFilterRanking(t *testing.T) {
+	tests := []struct {
+		name        string
+		higherTask  *db.Task
+		higherQuery string
+		lowerTask   *db.Task
+		lowerQuery  string
+	}{
+		{
+			name:        "ID match beats title match",
+			higherTask:  &db.Task{ID: 123, Title: "Some task"},
+			higherQuery: "123",
+			lowerTask:   &db.Task{ID: 1, Title: "Task 123"},
+			lowerQuery:  "task",
+		},
+		{
+			name:        "exact title substring beats fuzzy match",
+			higherTask:  &db.Task{ID: 1, Title: "authentication"},
+			higherQuery: "auth",
+			lowerTask:   &db.Task{ID: 2, Title: "author handling"},
+			lowerQuery:  "athn",
+		},
+		{
+			name:        "word boundary match beats middle match",
+			higherTask:  &db.Task{ID: 1, Title: "fix authentication bug"},
+			higherQuery: "auth",
+			lowerTask:   &db.Task{ID: 2, Title: "authenticate users"},
+			lowerQuery:  "cate",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			higherScore := scoreTaskForFilter(tt.higherTask, tt.higherQuery)
+			lowerScore := scoreTaskForFilter(tt.lowerTask, tt.lowerQuery)
+			if higherScore <= lowerScore {
+				t.Errorf("expected higher score (%d) > lower score (%d)", higherScore, lowerScore)
+			}
+		})
+	}
+}

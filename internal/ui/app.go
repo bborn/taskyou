@@ -6,6 +6,7 @@ import (
 	"os"
 	osExec "os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -1204,7 +1205,8 @@ func (m *AppModel) updateFilterMode(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
-// applyFilter filters the tasks based on current filter text.
+// applyFilter filters the tasks based on current filter text using fuzzy matching.
+// Uses the same matching logic as the command palette (Ctrl+P) for consistency.
 func (m *AppModel) applyFilter() {
 	if m.filterText == "" {
 		// No filter, show all tasks
@@ -1212,36 +1214,96 @@ func (m *AppModel) applyFilter() {
 		return
 	}
 
-	filterLower := strings.ToLower(m.filterText)
-	var filtered []*db.Task
+	queryLower := strings.ToLower(m.filterText)
+
+	// Score all tasks using fuzzy matching
+	var scored []scoredTask
 	for _, task := range m.tasks {
-		// Match by project name
-		if strings.Contains(strings.ToLower(task.Project), filterLower) {
-			filtered = append(filtered, task)
-			continue
-		}
-		// Match by task type
-		if strings.Contains(strings.ToLower(task.Type), filterLower) {
-			filtered = append(filtered, task)
-			continue
-		}
-		// Match by title
-		if strings.Contains(strings.ToLower(task.Title), filterLower) {
-			filtered = append(filtered, task)
-			continue
-		}
-		// Match by task ID
-		if strings.Contains(fmt.Sprintf("%d", task.ID), filterLower) {
-			filtered = append(filtered, task)
-			continue
-		}
-		// Match by status
-		if strings.Contains(strings.ToLower(task.Status), filterLower) {
-			filtered = append(filtered, task)
-			continue
+		score := scoreTaskForFilter(task, queryLower)
+		if score >= 0 {
+			scored = append(scored, scoredTask{task: task, score: score})
 		}
 	}
+
+	// Sort by score descending (best matches first)
+	sort.Slice(scored, func(i, j int) bool {
+		return scored[i].score > scored[j].score
+	})
+
+	// Extract sorted tasks
+	filtered := make([]*db.Task, len(scored))
+	for i, st := range scored {
+		filtered[i] = st.task
+	}
 	m.kanban.SetTasks(filtered)
+}
+
+// scoreTaskForFilter calculates a fuzzy match score for a task against the query.
+// Returns -1 if the task doesn't match, otherwise returns a positive score.
+// Higher scores indicate better matches.
+// This uses the same matching logic as the command palette (Ctrl+P) for consistency.
+func scoreTaskForFilter(task *db.Task, query string) int {
+	bestScore := -1
+
+	// Check task ID (exact or prefix match gets high priority)
+	idStr := fmt.Sprintf("%d", task.ID)
+	if strings.HasPrefix(query, "#") {
+		idQuery := strings.TrimPrefix(query, "#")
+		if strings.Contains(idStr, idQuery) {
+			return 1000 // ID matches are highest priority
+		}
+	} else if strings.Contains(idStr, query) {
+		return 1000 // ID matches are highest priority
+	}
+
+	// Check PR number (high priority for specific lookups)
+	if task.PRNumber > 0 {
+		prNumStr := fmt.Sprintf("%d", task.PRNumber)
+		prQuery := query
+		if strings.HasPrefix(query, "#") {
+			prQuery = strings.TrimPrefix(query, "#")
+		}
+		if strings.Contains(prNumStr, prQuery) {
+			return 900 // PR number matches are high priority
+		}
+	}
+
+	// Check PR URL
+	if task.PRURL != "" {
+		if strings.Contains(strings.ToLower(task.PRURL), query) {
+			return 800 // PR URL matches
+		}
+	}
+
+	// Fuzzy match on title (primary search field)
+	titleScore := fuzzyScore(task.Title, query)
+	if titleScore > bestScore {
+		bestScore = titleScore
+	}
+
+	// Also check project name with fuzzy matching
+	projectScore := fuzzyScore(task.Project, query)
+	if projectScore > bestScore {
+		// Project matches get a slight penalty vs title matches
+		bestScore = projectScore - 50
+	}
+
+	// Check task type with fuzzy matching
+	typeScore := fuzzyScore(task.Type, query)
+	if typeScore > bestScore {
+		// Type matches get a slight penalty
+		bestScore = typeScore - 50
+	}
+
+	// Check status as substring match
+	if strings.Contains(strings.ToLower(task.Status), query) {
+		statusScore := 100
+		if statusScore > bestScore {
+			bestScore = statusScore
+		}
+	}
+
+	return bestScore
 }
 
 func (m *AppModel) updateDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
