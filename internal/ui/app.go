@@ -68,9 +68,10 @@ type KeyMap struct {
 	ToggleDangerous key.Binding
 	Filter          key.Binding
 	ResumeClaude    key.Binding
-	OpenWorktree    key.Binding
+	OpenWorktree       key.Binding
+	KillShellProcess   key.Binding
 	// Column focus shortcuts
-	FocusBacklog    key.Binding
+	FocusBacklog       key.Binding
 	FocusInProgress key.Binding
 	FocusBlocked    key.Binding
 	FocusDone       key.Binding
@@ -191,6 +192,10 @@ func DefaultKeyMap() KeyMap {
 		OpenWorktree: key.NewBinding(
 			key.WithKeys("o"),
 			key.WithHelp("o", "open in editor"),
+		),
+		KillShellProcess: key.NewBinding(
+			key.WithKeys("K"),
+			key.WithHelp("K", "kill shell process"),
 		),
 		FocusBacklog: key.NewBinding(
 			key.WithKeys("B"),
@@ -686,6 +691,15 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.notifyUntil = time.Now().Add(5 * time.Second)
 		} else if msg.message != "" {
 			m.notification = fmt.Sprintf("📂 %s", msg.message)
+			m.notifyUntil = time.Now().Add(3 * time.Second)
+		}
+
+	case shellProcessKilledMsg:
+		if msg.err != nil {
+			m.notification = fmt.Sprintf("⚠ %s", msg.err.Error())
+			m.notifyUntil = time.Now().Add(5 * time.Second)
+		} else if msg.message != "" {
+			m.notification = fmt.Sprintf("⏹ %s", msg.message)
 			m.notifyUntil = time.Now().Add(3 * time.Second)
 		}
 
@@ -1349,6 +1363,9 @@ func (m *AppModel) updateDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 	if key.Matches(keyMsg, m.keys.OpenWorktree) && m.selectedTask != nil {
 		return m, m.openWorktreeInEditor(m.selectedTask)
+	}
+	if key.Matches(keyMsg, m.keys.KillShellProcess) && m.detailView != nil {
+		return m, m.killShellProcess()
 	}
 
 	// Arrow key navigation to prev/next task in the same column
@@ -2572,6 +2589,38 @@ func (m *AppModel) openWorktreeInEditor(task *db.Task) tea.Cmd {
 		}
 
 		return worktreeOpenedMsg{message: fmt.Sprintf("Opened %s", filepath.Base(task.WorktreePath))}
+	}
+}
+
+// shellProcessKilledMsg is returned when a shell process is killed.
+type shellProcessKilledMsg struct {
+	message string
+	err     error
+}
+
+// killShellProcess sends Ctrl+C to the shell pane to interrupt the foreground process.
+func (m *AppModel) killShellProcess() tea.Cmd {
+	return func() tea.Msg {
+		if m.detailView == nil {
+			return shellProcessKilledMsg{err: fmt.Errorf("no detail view")}
+		}
+
+		workdirPaneID := m.detailView.WorkdirPaneID()
+		if workdirPaneID == "" {
+			return shellProcessKilledMsg{err: fmt.Errorf("no shell pane")}
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+
+		// Send Ctrl+C to the shell pane via tmux send-keys
+		// This sends the interrupt signal to the foreground process
+		err := osExec.CommandContext(ctx, "tmux", "send-keys", "-t", workdirPaneID, "C-c").Run()
+		if err != nil {
+			return shellProcessKilledMsg{err: fmt.Errorf("failed to send Ctrl+C: %w", err)}
+		}
+
+		return shellProcessKilledMsg{message: "Sent interrupt signal to shell pane"}
 	}
 }
 

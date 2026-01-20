@@ -191,6 +191,11 @@ func (m *DetailModel) ClaudePaneID() string {
 	return m.claudePaneID
 }
 
+// WorkdirPaneID returns the tmux pane ID of the shell pane.
+func (m *DetailModel) WorkdirPaneID() string {
+	return m.workdirPaneID
+}
+
 // NewDetailModel creates a new detail model.
 // Returns the model and an optional command for async pane setup.
 func NewDetailModel(t *db.Task, database *db.DB, exec *executor.Executor, width, height int) (*DetailModel, tea.Cmd) {
@@ -2030,6 +2035,14 @@ func (m *DetailModel) renderHelp() string {
 			key  string
 			desc string
 		}{"shift+↑↓", "switch pane"})
+	}
+
+	// Show kill shell process shortcut when shell pane exists
+	if m.workdirPaneID != "" && os.Getenv("TMUX") != "" {
+		keys = append(keys, struct {
+			key  string
+			desc string
+		}{"K", "kill shell proc"})
 	}
 
 	keys = append(keys, []struct {
