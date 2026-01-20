@@ -1605,11 +1605,21 @@ func (m *DetailModel) renderHeader() string {
 	dimmedTextFg := lipgloss.Color("#6B7280") // Even more muted for text
 
 	// Task title (ID and position are shown in the panel border)
+	// Truncate title if it's too long for the panel width
+	title := t.Title
+	maxTitleLen := m.width - 4 // Account for border and padding
+	if maxTitleLen < 10 {
+		maxTitleLen = 10
+	}
+	if len(title) > maxTitleLen {
+		title = title[:maxTitleLen-1] + "…"
+	}
+
 	var subtitle string
 	if m.focused {
-		subtitle = Bold.Render(t.Title)
+		subtitle = Bold.Render(title)
 	} else {
-		subtitle = lipgloss.NewStyle().Foreground(dimmedTextFg).Render(t.Title)
+		subtitle = lipgloss.NewStyle().Foreground(dimmedTextFg).Render(title)
 	}
 
 	var meta strings.Builder
