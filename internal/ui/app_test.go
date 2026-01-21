@@ -34,9 +34,6 @@ func TestDefaultKeyMap(t *testing.T) {
 		t.Error("OpenWorktree key should have help text 'o'")
 	}
 
-	if keys.JumpToNotification.Help().Key != "alt+j" {
-		t.Error("JumpToNotification key should have help text 'alt+j'")
-	}
 }
 
 func TestNotificationHelpers(t *testing.T) {

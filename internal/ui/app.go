@@ -91,7 +91,6 @@ func (k KeyMap) FullHelp() [][]key.Binding {
 		{k.Retry, k.Archive, k.Delete, k.OpenWorktree},
 		{k.Filter, k.CommandPalette, k.Settings, k.Memories},
 		{k.ChangeStatus, k.Refresh, k.Help, k.Quit},
-		{k.JumpToNotification},
 	}
 }
 
