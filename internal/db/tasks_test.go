@@ -508,6 +508,77 @@ func TestLastTaskTypeForProject(t *testing.T) {
 	}
 }
 
+func TestLastExecutorForProject(t *testing.T) {
+	// Create temporary database
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	db, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer db.Close()
+	defer os.Remove(dbPath)
+
+	// Get last executor for non-existent project - should return empty
+	lastExecutor, err := db.GetLastExecutorForProject("personal")
+	if err != nil {
+		t.Fatalf("failed to get last executor: %v", err)
+	}
+	if lastExecutor != "" {
+		t.Errorf("expected empty string for non-existent project, got %q", lastExecutor)
+	}
+
+	// Set last executor for personal
+	if err := db.SetLastExecutorForProject("personal", "claude"); err != nil {
+		t.Fatalf("failed to set last executor: %v", err)
+	}
+
+	// Get it back
+	lastExecutor, err = db.GetLastExecutorForProject("personal")
+	if err != nil {
+		t.Fatalf("failed to get last executor: %v", err)
+	}
+	if lastExecutor != "claude" {
+		t.Errorf("expected 'claude', got %q", lastExecutor)
+	}
+
+	// Set different executor for another project
+	if err := db.SetLastExecutorForProject("work", "codex"); err != nil {
+		t.Fatalf("failed to set last executor: %v", err)
+	}
+
+	// Verify both are independent
+	lastExecutor, err = db.GetLastExecutorForProject("personal")
+	if err != nil {
+		t.Fatalf("failed to get last executor: %v", err)
+	}
+	if lastExecutor != "claude" {
+		t.Errorf("expected 'claude' for personal, got %q", lastExecutor)
+	}
+
+	lastExecutor, err = db.GetLastExecutorForProject("work")
+	if err != nil {
+		t.Fatalf("failed to get last executor: %v", err)
+	}
+	if lastExecutor != "codex" {
+		t.Errorf("expected 'codex' for work, got %q", lastExecutor)
+	}
+
+	// Update the executor for personal
+	if err := db.SetLastExecutorForProject("personal", "codex"); err != nil {
+		t.Fatalf("failed to update last executor: %v", err)
+	}
+
+	lastExecutor, err = db.GetLastExecutorForProject("personal")
+	if err != nil {
+		t.Fatalf("failed to get last executor: %v", err)
+	}
+	if lastExecutor != "codex" {
+		t.Errorf("expected 'codex' after update, got %q", lastExecutor)
+	}
+}
+
 func TestUpdateTaskStatus(t *testing.T) {
 	// Create temporary database
 	tmpDir := t.TempDir()
@@ -757,6 +828,82 @@ func TestCreateTaskSavesLastType(t *testing.T) {
 	}
 	if lastType != "writing" {
 		t.Errorf("expected 'writing' (unchanged), got %q", lastType)
+	}
+}
+
+func TestCreateTaskSavesLastExecutor(t *testing.T) {
+	// Create temporary database
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	db, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer db.Close()
+	defer os.Remove(dbPath)
+
+	// Create a task with an executor
+	task := &Task{
+		Title:    "Test Task",
+		Status:   StatusBacklog,
+		Type:     "code",
+		Project:  "personal",
+		Executor: ExecutorClaude,
+	}
+	if err := db.CreateTask(task); err != nil {
+		t.Fatalf("failed to create task: %v", err)
+	}
+
+	// Verify last executor was saved
+	lastExecutor, err := db.GetLastExecutorForProject("personal")
+	if err != nil {
+		t.Fatalf("failed to get last executor: %v", err)
+	}
+	if lastExecutor != ExecutorClaude {
+		t.Errorf("expected %q, got %q", ExecutorClaude, lastExecutor)
+	}
+
+	// Create another task with a different executor
+	task2 := &Task{
+		Title:    "Test Task 2",
+		Status:   StatusBacklog,
+		Type:     "code",
+		Project:  "personal",
+		Executor: ExecutorCodex,
+	}
+	if err := db.CreateTask(task2); err != nil {
+		t.Fatalf("failed to create task: %v", err)
+	}
+
+	// Verify last executor was updated
+	lastExecutor, err = db.GetLastExecutorForProject("personal")
+	if err != nil {
+		t.Fatalf("failed to get last executor: %v", err)
+	}
+	if lastExecutor != ExecutorCodex {
+		t.Errorf("expected %q, got %q", ExecutorCodex, lastExecutor)
+	}
+
+	// Create task with empty executor - should still save the default executor
+	task3 := &Task{
+		Title:    "Test Task 3",
+		Status:   StatusBacklog,
+		Type:     "code",
+		Project:  "personal",
+		Executor: "", // Will be set to default by CreateTask
+	}
+	if err := db.CreateTask(task3); err != nil {
+		t.Fatalf("failed to create task: %v", err)
+	}
+
+	// Verify last executor was updated to the default (claude)
+	lastExecutor, err = db.GetLastExecutorForProject("personal")
+	if err != nil {
+		t.Fatalf("failed to get last executor: %v", err)
+	}
+	if lastExecutor != ExecutorClaude {
+		t.Errorf("expected %q (default), got %q", ExecutorClaude, lastExecutor)
 	}
 }
 

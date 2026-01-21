@@ -150,6 +150,11 @@ func (db *DB) CreateTask(t *Task) error {
 		db.SetLastTaskTypeForProject(t.Project, t.Type)
 	}
 
+	// Save the last used executor for this project
+	if t.Executor != "" {
+		db.SetLastExecutorForProject(t.Project, t.Executor)
+	}
+
 	// Save the last used project
 	if t.Project != "" {
 		db.SetLastUsedProject(t.Project)
@@ -1200,6 +1205,16 @@ func (db *DB) GetLastUsedProject() (string, error) {
 // SetLastUsedProject saves the last used project name.
 func (db *DB) SetLastUsedProject(project string) error {
 	return db.SetSetting("last_used_project", project)
+}
+
+// GetLastExecutorForProject returns the last used executor for a project.
+func (db *DB) GetLastExecutorForProject(project string) (string, error) {
+	return db.GetSetting("last_executor_" + project)
+}
+
+// SetLastExecutorForProject saves the last used executor for a project.
+func (db *DB) SetLastExecutorForProject(project, executor string) error {
+	return db.SetSetting("last_executor_"+project, executor)
 }
 
 // CreateTaskType creates a new task type.
