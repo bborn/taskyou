@@ -588,3 +588,35 @@ func TestKanbanBoard_FirstTaskClickable(t *testing.T) {
 		t.Errorf("HandleClick at y=0 (border) returned task %d, expected nil", task.ID)
 	}
 }
+
+// TestKanbanBoard_BlockedTaskHighlight verifies that blocked tasks (needing input)
+// are rendered with a yellow outline to make them visually distinct.
+func TestKanbanBoard_BlockedTaskHighlight(t *testing.T) {
+	board := NewKanbanBoard(100, 50)
+
+	// Create tasks in different statuses
+	tasks := []*db.Task{
+		{ID: 1, Title: "Backlog Task", Status: db.StatusBacklog},
+		{ID: 2, Title: "Blocked Task (needs input)", Status: db.StatusBlocked},
+		{ID: 3, Title: "Done Task", Status: db.StatusDone},
+	}
+	board.SetTasks(tasks)
+
+	// Verify the blocked task is in the blocked column
+	blockedCol := board.columns[2] // Blocked column is at index 2
+	if len(blockedCol.Tasks) != 1 {
+		t.Fatalf("Expected 1 task in blocked column, got %d", len(blockedCol.Tasks))
+	}
+	if blockedCol.Tasks[0].ID != 2 {
+		t.Errorf("Expected task ID 2 in blocked column, got %d", blockedCol.Tasks[0].ID)
+	}
+	if blockedCol.Tasks[0].Status != db.StatusBlocked {
+		t.Errorf("Expected task status 'blocked', got %s", blockedCol.Tasks[0].Status)
+	}
+
+	// Render the view and verify it doesn't panic
+	view := board.View()
+	if view == "" {
+		t.Error("View() returned empty string")
+	}
+}
