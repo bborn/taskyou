@@ -246,9 +246,13 @@ func (k *KanbanBoard) ensureSelectedVisible() {
 	}
 
 	// Calculate how many tasks fit in the visible area
-	colHeight := k.height
+	// Must match viewDesktop()/viewMobile() calculation
+	colHeight := k.height - 2 // -2 for column borders
+	if k.IsMobileMode() {
+		colHeight = k.height - 4 // -2 for tab bar, -2 for column borders
+	}
 	cardHeight := 3                            // Most cards are 3 lines (2 content + 1 border)
-	maxVisible := (colHeight - 3) / cardHeight // -3 for header bar and minimal padding
+	maxVisible := (colHeight - 3) / cardHeight // -3 for header bar and scroll indicators
 	if maxVisible < 1 {
 		maxVisible = 1
 	}
