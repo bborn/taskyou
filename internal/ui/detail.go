@@ -1741,30 +1741,7 @@ func (m *DetailModel) renderHeader() string {
 	dimmedFg := lipgloss.Color("#9CA3AF")     // Muted gray foreground
 	dimmedTextFg := lipgloss.Color("#6B7280") // Even more muted for text
 
-	// Task title (ID and position are shown in the panel border)
-	// Use title if available, otherwise show first line of body as fallback
-	titleText := t.Title
-	if titleText == "" && t.Body != "" {
-		// Extract first line of body as title fallback
-		if idx := strings.Index(t.Body, "\n"); idx > 0 {
-			titleText = t.Body[:idx]
-		} else {
-			titleText = t.Body
-		}
-		// Truncate long body text used as title
-		if len(titleText) > 100 {
-			titleText = titleText[:97] + "..."
-		}
-	}
-
-	var subtitle string
-	if titleText != "" {
-		if m.focused {
-			subtitle = Title.Render(titleText)
-		} else {
-			subtitle = lipgloss.NewStyle().Foreground(dimmedTextFg).Render(titleText)
-		}
-	}
+	// Task title is shown in the tmux pane border, so we don't duplicate it here
 
 	var meta strings.Builder
 
@@ -1941,7 +1918,7 @@ func (m *DetailModel) renderHeader() string {
 		}
 	}
 
-	lines := []string{subtitle, meta.String()}
+	lines := []string{meta.String()}
 	if prLine != "" {
 		lines = append(lines, prLine)
 	}
