@@ -911,8 +911,14 @@ func (e *Executor) executeTask(ctx context.Context, task *db.Task) {
 	// Run the executor
 	var result execResult
 	if isRetry {
+		// Include attachments info in retry feedback so Claude knows about them
+		// This is important when attachments are added after the initial run or when resuming
+		feedbackWithAttachments := retryFeedback
+		if len(attachmentPaths) > 0 {
+			feedbackWithAttachments = retryFeedback + "\n" + e.getAttachmentsSection(task.ID, attachmentPaths)
+		}
 		e.logLine(task.ID, "system", fmt.Sprintf("Resuming previous session with feedback (executor: %s)", executorName))
-		execResult := taskExecutor.Resume(taskCtx, task, workDir, prompt, retryFeedback)
+		execResult := taskExecutor.Resume(taskCtx, task, workDir, prompt, feedbackWithAttachments)
 		result = execResult.toInternal()
 	} else if isRecurringRun {
 		// Resume session with recurring message that includes full task details
