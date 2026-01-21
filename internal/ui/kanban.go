@@ -829,6 +829,32 @@ func (k *KanbanBoard) GetTaskPosition() (int, int) {
 	return k.selectedRow + 1, len(col.Tasks) // 1-indexed position
 }
 
+// HasPrevTask returns true if there is a previous task in the current column.
+// Returns false if already at the first task or no tasks exist.
+func (k *KanbanBoard) HasPrevTask() bool {
+	if k.selectedCol < 0 || k.selectedCol >= len(k.columns) {
+		return false
+	}
+	col := k.columns[k.selectedCol]
+	if len(col.Tasks) <= 1 {
+		return false // Only one or no tasks, no prev
+	}
+	return k.selectedRow > 0
+}
+
+// HasNextTask returns true if there is a next task in the current column.
+// Returns false if already at the last task or no tasks exist.
+func (k *KanbanBoard) HasNextTask() bool {
+	if k.selectedCol < 0 || k.selectedCol >= len(k.columns) {
+		return false
+	}
+	col := k.columns[k.selectedCol]
+	if len(col.Tasks) <= 1 {
+		return false // Only one or no tasks, no next
+	}
+	return k.selectedRow < len(col.Tasks)-1
+}
+
 // HandleClick handles a mouse click at the given coordinates.
 // Returns the clicked task if a task card was clicked, nil otherwise.
 // Also updates the selection to the clicked task.

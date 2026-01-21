@@ -244,6 +244,77 @@ func TestKanbanBoard_MoveUpDownSingleTask(t *testing.T) {
 	}
 }
 
+func TestKanbanBoard_HasPrevNextTask(t *testing.T) {
+	board := NewKanbanBoard(100, 50)
+
+	// Multiple tasks in column
+	tasks := []*db.Task{
+		{ID: 1, Title: "Task 1", Status: db.StatusBacklog},
+		{ID: 2, Title: "Task 2", Status: db.StatusBacklog},
+		{ID: 3, Title: "Task 3", Status: db.StatusBacklog},
+	}
+	board.SetTasks(tasks)
+
+	// At first position: no prev, has next
+	if board.HasPrevTask() {
+		t.Error("At first task: HasPrevTask() = true, want false")
+	}
+	if !board.HasNextTask() {
+		t.Error("At first task: HasNextTask() = false, want true")
+	}
+
+	// Move to middle: has both
+	board.MoveDown()
+	if !board.HasPrevTask() {
+		t.Error("At middle task: HasPrevTask() = false, want true")
+	}
+	if !board.HasNextTask() {
+		t.Error("At middle task: HasNextTask() = false, want true")
+	}
+
+	// Move to last: has prev, no next
+	board.MoveDown()
+	if !board.HasPrevTask() {
+		t.Error("At last task: HasPrevTask() = false, want true")
+	}
+	if board.HasNextTask() {
+		t.Error("At last task: HasNextTask() = true, want false")
+	}
+}
+
+func TestKanbanBoard_HasPrevNextTaskSingleTask(t *testing.T) {
+	board := NewKanbanBoard(100, 50)
+
+	// Single task in column
+	tasks := []*db.Task{
+		{ID: 1, Title: "Task 1", Status: db.StatusBacklog},
+	}
+	board.SetTasks(tasks)
+
+	// With only one task: no prev, no next
+	if board.HasPrevTask() {
+		t.Error("With single task: HasPrevTask() = true, want false")
+	}
+	if board.HasNextTask() {
+		t.Error("With single task: HasNextTask() = true, want false")
+	}
+}
+
+func TestKanbanBoard_HasPrevNextTaskEmptyColumn(t *testing.T) {
+	board := NewKanbanBoard(100, 50)
+
+	// No tasks
+	board.SetTasks([]*db.Task{})
+
+	// With empty column: no prev, no next
+	if board.HasPrevTask() {
+		t.Error("With empty column: HasPrevTask() = true, want false")
+	}
+	if board.HasNextTask() {
+		t.Error("With empty column: HasNextTask() = true, want false")
+	}
+}
+
 func TestKanbanBoard_HandleClickUpdatesSelection(t *testing.T) {
 	board := NewKanbanBoard(100, 50)
 
