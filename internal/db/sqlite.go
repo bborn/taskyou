@@ -243,6 +243,9 @@ func (db *DB) migrate() error {
 		`ALTER TABLE tasks ADD COLUMN summary TEXT DEFAULT ''`, // Distilled summary of what was accomplished
 		// Last distillation timestamp for tracking when to re-distill
 		`ALTER TABLE tasks ADD COLUMN last_distilled_at DATETIME`, // When task was last distilled
+		// Tmux pane IDs for deterministic pane identification (avoids index-based guessing)
+		`ALTER TABLE tasks ADD COLUMN claude_pane_id TEXT DEFAULT ''`, // tmux pane ID for Claude/executor pane (e.g., "%1234")
+		`ALTER TABLE tasks ADD COLUMN shell_pane_id TEXT DEFAULT ''`,  // tmux pane ID for shell pane (e.g., "%1235")
 	}
 
 	for _, m := range alterMigrations {

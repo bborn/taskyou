@@ -235,6 +235,8 @@ type AppModel struct {
 
 	// Track task statuses to detect changes
 	prevStatuses map[int64]string
+	// Track tasks with active input notifications (for UI highlighting)
+	tasksNeedingInput map[int64]bool
 
 	// Real-time event subscription
 	eventCh chan executor.TaskEvent
@@ -326,6 +328,26 @@ func (m *AppModel) executorDisplayName() string {
 	return executor.DefaultExecutorName()
 }
 
+// taskExecutorDisplayName returns the display name for a task's executor.
+// Uses the task's Executor field to determine the correct name.
+func taskExecutorDisplayName(task *db.Task) string {
+	if task == nil || task.Executor == "" {
+		return executor.DefaultExecutorName()
+	}
+	switch task.Executor {
+	case db.ExecutorCodex:
+		return "Codex"
+	case db.ExecutorClaude:
+		return "Claude"
+	default:
+		// Unknown executor, capitalize first letter
+		if len(task.Executor) > 0 {
+			return strings.ToUpper(task.Executor[:1]) + task.Executor[1:]
+		}
+		return executor.DefaultExecutorName()
+	}
+}
+
 // updateTaskInList updates a task in the tasks list and refreshes the kanban.
 func (m *AppModel) updateTaskInList(task *db.Task) {
 	for i, t := range m.tasks {
@@ -367,17 +389,18 @@ func NewAppModel(database *db.DB, exec *executor.Executor, workingDir string) *A
 	filterInput.CharLimit = 50
 
 	model := &AppModel{
-		db:           database,
-		executor:     exec,
-		workingDir:   workingDir,
-		keys:         DefaultKeyMap(),
-		help:         h,
-		currentView:  ViewDashboard,
-		kanban:       kanban,
-		loading:      true,
-		prevStatuses: make(map[int64]string),
-		watcher:      watcher,
-		dbChangeCh:   dbChangeCh,
+		db:                database,
+		executor:          exec,
+		workingDir:        workingDir,
+		keys:              DefaultKeyMap(),
+		help:              h,
+		currentView:       ViewDashboard,
+		kanban:            kanban,
+		loading:           true,
+		prevStatuses:      make(map[int64]string),
+		tasksNeedingInput: make(map[int64]bool),
+		watcher:           watcher,
+		dbChangeCh:        dbChangeCh,
 		prCache:      github.NewPRCache(),
 		filterInput:  filterInput,
 		filterText:   "",
@@ -534,11 +557,17 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.notification = fmt.Sprintf("⚠ Task #%d needs input: %s", t.ID, t.Title)
 					m.notifyUntil = time.Now().Add(10 * time.Second)
 					RingBell() // Ring terminal bell (writes to /dev/tty to bypass TUI)
+					// Mark task as needing input for kanban highlighting
+					m.tasksNeedingInput[t.ID] = true
 				} else if t.Status == db.StatusDone && db.IsInProgress(prevStatus) {
 					// Task completed - ring bell and show notification
 					m.notification = fmt.Sprintf("✓ Task #%d complete: %s", t.ID, t.Title)
 					m.notifyUntil = time.Now().Add(5 * time.Second)
 					RingBell() // Ring terminal bell (writes to /dev/tty to bypass TUI)
+				}
+				// Clear needing input flag when task leaves blocked status
+				if prevStatus == db.StatusBlocked && t.Status != db.StatusBlocked {
+					delete(m.tasksNeedingInput, t.ID)
 				}
 			}
 			m.prevStatuses[t.ID] = t.Status
@@ -562,6 +591,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			running[m.selectedTask.ID] = true
 		}
 		m.kanban.SetRunningProcesses(running)
+		m.kanban.SetTasksNeedingInput(m.tasksNeedingInput)
 
 		// Trigger initial PR refresh after first task load (subsequent refreshes via prRefreshTick)
 		if !m.initialPRRefreshDone {
@@ -706,6 +736,8 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 							m.notification = fmt.Sprintf("⚠ Task #%d needs input: %s", event.TaskID, event.Task.Title)
 							m.notifyUntil = time.Now().Add(10 * time.Second)
 							RingBell() // Ring terminal bell (writes to /dev/tty to bypass TUI)
+							// Mark task as needing input for kanban highlighting
+							m.tasksNeedingInput[event.TaskID] = true
 						} else if event.Task.Status == db.StatusDone && db.IsInProgress(prevStatus) {
 							m.notification = fmt.Sprintf("✓ Task #%d complete: %s", event.TaskID, event.Task.Title)
 							m.notifyUntil = time.Now().Add(5 * time.Second)
@@ -714,12 +746,17 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 							m.notification = fmt.Sprintf("▶ Task #%d started: %s", event.TaskID, event.Task.Title)
 							m.notifyUntil = time.Now().Add(3 * time.Second)
 						}
+						// Clear needing input flag when task leaves blocked status
+						if prevStatus == db.StatusBlocked && event.Task.Status != db.StatusBlocked {
+							delete(m.tasksNeedingInput, event.TaskID)
+						}
 						m.prevStatuses[event.TaskID] = event.Task.Status
 					}
 					break
 				}
 			}
 			m.kanban.SetTasks(m.tasks)
+			m.kanban.SetTasksNeedingInput(m.tasksNeedingInput)
 
 			// Update detail view if showing this task
 			if m.selectedTask != nil && m.selectedTask.ID == event.TaskID {
@@ -1419,6 +1456,10 @@ func (m *AppModel) updateDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	if key.Matches(keyMsg, m.keys.Up) {
+		// Ignore if no previous task exists
+		if !m.kanban.HasPrevTask() {
+			return m, nil
+		}
 		// Ignore if transition already in progress to prevent duplicate panes
 		if m.taskTransitionInProgress {
 			return m, nil
@@ -1439,6 +1480,10 @@ func (m *AppModel) updateDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	if key.Matches(keyMsg, m.keys.Down) {
+		// Ignore if no next task exists
+		if !m.kanban.HasNextTask() {
+			return m, nil
+		}
 		// Ignore if transition already in progress to prevent duplicate panes
 		if m.taskTransitionInProgress {
 			return m, nil
@@ -2694,7 +2739,7 @@ func (m *AppModel) toggleDangerousMode(id int64) tea.Cmd {
 			return taskDangerousModeToggledMsg{err: fmt.Errorf("failed to get task")}
 		}
 
-		executorName := m.executorDisplayName()
+		executorName := taskExecutorDisplayName(task)
 		var success bool
 		if task.DangerousMode {
 			// Currently in dangerous mode, switch to safe mode
@@ -2721,7 +2766,7 @@ func (m *AppModel) resumeClaude(id int64, claudePaneID string) tea.Cmd {
 			return taskClaudeToggledMsg{err: fmt.Errorf("failed to get task")}
 		}
 
-		executorName := m.executorDisplayName()
+		executorName := taskExecutorDisplayName(task)
 
 		// Check if Claude is already running
 		if claudePaneID != "" {

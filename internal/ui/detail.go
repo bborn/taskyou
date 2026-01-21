@@ -19,6 +19,18 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
+// shouldSkipAutoExecutor returns true if the task should NOT automatically
+// start the executor when viewed in the TUI. Tasks in backlog status are
+// explicitly not ready for execution, and done/archived tasks are finished.
+func shouldSkipAutoExecutor(task *db.Task) bool {
+	switch task.Status {
+	case db.StatusBacklog, db.StatusDone, db.StatusArchived:
+		return true
+	default:
+		return false
+	}
+}
+
 // DetailModel represents the task detail view.
 type DetailModel struct {
 	task     *db.Task
@@ -97,6 +109,21 @@ type spinnerTickMsg struct{}
 var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 
 func (m *DetailModel) executorDisplayName() string {
+	// Use the task's executor field if available (each task can have a different executor)
+	if m.task != nil && m.task.Executor != "" {
+		switch m.task.Executor {
+		case db.ExecutorCodex:
+			return "Codex"
+		case db.ExecutorClaude:
+			return "Claude"
+		default:
+			// Unknown executor, capitalize first letter
+			if len(m.task.Executor) > 0 {
+				return strings.ToUpper(m.task.Executor[:1]) + m.task.Executor[1:]
+			}
+		}
+	}
+	// Fallback to the global executor's display name
 	if m.executor != nil {
 		return m.executor.DisplayName()
 	}
@@ -236,6 +263,14 @@ func NewDetailModel(t *db.Task, database *db.DB, exec *executor.Executor, width,
 		m.joinTmuxPane()
 		log.Info("NewDetailModel: after joinTmuxPane, claudePaneID=%q, workdirPaneID=%q",
 			m.claudePaneID, m.workdirPaneID)
+		log.Info("NewDetailModel: completed for task %d", t.ID)
+		return m, nil
+	}
+
+	// Don't auto-start executor for backlog/done/archived tasks
+	// Backlog tasks haven't been queued for execution yet, and done/archived tasks are finished
+	if shouldSkipAutoExecutor(t) {
+		log.Info("NewDetailModel: skipping auto-executor for %s task", t.Status)
 		log.Info("NewDetailModel: completed for task %d", t.ID)
 		return m, nil
 	}
@@ -635,16 +670,43 @@ func (m *DetailModel) ensureTmuxPanesJoined() {
 	}
 }
 
-// getPaneTitle returns the title for the detail pane (e.g., "Task 123 (2/5)").
+// getPaneTitle returns the title for the detail pane (e.g., "Task 123: some task title... (2/5)").
 func (m *DetailModel) getPaneTitle() string {
 	if m.task == nil {
 		return "Task"
 	}
-	title := fmt.Sprintf("Task %d", m.task.ID)
+
+	// Build position suffix if available
+	positionSuffix := ""
 	if m.positionInColumn > 0 && m.totalInColumn > 0 {
-		title += fmt.Sprintf(" (%d/%d)", m.positionInColumn, m.totalInColumn)
+		positionSuffix = fmt.Sprintf(" (%d/%d)", m.positionInColumn, m.totalInColumn)
 	}
-	return title
+
+	// Calculate available space for title
+	// Format: "Task {id}: {title}{positionSuffix}"
+	prefix := fmt.Sprintf("Task %d", m.task.ID)
+	if m.task.Title == "" {
+		return prefix + positionSuffix
+	}
+
+	// Max pane title length (reasonable for most terminal widths)
+	const maxPaneTitle = 60
+	// Reserve space for prefix ": " and position suffix
+	availableForTitle := maxPaneTitle - len(prefix) - 2 - len(positionSuffix)
+	if availableForTitle < 10 {
+		availableForTitle = 10 // Minimum title length
+	}
+
+	taskTitle := m.task.Title
+	// Replace newlines with spaces for single-line display
+	taskTitle = strings.ReplaceAll(taskTitle, "\n", " ")
+	taskTitle = strings.ReplaceAll(taskTitle, "\r", "")
+
+	if len(taskTitle) > availableForTitle {
+		taskTitle = taskTitle[:availableForTitle-3] + "..."
+	}
+
+	return fmt.Sprintf("%s: %s%s", prefix, taskTitle, positionSuffix)
 }
 
 // updateTmuxPaneTitle updates the tmux pane title to show task info.
@@ -930,9 +992,14 @@ func (m *DetailModel) joinTmuxPanes() {
 		log.Debug("joinTmuxPanes: list-panes failed (expected if task-ui doesn't exist): %v", err)
 	}
 
-	// Get list of panes in daemon window to find actual pane indices
-	// Pane indices may not start at 0 if panes were killed
-	daemonPanesCmd := exec.CommandContext(ctx, "tmux", "list-panes", "-t", windowTarget, "-F", "#{pane_index}")
+	// Use stored pane IDs if available for deterministic pane identification
+	// This prevents the bug where panes could be swapped if indices change
+	storedClaudePaneID := m.task.ClaudePaneID
+	storedShellPaneID := m.task.ShellPaneID
+	log.Debug("joinTmuxPanes: stored pane IDs: claude=%q, shell=%q", storedClaudePaneID, storedShellPaneID)
+
+	// Get list of panes in daemon window to verify they exist
+	daemonPanesCmd := exec.CommandContext(ctx, "tmux", "list-panes", "-t", windowTarget, "-F", "#{pane_id}")
 	daemonPanesOut, err := daemonPanesCmd.Output()
 	if err != nil {
 		log.Error("joinTmuxPanes: failed to list panes for %q: %v", windowTarget, err)
@@ -944,22 +1011,38 @@ func (m *DetailModel) joinTmuxPanes() {
 		m.joinPaneFailed = true
 		return
 	}
-	daemonPaneIndices := strings.Split(strings.TrimSpace(string(daemonPanesOut)), "\n")
-	if len(daemonPaneIndices) == 0 || daemonPaneIndices[0] == "" {
+	daemonPaneIDs := strings.Split(strings.TrimSpace(string(daemonPanesOut)), "\n")
+	if len(daemonPaneIDs) == 0 || daemonPaneIDs[0] == "" {
 		log.Error("joinTmuxPanes: no panes found in %q", windowTarget)
 		m.joinPaneFailed = true
 		return
 	}
-	hasShellPane := len(daemonPaneIndices) >= 2
-	firstPaneIndex := daemonPaneIndices[0]
-	log.Debug("joinTmuxPanes: daemon panes=%v, hasShellPane=%v, firstPaneIndex=%q", daemonPaneIndices, hasShellPane, firstPaneIndex)
+	log.Debug("joinTmuxPanes: daemon pane IDs=%v", daemonPaneIDs)
+
+	// Determine which pane ID to use for Claude
+	// Priority: stored ID (if still valid) > first pane in daemon
+	claudeSourcePaneID := ""
+	if storedClaudePaneID != "" {
+		// Verify stored Claude pane ID is still in the daemon window
+		for _, pid := range daemonPaneIDs {
+			if pid == storedClaudePaneID {
+				claudeSourcePaneID = storedClaudePaneID
+				log.Debug("joinTmuxPanes: using stored Claude pane ID %q", claudeSourcePaneID)
+				break
+			}
+		}
+	}
+	if claudeSourcePaneID == "" {
+		// Fall back to first pane in daemon (legacy behavior)
+		claudeSourcePaneID = daemonPaneIDs[0]
+		log.Debug("joinTmuxPanes: falling back to first daemon pane ID %q for Claude", claudeSourcePaneID)
+	}
 
 	// Step 1: Join the Claude pane below the TUI pane (vertical split)
-	claudeSource := windowTarget + "." + firstPaneIndex
-	log.Info("joinTmuxPanes: joining Claude pane from %q", claudeSource)
+	log.Info("joinTmuxPanes: joining Claude pane %q", claudeSourcePaneID)
 	joinCmd := exec.CommandContext(ctx, "tmux", "join-pane",
 		"-v",
-		"-s", claudeSource)
+		"-s", claudeSourcePaneID)
 	joinOutput, err := joinCmd.CombinedOutput()
 	if err != nil {
 		log.Error("joinTmuxPanes: join-pane failed: %v, output: %s", err, string(joinOutput))
@@ -987,21 +1070,41 @@ func (m *DetailModel) joinTmuxPanes() {
 
 	// Step 2: Join or create the Shell pane to the right of Claude
 	shellWidth := m.getShellPaneWidth()
-	log.Debug("joinTmuxPanes: shellWidth=%q, hasShellPane=%v", shellWidth, hasShellPane)
 
-	// Get second pane index if shell pane exists (used below)
-	var secondPaneIndex string
-	if hasShellPane && len(daemonPaneIndices) >= 2 {
-		secondPaneIndex = daemonPaneIndices[1]
+	// Determine which pane ID to use for Shell
+	// Priority: stored ID (if still valid) > remaining pane in daemon
+	shellSourcePaneID := ""
+	hasShellPane := len(daemonPaneIDs) >= 2
+
+	if storedShellPaneID != "" && hasShellPane {
+		// Verify stored Shell pane ID is still in the daemon window (and not the Claude pane we just joined)
+		for _, pid := range daemonPaneIDs {
+			if pid == storedShellPaneID && pid != claudeSourcePaneID {
+				shellSourcePaneID = storedShellPaneID
+				log.Debug("joinTmuxPanes: using stored Shell pane ID %q", shellSourcePaneID)
+				break
+			}
+		}
+	}
+	if shellSourcePaneID == "" && hasShellPane {
+		// Fall back to the other pane in daemon (the one we didn't use for Claude)
+		for _, pid := range daemonPaneIDs {
+			if pid != claudeSourcePaneID {
+				shellSourcePaneID = pid
+				log.Debug("joinTmuxPanes: falling back to remaining daemon pane ID %q for Shell", shellSourcePaneID)
+				break
+			}
+		}
 	}
 
-	if hasShellPane && secondPaneIndex != "" {
-		// Daemon had 2 panes. After joining Claude, shell becomes pane 0 (tmux renumbers)
-		shellSource := windowTarget + ".0"
-		log.Debug("joinTmuxPanes: joining existing shell pane from %q", shellSource)
+	log.Debug("joinTmuxPanes: shellWidth=%q, hasShellPane=%v, shellSourcePaneID=%q", shellWidth, hasShellPane, shellSourcePaneID)
+
+	if shellSourcePaneID != "" {
+		// Join the shell pane from daemon
+		log.Debug("joinTmuxPanes: joining shell pane %q", shellSourcePaneID)
 		err = exec.CommandContext(ctx, "tmux", "join-pane",
 			"-h", "-l", shellWidth,
-			"-s", shellSource,
+			"-s", shellSourcePaneID,
 			"-t", m.claudePaneID).Run()
 		if err != nil {
 			log.Error("joinTmuxPanes: join shell pane failed: %v", err)
@@ -1435,6 +1538,10 @@ func (m *DetailModel) breakTmuxPanes(saveHeight bool, resizeTUI bool) {
 		}
 	}
 
+	// Save the new pane IDs in the daemon window to the database
+	// This ensures we can reliably identify panes when joining again later
+	m.saveDaemonPaneIDs(ctx, targetWindowID)
+
 	// Resize the TUI pane back to full window size now that the splits are gone
 	// This ensures the kanban view has the full window to render
 	// Skip during task switching to avoid layout thrashing
@@ -1445,6 +1552,46 @@ func (m *DetailModel) breakTmuxPanes(saveHeight bool, resizeTUI bool) {
 	m.claudePaneID = ""
 	m.daemonSessionID = ""
 	log.Info("breakTmuxPanes: completed for task %d", m.task.ID)
+}
+
+// saveDaemonPaneIDs saves the pane IDs from the daemon window to the database.
+// This is called after breaking panes back to the daemon to ensure we have the correct
+// pane IDs for when we join them again later.
+func (m *DetailModel) saveDaemonPaneIDs(ctx context.Context, targetWindowID string) {
+	log := GetLogger()
+
+	if m.task == nil || m.database == nil {
+		return
+	}
+
+	// Get Claude pane ID (pane .0 in daemon)
+	claudePaneCmd := exec.CommandContext(ctx, "tmux", "display-message", "-t", targetWindowID+".0", "-p", "#{pane_id}")
+	claudePaneOut, err := claudePaneCmd.Output()
+	if err != nil {
+		log.Warn("saveDaemonPaneIDs: failed to get Claude pane ID: %v", err)
+		return
+	}
+	claudePaneID := strings.TrimSpace(string(claudePaneOut))
+
+	// Get Shell pane ID (pane .1 in daemon) - may not exist
+	shellPaneID := ""
+	shellPaneCmd := exec.CommandContext(ctx, "tmux", "display-message", "-t", targetWindowID+".1", "-p", "#{pane_id}")
+	shellPaneOut, err := shellPaneCmd.Output()
+	if err == nil {
+		shellPaneID = strings.TrimSpace(string(shellPaneOut))
+	}
+
+	// Save to database
+	if err := m.database.UpdateTaskPaneIDs(m.task.ID, claudePaneID, shellPaneID); err != nil {
+		log.Warn("saveDaemonPaneIDs: failed to save pane IDs: %v", err)
+		return
+	}
+
+	// Update local task object
+	m.task.ClaudePaneID = claudePaneID
+	m.task.ShellPaneID = shellPaneID
+
+	log.Debug("saveDaemonPaneIDs: saved pane IDs for task %d: claude=%q, shell=%q", m.task.ID, claudePaneID, shellPaneID)
 }
 
 // HasRunningShellProcess returns true if the shell pane has a running process.
@@ -1594,30 +1741,7 @@ func (m *DetailModel) renderHeader() string {
 	dimmedFg := lipgloss.Color("#9CA3AF")     // Muted gray foreground
 	dimmedTextFg := lipgloss.Color("#6B7280") // Even more muted for text
 
-	// Task title (ID and position are shown in the panel border)
-	// Use title if available, otherwise show first line of body as fallback
-	titleText := t.Title
-	if titleText == "" && t.Body != "" {
-		// Extract first line of body as title fallback
-		if idx := strings.Index(t.Body, "\n"); idx > 0 {
-			titleText = t.Body[:idx]
-		} else {
-			titleText = t.Body
-		}
-		// Truncate long body text used as title
-		if len(titleText) > 100 {
-			titleText = titleText[:97] + "..."
-		}
-	}
-
-	var subtitle string
-	if titleText != "" {
-		if m.focused {
-			subtitle = Title.Render(titleText)
-		} else {
-			subtitle = lipgloss.NewStyle().Foreground(dimmedTextFg).Render(titleText)
-		}
-	}
+	// Task title is shown in the tmux pane border, so we don't duplicate it here
 
 	var meta strings.Builder
 
@@ -1794,7 +1918,7 @@ func (m *DetailModel) renderHeader() string {
 		}
 	}
 
-	lines := []string{subtitle, meta.String()}
+	lines := []string{meta.String()}
 	if prLine != "" {
 		lines = append(lines, prLine)
 	}
@@ -1966,50 +2090,41 @@ func (m *DetailModel) renderContent() string {
 }
 
 func (m *DetailModel) renderHelp() string {
-	keys := []struct {
-		key  string
-		desc string
-	}{
-		{"↑/↓", "prev/next task"},
+	type helpKey struct {
+		key      string
+		desc     string
+		disabled bool // When disabled, always show grayed out
+	}
+
+	// Check if navigation is available (more than 1 task in column)
+	hasNavigation := m.totalInColumn > 1
+
+	keys := []helpKey{
+		{"↑/↓", "prev/next task", !hasNavigation},
 	}
 
 	// Show scroll hint when content is scrollable
 	if m.viewport.TotalLineCount() > m.viewport.VisibleLineCount() {
-		keys = append(keys, struct {
-			key  string
-			desc string
-		}{"PgUp/Dn", "scroll"})
+		keys = append(keys, helpKey{"PgUp/Dn", "scroll", false})
 	}
 
 	// Only show execute/retry when Claude is not running
 	claudeRunning := m.claudeMemoryMB > 0
 	if !claudeRunning {
-		keys = append(keys, struct {
-			key  string
-			desc string
-		}{"x", "execute"})
+		keys = append(keys, helpKey{"x", "execute", false})
 	}
 
 	hasPanes := m.claudePaneID != "" || m.workdirPaneID != ""
 
-	keys = append(keys, struct {
-		key  string
-		desc string
-	}{"e", "edit"})
+	keys = append(keys, helpKey{"e", "edit", false})
 
 	// Only show retry when Claude is not running
 	if !claudeRunning {
-		keys = append(keys, struct {
-			key  string
-			desc string
-		}{"r", "retry"})
+		keys = append(keys, helpKey{"r", "retry", false})
 	}
 
 	// Always show status change option
-	keys = append(keys, struct {
-		key  string
-		desc string
-	}{"S", "status"})
+	keys = append(keys, helpKey{"S", "status", false})
 
 	// Show dangerous mode toggle when task is processing or blocked
 	if m.task != nil && (m.task.Status == db.StatusProcessing || m.task.Status == db.StatusBlocked) {
@@ -2017,36 +2132,24 @@ func (m *DetailModel) renderHelp() string {
 		if m.task.DangerousMode {
 			toggleDesc = "safe mode"
 		}
-		keys = append(keys, struct {
-			key  string
-			desc string
-		}{"!", toggleDesc})
+		keys = append(keys, helpKey{"!", toggleDesc, false})
 	}
 
 	// Show executor resume shortcut only when the agent is not running but has a session
 	if m.task != nil && m.task.ClaudeSessionID != "" && m.claudeMemoryMB == 0 {
-		keys = append(keys, struct {
-			key  string
-			desc string
-		}{"R", fmt.Sprintf("resume %s", m.executorDisplayName())})
+		keys = append(keys, helpKey{"R", fmt.Sprintf("resume %s", m.executorDisplayName()), false})
 	}
 
 	// Show pane navigation shortcut when panes are visible
 	if hasPanes && os.Getenv("TMUX") != "" {
-		keys = append(keys, struct {
-			key  string
-			desc string
-		}{"shift+↑↓", "switch pane"})
+		keys = append(keys, helpKey{"shift+↑↓", "switch pane", false})
 	}
 
-	keys = append(keys, []struct {
-		key  string
-		desc string
-	}{
-		{"c", "close"},
-		{"a", "archive"},
-		{"d", "delete"},
-		{"esc", "back"},
+	keys = append(keys, []helpKey{
+		{"c", "close", false},
+		{"a", "archive", false},
+		{"d", "delete", false},
+		{"esc", "back", false},
 	}...)
 
 	var help string
@@ -2057,10 +2160,11 @@ func (m *DetailModel) renderHelp() string {
 		if i > 0 {
 			help += "  "
 		}
-		if m.focused {
-			help += HelpKey.Render(k.key) + " " + HelpDesc.Render(k.desc)
-		} else {
+		// Disabled keys are always dimmed, regardless of focus
+		if k.disabled || !m.focused {
 			help += dimmedKeyStyle.Render(k.key) + " " + dimmedDescStyle.Render(k.desc)
+		} else {
+			help += HelpKey.Render(k.key) + " " + HelpDesc.Render(k.desc)
 		}
 	}
 

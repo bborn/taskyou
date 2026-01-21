@@ -34,6 +34,7 @@ type KanbanBoard struct {
 	allTasks         []*db.Task               // All tasks
 	prInfo           map[int64]*github.PRInfo // PR info by task ID
 	runningProcesses map[int64]bool           // Tasks with running shell processes
+	tasksNeedingInput map[int64]bool          // Tasks waiting for user input (active input notification)
 	hiddenDoneCount  int                      // Number of done tasks not shown (older ones)
 }
 
@@ -114,6 +115,19 @@ func (k *KanbanBoard) HasRunningProcess(taskID int64) bool {
 		return false
 	}
 	return k.runningProcesses[taskID]
+}
+
+// SetTasksNeedingInput updates the map of tasks waiting for user input.
+func (k *KanbanBoard) SetTasksNeedingInput(needsInput map[int64]bool) {
+	k.tasksNeedingInput = needsInput
+}
+
+// NeedsInput returns true if the task has an active input notification.
+func (k *KanbanBoard) NeedsInput(taskID int64) bool {
+	if k.tasksNeedingInput == nil {
+		return false
+	}
+	return k.tasksNeedingInput[taskID]
 }
 
 // distributeTasksToColumns distributes tasks to their respective columns.
@@ -246,9 +260,13 @@ func (k *KanbanBoard) ensureSelectedVisible() {
 	}
 
 	// Calculate how many tasks fit in the visible area
-	colHeight := k.height
+	// Must match viewDesktop()/viewMobile() calculation
+	colHeight := k.height - 2 // -2 for column borders
+	if k.IsMobileMode() {
+		colHeight = k.height - 4 // -2 for tab bar, -2 for column borders
+	}
 	cardHeight := 3                            // Most cards are 3 lines (2 content + 1 border)
-	maxVisible := (colHeight - 3) / cardHeight // -3 for header bar and minimal padding
+	maxVisible := (colHeight - 3) / cardHeight // -3 for header bar and scroll indicators
 	if maxVisible < 1 {
 		maxVisible = 1
 	}
@@ -766,6 +784,8 @@ func (k *KanbanBoard) renderTaskCard(task *db.Task, width int, isSelected bool) 
 
 	// Recurring tasks are de-emphasized visually (dimmed) when not selected
 	isRecurring := task.IsRecurring()
+	// Check if task has an active input notification
+	needsInput := k.NeedsInput(task.ID)
 
 	if isSelected {
 		cardBg, cardFg := GetThemeCardColors()
@@ -777,6 +797,13 @@ func (k *KanbanBoard) renderTaskCard(task *db.Task, width int, isSelected bool) 
 			Border(lipgloss.RoundedBorder()).
 			BorderForeground(lipgloss.Color(currentTheme.CardBorderHi)).
 			MarginBottom(0) // Border adds visual separation
+	} else if needsInput {
+		// Tasks with active input notification get yellow bottom border
+		cardStyle = cardStyle.
+			BorderBottom(true).
+			BorderStyle(lipgloss.NormalBorder()).
+			BorderForeground(ColorWarning).
+			MarginBottom(0)
 	} else if isRecurring {
 		// Recurring tasks are dimmed to de-emphasize them
 		cardStyle = cardStyle.
@@ -823,6 +850,32 @@ func (k *KanbanBoard) GetTaskPosition() (int, int) {
 		return 0, 0
 	}
 	return k.selectedRow + 1, len(col.Tasks) // 1-indexed position
+}
+
+// HasPrevTask returns true if there is a previous task in the current column.
+// Returns false if already at the first task or no tasks exist.
+func (k *KanbanBoard) HasPrevTask() bool {
+	if k.selectedCol < 0 || k.selectedCol >= len(k.columns) {
+		return false
+	}
+	col := k.columns[k.selectedCol]
+	if len(col.Tasks) <= 1 {
+		return false // Only one or no tasks, no prev
+	}
+	return k.selectedRow > 0
+}
+
+// HasNextTask returns true if there is a next task in the current column.
+// Returns false if already at the last task or no tasks exist.
+func (k *KanbanBoard) HasNextTask() bool {
+	if k.selectedCol < 0 || k.selectedCol >= len(k.columns) {
+		return false
+	}
+	col := k.columns[k.selectedCol]
+	if len(col.Tasks) <= 1 {
+		return false // Only one or no tasks, no next
+	}
+	return k.selectedRow < len(col.Tasks)-1
 }
 
 // HandleClick handles a mouse click at the given coordinates.
