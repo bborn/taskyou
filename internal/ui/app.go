@@ -194,8 +194,8 @@ func DefaultKeyMap() KeyMap {
 			key.WithHelp("o", "open in editor"),
 		),
 		JumpToNotification: key.NewBinding(
-			key.WithKeys("alt+j"),
-			key.WithHelp("alt+j", "jump to task"),
+			key.WithKeys("ctrl+shift+k"),
+			key.WithHelp("ctrl+shift+k", "jump to task"),
 		),
 		FocusBacklog: key.NewBinding(
 			key.WithKeys("B"),
@@ -902,7 +902,7 @@ func (m *AppModel) viewDashboard() string {
 			Padding(0, 2)
 		message := m.notification
 		if m.notificationTaskID != 0 {
-			message = fmt.Sprintf("%s  (Alt+J to jump)", message)
+			message = fmt.Sprintf("%s  (Ctrl+Shift+K to jump)", message)
 		}
 		headerParts = append(headerParts, notifyStyle.Render(message))
 	} else {
