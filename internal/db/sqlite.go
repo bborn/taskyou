@@ -473,6 +473,7 @@ Task: {{title}}
 
 Instructions:
 - Explore the codebase to understand the context
+- Always use relative paths (e.g., "." or "./src") when searching or navigating - never use absolute paths
 - Implement the solution
 - Write tests if applicable
 - Commit your changes with clear messages
