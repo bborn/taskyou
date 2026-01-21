@@ -103,13 +103,13 @@ func (c *CodexExecutor) runCodex(ctx context.Context, task *db.Task, workDir, pr
 	}
 
 	// Build the codex command
-	// Codex CLI uses different flags than Claude:
-	// - --full-auto for autonomous mode (similar to Claude's default)
-	// - prompts are passed via stdin or as arguments
+	// Codex CLI is run interactively (like Claude) so user can attach to the tmux session.
+	// For dangerous mode, we use --dangerously-bypass-approvals-and-sandbox which works with
+	// interactive mode (--full-auto is only for `codex exec`).
 	var script string
 	dangerousFlag := ""
 	if os.Getenv("WORKTREE_DANGEROUS_MODE") == "1" {
-		dangerousFlag = "--full-auto "
+		dangerousFlag = "--dangerously-bypass-approvals-and-sandbox "
 	}
 
 	// Note: Codex doesn't have built-in session resume like Claude,
@@ -298,4 +298,41 @@ func (c *CodexExecutor) ResumeProcess(taskID int64) bool {
 	c.logger.Info("Resumed Codex process", "task", taskID, "pid", pid)
 	c.executor.logLine(taskID, "system", "Codex resumed")
 	return true
+}
+
+// BuildCommand returns the shell command to start an interactive Codex session.
+func (c *CodexExecutor) BuildCommand(task *db.Task, sessionID, prompt string) string {
+	// Note: Codex doesn't support --resume like Claude, so sessionID is ignored
+	// and we always start fresh with the full prompt
+
+	// Build dangerous mode flag
+	dangerousFlag := ""
+	if task.DangerousMode || os.Getenv("WORKTREE_DANGEROUS_MODE") == "1" {
+		dangerousFlag = "--dangerously-bypass-approvals-and-sandbox "
+	}
+
+	// Get session ID for environment
+	worktreeSessionID := os.Getenv("WORKTREE_SESSION_ID")
+	if worktreeSessionID == "" {
+		worktreeSessionID = fmt.Sprintf("%d", os.Getpid())
+	}
+
+	// If prompt is provided, write to temp file and pass it
+	if prompt != "" {
+		// Create temp file for prompt (avoids shell quoting issues)
+		promptFile, err := os.CreateTemp("", "task-prompt-*.txt")
+		if err != nil {
+			c.logger.Error("BuildCommand: failed to create temp file", "error", err)
+			return fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q codex %s`,
+				task.ID, worktreeSessionID, task.Port, task.WorktreePath, dangerousFlag)
+		}
+		promptFile.WriteString(prompt)
+		promptFile.Close()
+
+		return fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q codex %s"$(cat %q)"; rm -f %q`,
+			task.ID, worktreeSessionID, task.Port, task.WorktreePath, dangerousFlag, promptFile.Name(), promptFile.Name())
+	}
+
+	return fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q codex %s`,
+		task.ID, worktreeSessionID, task.Port, task.WorktreePath, dangerousFlag)
 }
