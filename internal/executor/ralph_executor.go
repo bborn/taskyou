@@ -306,3 +306,41 @@ func (r *RalphExecutor) ResumeProcess(taskID int64) bool {
 	r.executor.logLine(taskID, "system", "Amp resumed")
 	return true
 }
+
+// BuildCommand returns the shell command to start an interactive Amp session.
+func (r *RalphExecutor) BuildCommand(task *db.Task, sessionID, prompt string) string {
+	// Note: Amp doesn't support --resume like Claude, so sessionID is ignored
+	// and we always start fresh with the full prompt
+
+	// Build dangerous mode flag
+	dangerousFlag := ""
+	if task.DangerousMode || os.Getenv("WORKTREE_DANGEROUS_MODE") == "1" {
+		dangerousFlag = "--dangerously-allow-all "
+	}
+
+	// Get session ID for environment
+	worktreeSessionID := os.Getenv("WORKTREE_SESSION_ID")
+	if worktreeSessionID == "" {
+		worktreeSessionID = fmt.Sprintf("%d", os.Getpid())
+	}
+
+	// If prompt is provided, write to temp file and pipe to amp
+	if prompt != "" {
+		// Create temp file for prompt (avoids shell quoting issues)
+		promptFile, err := os.CreateTemp("", "task-prompt-*.txt")
+		if err != nil {
+			r.logger.Error("BuildCommand: failed to create temp file", "error", err)
+			return fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q amp %s`,
+				task.ID, worktreeSessionID, task.Port, task.WorktreePath, dangerousFlag)
+		}
+		promptFile.WriteString(prompt)
+		promptFile.Close()
+
+		// Amp receives prompt via stdin (like ralph.sh does)
+		return fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q cat %q | amp %s; rm -f %q`,
+			task.ID, worktreeSessionID, task.Port, task.WorktreePath, promptFile.Name(), dangerousFlag, promptFile.Name())
+	}
+
+	return fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q amp %s`,
+		task.ID, worktreeSessionID, task.Port, task.WorktreePath, dangerousFlag)
+}
