@@ -239,6 +239,10 @@ func (db *DB) migrate() error {
 		`ALTER TABLE tasks ADD COLUMN executor TEXT DEFAULT 'claude'`, // Task executor: "claude" (default), "codex"
 		// Tmux window ID for unique window identification (avoids duplicate window issues)
 		`ALTER TABLE tasks ADD COLUMN tmux_window_id TEXT DEFAULT ''`, // tmux window ID (e.g., "@1234")
+		// Distilled task summary for search indexing and context
+		`ALTER TABLE tasks ADD COLUMN summary TEXT DEFAULT ''`, // Distilled summary of what was accomplished
+		// Last distillation timestamp for tracking when to re-distill
+		`ALTER TABLE tasks ADD COLUMN last_distilled_at DATETIME`, // When task was last distilled
 	}
 
 	for _, m := range alterMigrations {
