@@ -3185,7 +3185,7 @@ func (e *Executor) checkMergeConflicts() {
 		e.logger.Info("Attempting to resolve merge conflicts", "task", task.ID, "branch", task.BranchName)
 		e.logLine(task.ID, "system", "")
 		e.logLine(task.ID, "system", "═══════════════════════════════════════════════════════")
-		e.logLine(task.ID, "system", fmt.Sprintf("🔀 MERGE CONFLICTS DETECTED - Attempting automatic resolution"))
+		e.logLine(task.ID, "system", "🔀 MERGE CONFLICTS DETECTED - Attempting automatic resolution")
 		e.logLine(task.ID, "system", "═══════════════════════════════════════════════════════")
 
 		// Retry the task with a message to resolve the conflicts
