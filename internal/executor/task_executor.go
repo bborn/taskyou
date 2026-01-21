@@ -34,6 +34,12 @@ type TaskExecutor interface {
 	// If no previous session exists, it should start fresh with the full prompt + feedback.
 	Resume(ctx context.Context, task *db.Task, workDir, prompt, feedback string) ExecResult
 
+	// BuildCommand returns the shell command to start an interactive session.
+	// This is used by the UI to start the executor in a tmux window.
+	// The sessionID is optional - if provided, the executor should resume that session if supported.
+	// The prompt is the task prompt to pass to the executor.
+	BuildCommand(task *db.Task, sessionID, prompt string) string
+
 	// IsAvailable checks if the executor CLI is installed and available.
 	IsAvailable() bool
 
