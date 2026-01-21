@@ -235,6 +235,8 @@ type AppModel struct {
 
 	// Track task statuses to detect changes
 	prevStatuses map[int64]string
+	// Track tasks with active input notifications (for UI highlighting)
+	tasksNeedingInput map[int64]bool
 
 	// Real-time event subscription
 	eventCh chan executor.TaskEvent
@@ -387,17 +389,18 @@ func NewAppModel(database *db.DB, exec *executor.Executor, workingDir string) *A
 	filterInput.CharLimit = 50
 
 	model := &AppModel{
-		db:           database,
-		executor:     exec,
-		workingDir:   workingDir,
-		keys:         DefaultKeyMap(),
-		help:         h,
-		currentView:  ViewDashboard,
-		kanban:       kanban,
-		loading:      true,
-		prevStatuses: make(map[int64]string),
-		watcher:      watcher,
-		dbChangeCh:   dbChangeCh,
+		db:                database,
+		executor:          exec,
+		workingDir:        workingDir,
+		keys:              DefaultKeyMap(),
+		help:              h,
+		currentView:       ViewDashboard,
+		kanban:            kanban,
+		loading:           true,
+		prevStatuses:      make(map[int64]string),
+		tasksNeedingInput: make(map[int64]bool),
+		watcher:           watcher,
+		dbChangeCh:        dbChangeCh,
 		prCache:      github.NewPRCache(),
 		filterInput:  filterInput,
 		filterText:   "",
@@ -554,11 +557,17 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.notification = fmt.Sprintf("⚠ Task #%d needs input: %s", t.ID, t.Title)
 					m.notifyUntil = time.Now().Add(10 * time.Second)
 					RingBell() // Ring terminal bell (writes to /dev/tty to bypass TUI)
+					// Mark task as needing input for kanban highlighting
+					m.tasksNeedingInput[t.ID] = true
 				} else if t.Status == db.StatusDone && db.IsInProgress(prevStatus) {
 					// Task completed - ring bell and show notification
 					m.notification = fmt.Sprintf("✓ Task #%d complete: %s", t.ID, t.Title)
 					m.notifyUntil = time.Now().Add(5 * time.Second)
 					RingBell() // Ring terminal bell (writes to /dev/tty to bypass TUI)
+				}
+				// Clear needing input flag when task leaves blocked status
+				if prevStatus == db.StatusBlocked && t.Status != db.StatusBlocked {
+					delete(m.tasksNeedingInput, t.ID)
 				}
 			}
 			m.prevStatuses[t.ID] = t.Status
@@ -582,6 +591,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			running[m.selectedTask.ID] = true
 		}
 		m.kanban.SetRunningProcesses(running)
+		m.kanban.SetTasksNeedingInput(m.tasksNeedingInput)
 
 		// Trigger initial PR refresh after first task load (subsequent refreshes via prRefreshTick)
 		if !m.initialPRRefreshDone {
@@ -726,6 +736,8 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 							m.notification = fmt.Sprintf("⚠ Task #%d needs input: %s", event.TaskID, event.Task.Title)
 							m.notifyUntil = time.Now().Add(10 * time.Second)
 							RingBell() // Ring terminal bell (writes to /dev/tty to bypass TUI)
+							// Mark task as needing input for kanban highlighting
+							m.tasksNeedingInput[event.TaskID] = true
 						} else if event.Task.Status == db.StatusDone && db.IsInProgress(prevStatus) {
 							m.notification = fmt.Sprintf("✓ Task #%d complete: %s", event.TaskID, event.Task.Title)
 							m.notifyUntil = time.Now().Add(5 * time.Second)
@@ -734,12 +746,17 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 							m.notification = fmt.Sprintf("▶ Task #%d started: %s", event.TaskID, event.Task.Title)
 							m.notifyUntil = time.Now().Add(3 * time.Second)
 						}
+						// Clear needing input flag when task leaves blocked status
+						if prevStatus == db.StatusBlocked && event.Task.Status != db.StatusBlocked {
+							delete(m.tasksNeedingInput, event.TaskID)
+						}
 						m.prevStatuses[event.TaskID] = event.Task.Status
 					}
 					break
 				}
 			}
 			m.kanban.SetTasks(m.tasks)
+			m.kanban.SetTasksNeedingInput(m.tasksNeedingInput)
 
 			// Update detail view if showing this task
 			if m.selectedTask != nil && m.selectedTask.ID == event.TaskID {

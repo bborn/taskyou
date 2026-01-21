@@ -588,3 +588,41 @@ func TestKanbanBoard_FirstTaskClickable(t *testing.T) {
 		t.Errorf("HandleClick at y=0 (border) returned task %d, expected nil", task.ID)
 	}
 }
+
+// TestKanbanBoard_NeedsInput verifies that the input notification tracking works.
+func TestKanbanBoard_NeedsInput(t *testing.T) {
+	board := NewKanbanBoard(100, 50)
+
+	tasks := []*db.Task{
+		{ID: 1, Title: "Task 1", Status: db.StatusBlocked},
+		{ID: 2, Title: "Task 2", Status: db.StatusBlocked},
+		{ID: 3, Title: "Task 3", Status: db.StatusBacklog},
+	}
+	board.SetTasks(tasks)
+
+	// Initially no tasks need input
+	if board.NeedsInput(1) {
+		t.Error("Task 1 should not need input initially")
+	}
+
+	// Mark task 1 as needing input
+	needsInput := map[int64]bool{1: true}
+	board.SetTasksNeedingInput(needsInput)
+
+	// Now task 1 needs input, but task 2 (also blocked) doesn't
+	if !board.NeedsInput(1) {
+		t.Error("Task 1 should need input after SetTasksNeedingInput")
+	}
+	if board.NeedsInput(2) {
+		t.Error("Task 2 should not need input (not in the map)")
+	}
+	if board.NeedsInput(3) {
+		t.Error("Task 3 should not need input")
+	}
+
+	// Render should work without panic
+	view := board.View()
+	if view == "" {
+		t.Error("View() returned empty string")
+	}
+}
