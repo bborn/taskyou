@@ -1,7 +1,6 @@
 # frozen_string_literal: true
 
-# NOTE: This is a stub implementation. Full implementation requires bubbletea-ruby gem.
-# The actual styling will use lipgloss-ruby when available.
+require "lipgloss"
 
 module Taskyou
   module UI
@@ -40,26 +39,119 @@ module Taskyou
         "archived" => COLORS[:bright_black]
       }.freeze
 
-      def self.status_color(status)
-        STATUS_COLORS[status] || COLORS[:foreground]
-      end
+      class << self
+        def status_color(status)
+          STATUS_COLORS[status] || COLORS[:foreground]
+        end
 
-      # ANSI escape codes for terminal colors
-      def self.colorize(text, color)
-        # Simple ANSI coloring - would be replaced by lipgloss in full implementation
-        "\e[38;5;#{hex_to_ansi(color)}m#{text}\e[0m"
-      end
+        # Base style for the app
+        def app_style
+          Lipgloss::Style.new
+            .padding(1, 2)
+        end
 
-      def self.hex_to_ansi(hex)
-        # Simplified conversion - full implementation would use proper color matching
-        case hex
-        when COLORS[:red] then 196
-        when COLORS[:green] then 114
-        when COLORS[:yellow] then 220
-        when COLORS[:blue] then 75
-        when COLORS[:magenta] then 176
-        when COLORS[:cyan] then 80
-        else 252
+        # Title bar style
+        def title_style
+          Lipgloss::Style.new
+            .foreground(COLORS[:bright_white])
+            .background(COLORS[:blue])
+            .bold(true)
+            .padding(0, 1)
+        end
+
+        # Column header style
+        def column_header_style(selected: false)
+          style = Lipgloss::Style.new
+            .bold(true)
+            .padding(0, 1)
+            .margin_bottom(1)
+
+          if selected
+            style.foreground(COLORS[:bright_white])
+                 .background(COLORS[:blue])
+          else
+            style.foreground(COLORS[:foreground])
+          end
+        end
+
+        # Task card style
+        def task_card_style(status:, selected: false)
+          color = status_color(status)
+          style = Lipgloss::Style.new
+            .border(Lipgloss::ROUNDED_BORDER)
+            .border_foreground(color)
+            .padding(0, 1)
+            .margin_bottom(1)
+            .width(20)
+
+          if selected
+            style.border_foreground(COLORS[:bright_white])
+                 .bold(true)
+          else
+            style
+          end
+        end
+
+        # Status badge style
+        def status_badge_style(status)
+          color = status_color(status)
+          Lipgloss::Style.new
+            .foreground(COLORS[:black])
+            .background(color)
+            .padding(0, 1)
+        end
+
+        # Help style
+        def help_style
+          Lipgloss::Style.new
+            .foreground(COLORS[:bright_black])
+        end
+
+        # Error style
+        def error_style
+          Lipgloss::Style.new
+            .foreground(COLORS[:red])
+            .bold(true)
+        end
+
+        # Success style
+        def success_style
+          Lipgloss::Style.new
+            .foreground(COLORS[:green])
+            .bold(true)
+        end
+
+        # Muted text style
+        def muted_style
+          Lipgloss::Style.new
+            .foreground(COLORS[:bright_black])
+        end
+
+        # Project label style
+        def project_label_style(color = nil)
+          Lipgloss::Style.new
+            .foreground(color || COLORS[:magenta])
+            .bold(true)
+        end
+
+        # Key binding style (for help)
+        def key_style
+          Lipgloss::Style.new
+            .foreground(COLORS[:cyan])
+            .bold(true)
+        end
+
+        # Description style (for help)
+        def desc_style
+          Lipgloss::Style.new
+            .foreground(COLORS[:foreground])
+        end
+
+        # Divider
+        def divider(width)
+          Lipgloss::Style.new
+            .foreground(COLORS[:bright_black])
+            .render("─" * width)
         end
       end
     end

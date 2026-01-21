@@ -158,6 +158,29 @@ module Taskyou
       puts "TaskYou Ruby v#{VERSION}"
     end
 
+    desc "tui", "Launch the terminal user interface"
+    def tui
+      require "bubbletea"
+
+      db = open_database
+
+      # Create executor
+      executor = Executor::Executor.new(db, Dir.pwd)
+
+      # Create app model
+      app = UI::App.new(db, executor, Dir.pwd)
+
+      # Run the TUI
+      program = Bubbletea::Program.new(app)
+      program.run
+    rescue Interrupt
+      # Handle Ctrl+C gracefully
+    ensure
+      db&.close
+    end
+
+    default_task :tui
+
     private
 
     def open_database
