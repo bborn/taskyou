@@ -5,7 +5,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -113,6 +115,12 @@ func (e *Executor) ExtractMemories(ctx context.Context, task *db.Task) error {
 		}
 
 		e.logLine(task.ID, "system", fmt.Sprintf("Learned: [%s] %s", category, truncate(content, 60)))
+	}
+
+	// Update .claude/memories.md with the latest memories so Claude doesn't have to re-explore the codebase
+	if err := e.GenerateMemoriesMD(task.Project); err != nil {
+		e.logger.Error("Failed to generate memories.md", "error", err)
+		// Non-fatal - continue even if memories.md generation fails
 	}
 
 	return nil
@@ -243,4 +251,90 @@ func truncate(s string, maxLen int) string {
 		return s
 	}
 	return s[:maxLen-3] + "..."
+}
+
+// GenerateMemoriesMD creates or updates a .claude/memories.md file in the project directory
+// with accumulated project memories. Claude Code reads files in the .claude/ directory,
+// so this provides context without clobbering any existing CLAUDE.md in the project root.
+func (e *Executor) GenerateMemoriesMD(project string) error {
+	if project == "" {
+		return nil
+	}
+
+	projectDir := e.getProjectDir(project)
+	if projectDir == "" {
+		return fmt.Errorf("project directory not found: %s", project)
+	}
+
+	// Use .claude/memories.md to avoid clobbering any existing CLAUDE.md
+	claudeDir := filepath.Join(projectDir, ".claude")
+	if err := os.MkdirAll(claudeDir, 0755); err != nil {
+		return fmt.Errorf("create .claude dir: %w", err)
+	}
+	memoriesPath := filepath.Join(claudeDir, "memories.md")
+
+	// Get all project memories
+	memories, err := e.db.GetProjectMemories(project, 100)
+	if err != nil {
+		return fmt.Errorf("get project memories: %w", err)
+	}
+
+	// Build memories.md content
+	var content strings.Builder
+
+	content.WriteString("# Project Memories\n\n")
+	content.WriteString("This file is auto-generated from task completions to help Claude understand the codebase.\n")
+	content.WriteString("Do not edit manually - changes will be overwritten.\n\n")
+
+	if len(memories) == 0 {
+		content.WriteString("No project memories have been captured yet. They will appear here as tasks are completed.\n")
+	} else {
+		// Group memories by category
+		byCategory := make(map[string][]*db.ProjectMemory)
+		for _, m := range memories {
+			byCategory[m.Category] = append(byCategory[m.Category], m)
+		}
+
+		// Category order and labels (same as getProjectMemoriesSection)
+		categoryOrder := []string{
+			db.MemoryCategoryPattern,
+			db.MemoryCategoryContext,
+			db.MemoryCategoryDecision,
+			db.MemoryCategoryGotcha,
+			db.MemoryCategoryGeneral,
+		}
+		categoryLabels := map[string]string{
+			db.MemoryCategoryPattern:  "Patterns & Conventions",
+			db.MemoryCategoryContext:  "Project Context",
+			db.MemoryCategoryDecision: "Key Decisions",
+			db.MemoryCategoryGotcha:   "Known Gotchas",
+			db.MemoryCategoryGeneral:  "General Notes",
+		}
+
+		for _, cat := range categoryOrder {
+			mems := byCategory[cat]
+			if len(mems) == 0 {
+				continue
+			}
+
+			label := categoryLabels[cat]
+			if label == "" {
+				label = cat
+			}
+
+			content.WriteString(fmt.Sprintf("## %s\n\n", label))
+			for _, m := range mems {
+				content.WriteString(fmt.Sprintf("- %s\n", m.Content))
+			}
+			content.WriteString("\n")
+		}
+	}
+
+	// Write the file
+	if err := os.WriteFile(memoriesPath, []byte(content.String()), 0644); err != nil {
+		return fmt.Errorf("write memories.md: %w", err)
+	}
+
+	e.logger.Debug("Generated .claude/memories.md", "project", project, "memories", len(memories))
+	return nil
 }
