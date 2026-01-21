@@ -992,9 +992,14 @@ func (m *DetailModel) joinTmuxPanes() {
 		log.Debug("joinTmuxPanes: list-panes failed (expected if task-ui doesn't exist): %v", err)
 	}
 
-	// Get list of panes in daemon window to find actual pane indices
-	// Pane indices may not start at 0 if panes were killed
-	daemonPanesCmd := exec.CommandContext(ctx, "tmux", "list-panes", "-t", windowTarget, "-F", "#{pane_index}")
+	// Use stored pane IDs if available for deterministic pane identification
+	// This prevents the bug where panes could be swapped if indices change
+	storedClaudePaneID := m.task.ClaudePaneID
+	storedShellPaneID := m.task.ShellPaneID
+	log.Debug("joinTmuxPanes: stored pane IDs: claude=%q, shell=%q", storedClaudePaneID, storedShellPaneID)
+
+	// Get list of panes in daemon window to verify they exist
+	daemonPanesCmd := exec.CommandContext(ctx, "tmux", "list-panes", "-t", windowTarget, "-F", "#{pane_id}")
 	daemonPanesOut, err := daemonPanesCmd.Output()
 	if err != nil {
 		log.Error("joinTmuxPanes: failed to list panes for %q: %v", windowTarget, err)
@@ -1006,22 +1011,38 @@ func (m *DetailModel) joinTmuxPanes() {
 		m.joinPaneFailed = true
 		return
 	}
-	daemonPaneIndices := strings.Split(strings.TrimSpace(string(daemonPanesOut)), "\n")
-	if len(daemonPaneIndices) == 0 || daemonPaneIndices[0] == "" {
+	daemonPaneIDs := strings.Split(strings.TrimSpace(string(daemonPanesOut)), "\n")
+	if len(daemonPaneIDs) == 0 || daemonPaneIDs[0] == "" {
 		log.Error("joinTmuxPanes: no panes found in %q", windowTarget)
 		m.joinPaneFailed = true
 		return
 	}
-	hasShellPane := len(daemonPaneIndices) >= 2
-	firstPaneIndex := daemonPaneIndices[0]
-	log.Debug("joinTmuxPanes: daemon panes=%v, hasShellPane=%v, firstPaneIndex=%q", daemonPaneIndices, hasShellPane, firstPaneIndex)
+	log.Debug("joinTmuxPanes: daemon pane IDs=%v", daemonPaneIDs)
+
+	// Determine which pane ID to use for Claude
+	// Priority: stored ID (if still valid) > first pane in daemon
+	claudeSourcePaneID := ""
+	if storedClaudePaneID != "" {
+		// Verify stored Claude pane ID is still in the daemon window
+		for _, pid := range daemonPaneIDs {
+			if pid == storedClaudePaneID {
+				claudeSourcePaneID = storedClaudePaneID
+				log.Debug("joinTmuxPanes: using stored Claude pane ID %q", claudeSourcePaneID)
+				break
+			}
+		}
+	}
+	if claudeSourcePaneID == "" {
+		// Fall back to first pane in daemon (legacy behavior)
+		claudeSourcePaneID = daemonPaneIDs[0]
+		log.Debug("joinTmuxPanes: falling back to first daemon pane ID %q for Claude", claudeSourcePaneID)
+	}
 
 	// Step 1: Join the Claude pane below the TUI pane (vertical split)
-	claudeSource := windowTarget + "." + firstPaneIndex
-	log.Info("joinTmuxPanes: joining Claude pane from %q", claudeSource)
+	log.Info("joinTmuxPanes: joining Claude pane %q", claudeSourcePaneID)
 	joinCmd := exec.CommandContext(ctx, "tmux", "join-pane",
 		"-v",
-		"-s", claudeSource)
+		"-s", claudeSourcePaneID)
 	joinOutput, err := joinCmd.CombinedOutput()
 	if err != nil {
 		log.Error("joinTmuxPanes: join-pane failed: %v, output: %s", err, string(joinOutput))
@@ -1049,21 +1070,41 @@ func (m *DetailModel) joinTmuxPanes() {
 
 	// Step 2: Join or create the Shell pane to the right of Claude
 	shellWidth := m.getShellPaneWidth()
-	log.Debug("joinTmuxPanes: shellWidth=%q, hasShellPane=%v", shellWidth, hasShellPane)
 
-	// Get second pane index if shell pane exists (used below)
-	var secondPaneIndex string
-	if hasShellPane && len(daemonPaneIndices) >= 2 {
-		secondPaneIndex = daemonPaneIndices[1]
+	// Determine which pane ID to use for Shell
+	// Priority: stored ID (if still valid) > remaining pane in daemon
+	shellSourcePaneID := ""
+	hasShellPane := len(daemonPaneIDs) >= 2
+
+	if storedShellPaneID != "" && hasShellPane {
+		// Verify stored Shell pane ID is still in the daemon window (and not the Claude pane we just joined)
+		for _, pid := range daemonPaneIDs {
+			if pid == storedShellPaneID && pid != claudeSourcePaneID {
+				shellSourcePaneID = storedShellPaneID
+				log.Debug("joinTmuxPanes: using stored Shell pane ID %q", shellSourcePaneID)
+				break
+			}
+		}
+	}
+	if shellSourcePaneID == "" && hasShellPane {
+		// Fall back to the other pane in daemon (the one we didn't use for Claude)
+		for _, pid := range daemonPaneIDs {
+			if pid != claudeSourcePaneID {
+				shellSourcePaneID = pid
+				log.Debug("joinTmuxPanes: falling back to remaining daemon pane ID %q for Shell", shellSourcePaneID)
+				break
+			}
+		}
 	}
 
-	if hasShellPane && secondPaneIndex != "" {
-		// Daemon had 2 panes. After joining Claude, shell becomes pane 0 (tmux renumbers)
-		shellSource := windowTarget + ".0"
-		log.Debug("joinTmuxPanes: joining existing shell pane from %q", shellSource)
+	log.Debug("joinTmuxPanes: shellWidth=%q, hasShellPane=%v, shellSourcePaneID=%q", shellWidth, hasShellPane, shellSourcePaneID)
+
+	if shellSourcePaneID != "" {
+		// Join the shell pane from daemon
+		log.Debug("joinTmuxPanes: joining shell pane %q", shellSourcePaneID)
 		err = exec.CommandContext(ctx, "tmux", "join-pane",
 			"-h", "-l", shellWidth,
-			"-s", shellSource,
+			"-s", shellSourcePaneID,
 			"-t", m.claudePaneID).Run()
 		if err != nil {
 			log.Error("joinTmuxPanes: join shell pane failed: %v", err)
@@ -1497,6 +1538,10 @@ func (m *DetailModel) breakTmuxPanes(saveHeight bool, resizeTUI bool) {
 		}
 	}
 
+	// Save the new pane IDs in the daemon window to the database
+	// This ensures we can reliably identify panes when joining again later
+	m.saveDaemonPaneIDs(ctx, targetWindowID)
+
 	// Resize the TUI pane back to full window size now that the splits are gone
 	// This ensures the kanban view has the full window to render
 	// Skip during task switching to avoid layout thrashing
@@ -1507,6 +1552,46 @@ func (m *DetailModel) breakTmuxPanes(saveHeight bool, resizeTUI bool) {
 	m.claudePaneID = ""
 	m.daemonSessionID = ""
 	log.Info("breakTmuxPanes: completed for task %d", m.task.ID)
+}
+
+// saveDaemonPaneIDs saves the pane IDs from the daemon window to the database.
+// This is called after breaking panes back to the daemon to ensure we have the correct
+// pane IDs for when we join them again later.
+func (m *DetailModel) saveDaemonPaneIDs(ctx context.Context, targetWindowID string) {
+	log := GetLogger()
+
+	if m.task == nil || m.database == nil {
+		return
+	}
+
+	// Get Claude pane ID (pane .0 in daemon)
+	claudePaneCmd := exec.CommandContext(ctx, "tmux", "display-message", "-t", targetWindowID+".0", "-p", "#{pane_id}")
+	claudePaneOut, err := claudePaneCmd.Output()
+	if err != nil {
+		log.Warn("saveDaemonPaneIDs: failed to get Claude pane ID: %v", err)
+		return
+	}
+	claudePaneID := strings.TrimSpace(string(claudePaneOut))
+
+	// Get Shell pane ID (pane .1 in daemon) - may not exist
+	shellPaneID := ""
+	shellPaneCmd := exec.CommandContext(ctx, "tmux", "display-message", "-t", targetWindowID+".1", "-p", "#{pane_id}")
+	shellPaneOut, err := shellPaneCmd.Output()
+	if err == nil {
+		shellPaneID = strings.TrimSpace(string(shellPaneOut))
+	}
+
+	// Save to database
+	if err := m.database.UpdateTaskPaneIDs(m.task.ID, claudePaneID, shellPaneID); err != nil {
+		log.Warn("saveDaemonPaneIDs: failed to save pane IDs: %v", err)
+		return
+	}
+
+	// Update local task object
+	m.task.ClaudePaneID = claudePaneID
+	m.task.ShellPaneID = shellPaneID
+
+	log.Debug("saveDaemonPaneIDs: saved pane IDs for task %d: claude=%q, shell=%q", m.task.ID, claudePaneID, shellPaneID)
 }
 
 // HasRunningShellProcess returns true if the shell pane has a running process.

@@ -239,6 +239,9 @@ func (db *DB) migrate() error {
 		`ALTER TABLE tasks ADD COLUMN executor TEXT DEFAULT 'claude'`, // Task executor: "claude" (default), "codex"
 		// Tmux window ID for unique window identification (avoids duplicate window issues)
 		`ALTER TABLE tasks ADD COLUMN tmux_window_id TEXT DEFAULT ''`, // tmux window ID (e.g., "@1234")
+		// Tmux pane IDs for deterministic pane identification (avoids index-based guessing)
+		`ALTER TABLE tasks ADD COLUMN claude_pane_id TEXT DEFAULT ''`, // tmux pane ID for Claude/executor pane (e.g., "%1234")
+		`ALTER TABLE tasks ADD COLUMN shell_pane_id TEXT DEFAULT ''`,  // tmux pane ID for shell pane (e.g., "%1235")
 	}
 
 	for _, m := range alterMigrations {
