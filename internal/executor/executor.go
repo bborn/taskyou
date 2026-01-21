@@ -2624,6 +2624,8 @@ func (e *Executor) ensureShellPane(windowTarget, workDir string, taskID int64, p
 		exec.CommandContext(ctx, "tmux", "send-keys", "-t", windowTarget+".1", envCmd, "Enter").Run()
 		exec.CommandContext(ctx, "tmux", "send-keys", "-t", windowTarget+".1", "clear", "Enter").Run()
 		exec.CommandContext(ctx, "tmux", "select-pane", "-t", windowTarget+".1", "-T", "Shell").Run()
+		// Save pane IDs to database for deterministic identification
+		e.savePaneIDs(ctx, windowTarget, taskID)
 		return
 	}
 
@@ -2667,7 +2669,40 @@ func (e *Executor) ensureShellPane(windowTarget, workDir string, taskID int64, p
 	// Select Claude pane so it's active (user sees Claude output)
 	exec.CommandContext(ctx, "tmux", "select-pane", "-t", windowTarget+".0").Run()
 
+	// Save pane IDs to database for deterministic identification
+	e.savePaneIDs(ctx, windowTarget, taskID)
+
 	e.logger.Info("created shell pane with env vars", "window", windowTarget, "taskID", taskID, "port", port)
+}
+
+// savePaneIDs saves the tmux pane IDs for Claude (.0) and Shell (.1) panes to the database.
+// This enables deterministic pane identification when joining/breaking panes.
+func (e *Executor) savePaneIDs(ctx context.Context, windowTarget string, taskID int64) {
+	// Get Claude pane ID (pane .0)
+	claudePaneCmd := exec.CommandContext(ctx, "tmux", "display-message", "-t", windowTarget+".0", "-p", "#{pane_id}")
+	claudePaneOut, err := claudePaneCmd.Output()
+	if err != nil {
+		e.logger.Warn("failed to get Claude pane ID", "window", windowTarget, "error", err)
+		return
+	}
+	claudePaneID := strings.TrimSpace(string(claudePaneOut))
+
+	// Get Shell pane ID (pane .1)
+	shellPaneCmd := exec.CommandContext(ctx, "tmux", "display-message", "-t", windowTarget+".1", "-p", "#{pane_id}")
+	shellPaneOut, err := shellPaneCmd.Output()
+	if err != nil {
+		e.logger.Warn("failed to get Shell pane ID", "window", windowTarget, "error", err)
+		return
+	}
+	shellPaneID := strings.TrimSpace(string(shellPaneOut))
+
+	// Save to database
+	if err := e.db.UpdateTaskPaneIDs(taskID, claudePaneID, shellPaneID); err != nil {
+		e.logger.Warn("failed to save pane IDs", "taskID", taskID, "error", err)
+		return
+	}
+
+	e.logger.Debug("saved pane IDs", "taskID", taskID, "claudePaneID", claudePaneID, "shellPaneID", shellPaneID)
 }
 
 // configureTmuxWindow sets up helpful UI elements for a task window.

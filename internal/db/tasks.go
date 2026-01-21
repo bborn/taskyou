@@ -24,6 +24,8 @@ type Task struct {
 	ClaudeSessionID string // Claude session ID for resuming conversations
 	DaemonSession   string // tmux daemon session name (e.g., "task-daemon-12345")
 	TmuxWindowID    string // tmux window ID (e.g., "@1234") for unique window identification
+	ClaudePaneID    string // tmux pane ID (e.g., "%1234") for the Claude/executor pane
+	ShellPaneID     string // tmux pane ID (e.g., "%1235") for the shell pane
 	PRURL           string // Pull request URL (if associated with a PR)
 	PRNumber        int    // Pull request number (if associated with a PR)
 	DangerousMode   bool   // Whether task is running in dangerous mode (--dangerously-skip-permissions)
@@ -164,7 +166,9 @@ func (db *DB) GetTask(id int64) (*Task, error) {
 	err := db.QueryRow(`
 		SELECT id, title, body, status, type, project, COALESCE(executor, 'claude'),
 		       worktree_path, branch_name, port, claude_session_id,
-		       COALESCE(daemon_session, ''), COALESCE(tmux_window_id, ''), COALESCE(pr_url, ''), COALESCE(pr_number, 0),
+		       COALESCE(daemon_session, ''), COALESCE(tmux_window_id, ''),
+		       COALESCE(claude_pane_id, ''), COALESCE(shell_pane_id, ''),
+		       COALESCE(pr_url, ''), COALESCE(pr_number, 0),
 		       COALESCE(dangerous_mode, 0), COALESCE(tags, ''),
 		       created_at, updated_at, started_at, completed_at,
 		       scheduled_at, recurrence, last_run_at
@@ -172,7 +176,8 @@ func (db *DB) GetTask(id int64) (*Task, error) {
 	`, id).Scan(
 		&t.ID, &t.Title, &t.Body, &t.Status, &t.Type, &t.Project, &t.Executor,
 		&t.WorktreePath, &t.BranchName, &t.Port, &t.ClaudeSessionID,
-		&t.DaemonSession, &t.TmuxWindowID, &t.PRURL, &t.PRNumber,
+		&t.DaemonSession, &t.TmuxWindowID, &t.ClaudePaneID, &t.ShellPaneID,
+		&t.PRURL, &t.PRNumber,
 		&t.DangerousMode, &t.Tags,
 		&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
 		&t.ScheduledAt, &t.Recurrence, &t.LastRunAt,
@@ -201,7 +206,9 @@ func (db *DB) ListTasks(opts ListTasksOptions) ([]*Task, error) {
 	query := `
 		SELECT id, title, body, status, type, project, COALESCE(executor, 'claude'),
 		       worktree_path, branch_name, port, claude_session_id,
-		       COALESCE(daemon_session, ''), COALESCE(tmux_window_id, ''), COALESCE(pr_url, ''), COALESCE(pr_number, 0),
+		       COALESCE(daemon_session, ''), COALESCE(tmux_window_id, ''),
+		       COALESCE(claude_pane_id, ''), COALESCE(shell_pane_id, ''),
+		       COALESCE(pr_url, ''), COALESCE(pr_number, 0),
 		       COALESCE(dangerous_mode, 0), COALESCE(tags, ''),
 		       created_at, updated_at, started_at, completed_at,
 		       scheduled_at, recurrence, last_run_at
@@ -253,7 +260,8 @@ func (db *DB) ListTasks(opts ListTasksOptions) ([]*Task, error) {
 		err := rows.Scan(
 			&t.ID, &t.Title, &t.Body, &t.Status, &t.Type, &t.Project, &t.Executor,
 			&t.WorktreePath, &t.BranchName, &t.Port, &t.ClaudeSessionID,
-			&t.DaemonSession, &t.TmuxWindowID, &t.PRURL, &t.PRNumber,
+			&t.DaemonSession, &t.TmuxWindowID, &t.ClaudePaneID, &t.ShellPaneID,
+			&t.PRURL, &t.PRNumber,
 			&t.DangerousMode, &t.Tags,
 			&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
 			&t.ScheduledAt, &t.Recurrence, &t.LastRunAt,
@@ -274,7 +282,9 @@ func (db *DB) GetMostRecentlyCreatedTask() (*Task, error) {
 	err := db.QueryRow(`
 		SELECT id, title, body, status, type, project, COALESCE(executor, 'claude'),
 		       worktree_path, branch_name, port, claude_session_id,
-		       COALESCE(daemon_session, ''), COALESCE(tmux_window_id, ''), COALESCE(pr_url, ''), COALESCE(pr_number, 0),
+		       COALESCE(daemon_session, ''), COALESCE(tmux_window_id, ''),
+		       COALESCE(claude_pane_id, ''), COALESCE(shell_pane_id, ''),
+		       COALESCE(pr_url, ''), COALESCE(pr_number, 0),
 		       COALESCE(dangerous_mode, 0), COALESCE(tags, ''),
 		       created_at, updated_at, started_at, completed_at,
 		       scheduled_at, recurrence, last_run_at
@@ -284,7 +294,8 @@ func (db *DB) GetMostRecentlyCreatedTask() (*Task, error) {
 	`).Scan(
 		&t.ID, &t.Title, &t.Body, &t.Status, &t.Type, &t.Project, &t.Executor,
 		&t.WorktreePath, &t.BranchName, &t.Port, &t.ClaudeSessionID,
-		&t.DaemonSession, &t.TmuxWindowID, &t.PRURL, &t.PRNumber,
+		&t.DaemonSession, &t.TmuxWindowID, &t.ClaudePaneID, &t.ShellPaneID,
+		&t.PRURL, &t.PRNumber,
 		&t.DangerousMode, &t.Tags,
 		&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
 		&t.ScheduledAt, &t.Recurrence, &t.LastRunAt,
@@ -309,7 +320,9 @@ func (db *DB) SearchTasks(query string, limit int) ([]*Task, error) {
 	sqlQuery := `
 		SELECT id, title, body, status, type, project, COALESCE(executor, 'claude'),
 		       worktree_path, branch_name, port, claude_session_id,
-		       COALESCE(daemon_session, ''), COALESCE(tmux_window_id, ''), COALESCE(pr_url, ''), COALESCE(pr_number, 0),
+		       COALESCE(daemon_session, ''), COALESCE(tmux_window_id, ''),
+		       COALESCE(claude_pane_id, ''), COALESCE(shell_pane_id, ''),
+		       COALESCE(pr_url, ''), COALESCE(pr_number, 0),
 		       COALESCE(dangerous_mode, 0), COALESCE(tags, ''),
 		       created_at, updated_at, started_at, completed_at,
 		       scheduled_at, recurrence, last_run_at
@@ -338,7 +351,8 @@ func (db *DB) SearchTasks(query string, limit int) ([]*Task, error) {
 		err := rows.Scan(
 			&t.ID, &t.Title, &t.Body, &t.Status, &t.Type, &t.Project, &t.Executor,
 			&t.WorktreePath, &t.BranchName, &t.Port, &t.ClaudeSessionID,
-			&t.DaemonSession, &t.TmuxWindowID, &t.PRURL, &t.PRNumber,
+			&t.DaemonSession, &t.TmuxWindowID, &t.ClaudePaneID, &t.ShellPaneID,
+			&t.PRURL, &t.PRNumber,
 			&t.DangerousMode, &t.Tags,
 			&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
 			&t.ScheduledAt, &t.Recurrence, &t.LastRunAt,
@@ -464,6 +478,20 @@ func (db *DB) UpdateTaskWindowID(taskID int64, windowID string) error {
 	return nil
 }
 
+// UpdateTaskPaneIDs updates the tmux pane IDs for a task.
+// This is used to track the unique pane IDs (e.g., "%1234") for reliable pane identification
+// when joining/breaking panes between the daemon and the TUI.
+func (db *DB) UpdateTaskPaneIDs(taskID int64, claudePaneID, shellPaneID string) error {
+	_, err := db.Exec(`
+		UPDATE tasks SET claude_pane_id = ?, shell_pane_id = ?, updated_at = CURRENT_TIMESTAMP
+		WHERE id = ?
+	`, claudePaneID, shellPaneID, taskID)
+	if err != nil {
+		return fmt.Errorf("update task pane ids: %w", err)
+	}
+	return nil
+}
+
 // DeleteTask deletes a task.
 func (db *DB) DeleteTask(id int64) error {
 	_, err := db.Exec("DELETE FROM tasks WHERE id = ?", id)
@@ -539,7 +567,9 @@ func (db *DB) GetNextQueuedTask() (*Task, error) {
 	err := db.QueryRow(`
 		SELECT id, title, body, status, type, project, COALESCE(executor, 'claude'),
 		       worktree_path, branch_name, port, claude_session_id,
-		       COALESCE(daemon_session, ''), COALESCE(tmux_window_id, ''), COALESCE(pr_url, ''), COALESCE(pr_number, 0),
+		       COALESCE(daemon_session, ''), COALESCE(tmux_window_id, ''),
+		       COALESCE(claude_pane_id, ''), COALESCE(shell_pane_id, ''),
+		       COALESCE(pr_url, ''), COALESCE(pr_number, 0),
 		       COALESCE(dangerous_mode, 0), COALESCE(tags, ''),
 		       created_at, updated_at, started_at, completed_at,
 		       scheduled_at, recurrence, last_run_at
@@ -550,7 +580,8 @@ func (db *DB) GetNextQueuedTask() (*Task, error) {
 	`, StatusQueued).Scan(
 		&t.ID, &t.Title, &t.Body, &t.Status, &t.Type, &t.Project, &t.Executor,
 		&t.WorktreePath, &t.BranchName, &t.Port, &t.ClaudeSessionID,
-		&t.DaemonSession, &t.TmuxWindowID, &t.PRURL, &t.PRNumber,
+		&t.DaemonSession, &t.TmuxWindowID, &t.ClaudePaneID, &t.ShellPaneID,
+		&t.PRURL, &t.PRNumber,
 		&t.DangerousMode, &t.Tags,
 		&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
 		&t.ScheduledAt, &t.Recurrence, &t.LastRunAt,
@@ -569,7 +600,9 @@ func (db *DB) GetQueuedTasks() ([]*Task, error) {
 	rows, err := db.Query(`
 		SELECT id, title, body, status, type, project, COALESCE(executor, 'claude'),
 		       worktree_path, branch_name, port, claude_session_id,
-		       COALESCE(daemon_session, ''), COALESCE(tmux_window_id, ''), COALESCE(pr_url, ''), COALESCE(pr_number, 0),
+		       COALESCE(daemon_session, ''), COALESCE(tmux_window_id, ''),
+		       COALESCE(claude_pane_id, ''), COALESCE(shell_pane_id, ''),
+		       COALESCE(pr_url, ''), COALESCE(pr_number, 0),
 		       COALESCE(dangerous_mode, 0), COALESCE(tags, ''),
 		       created_at, updated_at, started_at, completed_at,
 		       scheduled_at, recurrence, last_run_at
@@ -588,7 +621,8 @@ func (db *DB) GetQueuedTasks() ([]*Task, error) {
 		if err := rows.Scan(
 			&t.ID, &t.Title, &t.Body, &t.Status, &t.Type, &t.Project, &t.Executor,
 			&t.WorktreePath, &t.BranchName, &t.Port, &t.ClaudeSessionID,
-			&t.DaemonSession, &t.TmuxWindowID, &t.PRURL, &t.PRNumber,
+			&t.DaemonSession, &t.TmuxWindowID, &t.ClaudePaneID, &t.ShellPaneID,
+		&t.PRURL, &t.PRNumber,
 			&t.DangerousMode, &t.Tags,
 			&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
 			&t.ScheduledAt, &t.Recurrence, &t.LastRunAt,
@@ -606,7 +640,9 @@ func (db *DB) GetTasksWithBranches() ([]*Task, error) {
 	rows, err := db.Query(`
 		SELECT id, title, body, status, type, project, COALESCE(executor, 'claude'),
 		       worktree_path, branch_name, port, claude_session_id,
-		       COALESCE(daemon_session, ''), COALESCE(tmux_window_id, ''), COALESCE(pr_url, ''), COALESCE(pr_number, 0),
+		       COALESCE(daemon_session, ''), COALESCE(tmux_window_id, ''),
+		       COALESCE(claude_pane_id, ''), COALESCE(shell_pane_id, ''),
+		       COALESCE(pr_url, ''), COALESCE(pr_number, 0),
 		       COALESCE(dangerous_mode, 0), COALESCE(tags, ''),
 		       created_at, updated_at, started_at, completed_at,
 		       scheduled_at, recurrence, last_run_at
@@ -625,7 +661,8 @@ func (db *DB) GetTasksWithBranches() ([]*Task, error) {
 		if err := rows.Scan(
 			&t.ID, &t.Title, &t.Body, &t.Status, &t.Type, &t.Project, &t.Executor,
 			&t.WorktreePath, &t.BranchName, &t.Port, &t.ClaudeSessionID,
-			&t.DaemonSession, &t.TmuxWindowID, &t.PRURL, &t.PRNumber,
+			&t.DaemonSession, &t.TmuxWindowID, &t.ClaudePaneID, &t.ShellPaneID,
+		&t.PRURL, &t.PRNumber,
 			&t.DangerousMode, &t.Tags,
 			&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
 			&t.ScheduledAt, &t.Recurrence, &t.LastRunAt,
@@ -646,7 +683,9 @@ func (db *DB) GetDueScheduledTasks() ([]*Task, error) {
 	rows, err := db.Query(`
 		SELECT id, title, body, status, type, project, COALESCE(executor, 'claude'),
 		       worktree_path, branch_name, port, claude_session_id,
-		       COALESCE(daemon_session, ''), COALESCE(tmux_window_id, ''), COALESCE(pr_url, ''), COALESCE(pr_number, 0),
+		       COALESCE(daemon_session, ''), COALESCE(tmux_window_id, ''),
+		       COALESCE(claude_pane_id, ''), COALESCE(shell_pane_id, ''),
+		       COALESCE(pr_url, ''), COALESCE(pr_number, 0),
 		       COALESCE(dangerous_mode, 0), COALESCE(tags, ''),
 		       created_at, updated_at, started_at, completed_at,
 		       scheduled_at, recurrence, last_run_at
@@ -667,7 +706,8 @@ func (db *DB) GetDueScheduledTasks() ([]*Task, error) {
 		if err := rows.Scan(
 			&t.ID, &t.Title, &t.Body, &t.Status, &t.Type, &t.Project, &t.Executor,
 			&t.WorktreePath, &t.BranchName, &t.Port, &t.ClaudeSessionID,
-			&t.DaemonSession, &t.TmuxWindowID, &t.PRURL, &t.PRNumber,
+			&t.DaemonSession, &t.TmuxWindowID, &t.ClaudePaneID, &t.ShellPaneID,
+		&t.PRURL, &t.PRNumber,
 			&t.DangerousMode, &t.Tags,
 			&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
 			&t.ScheduledAt, &t.Recurrence, &t.LastRunAt,
@@ -684,7 +724,9 @@ func (db *DB) GetScheduledTasks() ([]*Task, error) {
 	rows, err := db.Query(`
 		SELECT id, title, body, status, type, project, COALESCE(executor, 'claude'),
 		       worktree_path, branch_name, port, claude_session_id,
-		       COALESCE(daemon_session, ''), COALESCE(tmux_window_id, ''), COALESCE(pr_url, ''), COALESCE(pr_number, 0),
+		       COALESCE(daemon_session, ''), COALESCE(tmux_window_id, ''),
+		       COALESCE(claude_pane_id, ''), COALESCE(shell_pane_id, ''),
+		       COALESCE(pr_url, ''), COALESCE(pr_number, 0),
 		       COALESCE(dangerous_mode, 0), COALESCE(tags, ''),
 		       created_at, updated_at, started_at, completed_at,
 		       scheduled_at, recurrence, last_run_at
@@ -703,7 +745,8 @@ func (db *DB) GetScheduledTasks() ([]*Task, error) {
 		if err := rows.Scan(
 			&t.ID, &t.Title, &t.Body, &t.Status, &t.Type, &t.Project, &t.Executor,
 			&t.WorktreePath, &t.BranchName, &t.Port, &t.ClaudeSessionID,
-			&t.DaemonSession, &t.TmuxWindowID, &t.PRURL, &t.PRNumber,
+			&t.DaemonSession, &t.TmuxWindowID, &t.ClaudePaneID, &t.ShellPaneID,
+		&t.PRURL, &t.PRNumber,
 			&t.DangerousMode, &t.Tags,
 			&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
 			&t.ScheduledAt, &t.Recurrence, &t.LastRunAt,
