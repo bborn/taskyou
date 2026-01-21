@@ -297,6 +297,30 @@ func TestAttachmentsInPrompt(t *testing.T) {
 			t.Error("prompt should mention Read tool")
 		}
 	})
+
+	t.Run("retry feedback includes attachments when present", func(t *testing.T) {
+		worktreePath := t.TempDir()
+		paths, cleanup := exec.prepareAttachments(task.ID, worktreePath)
+		defer cleanup()
+
+		// Simulate what happens during retry: attachment section is appended to feedback
+		retryFeedback := "Please fix the bug"
+		feedbackWithAttachments := retryFeedback
+		if len(paths) > 0 {
+			feedbackWithAttachments = retryFeedback + "\n" + exec.getAttachmentsSection(task.ID, paths)
+		}
+
+		// Verify attachments are included in the retry feedback
+		if !strings.Contains(feedbackWithAttachments, "## Attachments") {
+			t.Error("retry feedback should include attachments section")
+		}
+		if !strings.Contains(feedbackWithAttachments, "Read tool") {
+			t.Error("retry feedback should mention Read tool")
+		}
+		if !strings.Contains(feedbackWithAttachments, "Please fix the bug") {
+			t.Error("retry feedback should still contain original feedback")
+		}
+	})
 }
 
 func TestFindClaudeSessionID(t *testing.T) {
