@@ -2,6 +2,7 @@ package ui
 
 import (
 	"testing"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -31,6 +32,39 @@ func TestDefaultKeyMap(t *testing.T) {
 
 	if keys.OpenWorktree.Help().Key != "o" {
 		t.Error("OpenWorktree key should have help text 'o'")
+	}
+
+	if keys.JumpToNotification.Help().Key != "alt+j" {
+		t.Error("JumpToNotification key should have help text 'alt+j'")
+	}
+}
+
+func TestNotificationHelpers(t *testing.T) {
+	m := &AppModel{}
+
+	before := time.Now()
+	m.showTaskNotification(42, "Task done", time.Second)
+
+	if m.notification != "Task done" {
+		t.Fatalf("expected notification to be set, got %q", m.notification)
+	}
+
+	if m.notificationTaskID != 42 {
+		t.Fatalf("expected notificationTaskID 42, got %d", m.notificationTaskID)
+	}
+
+	if !m.notifyUntil.After(before) {
+		t.Error("notifyUntil should be set in the future for task notifications")
+	}
+
+	m.showNotification("Generic", time.Second)
+	if m.notificationTaskID != 0 {
+		t.Errorf("expected task ID to reset for generic notifications, got %d", m.notificationTaskID)
+	}
+
+	m.clearNotification()
+	if m.notification != "" || m.notificationTaskID != 0 || !m.notifyUntil.IsZero() {
+		t.Error("clearNotification should reset notification state")
 	}
 }
 

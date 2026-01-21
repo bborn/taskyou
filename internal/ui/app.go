@@ -45,30 +45,31 @@ const (
 
 // KeyMap defines key bindings.
 type KeyMap struct {
-	Left            key.Binding
-	Right           key.Binding
-	Up              key.Binding
-	Down            key.Binding
-	Enter           key.Binding
-	Back            key.Binding
-	New             key.Binding
-	Edit            key.Binding
-	Queue           key.Binding
-	Retry           key.Binding
-	Close           key.Binding
-	Archive         key.Binding
-	Delete          key.Binding
-	Refresh         key.Binding
-	Settings        key.Binding
-	Memories        key.Binding
-	Help            key.Binding
-	Quit            key.Binding
-	ChangeStatus    key.Binding
-	CommandPalette  key.Binding
-	ToggleDangerous key.Binding
-	Filter          key.Binding
-	ResumeClaude    key.Binding
-	OpenWorktree    key.Binding
+	Left               key.Binding
+	Right              key.Binding
+	Up                 key.Binding
+	Down               key.Binding
+	Enter              key.Binding
+	Back               key.Binding
+	New                key.Binding
+	Edit               key.Binding
+	Queue              key.Binding
+	Retry              key.Binding
+	Close              key.Binding
+	Archive            key.Binding
+	Delete             key.Binding
+	Refresh            key.Binding
+	Settings           key.Binding
+	Memories           key.Binding
+	Help               key.Binding
+	Quit               key.Binding
+	ChangeStatus       key.Binding
+	CommandPalette     key.Binding
+	ToggleDangerous    key.Binding
+	Filter             key.Binding
+	ResumeClaude       key.Binding
+	OpenWorktree       key.Binding
+	JumpToNotification key.Binding
 	// Column focus shortcuts
 	FocusBacklog    key.Binding
 	FocusInProgress key.Binding
@@ -90,6 +91,7 @@ func (k KeyMap) FullHelp() [][]key.Binding {
 		{k.Retry, k.Archive, k.Delete, k.OpenWorktree},
 		{k.Filter, k.CommandPalette, k.Settings, k.Memories},
 		{k.ChangeStatus, k.Refresh, k.Help, k.Quit},
+		{k.JumpToNotification},
 	}
 }
 
@@ -192,6 +194,10 @@ func DefaultKeyMap() KeyMap {
 			key.WithKeys("o"),
 			key.WithHelp("o", "open in editor"),
 		),
+		JumpToNotification: key.NewBinding(
+			key.WithKeys("alt+j"),
+			key.WithHelp("alt+j", "jump to task"),
+		),
 		FocusBacklog: key.NewBinding(
 			key.WithKeys("B"),
 			key.WithHelp("B", "backlog"),
@@ -225,12 +231,13 @@ type AppModel struct {
 	previousView View
 
 	// Dashboard state
-	tasks        []*db.Task
-	kanban       *KanbanBoard
-	loading      bool
-	err          error
-	notification string    // Notification banner text
-	notifyUntil  time.Time // When to hide notification
+	tasks              []*db.Task
+	kanban             *KanbanBoard
+	loading            bool
+	err                error
+	notification       string    // Notification banner text
+	notifyUntil        time.Time // When to hide notification
+	notificationTaskID int64     // Task ID referenced in notification (if any)
 
 	// Track task statuses to detect changes
 	prevStatuses map[int64]string
@@ -266,8 +273,8 @@ type AppModel struct {
 	// Project change confirmation state (when changing a task's project)
 	projectChangeConfirm      *huh.Form
 	projectChangeConfirmValue bool
-	pendingProjectChangeTask  *db.Task  // The updated task data with new project
-	originalProjectChangeTask *db.Task  // The original task to delete
+	pendingProjectChangeTask  *db.Task // The updated task data with new project
+	originalProjectChangeTask *db.Task // The original task to delete
 
 	// Delete confirmation state
 	deleteConfirm      *huh.Form
@@ -316,6 +323,26 @@ type AppModel struct {
 	// Window size
 	width  int
 	height int
+}
+
+// showNotification displays a generic notification banner for the given duration.
+func (m *AppModel) showNotification(message string, duration time.Duration) {
+	m.notification = message
+	m.notifyUntil = time.Now().Add(duration)
+	m.notificationTaskID = 0
+}
+
+// showTaskNotification displays a notification tied to a specific task.
+func (m *AppModel) showTaskNotification(taskID int64, message string, duration time.Duration) {
+	m.showNotification(message, duration)
+	m.notificationTaskID = taskID
+}
+
+// clearNotification hides the currently displayed notification and resets its state.
+func (m *AppModel) clearNotification() {
+	m.notification = ""
+	m.notificationTaskID = 0
+	m.notifyUntil = time.Time{}
 }
 
 func (m *AppModel) executorDisplayName() string {
@@ -530,13 +557,11 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if prevStatus != "" && prevStatus != t.Status {
 				if t.Status == db.StatusBlocked {
 					// Task just became blocked - ring bell and show notification
-					m.notification = fmt.Sprintf("⚠ Task #%d needs input: %s", t.ID, t.Title)
-					m.notifyUntil = time.Now().Add(10 * time.Second)
+					m.showTaskNotification(t.ID, fmt.Sprintf("⚠ Task #%d needs input: %s", t.ID, t.Title), 10*time.Second)
 					RingBell() // Ring terminal bell (writes to /dev/tty to bypass TUI)
 				} else if t.Status == db.StatusDone && db.IsInProgress(prevStatus) {
 					// Task completed - ring bell and show notification
-					m.notification = fmt.Sprintf("✓ Task #%d complete: %s", t.ID, t.Title)
-					m.notifyUntil = time.Now().Add(5 * time.Second)
+					m.showTaskNotification(t.ID, fmt.Sprintf("✓ Task #%d complete: %s", t.ID, t.Title), 5*time.Second)
 					RingBell() // Ring terminal bell (writes to /dev/tty to bypass TUI)
 				}
 			}
@@ -662,8 +687,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err == nil {
 			// Task was moved successfully
 			m.selectedTask = msg.newTask
-			m.notification = fmt.Sprintf("✓ Task moved to %s as #%d", msg.newTask.Project, msg.newTask.ID)
-			m.notifyUntil = time.Now().Add(5 * time.Second)
+			m.showTaskNotification(msg.newTask.ID, fmt.Sprintf("✓ Task moved to %s as #%d", msg.newTask.Project, msg.newTask.ID), 5*time.Second)
 			cmds = append(cmds, m.loadTasks())
 			// Navigate to the new task's detail view
 			if m.selectedTask != nil {
@@ -682,11 +706,9 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case worktreeOpenedMsg:
 		if msg.err != nil {
-			m.notification = fmt.Sprintf("⚠ %s", msg.err.Error())
-			m.notifyUntil = time.Now().Add(5 * time.Second)
+			m.showNotification(fmt.Sprintf("⚠ %s", msg.err.Error()), 5*time.Second)
 		} else if msg.message != "" {
-			m.notification = fmt.Sprintf("📂 %s", msg.message)
-			m.notifyUntil = time.Now().Add(3 * time.Second)
+			m.showNotification(fmt.Sprintf("📂 %s", msg.message), 3*time.Second)
 		}
 
 	case taskEventMsg:
@@ -702,16 +724,13 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					// Show notification for status changes
 					if prevStatus != event.Task.Status {
 						if event.Task.Status == db.StatusBlocked {
-							m.notification = fmt.Sprintf("⚠ Task #%d needs input: %s", event.TaskID, event.Task.Title)
-							m.notifyUntil = time.Now().Add(10 * time.Second)
+							m.showTaskNotification(event.TaskID, fmt.Sprintf("⚠ Task #%d needs input: %s", event.TaskID, event.Task.Title), 10*time.Second)
 							RingBell() // Ring terminal bell (writes to /dev/tty to bypass TUI)
 						} else if event.Task.Status == db.StatusDone && db.IsInProgress(prevStatus) {
-							m.notification = fmt.Sprintf("✓ Task #%d complete: %s", event.TaskID, event.Task.Title)
-							m.notifyUntil = time.Now().Add(5 * time.Second)
+							m.showTaskNotification(event.TaskID, fmt.Sprintf("✓ Task #%d complete: %s", event.TaskID, event.Task.Title), 5*time.Second)
 							RingBell() // Ring terminal bell (writes to /dev/tty to bypass TUI)
 						} else if db.IsInProgress(event.Task.Status) {
-							m.notification = fmt.Sprintf("▶ Task #%d started: %s", event.TaskID, event.Task.Title)
-							m.notifyUntil = time.Now().Add(3 * time.Second)
+							m.showTaskNotification(event.TaskID, fmt.Sprintf("▶ Task #%d started: %s", event.TaskID, event.Task.Title), 3*time.Second)
 						}
 						m.prevStatuses[event.TaskID] = event.Task.Status
 					}
@@ -734,7 +753,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tickMsg:
 		// Clear expired notifications
 		if !m.notifyUntil.IsZero() && time.Now().After(m.notifyUntil) {
-			m.notification = ""
+			m.clearNotification()
 		}
 		// Refresh detail view if active (for logs which may update frequently)
 		if m.currentView == ViewDetail && m.detailView != nil {
@@ -882,9 +901,13 @@ func (m *AppModel) viewDashboard() string {
 			Foreground(lipgloss.Color("#000000")).
 			Bold(true).
 			Padding(0, 2)
-		headerParts = append(headerParts, notifyStyle.Render(m.notification))
+		message := m.notification
+		if m.notificationTaskID != 0 {
+			message = fmt.Sprintf("%s  (Alt+J to jump)", message)
+		}
+		headerParts = append(headerParts, notifyStyle.Render(message))
 	} else {
-		m.notification = "" // Clear expired notification
+		m.clearNotification() // Clear expired notification
 	}
 
 	// Show current processing tasks if any
@@ -1023,6 +1046,12 @@ func (m *AppModel) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case key.Matches(msg, m.keys.FocusDone):
 		m.kanban.FocusColumn(3)
+		return m, nil
+
+	case key.Matches(msg, m.keys.JumpToNotification):
+		if m.notificationTaskID != 0 && m.kanban != nil {
+			m.kanban.SelectTask(m.notificationTaskID)
+		}
 		return m, nil
 
 	case key.Matches(msg, m.keys.Enter):
