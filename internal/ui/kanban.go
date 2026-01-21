@@ -770,8 +770,6 @@ func (k *KanbanBoard) renderTaskCard(task *db.Task, width int, isSelected bool) 
 
 	// Recurring tasks are de-emphasized visually (dimmed) when not selected
 	isRecurring := task.IsRecurring()
-	// Blocked tasks need input - highlight with yellow outline
-	isBlocked := task.Status == db.StatusBlocked
 
 	if isSelected {
 		cardBg, cardFg := GetThemeCardColors()
@@ -783,12 +781,6 @@ func (k *KanbanBoard) renderTaskCard(task *db.Task, width int, isSelected bool) 
 			Border(lipgloss.RoundedBorder()).
 			BorderForeground(lipgloss.Color(currentTheme.CardBorderHi)).
 			MarginBottom(0) // Border adds visual separation
-	} else if isBlocked {
-		// Blocked tasks (needing input) get a subtle yellow outline
-		cardStyle = cardStyle.
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(ColorWarning).
-			MarginBottom(0)
 	} else if isRecurring {
 		// Recurring tasks are dimmed to de-emphasize them
 		cardStyle = cardStyle.
