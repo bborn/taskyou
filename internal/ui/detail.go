@@ -19,6 +19,18 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
+// shouldSkipAutoExecutor returns true if the task should NOT automatically
+// start the executor when viewed in the TUI. Tasks in backlog status are
+// explicitly not ready for execution, and done/archived tasks are finished.
+func shouldSkipAutoExecutor(task *db.Task) bool {
+	switch task.Status {
+	case db.StatusBacklog, db.StatusDone, db.StatusArchived:
+		return true
+	default:
+		return false
+	}
+}
+
 // DetailModel represents the task detail view.
 type DetailModel struct {
 	task     *db.Task
@@ -251,6 +263,14 @@ func NewDetailModel(t *db.Task, database *db.DB, exec *executor.Executor, width,
 		m.joinTmuxPane()
 		log.Info("NewDetailModel: after joinTmuxPane, claudePaneID=%q, workdirPaneID=%q",
 			m.claudePaneID, m.workdirPaneID)
+		log.Info("NewDetailModel: completed for task %d", t.ID)
+		return m, nil
+	}
+
+	// Don't auto-start executor for backlog/done/archived tasks
+	// Backlog tasks haven't been queued for execution yet, and done/archived tasks are finished
+	if shouldSkipAutoExecutor(t) {
+		log.Info("NewDetailModel: skipping auto-executor for %s task", t.Status)
 		log.Info("NewDetailModel: completed for task %d", t.ID)
 		return m, nil
 	}
