@@ -92,6 +92,7 @@ type DetailModel struct {
 	// Async pane loading state
 	paneLoading      bool      // true while panes are being set up asynchronously
 	paneLoadingStart time.Time // when loading started (for spinner animation)
+	paneError        string    // user-visible error when panes fail to open
 }
 
 // Message types for async pane loading
@@ -100,6 +101,7 @@ type panesJoinedMsg struct {
 	workdirPaneID   string
 	daemonSessionID string
 	windowTarget    string
+	userMessage     string
 	err             error
 }
 
@@ -278,6 +280,7 @@ func NewDetailModel(t *db.Task, database *db.DB, exec *executor.Executor, width,
 	// Slow path: No active window - start session asynchronously
 	log.Info("NewDetailModel: no window target, starting async pane setup")
 	m.paneLoading = true
+	m.paneError = ""
 	m.paneLoadingStart = time.Now()
 
 	// Return immediately with a command to start panes in background
@@ -296,7 +299,11 @@ func (m *DetailModel) startPanesAsync() tea.Cmd {
 		log.Info("startPanesAsync: starting for task %d", taskID)
 
 		// Start the Claude session (creates tmux window)
-		m.startResumableSession(sessionID)
+		if err := m.startResumableSession(sessionID); err != nil {
+			userMsg := m.executorFailureMessage(err.Error())
+			m.logExecutorFailure(userMsg)
+			return panesJoinedMsg{err: err, userMessage: userMsg}
+		}
 
 		// Find the window target
 		windowTarget := m.findTaskWindow()
@@ -304,7 +311,10 @@ func (m *DetailModel) startPanesAsync() tea.Cmd {
 
 		if windowTarget == "" {
 			log.Error("startPanesAsync: failed to find window after starting session")
-			return panesJoinedMsg{err: fmt.Errorf("failed to create Claude session window")}
+			err := fmt.Errorf("%s session window not found", m.executorDisplayName())
+			userMsg := m.executorFailureMessage("the executor exited before panes could be created")
+			m.logExecutorFailure(userMsg)
+			return panesJoinedMsg{err: err, userMessage: userMsg}
 		}
 
 		// Join the panes
@@ -321,6 +331,26 @@ func (m *DetailModel) startPanesAsync() tea.Cmd {
 			windowTarget:    windowTarget,
 		}
 	}
+}
+
+// logExecutorFailure writes a system log entry explaining why the executor panes
+// failed to open so that the user can see the reason without digging into tmux.
+func (m *DetailModel) logExecutorFailure(message string) {
+	if message == "" || m.database == nil || m.task == nil {
+		return
+	}
+	// Best effort - ignore error, logs table already handles concurrency.
+	m.database.AppendTaskLog(m.task.ID, "error", message)
+}
+
+// executorFailureMessage formats a user-friendly error string for the header.
+func (m *DetailModel) executorFailureMessage(details string) string {
+	executorName := m.executorDisplayName()
+	base := fmt.Sprintf("%s failed to start", executorName)
+	if details != "" {
+		base = fmt.Sprintf("%s: %s", base, details)
+	}
+	return base + ". Check your executor configuration."
 }
 
 // spinnerTick returns a command that ticks the loading spinner.
@@ -370,6 +400,7 @@ func (m *DetailModel) Update(msg tea.Msg) (*DetailModel, tea.Cmd) {
 		m.paneLoading = false
 		if msg.err != nil {
 			log.Error("panesJoinedMsg: error=%v", msg.err)
+			m.paneError = msg.userMessage
 		} else {
 			log.Info("panesJoinedMsg: claudePaneID=%q, workdirPaneID=%q",
 				msg.claudePaneID, msg.workdirPaneID)
@@ -377,6 +408,7 @@ func (m *DetailModel) Update(msg tea.Msg) (*DetailModel, tea.Cmd) {
 			m.workdirPaneID = msg.workdirPaneID
 			m.daemonSessionID = msg.daemonSessionID
 			m.cachedWindowTarget = msg.windowTarget
+			m.paneError = ""
 		}
 		m.viewport.SetContent(m.renderContent())
 		return m, nil
@@ -483,13 +515,13 @@ func (m *DetailModel) findTaskWindow() string {
 
 // startResumableSession starts a new tmux window with the task's executor.
 // This reconnects to a session that was previously running but whose tmux window was killed.
-func (m *DetailModel) startResumableSession(sessionID string) {
+func (m *DetailModel) startResumableSession(sessionID string) error {
 	log := GetLogger()
 	log.Info("startResumableSession: called with sessionID=%q for task %d", sessionID, m.task.ID)
 
 	if m.task == nil {
 		log.Debug("startResumableSession: early return (task is nil)")
-		return
+		return fmt.Errorf("task not available")
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -508,7 +540,7 @@ func (m *DetailModel) startResumableSession(sessionID string) {
 				// Window already exists - use session:index format to avoid ambiguity
 				m.cachedWindowTarget = parts[0] + ":" + parts[1]
 				log.Info("startResumableSession: window already exists at %q, reusing", m.cachedWindowTarget)
-				return
+				return nil
 			}
 		}
 	}
@@ -518,7 +550,7 @@ func (m *DetailModel) startResumableSession(sessionID string) {
 	out, err := exec.CommandContext(ctx, "tmux", "list-sessions", "-F", "#{session_name}").Output()
 	if err != nil {
 		log.Error("startResumableSession: list-sessions failed: %v", err)
-		return
+		return fmt.Errorf("tmux list-sessions failed: %w", err)
 	}
 	log.Debug("startResumableSession: sessions: %q", strings.TrimSpace(string(out)))
 
@@ -538,7 +570,7 @@ func (m *DetailModel) startResumableSession(sessionID string) {
 		err := exec.CommandContext(ctx, "tmux", "new-session", "-d", "-s", daemonSession, "-n", "_placeholder", "tail", "-f", "/dev/null").Run()
 		if err != nil {
 			log.Error("startResumableSession: new-session failed: %v", err)
-			return
+			return fmt.Errorf("tmux new-session failed: %w", err)
 		}
 	} else {
 		log.Debug("startResumableSession: using existing daemon session %q", daemonSession)
@@ -551,7 +583,7 @@ func (m *DetailModel) startResumableSession(sessionID string) {
 	taskExecutor := m.executor.GetTaskExecutor(m.task)
 	if taskExecutor == nil {
 		log.Error("startResumableSession: no executor found for task")
-		return
+		return fmt.Errorf("no executor configured for task")
 	}
 
 	// Build prompt with task details (for executors that need it)
@@ -588,7 +620,7 @@ func (m *DetailModel) startResumableSession(sessionID string) {
 		"sh", "-c", script).Run()
 	if err != nil {
 		log.Error("startResumableSession: new-window failed: %v", err)
-		return
+		return fmt.Errorf("tmux new-window failed: %w", err)
 	}
 
 	// Give tmux a moment to create the window
@@ -615,6 +647,7 @@ func (m *DetailModel) startResumableSession(sessionID string) {
 	exec.CommandContext(ctx, "tmux", "select-pane", "-t", windowTarget+".0", "-T", m.executorDisplayName()).Run()
 	exec.CommandContext(ctx, "tmux", "select-pane", "-t", windowTarget+".1", "-T", "Shell").Run()
 	log.Info("startResumableSession: completed for task %d", m.task.ID)
+	return nil
 }
 
 // hasActiveTmuxSession checks if this task has an active tmux window in any task-daemon session.
@@ -1865,7 +1898,20 @@ func (m *DetailModel) renderHeader() string {
 		} else {
 			loadingStyle = lipgloss.NewStyle().Foreground(dimmedFg)
 		}
-		meta.WriteString(loadingStyle.Render(spinner + " Starting Claude..."))
+		loadingText := fmt.Sprintf("%s Starting %s...", spinner, m.executorDisplayName())
+		meta.WriteString(loadingStyle.Render(loadingText))
+	}
+
+	// Executor failure indicator
+	if m.paneError != "" {
+		meta.WriteString("  ")
+		var errorStyle lipgloss.Style
+		if m.focused {
+			errorStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Bold(true)
+		} else {
+			errorStyle = lipgloss.NewStyle().Foreground(dimmedFg)
+		}
+		meta.WriteString(errorStyle.Render("⚠ " + m.paneError))
 	}
 
 	// Schedule info - show if scheduled OR recurring
