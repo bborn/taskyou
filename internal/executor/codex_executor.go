@@ -53,6 +53,8 @@ func (c *CodexExecutor) Resume(ctx context.Context, task *db.Task, workDir, prom
 
 // runCodex executes the Codex CLI with the given parameters.
 func (c *CodexExecutor) runCodex(ctx context.Context, task *db.Task, workDir, prompt, feedback string, isResume bool) ExecResult {
+	paths := c.executor.claudePathsForProject(task.Project)
+
 	// Check if codex CLI is available
 	if !c.IsAvailable() {
 		c.executor.logLine(task.ID, "error", "codex CLI is not installed - please install it from https://github.com/openai/codex")
@@ -114,8 +116,9 @@ func (c *CodexExecutor) runCodex(ctx context.Context, task *db.Task, workDir, pr
 
 	// Note: Codex doesn't have built-in session resume like Claude,
 	// so we always start fresh but include full context
-	script = fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q codex %s"$(cat %q)"`,
-		task.ID, sessionID, task.Port, task.WorktreePath, dangerousFlag, promptFile.Name())
+	envPrefix := claudeEnvPrefix(paths.configDir)
+	script = fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %scodex %s"$(cat %q)"`,
+		task.ID, sessionID, task.Port, task.WorktreePath, envPrefix, dangerousFlag, promptFile.Name())
 
 	// Create new window in task-daemon session
 	actualSession, tmuxErr := createTmuxWindow(daemonSession, windowName, workDir, script)
@@ -147,7 +150,7 @@ func (c *CodexExecutor) runCodex(ctx context.Context, task *db.Task, workDir, pr
 	}
 
 	// Ensure shell pane exists alongside Codex pane
-	c.executor.ensureShellPane(windowTarget, workDir, task.ID, task.Port, task.WorktreePath)
+	c.executor.ensureShellPane(windowTarget, workDir, task.ID, task.Port, task.WorktreePath, paths.configDir)
 
 	// Configure tmux window
 	c.executor.configureTmuxWindow(windowTarget)

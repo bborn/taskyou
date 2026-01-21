@@ -225,7 +225,8 @@ func (db *DB) migrate() error {
 		// Claude session tracking
 		`ALTER TABLE tasks ADD COLUMN claude_session_id TEXT DEFAULT ''`, // Claude session ID for resuming conversations
 		// Project color column
-		`ALTER TABLE projects ADD COLUMN color TEXT DEFAULT ''`, // Hex color for project label (e.g., "#61AFEF")
+		`ALTER TABLE projects ADD COLUMN color TEXT DEFAULT ''`,             // Hex color for project label (e.g., "#61AFEF")
+		`ALTER TABLE projects ADD COLUMN claude_config_dir TEXT DEFAULT ''`, // Per-project CLAUDE_CONFIG_DIR override
 		// PR tracking columns
 		`ALTER TABLE tasks ADD COLUMN pr_url TEXT DEFAULT ''`,      // Pull request URL (if associated with a PR)
 		`ALTER TABLE tasks ADD COLUMN pr_number INTEGER DEFAULT 0`, // Pull request number (if associated with a PR)
@@ -326,8 +327,8 @@ func (db *DB) ensurePersonalProject() error {
 
 	// Create the personal project in database
 	_, err = db.Exec(`
-		INSERT INTO projects (name, path, aliases, instructions)
-		VALUES ('personal', ?, '', 'Default project for personal tasks')
+		INSERT INTO projects (name, path, aliases, instructions, claude_config_dir)
+		VALUES ('personal', ?, '', 'Default project for personal tasks', '')
 	`, personalDir)
 	if err != nil {
 		return fmt.Errorf("insert personal project: %w", err)

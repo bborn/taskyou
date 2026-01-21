@@ -1902,6 +1902,8 @@ func (e *Executor) runClaude(ctx context.Context, task *db.Task, workDir, prompt
 		return execResult{Message: "tmux is not installed"}
 	}
 
+	paths := e.claudePathsForProject(task.Project)
+
 	// Ensure task-daemon session exists
 	daemonSession, err := ensureTmuxDaemon()
 	if err != nil {
@@ -1958,13 +1960,14 @@ func (e *Executor) runClaude(ctx context.Context, task *db.Task, workDir, prompt
 	// Only use stored session ID - no file-based fallback to avoid cross-task contamination
 	var script string
 	existingSessionID := task.ClaudeSessionID
+	envPrefix := claudeEnvPrefix(paths.configDir)
 	if existingSessionID != "" {
 		e.logLine(task.ID, "system", fmt.Sprintf("Resuming existing session %s", existingSessionID))
-		script = fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q claude %s--chrome --resume %s "$(cat %q)"`,
-			task.ID, sessionID, task.Port, task.WorktreePath, dangerousFlag, existingSessionID, promptFile.Name())
+		script = fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %sclaude %s--chrome --resume %s "$(cat %q)"`,
+			task.ID, sessionID, task.Port, task.WorktreePath, envPrefix, dangerousFlag, existingSessionID, promptFile.Name())
 	} else {
-		script = fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q claude %s--chrome "$(cat %q)"`,
-			task.ID, sessionID, task.Port, task.WorktreePath, dangerousFlag, promptFile.Name())
+		script = fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %sclaude %s--chrome "$(cat %q)"`,
+			task.ID, sessionID, task.Port, task.WorktreePath, envPrefix, dangerousFlag, promptFile.Name())
 	}
 
 	// Create new window in task-daemon session (with retry logic for race conditions)
@@ -2000,7 +2003,7 @@ func (e *Executor) runClaude(ctx context.Context, task *db.Task, workDir, prompt
 	}
 
 	// Ensure shell pane exists alongside Claude pane with environment variables
-	e.ensureShellPane(windowTarget, workDir, task.ID, task.Port, task.WorktreePath)
+	e.ensureShellPane(windowTarget, workDir, task.ID, task.Port, task.WorktreePath, paths.configDir)
 
 	// Configure tmux window with helpful status bar
 	e.configureTmuxWindow(windowTarget)
@@ -2027,6 +2030,8 @@ func (e *Executor) runClaudeResume(ctx context.Context, task *db.Task, workDir, 
 		fullPrompt := prompt + "\n\n## User Feedback\n\n" + feedback
 		return e.runClaude(ctx, task, workDir, fullPrompt)
 	}
+
+	paths := e.claudePathsForProject(task.Project)
 
 	e.logLine(task.ID, "system", fmt.Sprintf("Resuming session %s", claudeSessionID))
 
@@ -2085,8 +2090,9 @@ func (e *Executor) runClaudeResume(ctx context.Context, task *db.Task, workDir, 
 	if os.Getenv("WORKTREE_DANGEROUS_MODE") == "1" {
 		dangerousFlag = "--dangerously-skip-permissions "
 	}
-	script := fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q claude %s--chrome --resume %s "$(cat %q)"`,
-		task.ID, taskSessionID, task.Port, task.WorktreePath, dangerousFlag, claudeSessionID, feedbackFile.Name())
+	envPrefix := claudeEnvPrefix(paths.configDir)
+	script := fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %sclaude %s--chrome --resume %s "$(cat %q)"`,
+		task.ID, taskSessionID, task.Port, task.WorktreePath, envPrefix, dangerousFlag, claudeSessionID, feedbackFile.Name())
 
 	// Create new window in task-daemon session (with retry logic for race conditions)
 	actualSession, tmuxErr := createTmuxWindow(daemonSession, windowName, workDir, script)
@@ -2121,7 +2127,7 @@ func (e *Executor) runClaudeResume(ctx context.Context, task *db.Task, workDir, 
 	}
 
 	// Ensure shell pane exists alongside Claude pane with environment variables
-	e.ensureShellPane(windowTarget, workDir, task.ID, task.Port, task.WorktreePath)
+	e.ensureShellPane(windowTarget, workDir, task.ID, task.Port, task.WorktreePath, paths.configDir)
 
 	// Configure tmux window with helpful status bar
 	e.configureTmuxWindow(windowTarget)
@@ -2147,6 +2153,7 @@ func (e *Executor) ResumeDangerous(taskID int64) bool {
 		e.logger.Error("Failed to get task", "taskID", taskID, "error", err)
 		return false
 	}
+	paths := e.claudePathsForProject(task.Project)
 
 	claudeSessionID := task.ClaudeSessionID
 	if claudeSessionID == "" {
@@ -2201,8 +2208,9 @@ func (e *Executor) ResumeDangerous(taskID int64) bool {
 	}
 
 	// Force dangerous mode regardless of WORKTREE_DANGEROUS_MODE setting
-	script := fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q claude --dangerously-skip-permissions --chrome --resume %s`,
-		taskID, taskSessionID, task.Port, task.WorktreePath, claudeSessionID)
+	envPrefix := claudeEnvPrefix(paths.configDir)
+	script := fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %sclaude --dangerously-skip-permissions --chrome --resume %s`,
+		taskID, taskSessionID, task.Port, task.WorktreePath, envPrefix, claudeSessionID)
 
 	// Create new window in task-daemon session (with retry logic for race conditions)
 	actualSession, tmuxErr := createTmuxWindow(daemonSession, windowName, workDir, script)
@@ -2236,7 +2244,7 @@ func (e *Executor) ResumeDangerous(taskID int64) bool {
 	}
 
 	// Ensure shell pane exists alongside Claude pane with environment variables
-	e.ensureShellPane(windowTarget, workDir, task.ID, task.Port, task.WorktreePath)
+	e.ensureShellPane(windowTarget, workDir, task.ID, task.Port, task.WorktreePath, paths.configDir)
 
 	// Configure tmux window with helpful status bar
 	e.configureTmuxWindow(windowTarget)
@@ -2263,6 +2271,7 @@ func (e *Executor) ResumeSafe(taskID int64) bool {
 		e.logger.Error("Failed to get task", "taskID", taskID, "error", err)
 		return false
 	}
+	paths := e.claudePathsForProject(task.Project)
 
 	claudeSessionID := task.ClaudeSessionID
 	if claudeSessionID == "" {
@@ -2317,8 +2326,9 @@ func (e *Executor) ResumeSafe(taskID int64) bool {
 	}
 
 	// Resume without --dangerously-skip-permissions (safe mode)
-	script := fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q claude --chrome --resume %s`,
-		taskID, taskSessionID, task.Port, task.WorktreePath, claudeSessionID)
+	envPrefix := claudeEnvPrefix(paths.configDir)
+	script := fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %sclaude --chrome --resume %s`,
+		taskID, taskSessionID, task.Port, task.WorktreePath, envPrefix, claudeSessionID)
 
 	// Create new window in task-daemon session (with retry logic for race conditions)
 	actualSession, tmuxErr := createTmuxWindow(daemonSession, windowName, workDir, script)
@@ -2352,7 +2362,7 @@ func (e *Executor) ResumeSafe(taskID int64) bool {
 	}
 
 	// Ensure shell pane exists alongside Claude pane with environment variables
-	e.ensureShellPane(windowTarget, workDir, task.ID, task.Port, task.WorktreePath)
+	e.ensureShellPane(windowTarget, workDir, task.ID, task.Port, task.WorktreePath, paths.configDir)
 
 	// Configure tmux window with helpful status bar
 	e.configureTmuxWindow(windowTarget)
@@ -2369,27 +2379,24 @@ func (e *Executor) ResumeSafe(taskID int64) bool {
 	return true
 }
 
-// FindClaudeSessionID finds the most recent claude session ID for a workDir.
+// FindClaudeSessionID finds the most recent claude session ID for a workDir using the default config dir.
 // Exported for use by the UI to check for resumable sessions.
 func FindClaudeSessionID(workDir string) string {
-	return findClaudeSessionIDImpl(workDir)
+	return findClaudeSessionIDImpl(workDir, DefaultClaudeConfigDir())
 }
 
 // findClaudeSessionIDImpl is the shared implementation
-func findClaudeSessionIDImpl(workDir string) string {
-	// Claude stores sessions in ~/.claude/projects/<escaped-path>/
+func findClaudeSessionIDImpl(workDir, configDir string) string {
+	// Claude stores sessions in CLAUDE_CONFIG_DIR/projects/<escaped-path>/
 	// The path is escaped: /Users/bruno/foo -> -Users-bruno-foo
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return ""
-	}
+	baseDir := ResolveClaudeConfigDir(configDir)
 
 	// Escape the workDir path to match Claude's project directory naming
 	// Claude replaces / with - and . with - (keeps leading dash)
 	escapedPath := strings.ReplaceAll(workDir, "/", "-")
 	escapedPath = strings.ReplaceAll(escapedPath, ".", "-")
 
-	projectDir := filepath.Join(home, ".claude", "projects", escapedPath)
+	projectDir := filepath.Join(baseDir, "projects", escapedPath)
 
 	// Find the most recent UUID.jsonl file (not agent-*.jsonl)
 	entries, err := os.ReadDir(projectDir)
@@ -2432,8 +2439,9 @@ func findClaudeSessionIDImpl(workDir string) string {
 // RenameClaudeSession renames the Claude session for a given workDir to the new name.
 // It uses Claude's /rename slash command via print mode.
 // This is useful when a task title changes and we want the Claude session to reflect it.
-func RenameClaudeSession(workDir, newName string) error {
-	sessionID := findClaudeSessionIDImpl(workDir)
+func RenameClaudeSession(workDir, newName, configDir string) error {
+	resolvedDir := ResolveClaudeConfigDir(configDir)
+	sessionID := findClaudeSessionIDImpl(workDir, resolvedDir)
 	if sessionID == "" {
 		return nil // No session to rename
 	}
@@ -2444,6 +2452,7 @@ func RenameClaudeSession(workDir, newName string) error {
 
 	cmd := exec.CommandContext(ctx, "claude", "--resume", sessionID, "-p", "/rename "+newName)
 	cmd.Dir = workDir
+	cmd.Env = append(os.Environ(), fmt.Sprintf("CLAUDE_CONFIG_DIR=%s", resolvedDir))
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		// Log but don't fail - renaming is a nice-to-have
@@ -2456,11 +2465,12 @@ func RenameClaudeSession(workDir, newName string) error {
 // RenameClaudeSessionForTask renames the Claude session for a task if it has a worktree.
 // This is a convenience method that handles the common case of renaming based on task.
 func (e *Executor) RenameClaudeSessionForTask(task *db.Task, newName string) {
-	if task.WorktreePath == "" {
+	if task == nil || task.WorktreePath == "" {
 		return
 	}
 
-	if err := RenameClaudeSession(task.WorktreePath, newName); err != nil {
+	paths := e.claudePathsForProject(task.Project)
+	if err := RenameClaudeSession(task.WorktreePath, newName, paths.configDir); err != nil {
 		e.logger.Debug("Could not rename Claude session", "taskID", task.ID, "error", err)
 	}
 }
@@ -2613,7 +2623,7 @@ func (e *Executor) pollTmuxSession(ctx context.Context, taskID int64, sessionNam
 // ensureShellPane creates a shell pane alongside the Claude pane in the daemon window.
 // This ensures every task always has a persistent shell pane that survives navigation.
 // It also sets environment variables (WORKTREE_TASK_ID, WORKTREE_PORT, WORKTREE_PATH) in the shell.
-func (e *Executor) ensureShellPane(windowTarget, workDir string, taskID int64, port int, worktreePath string) {
+func (e *Executor) ensureShellPane(windowTarget, workDir string, taskID int64, port int, worktreePath string, claudeConfigDir string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -2627,6 +2637,9 @@ func (e *Executor) ensureShellPane(windowTarget, workDir string, taskID int64, p
 		exec.CommandContext(ctx, "tmux", "send-keys", "-t", windowTarget+".1", fmt.Sprintf("cd %q", workDir), "Enter").Run()
 		// Set environment variables in the existing shell pane
 		envCmd := fmt.Sprintf("export WORKTREE_TASK_ID=%d WORKTREE_PORT=%d WORKTREE_PATH=%q", taskID, port, worktreePath)
+		if claudeConfigDir != "" {
+			envCmd += fmt.Sprintf(" CLAUDE_CONFIG_DIR=%q", claudeConfigDir)
+		}
 		exec.CommandContext(ctx, "tmux", "send-keys", "-t", windowTarget+".1", envCmd, "Enter").Run()
 		exec.CommandContext(ctx, "tmux", "send-keys", "-t", windowTarget+".1", "clear", "Enter").Run()
 		exec.CommandContext(ctx, "tmux", "select-pane", "-t", windowTarget+".1", "-T", "Shell").Run()
@@ -2668,6 +2681,9 @@ func (e *Executor) ensureShellPane(windowTarget, workDir string, taskID int64, p
 	// Set environment variables in the shell pane
 	// Use export commands so they persist for all commands in the shell
 	envCmd := fmt.Sprintf("export WORKTREE_TASK_ID=%d WORKTREE_PORT=%d WORKTREE_PATH=%q", taskID, port, worktreePath)
+	if claudeConfigDir != "" {
+		envCmd += fmt.Sprintf(" CLAUDE_CONFIG_DIR=%q", claudeConfigDir)
+	}
 	exec.CommandContext(ctx, "tmux", "send-keys", "-t", windowTarget+".1", envCmd, "Enter").Run()
 	// Clear the screen so the export command doesn't clutter the shell
 	exec.CommandContext(ctx, "tmux", "send-keys", "-t", windowTarget+".1", "clear", "Enter").Run()
@@ -3129,6 +3145,8 @@ func (e *Executor) setupWorktree(task *db.Task) (string, error) {
 		e.db.UpdateTask(task)
 	}
 
+	paths := e.claudePathsForProject(task.Project)
+
 	// Get project directory
 	projectDir := e.getProjectDir(task.Project)
 
@@ -3167,9 +3185,9 @@ func (e *Executor) setupWorktree(task *db.Task) (string, error) {
 	if task.WorktreePath != "" {
 		if _, err := os.Stat(task.WorktreePath); err == nil {
 			trustMiseConfig(task.WorktreePath)
-			e.writeWorktreeEnvFile(projectDir, task.WorktreePath, task)
+			e.writeWorktreeEnvFile(projectDir, task.WorktreePath, task, paths.configDir)
 			symlinkClaudeConfig(projectDir, task.WorktreePath)
-			copyMCPConfig(projectDir, task.WorktreePath)
+			copyMCPConfig(paths.configFile, projectDir, task.WorktreePath)
 			return task.WorktreePath, nil
 		}
 		// Worktree path was set but directory doesn't exist, clear it and create fresh
@@ -3213,9 +3231,9 @@ func (e *Executor) setupWorktree(task *db.Task) (string, error) {
 			}
 		}
 		trustMiseConfig(worktreePath)
-		e.writeWorktreeEnvFile(projectDir, worktreePath, task)
+		e.writeWorktreeEnvFile(projectDir, worktreePath, task, paths.configDir)
 		symlinkClaudeConfig(projectDir, worktreePath)
-		copyMCPConfig(projectDir, worktreePath)
+		copyMCPConfig(paths.configFile, projectDir, worktreePath)
 		e.runWorktreeInitScript(projectDir, worktreePath, task)
 		return worktreePath, nil
 	}
@@ -3255,8 +3273,8 @@ func (e *Executor) setupWorktree(task *db.Task) (string, error) {
 						}
 					}
 					trustMiseConfig(worktreePath)
-					e.writeWorktreeEnvFile(projectDir, worktreePath, task)
-					copyMCPConfig(projectDir, worktreePath)
+					e.writeWorktreeEnvFile(projectDir, worktreePath, task, paths.configDir)
+					copyMCPConfig(paths.configFile, projectDir, worktreePath)
 					e.runWorktreeInitScript(projectDir, worktreePath, task)
 					return worktreePath, nil
 				}
@@ -3290,9 +3308,9 @@ func (e *Executor) setupWorktree(task *db.Task) (string, error) {
 	}
 
 	trustMiseConfig(worktreePath)
-	e.writeWorktreeEnvFile(projectDir, worktreePath, task)
+	e.writeWorktreeEnvFile(projectDir, worktreePath, task, paths.configDir)
 	symlinkClaudeConfig(projectDir, worktreePath)
-	copyMCPConfig(projectDir, worktreePath)
+	copyMCPConfig(paths.configFile, projectDir, worktreePath)
 
 	// Run worktree init script if configured
 	e.runWorktreeInitScript(projectDir, worktreePath, task)
@@ -3335,19 +3353,22 @@ func getUserShell(username string) (string, error) {
 // This is the standard direnv format - users with direnv get auto-loading,
 // others can manually run "source .envrc".
 // It also adds .envrc to .git/info/exclude so it doesn't pollute git status.
-func (e *Executor) writeWorktreeEnvFile(projectDir, worktreePath string, task *db.Task) error {
+func (e *Executor) writeWorktreeEnvFile(projectDir, worktreePath string, task *db.Task, claudeConfigDir string) error {
 	// Write the .envrc file
 	envContent := fmt.Sprintf(`export WORKTREE_TASK_ID=%d
 export WORKTREE_PORT=%d
 export WORKTREE_PATH=%q
 `, task.ID, task.Port, worktreePath)
+	if claudeConfigDir != "" {
+		envContent += fmt.Sprintf("export CLAUDE_CONFIG_DIR=%q\n", claudeConfigDir)
+	}
 
 	envPath := filepath.Join(worktreePath, ".envrc")
 	if err := os.WriteFile(envPath, []byte(envContent), 0644); err != nil {
 		return fmt.Errorf("write .envrc: %w", err)
 	}
 
-	e.logLine(task.ID, "system", "Created .envrc with WORKTREE_TASK_ID, WORKTREE_PORT, WORKTREE_PATH (use direnv or 'source .envrc')")
+	e.logLine(task.ID, "system", "Created .envrc with WORKTREE_TASK_ID, WORKTREE_PORT, WORKTREE_PATH, CLAUDE_CONFIG_DIR (use direnv or 'source .envrc')")
 
 	// Add to .git/info/exclude in the main project so it doesn't show in git status
 	excludePath := filepath.Join(projectDir, ".git", "info", "exclude")
@@ -3394,6 +3415,75 @@ func trustMiseConfig(dir string) {
 	}
 }
 
+type claudePaths struct {
+	configDir  string
+	configFile string
+}
+
+// DefaultClaudeConfigDir returns the resolved CLAUDE_CONFIG_DIR taking the environment into account.
+func DefaultClaudeConfigDir() string {
+	if env := strings.TrimSpace(os.Getenv("CLAUDE_CONFIG_DIR")); env != "" {
+		return filepath.Clean(expandUserPath(env))
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ".claude"
+	}
+	return filepath.Join(home, ".claude")
+}
+
+// ResolveClaudeConfigDir resolves a custom CLAUDE_CONFIG_DIR override.
+// If custom is empty, the default directory (respecting CLAUDE_CONFIG_DIR env) is returned.
+func ResolveClaudeConfigDir(custom string) string {
+	custom = strings.TrimSpace(custom)
+	if custom == "" {
+		return DefaultClaudeConfigDir()
+	}
+	return filepath.Clean(expandUserPath(custom))
+}
+
+// ClaudeConfigFilePath returns the path to the claude.json configuration alongside the directory.
+func ClaudeConfigFilePath(dir string) string {
+	if dir == "" {
+		dir = DefaultClaudeConfigDir()
+	}
+	dir = strings.TrimRight(dir, string(os.PathSeparator))
+	return dir + ".json"
+}
+
+func expandUserPath(path string) string {
+	if path == "" {
+		return ""
+	}
+	if strings.HasPrefix(path, "~") {
+		home, err := os.UserHomeDir()
+		if err == nil {
+			return filepath.Join(home, path[1:])
+		}
+	}
+	return path
+}
+
+func (e *Executor) claudePathsForProject(project string) claudePaths {
+	dir := DefaultClaudeConfigDir()
+	if project != "" {
+		if p, err := e.db.GetProjectByName(project); err == nil && p != nil {
+			dir = ResolveClaudeConfigDir(p.ClaudeConfigDir)
+		}
+	}
+	return claudePaths{
+		configDir:  dir,
+		configFile: ClaudeConfigFilePath(dir),
+	}
+}
+
+func claudeEnvPrefix(dir string) string {
+	if strings.TrimSpace(dir) == "" {
+		return ""
+	}
+	return fmt.Sprintf("CLAUDE_CONFIG_DIR=%q ", dir)
+}
+
 // symlinkClaudeConfig symlinks the worktree's .claude directory to the main project's .claude.
 // This ensures permissions granted in any worktree are shared across all worktrees and the main project.
 func symlinkClaudeConfig(projectDir, worktreePath string) error {
@@ -3435,17 +3525,14 @@ func symlinkClaudeConfig(projectDir, worktreePath string) error {
 }
 
 // copyMCPConfig copies the MCP server configuration from the source project to the worktree
-// in ~/.claude.json so that Claude Code in the worktree has the same MCP servers available.
-func copyMCPConfig(srcDir, dstDir string) error {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return fmt.Errorf("get home dir: %w", err)
+// in the claude.json file so that Claude Code in the worktree has the same MCP servers available.
+func copyMCPConfig(configPath, srcDir, dstDir string) error {
+	if configPath == "" {
+		configPath = ClaudeConfigFilePath("")
 	}
 
-	claudeConfigPath := filepath.Join(home, ".claude.json")
-
 	// Read existing config
-	data, err := os.ReadFile(claudeConfigPath)
+	data, err := os.ReadFile(configPath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil // No config file, nothing to copy
@@ -3513,7 +3600,7 @@ func copyMCPConfig(srcDir, dstDir string) error {
 		return fmt.Errorf("marshal claude config: %w", err)
 	}
 
-	if err := os.WriteFile(claudeConfigPath, newData, 0644); err != nil {
+	if err := os.WriteFile(configPath, newData, 0644); err != nil {
 		return fmt.Errorf("write claude config: %w", err)
 	}
 
@@ -3779,6 +3866,7 @@ func (e *Executor) CleanupWorktree(task *db.Task) error {
 	if projectDir == "" {
 		return nil
 	}
+	paths := e.claudePathsForProject(task.Project)
 
 	// Run teardown script before removing the worktree
 	e.runWorktreeTeardownScript(projectDir, task.WorktreePath, task)
@@ -3798,12 +3886,12 @@ func (e *Executor) CleanupWorktree(task *db.Task) error {
 	}
 
 	// Remove project entry from ~/.claude.json (run async - this can be slow with large configs)
-	go func(path string) {
-		if err := RemoveClaudeProjectConfig(path); err != nil {
+	go func(path, config string) {
+		if err := RemoveClaudeProjectConfig(config, path); err != nil {
 			// Log warning but don't fail - this is cleanup
 			fmt.Fprintf(os.Stderr, "Warning: could not remove Claude project config: %v\n", err)
 		}
-	}(task.WorktreePath)
+	}(task.WorktreePath, paths.configFile)
 
 	// Clear worktree info from task
 	task.WorktreePath = ""
@@ -3814,24 +3902,21 @@ func (e *Executor) CleanupWorktree(task *db.Task) error {
 }
 
 // CleanupClaudeSessions removes Claude session files for a given worktree path.
-// Claude stores sessions in ~/.claude/projects/<escaped-path>/.
+// Claude stores sessions under CLAUDE_CONFIG_DIR/projects/<escaped-path>/.
 // This should be called when deleting a task to clean up session data.
-func CleanupClaudeSessions(worktreePath string) error {
+func CleanupClaudeSessions(worktreePath, configDir string) error {
 	if worktreePath == "" {
 		return nil
 	}
 
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return fmt.Errorf("get home dir: %w", err)
-	}
+	baseDir := ResolveClaudeConfigDir(configDir)
 
 	// Escape the worktree path to match Claude's project directory naming
 	// Claude replaces / with - and . with - (keeps leading dash)
 	escapedPath := strings.ReplaceAll(worktreePath, "/", "-")
 	escapedPath = strings.ReplaceAll(escapedPath, ".", "-")
 
-	projectDir := filepath.Join(home, ".claude", "projects", escapedPath)
+	projectDir := filepath.Join(baseDir, "projects", escapedPath)
 
 	// Check if directory exists
 	if _, err := os.Stat(projectDir); os.IsNotExist(err) {
@@ -3846,22 +3931,19 @@ func CleanupClaudeSessions(worktreePath string) error {
 	return nil
 }
 
-// RemoveClaudeProjectConfig removes a project entry from ~/.claude.json.
+// RemoveClaudeProjectConfig removes a project entry from claude.json.
 // This should be called when deleting a worktree to clean up stale config entries.
-func RemoveClaudeProjectConfig(projectPath string) error {
+func RemoveClaudeProjectConfig(configPath, projectPath string) error {
 	if projectPath == "" {
 		return nil
 	}
 
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return fmt.Errorf("get home dir: %w", err)
+	if configPath == "" {
+		configPath = ClaudeConfigFilePath("")
 	}
 
-	claudeConfigPath := filepath.Join(home, ".claude.json")
-
 	// Read existing config
-	data, err := os.ReadFile(claudeConfigPath)
+	data, err := os.ReadFile(configPath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil // No config file, nothing to remove
@@ -3900,25 +3982,22 @@ func RemoveClaudeProjectConfig(projectPath string) error {
 		return fmt.Errorf("marshal claude config: %w", err)
 	}
 
-	if err := os.WriteFile(claudeConfigPath, newData, 0644); err != nil {
+	if err := os.WriteFile(configPath, newData, 0644); err != nil {
 		return fmt.Errorf("write claude config: %w", err)
 	}
 
 	return nil
 }
 
-// PurgeStaleClaudeProjectConfigs removes entries from ~/.claude.json for paths that no longer exist.
+// PurgeStaleClaudeProjectConfigs removes entries from claude.json for paths that no longer exist.
 // Returns the number of entries removed and any error encountered.
-func PurgeStaleClaudeProjectConfigs() (int, error) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return 0, fmt.Errorf("get home dir: %w", err)
+func PurgeStaleClaudeProjectConfigs(configPath string) (int, error) {
+	if configPath == "" {
+		configPath = ClaudeConfigFilePath("")
 	}
 
-	claudeConfigPath := filepath.Join(home, ".claude.json")
-
 	// Read existing config
-	data, err := os.ReadFile(claudeConfigPath)
+	data, err := os.ReadFile(configPath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return 0, nil // No config file
@@ -3963,7 +4042,7 @@ func PurgeStaleClaudeProjectConfigs() (int, error) {
 		return 0, fmt.Errorf("marshal claude config: %w", err)
 	}
 
-	if err := os.WriteFile(claudeConfigPath, newData, 0644); err != nil {
+	if err := os.WriteFile(configPath, newData, 0644); err != nil {
 		return 0, fmt.Errorf("write claude config: %w", err)
 	}
 
