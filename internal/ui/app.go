@@ -326,6 +326,26 @@ func (m *AppModel) executorDisplayName() string {
 	return executor.DefaultExecutorName()
 }
 
+// taskExecutorDisplayName returns the display name for a task's executor.
+// Uses the task's Executor field to determine the correct name.
+func taskExecutorDisplayName(task *db.Task) string {
+	if task == nil || task.Executor == "" {
+		return executor.DefaultExecutorName()
+	}
+	switch task.Executor {
+	case db.ExecutorCodex:
+		return "Codex"
+	case db.ExecutorClaude:
+		return "Claude"
+	default:
+		// Unknown executor, capitalize first letter
+		if len(task.Executor) > 0 {
+			return strings.ToUpper(task.Executor[:1]) + task.Executor[1:]
+		}
+		return executor.DefaultExecutorName()
+	}
+}
+
 // updateTaskInList updates a task in the tasks list and refreshes the kanban.
 func (m *AppModel) updateTaskInList(task *db.Task) {
 	for i, t := range m.tasks {
@@ -2694,7 +2714,7 @@ func (m *AppModel) toggleDangerousMode(id int64) tea.Cmd {
 			return taskDangerousModeToggledMsg{err: fmt.Errorf("failed to get task")}
 		}
 
-		executorName := m.executorDisplayName()
+		executorName := taskExecutorDisplayName(task)
 		var success bool
 		if task.DangerousMode {
 			// Currently in dangerous mode, switch to safe mode
@@ -2721,7 +2741,7 @@ func (m *AppModel) resumeClaude(id int64, claudePaneID string) tea.Cmd {
 			return taskClaudeToggledMsg{err: fmt.Errorf("failed to get task")}
 		}
 
-		executorName := m.executorDisplayName()
+		executorName := taskExecutorDisplayName(task)
 
 		// Check if Claude is already running
 		if claudePaneID != "" {
