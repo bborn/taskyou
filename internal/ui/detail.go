@@ -97,6 +97,21 @@ type spinnerTickMsg struct{}
 var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 
 func (m *DetailModel) executorDisplayName() string {
+	// Use the task's executor field if available (each task can have a different executor)
+	if m.task != nil && m.task.Executor != "" {
+		switch m.task.Executor {
+		case db.ExecutorCodex:
+			return "Codex"
+		case db.ExecutorClaude:
+			return "Claude"
+		default:
+			// Unknown executor, capitalize first letter
+			if len(m.task.Executor) > 0 {
+				return strings.ToUpper(m.task.Executor[:1]) + m.task.Executor[1:]
+			}
+		}
+	}
+	// Fallback to the global executor's display name
 	if m.executor != nil {
 		return m.executor.DisplayName()
 	}
