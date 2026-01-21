@@ -232,6 +232,8 @@ func (db *DB) migrate() error {
 		`ALTER TABLE tasks ADD COLUMN pr_number INTEGER DEFAULT 0`, // Pull request number (if associated with a PR)
 		// Dangerous mode tracking
 		`ALTER TABLE tasks ADD COLUMN dangerous_mode INTEGER DEFAULT 0`, // Whether running with --dangerously-skip-permissions
+		// Task pinning
+		`ALTER TABLE tasks ADD COLUMN pinned INTEGER DEFAULT 0`, // Whether task is pinned to top of column
 		// Daemon session tracking for process management
 		`ALTER TABLE tasks ADD COLUMN daemon_session TEXT DEFAULT ''`, // tmux daemon session name for killing Claude
 		// Task tagging for categorization and search
