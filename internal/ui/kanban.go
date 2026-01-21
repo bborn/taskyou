@@ -34,6 +34,7 @@ type KanbanBoard struct {
 	allTasks         []*db.Task               // All tasks
 	prInfo           map[int64]*github.PRInfo // PR info by task ID
 	runningProcesses map[int64]bool           // Tasks with running shell processes
+	tasksNeedingInput map[int64]bool          // Tasks waiting for user input (active input notification)
 	hiddenDoneCount  int                      // Number of done tasks not shown (older ones)
 }
 
@@ -114,6 +115,19 @@ func (k *KanbanBoard) HasRunningProcess(taskID int64) bool {
 		return false
 	}
 	return k.runningProcesses[taskID]
+}
+
+// SetTasksNeedingInput updates the map of tasks waiting for user input.
+func (k *KanbanBoard) SetTasksNeedingInput(needsInput map[int64]bool) {
+	k.tasksNeedingInput = needsInput
+}
+
+// NeedsInput returns true if the task has an active input notification.
+func (k *KanbanBoard) NeedsInput(taskID int64) bool {
+	if k.tasksNeedingInput == nil {
+		return false
+	}
+	return k.tasksNeedingInput[taskID]
 }
 
 // distributeTasksToColumns distributes tasks to their respective columns.
@@ -770,6 +784,8 @@ func (k *KanbanBoard) renderTaskCard(task *db.Task, width int, isSelected bool) 
 
 	// Recurring tasks are de-emphasized visually (dimmed) when not selected
 	isRecurring := task.IsRecurring()
+	// Check if task has an active input notification
+	needsInput := k.NeedsInput(task.ID)
 
 	if isSelected {
 		cardBg, cardFg := GetThemeCardColors()
@@ -781,6 +797,13 @@ func (k *KanbanBoard) renderTaskCard(task *db.Task, width int, isSelected bool) 
 			Border(lipgloss.RoundedBorder()).
 			BorderForeground(lipgloss.Color(currentTheme.CardBorderHi)).
 			MarginBottom(0) // Border adds visual separation
+	} else if needsInput {
+		// Tasks with active input notification get yellow bottom border
+		cardStyle = cardStyle.
+			BorderBottom(true).
+			BorderStyle(lipgloss.NormalBorder()).
+			BorderForeground(ColorWarning).
+			MarginBottom(0)
 	} else if isRecurring {
 		// Recurring tasks are dimmed to de-emphasize them
 		cardStyle = cardStyle.
