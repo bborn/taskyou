@@ -269,8 +269,8 @@ type AppModel struct {
 	// Project change confirmation state (when changing a task's project)
 	projectChangeConfirm      *huh.Form
 	projectChangeConfirmValue bool
-	pendingProjectChangeTask  *db.Task  // The updated task data with new project
-	originalProjectChangeTask *db.Task  // The original task to delete
+	pendingProjectChangeTask  *db.Task // The updated task data with new project
+	originalProjectChangeTask *db.Task // The original task to delete
 
 	// Delete confirmation state
 	deleteConfirm      *huh.Form
@@ -401,9 +401,9 @@ func NewAppModel(database *db.DB, exec *executor.Executor, workingDir string) *A
 		tasksNeedingInput: make(map[int64]bool),
 		watcher:           watcher,
 		dbChangeCh:        dbChangeCh,
-		prCache:      github.NewPRCache(),
-		filterInput:  filterInput,
-		filterText:   "",
+		prCache:           github.NewPRCache(),
+		filterInput:       filterInput,
+		filterText:        "",
 	}
 
 	model.keys.ResumeClaude.SetHelp("R", fmt.Sprintf("resume %s", model.executorDisplayName()))
@@ -2609,8 +2609,14 @@ func (m *AppModel) deleteTask(id int64) tea.Cmd {
 
 		// Clean up worktree and Claude sessions if they exist
 		if task != nil && task.WorktreePath != "" {
+			projectConfigDir := ""
+			if task.Project != "" {
+				if project, err := m.db.GetProjectByName(task.Project); err == nil && project != nil {
+					projectConfigDir = project.ClaudeConfigDir
+				}
+			}
 			// Clean up Claude session files first (before worktree is removed)
-			executor.CleanupClaudeSessions(task.WorktreePath)
+			executor.CleanupClaudeSessions(task.WorktreePath, projectConfigDir)
 
 			// Clean up worktree
 			m.executor.CleanupWorktree(task)
@@ -2687,8 +2693,14 @@ func (m *AppModel) moveTaskToProject(newTaskData *db.Task, oldTask *db.Task) tea
 
 		// Clean up worktree and Claude sessions if they exist
 		if oldTask.WorktreePath != "" {
+			oldConfigDir := ""
+			if oldTask.Project != "" {
+				if project, err := database.GetProjectByName(oldTask.Project); err == nil && project != nil {
+					oldConfigDir = project.ClaudeConfigDir
+				}
+			}
 			// Clean up Claude session files first (before worktree is removed)
-			executor.CleanupClaudeSessions(oldTask.WorktreePath)
+			executor.CleanupClaudeSessions(oldTask.WorktreePath, oldConfigDir)
 
 			// Clean up worktree
 			exec.CleanupWorktree(oldTask)

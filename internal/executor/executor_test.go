@@ -402,7 +402,7 @@ func TestFindClaudeSessionID(t *testing.T) {
 func TestRenameClaudeSession(t *testing.T) {
 	t.Run("returns nil for non-existent workdir", func(t *testing.T) {
 		// Test with a workdir that doesn't have any Claude sessions
-		err := RenameClaudeSession("/tmp/non-existent-workdir-12345", "New Name")
+		err := RenameClaudeSession("/tmp/non-existent-workdir-12345", "New Name", "")
 		if err != nil {
 			t.Errorf("expected nil error for non-existent session, got: %v", err)
 		}
@@ -513,16 +513,17 @@ func TestCleanupClaudeSessions(t *testing.T) {
 	if err != nil {
 		t.Skip("Could not get home directory")
 	}
+	defaultDir := filepath.Join(home, ".claude")
 
 	t.Run("returns nil for empty worktree path", func(t *testing.T) {
-		err := CleanupClaudeSessions("")
+		err := CleanupClaudeSessions("", defaultDir)
 		if err != nil {
 			t.Errorf("expected nil error for empty path, got: %v", err)
 		}
 	})
 
 	t.Run("returns nil for non-existent session directory", func(t *testing.T) {
-		err := CleanupClaudeSessions("/tmp/non-existent-worktree-12345")
+		err := CleanupClaudeSessions("/tmp/non-existent-worktree-12345", defaultDir)
 		if err != nil {
 			t.Errorf("expected nil error for non-existent directory, got: %v", err)
 		}
@@ -562,7 +563,7 @@ func TestCleanupClaudeSessions(t *testing.T) {
 		}
 
 		// Run cleanup
-		err := CleanupClaudeSessions(testWorkDir)
+		err := CleanupClaudeSessions(testWorkDir, defaultDir)
 		if err != nil {
 			t.Errorf("CleanupClaudeSessions failed: %v", err)
 		}
@@ -578,63 +579,63 @@ func TestCleanupClaudeSessions(t *testing.T) {
 
 func TestIsValidWorktreePath(t *testing.T) {
 	tests := []struct {
-		name     string
-		path     string
+		name      string
+		path      string
 		wantValid bool
 	}{
 		{
-			name:     "valid worktree path",
-			path:     "/Users/bruno/Projects/myproject/.task-worktrees/123-task-slug",
+			name:      "valid worktree path",
+			path:      "/Users/bruno/Projects/myproject/.task-worktrees/123-task-slug",
 			wantValid: true,
 		},
 		{
-			name:     "valid worktree path with nested dirs",
-			path:     "/Users/bruno/Projects/myproject/.task-worktrees/456-another-task/subdir",
+			name:      "valid worktree path with nested dirs",
+			path:      "/Users/bruno/Projects/myproject/.task-worktrees/456-another-task/subdir",
 			wantValid: true,
 		},
 		{
-			name:     "main project directory - not valid",
-			path:     "/Users/bruno/Projects/myproject",
+			name:      "main project directory - not valid",
+			path:      "/Users/bruno/Projects/myproject",
 			wantValid: false,
 		},
 		{
-			name:     "project subdirectory - not valid",
-			path:     "/Users/bruno/Projects/myproject/src",
+			name:      "project subdirectory - not valid",
+			path:      "/Users/bruno/Projects/myproject/src",
 			wantValid: false,
 		},
 		{
-			name:     "root directory - not valid",
-			path:     "/",
+			name:      "root directory - not valid",
+			path:      "/",
 			wantValid: false,
 		},
 		{
-			name:     "home directory - not valid",
-			path:     "/Users/bruno",
+			name:      "home directory - not valid",
+			path:      "/Users/bruno",
 			wantValid: false,
 		},
 		{
-			name:     "tmp directory - not valid",
-			path:     "/tmp",
+			name:      "tmp directory - not valid",
+			path:      "/tmp",
 			wantValid: false,
 		},
 		{
-			name:     ".task-worktrees directory itself - not valid (needs subdirectory)",
-			path:     "/Users/bruno/Projects/myproject/.task-worktrees",
+			name:      ".task-worktrees directory itself - not valid (needs subdirectory)",
+			path:      "/Users/bruno/Projects/myproject/.task-worktrees",
 			wantValid: false,
 		},
 		{
-			name:     "empty path - not valid",
-			path:     "",
+			name:      "empty path - not valid",
+			path:      "",
 			wantValid: false,
 		},
 		{
-			name:     "relative path with .task-worktrees",
-			path:     "project/.task-worktrees/123-task",
+			name:      "relative path with .task-worktrees",
+			path:      "project/.task-worktrees/123-task",
 			wantValid: true,
 		},
 		{
-			name:     "path containing task-worktrees without dot - not valid",
-			path:     "/Users/bruno/Projects/task-worktrees/123-task",
+			name:      "path containing task-worktrees without dot - not valid",
+			path:      "/Users/bruno/Projects/task-worktrees/123-task",
 			wantValid: false,
 		},
 	}

@@ -353,6 +353,7 @@ Configure projects in Settings (`s`):
 - **Path** - Local filesystem path to git repo
 - **Aliases** - Short names for quick reference
 - **Instructions** - Project-specific AI instructions
+- **Claude Config Dir** - Optional override for `CLAUDE_CONFIG_DIR` (use different Claude accounts per project)
 
 ### Worktrees
 

@@ -1140,10 +1140,13 @@ Examples:
   task purge-claude-config --dry-run`,
 		Run: func(cmd *cobra.Command, args []string) {
 			dryRun, _ := cmd.Flags().GetBool("dry-run")
+			configDirFlag, _ := cmd.Flags().GetString("config-dir")
+			resolvedDir := executor.ResolveClaudeConfigDir(configDirFlag)
+			configPath := executor.ClaudeConfigFilePath(resolvedDir)
 
 			if dryRun {
 				// Show what would be removed
-				removed, paths, err := previewStaleClaudeProjectConfigs()
+				removed, paths, err := previewStaleClaudeProjectConfigs(configPath)
 				if err != nil {
 					fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
 					os.Exit(1)
@@ -1159,7 +1162,7 @@ Examples:
 				return
 			}
 
-			removed, err := executor.PurgeStaleClaudeProjectConfigs()
+			removed, err := executor.PurgeStaleClaudeProjectConfigs(configPath)
 			if err != nil {
 				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
 				os.Exit(1)
@@ -1168,11 +1171,12 @@ Examples:
 			if removed == 0 {
 				fmt.Println(dimStyle.Render("No stale entries found"))
 			} else {
-				fmt.Println(successStyle.Render(fmt.Sprintf("Removed %d stale entries from ~/.claude.json", removed)))
+				fmt.Println(successStyle.Render(fmt.Sprintf("Removed %d stale entries from %s", removed, configPath)))
 			}
 		},
 	}
 	purgeClaudeConfigCmd.Flags().Bool("dry-run", false, "Show what would be removed without making changes")
+	purgeClaudeConfigCmd.Flags().String("config-dir", "", "Claude config directory (defaults to $CLAUDE_CONFIG_DIR or ~/.claude)")
 	rootCmd.AddCommand(purgeClaudeConfigCmd)
 
 	// Cloud subcommand
@@ -2654,8 +2658,14 @@ func deleteTask(taskID int64) error {
 
 	// Clean up worktree and Claude sessions if they exist
 	if task.WorktreePath != "" {
+		projectConfigDir := ""
+		if task.Project != "" {
+			if project, err := database.GetProjectByName(task.Project); err == nil && project != nil {
+				projectConfigDir = project.ClaudeConfigDir
+			}
+		}
 		// Clean up Claude session files first (before worktree is removed)
-		if err := executor.CleanupClaudeSessions(task.WorktreePath); err != nil {
+		if err := executor.CleanupClaudeSessions(task.WorktreePath, projectConfigDir); err != nil {
 			fmt.Fprintln(os.Stderr, dimStyle.Render(fmt.Sprintf("Warning: could not remove Claude sessions: %v", err)))
 		}
 
@@ -2677,17 +2687,14 @@ func deleteTask(taskID int64) error {
 }
 
 // previewStaleClaudeProjectConfigs returns the count and paths of stale entries
-// that would be removed from ~/.claude.json without actually removing them.
-func previewStaleClaudeProjectConfigs() (int, []string, error) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return 0, nil, fmt.Errorf("get home dir: %w", err)
+// that would be removed from claude.json without actually removing them.
+func previewStaleClaudeProjectConfigs(configPath string) (int, []string, error) {
+	if configPath == "" {
+		configPath = executor.ClaudeConfigFilePath(executor.DefaultClaudeConfigDir())
 	}
 
-	claudeConfigPath := filepath.Join(home, ".claude.json")
-
 	// Read existing config
-	data, err := os.ReadFile(claudeConfigPath)
+	data, err := os.ReadFile(configPath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return 0, nil, nil // No config file
