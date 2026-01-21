@@ -650,16 +650,43 @@ func (m *DetailModel) ensureTmuxPanesJoined() {
 	}
 }
 
-// getPaneTitle returns the title for the detail pane (e.g., "Task 123 (2/5)").
+// getPaneTitle returns the title for the detail pane (e.g., "Task 123: some task title... (2/5)").
 func (m *DetailModel) getPaneTitle() string {
 	if m.task == nil {
 		return "Task"
 	}
-	title := fmt.Sprintf("Task %d", m.task.ID)
+
+	// Build position suffix if available
+	positionSuffix := ""
 	if m.positionInColumn > 0 && m.totalInColumn > 0 {
-		title += fmt.Sprintf(" (%d/%d)", m.positionInColumn, m.totalInColumn)
+		positionSuffix = fmt.Sprintf(" (%d/%d)", m.positionInColumn, m.totalInColumn)
 	}
-	return title
+
+	// Calculate available space for title
+	// Format: "Task {id}: {title}{positionSuffix}"
+	prefix := fmt.Sprintf("Task %d", m.task.ID)
+	if m.task.Title == "" {
+		return prefix + positionSuffix
+	}
+
+	// Max pane title length (reasonable for most terminal widths)
+	const maxPaneTitle = 60
+	// Reserve space for prefix ": " and position suffix
+	availableForTitle := maxPaneTitle - len(prefix) - 2 - len(positionSuffix)
+	if availableForTitle < 10 {
+		availableForTitle = 10 // Minimum title length
+	}
+
+	taskTitle := m.task.Title
+	// Replace newlines with spaces for single-line display
+	taskTitle = strings.ReplaceAll(taskTitle, "\n", " ")
+	taskTitle = strings.ReplaceAll(taskTitle, "\r", "")
+
+	if len(taskTitle) > availableForTitle {
+		taskTitle = taskTitle[:availableForTitle-3] + "..."
+	}
+
+	return fmt.Sprintf("%s: %s%s", prefix, taskTitle, positionSuffix)
 }
 
 // updateTmuxPaneTitle updates the tmux pane title to show task info.
