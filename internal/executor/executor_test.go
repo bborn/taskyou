@@ -3,6 +3,7 @@ package executor
 import (
 	"context"
 	"os"
+	execPkg "os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -740,4 +741,161 @@ func TestCleanupInactiveDoneTasksFiltering(t *testing.T) {
 		// The task would be selected for cleanup if it had a running process
 		exec.cleanupInactiveDoneTasks()
 	})
+}
+
+func TestGetWorktreeHeadSHA(t *testing.T) {
+	// Create a temp directory and initialize a git repo
+	tmpDir := t.TempDir()
+
+	// Initialize git repo
+	initScript := "git init && git config user.email 'test@test.com' && git config user.name 'Test' && git commit --allow-empty -m 'Initial commit'"
+	initCmd := execPkg.Command("bash", "-c", "cd "+tmpDir+" && "+initScript)
+	if output, err := initCmd.CombinedOutput(); err != nil {
+		t.Fatalf("Failed to init git repo: %v\n%s", err, string(output))
+	}
+
+	// Create temp database
+	tmpFile, err := os.CreateTemp("", "test-*.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(tmpFile.Name())
+	tmpFile.Close()
+
+	database, err := db.Open(tmpFile.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+
+	cfg := &config.Config{}
+	exec := New(database, cfg)
+
+	// Test getting HEAD SHA from a valid git directory
+	sha := exec.getWorktreeHeadSHA(tmpDir)
+	if sha == "" {
+		t.Error("expected non-empty SHA from git directory")
+	}
+	if len(sha) != 40 {
+		t.Errorf("expected 40-character SHA, got %d characters: %s", len(sha), sha)
+	}
+
+	// Test getting HEAD SHA from a non-git directory
+	nonGitDir := t.TempDir()
+	sha = exec.getWorktreeHeadSHA(nonGitDir)
+	if sha != "" {
+		t.Errorf("expected empty SHA from non-git directory, got %s", sha)
+	}
+}
+
+func TestConflictResolveSHATracking(t *testing.T) {
+	// Create temp database
+	tmpFile, err := os.CreateTemp("", "test-*.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(tmpFile.Name())
+	tmpFile.Close()
+
+	database, err := db.Open(tmpFile.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+
+	// Create the test project first
+	if err := database.CreateProject(&db.Project{Name: "test", Path: "/tmp/test"}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create a test task
+	task := &db.Task{
+		Title:   "Test task with conflicts",
+		Status:  db.StatusBlocked,
+		Project: "test",
+	}
+	if err := database.CreateTask(task); err != nil {
+		t.Fatal(err)
+	}
+
+	// Initially, LastConflictResolveSHA should be empty
+	retrievedTask, err := database.GetTask(task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if retrievedTask.LastConflictResolveSHA != "" {
+		t.Errorf("expected empty LastConflictResolveSHA, got %s", retrievedTask.LastConflictResolveSHA)
+	}
+
+	// Update the SHA
+	testSHA := "abc123def456789012345678901234567890abcd"
+	if err := database.UpdateTaskConflictResolveSHA(task.ID, testSHA); err != nil {
+		t.Fatal(err)
+	}
+
+	// Verify the SHA was updated
+	retrievedTask, err = database.GetTask(task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if retrievedTask.LastConflictResolveSHA != testSHA {
+		t.Errorf("expected LastConflictResolveSHA = %s, got %s", testSHA, retrievedTask.LastConflictResolveSHA)
+	}
+
+	// Update task should also persist the SHA
+	retrievedTask.LastConflictResolveSHA = "newsha123456789012345678901234567890abcd"
+	if err := database.UpdateTask(retrievedTask); err != nil {
+		t.Fatal(err)
+	}
+
+	retrievedTask, err = database.GetTask(task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if retrievedTask.LastConflictResolveSHA != "newsha123456789012345678901234567890abcd" {
+		t.Errorf("UpdateTask did not persist LastConflictResolveSHA")
+	}
+}
+
+func TestCheckMergeConflictsSkipsNonBlockedTasks(t *testing.T) {
+	// Create temp database
+	tmpFile, err := os.CreateTemp("", "test-*.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(tmpFile.Name())
+	tmpFile.Close()
+
+	database, err := db.Open(tmpFile.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+
+	// Create the test project first
+	if err := database.CreateProject(&db.Project{Name: "test", Path: "/tmp/test"}); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.Config{}
+	exec := New(database, cfg)
+
+	// Create tasks in various statuses
+	statuses := []string{db.StatusBacklog, db.StatusQueued, db.StatusProcessing, db.StatusDone}
+	for _, status := range statuses {
+		task := &db.Task{
+			Title:      "Test task " + status,
+			Status:     status,
+			Project:    "test",
+			BranchName: "test-branch-" + status,
+		}
+		if err := database.CreateTask(task); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// checkMergeConflicts should not panic and should skip non-blocked tasks
+	// (We can't easily test that it actually triggers resolution without mocking the PR cache,
+	// but we can verify it doesn't crash)
+	exec.checkMergeConflicts()
 }

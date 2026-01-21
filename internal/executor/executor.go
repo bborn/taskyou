@@ -583,11 +583,13 @@ func (e *Executor) worker(ctx context.Context) {
 	// Check for idle blocked tasks to suspend every 60 seconds (30 ticks)
 	// Check for due scheduled tasks every 10 seconds (5 ticks)
 	// Check for inactive done tasks to cleanup every 5 minutes (150 ticks)
+	// Check for merge conflicts every 60 seconds (30 ticks)
 	tickCount := 0
 	const mergeCheckInterval = 15
 	const suspendCheckInterval = 30
 	const scheduleCheckInterval = 5
-	const doneCleanupInterval = 150 // 5 minutes at 2 second ticks
+	const doneCleanupInterval = 150       // 5 minutes at 2 second ticks
+	const conflictCheckInterval = 30      // 60 seconds at 2 second ticks
 
 	for {
 		select {
@@ -618,6 +620,11 @@ func (e *Executor) worker(ctx context.Context) {
 			// Periodically cleanup Claude processes for inactive done tasks
 			if tickCount%doneCleanupInterval == 0 {
 				e.cleanupInactiveDoneTasks()
+			}
+
+			// Periodically check for merge conflicts and attempt resolution
+			if tickCount%conflictCheckInterval == 0 {
+				e.checkMergeConflicts()
 			}
 		}
 	}
@@ -3112,6 +3119,114 @@ func (e *Executor) isBranchMerged(task *db.Task) bool {
 	}
 
 	return false
+}
+
+// checkMergeConflicts checks for tasks with PRs that have merge conflicts and attempts to resolve them.
+// This runs periodically in the worker loop. It only attempts to resolve conflicts once per
+// unique commit state to prevent infinite loops - if new commits are pushed, it will try again.
+func (e *Executor) checkMergeConflicts() {
+	// Get all tasks that have branches and aren't done
+	tasks, err := e.db.GetTasksWithBranches()
+	if err != nil {
+		e.logger.Debug("Failed to get tasks with branches for conflict check", "error", err)
+		return
+	}
+
+	for _, task := range tasks {
+		// Only check blocked tasks - these are waiting for input
+		// Processing tasks are actively running and will handle conflicts themselves
+		if task.Status != db.StatusBlocked {
+			continue
+		}
+
+		// Skip tasks without a worktree path (not set up yet)
+		if task.WorktreePath == "" {
+			continue
+		}
+
+		// Skip tasks currently being processed
+		e.mu.RLock()
+		isRunning := e.runningTasks[task.ID]
+		e.mu.RUnlock()
+		if isRunning {
+			continue
+		}
+
+		// Check if the PR has merge conflicts
+		projectDir := e.getProjectDir(task.Project)
+		if projectDir == "" {
+			continue
+		}
+
+		prInfo := e.prCache.GetPRForBranch(projectDir, task.BranchName)
+		if prInfo == nil || prInfo.Mergeable != "CONFLICTING" {
+			continue
+		}
+
+		// PR has conflicts - check if we've already attempted to resolve for this commit
+		currentSHA := e.getWorktreeHeadSHA(task.WorktreePath)
+		if currentSHA == "" {
+			continue
+		}
+
+		// If we've already tried to resolve for this SHA, don't try again
+		if task.LastConflictResolveSHA == currentSHA {
+			e.logger.Debug("Already attempted conflict resolution for this commit", "task", task.ID, "sha", currentSHA)
+			continue
+		}
+
+		// Update the SHA to prevent infinite loops before we trigger the resolution
+		if err := e.db.UpdateTaskConflictResolveSHA(task.ID, currentSHA); err != nil {
+			e.logger.Error("Failed to update conflict resolve SHA", "task", task.ID, "error", err)
+			continue
+		}
+
+		// Log and trigger resolution attempt
+		e.logger.Info("Attempting to resolve merge conflicts", "task", task.ID, "branch", task.BranchName)
+		e.logLine(task.ID, "system", "")
+		e.logLine(task.ID, "system", "═══════════════════════════════════════════════════════")
+		e.logLine(task.ID, "system", fmt.Sprintf("🔀 MERGE CONFLICTS DETECTED - Attempting automatic resolution"))
+		e.logLine(task.ID, "system", "═══════════════════════════════════════════════════════")
+
+		// Retry the task with a message to resolve the conflicts
+		conflictMessage := `The PR for this task has merge conflicts with the main branch. Please:
+1. Fetch the latest changes from the main branch
+2. Merge or rebase the main branch into this branch
+3. Resolve any merge conflicts
+4. Commit the resolution and push the changes
+5. Continue with any remaining work on the task
+
+After resolving conflicts, verify the PR is ready for review.`
+
+		if err := e.db.RetryTask(task.ID, conflictMessage); err != nil {
+			e.logger.Error("Failed to retry task for conflict resolution", "task", task.ID, "error", err)
+			continue
+		}
+
+		// Broadcast the status change
+		updatedTask, _ := e.db.GetTask(task.ID)
+		if updatedTask != nil {
+			e.broadcastTaskEvent(TaskEvent{
+				Type:   "status_changed",
+				Task:   updatedTask,
+				TaskID: task.ID,
+			})
+		}
+	}
+}
+
+// getWorktreeHeadSHA returns the current HEAD commit SHA for a worktree.
+func (e *Executor) getWorktreeHeadSHA(worktreePath string) string {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "git", "rev-parse", "HEAD")
+	cmd.Dir = worktreePath
+	output, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(output))
 }
 
 // setupWorktree creates a git worktree for the task if the project is a git repo.

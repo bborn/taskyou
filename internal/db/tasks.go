@@ -38,6 +38,8 @@ type Task struct {
 	ScheduledAt *LocalTime // When to next run (nil = not scheduled)
 	Recurrence  string     // Recurrence pattern: "", "hourly", "daily", "weekly", "monthly", or cron expression
 	LastRunAt   *LocalTime // When last executed (for recurring tasks)
+	// Merge conflict resolution tracking
+	LastConflictResolveSHA string // Git commit SHA when we last attempted to resolve merge conflicts
 }
 
 // Task statuses
@@ -171,7 +173,8 @@ func (db *DB) GetTask(id int64) (*Task, error) {
 		       COALESCE(pr_url, ''), COALESCE(pr_number, 0),
 		       COALESCE(dangerous_mode, 0), COALESCE(tags, ''),
 		       created_at, updated_at, started_at, completed_at,
-		       scheduled_at, recurrence, last_run_at
+		       scheduled_at, recurrence, last_run_at,
+		       COALESCE(last_conflict_resolve_sha, '')
 		FROM tasks WHERE id = ?
 	`, id).Scan(
 		&t.ID, &t.Title, &t.Body, &t.Status, &t.Type, &t.Project, &t.Executor,
@@ -181,6 +184,7 @@ func (db *DB) GetTask(id int64) (*Task, error) {
 		&t.DangerousMode, &t.Tags,
 		&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
 		&t.ScheduledAt, &t.Recurrence, &t.LastRunAt,
+		&t.LastConflictResolveSHA,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -211,7 +215,8 @@ func (db *DB) ListTasks(opts ListTasksOptions) ([]*Task, error) {
 		       COALESCE(pr_url, ''), COALESCE(pr_number, 0),
 		       COALESCE(dangerous_mode, 0), COALESCE(tags, ''),
 		       created_at, updated_at, started_at, completed_at,
-		       scheduled_at, recurrence, last_run_at
+		       scheduled_at, recurrence, last_run_at,
+		       COALESCE(last_conflict_resolve_sha, '')
 		FROM tasks WHERE 1=1
 	`
 	args := []interface{}{}
@@ -265,6 +270,7 @@ func (db *DB) ListTasks(opts ListTasksOptions) ([]*Task, error) {
 			&t.DangerousMode, &t.Tags,
 			&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
 			&t.ScheduledAt, &t.Recurrence, &t.LastRunAt,
+			&t.LastConflictResolveSHA,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("scan task: %w", err)
@@ -287,7 +293,8 @@ func (db *DB) GetMostRecentlyCreatedTask() (*Task, error) {
 		       COALESCE(pr_url, ''), COALESCE(pr_number, 0),
 		       COALESCE(dangerous_mode, 0), COALESCE(tags, ''),
 		       created_at, updated_at, started_at, completed_at,
-		       scheduled_at, recurrence, last_run_at
+		       scheduled_at, recurrence, last_run_at,
+		       COALESCE(last_conflict_resolve_sha, '')
 		FROM tasks
 		ORDER BY created_at DESC, id DESC
 		LIMIT 1
@@ -299,6 +306,7 @@ func (db *DB) GetMostRecentlyCreatedTask() (*Task, error) {
 		&t.DangerousMode, &t.Tags,
 		&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
 		&t.ScheduledAt, &t.Recurrence, &t.LastRunAt,
+		&t.LastConflictResolveSHA,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -325,7 +333,8 @@ func (db *DB) SearchTasks(query string, limit int) ([]*Task, error) {
 		       COALESCE(pr_url, ''), COALESCE(pr_number, 0),
 		       COALESCE(dangerous_mode, 0), COALESCE(tags, ''),
 		       created_at, updated_at, started_at, completed_at,
-		       scheduled_at, recurrence, last_run_at
+		       scheduled_at, recurrence, last_run_at,
+		       COALESCE(last_conflict_resolve_sha, '')
 		FROM tasks
 		WHERE (
 			title LIKE ? COLLATE NOCASE
@@ -356,6 +365,7 @@ func (db *DB) SearchTasks(query string, limit int) ([]*Task, error) {
 			&t.DangerousMode, &t.Tags,
 			&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
 			&t.ScheduledAt, &t.Recurrence, &t.LastRunAt,
+			&t.LastConflictResolveSHA,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("scan task: %w", err)
@@ -415,12 +425,14 @@ func (db *DB) UpdateTask(t *Task) error {
 			worktree_path = ?, branch_name = ?, port = ?, claude_session_id = ?,
 			daemon_session = ?, pr_url = ?, pr_number = ?, dangerous_mode = ?,
 			tags = ?, scheduled_at = ?, recurrence = ?, last_run_at = ?,
+			last_conflict_resolve_sha = ?,
 			updated_at = CURRENT_TIMESTAMP
 		WHERE id = ?
 	`, t.Title, t.Body, t.Status, t.Type, t.Project, t.Executor,
 		t.WorktreePath, t.BranchName, t.Port, t.ClaudeSessionID,
 		t.DaemonSession, t.PRURL, t.PRNumber, t.DangerousMode,
-		t.Tags, t.ScheduledAt, t.Recurrence, t.LastRunAt, t.ID)
+		t.Tags, t.ScheduledAt, t.Recurrence, t.LastRunAt,
+		t.LastConflictResolveSHA, t.ID)
 	if err != nil {
 		return fmt.Errorf("update task: %w", err)
 	}
@@ -488,6 +500,20 @@ func (db *DB) UpdateTaskPaneIDs(taskID int64, claudePaneID, shellPaneID string) 
 	`, claudePaneID, shellPaneID, taskID)
 	if err != nil {
 		return fmt.Errorf("update task pane ids: %w", err)
+	}
+	return nil
+}
+
+// UpdateTaskConflictResolveSHA updates the last conflict resolution SHA for a task.
+// This is used to track when we last attempted to resolve merge conflicts,
+// so we don't keep retrying infinitely.
+func (db *DB) UpdateTaskConflictResolveSHA(taskID int64, sha string) error {
+	_, err := db.Exec(`
+		UPDATE tasks SET last_conflict_resolve_sha = ?, updated_at = CURRENT_TIMESTAMP
+		WHERE id = ?
+	`, sha, taskID)
+	if err != nil {
+		return fmt.Errorf("update task conflict resolve sha: %w", err)
 	}
 	return nil
 }
@@ -572,7 +598,8 @@ func (db *DB) GetNextQueuedTask() (*Task, error) {
 		       COALESCE(pr_url, ''), COALESCE(pr_number, 0),
 		       COALESCE(dangerous_mode, 0), COALESCE(tags, ''),
 		       created_at, updated_at, started_at, completed_at,
-		       scheduled_at, recurrence, last_run_at
+		       scheduled_at, recurrence, last_run_at,
+		       COALESCE(last_conflict_resolve_sha, '')
 		FROM tasks
 		WHERE status = ?
 		ORDER BY created_at ASC
@@ -585,6 +612,7 @@ func (db *DB) GetNextQueuedTask() (*Task, error) {
 		&t.DangerousMode, &t.Tags,
 		&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
 		&t.ScheduledAt, &t.Recurrence, &t.LastRunAt,
+		&t.LastConflictResolveSHA,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -605,7 +633,8 @@ func (db *DB) GetQueuedTasks() ([]*Task, error) {
 		       COALESCE(pr_url, ''), COALESCE(pr_number, 0),
 		       COALESCE(dangerous_mode, 0), COALESCE(tags, ''),
 		       created_at, updated_at, started_at, completed_at,
-		       scheduled_at, recurrence, last_run_at
+		       scheduled_at, recurrence, last_run_at,
+		       COALESCE(last_conflict_resolve_sha, '')
 		FROM tasks
 		WHERE status = ?
 		ORDER BY created_at ASC
@@ -622,10 +651,11 @@ func (db *DB) GetQueuedTasks() ([]*Task, error) {
 			&t.ID, &t.Title, &t.Body, &t.Status, &t.Type, &t.Project, &t.Executor,
 			&t.WorktreePath, &t.BranchName, &t.Port, &t.ClaudeSessionID,
 			&t.DaemonSession, &t.TmuxWindowID, &t.ClaudePaneID, &t.ShellPaneID,
-		&t.PRURL, &t.PRNumber,
+			&t.PRURL, &t.PRNumber,
 			&t.DangerousMode, &t.Tags,
 			&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
 			&t.ScheduledAt, &t.Recurrence, &t.LastRunAt,
+			&t.LastConflictResolveSHA,
 		); err != nil {
 			return nil, fmt.Errorf("scan task: %w", err)
 		}
@@ -645,7 +675,8 @@ func (db *DB) GetTasksWithBranches() ([]*Task, error) {
 		       COALESCE(pr_url, ''), COALESCE(pr_number, 0),
 		       COALESCE(dangerous_mode, 0), COALESCE(tags, ''),
 		       created_at, updated_at, started_at, completed_at,
-		       scheduled_at, recurrence, last_run_at
+		       scheduled_at, recurrence, last_run_at,
+		       COALESCE(last_conflict_resolve_sha, '')
 		FROM tasks
 		WHERE branch_name != '' AND status NOT IN (?, ?)
 		ORDER BY created_at DESC
@@ -662,10 +693,11 @@ func (db *DB) GetTasksWithBranches() ([]*Task, error) {
 			&t.ID, &t.Title, &t.Body, &t.Status, &t.Type, &t.Project, &t.Executor,
 			&t.WorktreePath, &t.BranchName, &t.Port, &t.ClaudeSessionID,
 			&t.DaemonSession, &t.TmuxWindowID, &t.ClaudePaneID, &t.ShellPaneID,
-		&t.PRURL, &t.PRNumber,
+			&t.PRURL, &t.PRNumber,
 			&t.DangerousMode, &t.Tags,
 			&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
 			&t.ScheduledAt, &t.Recurrence, &t.LastRunAt,
+			&t.LastConflictResolveSHA,
 		); err != nil {
 			return nil, fmt.Errorf("scan task: %w", err)
 		}
@@ -688,7 +720,8 @@ func (db *DB) GetDueScheduledTasks() ([]*Task, error) {
 		       COALESCE(pr_url, ''), COALESCE(pr_number, 0),
 		       COALESCE(dangerous_mode, 0), COALESCE(tags, ''),
 		       created_at, updated_at, started_at, completed_at,
-		       scheduled_at, recurrence, last_run_at
+		       scheduled_at, recurrence, last_run_at,
+		       COALESCE(last_conflict_resolve_sha, '')
 		FROM tasks
 		WHERE scheduled_at IS NOT NULL
 		  AND scheduled_at <= CURRENT_TIMESTAMP
@@ -707,10 +740,11 @@ func (db *DB) GetDueScheduledTasks() ([]*Task, error) {
 			&t.ID, &t.Title, &t.Body, &t.Status, &t.Type, &t.Project, &t.Executor,
 			&t.WorktreePath, &t.BranchName, &t.Port, &t.ClaudeSessionID,
 			&t.DaemonSession, &t.TmuxWindowID, &t.ClaudePaneID, &t.ShellPaneID,
-		&t.PRURL, &t.PRNumber,
+			&t.PRURL, &t.PRNumber,
 			&t.DangerousMode, &t.Tags,
 			&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
 			&t.ScheduledAt, &t.Recurrence, &t.LastRunAt,
+			&t.LastConflictResolveSHA,
 		); err != nil {
 			return nil, fmt.Errorf("scan task: %w", err)
 		}
@@ -729,7 +763,8 @@ func (db *DB) GetScheduledTasks() ([]*Task, error) {
 		       COALESCE(pr_url, ''), COALESCE(pr_number, 0),
 		       COALESCE(dangerous_mode, 0), COALESCE(tags, ''),
 		       created_at, updated_at, started_at, completed_at,
-		       scheduled_at, recurrence, last_run_at
+		       scheduled_at, recurrence, last_run_at,
+		       COALESCE(last_conflict_resolve_sha, '')
 		FROM tasks
 		WHERE scheduled_at IS NOT NULL
 		ORDER BY scheduled_at ASC
@@ -746,10 +781,11 @@ func (db *DB) GetScheduledTasks() ([]*Task, error) {
 			&t.ID, &t.Title, &t.Body, &t.Status, &t.Type, &t.Project, &t.Executor,
 			&t.WorktreePath, &t.BranchName, &t.Port, &t.ClaudeSessionID,
 			&t.DaemonSession, &t.TmuxWindowID, &t.ClaudePaneID, &t.ShellPaneID,
-		&t.PRURL, &t.PRNumber,
+			&t.PRURL, &t.PRNumber,
 			&t.DangerousMode, &t.Tags,
 			&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
 			&t.ScheduledAt, &t.Recurrence, &t.LastRunAt,
+			&t.LastConflictResolveSHA,
 		); err != nil {
 			return nil, fmt.Errorf("scan task: %w", err)
 		}

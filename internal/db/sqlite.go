@@ -242,6 +242,9 @@ func (db *DB) migrate() error {
 		// Tmux pane IDs for deterministic pane identification (avoids index-based guessing)
 		`ALTER TABLE tasks ADD COLUMN claude_pane_id TEXT DEFAULT ''`, // tmux pane ID for Claude/executor pane (e.g., "%1234")
 		`ALTER TABLE tasks ADD COLUMN shell_pane_id TEXT DEFAULT ''`,  // tmux pane ID for shell pane (e.g., "%1235")
+		// Merge conflict resolution tracking - stores commit SHA when we last attempted to resolve conflicts
+		// This prevents infinite loops by only attempting resolution once per commit state
+		`ALTER TABLE tasks ADD COLUMN last_conflict_resolve_sha TEXT DEFAULT ''`,
 	}
 
 	for _, m := range alterMigrations {
