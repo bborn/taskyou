@@ -1439,6 +1439,10 @@ func (m *AppModel) updateDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	if key.Matches(keyMsg, m.keys.Up) {
+		// Ignore if no previous task exists
+		if !m.kanban.HasPrevTask() {
+			return m, nil
+		}
 		// Ignore if transition already in progress to prevent duplicate panes
 		if m.taskTransitionInProgress {
 			return m, nil
@@ -1459,6 +1463,10 @@ func (m *AppModel) updateDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	if key.Matches(keyMsg, m.keys.Down) {
+		// Ignore if no next task exists
+		if !m.kanban.HasNextTask() {
+			return m, nil
+		}
 		// Ignore if transition already in progress to prevent duplicate panes
 		if m.taskTransitionInProgress {
 			return m, nil

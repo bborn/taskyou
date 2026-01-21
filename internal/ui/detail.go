@@ -2001,50 +2001,41 @@ func (m *DetailModel) renderContent() string {
 }
 
 func (m *DetailModel) renderHelp() string {
-	keys := []struct {
-		key  string
-		desc string
-	}{
-		{"↑/↓", "prev/next task"},
+	type helpKey struct {
+		key      string
+		desc     string
+		disabled bool // When disabled, always show grayed out
+	}
+
+	// Check if navigation is available (more than 1 task in column)
+	hasNavigation := m.totalInColumn > 1
+
+	keys := []helpKey{
+		{"↑/↓", "prev/next task", !hasNavigation},
 	}
 
 	// Show scroll hint when content is scrollable
 	if m.viewport.TotalLineCount() > m.viewport.VisibleLineCount() {
-		keys = append(keys, struct {
-			key  string
-			desc string
-		}{"PgUp/Dn", "scroll"})
+		keys = append(keys, helpKey{"PgUp/Dn", "scroll", false})
 	}
 
 	// Only show execute/retry when Claude is not running
 	claudeRunning := m.claudeMemoryMB > 0
 	if !claudeRunning {
-		keys = append(keys, struct {
-			key  string
-			desc string
-		}{"x", "execute"})
+		keys = append(keys, helpKey{"x", "execute", false})
 	}
 
 	hasPanes := m.claudePaneID != "" || m.workdirPaneID != ""
 
-	keys = append(keys, struct {
-		key  string
-		desc string
-	}{"e", "edit"})
+	keys = append(keys, helpKey{"e", "edit", false})
 
 	// Only show retry when Claude is not running
 	if !claudeRunning {
-		keys = append(keys, struct {
-			key  string
-			desc string
-		}{"r", "retry"})
+		keys = append(keys, helpKey{"r", "retry", false})
 	}
 
 	// Always show status change option
-	keys = append(keys, struct {
-		key  string
-		desc string
-	}{"S", "status"})
+	keys = append(keys, helpKey{"S", "status", false})
 
 	// Show dangerous mode toggle when task is processing or blocked
 	if m.task != nil && (m.task.Status == db.StatusProcessing || m.task.Status == db.StatusBlocked) {
@@ -2052,36 +2043,24 @@ func (m *DetailModel) renderHelp() string {
 		if m.task.DangerousMode {
 			toggleDesc = "safe mode"
 		}
-		keys = append(keys, struct {
-			key  string
-			desc string
-		}{"!", toggleDesc})
+		keys = append(keys, helpKey{"!", toggleDesc, false})
 	}
 
 	// Show executor resume shortcut only when the agent is not running but has a session
 	if m.task != nil && m.task.ClaudeSessionID != "" && m.claudeMemoryMB == 0 {
-		keys = append(keys, struct {
-			key  string
-			desc string
-		}{"R", fmt.Sprintf("resume %s", m.executorDisplayName())})
+		keys = append(keys, helpKey{"R", fmt.Sprintf("resume %s", m.executorDisplayName()), false})
 	}
 
 	// Show pane navigation shortcut when panes are visible
 	if hasPanes && os.Getenv("TMUX") != "" {
-		keys = append(keys, struct {
-			key  string
-			desc string
-		}{"shift+↑↓", "switch pane"})
+		keys = append(keys, helpKey{"shift+↑↓", "switch pane", false})
 	}
 
-	keys = append(keys, []struct {
-		key  string
-		desc string
-	}{
-		{"c", "close"},
-		{"a", "archive"},
-		{"d", "delete"},
-		{"esc", "back"},
+	keys = append(keys, []helpKey{
+		{"c", "close", false},
+		{"a", "archive", false},
+		{"d", "delete", false},
+		{"esc", "back", false},
 	}...)
 
 	var help string
@@ -2092,10 +2071,11 @@ func (m *DetailModel) renderHelp() string {
 		if i > 0 {
 			help += "  "
 		}
-		if m.focused {
-			help += HelpKey.Render(k.key) + " " + HelpDesc.Render(k.desc)
-		} else {
+		// Disabled keys are always dimmed, regardless of focus
+		if k.disabled || !m.focused {
 			help += dimmedKeyStyle.Render(k.key) + " " + dimmedDescStyle.Render(k.desc)
+		} else {
+			help += HelpKey.Render(k.key) + " " + HelpDesc.Render(k.desc)
 		}
 	}
 
