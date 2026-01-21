@@ -25,17 +25,17 @@ const MobileWidthThreshold = 80
 
 // KanbanBoard manages the kanban board state.
 type KanbanBoard struct {
-	columns          []KanbanColumn
-	selectedCol      int
-	selectedRow      int
-	scrollOffsets    []int // Scroll offset per column
-	width            int
-	height           int
-	allTasks         []*db.Task               // All tasks
-	prInfo           map[int64]*github.PRInfo // PR info by task ID
-	runningProcesses map[int64]bool           // Tasks with running shell processes
-	tasksNeedingInput map[int64]bool          // Tasks waiting for user input (active input notification)
-	hiddenDoneCount  int                      // Number of done tasks not shown (older ones)
+	columns           []KanbanColumn
+	selectedCol       int
+	selectedRow       int
+	scrollOffsets     []int // Scroll offset per column
+	width             int
+	height            int
+	allTasks          []*db.Task               // All tasks
+	prInfo            map[int64]*github.PRInfo // PR info by task ID
+	runningProcesses  map[int64]bool           // Tasks with running shell processes
+	tasksNeedingInput map[int64]bool           // Tasks waiting for user input (active input notification)
+	hiddenDoneCount   int                      // Number of done tasks not shown (older ones)
 }
 
 // IsMobileMode returns true if the board should show single-column mode.
@@ -79,8 +79,16 @@ func (k *KanbanBoard) RefreshTheme() {
 
 // SetTasks updates the tasks in the kanban board.
 func (k *KanbanBoard) SetTasks(tasks []*db.Task) {
+	var selectedID int64
+	if selected := k.SelectedTask(); selected != nil {
+		selectedID = selected.ID
+	}
+
 	k.allTasks = tasks
 	k.distributeTasksToColumns()
+	if selectedID != 0 {
+		k.SelectTask(selectedID)
+	}
 }
 
 // SetHiddenDoneCount sets the number of done tasks not shown in the kanban.
@@ -178,9 +186,13 @@ func (k *KanbanBoard) sortColumnTasks(colIdx int) {
 		return
 	}
 
-	// Stable sort: recurring tasks go to bottom, preserving relative order within groups
-	var nonRecurring, recurring []*db.Task
+	// Stable sort: pinned tasks stay at top, then non-recurring, then recurring
+	var pinned, nonRecurring, recurring []*db.Task
 	for _, task := range tasks {
+		if task.Pinned {
+			pinned = append(pinned, task)
+			continue
+		}
 		if task.IsRecurring() {
 			recurring = append(recurring, task)
 		} else {
@@ -188,8 +200,11 @@ func (k *KanbanBoard) sortColumnTasks(colIdx int) {
 		}
 	}
 
-	// Reconstruct the slice with non-recurring first, then recurring
-	k.columns[colIdx].Tasks = append(nonRecurring, recurring...)
+	// Reconstruct the slice with pinned first, then non-recurring, then recurring
+	ordered := append([]*db.Task{}, pinned...)
+	ordered = append(ordered, nonRecurring...)
+	ordered = append(ordered, recurring...)
+	k.columns[colIdx].Tasks = ordered
 }
 
 // SetSize updates the board dimensions.
@@ -761,6 +776,13 @@ func (k *KanbanBoard) renderTaskCard(task *db.Task, width int, isSelected bool) 
 		}
 		b.WriteString(" ")
 		b.WriteString(scheduleStyle.Render(icon + scheduleText))
+	}
+
+	// Pin indicator
+	if task.Pinned {
+		pinStyle := lipgloss.NewStyle().Foreground(ColorWarning)
+		b.WriteString(" ")
+		b.WriteString(pinStyle.Render("📌"))
 	}
 
 	// Title (truncate if needed)

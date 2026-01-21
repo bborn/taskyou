@@ -758,6 +758,73 @@ func TestListTasksClosedSortedByCompletedAt(t *testing.T) {
 	}
 }
 
+func TestListTasksPinnedFirst(t *testing.T) {
+	// Create temporary database
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	database, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer database.Close()
+	defer os.Remove(dbPath)
+
+	if err := database.CreateProject(&Project{Name: "test", Path: tmpDir}); err != nil {
+		t.Fatalf("failed to create project: %v", err)
+	}
+
+	makeTask := func(title string) *Task {
+		return &Task{Title: title, Status: StatusBacklog, Type: TypeCode, Project: "test"}
+	}
+
+	pinned := makeTask("Pinned older task")
+	recent := makeTask("Recent task")
+	third := makeTask("Another task")
+
+	for _, task := range []*Task{pinned, recent, third} {
+		if err := database.CreateTask(task); err != nil {
+			t.Fatalf("failed to create task %q: %v", task.Title, err)
+		}
+	}
+
+	// Complete tasks in order so pinned has the oldest completed_at
+	if err := database.UpdateTaskStatus(pinned.ID, StatusDone); err != nil {
+		t.Fatalf("failed to complete pinned task: %v", err)
+	}
+	if err := database.UpdateTaskStatus(recent.ID, StatusDone); err != nil {
+		t.Fatalf("failed to complete recent task: %v", err)
+	}
+	if err := database.UpdateTaskStatus(third.ID, StatusDone); err != nil {
+		t.Fatalf("failed to complete third task: %v", err)
+	}
+
+	// Ensure pinned task looks older by pushing its completed_at further back
+	if _, err := database.Exec(`UPDATE tasks SET completed_at = datetime('now', '-10 minutes') WHERE id = ?`, pinned.ID); err != nil {
+		t.Fatalf("failed to adjust completed_at: %v", err)
+	}
+
+	if err := database.UpdateTaskPinned(pinned.ID, true); err != nil {
+		t.Fatalf("failed to pin task: %v", err)
+	}
+
+	// Limit results to 2 to verify pinned tasks take precedence even when older
+	tasks, err := database.ListTasks(ListTasksOptions{Status: StatusDone, Limit: 2})
+	if err != nil {
+		t.Fatalf("failed to list tasks: %v", err)
+	}
+	if len(tasks) != 2 {
+		t.Fatalf("expected 2 tasks, got %d", len(tasks))
+	}
+
+	if tasks[0].ID != pinned.ID {
+		t.Fatalf("expected pinned task #%d to appear first, got #%d", pinned.ID, tasks[0].ID)
+	}
+	if tasks[1].ID == pinned.ID {
+		t.Fatalf("expected pinned task to appear only once in results")
+	}
+}
+
 func TestCreateTaskSavesLastType(t *testing.T) {
 	// Create temporary database
 	tmpDir := t.TempDir()

@@ -29,6 +29,7 @@ type Task struct {
 	PRURL           string // Pull request URL (if associated with a PR)
 	PRNumber        int    // Pull request number (if associated with a PR)
 	DangerousMode   bool   // Whether task is running in dangerous mode (--dangerously-skip-permissions)
+	Pinned          bool   // Whether the task is pinned to the top of its column
 	Tags            string // Comma-separated tags for categorization (e.g., "customer-support,email,influence-kit")
 	CreatedAt       LocalTime
 	UpdatedAt       LocalTime
@@ -174,7 +175,7 @@ func (db *DB) GetTask(id int64) (*Task, error) {
 		       COALESCE(daemon_session, ''), COALESCE(tmux_window_id, ''),
 		       COALESCE(claude_pane_id, ''), COALESCE(shell_pane_id, ''),
 		       COALESCE(pr_url, ''), COALESCE(pr_number, 0),
-		       COALESCE(dangerous_mode, 0), COALESCE(tags, ''),
+		       COALESCE(dangerous_mode, 0), COALESCE(pinned, 0), COALESCE(tags, ''),
 		       created_at, updated_at, started_at, completed_at,
 		       scheduled_at, recurrence, last_run_at
 		FROM tasks WHERE id = ?
@@ -183,7 +184,7 @@ func (db *DB) GetTask(id int64) (*Task, error) {
 		&t.WorktreePath, &t.BranchName, &t.Port, &t.ClaudeSessionID,
 		&t.DaemonSession, &t.TmuxWindowID, &t.ClaudePaneID, &t.ShellPaneID,
 		&t.PRURL, &t.PRNumber,
-		&t.DangerousMode, &t.Tags,
+		&t.DangerousMode, &t.Pinned, &t.Tags,
 		&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
 		&t.ScheduledAt, &t.Recurrence, &t.LastRunAt,
 	)
@@ -214,7 +215,7 @@ func (db *DB) ListTasks(opts ListTasksOptions) ([]*Task, error) {
 		       COALESCE(daemon_session, ''), COALESCE(tmux_window_id, ''),
 		       COALESCE(claude_pane_id, ''), COALESCE(shell_pane_id, ''),
 		       COALESCE(pr_url, ''), COALESCE(pr_number, 0),
-		       COALESCE(dangerous_mode, 0), COALESCE(tags, ''),
+		       COALESCE(dangerous_mode, 0), COALESCE(pinned, 0), COALESCE(tags, ''),
 		       created_at, updated_at, started_at, completed_at,
 		       scheduled_at, recurrence, last_run_at
 		FROM tasks WHERE 1=1
@@ -239,10 +240,9 @@ func (db *DB) ListTasks(opts ListTasksOptions) ([]*Task, error) {
 		query += " AND status NOT IN ('done', 'archived')"
 	}
 
-	// Sort done/blocked tasks by completed_at (most recently closed first),
-	// other tasks by created_at (newest first).
-	// Use id DESC as secondary sort for consistent ordering when timestamps are equal.
-	query += " ORDER BY CASE WHEN status IN ('done', 'blocked') THEN completed_at ELSE created_at END DESC, id DESC"
+	// Pinning takes precedence, then sort done/blocked tasks by completed_at (most recently closed first)
+	// and other tasks by created_at (newest first). Use id DESC as secondary sort for consistency.
+	query += " ORDER BY pinned DESC, CASE WHEN status IN ('done', 'blocked') THEN completed_at ELSE created_at END DESC, id DESC"
 
 	if opts.Limit > 0 {
 		query += fmt.Sprintf(" LIMIT %d", opts.Limit)
@@ -267,7 +267,7 @@ func (db *DB) ListTasks(opts ListTasksOptions) ([]*Task, error) {
 			&t.WorktreePath, &t.BranchName, &t.Port, &t.ClaudeSessionID,
 			&t.DaemonSession, &t.TmuxWindowID, &t.ClaudePaneID, &t.ShellPaneID,
 			&t.PRURL, &t.PRNumber,
-			&t.DangerousMode, &t.Tags,
+			&t.DangerousMode, &t.Pinned, &t.Tags,
 			&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
 			&t.ScheduledAt, &t.Recurrence, &t.LastRunAt,
 		)
@@ -290,7 +290,7 @@ func (db *DB) GetMostRecentlyCreatedTask() (*Task, error) {
 		       COALESCE(daemon_session, ''), COALESCE(tmux_window_id, ''),
 		       COALESCE(claude_pane_id, ''), COALESCE(shell_pane_id, ''),
 		       COALESCE(pr_url, ''), COALESCE(pr_number, 0),
-		       COALESCE(dangerous_mode, 0), COALESCE(tags, ''),
+		       COALESCE(dangerous_mode, 0), COALESCE(pinned, 0), COALESCE(tags, ''),
 		       created_at, updated_at, started_at, completed_at,
 		       scheduled_at, recurrence, last_run_at
 		FROM tasks
@@ -301,7 +301,7 @@ func (db *DB) GetMostRecentlyCreatedTask() (*Task, error) {
 		&t.WorktreePath, &t.BranchName, &t.Port, &t.ClaudeSessionID,
 		&t.DaemonSession, &t.TmuxWindowID, &t.ClaudePaneID, &t.ShellPaneID,
 		&t.PRURL, &t.PRNumber,
-		&t.DangerousMode, &t.Tags,
+		&t.DangerousMode, &t.Pinned, &t.Tags,
 		&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
 		&t.ScheduledAt, &t.Recurrence, &t.LastRunAt,
 	)
@@ -328,7 +328,7 @@ func (db *DB) SearchTasks(query string, limit int) ([]*Task, error) {
 		       COALESCE(daemon_session, ''), COALESCE(tmux_window_id, ''),
 		       COALESCE(claude_pane_id, ''), COALESCE(shell_pane_id, ''),
 		       COALESCE(pr_url, ''), COALESCE(pr_number, 0),
-		       COALESCE(dangerous_mode, 0), COALESCE(tags, ''),
+		       COALESCE(dangerous_mode, 0), COALESCE(pinned, 0), COALESCE(tags, ''),
 		       created_at, updated_at, started_at, completed_at,
 		       scheduled_at, recurrence, last_run_at
 		FROM tasks
@@ -339,7 +339,7 @@ func (db *DB) SearchTasks(query string, limit int) ([]*Task, error) {
 			OR CAST(pr_number AS TEXT) LIKE ?
 			OR pr_url LIKE ? COLLATE NOCASE
 		)
-		ORDER BY CASE WHEN status IN ('done', 'blocked') THEN completed_at ELSE created_at END DESC, id DESC
+		ORDER BY pinned DESC, CASE WHEN status IN ('done', 'blocked') THEN completed_at ELSE created_at END DESC, id DESC
 		LIMIT ?
 	`
 
@@ -358,7 +358,7 @@ func (db *DB) SearchTasks(query string, limit int) ([]*Task, error) {
 			&t.WorktreePath, &t.BranchName, &t.Port, &t.ClaudeSessionID,
 			&t.DaemonSession, &t.TmuxWindowID, &t.ClaudePaneID, &t.ShellPaneID,
 			&t.PRURL, &t.PRNumber,
-			&t.DangerousMode, &t.Tags,
+			&t.DangerousMode, &t.Pinned, &t.Tags,
 			&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
 			&t.ScheduledAt, &t.Recurrence, &t.LastRunAt,
 		)
@@ -419,13 +419,13 @@ func (db *DB) UpdateTask(t *Task) error {
 			title = ?, body = ?, status = ?, type = ?, project = ?, executor = ?,
 			worktree_path = ?, branch_name = ?, port = ?, claude_session_id = ?,
 			daemon_session = ?, pr_url = ?, pr_number = ?, dangerous_mode = ?,
-			tags = ?, scheduled_at = ?, recurrence = ?, last_run_at = ?,
+			pinned = ?, tags = ?, scheduled_at = ?, recurrence = ?, last_run_at = ?,
 			updated_at = CURRENT_TIMESTAMP
 		WHERE id = ?
 	`, t.Title, t.Body, t.Status, t.Type, t.Project, t.Executor,
 		t.WorktreePath, t.BranchName, t.Port, t.ClaudeSessionID,
 		t.DaemonSession, t.PRURL, t.PRNumber, t.DangerousMode,
-		t.Tags, t.ScheduledAt, t.Recurrence, t.LastRunAt, t.ID)
+		t.Pinned, t.Tags, t.ScheduledAt, t.Recurrence, t.LastRunAt, t.ID)
 	if err != nil {
 		return fmt.Errorf("update task: %w", err)
 	}
@@ -452,6 +452,18 @@ func (db *DB) UpdateTaskDangerousMode(taskID int64, dangerousMode bool) error {
 	`, dangerousMode, taskID)
 	if err != nil {
 		return fmt.Errorf("update task dangerous mode: %w", err)
+	}
+	return nil
+}
+
+// UpdateTaskPinned updates only the pinned flag for a task.
+func (db *DB) UpdateTaskPinned(taskID int64, pinned bool) error {
+	_, err := db.Exec(`
+		UPDATE tasks SET pinned = ?, updated_at = CURRENT_TIMESTAMP
+		WHERE id = ?
+	`, pinned, taskID)
+	if err != nil {
+		return fmt.Errorf("update task pinned: %w", err)
 	}
 	return nil
 }
@@ -575,7 +587,7 @@ func (db *DB) GetNextQueuedTask() (*Task, error) {
 		       COALESCE(daemon_session, ''), COALESCE(tmux_window_id, ''),
 		       COALESCE(claude_pane_id, ''), COALESCE(shell_pane_id, ''),
 		       COALESCE(pr_url, ''), COALESCE(pr_number, 0),
-		       COALESCE(dangerous_mode, 0), COALESCE(tags, ''),
+		       COALESCE(dangerous_mode, 0), COALESCE(pinned, 0), COALESCE(tags, ''),
 		       created_at, updated_at, started_at, completed_at,
 		       scheduled_at, recurrence, last_run_at
 		FROM tasks
@@ -587,7 +599,7 @@ func (db *DB) GetNextQueuedTask() (*Task, error) {
 		&t.WorktreePath, &t.BranchName, &t.Port, &t.ClaudeSessionID,
 		&t.DaemonSession, &t.TmuxWindowID, &t.ClaudePaneID, &t.ShellPaneID,
 		&t.PRURL, &t.PRNumber,
-		&t.DangerousMode, &t.Tags,
+		&t.DangerousMode, &t.Pinned, &t.Tags,
 		&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
 		&t.ScheduledAt, &t.Recurrence, &t.LastRunAt,
 	)
@@ -608,7 +620,7 @@ func (db *DB) GetQueuedTasks() ([]*Task, error) {
 		       COALESCE(daemon_session, ''), COALESCE(tmux_window_id, ''),
 		       COALESCE(claude_pane_id, ''), COALESCE(shell_pane_id, ''),
 		       COALESCE(pr_url, ''), COALESCE(pr_number, 0),
-		       COALESCE(dangerous_mode, 0), COALESCE(tags, ''),
+		       COALESCE(dangerous_mode, 0), COALESCE(pinned, 0), COALESCE(tags, ''),
 		       created_at, updated_at, started_at, completed_at,
 		       scheduled_at, recurrence, last_run_at
 		FROM tasks
@@ -628,7 +640,7 @@ func (db *DB) GetQueuedTasks() ([]*Task, error) {
 			&t.WorktreePath, &t.BranchName, &t.Port, &t.ClaudeSessionID,
 			&t.DaemonSession, &t.TmuxWindowID, &t.ClaudePaneID, &t.ShellPaneID,
 			&t.PRURL, &t.PRNumber,
-			&t.DangerousMode, &t.Tags,
+			&t.DangerousMode, &t.Pinned, &t.Tags,
 			&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
 			&t.ScheduledAt, &t.Recurrence, &t.LastRunAt,
 		); err != nil {
@@ -648,7 +660,7 @@ func (db *DB) GetTasksWithBranches() ([]*Task, error) {
 		       COALESCE(daemon_session, ''), COALESCE(tmux_window_id, ''),
 		       COALESCE(claude_pane_id, ''), COALESCE(shell_pane_id, ''),
 		       COALESCE(pr_url, ''), COALESCE(pr_number, 0),
-		       COALESCE(dangerous_mode, 0), COALESCE(tags, ''),
+		       COALESCE(dangerous_mode, 0), COALESCE(pinned, 0), COALESCE(tags, ''),
 		       created_at, updated_at, started_at, completed_at,
 		       scheduled_at, recurrence, last_run_at
 		FROM tasks
@@ -668,7 +680,7 @@ func (db *DB) GetTasksWithBranches() ([]*Task, error) {
 			&t.WorktreePath, &t.BranchName, &t.Port, &t.ClaudeSessionID,
 			&t.DaemonSession, &t.TmuxWindowID, &t.ClaudePaneID, &t.ShellPaneID,
 			&t.PRURL, &t.PRNumber,
-			&t.DangerousMode, &t.Tags,
+			&t.DangerousMode, &t.Pinned, &t.Tags,
 			&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
 			&t.ScheduledAt, &t.Recurrence, &t.LastRunAt,
 		); err != nil {
@@ -691,7 +703,7 @@ func (db *DB) GetDueScheduledTasks() ([]*Task, error) {
 		       COALESCE(daemon_session, ''), COALESCE(tmux_window_id, ''),
 		       COALESCE(claude_pane_id, ''), COALESCE(shell_pane_id, ''),
 		       COALESCE(pr_url, ''), COALESCE(pr_number, 0),
-		       COALESCE(dangerous_mode, 0), COALESCE(tags, ''),
+		       COALESCE(dangerous_mode, 0), COALESCE(pinned, 0), COALESCE(tags, ''),
 		       created_at, updated_at, started_at, completed_at,
 		       scheduled_at, recurrence, last_run_at
 		FROM tasks
@@ -713,7 +725,7 @@ func (db *DB) GetDueScheduledTasks() ([]*Task, error) {
 			&t.WorktreePath, &t.BranchName, &t.Port, &t.ClaudeSessionID,
 			&t.DaemonSession, &t.TmuxWindowID, &t.ClaudePaneID, &t.ShellPaneID,
 			&t.PRURL, &t.PRNumber,
-			&t.DangerousMode, &t.Tags,
+			&t.DangerousMode, &t.Pinned, &t.Tags,
 			&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
 			&t.ScheduledAt, &t.Recurrence, &t.LastRunAt,
 		); err != nil {
@@ -732,7 +744,7 @@ func (db *DB) GetScheduledTasks() ([]*Task, error) {
 		       COALESCE(daemon_session, ''), COALESCE(tmux_window_id, ''),
 		       COALESCE(claude_pane_id, ''), COALESCE(shell_pane_id, ''),
 		       COALESCE(pr_url, ''), COALESCE(pr_number, 0),
-		       COALESCE(dangerous_mode, 0), COALESCE(tags, ''),
+		       COALESCE(dangerous_mode, 0), COALESCE(pinned, 0), COALESCE(tags, ''),
 		       created_at, updated_at, started_at, completed_at,
 		       scheduled_at, recurrence, last_run_at
 		FROM tasks
@@ -752,7 +764,7 @@ func (db *DB) GetScheduledTasks() ([]*Task, error) {
 			&t.WorktreePath, &t.BranchName, &t.Port, &t.ClaudeSessionID,
 			&t.DaemonSession, &t.TmuxWindowID, &t.ClaudePaneID, &t.ShellPaneID,
 			&t.PRURL, &t.PRNumber,
-			&t.DangerousMode, &t.Tags,
+			&t.DangerousMode, &t.Pinned, &t.Tags,
 			&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
 			&t.ScheduledAt, &t.Recurrence, &t.LastRunAt,
 		); err != nil {

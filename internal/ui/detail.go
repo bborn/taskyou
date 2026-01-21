@@ -1767,6 +1767,24 @@ func (m *DetailModel) renderHeader() string {
 		meta.WriteString("  ")
 	}
 
+	if t.Pinned {
+		var pinStyle lipgloss.Style
+		if m.focused {
+			pinStyle = lipgloss.NewStyle().
+				Padding(0, 1).
+				Background(ColorWarning).
+				Foreground(lipgloss.Color("#000000")).
+				Bold(true)
+		} else {
+			pinStyle = lipgloss.NewStyle().
+				Padding(0, 1).
+				Background(dimmedBg).
+				Foreground(dimmedFg)
+		}
+		meta.WriteString(pinStyle.Render("PINNED"))
+		meta.WriteString("  ")
+	}
+
 	// Project
 	if t.Project != "" {
 		var projectStyle lipgloss.Style
@@ -2112,6 +2130,14 @@ func (m *DetailModel) renderHelp() string {
 
 	// Always show status change option
 	keys = append(keys, helpKey{"S", "status", false})
+
+	if m.task != nil {
+		pinDesc := "pin task"
+		if m.task.Pinned {
+			pinDesc = "unpin task"
+		}
+		keys = append(keys, helpKey{"t", pinDesc, false})
+	}
 
 	// Show dangerous mode toggle when task is processing or blocked
 	if m.task != nil && (m.task.Status == db.StatusProcessing || m.task.Status == db.StatusBlocked) {
