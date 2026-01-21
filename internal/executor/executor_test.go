@@ -242,29 +242,25 @@ func TestAttachmentsInPrompt(t *testing.T) {
 	}
 
 	t.Run("prepareAttachments creates files in .claude/attachments", func(t *testing.T) {
-		// Create a temp worktree directory
-		workDir, err := os.MkdirTemp("", "test-worktree-")
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer os.RemoveAll(workDir)
+		// Create a temporary worktree directory
+		worktreePath := t.TempDir()
 
-		paths, cleanup := exec.prepareAttachments(task.ID, workDir)
+		paths, cleanup := exec.prepareAttachments(task.ID, worktreePath)
 		defer cleanup()
 
 		if len(paths) != 2 {
 			t.Errorf("expected 2 attachment paths, got %d", len(paths))
 		}
 
-		// Verify files exist in .claude/attachments directory
+		// Verify files exist and are in the .claude/attachments directory
 		for _, path := range paths {
 			if _, err := os.Stat(path); os.IsNotExist(err) {
 				t.Errorf("attachment file does not exist: %s", path)
 			}
-			// Verify path is inside .claude/attachments
-			expectedPrefix := filepath.Join(workDir, ".claude", "attachments")
+			// Verify path is inside .claude/attachments/
+			expectedPrefix := filepath.Join(worktreePath, ".claude", "attachments")
 			if !strings.HasPrefix(path, expectedPrefix) {
-				t.Errorf("expected path to start with %s, got %s", expectedPrefix, path)
+				t.Errorf("attachment path %s should be inside %s", path, expectedPrefix)
 			}
 		}
 	})
@@ -288,14 +284,8 @@ func TestAttachmentsInPrompt(t *testing.T) {
 	})
 
 	t.Run("buildPrompt includes attachments section", func(t *testing.T) {
-		// Create a temp worktree directory
-		workDir, err := os.MkdirTemp("", "test-worktree-")
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer os.RemoveAll(workDir)
-
-		paths, cleanup := exec.prepareAttachments(task.ID, workDir)
+		worktreePath := t.TempDir()
+		paths, cleanup := exec.prepareAttachments(task.ID, worktreePath)
 		defer cleanup()
 
 		prompt := exec.buildPrompt(task, paths)
