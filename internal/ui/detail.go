@@ -446,8 +446,8 @@ func (m *DetailModel) findTaskWindow() string {
 	return ""
 }
 
-// startResumableSession starts a new tmux window with claude --resume for a previous session.
-// This reconnects to a Claude session that was previously running but whose tmux window was killed.
+// startResumableSession starts a new tmux window with the task's executor.
+// This reconnects to a session that was previously running but whose tmux window was killed.
 func (m *DetailModel) startResumableSession(sessionID string) {
 	log := GetLogger()
 	log.Info("startResumableSession: called with sessionID=%q for task %d", sessionID, m.task.ID)
@@ -512,28 +512,37 @@ func (m *DetailModel) startResumableSession(sessionID string) {
 	workDir := m.getWorkdir()
 	log.Debug("startResumableSession: workDir=%q", workDir)
 
-	// Build the claude command with --resume
-	// Check for dangerous mode - prefer task's stored mode, fall back to global env var
-	dangerousFlag := ""
-	if m.task.DangerousMode || os.Getenv("WORKTREE_DANGEROUS_MODE") == "1" {
-		dangerousFlag = "--dangerously-skip-permissions "
+	// Get the appropriate executor for this task
+	taskExecutor := m.executor.GetTaskExecutor(m.task)
+	if taskExecutor == nil {
+		log.Error("startResumableSession: no executor found for task")
+		return
 	}
 
-	// Get the session ID for environment
-	worktreeSessionID := strings.TrimPrefix(daemonSession, "task-daemon-")
-
-	// Build claude command - resume if we have a session ID, otherwise start fresh
-	var script string
-	if sessionID != "" {
-		script = fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s claude %s--chrome --resume %s`,
-			m.task.ID, worktreeSessionID, dangerousFlag, sessionID)
-		m.database.AppendTaskLog(m.task.ID, "system", fmt.Sprintf("Reconnecting to session %s", sessionID))
-	} else {
-		script = fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s claude %s--chrome`,
-			m.task.ID, worktreeSessionID, dangerousFlag)
-		m.database.AppendTaskLog(m.task.ID, "system", "Starting new Claude session")
+	// Build prompt with task details (for executors that need it)
+	var prompt string
+	if sessionID == "" {
+		// No session to resume - build prompt from task
+		var promptBuilder strings.Builder
+		promptBuilder.WriteString(fmt.Sprintf("# Task: %s\n\n", m.task.Title))
+		if m.task.Body != "" {
+			promptBuilder.WriteString(m.task.Body)
+			promptBuilder.WriteString("\n")
+		}
+		prompt = promptBuilder.String()
 	}
+
+	// Get the command from the executor
+	script := taskExecutor.BuildCommand(m.task, sessionID, prompt)
 	log.Debug("startResumableSession: script=%q", script)
+
+	// Log the session start
+	executorName := taskExecutor.Name()
+	if sessionID != "" {
+		m.database.AppendTaskLog(m.task.ID, "system", fmt.Sprintf("Reconnecting to %s session %s", executorName, sessionID))
+	} else {
+		m.database.AppendTaskLog(m.task.ID, "system", fmt.Sprintf("Starting new %s session", executorName))
+	}
 
 	// Create new window in the daemon session
 	log.Info("startResumableSession: creating new window in %q", daemonSession)
@@ -1586,11 +1595,28 @@ func (m *DetailModel) renderHeader() string {
 	dimmedTextFg := lipgloss.Color("#6B7280") // Even more muted for text
 
 	// Task title (ID and position are shown in the panel border)
+	// Use title if available, otherwise show first line of body as fallback
+	titleText := t.Title
+	if titleText == "" && t.Body != "" {
+		// Extract first line of body as title fallback
+		if idx := strings.Index(t.Body, "\n"); idx > 0 {
+			titleText = t.Body[:idx]
+		} else {
+			titleText = t.Body
+		}
+		// Truncate long body text used as title
+		if len(titleText) > 100 {
+			titleText = titleText[:97] + "..."
+		}
+	}
+
 	var subtitle string
-	if m.focused {
-		subtitle = Bold.Render(t.Title)
-	} else {
-		subtitle = lipgloss.NewStyle().Foreground(dimmedTextFg).Render(t.Title)
+	if titleText != "" {
+		if m.focused {
+			subtitle = Title.Render(titleText)
+		} else {
+			subtitle = lipgloss.NewStyle().Foreground(dimmedTextFg).Render(titleText)
+		}
 	}
 
 	var meta strings.Builder

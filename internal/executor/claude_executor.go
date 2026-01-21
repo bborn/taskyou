@@ -2,6 +2,8 @@ package executor
 
 import (
 	"context"
+	"fmt"
+	"os"
 	"os/exec"
 
 	"github.com/bborn/workflow/internal/db"
@@ -69,4 +71,44 @@ func (c *ClaudeExecutor) IsSuspended(taskID int64) bool {
 // ResumeProcess resumes a suspended Claude process.
 func (c *ClaudeExecutor) ResumeProcess(taskID int64) bool {
 	return c.executor.ResumeTask(taskID)
+}
+
+// BuildCommand returns the shell command to start an interactive Claude session.
+func (c *ClaudeExecutor) BuildCommand(task *db.Task, sessionID, prompt string) string {
+	// Build dangerous mode flag
+	dangerousFlag := ""
+	if task.DangerousMode || os.Getenv("WORKTREE_DANGEROUS_MODE") == "1" {
+		dangerousFlag = "--dangerously-skip-permissions "
+	}
+
+	// Get session ID for environment
+	worktreeSessionID := os.Getenv("WORKTREE_SESSION_ID")
+	if worktreeSessionID == "" {
+		worktreeSessionID = fmt.Sprintf("%d", os.Getpid())
+	}
+
+	// Build command - resume if we have a session ID, otherwise start fresh
+	if sessionID != "" {
+		return fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q claude %s--chrome --resume %s`,
+			task.ID, worktreeSessionID, task.Port, task.WorktreePath, dangerousFlag, sessionID)
+	}
+
+	// Start fresh - if prompt is provided, write to temp file and pass it
+	if prompt != "" {
+		// Create temp file for prompt (avoids shell quoting issues)
+		promptFile, err := os.CreateTemp("", "task-prompt-*.txt")
+		if err != nil {
+			c.logger.Error("BuildCommand: failed to create temp file", "error", err)
+			return fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q claude %s--chrome`,
+				task.ID, worktreeSessionID, task.Port, task.WorktreePath, dangerousFlag)
+		}
+		promptFile.WriteString(prompt)
+		promptFile.Close()
+
+		return fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q claude %s--chrome "$(cat %q)"; rm -f %q`,
+			task.ID, worktreeSessionID, task.Port, task.WorktreePath, dangerousFlag, promptFile.Name(), promptFile.Name())
+	}
+
+	return fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q claude %s--chrome`,
+		task.ID, worktreeSessionID, task.Port, task.WorktreePath, dangerousFlag)
 }
