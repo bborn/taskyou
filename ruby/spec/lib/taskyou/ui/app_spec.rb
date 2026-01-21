@@ -27,9 +27,11 @@ RSpec.describe Taskyou::UI::App do
   end
 
   describe "#init" do
-    it "loads tasks" do
+    it "loads tasks and returns model with nil command" do
       result = app.init
-      expect(result).to be_nil
+      expect(result).to be_an(Array)
+      expect(result[0]).to eq(app)
+      expect(result[1]).to be_nil
     end
   end
 

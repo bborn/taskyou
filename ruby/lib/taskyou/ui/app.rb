@@ -1,7 +1,6 @@
 # frozen_string_literal: true
 
 require "bubbletea"
-require "lipgloss"
 
 module Taskyou
   module UI
@@ -99,7 +98,7 @@ module Taskyou
         # Load tasks on initialization
         @kanban.refresh_tasks
         @loading = false
-        nil
+        [self, nil]
       end
 
       def update(message)
@@ -262,7 +261,7 @@ module Taskyou
       def handle_quit_confirm_key(key_str)
         case key_str
         when "y", "Y"
-          return [self, Bubbletea::Quit.new]
+          return [self, Bubbletea.quit]
         when "n", "N", "esc"
           @current_view = @previous_view || View::DASHBOARD
         end
@@ -363,7 +362,7 @@ module Taskyou
         lines << ""
 
         # Title
-        lines << Lipgloss::Style.new.bold(true).render(@selected_task.title)
+        lines << Styles::SimpleStyle.new.bold(true).render(@selected_task.title)
         lines << ""
 
         # Body
@@ -408,7 +407,7 @@ module Taskyou
         lines << Styles.error_style.render(" Delete Task ##{@pending_delete_task.id}? ")
         lines << ""
         lines << "This will permanently delete:"
-        lines << Lipgloss::Style.new.bold(true).render(@pending_delete_task.title)
+        lines << Styles::SimpleStyle.new.bold(true).render(@pending_delete_task.title)
         lines << ""
         lines << "#{Styles.key_style.render("y")} #{Styles.desc_style.render("yes, delete")}  " \
                  "#{Styles.key_style.render("n")} #{Styles.desc_style.render("no, cancel")}"
@@ -423,7 +422,7 @@ module Taskyou
         lines << Styles.title_style.render(" Close Task ##{@pending_close_task.id}? ")
         lines << ""
         lines << "Mark as done:"
-        lines << Lipgloss::Style.new.bold(true).render(@pending_close_task.title)
+        lines << Styles::SimpleStyle.new.bold(true).render(@pending_close_task.title)
         lines << ""
         lines << "#{Styles.key_style.render("y")} #{Styles.desc_style.render("yes, close")}  " \
                  "#{Styles.key_style.render("n")} #{Styles.desc_style.render("no, cancel")}"

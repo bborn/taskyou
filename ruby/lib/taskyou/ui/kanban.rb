@@ -1,7 +1,6 @@
 # frozen_string_literal: true
 
 require "bubbletea"
-require "lipgloss"
 
 module Taskyou
   module UI
@@ -31,7 +30,7 @@ module Taskyou
       end
 
       def init
-        nil
+        [self, nil]
       end
 
       def update(message)

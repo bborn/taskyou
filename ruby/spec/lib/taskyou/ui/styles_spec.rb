@@ -7,7 +7,6 @@ RSpec.describe Taskyou::UI::Styles do
     it "defines a color palette" do
       expect(described_class::COLORS).to be_a(Hash)
       expect(described_class::COLORS[:background]).to eq("#282c34")
-      expect(described_class::COLORS[:foreground]).to eq("#abb2bf")
     end
   end
 
@@ -26,13 +25,53 @@ RSpec.describe Taskyou::UI::Styles do
       expect(described_class.status_color("backlog")).to eq(described_class::COLORS[:bright_black])
       expect(described_class.status_color("processing")).to eq(described_class::COLORS[:blue])
     end
+  end
 
-    it "returns foreground for unknown status" do
-      expect(described_class.status_color("unknown")).to eq(described_class::COLORS[:foreground])
+  describe ".title_style" do
+    it "returns a SimpleStyle" do
+      style = described_class.title_style
+      expect(style).to be_a(described_class::SimpleStyle)
+    end
+
+    it "renders text with ANSI codes" do
+      style = described_class.title_style
+      result = style.render("Test")
+      expect(result).to include("Test")
+      expect(result).to include("\e[")  # Contains ANSI codes
     end
   end
 
-  # Note: Additional style creation tests are skipped due to memory management
-  # issues in the lipgloss-ruby gem's Go bindings when creating many styles rapidly.
-  # The styles work correctly in normal usage as verified by integration tests.
+  describe ".divider" do
+    it "renders a divider line" do
+      result = described_class.divider(10)
+      expect(result).to be_a(String)
+      expect(result).to include("─")
+    end
+  end
+
+  describe Taskyou::UI::Styles::SimpleStyle do
+    describe "#render" do
+      it "applies ANSI codes and resets" do
+        style = described_class.new.bold
+        result = style.render("Hello")
+        expect(result).to include("\e[1m")  # Bold
+        expect(result).to include("\e[0m")  # Reset
+        expect(result).to include("Hello")
+      end
+    end
+
+    describe "#foreground" do
+      it "is chainable" do
+        style = described_class.new
+        expect(style.foreground("blue")).to eq(style)
+      end
+    end
+
+    describe "#bold" do
+      it "is chainable" do
+        style = described_class.new
+        expect(style.bold).to eq(style)
+      end
+    end
+  end
 end

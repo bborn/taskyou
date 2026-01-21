@@ -171,8 +171,7 @@ module Taskyou
       app = UI::App.new(db, executor, Dir.pwd)
 
       # Run the TUI
-      program = Bubbletea::Program.new(app)
-      program.run
+      Bubbletea.run(app)
     rescue Interrupt
       # Handle Ctrl+C gracefully
     ensure

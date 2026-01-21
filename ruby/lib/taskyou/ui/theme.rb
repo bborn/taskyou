@@ -1,7 +1,5 @@
 # frozen_string_literal: true
 
-require "lipgloss"
-
 module Taskyou
   module UI
     # Theme provides color schemes for the UI
@@ -108,36 +106,27 @@ module Taskyou
 
       # Create a base style with theme colors
       def base_style
-        Lipgloss::Style.new
-          .foreground(foreground)
+        Styles::SimpleStyle.new.foreground(foreground)
       end
 
       # Create a highlighted/selected style
       def selected_style
-        Lipgloss::Style.new
-          .foreground(@colors[:bright_white])
-          .background(primary)
-          .bold(true)
+        Styles::SimpleStyle.new.foreground("white").background("blue").bold
       end
 
       # Create an error style
       def error_style
-        Lipgloss::Style.new
-          .foreground(error)
-          .bold(true)
+        Styles::SimpleStyle.new.foreground("red").bold
       end
 
       # Create a success style
       def success_style
-        Lipgloss::Style.new
-          .foreground(success)
-          .bold(true)
+        Styles::SimpleStyle.new.foreground("green").bold
       end
 
       # Create a muted style
       def muted_style
-        Lipgloss::Style.new
-          .foreground(muted)
+        Styles::SimpleStyle.new.foreground("bright_black")
       end
     end
   end
