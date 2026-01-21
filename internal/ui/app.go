@@ -194,7 +194,7 @@ func DefaultKeyMap() KeyMap {
 			key.WithHelp("o", "open in editor"),
 		),
 		JumpToNotification: key.NewBinding(
-			key.WithKeys("ctrl+shift+k"),
+			key.WithKeys("ctrl+shift+k", "ctrl+k"),
 			key.WithHelp("ctrl+shift+k", "jump to task"),
 		),
 		FocusBacklog: key.NewBinding(
