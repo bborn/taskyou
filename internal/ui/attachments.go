@@ -44,6 +44,12 @@ func (m *AttachmentsModel) loadAttachments() {
 	m.attachments = attachments
 }
 
+// SetSize updates the model dimensions for window resize handling.
+func (m *AttachmentsModel) SetSize(width, height int) {
+	m.width = width
+	m.height = height
+}
+
 // Init initializes the model.
 func (m *AttachmentsModel) Init() tea.Cmd {
 	return nil

@@ -20,6 +20,7 @@ import (
 	"github.com/charmbracelet/huh"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/fsnotify/fsnotify"
+	"golang.org/x/term"
 )
 
 // View represents the current view.
@@ -539,6 +540,9 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.editTaskForm != nil {
 			m.editTaskForm.SetSize(msg.Width, msg.Height)
 		}
+		if m.attachmentsView != nil {
+			m.attachmentsView.SetSize(msg.Width, msg.Height)
+		}
 
 	case tasksLoadedMsg:
 		m.loading = false
@@ -753,6 +757,39 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, m.waitForTaskEvent())
 
 	case tickMsg:
+		// Check for terminal size changes (handles display/window resize)
+		if fd := int(os.Stdout.Fd()); term.IsTerminal(fd) {
+			if width, height, err := term.GetSize(fd); err == nil {
+				if width != m.width || height != m.height {
+					// Terminal size changed - update all components
+					m.width = width
+					m.height = height
+					m.help.Width = width
+					m.kanban.SetSize(width, height-4)
+					if m.detailView != nil {
+						m.detailView.SetSize(width, height)
+					}
+					if m.settingsView != nil {
+						m.settingsView.SetSize(width, height)
+					}
+					if m.retryView != nil {
+						m.retryView.SetSize(width, height)
+					}
+					if m.commandPaletteView != nil {
+						m.commandPaletteView.SetSize(width, height)
+					}
+					if m.newTaskForm != nil {
+						m.newTaskForm.SetSize(width, height)
+					}
+					if m.editTaskForm != nil {
+						m.editTaskForm.SetSize(width, height)
+					}
+					if m.attachmentsView != nil {
+						m.attachmentsView.SetSize(width, height)
+					}
+				}
+			}
+		}
 		// Clear expired notifications
 		if !m.notifyUntil.IsZero() && time.Now().After(m.notifyUntil) {
 			m.notification = ""
