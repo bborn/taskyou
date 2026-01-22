@@ -694,8 +694,8 @@ func (db *DB) GetTasksWithBranches() ([]*Task, error) {
 // GetDueScheduledTasks returns all scheduled tasks that are due to run.
 // A task is due if:
 // - It has a scheduled_at time that is <= now
-// - It is in 'backlog' status (ready to be queued)
-// - It is not currently processing
+// - It is not currently queued or processing (to avoid double-queueing)
+// For recurring tasks, this allows blocked/done tasks to run again on schedule.
 func (db *DB) GetDueScheduledTasks() ([]*Task, error) {
 	rows, err := db.Query(`
 		SELECT id, title, body, status, type, project, COALESCE(executor, 'claude'),
@@ -709,9 +709,9 @@ func (db *DB) GetDueScheduledTasks() ([]*Task, error) {
 		FROM tasks
 		WHERE scheduled_at IS NOT NULL
 		  AND scheduled_at <= CURRENT_TIMESTAMP
-		  AND status = ?
+		  AND status NOT IN (?, ?)
 		ORDER BY scheduled_at ASC
-	`, StatusBacklog)
+	`, StatusQueued, StatusProcessing)
 	if err != nil {
 		return nil, fmt.Errorf("query due scheduled tasks: %w", err)
 	}
