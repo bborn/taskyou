@@ -67,6 +67,7 @@ type KeyMap struct {
 	ChangeStatus    key.Binding
 	CommandPalette  key.Binding
 	ToggleDangerous key.Binding
+	TogglePin       key.Binding
 	Filter          key.Binding
 	ResumeClaude    key.Binding
 	OpenWorktree    key.Binding
@@ -90,7 +91,8 @@ func (k KeyMap) FullHelp() [][]key.Binding {
 		{k.Enter, k.New, k.Queue, k.Close},
 		{k.Retry, k.Archive, k.Delete, k.OpenWorktree},
 		{k.Filter, k.CommandPalette, k.Settings, k.Memories},
-		{k.ChangeStatus, k.Refresh, k.Help, k.Quit},
+		{k.ChangeStatus, k.TogglePin, k.Refresh, k.Help},
+		{k.Quit},
 	}
 }
 
@@ -181,6 +183,10 @@ func DefaultKeyMap() KeyMap {
 			key.WithKeys("!"),
 			key.WithHelp("!", "dangerous mode"),
 		),
+		TogglePin: key.NewBinding(
+			key.WithKeys("t"),
+			key.WithHelp("t", "pin/unpin"),
+		),
 		Filter: key.NewBinding(
 			key.WithKeys("/"),
 			key.WithHelp("/", "filter"),
@@ -269,8 +275,8 @@ type AppModel struct {
 	// Project change confirmation state (when changing a task's project)
 	projectChangeConfirm      *huh.Form
 	projectChangeConfirmValue bool
-	pendingProjectChangeTask  *db.Task  // The updated task data with new project
-	originalProjectChangeTask *db.Task  // The original task to delete
+	pendingProjectChangeTask  *db.Task // The updated task data with new project
+	originalProjectChangeTask *db.Task // The original task to delete
 
 	// Delete confirmation state
 	deleteConfirm      *huh.Form
@@ -401,9 +407,9 @@ func NewAppModel(database *db.DB, exec *executor.Executor, workingDir string) *A
 		tasksNeedingInput: make(map[int64]bool),
 		watcher:           watcher,
 		dbChangeCh:        dbChangeCh,
-		prCache:      github.NewPRCache(),
-		filterInput:  filterInput,
-		filterText:   "",
+		prCache:           github.NewPRCache(),
+		filterInput:       filterInput,
+		filterText:        "",
 	}
 
 	model.keys.ResumeClaude.SetHelp("R", fmt.Sprintf("resume %s", model.executorDisplayName()))
@@ -703,6 +709,27 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.err = msg.err
 		}
+
+	case taskPinnedMsg:
+		if msg.err != nil {
+			m.err = msg.err
+			break
+		}
+		if msg.task != nil {
+			if m.selectedTask != nil && m.selectedTask.ID == msg.task.ID {
+				m.selectedTask = msg.task
+				if m.detailView != nil {
+					m.detailView.UpdateTask(msg.task)
+				}
+			}
+			if msg.task.Pinned {
+				m.notification = fmt.Sprintf("📌 Task #%d pinned", msg.task.ID)
+			} else {
+				m.notification = fmt.Sprintf("📍 Task #%d unpinned", msg.task.ID)
+			}
+			m.notifyUntil = time.Now().Add(3 * time.Second)
+		}
+		cmds = append(cmds, m.loadTasks())
 
 	case taskQueuedMsg, taskClosedMsg, taskArchivedMsg, taskDeletedMsg, taskRetriedMsg, taskStatusChangedMsg, taskDangerousModeToggledMsg:
 		cmds = append(cmds, m.loadTasks())
@@ -1086,6 +1113,12 @@ func (m *AppModel) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, m.queueTask(task.ID)
 		}
 
+	case key.Matches(msg, m.keys.TogglePin):
+		if task := m.kanban.SelectedTask(); task != nil {
+			return m, m.toggleTaskPinned(task.ID)
+		}
+		return m, nil
+
 	case key.Matches(msg, m.keys.Retry):
 		if task := m.kanban.SelectedTask(); task != nil {
 			// Allow retry for blocked, done, or backlog tasks
@@ -1432,6 +1465,9 @@ func (m *AppModel) updateDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 	if key.Matches(keyMsg, m.keys.ChangeStatus) && m.selectedTask != nil {
 		return m.showChangeStatus(m.selectedTask)
+	}
+	if key.Matches(keyMsg, m.keys.TogglePin) && m.selectedTask != nil {
+		return m, m.toggleTaskPinned(m.selectedTask.ID)
 	}
 	if key.Matches(keyMsg, m.keys.ToggleDangerous) && m.selectedTask != nil {
 		// Only allow toggling dangerous mode if task is processing or blocked
@@ -2422,6 +2458,11 @@ type taskDangerousModeToggledMsg struct {
 	err error
 }
 
+type taskPinnedMsg struct {
+	task *db.Task
+	err  error
+}
+
 type taskClaudeToggledMsg struct {
 	killed  bool   // true if Claude was killed, false if resumed
 	message string // status message
@@ -2609,8 +2650,14 @@ func (m *AppModel) deleteTask(id int64) tea.Cmd {
 
 		// Clean up worktree and Claude sessions if they exist
 		if task != nil && task.WorktreePath != "" {
+			projectConfigDir := ""
+			if task.Project != "" {
+				if project, err := m.db.GetProjectByName(task.Project); err == nil && project != nil {
+					projectConfigDir = project.ClaudeConfigDir
+				}
+			}
 			// Clean up Claude session files first (before worktree is removed)
-			executor.CleanupClaudeSessions(task.WorktreePath)
+			executor.CleanupClaudeSessions(task.WorktreePath, projectConfigDir)
 
 			// Clean up worktree
 			m.executor.CleanupWorktree(task)
@@ -2687,8 +2734,14 @@ func (m *AppModel) moveTaskToProject(newTaskData *db.Task, oldTask *db.Task) tea
 
 		// Clean up worktree and Claude sessions if they exist
 		if oldTask.WorktreePath != "" {
+			oldConfigDir := ""
+			if oldTask.Project != "" {
+				if project, err := database.GetProjectByName(oldTask.Project); err == nil && project != nil {
+					oldConfigDir = project.ClaudeConfigDir
+				}
+			}
 			// Clean up Claude session files first (before worktree is removed)
-			executor.CleanupClaudeSessions(oldTask.WorktreePath)
+			executor.CleanupClaudeSessions(oldTask.WorktreePath, oldConfigDir)
 
 			// Clean up worktree
 			exec.CleanupWorktree(oldTask)
@@ -2755,6 +2808,23 @@ func (m *AppModel) toggleDangerousMode(id int64) tea.Cmd {
 			}
 		}
 		return taskDangerousModeToggledMsg{err: nil}
+	}
+}
+
+func (m *AppModel) toggleTaskPinned(id int64) tea.Cmd {
+	database := m.db
+	return func() tea.Msg {
+		task, err := database.GetTask(id)
+		if err != nil || task == nil {
+			return taskPinnedMsg{err: fmt.Errorf("failed to get task")}
+		}
+
+		newValue := !task.Pinned
+		if err := database.UpdateTaskPinned(id, newValue); err != nil {
+			return taskPinnedMsg{err: fmt.Errorf("toggle pin: %w", err)}
+		}
+		task.Pinned = newValue
+		return taskPinnedMsg{task: task}
 	}
 }
 

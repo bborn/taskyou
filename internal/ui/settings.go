@@ -32,12 +32,13 @@ type SettingsModel struct {
 	selectedProject int
 
 	// Project form modal (two-step: 1. browse path, 2. fill details)
-	editingProject       bool
-	editProject          *db.Project
-	projectForm          *huh.Form
-	projectFormName      string
-	projectFormAliases   string
-	projectFormInstructions string
+	editingProject             bool
+	editProject                *db.Project
+	projectForm                *huh.Form
+	projectFormName            string
+	projectFormAliases         string
+	projectFormInstructions    string
+	projectFormClaudeConfigDir string
 
 	// Task Types
 	taskTypes        []*db.TaskType
@@ -268,6 +269,7 @@ func (m *SettingsModel) showProjectForm(project *db.Project) (*SettingsModel, te
 	m.projectFormName = project.Name
 	m.projectFormAliases = project.Aliases
 	m.projectFormInstructions = project.Instructions
+	m.projectFormClaudeConfigDir = project.ClaudeConfigDir
 
 	title := "New Project"
 	description := "You'll choose a directory next"
@@ -300,6 +302,12 @@ func (m *SettingsModel) showProjectForm(project *db.Project) (*SettingsModel, te
 				Placeholder("Instructions...").
 				CharLimit(5000).
 				Value(&m.projectFormInstructions),
+			huh.NewInput().
+				Key("claude_config_dir").
+				Title("Claude Config Directory").
+				Description("Overrides CLAUDE_CONFIG_DIR for this project").
+				Placeholder("~/.claude-other-account").
+				Value(&m.projectFormClaudeConfigDir),
 		).Title(title).Description(description),
 	).WithTheme(huh.ThemeDracula()).
 		WithWidth(modalWidth - 6).
@@ -465,12 +473,14 @@ func (m *SettingsModel) saveProject() (*SettingsModel, tea.Cmd) {
 	name := strings.TrimSpace(m.projectFormName)
 	aliases := strings.TrimSpace(m.projectFormAliases)
 	instructions := strings.TrimSpace(m.projectFormInstructions)
+	configDir := strings.TrimSpace(m.projectFormClaudeConfigDir)
 
 	// If form values are empty but editProject has values, use those
 	if name == "" && m.editProject.Name != "" {
 		name = m.editProject.Name
 		aliases = m.editProject.Aliases
 		instructions = m.editProject.Instructions
+		configDir = m.editProject.ClaudeConfigDir
 	}
 
 	if name == "" {
@@ -483,6 +493,7 @@ func (m *SettingsModel) saveProject() (*SettingsModel, tea.Cmd) {
 		m.editProject.Name = name
 		m.editProject.Aliases = aliases
 		m.editProject.Instructions = instructions
+		m.editProject.ClaudeConfigDir = configDir
 		m.editingProject = false
 		m.projectForm = nil
 		m.browsing = true
@@ -529,6 +540,7 @@ func (m *SettingsModel) saveProject() (*SettingsModel, tea.Cmd) {
 	m.editProject.Name = name
 	m.editProject.Aliases = aliases
 	m.editProject.Instructions = instructions
+	m.editProject.ClaudeConfigDir = configDir
 
 	if m.editProject.ID == 0 {
 		err = m.db.CreateProject(m.editProject)
@@ -831,6 +843,9 @@ func (m *SettingsModel) View() string {
 			line += Dim.Render(fmt.Sprintf(" → %s", p.Path))
 			if p.Aliases != "" {
 				line += Dim.Render(fmt.Sprintf(" (%s)", p.Aliases))
+			}
+			if strings.TrimSpace(p.ClaudeConfigDir) != "" {
+				line += Dim.Render(fmt.Sprintf(" [claude: %s]", p.ClaudeConfigDir))
 			}
 			b.WriteString(lipgloss.NewStyle().Padding(0, 2).Render(style.Render(line)))
 			b.WriteString("\n")

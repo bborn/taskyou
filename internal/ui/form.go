@@ -333,6 +333,9 @@ func NewFormModel(database *db.DB, width, height int, workingDir string) *FormMo
 	// Load last used task type for the selected project
 	m.loadLastTaskTypeForProject()
 
+	// Load last used executor for the selected project
+	m.loadLastExecutorForProject()
+
 	// Title input
 	m.titleInput = textinput.New()
 	m.titleInput.Placeholder = "What needs to be done?"
@@ -582,6 +585,7 @@ func (m *FormModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.projectIdx = (m.projectIdx - 1 + len(m.projects)) % len(m.projects)
 				m.project = m.projects[m.projectIdx]
 				m.loadLastTaskTypeForProject()
+				m.loadLastExecutorForProject()
 				return m, nil
 			}
 			if m.focused == FieldType {
@@ -605,6 +609,7 @@ func (m *FormModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.projectIdx = (m.projectIdx + 1) % len(m.projects)
 				m.project = m.projects[m.projectIdx]
 				m.loadLastTaskTypeForProject()
+				m.loadLastExecutorForProject()
 				return m, nil
 			}
 			if m.focused == FieldType {
@@ -830,6 +835,7 @@ func (m *FormModel) selectByPrefix(prefix string) {
 				m.projectIdx = i
 				m.project = p
 				m.loadLastTaskTypeForProject()
+				m.loadLastExecutorForProject()
 				return
 			}
 		}
@@ -884,6 +890,27 @@ func (m *FormModel) loadLastTaskTypeForProject() {
 		if t == lastType {
 			m.typeIdx = i
 			m.taskType = t
+			return
+		}
+	}
+}
+
+// loadLastExecutorForProject loads and sets the last used executor for the current project.
+func (m *FormModel) loadLastExecutorForProject() {
+	if m.db == nil || m.project == "" {
+		return
+	}
+
+	lastExecutor, err := m.db.GetLastExecutorForProject(m.project)
+	if err != nil || lastExecutor == "" {
+		return
+	}
+
+	// Find the executor in the list and set it
+	for i, e := range m.executors {
+		if e == lastExecutor {
+			m.executorIdx = i
+			m.executor = e
 			return
 		}
 	}

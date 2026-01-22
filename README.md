@@ -112,6 +112,7 @@ ssh -p 2222 your-server
 | `c` | Close task |
 | `a` | Archive task |
 | `d` | Delete task |
+| `t` | Pin/unpin task |
 | `o` | Open task's working directory |
 | `p` | Command palette (fuzzy search) |
 | `/` | Filter tasks |
@@ -129,6 +130,7 @@ ssh -p 2222 your-server
 | `r` | Retry with feedback |
 | `R` | Resume executor session |
 | `S` | Change task status |
+| `t` | Pin/unpin task |
 | `!` | Toggle dangerous/safe mode |
 | `\` | Toggle shell pane visibility |
 | `Shift+↑/↓` | Switch between panes |
@@ -353,6 +355,7 @@ Configure projects in Settings (`s`):
 - **Path** - Local filesystem path to git repo
 - **Aliases** - Short names for quick reference
 - **Instructions** - Project-specific AI instructions
+- **Claude Config Dir** - Optional override for `CLAUDE_CONFIG_DIR` (use different Claude accounts per project)
 
 ### Worktrees
 

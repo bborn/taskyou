@@ -670,7 +670,8 @@ func (m *DetailModel) ensureTmuxPanesJoined() {
 	}
 }
 
-// getPaneTitle returns the title for the detail pane (e.g., "Task 123: some task title... (2/5)").
+// getPaneTitle returns the title for the detail pane (e.g., "Task 123: some task title (2/5)").
+// We don't truncate the title - tmux will handle truncation based on pane width.
 func (m *DetailModel) getPaneTitle() string {
 	if m.task == nil {
 		return "Task"
@@ -682,29 +683,15 @@ func (m *DetailModel) getPaneTitle() string {
 		positionSuffix = fmt.Sprintf(" (%d/%d)", m.positionInColumn, m.totalInColumn)
 	}
 
-	// Calculate available space for title
-	// Format: "Task {id}: {title}{positionSuffix}"
 	prefix := fmt.Sprintf("Task %d", m.task.ID)
 	if m.task.Title == "" {
 		return prefix + positionSuffix
-	}
-
-	// Max pane title length (reasonable for most terminal widths)
-	const maxPaneTitle = 60
-	// Reserve space for prefix ": " and position suffix
-	availableForTitle := maxPaneTitle - len(prefix) - 2 - len(positionSuffix)
-	if availableForTitle < 10 {
-		availableForTitle = 10 // Minimum title length
 	}
 
 	taskTitle := m.task.Title
 	// Replace newlines with spaces for single-line display
 	taskTitle = strings.ReplaceAll(taskTitle, "\n", " ")
 	taskTitle = strings.ReplaceAll(taskTitle, "\r", "")
-
-	if len(taskTitle) > availableForTitle {
-		taskTitle = taskTitle[:availableForTitle-3] + "..."
-	}
 
 	return fmt.Sprintf("%s: %s%s", prefix, taskTitle, positionSuffix)
 }
@@ -1780,6 +1767,24 @@ func (m *DetailModel) renderHeader() string {
 		meta.WriteString("  ")
 	}
 
+	if t.Pinned {
+		var pinStyle lipgloss.Style
+		if m.focused {
+			pinStyle = lipgloss.NewStyle().
+				Padding(0, 1).
+				Background(ColorWarning).
+				Foreground(lipgloss.Color("#000000")).
+				Bold(true)
+		} else {
+			pinStyle = lipgloss.NewStyle().
+				Padding(0, 1).
+				Background(dimmedBg).
+				Foreground(dimmedFg)
+		}
+		meta.WriteString(pinStyle.Render("PINNED"))
+		meta.WriteString("  ")
+	}
+
 	// Project
 	if t.Project != "" {
 		var projectStyle lipgloss.Style
@@ -2125,6 +2130,14 @@ func (m *DetailModel) renderHelp() string {
 
 	// Always show status change option
 	keys = append(keys, helpKey{"S", "status", false})
+
+	if m.task != nil {
+		pinDesc := "pin task"
+		if m.task.Pinned {
+			pinDesc = "unpin task"
+		}
+		keys = append(keys, helpKey{"t", pinDesc, false})
+	}
 
 	// Show dangerous mode toggle when task is processing or blocked
 	if m.task != nil && (m.task.Status == db.StatusProcessing || m.task.Status == db.StatusBlocked) {

@@ -252,6 +252,7 @@ done triggers memory extraction + recurring task reset
 | `r` | Retry task with feedback |
 | `c` | Close selected task |
 | `d` | Delete selected task |
+| `t` | Pin/unpin selected task |
 | `s` | Settings |
 | `m` | Project memories |
 | `S` | Change task status |
