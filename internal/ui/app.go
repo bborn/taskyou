@@ -1240,15 +1240,23 @@ func (m *AppModel) updateFilterMode(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		case "up":
 			// Navigate while in filter mode (arrow keys only, not hjkl)
+			m.filterActive = false
+			m.filterInput.Blur()
 			m.kanban.MoveUp()
 			return m, nil
 		case "down":
+			m.filterActive = false
+			m.filterInput.Blur()
 			m.kanban.MoveDown()
 			return m, nil
 		case "left":
+			m.filterActive = false
+			m.filterInput.Blur()
 			m.kanban.MoveLeft()
 			return m, nil
 		case "right":
+			m.filterActive = false
+			m.filterInput.Blur()
 			m.kanban.MoveRight()
 			return m, nil
 		case "ctrl+c":
