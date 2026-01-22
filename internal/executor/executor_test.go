@@ -10,6 +10,7 @@ import (
 
 	"github.com/bborn/workflow/internal/config"
 	"github.com/bborn/workflow/internal/db"
+	"github.com/pelletier/go-toml/v2"
 )
 
 func TestNeedsInputDetection(t *testing.T) {
@@ -765,4 +766,97 @@ func TestCleanupInactiveDoneTasksFiltering(t *testing.T) {
 		// The task would be selected for cleanup if it had a running process
 		exec.cleanupInactiveDoneTasks()
 	})
+}
+
+func TestCopyCodexProjectConfig(t *testing.T) {
+	cfgDir := t.TempDir()
+	cfgPath := filepath.Join(cfgDir, "config.toml")
+	projectPath := "/repo"
+	worktreePath := "/repo/.task-worktrees/123-test"
+	contents := `model = "gpt-5.2"
+[projects]
+[projects."/repo"]
+trust_level = "trusted"
+`
+	if err := os.WriteFile(cfgPath, []byte(contents), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := copyCodexProjectConfig(cfgPath, projectPath, worktreePath); err != nil {
+		t.Fatalf("copyCodexProjectConfig() error = %v", err)
+	}
+
+	data, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var cfg map[string]interface{}
+	if err := toml.Unmarshal(data, &cfg); err != nil {
+		t.Fatalf("Failed to parse updated config: %v", err)
+	}
+
+	model, ok := cfg["model"].(string)
+	if !ok || model != "gpt-5.2" {
+		t.Fatalf("expected model to remain gpt-5.2, got %v", cfg["model"])
+	}
+
+	projects, ok := cfg["projects"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected projects table in config, got %T", cfg["projects"])
+	}
+
+	dst, ok := projects[worktreePath].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected worktree entry %q to exist", worktreePath)
+	}
+
+	trust, _ := dst["trust_level"].(string)
+	if trust != "trusted" {
+		t.Fatalf("expected trust_level to copy from project, got %q", trust)
+	}
+}
+
+func TestRemoveCodexProjectConfig(t *testing.T) {
+	cfgDir := t.TempDir()
+	cfgPath := filepath.Join(cfgDir, "config.toml")
+	projectPath := "/repo"
+	worktreePath := "/repo/.task-worktrees/456-demo"
+	contents := `model = "gpt-5.2"
+[projects]
+[projects."/repo"]
+trust_level = "trusted"
+[projects."/repo/.task-worktrees/456-demo"]
+trust_level = "trusted"
+`
+	if err := os.WriteFile(cfgPath, []byte(contents), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := RemoveCodexProjectConfig(cfgPath, worktreePath); err != nil {
+		t.Fatalf("RemoveCodexProjectConfig() error = %v", err)
+	}
+
+	data, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var cfg map[string]interface{}
+	if err := toml.Unmarshal(data, &cfg); err != nil {
+		t.Fatalf("Failed to parse updated config: %v", err)
+	}
+
+	projects, ok := cfg["projects"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected projects table in config, got %T", cfg["projects"])
+	}
+
+	if _, exists := projects[worktreePath]; exists {
+		t.Fatalf("expected worktree entry %q to be removed", worktreePath)
+	}
+
+	if _, exists := projects[projectPath]; !exists {
+		t.Fatalf("expected project entry %q to remain", projectPath)
+	}
 }

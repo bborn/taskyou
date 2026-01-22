@@ -23,6 +23,7 @@ import (
 	"github.com/bborn/workflow/internal/github"
 	"github.com/bborn/workflow/internal/hooks"
 	"github.com/charmbracelet/log"
+	"github.com/pelletier/go-toml/v2"
 )
 
 // TaskEvent represents a change to a task.
@@ -3146,6 +3147,7 @@ func (e *Executor) setupWorktree(task *db.Task) (string, error) {
 	}
 
 	paths := e.claudePathsForProject(task.Project)
+	codexConfigPath := DefaultCodexConfigPath()
 
 	// Get project directory
 	projectDir := e.getProjectDir(task.Project)
@@ -3188,6 +3190,7 @@ func (e *Executor) setupWorktree(task *db.Task) (string, error) {
 			e.writeWorktreeEnvFile(projectDir, task.WorktreePath, task, paths.configDir)
 			symlinkClaudeConfig(projectDir, task.WorktreePath)
 			copyMCPConfig(paths.configFile, projectDir, task.WorktreePath)
+			copyCodexProjectConfig(codexConfigPath, projectDir, task.WorktreePath)
 			return task.WorktreePath, nil
 		}
 		// Worktree path was set but directory doesn't exist, clear it and create fresh
@@ -3234,6 +3237,7 @@ func (e *Executor) setupWorktree(task *db.Task) (string, error) {
 		e.writeWorktreeEnvFile(projectDir, worktreePath, task, paths.configDir)
 		symlinkClaudeConfig(projectDir, worktreePath)
 		copyMCPConfig(paths.configFile, projectDir, worktreePath)
+		copyCodexProjectConfig(codexConfigPath, projectDir, worktreePath)
 		e.runWorktreeInitScript(projectDir, worktreePath, task)
 		return worktreePath, nil
 	}
@@ -3275,6 +3279,7 @@ func (e *Executor) setupWorktree(task *db.Task) (string, error) {
 					trustMiseConfig(worktreePath)
 					e.writeWorktreeEnvFile(projectDir, worktreePath, task, paths.configDir)
 					copyMCPConfig(paths.configFile, projectDir, worktreePath)
+					copyCodexProjectConfig(codexConfigPath, projectDir, worktreePath)
 					e.runWorktreeInitScript(projectDir, worktreePath, task)
 					return worktreePath, nil
 				}
@@ -3311,6 +3316,7 @@ func (e *Executor) setupWorktree(task *db.Task) (string, error) {
 	e.writeWorktreeEnvFile(projectDir, worktreePath, task, paths.configDir)
 	symlinkClaudeConfig(projectDir, worktreePath)
 	copyMCPConfig(paths.configFile, projectDir, worktreePath)
+	copyCodexProjectConfig(codexConfigPath, projectDir, worktreePath)
 
 	// Run worktree init script if configured
 	e.runWorktreeInitScript(projectDir, worktreePath, task)
@@ -3607,6 +3613,163 @@ func copyMCPConfig(configPath, srcDir, dstDir string) error {
 	return nil
 }
 
+// DefaultCodexConfigPath returns the config.toml location honoring CODEX_CONFIG_FILE or CODEX_CONFIG_DIR overrides.
+func DefaultCodexConfigPath() string {
+	if file := strings.TrimSpace(os.Getenv("CODEX_CONFIG_FILE")); file != "" {
+		return filepath.Clean(expandUserPath(file))
+	}
+	dir := strings.TrimSpace(os.Getenv("CODEX_CONFIG_DIR"))
+	if dir == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "config.toml"
+		}
+		dir = filepath.Join(home, ".codex")
+	} else {
+		dir = filepath.Clean(expandUserPath(dir))
+	}
+	return filepath.Join(dir, "config.toml")
+}
+
+// copyCodexProjectConfig copies the trust_level setting from the main project entry to the worktree entry.
+func copyCodexProjectConfig(configPath, srcDir, dstDir string) error {
+	srcDir = strings.TrimSpace(srcDir)
+	dstDir = strings.TrimSpace(dstDir)
+	if srcDir == "" || dstDir == "" {
+		return nil
+	}
+	srcDir = filepath.Clean(srcDir)
+	dstDir = filepath.Clean(dstDir)
+	if srcDir == dstDir {
+		return nil
+	}
+
+	if configPath == "" {
+		configPath = DefaultCodexConfigPath()
+	}
+
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("read codex config: %w", err)
+	}
+	if strings.TrimSpace(string(data)) == "" {
+		return nil
+	}
+
+	var config map[string]interface{}
+	if err := toml.Unmarshal(data, &config); err != nil {
+		return fmt.Errorf("parse codex config: %w", err)
+	}
+
+	projectsRaw, ok := config["projects"]
+	if !ok {
+		return nil
+	}
+	projects, ok := projectsRaw.(map[string]interface{})
+	if !ok {
+		return nil
+	}
+
+	srcConfigRaw, ok := projects[srcDir]
+	if !ok {
+		return nil
+	}
+	srcConfig, ok := srcConfigRaw.(map[string]interface{})
+	if !ok {
+		return nil
+	}
+
+	trustLevel, _ := srcConfig["trust_level"].(string)
+	if strings.TrimSpace(trustLevel) == "" {
+		return nil
+	}
+
+	dstConfigRaw, _ := projects[dstDir]
+	dstConfig, _ := dstConfigRaw.(map[string]interface{})
+	if dstConfig == nil {
+		dstConfig = make(map[string]interface{})
+	}
+	if existing, _ := dstConfig["trust_level"].(string); existing == trustLevel {
+		return nil
+	}
+
+	dstConfig["trust_level"] = trustLevel
+	projects[dstDir] = dstConfig
+	config["projects"] = projects
+
+	newData, err := toml.Marshal(config)
+	if err != nil {
+		return fmt.Errorf("marshal codex config: %w", err)
+	}
+	if err := os.WriteFile(configPath, newData, 0644); err != nil {
+		return fmt.Errorf("write codex config: %w", err)
+	}
+
+	return nil
+}
+
+// RemoveCodexProjectConfig removes a project entry from config.toml when a worktree is deleted.
+func RemoveCodexProjectConfig(configPath, projectPath string) error {
+	projectPath = strings.TrimSpace(projectPath)
+	if projectPath == "" {
+		return nil
+	}
+	projectPath = filepath.Clean(projectPath)
+
+	if configPath == "" {
+		configPath = DefaultCodexConfigPath()
+	}
+
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("read codex config: %w", err)
+	}
+	if strings.TrimSpace(string(data)) == "" {
+		return nil
+	}
+
+	var config map[string]interface{}
+	if err := toml.Unmarshal(data, &config); err != nil {
+		return fmt.Errorf("parse codex config: %w", err)
+	}
+
+	projectsRaw, ok := config["projects"]
+	if !ok {
+		return nil
+	}
+	projects, ok := projectsRaw.(map[string]interface{})
+	if !ok {
+		return nil
+	}
+
+	if _, exists := projects[projectPath]; !exists {
+		return nil
+	}
+
+	delete(projects, projectPath)
+	if len(projects) == 0 {
+		delete(config, "projects")
+	} else {
+		config["projects"] = projects
+	}
+
+	newData, err := toml.Marshal(config)
+	if err != nil {
+		return fmt.Errorf("marshal codex config: %w", err)
+	}
+	if err := os.WriteFile(configPath, newData, 0644); err != nil {
+		return fmt.Errorf("write codex config: %w", err)
+	}
+
+	return nil
+}
+
 // runWorktreeInitScript runs the worktree init script if configured or conventionally present.
 // It sets environment variables WORKTREE_TASK_ID, WORKTREE_PORT, and WORKTREE_PATH.
 // Non-zero exit codes are logged as warnings but do not cause the worktree setup to fail.
@@ -3885,13 +4048,17 @@ func (e *Executor) CleanupWorktree(task *db.Task) error {
 		cmd.Run() // Ignore errors - branch might have been merged/deleted
 	}
 
-	// Remove project entry from ~/.claude.json (run async - this can be slow with large configs)
-	go func(path, config string) {
-		if err := RemoveClaudeProjectConfig(config, path); err != nil {
+	// Remove project entry from ~/.claude.json and ~/.codex/config.toml (run async - this can be slow)
+	codexConfigPath := DefaultCodexConfigPath()
+	go func(path, claudeConfig, codexConfig string) {
+		if err := RemoveClaudeProjectConfig(claudeConfig, path); err != nil {
 			// Log warning but don't fail - this is cleanup
 			fmt.Fprintf(os.Stderr, "Warning: could not remove Claude project config: %v\n", err)
 		}
-	}(task.WorktreePath, paths.configFile)
+		if err := RemoveCodexProjectConfig(codexConfig, path); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: could not remove Codex project config: %v\n", err)
+		}
+	}(task.WorktreePath, paths.configFile, codexConfigPath)
 
 	// Clear worktree info from task
 	task.WorktreePath = ""
