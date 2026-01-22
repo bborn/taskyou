@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/bborn/workflow/internal/db"
@@ -96,5 +97,27 @@ func TestNewDetailModel_ArchivedTaskSkipsAutoExecutor(t *testing.T) {
 
 	if !shouldSkipAutoExecutor(task) {
 		t.Error("archived tasks should skip auto-executor")
+	}
+}
+
+func TestExecutorFailureMessage(t *testing.T) {
+	m := &DetailModel{task: &db.Task{Executor: db.ExecutorCodex}}
+	msgWithDetail := m.executorFailureMessage("tmux new-window failed")
+	if !strings.Contains(msgWithDetail, "Codex failed to start") {
+		t.Fatalf("expected executor name in message, got %q", msgWithDetail)
+	}
+	if !strings.Contains(msgWithDetail, "tmux new-window failed") {
+		t.Fatalf("expected detail in message, got %q", msgWithDetail)
+	}
+	if !strings.Contains(msgWithDetail, "executor configuration") {
+		t.Fatalf("expected guidance in message, got %q", msgWithDetail)
+	}
+
+	msgWithoutDetail := m.executorFailureMessage("")
+	if strings.Contains(msgWithoutDetail, "  ") {
+		t.Fatalf("unexpected double spaces in message: %q", msgWithoutDetail)
+	}
+	if !strings.Contains(msgWithoutDetail, "Codex failed to start.") {
+		t.Fatalf("expected default failure message, got %q", msgWithoutDetail)
 	}
 }

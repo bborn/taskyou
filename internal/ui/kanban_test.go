@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/bborn/workflow/internal/db"
@@ -526,6 +527,66 @@ func TestKanbanBoard_DesktopViewAtThreshold(t *testing.T) {
 	view := board.View()
 	if view == "" {
 		t.Error("View() returned empty string")
+	}
+}
+
+func TestPinnedSelectionDoesNotResetScroll(t *testing.T) {
+	board := NewKanbanBoard(100, 16)
+
+	tasks := []*db.Task{
+		{ID: 1, Title: "Pinned 1", Status: db.StatusBacklog, Pinned: true},
+		{ID: 2, Title: "Pinned 2", Status: db.StatusBacklog, Pinned: true},
+		{ID: 3, Title: "Task 3", Status: db.StatusBacklog},
+		{ID: 4, Title: "Task 4", Status: db.StatusBacklog},
+		{ID: 5, Title: "Task 5", Status: db.StatusBacklog},
+	}
+	board.SetTasks(tasks)
+
+	// Force selection to the last unpinned task so the column scrolls
+	board.selectedCol = 0
+	board.selectedRow = len(tasks) - 1
+	board.ensureSelectedVisible()
+
+	if len(board.scrollOffsets) == 0 {
+		t.Fatalf("scrollOffsets not initialized")
+	}
+	if board.scrollOffsets[0] == 0 {
+		t.Fatalf("expected scroll offset to move when focusing unpinned tasks")
+	}
+	offset := board.scrollOffsets[0]
+
+	// Selecting a pinned task should not reset the scroll offset
+	board.selectedRow = 0
+	board.ensureSelectedVisible()
+	if board.scrollOffsets[0] != offset {
+		t.Fatalf("pinned selection changed scroll offset: got %d want %d", board.scrollOffsets[0], offset)
+	}
+}
+
+func TestPinnedTasksStayVisibleWhenScrolling(t *testing.T) {
+	board := NewKanbanBoard(100, 16)
+
+	tasks := []*db.Task{
+		{ID: 1, Title: "Pinned Alpha", Status: db.StatusBacklog, Pinned: true},
+		{ID: 2, Title: "Pinned Beta", Status: db.StatusBacklog, Pinned: true},
+		{ID: 3, Title: "Task 3", Status: db.StatusBacklog},
+		{ID: 4, Title: "Task 4", Status: db.StatusBacklog},
+		{ID: 5, Title: "Task 5", Status: db.StatusBacklog},
+	}
+	board.SetTasks(tasks)
+
+	// Scroll down so that unpinned tasks require an offset
+	board.selectedRow = len(tasks) - 1
+	board.ensureSelectedVisible()
+	if board.scrollOffsets[0] == 0 {
+		t.Fatalf("expected non-zero scroll offset for unpinned tasks")
+	}
+
+	view := board.View()
+	for _, title := range []string{"Pinned Alpha", "Pinned Beta"} {
+		if !strings.Contains(view, title) {
+			t.Fatalf("expected view to include %q even when scrolled", title)
+		}
 	}
 }
 
