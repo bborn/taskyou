@@ -1221,6 +1221,94 @@ func TestGetDueScheduledTasks(t *testing.T) {
 	}
 }
 
+func TestGetDueScheduledTasks_RecurringFromAnyStatus(t *testing.T) {
+	// Test that recurring tasks are picked up when due, regardless of current status
+	// (blocked, done, etc.) as long as they're not already queued/processing
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	db, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer db.Close()
+	defer os.Remove(dbPath)
+
+	now := time.Now()
+
+	// Create a recurring task that's blocked and due
+	blockedTask := &Task{
+		Title:       "Blocked Recurring Task",
+		Status:      StatusBlocked,
+		Type:        TypeCode,
+		Project:     "personal",
+		ScheduledAt: &LocalTime{Time: now.Add(-1 * time.Hour)},
+		Recurrence:  RecurrenceDaily,
+	}
+	if err := db.CreateTask(blockedTask); err != nil {
+		t.Fatalf("failed to create blocked task: %v", err)
+	}
+
+	// Create a recurring task that's done and due
+	doneTask := &Task{
+		Title:       "Done Recurring Task",
+		Status:      StatusDone,
+		Type:        TypeCode,
+		Project:     "personal",
+		ScheduledAt: &LocalTime{Time: now.Add(-30 * time.Minute)},
+		Recurrence:  RecurrenceDaily,
+	}
+	if err := db.CreateTask(doneTask); err != nil {
+		t.Fatalf("failed to create done task: %v", err)
+	}
+
+	// Create a recurring task that's queued (should NOT be returned to avoid double-queue)
+	queuedTask := &Task{
+		Title:       "Queued Recurring Task",
+		Status:      StatusQueued,
+		Type:        TypeCode,
+		Project:     "personal",
+		ScheduledAt: &LocalTime{Time: now.Add(-15 * time.Minute)},
+		Recurrence:  RecurrenceDaily,
+	}
+	if err := db.CreateTask(queuedTask); err != nil {
+		t.Fatalf("failed to create queued task: %v", err)
+	}
+
+	// Get due scheduled tasks
+	dueTasks, err := db.GetDueScheduledTasks()
+	if err != nil {
+		t.Fatalf("failed to get due scheduled tasks: %v", err)
+	}
+
+	// Should return blocked and done tasks, but not the queued one
+	if len(dueTasks) != 2 {
+		t.Fatalf("expected 2 due tasks, got %d", len(dueTasks))
+	}
+
+	// Verify the correct tasks were returned
+	foundBlocked := false
+	foundDone := false
+	for _, task := range dueTasks {
+		if task.ID == blockedTask.ID {
+			foundBlocked = true
+		}
+		if task.ID == doneTask.ID {
+			foundDone = true
+		}
+		if task.ID == queuedTask.ID {
+			t.Error("queued task should not be returned as due")
+		}
+	}
+
+	if !foundBlocked {
+		t.Error("blocked recurring task should be returned when due")
+	}
+	if !foundDone {
+		t.Error("done recurring task should be returned when due")
+	}
+}
+
 func TestQueueScheduledTask(t *testing.T) {
 	// Create temporary database
 	tmpDir := t.TempDir()
