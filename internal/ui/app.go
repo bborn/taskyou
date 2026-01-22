@@ -1641,6 +1641,9 @@ func (m *AppModel) updateEditTaskForm(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if updatedTask.ScheduledAt == nil && originalTask.ScheduledAt != nil {
 					updatedTask.ScheduledAt = originalTask.ScheduledAt
 				}
+				if updatedTask.DueDate == nil && originalTask.DueDate != nil {
+					updatedTask.DueDate = originalTask.DueDate
+				}
 
 				m.editTaskForm = nil
 				m.editingTask = nil
@@ -1661,6 +1664,9 @@ func (m *AppModel) updateEditTaskForm(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// This handles cases where the schedule input wasn't changed or parsing failed
 			if updatedTask.ScheduledAt == nil && m.editingTask.ScheduledAt != nil {
 				updatedTask.ScheduledAt = m.editingTask.ScheduledAt
+			}
+			if updatedTask.DueDate == nil && m.editingTask.DueDate != nil {
+				updatedTask.DueDate = m.editingTask.DueDate
 			}
 
 			// Capture old title before clearing editingTask

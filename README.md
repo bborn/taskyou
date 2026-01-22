@@ -29,6 +29,7 @@ A personal task management system with a beautiful terminal UI, SQLite storage, 
 - **VS Code-style Fuzzy Search** - Quick task navigation with smart matching (e.g., "dsno" matches "diseno website")
 - **Markdown Rendering** - Task descriptions render with proper formatting in the detail view
 - **Project Memories** - Persistent context that carries across tasks
+- **Due Dates & Deadlines** - Optional due dates in the form and CLI surface upcoming or overdue work right on the kanban board
 - **Real-time Updates** - Watch tasks execute live
 - **Running Process Indicator** - Green dot (`●`) shows which tasks have active shell processes (servers, watchers, etc.)
 - **Auto-cleanup** - Automatic cleanup of Claude processes and config entries for completed tasks

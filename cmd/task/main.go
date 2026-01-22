@@ -534,6 +534,9 @@ Examples:
 					if t.Recurrence != "" {
 						item["recurrence"] = t.Recurrence
 					}
+					if t.DueDate != nil {
+						item["due_date"] = t.DueDate.Time.Format(time.RFC3339)
+					}
 					if t.LastRunAt != nil {
 						item["last_run_at"] = t.LastRunAt.Time.Format(time.RFC3339)
 					}
@@ -628,11 +631,21 @@ Examples:
 					} else if t.IsScheduled() {
 						scheduleIndicator = lipgloss.NewStyle().Foreground(lipgloss.Color("#F59E0B")).Render("⏰ ")
 					}
+
+					// Due indicator
+					dueIndicator := ""
+					if t.DueDate != nil && !t.DueDate.IsZero() {
+						info := ui.BuildDueInfo(t.DueDate.Time, time.Now())
+						if info.Text != "" {
+							dueStyle := lipgloss.NewStyle().Foreground(ui.DueSeverityColor(info.Severity))
+							dueIndicator = dueStyle.Render(info.Icon + " " + info.Text + " ")
+						}
+					}
 					prStatus := ""
 					if showPR {
 						prStatus = prStatusStyle(prInfoMap[t.ID])
 					}
-					fmt.Printf("%s %s %s%s%s%s\n", id, status, project, scheduleIndicator, t.Title, prStatus)
+					fmt.Printf("%s %s %s%s%s%s%s\n", id, status, project, scheduleIndicator, dueIndicator, t.Title, prStatus)
 				}
 			}
 		},
@@ -716,6 +729,9 @@ Examples:
 				}
 				if task.CompletedAt != nil {
 					output["completed_at"] = task.CompletedAt.Time.Format(time.RFC3339)
+				}
+				if task.DueDate != nil {
+					output["due_date"] = task.DueDate.Time.Format(time.RFC3339)
 				}
 				// Add schedule fields
 				if task.ScheduledAt != nil {
@@ -820,8 +836,9 @@ Examples:
 					fmt.Printf("CI:       %s\n", prStatusStyled)
 				}
 
-				// Schedule info
+				// Schedule / due info
 				scheduleColor := lipgloss.Color("#F59E0B") // Orange for schedule
+				planningPrinted := false
 				if task.IsRecurring() || task.IsScheduled() {
 					fmt.Println()
 					fmt.Println(boldStyle.Render("Schedule:"))
@@ -834,6 +851,19 @@ Examples:
 					}
 					if task.LastRunAt != nil {
 						fmt.Printf("  Last run:   %s\n", task.LastRunAt.Time.Format("2006-01-02 15:04:05"))
+					}
+					planningPrinted = true
+				}
+				if task.DueDate != nil && !task.DueDate.IsZero() {
+					info := ui.BuildDueInfo(task.DueDate.Time, time.Now())
+					if info.Text != "" {
+						if !planningPrinted {
+							fmt.Println()
+						}
+						fmt.Println(boldStyle.Render("Deadline:"))
+						dueStyle := lipgloss.NewStyle().Foreground(ui.DueSeverityColor(info.Severity))
+						fmt.Printf("  %s %s\n", dueStyle.Render(info.Icon), dueStyle.Render(info.Text))
+						planningPrinted = true
 					}
 				}
 

@@ -30,16 +30,17 @@ const (
 	FieldType
 	FieldExecutor
 	FieldSchedule
+	FieldDueDate
 	FieldRecurrence
 )
 
 // FormModel represents the new task form.
 type FormModel struct {
-	db        *db.DB
-	width     int
-	height    int
-	submitted bool
-	cancelled bool
+	db              *db.DB
+	width           int
+	height          int
+	submitted       bool
+	cancelled       bool
 	isEdit          bool   // true when editing an existing task
 	originalProject string // original project when editing (to detect project changes)
 
@@ -51,6 +52,7 @@ type FormModel struct {
 	bodyInput        textarea.Model
 	attachmentsInput textinput.Model
 	scheduleInput    textinput.Model // For entering schedule time (e.g., "1h", "2h30m", "tomorrow 9am")
+	dueDateInput     textinput.Model // Optional deadline (same parsing as schedule)
 
 	// Select values
 	project       string
@@ -230,6 +232,16 @@ func NewEditFormModel(database *db.DB, task *db.Task, width, height int) *FormMo
 		m.scheduleInput.SetValue(task.ScheduledAt.Format("2006-01-02 15:04"))
 	}
 
+	// Due date input - optional deadline separate from schedule
+	m.dueDateInput = textinput.New()
+	m.dueDateInput.Placeholder = "e.g., Friday 5pm"
+	m.dueDateInput.Prompt = ""
+	m.dueDateInput.Cursor.SetMode(cursor.CursorStatic)
+	m.dueDateInput.Width = width - 24
+	if task.DueDate != nil && !task.DueDate.IsZero() {
+		m.dueDateInput.SetValue(task.DueDate.Format("2006-01-02 15:04"))
+	}
+
 	// Set recurrence index
 	for i, r := range m.recurrences {
 		if r == task.Recurrence {
@@ -360,6 +372,13 @@ func NewFormModel(database *db.DB, width, height int, workingDir string) *FormMo
 	m.scheduleInput.Prompt = ""
 	m.scheduleInput.Cursor.SetMode(cursor.CursorStatic)
 	m.scheduleInput.Width = width - 24
+
+	// Due date input
+	m.dueDateInput = textinput.New()
+	m.dueDateInput.Placeholder = "e.g., Friday 5pm"
+	m.dueDateInput.Prompt = ""
+	m.dueDateInput.Cursor.SetMode(cursor.CursorStatic)
+	m.dueDateInput.Width = width - 24
 
 	// Attachments input
 	m.attachmentsInput = textinput.New()
@@ -698,6 +717,8 @@ func (m *FormModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	case FieldSchedule:
 		m.scheduleInput, cmd = m.scheduleInput.Update(msg)
+	case FieldDueDate:
+		m.dueDateInput, cmd = m.dueDateInput.Update(msg)
 	case FieldAttachments:
 		m.attachmentsInput, cmd = m.attachmentsInput.Update(msg)
 	}
@@ -950,6 +971,7 @@ func (m *FormModel) blurAll() {
 	m.titleInput.Blur()
 	m.bodyInput.Blur()
 	m.scheduleInput.Blur()
+	m.dueDateInput.Blur()
 	m.attachmentsInput.Blur()
 }
 
@@ -961,6 +983,8 @@ func (m *FormModel) focusCurrent() {
 		m.bodyInput.Focus()
 	case FieldSchedule:
 		m.scheduleInput.Focus()
+	case FieldDueDate:
+		m.dueDateInput.Focus()
 	case FieldAttachments:
 		m.attachmentsInput.Focus()
 	}
@@ -1258,6 +1282,14 @@ func (m *FormModel) View() string {
 	b.WriteString(cursor + " " + labelStyle.Render("Schedule") + m.scheduleInput.View())
 	b.WriteString("\n\n")
 
+	// Due date input
+	cursor = " "
+	if m.focused == FieldDueDate {
+		cursor = cursorStyle.Render("▸")
+	}
+	b.WriteString(cursor + " " + labelStyle.Render("Due Date") + m.dueDateInput.View())
+	b.WriteString("\n\n")
+
 	// Recurrence selector
 	cursor = " "
 	if m.focused == FieldRecurrence {
@@ -1324,6 +1356,7 @@ func (m *FormModel) hasFormData() bool {
 	return strings.TrimSpace(m.titleInput.Value()) != "" ||
 		strings.TrimSpace(m.bodyInput.Value()) != "" ||
 		strings.TrimSpace(m.scheduleInput.Value()) != "" ||
+		strings.TrimSpace(m.dueDateInput.Value()) != "" ||
 		strings.TrimSpace(m.attachmentsInput.Value()) != "" ||
 		len(m.attachments) > 0
 }
@@ -1352,54 +1385,61 @@ func (m *FormModel) GetDBTask() *db.Task {
 		task.ScheduledAt = scheduledAt
 	}
 
+	if dueDate := m.parseDueDate(); dueDate != nil {
+		task.DueDate = dueDate
+	}
+
 	return task
 }
 
 // parseScheduleTime parses the schedule input and returns a LocalTime.
 // Supports formats like: "1h", "2h30m", "30m", "tomorrow 9am", "2024-01-15 14:00"
 func (m *FormModel) parseScheduleTime() *db.LocalTime {
-	input := strings.TrimSpace(m.scheduleInput.Value())
+	return parseFlexibleTimeInput(m.scheduleInput.Value())
+}
+
+// parseDueDate parses the due date input and returns a LocalTime.
+func (m *FormModel) parseDueDate() *db.LocalTime {
+	return parseFlexibleTimeInput(m.dueDateInput.Value())
+}
+
+func parseFlexibleTimeInput(raw string) *db.LocalTime {
+	input := strings.TrimSpace(raw)
 	if input == "" {
 		return nil
 	}
 
 	now := time.Now()
 
-	// Try to parse duration format (e.g., "1h", "2h30m", "30m")
 	if duration := parseDuration(input); duration > 0 {
 		scheduledTime := now.Add(duration)
 		return &db.LocalTime{Time: scheduledTime}
 	}
 
-	// Try "tomorrow" with optional time
-	if strings.HasPrefix(strings.ToLower(input), "tomorrow") {
+	lower := strings.ToLower(input)
+	if strings.HasPrefix(lower, "tomorrow") {
 		tomorrow := now.AddDate(0, 0, 1)
-		timeStr := strings.TrimSpace(strings.TrimPrefix(strings.ToLower(input), "tomorrow"))
+		timeStr := strings.TrimSpace(strings.TrimPrefix(lower, "tomorrow"))
 		if timeStr == "" {
-			// Default to 9am
 			scheduled := time.Date(tomorrow.Year(), tomorrow.Month(), tomorrow.Day(), 9, 0, 0, 0, now.Location())
 			return &db.LocalTime{Time: scheduled}
 		}
-		// Parse time like "9am", "2pm", "14:00"
 		if t := parseTimeOfDay(timeStr, tomorrow); t != nil {
 			return t
 		}
 	}
 
-	// Try "today" with time
-	if strings.HasPrefix(strings.ToLower(input), "today") {
-		timeStr := strings.TrimSpace(strings.TrimPrefix(strings.ToLower(input), "today"))
+	if strings.HasPrefix(lower, "today") {
+		timeStr := strings.TrimSpace(strings.TrimPrefix(lower, "today"))
 		if t := parseTimeOfDay(timeStr, now); t != nil {
 			return t
 		}
 	}
 
-	// Try full datetime format (e.g., "2024-01-15 14:00")
 	if t, err := time.ParseInLocation("2006-01-02 15:04", input, now.Location()); err == nil {
 		return &db.LocalTime{Time: t}
 	}
 
-	// Try date only (e.g., "2024-01-15") - defaults to 9am
 	if t, err := time.ParseInLocation("2006-01-02", input, now.Location()); err == nil {
 		scheduled := time.Date(t.Year(), t.Month(), t.Day(), 9, 0, 0, 0, now.Location())
 		return &db.LocalTime{Time: scheduled}
@@ -1483,6 +1523,7 @@ func (m *FormModel) SetSize(width, height int) {
 	m.titleInput.Width = inputWidth
 	m.bodyInput.SetWidth(inputWidth)
 	m.scheduleInput.Width = inputWidth
+	m.dueDateInput.Width = inputWidth
 	m.attachmentsInput.Width = inputWidth
 	// Recalculate body height based on new dimensions
 	m.updateBodyHeight()

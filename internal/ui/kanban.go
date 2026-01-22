@@ -2,6 +2,7 @@ package ui
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -200,11 +201,43 @@ func (k *KanbanBoard) sortColumnTasks(colIdx int) {
 		}
 	}
 
+	// Sort non-pinned tasks by due date priority (earliest deadlines first)
+	sort.SliceStable(nonRecurring, func(i, j int) bool {
+		return dueDateLess(nonRecurring[i], nonRecurring[j])
+	})
+	sort.SliceStable(recurring, func(i, j int) bool {
+		return dueDateLess(recurring[i], recurring[j])
+	})
+
 	// Reconstruct the slice with pinned first, then non-recurring, then recurring
 	ordered := append([]*db.Task{}, pinned...)
 	ordered = append(ordered, nonRecurring...)
 	ordered = append(ordered, recurring...)
 	k.columns[colIdx].Tasks = ordered
+}
+
+// dueDateLess orders tasks by earliest due date (nil values stay in place via stable sort).
+func dueDateLess(a, b *db.Task) bool {
+	if a == nil || b == nil {
+		return false
+	}
+	aHas := a.HasDueDate()
+	bHas := b.HasDueDate()
+	switch {
+	case aHas && bHas:
+		aTime := a.DueDate.Time
+		bTime := b.DueDate.Time
+		if !aTime.Equal(bTime) {
+			return aTime.Before(bTime)
+		}
+		return a.ID < b.ID
+	case aHas:
+		return true
+	case bHas:
+		return false
+	default:
+		return false
+	}
 }
 
 // splitPinnedTasks separates the pinned prefix for a column from the rest.
@@ -880,6 +913,16 @@ func (k *KanbanBoard) renderTaskCard(task *db.Task, width int, isSelected bool) 
 		b.WriteString(scheduleStyle.Render(icon + scheduleText))
 	}
 
+	// Due date indicator
+	if task.HasDueDate() {
+		info := BuildDueInfo(task.DueDate.Time, time.Now())
+		if info.Text != "" {
+			dueStyle := lipgloss.NewStyle().Foreground(DueSeverityColor(info.Severity))
+			b.WriteString(" ")
+			b.WriteString(dueStyle.Render(info.Icon + " " + info.Text))
+		}
+	}
+
 	// Pin indicator
 	if task.Pinned {
 		pinStyle := lipgloss.NewStyle().Foreground(ColorWarning)
@@ -1261,45 +1304,4 @@ func (k *KanbanBoard) handleClickMobile(x, y int) *db.Task {
 	k.selectedRow = taskIdx
 
 	return col.Tasks[taskIdx]
-}
-
-// formatScheduleTime formats a scheduled time for display.
-func formatScheduleTime(t time.Time) string {
-	now := time.Now()
-	diff := t.Sub(now)
-
-	// If in the past
-	if diff < 0 {
-		return "overdue"
-	}
-
-	// If less than an hour away
-	if diff < time.Hour {
-		mins := int(diff.Minutes())
-		if mins <= 0 {
-			return "now"
-		}
-		return fmt.Sprintf("%dm", mins)
-	}
-
-	// If less than 24 hours away
-	if diff < 24*time.Hour {
-		hours := int(diff.Hours())
-		return fmt.Sprintf("%dh", hours)
-	}
-
-	// If today or tomorrow
-	if t.Day() == now.Day() && t.Month() == now.Month() && t.Year() == now.Year() {
-		return t.Format("3:04pm")
-	}
-	tomorrow := now.AddDate(0, 0, 1)
-	if t.Day() == tomorrow.Day() && t.Month() == tomorrow.Month() && t.Year() == tomorrow.Year() {
-		return "tmrw " + t.Format("3pm")
-	}
-
-	// Otherwise show date
-	if t.Year() == now.Year() {
-		return t.Format("Jan 2")
-	}
-	return t.Format("Jan 2 '06")
 }

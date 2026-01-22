@@ -1959,6 +1959,27 @@ func (m *DetailModel) renderHeader() string {
 		}
 	}
 
+	// Due date info
+	if t.HasDueDate() {
+		meta.WriteString("  ")
+		info := BuildDueInfo(t.DueDate.Time, time.Now())
+		if info.Text != "" {
+			var dueStyle lipgloss.Style
+			if m.focused {
+				dueStyle = lipgloss.NewStyle().
+					Padding(0, 1).
+					Background(DueSeverityColor(info.Severity)).
+					Foreground(lipgloss.Color("#000000"))
+			} else {
+				dueStyle = lipgloss.NewStyle().
+					Padding(0, 1).
+					Background(dimmedBg).
+					Foreground(DueSeverityColor(info.Severity))
+			}
+			meta.WriteString(dueStyle.Render(info.Icon + " " + info.Text))
+		}
+	}
+
 	// PR link if available
 	var prLine string
 	if m.prInfo != nil && m.prInfo.URL != "" {

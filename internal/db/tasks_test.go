@@ -1156,6 +1156,98 @@ func TestScheduledTasks(t *testing.T) {
 	}
 }
 
+func TestTaskDueDatePersistence(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+	db, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer db.Close()
+	defer os.Remove(dbPath)
+
+	due := time.Now().Add(6 * time.Hour)
+	task := &Task{
+		Title:   "Task with due date",
+		Status:  StatusQueued,
+		Type:    TypeCode,
+		Project: "personal",
+		DueDate: &LocalTime{Time: due},
+	}
+	if err := db.CreateTask(task); err != nil {
+		t.Fatalf("failed to create task: %v", err)
+	}
+
+	retrieved, err := db.GetTask(task.ID)
+	if err != nil {
+		t.Fatalf("failed to get task: %v", err)
+	}
+	if retrieved.DueDate == nil {
+		t.Fatal("expected due date to be persisted")
+	}
+	if !retrieved.DueDate.Time.Equal(due) {
+		t.Fatalf("expected due date %v, got %v", due, retrieved.DueDate.Time)
+	}
+}
+
+func TestQueuedTasksOrderByDueDate(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+	db, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer db.Close()
+	defer os.Remove(dbPath)
+
+	now := time.Now()
+	// Helper to create queued task
+	create := func(title string, dueOffset time.Duration) *Task {
+		var due *LocalTime
+		if dueOffset != 0 {
+			due = &LocalTime{Time: now.Add(dueOffset)}
+		}
+		task := &Task{
+			Title:   title,
+			Status:  StatusQueued,
+			Type:    TypeCode,
+			Project: "personal",
+			DueDate: due,
+		}
+		if err := db.CreateTask(task); err != nil {
+			t.Fatalf("failed to create task %s: %v", title, err)
+		}
+		return task
+	}
+
+	lateTask := create("overdue", -2*time.Hour)
+	soonTask := create("due soon", 30*time.Minute)
+	laterTask := create("due later", 48*time.Hour)
+	noDueTask := create("no due", 0)
+
+	queued, err := db.GetQueuedTasks()
+	if err != nil {
+		t.Fatalf("failed to get queued tasks: %v", err)
+	}
+	if len(queued) != 4 {
+		t.Fatalf("expected 4 queued tasks, got %d", len(queued))
+	}
+	idOrder := []int64{lateTask.ID, soonTask.ID, laterTask.ID, noDueTask.ID}
+	for i, expectedID := range idOrder {
+		if queued[i].ID != expectedID {
+			t.Fatalf("expected task %d at position %d, got %d", expectedID, i, queued[i].ID)
+		}
+	}
+
+	next, err := db.GetNextQueuedTask()
+	if err != nil {
+		t.Fatalf("failed to get next queued task: %v", err)
+	}
+	if next == nil || next.ID != lateTask.ID {
+		t.Fatalf("expected next queued task to be overdue task %d, got %+v", lateTask.ID, next)
+	}
+}
+
 func TestGetDueScheduledTasks(t *testing.T) {
 	// Create temporary database
 	tmpDir := t.TempDir()
