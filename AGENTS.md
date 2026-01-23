@@ -147,8 +147,8 @@ CREATE TABLE tasks (
     pr_url TEXT DEFAULT '',          -- Pull request URL
     pr_number INTEGER DEFAULT 0,     -- Pull request number
     scheduled_at DATETIME,           -- When to next run
-    recurrence TEXT DEFAULT '',      -- Recurrence pattern
-    last_run_at DATETIME,            -- Last execution time
+    recurrence TEXT DEFAULT '',      -- Deprecated recurrence pattern (kept for legacy display)
+    last_run_at DATETIME,            -- Last scheduled execution time
     created_at DATETIME,
     updated_at DATETIME,
     started_at DATETIME,
@@ -230,7 +230,7 @@ backlog → queued → processing → done
                  ↘ blocked (needs input)
 
 blocked can return to processing via retry
-done triggers memory extraction + recurring task reset
+done triggers memory extraction
 ```
 
 1. **backlog** - Created but not yet started
@@ -238,6 +238,8 @@ done triggers memory extraction + recurring task reset
 3. **processing** - Claude is actively executing
 4. **blocked** - Waiting for user input/clarification
 5. **done** - Completed successfully
+
+Recurring scheduling has been removed from TaskYou. Use external schedulers (cron, calendar apps, etc.) to invoke the CLI whenever a task should repeat.
 
 ## Key Bindings (TUI)
 
@@ -286,7 +288,7 @@ The background executor (`internal/executor/executor.go`):
 - Supports real-time watching via subscriptions
 - Handles task suspension and resumption
 - Extracts memories from successful tasks
-- Manages scheduled and recurring tasks
+- Manages scheduled tasks (recurring runs must now be handled externally via CLI automation)
 
 ### Claude Code Integration
 

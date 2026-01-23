@@ -35,10 +35,10 @@ type Task struct {
 	UpdatedAt       LocalTime
 	StartedAt       *LocalTime
 	CompletedAt     *LocalTime
-	// Schedule fields for recurring/scheduled tasks
+	// Schedule fields for tasks with delayed execution
 	ScheduledAt *LocalTime // When to next run (nil = not scheduled)
-	Recurrence  string     // Recurrence pattern: "", "hourly", "daily", "weekly", "monthly", or cron expression
-	LastRunAt   *LocalTime // When last executed (for recurring tasks)
+	Recurrence  string     // Deprecated: no longer used (kept for backward compatibility)
+	LastRunAt   *LocalTime // When last executed (for scheduled tasks)
 }
 
 // Task statuses
@@ -74,23 +74,9 @@ func DefaultExecutor() string {
 	return ExecutorClaude
 }
 
-// Recurrence patterns for scheduled tasks
-const (
-	RecurrenceNone    = ""        // One-time scheduled task (or not scheduled)
-	RecurrenceHourly  = "hourly"  // Run every hour
-	RecurrenceDaily   = "daily"   // Run every day
-	RecurrenceWeekly  = "weekly"  // Run every week
-	RecurrenceMonthly = "monthly" // Run every month
-)
-
 // IsScheduled returns true if the task has a scheduled time set.
 func (t *Task) IsScheduled() bool {
 	return t.ScheduledAt != nil && !t.ScheduledAt.Time.IsZero()
-}
-
-// IsRecurring returns true if the task has a recurrence pattern.
-func (t *Task) IsRecurring() bool {
-	return t.Recurrence != ""
 }
 
 // Port allocation constants
@@ -695,7 +681,6 @@ func (db *DB) GetTasksWithBranches() ([]*Task, error) {
 // A task is due if:
 // - It has a scheduled_at time that is <= now
 // - It is not currently queued or processing (to avoid double-queueing)
-// For recurring tasks, this allows blocked/done tasks to run again on schedule.
 func (db *DB) GetDueScheduledTasks() ([]*Task, error) {
 	rows, err := db.Query(`
 		SELECT id, title, body, status, type, project, COALESCE(executor, 'claude'),
@@ -775,49 +760,8 @@ func (db *DB) GetScheduledTasks() ([]*Task, error) {
 	return tasks, nil
 }
 
-// CalculateNextRunTime calculates the next scheduled time based on recurrence pattern.
-// Returns nil if recurrence is empty (one-time task).
-func CalculateNextRunTime(recurrence string, fromTime time.Time) *LocalTime {
-	if recurrence == "" {
-		return nil
-	}
-
-	var nextTime time.Time
-	switch recurrence {
-	case RecurrenceHourly:
-		nextTime = fromTime.Add(1 * time.Hour)
-	case RecurrenceDaily:
-		nextTime = fromTime.AddDate(0, 0, 1)
-	case RecurrenceWeekly:
-		nextTime = fromTime.AddDate(0, 0, 7)
-	case RecurrenceMonthly:
-		nextTime = fromTime.AddDate(0, 1, 0)
-	default:
-		// Unknown recurrence pattern
-		return nil
-	}
-
-	return &LocalTime{Time: nextTime}
-}
-
-// UpdateTaskSchedule updates only the schedule-related fields of a task.
-func (db *DB) UpdateTaskSchedule(taskID int64, scheduledAt *LocalTime, recurrence string, lastRunAt *LocalTime) error {
-	_, err := db.Exec(`
-		UPDATE tasks SET
-			scheduled_at = ?,
-			recurrence = ?,
-			last_run_at = ?,
-			updated_at = CURRENT_TIMESTAMP
-		WHERE id = ?
-	`, scheduledAt, recurrence, lastRunAt, taskID)
-	if err != nil {
-		return fmt.Errorf("update task schedule: %w", err)
-	}
-	return nil
-}
-
-// QueueScheduledTask queues a scheduled task and updates its schedule for recurring tasks.
-// For recurring tasks, it sets the next scheduled_at time; for one-time tasks, it clears scheduled_at.
+// QueueScheduledTask queues a scheduled task.
+// The scheduled time is always cleared so the run happens once.
 func (db *DB) QueueScheduledTask(taskID int64) error {
 	// Get the task first
 	task, err := db.GetTask(taskID)
@@ -830,15 +774,12 @@ func (db *DB) QueueScheduledTask(taskID int64) error {
 
 	now := time.Now()
 
-	// Calculate next run time for recurring tasks
-	if task.IsRecurring() {
-		nextRun := CalculateNextRunTime(task.Recurrence, now)
-		task.ScheduledAt = nextRun
-		task.LastRunAt = &LocalTime{Time: now}
-	} else {
-		// One-time task - clear the schedule after queuing
-		task.ScheduledAt = nil
-		task.LastRunAt = &LocalTime{Time: now}
+	// Recurring tasks are no longer supported; treat everything as one-time
+	task.ScheduledAt = nil
+	task.LastRunAt = &LocalTime{Time: now}
+	if task.Recurrence != "" {
+		// Clear any legacy recurrence data so the UI no longer highlights it
+		task.Recurrence = ""
 	}
 
 	// Update status to queued

@@ -1134,7 +1134,6 @@ func TestScheduledTasks(t *testing.T) {
 		Type:        TypeCode,
 		Project:     "personal",
 		ScheduledAt: &LocalTime{Time: scheduledTime},
-		Recurrence:  RecurrenceDaily,
 	}
 	if err := db.CreateTask(task); err != nil {
 		t.Fatalf("failed to create task: %v", err)
@@ -1148,11 +1147,8 @@ func TestScheduledTasks(t *testing.T) {
 	if !retrieved.IsScheduled() {
 		t.Error("expected task to be scheduled")
 	}
-	if !retrieved.IsRecurring() {
-		t.Error("expected task to be recurring")
-	}
-	if retrieved.Recurrence != RecurrenceDaily {
-		t.Errorf("expected recurrence %q, got %q", RecurrenceDaily, retrieved.Recurrence)
+	if retrieved.Recurrence != "" {
+		t.Errorf("expected recurrence to remain empty, got %q", retrieved.Recurrence)
 	}
 }
 
@@ -1221,9 +1217,9 @@ func TestGetDueScheduledTasks(t *testing.T) {
 	}
 }
 
-func TestGetDueScheduledTasks_RecurringFromAnyStatus(t *testing.T) {
-	// Test that recurring tasks are picked up when due, regardless of current status
-	// (blocked, done, etc.) as long as they're not already queued/processing
+func TestGetDueScheduledTasks_IgnoresStatus(t *testing.T) {
+	// Due tasks should be picked up regardless of status (blocked/done/etc.)
+	// as long as they're not already queued or processing
 	tmpDir := t.TempDir()
 	dbPath := filepath.Join(tmpDir, "test.db")
 
@@ -1236,40 +1232,37 @@ func TestGetDueScheduledTasks_RecurringFromAnyStatus(t *testing.T) {
 
 	now := time.Now()
 
-	// Create a recurring task that's blocked and due
+	// Create a scheduled task that's blocked and due
 	blockedTask := &Task{
-		Title:       "Blocked Recurring Task",
+		Title:       "Blocked Scheduled Task",
 		Status:      StatusBlocked,
 		Type:        TypeCode,
 		Project:     "personal",
 		ScheduledAt: &LocalTime{Time: now.Add(-1 * time.Hour)},
-		Recurrence:  RecurrenceDaily,
 	}
 	if err := db.CreateTask(blockedTask); err != nil {
 		t.Fatalf("failed to create blocked task: %v", err)
 	}
 
-	// Create a recurring task that's done and due
+	// Create a scheduled task that's done and due
 	doneTask := &Task{
-		Title:       "Done Recurring Task",
+		Title:       "Done Scheduled Task",
 		Status:      StatusDone,
 		Type:        TypeCode,
 		Project:     "personal",
 		ScheduledAt: &LocalTime{Time: now.Add(-30 * time.Minute)},
-		Recurrence:  RecurrenceDaily,
 	}
 	if err := db.CreateTask(doneTask); err != nil {
 		t.Fatalf("failed to create done task: %v", err)
 	}
 
-	// Create a recurring task that's queued (should NOT be returned to avoid double-queue)
+	// Create a scheduled task that's queued (should NOT be returned to avoid double-queue)
 	queuedTask := &Task{
-		Title:       "Queued Recurring Task",
+		Title:       "Queued Scheduled Task",
 		Status:      StatusQueued,
 		Type:        TypeCode,
 		Project:     "personal",
 		ScheduledAt: &LocalTime{Time: now.Add(-15 * time.Minute)},
-		Recurrence:  RecurrenceDaily,
 	}
 	if err := db.CreateTask(queuedTask); err != nil {
 		t.Fatalf("failed to create queued task: %v", err)
@@ -1302,10 +1295,10 @@ func TestGetDueScheduledTasks_RecurringFromAnyStatus(t *testing.T) {
 	}
 
 	if !foundBlocked {
-		t.Error("blocked recurring task should be returned when due")
+		t.Error("blocked scheduled task should be returned when due")
 	}
 	if !foundDone {
-		t.Error("done recurring task should be returned when due")
+		t.Error("done scheduled task should be returned when due")
 	}
 }
 
@@ -1330,7 +1323,6 @@ func TestQueueScheduledTask(t *testing.T) {
 		Type:        TypeCode,
 		Project:     "personal",
 		ScheduledAt: &LocalTime{Time: now},
-		Recurrence:  RecurrenceNone,
 	}
 	if err := db.CreateTask(oneTimeTask); err != nil {
 		t.Fatalf("failed to create one-time task: %v", err)
@@ -1355,79 +1347,39 @@ func TestQueueScheduledTask(t *testing.T) {
 	if retrieved.LastRunAt == nil {
 		t.Error("expected last_run_at to be set")
 	}
+	if retrieved.Recurrence != "" {
+		t.Errorf("expected recurrence to stay empty, got %q", retrieved.Recurrence)
+	}
 
-	// Test recurring scheduled task
-	recurringTask := &Task{
-		Title:       "Recurring Task",
+	// Legacy recurring tasks should be treated as one-time and cleared
+	legacyTask := &Task{
+		Title:       "Legacy Recurring Task",
 		Status:      StatusBacklog,
 		Type:        TypeCode,
 		Project:     "personal",
 		ScheduledAt: &LocalTime{Time: now},
-		Recurrence:  RecurrenceHourly,
+		Recurrence:  "daily",
 	}
-	if err := db.CreateTask(recurringTask); err != nil {
-		t.Fatalf("failed to create recurring task: %v", err)
-	}
-
-	// Queue the recurring task
-	if err := db.QueueScheduledTask(recurringTask.ID); err != nil {
-		t.Fatalf("failed to queue recurring task: %v", err)
+	if err := db.CreateTask(legacyTask); err != nil {
+		t.Fatalf("failed to create legacy recurring task: %v", err)
 	}
 
-	// Verify it was queued and next schedule set
-	retrieved, err = db.GetTask(recurringTask.ID)
+	if err := db.QueueScheduledTask(legacyTask.ID); err != nil {
+		t.Fatalf("failed to queue legacy task: %v", err)
+	}
+
+	retrieved, err = db.GetTask(legacyTask.ID)
 	if err != nil {
-		t.Fatalf("failed to get task: %v", err)
+		t.Fatalf("failed to get legacy task: %v", err)
 	}
-	if retrieved.Status != StatusQueued {
-		t.Errorf("expected status %q, got %q", StatusQueued, retrieved.Status)
+	if retrieved.ScheduledAt != nil {
+		t.Error("expected scheduled_at to be cleared for legacy recurring task")
 	}
-	if retrieved.ScheduledAt == nil {
-		t.Error("expected scheduled_at to be set for next run")
-	} else {
-		// Next run should be approximately 1 hour in the future
-		expectedNext := now.Add(1 * time.Hour)
-		diff := retrieved.ScheduledAt.Time.Sub(expectedNext)
-		if diff > 5*time.Second || diff < -5*time.Second {
-			t.Errorf("expected next schedule ~%v, got %v", expectedNext, retrieved.ScheduledAt.Time)
-		}
+	if retrieved.Recurrence != "" {
+		t.Errorf("expected recurrence to be cleared, got %q", retrieved.Recurrence)
 	}
 	if retrieved.LastRunAt == nil {
-		t.Error("expected last_run_at to be set")
-	}
-}
-
-func TestCalculateNextRunTime(t *testing.T) {
-	now := time.Date(2024, 6, 15, 10, 30, 0, 0, time.Local)
-
-	tests := []struct {
-		recurrence string
-		expected   time.Time
-		nilResult  bool
-	}{
-		{RecurrenceNone, time.Time{}, true},
-		{RecurrenceHourly, now.Add(1 * time.Hour), false},
-		{RecurrenceDaily, now.AddDate(0, 0, 1), false},
-		{RecurrenceWeekly, now.AddDate(0, 0, 7), false},
-		{RecurrenceMonthly, now.AddDate(0, 1, 0), false},
-		{"unknown", time.Time{}, true},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.recurrence, func(t *testing.T) {
-			result := CalculateNextRunTime(tc.recurrence, now)
-			if tc.nilResult {
-				if result != nil {
-					t.Errorf("expected nil, got %v", result)
-				}
-			} else {
-				if result == nil {
-					t.Error("expected non-nil result")
-				} else if !result.Time.Equal(tc.expected) {
-					t.Errorf("expected %v, got %v", tc.expected, result.Time)
-				}
-			}
-		})
+		t.Error("expected last_run_at to be set for legacy task")
 	}
 }
 
