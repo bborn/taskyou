@@ -2047,11 +2047,8 @@ func (m *DetailModel) renderContent() string {
 
 	// Description
 	if t.Body != "" && strings.TrimSpace(t.Body) != "" {
-		if m.focused {
-			b.WriteString(Bold.Render("Description"))
-		} else {
-			b.WriteString(dimmedStyle.Render("Description"))
-		}
+		// Labels always use full opacity for clarity and accessibility
+		b.WriteString(Bold.Render("Description"))
 		b.WriteString("\n\n")
 
 		// Use cached renderer
@@ -2084,11 +2081,8 @@ func (m *DetailModel) renderContent() string {
 	// Execution logs
 	if len(m.logs) > 0 {
 		b.WriteString("\n")
-		if m.focused {
-			b.WriteString(Bold.Render("Execution Log"))
-		} else {
-			b.WriteString(dimmedStyle.Render("Execution Log"))
-		}
+		// Labels always use full opacity for clarity and accessibility
+		b.WriteString(Bold.Render("Execution Log"))
 		b.WriteString("\n\n")
 
 		for _, log := range m.logs {
