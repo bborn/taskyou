@@ -274,6 +274,26 @@ func (k *KanbanBoard) MoveDown() {
 	k.ensureSelectedVisible()
 }
 
+// MoveToTop jumps to the first task in the current column.
+func (k *KanbanBoard) MoveToTop() {
+	col := k.columns[k.selectedCol]
+	if len(col.Tasks) == 0 {
+		return
+	}
+	k.selectedRow = 0
+	k.ensureSelectedVisible()
+}
+
+// MoveToBottom jumps to the last task in the current column.
+func (k *KanbanBoard) MoveToBottom() {
+	col := k.columns[k.selectedCol]
+	if len(col.Tasks) == 0 {
+		return
+	}
+	k.selectedRow = len(col.Tasks) - 1
+	k.ensureSelectedVisible()
+}
+
 // ensureSelectedVisible adjusts scroll offset so the selected task is visible.
 func (k *KanbanBoard) ensureSelectedVisible() {
 	if k.selectedCol < 0 || k.selectedCol >= len(k.columns) {

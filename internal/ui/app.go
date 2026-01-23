@@ -77,6 +77,9 @@ type KeyMap struct {
 	FocusInProgress key.Binding
 	FocusBlocked    key.Binding
 	FocusDone       key.Binding
+	// Jump to top/bottom of column
+	JumpTop    key.Binding
+	JumpBottom key.Binding
 }
 
 // ShortHelp returns key bindings to show in the mini help.
@@ -87,7 +90,7 @@ func (k KeyMap) ShortHelp() []key.Binding {
 // FullHelp returns keybindings for the expanded help view.
 func (k KeyMap) FullHelp() [][]key.Binding {
 	return [][]key.Binding{
-		{k.Left, k.Right, k.Up, k.Down},
+		{k.Left, k.Right, k.Up, k.Down, k.JumpTop, k.JumpBottom},
 		{k.FocusBacklog, k.FocusInProgress, k.FocusBlocked, k.FocusDone},
 		{k.Enter, k.New, k.Queue, k.Close},
 		{k.Retry, k.Archive, k.Delete, k.OpenWorktree},
@@ -219,6 +222,14 @@ func DefaultKeyMap() KeyMap {
 		FocusDone: key.NewBinding(
 			key.WithKeys("D"),
 			key.WithHelp("D", "done"),
+		),
+		JumpTop: key.NewBinding(
+			key.WithKeys("home"),
+			key.WithHelp("home", "top"),
+		),
+		JumpBottom: key.NewBinding(
+			key.WithKeys("end"),
+			key.WithHelp("end", "bottom"),
 		),
 	}
 }
@@ -1115,6 +1126,14 @@ func (m *AppModel) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.notifyTaskID = 0
 			return m, m.loadTask(taskID)
 		}
+
+	// Jump to top/bottom of column
+	case key.Matches(msg, m.keys.JumpTop):
+		m.kanban.MoveToTop()
+		return m, nil
+
+	case key.Matches(msg, m.keys.JumpBottom):
+		m.kanban.MoveToBottom()
 		return m, nil
 
 	case key.Matches(msg, m.keys.Enter):

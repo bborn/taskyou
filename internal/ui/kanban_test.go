@@ -207,6 +207,83 @@ func TestKanbanBoard_MoveDownWrapsAround(t *testing.T) {
 	}
 }
 
+func TestKanbanBoard_MoveToTop(t *testing.T) {
+	board := NewKanbanBoard(100, 50)
+
+	// Set up tasks in the first column
+	tasks := []*db.Task{
+		{ID: 1, Title: "Task 1", Status: db.StatusBacklog},
+		{ID: 2, Title: "Task 2", Status: db.StatusBacklog},
+		{ID: 3, Title: "Task 3", Status: db.StatusBacklog},
+	}
+	board.SetTasks(tasks)
+
+	// Move to the last task
+	board.MoveDown() // row 1
+	board.MoveDown() // row 2
+
+	if board.selectedRow != 2 {
+		t.Fatalf("Expected to be at row 2, got %d", board.selectedRow)
+	}
+
+	// MoveToTop should jump to first task
+	board.MoveToTop()
+	if board.selectedRow != 0 {
+		t.Errorf("MoveToTop: selectedRow = %d, want 0", board.selectedRow)
+	}
+
+	// MoveToTop at top should stay at top
+	board.MoveToTop()
+	if board.selectedRow != 0 {
+		t.Errorf("MoveToTop at top: selectedRow = %d, want 0", board.selectedRow)
+	}
+}
+
+func TestKanbanBoard_MoveToBottom(t *testing.T) {
+	board := NewKanbanBoard(100, 50)
+
+	// Set up tasks in the first column
+	tasks := []*db.Task{
+		{ID: 1, Title: "Task 1", Status: db.StatusBacklog},
+		{ID: 2, Title: "Task 2", Status: db.StatusBacklog},
+		{ID: 3, Title: "Task 3", Status: db.StatusBacklog},
+	}
+	board.SetTasks(tasks)
+
+	// Verify we start at row 0
+	if board.selectedRow != 0 {
+		t.Fatalf("Expected to start at row 0, got %d", board.selectedRow)
+	}
+
+	// MoveToBottom should jump to last task
+	board.MoveToBottom()
+	if board.selectedRow != 2 {
+		t.Errorf("MoveToBottom: selectedRow = %d, want 2", board.selectedRow)
+	}
+
+	// MoveToBottom at bottom should stay at bottom
+	board.MoveToBottom()
+	if board.selectedRow != 2 {
+		t.Errorf("MoveToBottom at bottom: selectedRow = %d, want 2", board.selectedRow)
+	}
+}
+
+func TestKanbanBoard_MoveToTopBottomEmptyColumn(t *testing.T) {
+	board := NewKanbanBoard(100, 50)
+
+	// No tasks - all columns empty
+	board.SetTasks([]*db.Task{})
+
+	// These should not panic
+	board.MoveToTop()
+	board.MoveToBottom()
+
+	// Selection should stay at 0
+	if board.selectedRow != 0 {
+		t.Errorf("selectedRow = %d, want 0", board.selectedRow)
+	}
+}
+
 func TestKanbanBoard_MoveUpDownEmptyColumn(t *testing.T) {
 	board := NewKanbanBoard(100, 50)
 
