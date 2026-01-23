@@ -1930,8 +1930,7 @@ func (m *DetailModel) renderHeader() string {
 				Foreground(dimmedFg)
 		}
 		icon := "⏰"
-		var scheduleText string
-		scheduleText = icon + " " + formatScheduleTime(t.ScheduledAt.Time)
+		scheduleText := icon + " " + formatScheduleTime(t.ScheduledAt.Time)
 		meta.WriteString(scheduleStyle.Render(scheduleText))
 
 		// Show last run info when available
