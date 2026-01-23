@@ -28,6 +28,17 @@ func TestDetectExecutorIdentityCodex(t *testing.T) {
 	}
 }
 
+func TestDetectExecutorIdentityGemini(t *testing.T) {
+	t.Setenv("TASK_EXECUTOR", "gemini")
+	slug, display := detectExecutorIdentity()
+	if slug != "gemini" {
+		t.Fatalf("expected slug gemini, got %q", slug)
+	}
+	if display != "Gemini" {
+		t.Fatalf("expected display Gemini, got %q", display)
+	}
+}
+
 func TestDetectExecutorIdentityUnknown(t *testing.T) {
 	t.Setenv("TASK_EXECUTOR", "beta")
 	slug, display := detectExecutorIdentity()
