@@ -803,8 +803,9 @@ func (m *DetailModel) getCurrentDetailPaneHeight(tuiPaneID string) int {
 		return 0
 	}
 
-	// Calculate the percentage
-	return (paneHeight * 100) / totalHeight
+	// Calculate the percentage with proper rounding to avoid truncation errors
+	// that cause the pane to progressively shrink over time
+	return (paneHeight*100 + totalHeight/2) / totalHeight
 }
 
 // getActualPaneHeight returns the actual pane height in lines.
@@ -868,7 +869,8 @@ func (m *DetailModel) getCurrentShellPaneWidth() int {
 
 	// Calculate total width and shell percentage
 	totalWidth := shellWidth + claudeWidth
-	return (shellWidth * 100) / totalWidth
+	// Use proper rounding to avoid truncation errors
+	return (shellWidth*100 + totalWidth/2) / totalWidth
 }
 
 // saveDetailPaneHeight saves the current detail pane height to settings.
@@ -900,8 +902,9 @@ func (m *DetailModel) saveDetailPaneHeight(tuiPaneID string) {
 		return
 	}
 
-	// Calculate the percentage
-	percentage := (paneHeight * 100) / totalHeight
+	// Calculate the percentage with proper rounding to avoid truncation errors
+	// that cause the pane to progressively shrink over time
+	percentage := (paneHeight*100 + totalHeight/2) / totalHeight
 	if percentage >= 1 && percentage <= 50 {
 		heightStr := fmt.Sprintf("%d%%", percentage)
 		m.database.SetSetting(config.SettingDetailPaneHeight, heightStr)
@@ -941,9 +944,9 @@ func (m *DetailModel) saveShellPaneWidth() {
 		return
 	}
 
-	// Calculate total width and shell percentage
+	// Calculate total width and shell percentage with proper rounding
 	totalWidth := shellWidth + claudeWidth
-	percentage := (shellWidth * 100) / totalWidth
+	percentage := (shellWidth*100 + totalWidth/2) / totalWidth
 	if percentage >= 10 && percentage <= 90 {
 		widthStr := fmt.Sprintf("%d%%", percentage)
 		m.database.SetSetting(config.SettingShellPaneWidth, widthStr)
