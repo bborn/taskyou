@@ -17,7 +17,7 @@ type Task struct {
 	Status          string
 	Type            string
 	Project         string
-	Executor        string // Task executor: "claude" (default), "codex"
+	Executor        string // Task executor: "claude" (default), "codex", "gemini"
 	WorktreePath    string
 	BranchName      string
 	Port            int    // Unique port for running the application in this task's worktree
@@ -67,6 +67,7 @@ const (
 const (
 	ExecutorClaude = "claude" // Claude Code CLI (default)
 	ExecutorCodex  = "codex"  // OpenAI Codex CLI
+	ExecutorGemini = "gemini" // Google Gemini CLI
 )
 
 // DefaultExecutor returns the default executor if none is specified.

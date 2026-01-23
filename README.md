@@ -167,10 +167,13 @@ backlog → queued → processing → done
 
 Task You supports multiple AI executors for processing tasks. You can choose the executor when creating or editing a task.
 
+> Developers who want to add another backend should read [`docs/executor_interface.md`](docs/executor_interface.md) for the full `TaskExecutor` contract.
+
 | Executor | CLI | Description |
 |----------|-----|-------------|
 | Claude (default) | `claude` | [Claude Code](https://claude.ai/claude-code) - Anthropic's coding agent with session resumption |
 | Codex | `codex` | [OpenAI Codex CLI](https://github.com/openai/codex) - OpenAI's coding assistant |
+| Gemini | `gemini` | [Gemini CLI](https://ai.google.dev/gemini-api/docs/cli) - Google's Gemini-based coding assistant |
 
 Both executors run in tmux windows with the same worktree isolation and environment variables. The main differences:
 
@@ -187,6 +190,9 @@ At least one executor CLI must be installed for tasks to run:
 
 # OpenAI Codex CLI
 npm install -g @openai/codex
+
+# Google Gemini CLI
+# See https://ai.google.dev/gemini-api/docs/cli for installation instructions
 ```
 
 ### How Task Executors Work

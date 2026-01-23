@@ -952,6 +952,27 @@ func TestCreateTaskSavesLastExecutor(t *testing.T) {
 		t.Errorf("expected %q, got %q", ExecutorCodex, lastExecutor)
 	}
 
+	// Create task with gemini executor
+	taskGemini := &Task{
+		Title:    "Test Task Gemini",
+		Status:   StatusBacklog,
+		Type:     "code",
+		Project:  "personal",
+		Executor: ExecutorGemini,
+	}
+	if err := db.CreateTask(taskGemini); err != nil {
+		t.Fatalf("failed to create task: %v", err)
+	}
+
+	// Verify last executor was updated to gemini
+	lastExecutor, err = db.GetLastExecutorForProject("personal")
+	if err != nil {
+		t.Fatalf("failed to get last executor: %v", err)
+	}
+	if lastExecutor != ExecutorGemini {
+		t.Errorf("expected %q, got %q", ExecutorGemini, lastExecutor)
+	}
+
 	// Create task with empty executor - should still save the default executor
 	task3 := &Task{
 		Title:    "Test Task 3",

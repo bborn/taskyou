@@ -99,6 +99,8 @@ func formatExecutorDisplayName(slug, raw string) string {
 		return "Codex"
 	case "claude":
 		return defaultExecutorName
+	case "gemini":
+		return "Gemini"
 	}
 	trimmed := strings.TrimSpace(raw)
 	if trimmed == "" {
@@ -145,6 +147,7 @@ func New(database *db.DB, cfg *config.Config) *Executor {
 	// Register available executors
 	e.executorFactory.Register(NewClaudeExecutor(e))
 	e.executorFactory.Register(NewCodexExecutor(e))
+	e.executorFactory.Register(NewGeminiExecutor(e))
 
 	return e
 }
@@ -173,6 +176,7 @@ func NewWithLogging(database *db.DB, cfg *config.Config, w io.Writer) *Executor 
 	// Register available executors
 	e.executorFactory.Register(NewClaudeExecutor(e))
 	e.executorFactory.Register(NewCodexExecutor(e))
+	e.executorFactory.Register(NewGeminiExecutor(e))
 
 	return e
 }
