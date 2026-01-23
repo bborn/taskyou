@@ -69,8 +69,9 @@ type KeyMap struct {
 	ToggleDangerous key.Binding
 	TogglePin       key.Binding
 	Filter          key.Binding
-	ResumeClaude    key.Binding
-	OpenWorktree    key.Binding
+	ResumeClaude       key.Binding
+	OpenWorktree       key.Binding
+	JumpToNotification key.Binding
 	// Column focus shortcuts
 	FocusBacklog    key.Binding
 	FocusInProgress key.Binding
@@ -199,6 +200,10 @@ func DefaultKeyMap() KeyMap {
 			key.WithKeys("o"),
 			key.WithHelp("o", "open in editor"),
 		),
+		JumpToNotification: key.NewBinding(
+			key.WithKeys("g"),
+			key.WithHelp("g", "go to notification"),
+		),
 		FocusBacklog: key.NewBinding(
 			key.WithKeys("B"),
 			key.WithHelp("B", "backlog"),
@@ -238,6 +243,7 @@ type AppModel struct {
 	err          error
 	notification string    // Notification banner text
 	notifyUntil  time.Time // When to hide notification
+	notifyTaskID int64     // Task ID that triggered the notification (for jumping to it)
 
 	// Track task statuses to detect changes
 	prevStatuses map[int64]string
@@ -562,15 +568,17 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if prevStatus != "" && prevStatus != t.Status {
 				if t.Status == db.StatusBlocked {
 					// Task just became blocked - ring bell and show notification
-					m.notification = fmt.Sprintf("⚠ Task #%d needs input: %s", t.ID, t.Title)
+					m.notification = fmt.Sprintf("⚠ Task #%d needs input: %s (g to jump)", t.ID, t.Title)
 					m.notifyUntil = time.Now().Add(10 * time.Second)
+					m.notifyTaskID = t.ID
 					RingBell() // Ring terminal bell (writes to /dev/tty to bypass TUI)
 					// Mark task as needing input for kanban highlighting
 					m.tasksNeedingInput[t.ID] = true
 				} else if t.Status == db.StatusDone && db.IsInProgress(prevStatus) {
 					// Task completed - ring bell and show notification
-					m.notification = fmt.Sprintf("✓ Task #%d complete: %s", t.ID, t.Title)
+					m.notification = fmt.Sprintf("✓ Task #%d complete: %s (g to jump)", t.ID, t.Title)
 					m.notifyUntil = time.Now().Add(5 * time.Second)
+					m.notifyTaskID = t.ID
 					RingBell() // Ring terminal bell (writes to /dev/tty to bypass TUI)
 				}
 				// Clear needing input flag when task leaves blocked status
@@ -762,18 +770,21 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					// Show notification for status changes
 					if prevStatus != event.Task.Status {
 						if event.Task.Status == db.StatusBlocked {
-							m.notification = fmt.Sprintf("⚠ Task #%d needs input: %s", event.TaskID, event.Task.Title)
+							m.notification = fmt.Sprintf("⚠ Task #%d needs input: %s (g to jump)", event.TaskID, event.Task.Title)
 							m.notifyUntil = time.Now().Add(10 * time.Second)
+							m.notifyTaskID = event.TaskID
 							RingBell() // Ring terminal bell (writes to /dev/tty to bypass TUI)
 							// Mark task as needing input for kanban highlighting
 							m.tasksNeedingInput[event.TaskID] = true
 						} else if event.Task.Status == db.StatusDone && db.IsInProgress(prevStatus) {
-							m.notification = fmt.Sprintf("✓ Task #%d complete: %s", event.TaskID, event.Task.Title)
+							m.notification = fmt.Sprintf("✓ Task #%d complete: %s (g to jump)", event.TaskID, event.Task.Title)
 							m.notifyUntil = time.Now().Add(5 * time.Second)
+							m.notifyTaskID = event.TaskID
 							RingBell() // Ring terminal bell (writes to /dev/tty to bypass TUI)
 						} else if db.IsInProgress(event.Task.Status) {
-							m.notification = fmt.Sprintf("▶ Task #%d started: %s", event.TaskID, event.Task.Title)
+							m.notification = fmt.Sprintf("▶ Task #%d started: %s (g to jump)", event.TaskID, event.Task.Title)
 							m.notifyUntil = time.Now().Add(3 * time.Second)
+							m.notifyTaskID = event.TaskID
 						}
 						// Clear needing input flag when task leaves blocked status
 						if prevStatus == db.StatusBlocked && event.Task.Status != db.StatusBlocked {
@@ -802,6 +813,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Clear expired notifications
 		if !m.notifyUntil.IsZero() && time.Now().After(m.notifyUntil) {
 			m.notification = ""
+			m.notifyTaskID = 0
 		}
 		// Refresh detail view if active (for logs which may update frequently)
 		if m.currentView == ViewDetail && m.detailView != nil {
@@ -952,6 +964,7 @@ func (m *AppModel) viewDashboard() string {
 		headerParts = append(headerParts, notifyStyle.Render(m.notification))
 	} else {
 		m.notification = "" // Clear expired notification
+		m.notifyTaskID = 0
 	}
 
 	// Show current processing tasks if any
@@ -1090,6 +1103,18 @@ func (m *AppModel) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case key.Matches(msg, m.keys.FocusDone):
 		m.kanban.FocusColumn(3)
+		return m, nil
+
+	case key.Matches(msg, m.keys.JumpToNotification):
+		// Jump to the task that triggered the notification
+		if m.notifyTaskID > 0 && m.notification != "" {
+			taskID := m.notifyTaskID
+			m.kanban.SelectTask(taskID)
+			// Clear notification after jumping
+			m.notification = ""
+			m.notifyTaskID = 0
+			return m, m.loadTask(taskID)
+		}
 		return m, nil
 
 	case key.Matches(msg, m.keys.Enter):
@@ -2537,7 +2562,9 @@ func (m *AppModel) loadTasks() tea.Cmd {
 
 func (m *AppModel) loadTask(id int64) tea.Cmd {
 	// Check PR state asynchronously (don't block UI)
-	go m.executor.CheckPRStateAndUpdateTask(id)
+	if m.executor != nil {
+		go m.executor.CheckPRStateAndUpdateTask(id)
+	}
 
 	return func() tea.Msg {
 		task, err := m.db.GetTask(id)
