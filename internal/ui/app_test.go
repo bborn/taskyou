@@ -489,3 +489,90 @@ func TestScoreTaskForFilterRanking(t *testing.T) {
 		})
 	}
 }
+
+func TestJumpToNotificationKey(t *testing.T) {
+	// Create app model with kanban board and tasks
+	tasks := []*db.Task{
+		{ID: 1, Title: "Task 1", Status: db.StatusBacklog},
+		{ID: 2, Title: "Task 2", Status: db.StatusBlocked},
+		{ID: 3, Title: "Task 3", Status: db.StatusDone},
+	}
+
+	m := &AppModel{
+		width:        100,
+		height:       50,
+		currentView:  ViewDashboard,
+		keys:         DefaultKeyMap(),
+		notification: "⚠ Task #2 needs input: Task 2 (g to jump)",
+		notifyTaskID: 2,
+		kanban:       NewKanbanBoard(100, 50),
+	}
+	m.kanban.SetTasks(tasks)
+
+	// Verify initial state - task 1 should be selected (first task in first column)
+	if task := m.kanban.SelectedTask(); task != nil && task.ID == 2 {
+		// Reset selection to different task
+		m.kanban.SelectTask(1)
+	}
+
+	// Verify notification fields are set before key press
+	if m.notification == "" {
+		t.Error("expected notification to be set before key press")
+	}
+	if m.notifyTaskID != 2 {
+		t.Errorf("expected notifyTaskID to be 2 before key press, got %d", m.notifyTaskID)
+	}
+
+	// Press 'g' to jump to notification
+	// Note: We test with a minimal setup that doesn't have executor/db,
+	// so we only verify the state changes, not the actual command execution
+	gMsg := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'g'}}
+	model, _ := m.updateDashboard(gMsg)
+	am := model.(*AppModel)
+
+	// Notification should be cleared
+	if am.notification != "" {
+		t.Errorf("expected notification to be cleared, got %q", am.notification)
+	}
+
+	// NotifyTaskID should be cleared
+	if am.notifyTaskID != 0 {
+		t.Errorf("expected notifyTaskID to be 0, got %d", am.notifyTaskID)
+	}
+
+	// Kanban should have task 2 selected
+	if task := am.kanban.SelectedTask(); task == nil || task.ID != 2 {
+		if task == nil {
+			t.Error("expected task 2 to be selected, but no task is selected")
+		} else {
+			t.Errorf("expected task 2 to be selected, got task %d", task.ID)
+		}
+	}
+}
+
+func TestJumpToNotificationKey_NoNotification(t *testing.T) {
+	// Create app model with kanban board but no active notification
+	tasks := []*db.Task{
+		{ID: 1, Title: "Task 1", Status: db.StatusBacklog},
+	}
+
+	m := &AppModel{
+		width:        100,
+		height:       50,
+		currentView:  ViewDashboard,
+		keys:         DefaultKeyMap(),
+		notification: "",
+		notifyTaskID: 0,
+		kanban:       NewKanbanBoard(100, 50),
+	}
+	m.kanban.SetTasks(tasks)
+
+	// Press 'g' when no notification is active
+	gMsg := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'g'}}
+	_, cmd := m.updateDashboard(gMsg)
+
+	// Should return nil command since there's no notification
+	if cmd != nil {
+		t.Error("expected nil command when no notification is active")
+	}
+}
