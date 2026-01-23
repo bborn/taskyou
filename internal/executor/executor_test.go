@@ -265,9 +265,10 @@ func TestAttachmentsInPrompt(t *testing.T) {
 		}
 	})
 
-	t.Run("getAttachmentsSection uses Read tool", func(t *testing.T) {
+	t.Run("getAttachmentsSection uses Read tool with relative paths", func(t *testing.T) {
+		worktreePath := "/worktree"
 		paths := []string{"/worktree/.claude/attachments/notes.txt", "/worktree/.claude/attachments/data.json"}
-		section := exec.getAttachmentsSection(task.ID, paths)
+		section := exec.getAttachmentsSection(task.ID, paths, worktreePath)
 
 		if !strings.Contains(section, "## Attachments") {
 			t.Error("section should contain Attachments header")
@@ -278,13 +279,19 @@ func TestAttachmentsInPrompt(t *testing.T) {
 		if strings.Contains(section, "View tool") {
 			t.Error("section should NOT mention View tool")
 		}
-		if !strings.Contains(section, "/worktree/.claude/attachments/notes.txt") {
-			t.Error("section should contain file path")
+		// Paths should be relative, not absolute
+		if !strings.Contains(section, ".claude/attachments/notes.txt") {
+			t.Error("section should contain relative file path")
+		}
+		if strings.Contains(section, "/worktree/.claude/attachments/notes.txt") {
+			t.Error("section should NOT contain absolute file path")
 		}
 	})
 
 	t.Run("buildPrompt includes attachments section", func(t *testing.T) {
 		worktreePath := t.TempDir()
+		// Set task's WorktreePath so buildPrompt can convert to relative paths
+		task.WorktreePath = worktreePath
 		paths, cleanup := exec.prepareAttachments(task.ID, worktreePath)
 		defer cleanup()
 
@@ -295,6 +302,10 @@ func TestAttachmentsInPrompt(t *testing.T) {
 		}
 		if !strings.Contains(prompt, "Read tool") {
 			t.Error("prompt should mention Read tool")
+		}
+		// Verify paths are relative in the prompt
+		if !strings.Contains(prompt, ".claude/attachments/") {
+			t.Error("prompt should contain relative attachment paths")
 		}
 	})
 
@@ -307,7 +318,7 @@ func TestAttachmentsInPrompt(t *testing.T) {
 		retryFeedback := "Please fix the bug"
 		feedbackWithAttachments := retryFeedback
 		if len(paths) > 0 {
-			feedbackWithAttachments = retryFeedback + "\n" + exec.getAttachmentsSection(task.ID, paths)
+			feedbackWithAttachments = retryFeedback + "\n" + exec.getAttachmentsSection(task.ID, paths, worktreePath)
 		}
 
 		// Verify attachments are included in the retry feedback
@@ -319,6 +330,10 @@ func TestAttachmentsInPrompt(t *testing.T) {
 		}
 		if !strings.Contains(feedbackWithAttachments, "Please fix the bug") {
 			t.Error("retry feedback should still contain original feedback")
+		}
+		// Verify paths are relative
+		if !strings.Contains(feedbackWithAttachments, ".claude/attachments/") {
+			t.Error("retry feedback should contain relative attachment paths")
 		}
 	})
 }

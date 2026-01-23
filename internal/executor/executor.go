@@ -915,7 +915,7 @@ func (e *Executor) executeTask(ctx context.Context, task *db.Task) {
 		// This is important when attachments are added after the initial run or when resuming
 		feedbackWithAttachments := retryFeedback
 		if len(attachmentPaths) > 0 {
-			feedbackWithAttachments = retryFeedback + "\n" + e.getAttachmentsSection(task.ID, attachmentPaths)
+			feedbackWithAttachments = retryFeedback + "\n" + e.getAttachmentsSection(task.ID, attachmentPaths, workDir)
 		}
 		e.logLine(task.ID, "system", fmt.Sprintf("Resuming previous session with feedback (executor: %s)", executorName))
 		execResult := taskExecutor.Resume(taskCtx, task, workDir, prompt, feedbackWithAttachments)
@@ -1094,7 +1094,9 @@ func (e *Executor) prepareAttachments(taskID int64, worktreePath string) ([]stri
 }
 
 // getAttachmentsSection returns a prompt section describing attachments.
-func (e *Executor) getAttachmentsSection(taskID int64, paths []string) string {
+// The worktreePath parameter is used to convert absolute paths to relative paths
+// so they match the permission pattern Read(.claude/attachments/**).
+func (e *Executor) getAttachmentsSection(taskID int64, paths []string, worktreePath string) string {
 	if len(paths) == 0 {
 		return ""
 	}
@@ -1103,7 +1105,13 @@ func (e *Executor) getAttachmentsSection(taskID int64, paths []string) string {
 	section.WriteString("\n## Attachments\n\n")
 	section.WriteString("The following files are attached to this task:\n")
 	for _, p := range paths {
-		section.WriteString(fmt.Sprintf("- %s\n", p))
+		// Convert absolute paths to relative paths so they match permission patterns
+		relPath := p
+		if worktreePath != "" && strings.HasPrefix(p, worktreePath) {
+			relPath = strings.TrimPrefix(p, worktreePath)
+			relPath = strings.TrimPrefix(relPath, string(filepath.Separator))
+		}
+		section.WriteString(fmt.Sprintf("- %s\n", relPath))
 	}
 	section.WriteString("\nYou can read these files using the Read tool.\n\n")
 	return section.String()
@@ -1134,8 +1142,8 @@ func (e *Executor) buildPrompt(task *db.Task, attachmentPaths []string) string {
 	// Check for conversation history (from previous runs/retries)
 	conversationHistory := e.getConversationHistory(task.ID)
 
-	// Get attachments section
-	attachments := e.getAttachmentsSection(task.ID, attachmentPaths)
+	// Get attachments section (use relative paths to match permission patterns)
+	attachments := e.getAttachmentsSection(task.ID, attachmentPaths, task.WorktreePath)
 
 	// Look up task type instructions from database
 	if task.Type != "" {
