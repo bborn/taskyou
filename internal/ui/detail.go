@@ -1974,13 +1974,20 @@ func (m *DetailModel) renderHeader() string {
 		}
 	}
 
-	lines := []string{meta.String()}
+	// Create a block for the right-aligned content
+	rightContent := []string{meta.String()}
 	if prLine != "" {
-		lines = append(lines, prLine)
+		rightContent = append(rightContent, prLine)
 	}
-	lines = append(lines, "")
+	rightBlock := lipgloss.JoinVertical(lipgloss.Right, rightContent...)
 
-	return lipgloss.JoinVertical(lipgloss.Left, lines...)
+	// Render the block aligned to the right of the available space
+	headerLayout := lipgloss.NewStyle().
+		Width(m.width - 4).
+		Align(lipgloss.Right).
+		Render(rightBlock)
+
+	return lipgloss.JoinVertical(lipgloss.Left, headerLayout, "")
 }
 
 // getGlamourRenderer returns a cached Glamour renderer, creating it if needed.
