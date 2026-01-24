@@ -646,6 +646,77 @@ Examples:
 	listCmd.Flags().Bool("pr", false, "Show PR/CI status (requires network)")
 	rootCmd.AddCommand(listCmd)
 
+	boardCmd := &cobra.Command{
+		Use:   "board",
+		Short: "Show the Kanban board in the CLI",
+		Long: `Print the same Backlog / Queued / In Progress / Blocked / Done view
+that the TUI shows, either as formatted text or JSON for automation.`,
+		Run: func(cmd *cobra.Command, args []string) {
+			outputJSON, _ := cmd.Flags().GetBool("json")
+			limit, _ := cmd.Flags().GetInt("limit")
+
+			if limit <= 0 {
+				limit = 5
+			}
+
+			dbPath := db.DefaultPath()
+			database, err := db.Open(dbPath)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+			defer database.Close()
+
+			tasks, err := database.ListTasks(db.ListTasksOptions{IncludeClosed: true, Limit: 500})
+			if err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+
+			snapshot := buildBoardSnapshot(tasks, limit)
+
+			if outputJSON {
+				data, _ := json.MarshalIndent(snapshot, "", "  ")
+				fmt.Println(string(data))
+				return
+			}
+
+			fmt.Println(boldStyle.Render("Kanban Snapshot"))
+			fmt.Println(strings.Repeat("─", 50))
+			for _, column := range snapshot.Columns {
+				fmt.Printf("%s (%d)\n", column.Label, column.Count)
+				if column.Count == 0 {
+					fmt.Println("  (empty)")
+					fmt.Println()
+					continue
+				}
+				for _, task := range column.Tasks {
+					line := fmt.Sprintf("- #%d %s", task.ID, task.Title)
+					if task.Project != "" {
+						line += fmt.Sprintf(" [%s]", task.Project)
+					}
+					if task.Type != "" {
+						line += fmt.Sprintf(" (%s)", task.Type)
+					}
+					if task.Pinned {
+						line += " 📌"
+					}
+					if task.AgeHint != "" {
+						line += fmt.Sprintf(" • %s", task.AgeHint)
+					}
+					fmt.Println("  " + line)
+				}
+				if column.Count > len(column.Tasks) {
+					fmt.Printf("  … +%d more\n", column.Count-len(column.Tasks))
+				}
+				fmt.Println()
+			}
+		},
+	}
+	boardCmd.Flags().Bool("json", false, "Output board snapshot as JSON")
+	boardCmd.Flags().Int("limit", 5, "Maximum entries to show per column")
+	rootCmd.AddCommand(boardCmd)
+
 	// Show subcommand - show task details
 	showCmd := &cobra.Command{
 		Use:   "show <task-id>",
@@ -1018,6 +1089,112 @@ Examples:
 		},
 	}
 	rootCmd.AddCommand(executeCmd)
+
+	statusCmd := &cobra.Command{
+		Use:   "status <task-id> <status>",
+		Short: "Set a task's status",
+		Long: `Manually update a task's status. Useful for automation/orchestration when
+you need to move cards between columns without opening the TUI.
+
+Valid statuses: backlog, queued, processing, blocked, done, archived.`,
+		Args: cobra.ExactArgs(2),
+		Run: func(cmd *cobra.Command, args []string) {
+			var taskID int64
+			if _, err := fmt.Sscanf(args[0], "%d", &taskID); err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Invalid task ID: "+args[0]))
+				os.Exit(1)
+			}
+
+			status := strings.ToLower(strings.TrimSpace(args[1]))
+			if !isValidStatus(status) {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Invalid status. Must be one of: "+strings.Join(validStatuses(), ", ")))
+				os.Exit(1)
+			}
+
+			dbPath := db.DefaultPath()
+			database, err := db.Open(dbPath)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+			defer database.Close()
+
+			task, err := database.GetTask(taskID)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+			if task == nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render(fmt.Sprintf("Task #%d not found", taskID)))
+				os.Exit(1)
+			}
+
+			if err := database.UpdateTaskStatus(taskID, status); err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+
+			fmt.Println(successStyle.Render(fmt.Sprintf("Task #%d moved to %s", taskID, status)))
+		},
+	}
+	rootCmd.AddCommand(statusCmd)
+
+	pinCmd := &cobra.Command{
+		Use:   "pin <task-id>",
+		Short: "Pin, unpin, or toggle a task",
+		Args:  cobra.ExactArgs(1),
+		Run: func(cmd *cobra.Command, args []string) {
+			var taskID int64
+			if _, err := fmt.Sscanf(args[0], "%d", &taskID); err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Invalid task ID: "+args[0]))
+				os.Exit(1)
+			}
+
+			unpin, _ := cmd.Flags().GetBool("unpin")
+			toggle, _ := cmd.Flags().GetBool("toggle")
+
+			dbPath := db.DefaultPath()
+			database, err := db.Open(dbPath)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+			defer database.Close()
+
+			task, err := database.GetTask(taskID)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+			if task == nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render(fmt.Sprintf("Task #%d not found", taskID)))
+				os.Exit(1)
+			}
+
+			var newValue bool
+			if toggle {
+				newValue = !task.Pinned
+			} else if unpin {
+				newValue = false
+			} else {
+				newValue = true
+			}
+
+			if err := database.UpdateTaskPinned(taskID, newValue); err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+
+			state := "pinned"
+			if !newValue {
+				state = "unpinned"
+			}
+			fmt.Println(successStyle.Render(fmt.Sprintf("Task #%d %s", taskID, state)))
+		},
+	}
+	pinCmd.Flags().Bool("unpin", false, "Unpin the task")
+	pinCmd.Flags().Bool("toggle", false, "Toggle the current pin state")
+	rootCmd.AddCommand(pinCmd)
 
 	// Close subcommand - mark a task as done
 	closeCmd := &cobra.Command{
@@ -1499,6 +1676,182 @@ func readPidFile(path string) (int, error) {
 
 func writePidFile(path string, pid int) error {
 	return os.WriteFile(path, []byte(fmt.Sprintf("%d", pid)), 0644)
+}
+
+type boardSnapshot struct {
+	Columns []boardColumn `json:"columns"`
+}
+
+type boardColumn struct {
+	Status string       `json:"status"`
+	Label  string       `json:"label"`
+	Count  int          `json:"count"`
+	Tasks  []boardEntry `json:"tasks"`
+}
+
+type boardEntry struct {
+	ID      int64  `json:"id"`
+	Title   string `json:"title"`
+	Project string `json:"project"`
+	Type    string `json:"type"`
+	Pinned  bool   `json:"pinned"`
+	AgeHint string `json:"age_hint"`
+}
+
+func buildBoardSnapshot(tasks []*db.Task, limit int) boardSnapshot {
+	sections := []struct {
+		status string
+		label  string
+	}{
+		{db.StatusBacklog, "Backlog"},
+		{db.StatusQueued, "Queued"},
+		{db.StatusProcessing, "In Progress"},
+		{db.StatusBlocked, "Blocked"},
+		{db.StatusDone, "Done"},
+	}
+
+	grouped := make(map[string][]*db.Task)
+	for _, task := range tasks {
+		if task.Status == db.StatusArchived {
+			continue
+		}
+		grouped[task.Status] = append(grouped[task.Status], task)
+	}
+
+	var snapshot boardSnapshot
+	for _, section := range sections {
+		columnTasks := grouped[section.status]
+		if len(columnTasks) == 0 {
+			snapshot.Columns = append(snapshot.Columns, boardColumn{Status: section.status, Label: section.label, Count: 0})
+			continue
+		}
+
+		sortTasksForBoard(columnTasks)
+		column := boardColumn{Status: section.status, Label: section.label, Count: len(columnTasks)}
+		for i, task := range columnTasks {
+			if i >= limit {
+				break
+			}
+			entry := boardEntry{
+				ID:      task.ID,
+				Title:   truncate(task.Title, 80),
+				Project: task.Project,
+				Type:    task.Type,
+				Pinned:  task.Pinned,
+				AgeHint: boardAgeHint(task),
+			}
+			column.Tasks = append(column.Tasks, entry)
+		}
+		snapshot.Columns = append(snapshot.Columns, column)
+	}
+
+	return snapshot
+}
+
+func sortTasksForBoard(tasks []*db.Task) {
+	sort.SliceStable(tasks, func(i, j int) bool {
+		if tasks[i].Pinned != tasks[j].Pinned {
+			return tasks[i].Pinned
+		}
+		return boardReferenceTime(tasks[i]).After(boardReferenceTime(tasks[j]))
+	})
+}
+
+func boardReferenceTime(task *db.Task) time.Time {
+	switch task.Status {
+	case db.StatusProcessing:
+		if task.StartedAt != nil {
+			return task.StartedAt.Time
+		}
+	case db.StatusDone:
+		if task.CompletedAt != nil {
+			return task.CompletedAt.Time
+		}
+	case db.StatusBlocked:
+		return task.UpdatedAt.Time
+	case db.StatusQueued:
+		return task.UpdatedAt.Time
+	case db.StatusBacklog:
+		return task.CreatedAt.Time
+	}
+	return task.UpdatedAt.Time
+}
+
+func boardAgeHint(task *db.Task) string {
+	ref := boardReferenceTime(task)
+	if ref.IsZero() {
+		return ""
+	}
+
+	delta := time.Since(ref)
+	if delta < 0 {
+		delta = -delta
+	}
+
+	switch task.Status {
+	case db.StatusProcessing:
+		return fmt.Sprintf("running %s ago", formatShortDuration(delta))
+	case db.StatusBlocked:
+		return fmt.Sprintf("blocked %s", formatShortDuration(delta))
+	case db.StatusQueued:
+		return fmt.Sprintf("queued %s", formatShortDuration(delta))
+	case db.StatusBacklog:
+		return fmt.Sprintf("created %s", formatShortDuration(delta))
+	case db.StatusDone:
+		return fmt.Sprintf("done %s", formatShortDuration(delta))
+	default:
+		return formatShortDuration(delta)
+	}
+}
+
+func formatShortDuration(d time.Duration) string {
+	if d < time.Second {
+		return "0s"
+	}
+	units := []struct {
+		dur   time.Duration
+		label string
+	}{
+		{24 * time.Hour, "d"},
+		{time.Hour, "h"},
+		{time.Minute, "m"},
+		{time.Second, "s"},
+	}
+	var parts []string
+	remainder := d
+	for _, u := range units {
+		if remainder >= u.dur {
+			value := remainder / u.dur
+			parts = append(parts, fmt.Sprintf("%d%s", value, u.label))
+			remainder %= u.dur
+		}
+		if len(parts) == 2 {
+			break
+		}
+	}
+	return strings.Join(parts, " ")
+}
+
+var allowedStatuses = []string{
+	db.StatusBacklog,
+	db.StatusQueued,
+	db.StatusProcessing,
+	db.StatusBlocked,
+	db.StatusDone,
+	db.StatusArchived,
+}
+
+func validStatuses() []string {
+	return allowedStatuses
+}
+
+func isValidStatus(status string) bool {
+	for _, s := range allowedStatuses {
+		if status == s {
+			return true
+		}
+	}
+	return false
 }
 
 func processExists(pid int) bool {

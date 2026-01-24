@@ -32,6 +32,7 @@ A personal task management system with a beautiful terminal UI, SQLite storage, 
 - **Real-time Updates** - Watch tasks execute live
 - **Running Process Indicator** - Green dot (`●`) shows which tasks have active shell processes (servers, watchers, etc.)
 - **Auto-cleanup** - Automatic cleanup of Claude processes and config entries for completed tasks
+- **Automation-Ready CLI** - Every Kanban action is also exposed via the `task` CLI, making it trivial to script or plug in your own orchestrator (see [external orchestration docs](docs/orchestrator.md))
 - **SSH Access** - Connect from anywhere via `ssh -p 2222 server`
 
 ## Prerequisites
@@ -94,6 +95,14 @@ ssh -p 2222 your-server
 ./bin/task purge-claude-config --dry-run  # Preview what would be removed
 ./bin/task claudes cleanup                # Kill orphaned Claude processes
 ```
+
+### External orchestration
+
+Need an always-on supervisor or LLM agent? Keep it outside Task You and use the CLI instead:
+
+- `task board --json` surfaces the full Kanban snapshot
+- `task pin`, `task status`, `task execute`, `task retry`, etc. mirror every interaction from the TUI
+- See [docs/orchestrator.md](docs/orchestrator.md) for a step-by-step Claude example
 
 **Auto-cleanup:** The daemon automatically cleans up Claude processes for tasks that have been done for more than 30 minutes, preventing memory bloat from orphaned processes.
 
