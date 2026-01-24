@@ -92,6 +92,15 @@ type DetailModel struct {
 	// Async pane loading state
 	paneLoading      bool      // true while panes are being set up asynchronously
 	paneLoadingStart time.Time // when loading started (for spinner animation)
+	paneError        string    // user-visible error when panes fail to open
+
+	// Notification state (passed from app)
+	notification   string // current notification message
+	notifyTaskID   int64  // task that triggered the notification
+	notifyUntil    time.Time
+
+	// Focus executor pane after joining (e.g., when jumping from notification)
+	focusExecutorOnJoin bool
 }
 
 // Message types for async pane loading
@@ -100,6 +109,7 @@ type panesJoinedMsg struct {
 	workdirPaneID   string
 	daemonSessionID string
 	windowTarget    string
+	userMessage     string
 	err             error
 }
 
@@ -116,6 +126,8 @@ func (m *DetailModel) executorDisplayName() string {
 			return "Codex"
 		case db.ExecutorClaude:
 			return "Claude"
+		case db.ExecutorGemini:
+			return "Gemini"
 		default:
 			// Unknown executor, capitalize first letter
 			if len(m.task.Executor) > 0 {
@@ -152,6 +164,30 @@ func (m *DetailModel) SetPRInfo(prInfo *github.PRInfo) {
 	if m.ready {
 		m.viewport.SetContent(m.renderContent())
 	}
+}
+
+// SetNotification updates the notification state from the app.
+func (m *DetailModel) SetNotification(msg string, taskID int64, until time.Time) {
+	m.notification = msg
+	m.notifyTaskID = taskID
+	m.notifyUntil = until
+}
+
+// HasNotification returns true if there is an active notification for a different task.
+func (m *DetailModel) HasNotification() bool {
+	if m.notification == "" || m.notifyTaskID == 0 {
+		return false
+	}
+	// Only show notification if it's for a different task
+	if m.task != nil && m.notifyTaskID == m.task.ID {
+		return false
+	}
+	return time.Now().Before(m.notifyUntil)
+}
+
+// NotifyTaskID returns the task ID that triggered the notification.
+func (m *DetailModel) NotifyTaskID() int64 {
+	return m.notifyTaskID
 }
 
 // Refresh reloads task and logs from database.
@@ -220,19 +256,21 @@ func (m *DetailModel) ClaudePaneID() string {
 
 // NewDetailModel creates a new detail model.
 // Returns the model and an optional command for async pane setup.
-func NewDetailModel(t *db.Task, database *db.DB, exec *executor.Executor, width, height int) (*DetailModel, tea.Cmd) {
+// If focusExecutor is true, the executor pane will be focused after panes are joined.
+func NewDetailModel(t *db.Task, database *db.DB, exec *executor.Executor, width, height int, focusExecutor bool) (*DetailModel, tea.Cmd) {
 	log := GetLogger()
-	log.Info("NewDetailModel: creating for task %d (%s)", t.ID, t.Title)
+	log.Info("NewDetailModel: creating for task %d (%s), focusExecutor=%v", t.ID, t.Title, focusExecutor)
 	log.Debug("NewDetailModel: TMUX env=%q, DaemonSession=%q, ClaudeSessionID=%q",
 		os.Getenv("TMUX"), t.DaemonSession, t.ClaudeSessionID)
 
 	m := &DetailModel{
-		task:     t,
-		database: database,
-		executor: exec,
-		width:    width,
-		height:   height,
-		focused:  true, // Initially focused when viewing details
+		task:                t,
+		database:            database,
+		executor:            exec,
+		width:               width,
+		height:              height,
+		focused:             true, // Initially focused when viewing details
+		focusExecutorOnJoin: focusExecutor,
 	}
 
 	// Load logs
@@ -278,6 +316,7 @@ func NewDetailModel(t *db.Task, database *db.DB, exec *executor.Executor, width,
 	// Slow path: No active window - start session asynchronously
 	log.Info("NewDetailModel: no window target, starting async pane setup")
 	m.paneLoading = true
+	m.paneError = ""
 	m.paneLoadingStart = time.Now()
 
 	// Return immediately with a command to start panes in background
@@ -296,7 +335,11 @@ func (m *DetailModel) startPanesAsync() tea.Cmd {
 		log.Info("startPanesAsync: starting for task %d", taskID)
 
 		// Start the Claude session (creates tmux window)
-		m.startResumableSession(sessionID)
+		if err := m.startResumableSession(sessionID); err != nil {
+			userMsg := m.executorFailureMessage(err.Error())
+			m.logExecutorFailure(userMsg)
+			return panesJoinedMsg{err: err, userMessage: userMsg}
+		}
 
 		// Find the window target
 		windowTarget := m.findTaskWindow()
@@ -304,7 +347,10 @@ func (m *DetailModel) startPanesAsync() tea.Cmd {
 
 		if windowTarget == "" {
 			log.Error("startPanesAsync: failed to find window after starting session")
-			return panesJoinedMsg{err: fmt.Errorf("failed to create Claude session window")}
+			err := fmt.Errorf("%s session window not found", m.executorDisplayName())
+			userMsg := m.executorFailureMessage("the executor exited before panes could be created")
+			m.logExecutorFailure(userMsg)
+			return panesJoinedMsg{err: err, userMessage: userMsg}
 		}
 
 		// Join the panes
@@ -321,6 +367,26 @@ func (m *DetailModel) startPanesAsync() tea.Cmd {
 			windowTarget:    windowTarget,
 		}
 	}
+}
+
+// logExecutorFailure writes a system log entry explaining why the executor panes
+// failed to open so that the user can see the reason without digging into tmux.
+func (m *DetailModel) logExecutorFailure(message string) {
+	if message == "" || m.database == nil || m.task == nil {
+		return
+	}
+	// Best effort - ignore error, logs table already handles concurrency.
+	m.database.AppendTaskLog(m.task.ID, "error", message)
+}
+
+// executorFailureMessage formats a user-friendly error string for the header.
+func (m *DetailModel) executorFailureMessage(details string) string {
+	executorName := m.executorDisplayName()
+	base := fmt.Sprintf("%s failed to start", executorName)
+	if details != "" {
+		base = fmt.Sprintf("%s: %s", base, details)
+	}
+	return base + ". Check your executor configuration."
 }
 
 // spinnerTick returns a command that ticks the loading spinner.
@@ -370,6 +436,7 @@ func (m *DetailModel) Update(msg tea.Msg) (*DetailModel, tea.Cmd) {
 		m.paneLoading = false
 		if msg.err != nil {
 			log.Error("panesJoinedMsg: error=%v", msg.err)
+			m.paneError = msg.userMessage
 		} else {
 			log.Info("panesJoinedMsg: claudePaneID=%q, workdirPaneID=%q",
 				msg.claudePaneID, msg.workdirPaneID)
@@ -377,6 +444,11 @@ func (m *DetailModel) Update(msg tea.Msg) (*DetailModel, tea.Cmd) {
 			m.workdirPaneID = msg.workdirPaneID
 			m.daemonSessionID = msg.daemonSessionID
 			m.cachedWindowTarget = msg.windowTarget
+			m.paneError = ""
+			// Focus executor pane if requested (e.g., when jumping from notification)
+			if m.focusExecutorOnJoin && m.claudePaneID != "" {
+				m.focusExecutorPane()
+			}
 		}
 		m.viewport.SetContent(m.renderContent())
 		return m, nil
@@ -483,13 +555,13 @@ func (m *DetailModel) findTaskWindow() string {
 
 // startResumableSession starts a new tmux window with the task's executor.
 // This reconnects to a session that was previously running but whose tmux window was killed.
-func (m *DetailModel) startResumableSession(sessionID string) {
+func (m *DetailModel) startResumableSession(sessionID string) error {
 	log := GetLogger()
 	log.Info("startResumableSession: called with sessionID=%q for task %d", sessionID, m.task.ID)
 
 	if m.task == nil {
 		log.Debug("startResumableSession: early return (task is nil)")
-		return
+		return fmt.Errorf("task not available")
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -508,7 +580,7 @@ func (m *DetailModel) startResumableSession(sessionID string) {
 				// Window already exists - use session:index format to avoid ambiguity
 				m.cachedWindowTarget = parts[0] + ":" + parts[1]
 				log.Info("startResumableSession: window already exists at %q, reusing", m.cachedWindowTarget)
-				return
+				return nil
 			}
 		}
 	}
@@ -518,7 +590,7 @@ func (m *DetailModel) startResumableSession(sessionID string) {
 	out, err := exec.CommandContext(ctx, "tmux", "list-sessions", "-F", "#{session_name}").Output()
 	if err != nil {
 		log.Error("startResumableSession: list-sessions failed: %v", err)
-		return
+		return fmt.Errorf("tmux list-sessions failed: %w", err)
 	}
 	log.Debug("startResumableSession: sessions: %q", strings.TrimSpace(string(out)))
 
@@ -538,7 +610,7 @@ func (m *DetailModel) startResumableSession(sessionID string) {
 		err := exec.CommandContext(ctx, "tmux", "new-session", "-d", "-s", daemonSession, "-n", "_placeholder", "tail", "-f", "/dev/null").Run()
 		if err != nil {
 			log.Error("startResumableSession: new-session failed: %v", err)
-			return
+			return fmt.Errorf("tmux new-session failed: %w", err)
 		}
 	} else {
 		log.Debug("startResumableSession: using existing daemon session %q", daemonSession)
@@ -551,7 +623,7 @@ func (m *DetailModel) startResumableSession(sessionID string) {
 	taskExecutor := m.executor.GetTaskExecutor(m.task)
 	if taskExecutor == nil {
 		log.Error("startResumableSession: no executor found for task")
-		return
+		return fmt.Errorf("no executor configured for task")
 	}
 
 	// Build prompt with task details (for executors that need it)
@@ -588,7 +660,7 @@ func (m *DetailModel) startResumableSession(sessionID string) {
 		"sh", "-c", script).Run()
 	if err != nil {
 		log.Error("startResumableSession: new-window failed: %v", err)
-		return
+		return fmt.Errorf("tmux new-window failed: %w", err)
 	}
 
 	// Give tmux a moment to create the window
@@ -615,6 +687,7 @@ func (m *DetailModel) startResumableSession(sessionID string) {
 	exec.CommandContext(ctx, "tmux", "select-pane", "-t", windowTarget+".0", "-T", m.executorDisplayName()).Run()
 	exec.CommandContext(ctx, "tmux", "select-pane", "-t", windowTarget+".1", "-T", "Shell").Run()
 	log.Info("startResumableSession: completed for task %d", m.task.ID)
+	return nil
 }
 
 // hasActiveTmuxSession checks if this task has an active tmux window in any task-daemon session.
@@ -770,8 +843,9 @@ func (m *DetailModel) getCurrentDetailPaneHeight(tuiPaneID string) int {
 		return 0
 	}
 
-	// Calculate the percentage
-	return (paneHeight * 100) / totalHeight
+	// Calculate the percentage with proper rounding to avoid truncation errors
+	// that cause the pane to progressively shrink over time
+	return (paneHeight*100 + totalHeight/2) / totalHeight
 }
 
 // getActualPaneHeight returns the actual pane height in lines.
@@ -835,7 +909,8 @@ func (m *DetailModel) getCurrentShellPaneWidth() int {
 
 	// Calculate total width and shell percentage
 	totalWidth := shellWidth + claudeWidth
-	return (shellWidth * 100) / totalWidth
+	// Use proper rounding to avoid truncation errors
+	return (shellWidth*100 + totalWidth/2) / totalWidth
 }
 
 // saveDetailPaneHeight saves the current detail pane height to settings.
@@ -867,8 +942,9 @@ func (m *DetailModel) saveDetailPaneHeight(tuiPaneID string) {
 		return
 	}
 
-	// Calculate the percentage
-	percentage := (paneHeight * 100) / totalHeight
+	// Calculate the percentage with proper rounding to avoid truncation errors
+	// that cause the pane to progressively shrink over time
+	percentage := (paneHeight*100 + totalHeight/2) / totalHeight
 	if percentage >= 1 && percentage <= 50 {
 		heightStr := fmt.Sprintf("%d%%", percentage)
 		m.database.SetSetting(config.SettingDetailPaneHeight, heightStr)
@@ -908,9 +984,9 @@ func (m *DetailModel) saveShellPaneWidth() {
 		return
 	}
 
-	// Calculate total width and shell percentage
+	// Calculate total width and shell percentage with proper rounding
 	totalWidth := shellWidth + claudeWidth
-	percentage := (shellWidth * 100) / totalWidth
+	percentage := (shellWidth*100 + totalWidth/2) / totalWidth
 	if percentage >= 10 && percentage <= 90 {
 		widthStr := fmt.Sprintf("%d%%", percentage)
 		m.database.SetSetting(config.SettingShellPaneWidth, widthStr)
@@ -1218,6 +1294,28 @@ func (m *DetailModel) joinTmuxPanes() {
 
 	log.Info("joinTmuxPanes: completed for task %d, claudePaneID=%q, workdirPaneID=%q, tuiPaneID=%q",
 		m.task.ID, m.claudePaneID, m.workdirPaneID, m.tuiPaneID)
+
+	// Focus executor pane if requested (e.g., when jumping from notification)
+	if m.focusExecutorOnJoin && m.claudePaneID != "" {
+		m.focusExecutorPane()
+	}
+}
+
+// focusExecutorPane focuses the executor (Claude) pane.
+func (m *DetailModel) focusExecutorPane() {
+	if m.claudePaneID == "" {
+		return
+	}
+	log := GetLogger()
+	log.Info("focusExecutorPane: focusing Claude pane %q", m.claudePaneID)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	err := exec.CommandContext(ctx, "tmux", "select-pane", "-t", m.claudePaneID).Run()
+	if err != nil {
+		log.Error("focusExecutorPane: select-pane failed: %v", err)
+	} else {
+		m.focused = false // TUI is no longer focused, executor is
+	}
 }
 
 // joinTmuxPane is a compatibility wrapper for joinTmuxPanes.
@@ -1865,11 +1963,24 @@ func (m *DetailModel) renderHeader() string {
 		} else {
 			loadingStyle = lipgloss.NewStyle().Foreground(dimmedFg)
 		}
-		meta.WriteString(loadingStyle.Render(spinner + " Starting Claude..."))
+		loadingText := fmt.Sprintf("%s Starting %s...", spinner, m.executorDisplayName())
+		meta.WriteString(loadingStyle.Render(loadingText))
 	}
 
-	// Schedule info - show if scheduled OR recurring
-	if t.IsScheduled() || t.IsRecurring() {
+	// Executor failure indicator
+	if m.paneError != "" {
+		meta.WriteString("  ")
+		var errorStyle lipgloss.Style
+		if m.focused {
+			errorStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Bold(true)
+		} else {
+			errorStyle = lipgloss.NewStyle().Foreground(dimmedFg)
+		}
+		meta.WriteString(errorStyle.Render("⚠ " + m.paneError))
+	}
+
+	// Schedule info - show if scheduled
+	if t.IsScheduled() {
 		meta.WriteString("  ")
 		var scheduleStyle lipgloss.Style
 		if m.focused {
@@ -1884,21 +1995,10 @@ func (m *DetailModel) renderHeader() string {
 				Foreground(dimmedFg)
 		}
 		icon := "⏰"
-		if t.IsRecurring() {
-			icon = "🔁"
-		}
-		var scheduleText string
-		if t.IsScheduled() {
-			scheduleText = icon + " " + formatScheduleTime(t.ScheduledAt.Time)
-		} else {
-			scheduleText = icon
-		}
-		if t.IsRecurring() {
-			scheduleText += " (" + t.Recurrence + ")"
-		}
+		scheduleText := icon + " " + formatScheduleTime(t.ScheduledAt.Time)
 		meta.WriteString(scheduleStyle.Render(scheduleText))
 
-		// Show last run info for recurring tasks
+		// Show last run info when available
 		if t.LastRunAt != nil {
 			var lastRunStyle lipgloss.Style
 			if m.focused {
@@ -1911,6 +2011,22 @@ func (m *DetailModel) renderHeader() string {
 			lastRunText := fmt.Sprintf(" Last: %s", t.LastRunAt.Time.Format("Jan 2 3:04pm"))
 			meta.WriteString(lastRunStyle.Render(lastRunText))
 		}
+	} else if t.Recurrence != "" {
+		// Legacy recurring tasks: show a subtle warning so users know it won't repeat
+		meta.WriteString("  ")
+		var warnStyle lipgloss.Style
+		if m.focused {
+			warnStyle = lipgloss.NewStyle().
+				Padding(0, 1).
+				Background(lipgloss.Color("214")).
+				Foreground(lipgloss.Color("#000000"))
+		} else {
+			warnStyle = lipgloss.NewStyle().
+				Padding(0, 1).
+				Background(dimmedBg).
+				Foreground(dimmedFg)
+		}
+		meta.WriteString(warnStyle.Render("Recurring schedules removed"))
 	}
 
 	// PR link if available
@@ -1923,13 +2039,39 @@ func (m *DetailModel) renderHeader() string {
 		}
 	}
 
-	lines := []string{meta.String()}
-	if prLine != "" {
-		lines = append(lines, prLine)
-	}
-	lines = append(lines, "")
+	// Build the first line with optional notification indicator
+	metaStr := meta.String()
 
-	return lipgloss.JoinVertical(lipgloss.Left, lines...)
+	// Add notification indicator if there's an active notification for a different task
+	var firstLine string
+	if m.HasNotification() {
+		// Create a subtle notification indicator
+		notifyStyle := lipgloss.NewStyle().
+			Background(lipgloss.Color("#4B5563")). // Muted gray background
+			Foreground(lipgloss.Color("#FFCC00")). // Yellow text
+			Padding(0, 1)
+		notifyIndicator := notifyStyle.Render(fmt.Sprintf("⚠ Task #%d (ctrl+g)", m.notifyTaskID))
+
+		// Add notification with spacing
+		firstLine = metaStr + "  " + notifyIndicator
+	} else {
+		firstLine = metaStr
+	}
+
+	// Create a block for the right-aligned content
+	rightContent := []string{firstLine}
+	if prLine != "" {
+		rightContent = append(rightContent, prLine)
+	}
+	rightBlock := lipgloss.JoinVertical(lipgloss.Right, rightContent...)
+
+	// Render the block aligned to the right of the available space
+	headerLayout := lipgloss.NewStyle().
+		Width(m.width - 4).
+		Align(lipgloss.Right).
+		Render(rightBlock)
+
+	return lipgloss.JoinVertical(lipgloss.Left, headerLayout, "")
 }
 
 // getGlamourRenderer returns a cached Glamour renderer, creating it if needed.
@@ -2001,11 +2143,8 @@ func (m *DetailModel) renderContent() string {
 
 	// Description
 	if t.Body != "" && strings.TrimSpace(t.Body) != "" {
-		if m.focused {
-			b.WriteString(Bold.Render("Description"))
-		} else {
-			b.WriteString(dimmedStyle.Render("Description"))
-		}
+		// Labels always use full opacity for clarity and accessibility
+		b.WriteString(Bold.Render("Description"))
 		b.WriteString("\n\n")
 
 		// Use cached renderer
@@ -2038,11 +2177,8 @@ func (m *DetailModel) renderContent() string {
 	// Execution logs
 	if len(m.logs) > 0 {
 		b.WriteString("\n")
-		if m.focused {
-			b.WriteString(Bold.Render("Execution Log"))
-		} else {
-			b.WriteString(dimmedStyle.Render("Execution Log"))
-		}
+		// Labels always use full opacity for clarity and accessibility
+		b.WriteString(Bold.Render("Execution Log"))
 		b.WriteString("\n\n")
 
 		for _, log := range m.logs {
@@ -2156,6 +2292,11 @@ func (m *DetailModel) renderHelp() string {
 	// Show pane navigation shortcut when panes are visible
 	if hasPanes && os.Getenv("TMUX") != "" {
 		keys = append(keys, helpKey{"shift+↑↓", "switch pane", false})
+	}
+
+	// Show jump to notification shortcut when there's an active notification
+	if m.HasNotification() {
+		keys = append(keys, helpKey{"ctrl+g", "jump to notification", false})
 	}
 
 	keys = append(keys, []helpKey{

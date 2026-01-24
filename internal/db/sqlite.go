@@ -220,8 +220,8 @@ func (db *DB) migrate() error {
 		`ALTER TABLE tasks ADD COLUMN port INTEGER DEFAULT 0`,
 		// Scheduled task columns
 		`ALTER TABLE tasks ADD COLUMN scheduled_at DATETIME`,      // When to next run (null = not scheduled)
-		`ALTER TABLE tasks ADD COLUMN recurrence TEXT DEFAULT ''`, // Recurrence pattern (empty = one-time)
-		`ALTER TABLE tasks ADD COLUMN last_run_at DATETIME`,       // When last executed (for recurring tasks)
+		`ALTER TABLE tasks ADD COLUMN recurrence TEXT DEFAULT ''`, // Deprecated recurrence pattern (empty = one-time)
+		`ALTER TABLE tasks ADD COLUMN last_run_at DATETIME`,       // When last executed (for scheduled tasks)
 		// Claude session tracking
 		`ALTER TABLE tasks ADD COLUMN claude_session_id TEXT DEFAULT ''`, // Claude session ID for resuming conversations
 		// Project color column
