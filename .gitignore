@@ -13,7 +13,6 @@
 # Claude Code
 .claude/
 .crush/
-.mcp.json
 
 # Archives
 *.tar.gz
