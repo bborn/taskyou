@@ -93,6 +93,11 @@ type DetailModel struct {
 	paneLoading      bool      // true while panes are being set up asynchronously
 	paneLoadingStart time.Time // when loading started (for spinner animation)
 	paneError        string    // user-visible error when panes fail to open
+
+	// Notification state (passed from app)
+	notification   string // current notification message
+	notifyTaskID   int64  // task that triggered the notification
+	notifyUntil    time.Time
 }
 
 // Message types for async pane loading
@@ -156,6 +161,30 @@ func (m *DetailModel) SetPRInfo(prInfo *github.PRInfo) {
 	if m.ready {
 		m.viewport.SetContent(m.renderContent())
 	}
+}
+
+// SetNotification updates the notification state from the app.
+func (m *DetailModel) SetNotification(msg string, taskID int64, until time.Time) {
+	m.notification = msg
+	m.notifyTaskID = taskID
+	m.notifyUntil = until
+}
+
+// HasNotification returns true if there is an active notification for a different task.
+func (m *DetailModel) HasNotification() bool {
+	if m.notification == "" || m.notifyTaskID == 0 {
+		return false
+	}
+	// Only show notification if it's for a different task
+	if m.task != nil && m.notifyTaskID == m.task.ID {
+		return false
+	}
+	return time.Now().Before(m.notifyUntil)
+}
+
+// NotifyTaskID returns the task ID that triggered the notification.
+func (m *DetailModel) NotifyTaskID() int64 {
+	return m.notifyTaskID
 }
 
 // Refresh reloads task and logs from database.
@@ -1974,8 +2003,27 @@ func (m *DetailModel) renderHeader() string {
 		}
 	}
 
+	// Build the first line with optional notification indicator
+	metaStr := meta.String()
+
+	// Add notification indicator if there's an active notification for a different task
+	var firstLine string
+	if m.HasNotification() {
+		// Create a subtle notification indicator
+		notifyStyle := lipgloss.NewStyle().
+			Background(lipgloss.Color("#4B5563")). // Muted gray background
+			Foreground(lipgloss.Color("#FFCC00")). // Yellow text
+			Padding(0, 1)
+		notifyIndicator := notifyStyle.Render(fmt.Sprintf("⚠ Task #%d (ctrl+g)", m.notifyTaskID))
+
+		// Add notification with spacing
+		firstLine = metaStr + "  " + notifyIndicator
+	} else {
+		firstLine = metaStr
+	}
+
 	// Create a block for the right-aligned content
-	rightContent := []string{meta.String()}
+	rightContent := []string{firstLine}
 	if prLine != "" {
 		rightContent = append(rightContent, prLine)
 	}
@@ -2208,6 +2256,11 @@ func (m *DetailModel) renderHelp() string {
 	// Show pane navigation shortcut when panes are visible
 	if hasPanes && os.Getenv("TMUX") != "" {
 		keys = append(keys, helpKey{"shift+↑↓", "switch pane", false})
+	}
+
+	// Show jump to notification shortcut when there's an active notification
+	if m.HasNotification() {
+		keys = append(keys, helpKey{"ctrl+g", "jump to notification", false})
 	}
 
 	keys = append(keys, []helpKey{
