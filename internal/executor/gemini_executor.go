@@ -97,7 +97,8 @@ func (g *GeminiExecutor) runGemini(ctx context.Context, task *db.Task, workDir, 
 
 	envPrefix := claudeEnvPrefix(paths.configDir)
 	dangerousFlag := buildGeminiDangerousFlag(task.DangerousMode)
-	script := fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %sgemini %s"$(cat %q)"`,
+	// Use -i (--prompt-interactive) to pass initial prompt while keeping interactive mode
+	script := fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %sgemini %s-i "$(cat %q)"`,
 		task.ID, sessionID, task.Port, task.WorktreePath, envPrefix, dangerousFlag, promptFile.Name())
 
 	actualSession, tmuxErr := createTmuxWindow(daemonSession, windowName, workDir, script)
@@ -266,7 +267,8 @@ func (g *GeminiExecutor) BuildCommand(task *db.Task, sessionID, prompt string) s
 		}
 		promptFile.WriteString(prompt)
 		promptFile.Close()
-		return fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q gemini %s"$(cat %q)"; rm -f %q`,
+		// Use -i (--prompt-interactive) to pass initial prompt while keeping interactive mode
+		return fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q gemini %s-i "$(cat %q)"; rm -f %q`,
 			task.ID, worktreeSessionID, task.Port, task.WorktreePath, dangerousFlag, promptFile.Name(), promptFile.Name())
 	}
 

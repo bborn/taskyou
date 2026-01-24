@@ -523,6 +523,93 @@ func TestConversationHistory(t *testing.T) {
 	})
 }
 
+func TestBuildPromptIncludesTaskMetadata(t *testing.T) {
+	// Create temp database
+	tmpFile, err := os.CreateTemp("", "test-*.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(tmpFile.Name())
+	tmpFile.Close()
+
+	database, err := db.Open(tmpFile.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+
+	// Create the test project first
+	if err := database.CreateProject(&db.Project{Name: "test", Path: "/tmp/test"}); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.Config{}
+	exec := New(database, cfg)
+
+	t.Run("includes branch and PR info", func(t *testing.T) {
+		task := &db.Task{
+			Title:      "Fix bug",
+			Body:       "Fix the authentication bug",
+			Project:    "test",
+			BranchName: "fix/auth-bug-123",
+			PRURL:      "https://github.com/org/repo/pull/456",
+			PRNumber:   456,
+			Tags:       "bugfix,auth",
+		}
+		if err := database.CreateTask(task); err != nil {
+			t.Fatal(err)
+		}
+
+		prompt := exec.buildPrompt(task, nil)
+
+		if !strings.Contains(prompt, "Branch: fix/auth-bug-123") {
+			t.Error("prompt should include branch name")
+		}
+		if !strings.Contains(prompt, "https://github.com/org/repo/pull/456") {
+			t.Error("prompt should include PR URL")
+		}
+		if !strings.Contains(prompt, "Tags: bugfix,auth") {
+			t.Error("prompt should include tags")
+		}
+	})
+
+	t.Run("handles task without metadata", func(t *testing.T) {
+		task := &db.Task{
+			Title:   "Simple task",
+			Body:    "Do something simple",
+			Project: "test",
+		}
+		if err := database.CreateTask(task); err != nil {
+			t.Fatal(err)
+		}
+
+		prompt := exec.buildPrompt(task, nil)
+
+		// Should not have empty "Task Details" section
+		if strings.Contains(prompt, "## Task Details\n\n\n") {
+			t.Error("prompt should not include empty task details section")
+		}
+	})
+
+	t.Run("shows PR number when URL is empty", func(t *testing.T) {
+		task := &db.Task{
+			Title:    "PR task",
+			Body:     "Work on PR",
+			Project:  "test",
+			PRNumber: 789,
+		}
+		if err := database.CreateTask(task); err != nil {
+			t.Fatal(err)
+		}
+
+		prompt := exec.buildPrompt(task, nil)
+
+		if !strings.Contains(prompt, "PR #789") {
+			t.Error("prompt should include PR number")
+		}
+	})
+}
+
 func TestCleanupClaudeSessions(t *testing.T) {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -779,5 +866,143 @@ func TestCleanupInactiveDoneTasksFiltering(t *testing.T) {
 		// This should not panic or error
 		// The task would be selected for cleanup if it had a running process
 		exec.cleanupInactiveDoneTasks()
+	})
+}
+
+func TestSymlinkMCPConfig(t *testing.T) {
+	t.Run("no .mcp.json in project - does nothing", func(t *testing.T) {
+		projectDir := t.TempDir()
+		worktreePath := t.TempDir()
+
+		err := symlinkMCPConfig(projectDir, worktreePath)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		// Verify no symlink was created
+		worktreeMCPFile := filepath.Join(worktreePath, ".mcp.json")
+		if _, err := os.Lstat(worktreeMCPFile); !os.IsNotExist(err) {
+			t.Error("expected no .mcp.json in worktree when none exists in project")
+		}
+	})
+
+	t.Run("creates symlink when .mcp.json exists in project", func(t *testing.T) {
+		projectDir := t.TempDir()
+		worktreePath := t.TempDir()
+
+		// Create .mcp.json in project
+		mainMCPFile := filepath.Join(projectDir, ".mcp.json")
+		if err := os.WriteFile(mainMCPFile, []byte(`{"mcpServers": {}}`), 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		err := symlinkMCPConfig(projectDir, worktreePath)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		// Verify symlink was created
+		worktreeMCPFile := filepath.Join(worktreePath, ".mcp.json")
+		target, err := os.Readlink(worktreeMCPFile)
+		if err != nil {
+			t.Fatalf("expected symlink at %s: %v", worktreeMCPFile, err)
+		}
+		if target != mainMCPFile {
+			t.Errorf("symlink target = %s, want %s", target, mainMCPFile)
+		}
+	})
+
+	t.Run("already correctly symlinked - does nothing", func(t *testing.T) {
+		projectDir := t.TempDir()
+		worktreePath := t.TempDir()
+
+		// Create .mcp.json in project
+		mainMCPFile := filepath.Join(projectDir, ".mcp.json")
+		if err := os.WriteFile(mainMCPFile, []byte(`{"mcpServers": {}}`), 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		// Create correct symlink
+		worktreeMCPFile := filepath.Join(worktreePath, ".mcp.json")
+		if err := os.Symlink(mainMCPFile, worktreeMCPFile); err != nil {
+			t.Fatal(err)
+		}
+
+		// Call again - should succeed without error
+		err := symlinkMCPConfig(projectDir, worktreePath)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		// Verify symlink still points to correct target
+		target, err := os.Readlink(worktreeMCPFile)
+		if err != nil {
+			t.Fatalf("expected symlink at %s: %v", worktreeMCPFile, err)
+		}
+		if target != mainMCPFile {
+			t.Errorf("symlink target = %s, want %s", target, mainMCPFile)
+		}
+	})
+
+	t.Run("replaces wrong symlink", func(t *testing.T) {
+		projectDir := t.TempDir()
+		worktreePath := t.TempDir()
+
+		// Create .mcp.json in project
+		mainMCPFile := filepath.Join(projectDir, ".mcp.json")
+		if err := os.WriteFile(mainMCPFile, []byte(`{"mcpServers": {}}`), 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		// Create wrong symlink
+		worktreeMCPFile := filepath.Join(worktreePath, ".mcp.json")
+		if err := os.Symlink("/wrong/path", worktreeMCPFile); err != nil {
+			t.Fatal(err)
+		}
+
+		err := symlinkMCPConfig(projectDir, worktreePath)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		// Verify symlink now points to correct target
+		target, err := os.Readlink(worktreeMCPFile)
+		if err != nil {
+			t.Fatalf("expected symlink at %s: %v", worktreeMCPFile, err)
+		}
+		if target != mainMCPFile {
+			t.Errorf("symlink target = %s, want %s", target, mainMCPFile)
+		}
+	})
+
+	t.Run("replaces existing regular file", func(t *testing.T) {
+		projectDir := t.TempDir()
+		worktreePath := t.TempDir()
+
+		// Create .mcp.json in project
+		mainMCPFile := filepath.Join(projectDir, ".mcp.json")
+		if err := os.WriteFile(mainMCPFile, []byte(`{"mcpServers": {}}`), 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		// Create regular file in worktree
+		worktreeMCPFile := filepath.Join(worktreePath, ".mcp.json")
+		if err := os.WriteFile(worktreeMCPFile, []byte(`{}`), 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		err := symlinkMCPConfig(projectDir, worktreePath)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		// Verify it's now a symlink pointing to correct target
+		target, err := os.Readlink(worktreeMCPFile)
+		if err != nil {
+			t.Fatalf("expected symlink at %s: %v", worktreeMCPFile, err)
+		}
+		if target != mainMCPFile {
+			t.Errorf("symlink target = %s, want %s", target, mainMCPFile)
+		}
 	})
 }
