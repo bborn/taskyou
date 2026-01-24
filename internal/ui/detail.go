@@ -2003,9 +2003,8 @@ func (m *DetailModel) renderHeader() string {
 		}
 	}
 
-	// Build the first line with optional notification indicator on the right
+	// Build the first line with optional notification indicator
 	metaStr := meta.String()
-	metaWidth := lipgloss.Width(metaStr)
 
 	// Add notification indicator if there's an active notification for a different task
 	var firstLine string
@@ -2016,26 +2015,27 @@ func (m *DetailModel) renderHeader() string {
 			Foreground(lipgloss.Color("#FFCC00")). // Yellow text
 			Padding(0, 1)
 		notifyIndicator := notifyStyle.Render(fmt.Sprintf("⚠ Task #%d (ctrl+g)", m.notifyTaskID))
-		notifyWidth := lipgloss.Width(notifyIndicator)
 
-		// Calculate available space for right-aligned notification
-		availableWidth := m.width - 4 // Account for box padding
-		gap := availableWidth - metaWidth - notifyWidth
-		if gap < 2 {
-			gap = 2
-		}
-		firstLine = metaStr + strings.Repeat(" ", gap) + notifyIndicator
+		// Add notification with spacing
+		firstLine = metaStr + "  " + notifyIndicator
 	} else {
 		firstLine = metaStr
 	}
 
-	lines := []string{firstLine}
+	// Create a block for the right-aligned content
+	rightContent := []string{firstLine}
 	if prLine != "" {
-		lines = append(lines, prLine)
+		rightContent = append(rightContent, prLine)
 	}
-	lines = append(lines, "")
+	rightBlock := lipgloss.JoinVertical(lipgloss.Right, rightContent...)
 
-	return lipgloss.JoinVertical(lipgloss.Left, lines...)
+	// Render the block aligned to the right of the available space
+	headerLayout := lipgloss.NewStyle().
+		Width(m.width - 4).
+		Align(lipgloss.Right).
+		Render(rightBlock)
+
+	return lipgloss.JoinVertical(lipgloss.Left, headerLayout, "")
 }
 
 // getGlamourRenderer returns a cached Glamour renderer, creating it if needed.
