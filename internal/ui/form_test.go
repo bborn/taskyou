@@ -120,9 +120,9 @@ func TestMaxHeightIs50PercentOfScreen(t *testing.T) {
 
 func TestRenderBodyScrollbar(t *testing.T) {
 	tests := []struct {
-		name         string
-		content      string
-		visibleLines int
+		name          string
+		content       string
+		visibleLines  int
 		wantScrollbar bool
 	}{
 		{
@@ -188,6 +188,59 @@ func TestScrollbarAppearsInFormView(t *testing.T) {
 	hasScrollbar := strings.Contains(view, "┃") || strings.Contains(view, "│")
 	if !hasScrollbar {
 		t.Error("expected scrollbar characters in view but found none")
+	}
+}
+
+func TestAttachmentRemovalFlow(t *testing.T) {
+	m := NewFormModel(nil, 100, 50, "")
+	m.focused = FieldAttachments
+	m.attachments = []string{"/tmp/spec.md", "/tmp/log.txt", "/tmp/image.png"}
+	m.attachmentsInput.SetValue("")
+
+	if m.attachmentSelectionActive() {
+		t.Fatal("selection should be inactive before any key input")
+	}
+
+	// First backspace selects the last attachment
+	if !m.handleAttachmentRemovalKey(tea.KeyMsg{Type: tea.KeyBackspace}) {
+		t.Fatal("expected backspace to be handled")
+	}
+	if m.attachmentCursor != 2 {
+		t.Fatalf("expected cursor to point to last attachment, got %d", m.attachmentCursor)
+	}
+	if len(m.attachments) != 3 {
+		t.Fatalf("expected attachments to remain until confirmed removal, got %d", len(m.attachments))
+	}
+
+	// Second backspace removes the selected attachment
+	if !m.handleAttachmentRemovalKey(tea.KeyMsg{Type: tea.KeyBackspace}) {
+		t.Fatal("expected second backspace to remove attachment")
+	}
+	if len(m.attachments) != 2 {
+		t.Fatalf("expected 2 attachments after removal, got %d", len(m.attachments))
+	}
+	if m.attachments[1] != "/tmp/log.txt" {
+		t.Fatalf("expected remaining attachments to keep order, got %v", m.attachments)
+	}
+
+	// Move selection to the previous attachment and remove with delete
+	if !m.handleAttachmentNavigation(-1) {
+		t.Fatal("expected navigation to activate selection when attachments focused")
+	}
+	if m.attachmentCursor != 0 {
+		t.Fatalf("expected cursor to move to first attachment, got %d", m.attachmentCursor)
+	}
+	if !m.handleAttachmentRemovalKey(tea.KeyMsg{Type: tea.KeyDelete}) {
+		t.Fatal("expected delete to remove selected attachment")
+	}
+	if len(m.attachments) != 1 {
+		t.Fatalf("expected 1 attachment after delete, got %d", len(m.attachments))
+	}
+	if m.attachments[0] != "/tmp/log.txt" {
+		t.Fatalf("expected log.txt to remain, got %v", m.attachments[0])
+	}
+	if m.attachmentCursor != 0 {
+		t.Fatalf("cursor should stay on remaining attachment, got %d", m.attachmentCursor)
 	}
 }
 

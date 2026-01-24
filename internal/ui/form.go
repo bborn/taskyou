@@ -53,17 +53,18 @@ type FormModel struct {
 	scheduleInput    textinput.Model // For entering schedule time (e.g., "1h", "2h30m", "tomorrow 9am")
 
 	// Select values
-	project     string
-	projectIdx  int
-	projects    []string
-	taskType    string
-	typeIdx     int
-	types       []string
-	executor    string // "claude", "codex", "gemini"
-	executorIdx int
-	executors   []string
-	queue       bool
-	attachments []string // Parsed file paths
+	project          string
+	projectIdx       int
+	projects         []string
+	taskType         string
+	typeIdx          int
+	types            []string
+	executor         string // "claude", "codex", "gemini"
+	executorIdx      int
+	executors        []string
+	queue            bool
+	attachments      []string // Parsed file paths
+	attachmentCursor int      // Index of the currently selected attachment chip
 
 	// Magic paste fields (populated when pasting URLs)
 	prURL    string // GitHub PR URL if pasted
@@ -144,6 +145,7 @@ func NewEditFormModel(database *db.DB, task *db.Task, width, height int) *FormMo
 		autocompleteSvc:     autocompleteSvc,
 		autocompleteEnabled: autocompleteEnabled,
 		taskRefAutocomplete: NewTaskRefAutocompleteModel(database, width-24),
+		attachmentCursor:    -1,
 	}
 
 	// Set executor index
@@ -263,6 +265,7 @@ func NewFormModel(database *db.DB, width, height int, workingDir string) *FormMo
 		autocompleteSvc:     autocompleteSvc,
 		autocompleteEnabled: autocompleteEnabled,
 		taskRefAutocomplete: NewTaskRefAutocompleteModel(database, width-24),
+		attachmentCursor:    -1,
 	}
 
 	// Load task types from database
@@ -478,6 +481,10 @@ func (m *FormModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 
 		case "esc":
+			if m.focused == FieldAttachments && m.attachmentSelectionActive() {
+				m.clearAttachmentSelection()
+				return m, nil
+			}
 			// If task ref autocomplete is showing WITH visible results, dismiss it first
 			if m.showTaskRefAutocomplete && m.taskRefAutocomplete != nil && m.taskRefAutocomplete.HasResults() {
 				m.showTaskRefAutocomplete = false
@@ -567,6 +574,9 @@ func (m *FormModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 
 		case "left":
+			if m.handleAttachmentNavigation(-1) {
+				return m, nil
+			}
 			if m.focused == FieldProject {
 				m.projectIdx = (m.projectIdx - 1 + len(m.projects)) % len(m.projects)
 				m.project = m.projects[m.projectIdx]
@@ -586,6 +596,9 @@ func (m *FormModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 
 		case "right":
+			if m.handleAttachmentNavigation(1) {
+				return m, nil
+			}
 			if m.focused == FieldProject {
 				m.projectIdx = (m.projectIdx + 1) % len(m.projects)
 				m.project = m.projects[m.projectIdx]
@@ -635,6 +648,9 @@ func (m *FormModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 
 		default:
+			if m.handleAttachmentRemovalKey(msg) {
+				return m, nil
+			}
 			// Type-to-select for selector fields
 			if m.focused == FieldProject || m.focused == FieldType || m.focused == FieldExecutor {
 				key := msg.String()
@@ -676,6 +692,9 @@ func (m *FormModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.scheduleInput, cmd = m.scheduleInput.Update(msg)
 	case FieldAttachments:
 		m.attachmentsInput, cmd = m.attachmentsInput.Update(msg)
+		if m.attachmentsInput.Value() != "" && m.attachmentCursor != -1 {
+			m.clearAttachmentSelection()
+		}
 	}
 
 	return m, cmd
@@ -915,6 +934,7 @@ func (m *FormModel) blurAll() {
 	m.bodyInput.Blur()
 	m.scheduleInput.Blur()
 	m.attachmentsInput.Blur()
+	m.clearAttachmentSelection()
 }
 
 func (m *FormModel) focusCurrent() {
@@ -955,6 +975,82 @@ func (m *FormModel) parseAttachments() {
 			m.attachments = append(m.attachments, path)
 		}
 	}
+}
+
+func (m *FormModel) attachmentSelectionEnabled() bool {
+	return m.focused == FieldAttachments && len(m.attachments) > 0 && m.attachmentsInput.Value() == ""
+}
+
+func (m *FormModel) attachmentSelectionActive() bool {
+	return m.attachmentSelectionEnabled() && m.attachmentCursor >= 0 && m.attachmentCursor < len(m.attachments)
+}
+
+func (m *FormModel) clearAttachmentSelection() {
+	m.attachmentCursor = -1
+}
+
+func (m *FormModel) handleAttachmentNavigation(direction int) bool {
+	if !m.attachmentSelectionEnabled() {
+		return false
+	}
+	if len(m.attachments) == 0 {
+		return false
+	}
+	if m.attachmentCursor == -1 {
+		if direction < 0 {
+			m.attachmentCursor = len(m.attachments) - 1
+		} else {
+			m.attachmentCursor = 0
+		}
+		return true
+	}
+	newIdx := m.attachmentCursor + direction
+	if newIdx < 0 {
+		newIdx = 0
+	}
+	if newIdx >= len(m.attachments) {
+		newIdx = len(m.attachments) - 1
+	}
+	m.attachmentCursor = newIdx
+	return true
+}
+
+func (m *FormModel) handleAttachmentRemovalKey(msg tea.KeyMsg) bool {
+	if !m.attachmentSelectionEnabled() {
+		return false
+	}
+	switch msg.Type {
+	case tea.KeyBackspace, tea.KeyDelete:
+		// supported key types
+	default:
+		key := msg.String()
+		if key != "backspace" && key != "delete" && key != "ctrl+h" {
+			return false
+		}
+	}
+	if m.attachmentCursor == -1 {
+		m.attachmentCursor = len(m.attachments) - 1
+		return true
+	}
+	m.removeAttachmentAt(m.attachmentCursor)
+	return true
+}
+
+func (m *FormModel) removeAttachmentAt(idx int) {
+	if idx < 0 || idx >= len(m.attachments) {
+		return
+	}
+	copy(m.attachments[idx:], m.attachments[idx+1:])
+	m.attachments = m.attachments[:len(m.attachments)-1]
+	if len(m.attachments) == 0 {
+		m.attachmentCursor = -1
+		return
+	}
+	if idx >= len(m.attachments) {
+		m.attachmentCursor = len(m.attachments) - 1
+		return
+	}
+	m.attachmentCursor = idx
 }
 
 // checkTaskRefTrigger checks if the user has typed '#' for task reference autocomplete.
@@ -1176,18 +1272,28 @@ func (m *FormModel) View() string {
 	if m.focused == FieldAttachments {
 		cursor = cursorStyle.Render("▸")
 	}
-	attachmentLine := m.attachmentsInput.View()
-	// Show attached files
+	attachmentInputView := m.attachmentsInput.View()
+	var attachmentChips []string
 	if len(m.attachments) > 0 {
-		var fileNames []string
-		for _, path := range m.attachments {
-			fileNames = append(fileNames, filepath.Base(path))
+		for i, path := range m.attachments {
+			style := AttachmentChip
+			if m.focused == FieldAttachments && m.attachmentSelectionActive() && m.attachmentCursor == i {
+				style = AttachmentChipSelected
+			}
+			attachmentChips = append(attachmentChips, style.Render(filepath.Base(path)))
 		}
-		attachmentLine = lipgloss.NewStyle().Foreground(ColorPrimary).Render(strings.Join(fileNames, ", ")) + "  " + m.attachmentsInput.View()
 	}
 	b.WriteString("\n")
-	b.WriteString(cursor + " " + labelStyle.Render("Attachments") + attachmentLine)
-	b.WriteString("\n\n")
+	b.WriteString(cursor + " " + labelStyle.Render("Attachments"))
+	if len(attachmentChips) > 0 {
+		b.WriteString(" " + strings.Join(attachmentChips, " "))
+	}
+	b.WriteString("  " + attachmentInputView + "\n")
+	if len(m.attachments) > 0 {
+		help := Dim.Render("←/→ select • backspace/delete remove")
+		b.WriteString("   " + help + "\n")
+	}
+	b.WriteString("\n")
 
 	// Type selector
 	cursor = " "
