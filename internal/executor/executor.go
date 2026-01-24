@@ -882,6 +882,10 @@ func (e *Executor) executeTask(ctx context.Context, task *db.Task) {
 		result = execResult.toInternal()
 	}
 
+	// Check if we should distill learnings from this execution session
+	// This runs asynchronously and captures memories even for in-progress tasks
+	e.MaybeDistillTask(task)
+
 	// Check current status - hooks may have already set it
 	currentTask, _ := e.db.GetTask(task.ID)
 	currentStatus := ""
@@ -919,17 +923,14 @@ func (e *Executor) executeTask(ctx context.Context, task *db.Task) {
 		// Save transcript on completion
 		e.saveTranscriptOnCompletion(task.ID, workDir)
 
-		// Index task for future search/retrieval
-		e.indexTaskForSearch(task)
-
 		// NOTE: We intentionally do NOT kill the executor here - keep it running so user can
 		// easily retry/resume the task. Old done task executors are cleaned up after 2h
 		// by the cleanupOrphanedClaudes routine.
 
-		// Extract memories from successful task
+		// Distill and index the completed task (runs in background)
 		go func() {
-			if err := e.ExtractMemories(context.Background(), task); err != nil {
-				e.logger.Error("Memory extraction failed", "task", task.ID, "error", err)
+			if err := e.processCompletedTask(context.Background(), task); err != nil {
+				e.logger.Error("Task processing failed", "task", task.ID, "error", err)
 			}
 		}()
 	} else if result.NeedsInput {
@@ -2791,33 +2792,6 @@ func (e *Executor) getProjectMemoriesSection(project string) string {
 	return sb.String()
 }
 
-// indexTaskForSearch indexes a completed task in the FTS5 search table.
-// This enables future tasks to find and reference similar past work.
-func (e *Executor) indexTaskForSearch(task *db.Task) {
-	// Get transcript excerpt (first ~2000 chars of the most recent transcript)
-	var transcriptExcerpt string
-	summary, err := e.db.GetLatestCompactionSummary(task.ID)
-	if err == nil && summary != nil && len(summary.Summary) > 0 {
-		transcriptExcerpt = summary.Summary
-		if len(transcriptExcerpt) > 2000 {
-			transcriptExcerpt = transcriptExcerpt[:2000]
-		}
-	}
-
-	// Index the task
-	if err := e.db.IndexTaskForSearch(
-		task.ID,
-		task.Project,
-		task.Title,
-		task.Body,
-		task.Tags,
-		transcriptExcerpt,
-	); err != nil {
-		e.logger.Debug("Failed to index task for search", "task", task.ID, "error", err)
-	} else {
-		e.logger.Debug("Indexed task for search", "task", task.ID)
-	}
-}
 
 // getSimilarTasksSection checks if similar past tasks exist and returns a hint.
 // Instead of injecting full content, we just notify Claude that the search tools are available.
