@@ -313,6 +313,18 @@ func NewDetailModel(t *db.Task, database *db.DB, exec *executor.Executor, width,
 		return m, nil
 	}
 
+	// Don't start panes for queued tasks without a worktree - let executor handle it
+	// This prevents a race condition where detail view creates panes with project dir,
+	// then executor kills them and creates new panes with worktree dir
+	if t.Status == db.StatusQueued && t.WorktreePath == "" {
+		log.Info("NewDetailModel: task is queued without worktree, waiting for executor")
+		m.paneLoading = true
+		m.paneLoadingStart = time.Now()
+		// Don't start panes, just show loading spinner and let ensureTmuxPanesJoined
+		// pick up the panes once executor creates them
+		return m, m.spinnerTick()
+	}
+
 	// Slow path: No active window - start session asynchronously
 	log.Info("NewDetailModel: no window target, starting async pane setup")
 	m.paneLoading = true
