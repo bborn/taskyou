@@ -531,9 +531,6 @@ Examples:
 					if t.ScheduledAt != nil {
 						item["scheduled_at"] = t.ScheduledAt.Time.Format(time.RFC3339)
 					}
-					if t.Recurrence != "" {
-						item["recurrence"] = t.Recurrence
-					}
 					if t.LastRunAt != nil {
 						item["last_run_at"] = t.LastRunAt.Time.Format(time.RFC3339)
 					}
@@ -623,10 +620,11 @@ Examples:
 					}
 					// Schedule indicator
 					scheduleIndicator := ""
-					if t.IsRecurring() {
-						scheduleIndicator = lipgloss.NewStyle().Foreground(lipgloss.Color("#F59E0B")).Render("🔁 ")
-					} else if t.IsScheduled() {
-						scheduleIndicator = lipgloss.NewStyle().Foreground(lipgloss.Color("#F59E0B")).Render("⏰ ")
+					scheduleStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#F59E0B"))
+					if t.IsScheduled() {
+						scheduleIndicator = scheduleStyle.Render("⏰ ")
+					} else if t.Recurrence != "" {
+						scheduleIndicator = scheduleStyle.Render("⚠ ")
 					}
 					prStatus := ""
 					if showPR {
@@ -792,9 +790,6 @@ Examples:
 				if task.ScheduledAt != nil {
 					output["scheduled_at"] = task.ScheduledAt.Time.Format(time.RFC3339)
 				}
-				if task.Recurrence != "" {
-					output["recurrence"] = task.Recurrence
-				}
 				if task.LastRunAt != nil {
 					output["last_run_at"] = task.LastRunAt.Time.Format(time.RFC3339)
 				}
@@ -893,18 +888,19 @@ Examples:
 
 				// Schedule info
 				scheduleColor := lipgloss.Color("#F59E0B") // Orange for schedule
-				if task.IsRecurring() || task.IsScheduled() {
+				scheduleStyle := lipgloss.NewStyle().Foreground(scheduleColor)
+				if task.IsScheduled() || task.LastRunAt != nil || task.Recurrence != "" {
 					fmt.Println()
 					fmt.Println(boldStyle.Render("Schedule:"))
-					if task.Recurrence != "" {
-						recurrenceStyled := lipgloss.NewStyle().Foreground(scheduleColor).Render(task.Recurrence)
-						fmt.Printf("  Recurrence: %s\n", recurrenceStyled)
-					}
 					if task.ScheduledAt != nil {
-						fmt.Printf("  Next run:   %s\n", task.ScheduledAt.Time.Format("2006-01-02 15:04:05"))
+						fmt.Printf("  Next run:   %s\n", scheduleStyle.Render(task.ScheduledAt.Time.Format("2006-01-02 15:04:05")))
 					}
 					if task.LastRunAt != nil {
-						fmt.Printf("  Last run:   %s\n", task.LastRunAt.Time.Format("2006-01-02 15:04:05"))
+						fmt.Printf("  Last run:   %s\n", scheduleStyle.Render(task.LastRunAt.Time.Format("2006-01-02 15:04:05")))
+					}
+					if task.Recurrence != "" {
+						note := fmt.Sprintf("Recurring schedules inside TaskYou were removed (legacy value: %s)", task.Recurrence)
+						fmt.Printf("  Note:       %s\n", scheduleStyle.Render(note))
 					}
 				}
 

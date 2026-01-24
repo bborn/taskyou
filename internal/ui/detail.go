@@ -1979,8 +1979,8 @@ func (m *DetailModel) renderHeader() string {
 		meta.WriteString(errorStyle.Render("⚠ " + m.paneError))
 	}
 
-	// Schedule info - show if scheduled OR recurring
-	if t.IsScheduled() || t.IsRecurring() {
+	// Schedule info - show if scheduled
+	if t.IsScheduled() {
 		meta.WriteString("  ")
 		var scheduleStyle lipgloss.Style
 		if m.focused {
@@ -1995,21 +1995,10 @@ func (m *DetailModel) renderHeader() string {
 				Foreground(dimmedFg)
 		}
 		icon := "⏰"
-		if t.IsRecurring() {
-			icon = "🔁"
-		}
-		var scheduleText string
-		if t.IsScheduled() {
-			scheduleText = icon + " " + formatScheduleTime(t.ScheduledAt.Time)
-		} else {
-			scheduleText = icon
-		}
-		if t.IsRecurring() {
-			scheduleText += " (" + t.Recurrence + ")"
-		}
+		scheduleText := icon + " " + formatScheduleTime(t.ScheduledAt.Time)
 		meta.WriteString(scheduleStyle.Render(scheduleText))
 
-		// Show last run info for recurring tasks
+		// Show last run info when available
 		if t.LastRunAt != nil {
 			var lastRunStyle lipgloss.Style
 			if m.focused {
@@ -2022,6 +2011,22 @@ func (m *DetailModel) renderHeader() string {
 			lastRunText := fmt.Sprintf(" Last: %s", t.LastRunAt.Time.Format("Jan 2 3:04pm"))
 			meta.WriteString(lastRunStyle.Render(lastRunText))
 		}
+	} else if t.Recurrence != "" {
+		// Legacy recurring tasks: show a subtle warning so users know it won't repeat
+		meta.WriteString("  ")
+		var warnStyle lipgloss.Style
+		if m.focused {
+			warnStyle = lipgloss.NewStyle().
+				Padding(0, 1).
+				Background(lipgloss.Color("214")).
+				Foreground(lipgloss.Color("#000000"))
+		} else {
+			warnStyle = lipgloss.NewStyle().
+				Padding(0, 1).
+				Background(dimmedBg).
+				Foreground(dimmedFg)
+		}
+		meta.WriteString(warnStyle.Render("Recurring schedules removed"))
 	}
 
 	// PR link if available

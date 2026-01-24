@@ -627,50 +627,6 @@ func (e *Executor) worker(ctx context.Context) {
 	}
 }
 
-// handleRecurringTaskCompletion resets a recurring task to backlog after it completes.
-// This allows it to be picked up again at the next scheduled time.
-func (e *Executor) handleRecurringTaskCompletion(task *db.Task) {
-	// Reload task to get current state
-	currentTask, err := e.db.GetTask(task.ID)
-	if err != nil || currentTask == nil {
-		return
-	}
-
-	// Only handle recurring tasks
-	if !currentTask.IsRecurring() {
-		return
-	}
-
-	// Calculate next run time if not already set
-	if currentTask.ScheduledAt == nil {
-		nextRun := db.CalculateNextRunTime(currentTask.Recurrence, time.Now())
-		currentTask.ScheduledAt = nextRun
-	}
-
-	// Reset to backlog so it can be queued again at next scheduled time
-	currentTask.Status = db.StatusBacklog
-	currentTask.LastRunAt = &db.LocalTime{Time: time.Now()}
-
-	if err := e.db.UpdateTask(currentTask); err != nil {
-		e.logger.Error("Failed to reset recurring task", "id", task.ID, "error", err)
-		return
-	}
-
-	e.logLine(task.ID, "system", "───────────────────────────────────────────────────────")
-	e.logLine(task.ID, "system", fmt.Sprintf("✅ RECURRING RUN COMPLETED - %s", time.Now().Format("Jan 2, 2006 3:04:05 PM")))
-	e.logLine(task.ID, "system", fmt.Sprintf("   Next run scheduled for: %s (%s)",
-		currentTask.ScheduledAt.Format("Jan 2, 2006 3:04:05 PM"),
-		currentTask.Recurrence))
-	e.logLine(task.ID, "system", "───────────────────────────────────────────────────────")
-
-	// Broadcast the status change
-	e.broadcastTaskEvent(TaskEvent{
-		Type:   "status_changed",
-		Task:   currentTask,
-		TaskID: task.ID,
-	})
-}
-
 // queueDueScheduledTasks checks for scheduled tasks that are due and queues them.
 func (e *Executor) queueDueScheduledTasks() {
 	tasks, err := e.db.GetDueScheduledTasks()
@@ -685,14 +641,13 @@ func (e *Executor) queueDueScheduledTasks() {
 		// Log the scheduled execution with a clear separator
 		e.logLine(task.ID, "system", "")
 		e.logLine(task.ID, "system", "═══════════════════════════════════════════════════════")
-		if task.IsRecurring() {
-			e.logLine(task.ID, "system", fmt.Sprintf("🔁 RECURRING RUN STARTED (%s) - %s", task.Recurrence, time.Now().Format("Jan 2, 2006 3:04:05 PM")))
-		} else {
-			e.logLine(task.ID, "system", fmt.Sprintf("⏰ SCHEDULED RUN STARTED - %s", time.Now().Format("Jan 2, 2006 3:04:05 PM")))
+		e.logLine(task.ID, "system", fmt.Sprintf("⏰ SCHEDULED RUN STARTED - %s", time.Now().Format("Jan 2, 2006 3:04:05 PM")))
+		if task.Recurrence != "" {
+			e.logLine(task.ID, "system", "Recurring schedules are no longer supported inside TaskYou. This run will not repeat automatically.")
 		}
 		e.logLine(task.ID, "system", "═══════════════════════════════════════════════════════")
 
-		// Queue the task (this also updates the next run time for recurring tasks)
+		// Queue the task
 		if err := e.db.QueueScheduledTask(task.ID); err != nil {
 			e.logger.Error("Failed to queue scheduled task", "id", task.ID, "error", err)
 			continue
@@ -882,9 +837,6 @@ func (e *Executor) executeTask(ctx context.Context, task *db.Task) {
 	retryFeedback, _ := e.db.GetRetryFeedback(task.ID)
 	isRetry := retryFeedback != ""
 
-	// Check if this is a recurring task that has run before
-	isRecurringRun := task.IsRecurring() && task.LastRunAt != nil
-
 	// Build prompt based on task type
 	prompt := e.buildPrompt(task, attachmentPaths)
 
@@ -924,12 +876,6 @@ func (e *Executor) executeTask(ctx context.Context, task *db.Task) {
 		e.logLine(task.ID, "system", fmt.Sprintf("Resuming previous session with feedback (executor: %s)", executorName))
 		execResult := taskExecutor.Resume(taskCtx, task, workDir, prompt, feedbackWithAttachments)
 		result = execResult.toInternal()
-	} else if isRecurringRun {
-		// Resume session with recurring message that includes full task details
-		recurringPrompt := e.buildRecurringPrompt(task, attachmentPaths)
-		e.logLine(task.ID, "system", fmt.Sprintf("Recurring task (%s) - resuming session (executor: %s)", task.Recurrence, executorName))
-		execResult := taskExecutor.Resume(taskCtx, task, workDir, prompt, recurringPrompt)
-		result = execResult.toInternal()
 	} else {
 		e.logLine(task.ID, "system", fmt.Sprintf("Starting new session (executor: %s)", executorName))
 		execResult := taskExecutor.Execute(taskCtx, task, workDir, prompt)
@@ -965,9 +911,6 @@ func (e *Executor) executeTask(ctx context.Context, task *db.Task) {
 		// NOTE: We intentionally do NOT kill the executor here - keep it running so user can
 		// easily retry/resume the task. Old done task executors are cleaned up after 2h
 		// by the cleanupOrphanedClaudes routine.
-
-		// Handle recurring task: reset to backlog for next run
-		e.handleRecurringTaskCompletion(task)
 	} else if result.Success {
 		e.updateStatus(task.ID, db.StatusDone)
 		e.logLine(task.ID, "system", "Task completed successfully")
@@ -989,9 +932,6 @@ func (e *Executor) executeTask(ctx context.Context, task *db.Task) {
 				e.logger.Error("Memory extraction failed", "task", task.ID, "error", err)
 			}
 		}()
-
-		// Handle recurring task: reset to backlog for next run
-		e.handleRecurringTaskCompletion(task)
 	} else if result.NeedsInput {
 		e.updateStatus(task.ID, db.StatusBlocked)
 		// Log the question with special type so UI can display it
@@ -1202,26 +1142,6 @@ The task system will automatically detect your status.
 `)
 
 	return prompt.String()
-}
-
-// buildRecurringPrompt builds a message for recurring task runs.
-// Includes full task details since the session history may be long.
-func (e *Executor) buildRecurringPrompt(task *db.Task, attachmentPaths []string) string {
-	var sb strings.Builder
-
-	sb.WriteString(fmt.Sprintf("=== Recurring Task Triggered (%s) ===\n\n", task.Recurrence))
-	sb.WriteString(fmt.Sprintf("It's time for your %s task.\n", task.Recurrence))
-	if task.LastRunAt != nil {
-		sb.WriteString(fmt.Sprintf("Last run: %s\n\n", task.LastRunAt.Format("2006-01-02 15:04")))
-	}
-
-	// Include full task details (since history may be long)
-	sb.WriteString("--- Task Details ---\n\n")
-	sb.WriteString(e.buildPrompt(task, attachmentPaths))
-
-	sb.WriteString("\n\nPlease work on this task now.")
-
-	return sb.String()
 }
 
 // applyTemplateSubstitutions replaces template placeholders in task type instructions.

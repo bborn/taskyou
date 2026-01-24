@@ -30,16 +30,16 @@ const (
 	FieldType
 	FieldExecutor
 	FieldSchedule
-	FieldRecurrence
+	FieldCount
 )
 
 // FormModel represents the new task form.
 type FormModel struct {
-	db        *db.DB
-	width     int
-	height    int
-	submitted bool
-	cancelled bool
+	db              *db.DB
+	width           int
+	height          int
+	submitted       bool
+	cancelled       bool
 	isEdit          bool   // true when editing an existing task
 	originalProject string // original project when editing (to detect project changes)
 
@@ -53,20 +53,17 @@ type FormModel struct {
 	scheduleInput    textinput.Model // For entering schedule time (e.g., "1h", "2h30m", "tomorrow 9am")
 
 	// Select values
-	project       string
-	projectIdx    int
-	projects      []string
-	taskType      string
-	typeIdx       int
-	types         []string
-	executor      string // "claude", "codex", "gemini"
-	executorIdx   int
-	executors     []string
-	queue         bool
-	attachments   []string // Parsed file paths
-	recurrence    string   // "", "hourly", "daily", "weekly", "monthly"
-	recurrenceIdx int
-	recurrences   []string
+	project     string
+	projectIdx  int
+	projects    []string
+	taskType    string
+	typeIdx     int
+	types       []string
+	executor    string // "claude", "codex", "gemini"
+	executorIdx int
+	executors   []string
+	queue       bool
+	attachments []string // Parsed file paths
 
 	// Magic paste fields (populated when pasting URLs)
 	prURL    string // GitHub PR URL if pasted
@@ -142,8 +139,6 @@ func NewEditFormModel(database *db.DB, task *db.Task, width, height int) *FormMo
 		executor:            executor,
 		executors:           []string{db.ExecutorClaude, db.ExecutorCodex, db.ExecutorGemini},
 		isEdit:              true,
-		recurrence:          task.Recurrence,
-		recurrences:         []string{"", db.RecurrenceHourly, db.RecurrenceDaily, db.RecurrenceWeekly, db.RecurrenceMonthly},
 		prURL:               task.PRURL,
 		prNumber:            task.PRNumber,
 		autocompleteSvc:     autocompleteSvc,
@@ -230,14 +225,6 @@ func NewEditFormModel(database *db.DB, task *db.Task, width, height int) *FormMo
 		m.scheduleInput.SetValue(task.ScheduledAt.Format("2006-01-02 15:04"))
 	}
 
-	// Set recurrence index
-	for i, r := range m.recurrences {
-		if r == task.Recurrence {
-			m.recurrenceIdx = i
-			break
-		}
-	}
-
 	// Attachments input
 	m.attachmentsInput = textinput.New()
 	m.attachmentsInput.Placeholder = "Files (drag anywhere or type paths)"
@@ -273,7 +260,6 @@ func NewFormModel(database *db.DB, width, height int, workingDir string) *FormMo
 		focused:             FieldProject,
 		executor:            db.DefaultExecutor(),
 		executors:           []string{db.ExecutorClaude, db.ExecutorCodex, db.ExecutorGemini},
-		recurrences:         []string{"", db.RecurrenceHourly, db.RecurrenceDaily, db.RecurrenceWeekly, db.RecurrenceMonthly},
 		autocompleteSvc:     autocompleteSvc,
 		autocompleteEnabled: autocompleteEnabled,
 		taskRefAutocomplete: NewTaskRefAutocompleteModel(database, width-24),
@@ -571,7 +557,7 @@ func (m *FormModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				break
 			}
 			// On last field, submit
-			if m.focused == FieldRecurrence {
+			if m.focused == FieldSchedule {
 				m.parseAttachments()
 				m.submitted = true
 				return m, nil
@@ -598,11 +584,6 @@ func (m *FormModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.executor = m.executors[m.executorIdx]
 				return m, nil
 			}
-			if m.focused == FieldRecurrence {
-				m.recurrenceIdx = (m.recurrenceIdx - 1 + len(m.recurrences)) % len(m.recurrences)
-				m.recurrence = m.recurrences[m.recurrenceIdx]
-				return m, nil
-			}
 
 		case "right":
 			if m.focused == FieldProject {
@@ -620,11 +601,6 @@ func (m *FormModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.focused == FieldExecutor {
 				m.executorIdx = (m.executorIdx + 1) % len(m.executors)
 				m.executor = m.executors[m.executorIdx]
-				return m, nil
-			}
-			if m.focused == FieldRecurrence {
-				m.recurrenceIdx = (m.recurrenceIdx + 1) % len(m.recurrences)
-				m.recurrence = m.recurrences[m.recurrenceIdx]
 				return m, nil
 			}
 
@@ -660,7 +636,7 @@ func (m *FormModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		default:
 			// Type-to-select for selector fields
-			if m.focused == FieldProject || m.focused == FieldType || m.focused == FieldExecutor || m.focused == FieldRecurrence {
+			if m.focused == FieldProject || m.focused == FieldType || m.focused == FieldExecutor {
 				key := msg.String()
 				if len(key) == 1 && unicode.IsLetter(rune(key[0])) {
 					m.selectByPrefix(strings.ToLower(key))
@@ -859,18 +835,6 @@ func (m *FormModel) selectByPrefix(prefix string) {
 				return
 			}
 		}
-	case FieldRecurrence:
-		for i, r := range m.recurrences {
-			label := r
-			if label == "" {
-				label = "none"
-			}
-			if strings.HasPrefix(strings.ToLower(label), prefix) {
-				m.recurrenceIdx = i
-				m.recurrence = r
-				return
-			}
-		}
 	}
 }
 
@@ -919,14 +883,14 @@ func (m *FormModel) loadLastExecutorForProject() {
 func (m *FormModel) focusNext() {
 	m.blurAll()
 	m.cancelAutocomplete()
-	m.focused = (m.focused + 1) % (FieldRecurrence + 1)
+	m.focused = (m.focused + 1) % FieldCount
 	m.focusCurrent()
 }
 
 func (m *FormModel) focusPrev() {
 	m.blurAll()
 	m.cancelAutocomplete()
-	m.focused = (m.focused - 1 + FieldRecurrence + 1) % (FieldRecurrence + 1)
+	m.focused = (m.focused - 1 + FieldCount) % FieldCount
 	m.focusCurrent()
 }
 
@@ -1258,23 +1222,6 @@ func (m *FormModel) View() string {
 	b.WriteString(cursor + " " + labelStyle.Render("Schedule") + m.scheduleInput.View())
 	b.WriteString("\n\n")
 
-	// Recurrence selector
-	cursor = " "
-	if m.focused == FieldRecurrence {
-		cursor = cursorStyle.Render("▸")
-	}
-	// Build recurrence labels from m.recurrences (replace empty string with "none")
-	recurrenceLabels := make([]string, len(m.recurrences))
-	for i, r := range m.recurrences {
-		if r == "" {
-			recurrenceLabels[i] = "none"
-		} else {
-			recurrenceLabels[i] = r
-		}
-	}
-	b.WriteString(cursor + " " + labelStyle.Render("Recurrence") + m.renderSelector(recurrenceLabels, m.recurrenceIdx, m.focused == FieldRecurrence, selectedStyle, optionStyle, dimStyle))
-	b.WriteString("\n\n")
-
 	// Cancel confirmation message
 	if m.showCancelConfirm {
 		confirmStyle := lipgloss.NewStyle().
@@ -1336,15 +1283,14 @@ func (m *FormModel) GetDBTask() *db.Task {
 	}
 
 	task := &db.Task{
-		Title:      m.titleInput.Value(),
-		Body:       m.bodyInput.Value(),
-		Status:     status,
-		Type:       m.taskType,
-		Project:    m.project,
-		Executor:   m.executor,
-		Recurrence: m.recurrence,
-		PRURL:      m.prURL,
-		PRNumber:   m.prNumber,
+		Title:    m.titleInput.Value(),
+		Body:     m.bodyInput.Value(),
+		Status:   status,
+		Type:     m.taskType,
+		Project:  m.project,
+		Executor: m.executor,
+		PRURL:    m.prURL,
+		PRNumber: m.prNumber,
 	}
 
 	// Parse schedule time
@@ -1498,7 +1444,7 @@ func (m *FormModel) calculateBodyHeight() int {
 
 	// Maximum height is 50% of screen height
 	// Account for other form elements: header(2) + title(2) + body label(1) + project(2) +
-	// type(2) + schedule(2) + recurrence(2) + attachments(2) + help(1) + padding/borders(~6) = ~22 lines
+	// type(2) + schedule(2) + attachments(2) + help(1) + padding/borders(~6) = ~19 lines
 	formOverhead := 22
 	maxHeight := (m.height - formOverhead) / 2
 	if maxHeight < minHeight {

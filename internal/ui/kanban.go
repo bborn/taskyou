@@ -166,7 +166,7 @@ func (k *KanbanBoard) distributeTasksToColumns() {
 		}
 	}
 
-	// Sort each column to put recurring tasks at the bottom
+	// Sort each column so pinned tasks stay at the top
 	for i := range k.columns {
 		k.sortColumnTasks(i)
 	}
@@ -175,8 +175,8 @@ func (k *KanbanBoard) distributeTasksToColumns() {
 	k.clampSelection()
 }
 
-// sortColumnTasks sorts tasks within a column, putting recurring tasks at the bottom.
-// Non-recurring tasks maintain their original order (by creation date from DB query).
+// sortColumnTasks keeps pinned tasks at the top of a column while preserving
+// the existing order for everything else.
 func (k *KanbanBoard) sortColumnTasks(colIdx int) {
 	if colIdx < 0 || colIdx >= len(k.columns) {
 		return
@@ -186,24 +186,19 @@ func (k *KanbanBoard) sortColumnTasks(colIdx int) {
 		return
 	}
 
-	// Stable sort: pinned tasks stay at top, then non-recurring, then recurring
-	var pinned, nonRecurring, recurring []*db.Task
+	// Stable sort: pinned tasks stay at top, then everything else in original order
+	var pinned, rest []*db.Task
 	for _, task := range tasks {
 		if task.Pinned {
 			pinned = append(pinned, task)
 			continue
 		}
-		if task.IsRecurring() {
-			recurring = append(recurring, task)
-		} else {
-			nonRecurring = append(nonRecurring, task)
-		}
+		rest = append(rest, task)
 	}
 
-	// Reconstruct the slice with pinned first, then non-recurring, then recurring
+	// Reconstruct the slice with pinned first
 	ordered := append([]*db.Task{}, pinned...)
-	ordered = append(ordered, nonRecurring...)
-	ordered = append(ordered, recurring...)
+	ordered = append(ordered, rest...)
 	k.columns[colIdx].Tasks = ordered
 }
 
@@ -865,19 +860,17 @@ func (k *KanbanBoard) renderTaskCard(task *db.Task, width int, isSelected bool) 
 		b.WriteString(processStyle.Render("●")) // Green dot for running process
 	}
 
-	// Schedule indicator - show if scheduled OR recurring
-	if task.IsScheduled() || task.IsRecurring() {
+	// Schedule indicator - show if scheduled or warn about legacy recurrence
+	if task.IsScheduled() {
 		scheduleStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("214")) // Orange for schedule
-		var scheduleText string
-		if task.IsScheduled() {
-			scheduleText = formatScheduleTime(task.ScheduledAt.Time)
-		}
+		scheduleText := formatScheduleTime(task.ScheduledAt.Time)
 		icon := "⏰"
-		if task.IsRecurring() {
-			icon = "🔁" // Use repeat icon to indicate recurring task
-		}
 		b.WriteString(" ")
 		b.WriteString(scheduleStyle.Render(icon + scheduleText))
+	} else if task.Recurrence != "" {
+		warnStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
+		b.WriteString(" ")
+		b.WriteString(warnStyle.Render("⚠"))
 	}
 
 	// Pin indicator
@@ -906,8 +899,6 @@ func (k *KanbanBoard) renderTaskCard(task *db.Task, width int, isSelected bool) 
 		Padding(0, 1).
 		MarginBottom(1)
 
-	// Recurring tasks are de-emphasized visually (dimmed) when not selected
-	isRecurring := task.IsRecurring()
 	// Check if task has an active input notification
 	needsInput := k.NeedsInput(task.ID)
 
@@ -927,14 +918,6 @@ func (k *KanbanBoard) renderTaskCard(task *db.Task, width int, isSelected bool) 
 			BorderBottom(true).
 			BorderStyle(lipgloss.NormalBorder()).
 			BorderForeground(ColorWarning).
-			MarginBottom(0)
-	} else if isRecurring {
-		// Recurring tasks are dimmed to de-emphasize them
-		cardStyle = cardStyle.
-			Foreground(ColorMuted).
-			BorderBottom(true).
-			BorderStyle(lipgloss.NormalBorder()).
-			BorderForeground(ColorMuted).
 			MarginBottom(0)
 	} else {
 		// Non-selected cards have a subtle bottom border for separation
