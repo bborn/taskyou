@@ -99,6 +99,8 @@ func formatExecutorDisplayName(slug, raw string) string {
 		return "Codex"
 	case "claude":
 		return defaultExecutorName
+	case "gemini":
+		return "Gemini"
 	}
 	trimmed := strings.TrimSpace(raw)
 	if trimmed == "" {
@@ -145,6 +147,7 @@ func New(database *db.DB, cfg *config.Config) *Executor {
 	// Register available executors
 	e.executorFactory.Register(NewClaudeExecutor(e))
 	e.executorFactory.Register(NewCodexExecutor(e))
+	e.executorFactory.Register(NewGeminiExecutor(e))
 
 	return e
 }
@@ -173,6 +176,7 @@ func NewWithLogging(database *db.DB, cfg *config.Config, w io.Writer) *Executor 
 	// Register available executors
 	e.executorFactory.Register(NewClaudeExecutor(e))
 	e.executorFactory.Register(NewCodexExecutor(e))
+	e.executorFactory.Register(NewGeminiExecutor(e))
 
 	return e
 }
@@ -867,7 +871,7 @@ func (e *Executor) executeTask(ctx context.Context, task *db.Task) {
 		// This is important when attachments are added after the initial run or when resuming
 		feedbackWithAttachments := retryFeedback
 		if len(attachmentPaths) > 0 {
-			feedbackWithAttachments = retryFeedback + "\n" + e.getAttachmentsSection(task.ID, attachmentPaths)
+			feedbackWithAttachments = retryFeedback + "\n" + e.getAttachmentsSection(task.ID, attachmentPaths, workDir)
 		}
 		e.logLine(task.ID, "system", fmt.Sprintf("Resuming previous session with feedback (executor: %s)", executorName))
 		execResult := taskExecutor.Resume(taskCtx, task, workDir, prompt, feedbackWithAttachments)
@@ -1034,7 +1038,9 @@ func (e *Executor) prepareAttachments(taskID int64, worktreePath string) ([]stri
 }
 
 // getAttachmentsSection returns a prompt section describing attachments.
-func (e *Executor) getAttachmentsSection(taskID int64, paths []string) string {
+// The worktreePath parameter is used to convert absolute paths to relative paths
+// so they match the permission pattern Read(.claude/attachments/**).
+func (e *Executor) getAttachmentsSection(taskID int64, paths []string, worktreePath string) string {
 	if len(paths) == 0 {
 		return ""
 	}
@@ -1043,7 +1049,13 @@ func (e *Executor) getAttachmentsSection(taskID int64, paths []string) string {
 	section.WriteString("\n## Attachments\n\n")
 	section.WriteString("The following files are attached to this task:\n")
 	for _, p := range paths {
-		section.WriteString(fmt.Sprintf("- %s\n", p))
+		// Convert absolute paths to relative paths so they match permission patterns
+		relPath := p
+		if worktreePath != "" && strings.HasPrefix(p, worktreePath) {
+			relPath = strings.TrimPrefix(p, worktreePath)
+			relPath = strings.TrimPrefix(relPath, string(filepath.Separator))
+		}
+		section.WriteString(fmt.Sprintf("- %s\n", relPath))
 	}
 	section.WriteString("\nYou can read these files using the Read tool.\n\n")
 	return section.String()
@@ -1074,24 +1086,36 @@ func (e *Executor) buildPrompt(task *db.Task, attachmentPaths []string) string {
 	// Check for conversation history (from previous runs/retries)
 	conversationHistory := e.getConversationHistory(task.ID)
 
-	// Get attachments section
-	attachments := e.getAttachmentsSection(task.ID, attachmentPaths)
+	// Get attachments section (use relative paths to match permission patterns)
+	attachments := e.getAttachmentsSection(task.ID, attachmentPaths, task.WorktreePath)
+
+	// Always include the core task information first - title and body
+	prompt.WriteString(fmt.Sprintf("# Task: %s\n\n", task.Title))
+	if task.Body != "" {
+		prompt.WriteString(fmt.Sprintf("%s\n\n", task.Body))
+	}
+
+	// Include task metadata (branch, PR, tags) right after the task description
+	taskMeta := e.buildTaskMetadataSection(task)
+	if taskMeta != "" {
+		prompt.WriteString(taskMeta)
+	}
 
 	// Look up task type instructions from database
 	if task.Type != "" {
 		taskType, err := e.db.GetTaskTypeByName(task.Type)
 		if err == nil && taskType != nil {
-			// Apply template substitutions
+			// Apply template substitutions for type-specific instructions
 			instructions := e.applyTemplateSubstitutions(taskType.Instructions, task, projectInstructions, memories, similarTasks, attachments, conversationHistory)
 			prompt.WriteString(instructions)
 			prompt.WriteString("\n")
 		} else {
-			// Fallback to generic task if type not found
-			prompt.WriteString(e.buildGenericPrompt(task, projectInstructions, memories, similarTasks, attachments, conversationHistory))
+			// Fallback to generic context if type not found
+			prompt.WriteString(e.buildGenericContextSection(projectInstructions, memories, similarTasks, attachments, conversationHistory))
 		}
 	} else {
-		// No type specified - use generic prompt
-		prompt.WriteString(e.buildGenericPrompt(task, projectInstructions, memories, similarTasks, attachments, conversationHistory))
+		// No type specified - use generic context
+		prompt.WriteString(e.buildGenericContextSection(projectInstructions, memories, similarTasks, attachments, conversationHistory))
 	}
 
 	// Add response guidance to ALL task types
@@ -1128,6 +1152,23 @@ func (e *Executor) applyTemplateSubstitutions(template string, task *db.Task, pr
 	result = strings.ReplaceAll(result, "{{project}}", task.Project)
 	result = strings.ReplaceAll(result, "{{title}}", task.Title)
 	result = strings.ReplaceAll(result, "{{body}}", task.Body)
+	result = strings.ReplaceAll(result, "{{branch}}", task.BranchName)
+	result = strings.ReplaceAll(result, "{{tags}}", task.Tags)
+	if task.PRURL != "" {
+		result = strings.ReplaceAll(result, "{{pr_url}}", task.PRURL)
+	} else {
+		result = strings.ReplaceAll(result, "{{pr_url}}", "")
+	}
+	if task.PRNumber > 0 {
+		result = strings.ReplaceAll(result, "{{pr_number}}", fmt.Sprintf("%d", task.PRNumber))
+	} else {
+		result = strings.ReplaceAll(result, "{{pr_number}}", "")
+	}
+	result = strings.ReplaceAll(result, "{{task_id}}", fmt.Sprintf("%d", task.ID))
+
+	// Include task metadata section for templates that want it
+	taskMeta := e.buildTaskMetadataSection(task)
+	result = strings.ReplaceAll(result, "{{task_metadata}}", taskMeta)
 
 	// For conditional sections, only include if non-empty
 	if projectInstructions != "" {
@@ -1173,8 +1214,9 @@ func (e *Executor) applyTemplateSubstitutions(template string, task *db.Task, pr
 	return result
 }
 
-// buildGenericPrompt builds a generic prompt for tasks without a specific type.
-func (e *Executor) buildGenericPrompt(task *db.Task, projectInstructions, memories, similarTasks, attachments, conversationHistory string) string {
+// buildGenericContextSection builds the context section (project instructions, memories, etc.)
+// for tasks without a specific type. The task title and body are added separately in buildPrompt.
+func (e *Executor) buildGenericContextSection(projectInstructions, memories, similarTasks, attachments, conversationHistory string) string {
 	var prompt strings.Builder
 
 	if projectInstructions != "" {
@@ -1186,10 +1228,6 @@ func (e *Executor) buildGenericPrompt(task *db.Task, projectInstructions, memori
 	if similarTasks != "" {
 		prompt.WriteString(similarTasks)
 	}
-	prompt.WriteString(fmt.Sprintf("Task: %s\n\n", task.Title))
-	if task.Body != "" {
-		prompt.WriteString(fmt.Sprintf("%s\n\n", task.Body))
-	}
 	if attachments != "" {
 		prompt.WriteString(attachments)
 	}
@@ -1199,6 +1237,29 @@ func (e *Executor) buildGenericPrompt(task *db.Task, projectInstructions, memori
 	prompt.WriteString("Complete this task and summarize what you did.\n")
 
 	return prompt.String()
+}
+
+// buildTaskMetadataSection creates a section with task metadata (branch, PR, tags).
+func (e *Executor) buildTaskMetadataSection(task *db.Task) string {
+	var parts []string
+
+	if task.BranchName != "" {
+		parts = append(parts, fmt.Sprintf("Branch: %s", task.BranchName))
+	}
+	if task.PRURL != "" {
+		parts = append(parts, fmt.Sprintf("PR: %s", task.PRURL))
+	} else if task.PRNumber > 0 {
+		parts = append(parts, fmt.Sprintf("PR #%d", task.PRNumber))
+	}
+	if task.Tags != "" {
+		parts = append(parts, fmt.Sprintf("Tags: %s", task.Tags))
+	}
+
+	if len(parts) == 0 {
+		return ""
+	}
+
+	return fmt.Sprintf("## Task Details\n\n%s\n\n", strings.Join(parts, "\n"))
 }
 
 // getOnCreateInstructions returns instructions to prepend for new tasks.
@@ -3107,6 +3168,7 @@ func (e *Executor) setupWorktree(task *db.Task) (string, error) {
 			trustMiseConfig(task.WorktreePath)
 			e.writeWorktreeEnvFile(projectDir, task.WorktreePath, task, paths.configDir)
 			symlinkClaudeConfig(projectDir, task.WorktreePath)
+			symlinkMCPConfig(projectDir, task.WorktreePath)
 			copyMCPConfig(paths.configFile, projectDir, task.WorktreePath)
 			return task.WorktreePath, nil
 		}
@@ -3153,6 +3215,7 @@ func (e *Executor) setupWorktree(task *db.Task) (string, error) {
 		trustMiseConfig(worktreePath)
 		e.writeWorktreeEnvFile(projectDir, worktreePath, task, paths.configDir)
 		symlinkClaudeConfig(projectDir, worktreePath)
+		symlinkMCPConfig(projectDir, worktreePath)
 		copyMCPConfig(paths.configFile, projectDir, worktreePath)
 		e.runWorktreeInitScript(projectDir, worktreePath, task)
 		return worktreePath, nil
@@ -3194,6 +3257,8 @@ func (e *Executor) setupWorktree(task *db.Task) (string, error) {
 					}
 					trustMiseConfig(worktreePath)
 					e.writeWorktreeEnvFile(projectDir, worktreePath, task, paths.configDir)
+					symlinkClaudeConfig(projectDir, worktreePath)
+					symlinkMCPConfig(projectDir, worktreePath)
 					copyMCPConfig(paths.configFile, projectDir, worktreePath)
 					e.runWorktreeInitScript(projectDir, worktreePath, task)
 					return worktreePath, nil
@@ -3230,6 +3295,7 @@ func (e *Executor) setupWorktree(task *db.Task) (string, error) {
 	trustMiseConfig(worktreePath)
 	e.writeWorktreeEnvFile(projectDir, worktreePath, task, paths.configDir)
 	symlinkClaudeConfig(projectDir, worktreePath)
+	symlinkMCPConfig(projectDir, worktreePath)
 	copyMCPConfig(paths.configFile, projectDir, worktreePath)
 
 	// Run worktree init script if configured
@@ -3439,6 +3505,49 @@ func symlinkClaudeConfig(projectDir, worktreePath string) error {
 	// Create symlink: worktree/.claude -> project/.claude
 	if err := os.Symlink(mainClaudeDir, worktreeClaudeDir); err != nil {
 		return fmt.Errorf("create .claude symlink: %w", err)
+	}
+
+	return nil
+}
+
+// symlinkMCPConfig symlinks the project's .mcp.json file to the worktree if it exists
+// and is not tracked by git. If the file is tracked, the worktree already has it from
+// checkout and we shouldn't replace it with a symlink (which would show as a modification).
+func symlinkMCPConfig(projectDir, worktreePath string) error {
+	mainMCPFile := filepath.Join(projectDir, ".mcp.json")
+	worktreeMCPFile := filepath.Join(worktreePath, ".mcp.json")
+
+	// Safety check: prevent circular symlinks if paths are the same
+	if mainMCPFile == worktreeMCPFile {
+		return nil
+	}
+
+	// Check if main project has .mcp.json
+	if _, err := os.Stat(mainMCPFile); os.IsNotExist(err) {
+		return nil // No .mcp.json in project, nothing to symlink
+	}
+
+	// Check if .mcp.json is tracked by git - if so, don't create symlink
+	// The worktree already has the file from checkout
+	cmd := exec.Command("git", "ls-files", ".mcp.json")
+	cmd.Dir = projectDir
+	if output, err := cmd.Output(); err == nil && len(output) > 0 {
+		return nil // File is tracked by git, don't replace with symlink
+	}
+
+	// Check if worktree .mcp.json is already a symlink to the right place
+	if target, err := os.Readlink(worktreeMCPFile); err == nil {
+		if target == mainMCPFile {
+			return nil // Already correctly symlinked
+		}
+	}
+
+	// Remove any existing .mcp.json in worktree (file or wrong symlink)
+	os.Remove(worktreeMCPFile)
+
+	// Create symlink: worktree/.mcp.json -> project/.mcp.json
+	if err := os.Symlink(mainMCPFile, worktreeMCPFile); err != nil {
+		return fmt.Errorf("create .mcp.json symlink: %w", err)
 	}
 
 	return nil

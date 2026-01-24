@@ -93,6 +93,14 @@ type DetailModel struct {
 	paneLoading      bool      // true while panes are being set up asynchronously
 	paneLoadingStart time.Time // when loading started (for spinner animation)
 	paneError        string    // user-visible error when panes fail to open
+
+	// Notification state (passed from app)
+	notification   string // current notification message
+	notifyTaskID   int64  // task that triggered the notification
+	notifyUntil    time.Time
+
+	// Focus executor pane after joining (e.g., when jumping from notification)
+	focusExecutorOnJoin bool
 }
 
 // Message types for async pane loading
@@ -118,6 +126,8 @@ func (m *DetailModel) executorDisplayName() string {
 			return "Codex"
 		case db.ExecutorClaude:
 			return "Claude"
+		case db.ExecutorGemini:
+			return "Gemini"
 		default:
 			// Unknown executor, capitalize first letter
 			if len(m.task.Executor) > 0 {
@@ -154,6 +164,30 @@ func (m *DetailModel) SetPRInfo(prInfo *github.PRInfo) {
 	if m.ready {
 		m.viewport.SetContent(m.renderContent())
 	}
+}
+
+// SetNotification updates the notification state from the app.
+func (m *DetailModel) SetNotification(msg string, taskID int64, until time.Time) {
+	m.notification = msg
+	m.notifyTaskID = taskID
+	m.notifyUntil = until
+}
+
+// HasNotification returns true if there is an active notification for a different task.
+func (m *DetailModel) HasNotification() bool {
+	if m.notification == "" || m.notifyTaskID == 0 {
+		return false
+	}
+	// Only show notification if it's for a different task
+	if m.task != nil && m.notifyTaskID == m.task.ID {
+		return false
+	}
+	return time.Now().Before(m.notifyUntil)
+}
+
+// NotifyTaskID returns the task ID that triggered the notification.
+func (m *DetailModel) NotifyTaskID() int64 {
+	return m.notifyTaskID
 }
 
 // Refresh reloads task and logs from database.
@@ -222,19 +256,21 @@ func (m *DetailModel) ClaudePaneID() string {
 
 // NewDetailModel creates a new detail model.
 // Returns the model and an optional command for async pane setup.
-func NewDetailModel(t *db.Task, database *db.DB, exec *executor.Executor, width, height int) (*DetailModel, tea.Cmd) {
+// If focusExecutor is true, the executor pane will be focused after panes are joined.
+func NewDetailModel(t *db.Task, database *db.DB, exec *executor.Executor, width, height int, focusExecutor bool) (*DetailModel, tea.Cmd) {
 	log := GetLogger()
-	log.Info("NewDetailModel: creating for task %d (%s)", t.ID, t.Title)
+	log.Info("NewDetailModel: creating for task %d (%s), focusExecutor=%v", t.ID, t.Title, focusExecutor)
 	log.Debug("NewDetailModel: TMUX env=%q, DaemonSession=%q, ClaudeSessionID=%q",
 		os.Getenv("TMUX"), t.DaemonSession, t.ClaudeSessionID)
 
 	m := &DetailModel{
-		task:     t,
-		database: database,
-		executor: exec,
-		width:    width,
-		height:   height,
-		focused:  true, // Initially focused when viewing details
+		task:                t,
+		database:            database,
+		executor:            exec,
+		width:               width,
+		height:              height,
+		focused:             true, // Initially focused when viewing details
+		focusExecutorOnJoin: focusExecutor,
 	}
 
 	// Load logs
@@ -409,6 +445,10 @@ func (m *DetailModel) Update(msg tea.Msg) (*DetailModel, tea.Cmd) {
 			m.daemonSessionID = msg.daemonSessionID
 			m.cachedWindowTarget = msg.windowTarget
 			m.paneError = ""
+			// Focus executor pane if requested (e.g., when jumping from notification)
+			if m.focusExecutorOnJoin && m.claudePaneID != "" {
+				m.focusExecutorPane()
+			}
 		}
 		m.viewport.SetContent(m.renderContent())
 		return m, nil
@@ -803,8 +843,9 @@ func (m *DetailModel) getCurrentDetailPaneHeight(tuiPaneID string) int {
 		return 0
 	}
 
-	// Calculate the percentage
-	return (paneHeight * 100) / totalHeight
+	// Calculate the percentage with proper rounding to avoid truncation errors
+	// that cause the pane to progressively shrink over time
+	return (paneHeight*100 + totalHeight/2) / totalHeight
 }
 
 // getActualPaneHeight returns the actual pane height in lines.
@@ -868,7 +909,8 @@ func (m *DetailModel) getCurrentShellPaneWidth() int {
 
 	// Calculate total width and shell percentage
 	totalWidth := shellWidth + claudeWidth
-	return (shellWidth * 100) / totalWidth
+	// Use proper rounding to avoid truncation errors
+	return (shellWidth*100 + totalWidth/2) / totalWidth
 }
 
 // saveDetailPaneHeight saves the current detail pane height to settings.
@@ -900,8 +942,9 @@ func (m *DetailModel) saveDetailPaneHeight(tuiPaneID string) {
 		return
 	}
 
-	// Calculate the percentage
-	percentage := (paneHeight * 100) / totalHeight
+	// Calculate the percentage with proper rounding to avoid truncation errors
+	// that cause the pane to progressively shrink over time
+	percentage := (paneHeight*100 + totalHeight/2) / totalHeight
 	if percentage >= 1 && percentage <= 50 {
 		heightStr := fmt.Sprintf("%d%%", percentage)
 		m.database.SetSetting(config.SettingDetailPaneHeight, heightStr)
@@ -941,9 +984,9 @@ func (m *DetailModel) saveShellPaneWidth() {
 		return
 	}
 
-	// Calculate total width and shell percentage
+	// Calculate total width and shell percentage with proper rounding
 	totalWidth := shellWidth + claudeWidth
-	percentage := (shellWidth * 100) / totalWidth
+	percentage := (shellWidth*100 + totalWidth/2) / totalWidth
 	if percentage >= 10 && percentage <= 90 {
 		widthStr := fmt.Sprintf("%d%%", percentage)
 		m.database.SetSetting(config.SettingShellPaneWidth, widthStr)
@@ -1251,6 +1294,28 @@ func (m *DetailModel) joinTmuxPanes() {
 
 	log.Info("joinTmuxPanes: completed for task %d, claudePaneID=%q, workdirPaneID=%q, tuiPaneID=%q",
 		m.task.ID, m.claudePaneID, m.workdirPaneID, m.tuiPaneID)
+
+	// Focus executor pane if requested (e.g., when jumping from notification)
+	if m.focusExecutorOnJoin && m.claudePaneID != "" {
+		m.focusExecutorPane()
+	}
+}
+
+// focusExecutorPane focuses the executor (Claude) pane.
+func (m *DetailModel) focusExecutorPane() {
+	if m.claudePaneID == "" {
+		return
+	}
+	log := GetLogger()
+	log.Info("focusExecutorPane: focusing Claude pane %q", m.claudePaneID)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	err := exec.CommandContext(ctx, "tmux", "select-pane", "-t", m.claudePaneID).Run()
+	if err != nil {
+		log.Error("focusExecutorPane: select-pane failed: %v", err)
+	} else {
+		m.focused = false // TUI is no longer focused, executor is
+	}
 }
 
 // joinTmuxPane is a compatibility wrapper for joinTmuxPanes.
@@ -1974,13 +2039,39 @@ func (m *DetailModel) renderHeader() string {
 		}
 	}
 
-	lines := []string{meta.String()}
-	if prLine != "" {
-		lines = append(lines, prLine)
-	}
-	lines = append(lines, "")
+	// Build the first line with optional notification indicator
+	metaStr := meta.String()
 
-	return lipgloss.JoinVertical(lipgloss.Left, lines...)
+	// Add notification indicator if there's an active notification for a different task
+	var firstLine string
+	if m.HasNotification() {
+		// Create a subtle notification indicator
+		notifyStyle := lipgloss.NewStyle().
+			Background(lipgloss.Color("#4B5563")). // Muted gray background
+			Foreground(lipgloss.Color("#FFCC00")). // Yellow text
+			Padding(0, 1)
+		notifyIndicator := notifyStyle.Render(fmt.Sprintf("⚠ Task #%d (ctrl+g)", m.notifyTaskID))
+
+		// Add notification with spacing
+		firstLine = metaStr + "  " + notifyIndicator
+	} else {
+		firstLine = metaStr
+	}
+
+	// Create a block for the right-aligned content
+	rightContent := []string{firstLine}
+	if prLine != "" {
+		rightContent = append(rightContent, prLine)
+	}
+	rightBlock := lipgloss.JoinVertical(lipgloss.Right, rightContent...)
+
+	// Render the block aligned to the right of the available space
+	headerLayout := lipgloss.NewStyle().
+		Width(m.width - 4).
+		Align(lipgloss.Right).
+		Render(rightBlock)
+
+	return lipgloss.JoinVertical(lipgloss.Left, headerLayout, "")
 }
 
 // getGlamourRenderer returns a cached Glamour renderer, creating it if needed.
@@ -2052,11 +2143,8 @@ func (m *DetailModel) renderContent() string {
 
 	// Description
 	if t.Body != "" && strings.TrimSpace(t.Body) != "" {
-		if m.focused {
-			b.WriteString(Bold.Render("Description"))
-		} else {
-			b.WriteString(dimmedStyle.Render("Description"))
-		}
+		// Labels always use full opacity for clarity and accessibility
+		b.WriteString(Bold.Render("Description"))
 		b.WriteString("\n\n")
 
 		// Use cached renderer
@@ -2089,11 +2177,8 @@ func (m *DetailModel) renderContent() string {
 	// Execution logs
 	if len(m.logs) > 0 {
 		b.WriteString("\n")
-		if m.focused {
-			b.WriteString(Bold.Render("Execution Log"))
-		} else {
-			b.WriteString(dimmedStyle.Render("Execution Log"))
-		}
+		// Labels always use full opacity for clarity and accessibility
+		b.WriteString(Bold.Render("Execution Log"))
 		b.WriteString("\n\n")
 
 		for _, log := range m.logs {
@@ -2207,6 +2292,11 @@ func (m *DetailModel) renderHelp() string {
 	// Show pane navigation shortcut when panes are visible
 	if hasPanes && os.Getenv("TMUX") != "" {
 		keys = append(keys, helpKey{"shift+↑↓", "switch pane", false})
+	}
+
+	// Show jump to notification shortcut when there's an active notification
+	if m.HasNotification() {
+		keys = append(keys, helpKey{"ctrl+g", "jump to notification", false})
 	}
 
 	keys = append(keys, []helpKey{

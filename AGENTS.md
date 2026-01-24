@@ -377,6 +377,7 @@ wish.WithPublicKeyAuth(func(ctx ssh.Context, key ssh.PublicKey) bool {
 | `WORKTREE_SESSION_ID` | tmux session ID | - |
 | `WORKTREE_DANGEROUS_MODE` | Skip Claude permissions | - |
 | `WORKTREE_CWD` | Working directory for project detection | - |
+| `GEMINI_DANGEROUS_ARGS` | Overrides the Gemini CLI flags used when dangerous mode is enabled | `--dangerously-allow-run` |
 
 Set `TASK_EXECUTOR` before launching `task -l`/`task daemon` to change the executor label shown in the UI (e.g., `TASK_EXECUTOR=codex`). For compatibility, `WORKFLOW_EXECUTOR`, `TASKYOU_EXECUTOR`, and `WORKTREE_EXECUTOR` are also recognized.
 
