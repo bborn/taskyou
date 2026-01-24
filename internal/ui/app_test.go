@@ -670,3 +670,59 @@ func TestJumpToNotificationKey_DetailView_NoNotification(t *testing.T) {
 		t.Error("expected nil command when no notification is active")
 	}
 }
+
+func TestJumpToNotificationKey_FocusExecutor(t *testing.T) {
+	// Create app model with kanban board and notification
+	tasks := []*db.Task{
+		{ID: 1, Title: "Task 1", Status: db.StatusBacklog},
+		{ID: 2, Title: "Task 2", Status: db.StatusBlocked},
+	}
+
+	// Create a mock database for the loadTask call
+	mockDB, err := db.Open(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to create test database: %v", err)
+	}
+	defer mockDB.Close()
+
+	// Insert test task
+	testTask := &db.Task{ID: 2, Title: "Task 2", Status: db.StatusBlocked}
+	if err := mockDB.CreateTask(testTask); err != nil {
+		t.Fatalf("Failed to create test task: %v", err)
+	}
+
+	m := &AppModel{
+		width:        100,
+		height:       50,
+		currentView:  ViewDashboard,
+		keys:         DefaultKeyMap(),
+		notification: "⚠ Task #2 needs input: Task 2 (g to jump)",
+		notifyTaskID: 2,
+		kanban:       NewKanbanBoard(100, 50),
+		db:           mockDB,
+	}
+	m.kanban.SetTasks(tasks)
+	m.kanban.SelectTask(1) // Start with task 1 selected
+
+	// Press 'g' to jump to notification
+	gMsg := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'g'}}
+	_, cmd := m.updateDashboard(gMsg)
+
+	// Verify command was returned
+	if cmd == nil {
+		t.Fatal("expected command to be returned")
+	}
+
+	// Execute the command to get the message
+	msg := cmd()
+
+	// Verify the message has focusExecutor set to true
+	loadedMsg, ok := msg.(taskLoadedMsg)
+	if !ok {
+		t.Fatalf("expected taskLoadedMsg, got %T", msg)
+	}
+
+	if !loadedMsg.focusExecutor {
+		t.Error("expected focusExecutor to be true when jumping from notification")
+	}
+}

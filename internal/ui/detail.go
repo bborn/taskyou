@@ -98,6 +98,9 @@ type DetailModel struct {
 	notification   string // current notification message
 	notifyTaskID   int64  // task that triggered the notification
 	notifyUntil    time.Time
+
+	// Focus executor pane after joining (e.g., when jumping from notification)
+	focusExecutorOnJoin bool
 }
 
 // Message types for async pane loading
@@ -253,19 +256,21 @@ func (m *DetailModel) ClaudePaneID() string {
 
 // NewDetailModel creates a new detail model.
 // Returns the model and an optional command for async pane setup.
-func NewDetailModel(t *db.Task, database *db.DB, exec *executor.Executor, width, height int) (*DetailModel, tea.Cmd) {
+// If focusExecutor is true, the executor pane will be focused after panes are joined.
+func NewDetailModel(t *db.Task, database *db.DB, exec *executor.Executor, width, height int, focusExecutor bool) (*DetailModel, tea.Cmd) {
 	log := GetLogger()
-	log.Info("NewDetailModel: creating for task %d (%s)", t.ID, t.Title)
+	log.Info("NewDetailModel: creating for task %d (%s), focusExecutor=%v", t.ID, t.Title, focusExecutor)
 	log.Debug("NewDetailModel: TMUX env=%q, DaemonSession=%q, ClaudeSessionID=%q",
 		os.Getenv("TMUX"), t.DaemonSession, t.ClaudeSessionID)
 
 	m := &DetailModel{
-		task:     t,
-		database: database,
-		executor: exec,
-		width:    width,
-		height:   height,
-		focused:  true, // Initially focused when viewing details
+		task:                t,
+		database:            database,
+		executor:            exec,
+		width:               width,
+		height:              height,
+		focused:             true, // Initially focused when viewing details
+		focusExecutorOnJoin: focusExecutor,
 	}
 
 	// Load logs
@@ -440,6 +445,10 @@ func (m *DetailModel) Update(msg tea.Msg) (*DetailModel, tea.Cmd) {
 			m.daemonSessionID = msg.daemonSessionID
 			m.cachedWindowTarget = msg.windowTarget
 			m.paneError = ""
+			// Focus executor pane if requested (e.g., when jumping from notification)
+			if m.focusExecutorOnJoin && m.claudePaneID != "" {
+				m.focusExecutorPane()
+			}
 		}
 		m.viewport.SetContent(m.renderContent())
 		return m, nil
@@ -1285,6 +1294,28 @@ func (m *DetailModel) joinTmuxPanes() {
 
 	log.Info("joinTmuxPanes: completed for task %d, claudePaneID=%q, workdirPaneID=%q, tuiPaneID=%q",
 		m.task.ID, m.claudePaneID, m.workdirPaneID, m.tuiPaneID)
+
+	// Focus executor pane if requested (e.g., when jumping from notification)
+	if m.focusExecutorOnJoin && m.claudePaneID != "" {
+		m.focusExecutorPane()
+	}
+}
+
+// focusExecutorPane focuses the executor (Claude) pane.
+func (m *DetailModel) focusExecutorPane() {
+	if m.claudePaneID == "" {
+		return
+	}
+	log := GetLogger()
+	log.Info("focusExecutorPane: focusing Claude pane %q", m.claudePaneID)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	err := exec.CommandContext(ctx, "tmux", "select-pane", "-t", m.claudePaneID).Run()
+	if err != nil {
+		log.Error("focusExecutorPane: select-pane failed: %v", err)
+	} else {
+		m.focused = false // TUI is no longer focused, executor is
+	}
 }
 
 // joinTmuxPane is a compatibility wrapper for joinTmuxPanes.

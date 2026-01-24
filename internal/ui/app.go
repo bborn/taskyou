@@ -640,7 +640,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.executor.ResumeTask(msg.task.ID)
 			}
 			var initCmd tea.Cmd
-			m.detailView, initCmd = NewDetailModel(msg.task, m.db, m.executor, m.width, m.height)
+			m.detailView, initCmd = NewDetailModel(msg.task, m.db, m.executor, m.width, m.height, msg.focusExecutor)
 			// Set task position in column for display
 			pos, total := m.kanban.GetTaskPosition()
 			m.detailView.SetPosition(pos, total)
@@ -1140,7 +1140,8 @@ func (m *AppModel) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			// Clear notification after jumping
 			m.notification = ""
 			m.notifyTaskID = 0
-			return m, m.loadTask(taskID)
+			// Use loadTaskWithFocus to automatically focus the executor pane
+			return m, m.loadTaskWithFocus(taskID)
 		}
 		return m, nil
 
@@ -2504,8 +2505,9 @@ type tasksLoadedMsg struct {
 }
 
 type taskLoadedMsg struct {
-	task *db.Task
-	err  error
+	task          *db.Task
+	err           error
+	focusExecutor bool // Focus executor pane after entering detail view (e.g., from notification jump)
 }
 
 type taskCreatedMsg struct {
@@ -2606,6 +2608,16 @@ func (m *AppModel) loadTasks() tea.Cmd {
 }
 
 func (m *AppModel) loadTask(id int64) tea.Cmd {
+	return m.loadTaskWithOptions(id, false)
+}
+
+// loadTaskWithFocus loads a task and focuses the executor pane when entering detail view.
+// Used when jumping to a task from a notification.
+func (m *AppModel) loadTaskWithFocus(id int64) tea.Cmd {
+	return m.loadTaskWithOptions(id, true)
+}
+
+func (m *AppModel) loadTaskWithOptions(id int64, focusExecutor bool) tea.Cmd {
 	// Check PR state asynchronously (don't block UI)
 	if m.executor != nil {
 		go m.executor.CheckPRStateAndUpdateTask(id)
@@ -2613,7 +2625,7 @@ func (m *AppModel) loadTask(id int64) tea.Cmd {
 
 	return func() tea.Msg {
 		task, err := m.db.GetTask(id)
-		return taskLoadedMsg{task: task, err: err}
+		return taskLoadedMsg{task: task, err: err, focusExecutor: focusExecutor}
 	}
 }
 
