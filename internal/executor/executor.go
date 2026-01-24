@@ -3590,8 +3590,9 @@ func symlinkClaudeConfig(projectDir, worktreePath string) error {
 	return nil
 }
 
-// symlinkMCPConfig symlinks the project's .mcp.json file to the worktree if it exists.
-// This ensures project-level MCP server configuration is available in worktrees.
+// symlinkMCPConfig symlinks the project's .mcp.json file to the worktree if it exists
+// and is not tracked by git. If the file is tracked, the worktree already has it from
+// checkout and we shouldn't replace it with a symlink (which would show as a modification).
 func symlinkMCPConfig(projectDir, worktreePath string) error {
 	mainMCPFile := filepath.Join(projectDir, ".mcp.json")
 	worktreeMCPFile := filepath.Join(worktreePath, ".mcp.json")
@@ -3604,6 +3605,14 @@ func symlinkMCPConfig(projectDir, worktreePath string) error {
 	// Check if main project has .mcp.json
 	if _, err := os.Stat(mainMCPFile); os.IsNotExist(err) {
 		return nil // No .mcp.json in project, nothing to symlink
+	}
+
+	// Check if .mcp.json is tracked by git - if so, don't create symlink
+	// The worktree already has the file from checkout
+	cmd := exec.Command("git", "ls-files", ".mcp.json")
+	cmd.Dir = projectDir
+	if output, err := cmd.Output(); err == nil && len(output) > 0 {
+		return nil // File is tracked by git, don't replace with symlink
 	}
 
 	// Check if worktree .mcp.json is already a symlink to the right place

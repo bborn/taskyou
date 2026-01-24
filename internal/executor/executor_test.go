@@ -3,6 +3,7 @@ package executor
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -975,7 +976,7 @@ func TestSymlinkMCPConfig(t *testing.T) {
 		}
 	})
 
-	t.Run("replaces existing regular file", func(t *testing.T) {
+	t.Run("replaces existing regular file in non-git directory", func(t *testing.T) {
 		projectDir := t.TempDir()
 		worktreePath := t.TempDir()
 
@@ -997,6 +998,95 @@ func TestSymlinkMCPConfig(t *testing.T) {
 		}
 
 		// Verify it's now a symlink pointing to correct target
+		target, err := os.Readlink(worktreeMCPFile)
+		if err != nil {
+			t.Fatalf("expected symlink at %s: %v", worktreeMCPFile, err)
+		}
+		if target != mainMCPFile {
+			t.Errorf("symlink target = %s, want %s", target, mainMCPFile)
+		}
+	})
+
+	t.Run("skips symlink when .mcp.json is tracked by git", func(t *testing.T) {
+		projectDir := t.TempDir()
+		worktreePath := t.TempDir()
+
+		// Initialize git repo
+		cmd := exec.Command("git", "init")
+		cmd.Dir = projectDir
+		if err := cmd.Run(); err != nil {
+			t.Fatal(err)
+		}
+
+		// Configure git user for commit
+		cmd = exec.Command("git", "config", "user.email", "test@test.com")
+		cmd.Dir = projectDir
+		cmd.Run()
+		cmd = exec.Command("git", "config", "user.name", "Test")
+		cmd.Dir = projectDir
+		cmd.Run()
+
+		// Create and track .mcp.json
+		mainMCPFile := filepath.Join(projectDir, ".mcp.json")
+		if err := os.WriteFile(mainMCPFile, []byte(`{"mcpServers": {}}`), 0644); err != nil {
+			t.Fatal(err)
+		}
+		cmd = exec.Command("git", "add", ".mcp.json")
+		cmd.Dir = projectDir
+		if err := cmd.Run(); err != nil {
+			t.Fatal(err)
+		}
+		cmd = exec.Command("git", "commit", "-m", "add mcp config")
+		cmd.Dir = projectDir
+		if err := cmd.Run(); err != nil {
+			t.Fatal(err)
+		}
+
+		// Create a file in worktree (simulating checkout)
+		worktreeMCPFile := filepath.Join(worktreePath, ".mcp.json")
+		if err := os.WriteFile(worktreeMCPFile, []byte(`{"mcpServers": {}}`), 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		err := symlinkMCPConfig(projectDir, worktreePath)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		// Verify the file was NOT replaced with a symlink
+		info, err := os.Lstat(worktreeMCPFile)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			t.Error("expected regular file, got symlink - should not replace tracked files")
+		}
+	})
+
+	t.Run("creates symlink when .mcp.json exists but is not tracked", func(t *testing.T) {
+		projectDir := t.TempDir()
+		worktreePath := t.TempDir()
+
+		// Initialize git repo
+		cmd := exec.Command("git", "init")
+		cmd.Dir = projectDir
+		if err := cmd.Run(); err != nil {
+			t.Fatal(err)
+		}
+
+		// Create .mcp.json but don't track it
+		mainMCPFile := filepath.Join(projectDir, ".mcp.json")
+		if err := os.WriteFile(mainMCPFile, []byte(`{"mcpServers": {}}`), 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		err := symlinkMCPConfig(projectDir, worktreePath)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		// Verify symlink was created
+		worktreeMCPFile := filepath.Join(worktreePath, ".mcp.json")
 		target, err := os.Readlink(worktreeMCPFile)
 		if err != nil {
 			t.Fatalf("expected symlink at %s: %v", worktreeMCPFile, err)
