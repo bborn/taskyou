@@ -65,9 +65,6 @@ type FormModel struct {
 	queue            bool
 	attachments      []string // Parsed file paths
 	attachmentCursor int      // Index of the currently selected attachment chip
-	recurrence       string   // "", "hourly", "daily", "weekly", "monthly"
-	recurrenceIdx    int
-	recurrences      []string
 
 	// Magic paste fields (populated when pasting URLs)
 	prURL    string // GitHub PR URL if pasted
