@@ -79,6 +79,10 @@ func (s *Server) Start(ctx context.Context) error {
 	// Task logs
 	mux.HandleFunc("GET /tasks/{id}/logs", s.handleGetTaskLogs)
 
+	// Terminal endpoints (ttyd)
+	mux.HandleFunc("GET /tasks/{id}/terminal", s.handleGetTerminal)
+	mux.HandleFunc("DELETE /tasks/{id}/terminal", s.handleStopTerminal)
+
 	// WebSocket
 	mux.HandleFunc("GET /ws", s.handleWebSocket)
 

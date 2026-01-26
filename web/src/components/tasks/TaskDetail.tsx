@@ -26,6 +26,7 @@ import { tasks } from '@/api/client';
 import type { Task, TaskLog, TaskStatus } from '@/api/types';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
+import { TaskTerminal } from '@/components/Terminal';
 import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
 import { cn } from '@/lib/utils';
@@ -96,6 +97,7 @@ export function TaskDetail({ task: initialTask, onClose, onUpdate, onDelete }: T
   const [showRetryDialog, setShowRetryDialog] = useState(false);
   const [retryFeedback, setRetryFeedback] = useState('');
   const [logsExpanded, setLogsExpanded] = useState(true);
+  const [terminalExpanded, setTerminalExpanded] = useState(true);
   const logsEndRef = useRef<HTMLDivElement>(null);
   const pollIntervalRef = useRef<number | undefined>(undefined);
 
@@ -545,6 +547,42 @@ export function TaskDetail({ task: initialTask, onClose, onUpdate, onDelete }: T
                 )}
               </AnimatePresence>
             </div>
+
+            {/* Live Terminal Section */}
+            {(task.status === 'processing' || task.status === 'blocked') && (
+              <div className="flex flex-col border-t border-border">
+                <button
+                  onClick={() => setTerminalExpanded(!terminalExpanded)}
+                  className="flex items-center justify-between px-5 py-3 hover:bg-muted/50 transition-colors"
+                >
+                  <div className="flex items-center gap-2">
+                    <Terminal className="h-4 w-4 text-green-500" />
+                    <span className="font-medium text-sm">Live Terminal</span>
+                    <Badge className="text-xs bg-green-500/20 text-green-500 border-green-500/50">
+                      Active
+                    </Badge>
+                  </div>
+                  {terminalExpanded ? (
+                    <ChevronUp className="h-4 w-4 text-muted-foreground" />
+                  ) : (
+                    <ChevronDown className="h-4 w-4 text-muted-foreground" />
+                  )}
+                </button>
+
+                <AnimatePresence>
+                  {terminalExpanded && (
+                    <motion.div
+                      initial={{ height: 0 }}
+                      animate={{ height: 400 }}
+                      exit={{ height: 0 }}
+                      className="overflow-hidden"
+                    >
+                      <TaskTerminal taskId={task.id} className="h-[400px]" />
+                    </motion.div>
+                  )}
+                </AnimatePresence>
+              </div>
+            )}
           </div>
 
           {/* Retry Dialog */}

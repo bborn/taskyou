@@ -97,7 +97,19 @@ export const tasks = {
     const params = limit ? `?limit=${limit}` : '';
     return fetchJSON<TaskLog[]>(`/tasks/${id}/logs${params}`);
   },
+  getTerminal: (id: number) =>
+    fetchJSON<TerminalInfo>(`/tasks/${id}/terminal`),
+  stopTerminal: (id: number) =>
+    fetchJSON<void>(`/tasks/${id}/terminal`, { method: 'DELETE' }),
 };
+
+// Terminal info returned by the API
+export interface TerminalInfo {
+  task_id: number;
+  port: number;
+  tmux_target: string;
+  websocket_url: string;
+}
 
 // Projects API
 export const projects = {
