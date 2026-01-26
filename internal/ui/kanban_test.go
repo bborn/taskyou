@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/bborn/workflow/internal/db"
@@ -78,37 +79,37 @@ func TestKanbanBoard_HandleClick(t *testing.T) {
 		{
 			name:       "click on first task in backlog column",
 			x:          colTotalWidth / 2, // Middle of first column
-			y:          5,                 // After header (1 border + 3 header = 4, so y=5 is first task)
+			y:          2,                 // After header (1 border + 1 header = 2, so y=2 is first task)
 			wantTaskID: 1,
 		},
 		{
 			name:       "click on second task in backlog column",
 			x:          colTotalWidth / 2, // Middle of first column
-			y:          8,                 // Second task (card height = 3)
+			y:          5,                 // Second task (card height = 3, so y=5 is second task)
 			wantTaskID: 2,
 		},
 		{
 			name:       "click on task in second column (in progress)",
 			x:          colTotalWidth + colTotalWidth/2, // Middle of second column
-			y:          5,
+			y:          2,
 			wantTaskID: 3,
 		},
 		{
 			name:       "click on task in third column (blocked)",
 			x:          2*colTotalWidth + colTotalWidth/2, // Middle of third column
-			y:          5,
+			y:          2,
 			wantTaskID: 4,
 		},
 		{
 			name:       "click on task in fourth column (done)",
 			x:          3*colTotalWidth + colTotalWidth/2, // Middle of fourth column
-			y:          5,
+			y:          2,
 			wantTaskID: 5,
 		},
 		{
 			name:    "click on header area returns nil",
 			x:       colTotalWidth / 2,
-			y:       2, // Header area
+			y:       1, // Header area (y=1 is the header bar)
 			wantNil: true,
 		},
 		{
@@ -244,6 +245,77 @@ func TestKanbanBoard_MoveUpDownSingleTask(t *testing.T) {
 	}
 }
 
+func TestKanbanBoard_HasPrevNextTask(t *testing.T) {
+	board := NewKanbanBoard(100, 50)
+
+	// Multiple tasks in column
+	tasks := []*db.Task{
+		{ID: 1, Title: "Task 1", Status: db.StatusBacklog},
+		{ID: 2, Title: "Task 2", Status: db.StatusBacklog},
+		{ID: 3, Title: "Task 3", Status: db.StatusBacklog},
+	}
+	board.SetTasks(tasks)
+
+	// At first position: no prev, has next
+	if board.HasPrevTask() {
+		t.Error("At first task: HasPrevTask() = true, want false")
+	}
+	if !board.HasNextTask() {
+		t.Error("At first task: HasNextTask() = false, want true")
+	}
+
+	// Move to middle: has both
+	board.MoveDown()
+	if !board.HasPrevTask() {
+		t.Error("At middle task: HasPrevTask() = false, want true")
+	}
+	if !board.HasNextTask() {
+		t.Error("At middle task: HasNextTask() = false, want true")
+	}
+
+	// Move to last: has prev, no next
+	board.MoveDown()
+	if !board.HasPrevTask() {
+		t.Error("At last task: HasPrevTask() = false, want true")
+	}
+	if board.HasNextTask() {
+		t.Error("At last task: HasNextTask() = true, want false")
+	}
+}
+
+func TestKanbanBoard_HasPrevNextTaskSingleTask(t *testing.T) {
+	board := NewKanbanBoard(100, 50)
+
+	// Single task in column
+	tasks := []*db.Task{
+		{ID: 1, Title: "Task 1", Status: db.StatusBacklog},
+	}
+	board.SetTasks(tasks)
+
+	// With only one task: no prev, no next
+	if board.HasPrevTask() {
+		t.Error("With single task: HasPrevTask() = true, want false")
+	}
+	if board.HasNextTask() {
+		t.Error("With single task: HasNextTask() = true, want false")
+	}
+}
+
+func TestKanbanBoard_HasPrevNextTaskEmptyColumn(t *testing.T) {
+	board := NewKanbanBoard(100, 50)
+
+	// No tasks
+	board.SetTasks([]*db.Task{})
+
+	// With empty column: no prev, no next
+	if board.HasPrevTask() {
+		t.Error("With empty column: HasPrevTask() = true, want false")
+	}
+	if board.HasNextTask() {
+		t.Error("With empty column: HasNextTask() = true, want false")
+	}
+}
+
 func TestKanbanBoard_HandleClickUpdatesSelection(t *testing.T) {
 	board := NewKanbanBoard(100, 50)
 
@@ -260,7 +332,7 @@ func TestKanbanBoard_HandleClickUpdatesSelection(t *testing.T) {
 	colTotalWidth := colWidth + 2
 
 	x := colTotalWidth + colTotalWidth/2 // Middle of second column
-	y := 5                               // First task position
+	y := 2                               // First task position (1 border + 1 header = 2)
 
 	task := board.HandleClick(x, y)
 
@@ -393,9 +465,9 @@ func TestKanbanBoard_MobileTaskClick(t *testing.T) {
 	board.FocusColumn(0)
 
 	// Click on first task in the column
-	// Mobile layout: tab bar (2 lines), border (1), header (3), task area
+	// Mobile layout: tab bar (2 lines), border (1), header (1), task area
 	x := 30 // Middle of column
-	y := 7  // After tab bar (2) + border (1) + header (3) = 6, so y=7 is first task
+	y := 4  // After tab bar (2) + border (1) + header (1) = 4, so y=4 is first task
 
 	task := board.HandleClick(x, y)
 
@@ -458,92 +530,141 @@ func TestKanbanBoard_DesktopViewAtThreshold(t *testing.T) {
 	}
 }
 
-func TestKanbanBoard_RecurringTasksAtBottom(t *testing.T) {
-	board := NewKanbanBoard(100, 50)
+func TestPinnedSelectionDoesNotResetScroll(t *testing.T) {
+	board := NewKanbanBoard(100, 16)
 
-	// Mix of recurring and non-recurring tasks in the same column
 	tasks := []*db.Task{
-		{ID: 1, Title: "Regular Task 1", Status: db.StatusBacklog, Recurrence: ""},
-		{ID: 2, Title: "Recurring Task (daily)", Status: db.StatusBacklog, Recurrence: "daily"},
-		{ID: 3, Title: "Regular Task 2", Status: db.StatusBacklog, Recurrence: ""},
-		{ID: 4, Title: "Recurring Task (weekly)", Status: db.StatusBacklog, Recurrence: "weekly"},
-		{ID: 5, Title: "Regular Task 3", Status: db.StatusBacklog, Recurrence: ""},
+		{ID: 1, Title: "Pinned 1", Status: db.StatusBacklog, Pinned: true},
+		{ID: 2, Title: "Pinned 2", Status: db.StatusBacklog, Pinned: true},
+		{ID: 3, Title: "Task 3", Status: db.StatusBacklog},
+		{ID: 4, Title: "Task 4", Status: db.StatusBacklog},
+		{ID: 5, Title: "Task 5", Status: db.StatusBacklog},
 	}
 	board.SetTasks(tasks)
 
-	// Get the backlog column (index 0)
-	col := board.columns[0]
+	// Force selection to the last unpinned task so the column scrolls
+	board.selectedCol = 0
+	board.selectedRow = len(tasks) - 1
+	board.ensureSelectedVisible()
 
-	// Verify order: all non-recurring tasks should come before recurring tasks
-	// Expected order: 1, 3, 5 (non-recurring) then 2, 4 (recurring)
-	expectedOrder := []int64{1, 3, 5, 2, 4}
+	if len(board.scrollOffsets) == 0 {
+		t.Fatalf("scrollOffsets not initialized")
+	}
+	if board.scrollOffsets[0] == 0 {
+		t.Fatalf("expected scroll offset to move when focusing unpinned tasks")
+	}
+	offset := board.scrollOffsets[0]
 
-	if len(col.Tasks) != len(expectedOrder) {
-		t.Fatalf("Expected %d tasks in backlog, got %d", len(expectedOrder), len(col.Tasks))
+	// Selecting a pinned task should not reset the scroll offset
+	board.selectedRow = 0
+	board.ensureSelectedVisible()
+	if board.scrollOffsets[0] != offset {
+		t.Fatalf("pinned selection changed scroll offset: got %d want %d", board.scrollOffsets[0], offset)
+	}
+}
+
+func TestPinnedTasksStayVisibleWhenScrolling(t *testing.T) {
+	board := NewKanbanBoard(100, 16)
+
+	tasks := []*db.Task{
+		{ID: 1, Title: "Pinned Alpha", Status: db.StatusBacklog, Pinned: true},
+		{ID: 2, Title: "Pinned Beta", Status: db.StatusBacklog, Pinned: true},
+		{ID: 3, Title: "Task 3", Status: db.StatusBacklog},
+		{ID: 4, Title: "Task 4", Status: db.StatusBacklog},
+		{ID: 5, Title: "Task 5", Status: db.StatusBacklog},
+	}
+	board.SetTasks(tasks)
+
+	// Scroll down so that unpinned tasks require an offset
+	board.selectedRow = len(tasks) - 1
+	board.ensureSelectedVisible()
+	if board.scrollOffsets[0] == 0 {
+		t.Fatalf("expected non-zero scroll offset for unpinned tasks")
 	}
 
-	for i, task := range col.Tasks {
-		if task.ID != expectedOrder[i] {
-			t.Errorf("Task at position %d: expected ID %d, got %d", i, expectedOrder[i], task.ID)
-		}
-	}
-
-	// Verify that recurring tasks are at the end
-	nonRecurringCount := 0
-	for _, task := range col.Tasks {
-		if !task.IsRecurring() {
-			nonRecurringCount++
-		}
-	}
-
-	// All non-recurring tasks should be in the first positions
-	for i := 0; i < nonRecurringCount; i++ {
-		if col.Tasks[i].IsRecurring() {
-			t.Errorf("Expected non-recurring task at position %d, but found recurring task (ID %d)", i, col.Tasks[i].ID)
-		}
-	}
-
-	// All recurring tasks should be at the end
-	for i := nonRecurringCount; i < len(col.Tasks); i++ {
-		if !col.Tasks[i].IsRecurring() {
-			t.Errorf("Expected recurring task at position %d, but found non-recurring task (ID %d)", i, col.Tasks[i].ID)
+	view := board.View()
+	for _, title := range []string{"Pinned Alpha", "Pinned Beta"} {
+		if !strings.Contains(view, title) {
+			t.Fatalf("expected view to include %q even when scrolled", title)
 		}
 	}
 }
 
-func TestKanbanBoard_RecurringTasksSortingAcrossColumns(t *testing.T) {
+// TestKanbanBoard_FirstTaskClickable is a regression test for the bug where
+// clicking on the first task in a kanban column did not work because the
+// click handler expected the task area to start at y=4 instead of y=2.
+func TestKanbanBoard_FirstTaskClickable(t *testing.T) {
 	board := NewKanbanBoard(100, 50)
 
-	// Tasks in multiple columns with recurring ones
 	tasks := []*db.Task{
-		{ID: 1, Title: "Backlog Regular", Status: db.StatusBacklog, Recurrence: ""},
-		{ID: 2, Title: "Backlog Recurring", Status: db.StatusBacklog, Recurrence: "daily"},
-		{ID: 3, Title: "InProgress Regular", Status: db.StatusQueued, Recurrence: ""},
-		{ID: 4, Title: "InProgress Recurring", Status: db.StatusQueued, Recurrence: "weekly"},
+		{ID: 1, Title: "First Task", Status: db.StatusBacklog},
 	}
 	board.SetTasks(tasks)
 
-	// Check backlog column (index 0)
-	backlogCol := board.columns[0]
-	if len(backlogCol.Tasks) != 2 {
-		t.Fatalf("Expected 2 tasks in backlog, got %d", len(backlogCol.Tasks))
-	}
-	if backlogCol.Tasks[0].ID != 1 {
-		t.Errorf("Backlog first task: expected ID 1, got %d", backlogCol.Tasks[0].ID)
-	}
-	if backlogCol.Tasks[1].ID != 2 {
-		t.Errorf("Backlog second task: expected ID 2, got %d", backlogCol.Tasks[1].ID)
+	// Calculate column layout
+	numCols := 4
+	availableWidth := 100 - (numCols * 2) - (numCols - 1)
+	colWidth := availableWidth / numCols
+	colTotalWidth := colWidth + 2
+
+	// The first task should be clickable at y=2, y=3, and y=4
+	// (y=0 is border, y=1 is header, y=2-4 is the first task card)
+	for y := 2; y <= 4; y++ {
+		task := board.HandleClick(colTotalWidth/2, y)
+		if task == nil {
+			t.Errorf("HandleClick at y=%d returned nil, expected task 1", y)
+		} else if task.ID != 1 {
+			t.Errorf("HandleClick at y=%d returned task %d, expected 1", y, task.ID)
+		}
 	}
 
-	// Check in-progress column (index 1)
-	inProgressCol := board.columns[1]
-	if len(inProgressCol.Tasks) != 2 {
-		t.Fatalf("Expected 2 tasks in in-progress, got %d", len(inProgressCol.Tasks))
+	// Clicking on header (y=1) should not select a task
+	task := board.HandleClick(colTotalWidth/2, 1)
+	if task != nil {
+		t.Errorf("HandleClick at y=1 (header) returned task %d, expected nil", task.ID)
 	}
-	if inProgressCol.Tasks[0].ID != 3 {
-		t.Errorf("InProgress first task: expected ID 3, got %d", inProgressCol.Tasks[0].ID)
+
+	// Clicking on border (y=0) should not select a task
+	task = board.HandleClick(colTotalWidth/2, 0)
+	if task != nil {
+		t.Errorf("HandleClick at y=0 (border) returned task %d, expected nil", task.ID)
 	}
-	if inProgressCol.Tasks[1].ID != 4 {
-		t.Errorf("InProgress second task: expected ID 4, got %d", inProgressCol.Tasks[1].ID)
+}
+
+// TestKanbanBoard_NeedsInput verifies that the input notification tracking works.
+func TestKanbanBoard_NeedsInput(t *testing.T) {
+	board := NewKanbanBoard(100, 50)
+
+	tasks := []*db.Task{
+		{ID: 1, Title: "Task 1", Status: db.StatusBlocked},
+		{ID: 2, Title: "Task 2", Status: db.StatusBlocked},
+		{ID: 3, Title: "Task 3", Status: db.StatusBacklog},
+	}
+	board.SetTasks(tasks)
+
+	// Initially no tasks need input
+	if board.NeedsInput(1) {
+		t.Error("Task 1 should not need input initially")
+	}
+
+	// Mark task 1 as needing input
+	needsInput := map[int64]bool{1: true}
+	board.SetTasksNeedingInput(needsInput)
+
+	// Now task 1 needs input, but task 2 (also blocked) doesn't
+	if !board.NeedsInput(1) {
+		t.Error("Task 1 should need input after SetTasksNeedingInput")
+	}
+	if board.NeedsInput(2) {
+		t.Error("Task 2 should not need input (not in the map)")
+	}
+	if board.NeedsInput(3) {
+		t.Error("Task 3 should not need input")
+	}
+
+	// Render should work without panic
+	view := board.View()
+	if view == "" {
+		t.Error("View() returned empty string")
 	}
 }

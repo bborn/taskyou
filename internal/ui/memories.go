@@ -408,7 +408,7 @@ func (m *MemoriesModel) renderHelp() string {
 			{"e", "edit"},
 			{"d", "delete"},
 			{"p/tab", "cycle project"},
-			{"q/esc", "back"},
+			{"esc", "back"},
 		}
 	}
 

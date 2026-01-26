@@ -100,6 +100,74 @@ func TestPRStatusBadge(t *testing.T) {
 	}
 }
 
+func TestPRStatusIcon(t *testing.T) {
+	tests := []struct {
+		name     string
+		prInfo   *github.PRInfo
+		expected string
+	}{
+		{
+			name:     "nil PR returns empty",
+			prInfo:   nil,
+			expected: "",
+		},
+		{
+			name:     "merged PR shows M",
+			prInfo:   &github.PRInfo{State: github.PRStateMerged},
+			expected: "M",
+		},
+		{
+			name:     "closed PR shows X",
+			prInfo:   &github.PRInfo{State: github.PRStateClosed},
+			expected: "X",
+		},
+		{
+			name:     "draft PR shows D",
+			prInfo:   &github.PRInfo{State: github.PRStateDraft},
+			expected: "D",
+		},
+		{
+			name:     "open PR ready to merge shows R",
+			prInfo:   &github.PRInfo{State: github.PRStateOpen, CheckState: github.CheckStatePassing, Mergeable: "MERGEABLE"},
+			expected: "R",
+		},
+		{
+			name:     "open PR with conflicts shows C",
+			prInfo:   &github.PRInfo{State: github.PRStateOpen, CheckState: github.CheckStatePassing, Mergeable: "CONFLICTING"},
+			expected: "C",
+		},
+		{
+			name:     "open PR with failing checks shows F",
+			prInfo:   &github.PRInfo{State: github.PRStateOpen, CheckState: github.CheckStateFailing},
+			expected: "F",
+		},
+		{
+			name:     "open PR with pending checks shows W",
+			prInfo:   &github.PRInfo{State: github.PRStateOpen, CheckState: github.CheckStatePending},
+			expected: "W",
+		},
+		{
+			name:     "open PR with passing checks shows P",
+			prInfo:   &github.PRInfo{State: github.PRStateOpen, CheckState: github.CheckStatePassing},
+			expected: "P",
+		},
+		{
+			name:     "open PR with no checks shows O",
+			prInfo:   &github.PRInfo{State: github.PRStateOpen, CheckState: github.CheckStateNone},
+			expected: "O",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := PRStatusIcon(tt.prInfo)
+			if got != tt.expected {
+				t.Errorf("PRStatusIcon() = %q, want %q", got, tt.expected)
+			}
+		})
+	}
+}
+
 func TestPRStatusDescription(t *testing.T) {
 	tests := []struct {
 		name     string

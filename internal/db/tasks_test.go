@@ -508,6 +508,77 @@ func TestLastTaskTypeForProject(t *testing.T) {
 	}
 }
 
+func TestLastExecutorForProject(t *testing.T) {
+	// Create temporary database
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	db, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer db.Close()
+	defer os.Remove(dbPath)
+
+	// Get last executor for non-existent project - should return empty
+	lastExecutor, err := db.GetLastExecutorForProject("personal")
+	if err != nil {
+		t.Fatalf("failed to get last executor: %v", err)
+	}
+	if lastExecutor != "" {
+		t.Errorf("expected empty string for non-existent project, got %q", lastExecutor)
+	}
+
+	// Set last executor for personal
+	if err := db.SetLastExecutorForProject("personal", "claude"); err != nil {
+		t.Fatalf("failed to set last executor: %v", err)
+	}
+
+	// Get it back
+	lastExecutor, err = db.GetLastExecutorForProject("personal")
+	if err != nil {
+		t.Fatalf("failed to get last executor: %v", err)
+	}
+	if lastExecutor != "claude" {
+		t.Errorf("expected 'claude', got %q", lastExecutor)
+	}
+
+	// Set different executor for another project
+	if err := db.SetLastExecutorForProject("work", "codex"); err != nil {
+		t.Fatalf("failed to set last executor: %v", err)
+	}
+
+	// Verify both are independent
+	lastExecutor, err = db.GetLastExecutorForProject("personal")
+	if err != nil {
+		t.Fatalf("failed to get last executor: %v", err)
+	}
+	if lastExecutor != "claude" {
+		t.Errorf("expected 'claude' for personal, got %q", lastExecutor)
+	}
+
+	lastExecutor, err = db.GetLastExecutorForProject("work")
+	if err != nil {
+		t.Fatalf("failed to get last executor: %v", err)
+	}
+	if lastExecutor != "codex" {
+		t.Errorf("expected 'codex' for work, got %q", lastExecutor)
+	}
+
+	// Update the executor for personal
+	if err := db.SetLastExecutorForProject("personal", "codex"); err != nil {
+		t.Fatalf("failed to update last executor: %v", err)
+	}
+
+	lastExecutor, err = db.GetLastExecutorForProject("personal")
+	if err != nil {
+		t.Fatalf("failed to get last executor: %v", err)
+	}
+	if lastExecutor != "codex" {
+		t.Errorf("expected 'codex' after update, got %q", lastExecutor)
+	}
+}
+
 func TestUpdateTaskStatus(t *testing.T) {
 	// Create temporary database
 	tmpDir := t.TempDir()
@@ -687,6 +758,73 @@ func TestListTasksClosedSortedByCompletedAt(t *testing.T) {
 	}
 }
 
+func TestListTasksPinnedFirst(t *testing.T) {
+	// Create temporary database
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	database, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer database.Close()
+	defer os.Remove(dbPath)
+
+	if err := database.CreateProject(&Project{Name: "test", Path: tmpDir}); err != nil {
+		t.Fatalf("failed to create project: %v", err)
+	}
+
+	makeTask := func(title string) *Task {
+		return &Task{Title: title, Status: StatusBacklog, Type: TypeCode, Project: "test"}
+	}
+
+	pinned := makeTask("Pinned older task")
+	recent := makeTask("Recent task")
+	third := makeTask("Another task")
+
+	for _, task := range []*Task{pinned, recent, third} {
+		if err := database.CreateTask(task); err != nil {
+			t.Fatalf("failed to create task %q: %v", task.Title, err)
+		}
+	}
+
+	// Complete tasks in order so pinned has the oldest completed_at
+	if err := database.UpdateTaskStatus(pinned.ID, StatusDone); err != nil {
+		t.Fatalf("failed to complete pinned task: %v", err)
+	}
+	if err := database.UpdateTaskStatus(recent.ID, StatusDone); err != nil {
+		t.Fatalf("failed to complete recent task: %v", err)
+	}
+	if err := database.UpdateTaskStatus(third.ID, StatusDone); err != nil {
+		t.Fatalf("failed to complete third task: %v", err)
+	}
+
+	// Ensure pinned task looks older by pushing its completed_at further back
+	if _, err := database.Exec(`UPDATE tasks SET completed_at = datetime('now', '-10 minutes') WHERE id = ?`, pinned.ID); err != nil {
+		t.Fatalf("failed to adjust completed_at: %v", err)
+	}
+
+	if err := database.UpdateTaskPinned(pinned.ID, true); err != nil {
+		t.Fatalf("failed to pin task: %v", err)
+	}
+
+	// Limit results to 2 to verify pinned tasks take precedence even when older
+	tasks, err := database.ListTasks(ListTasksOptions{Status: StatusDone, Limit: 2})
+	if err != nil {
+		t.Fatalf("failed to list tasks: %v", err)
+	}
+	if len(tasks) != 2 {
+		t.Fatalf("expected 2 tasks, got %d", len(tasks))
+	}
+
+	if tasks[0].ID != pinned.ID {
+		t.Fatalf("expected pinned task #%d to appear first, got #%d", pinned.ID, tasks[0].ID)
+	}
+	if tasks[1].ID == pinned.ID {
+		t.Fatalf("expected pinned task to appear only once in results")
+	}
+}
+
 func TestCreateTaskSavesLastType(t *testing.T) {
 	// Create temporary database
 	tmpDir := t.TempDir()
@@ -757,6 +895,103 @@ func TestCreateTaskSavesLastType(t *testing.T) {
 	}
 	if lastType != "writing" {
 		t.Errorf("expected 'writing' (unchanged), got %q", lastType)
+	}
+}
+
+func TestCreateTaskSavesLastExecutor(t *testing.T) {
+	// Create temporary database
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	db, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer db.Close()
+	defer os.Remove(dbPath)
+
+	// Create a task with an executor
+	task := &Task{
+		Title:    "Test Task",
+		Status:   StatusBacklog,
+		Type:     "code",
+		Project:  "personal",
+		Executor: ExecutorClaude,
+	}
+	if err := db.CreateTask(task); err != nil {
+		t.Fatalf("failed to create task: %v", err)
+	}
+
+	// Verify last executor was saved
+	lastExecutor, err := db.GetLastExecutorForProject("personal")
+	if err != nil {
+		t.Fatalf("failed to get last executor: %v", err)
+	}
+	if lastExecutor != ExecutorClaude {
+		t.Errorf("expected %q, got %q", ExecutorClaude, lastExecutor)
+	}
+
+	// Create another task with a different executor
+	task2 := &Task{
+		Title:    "Test Task 2",
+		Status:   StatusBacklog,
+		Type:     "code",
+		Project:  "personal",
+		Executor: ExecutorCodex,
+	}
+	if err := db.CreateTask(task2); err != nil {
+		t.Fatalf("failed to create task: %v", err)
+	}
+
+	// Verify last executor was updated
+	lastExecutor, err = db.GetLastExecutorForProject("personal")
+	if err != nil {
+		t.Fatalf("failed to get last executor: %v", err)
+	}
+	if lastExecutor != ExecutorCodex {
+		t.Errorf("expected %q, got %q", ExecutorCodex, lastExecutor)
+	}
+
+	// Create task with gemini executor
+	taskGemini := &Task{
+		Title:    "Test Task Gemini",
+		Status:   StatusBacklog,
+		Type:     "code",
+		Project:  "personal",
+		Executor: ExecutorGemini,
+	}
+	if err := db.CreateTask(taskGemini); err != nil {
+		t.Fatalf("failed to create task: %v", err)
+	}
+
+	// Verify last executor was updated to gemini
+	lastExecutor, err = db.GetLastExecutorForProject("personal")
+	if err != nil {
+		t.Fatalf("failed to get last executor: %v", err)
+	}
+	if lastExecutor != ExecutorGemini {
+		t.Errorf("expected %q, got %q", ExecutorGemini, lastExecutor)
+	}
+
+	// Create task with empty executor - should still save the default executor
+	task3 := &Task{
+		Title:    "Test Task 3",
+		Status:   StatusBacklog,
+		Type:     "code",
+		Project:  "personal",
+		Executor: "", // Will be set to default by CreateTask
+	}
+	if err := db.CreateTask(task3); err != nil {
+		t.Fatalf("failed to create task: %v", err)
+	}
+
+	// Verify last executor was updated to the default (claude)
+	lastExecutor, err = db.GetLastExecutorForProject("personal")
+	if err != nil {
+		t.Fatalf("failed to get last executor: %v", err)
+	}
+	if lastExecutor != ExecutorClaude {
+		t.Errorf("expected %q (default), got %q", ExecutorClaude, lastExecutor)
 	}
 }
 
@@ -920,7 +1155,6 @@ func TestScheduledTasks(t *testing.T) {
 		Type:        TypeCode,
 		Project:     "personal",
 		ScheduledAt: &LocalTime{Time: scheduledTime},
-		Recurrence:  RecurrenceDaily,
 	}
 	if err := db.CreateTask(task); err != nil {
 		t.Fatalf("failed to create task: %v", err)
@@ -934,11 +1168,8 @@ func TestScheduledTasks(t *testing.T) {
 	if !retrieved.IsScheduled() {
 		t.Error("expected task to be scheduled")
 	}
-	if !retrieved.IsRecurring() {
-		t.Error("expected task to be recurring")
-	}
-	if retrieved.Recurrence != RecurrenceDaily {
-		t.Errorf("expected recurrence %q, got %q", RecurrenceDaily, retrieved.Recurrence)
+	if retrieved.Recurrence != "" {
+		t.Errorf("expected recurrence to remain empty, got %q", retrieved.Recurrence)
 	}
 }
 
@@ -1007,6 +1238,91 @@ func TestGetDueScheduledTasks(t *testing.T) {
 	}
 }
 
+func TestGetDueScheduledTasks_IgnoresStatus(t *testing.T) {
+	// Due tasks should be picked up regardless of status (blocked/done/etc.)
+	// as long as they're not already queued or processing
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	db, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer db.Close()
+	defer os.Remove(dbPath)
+
+	now := time.Now()
+
+	// Create a scheduled task that's blocked and due
+	blockedTask := &Task{
+		Title:       "Blocked Scheduled Task",
+		Status:      StatusBlocked,
+		Type:        TypeCode,
+		Project:     "personal",
+		ScheduledAt: &LocalTime{Time: now.Add(-1 * time.Hour)},
+	}
+	if err := db.CreateTask(blockedTask); err != nil {
+		t.Fatalf("failed to create blocked task: %v", err)
+	}
+
+	// Create a scheduled task that's done and due
+	doneTask := &Task{
+		Title:       "Done Scheduled Task",
+		Status:      StatusDone,
+		Type:        TypeCode,
+		Project:     "personal",
+		ScheduledAt: &LocalTime{Time: now.Add(-30 * time.Minute)},
+	}
+	if err := db.CreateTask(doneTask); err != nil {
+		t.Fatalf("failed to create done task: %v", err)
+	}
+
+	// Create a scheduled task that's queued (should NOT be returned to avoid double-queue)
+	queuedTask := &Task{
+		Title:       "Queued Scheduled Task",
+		Status:      StatusQueued,
+		Type:        TypeCode,
+		Project:     "personal",
+		ScheduledAt: &LocalTime{Time: now.Add(-15 * time.Minute)},
+	}
+	if err := db.CreateTask(queuedTask); err != nil {
+		t.Fatalf("failed to create queued task: %v", err)
+	}
+
+	// Get due scheduled tasks
+	dueTasks, err := db.GetDueScheduledTasks()
+	if err != nil {
+		t.Fatalf("failed to get due scheduled tasks: %v", err)
+	}
+
+	// Should return blocked and done tasks, but not the queued one
+	if len(dueTasks) != 2 {
+		t.Fatalf("expected 2 due tasks, got %d", len(dueTasks))
+	}
+
+	// Verify the correct tasks were returned
+	foundBlocked := false
+	foundDone := false
+	for _, task := range dueTasks {
+		if task.ID == blockedTask.ID {
+			foundBlocked = true
+		}
+		if task.ID == doneTask.ID {
+			foundDone = true
+		}
+		if task.ID == queuedTask.ID {
+			t.Error("queued task should not be returned as due")
+		}
+	}
+
+	if !foundBlocked {
+		t.Error("blocked scheduled task should be returned when due")
+	}
+	if !foundDone {
+		t.Error("done scheduled task should be returned when due")
+	}
+}
+
 func TestQueueScheduledTask(t *testing.T) {
 	// Create temporary database
 	tmpDir := t.TempDir()
@@ -1028,7 +1344,6 @@ func TestQueueScheduledTask(t *testing.T) {
 		Type:        TypeCode,
 		Project:     "personal",
 		ScheduledAt: &LocalTime{Time: now},
-		Recurrence:  RecurrenceNone,
 	}
 	if err := db.CreateTask(oneTimeTask); err != nil {
 		t.Fatalf("failed to create one-time task: %v", err)
@@ -1053,79 +1368,39 @@ func TestQueueScheduledTask(t *testing.T) {
 	if retrieved.LastRunAt == nil {
 		t.Error("expected last_run_at to be set")
 	}
+	if retrieved.Recurrence != "" {
+		t.Errorf("expected recurrence to stay empty, got %q", retrieved.Recurrence)
+	}
 
-	// Test recurring scheduled task
-	recurringTask := &Task{
-		Title:       "Recurring Task",
+	// Legacy recurring tasks should be treated as one-time and cleared
+	legacyTask := &Task{
+		Title:       "Legacy Recurring Task",
 		Status:      StatusBacklog,
 		Type:        TypeCode,
 		Project:     "personal",
 		ScheduledAt: &LocalTime{Time: now},
-		Recurrence:  RecurrenceHourly,
+		Recurrence:  "daily",
 	}
-	if err := db.CreateTask(recurringTask); err != nil {
-		t.Fatalf("failed to create recurring task: %v", err)
-	}
-
-	// Queue the recurring task
-	if err := db.QueueScheduledTask(recurringTask.ID); err != nil {
-		t.Fatalf("failed to queue recurring task: %v", err)
+	if err := db.CreateTask(legacyTask); err != nil {
+		t.Fatalf("failed to create legacy recurring task: %v", err)
 	}
 
-	// Verify it was queued and next schedule set
-	retrieved, err = db.GetTask(recurringTask.ID)
+	if err := db.QueueScheduledTask(legacyTask.ID); err != nil {
+		t.Fatalf("failed to queue legacy task: %v", err)
+	}
+
+	retrieved, err = db.GetTask(legacyTask.ID)
 	if err != nil {
-		t.Fatalf("failed to get task: %v", err)
+		t.Fatalf("failed to get legacy task: %v", err)
 	}
-	if retrieved.Status != StatusQueued {
-		t.Errorf("expected status %q, got %q", StatusQueued, retrieved.Status)
+	if retrieved.ScheduledAt != nil {
+		t.Error("expected scheduled_at to be cleared for legacy recurring task")
 	}
-	if retrieved.ScheduledAt == nil {
-		t.Error("expected scheduled_at to be set for next run")
-	} else {
-		// Next run should be approximately 1 hour in the future
-		expectedNext := now.Add(1 * time.Hour)
-		diff := retrieved.ScheduledAt.Time.Sub(expectedNext)
-		if diff > 5*time.Second || diff < -5*time.Second {
-			t.Errorf("expected next schedule ~%v, got %v", expectedNext, retrieved.ScheduledAt.Time)
-		}
+	if retrieved.Recurrence != "" {
+		t.Errorf("expected recurrence to be cleared, got %q", retrieved.Recurrence)
 	}
 	if retrieved.LastRunAt == nil {
-		t.Error("expected last_run_at to be set")
-	}
-}
-
-func TestCalculateNextRunTime(t *testing.T) {
-	now := time.Date(2024, 6, 15, 10, 30, 0, 0, time.Local)
-
-	tests := []struct {
-		recurrence string
-		expected   time.Time
-		nilResult  bool
-	}{
-		{RecurrenceNone, time.Time{}, true},
-		{RecurrenceHourly, now.Add(1 * time.Hour), false},
-		{RecurrenceDaily, now.AddDate(0, 0, 1), false},
-		{RecurrenceWeekly, now.AddDate(0, 0, 7), false},
-		{RecurrenceMonthly, now.AddDate(0, 1, 0), false},
-		{"unknown", time.Time{}, true},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.recurrence, func(t *testing.T) {
-			result := CalculateNextRunTime(tc.recurrence, now)
-			if tc.nilResult {
-				if result != nil {
-					t.Errorf("expected nil, got %v", result)
-				}
-			} else {
-				if result == nil {
-					t.Error("expected non-nil result")
-				} else if !result.Time.Equal(tc.expected) {
-					t.Errorf("expected %v, got %v", tc.expected, result.Time)
-				}
-			}
-		})
+		t.Error("expected last_run_at to be set for legacy task")
 	}
 }
 
@@ -1829,5 +2104,213 @@ func TestCountMemoriesByProject(t *testing.T) {
 	}
 	if count != 0 {
 		t.Errorf("expected 0 memories for nonexistent project, got %d", count)
+	}
+}
+
+func TestGetMostRecentlyCreatedTask(t *testing.T) {
+	// Create temporary database
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	db, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer db.Close()
+	defer os.Remove(dbPath)
+
+	// Create test projects
+	if err := db.CreateProject(&Project{Name: "project1", Path: tmpDir}); err != nil {
+		t.Fatalf("failed to create project1: %v", err)
+	}
+	if err := db.CreateProject(&Project{Name: "project2", Path: tmpDir + "/sub"}); err != nil {
+		t.Fatalf("failed to create project2: %v", err)
+	}
+
+	// Test when no tasks exist
+	task, err := db.GetMostRecentlyCreatedTask()
+	if err != nil {
+		t.Fatalf("failed to get most recently created task: %v", err)
+	}
+	if task != nil {
+		t.Errorf("expected nil task when no tasks exist, got %v", task)
+	}
+
+	// Create first task
+	task1 := &Task{
+		Title:   "First Task",
+		Body:    "First task body",
+		Status:  StatusBacklog,
+		Type:    TypeCode,
+		Project: "project1",
+	}
+	if err := db.CreateTask(task1); err != nil {
+		t.Fatalf("failed to create first task: %v", err)
+	}
+
+	// Most recent should be task1
+	mostRecent, err := db.GetMostRecentlyCreatedTask()
+	if err != nil {
+		t.Fatalf("failed to get most recently created task: %v", err)
+	}
+	if mostRecent == nil {
+		t.Fatal("expected non-nil task")
+	}
+	if mostRecent.Title != "First Task" {
+		t.Errorf("expected 'First Task', got %q", mostRecent.Title)
+	}
+	if mostRecent.Project != "project1" {
+		t.Errorf("expected 'project1', got %q", mostRecent.Project)
+	}
+
+	// Wait a bit to ensure different timestamps
+	time.Sleep(10 * time.Millisecond)
+
+	// Create second task with different project
+	task2 := &Task{
+		Title:   "Second Task",
+		Body:    "Second task body",
+		Status:  StatusQueued,
+		Type:    TypeCode,
+		Project: "project2",
+	}
+	if err := db.CreateTask(task2); err != nil {
+		t.Fatalf("failed to create second task: %v", err)
+	}
+
+	// Most recent should now be task2
+	mostRecent, err = db.GetMostRecentlyCreatedTask()
+	if err != nil {
+		t.Fatalf("failed to get most recently created task: %v", err)
+	}
+	if mostRecent == nil {
+		t.Fatal("expected non-nil task")
+	}
+	if mostRecent.Title != "Second Task" {
+		t.Errorf("expected 'Second Task', got %q", mostRecent.Title)
+	}
+	if mostRecent.Project != "project2" {
+		t.Errorf("expected 'project2', got %q", mostRecent.Project)
+	}
+
+	// Mark second task as done - should still be most recently created
+	task2.Status = StatusDone
+	if err := db.UpdateTaskStatus(task2.ID, StatusDone); err != nil {
+		t.Fatalf("failed to update task status: %v", err)
+	}
+
+	mostRecent, err = db.GetMostRecentlyCreatedTask()
+	if err != nil {
+		t.Fatalf("failed to get most recently created task: %v", err)
+	}
+	if mostRecent.Title != "Second Task" {
+		t.Errorf("expected 'Second Task' (completed task should still be returned), got %q", mostRecent.Title)
+	}
+}
+
+func TestLastUsedProject(t *testing.T) {
+	// Create temporary database
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	db, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer db.Close()
+	defer os.Remove(dbPath)
+
+	// Get last used project before setting any - should return empty
+	lastProject, err := db.GetLastUsedProject()
+	if err != nil {
+		t.Fatalf("failed to get last used project: %v", err)
+	}
+	if lastProject != "" {
+		t.Errorf("expected empty string, got %q", lastProject)
+	}
+
+	// Set last used project
+	if err := db.SetLastUsedProject("personal"); err != nil {
+		t.Fatalf("failed to set last used project: %v", err)
+	}
+
+	// Get it back
+	lastProject, err = db.GetLastUsedProject()
+	if err != nil {
+		t.Fatalf("failed to get last used project: %v", err)
+	}
+	if lastProject != "personal" {
+		t.Errorf("expected 'personal', got %q", lastProject)
+	}
+
+	// Update to different project
+	if err := db.SetLastUsedProject("work"); err != nil {
+		t.Fatalf("failed to set last used project: %v", err)
+	}
+
+	lastProject, err = db.GetLastUsedProject()
+	if err != nil {
+		t.Fatalf("failed to get last used project: %v", err)
+	}
+	if lastProject != "work" {
+		t.Errorf("expected 'work' after update, got %q", lastProject)
+	}
+}
+
+func TestCreateTaskSavesLastProject(t *testing.T) {
+	// Create temporary database
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	db, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer db.Close()
+	defer os.Remove(dbPath)
+
+	// Create a second project for testing
+	if err := db.CreateProject(&Project{Name: "work", Path: tmpDir + "/work"}); err != nil {
+		t.Fatalf("failed to create work project: %v", err)
+	}
+
+	// Create a task with a project
+	task := &Task{
+		Title:   "Test Task",
+		Status:  StatusBacklog,
+		Type:    "code",
+		Project: "personal",
+	}
+	if err := db.CreateTask(task); err != nil {
+		t.Fatalf("failed to create task: %v", err)
+	}
+
+	// Verify last used project was saved
+	lastProject, err := db.GetLastUsedProject()
+	if err != nil {
+		t.Fatalf("failed to get last used project: %v", err)
+	}
+	if lastProject != "personal" {
+		t.Errorf("expected 'personal', got %q", lastProject)
+	}
+
+	// Create another task with a different project
+	task2 := &Task{
+		Title:   "Test Task 2",
+		Status:  StatusBacklog,
+		Type:    "writing",
+		Project: "work",
+	}
+	if err := db.CreateTask(task2); err != nil {
+		t.Fatalf("failed to create task: %v", err)
+	}
+
+	// Verify last used project was updated
+	lastProject, err = db.GetLastUsedProject()
+	if err != nil {
+		t.Fatalf("failed to get last used project: %v", err)
+	}
+	if lastProject != "work" {
+		t.Errorf("expected 'work', got %q", lastProject)
 	}
 }

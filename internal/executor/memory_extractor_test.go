@@ -33,7 +33,7 @@ func TestNormalizeCategory(t *testing.T) {
 	}
 }
 
-func TestTruncate(t *testing.T) {
+func TestTruncateSummary(t *testing.T) {
 	tests := []struct {
 		input    string
 		maxLen   int
@@ -48,47 +48,10 @@ func TestTruncate(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.input, func(t *testing.T) {
-			result := truncate(tt.input, tt.maxLen)
+			result := truncateSummary(tt.input, tt.maxLen)
 			if result != tt.expected {
-				t.Errorf("truncate(%q, %d) = %q, want %q", tt.input, tt.maxLen, result, tt.expected)
+				t.Errorf("truncateSummary(%q, %d) = %q, want %q", tt.input, tt.maxLen, result, tt.expected)
 			}
 		})
 	}
-}
-
-func TestBuildExtractionPrompt(t *testing.T) {
-	// Just verify it doesn't panic and includes key elements
-	task := &struct {
-		Title   string
-		Project string
-		Type    string
-		Body    string
-	}{
-		Title:   "Fix login bug",
-		Project: "myapp",
-		Type:    "code",
-		Body:    "Users can't log in",
-	}
-
-	// Create a mock task for testing
-	mockTask := struct {
-		Title   string
-		Project string
-		Type    string
-		Body    string
-	}{
-		Title:   task.Title,
-		Project: task.Project,
-		Type:    task.Type,
-		Body:    task.Body,
-	}
-
-	logContent := "Found the bug in auth.go\nFixed by checking nil pointer"
-	existingMemories := "- [pattern] Use early returns"
-
-	// We can't call buildExtractionPrompt directly since it takes *db.Task
-	// Just verify the helper functions work
-	_ = mockTask
-	_ = logContent
-	_ = existingMemories
 }

@@ -2,8 +2,6 @@ version: "2"
 
 linters:
   disable:
-    # Disable errcheck - this codebase intentionally ignores many error returns
-    # for logging, cleanup operations, and fire-and-forget calls
     - errcheck
 
   settings:
@@ -15,7 +13,26 @@ linters:
         - -QF1008  # Remove embedded field from selector - keep explicit for clarity
         - -S1017   # TrimPrefix suggestion - keep explicit for readability
 
+  exclusions:
+    generated: lax
+    presets:
+      - comments
+      - common-false-positives
+      - legacy
+      - std-error-handling
+    paths:
+      - third_party$
+      - builtin$
+      - examples$
+
 issues:
-  # Don't limit the number of issues per linter
   max-issues-per-linter: 0
   max-same-issues: 0
+
+formatters:
+  exclusions:
+    generated: lax
+    paths:
+      - third_party$
+      - builtin$
+      - examples$

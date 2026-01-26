@@ -17,22 +17,31 @@ type Task struct {
 	Status          string
 	Type            string
 	Project         string
+	Executor        string // Task executor: "claude" (default), "codex", "gemini"
 	WorktreePath    string
 	BranchName      string
 	Port            int    // Unique port for running the application in this task's worktree
 	ClaudeSessionID string // Claude session ID for resuming conversations
 	DaemonSession   string // tmux daemon session name (e.g., "task-daemon-12345")
+	TmuxWindowID    string // tmux window ID (e.g., "@1234") for unique window identification
+	ClaudePaneID    string // tmux pane ID (e.g., "%1234") for the Claude/executor pane
+	ShellPaneID     string // tmux pane ID (e.g., "%1235") for the shell pane
 	PRURL           string // Pull request URL (if associated with a PR)
 	PRNumber        int    // Pull request number (if associated with a PR)
 	DangerousMode   bool   // Whether task is running in dangerous mode (--dangerously-skip-permissions)
+	Pinned          bool   // Whether the task is pinned to the top of its column
+	Tags            string // Comma-separated tags for categorization (e.g., "customer-support,email,influence-kit")
+	Summary         string // Distilled summary of what was accomplished (for search and context)
 	CreatedAt       LocalTime
 	UpdatedAt       LocalTime
 	StartedAt       *LocalTime
 	CompletedAt     *LocalTime
-	// Schedule fields for recurring/scheduled tasks
+	// Schedule fields for tasks with delayed execution
 	ScheduledAt *LocalTime // When to next run (nil = not scheduled)
-	Recurrence  string     // Recurrence pattern: "", "hourly", "daily", "weekly", "monthly", or cron expression
-	LastRunAt   *LocalTime // When last executed (for recurring tasks)
+	Recurrence  string     // Deprecated: no longer used (kept for backward compatibility)
+	LastRunAt   *LocalTime // When last executed (for scheduled tasks)
+	// Distillation tracking
+	LastDistilledAt *LocalTime // When task was last distilled for learnings
 }
 
 // Task statuses
@@ -42,6 +51,7 @@ const (
 	StatusProcessing = "processing" // Currently being executed
 	StatusBlocked    = "blocked"    // Needs input/clarification
 	StatusDone       = "done"       // Completed
+	StatusArchived   = "archived"   // Archived (hidden from view)
 )
 
 // IsInProgress returns true if the task is actively being worked on.
@@ -56,23 +66,21 @@ const (
 	TypeThinking = "thinking"
 )
 
-// Recurrence patterns for scheduled tasks
+// Task executors
 const (
-	RecurrenceNone    = ""        // One-time scheduled task (or not scheduled)
-	RecurrenceHourly  = "hourly"  // Run every hour
-	RecurrenceDaily   = "daily"   // Run every day
-	RecurrenceWeekly  = "weekly"  // Run every week
-	RecurrenceMonthly = "monthly" // Run every month
+	ExecutorClaude = "claude" // Claude Code CLI (default)
+	ExecutorCodex  = "codex"  // OpenAI Codex CLI
+	ExecutorGemini = "gemini" // Google Gemini CLI
 )
+
+// DefaultExecutor returns the default executor if none is specified.
+func DefaultExecutor() string {
+	return ExecutorClaude
+}
 
 // IsScheduled returns true if the task has a scheduled time set.
 func (t *Task) IsScheduled() bool {
 	return t.ScheduledAt != nil && !t.ScheduledAt.Time.IsZero()
-}
-
-// IsRecurring returns true if the task has a recurrence pattern.
-func (t *Task) IsRecurring() bool {
-	return t.Recurrence != ""
 }
 
 // Port allocation constants
@@ -102,6 +110,11 @@ func (db *DB) CreateTask(t *Task) error {
 		t.Project = "personal"
 	}
 
+	// Default to 'claude' executor if not specified
+	if t.Executor == "" {
+		t.Executor = DefaultExecutor()
+	}
+
 	// Validate that the project exists
 	project, err := db.GetProjectByName(t.Project)
 	if err != nil {
@@ -112,9 +125,9 @@ func (db *DB) CreateTask(t *Task) error {
 	}
 
 	result, err := db.Exec(`
-		INSERT INTO tasks (title, body, status, type, project, scheduled_at, recurrence, last_run_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-	`, t.Title, t.Body, t.Status, t.Type, t.Project, t.ScheduledAt, t.Recurrence, t.LastRunAt)
+		INSERT INTO tasks (title, body, status, type, project, executor, scheduled_at, recurrence, last_run_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, t.Title, t.Body, t.Status, t.Type, t.Project, t.Executor, t.ScheduledAt, t.Recurrence, t.LastRunAt)
 	if err != nil {
 		return fmt.Errorf("insert task: %w", err)
 	}
@@ -130,6 +143,16 @@ func (db *DB) CreateTask(t *Task) error {
 		db.SetLastTaskTypeForProject(t.Project, t.Type)
 	}
 
+	// Save the last used executor for this project
+	if t.Executor != "" {
+		db.SetLastExecutorForProject(t.Project, t.Executor)
+	}
+
+	// Save the last used project
+	if t.Project != "" {
+		db.SetLastUsedProject(t.Project)
+	}
+
 	return nil
 }
 
@@ -137,20 +160,23 @@ func (db *DB) CreateTask(t *Task) error {
 func (db *DB) GetTask(id int64) (*Task, error) {
 	t := &Task{}
 	err := db.QueryRow(`
-		SELECT id, title, body, status, type, project,
+		SELECT id, title, body, status, type, project, COALESCE(executor, 'claude'),
 		       worktree_path, branch_name, port, claude_session_id,
-		       COALESCE(daemon_session, ''), COALESCE(pr_url, ''), COALESCE(pr_number, 0),
-		       COALESCE(dangerous_mode, 0),
+		       COALESCE(daemon_session, ''), COALESCE(tmux_window_id, ''),
+		       COALESCE(claude_pane_id, ''), COALESCE(shell_pane_id, ''),
+		       COALESCE(pr_url, ''), COALESCE(pr_number, 0),
+		       COALESCE(dangerous_mode, 0), COALESCE(pinned, 0), COALESCE(tags, ''), COALESCE(summary, ''),
 		       created_at, updated_at, started_at, completed_at,
-		       scheduled_at, recurrence, last_run_at
+		       scheduled_at, recurrence, last_run_at, last_distilled_at
 		FROM tasks WHERE id = ?
 	`, id).Scan(
-		&t.ID, &t.Title, &t.Body, &t.Status, &t.Type, &t.Project,
+		&t.ID, &t.Title, &t.Body, &t.Status, &t.Type, &t.Project, &t.Executor,
 		&t.WorktreePath, &t.BranchName, &t.Port, &t.ClaudeSessionID,
-		&t.DaemonSession, &t.PRURL, &t.PRNumber,
-		&t.DangerousMode,
+		&t.DaemonSession, &t.TmuxWindowID, &t.ClaudePaneID, &t.ShellPaneID,
+		&t.PRURL, &t.PRNumber,
+		&t.DangerousMode, &t.Pinned, &t.Tags, &t.Summary,
 		&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
-		&t.ScheduledAt, &t.Recurrence, &t.LastRunAt,
+		&t.ScheduledAt, &t.Recurrence, &t.LastRunAt, &t.LastDistilledAt,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -174,12 +200,14 @@ type ListTasksOptions struct {
 // ListTasks retrieves tasks with optional filters.
 func (db *DB) ListTasks(opts ListTasksOptions) ([]*Task, error) {
 	query := `
-		SELECT id, title, body, status, type, project,
+		SELECT id, title, body, status, type, project, COALESCE(executor, 'claude'),
 		       worktree_path, branch_name, port, claude_session_id,
-		       COALESCE(daemon_session, ''), COALESCE(pr_url, ''), COALESCE(pr_number, 0),
-		       COALESCE(dangerous_mode, 0),
+		       COALESCE(daemon_session, ''), COALESCE(tmux_window_id, ''),
+		       COALESCE(claude_pane_id, ''), COALESCE(shell_pane_id, ''),
+		       COALESCE(pr_url, ''), COALESCE(pr_number, 0),
+		       COALESCE(dangerous_mode, 0), COALESCE(pinned, 0), COALESCE(tags, ''), COALESCE(summary, ''),
 		       created_at, updated_at, started_at, completed_at,
-		       scheduled_at, recurrence, last_run_at
+		       scheduled_at, recurrence, last_run_at, last_distilled_at
 		FROM tasks WHERE 1=1
 	`
 	args := []interface{}{}
@@ -197,15 +225,14 @@ func (db *DB) ListTasks(opts ListTasksOptions) ([]*Task, error) {
 		args = append(args, opts.Project)
 	}
 
-	// Exclude done by default unless specifically querying for them or includeClosed is set
+	// Exclude done and archived by default unless specifically querying for them or includeClosed is set
 	if opts.Status == "" && !opts.IncludeClosed {
-		query += " AND status != 'done'"
+		query += " AND status NOT IN ('done', 'archived')"
 	}
 
-	// Sort done/blocked tasks by completed_at (most recently closed first),
-	// other tasks by created_at (newest first).
-	// Use id DESC as secondary sort for consistent ordering when timestamps are equal.
-	query += " ORDER BY CASE WHEN status IN ('done', 'blocked') THEN completed_at ELSE created_at END DESC, id DESC"
+	// Pinning takes precedence, then sort done/blocked tasks by completed_at (most recently closed first)
+	// and other tasks by created_at (newest first). Use id DESC as secondary sort for consistency.
+	query += " ORDER BY pinned DESC, CASE WHEN status IN ('done', 'blocked') THEN completed_at ELSE created_at END DESC, id DESC"
 
 	if opts.Limit > 0 {
 		query += fmt.Sprintf(" LIMIT %d", opts.Limit)
@@ -226,12 +253,13 @@ func (db *DB) ListTasks(opts ListTasksOptions) ([]*Task, error) {
 	for rows.Next() {
 		t := &Task{}
 		err := rows.Scan(
-			&t.ID, &t.Title, &t.Body, &t.Status, &t.Type, &t.Project,
+			&t.ID, &t.Title, &t.Body, &t.Status, &t.Type, &t.Project, &t.Executor,
 			&t.WorktreePath, &t.BranchName, &t.Port, &t.ClaudeSessionID,
-			&t.DaemonSession, &t.PRURL, &t.PRNumber,
-			&t.DangerousMode,
+			&t.DaemonSession, &t.TmuxWindowID, &t.ClaudePaneID, &t.ShellPaneID,
+			&t.PRURL, &t.PRNumber,
+			&t.DangerousMode, &t.Pinned, &t.Tags, &t.Summary,
 			&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
-			&t.ScheduledAt, &t.Recurrence, &t.LastRunAt,
+			&t.ScheduledAt, &t.Recurrence, &t.LastRunAt, &t.LastDistilledAt,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("scan task: %w", err)
@@ -240,6 +268,107 @@ func (db *DB) ListTasks(opts ListTasksOptions) ([]*Task, error) {
 	}
 
 	return tasks, nil
+}
+
+// GetMostRecentlyCreatedTask returns the task with the most recent created_at timestamp.
+// This is used to get the last task's project for defaulting in new task forms.
+func (db *DB) GetMostRecentlyCreatedTask() (*Task, error) {
+	t := &Task{}
+	err := db.QueryRow(`
+		SELECT id, title, body, status, type, project, COALESCE(executor, 'claude'),
+		       worktree_path, branch_name, port, claude_session_id,
+		       COALESCE(daemon_session, ''), COALESCE(tmux_window_id, ''),
+		       COALESCE(claude_pane_id, ''), COALESCE(shell_pane_id, ''),
+		       COALESCE(pr_url, ''), COALESCE(pr_number, 0),
+		       COALESCE(dangerous_mode, 0), COALESCE(pinned, 0), COALESCE(tags, ''), COALESCE(summary, ''),
+		       created_at, updated_at, started_at, completed_at,
+		       scheduled_at, recurrence, last_run_at, last_distilled_at
+		FROM tasks
+		ORDER BY created_at DESC, id DESC
+		LIMIT 1
+	`).Scan(
+		&t.ID, &t.Title, &t.Body, &t.Status, &t.Type, &t.Project, &t.Executor,
+		&t.WorktreePath, &t.BranchName, &t.Port, &t.ClaudeSessionID,
+		&t.DaemonSession, &t.TmuxWindowID, &t.ClaudePaneID, &t.ShellPaneID,
+		&t.PRURL, &t.PRNumber,
+		&t.DangerousMode, &t.Pinned, &t.Tags, &t.Summary,
+		&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
+		&t.ScheduledAt, &t.Recurrence, &t.LastRunAt, &t.LastDistilledAt,
+	)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("query most recently created task: %w", err)
+	}
+	return t, nil
+}
+
+// SearchTasks searches for tasks by query string across title, project, ID, and PR number.
+// This is used by the command palette to search all tasks, not just the preloaded ones.
+func (db *DB) SearchTasks(query string, limit int) ([]*Task, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+
+	// Build search query with LIKE clauses
+	sqlQuery := `
+		SELECT id, title, body, status, type, project, COALESCE(executor, 'claude'),
+		       worktree_path, branch_name, port, claude_session_id,
+		       COALESCE(daemon_session, ''), COALESCE(tmux_window_id, ''),
+		       COALESCE(claude_pane_id, ''), COALESCE(shell_pane_id, ''),
+		       COALESCE(pr_url, ''), COALESCE(pr_number, 0),
+		       COALESCE(dangerous_mode, 0), COALESCE(pinned, 0), COALESCE(tags, ''), COALESCE(summary, ''),
+		       created_at, updated_at, started_at, completed_at,
+		       scheduled_at, recurrence, last_run_at, last_distilled_at
+		FROM tasks
+		WHERE (
+			title LIKE ? COLLATE NOCASE
+			OR project LIKE ? COLLATE NOCASE
+			OR CAST(id AS TEXT) LIKE ?
+			OR CAST(pr_number AS TEXT) LIKE ?
+			OR pr_url LIKE ? COLLATE NOCASE
+		)
+		ORDER BY pinned DESC, CASE WHEN status IN ('done', 'blocked') THEN completed_at ELSE created_at END DESC, id DESC
+		LIMIT ?
+	`
+
+	searchPattern := "%" + query + "%"
+	rows, err := db.Query(sqlQuery, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, limit)
+	if err != nil {
+		return nil, fmt.Errorf("search tasks: %w", err)
+	}
+	defer rows.Close()
+
+	var tasks []*Task
+	for rows.Next() {
+		t := &Task{}
+		err := rows.Scan(
+			&t.ID, &t.Title, &t.Body, &t.Status, &t.Type, &t.Project, &t.Executor,
+			&t.WorktreePath, &t.BranchName, &t.Port, &t.ClaudeSessionID,
+			&t.DaemonSession, &t.TmuxWindowID, &t.ClaudePaneID, &t.ShellPaneID,
+			&t.PRURL, &t.PRNumber,
+			&t.DangerousMode, &t.Pinned, &t.Tags, &t.Summary,
+			&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
+			&t.ScheduledAt, &t.Recurrence, &t.LastRunAt, &t.LastDistilledAt,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("scan task: %w", err)
+		}
+		tasks = append(tasks, t)
+	}
+
+	return tasks, nil
+}
+
+// CountTasksByStatus returns the count of tasks with a given status.
+func (db *DB) CountTasksByStatus(status string) (int, error) {
+	var count int
+	err := db.QueryRow("SELECT COUNT(*) FROM tasks WHERE status = ?", status).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("count tasks: %w", err)
+	}
+	return count, nil
 }
 
 // MarkTaskStarted sets the started_at timestamp if not already set.
@@ -259,7 +388,7 @@ func (db *DB) UpdateTaskStatus(id int64, status string) error {
 	switch status {
 	case StatusProcessing:
 		query += ", started_at = CURRENT_TIMESTAMP"
-	case StatusDone, StatusBlocked:
+	case StatusDone, StatusBlocked, StatusArchived:
 		query += ", completed_at = CURRENT_TIMESTAMP"
 	}
 
@@ -277,16 +406,16 @@ func (db *DB) UpdateTaskStatus(id int64, status string) error {
 func (db *DB) UpdateTask(t *Task) error {
 	_, err := db.Exec(`
 		UPDATE tasks SET
-			title = ?, body = ?, status = ?, type = ?, project = ?,
+			title = ?, body = ?, status = ?, type = ?, project = ?, executor = ?,
 			worktree_path = ?, branch_name = ?, port = ?, claude_session_id = ?,
 			daemon_session = ?, pr_url = ?, pr_number = ?, dangerous_mode = ?,
-			scheduled_at = ?, recurrence = ?, last_run_at = ?,
+			pinned = ?, tags = ?, scheduled_at = ?, recurrence = ?, last_run_at = ?,
 			updated_at = CURRENT_TIMESTAMP
 		WHERE id = ?
-	`, t.Title, t.Body, t.Status, t.Type, t.Project,
+	`, t.Title, t.Body, t.Status, t.Type, t.Project, t.Executor,
 		t.WorktreePath, t.BranchName, t.Port, t.ClaudeSessionID,
 		t.DaemonSession, t.PRURL, t.PRNumber, t.DangerousMode,
-		t.ScheduledAt, t.Recurrence, t.LastRunAt, t.ID)
+		t.Pinned, t.Tags, t.ScheduledAt, t.Recurrence, t.LastRunAt, t.ID)
 	if err != nil {
 		return fmt.Errorf("update task: %w", err)
 	}
@@ -317,6 +446,31 @@ func (db *DB) UpdateTaskDangerousMode(taskID int64, dangerousMode bool) error {
 	return nil
 }
 
+// SaveTaskSummary updates the distilled summary for a task.
+// This is called after task completion to store a concise summary for search and context.
+func (db *DB) SaveTaskSummary(taskID int64, summary string) error {
+	_, err := db.Exec(`
+		UPDATE tasks SET summary = ?, updated_at = CURRENT_TIMESTAMP
+		WHERE id = ?
+	`, summary, taskID)
+	if err != nil {
+		return fmt.Errorf("save task summary: %w", err)
+	}
+	return nil
+}
+
+// UpdateTaskPinned updates only the pinned flag for a task.
+func (db *DB) UpdateTaskPinned(taskID int64, pinned bool) error {
+	_, err := db.Exec(`
+		UPDATE tasks SET pinned = ?, updated_at = CURRENT_TIMESTAMP
+		WHERE id = ?
+	`, pinned, taskID)
+	if err != nil {
+		return fmt.Errorf("update task pinned: %w", err)
+	}
+	return nil
+}
+
 // UpdateTaskDaemonSession updates the tmux daemon session name for a task.
 // This is used to track which daemon session owns the task's tmux window,
 // so we can properly kill the Claude process when the task completes.
@@ -331,6 +485,45 @@ func (db *DB) UpdateTaskDaemonSession(taskID int64, daemonSession string) error 
 	return nil
 }
 
+// UpdateTaskWindowID updates the tmux window ID for a task.
+// This is used to track the unique window ID (e.g., "@1234") for reliable window targeting.
+func (db *DB) UpdateTaskWindowID(taskID int64, windowID string) error {
+	_, err := db.Exec(`
+		UPDATE tasks SET tmux_window_id = ?, updated_at = CURRENT_TIMESTAMP
+		WHERE id = ?
+	`, windowID, taskID)
+	if err != nil {
+		return fmt.Errorf("update task window id: %w", err)
+	}
+	return nil
+}
+
+// UpdateTaskPaneIDs updates the tmux pane IDs for a task.
+// This is used to track the unique pane IDs (e.g., "%1234") for reliable pane identification
+// when joining/breaking panes between the daemon and the TUI.
+func (db *DB) UpdateTaskPaneIDs(taskID int64, claudePaneID, shellPaneID string) error {
+	_, err := db.Exec(`
+		UPDATE tasks SET claude_pane_id = ?, shell_pane_id = ?, updated_at = CURRENT_TIMESTAMP
+		WHERE id = ?
+	`, claudePaneID, shellPaneID, taskID)
+	if err != nil {
+		return fmt.Errorf("update task pane ids: %w", err)
+	}
+	return nil
+}
+
+// UpdateTaskSchedule updates the scheduled_at, recurrence, and last_run_at for a task.
+func (db *DB) UpdateTaskSchedule(taskID int64, scheduledAt *LocalTime, recurrence string, lastRunAt *LocalTime) error {
+	_, err := db.Exec(`
+		UPDATE tasks SET scheduled_at = ?, recurrence = ?, last_run_at = ?, updated_at = CURRENT_TIMESTAMP
+		WHERE id = ?
+	`, scheduledAt, recurrence, lastRunAt, taskID)
+	if err != nil {
+		return fmt.Errorf("update task schedule: %w", err)
+	}
+	return nil
+}
+
 // DeleteTask deletes a task.
 func (db *DB) DeleteTask(id int64) error {
 	_, err := db.Exec("DELETE FROM tasks WHERE id = ?", id)
@@ -340,12 +533,12 @@ func (db *DB) DeleteTask(id int64) error {
 	return nil
 }
 
-// GetActiveTaskPorts returns all ports currently in use by active (non-done) tasks.
+// GetActiveTaskPorts returns all ports currently in use by active (non-done, non-archived) tasks.
 func (db *DB) GetActiveTaskPorts() (map[int]bool, error) {
 	rows, err := db.Query(`
 		SELECT port FROM tasks
-		WHERE port > 0 AND status != ?
-	`, StatusDone)
+		WHERE port > 0 AND status NOT IN (?, ?)
+	`, StatusDone, StatusArchived)
 	if err != nil {
 		return nil, fmt.Errorf("query active ports: %w", err)
 	}
@@ -404,23 +597,26 @@ func (db *DB) RetryTask(id int64, feedback string) error {
 func (db *DB) GetNextQueuedTask() (*Task, error) {
 	t := &Task{}
 	err := db.QueryRow(`
-		SELECT id, title, body, status, type, project,
+		SELECT id, title, body, status, type, project, COALESCE(executor, 'claude'),
 		       worktree_path, branch_name, port, claude_session_id,
-		       COALESCE(daemon_session, ''), COALESCE(pr_url, ''), COALESCE(pr_number, 0),
-		       COALESCE(dangerous_mode, 0),
+		       COALESCE(daemon_session, ''), COALESCE(tmux_window_id, ''),
+		       COALESCE(claude_pane_id, ''), COALESCE(shell_pane_id, ''),
+		       COALESCE(pr_url, ''), COALESCE(pr_number, 0),
+		       COALESCE(dangerous_mode, 0), COALESCE(pinned, 0), COALESCE(tags, ''), COALESCE(summary, ''),
 		       created_at, updated_at, started_at, completed_at,
-		       scheduled_at, recurrence, last_run_at
+		       scheduled_at, recurrence, last_run_at, last_distilled_at
 		FROM tasks
 		WHERE status = ?
 		ORDER BY created_at ASC
 		LIMIT 1
 	`, StatusQueued).Scan(
-		&t.ID, &t.Title, &t.Body, &t.Status, &t.Type, &t.Project,
+		&t.ID, &t.Title, &t.Body, &t.Status, &t.Type, &t.Project, &t.Executor,
 		&t.WorktreePath, &t.BranchName, &t.Port, &t.ClaudeSessionID,
-		&t.DaemonSession, &t.PRURL, &t.PRNumber,
-		&t.DangerousMode,
+		&t.DaemonSession, &t.TmuxWindowID, &t.ClaudePaneID, &t.ShellPaneID,
+		&t.PRURL, &t.PRNumber,
+		&t.DangerousMode, &t.Pinned, &t.Tags, &t.Summary,
 		&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
-		&t.ScheduledAt, &t.Recurrence, &t.LastRunAt,
+		&t.ScheduledAt, &t.Recurrence, &t.LastRunAt, &t.LastDistilledAt,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -434,12 +630,14 @@ func (db *DB) GetNextQueuedTask() (*Task, error) {
 // GetQueuedTasks returns all queued tasks (waiting to be processed).
 func (db *DB) GetQueuedTasks() ([]*Task, error) {
 	rows, err := db.Query(`
-		SELECT id, title, body, status, type, project,
+		SELECT id, title, body, status, type, project, COALESCE(executor, 'claude'),
 		       worktree_path, branch_name, port, claude_session_id,
-		       COALESCE(daemon_session, ''), COALESCE(pr_url, ''), COALESCE(pr_number, 0),
-		       COALESCE(dangerous_mode, 0),
+		       COALESCE(daemon_session, ''), COALESCE(tmux_window_id, ''),
+		       COALESCE(claude_pane_id, ''), COALESCE(shell_pane_id, ''),
+		       COALESCE(pr_url, ''), COALESCE(pr_number, 0),
+		       COALESCE(dangerous_mode, 0), COALESCE(pinned, 0), COALESCE(tags, ''), COALESCE(summary, ''),
 		       created_at, updated_at, started_at, completed_at,
-		       scheduled_at, recurrence, last_run_at
+		       scheduled_at, recurrence, last_run_at, last_distilled_at
 		FROM tasks
 		WHERE status = ?
 		ORDER BY created_at ASC
@@ -453,12 +651,13 @@ func (db *DB) GetQueuedTasks() ([]*Task, error) {
 	for rows.Next() {
 		t := &Task{}
 		if err := rows.Scan(
-			&t.ID, &t.Title, &t.Body, &t.Status, &t.Type, &t.Project,
+			&t.ID, &t.Title, &t.Body, &t.Status, &t.Type, &t.Project, &t.Executor,
 			&t.WorktreePath, &t.BranchName, &t.Port, &t.ClaudeSessionID,
-			&t.DaemonSession, &t.PRURL, &t.PRNumber,
-			&t.DangerousMode,
+			&t.DaemonSession, &t.TmuxWindowID, &t.ClaudePaneID, &t.ShellPaneID,
+			&t.PRURL, &t.PRNumber,
+			&t.DangerousMode, &t.Pinned, &t.Tags, &t.Summary,
 			&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
-			&t.ScheduledAt, &t.Recurrence, &t.LastRunAt,
+			&t.ScheduledAt, &t.Recurrence, &t.LastRunAt, &t.LastDistilledAt,
 		); err != nil {
 			return nil, fmt.Errorf("scan task: %w", err)
 		}
@@ -467,20 +666,22 @@ func (db *DB) GetQueuedTasks() ([]*Task, error) {
 	return tasks, nil
 }
 
-// GetTasksWithBranches returns tasks that have a branch name and aren't done.
+// GetTasksWithBranches returns tasks that have a branch name and aren't done or archived.
 // These are candidates for automatic closure when their PR is merged.
 func (db *DB) GetTasksWithBranches() ([]*Task, error) {
 	rows, err := db.Query(`
-		SELECT id, title, body, status, type, project,
+		SELECT id, title, body, status, type, project, COALESCE(executor, 'claude'),
 		       worktree_path, branch_name, port, claude_session_id,
-		       COALESCE(daemon_session, ''), COALESCE(pr_url, ''), COALESCE(pr_number, 0),
-		       COALESCE(dangerous_mode, 0),
+		       COALESCE(daemon_session, ''), COALESCE(tmux_window_id, ''),
+		       COALESCE(claude_pane_id, ''), COALESCE(shell_pane_id, ''),
+		       COALESCE(pr_url, ''), COALESCE(pr_number, 0),
+		       COALESCE(dangerous_mode, 0), COALESCE(pinned, 0), COALESCE(tags, ''), COALESCE(summary, ''),
 		       created_at, updated_at, started_at, completed_at,
-		       scheduled_at, recurrence, last_run_at
+		       scheduled_at, recurrence, last_run_at, last_distilled_at
 		FROM tasks
-		WHERE branch_name != '' AND status != ?
+		WHERE branch_name != '' AND status NOT IN (?, ?)
 		ORDER BY created_at DESC
-	`, StatusDone)
+	`, StatusDone, StatusArchived)
 	if err != nil {
 		return nil, fmt.Errorf("query tasks with branches: %w", err)
 	}
@@ -490,12 +691,13 @@ func (db *DB) GetTasksWithBranches() ([]*Task, error) {
 	for rows.Next() {
 		t := &Task{}
 		if err := rows.Scan(
-			&t.ID, &t.Title, &t.Body, &t.Status, &t.Type, &t.Project,
+			&t.ID, &t.Title, &t.Body, &t.Status, &t.Type, &t.Project, &t.Executor,
 			&t.WorktreePath, &t.BranchName, &t.Port, &t.ClaudeSessionID,
-			&t.DaemonSession, &t.PRURL, &t.PRNumber,
-			&t.DangerousMode,
+			&t.DaemonSession, &t.TmuxWindowID, &t.ClaudePaneID, &t.ShellPaneID,
+			&t.PRURL, &t.PRNumber,
+			&t.DangerousMode, &t.Pinned, &t.Tags, &t.Summary,
 			&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
-			&t.ScheduledAt, &t.Recurrence, &t.LastRunAt,
+			&t.ScheduledAt, &t.Recurrence, &t.LastRunAt, &t.LastDistilledAt,
 		); err != nil {
 			return nil, fmt.Errorf("scan task: %w", err)
 		}
@@ -507,22 +709,23 @@ func (db *DB) GetTasksWithBranches() ([]*Task, error) {
 // GetDueScheduledTasks returns all scheduled tasks that are due to run.
 // A task is due if:
 // - It has a scheduled_at time that is <= now
-// - It is in 'backlog' status (ready to be queued)
-// - It is not currently processing
+// - It is not currently queued or processing (to avoid double-queueing)
 func (db *DB) GetDueScheduledTasks() ([]*Task, error) {
 	rows, err := db.Query(`
-		SELECT id, title, body, status, type, project,
+		SELECT id, title, body, status, type, project, COALESCE(executor, 'claude'),
 		       worktree_path, branch_name, port, claude_session_id,
-		       COALESCE(daemon_session, ''), COALESCE(pr_url, ''), COALESCE(pr_number, 0),
-		       COALESCE(dangerous_mode, 0),
+		       COALESCE(daemon_session, ''), COALESCE(tmux_window_id, ''),
+		       COALESCE(claude_pane_id, ''), COALESCE(shell_pane_id, ''),
+		       COALESCE(pr_url, ''), COALESCE(pr_number, 0),
+		       COALESCE(dangerous_mode, 0), COALESCE(pinned, 0), COALESCE(tags, ''), COALESCE(summary, ''),
 		       created_at, updated_at, started_at, completed_at,
-		       scheduled_at, recurrence, last_run_at
+		       scheduled_at, recurrence, last_run_at, last_distilled_at
 		FROM tasks
 		WHERE scheduled_at IS NOT NULL
 		  AND scheduled_at <= CURRENT_TIMESTAMP
-		  AND status = ?
+		  AND status NOT IN (?, ?)
 		ORDER BY scheduled_at ASC
-	`, StatusBacklog)
+	`, StatusQueued, StatusProcessing)
 	if err != nil {
 		return nil, fmt.Errorf("query due scheduled tasks: %w", err)
 	}
@@ -532,12 +735,13 @@ func (db *DB) GetDueScheduledTasks() ([]*Task, error) {
 	for rows.Next() {
 		t := &Task{}
 		if err := rows.Scan(
-			&t.ID, &t.Title, &t.Body, &t.Status, &t.Type, &t.Project,
+			&t.ID, &t.Title, &t.Body, &t.Status, &t.Type, &t.Project, &t.Executor,
 			&t.WorktreePath, &t.BranchName, &t.Port, &t.ClaudeSessionID,
-			&t.DaemonSession, &t.PRURL, &t.PRNumber,
-			&t.DangerousMode,
+			&t.DaemonSession, &t.TmuxWindowID, &t.ClaudePaneID, &t.ShellPaneID,
+			&t.PRURL, &t.PRNumber,
+			&t.DangerousMode, &t.Pinned, &t.Tags, &t.Summary,
 			&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
-			&t.ScheduledAt, &t.Recurrence, &t.LastRunAt,
+			&t.ScheduledAt, &t.Recurrence, &t.LastRunAt, &t.LastDistilledAt,
 		); err != nil {
 			return nil, fmt.Errorf("scan task: %w", err)
 		}
@@ -549,12 +753,14 @@ func (db *DB) GetDueScheduledTasks() ([]*Task, error) {
 // GetScheduledTasks returns all tasks that have a scheduled time set (regardless of status).
 func (db *DB) GetScheduledTasks() ([]*Task, error) {
 	rows, err := db.Query(`
-		SELECT id, title, body, status, type, project,
+		SELECT id, title, body, status, type, project, COALESCE(executor, 'claude'),
 		       worktree_path, branch_name, port, claude_session_id,
-		       COALESCE(daemon_session, ''), COALESCE(pr_url, ''), COALESCE(pr_number, 0),
-		       COALESCE(dangerous_mode, 0),
+		       COALESCE(daemon_session, ''), COALESCE(tmux_window_id, ''),
+		       COALESCE(claude_pane_id, ''), COALESCE(shell_pane_id, ''),
+		       COALESCE(pr_url, ''), COALESCE(pr_number, 0),
+		       COALESCE(dangerous_mode, 0), COALESCE(pinned, 0), COALESCE(tags, ''), COALESCE(summary, ''),
 		       created_at, updated_at, started_at, completed_at,
-		       scheduled_at, recurrence, last_run_at
+		       scheduled_at, recurrence, last_run_at, last_distilled_at
 		FROM tasks
 		WHERE scheduled_at IS NOT NULL
 		ORDER BY scheduled_at ASC
@@ -568,12 +774,13 @@ func (db *DB) GetScheduledTasks() ([]*Task, error) {
 	for rows.Next() {
 		t := &Task{}
 		if err := rows.Scan(
-			&t.ID, &t.Title, &t.Body, &t.Status, &t.Type, &t.Project,
+			&t.ID, &t.Title, &t.Body, &t.Status, &t.Type, &t.Project, &t.Executor,
 			&t.WorktreePath, &t.BranchName, &t.Port, &t.ClaudeSessionID,
-			&t.DaemonSession, &t.PRURL, &t.PRNumber,
-			&t.DangerousMode,
+			&t.DaemonSession, &t.TmuxWindowID, &t.ClaudePaneID, &t.ShellPaneID,
+			&t.PRURL, &t.PRNumber,
+			&t.DangerousMode, &t.Pinned, &t.Tags, &t.Summary,
 			&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
-			&t.ScheduledAt, &t.Recurrence, &t.LastRunAt,
+			&t.ScheduledAt, &t.Recurrence, &t.LastRunAt, &t.LastDistilledAt,
 		); err != nil {
 			return nil, fmt.Errorf("scan task: %w", err)
 		}
@@ -582,49 +789,8 @@ func (db *DB) GetScheduledTasks() ([]*Task, error) {
 	return tasks, nil
 }
 
-// CalculateNextRunTime calculates the next scheduled time based on recurrence pattern.
-// Returns nil if recurrence is empty (one-time task).
-func CalculateNextRunTime(recurrence string, fromTime time.Time) *LocalTime {
-	if recurrence == "" {
-		return nil
-	}
-
-	var nextTime time.Time
-	switch recurrence {
-	case RecurrenceHourly:
-		nextTime = fromTime.Add(1 * time.Hour)
-	case RecurrenceDaily:
-		nextTime = fromTime.AddDate(0, 0, 1)
-	case RecurrenceWeekly:
-		nextTime = fromTime.AddDate(0, 0, 7)
-	case RecurrenceMonthly:
-		nextTime = fromTime.AddDate(0, 1, 0)
-	default:
-		// Unknown recurrence pattern
-		return nil
-	}
-
-	return &LocalTime{Time: nextTime}
-}
-
-// UpdateTaskSchedule updates only the schedule-related fields of a task.
-func (db *DB) UpdateTaskSchedule(taskID int64, scheduledAt *LocalTime, recurrence string, lastRunAt *LocalTime) error {
-	_, err := db.Exec(`
-		UPDATE tasks SET
-			scheduled_at = ?,
-			recurrence = ?,
-			last_run_at = ?,
-			updated_at = CURRENT_TIMESTAMP
-		WHERE id = ?
-	`, scheduledAt, recurrence, lastRunAt, taskID)
-	if err != nil {
-		return fmt.Errorf("update task schedule: %w", err)
-	}
-	return nil
-}
-
-// QueueScheduledTask queues a scheduled task and updates its schedule for recurring tasks.
-// For recurring tasks, it sets the next scheduled_at time; for one-time tasks, it clears scheduled_at.
+// QueueScheduledTask queues a scheduled task.
+// The scheduled time is always cleared so the run happens once.
 func (db *DB) QueueScheduledTask(taskID int64) error {
 	// Get the task first
 	task, err := db.GetTask(taskID)
@@ -637,15 +803,12 @@ func (db *DB) QueueScheduledTask(taskID int64) error {
 
 	now := time.Now()
 
-	// Calculate next run time for recurring tasks
-	if task.IsRecurring() {
-		nextRun := CalculateNextRunTime(task.Recurrence, now)
-		task.ScheduledAt = nextRun
-		task.LastRunAt = &LocalTime{Time: now}
-	} else {
-		// One-time task - clear the schedule after queuing
-		task.ScheduledAt = nil
-		task.LastRunAt = &LocalTime{Time: now}
+	// Recurring tasks are no longer supported; treat everything as one-time
+	task.ScheduledAt = nil
+	task.LastRunAt = &LocalTime{Time: now}
+	if task.Recurrence != "" {
+		// Clear any legacy recurrence data so the UI no longer highlights it
+		task.Recurrence = ""
 	}
 
 	// Update status to queued
@@ -705,6 +868,17 @@ func (db *DB) GetTaskLogs(taskID int64, limit int) ([]*TaskLog, error) {
 	}
 
 	return logs, nil
+}
+
+// GetTaskLogCount returns the number of logs for a task.
+// This is a fast operation useful for checking if logs have changed.
+func (db *DB) GetTaskLogCount(taskID int64) (int, error) {
+	var count int
+	err := db.QueryRow("SELECT COUNT(*) FROM task_logs WHERE task_id = ?", taskID).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("count task logs: %w", err)
+	}
+	return count, nil
 }
 
 // GetTaskLogsSince retrieves logs after a given ID.
@@ -807,14 +981,15 @@ type ProjectAction struct {
 
 // Project represents a configured project.
 type Project struct {
-	ID           int64
-	Name         string
-	Path         string
-	Aliases      string          // comma-separated
-	Instructions string          // project-specific instructions for AI
-	Actions      []ProjectAction // actions triggered on task events (stored as JSON)
-	Color        string          // hex color for display (e.g., "#61AFEF")
-	CreatedAt    LocalTime
+	ID              int64
+	Name            string
+	Path            string
+	Aliases         string          // comma-separated
+	Instructions    string          // project-specific instructions for AI
+	Actions         []ProjectAction // actions triggered on task events (stored as JSON)
+	Color           string          // hex color for display (e.g., "#61AFEF")
+	ClaudeConfigDir string          // override CLAUDE_CONFIG_DIR for this project
+	CreatedAt       LocalTime
 }
 
 // GetAction returns the action for a given trigger, or nil if not found.
@@ -831,9 +1006,9 @@ func (p *Project) GetAction(trigger string) *ProjectAction {
 func (db *DB) CreateProject(p *Project) error {
 	actionsJSON, _ := json.Marshal(p.Actions)
 	result, err := db.Exec(`
-		INSERT INTO projects (name, path, aliases, instructions, actions, color)
-		VALUES (?, ?, ?, ?, ?, ?)
-	`, p.Name, p.Path, p.Aliases, p.Instructions, string(actionsJSON), p.Color)
+		INSERT INTO projects (name, path, aliases, instructions, actions, color, claude_config_dir)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
+	`, p.Name, p.Path, p.Aliases, p.Instructions, string(actionsJSON), p.Color, p.ClaudeConfigDir)
 	if err != nil {
 		return fmt.Errorf("insert project: %w", err)
 	}
@@ -846,9 +1021,9 @@ func (db *DB) CreateProject(p *Project) error {
 func (db *DB) UpdateProject(p *Project) error {
 	actionsJSON, _ := json.Marshal(p.Actions)
 	_, err := db.Exec(`
-		UPDATE projects SET name = ?, path = ?, aliases = ?, instructions = ?, actions = ?, color = ?
+		UPDATE projects SET name = ?, path = ?, aliases = ?, instructions = ?, actions = ?, color = ?, claude_config_dir = ?
 		WHERE id = ?
-	`, p.Name, p.Path, p.Aliases, p.Instructions, string(actionsJSON), p.Color, p.ID)
+	`, p.Name, p.Path, p.Aliases, p.Instructions, string(actionsJSON), p.Color, p.ClaudeConfigDir, p.ID)
 	if err != nil {
 		return fmt.Errorf("update project: %w", err)
 	}
@@ -899,7 +1074,7 @@ func (db *DB) CountMemoriesByProject(projectName string) (int, error) {
 // ListProjects returns all projects, with "personal" always first.
 func (db *DB) ListProjects() ([]*Project, error) {
 	rows, err := db.Query(`
-		SELECT id, name, path, aliases, instructions, COALESCE(actions, '[]'), COALESCE(color, ''), created_at
+		SELECT id, name, path, aliases, instructions, COALESCE(actions, '[]'), COALESCE(color, ''), COALESCE(claude_config_dir, ''), created_at
 		FROM projects ORDER BY CASE WHEN name = 'personal' THEN 0 ELSE 1 END, name
 	`)
 	if err != nil {
@@ -911,7 +1086,7 @@ func (db *DB) ListProjects() ([]*Project, error) {
 	for rows.Next() {
 		p := &Project{}
 		var actionsJSON string
-		if err := rows.Scan(&p.ID, &p.Name, &p.Path, &p.Aliases, &p.Instructions, &actionsJSON, &p.Color, &p.CreatedAt); err != nil {
+		if err := rows.Scan(&p.ID, &p.Name, &p.Path, &p.Aliases, &p.Instructions, &actionsJSON, &p.Color, &p.ClaudeConfigDir, &p.CreatedAt); err != nil {
 			return nil, fmt.Errorf("scan project: %w", err)
 		}
 		json.Unmarshal([]byte(actionsJSON), &p.Actions)
@@ -926,9 +1101,9 @@ func (db *DB) GetProjectByName(name string) (*Project, error) {
 	p := &Project{}
 	var actionsJSON string
 	err := db.QueryRow(`
-		SELECT id, name, path, aliases, instructions, COALESCE(actions, '[]'), COALESCE(color, ''), created_at
+		SELECT id, name, path, aliases, instructions, COALESCE(actions, '[]'), COALESCE(color, ''), COALESCE(claude_config_dir, ''), created_at
 		FROM projects WHERE name = ?
-	`, name).Scan(&p.ID, &p.Name, &p.Path, &p.Aliases, &p.Instructions, &actionsJSON, &p.Color, &p.CreatedAt)
+	`, name).Scan(&p.ID, &p.Name, &p.Path, &p.Aliases, &p.Instructions, &actionsJSON, &p.Color, &p.ClaudeConfigDir, &p.CreatedAt)
 	if err == nil {
 		json.Unmarshal([]byte(actionsJSON), &p.Actions)
 		return p, nil
@@ -938,7 +1113,7 @@ func (db *DB) GetProjectByName(name string) (*Project, error) {
 	}
 
 	// Try alias match
-	rows, err := db.Query(`SELECT id, name, path, aliases, instructions, COALESCE(actions, '[]'), COALESCE(color, ''), created_at FROM projects`)
+	rows, err := db.Query(`SELECT id, name, path, aliases, instructions, COALESCE(actions, '[]'), COALESCE(color, ''), COALESCE(claude_config_dir, ''), created_at FROM projects`)
 	if err != nil {
 		return nil, fmt.Errorf("query projects: %w", err)
 	}
@@ -946,7 +1121,7 @@ func (db *DB) GetProjectByName(name string) (*Project, error) {
 
 	for rows.Next() {
 		p := &Project{}
-		if err := rows.Scan(&p.ID, &p.Name, &p.Path, &p.Aliases, &p.Instructions, &actionsJSON, &p.Color, &p.CreatedAt); err != nil {
+		if err := rows.Scan(&p.ID, &p.Name, &p.Path, &p.Aliases, &p.Instructions, &actionsJSON, &p.Color, &p.ClaudeConfigDir, &p.CreatedAt); err != nil {
 			return nil, fmt.Errorf("scan project: %w", err)
 		}
 		json.Unmarshal([]byte(actionsJSON), &p.Actions)
@@ -1046,6 +1221,26 @@ func (db *DB) GetLastTaskTypeForProject(project string) (string, error) {
 // SetLastTaskTypeForProject saves the last used task type for a project.
 func (db *DB) SetLastTaskTypeForProject(project, taskType string) error {
 	return db.SetSetting("last_type_"+project, taskType)
+}
+
+// GetLastUsedProject returns the last used project name.
+func (db *DB) GetLastUsedProject() (string, error) {
+	return db.GetSetting("last_used_project")
+}
+
+// SetLastUsedProject saves the last used project name.
+func (db *DB) SetLastUsedProject(project string) error {
+	return db.SetSetting("last_used_project", project)
+}
+
+// GetLastExecutorForProject returns the last used executor for a project.
+func (db *DB) GetLastExecutorForProject(project string) (string, error) {
+	return db.GetSetting("last_executor_" + project)
+}
+
+// SetLastExecutorForProject saves the last used executor for a project.
+func (db *DB) SetLastExecutorForProject(project, executor string) error {
+	return db.SetSetting("last_executor_"+project, executor)
 }
 
 // CreateTaskType creates a new task type.
@@ -1462,4 +1657,200 @@ func (db *DB) ClearCompactionSummaries(taskID int64) error {
 		return fmt.Errorf("clear compaction summaries: %w", err)
 	}
 	return nil
+}
+
+// TaskSearchResult represents a search result from the FTS5 index.
+type TaskSearchResult struct {
+	TaskID            int64
+	Project           string
+	Title             string
+	Body              string
+	Tags              string
+	TranscriptExcerpt string
+	Rank              float64 // FTS5 rank score (lower is better match)
+}
+
+// IndexTaskForSearch adds or updates a task in the FTS5 search index.
+// Call this after task completion to make it searchable.
+func (db *DB) IndexTaskForSearch(taskID int64, project, title, body, tags, transcriptExcerpt string) error {
+	// First delete any existing entry
+	_, err := db.Exec(`DELETE FROM task_search WHERE task_id = ?`, taskID)
+	if err != nil {
+		return fmt.Errorf("delete existing search entry: %w", err)
+	}
+
+	// Insert new entry
+	_, err = db.Exec(`
+		INSERT INTO task_search (task_id, project, title, body, tags, transcript_excerpt)
+		VALUES (?, ?, ?, ?, ?, ?)
+	`, taskID, project, title, body, tags, transcriptExcerpt)
+	if err != nil {
+		return fmt.Errorf("insert search entry: %w", err)
+	}
+	return nil
+}
+
+// RemoveTaskFromSearch removes a task from the FTS5 search index.
+func (db *DB) RemoveTaskFromSearch(taskID int64) error {
+	_, err := db.Exec(`DELETE FROM task_search WHERE task_id = ?`, taskID)
+	if err != nil {
+		return fmt.Errorf("delete search entry: %w", err)
+	}
+	return nil
+}
+
+// FTSSearchOptions defines options for FTS5 full-text search.
+type FTSSearchOptions struct {
+	Query   string // The search query (FTS5 syntax supported)
+	Project string // Optional: filter by project
+	Limit   int    // Maximum results (default 10)
+}
+
+// SearchTasksFTS performs a full-text search on the FTS5 task index.
+// Returns matching tasks ordered by relevance (best matches first).
+// Note: This is different from SearchTasks which does simple LIKE matching.
+func (db *DB) SearchTasksFTS(opts FTSSearchOptions) ([]*TaskSearchResult, error) {
+	if opts.Query == "" {
+		return nil, nil
+	}
+	if opts.Limit <= 0 {
+		opts.Limit = 10
+	}
+
+	query := `
+		SELECT task_id, project, title, body, tags, transcript_excerpt, rank
+		FROM task_search
+		WHERE task_search MATCH ?
+	`
+	args := []interface{}{opts.Query}
+
+	if opts.Project != "" {
+		query += ` AND project = ?`
+		args = append(args, opts.Project)
+	}
+
+	query += ` ORDER BY rank LIMIT ?`
+	args = append(args, opts.Limit)
+
+	rows, err := db.Query(query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("search tasks: %w", err)
+	}
+	defer rows.Close()
+
+	var results []*TaskSearchResult
+	for rows.Next() {
+		r := &TaskSearchResult{}
+		if err := rows.Scan(&r.TaskID, &r.Project, &r.Title, &r.Body, &r.Tags, &r.TranscriptExcerpt, &r.Rank); err != nil {
+			return nil, fmt.Errorf("scan search result: %w", err)
+		}
+		results = append(results, r)
+	}
+	return results, nil
+}
+
+// FindSimilarTasks searches for completed tasks similar to the given task.
+// Uses the task's title, body, and tags to find relevant past work.
+func (db *DB) FindSimilarTasks(task *Task, limit int) ([]*TaskSearchResult, error) {
+	if limit <= 0 {
+		limit = 5
+	}
+
+	// Build search query from task title and first part of body
+	searchTerms := task.Title
+	if task.Tags != "" {
+		searchTerms += " " + strings.ReplaceAll(task.Tags, ",", " ")
+	}
+	// Add first 100 chars of body for context
+	if len(task.Body) > 0 {
+		bodySnippet := task.Body
+		if len(bodySnippet) > 100 {
+			bodySnippet = bodySnippet[:100]
+		}
+		searchTerms += " " + bodySnippet
+	}
+
+	// Escape special FTS5 characters and create OR query for flexibility
+	words := strings.Fields(searchTerms)
+	var escapedWords []string
+	for _, w := range words {
+		// Remove special characters that could break FTS5
+		w = strings.Map(func(r rune) rune {
+			if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') {
+				return r
+			}
+			return -1
+		}, w)
+		if len(w) >= 3 { // Only include words with 3+ chars
+			escapedWords = append(escapedWords, w)
+		}
+	}
+
+	if len(escapedWords) == 0 {
+		return nil, nil
+	}
+
+	// Create FTS5 OR query
+	ftsQuery := strings.Join(escapedWords, " OR ")
+
+	return db.SearchTasksFTS(FTSSearchOptions{
+		Query:   ftsQuery,
+		Project: task.Project,
+		Limit:   limit + 1, // Get one extra to exclude current task
+	})
+}
+
+// UpdateTaskLastDistilledAt updates the last_distilled_at timestamp for a task.
+// This is called after distilling learnings from a task to track when it was last processed.
+func (db *DB) UpdateTaskLastDistilledAt(taskID int64, t time.Time) error {
+	_, err := db.Exec(`
+		UPDATE tasks SET last_distilled_at = ?, updated_at = CURRENT_TIMESTAMP
+		WHERE id = ?
+	`, LocalTime{Time: t}, taskID)
+	if err != nil {
+		return fmt.Errorf("update task last_distilled_at: %w", err)
+	}
+	return nil
+}
+
+// UpdateTaskStartedAt updates the started_at timestamp for a task.
+// This is primarily used for testing.
+func (db *DB) UpdateTaskStartedAt(taskID int64, t time.Time) error {
+	_, err := db.Exec(`
+		UPDATE tasks SET started_at = ?, updated_at = CURRENT_TIMESTAMP
+		WHERE id = ?
+	`, LocalTime{Time: t}, taskID)
+	if err != nil {
+		return fmt.Errorf("update task started_at: %w", err)
+	}
+	return nil
+}
+
+// GetTagsList returns all unique tags used across all tasks.
+func (db *DB) GetTagsList() ([]string, error) {
+	rows, err := db.Query(`SELECT DISTINCT tags FROM tasks WHERE tags != ''`)
+	if err != nil {
+		return nil, fmt.Errorf("query tags: %w", err)
+	}
+	defer rows.Close()
+
+	tagSet := make(map[string]bool)
+	for rows.Next() {
+		var tags string
+		if err := rows.Scan(&tags); err != nil {
+			return nil, fmt.Errorf("scan tags: %w", err)
+		}
+		for _, tag := range strings.Split(tags, ",") {
+			tag = strings.TrimSpace(tag)
+			if tag != "" {
+				tagSet[tag] = true
+			}
+		}
+	}
+
+	var result []string
+	for tag := range tagSet {
+		result = append(result, tag)
+	}
+	return result, nil
 }

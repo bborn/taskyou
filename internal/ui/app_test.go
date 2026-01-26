@@ -2,6 +2,9 @@ package ui
 
 import (
 	"testing"
+	"time"
+
+	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/bborn/workflow/internal/db"
 )
@@ -25,6 +28,10 @@ func TestDefaultKeyMap(t *testing.T) {
 
 	if keys.ChangeStatus.Help().Key != "S" {
 		t.Error("ChangeStatus key should have help text 'S'")
+	}
+
+	if keys.OpenWorktree.Help().Key != "o" {
+		t.Error("OpenWorktree key should have help text 'o'")
 	}
 }
 
@@ -191,5 +198,531 @@ func TestShowCloseConfirm_DifferentTasks(t *testing.T) {
 				t.Error("pendingCloseTask was not set correctly")
 			}
 		})
+	}
+}
+
+func TestOpenWorktreeInEditor_NoWorktreePath(t *testing.T) {
+	m := &AppModel{}
+
+	// Test task with no worktree path
+	task := &db.Task{
+		ID:           1,
+		Title:        "Test Task",
+		WorktreePath: "",
+	}
+
+	cmd := m.openWorktreeInEditor(task)
+	msg := cmd()
+
+	result, ok := msg.(worktreeOpenedMsg)
+	if !ok {
+		t.Fatal("expected worktreeOpenedMsg")
+	}
+
+	if result.err == nil {
+		t.Error("expected error for task with no worktree path")
+	}
+}
+
+func TestOpenWorktreeInEditor_NonexistentPath(t *testing.T) {
+	m := &AppModel{}
+
+	// Test task with non-existent worktree path
+	task := &db.Task{
+		ID:           1,
+		Title:        "Test Task",
+		WorktreePath: "/nonexistent/path/that/does/not/exist",
+	}
+
+	cmd := m.openWorktreeInEditor(task)
+	msg := cmd()
+
+	result, ok := msg.(worktreeOpenedMsg)
+	if !ok {
+		t.Fatal("expected worktreeOpenedMsg")
+	}
+
+	if result.err == nil {
+		t.Error("expected error for non-existent worktree path")
+	}
+}
+
+func TestNewTaskFormEscapeShowsConfirmationWhenHasData(t *testing.T) {
+	// Create app model with new task form
+	m := &AppModel{
+		width:       100,
+		height:      50,
+		currentView: ViewNewTask,
+		newTaskForm: NewFormModel(nil, 100, 50, ""),
+	}
+
+	// Add data to the form
+	m.newTaskForm.titleInput.SetValue("Some task title")
+
+	// Press ESC
+	escMsg := tea.KeyMsg{Type: tea.KeyEscape}
+	model, _ := m.updateNewTaskForm(escMsg)
+	am := model.(*AppModel)
+
+	// Form should still be open with confirmation showing
+	if am.newTaskForm == nil {
+		t.Error("expected form to still be open while showing confirmation")
+	}
+	if am.currentView != ViewNewTask {
+		t.Errorf("expected view to still be ViewNewTask, got %v", am.currentView)
+	}
+	if !am.newTaskForm.showCancelConfirm {
+		t.Error("expected confirmation prompt to be shown")
+	}
+}
+
+func TestNewTaskFormEscapeClosesImmediatelyWhenEmpty(t *testing.T) {
+	// Create app model with empty new task form
+	m := &AppModel{
+		width:       100,
+		height:      50,
+		currentView: ViewNewTask,
+		newTaskForm: NewFormModel(nil, 100, 50, ""),
+	}
+
+	// Press ESC on empty form
+	escMsg := tea.KeyMsg{Type: tea.KeyEscape}
+	model, _ := m.updateNewTaskForm(escMsg)
+	am := model.(*AppModel)
+
+	// Form should be closed immediately
+	if am.newTaskForm != nil {
+		t.Error("expected form to be closed for empty form")
+	}
+	if am.currentView != ViewDashboard {
+		t.Errorf("expected view to be ViewDashboard, got %v", am.currentView)
+	}
+}
+
+func TestEditTaskFormEscapeShowsConfirmationWhenHasData(t *testing.T) {
+	// Create app model with edit task form
+	m := &AppModel{
+		width:        100,
+		height:       50,
+		currentView:  ViewEditTask,
+		previousView: ViewDashboard,
+		editTaskForm: NewFormModel(nil, 100, 50, ""),
+		editingTask:  &db.Task{ID: 1, Title: "Original Title"},
+	}
+
+	// Add data to the form
+	m.editTaskForm.titleInput.SetValue("Modified title")
+
+	// Press ESC
+	escMsg := tea.KeyMsg{Type: tea.KeyEscape}
+	model, _ := m.updateEditTaskForm(escMsg)
+	am := model.(*AppModel)
+
+	// Form should still be open with confirmation showing
+	if am.editTaskForm == nil {
+		t.Error("expected form to still be open while showing confirmation")
+	}
+	if am.currentView != ViewEditTask {
+		t.Errorf("expected view to still be ViewEditTask, got %v", am.currentView)
+	}
+	if !am.editTaskForm.showCancelConfirm {
+		t.Error("expected confirmation prompt to be shown")
+	}
+}
+
+func TestEditTaskFormEscapeClosesImmediatelyWhenEmpty(t *testing.T) {
+	// Create app model with empty edit task form
+	m := &AppModel{
+		width:        100,
+		height:       50,
+		currentView:  ViewEditTask,
+		previousView: ViewDashboard,
+		editTaskForm: NewFormModel(nil, 100, 50, ""),
+		editingTask:  &db.Task{ID: 1, Title: "Original Title"},
+	}
+
+	// Press ESC on empty form
+	escMsg := tea.KeyMsg{Type: tea.KeyEscape}
+	model, _ := m.updateEditTaskForm(escMsg)
+	am := model.(*AppModel)
+
+	// Form should be closed immediately
+	if am.editTaskForm != nil {
+		t.Error("expected form to be closed for empty form")
+	}
+	if am.currentView != ViewDashboard {
+		t.Errorf("expected view to be ViewDashboard, got %v", am.currentView)
+	}
+}
+
+// TestScoreTaskForFilter tests the fuzzy matching logic for the kanban filter.
+// This should match the behavior of the command palette (Ctrl+P) scoring.
+func TestScoreTaskForFilter(t *testing.T) {
+	tests := []struct {
+		name     string
+		task     *db.Task
+		query    string
+		wantMin  int  // minimum expected score (-1 means no match)
+		wantMax  int  // maximum expected score (use same as min for exact)
+		wantHigh bool // true if this should score higher than baseline
+	}{
+		{
+			name:    "ID exact match gives highest priority",
+			task:    &db.Task{ID: 123, Title: "Some task"},
+			query:   "123",
+			wantMin: 1000,
+			wantMax: 1000,
+		},
+		{
+			name:    "ID with hash prefix",
+			task:    &db.Task{ID: 456, Title: "Another task"},
+			query:   "#456",
+			wantMin: 1000,
+			wantMax: 1000,
+		},
+		{
+			name:    "PR number match",
+			task:    &db.Task{ID: 1, Title: "Fix bug", PRNumber: 789},
+			query:   "789",
+			wantMin: 900,
+			wantMax: 900,
+		},
+		{
+			name:    "PR URL match",
+			task:    &db.Task{ID: 1, Title: "Fix bug", PRURL: "https://github.com/org/repo/pull/123"},
+			query:   "github.com",
+			wantMin: 800,
+			wantMax: 800,
+		},
+		{
+			name:    "title fuzzy match with consecutive chars",
+			task:    &db.Task{ID: 1, Title: "Add authentication feature"},
+			query:   "auth",
+			wantMin: 100, // should get decent score
+			wantMax: 300,
+		},
+		{
+			name:    "title fuzzy match non-consecutive",
+			task:    &db.Task{ID: 1, Title: "design website"},
+			query:   "dsnw",
+			wantMin: 100, // should match with decent score due to word boundary bonuses
+			wantMax: 300,
+		},
+		{
+			name:    "project name fuzzy match",
+			task:    &db.Task{ID: 1, Title: "Some task", Project: "workflow"},
+			query:   "wkflw",
+			wantMin: 100, // matches project (with -50 penalty but still decent)
+			wantMax: 300,
+		},
+		{
+			name:    "status substring match",
+			task:    &db.Task{ID: 1, Title: "Task", Status: "processing"},
+			query:   "process",
+			wantMin: 100,
+			wantMax: 100,
+		},
+		{
+			name:    "type fuzzy match",
+			task:    &db.Task{ID: 1, Title: "Task", Type: "feature"},
+			query:   "feat",
+			wantMin: 100, // good score due to word start bonus
+			wantMax: 300,
+		},
+		{
+			name:    "no match returns -1",
+			task:    &db.Task{ID: 1, Title: "Hello world"},
+			query:   "xyz",
+			wantMin: -1,
+			wantMax: -1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			score := scoreTaskForFilter(tt.task, tt.query)
+			if score < tt.wantMin || score > tt.wantMax {
+				t.Errorf("scoreTaskForFilter() = %d, want between %d and %d", score, tt.wantMin, tt.wantMax)
+			}
+		})
+	}
+}
+
+// TestScoreTaskForFilterRanking verifies that better matches score higher.
+func TestScoreTaskForFilterRanking(t *testing.T) {
+	tests := []struct {
+		name        string
+		higherTask  *db.Task
+		higherQuery string
+		lowerTask   *db.Task
+		lowerQuery  string
+	}{
+		{
+			name:        "ID match beats title match",
+			higherTask:  &db.Task{ID: 123, Title: "Some task"},
+			higherQuery: "123",
+			lowerTask:   &db.Task{ID: 1, Title: "Task 123"},
+			lowerQuery:  "task",
+		},
+		{
+			name:        "exact title substring beats fuzzy match",
+			higherTask:  &db.Task{ID: 1, Title: "authentication"},
+			higherQuery: "auth",
+			lowerTask:   &db.Task{ID: 2, Title: "author handling"},
+			lowerQuery:  "athn",
+		},
+		{
+			name:        "word boundary match beats middle match",
+			higherTask:  &db.Task{ID: 1, Title: "fix authentication bug"},
+			higherQuery: "auth",
+			lowerTask:   &db.Task{ID: 2, Title: "authenticate users"},
+			lowerQuery:  "cate",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			higherScore := scoreTaskForFilter(tt.higherTask, tt.higherQuery)
+			lowerScore := scoreTaskForFilter(tt.lowerTask, tt.lowerQuery)
+			if higherScore <= lowerScore {
+				t.Errorf("expected higher score (%d) > lower score (%d)", higherScore, lowerScore)
+			}
+		})
+	}
+}
+
+func TestJumpToNotificationKey(t *testing.T) {
+	// Create app model with kanban board and tasks
+	tasks := []*db.Task{
+		{ID: 1, Title: "Task 1", Status: db.StatusBacklog},
+		{ID: 2, Title: "Task 2", Status: db.StatusBlocked},
+		{ID: 3, Title: "Task 3", Status: db.StatusDone},
+	}
+
+	m := &AppModel{
+		width:        100,
+		height:       50,
+		currentView:  ViewDashboard,
+		keys:         DefaultKeyMap(),
+		notification: "⚠ Task #2 needs input: Task 2 (g to jump)",
+		notifyTaskID: 2,
+		kanban:       NewKanbanBoard(100, 50),
+	}
+	m.kanban.SetTasks(tasks)
+
+	// Verify initial state - task 1 should be selected (first task in first column)
+	if task := m.kanban.SelectedTask(); task != nil && task.ID == 2 {
+		// Reset selection to different task
+		m.kanban.SelectTask(1)
+	}
+
+	// Verify notification fields are set before key press
+	if m.notification == "" {
+		t.Error("expected notification to be set before key press")
+	}
+	if m.notifyTaskID != 2 {
+		t.Errorf("expected notifyTaskID to be 2 before key press, got %d", m.notifyTaskID)
+	}
+
+	// Press 'g' to jump to notification
+	// Note: We test with a minimal setup that doesn't have executor/db,
+	// so we only verify the state changes, not the actual command execution
+	gMsg := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'g'}}
+	model, _ := m.updateDashboard(gMsg)
+	am := model.(*AppModel)
+
+	// Notification should be cleared
+	if am.notification != "" {
+		t.Errorf("expected notification to be cleared, got %q", am.notification)
+	}
+
+	// NotifyTaskID should be cleared
+	if am.notifyTaskID != 0 {
+		t.Errorf("expected notifyTaskID to be 0, got %d", am.notifyTaskID)
+	}
+
+	// Kanban should have task 2 selected
+	if task := am.kanban.SelectedTask(); task == nil || task.ID != 2 {
+		if task == nil {
+			t.Error("expected task 2 to be selected, but no task is selected")
+		} else {
+			t.Errorf("expected task 2 to be selected, got task %d", task.ID)
+		}
+	}
+}
+
+func TestJumpToNotificationKey_NoNotification(t *testing.T) {
+	// Create app model with kanban board but no active notification
+	tasks := []*db.Task{
+		{ID: 1, Title: "Task 1", Status: db.StatusBacklog},
+	}
+
+	m := &AppModel{
+		width:        100,
+		height:       50,
+		currentView:  ViewDashboard,
+		keys:         DefaultKeyMap(),
+		notification: "",
+		notifyTaskID: 0,
+		kanban:       NewKanbanBoard(100, 50),
+	}
+	m.kanban.SetTasks(tasks)
+
+	// Press 'g' when no notification is active
+	gMsg := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'g'}}
+	_, cmd := m.updateDashboard(gMsg)
+
+	// Should return nil command since there's no notification
+	if cmd != nil {
+		t.Error("expected nil command when no notification is active")
+	}
+}
+
+func TestJumpToNotificationKey_DetailView(t *testing.T) {
+	// Create app model in detail view with an active notification for a different task
+	tasks := []*db.Task{
+		{ID: 1, Title: "Task 1", Status: db.StatusBacklog},
+		{ID: 2, Title: "Task 2", Status: db.StatusBlocked},
+		{ID: 3, Title: "Task 3", Status: db.StatusQueued},
+	}
+
+	m := &AppModel{
+		width:        100,
+		height:       50,
+		currentView:  ViewDetail,
+		keys:         DefaultKeyMap(),
+		notification: "⚠ Task #2 needs input: Task 2 (g to jump)",
+		notifyTaskID: 2,
+		notifyUntil:  time.Now().Add(10 * time.Second),
+		kanban:       NewKanbanBoard(100, 50),
+		selectedTask: tasks[0], // Currently viewing task 1
+	}
+	m.kanban.SetTasks(tasks)
+
+	// Create a detail view for task 1 and sync notification state
+	m.detailView = &DetailModel{
+		task:   tasks[0],
+		width:  100,
+		height: 50,
+	}
+	m.detailView.SetNotification(m.notification, m.notifyTaskID, m.notifyUntil)
+
+	// Verify notification is set in detail view
+	if !m.detailView.HasNotification() {
+		t.Error("expected detail view to have notification before key press")
+	}
+
+	// Press Ctrl+g to jump to notification
+	ctrlGMsg := tea.KeyMsg{Type: tea.KeyCtrlG}
+	model, _ := m.updateDetail(ctrlGMsg)
+	am := model.(*AppModel)
+
+	// Notification should be cleared
+	if am.notification != "" {
+		t.Errorf("expected notification to be cleared, got %q", am.notification)
+	}
+
+	// NotifyTaskID should be cleared
+	if am.notifyTaskID != 0 {
+		t.Errorf("expected notifyTaskID to be 0, got %d", am.notifyTaskID)
+	}
+
+	// Kanban should have task 2 selected
+	if task := am.kanban.SelectedTask(); task == nil || task.ID != 2 {
+		if task == nil {
+			t.Error("expected task 2 to be selected, but no task is selected")
+		} else {
+			t.Errorf("expected task 2 to be selected, got task %d", task.ID)
+		}
+	}
+}
+
+func TestJumpToNotificationKey_DetailView_NoNotification(t *testing.T) {
+	// Create app model in detail view but no active notification
+	tasks := []*db.Task{
+		{ID: 1, Title: "Task 1", Status: db.StatusBacklog},
+	}
+
+	m := &AppModel{
+		width:        100,
+		height:       50,
+		currentView:  ViewDetail,
+		keys:         DefaultKeyMap(),
+		notification: "",
+		notifyTaskID: 0,
+		kanban:       NewKanbanBoard(100, 50),
+		selectedTask: tasks[0],
+	}
+	m.kanban.SetTasks(tasks)
+
+	m.detailView = &DetailModel{
+		task:   tasks[0],
+		width:  100,
+		height: 50,
+	}
+
+	// Press Ctrl+g when no notification is active
+	ctrlGMsg := tea.KeyMsg{Type: tea.KeyCtrlG}
+	_, cmd := m.updateDetail(ctrlGMsg)
+
+	// Should return nil command since there's no notification
+	if cmd != nil {
+		t.Error("expected nil command when no notification is active")
+	}
+}
+
+func TestJumpToNotificationKey_FocusExecutor(t *testing.T) {
+	// Create app model with kanban board and notification
+	tasks := []*db.Task{
+		{ID: 1, Title: "Task 1", Status: db.StatusBacklog},
+		{ID: 2, Title: "Task 2", Status: db.StatusBlocked},
+	}
+
+	// Create a mock database for the loadTask call
+	mockDB, err := db.Open(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to create test database: %v", err)
+	}
+	defer mockDB.Close()
+
+	// Insert test task
+	testTask := &db.Task{ID: 2, Title: "Task 2", Status: db.StatusBlocked}
+	if err := mockDB.CreateTask(testTask); err != nil {
+		t.Fatalf("Failed to create test task: %v", err)
+	}
+
+	m := &AppModel{
+		width:        100,
+		height:       50,
+		currentView:  ViewDashboard,
+		keys:         DefaultKeyMap(),
+		notification: "⚠ Task #2 needs input: Task 2 (g to jump)",
+		notifyTaskID: 2,
+		kanban:       NewKanbanBoard(100, 50),
+		db:           mockDB,
+	}
+	m.kanban.SetTasks(tasks)
+	m.kanban.SelectTask(1) // Start with task 1 selected
+
+	// Press 'g' to jump to notification
+	gMsg := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'g'}}
+	_, cmd := m.updateDashboard(gMsg)
+
+	// Verify command was returned
+	if cmd == nil {
+		t.Fatal("expected command to be returned")
+	}
+
+	// Execute the command to get the message
+	msg := cmd()
+
+	// Verify the message has focusExecutor set to true
+	loadedMsg, ok := msg.(taskLoadedMsg)
+	if !ok {
+		t.Fatalf("expected taskLoadedMsg, got %T", msg)
+	}
+
+	if !loadedMsg.focusExecutor {
+		t.Error("expected focusExecutor to be true when jumping from notification")
 	}
 }

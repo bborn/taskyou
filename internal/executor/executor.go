@@ -9,12 +9,14 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
+	"unicode"
 
 	"github.com/bborn/workflow/internal/config"
 	"github.com/bborn/workflow/internal/db"
@@ -38,6 +40,9 @@ type Executor struct {
 	hooks   *hooks.Runner
 	prCache *github.PRCache
 
+	// Executor factory for pluggable backends
+	executorFactory *ExecutorFactory
+
 	mu           sync.RWMutex
 	runningTasks map[int64]bool               // tracks which tasks are currently executing
 	cancelFuncs  map[int64]context.CancelFunc // cancel functions for running tasks
@@ -57,45 +62,139 @@ type Executor struct {
 
 	// Silent mode suppresses log output (for TUI embedding)
 	silent bool
+
+	executorSlug string
+	executorName string
 }
 
-// SuspendIdleTimeout is how long a blocked task must be idle before being suspended.
-const SuspendIdleTimeout = 5 * time.Minute
+// DefaultSuspendIdleTimeout is the default time a blocked task must be idle before being suspended.
+const DefaultSuspendIdleTimeout = 6 * time.Hour
+
+// DoneTaskCleanupTimeout is how long after a task is marked done before its Claude process is killed.
+// This gives users time to review output or retry the task before the process is cleaned up.
+const DoneTaskCleanupTimeout = 30 * time.Minute
+
+const (
+	defaultExecutorSlug = "claude"
+	defaultExecutorName = "Claude"
+)
+
+var executorEnvKeys = []string{"TASK_EXECUTOR", "WORKFLOW_EXECUTOR", "TASKYOU_EXECUTOR", "WORKTREE_EXECUTOR"}
+
+// detectExecutorIdentity determines the current executor based on environment variables.
+// It falls back to the default Claude executor when no overrides are provided.
+func detectExecutorIdentity() (slug, display string) {
+	for _, key := range executorEnvKeys {
+		if value := strings.TrimSpace(os.Getenv(key)); value != "" {
+			slug = strings.ToLower(value)
+			return slug, formatExecutorDisplayName(slug, value)
+		}
+	}
+	return defaultExecutorSlug, defaultExecutorName
+}
+
+func formatExecutorDisplayName(slug, raw string) string {
+	switch slug {
+	case "codex":
+		return "Codex"
+	case "claude":
+		return defaultExecutorName
+	case "gemini":
+		return "Gemini"
+	}
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return defaultExecutorName
+	}
+	lower := strings.ToLower(trimmed)
+	if trimmed == lower {
+		runes := []rune(lower)
+		if len(runes) == 0 {
+			return defaultExecutorName
+		}
+		runes[0] = unicode.ToUpper(runes[0])
+		return string(runes)
+	}
+	return trimmed
+}
+
+// DefaultExecutorName returns the fallback executor display name.
+func DefaultExecutorName() string {
+	return defaultExecutorName
+}
 
 // New creates a new executor.
 func New(database *db.DB, cfg *config.Config) *Executor {
-	return &Executor{
-		db:             database,
-		config:         cfg,
-		logger:         log.NewWithOptions(io.Discard, log.Options{Prefix: "executor"}),
-		hooks:          hooks.NewSilent(hooks.DefaultHooksDir()),
-		prCache:        github.NewPRCache(),
-		stopCh:         make(chan struct{}),
-		subs:           make(map[int64][]chan *db.TaskLog),
-		taskSubs:       make([]chan TaskEvent, 0),
-		runningTasks:   make(map[int64]bool),
-		cancelFuncs:    make(map[int64]context.CancelFunc),
-		suspendedTasks: make(map[int64]time.Time),
-		silent:         true,
+	slug, display := detectExecutorIdentity()
+	e := &Executor{
+		db:              database,
+		config:          cfg,
+		logger:          log.NewWithOptions(io.Discard, log.Options{Prefix: "executor"}),
+		hooks:           hooks.NewSilent(hooks.DefaultHooksDir()),
+		prCache:         github.NewPRCache(),
+		executorFactory: NewExecutorFactory(),
+		stopCh:          make(chan struct{}),
+		subs:            make(map[int64][]chan *db.TaskLog),
+		taskSubs:        make([]chan TaskEvent, 0),
+		runningTasks:    make(map[int64]bool),
+		cancelFuncs:     make(map[int64]context.CancelFunc),
+		suspendedTasks:  make(map[int64]time.Time),
+		silent:          true,
+		executorSlug:    slug,
+		executorName:    display,
 	}
+
+	// Register available executors
+	e.executorFactory.Register(NewClaudeExecutor(e))
+	e.executorFactory.Register(NewCodexExecutor(e))
+	e.executorFactory.Register(NewGeminiExecutor(e))
+
+	return e
 }
 
 // NewWithLogging creates an executor that logs to stderr (for daemon mode).
 func NewWithLogging(database *db.DB, cfg *config.Config, w io.Writer) *Executor {
-	return &Executor{
-		db:             database,
-		config:         cfg,
-		logger:         log.NewWithOptions(w, log.Options{Prefix: "executor"}),
-		hooks:          hooks.New(hooks.DefaultHooksDir()),
-		prCache:        github.NewPRCache(),
-		stopCh:         make(chan struct{}),
-		subs:           make(map[int64][]chan *db.TaskLog),
-		taskSubs:       make([]chan TaskEvent, 0),
-		runningTasks:   make(map[int64]bool),
-		cancelFuncs:    make(map[int64]context.CancelFunc),
-		suspendedTasks: make(map[int64]time.Time),
-		silent:         false,
+	slug, display := detectExecutorIdentity()
+	e := &Executor{
+		db:              database,
+		config:          cfg,
+		logger:          log.NewWithOptions(w, log.Options{Prefix: "executor"}),
+		hooks:           hooks.New(hooks.DefaultHooksDir()),
+		prCache:         github.NewPRCache(),
+		executorFactory: NewExecutorFactory(),
+		stopCh:          make(chan struct{}),
+		subs:            make(map[int64][]chan *db.TaskLog),
+		taskSubs:        make([]chan TaskEvent, 0),
+		runningTasks:    make(map[int64]bool),
+		cancelFuncs:     make(map[int64]context.CancelFunc),
+		suspendedTasks:  make(map[int64]time.Time),
+		silent:          false,
+		executorSlug:    slug,
+		executorName:    display,
 	}
+
+	// Register available executors
+	e.executorFactory.Register(NewClaudeExecutor(e))
+	e.executorFactory.Register(NewCodexExecutor(e))
+	e.executorFactory.Register(NewGeminiExecutor(e))
+
+	return e
+}
+
+// DisplayName returns the configured executor display name.
+func (e *Executor) DisplayName() string {
+	if e == nil || e.executorName == "" {
+		return defaultExecutorName
+	}
+	return e.executorName
+}
+
+// ExecutorSlug returns the normalized identifier for the executor (e.g., "codex").
+func (e *Executor) ExecutorSlug() string {
+	if e == nil || e.executorSlug == "" {
+		return defaultExecutorSlug
+	}
+	return e.executorSlug
 }
 
 // Start begins the background worker.
@@ -246,30 +345,76 @@ func (e *Executor) IsSuspended(taskID int64) bool {
 	return suspended
 }
 
-// getClaudePID finds the PID of the Claude process in a task's tmux window.
+// getClaudePID finds the PID of the Claude process for a task.
+// It first checks the stored daemon session, then searches all sessions for the task window.
 func (e *Executor) getClaudePID(taskID int64) int {
-	// First try to get the stored daemon session from the database
-	daemonSession := ""
-	if task, err := e.db.GetTask(taskID); err == nil && task != nil && task.DaemonSession != "" {
-		daemonSession = task.DaemonSession
-	} else {
-		// Fall back to current session (for backwards compatibility)
-		daemonSession = getDaemonSessionName()
-	}
-
-	windowTarget := fmt.Sprintf("%s:%s", daemonSession, TmuxWindowName(taskID))
-
-	// Get the PID of the process running in the tmux pane
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
-	// First check if the window exists
-	if exec.CommandContext(ctx, "tmux", "list-panes", "-t", windowTarget).Run() != nil {
+	windowName := TmuxWindowName(taskID)
+
+	// Search all tmux sessions for a window with this task's name
+	out, err := exec.CommandContext(ctx, "tmux", "list-panes", "-a", "-F", "#{session_name}:#{window_name}:#{pane_index} #{pane_pid}").Output()
+	if err != nil {
 		return 0
 	}
 
-	// Get the PID of the active process in the pane
-	out, err := exec.CommandContext(ctx, "tmux", "display-message", "-t", windowTarget, "-p", "#{pane_pid}").Output()
+	for _, line := range strings.Split(string(out), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+
+		// Parse "session:window:pane pid"
+		parts := strings.Fields(line)
+		if len(parts) != 2 {
+			continue
+		}
+
+		target := parts[0]
+		pidStr := parts[1]
+
+		// Only match panes in windows named after this task
+		if !strings.Contains(target, windowName) {
+			continue
+		}
+
+		pid, err := strconv.Atoi(pidStr)
+		if err != nil {
+			continue
+		}
+
+		// Check if this is a Claude process or has Claude as child
+		cmdOut, _ := exec.CommandContext(ctx, "ps", "-p", strconv.Itoa(pid), "-o", "comm=").Output()
+		if strings.Contains(string(cmdOut), "claude") {
+			return pid
+		}
+
+		// Check for claude child process
+		childOut, err := exec.CommandContext(ctx, "pgrep", "-P", strconv.Itoa(pid), "claude").Output()
+		if err == nil && len(childOut) > 0 {
+			childPid, err := strconv.Atoi(strings.TrimSpace(string(childOut)))
+			if err == nil {
+				return childPid
+			}
+		}
+	}
+
+	return 0
+}
+
+// GetClaudePIDFromPane returns the Claude PID for a specific tmux pane.
+// This is used by the UI when it knows the exact pane ID.
+func GetClaudePIDFromPane(paneID string) int {
+	if paneID == "" {
+		return 0
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	// Get the PID of the process in this pane
+	out, err := exec.CommandContext(ctx, "tmux", "display-message", "-t", paneID, "-p", "#{pane_pid}").Output()
 	if err != nil {
 		return 0
 	}
@@ -279,8 +424,13 @@ func (e *Executor) getClaudePID(taskID int64) int {
 		return 0
 	}
 
-	// The pane_pid is the shell PID - we need to find the claude child process
-	// Look for claude process that's a child of this shell
+	// Check if this is Claude
+	cmdOut, _ := exec.CommandContext(ctx, "ps", "-p", strconv.Itoa(pid), "-o", "comm=").Output()
+	if strings.Contains(string(cmdOut), "claude") {
+		return pid
+	}
+
+	// Check for claude child
 	childOut, err := exec.CommandContext(ctx, "pgrep", "-P", strconv.Itoa(pid), "claude").Output()
 	if err == nil && len(childOut) > 0 {
 		childPid, err := strconv.Atoi(strings.TrimSpace(string(childOut)))
@@ -289,8 +439,7 @@ func (e *Executor) getClaudePID(taskID int64) int {
 		}
 	}
 
-	// Fallback: return the shell PID (suspending the shell will suspend claude too)
-	return pid
+	return pid // Return the pane PID as fallback
 }
 
 // KillClaudeProcess terminates the Claude process for a task to free up memory.
@@ -322,6 +471,11 @@ func (e *Executor) KillClaudeProcess(taskID int64) bool {
 	e.mu.Unlock()
 
 	return true
+}
+
+// IsClaudeRunning checks if a Claude process is running for a task.
+func (e *Executor) IsClaudeRunning(taskID int64) bool {
+	return e.getClaudePID(taskID) != 0
 }
 
 // Subscribe to log updates for a task.
@@ -432,10 +586,12 @@ func (e *Executor) worker(ctx context.Context) {
 	// Check merged branches every 30 seconds (15 ticks)
 	// Check for idle blocked tasks to suspend every 60 seconds (30 ticks)
 	// Check for due scheduled tasks every 10 seconds (5 ticks)
+	// Check for inactive done tasks to cleanup every 5 minutes (150 ticks)
 	tickCount := 0
 	const mergeCheckInterval = 15
 	const suspendCheckInterval = 30
 	const scheduleCheckInterval = 5
+	const doneCleanupInterval = 150 // 5 minutes at 2 second ticks
 
 	for {
 		select {
@@ -462,49 +618,13 @@ func (e *Executor) worker(ctx context.Context) {
 			if tickCount%suspendCheckInterval == 0 {
 				e.suspendIdleBlockedTasks()
 			}
+
+			// Periodically cleanup Claude processes for inactive done tasks
+			if tickCount%doneCleanupInterval == 0 {
+				e.cleanupInactiveDoneTasks()
+			}
 		}
 	}
-}
-
-// handleRecurringTaskCompletion resets a recurring task to backlog after it completes.
-// This allows it to be picked up again at the next scheduled time.
-func (e *Executor) handleRecurringTaskCompletion(task *db.Task) {
-	// Reload task to get current state
-	currentTask, err := e.db.GetTask(task.ID)
-	if err != nil || currentTask == nil {
-		return
-	}
-
-	// Only handle recurring tasks
-	if !currentTask.IsRecurring() {
-		return
-	}
-
-	// Calculate next run time if not already set
-	if currentTask.ScheduledAt == nil {
-		nextRun := db.CalculateNextRunTime(currentTask.Recurrence, time.Now())
-		currentTask.ScheduledAt = nextRun
-	}
-
-	// Reset to backlog so it can be queued again at next scheduled time
-	currentTask.Status = db.StatusBacklog
-	currentTask.LastRunAt = &db.LocalTime{Time: time.Now()}
-
-	if err := e.db.UpdateTask(currentTask); err != nil {
-		e.logger.Error("Failed to reset recurring task", "id", task.ID, "error", err)
-		return
-	}
-
-	e.logLine(task.ID, "system", fmt.Sprintf("Recurring task (%s) will run again at %s",
-		currentTask.Recurrence,
-		currentTask.ScheduledAt.Format("Jan 2 3:04pm")))
-
-	// Broadcast the status change
-	e.broadcastTaskEvent(TaskEvent{
-		Type:   "status_changed",
-		Task:   currentTask,
-		TaskID: task.ID,
-	})
 }
 
 // queueDueScheduledTasks checks for scheduled tasks that are due and queues them.
@@ -518,14 +638,16 @@ func (e *Executor) queueDueScheduledTasks() {
 	for _, task := range tasks {
 		e.logger.Info("Queuing scheduled task", "id", task.ID, "title", task.Title, "scheduled_at", task.ScheduledAt)
 
-		// Log the scheduled execution
-		msg := "Scheduled task triggered"
-		if task.IsRecurring() {
-			msg = fmt.Sprintf("Recurring task triggered (%s)", task.Recurrence)
+		// Log the scheduled execution with a clear separator
+		e.logLine(task.ID, "system", "")
+		e.logLine(task.ID, "system", "═══════════════════════════════════════════════════════")
+		e.logLine(task.ID, "system", fmt.Sprintf("⏰ SCHEDULED RUN STARTED - %s", time.Now().Format("Jan 2, 2006 3:04:05 PM")))
+		if task.Recurrence != "" {
+			e.logLine(task.ID, "system", "Recurring schedules are no longer supported inside TaskYou. This run will not repeat automatically.")
 		}
-		e.logLine(task.ID, "system", msg)
+		e.logLine(task.ID, "system", "═══════════════════════════════════════════════════════")
 
-		// Queue the task (this also updates the next run time for recurring tasks)
+		// Queue the task
 		if err := e.db.QueueScheduledTask(task.ID); err != nil {
 			e.logger.Error("Failed to queue scheduled task", "id", task.ID, "error", err)
 			continue
@@ -566,7 +688,7 @@ func (e *Executor) suspendIdleBlockedTasks() {
 		}
 
 		idleDuration := time.Since(task.UpdatedAt.Time)
-		if idleDuration >= SuspendIdleTimeout {
+		if idleDuration >= e.getSuspendIdleTimeout() {
 			// Check if there's actually a Claude process to suspend
 			pid := e.getClaudePID(task.ID)
 			if pid > 0 {
@@ -574,6 +696,48 @@ func (e *Executor) suspendIdleBlockedTasks() {
 				e.SuspendTask(task.ID)
 			}
 		}
+	}
+}
+
+// cleanupInactiveDoneTasks kills Claude processes for done tasks that have been inactive
+// for longer than DoneTaskCleanupTimeout. This frees up memory from orphaned processes.
+func (e *Executor) cleanupInactiveDoneTasks() {
+	tasks, err := e.db.ListTasks(db.ListTasksOptions{
+		Status:        db.StatusDone,
+		IncludeClosed: true,
+		Limit:         100,
+	})
+	if err != nil {
+		e.logger.Debug("Failed to list done tasks for cleanup", "error", err)
+		return
+	}
+
+	for _, task := range tasks {
+		// Skip if not completed or completed recently
+		if task.CompletedAt == nil {
+			continue
+		}
+
+		doneDuration := time.Since(task.CompletedAt.Time)
+		if doneDuration < DoneTaskCleanupTimeout {
+			continue
+		}
+
+		// Check if there's a Claude process to kill
+		pid := e.getClaudePID(task.ID)
+		if pid == 0 {
+			continue
+		}
+
+		// Kill the Claude process
+		e.logger.Info("Cleaning up inactive done task", "task", task.ID, "done_for", doneDuration.Round(time.Minute))
+		e.KillClaudeProcess(task.ID)
+
+		// Also kill the tmux window to fully clean up (kill ALL duplicates)
+		windowName := TmuxWindowName(task.ID)
+		killAllWindowsByNameAllSessions(windowName)
+
+		e.logLine(task.ID, "system", "Claude process cleaned up (inactive done task)")
 	}
 }
 
@@ -651,18 +815,19 @@ func (e *Executor) executeTask(ctx context.Context, task *db.Task) {
 	e.hooks.OnStatusChange(task, db.StatusProcessing, startMsg)
 
 	// Setup worktree for isolated execution (symlinks claude config from project)
+	// SECURITY: We must have a valid worktree - never fall back to project directory
+	// to prevent Claude from accidentally writing to the main repo
 	workDir, err := e.setupWorktree(task)
 	if err != nil {
 		e.logger.Error("Failed to setup worktree", "error", err)
-		// Fall back to project directory
-		workDir = e.getProjectDir(task.Project)
-		if workDir == "" {
-			workDir, _ = os.Getwd()
-		}
+		e.logLine(task.ID, "error", fmt.Sprintf("Failed to setup worktree: %v", err))
+		_ = e.db.UpdateTaskStatus(task.ID, db.StatusBlocked)
+		e.hooks.OnStatusChange(task, db.StatusBlocked, "Worktree setup failed - cannot execute task safely")
+		return
 	}
 
-	// Prepare attachments (write to temp files)
-	attachmentPaths, cleanupAttachments := e.prepareAttachments(task.ID)
+	// Prepare attachments (write to .claude/attachments for seamless access)
+	attachmentPaths, cleanupAttachments := e.prepareAttachments(task.ID, workDir)
 	defer cleanupAttachments()
 	if len(attachmentPaths) > 0 {
 		e.logLine(task.ID, "system", fmt.Sprintf("Task has %d attachment(s)", len(attachmentPaths)))
@@ -672,26 +837,54 @@ func (e *Executor) executeTask(ctx context.Context, task *db.Task) {
 	retryFeedback, _ := e.db.GetRetryFeedback(task.ID)
 	isRetry := retryFeedback != ""
 
-	// Check if this is a recurring task that has run before
-	isRecurringRun := task.IsRecurring() && task.LastRunAt != nil
-
 	// Build prompt based on task type
 	prompt := e.buildPrompt(task, attachmentPaths)
 
-	// Run Claude
+	// Get the appropriate executor for this task
+	executorName := task.Executor
+	if executorName == "" {
+		executorName = db.DefaultExecutor()
+	}
+	taskExecutor := e.executorFactory.Get(executorName)
+	if taskExecutor == nil {
+		// Fall back to default executor if specified executor not found
+		e.logLine(task.ID, "system", fmt.Sprintf("Executor '%s' not found, falling back to '%s'", executorName, db.DefaultExecutor()))
+		taskExecutor = e.executorFactory.Get(db.DefaultExecutor())
+	}
+	if taskExecutor == nil {
+		e.logLine(task.ID, "error", "No executor available")
+		e.updateStatus(task.ID, db.StatusBlocked)
+		return
+	}
+
+	// Check if the executor is available
+	if !taskExecutor.IsAvailable() {
+		e.logLine(task.ID, "error", fmt.Sprintf("Executor '%s' is not installed", executorName))
+		e.updateStatus(task.ID, db.StatusBlocked)
+		return
+	}
+
+	// Run the executor
 	var result execResult
 	if isRetry {
-		e.logLine(task.ID, "system", "Resuming previous session with feedback")
-		result = e.runClaudeResume(taskCtx, task, workDir, prompt, retryFeedback)
-	} else if isRecurringRun {
-		// Resume session with recurring message that includes full task details
-		recurringPrompt := e.buildRecurringPrompt(task, attachmentPaths)
-		e.logLine(task.ID, "system", fmt.Sprintf("Recurring task (%s) - resuming session", task.Recurrence))
-		result = e.runClaudeResume(taskCtx, task, workDir, prompt, recurringPrompt)
+		// Include attachments info in retry feedback so Claude knows about them
+		// This is important when attachments are added after the initial run or when resuming
+		feedbackWithAttachments := retryFeedback
+		if len(attachmentPaths) > 0 {
+			feedbackWithAttachments = retryFeedback + "\n" + e.getAttachmentsSection(task.ID, attachmentPaths, workDir)
+		}
+		e.logLine(task.ID, "system", fmt.Sprintf("Resuming previous session with feedback (executor: %s)", executorName))
+		execResult := taskExecutor.Resume(taskCtx, task, workDir, prompt, feedbackWithAttachments)
+		result = execResult.toInternal()
 	} else {
-		e.logLine(task.ID, "system", "Starting new Claude session")
-		result = e.runClaude(taskCtx, task, workDir, prompt)
+		e.logLine(task.ID, "system", fmt.Sprintf("Starting new session (executor: %s)", executorName))
+		execResult := taskExecutor.Execute(taskCtx, task, workDir, prompt)
+		result = execResult.toInternal()
 	}
+
+	// Check if we should distill learnings from this execution session
+	// This runs asynchronously and captures memories even for in-progress tasks
+	e.MaybeDistillTask(task)
 
 	// Check current status - hooks may have already set it
 	currentTask, _ := e.db.GetTask(task.ID)
@@ -705,8 +898,8 @@ func (e *Executor) executeTask(ctx context.Context, task *db.Task) {
 	if result.Interrupted {
 		// Status already set by Interrupt(), just run hook
 		e.hooks.OnStatusChange(task, db.StatusBacklog, "Task interrupted by user")
-		// Kill Claude process to free memory when task is interrupted
-		e.KillClaudeProcess(task.ID)
+		// Kill executor process to free memory when task is interrupted
+		taskExecutor.Kill(task.ID)
 	} else if currentStatus == db.StatusBlocked {
 		// Hooks already marked as blocked - respect that
 		e.logLine(task.ID, "system", "Task waiting for input")
@@ -719,11 +912,9 @@ func (e *Executor) executeTask(ctx context.Context, task *db.Task) {
 		// Save transcript on completion
 		e.saveTranscriptOnCompletion(task.ID, workDir)
 
-		// Kill Claude process to free memory when task is done
-		e.KillClaudeProcess(task.ID)
-
-		// Handle recurring task: reset to backlog for next run
-		e.handleRecurringTaskCompletion(task)
+		// NOTE: We intentionally do NOT kill the executor here - keep it running so user can
+		// easily retry/resume the task. Old done task executors are cleaned up after 2h
+		// by the cleanupOrphanedClaudes routine.
 	} else if result.Success {
 		e.updateStatus(task.ID, db.StatusDone)
 		e.logLine(task.ID, "system", "Task completed successfully")
@@ -732,18 +923,16 @@ func (e *Executor) executeTask(ctx context.Context, task *db.Task) {
 		// Save transcript on completion
 		e.saveTranscriptOnCompletion(task.ID, workDir)
 
-		// Kill Claude process to free memory when task is done
-		e.KillClaudeProcess(task.ID)
+		// NOTE: We intentionally do NOT kill the executor here - keep it running so user can
+		// easily retry/resume the task. Old done task executors are cleaned up after 2h
+		// by the cleanupOrphanedClaudes routine.
 
-		// Extract memories from successful task
+		// Distill and index the completed task (runs in background)
 		go func() {
-			if err := e.ExtractMemories(context.Background(), task); err != nil {
-				e.logger.Error("Memory extraction failed", "task", task.ID, "error", err)
+			if err := e.processCompletedTask(context.Background(), task); err != nil {
+				e.logger.Error("Task processing failed", "task", task.ID, "error", err)
 			}
 		}()
-
-		// Handle recurring task: reset to backlog for next run
-		e.handleRecurringTaskCompletion(task)
 	} else if result.NeedsInput {
 		e.updateStatus(task.ID, db.StatusBlocked)
 		// Log the question with special type so UI can display it
@@ -765,8 +954,43 @@ func (e *Executor) GetProjectDir(project string) string {
 	return e.config.GetProjectDir(project)
 }
 
+// GetExecutor returns the executor for a task by name.
+func (e *Executor) GetExecutor(name string) TaskExecutor {
+	return e.executorFactory.Get(name)
+}
+
+// GetTaskExecutor returns the executor for a specific task.
+func (e *Executor) GetTaskExecutor(task *db.Task) TaskExecutor {
+	name := task.Executor
+	if name == "" {
+		name = db.DefaultExecutor()
+	}
+	return e.executorFactory.Get(name)
+}
+
+// AvailableExecutors returns the names of all available executors.
+func (e *Executor) AvailableExecutors() []string {
+	return e.executorFactory.Available()
+}
+
+// AllExecutors returns the names of all registered executors.
+func (e *Executor) AllExecutors() []string {
+	return e.executorFactory.All()
+}
+
 func (e *Executor) getProjectDir(project string) string {
 	return e.config.GetProjectDir(project)
+}
+
+// getSuspendIdleTimeout returns the configured idle timeout before suspended blocked tasks.
+// Falls back to DefaultSuspendIdleTimeout if not configured.
+func (e *Executor) getSuspendIdleTimeout() time.Duration {
+	if val, err := e.db.GetSetting(config.SettingIdleSuspendTimeout); err == nil && val != "" {
+		if duration, err := time.ParseDuration(val); err == nil {
+			return duration
+		}
+	}
+	return DefaultSuspendIdleTimeout
 }
 
 // getProjectInstructions returns the custom instructions for a project.
@@ -781,23 +1005,25 @@ func (e *Executor) getProjectInstructions(project string) string {
 	return p.Instructions
 }
 
-// prepareAttachments writes task attachments to temp files and returns paths.
+// prepareAttachments writes task attachments to .claude/attachments/ in the worktree.
+// This allows Claude to read them without permission prompts since .claude/ is trusted.
 // Returns a list of file paths and a cleanup function.
-func (e *Executor) prepareAttachments(taskID int64) ([]string, func()) {
+func (e *Executor) prepareAttachments(taskID int64, worktreePath string) ([]string, func()) {
 	attachments, err := e.db.ListAttachmentsWithData(taskID)
 	if err != nil || len(attachments) == 0 {
 		return nil, func() {}
 	}
 
-	var paths []string
-	tempDir, err := os.MkdirTemp("", fmt.Sprintf("task-%d-attachments-", taskID))
-	if err != nil {
-		e.logger.Error("Failed to create temp dir for attachments", "error", err)
+	// Create attachments directory inside .claude/ which Claude has permission to read
+	attachmentsDir := filepath.Join(worktreePath, ".claude", "attachments", fmt.Sprintf("task-%d", taskID))
+	if err := os.MkdirAll(attachmentsDir, 0755); err != nil {
+		e.logger.Error("Failed to create attachments dir", "error", err)
 		return nil, func() {}
 	}
 
+	var paths []string
 	for _, a := range attachments {
-		path := filepath.Join(tempDir, a.Filename)
+		path := filepath.Join(attachmentsDir, a.Filename)
 		if err := os.WriteFile(path, a.Data, 0644); err != nil {
 			e.logger.Error("Failed to write attachment", "file", a.Filename, "error", err)
 			continue
@@ -806,14 +1032,16 @@ func (e *Executor) prepareAttachments(taskID int64) ([]string, func()) {
 	}
 
 	cleanup := func() {
-		os.RemoveAll(tempDir)
+		os.RemoveAll(attachmentsDir)
 	}
 
 	return paths, cleanup
 }
 
 // getAttachmentsSection returns a prompt section describing attachments.
-func (e *Executor) getAttachmentsSection(taskID int64, paths []string) string {
+// The worktreePath parameter is used to convert absolute paths to relative paths
+// so they match the permission pattern Read(.claude/attachments/**).
+func (e *Executor) getAttachmentsSection(taskID int64, paths []string, worktreePath string) string {
 	if len(paths) == 0 {
 		return ""
 	}
@@ -822,7 +1050,13 @@ func (e *Executor) getAttachmentsSection(taskID int64, paths []string) string {
 	section.WriteString("\n## Attachments\n\n")
 	section.WriteString("The following files are attached to this task:\n")
 	for _, p := range paths {
-		section.WriteString(fmt.Sprintf("- %s\n", p))
+		// Convert absolute paths to relative paths so they match permission patterns
+		relPath := p
+		if worktreePath != "" && strings.HasPrefix(p, worktreePath) {
+			relPath = strings.TrimPrefix(p, worktreePath)
+			relPath = strings.TrimPrefix(relPath, string(filepath.Separator))
+		}
+		section.WriteString(fmt.Sprintf("- %s\n", relPath))
 	}
 	section.WriteString("\nYou can read these files using the Read tool.\n\n")
 	return section.String()
@@ -844,30 +1078,45 @@ func (e *Executor) buildPrompt(task *db.Task, attachmentPaths []string) string {
 	// Add project memories if available
 	memories := e.getProjectMemoriesSection(task.Project)
 
+	// Get similar past tasks for reference
+	similarTasks := e.getSimilarTasksSection(task)
+
 	// Get project-specific instructions
 	projectInstructions := e.getProjectInstructions(task.Project)
 
 	// Check for conversation history (from previous runs/retries)
 	conversationHistory := e.getConversationHistory(task.ID)
 
-	// Get attachments section
-	attachments := e.getAttachmentsSection(task.ID, attachmentPaths)
+	// Get attachments section (use relative paths to match permission patterns)
+	attachments := e.getAttachmentsSection(task.ID, attachmentPaths, task.WorktreePath)
+
+	// Always include the core task information first - title and body
+	prompt.WriteString(fmt.Sprintf("# Task: %s\n\n", task.Title))
+	if task.Body != "" {
+		prompt.WriteString(fmt.Sprintf("%s\n\n", task.Body))
+	}
+
+	// Include task metadata (branch, PR, tags) right after the task description
+	taskMeta := e.buildTaskMetadataSection(task)
+	if taskMeta != "" {
+		prompt.WriteString(taskMeta)
+	}
 
 	// Look up task type instructions from database
 	if task.Type != "" {
 		taskType, err := e.db.GetTaskTypeByName(task.Type)
 		if err == nil && taskType != nil {
-			// Apply template substitutions
-			instructions := e.applyTemplateSubstitutions(taskType.Instructions, task, projectInstructions, memories, attachments, conversationHistory)
+			// Apply template substitutions for type-specific instructions
+			instructions := e.applyTemplateSubstitutions(taskType.Instructions, task, projectInstructions, memories, similarTasks, attachments, conversationHistory)
 			prompt.WriteString(instructions)
 			prompt.WriteString("\n")
 		} else {
-			// Fallback to generic task if type not found
-			prompt.WriteString(e.buildGenericPrompt(task, projectInstructions, memories, attachments, conversationHistory))
+			// Fallback to generic context if type not found
+			prompt.WriteString(e.buildGenericContextSection(projectInstructions, memories, similarTasks, attachments, conversationHistory))
 		}
 	} else {
-		// No type specified - use generic prompt
-		prompt.WriteString(e.buildGenericPrompt(task, projectInstructions, memories, attachments, conversationHistory))
+		// No type specified - use generic context
+		prompt.WriteString(e.buildGenericContextSection(projectInstructions, memories, similarTasks, attachments, conversationHistory))
 	}
 
 	// Add response guidance to ALL task types
@@ -896,34 +1145,31 @@ The task system will automatically detect your status.
 	return prompt.String()
 }
 
-// buildRecurringPrompt builds a message for recurring task runs.
-// Includes full task details since the session history may be long.
-func (e *Executor) buildRecurringPrompt(task *db.Task, attachmentPaths []string) string {
-	var sb strings.Builder
-
-	sb.WriteString(fmt.Sprintf("=== Recurring Task Triggered (%s) ===\n\n", task.Recurrence))
-	sb.WriteString(fmt.Sprintf("It's time for your %s task.\n", task.Recurrence))
-	if task.LastRunAt != nil {
-		sb.WriteString(fmt.Sprintf("Last run: %s\n\n", task.LastRunAt.Format("2006-01-02 15:04")))
-	}
-
-	// Include full task details (since history may be long)
-	sb.WriteString("--- Task Details ---\n\n")
-	sb.WriteString(e.buildPrompt(task, attachmentPaths))
-
-	sb.WriteString("\n\nPlease work on this task now.")
-
-	return sb.String()
-}
-
 // applyTemplateSubstitutions replaces template placeholders in task type instructions.
-func (e *Executor) applyTemplateSubstitutions(template string, task *db.Task, projectInstructions, memories, attachments, conversationHistory string) string {
+func (e *Executor) applyTemplateSubstitutions(template string, task *db.Task, projectInstructions, memories, similarTasks, attachments, conversationHistory string) string {
 	result := template
 
 	// Replace placeholders
 	result = strings.ReplaceAll(result, "{{project}}", task.Project)
 	result = strings.ReplaceAll(result, "{{title}}", task.Title)
 	result = strings.ReplaceAll(result, "{{body}}", task.Body)
+	result = strings.ReplaceAll(result, "{{branch}}", task.BranchName)
+	result = strings.ReplaceAll(result, "{{tags}}", task.Tags)
+	if task.PRURL != "" {
+		result = strings.ReplaceAll(result, "{{pr_url}}", task.PRURL)
+	} else {
+		result = strings.ReplaceAll(result, "{{pr_url}}", "")
+	}
+	if task.PRNumber > 0 {
+		result = strings.ReplaceAll(result, "{{pr_number}}", fmt.Sprintf("%d", task.PRNumber))
+	} else {
+		result = strings.ReplaceAll(result, "{{pr_number}}", "")
+	}
+	result = strings.ReplaceAll(result, "{{task_id}}", fmt.Sprintf("%d", task.ID))
+
+	// Include task metadata section for templates that want it
+	taskMeta := e.buildTaskMetadataSection(task)
+	result = strings.ReplaceAll(result, "{{task_metadata}}", taskMeta)
 
 	// For conditional sections, only include if non-empty
 	if projectInstructions != "" {
@@ -936,6 +1182,17 @@ func (e *Executor) applyTemplateSubstitutions(template string, task *db.Task, pr
 		result = strings.ReplaceAll(result, "{{memories}}", memories)
 	} else {
 		result = strings.ReplaceAll(result, "{{memories}}", "")
+	}
+
+	// Similar tasks are injected after memories (no template placeholder for now)
+	if similarTasks != "" {
+		result = strings.ReplaceAll(result, "{{similar_tasks}}", similarTasks)
+		// Also append after memories if no placeholder
+		if !strings.Contains(template, "{{similar_tasks}}") && memories != "" {
+			result = strings.ReplaceAll(result, memories, memories+"\n"+similarTasks)
+		}
+	} else {
+		result = strings.ReplaceAll(result, "{{similar_tasks}}", "")
 	}
 
 	if attachments != "" {
@@ -958,8 +1215,9 @@ func (e *Executor) applyTemplateSubstitutions(template string, task *db.Task, pr
 	return result
 }
 
-// buildGenericPrompt builds a generic prompt for tasks without a specific type.
-func (e *Executor) buildGenericPrompt(task *db.Task, projectInstructions, memories, attachments, conversationHistory string) string {
+// buildGenericContextSection builds the context section (project instructions, memories, etc.)
+// for tasks without a specific type. The task title and body are added separately in buildPrompt.
+func (e *Executor) buildGenericContextSection(projectInstructions, memories, similarTasks, attachments, conversationHistory string) string {
 	var prompt strings.Builder
 
 	if projectInstructions != "" {
@@ -968,9 +1226,8 @@ func (e *Executor) buildGenericPrompt(task *db.Task, projectInstructions, memori
 	if memories != "" {
 		prompt.WriteString(memories)
 	}
-	prompt.WriteString(fmt.Sprintf("Task: %s\n\n", task.Title))
-	if task.Body != "" {
-		prompt.WriteString(fmt.Sprintf("%s\n\n", task.Body))
+	if similarTasks != "" {
+		prompt.WriteString(similarTasks)
 	}
 	if attachments != "" {
 		prompt.WriteString(attachments)
@@ -981,6 +1238,29 @@ func (e *Executor) buildGenericPrompt(task *db.Task, projectInstructions, memori
 	prompt.WriteString("Complete this task and summarize what you did.\n")
 
 	return prompt.String()
+}
+
+// buildTaskMetadataSection creates a section with task metadata (branch, PR, tags).
+func (e *Executor) buildTaskMetadataSection(task *db.Task) string {
+	var parts []string
+
+	if task.BranchName != "" {
+		parts = append(parts, fmt.Sprintf("Branch: %s", task.BranchName))
+	}
+	if task.PRURL != "" {
+		parts = append(parts, fmt.Sprintf("PR: %s", task.PRURL))
+	} else if task.PRNumber > 0 {
+		parts = append(parts, fmt.Sprintf("PR #%d", task.PRNumber))
+	}
+	if task.Tags != "" {
+		parts = append(parts, fmt.Sprintf("Tags: %s", task.Tags))
+	}
+
+	if len(parts) == 0 {
+		return ""
+	}
+
+	return fmt.Sprintf("## Task Details\n\n%s\n\n", strings.Join(parts, "\n"))
 }
 
 // getOnCreateInstructions returns instructions to prepend for new tasks.
@@ -1104,6 +1384,269 @@ func TmuxSessionName(taskID int64) string {
 	return fmt.Sprintf("%s:%s", getDaemonSessionName(), TmuxWindowName(taskID))
 }
 
+// killAllWindowsByNameAllSessions kills ALL windows with a given name across all daemon sessions.
+// Also kills any -shell variant windows.
+func killAllWindowsByNameAllSessions(windowName string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// List all windows across all sessions
+	out, err := exec.CommandContext(ctx, "tmux", "list-windows",
+		"-a", "-F", "#{session_name}:#{window_id}:#{window_name}").Output()
+	if err != nil {
+		return
+	}
+
+	shellWindowName := windowName + "-shell"
+
+	// Kill matching windows BY ID
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if line == "" {
+			continue
+		}
+		parts := strings.SplitN(line, ":", 3)
+		if len(parts) != 3 {
+			continue
+		}
+		sessionName := parts[0]
+		windowID := parts[1]
+		name := parts[2]
+
+		// Only kill windows in daemon sessions
+		if !strings.HasPrefix(sessionName, "task-daemon-") {
+			continue
+		}
+
+		// Kill if name matches (including -shell variant)
+		if name == windowName || name == shellWindowName {
+			exec.CommandContext(ctx, "tmux", "kill-window", "-t", windowID).Run()
+		}
+	}
+}
+
+// getWindowID returns the window ID for a window with the given name in a session.
+// Returns the LAST match (most recently created) if multiple windows have the same name.
+// Returns empty string if no matching window found.
+func getWindowID(session, windowName string) string {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	out, err := exec.CommandContext(ctx, "tmux", "list-windows",
+		"-t", session, "-F", "#{window_id}:#{window_name}").Output()
+	if err != nil {
+		return ""
+	}
+
+	// Return LAST match (most recently created)
+	var windowID string
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if line == "" {
+			continue
+		}
+		parts := strings.SplitN(line, ":", 2)
+		if len(parts) == 2 && parts[1] == windowName {
+			windowID = parts[0]
+		}
+	}
+	return windowID
+}
+
+// CleanupDuplicateWindows removes duplicate tmux windows for a task, keeping only the canonical one.
+// This prevents window proliferation that can occur from repeated break-pane operations.
+func (e *Executor) CleanupDuplicateWindows(taskID int64) {
+	windowName := TmuxWindowName(taskID)
+
+	// Get task's canonical window ID from DB
+	task, err := e.db.GetTask(taskID)
+	if err != nil {
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// List all windows across all sessions
+	out, err := exec.CommandContext(ctx, "tmux", "list-windows",
+		"-a", "-F", "#{session_name}:#{window_id}:#{window_name}").Output()
+	if err != nil {
+		return
+	}
+
+	var windowsToKill []string
+	var canonicalFound bool
+
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if line == "" {
+			continue
+		}
+		parts := strings.SplitN(line, ":", 3)
+		if len(parts) != 3 {
+			continue
+		}
+		sessionName := parts[0]
+		windowID := parts[1]
+		name := parts[2]
+
+		// Only look at daemon sessions
+		if !strings.HasPrefix(sessionName, "task-daemon-") {
+			continue
+		}
+
+		// Check for matching window name (including -shell variant)
+		if name != windowName && name != windowName+"-shell" {
+			continue
+		}
+
+		// Keep canonical window, kill duplicates
+		if task.TmuxWindowID != "" && windowID == task.TmuxWindowID {
+			canonicalFound = true
+			continue // Keep this one
+		}
+
+		if task.TmuxWindowID == "" && !canonicalFound {
+			// No canonical set - keep first, set it as canonical
+			if name == windowName { // Only set canonical for main window, not -shell
+				e.db.UpdateTaskWindowID(taskID, windowID)
+				canonicalFound = true
+				continue
+			}
+		}
+
+		windowsToKill = append(windowsToKill, windowID)
+	}
+
+	// Kill duplicates
+	for _, windowID := range windowsToKill {
+		e.logger.Debug("Cleaning up duplicate window", "task", taskID, "windowID", windowID)
+		exec.CommandContext(ctx, "tmux", "kill-window", "-t", windowID).Run()
+	}
+}
+
+// GetTasksWithRunningShellProcess returns a map of task IDs that have a running process
+// in their shell pane. A process is considered "running" if the shell pane exists and
+// has a foreground command that differs from the user's default shell.
+func GetTasksWithRunningShellProcess() map[int64]bool {
+	result := make(map[int64]bool)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	// List all panes across all sessions with their command and window name
+	// Format: session:window:pane_index pane_current_command
+	out, err := exec.CommandContext(ctx, "tmux", "list-panes", "-a", "-F", "#{session_name}:#{window_name}:#{pane_index} #{pane_current_command}").Output()
+	if err != nil {
+		return result
+	}
+
+	// Get user's default shell (basename only for comparison)
+	userShell := os.Getenv("SHELL")
+	if userShell == "" {
+		userShell = "/bin/zsh"
+	}
+	// Extract basename (e.g., "/bin/zsh" -> "zsh")
+	if idx := strings.LastIndex(userShell, "/"); idx >= 0 {
+		userShell = userShell[idx+1:]
+	}
+
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if line == "" {
+			continue
+		}
+
+		// Split into "session:window:index" and "command"
+		parts := strings.SplitN(line, " ", 2)
+		if len(parts) != 2 {
+			continue
+		}
+
+		location := parts[0]
+		command := parts[1]
+
+		// Parse window name to extract task ID
+		// Format: task-daemon-XXX:task-123:1 (pane index 1 is the shell pane)
+		locParts := strings.Split(location, ":")
+		if len(locParts) < 3 {
+			continue
+		}
+
+		windowName := locParts[1]
+		paneIndex := locParts[2]
+
+		// Only check pane index 1 (the shell pane, not the Claude pane at index 0)
+		if paneIndex != "1" {
+			continue
+		}
+
+		// Extract task ID from window name "task-123"
+		if !strings.HasPrefix(windowName, "task-") {
+			continue
+		}
+
+		var taskID int64
+		if _, err := fmt.Sscanf(windowName, "task-%d", &taskID); err != nil {
+			continue
+		}
+
+		// If the command differs from user's shell, a process is running
+		// This catches cases like ./bin/dev (shows as "bash" even if user's shell is zsh)
+		if command != userShell {
+			result[taskID] = true
+		}
+	}
+
+	return result
+}
+
+// HasRunningProcessInTaskUI checks if the task-ui session has a running process
+// in the shell pane (pane index 2). This is used to detect running processes
+// for the currently viewed task, whose panes are joined to task-ui rather than
+// being in the daemon.
+func HasRunningProcessInTaskUI() bool {
+	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+	defer cancel()
+
+	// Find task-ui session
+	out, err := exec.CommandContext(ctx, "tmux", "list-panes", "-a", "-F", "#{session_name}:#{pane_index} #{pane_current_command}").Output()
+	if err != nil {
+		return false
+	}
+
+	// Get user's default shell (basename only for comparison)
+	userShell := os.Getenv("SHELL")
+	if userShell == "" {
+		userShell = "/bin/zsh"
+	}
+	// Extract basename (e.g., "/bin/zsh" -> "zsh")
+	if idx := strings.LastIndex(userShell, "/"); idx >= 0 {
+		userShell = userShell[idx+1:]
+	}
+
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if line == "" {
+			continue
+		}
+
+		parts := strings.SplitN(line, " ", 2)
+		if len(parts) != 2 {
+			continue
+		}
+
+		location := parts[0]
+		command := parts[1]
+
+		// Look for task-ui session, pane index 2 (the shell pane when viewing a task)
+		if strings.HasPrefix(location, "task-ui") && strings.HasSuffix(location, ":2") {
+			// If the command differs from user's shell, a process is running
+			// This catches cases like ./bin/dev (shows as "bash" even if user's shell is zsh)
+			if command != userShell {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
 // ensureTmuxDaemon ensures the task-daemon session exists.
 // Returns the session name on success for callers that need it.
 func ensureTmuxDaemon() (string, error) {
@@ -1139,7 +1682,15 @@ func ensureTmuxDaemon() (string, error) {
 
 // createTmuxWindow creates a new tmux window in the daemon session with retry logic.
 // If the session doesn't exist, it will re-create it and retry once.
+// SECURITY: workDir must be within a .task-worktrees directory to prevent Claude from
+// accidentally writing to the main project directory.
 func createTmuxWindow(daemonSession, windowName, workDir, script string) (string, error) {
+	// SECURITY: Validate that workDir is within a .task-worktrees directory
+	// This prevents Claude from running in the main project directory
+	if !isValidWorktreePath(workDir) {
+		return "", fmt.Errorf("security: refusing to create tmux window with workDir outside .task-worktrees: %s", workDir)
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -1203,6 +1754,13 @@ func (e *Executor) setupClaudeHooks(workDir string, taskID int64) (cleanup func(
 	// - Stop: Fires when Claude finishes responding - marks task "blocked" when waiting for input
 	// - PreCompact: Fires before Claude compacts context - saves summary to DB for persistence
 	hooksConfig := map[string]interface{}{
+		// Pre-approve reading from .claude/attachments/ so Claude can access task attachments
+		// without permission prompts (attachments are written there by prepareAttachments)
+		"permissions": map[string]interface{}{
+			"allow": []string{
+				"Read(.claude/attachments/**)",
+			},
+		},
 		"hooks": map[string]interface{}{
 			"PreToolUse": []map[string]interface{}{
 				{
@@ -1263,12 +1821,34 @@ func (e *Executor) setupClaudeHooks(workDir string, taskID int64) (cleanup func(
 	var finalConfig map[string]interface{}
 
 	if existingErr == nil {
-		// Merge our hooks with existing settings
+		// Merge our hooks and permissions with existing settings
 		if json.Unmarshal(existingData, &finalConfig) != nil {
 			finalConfig = hooksConfig
 		} else {
 			// Merge hooks into existing config
 			finalConfig["hooks"] = hooksConfig["hooks"]
+
+			// Merge permissions - add our allow rules to existing ones
+			if existingPerms, ok := finalConfig["permissions"].(map[string]interface{}); ok {
+				if existingAllow, ok := existingPerms["allow"].([]interface{}); ok {
+					// Add our permission if not already present
+					attachmentPerm := "Read(.claude/attachments/**)"
+					found := false
+					for _, p := range existingAllow {
+						if p == attachmentPerm {
+							found = true
+							break
+						}
+					}
+					if !found {
+						existingPerms["allow"] = append(existingAllow, attachmentPerm)
+					}
+				} else {
+					existingPerms["allow"] = hooksConfig["permissions"].(map[string]interface{})["allow"]
+				}
+			} else {
+				finalConfig["permissions"] = hooksConfig["permissions"]
+			}
 		}
 	} else {
 		finalConfig = hooksConfig
@@ -1304,6 +1884,8 @@ func (e *Executor) runClaude(ctx context.Context, task *db.Task, workDir, prompt
 		return execResult{Message: "tmux is not installed"}
 	}
 
+	paths := e.claudePathsForProject(task.Project)
+
 	// Ensure task-daemon session exists
 	daemonSession, err := ensureTmuxDaemon()
 	if err != nil {
@@ -1315,10 +1897,8 @@ func (e *Executor) runClaude(ctx context.Context, task *db.Task, workDir, prompt
 	windowName := TmuxWindowName(task.ID)
 	windowTarget := fmt.Sprintf("%s:%s", daemonSession, windowName)
 
-	// Kill any existing window with this name (with timeout)
-	killCtx, killCancel := context.WithTimeout(context.Background(), 3*time.Second)
-	exec.CommandContext(killCtx, "tmux", "kill-window", "-t", windowTarget).Run()
-	killCancel()
+	// Kill ALL existing windows with this name (handles duplicates)
+	killAllWindowsByNameAllSessions(windowName)
 
 	// Setup Claude hooks for status updates
 	cleanupHooks, err := e.setupClaudeHooks(workDir, task.ID)
@@ -1362,13 +1942,14 @@ func (e *Executor) runClaude(ctx context.Context, task *db.Task, workDir, prompt
 	// Only use stored session ID - no file-based fallback to avoid cross-task contamination
 	var script string
 	existingSessionID := task.ClaudeSessionID
+	envPrefix := claudeEnvPrefix(paths.configDir)
 	if existingSessionID != "" {
 		e.logLine(task.ID, "system", fmt.Sprintf("Resuming existing session %s", existingSessionID))
-		script = fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q claude %s--chrome --resume %s "$(cat %q)"`,
-			task.ID, sessionID, task.Port, task.WorktreePath, dangerousFlag, existingSessionID, promptFile.Name())
+		script = fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %sclaude %s--chrome --resume %s "$(cat %q)"`,
+			task.ID, sessionID, task.Port, task.WorktreePath, envPrefix, dangerousFlag, existingSessionID, promptFile.Name())
 	} else {
-		script = fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q claude %s--chrome "$(cat %q)"`,
-			task.ID, sessionID, task.Port, task.WorktreePath, dangerousFlag, promptFile.Name())
+		script = fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %sclaude %s--chrome "$(cat %q)"`,
+			task.ID, sessionID, task.Port, task.WorktreePath, envPrefix, dangerousFlag, promptFile.Name())
 	}
 
 	// Create new window in task-daemon session (with retry logic for race conditions)
@@ -1396,8 +1977,15 @@ func (e *Executor) runClaude(ctx context.Context, task *db.Task, workDir, prompt
 		e.logger.Warn("failed to save daemon session", "task", task.ID, "error", err)
 	}
 
+	// Capture and store the window ID for reliable targeting
+	if windowID := getWindowID(daemonSession, windowName); windowID != "" {
+		if err := e.db.UpdateTaskWindowID(task.ID, windowID); err != nil {
+			e.logger.Warn("failed to save window ID", "task", task.ID, "error", err)
+		}
+	}
+
 	// Ensure shell pane exists alongside Claude pane with environment variables
-	e.ensureShellPane(windowTarget, workDir, task.ID, task.Port, task.WorktreePath)
+	e.ensureShellPane(windowTarget, workDir, task.ID, task.Port, task.WorktreePath, paths.configDir)
 
 	// Configure tmux window with helpful status bar
 	e.configureTmuxWindow(windowTarget)
@@ -1425,6 +2013,8 @@ func (e *Executor) runClaudeResume(ctx context.Context, task *db.Task, workDir, 
 		return e.runClaude(ctx, task, workDir, fullPrompt)
 	}
 
+	paths := e.claudePathsForProject(task.Project)
+
 	e.logLine(task.ID, "system", fmt.Sprintf("Resuming session %s", claudeSessionID))
 
 	// Check if tmux is available
@@ -1444,10 +2034,8 @@ func (e *Executor) runClaudeResume(ctx context.Context, task *db.Task, workDir, 
 	windowName := TmuxWindowName(task.ID)
 	windowTarget := fmt.Sprintf("%s:%s", daemonSession, windowName)
 
-	// Kill any existing window with this name (with timeout)
-	killCtx, killCancel := context.WithTimeout(context.Background(), 3*time.Second)
-	exec.CommandContext(killCtx, "tmux", "kill-window", "-t", windowTarget).Run()
-	killCancel()
+	// Kill ALL existing windows with this name (handles duplicates)
+	killAllWindowsByNameAllSessions(windowName)
 
 	// Setup Claude hooks for status updates
 	cleanupHooks, err := e.setupClaudeHooks(workDir, task.ID)
@@ -1484,8 +2072,9 @@ func (e *Executor) runClaudeResume(ctx context.Context, task *db.Task, workDir, 
 	if os.Getenv("WORKTREE_DANGEROUS_MODE") == "1" {
 		dangerousFlag = "--dangerously-skip-permissions "
 	}
-	script := fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q claude %s--chrome --resume %s "$(cat %q)"`,
-		task.ID, taskSessionID, task.Port, task.WorktreePath, dangerousFlag, claudeSessionID, feedbackFile.Name())
+	envPrefix := claudeEnvPrefix(paths.configDir)
+	script := fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %sclaude %s--chrome --resume %s "$(cat %q)"`,
+		task.ID, taskSessionID, task.Port, task.WorktreePath, envPrefix, dangerousFlag, claudeSessionID, feedbackFile.Name())
 
 	// Create new window in task-daemon session (with retry logic for race conditions)
 	actualSession, tmuxErr := createTmuxWindow(daemonSession, windowName, workDir, script)
@@ -1512,8 +2101,15 @@ func (e *Executor) runClaudeResume(ctx context.Context, task *db.Task, workDir, 
 		e.logger.Warn("failed to save daemon session", "task", task.ID, "error", err)
 	}
 
+	// Capture and store the window ID for reliable targeting
+	if windowID := getWindowID(daemonSession, windowName); windowID != "" {
+		if err := e.db.UpdateTaskWindowID(task.ID, windowID); err != nil {
+			e.logger.Warn("failed to save window ID", "task", task.ID, "error", err)
+		}
+	}
+
 	// Ensure shell pane exists alongside Claude pane with environment variables
-	e.ensureShellPane(windowTarget, workDir, task.ID, task.Port, task.WorktreePath)
+	e.ensureShellPane(windowTarget, workDir, task.ID, task.Port, task.WorktreePath, paths.configDir)
 
 	// Configure tmux window with helpful status bar
 	e.configureTmuxWindow(windowTarget)
@@ -1539,6 +2135,7 @@ func (e *Executor) ResumeDangerous(taskID int64) bool {
 		e.logger.Error("Failed to get task", "taskID", taskID, "error", err)
 		return false
 	}
+	paths := e.claudePathsForProject(task.Project)
 
 	claudeSessionID := task.ClaudeSessionID
 	if claudeSessionID == "" {
@@ -1561,20 +2158,10 @@ func (e *Executor) ResumeDangerous(taskID int64) bool {
 		return false
 	}
 
-	// Use task's stored daemon session for killing existing window
-	// Fall back to current session if not stored (for backwards compatibility)
-	oldDaemonSession := task.DaemonSession
-	if oldDaemonSession == "" {
-		oldDaemonSession = getDaemonSessionName()
-	}
-
 	windowName := TmuxWindowName(taskID)
-	oldWindowTarget := fmt.Sprintf("%s:%s", oldDaemonSession, windowName)
 
-	// Kill any existing window with this name (with timeout)
-	killCtx, killCancel := context.WithTimeout(context.Background(), 3*time.Second)
-	exec.CommandContext(killCtx, "tmux", "kill-window", "-t", oldWindowTarget).Run()
-	killCancel()
+	// Kill ALL existing windows with this name across all sessions (handles duplicates)
+	killAllWindowsByNameAllSessions(windowName)
 
 	// Ensure task-daemon session exists for creating new window
 	daemonSession, err := ensureTmuxDaemon()
@@ -1603,8 +2190,9 @@ func (e *Executor) ResumeDangerous(taskID int64) bool {
 	}
 
 	// Force dangerous mode regardless of WORKTREE_DANGEROUS_MODE setting
-	script := fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q claude --dangerously-skip-permissions --chrome --resume %s`,
-		taskID, taskSessionID, task.Port, task.WorktreePath, claudeSessionID)
+	envPrefix := claudeEnvPrefix(paths.configDir)
+	script := fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %sclaude --dangerously-skip-permissions --chrome --resume %s`,
+		taskID, taskSessionID, task.Port, task.WorktreePath, envPrefix, claudeSessionID)
 
 	// Create new window in task-daemon session (with retry logic for race conditions)
 	actualSession, tmuxErr := createTmuxWindow(daemonSession, windowName, workDir, script)
@@ -1630,8 +2218,15 @@ func (e *Executor) ResumeDangerous(taskID int64) bool {
 		e.logger.Warn("failed to save daemon session", "task", taskID, "error", err)
 	}
 
+	// Capture and store the window ID for reliable targeting
+	if windowID := getWindowID(daemonSession, windowName); windowID != "" {
+		if err := e.db.UpdateTaskWindowID(taskID, windowID); err != nil {
+			e.logger.Warn("failed to save window ID", "task", taskID, "error", err)
+		}
+	}
+
 	// Ensure shell pane exists alongside Claude pane with environment variables
-	e.ensureShellPane(windowTarget, workDir, task.ID, task.Port, task.WorktreePath)
+	e.ensureShellPane(windowTarget, workDir, task.ID, task.Port, task.WorktreePath, paths.configDir)
 
 	// Configure tmux window with helpful status bar
 	e.configureTmuxWindow(windowTarget)
@@ -1658,6 +2253,7 @@ func (e *Executor) ResumeSafe(taskID int64) bool {
 		e.logger.Error("Failed to get task", "taskID", taskID, "error", err)
 		return false
 	}
+	paths := e.claudePathsForProject(task.Project)
 
 	claudeSessionID := task.ClaudeSessionID
 	if claudeSessionID == "" {
@@ -1680,20 +2276,10 @@ func (e *Executor) ResumeSafe(taskID int64) bool {
 		return false
 	}
 
-	// Use task's stored daemon session for killing existing window
-	// Fall back to current session if not stored (for backwards compatibility)
-	oldDaemonSession := task.DaemonSession
-	if oldDaemonSession == "" {
-		oldDaemonSession = getDaemonSessionName()
-	}
-
 	windowName := TmuxWindowName(taskID)
-	oldWindowTarget := fmt.Sprintf("%s:%s", oldDaemonSession, windowName)
 
-	// Kill any existing window with this name (with timeout)
-	killCtx, killCancel := context.WithTimeout(context.Background(), 3*time.Second)
-	exec.CommandContext(killCtx, "tmux", "kill-window", "-t", oldWindowTarget).Run()
-	killCancel()
+	// Kill ALL existing windows with this name across all sessions (handles duplicates)
+	killAllWindowsByNameAllSessions(windowName)
 
 	// Ensure task-daemon session exists for creating new window
 	daemonSession, err := ensureTmuxDaemon()
@@ -1722,8 +2308,9 @@ func (e *Executor) ResumeSafe(taskID int64) bool {
 	}
 
 	// Resume without --dangerously-skip-permissions (safe mode)
-	script := fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q claude --chrome --resume %s`,
-		taskID, taskSessionID, task.Port, task.WorktreePath, claudeSessionID)
+	envPrefix := claudeEnvPrefix(paths.configDir)
+	script := fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %sclaude --chrome --resume %s`,
+		taskID, taskSessionID, task.Port, task.WorktreePath, envPrefix, claudeSessionID)
 
 	// Create new window in task-daemon session (with retry logic for race conditions)
 	actualSession, tmuxErr := createTmuxWindow(daemonSession, windowName, workDir, script)
@@ -1749,8 +2336,15 @@ func (e *Executor) ResumeSafe(taskID int64) bool {
 		e.logger.Warn("failed to save daemon session", "task", taskID, "error", err)
 	}
 
+	// Capture and store the window ID for reliable targeting
+	if windowID := getWindowID(daemonSession, windowName); windowID != "" {
+		if err := e.db.UpdateTaskWindowID(taskID, windowID); err != nil {
+			e.logger.Warn("failed to save window ID", "task", taskID, "error", err)
+		}
+	}
+
 	// Ensure shell pane exists alongside Claude pane with environment variables
-	e.ensureShellPane(windowTarget, workDir, task.ID, task.Port, task.WorktreePath)
+	e.ensureShellPane(windowTarget, workDir, task.ID, task.Port, task.WorktreePath, paths.configDir)
 
 	// Configure tmux window with helpful status bar
 	e.configureTmuxWindow(windowTarget)
@@ -1767,27 +2361,24 @@ func (e *Executor) ResumeSafe(taskID int64) bool {
 	return true
 }
 
-// FindClaudeSessionID finds the most recent claude session ID for a workDir.
+// FindClaudeSessionID finds the most recent claude session ID for a workDir using the default config dir.
 // Exported for use by the UI to check for resumable sessions.
 func FindClaudeSessionID(workDir string) string {
-	return findClaudeSessionIDImpl(workDir)
+	return findClaudeSessionIDImpl(workDir, DefaultClaudeConfigDir())
 }
 
 // findClaudeSessionIDImpl is the shared implementation
-func findClaudeSessionIDImpl(workDir string) string {
-	// Claude stores sessions in ~/.claude/projects/<escaped-path>/
+func findClaudeSessionIDImpl(workDir, configDir string) string {
+	// Claude stores sessions in CLAUDE_CONFIG_DIR/projects/<escaped-path>/
 	// The path is escaped: /Users/bruno/foo -> -Users-bruno-foo
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return ""
-	}
+	baseDir := ResolveClaudeConfigDir(configDir)
 
 	// Escape the workDir path to match Claude's project directory naming
 	// Claude replaces / with - and . with - (keeps leading dash)
 	escapedPath := strings.ReplaceAll(workDir, "/", "-")
 	escapedPath = strings.ReplaceAll(escapedPath, ".", "-")
 
-	projectDir := filepath.Join(home, ".claude", "projects", escapedPath)
+	projectDir := filepath.Join(baseDir, "projects", escapedPath)
 
 	// Find the most recent UUID.jsonl file (not agent-*.jsonl)
 	entries, err := os.ReadDir(projectDir)
@@ -1830,8 +2421,9 @@ func findClaudeSessionIDImpl(workDir string) string {
 // RenameClaudeSession renames the Claude session for a given workDir to the new name.
 // It uses Claude's /rename slash command via print mode.
 // This is useful when a task title changes and we want the Claude session to reflect it.
-func RenameClaudeSession(workDir, newName string) error {
-	sessionID := findClaudeSessionIDImpl(workDir)
+func RenameClaudeSession(workDir, newName, configDir string) error {
+	resolvedDir := ResolveClaudeConfigDir(configDir)
+	sessionID := findClaudeSessionIDImpl(workDir, resolvedDir)
 	if sessionID == "" {
 		return nil // No session to rename
 	}
@@ -1842,6 +2434,7 @@ func RenameClaudeSession(workDir, newName string) error {
 
 	cmd := exec.CommandContext(ctx, "claude", "--resume", sessionID, "-p", "/rename "+newName)
 	cmd.Dir = workDir
+	cmd.Env = append(os.Environ(), fmt.Sprintf("CLAUDE_CONFIG_DIR=%s", resolvedDir))
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		// Log but don't fail - renaming is a nice-to-have
@@ -1854,11 +2447,12 @@ func RenameClaudeSession(workDir, newName string) error {
 // RenameClaudeSessionForTask renames the Claude session for a task if it has a worktree.
 // This is a convenience method that handles the common case of renaming based on task.
 func (e *Executor) RenameClaudeSessionForTask(task *db.Task, newName string) {
-	if task.WorktreePath == "" {
+	if task == nil || task.WorktreePath == "" {
 		return
 	}
 
-	if err := RenameClaudeSession(task.WorktreePath, newName); err != nil {
+	paths := e.claudePathsForProject(task.Project)
+	if err := RenameClaudeSession(task.WorktreePath, newName, paths.configDir); err != nil {
 		e.logger.Debug("Could not rename Claude session", "taskID", task.ID, "error", err)
 	}
 }
@@ -2011,7 +2605,7 @@ func (e *Executor) pollTmuxSession(ctx context.Context, taskID int64, sessionNam
 // ensureShellPane creates a shell pane alongside the Claude pane in the daemon window.
 // This ensures every task always has a persistent shell pane that survives navigation.
 // It also sets environment variables (WORKTREE_TASK_ID, WORKTREE_PORT, WORKTREE_PATH) in the shell.
-func (e *Executor) ensureShellPane(windowTarget, workDir string, taskID int64, port int, worktreePath string) {
+func (e *Executor) ensureShellPane(windowTarget, workDir string, taskID int64, port int, worktreePath string, claudeConfigDir string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -2025,9 +2619,14 @@ func (e *Executor) ensureShellPane(windowTarget, workDir string, taskID int64, p
 		exec.CommandContext(ctx, "tmux", "send-keys", "-t", windowTarget+".1", fmt.Sprintf("cd %q", workDir), "Enter").Run()
 		// Set environment variables in the existing shell pane
 		envCmd := fmt.Sprintf("export WORKTREE_TASK_ID=%d WORKTREE_PORT=%d WORKTREE_PATH=%q", taskID, port, worktreePath)
+		if claudeConfigDir != "" {
+			envCmd += fmt.Sprintf(" CLAUDE_CONFIG_DIR=%q", claudeConfigDir)
+		}
 		exec.CommandContext(ctx, "tmux", "send-keys", "-t", windowTarget+".1", envCmd, "Enter").Run()
 		exec.CommandContext(ctx, "tmux", "send-keys", "-t", windowTarget+".1", "clear", "Enter").Run()
 		exec.CommandContext(ctx, "tmux", "select-pane", "-t", windowTarget+".1", "-T", "Shell").Run()
+		// Save pane IDs to database for deterministic identification
+		e.savePaneIDs(ctx, windowTarget, taskID)
 		return
 	}
 
@@ -2038,10 +2637,10 @@ func (e *Executor) ensureShellPane(windowTarget, workDir string, taskID int64, p
 		shell = "/bin/zsh"
 	}
 	splitCmd := exec.CommandContext(ctx, "tmux", "split-window",
-		"-h",           // horizontal split (side by side)
-		"-t", windowTarget+".0",  // split from Claude pane
-		"-c", workDir,  // start in task workdir
-		shell,          // user's shell to prevent immediate exit
+		"-h",                    // horizontal split (side by side)
+		"-t", windowTarget+".0", // split from Claude pane
+		"-c", workDir, // start in task workdir
+		shell, // user's shell to prevent immediate exit
 	)
 	splitOut, splitErr := splitCmd.CombinedOutput()
 	if splitErr != nil {
@@ -2064,6 +2663,9 @@ func (e *Executor) ensureShellPane(windowTarget, workDir string, taskID int64, p
 	// Set environment variables in the shell pane
 	// Use export commands so they persist for all commands in the shell
 	envCmd := fmt.Sprintf("export WORKTREE_TASK_ID=%d WORKTREE_PORT=%d WORKTREE_PATH=%q", taskID, port, worktreePath)
+	if claudeConfigDir != "" {
+		envCmd += fmt.Sprintf(" CLAUDE_CONFIG_DIR=%q", claudeConfigDir)
+	}
 	exec.CommandContext(ctx, "tmux", "send-keys", "-t", windowTarget+".1", envCmd, "Enter").Run()
 	// Clear the screen so the export command doesn't clutter the shell
 	exec.CommandContext(ctx, "tmux", "send-keys", "-t", windowTarget+".1", "clear", "Enter").Run()
@@ -2071,7 +2673,40 @@ func (e *Executor) ensureShellPane(windowTarget, workDir string, taskID int64, p
 	// Select Claude pane so it's active (user sees Claude output)
 	exec.CommandContext(ctx, "tmux", "select-pane", "-t", windowTarget+".0").Run()
 
+	// Save pane IDs to database for deterministic identification
+	e.savePaneIDs(ctx, windowTarget, taskID)
+
 	e.logger.Info("created shell pane with env vars", "window", windowTarget, "taskID", taskID, "port", port)
+}
+
+// savePaneIDs saves the tmux pane IDs for Claude (.0) and Shell (.1) panes to the database.
+// This enables deterministic pane identification when joining/breaking panes.
+func (e *Executor) savePaneIDs(ctx context.Context, windowTarget string, taskID int64) {
+	// Get Claude pane ID (pane .0)
+	claudePaneCmd := exec.CommandContext(ctx, "tmux", "display-message", "-t", windowTarget+".0", "-p", "#{pane_id}")
+	claudePaneOut, err := claudePaneCmd.Output()
+	if err != nil {
+		e.logger.Warn("failed to get Claude pane ID", "window", windowTarget, "error", err)
+		return
+	}
+	claudePaneID := strings.TrimSpace(string(claudePaneOut))
+
+	// Get Shell pane ID (pane .1)
+	shellPaneCmd := exec.CommandContext(ctx, "tmux", "display-message", "-t", windowTarget+".1", "-p", "#{pane_id}")
+	shellPaneOut, err := shellPaneCmd.Output()
+	if err != nil {
+		e.logger.Warn("failed to get Shell pane ID", "window", windowTarget, "error", err)
+		return
+	}
+	shellPaneID := strings.TrimSpace(string(shellPaneOut))
+
+	// Save to database
+	if err := e.db.UpdateTaskPaneIDs(taskID, claudePaneID, shellPaneID); err != nil {
+		e.logger.Warn("failed to save pane IDs", "taskID", taskID, "error", err)
+		return
+	}
+
+	e.logger.Debug("saved pane IDs", "taskID", taskID, "claudePaneID", claudePaneID, "shellPaneID", shellPaneID)
 }
 
 // configureTmuxWindow sets up helpful UI elements for a task window.
@@ -2088,7 +2723,6 @@ func (e *Executor) configureTmuxWindow(windowTarget string) {
 	exec.CommandContext(ctx, "tmux", "set-option", "-t", daemonSession, "status-right", " Ctrl+C kills Claude ").Run()
 	exec.CommandContext(ctx, "tmux", "set-option", "-t", daemonSession, "status-right-length", "30").Run()
 }
-
 
 func (e *Executor) logLine(taskID int64, lineType, content string) {
 	// Store in database
@@ -2158,6 +2792,42 @@ func (e *Executor) getProjectMemoriesSection(project string) string {
 	return sb.String()
 }
 
+
+// getSimilarTasksSection checks if similar past tasks exist and returns a hint.
+// Instead of injecting full content, we just notify Claude that the search tools are available.
+// Claude can then use workflow_search_tasks and workflow_show_task MCP tools on-demand.
+func (e *Executor) getSimilarTasksSection(task *db.Task) string {
+	if task.Project == "" {
+		return ""
+	}
+
+	// Quick check if any similar tasks exist
+	results, err := e.db.FindSimilarTasks(task, 1)
+	if err != nil || len(results) == 0 {
+		return ""
+	}
+
+	// Filter out the current task
+	hasSimilar := false
+	for _, r := range results {
+		if r.TaskID != task.ID {
+			hasSimilar = true
+			break
+		}
+	}
+
+	if !hasSimilar {
+		return ""
+	}
+
+	// Just return a hint - Claude can use MCP tools to look up details
+	return `## Past Task Reference
+
+Similar tasks have been completed in this project before. If you need to reference how similar work was done, use the workflow_search_tasks tool to find relevant past tasks, then workflow_show_task to get details.
+
+`
+}
+
 // getConversationHistory builds a context section from previous task runs.
 // This includes questions asked, user responses, and continuation markers.
 //
@@ -2224,8 +2894,9 @@ func (e *Executor) CheckPRStateAndUpdateTask(taskID int64) {
 		return
 	}
 
-	// Only check tasks that aren't done and have a branch
-	if task.Status == db.StatusDone || task.BranchName == "" {
+	// Only auto-close backlog tasks - if task ever started (queued/processing/blocked),
+	// let user decide what to do with it
+	if task.Status != db.StatusBacklog || task.BranchName == "" {
 		return
 	}
 
@@ -2258,6 +2929,11 @@ func (e *Executor) checkMergedBranches() {
 	}
 
 	for _, task := range tasks {
+		// Only auto-close backlog tasks - if task ever started, let user decide
+		if task.Status != db.StatusBacklog {
+			continue
+		}
+
 		// Skip tasks currently being processed
 		e.mu.RLock()
 		isRunning := e.runningTasks[task.ID]
@@ -2424,6 +3100,8 @@ func (e *Executor) setupWorktree(task *db.Task) (string, error) {
 		e.db.UpdateTask(task)
 	}
 
+	paths := e.claudePathsForProject(task.Project)
+
 	// Get project directory
 	projectDir := e.getProjectDir(task.Project)
 
@@ -2431,11 +3109,30 @@ func (e *Executor) setupWorktree(task *db.Task) (string, error) {
 		return "", fmt.Errorf("project directory not found for project: %s", task.Project)
 	}
 
-	// Check if project is a git repo
+	// Check if project is a git repo, initialize one if not
+	// Git is required for worktree isolation - tasks always run in worktrees
+	// NOTE: This should rarely happen now - git repos are initialized during project creation.
+	// If we get here, it's a legacy project created before that change.
 	gitDir := filepath.Join(projectDir, ".git")
 	if _, err := os.Stat(gitDir); os.IsNotExist(err) {
-		// Not a git repo, use project dir directly
-		return projectDir, nil
+		// Initialize git repo so we can create worktrees
+		e.logger.Warn("Project missing git repo - initializing (legacy project?)", "project", task.Project, "path", projectDir)
+		cmd := exec.Command("git", "init")
+		cmd.Dir = projectDir
+		if output, err := cmd.CombinedOutput(); err != nil {
+			return "", fmt.Errorf("failed to initialize git repo: %v\n%s", err, string(output))
+		}
+
+		// Create initial commit so we have a branch to create worktrees from
+		cmd = exec.Command("git", "add", "-A")
+		cmd.Dir = projectDir
+		cmd.Run() // Ignore errors - might be empty repo
+
+		cmd = exec.Command("git", "commit", "--allow-empty", "-m", "Initial commit for taskyou worktree support")
+		cmd.Dir = projectDir
+		if output, err := cmd.CombinedOutput(); err != nil {
+			return "", fmt.Errorf("failed to create initial commit: %v\n%s", err, string(output))
+		}
 	}
 
 	// If task already has a worktree path, reuse it (don't recalculate from title)
@@ -2443,8 +3140,10 @@ func (e *Executor) setupWorktree(task *db.Task) (string, error) {
 	if task.WorktreePath != "" {
 		if _, err := os.Stat(task.WorktreePath); err == nil {
 			trustMiseConfig(task.WorktreePath)
+			e.writeWorktreeEnvFile(projectDir, task.WorktreePath, task, paths.configDir)
 			symlinkClaudeConfig(projectDir, task.WorktreePath)
-			copyMCPConfig(projectDir, task.WorktreePath)
+			symlinkMCPConfig(projectDir, task.WorktreePath)
+			copyMCPConfig(paths.configFile, projectDir, task.WorktreePath)
 			return task.WorktreePath, nil
 		}
 		// Worktree path was set but directory doesn't exist, clear it and create fresh
@@ -2488,8 +3187,11 @@ func (e *Executor) setupWorktree(task *db.Task) (string, error) {
 			}
 		}
 		trustMiseConfig(worktreePath)
+		e.writeWorktreeEnvFile(projectDir, worktreePath, task, paths.configDir)
 		symlinkClaudeConfig(projectDir, worktreePath)
-		copyMCPConfig(projectDir, worktreePath)
+		symlinkMCPConfig(projectDir, worktreePath)
+		copyMCPConfig(paths.configFile, projectDir, worktreePath)
+		e.runWorktreeInitScript(projectDir, worktreePath, task)
 		return worktreePath, nil
 	}
 
@@ -2528,7 +3230,11 @@ func (e *Executor) setupWorktree(task *db.Task) (string, error) {
 						}
 					}
 					trustMiseConfig(worktreePath)
-					copyMCPConfig(projectDir, worktreePath)
+					e.writeWorktreeEnvFile(projectDir, worktreePath, task, paths.configDir)
+					symlinkClaudeConfig(projectDir, worktreePath)
+					symlinkMCPConfig(projectDir, worktreePath)
+					copyMCPConfig(paths.configFile, projectDir, worktreePath)
+					e.runWorktreeInitScript(projectDir, worktreePath, task)
 					return worktreePath, nil
 				}
 				return "", fmt.Errorf("create worktree: %v\n%s\n%s", err, string(output), string(output2))
@@ -2561,13 +3267,105 @@ func (e *Executor) setupWorktree(task *db.Task) (string, error) {
 	}
 
 	trustMiseConfig(worktreePath)
+	e.writeWorktreeEnvFile(projectDir, worktreePath, task, paths.configDir)
 	symlinkClaudeConfig(projectDir, worktreePath)
-	copyMCPConfig(projectDir, worktreePath)
+	symlinkMCPConfig(projectDir, worktreePath)
+	copyMCPConfig(paths.configFile, projectDir, worktreePath)
 
-	// Run worktree init script if configured (only for newly created worktrees)
+	// Run worktree init script if configured
 	e.runWorktreeInitScript(projectDir, worktreePath, task)
 
 	return worktreePath, nil
+}
+
+// getUserShell returns the login shell for the given username.
+// On macOS it uses dscl, on Linux it reads /etc/passwd.
+func getUserShell(username string) (string, error) {
+	// Try macOS dscl first
+	if output, err := exec.Command("dscl", ".", "-read", "/Users/"+username, "UserShell").Output(); err == nil {
+		line := strings.TrimSpace(string(output))
+		if strings.HasPrefix(line, "UserShell: ") {
+			return strings.TrimPrefix(line, "UserShell: "), nil
+		}
+	}
+
+	// Fall back to /etc/passwd for Linux
+	file, err := os.Open("/etc/passwd")
+	if err != nil {
+		return "", err
+	}
+	defer file.Close()
+
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if strings.HasPrefix(line, username+":") {
+			fields := strings.Split(line, ":")
+			if len(fields) >= 7 {
+				return fields[6], nil
+			}
+		}
+	}
+	return "", fmt.Errorf("user %s shell not found", username)
+}
+
+// writeWorktreeEnvFile creates .envrc with the task's environment variables.
+// This is the standard direnv format - users with direnv get auto-loading,
+// others can manually run "source .envrc".
+// It also adds .envrc to .git/info/exclude so it doesn't pollute git status.
+func (e *Executor) writeWorktreeEnvFile(projectDir, worktreePath string, task *db.Task, claudeConfigDir string) error {
+	// Write the .envrc file
+	envContent := fmt.Sprintf(`export WORKTREE_TASK_ID=%d
+export WORKTREE_PORT=%d
+export WORKTREE_PATH=%q
+`, task.ID, task.Port, worktreePath)
+	if claudeConfigDir != "" {
+		envContent += fmt.Sprintf("export CLAUDE_CONFIG_DIR=%q\n", claudeConfigDir)
+	}
+
+	envPath := filepath.Join(worktreePath, ".envrc")
+	if err := os.WriteFile(envPath, []byte(envContent), 0644); err != nil {
+		return fmt.Errorf("write .envrc: %w", err)
+	}
+
+	e.logLine(task.ID, "system", "Created .envrc with WORKTREE_TASK_ID, WORKTREE_PORT, WORKTREE_PATH, CLAUDE_CONFIG_DIR (use direnv or 'source .envrc')")
+
+	// Add to .git/info/exclude in the main project so it doesn't show in git status
+	excludePath := filepath.Join(projectDir, ".git", "info", "exclude")
+
+	// Create the info directory if it doesn't exist
+	infoDir := filepath.Dir(excludePath)
+	if err := os.MkdirAll(infoDir, 0755); err != nil {
+		return fmt.Errorf("create .git/info directory: %w", err)
+	}
+
+	// Check if .envrc is already in the exclude file
+	excludeEntry := ".envrc"
+	excludeContent, err := os.ReadFile(excludePath)
+	if err == nil {
+		// File exists, check if entry is already there
+		lines := strings.Split(string(excludeContent), "\n")
+		for _, line := range lines {
+			if strings.TrimSpace(line) == excludeEntry {
+				return nil // Already excluded
+			}
+		}
+	}
+
+	// Append the exclude entry
+	f, err := os.OpenFile(excludePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return fmt.Errorf("open exclude file: %w", err)
+	}
+	defer f.Close()
+
+	// Add newline before if file doesn't end with one
+	if len(excludeContent) > 0 && excludeContent[len(excludeContent)-1] != '\n' {
+		f.WriteString("\n")
+	}
+	f.WriteString(excludeEntry + "\n")
+
+	return nil
 }
 
 // trustMiseConfig trusts mise config files in a directory (no-op if mise not installed).
@@ -2577,11 +3375,91 @@ func trustMiseConfig(dir string) {
 	}
 }
 
+type claudePaths struct {
+	configDir  string
+	configFile string
+}
+
+// DefaultClaudeConfigDir returns the resolved CLAUDE_CONFIG_DIR taking the environment into account.
+func DefaultClaudeConfigDir() string {
+	if env := strings.TrimSpace(os.Getenv("CLAUDE_CONFIG_DIR")); env != "" {
+		return filepath.Clean(expandUserPath(env))
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ".claude"
+	}
+	return filepath.Join(home, ".claude")
+}
+
+// ResolveClaudeConfigDir resolves a custom CLAUDE_CONFIG_DIR override.
+// If custom is empty, the default directory (respecting CLAUDE_CONFIG_DIR env) is returned.
+func ResolveClaudeConfigDir(custom string) string {
+	custom = strings.TrimSpace(custom)
+	if custom == "" {
+		return DefaultClaudeConfigDir()
+	}
+	return filepath.Clean(expandUserPath(custom))
+}
+
+// ClaudeConfigFilePath returns the path to the claude.json configuration alongside the directory.
+func ClaudeConfigFilePath(dir string) string {
+	if dir == "" {
+		dir = DefaultClaudeConfigDir()
+	}
+	dir = strings.TrimRight(dir, string(os.PathSeparator))
+	return dir + ".json"
+}
+
+func expandUserPath(path string) string {
+	if path == "" {
+		return ""
+	}
+	if strings.HasPrefix(path, "~") {
+		home, err := os.UserHomeDir()
+		if err == nil {
+			return filepath.Join(home, path[1:])
+		}
+	}
+	return path
+}
+
+func (e *Executor) claudePathsForProject(project string) claudePaths {
+	dir := DefaultClaudeConfigDir()
+	if project != "" {
+		if p, err := e.db.GetProjectByName(project); err == nil && p != nil {
+			dir = ResolveClaudeConfigDir(p.ClaudeConfigDir)
+		}
+	}
+	return claudePaths{
+		configDir:  dir,
+		configFile: ClaudeConfigFilePath(dir),
+	}
+}
+
+func claudeEnvPrefix(dir string) string {
+	if strings.TrimSpace(dir) == "" {
+		return ""
+	}
+	return fmt.Sprintf("CLAUDE_CONFIG_DIR=%q ", dir)
+}
+
 // symlinkClaudeConfig symlinks the worktree's .claude directory to the main project's .claude.
 // This ensures permissions granted in any worktree are shared across all worktrees and the main project.
 func symlinkClaudeConfig(projectDir, worktreePath string) error {
 	mainClaudeDir := filepath.Join(projectDir, ".claude")
 	worktreeClaudeDir := filepath.Join(worktreePath, ".claude")
+
+	// Safety check: prevent circular symlinks if paths are the same
+	if mainClaudeDir == worktreeClaudeDir {
+		return fmt.Errorf("projectDir and worktreePath must be different (both resolve to %s)", mainClaudeDir)
+	}
+
+	// If mainClaudeDir exists as a symlink (possibly broken/circular), remove it
+	// The main project's .claude should always be a real directory, never a symlink
+	if info, err := os.Lstat(mainClaudeDir); err == nil && info.Mode()&os.ModeSymlink != 0 {
+		os.RemoveAll(mainClaudeDir)
+	}
 
 	// Ensure main project has .claude directory
 	if err := os.MkdirAll(mainClaudeDir, 0755); err != nil {
@@ -2606,18 +3484,58 @@ func symlinkClaudeConfig(projectDir, worktreePath string) error {
 	return nil
 }
 
-// copyMCPConfig copies the MCP server configuration from the source project to the worktree
-// in ~/.claude.json so that Claude Code in the worktree has the same MCP servers available.
-func copyMCPConfig(srcDir, dstDir string) error {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return fmt.Errorf("get home dir: %w", err)
+// symlinkMCPConfig symlinks the project's .mcp.json file to the worktree if it exists
+// and is not tracked by git. If the file is tracked, the worktree already has it from
+// checkout and we shouldn't replace it with a symlink (which would show as a modification).
+func symlinkMCPConfig(projectDir, worktreePath string) error {
+	mainMCPFile := filepath.Join(projectDir, ".mcp.json")
+	worktreeMCPFile := filepath.Join(worktreePath, ".mcp.json")
+
+	// Safety check: prevent circular symlinks if paths are the same
+	if mainMCPFile == worktreeMCPFile {
+		return nil
 	}
 
-	claudeConfigPath := filepath.Join(home, ".claude.json")
+	// Check if main project has .mcp.json
+	if _, err := os.Stat(mainMCPFile); os.IsNotExist(err) {
+		return nil // No .mcp.json in project, nothing to symlink
+	}
+
+	// Check if .mcp.json is tracked by git - if so, don't create symlink
+	// The worktree already has the file from checkout
+	cmd := exec.Command("git", "ls-files", ".mcp.json")
+	cmd.Dir = projectDir
+	if output, err := cmd.Output(); err == nil && len(output) > 0 {
+		return nil // File is tracked by git, don't replace with symlink
+	}
+
+	// Check if worktree .mcp.json is already a symlink to the right place
+	if target, err := os.Readlink(worktreeMCPFile); err == nil {
+		if target == mainMCPFile {
+			return nil // Already correctly symlinked
+		}
+	}
+
+	// Remove any existing .mcp.json in worktree (file or wrong symlink)
+	os.Remove(worktreeMCPFile)
+
+	// Create symlink: worktree/.mcp.json -> project/.mcp.json
+	if err := os.Symlink(mainMCPFile, worktreeMCPFile); err != nil {
+		return fmt.Errorf("create .mcp.json symlink: %w", err)
+	}
+
+	return nil
+}
+
+// copyMCPConfig copies the MCP server configuration from the source project to the worktree
+// in the claude.json file so that Claude Code in the worktree has the same MCP servers available.
+func copyMCPConfig(configPath, srcDir, dstDir string) error {
+	if configPath == "" {
+		configPath = ClaudeConfigFilePath("")
+	}
 
 	// Read existing config
-	data, err := os.ReadFile(claudeConfigPath)
+	data, err := os.ReadFile(configPath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil // No config file, nothing to copy
@@ -2685,7 +3603,7 @@ func copyMCPConfig(srcDir, dstDir string) error {
 		return fmt.Errorf("marshal claude config: %w", err)
 	}
 
-	if err := os.WriteFile(claudeConfigPath, newData, 0644); err != nil {
+	if err := os.WriteFile(configPath, newData, 0644); err != nil {
 		return fmt.Errorf("write claude config: %w", err)
 	}
 
@@ -2697,14 +3615,22 @@ func copyMCPConfig(srcDir, dstDir string) error {
 // Non-zero exit codes are logged as warnings but do not cause the worktree setup to fail.
 // Output is streamed line-by-line in real-time to provide feedback during long-running scripts.
 func (e *Executor) runWorktreeInitScript(projectDir, worktreePath string, task *db.Task) {
-	scriptPath := GetWorktreeInitScript(projectDir)
+	// Look for the init script in the worktree (not projectDir) so that __dir__ resolves correctly in scripts
+	scriptPath := GetWorktreeInitScript(worktreePath)
 	if scriptPath == "" {
 		return
 	}
 
 	e.logLine(task.ID, "system", fmt.Sprintf("Running worktree init script: %s", scriptPath))
 
-	cmd := exec.Command(scriptPath)
+	// Run through user's login interactive shell so that shell init (mise, nvm, etc.) is sourced
+	shell := "bash" // default fallback
+	if currentUser, err := user.Current(); err == nil {
+		if userShell, err := getUserShell(currentUser.Username); err == nil && userShell != "" {
+			shell = userShell
+		}
+	}
+	cmd := exec.Command(shell, "-l", "-i", "-c", scriptPath)
 	cmd.Dir = worktreePath
 
 	// Set environment variables as specified in the feature request
@@ -2774,6 +3700,90 @@ func (e *Executor) runWorktreeInitScript(projectDir, worktreePath string, task *
 	}
 
 	e.logLine(task.ID, "system", "Worktree init script completed successfully")
+}
+
+// runWorktreeTeardownScript runs the worktree teardown script if configured or conventionally present.
+// It sets environment variables WORKTREE_TASK_ID, WORKTREE_PORT, and WORKTREE_PATH.
+// Non-zero exit codes are logged as warnings but do not cause the worktree cleanup to fail.
+// Output is streamed line-by-line in real-time to provide feedback during long-running scripts.
+func (e *Executor) runWorktreeTeardownScript(projectDir, worktreePath string, task *db.Task) {
+	scriptPath := GetWorktreeTeardownScript(projectDir)
+	if scriptPath == "" {
+		return
+	}
+
+	e.logLine(task.ID, "system", fmt.Sprintf("Running worktree teardown script: %s", scriptPath))
+
+	cmd := exec.Command(scriptPath)
+	cmd.Dir = worktreePath
+
+	// Set environment variables
+	cmd.Env = append(os.Environ(),
+		fmt.Sprintf("WORKTREE_TASK_ID=%d", task.ID),
+		fmt.Sprintf("WORKTREE_PORT=%d", task.Port),
+		fmt.Sprintf("WORKTREE_PATH=%s", worktreePath),
+	)
+
+	// Set up pipes for streaming output in real-time
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		e.logger.Warn("failed to create stdout pipe for worktree teardown script", "error", err)
+		e.logLine(task.ID, "system", fmt.Sprintf("Warning: failed to set up script output: %v", err))
+		return
+	}
+
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		e.logger.Warn("failed to create stderr pipe for worktree teardown script", "error", err)
+		e.logLine(task.ID, "system", fmt.Sprintf("Warning: failed to set up script output: %v", err))
+		return
+	}
+
+	// Start the command
+	if err := cmd.Start(); err != nil {
+		e.logger.Warn("failed to start worktree teardown script", "script", scriptPath, "error", err)
+		e.logLine(task.ID, "system", fmt.Sprintf("Warning: failed to start worktree teardown script: %v", err))
+		return
+	}
+
+	// Stream output from both stdout and stderr concurrently
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	// Stream stdout
+	go func() {
+		defer wg.Done()
+		scanner := bufio.NewScanner(stdout)
+		for scanner.Scan() {
+			line := scanner.Text()
+			e.logLine(task.ID, "system", fmt.Sprintf("[teardown] %s", line))
+		}
+	}()
+
+	// Stream stderr
+	go func() {
+		defer wg.Done()
+		scanner := bufio.NewScanner(stderr)
+		for scanner.Scan() {
+			line := scanner.Text()
+			e.logLine(task.ID, "system", fmt.Sprintf("[teardown] %s", line))
+		}
+	}()
+
+	// Wait for all output to be read
+	wg.Wait()
+
+	// Wait for the command to finish
+	if err := cmd.Wait(); err != nil {
+		e.logger.Warn("worktree teardown script failed",
+			"script", scriptPath,
+			"error", err,
+		)
+		e.logLine(task.ID, "system", fmt.Sprintf("Warning: worktree teardown script failed: %v", err))
+		return
+	}
+
+	e.logLine(task.ID, "system", "Worktree teardown script completed successfully")
 }
 
 // ensureGitignore adds an entry to .gitignore if not already present.
@@ -2859,6 +3869,10 @@ func (e *Executor) CleanupWorktree(task *db.Task) error {
 	if projectDir == "" {
 		return nil
 	}
+	paths := e.claudePathsForProject(task.Project)
+
+	// Run teardown script before removing the worktree
+	e.runWorktreeTeardownScript(projectDir, task.WorktreePath, task)
 
 	// Remove worktree
 	cmd := exec.Command("git", "worktree", "remove", "--force", task.WorktreePath)
@@ -2874,12 +3888,195 @@ func (e *Executor) CleanupWorktree(task *db.Task) error {
 		cmd.Run() // Ignore errors - branch might have been merged/deleted
 	}
 
+	// Remove project entry from ~/.claude.json (run async - this can be slow with large configs)
+	go func(path, config string) {
+		if err := RemoveClaudeProjectConfig(config, path); err != nil {
+			// Log warning but don't fail - this is cleanup
+			fmt.Fprintf(os.Stderr, "Warning: could not remove Claude project config: %v\n", err)
+		}
+	}(task.WorktreePath, paths.configFile)
+
 	// Clear worktree info from task
 	task.WorktreePath = ""
 	task.BranchName = ""
 	e.db.UpdateTask(task)
 
 	return nil
+}
+
+// CleanupClaudeSessions removes Claude session files for a given worktree path.
+// Claude stores sessions under CLAUDE_CONFIG_DIR/projects/<escaped-path>/.
+// This should be called when deleting a task to clean up session data.
+func CleanupClaudeSessions(worktreePath, configDir string) error {
+	if worktreePath == "" {
+		return nil
+	}
+
+	baseDir := ResolveClaudeConfigDir(configDir)
+
+	// Escape the worktree path to match Claude's project directory naming
+	// Claude replaces / with - and . with - (keeps leading dash)
+	escapedPath := strings.ReplaceAll(worktreePath, "/", "-")
+	escapedPath = strings.ReplaceAll(escapedPath, ".", "-")
+
+	projectDir := filepath.Join(baseDir, "projects", escapedPath)
+
+	// Check if directory exists
+	if _, err := os.Stat(projectDir); os.IsNotExist(err) {
+		return nil // Nothing to clean up
+	}
+
+	// Remove the entire project directory
+	if err := os.RemoveAll(projectDir); err != nil {
+		return fmt.Errorf("remove claude session dir %s: %w", projectDir, err)
+	}
+
+	return nil
+}
+
+// RemoveClaudeProjectConfig removes a project entry from claude.json.
+// This should be called when deleting a worktree to clean up stale config entries.
+func RemoveClaudeProjectConfig(configPath, projectPath string) error {
+	if projectPath == "" {
+		return nil
+	}
+
+	if configPath == "" {
+		configPath = ClaudeConfigFilePath("")
+	}
+
+	// Read existing config
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil // No config file, nothing to remove
+		}
+		return fmt.Errorf("read claude config: %w", err)
+	}
+
+	// Parse as generic JSON to preserve all fields
+	var config map[string]interface{}
+	if err := json.Unmarshal(data, &config); err != nil {
+		return fmt.Errorf("parse claude config: %w", err)
+	}
+
+	// Get projects map
+	projectsRaw, ok := config["projects"]
+	if !ok {
+		return nil // No projects configured
+	}
+	projects, ok := projectsRaw.(map[string]interface{})
+	if !ok {
+		return nil // Invalid projects format
+	}
+
+	// Check if project exists
+	if _, exists := projects[projectPath]; !exists {
+		return nil // Project not in config
+	}
+
+	// Remove the project entry
+	delete(projects, projectPath)
+	config["projects"] = projects
+
+	// Write back config
+	newData, err := json.MarshalIndent(config, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal claude config: %w", err)
+	}
+
+	if err := os.WriteFile(configPath, newData, 0644); err != nil {
+		return fmt.Errorf("write claude config: %w", err)
+	}
+
+	return nil
+}
+
+// PurgeStaleClaudeProjectConfigs removes entries from claude.json for paths that no longer exist.
+// Returns the number of entries removed and any error encountered.
+func PurgeStaleClaudeProjectConfigs(configPath string) (int, error) {
+	if configPath == "" {
+		configPath = ClaudeConfigFilePath("")
+	}
+
+	// Read existing config
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, nil // No config file
+		}
+		return 0, fmt.Errorf("read claude config: %w", err)
+	}
+
+	// Parse as generic JSON to preserve all fields
+	var config map[string]interface{}
+	if err := json.Unmarshal(data, &config); err != nil {
+		return 0, fmt.Errorf("parse claude config: %w", err)
+	}
+
+	// Get projects map
+	projectsRaw, ok := config["projects"]
+	if !ok {
+		return 0, nil // No projects configured
+	}
+	projects, ok := projectsRaw.(map[string]interface{})
+	if !ok {
+		return 0, nil // Invalid projects format
+	}
+
+	// Find and remove stale entries
+	removed := 0
+	for path := range projects {
+		// Check if path exists
+		if _, err := os.Stat(path); os.IsNotExist(err) {
+			delete(projects, path)
+			removed++
+		}
+	}
+
+	if removed == 0 {
+		return 0, nil // Nothing to remove
+	}
+
+	// Write back config
+	config["projects"] = projects
+	newData, err := json.MarshalIndent(config, "", "  ")
+	if err != nil {
+		return 0, fmt.Errorf("marshal claude config: %w", err)
+	}
+
+	if err := os.WriteFile(configPath, newData, 0644); err != nil {
+		return 0, fmt.Errorf("write claude config: %w", err)
+	}
+
+	return removed, nil
+}
+
+// isValidWorktreePath validates that a working directory is within a .task-worktrees directory.
+// This prevents Claude from accidentally writing to the main project directory.
+// Returns true if the path is valid for task execution.
+func isValidWorktreePath(workDir string) bool {
+	// Empty path is never valid
+	if workDir == "" {
+		return false
+	}
+
+	// Resolve symlinks and clean the path
+	absPath, err := filepath.Abs(workDir)
+	if err != nil {
+		return false
+	}
+
+	// Evaluate any symlinks in the path
+	resolvedPath, err := filepath.EvalSymlinks(absPath)
+	if err != nil {
+		// Path might not exist yet, use the absolute path
+		resolvedPath = absPath
+	}
+
+	// Check that the path contains .task-worktrees
+	// Valid paths look like: /path/to/project/.task-worktrees/123-task-slug
+	return strings.Contains(resolvedPath, string(filepath.Separator)+".task-worktrees"+string(filepath.Separator))
 }
 
 // slugify converts a string to a URL/branch-friendly slug.

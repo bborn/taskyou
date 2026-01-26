@@ -3,6 +3,8 @@ package executor
 import (
 	"context"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -240,25 +242,34 @@ func TestAttachmentsInPrompt(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	t.Run("prepareAttachments creates temp files", func(t *testing.T) {
-		paths, cleanup := exec.prepareAttachments(task.ID)
+	t.Run("prepareAttachments creates files in .claude/attachments", func(t *testing.T) {
+		// Create a temporary worktree directory
+		worktreePath := t.TempDir()
+
+		paths, cleanup := exec.prepareAttachments(task.ID, worktreePath)
 		defer cleanup()
 
 		if len(paths) != 2 {
 			t.Errorf("expected 2 attachment paths, got %d", len(paths))
 		}
 
-		// Verify files exist and have correct content
+		// Verify files exist and are in the .claude/attachments directory
 		for _, path := range paths {
 			if _, err := os.Stat(path); os.IsNotExist(err) {
 				t.Errorf("attachment file does not exist: %s", path)
 			}
+			// Verify path is inside .claude/attachments/
+			expectedPrefix := filepath.Join(worktreePath, ".claude", "attachments")
+			if !strings.HasPrefix(path, expectedPrefix) {
+				t.Errorf("attachment path %s should be inside %s", path, expectedPrefix)
+			}
 		}
 	})
 
-	t.Run("getAttachmentsSection uses Read tool", func(t *testing.T) {
-		paths := []string{"/tmp/test/notes.txt", "/tmp/test/data.json"}
-		section := exec.getAttachmentsSection(task.ID, paths)
+	t.Run("getAttachmentsSection uses Read tool with relative paths", func(t *testing.T) {
+		worktreePath := "/worktree"
+		paths := []string{"/worktree/.claude/attachments/notes.txt", "/worktree/.claude/attachments/data.json"}
+		section := exec.getAttachmentsSection(task.ID, paths, worktreePath)
 
 		if !strings.Contains(section, "## Attachments") {
 			t.Error("section should contain Attachments header")
@@ -269,13 +280,20 @@ func TestAttachmentsInPrompt(t *testing.T) {
 		if strings.Contains(section, "View tool") {
 			t.Error("section should NOT mention View tool")
 		}
-		if !strings.Contains(section, "/tmp/test/notes.txt") {
-			t.Error("section should contain file path")
+		// Paths should be relative, not absolute
+		if !strings.Contains(section, ".claude/attachments/notes.txt") {
+			t.Error("section should contain relative file path")
+		}
+		if strings.Contains(section, "/worktree/.claude/attachments/notes.txt") {
+			t.Error("section should NOT contain absolute file path")
 		}
 	})
 
 	t.Run("buildPrompt includes attachments section", func(t *testing.T) {
-		paths, cleanup := exec.prepareAttachments(task.ID)
+		worktreePath := t.TempDir()
+		// Set task's WorktreePath so buildPrompt can convert to relative paths
+		task.WorktreePath = worktreePath
+		paths, cleanup := exec.prepareAttachments(task.ID, worktreePath)
 		defer cleanup()
 
 		prompt := exec.buildPrompt(task, paths)
@@ -285,6 +303,38 @@ func TestAttachmentsInPrompt(t *testing.T) {
 		}
 		if !strings.Contains(prompt, "Read tool") {
 			t.Error("prompt should mention Read tool")
+		}
+		// Verify paths are relative in the prompt
+		if !strings.Contains(prompt, ".claude/attachments/") {
+			t.Error("prompt should contain relative attachment paths")
+		}
+	})
+
+	t.Run("retry feedback includes attachments when present", func(t *testing.T) {
+		worktreePath := t.TempDir()
+		paths, cleanup := exec.prepareAttachments(task.ID, worktreePath)
+		defer cleanup()
+
+		// Simulate what happens during retry: attachment section is appended to feedback
+		retryFeedback := "Please fix the bug"
+		feedbackWithAttachments := retryFeedback
+		if len(paths) > 0 {
+			feedbackWithAttachments = retryFeedback + "\n" + exec.getAttachmentsSection(task.ID, paths, worktreePath)
+		}
+
+		// Verify attachments are included in the retry feedback
+		if !strings.Contains(feedbackWithAttachments, "## Attachments") {
+			t.Error("retry feedback should include attachments section")
+		}
+		if !strings.Contains(feedbackWithAttachments, "Read tool") {
+			t.Error("retry feedback should mention Read tool")
+		}
+		if !strings.Contains(feedbackWithAttachments, "Please fix the bug") {
+			t.Error("retry feedback should still contain original feedback")
+		}
+		// Verify paths are relative
+		if !strings.Contains(feedbackWithAttachments, ".claude/attachments/") {
+			t.Error("retry feedback should contain relative attachment paths")
 		}
 	})
 }
@@ -368,7 +418,7 @@ func TestFindClaudeSessionID(t *testing.T) {
 func TestRenameClaudeSession(t *testing.T) {
 	t.Run("returns nil for non-existent workdir", func(t *testing.T) {
 		// Test with a workdir that doesn't have any Claude sessions
-		err := RenameClaudeSession("/tmp/non-existent-workdir-12345", "New Name")
+		err := RenameClaudeSession("/tmp/non-existent-workdir-12345", "New Name", "")
 		if err != nil {
 			t.Errorf("expected nil error for non-existent session, got: %v", err)
 		}
@@ -474,7 +524,7 @@ func TestConversationHistory(t *testing.T) {
 	})
 }
 
-func TestRunWorktreeInitScriptStreaming(t *testing.T) {
+func TestBuildPromptIncludesTaskMetadata(t *testing.T) {
 	// Create temp database
 	tmpFile, err := os.CreateTemp("", "test-*.db")
 	if err != nil {
@@ -489,7 +539,7 @@ func TestRunWorktreeInitScriptStreaming(t *testing.T) {
 	}
 	defer database.Close()
 
-	// Create the test project
+	// Create the test project first
 	if err := database.CreateProject(&db.Project{Name: "test", Path: "/tmp/test"}); err != nil {
 		t.Fatal(err)
 	}
@@ -497,210 +547,552 @@ func TestRunWorktreeInitScriptStreaming(t *testing.T) {
 	cfg := &config.Config{}
 	exec := New(database, cfg)
 
-	// Create a test task
-	task := &db.Task{
-		Title:   "Test streaming task",
-		Status:  db.StatusProcessing,
-		Project: "test",
-		Port:    3100,
-	}
-	if err := database.CreateTask(task); err != nil {
-		t.Fatal(err)
-	}
-
-	// Create a temp worktree directory
-	worktreeDir, err := os.MkdirTemp("", "test-worktree-*")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer os.RemoveAll(worktreeDir)
-
-	// Create a temp project directory with a test init script
-	projectDir, err := os.MkdirTemp("", "test-project-*")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer os.RemoveAll(projectDir)
-
-	// Create bin directory
-	binDir := projectDir + "/bin"
-	if err := os.MkdirAll(binDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-
-	// Subscribe to task logs to capture streaming output
-	logCh := exec.Subscribe(task.ID)
-	defer exec.Unsubscribe(task.ID, logCh)
-
-	t.Run("streams output line by line", func(t *testing.T) {
-		// Create a test script that outputs multiple lines with delays
-		scriptContent := `#!/bin/bash
-echo "Line 1: Starting setup"
-echo "Line 2: Installing dependencies"
-echo "Line 3: Completed"
-`
-		scriptPath := binDir + "/worktree-setup"
-		if err := os.WriteFile(scriptPath, []byte(scriptContent), 0755); err != nil {
+	t.Run("includes branch and PR info", func(t *testing.T) {
+		task := &db.Task{
+			Title:      "Fix bug",
+			Body:       "Fix the authentication bug",
+			Project:    "test",
+			BranchName: "fix/auth-bug-123",
+			PRURL:      "https://github.com/org/repo/pull/456",
+			PRNumber:   456,
+			Tags:       "bugfix,auth",
+		}
+		if err := database.CreateTask(task); err != nil {
 			t.Fatal(err)
 		}
 
-		// Collect logs in the background
-		var collectedLogs []string
-		done := make(chan struct{})
-		go func() {
-			defer close(done)
-			timeout := time.After(5 * time.Second)
-			expectedCount := 5 // "Running worktree init script", 3 lines, "completed successfully"
-			for {
-				select {
-				case log := <-logCh:
-					collectedLogs = append(collectedLogs, log.Content)
-					if len(collectedLogs) >= expectedCount {
-						return
-					}
-				case <-timeout:
-					return
-				}
-			}
-		}()
+		prompt := exec.buildPrompt(task, nil)
 
-		// Run the script
-		exec.runWorktreeInitScript(projectDir, worktreeDir, task)
-
-		// Wait for log collection to complete
-		<-done
-
-		// Verify the logs were streamed
-		if len(collectedLogs) < 4 {
-			t.Errorf("expected at least 4 log entries, got %d: %v", len(collectedLogs), collectedLogs)
+		if !strings.Contains(prompt, "Branch: fix/auth-bug-123") {
+			t.Error("prompt should include branch name")
 		}
-
-		// Check that each line was logged individually with [init] prefix
-		var foundLine1, foundLine2, foundLine3 bool
-		for _, log := range collectedLogs {
-			if strings.Contains(log, "[init] Line 1:") {
-				foundLine1 = true
-			}
-			if strings.Contains(log, "[init] Line 2:") {
-				foundLine2 = true
-			}
-			if strings.Contains(log, "[init] Line 3:") {
-				foundLine3 = true
-			}
+		if !strings.Contains(prompt, "https://github.com/org/repo/pull/456") {
+			t.Error("prompt should include PR URL")
 		}
-
-		if !foundLine1 || !foundLine2 || !foundLine3 {
-			t.Errorf("expected all three lines to be logged individually, got logs: %v", collectedLogs)
+		if !strings.Contains(prompt, "Tags: bugfix,auth") {
+			t.Error("prompt should include tags")
 		}
 	})
 
-	t.Run("handles stderr output", func(t *testing.T) {
-		// Clear previous logs
-		collectedLogs := []string{}
-
-		// Create a script that outputs to stderr
-		scriptContent := `#!/bin/bash
-echo "stdout message"
-echo "stderr message" >&2
-`
-		scriptPath := binDir + "/worktree-setup"
-		if err := os.WriteFile(scriptPath, []byte(scriptContent), 0755); err != nil {
+	t.Run("handles task without metadata", func(t *testing.T) {
+		task := &db.Task{
+			Title:   "Simple task",
+			Body:    "Do something simple",
+			Project: "test",
+		}
+		if err := database.CreateTask(task); err != nil {
 			t.Fatal(err)
 		}
 
-		// Collect logs in the background
-		done := make(chan struct{})
-		go func() {
-			defer close(done)
-			timeout := time.After(5 * time.Second)
-			expectedCount := 4 // "Running worktree init script", stdout, stderr, "completed successfully"
-			for {
-				select {
-				case log := <-logCh:
-					collectedLogs = append(collectedLogs, log.Content)
-					if len(collectedLogs) >= expectedCount {
-						return
-					}
-				case <-timeout:
-					return
-				}
-			}
-		}()
+		prompt := exec.buildPrompt(task, nil)
 
-		// Run the script
-		exec.runWorktreeInitScript(projectDir, worktreeDir, task)
-
-		// Wait for log collection to complete
-		<-done
-
-		// Verify both stdout and stderr were captured
-		var foundStdout, foundStderr bool
-		for _, log := range collectedLogs {
-			if strings.Contains(log, "stdout message") {
-				foundStdout = true
-			}
-			if strings.Contains(log, "stderr message") {
-				foundStderr = true
-			}
-		}
-
-		if !foundStdout {
-			t.Error("expected stdout to be captured")
-		}
-		if !foundStderr {
-			t.Error("expected stderr to be captured")
+		// Should not have empty "Task Details" section
+		if strings.Contains(prompt, "## Task Details\n\n\n") {
+			t.Error("prompt should not include empty task details section")
 		}
 	})
 
-	t.Run("handles script failure", func(t *testing.T) {
-		// Clear previous logs
-		collectedLogs := []string{}
-
-		// Create a script that fails
-		scriptContent := `#!/bin/bash
-echo "Starting..."
-exit 1
-`
-		scriptPath := binDir + "/worktree-setup"
-		if err := os.WriteFile(scriptPath, []byte(scriptContent), 0755); err != nil {
+	t.Run("shows PR number when URL is empty", func(t *testing.T) {
+		task := &db.Task{
+			Title:    "PR task",
+			Body:     "Work on PR",
+			Project:  "test",
+			PRNumber: 789,
+		}
+		if err := database.CreateTask(task); err != nil {
 			t.Fatal(err)
 		}
 
-		// Collect logs in the background
-		done := make(chan struct{})
-		go func() {
-			defer close(done)
-			timeout := time.After(5 * time.Second)
-			expectedCount := 3 // "Running worktree init script", "Starting...", "Warning: ... failed"
-			for {
-				select {
-				case log := <-logCh:
-					collectedLogs = append(collectedLogs, log.Content)
-					if len(collectedLogs) >= expectedCount {
-						return
-					}
-				case <-timeout:
-					return
-				}
-			}
-		}()
+		prompt := exec.buildPrompt(task, nil)
 
-		// Run the script
-		exec.runWorktreeInitScript(projectDir, worktreeDir, task)
+		if !strings.Contains(prompt, "PR #789") {
+			t.Error("prompt should include PR number")
+		}
+	})
+}
 
-		// Wait for log collection to complete
-		<-done
+func TestCleanupClaudeSessions(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Skip("Could not get home directory")
+	}
+	defaultDir := filepath.Join(home, ".claude")
 
-		// Verify failure was logged
-		var foundFailure bool
-		for _, log := range collectedLogs {
-			if strings.Contains(log, "Warning: worktree init script failed") {
-				foundFailure = true
-			}
+	t.Run("returns nil for empty worktree path", func(t *testing.T) {
+		err := CleanupClaudeSessions("", defaultDir)
+		if err != nil {
+			t.Errorf("expected nil error for empty path, got: %v", err)
+		}
+	})
+
+	t.Run("returns nil for non-existent session directory", func(t *testing.T) {
+		err := CleanupClaudeSessions("/tmp/non-existent-worktree-12345", defaultDir)
+		if err != nil {
+			t.Errorf("expected nil error for non-existent directory, got: %v", err)
+		}
+	})
+
+	t.Run("removes existing session directory", func(t *testing.T) {
+		// Create a unique test worktree path
+		testWorkDir := "/tmp/test-cleanup-sessions-" + time.Now().Format("20060102150405")
+		// Match Claude's escaping: replace / with -, replace . with -, keep leading -
+		escapedPath := strings.ReplaceAll(testWorkDir, "/", "-")
+		escapedPath = strings.ReplaceAll(escapedPath, ".", "-")
+		projectDir := home + "/.claude/projects/" + escapedPath
+
+		// Create the project directory with some session files
+		if err := os.MkdirAll(projectDir, 0755); err != nil {
+			t.Fatalf("Could not create project directory: %v", err)
 		}
 
-		if !foundFailure {
-			t.Errorf("expected failure message, got logs: %v", collectedLogs)
+		// Create some session files
+		session1 := projectDir + "/abc12345-1234-5678-abcd-123456789abc.jsonl"
+		session2 := projectDir + "/def67890-1234-5678-abcd-123456789def.jsonl"
+		agentFile := projectDir + "/agent-xyz99999.jsonl"
+
+		if err := os.WriteFile(session1, []byte(`{"test":"data"}`), 0644); err != nil {
+			t.Fatalf("Could not create session file: %v", err)
+		}
+		if err := os.WriteFile(session2, []byte(`{"test":"data2"}`), 0644); err != nil {
+			t.Fatalf("Could not create session file: %v", err)
+		}
+		if err := os.WriteFile(agentFile, []byte(`{"agent":"data"}`), 0644); err != nil {
+			t.Fatalf("Could not create agent file: %v", err)
+		}
+
+		// Verify files exist
+		if _, err := os.Stat(projectDir); os.IsNotExist(err) {
+			t.Fatal("Project directory should exist before cleanup")
+		}
+
+		// Run cleanup
+		err := CleanupClaudeSessions(testWorkDir, defaultDir)
+		if err != nil {
+			t.Errorf("CleanupClaudeSessions failed: %v", err)
+		}
+
+		// Verify directory was removed
+		if _, err := os.Stat(projectDir); !os.IsNotExist(err) {
+			t.Error("Project directory should not exist after cleanup")
+			// Clean up manually if test failed
+			os.RemoveAll(projectDir)
+		}
+	})
+}
+
+func TestIsValidWorktreePath(t *testing.T) {
+	tests := []struct {
+		name      string
+		path      string
+		wantValid bool
+	}{
+		{
+			name:      "valid worktree path",
+			path:      "/Users/bruno/Projects/myproject/.task-worktrees/123-task-slug",
+			wantValid: true,
+		},
+		{
+			name:      "valid worktree path with nested dirs",
+			path:      "/Users/bruno/Projects/myproject/.task-worktrees/456-another-task/subdir",
+			wantValid: true,
+		},
+		{
+			name:      "main project directory - not valid",
+			path:      "/Users/bruno/Projects/myproject",
+			wantValid: false,
+		},
+		{
+			name:      "project subdirectory - not valid",
+			path:      "/Users/bruno/Projects/myproject/src",
+			wantValid: false,
+		},
+		{
+			name:      "root directory - not valid",
+			path:      "/",
+			wantValid: false,
+		},
+		{
+			name:      "home directory - not valid",
+			path:      "/Users/bruno",
+			wantValid: false,
+		},
+		{
+			name:      "tmp directory - not valid",
+			path:      "/tmp",
+			wantValid: false,
+		},
+		{
+			name:      ".task-worktrees directory itself - not valid (needs subdirectory)",
+			path:      "/Users/bruno/Projects/myproject/.task-worktrees",
+			wantValid: false,
+		},
+		{
+			name:      "empty path - not valid",
+			path:      "",
+			wantValid: false,
+		},
+		{
+			name:      "relative path with .task-worktrees",
+			path:      "project/.task-worktrees/123-task",
+			wantValid: true,
+		},
+		{
+			name:      "path containing task-worktrees without dot - not valid",
+			path:      "/Users/bruno/Projects/task-worktrees/123-task",
+			wantValid: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := isValidWorktreePath(tt.path)
+			if got != tt.wantValid {
+				t.Errorf("isValidWorktreePath(%q) = %v, want %v", tt.path, got, tt.wantValid)
+			}
+		})
+	}
+}
+
+func TestIsValidWorktreePathWithRealDirectory(t *testing.T) {
+	// Create a real temporary directory structure to test with
+	tmpDir, err := os.MkdirTemp("", "test-worktree-validation-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	// Create the .task-worktrees structure
+	worktreesDir := tmpDir + "/.task-worktrees"
+	taskDir := worktreesDir + "/123-test-task"
+	if err := os.MkdirAll(taskDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("real worktree directory is valid", func(t *testing.T) {
+		if !isValidWorktreePath(taskDir) {
+			t.Errorf("isValidWorktreePath(%q) should return true for real worktree directory", taskDir)
+		}
+	})
+
+	t.Run("real project directory is not valid", func(t *testing.T) {
+		if isValidWorktreePath(tmpDir) {
+			t.Errorf("isValidWorktreePath(%q) should return false for project directory", tmpDir)
+		}
+	})
+
+	t.Run("worktrees parent directory is not valid", func(t *testing.T) {
+		// The .task-worktrees directory itself shouldn't be valid
+		// (we need to be inside a specific task worktree)
+		if isValidWorktreePath(worktreesDir) {
+			t.Errorf("isValidWorktreePath(%q) should return false for worktrees parent directory", worktreesDir)
+		}
+	})
+}
+
+func TestDoneTaskCleanupTimeout(t *testing.T) {
+	// Verify the cleanup timeout constant is set correctly
+	if DoneTaskCleanupTimeout != 30*time.Minute {
+		t.Errorf("DoneTaskCleanupTimeout = %v, want 30 minutes", DoneTaskCleanupTimeout)
+	}
+}
+
+func TestCleanupInactiveDoneTasksFiltering(t *testing.T) {
+	// Create temp database
+	tmpFile, err := os.CreateTemp("", "test-*.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(tmpFile.Name())
+	tmpFile.Close()
+
+	database, err := db.Open(tmpFile.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+
+	// Create the test project first
+	if err := database.CreateProject(&db.Project{Name: "test", Path: "/tmp/test"}); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.Config{}
+	exec := New(database, cfg)
+
+	now := time.Now()
+
+	t.Run("skips tasks without CompletedAt", func(t *testing.T) {
+		task := &db.Task{
+			Title:   "Task without CompletedAt",
+			Status:  db.StatusDone,
+			Project: "test",
+		}
+		if err := database.CreateTask(task); err != nil {
+			t.Fatal(err)
+		}
+
+		// This should not panic or error - it should just skip the task
+		exec.cleanupInactiveDoneTasks()
+	})
+
+	t.Run("skips recently completed tasks", func(t *testing.T) {
+		recentTime := db.LocalTime{Time: now.Add(-5 * time.Minute)} // 5 minutes ago
+		task := &db.Task{
+			Title:       "Recently completed task",
+			Status:      db.StatusDone,
+			Project:     "test",
+			CompletedAt: &recentTime,
+		}
+		if err := database.CreateTask(task); err != nil {
+			t.Fatal(err)
+		}
+
+		// This should not panic or error - it should just skip the task
+		// (no actual process to kill, but filtering should work)
+		exec.cleanupInactiveDoneTasks()
+	})
+
+	t.Run("identifies old completed tasks", func(t *testing.T) {
+		oldTime := db.LocalTime{Time: now.Add(-2 * time.Hour)} // 2 hours ago
+		task := &db.Task{
+			Title:       "Old completed task",
+			Status:      db.StatusDone,
+			Project:     "test",
+			CompletedAt: &oldTime,
+		}
+		if err := database.CreateTask(task); err != nil {
+			t.Fatal(err)
+		}
+
+		// This should not panic or error
+		// The task would be selected for cleanup if it had a running process
+		exec.cleanupInactiveDoneTasks()
+	})
+}
+
+func TestSymlinkMCPConfig(t *testing.T) {
+	t.Run("no .mcp.json in project - does nothing", func(t *testing.T) {
+		projectDir := t.TempDir()
+		worktreePath := t.TempDir()
+
+		err := symlinkMCPConfig(projectDir, worktreePath)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		// Verify no symlink was created
+		worktreeMCPFile := filepath.Join(worktreePath, ".mcp.json")
+		if _, err := os.Lstat(worktreeMCPFile); !os.IsNotExist(err) {
+			t.Error("expected no .mcp.json in worktree when none exists in project")
+		}
+	})
+
+	t.Run("creates symlink when .mcp.json exists in project", func(t *testing.T) {
+		projectDir := t.TempDir()
+		worktreePath := t.TempDir()
+
+		// Create .mcp.json in project
+		mainMCPFile := filepath.Join(projectDir, ".mcp.json")
+		if err := os.WriteFile(mainMCPFile, []byte(`{"mcpServers": {}}`), 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		err := symlinkMCPConfig(projectDir, worktreePath)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		// Verify symlink was created
+		worktreeMCPFile := filepath.Join(worktreePath, ".mcp.json")
+		target, err := os.Readlink(worktreeMCPFile)
+		if err != nil {
+			t.Fatalf("expected symlink at %s: %v", worktreeMCPFile, err)
+		}
+		if target != mainMCPFile {
+			t.Errorf("symlink target = %s, want %s", target, mainMCPFile)
+		}
+	})
+
+	t.Run("already correctly symlinked - does nothing", func(t *testing.T) {
+		projectDir := t.TempDir()
+		worktreePath := t.TempDir()
+
+		// Create .mcp.json in project
+		mainMCPFile := filepath.Join(projectDir, ".mcp.json")
+		if err := os.WriteFile(mainMCPFile, []byte(`{"mcpServers": {}}`), 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		// Create correct symlink
+		worktreeMCPFile := filepath.Join(worktreePath, ".mcp.json")
+		if err := os.Symlink(mainMCPFile, worktreeMCPFile); err != nil {
+			t.Fatal(err)
+		}
+
+		// Call again - should succeed without error
+		err := symlinkMCPConfig(projectDir, worktreePath)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		// Verify symlink still points to correct target
+		target, err := os.Readlink(worktreeMCPFile)
+		if err != nil {
+			t.Fatalf("expected symlink at %s: %v", worktreeMCPFile, err)
+		}
+		if target != mainMCPFile {
+			t.Errorf("symlink target = %s, want %s", target, mainMCPFile)
+		}
+	})
+
+	t.Run("replaces wrong symlink", func(t *testing.T) {
+		projectDir := t.TempDir()
+		worktreePath := t.TempDir()
+
+		// Create .mcp.json in project
+		mainMCPFile := filepath.Join(projectDir, ".mcp.json")
+		if err := os.WriteFile(mainMCPFile, []byte(`{"mcpServers": {}}`), 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		// Create wrong symlink
+		worktreeMCPFile := filepath.Join(worktreePath, ".mcp.json")
+		if err := os.Symlink("/wrong/path", worktreeMCPFile); err != nil {
+			t.Fatal(err)
+		}
+
+		err := symlinkMCPConfig(projectDir, worktreePath)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		// Verify symlink now points to correct target
+		target, err := os.Readlink(worktreeMCPFile)
+		if err != nil {
+			t.Fatalf("expected symlink at %s: %v", worktreeMCPFile, err)
+		}
+		if target != mainMCPFile {
+			t.Errorf("symlink target = %s, want %s", target, mainMCPFile)
+		}
+	})
+
+	t.Run("replaces existing regular file in non-git directory", func(t *testing.T) {
+		projectDir := t.TempDir()
+		worktreePath := t.TempDir()
+
+		// Create .mcp.json in project
+		mainMCPFile := filepath.Join(projectDir, ".mcp.json")
+		if err := os.WriteFile(mainMCPFile, []byte(`{"mcpServers": {}}`), 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		// Create regular file in worktree
+		worktreeMCPFile := filepath.Join(worktreePath, ".mcp.json")
+		if err := os.WriteFile(worktreeMCPFile, []byte(`{}`), 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		err := symlinkMCPConfig(projectDir, worktreePath)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		// Verify it's now a symlink pointing to correct target
+		target, err := os.Readlink(worktreeMCPFile)
+		if err != nil {
+			t.Fatalf("expected symlink at %s: %v", worktreeMCPFile, err)
+		}
+		if target != mainMCPFile {
+			t.Errorf("symlink target = %s, want %s", target, mainMCPFile)
+		}
+	})
+
+	t.Run("skips symlink when .mcp.json is tracked by git", func(t *testing.T) {
+		projectDir := t.TempDir()
+		worktreePath := t.TempDir()
+
+		// Initialize git repo
+		cmd := exec.Command("git", "init")
+		cmd.Dir = projectDir
+		if err := cmd.Run(); err != nil {
+			t.Fatal(err)
+		}
+
+		// Configure git user for commit
+		cmd = exec.Command("git", "config", "user.email", "test@test.com")
+		cmd.Dir = projectDir
+		cmd.Run()
+		cmd = exec.Command("git", "config", "user.name", "Test")
+		cmd.Dir = projectDir
+		cmd.Run()
+
+		// Create and track .mcp.json
+		mainMCPFile := filepath.Join(projectDir, ".mcp.json")
+		if err := os.WriteFile(mainMCPFile, []byte(`{"mcpServers": {}}`), 0644); err != nil {
+			t.Fatal(err)
+		}
+		cmd = exec.Command("git", "add", ".mcp.json")
+		cmd.Dir = projectDir
+		if err := cmd.Run(); err != nil {
+			t.Fatal(err)
+		}
+		cmd = exec.Command("git", "commit", "-m", "add mcp config")
+		cmd.Dir = projectDir
+		if err := cmd.Run(); err != nil {
+			t.Fatal(err)
+		}
+
+		// Create a file in worktree (simulating checkout)
+		worktreeMCPFile := filepath.Join(worktreePath, ".mcp.json")
+		if err := os.WriteFile(worktreeMCPFile, []byte(`{"mcpServers": {}}`), 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		err := symlinkMCPConfig(projectDir, worktreePath)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		// Verify the file was NOT replaced with a symlink
+		info, err := os.Lstat(worktreeMCPFile)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			t.Error("expected regular file, got symlink - should not replace tracked files")
+		}
+	})
+
+	t.Run("creates symlink when .mcp.json exists but is not tracked", func(t *testing.T) {
+		projectDir := t.TempDir()
+		worktreePath := t.TempDir()
+
+		// Initialize git repo
+		cmd := exec.Command("git", "init")
+		cmd.Dir = projectDir
+		if err := cmd.Run(); err != nil {
+			t.Fatal(err)
+		}
+
+		// Create .mcp.json but don't track it
+		mainMCPFile := filepath.Join(projectDir, ".mcp.json")
+		if err := os.WriteFile(mainMCPFile, []byte(`{"mcpServers": {}}`), 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		err := symlinkMCPConfig(projectDir, worktreePath)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		// Verify symlink was created
+		worktreeMCPFile := filepath.Join(worktreePath, ".mcp.json")
+		target, err := os.Readlink(worktreeMCPFile)
+		if err != nil {
+			t.Fatalf("expected symlink at %s: %v", worktreeMCPFile, err)
+		}
+		if target != mainMCPFile {
+			t.Errorf("symlink target = %s, want %s", target, mainMCPFile)
 		}
 	})
 }

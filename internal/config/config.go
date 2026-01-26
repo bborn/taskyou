@@ -16,10 +16,11 @@ type Config struct {
 
 // Setting keys
 const (
-	SettingProjectsDir      = "projects_dir"
-	SettingTheme            = "theme"
-	SettingDetailPaneHeight = "detail_pane_height"
-	SettingShellPaneWidth   = "shell_pane_width"
+	SettingProjectsDir        = "projects_dir"
+	SettingTheme              = "theme"
+	SettingDetailPaneHeight   = "detail_pane_height"
+	SettingShellPaneWidth     = "shell_pane_width"
+	SettingIdleSuspendTimeout = "idle_suspend_timeout"
 )
 
 // New creates a config from database.
