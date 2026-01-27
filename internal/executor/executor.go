@@ -20,6 +20,7 @@ import (
 	"github.com/bborn/workflow/internal/db"
 	"github.com/bborn/workflow/internal/github"
 	"github.com/bborn/workflow/internal/hooks"
+	"github.com/bborn/workflow/internal/sprites"
 	"github.com/charmbracelet/log"
 )
 
@@ -57,6 +58,9 @@ type Executor struct {
 
 	// Silent mode suppresses log output (for TUI embedding)
 	silent bool
+
+	// Sprite runner for cloud execution (nil if not enabled)
+	spriteRunner *SpriteRunner
 }
 
 // SuspendIdleTimeout is how long a blocked task must be idle before being suspended.
@@ -108,6 +112,20 @@ func (e *Executor) Start(ctx context.Context) {
 	e.running = true
 	e.mu.Unlock()
 
+	// Initialize sprite runner if sprites are enabled
+	if sprites.IsEnabled(e.db) {
+		logFunc := func(format string, args ...interface{}) {
+			e.logger.Info(fmt.Sprintf(format, args...))
+		}
+		runner, err := NewSpriteRunner(e.db, logFunc)
+		if err != nil {
+			e.logger.Error("Failed to initialize sprite runner", "error", err)
+		} else {
+			e.spriteRunner = runner
+			e.logger.Info("Sprite runner initialized - Claude will execute on sprite")
+		}
+	}
+
 	e.logger.Info("Background executor started")
 
 	go e.worker(ctx)
@@ -123,6 +141,11 @@ func (e *Executor) Stop() {
 	e.running = false
 	close(e.stopCh)
 	e.mu.Unlock()
+
+	// Stop sprite runner if running
+	if e.spriteRunner != nil {
+		e.spriteRunner.Shutdown()
+	}
 
 	e.logger.Info("Background executor stopped")
 }
@@ -1027,6 +1050,19 @@ func (e *Executor) setupClaudeHooks(workDir string, taskID int64) (cleanup func(
 
 // runClaude runs a task using Claude CLI in a tmux window for interactive access
 func (e *Executor) runClaude(ctx context.Context, taskID int64, workDir, prompt string) execResult {
+	// If sprite runner is available, use cloud execution
+	if e.spriteRunner != nil {
+		task, _ := e.db.GetTask(taskID)
+		if task != nil {
+			e.logLine(taskID, "system", "Running Claude on sprite (cloud execution)")
+			if err := e.spriteRunner.RunClaude(ctx, task, workDir, prompt); err != nil {
+				e.logger.Error("Sprite execution failed", "error", err)
+				return execResult{Success: false, Message: err.Error()}
+			}
+			return execResult{Success: true}
+		}
+	}
+
 	// Check if tmux is available
 	if _, err := exec.LookPath("tmux"); err != nil {
 		return e.runClaudeDirect(ctx, taskID, workDir, prompt)

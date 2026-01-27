@@ -493,6 +493,8 @@ type Project struct {
 	Aliases      string          // comma-separated
 	Instructions string          // project-specific instructions for AI
 	Actions      []ProjectAction // actions triggered on task events (stored as JSON)
+	SpriteName   string          // name of the sprite for cloud execution
+	SpriteStatus string          // sprite status: "", "ready", "checkpointed", "error"
 	CreatedAt    LocalTime
 }
 
@@ -510,9 +512,9 @@ func (p *Project) GetAction(trigger string) *ProjectAction {
 func (db *DB) CreateProject(p *Project) error {
 	actionsJSON, _ := json.Marshal(p.Actions)
 	result, err := db.Exec(`
-		INSERT INTO projects (name, path, aliases, instructions, actions)
-		VALUES (?, ?, ?, ?, ?)
-	`, p.Name, p.Path, p.Aliases, p.Instructions, string(actionsJSON))
+		INSERT INTO projects (name, path, aliases, instructions, actions, sprite_name, sprite_status)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
+	`, p.Name, p.Path, p.Aliases, p.Instructions, string(actionsJSON), p.SpriteName, p.SpriteStatus)
 	if err != nil {
 		return fmt.Errorf("insert project: %w", err)
 	}
@@ -525,9 +527,10 @@ func (db *DB) CreateProject(p *Project) error {
 func (db *DB) UpdateProject(p *Project) error {
 	actionsJSON, _ := json.Marshal(p.Actions)
 	_, err := db.Exec(`
-		UPDATE projects SET name = ?, path = ?, aliases = ?, instructions = ?, actions = ?
+		UPDATE projects SET name = ?, path = ?, aliases = ?, instructions = ?, actions = ?,
+		sprite_name = ?, sprite_status = ?
 		WHERE id = ?
-	`, p.Name, p.Path, p.Aliases, p.Instructions, string(actionsJSON), p.ID)
+	`, p.Name, p.Path, p.Aliases, p.Instructions, string(actionsJSON), p.SpriteName, p.SpriteStatus, p.ID)
 	if err != nil {
 		return fmt.Errorf("update project: %w", err)
 	}
@@ -558,7 +561,8 @@ func (db *DB) DeleteProject(id int64) error {
 // ListProjects returns all projects, with "personal" always first.
 func (db *DB) ListProjects() ([]*Project, error) {
 	rows, err := db.Query(`
-		SELECT id, name, path, aliases, instructions, COALESCE(actions, '[]'), created_at
+		SELECT id, name, path, aliases, instructions, COALESCE(actions, '[]'),
+		       COALESCE(sprite_name, ''), COALESCE(sprite_status, ''), created_at
 		FROM projects ORDER BY CASE WHEN name = 'personal' THEN 0 ELSE 1 END, name
 	`)
 	if err != nil {
@@ -570,7 +574,7 @@ func (db *DB) ListProjects() ([]*Project, error) {
 	for rows.Next() {
 		p := &Project{}
 		var actionsJSON string
-		if err := rows.Scan(&p.ID, &p.Name, &p.Path, &p.Aliases, &p.Instructions, &actionsJSON, &p.CreatedAt); err != nil {
+		if err := rows.Scan(&p.ID, &p.Name, &p.Path, &p.Aliases, &p.Instructions, &actionsJSON, &p.SpriteName, &p.SpriteStatus, &p.CreatedAt); err != nil {
 			return nil, fmt.Errorf("scan project: %w", err)
 		}
 		json.Unmarshal([]byte(actionsJSON), &p.Actions)
@@ -585,9 +589,10 @@ func (db *DB) GetProjectByName(name string) (*Project, error) {
 	p := &Project{}
 	var actionsJSON string
 	err := db.QueryRow(`
-		SELECT id, name, path, aliases, instructions, COALESCE(actions, '[]'), created_at
+		SELECT id, name, path, aliases, instructions, COALESCE(actions, '[]'),
+		       COALESCE(sprite_name, ''), COALESCE(sprite_status, ''), created_at
 		FROM projects WHERE name = ?
-	`, name).Scan(&p.ID, &p.Name, &p.Path, &p.Aliases, &p.Instructions, &actionsJSON, &p.CreatedAt)
+	`, name).Scan(&p.ID, &p.Name, &p.Path, &p.Aliases, &p.Instructions, &actionsJSON, &p.SpriteName, &p.SpriteStatus, &p.CreatedAt)
 	if err == nil {
 		json.Unmarshal([]byte(actionsJSON), &p.Actions)
 		return p, nil
@@ -597,7 +602,11 @@ func (db *DB) GetProjectByName(name string) (*Project, error) {
 	}
 
 	// Try alias match
-	rows, err := db.Query(`SELECT id, name, path, aliases, instructions, COALESCE(actions, '[]'), created_at FROM projects`)
+	rows, err := db.Query(`
+		SELECT id, name, path, aliases, instructions, COALESCE(actions, '[]'),
+		       COALESCE(sprite_name, ''), COALESCE(sprite_status, ''), created_at
+		FROM projects
+	`)
 	if err != nil {
 		return nil, fmt.Errorf("query projects: %w", err)
 	}
@@ -605,7 +614,7 @@ func (db *DB) GetProjectByName(name string) (*Project, error) {
 
 	for rows.Next() {
 		p := &Project{}
-		if err := rows.Scan(&p.ID, &p.Name, &p.Path, &p.Aliases, &p.Instructions, &actionsJSON, &p.CreatedAt); err != nil {
+		if err := rows.Scan(&p.ID, &p.Name, &p.Path, &p.Aliases, &p.Instructions, &actionsJSON, &p.SpriteName, &p.SpriteStatus, &p.CreatedAt); err != nil {
 			return nil, fmt.Errorf("scan project: %w", err)
 		}
 		json.Unmarshal([]byte(actionsJSON), &p.Actions)
