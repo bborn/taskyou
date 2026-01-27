@@ -278,3 +278,121 @@ func TestInitialize(t *testing.T) {
 		t.Errorf("expected server name 'workflow-mcp', got '%v'", serverInfo["name"])
 	}
 }
+
+func TestWorkflowCreateTask(t *testing.T) {
+	database := testDB(t)
+	task := createTestTask(t, database)
+
+	request := map[string]interface{}{
+		"jsonrpc": "2.0",
+		"id":      1,
+		"method":  "tools/call",
+		"params": map[string]interface{}{
+			"name": "workflow_create_task",
+			"arguments": map[string]interface{}{
+				"title":  "New Task",
+				"body":   "Description of new task",
+				"status": "queued",
+			},
+		},
+	}
+	reqBytes, _ := json.Marshal(request)
+	reqBytes = append(reqBytes, '\n')
+
+	server, output := testServer(database, task.ID, string(reqBytes))
+	server.Run()
+
+	var resp jsonRPCResponse
+	if err := json.Unmarshal(output.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to parse response: %v", err)
+	}
+
+	if resp.Error != nil {
+		t.Fatalf("unexpected error: %s", resp.Error.Message)
+	}
+
+	// Verify task was created
+	tasks, err := database.ListTasks(db.ListTasksOptions{Status: "queued"})
+	if err != nil {
+		t.Fatalf("failed to list tasks: %v", err)
+	}
+
+	var found bool
+	for _, tsk := range tasks {
+		if tsk.Title == "New Task" {
+			found = true
+			if tsk.Body != "Description of new task" {
+				t.Errorf("expected body 'Description of new task', got '%s'", tsk.Body)
+			}
+			if tsk.Project != task.Project {
+				t.Errorf("expected project '%s', got '%s'", task.Project, tsk.Project)
+			}
+			break
+		}
+	}
+
+	if !found {
+		t.Error("new task not found in database")
+	}
+}
+
+func TestWorkflowListTasks(t *testing.T) {
+	database := testDB(t)
+	// Create current task
+	currentTask := createTestTask(t, database)
+
+	// Create another task in the same project
+	otherTask := &db.Task{
+		Title:   "Other Task",
+		Status:  db.StatusQueued,
+		Project: "test-project",
+	}
+	if err := database.CreateTask(otherTask); err != nil {
+		t.Fatalf("failed to create other task: %v", err)
+	}
+
+	request := map[string]interface{}{
+		"jsonrpc": "2.0",
+		"id":      1,
+		"method":  "tools/call",
+		"params": map[string]interface{}{
+			"name":      "workflow_list_tasks",
+			"arguments": map[string]interface{}{},
+		},
+	}
+	reqBytes, _ := json.Marshal(request)
+	reqBytes = append(reqBytes, '\n')
+
+	server, output := testServer(database, currentTask.ID, string(reqBytes))
+	server.Run()
+
+	var resp jsonRPCResponse
+	if err := json.Unmarshal(output.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to parse response: %v", err)
+	}
+
+	if resp.Error != nil {
+		t.Fatalf("unexpected error: %s", resp.Error.Message)
+	}
+
+	result, ok := resp.Result.(map[string]interface{})
+	if !ok {
+		t.Fatal("expected result to be a map")
+	}
+	content, ok := result["content"].([]interface{})
+	if !ok {
+		t.Fatal("expected content to be an array")
+	}
+	textBlock, ok := content[0].(map[string]interface{})
+	if !ok {
+		t.Fatal("expected text block to be a map")
+	}
+	text := textBlock["text"].(string)
+
+	if !strings.Contains(text, "Other Task") {
+		t.Errorf("expected output to contain 'Other Task', got:\n%s", text)
+	}
+	if !strings.Contains(text, "Test Task") {
+		t.Errorf("expected output to contain 'Test Task', got:\n%s", text)
+	}
+}
