@@ -142,19 +142,6 @@ func (db *DB) migrate() error {
 		`CREATE INDEX IF NOT EXISTS idx_tasks_project ON tasks(project)`,
 		`CREATE INDEX IF NOT EXISTS idx_task_logs_task_id ON task_logs(task_id)`,
 
-		`CREATE TABLE IF NOT EXISTS project_memories (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			project TEXT NOT NULL,
-			category TEXT NOT NULL DEFAULT 'general',
-			content TEXT NOT NULL,
-			source_task_id INTEGER REFERENCES tasks(id) ON DELETE SET NULL,
-			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-		)`,
-
-		`CREATE INDEX IF NOT EXISTS idx_project_memories_project ON project_memories(project)`,
-		`CREATE INDEX IF NOT EXISTS idx_project_memories_category ON project_memories(category)`,
-
 		`CREATE TABLE IF NOT EXISTS task_attachments (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
@@ -176,6 +163,33 @@ func (db *DB) migrate() error {
 			is_builtin INTEGER DEFAULT 0,
 			created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 		)`,
+
+		// Compaction summaries table - stores context summaries when Claude compacts
+		`CREATE TABLE IF NOT EXISTS task_compaction_summaries (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+			session_id TEXT NOT NULL,
+			trigger TEXT NOT NULL,
+			pre_tokens INTEGER DEFAULT 0,
+			summary TEXT NOT NULL,
+			custom_instructions TEXT DEFAULT '',
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+		)`,
+
+		`CREATE INDEX IF NOT EXISTS idx_task_compaction_summaries_task_id ON task_compaction_summaries(task_id)`,
+
+		// FTS5 virtual table for full-text search on tasks
+		// This enables searching task title, body, tags, and transcript excerpts
+		// Uses standalone table (not content-sync) for flexibility
+		`CREATE VIRTUAL TABLE IF NOT EXISTS task_search USING fts5(
+			task_id UNINDEXED,
+			project,
+			title,
+			body,
+			tags,
+			transcript_excerpt,
+			tokenize='porter unicode61'
+		)`,
 	}
 
 	for _, m := range migrations {
@@ -190,6 +204,38 @@ func (db *DB) migrate() error {
 		`ALTER TABLE projects ADD COLUMN actions TEXT DEFAULT '[]'`,
 		`ALTER TABLE tasks ADD COLUMN worktree_path TEXT DEFAULT ''`,
 		`ALTER TABLE tasks ADD COLUMN branch_name TEXT DEFAULT ''`,
+		`ALTER TABLE tasks ADD COLUMN port INTEGER DEFAULT 0`,
+		// Scheduled task columns
+		`ALTER TABLE tasks ADD COLUMN scheduled_at DATETIME`,      // When to next run (null = not scheduled)
+		`ALTER TABLE tasks ADD COLUMN recurrence TEXT DEFAULT ''`, // Deprecated recurrence pattern (empty = one-time)
+		`ALTER TABLE tasks ADD COLUMN last_run_at DATETIME`,       // When last executed (for scheduled tasks)
+		// Claude session tracking
+		`ALTER TABLE tasks ADD COLUMN claude_session_id TEXT DEFAULT ''`, // Claude session ID for resuming conversations
+		// Project color column
+		`ALTER TABLE projects ADD COLUMN color TEXT DEFAULT ''`,             // Hex color for project label (e.g., "#61AFEF")
+		`ALTER TABLE projects ADD COLUMN claude_config_dir TEXT DEFAULT ''`, // Per-project CLAUDE_CONFIG_DIR override
+		// PR tracking columns
+		`ALTER TABLE tasks ADD COLUMN pr_url TEXT DEFAULT ''`,      // Pull request URL (if associated with a PR)
+		`ALTER TABLE tasks ADD COLUMN pr_number INTEGER DEFAULT 0`, // Pull request number (if associated with a PR)
+		// Dangerous mode tracking
+		`ALTER TABLE tasks ADD COLUMN dangerous_mode INTEGER DEFAULT 0`, // Whether running with --dangerously-skip-permissions
+		// Task pinning
+		`ALTER TABLE tasks ADD COLUMN pinned INTEGER DEFAULT 0`, // Whether task is pinned to top of column
+		// Daemon session tracking for process management
+		`ALTER TABLE tasks ADD COLUMN daemon_session TEXT DEFAULT ''`, // tmux daemon session name for killing Claude
+		// Task tagging for categorization and search
+		`ALTER TABLE tasks ADD COLUMN tags TEXT DEFAULT ''`, // comma-separated tags for categorization (e.g., "customer-support,email,influence-kit")
+		// Task executor - which CLI to use for task execution
+		`ALTER TABLE tasks ADD COLUMN executor TEXT DEFAULT 'claude'`, // Task executor: "claude" (default), "codex"
+		// Tmux window ID for unique window identification (avoids duplicate window issues)
+		`ALTER TABLE tasks ADD COLUMN tmux_window_id TEXT DEFAULT ''`, // tmux window ID (e.g., "@1234")
+		// Distilled task summary for search indexing and context
+		`ALTER TABLE tasks ADD COLUMN summary TEXT DEFAULT ''`, // Distilled summary of what was accomplished
+		// Last distillation timestamp for tracking when to re-distill
+		`ALTER TABLE tasks ADD COLUMN last_distilled_at DATETIME`, // When task was last distilled
+		// Tmux pane IDs for deterministic pane identification (avoids index-based guessing)
+		`ALTER TABLE tasks ADD COLUMN claude_pane_id TEXT DEFAULT ''`, // tmux pane ID for Claude/executor pane (e.g., "%1234")
+		`ALTER TABLE tasks ADD COLUMN shell_pane_id TEXT DEFAULT ''`,  // tmux pane ID for shell pane (e.g., "%1235")
 		// Sprite support: cloud execution environments
 		`ALTER TABLE projects ADD COLUMN sprite_name TEXT DEFAULT ''`,
 		`ALTER TABLE projects ADD COLUMN sprite_status TEXT DEFAULT ''`,
@@ -229,6 +275,11 @@ func (db *DB) migrate() error {
 	// Ensure default task types exist
 	if err := db.ensureDefaultTaskTypes(); err != nil {
 		return fmt.Errorf("ensure default task types: %w", err)
+	}
+
+	// Assign default colors to projects without colors
+	if err := db.ensureProjectColors(); err != nil {
+		return fmt.Errorf("ensure project colors: %w", err)
 	}
 
 	return nil
@@ -272,8 +323,8 @@ func (db *DB) ensurePersonalProject() error {
 
 	// Create the personal project in database
 	_, err = db.Exec(`
-		INSERT INTO projects (name, path, aliases, instructions)
-		VALUES ('personal', ?, '', 'Default project for personal tasks')
+		INSERT INTO projects (name, path, aliases, instructions, claude_config_dir)
+		VALUES ('personal', ?, '', 'Default project for personal tasks', '')
 	`, personalDir)
 	if err != nil {
 		return fmt.Errorf("insert personal project: %w", err)
@@ -331,6 +382,55 @@ This is the default workspace for personal tasks.
 	return nil
 }
 
+// DefaultProjectColors is a palette of distinct colors for projects.
+// These are assigned to projects that don't have a color set.
+var DefaultProjectColors = []string{
+	"#C678DD", // Purple
+	"#61AFEF", // Blue
+	"#56B6C2", // Cyan
+	"#98C379", // Green
+	"#E5C07B", // Yellow
+	"#E06C75", // Red/Pink
+	"#D19A66", // Orange
+	"#ABB2BF", // Gray
+}
+
+// ensureProjectColors assigns default colors to projects that don't have colors.
+func (db *DB) ensureProjectColors() error {
+	// Get all projects without colors
+	rows, err := db.Query(`SELECT id, name FROM projects WHERE color = '' OR color IS NULL ORDER BY id`)
+	if err != nil {
+		return fmt.Errorf("query projects without colors: %w", err)
+	}
+	defer rows.Close()
+
+	var projects []struct {
+		ID   int64
+		Name string
+	}
+	for rows.Next() {
+		var p struct {
+			ID   int64
+			Name string
+		}
+		if err := rows.Scan(&p.ID, &p.Name); err != nil {
+			return fmt.Errorf("scan project: %w", err)
+		}
+		projects = append(projects, p)
+	}
+
+	// Assign colors to projects
+	for i, p := range projects {
+		color := DefaultProjectColors[i%len(DefaultProjectColors)]
+		_, err := db.Exec(`UPDATE projects SET color = ? WHERE id = ?`, color, p.ID)
+		if err != nil {
+			return fmt.Errorf("update project color: %w", err)
+		}
+	}
+
+	return nil
+}
+
 // ensureDefaultTaskTypes creates the default task types if they don't exist.
 func (db *DB) ensureDefaultTaskTypes() error {
 	// Check if task types already exist
@@ -358,8 +458,6 @@ func (db *DB) ensureDefaultTaskTypes() error {
 
 {{project_instructions}}
 
-{{memories}}
-
 Task: {{title}}
 
 {{body}}
@@ -370,6 +468,7 @@ Task: {{title}}
 
 Instructions:
 - Explore the codebase to understand the context
+- Always use relative paths (e.g., "." or "./src") when searching or navigating - never use absolute paths
 - Implement the solution
 - Write tests if applicable
 - Commit your changes with clear messages
@@ -391,8 +490,6 @@ When finished, provide a summary of what you did:
 
 {{project_instructions}}
 
-{{memories}}
-
 Task: {{title}}
 
 Details: {{body}}
@@ -411,8 +508,6 @@ Output the final content, then summarize what you created.`,
 			Instructions: `You are a strategic advisor. Analyze this thoroughly:
 
 {{project_instructions}}
-
-{{memories}}
 
 Question: {{title}}
 
@@ -449,7 +544,7 @@ Think deeply but be actionable. Summarize your conclusions clearly.`,
 // DefaultPath returns the default database path.
 func DefaultPath() string {
 	// Check for explicit path
-	if p := os.Getenv("TASK_DB_PATH"); p != "" {
+	if p := os.Getenv("WORKTREE_DB_PATH"); p != "" {
 		return p
 	}
 

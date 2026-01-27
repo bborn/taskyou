@@ -291,6 +291,17 @@ func refreshStyles() {
 	Success = lipgloss.NewStyle().Foreground(ColorSuccess)
 	Warning = lipgloss.NewStyle().Foreground(ColorWarning)
 	Error = lipgloss.NewStyle().Foreground(ColorError)
+	AttachmentChip = lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(ColorMuted).
+		Foreground(ColorMuted).
+		Padding(0, 1)
+	AttachmentChipSelected = lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(ColorPrimary).
+		Foreground(ColorPrimary).
+		Bold(true).
+		Padding(0, 1)
 
 	// Update status badges
 	StatusInProgress = lipgloss.NewStyle().

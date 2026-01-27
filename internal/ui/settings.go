@@ -2,12 +2,15 @@ package ui
 
 import (
 	"fmt"
+	"io/fs"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 
 	"github.com/bborn/workflow/internal/db"
-	"github.com/charmbracelet/bubbles/textarea"
-	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/huh"
 	"github.com/charmbracelet/lipgloss"
 )
 
@@ -28,67 +31,42 @@ type SettingsModel struct {
 	projects        []*db.Project
 	selectedProject int
 
-	// Project form
-	editingProject    bool
-	editProject       *db.Project
-	nameInput         textinput.Model
-	aliasInput        textinput.Model
-	instructionsInput textarea.Model
-	projectFormFocus  int // 0=name, 1=path (browser), 2=aliases, 3=instructions
+	// Project form modal (two-step: 1. browse path, 2. fill details)
+	editingProject             bool
+	editProject                *db.Project
+	projectForm                *huh.Form
+	projectFormName            string
+	projectFormAliases         string
+	projectFormInstructions    string
+	projectFormClaudeConfigDir string
 
 	// Task Types
 	taskTypes        []*db.TaskType
 	selectedTaskType int
 
-	// Task Type form
-	editingTaskType       bool
-	editTaskType          *db.TaskType
-	typeNameInput         textinput.Model
-	typeLabelInput        textinput.Model
-	typeInstructionsInput textarea.Model
-	typeFormFocus         int // 0=name, 1=label, 2=instructions
+	// Task Type form modal
+	editingTaskType          bool
+	editTaskType             *db.TaskType
+	taskTypeForm             *huh.Form
+	taskTypeFormName         string
+	taskTypeFormLabel        string
+	taskTypeFormInstructions string
 
 	// File browser for path selection
 	browsing    bool
-	browsingFor string // "path" or "dir"
 	fileBrowser *FileBrowserModel
 
-	// Settings
-	projectsDir string
+	// Delete project confirmation
+	confirmingDeleteProject bool
+	pendingDeleteProject    *db.Project
+	deleteProjectConfirm    *huh.Form
+	deleteProjectValue      bool
 
 	err error
 }
 
 // NewSettingsModel creates a new settings model.
 func NewSettingsModel(database *db.DB, width, height int) *SettingsModel {
-	// Project form inputs
-	nameInput := textinput.New()
-	nameInput.Placeholder = "Project name"
-	nameInput.CharLimit = 50
-
-	aliasInput := textinput.New()
-	aliasInput.Placeholder = "alias1, alias2"
-	aliasInput.CharLimit = 100
-
-	instructionsInput := textarea.New()
-	instructionsInput.Placeholder = "Project-specific instructions for AI..."
-	instructionsInput.SetWidth(width - 20)
-	instructionsInput.SetHeight(5)
-
-	// Task type form inputs
-	typeNameInput := textinput.New()
-	typeNameInput.Placeholder = "type-name (lowercase, no spaces)"
-	typeNameInput.CharLimit = 30
-
-	typeLabelInput := textinput.New()
-	typeLabelInput.Placeholder = "Display Label"
-	typeLabelInput.CharLimit = 50
-
-	typeInstructionsInput := textarea.New()
-	typeInstructionsInput.Placeholder = "Prompt template for this task type...\nUse {{title}}, {{body}}, {{project}}, {{project_instructions}}, {{memories}}, {{attachments}}, {{history}}"
-	typeInstructionsInput.SetWidth(width - 20)
-	typeInstructionsInput.SetHeight(10)
-
 	// Get available themes and current selection
 	themes := ListThemes()
 	currentThemeName := CurrentTheme().Name
@@ -101,17 +79,11 @@ func NewSettingsModel(database *db.DB, width, height int) *SettingsModel {
 	}
 
 	m := &SettingsModel{
-		db:                    database,
-		width:                 width,
-		height:                height,
-		themes:                themes,
-		selectedTheme:         selectedTheme,
-		nameInput:             nameInput,
-		aliasInput:            aliasInput,
-		instructionsInput:     instructionsInput,
-		typeNameInput:         typeNameInput,
-		typeLabelInput:        typeLabelInput,
-		typeInstructionsInput: typeInstructionsInput,
+		db:            database,
+		width:         width,
+		height:        height,
+		themes:        themes,
+		selectedTheme: selectedTheme,
 	}
 	m.loadSettings()
 	return m
@@ -131,12 +103,6 @@ func (m *SettingsModel) loadSettings() {
 		return
 	}
 	m.taskTypes = taskTypes
-
-	dir, _ := m.db.GetSetting("projects_dir")
-	m.projectsDir = dir
-	if m.projectsDir == "" {
-		m.projectsDir = "~/Projects"
-	}
 }
 
 // Init initializes the model.
@@ -146,6 +112,17 @@ func (m *SettingsModel) Init() tea.Cmd {
 
 // Update handles messages.
 func (m *SettingsModel) Update(msg tea.Msg) (*SettingsModel, tea.Cmd) {
+	// Handle modals first (they overlay everything)
+	if m.confirmingDeleteProject && m.deleteProjectConfirm != nil {
+		return m.updateDeleteProjectConfirm(msg)
+	}
+	if m.editingProject && m.projectForm != nil {
+		return m.updateProjectFormModal(msg)
+	}
+	if m.editingTaskType && m.taskTypeForm != nil {
+		return m.updateTaskTypeFormModal(msg)
+	}
+
 	// Handle file browser mode
 	if m.browsing && m.fileBrowser != nil {
 		return m.updateBrowser(msg)
@@ -153,14 +130,6 @@ func (m *SettingsModel) Update(msg tea.Msg) (*SettingsModel, tea.Cmd) {
 
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
-		// Handle editing mode
-		if m.editingProject {
-			return m.updateProjectForm(msg)
-		}
-		if m.editingTaskType {
-			return m.updateTaskTypeForm(msg)
-		}
-
 		switch msg.String() {
 		case "tab":
 			// Switch between sections (0=theme, 1=projects, 2=task types)
@@ -214,58 +183,22 @@ func (m *SettingsModel) Update(msg tea.Msg) (*SettingsModel, tea.Cmd) {
 		case "n":
 			// New item (projects or task types section)
 			if m.section == 1 {
-				m.editingProject = true
-				m.editProject = &db.Project{}
-				m.nameInput.SetValue("")
-				m.aliasInput.SetValue("")
-				m.instructionsInput.SetValue("")
-				m.nameInput.Focus()
-				m.projectFormFocus = 0
-				return m, textinput.Blink
+				// For new project, first get name, then browse for path
+				return m.showProjectForm(&db.Project{})
 			} else if m.section == 2 {
-				m.editingTaskType = true
-				m.editTaskType = &db.TaskType{}
-				m.typeNameInput.SetValue("")
-				m.typeLabelInput.SetValue("")
-				m.typeInstructionsInput.SetValue("")
-				m.typeNameInput.Focus()
-				m.typeFormFocus = 0
-				return m, textinput.Blink
+				return m.showTaskTypeForm(nil)
 			}
 		case "e":
 			// Edit selected item
 			if m.section == 1 && len(m.projects) > 0 && m.selectedProject < len(m.projects) {
-				m.editingProject = true
-				m.editProject = m.projects[m.selectedProject]
-				m.nameInput.SetValue(m.editProject.Name)
-				m.aliasInput.SetValue(m.editProject.Aliases)
-				m.instructionsInput.SetValue(m.editProject.Instructions)
-				m.nameInput.Focus()
-				m.projectFormFocus = 0
-				return m, textinput.Blink
+				return m.showProjectForm(m.projects[m.selectedProject])
 			} else if m.section == 2 && len(m.taskTypes) > 0 && m.selectedTaskType < len(m.taskTypes) {
-				m.editingTaskType = true
-				m.editTaskType = m.taskTypes[m.selectedTaskType]
-				m.typeNameInput.SetValue(m.editTaskType.Name)
-				m.typeLabelInput.SetValue(m.editTaskType.Label)
-				m.typeInstructionsInput.SetValue(m.editTaskType.Instructions)
-				m.typeNameInput.Focus()
-				m.typeFormFocus = 0
-				return m, textinput.Blink
+				return m.showTaskTypeForm(m.taskTypes[m.selectedTaskType])
 			}
 		case "d":
 			// Delete selected item
 			if m.section == 1 && len(m.projects) > 0 && m.selectedProject < len(m.projects) {
-				err := m.db.DeleteProject(m.projects[m.selectedProject].ID)
-				if err != nil {
-					m.err = err
-				} else {
-					m.err = nil
-					m.loadSettings()
-					if m.selectedProject >= len(m.projects) && m.selectedProject > 0 {
-						m.selectedProject--
-					}
-				}
+				return m.showDeleteProjectConfirm(m.projects[m.selectedProject])
 			} else if m.section == 2 && len(m.taskTypes) > 0 && m.selectedTaskType < len(m.taskTypes) {
 				err := m.db.DeleteTaskType(m.taskTypes[m.selectedTaskType].ID)
 				if err != nil {
@@ -278,12 +211,6 @@ func (m *SettingsModel) Update(msg tea.Msg) (*SettingsModel, tea.Cmd) {
 					}
 				}
 			}
-		case "p":
-			// Browse for projects dir
-			m.browsing = true
-			m.browsingFor = "dir"
-			m.fileBrowser = NewFileBrowserModel(m.projectsDir, m.width, m.height)
-			return m, nil
 		}
 	}
 
@@ -304,9 +231,10 @@ func (m *SettingsModel) updateBrowser(msg tea.Msg) (*SettingsModel, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
 		switch msg.String() {
-		case "esc", "q":
+		case "esc":
 			m.browsing = false
 			m.fileBrowser = nil
+			m.editProject = nil // Cancel new project creation
 			return m, nil
 		case " ":
 			// Select current directory
@@ -314,11 +242,14 @@ func (m *SettingsModel) updateBrowser(msg tea.Msg) (*SettingsModel, tea.Cmd) {
 			m.browsing = false
 			m.fileBrowser = nil
 
-			if m.browsingFor == "dir" {
-				m.db.SetSetting("projects_dir", path)
-				m.projectsDir = path
-			} else if m.browsingFor == "path" && m.editProject != nil {
+			if m.editProject != nil {
 				m.editProject.Path = path
+				// If project already has name (form was filled first), save it
+				// Otherwise show the form (for backwards compat if needed)
+				if m.editProject.Name != "" {
+					return m.saveProject()
+				}
+				return m.showProjectForm(m.editProject)
 			}
 			return m, nil
 		}
@@ -329,211 +260,288 @@ func (m *SettingsModel) updateBrowser(msg tea.Msg) (*SettingsModel, tea.Cmd) {
 	return m, cmd
 }
 
-func (m *SettingsModel) updateProjectForm(msg tea.KeyMsg) (*SettingsModel, tea.Cmd) {
-	switch msg.String() {
-	case "esc":
-		m.editingProject = false
-		m.editProject = nil
-		return m, nil
-	case "tab":
-		// Tab moves forward through fields (unless in textarea)
-		if m.projectFormFocus == 3 {
-			// In instructions textarea, tab inserts tab character
-			var cmd tea.Cmd
-			m.instructionsInput, cmd = m.instructionsInput.Update(msg)
-			return m, cmd
-		}
-		m.projectFormFocus = (m.projectFormFocus + 1) % 4
-		m.updateProjectFormFocus()
-		if m.projectFormFocus == 1 {
-			// Open file browser for path
-			startPath := m.projectsDir
-			if m.editProject != nil && m.editProject.Path != "" {
-				startPath = m.editProject.Path
-			}
-			m.browsing = true
-			m.browsingFor = "path"
-			m.fileBrowser = NewFileBrowserModel(startPath, m.width, m.height)
+// showProjectForm creates and shows the project form modal
+func (m *SettingsModel) showProjectForm(project *db.Project) (*SettingsModel, tea.Cmd) {
+	m.editingProject = true
+	m.editProject = project
+
+	// Initialize form values
+	m.projectFormName = project.Name
+	m.projectFormAliases = project.Aliases
+	m.projectFormInstructions = project.Instructions
+	m.projectFormClaudeConfigDir = project.ClaudeConfigDir
+
+	title := "New Project"
+	description := "You'll choose a directory next"
+	if project.ID != 0 {
+		title = "Edit Project"
+		description = fmt.Sprintf("Path: %s", project.Path)
+	} else if project.Path != "" {
+		// New project but path already selected
+		description = fmt.Sprintf("Path: %s", project.Path)
+	}
+
+	modalWidth := min(70, m.width-8)
+	m.projectForm = huh.NewForm(
+		huh.NewGroup(
+			huh.NewInput().
+				Key("name").
+				Title("Name").
+				Placeholder("Project name").
+				Value(&m.projectFormName),
+			huh.NewInput().
+				Key("aliases").
+				Title("Aliases").
+				Description("Comma-separated shortcuts").
+				Placeholder("alias1, alias2").
+				Value(&m.projectFormAliases),
+			huh.NewText().
+				Key("instructions").
+				Title("Instructions").
+				Description("Project-specific instructions for AI").
+				Placeholder("Instructions...").
+				CharLimit(5000).
+				Value(&m.projectFormInstructions),
+			huh.NewInput().
+				Key("claude_config_dir").
+				Title("Claude Config Directory").
+				Description("Overrides CLAUDE_CONFIG_DIR for this project").
+				Placeholder("~/.claude-other-account").
+				Value(&m.projectFormClaudeConfigDir),
+		).Title(title).Description(description),
+	).WithTheme(huh.ThemeDracula()).
+		WithWidth(modalWidth - 6).
+		WithShowHelp(true)
+
+	return m, m.projectForm.Init()
+}
+
+// updateProjectFormModal handles updates to the project form modal
+func (m *SettingsModel) updateProjectFormModal(msg tea.Msg) (*SettingsModel, tea.Cmd) {
+	// Handle escape to cancel
+	if keyMsg, ok := msg.(tea.KeyMsg); ok {
+		if keyMsg.String() == "esc" {
+			m.editingProject = false
+			m.projectForm = nil
+			m.editProject = nil
 			return m, nil
 		}
-		if m.projectFormFocus == 3 {
-			return m, textarea.Blink
-		}
-		return m, nil
-	case "shift+tab":
-		m.projectFormFocus = (m.projectFormFocus + 3) % 4
-		m.updateProjectFormFocus()
-		if m.projectFormFocus == 1 {
-			// Open file browser for path
-			startPath := m.projectsDir
-			if m.editProject != nil && m.editProject.Path != "" {
-				startPath = m.editProject.Path
-			}
-			m.browsing = true
-			m.browsingFor = "path"
-			m.fileBrowser = NewFileBrowserModel(startPath, m.width, m.height)
-			return m, nil
-		}
-		if m.projectFormFocus == 3 {
-			return m, textarea.Blink
-		}
-		return m, nil
-	case "enter":
-		if m.projectFormFocus == 1 {
-			// Open file browser
-			startPath := m.projectsDir
-			if m.editProject != nil && m.editProject.Path != "" {
-				startPath = m.editProject.Path
-			}
-			m.browsing = true
-			m.browsingFor = "path"
-			m.fileBrowser = NewFileBrowserModel(startPath, m.width, m.height)
-			return m, nil
-		}
-		if m.projectFormFocus == 3 {
-			// In instructions textarea, enter inserts newline
-			var cmd tea.Cmd
-			m.instructionsInput, cmd = m.instructionsInput.Update(msg)
-			return m, cmd
-		}
-		m.projectFormFocus = (m.projectFormFocus + 1) % 4
-		m.updateProjectFormFocus()
-		if m.projectFormFocus == 1 {
-			// Open file browser for path
-			startPath := m.projectsDir
-			if m.editProject != nil && m.editProject.Path != "" {
-				startPath = m.editProject.Path
-			}
-			m.browsing = true
-			m.browsingFor = "path"
-			m.fileBrowser = NewFileBrowserModel(startPath, m.width, m.height)
-			return m, nil
-		}
-		if m.projectFormFocus == 3 {
-			return m, textarea.Blink
-		}
-		return m, nil
-	case "ctrl+s":
+	}
+
+	// Update the huh form
+	form, cmd := m.projectForm.Update(msg)
+	if f, ok := form.(*huh.Form); ok {
+		m.projectForm = f
+	}
+
+	// Check if form completed
+	if m.projectForm.State == huh.StateCompleted {
 		return m.saveProject()
 	}
 
-	// Update focused input
-	var cmd tea.Cmd
-	switch m.projectFormFocus {
-	case 0:
-		m.nameInput, cmd = m.nameInput.Update(msg)
-	case 2:
-		m.aliasInput, cmd = m.aliasInput.Update(msg)
-	case 3:
-		m.instructionsInput, cmd = m.instructionsInput.Update(msg)
-	}
 	return m, cmd
 }
 
-func (m *SettingsModel) updateProjectFormFocus() {
-	m.nameInput.Blur()
-	m.aliasInput.Blur()
-	m.instructionsInput.Blur()
-	switch m.projectFormFocus {
-	case 0:
-		m.nameInput.Focus()
-	case 2:
-		m.aliasInput.Focus()
-	case 3:
-		m.instructionsInput.Focus()
+// showTaskTypeForm creates and shows the task type form modal
+func (m *SettingsModel) showTaskTypeForm(taskType *db.TaskType) (*SettingsModel, tea.Cmd) {
+	m.editingTaskType = true
+	if taskType == nil {
+		m.editTaskType = &db.TaskType{}
+		m.taskTypeFormName = ""
+		m.taskTypeFormLabel = ""
+		m.taskTypeFormInstructions = ""
+	} else {
+		m.editTaskType = taskType
+		m.taskTypeFormName = taskType.Name
+		m.taskTypeFormLabel = taskType.Label
+		m.taskTypeFormInstructions = taskType.Instructions
 	}
+
+	title := "New Task Type"
+	if m.editTaskType.ID != 0 {
+		title = "Edit Task Type"
+	}
+
+	modalWidth := min(80, m.width-8)
+	m.taskTypeForm = huh.NewForm(
+		huh.NewGroup(
+			huh.NewInput().
+				Key("name").
+				Title("Name").
+				Description("Lowercase, no spaces").
+				Placeholder("task-type-name").
+				Value(&m.taskTypeFormName),
+			huh.NewInput().
+				Key("label").
+				Title("Label").
+				Placeholder("Display Label").
+				Value(&m.taskTypeFormLabel),
+			huh.NewText().
+				Key("instructions").
+				Title("Prompt Template").
+				Description("Use {{title}}, {{body}}, {{project}}, {{project_instructions}}, {{attachments}}, {{history}}").
+				Placeholder("Instructions...").
+				CharLimit(10000).
+				Value(&m.taskTypeFormInstructions),
+		).Title(title),
+	).WithTheme(huh.ThemeDracula()).
+		WithWidth(modalWidth - 6).
+		WithShowHelp(true)
+
+	return m, m.taskTypeForm.Init()
 }
 
-func (m *SettingsModel) updateTaskTypeForm(msg tea.KeyMsg) (*SettingsModel, tea.Cmd) {
-	switch msg.String() {
-	case "esc":
-		m.editingTaskType = false
-		m.editTaskType = nil
-		return m, nil
-	case "tab":
-		// Tab moves forward through fields (unless in textarea)
-		if m.typeFormFocus == 2 {
-			// In instructions textarea, tab inserts tab character
-			var cmd tea.Cmd
-			m.typeInstructionsInput, cmd = m.typeInstructionsInput.Update(msg)
-			return m, cmd
+// updateTaskTypeFormModal handles updates to the task type form modal
+func (m *SettingsModel) updateTaskTypeFormModal(msg tea.Msg) (*SettingsModel, tea.Cmd) {
+	// Handle escape to cancel
+	if keyMsg, ok := msg.(tea.KeyMsg); ok {
+		if keyMsg.String() == "esc" {
+			m.editingTaskType = false
+			m.taskTypeForm = nil
+			m.editTaskType = nil
+			return m, nil
 		}
-		m.typeFormFocus = (m.typeFormFocus + 1) % 3
-		m.updateTaskTypeFormFocus()
-		if m.typeFormFocus == 2 {
-			return m, textarea.Blink
-		}
-		return m, nil
-	case "shift+tab":
-		m.typeFormFocus = (m.typeFormFocus + 2) % 3
-		m.updateTaskTypeFormFocus()
-		if m.typeFormFocus == 2 {
-			return m, textarea.Blink
-		}
-		return m, nil
-	case "enter":
-		if m.typeFormFocus == 2 {
-			// In instructions textarea, enter inserts newline
-			var cmd tea.Cmd
-			m.typeInstructionsInput, cmd = m.typeInstructionsInput.Update(msg)
-			return m, cmd
-		}
-		m.typeFormFocus = (m.typeFormFocus + 1) % 3
-		m.updateTaskTypeFormFocus()
-		if m.typeFormFocus == 2 {
-			return m, textarea.Blink
-		}
-		return m, nil
-	case "ctrl+s":
+	}
+
+	// Update the huh form
+	form, cmd := m.taskTypeForm.Update(msg)
+	if f, ok := form.(*huh.Form); ok {
+		m.taskTypeForm = f
+	}
+
+	// Check if form completed
+	if m.taskTypeForm.State == huh.StateCompleted {
 		return m.saveTaskType()
 	}
 
-	// Update focused input
-	var cmd tea.Cmd
-	switch m.typeFormFocus {
-	case 0:
-		m.typeNameInput, cmd = m.typeNameInput.Update(msg)
-	case 1:
-		m.typeLabelInput, cmd = m.typeLabelInput.Update(msg)
-	case 2:
-		m.typeInstructionsInput, cmd = m.typeInstructionsInput.Update(msg)
-	}
 	return m, cmd
 }
 
-func (m *SettingsModel) updateTaskTypeFormFocus() {
-	m.typeNameInput.Blur()
-	m.typeLabelInput.Blur()
-	m.typeInstructionsInput.Blur()
-	switch m.typeFormFocus {
-	case 0:
-		m.typeNameInput.Focus()
-	case 1:
-		m.typeLabelInput.Focus()
-	case 2:
-		m.typeInstructionsInput.Focus()
+// isGitRepo checks if a directory contains a .git folder
+func isGitRepo(path string) bool {
+	gitDir := filepath.Join(path, ".git")
+	info, err := os.Stat(gitDir)
+	return err == nil && info.IsDir()
+}
+
+// findNestedGitRepos searches for .git directories inside the given path (excluding root)
+func findNestedGitRepos(rootPath string) []string {
+	var nested []string
+	filepath.WalkDir(rootPath, func(path string, d fs.DirEntry, err error) error {
+		if err != nil || !d.IsDir() {
+			return nil
+		}
+		// Skip common dependency/build directories
+		if d.Name() == "node_modules" || d.Name() == "vendor" || d.Name() == ".task-worktrees" {
+			return filepath.SkipDir
+		}
+		// Check for nested .git (not the root one)
+		if d.Name() == ".git" && filepath.Dir(path) != rootPath {
+			nested = append(nested, filepath.Dir(path))
+			return filepath.SkipDir
+		}
+		return nil
+	})
+	return nested
+}
+
+// initGitRepo initializes a git repo with an initial commit
+func initGitRepo(path string) error {
+	// Create directory if needed
+	if err := os.MkdirAll(path, 0755); err != nil {
+		return fmt.Errorf("create directory: %w", err)
 	}
+
+	cmd := exec.Command("git", "init")
+	cmd.Dir = path
+	if output, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("git init: %v\n%s", err, output)
+	}
+
+	cmd = exec.Command("git", "commit", "--allow-empty", "-m", "Initial commit")
+	cmd.Dir = path
+	if output, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("git commit: %v\n%s", err, output)
+	}
+
+	return nil
 }
 
 func (m *SettingsModel) saveProject() (*SettingsModel, tea.Cmd) {
-	name := strings.TrimSpace(m.nameInput.Value())
-	aliases := strings.TrimSpace(m.aliasInput.Value())
-	instructions := strings.TrimSpace(m.instructionsInput.Value())
+	// Get values from form if available, otherwise use values already stored in editProject
+	// (which happens when coming from browser after form was already filled)
+	name := strings.TrimSpace(m.projectFormName)
+	aliases := strings.TrimSpace(m.projectFormAliases)
+	instructions := strings.TrimSpace(m.projectFormInstructions)
+	configDir := strings.TrimSpace(m.projectFormClaudeConfigDir)
+
+	// If form values are empty but editProject has values, use those
+	if name == "" && m.editProject.Name != "" {
+		name = m.editProject.Name
+		aliases = m.editProject.Aliases
+		instructions = m.editProject.Instructions
+		configDir = m.editProject.ClaudeConfigDir
+	}
 
 	if name == "" {
 		m.err = fmt.Errorf("name is required")
 		return m, nil
 	}
-	if m.editProject.Path == "" {
-		m.err = fmt.Errorf("path is required - press Tab to browse")
+
+	// For new projects without a path, open file browser
+	if m.editProject.ID == 0 && m.editProject.Path == "" {
+		m.editProject.Name = name
+		m.editProject.Aliases = aliases
+		m.editProject.Instructions = instructions
+		m.editProject.ClaudeConfigDir = configDir
+		m.editingProject = false
+		m.projectForm = nil
+		m.browsing = true
+		home, _ := os.UserHomeDir()
+		m.fileBrowser = NewFileBrowserModel(home, m.width, m.height)
 		return m, nil
+	}
+
+	path := m.editProject.Path
+
+	// Check if path exists
+	info, err := os.Stat(path)
+	pathExists := err == nil
+
+	if pathExists {
+		if !info.IsDir() {
+			m.err = fmt.Errorf("path is not a directory")
+			return m, nil
+		}
+
+		if isGitRepo(path) {
+			// Existing git repo - check for nested repos
+			nested := findNestedGitRepos(path)
+			if len(nested) > 0 {
+				m.err = fmt.Errorf("directory contains %d nested git repo(s) - select a single repo instead", len(nested))
+				return m, nil
+			}
+			// Valid existing git repo - proceed
+		} else {
+			// Not a git repo - initialize it
+			if err := initGitRepo(path); err != nil {
+				m.err = fmt.Errorf("failed to initialize git: %w", err)
+				return m, nil
+			}
+		}
+	} else {
+		// Path doesn't exist - create and initialize
+		if err := initGitRepo(path); err != nil {
+			m.err = fmt.Errorf("failed to create project: %w", err)
+			return m, nil
+		}
 	}
 
 	m.editProject.Name = name
 	m.editProject.Aliases = aliases
 	m.editProject.Instructions = instructions
+	m.editProject.ClaudeConfigDir = configDir
 
-	var err error
 	if m.editProject.ID == 0 {
 		err = m.db.CreateProject(m.editProject)
 	} else {
@@ -545,7 +553,13 @@ func (m *SettingsModel) saveProject() (*SettingsModel, tea.Cmd) {
 		return m, nil
 	}
 
+	// Update the project color cache
+	if m.editProject.Color != "" {
+		SetProjectColor(m.editProject.Name, m.editProject.Color)
+	}
+
 	m.editingProject = false
+	m.projectForm = nil
 	m.editProject = nil
 	m.err = nil
 	m.loadSettings()
@@ -553,9 +567,9 @@ func (m *SettingsModel) saveProject() (*SettingsModel, tea.Cmd) {
 }
 
 func (m *SettingsModel) saveTaskType() (*SettingsModel, tea.Cmd) {
-	name := strings.TrimSpace(m.typeNameInput.Value())
-	label := strings.TrimSpace(m.typeLabelInput.Value())
-	instructions := strings.TrimSpace(m.typeInstructionsInput.Value())
+	name := strings.TrimSpace(m.taskTypeFormName)
+	label := strings.TrimSpace(m.taskTypeFormLabel)
+	instructions := strings.TrimSpace(m.taskTypeFormInstructions)
 
 	if name == "" {
 		m.err = fmt.Errorf("name is required")
@@ -583,14 +597,198 @@ func (m *SettingsModel) saveTaskType() (*SettingsModel, tea.Cmd) {
 	}
 
 	m.editingTaskType = false
+	m.taskTypeForm = nil
 	m.editTaskType = nil
 	m.err = nil
 	m.loadSettings()
 	return m, nil
 }
 
+// showDeleteProjectConfirm shows the delete project confirmation dialog.
+func (m *SettingsModel) showDeleteProjectConfirm(project *db.Project) (*SettingsModel, tea.Cmd) {
+	// Don't allow deleting the personal project
+	if project.Name == "personal" {
+		m.err = fmt.Errorf("cannot delete the personal project")
+		return m, nil
+	}
+
+	m.pendingDeleteProject = project
+	m.deleteProjectValue = false
+	m.confirmingDeleteProject = true
+
+	// Count associated tasks
+	taskCount, _ := m.db.CountTasksByProject(project.Name)
+
+	// Build description with warning about what will happen
+	var description strings.Builder
+	description.WriteString("This will permanently delete the project configuration.\n")
+	if taskCount > 0 {
+		description.WriteString("\n")
+		if taskCount > 0 {
+			description.WriteString(fmt.Sprintf("• %d task(s) will become orphaned\n", taskCount))
+		}
+		description.WriteString("\nOrphaned items will still exist but won't be associated with any project.")
+	}
+
+	modalWidth := min(60, m.width-8)
+	m.deleteProjectConfirm = huh.NewForm(
+		huh.NewGroup(
+			huh.NewConfirm().
+				Key("delete").
+				Title(fmt.Sprintf("Delete project \"%s\"?", project.Name)).
+				Description(description.String()).
+				Affirmative("Delete").
+				Negative("Cancel").
+				Value(&m.deleteProjectValue),
+		),
+	).WithTheme(huh.ThemeDracula()).
+		WithWidth(modalWidth - 6).
+		WithShowHelp(true)
+
+	return m, m.deleteProjectConfirm.Init()
+}
+
+// updateDeleteProjectConfirm handles the delete project confirmation dialog.
+func (m *SettingsModel) updateDeleteProjectConfirm(msg tea.Msg) (*SettingsModel, tea.Cmd) {
+	// Handle escape to cancel
+	if keyMsg, ok := msg.(tea.KeyMsg); ok {
+		if keyMsg.String() == "esc" {
+			m.confirmingDeleteProject = false
+			m.deleteProjectConfirm = nil
+			m.pendingDeleteProject = nil
+			return m, nil
+		}
+	}
+
+	// Update the huh form
+	form, cmd := m.deleteProjectConfirm.Update(msg)
+	if f, ok := form.(*huh.Form); ok {
+		m.deleteProjectConfirm = f
+	}
+
+	// Check if form completed
+	if m.deleteProjectConfirm.State == huh.StateCompleted {
+		if m.pendingDeleteProject != nil && m.deleteProjectValue {
+			// User confirmed - delete the project
+			err := m.db.DeleteProject(m.pendingDeleteProject.ID)
+			if err != nil {
+				m.err = err
+			} else {
+				m.err = nil
+				m.loadSettings()
+				if m.selectedProject >= len(m.projects) && m.selectedProject > 0 {
+					m.selectedProject--
+				}
+			}
+		}
+		// Clean up confirmation state
+		m.confirmingDeleteProject = false
+		m.deleteProjectConfirm = nil
+		m.pendingDeleteProject = nil
+		return m, nil
+	}
+
+	return m, cmd
+}
+
+// viewDeleteProjectConfirm renders the delete project confirmation dialog.
+func (m *SettingsModel) viewDeleteProjectConfirm() string {
+	if m.deleteProjectConfirm == nil {
+		return ""
+	}
+
+	// Modal header with warning icon
+	header := lipgloss.NewStyle().
+		Bold(true).
+		Foreground(ColorError).
+		MarginBottom(1).
+		Render("Confirm Delete Project")
+
+	formView := m.deleteProjectConfirm.View()
+
+	// Modal box with border
+	modalWidth := min(60, m.width-8)
+	modalBox := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(ColorError).
+		Padding(1, 2).
+		Width(modalWidth)
+
+	modalContent := modalBox.Render(lipgloss.JoinVertical(lipgloss.Center, header, formView))
+
+	// Center the modal on screen
+	return lipgloss.NewStyle().
+		Width(m.width).
+		Height(m.height).
+		Align(lipgloss.Center, lipgloss.Center).
+		Render(modalContent)
+}
+
+// viewProjectFormModal renders the project form as a centered modal.
+func (m *SettingsModel) viewProjectFormModal() string {
+	if m.projectForm == nil {
+		return ""
+	}
+
+	formView := m.projectForm.View()
+
+	// Modal box with border
+	modalWidth := min(70, m.width-8)
+	modalBox := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(ColorPrimary).
+		Padding(1, 2).
+		Width(modalWidth)
+
+	modalContent := modalBox.Render(formView)
+
+	// Center the modal on screen
+	return lipgloss.NewStyle().
+		Width(m.width).
+		Height(m.height).
+		Align(lipgloss.Center, lipgloss.Center).
+		Render(modalContent)
+}
+
+// viewTaskTypeFormModal renders the task type form as a centered modal.
+func (m *SettingsModel) viewTaskTypeFormModal() string {
+	if m.taskTypeForm == nil {
+		return ""
+	}
+
+	formView := m.taskTypeForm.View()
+
+	// Modal box with border
+	modalWidth := min(80, m.width-8)
+	modalBox := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(ColorPrimary).
+		Padding(1, 2).
+		Width(modalWidth)
+
+	modalContent := modalBox.Render(formView)
+
+	// Center the modal on screen
+	return lipgloss.NewStyle().
+		Width(m.width).
+		Height(m.height).
+		Align(lipgloss.Center, lipgloss.Center).
+		Render(modalContent)
+}
+
 // View renders the settings view.
 func (m *SettingsModel) View() string {
+	// Show modals if active (these overlay the settings view)
+	if m.confirmingDeleteProject && m.deleteProjectConfirm != nil {
+		return m.viewDeleteProjectConfirm()
+	}
+	if m.editingProject && m.projectForm != nil {
+		return m.viewProjectFormModal()
+	}
+	if m.editingTaskType && m.taskTypeForm != nil {
+		return m.viewTaskTypeFormModal()
+	}
+
 	// Show file browser if active
 	if m.browsing && m.fileBrowser != nil {
 		return m.fileBrowser.View()
@@ -604,7 +802,7 @@ func (m *SettingsModel) View() string {
 	b.WriteString("\n")
 
 	// Theme section
-	themeHeader := "Theme"
+	var themeHeader string
 	if m.section == 0 {
 		themeHeader = Bold.Foreground(ColorPrimary).Render("Theme")
 	} else {
@@ -615,14 +813,8 @@ func (m *SettingsModel) View() string {
 	b.WriteString(lipgloss.NewStyle().Padding(0, 2).Render(m.renderThemeSelector()))
 	b.WriteString("\n\n")
 
-	// Projects directory
-	dirLabel := Dim.Render("Projects Directory: ")
-	dirValue := m.projectsDir + Dim.Render("  [p to browse]")
-	b.WriteString(lipgloss.NewStyle().Padding(0, 2).Render(dirLabel + dirValue))
-	b.WriteString("\n\n")
-
 	// Projects section
-	projectsHeader := "Projects"
+	var projectsHeader string
 	if m.section == 1 {
 		projectsHeader = Bold.Foreground(ColorPrimary).Render("Projects")
 	} else {
@@ -631,36 +823,34 @@ func (m *SettingsModel) View() string {
 	b.WriteString(lipgloss.NewStyle().Padding(0, 2).Render(projectsHeader))
 	b.WriteString("\n")
 
-	if m.editingProject {
-		// Show project form
-		b.WriteString(m.renderProjectForm())
+	// Show project list
+	if len(m.projects) == 0 {
+		b.WriteString(lipgloss.NewStyle().Padding(0, 2).Render(Dim.Render("No projects configured. Press 'n' to add one.")))
 	} else {
-		// Show project list
-		if len(m.projects) == 0 {
-			b.WriteString(lipgloss.NewStyle().Padding(0, 2).Render(Dim.Render("No projects configured. Press 'n' to add one.")))
-		} else {
-			for i, p := range m.projects {
-				prefix := "  "
-				style := lipgloss.NewStyle()
-				if m.section == 1 && i == m.selectedProject {
-					prefix = "> "
-					style = style.Foreground(ColorPrimary)
-				}
-
-				line := fmt.Sprintf("%s%s", prefix, p.Name)
-				line += Dim.Render(fmt.Sprintf(" → %s", p.Path))
-				if p.Aliases != "" {
-					line += Dim.Render(fmt.Sprintf(" (%s)", p.Aliases))
-				}
-				b.WriteString(lipgloss.NewStyle().Padding(0, 2).Render(style.Render(line)))
-				b.WriteString("\n")
+		for i, p := range m.projects {
+			prefix := "  "
+			style := lipgloss.NewStyle()
+			if m.section == 1 && i == m.selectedProject {
+				prefix = "> "
+				style = style.Foreground(ColorPrimary)
 			}
+
+			line := fmt.Sprintf("%s%s", prefix, p.Name)
+			line += Dim.Render(fmt.Sprintf(" → %s", p.Path))
+			if p.Aliases != "" {
+				line += Dim.Render(fmt.Sprintf(" (%s)", p.Aliases))
+			}
+			if strings.TrimSpace(p.ClaudeConfigDir) != "" {
+				line += Dim.Render(fmt.Sprintf(" [claude: %s]", p.ClaudeConfigDir))
+			}
+			b.WriteString(lipgloss.NewStyle().Padding(0, 2).Render(style.Render(line)))
+			b.WriteString("\n")
 		}
 	}
 	b.WriteString("\n")
 
 	// Task Types section
-	taskTypesHeader := "Task Types"
+	var taskTypesHeader string
 	if m.section == 2 {
 		taskTypesHeader = Bold.Foreground(ColorPrimary).Render("Task Types")
 	} else {
@@ -669,30 +859,25 @@ func (m *SettingsModel) View() string {
 	b.WriteString(lipgloss.NewStyle().Padding(0, 2).Render(taskTypesHeader))
 	b.WriteString("\n")
 
-	if m.editingTaskType {
-		// Show task type form
-		b.WriteString(m.renderTaskTypeForm())
+	// Show task type list
+	if len(m.taskTypes) == 0 {
+		b.WriteString(lipgloss.NewStyle().Padding(0, 2).Render(Dim.Render("No task types configured.")))
 	} else {
-		// Show task type list
-		if len(m.taskTypes) == 0 {
-			b.WriteString(lipgloss.NewStyle().Padding(0, 2).Render(Dim.Render("No task types configured.")))
-		} else {
-			for i, t := range m.taskTypes {
-				prefix := "  "
-				style := lipgloss.NewStyle()
-				if m.section == 2 && i == m.selectedTaskType {
-					prefix = "> "
-					style = style.Foreground(ColorPrimary)
-				}
-
-				line := fmt.Sprintf("%s%s", prefix, t.Label)
-				line += Dim.Render(fmt.Sprintf(" (%s)", t.Name))
-				if t.IsBuiltin {
-					line += Dim.Render(" [builtin]")
-				}
-				b.WriteString(lipgloss.NewStyle().Padding(0, 2).Render(style.Render(line)))
-				b.WriteString("\n")
+		for i, t := range m.taskTypes {
+			prefix := "  "
+			style := lipgloss.NewStyle()
+			if m.section == 2 && i == m.selectedTaskType {
+				prefix = "> "
+				style = style.Foreground(ColorPrimary)
 			}
+
+			line := fmt.Sprintf("%s%s", prefix, t.Label)
+			line += Dim.Render(fmt.Sprintf(" (%s)", t.Name))
+			if t.IsBuiltin {
+				line += Dim.Render(" [builtin]")
+			}
+			b.WriteString(lipgloss.NewStyle().Padding(0, 2).Render(style.Render(line)))
+			b.WriteString("\n")
 		}
 	}
 
@@ -736,108 +921,6 @@ func (m *SettingsModel) renderThemeSelector() string {
 	return lipgloss.JoinHorizontal(lipgloss.Center, parts...)
 }
 
-func (m *SettingsModel) renderProjectForm() string {
-	var b strings.Builder
-
-	title := "New Project"
-	if m.editProject.ID != 0 {
-		title = "Edit Project"
-	}
-	b.WriteString(lipgloss.NewStyle().Padding(1, 2).Render(Bold.Render(title)))
-	b.WriteString("\n")
-
-	// Name field
-	nameLabel := Dim.Render("Name:         ")
-	if m.projectFormFocus == 0 {
-		nameLabel = Bold.Render("Name:         ")
-	}
-	b.WriteString(lipgloss.NewStyle().Padding(0, 2).Render(nameLabel + m.nameInput.View()))
-	b.WriteString("\n")
-
-	// Path field (shows current path or prompt to browse)
-	pathLabel := Dim.Render("Path:         ")
-	if m.projectFormFocus == 1 {
-		pathLabel = Bold.Render("Path:         ")
-	}
-	pathValue := Dim.Render("[press Enter to browse]")
-	if m.editProject != nil && m.editProject.Path != "" {
-		pathValue = m.editProject.Path
-	}
-	pathLine := pathLabel + pathValue
-	if m.projectFormFocus == 1 {
-		pathLine = lipgloss.NewStyle().Foreground(ColorPrimary).Render(pathLine)
-	}
-	b.WriteString(lipgloss.NewStyle().Padding(0, 2).Render(pathLine))
-	b.WriteString("\n")
-
-	// Aliases field
-	aliasLabel := Dim.Render("Aliases:      ")
-	if m.projectFormFocus == 2 {
-		aliasLabel = Bold.Render("Aliases:      ")
-	}
-	b.WriteString(lipgloss.NewStyle().Padding(0, 2).Render(aliasLabel + m.aliasInput.View()))
-	b.WriteString("\n\n")
-
-	// Instructions field
-	instructionsLabel := Dim.Render("Instructions: ")
-	if m.projectFormFocus == 3 {
-		instructionsLabel = Bold.Render("Instructions: ")
-	}
-	b.WriteString(lipgloss.NewStyle().Padding(0, 2).Render(instructionsLabel))
-	b.WriteString("\n")
-	b.WriteString(lipgloss.NewStyle().Padding(0, 2).Render(m.instructionsInput.View()))
-	b.WriteString("\n")
-
-	b.WriteString("\n")
-	b.WriteString(lipgloss.NewStyle().Padding(0, 2).Render(Dim.Render("Tab: next field • Ctrl+S: save • Esc: cancel")))
-
-	return b.String()
-}
-
-func (m *SettingsModel) renderTaskTypeForm() string {
-	var b strings.Builder
-
-	title := "New Task Type"
-	if m.editTaskType.ID != 0 {
-		title = "Edit Task Type"
-	}
-	b.WriteString(lipgloss.NewStyle().Padding(1, 2).Render(Bold.Render(title)))
-	b.WriteString("\n")
-
-	// Name field
-	nameLabel := Dim.Render("Name:         ")
-	if m.typeFormFocus == 0 {
-		nameLabel = Bold.Render("Name:         ")
-	}
-	b.WriteString(lipgloss.NewStyle().Padding(0, 2).Render(nameLabel + m.typeNameInput.View()))
-	b.WriteString("\n")
-
-	// Label field
-	labelLabel := Dim.Render("Label:        ")
-	if m.typeFormFocus == 1 {
-		labelLabel = Bold.Render("Label:        ")
-	}
-	b.WriteString(lipgloss.NewStyle().Padding(0, 2).Render(labelLabel + m.typeLabelInput.View()))
-	b.WriteString("\n\n")
-
-	// Instructions field
-	instructionsLabel := Dim.Render("Instructions: ")
-	if m.typeFormFocus == 2 {
-		instructionsLabel = Bold.Render("Instructions: ")
-	}
-	b.WriteString(lipgloss.NewStyle().Padding(0, 2).Render(instructionsLabel))
-	b.WriteString("\n")
-	b.WriteString(lipgloss.NewStyle().Padding(0, 2).Render(m.typeInstructionsInput.View()))
-	b.WriteString("\n")
-
-	b.WriteString("\n")
-	b.WriteString(lipgloss.NewStyle().Padding(0, 2).Render(Dim.Render("Placeholders: {{title}}, {{body}}, {{project}}, {{project_instructions}}, {{memories}}, {{attachments}}, {{history}}")))
-	b.WriteString("\n")
-	b.WriteString(lipgloss.NewStyle().Padding(0, 2).Render(Dim.Render("Tab: next field • Ctrl+S: save • Esc: cancel")))
-
-	return b.String()
-}
-
 func (m *SettingsModel) renderHelp() string {
 	var keys []struct {
 		key  string
@@ -849,8 +932,8 @@ func (m *SettingsModel) renderHelp() string {
 			key  string
 			desc string
 		}{
-			{"tab", "next"},
-			{"ctrl+s", "save"},
+			{"tab", "next field"},
+			{"enter", "submit"},
 			{"esc", "cancel"},
 		}
 	} else {
@@ -864,8 +947,7 @@ func (m *SettingsModel) renderHelp() string {
 			{"n", "new"},
 			{"e", "edit"},
 			{"d", "delete"},
-			{"p", "projects dir"},
-			{"q/esc", "back"},
+			{"esc", "back"},
 		}
 	}
 
@@ -884,6 +966,4 @@ func (m *SettingsModel) renderHelp() string {
 func (m *SettingsModel) SetSize(width, height int) {
 	m.width = width
 	m.height = height
-	m.instructionsInput.SetWidth(width - 20)
-	m.typeInstructionsInput.SetWidth(width - 20)
 }

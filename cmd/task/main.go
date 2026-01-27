@@ -14,6 +14,8 @@ import (
 	"os/signal"
 	"os/user"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -48,7 +50,7 @@ var (
 // Uses PID to ensure each task instance gets its own tmux sessions.
 func getSessionID() string {
 	// Check if SESSION_ID is already set (for child processes)
-	if sid := os.Getenv("TASK_SESSION_ID"); sid != "" {
+	if sid := os.Getenv("WORKTREE_SESSION_ID"); sid != "" {
 		return sid
 	}
 	// Generate new session ID based on PID
@@ -146,7 +148,7 @@ func main() {
 			time.Sleep(100 * time.Millisecond)
 
 			// Start daemon (inherit dangerous mode from environment if set)
-			dangerousMode := os.Getenv("TASK_DANGEROUS_MODE") == "1"
+			dangerousMode := os.Getenv("WORKTREE_DANGEROUS_MODE") == "1"
 			if err := ensureDaemonRunning(dangerousMode); err != nil {
 				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
 				os.Exit(1)
@@ -278,38 +280,16 @@ Use --hard to kill all tmux sessions for a complete reset.`,
 	}
 	claudesCmd.AddCommand(claudesListCmd)
 
-	claudesKillCmd := &cobra.Command{
-		Use:   "kill <task-id>",
-		Short: "Kill a Claude session by task ID",
-		Args:  cobra.ExactArgs(1),
+	claudesCleanupCmd := &cobra.Command{
+		Use:   "cleanup",
+		Short: "Kill orphaned Claude processes not tied to active task windows",
 		Run: func(cmd *cobra.Command, args []string) {
-			var taskID int
-			if _, err := fmt.Sscanf(args[0], "%d", &taskID); err != nil {
-				fmt.Fprintln(os.Stderr, errorStyle.Render("Invalid task ID: "+args[0]))
-				os.Exit(1)
-			}
-			if err := killClaudeSession(taskID); err != nil {
-				fmt.Fprintln(os.Stderr, errorStyle.Render(err.Error()))
-				os.Exit(1)
-			}
-			fmt.Println(successStyle.Render(fmt.Sprintf("Killed session for task %d", taskID)))
+			force, _ := cmd.Flags().GetBool("force")
+			cleanupOrphanedClaudes(force)
 		},
 	}
-	claudesCmd.AddCommand(claudesKillCmd)
-
-	claudesKillallCmd := &cobra.Command{
-		Use:   "killall",
-		Short: "Kill all Claude sessions",
-		Run: func(cmd *cobra.Command, args []string) {
-			count := killAllClaudeSessions()
-			if count == 0 {
-				fmt.Println(dimStyle.Render("No Claude sessions running"))
-			} else {
-				fmt.Println(successStyle.Render(fmt.Sprintf("Killed %d session(s)", count)))
-			}
-		},
-	}
-	claudesCmd.AddCommand(claudesKillallCmd)
+	claudesCleanupCmd.Flags().BoolP("force", "f", false, "Use SIGKILL instead of SIGTERM to force kill processes")
+	claudesCmd.AddCommand(claudesCleanupCmd)
 
 	rootCmd.AddCommand(claudesCmd)
 
@@ -547,14 +527,21 @@ Examples:
 						"project":    t.Project,
 						"created_at": t.CreatedAt.Time.Format(time.RFC3339),
 					}
+					// Add schedule fields
+					if t.ScheduledAt != nil {
+						item["scheduled_at"] = t.ScheduledAt.Time.Format(time.RFC3339)
+					}
+					if t.LastRunAt != nil {
+						item["last_run_at"] = t.LastRunAt.Time.Format(time.RFC3339)
+					}
 					// Add PR info to JSON output if available
 					if prInfo, ok := prInfoMap[t.ID]; ok {
 						item["pr"] = map[string]interface{}{
-							"number":       prInfo.Number,
-							"url":          prInfo.URL,
-							"state":        string(prInfo.State),
-							"check_state":  string(prInfo.CheckState),
-							"description":  prInfo.StatusDescription(),
+							"number":      prInfo.Number,
+							"url":         prInfo.URL,
+							"state":       string(prInfo.State),
+							"check_state": string(prInfo.CheckState),
+							"description": prInfo.StatusDescription(),
 						}
 					}
 					output = append(output, item)
@@ -631,11 +618,19 @@ Examples:
 					if t.Project != "" {
 						project = dimStyle.Render(fmt.Sprintf("[%s] ", t.Project))
 					}
+					// Schedule indicator
+					scheduleIndicator := ""
+					scheduleStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#F59E0B"))
+					if t.IsScheduled() {
+						scheduleIndicator = scheduleStyle.Render("⏰ ")
+					} else if t.Recurrence != "" {
+						scheduleIndicator = scheduleStyle.Render("⚠ ")
+					}
 					prStatus := ""
 					if showPR {
 						prStatus = prStatusStyle(prInfoMap[t.ID])
 					}
-					fmt.Printf("%s %s %s%s%s\n", id, status, project, t.Title, prStatus)
+					fmt.Printf("%s %s %s%s%s%s\n", id, status, project, scheduleIndicator, t.Title, prStatus)
 				}
 			}
 		},
@@ -648,6 +643,77 @@ Examples:
 	listCmd.Flags().Bool("json", false, "Output in JSON format")
 	listCmd.Flags().Bool("pr", false, "Show PR/CI status (requires network)")
 	rootCmd.AddCommand(listCmd)
+
+	boardCmd := &cobra.Command{
+		Use:   "board",
+		Short: "Show the Kanban board in the CLI",
+		Long: `Print the same Backlog / Queued / In Progress / Blocked / Done view
+that the TUI shows, either as formatted text or JSON for automation.`,
+		Run: func(cmd *cobra.Command, args []string) {
+			outputJSON, _ := cmd.Flags().GetBool("json")
+			limit, _ := cmd.Flags().GetInt("limit")
+
+			if limit <= 0 {
+				limit = 5
+			}
+
+			dbPath := db.DefaultPath()
+			database, err := db.Open(dbPath)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+			defer database.Close()
+
+			tasks, err := database.ListTasks(db.ListTasksOptions{IncludeClosed: true, Limit: 500})
+			if err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+
+			snapshot := buildBoardSnapshot(tasks, limit)
+
+			if outputJSON {
+				data, _ := json.MarshalIndent(snapshot, "", "  ")
+				fmt.Println(string(data))
+				return
+			}
+
+			fmt.Println(boldStyle.Render("Kanban Snapshot"))
+			fmt.Println(strings.Repeat("─", 50))
+			for _, column := range snapshot.Columns {
+				fmt.Printf("%s (%d)\n", column.Label, column.Count)
+				if column.Count == 0 {
+					fmt.Println("  (empty)")
+					fmt.Println()
+					continue
+				}
+				for _, task := range column.Tasks {
+					line := fmt.Sprintf("- #%d %s", task.ID, task.Title)
+					if task.Project != "" {
+						line += fmt.Sprintf(" [%s]", task.Project)
+					}
+					if task.Type != "" {
+						line += fmt.Sprintf(" (%s)", task.Type)
+					}
+					if task.Pinned {
+						line += " 📌"
+					}
+					if task.AgeHint != "" {
+						line += fmt.Sprintf(" • %s", task.AgeHint)
+					}
+					fmt.Println("  " + line)
+				}
+				if column.Count > len(column.Tasks) {
+					fmt.Printf("  … +%d more\n", column.Count-len(column.Tasks))
+				}
+				fmt.Println()
+			}
+		},
+	}
+	boardCmd.Flags().Bool("json", false, "Output board snapshot as JSON")
+	boardCmd.Flags().Int("limit", 5, "Maximum entries to show per column")
+	rootCmd.AddCommand(boardCmd)
 
 	// Show subcommand - show task details
 	showCmd := &cobra.Command{
@@ -720,15 +786,22 @@ Examples:
 				if task.CompletedAt != nil {
 					output["completed_at"] = task.CompletedAt.Time.Format(time.RFC3339)
 				}
+				// Add schedule fields
+				if task.ScheduledAt != nil {
+					output["scheduled_at"] = task.ScheduledAt.Time.Format(time.RFC3339)
+				}
+				if task.LastRunAt != nil {
+					output["last_run_at"] = task.LastRunAt.Time.Format(time.RFC3339)
+				}
 				// Add PR info to JSON output
 				if prInfo != nil {
 					output["pr"] = map[string]interface{}{
-						"number":       prInfo.Number,
-						"url":          prInfo.URL,
-						"state":        string(prInfo.State),
-						"check_state":  string(prInfo.CheckState),
-						"description":  prInfo.StatusDescription(),
-						"mergeable":    prInfo.Mergeable,
+						"number":      prInfo.Number,
+						"url":         prInfo.URL,
+						"state":       string(prInfo.State),
+						"check_state": string(prInfo.CheckState),
+						"description": prInfo.StatusDescription(),
+						"mergeable":   prInfo.Mergeable,
 					}
 				}
 				if showLogs {
@@ -811,6 +884,24 @@ Examples:
 					}
 					prStatusStyled := lipgloss.NewStyle().Foreground(prStatusColor).Render(prInfo.StatusDescription())
 					fmt.Printf("CI:       %s\n", prStatusStyled)
+				}
+
+				// Schedule info
+				scheduleColor := lipgloss.Color("#F59E0B") // Orange for schedule
+				scheduleStyle := lipgloss.NewStyle().Foreground(scheduleColor)
+				if task.IsScheduled() || task.LastRunAt != nil || task.Recurrence != "" {
+					fmt.Println()
+					fmt.Println(boldStyle.Render("Schedule:"))
+					if task.ScheduledAt != nil {
+						fmt.Printf("  Next run:   %s\n", scheduleStyle.Render(task.ScheduledAt.Time.Format("2006-01-02 15:04:05")))
+					}
+					if task.LastRunAt != nil {
+						fmt.Printf("  Last run:   %s\n", scheduleStyle.Render(task.LastRunAt.Time.Format("2006-01-02 15:04:05")))
+					}
+					if task.Recurrence != "" {
+						note := fmt.Sprintf("Recurring schedules inside TaskYou were removed (legacy value: %s)", task.Recurrence)
+						fmt.Printf("  Note:       %s\n", scheduleStyle.Render(note))
+					}
 				}
 
 				// Body
@@ -995,6 +1086,112 @@ Examples:
 	}
 	rootCmd.AddCommand(executeCmd)
 
+	statusCmd := &cobra.Command{
+		Use:   "status <task-id> <status>",
+		Short: "Set a task's status",
+		Long: `Manually update a task's status. Useful for automation/orchestration when
+you need to move cards between columns without opening the TUI.
+
+Valid statuses: backlog, queued, processing, blocked, done, archived.`,
+		Args: cobra.ExactArgs(2),
+		Run: func(cmd *cobra.Command, args []string) {
+			var taskID int64
+			if _, err := fmt.Sscanf(args[0], "%d", &taskID); err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Invalid task ID: "+args[0]))
+				os.Exit(1)
+			}
+
+			status := strings.ToLower(strings.TrimSpace(args[1]))
+			if !isValidStatus(status) {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Invalid status. Must be one of: "+strings.Join(validStatuses(), ", ")))
+				os.Exit(1)
+			}
+
+			dbPath := db.DefaultPath()
+			database, err := db.Open(dbPath)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+			defer database.Close()
+
+			task, err := database.GetTask(taskID)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+			if task == nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render(fmt.Sprintf("Task #%d not found", taskID)))
+				os.Exit(1)
+			}
+
+			if err := database.UpdateTaskStatus(taskID, status); err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+
+			fmt.Println(successStyle.Render(fmt.Sprintf("Task #%d moved to %s", taskID, status)))
+		},
+	}
+	rootCmd.AddCommand(statusCmd)
+
+	pinCmd := &cobra.Command{
+		Use:   "pin <task-id>",
+		Short: "Pin, unpin, or toggle a task",
+		Args:  cobra.ExactArgs(1),
+		Run: func(cmd *cobra.Command, args []string) {
+			var taskID int64
+			if _, err := fmt.Sscanf(args[0], "%d", &taskID); err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Invalid task ID: "+args[0]))
+				os.Exit(1)
+			}
+
+			unpin, _ := cmd.Flags().GetBool("unpin")
+			toggle, _ := cmd.Flags().GetBool("toggle")
+
+			dbPath := db.DefaultPath()
+			database, err := db.Open(dbPath)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+			defer database.Close()
+
+			task, err := database.GetTask(taskID)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+			if task == nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render(fmt.Sprintf("Task #%d not found", taskID)))
+				os.Exit(1)
+			}
+
+			var newValue bool
+			if toggle {
+				newValue = !task.Pinned
+			} else if unpin {
+				newValue = false
+			} else {
+				newValue = true
+			}
+
+			if err := database.UpdateTaskPinned(taskID, newValue); err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+
+			state := "pinned"
+			if !newValue {
+				state = "unpinned"
+			}
+			fmt.Println(successStyle.Render(fmt.Sprintf("Task #%d %s", taskID, state)))
+		},
+	}
+	pinCmd.Flags().Bool("unpin", false, "Unpin the task")
+	pinCmd.Flags().Bool("toggle", false, "Toggle the current pin state")
+	rootCmd.AddCommand(pinCmd)
+
 	// Close subcommand - mark a task as done
 	closeCmd := &cobra.Command{
 		Use:     "close <task-id>",
@@ -1102,11 +1299,169 @@ Examples:
 	retryCmd.Flags().StringP("feedback", "m", "", "Feedback for the retry")
 	rootCmd.AddCommand(retryCmd)
 
+	// Purge Claude config subcommand - remove stale entries from ~/.claude.json
+	purgeClaudeConfigCmd := &cobra.Command{
+		Use:   "purge-claude-config",
+		Short: "Remove stale project entries from ~/.claude.json",
+		Long: `Remove entries from ~/.claude.json for project paths that no longer exist.
+
+This cleans up stale entries left behind by deleted worktrees, conductor workspaces,
+and other tools that add per-project configuration to the global Claude config.
+
+Examples:
+  task purge-claude-config
+  task purge-claude-config --dry-run`,
+		Run: func(cmd *cobra.Command, args []string) {
+			dryRun, _ := cmd.Flags().GetBool("dry-run")
+			configDirFlag, _ := cmd.Flags().GetString("config-dir")
+			resolvedDir := executor.ResolveClaudeConfigDir(configDirFlag)
+			configPath := executor.ClaudeConfigFilePath(resolvedDir)
+
+			if dryRun {
+				// Show what would be removed
+				removed, paths, err := previewStaleClaudeProjectConfigs(configPath)
+				if err != nil {
+					fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+					os.Exit(1)
+				}
+				if removed == 0 {
+					fmt.Println(dimStyle.Render("No stale entries found"))
+					return
+				}
+				fmt.Printf("Would remove %d stale entries:\n", removed)
+				for _, p := range paths {
+					fmt.Printf("  %s\n", dimStyle.Render(p))
+				}
+				return
+			}
+
+			removed, err := executor.PurgeStaleClaudeProjectConfigs(configPath)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+
+			if removed == 0 {
+				fmt.Println(dimStyle.Render("No stale entries found"))
+			} else {
+				fmt.Println(successStyle.Render(fmt.Sprintf("Removed %d stale entries from %s", removed, configPath)))
+			}
+		},
+	}
+	purgeClaudeConfigCmd.Flags().Bool("dry-run", false, "Show what would be removed without making changes")
+	purgeClaudeConfigCmd.Flags().String("config-dir", "", "Claude config directory (defaults to $CLAUDE_CONFIG_DIR or ~/.claude)")
+	rootCmd.AddCommand(purgeClaudeConfigCmd)
+
 	// Cloud subcommand
 	rootCmd.AddCommand(createCloudCommand())
 
 	// Sprite subcommand (cloud execution via Fly.io Sprites)
 	rootCmd.AddCommand(createSpriteCommand())
+
+	// Settings command
+	settingsCmd := &cobra.Command{
+		Use:   "settings",
+		Short: "View and manage app settings",
+		Run: func(cmd *cobra.Command, args []string) {
+			dbPath := db.DefaultPath()
+			database, err := db.Open(dbPath)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+			defer database.Close()
+
+			// Show all settings
+			fmt.Println(boldStyle.Render("Settings"))
+			fmt.Println()
+
+			// Anthropic API Key
+			apiKey, _ := database.GetSetting("anthropic_api_key")
+			if apiKey != "" {
+				// Mask the key for display
+				masked := apiKey[:7] + "..." + apiKey[len(apiKey)-4:]
+				fmt.Printf("anthropic_api_key: %s\n", masked)
+			} else if os.Getenv("ANTHROPIC_API_KEY") != "" {
+				fmt.Printf("anthropic_api_key: %s\n", dimStyle.Render("(using ANTHROPIC_API_KEY env var)"))
+			} else {
+				fmt.Printf("anthropic_api_key: %s\n", dimStyle.Render("(not set)"))
+			}
+
+			// Autocomplete enabled
+			autocomplete, _ := database.GetSetting("autocomplete_enabled")
+			if autocomplete == "" {
+				autocomplete = "true"
+			}
+			fmt.Printf("autocomplete_enabled: %s\n", autocomplete)
+
+			// Idle suspend timeout
+			idleTimeout, _ := database.GetSetting("idle_suspend_timeout")
+			if idleTimeout == "" {
+				idleTimeout = "6h (default)"
+			}
+			fmt.Printf("idle_suspend_timeout: %s\n", idleTimeout)
+
+			fmt.Println()
+			fmt.Println(dimStyle.Render("Use 'task settings set <key> <value>' to change settings"))
+		},
+	}
+
+	settingsSetCmd := &cobra.Command{
+		Use:   "set <key> <value>",
+		Short: "Set a setting value",
+		Long: `Set a configuration setting.
+
+Available settings:
+  anthropic_api_key     API key for ghost text autocomplete (uses Anthropic API
+                        directly for speed). Get yours at console.anthropic.com
+  autocomplete_enabled  Enable/disable ghost text autocomplete (true/false)
+  idle_suspend_timeout  How long blocked tasks wait before suspending (e.g. 6h, 30m, 24h)`,
+		Args: cobra.ExactArgs(2),
+		Run: func(cmd *cobra.Command, args []string) {
+			key := args[0]
+			value := args[1]
+
+			// Validate known settings
+			switch key {
+			case "anthropic_api_key":
+				if !strings.HasPrefix(value, "sk-ant-") {
+					fmt.Println(errorStyle.Render("Invalid API key format. Should start with 'sk-ant-'"))
+					return
+				}
+			case "autocomplete_enabled":
+				if value != "true" && value != "false" {
+					fmt.Println(errorStyle.Render("Value must be 'true' or 'false'"))
+					return
+				}
+			case "idle_suspend_timeout":
+				if _, err := time.ParseDuration(value); err != nil {
+					fmt.Println(errorStyle.Render("Invalid duration format. Examples: 6h, 30m, 24h, 1h30m"))
+					return
+				}
+			default:
+				fmt.Println(errorStyle.Render("Unknown setting: " + key))
+				fmt.Println(dimStyle.Render("Available: anthropic_api_key, autocomplete_enabled, idle_suspend_timeout"))
+				return
+			}
+
+			dbPath := db.DefaultPath()
+			database, err := db.Open(dbPath)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+			defer database.Close()
+
+			if err := database.SetSetting(key, value); err != nil {
+				fmt.Println(errorStyle.Render("Failed to save setting: " + err.Error()))
+				return
+			}
+			fmt.Println(successStyle.Render("Setting saved: " + key))
+		},
+	}
+
+	settingsCmd.AddCommand(settingsSetCmd)
+	rootCmd.AddCommand(settingsCmd)
 
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
@@ -1131,8 +1486,8 @@ func execInTmux() error {
 	args := append([]string{executable}, os.Args[1:]...)
 	cmdStr := strings.Join(args, " ")
 
-	// Set TASK_SESSION_ID env var so child processes use the same session ID
-	envCmd := fmt.Sprintf("TASK_SESSION_ID=%s %s", sessionID, cmdStr)
+	// Set WORKTREE_SESSION_ID env var so child processes use the same session ID
+	envCmd := fmt.Sprintf("WORKTREE_SESSION_ID=%s %s", sessionID, cmdStr)
 
 	// Check if session already exists
 	if osexec.Command("tmux", "has-session", "-t", sessionName).Run() == nil {
@@ -1231,7 +1586,7 @@ func runLocal(dangerousMode bool) error {
 }
 
 // ensureDaemonRunning starts the daemon if it's not already running.
-// If dangerousMode is true, sets TASK_DANGEROUS_MODE=1 for the daemon.
+// If dangerousMode is true, sets WORKTREE_DANGEROUS_MODE=1 for the daemon.
 // If the daemon is running with a different mode, it will be restarted.
 func ensureDaemonRunning(dangerousMode bool) error {
 	pidFile := getPidFilePath()
@@ -1271,10 +1626,10 @@ func ensureDaemonRunning(dangerousMode bool) error {
 	cmd.Stderr = nil
 	cmd.Stdin = nil
 	// Pass session ID to daemon so it uses the same tmux sessions
-	cmd.Env = append(os.Environ(), fmt.Sprintf("TASK_SESSION_ID=%s", getSessionID()))
+	cmd.Env = append(os.Environ(), fmt.Sprintf("WORKTREE_SESSION_ID=%s", getSessionID()))
 	// Pass dangerous mode flag if enabled
 	if dangerousMode {
-		cmd.Env = append(cmd.Env, "TASK_DANGEROUS_MODE=1")
+		cmd.Env = append(cmd.Env, "WORKTREE_DANGEROUS_MODE=1")
 	}
 	// Detach from parent process
 	cmd.SysProcAttr = &syscall.SysProcAttr{
@@ -1320,6 +1675,182 @@ func readPidFile(path string) (int, error) {
 
 func writePidFile(path string, pid int) error {
 	return os.WriteFile(path, []byte(fmt.Sprintf("%d", pid)), 0644)
+}
+
+type boardSnapshot struct {
+	Columns []boardColumn `json:"columns"`
+}
+
+type boardColumn struct {
+	Status string       `json:"status"`
+	Label  string       `json:"label"`
+	Count  int          `json:"count"`
+	Tasks  []boardEntry `json:"tasks"`
+}
+
+type boardEntry struct {
+	ID      int64  `json:"id"`
+	Title   string `json:"title"`
+	Project string `json:"project"`
+	Type    string `json:"type"`
+	Pinned  bool   `json:"pinned"`
+	AgeHint string `json:"age_hint"`
+}
+
+func buildBoardSnapshot(tasks []*db.Task, limit int) boardSnapshot {
+	sections := []struct {
+		status string
+		label  string
+	}{
+		{db.StatusBacklog, "Backlog"},
+		{db.StatusQueued, "Queued"},
+		{db.StatusProcessing, "In Progress"},
+		{db.StatusBlocked, "Blocked"},
+		{db.StatusDone, "Done"},
+	}
+
+	grouped := make(map[string][]*db.Task)
+	for _, task := range tasks {
+		if task.Status == db.StatusArchived {
+			continue
+		}
+		grouped[task.Status] = append(grouped[task.Status], task)
+	}
+
+	var snapshot boardSnapshot
+	for _, section := range sections {
+		columnTasks := grouped[section.status]
+		if len(columnTasks) == 0 {
+			snapshot.Columns = append(snapshot.Columns, boardColumn{Status: section.status, Label: section.label, Count: 0})
+			continue
+		}
+
+		sortTasksForBoard(columnTasks)
+		column := boardColumn{Status: section.status, Label: section.label, Count: len(columnTasks)}
+		for i, task := range columnTasks {
+			if i >= limit {
+				break
+			}
+			entry := boardEntry{
+				ID:      task.ID,
+				Title:   truncate(task.Title, 80),
+				Project: task.Project,
+				Type:    task.Type,
+				Pinned:  task.Pinned,
+				AgeHint: boardAgeHint(task),
+			}
+			column.Tasks = append(column.Tasks, entry)
+		}
+		snapshot.Columns = append(snapshot.Columns, column)
+	}
+
+	return snapshot
+}
+
+func sortTasksForBoard(tasks []*db.Task) {
+	sort.SliceStable(tasks, func(i, j int) bool {
+		if tasks[i].Pinned != tasks[j].Pinned {
+			return tasks[i].Pinned
+		}
+		return boardReferenceTime(tasks[i]).After(boardReferenceTime(tasks[j]))
+	})
+}
+
+func boardReferenceTime(task *db.Task) time.Time {
+	switch task.Status {
+	case db.StatusProcessing:
+		if task.StartedAt != nil {
+			return task.StartedAt.Time
+		}
+	case db.StatusDone:
+		if task.CompletedAt != nil {
+			return task.CompletedAt.Time
+		}
+	case db.StatusBlocked:
+		return task.UpdatedAt.Time
+	case db.StatusQueued:
+		return task.UpdatedAt.Time
+	case db.StatusBacklog:
+		return task.CreatedAt.Time
+	}
+	return task.UpdatedAt.Time
+}
+
+func boardAgeHint(task *db.Task) string {
+	ref := boardReferenceTime(task)
+	if ref.IsZero() {
+		return ""
+	}
+
+	delta := time.Since(ref)
+	if delta < 0 {
+		delta = -delta
+	}
+
+	switch task.Status {
+	case db.StatusProcessing:
+		return fmt.Sprintf("running %s ago", formatShortDuration(delta))
+	case db.StatusBlocked:
+		return fmt.Sprintf("blocked %s", formatShortDuration(delta))
+	case db.StatusQueued:
+		return fmt.Sprintf("queued %s", formatShortDuration(delta))
+	case db.StatusBacklog:
+		return fmt.Sprintf("created %s", formatShortDuration(delta))
+	case db.StatusDone:
+		return fmt.Sprintf("done %s", formatShortDuration(delta))
+	default:
+		return formatShortDuration(delta)
+	}
+}
+
+func formatShortDuration(d time.Duration) string {
+	if d < time.Second {
+		return "0s"
+	}
+	units := []struct {
+		dur   time.Duration
+		label string
+	}{
+		{24 * time.Hour, "d"},
+		{time.Hour, "h"},
+		{time.Minute, "m"},
+		{time.Second, "s"},
+	}
+	var parts []string
+	remainder := d
+	for _, u := range units {
+		if remainder >= u.dur {
+			value := remainder / u.dur
+			parts = append(parts, fmt.Sprintf("%d%s", value, u.label))
+			remainder %= u.dur
+		}
+		if len(parts) == 2 {
+			break
+		}
+	}
+	return strings.Join(parts, " ")
+}
+
+var allowedStatuses = []string{
+	db.StatusBacklog,
+	db.StatusQueued,
+	db.StatusProcessing,
+	db.StatusBlocked,
+	db.StatusDone,
+	db.StatusArchived,
+}
+
+func validStatuses() []string {
+	return allowedStatuses
+}
+
+func isValidStatus(status string) bool {
+	for _, s := range allowedStatuses {
+		if status == s {
+			return true
+		}
+	}
+	return false
 }
 
 func processExists(pid int) bool {
@@ -1492,7 +2023,7 @@ func connectRemote(host, port string) error {
 
 	// Send current working directory for project detection
 	if cwd, err := os.Getwd(); err == nil {
-		session.Setenv("TASK_CWD", cwd)
+		session.Setenv("WORKTREE_CWD", cwd)
 	}
 
 	// Start shell (taskd serves TUI directly)
@@ -1548,26 +2079,34 @@ func loadPrivateKey(path string) (ssh.Signer, error) {
 
 // ClaudeHookInput is the JSON structure Claude sends to hooks via stdin.
 type ClaudeHookInput struct {
-	SessionID        string `json:"session_id"`
-	TranscriptPath   string `json:"transcript_path"`
-	Cwd              string `json:"cwd"`
-	HookEventName    string `json:"hook_event_name"`
-	NotificationType string `json:"notification_type,omitempty"` // For Notification hooks
-	Message          string `json:"message,omitempty"`
-	StopReason       string `json:"stop_reason,omitempty"` // For Stop hooks
+	SessionID          string `json:"session_id"`
+	TranscriptPath     string `json:"transcript_path"`
+	Cwd                string `json:"cwd"`
+	HookEventName      string `json:"hook_event_name"`
+	NotificationType   string `json:"notification_type,omitempty"`   // For Notification hooks
+	Message            string `json:"message,omitempty"`             // General message field
+	StopReason         string `json:"stop_reason,omitempty"`         // For Stop hooks
+	Trigger            string `json:"trigger,omitempty"`             // For PreCompact hooks: "manual" or "auto"
+	CustomInstructions string `json:"custom_instructions,omitempty"` // For PreCompact hooks: user-specified compaction instructions
+	// Tool use fields (for PreToolUse and PostToolUse hooks)
+	ToolName     string          `json:"tool_name,omitempty"`     // Name of the tool being used
+	ToolInput    json.RawMessage `json:"tool_input,omitempty"`    // Tool-specific input parameters
+	ToolResponse json.RawMessage `json:"tool_response,omitempty"` // Tool result (PostToolUse only)
+	ToolUseID    string          `json:"tool_use_id,omitempty"`   // Unique identifier for this tool call
 }
 
 // handleClaudeHook processes Claude Code hook callbacks.
 // It reads hook data from stdin and updates task status accordingly.
 func handleClaudeHook(hookEvent string) error {
 	// Get task ID from environment (set by executor when launching Claude)
-	taskIDStr := os.Getenv("TASK_ID")
+	// If not set, this Claude session predates the task tracking system - silently succeed
+	taskIDStr := os.Getenv("WORKTREE_TASK_ID")
 	if taskIDStr == "" {
-		return fmt.Errorf("TASK_ID not set")
+		return nil
 	}
 	var taskID int64
 	if _, err := fmt.Sscanf(taskIDStr, "%d", &taskID); err != nil {
-		return fmt.Errorf("invalid TASK_ID: %s", taskIDStr)
+		return fmt.Errorf("invalid WORKTREE_TASK_ID: %s", taskIDStr)
 	}
 
 	// Read hook input from stdin
@@ -1585,6 +2124,9 @@ func handleClaudeHook(hookEvent string) error {
 	}
 	defer database.Close()
 
+	// Log session ID once (on first hook call for this task)
+	logSessionIDOnce(database, taskID, &input)
+
 	// Handle based on hook event type
 	switch hookEvent {
 	case "PreToolUse":
@@ -1595,10 +2137,41 @@ func handleClaudeHook(hookEvent string) error {
 		return handleNotificationHook(database, taskID, &input)
 	case "Stop":
 		return handleStopHook(database, taskID, &input)
+	case "PreCompact":
+		return handlePreCompactHook(database, taskID, &input)
 	default:
 		// Unknown hook type, ignore
 		return nil
 	}
+}
+
+// logSessionIDOnce logs the Claude session ID for a task, but only once.
+// It checks if a session ID log already exists to avoid duplicate entries.
+// Also persists the session ID to the task record for reliable resumption.
+func logSessionIDOnce(database *db.DB, taskID int64, input *ClaudeHookInput) {
+	if input.SessionID == "" {
+		return
+	}
+
+	// Check if we've already logged a session ID for this task
+	logs, err := database.GetTaskLogs(taskID, 50)
+	if err != nil {
+		return
+	}
+
+	sessionPrefix := "Claude session: "
+	for _, log := range logs {
+		if log.LineType == "system" && strings.HasPrefix(log.Content, sessionPrefix) {
+			// Already logged
+			return
+		}
+	}
+
+	// Log the session ID
+	database.AppendTaskLog(taskID, "system", sessionPrefix+input.SessionID)
+
+	// Persist session ID to task record for reliable resumption
+	database.UpdateTaskClaudeSessionID(taskID, input.SessionID)
 }
 
 // handleNotificationHook handles Notification hooks from Claude.
@@ -1627,9 +2200,9 @@ func handleNotificationHook(database *db.DB, taskID int64, input *ClaudeHookInpu
 
 // handleStopHook handles Stop hooks from Claude (agent finished responding).
 // The Stop hook fires when Claude Code finishes a response, with stop_reason indicating why:
-// - "end_turn": Claude finished and is waiting for user input → task should be "blocked"
-// - "tool_use": Claude finished with a tool call that's about to execute → task stays "processing"
-//   (PreToolUse/PostToolUse hooks handle the actual tool execution state tracking)
+//   - "end_turn": Claude finished and is waiting for user input → task should be "blocked"
+//   - "tool_use": Claude finished with a tool call that's about to execute → task stays "processing"
+//     (PreToolUse/PostToolUse hooks handle the actual tool execution state tracking)
 func handleStopHook(database *db.DB, taskID int64, input *ClaudeHookInput) error {
 	task, err := database.GetTask(taskID)
 	if err != nil {
@@ -1692,7 +2265,7 @@ func handlePreToolUseHook(database *db.DB, taskID int64, input *ClaudeHookInput)
 }
 
 // handlePostToolUseHook handles PostToolUse hooks from Claude (after tool execution).
-// This confirms Claude is still actively working after a tool completes.
+// This confirms Claude is still actively working after a tool completes and logs tool usage.
 func handlePostToolUseHook(database *db.DB, taskID int64, input *ClaudeHookInput) error {
 	task, err := database.GetTask(taskID)
 	if err != nil {
@@ -1708,14 +2281,146 @@ func handlePostToolUseHook(database *db.DB, taskID int64, input *ClaudeHookInput
 		return nil
 	}
 
+	// Log the tool use to the task log
+	if input.ToolName != "" {
+		logMsg := formatToolLogMessage(input)
+		database.AppendTaskLog(taskID, "tool", logMsg)
+	}
+
 	// After a tool completes, Claude is still working (will process tool results)
 	// Ensure task remains in "processing" state
 	if task.Status == db.StatusBlocked {
 		database.UpdateTaskStatus(taskID, db.StatusProcessing)
-		database.AppendTaskLog(taskID, "system", "Claude processing tool results")
 	}
 
 	return nil
+}
+
+// formatToolLogMessage creates a human-readable log message for tool usage.
+// It extracts relevant details from tool_input based on the tool type.
+func formatToolLogMessage(input *ClaudeHookInput) string {
+	toolName := input.ToolName
+
+	// Try to extract meaningful details from tool_input
+	if len(input.ToolInput) > 0 {
+		var toolInput map[string]interface{}
+		if err := json.Unmarshal(input.ToolInput, &toolInput); err == nil {
+			// Extract relevant fields based on tool type
+			switch toolName {
+			case "Bash":
+				if cmd, ok := toolInput["command"].(string); ok {
+					// Truncate long commands
+					if len(cmd) > 100 {
+						cmd = cmd[:100] + "..."
+					}
+					return fmt.Sprintf("Bash: %s", cmd)
+				}
+			case "Read":
+				if path, ok := toolInput["file_path"].(string); ok {
+					return fmt.Sprintf("Read: %s", path)
+				}
+			case "Write":
+				if path, ok := toolInput["file_path"].(string); ok {
+					return fmt.Sprintf("Write: %s", path)
+				}
+			case "Edit":
+				if path, ok := toolInput["file_path"].(string); ok {
+					return fmt.Sprintf("Edit: %s", path)
+				}
+			case "Glob":
+				if pattern, ok := toolInput["pattern"].(string); ok {
+					return fmt.Sprintf("Glob: %s", pattern)
+				}
+			case "Grep":
+				if pattern, ok := toolInput["pattern"].(string); ok {
+					return fmt.Sprintf("Grep: %s", pattern)
+				}
+			case "Task":
+				if desc, ok := toolInput["description"].(string); ok {
+					return fmt.Sprintf("Task: %s", desc)
+				}
+			case "WebFetch":
+				if url, ok := toolInput["url"].(string); ok {
+					return fmt.Sprintf("WebFetch: %s", url)
+				}
+			case "WebSearch":
+				if query, ok := toolInput["query"].(string); ok {
+					return fmt.Sprintf("WebSearch: %s", query)
+				}
+			}
+		}
+	}
+
+	// Default: just the tool name
+	return toolName
+}
+
+// handlePreCompactHook handles PreCompact hooks from Claude (before context compaction).
+// This hook fires when Claude is about to compact its context, either manually (/compact)
+// or automatically when the context window approaches its limit.
+//
+// We use this to:
+// 1. Read the current conversation from the transcript file
+// 2. Extract key context that should persist across compaction
+// 3. Store it in the database for retrieval on task resume
+//
+// This is better than letting Claude's normal compaction proceed alone because:
+// - We can persist important task context in our database
+// - We can provide this context back when the task resumes
+// - We can supplement Claude's summary with task-specific metadata
+// - The saved context survives Claude session cleanup
+func handlePreCompactHook(database *db.DB, taskID int64, input *ClaudeHookInput) error {
+	// Read the full transcript content before compaction
+	transcript, preTokens, err := readTranscriptContent(input.TranscriptPath)
+	if err != nil {
+		// Log error but don't fail - compaction should still proceed
+		database.AppendTaskLog(taskID, "system", fmt.Sprintf("Warning: Could not read transcript: %v", err))
+		return nil
+	}
+
+	// Store the full transcript in the database
+	compactionSummary := &db.CompactionSummary{
+		TaskID:             taskID,
+		SessionID:          input.SessionID,
+		Trigger:            input.Trigger,
+		PreTokens:          preTokens,
+		Summary:            transcript, // Full JSONL transcript content
+		CustomInstructions: input.CustomInstructions,
+	}
+
+	if err := database.SaveCompactionSummary(compactionSummary); err != nil {
+		database.AppendTaskLog(taskID, "system", fmt.Sprintf("Warning: Could not save transcript: %v", err))
+		return nil
+	}
+
+	// Log the compaction event
+	triggerType := "auto"
+	if input.Trigger == "manual" {
+		triggerType = "manual (/compact)"
+	}
+	database.AppendTaskLog(taskID, "system", fmt.Sprintf("Context compacted (%s) - saved %d bytes of transcript", triggerType, len(transcript)))
+
+	return nil
+}
+
+// readTranscriptContent reads the full Claude transcript file content.
+// Returns the complete JSONL content and estimated token count.
+// Saving the full transcript preserves all context without arbitrary truncation,
+// allowing us to reconstruct or re-summarize the conversation later if needed.
+func readTranscriptContent(transcriptPath string) (string, int, error) {
+	if transcriptPath == "" {
+		return "", 0, fmt.Errorf("no transcript path provided")
+	}
+
+	content, err := os.ReadFile(transcriptPath)
+	if err != nil {
+		return "", 0, fmt.Errorf("read transcript: %w", err)
+	}
+
+	// Estimate tokens (rough: ~4 chars per token)
+	preTokens := len(content) / 4
+
+	return string(content), preTokens, nil
 }
 
 // tailClaudeLogs tails all claude session logs for debugging.
@@ -1872,7 +2577,7 @@ func formatLogEntry(entry map[string]interface{}) string {
 				}
 			}
 		}
-	// Skip "result" type - tool results are noise for high-level view
+		// Skip "result" type - tool results are noise for high-level view
 	}
 
 	return ""
@@ -1898,71 +2603,217 @@ func listClaudeSessions() {
 		return
 	}
 
-	fmt.Printf("%s\n\n", boldStyle.Render("Running Claude Sessions (in task-daemon):"))
+	// Calculate total memory
+	totalMemoryMB := 0
 	for _, s := range sessions {
-		fmt.Printf("  %s  %s\n",
+		totalMemoryMB += s.memoryMB
+	}
+
+	fmt.Printf("%s\n\n", boldStyle.Render(fmt.Sprintf("Running Claude Sessions (%d total, %dMB memory):", len(sessions), totalMemoryMB)))
+	for _, s := range sessions {
+		memStr := ""
+		if s.memoryMB > 0 {
+			memStr = fmt.Sprintf("%dMB", s.memoryMB)
+		}
+		titleStr := ""
+		if s.taskTitle != "" {
+			// Truncate title to 40 chars
+			title := s.taskTitle
+			if len(title) > 40 {
+				title = title[:37] + "..."
+			}
+			titleStr = title
+		}
+		fmt.Printf("  %s  %s  %s  %s\n",
 			successStyle.Render(fmt.Sprintf("task-%d", s.taskID)),
+			dimStyle.Render(fmt.Sprintf("%-6s", memStr)),
+			dimStyle.Render(fmt.Sprintf("%-40s", titleStr)),
 			dimStyle.Render(s.info))
 	}
 }
 
 type claudeSession struct {
-	taskID int
-	info   string
+	taskID    int
+	taskTitle string
+	memoryMB  int // Memory usage in MB
+	info      string
 }
 
-// getClaudeSessions returns all running task-* windows in task-daemon session.
+// getClaudeSessions returns all running task-* windows across all task-daemon-* sessions.
 func getClaudeSessions() []claudeSession {
-	// List all windows in task-daemon session for this instance
-	daemonSession := getDaemonSessionName()
-	cmd := osexec.Command("tmux", "list-windows", "-t", daemonSession, "-F", "#{window_name}:#{window_activity}")
-	output, err := cmd.Output()
+	// First, get all task-daemon-* sessions
+	sessionsCmd := osexec.Command("tmux", "list-sessions", "-F", "#{session_name}")
+	sessionsOut, err := sessionsCmd.Output()
 	if err != nil {
 		return nil
 	}
 
+	var daemonSessions []string
+	for _, session := range strings.Split(strings.TrimSpace(string(sessionsOut)), "\n") {
+		if strings.HasPrefix(session, "task-daemon-") {
+			daemonSessions = append(daemonSessions, session)
+		}
+	}
+
+	if len(daemonSessions) == 0 {
+		return nil
+	}
+
+	// Open database to fetch task titles
+	dbPath := db.DefaultPath()
+	database, _ := db.Open(dbPath)
+	if database != nil {
+		defer database.Close()
+	}
+
+	// Build map of task ID -> memory usage
+	taskMemory := getClaudeMemoryByTaskID()
+
 	var sessions []claudeSession
-	for _, line := range strings.Split(string(output), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
+	seen := make(map[int]bool) // Avoid duplicates if same task appears in multiple sessions
+
+	for _, daemonSession := range daemonSessions {
+		cmd := osexec.Command("tmux", "list-windows", "-t", daemonSession, "-F", "#{window_name}:#{window_activity}")
+		output, err := cmd.Output()
+		if err != nil {
 			continue
 		}
 
-		parts := strings.SplitN(line, ":", 2)
-		if len(parts) < 1 {
-			continue
-		}
-
-		name := parts[0]
-		// Skip placeholder window
-		if name == "_placeholder" {
-			continue
-		}
-
-		if !strings.HasPrefix(name, "task-") {
-			continue
-		}
-
-		var taskID int
-		if _, err := fmt.Sscanf(name, "task-%d", &taskID); err != nil {
-			continue
-		}
-
-		info := ""
-		if len(parts) >= 2 {
-			// Parse activity timestamp
-			var activity int64
-			fmt.Sscanf(parts[1], "%d", &activity)
-			if activity > 0 {
-				t := time.Unix(activity, 0)
-				info = fmt.Sprintf("last activity %s", t.Format("15:04:05"))
+		for _, line := range strings.Split(string(output), "\n") {
+			line = strings.TrimSpace(line)
+			if line == "" {
+				continue
 			}
-		}
 
-		sessions = append(sessions, claudeSession{taskID: taskID, info: info})
+			parts := strings.SplitN(line, ":", 2)
+			if len(parts) < 1 {
+				continue
+			}
+
+			name := parts[0]
+			// Skip placeholder window
+			if name == "_placeholder" {
+				continue
+			}
+
+			if !strings.HasPrefix(name, "task-") {
+				continue
+			}
+
+			var taskID int
+			if _, err := fmt.Sscanf(name, "task-%d", &taskID); err != nil {
+				continue
+			}
+
+			// Skip if already seen (prefer first occurrence)
+			if seen[taskID] {
+				continue
+			}
+			seen[taskID] = true
+
+			info := daemonSession
+			if len(parts) >= 2 {
+				// Parse activity timestamp
+				var activity int64
+				fmt.Sscanf(parts[1], "%d", &activity)
+				if activity > 0 {
+					t := time.Unix(activity, 0)
+					info = fmt.Sprintf("%s, last activity %s", daemonSession, t.Format("15:04:05"))
+				}
+			}
+
+			// Get task title from database
+			var taskTitle string
+			if database != nil {
+				if task, err := database.GetTask(int64(taskID)); err == nil && task != nil {
+					taskTitle = task.Title
+				}
+			}
+
+			// Get memory usage for this task's Claude process
+			memoryMB := taskMemory[taskID]
+
+			sessions = append(sessions, claudeSession{
+				taskID:    taskID,
+				taskTitle: taskTitle,
+				memoryMB:  memoryMB,
+				info:      info,
+			})
+		}
 	}
 
 	return sessions
+}
+
+// getClaudeMemoryByTaskID returns a map of task ID -> memory (MB) for all Claude processes.
+// It identifies task IDs by examining each Claude process's working directory.
+func getClaudeMemoryByTaskID() map[int]int {
+	result := make(map[int]int)
+
+	// Find all Claude processes
+	pgrepOut, err := osexec.Command("pgrep", "-f", "claude").Output()
+	if err != nil {
+		return result
+	}
+
+	for _, pidStr := range strings.Split(string(pgrepOut), "\n") {
+		pidStr = strings.TrimSpace(pidStr)
+		if pidStr == "" {
+			continue
+		}
+		pid, err := strconv.Atoi(pidStr)
+		if err != nil {
+			continue
+		}
+
+		// Get the process's current working directory using lsof
+		lsofOut, err := osexec.Command("lsof", "-p", pidStr, "-Fn").Output()
+		if err != nil {
+			continue
+		}
+
+		// Parse lsof output to find cwd
+		var cwd string
+		lines := strings.Split(string(lsofOut), "\n")
+		for i, line := range lines {
+			if line == "fcwd" && i+1 < len(lines) && strings.HasPrefix(lines[i+1], "n") {
+				cwd = lines[i+1][1:] // Remove 'n' prefix
+				break
+			}
+		}
+
+		if cwd == "" {
+			continue
+		}
+
+		// Extract task ID from worktree path like ".task-worktrees/467-..."
+		if idx := strings.Index(cwd, ".task-worktrees/"); idx >= 0 {
+			pathPart := cwd[idx+len(".task-worktrees/"):]
+			// Parse the task ID from the beginning of the path
+			var taskID int
+			if _, err := fmt.Sscanf(pathPart, "%d-", &taskID); err == nil && taskID > 0 {
+				memMB := getProcessMemoryMB(pid)
+				// If there are multiple Claude processes for the same task, sum them
+				result[taskID] += memMB
+			}
+		}
+	}
+
+	return result
+}
+
+// getProcessMemoryMB returns the memory usage of a process in MB.
+func getProcessMemoryMB(pid int) int {
+	// Use ps to get RSS (resident set size) in KB
+	out, err := osexec.Command("ps", "-p", strconv.Itoa(pid), "-o", "rss=").Output()
+	if err != nil {
+		return 0
+	}
+	rssKB, err := strconv.Atoi(strings.TrimSpace(string(out)))
+	if err != nil {
+		return 0
+	}
+	return rssKB / 1024 // Convert to MB
 }
 
 // killClaudeSession kills a specific task's tmux window in task-daemon.
@@ -1984,16 +2835,155 @@ func killClaudeSession(taskID int) error {
 	return nil
 }
 
-// killAllClaudeSessions kills all task-* tmux windows in task-daemon.
-func killAllClaudeSessions() int {
-	sessions := getClaudeSessions()
-	count := 0
-	for _, s := range sessions {
-		if err := killClaudeSession(s.taskID); err == nil {
-			count++
+// cleanupOrphanedClaudes kills Claude processes that aren't tied to any active task windows
+// or belong to done tasks older than 2 hours.
+func cleanupOrphanedClaudes(force bool) {
+	// Step 1: Get all task windows across ALL task-daemon-* sessions
+	activeTaskIDs := make(map[int]bool)
+
+	// List all tmux sessions
+	sessionsOut, err := osexec.Command("tmux", "list-sessions", "-F", "#{session_name}").Output()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, errorStyle.Render("Error listing tmux sessions: "+err.Error()))
+		return
+	}
+
+	for _, session := range strings.Split(string(sessionsOut), "\n") {
+		session = strings.TrimSpace(session)
+		if !strings.HasPrefix(session, "task-daemon-") {
+			continue
+		}
+
+		// List windows in this daemon session
+		windowsOut, err := osexec.Command("tmux", "list-windows", "-t", session, "-F", "#{window_name}").Output()
+		if err != nil {
+			continue
+		}
+
+		for _, window := range strings.Split(string(windowsOut), "\n") {
+			window = strings.TrimSpace(window)
+			if !strings.HasPrefix(window, "task-") {
+				continue
+			}
+			var taskID int
+			if _, err := fmt.Sscanf(window, "task-%d", &taskID); err == nil {
+				activeTaskIDs[taskID] = true
+			}
 		}
 	}
-	return count
+
+	// Step 1b: Get task IDs of done tasks older than 2 hours - these should be killed
+	doneOldTaskIDs := make(map[int]bool)
+	dbPath := db.DefaultPath()
+	database, err := db.Open(dbPath)
+	if err == nil {
+		defer database.Close()
+		twoHoursAgo := time.Now().Add(-2 * time.Hour)
+		// Get done tasks completed more than 2 hours ago
+		tasks, err := database.ListTasks(db.ListTasksOptions{
+			Status: db.StatusDone,
+		})
+		if err == nil {
+			for _, task := range tasks {
+				if task.CompletedAt != nil && task.CompletedAt.Before(twoHoursAgo) {
+					doneOldTaskIDs[int(task.ID)] = true
+				}
+			}
+		}
+	}
+
+	// Step 2: Get all Claude processes running in tmux
+	pgrepOut, err := osexec.Command("pgrep", "-f", "claude.*TERM_PROGRAM=tmux").Output()
+	if err != nil {
+		// No Claude processes found
+		fmt.Println(successStyle.Render("No orphaned Claude processes found"))
+		return
+	}
+
+	var orphanedPIDs []int
+	var oldDonePIDs []int
+	for _, pidStr := range strings.Split(string(pgrepOut), "\n") {
+		pidStr = strings.TrimSpace(pidStr)
+		if pidStr == "" {
+			continue
+		}
+		pid, err := strconv.Atoi(pidStr)
+		if err != nil {
+			continue
+		}
+
+		// Check if this PID's environment has WORKTREE_TASK_ID
+		// and if that task ID is in our active set
+		envOut, err := osexec.Command("ps", "-p", strconv.Itoa(pid), "-o", "command=").Output()
+		if err != nil {
+			orphanedPIDs = append(orphanedPIDs, pid)
+			continue
+		}
+
+		env := string(envOut)
+		isOrphaned := true
+		var extractedTaskID int
+
+		// Try to extract WORKTREE_TASK_ID from the command line
+		if idx := strings.Index(env, "WORKTREE_TASK_ID="); idx >= 0 {
+			if _, err := fmt.Sscanf(env[idx:], "WORKTREE_TASK_ID=%d", &extractedTaskID); err == nil {
+				if activeTaskIDs[extractedTaskID] {
+					isOrphaned = false
+				}
+			}
+		}
+
+		// Check if this is from an old done task
+		if !isOrphaned && extractedTaskID > 0 && doneOldTaskIDs[extractedTaskID] {
+			oldDonePIDs = append(oldDonePIDs, pid)
+			continue
+		}
+
+		if isOrphaned {
+			orphanedPIDs = append(orphanedPIDs, pid)
+		}
+	}
+
+	totalToKill := len(orphanedPIDs) + len(oldDonePIDs)
+	if totalToKill == 0 {
+		fmt.Println(successStyle.Render("No orphaned Claude processes found"))
+		return
+	}
+
+	// Step 3: Kill orphaned processes
+	if len(orphanedPIDs) > 0 {
+		fmt.Printf("%s\n\n", boldStyle.Render(fmt.Sprintf("Found %d orphaned Claude processes:", len(orphanedPIDs))))
+	}
+	if len(oldDonePIDs) > 0 {
+		fmt.Printf("%s\n\n", boldStyle.Render(fmt.Sprintf("Found %d Claude processes from done tasks (>2h old):", len(oldDonePIDs))))
+	}
+
+	signal := syscall.SIGTERM
+	signalName := "SIGTERM"
+	if force {
+		signal = syscall.SIGKILL
+		signalName = "SIGKILL"
+	}
+
+	killed := 0
+	allPIDs := append(orphanedPIDs, oldDonePIDs...)
+	for _, pid := range allPIDs {
+		proc, err := os.FindProcess(pid)
+		if err != nil {
+			fmt.Printf("  %s PID %d: %s\n", errorStyle.Render("✗"), pid, err.Error())
+			continue
+		}
+
+		if err := proc.Signal(signal); err != nil {
+			fmt.Printf("  %s PID %d: %s\n", errorStyle.Render("✗"), pid, err.Error())
+			continue
+		}
+
+		fmt.Printf("  %s PID %d (%s)\n", successStyle.Render("✓ Killed"), pid, signalName)
+		killed++
+	}
+
+	fmt.Printf("\n%s\n", dimStyle.Render(fmt.Sprintf("Killed %d/%d processes", killed, totalToKill)))
 }
 
 // deleteTask deletes a task, its Claude session, and its worktree.
@@ -2018,8 +3008,20 @@ func deleteTask(taskID int64) error {
 	// Kill Claude session if running (ignore errors - session may not exist)
 	killClaudeSession(int(taskID))
 
-	// Clean up worktree if it exists
+	// Clean up worktree and Claude sessions if they exist
 	if task.WorktreePath != "" {
+		projectConfigDir := ""
+		if task.Project != "" {
+			if project, err := database.GetProjectByName(task.Project); err == nil && project != nil {
+				projectConfigDir = project.ClaudeConfigDir
+			}
+		}
+		// Clean up Claude session files first (before worktree is removed)
+		if err := executor.CleanupClaudeSessions(task.WorktreePath, projectConfigDir); err != nil {
+			fmt.Fprintln(os.Stderr, dimStyle.Render(fmt.Sprintf("Warning: could not remove Claude sessions: %v", err)))
+		}
+
+		// Clean up worktree
 		cfg := config.New(database)
 		exec := executor.New(database, cfg)
 		if err := exec.CleanupWorktree(task); err != nil {
@@ -2034,4 +3036,50 @@ func deleteTask(taskID int64) error {
 	}
 
 	return nil
+}
+
+// previewStaleClaudeProjectConfigs returns the count and paths of stale entries
+// that would be removed from claude.json without actually removing them.
+func previewStaleClaudeProjectConfigs(configPath string) (int, []string, error) {
+	if configPath == "" {
+		configPath = executor.ClaudeConfigFilePath(executor.DefaultClaudeConfigDir())
+	}
+
+	// Read existing config
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, nil, nil // No config file
+		}
+		return 0, nil, fmt.Errorf("read claude config: %w", err)
+	}
+
+	// Parse as generic JSON
+	var config map[string]interface{}
+	if err := json.Unmarshal(data, &config); err != nil {
+		return 0, nil, fmt.Errorf("parse claude config: %w", err)
+	}
+
+	// Get projects map
+	projectsRaw, ok := config["projects"]
+	if !ok {
+		return 0, nil, nil // No projects configured
+	}
+	projects, ok := projectsRaw.(map[string]interface{})
+	if !ok {
+		return 0, nil, nil // Invalid projects format
+	}
+
+	// Find stale entries
+	var stalePaths []string
+	for path := range projects {
+		if _, err := os.Stat(path); os.IsNotExist(err) {
+			stalePaths = append(stalePaths, path)
+		}
+	}
+
+	// Sort for consistent output
+	sort.Strings(stalePaths)
+
+	return len(stalePaths), stalePaths, nil
 }

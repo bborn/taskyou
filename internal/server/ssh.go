@@ -91,7 +91,7 @@ func (s *Server) Shutdown(ctx context.Context) error {
 
 // teaHandler returns the Bubble Tea program for each SSH session.
 func (s *Server) teaHandler(sess ssh.Session) (tea.Model, []tea.ProgramOption) {
-	workingDir := GetEnvValue(sess.Environ(), "TASK_CWD")
+	workingDir := GetEnvValue(sess.Environ(), "WORKTREE_CWD")
 	model := ui.NewAppModel(s.db, s.executor, workingDir)
 
 	return model, []tea.ProgramOption{

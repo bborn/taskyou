@@ -2,37 +2,45 @@
 
 Guide for AI agents working in this repository.
 
+**See also:** [DEVELOPMENT.md](DEVELOPMENT.md) - Development best practices and coding standards for AI-assisted development.
+
 ## Project Overview
 
-This is **Bruno's Task Queue** - a personal task management system with:
-- **SQLite storage** for tasks
+This is **Task You** - a personal task management system with:
+- **SQLite storage** for tasks and projects
 - **SSH-accessible TUI** via Wish
 - **Background executor** running Claude Code for task processing
 - **Beautiful terminal UI** built with Charm libraries (Kanban board)
+- **Git worktree isolation** for parallel task execution
+- **Claude Code hooks** for real-time task state tracking
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│                    Hetzner Server                        │
-│                                                          │
-│  ┌──────────────┐    ┌──────────────┐    ┌───────────┐ │
-│  │   Wish SSH   │───▶│  Bubble Tea  │───▶│  SQLite   │ │
-│  │   :2222      │    │     TUI      │    │ tasks.db  │ │
-│  └──────────────┘    └──────┬───────┘    └───────────┘ │
-│                             │                           │
-│                             ▼                           │
-│                    ┌─────────────────┐                  │
-│                    │ Background      │                  │
-│                    │ Executor        │                  │
-│                    │ (goroutine)     │                  │
-│                    └────────┬────────┘                  │
-│                             │                           │
-│                             ▼                           │
-│                      Claude Code                        │
-└─────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────┐
+│                        Local / Server                            │
+│                                                                  │
+│  ┌──────────────┐    ┌──────────────┐    ┌───────────────────┐ │
+│  │   Wish SSH   │───▶│  Bubble Tea  │───▶│      SQLite       │ │
+│  │   :2222      │    │     TUI      │    │    tasks.db       │ │
+│  └──────────────┘    └──────┬───────┘    └───────────────────┘ │
+│                             │                                   │
+│                             ▼                                   │
+│                    ┌─────────────────┐                          │
+│                    │   Background    │                          │
+│                    │    Executor     │                          │
+│                    │  (goroutine)    │                          │
+│                    └────────┬────────┘                          │
+│                             │                                   │
+│                             ▼                                   │
+│                    ┌─────────────────┐                          │
+│                    │  Claude Code    │                          │
+│                    │  (in tmux)      │                          │
+│                    └─────────────────┘                          │
+└─────────────────────────────────────────────────────────────────┘
 
-Access: ssh -p 2222 user@server
+Local:  task -l (launches TUI + daemon)
+Remote: ssh -p 2222 user@server
 ```
 
 ## Repository Structure
@@ -41,7 +49,7 @@ Access: ssh -p 2222 user@server
 workflow/
 ├── cmd/
 │   ├── task/
-│   │   └── main.go              # Local CLI + TUI
+│   │   └── main.go              # Local CLI + TUI + daemon management
 │   └── taskd/
 │       └── main.go              # SSH daemon + executor
 ├── internal/
@@ -51,26 +59,35 @@ workflow/
 │   │   ├── sqlite.go            # Database connection, migrations
 │   │   └── tasks.go             # Task CRUD operations
 │   ├── executor/
-│   │   ├── executor.go          # Background Claude runner
-│   │   └── triage.go            # Task pre-processing
+│   │   ├── executor.go          # Background Claude runner + hooks
+│   │   └── project_config.go    # .taskyou.yml configuration
+│   ├── github/
+│   │   └── github.go            # PR status tracking
 │   ├── hooks/
 │   │   └── hooks.go             # Task lifecycle hooks
+│   ├── mcp/
+│   │   └── mcp.go               # MCP server integration
 │   ├── server/
 │   │   └── ssh.go               # Wish SSH server
 │   └── ui/
-│       ├── app.go               # Main Bubble Tea app
-│       ├── kanban.go            # Kanban board view
-│       ├── detail.go            # Task detail with logs
-│       ├── form.go              # New task form (Huh)
-│       ├── watch.go             # Real-time execution watcher
-│       ├── memories.go          # Project memories view
+│       ├── app.go               # Main Bubble Tea app + key bindings
+│       ├── kanban.go            # Kanban board view (4 columns)
+│       ├── detail.go            # Task detail view with logs
+│       ├── form.go              # New/edit task forms (Huh)
+│       ├── retry.go             # Retry task with feedback
 │       ├── settings.go          # Settings view
-│       └── styles.go            # Lip Gloss styles
+│       ├── command_palette.go   # Quick task navigation
+│       ├── attachments.go       # File attachment handling
+│       ├── filebrowser.go       # File browser component
+│       ├── theme.go             # Theme configuration
+│       ├── styles.go            # Lip Gloss styles
+│       └── url_parser.go        # URL detection in text
 ├── scripts/
 │   └── install-service.sh       # Systemd service installer
 ├── go.mod
 ├── go.sum
-└── Makefile
+├── Makefile
+└── README.md
 ```
 
 ## Building
@@ -81,16 +98,20 @@ make build-task     # Build just the CLI
 make build-taskd    # Build just the daemon
 make install        # Install to ~/go/bin
 make test           # Run tests
+make lint           # Run linter
+make fmt            # Format code
 ```
 
 ## Running
 
 ### Local CLI
 ```bash
-./bin/task -l                        # Launch TUI locally
+./bin/task -l                        # Launch TUI locally (starts daemon)
 ./bin/task daemon                    # Start background executor
 ./bin/task daemon stop               # Stop daemon
 ./bin/task daemon status             # Check daemon status
+./bin/task daemon restart            # Restart daemon
+./bin/task claudes list              # List running Claude sessions
 ```
 
 ### Daemon (on server)
@@ -112,10 +133,20 @@ CREATE TABLE tasks (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     title TEXT NOT NULL,
     body TEXT DEFAULT '',
-    status TEXT DEFAULT 'pending',   -- pending, queued, processing, ready, blocked, closed
-    type TEXT DEFAULT '',            -- code, writing, thinking
-    project TEXT DEFAULT '',         -- offerlab, influencekit, personal
-    priority TEXT DEFAULT 'normal',  -- high, normal, low
+    status TEXT DEFAULT 'backlog',   -- backlog, queued, processing, blocked, done
+    type TEXT DEFAULT '',            -- Customizable via task_types table
+    project TEXT DEFAULT '',
+    worktree_path TEXT DEFAULT '',   -- Path to git worktree
+    branch_name TEXT DEFAULT '',     -- Git branch name
+    port INTEGER DEFAULT 0,          -- Unique port (3100-4099)
+    claude_session_id TEXT DEFAULT '',-- For resuming Claude conversations
+    daemon_session TEXT DEFAULT '',  -- tmux session name
+    dangerous_mode INTEGER DEFAULT 0,-- Skip Claude permissions
+    pr_url TEXT DEFAULT '',          -- Pull request URL
+    pr_number INTEGER DEFAULT 0,     -- Pull request number
+    scheduled_at DATETIME,           -- When to next run
+    recurrence TEXT DEFAULT '',      -- Deprecated recurrence pattern (kept for legacy display)
+    last_run_at DATETIME,            -- Last scheduled execution time
     created_at DATETIME,
     updated_at DATETIME,
     started_at DATETIME,
@@ -124,9 +155,9 @@ CREATE TABLE tasks (
 
 CREATE TABLE task_logs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    task_id INTEGER REFERENCES tasks(id),
-    line_type TEXT,                  -- system, text, tool, error, output
-    content TEXT,
+    task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    line_type TEXT DEFAULT 'output', -- system, text, tool, error, output
+    content TEXT NOT NULL,
     created_at DATETIME
 );
 
@@ -135,18 +166,41 @@ CREATE TABLE projects (
     name TEXT NOT NULL UNIQUE,
     path TEXT NOT NULL,
     aliases TEXT DEFAULT '',
-    instructions TEXT DEFAULT '',
+    instructions TEXT DEFAULT '',    -- Project-specific AI instructions
+    actions TEXT DEFAULT '[]',       -- Custom actions
+    color TEXT DEFAULT '',           -- Hex color for label
     created_at DATETIME
 );
 
-CREATE TABLE project_memories (
+CREATE TABLE task_types (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    project TEXT NOT NULL,
-    category TEXT NOT NULL DEFAULT 'general',
-    content TEXT NOT NULL,
-    source_task_id INTEGER REFERENCES tasks(id) ON DELETE SET NULL,
-    created_at DATETIME,
-    updated_at DATETIME
+    name TEXT NOT NULL UNIQUE,
+    label TEXT NOT NULL,
+    instructions TEXT DEFAULT '',    -- Type-specific AI instructions
+    sort_order INTEGER DEFAULT 0,
+    is_builtin INTEGER DEFAULT 0,
+    created_at DATETIME
+);
+
+CREATE TABLE task_attachments (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    filename TEXT NOT NULL,
+    mime_type TEXT DEFAULT '',
+    size INTEGER DEFAULT 0,
+    data BLOB NOT NULL,
+    created_at DATETIME
+);
+
+CREATE TABLE task_compaction_summaries (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    session_id TEXT NOT NULL,
+    trigger TEXT NOT NULL,
+    pre_tokens INTEGER DEFAULT 0,
+    summary TEXT NOT NULL,
+    custom_instructions TEXT DEFAULT '',
+    created_at DATETIME
 );
 
 CREATE TABLE settings (
@@ -155,23 +209,24 @@ CREATE TABLE settings (
 );
 ```
 
-Database location: `~/.local/share/task/tasks.db` (configurable via `TASK_DB_PATH`)
+Database location: `~/.local/share/task/tasks.db` (configurable via `WORKTREE_DB_PATH`)
 
 ## Task Lifecycle
 
 ```
-pending → queued → processing → ready
+backlog → queued → processing → done
                  ↘ blocked (needs input)
-                 
-Any state → closed (manual)
+
+blocked can return to processing via retry
 ```
 
-1. **pending** - Created but not queued
-2. **queued** - Waiting in background queue
-3. **processing** - Executor is running Claude
-4. **ready** - Completed successfully
-5. **blocked** - Needs clarification/input
-6. **closed** - Done and archived
+1. **backlog** - Created but not yet started
+2. **queued** - Waiting in executor queue
+3. **processing** - Claude is actively executing
+4. **blocked** - Waiting for user input/clarification
+5. **done** - Completed successfully
+
+Recurring scheduling has been removed from TaskYou. Use external schedulers (cron, calendar apps, etc.) to invoke the CLI whenever a task should repeat.
 
 ## Key Bindings (TUI)
 
@@ -181,17 +236,24 @@ Any state → closed (manual)
 | `↑/↓` or `j/k` | Navigate tasks |
 | `Enter` | View task details |
 | `n` | New task |
+| `e` | Edit task |
 | `x` | Execute (queue) selected task |
+| `r` | Retry task with feedback |
 | `c` | Close selected task |
 | `d` | Delete selected task |
-| `w` | Watch current execution |
-| `/` | Filter tasks |
-| `m` | Project memories |
+| `t` | Pin/unpin selected task |
 | `s` | Settings |
-| `r` | Retry task |
+| `S` | Change task status |
 | `R` | Refresh list |
+| `p` / `ctrl+p` | Command palette (go to task) |
+| `!` | Toggle dangerous mode |
+| `B` | Focus Backlog column |
+| `P` | Focus In Progress column |
+| `L` | Focus Blocked column |
+| `D` | Focus Done column |
 | `?` | Toggle help |
-| `q` | Quit / Back |
+| `q` / `esc` | Back / Quit |
+| `ctrl+c` | Force quit |
 
 ## Charm Libraries Used
 
@@ -206,28 +268,45 @@ Any state → closed (manual)
 
 The background executor (`internal/executor/executor.go`):
 - Polls for `queued` tasks every 2 seconds
-- Runs Claude Code with task-specific prompts
+- Creates isolated git worktrees for each task
+- Runs Claude Code in tmux windows with hooks
 - Streams output to `task_logs` table
 - Supports real-time watching via subscriptions
-- Handles `TASK_COMPLETE` and `NEEDS_INPUT` signals
+- Handles task suspension and resumption
+- Manages scheduled tasks (recurring runs must now be handled externally via CLI automation)
 
-### Claude Prompts
+### Claude Code Integration
 
-Prompts are built based on task type:
-- **code** - Full dev instructions (explore, implement, test, commit)
-- **writing** - Content generation
-- **thinking** - Analysis and strategy
+Tasks run in tmux windows with Claude Code hooks that track state:
 
-### Project Memories
+- **PreToolUse** - Before tool execution, ensures task is "processing"
+- **PostToolUse** - After tool completes, ensures task stays "processing"
+- **Notification** - When idle or needs permission, marks task "blocked"
+- **Stop** - When Claude finishes responding, updates state accordingly
+- **PreCompact** - Before context compaction, saves transcript to DB
 
-Project memories provide persistent context that carries across tasks. When a task runs, relevant memories for that project are injected into the prompt.
+### Worktree Isolation
 
-**Memory categories:**
-- `pattern` - Code patterns and conventions
-- `context` - Project-specific context
-- `decision` - Architectural decisions
-- `gotcha` - Known pitfalls and workarounds
-- `general` - General notes
+Each task gets an isolated git worktree:
+```
+~/.local/share/task/worktrees/{project}/task-{id}
+```
+
+Environment variables available in worktrees:
+- `WORKTREE_TASK_ID` - Task identifier
+- `WORKTREE_PORT` - Unique port (3100-4099)
+- `WORKTREE_PATH` - Worktree directory path
+- `WORKTREE_SESSION_ID` - tmux session ID
+- `WORKTREE_DANGEROUS_MODE` - If permissions are skipped
+
+### Task Prompts
+
+Prompts are built with:
+1. Task-type-specific instructions
+2. Project-specific instructions
+3. Previous conversation history (on retry/resume)
+4. File attachments
+5. Task title and body
 
 ## Deployment
 
@@ -235,11 +314,15 @@ Project memories provide persistent context that carries across tasks. When a ta
 
 1. Build for Linux:
    ```bash
-   GOOS=linux GOARCH=amd64 go build -o bin/taskd-linux ./cmd/taskd
-   scp bin/taskd-linux server:~/taskd
+   make build-linux
    ```
 
-2. Install systemd service:
+2. Deploy to server:
+   ```bash
+   make deploy
+   ```
+
+3. Install systemd service:
    ```bash
    ./scripts/install-service.sh
    ```
@@ -258,4 +341,29 @@ wish.WithPublicKeyAuth(func(ctx ssh.Context, key ssh.PublicKey) bool {
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `TASK_DB_PATH` | SQLite database path | `~/.local/share/task/tasks.db` |
+| `WORKTREE_DB_PATH` | SQLite database path | `~/.local/share/task/tasks.db` |
+| `TASK_EXECUTOR` | Overrides the executor name shown in the UI (e.g., `codex`) | `Claude` |
+| `WORKTREE_TASK_ID` | Current task ID (set by executor) | - |
+| `WORKTREE_PORT` | Task-specific port | - |
+| `WORKTREE_PATH` | Worktree directory | - |
+| `WORKTREE_SESSION_ID` | tmux session ID | - |
+| `WORKTREE_DANGEROUS_MODE` | Skip Claude permissions | - |
+| `WORKTREE_CWD` | Working directory for project detection | - |
+| `GEMINI_DANGEROUS_ARGS` | Overrides the Gemini CLI flags used when dangerous mode is enabled | `--dangerously-allow-run` |
+
+Set `TASK_EXECUTOR` before launching `task -l`/`task daemon` to change the executor label shown in the UI (e.g., `TASK_EXECUTOR=codex`). For compatibility, `WORKFLOW_EXECUTOR`, `TASKYOU_EXECUTOR`, and `WORKTREE_EXECUTOR` are also recognized.
+
+## Project Configuration
+
+Create `.taskyou.yml` in your project root:
+
+```yaml
+worktree:
+  init_script: bin/worktree-setup
+```
+
+The init script runs after worktree creation for setup tasks like:
+- Installing dependencies
+- Setting up databases
+- Copying configuration files
+- Running migrations

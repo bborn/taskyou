@@ -19,14 +19,19 @@ func TestTimestampLocalization(t *testing.T) {
 	defer db.Close()
 	defer os.Remove(dbPath)
 
+	// Create the test project first
+	if err := db.CreateProject(&Project{Name: "test", Path: tmpDir}); err != nil {
+		t.Fatalf("failed to create test project: %v", err)
+	}
+
 	// Create a task
 	task := &Task{
-		Title:    "Test Task",
-		Body:     "Test body",
-		Status:   StatusBacklog,
-		Type:     TypeCode,
-		Project:  "test",
-			}
+		Title:   "Test Task",
+		Body:    "Test body",
+		Status:  StatusBacklog,
+		Type:    TypeCode,
+		Project: "test",
+	}
 	if err := db.CreateTask(task); err != nil {
 		t.Fatalf("failed to create task: %v", err)
 	}
@@ -77,12 +82,12 @@ func TestPersonalProjectCreation(t *testing.T) {
 
 	// Verify that creating a task with empty project defaults to 'personal'
 	task := &Task{
-		Title:    "Test Task",
-		Body:     "Test body",
-		Status:   StatusBacklog,
-		Type:     TypeCode,
-		Project:  "", // Empty project
-			}
+		Title:   "Test Task",
+		Body:    "Test body",
+		Status:  StatusBacklog,
+		Type:    TypeCode,
+		Project: "", // Empty project
+	}
 	if err := db.CreateTask(task); err != nil {
 		t.Fatalf("failed to create task: %v", err)
 	}

@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/bborn/workflow/internal/db"
@@ -21,10 +22,15 @@ func TestCLICreateTask(t *testing.T) {
 	defer database.Close()
 	defer os.Remove(dbPath)
 
+	// Create the myproject project for testing
+	if err := database.CreateProject(&db.Project{Name: "myproject", Path: tmpDir}); err != nil {
+		t.Fatalf("failed to create myproject: %v", err)
+	}
+
 	tests := []struct {
-		name     string
-		task     *db.Task
-		wantErr  bool
+		name    string
+		task    *db.Task
+		wantErr bool
 	}{
 		{
 			name: "basic task",
@@ -96,6 +102,11 @@ func TestCLIListTasks(t *testing.T) {
 	}
 	defer database.Close()
 	defer os.Remove(dbPath)
+
+	// Create the proj1 project for testing
+	if err := database.CreateProject(&db.Project{Name: "proj1", Path: tmpDir}); err != nil {
+		t.Fatalf("failed to create proj1: %v", err)
+	}
 
 	// Create some tasks
 	tasks := []*db.Task{
@@ -626,4 +637,221 @@ func TestClaudeHookStatusHandling(t *testing.T) {
 			t.Errorf("Status = %v, want %v (tool_use should not change status)", fetched.Status, db.StatusProcessing)
 		}
 	})
+}
+
+// TestPostToolUseHookLogging tests that PostToolUse hooks log tool usage to the task log.
+func TestPostToolUseHookLogging(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+	database, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer database.Close()
+
+	// Test 1: PostToolUseHook logs tool name
+	t.Run("logs tool name to task log", func(t *testing.T) {
+		task := &db.Task{
+			Title:  "Task for tool logging",
+			Status: db.StatusProcessing,
+			Type:   db.TypeCode,
+		}
+		if err := database.CreateTask(task); err != nil {
+			t.Fatalf("failed to create task: %v", err)
+		}
+		if err := database.MarkTaskStarted(task.ID); err != nil {
+			t.Fatalf("MarkTaskStarted() error = %v", err)
+		}
+
+		// Simulate PostToolUse with tool name
+		input := &ClaudeHookInput{
+			ToolName: "Read",
+			ToolInput: []byte(`{"file_path": "/path/to/file.go"}`),
+		}
+		err := handlePostToolUseHook(database, task.ID, input)
+		if err != nil {
+			t.Fatalf("handlePostToolUseHook() error = %v", err)
+		}
+
+		// Check that tool use was logged
+		logs, err := database.GetTaskLogs(task.ID, 10)
+		if err != nil {
+			t.Fatalf("GetTaskLogs() error = %v", err)
+		}
+
+		found := false
+		for _, log := range logs {
+			if log.LineType == "tool" && log.Content == "Read: /path/to/file.go" {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("Expected tool log entry not found. Logs: %+v", logs)
+		}
+	})
+
+	// Test 2: PostToolUseHook does not log when tool name is empty
+	t.Run("does not log when tool name is empty", func(t *testing.T) {
+		task := &db.Task{
+			Title:  "Task for empty tool name",
+			Status: db.StatusProcessing,
+			Type:   db.TypeCode,
+		}
+		if err := database.CreateTask(task); err != nil {
+			t.Fatalf("failed to create task: %v", err)
+		}
+		if err := database.MarkTaskStarted(task.ID); err != nil {
+			t.Fatalf("MarkTaskStarted() error = %v", err)
+		}
+
+		// Clear any previous logs by getting initial count
+		initialLogs, _ := database.GetTaskLogs(task.ID, 100)
+		initialCount := len(initialLogs)
+
+		// Simulate PostToolUse without tool name
+		input := &ClaudeHookInput{}
+		err := handlePostToolUseHook(database, task.ID, input)
+		if err != nil {
+			t.Fatalf("handlePostToolUseHook() error = %v", err)
+		}
+
+		// Check that no new tool log was added
+		logs, err := database.GetTaskLogs(task.ID, 100)
+		if err != nil {
+			t.Fatalf("GetTaskLogs() error = %v", err)
+		}
+
+		toolLogCount := 0
+		for _, log := range logs {
+			if log.LineType == "tool" {
+				toolLogCount++
+			}
+		}
+		if toolLogCount != 0 || len(logs) != initialCount {
+			t.Errorf("Expected no new tool logs, got %d tool logs (total logs: %d vs initial: %d)", toolLogCount, len(logs), initialCount)
+		}
+	})
+}
+
+// TestFormatToolLogMessage tests the formatToolLogMessage function.
+func TestFormatToolLogMessage(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    *ClaudeHookInput
+		expected string
+	}{
+		{
+			name: "Bash with command",
+			input: &ClaudeHookInput{
+				ToolName:  "Bash",
+				ToolInput: []byte(`{"command": "go build ./..."}`),
+			},
+			expected: "Bash: go build ./...",
+		},
+		{
+			name: "Bash with long command gets truncated",
+			input: &ClaudeHookInput{
+				ToolName:  "Bash",
+				ToolInput: []byte(`{"command": "` + strings.Repeat("a", 150) + `"}`),
+			},
+			expected: "Bash: " + strings.Repeat("a", 100) + "...",
+		},
+		{
+			name: "Read with file_path",
+			input: &ClaudeHookInput{
+				ToolName:  "Read",
+				ToolInput: []byte(`{"file_path": "/path/to/file.go"}`),
+			},
+			expected: "Read: /path/to/file.go",
+		},
+		{
+			name: "Write with file_path",
+			input: &ClaudeHookInput{
+				ToolName:  "Write",
+				ToolInput: []byte(`{"file_path": "/path/to/new.go"}`),
+			},
+			expected: "Write: /path/to/new.go",
+		},
+		{
+			name: "Edit with file_path",
+			input: &ClaudeHookInput{
+				ToolName:  "Edit",
+				ToolInput: []byte(`{"file_path": "/path/to/edit.go"}`),
+			},
+			expected: "Edit: /path/to/edit.go",
+		},
+		{
+			name: "Glob with pattern",
+			input: &ClaudeHookInput{
+				ToolName:  "Glob",
+				ToolInput: []byte(`{"pattern": "**/*.go"}`),
+			},
+			expected: "Glob: **/*.go",
+		},
+		{
+			name: "Grep with pattern",
+			input: &ClaudeHookInput{
+				ToolName:  "Grep",
+				ToolInput: []byte(`{"pattern": "func Test"}`),
+			},
+			expected: "Grep: func Test",
+		},
+		{
+			name: "Task with description",
+			input: &ClaudeHookInput{
+				ToolName:  "Task",
+				ToolInput: []byte(`{"description": "Explore codebase"}`),
+			},
+			expected: "Task: Explore codebase",
+		},
+		{
+			name: "WebFetch with url",
+			input: &ClaudeHookInput{
+				ToolName:  "WebFetch",
+				ToolInput: []byte(`{"url": "https://example.com"}`),
+			},
+			expected: "WebFetch: https://example.com",
+		},
+		{
+			name: "WebSearch with query",
+			input: &ClaudeHookInput{
+				ToolName:  "WebSearch",
+				ToolInput: []byte(`{"query": "golang testing"}`),
+			},
+			expected: "WebSearch: golang testing",
+		},
+		{
+			name: "Unknown tool just shows tool name",
+			input: &ClaudeHookInput{
+				ToolName:  "CustomTool",
+				ToolInput: []byte(`{"custom_field": "value"}`),
+			},
+			expected: "CustomTool",
+		},
+		{
+			name: "Tool with no input just shows tool name",
+			input: &ClaudeHookInput{
+				ToolName: "Read",
+			},
+			expected: "Read",
+		},
+		{
+			name: "Tool with invalid JSON just shows tool name",
+			input: &ClaudeHookInput{
+				ToolName:  "Read",
+				ToolInput: []byte(`invalid json`),
+			},
+			expected: "Read",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := formatToolLogMessage(tt.input)
+			if result != tt.expected {
+				t.Errorf("formatToolLogMessage() = %q, want %q", result, tt.expected)
+			}
+		})
+	}
 }

@@ -44,14 +44,14 @@ type PRInfo struct {
 
 // ghPRResponse is the JSON response from gh pr view.
 type ghPRResponse struct {
-	Number              int    `json:"number"`
-	URL                 string `json:"url"`
-	State               string `json:"state"`
-	IsDraft             bool   `json:"isDraft"`
-	Title               string `json:"title"`
-	MergeStateStatus    string `json:"mergeStateStatus"`
-	StatusCheckRollup   []ghCheck `json:"statusCheckRollup"`
-	UpdatedAt           string `json:"updatedAt"`
+	Number            int       `json:"number"`
+	URL               string    `json:"url"`
+	State             string    `json:"state"`
+	IsDraft           bool      `json:"isDraft"`
+	Title             string    `json:"title"`
+	Mergeable         string    `json:"mergeable"`
+	StatusCheckRollup []ghCheck `json:"statusCheckRollup"`
+	UpdatedAt         string    `json:"updatedAt"`
 }
 
 type ghCheck struct {
@@ -133,9 +133,9 @@ func fetchPRInfo(repoDir, branchName string) *PRInfo {
 	defer cancel()
 
 	// Query for PR associated with this branch
-	// gh pr view <branch> --json number,url,state,isDraft,title,mergeStateStatus,statusCheckRollup,updatedAt
+	// gh pr view <branch> --json number,url,state,isDraft,title,mergeable,statusCheckRollup,updatedAt
 	cmd := exec.CommandContext(ctx, "gh", "pr", "view", branchName,
-		"--json", "number,url,state,isDraft,title,mergeStateStatus,statusCheckRollup,updatedAt")
+		"--json", "number,url,state,isDraft,title,mergeable,statusCheckRollup,updatedAt")
 	cmd.Dir = repoDir
 
 	output, err := cmd.Output()
@@ -155,7 +155,7 @@ func fetchPRInfo(repoDir, branchName string) *PRInfo {
 		URL:       resp.URL,
 		Title:     resp.Title,
 		IsDraft:   resp.IsDraft,
-		Mergeable: resp.MergeStateStatus,
+		Mergeable: resp.Mergeable,
 	}
 
 	// Parse state
@@ -295,7 +295,7 @@ type ghPRListResponse struct {
 	IsDraft           bool      `json:"isDraft"`
 	Title             string    `json:"title"`
 	HeadRefName       string    `json:"headRefName"`
-	MergeStateStatus  string    `json:"mergeStateStatus"`
+	Mergeable         string    `json:"mergeable"`
 	StatusCheckRollup []ghCheck `json:"statusCheckRollup"`
 	UpdatedAt         string    `json:"updatedAt"`
 }
@@ -316,7 +316,7 @@ func FetchAllPRsForRepo(repoDir string) map[string]*PRInfo {
 	// Get all open PRs in one call
 	cmd := exec.CommandContext(ctx, "gh", "pr", "list",
 		"--state", "open",
-		"--json", "number,url,state,isDraft,title,headRefName,mergeStateStatus,statusCheckRollup,updatedAt",
+		"--json", "number,url,state,isDraft,title,headRefName,mergeable,statusCheckRollup,updatedAt",
 		"--limit", "100")
 	cmd.Dir = repoDir
 
@@ -343,7 +343,7 @@ func FetchAllPRsForRepo(repoDir string) map[string]*PRInfo {
 
 	cmd2 := exec.CommandContext(ctx2, "gh", "pr", "list",
 		"--state", "merged",
-		"--json", "number,url,state,isDraft,title,headRefName,mergeStateStatus,updatedAt",
+		"--json", "number,url,state,isDraft,title,headRefName,mergeable,updatedAt",
 		"--limit", "20")
 	cmd2.Dir = repoDir
 
@@ -373,7 +373,7 @@ func parsePRListResponse(pr *ghPRListResponse) *PRInfo {
 		URL:       pr.URL,
 		Title:     pr.Title,
 		IsDraft:   pr.IsDraft,
-		Mergeable: pr.MergeStateStatus,
+		Mergeable: pr.Mergeable,
 	}
 
 	// Parse state

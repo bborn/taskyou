@@ -16,6 +16,7 @@ require (
 	github.com/superfly/sprites-go v0.0.0-20260109202230-abba9310f931
 	golang.org/x/crypto v0.37.0
 	golang.org/x/term v0.31.0
+	gopkg.in/yaml.v3 v3.0.1
 	modernc.org/sqlite v1.42.2
 )
 

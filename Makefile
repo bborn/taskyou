@@ -5,14 +5,25 @@ SERVER ?= root@cloud-claude
 REMOTE_USER ?= runner
 REMOTE_DIR ?= /home/runner
 
-# Build all binaries
-build: build-task build-taskd
+# Build all binaries and restart daemon if running
+build: build-task build-taskd restart-daemon
 
 build-task:
 	go build -o bin/task ./cmd/task
 
 build-taskd:
 	go build -o bin/taskd ./cmd/taskd
+
+# Restart daemon if it's running (silent if not)
+restart-daemon:
+	@if pgrep -f "task daemon" > /dev/null; then \
+		echo "Restarting daemon..."; \
+		pkill -f "task daemon"; \
+		sleep 1; \
+		bin/task daemon > /tmp/task-daemon.log 2>&1 & \
+		sleep 1; \
+		echo "Daemon restarted (PID $$(pgrep -f 'task daemon'))"; \
+	fi
 
 # Build for Linux (server deployment)
 build-linux:
