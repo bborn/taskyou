@@ -13,7 +13,7 @@ import (
 )
 
 // TaskSummary represents a distilled summary of a completed task.
-// This structured format enables efficient search indexing and memory extraction.
+// This structured format enables efficient search indexing.
 type TaskSummary struct {
 	WhatWasDone  string     `json:"what_was_done"`  // Brief description of what was accomplished
 	FilesChanged []string   `json:"files_changed"`  // Key files that were modified
@@ -191,61 +191,11 @@ Focus on information that would be valuable for future work on this project. Ski
 	return prompt.String()
 }
 
-// SaveMemoriesFromSummary extracts and saves project memories from a TaskSummary.
-func (e *Executor) SaveMemoriesFromSummary(task *db.Task, summary *TaskSummary) error {
-	if task.Project == "" || summary == nil {
-		return nil
-	}
-
-	// Save decisions as memories
-	for _, d := range summary.Decisions {
-		if d.Description == "" {
-			continue
-		}
-		content := d.Description
-		if d.Rationale != "" {
-			content = fmt.Sprintf("%s (Rationale: %s)", d.Description, d.Rationale)
-		}
-
-		memory := &db.ProjectMemory{
-			Project:      task.Project,
-			Category:     db.MemoryCategoryDecision,
-			Content:      content,
-			SourceTaskID: &task.ID,
-		}
-		if err := e.db.CreateMemory(memory); err != nil {
-			e.logger.Error("Failed to save decision memory", "error", err)
-		}
-	}
-
-	// Save learnings as memories
-	for _, l := range summary.Learnings {
-		if l.Content == "" {
-			continue
-		}
-
-		category := normalizeCategory(l.Category)
-		memory := &db.ProjectMemory{
-			Project:      task.Project,
-			Category:     category,
-			Content:      l.Content,
-			SourceTaskID: &task.ID,
-		}
-		if err := e.db.CreateMemory(memory); err != nil {
-			e.logger.Error("Failed to save learning memory", "error", err)
-		}
-	}
-
-	return nil
-}
-
 // processCompletedTask orchestrates the post-completion processing:
 // 1. Gets the compaction summary (full conversation transcript)
 // 2. Distills it into a structured TaskSummary using an LLM
 // 3. Saves the summary to the task for future reference
-// 4. Extracts and saves project memories from the summary
-// 5. Indexes the task for FTS5 search using the distilled summary
-// 6. Updates .claude/memories.md with the latest memories
+// 4. Indexes the task for FTS5 search using the distilled summary
 func (e *Executor) processCompletedTask(ctx context.Context, task *db.Task) error {
 	// Get the compaction summary which contains the full conversation
 	compaction, err := e.db.GetLatestCompactionSummary(task.ID)
@@ -274,11 +224,6 @@ func (e *Executor) processCompletedTask(ctx context.Context, task *db.Task) erro
 			e.logger.Error("Failed to save task summary", "task", task.ID, "error", err)
 		}
 
-		// Extract and save project memories
-		if err := e.SaveMemoriesFromSummary(task, summary); err != nil {
-			e.logger.Error("Failed to save memories", "task", task.ID, "error", err)
-		}
-
 		// Log what we extracted
 		e.logLine(task.ID, "system", fmt.Sprintf("Distilled: %s", truncateSummary(summary.WhatWasDone, 80)))
 		for _, d := range summary.Decisions {
@@ -301,13 +246,6 @@ func (e *Executor) processCompletedTask(ctx context.Context, task *db.Task) erro
 		e.logger.Debug("Failed to index task for search", "task", task.ID, "error", err)
 	} else {
 		e.logger.Debug("Indexed task for search", "task", task.ID)
-	}
-
-	// Update .claude/memories.md with the latest memories
-	if task.Project != "" {
-		if err := e.GenerateMemoriesMD(task.Project); err != nil {
-			e.logger.Error("Failed to generate memories.md", "error", err)
-		}
 	}
 
 	return nil
@@ -375,20 +313,8 @@ func (e *Executor) MaybeDistillTask(task *db.Task) {
 				e.logger.Error("Failed to save task summary", "task", freshTask.ID, "error", err)
 			}
 
-			// Extract and save project memories
-			if err := e.SaveMemoriesFromSummary(freshTask, summary); err != nil {
-				e.logger.Error("Failed to save memories", "task", freshTask.ID, "error", err)
-			}
-
 			// Log what we extracted
 			e.logLine(freshTask.ID, "system", fmt.Sprintf("Distilled: %s", truncateSummary(summary.WhatWasDone, 80)))
-
-			// Update .claude/memories.md with the latest memories
-			if freshTask.Project != "" {
-				if err := e.GenerateMemoriesMD(freshTask.Project); err != nil {
-					e.logger.Error("Failed to generate memories.md", "error", err)
-				}
-			}
 		}
 
 		// Update last_distilled_at to track when we distilled

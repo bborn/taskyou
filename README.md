@@ -28,7 +28,6 @@ A personal task management system with a beautiful terminal UI, SQLite storage, 
 - **Ghost Text Autocomplete** - LLM-powered suggestions for task titles and descriptions as you type
 - **VS Code-style Fuzzy Search** - Quick task navigation with smart matching (e.g., "dsno" matches "diseno website")
 - **Markdown Rendering** - Task descriptions render with proper formatting in the detail view
-- **Project Memories** - Persistent context that carries across tasks
 - **Real-time Updates** - Watch tasks execute live
 - **Running Process Indicator** - Green dot (`●`) shows which tasks have active shell processes (servers, watchers, etc.)
 - **Auto-cleanup** - Automatic cleanup of Claude processes and config entries for completed tasks
@@ -125,7 +124,6 @@ Need an always-on supervisor or LLM agent? Keep it outside Task You and use the 
 | `o` | Open task's working directory |
 | `p` | Command palette (fuzzy search) |
 | `/` | Filter tasks |
-| `m` | Project memories |
 | `s` | Settings |
 | `?` | Toggle help |
 | `q` | Quit |
@@ -580,16 +578,6 @@ curl -X POST -H 'Content-type: application/json' \
 - Hooks run in the background (non-blocking) with a 30-second timeout
 - Hook failures are logged but don't affect task execution
 - The hooks directory is created automatically at `~/.config/task/hooks/`
-
-### Memories
-
-Project memories provide persistent context for the AI. Press `m` to manage.
-
-Categories:
-- `pattern` - Code patterns and conventions
-- `context` - Project-specific context  
-- `decision` - Architectural decisions
-- `gotcha` - Known pitfalls and workarounds
 
 ## Development
 
