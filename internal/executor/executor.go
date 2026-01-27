@@ -2605,7 +2605,7 @@ func (e *Executor) ensureShellPane(windowTarget, workDir string, taskID int64, p
 		exec.CommandContext(ctx, "tmux", "send-keys", "-t", windowTarget+".1", fmt.Sprintf("cd %q", workDir), "Enter").Run()
 		// Set environment variables in the existing shell pane
 		envCmd := fmt.Sprintf("export WORKTREE_TASK_ID=%d WORKTREE_PORT=%d WORKTREE_PATH=%q", taskID, port, worktreePath)
-		if claudeConfigDir != "" {
+		if claudeConfigDir != "" && !isDefaultClaudeConfigDir(claudeConfigDir) {
 			envCmd += fmt.Sprintf(" CLAUDE_CONFIG_DIR=%q", claudeConfigDir)
 		}
 		exec.CommandContext(ctx, "tmux", "send-keys", "-t", windowTarget+".1", envCmd, "Enter").Run()
@@ -2649,7 +2649,7 @@ func (e *Executor) ensureShellPane(windowTarget, workDir string, taskID int64, p
 	// Set environment variables in the shell pane
 	// Use export commands so they persist for all commands in the shell
 	envCmd := fmt.Sprintf("export WORKTREE_TASK_ID=%d WORKTREE_PORT=%d WORKTREE_PATH=%q", taskID, port, worktreePath)
-	if claudeConfigDir != "" {
+	if claudeConfigDir != "" && !isDefaultClaudeConfigDir(claudeConfigDir) {
 		envCmd += fmt.Sprintf(" CLAUDE_CONFIG_DIR=%q", claudeConfigDir)
 	}
 	exec.CommandContext(ctx, "tmux", "send-keys", "-t", windowTarget+".1", envCmd, "Enter").Run()
@@ -3250,7 +3250,9 @@ func (e *Executor) writeWorktreeEnvFile(projectDir, worktreePath string, task *d
 export WORKTREE_PORT=%d
 export WORKTREE_PATH=%q
 `, task.ID, task.Port, worktreePath)
-	if claudeConfigDir != "" {
+	// Only include CLAUDE_CONFIG_DIR if it's different from the default.
+	// Setting it to the default breaks MCP discovery.
+	if claudeConfigDir != "" && !isDefaultClaudeConfigDir(claudeConfigDir) {
 		envContent += fmt.Sprintf("export CLAUDE_CONFIG_DIR=%q\n", claudeConfigDir)
 	}
 
@@ -3259,7 +3261,7 @@ export WORKTREE_PATH=%q
 		return fmt.Errorf("write .envrc: %w", err)
 	}
 
-	e.logLine(task.ID, "system", "Created .envrc with WORKTREE_TASK_ID, WORKTREE_PORT, WORKTREE_PATH, CLAUDE_CONFIG_DIR (use direnv or 'source .envrc')")
+	e.logLine(task.ID, "system", "Created .envrc with WORKTREE_TASK_ID, WORKTREE_PORT, WORKTREE_PATH (use direnv or 'source .envrc')")
 
 	// Add .envrc to git exclude so it doesn't show in git status
 	ensureGitExclude(projectDir, ".envrc")
@@ -3336,8 +3338,22 @@ func (e *Executor) claudePathsForProject(project string) claudePaths {
 	}
 }
 
+// isDefaultClaudeConfigDir returns true if dir is the default Claude config directory (~/.claude).
+// Setting CLAUDE_CONFIG_DIR to the default breaks MCP discovery because Claude then looks for
+// config at ~/.claude/.claude.json instead of ~/.claude.json.
+func isDefaultClaudeConfigDir(dir string) bool {
+	dir = strings.TrimSpace(dir)
+	if dir == "" {
+		return true
+	}
+	home, _ := os.UserHomeDir()
+	defaultDir := filepath.Join(home, ".claude")
+	return dir == defaultDir
+}
+
 func claudeEnvPrefix(dir string) string {
-	if strings.TrimSpace(dir) == "" {
+	dir = strings.TrimSpace(dir)
+	if dir == "" || isDefaultClaudeConfigDir(dir) {
 		return ""
 	}
 	return fmt.Sprintf("CLAUDE_CONFIG_DIR=%q ", dir)

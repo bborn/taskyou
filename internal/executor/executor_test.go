@@ -1201,3 +1201,53 @@ func TestSymlinkClaudeConfigExcludesFromGit(t *testing.T) {
 		t.Error("expected .claude entry in git exclude file to prevent symlink from being committed")
 	}
 }
+
+func TestIsDefaultClaudeConfigDir(t *testing.T) {
+	home, _ := os.UserHomeDir()
+	defaultDir := filepath.Join(home, ".claude")
+
+	tests := []struct {
+		name     string
+		dir      string
+		expected bool
+	}{
+		{"empty string", "", true},
+		{"whitespace only", "   ", true},
+		{"default dir", defaultDir, true},
+		{"custom dir", "/custom/claude", false},
+		{"different home subdir", filepath.Join(home, ".claude-custom"), false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := isDefaultClaudeConfigDir(tt.dir)
+			if got != tt.expected {
+				t.Errorf("isDefaultClaudeConfigDir(%q) = %v, want %v", tt.dir, got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestClaudeEnvPrefix(t *testing.T) {
+	home, _ := os.UserHomeDir()
+	defaultDir := filepath.Join(home, ".claude")
+
+	tests := []struct {
+		name     string
+		dir      string
+		expected string
+	}{
+		{"empty string returns empty", "", ""},
+		{"default dir returns empty", defaultDir, ""},
+		{"custom dir returns prefix", "/custom/claude", `CLAUDE_CONFIG_DIR="/custom/claude" `},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := claudeEnvPrefix(tt.dir)
+			if got != tt.expected {
+				t.Errorf("claudeEnvPrefix(%q) = %q, want %q", tt.dir, got, tt.expected)
+			}
+		})
+	}
+}
