@@ -98,4 +98,12 @@ fmt:
 lint:
 	golangci-lint run
 
+# Demo database setup for screencasts
+demo-seed:
+	go run ./cmd/demoseed
+
+# Run with demo database
+demo: demo-seed
+	WORKTREE_DB_PATH=~/.local/share/task/demo.db ./bin/task -l
+
 .DEFAULT_GOAL := build
