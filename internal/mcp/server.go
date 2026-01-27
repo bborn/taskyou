@@ -226,6 +226,57 @@ func (s *Server) handleRequest(req *jsonRPCRequest) {
 						"required": []string{"task_id"},
 					},
 				},
+				{
+					Name:        "workflow_create_task",
+					Description: "Create a new task in the workflow system. Use this to break down complex work or track future tasks.",
+					InputSchema: map[string]interface{}{
+						"type": "object",
+						"properties": map[string]interface{}{
+							"title": map[string]interface{}{
+								"type":        "string",
+								"description": "Title of the task",
+							},
+							"body": map[string]interface{}{
+								"type":        "string",
+								"description": "Detailed description of the task",
+							},
+							"project": map[string]interface{}{
+								"type":        "string",
+								"description": "Project name (defaults to current project)",
+							},
+							"type": map[string]interface{}{
+								"type":        "string",
+								"description": "Task type (code, writing, thinking)",
+							},
+							"status": map[string]interface{}{
+								"type":        "string",
+								"description": "Initial status (backlog, queued, defaults to backlog)",
+							},
+						},
+						"required": []string{"title"},
+					},
+				},
+				{
+					Name:        "workflow_list_tasks",
+					Description: "List active tasks (queued, processing, blocked, backlog) in the project. Use this to see what work is pending or in progress.",
+					InputSchema: map[string]interface{}{
+						"type": "object",
+						"properties": map[string]interface{}{
+							"status": map[string]interface{}{
+								"type":        "string",
+								"description": "Filter by status (queued, processing, blocked, backlog). If omitted, shows all active tasks.",
+							},
+							"limit": map[string]interface{}{
+								"type":        "integer",
+								"description": "Maximum number of tasks to return (default: 10, max: 50)",
+							},
+							"project": map[string]interface{}{
+								"type":        "string",
+								"description": "Filter by project (defaults to current project)",
+							},
+						},
+					},
+				},
 			},
 		})
 
@@ -521,6 +572,102 @@ func (s *Server) handleToolCall(id interface{}, params *toolCallParams) {
 			} else {
 				sb.WriteString("\n## Conversation Transcript\n\n(no transcript available)\n")
 			}
+		}
+
+		s.sendResult(id, toolCallResult{
+			Content: []contentBlock{
+				{Type: "text", Text: sb.String()},
+			},
+		})
+
+	case "workflow_create_task":
+		title, _ := params.Arguments["title"].(string)
+		if title == "" {
+			s.sendError(id, -32602, "title is required")
+			return
+		}
+		body, _ := params.Arguments["body"].(string)
+		project, _ := params.Arguments["project"].(string)
+		taskType, _ := params.Arguments["type"].(string)
+		status, _ := params.Arguments["status"].(string)
+
+		// Default project to current task's project
+		if project == "" {
+			currentTask, err := s.db.GetTask(s.taskID)
+			if err == nil && currentTask != nil {
+				project = currentTask.Project
+			}
+		}
+
+		if status == "" {
+			status = db.StatusBacklog
+		}
+
+		newTask := &db.Task{
+			Title:   title,
+			Body:    body,
+			Project: project,
+			Type:    taskType,
+			Status:  status,
+		}
+
+		if err := s.db.CreateTask(newTask); err != nil {
+			s.sendError(id, -32603, fmt.Sprintf("Failed to create task: %v", err))
+			return
+		}
+
+		s.sendResult(id, toolCallResult{
+			Content: []contentBlock{
+				{Type: "text", Text: fmt.Sprintf("Created task #%d: %s", newTask.ID, newTask.Title)},
+			},
+		})
+
+	case "workflow_list_tasks":
+		status, _ := params.Arguments["status"].(string)
+		project, _ := params.Arguments["project"].(string)
+
+		limit := 10
+		if l, ok := params.Arguments["limit"].(float64); ok {
+			limit = int(l)
+			if limit > 50 {
+				limit = 50
+			}
+			if limit < 1 {
+				limit = 1
+			}
+		}
+
+		// Default to current project if not specified
+		if project == "" {
+			currentTask, err := s.db.GetTask(s.taskID)
+			if err == nil && currentTask != nil {
+				project = currentTask.Project
+			}
+		}
+
+		tasks, err := s.db.ListTasks(db.ListTasksOptions{
+			Status:  status,
+			Project: project,
+			Limit:   limit,
+		})
+		if err != nil {
+			s.sendError(id, -32603, fmt.Sprintf("Failed to list tasks: %v", err))
+			return
+		}
+
+		if len(tasks) == 0 {
+			s.sendResult(id, toolCallResult{
+				Content: []contentBlock{
+					{Type: "text", Text: "No tasks found."},
+				},
+			})
+			return
+		}
+
+		var sb strings.Builder
+		sb.WriteString(fmt.Sprintf("Found %d task(s) in project '%s':\n\n", len(tasks), project))
+		for _, t := range tasks {
+			sb.WriteString(fmt.Sprintf("- **#%d %s** (%s)\n", t.ID, t.Title, t.Status))
 		}
 
 		s.sendResult(id, toolCallResult{
