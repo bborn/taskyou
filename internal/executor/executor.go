@@ -3330,40 +3330,8 @@ export WORKTREE_PATH=%q
 
 	e.logLine(task.ID, "system", "Created .envrc with WORKTREE_TASK_ID, WORKTREE_PORT, WORKTREE_PATH, CLAUDE_CONFIG_DIR (use direnv or 'source .envrc')")
 
-	// Add to .git/info/exclude in the main project so it doesn't show in git status
-	excludePath := filepath.Join(projectDir, ".git", "info", "exclude")
-
-	// Create the info directory if it doesn't exist
-	infoDir := filepath.Dir(excludePath)
-	if err := os.MkdirAll(infoDir, 0755); err != nil {
-		return fmt.Errorf("create .git/info directory: %w", err)
-	}
-
-	// Check if .envrc is already in the exclude file
-	excludeEntry := ".envrc"
-	excludeContent, err := os.ReadFile(excludePath)
-	if err == nil {
-		// File exists, check if entry is already there
-		lines := strings.Split(string(excludeContent), "\n")
-		for _, line := range lines {
-			if strings.TrimSpace(line) == excludeEntry {
-				return nil // Already excluded
-			}
-		}
-	}
-
-	// Append the exclude entry
-	f, err := os.OpenFile(excludePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-	if err != nil {
-		return fmt.Errorf("open exclude file: %w", err)
-	}
-	defer f.Close()
-
-	// Add newline before if file doesn't end with one
-	if len(excludeContent) > 0 && excludeContent[len(excludeContent)-1] != '\n' {
-		f.WriteString("\n")
-	}
-	f.WriteString(excludeEntry + "\n")
+	// Add .envrc to git exclude so it doesn't show in git status
+	ensureGitExclude(projectDir, ".envrc")
 
 	return nil
 }
@@ -3444,6 +3412,43 @@ func claudeEnvPrefix(dir string) string {
 	return fmt.Sprintf("CLAUDE_CONFIG_DIR=%q ", dir)
 }
 
+// ensureGitExclude adds an entry to .git/info/exclude if not already present.
+// This prevents generated files (symlinks, .envrc) from showing in git status
+// without modifying the shared .gitignore file.
+func ensureGitExclude(projectDir, entry string) {
+	excludePath := filepath.Join(projectDir, ".git", "info", "exclude")
+
+	// Create the info directory if it doesn't exist
+	infoDir := filepath.Dir(excludePath)
+	if err := os.MkdirAll(infoDir, 0755); err != nil {
+		return
+	}
+
+	// Check if entry is already in the exclude file
+	excludeContent, err := os.ReadFile(excludePath)
+	if err == nil {
+		lines := strings.Split(string(excludeContent), "\n")
+		for _, line := range lines {
+			if strings.TrimSpace(line) == entry {
+				return // Already present
+			}
+		}
+	}
+
+	// Append the exclude entry
+	f, err := os.OpenFile(excludePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+
+	// Add newline before entry if file doesn't end with one
+	if len(excludeContent) > 0 && excludeContent[len(excludeContent)-1] != '\n' {
+		f.WriteString("\n")
+	}
+	f.WriteString(entry + "\n")
+}
+
 // symlinkClaudeConfig symlinks the worktree's .claude directory to the main project's .claude.
 // This ensures permissions granted in any worktree are shared across all worktrees and the main project.
 func symlinkClaudeConfig(projectDir, worktreePath string) error {
@@ -3480,6 +3485,11 @@ func symlinkClaudeConfig(projectDir, worktreePath string) error {
 	if err := os.Symlink(mainClaudeDir, worktreeClaudeDir); err != nil {
 		return fmt.Errorf("create .claude symlink: %w", err)
 	}
+
+	// Exclude .claude from git so the symlink isn't accidentally committed.
+	// The .gitignore entry ".claude/" (with trailing slash) only matches directories, not symlinks.
+	// Use projectDir because worktree .git is a file pointing to the main repo's git dir.
+	ensureGitExclude(projectDir, ".claude")
 
 	return nil
 }
@@ -3523,6 +3533,10 @@ func symlinkMCPConfig(projectDir, worktreePath string) error {
 	if err := os.Symlink(mainMCPFile, worktreeMCPFile); err != nil {
 		return fmt.Errorf("create .mcp.json symlink: %w", err)
 	}
+
+	// Exclude .mcp.json from git so the symlink isn't accidentally committed.
+	// Use projectDir because worktree .git is a file pointing to the main repo's git dir.
+	ensureGitExclude(projectDir, ".mcp.json")
 
 	return nil
 }
