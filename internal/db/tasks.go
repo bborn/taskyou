@@ -512,6 +512,18 @@ func (db *DB) UpdateTaskPaneIDs(taskID int64, claudePaneID, shellPaneID string) 
 	return nil
 }
 
+// UpdateTaskSchedule updates the scheduled_at, recurrence, and last_run_at for a task.
+func (db *DB) UpdateTaskSchedule(taskID int64, scheduledAt *LocalTime, recurrence string, lastRunAt *LocalTime) error {
+	_, err := db.Exec(`
+		UPDATE tasks SET scheduled_at = ?, recurrence = ?, last_run_at = ?, updated_at = CURRENT_TIMESTAMP
+		WHERE id = ?
+	`, scheduledAt, recurrence, lastRunAt, taskID)
+	if err != nil {
+		return fmt.Errorf("update task schedule: %w", err)
+	}
+	return nil
+}
+
 // DeleteTask deletes a task.
 func (db *DB) DeleteTask(id int64) error {
 	_, err := db.Exec("DELETE FROM tasks WHERE id = ?", id)
