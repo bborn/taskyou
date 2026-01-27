@@ -379,7 +379,7 @@ func (m *SettingsModel) showTaskTypeForm(taskType *db.TaskType) (*SettingsModel,
 			huh.NewText().
 				Key("instructions").
 				Title("Prompt Template").
-				Description("Use {{title}}, {{body}}, {{project}}, {{project_instructions}}, {{memories}}, {{attachments}}, {{history}}").
+				Description("Use {{title}}, {{body}}, {{project}}, {{project_instructions}}, {{attachments}}, {{history}}").
 				Placeholder("Instructions...").
 				CharLimit(10000).
 				Value(&m.taskTypeFormInstructions),
@@ -616,20 +616,16 @@ func (m *SettingsModel) showDeleteProjectConfirm(project *db.Project) (*Settings
 	m.deleteProjectValue = false
 	m.confirmingDeleteProject = true
 
-	// Count associated tasks and memories
+	// Count associated tasks
 	taskCount, _ := m.db.CountTasksByProject(project.Name)
-	memoryCount, _ := m.db.CountMemoriesByProject(project.Name)
 
 	// Build description with warning about what will happen
 	var description strings.Builder
 	description.WriteString("This will permanently delete the project configuration.\n")
-	if taskCount > 0 || memoryCount > 0 {
+	if taskCount > 0 {
 		description.WriteString("\n")
 		if taskCount > 0 {
 			description.WriteString(fmt.Sprintf("• %d task(s) will become orphaned\n", taskCount))
-		}
-		if memoryCount > 0 {
-			description.WriteString(fmt.Sprintf("• %d memory(ies) will become orphaned\n", memoryCount))
 		}
 		description.WriteString("\nOrphaned items will still exist but won't be associated with any project.")
 	}

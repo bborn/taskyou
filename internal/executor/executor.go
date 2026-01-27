@@ -1075,9 +1075,6 @@ func (e *Executor) buildPrompt(task *db.Task, attachmentPaths []string) string {
 		}
 	}
 
-	// Add project memories if available
-	memories := e.getProjectMemoriesSection(task.Project)
-
 	// Get similar past tasks for reference
 	similarTasks := e.getSimilarTasksSection(task)
 
@@ -1107,16 +1104,16 @@ func (e *Executor) buildPrompt(task *db.Task, attachmentPaths []string) string {
 		taskType, err := e.db.GetTaskTypeByName(task.Type)
 		if err == nil && taskType != nil {
 			// Apply template substitutions for type-specific instructions
-			instructions := e.applyTemplateSubstitutions(taskType.Instructions, task, projectInstructions, memories, similarTasks, attachments, conversationHistory)
+			instructions := e.applyTemplateSubstitutions(taskType.Instructions, task, projectInstructions, similarTasks, attachments, conversationHistory)
 			prompt.WriteString(instructions)
 			prompt.WriteString("\n")
 		} else {
 			// Fallback to generic context if type not found
-			prompt.WriteString(e.buildGenericContextSection(projectInstructions, memories, similarTasks, attachments, conversationHistory))
+			prompt.WriteString(e.buildGenericContextSection(projectInstructions, similarTasks, attachments, conversationHistory))
 		}
 	} else {
 		// No type specified - use generic context
-		prompt.WriteString(e.buildGenericContextSection(projectInstructions, memories, similarTasks, attachments, conversationHistory))
+		prompt.WriteString(e.buildGenericContextSection(projectInstructions, similarTasks, attachments, conversationHistory))
 	}
 
 	// Add response guidance to ALL task types
@@ -1146,7 +1143,7 @@ The task system will automatically detect your status.
 }
 
 // applyTemplateSubstitutions replaces template placeholders in task type instructions.
-func (e *Executor) applyTemplateSubstitutions(template string, task *db.Task, projectInstructions, memories, similarTasks, attachments, conversationHistory string) string {
+func (e *Executor) applyTemplateSubstitutions(template string, task *db.Task, projectInstructions, similarTasks, attachments, conversationHistory string) string {
 	result := template
 
 	// Replace placeholders
@@ -1178,19 +1175,11 @@ func (e *Executor) applyTemplateSubstitutions(template string, task *db.Task, pr
 		result = strings.ReplaceAll(result, "{{project_instructions}}", "")
 	}
 
-	if memories != "" {
-		result = strings.ReplaceAll(result, "{{memories}}", memories)
-	} else {
-		result = strings.ReplaceAll(result, "{{memories}}", "")
-	}
+	result = strings.ReplaceAll(result, "{{memories}}", "")
 
 	// Similar tasks are injected after memories (no template placeholder for now)
 	if similarTasks != "" {
 		result = strings.ReplaceAll(result, "{{similar_tasks}}", similarTasks)
-		// Also append after memories if no placeholder
-		if !strings.Contains(template, "{{similar_tasks}}") && memories != "" {
-			result = strings.ReplaceAll(result, memories, memories+"\n"+similarTasks)
-		}
 	} else {
 		result = strings.ReplaceAll(result, "{{similar_tasks}}", "")
 	}
@@ -1217,14 +1206,11 @@ func (e *Executor) applyTemplateSubstitutions(template string, task *db.Task, pr
 
 // buildGenericContextSection builds the context section (project instructions, memories, etc.)
 // for tasks without a specific type. The task title and body are added separately in buildPrompt.
-func (e *Executor) buildGenericContextSection(projectInstructions, memories, similarTasks, attachments, conversationHistory string) string {
+func (e *Executor) buildGenericContextSection(projectInstructions, similarTasks, attachments, conversationHistory string) string {
 	var prompt strings.Builder
 
 	if projectInstructions != "" {
 		prompt.WriteString(fmt.Sprintf("## Project Instructions\n\n%s\n\n", projectInstructions))
-	}
-	if memories != "" {
-		prompt.WriteString(memories)
 	}
 	if similarTasks != "" {
 		prompt.WriteString(similarTasks)
@@ -2737,61 +2723,6 @@ func (e *Executor) logLine(taskID int64, lineType, content string) {
 	}
 	e.broadcast(taskID, logEntry)
 }
-
-// getProjectMemoriesSection builds a context section from stored project memories.
-func (e *Executor) getProjectMemoriesSection(project string) string {
-	if project == "" {
-		return ""
-	}
-
-	memories, err := e.db.GetProjectMemories(project, 15)
-	if err != nil || len(memories) == 0 {
-		return ""
-	}
-
-	var sb strings.Builder
-	sb.WriteString("## Project Context (from previous tasks)\n\n")
-
-	// Group by category for better organization
-	byCategory := make(map[string][]*db.ProjectMemory)
-	for _, m := range memories {
-		byCategory[m.Category] = append(byCategory[m.Category], m)
-	}
-
-	categoryOrder := []string{
-		db.MemoryCategoryPattern,
-		db.MemoryCategoryContext,
-		db.MemoryCategoryDecision,
-		db.MemoryCategoryGotcha,
-		db.MemoryCategoryGeneral,
-	}
-	categoryLabels := map[string]string{
-		db.MemoryCategoryPattern:  "Patterns & Conventions",
-		db.MemoryCategoryContext:  "Project Context",
-		db.MemoryCategoryDecision: "Key Decisions",
-		db.MemoryCategoryGotcha:   "Known Gotchas",
-		db.MemoryCategoryGeneral:  "General Notes",
-	}
-
-	for _, cat := range categoryOrder {
-		mems := byCategory[cat]
-		if len(mems) == 0 {
-			continue
-		}
-		label := categoryLabels[cat]
-		if label == "" {
-			label = cat
-		}
-		sb.WriteString(fmt.Sprintf("### %s\n", label))
-		for _, m := range mems {
-			sb.WriteString(fmt.Sprintf("- %s\n", m.Content))
-		}
-		sb.WriteString("\n")
-	}
-
-	return sb.String()
-}
-
 
 // getSimilarTasksSection checks if similar past tasks exist and returns a hint.
 // Instead of injecting full content, we just notify Claude that the search tools are available.

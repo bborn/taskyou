@@ -142,19 +142,6 @@ func (db *DB) migrate() error {
 		`CREATE INDEX IF NOT EXISTS idx_tasks_project ON tasks(project)`,
 		`CREATE INDEX IF NOT EXISTS idx_task_logs_task_id ON task_logs(task_id)`,
 
-		`CREATE TABLE IF NOT EXISTS project_memories (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			project TEXT NOT NULL,
-			category TEXT NOT NULL DEFAULT 'general',
-			content TEXT NOT NULL,
-			source_task_id INTEGER REFERENCES tasks(id) ON DELETE SET NULL,
-			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-		)`,
-
-		`CREATE INDEX IF NOT EXISTS idx_project_memories_project ON project_memories(project)`,
-		`CREATE INDEX IF NOT EXISTS idx_project_memories_category ON project_memories(category)`,
-
 		`CREATE TABLE IF NOT EXISTS task_attachments (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
@@ -468,8 +455,6 @@ func (db *DB) ensureDefaultTaskTypes() error {
 
 {{project_instructions}}
 
-{{memories}}
-
 Task: {{title}}
 
 {{body}}
@@ -502,8 +487,6 @@ When finished, provide a summary of what you did:
 
 {{project_instructions}}
 
-{{memories}}
-
 Task: {{title}}
 
 Details: {{body}}
@@ -522,8 +505,6 @@ Output the final content, then summarize what you created.`,
 			Instructions: `You are a strategic advisor. Analyze this thoroughly:
 
 {{project_instructions}}
-
-{{memories}}
 
 Question: {{title}}
 

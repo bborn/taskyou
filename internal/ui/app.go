@@ -38,7 +38,6 @@ const (
 	ViewQuitConfirm
 	ViewSettings
 	ViewRetry
-	ViewMemories
 	ViewAttachments
 	ViewChangeStatus
 	ViewCommandPalette
@@ -61,7 +60,6 @@ type KeyMap struct {
 	Delete          key.Binding
 	Refresh         key.Binding
 	Settings        key.Binding
-	Memories        key.Binding
 	Help            key.Binding
 	Quit            key.Binding
 	ChangeStatus    key.Binding
@@ -92,7 +90,7 @@ func (k KeyMap) FullHelp() [][]key.Binding {
 		{k.FocusBacklog, k.FocusInProgress, k.FocusBlocked, k.FocusDone},
 		{k.Enter, k.New, k.Queue, k.Close},
 		{k.Retry, k.Archive, k.Delete, k.OpenWorktree},
-		{k.Filter, k.CommandPalette, k.Settings, k.Memories},
+		{k.Filter, k.CommandPalette, k.Settings},
 		{k.ChangeStatus, k.TogglePin, k.Refresh, k.Help},
 		{k.Quit},
 	}
@@ -160,10 +158,6 @@ func DefaultKeyMap() KeyMap {
 		Settings: key.NewBinding(
 			key.WithKeys("s"),
 			key.WithHelp("s", "settings"),
-		),
-		Memories: key.NewBinding(
-			key.WithKeys("m"),
-			key.WithHelp("m", "memories"),
 		),
 		Help: key.NewBinding(
 			key.WithKeys("?"),
@@ -313,9 +307,6 @@ type AppModel struct {
 
 	// Retry view state
 	retryView *RetryModel
-
-	// Memories view state
-	memoriesView *MemoriesModel
 
 	// Attachments view state
 	attachmentsView *AttachmentsModel
@@ -523,8 +514,6 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.updateDashboard(msg)
 		case ViewDetail:
 			return m.updateDetail(msg)
-		case ViewMemories:
-			return m.updateMemories(msg)
 		case ViewAttachments:
 			return m.updateAttachments(msg)
 		}
@@ -937,10 +926,6 @@ func (m *AppModel) View() string {
 		if m.retryView != nil {
 			return m.retryView.View()
 		}
-	case ViewMemories:
-		if m.memoriesView != nil {
-			return m.memoriesView.View()
-		}
 	case ViewAttachments:
 		if m.attachmentsView != nil {
 			return m.attachmentsView.View()
@@ -1212,12 +1197,6 @@ func (m *AppModel) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.previousView = m.currentView
 		m.currentView = ViewSettings
 		return m, m.settingsView.Init()
-
-	case key.Matches(msg, m.keys.Memories):
-		m.memoriesView = NewMemoriesModel(m.db, m.width, m.height)
-		m.previousView = m.currentView
-		m.currentView = ViewMemories
-		return m, nil
 
 	case key.Matches(msg, m.keys.Refresh):
 		m.loading = true
@@ -2437,22 +2416,6 @@ func (m *AppModel) updateRetry(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	return m, cmd
-}
-
-func (m *AppModel) updateMemories(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	if key.Matches(msg, m.keys.Back) {
-		m.currentView = ViewDashboard
-		m.memoriesView = nil
-		return m, nil
-	}
-
-	if m.memoriesView != nil {
-		var cmd tea.Cmd
-		m.memoriesView, cmd = m.memoriesView.Update(msg)
-		return m, cmd
-	}
-
-	return m, nil
 }
 
 func (m *AppModel) updateAttachments(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
