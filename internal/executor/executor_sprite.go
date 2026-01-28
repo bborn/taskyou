@@ -22,14 +22,12 @@ import (
 // - Uses Filesystem API for file operations
 type SpriteRunner struct {
 	db     *db.DB
-	client *sdk.Client
 	sprite *sdk.Sprite
 
 	// Active task tracking
 	activeTasks   map[int64]context.CancelFunc
 	activeTasksMu sync.RWMutex
 
-	mu     sync.Mutex
 	logger func(format string, args ...interface{})
 }
 
@@ -44,7 +42,6 @@ func NewSpriteRunner(database *db.DB, logger func(format string, args ...interfa
 
 	runner := &SpriteRunner{
 		db:          database,
-		client:      client,
 		sprite:      sprite,
 		activeTasks: make(map[int64]context.CancelFunc),
 		logger:      logger,
