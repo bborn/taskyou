@@ -1135,6 +1135,16 @@ Work on this task until completion. When you're done or need input:
   Use the workflow_screenshot MCP tool to take screenshots of the
   screen. This helps verify correctness and document changes.
 
+⚠ CRITICAL - WORKING DIRECTORY CONSTRAINT:
+  You are running in an isolated git worktree. This worktree IS your
+  project - it is NOT a copy. NEVER access the "original" project
+  directory or any path outside your current working directory.
+
+  - ONLY use paths within your current working directory
+  - NEVER read/write files in /Users/*/Projects/* except this worktree
+  - If you see a path like .task-worktrees/, you're in the right place
+  - The parent repo does NOT exist for you - only this worktree does
+
 The task system will automatically detect your status.
 ═══════════════════════════════════════════════════════════════
 `)
