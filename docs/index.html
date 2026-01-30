@@ -138,13 +138,14 @@
 
     <script>
         function toggleVideo(video) {
-            if (video.paused) {
+            if (video.muted) {
                 video.currentTime = 0;
                 video.muted = false;
                 video.play();
+            } else if (video.paused) {
+                video.play();
             } else {
                 video.pause();
-                video.muted = true;
             }
         }
         function copyInstall(el) {
