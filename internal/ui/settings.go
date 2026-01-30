@@ -424,6 +424,35 @@ func isGitRepo(path string) bool {
 	return err == nil && info.IsDir()
 }
 
+// gitRepoHasCommits checks if a git repo has at least one commit
+func gitRepoHasCommits(path string) bool {
+	cmd := exec.Command("git", "rev-parse", "HEAD")
+	cmd.Dir = path
+	return cmd.Run() == nil
+}
+
+// ensureGitRepoHasCommit ensures a git repo has at least one commit
+// This is needed because worktrees require a base branch/commit to work from
+func ensureGitRepoHasCommit(path string) error {
+	if gitRepoHasCommits(path) {
+		return nil
+	}
+
+	// Stage any existing files
+	cmd := exec.Command("git", "add", "-A")
+	cmd.Dir = path
+	cmd.Run() // Ignore errors - might be empty repo
+
+	// Create initial commit
+	cmd = exec.Command("git", "commit", "--allow-empty", "-m", "Initial commit")
+	cmd.Dir = path
+	if output, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("git commit: %v\n%s", err, output)
+	}
+
+	return nil
+}
+
 // findNestedGitRepos searches for .git directories inside the given path (excluding root)
 func findNestedGitRepos(rootPath string) []string {
 	var nested []string
@@ -521,7 +550,11 @@ func (m *SettingsModel) saveProject() (*SettingsModel, tea.Cmd) {
 				m.err = fmt.Errorf("directory contains %d nested git repo(s) - select a single repo instead", len(nested))
 				return m, nil
 			}
-			// Valid existing git repo - proceed
+			// Valid existing git repo - ensure it has at least one commit for worktrees
+			if err := ensureGitRepoHasCommit(path); err != nil {
+				m.err = fmt.Errorf("failed to initialize git commit: %w", err)
+				return m, nil
+			}
 		} else {
 			// Not a git repo - initialize it
 			if err := initGitRepo(path); err != nil {
