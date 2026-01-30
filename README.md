@@ -1,6 +1,6 @@
 # Task You
 
-A personal task management system with a beautiful terminal UI, SQLite storage, and background task execution via pluggable AI agents (Claude Code or OpenAI Codex CLI).
+A personal task management system with a beautiful terminal UI, SQLite storage, and background task execution via pluggable AI agents (Claude Code, OpenAI Codex, Gemini, or OpenClaw).
 
 ## Screenshots
 
@@ -24,7 +24,7 @@ A personal task management system with a beautiful terminal UI, SQLite storage, 
 
 - **Kanban Board** - Visual task management with 4 columns (Backlog, In Progress, Blocked, Done)
 - **Git Worktrees** - Each task runs in an isolated worktree, no conflicts between parallel tasks
-- **Pluggable Executors** - Choose between Claude Code or OpenAI Codex CLI per task
+- **Pluggable Executors** - Choose between Claude Code, OpenAI Codex, Gemini, or OpenClaw per task
 - **Ghost Text Autocomplete** - LLM-powered suggestions for task titles and descriptions as you type
 - **VS Code-style Fuzzy Search** - Quick task navigation with smart matching (e.g., "dsno" matches "diseno website")
 - **Markdown Rendering** - Task descriptions render with proper formatting in the detail view
@@ -197,11 +197,12 @@ Task You supports multiple AI executors for processing tasks. You can choose the
 | Claude (default) | `claude` | [Claude Code](https://claude.ai/claude-code) - Anthropic's coding agent with session resumption |
 | Codex | `codex` | [OpenAI Codex CLI](https://github.com/openai/codex) - OpenAI's coding assistant |
 | Gemini | `gemini` | [Gemini CLI](https://ai.google.dev/gemini-api/docs/cli) - Google's Gemini-based coding assistant |
+| OpenClaw | `openclaw` | [OpenClaw](https://openclaw.ai) - Open-source personal AI assistant with session resumption |
 
-Both executors run in tmux windows with the same worktree isolation and environment variables. The main differences:
+All executors run in tmux windows with the same worktree isolation and environment variables. The main differences:
 
-- **Claude Code** supports session resumption - when you retry a task, Claude continues with full conversation history
-- **Codex** starts fresh on each execution but receives the full prompt with any feedback
+- **Claude Code** and **OpenClaw** support session resumption - when you retry a task, they continue with full conversation history
+- **Codex** and **Gemini** start fresh on each execution but receive the full prompt with any feedback
 
 ### Installing Executors
 
@@ -216,6 +217,10 @@ npm install -g @openai/codex
 
 # Google Gemini CLI
 # See https://ai.google.dev/gemini-api/docs/cli for installation instructions
+
+# OpenClaw
+npm install -g openclaw@latest
+openclaw onboard  # Run setup wizard
 ```
 
 ### How Task Executors Work
@@ -299,7 +304,7 @@ Claude Code supports **session resumption** - when you retry a task or press `R`
 
 This means when you retry a blocked task with feedback, Claude doesn't start over—it continues the conversation with full awareness of what it already tried.
 
-**Note:** Codex does not support session resumption. When retrying a Codex task, it receives the full prompt including any feedback, but starts a fresh session.
+**Note:** Codex and Gemini do not support session resumption. When retrying these tasks, they receive the full prompt including any feedback, but start a fresh session. Claude Code and OpenClaw support full session resumption.
 
 #### Lifecycle & Cleanup
 

@@ -361,6 +361,8 @@ func taskExecutorDisplayName(task *db.Task) string {
 		return "Claude"
 	case db.ExecutorGemini:
 		return "Gemini"
+	case db.ExecutorOpenClaw:
+		return "OpenClaw"
 	default:
 		// Unknown executor, capitalize first letter
 		if len(task.Executor) > 0 {

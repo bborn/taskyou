@@ -128,6 +128,8 @@ func (m *DetailModel) executorDisplayName() string {
 			return "Claude"
 		case db.ExecutorGemini:
 			return "Gemini"
+		case db.ExecutorOpenClaw:
+			return "OpenClaw"
 		default:
 			// Unknown executor, capitalize first letter
 			if len(m.task.Executor) > 0 {
