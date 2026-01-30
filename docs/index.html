@@ -4,102 +4,127 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>TaskYou - Personal Task Management</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@500;700;800;900&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
     <style>
         :root {
-            --bg: #0d1117;
-            --fg: #c9d1d9;
-            --accent: #58a6ff;
-            --green: #3fb950;
-            --border: #30363d;
+            --midnight-navy: #0a2540;
+            --deep-navy: #1a365d;
+            --electric-purple: #635bff;
+            --violet: #a855f7;
+            --cyan-glow: #80e9ff;
+            --cloud-white: #f6f9fc;
+            --pure-white: #ffffff;
+            --slate: #94a3b8;
         }
-        * { box-sizing: border-box; }
+        * { box-sizing: border-box; margin: 0; padding: 0; }
         body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
-            background: var(--bg);
-            color: var(--fg);
-            margin: 0;
-            padding: 2rem;
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+            background: linear-gradient(135deg, var(--midnight-navy) 0%, var(--deep-navy) 100%);
+            color: var(--pure-white);
             min-height: 100vh;
             display: flex;
             flex-direction: column;
             align-items: center;
             justify-content: center;
+            padding: 2rem;
         }
         .container {
-            max-width: 600px;
+            max-width: 700px;
             text-align: center;
         }
         h1 {
-            font-size: 3rem;
-            margin-bottom: 0.5rem;
-            color: #fff;
+            font-size: clamp(3rem, 10vw, 5rem);
+            font-weight: 900;
+            letter-spacing: -3px;
+            margin-bottom: 1rem;
+            background: linear-gradient(135deg, var(--pure-white) 0%, var(--cyan-glow) 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
         }
         .tagline {
-            font-size: 1.25rem;
-            color: #8b949e;
-            margin-bottom: 2rem;
+            font-size: 1.5rem;
+            font-weight: 500;
+            color: var(--slate);
+            margin-bottom: 2.5rem;
+        }
+        .demo-video {
+            width: 100%;
+            max-width: 640px;
+            border-radius: 16px;
+            cursor: pointer;
+            margin: 2rem 0;
+            box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
         }
         .install-box {
-            background: #161b22;
-            border: 1px solid var(--border);
-            border-radius: 8px;
-            padding: 1.5rem;
+            background: rgba(255, 255, 255, 0.05);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 24px;
+            padding: 2rem;
             margin: 2rem 0;
         }
         .install-label {
             font-size: 0.875rem;
-            color: #8b949e;
-            margin-bottom: 0.5rem;
+            font-weight: 600;
+            color: var(--slate);
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin-bottom: 1rem;
         }
         .install-cmd {
-            font-family: 'SF Mono', Consolas, monospace;
+            font-family: 'JetBrains Mono', monospace;
             font-size: 1rem;
-            color: var(--green);
-            background: var(--bg);
-            padding: 1rem;
-            border-radius: 4px;
-            overflow-x: auto;
+            font-weight: 500;
+            color: var(--cyan-glow);
+            background: var(--midnight-navy);
+            padding: 1rem 1.5rem;
+            border-radius: 12px;
             cursor: pointer;
-            transition: background 0.2s;
+            transition: all 0.2s ease;
         }
         .install-cmd:hover {
-            background: #1c2128;
+            background: #0d2d4d;
+            transform: translateY(-1px);
         }
         .links {
-            margin-top: 2rem;
+            margin-top: 2.5rem;
+            display: flex;
+            justify-content: center;
+            gap: 1rem;
         }
         .links a {
-            color: var(--accent);
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.875rem;
+            font-weight: 600;
+            color: var(--pure-white);
             text-decoration: none;
-            margin: 0 1rem;
+            padding: 12px 24px;
+            border-radius: 100px;
+            background: rgba(255, 255, 255, 0.1);
+            transition: all 0.2s ease;
         }
         .links a:hover {
-            text-decoration: underline;
+            background: var(--electric-purple);
+            transform: translateY(-1px);
         }
         .copied {
-            color: var(--green) !important;
-        }
-        .demo-video {
-            width: 100%;
-            max-width: 560px;
-            border-radius: 8px;
-            border: 1px solid var(--border);
-            cursor: pointer;
-            margin: 1.5rem 0;
+            color: var(--electric-purple) !important;
         }
     </style>
 </head>
 <body>
     <div class="container">
         <h1>TaskYou</h1>
-        <p class="tagline">Personal task management with a beautiful terminal UI</p>
+        <p class="tagline">Worktrees that work. Keep context, no craziness.</p>
 
         <video class="demo-video" autoplay muted loop playsinline onclick="restartVideo(this)">
             <source src="TaskYouDemo.mp4" type="video/mp4">
         </video>
 
         <div class="install-box">
-            <div class="install-label">Install with one command:</div>
+            <div class="install-label">Install with one command</div>
             <div class="install-cmd" onclick="copyInstall(this)">
                 curl -fsSL taskyou.dev/install.sh | bash
             </div>
@@ -107,7 +132,7 @@
 
         <div class="links">
             <a href="https://github.com/bborn/taskyou">GitHub</a>
-            <a href="https://github.com/bborn/taskyou#readme">Documentation</a>
+            <a href="https://github.com/bborn/taskyou#readme">Docs</a>
         </div>
     </div>
 
