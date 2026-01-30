@@ -232,6 +232,22 @@ Use --hard to kill all tmux sessions for a complete reset.`,
 	restartCmd.Flags().BoolVar(&hardRestart, "hard", false, "Kill all tmux sessions (full reset)")
 	rootCmd.AddCommand(restartCmd)
 
+	// Recover subcommand - fix stale references after crash
+	recoverCmd := &cobra.Command{
+		Use:   "recover",
+		Short: "Fix stale tmux references after a crash",
+		Long: `Clears stale daemon_session and tmux_window_id references from tasks.
+
+Use this after your computer crashes or the daemon dies unexpectedly.
+Tasks will automatically reconnect to their Claude sessions when viewed.`,
+		Run: func(cmd *cobra.Command, args []string) {
+			dryRun, _ := cmd.Flags().GetBool("dry-run")
+			recoverStaleTmuxRefs(dryRun)
+		},
+	}
+	recoverCmd.Flags().Bool("dry-run", false, "Show what would be cleaned up without making changes")
+	rootCmd.AddCommand(recoverCmd)
+
 	// Logs subcommand - tail claude session logs
 	logsCmd := &cobra.Command{
 		Use:   "logs",
@@ -2830,6 +2846,156 @@ func killClaudeSession(taskID int) error {
 	}
 
 	return nil
+}
+
+// recoverStaleTmuxRefs clears stale daemon_session and tmux_window_id references
+// from tasks after a crash or daemon restart. This allows tasks to automatically
+// reconnect to their Claude sessions when viewed.
+func recoverStaleTmuxRefs(dryRun bool) {
+	dbPath := db.DefaultPath()
+	database, err := db.Open(dbPath)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, errorStyle.Render("Error opening database: "+err.Error()))
+		os.Exit(1)
+	}
+	defer database.Close()
+
+	// Step 1: Find all active daemon sessions
+	activeSessions := make(map[string]bool)
+	sessionsOut, err := osexec.Command("tmux", "list-sessions", "-F", "#{session_name}").Output()
+	if err == nil {
+		for _, session := range strings.Split(strings.TrimSpace(string(sessionsOut)), "\n") {
+			if strings.HasPrefix(session, "task-daemon-") {
+				activeSessions[session] = true
+			}
+		}
+	}
+
+	if len(activeSessions) == 0 {
+		fmt.Println(dimStyle.Render("No active daemon sessions found"))
+		return
+	}
+
+	fmt.Println(dimStyle.Render(fmt.Sprintf("Active daemon sessions: %d", len(activeSessions))))
+	for session := range activeSessions {
+		fmt.Println(dimStyle.Render("  " + session))
+	}
+
+	// Step 2: Find all valid window IDs across all daemon sessions
+	validWindowIDs := make(map[string]bool)
+	for session := range activeSessions {
+		windowsOut, err := osexec.Command("tmux", "list-windows", "-t", session, "-F", "#{window_id}").Output()
+		if err == nil {
+			for _, windowID := range strings.Split(strings.TrimSpace(string(windowsOut)), "\n") {
+				if windowID != "" {
+					validWindowIDs[windowID] = true
+				}
+			}
+		}
+	}
+
+	fmt.Println(dimStyle.Render(fmt.Sprintf("Valid window IDs: %d", len(validWindowIDs))))
+
+	// Step 3: Count tasks with stale daemon_session references
+	var staleDaemonCount int
+	rows, err := database.Query(`
+		SELECT COUNT(*) FROM tasks
+		WHERE daemon_session IS NOT NULL
+		AND daemon_session NOT IN (` + quotedSessionList(activeSessions) + `)
+	`)
+	if err == nil {
+		if rows.Next() {
+			rows.Scan(&staleDaemonCount)
+		}
+		rows.Close()
+	}
+
+	// Step 4: Count tasks with stale window IDs
+	var staleWindowCount int
+	rows, err = database.Query(`
+		SELECT COUNT(*) FROM tasks
+		WHERE tmux_window_id IS NOT NULL
+		AND tmux_window_id NOT IN (` + quotedWindowList(validWindowIDs) + `)
+	`)
+	if err == nil {
+		if rows.Next() {
+			rows.Scan(&staleWindowCount)
+		}
+		rows.Close()
+	}
+
+	if staleDaemonCount == 0 && staleWindowCount == 0 {
+		fmt.Println(successStyle.Render("No stale references found - database is clean"))
+		return
+	}
+
+	fmt.Println()
+	if staleDaemonCount > 0 {
+		fmt.Printf("Found %d tasks with stale daemon_session references\n", staleDaemonCount)
+	}
+	if staleWindowCount > 0 {
+		fmt.Printf("Found %d tasks with stale tmux_window_id references\n", staleWindowCount)
+	}
+
+	if dryRun {
+		fmt.Println(dimStyle.Render("\nDry run - no changes made. Run without --dry-run to fix."))
+		return
+	}
+
+	// Step 5: Clear stale references
+	fmt.Println()
+	if staleDaemonCount > 0 {
+		_, err := database.Exec(`
+			UPDATE tasks SET daemon_session = NULL
+			WHERE daemon_session IS NOT NULL
+			AND daemon_session NOT IN (` + quotedSessionList(activeSessions) + `)
+		`)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, errorStyle.Render("Error clearing daemon sessions: "+err.Error()))
+		} else {
+			fmt.Println(successStyle.Render(fmt.Sprintf("Cleared %d stale daemon_session references", staleDaemonCount)))
+		}
+	}
+
+	if staleWindowCount > 0 {
+		_, err := database.Exec(`
+			UPDATE tasks SET tmux_window_id = NULL
+			WHERE tmux_window_id IS NOT NULL
+			AND tmux_window_id NOT IN (` + quotedWindowList(validWindowIDs) + `)
+		`)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, errorStyle.Render("Error clearing window IDs: "+err.Error()))
+		} else {
+			fmt.Println(successStyle.Render(fmt.Sprintf("Cleared %d stale tmux_window_id references", staleWindowCount)))
+		}
+	}
+
+	fmt.Println()
+	fmt.Println(dimStyle.Render("Tasks will automatically reconnect to their Claude sessions when viewed."))
+}
+
+// quotedSessionList returns a SQL-safe comma-separated list of quoted session names
+func quotedSessionList(sessions map[string]bool) string {
+	if len(sessions) == 0 {
+		return "''"
+	}
+	var parts []string
+	for s := range sessions {
+		parts = append(parts, "'"+s+"'")
+	}
+	return strings.Join(parts, ",")
+}
+
+// quotedWindowList returns a SQL-safe comma-separated list of quoted window IDs
+func quotedWindowList(windows map[string]bool) string {
+	if len(windows) == 0 {
+		return "''"
+	}
+	var parts []string
+	for w := range windows {
+		parts = append(parts, "'"+w+"'")
+	}
+	return strings.Join(parts, ",")
 }
 
 // cleanupOrphanedClaudes kills Claude processes that aren't tied to any active task windows
