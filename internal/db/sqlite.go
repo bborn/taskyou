@@ -237,6 +237,9 @@ func (db *DB) migrate() error {
 		// Tmux pane IDs for deterministic pane identification (avoids index-based guessing)
 		`ALTER TABLE tasks ADD COLUMN claude_pane_id TEXT DEFAULT ''`, // tmux pane ID for Claude/executor pane (e.g., "%1234")
 		`ALTER TABLE tasks ADD COLUMN shell_pane_id TEXT DEFAULT ''`,  // tmux pane ID for shell pane (e.g., "%1235")
+		// Sprite support: cloud execution environments
+		`ALTER TABLE projects ADD COLUMN sprite_name TEXT DEFAULT ''`,
+		`ALTER TABLE projects ADD COLUMN sprite_status TEXT DEFAULT ''`,
 	}
 
 	for _, m := range alterMigrations {

@@ -1372,6 +1372,9 @@ Examples:
 	// Cloud subcommand
 	rootCmd.AddCommand(createCloudCommand())
 
+	// Sprite subcommand (cloud execution via Fly.io Sprites)
+	rootCmd.AddCommand(createSpriteCommand())
+
 	// Settings command
 	settingsCmd := &cobra.Command{
 		Use:   "settings",
