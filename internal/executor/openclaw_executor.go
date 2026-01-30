@@ -95,7 +95,7 @@ func (o *OpenClawExecutor) runOpenClaw(ctx context.Context, task *db.Task, workD
 
 	// Prepend working directory context - OpenClaw needs to know where to work
 	var fullPrompt strings.Builder
-	fullPrompt.WriteString(fmt.Sprintf("## Working Directory\n\n"))
+	fullPrompt.WriteString("## Working Directory\n\n")
 	fullPrompt.WriteString(fmt.Sprintf("You are working in a git worktree at: `%s`\n\n", workDir))
 	fullPrompt.WriteString("IMPORTANT: All file operations (reading, writing, creating files) MUST be done within this directory. ")
 	fullPrompt.WriteString("Do NOT use your default workspace. Always use absolute paths or paths relative to this working directory.\n\n")
