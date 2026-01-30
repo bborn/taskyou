@@ -138,7 +138,7 @@ func NewEditFormModel(database *db.DB, task *db.Task, width, height int) *FormMo
 		project:             task.Project,
 		originalProject:     task.Project, // Track original project for detecting changes
 		executor:            executor,
-		executors:           []string{db.ExecutorClaude, db.ExecutorCodex, db.ExecutorGemini},
+		executors:           []string{db.ExecutorClaude, db.ExecutorCodex, db.ExecutorGemini, db.ExecutorOpenClaw},
 		isEdit:              true,
 		prURL:               task.PRURL,
 		prNumber:            task.PRNumber,
@@ -261,7 +261,7 @@ func NewFormModel(database *db.DB, width, height int, workingDir string) *FormMo
 		height:              height,
 		focused:             FieldProject,
 		executor:            db.DefaultExecutor(),
-		executors:           []string{db.ExecutorClaude, db.ExecutorCodex, db.ExecutorGemini},
+		executors:           []string{db.ExecutorClaude, db.ExecutorCodex, db.ExecutorGemini, db.ExecutorOpenClaw},
 		autocompleteSvc:     autocompleteSvc,
 		autocompleteEnabled: autocompleteEnabled,
 		taskRefAutocomplete: NewTaskRefAutocompleteModel(database, width-24),
