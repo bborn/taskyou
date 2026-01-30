@@ -8,7 +8,7 @@
 set -e
 
 REPO="bborn/taskyou"
-INSTALL_DIR="${INSTALL_DIR:-/usr/local/bin}"
+INSTALL_DIR="${INSTALL_DIR:-$HOME/.local/bin}"
 BINARY_NAME="task"
 
 # Colors for output
@@ -87,6 +87,11 @@ install_binary() {
 
     # Install binary
     info "Installing to ${INSTALL_DIR}/${BINARY_NAME}..."
+
+    # Create directory if it doesn't exist
+    if [ ! -d "$INSTALL_DIR" ]; then
+        mkdir -p "$INSTALL_DIR" 2>/dev/null || sudo mkdir -p "$INSTALL_DIR"
+    fi
 
     if [ -w "$INSTALL_DIR" ]; then
         mv "${tmp_dir}/${BINARY_NAME}" "${INSTALL_DIR}/${BINARY_NAME}"
