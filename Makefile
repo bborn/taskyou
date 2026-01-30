@@ -83,6 +83,17 @@ logs:
 connect:
 	ssh -p 2222 cloud-claude
 
+# Create a new release (usage: make tag VERSION=v0.1.0)
+tag:
+ifndef VERSION
+	$(error VERSION is required. Usage: make tag VERSION=v0.1.0)
+endif
+	@echo "Creating release $(VERSION)..."
+	git tag -a $(VERSION) -m "Release $(VERSION)"
+	git push origin $(VERSION)
+	@echo "Done! GitHub Actions will build and publish the release."
+	@echo "View at: https://github.com/bborn/taskyou/releases/tag/$(VERSION)"
+
 # Build for release (all platforms)
 release:
 	GOOS=darwin GOARCH=amd64 go build -ldflags="-s -w" -o bin/task-darwin-amd64 ./cmd/task

@@ -1,0 +1,4 @@
+# Serve shell scripts with correct content-type
+/install.sh
+  Content-Type: text/plain; charset=utf-8
+  Cache-Control: no-cache
