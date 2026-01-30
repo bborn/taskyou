@@ -1372,6 +1372,28 @@ Examples:
 	// Cloud subcommand
 	rootCmd.AddCommand(createCloudCommand())
 
+	// Update command - self-update via install script
+	upgradeCmd := &cobra.Command{
+		Use:   "upgrade",
+		Short: "Upgrade task to the latest version",
+		Long:  "Downloads and installs the latest version of the task CLI from GitHub releases.",
+		Run: func(cmd *cobra.Command, args []string) {
+			fmt.Println(dimStyle.Render("Checking for updates..."))
+
+			// Run the install script via curl
+			installCmd := osexec.Command("bash", "-c", "curl -fsSL https://raw.githubusercontent.com/bborn/taskyou/main/scripts/install.sh | bash")
+			installCmd.Stdout = os.Stdout
+			installCmd.Stderr = os.Stderr
+			installCmd.Stdin = os.Stdin
+
+			if err := installCmd.Run(); err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Update failed: "+err.Error()))
+				os.Exit(1)
+			}
+		},
+	}
+	rootCmd.AddCommand(upgradeCmd)
+
 	// Settings command
 	settingsCmd := &cobra.Command{
 		Use:   "settings",
