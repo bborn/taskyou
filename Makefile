@@ -83,12 +83,25 @@ logs:
 connect:
 	ssh -p 2222 cloud-claude
 
+# Create a new release (usage: make tag VERSION=v0.1.0)
+tag:
+ifndef VERSION
+	$(error VERSION is required. Usage: make tag VERSION=v0.1.0)
+endif
+	@echo "Creating release $(VERSION)..."
+	git tag -a $(VERSION) -m "Release $(VERSION)"
+	git push origin $(VERSION)
+	@echo "Done! GitHub Actions will build and publish the release."
+	@echo "View at: https://github.com/bborn/taskyou/releases/tag/$(VERSION)"
+
 # Build for release (all platforms)
 release:
-	GOOS=darwin GOARCH=amd64 go build -o bin/task-darwin-amd64 ./cmd/task
-	GOOS=darwin GOARCH=arm64 go build -o bin/task-darwin-arm64 ./cmd/task
-	GOOS=linux GOARCH=amd64 go build -o bin/task-linux-amd64 ./cmd/task
-	GOOS=linux GOARCH=amd64 go build -o bin/taskd-linux-amd64 ./cmd/taskd
+	GOOS=darwin GOARCH=amd64 go build -ldflags="-s -w" -o bin/task-darwin-amd64 ./cmd/task
+	GOOS=darwin GOARCH=arm64 go build -ldflags="-s -w" -o bin/task-darwin-arm64 ./cmd/task
+	GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o bin/task-linux-amd64 ./cmd/task
+	GOOS=linux GOARCH=arm64 go build -ldflags="-s -w" -o bin/task-linux-arm64 ./cmd/task
+	GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o bin/taskd-linux-amd64 ./cmd/taskd
+	GOOS=linux GOARCH=arm64 go build -ldflags="-s -w" -o bin/taskd-linux-arm64 ./cmd/taskd
 
 # Format code
 fmt:

@@ -1,5 +1,5 @@
 // task is the local CLI for managing tasks.
-// It connects to a remote taskd server over SSH by default, or runs locally with -l flag.
+// It runs locally by default, or connects to a remote taskd server over SSH with -r flag.
 package main
 
 import (
@@ -71,7 +71,7 @@ func main() {
 	var (
 		host      string
 		port      string
-		local     bool
+		remote    bool
 		dangerous bool
 	)
 
@@ -89,16 +89,17 @@ func main() {
 				return
 			}
 
-			if local {
-				if err := runLocal(dangerous); err != nil {
-					fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+			if remote {
+				// Connect to remote server
+				if err := connectRemote(host, port); err != nil {
+					fmt.Fprintln(os.Stderr, errorStyle.Render("Connection failed: "+err.Error()))
 					os.Exit(1)
 				}
 				return
 			}
-			// Connect to remote server
-			if err := connectRemote(host, port); err != nil {
-				fmt.Fprintln(os.Stderr, errorStyle.Render("Connection failed: "+err.Error()))
+			// Run locally (default)
+			if err := runLocal(dangerous); err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
 				os.Exit(1)
 			}
 		},
@@ -106,7 +107,7 @@ func main() {
 
 	rootCmd.PersistentFlags().StringVarP(&host, "host", "H", defaultHost, "Remote server host")
 	rootCmd.PersistentFlags().StringVar(&port, "port", defaultPort, "Remote server port")
-	rootCmd.PersistentFlags().BoolVarP(&local, "local", "l", false, "Run locally (use local database)")
+	rootCmd.PersistentFlags().BoolVarP(&remote, "remote", "r", false, "Connect to remote server instead of running locally")
 	rootCmd.PersistentFlags().BoolVar(&dangerous, "dangerous", false, "Run Claude with --dangerously-skip-permissions (for sandboxed environments)")
 
 	// Daemon subcommand - runs executor in background
@@ -219,16 +220,16 @@ Use --hard to kill all tmux sessions for a complete reset.`,
 				os.Exit(1)
 			}
 
-			// Pass through -l flag if we're in local mode
+			// Pass through -r flag if we're in remote mode
 			execArgs := []string{executable}
-			if local {
-				execArgs = append(execArgs, "-l")
+			if remote {
+				execArgs = append(execArgs, "-r")
 			}
 
 			syscall.Exec(executable, execArgs, os.Environ())
 		},
 	}
-	restartCmd.Flags().BoolVarP(&local, "local", "l", false, "Run locally")
+	restartCmd.Flags().BoolVarP(&remote, "remote", "r", false, "Connect to remote server")
 	restartCmd.Flags().BoolVar(&hardRestart, "hard", false, "Kill all tmux sessions (full reset)")
 	rootCmd.AddCommand(restartCmd)
 
