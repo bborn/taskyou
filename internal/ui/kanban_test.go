@@ -631,6 +631,149 @@ func TestKanbanBoard_FirstTaskClickable(t *testing.T) {
 	}
 }
 
+// TestKanbanBoard_JumpToPinned tests the JumpToPinned method.
+func TestKanbanBoard_JumpToPinned(t *testing.T) {
+	board := NewKanbanBoard(100, 50)
+
+	tasks := []*db.Task{
+		{ID: 1, Title: "Pinned 1", Status: db.StatusBacklog, Pinned: true},
+		{ID: 2, Title: "Pinned 2", Status: db.StatusBacklog, Pinned: true},
+		{ID: 3, Title: "Task 3", Status: db.StatusBacklog},
+		{ID: 4, Title: "Task 4", Status: db.StatusBacklog},
+		{ID: 5, Title: "Task 5", Status: db.StatusBacklog},
+	}
+	board.SetTasks(tasks)
+
+	// Start at task 5 (row 4)
+	board.selectedRow = 4
+	if selected := board.SelectedTask(); selected == nil || selected.ID != 5 {
+		t.Fatalf("Expected to be at task 5, got %v", selected)
+	}
+
+	// JumpToPinned should go to the first task (row 0)
+	board.JumpToPinned()
+	if board.selectedRow != 0 {
+		t.Errorf("JumpToPinned: selectedRow = %d, want 0", board.selectedRow)
+	}
+	if selected := board.SelectedTask(); selected == nil || selected.ID != 1 {
+		t.Errorf("JumpToPinned: selected task = %v, want task 1", selected)
+	}
+}
+
+// TestKanbanBoard_JumpToPinnedNoPinnedTasks tests JumpToPinned when no tasks are pinned.
+func TestKanbanBoard_JumpToPinnedNoPinnedTasks(t *testing.T) {
+	board := NewKanbanBoard(100, 50)
+
+	tasks := []*db.Task{
+		{ID: 1, Title: "Task 1", Status: db.StatusBacklog},
+		{ID: 2, Title: "Task 2", Status: db.StatusBacklog},
+		{ID: 3, Title: "Task 3", Status: db.StatusBacklog},
+	}
+	board.SetTasks(tasks)
+
+	// Start at task 3 (row 2)
+	board.selectedRow = 2
+
+	// JumpToPinned should still go to top (row 0) even with no pinned tasks
+	board.JumpToPinned()
+	if board.selectedRow != 0 {
+		t.Errorf("JumpToPinned with no pinned tasks: selectedRow = %d, want 0", board.selectedRow)
+	}
+}
+
+// TestKanbanBoard_JumpToPinnedEmptyColumn tests JumpToPinned on an empty column.
+func TestKanbanBoard_JumpToPinnedEmptyColumn(t *testing.T) {
+	board := NewKanbanBoard(100, 50)
+	board.SetTasks([]*db.Task{})
+
+	// Should not panic
+	board.JumpToPinned()
+	if board.selectedRow != 0 {
+		t.Errorf("JumpToPinned with empty column: selectedRow = %d, want 0", board.selectedRow)
+	}
+}
+
+// TestKanbanBoard_JumpToUnpinned tests the JumpToUnpinned method.
+func TestKanbanBoard_JumpToUnpinned(t *testing.T) {
+	board := NewKanbanBoard(100, 50)
+
+	tasks := []*db.Task{
+		{ID: 1, Title: "Pinned 1", Status: db.StatusBacklog, Pinned: true},
+		{ID: 2, Title: "Pinned 2", Status: db.StatusBacklog, Pinned: true},
+		{ID: 3, Title: "Task 3", Status: db.StatusBacklog},
+		{ID: 4, Title: "Task 4", Status: db.StatusBacklog},
+		{ID: 5, Title: "Task 5", Status: db.StatusBacklog},
+	}
+	board.SetTasks(tasks)
+
+	// Start at first pinned task (row 0)
+	board.selectedRow = 0
+	if selected := board.SelectedTask(); selected == nil || selected.ID != 1 {
+		t.Fatalf("Expected to be at task 1, got %v", selected)
+	}
+
+	// JumpToUnpinned should go to the first unpinned task (row 2, task 3)
+	board.JumpToUnpinned()
+	if board.selectedRow != 2 {
+		t.Errorf("JumpToUnpinned: selectedRow = %d, want 2", board.selectedRow)
+	}
+	if selected := board.SelectedTask(); selected == nil || selected.ID != 3 {
+		t.Errorf("JumpToUnpinned: selected task = %v, want task 3", selected)
+	}
+}
+
+// TestKanbanBoard_JumpToUnpinnedAllPinned tests JumpToUnpinned when all tasks are pinned.
+func TestKanbanBoard_JumpToUnpinnedAllPinned(t *testing.T) {
+	board := NewKanbanBoard(100, 50)
+
+	tasks := []*db.Task{
+		{ID: 1, Title: "Pinned 1", Status: db.StatusBacklog, Pinned: true},
+		{ID: 2, Title: "Pinned 2", Status: db.StatusBacklog, Pinned: true},
+	}
+	board.SetTasks(tasks)
+
+	// Start at row 0
+	board.selectedRow = 0
+
+	// JumpToUnpinned should stay at current position (no unpinned tasks)
+	board.JumpToUnpinned()
+	if board.selectedRow != 0 {
+		t.Errorf("JumpToUnpinned with all pinned: selectedRow = %d, want 0", board.selectedRow)
+	}
+}
+
+// TestKanbanBoard_JumpToUnpinnedNoPinnedTasks tests JumpToUnpinned when no tasks are pinned.
+func TestKanbanBoard_JumpToUnpinnedNoPinnedTasks(t *testing.T) {
+	board := NewKanbanBoard(100, 50)
+
+	tasks := []*db.Task{
+		{ID: 1, Title: "Task 1", Status: db.StatusBacklog},
+		{ID: 2, Title: "Task 2", Status: db.StatusBacklog},
+	}
+	board.SetTasks(tasks)
+
+	// Start at row 1
+	board.selectedRow = 1
+
+	// JumpToUnpinned should go to row 0 (first task is unpinned)
+	board.JumpToUnpinned()
+	if board.selectedRow != 0 {
+		t.Errorf("JumpToUnpinned with no pinned tasks: selectedRow = %d, want 0", board.selectedRow)
+	}
+}
+
+// TestKanbanBoard_JumpToUnpinnedEmptyColumn tests JumpToUnpinned on an empty column.
+func TestKanbanBoard_JumpToUnpinnedEmptyColumn(t *testing.T) {
+	board := NewKanbanBoard(100, 50)
+	board.SetTasks([]*db.Task{})
+
+	// Should not panic
+	board.JumpToUnpinned()
+	if board.selectedRow != 0 {
+		t.Errorf("JumpToUnpinned with empty column: selectedRow = %d, want 0", board.selectedRow)
+	}
+}
+
 // TestKanbanBoard_NeedsInput verifies that the input notification tracking works.
 func TestKanbanBoard_NeedsInput(t *testing.T) {
 	board := NewKanbanBoard(100, 50)

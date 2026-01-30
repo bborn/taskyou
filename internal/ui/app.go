@@ -76,6 +76,9 @@ type KeyMap struct {
 	FocusInProgress key.Binding
 	FocusBlocked    key.Binding
 	FocusDone       key.Binding
+	// Jump to pinned/unpinned tasks
+	JumpToPinned   key.Binding
+	JumpToUnpinned key.Binding
 }
 
 // ShortHelp returns key bindings to show in the mini help.
@@ -87,6 +90,7 @@ func (k KeyMap) ShortHelp() []key.Binding {
 func (k KeyMap) FullHelp() [][]key.Binding {
 	return [][]key.Binding{
 		{k.Left, k.Right, k.Up, k.Down},
+		{k.JumpToPinned, k.JumpToUnpinned},
 		{k.FocusBacklog, k.FocusInProgress, k.FocusBlocked, k.FocusDone},
 		{k.Enter, k.New, k.Queue, k.Close},
 		{k.Retry, k.Archive, k.Delete, k.OpenWorktree},
@@ -100,20 +104,20 @@ func (k KeyMap) FullHelp() [][]key.Binding {
 func DefaultKeyMap() KeyMap {
 	return KeyMap{
 		Left: key.NewBinding(
-			key.WithKeys("left", "h"),
-			key.WithHelp("←/h", "prev col"),
+			key.WithKeys("left"),
+			key.WithHelp("←", "prev col"),
 		),
 		Right: key.NewBinding(
-			key.WithKeys("right", "l"),
-			key.WithHelp("→/l", "next col"),
+			key.WithKeys("right"),
+			key.WithHelp("→", "next col"),
 		),
 		Up: key.NewBinding(
-			key.WithKeys("up", "k"),
-			key.WithHelp("↑/k", "up"),
+			key.WithKeys("up"),
+			key.WithHelp("↑", "up"),
 		),
 		Down: key.NewBinding(
-			key.WithKeys("down", "j"),
-			key.WithHelp("↓/j", "down"),
+			key.WithKeys("down"),
+			key.WithHelp("↓", "down"),
 		),
 		Enter: key.NewBinding(
 			key.WithKeys("enter"),
@@ -218,6 +222,14 @@ func DefaultKeyMap() KeyMap {
 		FocusDone: key.NewBinding(
 			key.WithKeys("D"),
 			key.WithHelp("D", "done"),
+		),
+		JumpToPinned: key.NewBinding(
+			key.WithKeys("shift+up"),
+			key.WithHelp("⇧↑", "jump to pinned"),
+		),
+		JumpToUnpinned: key.NewBinding(
+			key.WithKeys("shift+down"),
+			key.WithHelp("⇧↓", "jump to unpinned"),
 		),
 	}
 }
@@ -1098,6 +1110,15 @@ func (m *AppModel) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case key.Matches(msg, m.keys.Down):
 		m.kanban.MoveDown()
+		return m, nil
+
+	// Jump to pinned/unpinned tasks
+	case key.Matches(msg, m.keys.JumpToPinned):
+		m.kanban.JumpToPinned()
+		return m, nil
+
+	case key.Matches(msg, m.keys.JumpToUnpinned):
+		m.kanban.JumpToUnpinned()
 		return m, nil
 
 	// Column focus shortcuts

@@ -269,6 +269,36 @@ func (k *KanbanBoard) MoveDown() {
 	k.ensureSelectedVisible()
 }
 
+// JumpToPinned moves selection to the first pinned task in the current column.
+// If there are no pinned tasks, moves to the top of the column.
+func (k *KanbanBoard) JumpToPinned() {
+	col := k.columns[k.selectedCol]
+	if len(col.Tasks) == 0 {
+		return
+	}
+	// Pinned tasks are always at the top, so just go to row 0
+	// If already at the top, stay there
+	k.selectedRow = 0
+	k.ensureSelectedVisible()
+}
+
+// JumpToUnpinned moves selection to the first unpinned task in the current column.
+// If all tasks are pinned or there are no tasks, stays at current position.
+func (k *KanbanBoard) JumpToUnpinned() {
+	col := k.columns[k.selectedCol]
+	if len(col.Tasks) == 0 {
+		return
+	}
+	pinnedTasks, unpinnedTasks := splitPinnedTasks(col.Tasks)
+	if len(unpinnedTasks) == 0 {
+		// No unpinned tasks, stay at current position
+		return
+	}
+	// Jump to the first unpinned task (index equals count of pinned tasks)
+	k.selectedRow = len(pinnedTasks)
+	k.ensureSelectedVisible()
+}
+
 // ensureSelectedVisible adjusts scroll offset so the selected task is visible.
 func (k *KanbanBoard) ensureSelectedVisible() {
 	if k.selectedCol < 0 || k.selectedCol >= len(k.columns) {
