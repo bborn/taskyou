@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TaskYou - Personal Task Management</title>
+    <style>
+        :root {
+            --bg: #0d1117;
+            --fg: #c9d1d9;
+            --accent: #58a6ff;
+            --green: #3fb950;
+            --border: #30363d;
+        }
+        * { box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+            background: var(--bg);
+            color: var(--fg);
+            margin: 0;
+            padding: 2rem;
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+        }
+        .container {
+            max-width: 600px;
+            text-align: center;
+        }
+        h1 {
+            font-size: 3rem;
+            margin-bottom: 0.5rem;
+            color: #fff;
+        }
+        .tagline {
+            font-size: 1.25rem;
+            color: #8b949e;
+            margin-bottom: 2rem;
+        }
+        .install-box {
+            background: #161b22;
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 1.5rem;
+            margin: 2rem 0;
+        }
+        .install-label {
+            font-size: 0.875rem;
+            color: #8b949e;
+            margin-bottom: 0.5rem;
+        }
+        .install-cmd {
+            font-family: 'SF Mono', Consolas, monospace;
+            font-size: 1rem;
+            color: var(--green);
+            background: var(--bg);
+            padding: 1rem;
+            border-radius: 4px;
+            overflow-x: auto;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+        .install-cmd:hover {
+            background: #1c2128;
+        }
+        .links {
+            margin-top: 2rem;
+        }
+        .links a {
+            color: var(--accent);
+            text-decoration: none;
+            margin: 0 1rem;
+        }
+        .links a:hover {
+            text-decoration: underline;
+        }
+        .copied {
+            color: var(--green) !important;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>TaskYou</h1>
+        <p class="tagline">Personal task management with a beautiful terminal UI</p>
+
+        <div class="install-box">
+            <div class="install-label">Install with one command:</div>
+            <div class="install-cmd" onclick="copyInstall(this)">
+                curl -fsSL taskyou.dev/install.sh | bash
+            </div>
+        </div>
+
+        <div class="links">
+            <a href="https://github.com/bborn/taskyou">GitHub</a>
+            <a href="https://github.com/bborn/taskyou#readme">Documentation</a>
+        </div>
+    </div>
+
+    <script>
+        function copyInstall(el) {
+            navigator.clipboard.writeText(el.textContent.trim());
+            el.classList.add('copied');
+            el.textContent = 'Copied!';
+            setTimeout(() => {
+                el.classList.remove('copied');
+                el.textContent = 'curl -fsSL taskyou.dev/install.sh | bash';
+            }, 2000);
+        }
+    </script>
+</body>
+</html>

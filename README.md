@@ -54,22 +54,38 @@ Install Go 1.24.4 or later from [go.dev/dl](https://go.dev/dl/).
 
 ## Installation
 
+### Quick Install (recommended)
+
 ```bash
-git clone https://github.com/bborn/workflow
-cd workflow
+curl -fsSL taskyou.dev/install.sh | bash
+```
+
+This downloads the latest release and installs `task` to `/usr/local/bin`.
+
+You can also specify a custom install directory:
+
+```bash
+INSTALL_DIR=~/.local/bin curl -fsSL taskyou.dev/install.sh | bash
+```
+
+### Build from source
+
+```bash
+git clone https://github.com/bborn/taskyou
+cd taskyou
 make build
 ```
 
 ## Usage
 
-### Run locally
+### Run locally (default)
 
 ```bash
 # Launch the TUI (auto-starts background daemon)
-./bin/task -l
+./bin/task
 ```
 
-### Run on server
+### Connect to remote server
 
 ```bash
 # Start the SSH server + executor
