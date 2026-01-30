@@ -3074,6 +3074,25 @@ func (e *Executor) setupWorktree(task *db.Task) (string, error) {
 		if output, err := cmd.CombinedOutput(); err != nil {
 			return "", fmt.Errorf("failed to create initial commit: %v\n%s", err, string(output))
 		}
+	} else {
+		// Git repo exists, but check if it has any commits
+		// Worktrees require at least one commit to have a base branch
+		cmd := exec.Command("git", "rev-parse", "HEAD")
+		cmd.Dir = projectDir
+		if err := cmd.Run(); err != nil {
+			// No commits exist - create an initial commit
+			e.logger.Warn("Git repo has no commits - creating initial commit", "project", task.Project, "path", projectDir)
+
+			cmd = exec.Command("git", "add", "-A")
+			cmd.Dir = projectDir
+			cmd.Run() // Ignore errors - might be empty repo
+
+			cmd = exec.Command("git", "commit", "--allow-empty", "-m", "Initial commit for taskyou worktree support")
+			cmd.Dir = projectDir
+			if output, err := cmd.CombinedOutput(); err != nil {
+				return "", fmt.Errorf("failed to create initial commit: %v\n%s", err, string(output))
+			}
+		}
 	}
 
 	// If task already has a worktree path, reuse it (don't recalculate from title)

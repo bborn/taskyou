@@ -6,6 +6,7 @@ import (
 	"database/sql/driver"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"time"
 
@@ -330,43 +331,15 @@ func (db *DB) ensurePersonalProject() error {
 	return nil
 }
 
-// initGitRepo initializes a git repository at the given path.
+// initGitRepo initializes a git repository at the given path with an initial commit.
+// The initial commit is required for worktree support to work properly.
 func initGitRepo(path string) error {
-	// Create .git directory
-	gitDir := filepath.Join(path, ".git")
-	if err := os.MkdirAll(gitDir, 0755); err != nil {
-		return fmt.Errorf("create .git dir: %w", err)
+	// Create directory if needed
+	if err := os.MkdirAll(path, 0755); err != nil {
+		return fmt.Errorf("create directory: %w", err)
 	}
 
-	// Write minimal git config
-	configPath := filepath.Join(gitDir, "config")
-	config := `[core]
-	repositoryformatversion = 0
-	filemode = true
-	bare = false
-	logallrefupdates = true
-[init]
-	defaultBranch = main
-`
-	if err := os.WriteFile(configPath, []byte(config), 0644); err != nil {
-		return fmt.Errorf("write git config: %w", err)
-	}
-
-	// Create HEAD
-	headPath := filepath.Join(gitDir, "HEAD")
-	if err := os.WriteFile(headPath, []byte("ref: refs/heads/main\n"), 0644); err != nil {
-		return fmt.Errorf("write HEAD: %w", err)
-	}
-
-	// Create objects and refs directories
-	if err := os.MkdirAll(filepath.Join(gitDir, "objects"), 0755); err != nil {
-		return fmt.Errorf("create objects dir: %w", err)
-	}
-	if err := os.MkdirAll(filepath.Join(gitDir, "refs", "heads"), 0755); err != nil {
-		return fmt.Errorf("create refs dir: %w", err)
-	}
-
-	// Create initial README
+	// Create initial README before git init
 	readmePath := filepath.Join(path, "README.md")
 	readme := `# Personal Tasks
 
@@ -374,6 +347,27 @@ This is the default workspace for personal tasks.
 `
 	if err := os.WriteFile(readmePath, []byte(readme), 0644); err != nil {
 		return fmt.Errorf("write README: %w", err)
+	}
+
+	// Use git command to initialize - this ensures proper git structure
+	cmd := exec.Command("git", "init")
+	cmd.Dir = path
+	if output, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("git init: %v\n%s", err, output)
+	}
+
+	// Stage the README
+	cmd = exec.Command("git", "add", "README.md")
+	cmd.Dir = path
+	if output, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("git add: %v\n%s", err, output)
+	}
+
+	// Create initial commit - this is required for worktrees to work
+	cmd = exec.Command("git", "commit", "-m", "Initial commit")
+	cmd.Dir = path
+	if output, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("git commit: %v\n%s", err, output)
 	}
 
 	return nil
