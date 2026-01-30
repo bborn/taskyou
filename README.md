@@ -20,6 +20,10 @@ A personal task management system with a beautiful terminal UI, SQLite storage, 
 ![New Task Form](docs/screenshots/new-task-form.png)
 *Creating a new task with project selection, type, scheduling, and attachments*
 
+## Try It Now
+
+[![Launch on exe.dev](https://img.shields.io/badge/Launch%20on-exe.dev-blue)](https://exe.dev/new?prompt=Install%20taskyou%20from%20taskyou.dev%20and%20run%20task)
+
 ## Features
 
 - **Kanban Board** - Visual task management with 4 columns (Backlog, In Progress, Blocked, Done)
