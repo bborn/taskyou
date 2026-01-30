@@ -93,11 +93,19 @@ func (o *OpenClawExecutor) runOpenClaw(ctx context.Context, task *db.Task, workD
 		return ExecResult{Message: fmt.Sprintf("failed to create temp file: %s", err.Error())}
 	}
 
-	fullPrompt := prompt
+	// Prepend working directory context - OpenClaw needs to know where to work
+	var fullPrompt strings.Builder
+	fullPrompt.WriteString(fmt.Sprintf("## Working Directory\n\n"))
+	fullPrompt.WriteString(fmt.Sprintf("You are working in a git worktree at: `%s`\n\n", workDir))
+	fullPrompt.WriteString("IMPORTANT: All file operations (reading, writing, creating files) MUST be done within this directory. ")
+	fullPrompt.WriteString("Do NOT use your default workspace. Always use absolute paths or paths relative to this working directory.\n\n")
+	fullPrompt.WriteString("---\n\n")
+	fullPrompt.WriteString(prompt)
 	if isResume && feedback != "" {
-		fullPrompt = prompt + "\n\n## User Feedback\n\n" + feedback
+		fullPrompt.WriteString("\n\n## User Feedback\n\n")
+		fullPrompt.WriteString(feedback)
 	}
-	promptFile.WriteString(fullPrompt)
+	promptFile.WriteString(fullPrompt.String())
 	promptFile.Close()
 	defer os.Remove(promptFile.Name())
 
