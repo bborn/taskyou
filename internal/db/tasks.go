@@ -68,9 +68,10 @@ const (
 
 // Task executors
 const (
-	ExecutorClaude = "claude" // Claude Code CLI (default)
-	ExecutorCodex  = "codex"  // OpenAI Codex CLI
-	ExecutorGemini = "gemini" // Google Gemini CLI
+	ExecutorClaude   = "claude"   // Claude Code CLI (default)
+	ExecutorCodex    = "codex"    // OpenAI Codex CLI
+	ExecutorGemini   = "gemini"   // Google Gemini CLI
+	ExecutorOpenClaw = "openclaw" // OpenClaw AI assistant (https://openclaw.ai)
 )
 
 // DefaultExecutor returns the default executor if none is specified.
