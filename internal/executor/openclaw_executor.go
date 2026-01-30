@@ -19,11 +19,10 @@ import (
 // capable of automating tasks across your digital life.
 // See: https://openclaw.ai
 //
-// CLI Reference:
-//   - openclaw agent --message "prompt" - Run a prompt
-//   - openclaw agent --session-id <id> - Resume a session
-//   - openclaw agent --thinking <level> - Set reasoning depth (low/medium/high)
-//   - openclaw agent --local - Use embedded mode instead of Gateway
+// CLI Reference (using openclaw tui for interactive terminal UI):
+//   - openclaw tui --session <key> - Connect to a session
+//   - openclaw tui --message "prompt" - Send initial message after connecting
+//   - openclaw tui --thinking <level> - Set reasoning depth (off/minimal/low/medium/high)
 type OpenClawExecutor struct {
 	executor       *Executor
 	logger         *log.Logger
@@ -110,28 +109,23 @@ func (o *OpenClawExecutor) runOpenClaw(ctx context.Context, task *db.Task, workD
 	envPrefix := claudeEnvPrefix(paths.configDir)
 
 	// Build OpenClaw command with appropriate flags
-	// Use --session-id for session continuity, --message for the prompt
-	// Use --local for embedded mode (doesn't require Gateway)
-	sessionFlag := ""
+	// Use openclaw tui for interactive terminal UI (not openclaw agent which is one-shot)
+	// Use --session for session continuity, --message for initial prompt
+	sessionKey := fmt.Sprintf("task-%d", task.ID)
 	if task.ClaudeSessionID != "" {
-		// Resume existing session
-		sessionFlag = fmt.Sprintf("--session-id %s ", task.ClaudeSessionID)
+		sessionKey = task.ClaudeSessionID
 	} else {
-		// Create new session ID based on task ID for future resumption
-		newSessionID := fmt.Sprintf("task-%d", task.ID)
-		sessionFlag = fmt.Sprintf("--session-id %s ", newSessionID)
-		// Save session ID for future resumption
-		if err := o.executor.db.UpdateTaskClaudeSessionID(task.ID, newSessionID); err != nil {
+		// Save session key for future resumption
+		if err := o.executor.db.UpdateTaskClaudeSessionID(task.ID, sessionKey); err != nil {
 			o.logger.Warn("failed to save session ID", "task", task.ID, "error", err)
 		}
 	}
 
 	thinkingFlag := buildOpenClawThinkingFlag()
-	dangerousFlag := buildOpenClawDangerousFlag(task.DangerousMode)
 
-	// openclaw agent --message "prompt" --session-id <id> --local --thinking <level>
-	script := fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %sopenclaw agent %s%s%s--message "$(cat %q)"`,
-		task.ID, worktreeSessionID, task.Port, task.WorktreePath, envPrefix, sessionFlag, thinkingFlag, dangerousFlag, promptFile.Name())
+	// openclaw tui --session <key> --message "prompt" --thinking <level>
+	script := fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %sopenclaw tui --session %s %s--message "$(cat %q)"`,
+		task.ID, worktreeSessionID, task.Port, task.WorktreePath, envPrefix, sessionKey, thinkingFlag, promptFile.Name())
 
 	actualSession, tmuxErr := createTmuxWindow(daemonSession, windowName, workDir, script)
 	if tmuxErr != nil {
@@ -297,18 +291,15 @@ func (o *OpenClawExecutor) BuildCommand(task *db.Task, sessionID, prompt string)
 		worktreeSessionID = fmt.Sprintf("%d", os.Getpid())
 	}
 
-	// Build session flag - use existing session ID or create one from task ID
-	sessionFlag := ""
+	// Build session key - use existing session ID or create one from task ID
+	sessionKey := fmt.Sprintf("task-%d", task.ID)
 	if sessionID != "" {
-		sessionFlag = fmt.Sprintf("--session-id %s ", sessionID)
+		sessionKey = sessionID
 	} else if task.ClaudeSessionID != "" {
-		sessionFlag = fmt.Sprintf("--session-id %s ", task.ClaudeSessionID)
-	} else {
-		sessionFlag = fmt.Sprintf("--session-id task-%d ", task.ID)
+		sessionKey = task.ClaudeSessionID
 	}
 
 	thinkingFlag := buildOpenClawThinkingFlag()
-	dangerousFlag := buildOpenClawDangerousFlag(task.DangerousMode)
 
 	envVars := fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q`,
 		task.ID, worktreeSessionID, task.Port, task.WorktreePath)
@@ -317,17 +308,17 @@ func (o *OpenClawExecutor) BuildCommand(task *db.Task, sessionID, prompt string)
 		promptFile, err := os.CreateTemp("", "task-prompt-*.txt")
 		if err != nil {
 			o.logger.Error("BuildCommand: failed to create temp file", "error", err)
-			return fmt.Sprintf(`%s openclaw agent %s%s%s`,
-				envVars, sessionFlag, thinkingFlag, dangerousFlag)
+			return fmt.Sprintf(`%s openclaw tui --session %s %s`,
+				envVars, sessionKey, thinkingFlag)
 		}
 		promptFile.WriteString(prompt)
 		promptFile.Close()
-		return fmt.Sprintf(`%s openclaw agent %s%s%s--message "$(cat %q)"; rm -f %q`,
-			envVars, sessionFlag, thinkingFlag, dangerousFlag, promptFile.Name(), promptFile.Name())
+		return fmt.Sprintf(`%s openclaw tui --session %s %s--message "$(cat %q)"; rm -f %q`,
+			envVars, sessionKey, thinkingFlag, promptFile.Name(), promptFile.Name())
 	}
 
-	return fmt.Sprintf(`%s openclaw agent %s%s%s`,
-		envVars, sessionFlag, thinkingFlag, dangerousFlag)
+	return fmt.Sprintf(`%s openclaw tui --session %s %s`,
+		envVars, sessionKey, thinkingFlag)
 }
 
 // buildOpenClawThinkingFlag returns the --thinking flag based on environment config.
@@ -340,19 +331,3 @@ func buildOpenClawThinkingFlag() string {
 	return fmt.Sprintf("--thinking %s ", level)
 }
 
-// buildOpenClawDangerousFlag returns flags for dangerous/auto-approve mode.
-func buildOpenClawDangerousFlag(enabled bool) string {
-	useDanger := enabled || os.Getenv("WORKTREE_DANGEROUS_MODE") == "1"
-	if !useDanger {
-		return ""
-	}
-	flag := strings.TrimSpace(os.Getenv("OPENCLAW_DANGEROUS_ARGS"))
-	if flag == "" {
-		// OpenClaw uses --local for embedded mode which auto-approves actions
-		flag = "--local"
-	}
-	if !strings.HasSuffix(flag, " ") {
-		flag += " "
-	}
-	return flag
-}
