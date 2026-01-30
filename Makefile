@@ -1,28 +1,34 @@
-.PHONY: build install clean test deploy
+.PHONY: build build-no-restart install clean test deploy
 
 # Configuration
 SERVER ?= root@cloud-claude
 REMOTE_USER ?= runner
 REMOTE_DIR ?= /home/runner
 
-# Build all binaries and restart daemon if running
+# Allow overriding the Go binary/toolchain (e.g. GO=go1.24.4 or mise exec -- go)
+GO ?= go
+
+# Build all binaries and (optionally) restart daemon if running
 build: build-task build-taskd restart-daemon
 
+# Build binaries without touching any running daemon
+build-no-restart: build-task build-taskd
+
 build-task:
-	go build -o bin/task ./cmd/task
+	$(GO) build -o bin/task ./cmd/task
 
 build-taskd:
-	go build -o bin/taskd ./cmd/taskd
+	$(GO) build -o bin/taskd ./cmd/taskd
 
-# Restart daemon if it's running (silent if not)
+# Restart daemon if it's running (silent if not). Never fail the build if we lack permissions.
 restart-daemon:
 	@if pgrep -f "task daemon" > /dev/null; then \
 		echo "Restarting daemon..."; \
-		pkill -f "task daemon"; \
+		pkill -f "task daemon" || true; \
 		sleep 1; \
 		bin/task daemon > /tmp/task-daemon.log 2>&1 & \
 		sleep 1; \
-		echo "Daemon restarted (PID $$(pgrep -f 'task daemon'))"; \
+		echo "Daemon restarted (PID $$(pgrep -f 'task daemon' || true))"; \
 	fi
 
 # Build for Linux (server deployment)
