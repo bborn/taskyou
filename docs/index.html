@@ -79,12 +79,24 @@
         .copied {
             color: var(--green) !important;
         }
+        .demo-video {
+            width: 100%;
+            max-width: 560px;
+            border-radius: 8px;
+            border: 1px solid var(--border);
+            cursor: pointer;
+            margin: 1.5rem 0;
+        }
     </style>
 </head>
 <body>
     <div class="container">
         <h1>TaskYou</h1>
         <p class="tagline">Personal task management with a beautiful terminal UI</p>
+
+        <video class="demo-video" autoplay muted loop playsinline onclick="restartVideo(this)">
+            <source src="TaskYouDemo.mp4" type="video/mp4">
+        </video>
 
         <div class="install-box">
             <div class="install-label">Install with one command:</div>
@@ -100,6 +112,10 @@
     </div>
 
     <script>
+        function restartVideo(video) {
+            video.currentTime = 0;
+            video.play();
+        }
         function copyInstall(el) {
             navigator.clipboard.writeText(el.textContent.trim());
             el.classList.add('copied');
