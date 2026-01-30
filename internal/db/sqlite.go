@@ -363,6 +363,19 @@ This is the default workspace for personal tasks.
 		return fmt.Errorf("git add: %v\n%s", err, output)
 	}
 
+	// Configure local git user for this repo (required for CI environments)
+	cmd = exec.Command("git", "config", "user.email", "task@local")
+	cmd.Dir = path
+	if output, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("git config user.email: %v\n%s", err, output)
+	}
+
+	cmd = exec.Command("git", "config", "user.name", "Task")
+	cmd.Dir = path
+	if output, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("git config user.name: %v\n%s", err, output)
+	}
+
 	// Create initial commit - this is required for worktrees to work
 	cmd = exec.Command("git", "commit", "-m", "Initial commit")
 	cmd.Dir = path
