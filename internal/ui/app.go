@@ -104,20 +104,20 @@ func (k KeyMap) FullHelp() [][]key.Binding {
 func DefaultKeyMap() KeyMap {
 	return KeyMap{
 		Left: key.NewBinding(
-			key.WithKeys("left", "h"),
-			key.WithHelp("←/h", "prev col"),
+			key.WithKeys("left"),
+			key.WithHelp("←", "prev col"),
 		),
 		Right: key.NewBinding(
-			key.WithKeys("right", "l"),
-			key.WithHelp("→/l", "next col"),
+			key.WithKeys("right"),
+			key.WithHelp("→", "next col"),
 		),
 		Up: key.NewBinding(
-			key.WithKeys("up", "k"),
-			key.WithHelp("↑/k", "up"),
+			key.WithKeys("up"),
+			key.WithHelp("↑", "up"),
 		),
 		Down: key.NewBinding(
-			key.WithKeys("down", "j"),
-			key.WithHelp("↓/j", "down"),
+			key.WithKeys("down"),
+			key.WithHelp("↓", "down"),
 		),
 		Enter: key.NewBinding(
 			key.WithKeys("enter"),
@@ -224,12 +224,12 @@ func DefaultKeyMap() KeyMap {
 			key.WithHelp("D", "done"),
 		),
 		JumpToPinned: key.NewBinding(
-			key.WithKeys("K"),
-			key.WithHelp("K", "jump to pinned"),
+			key.WithKeys("shift+up"),
+			key.WithHelp("⇧↑", "jump to pinned"),
 		),
 		JumpToUnpinned: key.NewBinding(
-			key.WithKeys("J"),
-			key.WithHelp("J", "jump to unpinned"),
+			key.WithKeys("shift+down"),
+			key.WithHelp("⇧↓", "jump to unpinned"),
 		),
 	}
 }
