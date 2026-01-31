@@ -36,6 +36,7 @@ type KanbanBoard struct {
 	runningProcesses  map[int64]bool           // Tasks with running shell processes
 	tasksNeedingInput map[int64]bool           // Tasks waiting for user input (active input notification)
 	hiddenDoneCount   int                      // Number of done tasks not shown (older ones)
+	originColumn      int                      // Column where detail view navigation started (-1 = not set)
 }
 
 // IsMobileMode returns true if the board should show single-column mode.
@@ -53,6 +54,7 @@ func NewKanbanBoard(width, height int) *KanbanBoard {
 		height:           height,
 		prInfo:           make(map[int64]*github.PRInfo),
 		runningProcesses: make(map[int64]bool),
+		originColumn:     -1,
 	}
 }
 
@@ -86,6 +88,15 @@ func (k *KanbanBoard) SetTasks(tasks []*db.Task) {
 
 	k.allTasks = tasks
 	k.distributeTasksToColumns()
+
+	// When origin column is set (detail view navigation), stay in that column
+	// even if the task moved to a different column
+	if k.originColumn >= 0 {
+		k.selectedCol = k.originColumn
+		k.clampSelection()
+		return
+	}
+
 	if selectedID != 0 {
 		k.SelectTask(selectedID)
 	}
@@ -136,6 +147,22 @@ func (k *KanbanBoard) NeedsInput(taskID int64) bool {
 		return false
 	}
 	return k.tasksNeedingInput[taskID]
+}
+
+// SetOriginColumn sets the origin column for detail view navigation.
+// This preserves the column context even if the task moves to a different column.
+func (k *KanbanBoard) SetOriginColumn() {
+	k.originColumn = k.selectedCol
+}
+
+// ClearOriginColumn clears the origin column, returning to normal navigation.
+func (k *KanbanBoard) ClearOriginColumn() {
+	k.originColumn = -1
+}
+
+// HasOriginColumn returns true if an origin column is set.
+func (k *KanbanBoard) HasOriginColumn() bool {
+	return k.originColumn >= 0
 }
 
 // distributeTasksToColumns distributes tasks to their respective columns.

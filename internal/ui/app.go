@@ -644,6 +644,11 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			var initCmd tea.Cmd
 			m.detailView, initCmd = NewDetailModel(msg.task, m.db, m.executor, m.width, m.height, msg.focusExecutor)
+			// Set origin column for navigation if entering from dashboard
+			// (preserve existing origin when navigating between tasks in detail view)
+			if !m.kanban.HasOriginColumn() {
+				m.kanban.SetOriginColumn()
+			}
 			// Set task position in column for display
 			pos, total := m.kanban.GetTaskPosition()
 			m.detailView.SetPosition(pos, total)
@@ -1480,6 +1485,8 @@ func (m *AppModel) updateDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		m.currentView = ViewDashboard
+		// Clear origin column when exiting detail view
+		m.kanban.ClearOriginColumn()
 		if m.detailView != nil {
 			m.detailView.Cleanup()
 			m.detailView = nil
@@ -1497,6 +1504,8 @@ func (m *AppModel) updateDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.detailView.CleanupWithoutSaving()
 				m.detailView = nil
 			}
+			// Clear origin column since we're jumping to a different task
+			m.kanban.ClearOriginColumn()
 			m.kanban.SelectTask(taskID)
 			// Clear notification after jumping
 			m.notification = ""
