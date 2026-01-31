@@ -396,3 +396,155 @@ func TestWorkflowListTasks(t *testing.T) {
 		t.Errorf("expected output to contain 'Test Task', got:\n%s", text)
 	}
 }
+
+func TestWorkflowGetProjectContext(t *testing.T) {
+	database := testDB(t)
+	task := createTestTask(t, database)
+
+	// First call should return empty context message
+	request := map[string]interface{}{
+		"jsonrpc": "2.0",
+		"id":      1,
+		"method":  "tools/call",
+		"params": map[string]interface{}{
+			"name":      "workflow_get_project_context",
+			"arguments": map[string]interface{}{},
+		},
+	}
+	reqBytes, _ := json.Marshal(request)
+	reqBytes = append(reqBytes, '\n')
+
+	server, output := testServer(database, task.ID, string(reqBytes))
+	server.Run()
+
+	var resp jsonRPCResponse
+	if err := json.Unmarshal(output.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to parse response: %v", err)
+	}
+
+	if resp.Error != nil {
+		t.Fatalf("unexpected error: %s", resp.Error.Message)
+	}
+
+	result, ok := resp.Result.(map[string]interface{})
+	if !ok {
+		t.Fatal("expected result to be a map")
+	}
+	content, ok := result["content"].([]interface{})
+	if !ok {
+		t.Fatal("expected content to be an array")
+	}
+	textBlock, ok := content[0].(map[string]interface{})
+	if !ok {
+		t.Fatal("expected text block to be a map")
+	}
+	text := textBlock["text"].(string)
+
+	if !strings.Contains(text, "No cached project context found") {
+		t.Errorf("expected 'No cached project context found', got:\n%s", text)
+	}
+
+	// Now set some context
+	testContext := "This is a test codebase with Go files."
+	if err := database.SetProjectContext("test-project", testContext); err != nil {
+		t.Fatalf("failed to set project context: %v", err)
+	}
+
+	// Call again to get the cached context
+	server, output = testServer(database, task.ID, string(reqBytes))
+	server.Run()
+
+	if err := json.Unmarshal(output.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to parse response: %v", err)
+	}
+
+	if resp.Error != nil {
+		t.Fatalf("unexpected error: %s", resp.Error.Message)
+	}
+
+	result, ok = resp.Result.(map[string]interface{})
+	if !ok {
+		t.Fatal("expected result to be a map")
+	}
+	content, ok = result["content"].([]interface{})
+	if !ok {
+		t.Fatal("expected content to be an array")
+	}
+	textBlock, ok = content[0].(map[string]interface{})
+	if !ok {
+		t.Fatal("expected text block to be a map")
+	}
+	text = textBlock["text"].(string)
+
+	if !strings.Contains(text, testContext) {
+		t.Errorf("expected context '%s' in output, got:\n%s", testContext, text)
+	}
+}
+
+func TestWorkflowSetProjectContext(t *testing.T) {
+	database := testDB(t)
+	task := createTestTask(t, database)
+
+	testContext := "This is a Go project with cmd/, internal/, and pkg/ directories."
+
+	request := map[string]interface{}{
+		"jsonrpc": "2.0",
+		"id":      1,
+		"method":  "tools/call",
+		"params": map[string]interface{}{
+			"name": "workflow_set_project_context",
+			"arguments": map[string]interface{}{
+				"context": testContext,
+			},
+		},
+	}
+	reqBytes, _ := json.Marshal(request)
+	reqBytes = append(reqBytes, '\n')
+
+	server, output := testServer(database, task.ID, string(reqBytes))
+	server.Run()
+
+	var resp jsonRPCResponse
+	if err := json.Unmarshal(output.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to parse response: %v", err)
+	}
+
+	if resp.Error != nil {
+		t.Fatalf("unexpected error: %s", resp.Error.Message)
+	}
+
+	// Verify the context was saved
+	savedContext, err := database.GetProjectContext("test-project")
+	if err != nil {
+		t.Fatalf("failed to get project context: %v", err)
+	}
+	if savedContext != testContext {
+		t.Errorf("expected saved context '%s', got '%s'", testContext, savedContext)
+	}
+
+	// Test with empty context (should fail)
+	request = map[string]interface{}{
+		"jsonrpc": "2.0",
+		"id":      2,
+		"method":  "tools/call",
+		"params": map[string]interface{}{
+			"name": "workflow_set_project_context",
+			"arguments": map[string]interface{}{
+				"context": "",
+			},
+		},
+	}
+	reqBytes, _ = json.Marshal(request)
+	reqBytes = append(reqBytes, '\n')
+
+	server, output = testServer(database, task.ID, string(reqBytes))
+	server.Run()
+
+	if err := json.Unmarshal(output.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to parse response: %v", err)
+	}
+
+	if resp.Error == nil {
+		t.Error("expected error for empty context")
+	}
+}

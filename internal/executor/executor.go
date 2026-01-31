@@ -1125,6 +1125,12 @@ func (e *Executor) buildPrompt(task *db.Task, attachmentPaths []string) string {
                       TASK GUIDANCE
 ═══════════════════════════════════════════════════════════════
 
+⚡ BEFORE EXPLORING THE CODEBASE:
+  Call workflow_get_project_context first via MCP.
+  - If it returns context, use it and skip exploration
+  - If empty, explore once and save a summary via workflow_set_project_context
+  This caches your exploration for future tasks in this project.
+
 Work on this task until completion. When you're done or need input:
 
 ✓ WHEN TASK IS COMPLETE:
