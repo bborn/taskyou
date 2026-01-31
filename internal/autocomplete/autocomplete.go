@@ -359,6 +359,51 @@ func (s *Service) log(format string, args ...interface{}) {
 	fmt.Fprintf(f, "[%s] %s\n", time.Now().Format("15:04:05"), msg)
 }
 
+// GenerateTitle generates a concise task title from the description/body.
+// This is used when the user provides a description but no title.
+func (s *Service) GenerateTitle(ctx context.Context, body, project string) (string, error) {
+	if s.apiKey == "" {
+		return "", fmt.Errorf("no API key available")
+	}
+
+	if strings.TrimSpace(body) == "" {
+		return "", fmt.Errorf("body is empty")
+	}
+
+	prompt := buildTitleGenerationPrompt(body, project)
+	title, err := s.callAPI(ctx, prompt)
+	if err != nil {
+		return "", err
+	}
+
+	// Clean up the title
+	title = strings.TrimSpace(title)
+	title = strings.Trim(title, "\"'")
+
+	// Ensure title isn't too long (max 100 chars)
+	if len(title) > 100 {
+		// Truncate at last word boundary
+		title = title[:100]
+		if lastSpace := strings.LastIndex(title, " "); lastSpace > 50 {
+			title = title[:lastSpace]
+		}
+	}
+
+	return title, nil
+}
+
+func buildTitleGenerationPrompt(body, project string) string {
+	var sb strings.Builder
+	sb.WriteString("Generate a concise task title (3-8 words) from this description. ")
+	sb.WriteString("Use imperative form (e.g., 'Fix login bug', 'Add dark mode support'). ")
+	sb.WriteString("Output ONLY the title text, no explanations or quotes.\n\n")
+	if project != "" && project != "personal" {
+		sb.WriteString(fmt.Sprintf("Project: %s\n", project))
+	}
+	sb.WriteString(fmt.Sprintf("Description:\n%s\n\nTitle:", body))
+	return sb.String()
+}
+
 func (s *Service) callAPI(ctx context.Context, prompt string) (string, error) {
 	s.log("REQUEST: %s", prompt[:min(80, len(prompt))])
 
