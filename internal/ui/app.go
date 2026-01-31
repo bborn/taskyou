@@ -1015,6 +1015,11 @@ func (m *AppModel) viewNewTaskConfirm() string {
 func (m *AppModel) viewDashboard() string {
 	var headerParts []string
 
+	// Add Tasky logo header (right-aligned branding)
+	if logoHeader := RenderTaskyHeader(m.width); logoHeader != "" {
+		headerParts = append(headerParts, logoHeader)
+	}
+
 	// Show global dangerous mode banner if the entire system is in dangerous mode
 	if IsGlobalDangerousMode() {
 		dangerStyle := lipgloss.NewStyle().
@@ -1055,12 +1060,15 @@ func (m *AppModel) viewDashboard() string {
 		filterBarHeight = lipgloss.Height(filterBar)
 	}
 
-	// Calculate heights dynamically
-	headerHeight := len(headerParts)
-
 	// Render help to measure its actual height
 	helpView := m.renderHelp()
 	helpHeight := lipgloss.Height(helpView)
+
+	// Calculate header height dynamically (accounts for multi-line content like ASCII art)
+	headerHeight := 0
+	if len(headerParts) > 0 {
+		headerHeight = lipgloss.Height(lipgloss.JoinVertical(lipgloss.Left, headerParts...))
+	}
 
 	kanbanHeight := m.height - headerHeight - filterBarHeight - helpHeight
 
