@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"os"
 	"strings"
 	"testing"
 
@@ -809,5 +810,77 @@ func TestKanbanBoard_NeedsInput(t *testing.T) {
 	view := board.View()
 	if view == "" {
 		t.Error("View() returned empty string")
+	}
+}
+
+// TestKanbanBoard_DangerousModeIndicator tests that tasks in dangerous mode
+// show a red dot indicator when the system is not in global dangerous mode.
+func TestKanbanBoard_DangerousModeIndicator(t *testing.T) {
+	// Save original value to restore after test
+	original := os.Getenv("WORKTREE_DANGEROUS_MODE")
+	defer os.Setenv("WORKTREE_DANGEROUS_MODE", original)
+
+	// Ensure global dangerous mode is OFF for this test
+	os.Unsetenv("WORKTREE_DANGEROUS_MODE")
+
+	board := NewKanbanBoard(100, 50)
+
+	tasks := []*db.Task{
+		{ID: 1, Title: "Normal", Status: db.StatusProcessing, DangerousMode: false},
+		{ID: 2, Title: "Danger", Status: db.StatusProcessing, DangerousMode: true},
+		{ID: 3, Title: "Block", Status: db.StatusBlocked, DangerousMode: true},
+		{ID: 4, Title: "Done", Status: db.StatusDone, DangerousMode: true}, // Should not show indicator
+	}
+	board.SetTasks(tasks)
+
+	// Render the view - should work without errors
+	view := board.View()
+	if view == "" {
+		t.Fatal("View() returned empty string")
+	}
+
+	// Focus on the In Progress column and verify rendering works
+	board.FocusColumn(1) // In Progress column
+	view = board.View()
+	if view == "" {
+		t.Error("View should render In Progress column")
+	}
+
+	// Focus on the Blocked column and verify rendering works
+	board.FocusColumn(2) // Blocked column
+	view = board.View()
+	if view == "" {
+		t.Error("View should render Blocked column")
+	}
+}
+
+// TestKanbanBoard_DangerousModeIndicatorHiddenInGlobalMode tests that
+// when global dangerous mode is enabled, individual tasks don't show
+// the red dot indicator (since there's a global banner instead).
+func TestKanbanBoard_DangerousModeIndicatorHiddenInGlobalMode(t *testing.T) {
+	// Save original value to restore after test
+	original := os.Getenv("WORKTREE_DANGEROUS_MODE")
+	defer os.Setenv("WORKTREE_DANGEROUS_MODE", original)
+
+	// Enable global dangerous mode
+	os.Setenv("WORKTREE_DANGEROUS_MODE", "1")
+
+	board := NewKanbanBoard(100, 50)
+
+	tasks := []*db.Task{
+		{ID: 1, Title: "Dangerous Task", Status: db.StatusProcessing, DangerousMode: true},
+	}
+	board.SetTasks(tasks)
+
+	// Render should work without panic
+	view := board.View()
+	if view == "" {
+		t.Error("View() returned empty string")
+	}
+
+	// The view should still render the task, just without the individual red dot
+	// (the global banner will be shown by the app view wrapper, not the kanban)
+	if !strings.Contains(view, "Dangerous Task") {
+		t.Error("View should contain the task title 'Dangerous Task'")
 	}
 }

@@ -1789,6 +1789,18 @@ func (m *DetailModel) View() string {
 		return "\n  Loading..."
 	}
 
+	// Global dangerous mode banner
+	var dangerBanner string
+	if IsGlobalDangerousMode() {
+		dangerStyle := lipgloss.NewStyle().
+			Background(lipgloss.Color("#E06C75")). // Red background
+			Foreground(lipgloss.Color("#FFFFFF")).
+			Bold(true).
+			Padding(0, 2).
+			Width(m.width)
+		dangerBanner = dangerStyle.Render("⚠ DANGEROUS MODE ENABLED")
+	}
+
 	header := m.renderHeader()
 	content := m.viewport.View()
 
@@ -1826,10 +1838,15 @@ func (m *DetailModel) View() string {
 	if scrollIndicator != "" {
 		boxContent = lipgloss.JoinVertical(lipgloss.Left, header, content, scrollIndicator)
 	}
-	return lipgloss.JoinVertical(lipgloss.Left,
-		box.Render(boxContent),
-		help,
-	)
+
+	// Build view parts
+	var viewParts []string
+	if dangerBanner != "" {
+		viewParts = append(viewParts, dangerBanner)
+	}
+	viewParts = append(viewParts, box.Render(boxContent), help)
+
+	return lipgloss.JoinVertical(lipgloss.Left, viewParts...)
 }
 
 func (m *DetailModel) renderHeader() string {
