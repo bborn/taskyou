@@ -133,8 +133,8 @@
 
         <div class="install-box">
             <div class="install-label">Or run instantly on <a href="https://exe.dev" style="color: var(--cyan-glow); text-decoration: none;">exe.dev</a></div>
-            <div class="install-cmd" data-cmd="ssh exe.dev 'new --prompt=&quot;Run: curl -fsSL taskyou.dev/install.sh | bash&quot;'" onclick="copyInstall(this)">
-                ssh exe.dev 'new --prompt="Run: curl -fsSL taskyou.dev/install.sh | bash"'
+            <div class="install-cmd" data-cmd="VM=$(ssh exe.dev 'new --json --no-email' | jq -r .vm_name) && ssh -t $VM.exe.xyz 'curl -fsSL taskyou.dev/install.sh | bash && ~/.local/bin/ty'" onclick="copyInstall(this)">
+                VM=$(ssh exe.dev 'new --json --no-email' | jq -r .vm_name) && ssh -t $VM.exe.xyz 'curl -fsSL taskyou.dev/install.sh | bash && ~/.local/bin/ty'
             </div>
         </div>
 
