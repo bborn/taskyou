@@ -1,4 +1,4 @@
-.PHONY: build build-no-restart install clean test deploy docker-build docker-push
+.PHONY: build build-no-restart install clean test deploy
 
 # Configuration
 SERVER ?= root@cloud-claude
@@ -116,22 +116,5 @@ fmt:
 # Lint code
 lint:
 	golangci-lint run
-
-# Docker image for exe.dev
-DOCKER_IMAGE ?= ghcr.io/bborn/taskyou-exe
-DOCKER_TAG ?= latest
-
-docker-build:
-	docker buildx build --platform linux/amd64,linux/arm64 \
-		-t $(DOCKER_IMAGE):$(DOCKER_TAG) \
-		-f docker/exedev/Dockerfile \
-		docker/exedev
-
-docker-push:
-	docker buildx build --platform linux/amd64,linux/arm64 \
-		-t $(DOCKER_IMAGE):$(DOCKER_TAG) \
-		-f docker/exedev/Dockerfile \
-		--push \
-		docker/exedev
 
 .DEFAULT_GOAL := build
