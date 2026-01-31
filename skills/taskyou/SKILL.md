@@ -27,6 +27,11 @@ You are an autonomous orchestrator for **Task You**, a personal task management 
 | Pin/prioritize | `ty pin <id>` |
 | Close/complete | `ty close <id>` |
 | Delete | `ty delete <id>` |
+| **Executor interaction** | |
+| See executor output | `ty output <id>` |
+| Get blocked question | `ty question <id>` |
+| Send input to executor | `ty input <id> "message"` |
+| Confirm prompt | `ty input <id> --enter` |
 
 **Statuses:** `backlog`, `queued`, `processing`, `blocked`, `done`, `archived`
 
@@ -72,6 +77,29 @@ Then retry with feedback:
 ```bash
 ty retry <id> --feedback "Here's the clarification you need..."
 ```
+
+### 3b. Direct Executor Interaction
+
+For running/blocked tasks, you can interact directly with the executor:
+
+```bash
+# See what the executor is doing/asking
+ty output <id>              # Capture recent terminal output
+ty output <id> --lines 100  # More history
+
+# Check the specific question (if blocked with NEEDS_INPUT)
+ty question <id> --json
+
+# Send input directly to the executor's terminal
+ty input <id> "yes"         # Send text and press Enter
+ty input <id> --enter       # Just press Enter (confirm a prompt)
+ty input <id> --key Down --enter  # Press Down arrow then Enter
+```
+
+This is useful when:
+- The executor is waiting for permission (just send `--enter`)
+- You need to respond to a TUI prompt (use `--key` for navigation)
+- You want to see what's happening without attaching to tmux
 
 ### 4. Create New Tasks
 
@@ -206,9 +234,19 @@ watch -n30 "ty board"
 
 ### Task stuck in processing?
 
-Check if the executor is running:
+Check if the executor is running and what it's doing:
 ```bash
 ty show <id> --logs
+ty output <id>  # See live terminal output
+```
+
+### Executor waiting for input?
+
+Check what it's asking and respond directly:
+```bash
+ty question <id>           # See the question
+ty input <id> --enter      # Confirm a prompt
+ty input <id> "yes"        # Send specific input
 ```
 
 ### No tasks executing?

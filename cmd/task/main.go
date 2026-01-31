@@ -815,16 +815,19 @@ Examples:
 
 			if outputJSON {
 				output := map[string]interface{}{
-					"id":         task.ID,
-					"title":      task.Title,
-					"body":       task.Body,
-					"status":     task.Status,
-					"type":       task.Type,
-					"project":    task.Project,
-					"worktree":   task.WorktreePath,
-					"branch":     task.BranchName,
-					"created_at": task.CreatedAt.Time.Format(time.RFC3339),
-					"updated_at": task.UpdatedAt.Time.Format(time.RFC3339),
+					"id":             task.ID,
+					"title":          task.Title,
+					"body":           task.Body,
+					"status":         task.Status,
+					"type":           task.Type,
+					"project":        task.Project,
+					"executor":       task.Executor,
+					"worktree":       task.WorktreePath,
+					"branch":         task.BranchName,
+					"claude_pane_id": task.ClaudePaneID,
+					"shell_pane_id":  task.ShellPaneID,
+					"created_at":     task.CreatedAt.Time.Format(time.RFC3339),
+					"updated_at":     task.UpdatedAt.Time.Format(time.RFC3339),
 				}
 				if task.StartedAt != nil {
 					output["started_at"] = task.StartedAt.Time.Format(time.RFC3339)
@@ -1425,6 +1428,248 @@ Examples:
 	}
 	retryCmd.Flags().StringP("feedback", "m", "", "Feedback for the retry")
 	rootCmd.AddCommand(retryCmd)
+
+	// Input subcommand - send input directly to a running task's executor
+	inputCmd := &cobra.Command{
+		Use:   "input <task-id> [message]",
+		Short: "Send input to a task's executor",
+		Long: `Send input directly to a running task's executor via tmux.
+
+This allows you to interact with a blocked or running task without going through
+the retry mechanism. The input is sent directly to the executor's tmux pane.
+
+If no message is provided, reads from stdin (useful for piping).
+Use --enter to just send Enter (for confirming TUI prompts).
+Use --key to send special keys like "Up", "Down", "Tab", "Escape".
+
+Examples:
+  task input 42 "yes"
+  task input 42 "Try a different approach"
+  task input 42 --enter              # Just press Enter
+  task input 42 --key Down --enter   # Press Down then Enter
+  echo "continue" | task input 42`,
+		Args: cobra.MinimumNArgs(1),
+		Run: func(cmd *cobra.Command, args []string) {
+			var taskID int64
+			if _, err := fmt.Sscanf(args[0], "%d", &taskID); err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Invalid task ID: "+args[0]))
+				os.Exit(1)
+			}
+
+			justEnter, _ := cmd.Flags().GetBool("enter")
+			specialKey, _ := cmd.Flags().GetString("key")
+
+			var message string
+			if len(args) > 1 {
+				message = strings.Join(args[1:], " ")
+			} else if !justEnter && specialKey == "" {
+				// Read from stdin only if not using --enter or --key
+				scanner := bufio.NewScanner(os.Stdin)
+				if scanner.Scan() {
+					message = scanner.Text()
+				}
+				if err := scanner.Err(); err != nil {
+					fmt.Fprintln(os.Stderr, errorStyle.Render("Error reading stdin: "+err.Error()))
+					os.Exit(1)
+				}
+			}
+
+			if message == "" && !justEnter && specialKey == "" {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("No input provided (use --enter to send just Enter, or --key for special keys)"))
+				os.Exit(1)
+			}
+
+			// Open database
+			dbPath := db.DefaultPath()
+			database, err := db.Open(dbPath)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+			defer database.Close()
+
+			task, err := database.GetTask(taskID)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+			if task == nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render(fmt.Sprintf("Task #%d not found", taskID)))
+				os.Exit(1)
+			}
+
+			// Get the pane ID
+			paneID := task.ClaudePaneID
+			if paneID == "" {
+				fmt.Fprintln(os.Stderr, errorStyle.Render(fmt.Sprintf("Task #%d has no executor pane (not running?)", taskID)))
+				os.Exit(1)
+			}
+
+			// Build and send tmux send-keys commands
+			// If --key specified, send that first
+			if specialKey != "" {
+				keyCmd := osexec.Command("tmux", "send-keys", "-t", paneID, specialKey)
+				if err := keyCmd.Run(); err != nil {
+					fmt.Fprintln(os.Stderr, errorStyle.Render(fmt.Sprintf("Error sending key to pane %s: %v", paneID, err)))
+					os.Exit(1)
+				}
+			}
+
+			// Send message if provided, or just Enter if --enter flag
+			if message != "" {
+				sendCmd := osexec.Command("tmux", "send-keys", "-t", paneID, message, "Enter")
+				if err := sendCmd.Run(); err != nil {
+					fmt.Fprintln(os.Stderr, errorStyle.Render(fmt.Sprintf("Error sending input to pane %s (task may have finished): %v", paneID, err)))
+					os.Exit(1)
+				}
+			} else if justEnter {
+				sendCmd := osexec.Command("tmux", "send-keys", "-t", paneID, "Enter")
+				if err := sendCmd.Run(); err != nil {
+					fmt.Fprintln(os.Stderr, errorStyle.Render(fmt.Sprintf("Error sending Enter to pane %s (task may have finished): %v", paneID, err)))
+					os.Exit(1)
+				}
+			}
+
+			fmt.Println(successStyle.Render(fmt.Sprintf("Sent input to task #%d", taskID)))
+		},
+	}
+	inputCmd.Flags().Bool("enter", false, "Just send Enter key (for confirming prompts)")
+	inputCmd.Flags().String("key", "", "Send a special key (e.g., Up, Down, Tab, Escape)")
+	rootCmd.AddCommand(inputCmd)
+
+	// Question subcommand - show the last question from a blocked task
+	questionCmd := &cobra.Command{
+		Use:   "question <task-id>",
+		Short: "Show the last question from a blocked task",
+		Long: `Show the most recent question that the executor asked for a task.
+
+This is useful to see what input the executor is waiting for when a task is blocked.
+
+Examples:
+  task question 42
+  task question 42 --json`,
+		Args: cobra.ExactArgs(1),
+		Run: func(cmd *cobra.Command, args []string) {
+			var taskID int64
+			if _, err := fmt.Sscanf(args[0], "%d", &taskID); err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Invalid task ID: "+args[0]))
+				os.Exit(1)
+			}
+
+			outputJSON, _ := cmd.Flags().GetBool("json")
+
+			// Open database
+			dbPath := db.DefaultPath()
+			database, err := db.Open(dbPath)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+			defer database.Close()
+
+			task, err := database.GetTask(taskID)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+			if task == nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render(fmt.Sprintf("Task #%d not found", taskID)))
+				os.Exit(1)
+			}
+
+			question, err := database.GetLastQuestion(taskID)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+
+			if outputJSON {
+				output := map[string]interface{}{
+					"task_id":  taskID,
+					"status":   task.Status,
+					"question": question,
+				}
+				enc := json.NewEncoder(os.Stdout)
+				enc.SetIndent("", "  ")
+				enc.Encode(output)
+				return
+			}
+
+			if question == "" {
+				fmt.Println(dimStyle.Render("No question found for task #" + args[0]))
+				return
+			}
+
+			fmt.Printf("%s %s\n", boldStyle.Render("Task #"+args[0]), dimStyle.Render("("+task.Status+")"))
+			fmt.Println(question)
+		},
+	}
+	questionCmd.Flags().Bool("json", false, "Output in JSON format")
+	rootCmd.AddCommand(questionCmd)
+
+	// Output subcommand - capture recent output from executor pane
+	outputCmd := &cobra.Command{
+		Use:   "output <task-id>",
+		Short: "Capture recent output from a task's executor",
+		Long: `Capture recent output from a running task's executor pane.
+
+This allows you to see what the executor has outputted without attaching to the tmux pane.
+
+Examples:
+  task output 42
+  task output 42 --lines 100`,
+		Args: cobra.ExactArgs(1),
+		Run: func(cmd *cobra.Command, args []string) {
+			var taskID int64
+			if _, err := fmt.Sscanf(args[0], "%d", &taskID); err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Invalid task ID: "+args[0]))
+				os.Exit(1)
+			}
+
+			lines, _ := cmd.Flags().GetInt("lines")
+			if lines <= 0 {
+				lines = 50
+			}
+
+			// Open database
+			dbPath := db.DefaultPath()
+			database, err := db.Open(dbPath)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+			defer database.Close()
+
+			task, err := database.GetTask(taskID)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+			if task == nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render(fmt.Sprintf("Task #%d not found", taskID)))
+				os.Exit(1)
+			}
+
+			// Get the pane ID
+			paneID := task.ClaudePaneID
+			if paneID == "" {
+				fmt.Fprintln(os.Stderr, errorStyle.Render(fmt.Sprintf("Task #%d has no executor pane (not running?)", taskID)))
+				os.Exit(1)
+			}
+
+			// Capture pane content
+			captureCmd := osexec.Command("tmux", "capture-pane", "-t", paneID, "-p", "-S", fmt.Sprintf("-%d", lines))
+			output, err := captureCmd.Output()
+			if err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render(fmt.Sprintf("Error capturing output (pane may not exist): %v", err)))
+				os.Exit(1)
+			}
+
+			fmt.Print(string(output))
+		},
+	}
+	outputCmd.Flags().IntP("lines", "n", 50, "Number of lines to capture")
+	rootCmd.AddCommand(outputCmd)
 
 	// Purge Claude config subcommand - remove stale entries from ~/.claude.json
 	purgeClaudeConfigCmd := &cobra.Command{

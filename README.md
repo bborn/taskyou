@@ -105,6 +105,7 @@ Need an always-on supervisor or LLM agent? Keep it outside Task You and use the 
 
 - `ty board --json` surfaces the full Kanban snapshot
 - `ty pin`, `ty status`, `ty execute`, `ty retry`, etc. mirror every interaction from the TUI
+- `ty input`, `ty output`, `ty question` allow direct interaction with running executors
 - See [docs/orchestrator.md](docs/orchestrator.md) for a step-by-step Claude example
 
 **Auto-cleanup:** The daemon automatically cleans up Claude processes for tasks that have been done for more than 30 minutes, preventing memory bloat from orphaned processes.
@@ -280,10 +281,28 @@ Each task tracks its executor state in the database:
 
 ```bash
 # List all running executor processes
-./bin/ty claudes list
+./bin/ty sessions list
 
 # Kill orphaned executor processes
-./bin/ty claudes cleanup
+./bin/ty sessions cleanup
+```
+
+**Direct executor interaction:**
+
+```bash
+# See what the executor is outputting
+./bin/ty output <id>              # Last 50 lines
+./bin/ty output <id> --lines 100  # More history
+
+# Check what question a blocked task is asking
+./bin/ty question <id>
+./bin/ty question <id> --json
+
+# Send input directly to a running executor
+./bin/ty input <id> "yes"         # Send text + Enter
+./bin/ty input <id> --enter       # Just press Enter (confirm prompts)
+./bin/ty input <id> --key Down --enter  # Navigate + confirm
+echo "continue" | ./bin/ty input <id>   # Pipe input
 ```
 
 **Inside a task worktree:**
