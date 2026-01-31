@@ -1045,6 +1045,112 @@ Examples:
 	updateCmd.Flags().StringP("project", "p", "", "Update project name")
 	rootCmd.AddCommand(updateCmd)
 
+	// Move subcommand - move a task to a different project
+	moveCmd := &cobra.Command{
+		Use:   "move <task-id> <target-project>",
+		Short: "Move a task to a different project",
+		Long: `Move a task to a different project.
+
+This properly cleans up the task's worktree and Claude sessions from the old project,
+deletes the old task, and creates a new task in the target project.
+
+The new task preserves:
+- Title, body, type, and tags
+- Status (unless processing/blocked, which resets to backlog)
+
+The new task resets:
+- Worktree path, branch name, port
+- Claude session ID, daemon session
+- Started/completed timestamps
+
+Examples:
+  task move 42 myapp
+  task move 42 myapp --execute`,
+		Args: cobra.ExactArgs(2),
+		Run: func(cmd *cobra.Command, args []string) {
+			var taskID int64
+			if _, err := fmt.Sscanf(args[0], "%d", &taskID); err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Invalid task ID: "+args[0]))
+				os.Exit(1)
+			}
+			targetProject := args[1]
+
+			// Open database
+			dbPath := db.DefaultPath()
+			database, err := db.Open(dbPath)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+			defer database.Close()
+
+			// Validate target project exists
+			proj, err := database.GetProjectByName(targetProject)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+			if proj == nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render(fmt.Sprintf("Project '%s' not found", targetProject)))
+				os.Exit(1)
+			}
+
+			// Get task
+			task, err := database.GetTask(taskID)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+			if task == nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render(fmt.Sprintf("Task #%d not found", taskID)))
+				os.Exit(1)
+			}
+
+			// Check if already in target project
+			if task.Project == targetProject || task.Project == proj.Name {
+				fmt.Println(dimStyle.Render(fmt.Sprintf("Task #%d is already in project '%s'", taskID, targetProject)))
+				return
+			}
+
+			oldProject := task.Project
+			execute, _ := cmd.Flags().GetBool("execute")
+
+			// Confirm unless --force flag is set
+			force, _ := cmd.Flags().GetBool("force")
+			if !force {
+				fmt.Printf("Move task #%d from '%s' to '%s'? [y/N] ", taskID, oldProject, targetProject)
+				reader := bufio.NewReader(os.Stdin)
+				response, _ := reader.ReadString('\n')
+				response = strings.TrimSpace(strings.ToLower(response))
+				if response != "y" && response != "yes" {
+					fmt.Println("Cancelled")
+					return
+				}
+			}
+
+			// Perform the move
+			newTaskID, err := moveTask(database, task, targetProject)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+
+			fmt.Println(successStyle.Render(fmt.Sprintf("Moved task #%d to project '%s' (new task #%d)", taskID, targetProject, newTaskID)))
+
+			// Queue for execution if requested
+			if execute {
+				if err := database.UpdateTaskStatus(newTaskID, db.StatusQueued); err != nil {
+					fmt.Fprintln(os.Stderr, errorStyle.Render("Error queueing task: "+err.Error()))
+					os.Exit(1)
+				}
+				fmt.Println(successStyle.Render(fmt.Sprintf("Queued task #%d for execution", newTaskID)))
+			}
+		},
+	}
+	moveCmd.Flags().BoolP("force", "f", false, "Skip confirmation prompt")
+	moveCmd.Flags().BoolP("execute", "e", false, "Queue the task for execution after moving")
+	rootCmd.AddCommand(moveCmd)
+
 	// Execute subcommand - queue a task for execution
 	executeCmd := &cobra.Command{
 		Use:     "execute <task-id>",
@@ -3170,6 +3276,85 @@ func cleanupOrphanedClaudes(force bool) {
 	}
 
 	fmt.Printf("\n%s\n", dimStyle.Render(fmt.Sprintf("Killed %d/%d processes", killed, totalToKill)))
+}
+
+// moveTask moves a task to a different project by cleaning up old resources,
+// deleting the old task, and creating a new task in the target project.
+// Returns the new task ID.
+func moveTask(database *db.DB, oldTask *db.Task, targetProject string) (int64, error) {
+	cfg := config.New(database)
+	exec := executor.New(database, cfg)
+
+	// Step 1: Clean up old task's resources
+
+	// Kill Claude session if running (ignore errors - session may not exist)
+	killClaudeSession(int(oldTask.ID))
+
+	// Clean up worktree and Claude sessions if they exist
+	if oldTask.WorktreePath != "" {
+		projectConfigDir := ""
+		if oldTask.Project != "" {
+			if project, err := database.GetProjectByName(oldTask.Project); err == nil && project != nil {
+				projectConfigDir = project.ClaudeConfigDir
+			}
+		}
+		// Clean up Claude session files first (before worktree is removed)
+		if err := executor.CleanupClaudeSessions(oldTask.WorktreePath, projectConfigDir); err != nil {
+			fmt.Fprintln(os.Stderr, dimStyle.Render(fmt.Sprintf("Warning: could not remove Claude sessions: %v", err)))
+		}
+
+		// Clean up worktree
+		if err := exec.CleanupWorktree(oldTask); err != nil {
+			fmt.Fprintln(os.Stderr, dimStyle.Render(fmt.Sprintf("Warning: could not remove worktree: %v", err)))
+		}
+	}
+
+	// Step 2: Delete the old task from database
+	if err := database.DeleteTask(oldTask.ID); err != nil {
+		return 0, fmt.Errorf("delete old task: %w", err)
+	}
+
+	// Step 3: Create new task in target project
+	// Reset execution-related fields but preserve content
+	newTask := &db.Task{
+		Title:    oldTask.Title,
+		Body:     oldTask.Body,
+		Type:     oldTask.Type,
+		Tags:     oldTask.Tags,
+		Project:  targetProject,
+		Executor: oldTask.Executor,
+		Pinned:   oldTask.Pinned,
+		// Reset execution state
+		WorktreePath:    "",
+		BranchName:      "",
+		Port:            0,
+		ClaudeSessionID: "",
+		DaemonSession:   "",
+		StartedAt:       nil,
+		CompletedAt:     nil,
+		// Keep status unless it was processing/blocked
+		Status: oldTask.Status,
+	}
+
+	// Reset status if task was in progress (work is lost)
+	if newTask.Status == db.StatusProcessing || newTask.Status == db.StatusBlocked {
+		newTask.Status = db.StatusBacklog
+	}
+
+	if err := database.CreateTask(newTask); err != nil {
+		return 0, fmt.Errorf("create new task: %w", err)
+	}
+
+	// CreateTask doesn't insert all fields (tags, pinned, etc.), so update them
+	if err := database.UpdateTask(newTask); err != nil {
+		return 0, fmt.Errorf("update new task: %w", err)
+	}
+
+	// Notify about the changes
+	exec.NotifyTaskChange("deleted", oldTask)
+	exec.NotifyTaskChange("created", newTask)
+
+	return newTask.ID, nil
 }
 
 // deleteTask deletes a task, its Claude session, and its worktree.
