@@ -822,6 +822,17 @@ func pushToCloud(force bool) error {
 		fmt.Println(cloudCheckStyle.Render("done"))
 	}
 
+	// Clear cloud settings on the remote so it doesn't try to sync to itself
+	fmt.Print("Clearing remote cloud settings... ")
+	clearCloudSQL := fmt.Sprintf(`DELETE FROM settings WHERE key IN ('%s', '%s', '%s', '%s', '%s')`,
+		SettingCloudServer, SettingCloudSSHPort, SettingCloudTaskPort, SettingCloudRemoteUser, SettingCloudRemoteDir)
+	_, err = sshRun(server, fmt.Sprintf("sqlite3 '%s' \"%s\"", fullRemoteDBPath, clearCloudSQL))
+	if err != nil {
+		fmt.Println(cloudPendingStyle.Render("warning"))
+	} else {
+		fmt.Println(cloudCheckStyle.Render("done"))
+	}
+
 	// Update project paths to remote paths
 	fmt.Print("Updating project paths... ")
 	projects, err := database.ListProjects()
