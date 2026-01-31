@@ -339,3 +339,36 @@ func buildOpenClawThinkingFlag() string {
 	return fmt.Sprintf("--thinking %s ", level)
 }
 
+// ---- Session and Dangerous Mode Support ----
+
+// SupportsSessionResume returns true - OpenClaw supports session resume via --session.
+func (o *OpenClawExecutor) SupportsSessionResume() bool {
+	return true
+}
+
+// SupportsDangerousMode returns false - OpenClaw does not currently have a dangerous mode flag.
+// Users can configure OpenClaw's permissions through its own settings.
+func (o *OpenClawExecutor) SupportsDangerousMode() bool {
+	return false
+}
+
+// FindSessionID returns the session key for the given task.
+// OpenClaw uses explicit session keys rather than auto-discovering from files.
+func (o *OpenClawExecutor) FindSessionID(workDir string) string {
+	// OpenClaw sessions are managed by the --session flag with explicit keys
+	// We don't auto-discover sessions; they're stored in task.ClaudeSessionID
+	return ""
+}
+
+// ResumeDangerous is not supported for OpenClaw as it doesn't have a dangerous mode flag.
+func (o *OpenClawExecutor) ResumeDangerous(task *db.Task, workDir string) bool {
+	o.executor.logLine(task.ID, "system", "OpenClaw does not support dangerous mode")
+	return false
+}
+
+// ResumeSafe is not supported for OpenClaw as it doesn't have a dangerous mode flag.
+func (o *OpenClawExecutor) ResumeSafe(task *db.Task, workDir string) bool {
+	o.executor.logLine(task.ID, "system", "OpenClaw does not support dangerous mode toggle")
+	return false
+}
+

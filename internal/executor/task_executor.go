@@ -54,6 +54,30 @@ type TaskExecutor interface {
 
 	// IsSuspended checks if a task's executor process is suspended.
 	IsSuspended(taskID int64) bool
+
+	// ---- Session and Dangerous Mode Support ----
+	// These methods enable session tracking and runtime mode switching.
+	// Executors that don't support these features should return appropriate defaults.
+
+	// SupportsSessionResume returns true if the executor supports resuming previous sessions.
+	// If true, FindSessionID and session-based Resume will work.
+	SupportsSessionResume() bool
+
+	// SupportsDangerousMode returns true if the executor has a "dangerous mode" flag
+	// that skips permission prompts for autonomous operation.
+	SupportsDangerousMode() bool
+
+	// FindSessionID discovers and returns the most recent session ID for the given workDir.
+	// Returns empty string if no session is found or sessions aren't supported.
+	FindSessionID(workDir string) string
+
+	// ResumeDangerous kills the current process and restarts with dangerous mode enabled.
+	// Returns true if successfully restarted. Requires session resume support.
+	ResumeDangerous(task *db.Task, workDir string) bool
+
+	// ResumeSafe kills the current process and restarts with dangerous mode disabled.
+	// Returns true if successfully restarted. Requires session resume support.
+	ResumeSafe(task *db.Task, workDir string) bool
 }
 
 // ExecutorFactory manages creation of task executors.

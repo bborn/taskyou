@@ -1931,9 +1931,9 @@ func (e *Executor) runClaude(ctx context.Context, task *db.Task, workDir, prompt
 	if sessionID == "" {
 		sessionID = fmt.Sprintf("%d", os.Getpid())
 	}
-	// Only use --dangerously-skip-permissions if WORKTREE_DANGEROUS_MODE is set
+	// Use --dangerously-skip-permissions if task has dangerous mode enabled or WORKTREE_DANGEROUS_MODE is set
 	dangerousFlag := ""
-	if os.Getenv("WORKTREE_DANGEROUS_MODE") == "1" {
+	if task.DangerousMode || os.Getenv("WORKTREE_DANGEROUS_MODE") == "1" {
 		dangerousFlag = "--dangerously-skip-permissions "
 	}
 	// Check for existing Claude session to resume instead of starting fresh
@@ -2065,9 +2065,9 @@ func (e *Executor) runClaudeResume(ctx context.Context, task *db.Task, workDir, 
 	if taskSessionID == "" {
 		taskSessionID = fmt.Sprintf("%d", os.Getpid())
 	}
-	// Only use --dangerously-skip-permissions if WORKTREE_DANGEROUS_MODE is set
+	// Use --dangerously-skip-permissions if task has dangerous mode enabled or WORKTREE_DANGEROUS_MODE is set
 	dangerousFlag := ""
-	if os.Getenv("WORKTREE_DANGEROUS_MODE") == "1" {
+	if task.DangerousMode || os.Getenv("WORKTREE_DANGEROUS_MODE") == "1" {
 		dangerousFlag = "--dangerously-skip-permissions "
 	}
 	envPrefix := claudeEnvPrefix(paths.configDir)
@@ -2123,27 +2123,56 @@ func (e *Executor) runClaudeResume(ctx context.Context, task *db.Task, workDir, 
 	return result
 }
 
-// ResumeDangerous kills the current Claude process and restarts it with --dangerously-skip-permissions.
+// ResumeDangerous kills the current executor process and restarts it with dangerous mode enabled.
 // This allows switching a running task to dangerous mode without restarting the daemon.
 // Returns true if successfully restarted, false otherwise.
+// This is executor-aware and will delegate to the appropriate executor's implementation.
 func (e *Executor) ResumeDangerous(taskID int64) bool {
-	// Get the task to access session ID and work directory
+	// Get the task to determine which executor to use
 	task, err := e.db.GetTask(taskID)
 	if err != nil || task == nil {
 		e.logger.Error("Failed to get task", "taskID", taskID, "error", err)
-		return false
-	}
-	paths := e.claudePathsForProject(task.Project)
-
-	claudeSessionID := task.ClaudeSessionID
-	if claudeSessionID == "" {
-		e.logLine(taskID, "system", "No Claude session found - cannot resume in dangerous mode")
 		return false
 	}
 
 	workDir := task.WorktreePath
 	if workDir == "" {
 		e.logger.Error("Task has no worktree path", "taskID", taskID)
+		return false
+	}
+
+	// Get the executor for this task
+	exec := e.executorFactory.Get(task.Executor)
+	if exec == nil {
+		e.logger.Error("Unknown executor", "executor", task.Executor)
+		return false
+	}
+
+	// Check if this executor supports dangerous mode
+	if !exec.SupportsDangerousMode() {
+		e.logLine(taskID, "system", fmt.Sprintf("Executor %s does not support dangerous mode", exec.Name()))
+		return false
+	}
+
+	// Check if this executor supports session resume (required for mode switching)
+	if !exec.SupportsSessionResume() {
+		e.logLine(taskID, "system", fmt.Sprintf("Executor %s does not support session resume - cannot toggle mode", exec.Name()))
+		return false
+	}
+
+	// Delegate to the executor's implementation
+	return exec.ResumeDangerous(task, workDir)
+}
+
+// resumeClaudeDangerous is the Claude-specific implementation of dangerous mode resume.
+// It kills the current Claude process and restarts with --dangerously-skip-permissions.
+func (e *Executor) resumeClaudeDangerous(task *db.Task, workDir string) bool {
+	paths := e.claudePathsForProject(task.Project)
+	taskID := task.ID
+
+	claudeSessionID := task.ClaudeSessionID
+	if claudeSessionID == "" {
+		e.logLine(taskID, "system", "No Claude session found - cannot resume in dangerous mode")
 		return false
 	}
 
@@ -2241,27 +2270,56 @@ func (e *Executor) ResumeDangerous(taskID int64) bool {
 	return true
 }
 
-// ResumeSafe kills the current Claude process and restarts it without --dangerously-skip-permissions.
+// ResumeSafe kills the current executor process and restarts it with dangerous mode disabled.
 // This allows switching a running task back from dangerous mode to safe mode.
 // Returns true if successfully restarted, false otherwise.
+// This is executor-aware and will delegate to the appropriate executor's implementation.
 func (e *Executor) ResumeSafe(taskID int64) bool {
-	// Get the task to access session ID and work directory
+	// Get the task to determine which executor to use
 	task, err := e.db.GetTask(taskID)
 	if err != nil || task == nil {
 		e.logger.Error("Failed to get task", "taskID", taskID, "error", err)
-		return false
-	}
-	paths := e.claudePathsForProject(task.Project)
-
-	claudeSessionID := task.ClaudeSessionID
-	if claudeSessionID == "" {
-		e.logLine(taskID, "system", "No Claude session found - cannot resume in safe mode")
 		return false
 	}
 
 	workDir := task.WorktreePath
 	if workDir == "" {
 		e.logger.Error("Task has no worktree path", "taskID", taskID)
+		return false
+	}
+
+	// Get the executor for this task
+	exec := e.executorFactory.Get(task.Executor)
+	if exec == nil {
+		e.logger.Error("Unknown executor", "executor", task.Executor)
+		return false
+	}
+
+	// Check if this executor supports dangerous mode
+	if !exec.SupportsDangerousMode() {
+		e.logLine(taskID, "system", fmt.Sprintf("Executor %s does not support dangerous mode", exec.Name()))
+		return false
+	}
+
+	// Check if this executor supports session resume (required for mode switching)
+	if !exec.SupportsSessionResume() {
+		e.logLine(taskID, "system", fmt.Sprintf("Executor %s does not support session resume - cannot toggle mode", exec.Name()))
+		return false
+	}
+
+	// Delegate to the executor's implementation
+	return exec.ResumeSafe(task, workDir)
+}
+
+// resumeClaudeSafe is the Claude-specific implementation of safe mode resume.
+// It kills the current Claude process and restarts without --dangerously-skip-permissions.
+func (e *Executor) resumeClaudeSafe(task *db.Task, workDir string) bool {
+	paths := e.claudePathsForProject(task.Project)
+	taskID := task.ID
+
+	claudeSessionID := task.ClaudeSessionID
+	if claudeSessionID == "" {
+		e.logLine(taskID, "system", "No Claude session found - cannot resume in safe mode")
 		return false
 	}
 
@@ -2356,6 +2414,178 @@ func (e *Executor) ResumeSafe(taskID int64) bool {
 
 	// Don't poll for completion here - the process will continue running in tmux
 	// The existing polling infrastructure will handle it
+	return true
+}
+
+// resumeCodexWithMode kills the current Codex process and restarts with the specified mode.
+// If dangerousMode is true, uses --dangerously-bypass-approvals-and-sandbox.
+func (e *Executor) resumeCodexWithMode(task *db.Task, workDir string, dangerousMode bool) bool {
+	taskID := task.ID
+	paths := e.claudePathsForProject(task.Project)
+
+	sessionID := task.ClaudeSessionID
+	if sessionID == "" {
+		e.logLine(taskID, "system", "No Codex session found - cannot toggle mode")
+		return false
+	}
+
+	modeStr := "safe"
+	if dangerousMode {
+		modeStr = "dangerous"
+	}
+	e.logLine(taskID, "system", fmt.Sprintf("Restarting Codex in %s mode", modeStr))
+
+	if _, err := exec.LookPath("tmux"); err != nil {
+		e.logLine(taskID, "system", "Tmux not available - cannot resume")
+		return false
+	}
+
+	windowName := TmuxWindowName(taskID)
+	killAllWindowsByNameAllSessions(windowName)
+
+	daemonSession, err := ensureTmuxDaemon()
+	if err != nil {
+		e.logger.Warn("could not create task-daemon session", "error", err)
+		return false
+	}
+
+	windowTarget := fmt.Sprintf("%s:%s", daemonSession, windowName)
+
+	taskSessionID := os.Getenv("WORKTREE_SESSION_ID")
+	if taskSessionID == "" {
+		taskSessionID = fmt.Sprintf("%d", os.Getpid())
+	}
+
+	// Build dangerous flag
+	dangerousFlag := ""
+	if dangerousMode {
+		dangerousFlag = "--dangerously-bypass-approvals-and-sandbox "
+	}
+
+	// Build script with --resume flag
+	envPrefix := claudeEnvPrefix(paths.configDir)
+	script := fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %scodex %s--resume %s`,
+		taskID, taskSessionID, task.Port, task.WorktreePath, envPrefix, dangerousFlag, sessionID)
+
+	actualSession, tmuxErr := createTmuxWindow(daemonSession, windowName, workDir, script)
+	if tmuxErr != nil {
+		e.logger.Warn("tmux failed to create window", "error", tmuxErr, "session", daemonSession)
+		return false
+	}
+
+	if actualSession != daemonSession {
+		windowTarget = fmt.Sprintf("%s:%s", actualSession, windowName)
+		daemonSession = actualSession
+	}
+
+	time.Sleep(200 * time.Millisecond)
+
+	if err := e.db.UpdateTaskDaemonSession(taskID, daemonSession); err != nil {
+		e.logger.Warn("failed to save daemon session", "task", taskID, "error", err)
+	}
+
+	if windowID := getWindowID(daemonSession, windowName); windowID != "" {
+		if err := e.db.UpdateTaskWindowID(taskID, windowID); err != nil {
+			e.logger.Warn("failed to save window ID", "task", taskID, "error", err)
+		}
+	}
+
+	e.ensureShellPane(windowTarget, workDir, task.ID, task.Port, task.WorktreePath, paths.configDir)
+	e.configureTmuxWindow(windowTarget)
+
+	if err := e.db.UpdateTaskDangerousMode(taskID, dangerousMode); err != nil {
+		e.logger.Warn("could not update task dangerous mode", "error", err)
+	}
+
+	e.logLine(taskID, "system", fmt.Sprintf("Codex restarted in %s mode", modeStr))
+	return true
+}
+
+// resumeGeminiWithMode kills the current Gemini process and restarts with the specified mode.
+// If dangerousMode is true, uses --dangerously-allow-run.
+func (e *Executor) resumeGeminiWithMode(task *db.Task, workDir string, dangerousMode bool) bool {
+	taskID := task.ID
+	paths := e.claudePathsForProject(task.Project)
+
+	sessionID := task.ClaudeSessionID
+	if sessionID == "" {
+		e.logLine(taskID, "system", "No Gemini session found - cannot toggle mode")
+		return false
+	}
+
+	modeStr := "safe"
+	if dangerousMode {
+		modeStr = "dangerous"
+	}
+	e.logLine(taskID, "system", fmt.Sprintf("Restarting Gemini in %s mode", modeStr))
+
+	if _, err := exec.LookPath("tmux"); err != nil {
+		e.logLine(taskID, "system", "Tmux not available - cannot resume")
+		return false
+	}
+
+	windowName := TmuxWindowName(taskID)
+	killAllWindowsByNameAllSessions(windowName)
+
+	daemonSession, err := ensureTmuxDaemon()
+	if err != nil {
+		e.logger.Warn("could not create task-daemon session", "error", err)
+		return false
+	}
+
+	windowTarget := fmt.Sprintf("%s:%s", daemonSession, windowName)
+
+	taskSessionID := os.Getenv("WORKTREE_SESSION_ID")
+	if taskSessionID == "" {
+		taskSessionID = fmt.Sprintf("%d", os.Getpid())
+	}
+
+	// Build dangerous flag
+	dangerousFlag := ""
+	if dangerousMode {
+		flag := strings.TrimSpace(os.Getenv("GEMINI_DANGEROUS_ARGS"))
+		if flag == "" {
+			flag = "--dangerously-allow-run"
+		}
+		dangerousFlag = flag + " "
+	}
+
+	// Build script with --resume flag
+	envPrefix := claudeEnvPrefix(paths.configDir)
+	script := fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %sgemini %s--resume %s`,
+		taskID, taskSessionID, task.Port, task.WorktreePath, envPrefix, dangerousFlag, sessionID)
+
+	actualSession, tmuxErr := createTmuxWindow(daemonSession, windowName, workDir, script)
+	if tmuxErr != nil {
+		e.logger.Warn("tmux failed to create window", "error", tmuxErr, "session", daemonSession)
+		return false
+	}
+
+	if actualSession != daemonSession {
+		windowTarget = fmt.Sprintf("%s:%s", actualSession, windowName)
+		daemonSession = actualSession
+	}
+
+	time.Sleep(200 * time.Millisecond)
+
+	if err := e.db.UpdateTaskDaemonSession(taskID, daemonSession); err != nil {
+		e.logger.Warn("failed to save daemon session", "task", taskID, "error", err)
+	}
+
+	if windowID := getWindowID(daemonSession, windowName); windowID != "" {
+		if err := e.db.UpdateTaskWindowID(taskID, windowID); err != nil {
+			e.logger.Warn("failed to save window ID", "task", taskID, "error", err)
+		}
+	}
+
+	e.ensureShellPane(windowTarget, workDir, task.ID, task.Port, task.WorktreePath, paths.configDir)
+	e.configureTmuxWindow(windowTarget)
+
+	if err := e.db.UpdateTaskDangerousMode(taskID, dangerousMode); err != nil {
+		e.logger.Warn("could not update task dangerous mode", "error", err)
+	}
+
+	e.logLine(taskID, "system", fmt.Sprintf("Gemini restarted in %s mode", modeStr))
 	return true
 }
 
