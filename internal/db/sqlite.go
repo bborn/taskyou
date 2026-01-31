@@ -178,6 +178,25 @@ func (db *DB) migrate() error {
 		)`,
 
 		`CREATE INDEX IF NOT EXISTS idx_task_compaction_summaries_task_id ON task_compaction_summaries(task_id)`,
+
+		// Executor sessions table - tracks multiple executor sessions per task
+		`CREATE TABLE IF NOT EXISTS task_executor_sessions (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+			executor TEXT NOT NULL DEFAULT 'claude',
+			session_id TEXT DEFAULT '',
+			daemon_session TEXT DEFAULT '',
+			tmux_window_id TEXT DEFAULT '',
+			claude_pane_id TEXT DEFAULT '',
+			shell_pane_id TEXT DEFAULT '',
+			status TEXT DEFAULT 'pending',
+			dangerous_mode INTEGER DEFAULT 0,
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			started_at DATETIME,
+			completed_at DATETIME
+		)`,
+
+		`CREATE INDEX IF NOT EXISTS idx_task_executor_sessions_task_id ON task_executor_sessions(task_id)`,
 	}
 
 	for _, m := range migrations {
@@ -226,6 +245,10 @@ func (db *DB) migrate() error {
 		`ALTER TABLE tasks ADD COLUMN shell_pane_id TEXT DEFAULT ''`,  // tmux pane ID for shell pane (e.g., "%1235")
 		// Auto-generated project context for caching exploration results
 		`ALTER TABLE projects ADD COLUMN context TEXT DEFAULT ''`, // Auto-generated project context (codebase summary, patterns, etc.)
+		// Active executor session tracking - references the currently active session
+		`ALTER TABLE tasks ADD COLUMN active_session_id INTEGER DEFAULT 0`, // FK to task_executor_sessions.id (0 = none/use legacy)
+		// Session ID for task logs - associates logs with a specific executor session
+		`ALTER TABLE task_logs ADD COLUMN session_id INTEGER DEFAULT 0`, // FK to task_executor_sessions.id (0 = legacy/all sessions)
 	}
 
 	for _, m := range alterMigrations {

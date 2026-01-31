@@ -38,6 +38,8 @@ type Task struct {
 	CompletedAt     *LocalTime
 	// Distillation tracking
 	LastDistilledAt *LocalTime // When task was last distilled for learnings
+	// Multi-executor support
+	ActiveSessionID int64 // Currently active executor session (FK to task_executor_sessions.id, 0 = use legacy fields)
 }
 
 // Task statuses
@@ -91,6 +93,32 @@ type TaskType struct {
 	IsBuiltin    bool   // Protect default types from deletion
 	CreatedAt    LocalTime
 }
+
+// ExecutorSession represents an executor session for a task.
+// Multiple sessions can exist per task, allowing different executors to work on the same task.
+type ExecutorSession struct {
+	ID            int64
+	TaskID        int64
+	Executor      string     // "claude", "codex", "gemini", "openclaw"
+	SessionID     string     // Executor-specific session ID (e.g., Claude session ID)
+	DaemonSession string     // tmux daemon session name
+	TmuxWindowID  string     // tmux window ID
+	ClaudePaneID  string     // tmux pane ID for executor
+	ShellPaneID   string     // tmux pane ID for shell
+	Status        string     // "pending", "active", "completed", "failed"
+	DangerousMode bool       // Whether running in dangerous mode
+	CreatedAt     LocalTime
+	StartedAt     *LocalTime
+	CompletedAt   *LocalTime
+}
+
+// ExecutorSession statuses
+const (
+	SessionStatusPending   = "pending"   // Session created but not started
+	SessionStatusActive    = "active"    // Session is currently running
+	SessionStatusCompleted = "completed" // Session finished successfully
+	SessionStatusFailed    = "failed"    // Session failed
+)
 
 // ErrProjectNotFound is returned when a task is created with a non-existent project.
 var ErrProjectNotFound = fmt.Errorf("project not found")
@@ -159,7 +187,7 @@ func (db *DB) GetTask(id int64) (*Task, error) {
 		       COALESCE(pr_url, ''), COALESCE(pr_number, 0),
 		       COALESCE(dangerous_mode, 0), COALESCE(pinned, 0), COALESCE(tags, ''), COALESCE(summary, ''),
 		       created_at, updated_at, started_at, completed_at,
-		       last_distilled_at
+		       last_distilled_at, COALESCE(active_session_id, 0)
 		FROM tasks WHERE id = ?
 	`, id).Scan(
 		&t.ID, &t.Title, &t.Body, &t.Status, &t.Type, &t.Project, &t.Executor,
@@ -168,7 +196,7 @@ func (db *DB) GetTask(id int64) (*Task, error) {
 		&t.PRURL, &t.PRNumber,
 		&t.DangerousMode, &t.Pinned, &t.Tags, &t.Summary,
 		&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
-		&t.LastDistilledAt,
+		&t.LastDistilledAt, &t.ActiveSessionID,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -199,7 +227,7 @@ func (db *DB) ListTasks(opts ListTasksOptions) ([]*Task, error) {
 		       COALESCE(pr_url, ''), COALESCE(pr_number, 0),
 		       COALESCE(dangerous_mode, 0), COALESCE(pinned, 0), COALESCE(tags, ''), COALESCE(summary, ''),
 		       created_at, updated_at, started_at, completed_at,
-		       last_distilled_at
+		       last_distilled_at, COALESCE(active_session_id, 0)
 		FROM tasks WHERE 1=1
 	`
 	args := []interface{}{}
@@ -251,7 +279,7 @@ func (db *DB) ListTasks(opts ListTasksOptions) ([]*Task, error) {
 			&t.PRURL, &t.PRNumber,
 			&t.DangerousMode, &t.Pinned, &t.Tags, &t.Summary,
 			&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
-			&t.LastDistilledAt,
+			&t.LastDistilledAt, &t.ActiveSessionID,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("scan task: %w", err)
@@ -274,7 +302,7 @@ func (db *DB) GetMostRecentlyCreatedTask() (*Task, error) {
 		       COALESCE(pr_url, ''), COALESCE(pr_number, 0),
 		       COALESCE(dangerous_mode, 0), COALESCE(pinned, 0), COALESCE(tags, ''), COALESCE(summary, ''),
 		       created_at, updated_at, started_at, completed_at,
-		       last_distilled_at
+		       last_distilled_at, COALESCE(active_session_id, 0)
 		FROM tasks
 		ORDER BY created_at DESC, id DESC
 		LIMIT 1
@@ -285,7 +313,7 @@ func (db *DB) GetMostRecentlyCreatedTask() (*Task, error) {
 		&t.PRURL, &t.PRNumber,
 		&t.DangerousMode, &t.Pinned, &t.Tags, &t.Summary,
 		&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
-		&t.LastDistilledAt,
+		&t.LastDistilledAt, &t.ActiveSessionID,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -312,7 +340,7 @@ func (db *DB) SearchTasks(query string, limit int) ([]*Task, error) {
 		       COALESCE(pr_url, ''), COALESCE(pr_number, 0),
 		       COALESCE(dangerous_mode, 0), COALESCE(pinned, 0), COALESCE(tags, ''), COALESCE(summary, ''),
 		       created_at, updated_at, started_at, completed_at,
-		       last_distilled_at
+		       last_distilled_at, COALESCE(active_session_id, 0)
 		FROM tasks
 		WHERE (
 			title LIKE ? COLLATE NOCASE
@@ -342,7 +370,7 @@ func (db *DB) SearchTasks(query string, limit int) ([]*Task, error) {
 			&t.PRURL, &t.PRNumber,
 			&t.DangerousMode, &t.Pinned, &t.Tags, &t.Summary,
 			&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
-			&t.LastDistilledAt,
+			&t.LastDistilledAt, &t.ActiveSessionID,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("scan task: %w", err)
@@ -571,7 +599,7 @@ func (db *DB) GetNextQueuedTask() (*Task, error) {
 		       COALESCE(pr_url, ''), COALESCE(pr_number, 0),
 		       COALESCE(dangerous_mode, 0), COALESCE(pinned, 0), COALESCE(tags, ''), COALESCE(summary, ''),
 		       created_at, updated_at, started_at, completed_at,
-		       last_distilled_at
+		       last_distilled_at, COALESCE(active_session_id, 0)
 		FROM tasks
 		WHERE status = ?
 		ORDER BY created_at ASC
@@ -583,7 +611,7 @@ func (db *DB) GetNextQueuedTask() (*Task, error) {
 		&t.PRURL, &t.PRNumber,
 		&t.DangerousMode, &t.Pinned, &t.Tags, &t.Summary,
 		&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
-		&t.LastDistilledAt,
+		&t.LastDistilledAt, &t.ActiveSessionID,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -604,7 +632,7 @@ func (db *DB) GetQueuedTasks() ([]*Task, error) {
 		       COALESCE(pr_url, ''), COALESCE(pr_number, 0),
 		       COALESCE(dangerous_mode, 0), COALESCE(pinned, 0), COALESCE(tags, ''), COALESCE(summary, ''),
 		       created_at, updated_at, started_at, completed_at,
-		       last_distilled_at
+		       last_distilled_at, COALESCE(active_session_id, 0)
 		FROM tasks
 		WHERE status = ?
 		ORDER BY created_at ASC
@@ -624,7 +652,7 @@ func (db *DB) GetQueuedTasks() ([]*Task, error) {
 			&t.PRURL, &t.PRNumber,
 			&t.DangerousMode, &t.Pinned, &t.Tags, &t.Summary,
 			&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
-			&t.LastDistilledAt,
+			&t.LastDistilledAt, &t.ActiveSessionID,
 		); err != nil {
 			return nil, fmt.Errorf("scan task: %w", err)
 		}
@@ -644,7 +672,7 @@ func (db *DB) GetTasksWithBranches() ([]*Task, error) {
 		       COALESCE(pr_url, ''), COALESCE(pr_number, 0),
 		       COALESCE(dangerous_mode, 0), COALESCE(pinned, 0), COALESCE(tags, ''), COALESCE(summary, ''),
 		       created_at, updated_at, started_at, completed_at,
-		       last_distilled_at
+		       last_distilled_at, COALESCE(active_session_id, 0)
 		FROM tasks
 		WHERE branch_name != '' AND status NOT IN (?, ?)
 		ORDER BY created_at DESC
@@ -664,7 +692,7 @@ func (db *DB) GetTasksWithBranches() ([]*Task, error) {
 			&t.PRURL, &t.PRNumber,
 			&t.DangerousMode, &t.Pinned, &t.Tags, &t.Summary,
 			&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
-			&t.LastDistilledAt,
+			&t.LastDistilledAt, &t.ActiveSessionID,
 		); err != nil {
 			return nil, fmt.Errorf("scan task: %w", err)
 		}
@@ -677,6 +705,7 @@ func (db *DB) GetTasksWithBranches() ([]*Task, error) {
 type TaskLog struct {
 	ID        int64
 	TaskID    int64
+	SessionID int64  // Executor session ID (0 = legacy, before multi-session support)
 	LineType  string // "output", "tool", "error", "system"
 	Content   string
 	CreatedAt LocalTime
@@ -1440,4 +1469,181 @@ func (db *DB) GetTagsList() ([]string, error) {
 		result = append(result, tag)
 	}
 	return result, nil
+}
+
+// CreateExecutorSession creates a new executor session for a task.
+func (db *DB) CreateExecutorSession(s *ExecutorSession) error {
+	result, err := db.Exec(`
+		INSERT INTO task_executor_sessions (task_id, executor, session_id, daemon_session, tmux_window_id,
+		                                    claude_pane_id, shell_pane_id, status, dangerous_mode, started_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, s.TaskID, s.Executor, s.SessionID, s.DaemonSession, s.TmuxWindowID,
+		s.ClaudePaneID, s.ShellPaneID, s.Status, s.DangerousMode, s.StartedAt)
+	if err != nil {
+		return fmt.Errorf("insert executor session: %w", err)
+	}
+	id, err := result.LastInsertId()
+	if err != nil {
+		return fmt.Errorf("get last insert id: %w", err)
+	}
+	s.ID = id
+	return nil
+}
+
+// GetExecutorSession retrieves an executor session by ID.
+func (db *DB) GetExecutorSession(id int64) (*ExecutorSession, error) {
+	s := &ExecutorSession{}
+	err := db.QueryRow(`
+		SELECT id, task_id, executor, COALESCE(session_id, ''), COALESCE(daemon_session, ''),
+		       COALESCE(tmux_window_id, ''), COALESCE(claude_pane_id, ''), COALESCE(shell_pane_id, ''),
+		       status, COALESCE(dangerous_mode, 0), created_at, started_at, completed_at
+		FROM task_executor_sessions WHERE id = ?
+	`, id).Scan(
+		&s.ID, &s.TaskID, &s.Executor, &s.SessionID, &s.DaemonSession,
+		&s.TmuxWindowID, &s.ClaudePaneID, &s.ShellPaneID,
+		&s.Status, &s.DangerousMode, &s.CreatedAt, &s.StartedAt, &s.CompletedAt,
+	)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("query executor session: %w", err)
+	}
+	return s, nil
+}
+
+// GetExecutorSessionsForTask retrieves all executor sessions for a task.
+func (db *DB) GetExecutorSessionsForTask(taskID int64) ([]*ExecutorSession, error) {
+	rows, err := db.Query(`
+		SELECT id, task_id, executor, COALESCE(session_id, ''), COALESCE(daemon_session, ''),
+		       COALESCE(tmux_window_id, ''), COALESCE(claude_pane_id, ''), COALESCE(shell_pane_id, ''),
+		       status, COALESCE(dangerous_mode, 0), created_at, started_at, completed_at
+		FROM task_executor_sessions WHERE task_id = ?
+		ORDER BY created_at ASC
+	`, taskID)
+	if err != nil {
+		return nil, fmt.Errorf("query executor sessions: %w", err)
+	}
+	defer rows.Close()
+
+	var sessions []*ExecutorSession
+	for rows.Next() {
+		s := &ExecutorSession{}
+		if err := rows.Scan(
+			&s.ID, &s.TaskID, &s.Executor, &s.SessionID, &s.DaemonSession,
+			&s.TmuxWindowID, &s.ClaudePaneID, &s.ShellPaneID,
+			&s.Status, &s.DangerousMode, &s.CreatedAt, &s.StartedAt, &s.CompletedAt,
+		); err != nil {
+			return nil, fmt.Errorf("scan executor session: %w", err)
+		}
+		sessions = append(sessions, s)
+	}
+	return sessions, nil
+}
+
+// GetActiveExecutorSession retrieves the active executor session for a task.
+func (db *DB) GetActiveExecutorSession(taskID int64) (*ExecutorSession, error) {
+	s := &ExecutorSession{}
+	err := db.QueryRow(`
+		SELECT id, task_id, executor, COALESCE(session_id, ''), COALESCE(daemon_session, ''),
+		       COALESCE(tmux_window_id, ''), COALESCE(claude_pane_id, ''), COALESCE(shell_pane_id, ''),
+		       status, COALESCE(dangerous_mode, 0), created_at, started_at, completed_at
+		FROM task_executor_sessions
+		WHERE task_id = ? AND status = ?
+		ORDER BY created_at DESC
+		LIMIT 1
+	`, taskID, SessionStatusActive).Scan(
+		&s.ID, &s.TaskID, &s.Executor, &s.SessionID, &s.DaemonSession,
+		&s.TmuxWindowID, &s.ClaudePaneID, &s.ShellPaneID,
+		&s.Status, &s.DangerousMode, &s.CreatedAt, &s.StartedAt, &s.CompletedAt,
+	)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("query active executor session: %w", err)
+	}
+	return s, nil
+}
+
+// UpdateExecutorSession updates an executor session.
+func (db *DB) UpdateExecutorSession(s *ExecutorSession) error {
+	_, err := db.Exec(`
+		UPDATE task_executor_sessions SET
+			executor = ?, session_id = ?, daemon_session = ?, tmux_window_id = ?,
+			claude_pane_id = ?, shell_pane_id = ?, status = ?, dangerous_mode = ?,
+			started_at = ?, completed_at = ?
+		WHERE id = ?
+	`, s.Executor, s.SessionID, s.DaemonSession, s.TmuxWindowID,
+		s.ClaudePaneID, s.ShellPaneID, s.Status, s.DangerousMode,
+		s.StartedAt, s.CompletedAt, s.ID)
+	if err != nil {
+		return fmt.Errorf("update executor session: %w", err)
+	}
+	return nil
+}
+
+// SetActiveExecutorSession sets the active executor session for a task.
+func (db *DB) SetActiveExecutorSession(taskID int64, sessionID int64) error {
+	_, err := db.Exec(`
+		UPDATE tasks SET active_session_id = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?
+	`, sessionID, taskID)
+	if err != nil {
+		return fmt.Errorf("set active executor session: %w", err)
+	}
+	return nil
+}
+
+// DeleteExecutorSession deletes an executor session.
+func (db *DB) DeleteExecutorSession(id int64) error {
+	_, err := db.Exec("DELETE FROM task_executor_sessions WHERE id = ?", id)
+	if err != nil {
+		return fmt.Errorf("delete executor session: %w", err)
+	}
+	return nil
+}
+
+// AppendTaskLogForSession appends a log entry to a task for a specific session.
+func (db *DB) AppendTaskLogForSession(taskID int64, sessionID int64, lineType, content string) error {
+	_, err := db.Exec(`
+		INSERT INTO task_logs (task_id, session_id, line_type, content)
+		VALUES (?, ?, ?, ?)
+	`, taskID, sessionID, lineType, content)
+	if err != nil {
+		return fmt.Errorf("insert task log for session: %w", err)
+	}
+	return nil
+}
+
+// GetTaskLogsForSession retrieves logs for a task filtered by session.
+// If sessionID is 0, returns all logs (legacy behavior).
+// Otherwise, returns logs for the specific session plus any legacy logs (session_id = 0).
+func (db *DB) GetTaskLogsForSession(taskID int64, sessionID int64, limit int) ([]*TaskLog, error) {
+	if limit <= 0 {
+		limit = 1000
+	}
+
+	rows, err := db.Query(`
+		SELECT id, task_id, COALESCE(session_id, 0), line_type, content, created_at
+		FROM task_logs
+		WHERE task_id = ? AND (session_id = ? OR session_id = 0 OR session_id IS NULL)
+		ORDER BY id DESC
+		LIMIT ?
+	`, taskID, sessionID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("query task logs for session: %w", err)
+	}
+	defer rows.Close()
+
+	var logs []*TaskLog
+	for rows.Next() {
+		l := &TaskLog{}
+		err := rows.Scan(&l.ID, &l.TaskID, &l.SessionID, &l.LineType, &l.Content, &l.CreatedAt)
+		if err != nil {
+			return nil, fmt.Errorf("scan task log: %w", err)
+		}
+		logs = append(logs, l)
+	}
+
+	return logs, nil
 }

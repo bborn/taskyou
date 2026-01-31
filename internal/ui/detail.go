@@ -104,6 +104,10 @@ type DetailModel struct {
 
 	// Shell pane visibility toggle
 	shellPaneHidden bool // true when shell pane is collapsed to daemon
+
+	// Multi-executor session support
+	sessions        []*db.ExecutorSession // All sessions for this task
+	selectedSession int                   // Index of currently selected session (0-based)
 }
 
 // Message types for async pane loading
@@ -207,6 +211,16 @@ func (m *DetailModel) Refresh() {
 		m.task = task
 	}
 
+	// Reload executor sessions
+	sessions, err := m.database.GetExecutorSessionsForTask(m.task.ID)
+	if err == nil {
+		m.sessions = sessions
+		// Ensure selectedSession is within bounds
+		if m.selectedSession >= len(m.sessions) {
+			m.selectedSession = 0
+		}
+	}
+
 	// Check log count first to avoid loading all logs if unchanged
 	logCount, err := m.database.GetTaskLogCount(m.task.ID)
 	if err == nil && logCount != m.lastLogCount {
@@ -286,6 +300,10 @@ func NewDetailModel(t *db.Task, database *db.DB, exec *executor.Executor, width,
 	// Load logs
 	logs, _ := database.GetTaskLogs(t.ID, 100)
 	m.logs = logs
+
+	// Load executor sessions
+	sessions, _ := database.GetExecutorSessionsForTask(t.ID)
+	m.sessions = sessions
 
 	m.initViewport()
 
@@ -489,6 +507,21 @@ func (m *DetailModel) Update(msg tea.Msg) (*DetailModel, tea.Cmd) {
 		log.Info("panesRefreshMsg: refreshing panes for task %d", m.task.ID)
 		// Re-start the async pane setup
 		return m, m.startPanesAsync()
+
+	case tea.KeyMsg:
+		// Handle session switching with < and >
+		switch msg.String() {
+		case "<", "shift+,":
+			if len(m.sessions) > 1 {
+				m.SelectPrevSession()
+				return m, nil
+			}
+		case ">", "shift+.":
+			if len(m.sessions) > 1 {
+				m.SelectNextSession()
+				return m, nil
+			}
+		}
 	}
 
 	// Pass all messages to viewport for scrolling support
@@ -2019,6 +2052,7 @@ func (m *DetailModel) View() string {
 	}
 
 	header := m.renderHeader()
+	sessionTabs := m.renderSessionTabs()
 	content := m.viewport.View()
 
 	// Use dimmed border when unfocused
@@ -2051,9 +2085,21 @@ func (m *DetailModel) View() string {
 	}
 
 	help := m.renderHelp()
-	boxContent := lipgloss.JoinVertical(lipgloss.Left, header, content)
-	if scrollIndicator != "" {
-		boxContent = lipgloss.JoinVertical(lipgloss.Left, header, content, scrollIndicator)
+
+	// Build box content with optional session tabs
+	var boxContent string
+	if sessionTabs != "" {
+		if scrollIndicator != "" {
+			boxContent = lipgloss.JoinVertical(lipgloss.Left, header, sessionTabs, content, scrollIndicator)
+		} else {
+			boxContent = lipgloss.JoinVertical(lipgloss.Left, header, sessionTabs, content)
+		}
+	} else {
+		if scrollIndicator != "" {
+			boxContent = lipgloss.JoinVertical(lipgloss.Left, header, content, scrollIndicator)
+		} else {
+			boxContent = lipgloss.JoinVertical(lipgloss.Left, header, content)
+		}
 	}
 
 	// Build view parts
@@ -2270,6 +2316,100 @@ func (m *DetailModel) renderHeader() string {
 		Render(rightBlock)
 
 	return lipgloss.JoinVertical(lipgloss.Left, headerLayout, "")
+}
+
+// renderSessionTabs renders the executor session tabs (if there are multiple sessions).
+func (m *DetailModel) renderSessionTabs() string {
+	// Don't show tabs if there are no sessions or only one
+	if len(m.sessions) <= 1 {
+		return ""
+	}
+
+	var tabs strings.Builder
+
+	// Muted colors for unfocused state
+	dimmedBg := lipgloss.Color("#4B5563")
+	dimmedFg := lipgloss.Color("#9CA3AF")
+
+	for i, session := range m.sessions {
+		isSelected := i == m.selectedSession
+
+		// Build tab label
+		label := strings.ToUpper(session.Executor[:1]) + session.Executor[1:]
+		if session.Status == db.SessionStatusActive {
+			label += " ●"
+		} else if session.Status == db.SessionStatusCompleted {
+			label += " ✓"
+		} else if session.Status == db.SessionStatusFailed {
+			label += " ✗"
+		}
+
+		var tabStyle lipgloss.Style
+		if isSelected {
+			if m.focused {
+				tabStyle = lipgloss.NewStyle().
+					Padding(0, 1).
+					Background(ColorPrimary).
+					Foreground(lipgloss.Color("#FFFFFF")).
+					Bold(true)
+			} else {
+				tabStyle = lipgloss.NewStyle().
+					Padding(0, 1).
+					Background(dimmedBg).
+					Foreground(dimmedFg).
+					Bold(true)
+			}
+		} else {
+			tabStyle = lipgloss.NewStyle().
+				Padding(0, 1).
+				Foreground(lipgloss.Color("#6B7280"))
+		}
+
+		if i > 0 {
+			tabs.WriteString(" ")
+		}
+		tabs.WriteString(tabStyle.Render(label))
+	}
+
+	// Add hint for switching tabs
+	hint := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#4B5563")).
+		Render("  (< > to switch)")
+
+	return tabs.String() + hint
+}
+
+// HasMultipleSessions returns true if the task has multiple executor sessions.
+func (m *DetailModel) HasMultipleSessions() bool {
+	return len(m.sessions) > 1
+}
+
+// GetSelectedSession returns the currently selected executor session.
+func (m *DetailModel) GetSelectedSession() *db.ExecutorSession {
+	if m.selectedSession >= 0 && m.selectedSession < len(m.sessions) {
+		return m.sessions[m.selectedSession]
+	}
+	return nil
+}
+
+// SelectNextSession moves to the next executor session.
+func (m *DetailModel) SelectNextSession() {
+	if len(m.sessions) > 1 {
+		m.selectedSession = (m.selectedSession + 1) % len(m.sessions)
+		if m.ready {
+			m.viewport.SetContent(m.renderContent())
+		}
+	}
+}
+
+// SelectPrevSession moves to the previous executor session.
+func (m *DetailModel) SelectPrevSession() {
+	if len(m.sessions) > 1 {
+		m.selectedSession = (m.selectedSession - 1 + len(m.sessions)) % len(m.sessions)
+		if m.ready {
+			m.viewport.SetContent(m.renderContent())
+		}
+	}
 }
 
 // getGlamourRenderer returns a cached Glamour renderer, creating it if needed.

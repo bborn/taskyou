@@ -818,6 +818,26 @@ func (e *Executor) executeTask(ctx context.Context, task *db.Task) {
 		return
 	}
 
+	// Create or get executor session for tracking
+	var session *db.ExecutorSession
+	if !isRetry {
+		// Create new executor session
+		now := db.LocalTime{Time: time.Now()}
+		session = &db.ExecutorSession{
+			TaskID:        task.ID,
+			Executor:      executorName,
+			Status:        db.SessionStatusActive,
+			DangerousMode: task.DangerousMode,
+			StartedAt:     &now,
+		}
+		if err := e.db.CreateExecutorSession(session); err != nil {
+			e.logger.Error("Failed to create executor session", "error", err)
+		} else {
+			// Set as active session
+			e.db.SetActiveExecutorSession(task.ID, session.ID)
+		}
+	}
+
 	// Run the executor
 	var result execResult
 	if isRetry {
@@ -887,6 +907,23 @@ func (e *Executor) executeTask(ctx context.Context, task *db.Task) {
 		msg := fmt.Sprintf("Task failed: %s", result.Message)
 		e.logLine(task.ID, "error", msg)
 		e.hooks.OnStatusChange(task, db.StatusBlocked, msg)
+	}
+
+	// Update executor session status
+	if session != nil {
+		now := db.LocalTime{Time: time.Now()}
+		session.CompletedAt = &now
+		if result.Interrupted {
+			session.Status = db.SessionStatusFailed
+		} else if result.Success || currentStatus == db.StatusDone {
+			session.Status = db.SessionStatusCompleted
+		} else {
+			// Still active (blocked/needs input means the executor is still running)
+			session.Status = db.SessionStatusActive
+		}
+		if err := e.db.UpdateExecutorSession(session); err != nil {
+			e.logger.Error("Failed to update executor session", "error", err)
+		}
 	}
 
 	e.logger.Info("Task finished", "id", task.ID, "success", result.Success)
