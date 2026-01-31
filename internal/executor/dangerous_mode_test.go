@@ -66,6 +66,13 @@ func TestExecutorInterfaceImplementation(t *testing.T) {
 			supportsDangerousMode: false, // OpenClaw does not support dangerous mode
 			dangerousFlag:         "",
 		},
+		{
+			name:                  "OpenCode executor",
+			executorName:          db.ExecutorOpenCode,
+			supportsSessionResume: false, // OpenCode does not support session resume
+			supportsDangerousMode: false, // OpenCode does not support dangerous mode
+			dangerousFlag:         "",
+		},
 	}
 
 	for _, tt := range tests {
@@ -684,6 +691,84 @@ func TestOpenClawDangerousModeNotSupported(t *testing.T) {
 	})
 }
 
+// TestOpenCodeDangerousModeNotSupported tests that OpenCode correctly reports
+// it doesn't support dangerous mode and ResumeDangerous returns false.
+func TestOpenCodeDangerousModeNotSupported(t *testing.T) {
+	// Create temp database
+	tmpFile, err := os.CreateTemp("", "test-*.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(tmpFile.Name())
+	tmpFile.Close()
+
+	database, err := db.Open(tmpFile.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+
+	// Create the test project first
+	if err := database.CreateProject(&db.Project{Name: "test", Path: "/tmp/test"}); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.Config{}
+	exec := New(database, cfg)
+
+	executor := exec.executorFactory.Get(db.ExecutorOpenCode)
+
+	t.Run("SupportsDangerousMode returns false", func(t *testing.T) {
+		if executor.SupportsDangerousMode() {
+			t.Error("OpenCode should not support dangerous mode")
+		}
+	})
+
+	t.Run("SupportsSessionResume returns false", func(t *testing.T) {
+		if executor.SupportsSessionResume() {
+			t.Error("OpenCode should not support session resume")
+		}
+	})
+
+	t.Run("BuildCommand does not include dangerous flags", func(t *testing.T) {
+		task := &db.Task{
+			ID:            1,
+			DangerousMode: true, // Even when enabled on task
+			Port:          8080,
+			WorktreePath:  "/tmp/test-worktree",
+		}
+
+		cmd := executor.BuildCommand(task, "", "")
+
+		// Should NOT contain any dangerous flag
+		dangerousFlags := []string{
+			"--dangerously-skip-permissions",
+			"--dangerously-bypass-approvals-and-sandbox",
+			"--dangerously-allow-run",
+		}
+		for _, flag := range dangerousFlags {
+			if strings.Contains(cmd, flag) {
+				t.Errorf("OpenCode BuildCommand() = %q, should NOT contain %q", cmd, flag)
+			}
+		}
+	})
+
+	t.Run("ResumeDangerous returns false", func(t *testing.T) {
+		task := &db.Task{
+			ID:      1,
+			Project: "test",
+		}
+		if err := database.CreateTask(task); err != nil {
+			t.Fatal(err)
+		}
+
+		result := executor.ResumeDangerous(task, "/tmp/test-worktree")
+		if result {
+			t.Error("OpenCode ResumeDangerous should return false")
+		}
+	})
+}
+
 // TestBuildCommandIncludesEnvironmentVariables tests that BuildCommand
 // includes the necessary WORKTREE_* environment variables.
 func TestBuildCommandIncludesEnvironmentVariables(t *testing.T) {
@@ -710,7 +795,7 @@ func TestBuildCommandIncludesEnvironmentVariables(t *testing.T) {
 		WorktreePath: "/home/user/projects/myapp/.task-worktrees/42-fix-bug",
 	}
 
-	executors := []string{db.ExecutorClaude, db.ExecutorCodex, db.ExecutorGemini, db.ExecutorOpenClaw}
+	executors := []string{db.ExecutorClaude, db.ExecutorCodex, db.ExecutorGemini, db.ExecutorOpenClaw, db.ExecutorOpenCode}
 
 	for _, name := range executors {
 		t.Run(name, func(t *testing.T) {

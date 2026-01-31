@@ -149,6 +149,7 @@ func New(database *db.DB, cfg *config.Config) *Executor {
 	e.executorFactory.Register(NewCodexExecutor(e))
 	e.executorFactory.Register(NewGeminiExecutor(e))
 	e.executorFactory.Register(NewOpenClawExecutor(e))
+	e.executorFactory.Register(NewOpenCodeExecutor(e))
 
 	return e
 }
@@ -179,6 +180,7 @@ func NewWithLogging(database *db.DB, cfg *config.Config, w io.Writer) *Executor 
 	e.executorFactory.Register(NewCodexExecutor(e))
 	e.executorFactory.Register(NewGeminiExecutor(e))
 	e.executorFactory.Register(NewOpenClawExecutor(e))
+	e.executorFactory.Register(NewOpenCodeExecutor(e))
 
 	return e
 }
