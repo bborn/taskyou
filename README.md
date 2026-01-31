@@ -30,7 +30,7 @@ A personal task management system with a beautiful terminal UI, SQLite storage, 
 - **Markdown Rendering** - Task descriptions render with proper formatting in the detail view
 - **Real-time Updates** - Watch tasks execute live
 - **Running Process Indicator** - Green dot (`●`) shows which tasks have active shell processes (servers, watchers, etc.)
-- **Auto-cleanup** - Automatic cleanup of Claude processes and config entries for completed tasks
+- **Auto-cleanup** - Automatic cleanup of Claude processes for completed tasks (see maintenance commands for config cleanup)
 - **Automation-Ready CLI** - Every Kanban action is also exposed via the `ty` CLI, making it trivial to script or plug in your own orchestrator (see [external orchestration docs](docs/orchestrator.md))
 - **SSH Access** - Run as an SSH server to access your tasks from anywhere (see [SSH Access & Deployment](#ssh-access--deployment))
 
@@ -109,6 +109,8 @@ Need an always-on supervisor or LLM agent? Keep it outside Task You and use the 
 - See [docs/orchestrator.md](docs/orchestrator.md) for a step-by-step Claude example
 
 **Auto-cleanup:** The daemon automatically cleans up Claude processes for tasks that have been done for more than 30 minutes, preventing memory bloat from orphaned processes.
+
+> **Note:** Automatic cleanup currently only works for the Claude executor. When using other executors (Codex, Gemini, Pi, etc.), you may need to manually clean up processes using `ty sessions cleanup` to prevent memory bloat.
 
 ### AI Agent Skill
 
