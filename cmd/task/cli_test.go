@@ -62,6 +62,17 @@ func TestCLICreateTask(t *testing.T) {
 				Project: "",
 			},
 		},
+		{
+			name: "task with executor",
+			task: &db.Task{
+				Title:    "Task with codex",
+				Body:     "Use codex executor",
+				Status:   db.StatusBacklog,
+				Type:     db.TypeCode,
+				Executor: db.ExecutorCodex,
+				Project:  "",
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -85,6 +96,14 @@ func TestCLICreateTask(t *testing.T) {
 				}
 				if fetched.Status != tt.task.Status {
 					t.Errorf("Status = %v, want %v", fetched.Status, tt.task.Status)
+				}
+				// Check executor (defaults to claude if empty)
+				expectedExecutor := tt.task.Executor
+				if expectedExecutor == "" {
+					expectedExecutor = db.ExecutorClaude
+				}
+				if fetched.Executor != expectedExecutor {
+					t.Errorf("Executor = %v, want %v", fetched.Executor, expectedExecutor)
 				}
 			}
 		})

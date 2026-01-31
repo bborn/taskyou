@@ -377,6 +377,7 @@ Examples:
   task create "Fix login bug"
   task create "Add dark mode" --type code --project myapp
   task create "Write documentation" --body "Document the API endpoints" --execute
+  task create "Refactor auth" --executor codex  # Use Codex instead of Claude
   task create --body "The login button is broken on mobile devices" # AI generates title`,
 		Args: cobra.MaximumNArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
@@ -387,6 +388,7 @@ Examples:
 			body, _ := cmd.Flags().GetString("body")
 			taskType, _ := cmd.Flags().GetString("type")
 			project, _ := cmd.Flags().GetString("project")
+			taskExecutor, _ := cmd.Flags().GetString("executor")
 			execute, _ := cmd.Flags().GetBool("execute")
 			outputJSON, _ := cmd.Flags().GetBool("json")
 
@@ -432,6 +434,22 @@ Examples:
 				os.Exit(1)
 			}
 
+			// Validate executor if provided
+			validExecutors := []string{db.ExecutorClaude, db.ExecutorCodex, db.ExecutorGemini, db.ExecutorPi, db.ExecutorOpenCode, db.ExecutorOpenClaw}
+			if taskExecutor != "" {
+				validExecutor := false
+				for _, e := range validExecutors {
+					if e == taskExecutor {
+						validExecutor = true
+						break
+					}
+				}
+				if !validExecutor {
+					fmt.Fprintln(os.Stderr, errorStyle.Render("Invalid executor. Must be one of: "+strings.Join(validExecutors, ", ")))
+					os.Exit(1)
+				}
+			}
+
 			// If project not specified, try to detect from cwd
 			if project == "" {
 				if cwd, err := os.Getwd(); err == nil {
@@ -474,11 +492,12 @@ Examples:
 
 			// Create the task
 			task := &db.Task{
-				Title:   title,
-				Body:    body,
-				Status:  status,
-				Type:    taskType,
-				Project: project,
+				Title:    title,
+				Body:     body,
+				Status:   status,
+				Type:     taskType,
+				Project:  project,
+				Executor: taskExecutor,
 			}
 
 			if err := database.CreateTask(task); err != nil {
@@ -488,11 +507,12 @@ Examples:
 
 			if outputJSON {
 				output := map[string]interface{}{
-					"id":      task.ID,
-					"title":   task.Title,
-					"status":  task.Status,
-					"type":    task.Type,
-					"project": task.Project,
+					"id":       task.ID,
+					"title":    task.Title,
+					"status":   task.Status,
+					"type":     task.Type,
+					"project":  task.Project,
+					"executor": task.Executor,
 				}
 				jsonBytes, _ := json.Marshal(output)
 				fmt.Println(string(jsonBytes))
@@ -508,6 +528,7 @@ Examples:
 	createCmd.Flags().String("body", "", "Task body/description (if no title, AI generates from body)")
 	createCmd.Flags().StringP("type", "t", "", "Task type: code, writing, thinking (default: code)")
 	createCmd.Flags().StringP("project", "p", "", "Project name (auto-detected from cwd if not specified)")
+	createCmd.Flags().StringP("executor", "e", "", "Task executor: claude, codex, gemini, pi, opencode, openclaw (default: claude)")
 	createCmd.Flags().BoolP("execute", "x", false, "Queue task for immediate execution")
 	createCmd.Flags().Bool("json", false, "Output in JSON format")
 	rootCmd.AddCommand(createCmd)
