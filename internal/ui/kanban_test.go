@@ -884,3 +884,188 @@ func TestKanbanBoard_DangerousModeIndicatorHiddenInGlobalMode(t *testing.T) {
 		t.Error("View should contain the task title 'Dangerous Task'")
 	}
 }
+
+func TestKanbanBoard_OriginColumn(t *testing.T) {
+	board := NewKanbanBoard(100, 50)
+
+	// Initially no origin column is set
+	if board.HasOriginColumn() {
+		t.Error("HasOriginColumn() should return false initially")
+	}
+
+	// Set up tasks
+	tasks := []*db.Task{
+		{ID: 1, Title: "Backlog Task", Status: db.StatusBacklog},
+		{ID: 2, Title: "Blocked Task", Status: db.StatusBlocked},
+	}
+	board.SetTasks(tasks)
+
+	// Focus on blocked column
+	board.FocusColumn(2)
+	if board.selectedCol != 2 {
+		t.Fatalf("FocusColumn(2) failed, selectedCol = %d", board.selectedCol)
+	}
+
+	// Set origin column
+	board.SetOriginColumn()
+	if !board.HasOriginColumn() {
+		t.Error("HasOriginColumn() should return true after SetOriginColumn()")
+	}
+
+	// Clear origin column
+	board.ClearOriginColumn()
+	if board.HasOriginColumn() {
+		t.Error("HasOriginColumn() should return false after ClearOriginColumn()")
+	}
+}
+
+func TestKanbanBoard_OriginColumnPreservesColumnOnTaskMove(t *testing.T) {
+	board := NewKanbanBoard(100, 50)
+
+	// Set up initial tasks - one blocked task
+	tasks := []*db.Task{
+		{ID: 1, Title: "Backlog Task", Status: db.StatusBacklog},
+		{ID: 2, Title: "Blocked Task", Status: db.StatusBlocked},
+	}
+	board.SetTasks(tasks)
+
+	// Focus on blocked column and select the blocked task
+	board.FocusColumn(2)
+	board.SelectTask(2)
+
+	if board.selectedCol != 2 {
+		t.Fatalf("Expected selectedCol to be 2 (blocked), got %d", board.selectedCol)
+	}
+
+	// Set origin column (simulating entering detail view)
+	board.SetOriginColumn()
+
+	// Now simulate the task moving to a different column (e.g., to in-progress)
+	tasks = []*db.Task{
+		{ID: 1, Title: "Backlog Task", Status: db.StatusBacklog},
+		{ID: 2, Title: "Blocked Task", Status: db.StatusQueued}, // Moved to in-progress
+	}
+	board.SetTasks(tasks)
+
+	// selectedCol should stay at 2 (blocked) because origin column is set
+	if board.selectedCol != 2 {
+		t.Errorf("Expected selectedCol to remain at 2 (blocked), got %d", board.selectedCol)
+	}
+}
+
+func TestKanbanBoard_NoOriginColumnFollowsTask(t *testing.T) {
+	board := NewKanbanBoard(100, 50)
+
+	// Set up initial tasks - one blocked task
+	tasks := []*db.Task{
+		{ID: 1, Title: "Backlog Task", Status: db.StatusBacklog},
+		{ID: 2, Title: "Blocked Task", Status: db.StatusBlocked},
+	}
+	board.SetTasks(tasks)
+
+	// Focus on blocked column and select the blocked task
+	board.FocusColumn(2)
+	board.SelectTask(2)
+
+	// Verify initial state
+	if board.selectedCol != 2 {
+		t.Fatalf("Expected selectedCol to be 2 (blocked), got %d", board.selectedCol)
+	}
+
+	// Do NOT set origin column (normal dashboard behavior)
+
+	// Now simulate the task moving to a different column (e.g., to in-progress)
+	tasks = []*db.Task{
+		{ID: 1, Title: "Backlog Task", Status: db.StatusBacklog},
+		{ID: 2, Title: "Blocked Task", Status: db.StatusQueued}, // Moved to in-progress
+	}
+	board.SetTasks(tasks)
+
+	// selectedCol should follow the task to column 1 (in-progress)
+	if board.selectedCol != 1 {
+		t.Errorf("Expected selectedCol to follow task to 1 (in-progress), got %d", board.selectedCol)
+	}
+}
+
+func TestKanbanBoard_OriginColumnClampsSelection(t *testing.T) {
+	board := NewKanbanBoard(100, 50)
+
+	// Set up tasks - multiple in blocked column
+	tasks := []*db.Task{
+		{ID: 1, Title: "Blocked Task 1", Status: db.StatusBlocked},
+		{ID: 2, Title: "Blocked Task 2", Status: db.StatusBlocked},
+		{ID: 3, Title: "Blocked Task 3", Status: db.StatusBlocked},
+	}
+	board.SetTasks(tasks)
+
+	// Focus on blocked column, select last task
+	board.FocusColumn(2)
+	board.MoveDown()
+	board.MoveDown() // Now at row 2 (third task)
+
+	if board.selectedRow != 2 {
+		t.Fatalf("Expected selectedRow to be 2, got %d", board.selectedRow)
+	}
+
+	// Set origin column
+	board.SetOriginColumn()
+
+	// Remove all but one task from blocked column
+	tasks = []*db.Task{
+		{ID: 1, Title: "Blocked Task 1", Status: db.StatusBlocked},
+	}
+	board.SetTasks(tasks)
+
+	// selectedRow should be clamped to 0 (only task remaining)
+	if board.selectedRow != 0 {
+		t.Errorf("Expected selectedRow to be clamped to 0, got %d", board.selectedRow)
+	}
+
+	// selectedCol should still be 2 (blocked)
+	if board.selectedCol != 2 {
+		t.Errorf("Expected selectedCol to remain at 2, got %d", board.selectedCol)
+	}
+}
+
+func TestKanbanBoard_OriginColumnEmptyColumn(t *testing.T) {
+	board := NewKanbanBoard(100, 50)
+
+	// Set up tasks - one in blocked column
+	tasks := []*db.Task{
+		{ID: 1, Title: "Backlog Task", Status: db.StatusBacklog},
+		{ID: 2, Title: "Blocked Task", Status: db.StatusBlocked},
+	}
+	board.SetTasks(tasks)
+
+	// Focus on blocked column
+	board.FocusColumn(2)
+	board.SelectTask(2)
+
+	// Set origin column
+	board.SetOriginColumn()
+
+	// Now remove ALL tasks from blocked column (move to in-progress)
+	tasks = []*db.Task{
+		{ID: 1, Title: "Backlog Task", Status: db.StatusBacklog},
+		{ID: 2, Title: "Was Blocked", Status: db.StatusQueued}, // Moved to in-progress
+	}
+	board.SetTasks(tasks)
+
+	// selectedCol should still be 2 (blocked) - origin column is preserved
+	if board.selectedCol != 2 {
+		t.Errorf("Expected selectedCol to remain at 2, got %d", board.selectedCol)
+	}
+
+	// SelectedTask should return nil (no tasks in blocked column)
+	if board.SelectedTask() != nil {
+		t.Error("SelectedTask() should return nil for empty column")
+	}
+
+	// HasPrevTask and HasNextTask should return false
+	if board.HasPrevTask() {
+		t.Error("HasPrevTask() should return false for empty column")
+	}
+	if board.HasNextTask() {
+		t.Error("HasNextTask() should return false for empty column")
+	}
+}
