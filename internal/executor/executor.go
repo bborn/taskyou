@@ -1059,10 +1059,17 @@ func (e *Executor) buildPrompt(task *db.Task, attachmentPaths []string) string {
 		prompt.WriteString(e.buildGenericContextSection(projectInstructions, similarTasks, attachments, conversationHistory))
 	}
 
-	// Add response guidance to ALL task types
-	// Note: Task status is now managed automatically via Claude hooks
-	prompt.WriteString(`
-═══════════════════════════════════════════════════════════════
+	// Note: Task guidance is now passed via system prompt (Claude) or GEMINI.md (Gemini)
+	// to keep the user conversation thread clean. See buildSystemInstructions().
+
+	return prompt.String()
+}
+
+// buildSystemInstructions returns the system-level instructions that guide task execution.
+// These instructions are passed via system prompt mechanisms (e.g., --append-system-prompt for Claude,
+// GEMINI.md for Gemini) rather than in the user conversation thread to keep it clean.
+func (e *Executor) buildSystemInstructions() string {
+	return `═══════════════════════════════════════════════════════════════
                       TASK GUIDANCE
 ═══════════════════════════════════════════════════════════════
 
@@ -1095,10 +1102,7 @@ Work on this task until completion. When you're done or need input:
   - The parent repo does NOT exist for you - only this worktree does
 
 The task system will automatically detect your status.
-═══════════════════════════════════════════════════════════════
-`)
-
-	return prompt.String()
+═══════════════════════════════════════════════════════════════`
 }
 
 // applyTemplateSubstitutions replaces template placeholders in task type instructions.
@@ -1866,6 +1870,21 @@ func (e *Executor) runClaude(ctx context.Context, task *db.Task, workDir, prompt
 	promptFile.Close()
 	defer os.Remove(promptFile.Name())
 
+	// Create a temp file for system instructions (passed via --append-system-prompt)
+	// This keeps the task guidance out of the user conversation thread
+	systemFile, err := os.CreateTemp("", "task-system-*.txt")
+	if err != nil {
+		e.logger.Error("could not create system file", "error", err)
+		e.logLine(task.ID, "error", fmt.Sprintf("Failed to create system file: %s", err.Error()))
+		if cleanupHooks != nil {
+			cleanupHooks()
+		}
+		return execResult{Message: fmt.Sprintf("failed to create system file: %s", err.Error())}
+	}
+	systemFile.WriteString(e.buildSystemInstructions())
+	systemFile.Close()
+	defer os.Remove(systemFile.Name())
+
 	// Script that runs claude interactively with worktree environment variables
 	// Note: tmux starts in workDir (-c flag), so claude inherits proper permissions and hooks config
 	// Run interactively (no -p) so user can attach and see/interact in real-time
@@ -1883,6 +1902,9 @@ func (e *Executor) runClaude(ctx context.Context, task *db.Task, workDir, prompt
 	if task.DangerousMode || os.Getenv("WORKTREE_DANGEROUS_MODE") == "1" {
 		dangerousFlag = "--dangerously-skip-permissions "
 	}
+	// Build system prompt flag - passes task guidance via system prompt to keep conversation clean
+	systemPromptFlag := fmt.Sprintf(`--append-system-prompt "$(cat %q)" `, systemFile.Name())
+
 	// Check for existing Claude session to resume instead of starting fresh
 	// Only use stored session ID - no file-based fallback to avoid cross-task contamination
 	// Validate session file exists before attempting resume
@@ -1891,8 +1913,8 @@ func (e *Executor) runClaude(ctx context.Context, task *db.Task, workDir, prompt
 	envPrefix := claudeEnvPrefix(paths.configDir)
 	if existingSessionID != "" && ClaudeSessionExists(existingSessionID, workDir, paths.configDir) {
 		e.logLine(task.ID, "system", fmt.Sprintf("Resuming existing session %s", existingSessionID))
-		script = fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %sclaude %s--chrome --resume %s "$(cat %q)"`,
-			task.ID, sessionID, task.Port, task.WorktreePath, envPrefix, dangerousFlag, existingSessionID, promptFile.Name())
+		script = fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %sclaude %s%s--chrome --resume %s "$(cat %q)"`,
+			task.ID, sessionID, task.Port, task.WorktreePath, envPrefix, dangerousFlag, systemPromptFlag, existingSessionID, promptFile.Name())
 	} else {
 		if existingSessionID != "" {
 			e.logLine(task.ID, "system", fmt.Sprintf("Session %s no longer exists, starting fresh", existingSessionID))
@@ -1901,8 +1923,8 @@ func (e *Executor) runClaude(ctx context.Context, task *db.Task, workDir, prompt
 				e.logger.Warn("failed to clear stale session ID", "task", task.ID, "error", err)
 			}
 		}
-		script = fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %sclaude %s--chrome "$(cat %q)"`,
-			task.ID, sessionID, task.Port, task.WorktreePath, envPrefix, dangerousFlag, promptFile.Name())
+		script = fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %sclaude %s%s--chrome "$(cat %q)"`,
+			task.ID, sessionID, task.Port, task.WorktreePath, envPrefix, dangerousFlag, systemPromptFlag, promptFile.Name())
 	}
 
 	// Create new window in task-daemon session (with retry logic for race conditions)
@@ -2019,6 +2041,21 @@ func (e *Executor) runClaudeResume(ctx context.Context, task *db.Task, workDir, 
 	feedbackFile.Close()
 	defer os.Remove(feedbackFile.Name())
 
+	// Create a temp file for system instructions (passed via --append-system-prompt)
+	// This keeps the task guidance out of the user conversation thread
+	systemFile, err := os.CreateTemp("", "task-system-*.txt")
+	if err != nil {
+		e.logger.Error("could not create system file", "error", err)
+		e.logLine(task.ID, "error", fmt.Sprintf("Failed to create system file: %s", err.Error()))
+		if cleanupHooks != nil {
+			cleanupHooks()
+		}
+		return execResult{Message: fmt.Sprintf("failed to create system file: %s", err.Error())}
+	}
+	systemFile.WriteString(e.buildSystemInstructions())
+	systemFile.Close()
+	defer os.Remove(systemFile.Name())
+
 	// Script that resumes claude with session ID (interactive mode)
 	// Environment variables passed:
 	// - WORKTREE_TASK_ID: Task identifier for hooks
@@ -2034,9 +2071,12 @@ func (e *Executor) runClaudeResume(ctx context.Context, task *db.Task, workDir, 
 	if task.DangerousMode || os.Getenv("WORKTREE_DANGEROUS_MODE") == "1" {
 		dangerousFlag = "--dangerously-skip-permissions "
 	}
+	// Build system prompt flag - passes task guidance via system prompt to keep conversation clean
+	systemPromptFlag := fmt.Sprintf(`--append-system-prompt "$(cat %q)" `, systemFile.Name())
+
 	envPrefix := claudeEnvPrefix(paths.configDir)
-	script := fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %sclaude %s--chrome --resume %s "$(cat %q)"`,
-		task.ID, taskSessionID, task.Port, task.WorktreePath, envPrefix, dangerousFlag, claudeSessionID, feedbackFile.Name())
+	script := fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %sclaude %s%s--chrome --resume %s "$(cat %q)"`,
+		task.ID, taskSessionID, task.Port, task.WorktreePath, envPrefix, dangerousFlag, systemPromptFlag, claudeSessionID, feedbackFile.Name())
 
 	// Create new window in task-daemon session (with retry logic for race conditions)
 	actualSession, tmuxErr := createTmuxWindow(daemonSession, windowName, workDir, script)
