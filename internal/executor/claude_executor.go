@@ -112,3 +112,30 @@ func (c *ClaudeExecutor) BuildCommand(task *db.Task, sessionID, prompt string) s
 	return fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q claude %s--chrome`,
 		task.ID, worktreeSessionID, task.Port, task.WorktreePath, dangerousFlag)
 }
+
+// ---- Session and Dangerous Mode Support ----
+
+// SupportsSessionResume returns true - Claude supports session resume via --resume.
+func (c *ClaudeExecutor) SupportsSessionResume() bool {
+	return true
+}
+
+// SupportsDangerousMode returns true - Claude supports --dangerously-skip-permissions.
+func (c *ClaudeExecutor) SupportsDangerousMode() bool {
+	return true
+}
+
+// FindSessionID discovers the most recent Claude session ID for the given workDir.
+func (c *ClaudeExecutor) FindSessionID(workDir string) string {
+	return FindClaudeSessionID(workDir)
+}
+
+// ResumeDangerous kills the current Claude process and restarts with --dangerously-skip-permissions.
+func (c *ClaudeExecutor) ResumeDangerous(task *db.Task, workDir string) bool {
+	return c.executor.resumeClaudeDangerous(task, workDir)
+}
+
+// ResumeSafe kills the current Claude process and restarts without --dangerously-skip-permissions.
+func (c *ClaudeExecutor) ResumeSafe(task *db.Task, workDir string) bool {
+	return c.executor.resumeClaudeSafe(task, workDir)
+}

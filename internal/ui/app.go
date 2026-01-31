@@ -762,8 +762,38 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		cmds = append(cmds, m.loadTasks())
 
-	case taskQueuedMsg, taskClosedMsg, taskArchivedMsg, taskDeletedMsg, taskRetriedMsg, taskStatusChangedMsg, taskDangerousModeToggledMsg:
+	case taskQueuedMsg, taskClosedMsg, taskArchivedMsg, taskDeletedMsg, taskRetriedMsg, taskStatusChangedMsg:
 		cmds = append(cmds, m.loadTasks())
+
+	case taskDangerousModeToggledMsg:
+		cmds = append(cmds, m.loadTasks())
+		// Refresh the detail view panes since the executor window was recreated
+		if m.detailView != nil && m.selectedTask != nil {
+			// Clear pane state so it will rejoin the new window
+			m.detailView.ClearPaneState()
+			// Trigger pane rejoin
+			cmds = append(cmds, m.detailView.RefreshPanesCmd())
+		}
+		if msg.err != nil {
+			m.notification = fmt.Sprintf("⚠ %s", msg.err.Error())
+		} else {
+			// Reload the task to get updated dangerous_mode flag
+			if m.selectedTask != nil {
+				task, _ := m.db.GetTask(m.selectedTask.ID)
+				if task != nil {
+					m.selectedTask = task
+					if m.detailView != nil {
+						m.detailView.UpdateTask(task)
+					}
+					if task.DangerousMode {
+						m.notification = "⚠️ Dangerous mode enabled"
+					} else {
+						m.notification = "✓ Safe mode enabled"
+					}
+				}
+			}
+		}
+		m.notifyUntil = time.Now().Add(3 * time.Second)
 
 	case taskClaudeToggledMsg:
 		// Just refresh task list - pane stays open
