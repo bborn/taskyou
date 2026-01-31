@@ -38,10 +38,10 @@ RUN mkdir -p /etc/ssh/sshd_config.d && \
     echo '    ForceCommand /usr/local/bin/task-shell' >> /etc/ssh/sshd_config.d/taskyou.conf
 
 # Also add to .bashrc as fallback (for when exe.dev uses its own SSH handling)
-# Only launch task for interactive login shells that aren't already in task
+# Only launch task for interactive login shells with a proper TTY
 RUN echo '' >> /home/exedev/.bashrc && \
     echo '# Launch TaskYou on interactive login' >> /home/exedev/.bashrc && \
-    echo 'if [[ $- == *i* ]] && [[ -z "$TASKYOU_RUNNING" ]] && [[ -z "$TMUX" ]]; then' >> /home/exedev/.bashrc && \
+    echo 'if [[ $- == *i* ]] && [[ -t 0 ]] && [[ -z "$TASKYOU_RUNNING" ]] && [[ -z "$TMUX" ]]; then' >> /home/exedev/.bashrc && \
     echo '    export TASKYOU_RUNNING=1' >> /home/exedev/.bashrc && \
     echo '    exec /usr/local/bin/task' >> /home/exedev/.bashrc && \
     echo 'fi' >> /home/exedev/.bashrc
