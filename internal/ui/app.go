@@ -277,6 +277,8 @@ type AppModel struct {
 	detailView   *DetailModel
 	// Prevent rapid arrow key navigation from causing duplicate panes
 	taskTransitionInProgress bool
+	// Grace period after task transition to prevent focus flashing
+	taskTransitionGraceUntil time.Time
 
 	// New task form state
 	newTaskForm        *FormModel
@@ -634,6 +636,9 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case taskLoadedMsg:
 		// Reset transition flag now that task is loaded
 		m.taskTransitionInProgress = false
+		// Set grace period to prevent focus flashing during task switch
+		// This allows the new detail view to settle before checking focus
+		m.taskTransitionGraceUntil = time.Now().Add(500 * time.Millisecond)
 		if msg.err == nil {
 			m.selectedTask = msg.task
 			// Clean up any duplicate tmux windows for this task before switching
@@ -900,7 +905,11 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case focusTickMsg:
 		// Fast tick for responsive focus state changes in detail view
 		if m.currentView == ViewDetail && m.detailView != nil {
-			m.detailView.RefreshFocusState()
+			// Skip focus checking during task transitions to prevent visual flashing
+			// The grace period allows the new task to settle before checking focus
+			if !m.taskTransitionInProgress && time.Now().After(m.taskTransitionGraceUntil) {
+				m.detailView.RefreshFocusState()
+			}
 			cmds = append(cmds, m.focusTick())
 		}
 
