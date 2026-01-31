@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/bborn/workflow/internal/db"
+	"github.com/spf13/cobra"
 )
 
 func TestGetCloudSettings(t *testing.T) {
@@ -122,10 +123,94 @@ func TestCreateCloudCommand(t *testing.T) {
 		subcommands[sub.Use] = true
 	}
 
-	expected := []string{"init", "status", "logs", "sync"}
+	expected := []string{"init", "status", "logs", "sync", "push", "pull"}
 	for _, name := range expected {
 		if !subcommands[name] {
 			t.Errorf("Expected subcommand %s not found", name)
 		}
+	}
+}
+
+func TestCopyFile(t *testing.T) {
+	// Create temp directory
+	tmpDir, err := os.MkdirTemp("", "task-copy-test-*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	// Create source file with content
+	srcPath := filepath.Join(tmpDir, "source.txt")
+	content := []byte("test content for copy")
+	if err := os.WriteFile(srcPath, content, 0644); err != nil {
+		t.Fatalf("Failed to write source file: %v", err)
+	}
+
+	// Copy to destination
+	dstPath := filepath.Join(tmpDir, "dest.txt")
+	if err := copyFile(srcPath, dstPath); err != nil {
+		t.Fatalf("copyFile failed: %v", err)
+	}
+
+	// Verify destination file exists and has correct content
+	readContent, err := os.ReadFile(dstPath)
+	if err != nil {
+		t.Fatalf("Failed to read destination file: %v", err)
+	}
+
+	if string(readContent) != string(content) {
+		t.Errorf("Content mismatch: expected %q, got %q", content, readContent)
+	}
+}
+
+func TestCopyFileNonexistent(t *testing.T) {
+	// Create temp directory
+	tmpDir, err := os.MkdirTemp("", "task-copy-test-*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	// Try to copy non-existent file
+	srcPath := filepath.Join(tmpDir, "nonexistent.txt")
+	dstPath := filepath.Join(tmpDir, "dest.txt")
+
+	err = copyFile(srcPath, dstPath)
+	if err == nil {
+		t.Error("Expected error when copying non-existent file, got nil")
+	}
+}
+
+func TestPushPullCommandFlags(t *testing.T) {
+	cmd := createCloudCommand()
+
+	// Find push command
+	var pushCmd, pullCmd *cobra.Command
+	for _, sub := range cmd.Commands() {
+		switch sub.Use {
+		case "push":
+			pushCmd = sub
+		case "pull":
+			pullCmd = sub
+		}
+	}
+
+	if pushCmd == nil {
+		t.Fatal("push command not found")
+	}
+	if pullCmd == nil {
+		t.Fatal("pull command not found")
+	}
+
+	// Check push has --force flag
+	forceFlag := pushCmd.Flags().Lookup("force")
+	if forceFlag == nil {
+		t.Error("push command missing --force flag")
+	}
+
+	// Check pull has --force flag
+	forceFlag = pullCmd.Flags().Lookup("force")
+	if forceFlag == nil {
+		t.Error("pull command missing --force flag")
 	}
 }
