@@ -32,7 +32,7 @@ A personal task management system with a beautiful terminal UI, SQLite storage, 
 - **Running Process Indicator** - Green dot (`●`) shows which tasks have active shell processes (servers, watchers, etc.)
 - **Auto-cleanup** - Automatic cleanup of Claude processes and config entries for completed tasks
 - **Automation-Ready CLI** - Every Kanban action is also exposed via the `ty` CLI, making it trivial to script or plug in your own orchestrator (see [external orchestration docs](docs/orchestrator.md))
-- **SSH Access** - Connect from anywhere via `ssh -p 2222 server`
+- **SSH Access** - Run as an SSH server to access your tasks from anywhere (see [SSH Access & Deployment](#ssh-access--deployment))
 
 ## Prerequisites
 
@@ -611,6 +611,90 @@ curl -X POST -H 'Content-type: application/json' \
 - Hooks run in the background (non-blocking) with a 30-second timeout
 - Hook failures are logged but don't affect task execution
 - The hooks directory is created automatically at `~/.config/task/hooks/`
+
+## SSH Access & Deployment
+
+Task You can run as an SSH server, allowing you to access your task board from anywhere.
+
+### Running the SSH Server
+
+The `taskd` daemon provides SSH access to the TUI:
+
+```bash
+# Start SSH server on default port (2222)
+./bin/taskd
+
+# Custom port
+./bin/taskd -addr :22222
+
+# Custom database location
+./bin/taskd -db /path/to/tasks.db
+
+# Custom SSH host key
+./bin/taskd -host-key ~/.ssh/custom_key
+```
+
+Once running, connect from any machine:
+
+```bash
+ssh -p 2222 username@your-server.com
+```
+
+Replace `your-server.com` with your server's hostname or IP address. The SSH server accepts public key authentication (currently accepts all keys - see [Security](#security) below).
+
+### Deployment
+
+#### Building for Linux
+
+If deploying from macOS to a Linux server:
+
+```bash
+make build-linux
+```
+
+This creates Linux binaries in `./bin/`.
+
+#### Installing as a Systemd Service
+
+For persistent SSH access, install taskd as a systemd service:
+
+```bash
+./scripts/install-service.sh
+```
+
+This creates `~/.config/systemd/user/taskd.service` and enables it to start on boot.
+
+Manage the service with:
+
+```bash
+systemctl --user status taskd   # Check status
+systemctl --user start taskd    # Start
+systemctl --user stop taskd     # Stop
+systemctl --user restart taskd  # Restart
+journalctl --user -u taskd      # View logs
+```
+
+#### Security
+
+**Important:** The SSH server currently accepts all public keys. For production use, edit `internal/server/ssh.go`:
+
+```go
+wish.WithPublicKeyAuth(func(ctx ssh.Context, key ssh.PublicKey) bool {
+    // Compare key fingerprint against allowed list
+    allowed := map[string]bool{
+        "SHA256:your-allowed-key-fingerprint": true,
+    }
+    return allowed[ssh.FingerprintSHA256(key)]
+})
+```
+
+Get your key fingerprint with:
+
+```bash
+ssh-keygen -lf ~/.ssh/id_ed25519.pub
+```
+
+Password authentication is disabled by default.
 
 ## Development
 
