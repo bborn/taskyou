@@ -90,11 +90,13 @@ func (c *CodexExecutor) runCodex(ctx context.Context, task *db.Task, workDir, pr
 		return ExecResult{Message: fmt.Sprintf("failed to create temp file: %s", err.Error())}
 	}
 
-	// Build the full prompt
+	// Build the full prompt with system instructions
+	// Codex doesn't have a verified system prompt flag, so we include task guidance in the prompt
 	fullPrompt := prompt
 	if isResume && feedback != "" {
 		fullPrompt = prompt + "\n\n## User Feedback\n\n" + feedback
 	}
+	fullPrompt = fullPrompt + "\n\n" + c.executor.buildSystemInstructions()
 	promptFile.WriteString(fullPrompt)
 	promptFile.Close()
 	defer os.Remove(promptFile.Name())
@@ -347,7 +349,9 @@ func (c *CodexExecutor) BuildCommand(task *db.Task, sessionID, prompt string) st
 			return fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q codex %s%s`,
 				task.ID, worktreeSessionID, task.Port, task.WorktreePath, dangerousFlag, resumeFlag)
 		}
-		promptFile.WriteString(prompt)
+		// Include system instructions at the end of prompt since Codex doesn't have a verified system prompt flag
+		fullPrompt := prompt + "\n\n" + c.executor.buildSystemInstructions()
+		promptFile.WriteString(fullPrompt)
 		promptFile.Close()
 
 		return fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q codex %s%s"$(cat %q)"; rm -f %q`,
