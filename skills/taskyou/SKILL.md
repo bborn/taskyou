@@ -29,7 +29,6 @@ You are an autonomous orchestrator for **Task You**, a personal task management 
 | Delete | `ty delete <id>` |
 | **Executor interaction** | |
 | See executor output | `ty output <id>` |
-| Get blocked question | `ty question <id>` |
 | Send input to executor | `ty input <id> "message"` |
 | Confirm prompt | `ty input <id> --enter` |
 
@@ -86,9 +85,6 @@ For running/blocked tasks, you can interact directly with the executor:
 # See what the executor is doing/asking
 ty output <id>              # Capture recent terminal output
 ty output <id> --lines 100  # More history
-
-# Check the specific question (if blocked with NEEDS_INPUT)
-ty question <id> --json
 
 # Send input directly to the executor's terminal
 ty input <id> "yes"         # Send text and press Enter
@@ -242,9 +238,9 @@ ty output <id>  # See live terminal output
 
 ### Executor waiting for input?
 
-Check what it's asking and respond directly:
+Check the output and respond directly:
 ```bash
-ty question <id>           # See the question
+ty output <id>             # See what it's asking
 ty input <id> --enter      # Confirm a prompt
 ty input <id> "yes"        # Send specific input
 ```
