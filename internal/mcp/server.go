@@ -200,10 +200,6 @@ func (s *Server) handleRequest(req *jsonRPCRequest) {
 								"type":        "integer",
 								"description": "The ID of the task to retrieve",
 							},
-							"include_transcript": map[string]interface{}{
-								"type":        "boolean",
-								"description": "Whether to include the conversation transcript (default: false, can be large)",
-							},
 						},
 						"required": []string{"task_id"},
 					},
@@ -428,11 +424,6 @@ func (s *Server) handleToolCall(id interface{}, params *toolCallParams) {
 		}
 		targetTaskID := int64(taskIDFloat)
 
-		includeTranscript := false
-		if inc, ok := params.Arguments["include_transcript"].(bool); ok {
-			includeTranscript = inc
-		}
-
 		// Get current task's project for access control
 		currentTask, err := s.db.GetTask(s.taskID)
 		if err != nil || currentTask == nil {
@@ -478,24 +469,6 @@ func (s *Server) handleToolCall(id interface{}, params *toolCallParams) {
 			sb.WriteString("(no description)")
 		}
 		sb.WriteString("\n")
-
-		// Include transcript if requested
-		if includeTranscript {
-			summary, err := s.db.GetLatestCompactionSummary(targetTaskID)
-			if err == nil && summary != nil && len(summary.Summary) > 0 {
-				sb.WriteString("\n## Conversation Transcript\n\n")
-				// Limit transcript size
-				transcript := summary.Summary
-				if len(transcript) > 5000 {
-					transcript = transcript[:5000] + "\n\n... (transcript truncated, " + fmt.Sprintf("%d", len(summary.Summary)) + " bytes total)"
-				}
-				sb.WriteString("```\n")
-				sb.WriteString(transcript)
-				sb.WriteString("\n```\n")
-			} else {
-				sb.WriteString("\n## Conversation Transcript\n\n(no transcript available)\n")
-			}
-		}
 
 		s.sendResult(id, toolCallResult{
 			Content: []contentBlock{
