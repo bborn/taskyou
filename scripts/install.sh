@@ -95,12 +95,15 @@ install_binary() {
 
     if [ -w "$INSTALL_DIR" ]; then
         mv "${tmp_dir}/${BINARY_NAME}" "${INSTALL_DIR}/${BINARY_NAME}"
+        ln -sf "${BINARY_NAME}" "${INSTALL_DIR}/taskyou"
     else
         warn "${INSTALL_DIR} is not writable. Using sudo..."
         sudo mv "${tmp_dir}/${BINARY_NAME}" "${INSTALL_DIR}/${BINARY_NAME}"
+        sudo ln -sf "${BINARY_NAME}" "${INSTALL_DIR}/taskyou"
     fi
 
     info "Successfully installed ${BINARY_NAME} ${version} to ${INSTALL_DIR}/${BINARY_NAME}"
+    info "Also available as 'taskyou' (symlink)"
 }
 
 # Check if install directory is in PATH
@@ -135,7 +138,7 @@ main() {
     check_path
 
     echo ""
-    info "Run 'ty --help' to get started!"
+    info "Run 'ty --help' or 'taskyou --help' to get started!"
     echo ""
 }
 

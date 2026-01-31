@@ -16,6 +16,7 @@ build-no-restart: build-ty build-taskd
 
 build-ty:
 	$(GO) build -o bin/ty ./cmd/task
+	ln -sf ty bin/taskyou
 
 build-taskd:
 	$(GO) build -o bin/taskd ./cmd/taskd
@@ -35,9 +36,10 @@ restart-daemon:
 build-linux:
 	GOOS=linux GOARCH=amd64 go build -o bin/taskd-linux ./cmd/taskd
 
-# Install to GOBIN (usually ~/go/bin) - installs as 'ty' and 'taskd'
+# Install to GOBIN (usually ~/go/bin) - installs as 'ty', 'taskyou' (symlink), and 'taskd'
 install:
 	go build -o $(shell go env GOBIN)/ty ./cmd/task
+	ln -sf ty $(shell go env GOBIN)/taskyou
 	go install ./cmd/taskd
 
 # Clean build artifacts

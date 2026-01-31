@@ -60,7 +60,7 @@ Install Go 1.24.4 or later from [go.dev/dl](https://go.dev/dl/).
 curl -fsSL taskyou.dev/install.sh | bash
 ```
 
-This downloads the latest release and installs `ty` to `~/.local/bin`.
+This downloads the latest release and installs `ty` (with `taskyou` as an alias) to `~/.local/bin`.
 
 You can also specify a custom install directory:
 
