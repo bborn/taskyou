@@ -980,6 +980,17 @@ func (m *AppModel) viewNewTaskConfirm() string {
 func (m *AppModel) viewDashboard() string {
 	var headerParts []string
 
+	// Show global dangerous mode banner if the entire system is in dangerous mode
+	if IsGlobalDangerousMode() {
+		dangerStyle := lipgloss.NewStyle().
+			Background(lipgloss.Color("#E06C75")). // Red background
+			Foreground(lipgloss.Color("#FFFFFF")).
+			Bold(true).
+			Padding(0, 2).
+			Width(m.width)
+		headerParts = append(headerParts, dangerStyle.Render("⚠ DANGEROUS MODE ENABLED"))
+	}
+
 	// Show notification banner if active
 	if m.notification != "" && time.Now().Before(m.notifyUntil) {
 		notifyStyle := lipgloss.NewStyle().

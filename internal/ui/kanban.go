@@ -890,6 +890,16 @@ func (k *KanbanBoard) renderTaskCard(task *db.Task, width int, isSelected bool) 
 		b.WriteString(processStyle.Render("●")) // Green dot for running process
 	}
 
+	// Dangerous mode indicator (red dot) - only shown when:
+	// - Task is in dangerous mode
+	// - Task is active (processing or blocked)
+	// - System is NOT in global dangerous mode (otherwise the global banner is shown)
+	if task.DangerousMode && (task.Status == db.StatusProcessing || task.Status == db.StatusBlocked) && !IsGlobalDangerousMode() {
+		dangerStyle := lipgloss.NewStyle().Foreground(ColorDangerous)
+		b.WriteString(" ")
+		b.WriteString(dangerStyle.Render("●")) // Red dot for dangerous mode
+	}
+
 	// Schedule indicator - show if scheduled or warn about legacy recurrence
 	if task.IsScheduled() {
 		scheduleStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("214")) // Orange for schedule
