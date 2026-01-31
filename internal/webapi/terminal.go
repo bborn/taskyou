@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"os/exec"
+	"strings"
 	"sync"
 )
 
@@ -31,6 +32,20 @@ func getTerminalPort(taskID int64) int {
 	return ttydBasePort + int(taskID%1000)
 }
 
+// findDaemonSession finds the current task-daemon session.
+func findDaemonSession() string {
+	out, err := exec.Command("tmux", "list-sessions", "-F", "#{session_name}").Output()
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		if strings.HasPrefix(line, "task-daemon-") {
+			return line
+		}
+	}
+	return ""
+}
+
 // handleGetTerminal returns terminal connection info for a task.
 func (s *Server) handleGetTerminal(w http.ResponseWriter, r *http.Request) {
 	taskID, err := getIDParam(r)
@@ -46,14 +61,18 @@ func (s *Server) handleGetTerminal(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Check if task has a tmux session
-	if task.DaemonSession == "" {
+	// Try to find the daemon session - use task's recorded session or auto-detect
+	daemonSession := task.DaemonSession
+	if daemonSession == "" {
+		daemonSession = findDaemonSession()
+	}
+	if daemonSession == "" {
 		jsonError(w, "task has no active terminal session", http.StatusNotFound)
 		return
 	}
 
 	windowName := fmt.Sprintf("task-%d", taskID)
-	tmuxTarget := fmt.Sprintf("%s:%s", task.DaemonSession, windowName)
+	tmuxTarget := fmt.Sprintf("%s:%s", daemonSession, windowName)
 
 	// Check if tmux window exists
 	if err := exec.Command("tmux", "has-session", "-t", tmuxTarget).Run(); err != nil {
@@ -104,12 +123,11 @@ func (tm *terminalManager) ensureRunning(taskID int64, tmuxTarget string) (int, 
 	// Start ttyd attached to the tmux session
 	// -W = writable (interactive)
 	// -p = port
-	// -t = terminal type options for better compatibility
+	// Use -- to separate ttyd options from the command
 	cmd := exec.Command("ttyd",
 		"-W",
 		"-p", fmt.Sprintf("%d", port),
-		"-t", "fontSize=14",
-		"-t", "fontFamily=monospace",
+		"--",
 		"tmux", "attach-session", "-t", tmuxTarget,
 	)
 

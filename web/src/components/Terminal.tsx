@@ -1,8 +1,7 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { Terminal as XTerm } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
-import { AttachAddon } from '@xterm/addon-attach';
-import { Loader2, AlertCircle, Terminal as TerminalIcon, RefreshCw } from 'lucide-react';
+import { Loader2, AlertCircle, Terminal as TerminalIcon, RefreshCw, Download } from 'lucide-react';
 import { tasks } from '@/api/client';
 import { cn } from '@/lib/utils';
 import '@xterm/xterm/css/xterm.css';
@@ -12,7 +11,7 @@ interface TerminalProps {
   className?: string;
 }
 
-type TerminalState = 'connecting' | 'connected' | 'disconnected' | 'error' | 'no-session';
+type TerminalState = 'connecting' | 'connected' | 'disconnected' | 'error' | 'no-session' | 'no-ttyd';
 
 export function TaskTerminal({ taskId, className }: TerminalProps) {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -89,11 +88,39 @@ export function TaskTerminal({ taskId, className }: TerminalProps) {
 
       ws.onopen = () => {
         setState('connected');
-        // Attach websocket to terminal
-        const attachAddon = new AttachAddon(ws);
-        terminal.loadAddon(attachAddon);
         terminal.focus();
+
+        // Send terminal size to ttyd
+        // ttyd protocol: byte 1 + JSON for resize (using actual byte values, not ASCII)
+        const sendSize = () => {
+          const msg = JSON.stringify({ columns: terminal.cols, rows: terminal.rows });
+          ws.send(String.fromCharCode(1) + msg);
+        };
+        sendSize();
+        terminal.onResize(sendSize);
       };
+
+      // Handle incoming data from ttyd
+      ws.onmessage = (event) => {
+        const data = event.data;
+        if (typeof data === 'string' && data.length > 0) {
+          const cmd = data.charCodeAt(0);
+          const payload = data.substring(1);
+          if (cmd === 0) {
+            // Output message - write to terminal
+            terminal.write(payload);
+          }
+          // cmd 1 = window title, 2 = preferences (ignored)
+        }
+      };
+
+      // Send input to ttyd
+      // ttyd protocol: byte 0 + input data (using actual byte values, not ASCII)
+      terminal.onData((data) => {
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.send(String.fromCharCode(0) + data);
+        }
+      });
 
       ws.onclose = () => {
         if (state !== 'error') {
@@ -109,6 +136,8 @@ export function TaskTerminal({ taskId, className }: TerminalProps) {
       const message = err instanceof Error ? err.message : 'Failed to connect';
       if (message.includes('no active terminal') || message.includes('not running')) {
         setState('no-session');
+      } else if (message.includes('ttyd not installed')) {
+        setState('no-ttyd');
       } else {
         setState('error');
         setError(message);
@@ -163,6 +192,18 @@ export function TaskTerminal({ taskId, className }: TerminalProps) {
             <p className="text-xs text-muted-foreground/70">
               The task must be running to view its terminal
             </p>
+          </>
+        )}
+        {state === 'no-ttyd' && (
+          <>
+            <Download className="h-8 w-8 text-yellow-500 mb-3" />
+            <p className="text-sm text-foreground mb-1">ttyd not installed</p>
+            <p className="text-xs text-muted-foreground mb-3 text-center max-w-xs">
+              Install ttyd to enable live terminal streaming
+            </p>
+            <code className="px-3 py-1.5 bg-muted rounded text-xs font-mono">
+              brew install ttyd
+            </code>
           </>
         )}
         {state === 'disconnected' && (
