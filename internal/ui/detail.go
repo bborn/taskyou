@@ -101,6 +101,9 @@ type DetailModel struct {
 
 	// Focus executor pane after joining (e.g., when jumping from notification)
 	focusExecutorOnJoin bool
+
+	// Shell pane visibility toggle
+	shellPaneHidden bool // true when shell pane is collapsed to daemon
 }
 
 // Message types for async pane loading
@@ -273,6 +276,11 @@ func NewDetailModel(t *db.Task, database *db.DB, exec *executor.Executor, width,
 		height:              height,
 		focused:             true, // Initially focused when viewing details
 		focusExecutorOnJoin: focusExecutor,
+	}
+
+	// Load shell pane visibility preference from settings
+	if hiddenStr, err := database.GetSetting(config.SettingShellPaneHidden); err == nil && hiddenStr == "true" {
+		m.shellPaneHidden = true
 	}
 
 	// Load logs
@@ -1145,89 +1153,94 @@ func (m *DetailModel) joinTmuxPanes() {
 	}
 	exec.CommandContext(ctx, "tmux", "select-pane", "-t", m.claudePaneID, "-T", claudeTitle).Run()
 
-	// Step 2: Join or create the Shell pane to the right of Claude
-	shellWidth := m.getShellPaneWidth()
-
-	// Determine which pane ID to use for Shell
-	// Priority: stored ID (if still valid) > remaining pane in daemon
-	shellSourcePaneID := ""
-	hasShellPane := len(daemonPaneIDs) >= 2
-
-	if storedShellPaneID != "" && hasShellPane {
-		// Verify stored Shell pane ID is still in the daemon window (and not the Claude pane we just joined)
-		for _, pid := range daemonPaneIDs {
-			if pid == storedShellPaneID && pid != claudeSourcePaneID {
-				shellSourcePaneID = storedShellPaneID
-				log.Debug("joinTmuxPanes: using stored Shell pane ID %q", shellSourcePaneID)
-				break
-			}
-		}
-	}
-	if shellSourcePaneID == "" && hasShellPane {
-		// Fall back to the other pane in daemon (the one we didn't use for Claude)
-		for _, pid := range daemonPaneIDs {
-			if pid != claudeSourcePaneID {
-				shellSourcePaneID = pid
-				log.Debug("joinTmuxPanes: falling back to remaining daemon pane ID %q for Shell", shellSourcePaneID)
-				break
-			}
-		}
-	}
-
-	log.Debug("joinTmuxPanes: shellWidth=%q, hasShellPane=%v, shellSourcePaneID=%q", shellWidth, hasShellPane, shellSourcePaneID)
-
-	if shellSourcePaneID != "" {
-		// Join the shell pane from daemon
-		log.Debug("joinTmuxPanes: joining shell pane %q", shellSourcePaneID)
-		err = exec.CommandContext(ctx, "tmux", "join-pane",
-			"-h", "-l", shellWidth,
-			"-s", shellSourcePaneID,
-			"-t", m.claudePaneID).Run()
-		if err != nil {
-			log.Error("joinTmuxPanes: join shell pane failed: %v", err)
-			m.workdirPaneID = ""
-		} else {
-			// Get the joined shell pane ID
-			workdirPaneCmd := exec.CommandContext(ctx, "tmux", "display-message", "-p", "#{pane_id}")
-			workdirPaneOut, _ := workdirPaneCmd.Output()
-			m.workdirPaneID = strings.TrimSpace(string(workdirPaneOut))
-			log.Debug("joinTmuxPanes: joined shell pane, workdirPaneID=%q", m.workdirPaneID)
-			exec.CommandContext(ctx, "tmux", "select-pane", "-t", m.workdirPaneID, "-T", "Shell").Run()
-			// Set environment variables in the shell pane (they should already be set from daemon, but ensure they're fresh)
-			envCmd := fmt.Sprintf("export WORKTREE_TASK_ID=%d WORKTREE_PORT=%d WORKTREE_PATH=%q", m.task.ID, m.task.Port, m.task.WorktreePath)
-			exec.CommandContext(ctx, "tmux", "send-keys", "-t", m.workdirPaneID, envCmd, "Enter").Run()
-			exec.CommandContext(ctx, "tmux", "send-keys", "-t", m.workdirPaneID, "clear", "Enter").Run()
-		}
+	// Step 2: Join or create the Shell pane to the right of Claude (unless hidden)
+	if m.shellPaneHidden {
+		log.Debug("joinTmuxPanes: shell pane is hidden, skipping shell join")
+		m.workdirPaneID = ""
 	} else {
-		// Daemon only had Claude pane - create a new shell pane
-		// (Shell and Claude always travel together, no separate -shell windows)
-		log.Debug("joinTmuxPanes: no shell in daemon window, creating new shell pane")
-		workdir := m.getWorkdir()
-		// Use user's default shell, fallback to zsh
-		userShell := os.Getenv("SHELL")
-		if userShell == "" {
-			userShell = "/bin/zsh"
+		shellWidth := m.getShellPaneWidth()
+
+		// Determine which pane ID to use for Shell
+		// Priority: stored ID (if still valid) > remaining pane in daemon
+		shellSourcePaneID := ""
+		hasShellPane := len(daemonPaneIDs) >= 2
+
+		if storedShellPaneID != "" && hasShellPane {
+			// Verify stored Shell pane ID is still in the daemon window (and not the Claude pane we just joined)
+			for _, pid := range daemonPaneIDs {
+				if pid == storedShellPaneID && pid != claudeSourcePaneID {
+					shellSourcePaneID = storedShellPaneID
+					log.Debug("joinTmuxPanes: using stored Shell pane ID %q", shellSourcePaneID)
+					break
+				}
+			}
 		}
-		log.Debug("joinTmuxPanes: split-window for shell, workdir=%q, shell=%q", workdir, userShell)
-		err = exec.CommandContext(ctx, "tmux", "split-window",
-			"-h", "-l", shellWidth,
-			"-t", m.claudePaneID,
-			"-c", workdir,
-			userShell).Run() // user's shell to prevent immediate exit
-		if err != nil {
-			log.Error("joinTmuxPanes: split-window for shell failed: %v", err)
-			m.workdirPaneID = ""
+		if shellSourcePaneID == "" && hasShellPane {
+			// Fall back to the other pane in daemon (the one we didn't use for Claude)
+			for _, pid := range daemonPaneIDs {
+				if pid != claudeSourcePaneID {
+					shellSourcePaneID = pid
+					log.Debug("joinTmuxPanes: falling back to remaining daemon pane ID %q for Shell", shellSourcePaneID)
+					break
+				}
+			}
+		}
+
+		log.Debug("joinTmuxPanes: shellWidth=%q, hasShellPane=%v, shellSourcePaneID=%q", shellWidth, hasShellPane, shellSourcePaneID)
+
+		if shellSourcePaneID != "" {
+			// Join the shell pane from daemon
+			log.Debug("joinTmuxPanes: joining shell pane %q", shellSourcePaneID)
+			err = exec.CommandContext(ctx, "tmux", "join-pane",
+				"-h", "-l", shellWidth,
+				"-s", shellSourcePaneID,
+				"-t", m.claudePaneID).Run()
+			if err != nil {
+				log.Error("joinTmuxPanes: join shell pane failed: %v", err)
+				m.workdirPaneID = ""
+			} else {
+				// Get the joined shell pane ID
+				workdirPaneCmd := exec.CommandContext(ctx, "tmux", "display-message", "-p", "#{pane_id}")
+				workdirPaneOut, _ := workdirPaneCmd.Output()
+				m.workdirPaneID = strings.TrimSpace(string(workdirPaneOut))
+				log.Debug("joinTmuxPanes: joined shell pane, workdirPaneID=%q", m.workdirPaneID)
+				exec.CommandContext(ctx, "tmux", "select-pane", "-t", m.workdirPaneID, "-T", "Shell").Run()
+				// Set environment variables in the shell pane (they should already be set from daemon, but ensure they're fresh)
+				envCmd := fmt.Sprintf("export WORKTREE_TASK_ID=%d WORKTREE_PORT=%d WORKTREE_PATH=%q", m.task.ID, m.task.Port, m.task.WorktreePath)
+				exec.CommandContext(ctx, "tmux", "send-keys", "-t", m.workdirPaneID, envCmd, "Enter").Run()
+				exec.CommandContext(ctx, "tmux", "send-keys", "-t", m.workdirPaneID, "clear", "Enter").Run()
+			}
 		} else {
-			// Get the new shell pane ID
-			workdirPaneCmd := exec.CommandContext(ctx, "tmux", "display-message", "-p", "#{pane_id}")
-			workdirPaneOut, _ := workdirPaneCmd.Output()
-			m.workdirPaneID = strings.TrimSpace(string(workdirPaneOut))
-			log.Debug("joinTmuxPanes: created shell pane, workdirPaneID=%q", m.workdirPaneID)
-			exec.CommandContext(ctx, "tmux", "select-pane", "-t", m.workdirPaneID, "-T", "Shell").Run()
-			// Set environment variables in the newly created shell pane
-			envCmd := fmt.Sprintf("export WORKTREE_TASK_ID=%d WORKTREE_PORT=%d WORKTREE_PATH=%q", m.task.ID, m.task.Port, m.task.WorktreePath)
-			exec.CommandContext(ctx, "tmux", "send-keys", "-t", m.workdirPaneID, envCmd, "Enter").Run()
-			exec.CommandContext(ctx, "tmux", "send-keys", "-t", m.workdirPaneID, "clear", "Enter").Run()
+			// Daemon only had Claude pane - create a new shell pane
+			// (Shell and Claude always travel together, no separate -shell windows)
+			log.Debug("joinTmuxPanes: no shell in daemon window, creating new shell pane")
+			workdir := m.getWorkdir()
+			// Use user's default shell, fallback to zsh
+			userShell := os.Getenv("SHELL")
+			if userShell == "" {
+				userShell = "/bin/zsh"
+			}
+			log.Debug("joinTmuxPanes: split-window for shell, workdir=%q, shell=%q", workdir, userShell)
+			err = exec.CommandContext(ctx, "tmux", "split-window",
+				"-h", "-l", shellWidth,
+				"-t", m.claudePaneID,
+				"-c", workdir,
+				userShell).Run() // user's shell to prevent immediate exit
+			if err != nil {
+				log.Error("joinTmuxPanes: split-window for shell failed: %v", err)
+				m.workdirPaneID = ""
+			} else {
+				// Get the new shell pane ID
+				workdirPaneCmd := exec.CommandContext(ctx, "tmux", "display-message", "-p", "#{pane_id}")
+				workdirPaneOut, _ := workdirPaneCmd.Output()
+				m.workdirPaneID = strings.TrimSpace(string(workdirPaneOut))
+				log.Debug("joinTmuxPanes: created shell pane, workdirPaneID=%q", m.workdirPaneID)
+				exec.CommandContext(ctx, "tmux", "select-pane", "-t", m.workdirPaneID, "-T", "Shell").Run()
+				// Set environment variables in the newly created shell pane
+				envCmd := fmt.Sprintf("export WORKTREE_TASK_ID=%d WORKTREE_PORT=%d WORKTREE_PATH=%q", m.task.ID, m.task.Port, m.task.WorktreePath)
+				exec.CommandContext(ctx, "tmux", "send-keys", "-t", m.workdirPaneID, envCmd, "Enter").Run()
+				exec.CommandContext(ctx, "tmux", "send-keys", "-t", m.workdirPaneID, "clear", "Enter").Run()
+			}
 		}
 	}
 
@@ -1330,6 +1343,180 @@ func (m *DetailModel) focusExecutorPane() {
 	} else {
 		m.focused = false // TUI is no longer focused, executor is
 	}
+}
+
+// ToggleShellPane toggles the visibility of the shell pane.
+// When hidden, the shell pane is moved to the daemon window and Claude expands to full width.
+// When shown, the shell pane is rejoined from the daemon or a new one is created.
+func (m *DetailModel) ToggleShellPane() {
+	log := GetLogger()
+	log.Info("ToggleShellPane: shellPaneHidden=%v, workdirPaneID=%q, claudePaneID=%q",
+		m.shellPaneHidden, m.workdirPaneID, m.claudePaneID)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if m.shellPaneHidden {
+		// Show shell pane - rejoin it from daemon or create new
+		m.showShellPane(ctx)
+	} else {
+		// Hide shell pane - move it to daemon and expand Claude
+		m.hideShellPane(ctx)
+	}
+
+	// Save preference to settings
+	hiddenStr := "false"
+	if m.shellPaneHidden {
+		hiddenStr = "true"
+	}
+	m.database.SetSetting(config.SettingShellPaneHidden, hiddenStr)
+	log.Info("ToggleShellPane: saved shellPaneHidden=%v", m.shellPaneHidden)
+}
+
+// hideShellPane moves the shell pane to the daemon window and expands Claude to full width.
+func (m *DetailModel) hideShellPane(ctx context.Context) {
+	log := GetLogger()
+
+	if m.workdirPaneID == "" {
+		log.Debug("hideShellPane: no shell pane to hide")
+		m.shellPaneHidden = true
+		return
+	}
+
+	if m.claudePaneID == "" || m.cachedWindowTarget == "" {
+		log.Debug("hideShellPane: no Claude pane or window target, cannot hide shell")
+		return
+	}
+
+	// Save shell width before hiding so we can restore it later
+	m.saveShellPaneWidth()
+
+	// Break the shell pane to the daemon window (preserving its state)
+	log.Info("hideShellPane: breaking shell pane %q to daemon window %q", m.workdirPaneID, m.cachedWindowTarget)
+	err := exec.CommandContext(ctx, "tmux", "join-pane",
+		"-d",                    // don't switch focus
+		"-s", m.workdirPaneID,   // source: shell pane
+		"-t", m.cachedWindowTarget, // target: daemon window
+	).Run()
+
+	if err != nil {
+		log.Error("hideShellPane: join-pane to daemon failed: %v", err)
+		return
+	}
+
+	// Store the shell pane ID in the task so we can find it later
+	if m.database != nil && m.task != nil {
+		m.database.UpdateTaskPaneIDs(m.task.ID, m.claudePaneID, m.workdirPaneID)
+	}
+
+	m.workdirPaneID = "" // No longer visible in task-ui
+	m.shellPaneHidden = true
+	log.Info("hideShellPane: shell pane hidden successfully")
+}
+
+// showShellPane rejoins the shell pane from the daemon or creates a new one.
+func (m *DetailModel) showShellPane(ctx context.Context) {
+	log := GetLogger()
+
+	if m.claudePaneID == "" {
+		log.Debug("showShellPane: no Claude pane, cannot show shell")
+		return
+	}
+
+	shellWidth := m.getShellPaneWidth()
+
+	// Try to find the shell pane in the daemon window
+	storedShellPaneID := ""
+	if m.task != nil {
+		storedShellPaneID = m.task.ShellPaneID
+	}
+
+	var shellSourcePaneID string
+	if storedShellPaneID != "" && m.cachedWindowTarget != "" {
+		// Check if the stored shell pane is still in the daemon window
+		daemonPanesCmd := exec.CommandContext(ctx, "tmux", "list-panes", "-t", m.cachedWindowTarget, "-F", "#{pane_id}")
+		if daemonPanesOut, err := daemonPanesCmd.Output(); err == nil {
+			for _, pid := range strings.Split(strings.TrimSpace(string(daemonPanesOut)), "\n") {
+				if pid == storedShellPaneID {
+					shellSourcePaneID = storedShellPaneID
+					log.Debug("showShellPane: found stored shell pane %q in daemon", shellSourcePaneID)
+					break
+				}
+			}
+		}
+	}
+
+	if shellSourcePaneID != "" {
+		// Rejoin the shell pane from daemon
+		log.Info("showShellPane: rejoining shell pane %q from daemon", shellSourcePaneID)
+		err := exec.CommandContext(ctx, "tmux", "join-pane",
+			"-h", "-l", shellWidth,
+			"-s", shellSourcePaneID,
+			"-t", m.claudePaneID,
+		).Run()
+		if err != nil {
+			log.Error("showShellPane: join-pane from daemon failed: %v, will create new shell", err)
+			shellSourcePaneID = "" // Fall through to create new
+		} else {
+			// Get the joined pane ID
+			workdirPaneCmd := exec.CommandContext(ctx, "tmux", "display-message", "-p", "#{pane_id}")
+			if workdirPaneOut, err := workdirPaneCmd.Output(); err == nil {
+				m.workdirPaneID = strings.TrimSpace(string(workdirPaneOut))
+				exec.CommandContext(ctx, "tmux", "select-pane", "-t", m.workdirPaneID, "-T", "Shell").Run()
+			}
+		}
+	}
+
+	if shellSourcePaneID == "" {
+		// Create a new shell pane
+		log.Info("showShellPane: creating new shell pane")
+		workdir := m.getWorkdir()
+		userShell := os.Getenv("SHELL")
+		if userShell == "" {
+			userShell = "/bin/zsh"
+		}
+		err := exec.CommandContext(ctx, "tmux", "split-window",
+			"-h", "-l", shellWidth,
+			"-t", m.claudePaneID,
+			"-c", workdir,
+			userShell,
+		).Run()
+		if err != nil {
+			log.Error("showShellPane: split-window failed: %v", err)
+			return
+		}
+		// Get the new shell pane ID
+		workdirPaneCmd := exec.CommandContext(ctx, "tmux", "display-message", "-p", "#{pane_id}")
+		if workdirPaneOut, err := workdirPaneCmd.Output(); err == nil {
+			m.workdirPaneID = strings.TrimSpace(string(workdirPaneOut))
+			exec.CommandContext(ctx, "tmux", "select-pane", "-t", m.workdirPaneID, "-T", "Shell").Run()
+			// Set environment variables in the newly created shell pane
+			if m.task != nil {
+				envCmd := fmt.Sprintf("export WORKTREE_TASK_ID=%d WORKTREE_PORT=%d WORKTREE_PATH=%q", m.task.ID, m.task.Port, m.task.WorktreePath)
+				exec.CommandContext(ctx, "tmux", "send-keys", "-t", m.workdirPaneID, envCmd, "Enter").Run()
+				exec.CommandContext(ctx, "tmux", "send-keys", "-t", m.workdirPaneID, "clear", "Enter").Run()
+			}
+		}
+	}
+
+	// Select back to TUI pane
+	if m.tuiPaneID != "" {
+		exec.CommandContext(ctx, "tmux", "select-pane", "-t", m.tuiPaneID).Run()
+	}
+
+	m.shellPaneHidden = false
+
+	// Update stored pane IDs
+	if m.database != nil && m.task != nil {
+		m.database.UpdateTaskPaneIDs(m.task.ID, m.claudePaneID, m.workdirPaneID)
+	}
+
+	log.Info("showShellPane: shell pane shown, workdirPaneID=%q", m.workdirPaneID)
+}
+
+// IsShellPaneHidden returns true if the shell pane is currently hidden.
+func (m *DetailModel) IsShellPaneHidden() bool {
+	return m.shellPaneHidden
 }
 
 // joinTmuxPane is a compatibility wrapper for joinTmuxPanes.
