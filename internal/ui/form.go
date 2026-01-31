@@ -198,7 +198,7 @@ func NewEditFormModel(database *db.DB, task *db.Task, width, height int) *FormMo
 
 	// Title input - pre-populate with existing title
 	m.titleInput = textinput.New()
-	m.titleInput.Placeholder = "What needs to be done?"
+	m.titleInput.Placeholder = "What needs to be done? (optional if details provided)"
 	m.titleInput.Prompt = ""
 	m.titleInput.Cursor.SetMode(cursor.CursorStatic)
 	m.titleInput.Width = width - 24
@@ -206,7 +206,7 @@ func NewEditFormModel(database *db.DB, task *db.Task, width, height int) *FormMo
 
 	// Body textarea - pre-populate with existing body
 	m.bodyInput = textarea.New()
-	m.bodyInput.Placeholder = "Additional context (optional)"
+	m.bodyInput.Placeholder = "Details (AI generates title if left empty above)"
 	m.bodyInput.Prompt = ""
 	m.bodyInput.ShowLineNumbers = false
 	m.bodyInput.Cursor.SetMode(cursor.CursorStatic)
@@ -327,14 +327,14 @@ func NewFormModel(database *db.DB, width, height int, workingDir string) *FormMo
 
 	// Title input
 	m.titleInput = textinput.New()
-	m.titleInput.Placeholder = "What needs to be done?"
+	m.titleInput.Placeholder = "What needs to be done? (optional if details provided)"
 	m.titleInput.Prompt = ""
 	m.titleInput.Cursor.SetMode(cursor.CursorStatic)
 	m.titleInput.Width = width - 24
 
 	// Body textarea
 	m.bodyInput = textarea.New()
-	m.bodyInput.Placeholder = "Additional context (optional)"
+	m.bodyInput.Placeholder = "Details (AI generates title if left empty above)"
 	m.bodyInput.Prompt = ""
 	m.bodyInput.ShowLineNumbers = false
 	m.bodyInput.Cursor.SetMode(cursor.CursorStatic)
@@ -1216,6 +1216,11 @@ func (m *FormModel) View() string {
 		titleView = strings.TrimRight(titleView, " ") + ghostStyle.Render(m.ghostText)
 	}
 	b.WriteString(cursor + " " + labelStyle.Render("Title") + titleView)
+	// Show indicator when title will be auto-generated
+	if strings.TrimSpace(m.titleInput.Value()) == "" && strings.TrimSpace(m.bodyInput.Value()) != "" {
+		autoGenStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("214")).Italic(true)
+		b.WriteString("  " + autoGenStyle.Render("✨ AI will generate title"))
+	}
 	b.WriteString("\n\n")
 
 	// Body (textarea)
