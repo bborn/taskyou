@@ -587,13 +587,6 @@ Examples:
 						"project":    t.Project,
 						"created_at": t.CreatedAt.Time.Format(time.RFC3339),
 					}
-					// Add schedule fields
-					if t.ScheduledAt != nil {
-						item["scheduled_at"] = t.ScheduledAt.Time.Format(time.RFC3339)
-					}
-					if t.LastRunAt != nil {
-						item["last_run_at"] = t.LastRunAt.Time.Format(time.RFC3339)
-					}
 					// Add PR info to JSON output if available
 					if prInfo, ok := prInfoMap[t.ID]; ok {
 						item["pr"] = map[string]interface{}{
@@ -679,18 +672,11 @@ Examples:
 						project = dimStyle.Render(fmt.Sprintf("[%s] ", t.Project))
 					}
 					// Schedule indicator
-					scheduleIndicator := ""
-					scheduleStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#F59E0B"))
-					if t.IsScheduled() {
-						scheduleIndicator = scheduleStyle.Render("⏰ ")
-					} else if t.Recurrence != "" {
-						scheduleIndicator = scheduleStyle.Render("⚠ ")
-					}
 					prStatus := ""
 					if showPR {
 						prStatus = prStatusStyle(prInfoMap[t.ID])
 					}
-					fmt.Printf("%s %s %s%s%s%s\n", id, status, project, scheduleIndicator, t.Title, prStatus)
+					fmt.Printf("%s %s %s%s%s\n", id, status, project, t.Title, prStatus)
 				}
 			}
 		},
@@ -846,13 +832,6 @@ Examples:
 				if task.CompletedAt != nil {
 					output["completed_at"] = task.CompletedAt.Time.Format(time.RFC3339)
 				}
-				// Add schedule fields
-				if task.ScheduledAt != nil {
-					output["scheduled_at"] = task.ScheduledAt.Time.Format(time.RFC3339)
-				}
-				if task.LastRunAt != nil {
-					output["last_run_at"] = task.LastRunAt.Time.Format(time.RFC3339)
-				}
 				// Add PR info to JSON output
 				if prInfo != nil {
 					output["pr"] = map[string]interface{}{
@@ -944,24 +923,6 @@ Examples:
 					}
 					prStatusStyled := lipgloss.NewStyle().Foreground(prStatusColor).Render(prInfo.StatusDescription())
 					fmt.Printf("CI:       %s\n", prStatusStyled)
-				}
-
-				// Schedule info
-				scheduleColor := lipgloss.Color("#F59E0B") // Orange for schedule
-				scheduleStyle := lipgloss.NewStyle().Foreground(scheduleColor)
-				if task.IsScheduled() || task.LastRunAt != nil || task.Recurrence != "" {
-					fmt.Println()
-					fmt.Println(boldStyle.Render("Schedule:"))
-					if task.ScheduledAt != nil {
-						fmt.Printf("  Next run:   %s\n", scheduleStyle.Render(task.ScheduledAt.Time.Format("2006-01-02 15:04:05")))
-					}
-					if task.LastRunAt != nil {
-						fmt.Printf("  Last run:   %s\n", scheduleStyle.Render(task.LastRunAt.Time.Format("2006-01-02 15:04:05")))
-					}
-					if task.Recurrence != "" {
-						note := fmt.Sprintf("Recurring schedules inside TaskYou were removed (legacy value: %s)", task.Recurrence)
-						fmt.Printf("  Note:       %s\n", scheduleStyle.Render(note))
-					}
 				}
 
 				// Body

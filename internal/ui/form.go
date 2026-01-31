@@ -4,8 +4,6 @@ import (
 	"context"
 	"os"
 	"path/filepath"
-	"regexp"
-	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -29,7 +27,6 @@ const (
 	FieldAttachments // Moved after body for proximity - drag works from any field
 	FieldType
 	FieldExecutor
-	FieldSchedule
 	FieldCount
 )
 
@@ -50,7 +47,6 @@ type FormModel struct {
 	titleInput       textinput.Model
 	bodyInput        textarea.Model
 	attachmentsInput textinput.Model
-	scheduleInput    textinput.Model // For entering schedule time (e.g., "1h", "2h30m", "tomorrow 9am")
 
 	// Select values
 	project          string
@@ -276,17 +272,6 @@ func NewEditFormModel(database *db.DB, task *db.Task, width, height int, availab
 	m.bodyInput.SetValue(task.Body)
 	m.updateBodyHeight() // Autogrow based on content
 
-	// Schedule input - pre-populate if task has a scheduled time
-	m.scheduleInput = textinput.New()
-	m.scheduleInput.Placeholder = "e.g., 1h, 2h30m, tomorrow 9am"
-	m.scheduleInput.Prompt = ""
-	m.scheduleInput.Cursor.SetMode(cursor.CursorStatic)
-	m.scheduleInput.Width = width - 24
-	if task.ScheduledAt != nil && !task.ScheduledAt.IsZero() {
-		// Show relative time or formatted time
-		m.scheduleInput.SetValue(task.ScheduledAt.Format("2006-01-02 15:04"))
-	}
-
 	// Attachments input
 	m.attachmentsInput = textinput.New()
 	m.attachmentsInput.Placeholder = "Files (drag anywhere or type paths)"
@@ -415,13 +400,6 @@ func NewFormModel(database *db.DB, width, height int, workingDir string, availab
 	m.bodyInput.FocusedStyle.CursorLine = lipgloss.NewStyle()
 	m.bodyInput.BlurredStyle.CursorLine = lipgloss.NewStyle()
 	m.updateBodyHeight() // Start with minimum height, will autogrow as content is added
-
-	// Schedule input
-	m.scheduleInput = textinput.New()
-	m.scheduleInput.Placeholder = "e.g., 1h, 2h30m, tomorrow 9am"
-	m.scheduleInput.Prompt = ""
-	m.scheduleInput.Cursor.SetMode(cursor.CursorStatic)
-	m.scheduleInput.Width = width - 24
 
 	// Attachments input
 	m.attachmentsInput = textinput.New()
@@ -637,7 +615,7 @@ func (m *FormModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				break
 			}
 			// On last field, submit
-			if m.focused == FieldSchedule {
+			if m.focused == FieldExecutor {
 				m.parseAttachments()
 				m.submitted = true
 				return m, nil
@@ -773,8 +751,6 @@ func (m *FormModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, tea.Batch(cmd, debounceCmd)
 			}
 		}
-	case FieldSchedule:
-		m.scheduleInput, cmd = m.scheduleInput.Update(msg)
 	case FieldAttachments:
 		m.attachmentsInput, cmd = m.attachmentsInput.Update(msg)
 		if m.attachmentsInput.Value() != "" && m.attachmentCursor != -1 {
@@ -1018,7 +994,6 @@ func (m *FormModel) cancelAutocomplete() {
 func (m *FormModel) blurAll() {
 	m.titleInput.Blur()
 	m.bodyInput.Blur()
-	m.scheduleInput.Blur()
 	m.attachmentsInput.Blur()
 	m.clearAttachmentSelection()
 }
@@ -1029,8 +1004,6 @@ func (m *FormModel) focusCurrent() {
 		m.titleInput.Focus()
 	case FieldBody:
 		m.bodyInput.Focus()
-	case FieldSchedule:
-		m.scheduleInput.Focus()
 	case FieldAttachments:
 		m.attachmentsInput.Focus()
 	}
@@ -1381,7 +1354,7 @@ func (m *FormModel) View() string {
 	}
 	b.WriteString("  " + attachmentInputView + "\n")
 	if len(m.attachments) > 0 {
-		help := Dim.Render("←/→ select • backspace/delete remove")
+		help := Dim.Render(IconArrowLeft() + "/" + IconArrowRight() + " select • backspace/delete remove")
 		b.WriteString("   " + help + "\n")
 	}
 	b.WriteString("\n")
@@ -1411,14 +1384,6 @@ func (m *FormModel) View() string {
 	b.WriteString(cursor + " " + labelStyle.Render("Executor") + m.renderSelector(m.executors, m.executorIdx, m.focused == FieldExecutor, selectedStyle, optionStyle, dimStyle))
 	b.WriteString("\n\n")
 
-	// Schedule input
-	cursor = " "
-	if m.focused == FieldSchedule {
-		cursor = cursorStyle.Render("▸")
-	}
-	b.WriteString(cursor + " " + labelStyle.Render("Schedule") + m.scheduleInput.View())
-	b.WriteString("\n\n")
-
 	// Cancel confirmation message
 	if m.showCancelConfirm {
 		confirmStyle := lipgloss.NewStyle().
@@ -1428,7 +1393,7 @@ func (m *FormModel) View() string {
 	}
 
 	// Help
-	helpText := "tab accept/navigate • # ref task • ctrl+space suggest • ←→ select • ctrl+s submit • esc dismiss/cancel"
+	helpText := "tab accept/navigate • # ref task • ctrl+space suggest • " + IconArrowLeft() + IconArrowRight() + " select • ctrl+s submit • esc dismiss/cancel"
 	b.WriteString("  " + dimStyle.Render(helpText))
 
 	// Wrap in box - use full height (subtract 2 for border)
@@ -1467,7 +1432,6 @@ func (m *FormModel) renderSelector(options []string, selected int, focused bool,
 func (m *FormModel) hasFormData() bool {
 	return strings.TrimSpace(m.titleInput.Value()) != "" ||
 		strings.TrimSpace(m.bodyInput.Value()) != "" ||
-		strings.TrimSpace(m.scheduleInput.Value()) != "" ||
 		strings.TrimSpace(m.attachmentsInput.Value()) != "" ||
 		len(m.attachments) > 0
 }
@@ -1490,126 +1454,7 @@ func (m *FormModel) GetDBTask() *db.Task {
 		PRNumber: m.prNumber,
 	}
 
-	// Parse schedule time
-	if scheduledAt := m.parseScheduleTime(); scheduledAt != nil {
-		task.ScheduledAt = scheduledAt
-	}
-
 	return task
-}
-
-// parseScheduleTime parses the schedule input and returns a LocalTime.
-// Supports formats like: "1h", "2h30m", "30m", "tomorrow 9am", "2024-01-15 14:00"
-func (m *FormModel) parseScheduleTime() *db.LocalTime {
-	input := strings.TrimSpace(m.scheduleInput.Value())
-	if input == "" {
-		return nil
-	}
-
-	now := time.Now()
-
-	// Try to parse duration format (e.g., "1h", "2h30m", "30m")
-	if duration := parseDuration(input); duration > 0 {
-		scheduledTime := now.Add(duration)
-		return &db.LocalTime{Time: scheduledTime}
-	}
-
-	// Try "tomorrow" with optional time
-	if strings.HasPrefix(strings.ToLower(input), "tomorrow") {
-		tomorrow := now.AddDate(0, 0, 1)
-		timeStr := strings.TrimSpace(strings.TrimPrefix(strings.ToLower(input), "tomorrow"))
-		if timeStr == "" {
-			// Default to 9am
-			scheduled := time.Date(tomorrow.Year(), tomorrow.Month(), tomorrow.Day(), 9, 0, 0, 0, now.Location())
-			return &db.LocalTime{Time: scheduled}
-		}
-		// Parse time like "9am", "2pm", "14:00"
-		if t := parseTimeOfDay(timeStr, tomorrow); t != nil {
-			return t
-		}
-	}
-
-	// Try "today" with time
-	if strings.HasPrefix(strings.ToLower(input), "today") {
-		timeStr := strings.TrimSpace(strings.TrimPrefix(strings.ToLower(input), "today"))
-		if t := parseTimeOfDay(timeStr, now); t != nil {
-			return t
-		}
-	}
-
-	// Try full datetime format (e.g., "2024-01-15 14:00")
-	if t, err := time.ParseInLocation("2006-01-02 15:04", input, now.Location()); err == nil {
-		return &db.LocalTime{Time: t}
-	}
-
-	// Try date only (e.g., "2024-01-15") - defaults to 9am
-	if t, err := time.ParseInLocation("2006-01-02", input, now.Location()); err == nil {
-		scheduled := time.Date(t.Year(), t.Month(), t.Day(), 9, 0, 0, 0, now.Location())
-		return &db.LocalTime{Time: scheduled}
-	}
-
-	return nil
-}
-
-// parseDuration parses duration strings like "1h", "30m", "2h30m"
-func parseDuration(s string) time.Duration {
-	// Try standard duration parsing first
-	if d, err := time.ParseDuration(s); err == nil {
-		return d
-	}
-
-	// Handle shorthand like "1h30m" or "2h"
-	re := regexp.MustCompile(`(?i)^(\d+)h(?:(\d+)m)?$`)
-	if matches := re.FindStringSubmatch(s); matches != nil {
-		hours, _ := strconv.Atoi(matches[1])
-		minutes := 0
-		if matches[2] != "" {
-			minutes, _ = strconv.Atoi(matches[2])
-		}
-		return time.Duration(hours)*time.Hour + time.Duration(minutes)*time.Minute
-	}
-
-	// Handle just minutes like "30m"
-	re = regexp.MustCompile(`(?i)^(\d+)m$`)
-	if matches := re.FindStringSubmatch(s); matches != nil {
-		minutes, _ := strconv.Atoi(matches[1])
-		return time.Duration(minutes) * time.Minute
-	}
-
-	return 0
-}
-
-// parseTimeOfDay parses time strings like "9am", "2pm", "14:00"
-func parseTimeOfDay(s string, date time.Time) *db.LocalTime {
-	s = strings.ToLower(strings.TrimSpace(s))
-
-	// Parse 12-hour format like "9am", "2pm", "11:30am"
-	re := regexp.MustCompile(`^(\d{1,2})(?::(\d{2}))?\s*(am|pm)$`)
-	if matches := re.FindStringSubmatch(s); matches != nil {
-		hour, _ := strconv.Atoi(matches[1])
-		minutes := 0
-		if matches[2] != "" {
-			minutes, _ = strconv.Atoi(matches[2])
-		}
-		if matches[3] == "pm" && hour != 12 {
-			hour += 12
-		} else if matches[3] == "am" && hour == 12 {
-			hour = 0
-		}
-		scheduled := time.Date(date.Year(), date.Month(), date.Day(), hour, minutes, 0, 0, date.Location())
-		return &db.LocalTime{Time: scheduled}
-	}
-
-	// Parse 24-hour format like "14:00", "9:30"
-	re = regexp.MustCompile(`^(\d{1,2}):(\d{2})$`)
-	if matches := re.FindStringSubmatch(s); matches != nil {
-		hour, _ := strconv.Atoi(matches[1])
-		minutes, _ := strconv.Atoi(matches[2])
-		scheduled := time.Date(date.Year(), date.Month(), date.Day(), hour, minutes, 0, 0, date.Location())
-		return &db.LocalTime{Time: scheduled}
-	}
-
-	return nil
 }
 
 // SetQueue sets whether to queue the task.
@@ -1625,7 +1470,6 @@ func (m *FormModel) SetSize(width, height int) {
 	inputWidth := width - 24
 	m.titleInput.Width = inputWidth
 	m.bodyInput.SetWidth(inputWidth)
-	m.scheduleInput.Width = inputWidth
 	m.attachmentsInput.Width = inputWidth
 	// Recalculate body height based on new dimensions
 	m.updateBodyHeight()

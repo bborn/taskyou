@@ -975,8 +975,8 @@ func (m *SettingsModel) renderHelp() string {
 			desc string
 		}{
 			{"tab", "section"},
-			{"←/→", "theme"},
-			{"↑/↓", "navigate"},
+			{IconArrowLeft() + "/" + IconArrowRight(), "theme"},
+			{IconArrowUp() + "/" + IconArrowDown(), "navigate"},
 			{"n", "new"},
 			{"e", "edit"},
 			{"d", "delete"},

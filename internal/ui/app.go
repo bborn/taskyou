@@ -107,19 +107,19 @@ func DefaultKeyMap() KeyMap {
 	return KeyMap{
 		Left: key.NewBinding(
 			key.WithKeys("left"),
-			key.WithHelp("←", "prev col"),
+			key.WithHelp(IconArrowLeft(), "prev col"),
 		),
 		Right: key.NewBinding(
 			key.WithKeys("right"),
-			key.WithHelp("→", "next col"),
+			key.WithHelp(IconArrowRight(), "next col"),
 		),
 		Up: key.NewBinding(
 			key.WithKeys("up"),
-			key.WithHelp("↑", "up"),
+			key.WithHelp(IconArrowUp(), "up"),
 		),
 		Down: key.NewBinding(
 			key.WithKeys("down"),
-			key.WithHelp("↓", "down"),
+			key.WithHelp(IconArrowDown(), "down"),
 		),
 		Enter: key.NewBinding(
 			key.WithKeys("enter"),
@@ -231,11 +231,11 @@ func DefaultKeyMap() KeyMap {
 		),
 		JumpToPinned: key.NewBinding(
 			key.WithKeys("shift+up"),
-			key.WithHelp("⇧↑", "jump to pinned"),
+			key.WithHelp(IconShiftUp(), "jump to pinned"),
 		),
 		JumpToUnpinned: key.NewBinding(
 			key.WithKeys("shift+down"),
-			key.WithHelp("⇧↓", "jump to unpinned"),
+			key.WithHelp(IconShiftDown(), "jump to unpinned"),
 		),
 	}
 }
@@ -594,7 +594,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if prevStatus != "" && prevStatus != t.Status {
 				if t.Status == db.StatusBlocked {
 					// Task just became blocked - ring bell and show notification
-					m.notification = fmt.Sprintf("⚠ Task #%d needs input: %s (g to jump)", t.ID, t.Title)
+					m.notification = fmt.Sprintf("%s Task #%d needs input: %s (g to jump)", IconBlocked(), t.ID, t.Title)
 					m.notifyUntil = time.Now().Add(10 * time.Second)
 					m.notifyTaskID = t.ID
 					RingBell() // Ring terminal bell (writes to /dev/tty to bypass TUI)
@@ -606,7 +606,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 				} else if t.Status == db.StatusDone && db.IsInProgress(prevStatus) {
 					// Task completed - ring bell and show notification
-					m.notification = fmt.Sprintf("✓ Task #%d complete: %s (g to jump)", t.ID, t.Title)
+					m.notification = fmt.Sprintf("%s Task #%d complete: %s (g to jump)", IconDone(), t.ID, t.Title)
 					m.notifyUntil = time.Now().Add(5 * time.Second)
 					m.notifyTaskID = t.ID
 					RingBell() // Ring terminal bell (writes to /dev/tty to bypass TUI)
@@ -751,7 +751,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err == nil {
 			// Task was moved successfully
 			m.selectedTask = msg.newTask
-			m.notification = fmt.Sprintf("✓ Task moved to %s as #%d", msg.newTask.Project, msg.newTask.ID)
+			m.notification = fmt.Sprintf("%s Task moved to %s as #%d", IconDone(), msg.newTask.Project, msg.newTask.ID)
 			m.notifyUntil = time.Now().Add(5 * time.Second)
 			cmds = append(cmds, m.loadTasks())
 			// Navigate to the new task's detail view
@@ -775,7 +775,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 			if msg.task.Pinned {
-				m.notification = fmt.Sprintf("📌 Task #%d pinned", msg.task.ID)
+				m.notification = fmt.Sprintf("%s Task #%d pinned", IconPin(), msg.task.ID)
 			} else {
 				m.notification = fmt.Sprintf("📍 Task #%d unpinned", msg.task.ID)
 			}
@@ -796,7 +796,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, m.detailView.RefreshPanesCmd())
 		}
 		if msg.err != nil {
-			m.notification = fmt.Sprintf("⚠ %s", msg.err.Error())
+			m.notification = fmt.Sprintf("%s %s", IconBlocked(), msg.err.Error())
 		} else {
 			// Reload the task to get updated dangerous_mode flag
 			if m.selectedTask != nil {
@@ -807,9 +807,9 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						m.detailView.UpdateTask(task)
 					}
 					if task.DangerousMode {
-						m.notification = "⚠️ Dangerous mode enabled"
+						m.notification = IconBlocked() + " Dangerous mode enabled"
 					} else {
-						m.notification = "✓ Safe mode enabled"
+						m.notification = IconDone() + " Safe mode enabled"
 					}
 				}
 			}
@@ -822,7 +822,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case worktreeOpenedMsg:
 		if msg.err != nil {
-			m.notification = fmt.Sprintf("⚠ %s", msg.err.Error())
+			m.notification = fmt.Sprintf("%s %s", IconBlocked(), msg.err.Error())
 			m.notifyUntil = time.Now().Add(5 * time.Second)
 		} else if msg.message != "" {
 			m.notification = fmt.Sprintf("📂 %s", msg.message)
@@ -862,7 +862,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 								m.detailView.SetNotification(m.notification, m.notifyTaskID, m.notifyUntil)
 							}
 						} else if db.IsInProgress(event.Task.Status) {
-							m.notification = fmt.Sprintf("▶ Task #%d started: %s (g to jump)", event.TaskID, event.Task.Title)
+							m.notification = fmt.Sprintf("%s Task #%d started: %s (g to jump)", IconInProgress(), event.TaskID, event.Task.Title)
 							m.notifyUntil = time.Now().Add(3 * time.Second)
 							m.notifyTaskID = event.TaskID
 							// Immediately update detail view notification if active
@@ -1048,7 +1048,7 @@ func (m *AppModel) viewDashboard() string {
 			Bold(true).
 			Padding(0, 2).
 			Width(m.width)
-		headerParts = append(headerParts, warnStyle.Render("⚠ No AI executor installed. See: https://code.claude.com/docs/en/overview"))
+		headerParts = append(headerParts, warnStyle.Render(IconBlocked()+" No AI executor installed. See: https://code.claude.com/docs/en/overview"))
 	}
 
 	// Show global dangerous mode banner if the entire system is in dangerous mode
@@ -1059,7 +1059,7 @@ func (m *AppModel) viewDashboard() string {
 			Bold(true).
 			Padding(0, 2).
 			Width(m.width)
-		headerParts = append(headerParts, dangerStyle.Render("⚠ DANGEROUS MODE ENABLED"))
+		headerParts = append(headerParts, dangerStyle.Render(IconBlocked()+" DANGEROUS MODE ENABLED"))
 	}
 
 	// Show notification banner if active
@@ -1079,7 +1079,7 @@ func (m *AppModel) viewDashboard() string {
 	if runningIDs := m.executor.RunningTasks(); len(runningIDs) > 0 {
 		statusBar := lipgloss.NewStyle().
 			Foreground(ColorInProgress).
-			Render(fmt.Sprintf("⋯ Processing %d task(s)", len(runningIDs)))
+			Render(fmt.Sprintf("%s Processing %d task(s)", IconProcessing(), len(runningIDs)))
 		headerParts = append(headerParts, statusBar)
 	}
 
@@ -1152,7 +1152,8 @@ func (m *AppModel) renderFilterBar() string {
 	// Help hint
 	helpStyle := lipgloss.NewStyle().Foreground(ColorMuted).Italic(true)
 	if m.filterActive {
-		parts = append(parts, helpStyle.Render("  (⌫: clear, Enter: select, ↑↓←→: navigate)"))
+		navHelp := fmt.Sprintf("%s%s%s%s", IconArrowUp(), IconArrowDown(), IconArrowLeft(), IconArrowRight())
+		parts = append(parts, helpStyle.Render(fmt.Sprintf("  (backspace: clear, Enter: select, %s: navigate)", navHelp)))
 	} else if m.filterText != "" {
 		parts = append(parts, helpStyle.Render("  (/: edit, Esc: clear)"))
 	}
@@ -1837,12 +1838,6 @@ func (m *AppModel) updateEditTaskForm(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// Store the original task for the confirmation dialog
 				originalTask := m.editingTask
 
-				// Preserve schedule fields for the new task
-				updatedTask.LastRunAt = originalTask.LastRunAt
-				if updatedTask.ScheduledAt == nil && originalTask.ScheduledAt != nil {
-					updatedTask.ScheduledAt = originalTask.ScheduledAt
-				}
-
 				m.editTaskForm = nil
 				m.editingTask = nil
 				return m.showProjectChangeConfirm(updatedTask, originalTask)
@@ -1856,13 +1851,6 @@ func (m *AppModel) updateEditTaskForm(msg tea.Msg) (tea.Model, tea.Cmd) {
 			updatedTask.CreatedAt = m.editingTask.CreatedAt
 			updatedTask.StartedAt = m.editingTask.StartedAt
 			updatedTask.CompletedAt = m.editingTask.CompletedAt
-			updatedTask.LastRunAt = m.editingTask.LastRunAt
-
-			// Preserve ScheduledAt if form didn't parse a new one but original had one
-			// This handles cases where the schedule input wasn't changed or parsing failed
-			if updatedTask.ScheduledAt == nil && m.editingTask.ScheduledAt != nil {
-				updatedTask.ScheduledAt = m.editingTask.ScheduledAt
-			}
 
 			// Capture old title before clearing editingTask
 			oldTitle := m.editingTask.Title
@@ -1914,7 +1902,7 @@ func (m *AppModel) viewDeleteConfirm() string {
 		Bold(true).
 		Foreground(ColorError).
 		MarginBottom(1).
-		Render("⚠ Confirm Delete")
+		Render(IconBlocked() + " Confirm Delete")
 
 	formView := m.deleteConfirm.View()
 
@@ -2010,7 +1998,7 @@ func (m *AppModel) viewProjectChangeConfirm() string {
 		Bold(true).
 		Foreground(ColorWarning).
 		MarginBottom(1).
-		Render("⚠ Move Task to Different Project")
+		Render(IconBlocked() + " Move Task to Different Project")
 
 	formView := m.projectChangeConfirm.View()
 
@@ -2190,7 +2178,7 @@ func (m *AppModel) viewCloseConfirm() string {
 		Bold(true).
 		Foreground(ColorSuccess).
 		MarginBottom(1).
-		Render("✓ Confirm Close")
+		Render(IconDone() + " Confirm Close")
 
 	formView := m.closeConfirm.View()
 
@@ -2359,10 +2347,10 @@ func (m *AppModel) showChangeStatus(task *db.Task) (tea.Model, tea.Cmd) {
 		value string
 		label string
 	}{
-		{db.StatusBacklog, "◦ Backlog"},
-		{db.StatusQueued, "▶ In Progress"},
-		{db.StatusBlocked, "⚠ Blocked"},
-		{db.StatusDone, "✓ Done"},
+		{db.StatusBacklog, IconBacklog() + " Backlog"},
+		{db.StatusQueued, IconInProgress() + " In Progress"},
+		{db.StatusBlocked, IconBlocked() + " Blocked"},
+		{db.StatusDone, IconDone() + " Done"},
 	}
 
 	for _, s := range allStatuses {

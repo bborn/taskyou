@@ -529,7 +529,7 @@ func (m *CommandPaletteModel) View() string {
 	helpStyle := lipgloss.NewStyle().
 		Foreground(ColorMuted).
 		MarginTop(1)
-	help := helpStyle.Render("Enter: select  Esc: cancel  ↑/↓: navigate")
+	help := helpStyle.Render("Enter: select  Esc: cancel  " + IconArrowUp() + "/" + IconArrowDown() + ": navigate")
 
 	// Combine all parts
 	content := lipgloss.JoinVertical(lipgloss.Left,

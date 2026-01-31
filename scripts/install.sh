@@ -138,7 +138,7 @@ main() {
     check_path
 
     echo ""
-    info "Run 'ty --help' or 'taskyou --help' to get started!"
+    info "Run 'ty' to get started!"
     echo ""
 }
 

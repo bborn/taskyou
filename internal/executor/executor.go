@@ -211,10 +211,6 @@ func (e *Executor) Start(ctx context.Context) {
 
 	e.logger.Info("Background executor started")
 
-	// Check for overdue scheduled tasks immediately on startup
-	// (handles tasks that were due while app wasn't running)
-	e.queueDueScheduledTasks()
-
 	go e.worker(ctx)
 }
 
@@ -592,7 +588,6 @@ func (e *Executor) worker(ctx context.Context) {
 	tickCount := 0
 	const mergeCheckInterval = 15
 	const suspendCheckInterval = 30
-	const scheduleCheckInterval = 5
 	const doneCleanupInterval = 150 // 5 minutes at 2 second ticks
 
 	for {
@@ -605,11 +600,6 @@ func (e *Executor) worker(ctx context.Context) {
 			e.processNextTask(ctx)
 
 			tickCount++
-
-			// Periodically check for due scheduled tasks and queue them
-			if tickCount%scheduleCheckInterval == 0 {
-				e.queueDueScheduledTasks()
-			}
 
 			// Periodically check for merged branches
 			if tickCount%mergeCheckInterval == 0 {
@@ -625,44 +615,6 @@ func (e *Executor) worker(ctx context.Context) {
 			if tickCount%doneCleanupInterval == 0 {
 				e.cleanupInactiveDoneTasks()
 			}
-		}
-	}
-}
-
-// queueDueScheduledTasks checks for scheduled tasks that are due and queues them.
-func (e *Executor) queueDueScheduledTasks() {
-	tasks, err := e.db.GetDueScheduledTasks()
-	if err != nil {
-		e.logger.Debug("Failed to get due scheduled tasks", "error", err)
-		return
-	}
-
-	for _, task := range tasks {
-		e.logger.Info("Queuing scheduled task", "id", task.ID, "title", task.Title, "scheduled_at", task.ScheduledAt)
-
-		// Log the scheduled execution with a clear separator
-		e.logLine(task.ID, "system", "")
-		e.logLine(task.ID, "system", "═══════════════════════════════════════════════════════")
-		e.logLine(task.ID, "system", fmt.Sprintf("⏰ SCHEDULED RUN STARTED - %s", time.Now().Format("Jan 2, 2006 3:04:05 PM")))
-		if task.Recurrence != "" {
-			e.logLine(task.ID, "system", "Recurring schedules are no longer supported inside TaskYou. This run will not repeat automatically.")
-		}
-		e.logLine(task.ID, "system", "═══════════════════════════════════════════════════════")
-
-		// Queue the task
-		if err := e.db.QueueScheduledTask(task.ID); err != nil {
-			e.logger.Error("Failed to queue scheduled task", "id", task.ID, "error", err)
-			continue
-		}
-
-		// Broadcast the status change
-		updatedTask, _ := e.db.GetTask(task.ID)
-		if updatedTask != nil {
-			e.broadcastTaskEvent(TaskEvent{
-				Type:   "status_changed",
-				Task:   updatedTask,
-				TaskID: task.ID,
-			})
 		}
 	}
 }

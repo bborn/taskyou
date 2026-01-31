@@ -560,42 +560,30 @@ func TestHasFormData(t *testing.T) {
 		name     string
 		title    string
 		body     string
-		schedule string
 		expected bool
 	}{
 		{
 			name:     "empty form returns false",
 			title:    "",
 			body:     "",
-			schedule: "",
 			expected: false,
 		},
 		{
 			name:     "whitespace only returns false",
 			title:    "  ",
 			body:     "\n\t",
-			schedule: " ",
 			expected: false,
 		},
 		{
 			name:     "title with content returns true",
 			title:    "My task",
 			body:     "",
-			schedule: "",
 			expected: true,
 		},
 		{
 			name:     "body with content returns true",
 			title:    "",
 			body:     "Some description",
-			schedule: "",
-			expected: true,
-		},
-		{
-			name:     "schedule with content returns true",
-			title:    "",
-			body:     "",
-			schedule: "1h",
 			expected: true,
 		},
 	}
@@ -605,7 +593,6 @@ func TestHasFormData(t *testing.T) {
 			m := NewFormModel(nil, 100, 50, "", nil)
 			m.titleInput.SetValue(tt.title)
 			m.bodyInput.SetValue(tt.body)
-			m.scheduleInput.SetValue(tt.schedule)
 
 			if got := m.hasFormData(); got != tt.expected {
 				t.Errorf("hasFormData() = %v, want %v", got, tt.expected)

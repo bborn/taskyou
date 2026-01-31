@@ -2015,7 +2015,7 @@ func (m *DetailModel) View() string {
 			Bold(true).
 			Padding(0, 2).
 			Width(m.width)
-		dangerBanner = dangerStyle.Render("⚠ DANGEROUS MODE ENABLED")
+		dangerBanner = dangerStyle.Render(IconBlocked() + " DANGEROUS MODE ENABLED")
 	}
 
 	header := m.renderHeader()
@@ -2227,56 +2227,6 @@ func (m *DetailModel) renderHeader() string {
 		meta.WriteString(errorStyle.Render("⚠ " + m.paneError))
 	}
 
-	// Schedule info - show if scheduled
-	if t.IsScheduled() {
-		meta.WriteString("  ")
-		var scheduleStyle lipgloss.Style
-		if m.focused {
-			scheduleStyle = lipgloss.NewStyle().
-				Padding(0, 1).
-				Background(lipgloss.Color("214")). // Orange
-				Foreground(lipgloss.Color("#000000"))
-		} else {
-			scheduleStyle = lipgloss.NewStyle().
-				Padding(0, 1).
-				Background(dimmedBg).
-				Foreground(dimmedFg)
-		}
-		icon := "⏰"
-		scheduleText := icon + " " + formatScheduleTime(t.ScheduledAt.Time)
-		meta.WriteString(scheduleStyle.Render(scheduleText))
-
-		// Show last run info when available
-		if t.LastRunAt != nil {
-			var lastRunStyle lipgloss.Style
-			if m.focused {
-				lastRunStyle = lipgloss.NewStyle().
-					Foreground(lipgloss.Color("214"))
-			} else {
-				lastRunStyle = lipgloss.NewStyle().
-					Foreground(dimmedTextFg)
-			}
-			lastRunText := fmt.Sprintf(" Last: %s", t.LastRunAt.Time.Format("Jan 2 3:04pm"))
-			meta.WriteString(lastRunStyle.Render(lastRunText))
-		}
-	} else if t.Recurrence != "" {
-		// Legacy recurring tasks: show a subtle warning so users know it won't repeat
-		meta.WriteString("  ")
-		var warnStyle lipgloss.Style
-		if m.focused {
-			warnStyle = lipgloss.NewStyle().
-				Padding(0, 1).
-				Background(lipgloss.Color("214")).
-				Foreground(lipgloss.Color("#000000"))
-		} else {
-			warnStyle = lipgloss.NewStyle().
-				Padding(0, 1).
-				Background(dimmedBg).
-				Foreground(dimmedFg)
-		}
-		meta.WriteString(warnStyle.Render("Recurring schedules removed"))
-	}
-
 	// PR link if available
 	var prLine string
 	if m.prInfo != nil && m.prInfo.URL != "" {
@@ -2298,7 +2248,7 @@ func (m *DetailModel) renderHeader() string {
 			Background(lipgloss.Color("#4B5563")). // Muted gray background
 			Foreground(lipgloss.Color("#FFCC00")). // Yellow text
 			Padding(0, 1)
-		notifyIndicator := notifyStyle.Render(fmt.Sprintf("⚠ Task #%d (ctrl+g)", m.notifyTaskID))
+		notifyIndicator := notifyStyle.Render(fmt.Sprintf("%s Task #%d (ctrl+g)", IconBlocked(), m.notifyTaskID))
 
 		// Add notification with spacing
 		firstLine = metaStr + "  " + notifyIndicator
@@ -2489,7 +2439,7 @@ func (m *DetailModel) renderHelp() string {
 	hasNavigation := m.totalInColumn > 1
 
 	keys := []helpKey{
-		{"↑/↓", "prev/next task", !hasNavigation},
+		{IconArrowUp() + "/" + IconArrowDown(), "prev/next task", !hasNavigation},
 	}
 
 	// Show scroll hint when content is scrollable
@@ -2539,7 +2489,7 @@ func (m *DetailModel) renderHelp() string {
 
 	// Show pane navigation shortcut when panes are visible
 	if hasPanes && os.Getenv("TMUX") != "" {
-		keys = append(keys, helpKey{"shift+↑↓", "switch pane", false})
+		keys = append(keys, helpKey{"shift+" + IconArrowUp() + IconArrowDown(), "switch pane", false})
 	}
 
 	// Show jump to notification shortcut when there's an active notification

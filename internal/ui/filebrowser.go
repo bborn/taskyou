@@ -224,7 +224,7 @@ func (m *FileBrowserModel) View() string {
 
 	// Help
 	b.WriteString("\n")
-	help := HelpKey.Render("↑/↓") + " " + HelpDesc.Render("navigate") + "  "
+	help := HelpKey.Render(IconArrowUp()+"/"+IconArrowDown()) + " " + HelpDesc.Render("navigate") + "  "
 	help += HelpKey.Render("enter") + " " + HelpDesc.Render("open") + "  "
 	help += HelpKey.Render("space") + " " + HelpDesc.Render("select this dir") + "  "
 	help += HelpKey.Render("~") + " " + HelpDesc.Render("home") + "  "

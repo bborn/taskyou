@@ -36,10 +36,6 @@ type Task struct {
 	UpdatedAt       LocalTime
 	StartedAt       *LocalTime
 	CompletedAt     *LocalTime
-	// Schedule fields for tasks with delayed execution
-	ScheduledAt *LocalTime // When to next run (nil = not scheduled)
-	Recurrence  string     // Deprecated: no longer used (kept for backward compatibility)
-	LastRunAt   *LocalTime // When last executed (for scheduled tasks)
 	// Distillation tracking
 	LastDistilledAt *LocalTime // When task was last distilled for learnings
 }
@@ -77,11 +73,6 @@ const (
 // DefaultExecutor returns the default executor if none is specified.
 func DefaultExecutor() string {
 	return ExecutorClaude
-}
-
-// IsScheduled returns true if the task has a scheduled time set.
-func (t *Task) IsScheduled() bool {
-	return t.ScheduledAt != nil && !t.ScheduledAt.Time.IsZero()
 }
 
 // Port allocation constants
@@ -126,9 +117,9 @@ func (db *DB) CreateTask(t *Task) error {
 	}
 
 	result, err := db.Exec(`
-		INSERT INTO tasks (title, body, status, type, project, executor, scheduled_at, recurrence, last_run_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, t.Title, t.Body, t.Status, t.Type, t.Project, t.Executor, t.ScheduledAt, t.Recurrence, t.LastRunAt)
+		INSERT INTO tasks (title, body, status, type, project, executor)
+		VALUES (?, ?, ?, ?, ?, ?)
+	`, t.Title, t.Body, t.Status, t.Type, t.Project, t.Executor)
 	if err != nil {
 		return fmt.Errorf("insert task: %w", err)
 	}
@@ -168,7 +159,7 @@ func (db *DB) GetTask(id int64) (*Task, error) {
 		       COALESCE(pr_url, ''), COALESCE(pr_number, 0),
 		       COALESCE(dangerous_mode, 0), COALESCE(pinned, 0), COALESCE(tags, ''), COALESCE(summary, ''),
 		       created_at, updated_at, started_at, completed_at,
-		       scheduled_at, recurrence, last_run_at, last_distilled_at
+		       last_distilled_at
 		FROM tasks WHERE id = ?
 	`, id).Scan(
 		&t.ID, &t.Title, &t.Body, &t.Status, &t.Type, &t.Project, &t.Executor,
@@ -177,7 +168,7 @@ func (db *DB) GetTask(id int64) (*Task, error) {
 		&t.PRURL, &t.PRNumber,
 		&t.DangerousMode, &t.Pinned, &t.Tags, &t.Summary,
 		&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
-		&t.ScheduledAt, &t.Recurrence, &t.LastRunAt, &t.LastDistilledAt,
+		&t.LastDistilledAt,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -208,7 +199,7 @@ func (db *DB) ListTasks(opts ListTasksOptions) ([]*Task, error) {
 		       COALESCE(pr_url, ''), COALESCE(pr_number, 0),
 		       COALESCE(dangerous_mode, 0), COALESCE(pinned, 0), COALESCE(tags, ''), COALESCE(summary, ''),
 		       created_at, updated_at, started_at, completed_at,
-		       scheduled_at, recurrence, last_run_at, last_distilled_at
+		       last_distilled_at
 		FROM tasks WHERE 1=1
 	`
 	args := []interface{}{}
@@ -260,7 +251,7 @@ func (db *DB) ListTasks(opts ListTasksOptions) ([]*Task, error) {
 			&t.PRURL, &t.PRNumber,
 			&t.DangerousMode, &t.Pinned, &t.Tags, &t.Summary,
 			&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
-			&t.ScheduledAt, &t.Recurrence, &t.LastRunAt, &t.LastDistilledAt,
+			&t.LastDistilledAt,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("scan task: %w", err)
@@ -283,7 +274,7 @@ func (db *DB) GetMostRecentlyCreatedTask() (*Task, error) {
 		       COALESCE(pr_url, ''), COALESCE(pr_number, 0),
 		       COALESCE(dangerous_mode, 0), COALESCE(pinned, 0), COALESCE(tags, ''), COALESCE(summary, ''),
 		       created_at, updated_at, started_at, completed_at,
-		       scheduled_at, recurrence, last_run_at, last_distilled_at
+		       last_distilled_at
 		FROM tasks
 		ORDER BY created_at DESC, id DESC
 		LIMIT 1
@@ -294,7 +285,7 @@ func (db *DB) GetMostRecentlyCreatedTask() (*Task, error) {
 		&t.PRURL, &t.PRNumber,
 		&t.DangerousMode, &t.Pinned, &t.Tags, &t.Summary,
 		&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
-		&t.ScheduledAt, &t.Recurrence, &t.LastRunAt, &t.LastDistilledAt,
+		&t.LastDistilledAt,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -321,7 +312,7 @@ func (db *DB) SearchTasks(query string, limit int) ([]*Task, error) {
 		       COALESCE(pr_url, ''), COALESCE(pr_number, 0),
 		       COALESCE(dangerous_mode, 0), COALESCE(pinned, 0), COALESCE(tags, ''), COALESCE(summary, ''),
 		       created_at, updated_at, started_at, completed_at,
-		       scheduled_at, recurrence, last_run_at, last_distilled_at
+		       last_distilled_at
 		FROM tasks
 		WHERE (
 			title LIKE ? COLLATE NOCASE
@@ -351,7 +342,7 @@ func (db *DB) SearchTasks(query string, limit int) ([]*Task, error) {
 			&t.PRURL, &t.PRNumber,
 			&t.DangerousMode, &t.Pinned, &t.Tags, &t.Summary,
 			&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
-			&t.ScheduledAt, &t.Recurrence, &t.LastRunAt, &t.LastDistilledAt,
+			&t.LastDistilledAt,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("scan task: %w", err)
@@ -410,13 +401,13 @@ func (db *DB) UpdateTask(t *Task) error {
 			title = ?, body = ?, status = ?, type = ?, project = ?, executor = ?,
 			worktree_path = ?, branch_name = ?, port = ?, claude_session_id = ?,
 			daemon_session = ?, pr_url = ?, pr_number = ?, dangerous_mode = ?,
-			pinned = ?, tags = ?, scheduled_at = ?, recurrence = ?, last_run_at = ?,
+			pinned = ?, tags = ?,
 			updated_at = CURRENT_TIMESTAMP
 		WHERE id = ?
 	`, t.Title, t.Body, t.Status, t.Type, t.Project, t.Executor,
 		t.WorktreePath, t.BranchName, t.Port, t.ClaudeSessionID,
 		t.DaemonSession, t.PRURL, t.PRNumber, t.DangerousMode,
-		t.Pinned, t.Tags, t.ScheduledAt, t.Recurrence, t.LastRunAt, t.ID)
+		t.Pinned, t.Tags, t.ID)
 	if err != nil {
 		return fmt.Errorf("update task: %w", err)
 	}
@@ -580,7 +571,7 @@ func (db *DB) GetNextQueuedTask() (*Task, error) {
 		       COALESCE(pr_url, ''), COALESCE(pr_number, 0),
 		       COALESCE(dangerous_mode, 0), COALESCE(pinned, 0), COALESCE(tags, ''), COALESCE(summary, ''),
 		       created_at, updated_at, started_at, completed_at,
-		       scheduled_at, recurrence, last_run_at, last_distilled_at
+		       last_distilled_at
 		FROM tasks
 		WHERE status = ?
 		ORDER BY created_at ASC
@@ -592,7 +583,7 @@ func (db *DB) GetNextQueuedTask() (*Task, error) {
 		&t.PRURL, &t.PRNumber,
 		&t.DangerousMode, &t.Pinned, &t.Tags, &t.Summary,
 		&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
-		&t.ScheduledAt, &t.Recurrence, &t.LastRunAt, &t.LastDistilledAt,
+		&t.LastDistilledAt,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -613,7 +604,7 @@ func (db *DB) GetQueuedTasks() ([]*Task, error) {
 		       COALESCE(pr_url, ''), COALESCE(pr_number, 0),
 		       COALESCE(dangerous_mode, 0), COALESCE(pinned, 0), COALESCE(tags, ''), COALESCE(summary, ''),
 		       created_at, updated_at, started_at, completed_at,
-		       scheduled_at, recurrence, last_run_at, last_distilled_at
+		       last_distilled_at
 		FROM tasks
 		WHERE status = ?
 		ORDER BY created_at ASC
@@ -633,7 +624,7 @@ func (db *DB) GetQueuedTasks() ([]*Task, error) {
 			&t.PRURL, &t.PRNumber,
 			&t.DangerousMode, &t.Pinned, &t.Tags, &t.Summary,
 			&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
-			&t.ScheduledAt, &t.Recurrence, &t.LastRunAt, &t.LastDistilledAt,
+			&t.LastDistilledAt,
 		); err != nil {
 			return nil, fmt.Errorf("scan task: %w", err)
 		}
@@ -653,7 +644,7 @@ func (db *DB) GetTasksWithBranches() ([]*Task, error) {
 		       COALESCE(pr_url, ''), COALESCE(pr_number, 0),
 		       COALESCE(dangerous_mode, 0), COALESCE(pinned, 0), COALESCE(tags, ''), COALESCE(summary, ''),
 		       created_at, updated_at, started_at, completed_at,
-		       scheduled_at, recurrence, last_run_at, last_distilled_at
+		       last_distilled_at
 		FROM tasks
 		WHERE branch_name != '' AND status NOT IN (?, ?)
 		ORDER BY created_at DESC
@@ -673,125 +664,13 @@ func (db *DB) GetTasksWithBranches() ([]*Task, error) {
 			&t.PRURL, &t.PRNumber,
 			&t.DangerousMode, &t.Pinned, &t.Tags, &t.Summary,
 			&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
-			&t.ScheduledAt, &t.Recurrence, &t.LastRunAt, &t.LastDistilledAt,
+			&t.LastDistilledAt,
 		); err != nil {
 			return nil, fmt.Errorf("scan task: %w", err)
 		}
 		tasks = append(tasks, t)
 	}
 	return tasks, nil
-}
-
-// GetDueScheduledTasks returns all scheduled tasks that are due to run.
-// A task is due if:
-// - It has a scheduled_at time that is <= now
-// - It is not currently queued or processing (to avoid double-queueing)
-func (db *DB) GetDueScheduledTasks() ([]*Task, error) {
-	rows, err := db.Query(`
-		SELECT id, title, body, status, type, project, COALESCE(executor, 'claude'),
-		       worktree_path, branch_name, port, claude_session_id,
-		       COALESCE(daemon_session, ''), COALESCE(tmux_window_id, ''),
-		       COALESCE(claude_pane_id, ''), COALESCE(shell_pane_id, ''),
-		       COALESCE(pr_url, ''), COALESCE(pr_number, 0),
-		       COALESCE(dangerous_mode, 0), COALESCE(pinned, 0), COALESCE(tags, ''), COALESCE(summary, ''),
-		       created_at, updated_at, started_at, completed_at,
-		       scheduled_at, recurrence, last_run_at, last_distilled_at
-		FROM tasks
-		WHERE scheduled_at IS NOT NULL
-		  AND scheduled_at <= CURRENT_TIMESTAMP
-		  AND status NOT IN (?, ?)
-		ORDER BY scheduled_at ASC
-	`, StatusQueued, StatusProcessing)
-	if err != nil {
-		return nil, fmt.Errorf("query due scheduled tasks: %w", err)
-	}
-	defer rows.Close()
-
-	var tasks []*Task
-	for rows.Next() {
-		t := &Task{}
-		if err := rows.Scan(
-			&t.ID, &t.Title, &t.Body, &t.Status, &t.Type, &t.Project, &t.Executor,
-			&t.WorktreePath, &t.BranchName, &t.Port, &t.ClaudeSessionID,
-			&t.DaemonSession, &t.TmuxWindowID, &t.ClaudePaneID, &t.ShellPaneID,
-			&t.PRURL, &t.PRNumber,
-			&t.DangerousMode, &t.Pinned, &t.Tags, &t.Summary,
-			&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
-			&t.ScheduledAt, &t.Recurrence, &t.LastRunAt, &t.LastDistilledAt,
-		); err != nil {
-			return nil, fmt.Errorf("scan task: %w", err)
-		}
-		tasks = append(tasks, t)
-	}
-	return tasks, nil
-}
-
-// GetScheduledTasks returns all tasks that have a scheduled time set (regardless of status).
-func (db *DB) GetScheduledTasks() ([]*Task, error) {
-	rows, err := db.Query(`
-		SELECT id, title, body, status, type, project, COALESCE(executor, 'claude'),
-		       worktree_path, branch_name, port, claude_session_id,
-		       COALESCE(daemon_session, ''), COALESCE(tmux_window_id, ''),
-		       COALESCE(claude_pane_id, ''), COALESCE(shell_pane_id, ''),
-		       COALESCE(pr_url, ''), COALESCE(pr_number, 0),
-		       COALESCE(dangerous_mode, 0), COALESCE(pinned, 0), COALESCE(tags, ''), COALESCE(summary, ''),
-		       created_at, updated_at, started_at, completed_at,
-		       scheduled_at, recurrence, last_run_at, last_distilled_at
-		FROM tasks
-		WHERE scheduled_at IS NOT NULL
-		ORDER BY scheduled_at ASC
-	`)
-	if err != nil {
-		return nil, fmt.Errorf("query scheduled tasks: %w", err)
-	}
-	defer rows.Close()
-
-	var tasks []*Task
-	for rows.Next() {
-		t := &Task{}
-		if err := rows.Scan(
-			&t.ID, &t.Title, &t.Body, &t.Status, &t.Type, &t.Project, &t.Executor,
-			&t.WorktreePath, &t.BranchName, &t.Port, &t.ClaudeSessionID,
-			&t.DaemonSession, &t.TmuxWindowID, &t.ClaudePaneID, &t.ShellPaneID,
-			&t.PRURL, &t.PRNumber,
-			&t.DangerousMode, &t.Pinned, &t.Tags, &t.Summary,
-			&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
-			&t.ScheduledAt, &t.Recurrence, &t.LastRunAt, &t.LastDistilledAt,
-		); err != nil {
-			return nil, fmt.Errorf("scan task: %w", err)
-		}
-		tasks = append(tasks, t)
-	}
-	return tasks, nil
-}
-
-// QueueScheduledTask queues a scheduled task.
-// The scheduled time is always cleared so the run happens once.
-func (db *DB) QueueScheduledTask(taskID int64) error {
-	// Get the task first
-	task, err := db.GetTask(taskID)
-	if err != nil {
-		return fmt.Errorf("get task: %w", err)
-	}
-	if task == nil {
-		return fmt.Errorf("task %d not found", taskID)
-	}
-
-	now := time.Now()
-
-	// Recurring tasks are no longer supported; treat everything as one-time
-	task.ScheduledAt = nil
-	task.LastRunAt = &LocalTime{Time: now}
-	if task.Recurrence != "" {
-		// Clear any legacy recurrence data so the UI no longer highlights it
-		task.Recurrence = ""
-	}
-
-	// Update status to queued
-	task.Status = StatusQueued
-
-	// Save all changes
-	return db.UpdateTask(task)
 }
 
 // TaskLog represents a log entry for a task.

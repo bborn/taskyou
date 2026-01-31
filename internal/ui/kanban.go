@@ -3,7 +3,6 @@ package ui
 import (
 	"fmt"
 	"strings"
-	"time"
 
 	"github.com/bborn/workflow/internal/db"
 	"github.com/bborn/workflow/internal/github"
@@ -61,10 +60,10 @@ func NewKanbanBoard(width, height int) *KanbanBoard {
 // makeKanbanColumns creates columns with current theme colors.
 func makeKanbanColumns() []KanbanColumn {
 	return []KanbanColumn{
-		{Title: "Backlog", Status: db.StatusBacklog, Color: ColorMuted, Icon: "◦"},
-		{Title: "In Progress", Status: db.StatusQueued, Color: ColorInProgress, Icon: "▶"}, // Also shows processing
-		{Title: "Blocked", Status: db.StatusBlocked, Color: ColorBlocked, Icon: "⚠"},
-		{Title: "Done", Status: db.StatusDone, Color: ColorDone, Icon: "✓"},
+		{Title: "Backlog", Status: db.StatusBacklog, Color: ColorMuted, Icon: IconBacklog()},
+		{Title: "In Progress", Status: db.StatusQueued, Color: ColorInProgress, Icon: IconInProgress()}, // Also shows processing
+		{Title: "Blocked", Status: db.StatusBlocked, Color: ColorBlocked, Icon: IconBlocked()},
+		{Title: "Done", Status: db.StatusDone, Color: ColorDone, Icon: IconDone()},
 	}
 }
 
@@ -563,7 +562,7 @@ func (k *KanbanBoard) viewDesktop() string {
 				Width(colWidth - 2).
 				Align(lipgloss.Center).
 				Italic(true)
-			taskViews = append(taskViews, scrollIndicatorStyle.Render(fmt.Sprintf("↑ %d more", scrollOffset)))
+			taskViews = append(taskViews, scrollIndicatorStyle.Render(fmt.Sprintf("%s %d more", IconArrowUp(), scrollOffset)))
 		}
 
 		// Render visible unpinned tasks
@@ -589,9 +588,9 @@ func (k *KanbanBoard) viewDesktop() string {
 
 			var indicatorText string
 			if remainingBelow > 0 && hasHiddenDone {
-				indicatorText = fmt.Sprintf("↓ %d more (+%d older)", remainingBelow, k.hiddenDoneCount)
+				indicatorText = fmt.Sprintf("%s %d more (+%d older)", IconArrowDown(), remainingBelow, k.hiddenDoneCount)
 			} else if remainingBelow > 0 {
-				indicatorText = fmt.Sprintf("↓ %d more", remainingBelow)
+				indicatorText = fmt.Sprintf("%s %d more", IconArrowDown(), remainingBelow)
 			} else {
 				indicatorText = fmt.Sprintf("+%d older (Ctrl+P)", k.hiddenDoneCount)
 			}
@@ -742,7 +741,7 @@ func (k *KanbanBoard) viewMobile() string {
 			Width(colWidth - 2).
 			Align(lipgloss.Center).
 			Italic(true)
-		taskViews = append(taskViews, scrollIndicatorStyle.Render(fmt.Sprintf("↑ %d more", scrollOffset)))
+		taskViews = append(taskViews, scrollIndicatorStyle.Render(fmt.Sprintf("%s %d more", IconArrowUp(), scrollOffset)))
 	}
 
 	// Render visible unpinned tasks
@@ -768,9 +767,9 @@ func (k *KanbanBoard) viewMobile() string {
 
 		var indicatorText string
 		if remainingBelow > 0 && hasHiddenDone {
-			indicatorText = fmt.Sprintf("↓ %d more (+%d older)", remainingBelow, k.hiddenDoneCount)
+			indicatorText = fmt.Sprintf("%s %d more (+%d older)", IconArrowDown(), remainingBelow, k.hiddenDoneCount)
 		} else if remainingBelow > 0 {
-			indicatorText = fmt.Sprintf("↓ %d more", remainingBelow)
+			indicatorText = fmt.Sprintf("%s %d more", IconArrowDown(), remainingBelow)
 		} else {
 			indicatorText = fmt.Sprintf("+%d older (Ctrl+P)", k.hiddenDoneCount)
 		}
@@ -927,24 +926,11 @@ func (k *KanbanBoard) renderTaskCard(task *db.Task, width int, isSelected bool) 
 		b.WriteString(dangerStyle.Render("●")) // Red dot for dangerous mode
 	}
 
-	// Schedule indicator - show if scheduled or warn about legacy recurrence
-	if task.IsScheduled() {
-		scheduleStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("214")) // Orange for schedule
-		scheduleText := formatScheduleTime(task.ScheduledAt.Time)
-		icon := "⏰"
-		b.WriteString(" ")
-		b.WriteString(scheduleStyle.Render(icon + scheduleText))
-	} else if task.Recurrence != "" {
-		warnStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
-		b.WriteString(" ")
-		b.WriteString(warnStyle.Render("⚠"))
-	}
-
 	// Pin indicator
 	if task.Pinned {
 		pinStyle := lipgloss.NewStyle().Foreground(ColorWarning)
 		b.WriteString(" ")
-		b.WriteString(pinStyle.Render("📌"))
+		b.WriteString(pinStyle.Render(IconPin()))
 	}
 
 	// Title (truncate if needed)
@@ -1311,45 +1297,4 @@ func (k *KanbanBoard) handleClickMobile(x, y int) *db.Task {
 	k.selectedRow = taskIdx
 
 	return col.Tasks[taskIdx]
-}
-
-// formatScheduleTime formats a scheduled time for display.
-func formatScheduleTime(t time.Time) string {
-	now := time.Now()
-	diff := t.Sub(now)
-
-	// If in the past
-	if diff < 0 {
-		return "overdue"
-	}
-
-	// If less than an hour away
-	if diff < time.Hour {
-		mins := int(diff.Minutes())
-		if mins <= 0 {
-			return "now"
-		}
-		return fmt.Sprintf("%dm", mins)
-	}
-
-	// If less than 24 hours away
-	if diff < 24*time.Hour {
-		hours := int(diff.Hours())
-		return fmt.Sprintf("%dh", hours)
-	}
-
-	// If today or tomorrow
-	if t.Day() == now.Day() && t.Month() == now.Month() && t.Year() == now.Year() {
-		return t.Format("3:04pm")
-	}
-	tomorrow := now.AddDate(0, 0, 1)
-	if t.Day() == tomorrow.Day() && t.Month() == tomorrow.Month() && t.Year() == tomorrow.Year() {
-		return "tmrw " + t.Format("3pm")
-	}
-
-	// Otherwise show date
-	if t.Year() == now.Year() {
-		return t.Format("Jan 2")
-	}
-	return t.Format("Jan 2 '06")
 }

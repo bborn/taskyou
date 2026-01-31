@@ -3,12 +3,120 @@ package ui
 
 import (
 	"os"
+	"strings"
 	"sync"
 
 	"github.com/bborn/workflow/internal/db"
 	"github.com/bborn/workflow/internal/github"
 	"github.com/charmbracelet/lipgloss"
 )
+
+// unicodeSupported caches whether the terminal supports Unicode.
+// Initialized once on first call to SupportsUnicode().
+var (
+	unicodeSupported     bool
+	unicodeSupportedOnce sync.Once
+)
+
+// SupportsUnicode returns true if the terminal likely supports Unicode characters.
+// It checks LANG, LC_ALL, and LC_CTYPE environment variables for UTF-8 indicators.
+func SupportsUnicode() bool {
+	unicodeSupportedOnce.Do(func() {
+		// Check common locale environment variables for UTF-8
+		for _, envVar := range []string{"LC_ALL", "LC_CTYPE", "LANG"} {
+			val := strings.ToLower(os.Getenv(envVar))
+			if strings.Contains(val, "utf-8") || strings.Contains(val, "utf8") {
+				unicodeSupported = true
+				return
+			}
+		}
+		// Default to false if no UTF-8 locale found
+		unicodeSupported = false
+	})
+	return unicodeSupported
+}
+
+// Icon constants - Unicode and ASCII versions
+const (
+	// Unicode icons
+	IconBacklogUnicode    = "◦"
+	IconInProgressUnicode = "▶"
+	IconBlockedUnicode    = "⚠"
+	IconDoneUnicode    = "✓"
+	IconPinUnicode     = "📌"
+	IconWarningUnicode = "⚠"
+	IconArrowUpUnicode    = "↑"
+	IconArrowDownUnicode  = "↓"
+	IconArrowLeftUnicode  = "←"
+	IconArrowRightUnicode = "→"
+	IconShiftUpUnicode    = "⇧↑"
+	IconShiftDownUnicode  = "⇧↓"
+
+	// ASCII fallbacks
+	IconBacklogASCII     = "o"
+	IconInProgressASCII  = ">"
+	IconProcessingASCII  = "~"
+	IconBlockedASCII     = "!"
+	IconDoneASCII    = "*"
+	IconPinASCII     = "P"
+	IconWarningASCII = "!"
+	IconArrowUpASCII     = "^"
+	IconArrowDownASCII   = "v"
+	IconArrowLeftASCII   = "<"
+	IconArrowRightASCII  = ">"
+	IconShiftUpASCII     = "^^"
+	IconShiftDownASCII   = "vv"
+	IconProcessingUnicode = "⋯"
+	IconDefaultUnicode    = "·"
+	IconDefaultASCII      = "."
+)
+
+// Icon returns the appropriate icon based on terminal Unicode support.
+func Icon(unicodeIcon, asciiIcon string) string {
+	if SupportsUnicode() {
+		return unicodeIcon
+	}
+	return asciiIcon
+}
+
+// IconBacklog returns the backlog status icon.
+func IconBacklog() string { return Icon(IconBacklogUnicode, IconBacklogASCII) }
+
+// IconInProgress returns the in-progress status icon.
+func IconInProgress() string { return Icon(IconInProgressUnicode, IconInProgressASCII) }
+
+// IconBlocked returns the blocked status icon.
+func IconBlocked() string { return Icon(IconBlockedUnicode, IconBlockedASCII) }
+
+// IconDone returns the done status icon.
+func IconDone() string { return Icon(IconDoneUnicode, IconDoneASCII) }
+
+// IconPin returns the pin icon.
+func IconPin() string { return Icon(IconPinUnicode, IconPinASCII) }
+
+// IconArrowUp returns the up arrow.
+func IconArrowUp() string { return Icon(IconArrowUpUnicode, IconArrowUpASCII) }
+
+// IconArrowDown returns the down arrow.
+func IconArrowDown() string { return Icon(IconArrowDownUnicode, IconArrowDownASCII) }
+
+// IconArrowLeft returns the left arrow.
+func IconArrowLeft() string { return Icon(IconArrowLeftUnicode, IconArrowLeftASCII) }
+
+// IconArrowRight returns the right arrow.
+func IconArrowRight() string { return Icon(IconArrowRightUnicode, IconArrowRightASCII) }
+
+// IconShiftUp returns the shift+up icon.
+func IconShiftUp() string { return Icon(IconShiftUpUnicode, IconShiftUpASCII) }
+
+// IconShiftDown returns the shift+down icon.
+func IconShiftDown() string { return Icon(IconShiftDownUnicode, IconShiftDownASCII) }
+
+// IconProcessing returns the processing status icon.
+func IconProcessing() string { return Icon(IconProcessingUnicode, IconProcessingASCII) }
+
+// IconDefault returns the default/unknown status icon.
+func IconDefault() string { return Icon(IconDefaultUnicode, IconDefaultASCII) }
 
 // IsGlobalDangerousMode returns true if the system is running in global dangerous mode.
 // This is set by the WORKTREE_DANGEROUS_MODE=1 environment variable.
@@ -151,15 +259,15 @@ func StatusStyle(status string) lipgloss.Style {
 func StatusIcon(status string) string {
 	switch status {
 	case "queued":
-		return "◦"
+		return IconBacklog()
 	case "processing":
-		return "⋯"
+		return IconProcessing()
 	case "done":
-		return "✓"
+		return IconDone()
 	case "blocked":
-		return "!"
+		return IconBlocked()
 	default:
-		return "·"
+		return IconDefault()
 	}
 }
 
