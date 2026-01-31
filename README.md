@@ -76,6 +76,16 @@ cd taskyou
 make build
 ```
 
+### Run on exe.dev (cloud)
+
+Spin up TaskYou instantly on [exe.dev](https://exe.dev):
+
+```bash
+ssh exe.dev 'new --name=tasks --prompt="Run: curl -fsSL taskyou.dev/install.sh | bash"'
+ssh tasks.exe.xyz
+~/.local/bin/task
+```
+
 ## Usage
 
 ### Run locally (default)
