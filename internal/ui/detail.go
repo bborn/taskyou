@@ -1413,20 +1413,34 @@ func (m *DetailModel) hideShellPane(ctx context.Context) {
 		return
 	}
 
-	if m.claudePaneID == "" || m.cachedWindowTarget == "" {
-		log.Debug("hideShellPane: no Claude pane or window target, cannot hide shell")
+	if m.claudePaneID == "" {
+		log.Debug("hideShellPane: no Claude pane, cannot hide shell")
 		return
 	}
 
 	// Save shell width before hiding so we can restore it later
 	m.saveShellPaneWidth()
 
+	// Find or create the daemon window to move the shell pane to.
+	// The original cachedWindowTarget may no longer exist if it was destroyed
+	// when the Claude pane was joined to task-ui (windows with 0 panes get destroyed).
+	daemonSession := m.daemonSessionID
+	if daemonSession == "" {
+		daemonSession = executor.TmuxDaemonSession
+	}
+	windowName := executor.TmuxWindowName(m.task.ID)
+	targetWindowID := m.findOrCreateTaskWindow(ctx, daemonSession, windowName)
+	if targetWindowID == "" {
+		log.Error("hideShellPane: could not find or create task window")
+		return
+	}
+
 	// Break the shell pane to the daemon window (preserving its state)
-	log.Info("hideShellPane: breaking shell pane %q to daemon window %q", m.workdirPaneID, m.cachedWindowTarget)
+	log.Info("hideShellPane: breaking shell pane %q to daemon window %q", m.workdirPaneID, targetWindowID)
 	err := exec.CommandContext(ctx, "tmux", "join-pane",
-		"-d",                    // don't switch focus
-		"-s", m.workdirPaneID,   // source: shell pane
-		"-t", m.cachedWindowTarget, // target: daemon window
+		"-d",                // don't switch focus
+		"-s", m.workdirPaneID, // source: shell pane
+		"-t", targetWindowID,  // target: daemon window
 	).Run()
 
 	if err != nil {
