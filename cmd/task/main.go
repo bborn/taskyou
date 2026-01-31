@@ -1552,7 +1552,10 @@ func execInTmux() error {
 
 	// Enable pane border labels
 	osexec.Command("tmux", "set-option", "-t", sessionName, "pane-border-status", "top").Run()
-	osexec.Command("tmux", "set-option", "-t", sessionName, "pane-border-format", " #{pane_title} ").Run()
+	// Use conditional formatting: pane 0 (task detail) always uses bright color, others follow border style
+	// This prevents the task detail title from being dimmed when other panes are focused
+	osexec.Command("tmux", "set-option", "-t", sessionName, "pane-border-format",
+		"#{?#{==:#{pane_index},0},#[fg=#9CA3AF] #{pane_title} , #{pane_title} }").Run()
 	osexec.Command("tmux", "set-option", "-t", sessionName, "pane-border-style", "fg=#374151").Run()
 	osexec.Command("tmux", "set-option", "-t", sessionName, "pane-active-border-style", "fg=#61AFEF").Run()
 
