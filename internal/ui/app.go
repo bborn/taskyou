@@ -67,9 +67,8 @@ type KeyMap struct {
 	CommandPalette  key.Binding
 	ToggleDangerous key.Binding
 	TogglePin       key.Binding
-	Filter          key.Binding
-	ResumeClaude             key.Binding
-	OpenWorktree             key.Binding
+	Filter       key.Binding
+	OpenWorktree key.Binding
 	ToggleShellPane          key.Binding
 	JumpToNotification       key.Binding
 	JumpToNotificationDetail key.Binding // For detail view (uses Ctrl+g to avoid conflicting with text input)
@@ -192,10 +191,6 @@ func DefaultKeyMap() KeyMap {
 		Filter: key.NewBinding(
 			key.WithKeys("/"),
 			key.WithHelp("/", "filter"),
-		),
-		ResumeClaude: key.NewBinding(
-			key.WithKeys("R"),
-			key.WithHelp("R", "resume claude"),
 		),
 		OpenWorktree: key.NewBinding(
 			key.WithKeys("o"),
@@ -447,8 +442,6 @@ func NewAppModel(database *db.DB, exec *executor.Executor, workingDir string) *A
 		filterText:         "",
 		availableExecutors: availableExecutors,
 	}
-
-	model.keys.ResumeClaude.SetHelp("R", fmt.Sprintf("resume %s", model.executorDisplayName()))
 
 	return model
 }
@@ -1672,13 +1665,6 @@ func (m *AppModel) updateDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, m.toggleDangerousMode(m.selectedTask.ID)
 		}
-	}
-	if key.Matches(keyMsg, m.keys.ResumeClaude) && m.selectedTask != nil {
-		claudePaneID := ""
-		if m.detailView != nil {
-			claudePaneID = m.detailView.ClaudePaneID()
-		}
-		return m, m.resumeClaude(m.selectedTask.ID, claudePaneID)
 	}
 	if key.Matches(keyMsg, m.keys.OpenWorktree) && m.selectedTask != nil {
 		return m, m.openWorktreeInEditor(m.selectedTask)
@@ -3037,73 +3023,6 @@ func (m *AppModel) toggleTaskPinned(id int64) tea.Cmd {
 		}
 		task.Pinned = newValue
 		return taskPinnedMsg{task: task}
-	}
-}
-
-func (m *AppModel) resumeClaude(id int64, claudePaneID string) tea.Cmd {
-	database := m.db
-	return func() tea.Msg {
-		task, err := database.GetTask(id)
-		if err != nil || task == nil {
-			return taskClaudeToggledMsg{err: fmt.Errorf("failed to get task")}
-		}
-
-		executorName := taskExecutorDisplayName(task)
-
-		// Check if Claude is already running
-		if claudePaneID != "" {
-			claudePID := executor.GetClaudePIDFromPane(claudePaneID)
-			if claudePID > 0 {
-				return taskClaudeToggledMsg{err: fmt.Errorf("%s is already running", executorName)}
-			}
-		}
-
-		// If no session ID, can't resume
-		if task.ClaudeSessionID == "" {
-			return taskClaudeToggledMsg{err: fmt.Errorf("no %s session to resume", executorName)}
-		}
-
-		claudeCmd := fmt.Sprintf("claude --resume %s", task.ClaudeSessionID)
-
-		// If pane exists, send command to it
-		if claudePaneID != "" {
-			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-			defer cancel()
-			err = osExec.CommandContext(ctx, "tmux", "send-keys", "-t", claudePaneID, claudeCmd, "Enter").Run()
-			if err != nil {
-				return taskClaudeToggledMsg{err: fmt.Errorf("failed to resume %s: %w", executorName, err)}
-			}
-			return taskClaudeToggledMsg{killed: false, message: fmt.Sprintf("Resuming %s session", executorName)}
-		}
-
-		// No pane - create one below the TUI and start Claude
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-
-		// Get workdir for the new pane
-		workdir := task.WorktreePath
-		if workdir == "" && task.Project != "" {
-			// Try to find project directory
-			homeDir, _ := os.UserHomeDir()
-			workdir = filepath.Join(homeDir, "Projects", task.Project)
-			if _, err := os.Stat(workdir); os.IsNotExist(err) {
-				workdir = homeDir
-			}
-		}
-		if workdir == "" {
-			workdir, _ = os.Getwd()
-		}
-
-		// Split window below TUI and run Claude
-		err = osExec.CommandContext(ctx, "tmux", "split-window", "-v", "-c", workdir, claudeCmd).Run()
-		if err != nil {
-			return taskClaudeToggledMsg{err: fmt.Errorf("failed to create pane: %w", err)}
-		}
-
-		// Select back to the TUI pane
-		osExec.CommandContext(ctx, "tmux", "select-pane", "-t", ":.0").Run()
-
-		return taskClaudeToggledMsg{killed: false, message: fmt.Sprintf("Resuming %s session in new pane", executorName)}
 	}
 }
 
