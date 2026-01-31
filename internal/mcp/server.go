@@ -259,6 +259,28 @@ func (s *Server) handleRequest(req *jsonRPCRequest) {
 						},
 					},
 				},
+				{
+					Name:        "workflow_get_project_context",
+					Description: "Get cached project context (codebase structure, patterns, conventions). Call this FIRST before exploring the codebase. If context exists, use it to skip exploration. If empty, explore the codebase once and save a summary via workflow_set_project_context.",
+					InputSchema: map[string]interface{}{
+						"type":       "object",
+						"properties": map[string]interface{}{},
+					},
+				},
+				{
+					Name:        "workflow_set_project_context",
+					Description: "Save auto-generated project context for future tasks. Call this after exploring a codebase to cache your findings (structure, patterns, key files, conventions). Future tasks will skip exploration by reading this context.",
+					InputSchema: map[string]interface{}{
+						"type": "object",
+						"properties": map[string]interface{}{
+							"context": map[string]interface{}{
+								"type":        "string",
+								"description": "The project context to cache. Include: codebase structure, key directories, architectural patterns, coding conventions, important files, and any other information useful for future tasks.",
+							},
+						},
+						"required": []string{"context"},
+					},
+				},
 			},
 		})
 
@@ -574,6 +596,76 @@ func (s *Server) handleToolCall(id interface{}, params *toolCallParams) {
 		s.sendResult(id, toolCallResult{
 			Content: []contentBlock{
 				{Type: "text", Text: sb.String()},
+			},
+		})
+
+	case "workflow_get_project_context":
+		// Get current task's project
+		currentTask, err := s.db.GetTask(s.taskID)
+		if err != nil || currentTask == nil {
+			s.sendError(id, -32603, "Failed to get current task")
+			return
+		}
+
+		if currentTask.Project == "" {
+			s.sendResult(id, toolCallResult{
+				Content: []contentBlock{
+					{Type: "text", Text: "No project associated with this task. Please explore the codebase manually."},
+				},
+			})
+			return
+		}
+
+		context, err := s.db.GetProjectContext(currentTask.Project)
+		if err != nil {
+			s.sendError(id, -32603, fmt.Sprintf("Failed to get project context: %v", err))
+			return
+		}
+
+		if context == "" {
+			s.sendResult(id, toolCallResult{
+				Content: []contentBlock{
+					{Type: "text", Text: "No cached project context found. Please explore the codebase and save a summary using workflow_set_project_context."},
+				},
+			})
+			return
+		}
+
+		s.sendResult(id, toolCallResult{
+			Content: []contentBlock{
+				{Type: "text", Text: fmt.Sprintf("## Cached Project Context\n\n%s", context)},
+			},
+		})
+
+	case "workflow_set_project_context":
+		context, _ := params.Arguments["context"].(string)
+		if context == "" {
+			s.sendError(id, -32602, "context is required")
+			return
+		}
+
+		// Get current task's project
+		currentTask, err := s.db.GetTask(s.taskID)
+		if err != nil || currentTask == nil {
+			s.sendError(id, -32603, "Failed to get current task")
+			return
+		}
+
+		if currentTask.Project == "" {
+			s.sendError(id, -32602, "No project associated with this task")
+			return
+		}
+
+		if err := s.db.SetProjectContext(currentTask.Project, context); err != nil {
+			s.sendError(id, -32603, fmt.Sprintf("Failed to save project context: %v", err))
+			return
+		}
+
+		s.db.AppendTaskLog(s.taskID, "system", fmt.Sprintf("Project context saved for '%s' (%d bytes)", currentTask.Project, len(context)))
+
+		s.sendResult(id, toolCallResult{
+			Content: []contentBlock{
+				{Type: "text", Text: fmt.Sprintf("Project context saved for '%s'. Future tasks will use this context to skip codebase exploration.", currentTask.Project)},
 			},
 		})
 

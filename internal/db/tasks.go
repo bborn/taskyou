@@ -1135,6 +1135,34 @@ func (db *DB) GetProjectByPath(cwd string) (*Project, error) {
 	return nil, nil
 }
 
+// GetProjectContext returns the auto-generated context for a project.
+// This context is cached exploration results that can be reused across tasks.
+func (db *DB) GetProjectContext(projectName string) (string, error) {
+	var context string
+	err := db.QueryRow(`SELECT COALESCE(context, '') FROM projects WHERE name = ?`, projectName).Scan(&context)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("get project context: %w", err)
+	}
+	return context, nil
+}
+
+// SetProjectContext saves auto-generated context for a project.
+// This overwrites any existing context.
+func (db *DB) SetProjectContext(projectName string, context string) error {
+	result, err := db.Exec(`UPDATE projects SET context = ? WHERE name = ?`, context, projectName)
+	if err != nil {
+		return fmt.Errorf("set project context: %w", err)
+	}
+	rowsAffected, _ := result.RowsAffected()
+	if rowsAffected == 0 {
+		return fmt.Errorf("project '%s' not found", projectName)
+	}
+	return nil
+}
+
 // GetSetting returns a setting value.
 func (db *DB) GetSetting(key string) (string, error) {
 	var value string
