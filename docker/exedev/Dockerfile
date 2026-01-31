@@ -4,7 +4,7 @@
 # This image extends exeuntu with TaskYou pre-installed and configured
 # to launch immediately on SSH login.
 
-FROM boldsoftware/exeuntu:latest
+FROM ghcr.io/boldsoftware/exeuntu:latest
 
 USER root
 
