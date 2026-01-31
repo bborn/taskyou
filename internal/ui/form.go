@@ -105,12 +105,41 @@ type autocompleteSuggestionMsg struct {
 	debounceID int // To verify response is still relevant
 }
 
+// buildExecutorList creates the list of executors for the form.
+// Available executors are shown normally, unavailable ones are marked with "(not installed)".
+func buildExecutorList(allExecutors, availableExecutors []string) []string {
+	availableSet := make(map[string]bool)
+	for _, e := range availableExecutors {
+		availableSet[e] = true
+	}
+
+	result := make([]string, 0, len(allExecutors))
+	for _, e := range allExecutors {
+		if availableSet[e] {
+			result = append(result, e)
+		} else {
+			result = append(result, e+" (not installed)")
+		}
+	}
+	return result
+}
+
+// isExecutorAvailable checks if an executor string (potentially with "(not installed)" suffix) is available.
+func isExecutorAvailable(executor string) bool {
+	return !strings.HasSuffix(executor, "(not installed)")
+}
+
+// cleanExecutorName removes the "(not installed)" suffix if present.
+func cleanExecutorName(executor string) string {
+	return strings.TrimSuffix(executor, " (not installed)")
+}
+
 // NewEditFormModel creates a form model pre-populated with an existing task's data for editing.
-func NewEditFormModel(database *db.DB, task *db.Task, width, height int) *FormModel {
+func NewEditFormModel(database *db.DB, task *db.Task, width, height int, availableExecutors []string) *FormModel {
 	// Set executor to default if not specified
-	executor := task.Executor
-	if executor == "" {
-		executor = db.DefaultExecutor()
+	taskExecutor := task.Executor
+	if taskExecutor == "" {
+		taskExecutor = db.DefaultExecutor()
 	}
 
 	// Check if autocomplete is enabled (default: true) and API key is available
@@ -129,6 +158,10 @@ func NewEditFormModel(database *db.DB, task *db.Task, width, height int) *FormMo
 		autocompleteEnabled = false
 	}
 
+	// Build executor list: show available ones first, then unavailable ones marked
+	allExecutors := []string{db.ExecutorClaude, db.ExecutorCodex, db.ExecutorGemini, db.ExecutorOpenClaw}
+	executors := buildExecutorList(allExecutors, availableExecutors)
+
 	m := &FormModel{
 		db:                  database,
 		width:               width,
@@ -137,8 +170,8 @@ func NewEditFormModel(database *db.DB, task *db.Task, width, height int) *FormMo
 		taskType:            task.Type,
 		project:             task.Project,
 		originalProject:     task.Project, // Track original project for detecting changes
-		executor:            executor,
-		executors:           []string{db.ExecutorClaude, db.ExecutorCodex, db.ExecutorGemini, db.ExecutorOpenClaw},
+		executor:            taskExecutor,
+		executors:           executors,
 		isEdit:              true,
 		prURL:               task.PRURL,
 		prNumber:            task.PRNumber,
@@ -148,9 +181,9 @@ func NewEditFormModel(database *db.DB, task *db.Task, width, height int) *FormMo
 		attachmentCursor:    -1,
 	}
 
-	// Set executor index
+	// Set executor index (match by clean name since display may include "(not installed)")
 	for i, e := range m.executors {
-		if e == executor {
+		if cleanExecutorName(e) == taskExecutor {
 			m.executorIdx = i
 			break
 		}
@@ -238,7 +271,7 @@ func NewEditFormModel(database *db.DB, task *db.Task, width, height int) *FormMo
 }
 
 // NewFormModel creates a new form model.
-func NewFormModel(database *db.DB, width, height int, workingDir string) *FormModel {
+func NewFormModel(database *db.DB, width, height int, workingDir string, availableExecutors []string) *FormModel {
 	// Check if autocomplete is enabled (default: true) and API key is available
 	autocompleteEnabled := true
 	var apiKey string
@@ -255,13 +288,17 @@ func NewFormModel(database *db.DB, width, height int, workingDir string) *FormMo
 		autocompleteEnabled = false
 	}
 
+	// Build executor list: show available ones first, then unavailable ones marked
+	allExecutors := []string{db.ExecutorClaude, db.ExecutorCodex, db.ExecutorGemini, db.ExecutorOpenClaw}
+	executors := buildExecutorList(allExecutors, availableExecutors)
+
 	m := &FormModel{
 		db:                  database,
 		width:               width,
 		height:              height,
 		focused:             FieldProject,
 		executor:            db.DefaultExecutor(),
-		executors:           []string{db.ExecutorClaude, db.ExecutorCodex, db.ExecutorGemini, db.ExecutorOpenClaw},
+		executors:           executors,
 		autocompleteSvc:     autocompleteSvc,
 		autocompleteEnabled: autocompleteEnabled,
 		taskRefAutocomplete: NewTaskRefAutocompleteModel(database, width-24),
@@ -889,9 +926,9 @@ func (m *FormModel) loadLastExecutorForProject() {
 		return
 	}
 
-	// Find the executor in the list and set it
+	// Find the executor in the list and set it (match by clean name since display may include "(not installed)")
 	for i, e := range m.executors {
-		if e == lastExecutor {
+		if cleanExecutorName(e) == lastExecutor {
 			m.executorIdx = i
 			m.executor = e
 			return
@@ -1394,7 +1431,7 @@ func (m *FormModel) GetDBTask() *db.Task {
 		Status:   status,
 		Type:     m.taskType,
 		Project:  m.project,
-		Executor: m.executor,
+		Executor: cleanExecutorName(m.executor), // Strip "(not installed)" suffix if present
 		PRURL:    m.prURL,
 		PRNumber: m.prNumber,
 	}

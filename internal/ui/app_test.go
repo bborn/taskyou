@@ -253,7 +253,7 @@ func TestNewTaskFormEscapeShowsConfirmationWhenHasData(t *testing.T) {
 		width:       100,
 		height:      50,
 		currentView: ViewNewTask,
-		newTaskForm: NewFormModel(nil, 100, 50, ""),
+		newTaskForm: NewFormModel(nil, 100, 50, "", nil),
 	}
 
 	// Add data to the form
@@ -282,7 +282,7 @@ func TestNewTaskFormEscapeClosesImmediatelyWhenEmpty(t *testing.T) {
 		width:       100,
 		height:      50,
 		currentView: ViewNewTask,
-		newTaskForm: NewFormModel(nil, 100, 50, ""),
+		newTaskForm: NewFormModel(nil, 100, 50, "", nil),
 	}
 
 	// Press ESC on empty form
@@ -306,7 +306,7 @@ func TestEditTaskFormEscapeShowsConfirmationWhenHasData(t *testing.T) {
 		height:       50,
 		currentView:  ViewEditTask,
 		previousView: ViewDashboard,
-		editTaskForm: NewFormModel(nil, 100, 50, ""),
+		editTaskForm: NewFormModel(nil, 100, 50, "", nil),
 		editingTask:  &db.Task{ID: 1, Title: "Original Title"},
 	}
 
@@ -337,7 +337,7 @@ func TestEditTaskFormEscapeClosesImmediatelyWhenEmpty(t *testing.T) {
 		height:       50,
 		currentView:  ViewEditTask,
 		previousView: ViewDashboard,
-		editTaskForm: NewFormModel(nil, 100, 50, ""),
+		editTaskForm: NewFormModel(nil, 100, 50, "", nil),
 		editingTask:  &db.Task{ID: 1, Title: "Original Title"},
 	}
 
@@ -352,6 +352,31 @@ func TestEditTaskFormEscapeClosesImmediatelyWhenEmpty(t *testing.T) {
 	}
 	if am.currentView != ViewDashboard {
 		t.Errorf("expected view to be ViewDashboard, got %v", am.currentView)
+	}
+}
+
+func TestAppModelAvailableExecutors(t *testing.T) {
+	// Test that availableExecutors is properly stored
+	m := &AppModel{
+		availableExecutors: []string{"claude", "codex"},
+	}
+
+	if len(m.availableExecutors) != 2 {
+		t.Errorf("expected 2 available executors, got %d", len(m.availableExecutors))
+	}
+	if m.availableExecutors[0] != "claude" {
+		t.Errorf("expected first executor to be 'claude', got %s", m.availableExecutors[0])
+	}
+}
+
+func TestAppModelNoExecutors(t *testing.T) {
+	// Test that empty availableExecutors works properly
+	m := &AppModel{
+		availableExecutors: []string{},
+	}
+
+	if len(m.availableExecutors) != 0 {
+		t.Errorf("expected 0 available executors, got %d", len(m.availableExecutors))
 	}
 }
 
