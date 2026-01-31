@@ -2490,6 +2490,12 @@ func (m *DetailModel) renderHelp() string {
 	// Show pane navigation shortcut when panes are visible
 	if hasPanes && os.Getenv("TMUX") != "" {
 		keys = append(keys, helpKey{"shift+" + IconArrowUp() + IconArrowDown(), "switch pane", false})
+		// Show shell pane toggle shortcut
+		toggleDesc := "hide shell"
+		if m.shellPaneHidden {
+			toggleDesc = "show shell"
+		}
+		keys = append(keys, helpKey{"\\", toggleDesc, false})
 	}
 
 	// Show jump to notification shortcut when there's an active notification
