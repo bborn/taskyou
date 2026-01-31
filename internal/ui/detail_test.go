@@ -216,3 +216,70 @@ func TestDetailModel_HasNotification(t *testing.T) {
 		})
 	}
 }
+
+// TestDetailModel_IsShellPaneHidden verifies the shell pane hidden state accessor.
+func TestDetailModel_IsShellPaneHidden(t *testing.T) {
+	task := &db.Task{ID: 1, Title: "Test task"}
+
+	tests := []struct {
+		name           string
+		shellPaneHidden bool
+		want           bool
+	}{
+		{
+			name:           "shell pane visible",
+			shellPaneHidden: false,
+			want:           false,
+		},
+		{
+			name:           "shell pane hidden",
+			shellPaneHidden: true,
+			want:           true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := &DetailModel{task: task, shellPaneHidden: tt.shellPaneHidden}
+
+			got := m.IsShellPaneHidden()
+			if got != tt.want {
+				t.Errorf("IsShellPaneHidden() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestDetailModel_ToggleShellPaneKeyBinding verifies that the shell pane toggle
+// key binding (\) is properly defined and accessible.
+func TestDetailModel_ToggleShellPaneKeyBinding(t *testing.T) {
+	// Verify the key binding exists and uses the backslash key
+	keys := DefaultKeyMap()
+
+	// Check that ToggleShellPane binding is set to backslash
+	bindings := keys.ToggleShellPane.Keys()
+	if len(bindings) == 0 {
+		t.Fatal("ToggleShellPane key binding has no keys")
+	}
+
+	found := false
+	for _, k := range bindings {
+		if k == "\\" {
+			found = true
+			break
+		}
+	}
+
+	if !found {
+		t.Errorf("ToggleShellPane key binding expected '\\', got %v", bindings)
+	}
+
+	// Verify help text is set
+	help := keys.ToggleShellPane.Help()
+	if help.Key != "\\" {
+		t.Errorf("ToggleShellPane help key expected '\\', got %q", help.Key)
+	}
+	if help.Desc != "toggle shell" {
+		t.Errorf("ToggleShellPane help desc expected 'toggle shell', got %q", help.Desc)
+	}
+}
