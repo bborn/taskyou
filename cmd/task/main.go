@@ -1691,6 +1691,17 @@ func runLocal(dangerousMode bool) error {
 	}
 	defer database.Close()
 
+	// Check cloud sync on startup
+	if synced := CheckCloudSync(database); synced {
+		// Reopen database after sync to get fresh data
+		database.Close()
+		database, err = db.Open(dbPath)
+		if err != nil {
+			return fmt.Errorf("reopen database after sync: %w", err)
+		}
+		defer database.Close()
+	}
+
 	fmt.Fprintln(os.Stderr, dimStyle.Render("Using local database: "+dbPath))
 
 	// Load config from database

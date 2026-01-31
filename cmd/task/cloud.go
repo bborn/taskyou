@@ -1022,3 +1022,73 @@ func copyFile(src, dst string) error {
 	}
 	return os.WriteFile(dst, data, 0644)
 }
+
+// CheckCloudSync checks if cloud is configured and offers to sync if counts differ.
+// Returns true if the user chose to sync (so caller can reload data if needed).
+func CheckCloudSync(database *db.DB) bool {
+	settings, _ := getCloudSettings(database)
+	server := settings[SettingCloudServer]
+
+	// No cloud configured, nothing to do
+	if server == "" {
+		return false
+	}
+
+	// Get local task count
+	localTasks, err := database.ListTasks(db.ListTasksOptions{IncludeClosed: true})
+	if err != nil {
+		return false
+	}
+	localCount := len(localTasks)
+
+	// Get remote task count (quick check, fail silently)
+	remoteHome, err := sshRun(server, "echo $HOME")
+	if err != nil || remoteHome == "" {
+		// Can't reach server, skip silently
+		return false
+	}
+	remoteHome = strings.TrimSpace(remoteHome)
+	remoteDBPath := fmt.Sprintf("%s/.local/share/task/tasks.db", remoteHome)
+
+	output, err := sshRun(server, fmt.Sprintf("sqlite3 '%s' 'SELECT COUNT(*) FROM tasks' 2>/dev/null", remoteDBPath))
+	if err != nil {
+		// No remote database or can't query, skip
+		return false
+	}
+
+	remoteCount := 0
+	fmt.Sscanf(strings.TrimSpace(output), "%d", &remoteCount)
+
+	// If counts match, no need to prompt
+	if localCount == remoteCount {
+		return false
+	}
+
+	// Show sync prompt
+	fmt.Printf("\n%s\n", cloudTitleStyle.Render("Cloud Sync"))
+	fmt.Printf("Local: %d tasks, Cloud: %d tasks\n", localCount, remoteCount)
+	fmt.Print("[p]ush local → cloud / [P]ull cloud → local / [s]kip (default): ")
+
+	reader := bufio.NewReader(os.Stdin)
+	input, _ := reader.ReadString('\n')
+	input = strings.TrimSpace(strings.ToLower(input))
+
+	switch input {
+	case "p", "push":
+		fmt.Println()
+		if err := pushToCloud(true); err != nil {
+			fmt.Fprintln(os.Stderr, errorStyle.Render("Push failed: "+err.Error()))
+		}
+		return true
+	case "pull":
+		fmt.Println()
+		if err := pullFromCloud(true); err != nil {
+			fmt.Fprintln(os.Stderr, errorStyle.Render("Pull failed: "+err.Error()))
+		}
+		return true
+	default:
+		// Skip
+		fmt.Println()
+		return false
+	}
+}
