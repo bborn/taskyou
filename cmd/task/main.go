@@ -182,12 +182,12 @@ func main() {
 
 	rootCmd.AddCommand(daemonCmd)
 
-	// Restart subcommand - restart daemon and TUI (preserves Claude sessions by default)
+	// Restart subcommand - restart daemon and TUI (preserves agent sessions by default)
 	var hardRestart bool
 	restartCmd := &cobra.Command{
 		Use:   "restart",
-		Short: "Restart the daemon and TUI (preserves Claude sessions)",
-		Long: `Restarts the daemon and TUI while preserving running Claude sessions.
+		Short: "Restart the daemon and TUI (preserves agent sessions)",
+		Long: `Restarts the daemon and TUI while preserving running agent sessions.
 Use --hard to kill all tmux sessions for a complete reset.`,
 		Run: func(cmd *cobra.Command, args []string) {
 			fmt.Println(dimStyle.Render("Stopping daemon..."))
@@ -204,8 +204,8 @@ Use --hard to kill all tmux sessions for a complete reset.`,
 					}
 				}
 			} else {
-				// Soft restart: only kill the task-ui session, preserve task-daemon sessions with Claude windows
-				fmt.Println(dimStyle.Render("Preserving Claude sessions..."))
+				// Soft restart: only kill the task-ui session, preserve task-daemon sessions with agent windows
+				fmt.Println(dimStyle.Render("Preserving agent sessions..."))
 				out, _ := osexec.Command("tmux", "list-sessions", "-F", "#{session_name}").Output()
 				for _, session := range strings.Split(string(out), "\n") {
 					session = strings.TrimSpace(session)
@@ -246,7 +246,7 @@ Use --hard to kill all tmux sessions for a complete reset.`,
 		Long: `Clears stale daemon_session and tmux_window_id references from tasks.
 
 Use this after your computer crashes or the daemon dies unexpectedly.
-Tasks will automatically reconnect to their Claude sessions when viewed.`,
+Tasks will automatically reconnect to their agent sessions when viewed.`,
 		Run: func(cmd *cobra.Command, args []string) {
 			dryRun, _ := cmd.Flags().GetBool("dry-run")
 			recoverStaleTmuxRefs(dryRun)
@@ -285,41 +285,52 @@ Tasks will automatically reconnect to their Claude sessions when viewed.`,
 	claudeHookCmd.Flags().String("event", "", "Hook event type (Notification, Stop, etc.)")
 	rootCmd.AddCommand(claudeHookCmd)
 
-	// Claudes subcommand - manage running Claude sessions
-	claudesCmd := &cobra.Command{
-		Use:   "claudes",
-		Short: "Manage running Claude tmux sessions",
+	// Sessions subcommand - manage running agent sessions (supports all executors)
+	sessionsCmd := &cobra.Command{
+		Use:   "sessions",
+		Short: "Manage running agent tmux sessions",
 		Run: func(cmd *cobra.Command, args []string) {
-			listClaudeSessions()
+			listSessions()
 		},
 	}
 
-	claudesListCmd := &cobra.Command{
+	sessionsListCmd := &cobra.Command{
 		Use:   "list",
-		Short: "List running Claude sessions",
+		Short: "List running agent sessions",
 		Run: func(cmd *cobra.Command, args []string) {
-			listClaudeSessions()
+			listSessions()
 		},
 	}
-	claudesCmd.AddCommand(claudesListCmd)
+	sessionsCmd.AddCommand(sessionsListCmd)
 
-	claudesCleanupCmd := &cobra.Command{
+	sessionsCleanupCmd := &cobra.Command{
 		Use:   "cleanup",
-		Short: "Kill orphaned Claude processes not tied to active task windows",
+		Short: "Kill orphaned agent processes not tied to active task windows",
 		Run: func(cmd *cobra.Command, args []string) {
 			force, _ := cmd.Flags().GetBool("force")
-			cleanupOrphanedClaudes(force)
+			cleanupOrphanedSessions(force)
 		},
 	}
-	claudesCleanupCmd.Flags().BoolP("force", "f", false, "Use SIGKILL instead of SIGTERM to force kill processes")
-	claudesCmd.AddCommand(claudesCleanupCmd)
+	sessionsCleanupCmd.Flags().BoolP("force", "f", false, "Use SIGKILL instead of SIGTERM to force kill processes")
+	sessionsCmd.AddCommand(sessionsCleanupCmd)
 
+	rootCmd.AddCommand(sessionsCmd)
+
+	// Alias: claudes -> sessions (for backwards compatibility)
+	claudesCmd := &cobra.Command{
+		Use:    "claudes",
+		Short:  "Alias for 'sessions' (deprecated, use 'sessions' instead)",
+		Hidden: true, // Hide from help but still works
+		Run: func(cmd *cobra.Command, args []string) {
+			listSessions()
+		},
+	}
 	rootCmd.AddCommand(claudesCmd)
 
-	// Delete subcommand - delete a task, kill its Claude session, and remove worktree
+	// Delete subcommand - delete a task, kill its agent session, and remove worktree
 	deleteCmd := &cobra.Command{
 		Use:   "delete <task-id>",
-		Short: "Delete a task, kill its Claude session, and remove its worktree",
+		Short: "Delete a task, kill its agent session, and remove its worktree",
 		Args:  cobra.ExactArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
 			var taskID int64
@@ -1076,7 +1087,7 @@ Examples:
 		Short: "Move a task to a different project",
 		Long: `Move a task to a different project.
 
-This properly cleans up the task's worktree and Claude sessions from the old project,
+This properly cleans up the task's worktree and agent sessions from the old project,
 deletes the old task, and creates a new task in the target project.
 
 The new task preserves:
@@ -1085,7 +1096,7 @@ The new task preserves:
 
 The new task resets:
 - Worktree path, branch name, port
-- Claude session ID, daemon session
+- Agent session ID, daemon session
 - Started/completed timestamps
 
 Examples:
@@ -1383,9 +1394,9 @@ Examples:
 				return
 			}
 
-			// Note: We intentionally do NOT kill the Claude session when closing a task.
-			// The tmux window is kept around so users can review Claude's work.
-			// Use 'task claudes kill <id>' or 'task delete <id>' to clean up windows.
+			// Note: We intentionally do NOT kill the agent session when closing a task.
+			// The tmux window is kept around so users can review the agent's work.
+			// Use 'task sessions cleanup' or 'task delete <id>' to clean up windows.
 
 			if err := database.UpdateTaskStatus(taskID, db.StatusDone); err != nil {
 				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
@@ -2704,11 +2715,11 @@ func truncate(s string, maxLen int) string {
 	return s[:maxLen-3] + "..."
 }
 
-// listClaudeSessions lists all running Claude task windows in task-daemon.
-func listClaudeSessions() {
-	sessions := getClaudeSessions()
+// listSessions lists all running agent task windows in task-daemon.
+func listSessions() {
+	sessions := getSessions()
 	if len(sessions) == 0 {
-		fmt.Println(dimStyle.Render("No Claude sessions running"))
+		fmt.Println(dimStyle.Render("No agent sessions running"))
 		return
 	}
 
@@ -2718,7 +2729,7 @@ func listClaudeSessions() {
 		totalMemoryMB += s.memoryMB
 	}
 
-	fmt.Printf("%s\n\n", boldStyle.Render(fmt.Sprintf("Running Claude Sessions (%d total, %dMB memory):", len(sessions), totalMemoryMB)))
+	fmt.Printf("%s\n\n", boldStyle.Render(fmt.Sprintf("Running Agent Sessions (%d total, %dMB memory):", len(sessions), totalMemoryMB)))
 	for _, s := range sessions {
 		memStr := ""
 		if s.memoryMB > 0 {
@@ -2733,23 +2744,29 @@ func listClaudeSessions() {
 			}
 			titleStr = title
 		}
-		fmt.Printf("  %s  %s  %s  %s\n",
+		executorStr := s.executor
+		if executorStr == "" {
+			executorStr = "claude" // default
+		}
+		fmt.Printf("  %s  %-8s  %s  %s  %s\n",
 			successStyle.Render(fmt.Sprintf("task-%d", s.taskID)),
+			dimStyle.Render(executorStr),
 			dimStyle.Render(fmt.Sprintf("%-6s", memStr)),
-			dimStyle.Render(fmt.Sprintf("%-40s", titleStr)),
+			dimStyle.Render(fmt.Sprintf("%-36s", titleStr)),
 			dimStyle.Render(s.info))
 	}
 }
 
-type claudeSession struct {
+type agentSession struct {
 	taskID    int
 	taskTitle string
-	memoryMB  int // Memory usage in MB
+	executor  string // Executor name (claude, codex, gemini, etc.)
+	memoryMB  int    // Memory usage in MB
 	info      string
 }
 
-// getClaudeSessions returns all running task-* windows across all task-daemon-* sessions.
-func getClaudeSessions() []claudeSession {
+// getSessions returns all running task-* windows across all task-daemon-* sessions.
+func getSessions() []agentSession {
 	// First, get all task-daemon-* sessions
 	sessionsCmd := osexec.Command("tmux", "list-sessions", "-F", "#{session_name}")
 	sessionsOut, err := sessionsCmd.Output()
@@ -2768,17 +2785,17 @@ func getClaudeSessions() []claudeSession {
 		return nil
 	}
 
-	// Open database to fetch task titles
+	// Open database to fetch task titles and executor info
 	dbPath := db.DefaultPath()
 	database, _ := db.Open(dbPath)
 	if database != nil {
 		defer database.Close()
 	}
 
-	// Build map of task ID -> memory usage
-	taskMemory := getClaudeMemoryByTaskID()
+	// Build map of task ID -> memory usage (supports all executors)
+	taskMemory := getAgentMemoryByTaskID()
 
-	var sessions []claudeSession
+	var sessions []agentSession
 	seen := make(map[int]bool) // Avoid duplicates if same task appears in multiple sessions
 
 	for _, daemonSession := range daemonSessions {
@@ -2831,20 +2848,23 @@ func getClaudeSessions() []claudeSession {
 				}
 			}
 
-			// Get task title from database
+			// Get task title and executor from database
 			var taskTitle string
+			var taskExecutor string
 			if database != nil {
 				if task, err := database.GetTask(int64(taskID)); err == nil && task != nil {
 					taskTitle = task.Title
+					taskExecutor = task.Executor
 				}
 			}
 
-			// Get memory usage for this task's Claude process
+			// Get memory usage for this task's agent process
 			memoryMB := taskMemory[taskID]
 
-			sessions = append(sessions, claudeSession{
+			sessions = append(sessions, agentSession{
 				taskID:    taskID,
 				taskTitle: taskTitle,
+				executor:  taskExecutor,
 				memoryMB:  memoryMB,
 				info:      info,
 			})
@@ -2854,56 +2874,61 @@ func getClaudeSessions() []claudeSession {
 	return sessions
 }
 
-// getClaudeMemoryByTaskID returns a map of task ID -> memory (MB) for all Claude processes.
-// It identifies task IDs by examining each Claude process's working directory.
-func getClaudeMemoryByTaskID() map[int]int {
+// getAgentMemoryByTaskID returns a map of task ID -> memory (MB) for all agent processes.
+// It identifies task IDs by examining each agent process's working directory.
+// Supports all executors: claude, codex, gemini, openclaw, opencode, pi.
+func getAgentMemoryByTaskID() map[int]int {
 	result := make(map[int]int)
 
-	// Find all Claude processes
-	pgrepOut, err := osexec.Command("pgrep", "-f", "claude").Output()
-	if err != nil {
-		return result
-	}
+	// Find processes for all supported executors
+	executorNames := []string{"claude", "codex", "gemini", "openclaw", "opencode", "pi"}
 
-	for _, pidStr := range strings.Split(string(pgrepOut), "\n") {
-		pidStr = strings.TrimSpace(pidStr)
-		if pidStr == "" {
-			continue
-		}
-		pid, err := strconv.Atoi(pidStr)
+	for _, executorName := range executorNames {
+		pgrepOut, err := osexec.Command("pgrep", "-f", executorName).Output()
 		if err != nil {
-			continue
+			continue // No processes found for this executor
 		}
 
-		// Get the process's current working directory using lsof
-		lsofOut, err := osexec.Command("lsof", "-p", pidStr, "-Fn").Output()
-		if err != nil {
-			continue
-		}
-
-		// Parse lsof output to find cwd
-		var cwd string
-		lines := strings.Split(string(lsofOut), "\n")
-		for i, line := range lines {
-			if line == "fcwd" && i+1 < len(lines) && strings.HasPrefix(lines[i+1], "n") {
-				cwd = lines[i+1][1:] // Remove 'n' prefix
-				break
+		for _, pidStr := range strings.Split(string(pgrepOut), "\n") {
+			pidStr = strings.TrimSpace(pidStr)
+			if pidStr == "" {
+				continue
 			}
-		}
+			pid, err := strconv.Atoi(pidStr)
+			if err != nil {
+				continue
+			}
 
-		if cwd == "" {
-			continue
-		}
+			// Get the process's current working directory using lsof
+			lsofOut, err := osexec.Command("lsof", "-p", pidStr, "-Fn").Output()
+			if err != nil {
+				continue
+			}
 
-		// Extract task ID from worktree path like ".task-worktrees/467-..."
-		if idx := strings.Index(cwd, ".task-worktrees/"); idx >= 0 {
-			pathPart := cwd[idx+len(".task-worktrees/"):]
-			// Parse the task ID from the beginning of the path
-			var taskID int
-			if _, err := fmt.Sscanf(pathPart, "%d-", &taskID); err == nil && taskID > 0 {
-				memMB := getProcessMemoryMB(pid)
-				// If there are multiple Claude processes for the same task, sum them
-				result[taskID] += memMB
+			// Parse lsof output to find cwd
+			var cwd string
+			lines := strings.Split(string(lsofOut), "\n")
+			for i, line := range lines {
+				if line == "fcwd" && i+1 < len(lines) && strings.HasPrefix(lines[i+1], "n") {
+					cwd = lines[i+1][1:] // Remove 'n' prefix
+					break
+				}
+			}
+
+			if cwd == "" {
+				continue
+			}
+
+			// Extract task ID from worktree path like ".task-worktrees/467-..."
+			if idx := strings.Index(cwd, ".task-worktrees/"); idx >= 0 {
+				pathPart := cwd[idx+len(".task-worktrees/"):]
+				// Parse the task ID from the beginning of the path
+				var taskID int
+				if _, err := fmt.Sscanf(pathPart, "%d-", &taskID); err == nil && taskID > 0 {
+					memMB := getProcessMemoryMB(pid)
+					// If there are multiple agent processes for the same task, sum them
+					result[taskID] += memMB
+				}
 			}
 		}
 	}
@@ -2925,8 +2950,8 @@ func getProcessMemoryMB(pid int) int {
 	return rssKB / 1024 // Convert to MB
 }
 
-// killClaudeSession kills a specific task's tmux window in task-daemon.
-func killClaudeSession(taskID int) error {
+// killSession kills a specific task's tmux window in task-daemon.
+func killSession(taskID int) error {
 	daemonSession := getDaemonSessionName()
 	windowName := fmt.Sprintf("task-%d", taskID)
 	windowTarget := fmt.Sprintf("%s:%s", daemonSession, windowName)
@@ -2946,7 +2971,7 @@ func killClaudeSession(taskID int) error {
 
 // recoverStaleTmuxRefs clears stale daemon_session and tmux_window_id references
 // from tasks after a crash or daemon restart. This allows tasks to automatically
-// reconnect to their Claude sessions when viewed.
+// reconnect to their agent sessions when viewed.
 func recoverStaleTmuxRefs(dryRun bool) {
 	dbPath := db.DefaultPath()
 	database, err := db.Open(dbPath)
@@ -3067,7 +3092,7 @@ func recoverStaleTmuxRefs(dryRun bool) {
 	}
 
 	fmt.Println()
-	fmt.Println(dimStyle.Render("Tasks will automatically reconnect to their Claude sessions when viewed."))
+	fmt.Println(dimStyle.Render("Tasks will automatically reconnect to their agent sessions when viewed."))
 }
 
 // quotedSessionList returns a SQL-safe comma-separated list of quoted session names
@@ -3094,9 +3119,9 @@ func quotedWindowList(windows map[string]bool) string {
 	return strings.Join(parts, ",")
 }
 
-// cleanupOrphanedClaudes kills Claude processes that aren't tied to any active task windows
-// or belong to done tasks older than 2 hours.
-func cleanupOrphanedClaudes(force bool) {
+// cleanupOrphanedSessions kills agent processes that aren't tied to any active task windows
+// or belong to done tasks older than 2 hours. Supports all executors.
+func cleanupOrphanedSessions(force bool) {
 	// Step 1: Get all task windows across ALL task-daemon-* sessions
 	activeTaskIDs := make(map[int]bool)
 
@@ -3151,70 +3176,87 @@ func cleanupOrphanedClaudes(force bool) {
 		}
 	}
 
-	// Step 2: Get all Claude processes running in tmux
-	pgrepOut, err := osexec.Command("pgrep", "-f", "claude.*TERM_PROGRAM=tmux").Output()
-	if err != nil {
-		// No Claude processes found
-		fmt.Println(successStyle.Render("No orphaned Claude processes found"))
-		return
+	// Step 2: Get all agent processes running in tmux (supports all executors)
+	executorPatterns := []string{
+		"claude.*TERM_PROGRAM=tmux",
+		"codex.*TERM_PROGRAM=tmux",
+		"gemini.*TERM_PROGRAM=tmux",
+		"openclaw.*TERM_PROGRAM=tmux",
+		"opencode.*TERM_PROGRAM=tmux",
+		"pi.*TERM_PROGRAM=tmux",
 	}
 
 	var orphanedPIDs []int
 	var oldDonePIDs []int
-	for _, pidStr := range strings.Split(string(pgrepOut), "\n") {
-		pidStr = strings.TrimSpace(pidStr)
-		if pidStr == "" {
-			continue
-		}
-		pid, err := strconv.Atoi(pidStr)
+	seenPIDs := make(map[int]bool) // Avoid duplicates
+
+	for _, pattern := range executorPatterns {
+		pgrepOut, err := osexec.Command("pgrep", "-f", pattern).Output()
 		if err != nil {
-			continue
+			continue // No processes found for this executor
 		}
 
-		// Check if this PID's environment has WORKTREE_TASK_ID
-		// and if that task ID is in our active set
-		envOut, err := osexec.Command("ps", "-p", strconv.Itoa(pid), "-o", "command=").Output()
-		if err != nil {
-			orphanedPIDs = append(orphanedPIDs, pid)
-			continue
-		}
+		for _, pidStr := range strings.Split(string(pgrepOut), "\n") {
+			pidStr = strings.TrimSpace(pidStr)
+			if pidStr == "" {
+				continue
+			}
+			pid, err := strconv.Atoi(pidStr)
+			if err != nil {
+				continue
+			}
 
-		env := string(envOut)
-		isOrphaned := true
-		var extractedTaskID int
+			// Skip if already processed
+			if seenPIDs[pid] {
+				continue
+			}
+			seenPIDs[pid] = true
 
-		// Try to extract WORKTREE_TASK_ID from the command line
-		if idx := strings.Index(env, "WORKTREE_TASK_ID="); idx >= 0 {
-			if _, err := fmt.Sscanf(env[idx:], "WORKTREE_TASK_ID=%d", &extractedTaskID); err == nil {
-				if activeTaskIDs[extractedTaskID] {
-					isOrphaned = false
+			// Check if this PID's environment has WORKTREE_TASK_ID
+			// and if that task ID is in our active set
+			envOut, err := osexec.Command("ps", "-p", strconv.Itoa(pid), "-o", "command=").Output()
+			if err != nil {
+				orphanedPIDs = append(orphanedPIDs, pid)
+				continue
+			}
+
+			env := string(envOut)
+			isOrphaned := true
+			var extractedTaskID int
+
+			// Try to extract WORKTREE_TASK_ID from the command line
+			if idx := strings.Index(env, "WORKTREE_TASK_ID="); idx >= 0 {
+				if _, err := fmt.Sscanf(env[idx:], "WORKTREE_TASK_ID=%d", &extractedTaskID); err == nil {
+					if activeTaskIDs[extractedTaskID] {
+						isOrphaned = false
+					}
 				}
 			}
-		}
 
-		// Check if this is from an old done task
-		if !isOrphaned && extractedTaskID > 0 && doneOldTaskIDs[extractedTaskID] {
-			oldDonePIDs = append(oldDonePIDs, pid)
-			continue
-		}
+			// Check if this is from an old done task
+			if !isOrphaned && extractedTaskID > 0 && doneOldTaskIDs[extractedTaskID] {
+				oldDonePIDs = append(oldDonePIDs, pid)
+				continue
+			}
 
-		if isOrphaned {
-			orphanedPIDs = append(orphanedPIDs, pid)
+			if isOrphaned {
+				orphanedPIDs = append(orphanedPIDs, pid)
+			}
 		}
 	}
 
 	totalToKill := len(orphanedPIDs) + len(oldDonePIDs)
 	if totalToKill == 0 {
-		fmt.Println(successStyle.Render("No orphaned Claude processes found"))
+		fmt.Println(successStyle.Render("No orphaned agent processes found"))
 		return
 	}
 
 	// Step 3: Kill orphaned processes
 	if len(orphanedPIDs) > 0 {
-		fmt.Printf("%s\n\n", boldStyle.Render(fmt.Sprintf("Found %d orphaned Claude processes:", len(orphanedPIDs))))
+		fmt.Printf("%s\n\n", boldStyle.Render(fmt.Sprintf("Found %d orphaned agent processes:", len(orphanedPIDs))))
 	}
 	if len(oldDonePIDs) > 0 {
-		fmt.Printf("%s\n\n", boldStyle.Render(fmt.Sprintf("Found %d Claude processes from done tasks (>2h old):", len(oldDonePIDs))))
+		fmt.Printf("%s\n\n", boldStyle.Render(fmt.Sprintf("Found %d agent processes from done tasks (>2h old):", len(oldDonePIDs))))
 	}
 
 	signal := syscall.SIGTERM
@@ -3254,10 +3296,10 @@ func moveTask(database *db.DB, oldTask *db.Task, targetProject string) (int64, e
 
 	// Step 1: Clean up old task's resources
 
-	// Kill Claude session if running (ignore errors - session may not exist)
-	killClaudeSession(int(oldTask.ID))
+	// Kill agent session if running (ignore errors - session may not exist)
+	killSession(int(oldTask.ID))
 
-	// Clean up worktree and Claude sessions if they exist
+	// Clean up worktree and agent sessions if they exist
 	if oldTask.WorktreePath != "" {
 		projectConfigDir := ""
 		if oldTask.Project != "" {
@@ -3324,7 +3366,7 @@ func moveTask(database *db.DB, oldTask *db.Task, targetProject string) (int64, e
 	return newTask.ID, nil
 }
 
-// deleteTask deletes a task, its Claude session, and its worktree.
+// deleteTask deletes a task, its agent session, and its worktree.
 func deleteTask(taskID int64) error {
 	// Open database
 	dbPath := db.DefaultPath()
@@ -3343,10 +3385,10 @@ func deleteTask(taskID int64) error {
 		return fmt.Errorf("task #%d not found", taskID)
 	}
 
-	// Kill Claude session if running (ignore errors - session may not exist)
-	killClaudeSession(int(taskID))
+	// Kill agent session if running (ignore errors - session may not exist)
+	killSession(int(taskID))
 
-	// Clean up worktree and Claude sessions if they exist
+	// Clean up worktree and agent sessions if they exist
 	if task.WorktreePath != "" {
 		projectConfigDir := ""
 		if task.Project != "" {
