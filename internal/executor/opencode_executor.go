@@ -120,17 +120,15 @@ func (o *OpenCodeExecutor) runOpenCode(ctx context.Context, task *db.Task, workD
 	envPrefix := claudeEnvPrefix(paths.configDir)
 
 	// Build OpenCode command
-	// OpenCode is an interactive TUI that doesn't have explicit prompt arguments like Claude
-	// We'll use the prompt file and pipe it to opencode, or start it in the workdir
-	// From docs: opencode starts an interactive session, uses @-symbol for file refs
-	// We start opencode in the working directory and let it pick up the project context
+	// OpenCode CLI uses --prompt flag to pass initial prompt to the TUI
+	// The positional [project] argument is for the working directory path, not the prompt
+	// We start opencode in the working directory and pass the prompt via --prompt flag
 	script := fmt.Sprintf(`cd %q && WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %sopencode`,
 		workDir, task.ID, worktreeSessionID, task.Port, task.WorktreePath, envPrefix)
 
-	// If we have a prompt, we need to pass it to opencode
-	// OpenCode accepts initial prompt as first argument
+	// If we have a prompt, pass it via --prompt flag
 	if prompt != "" {
-		script = fmt.Sprintf(`cd %q && WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %sopencode "$(cat %q)"; rm -f %q`,
+		script = fmt.Sprintf(`cd %q && WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %sopencode --prompt "$(cat %q)"; rm -f %q`,
 			workDir, task.ID, worktreeSessionID, task.Port, task.WorktreePath, envPrefix, promptFile.Name(), promptFile.Name())
 	}
 
@@ -309,7 +307,7 @@ func (o *OpenCodeExecutor) BuildCommand(task *db.Task, sessionID, prompt string)
 		}
 		promptFile.WriteString(prompt)
 		promptFile.Close()
-		return fmt.Sprintf(`%s opencode "$(cat %q)"; rm -f %q`,
+		return fmt.Sprintf(`%s opencode --prompt "$(cat %q)"; rm -f %q`,
 			envVars, promptFile.Name(), promptFile.Name())
 	}
 
