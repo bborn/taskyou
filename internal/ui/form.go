@@ -166,7 +166,7 @@ func NewEditFormModel(database *db.DB, task *db.Task, width, height int, availab
 	}
 
 	// Build executor list: show available ones first, then unavailable ones marked
-	allExecutors := []string{db.ExecutorClaude, db.ExecutorCodex, db.ExecutorGemini, db.ExecutorOpenCode, db.ExecutorOpenClaw}
+	allExecutors := []string{db.ExecutorClaude, db.ExecutorCodex, db.ExecutorGemini, db.ExecutorPi, db.ExecutorOpenCode, db.ExecutorOpenClaw}
 	executors := buildExecutorList(allExecutors, availableExecutors)
 
 	// Find the executor index and check if it's available
@@ -301,7 +301,7 @@ func NewFormModel(database *db.DB, width, height int, workingDir string, availab
 	}
 
 	// Build executor list: show available ones first, then unavailable ones marked
-	allExecutors := []string{db.ExecutorClaude, db.ExecutorCodex, db.ExecutorGemini, db.ExecutorOpenCode, db.ExecutorOpenClaw}
+	allExecutors := []string{db.ExecutorClaude, db.ExecutorCodex, db.ExecutorGemini, db.ExecutorPi, db.ExecutorOpenCode, db.ExecutorOpenClaw}
 	executors := buildExecutorList(allExecutors, availableExecutors)
 
 	// Find the first available executor for default selection

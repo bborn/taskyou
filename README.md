@@ -1,6 +1,6 @@
 # Task You
 
-A personal task management system with a beautiful terminal UI, SQLite storage, and background task execution via pluggable AI agents (Claude Code, OpenAI Codex, Gemini, or OpenClaw).
+A personal task management system with a beautiful terminal UI, SQLite storage, and background task execution via pluggable AI agents (Claude Code, OpenAI Codex, Gemini, Pi, OpenClaw, or OpenCode).
 
 ## Screenshots
 
@@ -24,7 +24,7 @@ A personal task management system with a beautiful terminal UI, SQLite storage, 
 
 - **Kanban Board** - Visual task management with 4 columns (Backlog, In Progress, Blocked, Done)
 - **Git Worktrees** - Each task runs in an isolated worktree, no conflicts between parallel tasks
-- **Pluggable Executors** - Choose between Claude Code, OpenAI Codex, Gemini, or OpenClaw per task
+- **Pluggable Executors** - Choose between Claude Code, OpenAI Codex, Gemini, Pi, OpenClaw, or OpenCode per task
 - **Ghost Text Autocomplete** - LLM-powered suggestions for task titles and descriptions as you type
 - **VS Code-style Fuzzy Search** - Quick task navigation with smart matching (e.g., "dsno" matches "diseno website")
 - **Markdown Rendering** - Task descriptions render with proper formatting in the detail view
@@ -227,13 +227,15 @@ Task You supports multiple AI executors for processing tasks. You can choose the
 | Claude (default) | `claude` | [Claude Code](https://claude.ai/claude-code) - Anthropic's coding agent with session resumption |
 | Codex | `codex` | [OpenAI Codex CLI](https://github.com/openai/codex) - OpenAI's coding assistant |
 | Gemini | `gemini` | [Gemini CLI](https://ai.google.dev/gemini-api/docs/cli) - Google's Gemini-based coding assistant |
+| Pi | `pi` | [Pi Coding Agent](https://github.com/mariozechner/pi-coding-agent) - Multi-provider AI coding agent with session continuity |
 | OpenCode | `opencode` | [OpenCode](https://opencode.ai) - Open-source AI coding assistant with multi-LLM support |
 | OpenClaw | `openclaw` | [OpenClaw](https://openclaw.ai) - Open-source personal AI assistant with session resumption |
 
 All executors run in tmux windows with the same worktree isolation and environment variables. The main differences:
 
-- **Claude Code** and **OpenClaw** support session resumption - when you retry a task, they continue with full conversation history
+- **Claude Code**, **Pi**, and **OpenClaw** support session resumption - when you retry a task, they continue with full conversation history
 - **Codex** and **Gemini** start fresh on each execution but receive the full prompt with any feedback
+- **OpenCode** does not support session resumption
 
 ### Installing Executors
 
@@ -248,6 +250,9 @@ npm install -g @openai/codex
 
 # Google Gemini CLI
 # See https://ai.google.dev/gemini-api/docs/cli for installation instructions
+
+# Pi Coding Agent
+npm install -g @mariozechner/pi-coding-agent
 
 # OpenClaw
 npm install -g openclaw@latest

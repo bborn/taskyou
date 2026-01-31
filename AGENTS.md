@@ -9,10 +9,10 @@ Guide for AI agents working in this repository.
 This is **Task You** - a personal task management system with:
 - **SQLite storage** for tasks and projects
 - **SSH-accessible TUI** via Wish
-- **Background executor** running Claude Code for task processing
+- **Background executor** with support for multiple AI coding agents (Claude, Codex, Gemini, Pi, OpenClaw, OpenCode)
 - **Beautiful terminal UI** built with Charm libraries (Kanban board)
 - **Git worktree isolation** for parallel task execution
-- **Claude Code hooks** for real-time task state tracking
+- **Task lifecycle hooks** for real-time task state tracking
 
 ## Architecture
 
@@ -269,15 +269,28 @@ Recurring scheduling has been removed from TaskYou. Use external schedulers (cro
 The background executor (`internal/executor/executor.go`):
 - Polls for `queued` tasks every 2 seconds
 - Creates isolated git worktrees for each task
-- Runs Claude Code in tmux windows with hooks
+- Runs AI coding agents in tmux windows with hooks
 - Streams output to `task_logs` table
 - Supports real-time watching via subscriptions
 - Handles task suspension and resumption
 - Manages scheduled tasks (recurring runs must now be handled externally via CLI automation)
 
-### Claude Code Integration
+### Supported Executors
 
-Tasks run in tmux windows with Claude Code hooks that track state:
+TaskYou supports multiple AI coding agent backends:
+
+- **claude** (default) - Claude Code CLI with hooks and session resume
+- **codex** - OpenAI Codex CLI with dangerous mode support
+- **gemini** - Google Gemini CLI with configurable dangerous mode flags
+- **pi** - Pi coding agent with session continuity
+- **openclaw** - OpenClaw AI assistant
+- **opencode** - OpenCode AI assistant
+
+Each task can specify its executor in the task form. The executor runs in an isolated git worktree with environment variables for task context.
+
+### Executor Integration (Claude Example)
+
+Tasks run in tmux windows with hooks that track state:
 
 - **PreToolUse** - Before tool execution, ensures task is "processing"
 - **PostToolUse** - After tool completes, ensures task stays "processing"
