@@ -68,6 +68,12 @@ func (c *CodexExecutor) runCodex(ctx context.Context, task *db.Task, workDir, pr
 		return ExecResult{Message: "tmux is not installed"}
 	}
 
+	// Write system instructions to AGENTS.md in the worktree
+	// Codex CLI auto-loads AGENTS.md files for project-specific instructions
+	if err := c.writeAgentsMd(workDir); err != nil {
+		c.logger.Warn("could not write AGENTS.md", "error", err)
+	}
+
 	// Ensure task-daemon session exists
 	daemonSession, err := ensureTmuxDaemon()
 	if err != nil {
@@ -90,13 +96,11 @@ func (c *CodexExecutor) runCodex(ctx context.Context, task *db.Task, workDir, pr
 		return ExecResult{Message: fmt.Sprintf("failed to create temp file: %s", err.Error())}
 	}
 
-	// Build the full prompt with system instructions
-	// Codex doesn't have a verified system prompt flag, so we include task guidance in the prompt
+	// Build the full prompt (system instructions are in AGENTS.md)
 	fullPrompt := prompt
 	if isResume && feedback != "" {
 		fullPrompt = prompt + "\n\n## User Feedback\n\n" + feedback
 	}
-	fullPrompt = fullPrompt + "\n\n" + c.executor.buildSystemInstructions()
 	promptFile.WriteString(fullPrompt)
 	promptFile.Close()
 	defer os.Remove(promptFile.Name())
@@ -340,6 +344,14 @@ func (c *CodexExecutor) BuildCommand(task *db.Task, sessionID, prompt string) st
 		resumeFlag = fmt.Sprintf("--resume %s ", sessionID)
 	}
 
+	// Write system instructions to AGENTS.md in the worktree
+	// Codex CLI auto-loads AGENTS.md files for project-specific instructions
+	if task.WorktreePath != "" {
+		if err := c.writeAgentsMd(task.WorktreePath); err != nil {
+			c.logger.Warn("BuildCommand: could not write AGENTS.md", "error", err)
+		}
+	}
+
 	// If prompt is provided, write to temp file and pass it
 	if prompt != "" {
 		// Create temp file for prompt (avoids shell quoting issues)
@@ -349,9 +361,7 @@ func (c *CodexExecutor) BuildCommand(task *db.Task, sessionID, prompt string) st
 			return fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q codex %s%s`,
 				task.ID, worktreeSessionID, task.Port, task.WorktreePath, dangerousFlag, resumeFlag)
 		}
-		// Include system instructions at the end of prompt since Codex doesn't have a verified system prompt flag
-		fullPrompt := prompt + "\n\n" + c.executor.buildSystemInstructions()
-		promptFile.WriteString(fullPrompt)
+		promptFile.WriteString(prompt)
 		promptFile.Close()
 
 		return fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q codex %s%s"$(cat %q)"; rm -f %q`,
@@ -455,4 +465,18 @@ func codexSessionExists(sessionID string) bool {
 
 	_, err = os.Stat(sessionFile)
 	return err == nil
+}
+
+// writeAgentsMd writes task guidance to AGENTS.md in the worktree.
+// Codex CLI automatically loads AGENTS.md files for project-specific instructions,
+// keeping the guidance out of the user conversation thread.
+func (c *CodexExecutor) writeAgentsMd(workDir string) error {
+	agentsMdPath := filepath.Join(workDir, "AGENTS.md")
+	instructions := c.executor.buildSystemInstructions()
+
+	if err := os.WriteFile(agentsMdPath, []byte(instructions), 0644); err != nil {
+		return fmt.Errorf("failed to write AGENTS.md: %w", err)
+	}
+
+	return nil
 }
