@@ -1,5 +1,4 @@
 // task is the local CLI for managing tasks.
-// It runs locally by default, or connects to a remote taskd server over SSH with -r flag.
 package main
 
 import (
@@ -8,11 +7,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"net"
 	"os"
 	osexec "os/exec"
 	"os/signal"
-	"os/user"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -30,16 +27,10 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/log"
 	"github.com/spf13/cobra"
-	"golang.org/x/crypto/ssh"
-	"golang.org/x/crypto/ssh/agent"
-	"golang.org/x/term"
 )
 
 var (
 	version = "dev"
-	// Default server configuration
-	defaultHost = "cloud-claude"
-	defaultPort = "2222"
 
 	// Styles for CLI output
 	successStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#10B981"))
@@ -70,12 +61,7 @@ func getDaemonSessionName() string {
 }
 
 func main() {
-	var (
-		host      string
-		port      string
-		remote    bool
-		dangerous bool
-	)
+	var dangerous bool
 
 	rootCmd := &cobra.Command{
 		Use:     "ty",
@@ -92,15 +78,7 @@ func main() {
 				return
 			}
 
-			if remote {
-				// Connect to remote server
-				if err := connectRemote(host, port); err != nil {
-					fmt.Fprintln(os.Stderr, errorStyle.Render("Connection failed: "+err.Error()))
-					os.Exit(1)
-				}
-				return
-			}
-			// Run locally (default)
+			// Run locally
 			if err := runLocal(dangerous); err != nil {
 				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
 				os.Exit(1)
@@ -111,9 +89,6 @@ func main() {
 	rootCmd.SetVersionTemplate(`{{.Version}}
 `)
 
-	rootCmd.PersistentFlags().StringVarP(&host, "host", "H", defaultHost, "Remote server host")
-	rootCmd.PersistentFlags().StringVar(&port, "port", defaultPort, "Remote server port")
-	rootCmd.PersistentFlags().BoolVarP(&remote, "remote", "r", false, "Connect to remote server instead of running locally")
 	rootCmd.PersistentFlags().BoolVar(&dangerous, "dangerous", false, "Run Claude with --dangerously-skip-permissions (for sandboxed environments)")
 
 	// Daemon subcommand - runs executor in background
@@ -226,16 +201,9 @@ Use --hard to kill all tmux sessions for a complete reset.`,
 				os.Exit(1)
 			}
 
-			// Pass through -r flag if we're in remote mode
-			execArgs := []string{executable}
-			if remote {
-				execArgs = append(execArgs, "-r")
-			}
-
-			syscall.Exec(executable, execArgs, os.Environ())
+			syscall.Exec(executable, []string{executable}, os.Environ())
 		},
 	}
-	restartCmd.Flags().BoolVarP(&remote, "remote", "r", false, "Connect to remote server")
 	restartCmd.Flags().BoolVar(&hardRestart, "hard", false, "Kill all tmux sessions (full reset)")
 	rootCmd.AddCommand(restartCmd)
 
@@ -1500,9 +1468,6 @@ Examples:
 	purgeClaudeConfigCmd.Flags().String("config-dir", "", "Claude config directory (defaults to $CLAUDE_CONFIG_DIR or ~/.claude)")
 	rootCmd.AddCommand(purgeClaudeConfigCmd)
 
-	// Cloud subcommand
-	rootCmd.AddCommand(createCloudCommand())
-
 	// Update command - self-update via install script
 	upgradeCmd := &cobra.Command{
 		Use:   "upgrade",
@@ -1715,17 +1680,6 @@ func runLocal(dangerousMode bool) error {
 		return fmt.Errorf("open database: %w", err)
 	}
 	defer database.Close()
-
-	// Check cloud sync on startup
-	if synced := CheckCloudSync(database); synced {
-		// Reopen database after sync to get fresh data
-		database.Close()
-		database, err = db.Open(dbPath)
-		if err != nil {
-			return fmt.Errorf("reopen database after sync: %w", err)
-		}
-		defer database.Close()
-	}
 
 	fmt.Fprintln(os.Stderr, dimStyle.Render("Using local database: "+dbPath))
 
@@ -2133,129 +2087,6 @@ func runDaemon() error {
 	exec.Stop()
 
 	return nil
-}
-
-func connectRemote(host, port string) error {
-	// Get SSH auth methods
-	authMethods, err := getAuthMethods()
-	if err != nil {
-		return fmt.Errorf("auth setup: %w", err)
-	}
-
-	// Get current user
-	currentUser, err := user.Current()
-	if err != nil {
-		return fmt.Errorf("get user: %w", err)
-	}
-	username := currentUser.Username
-
-	config := &ssh.ClientConfig{
-		User:            username,
-		Auth:            authMethods,
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(), // TODO: proper host key verification
-	}
-
-	// Connect
-	addr := net.JoinHostPort(host, port)
-	client, err := ssh.Dial("tcp", addr, config)
-	if err != nil {
-		return fmt.Errorf("dial %s: %w", addr, err)
-	}
-	defer client.Close()
-
-	// Create session
-	session, err := client.NewSession()
-	if err != nil {
-		return fmt.Errorf("session: %w", err)
-	}
-	defer session.Close()
-
-	// Set up terminal
-	fd := int(os.Stdin.Fd())
-	if term.IsTerminal(fd) {
-		// Get terminal size
-		width, height, err := term.GetSize(fd)
-		if err != nil {
-			width, height = 80, 24
-		}
-
-		// Set raw mode
-		oldState, err := term.MakeRaw(fd)
-		if err != nil {
-			return fmt.Errorf("raw mode: %w", err)
-		}
-		defer term.Restore(fd, oldState)
-
-		// Request PTY
-		modes := ssh.TerminalModes{
-			ssh.ECHO:          1,
-			ssh.TTY_OP_ISPEED: 14400,
-			ssh.TTY_OP_OSPEED: 14400,
-		}
-		if err := session.RequestPty("xterm-256color", height, width, modes); err != nil {
-			return fmt.Errorf("pty: %w", err)
-		}
-	}
-
-	// Connect I/O
-	session.Stdin = os.Stdin
-	session.Stdout = os.Stdout
-	session.Stderr = os.Stderr
-
-	// Send current working directory for project detection
-	if cwd, err := os.Getwd(); err == nil {
-		session.Setenv("WORKTREE_CWD", cwd)
-	}
-
-	// Start shell (taskd serves TUI directly)
-	if err := session.Shell(); err != nil {
-		return fmt.Errorf("shell: %w", err)
-	}
-
-	return session.Wait()
-}
-
-func getAuthMethods() ([]ssh.AuthMethod, error) {
-	var methods []ssh.AuthMethod
-
-	// Try SSH agent first
-	if sock := os.Getenv("SSH_AUTH_SOCK"); sock != "" {
-		conn, err := net.Dial("unix", sock)
-		if err == nil {
-			agentClient := agent.NewClient(conn)
-			signers, err := agentClient.Signers()
-			if err == nil && len(signers) > 0 {
-				methods = append(methods, ssh.PublicKeysCallback(agentClient.Signers))
-			}
-		}
-	}
-
-	// Try default key files
-	home, _ := os.UserHomeDir()
-	keyFiles := []string{
-		filepath.Join(home, ".ssh", "id_ed25519"),
-		filepath.Join(home, ".ssh", "id_rsa"),
-	}
-
-	for _, keyFile := range keyFiles {
-		if key, err := loadPrivateKey(keyFile); err == nil {
-			methods = append(methods, ssh.PublicKeys(key))
-		}
-	}
-
-	if len(methods) == 0 {
-		return nil, fmt.Errorf("no SSH keys found (checked agent and ~/.ssh/id_*)")
-	}
-
-	return methods, nil
-}
-
-func loadPrivateKey(path string) (ssh.Signer, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-	return ssh.ParsePrivateKey(data)
 }
 
 // ClaudeHookInput is the JSON structure Claude sends to hooks via stdin.

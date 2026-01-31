@@ -76,33 +76,11 @@ cd taskyou
 make build
 ```
 
-### Run on exe.dev (cloud)
-
-Spin up TaskYou instantly on [exe.dev](https://exe.dev):
-
-```bash
-ssh exe.dev 'new --name=tasks --prompt="Run: curl -fsSL taskyou.dev/install.sh | bash"'
-ssh tasks.exe.xyz
-~/.local/bin/task
-```
-
 ## Usage
-
-### Run locally (default)
 
 ```bash
 # Launch the TUI (auto-starts background daemon)
 ./bin/ty
-```
-
-### Connect to remote server
-
-```bash
-# Start the SSH server + executor
-./bin/taskd -addr :2222
-
-# Connect from anywhere
-ssh -p 2222 your-server
 ```
 
 ### Daemon management
