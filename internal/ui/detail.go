@@ -1870,9 +1870,9 @@ func (m *DetailModel) breakTmuxPanes(saveHeight bool, resizeTUI bool) {
 	log.Info("breakTmuxPanes: completed for task %d", m.task.ID)
 }
 
-// saveDaemonPaneIDs saves the pane IDs from the daemon window to the database.
-// This is called after breaking panes back to the daemon to ensure we have the correct
-// pane IDs for when we join them again later.
+// saveDaemonPaneIDs saves the pane IDs to the database.
+// This uses the already-known pane IDs (m.claudePaneID, m.workdirPaneID) rather than
+// querying by index, since tmux pane indices can change when panes are reordered.
 func (m *DetailModel) saveDaemonPaneIDs(ctx context.Context, targetWindowID string) {
 	log := GetLogger()
 
@@ -1880,21 +1880,13 @@ func (m *DetailModel) saveDaemonPaneIDs(ctx context.Context, targetWindowID stri
 		return
 	}
 
-	// Get Claude pane ID (pane .0 in daemon)
-	claudePaneCmd := exec.CommandContext(ctx, "tmux", "display-message", "-t", targetWindowID+".0", "-p", "#{pane_id}")
-	claudePaneOut, err := claudePaneCmd.Output()
-	if err != nil {
-		log.Warn("saveDaemonPaneIDs: failed to get Claude pane ID: %v", err)
-		return
-	}
-	claudePaneID := strings.TrimSpace(string(claudePaneOut))
+	// Use the pane IDs we already know - don't re-query by index since indices can change
+	claudePaneID := m.claudePaneID
+	shellPaneID := m.workdirPaneID
 
-	// Get Shell pane ID (pane .1 in daemon) - may not exist
-	shellPaneID := ""
-	shellPaneCmd := exec.CommandContext(ctx, "tmux", "display-message", "-t", targetWindowID+".1", "-p", "#{pane_id}")
-	shellPaneOut, err := shellPaneCmd.Output()
-	if err == nil {
-		shellPaneID = strings.TrimSpace(string(shellPaneOut))
+	if claudePaneID == "" {
+		log.Warn("saveDaemonPaneIDs: no Claude pane ID to save")
+		return
 	}
 
 	// Save to database
