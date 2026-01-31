@@ -2,14 +2,14 @@
 # TaskYou Installation Script
 # Usage: curl -fsSL taskyou.dev/install.sh | bash
 #
-# This script downloads and installs the 'task' CLI tool.
+# This script downloads and installs the 'ty' CLI tool.
 # It detects your OS and architecture automatically.
 
 set -e
 
 REPO="bborn/taskyou"
 INSTALL_DIR="${INSTALL_DIR:-$HOME/.local/bin}"
-BINARY_NAME="task"
+BINARY_NAME="ty"
 
 # Colors for output
 RED='\033[0;31m'
@@ -68,7 +68,7 @@ install_binary() {
     local arch=$2
     local version=$3
 
-    local filename="task-${os}-${arch}"
+    local filename="ty-${os}-${arch}"
     local url="https://github.com/${REPO}/releases/download/${version}/${filename}"
 
     info "Downloading ${BINARY_NAME} ${version} for ${os}/${arch}..."
@@ -135,7 +135,7 @@ main() {
     check_path
 
     echo ""
-    info "Run 'task --help' to get started!"
+    info "Run 'ty --help' to get started!"
     echo ""
 }
 

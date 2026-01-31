@@ -39,7 +39,7 @@ This is **Task You** - a personal task management system with:
 │                    └─────────────────┘                          │
 └─────────────────────────────────────────────────────────────────┘
 
-Local:  task -l (launches TUI + daemon)
+Local:  ty -l (launches TUI + daemon)
 Remote: ssh -p 2222 user@server
 ```
 
@@ -93,8 +93,8 @@ workflow/
 ## Building
 
 ```bash
-make build          # Build bin/task and bin/taskd
-make build-task     # Build just the CLI
+make build          # Build bin/ty and bin/taskd
+make build-ty       # Build just the CLI
 make build-taskd    # Build just the daemon
 make install        # Install to ~/go/bin
 make test           # Run tests
@@ -106,12 +106,12 @@ make fmt            # Format code
 
 ### Local CLI
 ```bash
-./bin/task -l                        # Launch TUI locally (starts daemon)
-./bin/task daemon                    # Start background executor
-./bin/task daemon stop               # Stop daemon
-./bin/task daemon status             # Check daemon status
-./bin/task daemon restart            # Restart daemon
-./bin/task claudes list              # List running Claude sessions
+./bin/ty -l                        # Launch TUI locally (starts daemon)
+./bin/ty daemon                    # Start background executor
+./bin/ty daemon stop               # Stop daemon
+./bin/ty daemon status             # Check daemon status
+./bin/ty daemon restart            # Restart daemon
+./bin/ty claudes list              # List running Claude sessions
 ```
 
 ### Daemon (on server)

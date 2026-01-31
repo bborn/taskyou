@@ -31,7 +31,7 @@ A personal task management system with a beautiful terminal UI, SQLite storage, 
 - **Real-time Updates** - Watch tasks execute live
 - **Running Process Indicator** - Green dot (`●`) shows which tasks have active shell processes (servers, watchers, etc.)
 - **Auto-cleanup** - Automatic cleanup of Claude processes and config entries for completed tasks
-- **Automation-Ready CLI** - Every Kanban action is also exposed via the `task` CLI, making it trivial to script or plug in your own orchestrator (see [external orchestration docs](docs/orchestrator.md))
+- **Automation-Ready CLI** - Every Kanban action is also exposed via the `ty` CLI, making it trivial to script or plug in your own orchestrator (see [external orchestration docs](docs/orchestrator.md))
 - **SSH Access** - Connect from anywhere via `ssh -p 2222 server`
 
 ## Prerequisites
@@ -60,7 +60,7 @@ Install Go 1.24.4 or later from [go.dev/dl](https://go.dev/dl/).
 curl -fsSL taskyou.dev/install.sh | bash
 ```
 
-This downloads the latest release and installs `task` to `/usr/local/bin`.
+This downloads the latest release and installs `ty` to `~/.local/bin`.
 
 You can also specify a custom install directory:
 
@@ -82,7 +82,7 @@ make build
 
 ```bash
 # Launch the TUI (auto-starts background daemon)
-./bin/task
+./bin/ty
 ```
 
 ### Connect to remote server
@@ -98,25 +98,25 @@ ssh -p 2222 your-server
 ### Daemon management
 
 ```bash
-./bin/task daemon         # Start daemon manually
-./bin/task daemon stop    # Stop the daemon
-./bin/task daemon status  # Check daemon status
+./bin/ty daemon         # Start daemon manually
+./bin/ty daemon stop    # Stop the daemon
+./bin/ty daemon status  # Check daemon status
 ```
 
 ### Maintenance commands
 
 ```bash
-./bin/task purge-claude-config            # Remove stale ~/.claude.json entries
-./bin/task purge-claude-config --dry-run  # Preview what would be removed
-./bin/task claudes cleanup                # Kill orphaned Claude processes
+./bin/ty purge-claude-config            # Remove stale ~/.claude.json entries
+./bin/ty purge-claude-config --dry-run  # Preview what would be removed
+./bin/ty claudes cleanup                # Kill orphaned Claude processes
 ```
 
 ### External orchestration
 
 Need an always-on supervisor or LLM agent? Keep it outside Task You and use the CLI instead:
 
-- `task board --json` surfaces the full Kanban snapshot
-- `task pin`, `task status`, `task execute`, `task retry`, etc. mirror every interaction from the TUI
+- `ty board --json` surfaces the full Kanban snapshot
+- `ty pin`, `ty status`, `ty execute`, `ty retry`, etc. mirror every interaction from the TUI
 - See [docs/orchestrator.md](docs/orchestrator.md) for a step-by-step Claude example
 
 **Auto-cleanup:** The daemon automatically cleans up Claude processes for tasks that have been done for more than 30 minutes, preventing memory bloat from orphaned processes.
@@ -268,10 +268,10 @@ Each task tracks its executor state in the database:
 
 ```bash
 # List all running executor processes
-./bin/task claudes list
+./bin/ty claudes list
 
 # Kill orphaned executor processes
-./bin/task claudes cleanup
+./bin/ty claudes cleanup
 ```
 
 **Inside a task worktree:**
@@ -319,11 +319,11 @@ This means when you retry a blocked task with feedback, Claude doesn't start ove
 
 ### Settings
 
-Manage settings with `task settings`:
+Manage settings with `ty settings`:
 
 ```bash
-task settings                              # View all settings
-task settings set <key> <value>            # Set a value
+ty settings                              # View all settings
+ty settings set <key> <value>            # Set a value
 ```
 
 | Setting | Description |
@@ -342,7 +342,7 @@ LLM-powered suggestions appear as you type task titles and descriptions, similar
 
 **Setup:**
 ```bash
-task settings set anthropic_api_key sk-ant-your-key-here
+ty settings set anthropic_api_key sk-ant-your-key-here
 ```
 
 **Controls:**

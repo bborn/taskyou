@@ -53,5 +53,5 @@ jobs:
 
       - name: Build binaries
         run: |
-          go build -o bin/task ./cmd/task
+          go build -o bin/ty ./cmd/task
           go build -o bin/taskd ./cmd/taskd
