@@ -1411,7 +1411,7 @@ func (m *DetailModel) ToggleShellPane() {
 	log.Info("ToggleShellPane: saved shellPaneHidden=%v", m.shellPaneHidden)
 }
 
-// hideShellPane moves the shell pane to the daemon window and expands Claude to full width.
+// hideShellPane moves the shell pane to a hidden background window (preserves process).
 func (m *DetailModel) hideShellPane(ctx context.Context) {
 	log := GetLogger()
 
@@ -1421,52 +1421,30 @@ func (m *DetailModel) hideShellPane(ctx context.Context) {
 		return
 	}
 
-	if m.claudePaneID == "" {
-		log.Debug("hideShellPane: no Claude pane, cannot hide shell")
-		return
-	}
-
 	// Save shell width before hiding so we can restore it later
 	m.saveShellPaneWidth()
 
-	// Find or create the daemon window to move the shell pane to.
-	// The original cachedWindowTarget may no longer exist if it was destroyed
-	// when the Claude pane was joined to task-ui (windows with 0 panes get destroyed).
-	daemonSession := m.daemonSessionID
-	if daemonSession == "" {
-		daemonSession = executor.TmuxDaemonSession
-	}
-	windowName := executor.TmuxWindowName(m.task.ID)
-	targetWindowID := m.findOrCreateTaskWindow(ctx, daemonSession, windowName)
-	if targetWindowID == "" {
-		log.Error("hideShellPane: could not find or create task window")
-		return
-	}
-
-	// Break the shell pane to the daemon window (preserving its state)
-	log.Info("hideShellPane: breaking shell pane %q to daemon window %q", m.workdirPaneID, targetWindowID)
-	err := osExec.CommandContext(ctx, "tmux", "join-pane",
-		"-d",                // don't switch focus
-		"-s", m.workdirPaneID, // source: shell pane
-		"-t", targetWindowID,  // target: daemon window
+	// Use break-pane to move shell to a hidden background window (keeps process running)
+	// -d: don't switch to the new window
+	// -n: name the new window so we can find it
+	hiddenWindowName := fmt.Sprintf("_hidden_shell_%d", m.task.ID)
+	log.Info("hideShellPane: breaking shell pane %q to hidden window %q", m.workdirPaneID, hiddenWindowName)
+	err := osExec.CommandContext(ctx, "tmux", "break-pane",
+		"-d",
+		"-n", hiddenWindowName,
+		"-s", m.workdirPaneID,
 	).Run()
-
 	if err != nil {
-		log.Error("hideShellPane: join-pane to daemon failed: %v", err)
+		log.Error("hideShellPane: break-pane failed: %v", err)
 		return
 	}
 
-	// Store the shell pane ID in the task so we can find it later
-	if m.database != nil && m.task != nil {
-		m.database.UpdateTaskPaneIDs(m.task.ID, m.claudePaneID, m.workdirPaneID)
-	}
-
-	m.workdirPaneID = "" // No longer visible in task-ui
+	// The pane ID stays the same after break-pane, we just need to track that it's hidden
 	m.shellPaneHidden = true
 	log.Info("hideShellPane: shell pane hidden successfully")
 }
 
-// showShellPane rejoins the shell pane from the daemon or creates a new one.
+// showShellPane joins the hidden shell pane back, or creates one if needed.
 func (m *DetailModel) showShellPane(ctx context.Context) {
 	log := GetLogger()
 
@@ -1477,50 +1455,25 @@ func (m *DetailModel) showShellPane(ctx context.Context) {
 
 	shellWidth := m.getShellPaneWidth()
 
-	// Try to find the shell pane in the daemon window
-	storedShellPaneID := ""
-	if m.task != nil {
-		storedShellPaneID = m.task.ShellPaneID
-	}
-
-	var shellSourcePaneID string
-	if storedShellPaneID != "" && m.cachedWindowTarget != "" {
-		// Check if the stored shell pane is still in the daemon window
-		daemonPanesCmd := osExec.CommandContext(ctx, "tmux", "list-panes", "-t", m.cachedWindowTarget, "-F", "#{pane_id}")
-		if daemonPanesOut, err := daemonPanesCmd.Output(); err == nil {
-			for _, pid := range strings.Split(strings.TrimSpace(string(daemonPanesOut)), "\n") {
-				if pid == storedShellPaneID {
-					shellSourcePaneID = storedShellPaneID
-					log.Debug("showShellPane: found stored shell pane %q in daemon", shellSourcePaneID)
-					break
-				}
-			}
-		}
-	}
-
-	if shellSourcePaneID != "" {
-		// Rejoin the shell pane from daemon
-		log.Info("showShellPane: rejoining shell pane %q from daemon", shellSourcePaneID)
+	// Try to join back the hidden shell pane
+	if m.workdirPaneID != "" {
+		log.Info("showShellPane: joining shell pane %q back to Claude pane", m.workdirPaneID)
 		err := osExec.CommandContext(ctx, "tmux", "join-pane",
 			"-h", "-l", shellWidth,
-			"-s", shellSourcePaneID,
+			"-s", m.workdirPaneID,
 			"-t", m.claudePaneID,
 		).Run()
 		if err != nil {
-			log.Error("showShellPane: join-pane from daemon failed: %v, will create new shell", err)
-			shellSourcePaneID = "" // Fall through to create new
+			log.Error("showShellPane: join-pane failed: %v, will create new shell", err)
+			m.workdirPaneID = "" // Fall through to create new
 		} else {
-			// Get the joined pane ID
-			workdirPaneCmd := osExec.CommandContext(ctx, "tmux", "display-message", "-p", "#{pane_id}")
-			if workdirPaneOut, err := workdirPaneCmd.Output(); err == nil {
-				m.workdirPaneID = strings.TrimSpace(string(workdirPaneOut))
-				osExec.CommandContext(ctx, "tmux", "select-pane", "-t", m.workdirPaneID, "-T", "Shell").Run()
-			}
+			// Set pane title
+			osExec.CommandContext(ctx, "tmux", "select-pane", "-t", m.workdirPaneID, "-T", "Shell").Run()
 		}
 	}
 
-	if shellSourcePaneID == "" {
-		// Create a new shell pane
+	// Create new shell if needed
+	if m.workdirPaneID == "" {
 		log.Info("showShellPane: creating new shell pane")
 		workdir := m.getWorkdir()
 		userShell := os.Getenv("SHELL")
@@ -1542,12 +1495,6 @@ func (m *DetailModel) showShellPane(ctx context.Context) {
 		if workdirPaneOut, err := workdirPaneCmd.Output(); err == nil {
 			m.workdirPaneID = strings.TrimSpace(string(workdirPaneOut))
 			osExec.CommandContext(ctx, "tmux", "select-pane", "-t", m.workdirPaneID, "-T", "Shell").Run()
-			// Set environment variables in the newly created shell pane
-			if m.task != nil {
-				envCmd := fmt.Sprintf("export WORKTREE_TASK_ID=%d WORKTREE_PORT=%d WORKTREE_PATH=%q", m.task.ID, m.task.Port, m.task.WorktreePath)
-				osExec.CommandContext(ctx, "tmux", "send-keys", "-t", m.workdirPaneID, envCmd, "Enter").Run()
-				osExec.CommandContext(ctx, "tmux", "send-keys", "-t", m.workdirPaneID, "clear", "Enter").Run()
-			}
 		}
 	}
 
