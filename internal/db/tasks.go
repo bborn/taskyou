@@ -68,6 +68,7 @@ const (
 	ExecutorCodex    = "codex"    // OpenAI Codex CLI
 	ExecutorGemini   = "gemini"   // Google Gemini CLI
 	ExecutorOpenClaw = "openclaw" // OpenClaw AI assistant (https://openclaw.ai)
+	ExecutorOpenCode = "opencode" // OpenCode AI assistant (https://opencode.ai)
 )
 
 // DefaultExecutor returns the default executor if none is specified.
