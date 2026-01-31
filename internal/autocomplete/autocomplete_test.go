@@ -1,6 +1,7 @@
 package autocomplete
 
 import (
+	"context"
 	"strings"
 	"testing"
 )
@@ -445,7 +446,7 @@ func TestBuildTitleGenerationPrompt(t *testing.T) {
 
 func TestGenerateTitle_NoAPIKey(t *testing.T) {
 	svc := NewService("")
-	_, err := svc.GenerateTitle(nil, "Some description", "")
+	_, err := svc.GenerateTitle(context.TODO(), "Some description", "")
 	if err == nil {
 		t.Error("GenerateTitle() should return error when no API key")
 	}
@@ -453,12 +454,12 @@ func TestGenerateTitle_NoAPIKey(t *testing.T) {
 
 func TestGenerateTitle_EmptyBody(t *testing.T) {
 	svc := NewService("test-api-key")
-	_, err := svc.GenerateTitle(nil, "", "")
+	_, err := svc.GenerateTitle(context.TODO(), "", "")
 	if err == nil {
 		t.Error("GenerateTitle() should return error when body is empty")
 	}
 
-	_, err = svc.GenerateTitle(nil, "   ", "")
+	_, err = svc.GenerateTitle(context.TODO(), "   ", "")
 	if err == nil {
 		t.Error("GenerateTitle() should return error when body is whitespace only")
 	}
