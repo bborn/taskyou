@@ -884,10 +884,6 @@ func (e *Executor) executeTask(ctx context.Context, task *db.Task) {
 		result = execResult.toInternal()
 	}
 
-	// Check if we should distill learnings from this execution session
-	// This runs asynchronously and captures memories even for in-progress tasks
-	e.MaybeDistillTask(task)
-
 	// Check current status - hooks may have already set it
 	currentTask, _ := e.db.GetTask(task.ID)
 	currentStatus := ""
@@ -928,13 +924,6 @@ func (e *Executor) executeTask(ctx context.Context, task *db.Task) {
 		// NOTE: We intentionally do NOT kill the executor here - keep it running so user can
 		// easily retry/resume the task. Old done task executors are cleaned up after 2h
 		// by the cleanupOrphanedClaudes routine.
-
-		// Distill and index the completed task (runs in background)
-		go func() {
-			if err := e.processCompletedTask(context.Background(), task); err != nil {
-				e.logger.Error("Task processing failed", "task", task.ID, "error", err)
-			}
-		}()
 	} else if result.NeedsInput {
 		e.updateStatus(task.ID, db.StatusBlocked)
 		// Log the question with special type so UI can display it
@@ -1077,8 +1066,8 @@ func (e *Executor) buildPrompt(task *db.Task, attachmentPaths []string) string {
 		}
 	}
 
-	// Get similar past tasks for reference
-	similarTasks := e.getSimilarTasksSection(task)
+	// Similar tasks feature has been removed - always empty
+	similarTasks := ""
 
 	// Get project-specific instructions
 	projectInstructions := e.getProjectInstructions(task.Project)
@@ -2734,41 +2723,6 @@ func (e *Executor) logLine(taskID int64, lineType, content string) {
 		CreatedAt: db.LocalTime{Time: time.Now()},
 	}
 	e.broadcast(taskID, logEntry)
-}
-
-// getSimilarTasksSection checks if similar past tasks exist and returns a hint.
-// Instead of injecting full content, we just notify Claude that the search tools are available.
-// Claude can then use workflow_search_tasks and workflow_show_task MCP tools on-demand.
-func (e *Executor) getSimilarTasksSection(task *db.Task) string {
-	if task.Project == "" {
-		return ""
-	}
-
-	// Quick check if any similar tasks exist
-	results, err := e.db.FindSimilarTasks(task, 1)
-	if err != nil || len(results) == 0 {
-		return ""
-	}
-
-	// Filter out the current task
-	hasSimilar := false
-	for _, r := range results {
-		if r.TaskID != task.ID {
-			hasSimilar = true
-			break
-		}
-	}
-
-	if !hasSimilar {
-		return ""
-	}
-
-	// Just return a hint - Claude can use MCP tools to look up details
-	return `## Past Task Reference
-
-Similar tasks have been completed in this project before. If you need to reference how similar work was done, use the workflow_search_tasks tool to find relevant past tasks, then workflow_show_task to get details.
-
-`
 }
 
 // getConversationHistory builds a context section from previous task runs.
