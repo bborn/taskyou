@@ -1927,14 +1927,22 @@ func (e *Executor) runClaude(ctx context.Context, task *db.Task, workDir, prompt
 	}
 	// Check for existing Claude session to resume instead of starting fresh
 	// Only use stored session ID - no file-based fallback to avoid cross-task contamination
+	// Validate session file exists before attempting resume
 	var script string
 	existingSessionID := task.ClaudeSessionID
 	envPrefix := claudeEnvPrefix(paths.configDir)
-	if existingSessionID != "" {
+	if existingSessionID != "" && ClaudeSessionExists(existingSessionID, workDir, paths.configDir) {
 		e.logLine(task.ID, "system", fmt.Sprintf("Resuming existing session %s", existingSessionID))
 		script = fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %sclaude %s--chrome --resume %s "$(cat %q)"`,
 			task.ID, sessionID, task.Port, task.WorktreePath, envPrefix, dangerousFlag, existingSessionID, promptFile.Name())
 	} else {
+		if existingSessionID != "" {
+			e.logLine(task.ID, "system", fmt.Sprintf("Session %s no longer exists, starting fresh", existingSessionID))
+			// Clear the stale session ID
+			if err := e.db.UpdateTaskClaudeSessionID(task.ID, ""); err != nil {
+				e.logger.Warn("failed to clear stale session ID", "task", task.ID, "error", err)
+			}
+		}
 		script = fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %sclaude %s--chrome "$(cat %q)"`,
 			task.ID, sessionID, task.Port, task.WorktreePath, envPrefix, dangerousFlag, promptFile.Name())
 	}
@@ -1991,16 +1999,25 @@ func (e *Executor) runClaude(ctx context.Context, task *db.Task, workDir, prompt
 // runClaudeResume resumes a previous Claude session with feedback.
 // If no previous session exists, starts fresh with the full prompt + feedback.
 func (e *Executor) runClaudeResume(ctx context.Context, task *db.Task, workDir, prompt, feedback string) execResult {
+	paths := e.claudePathsForProject(task.Project)
+
 	// Only use stored session ID - no file-based fallback to avoid cross-task contamination
+	// Validate session file exists before attempting resume
 	claudeSessionID := task.ClaudeSessionID
-	if claudeSessionID == "" {
-		e.logLine(task.ID, "system", "No previous session found, starting fresh")
+	if claudeSessionID == "" || !ClaudeSessionExists(claudeSessionID, workDir, paths.configDir) {
+		if claudeSessionID != "" {
+			e.logLine(task.ID, "system", fmt.Sprintf("Session %s no longer exists, starting fresh", claudeSessionID))
+			// Clear the stale session ID
+			if err := e.db.UpdateTaskClaudeSessionID(task.ID, ""); err != nil {
+				e.logger.Warn("failed to clear stale session ID", "task", task.ID, "error", err)
+			}
+		} else {
+			e.logLine(task.ID, "system", "No previous session found, starting fresh")
+		}
 		// Build a combined prompt with the feedback included
 		fullPrompt := prompt + "\n\n## User Feedback\n\n" + feedback
 		return e.runClaude(ctx, task, workDir, fullPrompt)
 	}
-
-	paths := e.claudePathsForProject(task.Project)
 
 	e.logLine(task.ID, "system", fmt.Sprintf("Resuming session %s", claudeSessionID))
 
@@ -2165,6 +2182,16 @@ func (e *Executor) resumeClaudeDangerous(task *db.Task, workDir string) bool {
 		return false
 	}
 
+	// Validate session file exists before attempting resume
+	if !ClaudeSessionExists(claudeSessionID, workDir, paths.configDir) {
+		e.logLine(taskID, "system", fmt.Sprintf("Session %s no longer exists - cannot resume in dangerous mode", claudeSessionID))
+		// Clear the stale session ID
+		if err := e.db.UpdateTaskClaudeSessionID(taskID, ""); err != nil {
+			e.logger.Warn("failed to clear stale session ID", "task", taskID, "error", err)
+		}
+		return false
+	}
+
 	// Log the action
 	e.logLine(taskID, "system", "Restarting Claude with --dangerously-skip-permissions")
 
@@ -2312,6 +2339,16 @@ func (e *Executor) resumeClaudeSafe(task *db.Task, workDir string) bool {
 		return false
 	}
 
+	// Validate session file exists before attempting resume
+	if !ClaudeSessionExists(claudeSessionID, workDir, paths.configDir) {
+		e.logLine(taskID, "system", fmt.Sprintf("Session %s no longer exists - cannot resume in safe mode", claudeSessionID))
+		// Clear the stale session ID
+		if err := e.db.UpdateTaskClaudeSessionID(taskID, ""); err != nil {
+			e.logger.Warn("failed to clear stale session ID", "task", taskID, "error", err)
+		}
+		return false
+	}
+
 	// Log the action
 	e.logLine(taskID, "system", "Restarting Claude in safe mode (permissions enabled)")
 
@@ -2418,6 +2455,16 @@ func (e *Executor) resumeCodexWithMode(task *db.Task, workDir string, dangerousM
 		return false
 	}
 
+	// Validate session file exists before attempting resume
+	if !codexSessionExists(sessionID) {
+		e.logLine(taskID, "system", fmt.Sprintf("Session %s no longer exists - cannot toggle mode", sessionID))
+		// Clear the stale session ID
+		if err := e.db.UpdateTaskClaudeSessionID(taskID, ""); err != nil {
+			e.logger.Warn("failed to clear stale session ID", "task", taskID, "error", err)
+		}
+		return false
+	}
+
 	modeStr := "safe"
 	if dangerousMode {
 		modeStr = "dangerous"
@@ -2499,6 +2546,16 @@ func (e *Executor) resumeGeminiWithMode(task *db.Task, workDir string, dangerous
 	sessionID := task.ClaudeSessionID
 	if sessionID == "" {
 		e.logLine(taskID, "system", "No Gemini session found - cannot toggle mode")
+		return false
+	}
+
+	// Validate session file exists before attempting resume
+	if !geminiSessionExists(sessionID) {
+		e.logLine(taskID, "system", fmt.Sprintf("Session %s no longer exists - cannot toggle mode", sessionID))
+		// Clear the stale session ID
+		if err := e.db.UpdateTaskClaudeSessionID(taskID, ""); err != nil {
+			e.logger.Warn("failed to clear stale session ID", "task", taskID, "error", err)
+		}
 		return false
 	}
 
@@ -2633,6 +2690,21 @@ func findClaudeSessionIDImpl(workDir, configDir string) string {
 	}
 
 	return latestSession
+}
+
+// ClaudeSessionExists checks if a Claude session file exists for the given session ID and workDir.
+func ClaudeSessionExists(sessionID, workDir, configDir string) bool {
+	if sessionID == "" {
+		return false
+	}
+
+	baseDir := ResolveClaudeConfigDir(configDir)
+	escapedPath := strings.ReplaceAll(workDir, "/", "-")
+	escapedPath = strings.ReplaceAll(escapedPath, ".", "-")
+	sessionFile := filepath.Join(baseDir, "projects", escapedPath, sessionID+".jsonl")
+
+	_, err := os.Stat(sessionFile)
+	return err == nil
 }
 
 // RenameClaudeSession renames the Claude session for a given workDir to the new name.
