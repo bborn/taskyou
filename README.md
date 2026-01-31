@@ -181,7 +181,6 @@ The skill works with Claude Code, Codex, Gemini, or any agent that can execute s
 | `e` | Edit task |
 | `x` | Execute task |
 | `r` | Retry with feedback |
-| `R` | Resume executor session |
 | `S` | Change task status |
 | `t` | Pin/unpin task |
 | `!` | Toggle dangerous/safe mode |
@@ -297,7 +296,6 @@ Each task tracks its executor state in the database:
 #### Managing Executor Processes
 
 **Inside the TUI:**
-- Press `R` on a task to resume its executor session (Claude only - requires existing session)
 - The green dot (`●`) indicates tasks with active processes
 
 **From the command line:**
