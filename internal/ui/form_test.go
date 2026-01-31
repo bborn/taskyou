@@ -60,7 +60,7 @@ func TestCalculateBodyHeight(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			m := NewFormModel(nil, tt.screenWidth, tt.screenHeight, "")
+			m := NewFormModel(nil, tt.screenWidth, tt.screenHeight, "", nil)
 			m.bodyInput.SetValue(tt.content)
 
 			height := m.calculateBodyHeight()
@@ -76,7 +76,7 @@ func TestCalculateBodyHeight(t *testing.T) {
 }
 
 func TestUpdateBodyHeightSetsHeight(t *testing.T) {
-	m := NewFormModel(nil, 100, 50, "")
+	m := NewFormModel(nil, 100, 50, "", nil)
 
 	// Initially should have minimum height of 8
 	m.updateBodyHeight()
@@ -98,7 +98,7 @@ func TestMaxHeightIs50PercentOfScreen(t *testing.T) {
 
 	for _, screenHeight := range screenHeights {
 		t.Run("screen_height_"+string(rune('0'+screenHeight/10)), func(t *testing.T) {
-			m := NewFormModel(nil, 100, screenHeight, "")
+			m := NewFormModel(nil, 100, screenHeight, "", nil)
 
 			// Add lots of content to trigger max height
 			m.bodyInput.SetValue(strings.Repeat("line\n", 100))
@@ -147,7 +147,7 @@ func TestRenderBodyScrollbar(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			m := NewFormModel(nil, 100, 50, "")
+			m := NewFormModel(nil, 100, 50, "", nil)
 			m.bodyInput.SetValue(tt.content)
 			m.bodyInput.SetHeight(tt.visibleLines)
 
@@ -176,7 +176,7 @@ func TestRenderBodyScrollbar(t *testing.T) {
 }
 
 func TestScrollbarAppearsInFormView(t *testing.T) {
-	m := NewFormModel(nil, 100, 50, "")
+	m := NewFormModel(nil, 100, 50, "", nil)
 
 	// Add enough content to trigger scrollbar
 	m.bodyInput.SetValue(strings.Repeat("line\n", 20))
@@ -192,7 +192,7 @@ func TestScrollbarAppearsInFormView(t *testing.T) {
 }
 
 func TestAttachmentRemovalFlow(t *testing.T) {
-	m := NewFormModel(nil, 100, 50, "")
+	m := NewFormModel(nil, 100, 50, "", nil)
 	m.focused = FieldAttachments
 	m.attachments = []string{"/tmp/spec.md", "/tmp/log.txt", "/tmp/image.png"}
 	m.attachmentsInput.SetValue("")
@@ -318,7 +318,7 @@ func TestMoveCursorWordBackward(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			m := NewFormModel(nil, 100, 50, "")
+			m := NewFormModel(nil, 100, 50, "", nil)
 			m.bodyInput.SetValue(tt.content)
 			m.bodyInput.SetCursor(tt.initialCursor)
 			m.focused = FieldBody
@@ -368,7 +368,7 @@ func TestMoveCursorWordForward(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			m := NewFormModel(nil, 100, 50, "")
+			m := NewFormModel(nil, 100, 50, "", nil)
 			m.bodyInput.SetValue(tt.content)
 			m.bodyInput.SetCursor(tt.initialCursor)
 			m.focused = FieldBody
@@ -415,7 +415,7 @@ func TestMoveCursorParagraphBackward(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			m := NewFormModel(nil, 100, 50, "")
+			m := NewFormModel(nil, 100, 50, "", nil)
 			m.bodyInput.SetValue(tt.content)
 			m.bodyInput.Focus()
 			m.bodyInput.SetCursor(tt.initialCursor)
@@ -463,7 +463,7 @@ func TestMoveCursorParagraphForward(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			m := NewFormModel(nil, 100, 50, "")
+			m := NewFormModel(nil, 100, 50, "", nil)
 			m.bodyInput.SetValue(tt.content)
 			m.bodyInput.Focus()
 			m.bodyInput.SetCursor(tt.initialCursor)
@@ -502,7 +502,7 @@ func TestMoveTitleCursorWordBackward(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			m := NewFormModel(nil, 100, 50, "")
+			m := NewFormModel(nil, 100, 50, "", nil)
 			m.titleInput.SetValue(tt.content)
 			m.titleInput.SetCursor(tt.initialCursor)
 			m.focused = FieldTitle
@@ -540,7 +540,7 @@ func TestMoveTitleCursorWordForward(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			m := NewFormModel(nil, 100, 50, "")
+			m := NewFormModel(nil, 100, 50, "", nil)
 			m.titleInput.SetValue(tt.content)
 			m.titleInput.SetCursor(tt.initialCursor)
 			m.focused = FieldTitle
@@ -602,7 +602,7 @@ func TestHasFormData(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			m := NewFormModel(nil, 100, 50, "")
+			m := NewFormModel(nil, 100, 50, "", nil)
 			m.titleInput.SetValue(tt.title)
 			m.bodyInput.SetValue(tt.body)
 			m.scheduleInput.SetValue(tt.schedule)
@@ -615,7 +615,7 @@ func TestHasFormData(t *testing.T) {
 }
 
 func TestEscapeWithEmptyFormCancelsImmediately(t *testing.T) {
-	m := NewFormModel(nil, 100, 50, "")
+	m := NewFormModel(nil, 100, 50, "", nil)
 
 	// Press escape on empty form
 	escMsg := tea.KeyMsg{Type: tea.KeyEscape}
@@ -632,7 +632,7 @@ func TestEscapeWithEmptyFormCancelsImmediately(t *testing.T) {
 }
 
 func TestEscapeWithDataShowsConfirmation(t *testing.T) {
-	m := NewFormModel(nil, 100, 50, "")
+	m := NewFormModel(nil, 100, 50, "", nil)
 	m.titleInput.SetValue("Some task title")
 
 	// Press escape with data in form
@@ -650,7 +650,7 @@ func TestEscapeWithDataShowsConfirmation(t *testing.T) {
 }
 
 func TestConfirmationYesCancelsForm(t *testing.T) {
-	m := NewFormModel(nil, 100, 50, "")
+	m := NewFormModel(nil, 100, 50, "", nil)
 	m.titleInput.SetValue("Some task title")
 	m.showCancelConfirm = true
 
@@ -665,7 +665,7 @@ func TestConfirmationYesCancelsForm(t *testing.T) {
 }
 
 func TestConfirmationNoCancelsConfirmation(t *testing.T) {
-	m := NewFormModel(nil, 100, 50, "")
+	m := NewFormModel(nil, 100, 50, "", nil)
 	m.titleInput.SetValue("Some task title")
 	m.showCancelConfirm = true
 
@@ -683,7 +683,7 @@ func TestConfirmationNoCancelsConfirmation(t *testing.T) {
 }
 
 func TestConfirmationEscCancelsConfirmation(t *testing.T) {
-	m := NewFormModel(nil, 100, 50, "")
+	m := NewFormModel(nil, 100, 50, "", nil)
 	m.titleInput.SetValue("Some task title")
 	m.showCancelConfirm = true
 
@@ -701,7 +701,7 @@ func TestConfirmationEscCancelsConfirmation(t *testing.T) {
 }
 
 func TestEscapeDismissesGhostTextFirst(t *testing.T) {
-	m := NewFormModel(nil, 100, 50, "")
+	m := NewFormModel(nil, 100, 50, "", nil)
 	m.titleInput.SetValue("Some task title")
 	m.ghostText = "suggestion text"
 	m.ghostFullText = "Some task title suggestion text"
@@ -724,7 +724,7 @@ func TestEscapeDismissesGhostTextFirst(t *testing.T) {
 }
 
 func TestEscapeDismissesTaskRefAutocompleteFirst(t *testing.T) {
-	m := NewFormModel(nil, 100, 50, "")
+	m := NewFormModel(nil, 100, 50, "", nil)
 	m.titleInput.SetValue("Some task title")
 	m.showTaskRefAutocomplete = true
 	m.taskRefAutocomplete = NewTaskRefAutocompleteModel(nil, 80)
@@ -742,12 +742,216 @@ func TestEscapeDismissesTaskRefAutocompleteFirst(t *testing.T) {
 }
 
 func TestConfirmationMessageAppearsInView(t *testing.T) {
-	m := NewFormModel(nil, 100, 50, "")
+	m := NewFormModel(nil, 100, 50, "", nil)
 	m.showCancelConfirm = true
 
 	view := m.View()
 
 	if !strings.Contains(view, "Discard changes?") {
 		t.Error("expected confirmation message in view")
+	}
+}
+
+func TestBuildExecutorList(t *testing.T) {
+	tests := []struct {
+		name               string
+		allExecutors       []string
+		availableExecutors []string
+		want               []string
+	}{
+		{
+			name:               "all available",
+			allExecutors:       []string{"claude", "codex", "gemini"},
+			availableExecutors: []string{"claude", "codex", "gemini"},
+			want:               []string{"claude", "codex", "gemini"},
+		},
+		{
+			name:               "none available",
+			allExecutors:       []string{"claude", "codex", "gemini"},
+			availableExecutors: []string{},
+			want:               []string{"claude (not installed)", "codex (not installed)", "gemini (not installed)"},
+		},
+		{
+			name:               "some available",
+			allExecutors:       []string{"claude", "codex", "gemini"},
+			availableExecutors: []string{"claude"},
+			want:               []string{"claude", "codex (not installed)", "gemini (not installed)"},
+		},
+		{
+			name:               "nil available",
+			allExecutors:       []string{"claude", "codex"},
+			availableExecutors: nil,
+			want:               []string{"claude (not installed)", "codex (not installed)"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := buildExecutorList(tt.allExecutors, tt.availableExecutors)
+			if len(got) != len(tt.want) {
+				t.Fatalf("buildExecutorList() = %v, want %v", got, tt.want)
+			}
+			for i, v := range got {
+				if v != tt.want[i] {
+					t.Errorf("buildExecutorList()[%d] = %q, want %q", i, v, tt.want[i])
+				}
+			}
+		})
+	}
+}
+
+func TestCleanExecutorName(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{"claude", "claude"},
+		{"claude (not installed)", "claude"},
+		{"codex", "codex"},
+		{"codex (not installed)", "codex"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			got := cleanExecutorName(tt.input)
+			if got != tt.want {
+				t.Errorf("cleanExecutorName(%q) = %q, want %q", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestIsExecutorAvailable(t *testing.T) {
+	tests := []struct {
+		input string
+		want  bool
+	}{
+		{"claude", true},
+		{"claude (not installed)", false},
+		{"codex", true},
+		{"codex (not installed)", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			got := isExecutorAvailable(tt.input)
+			if got != tt.want {
+				t.Errorf("isExecutorAvailable(%q) = %v, want %v", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestFormWithNoAvailableExecutors(t *testing.T) {
+	// Test that form properly handles no available executors
+	m := NewFormModel(nil, 100, 50, "", nil)
+
+	// All executors should be marked as not installed
+	for _, e := range m.executors {
+		if !strings.Contains(e, "(not installed)") {
+			t.Errorf("executor %q should be marked as not installed when no available executors", e)
+		}
+	}
+}
+
+func TestFormWithSomeAvailableExecutors(t *testing.T) {
+	// Test that form properly filters available executors
+	m := NewFormModel(nil, 100, 50, "", []string{"claude"})
+
+	// Find claude - should not have "(not installed)"
+	foundClaude := false
+	for _, e := range m.executors {
+		if strings.HasPrefix(e, "claude") {
+			foundClaude = true
+			if strings.Contains(e, "(not installed)") {
+				t.Error("claude should NOT be marked as not installed when it's available")
+			}
+		}
+	}
+	if !foundClaude {
+		t.Error("claude should be in the executor list")
+	}
+
+	// Other executors should have "(not installed)"
+	for _, e := range m.executors {
+		if strings.HasPrefix(e, "codex") && !strings.Contains(e, "(not installed)") {
+			t.Error("codex should be marked as not installed")
+		}
+	}
+}
+
+func TestGetDBTaskCleansExecutorName(t *testing.T) {
+	m := NewFormModel(nil, 100, 50, "", nil)
+	m.titleInput.SetValue("Test task")
+	m.executor = "claude (not installed)"
+
+	task := m.GetDBTask()
+	if task.Executor != "claude" {
+		t.Errorf("GetDBTask() executor = %q, want %q", task.Executor, "claude")
+	}
+}
+
+func TestFindFirstAvailableExecutor(t *testing.T) {
+	tests := []struct {
+		name      string
+		executors []string
+		wantIdx   int
+		wantName  string
+	}{
+		{
+			name:      "first is available",
+			executors: []string{"claude", "codex (not installed)"},
+			wantIdx:   0,
+			wantName:  "claude",
+		},
+		{
+			name:      "second is available",
+			executors: []string{"claude (not installed)", "codex"},
+			wantIdx:   1,
+			wantName:  "codex",
+		},
+		{
+			name:      "none available",
+			executors: []string{"claude (not installed)", "codex (not installed)"},
+			wantIdx:   -1,
+			wantName:  "",
+		},
+		{
+			name:      "all available",
+			executors: []string{"claude", "codex", "gemini"},
+			wantIdx:   0,
+			wantName:  "claude",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotIdx, gotName := findFirstAvailableExecutor(tt.executors)
+			if gotIdx != tt.wantIdx || gotName != tt.wantName {
+				t.Errorf("findFirstAvailableExecutor() = (%d, %q), want (%d, %q)",
+					gotIdx, gotName, tt.wantIdx, tt.wantName)
+			}
+		})
+	}
+}
+
+func TestFormDefaultsToAvailableExecutor(t *testing.T) {
+	// When claude is available, form should default to claude
+	m := NewFormModel(nil, 100, 50, "", []string{"claude"})
+
+	if m.executor != "claude" {
+		t.Errorf("expected form to default to 'claude', got %q", m.executor)
+	}
+	if m.executorIdx != 0 {
+		t.Errorf("expected executorIdx to be 0, got %d", m.executorIdx)
+	}
+}
+
+func TestFormDefaultsToFirstAvailableExecutor(t *testing.T) {
+	// When only codex is available, form should default to codex
+	m := NewFormModel(nil, 100, 50, "", []string{"codex"})
+
+	if m.executor != "codex" {
+		t.Errorf("expected form to default to 'codex', got %q", m.executor)
 	}
 }

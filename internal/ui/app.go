@@ -344,6 +344,9 @@ type AppModel struct {
 	filterActive bool   // Whether filter mode is active (typing in filter)
 	filterText   string // Current filter text (persists when not typing)
 
+	// Available executors (cached on startup)
+	availableExecutors []string
+
 	// Window size
 	width  int
 	height int
@@ -420,22 +423,29 @@ func NewAppModel(database *db.DB, exec *executor.Executor, workingDir string) *A
 	filterInput.Placeholder = "Filter by project, type, or text..."
 	filterInput.CharLimit = 50
 
+	// Get available executors for form filtering and warnings
+	var availableExecutors []string
+	if exec != nil {
+		availableExecutors = exec.AvailableExecutors()
+	}
+
 	model := &AppModel{
-		db:                database,
-		executor:          exec,
-		workingDir:        workingDir,
-		keys:              DefaultKeyMap(),
-		help:              h,
-		currentView:       ViewDashboard,
-		kanban:            kanban,
-		loading:           true,
-		prevStatuses:      make(map[int64]string),
-		tasksNeedingInput: make(map[int64]bool),
-		watcher:           watcher,
-		dbChangeCh:        dbChangeCh,
-		prCache:           github.NewPRCache(),
-		filterInput:       filterInput,
-		filterText:        "",
+		db:                 database,
+		executor:           exec,
+		workingDir:         workingDir,
+		keys:               DefaultKeyMap(),
+		help:               h,
+		currentView:        ViewDashboard,
+		kanban:             kanban,
+		loading:            true,
+		prevStatuses:       make(map[int64]string),
+		tasksNeedingInput:  make(map[int64]bool),
+		watcher:            watcher,
+		dbChangeCh:         dbChangeCh,
+		prCache:            github.NewPRCache(),
+		filterInput:        filterInput,
+		filterText:         "",
+		availableExecutors: availableExecutors,
 	}
 
 	model.keys.ResumeClaude.SetHelp("R", fmt.Sprintf("resume %s", model.executorDisplayName()))
@@ -1030,6 +1040,17 @@ func (m *AppModel) viewNewTaskConfirm() string {
 func (m *AppModel) viewDashboard() string {
 	var headerParts []string
 
+	// Show warning banner if no executors are available
+	if len(m.availableExecutors) == 0 {
+		warnStyle := lipgloss.NewStyle().
+			Background(lipgloss.Color("#FFCC00")). // Yellow background
+			Foreground(lipgloss.Color("#000000")).
+			Bold(true).
+			Padding(0, 2).
+			Width(m.width)
+		headerParts = append(headerParts, warnStyle.Render("⚠ No AI executor installed. See: https://code.claude.com/docs/en/overview"))
+	}
+
 	// Show global dangerous mode banner if the entire system is in dangerous mode
 	if IsGlobalDangerousMode() {
 		dangerStyle := lipgloss.NewStyle().
@@ -1220,7 +1241,7 @@ func (m *AppModel) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 
 	case key.Matches(msg, m.keys.New):
-		m.newTaskForm = NewFormModel(m.db, m.width, m.height, m.workingDir)
+		m.newTaskForm = NewFormModel(m.db, m.width, m.height, m.workingDir, m.availableExecutors)
 		m.previousView = m.currentView
 		m.currentView = ViewNewTask
 		return m, m.newTaskForm.Init()
@@ -1606,7 +1627,7 @@ func (m *AppModel) updateDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 	if key.Matches(keyMsg, m.keys.Edit) && m.selectedTask != nil {
 		m.editingTask = m.selectedTask
-		m.editTaskForm = NewEditFormModel(m.db, m.selectedTask, m.width, m.height)
+		m.editTaskForm = NewEditFormModel(m.db, m.selectedTask, m.width, m.height, m.availableExecutors)
 		m.previousView = m.currentView
 		m.currentView = ViewEditTask
 		return m, m.editTaskForm.Init()
