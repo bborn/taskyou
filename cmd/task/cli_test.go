@@ -314,6 +314,188 @@ func TestCLIDeleteTask(t *testing.T) {
 	}
 }
 
+// TestCLIMoveTask tests moving a task to a different project
+func TestCLIMoveTask(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	database, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer database.Close()
+	defer os.Remove(dbPath)
+
+	// Create source and target projects
+	srcProjectDir := filepath.Join(tmpDir, "src-project")
+	tgtProjectDir := filepath.Join(tmpDir, "tgt-project")
+	os.MkdirAll(srcProjectDir, 0755)
+	os.MkdirAll(tgtProjectDir, 0755)
+
+	if err := database.CreateProject(&db.Project{Name: "src-project", Path: srcProjectDir}); err != nil {
+		t.Fatalf("failed to create src-project: %v", err)
+	}
+	if err := database.CreateProject(&db.Project{Name: "tgt-project", Path: tgtProjectDir}); err != nil {
+		t.Fatalf("failed to create tgt-project: %v", err)
+	}
+
+	// Test 1: Basic move preserves task content
+	t.Run("move preserves task content", func(t *testing.T) {
+		task := &db.Task{
+			Title:   "Task to move",
+			Body:    "Task description",
+			Status:  db.StatusBacklog,
+			Type:    db.TypeWriting,
+			Tags:    "tag1,tag2",
+			Project: "src-project",
+			Pinned:  true,
+		}
+		if err := database.CreateTask(task); err != nil {
+			t.Fatalf("failed to create task: %v", err)
+		}
+		oldID := task.ID
+
+		// Move the task
+		newID, err := moveTask(database, task, "tgt-project")
+		if err != nil {
+			t.Fatalf("moveTask() error = %v", err)
+		}
+
+		// Verify old task is deleted
+		oldTask, err := database.GetTask(oldID)
+		if err != nil {
+			t.Fatalf("GetTask() error = %v", err)
+		}
+		if oldTask != nil {
+			t.Error("expected old task to be deleted")
+		}
+
+		// Verify new task exists with correct content
+		newTask, err := database.GetTask(newID)
+		if err != nil {
+			t.Fatalf("GetTask() error = %v", err)
+		}
+		if newTask == nil {
+			t.Fatal("expected new task to exist")
+		}
+		if newTask.Title != "Task to move" {
+			t.Errorf("Title = %v, want 'Task to move'", newTask.Title)
+		}
+		if newTask.Body != "Task description" {
+			t.Errorf("Body = %v, want 'Task description'", newTask.Body)
+		}
+		if newTask.Type != db.TypeWriting {
+			t.Errorf("Type = %v, want 'writing'", newTask.Type)
+		}
+		if newTask.Tags != "tag1,tag2" {
+			t.Errorf("Tags = %v, want 'tag1,tag2'", newTask.Tags)
+		}
+		if newTask.Project != "tgt-project" {
+			t.Errorf("Project = %v, want 'tgt-project'", newTask.Project)
+		}
+		if !newTask.Pinned {
+			t.Error("expected Pinned to be true")
+		}
+	})
+
+	// Test 2: Move resets execution-related fields
+	t.Run("move resets execution fields", func(t *testing.T) {
+		task := &db.Task{
+			Title:           "Task with execution state",
+			Status:          db.StatusBacklog,
+			Type:            db.TypeCode,
+			Project:         "src-project",
+			WorktreePath:    "/some/path",
+			BranchName:      "task/123-branch",
+			Port:            3100,
+			ClaudeSessionID: "session-123",
+			DaemonSession:   "daemon-123",
+		}
+		if err := database.CreateTask(task); err != nil {
+			t.Fatalf("failed to create task: %v", err)
+		}
+
+		newID, err := moveTask(database, task, "tgt-project")
+		if err != nil {
+			t.Fatalf("moveTask() error = %v", err)
+		}
+
+		newTask, err := database.GetTask(newID)
+		if err != nil || newTask == nil {
+			t.Fatalf("failed to get new task: %v", err)
+		}
+
+		// Verify execution fields are reset
+		if newTask.WorktreePath != "" {
+			t.Errorf("WorktreePath = %v, want ''", newTask.WorktreePath)
+		}
+		if newTask.BranchName != "" {
+			t.Errorf("BranchName = %v, want ''", newTask.BranchName)
+		}
+		if newTask.Port != 0 {
+			t.Errorf("Port = %v, want 0", newTask.Port)
+		}
+		if newTask.ClaudeSessionID != "" {
+			t.Errorf("ClaudeSessionID = %v, want ''", newTask.ClaudeSessionID)
+		}
+		if newTask.DaemonSession != "" {
+			t.Errorf("DaemonSession = %v, want ''", newTask.DaemonSession)
+		}
+	})
+
+	// Test 3: Move resets status for processing/blocked tasks
+	t.Run("move resets processing status to backlog", func(t *testing.T) {
+		task := &db.Task{
+			Title:   "Processing task",
+			Status:  db.StatusProcessing,
+			Type:    db.TypeCode,
+			Project: "src-project",
+		}
+		if err := database.CreateTask(task); err != nil {
+			t.Fatalf("failed to create task: %v", err)
+		}
+
+		newID, err := moveTask(database, task, "tgt-project")
+		if err != nil {
+			t.Fatalf("moveTask() error = %v", err)
+		}
+
+		newTask, err := database.GetTask(newID)
+		if err != nil || newTask == nil {
+			t.Fatalf("failed to get new task: %v", err)
+		}
+		if newTask.Status != db.StatusBacklog {
+			t.Errorf("Status = %v, want 'backlog' (should reset from processing)", newTask.Status)
+		}
+	})
+
+	// Test 4: Move preserves queued status
+	t.Run("move preserves queued status", func(t *testing.T) {
+		task := &db.Task{
+			Title:   "Queued task",
+			Status:  db.StatusQueued,
+			Type:    db.TypeCode,
+			Project: "src-project",
+		}
+		if err := database.CreateTask(task); err != nil {
+			t.Fatalf("failed to create task: %v", err)
+		}
+
+		newID, err := moveTask(database, task, "tgt-project")
+		if err != nil {
+			t.Fatalf("moveTask() error = %v", err)
+		}
+
+		newTask, err := database.GetTask(newID)
+		if err != nil || newTask == nil {
+			t.Fatalf("failed to get new task: %v", err)
+		}
+		if newTask.Status != db.StatusQueued {
+			t.Errorf("Status = %v, want 'queued' (should preserve)", newTask.Status)
+		}
+	})
+}
+
 // TestCLIRetryTask tests retrying a blocked task
 func TestCLIRetryTask(t *testing.T) {
 	tmpDir := t.TempDir()
