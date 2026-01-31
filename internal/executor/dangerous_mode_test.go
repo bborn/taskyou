@@ -73,6 +73,13 @@ func TestExecutorInterfaceImplementation(t *testing.T) {
 			supportsDangerousMode: false, // OpenCode does not support dangerous mode
 			dangerousFlag:         "",
 		},
+		{
+			name:                  "Pi executor",
+			executorName:          db.ExecutorPi,
+			supportsSessionResume: true,  // Pi supports session resume via --continue
+			supportsDangerousMode: false, // Pi does not support dangerous mode
+			dangerousFlag:         "",
+		},
 	}
 
 	for _, tt := range tests {

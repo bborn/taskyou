@@ -101,6 +101,8 @@ func formatExecutorDisplayName(slug, raw string) string {
 		return defaultExecutorName
 	case "gemini":
 		return "Gemini"
+	case "pi":
+		return "Pi"
 	}
 	trimmed := strings.TrimSpace(raw)
 	if trimmed == "" {
@@ -150,6 +152,7 @@ func New(database *db.DB, cfg *config.Config) *Executor {
 	e.executorFactory.Register(NewGeminiExecutor(e))
 	e.executorFactory.Register(NewOpenClawExecutor(e))
 	e.executorFactory.Register(NewOpenCodeExecutor(e))
+	e.executorFactory.Register(NewPiExecutor(e))
 
 	return e
 }
@@ -181,6 +184,7 @@ func NewWithLogging(database *db.DB, cfg *config.Config, w io.Writer) *Executor 
 	e.executorFactory.Register(NewGeminiExecutor(e))
 	e.executorFactory.Register(NewOpenClawExecutor(e))
 	e.executorFactory.Register(NewOpenCodeExecutor(e))
+	e.executorFactory.Register(NewPiExecutor(e))
 
 	return e
 }
@@ -4298,6 +4302,329 @@ func PurgeStaleClaudeProjectConfigs(configPath string) (int, error) {
 	}
 
 	return removed, nil
+}
+
+// ---- Pi Executor Support ----
+
+// runPi runs a task using Pi coding agent in a tmux window for interactive access.
+func (e *Executor) runPi(ctx context.Context, task *db.Task, workDir, prompt string) execResult {
+	// Check if tmux is available
+	if _, err := exec.LookPath("tmux"); err != nil {
+		e.logLine(task.ID, "error", "tmux is not installed - required for task execution")
+		return execResult{Message: "tmux is not installed"}
+	}
+
+	// Check if pi is available
+	if _, err := exec.LookPath("pi"); err != nil {
+		e.logLine(task.ID, "error", "pi is not installed")
+		return execResult{Message: "pi is not installed"}
+	}
+
+	// Ensure task-daemon session exists
+	daemonSession, err := ensureTmuxDaemon()
+	if err != nil {
+		e.logger.Error("could not create task-daemon session", "error", err)
+		e.logLine(task.ID, "error", fmt.Sprintf("Failed to create tmux daemon: %s", err.Error()))
+		return execResult{Message: fmt.Sprintf("failed to create tmux daemon: %s", err.Error())}
+	}
+
+	windowName := TmuxWindowName(task.ID)
+	windowTarget := fmt.Sprintf("%s:%s", daemonSession, windowName)
+
+	// Kill ALL existing windows with this name (handles duplicates)
+	killAllWindowsByNameAllSessions(windowName)
+
+	// Create a temp file for the prompt (avoids quoting issues)
+	promptFile, err := os.CreateTemp("", "task-prompt-*.txt")
+	if err != nil {
+		e.logger.Error("could not create temp file", "error", err)
+		e.logLine(task.ID, "error", fmt.Sprintf("Failed to create temp file: %s", err.Error()))
+		return execResult{Message: fmt.Sprintf("failed to create temp file: %s", err.Error())}
+	}
+	promptFile.WriteString(prompt)
+	promptFile.Close()
+	defer os.Remove(promptFile.Name())
+
+	// Create a temp file for system instructions (passed via --append-system-prompt)
+	systemFile, err := os.CreateTemp("", "task-system-*.txt")
+	if err != nil {
+		e.logger.Error("could not create system file", "error", err)
+		e.logLine(task.ID, "error", fmt.Sprintf("Failed to create system file: %s", err.Error()))
+		return execResult{Message: fmt.Sprintf("failed to create system file: %s", err.Error())}
+	}
+	systemFile.WriteString(e.buildSystemInstructions())
+	systemFile.Close()
+	defer os.Remove(systemFile.Name())
+
+	// Script that runs pi interactively with worktree environment variables
+	sessionID := os.Getenv("WORKTREE_SESSION_ID")
+	if sessionID == "" {
+		sessionID = fmt.Sprintf("%d", os.Getpid())
+	}
+
+	// Build system prompt flag
+	systemPromptFlag := fmt.Sprintf(`--append-system-prompt %q `, systemFile.Name())
+
+	// Check for existing Pi session to resume instead of starting fresh
+	existingSessionPath := task.ClaudeSessionID
+	var script string
+	if existingSessionPath != "" && piSessionExists(existingSessionPath) {
+		e.logLine(task.ID, "system", fmt.Sprintf("Resuming existing session %s", filepath.Base(existingSessionPath)))
+		script = fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q pi %s--continue "$(cat %q)"`,
+			task.ID, sessionID, task.Port, task.WorktreePath, systemPromptFlag, promptFile.Name())
+	} else {
+		if existingSessionPath != "" {
+			e.logLine(task.ID, "system", fmt.Sprintf("Session %s no longer exists, starting fresh", filepath.Base(existingSessionPath)))
+			// Clear the stale session ID
+			if err := e.db.UpdateTaskClaudeSessionID(task.ID, ""); err != nil {
+				e.logger.Warn("failed to clear stale session ID", "task", task.ID, "error", err)
+			}
+		}
+		script = fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q pi %s"$(cat %q)"`,
+			task.ID, sessionID, task.Port, task.WorktreePath, systemPromptFlag, promptFile.Name())
+	}
+
+	// Create new window in task-daemon session (with retry logic for race conditions)
+	actualSession, tmuxErr := createTmuxWindow(daemonSession, windowName, workDir, script)
+	if tmuxErr != nil {
+		e.logger.Error("tmux new-window failed", "error", tmuxErr, "session", daemonSession)
+		e.logLine(task.ID, "error", fmt.Sprintf("Failed to create tmux window: %s", tmuxErr.Error()))
+		return execResult{Message: fmt.Sprintf("failed to create tmux window: %s", tmuxErr.Error())}
+	}
+
+	// Update windowTarget if session changed during retry
+	if actualSession != daemonSession {
+		windowTarget = fmt.Sprintf("%s:%s", actualSession, windowName)
+		daemonSession = actualSession
+	}
+
+	// Give tmux a moment to fully create the window and start the Pi process
+	time.Sleep(200 * time.Millisecond)
+
+	// Save which daemon session owns this task's window (for kill logic)
+	if err := e.db.UpdateTaskDaemonSession(task.ID, daemonSession); err != nil {
+		e.logger.Warn("failed to save daemon session", "task", task.ID, "error", err)
+	}
+
+	// Capture and store the window ID for reliable targeting
+	if windowID := getWindowID(daemonSession, windowName); windowID != "" {
+		if err := e.db.UpdateTaskWindowID(task.ID, windowID); err != nil {
+			e.logger.Warn("failed to save window ID", "task", task.ID, "error", err)
+		}
+	}
+
+	// Ensure shell pane exists alongside Pi pane with environment variables
+	e.ensureShellPane(windowTarget, workDir, task.ID, task.Port, task.WorktreePath, "")
+
+	// Configure tmux window with helpful status bar
+	e.configureTmuxWindow(windowTarget)
+
+	// Poll for output and completion
+	result := e.pollTmuxSession(ctx, task.ID, windowTarget)
+
+	return result
+}
+
+// runPiResume resumes a previous Pi session with feedback.
+func (e *Executor) runPiResume(ctx context.Context, task *db.Task, workDir, prompt, feedback string) execResult {
+	// Check for existing session
+	piSessionPath := task.ClaudeSessionID
+	if piSessionPath == "" || !piSessionExists(piSessionPath) {
+		if piSessionPath != "" {
+			e.logLine(task.ID, "system", fmt.Sprintf("Session %s no longer exists, starting fresh", filepath.Base(piSessionPath)))
+			// Clear the stale session ID
+			if err := e.db.UpdateTaskClaudeSessionID(task.ID, ""); err != nil {
+				e.logger.Warn("failed to clear stale session ID", "task", task.ID, "error", err)
+			}
+		} else {
+			e.logLine(task.ID, "system", "No previous session found, starting fresh")
+		}
+		// Build a combined prompt with the feedback included
+		fullPrompt := prompt + "\n\n## User Feedback\n\n" + feedback
+		return e.runPi(ctx, task, workDir, fullPrompt)
+	}
+
+	e.logLine(task.ID, "system", fmt.Sprintf("Resuming session %s", filepath.Base(piSessionPath)))
+
+	// Check if tmux is available
+	if _, err := exec.LookPath("tmux"); err != nil {
+		e.logLine(task.ID, "error", "tmux is not installed - required for task execution")
+		return execResult{Message: "tmux is not installed"}
+	}
+
+	// Ensure task-daemon session exists
+	daemonSession, err := ensureTmuxDaemon()
+	if err != nil {
+		e.logger.Error("could not create task-daemon session", "error", err)
+		e.logLine(task.ID, "error", fmt.Sprintf("Failed to create tmux daemon: %s", err.Error()))
+		return execResult{Message: fmt.Sprintf("failed to create tmux daemon: %s", err.Error())}
+	}
+
+	windowName := TmuxWindowName(task.ID)
+	windowTarget := fmt.Sprintf("%s:%s", daemonSession, windowName)
+
+	// Kill ALL existing windows with this name (handles duplicates)
+	killAllWindowsByNameAllSessions(windowName)
+
+	// Create a temp file for the feedback (avoids quoting issues)
+	feedbackFile, err := os.CreateTemp("", "task-feedback-*.txt")
+	if err != nil {
+		e.logger.Error("could not create temp file", "error", err)
+		e.logLine(task.ID, "error", fmt.Sprintf("Failed to create temp file: %s", err.Error()))
+		return execResult{Message: fmt.Sprintf("failed to create temp file: %s", err.Error())}
+	}
+	feedbackFile.WriteString(feedback)
+	feedbackFile.Close()
+	defer os.Remove(feedbackFile.Name())
+
+	// Create a temp file for system instructions
+	systemFile, err := os.CreateTemp("", "task-system-*.txt")
+	if err != nil {
+		e.logger.Error("could not create system file", "error", err)
+		e.logLine(task.ID, "error", fmt.Sprintf("Failed to create system file: %s", err.Error()))
+		return execResult{Message: fmt.Sprintf("failed to create system file: %s", err.Error())}
+	}
+	systemFile.WriteString(e.buildSystemInstructions())
+	systemFile.Close()
+	defer os.Remove(systemFile.Name())
+
+	// Script that resumes pi with session ID (interactive mode)
+	taskSessionID := os.Getenv("WORKTREE_SESSION_ID")
+	if taskSessionID == "" {
+		taskSessionID = fmt.Sprintf("%d", os.Getpid())
+	}
+
+	// Build system prompt flag
+	systemPromptFlag := fmt.Sprintf(`--append-system-prompt %q `, systemFile.Name())
+
+	script := fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q pi %s--continue "$(cat %q)"`,
+		task.ID, taskSessionID, task.Port, task.WorktreePath, systemPromptFlag, feedbackFile.Name())
+
+	// Create new window in task-daemon session (with retry logic for race conditions)
+	actualSession, tmuxErr := createTmuxWindow(daemonSession, windowName, workDir, script)
+	if tmuxErr != nil {
+		e.logger.Error("tmux new-window failed", "error", tmuxErr, "session", daemonSession)
+		e.logLine(task.ID, "error", fmt.Sprintf("Failed to create tmux window: %s", tmuxErr.Error()))
+		return execResult{Message: fmt.Sprintf("failed to create tmux window: %s", tmuxErr.Error())}
+	}
+
+	// Update windowTarget if session changed during retry
+	if actualSession != daemonSession {
+		windowTarget = fmt.Sprintf("%s:%s", actualSession, windowName)
+		daemonSession = actualSession
+	}
+
+	// Give tmux a moment to fully create the window and start the Pi process
+	time.Sleep(200 * time.Millisecond)
+
+	// Save which daemon session owns this task's window (for kill logic)
+	if err := e.db.UpdateTaskDaemonSession(task.ID, daemonSession); err != nil {
+		e.logger.Warn("failed to save daemon session", "task", task.ID, "error", err)
+	}
+
+	// Capture and store the window ID for reliable targeting
+	if windowID := getWindowID(daemonSession, windowName); windowID != "" {
+		if err := e.db.UpdateTaskWindowID(task.ID, windowID); err != nil {
+			e.logger.Warn("failed to save window ID", "task", task.ID, "error", err)
+		}
+	}
+
+	// Ensure shell pane exists alongside Pi pane with environment variables
+	e.ensureShellPane(windowTarget, workDir, task.ID, task.Port, task.WorktreePath, "")
+
+	// Configure tmux window with helpful status bar
+	e.configureTmuxWindow(windowTarget)
+
+	// Poll for output and completion
+	result := e.pollTmuxSession(ctx, task.ID, windowTarget)
+
+	return result
+}
+
+// getPiPID finds the PID of the Pi process for a task.
+func (e *Executor) getPiPID(taskID int64) int {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	windowName := TmuxWindowName(taskID)
+
+	// Search all tmux sessions for a window with this task's name
+	out, err := exec.CommandContext(ctx, "tmux", "list-panes", "-a", "-F", "#{session_name}:#{window_name}:#{pane_index} #{pane_pid}").Output()
+	if err != nil {
+		return 0
+	}
+
+	for _, line := range strings.Split(string(out), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+
+		// Parse "session:window:pane pid"
+		parts := strings.Fields(line)
+		if len(parts) != 2 {
+			continue
+		}
+
+		target := parts[0]
+		pidStr := parts[1]
+
+		// Only match panes in windows named after this task
+		if !strings.Contains(target, windowName) {
+			continue
+		}
+
+		pid, err := strconv.Atoi(pidStr)
+		if err != nil {
+			continue
+		}
+
+		// Check if this is a Pi process or has Pi as child
+		cmdOut, _ := exec.CommandContext(ctx, "ps", "-p", strconv.Itoa(pid), "-o", "comm=").Output()
+		if strings.Contains(string(cmdOut), "pi") || strings.Contains(string(cmdOut), "node") {
+			return pid
+		}
+
+		// Check for pi child process
+		childOut, err := exec.CommandContext(ctx, "pgrep", "-P", strconv.Itoa(pid), "pi").Output()
+		if err == nil && len(childOut) > 0 {
+			childPid, err := strconv.Atoi(strings.TrimSpace(string(childOut)))
+			if err == nil {
+				return childPid
+			}
+		}
+	}
+
+	return 0
+}
+
+// KillPiProcess terminates the Pi process for a task to free up memory.
+func (e *Executor) KillPiProcess(taskID int64) bool {
+	pid := e.getPiPID(taskID)
+	if pid == 0 {
+		return false
+	}
+
+	// Send SIGTERM for graceful shutdown
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		e.logger.Debug("Failed to find Pi process", "pid", pid, "error", err)
+		return false
+	}
+
+	if err := proc.Signal(syscall.SIGTERM); err != nil {
+		e.logger.Debug("Failed to terminate Pi process", "pid", pid, "error", err)
+		return false
+	}
+
+	e.logger.Info("Terminated Pi process", "task", taskID, "pid", pid)
+
+	// Clean up suspended task tracking if present
+	e.mu.Lock()
+	delete(e.suspendedTasks, taskID)
+	e.mu.Unlock()
+
+	return true
 }
 
 // isValidWorktreePath validates that a working directory is within a .task-worktrees directory.
