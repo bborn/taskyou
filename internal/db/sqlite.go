@@ -178,19 +178,6 @@ func (db *DB) migrate() error {
 		)`,
 
 		`CREATE INDEX IF NOT EXISTS idx_task_compaction_summaries_task_id ON task_compaction_summaries(task_id)`,
-
-		// FTS5 virtual table for full-text search on tasks
-		// This enables searching task title, body, tags, and transcript excerpts
-		// Uses standalone table (not content-sync) for flexibility
-		`CREATE VIRTUAL TABLE IF NOT EXISTS task_search USING fts5(
-			task_id UNINDEXED,
-			project,
-			title,
-			body,
-			tags,
-			transcript_excerpt,
-			tokenize='porter unicode61'
-		)`,
 	}
 
 	for _, m := range migrations {
