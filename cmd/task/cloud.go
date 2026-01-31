@@ -1067,7 +1067,7 @@ func CheckCloudSync(database *db.DB) bool {
 	// Show sync prompt
 	fmt.Printf("\n%s\n", cloudTitleStyle.Render("Cloud Sync"))
 	fmt.Printf("Local: %d tasks, Cloud: %d tasks\n", localCount, remoteCount)
-	fmt.Print("[p]ush local → cloud / [P]ull cloud → local / [s]kip (default): ")
+	fmt.Print("[p]ush local → cloud / pul[l] cloud → local / [s]kip (default): ")
 
 	reader := bufio.NewReader(os.Stdin)
 	input, _ := reader.ReadString('\n')
@@ -1080,7 +1080,7 @@ func CheckCloudSync(database *db.DB) bool {
 			fmt.Fprintln(os.Stderr, errorStyle.Render("Push failed: "+err.Error()))
 		}
 		return true
-	case "pull":
+	case "l", "pull":
 		fmt.Println()
 		if err := pullFromCloud(true); err != nil {
 			fmt.Fprintln(os.Stderr, errorStyle.Render("Pull failed: "+err.Error()))
