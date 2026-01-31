@@ -1620,6 +1620,11 @@ func (m *AppModel) updateDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if key.Matches(keyMsg, m.keys.ToggleDangerous) && m.selectedTask != nil {
 		// Only allow toggling dangerous mode if task is processing or blocked
 		if m.selectedTask.Status == db.StatusProcessing || m.selectedTask.Status == db.StatusBlocked {
+			// Break panes back to daemon BEFORE toggling so the executor can kill them.
+			// If panes are joined to task-ui, killAllWindowsByNameAllSessions won't find them.
+			if m.detailView != nil {
+				m.detailView.Cleanup()
+			}
 			return m, m.toggleDangerousMode(m.selectedTask.ID)
 		}
 	}
