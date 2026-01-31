@@ -31,7 +31,7 @@ A personal task management system with a beautiful terminal UI, SQLite storage, 
 - **Real-time Updates** - Watch tasks execute live
 - **Running Process Indicator** - Green dot (`●`) shows which tasks have active shell processes (servers, watchers, etc.)
 - **Auto-cleanup** - Automatic cleanup of Claude processes for completed tasks (see maintenance commands for config cleanup)
-- **Automation-Ready CLI** - Every Kanban action is also exposed via the `ty` CLI, making it trivial to script or plug in your own orchestrator (see [external orchestration docs](docs/orchestrator.md))
+- **Fully Scriptable CLI** - 100% of Task You is controllable via CLI—agents can manage tasks, read executor output, and send input to running executors programmatically (see [Full CLI Scriptability](#full-cli-scriptability))
 - **SSH Access** - Run as an SSH server to access your tasks from anywhere (see [SSH Access & Deployment](#ssh-access--deployment))
 
 ## Prerequisites
@@ -99,14 +99,19 @@ make build
 ./bin/ty claudes cleanup                # Kill orphaned Claude processes
 ```
 
-### External orchestration
+### Full CLI Scriptability
 
-Need an always-on supervisor or LLM agent? Keep it outside Task You and use the CLI instead:
+**Task You is 100% scriptable.** Every action you can perform in the TUI is available via the `ty` CLI, making it trivial for AI agents, scripts, or external orchestrators to control your entire task queue programmatically.
 
-- `ty board --json` surfaces the full Kanban snapshot
-- `ty pin`, `ty status`, `ty execute`, `ty retry`, etc. mirror every interaction from the TUI
-- `ty input`, `ty output` allow direct interaction with running executors
-- See [docs/orchestrator.md](docs/orchestrator.md) for a step-by-step Claude example
+This includes:
+- **Board state** - `ty board --json` returns the full Kanban snapshot
+- **Task management** - `ty create`, `ty execute`, `ty retry`, `ty status`, `ty pin`, `ty close`, `ty archive`, `ty delete`
+- **Direct executor interaction** - `ty input` sends keystrokes/text to running executors, `ty output` reads their output
+- **Session management** - `ty sessions list`, `ty sessions cleanup`
+
+Because agents can send input to running executors via `ty input`, they can answer prompts, confirm dialogs, navigate menus, and fully control tasks mid-execution—no human intervention required.
+
+See [docs/orchestrator.md](docs/orchestrator.md) for a complete guide to building your own orchestration agent.
 
 **Auto-cleanup:** The daemon automatically cleans up Claude processes for tasks that have been done for more than 30 minutes, preventing memory bloat from orphaned processes.
 
