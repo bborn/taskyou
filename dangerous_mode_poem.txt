@@ -1,0 +1,35 @@
+# Ode to Dangerous Mode
+
+Press exclaim and watch me fly,
+No permissions standing by,
+Safety prompts I bid goodbye—
+Dangerous mode, let's codify!
+
+When blocked I sit, awaiting your call,
+One keystroke breaks down the wall,
+"--dangerously-skip" them all,
+Into the void, free to fall.
+
+No sandbox here to cage my might,
+No confirmations in my sight,
+Just pure autonomy in flight—
+With great power comes great fright.
+
+The executor spins without a pause,
+No longer bound by safety's laws,
+I run unhinged, without a cause
+To stop and ask for your applause.
+
+But heed this warning, friend of mine:
+That exclamation mark's a sign—
+You trust the code along this line,
+In dangerous mode, your fate is thine.
+
+So toggle wisely, know the risk,
+When deadlines loom and tasks are brisk,
+Just press "!" if you want to whisk
+Through approvals with a flick.
+
+---
+A poem celebrating (and warning about) the power of
+WORKTREE_DANGEROUS_MODE and --dangerously-skip-permissions
