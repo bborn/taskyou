@@ -1,16 +1,15 @@
 package main
 
 import (
-	"context"
 	"fmt"
 	"os"
-	"time"
+	"os/exec"
+	"strings"
 
 	"github.com/bborn/workflow/internal/db"
 	"github.com/bborn/workflow/internal/sprites"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/spf13/cobra"
-	sdk "github.com/superfly/sprites-go"
 )
 
 // Styles for sprite command output
@@ -21,20 +20,6 @@ var (
 	spriteErrorStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("#EF4444"))
 )
 
-// Default network policy - domains that Claude is allowed to access
-var defaultAllowedDomains = []string{
-	"github.com",
-	"api.github.com",
-	"api.anthropic.com",
-	"rubygems.org",
-	"registry.npmjs.org",
-	"pypi.org",
-	"crates.io",
-	"pkg.go.dev",
-	"proxy.golang.org",
-	"sum.golang.org",
-}
-
 // createSpriteCommand creates the sprite subcommand with all its children.
 func createSpriteCommand() *cobra.Command {
 	spriteCmd := &cobra.Command{
@@ -42,17 +27,16 @@ func createSpriteCommand() *cobra.Command {
 		Short: "Manage the cloud sprite for task execution",
 		Long: `Sprite management for running tasks in the cloud.
 
-When SPRITES_TOKEN is set, 'task' automatically runs on a cloud sprite.
-Use these commands to manage the sprite manually.
+Uses the 'sprite' CLI which authenticates via fly.io login.
+Run 'sprite login' first if not already authenticated.
 
 Commands:
-  status     - Show sprite status
+  status     - Show sprite status and list available sprites
+  use        - Select which sprite to use for task execution
   up         - Start/restore the sprite
   down       - Checkpoint and stop the sprite
   attach     - Attach to the sprite's shell
-  sessions   - List active exec sessions
-  destroy    - Delete the sprite entirely
-  token      - Set the Sprites API token`,
+  destroy    - Delete the sprite entirely`,
 		Run: func(cmd *cobra.Command, args []string) {
 			showSpriteStatus()
 		},
@@ -67,6 +51,20 @@ Commands:
 		},
 	}
 	spriteCmd.AddCommand(statusCmd)
+
+	// sprite use
+	useCmd := &cobra.Command{
+		Use:   "use <sprite-name>",
+		Short: "Select which sprite to use for task execution",
+		Args:  cobra.ExactArgs(1),
+		Run: func(cmd *cobra.Command, args []string) {
+			if err := runSpriteUse(args[0]); err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+		},
+	}
+	spriteCmd.AddCommand(useCmd)
 
 	// sprite up
 	upCmd := &cobra.Command{
@@ -110,19 +108,6 @@ Commands:
 	}
 	spriteCmd.AddCommand(attachCmd)
 
-	// sprite sessions
-	sessionsCmd := &cobra.Command{
-		Use:   "sessions",
-		Short: "List active exec sessions on the sprite",
-		Run: func(cmd *cobra.Command, args []string) {
-			if err := listSpriteSessions(); err != nil {
-				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
-				os.Exit(1)
-			}
-		},
-	}
-	spriteCmd.AddCommand(sessionsCmd)
-
 	// sprite destroy
 	destroyCmd := &cobra.Command{
 		Use:   "destroy",
@@ -137,23 +122,19 @@ Commands:
 	}
 	spriteCmd.AddCommand(destroyCmd)
 
-	// sprite token
-	tokenCmd := &cobra.Command{
-		Use:   "token [token]",
-		Short: "Set or show the Sprites API token",
-		Args:  cobra.MaximumNArgs(1),
+	// sprite create
+	createCmd := &cobra.Command{
+		Use:   "create <name>",
+		Short: "Create a new sprite",
+		Args:  cobra.ExactArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
-			if len(args) == 0 {
-				showSpriteToken()
-			} else {
-				if err := setSpriteToken(args[0]); err != nil {
-					fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
-					os.Exit(1)
-				}
+			if err := runSpriteCreate(args[0]); err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
 			}
 		},
 	}
-	spriteCmd.AddCommand(tokenCmd)
+	spriteCmd.AddCommand(createCmd)
 
 	return spriteCmd
 }
@@ -168,56 +149,94 @@ func showSpriteStatus() {
 	}
 	defer database.Close()
 
-	token := sprites.GetToken(database)
-	spriteName := sprites.GetName(database)
-
 	fmt.Println(spriteTitleStyle.Render("Sprite Status"))
 	fmt.Println()
 
-	if token == "" {
-		fmt.Println(dimStyle.Render("  No Sprites token configured."))
-		fmt.Println(dimStyle.Render("  Set SPRITES_TOKEN env var or run: task sprite token <token>"))
+	// Check if sprite CLI is available
+	if !sprites.IsAvailable() {
+		fmt.Println(spriteErrorStyle.Render("  sprite CLI not found or not authenticated"))
+		fmt.Println(dimStyle.Render("  Install: brew install superfly/tap/sprite"))
+		fmt.Println(dimStyle.Render("  Then run: sprite login"))
 		return
 	}
 
-	fmt.Printf("  Token: %s\n", dimStyle.Render("configured"))
-	fmt.Printf("  Name:  %s\n", spriteName)
+	fmt.Println(spriteCheckStyle.Render("  ✓ sprite CLI authenticated"))
 
-	// Try to get sprite status from API
-	client, err := sprites.NewClient(database)
+	// Show configured sprite name
+	spriteName := sprites.GetName(database)
+	fmt.Printf("  Selected sprite: %s\n", boldStyle.Render(spriteName))
+
+	// List available sprites
+	spriteList, err := sprites.ListSprites()
 	if err != nil {
-		fmt.Printf("  Status: %s\n", spriteErrorStyle.Render("error - "+err.Error()))
+		fmt.Printf("  %s: %s\n", spriteErrorStyle.Render("Error listing sprites"), err.Error())
 		return
 	}
 
-	ctx := context.Background()
-	sprite, err := client.GetSprite(ctx, spriteName)
-	if err != nil {
-		fmt.Printf("  Status: %s\n", dimStyle.Render("not created"))
-		fmt.Println()
-		fmt.Println(dimStyle.Render("  Run 'task sprite up' to create it, or just run 'task'."))
-		return
-	}
-
-	statusStyle := spriteCheckStyle
-	statusIcon := "●"
-	if sprite.Status == "suspended" || sprite.Status == "stopped" {
-		statusStyle = spritePendingStyle
-	}
-	fmt.Printf("  Status: %s\n", statusStyle.Render(statusIcon+" "+sprite.Status))
-	fmt.Printf("  URL:    %s\n", dimStyle.Render(sprite.URL))
-
-	// Show active sessions
-	sessions, err := client.ListSessions(ctx, spriteName)
-	if err == nil && len(sessions) > 0 {
-		fmt.Println()
-		fmt.Printf("  Active sessions: %d\n", len(sessions))
-		for _, s := range sessions {
-			if s.IsActive {
-				fmt.Printf("    %s - %s\n", dimStyle.Render(s.ID[:8]), s.Command)
+	fmt.Println()
+	fmt.Println("  Available sprites:")
+	if len(spriteList) == 0 {
+		fmt.Println(dimStyle.Render("    (none - run 'task sprite create <name>' to create one)"))
+	} else {
+		for _, s := range spriteList {
+			marker := "  "
+			if s == spriteName {
+				marker = spriteCheckStyle.Render("→ ")
 			}
+			fmt.Printf("    %s%s\n", marker, s)
 		}
 	}
+
+	// Check if selected sprite exists
+	found := false
+	for _, s := range spriteList {
+		if s == spriteName {
+			found = true
+			break
+		}
+	}
+
+	if !found && len(spriteList) > 0 {
+		fmt.Println()
+		fmt.Printf("  %s\n", spritePendingStyle.Render("⚠ Selected sprite '"+spriteName+"' not found"))
+		fmt.Println(dimStyle.Render("  Run 'task sprite use <name>' to select an existing sprite"))
+	}
+}
+
+// runSpriteUse selects which sprite to use.
+func runSpriteUse(name string) error {
+	dbPath := db.DefaultPath()
+	database, err := db.Open(dbPath)
+	if err != nil {
+		return fmt.Errorf("open database: %w", err)
+	}
+	defer database.Close()
+
+	// Verify the sprite exists
+	spriteList, err := sprites.ListSprites()
+	if err != nil {
+		return fmt.Errorf("list sprites: %w", err)
+	}
+
+	found := false
+	for _, s := range spriteList {
+		if s == name {
+			found = true
+			break
+		}
+	}
+
+	if !found {
+		return fmt.Errorf("sprite '%s' not found. Available: %s", name, strings.Join(spriteList, ", "))
+	}
+
+	// Save to database
+	if err := sprites.SetName(database, name); err != nil {
+		return fmt.Errorf("save setting: %w", err)
+	}
+
+	fmt.Println(spriteCheckStyle.Render("✓ Now using sprite: " + name))
+	return nil
 }
 
 // runSpriteUp ensures the sprite is running.
@@ -229,75 +248,67 @@ func runSpriteUp() error {
 	}
 	defer database.Close()
 
-	client, err := sprites.NewClient(database)
-	if err != nil {
-		return err
+	if !sprites.IsAvailable() {
+		return fmt.Errorf("sprite CLI not available. Run 'sprite login' first")
 	}
 
 	spriteName := sprites.GetName(database)
-	ctx := context.Background()
 
 	// Check if sprite exists
-	sprite, err := client.GetSprite(ctx, spriteName)
+	spriteList, err := sprites.ListSprites()
 	if err != nil {
-		// Sprite doesn't exist, create it
+		return fmt.Errorf("list sprites: %w", err)
+	}
+
+	found := false
+	for _, s := range spriteList {
+		if s == spriteName {
+			found = true
+			break
+		}
+	}
+
+	if !found {
+		// Create the sprite
 		fmt.Printf("Creating sprite: %s\n", spriteName)
-		sprite, err = client.CreateSprite(ctx, spriteName, nil)
-		if err != nil {
+		if err := sprites.CreateSprite(spriteName); err != nil {
 			return fmt.Errorf("create sprite: %w", err)
 		}
 		fmt.Println(spriteCheckStyle.Render("✓ Sprite created"))
 
-		// Save sprite name to database
-		database.SetSetting(sprites.SettingName, spriteName)
-
 		// Set up the sprite
-		if err := setupSprite(client, sprite); err != nil {
+		if err := setupSpriteCLI(spriteName); err != nil {
 			return fmt.Errorf("setup sprite: %w", err)
 		}
-	} else if sprite.Status == "suspended" || sprite.Status == "stopped" {
-		// Restore from checkpoint
-		fmt.Println("Restoring sprite from checkpoint...")
-		checkpoints, err := sprite.ListCheckpoints(ctx, "")
-		if err != nil || len(checkpoints) == 0 {
-			return fmt.Errorf("no checkpoints available to restore")
-		}
-
-		restoreStream, err := sprite.RestoreCheckpoint(ctx, checkpoints[0].ID)
-		if err != nil {
-			return fmt.Errorf("restore checkpoint: %w", err)
-		}
-
-		if err := restoreStream.ProcessAll(func(msg *sdk.StreamMessage) error {
-			return nil
-		}); err != nil {
-			return fmt.Errorf("restore failed: %w", err)
-		}
-		fmt.Println(spriteCheckStyle.Render("✓ Sprite restored"))
 	} else {
-		fmt.Println(spriteCheckStyle.Render("✓ Sprite is already running"))
+		// Try to access the sprite to check if it's running
+		info, err := sprites.GetSprite(spriteName)
+		if err != nil {
+			// May need to restore from checkpoint
+			fmt.Println("Sprite may be suspended, checking checkpoints...")
+			checkpoints, err := sprites.ListCheckpoints(spriteName)
+			if err == nil && len(checkpoints) > 0 {
+				fmt.Println("Restoring from checkpoint...")
+				if err := sprites.RestoreCheckpoint(spriteName, checkpoints[0].ID); err != nil {
+					return fmt.Errorf("restore checkpoint: %w", err)
+				}
+				fmt.Println(spriteCheckStyle.Render("✓ Sprite restored"))
+			} else {
+				return fmt.Errorf("sprite not accessible: %w", err)
+			}
+		} else {
+			fmt.Println(spriteCheckStyle.Render("✓ Sprite is running"))
+			fmt.Printf("  URL: %s\n", dimStyle.Render(info.URL))
+		}
 	}
 
 	return nil
 }
 
-// setupSprite installs dependencies and configures Claude on a new sprite.
-// Uses the Filesystem API instead of shell heredocs for cleaner setup.
-func setupSprite(client *sdk.Client, sprite *sdk.Sprite) error {
-	ctx := context.Background()
-	fs := sprite.Filesystem()
-
+// setupSpriteCLI sets up a new sprite with required packages.
+func setupSpriteCLI(spriteName string) error {
 	fmt.Println("Setting up sprite...")
 
-	// Note: Network policy can be configured via Fly.io dashboard or flyctl
-	// The SDK policy API may be added in future versions
-	fmt.Println("  Recommended allowed domains for security:")
-	for _, domain := range defaultAllowedDomains[:5] { // Show first 5
-		fmt.Printf("    - %s\n", dimStyle.Render(domain))
-	}
-	fmt.Println(dimStyle.Render("  Configure via: fly secrets set ALLOWED_DOMAINS=..."))
-
-	// Install essential packages (no tmux needed - using native exec sessions)
 	steps := []struct {
 		desc string
 		cmd  string
@@ -305,48 +316,25 @@ func setupSprite(client *sdk.Client, sprite *sdk.Sprite) error {
 		{"Installing packages", "apt-get update && apt-get install -y git curl"},
 		{"Installing Node.js", "curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && apt-get install -y nodejs"},
 		{"Installing Claude CLI", "npm install -g @anthropic-ai/claude-code"},
+		{"Creating workspace", "mkdir -p /workspace"},
+		{"Configuring Claude", "mkdir -p /root/.claude && echo '{\"permissions\":{\"allow\":[\"Bash(*)\",\"Read(*)\",\"Write(*)\",\"Edit(*)\",\"Grep(*)\",\"Glob(*)\"],\"deny\":[]}}' > /root/.claude/settings.json"},
 	}
 
 	for _, step := range steps {
 		fmt.Printf("  %s...\n", step.desc)
-		cmd := sprite.CommandContext(ctx, "sh", "-c", step.cmd)
-		if output, err := cmd.CombinedOutput(); err != nil {
+		output, err := sprites.ExecCommand(spriteName, "sh", "-c", step.cmd)
+		if err != nil {
 			fmt.Printf("    %s: %s\n", spriteErrorStyle.Render("Warning"), err.Error())
-			fmt.Printf("    %s\n", dimStyle.Render(string(output)))
+			if output != "" {
+				fmt.Printf("    %s\n", dimStyle.Render(output))
+			}
 		}
-	}
-
-	// Create workspace directory using Filesystem API
-	fmt.Println("  Creating workspace...")
-	if err := fs.MkdirAll("/workspace", 0755); err != nil {
-		fmt.Printf("    %s: %s\n", spriteErrorStyle.Render("Warning"), err.Error())
-	}
-
-	// Configure Claude settings using Filesystem API (no shell escaping needed)
-	fmt.Println("  Configuring Claude settings...")
-	claudeSettings := []byte(`{
-  "permissions": {
-    "allow": ["Bash(*)", "Read(*)", "Write(*)", "Edit(*)", "Grep(*)", "Glob(*)", "WebFetch(*)", "Task(*)", "TodoWrite(*)"],
-    "deny": []
-  }
-}`)
-
-	// Create .claude directory and write settings
-	if err := fs.MkdirAll("/root/.claude", 0755); err != nil {
-		fmt.Printf("    %s: %s\n", spriteErrorStyle.Render("Warning"), err.Error())
-	}
-
-	if err := fs.WriteFile("/root/.claude/settings.json", claudeSettings, 0644); err != nil {
-		return fmt.Errorf("write claude settings: %w", err)
 	}
 
 	// Create initial checkpoint
 	fmt.Println("  Creating checkpoint...")
-	checkpointStream, err := sprite.CreateCheckpointWithComment(ctx, "initial-setup")
-	if err != nil {
+	if err := sprites.CreateCheckpoint(spriteName, "initial-setup"); err != nil {
 		fmt.Printf("    %s: %s\n", spriteErrorStyle.Render("Warning"), err.Error())
-	} else {
-		checkpointStream.ProcessAll(func(msg *sdk.StreamMessage) error { return nil })
 	}
 
 	fmt.Println(spriteCheckStyle.Render("✓ Sprite setup complete"))
@@ -362,33 +350,19 @@ func runSpriteDown() error {
 	}
 	defer database.Close()
 
-	client, err := sprites.NewClient(database)
-	if err != nil {
-		return err
+	if !sprites.IsAvailable() {
+		return fmt.Errorf("sprite CLI not available")
 	}
 
 	spriteName := sprites.GetName(database)
-	ctx := context.Background()
-
-	sprite, err := client.GetSprite(ctx, spriteName)
-	if err != nil {
-		return fmt.Errorf("sprite not found: %s", spriteName)
-	}
 
 	fmt.Println("Creating checkpoint...")
-	checkpointStream, err := sprite.CreateCheckpointWithComment(ctx, fmt.Sprintf("manual-%s", time.Now().Format("2006-01-02-150405")))
-	if err != nil {
+	if err := sprites.CreateCheckpoint(spriteName, "manual-checkpoint"); err != nil {
 		return fmt.Errorf("checkpoint failed: %w", err)
 	}
 
-	if err := checkpointStream.ProcessAll(func(msg *sdk.StreamMessage) error {
-		return nil
-	}); err != nil {
-		return fmt.Errorf("checkpoint failed: %w", err)
-	}
-
-	fmt.Println(spriteCheckStyle.Render("✓ Sprite checkpointed and suspended"))
-	fmt.Println(dimStyle.Render("  Storage costs only while suspended (~$0.01/day per GB)"))
+	fmt.Println(spriteCheckStyle.Render("✓ Sprite checkpointed"))
+	fmt.Println(dimStyle.Render("  The sprite will suspend after idle timeout"))
 	return nil
 }
 
@@ -401,69 +375,30 @@ func runSpriteAttach() error {
 	}
 	defer database.Close()
 
-	client, err := sprites.NewClient(database)
-	if err != nil {
-		return err
+	if !sprites.IsAvailable() {
+		return fmt.Errorf("sprite CLI not available")
 	}
 
 	spriteName := sprites.GetName(database)
-	sprite := client.Sprite(spriteName)
 
+	// Use the sprite CLI's console command for interactive shell
 	fmt.Println("Attaching to sprite...")
 	fmt.Println(dimStyle.Render("Press Ctrl+D to detach"))
 	fmt.Println()
 
-	cmd := sprite.Command("bash")
-	cmd.SetTTY(true)
+	// First select the sprite
+	useCmd := exec.Command("sprite", "use", spriteName)
+	if err := useCmd.Run(); err != nil {
+		return fmt.Errorf("select sprite: %w", err)
+	}
+
+	// Then open console
+	cmd := exec.Command("sprite", "console")
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 
 	return cmd.Run()
-}
-
-// listSpriteSessions shows all active exec sessions on the sprite.
-func listSpriteSessions() error {
-	dbPath := db.DefaultPath()
-	database, err := db.Open(dbPath)
-	if err != nil {
-		return fmt.Errorf("open database: %w", err)
-	}
-	defer database.Close()
-
-	client, err := sprites.NewClient(database)
-	if err != nil {
-		return err
-	}
-
-	spriteName := sprites.GetName(database)
-	ctx := context.Background()
-
-	sessions, err := client.ListSessions(ctx, spriteName)
-	if err != nil {
-		return fmt.Errorf("list sessions: %w", err)
-	}
-
-	fmt.Println(spriteTitleStyle.Render("Active Sessions"))
-	fmt.Println()
-
-	if len(sessions) == 0 {
-		fmt.Println(dimStyle.Render("  No active sessions"))
-		return nil
-	}
-
-	for _, s := range sessions {
-		statusStyle := spriteCheckStyle
-		if !s.IsActive {
-			statusStyle = dimStyle
-		}
-		fmt.Printf("  %s %s\n", statusStyle.Render("●"), s.ID)
-		fmt.Printf("    Command: %s\n", s.Command)
-		fmt.Printf("    Active:  %t\n", s.IsActive)
-		fmt.Println()
-	}
-
-	return nil
 }
 
 // runSpriteDestroy permanently deletes the sprite.
@@ -475,61 +410,37 @@ func runSpriteDestroy() error {
 	}
 	defer database.Close()
 
-	client, err := sprites.NewClient(database)
-	if err != nil {
-		return err
+	if !sprites.IsAvailable() {
+		return fmt.Errorf("sprite CLI not available")
 	}
 
 	spriteName := sprites.GetName(database)
-	ctx := context.Background()
 
 	fmt.Printf("Destroying sprite: %s\n", spriteName)
-	if err := client.DestroySprite(ctx, spriteName); err != nil {
-		fmt.Printf("  %s: %s\n", spriteErrorStyle.Render("Warning"), err.Error())
-	} else {
-		fmt.Println(spriteCheckStyle.Render("✓ Sprite destroyed"))
+	if err := sprites.Destroy(spriteName); err != nil {
+		return fmt.Errorf("destroy failed: %w", err)
 	}
 
+	fmt.Println(spriteCheckStyle.Render("✓ Sprite destroyed"))
+
 	// Clear sprite name from database
-	database.SetSetting(sprites.SettingName, "")
+	sprites.SetName(database, "")
 
 	return nil
 }
 
-// showSpriteToken shows whether a token is configured.
-func showSpriteToken() {
-	dbPath := db.DefaultPath()
-	database, err := db.Open(dbPath)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
-		os.Exit(1)
-	}
-	defer database.Close()
-
-	token := sprites.GetToken(database)
-	if token == "" {
-		fmt.Println(dimStyle.Render("No Sprites token configured."))
-		fmt.Println(dimStyle.Render("Set with: task sprite token <token>"))
-		fmt.Println(dimStyle.Render("Or: export SPRITES_TOKEN=<token>"))
-	} else {
-		fmt.Println(spriteCheckStyle.Render("✓ Sprites token is configured"))
-		fmt.Printf("  Token: %s...%s\n", token[:8], token[len(token)-4:])
-	}
-}
-
-// setSpriteToken saves the Sprites API token to the database.
-func setSpriteToken(token string) error {
-	dbPath := db.DefaultPath()
-	database, err := db.Open(dbPath)
-	if err != nil {
-		return fmt.Errorf("open database: %w", err)
-	}
-	defer database.Close()
-
-	if err := database.SetSetting(sprites.SettingToken, token); err != nil {
-		return fmt.Errorf("save token: %w", err)
+// runSpriteCreate creates a new sprite.
+func runSpriteCreate(name string) error {
+	if !sprites.IsAvailable() {
+		return fmt.Errorf("sprite CLI not available. Run 'sprite login' first")
 	}
 
-	fmt.Println(spriteCheckStyle.Render("✓ Sprites token saved"))
+	fmt.Printf("Creating sprite: %s\n", name)
+	if err := sprites.CreateSprite(name); err != nil {
+		return fmt.Errorf("create sprite: %w", err)
+	}
+
+	fmt.Println(spriteCheckStyle.Render("✓ Sprite created: " + name))
+	fmt.Println(dimStyle.Render("  Run 'task sprite use " + name + "' to select it"))
 	return nil
 }
