@@ -70,6 +70,7 @@ type KeyMap struct {
 	Filter          key.Binding
 	ResumeClaude             key.Binding
 	OpenWorktree             key.Binding
+	ToggleShellPane          key.Binding
 	JumpToNotification       key.Binding
 	JumpToNotificationDetail key.Binding // For detail view (uses Ctrl+g to avoid conflicting with text input)
 	// Column focus shortcuts
@@ -95,7 +96,7 @@ func (k KeyMap) FullHelp() [][]key.Binding {
 		{k.FocusBacklog, k.FocusInProgress, k.FocusBlocked, k.FocusDone},
 		{k.Enter, k.New, k.Queue, k.Close},
 		{k.Retry, k.Archive, k.Delete, k.OpenWorktree},
-		{k.Filter, k.CommandPalette, k.Settings},
+		{k.Filter, k.CommandPalette, k.Settings, k.ToggleShellPane},
 		{k.ChangeStatus, k.TogglePin, k.Refresh, k.Help},
 		{k.Quit},
 	}
@@ -199,6 +200,10 @@ func DefaultKeyMap() KeyMap {
 		OpenWorktree: key.NewBinding(
 			key.WithKeys("o"),
 			key.WithHelp("o", "open in editor"),
+		),
+		ToggleShellPane: key.NewBinding(
+			key.WithKeys("\\"),
+			key.WithHelp("\\", "toggle shell"),
 		),
 		JumpToNotification: key.NewBinding(
 			key.WithKeys("g"),
@@ -1627,6 +1632,10 @@ func (m *AppModel) updateDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 	if key.Matches(keyMsg, m.keys.OpenWorktree) && m.selectedTask != nil {
 		return m, m.openWorktreeInEditor(m.selectedTask)
+	}
+	if key.Matches(keyMsg, m.keys.ToggleShellPane) && m.detailView != nil {
+		m.detailView.ToggleShellPane()
+		return m, nil
 	}
 
 	// Arrow key navigation to prev/next task in the same column
