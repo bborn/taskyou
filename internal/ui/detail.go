@@ -128,6 +128,8 @@ func (m *DetailModel) executorDisplayName() string {
 			return "Claude"
 		case db.ExecutorGemini:
 			return "Gemini"
+		case db.ExecutorOpenClaw:
+			return "OpenClaw"
 		default:
 			// Unknown executor, capitalize first letter
 			if len(m.task.Executor) > 0 {
@@ -472,6 +474,13 @@ func (m *DetailModel) Update(msg tea.Msg) (*DetailModel, tea.Cmd) {
 			return m, m.spinnerTick()
 		}
 		return m, nil
+
+	case panesRefreshMsg:
+		// Panes need to be refreshed (e.g., after dangerous mode toggle recreated the window)
+		log := GetLogger()
+		log.Info("panesRefreshMsg: refreshing panes for task %d", m.task.ID)
+		// Re-start the async pane setup
+		return m, m.startPanesAsync()
 	}
 
 	// Pass all messages to viewport for scrolling support
@@ -500,6 +509,29 @@ func (m *DetailModel) CleanupWithoutSaving() {
 		m.breakTmuxPanes(false, true) // saveHeight=false, resizeTUI=true
 	}
 }
+
+// ClearPaneState clears the cached pane state without breaking panes.
+// Use this when the tmux window has been recreated externally (e.g., dangerous mode toggle).
+func (m *DetailModel) ClearPaneState() {
+	m.claudePaneID = ""
+	m.workdirPaneID = ""
+	m.daemonSessionID = ""
+	m.cachedWindowTarget = ""
+	m.joinPaneFailed = false
+}
+
+// RefreshPanesCmd returns a command to refresh the tmux panes.
+// Use this after ClearPaneState() to rejoin panes to a recreated window.
+func (m *DetailModel) RefreshPanesCmd() tea.Cmd {
+	return func() tea.Msg {
+		// Small delay to allow the new tmux window to be created
+		time.Sleep(300 * time.Millisecond)
+		return panesRefreshMsg{}
+	}
+}
+
+// panesRefreshMsg triggers a pane refresh in the detail view.
+type panesRefreshMsg struct{}
 
 // InFeedbackMode returns false - use tmux pane for interaction.
 func (m *DetailModel) InFeedbackMode() bool {
@@ -1787,6 +1819,18 @@ func (m *DetailModel) View() string {
 		return "\n  Loading..."
 	}
 
+	// Global dangerous mode banner
+	var dangerBanner string
+	if IsGlobalDangerousMode() {
+		dangerStyle := lipgloss.NewStyle().
+			Background(lipgloss.Color("#E06C75")). // Red background
+			Foreground(lipgloss.Color("#FFFFFF")).
+			Bold(true).
+			Padding(0, 2).
+			Width(m.width)
+		dangerBanner = dangerStyle.Render("⚠ DANGEROUS MODE ENABLED")
+	}
+
 	header := m.renderHeader()
 	content := m.viewport.View()
 
@@ -1824,10 +1868,15 @@ func (m *DetailModel) View() string {
 	if scrollIndicator != "" {
 		boxContent = lipgloss.JoinVertical(lipgloss.Left, header, content, scrollIndicator)
 	}
-	return lipgloss.JoinVertical(lipgloss.Left,
-		box.Render(boxContent),
-		help,
-	)
+
+	// Build view parts
+	var viewParts []string
+	if dangerBanner != "" {
+		viewParts = append(viewParts, dangerBanner)
+	}
+	viewParts = append(viewParts, box.Render(boxContent), help)
+
+	return lipgloss.JoinVertical(lipgloss.Left, viewParts...)
 }
 
 func (m *DetailModel) renderHeader() string {

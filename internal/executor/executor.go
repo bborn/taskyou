@@ -148,6 +148,7 @@ func New(database *db.DB, cfg *config.Config) *Executor {
 	e.executorFactory.Register(NewClaudeExecutor(e))
 	e.executorFactory.Register(NewCodexExecutor(e))
 	e.executorFactory.Register(NewGeminiExecutor(e))
+	e.executorFactory.Register(NewOpenClawExecutor(e))
 
 	return e
 }
@@ -177,6 +178,7 @@ func NewWithLogging(database *db.DB, cfg *config.Config, w io.Writer) *Executor 
 	e.executorFactory.Register(NewClaudeExecutor(e))
 	e.executorFactory.Register(NewCodexExecutor(e))
 	e.executorFactory.Register(NewGeminiExecutor(e))
+	e.executorFactory.Register(NewOpenClawExecutor(e))
 
 	return e
 }
@@ -882,10 +884,6 @@ func (e *Executor) executeTask(ctx context.Context, task *db.Task) {
 		result = execResult.toInternal()
 	}
 
-	// Check if we should distill learnings from this execution session
-	// This runs asynchronously and captures memories even for in-progress tasks
-	e.MaybeDistillTask(task)
-
 	// Check current status - hooks may have already set it
 	currentTask, _ := e.db.GetTask(task.ID)
 	currentStatus := ""
@@ -926,13 +924,6 @@ func (e *Executor) executeTask(ctx context.Context, task *db.Task) {
 		// NOTE: We intentionally do NOT kill the executor here - keep it running so user can
 		// easily retry/resume the task. Old done task executors are cleaned up after 2h
 		// by the cleanupOrphanedClaudes routine.
-
-		// Distill and index the completed task (runs in background)
-		go func() {
-			if err := e.processCompletedTask(context.Background(), task); err != nil {
-				e.logger.Error("Task processing failed", "task", task.ID, "error", err)
-			}
-		}()
 	} else if result.NeedsInput {
 		e.updateStatus(task.ID, db.StatusBlocked)
 		// Log the question with special type so UI can display it
@@ -1075,11 +1066,8 @@ func (e *Executor) buildPrompt(task *db.Task, attachmentPaths []string) string {
 		}
 	}
 
-	// Add project memories if available
-	memories := e.getProjectMemoriesSection(task.Project)
-
-	// Get similar past tasks for reference
-	similarTasks := e.getSimilarTasksSection(task)
+	// Similar tasks feature has been removed - always empty
+	similarTasks := ""
 
 	// Get project-specific instructions
 	projectInstructions := e.getProjectInstructions(task.Project)
@@ -1107,16 +1095,16 @@ func (e *Executor) buildPrompt(task *db.Task, attachmentPaths []string) string {
 		taskType, err := e.db.GetTaskTypeByName(task.Type)
 		if err == nil && taskType != nil {
 			// Apply template substitutions for type-specific instructions
-			instructions := e.applyTemplateSubstitutions(taskType.Instructions, task, projectInstructions, memories, similarTasks, attachments, conversationHistory)
+			instructions := e.applyTemplateSubstitutions(taskType.Instructions, task, projectInstructions, similarTasks, attachments, conversationHistory)
 			prompt.WriteString(instructions)
 			prompt.WriteString("\n")
 		} else {
 			// Fallback to generic context if type not found
-			prompt.WriteString(e.buildGenericContextSection(projectInstructions, memories, similarTasks, attachments, conversationHistory))
+			prompt.WriteString(e.buildGenericContextSection(projectInstructions, similarTasks, attachments, conversationHistory))
 		}
 	} else {
 		// No type specified - use generic context
-		prompt.WriteString(e.buildGenericContextSection(projectInstructions, memories, similarTasks, attachments, conversationHistory))
+		prompt.WriteString(e.buildGenericContextSection(projectInstructions, similarTasks, attachments, conversationHistory))
 	}
 
 	// Add response guidance to ALL task types
@@ -1125,6 +1113,12 @@ func (e *Executor) buildPrompt(task *db.Task, attachmentPaths []string) string {
 ═══════════════════════════════════════════════════════════════
                       TASK GUIDANCE
 ═══════════════════════════════════════════════════════════════
+
+⚡ BEFORE EXPLORING THE CODEBASE:
+  Call workflow_get_project_context first via MCP.
+  - If it returns context, use it and skip exploration
+  - If empty, explore once and save a summary via workflow_set_project_context
+  This caches your exploration for future tasks in this project.
 
 Work on this task until completion. When you're done or need input:
 
@@ -1138,6 +1132,16 @@ Work on this task until completion. When you're done or need input:
   Use the workflow_screenshot MCP tool to take screenshots of the
   screen. This helps verify correctness and document changes.
 
+⚠ CRITICAL - WORKING DIRECTORY CONSTRAINT:
+  You are running in an isolated git worktree. This worktree IS your
+  project - it is NOT a copy. NEVER access the "original" project
+  directory or any path outside your current working directory.
+
+  - ONLY use paths within your current working directory
+  - NEVER read/write files in /Users/*/Projects/* except this worktree
+  - If you see a path like .task-worktrees/, you're in the right place
+  - The parent repo does NOT exist for you - only this worktree does
+
 The task system will automatically detect your status.
 ═══════════════════════════════════════════════════════════════
 `)
@@ -1146,7 +1150,7 @@ The task system will automatically detect your status.
 }
 
 // applyTemplateSubstitutions replaces template placeholders in task type instructions.
-func (e *Executor) applyTemplateSubstitutions(template string, task *db.Task, projectInstructions, memories, similarTasks, attachments, conversationHistory string) string {
+func (e *Executor) applyTemplateSubstitutions(template string, task *db.Task, projectInstructions, similarTasks, attachments, conversationHistory string) string {
 	result := template
 
 	// Replace placeholders
@@ -1178,19 +1182,11 @@ func (e *Executor) applyTemplateSubstitutions(template string, task *db.Task, pr
 		result = strings.ReplaceAll(result, "{{project_instructions}}", "")
 	}
 
-	if memories != "" {
-		result = strings.ReplaceAll(result, "{{memories}}", memories)
-	} else {
-		result = strings.ReplaceAll(result, "{{memories}}", "")
-	}
+	result = strings.ReplaceAll(result, "{{memories}}", "")
 
 	// Similar tasks are injected after memories (no template placeholder for now)
 	if similarTasks != "" {
 		result = strings.ReplaceAll(result, "{{similar_tasks}}", similarTasks)
-		// Also append after memories if no placeholder
-		if !strings.Contains(template, "{{similar_tasks}}") && memories != "" {
-			result = strings.ReplaceAll(result, memories, memories+"\n"+similarTasks)
-		}
 	} else {
 		result = strings.ReplaceAll(result, "{{similar_tasks}}", "")
 	}
@@ -1217,14 +1213,11 @@ func (e *Executor) applyTemplateSubstitutions(template string, task *db.Task, pr
 
 // buildGenericContextSection builds the context section (project instructions, memories, etc.)
 // for tasks without a specific type. The task title and body are added separately in buildPrompt.
-func (e *Executor) buildGenericContextSection(projectInstructions, memories, similarTasks, attachments, conversationHistory string) string {
+func (e *Executor) buildGenericContextSection(projectInstructions, similarTasks, attachments, conversationHistory string) string {
 	var prompt strings.Builder
 
 	if projectInstructions != "" {
 		prompt.WriteString(fmt.Sprintf("## Project Instructions\n\n%s\n\n", projectInstructions))
-	}
-	if memories != "" {
-		prompt.WriteString(memories)
 	}
 	if similarTasks != "" {
 		prompt.WriteString(similarTasks)
@@ -1933,21 +1926,29 @@ func (e *Executor) runClaude(ctx context.Context, task *db.Task, workDir, prompt
 	if sessionID == "" {
 		sessionID = fmt.Sprintf("%d", os.Getpid())
 	}
-	// Only use --dangerously-skip-permissions if WORKTREE_DANGEROUS_MODE is set
+	// Use --dangerously-skip-permissions if task has dangerous mode enabled or WORKTREE_DANGEROUS_MODE is set
 	dangerousFlag := ""
-	if os.Getenv("WORKTREE_DANGEROUS_MODE") == "1" {
+	if task.DangerousMode || os.Getenv("WORKTREE_DANGEROUS_MODE") == "1" {
 		dangerousFlag = "--dangerously-skip-permissions "
 	}
 	// Check for existing Claude session to resume instead of starting fresh
 	// Only use stored session ID - no file-based fallback to avoid cross-task contamination
+	// Validate session file exists before attempting resume
 	var script string
 	existingSessionID := task.ClaudeSessionID
 	envPrefix := claudeEnvPrefix(paths.configDir)
-	if existingSessionID != "" {
+	if existingSessionID != "" && ClaudeSessionExists(existingSessionID, workDir, paths.configDir) {
 		e.logLine(task.ID, "system", fmt.Sprintf("Resuming existing session %s", existingSessionID))
 		script = fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %sclaude %s--chrome --resume %s "$(cat %q)"`,
 			task.ID, sessionID, task.Port, task.WorktreePath, envPrefix, dangerousFlag, existingSessionID, promptFile.Name())
 	} else {
+		if existingSessionID != "" {
+			e.logLine(task.ID, "system", fmt.Sprintf("Session %s no longer exists, starting fresh", existingSessionID))
+			// Clear the stale session ID
+			if err := e.db.UpdateTaskClaudeSessionID(task.ID, ""); err != nil {
+				e.logger.Warn("failed to clear stale session ID", "task", task.ID, "error", err)
+			}
+		}
 		script = fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %sclaude %s--chrome "$(cat %q)"`,
 			task.ID, sessionID, task.Port, task.WorktreePath, envPrefix, dangerousFlag, promptFile.Name())
 	}
@@ -2004,16 +2005,25 @@ func (e *Executor) runClaude(ctx context.Context, task *db.Task, workDir, prompt
 // runClaudeResume resumes a previous Claude session with feedback.
 // If no previous session exists, starts fresh with the full prompt + feedback.
 func (e *Executor) runClaudeResume(ctx context.Context, task *db.Task, workDir, prompt, feedback string) execResult {
+	paths := e.claudePathsForProject(task.Project)
+
 	// Only use stored session ID - no file-based fallback to avoid cross-task contamination
+	// Validate session file exists before attempting resume
 	claudeSessionID := task.ClaudeSessionID
-	if claudeSessionID == "" {
-		e.logLine(task.ID, "system", "No previous session found, starting fresh")
+	if claudeSessionID == "" || !ClaudeSessionExists(claudeSessionID, workDir, paths.configDir) {
+		if claudeSessionID != "" {
+			e.logLine(task.ID, "system", fmt.Sprintf("Session %s no longer exists, starting fresh", claudeSessionID))
+			// Clear the stale session ID
+			if err := e.db.UpdateTaskClaudeSessionID(task.ID, ""); err != nil {
+				e.logger.Warn("failed to clear stale session ID", "task", task.ID, "error", err)
+			}
+		} else {
+			e.logLine(task.ID, "system", "No previous session found, starting fresh")
+		}
 		// Build a combined prompt with the feedback included
 		fullPrompt := prompt + "\n\n## User Feedback\n\n" + feedback
 		return e.runClaude(ctx, task, workDir, fullPrompt)
 	}
-
-	paths := e.claudePathsForProject(task.Project)
 
 	e.logLine(task.ID, "system", fmt.Sprintf("Resuming session %s", claudeSessionID))
 
@@ -2067,9 +2077,9 @@ func (e *Executor) runClaudeResume(ctx context.Context, task *db.Task, workDir, 
 	if taskSessionID == "" {
 		taskSessionID = fmt.Sprintf("%d", os.Getpid())
 	}
-	// Only use --dangerously-skip-permissions if WORKTREE_DANGEROUS_MODE is set
+	// Use --dangerously-skip-permissions if task has dangerous mode enabled or WORKTREE_DANGEROUS_MODE is set
 	dangerousFlag := ""
-	if os.Getenv("WORKTREE_DANGEROUS_MODE") == "1" {
+	if task.DangerousMode || os.Getenv("WORKTREE_DANGEROUS_MODE") == "1" {
 		dangerousFlag = "--dangerously-skip-permissions "
 	}
 	envPrefix := claudeEnvPrefix(paths.configDir)
@@ -2125,17 +2135,52 @@ func (e *Executor) runClaudeResume(ctx context.Context, task *db.Task, workDir, 
 	return result
 }
 
-// ResumeDangerous kills the current Claude process and restarts it with --dangerously-skip-permissions.
+// ResumeDangerous kills the current executor process and restarts it with dangerous mode enabled.
 // This allows switching a running task to dangerous mode without restarting the daemon.
 // Returns true if successfully restarted, false otherwise.
+// This is executor-aware and will delegate to the appropriate executor's implementation.
 func (e *Executor) ResumeDangerous(taskID int64) bool {
-	// Get the task to access session ID and work directory
+	// Get the task to determine which executor to use
 	task, err := e.db.GetTask(taskID)
 	if err != nil || task == nil {
 		e.logger.Error("Failed to get task", "taskID", taskID, "error", err)
 		return false
 	}
+
+	workDir := task.WorktreePath
+	if workDir == "" {
+		e.logger.Error("Task has no worktree path", "taskID", taskID)
+		return false
+	}
+
+	// Get the executor for this task
+	exec := e.executorFactory.Get(task.Executor)
+	if exec == nil {
+		e.logger.Error("Unknown executor", "executor", task.Executor)
+		return false
+	}
+
+	// Check if this executor supports dangerous mode
+	if !exec.SupportsDangerousMode() {
+		e.logLine(taskID, "system", fmt.Sprintf("Executor %s does not support dangerous mode", exec.Name()))
+		return false
+	}
+
+	// Check if this executor supports session resume (required for mode switching)
+	if !exec.SupportsSessionResume() {
+		e.logLine(taskID, "system", fmt.Sprintf("Executor %s does not support session resume - cannot toggle mode", exec.Name()))
+		return false
+	}
+
+	// Delegate to the executor's implementation
+	return exec.ResumeDangerous(task, workDir)
+}
+
+// resumeClaudeDangerous is the Claude-specific implementation of dangerous mode resume.
+// It kills the current Claude process and restarts with --dangerously-skip-permissions.
+func (e *Executor) resumeClaudeDangerous(task *db.Task, workDir string) bool {
 	paths := e.claudePathsForProject(task.Project)
+	taskID := task.ID
 
 	claudeSessionID := task.ClaudeSessionID
 	if claudeSessionID == "" {
@@ -2143,9 +2188,13 @@ func (e *Executor) ResumeDangerous(taskID int64) bool {
 		return false
 	}
 
-	workDir := task.WorktreePath
-	if workDir == "" {
-		e.logger.Error("Task has no worktree path", "taskID", taskID)
+	// Validate session file exists before attempting resume
+	if !ClaudeSessionExists(claudeSessionID, workDir, paths.configDir) {
+		e.logLine(taskID, "system", fmt.Sprintf("Session %s no longer exists - cannot resume in dangerous mode", claudeSessionID))
+		// Clear the stale session ID
+		if err := e.db.UpdateTaskClaudeSessionID(taskID, ""); err != nil {
+			e.logger.Warn("failed to clear stale session ID", "task", taskID, "error", err)
+		}
 		return false
 	}
 
@@ -2243,17 +2292,52 @@ func (e *Executor) ResumeDangerous(taskID int64) bool {
 	return true
 }
 
-// ResumeSafe kills the current Claude process and restarts it without --dangerously-skip-permissions.
+// ResumeSafe kills the current executor process and restarts it with dangerous mode disabled.
 // This allows switching a running task back from dangerous mode to safe mode.
 // Returns true if successfully restarted, false otherwise.
+// This is executor-aware and will delegate to the appropriate executor's implementation.
 func (e *Executor) ResumeSafe(taskID int64) bool {
-	// Get the task to access session ID and work directory
+	// Get the task to determine which executor to use
 	task, err := e.db.GetTask(taskID)
 	if err != nil || task == nil {
 		e.logger.Error("Failed to get task", "taskID", taskID, "error", err)
 		return false
 	}
+
+	workDir := task.WorktreePath
+	if workDir == "" {
+		e.logger.Error("Task has no worktree path", "taskID", taskID)
+		return false
+	}
+
+	// Get the executor for this task
+	exec := e.executorFactory.Get(task.Executor)
+	if exec == nil {
+		e.logger.Error("Unknown executor", "executor", task.Executor)
+		return false
+	}
+
+	// Check if this executor supports dangerous mode
+	if !exec.SupportsDangerousMode() {
+		e.logLine(taskID, "system", fmt.Sprintf("Executor %s does not support dangerous mode", exec.Name()))
+		return false
+	}
+
+	// Check if this executor supports session resume (required for mode switching)
+	if !exec.SupportsSessionResume() {
+		e.logLine(taskID, "system", fmt.Sprintf("Executor %s does not support session resume - cannot toggle mode", exec.Name()))
+		return false
+	}
+
+	// Delegate to the executor's implementation
+	return exec.ResumeSafe(task, workDir)
+}
+
+// resumeClaudeSafe is the Claude-specific implementation of safe mode resume.
+// It kills the current Claude process and restarts without --dangerously-skip-permissions.
+func (e *Executor) resumeClaudeSafe(task *db.Task, workDir string) bool {
 	paths := e.claudePathsForProject(task.Project)
+	taskID := task.ID
 
 	claudeSessionID := task.ClaudeSessionID
 	if claudeSessionID == "" {
@@ -2261,9 +2345,13 @@ func (e *Executor) ResumeSafe(taskID int64) bool {
 		return false
 	}
 
-	workDir := task.WorktreePath
-	if workDir == "" {
-		e.logger.Error("Task has no worktree path", "taskID", taskID)
+	// Validate session file exists before attempting resume
+	if !ClaudeSessionExists(claudeSessionID, workDir, paths.configDir) {
+		e.logLine(taskID, "system", fmt.Sprintf("Session %s no longer exists - cannot resume in safe mode", claudeSessionID))
+		// Clear the stale session ID
+		if err := e.db.UpdateTaskClaudeSessionID(taskID, ""); err != nil {
+			e.logger.Warn("failed to clear stale session ID", "task", taskID, "error", err)
+		}
 		return false
 	}
 
@@ -2361,6 +2449,198 @@ func (e *Executor) ResumeSafe(taskID int64) bool {
 	return true
 }
 
+// resumeCodexWithMode kills the current Codex process and restarts with the specified mode.
+// If dangerousMode is true, uses --dangerously-bypass-approvals-and-sandbox.
+func (e *Executor) resumeCodexWithMode(task *db.Task, workDir string, dangerousMode bool) bool {
+	taskID := task.ID
+	paths := e.claudePathsForProject(task.Project)
+
+	sessionID := task.ClaudeSessionID
+	if sessionID == "" {
+		e.logLine(taskID, "system", "No Codex session found - cannot toggle mode")
+		return false
+	}
+
+	// Validate session file exists before attempting resume
+	if !codexSessionExists(sessionID) {
+		e.logLine(taskID, "system", fmt.Sprintf("Session %s no longer exists - cannot toggle mode", sessionID))
+		// Clear the stale session ID
+		if err := e.db.UpdateTaskClaudeSessionID(taskID, ""); err != nil {
+			e.logger.Warn("failed to clear stale session ID", "task", taskID, "error", err)
+		}
+		return false
+	}
+
+	modeStr := "safe"
+	if dangerousMode {
+		modeStr = "dangerous"
+	}
+	e.logLine(taskID, "system", fmt.Sprintf("Restarting Codex in %s mode", modeStr))
+
+	if _, err := exec.LookPath("tmux"); err != nil {
+		e.logLine(taskID, "system", "Tmux not available - cannot resume")
+		return false
+	}
+
+	windowName := TmuxWindowName(taskID)
+	killAllWindowsByNameAllSessions(windowName)
+
+	daemonSession, err := ensureTmuxDaemon()
+	if err != nil {
+		e.logger.Warn("could not create task-daemon session", "error", err)
+		return false
+	}
+
+	windowTarget := fmt.Sprintf("%s:%s", daemonSession, windowName)
+
+	taskSessionID := os.Getenv("WORKTREE_SESSION_ID")
+	if taskSessionID == "" {
+		taskSessionID = fmt.Sprintf("%d", os.Getpid())
+	}
+
+	// Build dangerous flag
+	dangerousFlag := ""
+	if dangerousMode {
+		dangerousFlag = "--dangerously-bypass-approvals-and-sandbox "
+	}
+
+	// Build script with --resume flag
+	envPrefix := claudeEnvPrefix(paths.configDir)
+	script := fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %scodex %s--resume %s`,
+		taskID, taskSessionID, task.Port, task.WorktreePath, envPrefix, dangerousFlag, sessionID)
+
+	actualSession, tmuxErr := createTmuxWindow(daemonSession, windowName, workDir, script)
+	if tmuxErr != nil {
+		e.logger.Warn("tmux failed to create window", "error", tmuxErr, "session", daemonSession)
+		return false
+	}
+
+	if actualSession != daemonSession {
+		windowTarget = fmt.Sprintf("%s:%s", actualSession, windowName)
+		daemonSession = actualSession
+	}
+
+	time.Sleep(200 * time.Millisecond)
+
+	if err := e.db.UpdateTaskDaemonSession(taskID, daemonSession); err != nil {
+		e.logger.Warn("failed to save daemon session", "task", taskID, "error", err)
+	}
+
+	if windowID := getWindowID(daemonSession, windowName); windowID != "" {
+		if err := e.db.UpdateTaskWindowID(taskID, windowID); err != nil {
+			e.logger.Warn("failed to save window ID", "task", taskID, "error", err)
+		}
+	}
+
+	e.ensureShellPane(windowTarget, workDir, task.ID, task.Port, task.WorktreePath, paths.configDir)
+	e.configureTmuxWindow(windowTarget)
+
+	if err := e.db.UpdateTaskDangerousMode(taskID, dangerousMode); err != nil {
+		e.logger.Warn("could not update task dangerous mode", "error", err)
+	}
+
+	e.logLine(taskID, "system", fmt.Sprintf("Codex restarted in %s mode", modeStr))
+	return true
+}
+
+// resumeGeminiWithMode kills the current Gemini process and restarts with the specified mode.
+// If dangerousMode is true, uses --dangerously-allow-run.
+func (e *Executor) resumeGeminiWithMode(task *db.Task, workDir string, dangerousMode bool) bool {
+	taskID := task.ID
+	paths := e.claudePathsForProject(task.Project)
+
+	sessionID := task.ClaudeSessionID
+	if sessionID == "" {
+		e.logLine(taskID, "system", "No Gemini session found - cannot toggle mode")
+		return false
+	}
+
+	// Validate session file exists before attempting resume
+	if !geminiSessionExists(sessionID) {
+		e.logLine(taskID, "system", fmt.Sprintf("Session %s no longer exists - cannot toggle mode", sessionID))
+		// Clear the stale session ID
+		if err := e.db.UpdateTaskClaudeSessionID(taskID, ""); err != nil {
+			e.logger.Warn("failed to clear stale session ID", "task", taskID, "error", err)
+		}
+		return false
+	}
+
+	modeStr := "safe"
+	if dangerousMode {
+		modeStr = "dangerous"
+	}
+	e.logLine(taskID, "system", fmt.Sprintf("Restarting Gemini in %s mode", modeStr))
+
+	if _, err := exec.LookPath("tmux"); err != nil {
+		e.logLine(taskID, "system", "Tmux not available - cannot resume")
+		return false
+	}
+
+	windowName := TmuxWindowName(taskID)
+	killAllWindowsByNameAllSessions(windowName)
+
+	daemonSession, err := ensureTmuxDaemon()
+	if err != nil {
+		e.logger.Warn("could not create task-daemon session", "error", err)
+		return false
+	}
+
+	windowTarget := fmt.Sprintf("%s:%s", daemonSession, windowName)
+
+	taskSessionID := os.Getenv("WORKTREE_SESSION_ID")
+	if taskSessionID == "" {
+		taskSessionID = fmt.Sprintf("%d", os.Getpid())
+	}
+
+	// Build dangerous flag
+	dangerousFlag := ""
+	if dangerousMode {
+		flag := strings.TrimSpace(os.Getenv("GEMINI_DANGEROUS_ARGS"))
+		if flag == "" {
+			flag = "--dangerously-allow-run"
+		}
+		dangerousFlag = flag + " "
+	}
+
+	// Build script with --resume flag
+	envPrefix := claudeEnvPrefix(paths.configDir)
+	script := fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %sgemini %s--resume %s`,
+		taskID, taskSessionID, task.Port, task.WorktreePath, envPrefix, dangerousFlag, sessionID)
+
+	actualSession, tmuxErr := createTmuxWindow(daemonSession, windowName, workDir, script)
+	if tmuxErr != nil {
+		e.logger.Warn("tmux failed to create window", "error", tmuxErr, "session", daemonSession)
+		return false
+	}
+
+	if actualSession != daemonSession {
+		windowTarget = fmt.Sprintf("%s:%s", actualSession, windowName)
+		daemonSession = actualSession
+	}
+
+	time.Sleep(200 * time.Millisecond)
+
+	if err := e.db.UpdateTaskDaemonSession(taskID, daemonSession); err != nil {
+		e.logger.Warn("failed to save daemon session", "task", taskID, "error", err)
+	}
+
+	if windowID := getWindowID(daemonSession, windowName); windowID != "" {
+		if err := e.db.UpdateTaskWindowID(taskID, windowID); err != nil {
+			e.logger.Warn("failed to save window ID", "task", taskID, "error", err)
+		}
+	}
+
+	e.ensureShellPane(windowTarget, workDir, task.ID, task.Port, task.WorktreePath, paths.configDir)
+	e.configureTmuxWindow(windowTarget)
+
+	if err := e.db.UpdateTaskDangerousMode(taskID, dangerousMode); err != nil {
+		e.logger.Warn("could not update task dangerous mode", "error", err)
+	}
+
+	e.logLine(taskID, "system", fmt.Sprintf("Gemini restarted in %s mode", modeStr))
+	return true
+}
+
 // FindClaudeSessionID finds the most recent claude session ID for a workDir using the default config dir.
 // Exported for use by the UI to check for resumable sessions.
 func FindClaudeSessionID(workDir string) string {
@@ -2416,6 +2696,21 @@ func findClaudeSessionIDImpl(workDir, configDir string) string {
 	}
 
 	return latestSession
+}
+
+// ClaudeSessionExists checks if a Claude session file exists for the given session ID and workDir.
+func ClaudeSessionExists(sessionID, workDir, configDir string) bool {
+	if sessionID == "" {
+		return false
+	}
+
+	baseDir := ResolveClaudeConfigDir(configDir)
+	escapedPath := strings.ReplaceAll(workDir, "/", "-")
+	escapedPath = strings.ReplaceAll(escapedPath, ".", "-")
+	sessionFile := filepath.Join(baseDir, "projects", escapedPath, sessionID+".jsonl")
+
+	_, err := os.Stat(sessionFile)
+	return err == nil
 }
 
 // RenameClaudeSession renames the Claude session for a given workDir to the new name.
@@ -2619,7 +2914,7 @@ func (e *Executor) ensureShellPane(windowTarget, workDir string, taskID int64, p
 		exec.CommandContext(ctx, "tmux", "send-keys", "-t", windowTarget+".1", fmt.Sprintf("cd %q", workDir), "Enter").Run()
 		// Set environment variables in the existing shell pane
 		envCmd := fmt.Sprintf("export WORKTREE_TASK_ID=%d WORKTREE_PORT=%d WORKTREE_PATH=%q", taskID, port, worktreePath)
-		if claudeConfigDir != "" {
+		if claudeConfigDir != "" && !isDefaultClaudeConfigDir(claudeConfigDir) {
 			envCmd += fmt.Sprintf(" CLAUDE_CONFIG_DIR=%q", claudeConfigDir)
 		}
 		exec.CommandContext(ctx, "tmux", "send-keys", "-t", windowTarget+".1", envCmd, "Enter").Run()
@@ -2663,7 +2958,7 @@ func (e *Executor) ensureShellPane(windowTarget, workDir string, taskID int64, p
 	// Set environment variables in the shell pane
 	// Use export commands so they persist for all commands in the shell
 	envCmd := fmt.Sprintf("export WORKTREE_TASK_ID=%d WORKTREE_PORT=%d WORKTREE_PATH=%q", taskID, port, worktreePath)
-	if claudeConfigDir != "" {
+	if claudeConfigDir != "" && !isDefaultClaudeConfigDir(claudeConfigDir) {
 		envCmd += fmt.Sprintf(" CLAUDE_CONFIG_DIR=%q", claudeConfigDir)
 	}
 	exec.CommandContext(ctx, "tmux", "send-keys", "-t", windowTarget+".1", envCmd, "Enter").Run()
@@ -2736,96 +3031,6 @@ func (e *Executor) logLine(taskID int64, lineType, content string) {
 		CreatedAt: db.LocalTime{Time: time.Now()},
 	}
 	e.broadcast(taskID, logEntry)
-}
-
-// getProjectMemoriesSection builds a context section from stored project memories.
-func (e *Executor) getProjectMemoriesSection(project string) string {
-	if project == "" {
-		return ""
-	}
-
-	memories, err := e.db.GetProjectMemories(project, 15)
-	if err != nil || len(memories) == 0 {
-		return ""
-	}
-
-	var sb strings.Builder
-	sb.WriteString("## Project Context (from previous tasks)\n\n")
-
-	// Group by category for better organization
-	byCategory := make(map[string][]*db.ProjectMemory)
-	for _, m := range memories {
-		byCategory[m.Category] = append(byCategory[m.Category], m)
-	}
-
-	categoryOrder := []string{
-		db.MemoryCategoryPattern,
-		db.MemoryCategoryContext,
-		db.MemoryCategoryDecision,
-		db.MemoryCategoryGotcha,
-		db.MemoryCategoryGeneral,
-	}
-	categoryLabels := map[string]string{
-		db.MemoryCategoryPattern:  "Patterns & Conventions",
-		db.MemoryCategoryContext:  "Project Context",
-		db.MemoryCategoryDecision: "Key Decisions",
-		db.MemoryCategoryGotcha:   "Known Gotchas",
-		db.MemoryCategoryGeneral:  "General Notes",
-	}
-
-	for _, cat := range categoryOrder {
-		mems := byCategory[cat]
-		if len(mems) == 0 {
-			continue
-		}
-		label := categoryLabels[cat]
-		if label == "" {
-			label = cat
-		}
-		sb.WriteString(fmt.Sprintf("### %s\n", label))
-		for _, m := range mems {
-			sb.WriteString(fmt.Sprintf("- %s\n", m.Content))
-		}
-		sb.WriteString("\n")
-	}
-
-	return sb.String()
-}
-
-
-// getSimilarTasksSection checks if similar past tasks exist and returns a hint.
-// Instead of injecting full content, we just notify Claude that the search tools are available.
-// Claude can then use workflow_search_tasks and workflow_show_task MCP tools on-demand.
-func (e *Executor) getSimilarTasksSection(task *db.Task) string {
-	if task.Project == "" {
-		return ""
-	}
-
-	// Quick check if any similar tasks exist
-	results, err := e.db.FindSimilarTasks(task, 1)
-	if err != nil || len(results) == 0 {
-		return ""
-	}
-
-	// Filter out the current task
-	hasSimilar := false
-	for _, r := range results {
-		if r.TaskID != task.ID {
-			hasSimilar = true
-			break
-		}
-	}
-
-	if !hasSimilar {
-		return ""
-	}
-
-	// Just return a hint - Claude can use MCP tools to look up details
-	return `## Past Task Reference
-
-Similar tasks have been completed in this project before. If you need to reference how similar work was done, use the workflow_search_tasks tool to find relevant past tasks, then workflow_show_task to get details.
-
-`
 }
 
 // getConversationHistory builds a context section from previous task runs.
@@ -3133,6 +3338,25 @@ func (e *Executor) setupWorktree(task *db.Task) (string, error) {
 		if output, err := cmd.CombinedOutput(); err != nil {
 			return "", fmt.Errorf("failed to create initial commit: %v\n%s", err, string(output))
 		}
+	} else {
+		// Git repo exists, but check if it has any commits
+		// Worktrees require at least one commit to have a base branch
+		cmd := exec.Command("git", "rev-parse", "HEAD")
+		cmd.Dir = projectDir
+		if err := cmd.Run(); err != nil {
+			// No commits exist - create an initial commit
+			e.logger.Warn("Git repo has no commits - creating initial commit", "project", task.Project, "path", projectDir)
+
+			cmd = exec.Command("git", "add", "-A")
+			cmd.Dir = projectDir
+			cmd.Run() // Ignore errors - might be empty repo
+
+			cmd = exec.Command("git", "commit", "--allow-empty", "-m", "Initial commit for taskyou worktree support")
+			cmd.Dir = projectDir
+			if output, err := cmd.CombinedOutput(); err != nil {
+				return "", fmt.Errorf("failed to create initial commit: %v\n%s", err, string(output))
+			}
+		}
 	}
 
 	// If task already has a worktree path, reuse it (don't recalculate from title)
@@ -3319,7 +3543,9 @@ func (e *Executor) writeWorktreeEnvFile(projectDir, worktreePath string, task *d
 export WORKTREE_PORT=%d
 export WORKTREE_PATH=%q
 `, task.ID, task.Port, worktreePath)
-	if claudeConfigDir != "" {
+	// Only include CLAUDE_CONFIG_DIR if it's different from the default.
+	// Setting it to the default breaks MCP discovery.
+	if claudeConfigDir != "" && !isDefaultClaudeConfigDir(claudeConfigDir) {
 		envContent += fmt.Sprintf("export CLAUDE_CONFIG_DIR=%q\n", claudeConfigDir)
 	}
 
@@ -3328,42 +3554,10 @@ export WORKTREE_PATH=%q
 		return fmt.Errorf("write .envrc: %w", err)
 	}
 
-	e.logLine(task.ID, "system", "Created .envrc with WORKTREE_TASK_ID, WORKTREE_PORT, WORKTREE_PATH, CLAUDE_CONFIG_DIR (use direnv or 'source .envrc')")
+	e.logLine(task.ID, "system", "Created .envrc with WORKTREE_TASK_ID, WORKTREE_PORT, WORKTREE_PATH (use direnv or 'source .envrc')")
 
-	// Add to .git/info/exclude in the main project so it doesn't show in git status
-	excludePath := filepath.Join(projectDir, ".git", "info", "exclude")
-
-	// Create the info directory if it doesn't exist
-	infoDir := filepath.Dir(excludePath)
-	if err := os.MkdirAll(infoDir, 0755); err != nil {
-		return fmt.Errorf("create .git/info directory: %w", err)
-	}
-
-	// Check if .envrc is already in the exclude file
-	excludeEntry := ".envrc"
-	excludeContent, err := os.ReadFile(excludePath)
-	if err == nil {
-		// File exists, check if entry is already there
-		lines := strings.Split(string(excludeContent), "\n")
-		for _, line := range lines {
-			if strings.TrimSpace(line) == excludeEntry {
-				return nil // Already excluded
-			}
-		}
-	}
-
-	// Append the exclude entry
-	f, err := os.OpenFile(excludePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-	if err != nil {
-		return fmt.Errorf("open exclude file: %w", err)
-	}
-	defer f.Close()
-
-	// Add newline before if file doesn't end with one
-	if len(excludeContent) > 0 && excludeContent[len(excludeContent)-1] != '\n' {
-		f.WriteString("\n")
-	}
-	f.WriteString(excludeEntry + "\n")
+	// Add .envrc to git exclude so it doesn't show in git status
+	ensureGitExclude(projectDir, ".envrc")
 
 	return nil
 }
@@ -3437,11 +3631,62 @@ func (e *Executor) claudePathsForProject(project string) claudePaths {
 	}
 }
 
+// isDefaultClaudeConfigDir returns true if dir is the default Claude config directory (~/.claude).
+// Setting CLAUDE_CONFIG_DIR to the default breaks MCP discovery because Claude then looks for
+// config at ~/.claude/.claude.json instead of ~/.claude.json.
+func isDefaultClaudeConfigDir(dir string) bool {
+	dir = strings.TrimSpace(dir)
+	if dir == "" {
+		return true
+	}
+	home, _ := os.UserHomeDir()
+	defaultDir := filepath.Join(home, ".claude")
+	return dir == defaultDir
+}
+
 func claudeEnvPrefix(dir string) string {
-	if strings.TrimSpace(dir) == "" {
+	dir = strings.TrimSpace(dir)
+	if dir == "" || isDefaultClaudeConfigDir(dir) {
 		return ""
 	}
 	return fmt.Sprintf("CLAUDE_CONFIG_DIR=%q ", dir)
+}
+
+// ensureGitExclude adds an entry to .git/info/exclude if not already present.
+// This prevents generated files (symlinks, .envrc) from showing in git status
+// without modifying the shared .gitignore file.
+func ensureGitExclude(projectDir, entry string) {
+	excludePath := filepath.Join(projectDir, ".git", "info", "exclude")
+
+	// Create the info directory if it doesn't exist
+	infoDir := filepath.Dir(excludePath)
+	if err := os.MkdirAll(infoDir, 0755); err != nil {
+		return
+	}
+
+	// Check if entry is already in the exclude file
+	excludeContent, err := os.ReadFile(excludePath)
+	if err == nil {
+		lines := strings.Split(string(excludeContent), "\n")
+		for _, line := range lines {
+			if strings.TrimSpace(line) == entry {
+				return // Already present
+			}
+		}
+	}
+
+	// Append the exclude entry
+	f, err := os.OpenFile(excludePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+
+	// Add newline before entry if file doesn't end with one
+	if len(excludeContent) > 0 && excludeContent[len(excludeContent)-1] != '\n' {
+		f.WriteString("\n")
+	}
+	f.WriteString(entry + "\n")
 }
 
 // symlinkClaudeConfig symlinks the worktree's .claude directory to the main project's .claude.
@@ -3480,6 +3725,11 @@ func symlinkClaudeConfig(projectDir, worktreePath string) error {
 	if err := os.Symlink(mainClaudeDir, worktreeClaudeDir); err != nil {
 		return fmt.Errorf("create .claude symlink: %w", err)
 	}
+
+	// Exclude .claude from git so the symlink isn't accidentally committed.
+	// The .gitignore entry ".claude/" (with trailing slash) only matches directories, not symlinks.
+	// Use projectDir because worktree .git is a file pointing to the main repo's git dir.
+	ensureGitExclude(projectDir, ".claude")
 
 	return nil
 }
@@ -3523,6 +3773,10 @@ func symlinkMCPConfig(projectDir, worktreePath string) error {
 	if err := os.Symlink(mainMCPFile, worktreeMCPFile); err != nil {
 		return fmt.Errorf("create .mcp.json symlink: %w", err)
 	}
+
+	// Exclude .mcp.json from git so the symlink isn't accidentally committed.
+	// Use projectDir because worktree .git is a file pointing to the main repo's git dir.
+	ensureGitExclude(projectDir, ".mcp.json")
 
 	return nil
 }

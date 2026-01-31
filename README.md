@@ -1,6 +1,6 @@
 # Task You
 
-A personal task management system with a beautiful terminal UI, SQLite storage, and background task execution via pluggable AI agents (Claude Code or OpenAI Codex CLI).
+A personal task management system with a beautiful terminal UI, SQLite storage, and background task execution via pluggable AI agents (Claude Code, OpenAI Codex, Gemini, or OpenClaw).
 
 ## Screenshots
 
@@ -24,15 +24,14 @@ A personal task management system with a beautiful terminal UI, SQLite storage, 
 
 - **Kanban Board** - Visual task management with 4 columns (Backlog, In Progress, Blocked, Done)
 - **Git Worktrees** - Each task runs in an isolated worktree, no conflicts between parallel tasks
-- **Pluggable Executors** - Choose between Claude Code or OpenAI Codex CLI per task
+- **Pluggable Executors** - Choose between Claude Code, OpenAI Codex, Gemini, or OpenClaw per task
 - **Ghost Text Autocomplete** - LLM-powered suggestions for task titles and descriptions as you type
 - **VS Code-style Fuzzy Search** - Quick task navigation with smart matching (e.g., "dsno" matches "diseno website")
 - **Markdown Rendering** - Task descriptions render with proper formatting in the detail view
-- **Project Memories** - Persistent context that carries across tasks
 - **Real-time Updates** - Watch tasks execute live
 - **Running Process Indicator** - Green dot (`●`) shows which tasks have active shell processes (servers, watchers, etc.)
 - **Auto-cleanup** - Automatic cleanup of Claude processes and config entries for completed tasks
-- **Automation-Ready CLI** - Every Kanban action is also exposed via the `task` CLI, making it trivial to script or plug in your own orchestrator (see [external orchestration docs](docs/orchestrator.md))
+- **Automation-Ready CLI** - Every Kanban action is also exposed via the `ty` CLI, making it trivial to script or plug in your own orchestrator (see [external orchestration docs](docs/orchestrator.md))
 - **SSH Access** - Connect from anywhere via `ssh -p 2222 server`
 
 ## Prerequisites
@@ -55,22 +54,48 @@ Install Go 1.24.4 or later from [go.dev/dl](https://go.dev/dl/).
 
 ## Installation
 
+### Quick Install (recommended)
+
 ```bash
-git clone https://github.com/bborn/workflow
-cd workflow
+curl -fsSL taskyou.dev/install.sh | bash
+```
+
+This downloads the latest release and installs `ty` (with `taskyou` as an alias) to `~/.local/bin`.
+
+You can also specify a custom install directory:
+
+```bash
+INSTALL_DIR=~/.local/bin curl -fsSL taskyou.dev/install.sh | bash
+```
+
+### Build from source
+
+```bash
+git clone https://github.com/bborn/taskyou
+cd taskyou
 make build
+```
+
+### Run on exe.dev (cloud)
+
+Spin up TaskYou instantly on [exe.dev](https://exe.dev):
+
+```bash
+ssh exe.dev 'new --name=tasks --prompt="Run: curl -fsSL taskyou.dev/install.sh | bash"'
+ssh tasks.exe.xyz
+~/.local/bin/task
 ```
 
 ## Usage
 
-### Run locally
+### Run locally (default)
 
 ```bash
 # Launch the TUI (auto-starts background daemon)
-./bin/task -l
+./bin/ty
 ```
 
-### Run on server
+### Connect to remote server
 
 ```bash
 # Start the SSH server + executor
@@ -83,25 +108,25 @@ ssh -p 2222 your-server
 ### Daemon management
 
 ```bash
-./bin/task daemon         # Start daemon manually
-./bin/task daemon stop    # Stop the daemon
-./bin/task daemon status  # Check daemon status
+./bin/ty daemon         # Start daemon manually
+./bin/ty daemon stop    # Stop the daemon
+./bin/ty daemon status  # Check daemon status
 ```
 
 ### Maintenance commands
 
 ```bash
-./bin/task purge-claude-config            # Remove stale ~/.claude.json entries
-./bin/task purge-claude-config --dry-run  # Preview what would be removed
-./bin/task claudes cleanup                # Kill orphaned Claude processes
+./bin/ty purge-claude-config            # Remove stale ~/.claude.json entries
+./bin/ty purge-claude-config --dry-run  # Preview what would be removed
+./bin/ty claudes cleanup                # Kill orphaned Claude processes
 ```
 
 ### External orchestration
 
 Need an always-on supervisor or LLM agent? Keep it outside Task You and use the CLI instead:
 
-- `task board --json` surfaces the full Kanban snapshot
-- `task pin`, `task status`, `task execute`, `task retry`, etc. mirror every interaction from the TUI
+- `ty board --json` surfaces the full Kanban snapshot
+- `ty pin`, `ty status`, `ty execute`, `ty retry`, etc. mirror every interaction from the TUI
 - See [docs/orchestrator.md](docs/orchestrator.md) for a step-by-step Claude example
 
 **Auto-cleanup:** The daemon automatically cleans up Claude processes for tasks that have been done for more than 30 minutes, preventing memory bloat from orphaned processes.
@@ -125,7 +150,6 @@ Need an always-on supervisor or LLM agent? Keep it outside Task You and use the 
 | `o` | Open task's working directory |
 | `p` | Command palette (fuzzy search) |
 | `/` | Filter tasks |
-| `m` | Project memories |
 | `s` | Settings |
 | `?` | Toggle help |
 | `q` | Quit |
@@ -183,11 +207,12 @@ Task You supports multiple AI executors for processing tasks. You can choose the
 | Claude (default) | `claude` | [Claude Code](https://claude.ai/claude-code) - Anthropic's coding agent with session resumption |
 | Codex | `codex` | [OpenAI Codex CLI](https://github.com/openai/codex) - OpenAI's coding assistant |
 | Gemini | `gemini` | [Gemini CLI](https://ai.google.dev/gemini-api/docs/cli) - Google's Gemini-based coding assistant |
+| OpenClaw | `openclaw` | [OpenClaw](https://openclaw.ai) - Open-source personal AI assistant with session resumption |
 
-Both executors run in tmux windows with the same worktree isolation and environment variables. The main differences:
+All executors run in tmux windows with the same worktree isolation and environment variables. The main differences:
 
-- **Claude Code** supports session resumption - when you retry a task, Claude continues with full conversation history
-- **Codex** starts fresh on each execution but receives the full prompt with any feedback
+- **Claude Code** and **OpenClaw** support session resumption - when you retry a task, they continue with full conversation history
+- **Codex** and **Gemini** start fresh on each execution but receive the full prompt with any feedback
 
 ### Installing Executors
 
@@ -202,6 +227,10 @@ npm install -g @openai/codex
 
 # Google Gemini CLI
 # See https://ai.google.dev/gemini-api/docs/cli for installation instructions
+
+# OpenClaw
+npm install -g openclaw@latest
+openclaw onboard  # Run setup wizard
 ```
 
 ### How Task Executors Work
@@ -249,10 +278,10 @@ Each task tracks its executor state in the database:
 
 ```bash
 # List all running executor processes
-./bin/task claudes list
+./bin/ty claudes list
 
 # Kill orphaned executor processes
-./bin/task claudes cleanup
+./bin/ty claudes cleanup
 ```
 
 **Inside a task worktree:**
@@ -285,7 +314,7 @@ Claude Code supports **session resumption** - when you retry a task or press `R`
 
 This means when you retry a blocked task with feedback, Claude doesn't start over—it continues the conversation with full awareness of what it already tried.
 
-**Note:** Codex does not support session resumption. When retrying a Codex task, it receives the full prompt including any feedback, but starts a fresh session.
+**Note:** Codex and Gemini do not support session resumption. When retrying these tasks, they receive the full prompt including any feedback, but start a fresh session. Claude Code and OpenClaw support full session resumption.
 
 #### Lifecycle & Cleanup
 
@@ -300,11 +329,11 @@ This means when you retry a blocked task with feedback, Claude doesn't start ove
 
 ### Settings
 
-Manage settings with `task settings`:
+Manage settings with `ty settings`:
 
 ```bash
-task settings                              # View all settings
-task settings set <key> <value>            # Set a value
+ty settings                              # View all settings
+ty settings set <key> <value>            # Set a value
 ```
 
 | Setting | Description |
@@ -323,7 +352,7 @@ LLM-powered suggestions appear as you type task titles and descriptions, similar
 
 **Setup:**
 ```bash
-task settings set anthropic_api_key sk-ant-your-key-here
+ty settings set anthropic_api_key sk-ant-your-key-here
 ```
 
 **Controls:**
@@ -580,16 +609,6 @@ curl -X POST -H 'Content-type: application/json' \
 - Hooks run in the background (non-blocking) with a 30-second timeout
 - Hook failures are logged but don't affect task execution
 - The hooks directory is created automatically at `~/.config/task/hooks/`
-
-### Memories
-
-Project memories provide persistent context for the AI. Press `m` to manage.
-
-Categories:
-- `pattern` - Code patterns and conventions
-- `context` - Project-specific context  
-- `decision` - Architectural decisions
-- `gotcha` - Known pitfalls and workarounds
 
 ## Development
 

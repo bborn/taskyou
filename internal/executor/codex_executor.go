@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -110,15 +111,29 @@ func (c *CodexExecutor) runCodex(ctx context.Context, task *db.Task, workDir, pr
 	// interactive mode (--full-auto is only for `codex exec`).
 	var script string
 	dangerousFlag := ""
-	if os.Getenv("WORKTREE_DANGEROUS_MODE") == "1" {
+	if task.DangerousMode || os.Getenv("WORKTREE_DANGEROUS_MODE") == "1" {
 		dangerousFlag = "--dangerously-bypass-approvals-and-sandbox "
 	}
 
-	// Note: Codex doesn't have built-in session resume like Claude,
-	// so we always start fresh but include full context
+	// Check for existing session to resume (validate file exists first)
+	resumeFlag := ""
+	existingSessionID := task.ClaudeSessionID
+	if existingSessionID != "" && isResume {
+		if codexSessionExists(existingSessionID) {
+			resumeFlag = fmt.Sprintf("--resume %s ", existingSessionID)
+			c.executor.logLine(task.ID, "system", fmt.Sprintf("Resuming Codex session %s", existingSessionID))
+		} else {
+			c.executor.logLine(task.ID, "system", fmt.Sprintf("Session %s no longer exists, starting fresh", existingSessionID))
+			// Clear the stale session ID
+			if err := c.executor.db.UpdateTaskClaudeSessionID(task.ID, ""); err != nil {
+				c.logger.Warn("failed to clear stale session ID", "task", task.ID, "error", err)
+			}
+		}
+	}
+
 	envPrefix := claudeEnvPrefix(paths.configDir)
-	script = fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %scodex %s"$(cat %q)"`,
-		task.ID, sessionID, task.Port, task.WorktreePath, envPrefix, dangerousFlag, promptFile.Name())
+	script = fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %scodex %s%s"$(cat %q)"`,
+		task.ID, sessionID, task.Port, task.WorktreePath, envPrefix, dangerousFlag, resumeFlag, promptFile.Name())
 
 	// Create new window in task-daemon session
 	actualSession, tmuxErr := createTmuxWindow(daemonSession, windowName, workDir, script)
@@ -305,9 +320,6 @@ func (c *CodexExecutor) ResumeProcess(taskID int64) bool {
 
 // BuildCommand returns the shell command to start an interactive Codex session.
 func (c *CodexExecutor) BuildCommand(task *db.Task, sessionID, prompt string) string {
-	// Note: Codex doesn't support --resume like Claude, so sessionID is ignored
-	// and we always start fresh with the full prompt
-
 	// Build dangerous mode flag
 	dangerousFlag := ""
 	if task.DangerousMode || os.Getenv("WORKTREE_DANGEROUS_MODE") == "1" {
@@ -320,22 +332,123 @@ func (c *CodexExecutor) BuildCommand(task *db.Task, sessionID, prompt string) st
 		worktreeSessionID = fmt.Sprintf("%d", os.Getpid())
 	}
 
+	// Build resume flag if we have a session ID
+	resumeFlag := ""
+	if sessionID != "" {
+		resumeFlag = fmt.Sprintf("--resume %s ", sessionID)
+	}
+
 	// If prompt is provided, write to temp file and pass it
 	if prompt != "" {
 		// Create temp file for prompt (avoids shell quoting issues)
 		promptFile, err := os.CreateTemp("", "task-prompt-*.txt")
 		if err != nil {
 			c.logger.Error("BuildCommand: failed to create temp file", "error", err)
-			return fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q codex %s`,
-				task.ID, worktreeSessionID, task.Port, task.WorktreePath, dangerousFlag)
+			return fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q codex %s%s`,
+				task.ID, worktreeSessionID, task.Port, task.WorktreePath, dangerousFlag, resumeFlag)
 		}
 		promptFile.WriteString(prompt)
 		promptFile.Close()
 
-		return fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q codex %s"$(cat %q)"; rm -f %q`,
-			task.ID, worktreeSessionID, task.Port, task.WorktreePath, dangerousFlag, promptFile.Name(), promptFile.Name())
+		return fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q codex %s%s"$(cat %q)"; rm -f %q`,
+			task.ID, worktreeSessionID, task.Port, task.WorktreePath, dangerousFlag, resumeFlag, promptFile.Name(), promptFile.Name())
 	}
 
-	return fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q codex %s`,
-		task.ID, worktreeSessionID, task.Port, task.WorktreePath, dangerousFlag)
+	return fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q codex %s%s`,
+		task.ID, worktreeSessionID, task.Port, task.WorktreePath, dangerousFlag, resumeFlag)
+}
+
+// ---- Session and Dangerous Mode Support ----
+
+// SupportsSessionResume returns true - Codex supports session resume via --resume.
+func (c *CodexExecutor) SupportsSessionResume() bool {
+	return true
+}
+
+// SupportsDangerousMode returns true - Codex supports --dangerously-bypass-approvals-and-sandbox.
+func (c *CodexExecutor) SupportsDangerousMode() bool {
+	return true
+}
+
+// FindSessionID discovers the most recent Codex session ID for the given workDir.
+// Codex stores sessions in ~/.codex/sessions/ with project-specific subdirectories.
+func (c *CodexExecutor) FindSessionID(workDir string) string {
+	return findCodexSessionID(workDir)
+}
+
+// ResumeDangerous kills the current Codex process and restarts with --dangerously-bypass-approvals-and-sandbox.
+func (c *CodexExecutor) ResumeDangerous(task *db.Task, workDir string) bool {
+	return c.executor.resumeCodexWithMode(task, workDir, true)
+}
+
+// ResumeSafe kills the current Codex process and restarts without the dangerous flag.
+func (c *CodexExecutor) ResumeSafe(task *db.Task, workDir string) bool {
+	return c.executor.resumeCodexWithMode(task, workDir, false)
+}
+
+// findCodexSessionID discovers the most recent Codex session ID for the given workDir.
+// Codex stores sessions in ~/.codex/sessions/ directory.
+func findCodexSessionID(workDir string) string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+
+	sessionsDir := filepath.Join(home, ".codex", "sessions")
+	if _, err := os.Stat(sessionsDir); os.IsNotExist(err) {
+		return ""
+	}
+
+	// Find session files and return the most recent one for this workDir
+	// Codex session files are JSON with the session metadata
+	var mostRecent string
+	var mostRecentTime time.Time
+
+	filepath.Walk(sessionsDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() {
+			return nil
+		}
+
+		// Only process .json files
+		if !strings.HasSuffix(info.Name(), ".json") {
+			return nil
+		}
+
+		// Read the session file to check if it matches the workDir
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return nil
+		}
+
+		// Check if this session is for our workDir
+		if strings.Contains(string(data), workDir) {
+			if info.ModTime().After(mostRecentTime) {
+				mostRecentTime = info.ModTime()
+				// Extract session ID from filename (remove .json extension)
+				mostRecent = strings.TrimSuffix(info.Name(), ".json")
+			}
+		}
+
+		return nil
+	})
+
+	return mostRecent
+}
+
+// codexSessionExists checks if a Codex session file exists for the given session ID.
+func codexSessionExists(sessionID string) bool {
+	if sessionID == "" {
+		return false
+	}
+
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return false
+	}
+
+	sessionsDir := filepath.Join(home, ".codex", "sessions")
+	sessionFile := filepath.Join(sessionsDir, sessionID+".json")
+
+	_, err = os.Stat(sessionFile)
+	return err == nil
 }

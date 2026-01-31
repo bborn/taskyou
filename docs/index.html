@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TaskYou - Personal Task Management</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@500;700;800;900&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --midnight-navy: #0a2540;
+            --deep-navy: #1a365d;
+            --electric-purple: #635bff;
+            --violet: #a855f7;
+            --cyan-glow: #80e9ff;
+            --cloud-white: #f6f9fc;
+            --pure-white: #ffffff;
+            --slate: #94a3b8;
+        }
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+            background: linear-gradient(135deg, var(--midnight-navy) 0%, var(--deep-navy) 100%);
+            color: var(--pure-white);
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            padding: 2rem;
+        }
+        .container {
+            max-width: 700px;
+            text-align: center;
+        }
+        h1 {
+            font-size: clamp(3rem, 10vw, 5rem);
+            font-weight: 900;
+            letter-spacing: -3px;
+            margin-bottom: 1rem;
+            background: linear-gradient(135deg, var(--pure-white) 0%, var(--cyan-glow) 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+        .tagline {
+            font-size: 1.5rem;
+            font-weight: 500;
+            color: var(--slate);
+            margin-bottom: 2.5rem;
+        }
+        .demo-video {
+            width: 100%;
+            max-width: 640px;
+            border-radius: 16px;
+            cursor: pointer;
+            margin: 2rem 0;
+            box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
+        }
+        .install-box {
+            background: rgba(255, 255, 255, 0.05);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 24px;
+            padding: 2rem;
+            margin: 2rem 0;
+        }
+        .install-label {
+            font-size: 0.875rem;
+            font-weight: 600;
+            color: var(--slate);
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin-bottom: 1rem;
+        }
+        .install-cmd {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 1rem;
+            font-weight: 500;
+            color: var(--cyan-glow);
+            background: var(--midnight-navy);
+            padding: 1rem 1.5rem;
+            border-radius: 12px;
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+        .install-cmd:hover {
+            background: #0d2d4d;
+            transform: translateY(-1px);
+        }
+        .links {
+            margin-top: 2.5rem;
+            display: flex;
+            justify-content: center;
+            gap: 1rem;
+        }
+        .links a {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.875rem;
+            font-weight: 600;
+            color: var(--pure-white);
+            text-decoration: none;
+            padding: 12px 24px;
+            border-radius: 100px;
+            background: rgba(255, 255, 255, 0.1);
+            transition: all 0.2s ease;
+        }
+        .links a:hover {
+            background: var(--electric-purple);
+            transform: translateY(-1px);
+        }
+        .copied {
+            color: var(--electric-purple) !important;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <img src="images/logo.webp" alt="TaskYou mascot" style="width: 120px; height: auto; margin-bottom: 1rem;">
+        <h1>TaskYou</h1>
+        <p class="tagline">Kanban for Claude Code.</p>
+
+        <video class="demo-video" autoplay muted playsinline onclick="toggleVideo(this)" onended="this.currentTime=0; this.muted=true;">
+            <source src="TaskYouDemo.mp4" type="video/mp4">
+        </video>
+
+        <div class="install-box">
+            <div class="install-label">Install with one command</div>
+            <div class="install-cmd" onclick="copyInstall(this, 'curl -fsSL taskyou.dev/install.sh | bash')">
+                curl -fsSL taskyou.dev/install.sh | bash
+            </div>
+        </div>
+
+        <div class="install-box">
+            <div class="install-label">Or run instantly on <a href="https://exe.dev" style="color: var(--cyan-glow); text-decoration: none;">exe.dev</a></div>
+            <div class="install-cmd" onclick="copyInstall(this, 'ssh exe.dev \'new --name=tasks --prompt=\"Run: curl -fsSL taskyou.dev/install.sh | bash\"\'')">
+                ssh exe.dev 'new --name=tasks --prompt="Run: curl -fsSL taskyou.dev/install.sh | bash"'
+            </div>
+        </div>
+
+        <div class="links">
+            <a href="https://github.com/bborn/taskyou">GitHub</a>
+            <a href="https://github.com/bborn/taskyou#readme">Docs</a>
+        </div>
+    </div>
+
+    <script>
+        function toggleVideo(video) {
+            if (video.muted) {
+                video.currentTime = 0;
+                video.muted = false;
+                video.play();
+            } else if (video.paused) {
+                video.play();
+            } else {
+                video.pause();
+            }
+        }
+        function copyInstall(el, cmd) {
+            navigator.clipboard.writeText(cmd);
+            el.classList.add('copied');
+            const original = el.textContent;
+            el.textContent = 'Copied!';
+            setTimeout(() => {
+                el.classList.remove('copied');
+                el.textContent = original;
+            }, 2000);
+        }
+    </script>
+</body>
+</html>

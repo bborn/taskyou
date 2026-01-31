@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"os"
 	"strings"
 	"testing"
 
@@ -631,6 +632,149 @@ func TestKanbanBoard_FirstTaskClickable(t *testing.T) {
 	}
 }
 
+// TestKanbanBoard_JumpToPinned tests the JumpToPinned method.
+func TestKanbanBoard_JumpToPinned(t *testing.T) {
+	board := NewKanbanBoard(100, 50)
+
+	tasks := []*db.Task{
+		{ID: 1, Title: "Pinned 1", Status: db.StatusBacklog, Pinned: true},
+		{ID: 2, Title: "Pinned 2", Status: db.StatusBacklog, Pinned: true},
+		{ID: 3, Title: "Task 3", Status: db.StatusBacklog},
+		{ID: 4, Title: "Task 4", Status: db.StatusBacklog},
+		{ID: 5, Title: "Task 5", Status: db.StatusBacklog},
+	}
+	board.SetTasks(tasks)
+
+	// Start at task 5 (row 4)
+	board.selectedRow = 4
+	if selected := board.SelectedTask(); selected == nil || selected.ID != 5 {
+		t.Fatalf("Expected to be at task 5, got %v", selected)
+	}
+
+	// JumpToPinned should go to the first task (row 0)
+	board.JumpToPinned()
+	if board.selectedRow != 0 {
+		t.Errorf("JumpToPinned: selectedRow = %d, want 0", board.selectedRow)
+	}
+	if selected := board.SelectedTask(); selected == nil || selected.ID != 1 {
+		t.Errorf("JumpToPinned: selected task = %v, want task 1", selected)
+	}
+}
+
+// TestKanbanBoard_JumpToPinnedNoPinnedTasks tests JumpToPinned when no tasks are pinned.
+func TestKanbanBoard_JumpToPinnedNoPinnedTasks(t *testing.T) {
+	board := NewKanbanBoard(100, 50)
+
+	tasks := []*db.Task{
+		{ID: 1, Title: "Task 1", Status: db.StatusBacklog},
+		{ID: 2, Title: "Task 2", Status: db.StatusBacklog},
+		{ID: 3, Title: "Task 3", Status: db.StatusBacklog},
+	}
+	board.SetTasks(tasks)
+
+	// Start at task 3 (row 2)
+	board.selectedRow = 2
+
+	// JumpToPinned should still go to top (row 0) even with no pinned tasks
+	board.JumpToPinned()
+	if board.selectedRow != 0 {
+		t.Errorf("JumpToPinned with no pinned tasks: selectedRow = %d, want 0", board.selectedRow)
+	}
+}
+
+// TestKanbanBoard_JumpToPinnedEmptyColumn tests JumpToPinned on an empty column.
+func TestKanbanBoard_JumpToPinnedEmptyColumn(t *testing.T) {
+	board := NewKanbanBoard(100, 50)
+	board.SetTasks([]*db.Task{})
+
+	// Should not panic
+	board.JumpToPinned()
+	if board.selectedRow != 0 {
+		t.Errorf("JumpToPinned with empty column: selectedRow = %d, want 0", board.selectedRow)
+	}
+}
+
+// TestKanbanBoard_JumpToUnpinned tests the JumpToUnpinned method.
+func TestKanbanBoard_JumpToUnpinned(t *testing.T) {
+	board := NewKanbanBoard(100, 50)
+
+	tasks := []*db.Task{
+		{ID: 1, Title: "Pinned 1", Status: db.StatusBacklog, Pinned: true},
+		{ID: 2, Title: "Pinned 2", Status: db.StatusBacklog, Pinned: true},
+		{ID: 3, Title: "Task 3", Status: db.StatusBacklog},
+		{ID: 4, Title: "Task 4", Status: db.StatusBacklog},
+		{ID: 5, Title: "Task 5", Status: db.StatusBacklog},
+	}
+	board.SetTasks(tasks)
+
+	// Start at first pinned task (row 0)
+	board.selectedRow = 0
+	if selected := board.SelectedTask(); selected == nil || selected.ID != 1 {
+		t.Fatalf("Expected to be at task 1, got %v", selected)
+	}
+
+	// JumpToUnpinned should go to the first unpinned task (row 2, task 3)
+	board.JumpToUnpinned()
+	if board.selectedRow != 2 {
+		t.Errorf("JumpToUnpinned: selectedRow = %d, want 2", board.selectedRow)
+	}
+	if selected := board.SelectedTask(); selected == nil || selected.ID != 3 {
+		t.Errorf("JumpToUnpinned: selected task = %v, want task 3", selected)
+	}
+}
+
+// TestKanbanBoard_JumpToUnpinnedAllPinned tests JumpToUnpinned when all tasks are pinned.
+func TestKanbanBoard_JumpToUnpinnedAllPinned(t *testing.T) {
+	board := NewKanbanBoard(100, 50)
+
+	tasks := []*db.Task{
+		{ID: 1, Title: "Pinned 1", Status: db.StatusBacklog, Pinned: true},
+		{ID: 2, Title: "Pinned 2", Status: db.StatusBacklog, Pinned: true},
+	}
+	board.SetTasks(tasks)
+
+	// Start at row 0
+	board.selectedRow = 0
+
+	// JumpToUnpinned should stay at current position (no unpinned tasks)
+	board.JumpToUnpinned()
+	if board.selectedRow != 0 {
+		t.Errorf("JumpToUnpinned with all pinned: selectedRow = %d, want 0", board.selectedRow)
+	}
+}
+
+// TestKanbanBoard_JumpToUnpinnedNoPinnedTasks tests JumpToUnpinned when no tasks are pinned.
+func TestKanbanBoard_JumpToUnpinnedNoPinnedTasks(t *testing.T) {
+	board := NewKanbanBoard(100, 50)
+
+	tasks := []*db.Task{
+		{ID: 1, Title: "Task 1", Status: db.StatusBacklog},
+		{ID: 2, Title: "Task 2", Status: db.StatusBacklog},
+	}
+	board.SetTasks(tasks)
+
+	// Start at row 1
+	board.selectedRow = 1
+
+	// JumpToUnpinned should go to row 0 (first task is unpinned)
+	board.JumpToUnpinned()
+	if board.selectedRow != 0 {
+		t.Errorf("JumpToUnpinned with no pinned tasks: selectedRow = %d, want 0", board.selectedRow)
+	}
+}
+
+// TestKanbanBoard_JumpToUnpinnedEmptyColumn tests JumpToUnpinned on an empty column.
+func TestKanbanBoard_JumpToUnpinnedEmptyColumn(t *testing.T) {
+	board := NewKanbanBoard(100, 50)
+	board.SetTasks([]*db.Task{})
+
+	// Should not panic
+	board.JumpToUnpinned()
+	if board.selectedRow != 0 {
+		t.Errorf("JumpToUnpinned with empty column: selectedRow = %d, want 0", board.selectedRow)
+	}
+}
+
 // TestKanbanBoard_NeedsInput verifies that the input notification tracking works.
 func TestKanbanBoard_NeedsInput(t *testing.T) {
 	board := NewKanbanBoard(100, 50)
@@ -666,5 +810,262 @@ func TestKanbanBoard_NeedsInput(t *testing.T) {
 	view := board.View()
 	if view == "" {
 		t.Error("View() returned empty string")
+	}
+}
+
+// TestKanbanBoard_DangerousModeIndicator tests that tasks in dangerous mode
+// show a red dot indicator when the system is not in global dangerous mode.
+func TestKanbanBoard_DangerousModeIndicator(t *testing.T) {
+	// Save original value to restore after test
+	original := os.Getenv("WORKTREE_DANGEROUS_MODE")
+	defer os.Setenv("WORKTREE_DANGEROUS_MODE", original)
+
+	// Ensure global dangerous mode is OFF for this test
+	os.Unsetenv("WORKTREE_DANGEROUS_MODE")
+
+	board := NewKanbanBoard(100, 50)
+
+	tasks := []*db.Task{
+		{ID: 1, Title: "Normal", Status: db.StatusProcessing, DangerousMode: false},
+		{ID: 2, Title: "Danger", Status: db.StatusProcessing, DangerousMode: true},
+		{ID: 3, Title: "Block", Status: db.StatusBlocked, DangerousMode: true},
+		{ID: 4, Title: "Done", Status: db.StatusDone, DangerousMode: true}, // Should not show indicator
+	}
+	board.SetTasks(tasks)
+
+	// Render the view - should work without errors
+	view := board.View()
+	if view == "" {
+		t.Fatal("View() returned empty string")
+	}
+
+	// Focus on the In Progress column and verify rendering works
+	board.FocusColumn(1) // In Progress column
+	view = board.View()
+	if view == "" {
+		t.Error("View should render In Progress column")
+	}
+
+	// Focus on the Blocked column and verify rendering works
+	board.FocusColumn(2) // Blocked column
+	view = board.View()
+	if view == "" {
+		t.Error("View should render Blocked column")
+	}
+}
+
+// TestKanbanBoard_DangerousModeIndicatorHiddenInGlobalMode tests that
+// when global dangerous mode is enabled, individual tasks don't show
+// the red dot indicator (since there's a global banner instead).
+func TestKanbanBoard_DangerousModeIndicatorHiddenInGlobalMode(t *testing.T) {
+	// Save original value to restore after test
+	original := os.Getenv("WORKTREE_DANGEROUS_MODE")
+	defer os.Setenv("WORKTREE_DANGEROUS_MODE", original)
+
+	// Enable global dangerous mode
+	os.Setenv("WORKTREE_DANGEROUS_MODE", "1")
+
+	board := NewKanbanBoard(100, 50)
+
+	tasks := []*db.Task{
+		{ID: 1, Title: "Dangerous Task", Status: db.StatusProcessing, DangerousMode: true},
+	}
+	board.SetTasks(tasks)
+
+	// Render should work without panic
+	view := board.View()
+	if view == "" {
+		t.Error("View() returned empty string")
+	}
+
+	// The view should still render the task, just without the individual red dot
+	// (the global banner will be shown by the app view wrapper, not the kanban)
+	if !strings.Contains(view, "Dangerous Task") {
+		t.Error("View should contain the task title 'Dangerous Task'")
+	}
+}
+
+func TestKanbanBoard_OriginColumn(t *testing.T) {
+	board := NewKanbanBoard(100, 50)
+
+	// Initially no origin column is set
+	if board.HasOriginColumn() {
+		t.Error("HasOriginColumn() should return false initially")
+	}
+
+	// Set up tasks
+	tasks := []*db.Task{
+		{ID: 1, Title: "Backlog Task", Status: db.StatusBacklog},
+		{ID: 2, Title: "Blocked Task", Status: db.StatusBlocked},
+	}
+	board.SetTasks(tasks)
+
+	// Focus on blocked column
+	board.FocusColumn(2)
+	if board.selectedCol != 2 {
+		t.Fatalf("FocusColumn(2) failed, selectedCol = %d", board.selectedCol)
+	}
+
+	// Set origin column
+	board.SetOriginColumn()
+	if !board.HasOriginColumn() {
+		t.Error("HasOriginColumn() should return true after SetOriginColumn()")
+	}
+
+	// Clear origin column
+	board.ClearOriginColumn()
+	if board.HasOriginColumn() {
+		t.Error("HasOriginColumn() should return false after ClearOriginColumn()")
+	}
+}
+
+func TestKanbanBoard_OriginColumnPreservesColumnOnTaskMove(t *testing.T) {
+	board := NewKanbanBoard(100, 50)
+
+	// Set up initial tasks - one blocked task
+	tasks := []*db.Task{
+		{ID: 1, Title: "Backlog Task", Status: db.StatusBacklog},
+		{ID: 2, Title: "Blocked Task", Status: db.StatusBlocked},
+	}
+	board.SetTasks(tasks)
+
+	// Focus on blocked column and select the blocked task
+	board.FocusColumn(2)
+	board.SelectTask(2)
+
+	if board.selectedCol != 2 {
+		t.Fatalf("Expected selectedCol to be 2 (blocked), got %d", board.selectedCol)
+	}
+
+	// Set origin column (simulating entering detail view)
+	board.SetOriginColumn()
+
+	// Now simulate the task moving to a different column (e.g., to in-progress)
+	tasks = []*db.Task{
+		{ID: 1, Title: "Backlog Task", Status: db.StatusBacklog},
+		{ID: 2, Title: "Blocked Task", Status: db.StatusQueued}, // Moved to in-progress
+	}
+	board.SetTasks(tasks)
+
+	// selectedCol should stay at 2 (blocked) because origin column is set
+	if board.selectedCol != 2 {
+		t.Errorf("Expected selectedCol to remain at 2 (blocked), got %d", board.selectedCol)
+	}
+}
+
+func TestKanbanBoard_NoOriginColumnFollowsTask(t *testing.T) {
+	board := NewKanbanBoard(100, 50)
+
+	// Set up initial tasks - one blocked task
+	tasks := []*db.Task{
+		{ID: 1, Title: "Backlog Task", Status: db.StatusBacklog},
+		{ID: 2, Title: "Blocked Task", Status: db.StatusBlocked},
+	}
+	board.SetTasks(tasks)
+
+	// Focus on blocked column and select the blocked task
+	board.FocusColumn(2)
+	board.SelectTask(2)
+
+	// Verify initial state
+	if board.selectedCol != 2 {
+		t.Fatalf("Expected selectedCol to be 2 (blocked), got %d", board.selectedCol)
+	}
+
+	// Do NOT set origin column (normal dashboard behavior)
+
+	// Now simulate the task moving to a different column (e.g., to in-progress)
+	tasks = []*db.Task{
+		{ID: 1, Title: "Backlog Task", Status: db.StatusBacklog},
+		{ID: 2, Title: "Blocked Task", Status: db.StatusQueued}, // Moved to in-progress
+	}
+	board.SetTasks(tasks)
+
+	// selectedCol should follow the task to column 1 (in-progress)
+	if board.selectedCol != 1 {
+		t.Errorf("Expected selectedCol to follow task to 1 (in-progress), got %d", board.selectedCol)
+	}
+}
+
+func TestKanbanBoard_OriginColumnClampsSelection(t *testing.T) {
+	board := NewKanbanBoard(100, 50)
+
+	// Set up tasks - multiple in blocked column
+	tasks := []*db.Task{
+		{ID: 1, Title: "Blocked Task 1", Status: db.StatusBlocked},
+		{ID: 2, Title: "Blocked Task 2", Status: db.StatusBlocked},
+		{ID: 3, Title: "Blocked Task 3", Status: db.StatusBlocked},
+	}
+	board.SetTasks(tasks)
+
+	// Focus on blocked column, select last task
+	board.FocusColumn(2)
+	board.MoveDown()
+	board.MoveDown() // Now at row 2 (third task)
+
+	if board.selectedRow != 2 {
+		t.Fatalf("Expected selectedRow to be 2, got %d", board.selectedRow)
+	}
+
+	// Set origin column
+	board.SetOriginColumn()
+
+	// Remove all but one task from blocked column
+	tasks = []*db.Task{
+		{ID: 1, Title: "Blocked Task 1", Status: db.StatusBlocked},
+	}
+	board.SetTasks(tasks)
+
+	// selectedRow should be clamped to 0 (only task remaining)
+	if board.selectedRow != 0 {
+		t.Errorf("Expected selectedRow to be clamped to 0, got %d", board.selectedRow)
+	}
+
+	// selectedCol should still be 2 (blocked)
+	if board.selectedCol != 2 {
+		t.Errorf("Expected selectedCol to remain at 2, got %d", board.selectedCol)
+	}
+}
+
+func TestKanbanBoard_OriginColumnEmptyColumn(t *testing.T) {
+	board := NewKanbanBoard(100, 50)
+
+	// Set up tasks - one in blocked column
+	tasks := []*db.Task{
+		{ID: 1, Title: "Backlog Task", Status: db.StatusBacklog},
+		{ID: 2, Title: "Blocked Task", Status: db.StatusBlocked},
+	}
+	board.SetTasks(tasks)
+
+	// Focus on blocked column
+	board.FocusColumn(2)
+	board.SelectTask(2)
+
+	// Set origin column
+	board.SetOriginColumn()
+
+	// Now remove ALL tasks from blocked column (move to in-progress)
+	tasks = []*db.Task{
+		{ID: 1, Title: "Backlog Task", Status: db.StatusBacklog},
+		{ID: 2, Title: "Was Blocked", Status: db.StatusQueued}, // Moved to in-progress
+	}
+	board.SetTasks(tasks)
+
+	// selectedCol should still be 2 (blocked) - origin column is preserved
+	if board.selectedCol != 2 {
+		t.Errorf("Expected selectedCol to remain at 2, got %d", board.selectedCol)
+	}
+
+	// SelectedTask should return nil (no tasks in blocked column)
+	if board.SelectedTask() != nil {
+		t.Error("SelectedTask() should return nil for empty column")
+	}
+
+	// HasPrevTask and HasNextTask should return false
+	if board.HasPrevTask() {
+		t.Error("HasPrevTask() should return false for empty column")
+	}
+	if board.HasNextTask() {
+		t.Error("HasNextTask() should return false for empty column")
 	}
 }

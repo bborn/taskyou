@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/bborn/workflow/internal/autocomplete"
 	"github.com/bborn/workflow/internal/db"
 	"github.com/bborn/workflow/internal/executor"
 	"github.com/bborn/workflow/internal/github"
@@ -38,7 +39,6 @@ const (
 	ViewQuitConfirm
 	ViewSettings
 	ViewRetry
-	ViewMemories
 	ViewAttachments
 	ViewChangeStatus
 	ViewCommandPalette
@@ -61,7 +61,6 @@ type KeyMap struct {
 	Delete          key.Binding
 	Refresh         key.Binding
 	Settings        key.Binding
-	Memories        key.Binding
 	Help            key.Binding
 	Quit            key.Binding
 	ChangeStatus    key.Binding
@@ -78,6 +77,9 @@ type KeyMap struct {
 	FocusInProgress key.Binding
 	FocusBlocked    key.Binding
 	FocusDone       key.Binding
+	// Jump to pinned/unpinned tasks
+	JumpToPinned   key.Binding
+	JumpToUnpinned key.Binding
 }
 
 // ShortHelp returns key bindings to show in the mini help.
@@ -89,10 +91,11 @@ func (k KeyMap) ShortHelp() []key.Binding {
 func (k KeyMap) FullHelp() [][]key.Binding {
 	return [][]key.Binding{
 		{k.Left, k.Right, k.Up, k.Down},
+		{k.JumpToPinned, k.JumpToUnpinned},
 		{k.FocusBacklog, k.FocusInProgress, k.FocusBlocked, k.FocusDone},
 		{k.Enter, k.New, k.Queue, k.Close},
 		{k.Retry, k.Archive, k.Delete, k.OpenWorktree},
-		{k.Filter, k.CommandPalette, k.Settings, k.Memories},
+		{k.Filter, k.CommandPalette, k.Settings},
 		{k.ChangeStatus, k.TogglePin, k.Refresh, k.Help},
 		{k.Quit},
 	}
@@ -102,20 +105,20 @@ func (k KeyMap) FullHelp() [][]key.Binding {
 func DefaultKeyMap() KeyMap {
 	return KeyMap{
 		Left: key.NewBinding(
-			key.WithKeys("left", "h"),
-			key.WithHelp("←/h", "prev col"),
+			key.WithKeys("left"),
+			key.WithHelp("←", "prev col"),
 		),
 		Right: key.NewBinding(
-			key.WithKeys("right", "l"),
-			key.WithHelp("→/l", "next col"),
+			key.WithKeys("right"),
+			key.WithHelp("→", "next col"),
 		),
 		Up: key.NewBinding(
-			key.WithKeys("up", "k"),
-			key.WithHelp("↑/k", "up"),
+			key.WithKeys("up"),
+			key.WithHelp("↑", "up"),
 		),
 		Down: key.NewBinding(
-			key.WithKeys("down", "j"),
-			key.WithHelp("↓/j", "down"),
+			key.WithKeys("down"),
+			key.WithHelp("↓", "down"),
 		),
 		Enter: key.NewBinding(
 			key.WithKeys("enter"),
@@ -160,10 +163,6 @@ func DefaultKeyMap() KeyMap {
 		Settings: key.NewBinding(
 			key.WithKeys("s"),
 			key.WithHelp("s", "settings"),
-		),
-		Memories: key.NewBinding(
-			key.WithKeys("m"),
-			key.WithHelp("m", "memories"),
 		),
 		Help: key.NewBinding(
 			key.WithKeys("?"),
@@ -224,6 +223,14 @@ func DefaultKeyMap() KeyMap {
 		FocusDone: key.NewBinding(
 			key.WithKeys("D"),
 			key.WithHelp("D", "done"),
+		),
+		JumpToPinned: key.NewBinding(
+			key.WithKeys("shift+up"),
+			key.WithHelp("⇧↑", "jump to pinned"),
+		),
+		JumpToUnpinned: key.NewBinding(
+			key.WithKeys("shift+down"),
+			key.WithHelp("⇧↓", "jump to unpinned"),
 		),
 	}
 }
@@ -314,9 +321,6 @@ type AppModel struct {
 	// Retry view state
 	retryView *RetryModel
 
-	// Memories view state
-	memoriesView *MemoriesModel
-
 	// Attachments view state
 	attachmentsView *AttachmentsModel
 
@@ -358,6 +362,8 @@ func taskExecutorDisplayName(task *db.Task) string {
 		return "Claude"
 	case db.ExecutorGemini:
 		return "Gemini"
+	case db.ExecutorOpenClaw:
+		return "OpenClaw"
 	default:
 		// Unknown executor, capitalize first letter
 		if len(task.Executor) > 0 {
@@ -523,8 +529,6 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.updateDashboard(msg)
 		case ViewDetail:
 			return m.updateDetail(msg)
-		case ViewMemories:
-			return m.updateMemories(msg)
 		case ViewAttachments:
 			return m.updateAttachments(msg)
 		}
@@ -641,6 +645,11 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			var initCmd tea.Cmd
 			m.detailView, initCmd = NewDetailModel(msg.task, m.db, m.executor, m.width, m.height, msg.focusExecutor)
+			// Set origin column for navigation if entering from dashboard
+			// (preserve existing origin when navigating between tasks in detail view)
+			if !m.kanban.HasOriginColumn() {
+				m.kanban.SetOriginColumn()
+			}
 			// Set task position in column for display
 			pos, total := m.kanban.GetTaskPosition()
 			m.detailView.SetPosition(pos, total)
@@ -754,8 +763,38 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		cmds = append(cmds, m.loadTasks())
 
-	case taskQueuedMsg, taskClosedMsg, taskArchivedMsg, taskDeletedMsg, taskRetriedMsg, taskStatusChangedMsg, taskDangerousModeToggledMsg:
+	case taskQueuedMsg, taskClosedMsg, taskArchivedMsg, taskDeletedMsg, taskRetriedMsg, taskStatusChangedMsg:
 		cmds = append(cmds, m.loadTasks())
+
+	case taskDangerousModeToggledMsg:
+		cmds = append(cmds, m.loadTasks())
+		// Refresh the detail view panes since the executor window was recreated
+		if m.detailView != nil && m.selectedTask != nil {
+			// Clear pane state so it will rejoin the new window
+			m.detailView.ClearPaneState()
+			// Trigger pane rejoin
+			cmds = append(cmds, m.detailView.RefreshPanesCmd())
+		}
+		if msg.err != nil {
+			m.notification = fmt.Sprintf("⚠ %s", msg.err.Error())
+		} else {
+			// Reload the task to get updated dangerous_mode flag
+			if m.selectedTask != nil {
+				task, _ := m.db.GetTask(m.selectedTask.ID)
+				if task != nil {
+					m.selectedTask = task
+					if m.detailView != nil {
+						m.detailView.UpdateTask(task)
+					}
+					if task.DangerousMode {
+						m.notification = "⚠️ Dangerous mode enabled"
+					} else {
+						m.notification = "✓ Safe mode enabled"
+					}
+				}
+			}
+		}
+		m.notifyUntil = time.Now().Add(3 * time.Second)
 
 	case taskClaudeToggledMsg:
 		// Just refresh task list - pane stays open
@@ -937,10 +976,6 @@ func (m *AppModel) View() string {
 		if m.retryView != nil {
 			return m.retryView.View()
 		}
-	case ViewMemories:
-		if m.memoriesView != nil {
-			return m.memoriesView.View()
-		}
 	case ViewAttachments:
 		if m.attachmentsView != nil {
 			return m.attachmentsView.View()
@@ -980,6 +1015,17 @@ func (m *AppModel) viewNewTaskConfirm() string {
 
 func (m *AppModel) viewDashboard() string {
 	var headerParts []string
+
+	// Show global dangerous mode banner if the entire system is in dangerous mode
+	if IsGlobalDangerousMode() {
+		dangerStyle := lipgloss.NewStyle().
+			Background(lipgloss.Color("#E06C75")). // Red background
+			Foreground(lipgloss.Color("#FFFFFF")).
+			Bold(true).
+			Padding(0, 2).
+			Width(m.width)
+		headerParts = append(headerParts, dangerStyle.Render("⚠ DANGEROUS MODE ENABLED"))
+	}
 
 	// Show notification banner if active
 	if m.notification != "" && time.Now().Before(m.notifyUntil) {
@@ -1115,6 +1161,15 @@ func (m *AppModel) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.kanban.MoveDown()
 		return m, nil
 
+	// Jump to pinned/unpinned tasks
+	case key.Matches(msg, m.keys.JumpToPinned):
+		m.kanban.JumpToPinned()
+		return m, nil
+
+	case key.Matches(msg, m.keys.JumpToUnpinned):
+		m.kanban.JumpToUnpinned()
+		return m, nil
+
 	// Column focus shortcuts
 	case key.Matches(msg, m.keys.FocusBacklog):
 		m.kanban.FocusColumn(0)
@@ -1212,12 +1267,6 @@ func (m *AppModel) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.previousView = m.currentView
 		m.currentView = ViewSettings
 		return m, m.settingsView.Init()
-
-	case key.Matches(msg, m.keys.Memories):
-		m.memoriesView = NewMemoriesModel(m.db, m.width, m.height)
-		m.previousView = m.currentView
-		m.currentView = ViewMemories
-		return m, nil
 
 	case key.Matches(msg, m.keys.Refresh):
 		m.loading = true
@@ -1467,6 +1516,8 @@ func (m *AppModel) updateDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		m.currentView = ViewDashboard
+		// Clear origin column when exiting detail view
+		m.kanban.ClearOriginColumn()
 		if m.detailView != nil {
 			m.detailView.Cleanup()
 			m.detailView = nil
@@ -1484,6 +1535,8 @@ func (m *AppModel) updateDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.detailView.CleanupWithoutSaving()
 				m.detailView = nil
 			}
+			// Clear origin column since we're jumping to a different task
+			m.kanban.ClearOriginColumn()
 			m.kanban.SelectTask(taskID)
 			// Clear notification after jumping
 			m.notification = ""
@@ -2439,22 +2492,6 @@ func (m *AppModel) updateRetry(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
-func (m *AppModel) updateMemories(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	if key.Matches(msg, m.keys.Back) {
-		m.currentView = ViewDashboard
-		m.memoriesView = nil
-		return m, nil
-	}
-
-	if m.memoriesView != nil {
-		var cmd tea.Cmd
-		m.memoriesView, cmd = m.memoriesView.Update(msg)
-		return m, cmd
-	}
-
-	return m, nil
-}
-
 func (m *AppModel) updateAttachments(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if key.Matches(msg, m.keys.Back) {
 		m.currentView = m.previousView
@@ -2651,6 +2688,32 @@ func (m *AppModel) createTaskWithAttachments(t *db.Task, attachmentPaths []strin
 	exec := m.executor
 	database := m.db
 	return func() tea.Msg {
+		// Generate title from body if title is empty but body is provided
+		if strings.TrimSpace(t.Title) == "" && strings.TrimSpace(t.Body) != "" {
+			// Try to generate title using LLM
+			var apiKey string
+			if database != nil {
+				apiKey, _ = database.GetSetting("anthropic_api_key")
+			}
+			svc := autocomplete.NewService(apiKey)
+			if svc.IsAvailable() {
+				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				defer cancel()
+				if title, err := svc.GenerateTitle(ctx, t.Body, t.Project); err == nil && title != "" {
+					t.Title = title
+				}
+			}
+			// If generation failed, use a fallback
+			if strings.TrimSpace(t.Title) == "" {
+				// Use first line of body, truncated
+				firstLine := strings.Split(strings.TrimSpace(t.Body), "\n")[0]
+				if len(firstLine) > 50 {
+					firstLine = firstLine[:50] + "..."
+				}
+				t.Title = firstLine
+			}
+		}
+
 		err := database.CreateTask(t)
 		if err != nil {
 			return taskCreatedMsg{task: t, err: err}

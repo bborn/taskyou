@@ -2,12 +2,19 @@
 package ui
 
 import (
+	"os"
 	"sync"
 
 	"github.com/bborn/workflow/internal/db"
 	"github.com/bborn/workflow/internal/github"
 	"github.com/charmbracelet/lipgloss"
 )
+
+// IsGlobalDangerousMode returns true if the system is running in global dangerous mode.
+// This is set by the WORKTREE_DANGEROUS_MODE=1 environment variable.
+func IsGlobalDangerousMode() bool {
+	return os.Getenv("WORKTREE_DANGEROUS_MODE") == "1"
+}
 
 // Colors - these are updated by refreshStyles() when theme changes
 var (
@@ -17,6 +24,7 @@ var (
 	ColorSuccess   = lipgloss.Color("#98C379") // Green
 	ColorWarning   = lipgloss.Color("#E5C07B") // Yellow
 	ColorError     = lipgloss.Color("#E06C75") // Red
+	ColorDangerous = lipgloss.Color("#E06C75") // Red (same as error, for dangerous mode indicator)
 	ColorMuted     = lipgloss.Color("#5C6370") // Gray
 
 	// Status colors

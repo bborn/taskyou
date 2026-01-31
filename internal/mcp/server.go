@@ -191,24 +191,6 @@ func (s *Server) handleRequest(req *jsonRPCRequest) {
 					},
 				},
 				{
-					Name:        "workflow_search_tasks",
-					Description: "Search for similar past tasks within this project. Use this to find how similar work was done before. Results are scoped to the current project for isolation.",
-					InputSchema: map[string]interface{}{
-						"type": "object",
-						"properties": map[string]interface{}{
-							"query": map[string]interface{}{
-								"type":        "string",
-								"description": "Search query - keywords to find relevant past tasks (e.g., 'customer email reply', 'bug fix authentication')",
-							},
-							"limit": map[string]interface{}{
-								"type":        "integer",
-								"description": "Maximum number of results to return (default: 5, max: 10)",
-							},
-						},
-						"required": []string{"query"},
-					},
-				},
-				{
 					Name:        "workflow_show_task",
 					Description: "Get details of a specific past task by ID. Use this after workflow_search_tasks to get full details of a relevant task. Only works for tasks in the same project.",
 					InputSchema: map[string]interface{}{
@@ -224,6 +206,79 @@ func (s *Server) handleRequest(req *jsonRPCRequest) {
 							},
 						},
 						"required": []string{"task_id"},
+					},
+				},
+				{
+					Name:        "workflow_create_task",
+					Description: "Create a new task in the workflow system. Use this to break down complex work or track future tasks.",
+					InputSchema: map[string]interface{}{
+						"type": "object",
+						"properties": map[string]interface{}{
+							"title": map[string]interface{}{
+								"type":        "string",
+								"description": "Title of the task",
+							},
+							"body": map[string]interface{}{
+								"type":        "string",
+								"description": "Detailed description of the task",
+							},
+							"project": map[string]interface{}{
+								"type":        "string",
+								"description": "Project name (defaults to current project)",
+							},
+							"type": map[string]interface{}{
+								"type":        "string",
+								"description": "Task type (code, writing, thinking)",
+							},
+							"status": map[string]interface{}{
+								"type":        "string",
+								"description": "Initial status (backlog, queued, defaults to backlog)",
+							},
+						},
+						"required": []string{"title"},
+					},
+				},
+				{
+					Name:        "workflow_list_tasks",
+					Description: "List active tasks (queued, processing, blocked, backlog) in the project. Use this to see what work is pending or in progress.",
+					InputSchema: map[string]interface{}{
+						"type": "object",
+						"properties": map[string]interface{}{
+							"status": map[string]interface{}{
+								"type":        "string",
+								"description": "Filter by status (queued, processing, blocked, backlog). If omitted, shows all active tasks.",
+							},
+							"limit": map[string]interface{}{
+								"type":        "integer",
+								"description": "Maximum number of tasks to return (default: 10, max: 50)",
+							},
+							"project": map[string]interface{}{
+								"type":        "string",
+								"description": "Filter by project (defaults to current project)",
+							},
+						},
+					},
+				},
+				{
+					Name:        "workflow_get_project_context",
+					Description: "Get cached project context (codebase structure, patterns, conventions). Call this FIRST before exploring the codebase. If context exists, use it to skip exploration. If empty, explore the codebase once and save a summary via workflow_set_project_context.",
+					InputSchema: map[string]interface{}{
+						"type":       "object",
+						"properties": map[string]interface{}{},
+					},
+				},
+				{
+					Name:        "workflow_set_project_context",
+					Description: "Save auto-generated project context for future tasks. Call this after exploring a codebase to cache your findings (structure, patterns, key files, conventions). Future tasks will skip exploration by reading this context.",
+					InputSchema: map[string]interface{}{
+						"type": "object",
+						"properties": map[string]interface{}{
+							"context": map[string]interface{}{
+								"type":        "string",
+								"description": "The project context to cache. Include: codebase structure, key directories, architectural patterns, coding conventions, important files, and any other information useful for future tasks.",
+							},
+						},
+						"required": []string{"context"},
 					},
 				},
 			},
@@ -365,87 +420,6 @@ func (s *Server) handleToolCall(id interface{}, params *toolCallParams) {
 			},
 		})
 
-	case "workflow_search_tasks":
-		query, _ := params.Arguments["query"].(string)
-		if query == "" {
-			s.sendError(id, -32602, "query is required")
-			return
-		}
-
-		limit := 5
-		if l, ok := params.Arguments["limit"].(float64); ok {
-			limit = int(l)
-			if limit > 10 {
-				limit = 10
-			}
-			if limit < 1 {
-				limit = 1
-			}
-		}
-
-		// Get current task's project for scoping
-		currentTask, err := s.db.GetTask(s.taskID)
-		if err != nil || currentTask == nil {
-			s.sendError(id, -32603, "Failed to get current task")
-			return
-		}
-
-		// Search within the same project only
-		results, err := s.db.SearchTasksFTS(db.FTSSearchOptions{
-			Query:   query,
-			Project: currentTask.Project,
-			Limit:   limit,
-		})
-		if err != nil {
-			s.sendError(id, -32603, fmt.Sprintf("Search failed: %v", err))
-			return
-		}
-
-		// Filter out current task from results
-		var filtered []*db.TaskSearchResult
-		for _, r := range results {
-			if r.TaskID != s.taskID {
-				filtered = append(filtered, r)
-			}
-		}
-
-		if len(filtered) == 0 {
-			s.sendResult(id, toolCallResult{
-				Content: []contentBlock{
-					{Type: "text", Text: "No similar past tasks found in this project."},
-				},
-			})
-			return
-		}
-
-		// Format results
-		var sb strings.Builder
-		sb.WriteString(fmt.Sprintf("Found %d similar past task(s) in project '%s':\n\n", len(filtered), currentTask.Project))
-		for i, r := range filtered {
-			sb.WriteString(fmt.Sprintf("**Task #%d: %s**\n", r.TaskID, r.Title))
-			if r.Tags != "" {
-				sb.WriteString(fmt.Sprintf("  Tags: %s\n", r.Tags))
-			}
-			// Show snippet of body
-			if len(r.Body) > 0 {
-				bodySnippet := r.Body
-				if len(bodySnippet) > 150 {
-					bodySnippet = bodySnippet[:150] + "..."
-				}
-				sb.WriteString(fmt.Sprintf("  Description: %s\n", bodySnippet))
-			}
-			if i < len(filtered)-1 {
-				sb.WriteString("\n")
-			}
-		}
-		sb.WriteString("\nUse workflow_show_task with task_id to get full details of any task.")
-
-		s.sendResult(id, toolCallResult{
-			Content: []contentBlock{
-				{Type: "text", Text: sb.String()},
-			},
-		})
-
 	case "workflow_show_task":
 		taskIDFloat, ok := params.Arguments["task_id"].(float64)
 		if !ok {
@@ -526,6 +500,172 @@ func (s *Server) handleToolCall(id interface{}, params *toolCallParams) {
 		s.sendResult(id, toolCallResult{
 			Content: []contentBlock{
 				{Type: "text", Text: sb.String()},
+			},
+		})
+
+	case "workflow_create_task":
+		title, _ := params.Arguments["title"].(string)
+		if title == "" {
+			s.sendError(id, -32602, "title is required")
+			return
+		}
+		body, _ := params.Arguments["body"].(string)
+		project, _ := params.Arguments["project"].(string)
+		taskType, _ := params.Arguments["type"].(string)
+		status, _ := params.Arguments["status"].(string)
+
+		// Default project to current task's project
+		if project == "" {
+			currentTask, err := s.db.GetTask(s.taskID)
+			if err == nil && currentTask != nil {
+				project = currentTask.Project
+			}
+		}
+
+		if status == "" {
+			status = db.StatusBacklog
+		}
+
+		newTask := &db.Task{
+			Title:   title,
+			Body:    body,
+			Project: project,
+			Type:    taskType,
+			Status:  status,
+		}
+
+		if err := s.db.CreateTask(newTask); err != nil {
+			s.sendError(id, -32603, fmt.Sprintf("Failed to create task: %v", err))
+			return
+		}
+
+		s.sendResult(id, toolCallResult{
+			Content: []contentBlock{
+				{Type: "text", Text: fmt.Sprintf("Created task #%d: %s", newTask.ID, newTask.Title)},
+			},
+		})
+
+	case "workflow_list_tasks":
+		status, _ := params.Arguments["status"].(string)
+		project, _ := params.Arguments["project"].(string)
+
+		limit := 10
+		if l, ok := params.Arguments["limit"].(float64); ok {
+			limit = int(l)
+			if limit > 50 {
+				limit = 50
+			}
+			if limit < 1 {
+				limit = 1
+			}
+		}
+
+		// Default to current project if not specified
+		if project == "" {
+			currentTask, err := s.db.GetTask(s.taskID)
+			if err == nil && currentTask != nil {
+				project = currentTask.Project
+			}
+		}
+
+		tasks, err := s.db.ListTasks(db.ListTasksOptions{
+			Status:  status,
+			Project: project,
+			Limit:   limit,
+		})
+		if err != nil {
+			s.sendError(id, -32603, fmt.Sprintf("Failed to list tasks: %v", err))
+			return
+		}
+
+		if len(tasks) == 0 {
+			s.sendResult(id, toolCallResult{
+				Content: []contentBlock{
+					{Type: "text", Text: "No tasks found."},
+				},
+			})
+			return
+		}
+
+		var sb strings.Builder
+		sb.WriteString(fmt.Sprintf("Found %d task(s) in project '%s':\n\n", len(tasks), project))
+		for _, t := range tasks {
+			sb.WriteString(fmt.Sprintf("- **#%d %s** (%s)\n", t.ID, t.Title, t.Status))
+		}
+
+		s.sendResult(id, toolCallResult{
+			Content: []contentBlock{
+				{Type: "text", Text: sb.String()},
+			},
+		})
+
+	case "workflow_get_project_context":
+		// Get current task's project
+		currentTask, err := s.db.GetTask(s.taskID)
+		if err != nil || currentTask == nil {
+			s.sendError(id, -32603, "Failed to get current task")
+			return
+		}
+
+		if currentTask.Project == "" {
+			s.sendResult(id, toolCallResult{
+				Content: []contentBlock{
+					{Type: "text", Text: "No project associated with this task. Please explore the codebase manually."},
+				},
+			})
+			return
+		}
+
+		context, err := s.db.GetProjectContext(currentTask.Project)
+		if err != nil {
+			s.sendError(id, -32603, fmt.Sprintf("Failed to get project context: %v", err))
+			return
+		}
+
+		if context == "" {
+			s.sendResult(id, toolCallResult{
+				Content: []contentBlock{
+					{Type: "text", Text: "No cached project context found. Please explore the codebase and save a summary using workflow_set_project_context."},
+				},
+			})
+			return
+		}
+
+		s.sendResult(id, toolCallResult{
+			Content: []contentBlock{
+				{Type: "text", Text: fmt.Sprintf("## Cached Project Context\n\n%s", context)},
+			},
+		})
+
+	case "workflow_set_project_context":
+		context, _ := params.Arguments["context"].(string)
+		if context == "" {
+			s.sendError(id, -32602, "context is required")
+			return
+		}
+
+		// Get current task's project
+		currentTask, err := s.db.GetTask(s.taskID)
+		if err != nil || currentTask == nil {
+			s.sendError(id, -32603, "Failed to get current task")
+			return
+		}
+
+		if currentTask.Project == "" {
+			s.sendError(id, -32602, "No project associated with this task")
+			return
+		}
+
+		if err := s.db.SetProjectContext(currentTask.Project, context); err != nil {
+			s.sendError(id, -32603, fmt.Sprintf("Failed to save project context: %v", err))
+			return
+		}
+
+		s.db.AppendTaskLog(s.taskID, "system", fmt.Sprintf("Project context saved for '%s' (%d bytes)", currentTask.Project, len(context)))
+
+		s.sendResult(id, toolCallResult{
+			Content: []contentBlock{
+				{Type: "text", Text: fmt.Sprintf("Project context saved for '%s'. Future tasks will use this context to skip codebase exploration.", currentTask.Project)},
 			},
 		})
 

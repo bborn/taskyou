@@ -36,6 +36,7 @@ type KanbanBoard struct {
 	runningProcesses  map[int64]bool           // Tasks with running shell processes
 	tasksNeedingInput map[int64]bool           // Tasks waiting for user input (active input notification)
 	hiddenDoneCount   int                      // Number of done tasks not shown (older ones)
+	originColumn      int                      // Column where detail view navigation started (-1 = not set)
 }
 
 // IsMobileMode returns true if the board should show single-column mode.
@@ -53,6 +54,7 @@ func NewKanbanBoard(width, height int) *KanbanBoard {
 		height:           height,
 		prInfo:           make(map[int64]*github.PRInfo),
 		runningProcesses: make(map[int64]bool),
+		originColumn:     -1,
 	}
 }
 
@@ -86,6 +88,15 @@ func (k *KanbanBoard) SetTasks(tasks []*db.Task) {
 
 	k.allTasks = tasks
 	k.distributeTasksToColumns()
+
+	// When origin column is set (detail view navigation), stay in that column
+	// even if the task moved to a different column
+	if k.originColumn >= 0 {
+		k.selectedCol = k.originColumn
+		k.clampSelection()
+		return
+	}
+
 	if selectedID != 0 {
 		k.SelectTask(selectedID)
 	}
@@ -136,6 +147,22 @@ func (k *KanbanBoard) NeedsInput(taskID int64) bool {
 		return false
 	}
 	return k.tasksNeedingInput[taskID]
+}
+
+// SetOriginColumn sets the origin column for detail view navigation.
+// This preserves the column context even if the task moves to a different column.
+func (k *KanbanBoard) SetOriginColumn() {
+	k.originColumn = k.selectedCol
+}
+
+// ClearOriginColumn clears the origin column, returning to normal navigation.
+func (k *KanbanBoard) ClearOriginColumn() {
+	k.originColumn = -1
+}
+
+// HasOriginColumn returns true if an origin column is set.
+func (k *KanbanBoard) HasOriginColumn() bool {
+	return k.originColumn >= 0
 }
 
 // distributeTasksToColumns distributes tasks to their respective columns.
@@ -266,6 +293,36 @@ func (k *KanbanBoard) MoveDown() {
 		// Wrap around to top
 		k.selectedRow = 0
 	}
+	k.ensureSelectedVisible()
+}
+
+// JumpToPinned moves selection to the first pinned task in the current column.
+// If there are no pinned tasks, moves to the top of the column.
+func (k *KanbanBoard) JumpToPinned() {
+	col := k.columns[k.selectedCol]
+	if len(col.Tasks) == 0 {
+		return
+	}
+	// Pinned tasks are always at the top, so just go to row 0
+	// If already at the top, stay there
+	k.selectedRow = 0
+	k.ensureSelectedVisible()
+}
+
+// JumpToUnpinned moves selection to the first unpinned task in the current column.
+// If all tasks are pinned or there are no tasks, stays at current position.
+func (k *KanbanBoard) JumpToUnpinned() {
+	col := k.columns[k.selectedCol]
+	if len(col.Tasks) == 0 {
+		return
+	}
+	pinnedTasks, unpinnedTasks := splitPinnedTasks(col.Tasks)
+	if len(unpinnedTasks) == 0 {
+		// No unpinned tasks, stay at current position
+		return
+	}
+	// Jump to the first unpinned task (index equals count of pinned tasks)
+	k.selectedRow = len(pinnedTasks)
 	k.ensureSelectedVisible()
 }
 
@@ -858,6 +915,16 @@ func (k *KanbanBoard) renderTaskCard(task *db.Task, width int, isSelected bool) 
 		processStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("46")) // Bright green
 		b.WriteString(" ")
 		b.WriteString(processStyle.Render("●")) // Green dot for running process
+	}
+
+	// Dangerous mode indicator (red dot) - only shown when:
+	// - Task is in dangerous mode
+	// - Task is active (processing or blocked)
+	// - System is NOT in global dangerous mode (otherwise the global banner is shown)
+	if task.DangerousMode && (task.Status == db.StatusProcessing || task.Status == db.StatusBlocked) && !IsGlobalDangerousMode() {
+		dangerStyle := lipgloss.NewStyle().Foreground(ColorDangerous)
+		b.WriteString(" ")
+		b.WriteString(dangerStyle.Render("●")) // Red dot for dangerous mode
 	}
 
 	// Schedule indicator - show if scheduled or warn about legacy recurrence

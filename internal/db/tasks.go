@@ -68,9 +68,10 @@ const (
 
 // Task executors
 const (
-	ExecutorClaude = "claude" // Claude Code CLI (default)
-	ExecutorCodex  = "codex"  // OpenAI Codex CLI
-	ExecutorGemini = "gemini" // Google Gemini CLI
+	ExecutorClaude   = "claude"   // Claude Code CLI (default)
+	ExecutorCodex    = "codex"    // OpenAI Codex CLI
+	ExecutorGemini   = "gemini"   // Google Gemini CLI
+	ExecutorOpenClaw = "openclaw" // OpenClaw AI assistant (https://openclaw.ai)
 )
 
 // DefaultExecutor returns the default executor if none is specified.
@@ -442,19 +443,6 @@ func (db *DB) UpdateTaskDangerousMode(taskID int64, dangerousMode bool) error {
 	`, dangerousMode, taskID)
 	if err != nil {
 		return fmt.Errorf("update task dangerous mode: %w", err)
-	}
-	return nil
-}
-
-// SaveTaskSummary updates the distilled summary for a task.
-// This is called after task completion to store a concise summary for search and context.
-func (db *DB) SaveTaskSummary(taskID int64, summary string) error {
-	_, err := db.Exec(`
-		UPDATE tasks SET summary = ?, updated_at = CURRENT_TIMESTAMP
-		WHERE id = ?
-	`, summary, taskID)
-	if err != nil {
-		return fmt.Errorf("save task summary: %w", err)
 	}
 	return nil
 }
@@ -1061,16 +1049,6 @@ func (db *DB) CountTasksByProject(projectName string) (int, error) {
 	return count, nil
 }
 
-// CountMemoriesByProject returns the number of memories associated with a project name.
-func (db *DB) CountMemoriesByProject(projectName string) (int, error) {
-	var count int
-	err := db.QueryRow("SELECT COUNT(*) FROM project_memories WHERE project = ?", projectName).Scan(&count)
-	if err != nil {
-		return 0, fmt.Errorf("count memories: %w", err)
-	}
-	return count, nil
-}
-
 // ListProjects returns all projects, with "personal" always first.
 func (db *DB) ListProjects() ([]*Project, error) {
 	rows, err := db.Query(`
@@ -1167,6 +1145,34 @@ func (db *DB) GetProjectByPath(cwd string) (*Project, error) {
 		}
 	}
 	return nil, nil
+}
+
+// GetProjectContext returns the auto-generated context for a project.
+// This context is cached exploration results that can be reused across tasks.
+func (db *DB) GetProjectContext(projectName string) (string, error) {
+	var context string
+	err := db.QueryRow(`SELECT COALESCE(context, '') FROM projects WHERE name = ?`, projectName).Scan(&context)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("get project context: %w", err)
+	}
+	return context, nil
+}
+
+// SetProjectContext saves auto-generated context for a project.
+// This overwrites any existing context.
+func (db *DB) SetProjectContext(projectName string, context string) error {
+	result, err := db.Exec(`UPDATE projects SET context = ? WHERE name = ?`, context, projectName)
+	if err != nil {
+		return fmt.Errorf("set project context: %w", err)
+	}
+	rowsAffected, _ := result.RowsAffected()
+	if rowsAffected == 0 {
+		return fmt.Errorf("project '%s' not found", projectName)
+	}
+	return nil
 }
 
 // GetSetting returns a setting value.
@@ -1340,138 +1346,6 @@ func (db *DB) GetTaskTypeByName(name string) (*TaskType, error) {
 		return nil, fmt.Errorf("query task type: %w", err)
 	}
 	return t, nil
-}
-
-// ProjectMemory represents a stored learning/context for a project.
-type ProjectMemory struct {
-	ID           int64
-	Project      string
-	Category     string // "pattern", "context", "decision", "gotcha", etc.
-	Content      string
-	SourceTaskID *int64 // Task that generated this memory (optional)
-	CreatedAt    LocalTime
-	UpdatedAt    LocalTime
-}
-
-// Memory categories
-const (
-	MemoryCategoryPattern  = "pattern"  // Code patterns, conventions
-	MemoryCategoryContext  = "context"  // Project-specific context
-	MemoryCategoryDecision = "decision" // Architectural decisions
-	MemoryCategoryGotcha   = "gotcha"   // Known pitfalls, workarounds
-	MemoryCategoryGeneral  = "general"  // General learnings
-)
-
-// CreateMemory creates a new project memory.
-func (db *DB) CreateMemory(m *ProjectMemory) error {
-	result, err := db.Exec(`
-		INSERT INTO project_memories (project, category, content, source_task_id)
-		VALUES (?, ?, ?, ?)
-	`, m.Project, m.Category, m.Content, m.SourceTaskID)
-	if err != nil {
-		return fmt.Errorf("insert memory: %w", err)
-	}
-	id, _ := result.LastInsertId()
-	m.ID = id
-	return nil
-}
-
-// UpdateMemory updates an existing memory.
-func (db *DB) UpdateMemory(m *ProjectMemory) error {
-	_, err := db.Exec(`
-		UPDATE project_memories 
-		SET content = ?, category = ?, updated_at = CURRENT_TIMESTAMP
-		WHERE id = ?
-	`, m.Content, m.Category, m.ID)
-	if err != nil {
-		return fmt.Errorf("update memory: %w", err)
-	}
-	return nil
-}
-
-// DeleteMemory deletes a memory by ID.
-func (db *DB) DeleteMemory(id int64) error {
-	_, err := db.Exec("DELETE FROM project_memories WHERE id = ?", id)
-	if err != nil {
-		return fmt.Errorf("delete memory: %w", err)
-	}
-	return nil
-}
-
-// GetMemory retrieves a memory by ID.
-func (db *DB) GetMemory(id int64) (*ProjectMemory, error) {
-	m := &ProjectMemory{}
-	err := db.QueryRow(`
-		SELECT id, project, category, content, source_task_id, created_at, updated_at
-		FROM project_memories WHERE id = ?
-	`, id).Scan(&m.ID, &m.Project, &m.Category, &m.Content, &m.SourceTaskID, &m.CreatedAt, &m.UpdatedAt)
-	if err == sql.ErrNoRows {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, fmt.Errorf("query memory: %w", err)
-	}
-	return m, nil
-}
-
-// ListMemoriesOptions defines options for listing memories.
-type ListMemoriesOptions struct {
-	Project  string
-	Category string
-	Limit    int
-}
-
-// ListMemories retrieves memories with optional filters.
-func (db *DB) ListMemories(opts ListMemoriesOptions) ([]*ProjectMemory, error) {
-	query := `
-		SELECT id, project, category, content, source_task_id, created_at, updated_at
-		FROM project_memories WHERE 1=1
-	`
-	args := []interface{}{}
-
-	if opts.Project != "" {
-		query += " AND project = ?"
-		args = append(args, opts.Project)
-	}
-	if opts.Category != "" {
-		query += " AND category = ?"
-		args = append(args, opts.Category)
-	}
-
-	query += " ORDER BY updated_at DESC"
-
-	if opts.Limit > 0 {
-		query += fmt.Sprintf(" LIMIT %d", opts.Limit)
-	} else {
-		query += " LIMIT 50"
-	}
-
-	rows, err := db.Query(query, args...)
-	if err != nil {
-		return nil, fmt.Errorf("query memories: %w", err)
-	}
-	defer rows.Close()
-
-	var memories []*ProjectMemory
-	for rows.Next() {
-		m := &ProjectMemory{}
-		if err := rows.Scan(&m.ID, &m.Project, &m.Category, &m.Content, &m.SourceTaskID, &m.CreatedAt, &m.UpdatedAt); err != nil {
-			return nil, fmt.Errorf("scan memory: %w", err)
-		}
-		memories = append(memories, m)
-	}
-	return memories, nil
-}
-
-// GetProjectMemories retrieves all memories for a project (for use in prompts).
-func (db *DB) GetProjectMemories(project string, limit int) ([]*ProjectMemory, error) {
-	if limit <= 0 {
-		limit = 20
-	}
-	return db.ListMemories(ListMemoriesOptions{
-		Project: project,
-		Limit:   limit,
-	})
 }
 
 // Attachment represents a file attached to a task.
@@ -1655,160 +1529,6 @@ func (db *DB) ClearCompactionSummaries(taskID int64) error {
 	_, err := db.Exec("DELETE FROM task_compaction_summaries WHERE task_id = ?", taskID)
 	if err != nil {
 		return fmt.Errorf("clear compaction summaries: %w", err)
-	}
-	return nil
-}
-
-// TaskSearchResult represents a search result from the FTS5 index.
-type TaskSearchResult struct {
-	TaskID            int64
-	Project           string
-	Title             string
-	Body              string
-	Tags              string
-	TranscriptExcerpt string
-	Rank              float64 // FTS5 rank score (lower is better match)
-}
-
-// IndexTaskForSearch adds or updates a task in the FTS5 search index.
-// Call this after task completion to make it searchable.
-func (db *DB) IndexTaskForSearch(taskID int64, project, title, body, tags, transcriptExcerpt string) error {
-	// First delete any existing entry
-	_, err := db.Exec(`DELETE FROM task_search WHERE task_id = ?`, taskID)
-	if err != nil {
-		return fmt.Errorf("delete existing search entry: %w", err)
-	}
-
-	// Insert new entry
-	_, err = db.Exec(`
-		INSERT INTO task_search (task_id, project, title, body, tags, transcript_excerpt)
-		VALUES (?, ?, ?, ?, ?, ?)
-	`, taskID, project, title, body, tags, transcriptExcerpt)
-	if err != nil {
-		return fmt.Errorf("insert search entry: %w", err)
-	}
-	return nil
-}
-
-// RemoveTaskFromSearch removes a task from the FTS5 search index.
-func (db *DB) RemoveTaskFromSearch(taskID int64) error {
-	_, err := db.Exec(`DELETE FROM task_search WHERE task_id = ?`, taskID)
-	if err != nil {
-		return fmt.Errorf("delete search entry: %w", err)
-	}
-	return nil
-}
-
-// FTSSearchOptions defines options for FTS5 full-text search.
-type FTSSearchOptions struct {
-	Query   string // The search query (FTS5 syntax supported)
-	Project string // Optional: filter by project
-	Limit   int    // Maximum results (default 10)
-}
-
-// SearchTasksFTS performs a full-text search on the FTS5 task index.
-// Returns matching tasks ordered by relevance (best matches first).
-// Note: This is different from SearchTasks which does simple LIKE matching.
-func (db *DB) SearchTasksFTS(opts FTSSearchOptions) ([]*TaskSearchResult, error) {
-	if opts.Query == "" {
-		return nil, nil
-	}
-	if opts.Limit <= 0 {
-		opts.Limit = 10
-	}
-
-	query := `
-		SELECT task_id, project, title, body, tags, transcript_excerpt, rank
-		FROM task_search
-		WHERE task_search MATCH ?
-	`
-	args := []interface{}{opts.Query}
-
-	if opts.Project != "" {
-		query += ` AND project = ?`
-		args = append(args, opts.Project)
-	}
-
-	query += ` ORDER BY rank LIMIT ?`
-	args = append(args, opts.Limit)
-
-	rows, err := db.Query(query, args...)
-	if err != nil {
-		return nil, fmt.Errorf("search tasks: %w", err)
-	}
-	defer rows.Close()
-
-	var results []*TaskSearchResult
-	for rows.Next() {
-		r := &TaskSearchResult{}
-		if err := rows.Scan(&r.TaskID, &r.Project, &r.Title, &r.Body, &r.Tags, &r.TranscriptExcerpt, &r.Rank); err != nil {
-			return nil, fmt.Errorf("scan search result: %w", err)
-		}
-		results = append(results, r)
-	}
-	return results, nil
-}
-
-// FindSimilarTasks searches for completed tasks similar to the given task.
-// Uses the task's title, body, and tags to find relevant past work.
-func (db *DB) FindSimilarTasks(task *Task, limit int) ([]*TaskSearchResult, error) {
-	if limit <= 0 {
-		limit = 5
-	}
-
-	// Build search query from task title and first part of body
-	searchTerms := task.Title
-	if task.Tags != "" {
-		searchTerms += " " + strings.ReplaceAll(task.Tags, ",", " ")
-	}
-	// Add first 100 chars of body for context
-	if len(task.Body) > 0 {
-		bodySnippet := task.Body
-		if len(bodySnippet) > 100 {
-			bodySnippet = bodySnippet[:100]
-		}
-		searchTerms += " " + bodySnippet
-	}
-
-	// Escape special FTS5 characters and create OR query for flexibility
-	words := strings.Fields(searchTerms)
-	var escapedWords []string
-	for _, w := range words {
-		// Remove special characters that could break FTS5
-		w = strings.Map(func(r rune) rune {
-			if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') {
-				return r
-			}
-			return -1
-		}, w)
-		if len(w) >= 3 { // Only include words with 3+ chars
-			escapedWords = append(escapedWords, w)
-		}
-	}
-
-	if len(escapedWords) == 0 {
-		return nil, nil
-	}
-
-	// Create FTS5 OR query
-	ftsQuery := strings.Join(escapedWords, " OR ")
-
-	return db.SearchTasksFTS(FTSSearchOptions{
-		Query:   ftsQuery,
-		Project: task.Project,
-		Limit:   limit + 1, // Get one extra to exclude current task
-	})
-}
-
-// UpdateTaskLastDistilledAt updates the last_distilled_at timestamp for a task.
-// This is called after distilling learnings from a task to track when it was last processed.
-func (db *DB) UpdateTaskLastDistilledAt(taskID int64, t time.Time) error {
-	_, err := db.Exec(`
-		UPDATE tasks SET last_distilled_at = ?, updated_at = CURRENT_TIMESTAMP
-		WHERE id = ?
-	`, LocalTime{Time: t}, taskID)
-	if err != nil {
-		return fmt.Errorf("update task last_distilled_at: %w", err)
 	}
 	return nil
 }

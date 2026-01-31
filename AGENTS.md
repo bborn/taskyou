@@ -7,7 +7,7 @@ Guide for AI agents working in this repository.
 ## Project Overview
 
 This is **Task You** - a personal task management system with:
-- **SQLite storage** for tasks, projects, and memories
+- **SQLite storage** for tasks and projects
 - **SSH-accessible TUI** via Wish
 - **Background executor** running Claude Code for task processing
 - **Beautiful terminal UI** built with Charm libraries (Kanban board)
@@ -39,7 +39,7 @@ This is **Task You** - a personal task management system with:
 │                    └─────────────────┘                          │
 └─────────────────────────────────────────────────────────────────┘
 
-Local:  task -l (launches TUI + daemon)
+Local:  ty -l (launches TUI + daemon)
 Remote: ssh -p 2222 user@server
 ```
 
@@ -60,7 +60,6 @@ workflow/
 │   │   └── tasks.go             # Task CRUD operations
 │   ├── executor/
 │   │   ├── executor.go          # Background Claude runner + hooks
-│   │   ├── memory_extractor.go  # Extract memories from completed tasks
 │   │   └── project_config.go    # .taskyou.yml configuration
 │   ├── github/
 │   │   └── github.go            # PR status tracking
@@ -76,7 +75,6 @@ workflow/
 │       ├── detail.go            # Task detail view with logs
 │       ├── form.go              # New/edit task forms (Huh)
 │       ├── retry.go             # Retry task with feedback
-│       ├── memories.go          # Project memories view
 │       ├── settings.go          # Settings view
 │       ├── command_palette.go   # Quick task navigation
 │       ├── attachments.go       # File attachment handling
@@ -95,8 +93,8 @@ workflow/
 ## Building
 
 ```bash
-make build          # Build bin/task and bin/taskd
-make build-task     # Build just the CLI
+make build          # Build bin/ty and bin/taskd
+make build-ty       # Build just the CLI
 make build-taskd    # Build just the daemon
 make install        # Install to ~/go/bin
 make test           # Run tests
@@ -108,12 +106,12 @@ make fmt            # Format code
 
 ### Local CLI
 ```bash
-./bin/task -l                        # Launch TUI locally (starts daemon)
-./bin/task daemon                    # Start background executor
-./bin/task daemon stop               # Stop daemon
-./bin/task daemon status             # Check daemon status
-./bin/task daemon restart            # Restart daemon
-./bin/task claudes list              # List running Claude sessions
+./bin/ty -l                        # Launch TUI locally (starts daemon)
+./bin/ty daemon                    # Start background executor
+./bin/ty daemon stop               # Stop daemon
+./bin/ty daemon status             # Check daemon status
+./bin/ty daemon restart            # Restart daemon
+./bin/ty claudes list              # List running Claude sessions
 ```
 
 ### Daemon (on server)
@@ -174,16 +172,6 @@ CREATE TABLE projects (
     created_at DATETIME
 );
 
-CREATE TABLE project_memories (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    project TEXT NOT NULL,
-    category TEXT NOT NULL DEFAULT 'general',
-    content TEXT NOT NULL,
-    source_task_id INTEGER REFERENCES tasks(id) ON DELETE SET NULL,
-    created_at DATETIME,
-    updated_at DATETIME
-);
-
 CREATE TABLE task_types (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL UNIQUE,
@@ -230,7 +218,6 @@ backlog → queued → processing → done
                  ↘ blocked (needs input)
 
 blocked can return to processing via retry
-done triggers memory extraction
 ```
 
 1. **backlog** - Created but not yet started
@@ -256,7 +243,6 @@ Recurring scheduling has been removed from TaskYou. Use external schedulers (cro
 | `d` | Delete selected task |
 | `t` | Pin/unpin selected task |
 | `s` | Settings |
-| `m` | Project memories |
 | `S` | Change task status |
 | `R` | Refresh list |
 | `p` / `ctrl+p` | Command palette (go to task) |
@@ -287,7 +273,6 @@ The background executor (`internal/executor/executor.go`):
 - Streams output to `task_logs` table
 - Supports real-time watching via subscriptions
 - Handles task suspension and resumption
-- Extracts memories from successful tasks
 - Manages scheduled tasks (recurring runs must now be handled externally via CLI automation)
 
 ### Claude Code Integration
@@ -314,27 +299,14 @@ Environment variables available in worktrees:
 - `WORKTREE_SESSION_ID` - tmux session ID
 - `WORKTREE_DANGEROUS_MODE` - If permissions are skipped
 
-### Project Memories
-
-Project memories provide persistent context injected into prompts:
-
-**Categories:**
-- `pattern` - Code patterns and conventions
-- `context` - Project-specific context
-- `decision` - Architectural decisions
-- `gotcha` - Known pitfalls and workarounds
-
-Memories are automatically extracted from successful task completions.
-
 ### Task Prompts
 
 Prompts are built with:
 1. Task-type-specific instructions
-2. Project memories (patterns, context, decisions, gotchas)
-3. Project-specific instructions
-4. Previous conversation history (on retry/resume)
-5. File attachments
-6. Task title and body
+2. Project-specific instructions
+3. Previous conversation history (on retry/resume)
+4. File attachments
+5. Task title and body
 
 ## Deployment
 

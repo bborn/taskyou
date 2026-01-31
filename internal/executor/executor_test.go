@@ -1096,3 +1096,158 @@ func TestSymlinkMCPConfig(t *testing.T) {
 		}
 	})
 }
+
+func TestEnsureGitExclude(t *testing.T) {
+	t.Run("creates exclude file and adds entry", func(t *testing.T) {
+		projectDir := t.TempDir()
+		gitDir := filepath.Join(projectDir, ".git")
+		if err := os.MkdirAll(gitDir, 0755); err != nil {
+			t.Fatal(err)
+		}
+
+		ensureGitExclude(projectDir, ".claude")
+
+		excludePath := filepath.Join(gitDir, "info", "exclude")
+		content, err := os.ReadFile(excludePath)
+		if err != nil {
+			t.Fatalf("expected exclude file to exist: %v", err)
+		}
+		if !strings.Contains(string(content), ".claude") {
+			t.Error("expected .claude entry in exclude file")
+		}
+	})
+
+	t.Run("does not duplicate existing entry", func(t *testing.T) {
+		projectDir := t.TempDir()
+		infoDir := filepath.Join(projectDir, ".git", "info")
+		if err := os.MkdirAll(infoDir, 0755); err != nil {
+			t.Fatal(err)
+		}
+		excludePath := filepath.Join(infoDir, "exclude")
+		if err := os.WriteFile(excludePath, []byte(".claude\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		ensureGitExclude(projectDir, ".claude")
+
+		content, err := os.ReadFile(excludePath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Count(string(content), ".claude") != 1 {
+			t.Errorf("expected exactly one .claude entry, got content: %q", string(content))
+		}
+	})
+
+	t.Run("adds multiple different entries", func(t *testing.T) {
+		projectDir := t.TempDir()
+		gitDir := filepath.Join(projectDir, ".git")
+		if err := os.MkdirAll(gitDir, 0755); err != nil {
+			t.Fatal(err)
+		}
+
+		ensureGitExclude(projectDir, ".claude")
+		ensureGitExclude(projectDir, ".envrc")
+		ensureGitExclude(projectDir, ".mcp.json")
+
+		excludePath := filepath.Join(gitDir, "info", "exclude")
+		content, err := os.ReadFile(excludePath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, entry := range []string{".claude", ".envrc", ".mcp.json"} {
+			if !strings.Contains(string(content), entry) {
+				t.Errorf("expected %s entry in exclude file", entry)
+			}
+		}
+	})
+}
+
+func TestSymlinkClaudeConfigExcludesFromGit(t *testing.T) {
+	// symlinkClaudeConfig uses projectDir for git exclude because
+	// worktree .git is a file, not a directory
+	projectDir := t.TempDir()
+	worktreePath := t.TempDir()
+
+	// Create .git dir in projectDir (the main repo has the actual .git directory)
+	gitDir := filepath.Join(projectDir, ".git")
+	if err := os.MkdirAll(gitDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	err := symlinkClaudeConfig(projectDir, worktreePath)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Verify symlink was created
+	worktreeClaudeDir := filepath.Join(worktreePath, ".claude")
+	target, err := os.Readlink(worktreeClaudeDir)
+	if err != nil {
+		t.Fatalf("expected symlink: %v", err)
+	}
+	mainClaudeDir := filepath.Join(projectDir, ".claude")
+	if target != mainClaudeDir {
+		t.Errorf("symlink target = %s, want %s", target, mainClaudeDir)
+	}
+
+	// Verify .claude is in the project's git exclude (not the worktree's)
+	excludePath := filepath.Join(gitDir, "info", "exclude")
+	content, err := os.ReadFile(excludePath)
+	if err != nil {
+		t.Fatalf("expected exclude file to exist: %v", err)
+	}
+	if !strings.Contains(string(content), ".claude") {
+		t.Error("expected .claude entry in git exclude file to prevent symlink from being committed")
+	}
+}
+
+func TestIsDefaultClaudeConfigDir(t *testing.T) {
+	home, _ := os.UserHomeDir()
+	defaultDir := filepath.Join(home, ".claude")
+
+	tests := []struct {
+		name     string
+		dir      string
+		expected bool
+	}{
+		{"empty string", "", true},
+		{"whitespace only", "   ", true},
+		{"default dir", defaultDir, true},
+		{"custom dir", "/custom/claude", false},
+		{"different home subdir", filepath.Join(home, ".claude-custom"), false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := isDefaultClaudeConfigDir(tt.dir)
+			if got != tt.expected {
+				t.Errorf("isDefaultClaudeConfigDir(%q) = %v, want %v", tt.dir, got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestClaudeEnvPrefix(t *testing.T) {
+	home, _ := os.UserHomeDir()
+	defaultDir := filepath.Join(home, ".claude")
+
+	tests := []struct {
+		name     string
+		dir      string
+		expected string
+	}{
+		{"empty string returns empty", "", ""},
+		{"default dir returns empty", defaultDir, ""},
+		{"custom dir returns prefix", "/custom/claude", `CLAUDE_CONFIG_DIR="/custom/claude" `},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := claudeEnvPrefix(tt.dir)
+			if got != tt.expected {
+				t.Errorf("claudeEnvPrefix(%q) = %q, want %q", tt.dir, got, tt.expected)
+			}
+		})
+	}
+}

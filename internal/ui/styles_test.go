@@ -1,11 +1,44 @@
 package ui
 
 import (
+	"os"
 	"strings"
 	"testing"
 
 	"github.com/bborn/workflow/internal/github"
 )
+
+func TestIsGlobalDangerousMode(t *testing.T) {
+	// Save original value to restore after test
+	original := os.Getenv("WORKTREE_DANGEROUS_MODE")
+	defer os.Setenv("WORKTREE_DANGEROUS_MODE", original)
+
+	tests := []struct {
+		name     string
+		envValue string
+		expected bool
+	}{
+		{"disabled when env not set", "", false},
+		{"disabled when env is 0", "0", false},
+		{"enabled when env is 1", "1", true},
+		{"disabled when env is random", "foo", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.envValue == "" {
+				os.Unsetenv("WORKTREE_DANGEROUS_MODE")
+			} else {
+				os.Setenv("WORKTREE_DANGEROUS_MODE", tt.envValue)
+			}
+
+			got := IsGlobalDangerousMode()
+			if got != tt.expected {
+				t.Errorf("IsGlobalDangerousMode() = %v, want %v when env=%q", got, tt.expected, tt.envValue)
+			}
+		})
+	}
+}
 
 func TestPRStatusBadge(t *testing.T) {
 	tests := []struct {

@@ -1,6 +1,7 @@
 package autocomplete
 
 import (
+	"context"
 	"strings"
 	"testing"
 )
@@ -398,4 +399,68 @@ func TestService_Warmup(t *testing.T) {
 
 	// Calling warmup twice should be safe
 	svc.Warmup()
+}
+
+func TestBuildTitleGenerationPrompt(t *testing.T) {
+	tests := []struct {
+		name         string
+		body         string
+		project      string
+		wantContains []string
+	}{
+		{
+			name:         "basic title generation",
+			body:         "The login button is broken on mobile devices",
+			project:      "",
+			wantContains: []string{"Generate a concise task title", "login button is broken", "imperative form"},
+		},
+		{
+			name:         "title generation with project",
+			body:         "Fix the authentication bug",
+			project:      "myapp",
+			wantContains: []string{"Project: myapp", "authentication bug"},
+		},
+		{
+			name:         "personal project excluded",
+			body:         "Update documentation",
+			project:      "personal",
+			wantContains: []string{"Update documentation"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := buildTitleGenerationPrompt(tt.body, tt.project)
+			for _, want := range tt.wantContains {
+				if !strings.Contains(result, want) {
+					t.Errorf("buildTitleGenerationPrompt() = %q, want to contain %q", result, want)
+				}
+			}
+			// Personal project should not appear in prompt
+			if tt.project == "personal" && strings.Contains(result, "Project: personal") {
+				t.Error("buildTitleGenerationPrompt() should not include 'Project: personal'")
+			}
+		})
+	}
+}
+
+func TestGenerateTitle_NoAPIKey(t *testing.T) {
+	svc := NewService("")
+	_, err := svc.GenerateTitle(context.TODO(), "Some description", "")
+	if err == nil {
+		t.Error("GenerateTitle() should return error when no API key")
+	}
+}
+
+func TestGenerateTitle_EmptyBody(t *testing.T) {
+	svc := NewService("test-api-key")
+	_, err := svc.GenerateTitle(context.TODO(), "", "")
+	if err == nil {
+		t.Error("GenerateTitle() should return error when body is empty")
+	}
+
+	_, err = svc.GenerateTitle(context.TODO(), "   ", "")
+	if err == nil {
+		t.Error("GenerateTitle() should return error when body is whitespace only")
+	}
 }

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -95,11 +96,27 @@ func (g *GeminiExecutor) runGemini(ctx context.Context, task *db.Task, workDir, 
 		sessionID = fmt.Sprintf("%d", os.Getpid())
 	}
 
+	// Check for existing session to resume (validate file exists first)
+	resumeFlag := ""
+	existingSessionID := task.ClaudeSessionID
+	if existingSessionID != "" && isResume {
+		if geminiSessionExists(existingSessionID) {
+			resumeFlag = fmt.Sprintf("--resume %s ", existingSessionID)
+			g.executor.logLine(task.ID, "system", fmt.Sprintf("Resuming Gemini session %s", existingSessionID))
+		} else {
+			g.executor.logLine(task.ID, "system", fmt.Sprintf("Session %s no longer exists, starting fresh", existingSessionID))
+			// Clear the stale session ID
+			if err := g.executor.db.UpdateTaskClaudeSessionID(task.ID, ""); err != nil {
+				g.logger.Warn("failed to clear stale session ID", "task", task.ID, "error", err)
+			}
+		}
+	}
+
 	envPrefix := claudeEnvPrefix(paths.configDir)
 	dangerousFlag := buildGeminiDangerousFlag(task.DangerousMode)
 	// Use -i (--prompt-interactive) to pass initial prompt while keeping interactive mode
-	script := fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %sgemini %s-i "$(cat %q)"`,
-		task.ID, sessionID, task.Port, task.WorktreePath, envPrefix, dangerousFlag, promptFile.Name())
+	script := fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %sgemini %s%s-i "$(cat %q)"`,
+		task.ID, sessionID, task.Port, task.WorktreePath, envPrefix, dangerousFlag, resumeFlag, promptFile.Name())
 
 	actualSession, tmuxErr := createTmuxWindow(daemonSession, windowName, workDir, script)
 	if tmuxErr != nil {
@@ -258,22 +275,28 @@ func (g *GeminiExecutor) BuildCommand(task *db.Task, sessionID, prompt string) s
 		worktreeSessionID = fmt.Sprintf("%d", os.Getpid())
 	}
 
+	// Build resume flag if we have a session ID
+	resumeFlag := ""
+	if sessionID != "" {
+		resumeFlag = fmt.Sprintf("--resume %s ", sessionID)
+	}
+
 	if prompt != "" {
 		promptFile, err := os.CreateTemp("", "task-prompt-*.txt")
 		if err != nil {
 			g.logger.Error("BuildCommand: failed to create temp file", "error", err)
-			return fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q gemini %s`,
-				task.ID, worktreeSessionID, task.Port, task.WorktreePath, dangerousFlag)
+			return fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q gemini %s%s`,
+				task.ID, worktreeSessionID, task.Port, task.WorktreePath, dangerousFlag, resumeFlag)
 		}
 		promptFile.WriteString(prompt)
 		promptFile.Close()
 		// Use -i (--prompt-interactive) to pass initial prompt while keeping interactive mode
-		return fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q gemini %s-i "$(cat %q)"; rm -f %q`,
-			task.ID, worktreeSessionID, task.Port, task.WorktreePath, dangerousFlag, promptFile.Name(), promptFile.Name())
+		return fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q gemini %s%s-i "$(cat %q)"; rm -f %q`,
+			task.ID, worktreeSessionID, task.Port, task.WorktreePath, dangerousFlag, resumeFlag, promptFile.Name(), promptFile.Name())
 	}
 
-	return fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q gemini %s`,
-		task.ID, worktreeSessionID, task.Port, task.WorktreePath, dangerousFlag)
+	return fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q gemini %s%s`,
+		task.ID, worktreeSessionID, task.Port, task.WorktreePath, dangerousFlag, resumeFlag)
 }
 
 func buildGeminiDangerousFlag(enabled bool) string {
@@ -289,4 +312,121 @@ func buildGeminiDangerousFlag(enabled bool) string {
 		flag += " "
 	}
 	return flag
+}
+
+// ---- Session and Dangerous Mode Support ----
+
+// SupportsSessionResume returns true - Gemini supports session resume via --resume.
+func (g *GeminiExecutor) SupportsSessionResume() bool {
+	return true
+}
+
+// SupportsDangerousMode returns true - Gemini supports --dangerously-allow-run.
+func (g *GeminiExecutor) SupportsDangerousMode() bool {
+	return true
+}
+
+// FindSessionID discovers the most recent Gemini session ID for the given workDir.
+// Gemini stores sessions in ~/.gemini/tmp/<project_hash>/chats/ directory.
+func (g *GeminiExecutor) FindSessionID(workDir string) string {
+	return findGeminiSessionID(workDir)
+}
+
+// ResumeDangerous kills the current Gemini process and restarts with --dangerously-allow-run.
+func (g *GeminiExecutor) ResumeDangerous(task *db.Task, workDir string) bool {
+	return g.executor.resumeGeminiWithMode(task, workDir, true)
+}
+
+// ResumeSafe kills the current Gemini process and restarts without the dangerous flag.
+func (g *GeminiExecutor) ResumeSafe(task *db.Task, workDir string) bool {
+	return g.executor.resumeGeminiWithMode(task, workDir, false)
+}
+
+// findGeminiSessionID discovers the most recent Gemini session ID for the given workDir.
+// Gemini stores sessions in ~/.gemini/tmp/<project_hash>/chats/ directory.
+func findGeminiSessionID(workDir string) string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+
+	// Gemini uses a hash of the project path
+	// The sessions are stored in ~/.gemini/tmp/<hash>/chats/
+	geminiTmpDir := filepath.Join(home, ".gemini", "tmp")
+	if _, err := os.Stat(geminiTmpDir); os.IsNotExist(err) {
+		return ""
+	}
+
+	// Look for session files in subdirectories
+	var mostRecent string
+	var mostRecentTime time.Time
+
+	filepath.Walk(geminiTmpDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() {
+			return nil
+		}
+
+		// Only process files in chats directories
+		if !strings.Contains(path, "/chats/") {
+			return nil
+		}
+
+		// Session files are JSON
+		if !strings.HasSuffix(info.Name(), ".json") {
+			return nil
+		}
+
+		// Read the session file to check if it matches the workDir
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return nil
+		}
+
+		// Check if this session is for our workDir
+		if strings.Contains(string(data), workDir) {
+			if info.ModTime().After(mostRecentTime) {
+				mostRecentTime = info.ModTime()
+				// Extract session ID from filename (remove .json extension)
+				mostRecent = strings.TrimSuffix(info.Name(), ".json")
+			}
+		}
+
+		return nil
+	})
+
+	return mostRecent
+}
+
+// geminiSessionExists checks if a Gemini session file exists for the given session ID.
+// Returns true if the session file is found in any project hash directory.
+func geminiSessionExists(sessionID string) bool {
+	if sessionID == "" {
+		return false
+	}
+
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return false
+	}
+
+	geminiTmpDir := filepath.Join(home, ".gemini", "tmp")
+	if _, err := os.Stat(geminiTmpDir); os.IsNotExist(err) {
+		return false
+	}
+
+	sessionFile := sessionID + ".json"
+	found := false
+
+	filepath.Walk(geminiTmpDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() {
+			return nil
+		}
+		if strings.Contains(path, "/chats/") && info.Name() == sessionFile {
+			found = true
+			return filepath.SkipAll
+		}
+		return nil
+	})
+
+	return found
 }

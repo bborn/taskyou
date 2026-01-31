@@ -1,5 +1,5 @@
 // task is the local CLI for managing tasks.
-// It connects to a remote taskd server over SSH by default, or runs locally with -l flag.
+// It runs locally by default, or connects to a remote taskd server over SSH with -r flag.
 package main
 
 import (
@@ -20,6 +20,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/bborn/workflow/internal/autocomplete"
 	"github.com/bborn/workflow/internal/config"
 	"github.com/bborn/workflow/internal/db"
 	"github.com/bborn/workflow/internal/executor"
@@ -71,12 +72,12 @@ func main() {
 	var (
 		host      string
 		port      string
-		local     bool
+		remote    bool
 		dangerous bool
 	)
 
 	rootCmd := &cobra.Command{
-		Use:   "task",
+		Use:   "ty",
 		Short: "Task queue manager",
 		Long:  "A beautiful terminal UI for managing your task queue.",
 		Run: func(cmd *cobra.Command, args []string) {
@@ -89,16 +90,17 @@ func main() {
 				return
 			}
 
-			if local {
-				if err := runLocal(dangerous); err != nil {
-					fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+			if remote {
+				// Connect to remote server
+				if err := connectRemote(host, port); err != nil {
+					fmt.Fprintln(os.Stderr, errorStyle.Render("Connection failed: "+err.Error()))
 					os.Exit(1)
 				}
 				return
 			}
-			// Connect to remote server
-			if err := connectRemote(host, port); err != nil {
-				fmt.Fprintln(os.Stderr, errorStyle.Render("Connection failed: "+err.Error()))
+			// Run locally (default)
+			if err := runLocal(dangerous); err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
 				os.Exit(1)
 			}
 		},
@@ -106,7 +108,7 @@ func main() {
 
 	rootCmd.PersistentFlags().StringVarP(&host, "host", "H", defaultHost, "Remote server host")
 	rootCmd.PersistentFlags().StringVar(&port, "port", defaultPort, "Remote server port")
-	rootCmd.PersistentFlags().BoolVarP(&local, "local", "l", false, "Run locally (use local database)")
+	rootCmd.PersistentFlags().BoolVarP(&remote, "remote", "r", false, "Connect to remote server instead of running locally")
 	rootCmd.PersistentFlags().BoolVar(&dangerous, "dangerous", false, "Run Claude with --dangerously-skip-permissions (for sandboxed environments)")
 
 	// Daemon subcommand - runs executor in background
@@ -219,18 +221,34 @@ Use --hard to kill all tmux sessions for a complete reset.`,
 				os.Exit(1)
 			}
 
-			// Pass through -l flag if we're in local mode
+			// Pass through -r flag if we're in remote mode
 			execArgs := []string{executable}
-			if local {
-				execArgs = append(execArgs, "-l")
+			if remote {
+				execArgs = append(execArgs, "-r")
 			}
 
 			syscall.Exec(executable, execArgs, os.Environ())
 		},
 	}
-	restartCmd.Flags().BoolVarP(&local, "local", "l", false, "Run locally")
+	restartCmd.Flags().BoolVarP(&remote, "remote", "r", false, "Connect to remote server")
 	restartCmd.Flags().BoolVar(&hardRestart, "hard", false, "Kill all tmux sessions (full reset)")
 	rootCmd.AddCommand(restartCmd)
+
+	// Recover subcommand - fix stale references after crash
+	recoverCmd := &cobra.Command{
+		Use:   "recover",
+		Short: "Fix stale tmux references after a crash",
+		Long: `Clears stale daemon_session and tmux_window_id references from tasks.
+
+Use this after your computer crashes or the daemon dies unexpectedly.
+Tasks will automatically reconnect to their Claude sessions when viewed.`,
+		Run: func(cmd *cobra.Command, args []string) {
+			dryRun, _ := cmd.Flags().GetBool("dry-run")
+			recoverStaleTmuxRefs(dryRun)
+		},
+	}
+	recoverCmd.Flags().Bool("dry-run", false, "Show what would be cleaned up without making changes")
+	rootCmd.AddCommand(recoverCmd)
 
 	// Logs subcommand - tail claude session logs
 	logsCmd := &cobra.Command{
@@ -344,22 +362,34 @@ Use --hard to kill all tmux sessions for a complete reset.`,
 
 	// Create subcommand - create a new task from command line
 	createCmd := &cobra.Command{
-		Use:   "create <title>",
+		Use:   "create [title]",
 		Short: "Create a new task",
 		Long: `Create a new task from the command line.
+
+Title is optional if --body is provided; AI will generate a title from the body.
 
 Examples:
   task create "Fix login bug"
   task create "Add dark mode" --type code --project myapp
-  task create "Write documentation" --body "Document the API endpoints" --execute`,
-		Args: cobra.ExactArgs(1),
+  task create "Write documentation" --body "Document the API endpoints" --execute
+  task create --body "The login button is broken on mobile devices" # AI generates title`,
+		Args: cobra.MaximumNArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
-			title := args[0]
+			var title string
+			if len(args) > 0 {
+				title = args[0]
+			}
 			body, _ := cmd.Flags().GetString("body")
 			taskType, _ := cmd.Flags().GetString("type")
 			project, _ := cmd.Flags().GetString("project")
 			execute, _ := cmd.Flags().GetBool("execute")
 			outputJSON, _ := cmd.Flags().GetBool("json")
+
+			// Validate that either title or body is provided
+			if strings.TrimSpace(title) == "" && strings.TrimSpace(body) == "" {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: either title or --body must be provided"))
+				os.Exit(1)
+			}
 
 			// Set defaults
 			if taskType == "" {
@@ -406,6 +436,31 @@ Examples:
 				}
 			}
 
+			// Generate title from body if title is empty
+			if strings.TrimSpace(title) == "" && strings.TrimSpace(body) != "" {
+				var apiKey string
+				apiKey, _ = database.GetSetting("anthropic_api_key")
+				svc := autocomplete.NewService(apiKey)
+				if svc.IsAvailable() {
+					ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+					if generatedTitle, genErr := svc.GenerateTitle(ctx, body, project); genErr == nil && generatedTitle != "" {
+						title = generatedTitle
+						if !outputJSON {
+							fmt.Println(dimStyle.Render("Generated title: " + title))
+						}
+					}
+					cancel()
+				}
+				// Fallback if generation failed
+				if strings.TrimSpace(title) == "" {
+					firstLine := strings.Split(strings.TrimSpace(body), "\n")[0]
+					if len(firstLine) > 50 {
+						firstLine = firstLine[:50] + "..."
+					}
+					title = firstLine
+				}
+			}
+
 			// Set initial status
 			status := db.StatusBacklog
 			if execute {
@@ -445,7 +500,7 @@ Examples:
 			}
 		},
 	}
-	createCmd.Flags().String("body", "", "Task body/description")
+	createCmd.Flags().String("body", "", "Task body/description (if no title, AI generates from body)")
 	createCmd.Flags().StringP("type", "t", "", "Task type: code, writing, thinking (default: code)")
 	createCmd.Flags().StringP("project", "p", "", "Project name (auto-detected from cwd if not specified)")
 	createCmd.Flags().BoolP("execute", "x", false, "Queue task for immediate execution")
@@ -1028,6 +1083,112 @@ Examples:
 	updateCmd.Flags().StringP("project", "p", "", "Update project name")
 	rootCmd.AddCommand(updateCmd)
 
+	// Move subcommand - move a task to a different project
+	moveCmd := &cobra.Command{
+		Use:   "move <task-id> <target-project>",
+		Short: "Move a task to a different project",
+		Long: `Move a task to a different project.
+
+This properly cleans up the task's worktree and Claude sessions from the old project,
+deletes the old task, and creates a new task in the target project.
+
+The new task preserves:
+- Title, body, type, and tags
+- Status (unless processing/blocked, which resets to backlog)
+
+The new task resets:
+- Worktree path, branch name, port
+- Claude session ID, daemon session
+- Started/completed timestamps
+
+Examples:
+  task move 42 myapp
+  task move 42 myapp --execute`,
+		Args: cobra.ExactArgs(2),
+		Run: func(cmd *cobra.Command, args []string) {
+			var taskID int64
+			if _, err := fmt.Sscanf(args[0], "%d", &taskID); err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Invalid task ID: "+args[0]))
+				os.Exit(1)
+			}
+			targetProject := args[1]
+
+			// Open database
+			dbPath := db.DefaultPath()
+			database, err := db.Open(dbPath)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+			defer database.Close()
+
+			// Validate target project exists
+			proj, err := database.GetProjectByName(targetProject)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+			if proj == nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render(fmt.Sprintf("Project '%s' not found", targetProject)))
+				os.Exit(1)
+			}
+
+			// Get task
+			task, err := database.GetTask(taskID)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+			if task == nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render(fmt.Sprintf("Task #%d not found", taskID)))
+				os.Exit(1)
+			}
+
+			// Check if already in target project
+			if task.Project == targetProject || task.Project == proj.Name {
+				fmt.Println(dimStyle.Render(fmt.Sprintf("Task #%d is already in project '%s'", taskID, targetProject)))
+				return
+			}
+
+			oldProject := task.Project
+			execute, _ := cmd.Flags().GetBool("execute")
+
+			// Confirm unless --force flag is set
+			force, _ := cmd.Flags().GetBool("force")
+			if !force {
+				fmt.Printf("Move task #%d from '%s' to '%s'? [y/N] ", taskID, oldProject, targetProject)
+				reader := bufio.NewReader(os.Stdin)
+				response, _ := reader.ReadString('\n')
+				response = strings.TrimSpace(strings.ToLower(response))
+				if response != "y" && response != "yes" {
+					fmt.Println("Cancelled")
+					return
+				}
+			}
+
+			// Perform the move
+			newTaskID, err := moveTask(database, task, targetProject)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+
+			fmt.Println(successStyle.Render(fmt.Sprintf("Moved task #%d to project '%s' (new task #%d)", taskID, targetProject, newTaskID)))
+
+			// Queue for execution if requested
+			if execute {
+				if err := database.UpdateTaskStatus(newTaskID, db.StatusQueued); err != nil {
+					fmt.Fprintln(os.Stderr, errorStyle.Render("Error queueing task: "+err.Error()))
+					os.Exit(1)
+				}
+				fmt.Println(successStyle.Render(fmt.Sprintf("Queued task #%d for execution", newTaskID)))
+			}
+		},
+	}
+	moveCmd.Flags().BoolP("force", "f", false, "Skip confirmation prompt")
+	moveCmd.Flags().BoolP("execute", "e", false, "Queue the task for execution after moving")
+	rootCmd.AddCommand(moveCmd)
+
 	// Execute subcommand - queue a task for execution
 	executeCmd := &cobra.Command{
 		Use:     "execute <task-id>",
@@ -1355,6 +1516,28 @@ Examples:
 	// Cloud subcommand
 	rootCmd.AddCommand(createCloudCommand())
 
+	// Update command - self-update via install script
+	upgradeCmd := &cobra.Command{
+		Use:   "upgrade",
+		Short: "Upgrade task to the latest version",
+		Long:  "Downloads and installs the latest version of the task CLI from GitHub releases.",
+		Run: func(cmd *cobra.Command, args []string) {
+			fmt.Println(dimStyle.Render("Checking for updates..."))
+
+			// Run the install script via curl
+			installCmd := osexec.Command("bash", "-c", "curl -fsSL https://raw.githubusercontent.com/bborn/taskyou/main/scripts/install.sh | bash")
+			installCmd.Stdout = os.Stdout
+			installCmd.Stderr = os.Stderr
+			installCmd.Stdin = os.Stdin
+
+			if err := installCmd.Run(); err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Update failed: "+err.Error()))
+				os.Exit(1)
+			}
+		},
+	}
+	rootCmd.AddCommand(upgradeCmd)
+
 	// Settings command
 	settingsCmd := &cobra.Command{
 		Use:   "settings",
@@ -1513,7 +1696,10 @@ func execInTmux() error {
 
 	// Enable pane border labels
 	osexec.Command("tmux", "set-option", "-t", sessionName, "pane-border-status", "top").Run()
-	osexec.Command("tmux", "set-option", "-t", sessionName, "pane-border-format", " #{pane_title} ").Run()
+	// Use conditional formatting: pane 0 (task detail) always uses bright color, others follow border style
+	// This prevents the task detail title from being dimmed when other panes are focused
+	osexec.Command("tmux", "set-option", "-t", sessionName, "pane-border-format",
+		"#{?#{==:#{pane_index},0},#[fg=#9CA3AF] #{pane_title} , #{pane_title} }").Run()
 	osexec.Command("tmux", "set-option", "-t", sessionName, "pane-border-style", "fg=#374151").Run()
 	osexec.Command("tmux", "set-option", "-t", sessionName, "pane-active-border-style", "fg=#61AFEF").Run()
 
@@ -2832,6 +3018,156 @@ func killClaudeSession(taskID int) error {
 	return nil
 }
 
+// recoverStaleTmuxRefs clears stale daemon_session and tmux_window_id references
+// from tasks after a crash or daemon restart. This allows tasks to automatically
+// reconnect to their Claude sessions when viewed.
+func recoverStaleTmuxRefs(dryRun bool) {
+	dbPath := db.DefaultPath()
+	database, err := db.Open(dbPath)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, errorStyle.Render("Error opening database: "+err.Error()))
+		os.Exit(1)
+	}
+	defer database.Close()
+
+	// Step 1: Find all active daemon sessions
+	activeSessions := make(map[string]bool)
+	sessionsOut, err := osexec.Command("tmux", "list-sessions", "-F", "#{session_name}").Output()
+	if err == nil {
+		for _, session := range strings.Split(strings.TrimSpace(string(sessionsOut)), "\n") {
+			if strings.HasPrefix(session, "task-daemon-") {
+				activeSessions[session] = true
+			}
+		}
+	}
+
+	if len(activeSessions) == 0 {
+		fmt.Println(dimStyle.Render("No active daemon sessions found"))
+		return
+	}
+
+	fmt.Println(dimStyle.Render(fmt.Sprintf("Active daemon sessions: %d", len(activeSessions))))
+	for session := range activeSessions {
+		fmt.Println(dimStyle.Render("  " + session))
+	}
+
+	// Step 2: Find all valid window IDs across all daemon sessions
+	validWindowIDs := make(map[string]bool)
+	for session := range activeSessions {
+		windowsOut, err := osexec.Command("tmux", "list-windows", "-t", session, "-F", "#{window_id}").Output()
+		if err == nil {
+			for _, windowID := range strings.Split(strings.TrimSpace(string(windowsOut)), "\n") {
+				if windowID != "" {
+					validWindowIDs[windowID] = true
+				}
+			}
+		}
+	}
+
+	fmt.Println(dimStyle.Render(fmt.Sprintf("Valid window IDs: %d", len(validWindowIDs))))
+
+	// Step 3: Count tasks with stale daemon_session references
+	var staleDaemonCount int
+	rows, err := database.Query(`
+		SELECT COUNT(*) FROM tasks
+		WHERE daemon_session IS NOT NULL
+		AND daemon_session NOT IN (` + quotedSessionList(activeSessions) + `)
+	`)
+	if err == nil {
+		if rows.Next() {
+			rows.Scan(&staleDaemonCount)
+		}
+		rows.Close()
+	}
+
+	// Step 4: Count tasks with stale window IDs
+	var staleWindowCount int
+	rows, err = database.Query(`
+		SELECT COUNT(*) FROM tasks
+		WHERE tmux_window_id IS NOT NULL
+		AND tmux_window_id NOT IN (` + quotedWindowList(validWindowIDs) + `)
+	`)
+	if err == nil {
+		if rows.Next() {
+			rows.Scan(&staleWindowCount)
+		}
+		rows.Close()
+	}
+
+	if staleDaemonCount == 0 && staleWindowCount == 0 {
+		fmt.Println(successStyle.Render("No stale references found - database is clean"))
+		return
+	}
+
+	fmt.Println()
+	if staleDaemonCount > 0 {
+		fmt.Printf("Found %d tasks with stale daemon_session references\n", staleDaemonCount)
+	}
+	if staleWindowCount > 0 {
+		fmt.Printf("Found %d tasks with stale tmux_window_id references\n", staleWindowCount)
+	}
+
+	if dryRun {
+		fmt.Println(dimStyle.Render("\nDry run - no changes made. Run without --dry-run to fix."))
+		return
+	}
+
+	// Step 5: Clear stale references
+	fmt.Println()
+	if staleDaemonCount > 0 {
+		_, err := database.Exec(`
+			UPDATE tasks SET daemon_session = NULL
+			WHERE daemon_session IS NOT NULL
+			AND daemon_session NOT IN (` + quotedSessionList(activeSessions) + `)
+		`)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, errorStyle.Render("Error clearing daemon sessions: "+err.Error()))
+		} else {
+			fmt.Println(successStyle.Render(fmt.Sprintf("Cleared %d stale daemon_session references", staleDaemonCount)))
+		}
+	}
+
+	if staleWindowCount > 0 {
+		_, err := database.Exec(`
+			UPDATE tasks SET tmux_window_id = NULL
+			WHERE tmux_window_id IS NOT NULL
+			AND tmux_window_id NOT IN (` + quotedWindowList(validWindowIDs) + `)
+		`)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, errorStyle.Render("Error clearing window IDs: "+err.Error()))
+		} else {
+			fmt.Println(successStyle.Render(fmt.Sprintf("Cleared %d stale tmux_window_id references", staleWindowCount)))
+		}
+	}
+
+	fmt.Println()
+	fmt.Println(dimStyle.Render("Tasks will automatically reconnect to their Claude sessions when viewed."))
+}
+
+// quotedSessionList returns a SQL-safe comma-separated list of quoted session names
+func quotedSessionList(sessions map[string]bool) string {
+	if len(sessions) == 0 {
+		return "''"
+	}
+	var parts []string
+	for s := range sessions {
+		parts = append(parts, "'"+s+"'")
+	}
+	return strings.Join(parts, ",")
+}
+
+// quotedWindowList returns a SQL-safe comma-separated list of quoted window IDs
+func quotedWindowList(windows map[string]bool) string {
+	if len(windows) == 0 {
+		return "''"
+	}
+	var parts []string
+	for w := range windows {
+		parts = append(parts, "'"+w+"'")
+	}
+	return strings.Join(parts, ",")
+}
+
 // cleanupOrphanedClaudes kills Claude processes that aren't tied to any active task windows
 // or belong to done tasks older than 2 hours.
 func cleanupOrphanedClaudes(force bool) {
@@ -2981,6 +3317,85 @@ func cleanupOrphanedClaudes(force bool) {
 	}
 
 	fmt.Printf("\n%s\n", dimStyle.Render(fmt.Sprintf("Killed %d/%d processes", killed, totalToKill)))
+}
+
+// moveTask moves a task to a different project by cleaning up old resources,
+// deleting the old task, and creating a new task in the target project.
+// Returns the new task ID.
+func moveTask(database *db.DB, oldTask *db.Task, targetProject string) (int64, error) {
+	cfg := config.New(database)
+	exec := executor.New(database, cfg)
+
+	// Step 1: Clean up old task's resources
+
+	// Kill Claude session if running (ignore errors - session may not exist)
+	killClaudeSession(int(oldTask.ID))
+
+	// Clean up worktree and Claude sessions if they exist
+	if oldTask.WorktreePath != "" {
+		projectConfigDir := ""
+		if oldTask.Project != "" {
+			if project, err := database.GetProjectByName(oldTask.Project); err == nil && project != nil {
+				projectConfigDir = project.ClaudeConfigDir
+			}
+		}
+		// Clean up Claude session files first (before worktree is removed)
+		if err := executor.CleanupClaudeSessions(oldTask.WorktreePath, projectConfigDir); err != nil {
+			fmt.Fprintln(os.Stderr, dimStyle.Render(fmt.Sprintf("Warning: could not remove Claude sessions: %v", err)))
+		}
+
+		// Clean up worktree
+		if err := exec.CleanupWorktree(oldTask); err != nil {
+			fmt.Fprintln(os.Stderr, dimStyle.Render(fmt.Sprintf("Warning: could not remove worktree: %v", err)))
+		}
+	}
+
+	// Step 2: Delete the old task from database
+	if err := database.DeleteTask(oldTask.ID); err != nil {
+		return 0, fmt.Errorf("delete old task: %w", err)
+	}
+
+	// Step 3: Create new task in target project
+	// Reset execution-related fields but preserve content
+	newTask := &db.Task{
+		Title:    oldTask.Title,
+		Body:     oldTask.Body,
+		Type:     oldTask.Type,
+		Tags:     oldTask.Tags,
+		Project:  targetProject,
+		Executor: oldTask.Executor,
+		Pinned:   oldTask.Pinned,
+		// Reset execution state
+		WorktreePath:    "",
+		BranchName:      "",
+		Port:            0,
+		ClaudeSessionID: "",
+		DaemonSession:   "",
+		StartedAt:       nil,
+		CompletedAt:     nil,
+		// Keep status unless it was processing/blocked
+		Status: oldTask.Status,
+	}
+
+	// Reset status if task was in progress (work is lost)
+	if newTask.Status == db.StatusProcessing || newTask.Status == db.StatusBlocked {
+		newTask.Status = db.StatusBacklog
+	}
+
+	if err := database.CreateTask(newTask); err != nil {
+		return 0, fmt.Errorf("create new task: %w", err)
+	}
+
+	// CreateTask doesn't insert all fields (tags, pinned, etc.), so update them
+	if err := database.UpdateTask(newTask); err != nil {
+		return 0, fmt.Errorf("update new task: %w", err)
+	}
+
+	// Notify about the changes
+	exec.NotifyTaskChange("deleted", oldTask)
+	exec.NotifyTaskChange("created", newTask)
+
+	return newTask.ID, nil
 }
 
 // deleteTask deletes a task, its Claude session, and its worktree.

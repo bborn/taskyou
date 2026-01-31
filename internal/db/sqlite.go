@@ -6,6 +6,7 @@ import (
 	"database/sql/driver"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"time"
 
@@ -142,19 +143,6 @@ func (db *DB) migrate() error {
 		`CREATE INDEX IF NOT EXISTS idx_tasks_project ON tasks(project)`,
 		`CREATE INDEX IF NOT EXISTS idx_task_logs_task_id ON task_logs(task_id)`,
 
-		`CREATE TABLE IF NOT EXISTS project_memories (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			project TEXT NOT NULL,
-			category TEXT NOT NULL DEFAULT 'general',
-			content TEXT NOT NULL,
-			source_task_id INTEGER REFERENCES tasks(id) ON DELETE SET NULL,
-			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-		)`,
-
-		`CREATE INDEX IF NOT EXISTS idx_project_memories_project ON project_memories(project)`,
-		`CREATE INDEX IF NOT EXISTS idx_project_memories_category ON project_memories(category)`,
-
 		`CREATE TABLE IF NOT EXISTS task_attachments (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
@@ -190,19 +178,6 @@ func (db *DB) migrate() error {
 		)`,
 
 		`CREATE INDEX IF NOT EXISTS idx_task_compaction_summaries_task_id ON task_compaction_summaries(task_id)`,
-
-		// FTS5 virtual table for full-text search on tasks
-		// This enables searching task title, body, tags, and transcript excerpts
-		// Uses standalone table (not content-sync) for flexibility
-		`CREATE VIRTUAL TABLE IF NOT EXISTS task_search USING fts5(
-			task_id UNINDEXED,
-			project,
-			title,
-			body,
-			tags,
-			transcript_excerpt,
-			tokenize='porter unicode61'
-		)`,
 	}
 
 	for _, m := range migrations {
@@ -249,6 +224,8 @@ func (db *DB) migrate() error {
 		// Tmux pane IDs for deterministic pane identification (avoids index-based guessing)
 		`ALTER TABLE tasks ADD COLUMN claude_pane_id TEXT DEFAULT ''`, // tmux pane ID for Claude/executor pane (e.g., "%1234")
 		`ALTER TABLE tasks ADD COLUMN shell_pane_id TEXT DEFAULT ''`,  // tmux pane ID for shell pane (e.g., "%1235")
+		// Auto-generated project context for caching exploration results
+		`ALTER TABLE projects ADD COLUMN context TEXT DEFAULT ''`, // Auto-generated project context (codebase summary, patterns, etc.)
 	}
 
 	for _, m := range alterMigrations {
@@ -343,43 +320,15 @@ func (db *DB) ensurePersonalProject() error {
 	return nil
 }
 
-// initGitRepo initializes a git repository at the given path.
+// initGitRepo initializes a git repository at the given path with an initial commit.
+// The initial commit is required for worktree support to work properly.
 func initGitRepo(path string) error {
-	// Create .git directory
-	gitDir := filepath.Join(path, ".git")
-	if err := os.MkdirAll(gitDir, 0755); err != nil {
-		return fmt.Errorf("create .git dir: %w", err)
+	// Create directory if needed
+	if err := os.MkdirAll(path, 0755); err != nil {
+		return fmt.Errorf("create directory: %w", err)
 	}
 
-	// Write minimal git config
-	configPath := filepath.Join(gitDir, "config")
-	config := `[core]
-	repositoryformatversion = 0
-	filemode = true
-	bare = false
-	logallrefupdates = true
-[init]
-	defaultBranch = main
-`
-	if err := os.WriteFile(configPath, []byte(config), 0644); err != nil {
-		return fmt.Errorf("write git config: %w", err)
-	}
-
-	// Create HEAD
-	headPath := filepath.Join(gitDir, "HEAD")
-	if err := os.WriteFile(headPath, []byte("ref: refs/heads/main\n"), 0644); err != nil {
-		return fmt.Errorf("write HEAD: %w", err)
-	}
-
-	// Create objects and refs directories
-	if err := os.MkdirAll(filepath.Join(gitDir, "objects"), 0755); err != nil {
-		return fmt.Errorf("create objects dir: %w", err)
-	}
-	if err := os.MkdirAll(filepath.Join(gitDir, "refs", "heads"), 0755); err != nil {
-		return fmt.Errorf("create refs dir: %w", err)
-	}
-
-	// Create initial README
+	// Create initial README before git init
 	readmePath := filepath.Join(path, "README.md")
 	readme := `# Personal Tasks
 
@@ -387,6 +336,40 @@ This is the default workspace for personal tasks.
 `
 	if err := os.WriteFile(readmePath, []byte(readme), 0644); err != nil {
 		return fmt.Errorf("write README: %w", err)
+	}
+
+	// Use git command to initialize - this ensures proper git structure
+	cmd := exec.Command("git", "init")
+	cmd.Dir = path
+	if output, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("git init: %v\n%s", err, output)
+	}
+
+	// Stage the README
+	cmd = exec.Command("git", "add", "README.md")
+	cmd.Dir = path
+	if output, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("git add: %v\n%s", err, output)
+	}
+
+	// Configure local git user for this repo (required for CI environments)
+	cmd = exec.Command("git", "config", "user.email", "task@local")
+	cmd.Dir = path
+	if output, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("git config user.email: %v\n%s", err, output)
+	}
+
+	cmd = exec.Command("git", "config", "user.name", "Task")
+	cmd.Dir = path
+	if output, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("git config user.name: %v\n%s", err, output)
+	}
+
+	// Create initial commit - this is required for worktrees to work
+	cmd = exec.Command("git", "commit", "-m", "Initial commit")
+	cmd.Dir = path
+	if output, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("git commit: %v\n%s", err, output)
 	}
 
 	return nil
@@ -468,8 +451,6 @@ func (db *DB) ensureDefaultTaskTypes() error {
 
 {{project_instructions}}
 
-{{memories}}
-
 Task: {{title}}
 
 {{body}}
@@ -502,8 +483,6 @@ When finished, provide a summary of what you did:
 
 {{project_instructions}}
 
-{{memories}}
-
 Task: {{title}}
 
 Details: {{body}}
@@ -522,8 +501,6 @@ Output the final content, then summarize what you created.`,
 			Instructions: `You are a strategic advisor. Analyze this thoroughly:
 
 {{project_instructions}}
-
-{{memories}}
 
 Question: {{title}}
 
