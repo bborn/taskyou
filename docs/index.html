@@ -133,8 +133,8 @@
 
         <div class="install-box">
             <div class="install-label">Or run instantly on <a href="https://exe.dev" style="color: var(--cyan-glow); text-decoration: none;">exe.dev</a></div>
-            <div class="install-cmd" onclick="copyInstall(this, 'ssh exe.dev \'new --name=tasks --prompt=\"Run: curl -fsSL taskyou.dev/install.sh | bash\"\'')">
-                ssh exe.dev 'new --name=tasks --prompt="Run: curl -fsSL taskyou.dev/install.sh | bash"'
+            <div class="install-cmd" data-cmd="ssh exe.dev 'new --prompt=&quot;Run: curl -fsSL taskyou.dev/install.sh | bash&quot;'" onclick="copyInstall(this)">
+                ssh exe.dev 'new --prompt="Run: curl -fsSL taskyou.dev/install.sh | bash"'
             </div>
         </div>
 
@@ -157,7 +157,8 @@
             }
         }
         function copyInstall(el, cmd) {
-            navigator.clipboard.writeText(cmd);
+            const text = cmd || el.dataset.cmd;
+            navigator.clipboard.writeText(text);
             el.classList.add('copied');
             const original = el.textContent;
             el.textContent = 'Copied!';
