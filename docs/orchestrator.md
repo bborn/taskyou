@@ -1,6 +1,29 @@
 # External Orchestration with Task You
 
-Task You's Kanban UI is great for humans, but every action it performs is also available through the `ty` CLI. That means you can run your own always-on supervisor (Claude, Codex, bash scripts, etc.) completely outside the app by shelling into these commands.
+Task You's Kanban UI is great for humans, but every action it performs is also available through the `ty` CLI (or `taskyou`). That means you can run your own always-on supervisor (Claude, Codex, Gemini, bash scripts, etc.) completely outside the app by shelling into these commands.
+
+## Using the Claude Code Skill
+
+Task You includes a `/taskyou` skill that teaches Claude Code (or any compatible agent) how to manage your task queue via CLI.
+
+**Automatic availability:** When working inside the Task You project, the skill is automatically loaded from `skills/taskyou/`.
+
+**Global installation:** To use the skill from any project, run:
+
+```bash
+./scripts/install-skill.sh
+```
+
+This symlinks the skill to `~/.claude/skills/taskyou/` for personal access across all projects.
+
+Once available, you can say things like:
+
+- "Show me my task board"
+- "Execute the top priority task"
+- "What's blocked right now?"
+- "Create a task to fix the login bug"
+
+The skill provides structured guidance for common orchestration patterns, JSON output handling, and best practices.
 
 ## CLI Coverage for Automation
 
@@ -22,7 +45,7 @@ Statuses accepted by `ty status` are: `backlog`, `queued`, `processing`, `blocke
 
 1. **Start the daemon / UI** (locally or via SSH):
    ```bash
-   ty -l   # launches the TUI + daemon locally
+   ty   # launches the TUI + daemon locally
    ```
 2. **Open a second tmux pane/window** and launch Claude Code inside your project root:
    ```bash
@@ -34,12 +57,12 @@ Statuses accepted by `ty status` are: `backlog`, `queued`, `processing`, `blocke
    You are an autonomous operator that controls Task You via its CLI.
    Only interact with tasks by running shell commands that start with "ty".
    Available tools:
-     • ty board --json            # get the full Kanban snapshot
-     • ty list --json --status X  # list cards in a column
-     • ty show --json --logs ID   # inspect a card deeply
-     • ty execute|retry|close ID  # run or finish cards
-     • ty status ID <status>      # move cards between columns
-     • ty pin ID [--unpin]        # prioritize/deprioritize
+     - ty board --json            # get the full Kanban snapshot
+     - ty list --json --status X  # list cards in a column
+     - ty show --json --logs ID   # inspect a card deeply
+     - ty execute|retry|close ID  # run or finish cards
+     - ty status ID <status>      # move cards between columns
+     - ty pin ID [--unpin]        # prioritize/deprioritize
    Workflow:
      1. Periodically run `ty board --json` to understand the queue.
      2. Decide what should happen next and run the appropriate CLI command.
@@ -52,5 +75,43 @@ Statuses accepted by `ty status` are: `backlog`, `queued`, `processing`, `blocke
 - Use `ty board --json | jq` to feed structured snapshots directly into an LLM or script.
 - Combine `ty board` with `watch -n30` for a rolling dashboard.
 - When scripting, prefer JSON flags (`--json`, `--logs`) so the output is machine-readable.
+
+## Using with Other AI Agents
+
+The skill and CLI work with any agent that can execute shell commands:
+
+### Codex
+```bash
+codex exec "Run ty board --json and tell me what needs attention"
+```
+
+### Gemini
+```bash
+gemini code "Check my task queue with 'ty board --json' and summarize"
+```
+
+### OpenCode / Pi
+Same pattern - instruct the agent to shell out to `ty` CLI commands.
+
+## Scripted Automation
+
+For fully automated orchestration without human intervention:
+
+```bash
+#!/bin/bash
+# Auto-execute queued tasks every 5 minutes
+
+while true; do
+    # Get first queued task
+    TASK_ID=$(ty list --status queued --json | jq -r '.[0].id // empty')
+
+    if [ -n "$TASK_ID" ]; then
+        echo "Executing task $TASK_ID..."
+        ty execute "$TASK_ID"
+    fi
+
+    sleep 300
+done
+```
 
 With these primitives, you can plug in any agent or automation stack you like—all without adding bespoke orchestrators inside Task You itself.

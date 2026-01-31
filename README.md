@@ -131,6 +131,26 @@ Need an always-on supervisor or LLM agent? Keep it outside Task You and use the 
 
 **Auto-cleanup:** The daemon automatically cleans up Claude processes for tasks that have been done for more than 30 minutes, preventing memory bloat from orphaned processes.
 
+### AI Agent Skill
+
+Task You includes a `/taskyou` skill that teaches any AI agent how to orchestrate your task queue via CLI.
+
+**Automatic availability:** The skill is automatically available when working inside the Task You project directory (via `skills/taskyou/`).
+
+**Global installation:** To use the skill from any project:
+
+```bash
+./scripts/install-skill.sh
+```
+
+Once available, you can ask Claude things like:
+- "Show me my task board"
+- "Execute the top priority task"
+- "What's blocked right now?"
+- "Create a task to fix the login bug"
+
+The skill works with Claude Code, Codex, Gemini, or any agent that can execute shell commands. It provides structured guidance for common orchestration patterns without needing to memorize CLI flags.
+
 ## Keyboard Shortcuts
 
 ### Kanban Board
