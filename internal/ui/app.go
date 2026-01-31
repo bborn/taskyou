@@ -461,6 +461,11 @@ func (m *AppModel) Init() tea.Cmd {
 	// Start watching database file for changes
 	m.startDatabaseWatcher()
 
+	// Enable mouse support for click-to-focus on tmux panes
+	if os.Getenv("TMUX") != "" {
+		osExec.Command("tmux", "set-option", "-t", "task-ui", "mouse", "on").Run()
+	}
+
 	return tea.Batch(m.loadTasks(), m.waitForTaskEvent(), m.waitForDBChange(), m.tick(), m.prRefreshTick())
 }
 
