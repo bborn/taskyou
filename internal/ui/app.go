@@ -463,7 +463,11 @@ func (m *AppModel) Init() tea.Cmd {
 
 	// Enable mouse support for click-to-focus on tmux panes
 	if os.Getenv("TMUX") != "" {
-		osExec.Command("tmux", "set-option", "-t", "task-ui", "mouse", "on").Run()
+		// Get actual session name to avoid prefix-matching wrong session
+		if out, err := osExec.Command("tmux", "display-message", "-p", "#{session_name}").Output(); err == nil {
+			sessionName := strings.TrimSpace(string(out))
+			osExec.Command("tmux", "set-option", "-t", sessionName, "mouse", "on").Run()
+		}
 	}
 
 	return tea.Batch(m.loadTasks(), m.waitForTaskEvent(), m.waitForDBChange(), m.tick(), m.prRefreshTick())
@@ -675,8 +679,6 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.detailView.SetPosition(pos, total)
 			m.previousView = m.currentView
 			m.currentView = ViewDetail
-			// Disable mouse to allow native text selection in detail view
-			cmds = append(cmds, tea.DisableMouse)
 			// Start async pane setup if needed
 			if initCmd != nil {
 				cmds = append(cmds, initCmd)
@@ -1581,8 +1583,7 @@ func (m *AppModel) updateDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.detailView.Cleanup()
 			m.detailView = nil
 		}
-		// Re-enable mouse for dashboard click-to-select
-		return m, tea.EnableMouseCellMotion
+		return m, nil
 	}
 
 	// Handle jump to notification from detail view (Ctrl+g)

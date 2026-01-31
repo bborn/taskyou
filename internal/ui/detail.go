@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"os/exec"
+	osExec "os/exec"
 	"strconv"
 	"strings"
 	"time"
@@ -52,6 +52,7 @@ type DetailModel struct {
 	workdirPaneID   string // The workdir shell pane (middle-right)
 	daemonSessionID string // The daemon session the Claude pane came from
 	tuiPaneID       string // The TUI/Details pane (top)
+	uiSessionName   string // The full UI session name (e.g., task-ui-12345)
 
 	// Cached tmux window target (set once on creation, cleared on kill)
 	cachedWindowTarget string
@@ -234,7 +235,7 @@ func (m *DetailModel) Refresh() {
 				title = fmt.Sprintf("%s (%d MB)", title, m.claudeMemoryMB)
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
-			exec.CommandContext(ctx, "tmux", "select-pane", "-t", m.claudePaneID, "-T", title).Run()
+			osExec.CommandContext(ctx, "tmux", "select-pane", "-t", m.claudePaneID, "-T", title).Run()
 			cancel()
 		}
 	}
@@ -298,6 +299,13 @@ func NewDetailModel(t *db.Task, database *db.DB, exec *executor.Executor, width,
 		log.Info("NewDetailModel: not in tmux, skipping pane operations")
 		log.Info("NewDetailModel: completed for task %d", t.ID)
 		return m, nil
+	}
+
+	// Get the actual UI session name (avoid prefix-matching wrong session)
+	if out, err := osExec.Command("tmux", "display-message", "-p", "#{session_name}").Output(); err == nil {
+		m.uiSessionName = strings.TrimSpace(string(out))
+	} else {
+		m.uiSessionName = "task-ui" // fallback
 	}
 
 	// Cache the tmux window target once (expensive operation)
@@ -572,7 +580,7 @@ func (m *DetailModel) findTaskWindow() string {
 	// Search all daemon sessions for the task window
 	// Always return "session:windowID" format for consistency
 	log.Debug("findTaskWindow: searching all sessions")
-	out, err := exec.CommandContext(ctx, "tmux", "list-windows", "-a", "-F", "#{session_name}:#{window_id}:#{window_name}").Output()
+	out, err := osExec.CommandContext(ctx, "tmux", "list-windows", "-a", "-F", "#{session_name}:#{window_id}:#{window_name}").Output()
 	if err != nil {
 		log.Error("findTaskWindow: list-windows -a failed: %v", err)
 		return ""
@@ -624,7 +632,7 @@ func (m *DetailModel) startResumableSession(sessionID string) error {
 
 	// IMPORTANT: Check if a window with this name already exists in ANY daemon session
 	// to avoid creating duplicates. If found, update the cached target and return.
-	existingOut, err := exec.CommandContext(ctx, "tmux", "list-windows", "-a", "-F", "#{session_name}:#{window_index}:#{window_name}").Output()
+	existingOut, err := osExec.CommandContext(ctx, "tmux", "list-windows", "-a", "-F", "#{session_name}:#{window_index}:#{window_name}").Output()
 	if err == nil {
 		for _, line := range strings.Split(strings.TrimSpace(string(existingOut)), "\n") {
 			parts := strings.SplitN(line, ":", 3)
@@ -639,7 +647,7 @@ func (m *DetailModel) startResumableSession(sessionID string) error {
 
 	// Find or create a task-daemon session to put the window in
 	// First, look for any existing task-daemon-* session
-	out, err := exec.CommandContext(ctx, "tmux", "list-sessions", "-F", "#{session_name}").Output()
+	out, err := osExec.CommandContext(ctx, "tmux", "list-sessions", "-F", "#{session_name}").Output()
 	if err != nil {
 		log.Error("startResumableSession: list-sessions failed: %v", err)
 		return fmt.Errorf("tmux list-sessions failed: %w", err)
@@ -659,7 +667,7 @@ func (m *DetailModel) startResumableSession(sessionID string) error {
 		daemonSession = fmt.Sprintf("task-daemon-%d", os.Getpid())
 		log.Info("startResumableSession: creating new daemon session %q", daemonSession)
 		// Use "tail -f /dev/null" to keep placeholder alive (empty windows exit immediately)
-		err := exec.CommandContext(ctx, "tmux", "new-session", "-d", "-s", daemonSession, "-n", "_placeholder", "tail", "-f", "/dev/null").Run()
+		err := osExec.CommandContext(ctx, "tmux", "new-session", "-d", "-s", daemonSession, "-n", "_placeholder", "tail", "-f", "/dev/null").Run()
 		if err != nil {
 			log.Error("startResumableSession: new-session failed: %v", err)
 			return fmt.Errorf("tmux new-session failed: %w", err)
@@ -705,7 +713,7 @@ func (m *DetailModel) startResumableSession(sessionID string) error {
 
 	// Create new window in the daemon session
 	log.Info("startResumableSession: creating new window in %q", daemonSession)
-	err = exec.CommandContext(ctx, "tmux", "new-window", "-d",
+	err = osExec.CommandContext(ctx, "tmux", "new-window", "-d",
 		"-t", daemonSession,
 		"-n", windowName,
 		"-c", workDir,
@@ -726,7 +734,7 @@ func (m *DetailModel) startResumableSession(sessionID string) error {
 	}
 	windowTarget := daemonSession + ":" + windowName
 	log.Debug("startResumableSession: creating shell pane at %q", windowTarget)
-	err = exec.CommandContext(ctx, "tmux", "split-window",
+	err = osExec.CommandContext(ctx, "tmux", "split-window",
 		"-h",                    // horizontal split
 		"-t", windowTarget+".0", // split from Claude pane
 		"-c", workDir, // start in task workdir
@@ -736,8 +744,8 @@ func (m *DetailModel) startResumableSession(sessionID string) error {
 	}
 
 	// Set pane titles
-	exec.CommandContext(ctx, "tmux", "select-pane", "-t", windowTarget+".0", "-T", m.executorDisplayName()).Run()
-	exec.CommandContext(ctx, "tmux", "select-pane", "-t", windowTarget+".1", "-T", "Shell").Run()
+	osExec.CommandContext(ctx, "tmux", "select-pane", "-t", windowTarget+".0", "-T", m.executorDisplayName()).Run()
+	osExec.CommandContext(ctx, "tmux", "select-pane", "-t", windowTarget+".1", "-T", "Shell").Run()
 	log.Info("startResumableSession: completed for task %d", m.task.ID)
 	return nil
 }
@@ -773,7 +781,7 @@ func (m *DetailModel) ensureTmuxPanesJoined() {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
 		// Verify the pane still exists
-		err := exec.CommandContext(ctx, "tmux", "display-message", "-t", m.claudePaneID, "-p", "#{pane_id}").Run()
+		err := osExec.CommandContext(ctx, "tmux", "display-message", "-t", m.claudePaneID, "-p", "#{pane_id}").Run()
 		if err != nil {
 			// Pane no longer exists, clear our state
 			m.claudePaneID = ""
@@ -828,7 +836,7 @@ func (m *DetailModel) updateTmuxPaneTitle() {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
-	exec.CommandContext(ctx, "tmux", "select-pane", "-t", m.tuiPaneID, "-T", m.getPaneTitle()).Run()
+	osExec.CommandContext(ctx, "tmux", "select-pane", "-t", m.tuiPaneID, "-T", m.getPaneTitle()).Run()
 }
 
 // getDetailPaneHeight returns the configured detail pane height percentage.
@@ -872,7 +880,7 @@ func (m *DetailModel) getCurrentDetailPaneHeight(tuiPaneID string) int {
 	defer cancel()
 
 	// Get the current height of the TUI pane
-	cmd := exec.CommandContext(ctx, "tmux", "display-message", "-p", "-t", tuiPaneID, "#{pane_height}")
+	cmd := osExec.CommandContext(ctx, "tmux", "display-message", "-p", "-t", tuiPaneID, "#{pane_height}")
 	heightOut, err := cmd.Output()
 	if err != nil {
 		return 0
@@ -884,7 +892,7 @@ func (m *DetailModel) getCurrentDetailPaneHeight(tuiPaneID string) int {
 	}
 
 	// Get the total window height
-	cmd = exec.CommandContext(ctx, "tmux", "display-message", "-p", "#{window_height}")
+	cmd = osExec.CommandContext(ctx, "tmux", "display-message", "-p", "#{window_height}")
 	totalHeightOut, err := cmd.Output()
 	if err != nil {
 		return 0
@@ -911,7 +919,7 @@ func (m *DetailModel) getActualPaneHeight(tuiPaneID string) int {
 	defer cancel()
 
 	// Get the current height of the TUI pane in lines
-	cmd := exec.CommandContext(ctx, "tmux", "display-message", "-p", "-t", tuiPaneID, "#{pane_height}")
+	cmd := osExec.CommandContext(ctx, "tmux", "display-message", "-p", "-t", tuiPaneID, "#{pane_height}")
 	heightOut, err := cmd.Output()
 	if err != nil {
 		return 0
@@ -936,7 +944,7 @@ func (m *DetailModel) getCurrentShellPaneWidth() int {
 	defer cancel()
 
 	// Get the width of the shell pane
-	cmd := exec.CommandContext(ctx, "tmux", "display-message", "-p", "-t", m.workdirPaneID, "#{pane_width}")
+	cmd := osExec.CommandContext(ctx, "tmux", "display-message", "-p", "-t", m.workdirPaneID, "#{pane_width}")
 	shellWidthOut, err := cmd.Output()
 	if err != nil {
 		return 0
@@ -948,7 +956,7 @@ func (m *DetailModel) getCurrentShellPaneWidth() int {
 	}
 
 	// Get the width of the claude pane
-	cmd = exec.CommandContext(ctx, "tmux", "display-message", "-p", "-t", m.claudePaneID, "#{pane_width}")
+	cmd = osExec.CommandContext(ctx, "tmux", "display-message", "-p", "-t", m.claudePaneID, "#{pane_width}")
 	claudeWidthOut, err := cmd.Output()
 	if err != nil {
 		return 0
@@ -971,7 +979,7 @@ func (m *DetailModel) saveDetailPaneHeight(tuiPaneID string) {
 	defer cancel()
 
 	// Get the current height of the TUI pane
-	cmd := exec.CommandContext(ctx, "tmux", "display-message", "-p", "-t", tuiPaneID, "#{pane_height}")
+	cmd := osExec.CommandContext(ctx, "tmux", "display-message", "-p", "-t", tuiPaneID, "#{pane_height}")
 	heightOut, err := cmd.Output()
 	if err != nil {
 		return
@@ -983,7 +991,7 @@ func (m *DetailModel) saveDetailPaneHeight(tuiPaneID string) {
 	}
 
 	// Get the total window height
-	cmd = exec.CommandContext(ctx, "tmux", "display-message", "-p", "#{window_height}")
+	cmd = osExec.CommandContext(ctx, "tmux", "display-message", "-p", "#{window_height}")
 	totalHeightOut, err := cmd.Output()
 	if err != nil {
 		return
@@ -1013,7 +1021,7 @@ func (m *DetailModel) saveShellPaneWidth() {
 	defer cancel()
 
 	// Get the width of the shell pane
-	cmd := exec.CommandContext(ctx, "tmux", "display-message", "-p", "-t", m.workdirPaneID, "#{pane_width}")
+	cmd := osExec.CommandContext(ctx, "tmux", "display-message", "-p", "-t", m.workdirPaneID, "#{pane_width}")
 	shellWidthOut, err := cmd.Output()
 	if err != nil {
 		return
@@ -1025,7 +1033,7 @@ func (m *DetailModel) saveShellPaneWidth() {
 	}
 
 	// Get the width of the claude pane
-	cmd = exec.CommandContext(ctx, "tmux", "display-message", "-p", "-t", m.claudePaneID, "#{pane_width}")
+	cmd = osExec.CommandContext(ctx, "tmux", "display-message", "-p", "-t", m.claudePaneID, "#{pane_width}")
 	claudeWidthOut, err := cmd.Output()
 	if err != nil {
 		return
@@ -1073,7 +1081,7 @@ func (m *DetailModel) joinTmuxPanes() {
 	log.Debug("joinTmuxPanes: daemonSessionID=%q", m.daemonSessionID)
 
 	// Get current pane ID before joining (so we can select it after)
-	currentPaneCmd := exec.CommandContext(ctx, "tmux", "display-message", "-p", "#{pane_id}")
+	currentPaneCmd := osExec.CommandContext(ctx, "tmux", "display-message", "-p", "#{pane_id}")
 	currentPaneOut, err := currentPaneCmd.Output()
 	if err != nil {
 		log.Error("joinTmuxPanes: failed to get current pane ID: %v", err)
@@ -1086,7 +1094,7 @@ func (m *DetailModel) joinTmuxPanes() {
 	// Clean up any leftover panes from previous tasks (except the TUI pane)
 	// This prevents accumulation of orphaned shell panes
 	// Use pane IDs instead of indices since the TUI pane may not be at index 0
-	listPanesCmd := exec.CommandContext(ctx, "tmux", "list-panes", "-t", "task-ui", "-F", "#{pane_id}")
+	listPanesCmd := osExec.CommandContext(ctx, "tmux", "list-panes", "-t", m.uiSessionName, "-F", "#{pane_id}")
 	if paneListOut, err := listPanesCmd.Output(); err == nil {
 		log.Debug("joinTmuxPanes: existing panes in task-ui: %q (tuiPaneID=%q)", strings.TrimSpace(string(paneListOut)), tuiPaneID)
 		hadExtraPanes := false
@@ -1101,7 +1109,7 @@ func (m *DetailModel) joinTmuxPanes() {
 		// If we killed panes, resize TUI pane to full size before joining new ones
 		if hadExtraPanes {
 			log.Debug("joinTmuxPanes: resizing TUI pane to full size after cleanup")
-			exec.CommandContext(ctx, "tmux", "resize-pane", "-t", tuiPaneID, "-y", "100%").Run()
+			osExec.CommandContext(ctx, "tmux", "resize-pane", "-t", tuiPaneID, "-y", "100%").Run()
 		}
 	} else {
 		log.Debug("joinTmuxPanes: list-panes failed (expected if task-ui doesn't exist): %v", err)
@@ -1114,7 +1122,7 @@ func (m *DetailModel) joinTmuxPanes() {
 	log.Debug("joinTmuxPanes: stored pane IDs: claude=%q, shell=%q", storedClaudePaneID, storedShellPaneID)
 
 	// Get list of panes in daemon window to verify they exist
-	daemonPanesCmd := exec.CommandContext(ctx, "tmux", "list-panes", "-t", windowTarget, "-F", "#{pane_id}")
+	daemonPanesCmd := osExec.CommandContext(ctx, "tmux", "list-panes", "-t", windowTarget, "-F", "#{pane_id}")
 	daemonPanesOut, err := daemonPanesCmd.Output()
 	if err != nil {
 		log.Error("joinTmuxPanes: failed to list panes for %q: %v", windowTarget, err)
@@ -1155,7 +1163,7 @@ func (m *DetailModel) joinTmuxPanes() {
 
 	// Step 1: Join the Claude pane below the TUI pane (vertical split)
 	log.Info("joinTmuxPanes: joining Claude pane %q", claudeSourcePaneID)
-	joinCmd := exec.CommandContext(ctx, "tmux", "join-pane",
+	joinCmd := osExec.CommandContext(ctx, "tmux", "join-pane",
 		"-v",
 		"-s", claudeSourcePaneID)
 	joinOutput, err := joinCmd.CombinedOutput()
@@ -1167,7 +1175,7 @@ func (m *DetailModel) joinTmuxPanes() {
 	log.Debug("joinTmuxPanes: join-pane succeeded")
 
 	// Get the Claude pane ID (it's now the active pane after join)
-	claudePaneCmd := exec.CommandContext(ctx, "tmux", "display-message", "-p", "#{pane_id}")
+	claudePaneCmd := osExec.CommandContext(ctx, "tmux", "display-message", "-p", "#{pane_id}")
 	claudePaneOut, err := claudePaneCmd.Output()
 	if err != nil {
 		log.Error("joinTmuxPanes: failed to get Claude pane ID: %v", err)
@@ -1181,7 +1189,7 @@ func (m *DetailModel) joinTmuxPanes() {
 	if m.claudeMemoryMB > 0 {
 		claudeTitle = fmt.Sprintf("%s (%d MB)", claudeTitle, m.claudeMemoryMB)
 	}
-	exec.CommandContext(ctx, "tmux", "select-pane", "-t", m.claudePaneID, "-T", claudeTitle).Run()
+	osExec.CommandContext(ctx, "tmux", "select-pane", "-t", m.claudePaneID, "-T", claudeTitle).Run()
 
 	// Step 2: Join or create the Shell pane to the right of Claude (unless hidden)
 	if m.shellPaneHidden {
@@ -1221,7 +1229,7 @@ func (m *DetailModel) joinTmuxPanes() {
 		if shellSourcePaneID != "" {
 			// Join the shell pane from daemon
 			log.Debug("joinTmuxPanes: joining shell pane %q", shellSourcePaneID)
-			err = exec.CommandContext(ctx, "tmux", "join-pane",
+			err = osExec.CommandContext(ctx, "tmux", "join-pane",
 				"-h", "-l", shellWidth,
 				"-s", shellSourcePaneID,
 				"-t", m.claudePaneID).Run()
@@ -1230,15 +1238,15 @@ func (m *DetailModel) joinTmuxPanes() {
 				m.workdirPaneID = ""
 			} else {
 				// Get the joined shell pane ID
-				workdirPaneCmd := exec.CommandContext(ctx, "tmux", "display-message", "-p", "#{pane_id}")
+				workdirPaneCmd := osExec.CommandContext(ctx, "tmux", "display-message", "-p", "#{pane_id}")
 				workdirPaneOut, _ := workdirPaneCmd.Output()
 				m.workdirPaneID = strings.TrimSpace(string(workdirPaneOut))
 				log.Debug("joinTmuxPanes: joined shell pane, workdirPaneID=%q", m.workdirPaneID)
-				exec.CommandContext(ctx, "tmux", "select-pane", "-t", m.workdirPaneID, "-T", "Shell").Run()
+				osExec.CommandContext(ctx, "tmux", "select-pane", "-t", m.workdirPaneID, "-T", "Shell").Run()
 				// Set environment variables in the shell pane (they should already be set from daemon, but ensure they're fresh)
 				envCmd := fmt.Sprintf("export WORKTREE_TASK_ID=%d WORKTREE_PORT=%d WORKTREE_PATH=%q", m.task.ID, m.task.Port, m.task.WorktreePath)
-				exec.CommandContext(ctx, "tmux", "send-keys", "-t", m.workdirPaneID, envCmd, "Enter").Run()
-				exec.CommandContext(ctx, "tmux", "send-keys", "-t", m.workdirPaneID, "clear", "Enter").Run()
+				osExec.CommandContext(ctx, "tmux", "send-keys", "-t", m.workdirPaneID, envCmd, "Enter").Run()
+				osExec.CommandContext(ctx, "tmux", "send-keys", "-t", m.workdirPaneID, "clear", "Enter").Run()
 			}
 		} else {
 			// Daemon only had Claude pane - create a new shell pane
@@ -1251,7 +1259,7 @@ func (m *DetailModel) joinTmuxPanes() {
 				userShell = "/bin/zsh"
 			}
 			log.Debug("joinTmuxPanes: split-window for shell, workdir=%q, shell=%q", workdir, userShell)
-			err = exec.CommandContext(ctx, "tmux", "split-window",
+			err = osExec.CommandContext(ctx, "tmux", "split-window",
 				"-h", "-l", shellWidth,
 				"-t", m.claudePaneID,
 				"-c", workdir,
@@ -1261,15 +1269,15 @@ func (m *DetailModel) joinTmuxPanes() {
 				m.workdirPaneID = ""
 			} else {
 				// Get the new shell pane ID
-				workdirPaneCmd := exec.CommandContext(ctx, "tmux", "display-message", "-p", "#{pane_id}")
+				workdirPaneCmd := osExec.CommandContext(ctx, "tmux", "display-message", "-p", "#{pane_id}")
 				workdirPaneOut, _ := workdirPaneCmd.Output()
 				m.workdirPaneID = strings.TrimSpace(string(workdirPaneOut))
 				log.Debug("joinTmuxPanes: created shell pane, workdirPaneID=%q", m.workdirPaneID)
-				exec.CommandContext(ctx, "tmux", "select-pane", "-t", m.workdirPaneID, "-T", "Shell").Run()
+				osExec.CommandContext(ctx, "tmux", "select-pane", "-t", m.workdirPaneID, "-T", "Shell").Run()
 				// Set environment variables in the newly created shell pane
 				envCmd := fmt.Sprintf("export WORKTREE_TASK_ID=%d WORKTREE_PORT=%d WORKTREE_PATH=%q", m.task.ID, m.task.Port, m.task.WorktreePath)
-				exec.CommandContext(ctx, "tmux", "send-keys", "-t", m.workdirPaneID, envCmd, "Enter").Run()
-				exec.CommandContext(ctx, "tmux", "send-keys", "-t", m.workdirPaneID, "clear", "Enter").Run()
+				osExec.CommandContext(ctx, "tmux", "send-keys", "-t", m.workdirPaneID, envCmd, "Enter").Run()
+				osExec.CommandContext(ctx, "tmux", "send-keys", "-t", m.workdirPaneID, "clear", "Enter").Run()
 			}
 		}
 	}
@@ -1278,12 +1286,12 @@ func (m *DetailModel) joinTmuxPanes() {
 	log.Debug("joinTmuxPanes: selecting TUI pane %q", tuiPaneID)
 	if tuiPaneID != "" {
 		m.tuiPaneID = tuiPaneID
-		err = exec.CommandContext(ctx, "tmux", "select-pane", "-t", tuiPaneID, "-T", m.getPaneTitle()).Run()
+		err = osExec.CommandContext(ctx, "tmux", "select-pane", "-t", tuiPaneID, "-T", m.getPaneTitle()).Run()
 		if err != nil {
 			log.Error("joinTmuxPanes: select-pane for TUI title failed: %v", err)
 		}
 		// Ensure the TUI pane has focus for keyboard interaction
-		err = exec.CommandContext(ctx, "tmux", "select-pane", "-t", tuiPaneID).Run()
+		err = osExec.CommandContext(ctx, "tmux", "select-pane", "-t", tuiPaneID).Run()
 		if err != nil {
 			log.Error("joinTmuxPanes: select-pane for TUI focus failed: %v", err)
 		}
@@ -1292,44 +1300,44 @@ func (m *DetailModel) joinTmuxPanes() {
 
 	// Update status bar with navigation hints
 	log.Debug("joinTmuxPanes: configuring status bar and pane styles")
-	exec.CommandContext(ctx, "tmux", "set-option", "-t", "task-ui", "status", "on").Run()
-	exec.CommandContext(ctx, "tmux", "set-option", "-t", "task-ui", "status-style", "bg=#3b82f6,fg=white").Run()
-	exec.CommandContext(ctx, "tmux", "set-option", "-t", "task-ui", "status-left", " TASK UI ").Run()
-	exec.CommandContext(ctx, "tmux", "set-option", "-t", "task-ui", "status-right", " drag borders to resize ").Run()
-	exec.CommandContext(ctx, "tmux", "set-option", "-t", "task-ui", "status-right-length", "80").Run()
+	osExec.CommandContext(ctx, "tmux", "set-option", "-t", m.uiSessionName, "status", "on").Run()
+	osExec.CommandContext(ctx, "tmux", "set-option", "-t", m.uiSessionName, "status-style", "bg=#3b82f6,fg=white").Run()
+	osExec.CommandContext(ctx, "tmux", "set-option", "-t", m.uiSessionName, "status-left", " TASK UI ").Run()
+	osExec.CommandContext(ctx, "tmux", "set-option", "-t", m.uiSessionName, "status-right", " drag borders to resize ").Run()
+	osExec.CommandContext(ctx, "tmux", "set-option", "-t", m.uiSessionName, "status-right-length", "80").Run()
 
 	// Style pane borders - active pane gets theme color outline
 	// Use heavy border lines to make them more visible and indicate they're draggable
-	exec.CommandContext(ctx, "tmux", "set-option", "-t", "task-ui", "pane-border-lines", "heavy").Run()
-	exec.CommandContext(ctx, "tmux", "set-option", "-t", "task-ui", "pane-border-indicators", "arrows").Run()
-	exec.CommandContext(ctx, "tmux", "set-option", "-t", "task-ui", "pane-border-style", "fg=#374151").Run()
-	exec.CommandContext(ctx, "tmux", "set-option", "-t", "task-ui", "pane-active-border-style", "fg=#61AFEF").Run()
+	osExec.CommandContext(ctx, "tmux", "set-option", "-t", m.uiSessionName, "pane-border-lines", "heavy").Run()
+	osExec.CommandContext(ctx, "tmux", "set-option", "-t", m.uiSessionName, "pane-border-indicators", "arrows").Run()
+	osExec.CommandContext(ctx, "tmux", "set-option", "-t", m.uiSessionName, "pane-border-style", "fg=#374151").Run()
+	osExec.CommandContext(ctx, "tmux", "set-option", "-t", m.uiSessionName, "pane-active-border-style", "fg=#61AFEF").Run()
 
 	// De-emphasize inactive panes - dim text and remove colors
 	// This makes the focused pane more visually prominent
-	exec.CommandContext(ctx, "tmux", "set-option", "-t", "task-ui", "window-style", "fg=#6b7280").Run()
-	exec.CommandContext(ctx, "tmux", "set-option", "-t", "task-ui", "window-active-style", "fg=terminal").Run()
+	osExec.CommandContext(ctx, "tmux", "set-option", "-t", m.uiSessionName, "window-style", "fg=#6b7280").Run()
+	osExec.CommandContext(ctx, "tmux", "set-option", "-t", m.uiSessionName, "window-active-style", "fg=terminal").Run()
 
 	// Resize TUI pane to configured height (default 20%)
 	detailHeight := m.getDetailPaneHeight()
 	log.Debug("joinTmuxPanes: resizing TUI pane to %q", detailHeight)
-	exec.CommandContext(ctx, "tmux", "resize-pane", "-t", tuiPaneID, "-y", detailHeight).Run()
+	osExec.CommandContext(ctx, "tmux", "resize-pane", "-t", tuiPaneID, "-y", detailHeight).Run()
 
 	// Bind Shift+Arrow keys to cycle through panes from any pane
 	// Down/Right = next pane, Up/Left = previous pane
-	exec.CommandContext(ctx, "tmux", "bind-key", "-T", "root", "S-Down", "select-pane", "-t", ":.+").Run()
-	exec.CommandContext(ctx, "tmux", "bind-key", "-T", "root", "S-Right", "select-pane", "-t", ":.+").Run()
-	exec.CommandContext(ctx, "tmux", "bind-key", "-T", "root", "S-Up", "select-pane", "-t", ":.-").Run()
-	exec.CommandContext(ctx, "tmux", "bind-key", "-T", "root", "S-Left", "select-pane", "-t", ":.-").Run()
+	osExec.CommandContext(ctx, "tmux", "bind-key", "-T", "root", "S-Down", "select-pane", "-t", ":.+").Run()
+	osExec.CommandContext(ctx, "tmux", "bind-key", "-T", "root", "S-Right", "select-pane", "-t", ":.+").Run()
+	osExec.CommandContext(ctx, "tmux", "bind-key", "-T", "root", "S-Up", "select-pane", "-t", ":.-").Run()
+	osExec.CommandContext(ctx, "tmux", "bind-key", "-T", "root", "S-Left", "select-pane", "-t", ":.-").Run()
 
 	// Bind Alt+Shift+Up/Down to jump to prev/next task while focusing executor pane
 	// This allows quick task navigation from any pane (especially useful from Claude pane)
 	// Using Alt+Shift mirrors the Shift+Arrow pane switching, and doesn't produce printable chars
 	// The sequence: select TUI pane -> send navigation key -> wait for re-join -> select executor pane
 	prevTaskCmd := "tmux select-pane -t :.0 && tmux send-keys Up && sleep 0.3 && tmux select-pane -t :.1"
-	exec.CommandContext(ctx, "tmux", "bind-key", "-T", "root", "M-S-Up", "run-shell", prevTaskCmd).Run()
+	osExec.CommandContext(ctx, "tmux", "bind-key", "-T", "root", "M-S-Up", "run-shell", prevTaskCmd).Run()
 	nextTaskCmd := "tmux select-pane -t :.0 && tmux send-keys Down && sleep 0.3 && tmux select-pane -t :.1"
-	exec.CommandContext(ctx, "tmux", "bind-key", "-T", "root", "M-S-Down", "run-shell", nextTaskCmd).Run()
+	osExec.CommandContext(ctx, "tmux", "bind-key", "-T", "root", "M-S-Down", "run-shell", nextTaskCmd).Run()
 
 	// Capture initial dimensions so we can detect user resizing later
 	// This allows us to save only when the user has actually dragged to resize
@@ -1367,7 +1375,7 @@ func (m *DetailModel) focusExecutorPane() {
 	log.Info("focusExecutorPane: focusing Claude pane %q", m.claudePaneID)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	err := exec.CommandContext(ctx, "tmux", "select-pane", "-t", m.claudePaneID).Run()
+	err := osExec.CommandContext(ctx, "tmux", "select-pane", "-t", m.claudePaneID).Run()
 	if err != nil {
 		log.Error("focusExecutorPane: select-pane failed: %v", err)
 	} else {
@@ -1437,7 +1445,7 @@ func (m *DetailModel) hideShellPane(ctx context.Context) {
 
 	// Break the shell pane to the daemon window (preserving its state)
 	log.Info("hideShellPane: breaking shell pane %q to daemon window %q", m.workdirPaneID, targetWindowID)
-	err := exec.CommandContext(ctx, "tmux", "join-pane",
+	err := osExec.CommandContext(ctx, "tmux", "join-pane",
 		"-d",                // don't switch focus
 		"-s", m.workdirPaneID, // source: shell pane
 		"-t", targetWindowID,  // target: daemon window
@@ -1478,7 +1486,7 @@ func (m *DetailModel) showShellPane(ctx context.Context) {
 	var shellSourcePaneID string
 	if storedShellPaneID != "" && m.cachedWindowTarget != "" {
 		// Check if the stored shell pane is still in the daemon window
-		daemonPanesCmd := exec.CommandContext(ctx, "tmux", "list-panes", "-t", m.cachedWindowTarget, "-F", "#{pane_id}")
+		daemonPanesCmd := osExec.CommandContext(ctx, "tmux", "list-panes", "-t", m.cachedWindowTarget, "-F", "#{pane_id}")
 		if daemonPanesOut, err := daemonPanesCmd.Output(); err == nil {
 			for _, pid := range strings.Split(strings.TrimSpace(string(daemonPanesOut)), "\n") {
 				if pid == storedShellPaneID {
@@ -1493,7 +1501,7 @@ func (m *DetailModel) showShellPane(ctx context.Context) {
 	if shellSourcePaneID != "" {
 		// Rejoin the shell pane from daemon
 		log.Info("showShellPane: rejoining shell pane %q from daemon", shellSourcePaneID)
-		err := exec.CommandContext(ctx, "tmux", "join-pane",
+		err := osExec.CommandContext(ctx, "tmux", "join-pane",
 			"-h", "-l", shellWidth,
 			"-s", shellSourcePaneID,
 			"-t", m.claudePaneID,
@@ -1503,10 +1511,10 @@ func (m *DetailModel) showShellPane(ctx context.Context) {
 			shellSourcePaneID = "" // Fall through to create new
 		} else {
 			// Get the joined pane ID
-			workdirPaneCmd := exec.CommandContext(ctx, "tmux", "display-message", "-p", "#{pane_id}")
+			workdirPaneCmd := osExec.CommandContext(ctx, "tmux", "display-message", "-p", "#{pane_id}")
 			if workdirPaneOut, err := workdirPaneCmd.Output(); err == nil {
 				m.workdirPaneID = strings.TrimSpace(string(workdirPaneOut))
-				exec.CommandContext(ctx, "tmux", "select-pane", "-t", m.workdirPaneID, "-T", "Shell").Run()
+				osExec.CommandContext(ctx, "tmux", "select-pane", "-t", m.workdirPaneID, "-T", "Shell").Run()
 			}
 		}
 	}
@@ -1519,7 +1527,7 @@ func (m *DetailModel) showShellPane(ctx context.Context) {
 		if userShell == "" {
 			userShell = "/bin/zsh"
 		}
-		err := exec.CommandContext(ctx, "tmux", "split-window",
+		err := osExec.CommandContext(ctx, "tmux", "split-window",
 			"-h", "-l", shellWidth,
 			"-t", m.claudePaneID,
 			"-c", workdir,
@@ -1530,22 +1538,22 @@ func (m *DetailModel) showShellPane(ctx context.Context) {
 			return
 		}
 		// Get the new shell pane ID
-		workdirPaneCmd := exec.CommandContext(ctx, "tmux", "display-message", "-p", "#{pane_id}")
+		workdirPaneCmd := osExec.CommandContext(ctx, "tmux", "display-message", "-p", "#{pane_id}")
 		if workdirPaneOut, err := workdirPaneCmd.Output(); err == nil {
 			m.workdirPaneID = strings.TrimSpace(string(workdirPaneOut))
-			exec.CommandContext(ctx, "tmux", "select-pane", "-t", m.workdirPaneID, "-T", "Shell").Run()
+			osExec.CommandContext(ctx, "tmux", "select-pane", "-t", m.workdirPaneID, "-T", "Shell").Run()
 			// Set environment variables in the newly created shell pane
 			if m.task != nil {
 				envCmd := fmt.Sprintf("export WORKTREE_TASK_ID=%d WORKTREE_PORT=%d WORKTREE_PATH=%q", m.task.ID, m.task.Port, m.task.WorktreePath)
-				exec.CommandContext(ctx, "tmux", "send-keys", "-t", m.workdirPaneID, envCmd, "Enter").Run()
-				exec.CommandContext(ctx, "tmux", "send-keys", "-t", m.workdirPaneID, "clear", "Enter").Run()
+				osExec.CommandContext(ctx, "tmux", "send-keys", "-t", m.workdirPaneID, envCmd, "Enter").Run()
+				osExec.CommandContext(ctx, "tmux", "send-keys", "-t", m.workdirPaneID, "clear", "Enter").Run()
 			}
 		}
 	}
 
 	// Select back to TUI pane
 	if m.tuiPaneID != "" {
-		exec.CommandContext(ctx, "tmux", "select-pane", "-t", m.tuiPaneID).Run()
+		osExec.CommandContext(ctx, "tmux", "select-pane", "-t", m.tuiPaneID).Run()
 	}
 
 	m.shellPaneHidden = false
@@ -1594,7 +1602,7 @@ func (m *DetailModel) findOrCreateTaskWindow(ctx context.Context, daemonSession,
 	if m.task != nil && m.task.TmuxWindowID != "" {
 		// Verify window still exists by checking the output (not just exit code)
 		// tmux display-message returns exit code 0 even for non-existent windows
-		out, err := exec.CommandContext(ctx, "tmux", "display-message",
+		out, err := osExec.CommandContext(ctx, "tmux", "display-message",
 			"-t", m.task.TmuxWindowID, "-p", "#{window_id}").Output()
 		if err == nil && strings.TrimSpace(string(out)) == m.task.TmuxWindowID {
 			log.Debug("findOrCreateTaskWindow: using stored window ID %q", m.task.TmuxWindowID)
@@ -1608,7 +1616,7 @@ func (m *DetailModel) findOrCreateTaskWindow(ctx context.Context, daemonSession,
 	}
 
 	// Priority 2: Search for existing window by name (return first match's ID)
-	out, err := exec.CommandContext(ctx, "tmux", "list-windows",
+	out, err := osExec.CommandContext(ctx, "tmux", "list-windows",
 		"-t", daemonSession, "-F", "#{window_id}:#{window_name}").Output()
 	if err == nil {
 		for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
@@ -1631,7 +1639,7 @@ func (m *DetailModel) findOrCreateTaskWindow(ctx context.Context, daemonSession,
 	// Priority 3: Create a new placeholder window
 	// We'll use a placeholder command that stays alive
 	workDir := m.getWorkdir()
-	createErr := exec.CommandContext(ctx, "tmux", "new-window",
+	createErr := osExec.CommandContext(ctx, "tmux", "new-window",
 		"-d",
 		"-t", daemonSession+":",
 		"-n", windowName,
@@ -1643,7 +1651,7 @@ func (m *DetailModel) findOrCreateTaskWindow(ctx context.Context, daemonSession,
 	}
 
 	// Get the ID of the newly created window
-	out, err = exec.CommandContext(ctx, "tmux", "list-windows",
+	out, err = osExec.CommandContext(ctx, "tmux", "list-windows",
 		"-t", daemonSession, "-F", "#{window_id}:#{window_name}").Output()
 	if err == nil {
 		// Return LAST match (most recently created)
@@ -1717,28 +1725,28 @@ func (m *DetailModel) breakTmuxPanes(saveHeight bool, resizeTUI bool) {
 
 	// Reset status bar and pane styling
 	log.Debug("breakTmuxPanes: resetting status bar and pane styling")
-	exec.CommandContext(ctx, "tmux", "set-option", "-t", "task-ui", "status-right", " ").Run()
-	exec.CommandContext(ctx, "tmux", "set-option", "-t", "task-ui", "pane-border-lines", "single").Run()
-	exec.CommandContext(ctx, "tmux", "set-option", "-t", "task-ui", "pane-border-indicators", "off").Run()
-	exec.CommandContext(ctx, "tmux", "set-option", "-t", "task-ui", "pane-border-style", "fg=#374151").Run()
-	exec.CommandContext(ctx, "tmux", "set-option", "-t", "task-ui", "pane-active-border-style", "fg=#61AFEF").Run()
+	osExec.CommandContext(ctx, "tmux", "set-option", "-t", m.uiSessionName, "status-right", " ").Run()
+	osExec.CommandContext(ctx, "tmux", "set-option", "-t", m.uiSessionName, "pane-border-lines", "single").Run()
+	osExec.CommandContext(ctx, "tmux", "set-option", "-t", m.uiSessionName, "pane-border-indicators", "off").Run()
+	osExec.CommandContext(ctx, "tmux", "set-option", "-t", m.uiSessionName, "pane-border-style", "fg=#374151").Run()
+	osExec.CommandContext(ctx, "tmux", "set-option", "-t", m.uiSessionName, "pane-active-border-style", "fg=#61AFEF").Run()
 
 	// Reset window styling (remove inactive pane de-emphasis)
-	exec.CommandContext(ctx, "tmux", "set-option", "-t", "task-ui", "window-style", "default").Run()
-	exec.CommandContext(ctx, "tmux", "set-option", "-t", "task-ui", "window-active-style", "default").Run()
+	osExec.CommandContext(ctx, "tmux", "set-option", "-t", m.uiSessionName, "window-style", "default").Run()
+	osExec.CommandContext(ctx, "tmux", "set-option", "-t", m.uiSessionName, "window-active-style", "default").Run()
 
 	// Unbind Shift+Arrow keybindings that were set in joinTmuxPanes
-	exec.CommandContext(ctx, "tmux", "unbind-key", "-T", "root", "S-Down").Run()
-	exec.CommandContext(ctx, "tmux", "unbind-key", "-T", "root", "S-Right").Run()
-	exec.CommandContext(ctx, "tmux", "unbind-key", "-T", "root", "S-Up").Run()
-	exec.CommandContext(ctx, "tmux", "unbind-key", "-T", "root", "S-Left").Run()
+	osExec.CommandContext(ctx, "tmux", "unbind-key", "-T", "root", "S-Down").Run()
+	osExec.CommandContext(ctx, "tmux", "unbind-key", "-T", "root", "S-Right").Run()
+	osExec.CommandContext(ctx, "tmux", "unbind-key", "-T", "root", "S-Up").Run()
+	osExec.CommandContext(ctx, "tmux", "unbind-key", "-T", "root", "S-Left").Run()
 
 	// Unbind Alt+Shift+Arrow task navigation keybindings
-	exec.CommandContext(ctx, "tmux", "unbind-key", "-T", "root", "M-S-Up").Run()
-	exec.CommandContext(ctx, "tmux", "unbind-key", "-T", "root", "M-S-Down").Run()
+	osExec.CommandContext(ctx, "tmux", "unbind-key", "-T", "root", "M-S-Up").Run()
+	osExec.CommandContext(ctx, "tmux", "unbind-key", "-T", "root", "M-S-Down").Run()
 
 	// Reset pane title back to main view label
-	exec.CommandContext(ctx, "tmux", "select-pane", "-t", "task-ui:.0", "-T", "Tasks").Run()
+	osExec.CommandContext(ctx, "tmux", "select-pane", "-t", "task-ui:.0", "-T", "Tasks").Run()
 
 	// Break the Claude pane back to task-daemon
 	if m.claudePaneID == "" {
@@ -1752,7 +1760,7 @@ func (m *DetailModel) breakTmuxPanes(saveHeight bool, resizeTUI bool) {
 		}
 		// Ensure TUI pane is full size (only when returning to dashboard)
 		if resizeTUI {
-			exec.CommandContext(ctx, "tmux", "resize-pane", "-t", "task-ui:.0", "-y", "100%").Run()
+			osExec.CommandContext(ctx, "tmux", "resize-pane", "-t", "task-ui:.0", "-y", "100%").Run()
 		}
 		log.Info("breakTmuxPanes: completed (no Claude pane)")
 		return
@@ -1783,7 +1791,7 @@ func (m *DetailModel) breakTmuxPanes(saveHeight bool, resizeTUI bool) {
 		m.claudePaneID = ""
 		m.daemonSessionID = ""
 		if resizeTUI {
-			exec.CommandContext(ctx, "tmux", "resize-pane", "-t", "task-ui:.0", "-y", "100%").Run()
+			osExec.CommandContext(ctx, "tmux", "resize-pane", "-t", "task-ui:.0", "-y", "100%").Run()
 		}
 		log.Info("breakTmuxPanes: completed with error cleanup")
 		return
@@ -1792,7 +1800,7 @@ func (m *DetailModel) breakTmuxPanes(saveHeight bool, resizeTUI bool) {
 
 	// Check if the target window has a placeholder pane (from findOrCreateTaskWindow)
 	// If so, we need to kill it after joining our panes
-	paneCountOut, _ := exec.CommandContext(ctx, "tmux", "display-message", "-t", targetWindowID, "-p", "#{window_panes}").Output()
+	paneCountOut, _ := osExec.CommandContext(ctx, "tmux", "display-message", "-t", targetWindowID, "-p", "#{window_panes}").Output()
 	hadPlaceholder := strings.TrimSpace(string(paneCountOut)) == "1"
 
 	// Join the Claude pane to the task window using window ID (not name - avoids duplicates)
@@ -1800,7 +1808,7 @@ func (m *DetailModel) breakTmuxPanes(saveHeight bool, resizeTUI bool) {
 	// -s: source pane (the Claude pane currently in task-ui)
 	// -t: target window (the canonical task window)
 	log.Info("breakTmuxPanes: joining Claude pane %q to window %q", m.claudePaneID, targetWindowID)
-	joinErr := exec.CommandContext(ctx, "tmux", "join-pane",
+	joinErr := osExec.CommandContext(ctx, "tmux", "join-pane",
 		"-d",
 		"-s", m.claudePaneID,
 		"-t", targetWindowID).Run()
@@ -1810,7 +1818,7 @@ func (m *DetailModel) breakTmuxPanes(saveHeight bool, resizeTUI bool) {
 		// Preserving the user's running Claude session is more important than clean UI.
 		// Instead, try to break the pane to a new window in the daemon session.
 		log.Info("breakTmuxPanes: attempting to create new window for Claude pane")
-		newWindowErr := exec.CommandContext(ctx, "tmux", "break-pane",
+		newWindowErr := osExec.CommandContext(ctx, "tmux", "break-pane",
 			"-d", // don't switch focus
 			"-s", m.claudePaneID,
 			"-t", daemonSession+":",
@@ -1824,13 +1832,13 @@ func (m *DetailModel) breakTmuxPanes(saveHeight bool, resizeTUI bool) {
 		}
 		// Clean up shell pane (it's just a shell, safe to kill)
 		if m.workdirPaneID != "" {
-			exec.CommandContext(ctx, "tmux", "kill-pane", "-t", m.workdirPaneID).Run()
+			osExec.CommandContext(ctx, "tmux", "kill-pane", "-t", m.workdirPaneID).Run()
 			m.workdirPaneID = ""
 		}
 		m.claudePaneID = ""
 		m.daemonSessionID = ""
 		if resizeTUI {
-			exec.CommandContext(ctx, "tmux", "resize-pane", "-t", "task-ui:.0", "-y", "100%").Run()
+			osExec.CommandContext(ctx, "tmux", "resize-pane", "-t", "task-ui:.0", "-y", "100%").Run()
 		}
 		log.Info("breakTmuxPanes: completed with graceful error handling")
 		return
@@ -1839,7 +1847,7 @@ func (m *DetailModel) breakTmuxPanes(saveHeight bool, resizeTUI bool) {
 
 	// If we had a placeholder, kill it now (it's pane .0, Claude is now .1)
 	if hadPlaceholder {
-		exec.CommandContext(ctx, "tmux", "kill-pane", "-t", targetWindowID+".0").Run()
+		osExec.CommandContext(ctx, "tmux", "kill-pane", "-t", targetWindowID+".0").Run()
 		log.Debug("breakTmuxPanes: killed placeholder pane")
 	}
 
@@ -1853,7 +1861,7 @@ func (m *DetailModel) breakTmuxPanes(saveHeight bool, resizeTUI bool) {
 		// -d: don't switch focus
 		// -s: source pane (the workdir pane)
 		// -t: target window's first pane (Claude)
-		joinErr := exec.CommandContext(ctx, "tmux", "join-pane",
+		joinErr := osExec.CommandContext(ctx, "tmux", "join-pane",
 			"-h",
 			"-d",
 			"-s", m.workdirPaneID,
@@ -1876,7 +1884,7 @@ func (m *DetailModel) breakTmuxPanes(saveHeight bool, resizeTUI bool) {
 	// This ensures the kanban view has the full window to render
 	// Skip during task switching to avoid layout thrashing
 	if resizeTUI {
-		exec.CommandContext(ctx, "tmux", "resize-pane", "-t", "task-ui:.0", "-y", "100%").Run()
+		osExec.CommandContext(ctx, "tmux", "resize-pane", "-t", "task-ui:.0", "-y", "100%").Run()
 	}
 
 	m.claudePaneID = ""
@@ -1941,7 +1949,7 @@ func (m *DetailModel) HasRunningShellProcess() bool {
 	paneToCheck := m.workdirPaneID
 
 	// Get the current command in the shell pane
-	out, err := exec.CommandContext(ctx, "tmux", "display-message", "-t", paneToCheck, "-p", "#{pane_current_command}").Output()
+	out, err := osExec.CommandContext(ctx, "tmux", "display-message", "-t", paneToCheck, "-p", "#{pane_current_command}").Output()
 	if err != nil {
 		return false
 	}
@@ -1959,18 +1967,18 @@ func (m *DetailModel) killPaneWithProcess(ctx context.Context, paneID string) {
 	log := GetLogger()
 
 	// Get the PID of the process running in the pane
-	pidCmd := exec.CommandContext(ctx, "tmux", "display-message", "-t", paneID, "-p", "#{pane_pid}")
+	pidCmd := osExec.CommandContext(ctx, "tmux", "display-message", "-t", paneID, "-p", "#{pane_pid}")
 	if pidOut, err := pidCmd.Output(); err == nil {
 		pid := strings.TrimSpace(string(pidOut))
 		if pid != "" {
 			log.Debug("killPaneWithProcess: killing process %s in pane %s", pid, paneID)
 			// Use SIGKILL - Claude processes ignore SIGTERM
-			exec.CommandContext(ctx, "kill", "-9", pid).Run()
+			osExec.CommandContext(ctx, "kill", "-9", pid).Run()
 		}
 	}
 
 	// Now kill the pane
-	exec.CommandContext(ctx, "tmux", "kill-pane", "-t", paneID).Run()
+	osExec.CommandContext(ctx, "tmux", "kill-pane", "-t", paneID).Run()
 }
 
 // IsFocused returns true if the detail pane is the active tmux pane.
@@ -1996,7 +2004,7 @@ func (m *DetailModel) checkFocusState() {
 	defer cancel()
 
 	// Get the currently active pane ID
-	out, err := exec.CommandContext(ctx, "tmux", "display-message", "-p", "#{pane_id}").Output()
+	out, err := osExec.CommandContext(ctx, "tmux", "display-message", "-p", "#{pane_id}").Output()
 	if err != nil {
 		m.focused = true // Default to focused on error
 		return
@@ -2578,7 +2586,7 @@ func (m *DetailModel) getClaudeMemoryMB() int {
 	defer cancel()
 
 	// Get the shell PID from the tmux pane
-	out, err := exec.CommandContext(ctx, "tmux", "display-message", "-t", paneTarget, "-p", "#{pane_pid}").Output()
+	out, err := osExec.CommandContext(ctx, "tmux", "display-message", "-t", paneTarget, "-p", "#{pane_pid}").Output()
 	if err != nil {
 		return 0
 	}
@@ -2589,7 +2597,7 @@ func (m *DetailModel) getClaudeMemoryMB() int {
 	}
 
 	// Find claude child process
-	childOut, err := exec.CommandContext(ctx, "pgrep", "-P", shellPID, "claude").Output()
+	childOut, err := osExec.CommandContext(ctx, "pgrep", "-P", shellPID, "claude").Output()
 	var pid string
 	if err == nil && len(childOut) > 0 {
 		pid = strings.TrimSpace(string(childOut))
@@ -2598,7 +2606,7 @@ func (m *DetailModel) getClaudeMemoryMB() int {
 	}
 
 	// Get RSS in KB from ps
-	psOut, err := exec.CommandContext(ctx, "ps", "-o", "rss=", "-p", pid).Output()
+	psOut, err := osExec.CommandContext(ctx, "ps", "-o", "rss=", "-p", pid).Output()
 	if err != nil {
 		return 0
 	}
