@@ -420,7 +420,7 @@ func NewAppModel(database *db.DB, exec *executor.Executor, workingDir string) *A
 
 	// Setup filter input
 	filterInput := textinput.New()
-	filterInput.Placeholder = "Filter by project, type, or text..."
+	filterInput.Placeholder = "Filter text, #id, or [project..."
 	filterInput.CharLimit = 50
 
 	// Get available executors for form filtering and warnings
@@ -1459,8 +1459,31 @@ func (m *AppModel) applyFilter() {
 // Returns -1 if the task doesn't match, otherwise returns a positive score.
 // Higher scores indicate better matches.
 // This uses the same matching logic as the command palette (Ctrl+P) for consistency.
+//
+// Special prefixes:
+//   - "[project" filters only on the project field (matches the [project] display format)
 func scoreTaskForFilter(task *db.Task, query string) int {
 	bestScore := -1
+
+	// Check for project-only filter prefix "[" (matches display format [project])
+	if strings.HasPrefix(query, "[") {
+		projectQuery := strings.TrimPrefix(query, "[")
+		// Also strip trailing ] if present (user typed full "[project]")
+		projectQuery = strings.TrimSuffix(projectQuery, "]")
+		if projectQuery == "" {
+			// Just "[" typed, show all tasks with a project
+			if task.Project != "" {
+				return 100
+			}
+			return -1
+		}
+		// Only match against project field
+		projectScore := fuzzyScore(task.Project, projectQuery)
+		if projectScore > 0 {
+			return projectScore
+		}
+		return -1
+	}
 
 	// Check task ID (exact or prefix match gets high priority)
 	idStr := fmt.Sprintf("%d", task.ID)

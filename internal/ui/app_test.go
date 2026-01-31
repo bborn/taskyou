@@ -461,6 +461,49 @@ func TestScoreTaskForFilter(t *testing.T) {
 			wantMin: -1,
 			wantMax: -1,
 		},
+		// Project-only filter tests (using [ prefix)
+		{
+			name:    "project-only filter matches project",
+			task:    &db.Task{ID: 1, Title: "Some task", Project: "workflow"},
+			query:   "[workflow",
+			wantMin: 100,
+			wantMax: 500,
+		},
+		{
+			name:    "project-only filter with fuzzy match",
+			task:    &db.Task{ID: 1, Title: "Some task", Project: "offerlab"},
+			query:   "[ol",
+			wantMin: 100,
+			wantMax: 500,
+		},
+		{
+			name:    "project-only filter excludes title matches",
+			task:    &db.Task{ID: 1, Title: "workflow improvements", Project: ""},
+			query:   "[workflow",
+			wantMin: -1,
+			wantMax: -1,
+		},
+		{
+			name:    "project-only filter with trailing bracket",
+			task:    &db.Task{ID: 1, Title: "Task", Project: "influencekit"},
+			query:   "[influencekit]",
+			wantMin: 100,
+			wantMax: 700, // exact match gets high score
+		},
+		{
+			name:    "just bracket shows tasks with project",
+			task:    &db.Task{ID: 1, Title: "Task", Project: "myproject"},
+			query:   "[",
+			wantMin: 100,
+			wantMax: 100,
+		},
+		{
+			name:    "just bracket hides tasks without project",
+			task:    &db.Task{ID: 1, Title: "Task", Project: ""},
+			query:   "[",
+			wantMin: -1,
+			wantMax: -1,
+		},
 	}
 
 	for _, tt := range tests {
