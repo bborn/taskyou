@@ -737,8 +737,6 @@ func pushToCloud(force bool) error {
 
 	settings, _ := getCloudSettings(database)
 	server := settings[SettingCloudServer]
-	remoteUser := settings[SettingCloudRemoteUser]
-	remoteDir := settings[SettingCloudRemoteDir]
 
 	if server == "" {
 		return fmt.Errorf("no cloud server configured. Run 'task cloud init' first")
@@ -754,10 +752,10 @@ func pushToCloud(force bool) error {
 		return fmt.Errorf("list local tasks: %w", err)
 	}
 
-	// Get remote task count
+	// Get remote task count - use ~ to get the SSH user's home directory
 	fmt.Print("Checking remote state... ")
-	remoteDBPath := fmt.Sprintf("%s/.local/share/task/tasks.db", remoteDir)
-	output, _ := sshRun(server, fmt.Sprintf("sudo -u %s sqlite3 '%s' 'SELECT COUNT(*) FROM tasks' 2>/dev/null || echo 0", remoteUser, remoteDBPath))
+	remoteDBPath := "~/.local/share/task/tasks.db"
+	output, _ := sshRun(server, fmt.Sprintf("sqlite3 '%s' 'SELECT COUNT(*) FROM tasks' 2>/dev/null || echo 0", remoteDBPath))
 	remoteCount := strings.TrimSpace(output)
 	fmt.Println(cloudCheckStyle.Render("done"))
 
@@ -777,55 +775,47 @@ func pushToCloud(force bool) error {
 
 	fmt.Println()
 
+	// Get remote home directory
+	remoteHome, err := sshRun(server, "echo $HOME")
+	if err != nil || remoteHome == "" {
+		return fmt.Errorf("could not determine remote home directory")
+	}
+	remoteHome = strings.TrimSpace(remoteHome)
+	fullRemoteDBPath := fmt.Sprintf("%s/.local/share/task/tasks.db", remoteHome)
+
 	// Create backup on remote server
 	fmt.Print("Creating remote backup... ")
-	backupPath := fmt.Sprintf("%s/.local/share/task/tasks.db.backup.%d", remoteDir, time.Now().Unix())
-	_, err = sshRun(server, fmt.Sprintf("sudo -u %s cp -f '%s' '%s' 2>/dev/null || true", remoteUser, remoteDBPath, backupPath))
-	if err == nil {
-		fmt.Println(cloudCheckStyle.Render("done"))
-	} else {
-		fmt.Println(dimStyle.Render("skipped (no existing database)"))
-	}
+	backupPath := fmt.Sprintf("%s/.local/share/task/tasks.db.backup.%d", remoteHome, time.Now().Unix())
+	sshRun(server, fmt.Sprintf("cp -f '%s' '%s' 2>/dev/null || true", fullRemoteDBPath, backupPath))
+	fmt.Println(cloudCheckStyle.Render("done"))
 
 	// Ensure remote directory exists
 	fmt.Print("Preparing remote directory... ")
-	_, err = sshRun(server, fmt.Sprintf("sudo -u %s mkdir -p '%s/.local/share/task'", remoteUser, remoteDir))
+	_, err = sshRun(server, fmt.Sprintf("mkdir -p '%s/.local/share/task'", remoteHome))
 	if err != nil {
 		fmt.Println(errorStyle.Render("failed"))
 		return fmt.Errorf("create remote directory: %w", err)
 	}
 	fmt.Println(cloudCheckStyle.Render("done"))
 
-	// Stop the remote taskd service to release database locks
-	fmt.Print("Stopping remote service... ")
-	sshRun(server, "systemctl stop taskd 2>/dev/null || true")
-	fmt.Println(cloudCheckStyle.Render("done"))
-
 	// Copy the database file using scp
 	fmt.Print("Uploading database... ")
-	cmd := osexec.Command("scp", dbPath, fmt.Sprintf("%s:/tmp/tasks.db.upload", server))
+	cmd := osexec.Command("scp", dbPath, fmt.Sprintf("%s:%s", server, fullRemoteDBPath))
 	if output, err := cmd.CombinedOutput(); err != nil {
 		fmt.Println(errorStyle.Render("failed"))
 		return fmt.Errorf("upload database: %w\n%s", err, output)
-	}
-
-	// Move to final location with correct ownership
-	_, err = sshRun(server, fmt.Sprintf("mv /tmp/tasks.db.upload '%s' && chown %s:%s '%s'", remoteDBPath, remoteUser, remoteUser, remoteDBPath))
-	if err != nil {
-		fmt.Println(errorStyle.Render("failed"))
-		return fmt.Errorf("move database: %w", err)
 	}
 	fmt.Println(cloudCheckStyle.Render("done"))
 
 	// Remove WAL and SHM files (they will be recreated)
 	fmt.Print("Cleaning up... ")
-	sshRun(server, fmt.Sprintf("rm -f '%s-wal' '%s-shm'", remoteDBPath, remoteDBPath))
+	sshRun(server, fmt.Sprintf("rm -f '%s-wal' '%s-shm'", fullRemoteDBPath, fullRemoteDBPath))
 	fmt.Println(cloudCheckStyle.Render("done"))
 
 	// Clear execution-specific fields that don't apply to the remote environment
 	fmt.Print("Resetting execution state... ")
 	resetSQL := `UPDATE tasks SET worktree_path = '', port = 0, daemon_session = '', tmux_window_id = '', claude_pane_id = '', shell_pane_id = '', claude_session_id = '' WHERE 1=1`
-	_, err = sshRun(server, fmt.Sprintf("sqlite3 '%s' \"%s\"", remoteDBPath, resetSQL))
+	_, err = sshRun(server, fmt.Sprintf("sqlite3 '%s' \"%s\"", fullRemoteDBPath, resetSQL))
 	if err != nil {
 		fmt.Println(cloudPendingStyle.Render("warning"))
 	} else {
@@ -841,16 +831,16 @@ func pushToCloud(force bool) error {
 		for _, p := range projects {
 			var remotePath string
 			if p.Name == "personal" {
-				remotePath = fmt.Sprintf("%s/.local/share/task/personal", remoteDir)
+				remotePath = fmt.Sprintf("%s/.local/share/task/personal", remoteHome)
 			} else {
-				remotePath = fmt.Sprintf("/home/runner/Projects/%s", p.Name)
+				remotePath = fmt.Sprintf("%s/Projects/%s", remoteHome, p.Name)
 			}
 			updates = append(updates, fmt.Sprintf("UPDATE projects SET path = '%s' WHERE name = '%s';", remotePath, p.Name))
 		}
 		// Execute all updates in one SSH call
 		if len(updates) > 0 {
 			allSQL := strings.Join(updates, " ")
-			_, err = sshRun(server, fmt.Sprintf("sqlite3 '%s' \"%s\"", remoteDBPath, allSQL))
+			_, err = sshRun(server, fmt.Sprintf("sqlite3 '%s' \"%s\"", fullRemoteDBPath, allSQL))
 			if err != nil {
 				fmt.Println(cloudPendingStyle.Render("warning"))
 			} else {
@@ -863,15 +853,10 @@ func pushToCloud(force bool) error {
 		fmt.Println(cloudPendingStyle.Render("warning"))
 	}
 
-	// Restart the taskd service
-	fmt.Print("Starting remote service... ")
-	sshRun(server, "systemctl start taskd")
-	fmt.Println(cloudCheckStyle.Render("done"))
-
 	fmt.Println()
 	fmt.Println(successStyle.Render("✓ Database pushed to cloud successfully!"))
 	fmt.Println()
-	fmt.Printf("Connect: %s\n", boldStyle.Render(fmt.Sprintf("ssh -p %s %s", settings[SettingCloudTaskPort], extractHost(server))))
+	fmt.Printf("Connect: %s\n", boldStyle.Render(fmt.Sprintf("ssh %s", extractHost(server))))
 
 	return nil
 }
@@ -887,8 +872,6 @@ func pullFromCloud(force bool) error {
 
 	settings, _ := getCloudSettings(database)
 	server := settings[SettingCloudServer]
-	remoteUser := settings[SettingCloudRemoteUser]
-	remoteDir := settings[SettingCloudRemoteDir]
 
 	if server == "" {
 		return fmt.Errorf("no cloud server configured. Run 'task cloud init' first")
@@ -904,10 +887,17 @@ func pullFromCloud(force bool) error {
 		return fmt.Errorf("list local tasks: %w", err)
 	}
 
-	// Get remote task count
+	// Get remote home directory and task count
 	fmt.Print("Checking remote state... ")
-	remoteDBPath := fmt.Sprintf("%s/.local/share/task/tasks.db", remoteDir)
-	output, err := sshRun(server, fmt.Sprintf("sudo -u %s sqlite3 '%s' 'SELECT COUNT(*) FROM tasks' 2>/dev/null", remoteUser, remoteDBPath))
+	remoteHome, err := sshRun(server, "echo $HOME")
+	if err != nil || remoteHome == "" {
+		fmt.Println(errorStyle.Render("failed"))
+		return fmt.Errorf("could not determine remote home directory")
+	}
+	remoteHome = strings.TrimSpace(remoteHome)
+	fullRemoteDBPath := fmt.Sprintf("%s/.local/share/task/tasks.db", remoteHome)
+
+	output, err := sshRun(server, fmt.Sprintf("sqlite3 '%s' 'SELECT COUNT(*) FROM tasks' 2>/dev/null", fullRemoteDBPath))
 	if err != nil {
 		fmt.Println(errorStyle.Render("failed"))
 		return fmt.Errorf("no database found on remote server")
@@ -954,26 +944,14 @@ func pullFromCloud(force bool) error {
 	// Close the database before replacing it
 	database.Close()
 
-	// Stop the remote taskd service to release database locks
-	fmt.Print("Stopping remote service... ")
-	sshRun(server, "systemctl stop taskd 2>/dev/null || true")
-	fmt.Println(cloudCheckStyle.Render("done"))
-
 	// Download the database file using scp
 	fmt.Print("Downloading database... ")
 	tempPath := dbPath + ".download"
-	cmd := osexec.Command("scp", fmt.Sprintf("%s:%s", server, remoteDBPath), tempPath)
+	cmd := osexec.Command("scp", fmt.Sprintf("%s:%s", server, fullRemoteDBPath), tempPath)
 	if output, err := cmd.CombinedOutput(); err != nil {
 		fmt.Println(errorStyle.Render("failed"))
-		// Restart remote service before returning
-		sshRun(server, "systemctl start taskd")
 		return fmt.Errorf("download database: %w\n%s", err, output)
 	}
-	fmt.Println(cloudCheckStyle.Render("done"))
-
-	// Restart the remote service
-	fmt.Print("Starting remote service... ")
-	sshRun(server, "systemctl start taskd")
 	fmt.Println(cloudCheckStyle.Render("done"))
 
 	// Replace the local database
@@ -1017,8 +995,6 @@ func pullFromCloud(force bool) error {
 	database.SetSetting(SettingCloudServer, server)
 	database.SetSetting(SettingCloudSSHPort, settings[SettingCloudSSHPort])
 	database.SetSetting(SettingCloudTaskPort, settings[SettingCloudTaskPort])
-	database.SetSetting(SettingCloudRemoteUser, remoteUser)
-	database.SetSetting(SettingCloudRemoteDir, remoteDir)
 	fmt.Println(cloudCheckStyle.Render("done"))
 
 	// Restore local project paths
