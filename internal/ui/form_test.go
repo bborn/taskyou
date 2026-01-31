@@ -890,3 +890,68 @@ func TestGetDBTaskCleansExecutorName(t *testing.T) {
 		t.Errorf("GetDBTask() executor = %q, want %q", task.Executor, "claude")
 	}
 }
+
+func TestFindFirstAvailableExecutor(t *testing.T) {
+	tests := []struct {
+		name      string
+		executors []string
+		wantIdx   int
+		wantName  string
+	}{
+		{
+			name:      "first is available",
+			executors: []string{"claude", "codex (not installed)"},
+			wantIdx:   0,
+			wantName:  "claude",
+		},
+		{
+			name:      "second is available",
+			executors: []string{"claude (not installed)", "codex"},
+			wantIdx:   1,
+			wantName:  "codex",
+		},
+		{
+			name:      "none available",
+			executors: []string{"claude (not installed)", "codex (not installed)"},
+			wantIdx:   -1,
+			wantName:  "",
+		},
+		{
+			name:      "all available",
+			executors: []string{"claude", "codex", "gemini"},
+			wantIdx:   0,
+			wantName:  "claude",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotIdx, gotName := findFirstAvailableExecutor(tt.executors)
+			if gotIdx != tt.wantIdx || gotName != tt.wantName {
+				t.Errorf("findFirstAvailableExecutor() = (%d, %q), want (%d, %q)",
+					gotIdx, gotName, tt.wantIdx, tt.wantName)
+			}
+		})
+	}
+}
+
+func TestFormDefaultsToAvailableExecutor(t *testing.T) {
+	// When claude is available, form should default to claude
+	m := NewFormModel(nil, 100, 50, "", []string{"claude"})
+
+	if m.executor != "claude" {
+		t.Errorf("expected form to default to 'claude', got %q", m.executor)
+	}
+	if m.executorIdx != 0 {
+		t.Errorf("expected executorIdx to be 0, got %d", m.executorIdx)
+	}
+}
+
+func TestFormDefaultsToFirstAvailableExecutor(t *testing.T) {
+	// When only codex is available, form should default to codex
+	m := NewFormModel(nil, 100, 50, "", []string{"codex"})
+
+	if m.executor != "codex" {
+		t.Errorf("expected form to default to 'codex', got %q", m.executor)
+	}
+}

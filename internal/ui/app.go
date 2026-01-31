@@ -1033,7 +1033,7 @@ func (m *AppModel) viewDashboard() string {
 			Bold(true).
 			Padding(0, 2).
 			Width(m.width)
-		headerParts = append(headerParts, warnStyle.Render("⚠ No AI executor installed. Run: npm i -g @anthropic-ai/claude-code"))
+		headerParts = append(headerParts, warnStyle.Render("⚠ No AI executor installed. See: https://code.claude.com/docs/en/overview"))
 	}
 
 	// Show global dangerous mode banner if the entire system is in dangerous mode

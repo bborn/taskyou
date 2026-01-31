@@ -134,6 +134,17 @@ func cleanExecutorName(executor string) string {
 	return strings.TrimSuffix(executor, " (not installed)")
 }
 
+// findFirstAvailableExecutor returns the index and name of the first available executor.
+// Returns -1 and empty string if no available executor is found.
+func findFirstAvailableExecutor(executors []string) (int, string) {
+	for i, e := range executors {
+		if isExecutorAvailable(e) {
+			return i, e
+		}
+	}
+	return -1, ""
+}
+
 // NewEditFormModel creates a form model pre-populated with an existing task's data for editing.
 func NewEditFormModel(database *db.DB, task *db.Task, width, height int, availableExecutors []string) *FormModel {
 	// Set executor to default if not specified
@@ -162,6 +173,29 @@ func NewEditFormModel(database *db.DB, task *db.Task, width, height int, availab
 	allExecutors := []string{db.ExecutorClaude, db.ExecutorCodex, db.ExecutorGemini, db.ExecutorOpenClaw}
 	executors := buildExecutorList(allExecutors, availableExecutors)
 
+	// Find the executor index and check if it's available
+	var executorIdx int
+	var executorDisplay string
+	foundAvailable := false
+	for i, e := range executors {
+		if cleanExecutorName(e) == taskExecutor {
+			executorIdx = i
+			executorDisplay = e
+			if isExecutorAvailable(e) {
+				foundAvailable = true
+			}
+			break
+		}
+	}
+
+	// If the task's executor is not available, fall back to first available
+	if !foundAvailable {
+		if idx, exec := findFirstAvailableExecutor(executors); idx >= 0 {
+			executorIdx = idx
+			executorDisplay = exec
+		}
+	}
+
 	m := &FormModel{
 		db:                  database,
 		width:               width,
@@ -170,7 +204,8 @@ func NewEditFormModel(database *db.DB, task *db.Task, width, height int, availab
 		taskType:            task.Type,
 		project:             task.Project,
 		originalProject:     task.Project, // Track original project for detecting changes
-		executor:            taskExecutor,
+		executor:            executorDisplay,
+		executorIdx:         executorIdx,
 		executors:           executors,
 		isEdit:              true,
 		prURL:               task.PRURL,
@@ -179,14 +214,6 @@ func NewEditFormModel(database *db.DB, task *db.Task, width, height int, availab
 		autocompleteEnabled: autocompleteEnabled,
 		taskRefAutocomplete: NewTaskRefAutocompleteModel(database, width-24),
 		attachmentCursor:    -1,
-	}
-
-	// Set executor index (match by clean name since display may include "(not installed)")
-	for i, e := range m.executors {
-		if cleanExecutorName(e) == taskExecutor {
-			m.executorIdx = i
-			break
-		}
 	}
 
 	// Load task types from database
@@ -292,12 +319,21 @@ func NewFormModel(database *db.DB, width, height int, workingDir string, availab
 	allExecutors := []string{db.ExecutorClaude, db.ExecutorCodex, db.ExecutorGemini, db.ExecutorOpenClaw}
 	executors := buildExecutorList(allExecutors, availableExecutors)
 
+	// Find the first available executor for default selection
+	defaultExecutorIdx, defaultExecutor := findFirstAvailableExecutor(executors)
+	if defaultExecutorIdx == -1 {
+		// No available executors - use first in list (will be disabled)
+		defaultExecutorIdx = 0
+		defaultExecutor = executors[0]
+	}
+
 	m := &FormModel{
 		db:                  database,
 		width:               width,
 		height:              height,
 		focused:             FieldProject,
-		executor:            db.DefaultExecutor(),
+		executor:            defaultExecutor,
+		executorIdx:         defaultExecutorIdx,
 		executors:           executors,
 		autocompleteSvc:     autocompleteSvc,
 		autocompleteEnabled: autocompleteEnabled,
@@ -627,8 +663,14 @@ func (m *FormModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			if m.focused == FieldExecutor {
-				m.executorIdx = (m.executorIdx - 1 + len(m.executors)) % len(m.executors)
-				m.executor = m.executors[m.executorIdx]
+				// Skip unavailable executors when navigating left
+				for i := 0; i < len(m.executors); i++ {
+					m.executorIdx = (m.executorIdx - 1 + len(m.executors)) % len(m.executors)
+					if isExecutorAvailable(m.executors[m.executorIdx]) {
+						m.executor = m.executors[m.executorIdx]
+						break
+					}
+				}
 				return m, nil
 			}
 
@@ -649,8 +691,14 @@ func (m *FormModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			if m.focused == FieldExecutor {
-				m.executorIdx = (m.executorIdx + 1) % len(m.executors)
-				m.executor = m.executors[m.executorIdx]
+				// Skip unavailable executors when navigating right
+				for i := 0; i < len(m.executors); i++ {
+					m.executorIdx = (m.executorIdx + 1) % len(m.executors)
+					if isExecutorAvailable(m.executors[m.executorIdx]) {
+						m.executor = m.executors[m.executorIdx]
+						break
+					}
+				}
 				return m, nil
 			}
 
@@ -927,8 +975,9 @@ func (m *FormModel) loadLastExecutorForProject() {
 	}
 
 	// Find the executor in the list and set it (match by clean name since display may include "(not installed)")
+	// Only select if the executor is available
 	for i, e := range m.executors {
-		if cleanExecutorName(e) == lastExecutor {
+		if cleanExecutorName(e) == lastExecutor && isExecutorAvailable(e) {
 			m.executorIdx = i
 			m.executor = e
 			return
