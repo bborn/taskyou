@@ -2234,9 +2234,7 @@ type ClaudeHookInput struct {
 	HookEventName      string `json:"hook_event_name"`
 	NotificationType   string `json:"notification_type,omitempty"`   // For Notification hooks
 	Message            string `json:"message,omitempty"`             // General message field
-	StopReason         string `json:"stop_reason,omitempty"`         // For Stop hooks
-	Trigger            string `json:"trigger,omitempty"`             // For PreCompact hooks: "manual" or "auto"
-	CustomInstructions string `json:"custom_instructions,omitempty"` // For PreCompact hooks: user-specified compaction instructions
+	StopReason string `json:"stop_reason,omitempty"` // For Stop hooks
 	// Tool use fields (for PreToolUse and PostToolUse hooks)
 	ToolName     string          `json:"tool_name,omitempty"`     // Name of the tool being used
 	ToolInput    json.RawMessage `json:"tool_input,omitempty"`    // Tool-specific input parameters
@@ -2286,8 +2284,6 @@ func handleClaudeHook(hookEvent string) error {
 		return handleNotificationHook(database, taskID, &input)
 	case "Stop":
 		return handleStopHook(database, taskID, &input)
-	case "PreCompact":
-		return handlePreCompactHook(database, taskID, &input)
 	default:
 		// Unknown hook type, ignore
 		return nil
@@ -2502,74 +2498,6 @@ func formatToolLogMessage(input *ClaudeHookInput) string {
 
 	// Default: just the tool name
 	return toolName
-}
-
-// handlePreCompactHook handles PreCompact hooks from Claude (before context compaction).
-// This hook fires when Claude is about to compact its context, either manually (/compact)
-// or automatically when the context window approaches its limit.
-//
-// We use this to:
-// 1. Read the current conversation from the transcript file
-// 2. Extract key context that should persist across compaction
-// 3. Store it in the database for retrieval on task resume
-//
-// This is better than letting Claude's normal compaction proceed alone because:
-// - We can persist important task context in our database
-// - We can provide this context back when the task resumes
-// - We can supplement Claude's summary with task-specific metadata
-// - The saved context survives Claude session cleanup
-func handlePreCompactHook(database *db.DB, taskID int64, input *ClaudeHookInput) error {
-	// Read the full transcript content before compaction
-	transcript, preTokens, err := readTranscriptContent(input.TranscriptPath)
-	if err != nil {
-		// Log error but don't fail - compaction should still proceed
-		database.AppendTaskLog(taskID, "system", fmt.Sprintf("Warning: Could not read transcript: %v", err))
-		return nil
-	}
-
-	// Store the full transcript in the database
-	compactionSummary := &db.CompactionSummary{
-		TaskID:             taskID,
-		SessionID:          input.SessionID,
-		Trigger:            input.Trigger,
-		PreTokens:          preTokens,
-		Summary:            transcript, // Full JSONL transcript content
-		CustomInstructions: input.CustomInstructions,
-	}
-
-	if err := database.SaveCompactionSummary(compactionSummary); err != nil {
-		database.AppendTaskLog(taskID, "system", fmt.Sprintf("Warning: Could not save transcript: %v", err))
-		return nil
-	}
-
-	// Log the compaction event
-	triggerType := "auto"
-	if input.Trigger == "manual" {
-		triggerType = "manual (/compact)"
-	}
-	database.AppendTaskLog(taskID, "system", fmt.Sprintf("Context compacted (%s) - saved %d bytes of transcript", triggerType, len(transcript)))
-
-	return nil
-}
-
-// readTranscriptContent reads the full Claude transcript file content.
-// Returns the complete JSONL content and estimated token count.
-// Saving the full transcript preserves all context without arbitrary truncation,
-// allowing us to reconstruct or re-summarize the conversation later if needed.
-func readTranscriptContent(transcriptPath string) (string, int, error) {
-	if transcriptPath == "" {
-		return "", 0, fmt.Errorf("no transcript path provided")
-	}
-
-	content, err := os.ReadFile(transcriptPath)
-	if err != nil {
-		return "", 0, fmt.Errorf("read transcript: %w", err)
-	}
-
-	// Estimate tokens (rough: ~4 chars per token)
-	preTokens := len(content) / 4
-
-	return string(content), preTokens, nil
 }
 
 // tailClaudeLogs tails all claude session logs for debugging.

@@ -192,17 +192,6 @@ CREATE TABLE task_attachments (
     created_at DATETIME
 );
 
-CREATE TABLE task_compaction_summaries (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
-    session_id TEXT NOT NULL,
-    trigger TEXT NOT NULL,
-    pre_tokens INTEGER DEFAULT 0,
-    summary TEXT NOT NULL,
-    custom_instructions TEXT DEFAULT '',
-    created_at DATETIME
-);
-
 CREATE TABLE settings (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -296,7 +285,6 @@ Tasks run in tmux windows with hooks that track state:
 - **PostToolUse** - After tool completes, ensures task stays "processing"
 - **Notification** - When idle or needs permission, marks task "blocked"
 - **Stop** - When Claude finishes responding, updates state accordingly
-- **PreCompact** - Before context compaction, saves transcript to DB
 
 ### Worktree Isolation
 
