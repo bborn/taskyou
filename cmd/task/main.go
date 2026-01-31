@@ -76,7 +76,7 @@ func main() {
 	)
 
 	rootCmd := &cobra.Command{
-		Use:   "task",
+		Use:   "ty",
 		Short: "Task queue manager",
 		Long:  "A beautiful terminal UI for managing your task queue.",
 		Run: func(cmd *cobra.Command, args []string) {

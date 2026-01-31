@@ -2,14 +2,14 @@
 # TaskYou Installation Script
 # Usage: curl -fsSL taskyou.dev/install.sh | bash
 #
-# This script downloads and installs the 'task' CLI tool.
+# This script downloads and installs the 'ty' CLI tool.
 # It detects your OS and architecture automatically.
 
 set -e
 
 REPO="bborn/taskyou"
 INSTALL_DIR="${INSTALL_DIR:-$HOME/.local/bin}"
-BINARY_NAME="task"
+BINARY_NAME="ty"
 
 # Colors for output
 RED='\033[0;31m'
@@ -68,7 +68,7 @@ install_binary() {
     local arch=$2
     local version=$3
 
-    local filename="task-${os}-${arch}"
+    local filename="ty-${os}-${arch}"
     local url="https://github.com/${REPO}/releases/download/${version}/${filename}"
 
     info "Downloading ${BINARY_NAME} ${version} for ${os}/${arch}..."
@@ -95,12 +95,15 @@ install_binary() {
 
     if [ -w "$INSTALL_DIR" ]; then
         mv "${tmp_dir}/${BINARY_NAME}" "${INSTALL_DIR}/${BINARY_NAME}"
+        ln -sf "${BINARY_NAME}" "${INSTALL_DIR}/taskyou"
     else
         warn "${INSTALL_DIR} is not writable. Using sudo..."
         sudo mv "${tmp_dir}/${BINARY_NAME}" "${INSTALL_DIR}/${BINARY_NAME}"
+        sudo ln -sf "${BINARY_NAME}" "${INSTALL_DIR}/taskyou"
     fi
 
     info "Successfully installed ${BINARY_NAME} ${version} to ${INSTALL_DIR}/${BINARY_NAME}"
+    info "Also available as 'taskyou' (symlink)"
 }
 
 # Check if install directory is in PATH
@@ -135,7 +138,7 @@ main() {
     check_path
 
     echo ""
-    info "Run 'task --help' to get started!"
+    info "Run 'ty --help' or 'taskyou --help' to get started!"
     echo ""
 }
 
