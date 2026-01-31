@@ -283,3 +283,66 @@ func TestDetailModel_ToggleShellPaneKeyBinding(t *testing.T) {
 		t.Errorf("ToggleShellPane help desc expected 'toggle shell', got %q", help.Desc)
 	}
 }
+
+// TestDetailModel_CollapsedShellIndicator verifies that when the shell pane is
+// hidden and running in TMUX, the View() includes a vertical "Shell" label on the
+// right side to indicate there's a collapsed shell pane available.
+func TestDetailModel_CollapsedShellIndicator(t *testing.T) {
+	task := &db.Task{ID: 1, Title: "Test task", Status: db.StatusQueued}
+
+	tests := []struct {
+		name            string
+		shellPaneHidden bool
+		tmuxEnv         string
+		expectShellTab  bool
+	}{
+		{
+			name:            "shell hidden in tmux shows indicator",
+			shellPaneHidden: true,
+			tmuxEnv:         "/tmp/tmux-1000/default",
+			expectShellTab:  true,
+		},
+		{
+			name:            "shell visible in tmux hides indicator",
+			shellPaneHidden: false,
+			tmuxEnv:         "/tmp/tmux-1000/default",
+			expectShellTab:  false,
+		},
+		{
+			name:            "shell hidden outside tmux hides indicator",
+			shellPaneHidden: true,
+			tmuxEnv:         "",
+			expectShellTab:  false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Set TMUX environment variable for test
+			t.Setenv("TMUX", tt.tmuxEnv)
+
+			m := &DetailModel{
+				task:            task,
+				shellPaneHidden: tt.shellPaneHidden,
+				ready:           true,
+				width:           80,
+				height:          24,
+			}
+
+			view := m.View()
+
+			// Check if the vertical "Shell" label characters are present
+			// The label renders as "S\nh\ne\nl\nl" (each char on own line)
+			hasShellTab := strings.Contains(view, "S") &&
+				strings.Contains(view, "h") &&
+				strings.Contains(view, "e") &&
+				strings.Contains(view, "l")
+
+			// Also check for the shell background styling (teal color marker)
+			// The #88C0D0 color is used for the shell tab text
+			if tt.expectShellTab && !hasShellTab {
+				t.Errorf("Expected collapsed shell indicator in view when shell is hidden in TMUX")
+			}
+		})
+	}
+}

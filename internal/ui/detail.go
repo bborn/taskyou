@@ -2056,12 +2056,35 @@ func (m *DetailModel) View() string {
 		boxContent = lipgloss.JoinVertical(lipgloss.Left, header, content, scrollIndicator)
 	}
 
+	renderedBox := box.Render(boxContent)
+
+	// When shell pane is hidden, show a collapsed indicator on the right
+	if m.shellPaneHidden && os.Getenv("TMUX") != "" {
+		// Create vertical "Shell" label - each character on its own line
+		shellLabel := "S\nh\ne\nl\nl"
+
+		// Style for the collapsed shell tab
+		tabStyle := lipgloss.NewStyle().
+			Background(lipgloss.Color("#3B4252")). // Dark muted background
+			Foreground(lipgloss.Color("#88C0D0")). // Teal text (matches shell theme)
+			Bold(true).
+			Padding(1, 0).
+			Align(lipgloss.Center)
+
+		// Calculate height to match the box
+		boxHeight := lipgloss.Height(renderedBox)
+		shellTab := tabStyle.Height(boxHeight).Render(shellLabel)
+
+		// Join the box and the shell tab horizontally
+		renderedBox = lipgloss.JoinHorizontal(lipgloss.Top, renderedBox, shellTab)
+	}
+
 	// Build view parts
 	var viewParts []string
 	if dangerBanner != "" {
 		viewParts = append(viewParts, dangerBanner)
 	}
-	viewParts = append(viewParts, box.Render(boxContent), help)
+	viewParts = append(viewParts, renderedBox, help)
 
 	return lipgloss.JoinVertical(lipgloss.Left, viewParts...)
 }
