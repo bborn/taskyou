@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/bborn/workflow/internal/autocomplete"
 	"github.com/bborn/workflow/internal/db"
 	"github.com/bborn/workflow/internal/executor"
 	"github.com/bborn/workflow/internal/github"
@@ -2687,6 +2688,32 @@ func (m *AppModel) createTaskWithAttachments(t *db.Task, attachmentPaths []strin
 	exec := m.executor
 	database := m.db
 	return func() tea.Msg {
+		// Generate title from body if title is empty but body is provided
+		if strings.TrimSpace(t.Title) == "" && strings.TrimSpace(t.Body) != "" {
+			// Try to generate title using LLM
+			var apiKey string
+			if database != nil {
+				apiKey, _ = database.GetSetting("anthropic_api_key")
+			}
+			svc := autocomplete.NewService(apiKey)
+			if svc.IsAvailable() {
+				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				defer cancel()
+				if title, err := svc.GenerateTitle(ctx, t.Body, t.Project); err == nil && title != "" {
+					t.Title = title
+				}
+			}
+			// If generation failed, use a fallback
+			if strings.TrimSpace(t.Title) == "" {
+				// Use first line of body, truncated
+				firstLine := strings.Split(strings.TrimSpace(t.Body), "\n")[0]
+				if len(firstLine) > 50 {
+					firstLine = firstLine[:50] + "..."
+				}
+				t.Title = firstLine
+			}
+		}
+
 		err := database.CreateTask(t)
 		if err != nil {
 			return taskCreatedMsg{task: t, err: err}

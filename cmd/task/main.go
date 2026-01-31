@@ -20,6 +20,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/bborn/workflow/internal/autocomplete"
 	"github.com/bborn/workflow/internal/config"
 	"github.com/bborn/workflow/internal/db"
 	"github.com/bborn/workflow/internal/executor"
@@ -77,7 +78,7 @@ func main() {
 	)
 
 	rootCmd := &cobra.Command{
-		Use:     "task",
+		Use:     "ty",
 		Short:   "Task queue manager",
 		Long:    "A beautiful terminal UI for managing your task queue.",
 		Version: version,
@@ -366,22 +367,34 @@ Tasks will automatically reconnect to their Claude sessions when viewed.`,
 
 	// Create subcommand - create a new task from command line
 	createCmd := &cobra.Command{
-		Use:   "create <title>",
+		Use:   "create [title]",
 		Short: "Create a new task",
 		Long: `Create a new task from the command line.
+
+Title is optional if --body is provided; AI will generate a title from the body.
 
 Examples:
   task create "Fix login bug"
   task create "Add dark mode" --type code --project myapp
-  task create "Write documentation" --body "Document the API endpoints" --execute`,
-		Args: cobra.ExactArgs(1),
+  task create "Write documentation" --body "Document the API endpoints" --execute
+  task create --body "The login button is broken on mobile devices" # AI generates title`,
+		Args: cobra.MaximumNArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
-			title := args[0]
+			var title string
+			if len(args) > 0 {
+				title = args[0]
+			}
 			body, _ := cmd.Flags().GetString("body")
 			taskType, _ := cmd.Flags().GetString("type")
 			project, _ := cmd.Flags().GetString("project")
 			execute, _ := cmd.Flags().GetBool("execute")
 			outputJSON, _ := cmd.Flags().GetBool("json")
+
+			// Validate that either title or body is provided
+			if strings.TrimSpace(title) == "" && strings.TrimSpace(body) == "" {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: either title or --body must be provided"))
+				os.Exit(1)
+			}
 
 			// Set defaults
 			if taskType == "" {
@@ -428,6 +441,31 @@ Examples:
 				}
 			}
 
+			// Generate title from body if title is empty
+			if strings.TrimSpace(title) == "" && strings.TrimSpace(body) != "" {
+				var apiKey string
+				apiKey, _ = database.GetSetting("anthropic_api_key")
+				svc := autocomplete.NewService(apiKey)
+				if svc.IsAvailable() {
+					ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+					if generatedTitle, genErr := svc.GenerateTitle(ctx, body, project); genErr == nil && generatedTitle != "" {
+						title = generatedTitle
+						if !outputJSON {
+							fmt.Println(dimStyle.Render("Generated title: " + title))
+						}
+					}
+					cancel()
+				}
+				// Fallback if generation failed
+				if strings.TrimSpace(title) == "" {
+					firstLine := strings.Split(strings.TrimSpace(body), "\n")[0]
+					if len(firstLine) > 50 {
+						firstLine = firstLine[:50] + "..."
+					}
+					title = firstLine
+				}
+			}
+
 			// Set initial status
 			status := db.StatusBacklog
 			if execute {
@@ -467,7 +505,7 @@ Examples:
 			}
 		},
 	}
-	createCmd.Flags().String("body", "", "Task body/description")
+	createCmd.Flags().String("body", "", "Task body/description (if no title, AI generates from body)")
 	createCmd.Flags().StringP("type", "t", "", "Task type: code, writing, thinking (default: code)")
 	createCmd.Flags().StringP("project", "p", "", "Project name (auto-detected from cwd if not specified)")
 	createCmd.Flags().BoolP("execute", "x", false, "Queue task for immediate execution")

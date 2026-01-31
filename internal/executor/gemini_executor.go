@@ -96,12 +96,20 @@ func (g *GeminiExecutor) runGemini(ctx context.Context, task *db.Task, workDir, 
 		sessionID = fmt.Sprintf("%d", os.Getpid())
 	}
 
-	// Check for existing session to resume
+	// Check for existing session to resume (validate file exists first)
 	resumeFlag := ""
 	existingSessionID := task.ClaudeSessionID
 	if existingSessionID != "" && isResume {
-		resumeFlag = fmt.Sprintf("--resume %s ", existingSessionID)
-		g.executor.logLine(task.ID, "system", fmt.Sprintf("Resuming Gemini session %s", existingSessionID))
+		if geminiSessionExists(existingSessionID) {
+			resumeFlag = fmt.Sprintf("--resume %s ", existingSessionID)
+			g.executor.logLine(task.ID, "system", fmt.Sprintf("Resuming Gemini session %s", existingSessionID))
+		} else {
+			g.executor.logLine(task.ID, "system", fmt.Sprintf("Session %s no longer exists, starting fresh", existingSessionID))
+			// Clear the stale session ID
+			if err := g.executor.db.UpdateTaskClaudeSessionID(task.ID, ""); err != nil {
+				g.logger.Warn("failed to clear stale session ID", "task", task.ID, "error", err)
+			}
+		}
 	}
 
 	envPrefix := claudeEnvPrefix(paths.configDir)
@@ -387,4 +395,38 @@ func findGeminiSessionID(workDir string) string {
 	})
 
 	return mostRecent
+}
+
+// geminiSessionExists checks if a Gemini session file exists for the given session ID.
+// Returns true if the session file is found in any project hash directory.
+func geminiSessionExists(sessionID string) bool {
+	if sessionID == "" {
+		return false
+	}
+
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return false
+	}
+
+	geminiTmpDir := filepath.Join(home, ".gemini", "tmp")
+	if _, err := os.Stat(geminiTmpDir); os.IsNotExist(err) {
+		return false
+	}
+
+	sessionFile := sessionID + ".json"
+	found := false
+
+	filepath.Walk(geminiTmpDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() {
+			return nil
+		}
+		if strings.Contains(path, "/chats/") && info.Name() == sessionFile {
+			found = true
+			return filepath.SkipAll
+		}
+		return nil
+	})
+
+	return found
 }
