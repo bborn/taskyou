@@ -115,12 +115,20 @@ func (c *CodexExecutor) runCodex(ctx context.Context, task *db.Task, workDir, pr
 		dangerousFlag = "--dangerously-bypass-approvals-and-sandbox "
 	}
 
-	// Check for existing session to resume
+	// Check for existing session to resume (validate file exists first)
 	resumeFlag := ""
 	existingSessionID := task.ClaudeSessionID
 	if existingSessionID != "" && isResume {
-		resumeFlag = fmt.Sprintf("--resume %s ", existingSessionID)
-		c.executor.logLine(task.ID, "system", fmt.Sprintf("Resuming Codex session %s", existingSessionID))
+		if codexSessionExists(existingSessionID) {
+			resumeFlag = fmt.Sprintf("--resume %s ", existingSessionID)
+			c.executor.logLine(task.ID, "system", fmt.Sprintf("Resuming Codex session %s", existingSessionID))
+		} else {
+			c.executor.logLine(task.ID, "system", fmt.Sprintf("Session %s no longer exists, starting fresh", existingSessionID))
+			// Clear the stale session ID
+			if err := c.executor.db.UpdateTaskClaudeSessionID(task.ID, ""); err != nil {
+				c.logger.Warn("failed to clear stale session ID", "task", task.ID, "error", err)
+			}
+		}
 	}
 
 	envPrefix := claudeEnvPrefix(paths.configDir)
@@ -425,4 +433,22 @@ func findCodexSessionID(workDir string) string {
 	})
 
 	return mostRecent
+}
+
+// codexSessionExists checks if a Codex session file exists for the given session ID.
+func codexSessionExists(sessionID string) bool {
+	if sessionID == "" {
+		return false
+	}
+
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return false
+	}
+
+	sessionsDir := filepath.Join(home, ".codex", "sessions")
+	sessionFile := filepath.Join(sessionsDir, sessionID+".json")
+
+	_, err = os.Stat(sessionFile)
+	return err == nil
 }
