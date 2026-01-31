@@ -18,6 +18,7 @@ import (
 	"github.com/charmbracelet/wish/activeterm"
 	"github.com/charmbracelet/wish/bubbletea"
 	"github.com/charmbracelet/wish/logging"
+	"github.com/muesli/termenv"
 )
 
 // Server is the SSH server.
@@ -57,7 +58,9 @@ func New(cfg Config) (*Server, error) {
 		wish.WithAddress(s.addr),
 		wish.WithHostKeyPath(s.hostKey),
 		wish.WithMiddleware(
-			bubbletea.Middleware(s.teaHandler),
+			// Use MiddlewareWithColorProfile to ensure colors work over SSH.
+			// TrueColor (24-bit) is the minimum we need for our theme colors.
+			bubbletea.MiddlewareWithColorProfile(s.teaHandler, termenv.TrueColor),
 			activeterm.Middleware(),
 			logging.Middleware(),
 		),
