@@ -347,13 +347,6 @@ type AppModel struct {
 	height int
 }
 
-func (m *AppModel) executorDisplayName() string {
-	if m.executor != nil {
-		return m.executor.DisplayName()
-	}
-	return executor.DefaultExecutorName()
-}
-
 // taskExecutorDisplayName returns the display name for a task's executor.
 // Uses the task's Executor field to determine the correct name.
 func taskExecutorDisplayName(task *db.Task) string {
@@ -808,10 +801,6 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		m.notifyUntil = time.Now().Add(3 * time.Second)
-
-	case taskClaudeToggledMsg:
-		// Just refresh task list - pane stays open
-		cmds = append(cmds, m.loadTasks())
 
 	case worktreeOpenedMsg:
 		if msg.err != nil {
@@ -2621,12 +2610,6 @@ type taskDangerousModeToggledMsg struct {
 type taskPinnedMsg struct {
 	task *db.Task
 	err  error
-}
-
-type taskClaudeToggledMsg struct {
-	killed  bool   // true if Claude was killed, false if resumed
-	message string // status message
-	err     error
 }
 
 type taskRetriedMsg struct {
