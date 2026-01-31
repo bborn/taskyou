@@ -35,6 +35,7 @@ import (
 )
 
 var (
+	version = "dev"
 	// Default server configuration
 	defaultHost = "cloud-claude"
 	defaultPort = "2222"
@@ -76,9 +77,10 @@ func main() {
 	)
 
 	rootCmd := &cobra.Command{
-		Use:   "task",
-		Short: "Task queue manager",
-		Long:  "A beautiful terminal UI for managing your task queue.",
+		Use:     "task",
+		Short:   "Task queue manager",
+		Long:    "A beautiful terminal UI for managing your task queue.",
+		Version: version,
 		Run: func(cmd *cobra.Command, args []string) {
 			// TUI requires tmux for split-pane Claude interaction
 			if os.Getenv("TMUX") == "" {
@@ -104,6 +106,9 @@ func main() {
 			}
 		},
 	}
+
+	rootCmd.SetVersionTemplate(`{{.Version}}
+`)
 
 	rootCmd.PersistentFlags().StringVarP(&host, "host", "H", defaultHost, "Remote server host")
 	rootCmd.PersistentFlags().StringVar(&port, "port", defaultPort, "Remote server port")
