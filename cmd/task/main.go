@@ -1781,6 +1781,290 @@ Available settings:
 	settingsCmd.AddCommand(settingsSetCmd)
 	rootCmd.AddCommand(settingsCmd)
 
+	// Events command - manage event system (webhooks, hooks, event log)
+	eventsCmd := &cobra.Command{
+		Use:   "events",
+		Short: "Manage event system (webhooks, hooks, event log)",
+		Long: `Manage the TaskYou event system for automation and integrations.
+
+Events are emitted when tasks change state (created, updated, status changed, etc.)
+and can be delivered via:
+  - Script hooks (~/.config/task/hooks/)
+  - Webhooks (HTTP POST to configured URLs)
+  - In-process channels (for real-time UI updates)
+  - Event log database (for audit trail)
+
+Examples:
+  ty events list                      # Show recent events
+  ty events webhooks list             # List configured webhooks
+  ty events webhooks add <url>        # Add webhook URL
+  ty events webhooks remove <url>     # Remove webhook URL`,
+	}
+
+	// events list - show recent events from event log
+	eventsListCmd := &cobra.Command{
+		Use:   "list",
+		Short: "List recent events from the event log",
+		Run: func(cmd *cobra.Command, args []string) {
+			limit, _ := cmd.Flags().GetInt("limit")
+			eventType, _ := cmd.Flags().GetString("type")
+			taskID, _ := cmd.Flags().GetInt64("task")
+			outputJSON, _ := cmd.Flags().GetBool("json")
+
+			dbPath := db.DefaultPath()
+			database, err := db.Open(dbPath)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+			defer database.Close()
+
+			// Build query
+			query := "SELECT id, event_type, task_id, message, metadata, created_at FROM event_log WHERE 1=1"
+			var queryArgs []interface{}
+
+			if eventType != "" {
+				query += " AND event_type = ?"
+				queryArgs = append(queryArgs, eventType)
+			}
+			if taskID > 0 {
+				query += " AND task_id = ?"
+				queryArgs = append(queryArgs, taskID)
+			}
+
+			query += " ORDER BY created_at DESC LIMIT ?"
+			queryArgs = append(queryArgs, limit)
+
+			rows, err := database.Query(query, queryArgs...)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+			defer rows.Close()
+
+			type EventRecord struct {
+				ID        int64     `json:"id"`
+				Type      string    `json:"event_type"`
+				TaskID    int64     `json:"task_id"`
+				Message   string    `json:"message"`
+				Metadata  string    `json:"metadata"`
+				CreatedAt time.Time `json:"created_at"`
+			}
+
+			var events []EventRecord
+			for rows.Next() {
+				var e EventRecord
+				var createdAt db.LocalTime
+				if err := rows.Scan(&e.ID, &e.Type, &e.TaskID, &e.Message, &e.Metadata, &createdAt); err != nil {
+					fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+					os.Exit(1)
+				}
+				e.CreatedAt = createdAt.Time
+				events = append(events, e)
+			}
+
+			if outputJSON {
+				data, _ := json.MarshalIndent(events, "", "  ")
+				fmt.Println(string(data))
+				return
+			}
+
+			if len(events) == 0 {
+				fmt.Println(dimStyle.Render("No events found"))
+				return
+			}
+
+			fmt.Println(boldStyle.Render(fmt.Sprintf("Recent Events (%d)", len(events))))
+			fmt.Println(strings.Repeat("─", 80))
+			for _, e := range events {
+				timestamp := e.CreatedAt.Format("2006-01-02 15:04:05")
+				fmt.Printf("%s  %s  Task #%d  %s\n",
+					dimStyle.Render(timestamp),
+					boldStyle.Render(e.Type),
+					e.TaskID,
+					e.Message)
+				if e.Metadata != "{}" && e.Metadata != "" {
+					fmt.Println(dimStyle.Render("  Metadata: " + e.Metadata))
+				}
+			}
+		},
+	}
+	eventsListCmd.Flags().Int("limit", 50, "Maximum number of events to show")
+	eventsListCmd.Flags().String("type", "", "Filter by event type (e.g., task.created, task.status.changed)")
+	eventsListCmd.Flags().Int64("task", 0, "Filter by task ID")
+	eventsListCmd.Flags().Bool("json", false, "Output in JSON format")
+	eventsCmd.AddCommand(eventsListCmd)
+
+	// webhooks subcommand
+	webhooksCmd := &cobra.Command{
+		Use:   "webhooks",
+		Short: "Manage webhook URLs for event delivery",
+		Long: `Configure webhook URLs that will receive HTTP POST requests for all events.
+
+The webhook will receive a JSON payload with the event details:
+  {
+    "type": "task.created",
+    "task_id": 123,
+    "task": { ... },
+    "message": "Task created: Example task",
+    "metadata": { ... },
+    "timestamp": "2024-01-01T12:00:00Z"
+  }
+
+Examples:
+  ty events webhooks list
+  ty events webhooks add https://example.com/webhook
+  ty events webhooks remove https://example.com/webhook`,
+	}
+
+	// webhooks list
+	webhooksListCmd := &cobra.Command{
+		Use:   "list",
+		Short: "List configured webhook URLs",
+		Run: func(cmd *cobra.Command, args []string) {
+			dbPath := db.DefaultPath()
+			database, err := db.Open(dbPath)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+			defer database.Close()
+
+			webhooksJSON, _ := database.GetSetting("event_webhooks")
+			if webhooksJSON == "" {
+				fmt.Println(dimStyle.Render("No webhooks configured"))
+				fmt.Println()
+				fmt.Println("Add a webhook with: ty events webhooks add <url>")
+				return
+			}
+
+			var webhooks []string
+			if err := json.Unmarshal([]byte(webhooksJSON), &webhooks); err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error parsing webhooks: "+err.Error()))
+				os.Exit(1)
+			}
+
+			if len(webhooks) == 0 {
+				fmt.Println(dimStyle.Render("No webhooks configured"))
+				return
+			}
+
+			fmt.Println(boldStyle.Render(fmt.Sprintf("Configured Webhooks (%d)", len(webhooks))))
+			fmt.Println(strings.Repeat("─", 80))
+			for i, url := range webhooks {
+				fmt.Printf("%d. %s\n", i+1, url)
+			}
+		},
+	}
+	webhooksCmd.AddCommand(webhooksListCmd)
+
+	// webhooks add
+	webhooksAddCmd := &cobra.Command{
+		Use:   "add <url>",
+		Short: "Add a webhook URL",
+		Args:  cobra.ExactArgs(1),
+		Run: func(cmd *cobra.Command, args []string) {
+			url := args[0]
+
+			dbPath := db.DefaultPath()
+			database, err := db.Open(dbPath)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+			defer database.Close()
+
+			// Load existing webhooks
+			webhooksJSON, _ := database.GetSetting("event_webhooks")
+			var webhooks []string
+			if webhooksJSON != "" {
+				json.Unmarshal([]byte(webhooksJSON), &webhooks)
+			}
+
+			// Check if already exists
+			for _, existing := range webhooks {
+				if existing == url {
+					fmt.Println(dimStyle.Render("Webhook already configured: " + url))
+					return
+				}
+			}
+
+			// Add new webhook
+			webhooks = append(webhooks, url)
+			newJSON, _ := json.Marshal(webhooks)
+			if err := database.SetSetting("event_webhooks", string(newJSON)); err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+
+			fmt.Println(successStyle.Render("✓ Webhook added: " + url))
+			fmt.Println()
+			fmt.Println(dimStyle.Render("Restart the daemon to apply changes:"))
+			fmt.Println("  ty daemon restart")
+		},
+	}
+	webhooksCmd.AddCommand(webhooksAddCmd)
+
+	// webhooks remove
+	webhooksRemoveCmd := &cobra.Command{
+		Use:   "remove <url>",
+		Short: "Remove a webhook URL",
+		Args:  cobra.ExactArgs(1),
+		Run: func(cmd *cobra.Command, args []string) {
+			url := args[0]
+
+			dbPath := db.DefaultPath()
+			database, err := db.Open(dbPath)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+			defer database.Close()
+
+			// Load existing webhooks
+			webhooksJSON, _ := database.GetSetting("event_webhooks")
+			if webhooksJSON == "" {
+				fmt.Println(dimStyle.Render("No webhooks configured"))
+				return
+			}
+
+			var webhooks []string
+			json.Unmarshal([]byte(webhooksJSON), &webhooks)
+
+			// Remove webhook
+			var newWebhooks []string
+			found := false
+			for _, existing := range webhooks {
+				if existing != url {
+					newWebhooks = append(newWebhooks, existing)
+				} else {
+					found = true
+				}
+			}
+
+			if !found {
+				fmt.Println(dimStyle.Render("Webhook not found: " + url))
+				return
+			}
+
+			// Save updated list
+			newJSON, _ := json.Marshal(newWebhooks)
+			if err := database.SetSetting("event_webhooks", string(newJSON)); err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+
+			fmt.Println(successStyle.Render("✓ Webhook removed: " + url))
+			fmt.Println()
+			fmt.Println(dimStyle.Render("Restart the daemon to apply changes:"))
+			fmt.Println("  ty daemon restart")
+		},
+	}
+	webhooksCmd.AddCommand(webhooksRemoveCmd)
+
+	eventsCmd.AddCommand(webhooksCmd)
+	rootCmd.AddCommand(eventsCmd)
+
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
 		os.Exit(1)

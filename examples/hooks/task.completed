@@ -1,0 +1,32 @@
+#!/bin/bash
+# Example hook: Runs when a task completes successfully
+#
+# Installation:
+#   1. Copy to ~/.config/task/hooks/task.completed
+#   2. chmod +x ~/.config/task/hooks/task.completed
+#
+# Available environment variables:
+#   TASK_ID, TASK_TITLE, TASK_STATUS, TASK_PROJECT, TASK_TYPE,
+#   TASK_EXECUTOR, TASK_EVENT, TASK_MESSAGE, TASK_TIMESTAMP
+
+# Desktop notification
+if command -v osascript &> /dev/null; then
+    # macOS
+    osascript -e "display notification \"$TASK_TITLE\" with title \"✅ Task Completed\""
+elif command -v notify-send &> /dev/null; then
+    # Linux
+    notify-send "✅ Task Completed" "$TASK_TITLE"
+fi
+
+# Log to file
+echo "$(date -Iseconds) | Task #$TASK_ID completed | $TASK_TITLE | Project: $TASK_PROJECT" >> ~/.task-completions.log
+
+# Optional: Play sound
+# afplay /System/Library/Sounds/Glass.aiff  # macOS
+# paplay /usr/share/sounds/freedesktop/stereo/complete.oga  # Linux
+
+# Optional: Send to analytics/tracking
+# curl -X POST https://your-analytics.com/track \
+#   -d "event=task_completed&task_id=$TASK_ID&project=$TASK_PROJECT"
+
+echo "Task #$TASK_ID completed: $TASK_TITLE"

@@ -1,0 +1,21 @@
+#!/bin/bash
+# Example hook: Runs when a task starts execution
+#
+# Installation:
+#   1. Copy to ~/.config/task/hooks/task.started
+#   2. chmod +x ~/.config/task/hooks/task.started
+
+# Log task start
+echo "$(date -Iseconds) | STARTED | Task #$TASK_ID | $TASK_TITLE | Executor: $TASK_EXECUTOR" >> ~/.task-execution.log
+
+# Optional: Track task duration
+# Store start time for later comparison
+mkdir -p ~/.task-timings
+echo "$(date +%s)" > ~/.task-timings/task-${TASK_ID}.start
+
+# Optional: Desktop notification (less intrusive)
+# if command -v osascript &> /dev/null; then
+#     osascript -e "display notification \"$TASK_TITLE\" with title \"▶️ Task Started\""
+# fi
+
+echo "Task #$TASK_ID started: $TASK_TITLE (Executor: $TASK_EXECUTOR)"

@@ -147,6 +147,12 @@ func (db *DB) CreateTask(t *Task) error {
 		db.SetLastUsedProject(t.Project)
 	}
 
+	// Fetch the complete task and emit created event
+	createdTask, err := db.GetTask(id)
+	if err == nil && createdTask != nil {
+		db.emitTaskCreated(createdTask)
+	}
+
 	return nil
 }
 
@@ -376,6 +382,13 @@ func (db *DB) MarkTaskStarted(id int64) error {
 
 // UpdateTaskStatus updates a task's status.
 func (db *DB) UpdateTaskStatus(id int64, status string) error {
+	// Get old task to track status change
+	oldTask, _ := db.GetTask(id)
+	oldStatus := ""
+	if oldTask != nil {
+		oldStatus = oldTask.Status
+	}
+
 	query := "UPDATE tasks SET status = ?, updated_at = CURRENT_TIMESTAMP"
 	args := []interface{}{status}
 
@@ -393,11 +406,29 @@ func (db *DB) UpdateTaskStatus(id int64, status string) error {
 	if err != nil {
 		return fmt.Errorf("update task status: %w", err)
 	}
+
+	// Emit status change event if status actually changed
+	if oldStatus != "" && oldStatus != status {
+		updatedTask, err := db.GetTask(id)
+		if err == nil && updatedTask != nil {
+			changes := map[string]interface{}{
+				"status": map[string]string{
+					"old": oldStatus,
+					"new": status,
+				},
+			}
+			db.emitTaskUpdated(updatedTask, changes)
+		}
+	}
+
 	return nil
 }
 
 // UpdateTask updates a task's fields.
 func (db *DB) UpdateTask(t *Task) error {
+	// Get old task to track changes
+	oldTask, _ := db.GetTask(t.ID)
+
 	_, err := db.Exec(`
 		UPDATE tasks SET
 			title = ?, body = ?, status = ?, type = ?, project = ?, executor = ?,
@@ -413,6 +444,30 @@ func (db *DB) UpdateTask(t *Task) error {
 	if err != nil {
 		return fmt.Errorf("update task: %w", err)
 	}
+
+	// Track changes for event emission
+	if oldTask != nil {
+		changes := make(map[string]interface{})
+		if oldTask.Title != t.Title {
+			changes["title"] = map[string]string{"old": oldTask.Title, "new": t.Title}
+		}
+		if oldTask.Body != t.Body {
+			changes["body"] = map[string]string{"old": oldTask.Body, "new": t.Body}
+		}
+		if oldTask.Status != t.Status {
+			changes["status"] = map[string]string{"old": oldTask.Status, "new": t.Status}
+		}
+		if oldTask.Type != t.Type {
+			changes["type"] = map[string]string{"old": oldTask.Type, "new": t.Type}
+		}
+		if oldTask.Project != t.Project {
+			changes["project"] = map[string]string{"old": oldTask.Project, "new": t.Project}
+		}
+		if len(changes) > 0 {
+			db.emitTaskUpdated(t, changes)
+		}
+	}
+
 	return nil
 }
 
@@ -449,6 +504,17 @@ func (db *DB) UpdateTaskPinned(taskID int64, pinned bool) error {
 	if err != nil {
 		return fmt.Errorf("update task pinned: %w", err)
 	}
+
+	// Emit pin/unpin event
+	task, err := db.GetTask(taskID)
+	if err == nil && task != nil {
+		if pinned {
+			db.emitTaskPinned(task)
+		} else {
+			db.emitTaskUnpinned(task)
+		}
+	}
+
 	return nil
 }
 
@@ -495,10 +561,21 @@ func (db *DB) UpdateTaskPaneIDs(taskID int64, claudePaneID, shellPaneID string) 
 
 // DeleteTask deletes a task.
 func (db *DB) DeleteTask(id int64) error {
+	// Get task before deleting for event emission
+	task, _ := db.GetTask(id)
+	title := ""
+	if task != nil {
+		title = task.Title
+	}
+
 	_, err := db.Exec("DELETE FROM tasks WHERE id = ?", id)
 	if err != nil {
 		return fmt.Errorf("delete task: %w", err)
 	}
+
+	// Emit delete event
+	db.emitTaskDeleted(id, title)
+
 	return nil
 }
 

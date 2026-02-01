@@ -349,6 +349,113 @@ This means when you retry a blocked task with feedback, Claude doesn't start ove
 | Task deleted | Window killed, worktree removed, teardown script runs |
 | Daemon restart | Orphaned windows are cleaned up on next poll |
 
+## Events & Automation
+
+TaskYou emits events when tasks change state, enabling automation, integrations, and notifications through multiple delivery mechanisms:
+
+- **Script Hooks** - Run local scripts in `~/.config/task/hooks/`
+- **Webhooks** - HTTP POST to configured URLs
+- **Event Log** - Audit trail in database
+- **In-Process Channels** - Real-time UI updates
+
+### Quick Start
+
+**1. Create a hook script:**
+```bash
+# Desktop notification when tasks complete
+cat > ~/.config/task/hooks/task.completed << 'EOF'
+#!/bin/bash
+osascript -e "display notification \"$TASK_TITLE\" with title \"Task Completed\""
+EOF
+
+chmod +x ~/.config/task/hooks/task.completed
+```
+
+**2. Or configure a webhook:**
+```bash
+ty events webhooks add https://example.com/webhook
+ty daemon restart  # Required after adding webhooks
+```
+
+**3. View event history:**
+```bash
+ty events list                    # Recent events
+ty events list --type task.completed  # Filter by type
+ty events list --task 42          # Events for specific task
+```
+
+### Available Events
+
+| Event | When Emitted |
+|-------|--------------|
+| `task.created` | New task created |
+| `task.updated` | Task fields updated |
+| `task.deleted` | Task removed |
+| `task.status.changed` | Status transition |
+| `task.queued` | Task queued for execution |
+| `task.started` | Execution begins |
+| `task.processing` | Task actively executing |
+| `task.blocked` | Task needs user input |
+| `task.completed` | Task finished successfully |
+| `task.failed` | Task execution failed |
+| `task.retried` | Task retried with feedback |
+| `task.interrupted` | Task cancelled by user |
+| `task.pinned` | Task pinned to top |
+| `task.unpinned` | Task unpinned |
+
+### Hook Scripts
+
+All hooks receive environment variables with task details:
+
+```bash
+TASK_ID          # Task ID
+TASK_TITLE       # Task title
+TASK_STATUS      # Current status
+TASK_PROJECT     # Project name
+TASK_TYPE        # Task type
+TASK_EXECUTOR    # Executor used (claude, codex, etc.)
+TASK_EVENT       # Event type
+TASK_MESSAGE     # Event message
+TASK_TIMESTAMP   # ISO 8601 timestamp
+TASK_METADATA    # Additional data as JSON
+```
+
+**Examples:**
+- [task.completed](examples/hooks/task.completed) - Desktop notification + logging
+- [task.blocked](examples/hooks/task.blocked) - Alert when task needs input
+- [task.started](examples/hooks/task.started) - Time tracking
+- [slack-integration.sh](examples/hooks/slack-integration.sh) - Send to Slack
+
+See [examples/hooks/](examples/hooks/) for more examples and [docs/EVENTS.md](docs/EVENTS.md) for complete documentation.
+
+### Webhook Integration
+
+Webhooks receive JSON payloads via HTTP POST:
+
+```json
+{
+  "type": "task.completed",
+  "task_id": 123,
+  "task": {
+    "id": 123,
+    "title": "Implement feature X",
+    "status": "done",
+    "project": "myapp"
+  },
+  "message": "Task completed successfully",
+  "timestamp": "2024-01-01T12:00:00Z"
+}
+```
+
+**Manage webhooks:**
+```bash
+ty events webhooks list              # List configured webhooks
+ty events webhooks add <url>         # Add webhook
+ty events webhooks remove <url>      # Remove webhook
+```
+
+**Note:** Restart the daemon after webhook changes: `ty daemon restart`
+
 ## Configuration
 
 ### Settings
