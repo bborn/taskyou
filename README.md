@@ -25,6 +25,7 @@ A personal task management system with a beautiful terminal UI, SQLite storage, 
 - **Kanban Board** - Visual task management with 4 columns (Backlog, In Progress, Blocked, Done)
 - **Git Worktrees** - Each task runs in an isolated worktree, no conflicts between parallel tasks
 - **Pluggable Executors** - Choose between Claude Code, OpenAI Codex, Gemini, Pi, OpenClaw, or OpenCode per task
+- **Event Streaming** - Watch task events in real-time with webhooks, script hooks, or live streams (see [Events & Automation](#events--automation))
 - **Ghost Text Autocomplete** - LLM-powered suggestions for task titles and descriptions as you type
 - **VS Code-style Fuzzy Search** - Quick task navigation with smart matching (e.g., "dsno" matches "diseno website")
 - **Markdown Rendering** - Task descriptions render with proper formatting in the detail view
@@ -353,6 +354,7 @@ This means when you retry a blocked task with feedback, Claude doesn't start ove
 
 TaskYou emits events when tasks change state, enabling automation, integrations, and notifications through multiple delivery mechanisms:
 
+- **Real-time Streaming** - Watch events live as newline-delimited JSON
 - **Script Hooks** - Run local scripts in `~/.config/task/hooks/`
 - **Webhooks** - HTTP POST to configured URLs
 - **Event Log** - Audit trail in database
@@ -360,7 +362,20 @@ TaskYou emits events when tasks change state, enabling automation, integrations,
 
 ### Quick Start
 
-**1. Create a hook script:**
+**1. Watch events in real-time:**
+```bash
+# Stream all events
+ty events watch
+
+# Filter by event type
+ty events watch --type task.completed
+
+# Pipe to other tools
+ty events watch | jq 'select(.type == "task.failed")'
+ty events watch --type task.completed | notify-send "Task completed"
+```
+
+**2. Create a hook script:**
 ```bash
 # Desktop notification when tasks complete
 cat > ~/.config/task/hooks/task.completed << 'EOF'
@@ -371,13 +386,13 @@ EOF
 chmod +x ~/.config/task/hooks/task.completed
 ```
 
-**2. Or configure a webhook:**
+**3. Or configure a webhook:**
 ```bash
 ty events webhooks add https://example.com/webhook
 ty daemon restart  # Required after adding webhooks
 ```
 
-**3. View event history:**
+**4. View event history:**
 ```bash
 ty events list                    # Recent events
 ty events list --type task.completed  # Filter by type

@@ -430,40 +430,40 @@ func TestRenameClaudeSession(t *testing.T) {
 }
 
 func TestConversationHistory(t *testing.T) {
-	// Create temp database
-	tmpFile, err := os.CreateTemp("", "test-*.db")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer os.Remove(tmpFile.Name())
-	tmpFile.Close()
-
-	database, err := db.Open(tmpFile.Name())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer database.Close()
-
-	// Create the test project first
-	if err := database.CreateProject(&db.Project{Name: "test", Path: "/tmp/test"}); err != nil {
-		t.Fatal(err)
-	}
-
-	cfg := &config.Config{}
-	exec := New(database, cfg)
-
-	// Create a test task
-	task := &db.Task{
-		Title:   "Test task",
-		Status:  db.StatusBacklog,
-		Type:    db.TypeCode,
-		Project: "test",
-	}
-	if err := database.CreateTask(task); err != nil {
-		t.Fatal(err)
-	}
-
 	t.Run("no history for fresh task", func(t *testing.T) {
+		// Create fresh database
+		tmpFile, err := os.CreateTemp("", "test-*.db")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer os.Remove(tmpFile.Name())
+		tmpFile.Close()
+
+		database, err := db.Open(tmpFile.Name())
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer database.Close()
+
+		// Create the test project
+		if err := database.CreateProject(&db.Project{Name: "test", Path: "/tmp/test"}); err != nil {
+			t.Fatal(err)
+		}
+
+		cfg := &config.Config{}
+		exec := New(database, cfg)
+
+		// Create a test task
+		task := &db.Task{
+			Title:   "Test task",
+			Status:  db.StatusBacklog,
+			Type:    db.TypeCode,
+			Project: "test",
+		}
+		if err := database.CreateTask(task); err != nil {
+			t.Fatal(err)
+		}
+
 		prompt := exec.buildPrompt(task, nil)
 		if strings.Contains(prompt, "Previous Conversation") {
 			t.Error("fresh task should not have conversation history")
@@ -471,6 +471,39 @@ func TestConversationHistory(t *testing.T) {
 	})
 
 	t.Run("history after retry with feedback", func(t *testing.T) {
+		// Create fresh database
+		tmpFile, err := os.CreateTemp("", "test-*.db")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer os.Remove(tmpFile.Name())
+		tmpFile.Close()
+
+		database, err := db.Open(tmpFile.Name())
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer database.Close()
+
+		// Create the test project
+		if err := database.CreateProject(&db.Project{Name: "test", Path: "/tmp/test"}); err != nil {
+			t.Fatal(err)
+		}
+
+		cfg := &config.Config{}
+		exec := New(database, cfg)
+
+		// Create a test task
+		task := &db.Task{
+			Title:   "Test task",
+			Status:  db.StatusBacklog,
+			Type:    db.TypeCode,
+			Project: "test",
+		}
+		if err := database.CreateTask(task); err != nil {
+			t.Fatal(err)
+		}
+
 		// Simulate a first run with a question
 		database.AppendTaskLog(task.ID, "system", "Starting task #1: Test task")
 		database.AppendTaskLog(task.ID, "output", "Looking at the code...")
@@ -494,60 +527,90 @@ func TestConversationHistory(t *testing.T) {
 	})
 
 	t.Run("multiple continuations", func(t *testing.T) {
-		// Clear logs for fresh test
-		database.ClearTaskLogs(task.ID)
+		// Create fresh database for this subtest
+		tmpFile2, err := os.CreateTemp("", "test-*.db")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer os.Remove(tmpFile2.Name())
+		tmpFile2.Close()
+
+		database2, err := db.Open(tmpFile2.Name())
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer database2.Close()
+
+		// Create the test project
+		if err := database2.CreateProject(&db.Project{Name: "test", Path: "/tmp/test"}); err != nil {
+			t.Fatal(err)
+		}
+
+		cfg2 := &config.Config{}
+		exec2 := New(database2, cfg2)
+
+		// Create a test task
+		task2 := &db.Task{
+			Title:   "Test task 2",
+			Status:  db.StatusBacklog,
+			Type:    db.TypeCode,
+			Project: "test",
+		}
+		if err := database2.CreateTask(task2); err != nil {
+			t.Fatal(err)
+		}
 
 		// First run
-		database.AppendTaskLog(task.ID, "question", "First question?")
-		database.AppendTaskLog(task.ID, "system", "--- Continuation ---")
-		database.AppendTaskLog(task.ID, "text", "Feedback: First answer")
+		database2.AppendTaskLog(task2.ID, "question", "First question?")
+		database2.AppendTaskLog(task2.ID, "system", "--- Continuation ---")
+		database2.AppendTaskLog(task2.ID, "text", "Feedback: First answer")
 
 		// Second run
-		database.AppendTaskLog(task.ID, "question", "Second question?")
-		database.AppendTaskLog(task.ID, "system", "--- Continuation ---")
-		database.AppendTaskLog(task.ID, "text", "Feedback: Second answer")
+		database2.AppendTaskLog(task2.ID, "question", "Second question?")
+		database2.AppendTaskLog(task2.ID, "system", "--- Continuation ---")
+		database2.AppendTaskLog(task2.ID, "text", "Feedback: Second answer")
 
-		prompt := exec.buildPrompt(task, nil)
+		prompt := exec2.buildPrompt(task2, nil)
 
 		if !strings.Contains(prompt, "First question?") {
-			t.Error("should include first question")
+			t.Errorf("should include first question\nPrompt: %s", prompt)
 		}
 		if !strings.Contains(prompt, "First answer") {
-			t.Error("should include first answer")
+			t.Errorf("should include first answer\nPrompt: %s", prompt)
 		}
 		if !strings.Contains(prompt, "Second question?") {
-			t.Error("should include second question")
+			t.Errorf("should include second question\nPrompt: %s", prompt)
 		}
 		if !strings.Contains(prompt, "Second answer") {
-			t.Error("should include second answer")
+			t.Errorf("should include second answer\nPrompt: %s", prompt)
 		}
 	})
 }
 
 func TestBuildPromptIncludesTaskMetadata(t *testing.T) {
-	// Create temp database
-	tmpFile, err := os.CreateTemp("", "test-*.db")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer os.Remove(tmpFile.Name())
-	tmpFile.Close()
-
-	database, err := db.Open(tmpFile.Name())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer database.Close()
-
-	// Create the test project first
-	if err := database.CreateProject(&db.Project{Name: "test", Path: "/tmp/test"}); err != nil {
-		t.Fatal(err)
-	}
-
-	cfg := &config.Config{}
-	exec := New(database, cfg)
-
 	t.Run("includes branch and PR info", func(t *testing.T) {
+		// Create fresh database
+		tmpFile, err := os.CreateTemp("", "test-*.db")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer os.Remove(tmpFile.Name())
+		tmpFile.Close()
+
+		database, err := db.Open(tmpFile.Name())
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer database.Close()
+
+		// Create the test project
+		if err := database.CreateProject(&db.Project{Name: "test", Path: "/tmp/test"}); err != nil {
+			t.Fatal(err)
+		}
+
+		cfg := &config.Config{}
+		exec := New(database, cfg)
+
 		task := &db.Task{
 			Title:      "Fix bug",
 			Body:       "Fix the authentication bug",
@@ -575,6 +638,28 @@ func TestBuildPromptIncludesTaskMetadata(t *testing.T) {
 	})
 
 	t.Run("handles task without metadata", func(t *testing.T) {
+		// Create fresh database
+		tmpFile, err := os.CreateTemp("", "test-*.db")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer os.Remove(tmpFile.Name())
+		tmpFile.Close()
+
+		database, err := db.Open(tmpFile.Name())
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer database.Close()
+
+		// Create the test project
+		if err := database.CreateProject(&db.Project{Name: "test", Path: "/tmp/test"}); err != nil {
+			t.Fatal(err)
+		}
+
+		cfg := &config.Config{}
+		exec := New(database, cfg)
+
 		task := &db.Task{
 			Title:   "Simple task",
 			Body:    "Do something simple",
@@ -593,17 +678,39 @@ func TestBuildPromptIncludesTaskMetadata(t *testing.T) {
 	})
 
 	t.Run("shows PR number when URL is empty", func(t *testing.T) {
+		// Create fresh database for this subtest
+		tmpFile2, err := os.CreateTemp("", "test-*.db")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer os.Remove(tmpFile2.Name())
+		tmpFile2.Close()
+
+		database2, err := db.Open(tmpFile2.Name())
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer database2.Close()
+
+		// Create the test project
+		if err := database2.CreateProject(&db.Project{Name: "test", Path: "/tmp/test"}); err != nil {
+			t.Fatal(err)
+		}
+
+		cfg2 := &config.Config{}
+		exec2 := New(database2, cfg2)
+
 		task := &db.Task{
 			Title:    "PR task",
 			Body:     "Work on PR",
 			Project:  "test",
 			PRNumber: 789,
 		}
-		if err := database.CreateTask(task); err != nil {
+		if err := database2.CreateTask(task); err != nil {
 			t.Fatal(err)
 		}
 
-		prompt := exec.buildPrompt(task, nil)
+		prompt := exec2.buildPrompt(task, nil)
 
 		if !strings.Contains(prompt, "PR #789") {
 			t.Error("prompt should include PR number")
@@ -853,6 +960,28 @@ func TestCleanupInactiveDoneTasksFiltering(t *testing.T) {
 	})
 
 	t.Run("identifies old completed tasks", func(t *testing.T) {
+		// Create fresh database for this subtest
+		tmpFile3, err := os.CreateTemp("", "test-*.db")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer os.Remove(tmpFile3.Name())
+		tmpFile3.Close()
+
+		database3, err := db.Open(tmpFile3.Name())
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer database3.Close()
+
+		// Create the test project
+		if err := database3.CreateProject(&db.Project{Name: "test", Path: "/tmp/test"}); err != nil {
+			t.Fatal(err)
+		}
+
+		cfg3 := &config.Config{}
+		exec3 := New(database3, cfg3)
+
 		oldTime := db.LocalTime{Time: now.Add(-2 * time.Hour)} // 2 hours ago
 		task := &db.Task{
 			Title:       "Old completed task",
@@ -860,13 +989,13 @@ func TestCleanupInactiveDoneTasksFiltering(t *testing.T) {
 			Project:     "test",
 			CompletedAt: &oldTime,
 		}
-		if err := database.CreateTask(task); err != nil {
+		if err := database3.CreateTask(task); err != nil {
 			t.Fatal(err)
 		}
 
 		// This should not panic or error
 		// The task would be selected for cleanup if it had a running process
-		exec.cleanupInactiveDoneTasks()
+		exec3.cleanupInactiveDoneTasks()
 	})
 }
 

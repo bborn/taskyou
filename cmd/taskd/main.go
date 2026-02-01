@@ -10,6 +10,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"syscall"
+	"time"
 
 	"github.com/bborn/workflow/internal/config"
 	"github.com/bborn/workflow/internal/db"
@@ -21,6 +22,7 @@ import (
 func main() {
 	// Flags
 	addr := flag.String("addr", ":2222", "SSH server address")
+	httpAddr := flag.String("http", ":3333", "HTTP API address for event streaming")
 	dbPath := flag.String("db", "", "Database path (default: ~/.local/share/task/tasks.db)")
 	hostKey := flag.String("host-key", "", "SSH host key path (default: ~/.ssh/task_ed25519)")
 	flag.Parse()
@@ -54,6 +56,7 @@ func main() {
 
 	logger.Info("Starting taskd",
 		"addr", *addr,
+		"http", *httpAddr,
 		"db", *dbPath,
 		"projects_dir", cfg.ProjectsDir,
 	)
@@ -72,6 +75,10 @@ func main() {
 		logger.Fatal("Failed to create server", "error", err)
 	}
 
+	// Create HTTP server for event streaming
+	eventsManager := exec.GetEventsManager()
+	httpSrv := server.NewHTTPServer(*httpAddr, eventsManager)
+
 	// Start background executor
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -81,14 +88,20 @@ func main() {
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 
-	// Start server in goroutine
-	errCh := make(chan error, 1)
+	// Start servers in goroutines
+	errCh := make(chan error, 2)
 	go func() {
 		errCh <- srv.Start()
 	}()
+	go func() {
+		errCh <- httpSrv.Start()
+	}()
 
 	logger.Info("SSH server listening", "addr", *addr)
-	fmt.Printf("\n  Connect with: ssh -p %s localhost\n\n", (*addr)[1:])
+	logger.Info("HTTP API listening", "addr", *httpAddr)
+	fmt.Printf("\n  SSH:   ssh -p %s localhost\n", (*addr)[1:])
+	fmt.Printf("  HTTP:  http://localhost%s\n", *httpAddr)
+	fmt.Printf("  Watch: ty events watch\n\n")
 
 	// Wait for signal or error
 	select {
@@ -99,6 +112,11 @@ func main() {
 	case sig := <-sigCh:
 		logger.Info("Received signal, shutting down", "signal", sig)
 		exec.Stop()
-		srv.Shutdown(context.Background())
+		
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer shutdownCancel()
+		
+		srv.Shutdown(shutdownCtx)
+		httpSrv.Shutdown(shutdownCtx)
 	}
 }

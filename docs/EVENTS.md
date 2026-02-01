@@ -1,364 +1,381 @@
-# Event System
+# TaskYou Event System
 
-TaskYou emits events when tasks change state, enabling automation, integrations, and notifications through multiple delivery mechanisms.
+TaskYou emits events for all task lifecycle changes, enabling automation and integrations.
 
-## Overview
+## Event Delivery Mechanisms
 
-Events are automatically emitted when:
-- Tasks are created, updated, or deleted
-- Task status changes (backlog → queued → processing → done/blocked)
-- Tasks are pinned/unpinned
-- Tasks are retried or interrupted
+Events can be delivered through multiple channels:
 
-## Event Types
+### 1. **Real-time Streaming** (NEW!)
+Stream events to stdout as newline-delimited JSON:
 
-| Event Type | Description | When Emitted |
-|------------|-------------|--------------|
-| `task.created` | New task created | After CreateTask() |
-| `task.updated` | Task fields updated | After UpdateTask() with changes |
-| `task.deleted` | Task removed | After DeleteTask() |
-| `task.status.changed` | Status transition | After UpdateTaskStatus() |
-| `task.queued` | Task queued for execution | When task is queued |
-| `task.started` | Execution begins | When executor starts task |
-| `task.processing` | Task actively executing | When task enters processing state |
-| `task.blocked` | Task needs input | When task is blocked waiting for user |
-| `task.completed` | Task finished successfully | When task completes |
-| `task.failed` | Task execution failed | When task fails |
-| `task.retried` | Task retried with feedback | When user retries a task |
-| `task.interrupted` | Task cancelled by user | When task is interrupted |
-| `task.pinned` | Task pinned to top | When task is pinned |
-| `task.unpinned` | Task unpinned | When task is unpinned |
-
-## Delivery Mechanisms
-
-### 1. Script Hooks (Recommended for Local Automation)
-
-Place executable scripts in `~/.config/task/hooks/` named after the event type.
-
-**Example: `~/.config/task/hooks/task.completed`**
 ```bash
-#!/bin/bash
-# Runs when a task completes
+# Watch all events
+ty events watch
 
-echo "Task #$TASK_ID completed: $TASK_TITLE"
-echo "Project: $TASK_PROJECT"
-echo "Status: $TASK_STATUS"
+# Filter by event type
+ty events watch --type task.completed
 
-# Send notification
-osascript -e "display notification \"$TASK_TITLE\" with title \"Task Completed\""
+# Filter by task ID
+ty events watch --task 123
+
+# Filter by project
+ty events watch --project myproject
+
+# Pipe to other tools
+ty events watch | jq 'select(.type == "task.failed")'
+ty events watch --type task.completed | notify-send "Task completed"
 ```
 
-**Environment Variables Available:**
-- `TASK_ID` - Task ID
-- `TASK_TITLE` - Task title
-- `TASK_STATUS` - Current status
-- `TASK_PROJECT` - Project name
-- `TASK_TYPE` - Task type (code, writing, etc.)
-- `TASK_EXECUTOR` - Executor used (claude, codex, gemini, pi)
-- `TASK_EVENT` - Event type (e.g., task.completed)
-- `TASK_MESSAGE` - Event message
-- `TASK_TIMESTAMP` - Event timestamp (RFC3339)
-- `TASK_METADATA` - Additional metadata as JSON
+**Use cases:**
+- Real-time monitoring dashboards
+- CI/CD integrations
+- Custom automation scripts
+- Notifications
 
-**Make scripts executable:**
+### 2. **Webhooks**
+HTTP POST requests to configured URLs:
+
 ```bash
-chmod +x ~/.config/task/hooks/task.completed
-```
-
-### 2. Webhooks (Recommended for External Integrations)
-
-Configure HTTP endpoints to receive POST requests with event data.
-
-**Add webhook:**
-```bash
+# Add a webhook
 ty events webhooks add https://example.com/webhook
-```
 
-**List webhooks:**
-```bash
+# List configured webhooks
 ty events webhooks list
-```
 
-**Remove webhook:**
-```bash
+# Remove a webhook
 ty events webhooks remove https://example.com/webhook
+
+# After adding/removing webhooks, restart the daemon:
+ty daemon restart
 ```
 
-**Webhook Payload:**
+**Webhook payload format:**
 ```json
 {
   "type": "task.completed",
   "task_id": 123,
-  "task": {
-    "id": 123,
-    "title": "Implement feature X",
-    "status": "done",
-    "project": "myapp",
-    "executor": "claude"
-  },
+  "task": { /* full task object */ },
   "message": "Task completed successfully",
-  "metadata": {},
+  "metadata": { /* additional context */ },
   "timestamp": "2024-01-01T12:00:00Z"
 }
 ```
 
-**Important:** Restart the daemon after adding/removing webhooks:
+**Use cases:**
+- Slack/Discord notifications
+- External system integrations
+- Monitoring services
+- Analytics platforms
+
+### 3. **Script Hooks**
+Execute local scripts on events:
+
 ```bash
-ty daemon restart
-```
-
-### 3. Event Log (Audit Trail)
-
-All events are stored in the database (`event_log` table) for audit and debugging.
-
-**View recent events:**
-```bash
-ty events list                    # Last 50 events
-ty events list --limit 100        # Last 100 events
-ty events list --type task.created  # Filter by type
-ty events list --task 42          # Events for specific task
-ty events list --json             # JSON output
-```
-
-### 4. In-Process Channels (For Real-Time UI Updates)
-
-The TUI subscribes to events for real-time updates without polling. This is handled automatically.
-
-## Common Use Cases
-
-### Desktop Notifications
-
-**macOS** (`~/.config/task/hooks/task.completed`):
-```bash
+# Create a hook script
+mkdir -p ~/.config/task/hooks
+cat > ~/.config/task/hooks/task.completed << 'EOF'
 #!/bin/bash
-osascript -e "display notification \"$TASK_TITLE\" with title \"Task Completed\""
+echo "Task #$TASK_ID completed: $TASK_TITLE" | notify-send -u normal "TaskYou"
+EOF
+chmod +x ~/.config/task/hooks/task.completed
 ```
 
-**Linux** (`~/.config/task/hooks/task.completed`):
+**Available environment variables in hooks:**
+- `TASK_ID` - Task ID
+- `TASK_TITLE` - Task title
+- `TASK_STATUS` - Current status
+- `TASK_PROJECT` - Project name
+- `TASK_TYPE` - Task type
+- `TASK_EXECUTOR` - Executor name (claude, codex, etc.)
+- `TASK_EVENT` - Event type
+- `TASK_MESSAGE` - Event message
+- `TASK_METADATA` - JSON metadata object
+- `TASK_TIMESTAMP` - Event timestamp (RFC3339)
+
+**Use cases:**
+- Desktop notifications
+- Local file updates
+- System commands
+- Custom logging
+
+### 4. **Event Log**
+Query historical events from the database:
+
 ```bash
-#!/bin/bash
-notify-send "Task Completed" "$TASK_TITLE"
+# List recent events
+ty events list
+
+# Filter by type
+ty events list --type task.completed
+
+# Filter by task
+ty events list --task 123
+
+# Limit results
+ty events list --limit 100
+
+# Output as JSON
+ty events list --json
 ```
 
-### Slack Notifications
+**Use cases:**
+- Audit trail
+- Debugging
+- Analytics
+- Historical analysis
+
+## Event Types
+
+### Task Lifecycle Events
+
+| Event Type | Description | When Emitted |
+|------------|-------------|--------------|
+| `task.created` | Task created | When a new task is created |
+| `task.updated` | Task updated | When task fields are modified |
+| `task.deleted` | Task deleted | When a task is deleted |
+| `task.queued` | Task queued | When task is queued for execution |
+| `task.started` | Task started | When executor begins processing |
+| `task.processing` | Task processing | When task is actively being worked on |
+| `task.blocked` | Task blocked | When task needs user input |
+| `task.completed` | Task completed | When task finishes successfully |
+| `task.failed` | Task failed | When task execution fails |
+| `task.interrupted` | Task interrupted | When user stops a running task |
+| `task.retried` | Task retried | When a blocked task is retried |
+| `task.status.changed` | Status changed | When task status changes |
+| `task.pinned` | Task pinned | When task is pinned |
+| `task.unpinned` | Task unpinned | When task is unpinned |
+
+### Event Metadata
+
+Events include rich metadata in the `metadata` field:
+
+**Status changes:**
+```json
+{
+  "old_status": "queued",
+  "new_status": "processing"
+}
+```
+
+**Task updates:**
+```json
+{
+  "title": {"old": "Old title", "new": "New title"},
+  "status": {"old": "backlog", "new": "queued"}
+}
+```
+
+**Task retries:**
+```json
+{
+  "feedback": "Please fix the error in the database migration"
+}
+```
+
+## Architecture
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                       Task Operations                        │
+│  (Executor modifies tasks - creates, updates, status changes)│
+└────────────────────────┬────────────────────────────────────┘
+                         │
+                         ▼
+              ┌──────────────────────┐
+              │   Events Manager     │
+              │  (internal/events)   │
+              └──────────┬───────────┘
+                         │
+        ┌────────────────┼────────────────┐
+        │                │                │
+        ▼                ▼                ▼
+ ┌─────────────┐  ┌──────────┐  ┌─────────────┐
+ │   In-Process │  │ Database │  │   HTTP/SSE  │
+ │   Channels   │  │ Event Log│  │   Stream    │
+ └──────┬──────┘  └──────────┘  └──────┬──────┘
+        │                                │
+        ▼                                ▼
+  ┌──────────┐                   ┌──────────────┐
+  │   TUI    │                   │ ty events    │
+  │ Updates  │                   │    watch     │
+  └──────────┘                   └──────────────┘
+```
+
+**Note:** Events are only emitted for operations performed by the executor (daemon). Direct CLI operations (like `ty status`) provide immediate synchronous feedback and do not emit events. This is by design - events are for automation and external integrations, not for user-initiated commands.
+
+## Example Integrations
+
+### Slack Notification
 
 ```bash
 #!/bin/bash
 # ~/.config/task/hooks/task.completed
 
-WEBHOOK_URL="https://hooks.slack.com/services/YOUR/WEBHOOK/URL"
-
-curl -X POST "$WEBHOOK_URL" \
+curl -X POST https://hooks.slack.com/services/YOUR/WEBHOOK/URL \
   -H 'Content-Type: application/json' \
   -d "{
-    \"text\": \"Task #$TASK_ID completed: $TASK_TITLE\",
+    \"text\": \"Task completed: $TASK_TITLE\",
     \"blocks\": [{
       \"type\": \"section\",
       \"text\": {
         \"type\": \"mrkdwn\",
-        \"text\": \"*Task Completed*\n\n*Task:* $TASK_TITLE\n*Project:* $TASK_PROJECT\n*ID:* #$TASK_ID\"
+        \"text\": \"*Task #$TASK_ID completed*\n$TASK_TITLE\nProject: $TASK_PROJECT\"
       }
     }]
   }"
 ```
 
-### Discord Webhooks
+### Real-time Dashboard
+
+```bash
+# Stream events to a dashboard
+ty events watch | while read event; do
+  echo "$event" | jq '{
+    time: .timestamp,
+    task: .task_id,
+    status: .task.Status,
+    title: .task.Title
+  }' >> /var/log/taskyou/dashboard.jsonl
+done
+```
+
+### Automated PR Comments
+
+```javascript
+// Node.js webhook server
+const express = require('express');
+const { Octokit } = require('@octokit/rest');
+
+const app = express();
+app.use(express.json());
+
+const octokit = new Octokit({ auth: process.env.GITHUB_TOKEN });
+
+app.post('/webhook', async (req, res) => {
+  const event = req.body;
+  
+  if (event.type === 'task.completed' && event.task.PRURL) {
+    const [owner, repo, prNumber] = event.task.PRURL.match(/github.com\/(.+)\/(.+)\/pull\/(\d+)/).slice(1);
+    
+    await octokit.issues.createComment({
+      owner,
+      repo,
+      issue_number: parseInt(prNumber),
+      body: `✅ Task completed: ${event.task.Title}\n\nReview ready!`
+    });
+  }
+  
+  res.json({ ok: true });
+});
+
+app.listen(3000);
+```
+
+### Desktop Notifications (macOS)
+
+```bash
+#!/bin/bash
+# ~/.config/task/hooks/task.failed
+
+osascript -e "display notification \"$TASK_TITLE\" with title \"Task Failed\" subtitle \"Task #$TASK_ID\" sound name \"Basso\""
+```
+
+### Desktop Notifications (Linux)
 
 ```bash
 #!/bin/bash
 # ~/.config/task/hooks/task.completed
 
-WEBHOOK_URL="https://discord.com/api/webhooks/YOUR/WEBHOOK"
-
-curl -X POST "$WEBHOOK_URL" \
-  -H 'Content-Type: application/json' \
-  -d "{
-    \"content\": \"✅ Task #$TASK_ID completed: **$TASK_TITLE**\",
-    \"embeds\": [{
-      \"title\": \"Task Details\",
-      \"color\": 5814783,
-      \"fields\": [
-        {\"name\": \"Project\", \"value\": \"$TASK_PROJECT\", \"inline\": true},
-        {\"name\": \"Type\", \"value\": \"$TASK_TYPE\", \"inline\": true}
-      ]
-    }]
-  }"
+notify-send -u normal \
+  -i checkbox-checked \
+  "Task Completed" \
+  "$TASK_TITLE"
 ```
 
-### Time Tracking
+## HTTP API
 
-Track when tasks start and complete:
+The daemon exposes an HTTP API for event streaming:
 
+**Endpoint:** `GET /events/stream`
+
+**Query Parameters:**
+- `type` - Filter by event type (e.g., `task.completed`)
+- `task` - Filter by task ID
+- `project` - Filter by project name
+
+**Response:** Server-Sent Events (SSE) stream
+
+**Example:**
 ```bash
-#!/bin/bash
-# ~/.config/task/hooks/task.started
-
-echo "$(date -Iseconds),$TASK_ID,$TASK_TITLE,started" >> ~/.task-time-log.csv
+curl -N -H "Accept: text/event-stream" \
+  "http://localhost:3333/events/stream?type=task.completed"
 ```
 
+## Configuration
+
+### HTTP Server Address
+
+The HTTP server runs on port `3333` by default.
+
+**Local daemon:**
 ```bash
-#!/bin/bash
-# ~/.config/task/hooks/task.completed
-
-echo "$(date -Iseconds),$TASK_ID,$TASK_TITLE,completed" >> ~/.task-time-log.csv
+# Default: localhost:3333
+ty daemon
 ```
 
-### Project-Specific Actions
-
-Trigger actions based on project:
-
+**Remote daemon (taskd):**
 ```bash
-#!/bin/bash
-# ~/.config/task/hooks/task.completed
-
-if [ "$TASK_PROJECT" = "website" ]; then
-    # Deploy website
-    echo "Deploying website..."
-    ssh server "cd /var/www && git pull"
-fi
+# Custom port
+taskd -http :4444
 ```
 
-### Email Notifications
+### Environment Variables
 
-```bash
-#!/bin/bash
-# ~/.config/task/hooks/task.blocked
-
-# Task needs input - send email
-echo "Task #$TASK_ID is blocked: $TASK_MESSAGE" | \
-    mail -s "Task Blocked: $TASK_TITLE" user@example.com
-```
-
-### Integration with External Task Managers
-
-Sync completed tasks to other systems:
-
-```bash
-#!/bin/bash
-# ~/.config/task/hooks/task.completed
-
-# Sync to Todoist, Linear, Jira, etc.
-curl -X POST https://api.todoist.com/rest/v2/tasks \
-  -H "Authorization: Bearer YOUR_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d "{\"content\": \"✓ $TASK_TITLE\", \"project_id\": \"123\"}"
-```
-
-## Event Hook vs Legacy Hook System
-
-TaskYou has two hook systems:
-
-1. **New Event System** (Recommended)
-   - More event types
-   - Consistent event data
-   - Webhook support
-   - Event log database
-   - Location: `~/.config/task/hooks/`
-
-2. **Legacy Hook System** (Deprecated)
-   - Limited to 4 events: task.started, task.done, task.failed, task.blocked
-   - Less consistent event naming
-   - No webhook support
-   - Still supported for backward compatibility
-
-**Migration:** Simply rename your hooks from the legacy names to the new event names. Both systems work in parallel.
-
-## Debugging
-
-### Test Hooks Locally
-
-```bash
-# Manually trigger a hook to test
-TASK_ID=123 \
-TASK_TITLE="Test Task" \
-TASK_STATUS="done" \
-TASK_PROJECT="test" \
-TASK_EVENT="task.completed" \
-~/.config/task/hooks/task.completed
-```
-
-### View Hook Output
-
-Hook execution errors are logged:
-```bash
-# Daemon logs show hook execution results
-tail -f ~/.local/share/task/daemon.log
-```
-
-### Test Webhooks
-
-```bash
-# Start a local test server
-python3 -m http.server 8080
-
-# Add webhook
-ty events webhooks add http://localhost:8080/webhook
-
-# Restart daemon
-ty daemon restart
-
-# Create/complete a task and watch the server output
-```
-
-## Event Flow Diagram
-
-```
-┌─────────────┐
-│   Action    │  (Create task, update status, etc.)
-└──────┬──────┘
-       │
-       ▼
-┌─────────────┐
-│ Event       │  Event created with type, task data, metadata
-│ Generated   │
-└──────┬──────┘
-       │
-       ▼
-┌─────────────┐
-│ Event Queue │  Async queue (non-blocking)
-└──────┬──────┘
-       │
-       ├──────────────────┬────────────────┬────────────────┐
-       ▼                  ▼                ▼                ▼
-┌──────────────┐  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐
-│  Script      │  │   Webhook    │  │  Event Log   │  │  In-Process  │
-│  Hooks       │  │   HTTP POST  │  │  Database    │  │  Channels    │
-└──────────────┘  └──────────────┘  └──────────────┘  └──────────────┘
-```
-
-## Best Practices
-
-1. **Keep hooks fast** - Hooks run asynchronously but should complete within 30 seconds
-2. **Handle errors gracefully** - Exit with status 0 even if non-critical operations fail
-3. **Use webhooks for heavy processing** - Offload complex logic to external services
-4. **Log hook activity** - Redirect output to a log file for debugging
-5. **Test hooks manually** - Use environment variables to test before deploying
-6. **Secure webhook endpoints** - Validate incoming requests, use HTTPS
-7. **Monitor event log** - Use `ty events list` to verify events are firing
-
-## Security Considerations
-
-- Hook scripts run with your user permissions - be cautious with what they execute
-- Webhook URLs may be visible in database - avoid embedding secrets
-- Use environment variables or secret managers for sensitive data
-- Validate webhook payloads on the receiving end
-- Consider rate limiting on webhook endpoints
+None required - the event system is enabled by default.
 
 ## Troubleshooting
 
-### Hooks not executing
-- Verify script is executable: `chmod +x ~/.config/task/hooks/task.completed`
-- Check script has shebang: `#!/bin/bash`
-- Test manually with environment variables
-- Check daemon logs for errors
+### Events not appearing
 
-### Webhooks not firing
-- Verify daemon is running: `ty daemon status`
-- Restart daemon after adding webhooks: `ty daemon restart`
-- Check webhook URL is correct: `ty events webhooks list`
-- Test endpoint is reachable: `curl -X POST <webhook-url>`
+**Symptom:** `ty events watch` shows connection but no events
 
-### Events not appearing in log
-- Verify daemon is running with events enabled
-- Check database has event_log table: `sqlite3 ~/.local/share/task/tasks.db ".schema event_log"`
-- Try `ty events list --limit 200` to see older events
+**Cause:** Events are only emitted by the executor, not by CLI commands
+
+**Solution:** Queue a task for execution to see events:
+```bash
+ty execute <task-id>
+```
+
+### Webhook delivery failures
+
+**Symptom:** Webhook requests timeout or fail
+
+**Check:**
+1. Webhook URL is accessible from the daemon
+2. Webhook server is running
+3. Check daemon logs for errors
+
+### Hook scripts not executing
+
+**Check:**
+1. Script has execute permissions: `chmod +x ~/.config/task/hooks/task.*`
+2. Script has correct shebang: `#!/bin/bash`
+3. Check daemon logs for errors
+
+## Best Practices
+
+1. **Use filtering** - Filter events by type or task to reduce noise
+2. **Handle errors** - Webhook servers and hooks should handle errors gracefully
+3. **Idempotency** - Design hooks to be idempotent (safe to run multiple times)
+4. **Timeouts** - Hooks have a 30-second timeout, keep them fast
+5. **Async processing** - Use webhooks or `ty events watch` for long-running operations
+6. **Security** - Validate webhook payloads and sanitize environment variables in hooks
+7. **Monitoring** - Use the event log (`ty events list`) to verify event delivery
+
+## See Also
+
+- [AGENTS.md](../AGENTS.md) - Architecture overview
+- [DEVELOPMENT.md](../DEVELOPMENT.md) - Development guide
+- [internal/events/events.go](../internal/events/events.go) - Event manager implementation
+- [internal/server/http.go](../internal/server/http.go) - HTTP/SSE server implementation

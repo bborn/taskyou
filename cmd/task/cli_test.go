@@ -335,31 +335,29 @@ func TestCLIDeleteTask(t *testing.T) {
 
 // TestCLIMoveTask tests moving a task to a different project
 func TestCLIMoveTask(t *testing.T) {
-	tmpDir := t.TempDir()
-	dbPath := filepath.Join(tmpDir, "test.db")
-
-	database, err := db.Open(dbPath)
-	if err != nil {
-		t.Fatalf("failed to open database: %v", err)
-	}
-	defer database.Close()
-	defer os.Remove(dbPath)
-
-	// Create source and target projects
-	srcProjectDir := filepath.Join(tmpDir, "src-project")
-	tgtProjectDir := filepath.Join(tmpDir, "tgt-project")
-	os.MkdirAll(srcProjectDir, 0755)
-	os.MkdirAll(tgtProjectDir, 0755)
-
-	if err := database.CreateProject(&db.Project{Name: "src-project", Path: srcProjectDir}); err != nil {
-		t.Fatalf("failed to create src-project: %v", err)
-	}
-	if err := database.CreateProject(&db.Project{Name: "tgt-project", Path: tgtProjectDir}); err != nil {
-		t.Fatalf("failed to create tgt-project: %v", err)
-	}
-
 	// Test 1: Basic move preserves task content
 	t.Run("move preserves task content", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		dbPath := filepath.Join(tmpDir, "test.db")
+
+		database, err := db.Open(dbPath)
+		if err != nil {
+			t.Fatalf("failed to open database: %v", err)
+		}
+		defer database.Close()
+
+		// Create source and target projects
+		srcProjectDir := filepath.Join(tmpDir, "src-project")
+		tgtProjectDir := filepath.Join(tmpDir, "tgt-project")
+		os.MkdirAll(srcProjectDir, 0755)
+		os.MkdirAll(tgtProjectDir, 0755)
+
+		if err := database.CreateProject(&db.Project{Name: "src-project", Path: srcProjectDir}); err != nil {
+			t.Fatalf("failed to create src-project: %v", err)
+		}
+		if err := database.CreateProject(&db.Project{Name: "tgt-project", Path: tgtProjectDir}); err != nil {
+			t.Fatalf("failed to create tgt-project: %v", err)
+		}
 		task := &db.Task{
 			Title:   "Task to move",
 			Body:    "Task description",
@@ -419,6 +417,27 @@ func TestCLIMoveTask(t *testing.T) {
 
 	// Test 2: Move resets execution-related fields
 	t.Run("move resets execution fields", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		dbPath := filepath.Join(tmpDir, "test.db")
+
+		database, err := db.Open(dbPath)
+		if err != nil {
+			t.Fatalf("failed to open database: %v", err)
+		}
+		defer database.Close()
+
+		// Create source and target projects
+		srcProjectDir := filepath.Join(tmpDir, "src-project")
+		tgtProjectDir := filepath.Join(tmpDir, "tgt-project")
+		os.MkdirAll(srcProjectDir, 0755)
+		os.MkdirAll(tgtProjectDir, 0755)
+
+		if err := database.CreateProject(&db.Project{Name: "src-project", Path: srcProjectDir}); err != nil {
+			t.Fatalf("failed to create src-project: %v", err)
+		}
+		if err := database.CreateProject(&db.Project{Name: "tgt-project", Path: tgtProjectDir}); err != nil {
+			t.Fatalf("failed to create tgt-project: %v", err)
+		}
 		task := &db.Task{
 			Title:           "Task with execution state",
 			Status:          db.StatusBacklog,
@@ -464,6 +483,27 @@ func TestCLIMoveTask(t *testing.T) {
 
 	// Test 3: Move resets status for processing/blocked tasks
 	t.Run("move resets processing status to backlog", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		dbPath := filepath.Join(tmpDir, "test.db")
+
+		database, err := db.Open(dbPath)
+		if err != nil {
+			t.Fatalf("failed to open database: %v", err)
+		}
+		defer database.Close()
+
+		// Create source and target projects
+		srcProjectDir := filepath.Join(tmpDir, "src-project")
+		tgtProjectDir := filepath.Join(tmpDir, "tgt-project")
+		os.MkdirAll(srcProjectDir, 0755)
+		os.MkdirAll(tgtProjectDir, 0755)
+
+		if err := database.CreateProject(&db.Project{Name: "src-project", Path: srcProjectDir}); err != nil {
+			t.Fatalf("failed to create src-project: %v", err)
+		}
+		if err := database.CreateProject(&db.Project{Name: "tgt-project", Path: tgtProjectDir}); err != nil {
+			t.Fatalf("failed to create tgt-project: %v", err)
+		}
 		task := &db.Task{
 			Title:   "Processing task",
 			Status:  db.StatusProcessing,
@@ -490,6 +530,27 @@ func TestCLIMoveTask(t *testing.T) {
 
 	// Test 4: Move preserves queued status
 	t.Run("move preserves queued status", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		dbPath := filepath.Join(tmpDir, "test.db")
+
+		database, err := db.Open(dbPath)
+		if err != nil {
+			t.Fatalf("failed to open database: %v", err)
+		}
+		defer database.Close()
+
+		// Create source and target projects
+		srcProjectDir := filepath.Join(tmpDir, "src-project")
+		tgtProjectDir := filepath.Join(tmpDir, "tgt-project")
+		os.MkdirAll(srcProjectDir, 0755)
+		os.MkdirAll(tgtProjectDir, 0755)
+
+		if err := database.CreateProject(&db.Project{Name: "src-project", Path: srcProjectDir}); err != nil {
+			t.Fatalf("failed to create src-project: %v", err)
+		}
+		if err := database.CreateProject(&db.Project{Name: "tgt-project", Path: tgtProjectDir}); err != nil {
+			t.Fatalf("failed to create tgt-project: %v", err)
+		}
 		task := &db.Task{
 			Title:   "Queued task",
 			Status:  db.StatusQueued,
