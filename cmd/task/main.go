@@ -1783,25 +1783,23 @@ Available settings:
 	settingsCmd.AddCommand(settingsSetCmd)
 	rootCmd.AddCommand(settingsCmd)
 
-	// Events command - manage event system (webhooks, hooks, event log)
+	// Events command - manage event system (streaming, hooks, event log)
 	eventsCmd := &cobra.Command{
 		Use:   "events",
-		Short: "Manage event system (webhooks, hooks, event log)",
+		Short: "Manage event system (streaming, hooks, event log)",
 		Long: `Manage the TaskYou event system for automation and integrations.
 
 Events are emitted when tasks change state (created, updated, status changed, etc.)
 and can be delivered via:
+  - Real-time streaming (ty events watch)
   - Script hooks (~/.config/task/hooks/)
-  - Webhooks (HTTP POST to configured URLs)
-  - In-process channels (for real-time UI updates)
   - Event log database (for audit trail)
+  - In-process channels (for real-time UI updates)
 
 Examples:
   ty events watch                     # Stream events in real-time
-  ty events list                      # Show recent events
-  ty events webhooks list             # List configured webhooks
-  ty events webhooks add <url>        # Add webhook URL
-  ty events webhooks remove <url>     # Remove webhook URL`,
+  ty events watch --type task.completed  # Filter by event type
+  ty events list                      # Show recent events from database`,
 	}
 
 	// events list - show recent events from event log
@@ -1898,212 +1896,6 @@ Examples:
 	eventsListCmd.Flags().Bool("json", false, "Output in JSON format")
 	eventsCmd.AddCommand(eventsListCmd)
 
-	// webhooks subcommand
-	webhooksCmd := &cobra.Command{
-		Use:   "webhooks",
-		Short: "Manage webhook URLs for event delivery",
-		Long: `Configure webhook URLs that will receive HTTP POST requests for all events.
-
-The webhook will receive a JSON payload with the event details:
-  {
-    "type": "task.created",
-    "task_id": 123,
-    "task": { ... },
-    "message": "Task created: Example task",
-    "metadata": { ... },
-    "timestamp": "2024-01-01T12:00:00Z"
-  }
-
-Examples:
-  ty events webhooks list
-  ty events webhooks add https://example.com/webhook
-  ty events webhooks remove https://example.com/webhook`,
-	}
-
-	// webhooks list
-	webhooksListCmd := &cobra.Command{
-		Use:   "list",
-		Short: "List configured webhook URLs",
-		Run: func(cmd *cobra.Command, args []string) {
-			dbPath := db.DefaultPath()
-			database, err := db.Open(dbPath)
-			if err != nil {
-				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
-				os.Exit(1)
-			}
-			defer database.Close()
-
-			webhooksJSON, _ := database.GetSetting("event_webhooks")
-			if webhooksJSON == "" {
-				fmt.Println(dimStyle.Render("No webhooks configured"))
-				fmt.Println()
-				fmt.Println("Add a webhook with: ty events webhooks add <url>")
-				return
-			}
-
-			var webhooks []string
-			if err := json.Unmarshal([]byte(webhooksJSON), &webhooks); err != nil {
-				fmt.Fprintln(os.Stderr, errorStyle.Render("Error parsing webhooks: "+err.Error()))
-				os.Exit(1)
-			}
-
-			if len(webhooks) == 0 {
-				fmt.Println(dimStyle.Render("No webhooks configured"))
-				return
-			}
-
-			fmt.Println(boldStyle.Render(fmt.Sprintf("Configured Webhooks (%d)", len(webhooks))))
-			fmt.Println(strings.Repeat("─", 80))
-			for i, url := range webhooks {
-				fmt.Printf("%d. %s\n", i+1, url)
-			}
-		},
-	}
-	webhooksCmd.AddCommand(webhooksListCmd)
-
-	// webhooks add
-	webhooksAddCmd := &cobra.Command{
-		Use:   "add <url>",
-		Short: "Add a webhook URL",
-		Args:  cobra.ExactArgs(1),
-		Run: func(cmd *cobra.Command, args []string) {
-			url := args[0]
-
-			dbPath := db.DefaultPath()
-			database, err := db.Open(dbPath)
-			if err != nil {
-				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
-				os.Exit(1)
-			}
-			defer database.Close()
-
-			// Load existing webhooks
-			webhooksJSON, _ := database.GetSetting("event_webhooks")
-			var webhooks []string
-			if webhooksJSON != "" {
-				json.Unmarshal([]byte(webhooksJSON), &webhooks)
-			}
-
-			// Check if already exists
-			for _, existing := range webhooks {
-				if existing == url {
-					fmt.Println(dimStyle.Render("Webhook already configured: " + url))
-					return
-				}
-			}
-
-			// Add new webhook
-			webhooks = append(webhooks, url)
-			newJSON, _ := json.Marshal(webhooks)
-			if err := database.SetSetting("event_webhooks", string(newJSON)); err != nil {
-				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
-				os.Exit(1)
-			}
-
-			fmt.Println(successStyle.Render("✓ Webhook added: " + url))
-			fmt.Println()
-			fmt.Println(dimStyle.Render("Restart the daemon to apply changes:"))
-			fmt.Println("  ty daemon restart")
-		},
-	}
-	webhooksCmd.AddCommand(webhooksAddCmd)
-
-	// webhooks remove
-	webhooksRemoveCmd := &cobra.Command{
-		Use:   "remove <url>",
-		Short: "Remove a webhook URL",
-		Args:  cobra.ExactArgs(1),
-		Run: func(cmd *cobra.Command, args []string) {
-			url := args[0]
-
-			dbPath := db.DefaultPath()
-			database, err := db.Open(dbPath)
-			if err != nil {
-				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
-				os.Exit(1)
-			}
-			defer database.Close()
-
-			// Load existing webhooks
-			webhooksJSON, _ := database.GetSetting("event_webhooks")
-			if webhooksJSON == "" {
-				fmt.Println(dimStyle.Render("No webhooks configured"))
-				return
-			}
-
-			var webhooks []string
-			json.Unmarshal([]byte(webhooksJSON), &webhooks)
-
-			// Remove webhook
-			var newWebhooks []string
-			found := false
-			for _, existing := range webhooks {
-				if existing != url {
-					newWebhooks = append(newWebhooks, existing)
-				} else {
-					found = true
-				}
-			}
-
-			if !found {
-				fmt.Println(dimStyle.Render("Webhook not found: " + url))
-				return
-			}
-
-			// Save updated list
-			newJSON, _ := json.Marshal(newWebhooks)
-			if err := database.SetSetting("event_webhooks", string(newJSON)); err != nil {
-				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
-				os.Exit(1)
-			}
-
-			fmt.Println(successStyle.Render("✓ Webhook removed: " + url))
-			fmt.Println()
-			fmt.Println(dimStyle.Render("Restart the daemon to apply changes:"))
-			fmt.Println("  ty daemon restart")
-		},
-	}
-	webhooksCmd.AddCommand(webhooksRemoveCmd)
-
-	// events watch - stream events in real-time
-	eventsWatchCmd := &cobra.Command{
-		Use:   "watch",
-		Short: "Watch events in real-time",
-		Long: `Stream events in real-time as newline-delimited JSON.
-
-This command connects to the daemon and streams all events to stdout.
-Each line is a JSON object representing an event.
-
-Filters:
-  --type      Filter by event type (e.g., task.completed)
-  --task      Filter by task ID
-  --project   Filter by project name
-
-Examples:
-  ty events watch                                    # Watch all events
-  ty events watch --type task.completed              # Only completed tasks
-  ty events watch --task 123                         # Events for task #123
-  ty events watch | jq 'select(.type == "task.failed")'  # Use with jq
-  ty events watch | grep "error"                     # Use with grep`,
-		Run: func(cmd *cobra.Command, args []string) {
-			eventType, _ := cmd.Flags().GetString("type")
-			taskID, _ := cmd.Flags().GetInt64("task")
-			project, _ := cmd.Flags().GetString("project")
-			httpAddr, _ := cmd.Flags().GetString("addr")
-
-			if err := watchEvents(httpAddr, eventType, taskID, project); err != nil {
-				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
-				os.Exit(1)
-			}
-		},
-	}
-	eventsWatchCmd.Flags().String("type", "", "Filter by event type")
-	eventsWatchCmd.Flags().Int64("task", 0, "Filter by task ID")
-	eventsWatchCmd.Flags().String("project", "", "Filter by project name")
-	eventsWatchCmd.Flags().String("addr", "http://localhost:3333", "HTTP API address")
-	eventsCmd.AddCommand(eventsWatchCmd)
-
-	eventsCmd.AddCommand(webhooksCmd)
 	rootCmd.AddCommand(eventsCmd)
 
 	if err := rootCmd.Execute(); err != nil {
@@ -3892,7 +3684,7 @@ func watchEvents(httpAddr, eventType string, taskID int64, project string) error
 				currentData.WriteString("\n")
 			}
 			currentData.WriteString(strings.TrimPrefix(line, "data: "))
-		} else if strings.HasPrefix(line, ":") {
+		} else if line != "" && line[0] == ':' {
 			// Comment (keepalive) - ignore
 			continue
 		}

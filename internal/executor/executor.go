@@ -971,24 +971,9 @@ func (e *Executor) AllExecutors() []string {
 	return e.executorFactory.All()
 }
 
-// GetEventsManager returns the events manager for subscribing to events or managing webhooks.
+// GetEventsManager returns the events manager for subscribing to events.
 func (e *Executor) GetEventsManager() *events.Manager {
 	return e.events
-}
-
-// AddWebhook adds a webhook URL to receive task events.
-func (e *Executor) AddWebhook(url string) error {
-	return e.events.AddWebhook(url)
-}
-
-// RemoveWebhook removes a webhook URL.
-func (e *Executor) RemoveWebhook(url string) error {
-	return e.events.RemoveWebhook(url)
-}
-
-// ListWebhooks returns configured webhook URLs.
-func (e *Executor) ListWebhooks() []string {
-	return e.events.ListWebhooks()
 }
 
 func (e *Executor) getProjectDir(project string) string {

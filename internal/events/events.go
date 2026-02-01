@@ -2,17 +2,14 @@
 // It supports multiple delivery mechanisms:
 // - In-process channels (for real-time UI updates)
 // - Script hooks (for local automation)
-// - Webhooks (for external integrations)
 // - Event log (for audit trail and debugging)
 package events
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
-	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -56,7 +53,6 @@ type Manager struct {
 	db       *db.DB
 	logger   *log.Logger
 	hooksDir string
-	webhooks []string // List of webhook URLs to POST events to
 
 	// In-process subscribers
 	mu   sync.RWMutex
@@ -74,14 +70,10 @@ func New(database *db.DB, hooksDir string) *Manager {
 		db:         database,
 		logger:     log.NewWithOptions(os.Stderr, log.Options{Prefix: "events"}),
 		hooksDir:   hooksDir,
-		webhooks:   []string{},
 		subs:       make([]chan Event, 0),
 		eventQueue: make(chan Event, 1000), // Buffered to prevent blocking
 		stopCh:     make(chan struct{}),
 	}
-
-	// Load webhook URLs from database
-	m.loadWebhooks()
 
 	// Start background worker for async event delivery
 	m.wg.Add(1)
@@ -95,53 +87,6 @@ func NewSilent(database *db.DB, hooksDir string) *Manager {
 	m := New(database, hooksDir)
 	m.logger = log.NewWithOptions(io.Discard, log.Options{Level: log.FatalLevel})
 	return m
-}
-
-// loadWebhooks loads configured webhook URLs from database settings.
-func (m *Manager) loadWebhooks() {
-	webhooksJSON, err := m.db.GetSetting("event_webhooks")
-	if err != nil || webhooksJSON == "" {
-		return
-	}
-
-	var urls []string
-	if err := json.Unmarshal([]byte(webhooksJSON), &urls); err != nil {
-		m.logger.Error("Failed to parse webhooks", "error", err)
-		return
-	}
-
-	m.webhooks = urls
-}
-
-// AddWebhook adds a webhook URL and persists it to database.
-func (m *Manager) AddWebhook(url string) error {
-	m.webhooks = append(m.webhooks, url)
-	return m.saveWebhooks()
-}
-
-// RemoveWebhook removes a webhook URL and persists to database.
-func (m *Manager) RemoveWebhook(url string) error {
-	for i, w := range m.webhooks {
-		if w == url {
-			m.webhooks = append(m.webhooks[:i], m.webhooks[i+1:]...)
-			return m.saveWebhooks()
-		}
-	}
-	return nil
-}
-
-// ListWebhooks returns configured webhook URLs.
-func (m *Manager) ListWebhooks() []string {
-	return append([]string{}, m.webhooks...) // Return a copy
-}
-
-// saveWebhooks persists webhook URLs to database.
-func (m *Manager) saveWebhooks() error {
-	data, err := json.Marshal(m.webhooks)
-	if err != nil {
-		return err
-	}
-	return m.db.SetSetting("event_webhooks", string(data))
 }
 
 // Emit sends an event to all configured delivery channels.
@@ -202,11 +147,6 @@ func (m *Manager) deliverEvent(event Event) {
 
 	// 3. Execute script hooks (async)
 	go m.executeHook(event)
-
-	// 4. Send webhooks (async)
-	for _, url := range m.webhooks {
-		go m.sendWebhook(url, event)
-	}
 }
 
 // broadcastToSubscribers sends event to all in-process channel subscribers.
@@ -293,41 +233,6 @@ func (m *Manager) executeHook(event Event) {
 		m.logger.Error("Hook failed", "event", event.Type, "error", err, "output", string(output))
 	} else {
 		m.logger.Debug("Hook executed", "event", event.Type)
-	}
-}
-
-// sendWebhook sends an HTTP POST request to a webhook URL.
-func (m *Manager) sendWebhook(url string, event Event) {
-	payload, err := json.Marshal(event)
-	if err != nil {
-		m.logger.Error("Failed to marshal event for webhook", "url", url, "error", err)
-		return
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(payload))
-	if err != nil {
-		m.logger.Error("Failed to create webhook request", "url", url, "error", err)
-		return
-	}
-
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", "TaskYou/1.0")
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		m.logger.Error("Webhook delivery failed", "url", url, "error", err)
-		return
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode >= 400 {
-		body, _ := io.ReadAll(resp.Body)
-		m.logger.Warn("Webhook returned error status", "url", url, "status", resp.StatusCode, "body", string(body))
-	} else {
-		m.logger.Debug("Webhook delivered", "url", url, "status", resp.StatusCode)
 	}
 }
 

@@ -4,9 +4,7 @@ TaskYou emits events for all task lifecycle changes, enabling automation and int
 
 ## Event Delivery Mechanisms
 
-Events can be delivered through multiple channels:
-
-### 1. **Real-time Streaming** (NEW!)
+### 1. **Real-time Streaming** 
 Stream events to stdout as newline-delimited JSON:
 
 ```bash
@@ -33,42 +31,7 @@ ty events watch --type task.completed | notify-send "Task completed"
 - Custom automation scripts
 - Notifications
 
-### 2. **Webhooks**
-HTTP POST requests to configured URLs:
-
-```bash
-# Add a webhook
-ty events webhooks add https://example.com/webhook
-
-# List configured webhooks
-ty events webhooks list
-
-# Remove a webhook
-ty events webhooks remove https://example.com/webhook
-
-# After adding/removing webhooks, restart the daemon:
-ty daemon restart
-```
-
-**Webhook payload format:**
-```json
-{
-  "type": "task.completed",
-  "task_id": 123,
-  "task": { /* full task object */ },
-  "message": "Task completed successfully",
-  "metadata": { /* additional context */ },
-  "timestamp": "2024-01-01T12:00:00Z"
-}
-```
-
-**Use cases:**
-- Slack/Discord notifications
-- External system integrations
-- Monitoring services
-- Analytics platforms
-
-### 3. **Script Hooks**
+### 2. **Script Hooks**
 Execute local scripts on events:
 
 ```bash
@@ -99,7 +62,7 @@ chmod +x ~/.config/task/hooks/task.completed
 - System commands
 - Custom logging
 
-### 4. **Event Log**
+### 3. **Event Log**
 Query historical events from the database:
 
 ```bash
@@ -206,26 +169,6 @@ Events include rich metadata in the `metadata` field:
 
 ## Example Integrations
 
-### Slack Notification
-
-```bash
-#!/bin/bash
-# ~/.config/task/hooks/task.completed
-
-curl -X POST https://hooks.slack.com/services/YOUR/WEBHOOK/URL \
-  -H 'Content-Type: application/json' \
-  -d "{
-    \"text\": \"Task completed: $TASK_TITLE\",
-    \"blocks\": [{
-      \"type\": \"section\",
-      \"text\": {
-        \"type\": \"mrkdwn\",
-        \"text\": \"*Task #$TASK_ID completed*\n$TASK_TITLE\nProject: $TASK_PROJECT\"
-      }
-    }]
-  }"
-```
-
 ### Real-time Dashboard
 
 ```bash
@@ -238,38 +181,6 @@ ty events watch | while read event; do
     title: .task.Title
   }' >> /var/log/taskyou/dashboard.jsonl
 done
-```
-
-### Automated PR Comments
-
-```javascript
-// Node.js webhook server
-const express = require('express');
-const { Octokit } = require('@octokit/rest');
-
-const app = express();
-app.use(express.json());
-
-const octokit = new Octokit({ auth: process.env.GITHUB_TOKEN });
-
-app.post('/webhook', async (req, res) => {
-  const event = req.body;
-  
-  if (event.type === 'task.completed' && event.task.PRURL) {
-    const [owner, repo, prNumber] = event.task.PRURL.match(/github.com\/(.+)\/(.+)\/pull\/(\d+)/).slice(1);
-    
-    await octokit.issues.createComment({
-      owner,
-      repo,
-      issue_number: parseInt(prNumber),
-      body: `✅ Task completed: ${event.task.Title}\n\nReview ready!`
-    });
-  }
-  
-  res.json({ ok: true });
-});
-
-app.listen(3000);
 ```
 
 ### Desktop Notifications (macOS)
@@ -330,10 +241,6 @@ ty daemon
 taskd -http :4444
 ```
 
-### Environment Variables
-
-None required - the event system is enabled by default.
-
 ## Troubleshooting
 
 ### Events not appearing
@@ -347,15 +254,6 @@ None required - the event system is enabled by default.
 ty execute <task-id>
 ```
 
-### Webhook delivery failures
-
-**Symptom:** Webhook requests timeout or fail
-
-**Check:**
-1. Webhook URL is accessible from the daemon
-2. Webhook server is running
-3. Check daemon logs for errors
-
 ### Hook scripts not executing
 
 **Check:**
@@ -366,12 +264,11 @@ ty execute <task-id>
 ## Best Practices
 
 1. **Use filtering** - Filter events by type or task to reduce noise
-2. **Handle errors** - Webhook servers and hooks should handle errors gracefully
+2. **Handle errors** - Hook scripts should handle errors gracefully
 3. **Idempotency** - Design hooks to be idempotent (safe to run multiple times)
 4. **Timeouts** - Hooks have a 30-second timeout, keep them fast
-5. **Async processing** - Use webhooks or `ty events watch` for long-running operations
-6. **Security** - Validate webhook payloads and sanitize environment variables in hooks
-7. **Monitoring** - Use the event log (`ty events list`) to verify event delivery
+5. **Async processing** - Use `ty events watch` for long-running operations
+6. **Monitoring** - Use the event log (`ty events list`) to verify event delivery
 
 ## See Also
 

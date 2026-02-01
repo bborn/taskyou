@@ -5,9 +5,8 @@
 TaskYou now supports **real-time event streaming**, eliminating the need for external callers to poll for task updates. Events can be consumed via multiple channels:
 
 1. **Real-time streaming** (`ty events watch`) - NEW!
-2. **Webhooks** - Already existed, now enhanced
-3. **Script hooks** - Already existed
-4. **Event log** - Already existed
+2. **Script hooks** - Already existed
+3. **Event log** - Already existed
 
 ## What Was Implemented
 

@@ -196,45 +196,6 @@ echo "Task $TASK_ID: $TASK_TITLE" > ` + filepath.Join(hooksDir, "hook_output.txt
 	}
 }
 
-func TestWebhookManagement(t *testing.T) {
-	database := setupTestDB(t)
-	defer database.Close()
-
-	hooksDir := t.TempDir()
-	mgr := NewSilent(database, hooksDir)
-	defer mgr.Stop()
-
-	// Add webhooks
-	url1 := "http://example.com/webhook1"
-	url2 := "http://example.com/webhook2"
-
-	if err := mgr.AddWebhook(url1); err != nil {
-		t.Fatalf("Failed to add webhook: %v", err)
-	}
-	if err := mgr.AddWebhook(url2); err != nil {
-		t.Fatalf("Failed to add webhook: %v", err)
-	}
-
-	// List webhooks
-	webhooks := mgr.ListWebhooks()
-	if len(webhooks) != 2 {
-		t.Errorf("Expected 2 webhooks, got %d", len(webhooks))
-	}
-
-	// Remove webhook
-	if err := mgr.RemoveWebhook(url1); err != nil {
-		t.Fatalf("Failed to remove webhook: %v", err)
-	}
-
-	webhooks = mgr.ListWebhooks()
-	if len(webhooks) != 1 {
-		t.Errorf("Expected 1 webhook after removal, got %d", len(webhooks))
-	}
-	if webhooks[0] != url2 {
-		t.Errorf("Expected webhook %s, got %s", url2, webhooks[0])
-	}
-}
-
 func TestMultipleSubscribers(t *testing.T) {
 	database := setupTestDB(t)
 	defer database.Close()
