@@ -1,48 +1,13 @@
 #!/bin/bash
 # Example hook: task.completed
-# This script runs whenever a task completes successfully
-#
-# Install:
-#   mkdir -p ~/.config/task/hooks
-#   cp examples/hooks/task.completed ~/.config/task/hooks/
-#   chmod +x ~/.config/task/hooks/task.completed
-#
-# Available environment variables:
-#   TASK_ID, TASK_TITLE, TASK_STATUS, TASK_PROJECT, TASK_TYPE,
-#   TASK_EXECUTOR, TASK_EVENT, TASK_MESSAGE, TASK_METADATA, TASK_TIMESTAMP
+# Runs when a task completes successfully
 
-# Example 1: Desktop notification (macOS)
+# Desktop notification (macOS)
 if command -v osascript &> /dev/null; then
-  osascript -e "display notification \"$TASK_TITLE\" with title \"✅ Task Completed\" subtitle \"Task #$TASK_ID\" sound name \"Glass\""
+  osascript -e "display notification \"$TASK_TITLE\" with title \"Task Completed\" subtitle \"#$TASK_ID\" sound name \"Glass\""
 fi
 
-# Example 2: Desktop notification (Linux)
+# Desktop notification (Linux)
 if command -v notify-send &> /dev/null; then
-  notify-send -u normal -i checkbox-checked "✅ Task Completed" "$TASK_TITLE"
+  notify-send "Task Completed" "$TASK_TITLE (#$TASK_ID)"
 fi
-
-# Example 3: Log to file
-echo "$(date '+%Y-%m-%d %H:%M:%S') | Task #$TASK_ID completed: $TASK_TITLE" >> ~/.local/share/task/completed.log
-
-# Example 4: Slack notification (requires SLACK_WEBHOOK_URL env var)
-if [ -n "$SLACK_WEBHOOK_URL" ]; then
-  curl -s -X POST "$SLACK_WEBHOOK_URL" \
-    -H 'Content-Type: application/json' \
-    -d "{
-      \"text\": \"✅ Task completed: $TASK_TITLE\",
-      \"blocks\": [{
-        \"type\": \"section\",
-        \"text\": {
-          \"type\": \"mrkdwn\",
-          \"text\": \"*Task #$TASK_ID completed*\n$TASK_TITLE\n*Project:* $TASK_PROJECT\"
-        }
-      }]
-    }" > /dev/null
-fi
-
-# Example 5: Update external tracking system
-# if [ "$TASK_PROJECT" = "myproject" ]; then
-#   curl -s -X POST https://api.example.com/tasks/$TASK_ID/complete \
-#     -H "Authorization: Bearer $API_TOKEN" \
-#     -d "{\"status\": \"completed\"}" > /dev/null
-# fi

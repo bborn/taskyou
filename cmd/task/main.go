@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"net/http"
 	"os"
 	osexec "os/exec"
 	"os/signal"
@@ -23,7 +22,6 @@ import (
 	"github.com/bborn/workflow/internal/db"
 	"github.com/bborn/workflow/internal/executor"
 	"github.com/bborn/workflow/internal/github"
-	"github.com/bborn/workflow/internal/server"
 	"github.com/bborn/workflow/internal/ui"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -1783,23 +1781,17 @@ Available settings:
 	settingsCmd.AddCommand(settingsSetCmd)
 	rootCmd.AddCommand(settingsCmd)
 
-	// Events command - manage event system (streaming, hooks, event log)
+	// Events command - manage event hooks
 	eventsCmd := &cobra.Command{
 		Use:   "events",
-		Short: "Manage event system (streaming, hooks, event log)",
-		Long: `Manage the TaskYou event system for automation and integrations.
+		Short: "Manage event hooks",
+		Long: `Manage task event hooks for automation.
 
-Events are emitted when tasks change state (created, updated, status changed, etc.)
-and can be delivered via:
-  - Real-time streaming (ty events watch)
-  - Script hooks (~/.config/task/hooks/)
-  - Event log database (for audit trail)
-  - In-process channels (for real-time UI updates)
+Events are emitted when tasks change state (created, started, completed, failed).
+Script hooks in ~/.config/task/hooks/ are executed automatically.
 
 Examples:
-  ty events watch                     # Stream events in real-time
-  ty events watch --type task.completed  # Filter by event type
-  ty events list                      # Show recent events from database`,
+  ty events list                      # Show recent events`,
 	}
 
 	// events list - show recent events from event log
@@ -1891,48 +1883,10 @@ Examples:
 		},
 	}
 	eventsListCmd.Flags().Int("limit", 50, "Maximum number of events to show")
-	eventsListCmd.Flags().String("type", "", "Filter by event type (e.g., task.created, task.status.changed)")
+	eventsListCmd.Flags().String("type", "", "Filter by event type (e.g., task.created)")
 	eventsListCmd.Flags().Int64("task", 0, "Filter by task ID")
 	eventsListCmd.Flags().Bool("json", false, "Output in JSON format")
 	eventsCmd.AddCommand(eventsListCmd)
-
-	// events watch - stream events in real-time
-	eventsWatchCmd := &cobra.Command{
-		Use:   "watch",
-		Short: "Watch events in real-time",
-		Long: `Stream events in real-time as newline-delimited JSON.
-
-This command connects to the daemon and streams all events to stdout.
-Each line is a JSON object representing an event.
-
-Filters:
-  --type      Filter by event type (e.g., task.completed)
-  --task      Filter by task ID
-  --project   Filter by project name
-
-Examples:
-  ty events watch                                    # Watch all events
-  ty events watch --type task.completed              # Only completed tasks
-  ty events watch --task 123                         # Events for task #123
-  ty events watch | jq 'select(.type == "task.failed")'  # Use with jq
-  ty events watch | grep "error"                     # Use with grep`,
-		Run: func(cmd *cobra.Command, args []string) {
-			eventType, _ := cmd.Flags().GetString("type")
-			taskID, _ := cmd.Flags().GetInt64("task")
-			project, _ := cmd.Flags().GetString("project")
-			httpAddr, _ := cmd.Flags().GetString("addr")
-
-			if err := watchEvents(httpAddr, eventType, taskID, project); err != nil {
-				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
-				os.Exit(1)
-			}
-		},
-	}
-	eventsWatchCmd.Flags().String("type", "", "Filter by event type")
-	eventsWatchCmd.Flags().Int64("task", 0, "Filter by task ID")
-	eventsWatchCmd.Flags().String("project", "", "Filter by project name")
-	eventsWatchCmd.Flags().String("addr", "http://localhost:3333", "HTTP API address")
-	eventsCmd.AddCommand(eventsWatchCmd)
 
 	rootCmd.AddCommand(eventsCmd)
 
@@ -2411,25 +2365,12 @@ func runDaemon() error {
 	// Create executor with logging
 	exec := executor.NewWithLogging(database, cfg, os.Stderr)
 
-	// Create HTTP server for event streaming
-	eventsManager := exec.GetEventsManager()
-	httpAddr := ":3333"
-	httpSrv := server.NewHTTPServer(httpAddr, eventsManager)
-
 	// Start background executor
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	exec.Start(ctx)
 
 	logger.Info("Executor started, waiting for tasks...")
-	logger.Info("HTTP API listening", "addr", httpAddr)
-
-	// Start HTTP server in background
-	go func() {
-		if err := httpSrv.Start(); err != nil {
-			logger.Error("HTTP server error", "error", err)
-		}
-	}()
 
 	// Handle signals
 	sigCh := make(chan os.Signal, 1)
@@ -2439,10 +2380,6 @@ func runDaemon() error {
 	sig := <-sigCh
 	logger.Info("Received signal, shutting down", "signal", sig)
 	exec.Stop()
-	
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer shutdownCancel()
-	httpSrv.Shutdown(shutdownCtx)
 
 	return nil
 }
@@ -3637,100 +3574,3 @@ func previewStaleClaudeProjectConfigs(configPath string) (int, []string, error) 
 	return len(stalePaths), stalePaths, nil
 }
 
-// watchEvents streams events from the daemon in real-time.
-func watchEvents(httpAddr, eventType string, taskID int64, project string) error {
-	// Build SSE URL with query parameters
-	url := httpAddr + "/events/stream"
-	params := []string{}
-	if eventType != "" {
-		params = append(params, "type="+eventType)
-	}
-	if taskID > 0 {
-		params = append(params, fmt.Sprintf("task=%d", taskID))
-	}
-	if project != "" {
-		params = append(params, "project="+project)
-	}
-	if len(params) > 0 {
-		url += "?" + strings.Join(params, "&")
-	}
-
-	// Create HTTP client with no timeout (for streaming)
-	client := &http.Client{
-		Timeout: 0,
-	}
-
-	// Create request
-	req, err := http.NewRequest("GET", url, nil)
-	if err != nil {
-		return fmt.Errorf("create request: %w", err)
-	}
-
-	req.Header.Set("Accept", "text/event-stream")
-	req.Header.Set("Cache-Control", "no-cache")
-	req.Header.Set("Connection", "keep-alive")
-
-	// Make request
-	resp, err := client.Do(req)
-	if err != nil {
-		return fmt.Errorf("connect to daemon: %w (is the daemon running?)", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("unexpected status %d: %s", resp.StatusCode, string(body))
-	}
-
-	// Read SSE stream
-	scanner := bufio.NewScanner(resp.Body)
-	var currentEvent string
-	var currentData strings.Builder
-
-	for scanner.Scan() {
-		line := scanner.Text()
-
-		// Empty line = end of event
-		if line == "" {
-			if currentEvent != "" && currentData.Len() > 0 {
-				// Parse and output event data
-				data := currentData.String()
-				
-				// For connected event, just log to stderr
-				if currentEvent == "connected" {
-					var msg map[string]string
-					if err := json.Unmarshal([]byte(data), &msg); err == nil {
-						fmt.Fprintln(os.Stderr, dimStyle.Render("# "+msg["message"]))
-					}
-				} else {
-					// Output event data as JSON to stdout
-					fmt.Println(data)
-				}
-
-				// Reset for next event
-				currentEvent = ""
-				currentData.Reset()
-			}
-			continue
-		}
-
-		// Parse SSE field
-		if strings.HasPrefix(line, "event: ") {
-			currentEvent = strings.TrimPrefix(line, "event: ")
-		} else if strings.HasPrefix(line, "data: ") {
-			if currentData.Len() > 0 {
-				currentData.WriteString("\n")
-			}
-			currentData.WriteString(strings.TrimPrefix(line, "data: "))
-		} else if line != "" && line[0] == ':' {
-			// Comment (keepalive) - ignore
-			continue
-		}
-	}
-
-	if err := scanner.Err(); err != nil {
-		return fmt.Errorf("read stream: %w", err)
-	}
-
-	return nil
-}

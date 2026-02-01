@@ -9,237 +9,69 @@ import (
 	"github.com/bborn/workflow/internal/db"
 )
 
-func setupTestDB(t *testing.T) *db.DB {
-	t.Helper()
-
-	// Create temp database
-	tmpDir := t.TempDir()
-	dbPath := filepath.Join(tmpDir, "test.db")
-
-	database, err := db.Open(dbPath)
-	if err != nil {
-		t.Fatalf("Failed to open database: %v", err)
-	}
-
-	return database
-}
-
-func TestEventEmission(t *testing.T) {
-	database := setupTestDB(t)
-	defer database.Close()
-
-	// Create hooks directory
+func TestEmitterRunsHook(t *testing.T) {
 	hooksDir := t.TempDir()
+	markerFile := filepath.Join(hooksDir, "marker")
+	hookScript := filepath.Join(hooksDir, TaskCreated)
 
-	// Create event manager
-	mgr := NewSilent(database, hooksDir)
-	defer mgr.Stop()
-
-	// Subscribe to events
-	eventCh := mgr.Subscribe()
-	defer mgr.Unsubscribe(eventCh)
-
-	// Create a test task
-	task := &db.Task{
-		ID:     123,
-		Title:  "Test Task",
-		Status: db.StatusBacklog,
+	script := `#!/bin/sh
+echo "$TASK_ID:$TASK_TITLE" > "` + markerFile + `"
+`
+	if err := os.WriteFile(hookScript, []byte(script), 0755); err != nil {
+		t.Fatal(err)
 	}
 
-	// Emit task created event
-	mgr.EmitTaskCreated(task)
+	emitter := New(hooksDir)
+	task := &db.Task{ID: 42, Title: "Test Task"}
+	emitter.EmitTaskCreated(task)
 
-	// Wait for event
-	select {
-	case event := <-eventCh:
-		if event.Type != EventTaskCreated {
-			t.Errorf("Expected event type %s, got %s", EventTaskCreated, event.Type)
-		}
-		if event.TaskID != 123 {
-			t.Errorf("Expected task ID 123, got %d", event.TaskID)
-		}
-	case <-time.After(1 * time.Second):
-		t.Fatal("Timeout waiting for event")
-	}
-}
-
-func TestEventLog(t *testing.T) {
-	database := setupTestDB(t)
-	defer database.Close()
-
-	hooksDir := t.TempDir()
-	mgr := NewSilent(database, hooksDir)
-	defer mgr.Stop()
-
-	// Create a test task in database
-	task := &db.Task{
-		Title:  "Test Task",
-		Status: db.StatusBacklog,
-		Body:   "Test body",
-		Project: "personal",
-	}
-	if err := database.CreateTask(task); err != nil {
-		t.Fatalf("Failed to create task: %v", err)
-	}
-
-	// Emit event synchronously to ensure it's logged before we query
-	mgr.EmitSync(Event{
-		Type:    EventTaskCreated,
-		TaskID:  task.ID,
-		Task:    task,
-		Message: "Task created",
-	})
-
-	// Give it a moment to write to database
-	time.Sleep(100 * time.Millisecond)
-
-	// Query event log
-	var count int
-	err := database.QueryRow("SELECT COUNT(*) FROM event_log WHERE task_id = ?", task.ID).Scan(&count)
-	if err != nil {
-		t.Fatalf("Failed to query event log: %v", err)
-	}
-
-	if count == 0 {
-		t.Error("Event was not logged to database")
-	}
-}
-
-func TestStatusChangeEvents(t *testing.T) {
-	database := setupTestDB(t)
-	defer database.Close()
-
-	hooksDir := t.TempDir()
-	mgr := NewSilent(database, hooksDir)
-	defer mgr.Stop()
-
-	eventCh := mgr.Subscribe()
-	defer mgr.Unsubscribe(eventCh)
-
-	task := &db.Task{
-		ID:     456,
-		Title:  "Status Test",
-		Status: db.StatusBacklog,
-	}
-
-	// Test various status transitions
-	testCases := []struct {
-		oldStatus string
-		newStatus string
-		eventType string
-	}{
-		{db.StatusBacklog, db.StatusQueued, EventTaskQueued},
-		{db.StatusQueued, db.StatusProcessing, EventTaskProcessing},
-		{db.StatusProcessing, db.StatusBlocked, EventTaskBlocked},
-		{db.StatusBlocked, db.StatusDone, EventTaskCompleted},
-	}
-
-	for _, tc := range testCases {
-		t.Run(tc.eventType, func(t *testing.T) {
-			task.Status = tc.newStatus
-
-			// Emit status changed event
-			mgr.EmitTaskStatusChanged(task, tc.oldStatus, tc.newStatus)
-
-			// Wait for event
-			select {
-			case event := <-eventCh:
-				if event.Type != EventTaskStatusChanged {
-					t.Errorf("Expected event type %s, got %s", EventTaskStatusChanged, event.Type)
-				}
-				if event.Metadata["old_status"] != tc.oldStatus {
-					t.Errorf("Expected old status %s, got %v", tc.oldStatus, event.Metadata["old_status"])
-				}
-				if event.Metadata["new_status"] != tc.newStatus {
-					t.Errorf("Expected new status %s, got %v", tc.newStatus, event.Metadata["new_status"])
-				}
-			case <-time.After(1 * time.Second):
-				t.Fatal("Timeout waiting for event")
-			}
-		})
-	}
-}
-
-func TestHookExecution(t *testing.T) {
-	database := setupTestDB(t)
-	defer database.Close()
-
-	hooksDir := t.TempDir()
-	mgr := New(database, hooksDir)
-	defer mgr.Stop()
-
-	// Create a simple hook script
-	hookPath := filepath.Join(hooksDir, EventTaskCreated)
-	hookScript := `#!/bin/bash
-echo "Task $TASK_ID: $TASK_TITLE" > ` + filepath.Join(hooksDir, "hook_output.txt")
-
-	if err := os.WriteFile(hookPath, []byte(hookScript), 0755); err != nil {
-		t.Fatalf("Failed to create hook script: %v", err)
-	}
-
-	task := &db.Task{
-		ID:     789,
-		Title:  "Hook Test",
-		Status: db.StatusBacklog,
-	}
-
-	// Emit event
-	mgr.EmitTaskCreated(task)
-
-	// Wait for hook to execute (it runs in background)
+	// Wait for async hook execution
 	time.Sleep(500 * time.Millisecond)
 
-	// Check if hook created output file
-	outputPath := filepath.Join(hooksDir, "hook_output.txt")
-	if _, err := os.Stat(outputPath); os.IsNotExist(err) {
-		t.Error("Hook script was not executed")
+	content, err := os.ReadFile(markerFile)
+	if err != nil {
+		t.Fatalf("hook didn't run: %v", err)
+	}
+	if string(content) != "42:Test Task\n" {
+		t.Errorf("unexpected hook output: %q", content)
 	}
 }
 
-func TestMultipleSubscribers(t *testing.T) {
-	database := setupTestDB(t)
-	defer database.Close()
-
+func TestEmitterPassesEnvironment(t *testing.T) {
 	hooksDir := t.TempDir()
-	mgr := NewSilent(database, hooksDir)
-	defer mgr.Stop()
+	markerFile := filepath.Join(hooksDir, "env_marker")
+	hookScript := filepath.Join(hooksDir, TaskCompleted)
 
-	// Create multiple subscribers
-	ch1 := mgr.Subscribe()
-	ch2 := mgr.Subscribe()
-	ch3 := mgr.Subscribe()
-
-	defer mgr.Unsubscribe(ch1)
-	defer mgr.Unsubscribe(ch2)
-	defer mgr.Unsubscribe(ch3)
-
-	task := &db.Task{
-		ID:     999,
-		Title:  "Multi-subscriber Test",
-		Status: db.StatusBacklog,
+	script := `#!/bin/sh
+echo "$TASK_STATUS:$TASK_PROJECT" > "` + markerFile + `"
+`
+	if err := os.WriteFile(hookScript, []byte(script), 0755); err != nil {
+		t.Fatal(err)
 	}
 
-	// Emit event
-	mgr.EmitTaskCreated(task)
+	emitter := New(hooksDir)
+	task := &db.Task{ID: 1, Title: "Done", Status: "done", Project: "personal"}
+	emitter.Emit(Event{Type: TaskCompleted, TaskID: task.ID, Task: task})
 
-	// All subscribers should receive the event
-	timeout := time.After(1 * time.Second)
-	received := 0
+	time.Sleep(500 * time.Millisecond)
 
-	for i := 0; i < 3; i++ {
-		select {
-		case <-ch1:
-			received++
-		case <-ch2:
-			received++
-		case <-ch3:
-			received++
-		case <-timeout:
-			t.Fatalf("Timeout waiting for events, received %d/3", received)
-		}
+	content, err := os.ReadFile(markerFile)
+	if err != nil {
+		t.Fatalf("hook didn't run: %v", err)
 	}
-
-	if received != 3 {
-		t.Errorf("Expected 3 events received, got %d", received)
+	if string(content) != "done:personal\n" {
+		t.Errorf("unexpected hook output: %q", content)
 	}
+}
+
+func TestEmitterNoHooksDir(t *testing.T) {
+	emitter := New("")
+	// Should not panic
+	emitter.Emit(Event{Type: TaskCreated, TaskID: 1})
+}
+
+func TestEmitterMissingHook(t *testing.T) {
+	emitter := New(t.TempDir())
+	// Should not panic when hook doesn't exist
+	emitter.Emit(Event{Type: TaskCreated, TaskID: 1})
 }

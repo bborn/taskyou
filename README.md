@@ -25,7 +25,7 @@ A personal task management system with a beautiful terminal UI, SQLite storage, 
 - **Kanban Board** - Visual task management with 4 columns (Backlog, In Progress, Blocked, Done)
 - **Git Worktrees** - Each task runs in an isolated worktree, no conflicts between parallel tasks
 - **Pluggable Executors** - Choose between Claude Code, OpenAI Codex, Gemini, Pi, OpenClaw, or OpenCode per task
-- **Event Streaming** - Watch task events in real-time with script hooks or live streams (see [Events & Automation](#events--automation))
+- **Event Hooks** - Run scripts when tasks change state (see [Event Hooks](#event-hooks))
 - **Ghost Text Autocomplete** - LLM-powered suggestions for task titles and descriptions as you type
 - **VS Code-style Fuzzy Search** - Quick task navigation with smart matching (e.g., "dsno" matches "diseno website")
 - **Markdown Rendering** - Task descriptions render with proper formatting in the detail view
@@ -350,33 +350,14 @@ This means when you retry a blocked task with feedback, Claude doesn't start ove
 | Task deleted | Window killed, worktree removed, teardown script runs |
 | Daemon restart | Orphaned windows are cleaned up on next poll |
 
-## Events & Automation
+## Event Hooks
 
-TaskYou emits events when tasks change state, enabling automation, integrations, and notifications through multiple delivery mechanisms:
+TaskYou runs scripts in `~/.config/task/hooks/` when tasks change state.
 
-- **Real-time Streaming** - Watch events live as newline-delimited JSON
-- **Script Hooks** - Run local scripts in `~/.config/task/hooks/`
-- **Event Log** - Audit trail in database
-- **In-Process Channels** - Real-time UI updates
+### Setup
 
-### Quick Start
-
-**1. Watch events in real-time:**
 ```bash
-# Stream all events
-ty events watch
-
-# Filter by event type
-ty events watch --type task.completed
-
-# Pipe to other tools
-ty events watch | jq 'select(.type == "task.failed")'
-ty events watch --type task.completed | notify-send "Task completed"
-```
-
-**2. Create a hook script:**
-```bash
-# Desktop notification when tasks complete
+# Create a hook for completed tasks
 cat > ~/.config/task/hooks/task.completed << 'EOF'
 #!/bin/bash
 osascript -e "display notification \"$TASK_TITLE\" with title \"Task Completed\""
@@ -385,75 +366,29 @@ EOF
 chmod +x ~/.config/task/hooks/task.completed
 ```
 
-**3. View event history:**
-```bash
-ty events list                    # Recent events
-ty events list --type task.completed  # Filter by type
-ty events list --task 42          # Events for specific task
-```
-
 ### Available Events
 
 | Event | When Emitted |
 |-------|--------------|
 | `task.created` | New task created |
-| `task.updated` | Task fields updated |
+| `task.updated` | Task fields changed |
 | `task.deleted` | Task removed |
-| `task.status.changed` | Status transition |
-| `task.queued` | Task queued for execution |
 | `task.started` | Execution begins |
-| `task.processing` | Task actively executing |
-| `task.blocked` | Task needs user input |
-| `task.completed` | Task finished successfully |
-| `task.failed` | Task execution failed |
-| `task.retried` | Task retried with feedback |
-| `task.interrupted` | Task cancelled by user |
-| `task.pinned` | Task pinned to top |
-| `task.unpinned` | Task unpinned |
+| `task.completed` | Task finished |
+| `task.failed` | Execution failed |
 
-### Hook Scripts
-
-All hooks receive environment variables with task details:
+### Environment Variables
 
 ```bash
 TASK_ID          # Task ID
 TASK_TITLE       # Task title
 TASK_STATUS      # Current status
 TASK_PROJECT     # Project name
-TASK_TYPE        # Task type
-TASK_EXECUTOR    # Executor used (claude, codex, etc.)
 TASK_EVENT       # Event type
-TASK_MESSAGE     # Event message
 TASK_TIMESTAMP   # ISO 8601 timestamp
-TASK_METADATA    # Additional data as JSON
 ```
 
-**Examples:**
-- [task.completed](examples/hooks/task.completed) - Desktop notification + logging
-- [task.blocked](examples/hooks/task.blocked) - Alert when task needs input
-- [task.started](examples/hooks/task.started) - Time tracking
-- [slack-integration.sh](examples/hooks/slack-integration.sh) - Send to Slack
-
-See [examples/hooks/](examples/hooks/) for more examples and [docs/EVENTS.md](docs/EVENTS.md) for complete documentation.
-
-### Webhook Integration
-
-Webhooks receive JSON payloads via HTTP POST:
-
-```json
-{
-  "type": "task.completed",
-  "task_id": 123,
-  "task": {
-    "id": 123,
-    "title": "Implement feature X",
-    "status": "done",
-    "project": "myapp"
-  },
-  "message": "Task completed successfully",
-  "timestamp": "2024-01-01T12:00:00Z"
-}
-```
+See [examples/hooks/](examples/hooks/) for examples.
 
 ## Configuration
 
@@ -596,7 +531,7 @@ worktree:
   teardown_script: scripts/my-teardown.sh
 ```
 
-**Note:** If you want automated cleanup when tasks complete (not just when deleted), use [Task Lifecycle Hooks](#task-lifecycle-hooks) to trigger your teardown script on the `task.done` event.
+**Note:** If you want automated cleanup when tasks complete (not just when deleted), use [Event Hooks](#event-hooks) to trigger your teardown script on the `task.completed` event.
 
 ### Running Applications in Worktrees
 
@@ -678,67 +613,6 @@ Now the AI executor (Claude or Codex) can:
 npm install
 cp .env.example .env.local
 ```
-
-### Task Lifecycle Hooks
-
-Task lifecycle hooks let you run custom scripts when task status changes. This is useful for automation like sending notifications, triggering CI/CD, or running cleanup when tasks complete.
-
-**Hook location:** `~/.config/task/hooks/`
-
-Create an executable script named after the event you want to handle:
-
-| Event | Filename | Triggered When |
-|-------|----------|----------------|
-| `task.started` | `~/.config/task/hooks/task.started` | Task moves to `queued` or `processing` |
-| `task.done` | `~/.config/task/hooks/task.done` | Task completes successfully |
-| `task.blocked` | `~/.config/task/hooks/task.blocked` | Task needs user input |
-| `task.failed` | `~/.config/task/hooks/task.failed` | Task fails with an error |
-
-**Environment variables available to hooks:**
-
-| Variable | Description |
-|----------|-------------|
-| `TASK_ID` | Task ID |
-| `TASK_TITLE` | Task title |
-| `TASK_STATUS` | New task status |
-| `TASK_PROJECT` | Project name |
-| `TASK_TYPE` | Task type |
-| `TASK_MESSAGE` | Status change message |
-| `TASK_EVENT` | Event name (e.g., `task.done`) |
-
-**Example: Run teardown on task completion**
-
-Since the worktree teardown script only runs on task deletion, you can use the `task.done` hook to run cleanup when tasks complete:
-
-```bash
-#!/bin/bash
-# ~/.config/task/hooks/task.done
-
-# Get the worktree path for this task
-WORKTREE_PATH="$HOME/.local/share/task/worktrees/${TASK_PROJECT}/task-${TASK_ID}"
-
-# Run your project's teardown script if it exists
-if [ -x "$WORKTREE_PATH/bin/worktree-teardown" ]; then
-    cd "$WORKTREE_PATH"
-    ./bin/worktree-teardown
-fi
-```
-
-**Example: Send Slack notification**
-
-```bash
-#!/bin/bash
-# ~/.config/task/hooks/task.done
-
-curl -X POST -H 'Content-type: application/json' \
-  --data "{\"text\":\"Task completed: ${TASK_TITLE}\"}" \
-  "$SLACK_WEBHOOK_URL"
-```
-
-**Notes:**
-- Hooks run in the background (non-blocking) with a 30-second timeout
-- Hook failures are logged but don't affect task execution
-- The hooks directory is created automatically at `~/.config/task/hooks/`
 
 ## SSH Access & Deployment
 

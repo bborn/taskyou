@@ -39,7 +39,7 @@ type Executor struct {
 	config  *config.Config
 	logger  *log.Logger
 	hooks   *hooks.Runner
-	events  *events.Manager
+	events  *events.Emitter
 	prCache *github.PRCache
 
 	// Executor factory for pluggable backends
@@ -130,13 +130,13 @@ func DefaultExecutorName() string {
 // New creates a new executor.
 func New(database *db.DB, cfg *config.Config) *Executor {
 	slug, display := detectExecutorIdentity()
-	eventsManager := events.NewSilent(database, hooks.DefaultHooksDir())
+	eventsEmitter := events.New(hooks.DefaultHooksDir())
 	e := &Executor{
 		db:              database,
 		config:          cfg,
 		logger:          log.NewWithOptions(io.Discard, log.Options{Prefix: "executor"}),
 		hooks:           hooks.NewSilent(hooks.DefaultHooksDir()),
-		events:          eventsManager,
+		events:          eventsEmitter,
 		prCache:         github.NewPRCache(),
 		executorFactory: NewExecutorFactory(),
 		stopCh:          make(chan struct{}),
@@ -150,8 +150,8 @@ func New(database *db.DB, cfg *config.Config) *Executor {
 		executorName:    display,
 	}
 
-	// Register the events manager with the database for event emission
-	database.SetEventEmitter(eventsManager)
+	// Register the events emitter with the database for event emission
+	database.SetEventEmitter(eventsEmitter)
 
 	// Register available executors
 	e.executorFactory.Register(NewClaudeExecutor(e))
@@ -167,13 +167,13 @@ func New(database *db.DB, cfg *config.Config) *Executor {
 // NewWithLogging creates an executor that logs to stderr (for daemon mode).
 func NewWithLogging(database *db.DB, cfg *config.Config, w io.Writer) *Executor {
 	slug, display := detectExecutorIdentity()
-	eventsManager := events.New(database, hooks.DefaultHooksDir())
+	eventsEmitter := events.New(hooks.DefaultHooksDir())
 	e := &Executor{
 		db:              database,
 		config:          cfg,
 		logger:          log.NewWithOptions(w, log.Options{Prefix: "executor"}),
 		hooks:           hooks.New(hooks.DefaultHooksDir()),
-		events:          eventsManager,
+		events:          eventsEmitter,
 		prCache:         github.NewPRCache(),
 		executorFactory: NewExecutorFactory(),
 		stopCh:          make(chan struct{}),
@@ -187,8 +187,8 @@ func NewWithLogging(database *db.DB, cfg *config.Config, w io.Writer) *Executor 
 		executorName:    display,
 	}
 
-	// Register the events manager with the database for event emission
-	database.SetEventEmitter(eventsManager)
+	// Register the events emitter with the database for event emission
+	database.SetEventEmitter(eventsEmitter)
 
 	// Register available executors
 	e.executorFactory.Register(NewClaudeExecutor(e))
@@ -244,11 +244,6 @@ func (e *Executor) Stop() {
 	e.mu.Unlock()
 
 	e.logger.Info("Background executor stopped")
-
-	// Stop event manager
-	if e.events != nil {
-		e.events.Stop()
-	}
 }
 
 // RunningTasks returns the IDs of currently processing tasks.
@@ -281,7 +276,7 @@ func (e *Executor) Interrupt(taskID int64) bool {
 
 	// Emit interrupt event
 	if task != nil {
-		e.events.EmitTaskInterrupted(task)
+		e.events.EmitTaskFailed(task, "interrupted")
 	}
 
 	// If running locally, cancel the context
@@ -613,21 +608,19 @@ func (e *Executor) updateStatus(taskID int64, status string) error {
 			TaskID: taskID,
 		})
 
-		// Emit specific events based on status
+		// Emit events based on status
 		switch status {
-		case db.StatusQueued:
-			e.events.EmitTaskQueued(task)
-		case db.StatusProcessing:
-			e.events.EmitTaskProcessing(task)
-		case db.StatusBlocked:
-			e.events.EmitTaskBlocked(task, "Task blocked")
+		case db.StatusQueued, db.StatusProcessing:
+			e.events.EmitTaskStarted(task)
 		case db.StatusDone:
 			e.events.EmitTaskCompleted(task)
-		}
-
-		// Always emit status changed event
-		if oldStatus != "" && oldStatus != status {
-			e.events.EmitTaskStatusChanged(task, oldStatus, status)
+		default:
+			if oldStatus != "" && oldStatus != status {
+				e.events.EmitTaskUpdated(task, map[string]interface{}{
+					"old_status": oldStatus,
+					"new_status": status,
+				})
+			}
 		}
 	}
 	return nil
@@ -969,11 +962,6 @@ func (e *Executor) AvailableExecutors() []string {
 // AllExecutors returns the names of all registered executors.
 func (e *Executor) AllExecutors() []string {
 	return e.executorFactory.All()
-}
-
-// GetEventsManager returns the events manager for subscribing to events.
-func (e *Executor) GetEventsManager() *events.Manager {
-	return e.events
 }
 
 func (e *Executor) getProjectDir(project string) string {
