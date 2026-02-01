@@ -3,6 +3,7 @@ package executor
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 	"sync"
 
@@ -83,6 +84,12 @@ func (r *SpriteRunner) RunClaude(ctx context.Context, task *db.Task, workDir str
 		"-p", prompt,
 	}
 
+	// Build environment variables to pass through
+	var env []string
+	if apiKey := os.Getenv("ANTHROPIC_API_KEY"); apiKey != "" {
+		env = append(env, "ANTHROPIC_API_KEY="+apiKey)
+	}
+
 	// Log the command we're running
 	r.db.AppendTaskLog(task.ID, "system", fmt.Sprintf("Executing on sprite: claude -p '%s...'", truncate(prompt, 50)))
 
@@ -112,7 +119,7 @@ func (r *SpriteRunner) RunClaude(ctx context.Context, task *db.Task, workDir str
 	}
 
 	// Execute with streaming
-	err := sprites.ExecCommandStreaming(r.spriteName, lineHandler, claudeArgs...)
+	err := sprites.ExecCommandStreaming(r.spriteName, lineHandler, env, claudeArgs...)
 
 	if err != nil {
 		// Check if it was cancelled

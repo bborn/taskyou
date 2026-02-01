@@ -125,15 +125,22 @@ func ExecCommand(spriteName string, args ...string) (string, error) {
 }
 
 // ExecCommandStreaming executes a command and streams output line by line.
-func ExecCommandStreaming(spriteName string, onLine func(line string), args ...string) error {
+// Pass environment variables to forward to the sprite (e.g., ANTHROPIC_API_KEY).
+func ExecCommandStreaming(spriteName string, onLine func(line string), env []string, args ...string) error {
 	// First ensure we're using the right sprite
 	useCmd := exec.Command("sprite", "use", spriteName)
 	if err := useCmd.Run(); err != nil {
 		return fmt.Errorf("select sprite: %w", err)
 	}
 
-	// Execute the command with streaming
-	execArgs := append([]string{"exec"}, args...)
+	// Build the command with env prefix if needed
+	// sprite exec env KEY=value command args...
+	execArgs := []string{"exec"}
+	if len(env) > 0 {
+		execArgs = append(execArgs, "env")
+		execArgs = append(execArgs, env...)
+	}
+	execArgs = append(execArgs, args...)
 	cmd := exec.Command("sprite", execArgs...)
 
 	stdout, err := cmd.StdoutPipe()
