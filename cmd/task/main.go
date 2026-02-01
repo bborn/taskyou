@@ -1896,6 +1896,44 @@ Examples:
 	eventsListCmd.Flags().Bool("json", false, "Output in JSON format")
 	eventsCmd.AddCommand(eventsListCmd)
 
+	// events watch - stream events in real-time
+	eventsWatchCmd := &cobra.Command{
+		Use:   "watch",
+		Short: "Watch events in real-time",
+		Long: `Stream events in real-time as newline-delimited JSON.
+
+This command connects to the daemon and streams all events to stdout.
+Each line is a JSON object representing an event.
+
+Filters:
+  --type      Filter by event type (e.g., task.completed)
+  --task      Filter by task ID
+  --project   Filter by project name
+
+Examples:
+  ty events watch                                    # Watch all events
+  ty events watch --type task.completed              # Only completed tasks
+  ty events watch --task 123                         # Events for task #123
+  ty events watch | jq 'select(.type == "task.failed")'  # Use with jq
+  ty events watch | grep "error"                     # Use with grep`,
+		Run: func(cmd *cobra.Command, args []string) {
+			eventType, _ := cmd.Flags().GetString("type")
+			taskID, _ := cmd.Flags().GetInt64("task")
+			project, _ := cmd.Flags().GetString("project")
+			httpAddr, _ := cmd.Flags().GetString("addr")
+
+			if err := watchEvents(httpAddr, eventType, taskID, project); err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+		},
+	}
+	eventsWatchCmd.Flags().String("type", "", "Filter by event type")
+	eventsWatchCmd.Flags().Int64("task", 0, "Filter by task ID")
+	eventsWatchCmd.Flags().String("project", "", "Filter by project name")
+	eventsWatchCmd.Flags().String("addr", "http://localhost:3333", "HTTP API address")
+	eventsCmd.AddCommand(eventsWatchCmd)
+
 	rootCmd.AddCommand(eventsCmd)
 
 	if err := rootCmd.Execute(); err != nil {
