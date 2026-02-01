@@ -215,9 +215,54 @@ func (e *Executor) Start(ctx context.Context) {
 	e.running = true
 	e.mu.Unlock()
 
+	// Recover stale tmux references on startup (handles crash recovery)
+	e.recoverStaleTmuxRefs()
+
 	e.logger.Info("Background executor started")
 
 	go e.worker(ctx)
+}
+
+// recoverStaleTmuxRefs clears stale daemon_session and tmux_window_id references
+// from tasks after a daemon restart or crash. This is called automatically on startup.
+func (e *Executor) recoverStaleTmuxRefs() {
+	// Step 1: Find all active daemon sessions
+	activeSessions := make(map[string]bool)
+	sessionsOut, err := exec.Command("tmux", "list-sessions", "-F", "#{session_name}").Output()
+	if err == nil {
+		for _, session := range strings.Split(strings.TrimSpace(string(sessionsOut)), "\n") {
+			if strings.HasPrefix(session, "task-daemon-") {
+				activeSessions[session] = true
+			}
+		}
+	}
+
+	// Step 2: Find all valid window IDs across all daemon sessions
+	validWindowIDs := make(map[string]bool)
+	for session := range activeSessions {
+		windowsOut, err := exec.Command("tmux", "list-windows", "-t", session, "-F", "#{window_id}").Output()
+		if err == nil {
+			for _, windowID := range strings.Split(strings.TrimSpace(string(windowsOut)), "\n") {
+				if windowID != "" {
+					validWindowIDs[windowID] = true
+				}
+			}
+		}
+	}
+
+	// Step 3: Clear stale references in database
+	staleDaemon, staleWindow, err := e.db.RecoverStaleTmuxRefs(activeSessions, validWindowIDs)
+	if err != nil {
+		e.logger.Error("Failed to recover stale tmux refs", "error", err)
+		return
+	}
+
+	if staleDaemon > 0 || staleWindow > 0 {
+		e.logger.Info("Recovered stale tmux references",
+			"daemon_sessions", staleDaemon,
+			"window_ids", staleWindow,
+		)
+	}
 }
 
 // Stop stops the background worker.

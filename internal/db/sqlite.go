@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -531,4 +532,95 @@ func DefaultPath() string {
 	// Default to ~/.local/share/task/tasks.db
 	home, _ := os.UserHomeDir()
 	return filepath.Join(home, ".local", "share", "task", "tasks.db")
+}
+
+// RecoverStaleTmuxRefs clears stale daemon_session and tmux_window_id references
+// from tasks. Called automatically on daemon startup to recover from crashes.
+// Returns (staleDaemonCount, staleWindowCount) of cleaned references.
+func (db *DB) RecoverStaleTmuxRefs(activeSessions map[string]bool, validWindowIDs map[string]bool) (int, int, error) {
+	var staleDaemonCount, staleWindowCount int
+
+	// Count and clear stale daemon_session references
+	if len(activeSessions) > 0 {
+		sessionList := quotedList(activeSessions)
+		row := db.QueryRow(`
+			SELECT COUNT(*) FROM tasks
+			WHERE daemon_session IS NOT NULL
+			AND daemon_session != ''
+			AND daemon_session NOT IN (` + sessionList + `)
+		`)
+		row.Scan(&staleDaemonCount)
+
+		if staleDaemonCount > 0 {
+			_, err := db.Exec(`
+				UPDATE tasks SET daemon_session = NULL
+				WHERE daemon_session IS NOT NULL
+				AND daemon_session != ''
+				AND daemon_session NOT IN (` + sessionList + `)
+			`)
+			if err != nil {
+				return 0, 0, fmt.Errorf("clear stale daemon sessions: %w", err)
+			}
+		}
+	} else {
+		// No active sessions - clear all daemon_session refs
+		row := db.QueryRow(`SELECT COUNT(*) FROM tasks WHERE daemon_session IS NOT NULL AND daemon_session != ''`)
+		row.Scan(&staleDaemonCount)
+		if staleDaemonCount > 0 {
+			_, err := db.Exec(`UPDATE tasks SET daemon_session = NULL WHERE daemon_session IS NOT NULL AND daemon_session != ''`)
+			if err != nil {
+				return 0, 0, fmt.Errorf("clear all daemon sessions: %w", err)
+			}
+		}
+	}
+
+	// Count and clear stale tmux_window_id references
+	if len(validWindowIDs) > 0 {
+		windowList := quotedList(validWindowIDs)
+		row := db.QueryRow(`
+			SELECT COUNT(*) FROM tasks
+			WHERE tmux_window_id IS NOT NULL
+			AND tmux_window_id != ''
+			AND tmux_window_id NOT IN (` + windowList + `)
+		`)
+		row.Scan(&staleWindowCount)
+
+		if staleWindowCount > 0 {
+			_, err := db.Exec(`
+				UPDATE tasks SET tmux_window_id = NULL
+				WHERE tmux_window_id IS NOT NULL
+				AND tmux_window_id != ''
+				AND tmux_window_id NOT IN (` + windowList + `)
+			`)
+			if err != nil {
+				return staleDaemonCount, 0, fmt.Errorf("clear stale window IDs: %w", err)
+			}
+		}
+	} else {
+		// No valid windows - clear all tmux_window_id refs
+		row := db.QueryRow(`SELECT COUNT(*) FROM tasks WHERE tmux_window_id IS NOT NULL AND tmux_window_id != ''`)
+		row.Scan(&staleWindowCount)
+		if staleWindowCount > 0 {
+			_, err := db.Exec(`UPDATE tasks SET tmux_window_id = NULL WHERE tmux_window_id IS NOT NULL AND tmux_window_id != ''`)
+			if err != nil {
+				return staleDaemonCount, 0, fmt.Errorf("clear all window IDs: %w", err)
+			}
+		}
+	}
+
+	return staleDaemonCount, staleWindowCount, nil
+}
+
+// quotedList returns a SQL-safe comma-separated list of quoted strings.
+func quotedList(items map[string]bool) string {
+	if len(items) == 0 {
+		return "''"
+	}
+	var parts []string
+	for item := range items {
+		// Simple SQL escaping - replace single quotes with two single quotes
+		escaped := strings.ReplaceAll(item, "'", "''")
+		parts = append(parts, "'"+escaped+"'")
+	}
+	return strings.Join(parts, ",")
 }
