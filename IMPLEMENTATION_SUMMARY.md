@@ -67,7 +67,6 @@ The HTTP server automatically subscribes to the events manager and broadcasts al
 **New files:**
 - `docs/EVENTS.md` - Comprehensive event system documentation
 - `examples/event-watcher.sh` - Colored real-time event viewer
-- `examples/webhook-server.js` - Node.js webhook server example
 - `examples/hooks/task.completed` - Hook script example
 
 **Updated files:**
@@ -89,7 +88,6 @@ Events Manager
   ├─→ In-process channels (TUI updates)
   ├─→ Database event log
   ├─→ Script hooks (background exec)
-  ├─→ Webhooks (HTTP POST)
   └─→ SSE streams (HTTP streaming)
 ```
 
@@ -192,8 +190,7 @@ Comprehensive testing was performed:
 5. ✅ Multiple concurrent connections
 6. ✅ Graceful shutdown
 7. ✅ Event log persistence
-8. ✅ Webhook delivery (manual test with example server)
-9. ✅ Script hooks (manual test with example hooks)
+8. ✅ Script hooks (manual test with example hooks)
 
 ## Performance
 
@@ -209,21 +206,28 @@ Potential improvements (not implemented):
 1. **Event filtering on server side** - Currently filters in HTTP params, could add more complex filtering
 2. **Event replay** - Stream historical events from database
 3. **Event aggregation** - Combine related events
-4. **Rate limiting** - Throttle webhook delivery
-5. **Event persistence** - Optional durable queue for webhooks
-6. **Authentication** - Secure the HTTP API with tokens
-7. **WebSocket support** - For bidirectional communication
-8. **Event schemas** - Formal schema validation
+4. **Authentication** - Secure the HTTP API with tokens
+5. **WebSocket support** - For bidirectional communication
+6. **Event schemas** - Formal schema validation
 
 ## Backward Compatibility
 
-✅ **Fully backward compatible**
+✅ **Fully backward compatible and opt-in**
 
-- Existing webhooks still work
-- Existing hooks still work
-- Event log still works
+- Existing script hooks still work
+- Existing event log still work
 - No breaking changes to CLI
 - New features are additive only
+- Event streaming is completely optional
+- HTTP server runs quietly in background (port 3333)
+
+**What "opt-in" means:**
+You can completely ignore the event system and TaskYou works exactly as before. But if you want automation, you can *choose* to use:
+- `ty events watch` for real-time streaming
+- Script hooks for local automation
+- Event log for history/debugging
+
+Nothing is forced on you.
 
 ## Files Changed
 
@@ -231,7 +235,6 @@ Potential improvements (not implemented):
 - `internal/server/http.go` - HTTP/SSE server
 - `docs/EVENTS.md` - Documentation
 - `examples/event-watcher.sh` - Example viewer
-- `examples/webhook-server.js` - Example webhook server
 - `examples/hooks/task.completed` - Example hook
 
 ### Modified Files
@@ -255,13 +258,13 @@ Daemon automatically starts HTTP server on port 3333.
 
 TaskYou now has a complete, production-ready event system that supports:
 
-- ✅ Real-time streaming
-- ✅ Webhooks
-- ✅ Script hooks
-- ✅ Event log
-- ✅ Cross-platform
-- ✅ Unix-friendly
-- ✅ Zero dependencies
+- ✅ Real-time streaming (`ty events watch`)
+- ✅ Script hooks (local automation)
+- ✅ Event log (history/debugging)
+- ✅ Cross-platform (HTTP/SSE)
+- ✅ Unix-friendly (newline-delimited JSON)
+- ✅ Zero external dependencies
 - ✅ Fully documented
+- ✅ Completely opt-in
 
 External callers no longer need to poll - they can subscribe to a live event stream and react in real-time! 🎉
