@@ -33,6 +33,81 @@ A personal task management system with a beautiful terminal UI, SQLite storage, 
 - **Auto-cleanup** - Automatic cleanup of Claude processes for completed tasks (see maintenance commands for config cleanup)
 - **Fully Scriptable CLI** - 100% of Task You is controllable via CLI—agents can manage tasks, read executor output, and send input to running executors programmatically (see [Full CLI Scriptability](#full-cli-scriptability))
 - **SSH Access** - Run as an SSH server to access your tasks from anywhere (see [SSH Access & Deployment](#ssh-access--deployment))
+- **Project Context Caching** - AI agents automatically cache codebase exploration results and reuse them across tasks, eliminating redundant exploration (see [Project Context](#project-context))
+
+## Project Context
+
+TaskYou implements **intelligent codebase caching** to make AI agents dramatically more efficient across multiple tasks in the same project.
+
+### How It Works
+
+When an AI agent starts a task, it can:
+
+1. **Check for cached context** via `workflow_get_project_context` MCP tool
+2. **Use existing context** if available, skipping redundant exploration
+3. **Explore once and save** via `workflow_set_project_context` for future tasks
+
+This cached context is stored in the `projects.context` database column and persists across all tasks in that project.
+
+### Benefits
+
+- **Faster task startup** - No need to re-explore the codebase on every task
+- **Consistent understanding** - All tasks share the same baseline knowledge
+- **Token efficiency** - Avoids burning tokens on repeated exploration
+- **Better continuity** - Agents build on previous learnings
+
+### Example Usage
+
+When an agent starts a task, it first checks for context:
+
+```
+Agent: workflow_get_project_context()
+TaskYou: "## Cached Project Context
+
+This is a Go project using:
+- Bubble Tea for TUI
+- SQLite for storage
+- Charm libraries for styling
+
+Key directories:
+- internal/db/ - Database layer
+- internal/executor/ - Task execution
+- internal/ui/ - UI components
+..."
+```
+
+If no context exists, the agent explores once and saves it:
+
+```
+Agent: [explores codebase]
+Agent: workflow_set_project_context("...")
+TaskYou: "Project context saved. Future tasks will use this."
+```
+
+### Best Practices
+
+**What to include in context:**
+- Project structure and key directories
+- Tech stack and frameworks used
+- Coding conventions and patterns
+- Important files and their purposes
+- Common development workflows
+
+**When to update:**
+- After major refactorings
+- When new patterns are introduced
+- After significant file reorganization
+- When the tech stack changes
+
+**Context is per-project** - Each project maintains its own cached context, preventing cross-contamination.
+
+### Related Features
+
+- Task types can have their own instructions that complement project context
+- Project-level instructions (in the database) add project-specific guidance
+- Both are automatically included in agent prompts alongside cached context
+
+For implementation details, see [docs/analysis-boris-cherny-recommendations.md](docs/analysis-boris-cherny-recommendations.md).
 
 ## Prerequisites
 
