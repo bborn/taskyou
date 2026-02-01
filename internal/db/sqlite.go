@@ -363,20 +363,28 @@ This is the default workspace for personal tasks.
 	return nil
 }
 
-// DefaultProjectColors is a palette of distinct colors for projects.
-// These are assigned to projects that don't have a color set.
+// DefaultProjectColors is a palette of 8 distinct colors for projects.
+// Colors are assigned to projects using modulo arithmetic: project N gets
+// DefaultProjectColors[N % 8]. This means colors cycle for projects beyond
+// the 8th: project 0 and 8 both get purple, 1 and 9 get blue, etc.
+//
+// This approach works for any number of projects - colors simply repeat
+// after every 8 projects. The colors were chosen to be visually distinct
+// and harmonious with the One Dark theme.
 var DefaultProjectColors = []string{
-	"#C678DD", // Purple
-	"#61AFEF", // Blue
-	"#56B6C2", // Cyan
-	"#98C379", // Green
-	"#E5C07B", // Yellow
-	"#E06C75", // Red/Pink
-	"#D19A66", // Orange
-	"#ABB2BF", // Gray
+	"#C678DD", // Purple  (index 0, 8, 16, ...)
+	"#61AFEF", // Blue    (index 1, 9, 17, ...)
+	"#56B6C2", // Cyan    (index 2, 10, 18, ...)
+	"#98C379", // Green   (index 3, 11, 19, ...)
+	"#E5C07B", // Yellow  (index 4, 12, 20, ...)
+	"#E06C75", // Red/Pink(index 5, 13, 21, ...)
+	"#D19A66", // Orange  (index 6, 14, 22, ...)
+	"#ABB2BF", // Gray    (index 7, 15, 23, ...)
 }
 
 // ensureProjectColors assigns default colors to projects that don't have colors.
+// Colors are assigned based on the order projects appear in the database (by ID),
+// cycling through the palette using modulo arithmetic.
 func (db *DB) ensureProjectColors() error {
 	// Get all projects without colors
 	rows, err := db.Query(`SELECT id, name FROM projects WHERE color = '' OR color IS NULL ORDER BY id`)

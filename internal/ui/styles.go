@@ -140,17 +140,18 @@ var (
 	ColorDone       = lipgloss.Color("#98C379") // Green
 	ColorBlocked    = lipgloss.Color("#E06C75") // Red
 
-	// Default project colors palette - used when no color is set
-	// These are distinct, visually pleasing colors for project labels
+	// DefaultProjectColors is a palette of 8 distinct colors for project labels.
+	// Colors are assigned using modulo arithmetic (index % 8), so colors cycle
+	// for any number of projects. This palette matches the One Dark theme.
 	DefaultProjectColors = []string{
-		"#C678DD", // Purple
-		"#61AFEF", // Blue
-		"#56B6C2", // Cyan
-		"#98C379", // Green
-		"#E5C07B", // Yellow
-		"#E06C75", // Red/Pink
-		"#D19A66", // Orange
-		"#ABB2BF", // Gray
+		"#C678DD", // Purple  (index 0, 8, 16, ...)
+		"#61AFEF", // Blue    (index 1, 9, 17, ...)
+		"#56B6C2", // Cyan    (index 2, 10, 18, ...)
+		"#98C379", // Green   (index 3, 11, 19, ...)
+		"#E5C07B", // Yellow  (index 4, 12, 20, ...)
+		"#E06C75", // Red/Pink(index 5, 13, 21, ...)
+		"#D19A66", // Orange  (index 6, 14, 22, ...)
+		"#ABB2BF", // Gray    (index 7, 15, 23, ...)
 	}
 
 	// Type colors (fixed, not theme-dependent)
@@ -294,7 +295,9 @@ func SetProjectColor(project, color string) {
 }
 
 // GetDefaultProjectColor returns a default color for a project based on its index.
-// Used when a project doesn't have a color set.
+// Uses modulo arithmetic to cycle through the 8-color palette, so this works
+// for any number of projects: index 0 gets purple, 1 gets blue, ..., 8 gets
+// purple again, and so on. Negative indices are treated as 0.
 func GetDefaultProjectColor(index int) string {
 	if index < 0 {
 		index = 0

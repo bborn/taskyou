@@ -228,3 +228,134 @@ func TestPRStatusDescription(t *testing.T) {
 		})
 	}
 }
+
+func TestGetDefaultProjectColor(t *testing.T) {
+	// There are 8 default project colors in the palette
+	paletteSize := len(DefaultProjectColors)
+	if paletteSize != 8 {
+		t.Fatalf("Expected 8 default colors, got %d", paletteSize)
+	}
+
+	tests := []struct {
+		name     string
+		index    int
+		expected string
+	}{
+		// First cycle through the palette (0-7)
+		{"index 0 returns purple", 0, "#C678DD"},
+		{"index 1 returns blue", 1, "#61AFEF"},
+		{"index 2 returns cyan", 2, "#56B6C2"},
+		{"index 3 returns green", 3, "#98C379"},
+		{"index 4 returns yellow", 4, "#E5C07B"},
+		{"index 5 returns red/pink", 5, "#E06C75"},
+		{"index 6 returns orange", 6, "#D19A66"},
+		{"index 7 returns gray", 7, "#ABB2BF"},
+
+		// Second cycle (8-15) - colors repeat
+		{"index 8 wraps to purple", 8, "#C678DD"},
+		{"index 9 wraps to blue", 9, "#61AFEF"},
+		{"index 15 wraps to gray", 15, "#ABB2BF"},
+
+		// Large numbers work correctly
+		{"index 100 uses modulo correctly", 100, "#E5C07B"}, // 100 % 8 = 4 (yellow)
+		{"index 1000 uses modulo correctly", 1000, "#C678DD"}, // 1000 % 8 = 0 (purple)
+
+		// Edge cases
+		{"negative index becomes 0", -1, "#C678DD"},
+		{"negative large number becomes 0", -100, "#C678DD"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := GetDefaultProjectColor(tt.index)
+			if got != tt.expected {
+				t.Errorf("GetDefaultProjectColor(%d) = %q, want %q", tt.index, got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestGetDefaultProjectColor_WorksForAnyNumberOfProjects(t *testing.T) {
+	// Verify that the color selection works for a large number of projects
+	// by checking that colors cycle predictably
+	paletteSize := len(DefaultProjectColors)
+
+	// Test with 100 projects
+	for i := 0; i < 100; i++ {
+		color := GetDefaultProjectColor(i)
+		expectedColor := DefaultProjectColors[i%paletteSize]
+		if color != expectedColor {
+			t.Errorf("Project %d: got color %q, want %q", i, color, expectedColor)
+		}
+	}
+}
+
+func TestProjectColorCache(t *testing.T) {
+	// Clear cache before testing
+	SetProjectColors(make(map[string]string))
+
+	// Test that unknown projects return muted color
+	color := ProjectColor("unknown-project")
+	if string(color) != string(ColorMuted) {
+		t.Errorf("Unknown project should return ColorMuted, got %q", color)
+	}
+
+	// Test setting and getting a project color
+	SetProjectColor("test-project", "#FF5500")
+	color = ProjectColor("test-project")
+	if string(color) != "#FF5500" {
+		t.Errorf("ProjectColor('test-project') = %q, want #FF5500", color)
+	}
+
+	// Test bulk setting colors
+	colors := map[string]string{
+		"project-a": "#AA0000",
+		"project-b": "#BB0000",
+		"project-c": "#CC0000",
+	}
+	SetProjectColors(colors)
+
+	// Verify all colors are set
+	for name, expected := range colors {
+		got := ProjectColor(name)
+		if string(got) != expected {
+			t.Errorf("ProjectColor(%q) = %q, want %q", name, got, expected)
+		}
+	}
+
+	// Verify the cache was replaced (test-project should now return muted)
+	color = ProjectColor("test-project")
+	if string(color) != string(ColorMuted) {
+		t.Errorf("After SetProjectColors, 'test-project' should return ColorMuted, got %q", color)
+	}
+}
+
+func TestDefaultProjectColors_AreValidHexColors(t *testing.T) {
+	// Verify that all default colors are valid hex color strings
+	for i, color := range DefaultProjectColors {
+		if len(color) != 7 {
+			t.Errorf("DefaultProjectColors[%d] = %q: should be 7 characters (#RRGGBB)", i, color)
+		}
+		if color[0] != '#' {
+			t.Errorf("DefaultProjectColors[%d] = %q: should start with #", i, color)
+		}
+		// Check that remaining characters are valid hex
+		for j := 1; j < len(color); j++ {
+			c := color[j]
+			if !((c >= '0' && c <= '9') || (c >= 'A' && c <= 'F') || (c >= 'a' && c <= 'f')) {
+				t.Errorf("DefaultProjectColors[%d] = %q: contains invalid hex character at position %d", i, color, j)
+			}
+		}
+	}
+}
+
+func TestDefaultProjectColors_AreDistinct(t *testing.T) {
+	// Verify that all default colors are unique (no duplicates)
+	seen := make(map[string]int)
+	for i, color := range DefaultProjectColors {
+		if prev, exists := seen[color]; exists {
+			t.Errorf("DefaultProjectColors[%d] = %q: duplicate of DefaultProjectColors[%d]", i, color, prev)
+		}
+		seen[color] = i
+	}
+}
