@@ -309,6 +309,55 @@ Prompts are built with:
 4. File attachments
 5. Task title and body
 
+### Project Context Caching
+
+**⚡ IMPORTANT:** TaskYou caches codebase exploration results to avoid redundant work.
+
+**Best Practice Workflow:**
+
+1. **Start every task** by calling `workflow_get_project_context` MCP tool
+2. **If context exists:** Use it to understand the codebase, skip exploration
+3. **If empty:** Explore the codebase once, then save via `workflow_set_project_context`
+4. **Future tasks** will reuse this context, saving time and tokens
+
+**Example:**
+
+```
+Agent: workflow_get_project_context()
+TaskYou: "## Cached Project Context\n\nThis is a Go project using Bubble Tea..."
+
+[Agent uses the context to work efficiently]
+```
+
+Or if no context exists:
+
+```
+Agent: workflow_get_project_context()
+TaskYou: "No cached project context found. Please explore and save a summary."
+
+Agent: [explores key files and directories]
+Agent: workflow_set_project_context("This is a Go project using:
+- Bubble Tea for TUI
+- SQLite for storage
+Key directories: internal/db/, internal/executor/, internal/ui/...")
+
+TaskYou: "Project context saved. Future tasks will use this."
+```
+
+**What to include in context:**
+- Project structure and key directories
+- Tech stack and frameworks
+- Coding conventions and patterns
+- Important files and their purposes
+- Development workflows
+
+**When to update context:**
+- After major refactorings
+- When new patterns are introduced
+- After significant file reorganization
+
+This feature is inspired by [Boris Cherny's Claude Code improvements](https://x.com/bcherny/status/2017742741636321619) and dramatically improves multi-task efficiency.
+
 ## Deployment
 
 ### On Hetzner VPS
