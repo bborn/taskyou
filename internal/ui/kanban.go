@@ -486,18 +486,16 @@ func (k *KanbanBoard) viewDesktop() string {
 	for colIdx, col := range k.columns {
 		isSelectedCol := colIdx == k.selectedCol
 
-		// Subtle header row (no background) for a cleaner column top
+		// Colored header bar at top of column
+		// Width matches the column content width (will be inside the border)
 		headerBarStyle := lipgloss.NewStyle().
-			Width(colWidth - 2).
-			Padding(0, 1).
-			Align(lipgloss.Left)
-
-		headerTitle := lipgloss.NewStyle().
-			Foreground(col.Color).
+			Width(colWidth).
+			Background(col.Color).
+			Foreground(lipgloss.Color("#000000")).
 			Bold(true).
-			Render(fmt.Sprintf("%s %s", col.Icon, col.Title))
-		headerCount := Dim.Render(fmt.Sprintf("%s %d", IconDefault(), len(col.Tasks)))
-		headerText := lipgloss.JoinHorizontal(lipgloss.Left, headerTitle, " ", headerCount)
+			Align(lipgloss.Center)
+
+		headerText := fmt.Sprintf("%s %s (%d)", col.Icon, col.Title, len(col.Tasks))
 		headerBar := headerBarStyle.Render(headerText)
 
 		// Task cards - calculate how many fit
@@ -613,10 +611,10 @@ func (k *KanbanBoard) viewDesktop() string {
 		// Combine tasks with spacing
 		taskContent := lipgloss.JoinVertical(lipgloss.Left, taskViews...)
 
-		// Column container with subtle border
+		// Column container with subtle rounded border
 		normalBorder, highlightBorder := GetThemeBorderColors()
 		borderColor := normalBorder
-		borderStyle := lipgloss.NormalBorder()
+		borderStyle := lipgloss.RoundedBorder()
 		if isSelectedCol {
 			borderColor = highlightBorder
 		}
@@ -670,18 +668,15 @@ func (k *KanbanBoard) viewMobile() string {
 
 	col := k.columns[k.selectedCol]
 
-	// Subtle header row (no background) for a cleaner column top
+	// Colored header bar at top of column
 	headerBarStyle := lipgloss.NewStyle().
-		Width(colWidth - 2).
-		Padding(0, 1).
-		Align(lipgloss.Left)
-
-	headerTitle := lipgloss.NewStyle().
-		Foreground(col.Color).
+		Width(colWidth).
+		Background(col.Color).
+		Foreground(lipgloss.Color("#000000")).
 		Bold(true).
-		Render(fmt.Sprintf("%s %s", col.Icon, col.Title))
-	headerCount := Dim.Render(fmt.Sprintf("%s %d", IconDefault(), len(col.Tasks)))
-	headerText := lipgloss.JoinHorizontal(lipgloss.Left, headerTitle, " ", headerCount)
+		Align(lipgloss.Center)
+
+	headerText := fmt.Sprintf("%s %s (%d)", col.Icon, col.Title, len(col.Tasks))
 	headerBar := headerBarStyle.Render(headerText)
 
 	// Task cards - calculate how many fit
@@ -795,9 +790,9 @@ func (k *KanbanBoard) viewMobile() string {
 	// Combine tasks with spacing
 	taskContent := lipgloss.JoinVertical(lipgloss.Left, taskViews...)
 
-	// Column container with subtle border
+	// Column container with subtle rounded border
 	_, highlightBorder := GetThemeBorderColors()
-	borderStyle := lipgloss.NormalBorder()
+	borderStyle := lipgloss.RoundedBorder()
 
 	fullContent := lipgloss.JoinVertical(lipgloss.Left,
 		headerBar,
@@ -907,34 +902,26 @@ func (k *KanbanBoard) renderTaskCard(task *db.Task, width int, isSelected bool) 
 		b.WriteString(projectStyle.Render("[" + shortProject + "]"))
 	}
 
-	// PR status indicator
+	// Status indicators (right-aligned)
+	var indicators []string
 	if prInfo := k.prInfo[task.ID]; prInfo != nil {
-		b.WriteString(" ")
-		b.WriteString(PRStatusBadge(prInfo))
+		indicators = append(indicators, PRStatusBadge(prInfo))
 	}
-
-	// Running process indicator
 	if k.HasRunningProcess(task.ID) {
 		processStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("46")) // Bright green
-		b.WriteString(" ")
-		b.WriteString(processStyle.Render("●")) // Green dot for running process
+		indicators = append(indicators, processStyle.Render("●"))
 	}
-
 	// Dangerous mode indicator (red dot) - only shown when:
 	// - Task is in dangerous mode
 	// - Task is active (processing or blocked)
 	// - System is NOT in global dangerous mode (otherwise the global banner is shown)
 	if task.DangerousMode && (task.Status == db.StatusProcessing || task.Status == db.StatusBlocked) && !IsGlobalDangerousMode() {
 		dangerStyle := lipgloss.NewStyle().Foreground(ColorDangerous)
-		b.WriteString(" ")
-		b.WriteString(dangerStyle.Render("●")) // Red dot for dangerous mode
+		indicators = append(indicators, dangerStyle.Render("●"))
 	}
-
-	// Pin indicator
 	if task.Pinned {
 		pinStyle := lipgloss.NewStyle().Foreground(ColorWarning)
-		b.WriteString(" ")
-		b.WriteString(pinStyle.Render(IconPin()))
+		indicators = append(indicators, pinStyle.Render(IconPin()))
 	}
 
 	// Title (truncate if needed)
@@ -947,7 +934,27 @@ func (k *KanbanBoard) renderTaskCard(task *db.Task, width int, isSelected bool) 
 		title = title[:maxTitleLen-1] + "…"
 	}
 
-	idLine := b.String()
+	leftLine := b.String()
+	indicatorText := strings.Join(indicators, " ")
+
+	lineWidth := width - 2 // account for horizontal padding
+	if lineWidth < 10 {
+		lineWidth = 10
+	}
+
+	idLine := leftLine
+	if indicatorText != "" {
+		space := lineWidth - lipgloss.Width(leftLine) - lipgloss.Width(indicatorText)
+		if space < 1 {
+			available := lineWidth - lipgloss.Width(indicatorText) - 1
+			if available < 4 {
+				available = 4
+			}
+			leftLine = lipgloss.Truncate(leftLine, available)
+			space = 1
+		}
+		idLine = leftLine + strings.Repeat(" ", space) + indicatorText
+	}
 	titleLine := title
 
 	// Card style with bottom margin for separation
