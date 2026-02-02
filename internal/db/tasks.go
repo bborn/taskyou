@@ -1195,6 +1195,33 @@ func (db *DB) SetLastExecutorForProject(project, executor string) error {
 	return db.SetSetting("last_executor_"+project, executor)
 }
 
+// GetExecutorUsageByProject returns a map of executor names to their usage counts for a project.
+// This counts how many tasks have been created with each executor for the given project.
+func (db *DB) GetExecutorUsageByProject(project string) (map[string]int, error) {
+	rows, err := db.Query(`
+		SELECT COALESCE(executor, 'claude'), COUNT(*) as count
+		FROM tasks
+		WHERE project = ?
+		GROUP BY executor
+		ORDER BY count DESC
+	`, project)
+	if err != nil {
+		return nil, fmt.Errorf("query executor usage: %w", err)
+	}
+	defer rows.Close()
+
+	usage := make(map[string]int)
+	for rows.Next() {
+		var executor string
+		var count int
+		if err := rows.Scan(&executor, &count); err != nil {
+			return nil, fmt.Errorf("scan executor usage: %w", err)
+		}
+		usage[executor] = count
+	}
+	return usage, nil
+}
+
 // CreateTaskType creates a new task type.
 func (db *DB) CreateTaskType(t *TaskType) error {
 	result, err := db.Exec(`

@@ -1783,3 +1783,100 @@ func TestCreateTaskSavesLastProject(t *testing.T) {
 		t.Errorf("expected 'work', got %q", lastProject)
 	}
 }
+
+func TestGetExecutorUsageByProject(t *testing.T) {
+	// Create temporary database
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	db, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer db.Close()
+	defer os.Remove(dbPath)
+
+	// Create test projects
+	if err := db.CreateProject(&Project{Name: "project1", Path: tmpDir}); err != nil {
+		t.Fatalf("failed to create project1: %v", err)
+	}
+	if err := db.CreateProject(&Project{Name: "project2", Path: tmpDir + "/p2"}); err != nil {
+		t.Fatalf("failed to create project2: %v", err)
+	}
+
+	// Test empty project - should return empty map
+	usage, err := db.GetExecutorUsageByProject("project1")
+	if err != nil {
+		t.Fatalf("failed to get executor usage: %v", err)
+	}
+	if len(usage) != 0 {
+		t.Errorf("expected empty usage map, got %v", usage)
+	}
+
+	// Create tasks with different executors for project1
+	tasks := []struct {
+		title    string
+		project  string
+		executor string
+	}{
+		{"Task 1", "project1", "claude"},
+		{"Task 2", "project1", "claude"},
+		{"Task 3", "project1", "claude"},
+		{"Task 4", "project1", "codex"},
+		{"Task 5", "project1", "gemini"},
+		{"Task 6", "project2", "codex"}, // Different project
+		{"Task 7", "project2", "codex"},
+	}
+
+	for _, tt := range tasks {
+		task := &Task{
+			Title:    tt.title,
+			Status:   StatusBacklog,
+			Project:  tt.project,
+			Executor: tt.executor,
+		}
+		if err := db.CreateTask(task); err != nil {
+			t.Fatalf("failed to create task %s: %v", tt.title, err)
+		}
+	}
+
+	// Test project1 usage
+	usage, err = db.GetExecutorUsageByProject("project1")
+	if err != nil {
+		t.Fatalf("failed to get executor usage: %v", err)
+	}
+
+	// project1 should have: claude=3, codex=1, gemini=1
+	if usage["claude"] != 3 {
+		t.Errorf("expected claude=3, got %d", usage["claude"])
+	}
+	if usage["codex"] != 1 {
+		t.Errorf("expected codex=1, got %d", usage["codex"])
+	}
+	if usage["gemini"] != 1 {
+		t.Errorf("expected gemini=1, got %d", usage["gemini"])
+	}
+
+	// Test project2 usage - should only count project2 tasks
+	usage, err = db.GetExecutorUsageByProject("project2")
+	if err != nil {
+		t.Fatalf("failed to get executor usage: %v", err)
+	}
+
+	// project2 should have: codex=2 only
+	if usage["codex"] != 2 {
+		t.Errorf("expected codex=2, got %d", usage["codex"])
+	}
+	if usage["claude"] != 0 {
+		t.Errorf("expected claude=0, got %d", usage["claude"])
+	}
+
+	// Test non-existent project
+	usage, err = db.GetExecutorUsageByProject("nonexistent")
+	if err != nil {
+		t.Fatalf("failed to get executor usage for nonexistent project: %v", err)
+	}
+	if len(usage) != 0 {
+		t.Errorf("expected empty usage map for nonexistent project, got %v", usage)
+	}
+}

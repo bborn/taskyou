@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 	"unicode"
@@ -49,18 +50,19 @@ type FormModel struct {
 	attachmentsInput textinput.Model
 
 	// Select values
-	project          string
-	projectIdx       int
-	projects         []string
-	taskType         string
-	typeIdx          int
-	types            []string
-	executor         string // "claude", "codex", "gemini"
-	executorIdx      int
-	executors        []string
-	queue            bool
-	attachments      []string // Parsed file paths
-	attachmentCursor int      // Index of the currently selected attachment chip
+	project            string
+	projectIdx         int
+	projects           []string
+	taskType           string
+	typeIdx            int
+	types              []string
+	executor           string   // "claude", "codex", "gemini"
+	executorIdx        int
+	executors          []string
+	availableExecutors []string // Original list of available executors (for rebuilding when project changes)
+	queue              bool
+	attachments        []string // Parsed file paths
+	attachmentCursor   int      // Index of the currently selected attachment chip
 
 	// Magic paste fields (populated when pasting URLs)
 	prURL    string // GitHub PR URL if pasted
@@ -103,12 +105,26 @@ type autocompleteSuggestionMsg struct {
 
 // buildExecutorList creates the list of executors for the form.
 // Only available (installed) executors are included in the list.
-func buildExecutorList(availableExecutors []string) []string {
+// Executors are sorted by usage count (most used first) for the current project.
+func buildExecutorList(availableExecutors []string, usageCounts map[string]int) []string {
 	if len(availableExecutors) == 0 {
 		return []string{}
 	}
 	result := make([]string, len(availableExecutors))
 	copy(result, availableExecutors)
+
+	// Sort by usage count (descending), then alphabetically for ties
+	if len(usageCounts) > 0 {
+		sort.Slice(result, func(i, j int) bool {
+			countI := usageCounts[result[i]]
+			countJ := usageCounts[result[j]]
+			if countI != countJ {
+				return countI > countJ // Higher count first
+			}
+			return result[i] < result[j] // Alphabetical for ties
+		})
+	}
+
 	return result
 }
 
@@ -136,8 +152,14 @@ func NewEditFormModel(database *db.DB, task *db.Task, width, height int, availab
 		autocompleteEnabled = false
 	}
 
-	// Build executor list: only show available (installed) executors
-	executors := buildExecutorList(availableExecutors)
+	// Get executor usage counts for sorting (scoped to project)
+	var usageCounts map[string]int
+	if database != nil {
+		usageCounts, _ = database.GetExecutorUsageByProject(task.Project)
+	}
+
+	// Build executor list: only show available (installed) executors, sorted by usage
+	executors := buildExecutorList(availableExecutors, usageCounts)
 
 	// Find the executor index - if task's executor is not available, fall back to first available
 	var executorIdx int
@@ -169,6 +191,7 @@ func NewEditFormModel(database *db.DB, task *db.Task, width, height int, availab
 		executor:            executorDisplay,
 		executorIdx:         executorIdx,
 		executors:           executors,
+		availableExecutors:  availableExecutors, // Store for rebuilding when project changes
 		isEdit:              true,
 		prURL:               task.PRURL,
 		prNumber:            task.PRNumber,
@@ -266,25 +289,12 @@ func NewFormModel(database *db.DB, width, height int, workingDir string, availab
 		autocompleteEnabled = false
 	}
 
-	// Build executor list: only show available (installed) executors
-	executors := buildExecutorList(availableExecutors)
-
-	// Find the first available executor for default selection
-	var defaultExecutorIdx int
-	var defaultExecutor string
-	if len(executors) > 0 {
-		defaultExecutorIdx = 0
-		defaultExecutor = executors[0]
-	}
-
+	// Create form model first (executors will be set after project is determined)
 	m := &FormModel{
 		db:                  database,
 		width:               width,
 		height:              height,
 		focused:             FieldProject,
-		executor:            defaultExecutor,
-		executorIdx:         defaultExecutorIdx,
-		executors:           executors,
 		autocompleteSvc:     autocompleteSvc,
 		autocompleteEnabled: autocompleteEnabled,
 		taskRefAutocomplete: NewTaskRefAutocompleteModel(database, width-24),
@@ -342,10 +352,22 @@ func NewFormModel(database *db.DB, width, height int, workingDir string, availab
 		}
 	}
 
+	// Store available executors for rebuilding when project changes
+	m.availableExecutors = availableExecutors
+
+	// Build executor list sorted by usage for this project
+	m.rebuildExecutorListForProject()
+
+	// Set default executor (first in the sorted list)
+	if len(m.executors) > 0 {
+		m.executorIdx = 0
+		m.executor = m.executors[0]
+	}
+
 	// Load last used task type for the selected project
 	m.loadLastTaskTypeForProject()
 
-	// Load last used executor for the selected project
+	// Load last used executor for the selected project (overrides default if available)
 	m.loadLastExecutorForProject()
 
 	// Title input
@@ -597,6 +619,7 @@ func (m *FormModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.projectIdx = (m.projectIdx - 1 + len(m.projects)) % len(m.projects)
 				m.project = m.projects[m.projectIdx]
 				m.loadLastTaskTypeForProject()
+				m.rebuildExecutorListForProject() // Re-sort by usage for new project
 				m.loadLastExecutorForProject()
 				return m, nil
 			}
@@ -619,6 +642,7 @@ func (m *FormModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.projectIdx = (m.projectIdx + 1) % len(m.projects)
 				m.project = m.projects[m.projectIdx]
 				m.loadLastTaskTypeForProject()
+				m.rebuildExecutorListForProject() // Re-sort by usage for new project
 				m.loadLastExecutorForProject()
 				return m, nil
 			}
@@ -844,6 +868,7 @@ func (m *FormModel) selectByPrefix(prefix string) {
 				m.projectIdx = i
 				m.project = p
 				m.loadLastTaskTypeForProject()
+				m.rebuildExecutorListForProject() // Re-sort by usage for new project
 				m.loadLastExecutorForProject()
 				return
 			}
@@ -910,6 +935,41 @@ func (m *FormModel) loadLastExecutorForProject() {
 			m.executorIdx = i
 			m.executor = e
 			return
+		}
+	}
+}
+
+// rebuildExecutorListForProject rebuilds the executor list sorted by usage for the current project.
+// This should be called when the project changes to re-sort executors by usage count.
+func (m *FormModel) rebuildExecutorListForProject() {
+	if len(m.availableExecutors) == 0 {
+		return
+	}
+
+	// Get executor usage counts for the current project
+	var usageCounts map[string]int
+	if m.db != nil && m.project != "" {
+		usageCounts, _ = m.db.GetExecutorUsageByProject(m.project)
+	}
+
+	// Rebuild the list sorted by usage
+	m.executors = buildExecutorList(m.availableExecutors, usageCounts)
+
+	// Reset to first executor (most used) if current executor is still valid
+	if len(m.executors) > 0 {
+		// Try to keep the current executor selected if it's in the new list
+		found := false
+		for i, e := range m.executors {
+			if e == m.executor {
+				m.executorIdx = i
+				found = true
+				break
+			}
+		}
+		// If current executor not found, default to first (most used)
+		if !found {
+			m.executorIdx = 0
+			m.executor = m.executors[0]
 		}
 	}
 }

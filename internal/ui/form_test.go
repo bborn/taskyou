@@ -743,33 +743,62 @@ func TestBuildExecutorList(t *testing.T) {
 	tests := []struct {
 		name               string
 		availableExecutors []string
+		usageCounts        map[string]int
 		want               []string
 	}{
 		{
-			name:               "multiple available",
+			name:               "multiple available no usage",
 			availableExecutors: []string{"claude", "codex", "gemini"},
+			usageCounts:        nil,
 			want:               []string{"claude", "codex", "gemini"},
 		},
 		{
 			name:               "none available",
 			availableExecutors: []string{},
+			usageCounts:        nil,
 			want:               []string{},
 		},
 		{
 			name:               "single available",
 			availableExecutors: []string{"claude"},
+			usageCounts:        nil,
 			want:               []string{"claude"},
 		},
 		{
 			name:               "nil available",
 			availableExecutors: nil,
+			usageCounts:        nil,
 			want:               []string{},
+		},
+		{
+			name:               "sorted by usage - codex most used",
+			availableExecutors: []string{"claude", "codex", "gemini"},
+			usageCounts:        map[string]int{"codex": 10, "claude": 5, "gemini": 2},
+			want:               []string{"codex", "claude", "gemini"},
+		},
+		{
+			name:               "sorted by usage - gemini most used",
+			availableExecutors: []string{"claude", "codex", "gemini"},
+			usageCounts:        map[string]int{"gemini": 20, "codex": 5},
+			want:               []string{"gemini", "codex", "claude"},
+		},
+		{
+			name:               "sorted by usage - ties sorted alphabetically",
+			availableExecutors: []string{"claude", "codex", "gemini"},
+			usageCounts:        map[string]int{"codex": 5, "gemini": 5},
+			want:               []string{"codex", "gemini", "claude"},
+		},
+		{
+			name:               "empty usage counts treated as no sorting",
+			availableExecutors: []string{"claude", "codex", "gemini"},
+			usageCounts:        map[string]int{},
+			want:               []string{"claude", "codex", "gemini"},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := buildExecutorList(tt.availableExecutors)
+			got := buildExecutorList(tt.availableExecutors, tt.usageCounts)
 			if len(got) != len(tt.want) {
 				t.Fatalf("buildExecutorList() = %v, want %v", got, tt.want)
 			}
