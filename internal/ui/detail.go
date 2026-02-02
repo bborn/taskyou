@@ -202,10 +202,23 @@ func (m *DetailModel) Refresh() {
 		return
 	}
 
+	prevTask := m.task
+
 	// Reload task
 	task, err := m.database.GetTask(m.task.ID)
 	if err == nil && task != nil {
 		m.task = task
+	}
+
+	if m.ready && prevTask != nil && m.task != nil {
+		if prevTask.Status != m.task.Status ||
+			prevTask.DangerousMode != m.task.DangerousMode ||
+			prevTask.Pinned != m.task.Pinned ||
+			prevTask.Project != m.task.Project ||
+			prevTask.Type != m.task.Type ||
+			prevTask.Title != m.task.Title {
+			m.viewport.SetContent(m.renderContent())
+		}
 	}
 
 	// Check log count first to avoid loading all logs if unchanged
