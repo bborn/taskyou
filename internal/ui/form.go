@@ -102,43 +102,14 @@ type autocompleteSuggestionMsg struct {
 }
 
 // buildExecutorList creates the list of executors for the form.
-// Available executors are shown normally, unavailable ones are marked with "(not installed)".
-func buildExecutorList(allExecutors, availableExecutors []string) []string {
-	availableSet := make(map[string]bool)
-	for _, e := range availableExecutors {
-		availableSet[e] = true
+// Only available (installed) executors are included in the list.
+func buildExecutorList(availableExecutors []string) []string {
+	if len(availableExecutors) == 0 {
+		return []string{}
 	}
-
-	result := make([]string, 0, len(allExecutors))
-	for _, e := range allExecutors {
-		if availableSet[e] {
-			result = append(result, e)
-		} else {
-			result = append(result, e+" (not installed)")
-		}
-	}
+	result := make([]string, len(availableExecutors))
+	copy(result, availableExecutors)
 	return result
-}
-
-// isExecutorAvailable checks if an executor string (potentially with "(not installed)" suffix) is available.
-func isExecutorAvailable(executor string) bool {
-	return !strings.HasSuffix(executor, "(not installed)")
-}
-
-// cleanExecutorName removes the "(not installed)" suffix if present.
-func cleanExecutorName(executor string) string {
-	return strings.TrimSuffix(executor, " (not installed)")
-}
-
-// findFirstAvailableExecutor returns the index and name of the first available executor.
-// Returns -1 and empty string if no available executor is found.
-func findFirstAvailableExecutor(executors []string) (int, string) {
-	for i, e := range executors {
-		if isExecutorAvailable(e) {
-			return i, e
-		}
-	}
-	return -1, ""
 }
 
 // NewEditFormModel creates a form model pre-populated with an existing task's data for editing.
@@ -165,31 +136,26 @@ func NewEditFormModel(database *db.DB, task *db.Task, width, height int, availab
 		autocompleteEnabled = false
 	}
 
-	// Build executor list: show available ones first, then unavailable ones marked
-	allExecutors := []string{db.ExecutorClaude, db.ExecutorCodex, db.ExecutorGemini, db.ExecutorPi, db.ExecutorOpenCode, db.ExecutorOpenClaw}
-	executors := buildExecutorList(allExecutors, availableExecutors)
+	// Build executor list: only show available (installed) executors
+	executors := buildExecutorList(availableExecutors)
 
-	// Find the executor index and check if it's available
+	// Find the executor index - if task's executor is not available, fall back to first available
 	var executorIdx int
 	var executorDisplay string
-	foundAvailable := false
+	found := false
 	for i, e := range executors {
-		if cleanExecutorName(e) == taskExecutor {
+		if e == taskExecutor {
 			executorIdx = i
 			executorDisplay = e
-			if isExecutorAvailable(e) {
-				foundAvailable = true
-			}
+			found = true
 			break
 		}
 	}
 
-	// If the task's executor is not available, fall back to first available
-	if !foundAvailable {
-		if idx, exec := findFirstAvailableExecutor(executors); idx >= 0 {
-			executorIdx = idx
-			executorDisplay = exec
-		}
+	// If the task's executor is not in the available list, fall back to first available
+	if !found && len(executors) > 0 {
+		executorIdx = 0
+		executorDisplay = executors[0]
 	}
 
 	m := &FormModel{
@@ -300,14 +266,13 @@ func NewFormModel(database *db.DB, width, height int, workingDir string, availab
 		autocompleteEnabled = false
 	}
 
-	// Build executor list: show available ones first, then unavailable ones marked
-	allExecutors := []string{db.ExecutorClaude, db.ExecutorCodex, db.ExecutorGemini, db.ExecutorPi, db.ExecutorOpenCode, db.ExecutorOpenClaw}
-	executors := buildExecutorList(allExecutors, availableExecutors)
+	// Build executor list: only show available (installed) executors
+	executors := buildExecutorList(availableExecutors)
 
 	// Find the first available executor for default selection
-	defaultExecutorIdx, defaultExecutor := findFirstAvailableExecutor(executors)
-	if defaultExecutorIdx == -1 {
-		// No available executors - use first in list (will be disabled)
+	var defaultExecutorIdx int
+	var defaultExecutor string
+	if len(executors) > 0 {
 		defaultExecutorIdx = 0
 		defaultExecutor = executors[0]
 	}
@@ -640,15 +605,9 @@ func (m *FormModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.taskType = m.types[m.typeIdx]
 				return m, nil
 			}
-			if m.focused == FieldExecutor {
-				// Skip unavailable executors when navigating left
-				for i := 0; i < len(m.executors); i++ {
-					m.executorIdx = (m.executorIdx - 1 + len(m.executors)) % len(m.executors)
-					if isExecutorAvailable(m.executors[m.executorIdx]) {
-						m.executor = m.executors[m.executorIdx]
-						break
-					}
-				}
+			if m.focused == FieldExecutor && len(m.executors) > 0 {
+				m.executorIdx = (m.executorIdx - 1 + len(m.executors)) % len(m.executors)
+				m.executor = m.executors[m.executorIdx]
 				return m, nil
 			}
 
@@ -668,15 +627,9 @@ func (m *FormModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.taskType = m.types[m.typeIdx]
 				return m, nil
 			}
-			if m.focused == FieldExecutor {
-				// Skip unavailable executors when navigating right
-				for i := 0; i < len(m.executors); i++ {
-					m.executorIdx = (m.executorIdx + 1) % len(m.executors)
-					if isExecutorAvailable(m.executors[m.executorIdx]) {
-						m.executor = m.executors[m.executorIdx]
-						break
-					}
-				}
+			if m.focused == FieldExecutor && len(m.executors) > 0 {
+				m.executorIdx = (m.executorIdx + 1) % len(m.executors)
+				m.executor = m.executors[m.executorIdx]
 				return m, nil
 			}
 
@@ -950,10 +903,10 @@ func (m *FormModel) loadLastExecutorForProject() {
 		return
 	}
 
-	// Find the executor in the list and set it (match by clean name since display may include "(not installed)")
-	// Only select if the executor is available
+	// Find the executor in the list and set it
+	// Only select if the executor is available (i.e., in the list)
 	for i, e := range m.executors {
-		if cleanExecutorName(e) == lastExecutor && isExecutorAvailable(e) {
+		if e == lastExecutor {
 			m.executorIdx = i
 			m.executor = e
 			return
@@ -1449,7 +1402,7 @@ func (m *FormModel) GetDBTask() *db.Task {
 		Status:   status,
 		Type:     m.taskType,
 		Project:  m.project,
-		Executor: cleanExecutorName(m.executor), // Strip "(not installed)" suffix if present
+		Executor: m.executor,
 		PRURL:    m.prURL,
 		PRNumber: m.prNumber,
 	}
