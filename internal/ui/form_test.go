@@ -742,39 +742,34 @@ func TestConfirmationMessageAppearsInView(t *testing.T) {
 func TestBuildExecutorList(t *testing.T) {
 	tests := []struct {
 		name               string
-		allExecutors       []string
 		availableExecutors []string
 		want               []string
 	}{
 		{
-			name:               "all available",
-			allExecutors:       []string{"claude", "codex", "gemini"},
+			name:               "multiple available",
 			availableExecutors: []string{"claude", "codex", "gemini"},
 			want:               []string{"claude", "codex", "gemini"},
 		},
 		{
 			name:               "none available",
-			allExecutors:       []string{"claude", "codex", "gemini"},
 			availableExecutors: []string{},
-			want:               []string{"claude (not installed)", "codex (not installed)", "gemini (not installed)"},
+			want:               []string{},
 		},
 		{
-			name:               "some available",
-			allExecutors:       []string{"claude", "codex", "gemini"},
+			name:               "single available",
 			availableExecutors: []string{"claude"},
-			want:               []string{"claude", "codex (not installed)", "gemini (not installed)"},
+			want:               []string{"claude"},
 		},
 		{
 			name:               "nil available",
-			allExecutors:       []string{"claude", "codex"},
 			availableExecutors: nil,
-			want:               []string{"claude (not installed)", "codex (not installed)"},
+			want:               []string{},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := buildExecutorList(tt.allExecutors, tt.availableExecutors)
+			got := buildExecutorList(tt.availableExecutors)
 			if len(got) != len(tt.want) {
 				t.Fatalf("buildExecutorList() = %v, want %v", got, tt.want)
 			}
@@ -787,138 +782,44 @@ func TestBuildExecutorList(t *testing.T) {
 	}
 }
 
-func TestCleanExecutorName(t *testing.T) {
-	tests := []struct {
-		input string
-		want  string
-	}{
-		{"claude", "claude"},
-		{"claude (not installed)", "claude"},
-		{"codex", "codex"},
-		{"codex (not installed)", "codex"},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.input, func(t *testing.T) {
-			got := cleanExecutorName(tt.input)
-			if got != tt.want {
-				t.Errorf("cleanExecutorName(%q) = %q, want %q", tt.input, got, tt.want)
-			}
-		})
-	}
-}
-
-func TestIsExecutorAvailable(t *testing.T) {
-	tests := []struct {
-		input string
-		want  bool
-	}{
-		{"claude", true},
-		{"claude (not installed)", false},
-		{"codex", true},
-		{"codex (not installed)", false},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.input, func(t *testing.T) {
-			got := isExecutorAvailable(tt.input)
-			if got != tt.want {
-				t.Errorf("isExecutorAvailable(%q) = %v, want %v", tt.input, got, tt.want)
-			}
-		})
-	}
-}
-
 func TestFormWithNoAvailableExecutors(t *testing.T) {
 	// Test that form properly handles no available executors
 	m := NewFormModel(nil, 100, 50, "", nil)
 
-	// All executors should be marked as not installed
-	for _, e := range m.executors {
-		if !strings.Contains(e, "(not installed)") {
-			t.Errorf("executor %q should be marked as not installed when no available executors", e)
-		}
+	// Executor list should be empty when no executors are available
+	if len(m.executors) != 0 {
+		t.Errorf("expected empty executor list, got %v", m.executors)
 	}
 }
 
 func TestFormWithSomeAvailableExecutors(t *testing.T) {
-	// Test that form properly filters available executors
+	// Test that form only shows available executors
 	m := NewFormModel(nil, 100, 50, "", []string{"claude"})
 
-	// Find claude - should not have "(not installed)"
-	foundClaude := false
-	for _, e := range m.executors {
-		if strings.HasPrefix(e, "claude") {
-			foundClaude = true
-			if strings.Contains(e, "(not installed)") {
-				t.Error("claude should NOT be marked as not installed when it's available")
-			}
-		}
+	// Should only have claude in the list
+	if len(m.executors) != 1 {
+		t.Errorf("expected 1 executor, got %d: %v", len(m.executors), m.executors)
 	}
-	if !foundClaude {
-		t.Error("claude should be in the executor list")
+	if m.executors[0] != "claude" {
+		t.Errorf("expected 'claude', got %q", m.executors[0])
 	}
 
-	// Other executors should have "(not installed)"
+	// Unavailable executors should not be in the list at all
 	for _, e := range m.executors {
-		if strings.HasPrefix(e, "codex") && !strings.Contains(e, "(not installed)") {
-			t.Error("codex should be marked as not installed")
+		if e == "codex" || e == "gemini" {
+			t.Errorf("unavailable executor %q should not be in the list", e)
 		}
 	}
 }
 
-func TestGetDBTaskCleansExecutorName(t *testing.T) {
-	m := NewFormModel(nil, 100, 50, "", nil)
+func TestGetDBTaskUsesExecutorDirectly(t *testing.T) {
+	m := NewFormModel(nil, 100, 50, "", []string{"claude"})
 	m.titleInput.SetValue("Test task")
-	m.executor = "claude (not installed)"
+	m.executor = "claude"
 
 	task := m.GetDBTask()
 	if task.Executor != "claude" {
 		t.Errorf("GetDBTask() executor = %q, want %q", task.Executor, "claude")
-	}
-}
-
-func TestFindFirstAvailableExecutor(t *testing.T) {
-	tests := []struct {
-		name      string
-		executors []string
-		wantIdx   int
-		wantName  string
-	}{
-		{
-			name:      "first is available",
-			executors: []string{"claude", "codex (not installed)"},
-			wantIdx:   0,
-			wantName:  "claude",
-		},
-		{
-			name:      "second is available",
-			executors: []string{"claude (not installed)", "codex"},
-			wantIdx:   1,
-			wantName:  "codex",
-		},
-		{
-			name:      "none available",
-			executors: []string{"claude (not installed)", "codex (not installed)"},
-			wantIdx:   -1,
-			wantName:  "",
-		},
-		{
-			name:      "all available",
-			executors: []string{"claude", "codex", "gemini"},
-			wantIdx:   0,
-			wantName:  "claude",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			gotIdx, gotName := findFirstAvailableExecutor(tt.executors)
-			if gotIdx != tt.wantIdx || gotName != tt.wantName {
-				t.Errorf("findFirstAvailableExecutor() = (%d, %q), want (%d, %q)",
-					gotIdx, gotName, tt.wantIdx, tt.wantName)
-			}
-		})
 	}
 }
 
