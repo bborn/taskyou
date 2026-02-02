@@ -29,6 +29,9 @@ type Server struct {
 	// Callbacks for task state changes
 	onComplete   func()
 	onNeedsInput func(question string)
+
+	// Track if context was requested but empty (for reminder on completion)
+	contextWasEmpty bool
 }
 
 // NewServer creates a new MCP server for a specific task.
@@ -298,6 +301,17 @@ func (s *Server) handleToolCall(id interface{}, params *toolCallParams) {
 	case "workflow_complete":
 		summary, _ := params.Arguments["summary"].(string)
 
+		// Check if we should remind about saving project context
+		var contextReminder string
+		if s.contextWasEmpty {
+			// Check if context is still empty
+			if task, err := s.db.GetTask(s.taskID); err == nil && task != nil && task.Project != "" {
+				if ctx, err := s.db.GetProjectContext(task.Project); err == nil && ctx == "" {
+					contextReminder = "\n\n⚠️ REMINDER: You explored this codebase but didn't save project context. Consider calling workflow_set_project_context to help future tasks skip exploration."
+				}
+			}
+		}
+
 		// Log the completion
 		s.db.AppendTaskLog(s.taskID, "system", fmt.Sprintf("Task completed: %s", summary))
 
@@ -311,7 +325,7 @@ func (s *Server) handleToolCall(id interface{}, params *toolCallParams) {
 
 		s.sendResult(id, toolCallResult{
 			Content: []contentBlock{
-				{Type: "text", Text: "Task marked as complete."},
+				{Type: "text", Text: "Task marked as complete." + contextReminder},
 			},
 		})
 
@@ -596,9 +610,36 @@ func (s *Server) handleToolCall(id interface{}, params *toolCallParams) {
 		}
 
 		if context == "" {
+			s.contextWasEmpty = true
 			s.sendResult(id, toolCallResult{
 				Content: []contentBlock{
-					{Type: "text", Text: "No cached project context found. Please explore the codebase and save a summary using workflow_set_project_context."},
+					{Type: "text", Text: `No cached project context found.
+
+⚠️ IMPORTANT: After exploring this codebase, you MUST save context using workflow_set_project_context.
+
+Include in your context:
+- Project structure (key directories and their purposes)
+- Tech stack and frameworks
+- Architectural patterns and conventions
+- Important files and entry points
+- Common workflows
+
+Example format:
+## Project Structure
+- src/ - Main source code
+- tests/ - Test files
+...
+
+## Tech Stack
+- Framework: Next.js
+- Database: PostgreSQL
+...
+
+## Key Patterns
+- Uses repository pattern for data access
+...
+
+This saves future tasks from re-exploring the codebase.`},
 				},
 			})
 			return
