@@ -691,3 +691,178 @@ func TestProjectContextCachingFlow(t *testing.T) {
 
 	t.Log("Full context caching flow works correctly!")
 }
+
+// TestContextReminderOnComplete tests that completing a task after requesting empty context shows a reminder
+func TestContextReminderOnComplete(t *testing.T) {
+	database := testDB(t)
+
+	// Create a project without context
+	if err := database.CreateProject(&db.Project{Name: "reminder-test-project", Path: "/tmp/reminder-test"}); err != nil {
+		t.Fatalf("failed to create project: %v", err)
+	}
+
+	// Create a task
+	task := &db.Task{
+		Title:   "Reminder Test Task",
+		Status:  db.StatusProcessing,
+		Project: "reminder-test-project",
+	}
+	if err := database.CreateTask(task); err != nil {
+		t.Fatalf("failed to create task: %v", err)
+	}
+
+	// Step 1: Request context (will be empty, setting contextWasEmpty flag)
+	getContextReq := map[string]interface{}{
+		"jsonrpc": "2.0",
+		"id":      1,
+		"method":  "tools/call",
+		"params": map[string]interface{}{
+			"name":      "workflow_get_project_context",
+			"arguments": map[string]interface{}{},
+		},
+	}
+	reqBytes, _ := json.Marshal(getContextReq)
+	reqBytes = append(reqBytes, '\n')
+
+	// Also prepare the complete request
+	completeReq := map[string]interface{}{
+		"jsonrpc": "2.0",
+		"id":      2,
+		"method":  "tools/call",
+		"params": map[string]interface{}{
+			"name": "workflow_complete",
+			"arguments": map[string]interface{}{
+				"summary": "Test completed without saving context",
+			},
+		},
+	}
+	completeBytes, _ := json.Marshal(completeReq)
+	completeBytes = append(completeBytes, '\n')
+
+	// Combine both requests
+	combinedInput := string(reqBytes) + string(completeBytes)
+
+	server, output := testServer(database, task.ID, combinedInput)
+	server.Run()
+
+	// Parse responses (there will be two)
+	responses := strings.Split(strings.TrimSpace(output.String()), "\n")
+	if len(responses) < 2 {
+		t.Fatalf("expected 2 responses, got %d: %s", len(responses), output.String())
+	}
+
+	// Parse the complete response (second one)
+	var completeResp jsonRPCResponse
+	if err := json.Unmarshal([]byte(responses[1]), &completeResp); err != nil {
+		t.Fatalf("failed to parse complete response: %v", err)
+	}
+
+	if completeResp.Error != nil {
+		t.Fatalf("unexpected error: %s", completeResp.Error.Message)
+	}
+
+	result := completeResp.Result.(map[string]interface{})
+	content := result["content"].([]interface{})
+	text := content[0].(map[string]interface{})["text"].(string)
+
+	// Should contain the reminder since context was requested but never saved
+	if !strings.Contains(text, "REMINDER") {
+		t.Errorf("expected reminder in completion response, got: %s", text)
+	}
+	if !strings.Contains(text, "workflow_set_project_context") {
+		t.Errorf("expected reminder to mention workflow_set_project_context, got: %s", text)
+	}
+
+	t.Log("Context reminder on completion works correctly!")
+}
+
+// TestNoReminderWhenContextSaved tests that no reminder appears when context was saved
+func TestNoReminderWhenContextSaved(t *testing.T) {
+	database := testDB(t)
+
+	// Create a project
+	if err := database.CreateProject(&db.Project{Name: "no-reminder-project", Path: "/tmp/no-reminder"}); err != nil {
+		t.Fatalf("failed to create project: %v", err)
+	}
+
+	// Create a task
+	task := &db.Task{
+		Title:   "No Reminder Task",
+		Status:  db.StatusProcessing,
+		Project: "no-reminder-project",
+	}
+	if err := database.CreateTask(task); err != nil {
+		t.Fatalf("failed to create task: %v", err)
+	}
+
+	// Request context (empty), then set context, then complete
+	getContextReq := map[string]interface{}{
+		"jsonrpc": "2.0",
+		"id":      1,
+		"method":  "tools/call",
+		"params": map[string]interface{}{
+			"name":      "workflow_get_project_context",
+			"arguments": map[string]interface{}{},
+		},
+	}
+
+	setContextReq := map[string]interface{}{
+		"jsonrpc": "2.0",
+		"id":      2,
+		"method":  "tools/call",
+		"params": map[string]interface{}{
+			"name": "workflow_set_project_context",
+			"arguments": map[string]interface{}{
+				"context": "This is a test project context.",
+			},
+		},
+	}
+
+	completeReq := map[string]interface{}{
+		"jsonrpc": "2.0",
+		"id":      3,
+		"method":  "tools/call",
+		"params": map[string]interface{}{
+			"name": "workflow_complete",
+			"arguments": map[string]interface{}{
+				"summary": "Test completed after saving context",
+			},
+		},
+	}
+
+	reqBytes1, _ := json.Marshal(getContextReq)
+	reqBytes2, _ := json.Marshal(setContextReq)
+	reqBytes3, _ := json.Marshal(completeReq)
+
+	combinedInput := string(reqBytes1) + "\n" + string(reqBytes2) + "\n" + string(reqBytes3) + "\n"
+
+	server, output := testServer(database, task.ID, combinedInput)
+	server.Run()
+
+	// Parse responses
+	responses := strings.Split(strings.TrimSpace(output.String()), "\n")
+	if len(responses) < 3 {
+		t.Fatalf("expected 3 responses, got %d", len(responses))
+	}
+
+	// Parse the complete response (third one)
+	var completeResp jsonRPCResponse
+	if err := json.Unmarshal([]byte(responses[2]), &completeResp); err != nil {
+		t.Fatalf("failed to parse complete response: %v", err)
+	}
+
+	if completeResp.Error != nil {
+		t.Fatalf("unexpected error: %s", completeResp.Error.Message)
+	}
+
+	result := completeResp.Result.(map[string]interface{})
+	content := result["content"].([]interface{})
+	text := content[0].(map[string]interface{})["text"].(string)
+
+	// Should NOT contain reminder since context was saved
+	if strings.Contains(text, "REMINDER") {
+		t.Errorf("should not have reminder when context was saved, got: %s", text)
+	}
+
+	t.Log("No reminder when context saved works correctly!")
+}
