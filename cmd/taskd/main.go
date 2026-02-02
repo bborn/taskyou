@@ -10,6 +10,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"syscall"
+	"time"
 
 	"github.com/bborn/workflow/internal/config"
 	"github.com/bborn/workflow/internal/db"
@@ -81,14 +82,14 @@ func main() {
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 
-	// Start server in goroutine
+	// Start server
 	errCh := make(chan error, 1)
 	go func() {
 		errCh <- srv.Start()
 	}()
 
 	logger.Info("SSH server listening", "addr", *addr)
-	fmt.Printf("\n  Connect with: ssh -p %s localhost\n\n", (*addr)[1:])
+	fmt.Printf("\n  SSH: ssh -p %s localhost\n\n", (*addr)[1:])
 
 	// Wait for signal or error
 	select {
@@ -99,6 +100,10 @@ func main() {
 	case sig := <-sigCh:
 		logger.Info("Received signal, shutting down", "signal", sig)
 		exec.Stop()
-		srv.Shutdown(context.Background())
+
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer shutdownCancel()
+
+		srv.Shutdown(shutdownCtx)
 	}
 }

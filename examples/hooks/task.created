@@ -1,0 +1,12 @@
+#!/bin/bash
+# Example hook: Log task creation
+# Install: cp examples/hooks/task.created ~/.config/task/hooks/
+# Make executable: chmod +x ~/.config/task/hooks/task.created
+
+# Log to file with timestamp
+LOG_FILE="$HOME/task-activity.log"
+echo "$(date '+%Y-%m-%d %H:%M:%S') - CREATED Task #$TASK_ID: $TASK_TITLE (Project: $TASK_PROJECT, Type: $TASK_TYPE)" >> "$LOG_FILE"
+
+# Optional: Track task creation metrics
+# Uncomment to send to StatsD/Telegraf
+# echo "tasks.created:1|c|#project:$TASK_PROJECT,type:$TASK_TYPE" | nc -u -w0 localhost 8125

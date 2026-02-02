@@ -20,6 +20,7 @@ import (
 
 	"github.com/bborn/workflow/internal/config"
 	"github.com/bborn/workflow/internal/db"
+	"github.com/bborn/workflow/internal/events"
 	"github.com/bborn/workflow/internal/github"
 	"github.com/bborn/workflow/internal/hooks"
 	"github.com/charmbracelet/log"
@@ -38,6 +39,7 @@ type Executor struct {
 	config  *config.Config
 	logger  *log.Logger
 	hooks   *hooks.Runner
+	events  *events.Emitter
 	prCache *github.PRCache
 
 	// Executor factory for pluggable backends
@@ -128,11 +130,13 @@ func DefaultExecutorName() string {
 // New creates a new executor.
 func New(database *db.DB, cfg *config.Config) *Executor {
 	slug, display := detectExecutorIdentity()
+	eventsEmitter := events.New(hooks.DefaultHooksDir())
 	e := &Executor{
 		db:              database,
 		config:          cfg,
 		logger:          log.NewWithOptions(io.Discard, log.Options{Prefix: "executor"}),
 		hooks:           hooks.NewSilent(hooks.DefaultHooksDir()),
+		events:          eventsEmitter,
 		prCache:         github.NewPRCache(),
 		executorFactory: NewExecutorFactory(),
 		stopCh:          make(chan struct{}),
@@ -145,6 +149,9 @@ func New(database *db.DB, cfg *config.Config) *Executor {
 		executorSlug:    slug,
 		executorName:    display,
 	}
+
+	// Register the events emitter with the database for event emission
+	database.SetEventEmitter(eventsEmitter)
 
 	// Register available executors
 	e.executorFactory.Register(NewClaudeExecutor(e))
@@ -160,11 +167,13 @@ func New(database *db.DB, cfg *config.Config) *Executor {
 // NewWithLogging creates an executor that logs to stderr (for daemon mode).
 func NewWithLogging(database *db.DB, cfg *config.Config, w io.Writer) *Executor {
 	slug, display := detectExecutorIdentity()
+	eventsEmitter := events.New(hooks.DefaultHooksDir())
 	e := &Executor{
 		db:              database,
 		config:          cfg,
 		logger:          log.NewWithOptions(w, log.Options{Prefix: "executor"}),
 		hooks:           hooks.New(hooks.DefaultHooksDir()),
+		events:          eventsEmitter,
 		prCache:         github.NewPRCache(),
 		executorFactory: NewExecutorFactory(),
 		stopCh:          make(chan struct{}),
@@ -177,6 +186,9 @@ func NewWithLogging(database *db.DB, cfg *config.Config, w io.Writer) *Executor 
 		executorSlug:    slug,
 		executorName:    display,
 	}
+
+	// Register the events emitter with the database for event emission
+	database.SetEventEmitter(eventsEmitter)
 
 	// Register available executors
 	e.executorFactory.Register(NewClaudeExecutor(e))
@@ -300,9 +312,17 @@ func (e *Executor) IsRunning(taskID int64) bool {
 // Interrupt cancels a running task.
 // If running in this process, cancels directly. Also marks in DB for cross-process interrupt.
 func (e *Executor) Interrupt(taskID int64) bool {
+	// Get task before interrupting
+	task, _ := e.db.GetTask(taskID)
+
 	// Mark as backlog in database (for cross-process communication)
 	e.updateStatus(taskID, db.StatusBacklog)
 	e.logLine(taskID, "system", "Task interrupted by user")
+
+	// Emit interrupt event
+	if task != nil {
+		e.events.EmitTaskFailed(task, "interrupted")
+	}
 
 	// If running locally, cancel the context
 	e.mu.RLock()
@@ -613,9 +633,17 @@ func (e *Executor) NotifyTaskChange(eventType string, task *db.Task) {
 
 // updateStatus updates task status in DB and broadcasts the change.
 func (e *Executor) updateStatus(taskID int64, status string) error {
+	// Get old status for event
+	oldTask, _ := e.db.GetTask(taskID)
+	oldStatus := ""
+	if oldTask != nil {
+		oldStatus = oldTask.Status
+	}
+
 	if err := e.db.UpdateTaskStatus(taskID, status); err != nil {
 		return err
 	}
+
 	// Fetch updated task and broadcast
 	task, err := e.db.GetTask(taskID)
 	if err == nil && task != nil {
@@ -624,6 +652,23 @@ func (e *Executor) updateStatus(taskID int64, status string) error {
 			Task:   task,
 			TaskID: taskID,
 		})
+
+		// Emit events based on status
+		switch status {
+		case db.StatusQueued, db.StatusProcessing:
+			e.events.EmitTaskStarted(task)
+		case db.StatusBlocked:
+			e.events.EmitTaskBlocked(task, "Task needs input")
+		case db.StatusDone:
+			e.events.EmitTaskCompleted(task)
+		default:
+			if oldStatus != "" && oldStatus != status {
+				e.events.EmitTaskUpdated(task, map[string]interface{}{
+					"old_status": oldStatus,
+					"new_status": status,
+				})
+			}
+		}
 	}
 	return nil
 }

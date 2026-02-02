@@ -60,7 +60,8 @@ func (lt LocalTime) Value() (driver.Value, error) {
 // DB wraps the SQLite database connection.
 type DB struct {
 	*sql.DB
-	path string
+	path         string
+	eventEmitter EventEmitter
 }
 
 // Path returns the path to the database file.
@@ -165,6 +166,19 @@ func (db *DB) migrate() error {
 			is_builtin INTEGER DEFAULT 0,
 			created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 		)`,
+
+		`CREATE TABLE IF NOT EXISTS event_log (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			event_type TEXT NOT NULL,
+			task_id INTEGER,
+			message TEXT DEFAULT '',
+			metadata TEXT DEFAULT '{}',
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+		)`,
+
+		`CREATE INDEX IF NOT EXISTS idx_event_log_task_id ON event_log(task_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_event_log_event_type ON event_log(event_type)`,
+		`CREATE INDEX IF NOT EXISTS idx_event_log_created_at ON event_log(created_at)`,
 
 	}
 

@@ -1,0 +1,13 @@
+#!/bin/bash
+# Example hook: task.completed
+# Runs when a task completes successfully
+
+# Desktop notification (macOS)
+if command -v osascript &> /dev/null; then
+  osascript -e "display notification \"$TASK_TITLE\" with title \"Task Completed\" subtitle \"#$TASK_ID\" sound name \"Glass\""
+fi
+
+# Desktop notification (Linux)
+if command -v notify-send &> /dev/null; then
+  notify-send "Task Completed" "$TASK_TITLE (#$TASK_ID)"
+fi

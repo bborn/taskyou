@@ -1781,6 +1781,115 @@ Available settings:
 	settingsCmd.AddCommand(settingsSetCmd)
 	rootCmd.AddCommand(settingsCmd)
 
+	// Events command - manage event hooks
+	eventsCmd := &cobra.Command{
+		Use:   "events",
+		Short: "Manage event hooks",
+		Long: `Manage task event hooks for automation.
+
+Events are emitted when tasks change state (created, started, completed, failed).
+Script hooks in ~/.config/task/hooks/ are executed automatically.
+
+Examples:
+  ty events list                      # Show recent events`,
+	}
+
+	// events list - show recent events from event log
+	eventsListCmd := &cobra.Command{
+		Use:   "list",
+		Short: "List recent events from the event log",
+		Run: func(cmd *cobra.Command, args []string) {
+			limit, _ := cmd.Flags().GetInt("limit")
+			eventType, _ := cmd.Flags().GetString("type")
+			taskID, _ := cmd.Flags().GetInt64("task")
+			outputJSON, _ := cmd.Flags().GetBool("json")
+
+			dbPath := db.DefaultPath()
+			database, err := db.Open(dbPath)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+			defer database.Close()
+
+			// Build query
+			query := "SELECT id, event_type, task_id, message, metadata, created_at FROM event_log WHERE 1=1"
+			var queryArgs []interface{}
+
+			if eventType != "" {
+				query += " AND event_type = ?"
+				queryArgs = append(queryArgs, eventType)
+			}
+			if taskID > 0 {
+				query += " AND task_id = ?"
+				queryArgs = append(queryArgs, taskID)
+			}
+
+			query += " ORDER BY created_at DESC LIMIT ?"
+			queryArgs = append(queryArgs, limit)
+
+			rows, err := database.Query(query, queryArgs...)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+			defer rows.Close()
+
+			type EventRecord struct {
+				ID        int64     `json:"id"`
+				Type      string    `json:"event_type"`
+				TaskID    int64     `json:"task_id"`
+				Message   string    `json:"message"`
+				Metadata  string    `json:"metadata"`
+				CreatedAt time.Time `json:"created_at"`
+			}
+
+			var events []EventRecord
+			for rows.Next() {
+				var e EventRecord
+				var createdAt db.LocalTime
+				if err := rows.Scan(&e.ID, &e.Type, &e.TaskID, &e.Message, &e.Metadata, &createdAt); err != nil {
+					fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+					os.Exit(1)
+				}
+				e.CreatedAt = createdAt.Time
+				events = append(events, e)
+			}
+
+			if outputJSON {
+				data, _ := json.MarshalIndent(events, "", "  ")
+				fmt.Println(string(data))
+				return
+			}
+
+			if len(events) == 0 {
+				fmt.Println(dimStyle.Render("No events found"))
+				return
+			}
+
+			fmt.Println(boldStyle.Render(fmt.Sprintf("Recent Events (%d)", len(events))))
+			fmt.Println(strings.Repeat("─", 80))
+			for _, e := range events {
+				timestamp := e.CreatedAt.Format("2006-01-02 15:04:05")
+				fmt.Printf("%s  %s  Task #%d  %s\n",
+					dimStyle.Render(timestamp),
+					boldStyle.Render(e.Type),
+					e.TaskID,
+					e.Message)
+				if e.Metadata != "{}" && e.Metadata != "" {
+					fmt.Println(dimStyle.Render("  Metadata: " + e.Metadata))
+				}
+			}
+		},
+	}
+	eventsListCmd.Flags().Int("limit", 50, "Maximum number of events to show")
+	eventsListCmd.Flags().String("type", "", "Filter by event type (e.g., task.created)")
+	eventsListCmd.Flags().Int64("task", 0, "Filter by task ID")
+	eventsListCmd.Flags().Bool("json", false, "Output in JSON format")
+	eventsCmd.AddCommand(eventsListCmd)
+
+	rootCmd.AddCommand(eventsCmd)
+
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
 		os.Exit(1)
@@ -3360,11 +3469,6 @@ func moveTask(database *db.DB, oldTask *db.Task, targetProject string) (int64, e
 		return 0, fmt.Errorf("create new task: %w", err)
 	}
 
-	// CreateTask doesn't insert all fields (tags, pinned, etc.), so update them
-	if err := database.UpdateTask(newTask); err != nil {
-		return 0, fmt.Errorf("update new task: %w", err)
-	}
-
 	// Notify about the changes
 	exec.NotifyTaskChange("deleted", oldTask)
 	exec.NotifyTaskChange("created", newTask)
@@ -3469,3 +3573,4 @@ func previewStaleClaudeProjectConfigs(configPath string) (int, []string, error) 
 
 	return len(stalePaths), stalePaths, nil
 }
+
