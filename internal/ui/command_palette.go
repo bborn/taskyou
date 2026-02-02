@@ -119,6 +119,28 @@ type scoredTask struct {
 	score int
 }
 
+// statusPriority returns a priority number for sorting tasks by status.
+// Lower values = higher priority (should appear first).
+// Priority order: processing/blocked > queued/backlog > done/archived
+func statusPriority(status string) int {
+	switch status {
+	case db.StatusProcessing:
+		return 0 // Highest priority - actively being worked on
+	case db.StatusBlocked:
+		return 1 // High priority - needs attention
+	case db.StatusQueued:
+		return 2 // Medium priority - waiting to be processed
+	case db.StatusBacklog:
+		return 3 // Lower priority - not started
+	case db.StatusDone:
+		return 4 // Low priority - completed
+	case db.StatusArchived:
+		return 5 // Lowest priority - archived
+	default:
+		return 3 // Default to backlog priority
+	}
+}
+
 // filterTasks filters tasks based on the search query using fuzzy matching.
 // Results are sorted by match score, with best matches first.
 // When a query is provided, it also searches the database to find older/done tasks.
@@ -159,8 +181,14 @@ func (m *CommandPaletteModel) filterTasks() {
 			}
 		}
 
-		// Sort by score descending (best matches first)
+		// Sort by status priority first, then by score descending within same priority
+		// Priority order: processing/blocked > queued/backlog > done/archived
 		sort.Slice(scored, func(i, j int) bool {
+			iPriority := statusPriority(scored[i].task.Status)
+			jPriority := statusPriority(scored[j].task.Status)
+			if iPriority != jPriority {
+				return iPriority < jPriority // Lower priority number = higher priority
+			}
 			return scored[i].score > scored[j].score
 		})
 

@@ -189,6 +189,135 @@ func TestMatchesQuery(t *testing.T) {
 	}
 }
 
+func TestStatusPriority(t *testing.T) {
+	// Test that status priorities are correctly ordered
+	tests := []struct {
+		name   string
+		higher string
+		lower  string
+	}{
+		{"processing before backlog", db.StatusProcessing, db.StatusBacklog},
+		{"blocked before backlog", db.StatusBlocked, db.StatusBacklog},
+		{"processing before blocked", db.StatusProcessing, db.StatusBlocked},
+		{"queued before backlog", db.StatusQueued, db.StatusBacklog},
+		{"backlog before done", db.StatusBacklog, db.StatusDone},
+		{"done before archived", db.StatusDone, db.StatusArchived},
+		{"processing before done", db.StatusProcessing, db.StatusDone},
+		{"blocked before done", db.StatusBlocked, db.StatusDone},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if statusPriority(tt.higher) >= statusPriority(tt.lower) {
+				t.Errorf("Expected %q (priority=%d) to have higher priority than %q (priority=%d)",
+					tt.higher, statusPriority(tt.higher), tt.lower, statusPriority(tt.lower))
+			}
+		})
+	}
+}
+
+func TestFilterTasksStatusOrdering(t *testing.T) {
+	// Test that filtered tasks are ordered by status priority
+	tasks := []*db.Task{
+		{ID: 1, Title: "dog task backlog", Status: db.StatusBacklog},
+		{ID: 2, Title: "dog task done", Status: db.StatusDone},
+		{ID: 3, Title: "dog task processing", Status: db.StatusProcessing},
+		{ID: 4, Title: "dog task blocked", Status: db.StatusBlocked},
+	}
+
+	m := &CommandPaletteModel{
+		allTasks: tasks,
+	}
+	m.searchInput.SetValue("dog")
+	m.filterTasks()
+
+	// Verify we got all 4 matching tasks
+	if len(m.filteredTasks) != 4 {
+		t.Fatalf("Expected 4 results, got %d", len(m.filteredTasks))
+	}
+
+	// First should be processing (highest priority)
+	if m.filteredTasks[0].Status != db.StatusProcessing {
+		t.Errorf("First task should be processing, got %q", m.filteredTasks[0].Status)
+	}
+
+	// Second should be blocked
+	if m.filteredTasks[1].Status != db.StatusBlocked {
+		t.Errorf("Second task should be blocked, got %q", m.filteredTasks[1].Status)
+	}
+
+	// Third should be backlog
+	if m.filteredTasks[2].Status != db.StatusBacklog {
+		t.Errorf("Third task should be backlog, got %q", m.filteredTasks[2].Status)
+	}
+
+	// Fourth should be done
+	if m.filteredTasks[3].Status != db.StatusDone {
+		t.Errorf("Fourth task should be done, got %q", m.filteredTasks[3].Status)
+	}
+}
+
+func TestFilterTasksStatusOrderingWithQueued(t *testing.T) {
+	// Test that queued tasks appear after blocked but before backlog
+	tasks := []*db.Task{
+		{ID: 1, Title: "cat task backlog", Status: db.StatusBacklog},
+		{ID: 2, Title: "cat task queued", Status: db.StatusQueued},
+		{ID: 3, Title: "cat task blocked", Status: db.StatusBlocked},
+		{ID: 4, Title: "cat task done", Status: db.StatusDone},
+		{ID: 5, Title: "cat task processing", Status: db.StatusProcessing},
+	}
+
+	m := &CommandPaletteModel{
+		allTasks: tasks,
+	}
+	m.searchInput.SetValue("cat")
+	m.filterTasks()
+
+	// Verify ordering: processing > blocked > queued > backlog > done
+	expectedOrder := []string{
+		db.StatusProcessing,
+		db.StatusBlocked,
+		db.StatusQueued,
+		db.StatusBacklog,
+		db.StatusDone,
+	}
+
+	if len(m.filteredTasks) != len(expectedOrder) {
+		t.Fatalf("Expected %d results, got %d", len(expectedOrder), len(m.filteredTasks))
+	}
+
+	for i, expected := range expectedOrder {
+		if m.filteredTasks[i].Status != expected {
+			t.Errorf("Position %d: expected %q, got %q", i, expected, m.filteredTasks[i].Status)
+		}
+	}
+}
+
+func TestFilterTasksScoreWithinSameStatus(t *testing.T) {
+	// Test that within the same status, tasks are sorted by fuzzy score
+	tasks := []*db.Task{
+		{ID: 1, Title: "unrelated dog", Status: db.StatusProcessing},       // "dog" matches later
+		{ID: 2, Title: "dog at the start", Status: db.StatusProcessing},    // "dog" matches at start
+		{ID: 3, Title: "big dog handler", Status: db.StatusProcessing},     // "dog" matches in middle
+	}
+
+	m := &CommandPaletteModel{
+		allTasks: tasks,
+	}
+	m.searchInput.SetValue("dog")
+	m.filterTasks()
+
+	if len(m.filteredTasks) != 3 {
+		t.Fatalf("Expected 3 results, got %d", len(m.filteredTasks))
+	}
+
+	// "dog at the start" should be first (best match - word boundary at start)
+	if m.filteredTasks[0].ID != 2 {
+		t.Errorf("Expected task 2 (dog at the start) first, got task %d (%s)",
+			m.filteredTasks[0].ID, m.filteredTasks[0].Title)
+	}
+}
+
 func TestMatchesQueryPRSearch(t *testing.T) {
 	taskWithPR := &db.Task{
 		ID:       42,
