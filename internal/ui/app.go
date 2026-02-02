@@ -1147,7 +1147,7 @@ func (m *AppModel) renderFilterBar() string {
 			parts = append(parts, helpStyle.Render("  (Tab: select project, ↑↓: navigate)"))
 		} else {
 			navHelp := fmt.Sprintf("%s%s%s%s", IconArrowUp(), IconArrowDown(), IconArrowLeft(), IconArrowRight())
-			parts = append(parts, helpStyle.Render(fmt.Sprintf("  (backspace: clear, Enter: select, %s: navigate, [: project)", navHelp)))
+			parts = append(parts, helpStyle.Render(fmt.Sprintf("  (backspace: clear, Enter: done, %s: navigate, [: project)", navHelp)))
 		}
 	} else if m.filterText != "" {
 		parts = append(parts, helpStyle.Render("  (/: edit, Esc: clear)"))
@@ -1377,14 +1377,11 @@ func (m *AppModel) updateFilterMode(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		if keyMsg.String() == "tab" {
-			return m, nil
+			return m, nil // Tab: do nothing if no dropdown
 		}
-		// Enter: select task or exit
+		// Enter: just exit filter mode (user can press Enter again on kanban to select task)
 		m.filterActive, m.showFilterDropdown = false, false
 		m.filterInput.Blur()
-		if task := m.kanban.SelectedTask(); task != nil {
-			return m, m.loadTask(task.ID)
-		}
 		return m, nil
 
 	case "up", "down", "left", "right":
