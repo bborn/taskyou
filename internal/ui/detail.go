@@ -2466,11 +2466,6 @@ func (m *DetailModel) renderHelp() string {
 		keys = append(keys, helpKey{"!", toggleDesc, false})
 	}
 
-	// Show executor resume shortcut only when the agent is not running but has a session
-	if m.task != nil && m.task.ClaudeSessionID != "" && m.claudeMemoryMB == 0 {
-		keys = append(keys, helpKey{"R", fmt.Sprintf("resume %s", m.executorDisplayName()), false})
-	}
-
 	// Show pane navigation shortcut when panes are visible
 	if hasPanes && os.Getenv("TMUX") != "" {
 		keys = append(keys, helpKey{"shift+" + IconArrowUp() + IconArrowDown(), "switch pane", false})
