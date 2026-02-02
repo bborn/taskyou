@@ -22,6 +22,7 @@ import (
 	"github.com/bborn/workflow/internal/db"
 	"github.com/bborn/workflow/internal/executor"
 	"github.com/bborn/workflow/internal/github"
+	"github.com/bborn/workflow/internal/mcp"
 	"github.com/bborn/workflow/internal/ui"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -257,6 +258,32 @@ Tasks will automatically reconnect to their agent sessions when viewed.`,
 	}
 	claudeHookCmd.Flags().String("event", "", "Hook event type (Notification, Stop, etc.)")
 	rootCmd.AddCommand(claudeHookCmd)
+
+	// MCP server subcommand - runs the workflow MCP server for a task (internal use)
+	mcpServerCmd := &cobra.Command{
+		Use:    "mcp-server",
+		Short:  "Run the workflow MCP server for a task",
+		Hidden: true, // Internal use only - invoked by Claude Code via .mcp.json
+		Run: func(cmd *cobra.Command, args []string) {
+			taskID, _ := cmd.Flags().GetInt64("task-id")
+			if taskID == 0 {
+				// Also check WORKTREE_TASK_ID environment variable
+				if taskIDStr := os.Getenv("WORKTREE_TASK_ID"); taskIDStr != "" {
+					fmt.Sscanf(taskIDStr, "%d", &taskID)
+				}
+			}
+			if taskID == 0 {
+				fmt.Fprintln(os.Stderr, "task-id is required (via --task-id flag or WORKTREE_TASK_ID env)")
+				os.Exit(1)
+			}
+			if err := runMCPServer(taskID); err != nil {
+				fmt.Fprintln(os.Stderr, "MCP server error:", err)
+				os.Exit(1)
+			}
+		},
+	}
+	mcpServerCmd.Flags().Int64("task-id", 0, "Task ID for the MCP server")
+	rootCmd.AddCommand(mcpServerCmd)
 
 	// Sessions subcommand - manage running agent sessions (supports all executors)
 	sessionsCmd := &cobra.Command{
@@ -2652,6 +2679,22 @@ func handleNotificationHook(database *db.DB, taskID int64, input *ClaudeHookInpu
 		}
 	}
 	return nil
+}
+
+// runMCPServer runs the workflow MCP server for a specific task.
+// This is invoked by Claude Code via the .mcp.json configuration.
+func runMCPServer(taskID int64) error {
+	// Open database
+	dbPath := db.DefaultPath()
+	database, err := db.Open(dbPath)
+	if err != nil {
+		return fmt.Errorf("open database: %w", err)
+	}
+	defer database.Close()
+
+	// Create and run MCP server
+	server := mcp.NewServer(database, taskID)
+	return server.Run()
 }
 
 // handleStopHook handles Stop hooks from Claude (agent finished responding).

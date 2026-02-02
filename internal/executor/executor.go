@@ -1935,6 +1935,11 @@ func (e *Executor) runClaude(ctx context.Context, task *db.Task, workDir, prompt
 	}
 	// Note: we don't clean up hooks config immediately - it needs to persist for the session
 
+	// Setup workflow MCP server in .mcp.json so Claude can use workflow_* tools
+	if err := writeWorkflowMCPConfig(workDir, task.ID); err != nil {
+		e.logger.Warn("could not setup workflow MCP config", "error", err)
+	}
+
 	// Create a temp file for the prompt (avoids quoting issues)
 	promptFile, err := os.CreateTemp("", "task-prompt-*.txt")
 	if err != nil {
@@ -2104,6 +2109,11 @@ func (e *Executor) runClaudeResume(ctx context.Context, task *db.Task, workDir, 
 	cleanupHooks, err := e.setupClaudeHooks(workDir, task.ID)
 	if err != nil {
 		e.logger.Warn("could not setup Claude hooks", "error", err)
+	}
+
+	// Setup workflow MCP server in .mcp.json so Claude can use workflow_* tools
+	if err := writeWorkflowMCPConfig(workDir, task.ID); err != nil {
+		e.logger.Warn("could not setup workflow MCP config", "error", err)
 	}
 
 	// Create a temp file for the feedback (avoids quoting issues)
@@ -3754,6 +3764,69 @@ func symlinkMCPConfig(projectDir, worktreePath string) error {
 	// Exclude .mcp.json from git so the symlink isn't accidentally committed.
 	// Use projectDir because worktree .git is a file pointing to the main repo's git dir.
 	ensureGitExclude(projectDir, ".mcp.json")
+
+	return nil
+}
+
+// writeWorkflowMCPConfig writes the workflow MCP server configuration to .mcp.json in the worktree.
+// This enables Claude Code to use workflow tools (workflow_complete, workflow_screenshot, etc.).
+// The function preserves existing MCP server configurations and only adds/updates the workflow server.
+// If the worktree has a symlinked .mcp.json (from symlinkMCPConfig), this function reads from the
+// symlink target but then replaces the symlink with a regular file to avoid modifying the project's original.
+func writeWorkflowMCPConfig(worktreePath string, taskID int64) error {
+	mcpFilePath := filepath.Join(worktreePath, ".mcp.json")
+
+	// Read existing config if present (follows symlinks to read project's MCP servers)
+	var config map[string]interface{}
+	if data, err := os.ReadFile(mcpFilePath); err == nil {
+		if err := json.Unmarshal(data, &config); err != nil {
+			// If file exists but is invalid JSON, start fresh
+			config = make(map[string]interface{})
+		}
+	} else {
+		config = make(map[string]interface{})
+	}
+
+	// Get or create mcpServers map
+	mcpServers, ok := config["mcpServers"].(map[string]interface{})
+	if !ok {
+		mcpServers = make(map[string]interface{})
+	}
+
+	// Get the path to the task executable
+	taskExecutable, err := os.Executable()
+	if err != nil {
+		// Fallback to just "task" and hope it's in PATH
+		taskExecutable = "task"
+	}
+
+	// Add/update the workflow MCP server
+	// Use "stdio" transport - Claude Code spawns the process and communicates via stdin/stdout
+	mcpServers["workflow"] = map[string]interface{}{
+		"type":    "stdio",
+		"command": taskExecutable,
+		"args":    []string{"mcp-server", "--task-id", fmt.Sprintf("%d", taskID)},
+	}
+
+	config["mcpServers"] = mcpServers
+
+	// Marshal the updated config
+	data, err := json.MarshalIndent(config, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal .mcp.json: %w", err)
+	}
+
+	// If .mcp.json is a symlink, remove it first to avoid writing through to the original file
+	// We want to write a regular file to the worktree, not modify the project's .mcp.json
+	if fi, err := os.Lstat(mcpFilePath); err == nil && fi.Mode()&os.ModeSymlink != 0 {
+		if err := os.Remove(mcpFilePath); err != nil {
+			return fmt.Errorf("remove .mcp.json symlink: %w", err)
+		}
+	}
+
+	if err := os.WriteFile(mcpFilePath, data, 0644); err != nil {
+		return fmt.Errorf("write .mcp.json: %w", err)
+	}
 
 	return nil
 }
