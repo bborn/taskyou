@@ -4072,7 +4072,19 @@ func (e *Executor) getDefaultBranch(projectDir string) string {
 		}
 	}
 
-	return "main" // Default to main
+	// Fallback: get current branch name (whatever branch HEAD points to)
+	cmd = exec.Command("git", "rev-parse", "--abbrev-ref", "HEAD")
+	cmd.Dir = projectDir
+	if output, err := cmd.Output(); err == nil {
+		branch := strings.TrimSpace(string(output))
+		if branch != "" && branch != "HEAD" {
+			return branch
+		}
+	}
+
+	// Last resort: use HEAD directly (works even for detached HEAD or unnamed branches)
+	// This ensures worktree creation succeeds as long as there's at least one commit
+	return "HEAD"
 }
 
 // updateTaskPRInfo fetches and updates PR information for a task if a PR exists for the branch.
