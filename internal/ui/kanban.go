@@ -486,16 +486,18 @@ func (k *KanbanBoard) viewDesktop() string {
 	for colIdx, col := range k.columns {
 		isSelectedCol := colIdx == k.selectedCol
 
-		// Colored header bar at top of column
-		// Width matches the column content width (will be inside the border)
+		// Subtle header row (no background) for a cleaner column top
 		headerBarStyle := lipgloss.NewStyle().
-			Width(colWidth).
-			Background(col.Color).
-			Foreground(lipgloss.Color("#000000")).
-			Bold(true).
-			Align(lipgloss.Center)
+			Width(colWidth - 2).
+			Padding(0, 1).
+			Align(lipgloss.Left)
 
-		headerText := fmt.Sprintf("%s %s (%d)", col.Icon, col.Title, len(col.Tasks))
+		headerTitle := lipgloss.NewStyle().
+			Foreground(col.Color).
+			Bold(true).
+			Render(fmt.Sprintf("%s %s", col.Icon, col.Title))
+		headerCount := Dim.Render(fmt.Sprintf("%s %d", IconDefault(), len(col.Tasks)))
+		headerText := lipgloss.JoinHorizontal(lipgloss.Left, headerTitle, " ", headerCount)
 		headerBar := headerBarStyle.Render(headerText)
 
 		// Task cards - calculate how many fit
@@ -611,10 +613,10 @@ func (k *KanbanBoard) viewDesktop() string {
 		// Combine tasks with spacing
 		taskContent := lipgloss.JoinVertical(lipgloss.Left, taskViews...)
 
-		// Column container with border (rounded to match active task card style)
-		_, highlightBorder := GetThemeBorderColors()
-		borderColor := col.Color // Use column color for border
-		borderStyle := lipgloss.RoundedBorder()
+		// Column container with subtle border
+		normalBorder, highlightBorder := GetThemeBorderColors()
+		borderColor := normalBorder
+		borderStyle := lipgloss.NormalBorder()
 		if isSelectedCol {
 			borderColor = highlightBorder
 		}
@@ -668,15 +670,18 @@ func (k *KanbanBoard) viewMobile() string {
 
 	col := k.columns[k.selectedCol]
 
-	// Colored header bar at top of column
+	// Subtle header row (no background) for a cleaner column top
 	headerBarStyle := lipgloss.NewStyle().
-		Width(colWidth).
-		Background(col.Color).
-		Foreground(lipgloss.Color("#000000")).
-		Bold(true).
-		Align(lipgloss.Center)
+		Width(colWidth - 2).
+		Padding(0, 1).
+		Align(lipgloss.Left)
 
-	headerText := fmt.Sprintf("%s %s (%d)", col.Icon, col.Title, len(col.Tasks))
+	headerTitle := lipgloss.NewStyle().
+		Foreground(col.Color).
+		Bold(true).
+		Render(fmt.Sprintf("%s %s", col.Icon, col.Title))
+	headerCount := Dim.Render(fmt.Sprintf("%s %d", IconDefault(), len(col.Tasks)))
+	headerText := lipgloss.JoinHorizontal(lipgloss.Left, headerTitle, " ", headerCount)
 	headerBar := headerBarStyle.Render(headerText)
 
 	// Task cards - calculate how many fit
@@ -790,9 +795,9 @@ func (k *KanbanBoard) viewMobile() string {
 	// Combine tasks with spacing
 	taskContent := lipgloss.JoinVertical(lipgloss.Left, taskViews...)
 
-	// Column container with border
+	// Column container with subtle border
 	_, highlightBorder := GetThemeBorderColors()
-	borderStyle := lipgloss.RoundedBorder()
+	borderStyle := lipgloss.NormalBorder()
 
 	fullContent := lipgloss.JoinVertical(lipgloss.Left,
 		headerBar,
@@ -848,10 +853,9 @@ func (k *KanbanBoard) renderColumnTabs() string {
 			Padding(0, 0)
 
 		if isSelected {
-			// Selected tab has background color matching column
+			// Selected tab uses a simple color highlight
 			tabStyle = tabStyle.
-				Background(col.Color).
-				Foreground(lipgloss.Color("#000000")).
+				Foreground(col.Color).
 				Bold(true)
 		} else {
 			// Unselected tabs are dimmed
@@ -957,28 +961,14 @@ func (k *KanbanBoard) renderTaskCard(task *db.Task, width int, isSelected bool) 
 
 	if isSelected {
 		cardBg, cardFg := GetThemeCardColors()
-		// Selected card has border and background
+		// Selected card uses a soft background highlight (no extra borders)
 		cardStyle = cardStyle.
 			Bold(true).
 			Background(cardBg).
-			Foreground(cardFg).
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(lipgloss.Color(currentTheme.CardBorderHi)).
-			MarginBottom(0) // Border adds visual separation
+			Foreground(cardFg)
 	} else if needsInput {
-		// Tasks with active input notification get yellow bottom border
-		cardStyle = cardStyle.
-			BorderBottom(true).
-			BorderStyle(lipgloss.NormalBorder()).
-			BorderForeground(ColorWarning).
-			MarginBottom(0)
-	} else {
-		// Non-selected cards have a subtle bottom border for separation
-		cardStyle = cardStyle.
-			BorderBottom(true).
-			BorderStyle(lipgloss.NormalBorder()).
-			BorderForeground(ColorMuted).
-			MarginBottom(0)
+		// Subtle warning tint for tasks needing input
+		cardStyle = cardStyle.Foreground(ColorWarning)
 	}
 
 	content := idLine + "\n" + titleLine
