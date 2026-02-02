@@ -469,6 +469,10 @@ func (m *AppModel) Init() tea.Cmd {
 func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
 
+	if sizeMsg, ok := msg.(tea.WindowSizeMsg); ok {
+		m.applyWindowSize(sizeMsg.Width, sizeMsg.Height)
+	}
+
 	// Handle form updates first (needs all message types)
 	if m.currentView == ViewNewTask && m.newTaskForm != nil {
 		return m.updateNewTaskForm(msg)
@@ -553,30 +557,6 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if task := m.kanban.HandleClick(msg.X, msg.Y); task != nil {
 				return m, m.loadTask(task.ID)
 			}
-		}
-
-	case tea.WindowSizeMsg:
-		m.width = msg.Width
-		m.height = msg.Height
-		m.help.Width = msg.Width
-		m.kanban.SetSize(msg.Width, msg.Height-4)
-		if m.detailView != nil {
-			m.detailView.SetSize(msg.Width, msg.Height)
-		}
-		if m.settingsView != nil {
-			m.settingsView.SetSize(msg.Width, msg.Height)
-		}
-		if m.retryView != nil {
-			m.retryView.SetSize(msg.Width, msg.Height)
-		}
-		if m.commandPaletteView != nil {
-			m.commandPaletteView.SetSize(msg.Width, msg.Height)
-		}
-		if m.newTaskForm != nil {
-			m.newTaskForm.SetSize(msg.Width, msg.Height)
-		}
-		if m.editTaskForm != nil {
-			m.editTaskForm.SetSize(msg.Width, msg.Height)
 		}
 
 	case tasksLoadedMsg:
@@ -938,6 +918,31 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	return m, tea.Batch(cmds...)
+}
+
+func (m *AppModel) applyWindowSize(width, height int) {
+	m.width = width
+	m.height = height
+	m.help.Width = width
+	m.kanban.SetSize(width, height-4)
+	if m.detailView != nil {
+		m.detailView.SetSize(width, height)
+	}
+	if m.settingsView != nil {
+		m.settingsView.SetSize(width, height)
+	}
+	if m.retryView != nil {
+		m.retryView.SetSize(width, height)
+	}
+	if m.commandPaletteView != nil {
+		m.commandPaletteView.SetSize(width, height)
+	}
+	if m.newTaskForm != nil {
+		m.newTaskForm.SetSize(width, height)
+	}
+	if m.editTaskForm != nil {
+		m.editTaskForm.SetSize(width, height)
+	}
 }
 
 // View renders the current view.
