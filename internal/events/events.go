@@ -19,6 +19,7 @@ const (
 	TaskUpdated   = "task.updated"
 	TaskDeleted   = "task.deleted"
 	TaskStarted   = "task.started"
+	TaskBlocked   = "task.blocked" // Task needs input from user
 	TaskCompleted = "task.completed"
 	TaskFailed    = "task.failed"
 )
@@ -114,6 +115,10 @@ func (e *Emitter) EmitTaskUnpinned(task *db.Task) {
 
 func (e *Emitter) EmitTaskStarted(task *db.Task) {
 	e.Emit(Event{Type: TaskStarted, TaskID: task.ID, Task: task})
+}
+
+func (e *Emitter) EmitTaskBlocked(task *db.Task, reason string) {
+	e.Emit(Event{Type: TaskBlocked, TaskID: task.ID, Task: task, Message: reason})
 }
 
 func (e *Emitter) EmitTaskCompleted(task *db.Task) {

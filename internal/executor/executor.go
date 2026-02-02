@@ -612,6 +612,8 @@ func (e *Executor) updateStatus(taskID int64, status string) error {
 		switch status {
 		case db.StatusQueued, db.StatusProcessing:
 			e.events.EmitTaskStarted(task)
+		case db.StatusBlocked:
+			e.events.EmitTaskBlocked(task, "Task needs input")
 		case db.StatusDone:
 			e.events.EmitTaskCompleted(task)
 		default:

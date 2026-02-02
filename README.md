@@ -374,6 +374,7 @@ chmod +x ~/.config/task/hooks/task.completed
 | `task.updated` | Task fields changed |
 | `task.deleted` | Task removed |
 | `task.started` | Execution begins |
+| `task.blocked` | Task needs user input |
 | `task.completed` | Task finished |
 | `task.failed` | Execution failed |
 

@@ -1,0 +1,13 @@
+#!/bin/bash
+# Example hook: task.blocked
+# Runs when a task needs user input (e.g., Claude is waiting for feedback)
+
+# Desktop notification (macOS)
+if command -v osascript &> /dev/null; then
+  osascript -e "display notification \"$TASK_TITLE needs input\" with title \"Task Blocked\" subtitle \"#$TASK_ID\" sound name \"Submarine\""
+fi
+
+# Desktop notification (Linux)
+if command -v notify-send &> /dev/null; then
+  notify-send -u critical "Task Blocked" "$TASK_TITLE (#$TASK_ID) needs input"
+fi
