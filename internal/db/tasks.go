@@ -518,6 +518,38 @@ func (db *DB) UpdateTaskPinned(taskID int64, pinned bool) error {
 	return nil
 }
 
+// UpdateTaskSummary updates the task summary and distillation timestamp.
+func (db *DB) UpdateTaskSummary(taskID int64, summary string) error {
+	oldTask, _ := db.GetTask(taskID)
+	oldSummary := ""
+	if oldTask != nil {
+		oldSummary = oldTask.Summary
+	}
+
+	_, err := db.Exec(`
+		UPDATE tasks
+		SET summary = ?, last_distilled_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+		WHERE id = ?
+	`, summary, taskID)
+	if err != nil {
+		return fmt.Errorf("update task summary: %w", err)
+	}
+
+	if oldTask != nil && oldSummary != summary {
+		task, err := db.GetTask(taskID)
+		if err == nil && task != nil {
+			db.emitTaskUpdated(task, map[string]interface{}{
+				"summary": map[string]string{
+					"old": oldSummary,
+					"new": summary,
+				},
+			})
+		}
+	}
+
+	return nil
+}
+
 // UpdateTaskDaemonSession updates the tmux daemon session name for a task.
 // This is used to track which daemon session owns the task's tmux window,
 // so we can properly kill the Claude process when the task completes.

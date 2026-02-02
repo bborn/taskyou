@@ -5,6 +5,7 @@ package mcp
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -16,6 +17,7 @@ import (
 	"time"
 
 	"github.com/bborn/workflow/internal/db"
+	"github.com/bborn/workflow/internal/tasksummary"
 )
 
 // Server is an MCP server that provides workflow tools to Claude.
@@ -317,6 +319,13 @@ func (s *Server) handleToolCall(id interface{}, params *toolCallParams) {
 
 		// Update task status
 		s.db.UpdateTaskStatus(s.taskID, db.StatusDone)
+
+		// Generate a concise activity summary in the background (if possible)
+		go func(taskID int64) {
+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+			defer cancel()
+			_, _ = tasksummary.GenerateAndStore(ctx, s.db, taskID)
+		}(s.taskID)
 
 		// Trigger callback
 		if s.onComplete != nil {

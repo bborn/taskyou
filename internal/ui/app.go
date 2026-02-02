@@ -14,6 +14,7 @@ import (
 	"github.com/bborn/workflow/internal/db"
 	"github.com/bborn/workflow/internal/executor"
 	"github.com/bborn/workflow/internal/github"
+	"github.com/bborn/workflow/internal/tasksummary"
 	"github.com/charmbracelet/bubbles/help"
 	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/textinput"
@@ -46,29 +47,29 @@ const (
 
 // KeyMap defines key bindings.
 type KeyMap struct {
-	Left            key.Binding
-	Right           key.Binding
-	Up              key.Binding
-	Down            key.Binding
-	Enter           key.Binding
-	Back            key.Binding
-	New             key.Binding
-	Edit            key.Binding
-	Queue           key.Binding
-	Retry           key.Binding
-	Close           key.Binding
-	Archive         key.Binding
-	Delete          key.Binding
-	Refresh         key.Binding
-	Settings        key.Binding
-	Help            key.Binding
-	Quit            key.Binding
-	ChangeStatus    key.Binding
-	CommandPalette  key.Binding
-	ToggleDangerous key.Binding
-	TogglePin       key.Binding
-	Filter       key.Binding
-	OpenWorktree key.Binding
+	Left                     key.Binding
+	Right                    key.Binding
+	Up                       key.Binding
+	Down                     key.Binding
+	Enter                    key.Binding
+	Back                     key.Binding
+	New                      key.Binding
+	Edit                     key.Binding
+	Queue                    key.Binding
+	Retry                    key.Binding
+	Close                    key.Binding
+	Archive                  key.Binding
+	Delete                   key.Binding
+	Refresh                  key.Binding
+	Settings                 key.Binding
+	Help                     key.Binding
+	Quit                     key.Binding
+	ChangeStatus             key.Binding
+	CommandPalette           key.Binding
+	ToggleDangerous          key.Binding
+	TogglePin                key.Binding
+	Filter                   key.Binding
+	OpenWorktree             key.Binding
 	ToggleShellPane          key.Binding
 	JumpToNotification       key.Binding
 	JumpToNotificationDetail key.Binding // For detail view (uses Ctrl+g to avoid conflicting with text input)
@@ -2804,6 +2805,12 @@ func (m *AppModel) closeTask(id int64) tea.Cmd {
 				exec.NotifyTaskChange("status_changed", task)
 			}
 		}
+
+		go func(taskID int64) {
+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+			defer cancel()
+			_, _ = tasksummary.GenerateAndStore(ctx, database, taskID)
+		}(id)
 
 		// Kill the task window to clean up both Claude and workdir panes
 		windowTarget := executor.TmuxSessionName(id)

@@ -77,6 +77,7 @@ type DetailModel struct {
 
 	// Content caching to avoid unnecessary re-renders
 	lastRenderedBody    string
+	lastRenderedSummary string
 	lastRenderedLogHash uint64
 	lastRenderedFocused bool
 	cachedContent       string
@@ -2326,6 +2327,7 @@ func (m *DetailModel) renderContent() string {
 	logHash := m.computeLogHash()
 	if m.cachedContent != "" &&
 		m.lastRenderedBody == t.Body &&
+		m.lastRenderedSummary == t.Summary &&
 		m.lastRenderedLogHash == logHash &&
 		m.lastRenderedFocused == m.focused {
 		return m.cachedContent
@@ -2357,6 +2359,40 @@ func (m *DetailModel) renderContent() string {
 					b.WriteString(t.Body)
 				} else {
 					b.WriteString(dimmedStyle.Render(t.Body))
+				}
+			} else {
+				if m.focused {
+					b.WriteString(strings.TrimSpace(rendered))
+				} else {
+					b.WriteString(dimmedStyle.Render(strings.TrimSpace(rendered)))
+				}
+			}
+		}
+		b.WriteString("\n")
+	}
+
+	// Activity summary
+	if t.Summary != "" && strings.TrimSpace(t.Summary) != "" {
+		if b.Len() > 0 {
+			b.WriteString("\n")
+		}
+		b.WriteString(Bold.Render("Activity Summary"))
+		b.WriteString("\n\n")
+
+		renderer := m.getGlamourRenderer(m.focused)
+		if renderer == nil {
+			if m.focused {
+				b.WriteString(t.Summary)
+			} else {
+				b.WriteString(dimmedStyle.Render(t.Summary))
+			}
+		} else {
+			rendered, err := renderer.Render(t.Summary)
+			if err != nil {
+				if m.focused {
+					b.WriteString(t.Summary)
+				} else {
+					b.WriteString(dimmedStyle.Render(t.Summary))
 				}
 			} else {
 				if m.focused {
@@ -2418,6 +2454,7 @@ func (m *DetailModel) renderContent() string {
 
 	// Cache the rendered content
 	m.lastRenderedBody = t.Body
+	m.lastRenderedSummary = t.Summary
 	m.lastRenderedLogHash = logHash
 	m.lastRenderedFocused = m.focused
 	m.cachedContent = content
