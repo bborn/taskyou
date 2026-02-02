@@ -504,6 +504,56 @@ func TestScoreTaskForFilter(t *testing.T) {
 			wantMin: -1,
 			wantMax: -1,
 		},
+		// [project] keyword tests (combined project + keyword filtering)
+		{
+			name:    "project with keyword matches task in project",
+			task:    &db.Task{ID: 1, Title: "Fix authentication bug", Project: "offerlab"},
+			query:   "[offerlab] auth",
+			wantMin: 100,
+			wantMax: 500,
+		},
+		{
+			name:    "project with keyword excludes task in different project",
+			task:    &db.Task{ID: 1, Title: "Fix authentication bug", Project: "workflow"},
+			query:   "[offerlab] auth",
+			wantMin: -1,
+			wantMax: -1,
+		},
+		{
+			name:    "project with keyword excludes task with no project",
+			task:    &db.Task{ID: 1, Title: "Fix authentication bug", Project: ""},
+			query:   "[offerlab] auth",
+			wantMin: -1,
+			wantMax: -1,
+		},
+		{
+			name:    "project with keyword no match for keyword",
+			task:    &db.Task{ID: 1, Title: "Setup database", Project: "offerlab"},
+			query:   "[offerlab] auth",
+			wantMin: -1,
+			wantMax: -1,
+		},
+		{
+			name:    "project bracket with space but no keyword shows all in project",
+			task:    &db.Task{ID: 1, Title: "Any task", Project: "offerlab"},
+			query:   "[offerlab] ",
+			wantMin: 100,
+			wantMax: 100,
+		},
+		{
+			name:    "project with ID keyword match",
+			task:    &db.Task{ID: 42, Title: "Task", Project: "offerlab"},
+			query:   "[offerlab] 42",
+			wantMin: 1000,
+			wantMax: 1000,
+		},
+		{
+			name:    "project filter case insensitive",
+			task:    &db.Task{ID: 1, Title: "Task", Project: "OfferLab"},
+			query:   "[offerlab] task",
+			wantMin: 100,
+			wantMax: 500,
+		},
 	}
 
 	for _, tt := range tests {
