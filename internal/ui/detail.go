@@ -1194,7 +1194,12 @@ func (m *DetailModel) joinTmuxPanes() {
 	// Step 2: Join or create the Shell pane to the right of Claude (unless hidden)
 	if m.shellPaneHidden {
 		log.Debug("joinTmuxPanes: shell pane is hidden, skipping shell join")
-		m.workdirPaneID = ""
+		// Keep the stored shell pane ID so we can bring it back when user toggles to show
+		// The shell pane is still in the hidden window (_hidden_shell_<task_id>)
+		if storedShellPaneID != "" {
+			m.workdirPaneID = storedShellPaneID
+			log.Debug("joinTmuxPanes: preserved hidden shell pane ID %q", m.workdirPaneID)
+		}
 	} else {
 		shellWidth := m.getShellPaneWidth()
 
@@ -1801,25 +1806,33 @@ func (m *DetailModel) breakTmuxPanes(saveHeight bool, resizeTUI bool) {
 	// If we have a workdir pane, join it to the task window alongside Claude
 	// This preserves any running processes (Rails servers, watchers, etc.)
 	if m.workdirPaneID != "" {
-		log.Debug("breakTmuxPanes: joining workdir pane %q to window %q", m.workdirPaneID, targetWindowID)
-
-		// Join the workdir pane horizontally to the right of the Claude pane
-		// -h: horizontal split (side by side)
-		// -d: don't switch focus
-		// -s: source pane (the workdir pane)
-		// -t: target window's first pane (Claude)
-		joinErr := osExec.CommandContext(ctx, "tmux", "join-pane",
-			"-h",
-			"-d",
-			"-s", m.workdirPaneID,
-			"-t", targetWindowID+".0").Run()
-		if joinErr != nil {
-			log.Error("breakTmuxPanes: join-pane for workdir failed: %v", joinErr)
-			// Join failed - kill the pane and its process to avoid orphans
-			m.killPaneWithProcess(ctx, m.workdirPaneID)
-			m.workdirPaneID = ""
+		// If the shell pane is hidden, leave it in the hidden window
+		// The user explicitly hid it to preserve their running process
+		if m.shellPaneHidden {
+			log.Info("breakTmuxPanes: shell pane is hidden, leaving in hidden window to preserve process")
+			// Don't clear workdirPaneID - we still track the pane for later
 		} else {
-			log.Debug("breakTmuxPanes: workdir pane joined successfully")
+			log.Debug("breakTmuxPanes: joining workdir pane %q to window %q", m.workdirPaneID, targetWindowID)
+
+			// Join the workdir pane horizontally to the right of the Claude pane
+			// -h: horizontal split (side by side)
+			// -d: don't switch focus
+			// -s: source pane (the workdir pane)
+			// -t: target window's first pane (Claude)
+			joinErr := osExec.CommandContext(ctx, "tmux", "join-pane",
+				"-h",
+				"-d",
+				"-s", m.workdirPaneID,
+				"-t", targetWindowID+".0").Run()
+			if joinErr != nil {
+				log.Error("breakTmuxPanes: join-pane for workdir failed: %v", joinErr)
+				// Join failed - DO NOT kill the process! The user may have important work running.
+				// Just log the error and leave the pane where it is. It may be orphaned but
+				// preserving the user's process is more important than cleanup.
+				log.Warn("breakTmuxPanes: leaving workdir pane in place to preserve running process")
+			} else {
+				log.Debug("breakTmuxPanes: workdir pane joined successfully")
+			}
 		}
 	}
 
