@@ -335,9 +335,11 @@ type AppModel struct {
 	commandPaletteView *CommandPaletteModel
 
 	// Filter state
-	filterInput  textinput.Model
-	filterActive bool   // Whether filter mode is active (typing in filter)
-	filterText   string // Current filter text (persists when not typing)
+	filterInput        textinput.Model
+	filterActive       bool   // Whether filter mode is active (typing in filter)
+	filterText         string // Current filter text (persists when not typing)
+	filterAutocomplete *FilterAutocompleteModel
+	showFilterDropdown bool // Whether to show the project autocomplete dropdown
 
 	// Available executors (cached on startup)
 	availableExecutors []string
@@ -417,6 +419,9 @@ func NewAppModel(database *db.DB, exec *executor.Executor, workingDir string) *A
 		availableExecutors = exec.AvailableExecutors()
 	}
 
+	// Create filter autocomplete for project suggestions
+	filterAutocomplete := NewFilterAutocompleteModel(database)
+
 	model := &AppModel{
 		db:                 database,
 		executor:           exec,
@@ -433,6 +438,7 @@ func NewAppModel(database *db.DB, exec *executor.Executor, workingDir string) *A
 		prCache:            github.NewPRCache(),
 		filterInput:        filterInput,
 		filterText:         "",
+		filterAutocomplete: filterAutocomplete,
 		availableExecutors: availableExecutors,
 	}
 
@@ -1136,8 +1142,13 @@ func (m *AppModel) renderFilterBar() string {
 	// Help hint
 	helpStyle := lipgloss.NewStyle().Foreground(ColorMuted).Italic(true)
 	if m.filterActive {
-		navHelp := fmt.Sprintf("%s%s%s%s", IconArrowUp(), IconArrowDown(), IconArrowLeft(), IconArrowRight())
-		parts = append(parts, helpStyle.Render(fmt.Sprintf("  (backspace: clear, Enter: select, %s: navigate)", navHelp)))
+		// Show different help based on whether autocomplete dropdown is showing
+		if m.showFilterDropdown && m.filterAutocomplete.HasResults() {
+			parts = append(parts, helpStyle.Render("  (Tab: select project, ↑↓: navigate)"))
+		} else {
+			navHelp := fmt.Sprintf("%s%s%s%s", IconArrowUp(), IconArrowDown(), IconArrowLeft(), IconArrowRight())
+			parts = append(parts, helpStyle.Render(fmt.Sprintf("  (backspace: clear, Enter: select, %s: navigate, [: project)", navHelp)))
+		}
 	} else if m.filterText != "" {
 		parts = append(parts, helpStyle.Render("  (/: edit, Esc: clear)"))
 	}
@@ -1154,7 +1165,14 @@ func (m *AppModel) renderFilterBar() string {
 			Background(lipgloss.Color("#333333"))
 	}
 
-	return filterBarStyle.Render(filterContent)
+	filterBar := filterBarStyle.Render(filterContent)
+
+	// Add autocomplete dropdown below filter bar if showing
+	if m.showFilterDropdown && m.filterAutocomplete.HasResults() {
+		filterBar = lipgloss.JoinVertical(lipgloss.Left, filterBar, m.filterAutocomplete.View())
+	}
+
+	return filterBar
 }
 
 func (m *AppModel) renderHelp() string {
@@ -1321,89 +1339,111 @@ func (m *AppModel) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 // updateFilterMode handles input when filter mode is active.
-// Navigation keys work while typing. The filter stays applied when you navigate away.
-// Esc or backspace on empty clears filter and hides the filter bar.
+// Tab accepts autocomplete suggestions for project names when typing "[project".
 func (m *AppModel) updateFilterMode(msg tea.Msg) (tea.Model, tea.Cmd) {
-	switch msg := msg.(type) {
-	case tea.KeyMsg:
-		switch msg.String() {
-		case "esc":
-			// Exit filter mode and clear filter
-			m.filterActive = false
-			m.filterText = ""
-			m.filterInput.SetValue("")
-			m.filterInput.Blur()
-			return m, m.loadTasks()
-		case "backspace":
-			// If filter is empty, clear and exit
-			if m.filterInput.Value() == "" {
-				m.filterActive = false
-				m.filterText = ""
-				m.filterInput.Blur()
-				return m, m.loadTasks()
-			}
-			// Otherwise, let the text input handle backspace
-			var cmd tea.Cmd
-			m.filterInput, cmd = m.filterInput.Update(msg)
-			newFilterText := m.filterInput.Value()
-			if newFilterText != m.filterText {
-				m.filterText = newFilterText
-				m.applyFilter()
-			}
-			return m, cmd
-		case "enter":
-			// Select task if one is highlighted
-			if task := m.kanban.SelectedTask(); task != nil {
-				m.filterActive = false
-				m.filterInput.Blur()
-				return m, m.loadTask(task.ID)
-			}
-			// Otherwise just exit filter mode
-			m.filterActive = false
-			m.filterInput.Blur()
-			return m, nil
-		case "up":
-			// Navigate while in filter mode (arrow keys only, not hjkl)
-			m.filterActive = false
-			m.filterInput.Blur()
-			m.kanban.MoveUp()
-			return m, nil
-		case "down":
-			m.filterActive = false
-			m.filterInput.Blur()
-			m.kanban.MoveDown()
-			return m, nil
-		case "left":
-			m.filterActive = false
-			m.filterInput.Blur()
-			m.kanban.MoveLeft()
-			return m, nil
-		case "right":
-			m.filterActive = false
-			m.filterInput.Blur()
-			m.kanban.MoveRight()
-			return m, nil
-		case "ctrl+c":
-			// Allow quit even in filter mode
-			if m.eventCh != nil {
-				m.executor.UnsubscribeTaskEvents(m.eventCh)
-			}
-			m.stopDatabaseWatcher()
-			return m, tea.Quit
-		}
+	keyMsg, ok := msg.(tea.KeyMsg)
+	if !ok {
+		return m.handleFilterInput(msg)
 	}
 
-	// Update the text input
+	switch keyMsg.String() {
+	case "esc":
+		m.filterActive, m.filterText, m.showFilterDropdown = false, "", false
+		m.filterInput.SetValue("")
+		m.filterInput.Blur()
+		m.filterAutocomplete.Reset()
+		return m, m.loadTasks()
+
+	case "backspace":
+		if m.filterInput.Value() == "" {
+			m.filterActive, m.showFilterDropdown = false, false
+			m.filterInput.Blur()
+			m.filterAutocomplete.Reset()
+			return m, m.loadTasks()
+		}
+		return m.handleFilterInput(msg)
+
+	case "tab", "enter":
+		// Accept autocomplete if showing
+		if m.showFilterDropdown && m.filterAutocomplete.HasResults() {
+			if name := m.filterAutocomplete.Select(); name != "" {
+				m.filterInput.SetValue("[" + name + "] ")
+				m.filterInput.SetCursor(len(m.filterInput.Value()))
+				m.filterText = m.filterInput.Value()
+				m.applyFilter()
+				m.showFilterDropdown = false
+				m.filterAutocomplete.Reset()
+				return m, nil
+			}
+		}
+		if keyMsg.String() == "tab" {
+			return m, nil
+		}
+		// Enter: select task or exit
+		m.filterActive, m.showFilterDropdown = false, false
+		m.filterInput.Blur()
+		if task := m.kanban.SelectedTask(); task != nil {
+			return m, m.loadTask(task.ID)
+		}
+		return m, nil
+
+	case "up", "down", "left", "right":
+		// Autocomplete navigation
+		if m.showFilterDropdown && m.filterAutocomplete.HasResults() {
+			if keyMsg.String() == "up" {
+				m.filterAutocomplete.MoveUp()
+			} else if keyMsg.String() == "down" {
+				m.filterAutocomplete.MoveDown()
+			}
+			if keyMsg.String() == "up" || keyMsg.String() == "down" {
+				return m, nil
+			}
+		}
+		// Exit filter and navigate kanban
+		m.filterActive, m.showFilterDropdown = false, false
+		m.filterInput.Blur()
+		switch keyMsg.String() {
+		case "up":
+			m.kanban.MoveUp()
+		case "down":
+			m.kanban.MoveDown()
+		case "left":
+			m.kanban.MoveLeft()
+		case "right":
+			m.kanban.MoveRight()
+		}
+		return m, nil
+
+	case "ctrl+c":
+		if m.eventCh != nil {
+			m.executor.UnsubscribeTaskEvents(m.eventCh)
+		}
+		m.stopDatabaseWatcher()
+		return m, tea.Quit
+	}
+
+	return m.handleFilterInput(msg)
+}
+
+// handleFilterInput processes text input and updates autocomplete state.
+func (m *AppModel) handleFilterInput(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 	m.filterInput, cmd = m.filterInput.Update(msg)
 
-	// If filter text changed, apply filter
-	newFilterText := m.filterInput.Value()
-	if newFilterText != m.filterText {
-		m.filterText = newFilterText
+	if newText := m.filterInput.Value(); newText != m.filterText {
+		m.filterText = newText
 		m.applyFilter()
-	}
 
+		// Update autocomplete: show when typing "[project" but not after "] "
+		if strings.HasPrefix(newText, "[") && !strings.Contains(newText, "] ") {
+			query := strings.TrimSuffix(strings.TrimPrefix(newText, "["), "]")
+			m.filterAutocomplete.SetQuery(query)
+			m.showFilterDropdown = m.filterAutocomplete.HasResults()
+		} else {
+			m.showFilterDropdown = false
+			m.filterAutocomplete.Reset()
+		}
+	}
 	return m, cmd
 }
 
@@ -1441,94 +1481,74 @@ func (m *AppModel) applyFilter() {
 }
 
 // scoreTaskForFilter calculates a fuzzy match score for a task against the query.
-// Returns -1 if the task doesn't match, otherwise returns a positive score.
-// Higher scores indicate better matches.
-// This uses the same matching logic as the command palette (Ctrl+P) for consistency.
-//
-// Special prefixes:
-//   - "[project" filters only on the project field (matches the [project] display format)
+// Special: "[project" filters by project, "[project] keyword" filters within project.
 func scoreTaskForFilter(task *db.Task, query string) int {
-	bestScore := -1
-
-	// Check for project-only filter prefix "[" (matches display format [project])
+	// Handle "[project..." syntax
 	if strings.HasPrefix(query, "[") {
-		projectQuery := strings.TrimPrefix(query, "[")
-		// Also strip trailing ] if present (user typed full "[project]")
-		projectQuery = strings.TrimSuffix(projectQuery, "]")
+		// "[project] keyword" pattern
+		if idx := strings.Index(query, "] "); idx != -1 {
+			projectName := strings.TrimPrefix(query[:idx], "[")
+			if !strings.EqualFold(task.Project, projectName) {
+				return -1
+			}
+			keyword := strings.TrimSpace(query[idx+2:])
+			if keyword == "" {
+				return 100
+			}
+			return scoreTaskFields(task, keyword, false)
+		}
+		// Still typing project name
+		projectQuery := strings.TrimSuffix(strings.TrimPrefix(query, "["), "]")
 		if projectQuery == "" {
-			// Just "[" typed, show all tasks with a project
 			if task.Project != "" {
 				return 100
 			}
 			return -1
 		}
-		// Only match against project field
-		projectScore := fuzzyScore(task.Project, projectQuery)
-		if projectScore > 0 {
-			return projectScore
+		if s := fuzzyScore(task.Project, projectQuery); s > 0 {
+			return s
 		}
 		return -1
 	}
 
-	// Check task ID (exact or prefix match gets high priority)
+	return scoreTaskFields(task, query, true)
+}
+
+// scoreTaskFields scores a task against a query, optionally including project field.
+func scoreTaskFields(task *db.Task, query string, includeProject bool) int {
+	// ID match (highest priority)
 	idStr := fmt.Sprintf("%d", task.ID)
-	if strings.HasPrefix(query, "#") {
-		idQuery := strings.TrimPrefix(query, "#")
-		if strings.Contains(idStr, idQuery) {
-			return 1000 // ID matches are highest priority
-		}
-	} else if strings.Contains(idStr, query) {
-		return 1000 // ID matches are highest priority
+	q := strings.TrimPrefix(query, "#")
+	if strings.Contains(idStr, q) {
+		return 1000
 	}
 
-	// Check PR number (high priority for specific lookups)
-	if task.PRNumber > 0 {
-		prNumStr := fmt.Sprintf("%d", task.PRNumber)
-		prQuery := query
-		if strings.HasPrefix(query, "#") {
-			prQuery = strings.TrimPrefix(query, "#")
-		}
-		if strings.Contains(prNumStr, prQuery) {
-			return 900 // PR number matches are high priority
-		}
+	// PR number match
+	if task.PRNumber > 0 && strings.Contains(fmt.Sprintf("%d", task.PRNumber), q) {
+		return 900
 	}
 
-	// Check PR URL
-	if task.PRURL != "" {
-		if strings.Contains(strings.ToLower(task.PRURL), query) {
-			return 800 // PR URL matches
+	// PR URL match
+	if task.PRURL != "" && strings.Contains(strings.ToLower(task.PRURL), query) {
+		return 800
+	}
+
+	best := -1
+	if s := fuzzyScore(task.Title, query); s > best {
+		best = s
+	}
+	if includeProject {
+		if s := fuzzyScore(task.Project, query) - 50; s > best {
+			best = s
 		}
 	}
-
-	// Fuzzy match on title (primary search field)
-	titleScore := fuzzyScore(task.Title, query)
-	if titleScore > bestScore {
-		bestScore = titleScore
+	if s := fuzzyScore(task.Type, query) - 50; s > best {
+		best = s
 	}
-
-	// Also check project name with fuzzy matching
-	projectScore := fuzzyScore(task.Project, query)
-	if projectScore > bestScore {
-		// Project matches get a slight penalty vs title matches
-		bestScore = projectScore - 50
+	if strings.Contains(strings.ToLower(task.Status), query) && 100 > best {
+		best = 100
 	}
-
-	// Check task type with fuzzy matching
-	typeScore := fuzzyScore(task.Type, query)
-	if typeScore > bestScore {
-		// Type matches get a slight penalty
-		bestScore = typeScore - 50
-	}
-
-	// Check status as substring match
-	if strings.Contains(strings.ToLower(task.Status), query) {
-		statusScore := 100
-		if statusScore > bestScore {
-			bestScore = statusScore
-		}
-	}
-
-	return bestScore
+	return best
 }
 
 func (m *AppModel) updateDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
