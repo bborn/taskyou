@@ -97,6 +97,11 @@ func main() {
 		Short: "Run the task executor daemon",
 		Long:  "Runs the background executor that processes queued tasks.",
 		Run: func(cmd *cobra.Command, args []string) {
+			// Set dangerous mode env var if flag is enabled
+			// This is checked by executors when spawning Claude sessions
+			if dangerous {
+				os.Setenv("WORKTREE_DANGEROUS_MODE", "1")
+			}
 			if err := runDaemon(); err != nil {
 				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
 				os.Exit(1)
@@ -2342,6 +2347,15 @@ func runDaemon() error {
 		return fmt.Errorf("write pid file: %w", err)
 	}
 	defer os.Remove(pidFile)
+
+	// Write mode file so we know what mode the daemon is running in
+	modeFile := pidFile + ".mode"
+	modeStr := "safe"
+	if os.Getenv("WORKTREE_DANGEROUS_MODE") == "1" {
+		modeStr = "dangerous"
+	}
+	os.WriteFile(modeFile, []byte(modeStr), 0644)
+	defer os.Remove(modeFile)
 
 	// Setup logger
 	logger := log.NewWithOptions(os.Stderr, log.Options{
