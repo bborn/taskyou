@@ -96,9 +96,9 @@ type DetailModel struct {
 	paneError        string    // user-visible error when panes fail to open
 
 	// Notification state (passed from app)
-	notification   string // current notification message
-	notifyTaskID   int64  // task that triggered the notification
-	notifyUntil    time.Time
+	notification string // current notification message
+	notifyTaskID int64  // task that triggered the notification
+	notifyUntil  time.Time
 
 	// Focus executor pane after joining (e.g., when jumping from notification)
 	focusExecutorOnJoin bool
