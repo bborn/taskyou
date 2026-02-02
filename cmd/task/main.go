@@ -1895,6 +1895,145 @@ Examples:
 
 	rootCmd.AddCommand(eventsCmd)
 
+	// Projects subcommand - manage projects
+	projectsCmd := &cobra.Command{
+		Use:   "projects",
+		Short: "Manage projects",
+		Long: `List, create, update, and delete projects.
+
+Examples:
+  ty projects                    # List all projects
+  ty projects list               # List all projects
+  ty projects show myapp         # Show project details
+  ty projects create myapp       # Create new project
+  ty projects update myapp       # Update project settings
+  ty projects delete myapp       # Delete a project`,
+		Run: func(cmd *cobra.Command, args []string) {
+			// Default to list when no subcommand provided
+			listProjectsCLI(cmd)
+		},
+	}
+	projectsCmd.Flags().Bool("json", false, "Output in JSON format")
+
+	// Projects list subcommand
+	projectsListCmd := &cobra.Command{
+		Use:   "list",
+		Short: "List all projects",
+		Run: func(cmd *cobra.Command, args []string) {
+			listProjectsCLI(cmd)
+		},
+	}
+	projectsListCmd.Flags().Bool("json", false, "Output in JSON format")
+	projectsCmd.AddCommand(projectsListCmd)
+
+	// Projects show subcommand
+	projectsShowCmd := &cobra.Command{
+		Use:   "show <name>",
+		Short: "Show project details",
+		Long: `Show detailed information about a project including its instructions.
+
+Examples:
+  ty projects show myapp
+  ty projects show myapp --json`,
+		Args: cobra.ExactArgs(1),
+		Run: func(cmd *cobra.Command, args []string) {
+			outputJSON, _ := cmd.Flags().GetBool("json")
+			showProjectCLI(args[0], outputJSON)
+		},
+	}
+	projectsShowCmd.Flags().Bool("json", false, "Output in JSON format")
+	projectsCmd.AddCommand(projectsShowCmd)
+
+	// Projects create subcommand
+	projectsCreateCmd := &cobra.Command{
+		Use:   "create <name>",
+		Short: "Create a new project",
+		Long: `Create a new project with the specified name.
+
+Examples:
+  ty projects create myapp --path ~/Projects/myapp
+  ty projects create myapp --path ~/Projects/myapp --instructions "Use TypeScript"
+  ty projects create myapp --path ~/Projects/myapp --color "#61AFEF"`,
+		Args: cobra.ExactArgs(1),
+		Run: func(cmd *cobra.Command, args []string) {
+			path, _ := cmd.Flags().GetString("path")
+			instructions, _ := cmd.Flags().GetString("instructions")
+			color, _ := cmd.Flags().GetString("color")
+			aliases, _ := cmd.Flags().GetString("aliases")
+			claudeConfigDir, _ := cmd.Flags().GetString("claude-config-dir")
+			outputJSON, _ := cmd.Flags().GetBool("json")
+
+			createProjectCLI(args[0], path, instructions, color, aliases, claudeConfigDir, outputJSON)
+		},
+	}
+	projectsCreateCmd.Flags().StringP("path", "p", "", "Project directory path (required)")
+	projectsCreateCmd.Flags().StringP("instructions", "i", "", "Project-specific AI instructions")
+	projectsCreateCmd.Flags().StringP("color", "c", "", "Hex color for display (e.g., #61AFEF)")
+	projectsCreateCmd.Flags().StringP("aliases", "a", "", "Comma-separated aliases for lookup")
+	projectsCreateCmd.Flags().String("claude-config-dir", "", "Override CLAUDE_CONFIG_DIR for this project")
+	projectsCreateCmd.Flags().Bool("json", false, "Output in JSON format")
+	projectsCreateCmd.MarkFlagRequired("path")
+	projectsCmd.AddCommand(projectsCreateCmd)
+
+	// Projects update subcommand
+	projectsUpdateCmd := &cobra.Command{
+		Use:   "update <name>",
+		Short: "Update project settings",
+		Long: `Update settings for an existing project.
+
+Examples:
+  ty projects update myapp --instructions "Use TypeScript and React"
+  ty projects update myapp --color "#10B981"
+  ty projects update myapp --name newname
+  ty projects update myapp --path ~/Projects/newpath
+  ty projects update myapp --context "Project context summary..."`,
+		Args: cobra.ExactArgs(1),
+		Run: func(cmd *cobra.Command, args []string) {
+			name, _ := cmd.Flags().GetString("name")
+			path, _ := cmd.Flags().GetString("path")
+			instructions, _ := cmd.Flags().GetString("instructions")
+			color, _ := cmd.Flags().GetString("color")
+			aliases, _ := cmd.Flags().GetString("aliases")
+			claudeConfigDir, _ := cmd.Flags().GetString("claude-config-dir")
+			projectContext, _ := cmd.Flags().GetString("context")
+			outputJSON, _ := cmd.Flags().GetBool("json")
+
+			updateProjectCLI(args[0], name, path, instructions, color, aliases, claudeConfigDir, projectContext, outputJSON)
+		},
+	}
+	projectsUpdateCmd.Flags().StringP("name", "n", "", "New project name")
+	projectsUpdateCmd.Flags().StringP("path", "p", "", "Project directory path")
+	projectsUpdateCmd.Flags().StringP("instructions", "i", "", "Project-specific AI instructions")
+	projectsUpdateCmd.Flags().StringP("color", "c", "", "Hex color for display (e.g., #61AFEF)")
+	projectsUpdateCmd.Flags().StringP("aliases", "a", "", "Comma-separated aliases for lookup")
+	projectsUpdateCmd.Flags().String("claude-config-dir", "", "Override CLAUDE_CONFIG_DIR for this project")
+	projectsUpdateCmd.Flags().String("context", "", "Cached project context summary")
+	projectsUpdateCmd.Flags().Bool("json", false, "Output in JSON format")
+	projectsCmd.AddCommand(projectsUpdateCmd)
+
+	// Projects delete subcommand
+	projectsDeleteCmd := &cobra.Command{
+		Use:   "delete <name>",
+		Short: "Delete a project",
+		Long: `Delete a project. The 'personal' project cannot be deleted.
+
+Note: This only removes the project from the task system. It does not
+delete any files or directories on disk.
+
+Examples:
+  ty projects delete myapp
+  ty projects delete myapp --force  # Skip confirmation`,
+		Args: cobra.ExactArgs(1),
+		Run: func(cmd *cobra.Command, args []string) {
+			force, _ := cmd.Flags().GetBool("force")
+			deleteProjectCLI(args[0], force)
+		},
+	}
+	projectsDeleteCmd.Flags().BoolP("force", "f", false, "Skip confirmation prompt")
+	projectsCmd.AddCommand(projectsDeleteCmd)
+
+	rootCmd.AddCommand(projectsCmd)
+
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
 		os.Exit(1)
@@ -3588,3 +3727,415 @@ func previewStaleClaudeProjectConfigs(configPath string) (int, []string, error) 
 	return len(stalePaths), stalePaths, nil
 }
 
+// listProjectsCLI lists all projects in the database.
+func listProjectsCLI(cmd *cobra.Command) {
+	outputJSON, _ := cmd.Flags().GetBool("json")
+
+	dbPath := db.DefaultPath()
+	database, err := db.Open(dbPath)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+		os.Exit(1)
+	}
+	defer database.Close()
+
+	projects, err := database.ListProjects()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+		os.Exit(1)
+	}
+
+	if outputJSON {
+		var output []map[string]interface{}
+		for _, p := range projects {
+			taskCount, _ := database.CountTasksByProject(p.Name)
+			item := map[string]interface{}{
+				"id":         p.ID,
+				"name":       p.Name,
+				"path":       p.Path,
+				"color":      p.Color,
+				"task_count": taskCount,
+				"created_at": p.CreatedAt.Time.Format(time.RFC3339),
+			}
+			if p.Aliases != "" {
+				item["aliases"] = p.Aliases
+			}
+			if p.Instructions != "" {
+				item["has_instructions"] = true
+			}
+			if p.ClaudeConfigDir != "" {
+				item["claude_config_dir"] = p.ClaudeConfigDir
+			}
+			output = append(output, item)
+		}
+		jsonBytes, _ := json.Marshal(output)
+		fmt.Println(string(jsonBytes))
+		return
+	}
+
+	if len(projects) == 0 {
+		fmt.Println(dimStyle.Render("No projects found"))
+		return
+	}
+
+	fmt.Println(boldStyle.Render("Projects"))
+	fmt.Println(strings.Repeat("─", 60))
+
+	for _, p := range projects {
+		taskCount, _ := database.CountTasksByProject(p.Name)
+
+		// Color indicator
+		colorIndicator := ""
+		if p.Color != "" {
+			colorStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(p.Color))
+			colorIndicator = colorStyle.Render("●") + " "
+		}
+
+		// Name with task count
+		nameStr := boldStyle.Render(p.Name)
+		countStr := dimStyle.Render(fmt.Sprintf("(%d tasks)", taskCount))
+
+		fmt.Printf("%s%s %s\n", colorIndicator, nameStr, countStr)
+		fmt.Printf("  %s\n", dimStyle.Render(p.Path))
+
+		if p.Aliases != "" {
+			fmt.Printf("  %s %s\n", dimStyle.Render("Aliases:"), p.Aliases)
+		}
+	}
+}
+
+// showProjectCLI shows detailed information about a single project.
+func showProjectCLI(name string, outputJSON bool) {
+	dbPath := db.DefaultPath()
+	database, err := db.Open(dbPath)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+		os.Exit(1)
+	}
+	defer database.Close()
+
+	project, err := database.GetProjectByName(name)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+		os.Exit(1)
+	}
+	if project == nil {
+		fmt.Fprintln(os.Stderr, errorStyle.Render(fmt.Sprintf("Project '%s' not found", name)))
+		os.Exit(1)
+	}
+
+	taskCount, _ := database.CountTasksByProject(project.Name)
+	projectContext, _ := database.GetProjectContext(project.Name)
+
+	if outputJSON {
+		output := map[string]interface{}{
+			"id":         project.ID,
+			"name":       project.Name,
+			"path":       project.Path,
+			"color":      project.Color,
+			"aliases":    project.Aliases,
+			"task_count": taskCount,
+			"created_at": project.CreatedAt.Time.Format(time.RFC3339),
+		}
+		if project.Instructions != "" {
+			output["instructions"] = project.Instructions
+		}
+		if project.ClaudeConfigDir != "" {
+			output["claude_config_dir"] = project.ClaudeConfigDir
+		}
+		if projectContext != "" {
+			output["context"] = projectContext
+		}
+		if len(project.Actions) > 0 {
+			output["actions"] = project.Actions
+		}
+		jsonBytes, _ := json.MarshalIndent(output, "", "  ")
+		fmt.Println(string(jsonBytes))
+		return
+	}
+
+	// Color indicator
+	colorIndicator := ""
+	if project.Color != "" {
+		colorStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(project.Color))
+		colorIndicator = colorStyle.Render("●") + " "
+	}
+
+	fmt.Println(boldStyle.Render(fmt.Sprintf("%s%s", colorIndicator, project.Name)))
+	fmt.Println(strings.Repeat("─", 60))
+
+	fmt.Printf("%s %s\n", dimStyle.Render("Path:"), project.Path)
+	fmt.Printf("%s %d\n", dimStyle.Render("Tasks:"), taskCount)
+
+	if project.Aliases != "" {
+		fmt.Printf("%s %s\n", dimStyle.Render("Aliases:"), project.Aliases)
+	}
+	if project.Color != "" {
+		fmt.Printf("%s %s\n", dimStyle.Render("Color:"), project.Color)
+	}
+	if project.ClaudeConfigDir != "" {
+		fmt.Printf("%s %s\n", dimStyle.Render("Claude Config:"), project.ClaudeConfigDir)
+	}
+
+	if project.Instructions != "" {
+		fmt.Println()
+		fmt.Println(boldStyle.Render("Instructions:"))
+		fmt.Println(project.Instructions)
+	}
+
+	if len(project.Actions) > 0 {
+		fmt.Println()
+		fmt.Println(boldStyle.Render("Actions:"))
+		for _, action := range project.Actions {
+			fmt.Printf("  %s: %s\n", dimStyle.Render(action.Trigger), action.Instructions)
+		}
+	}
+
+	if projectContext != "" {
+		fmt.Println()
+		fmt.Println(boldStyle.Render("Context:"))
+		// Truncate context if too long for display
+		contextDisplay := projectContext
+		if len(contextDisplay) > 500 {
+			contextDisplay = contextDisplay[:500] + "...\n" + dimStyle.Render(fmt.Sprintf("(truncated, %d chars total)", len(projectContext)))
+		}
+		fmt.Println(contextDisplay)
+	}
+}
+
+// createProjectCLI creates a new project.
+func createProjectCLI(name, path, instructions, color, aliases, claudeConfigDir string, outputJSON bool) {
+	// Validate name
+	if strings.TrimSpace(name) == "" {
+		fmt.Fprintln(os.Stderr, errorStyle.Render("Error: project name cannot be empty"))
+		os.Exit(1)
+	}
+
+	// Expand path
+	if path == "" {
+		fmt.Fprintln(os.Stderr, errorStyle.Render("Error: --path is required"))
+		os.Exit(1)
+	}
+	expandedPath := path
+	if strings.HasPrefix(path, "~") {
+		home, _ := os.UserHomeDir()
+		expandedPath = filepath.Join(home, path[1:])
+	}
+	absPath, err := filepath.Abs(expandedPath)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, errorStyle.Render("Error: invalid path: "+err.Error()))
+		os.Exit(1)
+	}
+
+	// Check if path exists
+	if _, err := os.Stat(absPath); os.IsNotExist(err) {
+		fmt.Fprintln(os.Stderr, errorStyle.Render(fmt.Sprintf("Error: path does not exist: %s", absPath)))
+		os.Exit(1)
+	}
+
+	dbPath := db.DefaultPath()
+	database, err := db.Open(dbPath)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+		os.Exit(1)
+	}
+	defer database.Close()
+
+	// Check if project already exists
+	existing, _ := database.GetProjectByName(name)
+	if existing != nil {
+		fmt.Fprintln(os.Stderr, errorStyle.Render(fmt.Sprintf("Error: project '%s' already exists", name)))
+		os.Exit(1)
+	}
+
+	project := &db.Project{
+		Name:            name,
+		Path:            absPath,
+		Instructions:    instructions,
+		Color:           color,
+		Aliases:         aliases,
+		ClaudeConfigDir: claudeConfigDir,
+	}
+
+	if err := database.CreateProject(project); err != nil {
+		fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+		os.Exit(1)
+	}
+
+	if outputJSON {
+		output := map[string]interface{}{
+			"id":         project.ID,
+			"name":       project.Name,
+			"path":       project.Path,
+			"created_at": project.CreatedAt.Time.Format(time.RFC3339),
+		}
+		if project.Color != "" {
+			output["color"] = project.Color
+		}
+		if project.Instructions != "" {
+			output["instructions"] = project.Instructions
+		}
+		jsonBytes, _ := json.Marshal(output)
+		fmt.Println(string(jsonBytes))
+	} else {
+		fmt.Println(successStyle.Render(fmt.Sprintf("Created project '%s' at %s", name, absPath)))
+	}
+}
+
+// updateProjectCLI updates an existing project.
+func updateProjectCLI(currentName, newName, path, instructions, color, aliases, claudeConfigDir, projectContext string, outputJSON bool) {
+	dbPath := db.DefaultPath()
+	database, err := db.Open(dbPath)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+		os.Exit(1)
+	}
+	defer database.Close()
+
+	project, err := database.GetProjectByName(currentName)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+		os.Exit(1)
+	}
+	if project == nil {
+		fmt.Fprintln(os.Stderr, errorStyle.Render(fmt.Sprintf("Project '%s' not found", currentName)))
+		os.Exit(1)
+	}
+
+	// Track what changed
+	changes := []string{}
+
+	// Update fields if provided
+	if newName != "" && newName != project.Name {
+		// Check if new name is available
+		existing, _ := database.GetProjectByName(newName)
+		if existing != nil {
+			fmt.Fprintln(os.Stderr, errorStyle.Render(fmt.Sprintf("Error: project '%s' already exists", newName)))
+			os.Exit(1)
+		}
+		project.Name = newName
+		changes = append(changes, "name")
+	}
+
+	if path != "" {
+		expandedPath := path
+		if strings.HasPrefix(path, "~") {
+			home, _ := os.UserHomeDir()
+			expandedPath = filepath.Join(home, path[1:])
+		}
+		absPath, err := filepath.Abs(expandedPath)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, errorStyle.Render("Error: invalid path: "+err.Error()))
+			os.Exit(1)
+		}
+		if _, err := os.Stat(absPath); os.IsNotExist(err) {
+			fmt.Fprintln(os.Stderr, errorStyle.Render(fmt.Sprintf("Error: path does not exist: %s", absPath)))
+			os.Exit(1)
+		}
+		project.Path = absPath
+		changes = append(changes, "path")
+	}
+
+	if instructions != "" {
+		project.Instructions = instructions
+		changes = append(changes, "instructions")
+	}
+
+	if color != "" {
+		project.Color = color
+		changes = append(changes, "color")
+	}
+
+	if aliases != "" {
+		project.Aliases = aliases
+		changes = append(changes, "aliases")
+	}
+
+	if claudeConfigDir != "" {
+		project.ClaudeConfigDir = claudeConfigDir
+		changes = append(changes, "claude_config_dir")
+	}
+
+	if len(changes) == 0 && projectContext == "" {
+		fmt.Fprintln(os.Stderr, errorStyle.Render("Error: no changes specified"))
+		os.Exit(1)
+	}
+
+	if err := database.UpdateProject(project); err != nil {
+		fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+		os.Exit(1)
+	}
+
+	// Handle context separately
+	if projectContext != "" {
+		if err := database.SetProjectContext(project.Name, projectContext); err != nil {
+			fmt.Fprintln(os.Stderr, errorStyle.Render("Error updating context: "+err.Error()))
+			os.Exit(1)
+		}
+		changes = append(changes, "context")
+	}
+
+	if outputJSON {
+		output := map[string]interface{}{
+			"id":      project.ID,
+			"name":    project.Name,
+			"path":    project.Path,
+			"updated": changes,
+		}
+		jsonBytes, _ := json.Marshal(output)
+		fmt.Println(string(jsonBytes))
+	} else {
+		fmt.Println(successStyle.Render(fmt.Sprintf("Updated project '%s': %s", project.Name, strings.Join(changes, ", "))))
+	}
+}
+
+// deleteProjectCLI deletes a project.
+func deleteProjectCLI(name string, force bool) {
+	dbPath := db.DefaultPath()
+	database, err := db.Open(dbPath)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+		os.Exit(1)
+	}
+	defer database.Close()
+
+	project, err := database.GetProjectByName(name)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+		os.Exit(1)
+	}
+	if project == nil {
+		fmt.Fprintln(os.Stderr, errorStyle.Render(fmt.Sprintf("Project '%s' not found", name)))
+		os.Exit(1)
+	}
+
+	// The 'personal' project cannot be deleted (enforced in DB layer too)
+	if project.Name == "personal" {
+		fmt.Fprintln(os.Stderr, errorStyle.Render("Error: the 'personal' project cannot be deleted"))
+		os.Exit(1)
+	}
+
+	// Confirm unless --force flag is set
+	if !force {
+		taskCount, _ := database.CountTasksByProject(project.Name)
+		msg := fmt.Sprintf("Delete project '%s'?", name)
+		if taskCount > 0 {
+			msg = fmt.Sprintf("Delete project '%s' (%d tasks will become unassigned)?", name, taskCount)
+		}
+		fmt.Printf("%s [y/N] ", msg)
+		reader := bufio.NewReader(os.Stdin)
+		response, _ := reader.ReadString('\n')
+		response = strings.TrimSpace(strings.ToLower(response))
+		if response != "y" && response != "yes" {
+			fmt.Println("Cancelled")
+			return
+		}
+	}
+
+	if err := database.DeleteProject(project.ID); err != nil {
+		fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+		os.Exit(1)
+	}
+
+	fmt.Println(successStyle.Render(fmt.Sprintf("Deleted project '%s'", name)))
+}
