@@ -2,6 +2,7 @@ package executor
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1379,4 +1380,206 @@ func TestClaudeEnvPrefix(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestWriteWorkflowMCPConfig(t *testing.T) {
+	t.Run("creates .mcp.json when none exists", func(t *testing.T) {
+		worktreePath := t.TempDir()
+		taskID := int64(123)
+
+		err := writeWorkflowMCPConfig(worktreePath, taskID)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		// Read and verify the config
+		mcpFilePath := filepath.Join(worktreePath, ".mcp.json")
+		data, err := os.ReadFile(mcpFilePath)
+		if err != nil {
+			t.Fatalf("failed to read .mcp.json: %v", err)
+		}
+
+		var config map[string]interface{}
+		if err := json.Unmarshal(data, &config); err != nil {
+			t.Fatalf("failed to parse .mcp.json: %v", err)
+		}
+
+		mcpServers, ok := config["mcpServers"].(map[string]interface{})
+		if !ok {
+			t.Fatal("expected mcpServers key in config")
+		}
+
+		workflow, ok := mcpServers["workflow"].(map[string]interface{})
+		if !ok {
+			t.Fatal("expected workflow key in mcpServers")
+		}
+
+		if workflow["type"] != "stdio" {
+			t.Errorf("workflow type = %v, want stdio", workflow["type"])
+		}
+
+		args, ok := workflow["args"].([]interface{})
+		if !ok {
+			t.Fatal("expected args array in workflow config")
+		}
+		if len(args) != 3 || args[0] != "mcp-server" || args[1] != "--task-id" || args[2] != "123" {
+			t.Errorf("workflow args = %v, want [mcp-server --task-id 123]", args)
+		}
+	})
+
+	t.Run("preserves existing MCP servers", func(t *testing.T) {
+		worktreePath := t.TempDir()
+		taskID := int64(456)
+
+		// Create existing .mcp.json with other servers
+		mcpFilePath := filepath.Join(worktreePath, ".mcp.json")
+		existingConfig := `{"mcpServers": {"github": {"type": "stdio", "command": "gh-mcp"}}}`
+		if err := os.WriteFile(mcpFilePath, []byte(existingConfig), 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		err := writeWorkflowMCPConfig(worktreePath, taskID)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		// Read and verify both servers exist
+		data, err := os.ReadFile(mcpFilePath)
+		if err != nil {
+			t.Fatalf("failed to read .mcp.json: %v", err)
+		}
+
+		var config map[string]interface{}
+		if err := json.Unmarshal(data, &config); err != nil {
+			t.Fatalf("failed to parse .mcp.json: %v", err)
+		}
+
+		mcpServers, ok := config["mcpServers"].(map[string]interface{})
+		if !ok {
+			t.Fatal("expected mcpServers key in config")
+		}
+
+		// Check github server preserved
+		github, ok := mcpServers["github"].(map[string]interface{})
+		if !ok {
+			t.Fatal("expected github key in mcpServers - existing server not preserved")
+		}
+		if github["command"] != "gh-mcp" {
+			t.Errorf("github command = %v, want gh-mcp", github["command"])
+		}
+
+		// Check workflow server added
+		if _, ok := mcpServers["workflow"].(map[string]interface{}); !ok {
+			t.Fatal("expected workflow key in mcpServers")
+		}
+	})
+
+	t.Run("replaces symlink with regular file", func(t *testing.T) {
+		projectDir := t.TempDir()
+		worktreePath := t.TempDir()
+		taskID := int64(789)
+
+		// Create .mcp.json in project with some servers
+		mainMCPFile := filepath.Join(projectDir, ".mcp.json")
+		originalConfig := `{"mcpServers": {"context7": {"type": "stdio", "command": "npx", "args": ["-y", "@upstash/context7-mcp"]}}}`
+		if err := os.WriteFile(mainMCPFile, []byte(originalConfig), 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		// Create symlink in worktree
+		worktreeMCPFile := filepath.Join(worktreePath, ".mcp.json")
+		if err := os.Symlink(mainMCPFile, worktreeMCPFile); err != nil {
+			t.Fatal(err)
+		}
+
+		// Verify it's a symlink
+		if fi, err := os.Lstat(worktreeMCPFile); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+			t.Fatal("expected symlink before test")
+		}
+
+		err := writeWorkflowMCPConfig(worktreePath, taskID)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		// Verify it's now a regular file (not a symlink)
+		fi, err := os.Lstat(worktreeMCPFile)
+		if err != nil {
+			t.Fatalf("failed to stat .mcp.json: %v", err)
+		}
+		if fi.Mode()&os.ModeSymlink != 0 {
+			t.Error("expected regular file, got symlink")
+		}
+
+		// Verify config has both original and workflow servers
+		data, err := os.ReadFile(worktreeMCPFile)
+		if err != nil {
+			t.Fatalf("failed to read .mcp.json: %v", err)
+		}
+
+		var config map[string]interface{}
+		if err := json.Unmarshal(data, &config); err != nil {
+			t.Fatalf("failed to parse .mcp.json: %v", err)
+		}
+
+		mcpServers, ok := config["mcpServers"].(map[string]interface{})
+		if !ok {
+			t.Fatal("expected mcpServers key in config")
+		}
+
+		// Check context7 server preserved from original
+		if _, ok := mcpServers["context7"].(map[string]interface{}); !ok {
+			t.Fatal("expected context7 key - original server not preserved from symlink target")
+		}
+
+		// Check workflow server added
+		if _, ok := mcpServers["workflow"].(map[string]interface{}); !ok {
+			t.Fatal("expected workflow key in mcpServers")
+		}
+
+		// Verify original file was NOT modified
+		origData, err := os.ReadFile(mainMCPFile)
+		if err != nil {
+			t.Fatalf("failed to read original .mcp.json: %v", err)
+		}
+		if string(origData) != originalConfig {
+			t.Error("original .mcp.json was modified - symlink should have been replaced, not followed")
+		}
+	})
+
+	t.Run("updates task ID on subsequent calls", func(t *testing.T) {
+		worktreePath := t.TempDir()
+
+		// First call with task ID 100
+		err := writeWorkflowMCPConfig(worktreePath, 100)
+		if err != nil {
+			t.Fatalf("first call failed: %v", err)
+		}
+
+		// Second call with task ID 200
+		err = writeWorkflowMCPConfig(worktreePath, 200)
+		if err != nil {
+			t.Fatalf("second call failed: %v", err)
+		}
+
+		// Verify task ID was updated
+		mcpFilePath := filepath.Join(worktreePath, ".mcp.json")
+		data, err := os.ReadFile(mcpFilePath)
+		if err != nil {
+			t.Fatalf("failed to read .mcp.json: %v", err)
+		}
+
+		var config map[string]interface{}
+		if err := json.Unmarshal(data, &config); err != nil {
+			t.Fatalf("failed to parse .mcp.json: %v", err)
+		}
+
+		mcpServers := config["mcpServers"].(map[string]interface{})
+		workflow := mcpServers["workflow"].(map[string]interface{})
+		args := workflow["args"].([]interface{})
+
+		if args[2] != "200" {
+			t.Errorf("task ID = %v, want 200", args[2])
+		}
+	})
 }
