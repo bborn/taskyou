@@ -114,7 +114,7 @@ func buildExecutorList(availableExecutors []string, usageCounts map[string]int) 
 	copy(result, availableExecutors)
 
 	// Sort by usage count (descending), then alphabetically for ties
-	if usageCounts != nil && len(usageCounts) > 0 {
+	if len(usageCounts) > 0 {
 		sort.Slice(result, func(i, j int) bool {
 			countI := usageCounts[result[i]]
 			countJ := usageCounts[result[j]]
