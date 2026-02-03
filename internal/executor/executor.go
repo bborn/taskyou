@@ -4426,6 +4426,12 @@ func (e *Executor) runPi(ctx context.Context, task *db.Task, workDir, prompt str
 		sessionID = fmt.Sprintf("%d", os.Getpid())
 	}
 
+	// Find the task binary
+	taskBin, err := os.Executable()
+	if err != nil {
+		taskBin = "ty" // Fallback
+	}
+
 	// Build system prompt flag
 	systemPromptFlag := fmt.Sprintf(`--append-system-prompt %q `, systemFile.Name())
 
@@ -4434,8 +4440,8 @@ func (e *Executor) runPi(ctx context.Context, task *db.Task, workDir, prompt str
 	var script string
 	if existingSessionPath != "" && piSessionExists(existingSessionPath) {
 		e.logLine(task.ID, "system", fmt.Sprintf("Resuming existing session %s", filepath.Base(existingSessionPath)))
-		script = fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q pi %s--continue "$(cat %q)"`,
-			task.ID, sessionID, task.Port, task.WorktreePath, systemPromptFlag, promptFile.Name())
+		script = fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %s pi-wrapper --task-id %d %s--continue "$(cat %q)"`,
+			task.ID, sessionID, task.Port, task.WorktreePath, taskBin, task.ID, systemPromptFlag, promptFile.Name())
 	} else {
 		if existingSessionPath != "" {
 			e.logLine(task.ID, "system", fmt.Sprintf("Session %s no longer exists, starting fresh", filepath.Base(existingSessionPath)))
@@ -4444,8 +4450,8 @@ func (e *Executor) runPi(ctx context.Context, task *db.Task, workDir, prompt str
 				e.logger.Warn("failed to clear stale session ID", "task", task.ID, "error", err)
 			}
 		}
-		script = fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q pi %s"$(cat %q)"`,
-			task.ID, sessionID, task.Port, task.WorktreePath, systemPromptFlag, promptFile.Name())
+		script = fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %s pi-wrapper --task-id %d %s"$(cat %q)"`,
+			task.ID, sessionID, task.Port, task.WorktreePath, taskBin, task.ID, systemPromptFlag, promptFile.Name())
 	}
 
 	// Create new window in task-daemon session (with retry logic for race conditions)
@@ -4558,11 +4564,17 @@ func (e *Executor) runPiResume(ctx context.Context, task *db.Task, workDir, prom
 		taskSessionID = fmt.Sprintf("%d", os.Getpid())
 	}
 
+	// Find the task binary
+	taskBin, err := os.Executable()
+	if err != nil {
+		taskBin = "ty" // Fallback
+	}
+
 	// Build system prompt flag
 	systemPromptFlag := fmt.Sprintf(`--append-system-prompt %q `, systemFile.Name())
 
-	script := fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q pi %s--continue "$(cat %q)"`,
-		task.ID, taskSessionID, task.Port, task.WorktreePath, systemPromptFlag, feedbackFile.Name())
+	script := fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %s pi-wrapper --task-id %d %s--continue "$(cat %q)"`,
+		task.ID, taskSessionID, task.Port, task.WorktreePath, taskBin, task.ID, systemPromptFlag, feedbackFile.Name())
 
 	// Create new window in task-daemon session (with retry logic for race conditions)
 	actualSession, tmuxErr := createTmuxWindow(daemonSession, windowName, workDir, script)
@@ -4645,7 +4657,7 @@ func (e *Executor) getPiPID(taskID int64) int {
 
 		// Check if this is a Pi process or has Pi as child
 		cmdOut, _ := exec.CommandContext(ctx, "ps", "-p", strconv.Itoa(pid), "-o", "comm=").Output()
-		if strings.Contains(string(cmdOut), "pi") || strings.Contains(string(cmdOut), "node") {
+		if strings.Contains(string(cmdOut), "pi") || strings.Contains(string(cmdOut), "node") || strings.Contains(string(cmdOut), "ty") {
 			return pid
 		}
 

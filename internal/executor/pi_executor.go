@@ -78,6 +78,12 @@ func (p *PiExecutor) BuildCommand(task *db.Task, sessionID, prompt string) strin
 		worktreeSessionID = fmt.Sprintf("%d", os.Getpid())
 	}
 
+	// Find the task binary
+	taskBin, err := os.Executable()
+	if err != nil {
+		taskBin = "ty" // Fallback
+	}
+
 	// Build system prompt flag
 	systemPromptFlag := ""
 	systemFile, err := os.CreateTemp("", "task-system-*.txt")
@@ -89,8 +95,8 @@ func (p *PiExecutor) BuildCommand(task *db.Task, sessionID, prompt string) strin
 
 	// Build command - resume if we have a session ID, otherwise start fresh
 	if sessionID != "" {
-		cmd := fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q pi %s--continue`,
-			task.ID, worktreeSessionID, task.Port, task.WorktreePath, systemPromptFlag)
+		cmd := fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %s pi-wrapper --task-id %d %s--continue`,
+			task.ID, worktreeSessionID, task.Port, task.WorktreePath, taskBin, task.ID, systemPromptFlag)
 		if systemFile != nil {
 			cmd += fmt.Sprintf(`; rm -f %q`, systemFile.Name())
 		}
@@ -103,8 +109,8 @@ func (p *PiExecutor) BuildCommand(task *db.Task, sessionID, prompt string) strin
 		promptFile, err := os.CreateTemp("", "task-prompt-*.txt")
 		if err != nil {
 			p.logger.Error("BuildCommand: failed to create temp file", "error", err)
-			cmd := fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q pi %s`,
-				task.ID, worktreeSessionID, task.Port, task.WorktreePath, systemPromptFlag)
+			cmd := fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %s pi-wrapper --task-id %d %s`,
+				task.ID, worktreeSessionID, task.Port, task.WorktreePath, taskBin, task.ID, systemPromptFlag)
 			if systemFile != nil {
 				cmd += fmt.Sprintf(`; rm -f %q`, systemFile.Name())
 			}
@@ -113,16 +119,16 @@ func (p *PiExecutor) BuildCommand(task *db.Task, sessionID, prompt string) strin
 		promptFile.WriteString(prompt)
 		promptFile.Close()
 
-		cmd := fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q pi %s"$(cat %q)"; rm -f %q`,
-			task.ID, worktreeSessionID, task.Port, task.WorktreePath, systemPromptFlag, promptFile.Name(), promptFile.Name())
+		cmd := fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %s pi-wrapper --task-id %d %s"$(cat %q)"; rm -f %q`,
+			task.ID, worktreeSessionID, task.Port, task.WorktreePath, taskBin, task.ID, systemPromptFlag, promptFile.Name(), promptFile.Name())
 		if systemFile != nil {
 			cmd += fmt.Sprintf(` %q`, systemFile.Name())
 		}
 		return cmd
 	}
 
-	cmd := fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q pi %s`,
-		task.ID, worktreeSessionID, task.Port, task.WorktreePath, systemPromptFlag)
+	cmd := fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %s pi-wrapper --task-id %d %s`,
+		task.ID, worktreeSessionID, task.Port, task.WorktreePath, taskBin, task.ID, systemPromptFlag)
 	if systemFile != nil {
 		cmd += fmt.Sprintf(`; rm -f %q`, systemFile.Name())
 	}
