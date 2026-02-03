@@ -105,6 +105,10 @@ type DetailModel struct {
 
 	// Shell pane visibility toggle
 	shellPaneHidden bool // true when shell pane is collapsed to daemon
+
+	// Server detection for task port
+	serverListening   bool      // true when a server is listening on the task's port
+	lastServerCheck   time.Time // throttle server port checks
 }
 
 // Message types for async pane loading
@@ -241,6 +245,12 @@ func (m *DetailModel) Refresh() {
 	}
 
 	// Note: Focus state is checked by focusTick every 200ms, no need to duplicate here
+
+	// Throttle server port checks to every 2 seconds
+	if time.Since(m.lastServerCheck) >= 2*time.Second {
+		m.checkServerListening()
+		m.lastServerCheck = time.Now()
+	}
 
 	// Throttle pane join checks to every 5 seconds (runs tmux commands)
 	if time.Since(m.lastPaneCheck) >= 5*time.Second {
@@ -1918,6 +1928,34 @@ func (m *DetailModel) HasRunningShellProcess() bool {
 	return command != "" && command != userShell
 }
 
+// checkServerListening checks if a server is listening on the task's port.
+// Uses lsof to check for listening processes on the port.
+func (m *DetailModel) checkServerListening() {
+	if m.task == nil || m.task.Port == 0 {
+		m.serverListening = false
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+
+	// Use lsof to check if any process is listening on the task's port
+	// -i :PORT checks for processes using that port
+	// -sTCP:LISTEN filters for listening sockets only
+	cmd := osExec.CommandContext(ctx, "lsof", "-i", fmt.Sprintf(":%d", m.task.Port), "-sTCP:LISTEN")
+	err := cmd.Run()
+	// lsof returns exit code 0 if it finds a match, non-zero otherwise
+	m.serverListening = err == nil
+}
+
+// GetServerURL returns the server URL if a server is listening on the task's port.
+func (m *DetailModel) GetServerURL() string {
+	if !m.serverListening || m.task == nil || m.task.Port == 0 {
+		return ""
+	}
+	return fmt.Sprintf("http://localhost:%d", m.task.Port)
+}
+
 // killPaneWithProcess kills a tmux pane AND the process running inside it.
 // This prevents orphaned processes when panes are closed.
 func (m *DetailModel) killPaneWithProcess(ctx context.Context, paneID string) {
@@ -2234,6 +2272,16 @@ func (m *DetailModel) renderHeader() string {
 		}
 	}
 
+	// Server URL if a server is listening on the task's port
+	var serverLine string
+	if serverURL := m.GetServerURL(); serverURL != "" {
+		if m.focused {
+			serverLine = Dim.Render(fmt.Sprintf("Server: %s", serverURL))
+		} else {
+			serverLine = lipgloss.NewStyle().Foreground(dimmedTextFg).Render(fmt.Sprintf("Server: %s", serverURL))
+		}
+	}
+
 	// Build the first line with optional notification indicator
 	metaStr := meta.String()
 
@@ -2257,6 +2305,9 @@ func (m *DetailModel) renderHeader() string {
 	rightContent := []string{firstLine}
 	if prLine != "" {
 		rightContent = append(rightContent, prLine)
+	}
+	if serverLine != "" {
+		rightContent = append(rightContent, serverLine)
 	}
 	rightBlock := lipgloss.JoinVertical(lipgloss.Right, rightContent...)
 
