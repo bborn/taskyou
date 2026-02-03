@@ -7,6 +7,7 @@ import (
 	"github.com/bborn/workflow/internal/db"
 	"github.com/bborn/workflow/internal/github"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/mattn/go-runewidth"
 )
 
 // KanbanColumn represents a column in the kanban board.
@@ -950,7 +951,7 @@ func (k *KanbanBoard) renderTaskCard(task *db.Task, width int, isSelected bool) 
 			if available < 4 {
 				available = 4
 			}
-			leftLine = lipgloss.Truncate(leftLine, available)
+			leftLine = truncateString(leftLine, available)
 			space = 1
 		}
 		idLine = leftLine + strings.Repeat(" ", space) + indicatorText
@@ -980,6 +981,13 @@ func (k *KanbanBoard) renderTaskCard(task *db.Task, width int, isSelected bool) 
 
 	content := idLine + "\n" + titleLine
 	return cardStyle.Render(content)
+}
+
+func truncateString(s string, max int) string {
+	if max <= 0 {
+		return ""
+	}
+	return runewidth.Truncate(s, max, "…")
 }
 
 // FocusColumn moves selection to a specific column by index.
