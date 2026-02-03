@@ -1542,6 +1542,9 @@ Examples:
 	inputCmd.Flags().String("key", "", "Send a special key (e.g., Up, Down, Tab, Escape)")
 	rootCmd.AddCommand(inputCmd)
 
+	// Pi Wrapper subcommand - internal use for RPC mode
+	rootCmd.AddCommand(piWrapperCmd)
+
 	// Output subcommand - capture recent output from executor pane
 	outputCmd := &cobra.Command{
 		Use:   "output <task-id>",
