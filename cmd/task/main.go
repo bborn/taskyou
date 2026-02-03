@@ -370,6 +370,7 @@ Examples:
 				title = args[0]
 			}
 			body, _ := cmd.Flags().GetString("body")
+			body = unescapeNewlines(body) // Convert literal \n to actual newlines
 			taskType, _ := cmd.Flags().GetString("type")
 			project, _ := cmd.Flags().GetString("project")
 			taskExecutor, _ := cmd.Flags().GetString("executor")
@@ -986,6 +987,7 @@ Examples:
 
 			title, _ := cmd.Flags().GetString("title")
 			body, _ := cmd.Flags().GetString("body")
+			body = unescapeNewlines(body) // Convert literal \n to actual newlines
 			taskType, _ := cmd.Flags().GetString("type")
 			project, _ := cmd.Flags().GetString("project")
 
@@ -2969,6 +2971,12 @@ func formatLogEntry(entry map[string]interface{}) string {
 	}
 
 	return ""
+}
+
+// unescapeNewlines converts literal "\n" sequences to actual newline characters
+// in CLI input. This allows users to enter multi-line text from the command line.
+func unescapeNewlines(s string) string {
+	return strings.ReplaceAll(s, "\\n", "\n")
 }
 
 // truncate shortens a string to maxLen, adding ellipsis if needed.
