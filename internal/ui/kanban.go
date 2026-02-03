@@ -611,9 +611,9 @@ func (k *KanbanBoard) viewDesktop() string {
 		// Combine tasks with spacing
 		taskContent := lipgloss.JoinVertical(lipgloss.Left, taskViews...)
 
-		// Column container with border (rounded to match active task card style)
-		_, highlightBorder := GetThemeBorderColors()
-		borderColor := col.Color // Use column color for border
+		// Column container with subtle rounded border
+		normalBorder, highlightBorder := GetThemeBorderColors()
+		borderColor := normalBorder
 		borderStyle := lipgloss.RoundedBorder()
 		if isSelectedCol {
 			borderColor = highlightBorder
@@ -790,7 +790,7 @@ func (k *KanbanBoard) viewMobile() string {
 	// Combine tasks with spacing
 	taskContent := lipgloss.JoinVertical(lipgloss.Left, taskViews...)
 
-	// Column container with border
+	// Column container with subtle rounded border
 	_, highlightBorder := GetThemeBorderColors()
 	borderStyle := lipgloss.RoundedBorder()
 
@@ -848,10 +848,9 @@ func (k *KanbanBoard) renderColumnTabs() string {
 			Padding(0, 0)
 
 		if isSelected {
-			// Selected tab has background color matching column
+			// Selected tab uses a simple color highlight
 			tabStyle = tabStyle.
-				Background(col.Color).
-				Foreground(lipgloss.Color("#000000")).
+				Foreground(col.Color).
 				Bold(true)
 		} else {
 			// Unselected tabs are dimmed
@@ -883,15 +882,20 @@ func (k *KanbanBoard) renderTaskCard(task *db.Task, width int, isSelected bool) 
 
 	// Task ID with status indicator
 	statusIcon := StatusIcon(task.Status)
-	statusColor := StatusColor(task.Status)
-	statusStyle := lipgloss.NewStyle().Foreground(statusColor)
-	b.WriteString(statusStyle.Render(statusIcon))
-	b.WriteString(" ")
-	b.WriteString(Dim.Render(fmt.Sprintf("#%d", task.ID)))
+	if isSelected {
+		b.WriteString(statusIcon)
+		b.WriteString(" ")
+		b.WriteString(fmt.Sprintf("#%d", task.ID))
+	} else {
+		statusColor := StatusColor(task.Status)
+		statusStyle := lipgloss.NewStyle().Foreground(statusColor)
+		b.WriteString(statusStyle.Render(statusIcon))
+		b.WriteString(" ")
+		b.WriteString(Dim.Render(fmt.Sprintf("#%d", task.ID)))
+	}
 
 	// Project tag
 	if task.Project != "" {
-		projectStyle := lipgloss.NewStyle().Foreground(ProjectColor(task.Project))
 		shortProject := task.Project
 		switch task.Project {
 		case "offerlab":
@@ -899,38 +903,51 @@ func (k *KanbanBoard) renderTaskCard(task *db.Task, width int, isSelected bool) 
 		case "influencekit":
 			shortProject = "ik"
 		}
-		b.WriteString(" ")
-		b.WriteString(projectStyle.Render("[" + shortProject + "]"))
+		if isSelected {
+			b.WriteString(" [" + shortProject + "]")
+		} else {
+			projectStyle := lipgloss.NewStyle().Foreground(ProjectColor(task.Project))
+			b.WriteString(" ")
+			b.WriteString(projectStyle.Render("[" + shortProject + "]"))
+		}
 	}
 
-	// PR status indicator
+	// Status indicators (right-aligned)
+	var indicators []string
 	if prInfo := k.prInfo[task.ID]; prInfo != nil {
-		b.WriteString(" ")
-		b.WriteString(PRStatusBadge(prInfo))
+		if isSelected {
+			indicators = append(indicators, PRStatusIcon(prInfo))
+		} else {
+			indicators = append(indicators, PRStatusBadge(prInfo))
+		}
 	}
-
-	// Running process indicator
 	if k.HasRunningProcess(task.ID) {
-		processStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("46")) // Bright green
-		b.WriteString(" ")
-		b.WriteString(processStyle.Render("●")) // Green dot for running process
+		if isSelected {
+			indicators = append(indicators, "●")
+		} else {
+			processStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("46")) // Bright green
+			indicators = append(indicators, processStyle.Render("●"))
+		}
 	}
-
 	// Dangerous mode indicator (red dot) - only shown when:
 	// - Task is in dangerous mode
 	// - Task is active (processing or blocked)
 	// - System is NOT in global dangerous mode (otherwise the global banner is shown)
 	if task.DangerousMode && (task.Status == db.StatusProcessing || task.Status == db.StatusBlocked) && !IsGlobalDangerousMode() {
-		dangerStyle := lipgloss.NewStyle().Foreground(ColorDangerous)
-		b.WriteString(" ")
-		b.WriteString(dangerStyle.Render("●")) // Red dot for dangerous mode
+		if isSelected {
+			indicators = append(indicators, "●")
+		} else {
+			dangerStyle := lipgloss.NewStyle().Foreground(ColorDangerous)
+			indicators = append(indicators, dangerStyle.Render("●"))
+		}
 	}
-
-	// Pin indicator
 	if task.Pinned {
-		pinStyle := lipgloss.NewStyle().Foreground(ColorWarning)
-		b.WriteString(" ")
-		b.WriteString(pinStyle.Render(IconPin()))
+		if isSelected {
+			indicators = append(indicators, IconPin())
+		} else {
+			pinStyle := lipgloss.NewStyle().Foreground(ColorWarning)
+			indicators = append(indicators, pinStyle.Render(IconPin()))
+		}
 	}
 
 	// Title (truncate if needed)
@@ -943,7 +960,27 @@ func (k *KanbanBoard) renderTaskCard(task *db.Task, width int, isSelected bool) 
 		title = title[:maxTitleLen-1] + "…"
 	}
 
-	idLine := b.String()
+	leftLine := b.String()
+	indicatorText := strings.Join(indicators, " ")
+
+	lineWidth := width - 2 // account for horizontal padding
+	if lineWidth < 10 {
+		lineWidth = 10
+	}
+
+	idLine := leftLine
+	if indicatorText != "" {
+		space := lineWidth - lipgloss.Width(leftLine) - lipgloss.Width(indicatorText)
+		if space < 1 {
+			available := lineWidth - lipgloss.Width(indicatorText) - 1
+			if available < 4 {
+				available = 4
+			}
+			leftLine = lipgloss.NewStyle().MaxWidth(available).Render(leftLine)
+			space = 1
+		}
+		idLine = leftLine + strings.Repeat(" ", space) + indicatorText
+	}
 	titleLine := title
 
 	// Card style with bottom margin for separation
@@ -957,28 +994,14 @@ func (k *KanbanBoard) renderTaskCard(task *db.Task, width int, isSelected bool) 
 
 	if isSelected {
 		cardBg, cardFg := GetThemeCardColors()
-		// Selected card has border and background
+		// Selected card uses a soft background highlight (no extra borders)
 		cardStyle = cardStyle.
 			Bold(true).
 			Background(cardBg).
-			Foreground(cardFg).
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(lipgloss.Color(currentTheme.CardBorderHi)).
-			MarginBottom(0) // Border adds visual separation
+			Foreground(cardFg)
 	} else if needsInput {
-		// Tasks with active input notification get yellow bottom border
-		cardStyle = cardStyle.
-			BorderBottom(true).
-			BorderStyle(lipgloss.NormalBorder()).
-			BorderForeground(ColorWarning).
-			MarginBottom(0)
-	} else {
-		// Non-selected cards have a subtle bottom border for separation
-		cardStyle = cardStyle.
-			BorderBottom(true).
-			BorderStyle(lipgloss.NormalBorder()).
-			BorderForeground(ColorMuted).
-			MarginBottom(0)
+		// Subtle warning tint for tasks needing input
+		cardStyle = cardStyle.Foreground(ColorWarning)
 	}
 
 	content := idLine + "\n" + titleLine
