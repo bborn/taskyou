@@ -71,7 +71,7 @@ type KeyMap struct {
 	OpenWorktree key.Binding
 	ToggleShellPane          key.Binding
 	JumpToNotification       key.Binding
-	JumpToNotificationDetail key.Binding // For detail view (uses Ctrl+g to avoid conflicting with text input)
+	JumpToNotificationDetail key.Binding // For detail view (uses Ctrl+j to avoid conflicting with text input and Claude Code's Ctrl+g)
 	// Column focus shortcuts
 	FocusBacklog    key.Binding
 	FocusInProgress key.Binding
@@ -205,8 +205,8 @@ func DefaultKeyMap() KeyMap {
 			key.WithHelp("g", "go to notification"),
 		),
 		JumpToNotificationDetail: key.NewBinding(
-			key.WithKeys("ctrl+g"),
-			key.WithHelp("ctrl+g", "go to notification"),
+			key.WithKeys("ctrl+j"),
+			key.WithHelp("ctrl+j", "go to notification"),
 		),
 		FocusBacklog: key.NewBinding(
 			key.WithKeys("B"),
@@ -1606,7 +1606,7 @@ func (m *AppModel) updateDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	// Handle jump to notification from detail view (Ctrl+g)
+	// Handle jump to notification from detail view (Ctrl+j)
 	if key.Matches(keyMsg, m.keys.JumpToNotificationDetail) {
 		if m.notifyTaskID > 0 && m.notification != "" {
 			taskID := m.notifyTaskID
