@@ -180,6 +180,20 @@ func (db *DB) migrate() error {
 		`CREATE INDEX IF NOT EXISTS idx_event_log_event_type ON event_log(event_type)`,
 		`CREATE INDEX IF NOT EXISTS idx_event_log_created_at ON event_log(created_at)`,
 
+		// Relay messages for agent-to-agent communication
+		`CREATE TABLE IF NOT EXISTS relay_messages (
+			id TEXT PRIMARY KEY,
+			from_agent TEXT NOT NULL,
+			to_agent TEXT NOT NULL,
+			content TEXT NOT NULL,
+			task_id INTEGER,
+			status TEXT DEFAULT 'pending',
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			delivered_at DATETIME,
+			read_at DATETIME
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_relay_messages_to ON relay_messages(to_agent)`,
+		`CREATE INDEX IF NOT EXISTS idx_relay_messages_status ON relay_messages(status)`,
 	}
 
 	for _, m := range migrations {

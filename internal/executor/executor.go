@@ -67,6 +67,9 @@ type Executor struct {
 
 	executorSlug string
 	executorName string
+
+	// Relay manager for agent-to-agent messaging
+	relay *RelayManager
 }
 
 // DefaultSuspendIdleTimeout is the default time a blocked task must be idle before being suspended.
@@ -161,6 +164,9 @@ func New(database *db.DB, cfg *config.Config) *Executor {
 	e.executorFactory.Register(NewOpenCodeExecutor(e))
 	e.executorFactory.Register(NewPiExecutor(e))
 
+	// Initialize relay manager for agent-to-agent messaging
+	e.relay = NewRelayManager(e)
+
 	return e
 }
 
@@ -198,6 +204,9 @@ func NewWithLogging(database *db.DB, cfg *config.Config, w io.Writer) *Executor 
 	e.executorFactory.Register(NewOpenCodeExecutor(e))
 	e.executorFactory.Register(NewPiExecutor(e))
 
+	// Initialize relay manager for agent-to-agent messaging
+	e.relay = NewRelayManager(e)
+
 	return e
 }
 
@@ -215,6 +224,11 @@ func (e *Executor) ExecutorSlug() string {
 		return defaultExecutorSlug
 	}
 	return e.executorSlug
+}
+
+// Relay returns the relay manager for agent-to-agent messaging.
+func (e *Executor) Relay() *RelayManager {
+	return e.relay
 }
 
 // Start begins the background worker.
@@ -695,6 +709,11 @@ func (e *Executor) worker(ctx context.Context) {
 		case <-ticker.C:
 			e.processNextTask(ctx)
 
+			// Deliver pending relay messages to idle agents
+			if e.relay != nil {
+				e.relay.DeliverPendingMessages(ctx)
+			}
+
 			tickCount++
 
 			// Periodically check for merged branches
@@ -862,6 +881,11 @@ func (e *Executor) executeTask(ctx context.Context, task *db.Task) {
 	// Log start and trigger hook
 	startMsg := fmt.Sprintf("Starting task #%d: %s", task.ID, task.Title)
 	e.logLine(task.ID, "system", startMsg)
+
+	// Register task as relay agent
+	if e.relay != nil {
+		e.relay.RegisterAgent(task)
+	}
 	e.hooks.OnStatusChange(task, db.StatusProcessing, startMsg)
 
 	// Setup worktree for isolated execution (symlinks claude config from project)
@@ -3012,6 +3036,11 @@ func (e *Executor) configureTmuxWindow(windowTarget string) {
 func (e *Executor) logLine(taskID int64, lineType, content string) {
 	// Store in database
 	e.db.AppendTaskLog(taskID, lineType, content)
+
+	// Record activity for relay idle detection (except for relay messages themselves)
+	if e.relay != nil && lineType != "relay" {
+		e.relay.RecordActivity(taskID)
+	}
 
 	// Broadcast to subscribers
 	logEntry := &db.TaskLog{
