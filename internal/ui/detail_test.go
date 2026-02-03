@@ -284,6 +284,53 @@ func TestDetailModel_ToggleShellPaneKeyBinding(t *testing.T) {
 	}
 }
 
+// TestDetailModel_GetServerURL verifies that the server URL is returned only
+// when serverListening is true and the task has a valid port.
+func TestDetailModel_GetServerURL(t *testing.T) {
+	tests := []struct {
+		name            string
+		task            *db.Task
+		serverListening bool
+		wantURL         string
+	}{
+		{
+			name:            "server listening with valid port",
+			task:            &db.Task{ID: 1, Port: 3100},
+			serverListening: true,
+			wantURL:         "http://localhost:3100",
+		},
+		{
+			name:            "server not listening",
+			task:            &db.Task{ID: 1, Port: 3100},
+			serverListening: false,
+			wantURL:         "",
+		},
+		{
+			name:            "no port assigned",
+			task:            &db.Task{ID: 1, Port: 0},
+			serverListening: true,
+			wantURL:         "",
+		},
+		{
+			name:            "nil task",
+			task:            nil,
+			serverListening: true,
+			wantURL:         "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := &DetailModel{task: tt.task, serverListening: tt.serverListening}
+
+			got := m.GetServerURL()
+			if got != tt.wantURL {
+				t.Errorf("GetServerURL() = %q, want %q", got, tt.wantURL)
+			}
+		})
+	}
+}
+
 // TestDetailModel_CollapsedShellIndicator verifies that when the shell pane is
 // hidden and running in TMUX, the View() includes a vertical "Shell" label on the
 // right side to indicate there's a collapsed shell pane available.
