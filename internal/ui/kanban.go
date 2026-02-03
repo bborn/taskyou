@@ -551,7 +551,7 @@ func (k *KanbanBoard) viewDesktop() string {
 		for i := 0; i < pinnedSlots; i++ {
 			task := pinnedTasks[i]
 			isSelected := isSelectedCol && i == k.selectedRow
-			taskView := k.renderTaskCard(task, colWidth-2, isSelected)
+			taskView := k.renderTaskCard(task, colWidth, isSelected)
 			taskViews = append(taskViews, taskView)
 		}
 
@@ -570,7 +570,7 @@ func (k *KanbanBoard) viewDesktop() string {
 			task := unpinnedTasks[i]
 			globalIndex := pinnedCount + i
 			isSelected := isSelectedCol && globalIndex == k.selectedRow
-			taskView := k.renderTaskCard(task, colWidth-2, isSelected)
+			taskView := k.renderTaskCard(task, colWidth, isSelected)
 			taskViews = append(taskViews, taskView)
 		}
 
@@ -730,7 +730,7 @@ func (k *KanbanBoard) viewMobile() string {
 	for i := 0; i < toRenderPinned; i++ {
 		task := pinnedTasks[i]
 		isSelected := i == k.selectedRow
-		taskView := k.renderTaskCard(task, colWidth-2, isSelected)
+		taskView := k.renderTaskCard(task, colWidth, isSelected)
 		taskViews = append(taskViews, taskView)
 	}
 
@@ -749,7 +749,7 @@ func (k *KanbanBoard) viewMobile() string {
 		task := unpinnedTasks[i]
 		globalIndex := len(pinnedTasks) + i
 		isSelected := globalIndex == k.selectedRow
-		taskView := k.renderTaskCard(task, colWidth-2, isSelected)
+		taskView := k.renderTaskCard(task, colWidth, isSelected)
 		taskViews = append(taskViews, taskView)
 	}
 
