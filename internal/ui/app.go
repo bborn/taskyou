@@ -633,6 +633,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.kanban.SetRunningProcesses(running)
 		m.kanban.SetTasksNeedingInput(m.tasksNeedingInput)
+		m.kanban.SetBlockedByDeps(msg.blockedByDeps)
 
 		// Trigger initial PR refresh after first task load (subsequent refreshes via prRefreshTick)
 		if !m.initialPRRefreshDone {
@@ -2621,7 +2622,8 @@ func (m *AppModel) updateCommandPalette(msg tea.Msg) (tea.Model, tea.Cmd) {
 type tasksLoadedMsg struct {
 	tasks           []*db.Task
 	err             error
-	hiddenDoneCount int // Number of done tasks not shown in kanban (older ones)
+	hiddenDoneCount int            // Number of done tasks not shown in kanban (older ones)
+	blockedByDeps   map[int64]int  // Tasks blocked by dependencies (task ID -> open blocker count)
 }
 
 type taskLoadedMsg struct {
@@ -2715,9 +2717,18 @@ func (m *AppModel) loadTasks() tea.Cmd {
 			hiddenDone = 0
 		}
 
+		// Load dependency blocker counts for each task
+		blockedByDeps := make(map[int64]int)
+		for _, task := range tasks {
+			count, err := m.db.GetOpenBlockerCount(task.ID)
+			if err == nil && count > 0 {
+				blockedByDeps[task.ID] = count
+			}
+		}
+
 		// Note: PR/merge status is now checked via batch refresh (prRefreshTick)
 		// to avoid spawning processes for every task on every tick
-		return tasksLoadedMsg{tasks: tasks, err: err, hiddenDoneCount: hiddenDone}
+		return tasksLoadedMsg{tasks: tasks, err: err, hiddenDoneCount: hiddenDone, blockedByDeps: blockedByDeps}
 	}
 }
 

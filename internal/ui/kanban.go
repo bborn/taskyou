@@ -34,6 +34,7 @@ type KanbanBoard struct {
 	prInfo            map[int64]*github.PRInfo // PR info by task ID
 	runningProcesses  map[int64]bool           // Tasks with running shell processes
 	tasksNeedingInput map[int64]bool           // Tasks waiting for user input (active input notification)
+	blockedByDeps     map[int64]int            // Tasks blocked by dependencies (task ID -> open blocker count)
 	hiddenDoneCount   int                      // Number of done tasks not shown (older ones)
 	originColumn      int                      // Column where detail view navigation started (-1 = not set)
 }
@@ -146,6 +147,26 @@ func (k *KanbanBoard) NeedsInput(taskID int64) bool {
 		return false
 	}
 	return k.tasksNeedingInput[taskID]
+}
+
+// SetBlockedByDeps updates the map of tasks blocked by dependencies.
+// The map contains task ID -> number of open blockers.
+func (k *KanbanBoard) SetBlockedByDeps(blockedByDeps map[int64]int) {
+	k.blockedByDeps = blockedByDeps
+}
+
+// GetOpenBlockerCount returns the number of open blockers for a task.
+// Returns 0 if the task has no blockers.
+func (k *KanbanBoard) GetOpenBlockerCount(taskID int64) int {
+	if k.blockedByDeps == nil {
+		return 0
+	}
+	return k.blockedByDeps[taskID]
+}
+
+// IsBlockedByDeps returns true if the task is blocked by dependencies.
+func (k *KanbanBoard) IsBlockedByDeps(taskID int64) bool {
+	return k.GetOpenBlockerCount(taskID) > 0
 }
 
 // SetOriginColumn sets the origin column for detail view navigation.
@@ -947,6 +968,18 @@ func (k *KanbanBoard) renderTaskCard(task *db.Task, width int, isSelected bool) 
 		} else {
 			pinStyle := lipgloss.NewStyle().Foreground(ColorWarning)
 			indicators = append(indicators, pinStyle.Render(IconPin()))
+		}
+	}
+
+	// Dependency blocker indicator (lock icon)
+	blockerCount := k.GetOpenBlockerCount(task.ID)
+	if blockerCount > 0 {
+		lockStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#F59E0B")) // Orange/amber
+		b.WriteString(" ")
+		if blockerCount == 1 {
+			b.WriteString(lockStyle.Render("🔒"))
+		} else {
+			b.WriteString(lockStyle.Render(fmt.Sprintf("🔒%d", blockerCount)))
 		}
 	}
 
