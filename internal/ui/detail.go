@@ -2306,7 +2306,7 @@ func (m *DetailModel) renderHeader() string {
 			Background(lipgloss.Color("#4B5563")). // Muted gray background
 			Foreground(lipgloss.Color("#FFCC00")). // Yellow text
 			Padding(0, 1)
-		notifyIndicator := notifyStyle.Render(fmt.Sprintf("%s Task #%d (ctrl+g)", IconBlocked(), m.notifyTaskID))
+		notifyIndicator := notifyStyle.Render(fmt.Sprintf("%s Task #%d (ctrl+j)", IconBlocked(), m.notifyTaskID))
 
 		// Add notification with spacing
 		firstLine = metaStr + "  " + notifyIndicator
@@ -2556,7 +2556,7 @@ func (m *DetailModel) renderHelp() string {
 
 	// Show jump to notification shortcut when there's an active notification
 	if m.HasNotification() {
-		keys = append(keys, helpKey{"ctrl+g", "jump to notification", false})
+		keys = append(keys, helpKey{"ctrl+j", "jump to notification", false})
 	}
 
 	keys = append(keys, []helpKey{

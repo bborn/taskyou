@@ -730,9 +730,9 @@ func TestJumpToNotificationKey_DetailView(t *testing.T) {
 		t.Error("expected detail view to have notification before key press")
 	}
 
-	// Press Ctrl+g to jump to notification
-	ctrlGMsg := tea.KeyMsg{Type: tea.KeyCtrlG}
-	model, _ := m.updateDetail(ctrlGMsg)
+	// Press Ctrl+j to jump to notification
+	ctrlJMsg := tea.KeyMsg{Type: tea.KeyCtrlJ}
+	model, _ := m.updateDetail(ctrlJMsg)
 	am := model.(*AppModel)
 
 	// Notification should be cleared
@@ -779,9 +779,9 @@ func TestJumpToNotificationKey_DetailView_NoNotification(t *testing.T) {
 		height: 50,
 	}
 
-	// Press Ctrl+g when no notification is active
-	ctrlGMsg := tea.KeyMsg{Type: tea.KeyCtrlG}
-	_, cmd := m.updateDetail(ctrlGMsg)
+	// Press Ctrl+j when no notification is active
+	ctrlJMsg := tea.KeyMsg{Type: tea.KeyCtrlJ}
+	_, cmd := m.updateDetail(ctrlJMsg)
 
 	// Should return nil command since there's no notification
 	if cmd != nil {
