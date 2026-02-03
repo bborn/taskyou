@@ -882,15 +882,20 @@ func (k *KanbanBoard) renderTaskCard(task *db.Task, width int, isSelected bool) 
 
 	// Task ID with status indicator
 	statusIcon := StatusIcon(task.Status)
-	statusColor := StatusColor(task.Status)
-	statusStyle := lipgloss.NewStyle().Foreground(statusColor)
-	b.WriteString(statusStyle.Render(statusIcon))
-	b.WriteString(" ")
-	b.WriteString(Dim.Render(fmt.Sprintf("#%d", task.ID)))
+	if isSelected {
+		b.WriteString(statusIcon)
+		b.WriteString(" ")
+		b.WriteString(fmt.Sprintf("#%d", task.ID))
+	} else {
+		statusColor := StatusColor(task.Status)
+		statusStyle := lipgloss.NewStyle().Foreground(statusColor)
+		b.WriteString(statusStyle.Render(statusIcon))
+		b.WriteString(" ")
+		b.WriteString(Dim.Render(fmt.Sprintf("#%d", task.ID)))
+	}
 
 	// Project tag
 	if task.Project != "" {
-		projectStyle := lipgloss.NewStyle().Foreground(ProjectColor(task.Project))
 		shortProject := task.Project
 		switch task.Project {
 		case "offerlab":
@@ -898,30 +903,51 @@ func (k *KanbanBoard) renderTaskCard(task *db.Task, width int, isSelected bool) 
 		case "influencekit":
 			shortProject = "ik"
 		}
-		b.WriteString(" ")
-		b.WriteString(projectStyle.Render("[" + shortProject + "]"))
+		if isSelected {
+			b.WriteString(" [" + shortProject + "]")
+		} else {
+			projectStyle := lipgloss.NewStyle().Foreground(ProjectColor(task.Project))
+			b.WriteString(" ")
+			b.WriteString(projectStyle.Render("[" + shortProject + "]"))
+		}
 	}
 
 	// Status indicators (right-aligned)
 	var indicators []string
 	if prInfo := k.prInfo[task.ID]; prInfo != nil {
-		indicators = append(indicators, PRStatusBadge(prInfo))
+		if isSelected {
+			indicators = append(indicators, PRStatusIcon(prInfo))
+		} else {
+			indicators = append(indicators, PRStatusBadge(prInfo))
+		}
 	}
 	if k.HasRunningProcess(task.ID) {
-		processStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("46")) // Bright green
-		indicators = append(indicators, processStyle.Render("●"))
+		if isSelected {
+			indicators = append(indicators, "●")
+		} else {
+			processStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("46")) // Bright green
+			indicators = append(indicators, processStyle.Render("●"))
+		}
 	}
 	// Dangerous mode indicator (red dot) - only shown when:
 	// - Task is in dangerous mode
 	// - Task is active (processing or blocked)
 	// - System is NOT in global dangerous mode (otherwise the global banner is shown)
 	if task.DangerousMode && (task.Status == db.StatusProcessing || task.Status == db.StatusBlocked) && !IsGlobalDangerousMode() {
-		dangerStyle := lipgloss.NewStyle().Foreground(ColorDangerous)
-		indicators = append(indicators, dangerStyle.Render("●"))
+		if isSelected {
+			indicators = append(indicators, "●")
+		} else {
+			dangerStyle := lipgloss.NewStyle().Foreground(ColorDangerous)
+			indicators = append(indicators, dangerStyle.Render("●"))
+		}
 	}
 	if task.Pinned {
-		pinStyle := lipgloss.NewStyle().Foreground(ColorWarning)
-		indicators = append(indicators, pinStyle.Render(IconPin()))
+		if isSelected {
+			indicators = append(indicators, IconPin())
+		} else {
+			pinStyle := lipgloss.NewStyle().Foreground(ColorWarning)
+			indicators = append(indicators, pinStyle.Render(IconPin()))
+		}
 	}
 
 	// Title (truncate if needed)
