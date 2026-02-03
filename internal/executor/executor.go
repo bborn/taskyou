@@ -1935,6 +1935,11 @@ func (e *Executor) runClaude(ctx context.Context, task *db.Task, workDir, prompt
 	}
 	// Note: we don't clean up hooks config immediately - it needs to persist for the session
 
+	// Setup workflow MCP server in .mcp.json so Claude can use workflow_* tools
+	if err := writeWorkflowMCPConfig(workDir, task.ID); err != nil {
+		e.logger.Warn("could not setup workflow MCP config", "error", err)
+	}
+
 	// Create a temp file for the prompt (avoids quoting issues)
 	promptFile, err := os.CreateTemp("", "task-prompt-*.txt")
 	if err != nil {
@@ -2104,6 +2109,11 @@ func (e *Executor) runClaudeResume(ctx context.Context, task *db.Task, workDir, 
 	cleanupHooks, err := e.setupClaudeHooks(workDir, task.ID)
 	if err != nil {
 		e.logger.Warn("could not setup Claude hooks", "error", err)
+	}
+
+	// Setup workflow MCP server in .mcp.json so Claude can use workflow_* tools
+	if err := writeWorkflowMCPConfig(workDir, task.ID); err != nil {
+		e.logger.Warn("could not setup workflow MCP config", "error", err)
 	}
 
 	// Create a temp file for the feedback (avoids quoting issues)
@@ -3758,6 +3768,69 @@ func symlinkMCPConfig(projectDir, worktreePath string) error {
 	return nil
 }
 
+// writeWorkflowMCPConfig writes the workflow MCP server configuration to .mcp.json in the worktree.
+// This enables Claude Code to use workflow tools (workflow_complete, workflow_screenshot, etc.).
+// The function preserves existing MCP server configurations and only adds/updates the workflow server.
+// If the worktree has a symlinked .mcp.json (from symlinkMCPConfig), this function reads from the
+// symlink target but then replaces the symlink with a regular file to avoid modifying the project's original.
+func writeWorkflowMCPConfig(worktreePath string, taskID int64) error {
+	mcpFilePath := filepath.Join(worktreePath, ".mcp.json")
+
+	// Read existing config if present (follows symlinks to read project's MCP servers)
+	var config map[string]interface{}
+	if data, err := os.ReadFile(mcpFilePath); err == nil {
+		if err := json.Unmarshal(data, &config); err != nil {
+			// If file exists but is invalid JSON, start fresh
+			config = make(map[string]interface{})
+		}
+	} else {
+		config = make(map[string]interface{})
+	}
+
+	// Get or create mcpServers map
+	mcpServers, ok := config["mcpServers"].(map[string]interface{})
+	if !ok {
+		mcpServers = make(map[string]interface{})
+	}
+
+	// Get the path to the task executable
+	taskExecutable, err := os.Executable()
+	if err != nil {
+		// Fallback to just "task" and hope it's in PATH
+		taskExecutable = "task"
+	}
+
+	// Add/update the workflow MCP server
+	// Use "stdio" transport - Claude Code spawns the process and communicates via stdin/stdout
+	mcpServers["workflow"] = map[string]interface{}{
+		"type":    "stdio",
+		"command": taskExecutable,
+		"args":    []string{"mcp-server", "--task-id", fmt.Sprintf("%d", taskID)},
+	}
+
+	config["mcpServers"] = mcpServers
+
+	// Marshal the updated config
+	data, err := json.MarshalIndent(config, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal .mcp.json: %w", err)
+	}
+
+	// If .mcp.json is a symlink, remove it first to avoid writing through to the original file
+	// We want to write a regular file to the worktree, not modify the project's .mcp.json
+	if fi, err := os.Lstat(mcpFilePath); err == nil && fi.Mode()&os.ModeSymlink != 0 {
+		if err := os.Remove(mcpFilePath); err != nil {
+			return fmt.Errorf("remove .mcp.json symlink: %w", err)
+		}
+	}
+
+	if err := os.WriteFile(mcpFilePath, data, 0644); err != nil {
+		return fmt.Errorf("write .mcp.json: %w", err)
+	}
+
+	return nil
+}
+
 // copyMCPConfig copies the MCP server configuration from the source project to the worktree
 // in the claude.json file so that Claude Code in the worktree has the same MCP servers available.
 func copyMCPConfig(configPath, srcDir, dstDir string) error {
@@ -4364,6 +4437,12 @@ func (e *Executor) runPi(ctx context.Context, task *db.Task, workDir, prompt str
 		return execResult{Message: fmt.Sprintf("failed to create session dir: %s", err.Error())}
 	}
 
+	// Find the task binary for the wrapper
+	taskBin, err := os.Executable()
+	if err != nil {
+		taskBin = "ty" // Fallback
+	}
+
 	// Update task with explicit session path if not already set
 	if task.ClaudeSessionID != sessionPath {
 		if err := e.db.UpdateTaskClaudeSessionID(task.ID, sessionPath); err != nil {
@@ -4375,12 +4454,12 @@ func (e *Executor) runPi(ctx context.Context, task *db.Task, workDir, prompt str
 	var script string
 	if piSessionExists(sessionPath) {
 		e.logLine(task.ID, "system", fmt.Sprintf("Resuming existing session %s", filepath.Base(sessionPath)))
-		script = fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q pi --session %q %s--continue "$(cat %q)"`,
-			task.ID, sessionID, task.Port, task.WorktreePath, sessionPath, systemPromptFlag, promptFile.Name())
+		script = fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %s pi-wrapper --task-id %d --session %q %s--continue "$(cat %q)"`,
+			task.ID, sessionID, task.Port, task.WorktreePath, taskBin, task.ID, sessionPath, systemPromptFlag, promptFile.Name())
 	} else {
 		// Start fresh using the explicit session path
-		script = fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q pi --session %q %s"$(cat %q)"`,
-			task.ID, sessionID, task.Port, task.WorktreePath, sessionPath, systemPromptFlag, promptFile.Name())
+		script = fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %s pi-wrapper --task-id %d --session %q %s"$(cat %q)"`,
+			task.ID, sessionID, task.Port, task.WorktreePath, taskBin, task.ID, sessionPath, systemPromptFlag, promptFile.Name())
 	}
 
 	// Create new window in task-daemon session (with retry logic for race conditions)
@@ -4432,6 +4511,12 @@ func (e *Executor) runPiResume(ctx context.Context, task *db.Task, workDir, prom
 	// Ensure session directory exists (just in case)
 	if err := e.ensurePiSessionDir(sessionPath); err != nil {
 		e.logger.Error("could not create session dir", "error", err)
+	}
+
+	// Find the task binary for the wrapper
+	taskBin, err := os.Executable()
+	if err != nil {
+		taskBin = "ty" // Fallback
 	}
 
 	// Update task with explicit session path if not already set (migration/safety)
@@ -4502,8 +4587,8 @@ func (e *Executor) runPiResume(ctx context.Context, task *db.Task, workDir, prom
 	// Build system prompt flag
 	systemPromptFlag := fmt.Sprintf(`--append-system-prompt %q `, systemFile.Name())
 
-	script := fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q pi --session %q %s--continue "$(cat %q)"`,
-		task.ID, taskSessionID, task.Port, task.WorktreePath, sessionPath, systemPromptFlag, feedbackFile.Name())
+	script := fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %s pi-wrapper --task-id %d --session %q %s--continue "$(cat %q)"`,
+		task.ID, taskSessionID, task.Port, task.WorktreePath, taskBin, task.ID, sessionPath, systemPromptFlag, feedbackFile.Name())
 
 	// Create new window in task-daemon session (with retry logic for race conditions)
 	actualSession, tmuxErr := createTmuxWindow(daemonSession, windowName, workDir, script)
@@ -4600,7 +4685,7 @@ func (e *Executor) getPiPID(taskID int64) int {
 
 		// Check if this is a Pi process or has Pi as child
 		cmdOut, _ := exec.CommandContext(ctx, "ps", "-p", strconv.Itoa(pid), "-o", "comm=").Output()
-		if strings.Contains(string(cmdOut), "pi") || strings.Contains(string(cmdOut), "node") {
+		if strings.Contains(string(cmdOut), "pi") || strings.Contains(string(cmdOut), "node") || strings.Contains(string(cmdOut), "ty") {
 			return pid
 		}
 
@@ -4708,3 +4793,4 @@ func slugify(s string, maxLen int) string {
 
 	return s
 }
+
