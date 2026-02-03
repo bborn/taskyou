@@ -1,15 +1,18 @@
 version: "2"
+
 linters:
   disable:
     - errcheck
+
   settings:
     staticcheck:
       checks:
         - all
-        - -QF1003
-        - -QF1008
-        - -S1017
-        - -SA9003
+        - -SA9003  # Empty branch - sometimes used for clarity
+        - -QF1003  # Tagged switch suggestion - keep explicit for readability
+        - -QF1008  # Remove embedded field from selector - keep explicit for clarity
+        - -S1017   # TrimPrefix suggestion - keep explicit for readability
+
   exclusions:
     generated: lax
     presets:
@@ -21,9 +24,11 @@ linters:
       - third_party$
       - builtin$
       - examples$
+
 issues:
   max-issues-per-linter: 0
   max-same-issues: 0
+
 formatters:
   exclusions:
     generated: lax

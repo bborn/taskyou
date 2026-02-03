@@ -1,4 +1,4 @@
-.PHONY: build build-no-restart install clean test deploy
+.PHONY: build build-no-restart install clean test deploy web
 
 # Configuration
 SERVER ?= root@cloud-claude
@@ -20,6 +20,24 @@ build-ty:
 
 build-taskd:
 	$(GO) build -o bin/taskd ./cmd/taskd
+
+build-taskweb:
+	go build -o bin/taskweb ./cmd/taskweb
+
+# Build web frontend
+web:
+	cd web && npm install && npm run build
+
+# Build taskweb with embedded frontend
+build-taskweb-full: web build-taskweb
+
+# Run web UI in development mode (connects to local database)
+# Usage: make webdev (run API server), then in another terminal: make webui
+webdev:
+	go run ./cmd/taskweb-dev
+
+webui:
+	cd web && npm install && npm run dev
 
 # Restart daemon if it's running (silent if not). Never fail the build if we lack permissions.
 restart-daemon:
