@@ -4258,8 +4258,7 @@ func parseKeyEvents(input string) []tea.Msg {
 			// Treat as text input
 			// If length is 1, it's a single rune keypress
 			// If length > 1, it's a sequence of rune keypresses
-			runes := []rune(part)
-			for _, r := range runes {
+			for _, r := range part {
 				msgs = append(msgs, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
 			}
 			continue
