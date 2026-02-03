@@ -4437,12 +4437,6 @@ func (e *Executor) runPi(ctx context.Context, task *db.Task, workDir, prompt str
 		return execResult{Message: fmt.Sprintf("failed to create session dir: %s", err.Error())}
 	}
 
-	// Find the task binary for the wrapper
-	taskBin, err := os.Executable()
-	if err != nil {
-		taskBin = "ty" // Fallback
-	}
-
 	// Update task with explicit session path if not already set
 	if task.ClaudeSessionID != sessionPath {
 		if err := e.db.UpdateTaskClaudeSessionID(task.ID, sessionPath); err != nil {
@@ -4454,12 +4448,12 @@ func (e *Executor) runPi(ctx context.Context, task *db.Task, workDir, prompt str
 	var script string
 	if piSessionExists(sessionPath) {
 		e.logLine(task.ID, "system", fmt.Sprintf("Resuming existing session %s", filepath.Base(sessionPath)))
-		script = fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %s pi-wrapper --task-id %d --session %q %s--continue "$(cat %q)"`,
-			task.ID, sessionID, task.Port, task.WorktreePath, taskBin, task.ID, sessionPath, systemPromptFlag, promptFile.Name())
+		script = fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q pi --session %q %s--continue "$(cat %q)"`,
+			task.ID, sessionID, task.Port, task.WorktreePath, sessionPath, systemPromptFlag, promptFile.Name())
 	} else {
 		// Start fresh using the explicit session path
-		script = fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %s pi-wrapper --task-id %d --session %q %s"$(cat %q)"`,
-			task.ID, sessionID, task.Port, task.WorktreePath, taskBin, task.ID, sessionPath, systemPromptFlag, promptFile.Name())
+		script = fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q pi --session %q %s"$(cat %q)"`,
+			task.ID, sessionID, task.Port, task.WorktreePath, sessionPath, systemPromptFlag, promptFile.Name())
 	}
 
 	// Create new window in task-daemon session (with retry logic for race conditions)
@@ -4511,12 +4505,6 @@ func (e *Executor) runPiResume(ctx context.Context, task *db.Task, workDir, prom
 	// Ensure session directory exists (just in case)
 	if err := e.ensurePiSessionDir(sessionPath); err != nil {
 		e.logger.Error("could not create session dir", "error", err)
-	}
-
-	// Find the task binary for the wrapper
-	taskBin, err := os.Executable()
-	if err != nil {
-		taskBin = "ty" // Fallback
 	}
 
 	// Update task with explicit session path if not already set (migration/safety)
@@ -4587,8 +4575,8 @@ func (e *Executor) runPiResume(ctx context.Context, task *db.Task, workDir, prom
 	// Build system prompt flag
 	systemPromptFlag := fmt.Sprintf(`--append-system-prompt %q `, systemFile.Name())
 
-	script := fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %s pi-wrapper --task-id %d --session %q %s--continue "$(cat %q)"`,
-		task.ID, taskSessionID, task.Port, task.WorktreePath, taskBin, task.ID, sessionPath, systemPromptFlag, feedbackFile.Name())
+	script := fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q pi --session %q %s--continue "$(cat %q)"`,
+		task.ID, taskSessionID, task.Port, task.WorktreePath, sessionPath, systemPromptFlag, feedbackFile.Name())
 
 	// Create new window in task-daemon session (with retry logic for race conditions)
 	actualSession, tmuxErr := createTmuxWindow(daemonSession, windowName, workDir, script)
