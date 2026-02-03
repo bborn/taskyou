@@ -7,7 +7,6 @@ import (
 	"github.com/bborn/workflow/internal/db"
 	"github.com/bborn/workflow/internal/github"
 	"github.com/charmbracelet/lipgloss"
-	"github.com/mattn/go-runewidth"
 )
 
 // KanbanColumn represents a column in the kanban board.
@@ -987,7 +986,14 @@ func truncateString(s string, max int) string {
 	if max <= 0 {
 		return ""
 	}
-	return runewidth.Truncate(s, max, "…")
+	runes := []rune(s)
+	if len(runes) <= max {
+		return s
+	}
+	if max == 1 {
+		return "…"
+	}
+	return string(runes[:max-1]) + "…"
 }
 
 // FocusColumn moves selection to a specific column by index.
