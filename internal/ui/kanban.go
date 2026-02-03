@@ -950,7 +950,7 @@ func (k *KanbanBoard) renderTaskCard(task *db.Task, width int, isSelected bool) 
 			if available < 4 {
 				available = 4
 			}
-			leftLine = truncateString(leftLine, available)
+			leftLine = lipgloss.NewStyle().MaxWidth(available).Render(leftLine)
 			space = 1
 		}
 		idLine = leftLine + strings.Repeat(" ", space) + indicatorText
@@ -980,20 +980,6 @@ func (k *KanbanBoard) renderTaskCard(task *db.Task, width int, isSelected bool) 
 
 	content := idLine + "\n" + titleLine
 	return cardStyle.Render(content)
-}
-
-func truncateString(s string, max int) string {
-	if max <= 0 {
-		return ""
-	}
-	runes := []rune(s)
-	if len(runes) <= max {
-		return s
-	}
-	if max == 1 {
-		return "…"
-	}
-	return string(runes[:max-1]) + "…"
 }
 
 // FocusColumn moves selection to a specific column by index.
