@@ -772,7 +772,16 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		cmds = append(cmds, m.loadTasks())
 
-	case taskQueuedMsg, taskClosedMsg, taskArchivedMsg, taskDeletedMsg, taskRetriedMsg, taskStatusChangedMsg:
+	case taskQueuedMsg:
+		if msg.err == nil && m.selectedTask != nil && m.detailView != nil {
+			if task, err := m.db.GetTask(m.selectedTask.ID); err == nil && task != nil {
+				m.selectedTask = task
+				m.detailView.UpdateTask(task)
+			}
+		}
+		cmds = append(cmds, m.loadTasks())
+
+	case taskClosedMsg, taskArchivedMsg, taskDeletedMsg, taskRetriedMsg, taskStatusChangedMsg:
 		cmds = append(cmds, m.loadTasks())
 
 	case taskDangerousModeToggledMsg:
