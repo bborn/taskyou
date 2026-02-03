@@ -1117,3 +1117,67 @@ func TestFormatToolLogMessage(t *testing.T) {
 		})
 	}
 }
+
+// TestUnescapeNewlines tests the unescapeNewlines function for CLI input handling.
+func TestUnescapeNewlines(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{
+			name:     "no newlines",
+			input:    "simple text",
+			expected: "simple text",
+		},
+		{
+			name:     "single literal newline",
+			input:    "line1\\nline2",
+			expected: "line1\nline2",
+		},
+		{
+			name:     "multiple literal newlines",
+			input:    "line1\\nline2\\nline3",
+			expected: "line1\nline2\nline3",
+		},
+		{
+			name:     "newline at start",
+			input:    "\\nline2",
+			expected: "\nline2",
+		},
+		{
+			name:     "newline at end",
+			input:    "line1\\n",
+			expected: "line1\n",
+		},
+		{
+			name:     "empty string",
+			input:    "",
+			expected: "",
+		},
+		{
+			name:     "only newlines",
+			input:    "\\n\\n\\n",
+			expected: "\n\n\n",
+		},
+		{
+			name:     "actual newlines preserved",
+			input:    "line1\nline2",
+			expected: "line1\nline2",
+		},
+		{
+			name:     "mixed literal and actual newlines",
+			input:    "line1\\nline2\nline3",
+			expected: "line1\nline2\nline3",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := unescapeNewlines(tt.input)
+			if result != tt.expected {
+				t.Errorf("unescapeNewlines(%q) = %q, want %q", tt.input, result, tt.expected)
+			}
+		})
+	}
+}
