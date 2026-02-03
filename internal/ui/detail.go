@@ -2420,6 +2420,51 @@ func (m *DetailModel) renderContent() string {
 		b.WriteString("\n")
 	}
 
+	// Dependencies section
+	if m.database != nil {
+		blockers, blockedBy, err := m.database.GetAllDependencies(t.ID)
+		if err == nil && (len(blockers) > 0 || len(blockedBy) > 0) {
+			b.WriteString("\n")
+			b.WriteString(Bold.Render("Dependencies"))
+			b.WriteString("\n\n")
+
+			if len(blockers) > 0 {
+				lockStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#F59E0B"))
+				b.WriteString(lockStyle.Render("Blocked by:"))
+				b.WriteString("\n")
+				for _, blocker := range blockers {
+					statusStr := ""
+					if blocker.Status == db.StatusDone || blocker.Status == db.StatusArchived {
+						statusStr = lipgloss.NewStyle().Foreground(lipgloss.Color("#10B981")).Render(" [done]")
+					} else {
+						statusStr = Dim.Render(fmt.Sprintf(" [%s]", blocker.Status))
+					}
+					if m.focused {
+						b.WriteString(fmt.Sprintf("  #%d: %s%s\n", blocker.ID, blocker.Title, statusStr))
+					} else {
+						b.WriteString(dimmedStyle.Render(fmt.Sprintf("  #%d: %s%s\n", blocker.ID, blocker.Title, statusStr)))
+					}
+				}
+			}
+
+			if len(blockedBy) > 0 {
+				if len(blockers) > 0 {
+					b.WriteString("\n")
+				}
+				b.WriteString(Bold.Render("Blocks:"))
+				b.WriteString("\n")
+				for _, blocked := range blockedBy {
+					statusStr := Dim.Render(fmt.Sprintf(" [%s]", blocked.Status))
+					if m.focused {
+						b.WriteString(fmt.Sprintf("  #%d: %s%s\n", blocked.ID, blocked.Title, statusStr))
+					} else {
+						b.WriteString(dimmedStyle.Render(fmt.Sprintf("  #%d: %s%s\n", blocked.ID, blocked.Title, statusStr)))
+					}
+				}
+			}
+		}
+	}
+
 	// Execution logs
 	if len(m.logs) > 0 {
 		b.WriteString("\n")

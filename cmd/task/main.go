@@ -2130,6 +2130,178 @@ Examples:
 
 	rootCmd.AddCommand(projectsCmd)
 
+	// Block command - create a dependency between two tasks
+	blockCmd := &cobra.Command{
+		Use:   "block <blocked-task-id> --by <blocker-task-id>",
+		Short: "Block a task until another task completes",
+		Long: `Create a dependency where a task is blocked until another task completes.
+
+Example: ty block 5 --by 3
+This makes task #5 blocked by task #3. Task #5 cannot proceed until #3 is done.
+
+Use --auto-queue to automatically move the blocked task to 'queued' when unblocked.`,
+		Args: cobra.ExactArgs(1),
+		Run: func(cmd *cobra.Command, args []string) {
+			var blockedID int64
+			if _, err := fmt.Sscanf(args[0], "%d", &blockedID); err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Invalid task ID: "+args[0]))
+				os.Exit(1)
+			}
+
+			blockerID, _ := cmd.Flags().GetInt64("by")
+			if blockerID == 0 {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("--by flag is required"))
+				os.Exit(1)
+			}
+
+			autoQueue, _ := cmd.Flags().GetBool("auto-queue")
+
+			dbPath := db.DefaultPath()
+			database, err := db.Open(dbPath)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+			defer database.Close()
+
+			// Verify both tasks exist
+			blocker, err := database.GetTask(blockerID)
+			if err != nil || blocker == nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render(fmt.Sprintf("Blocker task #%d not found", blockerID)))
+				os.Exit(1)
+			}
+
+			blocked, err := database.GetTask(blockedID)
+			if err != nil || blocked == nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render(fmt.Sprintf("Blocked task #%d not found", blockedID)))
+				os.Exit(1)
+			}
+
+			if err := database.AddDependency(blockerID, blockedID, autoQueue); err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+
+			autoQueueStr := ""
+			if autoQueue {
+				autoQueueStr = " (will auto-queue when unblocked)"
+			}
+			fmt.Println(successStyle.Render(fmt.Sprintf("Task #%d is now blocked by #%d%s", blockedID, blockerID, autoQueueStr)))
+		},
+	}
+	blockCmd.Flags().Int64("by", 0, "ID of the blocker task (required)")
+	blockCmd.Flags().Bool("auto-queue", false, "Auto-queue blocked task when unblocked")
+	blockCmd.MarkFlagRequired("by")
+	rootCmd.AddCommand(blockCmd)
+
+	// Unblock command - remove a dependency
+	unblockCmd := &cobra.Command{
+		Use:   "unblock <blocked-task-id> --from <blocker-task-id>",
+		Short: "Remove a blocking dependency",
+		Long: `Remove a dependency so a task is no longer blocked by another.
+
+Example: ty unblock 5 --from 3
+This removes the dependency where task #5 was blocked by task #3.`,
+		Args: cobra.ExactArgs(1),
+		Run: func(cmd *cobra.Command, args []string) {
+			var blockedID int64
+			if _, err := fmt.Sscanf(args[0], "%d", &blockedID); err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Invalid task ID: "+args[0]))
+				os.Exit(1)
+			}
+
+			blockerID, _ := cmd.Flags().GetInt64("from")
+			if blockerID == 0 {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("--from flag is required"))
+				os.Exit(1)
+			}
+
+			dbPath := db.DefaultPath()
+			database, err := db.Open(dbPath)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+			defer database.Close()
+
+			if err := database.RemoveDependency(blockerID, blockedID); err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+
+			fmt.Println(successStyle.Render(fmt.Sprintf("Task #%d is no longer blocked by #%d", blockedID, blockerID)))
+		},
+	}
+	unblockCmd.Flags().Int64("from", 0, "ID of the blocker task to remove (required)")
+	unblockCmd.MarkFlagRequired("from")
+	rootCmd.AddCommand(unblockCmd)
+
+	// Deps command - show dependencies for a task
+	depsCmd := &cobra.Command{
+		Use:   "deps <task-id>",
+		Short: "Show dependencies for a task",
+		Long: `Display all dependencies for a task, showing:
+- Tasks that block this task (must complete before this task)
+- Tasks that this task blocks (waiting on this task)`,
+		Args: cobra.ExactArgs(1),
+		Run: func(cmd *cobra.Command, args []string) {
+			var taskID int64
+			if _, err := fmt.Sscanf(args[0], "%d", &taskID); err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Invalid task ID: "+args[0]))
+				os.Exit(1)
+			}
+
+			dbPath := db.DefaultPath()
+			database, err := db.Open(dbPath)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+			defer database.Close()
+
+			task, err := database.GetTask(taskID)
+			if err != nil || task == nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render(fmt.Sprintf("Task #%d not found", taskID)))
+				os.Exit(1)
+			}
+
+			blockers, blockedBy, err := database.GetAllDependencies(taskID)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+
+			fmt.Printf("%s #%d: %s\n\n", boldStyle.Render("Task"), taskID, task.Title)
+
+			if len(blockers) == 0 && len(blockedBy) == 0 {
+				fmt.Println(dimStyle.Render("No dependencies"))
+				return
+			}
+
+			if len(blockers) > 0 {
+				fmt.Println(boldStyle.Render("Blocked by:"))
+				for _, b := range blockers {
+					statusIcon := ""
+					if b.Status == db.StatusDone || b.Status == db.StatusArchived {
+						statusIcon = successStyle.Render(" [done]")
+					} else {
+						statusIcon = dimStyle.Render(fmt.Sprintf(" [%s]", b.Status))
+					}
+					fmt.Printf("  #%d: %s%s\n", b.ID, b.Title, statusIcon)
+				}
+				fmt.Println()
+			}
+
+			if len(blockedBy) > 0 {
+				fmt.Println(boldStyle.Render("Blocks:"))
+				for _, b := range blockedBy {
+					fmt.Printf("  #%d: %s %s\n", b.ID, b.Title, dimStyle.Render(fmt.Sprintf("[%s]", b.Status)))
+				}
+			}
+		},
+	}
+	rootCmd.AddCommand(depsCmd)
+
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
 		os.Exit(1)

@@ -421,6 +421,11 @@ func (db *DB) UpdateTaskStatus(id int64, status string) error {
 		}
 	}
 
+	// Process dependent tasks when a blocker is completed
+	if status == StatusDone || status == StatusArchived {
+		db.ProcessCompletedBlocker(id)
+	}
+
 	return nil
 }
 

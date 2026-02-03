@@ -180,6 +180,20 @@ func (db *DB) migrate() error {
 		`CREATE INDEX IF NOT EXISTS idx_event_log_event_type ON event_log(event_type)`,
 		`CREATE INDEX IF NOT EXISTS idx_event_log_created_at ON event_log(created_at)`,
 
+		// Task dependencies table for blocking/blocked relationships
+		`CREATE TABLE IF NOT EXISTS task_dependencies (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			blocker_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+			blocked_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+			auto_queue INTEGER DEFAULT 0,
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			UNIQUE(blocker_id, blocked_id),
+			CHECK(blocker_id != blocked_id)
+		)`,
+
+		`CREATE INDEX IF NOT EXISTS idx_task_dependencies_blocker ON task_dependencies(blocker_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_task_dependencies_blocked ON task_dependencies(blocked_id)`,
+
 	}
 
 	for _, m := range migrations {
