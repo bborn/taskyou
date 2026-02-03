@@ -4426,32 +4426,34 @@ func (e *Executor) runPi(ctx context.Context, task *db.Task, workDir, prompt str
 		sessionID = fmt.Sprintf("%d", os.Getpid())
 	}
 
-	// Find the task binary
-	taskBin, err := os.Executable()
-	if err != nil {
-		taskBin = "ty" // Fallback
-	}
-
 	// Build system prompt flag
 	systemPromptFlag := fmt.Sprintf(`--append-system-prompt %q `, systemFile.Name())
 
-	// Check for existing Pi session to resume instead of starting fresh
-	existingSessionPath := task.ClaudeSessionID
-	var script string
-	if existingSessionPath != "" && piSessionExists(existingSessionPath) {
-		e.logLine(task.ID, "system", fmt.Sprintf("Resuming existing session %s", filepath.Base(existingSessionPath)))
-		script = fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %s pi-wrapper --task-id %d %s--continue "$(cat %q)"`,
-			task.ID, sessionID, task.Port, task.WorktreePath, taskBin, task.ID, systemPromptFlag, promptFile.Name())
-	} else {
-		if existingSessionPath != "" {
-			e.logLine(task.ID, "system", fmt.Sprintf("Session %s no longer exists, starting fresh", filepath.Base(existingSessionPath)))
-			// Clear the stale session ID
-			if err := e.db.UpdateTaskClaudeSessionID(task.ID, ""); err != nil {
-				e.logger.Warn("failed to clear stale session ID", "task", task.ID, "error", err)
-			}
+	// Determine explicit session path
+	sessionPath := e.getPiSessionPath(workDir, task.ID)
+	if err := e.ensurePiSessionDir(sessionPath); err != nil {
+		e.logger.Error("could not create session dir", "error", err)
+		e.logLine(task.ID, "error", fmt.Sprintf("Failed to create session dir: %s", err.Error()))
+		return execResult{Message: fmt.Sprintf("failed to create session dir: %s", err.Error())}
+	}
+
+	// Update task with explicit session path if not already set
+	if task.ClaudeSessionID != sessionPath {
+		if err := e.db.UpdateTaskClaudeSessionID(task.ID, sessionPath); err != nil {
+			e.logger.Warn("failed to update session ID", "task", task.ID, "error", err)
 		}
-		script = fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %s pi-wrapper --task-id %d %s"$(cat %q)"`,
-			task.ID, sessionID, task.Port, task.WorktreePath, taskBin, task.ID, systemPromptFlag, promptFile.Name())
+	}
+
+	// Check if session file exists at the explicit path to decide whether to resume
+	var script string
+	if piSessionExists(sessionPath) {
+		e.logLine(task.ID, "system", fmt.Sprintf("Resuming existing session %s", filepath.Base(sessionPath)))
+		script = fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q pi --session %q %s--continue "$(cat %q)"`,
+			task.ID, sessionID, task.Port, task.WorktreePath, sessionPath, systemPromptFlag, promptFile.Name())
+	} else {
+		// Start fresh using the explicit session path
+		script = fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q pi --session %q %s"$(cat %q)"`,
+			task.ID, sessionID, task.Port, task.WorktreePath, sessionPath, systemPromptFlag, promptFile.Name())
 	}
 
 	// Create new window in task-daemon session (with retry logic for race conditions)
@@ -4497,24 +4499,30 @@ func (e *Executor) runPi(ctx context.Context, task *db.Task, workDir, prompt str
 
 // runPiResume resumes a previous Pi session with feedback.
 func (e *Executor) runPiResume(ctx context.Context, task *db.Task, workDir, prompt, feedback string) execResult {
-	// Check for existing session
-	piSessionPath := task.ClaudeSessionID
-	if piSessionPath == "" || !piSessionExists(piSessionPath) {
-		if piSessionPath != "" {
-			e.logLine(task.ID, "system", fmt.Sprintf("Session %s no longer exists, starting fresh", filepath.Base(piSessionPath)))
-			// Clear the stale session ID
-			if err := e.db.UpdateTaskClaudeSessionID(task.ID, ""); err != nil {
-				e.logger.Warn("failed to clear stale session ID", "task", task.ID, "error", err)
-			}
-		} else {
-			e.logLine(task.ID, "system", "No previous session found, starting fresh")
+	// Determine explicit session path
+	sessionPath := e.getPiSessionPath(workDir, task.ID)
+
+	// Ensure session directory exists (just in case)
+	if err := e.ensurePiSessionDir(sessionPath); err != nil {
+		e.logger.Error("could not create session dir", "error", err)
+	}
+
+	// Update task with explicit session path if not already set (migration/safety)
+	if task.ClaudeSessionID != sessionPath {
+		if err := e.db.UpdateTaskClaudeSessionID(task.ID, sessionPath); err != nil {
+			e.logger.Warn("failed to update session ID", "task", task.ID, "error", err)
 		}
+	}
+
+	// Check for existing session
+	if !piSessionExists(sessionPath) {
+		e.logLine(task.ID, "system", "No previous session found, starting fresh")
 		// Build a combined prompt with the feedback included
 		fullPrompt := prompt + "\n\n## User Feedback\n\n" + feedback
 		return e.runPi(ctx, task, workDir, fullPrompt)
 	}
 
-	e.logLine(task.ID, "system", fmt.Sprintf("Resuming session %s", filepath.Base(piSessionPath)))
+	e.logLine(task.ID, "system", fmt.Sprintf("Resuming session %s", filepath.Base(sessionPath)))
 
 	// Check if tmux is available
 	if _, err := exec.LookPath("tmux"); err != nil {
@@ -4564,17 +4572,11 @@ func (e *Executor) runPiResume(ctx context.Context, task *db.Task, workDir, prom
 		taskSessionID = fmt.Sprintf("%d", os.Getpid())
 	}
 
-	// Find the task binary
-	taskBin, err := os.Executable()
-	if err != nil {
-		taskBin = "ty" // Fallback
-	}
-
 	// Build system prompt flag
 	systemPromptFlag := fmt.Sprintf(`--append-system-prompt %q `, systemFile.Name())
 
-	script := fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %s pi-wrapper --task-id %d %s--continue "$(cat %q)"`,
-		task.ID, taskSessionID, task.Port, task.WorktreePath, taskBin, task.ID, systemPromptFlag, feedbackFile.Name())
+	script := fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q pi --session %q %s--continue "$(cat %q)"`,
+		task.ID, taskSessionID, task.Port, task.WorktreePath, sessionPath, systemPromptFlag, feedbackFile.Name())
 
 	// Create new window in task-daemon session (with retry logic for race conditions)
 	actualSession, tmuxErr := createTmuxWindow(daemonSession, windowName, workDir, script)
@@ -4615,6 +4617,20 @@ func (e *Executor) runPiResume(ctx context.Context, task *db.Task, workDir, prom
 	result := e.pollTmuxSession(ctx, task.ID, windowTarget)
 
 	return result
+}
+
+// getPiSessionPath returns the explicit path for a Pi task session.
+// It stores sessions in .task-worktrees/sessions/task-<ID>.jsonl
+func (e *Executor) getPiSessionPath(workDir string, taskID int64) string {
+	// workDir is typically .../.task-worktrees/<slug>
+	// We want to go up one level to .task-worktrees, then into sessions/
+	worktreesDir := filepath.Dir(workDir)
+	return filepath.Join(worktreesDir, "sessions", fmt.Sprintf("task-%d.jsonl", taskID))
+}
+
+// ensurePiSessionDir ensures the directory for the Pi session exists.
+func (e *Executor) ensurePiSessionDir(sessionPath string) error {
+	return os.MkdirAll(filepath.Dir(sessionPath), 0755)
 }
 
 // getPiPID finds the PID of the Pi process for a task.
@@ -4765,3 +4781,4 @@ func slugify(s string, maxLen int) string {
 
 	return s
 }
+
