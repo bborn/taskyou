@@ -78,8 +78,10 @@ func main() {
 				return
 			}
 
+			debugStatePath, _ := cmd.Flags().GetString("debug-state-file")
+
 			// Run locally
-			if err := runLocal(dangerous); err != nil {
+			if err := runLocal(dangerous, debugStatePath); err != nil {
 				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
 				os.Exit(1)
 			}
@@ -90,6 +92,44 @@ func main() {
 `)
 
 	rootCmd.PersistentFlags().BoolVar(&dangerous, "dangerous", false, "Run Claude with --dangerously-skip-permissions (for sandboxed environments)")
+	rootCmd.PersistentFlags().String("debug-state-file", "", "Path to write debug state JSON on update")
+
+	// Debug subcommand
+	debugCmd := &cobra.Command{
+		Use:   "debug",
+		Short: "Debugging tools",
+	}
+	rootCmd.AddCommand(debugCmd)
+
+	// Debug state subcommand
+	debugStateCmd := &cobra.Command{
+		Use:   "state",
+		Short: "Dump initial application state as JSON",
+		Long: `Dump the initial application state (Model) as structured JSON.
+		
+For monitoring the LIVE state of a running TUI, use the --debug-state-file flag
+when starting the application:
+  ty --debug-state-file=state.json`,
+		Run: func(cmd *cobra.Command, args []string) {
+			dbPath := db.DefaultPath()
+			database, err := db.Open(dbPath)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+			defer database.Close()
+
+			cwd, _ := os.Getwd()
+			exec := executor.New(database, config.New(database))
+			model := ui.NewAppModel(database, exec, cwd)
+			
+			// Generate and print state
+			state := model.GenerateDebugState()
+			data, _ := json.MarshalIndent(state, "", "  ")
+			fmt.Println(string(data))
+		},
+	}
+	debugCmd.AddCommand(debugStateCmd)
 
 	// Daemon subcommand - runs executor in background
 	daemonCmd := &cobra.Command{
@@ -2106,7 +2146,7 @@ func execInTmux() error {
 }
 
 // runLocal runs the TUI locally with a local SQLite database.
-func runLocal(dangerousMode bool) error {
+func runLocal(dangerousMode bool, debugStatePath string) error {
 	// Ensure daemon is running
 	if err := ensureDaemonRunning(dangerousMode); err != nil {
 		fmt.Fprintln(os.Stderr, dimStyle.Render("Warning: could not start daemon: "+err.Error()))
@@ -2134,6 +2174,9 @@ func runLocal(dangerousMode bool) error {
 
 	// Create and run TUI
 	model := ui.NewAppModel(database, exec, cwd)
+	if debugStatePath != "" {
+		model.SetDebugStatePath(debugStatePath)
+	}
 	p := tea.NewProgram(
 		model,
 		tea.WithAltScreen(),
