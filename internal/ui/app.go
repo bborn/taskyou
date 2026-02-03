@@ -448,6 +448,13 @@ func NewAppModel(database *db.DB, exec *executor.Executor, workingDir string) *A
 	return model
 }
 
+// SetTasks sets the tasks for the model (useful for debugging/testing).
+func (m *AppModel) SetTasks(tasks []*db.Task) {
+	m.tasks = tasks
+	m.loading = false
+	m.kanban.SetTasks(tasks)
+}
+
 // SetDebugStatePath sets the path for dumping debug state.
 func (m *AppModel) SetDebugStatePath(path string) {
 	m.debugStatePath = path

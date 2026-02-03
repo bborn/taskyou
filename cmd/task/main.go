@@ -104,13 +104,18 @@ func main() {
 	// Debug state subcommand
 	debugStateCmd := &cobra.Command{
 		Use:   "state",
-		Short: "Dump initial application state as JSON",
-		Long: `Dump the initial application state (Model) as structured JSON.
+		Short: "Dump application state (Model) as JSON",
+		Long: `Dump the application state (Model) as structured JSON.
 		
-For monitoring the LIVE state of a running TUI, use the --debug-state-file flag
-when starting the application:
-  ty --debug-state-file=state.json`,
+This is useful for debugging and for AI agents to verify UI logic.
+
+Examples:
+  ty debug state
+  ty debug state --keys "Down,Down,Enter"  # Simulate key presses
+  ty debug state --keys "n,test task,Enter" # Simulate creating a task`,
 		Run: func(cmd *cobra.Command, args []string) {
+			keys, _ := cmd.Flags().GetString("keys")
+
 			dbPath := db.DefaultPath()
 			database, err := db.Open(dbPath)
 			if err != nil {
@@ -123,12 +128,33 @@ when starting the application:
 			exec := executor.New(database, config.New(database))
 			model := ui.NewAppModel(database, exec, cwd)
 			
+			// Load tasks synchronously to ensure model is populated
+			tasks, err := database.ListTasks(db.ListTasksOptions{
+				IncludeClosed: true,
+				Limit:         1000,
+			})
+			if err == nil {
+				model.SetTasks(tasks)
+				
+				// Also update window size to something reasonable
+				model.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+			}
+
+			// Simulate key presses if provided
+			if keys != "" {
+				keyEvents := parseKeyEvents(keys)
+				for _, msg := range keyEvents {
+					model.Update(msg)
+				}
+			}
+
 			// Generate and print state
 			state := model.GenerateDebugState()
 			data, _ := json.MarshalIndent(state, "", "  ")
 			fmt.Println(string(data))
 		},
 	}
+	debugStateCmd.Flags().String("keys", "", "Comma-separated list of keys to simulate (e.g., 'Down,Enter,n')")
 	debugCmd.AddCommand(debugStateCmd)
 
 	// Daemon subcommand - runs executor in background
@@ -4181,4 +4207,64 @@ func deleteProjectCLI(name string, force bool) {
 	}
 
 	fmt.Println(successStyle.Render(fmt.Sprintf("Deleted project '%s'", name)))
+}
+
+// parseKeyEvents parses a comma-separated string of keys into bubbletea KeyMsgs.
+func parseKeyEvents(input string) []tea.Msg {
+	var msgs []tea.Msg
+	// Split by comma, but be careful about text input that might contain commas if we were robust.
+	// For now, simple split is fine as per instructions.
+	parts := strings.Split(input, ",")
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+
+		var msg tea.KeyMsg
+		// Check for special keys
+		switch strings.ToLower(part) {
+		case "enter":
+			msg = tea.KeyMsg{Type: tea.KeyEnter}
+		case "esc", "escape":
+			msg = tea.KeyMsg{Type: tea.KeyEsc}
+		case "tab":
+			msg = tea.KeyMsg{Type: tea.KeyTab}
+		case "space":
+			msg = tea.KeyMsg{Type: tea.KeySpace, Runes: []rune{' '}}
+		case "backspace":
+			msg = tea.KeyMsg{Type: tea.KeyBackspace}
+		case "delete":
+			msg = tea.KeyMsg{Type: tea.KeyDelete}
+		case "up":
+			msg = tea.KeyMsg{Type: tea.KeyUp}
+		case "down":
+			msg = tea.KeyMsg{Type: tea.KeyDown}
+		case "left":
+			msg = tea.KeyMsg{Type: tea.KeyLeft}
+		case "right":
+			msg = tea.KeyMsg{Type: tea.KeyRight}
+		case "pgup", "pageup":
+			msg = tea.KeyMsg{Type: tea.KeyPgUp}
+		case "pgdown", "pagedown":
+			msg = tea.KeyMsg{Type: tea.KeyPgDown}
+		case "home":
+			msg = tea.KeyMsg{Type: tea.KeyHome}
+		case "end":
+			msg = tea.KeyMsg{Type: tea.KeyEnd}
+		case "ctrl+c":
+			msg = tea.KeyMsg{Type: tea.KeyCtrlC}
+		default:
+			// Treat as text input
+			// If length is 1, it's a single rune keypress
+			// If length > 1, it's a sequence of rune keypresses
+			runes := []rune(part)
+			for _, r := range runes {
+				msgs = append(msgs, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+			}
+			continue
+		}
+		msgs = append(msgs, msg)
+	}
+	return msgs
 }
