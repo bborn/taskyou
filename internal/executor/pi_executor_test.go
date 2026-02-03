@@ -1,11 +1,11 @@
 package executor
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/bborn/workflow/internal/config"
 	"github.com/bborn/workflow/internal/db"
@@ -176,9 +176,15 @@ func TestPiExecutor_BuildCommand(t *testing.T) {
 	if !containsString(cmd, "pi") {
 		t.Error("command should contain 'pi'")
 	}
+	// Should contain --session flag with calculated path
+	expectedSessionPath := filepath.Join("/tmp", "sessions", "task-123.jsonl")
+	if !containsString(cmd, fmt.Sprintf("--session %q", expectedSessionPath)) {
+		t.Errorf("command should contain explicit session path, got: %s", cmd)
+	}
 
 	// Test building command with session ID (resume)
-	cmdResume := piExec.BuildCommand(task, "session-123", "")
+	sessionPath := "/custom/path/to/session.jsonl"
+	cmdResume := piExec.BuildCommand(task, sessionPath, "")
 	if cmdResume == "" {
 		t.Error("expected non-empty resume command")
 	}
@@ -187,58 +193,59 @@ func TestPiExecutor_BuildCommand(t *testing.T) {
 	if !containsString(cmdResume, "--continue") {
 		t.Error("resume command should contain --continue flag")
 	}
+	// Should contain --session flag with provided path
+	if !containsString(cmdResume, fmt.Sprintf("--session %q", sessionPath)) {
+		t.Errorf("resume command should contain provided session path, got: %s", cmdResume)
+	}
 }
 
 func TestFindPiSessionID(t *testing.T) {
-	// Create a temporary session directory structure
+	// Create a temporary directory structure
 	tmpDir := t.TempDir()
-	home := os.Getenv("HOME")
 	
-	// Save original HOME and restore after test
+	// Create .task-worktrees structure
+	worktreesDir := filepath.Join(tmpDir, ".task-worktrees")
+	sessionsDir := filepath.Join(worktreesDir, "sessions")
+	if err := os.MkdirAll(sessionsDir, 0755); err != nil {
+		t.Fatalf("failed to create sessions dir: %v", err)
+	}
+
+	taskID := int64(123)
+	slug := "test-slug"
+	workDir := filepath.Join(worktreesDir, fmt.Sprintf("%d-%s", taskID, slug))
+	
+	// 1. Test finding explicit session path
+	explicitSessionPath := filepath.Join(sessionsDir, fmt.Sprintf("task-%d.jsonl", taskID))
+	if err := os.WriteFile(explicitSessionPath, []byte("explicit"), 0644); err != nil {
+		t.Fatalf("failed to write explicit session file: %v", err)
+	}
+	
+	foundSession := findPiSessionID(workDir)
+	if foundSession != explicitSessionPath {
+		t.Errorf("expected explicit session %q, got %q", explicitSessionPath, foundSession)
+	}
+
+	// 2. Test fallback to legacy path (when explicit doesn't exist)
+	os.Remove(explicitSessionPath)
+
+	home := os.Getenv("HOME")
 	defer os.Setenv("HOME", home)
 	os.Setenv("HOME", tmpDir)
 
-	workDir := "/test/work/dir"
 	escapedPath := "--" + strings.ReplaceAll(workDir, "/", "-") + "--"
-	
-	sessionDir := filepath.Join(tmpDir, ".pi", "agent", "sessions", escapedPath)
-	if err := os.MkdirAll(sessionDir, 0755); err != nil {
-		t.Fatalf("failed to create session dir: %v", err)
+	legacySessionDir := filepath.Join(tmpDir, ".pi", "agent", "sessions", escapedPath)
+	if err := os.MkdirAll(legacySessionDir, 0755); err != nil {
+		t.Fatalf("failed to create legacy session dir: %v", err)
 	}
 
-	// Create some test session files with different timestamps
-	sessions := []struct {
-		name    string
-		age     time.Duration
-		content string
-	}{
-		{"2026-01-01T10-00-00-000Z_old-session.jsonl", 2 * time.Hour, "old"},
-		{"2026-01-01T12-00-00-000Z_recent-session.jsonl", 1 * time.Hour, "recent"},
-		{"2026-01-01T11-00-00-000Z_middle-session.jsonl", 90 * time.Minute, "middle"},
+	legacySessionPath := filepath.Join(legacySessionDir, "legacy-session.jsonl")
+	if err := os.WriteFile(legacySessionPath, []byte("legacy"), 0644); err != nil {
+		t.Fatalf("failed to write legacy session file: %v", err)
 	}
 
-	for _, s := range sessions {
-		path := filepath.Join(sessionDir, s.name)
-		if err := os.WriteFile(path, []byte(s.content), 0644); err != nil {
-			t.Fatalf("failed to write session file: %v", err)
-		}
-		// Set modification time
-		mtime := time.Now().Add(-s.age)
-		if err := os.Chtimes(path, mtime, mtime); err != nil {
-			t.Fatalf("failed to set mtime: %v", err)
-		}
-	}
-
-	// Find the most recent session
-	sessionID := findPiSessionID(workDir)
-	if sessionID == "" {
-		t.Fatal("expected to find a session")
-	}
-
-	// Should be the most recent one
-	expectedPath := filepath.Join(sessionDir, "2026-01-01T12-00-00-000Z_recent-session.jsonl")
-	if sessionID != expectedPath {
-		t.Errorf("expected most recent session %q, got %q", expectedPath, sessionID)
+	foundLegacySession := findPiSessionID(workDir)
+	if foundLegacySession != legacySessionPath {
+		t.Errorf("expected legacy session %q, got %q", legacySessionPath, foundLegacySession)
 	}
 }
 
