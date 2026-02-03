@@ -347,6 +347,9 @@ type AppModel struct {
 	// Window size
 	width  int
 	height int
+
+	// Debug state file path
+	debugStatePath string
 }
 
 // taskExecutorDisplayName returns the display name for a task's executor.
@@ -443,6 +446,18 @@ func NewAppModel(database *db.DB, exec *executor.Executor, workingDir string) *A
 	}
 
 	return model
+}
+
+// SetTasks sets the tasks for the model (useful for debugging/testing).
+func (m *AppModel) SetTasks(tasks []*db.Task) {
+	m.tasks = tasks
+	m.loading = false
+	m.kanban.SetTasks(tasks)
+}
+
+// SetDebugStatePath sets the path for dumping debug state.
+func (m *AppModel) SetDebugStatePath(path string) {
+	m.debugStatePath = path
 }
 
 // Init initializes the model.
@@ -935,6 +950,12 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				cmds = append(cmds, cmd)
 			}
 		}
+	}
+
+	// Dump debug state if enabled
+	if m.debugStatePath != "" {
+		// Ignore errors during debug dump to avoid crashing UI
+		_ = m.DumpDebugStateToFile(m.debugStatePath)
 	}
 
 	return m, tea.Batch(cmds...)
