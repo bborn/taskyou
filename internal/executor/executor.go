@@ -3802,10 +3802,21 @@ func writeWorkflowMCPConfig(worktreePath string, taskID int64) error {
 
 	// Add/update the workflow MCP server
 	// Use "stdio" transport - Claude Code spawns the process and communicates via stdin/stdout
+	// Auto-approve all workflow tools so users don't have to manually approve each call
 	mcpServers["workflow"] = map[string]interface{}{
 		"type":    "stdio",
 		"command": taskExecutable,
 		"args":    []string{"mcp-server", "--task-id", fmt.Sprintf("%d", taskID)},
+		"autoApprove": []string{
+			"workflow_complete",
+			"workflow_needs_input",
+			"workflow_screenshot",
+			"workflow_show_task",
+			"workflow_create_task",
+			"workflow_list_tasks",
+			"workflow_get_project_context",
+			"workflow_set_project_context",
+		},
 	}
 
 	config["mcpServers"] = mcpServers

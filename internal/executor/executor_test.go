@@ -1425,6 +1425,30 @@ func TestWriteWorkflowMCPConfig(t *testing.T) {
 		if len(args) != 3 || args[0] != "mcp-server" || args[1] != "--task-id" || args[2] != "123" {
 			t.Errorf("workflow args = %v, want [mcp-server --task-id 123]", args)
 		}
+
+		// Verify autoApprove list is present with all workflow tools
+		autoApprove, ok := workflow["autoApprove"].([]interface{})
+		if !ok {
+			t.Fatal("expected autoApprove array in workflow config")
+		}
+		expectedTools := []string{
+			"workflow_complete",
+			"workflow_needs_input",
+			"workflow_screenshot",
+			"workflow_show_task",
+			"workflow_create_task",
+			"workflow_list_tasks",
+			"workflow_get_project_context",
+			"workflow_set_project_context",
+		}
+		if len(autoApprove) != len(expectedTools) {
+			t.Errorf("autoApprove has %d items, want %d", len(autoApprove), len(expectedTools))
+		}
+		for i, tool := range expectedTools {
+			if i < len(autoApprove) && autoApprove[i] != tool {
+				t.Errorf("autoApprove[%d] = %v, want %v", i, autoApprove[i], tool)
+			}
+		}
 	})
 
 	t.Run("preserves existing MCP servers", func(t *testing.T) {
