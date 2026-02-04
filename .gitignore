@@ -39,3 +39,6 @@ bin/
 # Tmux
 tmux-*.log
 .playwright-mcp/.mcp.json
+
+# Spotlight mode
+.spotlight-active

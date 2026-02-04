@@ -269,5 +269,29 @@ If you're running as the task executor, you have access to MCP tools:
 - `taskyou_show_task` - Get your task details
 - `taskyou_create_task` - Create follow-up tasks
 - `taskyou_list_tasks` - See other active tasks
+- `taskyou_spotlight` - Sync worktree changes to main repo for testing
 
 Use these instead of CLI when executing inside a Task You worktree.
+
+### Spotlight Mode
+
+Spotlight mode bridges the gap between isolated worktree development and testing in the main repository. It syncs your worktree changes back to the main repo so you can run and test your app there.
+
+```
+# Enable spotlight (syncs changes to main repo)
+taskyou_spotlight(action="start")
+
+# Manually sync after more changes
+taskyou_spotlight(action="sync")
+
+# Check status
+taskyou_spotlight(action="status")
+
+# Disable and restore main repo to original state
+taskyou_spotlight(action="stop")
+```
+
+Use this when:
+- Your app has directory-dependent assumptions (needs to run from repo root)
+- You need to test with resources already configured in the main repo (databases, ports)
+- Your project has fast incremental rebuilds but slow initial builds
