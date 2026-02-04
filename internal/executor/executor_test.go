@@ -1420,15 +1420,15 @@ func TestWriteWorkflowMCPConfig(t *testing.T) {
 			t.Fatal("expected mcpServers key in project config")
 		}
 
-		workflow, ok := mcpServers["workflow"].(map[string]interface{})
+		taskyou, ok := mcpServers["taskyou"].(map[string]interface{})
 		if !ok {
-			t.Fatal("expected workflow key in mcpServers")
+			t.Fatal("expected taskyou key in mcpServers")
 		}
 
-		return workflow
+		return taskyou
 	}
 
-	t.Run("creates workflow config in claude.json", func(t *testing.T) {
+	t.Run("creates taskyou config in claude.json", func(t *testing.T) {
 		configPath := setupTempConfigDir(t)
 		worktreePath := t.TempDir()
 		taskID := int64(123)
@@ -1438,34 +1438,34 @@ func TestWriteWorkflowMCPConfig(t *testing.T) {
 			t.Fatalf("unexpected error: %v", err)
 		}
 
-		workflow := readWorkflowConfig(t, configPath, worktreePath)
+		taskyou := readWorkflowConfig(t, configPath, worktreePath)
 
-		if workflow["type"] != "stdio" {
-			t.Errorf("workflow type = %v, want stdio", workflow["type"])
+		if taskyou["type"] != "stdio" {
+			t.Errorf("taskyou type = %v, want stdio", taskyou["type"])
 		}
 
-		args, ok := workflow["args"].([]interface{})
+		args, ok := taskyou["args"].([]interface{})
 		if !ok {
-			t.Fatal("expected args array in workflow config")
+			t.Fatal("expected args array in taskyou config")
 		}
 		if len(args) != 3 || args[0] != "mcp-server" || args[1] != "--task-id" || args[2] != "123" {
-			t.Errorf("workflow args = %v, want [mcp-server --task-id 123]", args)
+			t.Errorf("taskyou args = %v, want [mcp-server --task-id 123]", args)
 		}
 
-		// Verify autoApprove list is present with all workflow tools
-		autoApprove, ok := workflow["autoApprove"].([]interface{})
+		// Verify autoApprove list is present with all taskyou tools
+		autoApprove, ok := taskyou["autoApprove"].([]interface{})
 		if !ok {
-			t.Fatal("expected autoApprove array in workflow config")
+			t.Fatal("expected autoApprove array in taskyou config")
 		}
 		expectedTools := []string{
-			"workflow_complete",
-			"workflow_needs_input",
-			"workflow_screenshot",
-			"workflow_show_task",
-			"workflow_create_task",
-			"workflow_list_tasks",
-			"workflow_get_project_context",
-			"workflow_set_project_context",
+			"taskyou_complete",
+			"taskyou_needs_input",
+			"taskyou_screenshot",
+			"taskyou_show_task",
+			"taskyou_create_task",
+			"taskyou_list_tasks",
+			"taskyou_get_project_context",
+			"taskyou_set_project_context",
 		}
 		if len(autoApprove) != len(expectedTools) {
 			t.Errorf("autoApprove has %d items, want %d", len(autoApprove), len(expectedTools))
@@ -1529,9 +1529,9 @@ func TestWriteWorkflowMCPConfig(t *testing.T) {
 			t.Errorf("github command = %v, want gh-mcp", github["command"])
 		}
 
-		// Check workflow server added
-		if _, ok := mcpServers["workflow"].(map[string]interface{}); !ok {
-			t.Fatal("expected workflow key in mcpServers")
+		// Check taskyou server added
+		if _, ok := mcpServers["taskyou"].(map[string]interface{}); !ok {
+			t.Fatal("expected taskyou key in mcpServers")
 		}
 	})
 

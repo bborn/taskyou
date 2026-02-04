@@ -315,15 +315,15 @@ Prompts are built with:
 
 **Best Practice Workflow:**
 
-1. **Start every task** by calling `workflow_get_project_context` MCP tool
+1. **Start every task** by calling `taskyou_get_project_context` MCP tool
 2. **If context exists:** Use it to understand the codebase, skip exploration
-3. **If empty:** Explore the codebase once, then save via `workflow_set_project_context`
+3. **If empty:** Explore the codebase once, then save via `taskyou_set_project_context`
 4. **Future tasks** will reuse this context, saving time and tokens
 
 **Example:**
 
 ```
-Agent: workflow_get_project_context()
+Agent: taskyou_get_project_context()
 TaskYou: "## Cached Project Context\n\nThis is a Go project using Bubble Tea..."
 
 [Agent uses the context to work efficiently]
@@ -332,11 +332,11 @@ TaskYou: "## Cached Project Context\n\nThis is a Go project using Bubble Tea..."
 Or if no context exists:
 
 ```
-Agent: workflow_get_project_context()
+Agent: taskyou_get_project_context()
 TaskYou: "No cached project context found. Please explore and save a summary."
 
 Agent: [explores key files and directories]
-Agent: workflow_set_project_context("This is a Go project using:
+Agent: taskyou_set_project_context("This is a Go project using:
 - Bubble Tea for TUI
 - SQLite for storage
 Key directories: internal/db/, internal/executor/, internal/ui/...")
