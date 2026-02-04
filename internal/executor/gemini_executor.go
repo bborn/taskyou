@@ -81,6 +81,7 @@ func (g *GeminiExecutor) runGemini(ctx context.Context, task *db.Task, workDir, 
 	windowName := TmuxWindowName(task.ID)
 	windowTarget := fmt.Sprintf("%s:%s", daemonSession, windowName)
 
+	// Kill ALL existing windows with this name (handles duplicates)
 	killAllWindowsByNameAllSessions(windowName)
 
 	promptFile, err := os.CreateTemp("", "task-prompt-*.txt")

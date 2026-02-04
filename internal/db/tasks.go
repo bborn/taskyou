@@ -597,6 +597,20 @@ func (db *DB) UpdateTaskLastAccessedAt(taskID int64) error {
 	return nil
 }
 
+// ClearTaskTmuxIDs clears all tmux-related IDs for a task.
+// This should be called before retrying/restarting a task to prevent stale references.
+// Clears: tmux_window_id, claude_pane_id, shell_pane_id
+func (db *DB) ClearTaskTmuxIDs(taskID int64) error {
+	_, err := db.Exec(`
+		UPDATE tasks SET tmux_window_id = '', claude_pane_id = '', shell_pane_id = '', updated_at = CURRENT_TIMESTAMP
+		WHERE id = ?
+	`, taskID)
+	if err != nil {
+		return fmt.Errorf("clear task tmux ids: %w", err)
+	}
+	return nil
+}
+
 // DeleteTask deletes a task.
 func (db *DB) DeleteTask(id int64) error {
 	// Get task before deleting for event emission
@@ -664,6 +678,7 @@ func (db *DB) AllocatePort(taskID int64) (int, error) {
 }
 
 // RetryTask clears logs, appends feedback to body, and re-queues a task.
+// Also clears stale tmux window/pane IDs to prevent duplicate window issues.
 func (db *DB) RetryTask(id int64, feedback string) error {
 	// Add continuation marker to logs
 	db.AppendTaskLog(id, "system", "--- Continuation ---")
@@ -671,6 +686,13 @@ func (db *DB) RetryTask(id int64, feedback string) error {
 	// Log feedback if provided
 	if feedback != "" {
 		db.AppendTaskLog(id, "text", "Feedback: "+feedback)
+	}
+
+	// Clear stale tmux IDs to prevent duplicate window issues on retry
+	// The new window/pane IDs will be set when the task restarts
+	if err := db.ClearTaskTmuxIDs(id); err != nil {
+		// Log but don't fail - this is cleanup, not critical
+		// The executor will still handle duplicates via name-based cleanup
 	}
 
 	// Re-queue the task

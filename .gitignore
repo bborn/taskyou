@@ -38,4 +38,4 @@ bin/
 
 # Tmux
 tmux-*.log
-.playwright-mcp/
+.playwright-mcp/.mcp.json
