@@ -38,6 +38,10 @@ type Task struct {
 	CompletedAt     *LocalTime
 	// Distillation tracking
 	LastDistilledAt *LocalTime // When task was last distilled for learnings
+	// Fallback executor support
+	FallbackExecutors string // Comma-separated list of fallback executors (e.g., "codex,gemini")
+	OriginalExecutor  string // Original executor before fallback (empty if no fallback occurred)
+	FallbackCount     int    // Number of fallback attempts made
 }
 
 // Task statuses
@@ -167,7 +171,8 @@ func (db *DB) GetTask(id int64) (*Task, error) {
 		       COALESCE(pr_url, ''), COALESCE(pr_number, 0),
 		       COALESCE(dangerous_mode, 0), COALESCE(pinned, 0), COALESCE(tags, ''), COALESCE(summary, ''),
 		       created_at, updated_at, started_at, completed_at,
-		       last_distilled_at
+		       last_distilled_at,
+		       COALESCE(fallback_executors, ''), COALESCE(original_executor, ''), COALESCE(fallback_count, 0)
 		FROM tasks WHERE id = ?
 	`, id).Scan(
 		&t.ID, &t.Title, &t.Body, &t.Status, &t.Type, &t.Project, &t.Executor,
@@ -177,6 +182,7 @@ func (db *DB) GetTask(id int64) (*Task, error) {
 		&t.DangerousMode, &t.Pinned, &t.Tags, &t.Summary,
 		&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
 		&t.LastDistilledAt,
+		&t.FallbackExecutors, &t.OriginalExecutor, &t.FallbackCount,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -207,7 +213,8 @@ func (db *DB) ListTasks(opts ListTasksOptions) ([]*Task, error) {
 		       COALESCE(pr_url, ''), COALESCE(pr_number, 0),
 		       COALESCE(dangerous_mode, 0), COALESCE(pinned, 0), COALESCE(tags, ''), COALESCE(summary, ''),
 		       created_at, updated_at, started_at, completed_at,
-		       last_distilled_at
+		       last_distilled_at,
+		       COALESCE(fallback_executors, ''), COALESCE(original_executor, ''), COALESCE(fallback_count, 0)
 		FROM tasks WHERE 1=1
 	`
 	args := []interface{}{}
@@ -260,6 +267,7 @@ func (db *DB) ListTasks(opts ListTasksOptions) ([]*Task, error) {
 			&t.DangerousMode, &t.Pinned, &t.Tags, &t.Summary,
 			&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
 			&t.LastDistilledAt,
+			&t.FallbackExecutors, &t.OriginalExecutor, &t.FallbackCount,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("scan task: %w", err)
@@ -282,7 +290,8 @@ func (db *DB) GetMostRecentlyCreatedTask() (*Task, error) {
 		       COALESCE(pr_url, ''), COALESCE(pr_number, 0),
 		       COALESCE(dangerous_mode, 0), COALESCE(pinned, 0), COALESCE(tags, ''), COALESCE(summary, ''),
 		       created_at, updated_at, started_at, completed_at,
-		       last_distilled_at
+		       last_distilled_at,
+		       COALESCE(fallback_executors, ''), COALESCE(original_executor, ''), COALESCE(fallback_count, 0)
 		FROM tasks
 		ORDER BY created_at DESC, id DESC
 		LIMIT 1
@@ -294,6 +303,7 @@ func (db *DB) GetMostRecentlyCreatedTask() (*Task, error) {
 		&t.DangerousMode, &t.Pinned, &t.Tags, &t.Summary,
 		&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
 		&t.LastDistilledAt,
+		&t.FallbackExecutors, &t.OriginalExecutor, &t.FallbackCount,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -320,7 +330,8 @@ func (db *DB) SearchTasks(query string, limit int) ([]*Task, error) {
 		       COALESCE(pr_url, ''), COALESCE(pr_number, 0),
 		       COALESCE(dangerous_mode, 0), COALESCE(pinned, 0), COALESCE(tags, ''), COALESCE(summary, ''),
 		       created_at, updated_at, started_at, completed_at,
-		       last_distilled_at
+		       last_distilled_at,
+		       COALESCE(fallback_executors, ''), COALESCE(original_executor, ''), COALESCE(fallback_count, 0)
 		FROM tasks
 		WHERE (
 			title LIKE ? COLLATE NOCASE
@@ -351,6 +362,7 @@ func (db *DB) SearchTasks(query string, limit int) ([]*Task, error) {
 			&t.DangerousMode, &t.Pinned, &t.Tags, &t.Summary,
 			&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
 			&t.LastDistilledAt,
+			&t.FallbackExecutors, &t.OriginalExecutor, &t.FallbackCount,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("scan task: %w", err)
@@ -564,6 +576,73 @@ func (db *DB) UpdateTaskPaneIDs(taskID int64, claudePaneID, shellPaneID string) 
 	return nil
 }
 
+// UpdateTaskFallbackExecutors updates the fallback executors for a task.
+// The fallback_executors field is a comma-separated list of executor names (e.g., "codex,gemini").
+func (db *DB) UpdateTaskFallbackExecutors(taskID int64, fallbackExecutors string) error {
+	_, err := db.Exec(`
+		UPDATE tasks SET fallback_executors = ?, updated_at = CURRENT_TIMESTAMP
+		WHERE id = ?
+	`, fallbackExecutors, taskID)
+	if err != nil {
+		return fmt.Errorf("update task fallback executors: %w", err)
+	}
+	return nil
+}
+
+// UpdateTaskExecutorForFallback updates the task's executor and tracks the original executor.
+// This is called when switching to a fallback executor due to rate limits.
+// It also increments the fallback count.
+func (db *DB) UpdateTaskExecutorForFallback(taskID int64, newExecutor, originalExecutor string) error {
+	_, err := db.Exec(`
+		UPDATE tasks SET
+			executor = ?,
+			original_executor = CASE WHEN original_executor = '' THEN ? ELSE original_executor END,
+			fallback_count = fallback_count + 1,
+			updated_at = CURRENT_TIMESTAMP
+		WHERE id = ?
+	`, newExecutor, originalExecutor, taskID)
+	if err != nil {
+		return fmt.Errorf("update task executor for fallback: %w", err)
+	}
+	return nil
+}
+
+// ResetTaskFallbackState resets the fallback state when a task completes or is retried.
+// This restores the original executor if a fallback occurred.
+func (db *DB) ResetTaskFallbackState(taskID int64) error {
+	_, err := db.Exec(`
+		UPDATE tasks SET
+			executor = CASE WHEN original_executor != '' THEN original_executor ELSE executor END,
+			original_executor = '',
+			fallback_count = 0,
+			updated_at = CURRENT_TIMESTAMP
+		WHERE id = ?
+	`, taskID)
+	if err != nil {
+		return fmt.Errorf("reset task fallback state: %w", err)
+	}
+	return nil
+}
+
+// GetNextFallbackExecutor returns the next fallback executor to try for a task.
+// It parses the fallback_executors field (comma-separated) and returns the next one
+// based on the fallback_count. Returns empty string if no more fallbacks available.
+func (t *Task) GetNextFallbackExecutor() string {
+	if t.FallbackExecutors == "" {
+		return ""
+	}
+	executors := strings.Split(t.FallbackExecutors, ",")
+	if t.FallbackCount >= len(executors) {
+		return "" // No more fallbacks
+	}
+	return strings.TrimSpace(executors[t.FallbackCount])
+}
+
+// HasFallbackExecutors returns true if the task has fallback executors configured.
+func (t *Task) HasFallbackExecutors() bool {
+	return t.FallbackExecutors != ""
+}
+
 // DeleteTask deletes a task.
 func (db *DB) DeleteTask(id int64) error {
 	// Get task before deleting for event emission
@@ -655,7 +734,8 @@ func (db *DB) GetNextQueuedTask() (*Task, error) {
 		       COALESCE(pr_url, ''), COALESCE(pr_number, 0),
 		       COALESCE(dangerous_mode, 0), COALESCE(pinned, 0), COALESCE(tags, ''), COALESCE(summary, ''),
 		       created_at, updated_at, started_at, completed_at,
-		       last_distilled_at
+		       last_distilled_at,
+		       COALESCE(fallback_executors, ''), COALESCE(original_executor, ''), COALESCE(fallback_count, 0)
 		FROM tasks
 		WHERE status = ?
 		ORDER BY created_at ASC
@@ -668,6 +748,7 @@ func (db *DB) GetNextQueuedTask() (*Task, error) {
 		&t.DangerousMode, &t.Pinned, &t.Tags, &t.Summary,
 		&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
 		&t.LastDistilledAt,
+		&t.FallbackExecutors, &t.OriginalExecutor, &t.FallbackCount,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -688,7 +769,8 @@ func (db *DB) GetQueuedTasks() ([]*Task, error) {
 		       COALESCE(pr_url, ''), COALESCE(pr_number, 0),
 		       COALESCE(dangerous_mode, 0), COALESCE(pinned, 0), COALESCE(tags, ''), COALESCE(summary, ''),
 		       created_at, updated_at, started_at, completed_at,
-		       last_distilled_at
+		       last_distilled_at,
+		       COALESCE(fallback_executors, ''), COALESCE(original_executor, ''), COALESCE(fallback_count, 0)
 		FROM tasks
 		WHERE status = ?
 		ORDER BY created_at ASC
@@ -709,6 +791,7 @@ func (db *DB) GetQueuedTasks() ([]*Task, error) {
 			&t.DangerousMode, &t.Pinned, &t.Tags, &t.Summary,
 			&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
 			&t.LastDistilledAt,
+			&t.FallbackExecutors, &t.OriginalExecutor, &t.FallbackCount,
 		); err != nil {
 			return nil, fmt.Errorf("scan task: %w", err)
 		}
@@ -728,7 +811,8 @@ func (db *DB) GetTasksWithBranches() ([]*Task, error) {
 		       COALESCE(pr_url, ''), COALESCE(pr_number, 0),
 		       COALESCE(dangerous_mode, 0), COALESCE(pinned, 0), COALESCE(tags, ''), COALESCE(summary, ''),
 		       created_at, updated_at, started_at, completed_at,
-		       last_distilled_at
+		       last_distilled_at,
+		       COALESCE(fallback_executors, ''), COALESCE(original_executor, ''), COALESCE(fallback_count, 0)
 		FROM tasks
 		WHERE branch_name != '' AND status NOT IN (?, ?)
 		ORDER BY created_at DESC
@@ -749,6 +833,7 @@ func (db *DB) GetTasksWithBranches() ([]*Task, error) {
 			&t.DangerousMode, &t.Pinned, &t.Tags, &t.Summary,
 			&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
 			&t.LastDistilledAt,
+			&t.FallbackExecutors, &t.OriginalExecutor, &t.FallbackCount,
 		); err != nil {
 			return nil, fmt.Errorf("scan task: %w", err)
 		}

@@ -12,6 +12,7 @@ type ExecResult struct {
 	Success     bool   // Task completed successfully
 	NeedsInput  bool   // Task is waiting for user input
 	Interrupted bool   // Task was interrupted by user
+	RateLimited bool   // Task hit a rate limit
 	Message     string // Status message or error
 }
 

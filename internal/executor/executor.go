@@ -939,6 +939,41 @@ func (e *Executor) executeTask(ctx context.Context, task *db.Task) {
 		currentStatus = currentTask.Status
 	}
 
+	// Handle rate limit with fallback executor switching
+	if result.RateLimited {
+		// Refresh task from database to get current fallback state
+		task, _ = e.db.GetTask(task.ID)
+		if task != nil {
+			if fallbackExecutor := task.GetNextFallbackExecutor(); fallbackExecutor != "" {
+				e.logLine(task.ID, "system", fmt.Sprintf("Switching from '%s' to fallback executor '%s' due to rate limit", executorName, fallbackExecutor))
+
+				// Kill the current executor process
+				taskExecutor.Kill(task.ID)
+
+				// Update task to use fallback executor
+				if err := e.db.UpdateTaskExecutorForFallback(task.ID, fallbackExecutor, executorName); err != nil {
+					e.logger.Error("Failed to update task for fallback", "error", err)
+					e.logLine(task.ID, "error", fmt.Sprintf("Failed to switch to fallback executor: %v", err))
+					e.updateStatus(task.ID, db.StatusBlocked)
+					e.hooks.OnStatusChange(task, db.StatusBlocked, "Rate limit hit, fallback failed")
+				} else {
+					// Re-queue the task so it gets picked up with the new executor
+					e.logLine(task.ID, "system", fmt.Sprintf("Re-queueing task with executor '%s'", fallbackExecutor))
+					e.db.UpdateTaskStatus(task.ID, db.StatusQueued)
+					e.hooks.OnStatusChange(task, db.StatusQueued, fmt.Sprintf("Switched to fallback executor: %s", fallbackExecutor))
+				}
+				e.logger.Info("Task switched to fallback executor", "id", task.ID, "fallback", fallbackExecutor)
+				return
+			}
+		}
+		// No fallback available - mark as blocked
+		e.logLine(task.ID, "system", "Rate limit hit but no fallback executors available")
+		e.updateStatus(task.ID, db.StatusBlocked)
+		e.hooks.OnStatusChange(task, db.StatusBlocked, fmt.Sprintf("Rate limit hit: %s (no fallback available)", result.Message))
+		e.logger.Info("Task rate limited, no fallback", "id", task.ID)
+		return
+	}
+
 	// Update final status and trigger hooks
 	// Respect status set by hooks - don't override blocked with done
 	if result.Interrupted {
@@ -955,6 +990,12 @@ func (e *Executor) executeTask(ctx context.Context, task *db.Task) {
 		e.logLine(task.ID, "system", "Task completed")
 		e.hooks.OnStatusChange(task, db.StatusDone, "Task completed")
 
+		// Reset fallback state on completion (restore original executor for future retries)
+		if currentTask != nil && currentTask.OriginalExecutor != "" {
+			e.db.ResetTaskFallbackState(task.ID)
+			e.logLine(task.ID, "system", fmt.Sprintf("Restored original executor '%s' for future runs", currentTask.OriginalExecutor))
+		}
+
 		// NOTE: We intentionally do NOT kill the executor here - keep it running so user can
 		// easily retry/resume the task. Old done task executors are cleaned up after 2h
 		// by the cleanupOrphanedClaudes routine.
@@ -962,6 +1003,12 @@ func (e *Executor) executeTask(ctx context.Context, task *db.Task) {
 		e.updateStatus(task.ID, db.StatusDone)
 		e.logLine(task.ID, "system", "Task completed successfully")
 		e.hooks.OnStatusChange(task, db.StatusDone, "Task completed successfully")
+
+		// Reset fallback state on completion (restore original executor for future retries)
+		if currentTask != nil && currentTask.OriginalExecutor != "" {
+			e.db.ResetTaskFallbackState(task.ID)
+			e.logLine(task.ID, "system", fmt.Sprintf("Restored original executor '%s' for future runs", currentTask.OriginalExecutor))
+		}
 
 		// NOTE: We intentionally do NOT kill the executor here - keep it running so user can
 		// easily retry/resume the task. Old done task executors are cleaned up after 2h
@@ -1372,6 +1419,7 @@ type execResult struct {
 	Success     bool
 	NeedsInput  bool
 	Interrupted bool
+	RateLimited bool   // True if execution hit a rate limit
 	Message     string
 }
 
@@ -2842,6 +2890,10 @@ func (e *Executor) pollTmuxSession(ctx context.Context, taskID int64, sessionNam
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
 
+	// Rate limit check counter - only check every 5 seconds to reduce overhead
+	rateLimitCheckCounter := 0
+	const rateLimitCheckInterval = 5
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -2859,6 +2911,16 @@ func (e *Executor) pollTmuxSession(ctx context.Context, taskID int64, sessionNam
 				if task.Status == db.StatusDone {
 					// Don't kill window - keep it so user can review Claude's work
 					return execResult{Success: true}
+				}
+
+				// Check for rate limits if fallback executors are configured
+				rateLimitCheckCounter++
+				if task.HasFallbackExecutors() && rateLimitCheckCounter >= rateLimitCheckInterval {
+					rateLimitCheckCounter = 0
+					if rateLimited, message := e.checkForRateLimit(sessionName, task.Executor); rateLimited {
+						e.logLine(taskID, "system", fmt.Sprintf("Rate limit detected: %s", message))
+						return execResult{RateLimited: true, Message: message}
+					}
 				}
 			}
 
@@ -2895,6 +2957,22 @@ func (e *Executor) pollTmuxSession(ctx context.Context, taskID int64, sessionNam
 			}
 		}
 	}
+}
+
+// checkForRateLimit captures recent tmux pane output and checks for rate limit patterns.
+func (e *Executor) checkForRateLimit(sessionName, executorName string) (bool, string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	// Capture the last 50 lines of pane output
+	captureCmd := exec.CommandContext(ctx, "tmux", "capture-pane", "-t", sessionName, "-p", "-S", "-50")
+	output, err := captureCmd.Output()
+	if err != nil {
+		return false, ""
+	}
+
+	// Check for rate limit patterns
+	return DetectRateLimit(string(output), executorName)
 }
 
 // ensureShellPane creates a shell pane alongside the Claude pane in the daemon window.

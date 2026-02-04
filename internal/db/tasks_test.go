@@ -1880,3 +1880,326 @@ func TestGetExecutorUsageByProject(t *testing.T) {
 		t.Errorf("expected empty usage map for nonexistent project, got %v", usage)
 	}
 }
+
+func TestGetNextFallbackExecutor(t *testing.T) {
+	tests := []struct {
+		name              string
+		fallbackExecutors string
+		fallbackCount     int
+		want              string
+	}{
+		{
+			name:              "first fallback",
+			fallbackExecutors: "codex,gemini,opencode",
+			fallbackCount:     0,
+			want:              "codex",
+		},
+		{
+			name:              "second fallback",
+			fallbackExecutors: "codex,gemini,opencode",
+			fallbackCount:     1,
+			want:              "gemini",
+		},
+		{
+			name:              "third fallback",
+			fallbackExecutors: "codex,gemini,opencode",
+			fallbackCount:     2,
+			want:              "opencode",
+		},
+		{
+			name:              "no more fallbacks",
+			fallbackExecutors: "codex,gemini",
+			fallbackCount:     2,
+			want:              "",
+		},
+		{
+			name:              "empty fallback list",
+			fallbackExecutors: "",
+			fallbackCount:     0,
+			want:              "",
+		},
+		{
+			name:              "single fallback available",
+			fallbackExecutors: "codex",
+			fallbackCount:     0,
+			want:              "codex",
+		},
+		{
+			name:              "single fallback exhausted",
+			fallbackExecutors: "codex",
+			fallbackCount:     1,
+			want:              "",
+		},
+		{
+			name:              "fallback with spaces",
+			fallbackExecutors: "codex , gemini , opencode",
+			fallbackCount:     1,
+			want:              "gemini",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			task := &Task{
+				FallbackExecutors: tt.fallbackExecutors,
+				FallbackCount:     tt.fallbackCount,
+			}
+			got := task.GetNextFallbackExecutor()
+			if got != tt.want {
+				t.Errorf("GetNextFallbackExecutor() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestHasFallbackExecutors(t *testing.T) {
+	tests := []struct {
+		name              string
+		fallbackExecutors string
+		want              bool
+	}{
+		{
+			name:              "has fallbacks",
+			fallbackExecutors: "codex,gemini",
+			want:              true,
+		},
+		{
+			name:              "empty string",
+			fallbackExecutors: "",
+			want:              false,
+		},
+		{
+			name:              "single fallback",
+			fallbackExecutors: "codex",
+			want:              true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			task := &Task{
+				FallbackExecutors: tt.fallbackExecutors,
+			}
+			got := task.HasFallbackExecutors()
+			if got != tt.want {
+				t.Errorf("HasFallbackExecutors() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestUpdateTaskFallbackExecutors(t *testing.T) {
+	// Create temporary database
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	db, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer db.Close()
+
+	// Create test project
+	if err := db.CreateProject(&Project{Name: "test", Path: tmpDir}); err != nil {
+		t.Fatalf("failed to create project: %v", err)
+	}
+
+	// Create task
+	task := &Task{
+		Title:    "Test Task",
+		Body:     "Test body",
+		Status:   StatusBacklog,
+		Project:  "test",
+		Executor: "claude",
+	}
+	if err := db.CreateTask(task); err != nil {
+		t.Fatalf("failed to create task: %v", err)
+	}
+
+	// Update fallback executors
+	if err := db.UpdateTaskFallbackExecutors(task.ID, "codex,gemini"); err != nil {
+		t.Fatalf("failed to update fallback executors: %v", err)
+	}
+
+	// Verify the update
+	updated, err := db.GetTask(task.ID)
+	if err != nil {
+		t.Fatalf("failed to get task: %v", err)
+	}
+	if updated.FallbackExecutors != "codex,gemini" {
+		t.Errorf("expected fallback executors 'codex,gemini', got %q", updated.FallbackExecutors)
+	}
+}
+
+func TestUpdateTaskExecutorForFallback(t *testing.T) {
+	// Create temporary database
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	db, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer db.Close()
+
+	// Create test project
+	if err := db.CreateProject(&Project{Name: "test", Path: tmpDir}); err != nil {
+		t.Fatalf("failed to create project: %v", err)
+	}
+
+	// Create task with claude executor
+	task := &Task{
+		Title:    "Test Task",
+		Body:     "Test body",
+		Status:   StatusBacklog,
+		Project:  "test",
+		Executor: "claude",
+	}
+	if err := db.CreateTask(task); err != nil {
+		t.Fatalf("failed to create task: %v", err)
+	}
+
+	// First fallback switch: claude -> codex
+	if err := db.UpdateTaskExecutorForFallback(task.ID, "codex", "claude"); err != nil {
+		t.Fatalf("failed to update task for fallback: %v", err)
+	}
+
+	updated, err := db.GetTask(task.ID)
+	if err != nil {
+		t.Fatalf("failed to get task: %v", err)
+	}
+	if updated.Executor != "codex" {
+		t.Errorf("expected executor 'codex', got %q", updated.Executor)
+	}
+	if updated.OriginalExecutor != "claude" {
+		t.Errorf("expected original executor 'claude', got %q", updated.OriginalExecutor)
+	}
+	if updated.FallbackCount != 1 {
+		t.Errorf("expected fallback count 1, got %d", updated.FallbackCount)
+	}
+
+	// Second fallback switch: codex -> gemini (original executor should stay as claude)
+	if err := db.UpdateTaskExecutorForFallback(task.ID, "gemini", "codex"); err != nil {
+		t.Fatalf("failed to update task for second fallback: %v", err)
+	}
+
+	updated, err = db.GetTask(task.ID)
+	if err != nil {
+		t.Fatalf("failed to get task: %v", err)
+	}
+	if updated.Executor != "gemini" {
+		t.Errorf("expected executor 'gemini', got %q", updated.Executor)
+	}
+	// Original executor should remain as the first one (claude), not be overwritten
+	if updated.OriginalExecutor != "claude" {
+		t.Errorf("expected original executor to remain 'claude', got %q", updated.OriginalExecutor)
+	}
+	if updated.FallbackCount != 2 {
+		t.Errorf("expected fallback count 2, got %d", updated.FallbackCount)
+	}
+}
+
+func TestResetTaskFallbackState(t *testing.T) {
+	// Create temporary database
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	db, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer db.Close()
+
+	// Create test project
+	if err := db.CreateProject(&Project{Name: "test", Path: tmpDir}); err != nil {
+		t.Fatalf("failed to create project: %v", err)
+	}
+
+	// Create task
+	task := &Task{
+		Title:    "Test Task",
+		Body:     "Test body",
+		Status:   StatusBacklog,
+		Project:  "test",
+		Executor: "claude",
+	}
+	if err := db.CreateTask(task); err != nil {
+		t.Fatalf("failed to create task: %v", err)
+	}
+
+	// Simulate fallback scenario: claude -> codex -> gemini
+	db.UpdateTaskExecutorForFallback(task.ID, "codex", "claude")
+	db.UpdateTaskExecutorForFallback(task.ID, "gemini", "codex")
+
+	// Verify current state
+	updated, _ := db.GetTask(task.ID)
+	if updated.Executor != "gemini" {
+		t.Errorf("expected executor 'gemini' before reset, got %q", updated.Executor)
+	}
+	if updated.FallbackCount != 2 {
+		t.Errorf("expected fallback count 2 before reset, got %d", updated.FallbackCount)
+	}
+
+	// Reset fallback state
+	if err := db.ResetTaskFallbackState(task.ID); err != nil {
+		t.Fatalf("failed to reset fallback state: %v", err)
+	}
+
+	// Verify reset
+	updated, err = db.GetTask(task.ID)
+	if err != nil {
+		t.Fatalf("failed to get task: %v", err)
+	}
+	if updated.Executor != "claude" {
+		t.Errorf("expected executor restored to 'claude', got %q", updated.Executor)
+	}
+	if updated.OriginalExecutor != "" {
+		t.Errorf("expected original executor to be empty, got %q", updated.OriginalExecutor)
+	}
+	if updated.FallbackCount != 0 {
+		t.Errorf("expected fallback count 0, got %d", updated.FallbackCount)
+	}
+}
+
+func TestFallbackExecutorsDatabaseFields(t *testing.T) {
+	// Create temporary database
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	db, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer db.Close()
+
+	// Create test project
+	if err := db.CreateProject(&Project{Name: "test", Path: tmpDir}); err != nil {
+		t.Fatalf("failed to create project: %v", err)
+	}
+
+	// Create task - new fields should default to empty/zero
+	task := &Task{
+		Title:   "Test Task",
+		Body:    "Test body",
+		Status:  StatusBacklog,
+		Project: "test",
+	}
+	if err := db.CreateTask(task); err != nil {
+		t.Fatalf("failed to create task: %v", err)
+	}
+
+	// Verify default values
+	retrieved, err := db.GetTask(task.ID)
+	if err != nil {
+		t.Fatalf("failed to get task: %v", err)
+	}
+	if retrieved.FallbackExecutors != "" {
+		t.Errorf("expected empty fallback executors, got %q", retrieved.FallbackExecutors)
+	}
+	if retrieved.OriginalExecutor != "" {
+		t.Errorf("expected empty original executor, got %q", retrieved.OriginalExecutor)
+	}
+	if retrieved.FallbackCount != 0 {
+		t.Errorf("expected fallback count 0, got %d", retrieved.FallbackCount)
+	}
+}

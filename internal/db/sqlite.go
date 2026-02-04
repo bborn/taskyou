@@ -242,6 +242,12 @@ func (db *DB) migrate() error {
 		`ALTER TABLE tasks ADD COLUMN shell_pane_id TEXT DEFAULT ''`,  // tmux pane ID for shell pane (e.g., "%1235")
 		// Auto-generated project context for caching exploration results
 		`ALTER TABLE projects ADD COLUMN context TEXT DEFAULT ''`, // Auto-generated project context (codebase summary, patterns, etc.)
+		// Fallback executors for when primary executor hits rate limits
+		`ALTER TABLE tasks ADD COLUMN fallback_executors TEXT DEFAULT ''`, // Comma-separated list of fallback executors (e.g., "codex,gemini")
+		// Original executor tracking for fallback scenarios
+		`ALTER TABLE tasks ADD COLUMN original_executor TEXT DEFAULT ''`, // Original executor before fallback (empty if no fallback occurred)
+		// Fallback attempt count to track how many times we've tried fallbacks
+		`ALTER TABLE tasks ADD COLUMN fallback_count INTEGER DEFAULT 0`, // Number of fallback attempts made
 	}
 
 	for _, m := range alterMigrations {
