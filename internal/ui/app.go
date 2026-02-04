@@ -649,6 +649,17 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.taskTransitionGraceUntil = time.Now().Add(500 * time.Millisecond)
 		if msg.err == nil {
 			m.selectedTask = msg.task
+			// Update last_accessed_at in m.tasks for command palette sorting
+			// The DB update happens async in loadTaskWithOptions, so we update the
+			// in-memory list here to ensure Ctrl+P shows recently visited tasks first
+			now := db.LocalTime{Time: time.Now()}
+			msg.task.LastAccessedAt = &now
+			for i, t := range m.tasks {
+				if t.ID == msg.task.ID {
+					m.tasks[i].LastAccessedAt = &now
+					break
+				}
+			}
 			// Clean up any duplicate tmux windows for this task before switching
 			m.executor.CleanupDuplicateWindows(msg.task.ID)
 			// Resume task if it was suspended (blocked idle tasks get suspended to save memory)
