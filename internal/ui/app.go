@@ -793,7 +793,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		cmds = append(cmds, m.loadTasks())
 
-	case taskClosedMsg, taskArchivedMsg, taskDeletedMsg, taskRetriedMsg, taskStatusChangedMsg:
+	case taskClosedMsg, taskArchivedMsg, taskUnarchivedMsg, taskDeletedMsg, taskRetriedMsg, taskStatusChangedMsg:
 		cmds = append(cmds, m.loadTasks())
 
 	case taskDangerousModeToggledMsg:
@@ -1334,6 +1334,10 @@ func (m *AppModel) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case key.Matches(msg, m.keys.Archive):
 		if task := m.kanban.SelectedTask(); task != nil {
+			if task.Status == db.StatusArchived {
+				// Unarchive the task
+				return m, m.unarchiveTask(task.ID)
+			}
 			return m.showArchiveConfirm(task)
 		}
 
@@ -1687,6 +1691,15 @@ func (m *AppModel) updateDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.showCloseConfirm(m.selectedTask)
 	}
 	if key.Matches(keyMsg, m.keys.Archive) && m.selectedTask != nil {
+		if m.selectedTask.Status == db.StatusArchived {
+			// Unarchive the task - cleanup detail view since status will change
+			if m.detailView != nil {
+				m.detailView.Cleanup()
+				m.detailView = nil
+			}
+			m.currentView = ViewDashboard
+			return m, m.unarchiveTask(m.selectedTask.ID)
+		}
 		// Don't cleanup detail view yet - wait for confirmation
 		// If user cancels, we need to return to detail view
 		return m.showArchiveConfirm(m.selectedTask)
@@ -2665,6 +2678,10 @@ type taskArchivedMsg struct {
 	err error
 }
 
+type taskUnarchivedMsg struct {
+	err error
+}
+
 type taskDeletedMsg struct {
 	err error
 }
@@ -2880,18 +2897,65 @@ func (m *AppModel) archiveTask(id int64) tea.Cmd {
 	database := m.db
 	exec := m.executor
 	return func() tea.Msg {
-		err := database.UpdateTaskStatus(id, db.StatusArchived)
+		// Get the task first
+		task, err := database.GetTask(id)
+		if err != nil {
+			return taskArchivedMsg{err: err}
+		}
+
+		// Kill Claude process to free memory
+		exec.KillClaudeProcess(id)
+
+		// Kill the task window to clean up both Claude and workdir panes
+		windowTarget := executor.TmuxSessionName(id)
+		osExec.Command("tmux", "kill-window", "-t", windowTarget).Run()
+
+		// Archive worktree (saves uncommitted changes and removes worktree)
+		if task != nil && task.WorktreePath != "" {
+			if err := exec.ArchiveWorktree(task); err != nil {
+				// Log warning but continue with archiving
+				fmt.Fprintf(os.Stderr, "Warning: could not archive worktree: %v\n", err)
+			}
+		}
+
+		// Update status to archived
+		err = database.UpdateTaskStatus(id, db.StatusArchived)
 		if err == nil {
 			if task, _ := database.GetTask(id); task != nil {
 				exec.NotifyTaskChange("status_changed", task)
 			}
 		}
 
-		// Kill the task window to clean up both Claude and workdir panes
-		windowTarget := executor.TmuxSessionName(id)
-		osExec.Command("tmux", "kill-window", "-t", windowTarget).Run()
-
 		return taskArchivedMsg{err: err}
+	}
+}
+
+func (m *AppModel) unarchiveTask(id int64) tea.Cmd {
+	database := m.db
+	exec := m.executor
+	return func() tea.Msg {
+		// Get the task first
+		task, err := database.GetTask(id)
+		if err != nil {
+			return taskUnarchivedMsg{err: err}
+		}
+
+		// Unarchive worktree if there's saved archive state
+		if task != nil && task.HasArchiveState() {
+			if err := exec.UnarchiveWorktree(task); err != nil {
+				return taskUnarchivedMsg{err: fmt.Errorf("unarchive worktree: %w", err)}
+			}
+		}
+
+		// Update status back to backlog (user can then queue it if they want)
+		err = database.UpdateTaskStatus(id, db.StatusBacklog)
+		if err == nil {
+			if task, _ := database.GetTask(id); task != nil {
+				exec.NotifyTaskChange("status_changed", task)
+			}
+		}
+
+		return taskUnarchivedMsg{err: err}
 	}
 }
 

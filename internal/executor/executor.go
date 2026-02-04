@@ -4239,6 +4239,287 @@ func (e *Executor) CleanupWorktree(task *db.Task) error {
 	return nil
 }
 
+// ArchiveWorktree saves the complete worktree state (including uncommitted changes)
+// to a git ref and then removes the worktree. This allows the task to be unarchived
+// later with all changes restored.
+//
+// The archive process:
+// 1. Saves all changes (committed, uncommitted, tracked, untracked) to a git ref
+// 2. Stores the archive state in the database
+// 3. Runs teardown script
+// 4. Removes the worktree with --force
+func (e *Executor) ArchiveWorktree(task *db.Task) error {
+	if task.WorktreePath == "" {
+		return nil
+	}
+
+	// Get project directory to run git commands from
+	projectDir := e.getProjectDir(task.Project)
+	if projectDir == "" {
+		return nil
+	}
+	paths := e.claudePathsForProject(task.Project)
+
+	// Get current HEAD commit
+	headCmd := exec.Command("git", "rev-parse", "HEAD")
+	headCmd.Dir = task.WorktreePath
+	headOutput, err := headCmd.Output()
+	if err != nil {
+		return fmt.Errorf("get HEAD commit: %w", err)
+	}
+	headCommit := strings.TrimSpace(string(headOutput))
+
+	// Create archive ref name based on task ID
+	archiveRef := fmt.Sprintf("refs/task-archive/%d", task.ID)
+
+	// Check if there are any changes to save (staged, unstaged, or untracked)
+	statusCmd := exec.Command("git", "status", "--porcelain")
+	statusCmd.Dir = task.WorktreePath
+	statusOutput, _ := statusCmd.Output()
+	hasChanges := len(strings.TrimSpace(string(statusOutput))) > 0
+
+	if hasChanges {
+		// Add all files including untracked ones to the index
+		addCmd := exec.Command("git", "add", "-A")
+		addCmd.Dir = task.WorktreePath
+		if output, err := addCmd.CombinedOutput(); err != nil {
+			return fmt.Errorf("add all files: %v\n%s", err, string(output))
+		}
+
+		// Create a tree from the index
+		writeTreeCmd := exec.Command("git", "write-tree")
+		writeTreeCmd.Dir = task.WorktreePath
+		treeOutput, err := writeTreeCmd.Output()
+		if err != nil {
+			return fmt.Errorf("write tree: %w", err)
+		}
+		tree := strings.TrimSpace(string(treeOutput))
+
+		// Create a commit object with the tree (this doesn't advance any branch)
+		commitTreeCmd := exec.Command("git", "commit-tree", tree, "-p", headCommit, "-m",
+			fmt.Sprintf("Task archive: #%d - %s", task.ID, task.Title))
+		commitTreeCmd.Dir = task.WorktreePath
+		commitOutput, err := commitTreeCmd.Output()
+		if err != nil {
+			return fmt.Errorf("commit tree: %w", err)
+		}
+		archiveCommit := strings.TrimSpace(string(commitOutput))
+
+		// Create a ref pointing to this commit
+		updateRefCmd := exec.Command("git", "update-ref", archiveRef, archiveCommit)
+		updateRefCmd.Dir = task.WorktreePath
+		if output, err := updateRefCmd.CombinedOutput(); err != nil {
+			return fmt.Errorf("update ref: %v\n%s", err, string(output))
+		}
+
+		// Reset the index (undo the add -A) so the worktree is clean for removal
+		resetCmd := exec.Command("git", "reset", "HEAD")
+		resetCmd.Dir = task.WorktreePath
+		resetCmd.Run() // Ignore errors
+
+		// Save archive state to database
+		if err := e.db.SaveArchiveState(task.ID, archiveRef, archiveCommit, task.WorktreePath, task.BranchName); err != nil {
+			return fmt.Errorf("save archive state: %w", err)
+		}
+	} else {
+		// No changes, just save the current state for reference
+		// Create a ref pointing to HEAD
+		updateRefCmd := exec.Command("git", "update-ref", archiveRef, headCommit)
+		updateRefCmd.Dir = task.WorktreePath
+		if output, err := updateRefCmd.CombinedOutput(); err != nil {
+			return fmt.Errorf("update ref: %v\n%s", err, string(output))
+		}
+
+		// Save archive state to database (archive commit is same as HEAD since no changes)
+		if err := e.db.SaveArchiveState(task.ID, archiveRef, headCommit, task.WorktreePath, task.BranchName); err != nil {
+			return fmt.Errorf("save archive state: %w", err)
+		}
+	}
+
+	// Run teardown script before removing the worktree
+	e.runWorktreeTeardownScript(projectDir, task.WorktreePath, task)
+
+	// Remove worktree
+	cmd := exec.Command("git", "worktree", "remove", "--force", task.WorktreePath)
+	cmd.Dir = projectDir
+	if output, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("remove worktree: %v\n%s", err, string(output))
+	}
+
+	// DO NOT delete the branch - we need it for unarchiving
+	// The branch may have been pushed to remote, so we want to keep it
+
+	// Remove project entry from ~/.claude.json (run async - this can be slow with large configs)
+	go func(path, config string) {
+		if err := RemoveClaudeProjectConfig(config, path); err != nil {
+			// Log warning but don't fail - this is cleanup
+			fmt.Fprintf(os.Stderr, "Warning: could not remove Claude project config: %v\n", err)
+		}
+	}(task.WorktreePath, paths.configFile)
+
+	// Clear worktree info from task (but keep branch name for unarchiving reference)
+	task.WorktreePath = ""
+	e.db.UpdateTask(task)
+
+	return nil
+}
+
+// UnarchiveWorktree recreates a worktree from saved archive state and restores
+// all changes (including uncommitted changes that were saved during archiving).
+//
+// The unarchive process:
+// 1. Recreates the worktree (handling edge cases like branch deleted, dir taken, etc.)
+// 2. Restores changes from the archive ref
+// 3. Runs init script
+// 4. Clears the archive state from the database
+func (e *Executor) UnarchiveWorktree(task *db.Task) error {
+	// Check if task has archive state
+	if !task.HasArchiveState() {
+		return fmt.Errorf("task has no archive state to restore")
+	}
+
+	// Get project directory
+	projectDir := e.getProjectDir(task.Project)
+	if projectDir == "" {
+		return fmt.Errorf("could not find project directory for project: %s", task.Project)
+	}
+
+	// Determine worktree path - try original path first, then generate new one if taken
+	worktreePath := task.ArchiveWorktreePath
+	if worktreePath == "" {
+		// Generate a new path if original is not stored
+		worktreePath = filepath.Join(projectDir, ".task-worktrees", fmt.Sprintf("%d-restored", task.ID))
+	}
+
+	// Check if path is already taken
+	if _, err := os.Stat(worktreePath); err == nil {
+		// Path exists, generate a new unique path
+		worktreePath = filepath.Join(projectDir, ".task-worktrees",
+			fmt.Sprintf("%d-%s-restored", task.ID, time.Now().Format("20060102-150405")))
+	}
+
+	// Determine which branch to use
+	branchName := task.ArchiveBranchName
+	if branchName == "" && task.BranchName != "" {
+		branchName = task.BranchName
+	}
+
+	// Check if branch still exists locally
+	branchExists := false
+	if branchName != "" {
+		checkBranchCmd := exec.Command("git", "rev-parse", "--verify", branchName)
+		checkBranchCmd.Dir = projectDir
+		if err := checkBranchCmd.Run(); err == nil {
+			branchExists = true
+		}
+	}
+
+	// Check if another worktree is using this branch
+	branchInUse := false
+	if branchExists && branchName != "" {
+		listCmd := exec.Command("git", "worktree", "list", "--porcelain")
+		listCmd.Dir = projectDir
+		if output, err := listCmd.Output(); err == nil {
+			// Check if any worktree has this branch
+			for _, line := range strings.Split(string(output), "\n") {
+				if strings.HasPrefix(line, "branch refs/heads/"+branchName) {
+					branchInUse = true
+					break
+				}
+			}
+		}
+	}
+
+	var addCmd *exec.Cmd
+
+	if branchExists && !branchInUse {
+		// Branch exists and is available - use it
+		addCmd = exec.Command("git", "worktree", "add", worktreePath, branchName)
+	} else if branchInUse {
+		// Branch is in use by another worktree - create detached worktree from archive commit
+		addCmd = exec.Command("git", "worktree", "add", "--detach", worktreePath, task.ArchiveCommit)
+	} else {
+		// Branch doesn't exist - create new branch from archive commit
+		if branchName == "" {
+			branchName = fmt.Sprintf("task/%d-restored", task.ID)
+		}
+		addCmd = exec.Command("git", "worktree", "add", "-b", branchName, worktreePath, task.ArchiveCommit)
+	}
+
+	addCmd.Dir = projectDir
+	if output, err := addCmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("create worktree: %v\n%s", err, string(output))
+	}
+
+	// If the archive commit differs from the current HEAD (meaning there were uncommitted changes),
+	// we need to restore those changes without committing
+	headCmd := exec.Command("git", "rev-parse", "HEAD")
+	headCmd.Dir = worktreePath
+	headOutput, _ := headCmd.Output()
+	currentHead := strings.TrimSpace(string(headOutput))
+
+	if currentHead == task.ArchiveCommit {
+		// We're at the archive commit which includes the uncommitted changes as a commit
+		// We need to "soft reset" to the parent to get those changes back as uncommitted
+		parentCmd := exec.Command("git", "rev-parse", task.ArchiveCommit+"^")
+		parentCmd.Dir = worktreePath
+		parentOutput, err := parentCmd.Output()
+		if err == nil {
+			parentCommit := strings.TrimSpace(string(parentOutput))
+			// Soft reset to parent - this keeps the changes from the archive commit as staged changes
+			resetCmd := exec.Command("git", "reset", "--soft", parentCommit)
+			resetCmd.Dir = worktreePath
+			resetCmd.Run()
+
+			// Unstage the changes (so they're just modified files, not staged)
+			unstageCmd := exec.Command("git", "reset", "HEAD")
+			unstageCmd.Dir = worktreePath
+			unstageCmd.Run()
+		}
+	} else {
+		// The branch has new commits since archiving
+		// Cherry-pick the changes from the archive commit
+		// First, check if there's a diff between the archive commit and its parent
+		diffCmd := exec.Command("git", "diff", "--quiet", task.ArchiveCommit+"^", task.ArchiveCommit)
+		diffCmd.Dir = worktreePath
+		if err := diffCmd.Run(); err != nil {
+			// There are differences - apply them
+			// Use format-patch and apply to get the changes without committing
+			patchCmd := exec.Command("git", "format-patch", "-1", "--stdout", task.ArchiveCommit)
+			patchCmd.Dir = worktreePath
+			patch, err := patchCmd.Output()
+			if err == nil && len(patch) > 0 {
+				applyCmd := exec.Command("git", "apply", "--index")
+				applyCmd.Dir = worktreePath
+				applyCmd.Stdin = strings.NewReader(string(patch))
+				applyCmd.Run() // Ignore errors - patch may not apply cleanly if branch diverged
+
+				// Unstage the changes
+				unstageCmd := exec.Command("git", "reset", "HEAD")
+				unstageCmd.Dir = worktreePath
+				unstageCmd.Run()
+			}
+		}
+	}
+
+	// Update task with new worktree info
+	task.WorktreePath = worktreePath
+	task.BranchName = branchName
+	e.db.UpdateTask(task)
+
+	// Clear archive state
+	e.db.ClearArchiveState(task.ID)
+
+	// Run init script
+	e.runWorktreeInitScript(projectDir, worktreePath, task)
+
+	// Write env file
+	paths := e.claudePathsForProject(task.Project)
+	e.writeWorktreeEnvFile(projectDir, worktreePath, task, paths.configDir)
+
+	return nil
+}
+
 // CleanupClaudeSessions removes Claude session files for a given worktree path.
 // Claude stores sessions under CLAUDE_CONFIG_DIR/projects/<escaped-path>/.
 // This should be called when deleting a task to clean up session data.
