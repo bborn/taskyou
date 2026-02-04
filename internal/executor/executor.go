@@ -3768,30 +3768,12 @@ func symlinkMCPConfig(projectDir, worktreePath string) error {
 	return nil
 }
 
-// writeWorkflowMCPConfig writes the workflow MCP server configuration to .mcp.json in the worktree.
+// writeWorkflowMCPConfig writes the workflow MCP server configuration to the user's ~/.claude.json
+// under the worktree's project path. This makes it a "local-scoped" server that doesn't require
+// approval prompts (unlike project-scoped servers in .mcp.json which require user approval).
 // This enables Claude Code to use workflow tools (workflow_complete, workflow_screenshot, etc.).
-// The function preserves existing MCP server configurations and only adds/updates the workflow server.
-// If the worktree has a symlinked .mcp.json (from symlinkMCPConfig), this function reads from the
-// symlink target but then replaces the symlink with a regular file to avoid modifying the project's original.
 func writeWorkflowMCPConfig(worktreePath string, taskID int64) error {
-	mcpFilePath := filepath.Join(worktreePath, ".mcp.json")
-
-	// Read existing config if present (follows symlinks to read project's MCP servers)
-	var config map[string]interface{}
-	if data, err := os.ReadFile(mcpFilePath); err == nil {
-		if err := json.Unmarshal(data, &config); err != nil {
-			// If file exists but is invalid JSON, start fresh
-			config = make(map[string]interface{})
-		}
-	} else {
-		config = make(map[string]interface{})
-	}
-
-	// Get or create mcpServers map
-	mcpServers, ok := config["mcpServers"].(map[string]interface{})
-	if !ok {
-		mcpServers = make(map[string]interface{})
-	}
+	configPath := ClaudeConfigFilePath("")
 
 	// Get the path to the task executable
 	taskExecutable, err := os.Executable()
@@ -3800,10 +3782,10 @@ func writeWorkflowMCPConfig(worktreePath string, taskID int64) error {
 		taskExecutable = "task"
 	}
 
-	// Add/update the workflow MCP server
+	// Build the workflow MCP server config
 	// Use "stdio" transport - Claude Code spawns the process and communicates via stdin/stdout
 	// Auto-approve all workflow tools so users don't have to manually approve each call
-	mcpServers["workflow"] = map[string]interface{}{
+	workflowServer := map[string]interface{}{
 		"type":    "stdio",
 		"command": taskExecutable,
 		"args":    []string{"mcp-server", "--task-id", fmt.Sprintf("%d", taskID)},
@@ -3819,24 +3801,50 @@ func writeWorkflowMCPConfig(worktreePath string, taskID int64) error {
 		},
 	}
 
-	config["mcpServers"] = mcpServers
+	// Read existing claude.json config
+	var config map[string]interface{}
+	if data, err := os.ReadFile(configPath); err == nil {
+		if err := json.Unmarshal(data, &config); err != nil {
+			config = make(map[string]interface{})
+		}
+	} else {
+		config = make(map[string]interface{})
+	}
+
+	// Get or create projects map
+	projects, ok := config["projects"].(map[string]interface{})
+	if !ok {
+		projects = make(map[string]interface{})
+	}
+
+	// Get or create worktree project config
+	var projectConfig map[string]interface{}
+	if existing, ok := projects[worktreePath].(map[string]interface{}); ok {
+		projectConfig = existing
+	} else {
+		projectConfig = make(map[string]interface{})
+	}
+
+	// Get or create mcpServers map for this project
+	mcpServers, ok := projectConfig["mcpServers"].(map[string]interface{})
+	if !ok {
+		mcpServers = make(map[string]interface{})
+	}
+
+	// Add/update the workflow server
+	mcpServers["workflow"] = workflowServer
+	projectConfig["mcpServers"] = mcpServers
+	projects[worktreePath] = projectConfig
+	config["projects"] = projects
 
 	// Marshal the updated config
 	data, err := json.MarshalIndent(config, "", "  ")
 	if err != nil {
-		return fmt.Errorf("marshal .mcp.json: %w", err)
+		return fmt.Errorf("marshal claude.json: %w", err)
 	}
 
-	// If .mcp.json is a symlink, remove it first to avoid writing through to the original file
-	// We want to write a regular file to the worktree, not modify the project's .mcp.json
-	if fi, err := os.Lstat(mcpFilePath); err == nil && fi.Mode()&os.ModeSymlink != 0 {
-		if err := os.Remove(mcpFilePath); err != nil {
-			return fmt.Errorf("remove .mcp.json symlink: %w", err)
-		}
-	}
-
-	if err := os.WriteFile(mcpFilePath, data, 0644); err != nil {
-		return fmt.Errorf("write .mcp.json: %w", err)
+	if err := os.WriteFile(configPath, data, 0644); err != nil {
+		return fmt.Errorf("write claude.json: %w", err)
 	}
 
 	return nil
