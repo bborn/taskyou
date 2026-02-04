@@ -73,6 +73,41 @@ func TestCLICreateTask(t *testing.T) {
 				Project:  "",
 			},
 		},
+		{
+			name: "task with tags",
+			task: &db.Task{
+				Title:   "Task with tags",
+				Body:    "Has some tags",
+				Status:  db.StatusBacklog,
+				Type:    db.TypeCode,
+				Tags:    "bug,urgent",
+				Project: "",
+			},
+		},
+		{
+			name: "task pinned",
+			task: &db.Task{
+				Title:   "Pinned task",
+				Body:    "This is pinned",
+				Status:  db.StatusBacklog,
+				Type:    db.TypeCode,
+				Pinned:  true,
+				Project: "",
+			},
+		},
+		{
+			name: "task with all CLI fields",
+			task: &db.Task{
+				Title:    "Full CLI task",
+				Body:     "Has all fields",
+				Status:   db.StatusBacklog,
+				Type:     db.TypeWriting,
+				Executor: db.ExecutorGemini,
+				Tags:     "feature,high-priority",
+				Pinned:   true,
+				Project:  "myproject",
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -104,6 +139,14 @@ func TestCLICreateTask(t *testing.T) {
 				}
 				if fetched.Executor != expectedExecutor {
 					t.Errorf("Executor = %v, want %v", fetched.Executor, expectedExecutor)
+				}
+				// Check tags
+				if fetched.Tags != tt.task.Tags {
+					t.Errorf("Tags = %v, want %v", fetched.Tags, tt.task.Tags)
+				}
+				// Check pinned
+				if fetched.Pinned != tt.task.Pinned {
+					t.Errorf("Pinned = %v, want %v", fetched.Pinned, tt.task.Pinned)
 				}
 			}
 		})
@@ -217,6 +260,149 @@ func TestCLIUpdateTask(t *testing.T) {
 	if fetched.Body != "Updated body" {
 		t.Errorf("Body = %v, want 'Updated body'", fetched.Body)
 	}
+}
+
+// TestCLIUpdateTaskNewFields tests updating executor, tags, and pinned fields
+func TestCLIUpdateTaskNewFields(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	database, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer database.Close()
+	defer os.Remove(dbPath)
+
+	t.Run("update executor", func(t *testing.T) {
+		task := &db.Task{
+			Title:    "Task to update executor",
+			Status:   db.StatusBacklog,
+			Type:     db.TypeCode,
+			Executor: db.ExecutorClaude,
+		}
+		if err := database.CreateTask(task); err != nil {
+			t.Fatalf("failed to create task: %v", err)
+		}
+
+		// Update executor
+		task.Executor = db.ExecutorCodex
+		if err := database.UpdateTask(task); err != nil {
+			t.Fatalf("UpdateTask() error = %v", err)
+		}
+
+		fetched, err := database.GetTask(task.ID)
+		if err != nil {
+			t.Fatalf("GetTask() error = %v", err)
+		}
+		if fetched.Executor != db.ExecutorCodex {
+			t.Errorf("Executor = %v, want %v", fetched.Executor, db.ExecutorCodex)
+		}
+	})
+
+	t.Run("update tags", func(t *testing.T) {
+		task := &db.Task{
+			Title:  "Task to update tags",
+			Status: db.StatusBacklog,
+			Type:   db.TypeCode,
+			Tags:   "original-tag",
+		}
+		if err := database.CreateTask(task); err != nil {
+			t.Fatalf("failed to create task: %v", err)
+		}
+
+		// Update tags
+		task.Tags = "new-tag,updated"
+		if err := database.UpdateTask(task); err != nil {
+			t.Fatalf("UpdateTask() error = %v", err)
+		}
+
+		fetched, err := database.GetTask(task.ID)
+		if err != nil {
+			t.Fatalf("GetTask() error = %v", err)
+		}
+		if fetched.Tags != "new-tag,updated" {
+			t.Errorf("Tags = %v, want 'new-tag,updated'", fetched.Tags)
+		}
+	})
+
+	t.Run("update pinned", func(t *testing.T) {
+		task := &db.Task{
+			Title:  "Task to pin",
+			Status: db.StatusBacklog,
+			Type:   db.TypeCode,
+			Pinned: false,
+		}
+		if err := database.CreateTask(task); err != nil {
+			t.Fatalf("failed to create task: %v", err)
+		}
+
+		// Pin the task
+		task.Pinned = true
+		if err := database.UpdateTask(task); err != nil {
+			t.Fatalf("UpdateTask() error = %v", err)
+		}
+
+		fetched, err := database.GetTask(task.ID)
+		if err != nil {
+			t.Fatalf("GetTask() error = %v", err)
+		}
+		if !fetched.Pinned {
+			t.Errorf("Pinned = %v, want true", fetched.Pinned)
+		}
+	})
+
+	t.Run("clear tags", func(t *testing.T) {
+		task := &db.Task{
+			Title:  "Task to clear tags",
+			Status: db.StatusBacklog,
+			Type:   db.TypeCode,
+			Tags:   "some,tags",
+		}
+		if err := database.CreateTask(task); err != nil {
+			t.Fatalf("failed to create task: %v", err)
+		}
+
+		// Clear tags
+		task.Tags = ""
+		if err := database.UpdateTask(task); err != nil {
+			t.Fatalf("UpdateTask() error = %v", err)
+		}
+
+		fetched, err := database.GetTask(task.ID)
+		if err != nil {
+			t.Fatalf("GetTask() error = %v", err)
+		}
+		if fetched.Tags != "" {
+			t.Errorf("Tags = %v, want empty string", fetched.Tags)
+		}
+	})
+
+	t.Run("unpin task", func(t *testing.T) {
+		task := &db.Task{
+			Title:  "Task to unpin",
+			Status: db.StatusBacklog,
+			Type:   db.TypeCode,
+			Pinned: true,
+		}
+		if err := database.CreateTask(task); err != nil {
+			t.Fatalf("failed to create task: %v", err)
+		}
+
+		// Unpin the task
+		task.Pinned = false
+		if err := database.UpdateTask(task); err != nil {
+			t.Fatalf("UpdateTask() error = %v", err)
+		}
+
+		fetched, err := database.GetTask(task.ID)
+		if err != nil {
+			t.Fatalf("GetTask() error = %v", err)
+		}
+		if fetched.Pinned {
+			t.Errorf("Pinned = %v, want false", fetched.Pinned)
+		}
+	})
 }
 
 // TestCLIExecuteTask tests queueing a task for execution

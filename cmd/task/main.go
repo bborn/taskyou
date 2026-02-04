@@ -455,6 +455,7 @@ Examples:
   task create "Add dark mode" --type code --project myapp
   task create "Write documentation" --body "Document the API endpoints" --execute
   task create "Refactor auth" --executor codex  # Use Codex instead of Claude
+  task create "Urgent bug" --tags "bug,urgent" --pinned  # Tagged and pinned task
   task create --body "The login button is broken on mobile devices" # AI generates title`,
 		Args: cobra.MaximumNArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
@@ -467,6 +468,8 @@ Examples:
 			project, _ := cmd.Flags().GetString("project")
 			taskExecutor, _ := cmd.Flags().GetString("executor")
 			execute, _ := cmd.Flags().GetBool("execute")
+			tags, _ := cmd.Flags().GetString("tags")
+			pinned, _ := cmd.Flags().GetBool("pinned")
 			outputJSON, _ := cmd.Flags().GetBool("json")
 
 			// Validate that either title or body is provided
@@ -575,6 +578,8 @@ Examples:
 				Type:     taskType,
 				Project:  project,
 				Executor: taskExecutor,
+				Tags:     tags,
+				Pinned:   pinned,
 			}
 
 			if err := database.CreateTask(task); err != nil {
@@ -607,6 +612,8 @@ Examples:
 	createCmd.Flags().StringP("project", "p", "", "Project name (auto-detected from cwd if not specified)")
 	createCmd.Flags().StringP("executor", "e", "", "Task executor: claude, codex, gemini, pi, opencode, openclaw (default: claude)")
 	createCmd.Flags().BoolP("execute", "x", false, "Queue task for immediate execution")
+	createCmd.Flags().String("tags", "", "Task tags (comma-separated)")
+	createCmd.Flags().Bool("pinned", false, "Pin the task to the top of its column")
 	createCmd.Flags().Bool("json", false, "Output in JSON format")
 	rootCmd.AddCommand(createCmd)
 
@@ -1068,7 +1075,10 @@ Examples:
 
 Examples:
   task update 42 --title "New title"
-  task update 42 --body "Updated description"`,
+  task update 42 --body "Updated description"
+  task update 42 --executor codex        # Switch to Codex executor
+  task update 42 --tags "bug,urgent"     # Set tags
+  task update 42 --pinned                # Pin the task`,
 		Args: cobra.ExactArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
 			var taskID int64
@@ -1081,6 +1091,9 @@ Examples:
 			body, _ := cmd.Flags().GetString("body")
 			taskType, _ := cmd.Flags().GetString("type")
 			project, _ := cmd.Flags().GetString("project")
+			taskExecutor, _ := cmd.Flags().GetString("executor")
+			tags, _ := cmd.Flags().GetString("tags")
+			pinned, _ := cmd.Flags().GetBool("pinned")
 
 			// Open database
 			dbPath := db.DefaultPath()
@@ -1112,6 +1125,22 @@ Examples:
 				}
 			}
 
+			// Validate executor if provided
+			if taskExecutor != "" {
+				validExecutors := []string{db.ExecutorClaude, db.ExecutorCodex, db.ExecutorGemini, db.ExecutorPi, db.ExecutorOpenCode, db.ExecutorOpenClaw}
+				validExecutor := false
+				for _, e := range validExecutors {
+					if e == taskExecutor {
+						validExecutor = true
+						break
+					}
+				}
+				if !validExecutor {
+					fmt.Fprintln(os.Stderr, errorStyle.Render("Invalid executor. Must be one of: "+strings.Join(validExecutors, ", ")))
+					os.Exit(1)
+				}
+			}
+
 			task, err := database.GetTask(taskID)
 			if err != nil {
 				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
@@ -1135,6 +1164,15 @@ Examples:
 			if cmd.Flags().Changed("project") {
 				task.Project = project
 			}
+			if taskExecutor != "" {
+				task.Executor = taskExecutor
+			}
+			if cmd.Flags().Changed("tags") {
+				task.Tags = tags
+			}
+			if cmd.Flags().Changed("pinned") {
+				task.Pinned = pinned
+			}
 
 			if err := database.UpdateTask(task); err != nil {
 				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
@@ -1148,6 +1186,9 @@ Examples:
 	updateCmd.Flags().String("body", "", "Update task body/description")
 	updateCmd.Flags().StringP("type", "t", "", "Update task type: code, writing, thinking")
 	updateCmd.Flags().StringP("project", "p", "", "Update project name")
+	updateCmd.Flags().StringP("executor", "e", "", "Update task executor: claude, codex, gemini, pi, opencode, openclaw")
+	updateCmd.Flags().String("tags", "", "Update task tags (comma-separated)")
+	updateCmd.Flags().Bool("pinned", false, "Pin or unpin the task")
 	rootCmd.AddCommand(updateCmd)
 
 	// Move subcommand - move a task to a different project
