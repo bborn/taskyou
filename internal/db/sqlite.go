@@ -242,6 +242,8 @@ func (db *DB) migrate() error {
 		`ALTER TABLE tasks ADD COLUMN shell_pane_id TEXT DEFAULT ''`,  // tmux pane ID for shell pane (e.g., "%1235")
 		// Auto-generated project context for caching exploration results
 		`ALTER TABLE projects ADD COLUMN context TEXT DEFAULT ''`, // Auto-generated project context (codebase summary, patterns, etc.)
+		// Last accessed timestamp for tracking recently visited tasks in command palette
+		`ALTER TABLE tasks ADD COLUMN last_accessed_at DATETIME`, // When task was last accessed/opened in UI
 	}
 
 	for _, m := range alterMigrations {

@@ -2,6 +2,7 @@ package ui
 
 import (
 	"testing"
+	"time"
 
 	"github.com/bborn/workflow/internal/db"
 )
@@ -370,5 +371,116 @@ func TestMatchesQueryPRSearch(t *testing.T) {
 				t.Errorf("matchesQuery(%+v, %q) = %v, want %v", tt.task, tt.query, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestFilterTasksSortsByLastAccessedWhenNoQuery(t *testing.T) {
+	// Create test tasks with different last_accessed_at times
+	now := time.Now()
+	oldAccess := db.LocalTime{Time: now.Add(-2 * time.Hour)}
+	recentAccess := db.LocalTime{Time: now.Add(-1 * time.Hour)}
+	mostRecentAccess := db.LocalTime{Time: now.Add(-30 * time.Minute)}
+
+	tasks := []*db.Task{
+		{ID: 1, Title: "Old task", CreatedAt: db.LocalTime{Time: now.Add(-3 * time.Hour)}, LastAccessedAt: &oldAccess},
+		{ID: 2, Title: "Recent task", CreatedAt: db.LocalTime{Time: now.Add(-2 * time.Hour)}, LastAccessedAt: &recentAccess},
+		{ID: 3, Title: "Most recent task", CreatedAt: db.LocalTime{Time: now.Add(-1 * time.Hour)}, LastAccessedAt: &mostRecentAccess},
+		{ID: 4, Title: "Never accessed", CreatedAt: db.LocalTime{Time: now.Add(-30 * time.Minute)}, LastAccessedAt: nil},
+	}
+
+	m := &CommandPaletteModel{
+		allTasks: tasks,
+	}
+	// Empty query - should sort by last_accessed_at
+	m.searchInput.SetValue("")
+	m.filterTasks()
+
+	if len(m.filteredTasks) != 4 {
+		t.Fatalf("Expected 4 tasks, got %d", len(m.filteredTasks))
+	}
+
+	// First should be most recently accessed (ID 3)
+	if m.filteredTasks[0].ID != 3 {
+		t.Errorf("First task should be ID 3 (most recently accessed), got ID %d", m.filteredTasks[0].ID)
+	}
+
+	// Second should be recently accessed (ID 2)
+	if m.filteredTasks[1].ID != 2 {
+		t.Errorf("Second task should be ID 2 (recently accessed), got ID %d", m.filteredTasks[1].ID)
+	}
+
+	// Third should be old accessed (ID 1)
+	if m.filteredTasks[2].ID != 1 {
+		t.Errorf("Third task should be ID 1 (old accessed), got ID %d", m.filteredTasks[2].ID)
+	}
+
+	// Fourth should be never accessed (ID 4) - uses created_at as fallback
+	if m.filteredTasks[3].ID != 4 {
+		t.Errorf("Fourth task should be ID 4 (never accessed), got ID %d", m.filteredTasks[3].ID)
+	}
+}
+
+func TestFilterTasksNeverAccessedSortsByCreatedAt(t *testing.T) {
+	// Test that tasks that have never been accessed are sorted by created_at
+	now := time.Now()
+
+	tasks := []*db.Task{
+		{ID: 1, Title: "Oldest", CreatedAt: db.LocalTime{Time: now.Add(-3 * time.Hour)}, LastAccessedAt: nil},
+		{ID: 2, Title: "Middle", CreatedAt: db.LocalTime{Time: now.Add(-2 * time.Hour)}, LastAccessedAt: nil},
+		{ID: 3, Title: "Newest", CreatedAt: db.LocalTime{Time: now.Add(-1 * time.Hour)}, LastAccessedAt: nil},
+	}
+
+	m := &CommandPaletteModel{
+		allTasks: tasks,
+	}
+	// Empty query - should sort by created_at (newest first) when no access times
+	m.searchInput.SetValue("")
+	m.filterTasks()
+
+	if len(m.filteredTasks) != 3 {
+		t.Fatalf("Expected 3 tasks, got %d", len(m.filteredTasks))
+	}
+
+	// Should be sorted by created_at descending (newest first)
+	if m.filteredTasks[0].ID != 3 {
+		t.Errorf("First task should be ID 3 (newest created), got ID %d", m.filteredTasks[0].ID)
+	}
+	if m.filteredTasks[1].ID != 2 {
+		t.Errorf("Second task should be ID 2 (middle created), got ID %d", m.filteredTasks[1].ID)
+	}
+	if m.filteredTasks[2].ID != 1 {
+		t.Errorf("Third task should be ID 1 (oldest created), got ID %d", m.filteredTasks[2].ID)
+	}
+}
+
+func TestFilterTasksAccessedBeforeNeverAccessed(t *testing.T) {
+	// Test that accessed tasks always come before never-accessed tasks
+	now := time.Now()
+	oldAccess := db.LocalTime{Time: now.Add(-24 * time.Hour)} // Accessed long ago
+
+	tasks := []*db.Task{
+		// Never accessed but created very recently
+		{ID: 1, Title: "Never accessed new", CreatedAt: db.LocalTime{Time: now.Add(-1 * time.Minute)}, LastAccessedAt: nil},
+		// Accessed long ago
+		{ID: 2, Title: "Accessed old", CreatedAt: db.LocalTime{Time: now.Add(-48 * time.Hour)}, LastAccessedAt: &oldAccess},
+	}
+
+	m := &CommandPaletteModel{
+		allTasks: tasks,
+	}
+	// Empty query
+	m.searchInput.SetValue("")
+	m.filterTasks()
+
+	if len(m.filteredTasks) != 2 {
+		t.Fatalf("Expected 2 tasks, got %d", len(m.filteredTasks))
+	}
+
+	// Accessed task (even if old) should come before never-accessed task
+	if m.filteredTasks[0].ID != 2 {
+		t.Errorf("First task should be ID 2 (has been accessed), got ID %d", m.filteredTasks[0].ID)
+	}
+	if m.filteredTasks[1].ID != 1 {
+		t.Errorf("Second task should be ID 1 (never accessed), got ID %d", m.filteredTasks[1].ID)
 	}
 }

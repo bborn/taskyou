@@ -38,6 +38,8 @@ type Task struct {
 	CompletedAt     *LocalTime
 	// Distillation tracking
 	LastDistilledAt *LocalTime // When task was last distilled for learnings
+	// UI tracking
+	LastAccessedAt *LocalTime // When task was last accessed/opened in the UI
 }
 
 // Task statuses
@@ -167,7 +169,7 @@ func (db *DB) GetTask(id int64) (*Task, error) {
 		       COALESCE(pr_url, ''), COALESCE(pr_number, 0),
 		       COALESCE(dangerous_mode, 0), COALESCE(pinned, 0), COALESCE(tags, ''), COALESCE(summary, ''),
 		       created_at, updated_at, started_at, completed_at,
-		       last_distilled_at
+		       last_distilled_at, last_accessed_at
 		FROM tasks WHERE id = ?
 	`, id).Scan(
 		&t.ID, &t.Title, &t.Body, &t.Status, &t.Type, &t.Project, &t.Executor,
@@ -176,7 +178,7 @@ func (db *DB) GetTask(id int64) (*Task, error) {
 		&t.PRURL, &t.PRNumber,
 		&t.DangerousMode, &t.Pinned, &t.Tags, &t.Summary,
 		&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
-		&t.LastDistilledAt,
+		&t.LastDistilledAt, &t.LastAccessedAt,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -207,7 +209,7 @@ func (db *DB) ListTasks(opts ListTasksOptions) ([]*Task, error) {
 		       COALESCE(pr_url, ''), COALESCE(pr_number, 0),
 		       COALESCE(dangerous_mode, 0), COALESCE(pinned, 0), COALESCE(tags, ''), COALESCE(summary, ''),
 		       created_at, updated_at, started_at, completed_at,
-		       last_distilled_at
+		       last_distilled_at, last_accessed_at
 		FROM tasks WHERE 1=1
 	`
 	args := []interface{}{}
@@ -259,7 +261,7 @@ func (db *DB) ListTasks(opts ListTasksOptions) ([]*Task, error) {
 			&t.PRURL, &t.PRNumber,
 			&t.DangerousMode, &t.Pinned, &t.Tags, &t.Summary,
 			&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
-			&t.LastDistilledAt,
+			&t.LastDistilledAt, &t.LastAccessedAt,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("scan task: %w", err)
@@ -282,7 +284,7 @@ func (db *DB) GetMostRecentlyCreatedTask() (*Task, error) {
 		       COALESCE(pr_url, ''), COALESCE(pr_number, 0),
 		       COALESCE(dangerous_mode, 0), COALESCE(pinned, 0), COALESCE(tags, ''), COALESCE(summary, ''),
 		       created_at, updated_at, started_at, completed_at,
-		       last_distilled_at
+		       last_distilled_at, last_accessed_at
 		FROM tasks
 		ORDER BY created_at DESC, id DESC
 		LIMIT 1
@@ -293,7 +295,7 @@ func (db *DB) GetMostRecentlyCreatedTask() (*Task, error) {
 		&t.PRURL, &t.PRNumber,
 		&t.DangerousMode, &t.Pinned, &t.Tags, &t.Summary,
 		&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
-		&t.LastDistilledAt,
+		&t.LastDistilledAt, &t.LastAccessedAt,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -320,7 +322,7 @@ func (db *DB) SearchTasks(query string, limit int) ([]*Task, error) {
 		       COALESCE(pr_url, ''), COALESCE(pr_number, 0),
 		       COALESCE(dangerous_mode, 0), COALESCE(pinned, 0), COALESCE(tags, ''), COALESCE(summary, ''),
 		       created_at, updated_at, started_at, completed_at,
-		       last_distilled_at
+		       last_distilled_at, last_accessed_at
 		FROM tasks
 		WHERE (
 			title LIKE ? COLLATE NOCASE
@@ -350,7 +352,7 @@ func (db *DB) SearchTasks(query string, limit int) ([]*Task, error) {
 			&t.PRURL, &t.PRNumber,
 			&t.DangerousMode, &t.Pinned, &t.Tags, &t.Summary,
 			&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
-			&t.LastDistilledAt,
+			&t.LastDistilledAt, &t.LastAccessedAt,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("scan task: %w", err)
@@ -564,6 +566,20 @@ func (db *DB) UpdateTaskPaneIDs(taskID int64, claudePaneID, shellPaneID string) 
 	return nil
 }
 
+// UpdateTaskLastAccessedAt updates the last_accessed_at timestamp for a task.
+// This is used to track when a task was last accessed/opened in the UI,
+// enabling the command palette to show recently visited tasks first.
+func (db *DB) UpdateTaskLastAccessedAt(taskID int64) error {
+	_, err := db.Exec(`
+		UPDATE tasks SET last_accessed_at = CURRENT_TIMESTAMP
+		WHERE id = ?
+	`, taskID)
+	if err != nil {
+		return fmt.Errorf("update task last accessed at: %w", err)
+	}
+	return nil
+}
+
 // DeleteTask deletes a task.
 func (db *DB) DeleteTask(id int64) error {
 	// Get task before deleting for event emission
@@ -655,7 +671,7 @@ func (db *DB) GetNextQueuedTask() (*Task, error) {
 		       COALESCE(pr_url, ''), COALESCE(pr_number, 0),
 		       COALESCE(dangerous_mode, 0), COALESCE(pinned, 0), COALESCE(tags, ''), COALESCE(summary, ''),
 		       created_at, updated_at, started_at, completed_at,
-		       last_distilled_at
+		       last_distilled_at, last_accessed_at
 		FROM tasks
 		WHERE status = ?
 		ORDER BY created_at ASC
@@ -667,7 +683,7 @@ func (db *DB) GetNextQueuedTask() (*Task, error) {
 		&t.PRURL, &t.PRNumber,
 		&t.DangerousMode, &t.Pinned, &t.Tags, &t.Summary,
 		&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
-		&t.LastDistilledAt,
+		&t.LastDistilledAt, &t.LastAccessedAt,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -688,7 +704,7 @@ func (db *DB) GetQueuedTasks() ([]*Task, error) {
 		       COALESCE(pr_url, ''), COALESCE(pr_number, 0),
 		       COALESCE(dangerous_mode, 0), COALESCE(pinned, 0), COALESCE(tags, ''), COALESCE(summary, ''),
 		       created_at, updated_at, started_at, completed_at,
-		       last_distilled_at
+		       last_distilled_at, last_accessed_at
 		FROM tasks
 		WHERE status = ?
 		ORDER BY created_at ASC
@@ -708,7 +724,7 @@ func (db *DB) GetQueuedTasks() ([]*Task, error) {
 			&t.PRURL, &t.PRNumber,
 			&t.DangerousMode, &t.Pinned, &t.Tags, &t.Summary,
 			&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
-			&t.LastDistilledAt,
+			&t.LastDistilledAt, &t.LastAccessedAt,
 		); err != nil {
 			return nil, fmt.Errorf("scan task: %w", err)
 		}
@@ -728,7 +744,7 @@ func (db *DB) GetTasksWithBranches() ([]*Task, error) {
 		       COALESCE(pr_url, ''), COALESCE(pr_number, 0),
 		       COALESCE(dangerous_mode, 0), COALESCE(pinned, 0), COALESCE(tags, ''), COALESCE(summary, ''),
 		       created_at, updated_at, started_at, completed_at,
-		       last_distilled_at
+		       last_distilled_at, last_accessed_at
 		FROM tasks
 		WHERE branch_name != '' AND status NOT IN (?, ?)
 		ORDER BY created_at DESC
@@ -748,7 +764,7 @@ func (db *DB) GetTasksWithBranches() ([]*Task, error) {
 			&t.PRURL, &t.PRNumber,
 			&t.DangerousMode, &t.Pinned, &t.Tags, &t.Summary,
 			&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
-			&t.LastDistilledAt,
+			&t.LastDistilledAt, &t.LastAccessedAt,
 		); err != nil {
 			return nil, fmt.Errorf("scan task: %w", err)
 		}

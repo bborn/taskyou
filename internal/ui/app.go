@@ -2748,6 +2748,12 @@ func (m *AppModel) loadTaskWithOptions(id int64, focusExecutor bool) tea.Cmd {
 		go m.executor.CheckPRStateAndUpdateTask(id)
 	}
 
+	// Update last accessed timestamp (async, don't block UI)
+	if m.db != nil {
+		database := m.db
+		go database.UpdateTaskLastAccessedAt(id)
+	}
+
 	return func() tea.Msg {
 		task, err := m.db.GetTask(id)
 		return taskLoadedMsg{task: task, err: err, focusExecutor: focusExecutor}

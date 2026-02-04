@@ -111,7 +111,7 @@ func (db *DB) GetBlockers(taskID int64) ([]*Task, error) {
 		       COALESCE(t.pr_url, ''), COALESCE(t.pr_number, 0),
 		       COALESCE(t.dangerous_mode, 0), COALESCE(t.pinned, 0), COALESCE(t.tags, ''), COALESCE(t.summary, ''),
 		       t.created_at, t.updated_at, t.started_at, t.completed_at,
-		       t.last_distilled_at
+		       t.last_distilled_at, t.last_accessed_at
 		FROM tasks t
 		JOIN task_dependencies d ON t.id = d.blocker_id
 		WHERE d.blocked_id = ?
@@ -135,7 +135,7 @@ func (db *DB) GetBlockedBy(taskID int64) ([]*Task, error) {
 		       COALESCE(t.pr_url, ''), COALESCE(t.pr_number, 0),
 		       COALESCE(t.dangerous_mode, 0), COALESCE(t.pinned, 0), COALESCE(t.tags, ''), COALESCE(t.summary, ''),
 		       t.created_at, t.updated_at, t.started_at, t.completed_at,
-		       t.last_distilled_at
+		       t.last_distilled_at, t.last_accessed_at
 		FROM tasks t
 		JOIN task_dependencies d ON t.id = d.blocked_id
 		WHERE d.blocker_id = ?
@@ -309,7 +309,7 @@ func scanTaskRows(rows *sql.Rows) ([]*Task, error) {
 			&t.PRURL, &t.PRNumber,
 			&t.DangerousMode, &t.Pinned, &t.Tags, &t.Summary,
 			&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
-			&t.LastDistilledAt,
+			&t.LastDistilledAt, &t.LastAccessedAt,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("scan task: %w", err)

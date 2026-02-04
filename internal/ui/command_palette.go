@@ -143,12 +143,35 @@ func statusPriority(status string) int {
 
 // filterTasks filters tasks based on the search query using fuzzy matching.
 // Results are sorted by match score, with best matches first.
+// When no query is provided, tasks are sorted by recency (last accessed first).
 // When a query is provided, it also searches the database to find older/done tasks.
 func (m *CommandPaletteModel) filterTasks() {
 	query := strings.TrimSpace(m.searchInput.Value())
 
 	if query == "" {
-		m.filteredTasks = m.allTasks
+		// No query - sort by last accessed time (most recent first)
+		// Make a copy to avoid modifying the original slice
+		m.filteredTasks = make([]*db.Task, len(m.allTasks))
+		copy(m.filteredTasks, m.allTasks)
+		sort.Slice(m.filteredTasks, func(i, j int) bool {
+			// Tasks with LastAccessedAt set come before those without
+			iAccessed := m.filteredTasks[i].LastAccessedAt
+			jAccessed := m.filteredTasks[j].LastAccessedAt
+
+			// If both have been accessed, sort by most recent first
+			if iAccessed != nil && jAccessed != nil {
+				return iAccessed.Time.After(jAccessed.Time)
+			}
+			// Tasks that have been accessed come before those that haven't
+			if iAccessed != nil && jAccessed == nil {
+				return true
+			}
+			if iAccessed == nil && jAccessed != nil {
+				return false
+			}
+			// Neither has been accessed - fall back to created_at (newest first)
+			return m.filteredTasks[i].CreatedAt.Time.After(m.filteredTasks[j].CreatedAt.Time)
+		})
 	} else {
 		queryLower := strings.ToLower(query)
 
