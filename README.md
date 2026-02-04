@@ -44,9 +44,9 @@ TaskYou implements **intelligent codebase caching** to make AI agents dramatical
 
 When an AI agent starts a task, it can:
 
-1. **Check for cached context** via `workflow_get_project_context` MCP tool
+1. **Check for cached context** via `taskyou_get_project_context` MCP tool
 2. **Use existing context** if available, skipping redundant exploration
-3. **Explore once and save** via `workflow_set_project_context` for future tasks
+3. **Explore once and save** via `taskyou_set_project_context` for future tasks
 
 This cached context is stored in the `projects.context` database column and persists across all tasks in that project.
 
@@ -62,7 +62,7 @@ This cached context is stored in the `projects.context` database column and pers
 When an agent starts a task, it first checks for context:
 
 ```
-Agent: workflow_get_project_context()
+Agent: taskyou_get_project_context()
 TaskYou: "## Cached Project Context
 
 This is a Go project using:
@@ -81,7 +81,7 @@ If no context exists, the agent explores once and saves it:
 
 ```
 Agent: [explores codebase]
-Agent: workflow_set_project_context("...")
+Agent: taskyou_set_project_context("...")
 TaskYou: "Project context saved. Future tasks will use this."
 ```
 

@@ -1164,9 +1164,9 @@ func (e *Executor) buildSystemInstructions() string {
 ═══════════════════════════════════════════════════════════════
 
 ⚡ BEFORE EXPLORING THE CODEBASE:
-  Call workflow_get_project_context first via MCP.
+  Call taskyou_get_project_context first via MCP.
   - If it returns context, use it and skip exploration
-  - If empty, explore once and save a summary via workflow_set_project_context
+  - If empty, explore once and save a summary via taskyou_set_project_context
   This caches your exploration for future tasks in this project.
 
 Work on this task until completion. When you're done or need input:
@@ -1178,7 +1178,7 @@ Work on this task until completion. When you're done or need input:
   Ask your question clearly and wait for a response
 
 ✓ FOR VISUAL/FRONTEND WORK:
-  Use the workflow_screenshot MCP tool to take screenshots of the
+  Use the taskyou_screenshot MCP tool to take screenshots of the
   screen. This helps verify correctness and document changes.
 
 ⚠ CRITICAL - WORKING DIRECTORY CONSTRAINT:
@@ -1935,7 +1935,7 @@ func (e *Executor) runClaude(ctx context.Context, task *db.Task, workDir, prompt
 	}
 	// Note: we don't clean up hooks config immediately - it needs to persist for the session
 
-	// Setup workflow MCP server in .mcp.json so Claude can use workflow_* tools
+	// Setup TaskYou MCP server in .mcp.json so Claude can use taskyou_* tools
 	if err := writeWorkflowMCPConfig(workDir, task.ID); err != nil {
 		e.logger.Warn("could not setup workflow MCP config", "error", err)
 	}
@@ -2111,7 +2111,7 @@ func (e *Executor) runClaudeResume(ctx context.Context, task *db.Task, workDir, 
 		e.logger.Warn("could not setup Claude hooks", "error", err)
 	}
 
-	// Setup workflow MCP server in .mcp.json so Claude can use workflow_* tools
+	// Setup TaskYou MCP server in .mcp.json so Claude can use taskyou_* tools
 	if err := writeWorkflowMCPConfig(workDir, task.ID); err != nil {
 		e.logger.Warn("could not setup workflow MCP config", "error", err)
 	}
@@ -3768,8 +3768,8 @@ func symlinkMCPConfig(projectDir, worktreePath string) error {
 	return nil
 }
 
-// writeWorkflowMCPConfig writes the workflow MCP server configuration to .mcp.json in the worktree.
-// This enables Claude Code to use workflow tools (workflow_complete, workflow_screenshot, etc.).
+// writeWorkflowMCPConfig writes the TaskYou MCP server configuration to .mcp.json in the worktree.
+// This enables Claude Code to use TaskYou tools (taskyou_complete, taskyou_screenshot, etc.).
 // The function preserves existing MCP server configurations and only adds/updates the workflow server.
 // If the worktree has a symlinked .mcp.json (from symlinkMCPConfig), this function reads from the
 // symlink target but then replaces the symlink with a regular file to avoid modifying the project's original.
