@@ -82,11 +82,13 @@ type KeyMap struct {
 	// Jump to pinned/unpinned tasks
 	JumpToPinned   key.Binding
 	JumpToUnpinned key.Binding
+	// Open browser
+	OpenBrowser key.Binding
 }
 
 // ShortHelp returns key bindings to show in the mini help.
 func (k KeyMap) ShortHelp() []key.Binding {
-	return []key.Binding{k.Left, k.Right, k.Up, k.Down, k.Enter, k.New, k.Queue, k.Filter, k.CommandPalette, k.Quit}
+	return []key.Binding{k.Left, k.Right, k.Up, k.Down, k.Enter, k.New, k.Queue, k.Filter, k.CommandPalette, k.OpenBrowser, k.Quit}
 }
 
 // FullHelp returns keybindings for the expanded help view.
@@ -96,7 +98,7 @@ func (k KeyMap) FullHelp() [][]key.Binding {
 		{k.JumpToPinned, k.JumpToUnpinned},
 		{k.FocusBacklog, k.FocusInProgress, k.FocusBlocked, k.FocusDone},
 		{k.Enter, k.New, k.Queue, k.Close},
-		{k.Retry, k.Archive, k.Delete, k.OpenWorktree},
+		{k.Retry, k.Archive, k.Delete, k.OpenWorktree, k.OpenBrowser},
 		{k.Filter, k.CommandPalette, k.Settings},
 		{k.ChangeStatus, k.TogglePin, k.Refresh, k.Help},
 		{k.Quit},
@@ -230,6 +232,10 @@ func DefaultKeyMap() KeyMap {
 			key.WithKeys("shift+down"),
 			key.WithHelp(IconShiftDown(), "jump to unpinned"),
 		),
+		OpenBrowser: key.NewBinding(
+			key.WithKeys("b"),
+			key.WithHelp("b", "open in browser"),
+		),
 	}
 }
 
@@ -288,6 +294,7 @@ func ApplyKeybindingsConfig(km KeyMap, cfg *config.KeybindingsConfig) KeyMap {
 	km.FocusDone = applyBinding(km.FocusDone, cfg.FocusDone)
 	km.JumpToPinned = applyBinding(km.JumpToPinned, cfg.JumpToPinned)
 	km.JumpToUnpinned = applyBinding(km.JumpToUnpinned, cfg.JumpToUnpinned)
+	km.OpenBrowser = applyBinding(km.OpenBrowser, cfg.OpenBrowser)
 
 	return km
 }
@@ -955,6 +962,15 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.notifyUntil = time.Now().Add(3 * time.Second)
 		}
 
+	case browserOpenedMsg:
+		if msg.err != nil {
+			m.notification = fmt.Sprintf("%s %s", IconBlocked(), msg.err.Error())
+			m.notifyUntil = time.Now().Add(5 * time.Second)
+		} else if msg.message != "" {
+			m.notification = fmt.Sprintf("🌐 %s", msg.message)
+			m.notifyUntil = time.Now().Add(3 * time.Second)
+		}
+
 	case taskEventMsg:
 		// Real-time task update from executor
 		event := msg.event
@@ -1592,6 +1608,11 @@ func (m *AppModel) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, m.openWorktreeInEditor(task)
 		}
 
+	case key.Matches(msg, m.keys.OpenBrowser):
+		if task := m.kanban.SelectedTask(); task != nil {
+			return m, m.openBrowser(task)
+		}
+
 	case key.Matches(msg, m.keys.Settings):
 		m.settingsView = NewSettingsModel(m.db, m.width, m.height)
 		m.previousView = m.currentView
@@ -1956,6 +1977,9 @@ func (m *AppModel) updateDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 	if key.Matches(keyMsg, m.keys.OpenWorktree) && m.selectedTask != nil {
 		return m, m.openWorktreeInEditor(m.selectedTask)
+	}
+	if key.Matches(keyMsg, m.keys.OpenBrowser) && m.selectedTask != nil {
+		return m, m.openBrowser(m.selectedTask)
 	}
 	if key.Matches(keyMsg, m.keys.ToggleShellPane) && m.detailView != nil {
 		m.detailView.ToggleShellPane()
@@ -3278,6 +3302,37 @@ func (m *AppModel) openWorktreeInEditor(task *db.Task) tea.Cmd {
 		}
 
 		return worktreeOpenedMsg{message: fmt.Sprintf("Opened %s", filepath.Base(task.WorktreePath))}
+	}
+}
+
+// browserOpenedMsg is returned when attempting to open the browser.
+type browserOpenedMsg struct {
+	message string
+	err     error
+}
+
+// openBrowser opens the task's server URL in the default browser.
+// The URL is {server_url}:{port} where server_url is configurable (default: http://localhost).
+func (m *AppModel) openBrowser(task *db.Task) tea.Cmd {
+	return func() tea.Msg {
+		if task.Port == 0 {
+			return browserOpenedMsg{err: fmt.Errorf("no port allocated for task #%d", task.ID)}
+		}
+
+		// Get server URL from settings, default to http://localhost
+		serverURL := config.DefaultServerURL
+		if url, err := m.db.GetSetting(config.SettingServerURL); err == nil && url != "" {
+			serverURL = url
+		}
+
+		url := fmt.Sprintf("%s:%d", serverURL, task.Port)
+		cmd := osExec.Command("open", url)
+
+		if err := cmd.Start(); err != nil {
+			return browserOpenedMsg{err: fmt.Errorf("failed to open browser: %w", err)}
+		}
+
+		return browserOpenedMsg{message: fmt.Sprintf("Opened %s", url)}
 	}
 }
 

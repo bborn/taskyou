@@ -47,6 +47,7 @@ type KeybindingsConfig struct {
 	FocusDone          *KeybindingConfig `yaml:"focus_done,omitempty"`
 	JumpToPinned       *KeybindingConfig `yaml:"jump_to_pinned,omitempty"`
 	JumpToUnpinned     *KeybindingConfig `yaml:"jump_to_unpinned,omitempty"`
+	OpenBrowser        *KeybindingConfig `yaml:"open_browser,omitempty"`
 }
 
 // DefaultKeybindingsConfigPath returns the default path for the keybindings config file.
@@ -231,5 +232,9 @@ jump_to_pinned:
 jump_to_unpinned:
   keys: ["shift+down"]
   help: "jump to unpinned"
+
+open_browser:
+  keys: ["b"]
+  help: "open in browser"
 `
 }
