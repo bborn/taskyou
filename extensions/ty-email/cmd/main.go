@@ -599,32 +599,65 @@ func initCmd() *cobra.Command {
 					apiChoice = "1"
 				}
 
-				if apiChoice == "1" {
-					fmt.Printf("API key command [%s]: ", cfg.Classifier.APIKeyCmd)
-					apiCmd, _ := reader.ReadString('\n')
-					apiCmd = strings.TrimSpace(apiCmd)
-					if apiCmd != "" {
-						cfg.Classifier.APIKeyCmd = apiCmd
-					}
+				var apiKeyValid bool
+				for !apiKeyValid {
+					if apiChoice == "1" {
+						fmt.Printf("API key command [%s]: ", cfg.Classifier.APIKeyCmd)
+						apiCmd, _ := reader.ReadString('\n')
+						apiCmd = strings.TrimSpace(apiCmd)
+						if apiCmd != "" {
+							cfg.Classifier.APIKeyCmd = apiCmd
+						}
 
-					// Test the command
-					if cfg.Classifier.APIKeyCmd != "" {
+						if cfg.Classifier.APIKeyCmd == "" {
+							fmt.Println("ERROR: API key command is required")
+							continue
+						}
+
+						// Test the command
 						fmt.Print("Testing API key command... ")
 						out, err := exec.Command("sh", "-c", cfg.Classifier.APIKeyCmd).Output()
 						if err != nil {
 							fmt.Printf("FAILED: %v\n", err)
+							fmt.Println("Please enter a valid command.")
+							continue
 						} else if len(strings.TrimSpace(string(out))) == 0 {
-							fmt.Println("WARNING: command returned empty string")
+							fmt.Println("FAILED: command returned empty string")
+							fmt.Println("Please enter a command that returns your API key.")
+							continue
 						} else {
 							fmt.Println("OK")
+							apiKeyValid = true
 						}
-					}
-				} else {
-					cfg.Classifier.APIKeyCmd = "echo $ANTHROPIC_API_KEY"
-					if os.Getenv("ANTHROPIC_API_KEY") == "" {
-						fmt.Println("WARNING: ANTHROPIC_API_KEY not set")
 					} else {
-						fmt.Println("OK - ANTHROPIC_API_KEY is set")
+						if os.Getenv("ANTHROPIC_API_KEY") == "" {
+							fmt.Println("ERROR: ANTHROPIC_API_KEY environment variable is not set")
+							fmt.Println("\nPlease either:")
+							fmt.Println("  1. Set it now: export ANTHROPIC_API_KEY=sk-ant-...")
+							fmt.Println("  2. Or switch to using a command (option 1)")
+							fmt.Print("\nTry again? [Y/n]: ")
+							retry, _ := reader.ReadString('\n')
+							retry = strings.TrimSpace(strings.ToLower(retry))
+							if retry == "n" || retry == "no" {
+								fmt.Println("\nYou can set the API key later by editing ~/.config/ty-email/config.yaml")
+								fmt.Println("or by re-running 'ty-email init'")
+								apiKeyValid = true // let them proceed but warn
+							} else {
+								fmt.Println("\nAPI key retrieval:")
+								fmt.Println("1. Command (e.g., op read '...')")
+								fmt.Println("2. Environment variable ANTHROPIC_API_KEY")
+								fmt.Print("Choice [1]: ")
+								apiChoice, _ = reader.ReadString('\n')
+								apiChoice = strings.TrimSpace(apiChoice)
+								if apiChoice == "" {
+									apiChoice = "1"
+								}
+							}
+						} else {
+							cfg.Classifier.APIKeyCmd = "echo $ANTHROPIC_API_KEY"
+							fmt.Println("OK - ANTHROPIC_API_KEY is set")
+							apiKeyValid = true
+						}
 					}
 				}
 
