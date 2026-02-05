@@ -3372,10 +3372,38 @@ func (e *Executor) setupWorktree(task *db.Task) (string, error) {
 	// Ensure .task-worktrees is in .gitignore
 	e.ensureGitignore(projectDir, ".task-worktrees")
 
+	// Get project settings for GitHub Issue sync
+	project, _ := e.db.GetProjectByName(task.Project)
+
+	// Check if project has GitHub Issue sync enabled and we need to create an issue
+	if project != nil && project.SyncGitHubIssues && task.IssueNumber == 0 {
+		// Check if this is actually a GitHub repo
+		if github.IsGitHubRepo(projectDir) {
+			// Create a GitHub Issue to get a synced number
+			issueInfo, err := github.CreateIssue(projectDir, task.Title, task.Body)
+			if err != nil {
+				e.logger.Warn("could not create GitHub issue for synced numbering", "error", err)
+			} else {
+				task.IssueNumber = issueInfo.Number
+				task.IssueURL = issueInfo.URL
+				e.db.UpdateTask(task)
+				e.logger.Info("created GitHub issue for synced numbering", "issue", issueInfo.Number, "url", issueInfo.URL)
+			}
+		}
+	}
+
 	// Generate slug from title (e.g., "Add contact email" -> "add-contact-email")
 	slug := slugify(task.Title, 40)
-	branchName := fmt.Sprintf("task/%d-%s", task.ID, slug)
-	dirName := fmt.Sprintf("%d-%s", task.ID, slug)
+
+	// Use issue number for branch/directory naming if available (for synced numbering)
+	// Otherwise fall back to task ID
+	taskNumber := task.ID
+	if task.IssueNumber > 0 {
+		taskNumber = int64(task.IssueNumber)
+	}
+
+	branchName := fmt.Sprintf("task/%d-%s", taskNumber, slug)
+	dirName := fmt.Sprintf("%d-%s", taskNumber, slug)
 	worktreePath := filepath.Join(worktreesDir, dirName)
 
 	// Check if worktree already exists

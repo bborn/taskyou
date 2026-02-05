@@ -32,13 +32,14 @@ type SettingsModel struct {
 	selectedProject int
 
 	// Project form modal (two-step: 1. browse path, 2. fill details)
-	editingProject             bool
-	editProject                *db.Project
-	projectForm                *huh.Form
-	projectFormName            string
-	projectFormAliases         string
-	projectFormInstructions    string
-	projectFormClaudeConfigDir string
+	editingProject               bool
+	editProject                  *db.Project
+	projectForm                  *huh.Form
+	projectFormName              string
+	projectFormAliases           string
+	projectFormInstructions      string
+	projectFormClaudeConfigDir   string
+	projectFormSyncGitHubIssues  bool
 
 	// Task Types
 	taskTypes        []*db.TaskType
@@ -270,6 +271,7 @@ func (m *SettingsModel) showProjectForm(project *db.Project) (*SettingsModel, te
 	m.projectFormAliases = project.Aliases
 	m.projectFormInstructions = project.Instructions
 	m.projectFormClaudeConfigDir = project.ClaudeConfigDir
+	m.projectFormSyncGitHubIssues = project.SyncGitHubIssues
 
 	title := "New Project"
 	description := "You'll choose a directory next"
@@ -308,6 +310,11 @@ func (m *SettingsModel) showProjectForm(project *db.Project) (*SettingsModel, te
 				Description("Overrides CLAUDE_CONFIG_DIR for this project").
 				Placeholder("~/.claude-other-account").
 				Value(&m.projectFormClaudeConfigDir),
+			huh.NewConfirm().
+				Key("sync_github_issues").
+				Title("Sync GitHub Issues").
+				Description("Create GitHub Issues when tasks are created (syncs task/PR numbers)").
+				Value(&m.projectFormSyncGitHubIssues),
 		).Title(title).Description(description),
 	).WithTheme(huh.ThemeDracula()).
 		WithWidth(modalWidth - 6).
@@ -523,6 +530,7 @@ func (m *SettingsModel) saveProject() (*SettingsModel, tea.Cmd) {
 		m.editProject.Aliases = aliases
 		m.editProject.Instructions = instructions
 		m.editProject.ClaudeConfigDir = configDir
+		m.editProject.SyncGitHubIssues = m.projectFormSyncGitHubIssues
 		m.editingProject = false
 		m.projectForm = nil
 		m.browsing = true
@@ -574,6 +582,7 @@ func (m *SettingsModel) saveProject() (*SettingsModel, tea.Cmd) {
 	m.editProject.Aliases = aliases
 	m.editProject.Instructions = instructions
 	m.editProject.ClaudeConfigDir = configDir
+	m.editProject.SyncGitHubIssues = m.projectFormSyncGitHubIssues
 
 	if m.editProject.ID == 0 {
 		err = m.db.CreateProject(m.editProject)
@@ -875,6 +884,9 @@ func (m *SettingsModel) View() string {
 			}
 			if strings.TrimSpace(p.ClaudeConfigDir) != "" {
 				line += Dim.Render(fmt.Sprintf(" [claude: %s]", p.ClaudeConfigDir))
+			}
+			if p.SyncGitHubIssues {
+				line += Dim.Render(" [GH sync]")
 			}
 			b.WriteString(lipgloss.NewStyle().Padding(0, 2).Render(style.Render(line)))
 			b.WriteString("\n")

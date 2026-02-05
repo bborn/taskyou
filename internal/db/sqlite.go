@@ -244,6 +244,11 @@ func (db *DB) migrate() error {
 		`ALTER TABLE projects ADD COLUMN context TEXT DEFAULT ''`, // Auto-generated project context (codebase summary, patterns, etc.)
 		// Last accessed timestamp for tracking recently visited tasks in command palette
 		`ALTER TABLE tasks ADD COLUMN last_accessed_at DATETIME`, // When task was last accessed/opened in UI
+		// GitHub Issue tracking for synced task/issue numbers
+		`ALTER TABLE tasks ADD COLUMN issue_url TEXT DEFAULT ''`,      // GitHub Issue URL (created with task for synced numbering)
+		`ALTER TABLE tasks ADD COLUMN issue_number INTEGER DEFAULT 0`, // GitHub Issue number (used for branch naming when synced)
+		// Project setting to enable GitHub Issue sync
+		`ALTER TABLE projects ADD COLUMN sync_github_issues INTEGER DEFAULT 0`, // Whether to create GitHub Issues when tasks are created
 	}
 
 	for _, m := range alterMigrations {

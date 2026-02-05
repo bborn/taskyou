@@ -28,6 +28,8 @@ type Task struct {
 	ShellPaneID     string // tmux pane ID (e.g., "%1235") for the shell pane
 	PRURL           string // Pull request URL (if associated with a PR)
 	PRNumber        int    // Pull request number (if associated with a PR)
+	IssueURL        string // GitHub Issue URL (if created with task)
+	IssueNumber     int    // GitHub Issue number (used for branch naming when synced)
 	DangerousMode   bool   // Whether task is running in dangerous mode (--dangerously-skip-permissions)
 	Pinned          bool   // Whether the task is pinned to the top of its column
 	Tags            string // Comma-separated tags for categorization (e.g., "customer-support,email,influence-kit")
@@ -167,6 +169,7 @@ func (db *DB) GetTask(id int64) (*Task, error) {
 		       COALESCE(daemon_session, ''), COALESCE(tmux_window_id, ''),
 		       COALESCE(claude_pane_id, ''), COALESCE(shell_pane_id, ''),
 		       COALESCE(pr_url, ''), COALESCE(pr_number, 0),
+		       COALESCE(issue_url, ''), COALESCE(issue_number, 0),
 		       COALESCE(dangerous_mode, 0), COALESCE(pinned, 0), COALESCE(tags, ''), COALESCE(summary, ''),
 		       created_at, updated_at, started_at, completed_at,
 		       last_distilled_at, last_accessed_at
@@ -176,6 +179,7 @@ func (db *DB) GetTask(id int64) (*Task, error) {
 		&t.WorktreePath, &t.BranchName, &t.Port, &t.ClaudeSessionID,
 		&t.DaemonSession, &t.TmuxWindowID, &t.ClaudePaneID, &t.ShellPaneID,
 		&t.PRURL, &t.PRNumber,
+		&t.IssueURL, &t.IssueNumber,
 		&t.DangerousMode, &t.Pinned, &t.Tags, &t.Summary,
 		&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
 		&t.LastDistilledAt, &t.LastAccessedAt,
@@ -207,6 +211,7 @@ func (db *DB) ListTasks(opts ListTasksOptions) ([]*Task, error) {
 		       COALESCE(daemon_session, ''), COALESCE(tmux_window_id, ''),
 		       COALESCE(claude_pane_id, ''), COALESCE(shell_pane_id, ''),
 		       COALESCE(pr_url, ''), COALESCE(pr_number, 0),
+		       COALESCE(issue_url, ''), COALESCE(issue_number, 0),
 		       COALESCE(dangerous_mode, 0), COALESCE(pinned, 0), COALESCE(tags, ''), COALESCE(summary, ''),
 		       created_at, updated_at, started_at, completed_at,
 		       last_distilled_at, last_accessed_at
@@ -259,6 +264,7 @@ func (db *DB) ListTasks(opts ListTasksOptions) ([]*Task, error) {
 			&t.WorktreePath, &t.BranchName, &t.Port, &t.ClaudeSessionID,
 			&t.DaemonSession, &t.TmuxWindowID, &t.ClaudePaneID, &t.ShellPaneID,
 			&t.PRURL, &t.PRNumber,
+			&t.IssueURL, &t.IssueNumber,
 			&t.DangerousMode, &t.Pinned, &t.Tags, &t.Summary,
 			&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
 			&t.LastDistilledAt, &t.LastAccessedAt,
@@ -282,6 +288,7 @@ func (db *DB) GetMostRecentlyCreatedTask() (*Task, error) {
 		       COALESCE(daemon_session, ''), COALESCE(tmux_window_id, ''),
 		       COALESCE(claude_pane_id, ''), COALESCE(shell_pane_id, ''),
 		       COALESCE(pr_url, ''), COALESCE(pr_number, 0),
+		       COALESCE(issue_url, ''), COALESCE(issue_number, 0),
 		       COALESCE(dangerous_mode, 0), COALESCE(pinned, 0), COALESCE(tags, ''), COALESCE(summary, ''),
 		       created_at, updated_at, started_at, completed_at,
 		       last_distilled_at, last_accessed_at
@@ -293,6 +300,7 @@ func (db *DB) GetMostRecentlyCreatedTask() (*Task, error) {
 		&t.WorktreePath, &t.BranchName, &t.Port, &t.ClaudeSessionID,
 		&t.DaemonSession, &t.TmuxWindowID, &t.ClaudePaneID, &t.ShellPaneID,
 		&t.PRURL, &t.PRNumber,
+		&t.IssueURL, &t.IssueNumber,
 		&t.DangerousMode, &t.Pinned, &t.Tags, &t.Summary,
 		&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
 		&t.LastDistilledAt, &t.LastAccessedAt,
@@ -306,7 +314,7 @@ func (db *DB) GetMostRecentlyCreatedTask() (*Task, error) {
 	return t, nil
 }
 
-// SearchTasks searches for tasks by query string across title, project, ID, and PR number.
+// SearchTasks searches for tasks by query string across title, project, ID, PR number, and Issue number.
 // This is used by the command palette to search all tasks, not just the preloaded ones.
 func (db *DB) SearchTasks(query string, limit int) ([]*Task, error) {
 	if limit <= 0 {
@@ -320,6 +328,7 @@ func (db *DB) SearchTasks(query string, limit int) ([]*Task, error) {
 		       COALESCE(daemon_session, ''), COALESCE(tmux_window_id, ''),
 		       COALESCE(claude_pane_id, ''), COALESCE(shell_pane_id, ''),
 		       COALESCE(pr_url, ''), COALESCE(pr_number, 0),
+		       COALESCE(issue_url, ''), COALESCE(issue_number, 0),
 		       COALESCE(dangerous_mode, 0), COALESCE(pinned, 0), COALESCE(tags, ''), COALESCE(summary, ''),
 		       created_at, updated_at, started_at, completed_at,
 		       last_distilled_at, last_accessed_at
@@ -330,13 +339,15 @@ func (db *DB) SearchTasks(query string, limit int) ([]*Task, error) {
 			OR CAST(id AS TEXT) LIKE ?
 			OR CAST(pr_number AS TEXT) LIKE ?
 			OR pr_url LIKE ? COLLATE NOCASE
+			OR CAST(issue_number AS TEXT) LIKE ?
+			OR issue_url LIKE ? COLLATE NOCASE
 		)
 		ORDER BY pinned DESC, CASE WHEN status IN ('done', 'blocked') THEN completed_at ELSE created_at END DESC, id DESC
 		LIMIT ?
 	`
 
 	searchPattern := "%" + query + "%"
-	rows, err := db.Query(sqlQuery, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, limit)
+	rows, err := db.Query(sqlQuery, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, limit)
 	if err != nil {
 		return nil, fmt.Errorf("search tasks: %w", err)
 	}
@@ -350,6 +361,7 @@ func (db *DB) SearchTasks(query string, limit int) ([]*Task, error) {
 			&t.WorktreePath, &t.BranchName, &t.Port, &t.ClaudeSessionID,
 			&t.DaemonSession, &t.TmuxWindowID, &t.ClaudePaneID, &t.ShellPaneID,
 			&t.PRURL, &t.PRNumber,
+			&t.IssueURL, &t.IssueNumber,
 			&t.DangerousMode, &t.Pinned, &t.Tags, &t.Summary,
 			&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
 			&t.LastDistilledAt, &t.LastAccessedAt,
@@ -440,14 +452,14 @@ func (db *DB) UpdateTask(t *Task) error {
 		UPDATE tasks SET
 			title = ?, body = ?, status = ?, type = ?, project = ?, executor = ?,
 			worktree_path = ?, branch_name = ?, port = ?, claude_session_id = ?,
-			daemon_session = ?, pr_url = ?, pr_number = ?, dangerous_mode = ?,
-			pinned = ?, tags = ?,
+			daemon_session = ?, pr_url = ?, pr_number = ?, issue_url = ?, issue_number = ?,
+			dangerous_mode = ?, pinned = ?, tags = ?,
 			updated_at = CURRENT_TIMESTAMP
 		WHERE id = ?
 	`, t.Title, t.Body, t.Status, t.Type, t.Project, t.Executor,
 		t.WorktreePath, t.BranchName, t.Port, t.ClaudeSessionID,
-		t.DaemonSession, t.PRURL, t.PRNumber, t.DangerousMode,
-		t.Pinned, t.Tags, t.ID)
+		t.DaemonSession, t.PRURL, t.PRNumber, t.IssueURL, t.IssueNumber,
+		t.DangerousMode, t.Pinned, t.Tags, t.ID)
 	if err != nil {
 		return fmt.Errorf("update task: %w", err)
 	}
@@ -669,6 +681,7 @@ func (db *DB) GetNextQueuedTask() (*Task, error) {
 		       COALESCE(daemon_session, ''), COALESCE(tmux_window_id, ''),
 		       COALESCE(claude_pane_id, ''), COALESCE(shell_pane_id, ''),
 		       COALESCE(pr_url, ''), COALESCE(pr_number, 0),
+		       COALESCE(issue_url, ''), COALESCE(issue_number, 0),
 		       COALESCE(dangerous_mode, 0), COALESCE(pinned, 0), COALESCE(tags, ''), COALESCE(summary, ''),
 		       created_at, updated_at, started_at, completed_at,
 		       last_distilled_at, last_accessed_at
@@ -681,6 +694,7 @@ func (db *DB) GetNextQueuedTask() (*Task, error) {
 		&t.WorktreePath, &t.BranchName, &t.Port, &t.ClaudeSessionID,
 		&t.DaemonSession, &t.TmuxWindowID, &t.ClaudePaneID, &t.ShellPaneID,
 		&t.PRURL, &t.PRNumber,
+		&t.IssueURL, &t.IssueNumber,
 		&t.DangerousMode, &t.Pinned, &t.Tags, &t.Summary,
 		&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
 		&t.LastDistilledAt, &t.LastAccessedAt,
@@ -702,6 +716,7 @@ func (db *DB) GetQueuedTasks() ([]*Task, error) {
 		       COALESCE(daemon_session, ''), COALESCE(tmux_window_id, ''),
 		       COALESCE(claude_pane_id, ''), COALESCE(shell_pane_id, ''),
 		       COALESCE(pr_url, ''), COALESCE(pr_number, 0),
+		       COALESCE(issue_url, ''), COALESCE(issue_number, 0),
 		       COALESCE(dangerous_mode, 0), COALESCE(pinned, 0), COALESCE(tags, ''), COALESCE(summary, ''),
 		       created_at, updated_at, started_at, completed_at,
 		       last_distilled_at, last_accessed_at
@@ -722,6 +737,7 @@ func (db *DB) GetQueuedTasks() ([]*Task, error) {
 			&t.WorktreePath, &t.BranchName, &t.Port, &t.ClaudeSessionID,
 			&t.DaemonSession, &t.TmuxWindowID, &t.ClaudePaneID, &t.ShellPaneID,
 			&t.PRURL, &t.PRNumber,
+			&t.IssueURL, &t.IssueNumber,
 			&t.DangerousMode, &t.Pinned, &t.Tags, &t.Summary,
 			&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
 			&t.LastDistilledAt, &t.LastAccessedAt,
@@ -742,6 +758,7 @@ func (db *DB) GetTasksWithBranches() ([]*Task, error) {
 		       COALESCE(daemon_session, ''), COALESCE(tmux_window_id, ''),
 		       COALESCE(claude_pane_id, ''), COALESCE(shell_pane_id, ''),
 		       COALESCE(pr_url, ''), COALESCE(pr_number, 0),
+		       COALESCE(issue_url, ''), COALESCE(issue_number, 0),
 		       COALESCE(dangerous_mode, 0), COALESCE(pinned, 0), COALESCE(tags, ''), COALESCE(summary, ''),
 		       created_at, updated_at, started_at, completed_at,
 		       last_distilled_at, last_accessed_at
@@ -762,6 +779,7 @@ func (db *DB) GetTasksWithBranches() ([]*Task, error) {
 			&t.WorktreePath, &t.BranchName, &t.Port, &t.ClaudeSessionID,
 			&t.DaemonSession, &t.TmuxWindowID, &t.ClaudePaneID, &t.ShellPaneID,
 			&t.PRURL, &t.PRNumber,
+			&t.IssueURL, &t.IssueNumber,
 			&t.DangerousMode, &t.Pinned, &t.Tags, &t.Summary,
 			&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
 			&t.LastDistilledAt, &t.LastAccessedAt,
@@ -936,15 +954,16 @@ type ProjectAction struct {
 
 // Project represents a configured project.
 type Project struct {
-	ID              int64
-	Name            string
-	Path            string
-	Aliases         string          // comma-separated
-	Instructions    string          // project-specific instructions for AI
-	Actions         []ProjectAction // actions triggered on task events (stored as JSON)
-	Color           string          // hex color for display (e.g., "#61AFEF")
-	ClaudeConfigDir string          // override CLAUDE_CONFIG_DIR for this project
-	CreatedAt       LocalTime
+	ID               int64
+	Name             string
+	Path             string
+	Aliases          string          // comma-separated
+	Instructions     string          // project-specific instructions for AI
+	Actions          []ProjectAction // actions triggered on task events (stored as JSON)
+	Color            string          // hex color for display (e.g., "#61AFEF")
+	ClaudeConfigDir  string          // override CLAUDE_CONFIG_DIR for this project
+	SyncGitHubIssues bool            // whether to create GitHub Issues when tasks are created (syncs task/PR numbers)
+	CreatedAt        LocalTime
 }
 
 // GetAction returns the action for a given trigger, or nil if not found.
@@ -961,9 +980,9 @@ func (p *Project) GetAction(trigger string) *ProjectAction {
 func (db *DB) CreateProject(p *Project) error {
 	actionsJSON, _ := json.Marshal(p.Actions)
 	result, err := db.Exec(`
-		INSERT INTO projects (name, path, aliases, instructions, actions, color, claude_config_dir)
-		VALUES (?, ?, ?, ?, ?, ?, ?)
-	`, p.Name, p.Path, p.Aliases, p.Instructions, string(actionsJSON), p.Color, p.ClaudeConfigDir)
+		INSERT INTO projects (name, path, aliases, instructions, actions, color, claude_config_dir, sync_github_issues)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+	`, p.Name, p.Path, p.Aliases, p.Instructions, string(actionsJSON), p.Color, p.ClaudeConfigDir, p.SyncGitHubIssues)
 	if err != nil {
 		return fmt.Errorf("insert project: %w", err)
 	}
@@ -976,9 +995,9 @@ func (db *DB) CreateProject(p *Project) error {
 func (db *DB) UpdateProject(p *Project) error {
 	actionsJSON, _ := json.Marshal(p.Actions)
 	_, err := db.Exec(`
-		UPDATE projects SET name = ?, path = ?, aliases = ?, instructions = ?, actions = ?, color = ?, claude_config_dir = ?
+		UPDATE projects SET name = ?, path = ?, aliases = ?, instructions = ?, actions = ?, color = ?, claude_config_dir = ?, sync_github_issues = ?
 		WHERE id = ?
-	`, p.Name, p.Path, p.Aliases, p.Instructions, string(actionsJSON), p.Color, p.ClaudeConfigDir, p.ID)
+	`, p.Name, p.Path, p.Aliases, p.Instructions, string(actionsJSON), p.Color, p.ClaudeConfigDir, p.SyncGitHubIssues, p.ID)
 	if err != nil {
 		return fmt.Errorf("update project: %w", err)
 	}
@@ -1019,7 +1038,7 @@ func (db *DB) CountTasksByProject(projectName string) (int, error) {
 // ListProjects returns all projects, with "personal" always first.
 func (db *DB) ListProjects() ([]*Project, error) {
 	rows, err := db.Query(`
-		SELECT id, name, path, aliases, instructions, COALESCE(actions, '[]'), COALESCE(color, ''), COALESCE(claude_config_dir, ''), created_at
+		SELECT id, name, path, aliases, instructions, COALESCE(actions, '[]'), COALESCE(color, ''), COALESCE(claude_config_dir, ''), COALESCE(sync_github_issues, 0), created_at
 		FROM projects ORDER BY CASE WHEN name = 'personal' THEN 0 ELSE 1 END, name
 	`)
 	if err != nil {
@@ -1031,7 +1050,7 @@ func (db *DB) ListProjects() ([]*Project, error) {
 	for rows.Next() {
 		p := &Project{}
 		var actionsJSON string
-		if err := rows.Scan(&p.ID, &p.Name, &p.Path, &p.Aliases, &p.Instructions, &actionsJSON, &p.Color, &p.ClaudeConfigDir, &p.CreatedAt); err != nil {
+		if err := rows.Scan(&p.ID, &p.Name, &p.Path, &p.Aliases, &p.Instructions, &actionsJSON, &p.Color, &p.ClaudeConfigDir, &p.SyncGitHubIssues, &p.CreatedAt); err != nil {
 			return nil, fmt.Errorf("scan project: %w", err)
 		}
 		json.Unmarshal([]byte(actionsJSON), &p.Actions)
@@ -1046,9 +1065,9 @@ func (db *DB) GetProjectByName(name string) (*Project, error) {
 	p := &Project{}
 	var actionsJSON string
 	err := db.QueryRow(`
-		SELECT id, name, path, aliases, instructions, COALESCE(actions, '[]'), COALESCE(color, ''), COALESCE(claude_config_dir, ''), created_at
+		SELECT id, name, path, aliases, instructions, COALESCE(actions, '[]'), COALESCE(color, ''), COALESCE(claude_config_dir, ''), COALESCE(sync_github_issues, 0), created_at
 		FROM projects WHERE name = ?
-	`, name).Scan(&p.ID, &p.Name, &p.Path, &p.Aliases, &p.Instructions, &actionsJSON, &p.Color, &p.ClaudeConfigDir, &p.CreatedAt)
+	`, name).Scan(&p.ID, &p.Name, &p.Path, &p.Aliases, &p.Instructions, &actionsJSON, &p.Color, &p.ClaudeConfigDir, &p.SyncGitHubIssues, &p.CreatedAt)
 	if err == nil {
 		json.Unmarshal([]byte(actionsJSON), &p.Actions)
 		return p, nil
@@ -1058,7 +1077,7 @@ func (db *DB) GetProjectByName(name string) (*Project, error) {
 	}
 
 	// Try alias match
-	rows, err := db.Query(`SELECT id, name, path, aliases, instructions, COALESCE(actions, '[]'), COALESCE(color, ''), COALESCE(claude_config_dir, ''), created_at FROM projects`)
+	rows, err := db.Query(`SELECT id, name, path, aliases, instructions, COALESCE(actions, '[]'), COALESCE(color, ''), COALESCE(claude_config_dir, ''), COALESCE(sync_github_issues, 0), created_at FROM projects`)
 	if err != nil {
 		return nil, fmt.Errorf("query projects: %w", err)
 	}
@@ -1066,7 +1085,7 @@ func (db *DB) GetProjectByName(name string) (*Project, error) {
 
 	for rows.Next() {
 		p := &Project{}
-		if err := rows.Scan(&p.ID, &p.Name, &p.Path, &p.Aliases, &p.Instructions, &actionsJSON, &p.Color, &p.ClaudeConfigDir, &p.CreatedAt); err != nil {
+		if err := rows.Scan(&p.ID, &p.Name, &p.Path, &p.Aliases, &p.Instructions, &actionsJSON, &p.Color, &p.ClaudeConfigDir, &p.SyncGitHubIssues, &p.CreatedAt); err != nil {
 			return nil, fmt.Errorf("scan project: %w", err)
 		}
 		json.Unmarshal([]byte(actionsJSON), &p.Actions)
