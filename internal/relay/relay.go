@@ -44,6 +44,7 @@ type MessageStore interface {
 	SaveMessage(msg *Message) error
 	GetMessage(id string) (*Message, error)
 	GetMessagesForAgent(agentName string, limit int) ([]*Message, error)
+	GetPendingMessages(agentName string) ([]*Message, error)
 	MarkDelivered(id string) error
 	MarkRead(id string) error
 }
@@ -136,6 +137,15 @@ func (r *Relay) Send(from, to, content string, fromTaskID int64) (string, error)
 
 // GetPendingMessages returns pending messages for an agent.
 func (r *Relay) GetPendingMessages(agentName string) []*Message {
+	// If store is available, use it for single source of truth (handles multi-process)
+	if r.store != nil {
+		if msgs, err := r.store.GetPendingMessages(agentName); err == nil {
+			return msgs
+		}
+		// Fallback to memory if store fails? Or just return empty?
+		// For now fall back to memory which might contain unpersisted messages
+	}
+
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 

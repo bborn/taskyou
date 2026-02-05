@@ -51,6 +51,20 @@ func (s *DBStore) GetMessagesForAgent(agentName string, limit int) ([]*Message, 
 	return messages, nil
 }
 
+// GetPendingMessages retrieves pending messages for an agent.
+func (s *DBStore) GetPendingMessages(agentName string) ([]*Message, error) {
+	dbMsgs, err := s.db.GetPendingRelayMessages(agentName)
+	if err != nil {
+		return nil, err
+	}
+
+	messages := make([]*Message, len(dbMsgs))
+	for i, m := range dbMsgs {
+		messages[i] = dbToMessage(m)
+	}
+	return messages, nil
+}
+
 // MarkDelivered marks a message as delivered.
 func (s *DBStore) MarkDelivered(id string) error {
 	return s.db.MarkRelayMessageDelivered(id)
