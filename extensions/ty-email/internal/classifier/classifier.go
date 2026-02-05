@@ -13,11 +13,12 @@ type Action struct {
 	Type ActionType `json:"type"`
 
 	// For "create" action
-	Title   string `json:"title,omitempty"`
-	Body    string `json:"body,omitempty"`
-	Project string `json:"project,omitempty"`
-	TaskType string `json:"task_type,omitempty"` // code, writing, thinking
-	Execute bool   `json:"execute,omitempty"`    // Queue immediately
+	Title     string `json:"title,omitempty"`
+	Body      string `json:"body,omitempty"`
+	Project   string `json:"project,omitempty"`
+	TaskType  string `json:"task_type,omitempty"`  // code, writing, thinking
+	Execute   bool   `json:"execute,omitempty"`    // Queue immediately
+	Dangerous bool   `json:"dangerous,omitempty"`  // Enable dangerous mode (allows destructive operations)
 
 	// For "input" action
 	TaskID    int64  `json:"task_id,omitempty"`

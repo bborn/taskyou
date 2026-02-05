@@ -21,6 +21,7 @@ type Processor struct {
 	state          *state.DB
 	logger         *slog.Logger
 	allowedSenders []string
+	dangerous      bool
 }
 
 // Config holds processor configuration.
@@ -28,6 +29,7 @@ type Config struct {
 	DefaultProject string
 	FromAddress    string   // Reply-from address
 	AllowedSenders []string // Only process emails from these addresses
+	Dangerous      bool     // Enable dangerous mode for created tasks
 }
 
 // New creates a new processor.
@@ -43,8 +45,10 @@ func New(
 		logger = slog.Default()
 	}
 	var allowed []string
+	var dangerous bool
 	if cfg != nil {
 		allowed = cfg.AllowedSenders
+		dangerous = cfg.Dangerous
 	}
 	return &Processor{
 		adapter:        adp,
@@ -53,6 +57,7 @@ func New(
 		state:          st,
 		logger:         logger,
 		allowedSenders: allowed,
+		dangerous:      dangerous,
 	}
 }
 
@@ -191,6 +196,10 @@ func (p *Processor) ProcessEmail(ctx context.Context, email *adapter.Email) erro
 }
 
 func (p *Processor) handleCreate(ctx context.Context, action *classifier.Action) (*int64, string, error) {
+	// Apply dangerous mode from config
+	if p.dangerous {
+		action.Dangerous = true
+	}
 	result, err := p.bridge.CreateTask(action)
 	if err != nil {
 		return nil, "", fmt.Errorf("failed to create task: %w", err)

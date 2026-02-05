@@ -99,6 +99,9 @@ func (b *Bridge) CreateTask(action *classifier.Action) (*CreateResult, error) {
 	if action.Execute {
 		args = append(args, "--execute")
 	}
+	if action.Dangerous {
+		args = append(args, "--dangerous")
+	}
 
 	out, err := b.run(args...)
 	if err != nil {

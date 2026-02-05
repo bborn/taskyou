@@ -4,6 +4,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -25,8 +26,9 @@ type Config struct {
 	Adapter    adapter.Config     `yaml:"adapter"`
 	SMTP       adapter.SMTPConfig `yaml:"smtp"`
 	Classifier classifier.Config  `yaml:"classifier"`
-	TaskYou    struct {
-		CLI string `yaml:"cli"`
+	TaskYou struct {
+		CLI       string `yaml:"cli"`
+		Dangerous bool   `yaml:"dangerous"` // Enable dangerous mode for created tasks
 	} `yaml:"taskyou"`
 	Routing struct {
 		DefaultProject string `yaml:"default_project"`
@@ -56,6 +58,7 @@ func main() {
 	rootCmd.AddCommand(processCmd())
 	rootCmd.AddCommand(testCmd())
 	rootCmd.AddCommand(statusCmd())
+	rootCmd.AddCommand(sendCmd())
 
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)
@@ -98,6 +101,7 @@ func serveCmd() *cobra.Command {
 
 			procCfg := &processor.Config{
 				AllowedSenders: cfg.Security.AllowedSenders,
+				Dangerous:      cfg.TaskYou.Dangerous,
 			}
 			proc := processor.New(adp, cls, br, st, procCfg, logger)
 
@@ -172,6 +176,7 @@ func processCmd() *cobra.Command {
 
 			procCfg := &processor.Config{
 				AllowedSenders: cfg.Security.AllowedSenders,
+				Dangerous:      cfg.TaskYou.Dangerous,
 			}
 			proc := processor.New(adp, cls, br, st, procCfg, logger)
 
@@ -325,6 +330,108 @@ func statusCmd() *cobra.Command {
 	}
 }
 
+func sendCmd() *cobra.Command {
+	var (
+		to      string
+		subject string
+		body    string
+		taskID  int64
+	)
+
+	cmd := &cobra.Command{
+		Use:   "send",
+		Short: "Send an email (for use by tasks to report results)",
+		Long: `Send an email through the configured SMTP server.
+
+This command is designed to be called by tasks to send results back via email.
+The body can be provided via --body flag or piped from stdin.
+
+Examples:
+  # Send with body from flag
+  ty-email send --to user@example.com --subject "Task completed" --body "Done!"
+
+  # Send with body from stdin
+  echo "Task results here" | ty-email send --to user@example.com --subject "Results"
+
+  # Send with task ID for threading
+  ty-email send --to user@example.com --subject "Task #123 done" --task 123 --body "Results"`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if to == "" {
+				return fmt.Errorf("--to is required")
+			}
+			if subject == "" {
+				return fmt.Errorf("--subject is required")
+			}
+
+			// Read body from stdin if not provided
+			if body == "" {
+				stat, _ := os.Stdin.Stat()
+				if (stat.Mode() & os.ModeCharDevice) == 0 {
+					// Data is being piped
+					data, err := io.ReadAll(os.Stdin)
+					if err != nil {
+						return fmt.Errorf("failed to read stdin: %w", err)
+					}
+					body = string(data)
+				}
+			}
+
+			if body == "" {
+				return fmt.Errorf("--body is required (or pipe content to stdin)")
+			}
+
+			cfg, err := loadConfig()
+			if err != nil {
+				return err
+			}
+
+			logger := setupLogger()
+
+			// We need an adapter to send emails
+			adp, err := setupAdapter(cfg, logger)
+			if err != nil {
+				return fmt.Errorf("failed to setup adapter: %w", err)
+			}
+
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+
+			outbound := &adapter.OutboundEmail{
+				To:      []string{to},
+				Subject: subject,
+				Body:    body,
+				TaskID:  taskID,
+			}
+
+			// If we have a task ID, try to find the email thread to reply to
+			if taskID != 0 {
+				st, err := state.Open("")
+				if err == nil {
+					defer st.Close()
+					threadID, _ := st.GetTaskThread(taskID)
+					if threadID != "" {
+						outbound.InReplyTo = threadID
+					}
+				}
+			}
+
+			if err := adp.Send(ctx, outbound); err != nil {
+				return fmt.Errorf("failed to send email: %w", err)
+			}
+
+			logger.Info("email sent", "to", to, "subject", subject)
+			fmt.Printf("Email sent to %s\n", to)
+			return nil
+		},
+	}
+
+	cmd.Flags().StringVar(&to, "to", "", "Recipient email address (required)")
+	cmd.Flags().StringVar(&subject, "subject", "", "Email subject (required)")
+	cmd.Flags().StringVar(&body, "body", "", "Email body (or pipe from stdin)")
+	cmd.Flags().Int64Var(&taskID, "task", 0, "Associated task ID (for threading)")
+
+	return cmd
+}
 
 func loadConfig() (*Config, error) {
 	path := cfgFile
