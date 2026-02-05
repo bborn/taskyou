@@ -949,7 +949,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case shortcutTimeoutMsg:
 		// Only handle if this timeout matches the current pending shortcut
 		// (prevents stale timeouts from firing after a successful double-digit)
-		if m.pendingShortcutDigit == msg.digit && msg.timeout == m.shortcutTimeout {
+		if m.pendingShortcutDigit == msg.digit && msg.timeout.Equal(m.shortcutTimeout) {
 			m.pendingShortcutDigit = ""
 			if idx := TaskIndexFromShortcut(msg.digit); idx > 0 {
 				if task := m.kanban.SelectByShortcut(idx); task != nil {
