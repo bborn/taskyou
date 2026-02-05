@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -1070,17 +1071,14 @@ func TestKanbanBoard_OriginColumnEmptyColumn(t *testing.T) {
 	}
 }
 
-// TestKanbanBoard_SelectByShortcut tests selecting tasks by keyboard shortcuts 1-9.
+// TestKanbanBoard_SelectByShortcut tests selecting tasks by keyboard shortcuts 1-18.
 func TestKanbanBoard_SelectByShortcut(t *testing.T) {
-	board := NewKanbanBoard(100, 50)
+	board := NewKanbanBoard(100, 80) // Taller to fit more tasks
 
-	// Set up tasks in the first column
-	tasks := []*db.Task{
-		{ID: 1, Title: "Task 1", Status: db.StatusBacklog},
-		{ID: 2, Title: "Task 2", Status: db.StatusBacklog},
-		{ID: 3, Title: "Task 3", Status: db.StatusBacklog},
-		{ID: 4, Title: "Task 4", Status: db.StatusBacklog},
-		{ID: 5, Title: "Task 5", Status: db.StatusBacklog},
+	// Set up 15 tasks in the first column
+	tasks := make([]*db.Task, 15)
+	for i := 0; i < 15; i++ {
+		tasks[i] = &db.Task{ID: int64(i + 1), Title: fmt.Sprintf("Task %d", i+1), Status: db.StatusBacklog}
 	}
 	board.SetTasks(tasks)
 
@@ -1092,12 +1090,13 @@ func TestKanbanBoard_SelectByShortcut(t *testing.T) {
 	}{
 		{"shortcut 1 selects first task", 1, 1, false},
 		{"shortcut 2 selects second task", 2, 2, false},
-		{"shortcut 3 selects third task", 3, 3, false},
-		{"shortcut 5 selects fifth task", 5, 5, false},
-		{"shortcut 6 returns nil (only 5 tasks)", 6, 0, true},
-		{"shortcut 9 returns nil (only 5 tasks)", 9, 0, true},
+		{"shortcut 9 selects ninth task", 9, 9, false},
+		{"shortcut 10 selects tenth task", 10, 10, false},
+		{"shortcut 11 selects eleventh task", 11, 11, false},
+		{"shortcut 15 selects fifteenth task", 15, 15, false},
+		{"shortcut 16 returns nil (only 15 tasks)", 16, 0, true},
 		{"shortcut 0 returns nil (invalid)", 0, 0, true},
-		{"shortcut 10 returns nil (out of range)", 10, 0, true},
+		{"shortcut 19 returns nil (out of range)", 19, 0, true},
 		{"shortcut -1 returns nil (invalid)", -1, 0, true},
 	}
 

@@ -273,6 +273,10 @@ type AppModel struct {
 	prCache              *github.PRCache
 	initialPRRefreshDone bool // Track if initial PR refresh after load is done
 
+	// Keyboard shortcut state for double-digit shortcuts (11, 22, etc.)
+	pendingShortcutDigit string    // First digit of a potential double-digit shortcut
+	shortcutTimeout      time.Time // When the pending digit expires
+
 	// Detail view state
 	selectedTask *db.Task
 	detailView   *DetailModel
@@ -935,6 +939,19 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, m.focusTick())
 		}
 
+	case shortcutTimeoutMsg:
+		// Only handle if this timeout matches the current pending shortcut
+		// (prevents stale timeouts from firing after a successful double-digit)
+		if m.pendingShortcutDigit == msg.digit && msg.timeout == m.shortcutTimeout {
+			m.pendingShortcutDigit = ""
+			if idx := TaskIndexFromShortcut(msg.digit); idx > 0 {
+				if task := m.kanban.SelectByShortcut(idx); task != nil {
+					return m, m.loadTask(task.ID)
+				}
+			}
+		}
+		return m, nil
+
 	case dbChangeMsg:
 		// Database file changed - reload tasks
 		cmds = append(cmds, m.loadTasks())
@@ -1246,15 +1263,42 @@ func (m *AppModel) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.kanban.MoveDown()
 		return m, nil
 
-	// Numeric shortcuts 1-9 to select visible tasks in current column
+	// Numeric shortcuts 1-9 and double-digits (11, 22, etc.) to select visible tasks
 	case msg.String() == "1", msg.String() == "2", msg.String() == "3",
 		msg.String() == "4", msg.String() == "5", msg.String() == "6",
 		msg.String() == "7", msg.String() == "8", msg.String() == "9":
-		num := int(msg.String()[0] - '0')
-		if task := m.kanban.SelectByShortcut(num); task != nil {
-			return m, m.loadTask(task.ID)
+		digit := msg.String()
+
+		// Check if this completes a double-digit shortcut
+		if m.pendingShortcutDigit != "" && time.Now().Before(m.shortcutTimeout) {
+			// Same digit pressed twice = double-digit shortcut (11, 22, etc.)
+			if digit == m.pendingShortcutDigit {
+				shortcut := digit + digit
+				m.pendingShortcutDigit = ""
+				if idx := TaskIndexFromShortcut(shortcut); idx > 0 {
+					if task := m.kanban.SelectByShortcut(idx); task != nil {
+						return m, m.loadTask(task.ID)
+					}
+				}
+				return m, nil
+			}
+			// Different digit - first use the pending single digit, then start new
+			if idx := TaskIndexFromShortcut(m.pendingShortcutDigit); idx > 0 {
+				if task := m.kanban.SelectByShortcut(idx); task != nil {
+					m.pendingShortcutDigit = ""
+					return m, m.loadTask(task.ID)
+				}
+			}
 		}
-		return m, nil
+
+		// Start a new pending shortcut with 300ms timeout for double-digit
+		m.pendingShortcutDigit = digit
+		m.shortcutTimeout = time.Now().Add(300 * time.Millisecond)
+
+		// Return a command that fires after timeout to execute single-digit shortcut
+		return m, tea.Tick(300*time.Millisecond, func(t time.Time) tea.Msg {
+			return shortcutTimeoutMsg{digit: digit, timeout: m.shortcutTimeout}
+		})
 
 	// Jump to pinned/unpinned tasks
 	case key.Matches(msg, m.keys.JumpToPinned):
@@ -2703,6 +2747,11 @@ type focusTickMsg time.Time
 type prRefreshTickMsg time.Time
 
 type dbChangeMsg struct{}
+
+type shortcutTimeoutMsg struct {
+	digit   string    // The digit that was pressed
+	timeout time.Time // The timeout value to compare
+}
 
 type prInfoMsg struct {
 	taskID int64

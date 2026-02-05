@@ -579,9 +579,7 @@ func (k *KanbanBoard) viewDesktop() string {
 			var hint string
 			if isSelectedCol {
 				shortcutNum++
-				if shortcutNum <= 9 {
-					hint = fmt.Sprintf("%d", shortcutNum)
-				}
+				hint = TaskShortcutHint(shortcutNum)
 			}
 			taskView := k.renderTaskCard(task, colWidth, isSelected, hint)
 			taskViews = append(taskViews, taskView)
@@ -606,9 +604,7 @@ func (k *KanbanBoard) viewDesktop() string {
 			var hint string
 			if isSelectedCol {
 				shortcutNum++
-				if shortcutNum <= 9 {
-					hint = fmt.Sprintf("%d", shortcutNum)
-				}
+				hint = TaskShortcutHint(shortcutNum)
 			}
 			taskView := k.renderTaskCard(task, colWidth, isSelected, hint)
 			taskViews = append(taskViews, taskView)
@@ -774,10 +770,7 @@ func (k *KanbanBoard) viewMobile() string {
 		task := pinnedTasks[i]
 		isSelected := i == k.selectedRow
 		shortcutNum++
-		var hint string
-		if shortcutNum <= 9 {
-			hint = fmt.Sprintf("%d", shortcutNum)
-		}
+		hint := TaskShortcutHint(shortcutNum)
 		taskView := k.renderTaskCard(task, colWidth, isSelected, hint)
 		taskViews = append(taskViews, taskView)
 	}
@@ -798,10 +791,7 @@ func (k *KanbanBoard) viewMobile() string {
 		globalIndex := len(pinnedTasks) + i
 		isSelected := globalIndex == k.selectedRow
 		shortcutNum++
-		var hint string
-		if shortcutNum <= 9 {
-			hint = fmt.Sprintf("%d", shortcutNum)
-		}
+		hint := TaskShortcutHint(shortcutNum)
 		taskView := k.renderTaskCard(task, colWidth, isSelected, hint)
 		taskViews = append(taskViews, taskView)
 	}
@@ -1145,10 +1135,10 @@ func (k *KanbanBoard) HasNextTask() bool {
 	return k.selectedRow < len(col.Tasks)-1
 }
 
-// SelectByShortcut selects the Nth visible task in the current column (1-9).
+// SelectByShortcut selects the Nth visible task in the current column (1-18).
 // Returns the selected task, or nil if the shortcut doesn't correspond to a visible task.
 func (k *KanbanBoard) SelectByShortcut(num int) *db.Task {
-	if num < 1 || num > 9 {
+	if num < 1 || num > 18 {
 		return nil
 	}
 

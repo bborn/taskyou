@@ -228,3 +228,59 @@ func TestPRStatusDescription(t *testing.T) {
 		})
 	}
 }
+
+func TestTaskShortcutHint(t *testing.T) {
+	tests := []struct {
+		index    int
+		expected string
+	}{
+		{0, ""},   // Invalid
+		{1, "1"},  // Single digit
+		{5, "5"},  // Single digit
+		{9, "9"},  // Last single digit
+		{10, "11"}, // First double digit
+		{11, "22"}, // Double digit
+		{12, "33"}, // Double digit
+		{18, "99"}, // Last double digit
+		{19, ""},   // Out of range
+		{-1, ""},   // Invalid
+	}
+
+	for _, tt := range tests {
+		t.Run("", func(t *testing.T) {
+			got := TaskShortcutHint(tt.index)
+			if got != tt.expected {
+				t.Errorf("TaskShortcutHint(%d) = %q, want %q", tt.index, got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestTaskIndexFromShortcut(t *testing.T) {
+	tests := []struct {
+		shortcut string
+		expected int
+	}{
+		{"1", 1},   // Single digit
+		{"5", 5},   // Single digit
+		{"9", 9},   // Last single digit
+		{"11", 10}, // Double digit
+		{"22", 11}, // Double digit
+		{"33", 12}, // Double digit
+		{"99", 18}, // Last double digit
+		{"0", 0},   // Invalid
+		{"12", 0},  // Invalid (not matching digits)
+		{"10", 0},  // Invalid (not matching digits)
+		{"", 0},    // Empty
+		{"abc", 0}, // Invalid
+	}
+
+	for _, tt := range tests {
+		t.Run("", func(t *testing.T) {
+			got := TaskIndexFromShortcut(tt.shortcut)
+			if got != tt.expected {
+				t.Errorf("TaskIndexFromShortcut(%q) = %d, want %d", tt.shortcut, got, tt.expected)
+			}
+		})
+	}
+}
