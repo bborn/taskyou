@@ -1223,3 +1223,76 @@ func TestKanbanBoard_ColumnColors(t *testing.T) {
 			"ColorBlocked should be red (#E06C75), ColorMuted should be gray (#5C6370)", ColorMuted)
 	}
 }
+
+func TestEmptyColumnMessage(t *testing.T) {
+	tests := []struct {
+		status   string
+		expected string
+	}{
+		{db.StatusBacklog, "Press 'n' to create a task"},
+		{db.StatusQueued, "Press 'x' to execute a task"},
+		{db.StatusBlocked, "No tasks need input"},
+		{db.StatusDone, "Completed tasks appear here"},
+		{"unknown", "No tasks"},
+		{"", "No tasks"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.status, func(t *testing.T) {
+			got := emptyColumnMessage(tt.status)
+			if got != tt.expected {
+				t.Errorf("emptyColumnMessage(%q) = %q, want %q", tt.status, got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestKanbanBoard_IsEmpty(t *testing.T) {
+	board := NewKanbanBoard(100, 50)
+
+	t.Run("empty board is empty", func(t *testing.T) {
+		board.SetTasks(nil)
+		if !board.IsEmpty() {
+			t.Error("expected empty board to be empty")
+		}
+	})
+
+	t.Run("board with tasks is not empty", func(t *testing.T) {
+		board.SetTasks([]*db.Task{
+			{ID: 1, Title: "Task 1", Status: db.StatusBacklog},
+		})
+		if board.IsEmpty() {
+			t.Error("expected board with tasks to not be empty")
+		}
+	})
+
+	t.Run("empty slice is empty", func(t *testing.T) {
+		board.SetTasks([]*db.Task{})
+		if !board.IsEmpty() {
+			t.Error("expected board with empty slice to be empty")
+		}
+	})
+}
+
+func TestKanbanBoard_TotalTaskCount(t *testing.T) {
+	board := NewKanbanBoard(100, 50)
+
+	t.Run("empty board has zero tasks", func(t *testing.T) {
+		board.SetTasks(nil)
+		if count := board.TotalTaskCount(); count != 0 {
+			t.Errorf("expected 0 tasks, got %d", count)
+		}
+	})
+
+	t.Run("counts tasks across all columns", func(t *testing.T) {
+		board.SetTasks([]*db.Task{
+			{ID: 1, Title: "Task 1", Status: db.StatusBacklog},
+			{ID: 2, Title: "Task 2", Status: db.StatusQueued},
+			{ID: 3, Title: "Task 3", Status: db.StatusBlocked},
+			{ID: 4, Title: "Task 4", Status: db.StatusDone},
+		})
+		if count := board.TotalTaskCount(); count != 4 {
+			t.Errorf("expected 4 tasks, got %d", count)
+		}
+	})
+}
