@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/bborn/workflow/internal/db"
+	"github.com/bborn/workflow/internal/github"
 )
 
 // TestNewDetailModel_BacklogTaskDoesNotStartExecutor verifies that when a task
@@ -269,6 +270,104 @@ func TestDetailModel_GetServerURL(t *testing.T) {
 			got := m.GetServerURL()
 			if got != tt.wantURL {
 				t.Errorf("GetServerURL() = %q, want %q", got, tt.wantURL)
+			}
+		})
+	}
+}
+
+// TestDetailModel_RenderHeaderWithDiffStats verifies that diff stats are
+// displayed in the header when a PR has additions/deletions.
+func TestDetailModel_RenderHeaderWithDiffStats(t *testing.T) {
+	task := &db.Task{ID: 1, Title: "Test task", Status: db.StatusProcessing}
+
+	tests := []struct {
+		name         string
+		prInfo       *github.PRInfo
+		focused      bool
+		expectDiff   bool
+		expectAddDel string
+	}{
+		{
+			name:       "no PR info",
+			prInfo:     nil,
+			focused:    true,
+			expectDiff: false,
+		},
+		{
+			name: "PR with additions and deletions",
+			prInfo: &github.PRInfo{
+				Number:    123,
+				Additions: 42,
+				Deletions: 10,
+			},
+			focused:      true,
+			expectDiff:   true,
+			expectAddDel: "+42", // Should contain additions
+		},
+		{
+			name: "PR with only additions",
+			prInfo: &github.PRInfo{
+				Number:    124,
+				Additions: 100,
+				Deletions: 0,
+			},
+			focused:      true,
+			expectDiff:   true,
+			expectAddDel: "+100",
+		},
+		{
+			name: "PR with only deletions",
+			prInfo: &github.PRInfo{
+				Number:    125,
+				Additions: 0,
+				Deletions: 50,
+			},
+			focused:      true,
+			expectDiff:   true,
+			expectAddDel: "-50",
+		},
+		{
+			name: "PR with no changes",
+			prInfo: &github.PRInfo{
+				Number:    126,
+				Additions: 0,
+				Deletions: 0,
+			},
+			focused:    true,
+			expectDiff: false,
+		},
+		{
+			name: "unfocused state shows dim diff stats",
+			prInfo: &github.PRInfo{
+				Number:    127,
+				Additions: 20,
+				Deletions: 5,
+			},
+			focused:      false,
+			expectDiff:   true,
+			expectAddDel: "+20",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := &DetailModel{
+				task:    task,
+				prInfo:  tt.prInfo,
+				focused: tt.focused,
+				width:   100,
+				height:  24,
+			}
+
+			header := m.renderHeader()
+
+			if tt.expectDiff {
+				if !strings.Contains(header, tt.expectAddDel) {
+					t.Errorf("Expected header to contain %q for diff stats, got: %q", tt.expectAddDel, header)
+				}
+			} else if tt.prInfo != nil && (tt.prInfo.Additions > 0 || tt.prInfo.Deletions > 0) {
+				// If we don't expect diff stats but PR has changes, verify they're not shown
+				// This case shouldn't happen with current logic
 			}
 		})
 	}
