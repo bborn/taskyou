@@ -333,6 +333,9 @@ type AppModel struct {
 
 	// Command palette view state
 	commandPaletteView *CommandPaletteModel
+	// Track where to return after command palette (separate from previousView)
+	commandPaletteReturnView   View
+	commandPaletteReturnTaskID int64
 
 	// Filter state
 	filterInput        textinput.Model
@@ -550,7 +553,12 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Command palette works from any view
 		if key.Matches(msg, m.keys.CommandPalette) {
 			m.commandPaletteView = NewCommandPaletteModel(m.db, m.tasks, m.width, m.height)
-			m.previousView = m.currentView
+			m.commandPaletteReturnView = m.currentView
+			if m.currentView == ViewDetail && m.selectedTask != nil {
+				m.commandPaletteReturnTaskID = m.selectedTask.ID
+			} else {
+				m.commandPaletteReturnTaskID = 0
+			}
 			m.currentView = ViewCommandPalette
 			return m, m.commandPaletteView.Init()
 		}
@@ -2613,17 +2621,50 @@ func (m *AppModel) updateCommandPalette(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	// Check if user cancelled
 	if m.commandPaletteView.IsCancelled() {
-		m.currentView = ViewDashboard
+		returnView := m.commandPaletteReturnView
+		returnTaskID := m.commandPaletteReturnTaskID
+		if returnView == ViewDashboard && m.detailView != nil && m.selectedTask != nil {
+			returnView = ViewDetail
+			returnTaskID = m.selectedTask.ID
+		}
 		m.commandPaletteView = nil
+		m.commandPaletteReturnView = ViewDashboard
+		m.commandPaletteReturnTaskID = 0
+		m.currentView = returnView
+		if returnView == ViewDetail && m.detailView == nil && returnTaskID != 0 {
+			return m, m.loadTask(returnTaskID)
+		}
 		return m, nil
 	}
 
 	// Check if user selected a task
 	if selectedTask := m.commandPaletteView.SelectedTask(); selectedTask != nil {
+		taskID := selectedTask.ID
+		returnView := m.commandPaletteReturnView
+		returnTaskID := m.commandPaletteReturnTaskID
+		if returnView == ViewDashboard && m.detailView != nil && m.selectedTask != nil {
+			returnView = ViewDetail
+			returnTaskID = m.selectedTask.ID
+		}
 		m.commandPaletteView = nil
+		m.commandPaletteReturnView = ViewDashboard
+		m.commandPaletteReturnTaskID = 0
+
+		// If we were in detail view and selected the SAME task, just go back
+		if returnView == ViewDetail && returnTaskID != 0 && returnTaskID == taskID {
+			m.currentView = ViewDetail
+			return m, nil
+		}
+
+		// If we were in detail view and selected a DIFFERENT task, cleanup the old one
+		if returnView == ViewDetail && m.detailView != nil {
+			m.detailView.Cleanup()
+			m.detailView = nil
+		}
+
 		// Select the task on the kanban board and load its detail view
-		m.kanban.SelectTask(selectedTask.ID)
-		return m, m.loadTask(selectedTask.ID)
+		m.kanban.SelectTask(taskID)
+		return m, m.loadTask(taskID)
 	}
 
 	return m, cmd
