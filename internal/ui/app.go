@@ -765,6 +765,10 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if prCmd := m.fetchPRInfo(msg.task); prCmd != nil {
 				cmds = append(cmds, prCmd)
 			}
+			// Start loading related tasks from QMD
+			if relatedCmd := m.detailView.StartRelatedTasksLoad(); relatedCmd != nil {
+				cmds = append(cmds, relatedCmd)
+			}
 		} else {
 			m.err = msg.err
 		}

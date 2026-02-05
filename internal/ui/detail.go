@@ -13,6 +13,7 @@ import (
 	"github.com/bborn/workflow/internal/db"
 	"github.com/bborn/workflow/internal/executor"
 	"github.com/bborn/workflow/internal/github"
+	"github.com/bborn/workflow/internal/qmd"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/glamour"
@@ -104,6 +105,12 @@ type DetailModel struct {
 	// Server detection for task port
 	serverListening   bool      // true when a server is listening on the task's port
 	lastServerCheck   time.Time // throttle server port checks
+
+	// Related tasks from QMD semantic search
+	relatedTasks        []qmd.RelatedTask // cached related tasks
+	relatedTasksLoading bool              // true while loading related tasks
+	relatedTasksLoaded  bool              // true once loaded (even if empty)
+	lastRelatedSearch   string            // cache key for related task search
 }
 
 // Message types for async pane loading
@@ -117,6 +124,36 @@ type panesJoinedMsg struct {
 }
 
 type spinnerTickMsg struct{}
+
+// relatedTasksMsg is sent when related tasks are loaded from QMD
+type relatedTasksMsg struct {
+	taskID  int64
+	results []qmd.RelatedTask
+	err     error
+}
+
+// loadRelatedTasks fetches related tasks from QMD in the background
+func loadRelatedTasks(taskID int64, query string) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		results, err := qmd.DefaultClient.FindRelatedTasks(ctx, query, 5)
+		if err != nil {
+			return relatedTasksMsg{taskID: taskID, err: err}
+		}
+
+		// Filter out the current task from results
+		filtered := make([]qmd.RelatedTask, 0, len(results))
+		for _, r := range results {
+			if r.TaskID != taskID {
+				filtered = append(filtered, r)
+			}
+		}
+
+		return relatedTasksMsg{taskID: taskID, results: filtered}
+	}
+}
 
 // Spinner frames for loading animation
 var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
@@ -145,6 +182,36 @@ func (m *DetailModel) executorDisplayName() string {
 		return m.executor.DisplayName()
 	}
 	return executor.DefaultExecutorName()
+}
+
+// StartRelatedTasksLoad starts loading related tasks from QMD if available.
+// Returns a tea.Cmd that can be batched with other commands.
+func (m *DetailModel) StartRelatedTasksLoad() tea.Cmd {
+	if m.task == nil || !qmd.DefaultClient.IsAvailable() {
+		return nil
+	}
+
+	// Build search query from task title and body
+	query := m.task.Title
+	if m.task.Body != "" {
+		// Truncate body to avoid overly long queries
+		body := m.task.Body
+		if len(body) > 200 {
+			body = body[:200]
+		}
+		query += " " + body
+	}
+
+	// Check if we already loaded for this query
+	if m.lastRelatedSearch == query && m.relatedTasksLoaded {
+		return nil
+	}
+
+	m.lastRelatedSearch = query
+	m.relatedTasksLoading = true
+	m.relatedTasksLoaded = false
+
+	return loadRelatedTasks(m.task.ID, query)
 }
 
 // UpdateTask updates the task and refreshes the view.
@@ -482,6 +549,18 @@ func (m *DetailModel) Update(msg tea.Msg) (*DetailModel, tea.Cmd) {
 		if m.paneLoading {
 			m.viewport.SetContent(m.renderContent())
 			return m, m.spinnerTick()
+		}
+		return m, nil
+
+	case relatedTasksMsg:
+		// Related tasks loaded from QMD
+		if m.task != nil && msg.taskID == m.task.ID {
+			m.relatedTasksLoading = false
+			m.relatedTasksLoaded = true
+			if msg.err == nil {
+				m.relatedTasks = msg.results
+			}
+			m.viewport.SetContent(m.renderContent())
 		}
 		return m, nil
 
@@ -2342,11 +2421,13 @@ func (m *DetailModel) renderContent() string {
 	t := m.task
 
 	// Check if we can use cached content
+	// Note: We don't cache when related tasks are loading/changing
 	logHash := m.computeLogHash()
 	if m.cachedContent != "" &&
 		m.lastRenderedBody == t.Body &&
 		m.lastRenderedLogHash == logHash &&
-		m.lastRenderedFocused == m.focused {
+		m.lastRenderedFocused == m.focused &&
+		!m.relatedTasksLoading {
 		return m.cachedContent
 	}
 
@@ -2386,6 +2467,39 @@ func (m *DetailModel) renderContent() string {
 			}
 		}
 		b.WriteString("\n")
+	}
+
+	// Related Tasks section (from QMD semantic search)
+	if m.relatedTasksLoading {
+		b.WriteString("\n")
+		b.WriteString(Bold.Render("Related Tasks"))
+		b.WriteString("\n\n")
+		if m.focused {
+			b.WriteString(Dim.Render("  Searching..."))
+		} else {
+			b.WriteString(dimmedStyle.Render("  Searching..."))
+		}
+		b.WriteString("\n")
+	} else if len(m.relatedTasks) > 0 {
+		b.WriteString("\n")
+		b.WriteString(Bold.Render("Related Tasks"))
+		b.WriteString("\n\n")
+		for _, related := range m.relatedTasks {
+			// Score indicator: high (>0.7), medium (>0.4), low
+			scoreIndicator := "○"
+			if related.Score > 0.7 {
+				scoreIndicator = "●"
+			} else if related.Score > 0.4 {
+				scoreIndicator = "◐"
+			}
+			line := fmt.Sprintf("  %s #%d: %s", scoreIndicator, related.TaskID, related.Title)
+			if m.focused {
+				b.WriteString(line)
+			} else {
+				b.WriteString(dimmedStyle.Render(line))
+			}
+			b.WriteString("\n")
+		}
 	}
 
 	// Dependencies section
