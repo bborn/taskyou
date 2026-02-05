@@ -264,10 +264,10 @@ ty list --status done --json | jq '.[] | select(.title | contains("keyword"))'
 
 If you're running as the task executor, you have access to MCP tools:
 
-- `workflow_complete` - Mark your task complete
-- `workflow_needs_input` - Request user input (blocks task)
-- `workflow_show_task` - Get your task details
-- `workflow_create_task` - Create follow-up tasks
-- `workflow_list_tasks` - See other active tasks
+- `taskyou_complete` - Mark your task complete
+- `taskyou_needs_input` - Request user input (blocks task)
+- `taskyou_show_task` - Get your task details
+- `taskyou_create_task` - Create follow-up tasks
+- `taskyou_list_tasks` - See other active tasks
 
 Use these instead of CLI when executing inside a Task You worktree.

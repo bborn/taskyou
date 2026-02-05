@@ -84,7 +84,7 @@ func TestToolsList(t *testing.T) {
 		t.Fatalf("unexpected error: %s", resp.Error.Message)
 	}
 
-	// Check that the tools list includes workflow_screenshot
+	// Check that the tools list includes taskyou_screenshot
 	result, ok := resp.Result.(map[string]interface{})
 	if !ok {
 		t.Fatal("expected result to be a map")
@@ -100,7 +100,7 @@ func TestToolsList(t *testing.T) {
 		if !ok {
 			continue
 		}
-		if tool["name"] == "workflow_screenshot" {
+		if tool["name"] == "taskyou_screenshot" {
 			foundScreenshot = true
 			// Verify the tool has proper schema
 			schema, ok := tool["inputSchema"].(map[string]interface{})
@@ -121,7 +121,7 @@ func TestToolsList(t *testing.T) {
 	}
 
 	if !foundScreenshot {
-		t.Error("workflow_screenshot not found in tools list")
+		t.Error("taskyou_screenshot not found in tools list")
 	}
 }
 
@@ -134,7 +134,7 @@ func TestWorkflowComplete(t *testing.T) {
 		"id":      1,
 		"method":  "tools/call",
 		"params": map[string]interface{}{
-			"name": "workflow_complete",
+			"name": "taskyou_complete",
 			"arguments": map[string]interface{}{
 				"summary": "Task completed successfully",
 			},
@@ -174,7 +174,7 @@ func TestWorkflowNeedsInput(t *testing.T) {
 		"id":      1,
 		"method":  "tools/call",
 		"params": map[string]interface{}{
-			"name": "workflow_needs_input",
+			"name": "taskyou_needs_input",
 			"arguments": map[string]interface{}{
 				"question": "What should I do next?",
 			},
@@ -274,8 +274,8 @@ func TestInitialize(t *testing.T) {
 	if !ok {
 		t.Fatal("expected serverInfo to be a map")
 	}
-	if serverInfo["name"] != "workflow-mcp" {
-		t.Errorf("expected server name 'workflow-mcp', got '%v'", serverInfo["name"])
+	if serverInfo["name"] != "taskyou-mcp" {
+		t.Errorf("expected server name 'taskyou-mcp', got '%v'", serverInfo["name"])
 	}
 }
 
@@ -288,7 +288,7 @@ func TestWorkflowCreateTask(t *testing.T) {
 		"id":      1,
 		"method":  "tools/call",
 		"params": map[string]interface{}{
-			"name": "workflow_create_task",
+			"name": "taskyou_create_task",
 			"arguments": map[string]interface{}{
 				"title":  "New Task",
 				"body":   "Description of new task",
@@ -356,7 +356,7 @@ func TestWorkflowListTasks(t *testing.T) {
 		"id":      1,
 		"method":  "tools/call",
 		"params": map[string]interface{}{
-			"name":      "workflow_list_tasks",
+			"name":      "taskyou_list_tasks",
 			"arguments": map[string]interface{}{},
 		},
 	}
@@ -407,7 +407,7 @@ func TestWorkflowGetProjectContext(t *testing.T) {
 		"id":      1,
 		"method":  "tools/call",
 		"params": map[string]interface{}{
-			"name":      "workflow_get_project_context",
+			"name":      "taskyou_get_project_context",
 			"arguments": map[string]interface{}{},
 		},
 	}
@@ -492,7 +492,7 @@ func TestWorkflowSetProjectContext(t *testing.T) {
 		"id":      1,
 		"method":  "tools/call",
 		"params": map[string]interface{}{
-			"name": "workflow_set_project_context",
+			"name": "taskyou_set_project_context",
 			"arguments": map[string]interface{}{
 				"context": testContext,
 			},
@@ -528,7 +528,7 @@ func TestWorkflowSetProjectContext(t *testing.T) {
 		"id":      2,
 		"method":  "tools/call",
 		"params": map[string]interface{}{
-			"name": "workflow_set_project_context",
+			"name": "taskyou_set_project_context",
 			"arguments": map[string]interface{}{
 				"context": "",
 			},
@@ -574,7 +574,7 @@ func TestProjectContextCachingFlow(t *testing.T) {
 		"id":      1,
 		"method":  "tools/call",
 		"params": map[string]interface{}{
-			"name":      "workflow_get_project_context",
+			"name":      "taskyou_get_project_context",
 			"arguments": map[string]interface{}{},
 		},
 	}
@@ -617,7 +617,7 @@ func TestProjectContextCachingFlow(t *testing.T) {
 		"id":      2,
 		"method":  "tools/call",
 		"params": map[string]interface{}{
-			"name": "workflow_set_project_context",
+			"name": "taskyou_set_project_context",
 			"arguments": map[string]interface{}{
 				"context": explorationContext,
 			},
@@ -652,7 +652,7 @@ func TestProjectContextCachingFlow(t *testing.T) {
 		"id":      3,
 		"method":  "tools/call",
 		"params": map[string]interface{}{
-			"name":      "workflow_get_project_context",
+			"name":      "taskyou_get_project_context",
 			"arguments": map[string]interface{}{},
 		},
 	}
@@ -717,7 +717,7 @@ func TestContextReminderOnComplete(t *testing.T) {
 		"id":      1,
 		"method":  "tools/call",
 		"params": map[string]interface{}{
-			"name":      "workflow_get_project_context",
+			"name":      "taskyou_get_project_context",
 			"arguments": map[string]interface{}{},
 		},
 	}
@@ -730,7 +730,7 @@ func TestContextReminderOnComplete(t *testing.T) {
 		"id":      2,
 		"method":  "tools/call",
 		"params": map[string]interface{}{
-			"name": "workflow_complete",
+			"name": "taskyou_complete",
 			"arguments": map[string]interface{}{
 				"summary": "Test completed without saving context",
 			},
@@ -769,8 +769,8 @@ func TestContextReminderOnComplete(t *testing.T) {
 	if !strings.Contains(text, "REMINDER") {
 		t.Errorf("expected reminder in completion response, got: %s", text)
 	}
-	if !strings.Contains(text, "workflow_set_project_context") {
-		t.Errorf("expected reminder to mention workflow_set_project_context, got: %s", text)
+	if !strings.Contains(text, "taskyou_set_project_context") {
+		t.Errorf("expected reminder to mention taskyou_set_project_context, got: %s", text)
 	}
 
 	t.Log("Context reminder on completion works correctly!")
@@ -801,7 +801,7 @@ func TestNoReminderWhenContextSaved(t *testing.T) {
 		"id":      1,
 		"method":  "tools/call",
 		"params": map[string]interface{}{
-			"name":      "workflow_get_project_context",
+			"name":      "taskyou_get_project_context",
 			"arguments": map[string]interface{}{},
 		},
 	}
@@ -811,7 +811,7 @@ func TestNoReminderWhenContextSaved(t *testing.T) {
 		"id":      2,
 		"method":  "tools/call",
 		"params": map[string]interface{}{
-			"name": "workflow_set_project_context",
+			"name": "taskyou_set_project_context",
 			"arguments": map[string]interface{}{
 				"context": "This is a test project context.",
 			},
@@ -823,7 +823,7 @@ func TestNoReminderWhenContextSaved(t *testing.T) {
 		"id":      3,
 		"method":  "tools/call",
 		"params": map[string]interface{}{
-			"name": "workflow_complete",
+			"name": "taskyou_complete",
 			"arguments": map[string]interface{}{
 				"summary": "Test completed after saving context",
 			},

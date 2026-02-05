@@ -1164,9 +1164,9 @@ func (e *Executor) buildSystemInstructions() string {
 ═══════════════════════════════════════════════════════════════
 
 ⚡ BEFORE EXPLORING THE CODEBASE:
-  Call workflow_get_project_context first via MCP.
+  Call taskyou_get_project_context first via MCP.
   - If it returns context, use it and skip exploration
-  - If empty, explore once and save a summary via workflow_set_project_context
+  - If empty, explore once and save a summary via taskyou_set_project_context
   This caches your exploration for future tasks in this project.
 
 Work on this task until completion. When you're done or need input:
@@ -1178,7 +1178,7 @@ Work on this task until completion. When you're done or need input:
   Ask your question clearly and wait for a response
 
 ✓ FOR VISUAL/FRONTEND WORK:
-  Use the workflow_screenshot MCP tool to take screenshots of the
+  Use the taskyou_screenshot MCP tool to take screenshots of the
   screen. This helps verify correctness and document changes.
 
 ⚠ CRITICAL - WORKING DIRECTORY CONSTRAINT:
@@ -1935,9 +1935,9 @@ func (e *Executor) runClaude(ctx context.Context, task *db.Task, workDir, prompt
 	}
 	// Note: we don't clean up hooks config immediately - it needs to persist for the session
 
-	// Setup workflow MCP server in .mcp.json so Claude can use workflow_* tools
+	// Setup TaskYou MCP server in ~/.claude.json so Claude can use taskyou_* tools
 	if err := writeWorkflowMCPConfig(workDir, task.ID); err != nil {
-		e.logger.Warn("could not setup workflow MCP config", "error", err)
+		e.logger.Warn("could not setup TaskYou MCP config", "error", err)
 	}
 
 	// Create a temp file for the prompt (avoids quoting issues)
@@ -2111,9 +2111,9 @@ func (e *Executor) runClaudeResume(ctx context.Context, task *db.Task, workDir, 
 		e.logger.Warn("could not setup Claude hooks", "error", err)
 	}
 
-	// Setup workflow MCP server in .mcp.json so Claude can use workflow_* tools
+	// Setup TaskYou MCP server in ~/.claude.json so Claude can use taskyou_* tools
 	if err := writeWorkflowMCPConfig(workDir, task.ID); err != nil {
-		e.logger.Warn("could not setup workflow MCP config", "error", err)
+		e.logger.Warn("could not setup TaskYou MCP config", "error", err)
 	}
 
 	// Create a temp file for the feedback (avoids quoting issues)
@@ -3768,10 +3768,10 @@ func symlinkMCPConfig(projectDir, worktreePath string) error {
 	return nil
 }
 
-// writeWorkflowMCPConfig writes the workflow MCP server configuration to the user's ~/.claude.json
+// writeWorkflowMCPConfig writes the TaskYou MCP server configuration to the user's ~/.claude.json
 // under the worktree's project path. This makes it a "local-scoped" server that doesn't require
 // approval prompts (unlike project-scoped servers in .mcp.json which require user approval).
-// This enables Claude Code to use workflow tools (workflow_complete, workflow_screenshot, etc.).
+// This enables Claude Code to use TaskYou tools (taskyou_complete, taskyou_screenshot, etc.).
 func writeWorkflowMCPConfig(worktreePath string, taskID int64) error {
 	configPath := ClaudeConfigFilePath("")
 
@@ -3782,22 +3782,22 @@ func writeWorkflowMCPConfig(worktreePath string, taskID int64) error {
 		taskExecutable = "task"
 	}
 
-	// Build the workflow MCP server config
+	// Build the TaskYou MCP server config
 	// Use "stdio" transport - Claude Code spawns the process and communicates via stdin/stdout
-	// Auto-approve all workflow tools so users don't have to manually approve each call
-	workflowServer := map[string]interface{}{
+	// Auto-approve all TaskYou tools so users don't have to manually approve each call
+	taskyouServer := map[string]interface{}{
 		"type":    "stdio",
 		"command": taskExecutable,
 		"args":    []string{"mcp-server", "--task-id", fmt.Sprintf("%d", taskID)},
 		"autoApprove": []string{
-			"workflow_complete",
-			"workflow_needs_input",
-			"workflow_screenshot",
-			"workflow_show_task",
-			"workflow_create_task",
-			"workflow_list_tasks",
-			"workflow_get_project_context",
-			"workflow_set_project_context",
+			"taskyou_complete",
+			"taskyou_needs_input",
+			"taskyou_screenshot",
+			"taskyou_show_task",
+			"taskyou_create_task",
+			"taskyou_list_tasks",
+			"taskyou_get_project_context",
+			"taskyou_set_project_context",
 		},
 	}
 
@@ -3831,8 +3831,8 @@ func writeWorkflowMCPConfig(worktreePath string, taskID int64) error {
 		mcpServers = make(map[string]interface{})
 	}
 
-	// Add/update the workflow server
-	mcpServers["workflow"] = workflowServer
+	// Add/update the taskyou server
+	mcpServers["taskyou"] = taskyouServer
 	projectConfig["mcpServers"] = mcpServers
 	projects[worktreePath] = projectConfig
 	config["projects"] = projects

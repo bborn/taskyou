@@ -21,6 +21,7 @@ import (
 	"github.com/charmbracelet/huh"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/fsnotify/fsnotify"
+	"github.com/muesli/termenv"
 )
 
 // View represents the current view.
@@ -397,6 +398,12 @@ func NewAppModel(database *db.DB, exec *executor.Executor, workingDir string) *A
 	log := GetLogger()
 	log.Info("=== TaskYou TUI starting ===")
 	log.Info("NewAppModel: workingDir=%q", workingDir)
+
+	// Force TrueColor mode to ensure our theme colors render correctly.
+	// Without this, some terminals (especially when accessed via SSH) may
+	// approximate colors incorrectly, causing issues like the blocked column
+	// appearing gray instead of red.
+	lipgloss.SetColorProfile(termenv.TrueColor)
 
 	// Load saved theme from database
 	LoadThemeFromDB(database.GetSetting)

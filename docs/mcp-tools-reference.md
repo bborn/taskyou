@@ -4,7 +4,7 @@ TaskYou provides Model Context Protocol (MCP) tools that allow AI agents to inte
 
 ## Core Task Management
 
-### workflow_complete
+### taskyou_complete
 
 Mark the current task as complete.
 
@@ -14,14 +14,14 @@ Mark the current task as complete.
 **Example:**
 ```json
 {
-  "name": "workflow_complete",
+  "name": "taskyou_complete",
   "arguments": {
     "summary": "Implemented project context caching feature and updated documentation"
   }
 }
 ```
 
-### workflow_needs_input
+### taskyou_needs_input
 
 Request input from the user when you need clarification.
 
@@ -31,7 +31,7 @@ Request input from the user when you need clarification.
 **Example:**
 ```json
 {
-  "name": "workflow_needs_input",
+  "name": "taskyou_needs_input",
   "arguments": {
     "question": "Should I use TypeScript or JavaScript for the new component?"
   }
@@ -42,7 +42,7 @@ Request input from the user when you need clarification.
 
 ## Project Context (Memory Files)
 
-### workflow_get_project_context
+### taskyou_get_project_context
 
 Get cached project context to skip redundant codebase exploration.
 
@@ -53,7 +53,7 @@ Get cached project context to skip redundant codebase exploration.
 **Example:**
 ```json
 {
-  "name": "workflow_get_project_context",
+  "name": "taskyou_get_project_context",
   "arguments": {}
 }
 ```
@@ -76,7 +76,7 @@ Key directories:
 
 **Best Practice:** Call this FIRST at the start of every task. If context exists, use it to skip exploration.
 
-### workflow_set_project_context
+### taskyou_set_project_context
 
 Save auto-generated project context for future tasks.
 
@@ -86,7 +86,7 @@ Save auto-generated project context for future tasks.
 **Example:**
 ```json
 {
-  "name": "workflow_set_project_context",
+  "name": "taskyou_set_project_context",
   "arguments": {
     "context": "This is a Go project using Bubble Tea for TUI...\n\nKey directories:\n- internal/db/\n- internal/executor/\n..."
   }
@@ -104,7 +104,7 @@ Save auto-generated project context for future tasks.
 
 ## Task Management
 
-### workflow_create_task
+### taskyou_create_task
 
 Create a new task in the system.
 
@@ -118,7 +118,7 @@ Create a new task in the system.
 **Example:**
 ```json
 {
-  "name": "workflow_create_task",
+  "name": "taskyou_create_task",
   "arguments": {
     "title": "Add unit tests for executor",
     "body": "Create comprehensive test coverage for the executor package",
@@ -128,7 +128,7 @@ Create a new task in the system.
 }
 ```
 
-### workflow_list_tasks
+### taskyou_list_tasks
 
 List active tasks in the project.
 
@@ -140,7 +140,7 @@ List active tasks in the project.
 **Example:**
 ```json
 {
-  "name": "workflow_list_tasks",
+  "name": "taskyou_list_tasks",
   "arguments": {
     "status": "blocked",
     "limit": 5
@@ -148,7 +148,7 @@ List active tasks in the project.
 }
 ```
 
-### workflow_show_task
+### taskyou_show_task
 
 Get details of a specific past task by ID.
 
@@ -158,7 +158,7 @@ Get details of a specific past task by ID.
 **Example:**
 ```json
 {
-  "name": "workflow_show_task",
+  "name": "taskyou_show_task",
   "arguments": {
     "task_id": 42
   }
@@ -169,7 +169,7 @@ Get details of a specific past task by ID.
 
 ## Screenshots & Attachments
 
-### workflow_screenshot
+### taskyou_screenshot
 
 Take a screenshot of the entire screen and save it as an attachment.
 
@@ -180,7 +180,7 @@ Take a screenshot of the entire screen and save it as an attachment.
 **Example:**
 ```json
 {
-  "name": "workflow_screenshot",
+  "name": "taskyou_screenshot",
   "arguments": {
     "filename": "new-kanban-ui.png",
     "description": "Updated kanban board with project context indicator"
@@ -203,21 +203,21 @@ Take a screenshot of the entire screen and save it as an attachment.
 ### Starting a New Task
 
 ```
-1. workflow_get_project_context()
+1. taskyou_get_project_context()
    → If context exists, use it to understand codebase
    → If empty, proceed to step 2
 
 2. [Explore codebase]
 
-3. workflow_set_project_context("...")
+3. taskyou_set_project_context("...")
    → Save findings for future tasks
 
 4. [Work on the task]
 
-5. workflow_screenshot() (if visual work)
+5. taskyou_screenshot() (if visual work)
    → Document UI changes
 
-6. workflow_complete(summary="...")
+6. taskyou_complete(summary="...")
    → Mark task complete
 ```
 
@@ -226,7 +226,7 @@ Take a screenshot of the entire screen and save it as an attachment.
 ```
 1. [Working on task]
 
-2. workflow_needs_input("Should I use approach A or B?")
+2. taskyou_needs_input("Should I use approach A or B?")
    → Task marked as "blocked"
    → User notified via UI
 
@@ -234,7 +234,7 @@ Take a screenshot of the entire screen and save it as an attachment.
 
 4. [Continue with task]
 
-5. workflow_complete(summary="...")
+5. taskyou_complete(summary="...")
 ```
 
 ### Breaking Down Work
@@ -242,23 +242,23 @@ Take a screenshot of the entire screen and save it as an attachment.
 ```
 1. [Working on large task]
 
-2. workflow_create_task(
+2. taskyou_create_task(
      title="Subtask: Add tests",
      body="Create unit tests for new feature"
    )
 
-3. workflow_create_task(
+3. taskyou_create_task(
      title="Subtask: Update docs",
      body="Document new API endpoints"
    )
 
-4. workflow_complete(summary="Completed main implementation, created follow-up tasks")
+4. taskyou_complete(summary="Completed main implementation, created follow-up tasks")
 ```
 
 ## Tips & Best Practices
 
 ### Project Context
-- **Always check first:** Call `workflow_get_project_context` at the start of every task
+- **Always check first:** Call `taskyou_get_project_context` at the start of every task
 - **Be comprehensive:** Include structure, tech stack, patterns, conventions
 - **Keep current:** Update when the codebase significantly changes
 - **Use markdown:** Format context with headings and lists for readability
@@ -274,7 +274,7 @@ Take a screenshot of the entire screen and save it as an attachment.
 - Set appropriate task types for better organization
 
 ### Completing Tasks
-- Provide meaningful summaries in `workflow_complete`
+- Provide meaningful summaries in `taskyou_complete`
 - Include what was done, not just "task complete"
 - Mention any follow-up items or blockers encountered
 

@@ -1165,3 +1165,61 @@ func TestKanbanBoard_SelectByShortcutWithPinnedTasks(t *testing.T) {
 		t.Errorf("SelectByShortcut(4) = %v, want task 4", task)
 	}
 }
+
+// TestKanbanBoard_ColumnColors verifies that each column has the correct and distinct color.
+// This is a regression test to ensure blocked column doesn't incorrectly use the muted color.
+func TestKanbanBoard_ColumnColors(t *testing.T) {
+	board := NewKanbanBoard(100, 50)
+
+	// Verify we have 4 columns
+	if len(board.columns) != 4 {
+		t.Fatalf("Expected 4 columns, got %d", len(board.columns))
+	}
+
+	// Verify column order and expected colors
+	expectedColumns := []struct {
+		title string
+		color string // Expected color variable name for debugging
+	}{
+		{"Backlog", "ColorMuted"},
+		{"In Progress", "ColorInProgress"},
+		{"Blocked", "ColorBlocked"},
+		{"Done", "ColorDone"},
+	}
+
+	for i, expected := range expectedColumns {
+		if board.columns[i].Title != expected.title {
+			t.Errorf("Column %d: expected title %q, got %q", i, expected.title, board.columns[i].Title)
+		}
+	}
+
+	// CRITICAL: Verify Blocked column (index 2) has a DIFFERENT color than Backlog (index 0)
+	// This catches the bug where blocked was showing as gray instead of red
+	backlogColor := board.columns[0].Color
+	blockedColor := board.columns[2].Color
+
+	if backlogColor == blockedColor {
+		t.Errorf("BUG: Blocked column has same color as Backlog column (both are %v). "+
+			"Blocked should be red (ColorBlocked), not gray (ColorMuted)", blockedColor)
+	}
+
+	// Verify the colors match the expected color variables
+	if board.columns[0].Color != ColorMuted {
+		t.Errorf("Backlog column should use ColorMuted, got %v", board.columns[0].Color)
+	}
+	if board.columns[1].Color != ColorInProgress {
+		t.Errorf("In Progress column should use ColorInProgress, got %v", board.columns[1].Color)
+	}
+	if board.columns[2].Color != ColorBlocked {
+		t.Errorf("Blocked column should use ColorBlocked, got %v", board.columns[2].Color)
+	}
+	if board.columns[3].Color != ColorDone {
+		t.Errorf("Done column should use ColorDone, got %v", board.columns[3].Color)
+	}
+
+	// Also verify the actual color values are different
+	if ColorMuted == ColorBlocked {
+		t.Errorf("BUG: ColorMuted and ColorBlocked have the same value: %v. "+
+			"ColorBlocked should be red (#E06C75), ColorMuted should be gray (#5C6370)", ColorMuted)
+	}
+}
