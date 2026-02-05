@@ -2204,6 +2204,18 @@ func (m *DetailModel) renderHeader() string {
 			Foreground(dimmedTextFg).
 			Render(m.prInfo.StatusDescription())
 		meta.WriteString(prDesc)
+
+		// Diff stats (additions/deletions)
+		var diffStats string
+		if m.focused {
+			diffStats = PRDiffStatsBright(m.prInfo)
+		} else {
+			diffStats = PRDiffStats(m.prInfo)
+		}
+		if diffStats != "" {
+			meta.WriteString("  ")
+			meta.WriteString(diffStats)
+		}
 	}
 
 	// Running process indicator
