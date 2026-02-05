@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"os/exec"
-	"strings"
 	"sync"
 	"time"
 
@@ -37,7 +36,7 @@ func NewRelayManager(e *Executor) *RelayManager {
 // RegisterAgent registers a task as an agent.
 // Uses task title as the agent name.
 func (rm *RelayManager) RegisterAgent(task *db.Task) {
-	name := rm.agentName(task)
+	name := agentName(task)
 	rm.relay.Register(name, task.ID)
 	rm.executor.logger.Info("Registered relay agent", "name", name, "task", task.ID)
 }
@@ -46,33 +45,16 @@ func (rm *RelayManager) RegisterAgent(task *db.Task) {
 func (rm *RelayManager) UnregisterAgent(taskID int64) {
 	task, _ := rm.executor.db.GetTask(taskID)
 	if task != nil {
-		rm.relay.Unregister(rm.agentName(task))
+		name := agentName(task)
+		rm.relay.Unregister(name)
+		rm.executor.logger.Info("Unregistered relay agent", "name", name, "task", task.ID)
 	}
 }
 
-// agentName derives agent name from task.
-// Uses task title, cleaned up for relay addressing.
-func (rm *RelayManager) agentName(task *db.Task) string {
-	// Use task ID as fallback, title otherwise
-	name := task.Title
-	if name == "" {
-		name = fmt.Sprintf("task-%d", task.ID)
-	}
-	// Clean up for use as agent name (remove special chars except hyphen)
-	name = strings.Map(func(r rune) rune {
-		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_' {
-			return r
-		}
-		if r == ' ' {
-			return '-'
-		}
-		return -1
-	}, name)
-	// Limit length
-	if len(name) > 32 {
-		name = name[:32]
-	}
-	return name
+// agentName derives agent name from task using the shared relay.CleanAgentName function.
+func agentName(task *db.Task) string {
+	fallback := fmt.Sprintf("task-%d", task.ID)
+	return relay.CleanAgentName(task.Title, fallback)
 }
 
 // Send sends a message from one agent to another.
@@ -82,7 +64,7 @@ func (rm *RelayManager) Send(fromTaskID int64, to, content string) (string, erro
 		return "", fmt.Errorf("sender task not found")
 	}
 
-	from := rm.agentName(task)
+	from := agentName(task)
 	msgID, err := rm.relay.Send(from, to, content, fromTaskID)
 	if err != nil {
 		return "", err
@@ -101,6 +83,13 @@ func (rm *RelayManager) SendFromCLI(from, to, content string) (string, error) {
 func (rm *RelayManager) RecordActivity(taskID int64) {
 	rm.mu.Lock()
 	rm.lastActivity[taskID] = time.Now()
+	rm.mu.Unlock()
+}
+
+// ClearActivity removes activity tracking for a task (for cleanup).
+func (rm *RelayManager) ClearActivity(taskID int64) {
+	rm.mu.Lock()
+	delete(rm.lastActivity, taskID)
 	rm.mu.Unlock()
 }
 

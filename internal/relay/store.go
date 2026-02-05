@@ -1,8 +1,6 @@
 package relay
 
 import (
-	"time"
-
 	"github.com/bborn/workflow/internal/db"
 )
 
@@ -19,12 +17,12 @@ func NewDBStore(database *db.DB) *DBStore {
 // SaveMessage persists a message to the database.
 func (s *DBStore) SaveMessage(msg *Message) error {
 	dbMsg := &db.RelayMessage{
-		ID:      msg.ID,
-		From:    msg.From,
-		To:      msg.To,
-		Content: msg.Content,
-		TaskID:  msg.TaskID,
-		Status:  msg.Status,
+		ID:        msg.ID,
+		From:      msg.From,
+		To:        msg.To,
+		Content:   msg.Content,
+		TaskID:    msg.TaskID,
+		Status:    msg.Status,
 		CreatedAt: db.LocalTime{Time: msg.CreatedAt},
 	}
 	return s.db.SaveRelayMessage(dbMsg)
@@ -78,59 +76,4 @@ func dbToMessage(m *db.RelayMessage) *Message {
 		msg.ReadAt = &t
 	}
 	return msg
-}
-
-// LoadPendingMessages loads pending messages from the database into the relay.
-func (r *Relay) LoadPendingMessages(database *db.DB) error {
-	// Get all agents and load their pending messages
-	r.mu.Lock()
-	agents := make([]string, 0, len(r.agents))
-	for _, a := range r.agents {
-		agents = append(agents, a.Name)
-	}
-	r.mu.Unlock()
-
-	for _, name := range agents {
-		msgs, err := database.GetPendingRelayMessages(name)
-		if err != nil {
-			return err
-		}
-		r.mu.Lock()
-		for _, m := range msgs {
-			r.messages = append(r.messages, &Message{
-				ID:        m.ID,
-				From:      m.From,
-				To:        m.To,
-				Content:   m.Content,
-				TaskID:    m.TaskID,
-				Status:    m.Status,
-				CreatedAt: m.CreatedAt.Time,
-			})
-		}
-		r.mu.Unlock()
-	}
-	return nil
-}
-
-// GetAgentByTaskID finds an agent by their task ID.
-func (r *Relay) GetAgentByTaskID(taskID int64) *Agent {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-
-	for _, a := range r.agents {
-		if a.TaskID == taskID {
-			return a
-		}
-	}
-	return nil
-}
-
-// Heartbeat updates an agent's last seen time.
-func (r *Relay) Heartbeat(name string) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	if agent, ok := r.agents[normalize(name)]; ok {
-		agent.LastSeen = time.Now()
-	}
 }

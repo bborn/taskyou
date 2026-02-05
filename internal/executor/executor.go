@@ -865,6 +865,12 @@ func (e *Executor) executeTask(ctx context.Context, task *db.Task) {
 		delete(e.runningTasks, task.ID)
 		delete(e.cancelFuncs, task.ID)
 		e.mu.Unlock()
+
+		// Unregister relay agent when task finishes
+		if e.relay != nil {
+			e.relay.UnregisterAgent(task.ID)
+			e.relay.ClearActivity(task.ID)
+		}
 	}()
 
 	e.logger.Info("Processing task", "id", task.ID, "title", task.Title)
@@ -3037,8 +3043,8 @@ func (e *Executor) logLine(taskID int64, lineType, content string) {
 	// Store in database
 	e.db.AppendTaskLog(taskID, lineType, content)
 
-	// Record activity for relay idle detection (except for relay messages themselves)
-	if e.relay != nil && lineType != "relay" {
+	// Record activity for relay idle detection only for actual output lines
+	if e.relay != nil && lineType == "output" {
 		e.relay.RecordActivity(taskID)
 	}
 

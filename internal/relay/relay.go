@@ -237,3 +237,52 @@ func ParseRelayCommand(input string) (string, string, bool) {
 func normalize(name string) string {
 	return strings.ToLower(strings.TrimSpace(name))
 }
+
+// CleanAgentName cleans a raw name (like task title) for use as an agent name.
+// It removes special characters, replaces spaces with hyphens, limits length,
+// and normalizes to lowercase.
+func CleanAgentName(rawName string, fallback string) string {
+	name := rawName
+	if name == "" {
+		name = fallback
+	}
+	// Clean up for use as agent name (keep alphanumeric, hyphen, underscore)
+	name = strings.Map(func(r rune) rune {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_' {
+			return r
+		}
+		if r == ' ' {
+			return '-'
+		}
+		return -1
+	}, name)
+	// Limit length
+	if len(name) > 32 {
+		name = name[:32]
+	}
+	// Normalize to lowercase for consistent matching
+	return strings.ToLower(strings.TrimSpace(name))
+}
+
+// GetAgentByTaskID finds an agent by their task ID.
+func (r *Relay) GetAgentByTaskID(taskID int64) *Agent {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	for _, a := range r.agents {
+		if a.TaskID == taskID {
+			return a
+		}
+	}
+	return nil
+}
+
+// Heartbeat updates an agent's last seen time.
+func (r *Relay) Heartbeat(name string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if agent, ok := r.agents[normalize(name)]; ok {
+		agent.LastSeen = time.Now()
+	}
+}

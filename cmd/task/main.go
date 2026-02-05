@@ -24,6 +24,7 @@ import (
 	"github.com/bborn/workflow/internal/db"
 	"github.com/bborn/workflow/internal/executor"
 	"github.com/bborn/workflow/internal/github"
+	"github.com/bborn/workflow/internal/relay"
 	"github.com/bborn/workflow/internal/ui"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -2040,16 +2041,17 @@ Examples:
 			}
 
 			for _, msg := range messages {
-				status := msg.Status
-				if status == "pending" {
-					status = boldStyle.Render("• pending")
+				statusIcon := ""
+				if msg.Status == "pending" {
+					statusIcon = " •"
 				}
 				preview := msg.Content
 				if len(preview) > 60 {
 					preview = preview[:60] + "..."
 				}
-				fmt.Printf("%s  %s → %s: %s\n",
+				fmt.Printf("%s%s  %s → %s: %s\n",
 					dimStyle.Render(msg.ID),
+					boldStyle.Render(statusIcon),
 					msg.From,
 					msg.To,
 					preview,
@@ -2087,8 +2089,12 @@ when tasks complete.`,
 			}
 
 			// Also include blocked tasks (they're still "connected")
-			blockedTasks, _ := database.ListTasks(db.ListTasksOptions{Status: db.StatusBlocked, Limit: 100})
-			tasks = append(tasks, blockedTasks...)
+			blockedTasks, err := database.ListTasks(db.ListTasksOptions{Status: db.StatusBlocked, Limit: 100})
+			if err != nil {
+				fmt.Fprintln(os.Stderr, dimStyle.Render("Warning: failed to list blocked tasks"))
+			} else {
+				tasks = append(tasks, blockedTasks...)
+			}
 
 			if len(tasks) == 0 {
 				fmt.Println(dimStyle.Render("No agents connected"))
@@ -2098,23 +2104,8 @@ when tasks complete.`,
 			fmt.Println(boldStyle.Render("Connected Agents"))
 			fmt.Println()
 			for _, task := range tasks {
-				name := task.Title
-				if name == "" {
-					name = fmt.Sprintf("task-%d", task.ID)
-				}
-				// Clean name for relay addressing
-				name = strings.Map(func(r rune) rune {
-					if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_' {
-						return r
-					}
-					if r == ' ' {
-						return '-'
-					}
-					return -1
-				}, name)
-				if len(name) > 32 {
-					name = name[:32]
-				}
+				// Use shared function to get agent name
+				name := relay.CleanAgentName(task.Title, fmt.Sprintf("task-%d", task.ID))
 
 				status := task.Status
 				if status == db.StatusProcessing {
