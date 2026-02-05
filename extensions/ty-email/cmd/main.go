@@ -2,12 +2,15 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"log/slog"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -48,6 +51,7 @@ func main() {
 	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (default: ~/.config/ty-email/config.yaml)")
 	rootCmd.PersistentFlags().BoolVarP(&verbose, "verbose", "v", false, "verbose output")
 
+	rootCmd.AddCommand(initCmd())
 	rootCmd.AddCommand(serveCmd())
 	rootCmd.AddCommand(processCmd())
 	rootCmd.AddCommand(testCmd())
@@ -313,6 +317,322 @@ func statusCmd() *cobra.Command {
 			return nil
 		},
 	}
+}
+
+func initCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "init",
+		Short: "Setup ty-email configuration",
+		Long:  "Interactive wizard to configure email provider and LLM. Can be re-run anytime to update settings.",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			reader := bufio.NewReader(os.Stdin)
+
+			// Determine config path
+			configPath := cfgFile
+			if configPath == "" {
+				home, _ := os.UserHomeDir()
+				configPath = filepath.Join(home, ".config", "ty-email", "config.yaml")
+			}
+
+			// Check for existing config
+			var existingCfg *Config
+			if data, err := os.ReadFile(configPath); err == nil {
+				existingCfg = &Config{}
+				yaml.Unmarshal(data, existingCfg)
+				fmt.Printf("Existing config found at %s\n", configPath)
+				fmt.Println("Running setup will update your configuration.\n")
+			}
+
+			cfg := &Config{}
+			if existingCfg != nil {
+				*cfg = *existingCfg
+			}
+
+			// Email provider
+			fmt.Println("=== Email Provider ===")
+			fmt.Println("1. IMAP (Fastmail, ProtonMail, etc.)")
+			fmt.Println("2. Gmail (coming soon)")
+			fmt.Print("\nChoice [1]: ")
+			choice, _ := reader.ReadString('\n')
+			choice = strings.TrimSpace(choice)
+			if choice == "" {
+				choice = "1"
+			}
+
+			switch choice {
+			case "1":
+				cfg.Adapter.Type = "imap"
+				if cfg.Adapter.IMAP == nil {
+					cfg.Adapter.IMAP = &adapter.IMAPConfig{}
+				}
+
+				fmt.Print("\nIMAP server (e.g., imap.fastmail.com:993): ")
+				server, _ := reader.ReadString('\n')
+				server = strings.TrimSpace(server)
+				if server != "" {
+					cfg.Adapter.IMAP.Server = server
+				} else if cfg.Adapter.IMAP.Server == "" {
+					cfg.Adapter.IMAP.Server = "imap.fastmail.com:993"
+				}
+
+				fmt.Printf("Username/email [%s]: ", cfg.Adapter.IMAP.Username)
+				username, _ := reader.ReadString('\n')
+				username = strings.TrimSpace(username)
+				if username != "" {
+					cfg.Adapter.IMAP.Username = username
+				}
+
+				fmt.Println("\nPassword retrieval (choose one):")
+				fmt.Println("1. Command (e.g., op read 'op://...' for 1Password)")
+				fmt.Println("2. Environment variable")
+				fmt.Print("Choice [1]: ")
+				pwChoice, _ := reader.ReadString('\n')
+				pwChoice = strings.TrimSpace(pwChoice)
+				if pwChoice == "" {
+					pwChoice = "1"
+				}
+
+				if pwChoice == "1" {
+					fmt.Printf("Password command [%s]: ", cfg.Adapter.IMAP.PasswordCmd)
+					pwCmd, _ := reader.ReadString('\n')
+					pwCmd = strings.TrimSpace(pwCmd)
+					if pwCmd != "" {
+						cfg.Adapter.IMAP.PasswordCmd = pwCmd
+					}
+
+					// Test the command
+					if cfg.Adapter.IMAP.PasswordCmd != "" {
+						fmt.Print("Testing password command... ")
+						out, err := exec.Command("sh", "-c", cfg.Adapter.IMAP.PasswordCmd).Output()
+						if err != nil {
+							fmt.Printf("FAILED: %v\n", err)
+						} else if len(strings.TrimSpace(string(out))) == 0 {
+							fmt.Println("WARNING: command returned empty string")
+						} else {
+							fmt.Println("OK")
+						}
+					}
+				} else {
+					fmt.Print("Environment variable name: ")
+					envVar, _ := reader.ReadString('\n')
+					envVar = strings.TrimSpace(envVar)
+					if envVar != "" {
+						cfg.Adapter.IMAP.PasswordCmd = fmt.Sprintf("echo $%s", envVar)
+					}
+				}
+
+				fmt.Printf("IMAP folder [%s]: ", defaultStr(cfg.Adapter.IMAP.Folder, "INBOX"))
+				folder, _ := reader.ReadString('\n')
+				folder = strings.TrimSpace(folder)
+				if folder != "" {
+					cfg.Adapter.IMAP.Folder = folder
+				} else if cfg.Adapter.IMAP.Folder == "" {
+					cfg.Adapter.IMAP.Folder = "INBOX"
+				}
+
+				fmt.Printf("Poll interval [%s]: ", defaultStr(cfg.Adapter.IMAP.PollInterval, "30s"))
+				interval, _ := reader.ReadString('\n')
+				interval = strings.TrimSpace(interval)
+				if interval != "" {
+					cfg.Adapter.IMAP.PollInterval = interval
+				} else if cfg.Adapter.IMAP.PollInterval == "" {
+					cfg.Adapter.IMAP.PollInterval = "30s"
+				}
+
+			case "2":
+				fmt.Println("Gmail support coming soon. Please use IMAP for now.")
+				return nil
+			}
+
+			// SMTP for replies
+			fmt.Println("\n=== Outbound Email (SMTP) ===")
+			fmt.Printf("SMTP server [%s]: ", defaultStr(cfg.SMTP.Server, "smtp.fastmail.com:587"))
+			smtpServer, _ := reader.ReadString('\n')
+			smtpServer = strings.TrimSpace(smtpServer)
+			if smtpServer != "" {
+				cfg.SMTP.Server = smtpServer
+			} else if cfg.SMTP.Server == "" {
+				cfg.SMTP.Server = "smtp.fastmail.com:587"
+			}
+
+			// Default SMTP username to IMAP username
+			defaultSmtpUser := cfg.SMTP.Username
+			if defaultSmtpUser == "" && cfg.Adapter.IMAP != nil {
+				defaultSmtpUser = cfg.Adapter.IMAP.Username
+			}
+			fmt.Printf("SMTP username [%s]: ", defaultSmtpUser)
+			smtpUser, _ := reader.ReadString('\n')
+			smtpUser = strings.TrimSpace(smtpUser)
+			if smtpUser != "" {
+				cfg.SMTP.Username = smtpUser
+			} else if cfg.SMTP.Username == "" {
+				cfg.SMTP.Username = defaultSmtpUser
+			}
+
+			// Default SMTP password command to IMAP password command
+			defaultSmtpPwCmd := cfg.SMTP.PasswordCmd
+			if defaultSmtpPwCmd == "" && cfg.Adapter.IMAP != nil {
+				defaultSmtpPwCmd = cfg.Adapter.IMAP.PasswordCmd
+			}
+			fmt.Printf("SMTP password command [%s]: ", defaultSmtpPwCmd)
+			smtpPwCmd, _ := reader.ReadString('\n')
+			smtpPwCmd = strings.TrimSpace(smtpPwCmd)
+			if smtpPwCmd != "" {
+				cfg.SMTP.PasswordCmd = smtpPwCmd
+			} else if cfg.SMTP.PasswordCmd == "" {
+				cfg.SMTP.PasswordCmd = defaultSmtpPwCmd
+			}
+
+			fmt.Printf("From address [%s]: ", defaultStr(cfg.SMTP.From, cfg.SMTP.Username))
+			fromAddr, _ := reader.ReadString('\n')
+			fromAddr = strings.TrimSpace(fromAddr)
+			if fromAddr != "" {
+				cfg.SMTP.From = fromAddr
+			} else if cfg.SMTP.From == "" {
+				cfg.SMTP.From = cfg.SMTP.Username
+			}
+
+			// LLM provider
+			fmt.Println("\n=== LLM Provider ===")
+			fmt.Println("1. Claude (Anthropic)")
+			fmt.Println("2. OpenAI (coming soon)")
+			fmt.Println("3. Ollama (local, coming soon)")
+			fmt.Print("\nChoice [1]: ")
+			llmChoice, _ := reader.ReadString('\n')
+			llmChoice = strings.TrimSpace(llmChoice)
+			if llmChoice == "" {
+				llmChoice = "1"
+			}
+
+			switch llmChoice {
+			case "1":
+				cfg.Classifier.Provider = "claude"
+
+				fmt.Printf("Model [%s]: ", defaultStr(cfg.Classifier.Model, "claude-sonnet-4-20250514"))
+				model, _ := reader.ReadString('\n')
+				model = strings.TrimSpace(model)
+				if model != "" {
+					cfg.Classifier.Model = model
+				} else if cfg.Classifier.Model == "" {
+					cfg.Classifier.Model = "claude-sonnet-4-20250514"
+				}
+
+				fmt.Println("\nAPI key retrieval:")
+				fmt.Println("1. Command (e.g., op read '...')")
+				fmt.Println("2. Environment variable ANTHROPIC_API_KEY")
+				fmt.Print("Choice [1]: ")
+				apiChoice, _ := reader.ReadString('\n')
+				apiChoice = strings.TrimSpace(apiChoice)
+				if apiChoice == "" {
+					apiChoice = "1"
+				}
+
+				if apiChoice == "1" {
+					fmt.Printf("API key command [%s]: ", cfg.Classifier.APIKeyCmd)
+					apiCmd, _ := reader.ReadString('\n')
+					apiCmd = strings.TrimSpace(apiCmd)
+					if apiCmd != "" {
+						cfg.Classifier.APIKeyCmd = apiCmd
+					}
+
+					// Test the command
+					if cfg.Classifier.APIKeyCmd != "" {
+						fmt.Print("Testing API key command... ")
+						out, err := exec.Command("sh", "-c", cfg.Classifier.APIKeyCmd).Output()
+						if err != nil {
+							fmt.Printf("FAILED: %v\n", err)
+						} else if len(strings.TrimSpace(string(out))) == 0 {
+							fmt.Println("WARNING: command returned empty string")
+						} else {
+							fmt.Println("OK")
+						}
+					}
+				} else {
+					cfg.Classifier.APIKeyCmd = "echo $ANTHROPIC_API_KEY"
+					if os.Getenv("ANTHROPIC_API_KEY") == "" {
+						fmt.Println("WARNING: ANTHROPIC_API_KEY not set")
+					} else {
+						fmt.Println("OK - ANTHROPIC_API_KEY is set")
+					}
+				}
+
+			case "2", "3":
+				fmt.Println("Coming soon. Please use Claude for now.")
+				return nil
+			}
+
+			// TaskYou CLI
+			fmt.Println("\n=== TaskYou ===")
+			fmt.Printf("Path to ty CLI [%s]: ", defaultStr(cfg.TaskYou.CLI, "ty"))
+			tyCli, _ := reader.ReadString('\n')
+			tyCli = strings.TrimSpace(tyCli)
+			if tyCli != "" {
+				cfg.TaskYou.CLI = tyCli
+			} else if cfg.TaskYou.CLI == "" {
+				cfg.TaskYou.CLI = "ty"
+			}
+
+			// Test ty CLI
+			fmt.Print("Testing ty CLI... ")
+			if _, err := exec.LookPath(cfg.TaskYou.CLI); err != nil {
+				fmt.Printf("NOT FOUND: %v\n", err)
+			} else {
+				fmt.Println("OK")
+			}
+
+			// Default project
+			fmt.Printf("Default project [%s]: ", defaultStr(cfg.Routing.DefaultProject, "personal"))
+			defaultProj, _ := reader.ReadString('\n')
+			defaultProj = strings.TrimSpace(defaultProj)
+			if defaultProj != "" {
+				cfg.Routing.DefaultProject = defaultProj
+			} else if cfg.Routing.DefaultProject == "" {
+				cfg.Routing.DefaultProject = "personal"
+			}
+
+			// Save config
+			fmt.Println("\n=== Saving Configuration ===")
+
+			// Ensure directory exists
+			configDir := filepath.Dir(configPath)
+			if err := os.MkdirAll(configDir, 0755); err != nil {
+				return fmt.Errorf("failed to create config directory: %w", err)
+			}
+
+			data, err := yaml.Marshal(cfg)
+			if err != nil {
+				return fmt.Errorf("failed to marshal config: %w", err)
+			}
+
+			if err := os.WriteFile(configPath, data, 0600); err != nil {
+				return fmt.Errorf("failed to write config: %w", err)
+			}
+
+			fmt.Printf("Configuration saved to %s\n", configPath)
+
+			// Initialize state DB
+			fmt.Print("Initializing state database... ")
+			st, err := state.Open("")
+			if err != nil {
+				fmt.Printf("FAILED: %v\n", err)
+			} else {
+				st.Close()
+				fmt.Printf("OK (%s)\n", state.DefaultPath())
+			}
+
+			fmt.Println("\nSetup complete! Run 'ty-email serve' to start processing emails.")
+			fmt.Println("\nTip: Add [projectname] to your email subject to route to a specific project.")
+
+			return nil
+		},
+	}
+}
+
+func defaultStr(val, def string) string {
+	if val != "" {
+		return val
+	}
+	return def
 }
 
 func loadConfig() (*Config, error) {
