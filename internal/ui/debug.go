@@ -63,6 +63,7 @@ type DebugForm struct {
 	Project      string            `json:"project"`
 	Type         string            `json:"type"`
 	Executor     string            `json:"executor"`
+	Model        string            `json:"model"`
 }
 
 type DebugModals struct {
@@ -171,6 +172,7 @@ func (m *AppModel) GenerateDebugState() DebugState {
 			Project:      formModel.project,
 			Type:         formModel.taskType,
 			Executor:     formModel.executor,
+			Model:        formModel.model,
 		}
 		if m.currentView == ViewEditTask {
 			s.Form.Title = "Edit Task"

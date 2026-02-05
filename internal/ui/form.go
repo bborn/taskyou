@@ -28,6 +28,7 @@ const (
 	FieldAttachments // Moved after body for proximity - drag works from any field
 	FieldType
 	FieldExecutor
+	FieldModel
 	FieldCount
 )
 
@@ -60,6 +61,9 @@ type FormModel struct {
 	executorIdx        int
 	executors          []string
 	availableExecutors []string // Original list of available executors (for rebuilding when project changes)
+	model              string   // Model override (e.g., "opus", "sonnet", "claude-opus-4-6")
+	modelIdx           int
+	models             []string // Available model choices (first is "" for default)
 	queue              bool
 	attachments        []string // Parsed file paths
 	attachmentCursor   int      // Index of the currently selected attachment chip
@@ -101,6 +105,17 @@ type autocompleteSuggestionMsg struct {
 	suggestion *autocomplete.Suggestion
 	fieldType  string
 	debounceID int // To verify response is still relevant
+}
+
+// modelsForExecutor returns the available model choices for a given executor.
+// The first entry is always "" (meaning "use executor default").
+func modelsForExecutor(executor string) []string {
+	switch executor {
+	case db.ExecutorClaude:
+		return []string{"", "opus", "sonnet", "haiku"}
+	default:
+		return []string{""}
+	}
 }
 
 // buildExecutorList creates the list of executors for the form.
@@ -180,6 +195,16 @@ func NewEditFormModel(database *db.DB, task *db.Task, width, height int, availab
 		executorDisplay = executors[0]
 	}
 
+	// Build model list based on executor
+	models := modelsForExecutor(executorDisplay)
+	modelIdx := 0
+	for i, m := range models {
+		if m == task.Model {
+			modelIdx = i
+			break
+		}
+	}
+
 	m := &FormModel{
 		db:                  database,
 		width:               width,
@@ -192,6 +217,9 @@ func NewEditFormModel(database *db.DB, task *db.Task, width, height int, availab
 		executorIdx:         executorIdx,
 		executors:           executors,
 		availableExecutors:  availableExecutors, // Store for rebuilding when project changes
+		model:               task.Model,
+		modelIdx:            modelIdx,
+		models:              models,
 		isEdit:              true,
 		prURL:               task.PRURL,
 		prNumber:            task.PRNumber,
@@ -369,6 +397,11 @@ func NewFormModel(database *db.DB, width, height int, workingDir string, availab
 
 	// Load last used executor for the selected project (overrides default if available)
 	m.loadLastExecutorForProject()
+
+	// Initialize model list based on selected executor
+	m.models = modelsForExecutor(m.executor)
+	m.modelIdx = 0
+	m.model = ""
 
 	// Title input
 	m.titleInput = textinput.New()
@@ -602,7 +635,7 @@ func (m *FormModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				break
 			}
 			// On last field, submit
-			if m.focused == FieldExecutor {
+			if m.focused == FieldModel {
 				m.parseAttachments()
 				m.submitted = true
 				return m, nil
@@ -631,6 +664,12 @@ func (m *FormModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.focused == FieldExecutor && len(m.executors) > 0 {
 				m.executorIdx = (m.executorIdx - 1 + len(m.executors)) % len(m.executors)
 				m.executor = m.executors[m.executorIdx]
+				m.rebuildModelListForExecutor()
+				return m, nil
+			}
+			if m.focused == FieldModel && len(m.models) > 0 {
+				m.modelIdx = (m.modelIdx - 1 + len(m.models)) % len(m.models)
+				m.model = m.models[m.modelIdx]
 				return m, nil
 			}
 
@@ -654,6 +693,12 @@ func (m *FormModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.focused == FieldExecutor && len(m.executors) > 0 {
 				m.executorIdx = (m.executorIdx + 1) % len(m.executors)
 				m.executor = m.executors[m.executorIdx]
+				m.rebuildModelListForExecutor()
+				return m, nil
+			}
+			if m.focused == FieldModel && len(m.models) > 0 {
+				m.modelIdx = (m.modelIdx + 1) % len(m.models)
+				m.model = m.models[m.modelIdx]
 				return m, nil
 			}
 
@@ -692,7 +737,7 @@ func (m *FormModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			// Type-to-select for selector fields
-			if m.focused == FieldProject || m.focused == FieldType || m.focused == FieldExecutor {
+			if m.focused == FieldProject || m.focused == FieldType || m.focused == FieldExecutor || m.focused == FieldModel {
 				key := msg.String()
 				if len(key) == 1 && unicode.IsLetter(rune(key[0])) {
 					m.selectByPrefix(strings.ToLower(key))
@@ -890,6 +935,19 @@ func (m *FormModel) selectByPrefix(prefix string) {
 			if strings.HasPrefix(strings.ToLower(e), prefix) {
 				m.executorIdx = i
 				m.executor = e
+				m.rebuildModelListForExecutor()
+				return
+			}
+		}
+	case FieldModel:
+		for i, mdl := range m.models {
+			label := mdl
+			if label == "" {
+				label = "default"
+			}
+			if strings.HasPrefix(strings.ToLower(label), prefix) {
+				m.modelIdx = i
+				m.model = mdl
 				return
 			}
 		}
@@ -974,10 +1032,21 @@ func (m *FormModel) rebuildExecutorListForProject() {
 	}
 }
 
+// rebuildModelListForExecutor updates the model list when the executor changes.
+func (m *FormModel) rebuildModelListForExecutor() {
+	m.models = modelsForExecutor(m.executor)
+	m.modelIdx = 0
+	m.model = ""
+}
+
 func (m *FormModel) focusNext() {
 	m.blurAll()
 	m.cancelAutocomplete()
 	m.focused = (m.focused + 1) % FieldCount
+	// Skip model field if there's only one model choice (not selectable)
+	if m.focused == FieldModel && len(m.models) <= 1 {
+		m.focused = (m.focused + 1) % FieldCount
+	}
 	m.focusCurrent()
 }
 
@@ -985,6 +1054,10 @@ func (m *FormModel) focusPrev() {
 	m.blurAll()
 	m.cancelAutocomplete()
 	m.focused = (m.focused - 1 + FieldCount) % FieldCount
+	// Skip model field if there's only one model choice (not selectable)
+	if m.focused == FieldModel && len(m.models) <= 1 {
+		m.focused = (m.focused - 1 + FieldCount) % FieldCount
+	}
 	m.focusCurrent()
 }
 
@@ -1397,6 +1470,25 @@ func (m *FormModel) View() string {
 	b.WriteString(cursor + " " + labelStyle.Render("Executor") + m.renderSelector(m.executors, m.executorIdx, m.focused == FieldExecutor, selectedStyle, optionStyle, dimStyle))
 	b.WriteString("\n\n")
 
+	// Model selector (only show if executor has model choices)
+	if len(m.models) > 1 {
+		cursor = " "
+		if m.focused == FieldModel {
+			cursor = cursorStyle.Render("▸")
+		}
+		// Display labels: "" becomes "default"
+		modelLabels := make([]string, len(m.models))
+		for i, mdl := range m.models {
+			if mdl == "" {
+				modelLabels[i] = "default"
+			} else {
+				modelLabels[i] = mdl
+			}
+		}
+		b.WriteString(cursor + " " + labelStyle.Render("Model") + m.renderSelector(modelLabels, m.modelIdx, m.focused == FieldModel, selectedStyle, optionStyle, dimStyle))
+		b.WriteString("\n\n")
+	}
+
 	// Cancel confirmation message
 	if m.showCancelConfirm {
 		confirmStyle := lipgloss.NewStyle().
@@ -1463,6 +1555,7 @@ func (m *FormModel) GetDBTask() *db.Task {
 		Type:     m.taskType,
 		Project:  m.project,
 		Executor: m.executor,
+		Model:    m.model,
 		PRURL:    m.prURL,
 		PRNumber: m.prNumber,
 	}

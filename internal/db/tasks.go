@@ -18,6 +18,7 @@ type Task struct {
 	Type            string
 	Project         string
 	Executor        string // Task executor: "claude" (default), "codex", "gemini"
+	Model           string // Model override for the executor (e.g., "opus", "sonnet", "claude-opus-4-6")
 	WorktreePath    string
 	BranchName      string
 	Port            int    // Unique port for running the application in this task's worktree
@@ -126,9 +127,9 @@ func (db *DB) CreateTask(t *Task) error {
 	}
 
 	result, err := db.Exec(`
-		INSERT INTO tasks (title, body, status, type, project, executor, pinned, tags)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-	`, t.Title, t.Body, t.Status, t.Type, t.Project, t.Executor, t.Pinned, t.Tags)
+		INSERT INTO tasks (title, body, status, type, project, executor, model, pinned, tags)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, t.Title, t.Body, t.Status, t.Type, t.Project, t.Executor, t.Model, t.Pinned, t.Tags)
 	if err != nil {
 		return fmt.Errorf("insert task: %w", err)
 	}
@@ -167,7 +168,7 @@ func (db *DB) CreateTask(t *Task) error {
 func (db *DB) GetTask(id int64) (*Task, error) {
 	t := &Task{}
 	err := db.QueryRow(`
-		SELECT id, title, body, status, type, project, COALESCE(executor, 'claude'),
+		SELECT id, title, body, status, type, project, COALESCE(executor, 'claude'), COALESCE(model, ''),
 		       worktree_path, branch_name, port, claude_session_id,
 		       COALESCE(daemon_session, ''), COALESCE(tmux_window_id, ''),
 		       COALESCE(claude_pane_id, ''), COALESCE(shell_pane_id, ''),
@@ -179,7 +180,7 @@ func (db *DB) GetTask(id int64) (*Task, error) {
 		       COALESCE(archive_worktree_path, ''), COALESCE(archive_branch_name, '')
 		FROM tasks WHERE id = ?
 	`, id).Scan(
-		&t.ID, &t.Title, &t.Body, &t.Status, &t.Type, &t.Project, &t.Executor,
+		&t.ID, &t.Title, &t.Body, &t.Status, &t.Type, &t.Project, &t.Executor, &t.Model,
 		&t.WorktreePath, &t.BranchName, &t.Port, &t.ClaudeSessionID,
 		&t.DaemonSession, &t.TmuxWindowID, &t.ClaudePaneID, &t.ShellPaneID,
 		&t.PRURL, &t.PRNumber,
@@ -210,7 +211,7 @@ type ListTasksOptions struct {
 // ListTasks retrieves tasks with optional filters.
 func (db *DB) ListTasks(opts ListTasksOptions) ([]*Task, error) {
 	query := `
-		SELECT id, title, body, status, type, project, COALESCE(executor, 'claude'),
+		SELECT id, title, body, status, type, project, COALESCE(executor, 'claude'), COALESCE(model, ''),
 		       worktree_path, branch_name, port, claude_session_id,
 		       COALESCE(daemon_session, ''), COALESCE(tmux_window_id, ''),
 		       COALESCE(claude_pane_id, ''), COALESCE(shell_pane_id, ''),
@@ -265,7 +266,7 @@ func (db *DB) ListTasks(opts ListTasksOptions) ([]*Task, error) {
 	for rows.Next() {
 		t := &Task{}
 		err := rows.Scan(
-			&t.ID, &t.Title, &t.Body, &t.Status, &t.Type, &t.Project, &t.Executor,
+			&t.ID, &t.Title, &t.Body, &t.Status, &t.Type, &t.Project, &t.Executor, &t.Model,
 			&t.WorktreePath, &t.BranchName, &t.Port, &t.ClaudeSessionID,
 			&t.DaemonSession, &t.TmuxWindowID, &t.ClaudePaneID, &t.ShellPaneID,
 			&t.PRURL, &t.PRNumber,
@@ -288,7 +289,7 @@ func (db *DB) ListTasks(opts ListTasksOptions) ([]*Task, error) {
 func (db *DB) GetMostRecentlyCreatedTask() (*Task, error) {
 	t := &Task{}
 	err := db.QueryRow(`
-		SELECT id, title, body, status, type, project, COALESCE(executor, 'claude'),
+		SELECT id, title, body, status, type, project, COALESCE(executor, 'claude'), COALESCE(model, ''),
 		       worktree_path, branch_name, port, claude_session_id,
 		       COALESCE(daemon_session, ''), COALESCE(tmux_window_id, ''),
 		       COALESCE(claude_pane_id, ''), COALESCE(shell_pane_id, ''),
@@ -302,7 +303,7 @@ func (db *DB) GetMostRecentlyCreatedTask() (*Task, error) {
 		ORDER BY created_at DESC, id DESC
 		LIMIT 1
 	`).Scan(
-		&t.ID, &t.Title, &t.Body, &t.Status, &t.Type, &t.Project, &t.Executor,
+		&t.ID, &t.Title, &t.Body, &t.Status, &t.Type, &t.Project, &t.Executor, &t.Model,
 		&t.WorktreePath, &t.BranchName, &t.Port, &t.ClaudeSessionID,
 		&t.DaemonSession, &t.TmuxWindowID, &t.ClaudePaneID, &t.ShellPaneID,
 		&t.PRURL, &t.PRNumber,
@@ -329,7 +330,7 @@ func (db *DB) SearchTasks(query string, limit int) ([]*Task, error) {
 
 	// Build search query with LIKE clauses
 	sqlQuery := `
-		SELECT id, title, body, status, type, project, COALESCE(executor, 'claude'),
+		SELECT id, title, body, status, type, project, COALESCE(executor, 'claude'), COALESCE(model, ''),
 		       worktree_path, branch_name, port, claude_session_id,
 		       COALESCE(daemon_session, ''), COALESCE(tmux_window_id, ''),
 		       COALESCE(claude_pane_id, ''), COALESCE(shell_pane_id, ''),
@@ -362,7 +363,7 @@ func (db *DB) SearchTasks(query string, limit int) ([]*Task, error) {
 	for rows.Next() {
 		t := &Task{}
 		err := rows.Scan(
-			&t.ID, &t.Title, &t.Body, &t.Status, &t.Type, &t.Project, &t.Executor,
+			&t.ID, &t.Title, &t.Body, &t.Status, &t.Type, &t.Project, &t.Executor, &t.Model,
 			&t.WorktreePath, &t.BranchName, &t.Port, &t.ClaudeSessionID,
 			&t.DaemonSession, &t.TmuxWindowID, &t.ClaudePaneID, &t.ShellPaneID,
 			&t.PRURL, &t.PRNumber,
@@ -455,13 +456,13 @@ func (db *DB) UpdateTask(t *Task) error {
 
 	_, err := db.Exec(`
 		UPDATE tasks SET
-			title = ?, body = ?, status = ?, type = ?, project = ?, executor = ?,
+			title = ?, body = ?, status = ?, type = ?, project = ?, executor = ?, model = ?,
 			worktree_path = ?, branch_name = ?, port = ?, claude_session_id = ?,
 			daemon_session = ?, pr_url = ?, pr_number = ?, dangerous_mode = ?,
 			pinned = ?, tags = ?,
 			updated_at = CURRENT_TIMESTAMP
 		WHERE id = ?
-	`, t.Title, t.Body, t.Status, t.Type, t.Project, t.Executor,
+	`, t.Title, t.Body, t.Status, t.Type, t.Project, t.Executor, t.Model,
 		t.WorktreePath, t.BranchName, t.Port, t.ClaudeSessionID,
 		t.DaemonSession, t.PRURL, t.PRNumber, t.DangerousMode,
 		t.Pinned, t.Tags, t.ID)
@@ -703,7 +704,7 @@ func (db *DB) RetryTask(id int64, feedback string) error {
 func (db *DB) GetNextQueuedTask() (*Task, error) {
 	t := &Task{}
 	err := db.QueryRow(`
-		SELECT id, title, body, status, type, project, COALESCE(executor, 'claude'),
+		SELECT id, title, body, status, type, project, COALESCE(executor, 'claude'), COALESCE(model, ''),
 		       worktree_path, branch_name, port, claude_session_id,
 		       COALESCE(daemon_session, ''), COALESCE(tmux_window_id, ''),
 		       COALESCE(claude_pane_id, ''), COALESCE(shell_pane_id, ''),
@@ -718,7 +719,7 @@ func (db *DB) GetNextQueuedTask() (*Task, error) {
 		ORDER BY created_at ASC
 		LIMIT 1
 	`, StatusQueued).Scan(
-		&t.ID, &t.Title, &t.Body, &t.Status, &t.Type, &t.Project, &t.Executor,
+		&t.ID, &t.Title, &t.Body, &t.Status, &t.Type, &t.Project, &t.Executor, &t.Model,
 		&t.WorktreePath, &t.BranchName, &t.Port, &t.ClaudeSessionID,
 		&t.DaemonSession, &t.TmuxWindowID, &t.ClaudePaneID, &t.ShellPaneID,
 		&t.PRURL, &t.PRNumber,
@@ -739,7 +740,7 @@ func (db *DB) GetNextQueuedTask() (*Task, error) {
 // GetQueuedTasks returns all queued tasks (waiting to be processed).
 func (db *DB) GetQueuedTasks() ([]*Task, error) {
 	rows, err := db.Query(`
-		SELECT id, title, body, status, type, project, COALESCE(executor, 'claude'),
+		SELECT id, title, body, status, type, project, COALESCE(executor, 'claude'), COALESCE(model, ''),
 		       worktree_path, branch_name, port, claude_session_id,
 		       COALESCE(daemon_session, ''), COALESCE(tmux_window_id, ''),
 		       COALESCE(claude_pane_id, ''), COALESCE(shell_pane_id, ''),
@@ -762,7 +763,7 @@ func (db *DB) GetQueuedTasks() ([]*Task, error) {
 	for rows.Next() {
 		t := &Task{}
 		if err := rows.Scan(
-			&t.ID, &t.Title, &t.Body, &t.Status, &t.Type, &t.Project, &t.Executor,
+			&t.ID, &t.Title, &t.Body, &t.Status, &t.Type, &t.Project, &t.Executor, &t.Model,
 			&t.WorktreePath, &t.BranchName, &t.Port, &t.ClaudeSessionID,
 			&t.DaemonSession, &t.TmuxWindowID, &t.ClaudePaneID, &t.ShellPaneID,
 			&t.PRURL, &t.PRNumber,
@@ -782,7 +783,7 @@ func (db *DB) GetQueuedTasks() ([]*Task, error) {
 // These are candidates for automatic closure when their PR is merged.
 func (db *DB) GetTasksWithBranches() ([]*Task, error) {
 	rows, err := db.Query(`
-		SELECT id, title, body, status, type, project, COALESCE(executor, 'claude'),
+		SELECT id, title, body, status, type, project, COALESCE(executor, 'claude'), COALESCE(model, ''),
 		       worktree_path, branch_name, port, claude_session_id,
 		       COALESCE(daemon_session, ''), COALESCE(tmux_window_id, ''),
 		       COALESCE(claude_pane_id, ''), COALESCE(shell_pane_id, ''),
@@ -805,7 +806,7 @@ func (db *DB) GetTasksWithBranches() ([]*Task, error) {
 	for rows.Next() {
 		t := &Task{}
 		if err := rows.Scan(
-			&t.ID, &t.Title, &t.Body, &t.Status, &t.Type, &t.Project, &t.Executor,
+			&t.ID, &t.Title, &t.Body, &t.Status, &t.Type, &t.Project, &t.Executor, &t.Model,
 			&t.WorktreePath, &t.BranchName, &t.Port, &t.ClaudeSessionID,
 			&t.DaemonSession, &t.TmuxWindowID, &t.ClaudePaneID, &t.ShellPaneID,
 			&t.PRURL, &t.PRNumber,

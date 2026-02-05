@@ -249,6 +249,8 @@ func (db *DB) migrate() error {
 		`ALTER TABLE tasks ADD COLUMN archive_commit TEXT DEFAULT ''`,        // Commit hash at time of archiving
 		`ALTER TABLE tasks ADD COLUMN archive_worktree_path TEXT DEFAULT ''`, // Original worktree path before archiving
 		`ALTER TABLE tasks ADD COLUMN archive_branch_name TEXT DEFAULT ''`,   // Original branch name before archiving
+		// Model override for executor (e.g., "opus", "sonnet", "claude-opus-4-6")
+		`ALTER TABLE tasks ADD COLUMN model TEXT DEFAULT ''`, // Executor model override (empty = executor default)
 	}
 
 	for _, m := range alterMigrations {

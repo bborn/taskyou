@@ -104,7 +104,7 @@ func (db *DB) RemoveDependency(blockerID, blockedID int64) error {
 // GetBlockers returns all tasks that block the given task.
 func (db *DB) GetBlockers(taskID int64) ([]*Task, error) {
 	rows, err := db.Query(`
-		SELECT t.id, t.title, t.body, t.status, t.type, t.project, COALESCE(t.executor, 'claude'),
+		SELECT t.id, t.title, t.body, t.status, t.type, t.project, COALESCE(t.executor, 'claude'), COALESCE(t.model, ''),
 		       t.worktree_path, t.branch_name, t.port, t.claude_session_id,
 		       COALESCE(t.daemon_session, ''), COALESCE(t.tmux_window_id, ''),
 		       COALESCE(t.claude_pane_id, ''), COALESCE(t.shell_pane_id, ''),
@@ -128,7 +128,7 @@ func (db *DB) GetBlockers(taskID int64) ([]*Task, error) {
 // GetBlockedBy returns all tasks that are blocked by the given task.
 func (db *DB) GetBlockedBy(taskID int64) ([]*Task, error) {
 	rows, err := db.Query(`
-		SELECT t.id, t.title, t.body, t.status, t.type, t.project, COALESCE(t.executor, 'claude'),
+		SELECT t.id, t.title, t.body, t.status, t.type, t.project, COALESCE(t.executor, 'claude'), COALESCE(t.model, ''),
 		       t.worktree_path, t.branch_name, t.port, t.claude_session_id,
 		       COALESCE(t.daemon_session, ''), COALESCE(t.tmux_window_id, ''),
 		       COALESCE(t.claude_pane_id, ''), COALESCE(t.shell_pane_id, ''),
@@ -303,7 +303,7 @@ func scanTaskRows(rows *sql.Rows) ([]*Task, error) {
 	for rows.Next() {
 		t := &Task{}
 		err := rows.Scan(
-			&t.ID, &t.Title, &t.Body, &t.Status, &t.Type, &t.Project, &t.Executor,
+			&t.ID, &t.Title, &t.Body, &t.Status, &t.Type, &t.Project, &t.Executor, &t.Model,
 			&t.WorktreePath, &t.BranchName, &t.Port, &t.ClaudeSessionID,
 			&t.DaemonSession, &t.TmuxWindowID, &t.ClaudePaneID, &t.ShellPaneID,
 			&t.PRURL, &t.PRNumber,

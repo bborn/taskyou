@@ -233,6 +233,14 @@ func (s *Server) handleRequest(req *jsonRPCRequest) {
 								"type":        "string",
 								"description": "Initial status (backlog, queued, defaults to backlog)",
 							},
+							"executor": map[string]interface{}{
+								"type":        "string",
+								"description": "Task executor (claude, codex, gemini). Defaults to claude.",
+							},
+							"model": map[string]interface{}{
+								"type":        "string",
+								"description": "Model override for the executor (e.g., 'opus', 'sonnet', 'haiku' for Claude). Empty means use executor default.",
+							},
 						},
 						"required": []string{"title"},
 					},
@@ -500,6 +508,8 @@ func (s *Server) handleToolCall(id interface{}, params *toolCallParams) {
 		project, _ := params.Arguments["project"].(string)
 		taskType, _ := params.Arguments["type"].(string)
 		status, _ := params.Arguments["status"].(string)
+		executor, _ := params.Arguments["executor"].(string)
+		model, _ := params.Arguments["model"].(string)
 
 		// Default project to current task's project
 		if project == "" {
@@ -514,11 +524,13 @@ func (s *Server) handleToolCall(id interface{}, params *toolCallParams) {
 		}
 
 		newTask := &db.Task{
-			Title:   title,
-			Body:    body,
-			Project: project,
-			Type:    taskType,
-			Status:  status,
+			Title:    title,
+			Body:     body,
+			Project:  project,
+			Type:     taskType,
+			Status:   status,
+			Executor: executor,
+			Model:    model,
 		}
 
 		if err := s.db.CreateTask(newTask); err != nil {
