@@ -3,7 +3,6 @@ package ui
 import (
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/bborn/workflow/internal/db"
 )
@@ -158,62 +157,6 @@ func TestExecutorFailureMessage(t *testing.T) {
 	}
 	if !strings.Contains(msgWithoutDetail, "Codex failed to start.") {
 		t.Fatalf("expected default failure message, got %q", msgWithoutDetail)
-	}
-}
-
-// TestDetailModel_HasNotification verifies the notification display logic
-// in the detail view. Notifications should only show for tasks other than
-// the one currently being viewed.
-func TestDetailModel_HasNotification(t *testing.T) {
-	task := &db.Task{ID: 1, Title: "Current task"}
-
-	tests := []struct {
-		name         string
-		notification string
-		notifyTaskID int64
-		notifyUntil  time.Time
-		wantHas      bool
-	}{
-		{
-			name:         "no notification",
-			notification: "",
-			notifyTaskID: 0,
-			notifyUntil:  time.Time{},
-			wantHas:      false,
-		},
-		{
-			name:         "notification for different task",
-			notification: "⚠ Task #2 needs input",
-			notifyTaskID: 2,
-			notifyUntil:  time.Now().Add(10 * time.Second),
-			wantHas:      true,
-		},
-		{
-			name:         "notification for same task (should not show)",
-			notification: "⚠ Task #1 needs input",
-			notifyTaskID: 1, // Same as current task
-			notifyUntil:  time.Now().Add(10 * time.Second),
-			wantHas:      false,
-		},
-		{
-			name:         "expired notification",
-			notification: "⚠ Task #2 needs input",
-			notifyTaskID: 2,
-			notifyUntil:  time.Now().Add(-10 * time.Second), // In the past
-			wantHas:      false,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			m := &DetailModel{task: task}
-			m.SetNotification(tt.notification, tt.notifyTaskID, tt.notifyUntil)
-
-			got := m.HasNotification()
-			if got != tt.wantHas {
-				t.Errorf("HasNotification() = %v, want %v", got, tt.wantHas)
-			}
-		})
 	}
 }
 

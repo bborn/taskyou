@@ -2,7 +2,6 @@ package ui
 
 import (
 	"testing"
-	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -689,99 +688,6 @@ func TestJumpToNotificationKey_NoNotification(t *testing.T) {
 	// Press 'g' when no notification is active
 	gMsg := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'g'}}
 	_, cmd := m.updateDashboard(gMsg)
-
-	// Should return nil command since there's no notification
-	if cmd != nil {
-		t.Error("expected nil command when no notification is active")
-	}
-}
-
-func TestJumpToNotificationKey_DetailView(t *testing.T) {
-	// Create app model in detail view with an active notification for a different task
-	tasks := []*db.Task{
-		{ID: 1, Title: "Task 1", Status: db.StatusBacklog},
-		{ID: 2, Title: "Task 2", Status: db.StatusBlocked},
-		{ID: 3, Title: "Task 3", Status: db.StatusQueued},
-	}
-
-	m := &AppModel{
-		width:        100,
-		height:       50,
-		currentView:  ViewDetail,
-		keys:         DefaultKeyMap(),
-		notification: "⚠ Task #2 needs input: Task 2 (g to jump)",
-		notifyTaskID: 2,
-		notifyUntil:  time.Now().Add(10 * time.Second),
-		kanban:       NewKanbanBoard(100, 50),
-		selectedTask: tasks[0], // Currently viewing task 1
-	}
-	m.kanban.SetTasks(tasks)
-
-	// Create a detail view for task 1 and sync notification state
-	m.detailView = &DetailModel{
-		task:   tasks[0],
-		width:  100,
-		height: 50,
-	}
-	m.detailView.SetNotification(m.notification, m.notifyTaskID, m.notifyUntil)
-
-	// Verify notification is set in detail view
-	if !m.detailView.HasNotification() {
-		t.Error("expected detail view to have notification before key press")
-	}
-
-	// Press Ctrl+j to jump to notification
-	ctrlJMsg := tea.KeyMsg{Type: tea.KeyCtrlJ}
-	model, _ := m.updateDetail(ctrlJMsg)
-	am := model.(*AppModel)
-
-	// Notification should be cleared
-	if am.notification != "" {
-		t.Errorf("expected notification to be cleared, got %q", am.notification)
-	}
-
-	// NotifyTaskID should be cleared
-	if am.notifyTaskID != 0 {
-		t.Errorf("expected notifyTaskID to be 0, got %d", am.notifyTaskID)
-	}
-
-	// Kanban should have task 2 selected
-	if task := am.kanban.SelectedTask(); task == nil || task.ID != 2 {
-		if task == nil {
-			t.Error("expected task 2 to be selected, but no task is selected")
-		} else {
-			t.Errorf("expected task 2 to be selected, got task %d", task.ID)
-		}
-	}
-}
-
-func TestJumpToNotificationKey_DetailView_NoNotification(t *testing.T) {
-	// Create app model in detail view but no active notification
-	tasks := []*db.Task{
-		{ID: 1, Title: "Task 1", Status: db.StatusBacklog},
-	}
-
-	m := &AppModel{
-		width:        100,
-		height:       50,
-		currentView:  ViewDetail,
-		keys:         DefaultKeyMap(),
-		notification: "",
-		notifyTaskID: 0,
-		kanban:       NewKanbanBoard(100, 50),
-		selectedTask: tasks[0],
-	}
-	m.kanban.SetTasks(tasks)
-
-	m.detailView = &DetailModel{
-		task:   tasks[0],
-		width:  100,
-		height: 50,
-	}
-
-	// Press Ctrl+j when no notification is active
-	ctrlJMsg := tea.KeyMsg{Type: tea.KeyCtrlJ}
-	_, cmd := m.updateDetail(ctrlJMsg)
 
 	// Should return nil command since there's no notification
 	if cmd != nil {
