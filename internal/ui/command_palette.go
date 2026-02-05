@@ -11,7 +11,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
-// CommandPaletteModel represents the Command+P task switcher.
+// CommandPaletteModel represents the Command+P task switcher and AI command input.
 type CommandPaletteModel struct {
 	db            *db.DB
 	allTasks      []*db.Task
@@ -24,17 +24,19 @@ type CommandPaletteModel struct {
 	maxVisible    int
 
 	// Result
-	selectedTask *db.Task
-	cancelled    bool
+	selectedTask     *db.Task
+	cancelled        bool
+	aiCommandRequest bool   // True when user pressed Enter with text that should go to AI
+	rawInput         string // The raw input text for AI command processing
 }
 
 // NewCommandPaletteModel creates a new command palette model.
 func NewCommandPaletteModel(database *db.DB, tasks []*db.Task, width, height int) *CommandPaletteModel {
 	searchInput := textinput.New()
-	searchInput.Placeholder = "Search tasks by title, ID, project, or PR URL/number..."
+	searchInput.Placeholder = "Search tasks or type a command..."
 	searchInput.Focus()
-	searchInput.CharLimit = 100
-	searchInput.Width = min(60, width-10)
+	searchInput.CharLimit = 200
+	searchInput.Width = min(70, width-10)
 
 	// Load projects for project-based filtering
 	projects, _ := database.ListProjects()
@@ -66,8 +68,14 @@ func (m *CommandPaletteModel) Update(msg tea.Msg) (*CommandPaletteModel, tea.Cmd
 			m.cancelled = true
 			return m, nil
 		case "enter":
+			query := strings.TrimSpace(m.searchInput.Value())
 			if len(m.filteredTasks) > 0 && m.selectedIndex < len(m.filteredTasks) {
+				// If there are matching tasks and we have a selection, select that task
 				m.selectedTask = m.filteredTasks[m.selectedIndex]
+			} else if query != "" {
+				// No matching tasks but user typed something - treat as AI command
+				m.aiCommandRequest = true
+				m.rawInput = query
 			}
 			return m, nil
 		case "up", "ctrl+p", "ctrl+k":
@@ -500,13 +508,18 @@ func isCamelCaseBoundary(str string, i int) bool {
 func (m *CommandPaletteModel) View() string {
 	// Modal dimensions
 	modalWidth := min(80, m.width-4)
+	query := strings.TrimSpace(m.searchInput.Value())
 
-	// Header
+	// Header - changes based on whether we have matching tasks
+	headerText := "Go to Task"
+	if len(m.filteredTasks) == 0 && query != "" {
+		headerText = "AI Command"
+	}
 	header := lipgloss.NewStyle().
 		Bold(true).
 		Foreground(ColorPrimary).
 		MarginBottom(1).
-		Render("Go to Task")
+		Render(headerText)
 
 	// Search input
 	inputStyle := lipgloss.NewStyle().
@@ -523,7 +536,12 @@ func (m *CommandPaletteModel) View() string {
 			Foreground(ColorMuted).
 			Italic(true).
 			Padding(1, 0)
-		taskList.WriteString(emptyStyle.Render("No tasks found"))
+		if query != "" {
+			// Show AI command hint when there's input but no matching tasks
+			taskList.WriteString(emptyStyle.Render("Press Enter to run as AI command"))
+		} else {
+			taskList.WriteString(emptyStyle.Render("Type to search tasks or enter a command"))
+		}
 	} else {
 		// Calculate visible range (for scrolling)
 		start := 0
@@ -576,11 +594,17 @@ func (m *CommandPaletteModel) View() string {
 		}
 	}
 
-	// Help text
+	// Help text - show different help based on context
 	helpStyle := lipgloss.NewStyle().
 		Foreground(ColorMuted).
 		MarginTop(1)
-	help := helpStyle.Render("Enter: select  Esc: cancel  " + IconArrowUp() + "/" + IconArrowDown() + ": navigate")
+	var helpText string
+	if len(m.filteredTasks) == 0 && query != "" {
+		helpText = "Enter: run command  Esc: cancel"
+	} else {
+		helpText = "Enter: select  Esc: cancel  " + IconArrowUp() + "/" + IconArrowDown() + ": navigate"
+	}
+	help := helpStyle.Render(helpText)
 
 	// Combine all parts
 	content := lipgloss.JoinVertical(lipgloss.Left,
@@ -675,6 +699,21 @@ func (m *CommandPaletteModel) SelectedTask() *db.Task {
 // IsCancelled returns true if the user cancelled the palette.
 func (m *CommandPaletteModel) IsCancelled() bool {
 	return m.cancelled
+}
+
+// IsAICommandRequest returns true if the user pressed Enter with text that should go to AI.
+func (m *CommandPaletteModel) IsAICommandRequest() bool {
+	return m.aiCommandRequest
+}
+
+// RawInput returns the raw input text for AI command processing.
+func (m *CommandPaletteModel) RawInput() string {
+	return m.rawInput
+}
+
+// Projects returns the available projects for AI context.
+func (m *CommandPaletteModel) Projects() []*db.Project {
+	return m.projects
 }
 
 // SetSize updates the command palette dimensions.

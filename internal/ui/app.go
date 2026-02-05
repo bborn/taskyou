@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/bborn/workflow/internal/ai"
 	"github.com/bborn/workflow/internal/autocomplete"
 	"github.com/bborn/workflow/internal/db"
 	"github.com/bborn/workflow/internal/executor"
@@ -334,6 +335,9 @@ type AppModel struct {
 	// Command palette view state
 	commandPaletteView *CommandPaletteModel
 
+	// AI command service for natural language command interpretation
+	aiCommandService *ai.CommandService
+
 	// Filter state
 	filterInput        textinput.Model
 	filterActive       bool   // Whether filter mode is active (typing in filter)
@@ -425,6 +429,13 @@ func NewAppModel(database *db.DB, exec *executor.Executor, workingDir string) *A
 	// Create filter autocomplete for project suggestions
 	filterAutocomplete := NewFilterAutocompleteModel(database)
 
+	// Initialize AI command service (uses ANTHROPIC_API_KEY or database setting)
+	var apiKey string
+	if database != nil {
+		apiKey, _ = database.GetSetting("anthropic_api_key")
+	}
+	aiCmdService := ai.NewCommandService(apiKey)
+
 	model := &AppModel{
 		db:                 database,
 		executor:           exec,
@@ -443,6 +454,7 @@ func NewAppModel(database *db.DB, exec *executor.Executor, workingDir string) *A
 		filterText:         "",
 		filterAutocomplete: filterAutocomplete,
 		availableExecutors: availableExecutors,
+		aiCommandService:   aiCmdService,
 	}
 
 	return model
@@ -795,6 +807,14 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case taskClosedMsg, taskArchivedMsg, taskDeletedMsg, taskRetriedMsg, taskStatusChangedMsg:
 		cmds = append(cmds, m.loadTasks())
+
+	case aiCommandMsg:
+		if msg.err != nil {
+			m.notification = fmt.Sprintf("%s %s", IconBlocked(), msg.err.Error())
+			m.notifyUntil = time.Now().Add(5 * time.Second)
+		} else if msg.cmd != nil {
+			cmds = append(cmds, m.handleAICommand(msg.cmd))
+		}
 
 	case taskDangerousModeToggledMsg:
 		cmds = append(cmds, m.loadTasks())
@@ -2626,6 +2646,17 @@ func (m *AppModel) updateCommandPalette(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.loadTask(selectedTask.ID)
 	}
 
+	// Check if user requested an AI command
+	if m.commandPaletteView.IsAICommandRequest() {
+		rawInput := m.commandPaletteView.RawInput()
+		projects := m.commandPaletteView.Projects()
+		m.commandPaletteView = nil
+		m.currentView = ViewDashboard
+		m.notification = "Processing command..."
+		m.notifyUntil = time.Now().Add(30 * time.Second)
+		return m, m.executeAICommand(rawInput, projects)
+	}
+
 	return m, cmd
 }
 
@@ -2697,6 +2728,11 @@ type dbChangeMsg struct{}
 type prInfoMsg struct {
 	taskID int64
 	info   *github.PRInfo
+}
+
+type aiCommandMsg struct {
+	cmd *ai.Command
+	err error
 }
 
 const maxDoneTasksInKanban = 20
@@ -3341,4 +3377,117 @@ func (m *AppModel) stopDatabaseWatcher() {
 	if m.dbChangeCh != nil {
 		close(m.dbChangeCh)
 	}
+}
+
+// executeAICommand sends the user input to the AI service for interpretation.
+func (m *AppModel) executeAICommand(input string, projects []*db.Project) tea.Cmd {
+	aiSvc := m.aiCommandService
+	tasks := m.tasks
+	return func() tea.Msg {
+		if aiSvc == nil || !aiSvc.IsAvailable() {
+			return aiCommandMsg{err: fmt.Errorf("AI command service not available (set ANTHROPIC_API_KEY)")}
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+
+		cmdCtx := &ai.Context{
+			Tasks:    tasks,
+			Projects: projects,
+		}
+
+		cmd, err := aiSvc.InterpretCommand(ctx, input, cmdCtx)
+		return aiCommandMsg{cmd: cmd, err: err}
+	}
+}
+
+// handleAICommand executes the parsed AI command.
+func (m *AppModel) handleAICommand(cmd *ai.Command) tea.Cmd {
+	switch cmd.Type {
+	case ai.CommandCreateTask:
+		// Create a new task
+		project := cmd.Project
+		if project == "" {
+			// Try to detect project from working directory or use last used project
+			if m.workingDir != "" {
+				for _, p := range m.getProjects() {
+					if strings.HasPrefix(m.workingDir, p.Path) {
+						project = p.Name
+						break
+					}
+				}
+			}
+			if project == "" {
+				lastProject, _ := m.db.GetSetting("last_used_project")
+				if lastProject != "" {
+					project = lastProject
+				} else {
+					project = "personal"
+				}
+			}
+		}
+
+		newTask := &db.Task{
+			Title:   cmd.Title,
+			Body:    cmd.Body,
+			Status:  db.StatusBacklog,
+			Project: project,
+		}
+		m.notification = fmt.Sprintf("%s %s", IconDone(), cmd.Message)
+		m.notifyUntil = time.Now().Add(5 * time.Second)
+		return m.createTaskWithAttachments(newTask, nil)
+
+	case ai.CommandUpdateStatus:
+		if cmd.TaskID == 0 {
+			m.notification = fmt.Sprintf("%s Could not find task ID", IconBlocked())
+			m.notifyUntil = time.Now().Add(3 * time.Second)
+			return nil
+		}
+
+		m.notification = fmt.Sprintf("%s %s", IconDone(), cmd.Message)
+		m.notifyUntil = time.Now().Add(3 * time.Second)
+
+		database := m.db
+		exec := m.executor
+		return func() tea.Msg {
+			err := database.UpdateTaskStatus(cmd.TaskID, cmd.Status)
+			if err == nil {
+				if task, _ := database.GetTask(cmd.TaskID); task != nil {
+					exec.NotifyTaskChange("status_changed", task)
+				}
+			}
+			return taskStatusChangedMsg{err: err}
+		}
+
+	case ai.CommandSelectTask:
+		if cmd.TaskID == 0 {
+			m.notification = fmt.Sprintf("%s Could not find task ID", IconBlocked())
+			m.notifyUntil = time.Now().Add(3 * time.Second)
+			return nil
+		}
+
+		m.notification = fmt.Sprintf("%s %s", IconDone(), cmd.Message)
+		m.notifyUntil = time.Now().Add(2 * time.Second)
+		m.kanban.SelectTask(cmd.TaskID)
+		return m.loadTask(cmd.TaskID)
+
+	case ai.CommandSearchTasks:
+		// Apply the search as a filter
+		m.filterText = cmd.Query
+		m.filterInput.SetValue(cmd.Query)
+		m.notification = fmt.Sprintf("%s %s", IconDone(), cmd.Message)
+		m.notifyUntil = time.Now().Add(3 * time.Second)
+		return m.loadTasks()
+
+	default:
+		m.notification = fmt.Sprintf("%s %s", IconBlocked(), cmd.Message)
+		m.notifyUntil = time.Now().Add(5 * time.Second)
+		return nil
+	}
+}
+
+// getProjects returns the list of projects from the database.
+func (m *AppModel) getProjects() []*db.Project {
+	projects, _ := m.db.ListProjects()
+	return projects
 }
