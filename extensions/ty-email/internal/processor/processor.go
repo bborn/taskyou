@@ -15,17 +15,19 @@ import (
 
 // Processor handles the email → classify → execute → reply pipeline.
 type Processor struct {
-	adapter    adapter.Adapter
-	classifier classifier.Classifier
-	bridge     *bridge.Bridge
-	state      *state.DB
-	logger     *slog.Logger
+	adapter        adapter.Adapter
+	classifier     classifier.Classifier
+	bridge         *bridge.Bridge
+	state          *state.DB
+	logger         *slog.Logger
+	allowedSenders []string
 }
 
 // Config holds processor configuration.
 type Config struct {
 	DefaultProject string
-	FromAddress    string // Reply-from address
+	FromAddress    string   // Reply-from address
+	AllowedSenders []string // Only process emails from these addresses
 }
 
 // New creates a new processor.
@@ -34,17 +36,23 @@ func New(
 	cls classifier.Classifier,
 	br *bridge.Bridge,
 	st *state.DB,
+	cfg *Config,
 	logger *slog.Logger,
 ) *Processor {
 	if logger == nil {
 		logger = slog.Default()
 	}
+	var allowed []string
+	if cfg != nil {
+		allowed = cfg.AllowedSenders
+	}
 	return &Processor{
-		adapter:    adp,
-		classifier: cls,
-		bridge:     br,
-		state:      st,
-		logger:     logger,
+		adapter:        adp,
+		classifier:     cls,
+		bridge:         br,
+		state:          st,
+		logger:         logger,
+		allowedSenders: allowed,
 	}
 }
 
@@ -55,6 +63,22 @@ func (p *Processor) ProcessEmail(ctx context.Context, email *adapter.Email) erro
 		"subject", email.Subject,
 		"id", email.ID,
 	)
+
+	// Check if sender is allowed
+	if len(p.allowedSenders) > 0 {
+		allowed := false
+		senderLower := strings.ToLower(email.From)
+		for _, addr := range p.allowedSenders {
+			if strings.ToLower(addr) == senderLower || strings.Contains(senderLower, strings.ToLower(addr)) {
+				allowed = true
+				break
+			}
+		}
+		if !allowed {
+			p.logger.Warn("ignoring email from unauthorized sender", "from", email.From)
+			return nil
+		}
+	}
 
 	// Check if already processed
 	processed, err := p.state.IsProcessed(email.ID)
