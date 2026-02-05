@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/bborn/workflow/internal/autocomplete"
+	"github.com/bborn/workflow/internal/config"
 	"github.com/bborn/workflow/internal/db"
 	"github.com/bborn/workflow/internal/executor"
 	"github.com/bborn/workflow/internal/github"
@@ -231,6 +232,80 @@ func DefaultKeyMap() KeyMap {
 	}
 }
 
+// ApplyKeybindingsConfig applies custom keybindings from a config to the KeyMap.
+// Only non-nil config values override the defaults.
+func ApplyKeybindingsConfig(km KeyMap, cfg *config.KeybindingsConfig) KeyMap {
+	if cfg == nil {
+		return km
+	}
+
+	// Helper to create a key binding from config
+	applyBinding := func(current key.Binding, kc *config.KeybindingConfig) key.Binding {
+		if kc == nil || len(kc.Keys) == 0 {
+			return current
+		}
+		help := kc.Help
+		if help == "" {
+			// Preserve existing help text if not specified
+			help = current.Help().Key
+		}
+		return key.NewBinding(
+			key.WithKeys(kc.Keys...),
+			key.WithHelp(kc.Keys[0], help),
+		)
+	}
+
+	// Apply each binding if configured
+	km.Left = applyBinding(km.Left, cfg.Left)
+	km.Right = applyBinding(km.Right, cfg.Right)
+	km.Up = applyBinding(km.Up, cfg.Up)
+	km.Down = applyBinding(km.Down, cfg.Down)
+	km.Enter = applyBinding(km.Enter, cfg.Enter)
+	km.Back = applyBinding(km.Back, cfg.Back)
+	km.New = applyBinding(km.New, cfg.New)
+	km.Edit = applyBinding(km.Edit, cfg.Edit)
+	km.Queue = applyBinding(km.Queue, cfg.Queue)
+	km.Retry = applyBinding(km.Retry, cfg.Retry)
+	km.Close = applyBinding(km.Close, cfg.Close)
+	km.Archive = applyBinding(km.Archive, cfg.Archive)
+	km.Delete = applyBinding(km.Delete, cfg.Delete)
+	km.Refresh = applyBinding(km.Refresh, cfg.Refresh)
+	km.Settings = applyBinding(km.Settings, cfg.Settings)
+	km.Help = applyBinding(km.Help, cfg.Help)
+	km.Quit = applyBinding(km.Quit, cfg.Quit)
+	km.ChangeStatus = applyBinding(km.ChangeStatus, cfg.ChangeStatus)
+	km.CommandPalette = applyBinding(km.CommandPalette, cfg.CommandPalette)
+	km.ToggleDangerous = applyBinding(km.ToggleDangerous, cfg.ToggleDangerous)
+	km.TogglePin = applyBinding(km.TogglePin, cfg.TogglePin)
+	km.Filter = applyBinding(km.Filter, cfg.Filter)
+	km.OpenWorktree = applyBinding(km.OpenWorktree, cfg.OpenWorktree)
+	km.ToggleShellPane = applyBinding(km.ToggleShellPane, cfg.ToggleShellPane)
+	km.JumpToNotification = applyBinding(km.JumpToNotification, cfg.JumpToNotification)
+	km.FocusBacklog = applyBinding(km.FocusBacklog, cfg.FocusBacklog)
+	km.FocusInProgress = applyBinding(km.FocusInProgress, cfg.FocusInProgress)
+	km.FocusBlocked = applyBinding(km.FocusBlocked, cfg.FocusBlocked)
+	km.FocusDone = applyBinding(km.FocusDone, cfg.FocusDone)
+	km.JumpToPinned = applyBinding(km.JumpToPinned, cfg.JumpToPinned)
+	km.JumpToUnpinned = applyBinding(km.JumpToUnpinned, cfg.JumpToUnpinned)
+
+	return km
+}
+
+// LoadKeyMap loads the KeyMap from the config file, falling back to defaults.
+func LoadKeyMap() KeyMap {
+	km := DefaultKeyMap()
+
+	cfg, err := config.LoadKeybindings()
+	if err != nil {
+		// Log error but continue with defaults
+		log := GetLogger()
+		log.Error("Failed to load keybindings config: %v", err)
+		return km
+	}
+
+	return ApplyKeybindingsConfig(km, cfg)
+}
+
 // AppModel is the main application model.
 type AppModel struct {
 	db       *db.DB
@@ -435,7 +510,7 @@ func NewAppModel(database *db.DB, exec *executor.Executor, workingDir string) *A
 		db:                 database,
 		executor:           exec,
 		workingDir:         workingDir,
-		keys:               DefaultKeyMap(),
+		keys:               LoadKeyMap(),
 		help:               h,
 		currentView:        ViewDashboard,
 		kanban:             kanban,
