@@ -2555,6 +2555,7 @@ func (m *DetailModel) renderHelp() string {
 	}
 
 	keys = append(keys, []helpKey{
+		{"b", "browser", false},
 		{"c", "close", false},
 		{"a", "archive", false},
 		{"d", "delete", false},
