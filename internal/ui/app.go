@@ -70,8 +70,7 @@ type KeyMap struct {
 	Filter       key.Binding
 	OpenWorktree key.Binding
 	ToggleShellPane          key.Binding
-	JumpToNotification       key.Binding
-	JumpToNotificationDetail key.Binding // For detail view (uses Ctrl+j to avoid conflicting with text input and Claude Code's Ctrl+g)
+	JumpToNotification key.Binding
 	// Column focus shortcuts
 	FocusBacklog    key.Binding
 	FocusInProgress key.Binding
@@ -203,10 +202,6 @@ func DefaultKeyMap() KeyMap {
 		JumpToNotification: key.NewBinding(
 			key.WithKeys("g"),
 			key.WithHelp("g", "go to notification"),
-		),
-		JumpToNotificationDetail: key.NewBinding(
-			key.WithKeys("ctrl+j"),
-			key.WithHelp("ctrl+j", "go to notification"),
 		),
 		FocusBacklog: key.NewBinding(
 			key.WithKeys("B"),
@@ -591,20 +586,12 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					RingBell() // Ring terminal bell (writes to /dev/tty to bypass TUI)
 					// Mark task as needing input for kanban highlighting
 					m.tasksNeedingInput[t.ID] = true
-					// Immediately update detail view notification if active
-					if m.currentView == ViewDetail && m.detailView != nil {
-						m.detailView.SetNotification(m.notification, m.notifyTaskID, m.notifyUntil)
-					}
 				} else if t.Status == db.StatusDone && db.IsInProgress(prevStatus) {
 					// Task completed - ring bell and show notification
 					m.notification = fmt.Sprintf("%s Task #%d complete: %s (g to jump)", IconDone(), t.ID, t.Title)
 					m.notifyUntil = time.Now().Add(5 * time.Second)
 					m.notifyTaskID = t.ID
 					RingBell() // Ring terminal bell (writes to /dev/tty to bypass TUI)
-					// Immediately update detail view notification if active
-					if m.currentView == ViewDetail && m.detailView != nil {
-						m.detailView.SetNotification(m.notification, m.notifyTaskID, m.notifyUntil)
-					}
 				}
 				// Clear needing input flag when task leaves blocked status
 				if prevStatus == db.StatusBlocked && t.Status != db.StatusBlocked {
@@ -854,27 +841,15 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 							RingBell() // Ring terminal bell (writes to /dev/tty to bypass TUI)
 							// Mark task as needing input for kanban highlighting
 							m.tasksNeedingInput[event.TaskID] = true
-							// Immediately update detail view notification if active
-							if m.currentView == ViewDetail && m.detailView != nil {
-								m.detailView.SetNotification(m.notification, m.notifyTaskID, m.notifyUntil)
-							}
 						} else if event.Task.Status == db.StatusDone && db.IsInProgress(prevStatus) {
 							m.notification = fmt.Sprintf("✓ Task #%d complete: %s (g to jump)", event.TaskID, event.Task.Title)
 							m.notifyUntil = time.Now().Add(5 * time.Second)
 							m.notifyTaskID = event.TaskID
 							RingBell() // Ring terminal bell (writes to /dev/tty to bypass TUI)
-							// Immediately update detail view notification if active
-							if m.currentView == ViewDetail && m.detailView != nil {
-								m.detailView.SetNotification(m.notification, m.notifyTaskID, m.notifyUntil)
-							}
 						} else if db.IsInProgress(event.Task.Status) {
 							m.notification = fmt.Sprintf("%s Task #%d started: %s (g to jump)", IconInProgress(), event.TaskID, event.Task.Title)
 							m.notifyUntil = time.Now().Add(3 * time.Second)
 							m.notifyTaskID = event.TaskID
-							// Immediately update detail view notification if active
-							if m.currentView == ViewDetail && m.detailView != nil {
-								m.detailView.SetNotification(m.notification, m.notifyTaskID, m.notifyUntil)
-							}
 						}
 						// Clear needing input flag when task leaves blocked status
 						if prevStatus == db.StatusBlocked && event.Task.Status != db.StatusBlocked {
@@ -907,8 +882,6 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		// Refresh detail view if active (for logs which may update frequently)
 		if m.currentView == ViewDetail && m.detailView != nil {
-			// Pass notification state to detail view
-			m.detailView.SetNotification(m.notification, m.notifyTaskID, m.notifyUntil)
 			m.detailView.Refresh()
 		}
 		// Poll database for task changes (hooks run in separate process)
@@ -1628,26 +1601,6 @@ func (m *AppModel) updateDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.detailView != nil {
 			m.detailView.Cleanup()
 			m.detailView = nil
-		}
-		return m, nil
-	}
-
-	// Handle jump to notification from detail view (Ctrl+j)
-	if key.Matches(keyMsg, m.keys.JumpToNotificationDetail) {
-		if m.notifyTaskID > 0 && m.notification != "" {
-			taskID := m.notifyTaskID
-			// Clean up current detail view before switching
-			if m.detailView != nil {
-				m.detailView.CleanupWithoutSaving()
-				m.detailView = nil
-			}
-			// Clear origin column since we're jumping to a different task
-			m.kanban.ClearOriginColumn()
-			m.kanban.SelectTask(taskID)
-			// Clear notification after jumping
-			m.notification = ""
-			m.notifyTaskID = 0
-			return m, m.loadTask(taskID)
 		}
 		return m, nil
 	}
