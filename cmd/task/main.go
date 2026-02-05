@@ -2304,6 +2304,430 @@ This removes the dependency where task #5 was blocked by task #3.`,
 	}
 	rootCmd.AddCommand(depsCmd)
 
+	// Types command - manage task types
+	typesCmd := &cobra.Command{
+		Use:   "types",
+		Short: "Manage task types",
+		Long: `Manage task types used for organizing and customizing task behavior.
+
+Task types define prompt templates and instructions for different kinds of tasks.
+Built-in types (code, writing, thinking) can be edited but not deleted.
+
+Examples:
+  ty types                    # List all task types
+  ty types show code          # Show details of the 'code' type
+  ty types create             # Create a new task type
+  ty types edit research      # Edit the 'research' type
+  ty types delete research    # Delete a custom type`,
+		Run: func(cmd *cobra.Command, args []string) {
+			outputJSON, _ := cmd.Flags().GetBool("json")
+
+			dbPath := db.DefaultPath()
+			database, err := db.Open(dbPath)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+			defer database.Close()
+
+			taskTypes, err := database.ListTaskTypes()
+			if err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+
+			if outputJSON {
+				type typeOutput struct {
+					ID           int64  `json:"id"`
+					Name         string `json:"name"`
+					Label        string `json:"label"`
+					Instructions string `json:"instructions"`
+					SortOrder    int    `json:"sort_order"`
+					IsBuiltin    bool   `json:"is_builtin"`
+				}
+				output := make([]typeOutput, 0, len(taskTypes))
+				for _, t := range taskTypes {
+					output = append(output, typeOutput{
+						ID:           t.ID,
+						Name:         t.Name,
+						Label:        t.Label,
+						Instructions: t.Instructions,
+						SortOrder:    t.SortOrder,
+						IsBuiltin:    t.IsBuiltin,
+					})
+				}
+				data, _ := json.MarshalIndent(output, "", "  ")
+				fmt.Println(string(data))
+				return
+			}
+
+			fmt.Println(boldStyle.Render("Task Types"))
+			fmt.Println()
+
+			if len(taskTypes) == 0 {
+				fmt.Println(dimStyle.Render("No task types configured"))
+				return
+			}
+
+			for _, t := range taskTypes {
+				builtinTag := ""
+				if t.IsBuiltin {
+					builtinTag = dimStyle.Render(" [builtin]")
+				}
+				fmt.Printf("  %s%s\n", boldStyle.Render(t.Name), builtinTag)
+				fmt.Printf("    Label: %s\n", t.Label)
+				// Show truncated instructions
+				instr := t.Instructions
+				if len(instr) > 80 {
+					instr = instr[:77] + "..."
+				}
+				instr = strings.ReplaceAll(instr, "\n", " ")
+				fmt.Printf("    Instructions: %s\n", dimStyle.Render(instr))
+				fmt.Println()
+			}
+
+			fmt.Println(dimStyle.Render("Use 'ty types show <name>' to see full instructions"))
+		},
+	}
+	typesCmd.Flags().Bool("json", false, "Output in JSON format")
+
+	// Types list subcommand (alias for default behavior)
+	typesListCmd := &cobra.Command{
+		Use:   "list",
+		Short: "List all task types",
+		Run:   typesCmd.Run,
+	}
+	typesListCmd.Flags().Bool("json", false, "Output in JSON format")
+	typesCmd.AddCommand(typesListCmd)
+
+	// Types show subcommand
+	typesShowCmd := &cobra.Command{
+		Use:   "show <name>",
+		Short: "Show details of a task type",
+		Args:  cobra.ExactArgs(1),
+		Run: func(cmd *cobra.Command, args []string) {
+			name := args[0]
+			outputJSON, _ := cmd.Flags().GetBool("json")
+
+			dbPath := db.DefaultPath()
+			database, err := db.Open(dbPath)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+			defer database.Close()
+
+			taskType, err := database.GetTaskTypeByName(name)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+			if taskType == nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Task type not found: "+name))
+				os.Exit(1)
+			}
+
+			if outputJSON {
+				type typeOutput struct {
+					ID           int64  `json:"id"`
+					Name         string `json:"name"`
+					Label        string `json:"label"`
+					Instructions string `json:"instructions"`
+					SortOrder    int    `json:"sort_order"`
+					IsBuiltin    bool   `json:"is_builtin"`
+				}
+				output := typeOutput{
+					ID:           taskType.ID,
+					Name:         taskType.Name,
+					Label:        taskType.Label,
+					Instructions: taskType.Instructions,
+					SortOrder:    taskType.SortOrder,
+					IsBuiltin:    taskType.IsBuiltin,
+				}
+				data, _ := json.MarshalIndent(output, "", "  ")
+				fmt.Println(string(data))
+				return
+			}
+
+			builtinTag := ""
+			if taskType.IsBuiltin {
+				builtinTag = dimStyle.Render(" [builtin]")
+			}
+			fmt.Printf("%s%s\n", boldStyle.Render(taskType.Name), builtinTag)
+			fmt.Printf("Label: %s\n", taskType.Label)
+			fmt.Printf("Sort Order: %d\n", taskType.SortOrder)
+			fmt.Println()
+			fmt.Println(boldStyle.Render("Instructions:"))
+			fmt.Println(taskType.Instructions)
+		},
+	}
+	typesShowCmd.Flags().Bool("json", false, "Output in JSON format")
+	typesCmd.AddCommand(typesShowCmd)
+
+	// Types create subcommand
+	typesCreateCmd := &cobra.Command{
+		Use:   "create",
+		Short: "Create a new task type",
+		Long: `Create a new task type with custom instructions.
+
+The instructions field supports template variables:
+  {{project}}              - Project name
+  {{title}}                - Task title
+  {{body}}                 - Task body/description
+  {{branch}}               - Git branch name
+  {{tags}}                 - Task tags
+  {{pr_url}}               - Pull request URL (if set)
+  {{pr_number}}            - Pull request number (if set)
+  {{task_id}}              - Task ID
+  {{task_metadata}}        - Full task metadata section
+  {{project_instructions}} - Project-specific instructions
+  {{attachments}}          - File attachments content
+  {{history}}              - Conversation history
+
+Examples:
+  ty types create --name research --label "Research" --instructions "Research the topic: {{title}}"
+  ty types create --name review --label "Code Review" --instructions-file review.txt`,
+		Run: func(cmd *cobra.Command, args []string) {
+			name, _ := cmd.Flags().GetString("name")
+			label, _ := cmd.Flags().GetString("label")
+			instructions, _ := cmd.Flags().GetString("instructions")
+			instructionsFile, _ := cmd.Flags().GetString("instructions-file")
+			sortOrder, _ := cmd.Flags().GetInt("sort-order")
+
+			// Validate name is provided
+			if name == "" {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("--name is required"))
+				os.Exit(1)
+			}
+
+			// Validate name format (lowercase, no spaces)
+			if strings.ToLower(name) != name || strings.Contains(name, " ") {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Name must be lowercase with no spaces"))
+				os.Exit(1)
+			}
+
+			// Use name as label if not provided
+			if label == "" {
+				// Capitalize first letter for label
+				label = strings.ToUpper(name[:1]) + name[1:]
+			}
+
+			// Read instructions from file if provided
+			if instructionsFile != "" {
+				data, err := os.ReadFile(instructionsFile)
+				if err != nil {
+					fmt.Fprintln(os.Stderr, errorStyle.Render("Error reading instructions file: "+err.Error()))
+					os.Exit(1)
+				}
+				instructions = string(data)
+			}
+
+			if instructions == "" {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("--instructions or --instructions-file is required"))
+				os.Exit(1)
+			}
+
+			dbPath := db.DefaultPath()
+			database, err := db.Open(dbPath)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+			defer database.Close()
+
+			// Check if name already exists
+			existing, _ := database.GetTaskTypeByName(name)
+			if existing != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Task type already exists: "+name))
+				os.Exit(1)
+			}
+
+			taskType := &db.TaskType{
+				Name:         name,
+				Label:        label,
+				Instructions: instructions,
+				SortOrder:    sortOrder,
+				IsBuiltin:    false,
+			}
+
+			if err := database.CreateTaskType(taskType); err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error creating task type: "+err.Error()))
+				os.Exit(1)
+			}
+
+			fmt.Println(successStyle.Render("Created task type: " + name))
+		},
+	}
+	typesCreateCmd.Flags().String("name", "", "Type name (lowercase, no spaces) - required")
+	typesCreateCmd.Flags().String("label", "", "Display label (defaults to capitalized name)")
+	typesCreateCmd.Flags().String("instructions", "", "Prompt instructions template")
+	typesCreateCmd.Flags().String("instructions-file", "", "Read instructions from file")
+	typesCreateCmd.Flags().Int("sort-order", 100, "Sort order for display (lower = first)")
+	typesCmd.AddCommand(typesCreateCmd)
+
+	// Types edit subcommand
+	typesEditCmd := &cobra.Command{
+		Use:   "edit <name>",
+		Short: "Edit an existing task type",
+		Long: `Edit an existing task type. Built-in types can be edited but not deleted.
+
+All flags are optional - only specified values will be updated.
+
+Examples:
+  ty types edit code --label "Development"
+  ty types edit research --instructions "New instructions here"
+  ty types edit review --instructions-file updated_review.txt`,
+		Args: cobra.ExactArgs(1),
+		Run: func(cmd *cobra.Command, args []string) {
+			name := args[0]
+			newName, _ := cmd.Flags().GetString("name")
+			label, _ := cmd.Flags().GetString("label")
+			instructions, _ := cmd.Flags().GetString("instructions")
+			instructionsFile, _ := cmd.Flags().GetString("instructions-file")
+			sortOrder, _ := cmd.Flags().GetInt("sort-order")
+			sortOrderSet := cmd.Flags().Changed("sort-order")
+
+			dbPath := db.DefaultPath()
+			database, err := db.Open(dbPath)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+			defer database.Close()
+
+			taskType, err := database.GetTaskTypeByName(name)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+			if taskType == nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Task type not found: "+name))
+				os.Exit(1)
+			}
+
+			// Read instructions from file if provided
+			if instructionsFile != "" {
+				data, err := os.ReadFile(instructionsFile)
+				if err != nil {
+					fmt.Fprintln(os.Stderr, errorStyle.Render("Error reading instructions file: "+err.Error()))
+					os.Exit(1)
+				}
+				instructions = string(data)
+			}
+
+			// Update fields if provided
+			updated := false
+			if newName != "" {
+				if strings.ToLower(newName) != newName || strings.Contains(newName, " ") {
+					fmt.Fprintln(os.Stderr, errorStyle.Render("Name must be lowercase with no spaces"))
+					os.Exit(1)
+				}
+				// Check if new name conflicts with existing type
+				if newName != name {
+					existing, _ := database.GetTaskTypeByName(newName)
+					if existing != nil {
+						fmt.Fprintln(os.Stderr, errorStyle.Render("Task type already exists: "+newName))
+						os.Exit(1)
+					}
+				}
+				taskType.Name = newName
+				updated = true
+			}
+			if label != "" {
+				taskType.Label = label
+				updated = true
+			}
+			if instructions != "" {
+				taskType.Instructions = instructions
+				updated = true
+			}
+			if sortOrderSet {
+				taskType.SortOrder = sortOrder
+				updated = true
+			}
+
+			if !updated {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("No updates specified. Use --name, --label, --instructions, --instructions-file, or --sort-order"))
+				os.Exit(1)
+			}
+
+			if err := database.UpdateTaskType(taskType); err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error updating task type: "+err.Error()))
+				os.Exit(1)
+			}
+
+			fmt.Println(successStyle.Render("Updated task type: " + taskType.Name))
+		},
+	}
+	typesEditCmd.Flags().String("name", "", "New type name (lowercase, no spaces)")
+	typesEditCmd.Flags().String("label", "", "New display label")
+	typesEditCmd.Flags().String("instructions", "", "New prompt instructions template")
+	typesEditCmd.Flags().String("instructions-file", "", "Read new instructions from file")
+	typesEditCmd.Flags().Int("sort-order", 0, "New sort order for display")
+	typesCmd.AddCommand(typesEditCmd)
+
+	// Types delete subcommand
+	typesDeleteCmd := &cobra.Command{
+		Use:   "delete <name>",
+		Short: "Delete a custom task type",
+		Long: `Delete a custom task type. Built-in types (code, writing, thinking) cannot be deleted.
+
+Examples:
+  ty types delete research
+  ty types delete review --force`,
+		Args: cobra.ExactArgs(1),
+		Run: func(cmd *cobra.Command, args []string) {
+			name := args[0]
+			force, _ := cmd.Flags().GetBool("force")
+
+			dbPath := db.DefaultPath()
+			database, err := db.Open(dbPath)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+			defer database.Close()
+
+			taskType, err := database.GetTaskTypeByName(name)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+			if taskType == nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Task type not found: "+name))
+				os.Exit(1)
+			}
+
+			if taskType.IsBuiltin {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Cannot delete built-in task type: "+name))
+				os.Exit(1)
+			}
+
+			// Confirmation prompt unless --force
+			if !force {
+				fmt.Printf("Delete task type '%s'? This cannot be undone. [y/N] ", name)
+				reader := bufio.NewReader(os.Stdin)
+				response, _ := reader.ReadString('\n')
+				response = strings.TrimSpace(strings.ToLower(response))
+				if response != "y" && response != "yes" {
+					fmt.Println("Cancelled")
+					return
+				}
+			}
+
+			if err := database.DeleteTaskType(taskType.ID); err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error deleting task type: "+err.Error()))
+				os.Exit(1)
+			}
+
+			fmt.Println(successStyle.Render("Deleted task type: " + name))
+		},
+	}
+	typesDeleteCmd.Flags().BoolP("force", "f", false, "Skip confirmation prompt")
+	typesCmd.AddCommand(typesDeleteCmd)
+
+	rootCmd.AddCommand(typesCmd)
+
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
 		os.Exit(1)
