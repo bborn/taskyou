@@ -5,6 +5,7 @@ package mcp
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -793,6 +794,9 @@ func (s *Server) handleSpotlight(action, worktreePath, mainRepoDir string) (stri
 	case "stop":
 		return s.spotlightStop(worktreePath, mainRepoDir)
 	case "sync":
+		if !isSpotlightActive(worktreePath) {
+			return "", fmt.Errorf("spotlight mode is not active. Use 'start' to enable spotlight before syncing")
+		}
 		return s.spotlightSync(worktreePath, mainRepoDir)
 	case "status":
 		return s.spotlightStatus(worktreePath, mainRepoDir)
@@ -807,11 +811,28 @@ func (s *Server) spotlightStart(worktreePath, mainRepoDir string) (string, error
 		return "Spotlight mode is already active. Use 'sync' to sync changes or 'stop' to disable.", nil
 	}
 
-	// First, stash any uncommitted changes in the main repo to preserve them
-	stashCmd := exec.Command("git", "stash", "push", "-m", "spotlight-backup-"+time.Now().Format("20060102-150405"))
-	stashCmd.Dir = mainRepoDir
-	stashOutput, _ := stashCmd.CombinedOutput()
-	stashCreated := !strings.Contains(string(stashOutput), "No local changes")
+	// Check if main repo has uncommitted changes using git diff --quiet (more reliable than parsing output)
+	hasChanges := false
+	diffCmd := exec.Command("git", "diff", "--quiet")
+	diffCmd.Dir = mainRepoDir
+	if err := diffCmd.Run(); err != nil {
+		hasChanges = true // non-zero exit means changes exist
+	}
+	diffCachedCmd := exec.Command("git", "diff", "--cached", "--quiet")
+	diffCachedCmd.Dir = mainRepoDir
+	if err := diffCachedCmd.Run(); err != nil {
+		hasChanges = true // staged changes exist
+	}
+
+	// Stash changes if any exist
+	stashCreated := false
+	if hasChanges {
+		stashCmd := exec.Command("git", "stash", "push", "-m", "spotlight-backup-"+time.Now().Format("20060102-150405"))
+		stashCmd.Dir = mainRepoDir
+		if err := stashCmd.Run(); err == nil {
+			stashCreated = true
+		}
+	}
 
 	// Create the state file to track that spotlight is active
 	stateContent := fmt.Sprintf("started=%s\nstash_created=%t\n", time.Now().Format(time.RFC3339), stashCreated)
@@ -852,32 +873,43 @@ func (s *Server) spotlightStop(worktreePath, mainRepoDir string) (string, error)
 	// First, discard any uncommitted changes from spotlight
 	checkoutCmd := exec.Command("git", "checkout", ".")
 	checkoutCmd.Dir = mainRepoDir
-	checkoutCmd.CombinedOutput()
+	if output, err := checkoutCmd.CombinedOutput(); err != nil {
+		return "", fmt.Errorf("failed to restore main repo (git checkout): %s", strings.TrimSpace(string(output)))
+	}
 
 	// Clean any untracked files that were added
 	cleanCmd := exec.Command("git", "clean", "-fd")
 	cleanCmd.Dir = mainRepoDir
-	cleanCmd.CombinedOutput()
+	if output, err := cleanCmd.CombinedOutput(); err != nil {
+		return "", fmt.Errorf("failed to clean main repo (git clean): %s", strings.TrimSpace(string(output)))
+	}
 
 	// Pop the stash if we created one
 	var stashMsg string
+	stashPopFailed := false
 	if stashCreated {
 		stashPopCmd := exec.Command("git", "stash", "pop")
 		stashPopCmd.Dir = mainRepoDir
 		if output, err := stashPopCmd.CombinedOutput(); err != nil {
-			stashMsg = fmt.Sprintf("⚠️ Failed to restore stash: %s", string(output))
+			stashPopFailed = true
+			stashMsg = fmt.Sprintf("⚠️ Failed to restore stash: %s\n   Run 'git stash list' in %s to see available stashes.", strings.TrimSpace(string(output)), mainRepoDir)
 		} else {
 			stashMsg = "✓ Original main repo changes restored from stash"
 		}
 	}
 
-	// Remove the state file
-	os.Remove(spotlightStateFile(worktreePath))
+	// Only remove state file if restoration succeeded (including stash pop)
+	if !stashPopFailed {
+		os.Remove(spotlightStateFile(worktreePath))
+	}
 
 	msg := "🔦 Spotlight mode disabled!\n\n"
 	msg += "✓ Main repo restored to original state\n"
 	if stashMsg != "" {
 		msg += stashMsg + "\n"
+	}
+	if stashPopFailed {
+		msg += "\n⚠️ State file preserved due to stash pop failure. Run 'stop' again after resolving."
 	}
 
 	return msg, nil
@@ -885,6 +917,7 @@ func (s *Server) spotlightStop(worktreePath, mainRepoDir string) (string, error)
 
 // spotlightSync syncs git-tracked files from worktree to main repo.
 // It compares files between the worktree and main repo, copying any that differ.
+// Also handles file deletions by detecting files that exist in main but not in worktree.
 func (s *Server) spotlightSync(worktreePath, mainRepoDir string) (string, error) {
 	// Get list of all git-tracked files in the worktree
 	lsFilesCmd := exec.Command("git", "ls-files")
@@ -899,12 +932,12 @@ func (s *Server) spotlightSync(worktreePath, mainRepoDir string) (string, error)
 	untrackedCmd.Dir = worktreePath
 	untrackedOutput, _ := untrackedCmd.Output()
 
-	// Also get uncommitted changes
-	diffCmd := exec.Command("git", "diff", "--name-only", "HEAD")
-	diffCmd.Dir = worktreePath
-	diffOutput, _ := diffCmd.Output()
+	// Get deleted files (tracked but removed from worktree)
+	deletedCmd := exec.Command("git", "diff", "--name-only", "--diff-filter=D", "HEAD")
+	deletedCmd.Dir = worktreePath
+	deletedOutput, _ := deletedCmd.Output()
 
-	// Build set of all files to check
+	// Build set of all files to sync
 	fileSet := make(map[string]bool)
 	for _, file := range strings.Split(strings.TrimSpace(string(lsFilesOutput)), "\n") {
 		if file != "" {
@@ -916,21 +949,41 @@ func (s *Server) spotlightSync(worktreePath, mainRepoDir string) (string, error)
 			fileSet[file] = true
 		}
 	}
-	for _, file := range strings.Split(strings.TrimSpace(string(diffOutput)), "\n") {
+
+	// Build set of deleted files
+	deletedSet := make(map[string]bool)
+	for _, file := range strings.Split(strings.TrimSpace(string(deletedOutput)), "\n") {
 		if file != "" {
-			fileSet[file] = true
+			deletedSet[file] = true
 		}
 	}
 
+	// Clean paths for validation
+	cleanWorktree := filepath.Clean(worktreePath)
+	cleanMainRepo := filepath.Clean(mainRepoDir)
+
 	// Copy files that differ between worktree and main repo
-	var synced, unchanged, failed int
+	var synced, unchanged, deleted, failed int
 	for file := range fileSet {
 		if file == ".spotlight-active" || file == "" {
 			continue
 		}
 
-		srcPath := filepath.Join(worktreePath, file)
-		dstPath := filepath.Join(mainRepoDir, file)
+		// Validate path to prevent path traversal attacks
+		cleanFile := filepath.Clean(file)
+		if cleanFile == ".." || strings.HasPrefix(cleanFile, ".."+string(os.PathSeparator)) || filepath.IsAbs(cleanFile) {
+			failed++
+			continue
+		}
+
+		srcPath := filepath.Join(cleanWorktree, cleanFile)
+		dstPath := filepath.Join(cleanMainRepo, cleanFile)
+
+		// Ensure destination is within mainRepoDir
+		if !strings.HasPrefix(filepath.Clean(dstPath), cleanMainRepo+string(os.PathSeparator)) && filepath.Clean(dstPath) != cleanMainRepo {
+			failed++
+			continue
+		}
 
 		// Check if source exists
 		srcInfo, err := os.Stat(srcPath)
@@ -955,9 +1008,9 @@ func (s *Server) spotlightSync(worktreePath, mainRepoDir string) (string, error)
 			continue
 		}
 
-		// Check if destination exists and is the same
+		// Check if destination exists and is the same (use bytes.Equal for efficiency)
 		dstData, err := os.ReadFile(dstPath)
-		if err == nil && string(srcData) == string(dstData) {
+		if err == nil && bytes.Equal(srcData, dstData) {
 			unchanged++
 			continue
 		}
@@ -978,11 +1031,35 @@ func (s *Server) spotlightSync(worktreePath, mainRepoDir string) (string, error)
 		synced++
 	}
 
-	if synced == 0 && failed == 0 {
+	// Handle deleted files - remove them from main repo
+	for file := range deletedSet {
+		if file == "" {
+			continue
+		}
+
+		cleanFile := filepath.Clean(file)
+		if cleanFile == ".." || strings.HasPrefix(cleanFile, ".."+string(os.PathSeparator)) || filepath.IsAbs(cleanFile) {
+			continue
+		}
+
+		dstPath := filepath.Join(cleanMainRepo, cleanFile)
+		if !strings.HasPrefix(filepath.Clean(dstPath), cleanMainRepo+string(os.PathSeparator)) {
+			continue
+		}
+
+		if err := os.Remove(dstPath); err == nil {
+			deleted++
+		}
+	}
+
+	if synced == 0 && deleted == 0 && failed == 0 {
 		return "No changes to sync (worktree matches main repo).", nil
 	}
 
 	result := fmt.Sprintf("✓ Synced %d file(s) from worktree to main repo", synced)
+	if deleted > 0 {
+		result += fmt.Sprintf(", deleted %d", deleted)
+	}
 	if unchanged > 0 {
 		result += fmt.Sprintf(" (%d unchanged)", unchanged)
 	}

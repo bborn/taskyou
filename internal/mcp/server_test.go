@@ -1159,6 +1159,82 @@ func TestSpotlightRequiresWorktree(t *testing.T) {
 	}
 }
 
+// TestSpotlightSyncRequiresActive tests that sync fails when spotlight is not active
+func TestSpotlightSyncRequiresActive(t *testing.T) {
+	database := testDB(t)
+
+	// Create temp directories
+	worktreeDir := t.TempDir()
+	mainRepoDir := t.TempDir()
+
+	// Initialize repos
+	runGit(t, mainRepoDir, "init")
+	runGit(t, mainRepoDir, "config", "user.email", "test@test.com")
+	runGit(t, mainRepoDir, "config", "user.name", "Test")
+	os.WriteFile(filepath.Join(mainRepoDir, "file.txt"), []byte("original"), 0644)
+	runGit(t, mainRepoDir, "add", ".")
+	runGit(t, mainRepoDir, "commit", "-m", "initial")
+
+	runGit(t, worktreeDir, "init")
+	runGit(t, worktreeDir, "config", "user.email", "test@test.com")
+	runGit(t, worktreeDir, "config", "user.name", "Test")
+	os.WriteFile(filepath.Join(worktreeDir, "file.txt"), []byte("modified"), 0644)
+	runGit(t, worktreeDir, "add", ".")
+	runGit(t, worktreeDir, "commit", "-m", "initial")
+
+	// Create project
+	if err := database.CreateProject(&db.Project{Name: "spotlight-sync-inactive-test", Path: mainRepoDir}); err != nil {
+		t.Fatalf("failed to create project: %v", err)
+	}
+
+	// Create task
+	task := &db.Task{
+		Title:   "Spotlight Sync Inactive Test",
+		Status:  db.StatusProcessing,
+		Project: "spotlight-sync-inactive-test",
+	}
+	if err := database.CreateTask(task); err != nil {
+		t.Fatalf("failed to create task: %v", err)
+	}
+
+	task.WorktreePath = worktreeDir
+	if err := database.UpdateTask(task); err != nil {
+		t.Fatalf("failed to update task with worktree: %v", err)
+	}
+
+	// Try to sync WITHOUT starting spotlight first
+	syncReq := map[string]interface{}{
+		"jsonrpc": "2.0",
+		"id":      1,
+		"method":  "tools/call",
+		"params": map[string]interface{}{
+			"name": "taskyou_spotlight",
+			"arguments": map[string]interface{}{
+				"action": "sync",
+			},
+		},
+	}
+	reqBytes, _ := json.Marshal(syncReq)
+	reqBytes = append(reqBytes, '\n')
+
+	server, output := testServer(database, task.ID, string(reqBytes))
+	server.Run()
+
+	var resp jsonRPCResponse
+	if err := json.Unmarshal(output.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to parse response: %v", err)
+	}
+
+	// Should fail because spotlight is not active
+	if resp.Error == nil {
+		t.Fatal("expected error when syncing without spotlight active")
+	}
+
+	if !strings.Contains(resp.Error.Message, "not active") {
+		t.Errorf("expected error about spotlight not being active, got: %s", resp.Error.Message)
+	}
+}
+
 // TestSpotlightSync tests the sync action
 func TestSpotlightSync(t *testing.T) {
 	database := testDB(t)
