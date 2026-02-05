@@ -2457,6 +2457,8 @@ func (m *DetailModel) renderContent() string {
 				icon = "👤"
 			case "output":
 				icon = "📤"
+			case "relay":
+				icon = "📨"
 			}
 
 			var line string

@@ -194,6 +194,20 @@ func (db *DB) migrate() error {
 		`CREATE INDEX IF NOT EXISTS idx_task_dependencies_blocker ON task_dependencies(blocker_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_task_dependencies_blocked ON task_dependencies(blocked_id)`,
 
+		// Relay messages for agent-to-agent communication
+		`CREATE TABLE IF NOT EXISTS relay_messages (
+			id TEXT PRIMARY KEY,
+			from_agent TEXT NOT NULL,
+			to_agent TEXT NOT NULL,
+			content TEXT NOT NULL,
+			task_id INTEGER,
+			status TEXT DEFAULT 'pending',
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			delivered_at DATETIME,
+			read_at DATETIME
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_relay_messages_to ON relay_messages(to_agent)`,
+		`CREATE INDEX IF NOT EXISTS idx_relay_messages_status ON relay_messages(status)`,
 	}
 
 	for _, m := range migrations {
