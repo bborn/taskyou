@@ -1264,6 +1264,21 @@ func (db *DB) SetLastExecutorForProject(project, executor string) error {
 	return db.SetSetting("last_executor_"+project, executor)
 }
 
+// IsFirstRun returns true if this is the first time the app is being used.
+// This is determined by checking if onboarding has been completed.
+func (db *DB) IsFirstRun() bool {
+	val, err := db.GetSetting("onboarding_completed")
+	if err != nil || val != "true" {
+		return true
+	}
+	return false
+}
+
+// CompleteOnboarding marks the onboarding as complete.
+func (db *DB) CompleteOnboarding() error {
+	return db.SetSetting("onboarding_completed", "true")
+}
+
 // GetExecutorUsageByProject returns a map of executor names to their usage counts for a project.
 // This counts how many tasks have been created with each executor for the given project.
 func (db *DB) GetExecutorUsageByProject(project string) (map[string]int, error) {

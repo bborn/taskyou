@@ -429,6 +429,11 @@ type AppModel struct {
 
 	// Debug state file path
 	debugStatePath string
+
+	// First-time experience
+	isFirstLoad     bool // Track if this is the first load of tasks
+	showWelcome     bool // Show welcome message when kanban is empty
+	onboardingShown bool // Track if we've already shown the onboarding (to prevent double-triggering)
 }
 
 // taskExecutorDisplayName returns the display name for a task's executor.
@@ -536,6 +541,8 @@ func NewAppModel(database *db.DB, exec *executor.Executor, workingDir string) *A
 		filterAutocomplete: filterAutocomplete,
 		availableExecutors: availableExecutors,
 		aiCommandService:   aiCmdService,
+		isFirstLoad:        true,  // Track first load for onboarding
+		showWelcome:        false, // Will be set true when kanban is empty
 	}
 
 	return model
@@ -671,6 +678,25 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.loading = false
 		m.tasks = msg.tasks
 		m.err = msg.err
+
+		// First-time experience: auto-open new task form on first run when no tasks exist
+		if m.isFirstLoad {
+			m.isFirstLoad = false
+			m.showWelcome = len(msg.tasks) == 0
+
+			// If this is the very first run (no tasks, onboarding not completed), auto-open new task form
+			if len(msg.tasks) == 0 && m.db.IsFirstRun() && !m.onboardingShown {
+				m.onboardingShown = true
+				// Auto-open the new task form to guide users to create their first task
+				m.newTaskForm = NewFormModel(m.db, m.width, m.height, m.workingDir, m.availableExecutors)
+				m.previousView = m.currentView
+				m.currentView = ViewNewTask
+				return m, m.newTaskForm.Init()
+			}
+		}
+
+		// Update showWelcome based on current task count
+		m.showWelcome = len(msg.tasks) == 0
 
 		// Check for newly blocked/done tasks and notify
 		for _, t := range m.tasks {
@@ -814,6 +840,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err == nil {
 			m.currentView = ViewDashboard
 			m.newTaskForm = nil
+			m.showWelcome = false // Hide welcome message after first task is created
 			cmds = append(cmds, m.loadTasks())
 		} else {
 			m.err = msg.err
@@ -1245,12 +1272,97 @@ func (m *AppModel) viewDashboard() string {
 	if filterBar != "" {
 		contentParts = append(contentParts, filterBar)
 	}
-	contentParts = append(contentParts, m.kanban.View(), helpView)
+
+	// Show welcome/getting started message when kanban is empty
+	if m.showWelcome && m.kanban.IsEmpty() {
+		welcomeView := m.renderWelcomeMessage(kanbanHeight)
+		contentParts = append(contentParts, welcomeView, helpView)
+	} else {
+		contentParts = append(contentParts, m.kanban.View(), helpView)
+	}
 
 	content := lipgloss.JoinVertical(lipgloss.Left, contentParts...)
 
 	// Use Place to fill the entire terminal
 	return lipgloss.Place(m.width, m.height, lipgloss.Left, lipgloss.Top, content)
+}
+
+// renderWelcomeMessage renders a friendly getting started message for first-time users.
+func (m *AppModel) renderWelcomeMessage(height int) string {
+	// Welcome title
+	titleStyle := lipgloss.NewStyle().
+		Bold(true).
+		Foreground(ColorPrimary).
+		MarginBottom(1)
+
+	// Subtitle style
+	subtitleStyle := lipgloss.NewStyle().
+		Foreground(ColorSecondary).
+		MarginBottom(2)
+
+	// Action style for keyboard shortcuts
+	actionStyle := lipgloss.NewStyle().
+		Bold(true).
+		Foreground(ColorPrimary)
+
+	// Description style
+	descStyle := lipgloss.NewStyle().
+		Foreground(ColorMuted)
+
+	// Build the welcome content
+	var lines []string
+
+	lines = append(lines, titleStyle.Render("Welcome to TaskYou!"))
+	lines = append(lines, subtitleStyle.Render("Your AI-powered task management system"))
+	lines = append(lines, "")
+
+	// Key actions
+	lines = append(lines, lipgloss.JoinHorizontal(lipgloss.Top,
+		actionStyle.Render("n"),
+		descStyle.Render("  Create your first task"),
+	))
+	lines = append(lines, "")
+
+	lines = append(lines, lipgloss.JoinHorizontal(lipgloss.Top,
+		actionStyle.Render("s"),
+		descStyle.Render("  Open settings to configure projects"),
+	))
+	lines = append(lines, "")
+
+	lines = append(lines, lipgloss.JoinHorizontal(lipgloss.Top,
+		actionStyle.Render("?"),
+		descStyle.Render("  Show all keyboard shortcuts"),
+	))
+	lines = append(lines, "")
+
+	// Executor status
+	if len(m.availableExecutors) == 0 {
+		warningStyle := lipgloss.NewStyle().
+			Foreground(ColorWarning).
+			MarginTop(1)
+		lines = append(lines, warningStyle.Render(IconBlocked()+" Install an AI executor to run tasks"))
+		lines = append(lines, descStyle.Render("   Visit: https://code.claude.com/docs/en/overview"))
+	} else {
+		readyStyle := lipgloss.NewStyle().
+			Foreground(ColorDone).
+			MarginTop(1)
+		executorList := strings.Join(m.availableExecutors, ", ")
+		lines = append(lines, readyStyle.Render(IconDone()+" Ready to run tasks with: "+executorList))
+	}
+
+	content := lipgloss.JoinVertical(lipgloss.Left, lines...)
+
+	// Center the content in a box
+	boxStyle := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(ColorPrimary).
+		Padding(2, 4).
+		Width(min(60, m.width-4))
+
+	boxed := boxStyle.Render(content)
+
+	// Center in available space
+	return lipgloss.Place(m.width, height, lipgloss.Center, lipgloss.Center, boxed)
 }
 
 // renderFilterBar renders the filter input bar.
@@ -2970,6 +3082,9 @@ func (m *AppModel) createTaskWithAttachments(t *db.Task, attachmentPaths []strin
 		if err != nil {
 			return taskCreatedMsg{task: t, err: err}
 		}
+
+		// Mark onboarding as complete when first task is created
+		database.CompleteOnboarding()
 
 		// Add attachments if provided
 		for _, attachmentPath := range attachmentPaths {
