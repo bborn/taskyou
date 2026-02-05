@@ -244,6 +244,11 @@ func (db *DB) migrate() error {
 		`ALTER TABLE projects ADD COLUMN context TEXT DEFAULT ''`, // Auto-generated project context (codebase summary, patterns, etc.)
 		// Last accessed timestamp for tracking recently visited tasks in command palette
 		`ALTER TABLE tasks ADD COLUMN last_accessed_at DATETIME`, // When task was last accessed/opened in UI
+		// Archive state columns for preserving worktree state when archiving
+		`ALTER TABLE tasks ADD COLUMN archive_ref TEXT DEFAULT ''`,           // Git ref storing stashed changes (e.g., "refs/task-archive/123")
+		`ALTER TABLE tasks ADD COLUMN archive_commit TEXT DEFAULT ''`,        // Commit hash at time of archiving
+		`ALTER TABLE tasks ADD COLUMN archive_worktree_path TEXT DEFAULT ''`, // Original worktree path before archiving
+		`ALTER TABLE tasks ADD COLUMN archive_branch_name TEXT DEFAULT ''`,   // Original branch name before archiving
 	}
 
 	for _, m := range alterMigrations {

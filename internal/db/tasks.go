@@ -40,6 +40,11 @@ type Task struct {
 	LastDistilledAt *LocalTime // When task was last distilled for learnings
 	// UI tracking
 	LastAccessedAt *LocalTime // When task was last accessed/opened in the UI
+	// Archive state for preserving worktree state when archiving
+	ArchiveRef          string // Git ref storing stashed changes (e.g., "refs/task-archive/123")
+	ArchiveCommit       string // Commit hash at time of archiving
+	ArchiveWorktreePath string // Original worktree path before archiving
+	ArchiveBranchName   string // Original branch name before archiving
 }
 
 // Task statuses
@@ -169,7 +174,9 @@ func (db *DB) GetTask(id int64) (*Task, error) {
 		       COALESCE(pr_url, ''), COALESCE(pr_number, 0),
 		       COALESCE(dangerous_mode, 0), COALESCE(pinned, 0), COALESCE(tags, ''), COALESCE(summary, ''),
 		       created_at, updated_at, started_at, completed_at,
-		       last_distilled_at, last_accessed_at
+		       last_distilled_at, last_accessed_at,
+		       COALESCE(archive_ref, ''), COALESCE(archive_commit, ''),
+		       COALESCE(archive_worktree_path, ''), COALESCE(archive_branch_name, '')
 		FROM tasks WHERE id = ?
 	`, id).Scan(
 		&t.ID, &t.Title, &t.Body, &t.Status, &t.Type, &t.Project, &t.Executor,
@@ -179,6 +186,7 @@ func (db *DB) GetTask(id int64) (*Task, error) {
 		&t.DangerousMode, &t.Pinned, &t.Tags, &t.Summary,
 		&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
 		&t.LastDistilledAt, &t.LastAccessedAt,
+		&t.ArchiveRef, &t.ArchiveCommit, &t.ArchiveWorktreePath, &t.ArchiveBranchName,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -209,7 +217,9 @@ func (db *DB) ListTasks(opts ListTasksOptions) ([]*Task, error) {
 		       COALESCE(pr_url, ''), COALESCE(pr_number, 0),
 		       COALESCE(dangerous_mode, 0), COALESCE(pinned, 0), COALESCE(tags, ''), COALESCE(summary, ''),
 		       created_at, updated_at, started_at, completed_at,
-		       last_distilled_at, last_accessed_at
+		       last_distilled_at, last_accessed_at,
+		       COALESCE(archive_ref, ''), COALESCE(archive_commit, ''),
+		       COALESCE(archive_worktree_path, ''), COALESCE(archive_branch_name, '')
 		FROM tasks WHERE 1=1
 	`
 	args := []interface{}{}
@@ -262,6 +272,7 @@ func (db *DB) ListTasks(opts ListTasksOptions) ([]*Task, error) {
 			&t.DangerousMode, &t.Pinned, &t.Tags, &t.Summary,
 			&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
 			&t.LastDistilledAt, &t.LastAccessedAt,
+			&t.ArchiveRef, &t.ArchiveCommit, &t.ArchiveWorktreePath, &t.ArchiveBranchName,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("scan task: %w", err)
@@ -284,7 +295,9 @@ func (db *DB) GetMostRecentlyCreatedTask() (*Task, error) {
 		       COALESCE(pr_url, ''), COALESCE(pr_number, 0),
 		       COALESCE(dangerous_mode, 0), COALESCE(pinned, 0), COALESCE(tags, ''), COALESCE(summary, ''),
 		       created_at, updated_at, started_at, completed_at,
-		       last_distilled_at, last_accessed_at
+		       last_distilled_at, last_accessed_at,
+		       COALESCE(archive_ref, ''), COALESCE(archive_commit, ''),
+		       COALESCE(archive_worktree_path, ''), COALESCE(archive_branch_name, '')
 		FROM tasks
 		ORDER BY created_at DESC, id DESC
 		LIMIT 1
@@ -296,6 +309,7 @@ func (db *DB) GetMostRecentlyCreatedTask() (*Task, error) {
 		&t.DangerousMode, &t.Pinned, &t.Tags, &t.Summary,
 		&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
 		&t.LastDistilledAt, &t.LastAccessedAt,
+		&t.ArchiveRef, &t.ArchiveCommit, &t.ArchiveWorktreePath, &t.ArchiveBranchName,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -322,7 +336,9 @@ func (db *DB) SearchTasks(query string, limit int) ([]*Task, error) {
 		       COALESCE(pr_url, ''), COALESCE(pr_number, 0),
 		       COALESCE(dangerous_mode, 0), COALESCE(pinned, 0), COALESCE(tags, ''), COALESCE(summary, ''),
 		       created_at, updated_at, started_at, completed_at,
-		       last_distilled_at, last_accessed_at
+		       last_distilled_at, last_accessed_at,
+		       COALESCE(archive_ref, ''), COALESCE(archive_commit, ''),
+		       COALESCE(archive_worktree_path, ''), COALESCE(archive_branch_name, '')
 		FROM tasks
 		WHERE (
 			title LIKE ? COLLATE NOCASE
@@ -353,6 +369,7 @@ func (db *DB) SearchTasks(query string, limit int) ([]*Task, error) {
 			&t.DangerousMode, &t.Pinned, &t.Tags, &t.Summary,
 			&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
 			&t.LastDistilledAt, &t.LastAccessedAt,
+			&t.ArchiveRef, &t.ArchiveCommit, &t.ArchiveWorktreePath, &t.ArchiveBranchName,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("scan task: %w", err)
@@ -671,7 +688,9 @@ func (db *DB) GetNextQueuedTask() (*Task, error) {
 		       COALESCE(pr_url, ''), COALESCE(pr_number, 0),
 		       COALESCE(dangerous_mode, 0), COALESCE(pinned, 0), COALESCE(tags, ''), COALESCE(summary, ''),
 		       created_at, updated_at, started_at, completed_at,
-		       last_distilled_at, last_accessed_at
+		       last_distilled_at, last_accessed_at,
+		       COALESCE(archive_ref, ''), COALESCE(archive_commit, ''),
+		       COALESCE(archive_worktree_path, ''), COALESCE(archive_branch_name, '')
 		FROM tasks
 		WHERE status = ?
 		ORDER BY created_at ASC
@@ -684,6 +703,7 @@ func (db *DB) GetNextQueuedTask() (*Task, error) {
 		&t.DangerousMode, &t.Pinned, &t.Tags, &t.Summary,
 		&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
 		&t.LastDistilledAt, &t.LastAccessedAt,
+		&t.ArchiveRef, &t.ArchiveCommit, &t.ArchiveWorktreePath, &t.ArchiveBranchName,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -704,7 +724,9 @@ func (db *DB) GetQueuedTasks() ([]*Task, error) {
 		       COALESCE(pr_url, ''), COALESCE(pr_number, 0),
 		       COALESCE(dangerous_mode, 0), COALESCE(pinned, 0), COALESCE(tags, ''), COALESCE(summary, ''),
 		       created_at, updated_at, started_at, completed_at,
-		       last_distilled_at, last_accessed_at
+		       last_distilled_at, last_accessed_at,
+		       COALESCE(archive_ref, ''), COALESCE(archive_commit, ''),
+		       COALESCE(archive_worktree_path, ''), COALESCE(archive_branch_name, '')
 		FROM tasks
 		WHERE status = ?
 		ORDER BY created_at ASC
@@ -725,6 +747,7 @@ func (db *DB) GetQueuedTasks() ([]*Task, error) {
 			&t.DangerousMode, &t.Pinned, &t.Tags, &t.Summary,
 			&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
 			&t.LastDistilledAt, &t.LastAccessedAt,
+			&t.ArchiveRef, &t.ArchiveCommit, &t.ArchiveWorktreePath, &t.ArchiveBranchName,
 		); err != nil {
 			return nil, fmt.Errorf("scan task: %w", err)
 		}
@@ -744,7 +767,9 @@ func (db *DB) GetTasksWithBranches() ([]*Task, error) {
 		       COALESCE(pr_url, ''), COALESCE(pr_number, 0),
 		       COALESCE(dangerous_mode, 0), COALESCE(pinned, 0), COALESCE(tags, ''), COALESCE(summary, ''),
 		       created_at, updated_at, started_at, completed_at,
-		       last_distilled_at, last_accessed_at
+		       last_distilled_at, last_accessed_at,
+		       COALESCE(archive_ref, ''), COALESCE(archive_commit, ''),
+		       COALESCE(archive_worktree_path, ''), COALESCE(archive_branch_name, '')
 		FROM tasks
 		WHERE branch_name != '' AND status NOT IN (?, ?)
 		ORDER BY created_at DESC
@@ -765,6 +790,7 @@ func (db *DB) GetTasksWithBranches() ([]*Task, error) {
 			&t.DangerousMode, &t.Pinned, &t.Tags, &t.Summary,
 			&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
 			&t.LastDistilledAt, &t.LastAccessedAt,
+			&t.ArchiveRef, &t.ArchiveCommit, &t.ArchiveWorktreePath, &t.ArchiveBranchName,
 		); err != nil {
 			return nil, fmt.Errorf("scan task: %w", err)
 		}
@@ -1486,4 +1512,45 @@ func (db *DB) GetTagsList() ([]string, error) {
 		result = append(result, tag)
 	}
 	return result, nil
+}
+
+// SaveArchiveState saves the archive state for a task.
+// This stores the git ref, commit hash, worktree path, and branch name
+// that were active at the time of archiving.
+func (db *DB) SaveArchiveState(taskID int64, archiveRef, archiveCommit, worktreePath, branchName string) error {
+	_, err := db.Exec(`
+		UPDATE tasks SET
+			archive_ref = ?,
+			archive_commit = ?,
+			archive_worktree_path = ?,
+			archive_branch_name = ?,
+			updated_at = CURRENT_TIMESTAMP
+		WHERE id = ?
+	`, archiveRef, archiveCommit, worktreePath, branchName, taskID)
+	if err != nil {
+		return fmt.Errorf("save archive state: %w", err)
+	}
+	return nil
+}
+
+// ClearArchiveState clears the archive state for a task after unarchiving.
+func (db *DB) ClearArchiveState(taskID int64) error {
+	_, err := db.Exec(`
+		UPDATE tasks SET
+			archive_ref = '',
+			archive_commit = '',
+			archive_worktree_path = '',
+			archive_branch_name = '',
+			updated_at = CURRENT_TIMESTAMP
+		WHERE id = ?
+	`, taskID)
+	if err != nil {
+		return fmt.Errorf("clear archive state: %w", err)
+	}
+	return nil
+}
+
+// HasArchiveState returns true if the task has saved archive state.
+func (t *Task) HasArchiveState() bool {
+	return t.ArchiveRef != "" && t.ArchiveCommit != ""
 }
