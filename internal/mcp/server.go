@@ -1014,7 +1014,7 @@ func (s *Server) spotlightStatus(worktreePath, mainRepoDir string) (string, erro
 	msg := "🔦 Spotlight mode: ACTIVE\n\n"
 	msg += fmt.Sprintf("Worktree: %s\n", worktreePath)
 	msg += fmt.Sprintf("Main repo: %s\n", mainRepoDir)
-	if stateData != nil && len(stateData) > 0 {
+	if len(stateData) > 0 {
 		for _, line := range strings.Split(string(stateData), "\n") {
 			if strings.HasPrefix(line, "started=") {
 				msg += fmt.Sprintf("Started: %s\n", strings.TrimPrefix(line, "started="))

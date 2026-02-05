@@ -1220,6 +1220,7 @@ func TestSpotlightSync(t *testing.T) {
 
 	server, output := testServer(database, task.ID, string(reqBytes))
 	server.Run()
+	_ = output // first response not needed
 
 	// Now modify the worktree file
 	os.WriteFile(filepath.Join(worktreeDir, "file.txt"), []byte("modified again"), 0644)
