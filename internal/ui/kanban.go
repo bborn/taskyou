@@ -568,11 +568,20 @@ func (k *KanbanBoard) viewDesktop() string {
 
 		var taskViews []string
 
+		// Track shortcut number for the selected column (1-9)
+		shortcutNum := 0
+
 		// Render pinned tasks (always fixed at the top)
 		for i := 0; i < pinnedSlots; i++ {
 			task := pinnedTasks[i]
 			isSelected := isSelectedCol && i == k.selectedRow
-			taskView := k.renderTaskCard(task, colWidth, isSelected)
+			// Only show shortcuts in the selected column
+			var hint string
+			if isSelectedCol {
+				shortcutNum++
+				hint = TaskShortcutHint(shortcutNum)
+			}
+			taskView := k.renderTaskCard(task, colWidth, isSelected, hint)
 			taskViews = append(taskViews, taskView)
 		}
 
@@ -591,7 +600,13 @@ func (k *KanbanBoard) viewDesktop() string {
 			task := unpinnedTasks[i]
 			globalIndex := pinnedCount + i
 			isSelected := isSelectedCol && globalIndex == k.selectedRow
-			taskView := k.renderTaskCard(task, colWidth, isSelected)
+			// Only show shortcuts in the selected column
+			var hint string
+			if isSelectedCol {
+				shortcutNum++
+				hint = TaskShortcutHint(shortcutNum)
+			}
+			taskView := k.renderTaskCard(task, colWidth, isSelected, hint)
 			taskViews = append(taskViews, taskView)
 		}
 
@@ -747,11 +762,16 @@ func (k *KanbanBoard) viewMobile() string {
 
 	var taskViews []string
 
+	// Track shortcut number (1-9) for mobile view
+	shortcutNum := 0
+
 	// Render pinned tasks first
 	for i := 0; i < toRenderPinned; i++ {
 		task := pinnedTasks[i]
 		isSelected := i == k.selectedRow
-		taskView := k.renderTaskCard(task, colWidth, isSelected)
+		shortcutNum++
+		hint := TaskShortcutHint(shortcutNum)
+		taskView := k.renderTaskCard(task, colWidth, isSelected, hint)
 		taskViews = append(taskViews, taskView)
 	}
 
@@ -770,7 +790,9 @@ func (k *KanbanBoard) viewMobile() string {
 		task := unpinnedTasks[i]
 		globalIndex := len(pinnedTasks) + i
 		isSelected := globalIndex == k.selectedRow
-		taskView := k.renderTaskCard(task, colWidth, isSelected)
+		shortcutNum++
+		hint := TaskShortcutHint(shortcutNum)
+		taskView := k.renderTaskCard(task, colWidth, isSelected, hint)
 		taskViews = append(taskViews, taskView)
 	}
 
@@ -894,7 +916,8 @@ func (k *KanbanBoard) renderColumnTabs() string {
 }
 
 // renderTaskCard renders a single task card.
-func (k *KanbanBoard) renderTaskCard(task *db.Task, width int, isSelected bool) string {
+// shortcutHint is an optional keyboard shortcut to display (e.g., "1", "2", etc.)
+func (k *KanbanBoard) renderTaskCard(task *db.Task, width int, isSelected bool, shortcutHint string) string {
 	if width < 10 {
 		width = 10
 	}
@@ -936,6 +959,15 @@ func (k *KanbanBoard) renderTaskCard(task *db.Task, width int, isSelected bool) 
 	// Status indicators (right-aligned)
 	var indicators []string
 	if prInfo := k.prInfo[task.ID]; prInfo != nil {
+		// Show diff stats first (like Conductor)
+		if diffStats := PRDiffStats(prInfo); diffStats != "" {
+			if isSelected {
+				indicators = append(indicators, PRDiffStatsPlain(prInfo))
+			} else {
+				indicators = append(indicators, diffStats)
+			}
+		}
+		// Then PR status badge
 		if isSelected {
 			indicators = append(indicators, PRStatusIcon(prInfo))
 		} else {
@@ -968,6 +1000,15 @@ func (k *KanbanBoard) renderTaskCard(task *db.Task, width int, isSelected bool) 
 		} else {
 			pinStyle := lipgloss.NewStyle().Foreground(ColorWarning)
 			indicators = append(indicators, pinStyle.Render(IconPin()))
+		}
+	}
+	// Keyboard shortcut hint (shown at the end)
+	if shortcutHint != "" {
+		if isSelected {
+			indicators = append(indicators, shortcutHint)
+		} else {
+			shortcutStyle := lipgloss.NewStyle().Foreground(ColorMuted)
+			indicators = append(indicators, shortcutStyle.Render(shortcutHint))
 		}
 	}
 
@@ -1092,6 +1133,75 @@ func (k *KanbanBoard) HasNextTask() bool {
 		return false // Only one or no tasks, no next
 	}
 	return k.selectedRow < len(col.Tasks)-1
+}
+
+// SelectByShortcut selects the Nth visible task in the current column (1-18).
+// Returns the selected task, or nil if the shortcut doesn't correspond to a visible task.
+func (k *KanbanBoard) SelectByShortcut(num int) *db.Task {
+	if num < 1 || num > 18 {
+		return nil
+	}
+
+	col := k.columns[k.selectedCol]
+	if len(col.Tasks) == 0 {
+		return nil
+	}
+
+	// Calculate visible tasks (pinned + visible unpinned)
+	pinnedTasks, unpinnedTasks := splitPinnedTasks(col.Tasks)
+
+	// Calculate how many tasks are visible
+	colHeight := k.height - 2
+	if k.IsMobileMode() {
+		colHeight = k.height - 4
+	}
+	cardHeight := 3
+	maxVisible := (colHeight - 3) / cardHeight
+	if maxVisible < 1 {
+		maxVisible = 1
+	}
+
+	pinnedSlots := len(pinnedTasks)
+	if pinnedSlots > maxVisible {
+		pinnedSlots = maxVisible
+	}
+	scrollCapacity := maxVisible - pinnedSlots
+	if scrollCapacity < 0 {
+		scrollCapacity = 0
+	}
+
+	// Get scroll offset
+	scrollOffset := 0
+	if k.selectedCol < len(k.scrollOffsets) {
+		scrollOffset = k.scrollOffsets[k.selectedCol]
+	}
+
+	// Build list of visible task indices (in column order)
+	var visibleIndices []int
+
+	// Add pinned tasks
+	for i := 0; i < pinnedSlots; i++ {
+		visibleIndices = append(visibleIndices, i)
+	}
+
+	// Add visible unpinned tasks
+	startIdx := scrollOffset
+	endIdx := scrollOffset + scrollCapacity
+	if endIdx > len(unpinnedTasks) {
+		endIdx = len(unpinnedTasks)
+	}
+	for i := startIdx; i < endIdx; i++ {
+		visibleIndices = append(visibleIndices, len(pinnedTasks)+i)
+	}
+
+	// Select the Nth visible task (1-indexed)
+	idx := num - 1
+	if idx >= len(visibleIndices) {
+		return nil
+	}
+
+	k.selectedRow = visibleIndices[idx]
+	return col.Tasks[k.selectedRow]
 }
 
 // HandleClick handles a mouse click at the given coordinates.

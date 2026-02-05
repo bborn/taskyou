@@ -2,6 +2,7 @@
 package ui
 
 import (
+	"fmt"
 	"os"
 	"strings"
 	"sync"
@@ -454,4 +455,120 @@ func PRStatusDescription(pr *github.PRInfo) string {
 		return ""
 	}
 	return pr.StatusDescription()
+}
+
+// Diff stat colors (git-style green/red)
+var (
+	ColorDiffAdd     = lipgloss.Color("#98C379") // Green for additions (bright)
+	ColorDiffDel     = lipgloss.Color("#E06C75") // Red for deletions (bright)
+	ColorDiffAddDim  = lipgloss.Color("#5C7A4A") // Dim green for unselected
+	ColorDiffDelDim  = lipgloss.Color("#8B4C52") // Dim red for unselected
+)
+
+// PRDiffStats returns a formatted diff stats string like "+123 -45" with dim colors.
+// Use this for unselected items. Returns empty string if no changes or PR is nil.
+func PRDiffStats(pr *github.PRInfo) string {
+	if pr == nil {
+		return ""
+	}
+	if pr.Additions == 0 && pr.Deletions == 0 {
+		return ""
+	}
+
+	addStyle := lipgloss.NewStyle().Foreground(ColorDiffAddDim)
+	delStyle := lipgloss.NewStyle().Foreground(ColorDiffDelDim)
+
+	var parts []string
+	if pr.Additions > 0 {
+		parts = append(parts, addStyle.Render(formatDiffNum(pr.Additions, "+")))
+	}
+	if pr.Deletions > 0 {
+		parts = append(parts, delStyle.Render(formatDiffNum(pr.Deletions, "-")))
+	}
+
+	return strings.Join(parts, " ")
+}
+
+// PRDiffStatsBright returns diff stats with bright colors (for selected items).
+func PRDiffStatsBright(pr *github.PRInfo) string {
+	if pr == nil {
+		return ""
+	}
+	if pr.Additions == 0 && pr.Deletions == 0 {
+		return ""
+	}
+
+	addStyle := lipgloss.NewStyle().Foreground(ColorDiffAdd)
+	delStyle := lipgloss.NewStyle().Foreground(ColorDiffDel)
+
+	var parts []string
+	if pr.Additions > 0 {
+		parts = append(parts, addStyle.Render(formatDiffNum(pr.Additions, "+")))
+	}
+	if pr.Deletions > 0 {
+		parts = append(parts, delStyle.Render(formatDiffNum(pr.Deletions, "-")))
+	}
+
+	return strings.Join(parts, " ")
+}
+
+// PRDiffStatsPlain returns diff stats without color (for selected items with inverted bg).
+func PRDiffStatsPlain(pr *github.PRInfo) string {
+	if pr == nil {
+		return ""
+	}
+	if pr.Additions == 0 && pr.Deletions == 0 {
+		return ""
+	}
+
+	var parts []string
+	if pr.Additions > 0 {
+		parts = append(parts, formatDiffNum(pr.Additions, "+"))
+	}
+	if pr.Deletions > 0 {
+		parts = append(parts, formatDiffNum(pr.Deletions, "-"))
+	}
+
+	return strings.Join(parts, " ")
+}
+
+// formatDiffNum formats a number with prefix, using K suffix for large numbers.
+func formatDiffNum(n int, prefix string) string {
+	if n >= 10000 {
+		return prefix + fmt.Sprintf("%.0fk", float64(n)/1000)
+	}
+	if n >= 1000 {
+		return prefix + fmt.Sprintf("%.1fk", float64(n)/1000)
+	}
+	return prefix + fmt.Sprintf("%d", n)
+}
+
+// TaskShortcutHint returns the keyboard shortcut hint for a visible task.
+// Tasks 1-9 use single digits "1"-"9".
+// Tasks 10-18 use double digits "11", "22", "33", etc.
+// Returns empty string for tasks beyond 18.
+func TaskShortcutHint(visibleIndex int) string {
+	if visibleIndex < 1 || visibleIndex > 18 {
+		return ""
+	}
+	if visibleIndex <= 9 {
+		return fmt.Sprintf("%d", visibleIndex)
+	}
+	// Tasks 10-18: use doubled digits (11, 22, 33, ...)
+	// visibleIndex 10 → "11", 11 → "22", 12 → "33", etc.
+	doubleDigit := visibleIndex - 9 // 1-9 for tasks 10-18
+	return fmt.Sprintf("%d%d", doubleDigit, doubleDigit)
+}
+
+// TaskIndexFromShortcut converts a shortcut string to a 1-indexed visible task index.
+// Returns 0 if the shortcut is invalid.
+func TaskIndexFromShortcut(shortcut string) int {
+	if len(shortcut) == 1 && shortcut[0] >= '1' && shortcut[0] <= '9' {
+		return int(shortcut[0] - '0')
+	}
+	if len(shortcut) == 2 && shortcut[0] == shortcut[1] && shortcut[0] >= '1' && shortcut[0] <= '9' {
+		// "11" → 10, "22" → 11, "33" → 12, etc.
+		return int(shortcut[0]-'0') + 9
+	}
+	return 0
 }
