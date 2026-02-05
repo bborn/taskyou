@@ -2368,6 +2368,14 @@ func (e *Executor) resumeClaudeDangerous(task *db.Task, workDir string) bool {
 
 	e.logLine(taskID, "system", "Claude restarted in dangerous mode (--dangerously-skip-permissions enabled)")
 
+	// Wait for Claude to be fully ready before sending input
+	time.Sleep(1 * time.Second)
+
+	// Automatically send "continue working" to resume the task
+	// This tells Claude to continue where it left off after the mode switch
+	exec.Command("tmux", "send-keys", "-t", windowTarget+".0", "continue working", "Enter").Run()
+	e.logLine(taskID, "system", "Sent 'continue working' to resume task")
+
 	// Don't poll for completion here - the process will continue running in tmux
 	// The existing polling infrastructure will handle it
 	return true
@@ -2525,6 +2533,14 @@ func (e *Executor) resumeClaudeSafe(task *db.Task, workDir string) bool {
 
 	e.logLine(taskID, "system", "Claude restarted in safe mode (permissions enabled)")
 
+	// Wait for Claude to be fully ready before sending input
+	time.Sleep(1 * time.Second)
+
+	// Automatically send "continue working" to resume the task
+	// This tells Claude to continue where it left off after the mode switch
+	exec.Command("tmux", "send-keys", "-t", windowTarget+".0", "continue working", "Enter").Run()
+	e.logLine(taskID, "system", "Sent 'continue working' to resume task")
+
 	// Don't poll for completion here - the process will continue running in tmux
 	// The existing polling infrastructure will handle it
 	return true
@@ -2622,6 +2638,15 @@ func (e *Executor) resumeCodexWithMode(task *db.Task, workDir string, dangerousM
 	}
 
 	e.logLine(taskID, "system", fmt.Sprintf("Codex restarted in %s mode", modeStr))
+
+	// Wait for Codex to be fully ready before sending input
+	time.Sleep(1 * time.Second)
+
+	// Automatically send "continue working" to resume the task
+	// This tells Codex to continue where it left off after the mode switch
+	exec.Command("tmux", "send-keys", "-t", windowTarget+".0", "continue working", "Enter").Run()
+	e.logLine(taskID, "system", "Sent 'continue working' to resume task")
+
 	return true
 }
 
@@ -2721,6 +2746,15 @@ func (e *Executor) resumeGeminiWithMode(task *db.Task, workDir string, dangerous
 	}
 
 	e.logLine(taskID, "system", fmt.Sprintf("Gemini restarted in %s mode", modeStr))
+
+	// Wait for Gemini to be fully ready before sending input
+	time.Sleep(1 * time.Second)
+
+	// Automatically send "continue working" to resume the task
+	// This tells Gemini to continue where it left off after the mode switch
+	exec.Command("tmux", "send-keys", "-t", windowTarget+".0", "continue working", "Enter").Run()
+	e.logLine(taskID, "system", "Sent 'continue working' to resume task")
+
 	return true
 }
 
