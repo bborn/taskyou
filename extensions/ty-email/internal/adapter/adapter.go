@@ -75,6 +75,7 @@ type GmailConfig struct {
 	CredentialsFile string `yaml:"credentials_file"`
 	TokenFile       string `yaml:"token_file"`
 	PollInterval    string `yaml:"poll_interval"` // e.g., "30s"
+	Label           string `yaml:"label"`         // Optional label to filter (e.g., "ty-email")
 }
 
 // IMAPConfig holds IMAP configuration.

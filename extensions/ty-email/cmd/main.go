@@ -440,56 +440,114 @@ func initCmd() *cobra.Command {
 				}
 
 			case "2":
-				fmt.Println("Gmail support coming soon. Please use IMAP for now.")
-				return nil
+				cfg.Adapter.Type = "gmail"
+				if cfg.Adapter.Gmail == nil {
+					cfg.Adapter.Gmail = &adapter.GmailConfig{}
+				}
+
+				home, _ := os.UserHomeDir()
+				defaultCredsFile := filepath.Join(home, ".config", "ty-email", "gmail-credentials.json")
+				defaultTokenFile := filepath.Join(home, ".config", "ty-email", "gmail-token.json")
+
+				fmt.Println("\nGmail uses OAuth2 for authentication.")
+				fmt.Println("You'll need to create credentials in Google Cloud Console:")
+				fmt.Println("1. Go to https://console.cloud.google.com/apis/credentials")
+				fmt.Println("2. Create OAuth 2.0 Client ID (Desktop app)")
+				fmt.Println("3. Download the JSON credentials file")
+
+				fmt.Printf("\nCredentials file path [%s]: ", defaultStr(cfg.Adapter.Gmail.CredentialsFile, defaultCredsFile))
+				credsFile, _ := reader.ReadString('\n')
+				credsFile = strings.TrimSpace(credsFile)
+				if credsFile != "" {
+					cfg.Adapter.Gmail.CredentialsFile = credsFile
+				} else if cfg.Adapter.Gmail.CredentialsFile == "" {
+					cfg.Adapter.Gmail.CredentialsFile = defaultCredsFile
+				}
+
+				// Check if credentials file exists
+				if _, err := os.Stat(cfg.Adapter.Gmail.CredentialsFile); os.IsNotExist(err) {
+					fmt.Printf("WARNING: Credentials file not found at %s\n", cfg.Adapter.Gmail.CredentialsFile)
+					fmt.Println("Download it from Google Cloud Console before running 'ty-email serve'")
+				} else {
+					fmt.Println("Credentials file found.")
+				}
+
+				fmt.Printf("Token file path [%s]: ", defaultStr(cfg.Adapter.Gmail.TokenFile, defaultTokenFile))
+				tokenFile, _ := reader.ReadString('\n')
+				tokenFile = strings.TrimSpace(tokenFile)
+				if tokenFile != "" {
+					cfg.Adapter.Gmail.TokenFile = tokenFile
+				} else if cfg.Adapter.Gmail.TokenFile == "" {
+					cfg.Adapter.Gmail.TokenFile = defaultTokenFile
+				}
+
+				fmt.Printf("Poll interval [%s]: ", defaultStr(cfg.Adapter.Gmail.PollInterval, "30s"))
+				interval, _ := reader.ReadString('\n')
+				interval = strings.TrimSpace(interval)
+				if interval != "" {
+					cfg.Adapter.Gmail.PollInterval = interval
+				} else if cfg.Adapter.Gmail.PollInterval == "" {
+					cfg.Adapter.Gmail.PollInterval = "30s"
+				}
+
+				fmt.Printf("Gmail label to filter (optional, e.g., 'ty-email') [%s]: ", cfg.Adapter.Gmail.Label)
+				label, _ := reader.ReadString('\n')
+				label = strings.TrimSpace(label)
+				if label != "" {
+					cfg.Adapter.Gmail.Label = label
+				}
+
+				fmt.Println("\nNote: On first run, ty-email will open a browser for OAuth authorization.")
 			}
 
-			// SMTP for replies
-			fmt.Println("\n=== Outbound Email (SMTP) ===")
-			fmt.Printf("SMTP server [%s]: ", defaultStr(cfg.SMTP.Server, "smtp.fastmail.com:587"))
-			smtpServer, _ := reader.ReadString('\n')
-			smtpServer = strings.TrimSpace(smtpServer)
-			if smtpServer != "" {
-				cfg.SMTP.Server = smtpServer
-			} else if cfg.SMTP.Server == "" {
-				cfg.SMTP.Server = "smtp.fastmail.com:587"
-			}
+			// SMTP for replies (skip for Gmail - it uses the API)
+			if cfg.Adapter.Type != "gmail" {
+				fmt.Println("\n=== Outbound Email (SMTP) ===")
+				fmt.Printf("SMTP server [%s]: ", defaultStr(cfg.SMTP.Server, "smtp.fastmail.com:587"))
+				smtpServer, _ := reader.ReadString('\n')
+				smtpServer = strings.TrimSpace(smtpServer)
+				if smtpServer != "" {
+					cfg.SMTP.Server = smtpServer
+				} else if cfg.SMTP.Server == "" {
+					cfg.SMTP.Server = "smtp.fastmail.com:587"
+				}
 
-			// Default SMTP username to IMAP username
-			defaultSmtpUser := cfg.SMTP.Username
-			if defaultSmtpUser == "" && cfg.Adapter.IMAP != nil {
-				defaultSmtpUser = cfg.Adapter.IMAP.Username
-			}
-			fmt.Printf("SMTP username [%s]: ", defaultSmtpUser)
-			smtpUser, _ := reader.ReadString('\n')
-			smtpUser = strings.TrimSpace(smtpUser)
-			if smtpUser != "" {
-				cfg.SMTP.Username = smtpUser
-			} else if cfg.SMTP.Username == "" {
-				cfg.SMTP.Username = defaultSmtpUser
-			}
+				// Default SMTP username to IMAP username
+				defaultSmtpUser := cfg.SMTP.Username
+				if defaultSmtpUser == "" && cfg.Adapter.IMAP != nil {
+					defaultSmtpUser = cfg.Adapter.IMAP.Username
+				}
+				fmt.Printf("SMTP username [%s]: ", defaultSmtpUser)
+				smtpUser, _ := reader.ReadString('\n')
+				smtpUser = strings.TrimSpace(smtpUser)
+				if smtpUser != "" {
+					cfg.SMTP.Username = smtpUser
+				} else if cfg.SMTP.Username == "" {
+					cfg.SMTP.Username = defaultSmtpUser
+				}
 
-			// Default SMTP password command to IMAP password command
-			defaultSmtpPwCmd := cfg.SMTP.PasswordCmd
-			if defaultSmtpPwCmd == "" && cfg.Adapter.IMAP != nil {
-				defaultSmtpPwCmd = cfg.Adapter.IMAP.PasswordCmd
-			}
-			fmt.Printf("SMTP password command [%s]: ", defaultSmtpPwCmd)
-			smtpPwCmd, _ := reader.ReadString('\n')
-			smtpPwCmd = strings.TrimSpace(smtpPwCmd)
-			if smtpPwCmd != "" {
-				cfg.SMTP.PasswordCmd = smtpPwCmd
-			} else if cfg.SMTP.PasswordCmd == "" {
-				cfg.SMTP.PasswordCmd = defaultSmtpPwCmd
-			}
+				// Default SMTP password command to IMAP password command
+				defaultSmtpPwCmd := cfg.SMTP.PasswordCmd
+				if defaultSmtpPwCmd == "" && cfg.Adapter.IMAP != nil {
+					defaultSmtpPwCmd = cfg.Adapter.IMAP.PasswordCmd
+				}
+				fmt.Printf("SMTP password command [%s]: ", defaultSmtpPwCmd)
+				smtpPwCmd, _ := reader.ReadString('\n')
+				smtpPwCmd = strings.TrimSpace(smtpPwCmd)
+				if smtpPwCmd != "" {
+					cfg.SMTP.PasswordCmd = smtpPwCmd
+				} else if cfg.SMTP.PasswordCmd == "" {
+					cfg.SMTP.PasswordCmd = defaultSmtpPwCmd
+				}
 
-			fmt.Printf("From address [%s]: ", defaultStr(cfg.SMTP.From, cfg.SMTP.Username))
-			fromAddr, _ := reader.ReadString('\n')
-			fromAddr = strings.TrimSpace(fromAddr)
-			if fromAddr != "" {
-				cfg.SMTP.From = fromAddr
-			} else if cfg.SMTP.From == "" {
-				cfg.SMTP.From = cfg.SMTP.Username
+				fmt.Printf("From address [%s]: ", defaultStr(cfg.SMTP.From, cfg.SMTP.Username))
+				fromAddr, _ := reader.ReadString('\n')
+				fromAddr = strings.TrimSpace(fromAddr)
+				if fromAddr != "" {
+					cfg.SMTP.From = fromAddr
+				} else if cfg.SMTP.From == "" {
+					cfg.SMTP.From = cfg.SMTP.Username
+				}
 			}
 
 			// LLM provider
@@ -678,7 +736,11 @@ func setupAdapter(cfg *Config, logger *slog.Logger) (adapter.Adapter, error) {
 			return nil, fmt.Errorf("IMAP config required")
 		}
 		return adapter.NewIMAPAdapter(cfg.Adapter.IMAP, &cfg.SMTP, logger), nil
-	// TODO: Add gmail, webhook adapters
+	case "gmail":
+		if cfg.Adapter.Gmail == nil {
+			return nil, fmt.Errorf("Gmail config required")
+		}
+		return adapter.NewGmailAdapter(cfg.Adapter.Gmail, logger), nil
 	default:
 		return nil, fmt.Errorf("unsupported adapter type: %s", cfg.Adapter.Type)
 	}
