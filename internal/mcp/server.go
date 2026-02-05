@@ -280,6 +280,32 @@ func (s *Server) handleRequest(req *jsonRPCRequest) {
 						"required": []string{"context"},
 					},
 				},
+				{
+					Name:        "taskyou_handoff",
+					Description: "Hand off work to a new task in another project. Use this when you discover something during your current task that should be tracked separately in a different project. Creates a new task with context and a reference back to the source task.",
+					InputSchema: map[string]interface{}{
+						"type": "object",
+						"properties": map[string]interface{}{
+							"title": map[string]interface{}{
+								"type":        "string",
+								"description": "Title for the new task",
+							},
+							"context": map[string]interface{}{
+								"type":        "string",
+								"description": "The details/context to hand off - what was discovered, what needs to be done, any relevant findings",
+							},
+							"project": map[string]interface{}{
+								"type":        "string",
+								"description": "Target project name (required - must be different from current project for cross-project handoff)",
+							},
+							"execute": map[string]interface{}{
+								"type":        "boolean",
+								"description": "If true, queue the task for immediate execution (default: false, creates in backlog)",
+							},
+						},
+						"required": []string{"title", "context", "project"},
+					},
+				},
 			},
 		})
 
@@ -680,6 +706,79 @@ This saves future tasks from re-exploring the codebase.`},
 		s.sendResult(id, toolCallResult{
 			Content: []contentBlock{
 				{Type: "text", Text: fmt.Sprintf("Project context saved for '%s'. Future tasks will use this context to skip codebase exploration.", currentTask.Project)},
+			},
+		})
+
+	case "taskyou_handoff":
+		title, _ := params.Arguments["title"].(string)
+		if title == "" {
+			s.sendError(id, -32602, "title is required")
+			return
+		}
+		context, _ := params.Arguments["context"].(string)
+		if context == "" {
+			s.sendError(id, -32602, "context is required")
+			return
+		}
+		targetProject, _ := params.Arguments["project"].(string)
+		if targetProject == "" {
+			s.sendError(id, -32602, "project is required")
+			return
+		}
+		execute, _ := params.Arguments["execute"].(bool)
+
+		// Get current task for reference
+		currentTask, err := s.db.GetTask(s.taskID)
+		if err != nil || currentTask == nil {
+			s.sendError(id, -32603, "Failed to get current task")
+			return
+		}
+
+		// Build body with context and reference to source task
+		var bodyBuilder strings.Builder
+		bodyBuilder.WriteString(context)
+		bodyBuilder.WriteString("\n\n---\n")
+		bodyBuilder.WriteString(fmt.Sprintf("*Handed off from task #%d", currentTask.ID))
+		if currentTask.Title != "" {
+			bodyBuilder.WriteString(fmt.Sprintf(": %s", currentTask.Title))
+		}
+		if currentTask.Project != "" {
+			bodyBuilder.WriteString(fmt.Sprintf(" (project: %s)", currentTask.Project))
+		}
+		bodyBuilder.WriteString("*")
+
+		// Set initial status
+		status := db.StatusBacklog
+		if execute {
+			status = db.StatusQueued
+		}
+
+		// Create the new task
+		newTask := &db.Task{
+			Title:   title,
+			Body:    bodyBuilder.String(),
+			Project: targetProject,
+			Type:    db.TypeCode, // Default to code type
+			Status:  status,
+		}
+
+		if err := s.db.CreateTask(newTask); err != nil {
+			s.sendError(id, -32603, fmt.Sprintf("Failed to create task: %v", err))
+			return
+		}
+
+		// Log the handoff in current task
+		logMsg := fmt.Sprintf("Handed off to task #%d in project '%s': %s", newTask.ID, targetProject, title)
+		s.db.AppendTaskLog(s.taskID, "system", logMsg)
+
+		resultMsg := fmt.Sprintf("Created task #%d in project '%s': %s", newTask.ID, targetProject, title)
+		if execute {
+			resultMsg += " (queued for execution)"
+		}
+
+		s.sendResult(id, toolCallResult{
+			Content: []contentBlock{
+				{Type: "text", Text: resultMsg},
 			},
 		})
 

@@ -866,3 +866,213 @@ func TestNoReminderWhenContextSaved(t *testing.T) {
 
 	t.Log("No reminder when context saved works correctly!")
 }
+
+func TestWorkflowHandoff(t *testing.T) {
+	database := testDB(t)
+	task := createTestTask(t, database)
+
+	// Create target project
+	if err := database.CreateProject(&db.Project{Name: "target-project", Path: "/tmp/target-project"}); err != nil {
+		t.Fatalf("failed to create target project: %v", err)
+	}
+
+	request := map[string]interface{}{
+		"jsonrpc": "2.0",
+		"id":      1,
+		"method":  "tools/call",
+		"params": map[string]interface{}{
+			"name": "taskyou_handoff",
+			"arguments": map[string]interface{}{
+				"title":   "Fix API endpoint",
+				"context": "Found during frontend work: the /api/users endpoint returns 500 when user doesn't exist",
+				"project": "target-project",
+			},
+		},
+	}
+	reqBytes, _ := json.Marshal(request)
+	reqBytes = append(reqBytes, '\n')
+
+	server, output := testServer(database, task.ID, string(reqBytes))
+	server.Run()
+
+	var resp jsonRPCResponse
+	if err := json.Unmarshal(output.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to parse response: %v", err)
+	}
+
+	if resp.Error != nil {
+		t.Fatalf("unexpected error: %s", resp.Error.Message)
+	}
+
+	// Verify task was created in target project
+	tasks, err := database.ListTasks(db.ListTasksOptions{Project: "target-project"})
+	if err != nil {
+		t.Fatalf("failed to list tasks: %v", err)
+	}
+
+	var found bool
+	for _, tsk := range tasks {
+		if tsk.Title == "Fix API endpoint" {
+			found = true
+			// Check body contains context
+			if !strings.Contains(tsk.Body, "/api/users endpoint returns 500") {
+				t.Errorf("expected body to contain context, got: %s", tsk.Body)
+			}
+			// Check body contains reference to source task
+			if !strings.Contains(tsk.Body, "Handed off from task #") {
+				t.Errorf("expected body to contain reference to source task, got: %s", tsk.Body)
+			}
+			if tsk.Project != "target-project" {
+				t.Errorf("expected project 'target-project', got '%s'", tsk.Project)
+			}
+			if tsk.Status != db.StatusBacklog {
+				t.Errorf("expected status 'backlog', got '%s'", tsk.Status)
+			}
+			break
+		}
+	}
+
+	if !found {
+		t.Error("handoff task not found in target project")
+	}
+
+	// Verify response message
+	result, ok := resp.Result.(map[string]interface{})
+	if !ok {
+		t.Fatal("expected result to be a map")
+	}
+	content, ok := result["content"].([]interface{})
+	if !ok {
+		t.Fatal("expected content to be an array")
+	}
+	text := content[0].(map[string]interface{})["text"].(string)
+	if !strings.Contains(text, "target-project") {
+		t.Errorf("expected response to mention target project, got: %s", text)
+	}
+}
+
+func TestWorkflowHandoffWithExecute(t *testing.T) {
+	database := testDB(t)
+	task := createTestTask(t, database)
+
+	// Create target project
+	if err := database.CreateProject(&db.Project{Name: "exec-target", Path: "/tmp/exec-target"}); err != nil {
+		t.Fatalf("failed to create target project: %v", err)
+	}
+
+	request := map[string]interface{}{
+		"jsonrpc": "2.0",
+		"id":      1,
+		"method":  "tools/call",
+		"params": map[string]interface{}{
+			"name": "taskyou_handoff",
+			"arguments": map[string]interface{}{
+				"title":   "Urgent fix needed",
+				"context": "This needs immediate attention",
+				"project": "exec-target",
+				"execute": true,
+			},
+		},
+	}
+	reqBytes, _ := json.Marshal(request)
+	reqBytes = append(reqBytes, '\n')
+
+	server, output := testServer(database, task.ID, string(reqBytes))
+	server.Run()
+
+	var resp jsonRPCResponse
+	if err := json.Unmarshal(output.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to parse response: %v", err)
+	}
+
+	if resp.Error != nil {
+		t.Fatalf("unexpected error: %s", resp.Error.Message)
+	}
+
+	// Verify task was created with queued status
+	tasks, err := database.ListTasks(db.ListTasksOptions{Project: "exec-target", Status: db.StatusQueued})
+	if err != nil {
+		t.Fatalf("failed to list tasks: %v", err)
+	}
+
+	var found bool
+	for _, tsk := range tasks {
+		if tsk.Title == "Urgent fix needed" {
+			found = true
+			if tsk.Status != db.StatusQueued {
+				t.Errorf("expected status 'queued', got '%s'", tsk.Status)
+			}
+			break
+		}
+	}
+
+	if !found {
+		t.Error("queued handoff task not found")
+	}
+
+	// Verify response mentions queued
+	result := resp.Result.(map[string]interface{})
+	content := result["content"].([]interface{})
+	text := content[0].(map[string]interface{})["text"].(string)
+	if !strings.Contains(text, "queued for execution") {
+		t.Errorf("expected response to mention queued, got: %s", text)
+	}
+}
+
+func TestWorkflowHandoffMissingParams(t *testing.T) {
+	database := testDB(t)
+	task := createTestTask(t, database)
+
+	tests := []struct {
+		name       string
+		arguments  map[string]interface{}
+		wantError  string
+	}{
+		{
+			name:      "missing title",
+			arguments: map[string]interface{}{"context": "test", "project": "test"},
+			wantError: "title is required",
+		},
+		{
+			name:      "missing context",
+			arguments: map[string]interface{}{"title": "test", "project": "test"},
+			wantError: "context is required",
+		},
+		{
+			name:      "missing project",
+			arguments: map[string]interface{}{"title": "test", "context": "test"},
+			wantError: "project is required",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			request := map[string]interface{}{
+				"jsonrpc": "2.0",
+				"id":      1,
+				"method":  "tools/call",
+				"params": map[string]interface{}{
+					"name":      "taskyou_handoff",
+					"arguments": tt.arguments,
+				},
+			}
+			reqBytes, _ := json.Marshal(request)
+			reqBytes = append(reqBytes, '\n')
+
+			server, output := testServer(database, task.ID, string(reqBytes))
+			server.Run()
+
+			var resp jsonRPCResponse
+			if err := json.Unmarshal(output.Bytes(), &resp); err != nil {
+				t.Fatalf("failed to parse response: %v", err)
+			}
+
+			if resp.Error == nil {
+				t.Fatal("expected error for missing parameter")
+			}
+			if !strings.Contains(resp.Error.Message, tt.wantError) {
+				t.Errorf("expected error '%s', got: %s", tt.wantError, resp.Error.Message)
+			}
+		})
+	}
+}

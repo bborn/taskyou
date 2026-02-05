@@ -108,6 +108,18 @@ Optional flags:
 - `--type <type>` - Task type (bug, feature, etc.)
 - `--dangerous` - Skip permission prompts in executor
 
+### 4b. Hand Off to Another Project
+
+When you discover something during a task that belongs in a different project:
+
+```bash
+ty handoff "Fix API endpoint" --project backend --context "Found during frontend work: the /api/users endpoint returns 500"
+ty handoff "Update docs" -p docs -c "API changed, needs documentation" -x  # -x queues immediately
+ty handoff "Security audit" --project security --context "Found XSS in login" --from 42  # Link to source task
+```
+
+This creates a task in the target project with a reference back to the source.
+
 ### 5. Manage Priority
 
 Pin important tasks to the top:
@@ -269,5 +281,21 @@ If you're running as the task executor, you have access to MCP tools:
 - `taskyou_show_task` - Get your task details
 - `taskyou_create_task` - Create follow-up tasks
 - `taskyou_list_tasks` - See other active tasks
+- `taskyou_handoff` - Hand off work to a task in another project (cross-project)
 
 Use these instead of CLI when executing inside a Task You worktree.
+
+### Example: Handoff to Another Project
+
+When you discover work that belongs in a different project during execution:
+
+```
+taskyou_handoff({
+  title: "Fix API validation",
+  context: "Found during frontend form work: the /api/users POST endpoint doesn't validate email format properly. This causes the frontend to show a generic error when users enter malformed emails.",
+  project: "backend-api",
+  execute: true  // Queue immediately (optional)
+})
+```
+
+This creates a task in the target project with full context and a reference back to your current task.

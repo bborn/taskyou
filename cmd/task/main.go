@@ -611,6 +611,120 @@ Examples:
 	createCmd.Flags().Bool("json", false, "Output in JSON format")
 	rootCmd.AddCommand(createCmd)
 
+	// Handoff subcommand - hand off work to another project
+	handoffCmd := &cobra.Command{
+		Use:   "handoff <title>",
+		Short: "Hand off work to a task in another project",
+		Long: `Create a task in another project with context from current work.
+
+Use this when you discover something that should be tracked in a different project.
+The new task will include a reference back to the source context.
+
+Examples:
+  ty handoff "Fix API endpoint" --project backend --context "Found during frontend work: the /api/users endpoint returns 500"
+  ty handoff "Update docs" -p docs -c "API changed, needs documentation update" -x
+  ty handoff "Security audit" --project security --context "Found potential XSS in login form" --from 42`,
+		Args: cobra.ExactArgs(1),
+		Run: func(cmd *cobra.Command, args []string) {
+			title := args[0]
+			context, _ := cmd.Flags().GetString("context")
+			targetProject, _ := cmd.Flags().GetString("project")
+			execute, _ := cmd.Flags().GetBool("execute")
+			fromTaskID, _ := cmd.Flags().GetInt64("from")
+			outputJSON, _ := cmd.Flags().GetBool("json")
+
+			if context == "" {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: --context is required"))
+				os.Exit(1)
+			}
+			if targetProject == "" {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: --project is required"))
+				os.Exit(1)
+			}
+
+			// Open database
+			dbPath := db.DefaultPath()
+			database, err := db.Open(dbPath)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+			defer database.Close()
+
+			// Build body with context and optional reference
+			var bodyBuilder strings.Builder
+			bodyBuilder.WriteString(context)
+
+			if fromTaskID > 0 {
+				// Get source task for reference
+				sourceTask, err := database.GetTask(fromTaskID)
+				if err == nil && sourceTask != nil {
+					bodyBuilder.WriteString("\n\n---\n")
+					bodyBuilder.WriteString(fmt.Sprintf("*Handed off from task #%d", sourceTask.ID))
+					if sourceTask.Title != "" {
+						bodyBuilder.WriteString(fmt.Sprintf(": %s", sourceTask.Title))
+					}
+					if sourceTask.Project != "" {
+						bodyBuilder.WriteString(fmt.Sprintf(" (project: %s)", sourceTask.Project))
+					}
+					bodyBuilder.WriteString("*")
+				}
+			}
+
+			// Set initial status
+			status := db.StatusBacklog
+			if execute {
+				status = db.StatusQueued
+			}
+
+			// Create the task
+			task := &db.Task{
+				Title:   title,
+				Body:    bodyBuilder.String(),
+				Status:  status,
+				Type:    db.TypeCode,
+				Project: targetProject,
+			}
+
+			if err := database.CreateTask(task); err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+
+			// Log handoff in source task if specified
+			if fromTaskID > 0 {
+				logMsg := fmt.Sprintf("Handed off to task #%d in project '%s': %s", task.ID, targetProject, title)
+				database.AppendTaskLog(fromTaskID, "system", logMsg)
+			}
+
+			if outputJSON {
+				output := map[string]interface{}{
+					"id":      task.ID,
+					"title":   task.Title,
+					"status":  task.Status,
+					"project": task.Project,
+				}
+				if fromTaskID > 0 {
+					output["from_task_id"] = fromTaskID
+				}
+				jsonBytes, _ := json.Marshal(output)
+				fmt.Println(string(jsonBytes))
+			} else {
+				msg := fmt.Sprintf("Handed off to task #%d in '%s': %s", task.ID, targetProject, title)
+				if execute {
+					msg += " (queued for execution)"
+				}
+				fmt.Println(successStyle.Render(msg))
+			}
+		},
+	}
+	handoffCmd.Flags().StringP("context", "c", "", "Context/details to hand off (required)")
+	handoffCmd.Flags().StringP("project", "p", "", "Target project (required)")
+	handoffCmd.Flags().BoolP("execute", "x", false, "Queue task for immediate execution")
+	handoffCmd.Flags().Int64("from", 0, "Source task ID for reference linking")
+	handoffCmd.Flags().Bool("json", false, "Output in JSON format")
+	rootCmd.AddCommand(handoffCmd)
+
 	// List subcommand - list tasks
 	listCmd := &cobra.Command{
 		Use:   "list",
