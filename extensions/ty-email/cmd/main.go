@@ -351,7 +351,7 @@ func initCmd() *cobra.Command {
 			// Email provider
 			fmt.Println("=== Email Provider ===")
 			fmt.Println("1. IMAP (Fastmail, ProtonMail, etc.)")
-			fmt.Println("2. Gmail (coming soon)")
+			fmt.Println("2. Gmail (OAuth2)")
 			fmt.Print("\nChoice [1]: ")
 			choice, _ := reader.ReadString('\n')
 			choice = strings.TrimSpace(choice)
