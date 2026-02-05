@@ -1880,3 +1880,126 @@ func TestGetExecutorUsageByProject(t *testing.T) {
 		t.Errorf("expected empty usage map for nonexistent project, got %v", usage)
 	}
 }
+
+func TestClearTaskTmuxIDs(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	db, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer db.Close()
+	defer os.Remove(dbPath)
+
+	// Create task
+	task := &Task{
+		Title:   "Test Task",
+		Body:    "Test body",
+		Status:  StatusProcessing,
+		Type:    TypeCode,
+		Project: "personal",
+	}
+	if err := db.CreateTask(task); err != nil {
+		t.Fatalf("failed to create task: %v", err)
+	}
+
+	// Set tmux IDs
+	if err := db.UpdateTaskWindowID(task.ID, "@123"); err != nil {
+		t.Fatalf("failed to update window ID: %v", err)
+	}
+	if err := db.UpdateTaskPaneIDs(task.ID, "%456", "%789"); err != nil {
+		t.Fatalf("failed to update pane IDs: %v", err)
+	}
+
+	// Verify IDs are set
+	fetched, err := db.GetTask(task.ID)
+	if err != nil {
+		t.Fatalf("failed to get task: %v", err)
+	}
+	if fetched.TmuxWindowID != "@123" {
+		t.Errorf("expected window ID @123, got %q", fetched.TmuxWindowID)
+	}
+	if fetched.ClaudePaneID != "%456" {
+		t.Errorf("expected Claude pane ID %%456, got %q", fetched.ClaudePaneID)
+	}
+	if fetched.ShellPaneID != "%789" {
+		t.Errorf("expected Shell pane ID %%789, got %q", fetched.ShellPaneID)
+	}
+
+	// Clear tmux IDs
+	if err := db.ClearTaskTmuxIDs(task.ID); err != nil {
+		t.Fatalf("failed to clear tmux IDs: %v", err)
+	}
+
+	// Verify IDs are cleared
+	fetched, err = db.GetTask(task.ID)
+	if err != nil {
+		t.Fatalf("failed to get task: %v", err)
+	}
+	if fetched.TmuxWindowID != "" {
+		t.Errorf("expected empty window ID, got %q", fetched.TmuxWindowID)
+	}
+	if fetched.ClaudePaneID != "" {
+		t.Errorf("expected empty Claude pane ID, got %q", fetched.ClaudePaneID)
+	}
+	if fetched.ShellPaneID != "" {
+		t.Errorf("expected empty Shell pane ID, got %q", fetched.ShellPaneID)
+	}
+}
+
+func TestRetryTaskClearsTmuxIDs(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	db, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer db.Close()
+	defer os.Remove(dbPath)
+
+	// Create task
+	task := &Task{
+		Title:   "Test Task",
+		Body:    "Test body",
+		Status:  StatusBlocked,
+		Type:    TypeCode,
+		Project: "personal",
+	}
+	if err := db.CreateTask(task); err != nil {
+		t.Fatalf("failed to create task: %v", err)
+	}
+
+	// Set tmux IDs (simulate a running task)
+	if err := db.UpdateTaskWindowID(task.ID, "@999"); err != nil {
+		t.Fatalf("failed to update window ID: %v", err)
+	}
+	if err := db.UpdateTaskPaneIDs(task.ID, "%111", "%222"); err != nil {
+		t.Fatalf("failed to update pane IDs: %v", err)
+	}
+
+	// Retry the task with feedback
+	if err := db.RetryTask(task.ID, "Please try again"); err != nil {
+		t.Fatalf("failed to retry task: %v", err)
+	}
+
+	// Verify task status is queued and tmux IDs are cleared
+	fetched, err := db.GetTask(task.ID)
+	if err != nil {
+		t.Fatalf("failed to get task: %v", err)
+	}
+
+	if fetched.Status != StatusQueued {
+		t.Errorf("expected status %q, got %q", StatusQueued, fetched.Status)
+	}
+	if fetched.TmuxWindowID != "" {
+		t.Errorf("expected empty window ID after retry, got %q", fetched.TmuxWindowID)
+	}
+	if fetched.ClaudePaneID != "" {
+		t.Errorf("expected empty Claude pane ID after retry, got %q", fetched.ClaudePaneID)
+	}
+	if fetched.ShellPaneID != "" {
+		t.Errorf("expected empty Shell pane ID after retry, got %q", fetched.ShellPaneID)
+	}
+}

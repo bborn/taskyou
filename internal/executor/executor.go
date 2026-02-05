@@ -783,7 +783,7 @@ func (e *Executor) cleanupInactiveDoneTasks() {
 		e.logger.Info("Cleaning up inactive done task", "task", task.ID, "done_for", doneDuration.Round(time.Minute))
 		e.KillClaudeProcess(task.ID)
 
-		// Also kill the tmux window to fully clean up (kill ALL duplicates)
+		// Also kill the tmux window to fully clean up
 		windowName := TmuxWindowName(task.ID)
 		killAllWindowsByNameAllSessions(windowName)
 
@@ -2290,7 +2290,7 @@ func (e *Executor) resumeClaudeDangerous(task *db.Task, workDir string) bool {
 
 	windowName := TmuxWindowName(taskID)
 
-	// Kill ALL existing windows with this name across all sessions (handles duplicates)
+	// Kill ALL existing windows with this name (handles duplicates)
 	killAllWindowsByNameAllSessions(windowName)
 
 	// Ensure task-daemon session exists for creating new window
@@ -2447,7 +2447,7 @@ func (e *Executor) resumeClaudeSafe(task *db.Task, workDir string) bool {
 
 	windowName := TmuxWindowName(taskID)
 
-	// Kill ALL existing windows with this name across all sessions (handles duplicates)
+	// Kill ALL existing windows with this name (handles duplicates)
 	killAllWindowsByNameAllSessions(windowName)
 
 	// Ensure task-daemon session exists for creating new window
@@ -2564,6 +2564,7 @@ func (e *Executor) resumeCodexWithMode(task *db.Task, workDir string, dangerousM
 	}
 
 	windowName := TmuxWindowName(taskID)
+	// Kill ALL existing windows with this name (handles duplicates)
 	killAllWindowsByNameAllSessions(windowName)
 
 	daemonSession, err := ensureTmuxDaemon()
@@ -2658,6 +2659,7 @@ func (e *Executor) resumeGeminiWithMode(task *db.Task, workDir string, dangerous
 	}
 
 	windowName := TmuxWindowName(taskID)
+	// Kill ALL existing windows with this name (handles duplicates)
 	killAllWindowsByNameAllSessions(windowName)
 
 	daemonSession, err := ensureTmuxDaemon()
