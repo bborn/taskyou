@@ -56,6 +56,7 @@ classifier:
 # TaskYou integration
 taskyou:
   cli: ty  # Path to ty binary
+  dangerous: false  # Enable dangerous mode (allows destructive operations like force pushes)
 
 # Routing rules (optional)
 routing:
