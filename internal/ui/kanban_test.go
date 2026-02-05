@@ -1069,3 +1069,100 @@ func TestKanbanBoard_OriginColumnEmptyColumn(t *testing.T) {
 		t.Error("HasNextTask() should return false for empty column")
 	}
 }
+
+// TestKanbanBoard_SelectByShortcut tests selecting tasks by keyboard shortcuts 1-9.
+func TestKanbanBoard_SelectByShortcut(t *testing.T) {
+	board := NewKanbanBoard(100, 50)
+
+	// Set up tasks in the first column
+	tasks := []*db.Task{
+		{ID: 1, Title: "Task 1", Status: db.StatusBacklog},
+		{ID: 2, Title: "Task 2", Status: db.StatusBacklog},
+		{ID: 3, Title: "Task 3", Status: db.StatusBacklog},
+		{ID: 4, Title: "Task 4", Status: db.StatusBacklog},
+		{ID: 5, Title: "Task 5", Status: db.StatusBacklog},
+	}
+	board.SetTasks(tasks)
+
+	tests := []struct {
+		name       string
+		shortcut   int
+		wantTaskID int64
+		wantNil    bool
+	}{
+		{"shortcut 1 selects first task", 1, 1, false},
+		{"shortcut 2 selects second task", 2, 2, false},
+		{"shortcut 3 selects third task", 3, 3, false},
+		{"shortcut 5 selects fifth task", 5, 5, false},
+		{"shortcut 6 returns nil (only 5 tasks)", 6, 0, true},
+		{"shortcut 9 returns nil (only 5 tasks)", 9, 0, true},
+		{"shortcut 0 returns nil (invalid)", 0, 0, true},
+		{"shortcut 10 returns nil (out of range)", 10, 0, true},
+		{"shortcut -1 returns nil (invalid)", -1, 0, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Reset selection
+			board.selectedRow = 0
+
+			task := board.SelectByShortcut(tt.shortcut)
+
+			if tt.wantNil {
+				if task != nil {
+					t.Errorf("SelectByShortcut(%d) = task %d, want nil", tt.shortcut, task.ID)
+				}
+			} else {
+				if task == nil {
+					t.Errorf("SelectByShortcut(%d) = nil, want task %d", tt.shortcut, tt.wantTaskID)
+				} else if task.ID != tt.wantTaskID {
+					t.Errorf("SelectByShortcut(%d) = task %d, want task %d", tt.shortcut, task.ID, tt.wantTaskID)
+				}
+			}
+		})
+	}
+}
+
+// TestKanbanBoard_SelectByShortcutEmptyColumn tests SelectByShortcut on an empty column.
+func TestKanbanBoard_SelectByShortcutEmptyColumn(t *testing.T) {
+	board := NewKanbanBoard(100, 50)
+	board.SetTasks([]*db.Task{})
+
+	// Should return nil for any shortcut
+	task := board.SelectByShortcut(1)
+	if task != nil {
+		t.Errorf("SelectByShortcut(1) on empty column returned task, want nil")
+	}
+}
+
+// TestKanbanBoard_SelectByShortcutWithPinnedTasks tests that shortcuts work correctly
+// when there are pinned tasks at the top.
+func TestKanbanBoard_SelectByShortcutWithPinnedTasks(t *testing.T) {
+	board := NewKanbanBoard(100, 50)
+
+	tasks := []*db.Task{
+		{ID: 1, Title: "Pinned 1", Status: db.StatusBacklog, Pinned: true},
+		{ID: 2, Title: "Pinned 2", Status: db.StatusBacklog, Pinned: true},
+		{ID: 3, Title: "Task 3", Status: db.StatusBacklog},
+		{ID: 4, Title: "Task 4", Status: db.StatusBacklog},
+	}
+	board.SetTasks(tasks)
+
+	// Shortcut 1 should select the first pinned task
+	task := board.SelectByShortcut(1)
+	if task == nil || task.ID != 1 {
+		t.Errorf("SelectByShortcut(1) = %v, want task 1", task)
+	}
+
+	// Shortcut 3 should select the first unpinned task
+	task = board.SelectByShortcut(3)
+	if task == nil || task.ID != 3 {
+		t.Errorf("SelectByShortcut(3) = %v, want task 3", task)
+	}
+
+	// Shortcut 4 should select task 4
+	task = board.SelectByShortcut(4)
+	if task == nil || task.ID != 4 {
+		t.Errorf("SelectByShortcut(4) = %v, want task 4", task)
+	}
+}

@@ -1246,6 +1246,16 @@ func (m *AppModel) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.kanban.MoveDown()
 		return m, nil
 
+	// Numeric shortcuts 1-9 to select visible tasks in current column
+	case msg.String() == "1", msg.String() == "2", msg.String() == "3",
+		msg.String() == "4", msg.String() == "5", msg.String() == "6",
+		msg.String() == "7", msg.String() == "8", msg.String() == "9":
+		num := int(msg.String()[0] - '0')
+		if task := m.kanban.SelectByShortcut(num); task != nil {
+			return m, m.loadTask(task.ID)
+		}
+		return m, nil
+
 	// Jump to pinned/unpinned tasks
 	case key.Matches(msg, m.keys.JumpToPinned):
 		m.kanban.JumpToPinned()

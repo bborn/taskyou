@@ -2,6 +2,7 @@
 package ui
 
 import (
+	"fmt"
 	"os"
 	"strings"
 	"sync"
@@ -454,4 +455,65 @@ func PRStatusDescription(pr *github.PRInfo) string {
 		return ""
 	}
 	return pr.StatusDescription()
+}
+
+// Diff stat colors (git-style green/red)
+var (
+	ColorDiffAdd = lipgloss.Color("#98C379") // Green for additions
+	ColorDiffDel = lipgloss.Color("#E06C75") // Red for deletions
+)
+
+// PRDiffStats returns a formatted diff stats string like "+123 -45" with colors.
+// Returns empty string if no changes or PR is nil.
+func PRDiffStats(pr *github.PRInfo) string {
+	if pr == nil {
+		return ""
+	}
+	if pr.Additions == 0 && pr.Deletions == 0 {
+		return ""
+	}
+
+	addStyle := lipgloss.NewStyle().Foreground(ColorDiffAdd)
+	delStyle := lipgloss.NewStyle().Foreground(ColorDiffDel)
+
+	var parts []string
+	if pr.Additions > 0 {
+		parts = append(parts, addStyle.Render(formatDiffNum(pr.Additions, "+")))
+	}
+	if pr.Deletions > 0 {
+		parts = append(parts, delStyle.Render(formatDiffNum(pr.Deletions, "-")))
+	}
+
+	return strings.Join(parts, " ")
+}
+
+// PRDiffStatsPlain returns diff stats without color (for selected items).
+func PRDiffStatsPlain(pr *github.PRInfo) string {
+	if pr == nil {
+		return ""
+	}
+	if pr.Additions == 0 && pr.Deletions == 0 {
+		return ""
+	}
+
+	var parts []string
+	if pr.Additions > 0 {
+		parts = append(parts, formatDiffNum(pr.Additions, "+"))
+	}
+	if pr.Deletions > 0 {
+		parts = append(parts, formatDiffNum(pr.Deletions, "-"))
+	}
+
+	return strings.Join(parts, " ")
+}
+
+// formatDiffNum formats a number with prefix, using K suffix for large numbers.
+func formatDiffNum(n int, prefix string) string {
+	if n >= 10000 {
+		return prefix + fmt.Sprintf("%.0fk", float64(n)/1000)
+	}
+	if n >= 1000 {
+		return prefix + fmt.Sprintf("%.1fk", float64(n)/1000)
+	}
+	return prefix + fmt.Sprintf("%d", n)
 }
