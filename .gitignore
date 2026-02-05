@@ -38,3 +38,7 @@ bin/
 
 # Tmux
 tmux-*.log
+
+# VHS demo output
+demo.gif
+demo.mp4

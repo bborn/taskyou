@@ -27,7 +27,25 @@ This creates `~/.local/share/task/demo.db` with:
 - Font size: 14-16pt for readability in video
 - Consider using a simple prompt like `$` or hide it entirely
 
-### 3. Start Recording
+### 3. Automated Recording with VHS
+
+The easiest way to record is using [VHS](https://github.com/charmbracelet/vhs) which generates a GIF and MP4 from a scripted tape file:
+
+```bash
+# Install VHS
+brew install vhs
+
+# Record the demo (builds, seeds, and records)
+make demo-record
+```
+
+This runs `demo.tape` which automates the entire walkthrough and outputs `demo.gif` and `demo.mp4`.
+
+Edit `demo.tape` to adjust timing, scenes, or add new interactions.
+
+### 4. Manual Recording
+
+For a manual screencast (voiceover, custom pacing):
 
 ```bash
 # Launch TaskYou with demo database

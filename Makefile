@@ -106,4 +106,8 @@ demo-seed:
 demo: demo-seed
 	WORKTREE_DB_PATH=~/.local/share/task/demo.db ./bin/task -l
 
+# Record demo GIF/MP4 using VHS (brew install vhs)
+demo-record: build demo-seed
+	vhs demo.tape
+
 .DEFAULT_GOAL := build
