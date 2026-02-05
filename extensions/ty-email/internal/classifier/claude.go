@@ -150,6 +150,7 @@ Guidelines:
 - Extract a clear, actionable title for new tasks
 - Include relevant details in the body
 - If the email is a reply in a thread about a blocked task, it's likely providing "input"
+- Set "execute": true if user wants immediate execution (phrases like "and run it", "execute now", "do it", "start this", "asap", etc.)
 - Be friendly in replies, confirm what action you took
 - If unsure, ask for clarification in the reply and use lower confidence
 

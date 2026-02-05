@@ -774,6 +774,21 @@ ssh-keygen -lf ~/.ssh/id_ed25519.pub
 
 Password authentication is disabled by default.
 
+## Extensions
+
+### ty-email
+
+Email interface for TaskYou. Send emails to create tasks, reply to provide input, receive status updates—all from your phone or any email client.
+
+```bash
+cd extensions/ty-email
+go build -o ty-email ./cmd
+./ty-email init   # Interactive setup wizard
+./ty-email serve  # Run daemon
+```
+
+See [extensions/ty-email/README.md](extensions/ty-email/README.md) for full documentation.
+
 ## Development
 
 ```bash

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/smtp"
 	"os/exec"
 	"strings"
 	"sync"
@@ -307,9 +308,49 @@ func (a *IMAPAdapter) Emails() <-chan *Email {
 }
 
 func (a *IMAPAdapter) Send(ctx context.Context, email *OutboundEmail) error {
-	// TODO: Implement SMTP sending
-	// For now, just log
-	a.logger.Info("would send email", "to", email.To, "subject", email.Subject)
+	if a.smtp == nil {
+		a.logger.Warn("SMTP not configured, cannot send email")
+		return fmt.Errorf("SMTP not configured")
+	}
+
+	// Get password
+	password := ""
+	if a.smtp.PasswordCmd != "" {
+		out, err := exec.Command("sh", "-c", a.smtp.PasswordCmd).Output()
+		if err != nil {
+			return fmt.Errorf("failed to get SMTP password: %w", err)
+		}
+		password = strings.TrimSpace(string(out))
+	}
+
+	// Parse server address
+	host := a.smtp.Server
+	if !strings.Contains(host, ":") {
+		host = host + ":587"
+	}
+	hostOnly := strings.Split(host, ":")[0]
+
+	// Build message
+	var msg bytes.Buffer
+	msg.WriteString(fmt.Sprintf("From: %s\r\n", a.smtp.From))
+	msg.WriteString(fmt.Sprintf("To: %s\r\n", strings.Join(email.To, ", ")))
+	msg.WriteString(fmt.Sprintf("Subject: %s\r\n", email.Subject))
+	if email.InReplyTo != "" {
+		msg.WriteString(fmt.Sprintf("In-Reply-To: %s\r\n", email.InReplyTo))
+		msg.WriteString(fmt.Sprintf("References: %s\r\n", email.InReplyTo))
+	}
+	msg.WriteString("MIME-Version: 1.0\r\n")
+	msg.WriteString("Content-Type: text/plain; charset=utf-8\r\n")
+	msg.WriteString("\r\n")
+	msg.WriteString(email.Body)
+
+	// Send via SMTP
+	auth := smtp.PlainAuth("", a.smtp.Username, password, hostOnly)
+	if err := smtp.SendMail(host, auth, a.smtp.From, email.To, msg.Bytes()); err != nil {
+		return fmt.Errorf("failed to send email: %w", err)
+	}
+
+	a.logger.Info("sent email via SMTP", "to", email.To, "subject", email.Subject)
 	return nil
 }
 
