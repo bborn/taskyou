@@ -1,0 +1,52 @@
+# ty-openworkflow configuration
+# Copy this to ~/.config/ty-openworkflow/config.yaml
+
+# Data directory for state and workflow files
+data_dir: ~/.config/ty-openworkflow
+
+# Default compute adapter to use
+default_adapter: exec
+
+# Compute adapter configurations
+adapters:
+  # Local process execution (always available)
+  exec:
+    enabled: true
+    work_dir: ~/.config/ty-openworkflow/exec
+
+  # Docker container execution
+  docker:
+    enabled: false
+    work_dir: ~/.config/ty-openworkflow/docker
+    network: ""  # Optional Docker network
+
+  # Cloudflare Workers (serverless edge)
+  cloudflare:
+    enabled: false
+    account_id: ""
+    # API token - use api_token_cmd for secure retrieval
+    api_token: ""
+    api_token_cmd: "op read 'op://Private/Cloudflare/api_token'"
+    namespace: ""  # KV namespace for workflow state
+
+# Webhook server for receiving workflow completion callbacks
+webhook:
+  enabled: false
+  port: 8765
+  host: localhost
+  path: /webhook
+  # External URL for compute platforms to callback to
+  # Required if using Cloudflare or other external platforms
+  external_url: ""
+
+# TaskYou integration
+taskyou:
+  # Path to ty CLI binary
+  cli: ty
+  # Default project for created tasks
+  project: ""
+  # Automatically create tasks for workflow runs
+  auto_create_tasks: true
+
+# How often to poll for workflow status updates
+poll_interval: 30s
