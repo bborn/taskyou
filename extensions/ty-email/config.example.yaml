@@ -1,0 +1,70 @@
+# ty-email configuration
+# Copy to ~/.config/ty-email/config.yaml and customize
+
+# Email input adapter
+adapter:
+  type: imap  # Options: imap, gmail, webhook
+
+  # IMAP configuration (for Fastmail, ProtonMail, etc.)
+  imap:
+    server: imap.fastmail.com:993
+    username: you@yourdomain.com
+    # Command to get password (e.g., from 1Password, pass, or keychain)
+    password_cmd: "op read 'op://Private/Fastmail/password'"
+    # Or set directly (less secure):
+    # password: your-password
+    folder: INBOX
+    poll_interval: 30s
+
+  # Gmail configuration (OAuth2)
+  # gmail:
+  #   credentials_file: ~/.config/ty-email/gmail-credentials.json
+  #   token_file: ~/.config/ty-email/gmail-token.json
+  #   poll_interval: 30s
+
+  # Webhook configuration (for Mailgun, Postmark, etc.)
+  # webhook:
+  #   listen: :8080
+  #   path: /webhook/email
+  #   secret: your-webhook-secret
+
+# SMTP for sending replies
+smtp:
+  server: smtp.fastmail.com:587
+  username: you@yourdomain.com
+  password_cmd: "op read 'op://Private/Fastmail/password'"
+  from: tasks@yourdomain.com
+
+# LLM classifier configuration
+classifier:
+  provider: claude  # Options: claude, openai, ollama
+  model: claude-sonnet-4-20250514  # Or claude-3-5-haiku-latest for cheaper
+  api_key_cmd: "op read 'op://Private/Anthropic/api_key'"
+  # Or set directly:
+  # api_key: sk-ant-...
+
+  # OpenAI configuration
+  # provider: openai
+  # model: gpt-4o
+  # api_key_cmd: "op read 'op://Private/OpenAI/api_key'"
+
+  # Ollama configuration (local)
+  # provider: ollama
+  # model: llama3.2
+  # base_url: http://localhost:11434
+
+# TaskYou integration
+taskyou:
+  cli: ty  # Path to ty binary
+
+# Routing rules (optional)
+routing:
+  default_project: personal
+  # Rules are evaluated in order, first match wins
+  # rules:
+  #   - match: "from:support@"
+  #     project: customer-support
+  #   - match: "subject:[urgent]"
+  #     execute: true  # Auto-queue for execution
+  #   - match: "to:dev@"
+  #     project: development
