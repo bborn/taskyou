@@ -1775,6 +1775,30 @@ func (m *AppModel) applyFilter() {
 
 	queryLower := strings.ToLower(m.filterText)
 
+	// Resolve project aliases in "[project]" filter syntax
+	if strings.HasPrefix(queryLower, "[") {
+		var projectPart string
+		var rest string
+		if idx := strings.Index(queryLower, "] "); idx != -1 {
+			projectPart = queryLower[1:idx]
+			rest = queryLower[idx+2:]
+		} else {
+			projectPart = strings.TrimSuffix(strings.TrimPrefix(queryLower, "["), "]")
+		}
+		if projectPart != "" {
+			if p, err := m.db.GetProjectByName(projectPart); err == nil && p != nil {
+				canonical := strings.ToLower(p.Name)
+				if rest != "" {
+					queryLower = "[" + canonical + "] " + rest
+				} else if strings.HasSuffix(queryLower, "]") {
+					queryLower = "[" + canonical + "]"
+				} else {
+					queryLower = "[" + canonical
+				}
+			}
+		}
+	}
+
 	// Score all tasks using fuzzy matching
 	var scored []scoredTask
 	for _, task := range m.tasks {

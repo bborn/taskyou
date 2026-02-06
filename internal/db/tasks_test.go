@@ -1334,13 +1334,78 @@ func TestCreateTaskAllowsProjectAlias(t *testing.T) {
 		t.Fatalf("expected task creation with alias to succeed, got error: %v", err)
 	}
 
-	// Verify task was created with the alias (not the full name)
+	// Verify task was created with the canonical project name (not the alias)
 	retrieved, err := db.GetTask(task.ID)
 	if err != nil {
 		t.Fatalf("failed to get task: %v", err)
 	}
-	if retrieved.Project != "myproj" {
-		t.Errorf("expected project 'myproj', got '%s'", retrieved.Project)
+	if retrieved.Project != "my-long-project-name" {
+		t.Errorf("expected canonical project name 'my-long-project-name', got '%s'", retrieved.Project)
+	}
+
+	// Verify the task object itself was updated with the canonical name
+	if task.Project != "my-long-project-name" {
+		t.Errorf("expected task.Project to be updated to 'my-long-project-name', got '%s'", task.Project)
+	}
+}
+
+func TestListTasksResolvesProjectAlias(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	db, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer db.Close()
+	defer os.Remove(dbPath)
+
+	// Create a project with aliases
+	project := &Project{
+		Name:    "my-project",
+		Path:    tmpDir,
+		Aliases: "mp, myproj",
+	}
+	if err := db.CreateProject(project); err != nil {
+		t.Fatalf("failed to create project: %v", err)
+	}
+
+	// Create a task in the project (using canonical name)
+	task := &Task{
+		Title:   "Test Task",
+		Status:  StatusBacklog,
+		Type:    TypeCode,
+		Project: "my-project",
+	}
+	if err := db.CreateTask(task); err != nil {
+		t.Fatalf("failed to create task: %v", err)
+	}
+
+	// ListTasks with alias should find the task
+	tasks, err := db.ListTasks(ListTasksOptions{Project: "mp"})
+	if err != nil {
+		t.Fatalf("failed to list tasks: %v", err)
+	}
+	if len(tasks) != 1 {
+		t.Errorf("expected 1 task when filtering by alias 'mp', got %d", len(tasks))
+	}
+
+	// ListTasks with another alias should also find the task
+	tasks, err = db.ListTasks(ListTasksOptions{Project: "myproj"})
+	if err != nil {
+		t.Fatalf("failed to list tasks: %v", err)
+	}
+	if len(tasks) != 1 {
+		t.Errorf("expected 1 task when filtering by alias 'myproj', got %d", len(tasks))
+	}
+
+	// ListTasks with canonical name should still work
+	tasks, err = db.ListTasks(ListTasksOptions{Project: "my-project"})
+	if err != nil {
+		t.Fatalf("failed to list tasks: %v", err)
+	}
+	if len(tasks) != 1 {
+		t.Errorf("expected 1 task when filtering by canonical name, got %d", len(tasks))
 	}
 }
 
@@ -2001,6 +2066,58 @@ func TestRetryTaskClearsTmuxIDs(t *testing.T) {
 	}
 	if fetched.ShellPaneID != "" {
 		t.Errorf("expected empty Shell pane ID after retry, got %q", fetched.ShellPaneID)
+	}
+}
+
+func TestMigrateProjectAliases(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	db, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer db.Close()
+	defer os.Remove(dbPath)
+
+	// Create a project with aliases
+	project := &Project{
+		Name:    "my-project",
+		Path:    tmpDir,
+		Aliases: "mp, myp",
+	}
+	if err := db.CreateProject(project); err != nil {
+		t.Fatalf("failed to create project: %v", err)
+	}
+
+	// Manually insert a task with the alias as project (simulating old buggy behavior)
+	_, err = db.Exec(`INSERT INTO tasks (title, status, project) VALUES (?, ?, ?)`, "Aliased Task", StatusBacklog, "mp")
+	if err != nil {
+		t.Fatalf("failed to insert task with alias: %v", err)
+	}
+
+	// Run the migration
+	if err := db.migrateProjectAliases(); err != nil {
+		t.Fatalf("migration failed: %v", err)
+	}
+
+	// Verify the task was migrated to canonical name
+	tasks, err := db.ListTasks(ListTasksOptions{Project: "my-project"})
+	if err != nil {
+		t.Fatalf("failed to list tasks: %v", err)
+	}
+
+	found := false
+	for _, task := range tasks {
+		if task.Title == "Aliased Task" {
+			found = true
+			if task.Project != "my-project" {
+				t.Errorf("expected task project to be 'my-project' after migration, got '%s'", task.Project)
+			}
+		}
+	}
+	if !found {
+		t.Error("expected to find 'Aliased Task' in project 'my-project' after migration")
 	}
 }
 

@@ -117,7 +117,7 @@ func (db *DB) CreateTask(t *Task) error {
 		t.Executor = DefaultExecutor()
 	}
 
-	// Validate that the project exists
+	// Validate that the project exists and resolve aliases to canonical name
 	project, err := db.GetProjectByName(t.Project)
 	if err != nil {
 		return fmt.Errorf("validate project: %w", err)
@@ -125,6 +125,7 @@ func (db *DB) CreateTask(t *Task) error {
 	if project == nil {
 		return fmt.Errorf("%w: %s", ErrProjectNotFound, t.Project)
 	}
+	t.Project = project.Name
 
 	result, err := db.Exec(`
 		INSERT INTO tasks (title, body, status, type, project, executor, pinned, tags, source_branch)
@@ -237,8 +238,13 @@ func (db *DB) ListTasks(opts ListTasksOptions) ([]*Task, error) {
 		args = append(args, opts.Type)
 	}
 	if opts.Project != "" {
+		// Resolve alias to canonical project name
+		projectName := opts.Project
+		if p, err := db.GetProjectByName(opts.Project); err == nil && p != nil {
+			projectName = p.Name
+		}
 		query += " AND project = ?"
-		args = append(args, opts.Project)
+		args = append(args, projectName)
 	}
 
 	// Exclude done and archived by default unless specifically querying for them or includeClosed is set

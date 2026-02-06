@@ -294,6 +294,11 @@ func (db *DB) migrate() error {
 		return fmt.Errorf("ensure project colors: %w", err)
 	}
 
+	// Resolve any task project aliases to canonical project names
+	if err := db.migrateProjectAliases(); err != nil {
+		return fmt.Errorf("migrate project aliases: %w", err)
+	}
+
 	return nil
 }
 
@@ -443,6 +448,28 @@ func (db *DB) ensureProjectColors() error {
 		_, err := db.Exec(`UPDATE projects SET color = ? WHERE id = ?`, color, p.ID)
 		if err != nil {
 			return fmt.Errorf("update project color: %w", err)
+		}
+	}
+
+	return nil
+}
+
+// migrateProjectAliases finds tasks whose project field contains an alias
+// instead of the canonical project name, and updates them to use the canonical name.
+func (db *DB) migrateProjectAliases() error {
+	projects, err := db.ListProjects()
+	if err != nil {
+		return fmt.Errorf("list projects: %w", err)
+	}
+
+	// Build a map of alias -> canonical name
+	for _, p := range projects {
+		for _, alias := range splitAliases(p.Aliases) {
+			// Update any tasks that have the alias as their project
+			_, err := db.Exec(`UPDATE tasks SET project = ? WHERE project = ?`, p.Name, alias)
+			if err != nil {
+				return fmt.Errorf("update tasks for alias %q -> %q: %w", alias, p.Name, err)
+			}
 		}
 	}
 
