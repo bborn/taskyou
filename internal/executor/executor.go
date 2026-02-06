@@ -923,11 +923,19 @@ func (e *Executor) executeTask(ctx context.Context, task *db.Task) {
 		if len(attachmentPaths) > 0 {
 			feedbackWithAttachments = retryFeedback + "\n" + e.getAttachmentsSection(task.ID, attachmentPaths, workDir)
 		}
-		e.logLine(task.ID, "system", fmt.Sprintf("Resuming previous session with feedback (executor: %s)", executorName))
+		modelInfo := ""
+		if task.Model != "" {
+			modelInfo = fmt.Sprintf(", model: %s", task.Model)
+		}
+		e.logLine(task.ID, "system", fmt.Sprintf("Resuming previous session with feedback (executor: %s%s)", executorName, modelInfo))
 		execResult := taskExecutor.Resume(taskCtx, task, workDir, prompt, feedbackWithAttachments)
 		result = execResult.toInternal()
 	} else {
-		e.logLine(task.ID, "system", fmt.Sprintf("Starting new session (executor: %s)", executorName))
+		modelInfo := ""
+		if task.Model != "" {
+			modelInfo = fmt.Sprintf(", model: %s", task.Model)
+		}
+		e.logLine(task.ID, "system", fmt.Sprintf("Starting new session (executor: %s%s)", executorName, modelInfo))
 		execResult := taskExecutor.Execute(taskCtx, task, workDir, prompt)
 		result = execResult.toInternal()
 	}
@@ -1986,6 +1994,11 @@ func (e *Executor) runClaude(ctx context.Context, task *db.Task, workDir, prompt
 	if task.DangerousMode || os.Getenv("WORKTREE_DANGEROUS_MODE") == "1" {
 		dangerousFlag = "--dangerously-skip-permissions "
 	}
+	// Use --model if task has a model override
+	modelFlag := ""
+	if task.Model != "" {
+		modelFlag = fmt.Sprintf("--model %s ", task.Model)
+	}
 	// Build system prompt flag - passes task guidance via system prompt to keep conversation clean
 	systemPromptFlag := fmt.Sprintf(`--append-system-prompt "$(cat %q)" `, systemFile.Name())
 
@@ -1997,8 +2010,8 @@ func (e *Executor) runClaude(ctx context.Context, task *db.Task, workDir, prompt
 	envPrefix := claudeEnvPrefix(paths.configDir)
 	if existingSessionID != "" && ClaudeSessionExists(existingSessionID, workDir, paths.configDir) {
 		e.logLine(task.ID, "system", fmt.Sprintf("Resuming existing session %s", existingSessionID))
-		script = fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %sclaude %s%s--chrome --resume %s "$(cat %q)"`,
-			task.ID, sessionID, task.Port, task.WorktreePath, envPrefix, dangerousFlag, systemPromptFlag, existingSessionID, promptFile.Name())
+		script = fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %sclaude %s%s%s--chrome --resume %s "$(cat %q)"`,
+			task.ID, sessionID, task.Port, task.WorktreePath, envPrefix, dangerousFlag, modelFlag, systemPromptFlag, existingSessionID, promptFile.Name())
 	} else {
 		if existingSessionID != "" {
 			e.logLine(task.ID, "system", fmt.Sprintf("Session %s no longer exists, starting fresh", existingSessionID))
@@ -2007,8 +2020,8 @@ func (e *Executor) runClaude(ctx context.Context, task *db.Task, workDir, prompt
 				e.logger.Warn("failed to clear stale session ID", "task", task.ID, "error", err)
 			}
 		}
-		script = fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %sclaude %s%s--chrome "$(cat %q)"`,
-			task.ID, sessionID, task.Port, task.WorktreePath, envPrefix, dangerousFlag, systemPromptFlag, promptFile.Name())
+		script = fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %sclaude %s%s%s--chrome "$(cat %q)"`,
+			task.ID, sessionID, task.Port, task.WorktreePath, envPrefix, dangerousFlag, modelFlag, systemPromptFlag, promptFile.Name())
 	}
 
 	// Create new window in task-daemon session (with retry logic for race conditions)
@@ -2160,12 +2173,17 @@ func (e *Executor) runClaudeResume(ctx context.Context, task *db.Task, workDir, 
 	if task.DangerousMode || os.Getenv("WORKTREE_DANGEROUS_MODE") == "1" {
 		dangerousFlag = "--dangerously-skip-permissions "
 	}
+	// Use --model if task has a model override
+	modelFlag := ""
+	if task.Model != "" {
+		modelFlag = fmt.Sprintf("--model %s ", task.Model)
+	}
 	// Build system prompt flag - passes task guidance via system prompt to keep conversation clean
 	systemPromptFlag := fmt.Sprintf(`--append-system-prompt "$(cat %q)" `, systemFile.Name())
 
 	envPrefix := claudeEnvPrefix(paths.configDir)
-	script := fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %sclaude %s%s--chrome --resume %s "$(cat %q)"`,
-		task.ID, taskSessionID, task.Port, task.WorktreePath, envPrefix, dangerousFlag, systemPromptFlag, claudeSessionID, feedbackFile.Name())
+	script := fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %sclaude %s%s%s--chrome --resume %s "$(cat %q)"`,
+		task.ID, taskSessionID, task.Port, task.WorktreePath, envPrefix, dangerousFlag, modelFlag, systemPromptFlag, claudeSessionID, feedbackFile.Name())
 
 	// Create new window in task-daemon session (with retry logic for race conditions)
 	actualSession, tmuxErr := createTmuxWindow(daemonSession, windowName, workDir, script)
@@ -2320,9 +2338,14 @@ func (e *Executor) resumeClaudeDangerous(task *db.Task, workDir string) bool {
 	}
 
 	// Force dangerous mode regardless of WORKTREE_DANGEROUS_MODE setting
+	// Use --model if task has a model override
+	modelFlag := ""
+	if task.Model != "" {
+		modelFlag = fmt.Sprintf("--model %s ", task.Model)
+	}
 	envPrefix := claudeEnvPrefix(paths.configDir)
-	script := fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %sclaude --dangerously-skip-permissions --chrome --resume %s`,
-		taskID, taskSessionID, task.Port, task.WorktreePath, envPrefix, claudeSessionID)
+	script := fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %sclaude --dangerously-skip-permissions %s--chrome --resume %s`,
+		taskID, taskSessionID, task.Port, task.WorktreePath, envPrefix, modelFlag, claudeSessionID)
 
 	// Create new window in task-daemon session (with retry logic for race conditions)
 	actualSession, tmuxErr := createTmuxWindow(daemonSession, windowName, workDir, script)
@@ -2485,9 +2508,14 @@ func (e *Executor) resumeClaudeSafe(task *db.Task, workDir string) bool {
 	}
 
 	// Resume without --dangerously-skip-permissions (safe mode)
+	// Use --model if task has a model override
+	modelFlag := ""
+	if task.Model != "" {
+		modelFlag = fmt.Sprintf("--model %s ", task.Model)
+	}
 	envPrefix := claudeEnvPrefix(paths.configDir)
-	script := fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %sclaude --chrome --resume %s`,
-		taskID, taskSessionID, task.Port, task.WorktreePath, envPrefix, claudeSessionID)
+	script := fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %sclaude %s--chrome --resume %s`,
+		taskID, taskSessionID, task.Port, task.WorktreePath, envPrefix, modelFlag, claudeSessionID)
 
 	// Create new window in task-daemon session (with retry logic for race conditions)
 	actualSession, tmuxErr := createTmuxWindow(daemonSession, windowName, workDir, script)
