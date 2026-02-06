@@ -333,6 +333,8 @@ type AppModel struct {
 	prevStatuses map[int64]string
 	// Track tasks with active input notifications (for UI highlighting)
 	tasksNeedingInput map[int64]bool
+	// Track tasks the user closed manually (suppress notification for these)
+	userClosedTaskIDs map[int64]bool
 
 	// Real-time event subscription
 	eventCh chan executor.TaskEvent
@@ -528,6 +530,7 @@ func NewAppModel(database *db.DB, exec *executor.Executor, workingDir string) *A
 		loading:            true,
 		prevStatuses:       make(map[int64]string),
 		tasksNeedingInput:  make(map[int64]bool),
+		userClosedTaskIDs:  make(map[int64]bool),
 		watcher:            watcher,
 		dbChangeCh:         dbChangeCh,
 		prCache:            github.NewPRCache(),
@@ -938,8 +941,12 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					prevStatus := t.Status
 					m.tasks[i] = event.Task
 
-					// Show notification for status changes
+					// Show notification for status changes (skip if user closed this task manually)
 					if prevStatus != event.Task.Status {
+						userClosed := m.userClosedTaskIDs[event.TaskID]
+						if userClosed {
+							delete(m.userClosedTaskIDs, event.TaskID)
+						}
 						if event.Task.Status == db.StatusBlocked {
 							m.notification = fmt.Sprintf("⚠ Task #%d needs input: %s (g to jump)", event.TaskID, event.Task.Title)
 							m.notifyUntil = time.Now().Add(10 * time.Second)
@@ -947,7 +954,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 							RingBell() // Ring terminal bell (writes to /dev/tty to bypass TUI)
 							// Mark task as needing input for kanban highlighting
 							m.tasksNeedingInput[event.TaskID] = true
-						} else if event.Task.Status == db.StatusDone && db.IsInProgress(prevStatus) {
+						} else if event.Task.Status == db.StatusDone && db.IsInProgress(prevStatus) && !userClosed {
 							m.notification = fmt.Sprintf("✓ Task #%d complete: %s (g to jump)", event.TaskID, event.Task.Title)
 							m.notifyUntil = time.Now().Add(5 * time.Second)
 							m.notifyTaskID = event.TaskID
@@ -2391,6 +2398,7 @@ func (m *AppModel) updateCloseConfirm(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.detailView = nil
 			}
 			m.currentView = ViewDashboard
+			m.userClosedTaskIDs[taskID] = true
 			return m, m.closeTask(taskID)
 		}
 		// Cancelled - return to previous view
