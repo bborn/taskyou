@@ -82,11 +82,13 @@ type KeyMap struct {
 	// Jump to pinned/unpinned tasks
 	JumpToPinned   key.Binding
 	JumpToUnpinned key.Binding
+	// Open browser
+	OpenBrowser key.Binding
 }
 
 // ShortHelp returns key bindings to show in the mini help.
 func (k KeyMap) ShortHelp() []key.Binding {
-	return []key.Binding{k.Left, k.Right, k.Up, k.Down, k.Enter, k.New, k.Queue, k.Filter, k.CommandPalette, k.Quit}
+	return []key.Binding{k.Left, k.Right, k.Up, k.Down, k.Enter, k.New, k.Queue, k.Filter, k.CommandPalette, k.OpenBrowser, k.Quit}
 }
 
 // FullHelp returns keybindings for the expanded help view.
@@ -96,7 +98,7 @@ func (k KeyMap) FullHelp() [][]key.Binding {
 		{k.JumpToPinned, k.JumpToUnpinned},
 		{k.FocusBacklog, k.FocusInProgress, k.FocusBlocked, k.FocusDone},
 		{k.Enter, k.New, k.Queue, k.Close},
-		{k.Retry, k.Archive, k.Delete, k.OpenWorktree},
+		{k.Retry, k.Archive, k.Delete, k.OpenWorktree, k.OpenBrowser},
 		{k.Filter, k.CommandPalette, k.Settings},
 		{k.ChangeStatus, k.TogglePin, k.Refresh, k.Help},
 		{k.Quit},
@@ -230,6 +232,10 @@ func DefaultKeyMap() KeyMap {
 			key.WithKeys("shift+down"),
 			key.WithHelp(IconShiftDown(), "jump to unpinned"),
 		),
+		OpenBrowser: key.NewBinding(
+			key.WithKeys("b"),
+			key.WithHelp("b", "open in browser"),
+		),
 	}
 }
 
@@ -288,6 +294,7 @@ func ApplyKeybindingsConfig(km KeyMap, cfg *config.KeybindingsConfig) KeyMap {
 	km.FocusDone = applyBinding(km.FocusDone, cfg.FocusDone)
 	km.JumpToPinned = applyBinding(km.JumpToPinned, cfg.JumpToPinned)
 	km.JumpToUnpinned = applyBinding(km.JumpToUnpinned, cfg.JumpToUnpinned)
+	km.OpenBrowser = applyBinding(km.OpenBrowser, cfg.OpenBrowser)
 
 	return km
 }
@@ -333,6 +340,8 @@ type AppModel struct {
 	prevStatuses map[int64]string
 	// Track tasks with active input notifications (for UI highlighting)
 	tasksNeedingInput map[int64]bool
+	// Track tasks the user closed manually (suppress notification for these)
+	userClosedTaskIDs map[int64]bool
 
 	// Real-time event subscription
 	eventCh chan executor.TaskEvent
@@ -429,6 +438,11 @@ type AppModel struct {
 
 	// Debug state file path
 	debugStatePath string
+
+	// First-time experience
+	isFirstLoad     bool // Track if this is the first load of tasks
+	showWelcome     bool // Show welcome message when kanban is empty
+	onboardingShown bool // Track if we've already shown the onboarding (to prevent double-triggering)
 }
 
 // taskExecutorDisplayName returns the display name for a task's executor.
@@ -528,6 +542,7 @@ func NewAppModel(database *db.DB, exec *executor.Executor, workingDir string) *A
 		loading:            true,
 		prevStatuses:       make(map[int64]string),
 		tasksNeedingInput:  make(map[int64]bool),
+		userClosedTaskIDs:  make(map[int64]bool),
 		watcher:            watcher,
 		dbChangeCh:         dbChangeCh,
 		prCache:            github.NewPRCache(),
@@ -536,6 +551,8 @@ func NewAppModel(database *db.DB, exec *executor.Executor, workingDir string) *A
 		filterAutocomplete: filterAutocomplete,
 		availableExecutors: availableExecutors,
 		aiCommandService:   aiCmdService,
+		isFirstLoad:        true,  // Track first load for onboarding
+		showWelcome:        false, // Will be set true when kanban is empty
 	}
 
 	return model
@@ -671,6 +688,25 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.loading = false
 		m.tasks = msg.tasks
 		m.err = msg.err
+
+		// First-time experience: auto-open new task form on first run when no tasks exist
+		if m.isFirstLoad {
+			m.isFirstLoad = false
+			m.showWelcome = len(msg.tasks) == 0
+
+			// If this is the very first run (no tasks, onboarding not completed), auto-open new task form
+			if len(msg.tasks) == 0 && m.db.IsFirstRun() && !m.onboardingShown {
+				m.onboardingShown = true
+				// Auto-open the new task form to guide users to create their first task
+				m.newTaskForm = NewFormModel(m.db, m.width, m.height, m.workingDir, m.availableExecutors)
+				m.previousView = m.currentView
+				m.currentView = ViewNewTask
+				return m, m.newTaskForm.Init()
+			}
+		}
+
+		// Update showWelcome based on current task count
+		m.showWelcome = len(msg.tasks) == 0
 
 		// Check for newly blocked/done tasks and notify
 		for _, t := range m.tasks {
@@ -814,6 +850,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err == nil {
 			m.currentView = ViewDashboard
 			m.newTaskForm = nil
+			m.showWelcome = false // Hide welcome message after first task is created
 			cmds = append(cmds, m.loadTasks())
 		} else {
 			m.err = msg.err
@@ -928,6 +965,15 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.notifyUntil = time.Now().Add(3 * time.Second)
 		}
 
+	case browserOpenedMsg:
+		if msg.err != nil {
+			m.notification = fmt.Sprintf("%s %s", IconBlocked(), msg.err.Error())
+			m.notifyUntil = time.Now().Add(5 * time.Second)
+		} else if msg.message != "" {
+			m.notification = fmt.Sprintf("🌐 %s", msg.message)
+			m.notifyUntil = time.Now().Add(3 * time.Second)
+		}
+
 	case taskEventMsg:
 		// Real-time task update from executor
 		event := msg.event
@@ -938,8 +984,12 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					prevStatus := t.Status
 					m.tasks[i] = event.Task
 
-					// Show notification for status changes
+					// Show notification for status changes (skip if user closed this task manually)
 					if prevStatus != event.Task.Status {
+						userClosed := m.userClosedTaskIDs[event.TaskID]
+						if userClosed {
+							delete(m.userClosedTaskIDs, event.TaskID)
+						}
 						if event.Task.Status == db.StatusBlocked {
 							m.notification = fmt.Sprintf("⚠ Task #%d needs input: %s (g to jump)", event.TaskID, event.Task.Title)
 							m.notifyUntil = time.Now().Add(10 * time.Second)
@@ -947,7 +997,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 							RingBell() // Ring terminal bell (writes to /dev/tty to bypass TUI)
 							// Mark task as needing input for kanban highlighting
 							m.tasksNeedingInput[event.TaskID] = true
-						} else if event.Task.Status == db.StatusDone && db.IsInProgress(prevStatus) {
+						} else if event.Task.Status == db.StatusDone && db.IsInProgress(prevStatus) && !userClosed {
 							m.notification = fmt.Sprintf("✓ Task #%d complete: %s (g to jump)", event.TaskID, event.Task.Title)
 							m.notifyUntil = time.Now().Add(5 * time.Second)
 							m.notifyTaskID = event.TaskID
@@ -1245,12 +1295,97 @@ func (m *AppModel) viewDashboard() string {
 	if filterBar != "" {
 		contentParts = append(contentParts, filterBar)
 	}
-	contentParts = append(contentParts, m.kanban.View(), helpView)
+
+	// Show welcome/getting started message when kanban is empty
+	if m.showWelcome && m.kanban.IsEmpty() {
+		welcomeView := m.renderWelcomeMessage(kanbanHeight)
+		contentParts = append(contentParts, welcomeView, helpView)
+	} else {
+		contentParts = append(contentParts, m.kanban.View(), helpView)
+	}
 
 	content := lipgloss.JoinVertical(lipgloss.Left, contentParts...)
 
 	// Use Place to fill the entire terminal
 	return lipgloss.Place(m.width, m.height, lipgloss.Left, lipgloss.Top, content)
+}
+
+// renderWelcomeMessage renders a friendly getting started message for first-time users.
+func (m *AppModel) renderWelcomeMessage(height int) string {
+	// Welcome title
+	titleStyle := lipgloss.NewStyle().
+		Bold(true).
+		Foreground(ColorPrimary).
+		MarginBottom(1)
+
+	// Subtitle style
+	subtitleStyle := lipgloss.NewStyle().
+		Foreground(ColorSecondary).
+		MarginBottom(2)
+
+	// Action style for keyboard shortcuts
+	actionStyle := lipgloss.NewStyle().
+		Bold(true).
+		Foreground(ColorPrimary)
+
+	// Description style
+	descStyle := lipgloss.NewStyle().
+		Foreground(ColorMuted)
+
+	// Build the welcome content
+	var lines []string
+
+	lines = append(lines, titleStyle.Render("Welcome to TaskYou!"))
+	lines = append(lines, subtitleStyle.Render("Your AI-powered task management system"))
+	lines = append(lines, "")
+
+	// Key actions
+	lines = append(lines, lipgloss.JoinHorizontal(lipgloss.Top,
+		actionStyle.Render("n"),
+		descStyle.Render("  Create your first task"),
+	))
+	lines = append(lines, "")
+
+	lines = append(lines, lipgloss.JoinHorizontal(lipgloss.Top,
+		actionStyle.Render("s"),
+		descStyle.Render("  Open settings to configure projects"),
+	))
+	lines = append(lines, "")
+
+	lines = append(lines, lipgloss.JoinHorizontal(lipgloss.Top,
+		actionStyle.Render("?"),
+		descStyle.Render("  Show all keyboard shortcuts"),
+	))
+	lines = append(lines, "")
+
+	// Executor status
+	if len(m.availableExecutors) == 0 {
+		warningStyle := lipgloss.NewStyle().
+			Foreground(ColorWarning).
+			MarginTop(1)
+		lines = append(lines, warningStyle.Render(IconBlocked()+" Install an AI executor to run tasks"))
+		lines = append(lines, descStyle.Render("   Visit: https://code.claude.com/docs/en/overview"))
+	} else {
+		readyStyle := lipgloss.NewStyle().
+			Foreground(ColorDone).
+			MarginTop(1)
+		executorList := strings.Join(m.availableExecutors, ", ")
+		lines = append(lines, readyStyle.Render(IconDone()+" Ready to run tasks with: "+executorList))
+	}
+
+	content := lipgloss.JoinVertical(lipgloss.Left, lines...)
+
+	// Center the content in a box
+	boxStyle := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(ColorPrimary).
+		Padding(2, 4).
+		Width(min(60, m.width-4))
+
+	boxed := boxStyle.Render(content)
+
+	// Center in available space
+	return lipgloss.Place(m.width, height, lipgloss.Center, lipgloss.Center, boxed)
 }
 
 // renderFilterBar renders the filter input bar.
@@ -1478,6 +1613,11 @@ func (m *AppModel) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, m.keys.OpenWorktree):
 		if task := m.kanban.SelectedTask(); task != nil {
 			return m, m.openWorktreeInEditor(task)
+		}
+
+	case key.Matches(msg, m.keys.OpenBrowser):
+		if task := m.kanban.SelectedTask(); task != nil {
+			return m, m.openBrowser(task)
 		}
 
 	case key.Matches(msg, m.keys.Settings):
@@ -1868,6 +2008,9 @@ func (m *AppModel) updateDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 	if key.Matches(keyMsg, m.keys.OpenWorktree) && m.selectedTask != nil {
 		return m, m.openWorktreeInEditor(m.selectedTask)
+	}
+	if key.Matches(keyMsg, m.keys.OpenBrowser) && m.selectedTask != nil {
+		return m, m.openBrowser(m.selectedTask)
 	}
 	if key.Matches(keyMsg, m.keys.ToggleShellPane) && m.detailView != nil {
 		m.detailView.ToggleShellPane()
@@ -2415,6 +2558,7 @@ func (m *AppModel) updateCloseConfirm(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.detailView = nil
 			}
 			m.currentView = ViewDashboard
+			m.userClosedTaskIDs[taskID] = true
 			return m, m.closeTask(taskID)
 		}
 		// Cancelled - return to previous view
@@ -2995,6 +3139,9 @@ func (m *AppModel) createTaskWithAttachments(t *db.Task, attachmentPaths []strin
 			return taskCreatedMsg{task: t, err: err}
 		}
 
+		// Mark onboarding as complete when first task is created
+		database.CompleteOnboarding()
+
 		// Add attachments if provided
 		for _, attachmentPath := range attachmentPaths {
 			if attachmentPath != "" {
@@ -3187,6 +3334,37 @@ func (m *AppModel) openWorktreeInEditor(task *db.Task) tea.Cmd {
 		}
 
 		return worktreeOpenedMsg{message: fmt.Sprintf("Opened %s", filepath.Base(task.WorktreePath))}
+	}
+}
+
+// browserOpenedMsg is returned when attempting to open the browser.
+type browserOpenedMsg struct {
+	message string
+	err     error
+}
+
+// openBrowser opens the task's server URL in the default browser.
+// The URL is {server_url}:{port} where server_url is configurable (default: http://localhost).
+func (m *AppModel) openBrowser(task *db.Task) tea.Cmd {
+	return func() tea.Msg {
+		if task.Port == 0 {
+			return browserOpenedMsg{err: fmt.Errorf("no port allocated for task #%d", task.ID)}
+		}
+
+		// Get server URL from settings, default to http://localhost
+		serverURL := config.DefaultServerURL
+		if url, err := m.db.GetSetting(config.SettingServerURL); err == nil && url != "" {
+			serverURL = url
+		}
+
+		url := fmt.Sprintf("%s:%d", serverURL, task.Port)
+		cmd := osExec.Command("open", url)
+
+		if err := cmd.Start(); err != nil {
+			return browserOpenedMsg{err: fmt.Errorf("failed to open browser: %w", err)}
+		}
+
+		return browserOpenedMsg{message: fmt.Sprintf("Opened %s", url)}
 	}
 }
 

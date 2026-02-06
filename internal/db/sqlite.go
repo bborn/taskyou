@@ -249,6 +249,8 @@ func (db *DB) migrate() error {
 		`ALTER TABLE tasks ADD COLUMN archive_commit TEXT DEFAULT ''`,        // Commit hash at time of archiving
 		`ALTER TABLE tasks ADD COLUMN archive_worktree_path TEXT DEFAULT ''`, // Original worktree path before archiving
 		`ALTER TABLE tasks ADD COLUMN archive_branch_name TEXT DEFAULT ''`,   // Original branch name before archiving
+		// Source branch for checking out existing branches in worktrees (e.g., for QA deployments)
+		`ALTER TABLE tasks ADD COLUMN source_branch TEXT DEFAULT ''`, // Existing branch to checkout instead of creating new branch
 	}
 
 	for _, m := range alterMigrations {

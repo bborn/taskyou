@@ -2120,3 +2120,58 @@ func TestMigrateProjectAliases(t *testing.T) {
 		t.Error("expected to find 'Aliased Task' in project 'my-project' after migration")
 	}
 }
+
+func TestOnboarding(t *testing.T) {
+	// Create temporary database
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	db, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer db.Close()
+
+	t.Run("IsFirstRun returns true initially", func(t *testing.T) {
+		// Clear any existing onboarding setting
+		db.Exec("DELETE FROM settings WHERE key = 'onboarding_completed'")
+
+		if !db.IsFirstRun() {
+			t.Error("expected IsFirstRun to return true initially")
+		}
+	})
+
+	t.Run("CompleteOnboarding marks onboarding complete", func(t *testing.T) {
+		// Complete onboarding
+		if err := db.CompleteOnboarding(); err != nil {
+			t.Fatalf("failed to complete onboarding: %v", err)
+		}
+
+		// Verify onboarding is marked complete
+		if db.IsFirstRun() {
+			t.Error("expected IsFirstRun to return false after CompleteOnboarding")
+		}
+	})
+
+	t.Run("IsFirstRun returns false after CompleteOnboarding", func(t *testing.T) {
+		// Onboarding was completed in previous test
+		if db.IsFirstRun() {
+			t.Error("expected IsFirstRun to return false")
+		}
+	})
+
+	t.Run("CompleteOnboarding is idempotent", func(t *testing.T) {
+		// Call CompleteOnboarding multiple times
+		if err := db.CompleteOnboarding(); err != nil {
+			t.Fatalf("first CompleteOnboarding failed: %v", err)
+		}
+		if err := db.CompleteOnboarding(); err != nil {
+			t.Fatalf("second CompleteOnboarding failed: %v", err)
+		}
+
+		// Should still return false
+		if db.IsFirstRun() {
+			t.Error("expected IsFirstRun to return false after multiple CompleteOnboarding calls")
+		}
+	})
+}

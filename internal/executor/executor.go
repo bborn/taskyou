@@ -3442,58 +3442,84 @@ func (e *Executor) setupWorktree(task *db.Task) (string, error) {
 		return worktreePath, nil
 	}
 
-	// Get default branch name
-	defaultBranch := e.getDefaultBranch(projectDir)
-
-	// Create new branch and worktree
-	cmd := exec.Command("git", "worktree", "add", "-b", branchName, worktreePath, defaultBranch)
-	cmd.Dir = projectDir
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		// Check if branch already exists
-		if strings.Contains(string(output), "already exists") {
-			// Try using existing branch
-			cmd = exec.Command("git", "worktree", "add", worktreePath, branchName)
-			cmd.Dir = projectDir
-			output2, err2 := cmd.CombinedOutput()
-			if err2 != nil {
-				// Check if worktree was created by another process
-				if strings.Contains(string(output2), "already checked out") {
-					// Worktree exists, reuse it
-					task.WorktreePath = worktreePath
-					task.BranchName = branchName
-
-					// Fetch PR information if available
-					e.updateTaskPRInfo(task, projectDir)
-
-					e.db.UpdateTask(task)
-					// Allocate a port if not already assigned
-					if task.Port == 0 {
-						port, err := e.db.AllocatePort(task.ID)
-						if err != nil {
-							e.logger.Warn("could not allocate port", "error", err)
-						} else {
-							task.Port = port
-						}
-					}
-					trustMiseConfig(worktreePath)
-					e.writeWorktreeEnvFile(projectDir, worktreePath, task, paths.configDir)
-					symlinkClaudeConfig(projectDir, worktreePath)
-					symlinkMCPConfig(projectDir, worktreePath)
-					copyMCPConfig(paths.configFile, projectDir, worktreePath)
-					e.runWorktreeInitScript(projectDir, worktreePath, task)
-					return worktreePath, nil
-				}
-				return "", fmt.Errorf("create worktree: %v\n%s\n%s", err, string(output), string(output2))
-			}
-		} else {
-			return "", fmt.Errorf("create worktree: %v\n%s", err, string(output))
+	// Check if task specifies an existing source branch to checkout
+	if task.SourceBranch != "" {
+		// Fetch the latest from origin to ensure we have the branch
+		fetchCmd := exec.Command("git", "fetch", "origin")
+		fetchCmd.Dir = projectDir
+		if fetchOutput, fetchErr := fetchCmd.CombinedOutput(); fetchErr != nil {
+			return "", fmt.Errorf("fetch origin: %v\n%s", fetchErr, string(fetchOutput))
 		}
-	}
 
-	// Update task with worktree info
-	task.WorktreePath = worktreePath
-	task.BranchName = branchName
+		// Create worktree from existing remote branch (no -b flag)
+		remoteBranch := "origin/" + task.SourceBranch
+		cmd := exec.Command("git", "worktree", "add", worktreePath, remoteBranch)
+		cmd.Dir = projectDir
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			return "", fmt.Errorf("create worktree from branch %s: %v\n%s", task.SourceBranch, err, string(output))
+		}
+
+		// Use the source branch name as the branch name for the task
+		branchName = task.SourceBranch
+
+		// Update task with worktree info
+		task.WorktreePath = worktreePath
+		task.BranchName = branchName
+	} else {
+		// Get default branch name
+		defaultBranch := e.getDefaultBranch(projectDir)
+
+		// Create new branch and worktree
+		cmd := exec.Command("git", "worktree", "add", "-b", branchName, worktreePath, defaultBranch)
+		cmd.Dir = projectDir
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			// Check if branch already exists
+			if strings.Contains(string(output), "already exists") {
+				// Try using existing branch
+				cmd = exec.Command("git", "worktree", "add", worktreePath, branchName)
+				cmd.Dir = projectDir
+				output2, err2 := cmd.CombinedOutput()
+				if err2 != nil {
+					// Check if worktree was created by another process
+					if strings.Contains(string(output2), "already checked out") {
+						// Worktree exists, reuse it
+						task.WorktreePath = worktreePath
+						task.BranchName = branchName
+
+						// Fetch PR information if available
+						e.updateTaskPRInfo(task, projectDir)
+
+						e.db.UpdateTask(task)
+						// Allocate a port if not already assigned
+						if task.Port == 0 {
+							port, err := e.db.AllocatePort(task.ID)
+							if err != nil {
+								e.logger.Warn("could not allocate port", "error", err)
+							} else {
+								task.Port = port
+							}
+						}
+						trustMiseConfig(worktreePath)
+						e.writeWorktreeEnvFile(projectDir, worktreePath, task, paths.configDir)
+						symlinkClaudeConfig(projectDir, worktreePath)
+						symlinkMCPConfig(projectDir, worktreePath)
+						copyMCPConfig(paths.configFile, projectDir, worktreePath)
+						e.runWorktreeInitScript(projectDir, worktreePath, task)
+						return worktreePath, nil
+					}
+					return "", fmt.Errorf("create worktree: %v\n%s\n%s", err, string(output), string(output2))
+				}
+			} else {
+				return "", fmt.Errorf("create worktree: %v\n%s", err, string(output))
+			}
+		}
+
+		// Update task with worktree info
+		task.WorktreePath = worktreePath
+		task.BranchName = branchName
+	}
 
 	// Fetch PR information if available
 	e.updateTaskPRInfo(task, projectDir)
