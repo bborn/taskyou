@@ -78,6 +78,31 @@ echo "$TASK_STATUS:$TASK_PROJECT" > "` + markerFile + `"
 	}
 }
 
+func TestEmitterWorktreeReadyPassesEnv(t *testing.T) {
+	hooksDir := t.TempDir()
+	markerFile := filepath.Join(hooksDir, "wt_marker")
+	hookScript := filepath.Join(hooksDir, TaskWorktreeReady)
+
+	script := `#!/bin/sh
+echo "$WORKTREE_PATH:$WORKTREE_BRANCH:$WORKTREE_PORT" > "` + markerFile + `"
+`
+	if err := os.WriteFile(hookScript, []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	emitter := New(hooksDir)
+	task := &db.Task{ID: 7, Title: "Setup", WorktreePath: "/tmp/wt/7-setup", BranchName: "task/7-setup", Port: 4200}
+	emitter.EmitTaskWorktreeReady(task)
+
+	content, err := waitForFile(t, markerFile, 5*time.Second)
+	if err != nil {
+		t.Fatalf("hook didn't run: %v", err)
+	}
+	if string(content) != "/tmp/wt/7-setup:task/7-setup:4200\n" {
+		t.Errorf("unexpected hook output: %q", content)
+	}
+}
+
 func TestEmitterNoHooksDir(t *testing.T) {
 	emitter := New("")
 	// Should not panic

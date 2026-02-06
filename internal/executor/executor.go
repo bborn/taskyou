@@ -875,6 +875,7 @@ func (e *Executor) executeTask(ctx context.Context, task *db.Task) {
 		e.hooks.OnStatusChange(task, db.StatusBlocked, "Worktree setup failed - cannot execute task safely")
 		return
 	}
+	e.events.EmitTaskWorktreeReady(task)
 
 	// Prepare attachments (write to .claude/attachments for seamless access)
 	attachmentPaths, cleanupAttachments := e.prepareAttachments(task.ID, workDir)
