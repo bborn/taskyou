@@ -2,13 +2,23 @@ package ui
 
 import (
 	"fmt"
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/bborn/workflow/internal/db"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+)
+
+// Patterns for extracting task IDs and PR numbers from pasted input
+var (
+	// Matches branch names like "task/1068-description" or "task/1068"
+	branchTaskIDPattern = regexp.MustCompile(`(?:^|/)(\d+)(?:-|$)`)
+	// Matches GitHub PR URLs like "https://github.com/org/repo/pull/123"
+	githubPRURLPattern = regexp.MustCompile(`github\.com/[^/]+/[^/]+/pull/(\d+)`)
 )
 
 // CommandPaletteModel represents the Command+P task switcher and AI command input.
@@ -253,6 +263,20 @@ func (m *CommandPaletteModel) scoreTask(task *db.Task, query string) int {
 		return 1000 // ID matches are highest priority
 	}
 
+	// Try to extract a task ID from a pasted branch name (e.g., "task/1068-description")
+	if extractedID := extractTaskID(query); extractedID > 0 {
+		if task.ID == extractedID {
+			return 1000 // Extracted ID match is highest priority
+		}
+	}
+
+	// Try to extract a PR number from a pasted GitHub PR URL
+	if extractedPR := extractPRNumber(query); extractedPR > 0 {
+		if task.PRNumber == extractedPR {
+			return 900 // Extracted PR number match
+		}
+	}
+
 	// Check PR number (high priority for specific lookups)
 	if task.PRNumber > 0 {
 		prNumStr := fmt.Sprintf("%d", task.PRNumber)
@@ -269,6 +293,20 @@ func (m *CommandPaletteModel) scoreTask(task *db.Task, query string) int {
 	if task.PRURL != "" {
 		if strings.Contains(strings.ToLower(task.PRURL), query) {
 			return 800 // PR URL matches
+		}
+	}
+
+	// Check branch name (exact or substring match)
+	if task.BranchName != "" {
+		if strings.Contains(strings.ToLower(task.BranchName), query) {
+			return 850 // Branch name matches
+		}
+	}
+
+	// Check source branch
+	if task.SourceBranch != "" {
+		if strings.Contains(strings.ToLower(task.SourceBranch), query) {
+			return 850 // Source branch matches
 		}
 	}
 
@@ -296,6 +334,32 @@ func (m *CommandPaletteModel) scoreTask(task *db.Task, query string) int {
 	return bestScore
 }
 
+// extractTaskID tries to extract a task ID from a branch name pattern.
+// Supports patterns like "task/1068-description", "feature/1068-foo", "1068-description".
+func extractTaskID(input string) int64 {
+	matches := branchTaskIDPattern.FindStringSubmatch(input)
+	if len(matches) >= 2 {
+		id, err := strconv.ParseInt(matches[1], 10, 64)
+		if err == nil {
+			return id
+		}
+	}
+	return 0
+}
+
+// extractPRNumber extracts a PR number from a GitHub PR URL.
+// Supports URLs like "https://github.com/org/repo/pull/123".
+func extractPRNumber(input string) int {
+	matches := githubPRURLPattern.FindStringSubmatch(input)
+	if len(matches) >= 2 {
+		num, err := strconv.Atoi(matches[1])
+		if err == nil {
+			return num
+		}
+	}
+	return 0
+}
+
 // matchesQuery checks if a task matches the search query.
 func (m *CommandPaletteModel) matchesQuery(task *db.Task, query string) bool {
 	// Check task ID
@@ -309,6 +373,18 @@ func (m *CommandPaletteModel) matchesQuery(task *db.Task, query string) bool {
 			return true
 		}
 	}
+	// Check if query is a branch name containing a task ID
+	if extractedID := extractTaskID(query); extractedID > 0 {
+		if task.ID == extractedID {
+			return true
+		}
+	}
+	// Check if query is a GitHub PR URL containing a PR number
+	if extractedPR := extractPRNumber(query); extractedPR > 0 {
+		if task.PRNumber == extractedPR {
+			return true
+		}
+	}
 	// Check title
 	if strings.Contains(strings.ToLower(task.Title), query) {
 		return true
@@ -319,6 +395,14 @@ func (m *CommandPaletteModel) matchesQuery(task *db.Task, query string) bool {
 	}
 	// Check status
 	if strings.Contains(strings.ToLower(task.Status), query) {
+		return true
+	}
+	// Check branch name
+	if task.BranchName != "" && strings.Contains(strings.ToLower(task.BranchName), query) {
+		return true
+	}
+	// Check source branch
+	if task.SourceBranch != "" && strings.Contains(strings.ToLower(task.SourceBranch), query) {
 		return true
 	}
 	// Check PR URL (e.g., "https://github.com/offerlab/offerlab/pull/2382")
