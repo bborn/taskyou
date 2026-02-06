@@ -2116,9 +2116,9 @@ func (m *AppModel) updateNewTaskForm(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m *AppModel) updateNewTaskConfirm(msg tea.Msg) (tea.Model, tea.Cmd) {
-	// Handle escape to go back
 	if keyMsg, ok := msg.(tea.KeyMsg); ok {
-		if keyMsg.String() == "esc" {
+		switch keyMsg.String() {
+		case "esc", "ctrl+c":
 			m.currentView = ViewNewTask
 			m.queueConfirm = nil
 			return m, nil
@@ -2131,7 +2131,12 @@ func (m *AppModel) updateNewTaskConfirm(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.queueConfirm = f
 	}
 
-	// Check if form completed
+	// Check if form completed or aborted
+	if m.queueConfirm.State == huh.StateAborted {
+		m.currentView = ViewNewTask
+		m.queueConfirm = nil
+		return m, nil
+	}
 	if m.queueConfirm.State == huh.StateCompleted {
 		if m.pendingTask != nil {
 			if m.queueValue {
@@ -2254,9 +2259,9 @@ func (m *AppModel) viewDeleteConfirm() string {
 }
 
 func (m *AppModel) updateDeleteConfirm(msg tea.Msg) (tea.Model, tea.Cmd) {
-	// Handle escape to cancel
 	if keyMsg, ok := msg.(tea.KeyMsg); ok {
-		if keyMsg.String() == "esc" {
+		switch keyMsg.String() {
+		case "esc", "ctrl+c":
 			m.currentView = m.previousView
 			m.deleteConfirm = nil
 			m.pendingDeleteTask = nil
@@ -2270,7 +2275,7 @@ func (m *AppModel) updateDeleteConfirm(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.deleteConfirm = f
 	}
 
-	// Check if form completed
+	// Check if form completed or aborted
 	if m.deleteConfirm.State == huh.StateCompleted {
 		if m.pendingDeleteTask != nil && m.deleteConfirmValue {
 			taskID := m.pendingDeleteTask.ID
@@ -2285,6 +2290,12 @@ func (m *AppModel) updateDeleteConfirm(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.deleteTask(taskID)
 		}
 		// Cancelled - return to previous view
+		m.pendingDeleteTask = nil
+		m.deleteConfirm = nil
+		m.currentView = m.previousView
+		return m, nil
+	}
+	if m.deleteConfirm.State == huh.StateAborted {
 		m.pendingDeleteTask = nil
 		m.deleteConfirm = nil
 		m.currentView = m.previousView
@@ -2350,9 +2361,9 @@ func (m *AppModel) viewProjectChangeConfirm() string {
 }
 
 func (m *AppModel) updateProjectChangeConfirm(msg tea.Msg) (tea.Model, tea.Cmd) {
-	// Handle escape to cancel
 	if keyMsg, ok := msg.(tea.KeyMsg); ok {
-		if keyMsg.String() == "esc" {
+		switch keyMsg.String() {
+		case "esc", "ctrl+c":
 			m.currentView = m.previousView
 			m.projectChangeConfirm = nil
 			m.pendingProjectChangeTask = nil
@@ -2365,7 +2376,7 @@ func (m *AppModel) updateProjectChangeConfirm(msg tea.Msg) (tea.Model, tea.Cmd) 
 	model, cmd := m.projectChangeConfirm.Update(msg)
 	m.projectChangeConfirm = model.(*huh.Form)
 
-	// Check if form completed
+	// Check if form completed or aborted
 	if m.projectChangeConfirm.State == huh.StateCompleted {
 		if m.pendingProjectChangeTask != nil && m.originalProjectChangeTask != nil && m.projectChangeConfirmValue {
 			// User confirmed - perform the project change
@@ -2378,6 +2389,13 @@ func (m *AppModel) updateProjectChangeConfirm(msg tea.Msg) (tea.Model, tea.Cmd) 
 			return m, m.moveTaskToProject(newTask, oldTask)
 		}
 		// Cancelled - return to previous view
+		m.pendingProjectChangeTask = nil
+		m.originalProjectChangeTask = nil
+		m.projectChangeConfirm = nil
+		m.currentView = m.previousView
+		return m, nil
+	}
+	if m.projectChangeConfirm.State == huh.StateAborted {
 		m.pendingProjectChangeTask = nil
 		m.originalProjectChangeTask = nil
 		m.projectChangeConfirm = nil
@@ -2441,12 +2459,20 @@ func (m *AppModel) viewQuitConfirm() string {
 }
 
 func (m *AppModel) updateQuitConfirm(msg tea.Msg) (tea.Model, tea.Cmd) {
-	// Handle escape to cancel
 	if keyMsg, ok := msg.(tea.KeyMsg); ok {
-		if keyMsg.String() == "esc" {
+		switch keyMsg.String() {
+		case "esc":
+			// Cancel and return to dashboard
 			m.currentView = ViewDashboard
 			m.quitConfirm = nil
 			return m, nil
+		case "ctrl+c":
+			// Ctrl+C in quit confirm should just quit immediately
+			if m.eventCh != nil {
+				m.executor.UnsubscribeTaskEvents(m.eventCh)
+			}
+			m.stopDatabaseWatcher()
+			return m, tea.Quit
 		}
 	}
 
@@ -2456,7 +2482,7 @@ func (m *AppModel) updateQuitConfirm(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.quitConfirm = f
 	}
 
-	// Check if form completed
+	// Check if form completed or aborted
 	if m.quitConfirm.State == huh.StateCompleted {
 		if m.quitConfirmValue {
 			// User confirmed quit - cleanup and exit
@@ -2467,6 +2493,11 @@ func (m *AppModel) updateQuitConfirm(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 		}
 		// Cancelled
+		m.quitConfirm = nil
+		m.currentView = ViewDashboard
+		return m, nil
+	}
+	if m.quitConfirm.State == huh.StateAborted {
 		m.quitConfirm = nil
 		m.currentView = ViewDashboard
 		return m, nil
@@ -2530,9 +2561,9 @@ func (m *AppModel) viewCloseConfirm() string {
 }
 
 func (m *AppModel) updateCloseConfirm(msg tea.Msg) (tea.Model, tea.Cmd) {
-	// Handle escape to cancel
 	if keyMsg, ok := msg.(tea.KeyMsg); ok {
-		if keyMsg.String() == "esc" {
+		switch keyMsg.String() {
+		case "esc", "ctrl+c":
 			m.currentView = m.previousView
 			m.closeConfirm = nil
 			m.pendingCloseTask = nil
@@ -2546,7 +2577,7 @@ func (m *AppModel) updateCloseConfirm(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.closeConfirm = f
 	}
 
-	// Check if form completed
+	// Check if form completed or aborted
 	if m.closeConfirm.State == huh.StateCompleted {
 		if m.pendingCloseTask != nil && m.closeConfirmValue {
 			taskID := m.pendingCloseTask.ID
@@ -2562,6 +2593,12 @@ func (m *AppModel) updateCloseConfirm(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.closeTask(taskID)
 		}
 		// Cancelled - return to previous view
+		m.pendingCloseTask = nil
+		m.closeConfirm = nil
+		m.currentView = m.previousView
+		return m, nil
+	}
+	if m.closeConfirm.State == huh.StateAborted {
 		m.pendingCloseTask = nil
 		m.closeConfirm = nil
 		m.currentView = m.previousView
@@ -2626,9 +2663,9 @@ func (m *AppModel) viewArchiveConfirm() string {
 }
 
 func (m *AppModel) updateArchiveConfirm(msg tea.Msg) (tea.Model, tea.Cmd) {
-	// Handle escape to cancel
 	if keyMsg, ok := msg.(tea.KeyMsg); ok {
-		if keyMsg.String() == "esc" {
+		switch keyMsg.String() {
+		case "esc", "ctrl+c":
 			m.currentView = m.previousView
 			m.archiveConfirm = nil
 			m.pendingArchiveTask = nil
@@ -2642,7 +2679,7 @@ func (m *AppModel) updateArchiveConfirm(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.archiveConfirm = f
 	}
 
-	// Check if form completed
+	// Check if form completed or aborted
 	if m.archiveConfirm.State == huh.StateCompleted {
 		if m.pendingArchiveTask != nil && m.archiveConfirmValue {
 			taskID := m.pendingArchiveTask.ID
@@ -2657,6 +2694,12 @@ func (m *AppModel) updateArchiveConfirm(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.archiveTask(taskID)
 		}
 		// Cancelled - return to previous view
+		m.pendingArchiveTask = nil
+		m.archiveConfirm = nil
+		m.currentView = m.previousView
+		return m, nil
+	}
+	if m.archiveConfirm.State == huh.StateAborted {
 		m.pendingArchiveTask = nil
 		m.archiveConfirm = nil
 		m.currentView = m.previousView
