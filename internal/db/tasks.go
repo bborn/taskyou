@@ -360,15 +360,13 @@ func (db *DB) SearchTasks(query string, limit int) ([]*Task, error) {
 			OR CAST(id AS TEXT) LIKE ?
 			OR CAST(pr_number AS TEXT) LIKE ?
 			OR pr_url LIKE ? COLLATE NOCASE
-			OR branch_name LIKE ? COLLATE NOCASE
-			OR COALESCE(source_branch, '') LIKE ? COLLATE NOCASE
 		)
 		ORDER BY pinned DESC, CASE WHEN status IN ('done', 'blocked') THEN completed_at ELSE created_at END DESC, id DESC
 		LIMIT ?
 	`
 
 	searchPattern := "%" + query + "%"
-	rows, err := db.Query(sqlQuery, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, limit)
+	rows, err := db.Query(sqlQuery, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, limit)
 	if err != nil {
 		return nil, fmt.Errorf("search tasks: %w", err)
 	}
