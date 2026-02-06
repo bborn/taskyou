@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -482,5 +483,206 @@ func TestFilterTasksAccessedBeforeNeverAccessed(t *testing.T) {
 	}
 	if m.filteredTasks[1].ID != 1 {
 		t.Errorf("Second task should be ID 1 (never accessed), got ID %d", m.filteredTasks[1].ID)
+	}
+}
+
+func TestExtractTaskID(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  int64
+	}{
+		{"task branch with description", "task/1068-i-should-be-able-to-paste", 1068},
+		{"task branch ID only", "task/1068", 1068},
+		{"feature branch", "feature/42-add-login", 42},
+		{"fix branch", "fix/999-bug-fix", 999},
+		{"just ID with dash", "1068-description", 1068},
+		{"no ID", "feature/no-id-here", 0},
+		{"empty string", "", 0},
+		{"plain number", "1068", 1068},
+		{"nested path", "refs/heads/task/1068-description", 1068},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := extractTaskID(tt.input)
+			if got != tt.want {
+				t.Errorf("extractTaskID(%q) = %d, want %d", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestExtractPRNumber(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  int
+	}{
+		{"full github URL", "https://github.com/offerlab/offerlab/pull/2382", 2382},
+		{"github URL without https", "github.com/org/repo/pull/123", 123},
+		{"github URL with www", "https://www.github.com/org/repo/pull/456", 456},
+		{"not a PR URL", "https://github.com/org/repo/issues/789", 0},
+		{"empty string", "", 0},
+		{"random text", "some random text", 0},
+		{"just a number", "123", 0},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := extractPRNumber(tt.input)
+			if got != tt.want {
+				t.Errorf("extractPRNumber(%q) = %d, want %d", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestMatchesQueryBranchName(t *testing.T) {
+	taskWithBranch := &db.Task{
+		ID:         1068,
+		Title:      "Enable paste in quick select",
+		Project:    "workflow",
+		Status:     db.StatusProcessing,
+		BranchName: "task/1068-i-should-be-able-to-paste-in-a-git-branc",
+	}
+
+	taskWithSourceBranch := &db.Task{
+		ID:           42,
+		Title:        "Fix UI overflow",
+		Project:      "webapp",
+		Status:       db.StatusQueued,
+		SourceBranch: "fix/ui-overflow",
+	}
+
+	m := &CommandPaletteModel{}
+
+	tests := []struct {
+		name  string
+		task  *db.Task
+		query string
+		want  bool
+	}{
+		// Branch name matching
+		{"match full branch name", taskWithBranch, "task/1068-i-should-be-able-to-paste-in-a-git-branc", true},
+		{"match partial branch name", taskWithBranch, "task/1068", true},
+		{"extract task ID from branch", taskWithBranch, "task/1068-some-other-text", true}, // extracts 1068
+		{"match by branch substring", taskWithBranch, "paste-in-a-git", true},
+
+		// Source branch matching
+		{"match source branch", taskWithSourceBranch, "fix/ui-overflow", true},
+		{"match source branch partial", taskWithSourceBranch, "ui-overflow", true},
+
+		// Branch name with ID extraction for different task
+		{"branch ID doesn't match other task", taskWithSourceBranch, "task/1068-description", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := m.matchesQuery(tt.task, tt.query)
+			if got != tt.want {
+				t.Errorf("matchesQuery(%+v, %q) = %v, want %v", tt.task, tt.query, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestScoreTaskBranchAndPR(t *testing.T) {
+	taskWithBranch := &db.Task{
+		ID:         1068,
+		Title:      "Enable paste in quick select",
+		Project:    "workflow",
+		Status:     db.StatusProcessing,
+		BranchName: "task/1068-i-should-be-able-to-paste-in-a-git-branc",
+		PRNumber:   2382,
+		PRURL:      "https://github.com/bborn/workflow/pull/2382",
+	}
+
+	otherTask := &db.Task{
+		ID:      999,
+		Title:   "Some other task",
+		Project: "workflow",
+		Status:  db.StatusBacklog,
+	}
+
+	m := &CommandPaletteModel{}
+
+	tests := []struct {
+		name      string
+		task      *db.Task
+		query     string
+		wantScore int // minimum expected score (-1 means no match)
+	}{
+		// Branch name pasted - should extract ID and match
+		{"pasted branch name extracts ID", taskWithBranch, "task/1068-i-should-be-able-to-paste-in-a-git-branc", 1000},
+		{"pasted different branch with same ID", taskWithBranch, "task/1068-something-else", 1000},
+
+		// GitHub PR URL pasted - should extract PR number and match
+		{"pasted github PR URL", taskWithBranch, "https://github.com/bborn/workflow/pull/2382", 900},
+		{"pasted github PR URL different repo", taskWithBranch, "https://github.com/other/repo/pull/2382", 900},
+
+		// Branch name substring match
+		{"branch name substring", taskWithBranch, "paste-in-a-git", 850},
+
+		// Other task shouldn't match branch queries
+		{"other task no branch match", otherTask, "task/1068-description", -1},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			query := strings.ToLower(tt.query)
+			got := m.scoreTask(tt.task, query)
+			if tt.wantScore == -1 {
+				if got >= 0 {
+					t.Errorf("scoreTask(%+v, %q) = %d, expected no match (<0)", tt.task, tt.query, got)
+				}
+			} else if got < tt.wantScore {
+				t.Errorf("scoreTask(%+v, %q) = %d, want >= %d", tt.task, tt.query, got, tt.wantScore)
+			}
+		})
+	}
+}
+
+func TestFilterTasksFindsByBranchName(t *testing.T) {
+	tasks := []*db.Task{
+		{ID: 1, Title: "Unrelated task", Status: db.StatusBacklog},
+		{ID: 1068, Title: "Enable paste in quick select", Status: db.StatusProcessing,
+			BranchName: "task/1068-i-should-be-able-to-paste-in-a-git-branc"},
+		{ID: 3, Title: "Another task", Status: db.StatusQueued},
+	}
+
+	m := &CommandPaletteModel{allTasks: tasks}
+
+	// Paste a branch name - should find the right task
+	m.searchInput.SetValue("task/1068-i-should-be-able-to-paste-in-a-git-branc")
+	m.filterTasks()
+
+	if len(m.filteredTasks) == 0 {
+		t.Fatal("Expected at least 1 result when pasting branch name")
+	}
+	if m.filteredTasks[0].ID != 1068 {
+		t.Errorf("First result should be task 1068, got %d", m.filteredTasks[0].ID)
+	}
+}
+
+func TestFilterTasksFindsByGitHubPRURL(t *testing.T) {
+	tasks := []*db.Task{
+		{ID: 1, Title: "Unrelated task", Status: db.StatusBacklog},
+		{ID: 42, Title: "Fix auth bug", Status: db.StatusProcessing,
+			PRNumber: 2382, PRURL: "https://github.com/offerlab/offerlab/pull/2382"},
+		{ID: 3, Title: "Another task", Status: db.StatusQueued},
+	}
+
+	m := &CommandPaletteModel{allTasks: tasks}
+
+	// Paste a GitHub PR URL - should find the right task
+	m.searchInput.SetValue("https://github.com/offerlab/offerlab/pull/2382")
+	m.filterTasks()
+
+	if len(m.filteredTasks) == 0 {
+		t.Fatal("Expected at least 1 result when pasting PR URL")
+	}
+	if m.filteredTasks[0].ID != 42 {
+		t.Errorf("First result should be task 42, got %d", m.filteredTasks[0].ID)
 	}
 }
