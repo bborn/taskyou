@@ -3894,7 +3894,8 @@ func writeWorkflowMCPConfig(worktreePath string, taskID int64) error {
 		mcpServers = make(map[string]interface{})
 	}
 
-	// Add/update the taskyou server
+	// Add/update the taskyou server (and remove old "workflow" name if present)
+	delete(mcpServers, "workflow")
 	mcpServers["taskyou"] = taskyouServer
 	projectConfig["mcpServers"] = mcpServers
 	projects[worktreePath] = projectConfig

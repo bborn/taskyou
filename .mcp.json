@@ -1,6 +1,6 @@
 {
   "mcpServers": {
-    "workflow": {
+    "taskyou": {
       "args": [
         "mcp-server",
         "--task-id",
