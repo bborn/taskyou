@@ -139,6 +139,12 @@ func (c *CodexExecutor) runCodex(ctx context.Context, task *db.Task, workDir, pr
 		dangerousFlag = "--dangerously-bypass-approvals-and-sandbox "
 	}
 
+	// Build model flag
+	modelFlag := ""
+	if task.Model != "" {
+		modelFlag = fmt.Sprintf("--model %s ", task.Model)
+	}
+
 	// Check for existing session to resume (validate file exists first)
 	resumeFlag := ""
 	existingSessionID := task.ClaudeSessionID
@@ -156,8 +162,8 @@ func (c *CodexExecutor) runCodex(ctx context.Context, task *db.Task, workDir, pr
 	}
 
 	envPrefix := claudeEnvPrefix(paths.configDir)
-	script = fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %scodex %s%s"$(cat %q)"`,
-		task.ID, sessionID, task.Port, task.WorktreePath, envPrefix, dangerousFlag, resumeFlag, promptFile.Name())
+	script = fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %scodex %s%s%s"$(cat %q)"`,
+		task.ID, sessionID, task.Port, task.WorktreePath, envPrefix, dangerousFlag, modelFlag, resumeFlag, promptFile.Name())
 
 	// Create new window in task-daemon session
 	actualSession, tmuxErr := createTmuxWindow(daemonSession, windowName, workDir, script)
@@ -356,6 +362,12 @@ func (c *CodexExecutor) BuildCommand(task *db.Task, sessionID, prompt string) st
 		worktreeSessionID = fmt.Sprintf("%d", os.Getpid())
 	}
 
+	// Build model flag
+	modelFlag := ""
+	if task.Model != "" {
+		modelFlag = fmt.Sprintf("--model %s ", task.Model)
+	}
+
 	// Build resume flag if we have a session ID
 	resumeFlag := ""
 	if sessionID != "" {
@@ -368,20 +380,20 @@ func (c *CodexExecutor) BuildCommand(task *db.Task, sessionID, prompt string) st
 		promptFile, err := os.CreateTemp("", "task-prompt-*.txt")
 		if err != nil {
 			c.logger.Error("BuildCommand: failed to create temp file", "error", err)
-			return fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q codex %s%s`,
-				task.ID, worktreeSessionID, task.Port, task.WorktreePath, dangerousFlag, resumeFlag)
+			return fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q codex %s%s%s`,
+				task.ID, worktreeSessionID, task.Port, task.WorktreePath, dangerousFlag, modelFlag, resumeFlag)
 		}
 		// Include system instructions in prompt (AGENTS.md could overwrite project files)
 		fullPrompt := prompt + "\n\n" + c.executor.buildSystemInstructions()
 		promptFile.WriteString(fullPrompt)
 		promptFile.Close()
 
-		return fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q codex %s%s"$(cat %q)"; rm -f %q`,
-			task.ID, worktreeSessionID, task.Port, task.WorktreePath, dangerousFlag, resumeFlag, promptFile.Name(), promptFile.Name())
+		return fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q codex %s%s%s"$(cat %q)"; rm -f %q`,
+			task.ID, worktreeSessionID, task.Port, task.WorktreePath, dangerousFlag, modelFlag, resumeFlag, promptFile.Name(), promptFile.Name())
 	}
 
-	return fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q codex %s%s`,
-		task.ID, worktreeSessionID, task.Port, task.WorktreePath, dangerousFlag, resumeFlag)
+	return fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q codex %s%s%s`,
+		task.ID, worktreeSessionID, task.Port, task.WorktreePath, dangerousFlag, modelFlag, resumeFlag)
 }
 
 // ---- Session and Dangerous Mode Support ----

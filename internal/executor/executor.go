@@ -2630,10 +2630,16 @@ func (e *Executor) resumeCodexWithMode(task *db.Task, workDir string, dangerousM
 		dangerousFlag = "--dangerously-bypass-approvals-and-sandbox "
 	}
 
+	// Build model flag
+	modelFlag := ""
+	if task.Model != "" {
+		modelFlag = fmt.Sprintf("--model %s ", task.Model)
+	}
+
 	// Build script with --resume flag
 	envPrefix := claudeEnvPrefix(paths.configDir)
-	script := fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %scodex %s--resume %s`,
-		taskID, taskSessionID, task.Port, task.WorktreePath, envPrefix, dangerousFlag, sessionID)
+	script := fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %scodex %s%s--resume %s`,
+		taskID, taskSessionID, task.Port, task.WorktreePath, envPrefix, dangerousFlag, modelFlag, sessionID)
 
 	actualSession, tmuxErr := createTmuxWindow(daemonSession, windowName, workDir, script)
 	if tmuxErr != nil {
@@ -2738,10 +2744,16 @@ func (e *Executor) resumeGeminiWithMode(task *db.Task, workDir string, dangerous
 		dangerousFlag = flag + " "
 	}
 
+	// Build model flag
+	modelFlag := ""
+	if task.Model != "" {
+		modelFlag = fmt.Sprintf("--model %s ", task.Model)
+	}
+
 	// Build script with --resume flag
 	envPrefix := claudeEnvPrefix(paths.configDir)
-	script := fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %sgemini %s--resume %s`,
-		taskID, taskSessionID, task.Port, task.WorktreePath, envPrefix, dangerousFlag, sessionID)
+	script := fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %sgemini %s%s--resume %s`,
+		taskID, taskSessionID, task.Port, task.WorktreePath, envPrefix, dangerousFlag, modelFlag, sessionID)
 
 	actualSession, tmuxErr := createTmuxWindow(daemonSession, windowName, workDir, script)
 	if tmuxErr != nil {

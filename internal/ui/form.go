@@ -113,6 +113,10 @@ func modelsForExecutor(executor string) []string {
 	switch executor {
 	case db.ExecutorClaude:
 		return []string{"", "opus", "sonnet", "haiku"}
+	case db.ExecutorCodex:
+		return []string{"", "o4-mini", "o3", "gpt-4.1", "codex-mini"}
+	case db.ExecutorGemini:
+		return []string{"", "gemini-2.5-pro", "gemini-2.5-flash"}
 	default:
 		return []string{""}
 	}

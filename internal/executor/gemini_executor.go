@@ -121,9 +121,16 @@ func (g *GeminiExecutor) runGemini(ctx context.Context, task *db.Task, workDir, 
 
 	envPrefix := claudeEnvPrefix(paths.configDir)
 	dangerousFlag := buildGeminiDangerousFlag(task.DangerousMode)
+
+	// Build model flag
+	modelFlag := ""
+	if task.Model != "" {
+		modelFlag = fmt.Sprintf("--model %s ", task.Model)
+	}
+
 	// Use -i (--prompt-interactive) to pass initial prompt while keeping interactive mode
-	script := fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %sgemini %s%s-i "$(cat %q)"`,
-		task.ID, sessionID, task.Port, task.WorktreePath, envPrefix, dangerousFlag, resumeFlag, promptFile.Name())
+	script := fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %sgemini %s%s%s-i "$(cat %q)"`,
+		task.ID, sessionID, task.Port, task.WorktreePath, envPrefix, dangerousFlag, modelFlag, resumeFlag, promptFile.Name())
 
 	actualSession, tmuxErr := createTmuxWindow(daemonSession, windowName, workDir, script)
 	if tmuxErr != nil {
@@ -285,6 +292,12 @@ func (g *GeminiExecutor) BuildCommand(task *db.Task, sessionID, prompt string) s
 
 	dangerousFlag := buildGeminiDangerousFlag(task.DangerousMode)
 
+	// Build model flag
+	modelFlag := ""
+	if task.Model != "" {
+		modelFlag = fmt.Sprintf("--model %s ", task.Model)
+	}
+
 	worktreeSessionID := os.Getenv("WORKTREE_SESSION_ID")
 	if worktreeSessionID == "" {
 		worktreeSessionID = fmt.Sprintf("%d", os.Getpid())
@@ -300,18 +313,18 @@ func (g *GeminiExecutor) BuildCommand(task *db.Task, sessionID, prompt string) s
 		promptFile, err := os.CreateTemp("", "task-prompt-*.txt")
 		if err != nil {
 			g.logger.Error("BuildCommand: failed to create temp file", "error", err)
-			return fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q gemini %s%s`,
-				task.ID, worktreeSessionID, task.Port, task.WorktreePath, dangerousFlag, resumeFlag)
+			return fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q gemini %s%s%s`,
+				task.ID, worktreeSessionID, task.Port, task.WorktreePath, dangerousFlag, modelFlag, resumeFlag)
 		}
 		promptFile.WriteString(prompt)
 		promptFile.Close()
 		// Use -i (--prompt-interactive) to pass initial prompt while keeping interactive mode
-		return fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q gemini %s%s-i "$(cat %q)"; rm -f %q`,
-			task.ID, worktreeSessionID, task.Port, task.WorktreePath, dangerousFlag, resumeFlag, promptFile.Name(), promptFile.Name())
+		return fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q gemini %s%s%s-i "$(cat %q)"; rm -f %q`,
+			task.ID, worktreeSessionID, task.Port, task.WorktreePath, dangerousFlag, modelFlag, resumeFlag, promptFile.Name(), promptFile.Name())
 	}
 
-	return fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q gemini %s%s`,
-		task.ID, worktreeSessionID, task.Port, task.WorktreePath, dangerousFlag, resumeFlag)
+	return fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q gemini %s%s%s`,
+		task.ID, worktreeSessionID, task.Port, task.WorktreePath, dangerousFlag, modelFlag, resumeFlag)
 }
 
 func buildGeminiDangerousFlag(enabled bool) string {
