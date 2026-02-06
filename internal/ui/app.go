@@ -755,6 +755,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.kanban.SetRunningProcesses(running)
 		m.kanban.SetTasksNeedingInput(m.tasksNeedingInput)
 		m.kanban.SetBlockedByDeps(msg.blockedByDeps)
+		m.kanban.SetTeamStatuses(msg.teamStatuses)
 
 		// Trigger initial PR refresh after first task load (subsequent refreshes via prRefreshTick)
 		if !m.initialPRRefreshDone {
@@ -2934,8 +2935,9 @@ func (m *AppModel) updateCommandPalette(msg tea.Msg) (tea.Model, tea.Cmd) {
 type tasksLoadedMsg struct {
 	tasks           []*db.Task
 	err             error
-	hiddenDoneCount int            // Number of done tasks not shown in kanban (older ones)
-	blockedByDeps   map[int64]int  // Tasks blocked by dependencies (task ID -> open blocker count)
+	hiddenDoneCount int                       // Number of done tasks not shown in kanban (older ones)
+	blockedByDeps   map[int64]int             // Tasks blocked by dependencies (task ID -> open blocker count)
+	teamStatuses    map[int64]*db.TeamStatus  // Parent task ID -> team status (for team indicators)
 }
 
 type taskLoadedMsg struct {
@@ -3052,9 +3054,12 @@ func (m *AppModel) loadTasks() tea.Cmd {
 			}
 		}
 
+		// Load team statuses for parent tasks (agent teams)
+		teamStatuses, _ := m.db.GetTeamStatusMap()
+
 		// Note: PR/merge status is now checked via batch refresh (prRefreshTick)
 		// to avoid spawning processes for every task on every tick
-		return tasksLoadedMsg{tasks: tasks, err: err, hiddenDoneCount: hiddenDone, blockedByDeps: blockedByDeps}
+		return tasksLoadedMsg{tasks: tasks, err: err, hiddenDoneCount: hiddenDone, blockedByDeps: blockedByDeps, teamStatuses: teamStatuses}
 	}
 }
 

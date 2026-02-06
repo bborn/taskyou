@@ -251,12 +251,17 @@ func (db *DB) migrate() error {
 		`ALTER TABLE tasks ADD COLUMN archive_branch_name TEXT DEFAULT ''`,   // Original branch name before archiving
 		// Source branch for checking out existing branches in worktrees (e.g., for QA deployments)
 		`ALTER TABLE tasks ADD COLUMN source_branch TEXT DEFAULT ''`, // Existing branch to checkout instead of creating new branch
+		// Agent teams - parent-child task relationships
+		`ALTER TABLE tasks ADD COLUMN parent_id INTEGER DEFAULT 0`, // Parent task ID (0 = no parent)
 	}
 
 	for _, m := range alterMigrations {
 		// Ignore "duplicate column" errors for idempotent migrations
 		db.Exec(m)
 	}
+
+	// Index for parent_id (agent teams)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_tasks_parent_id ON tasks(parent_id)`)
 
 	// Note: SQLite doesn't support ALTER COLUMN DEFAULT directly
 	// The default value change for project column will be handled in the application layer
