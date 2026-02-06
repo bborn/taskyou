@@ -51,6 +51,7 @@ type KanbanBoard struct {
 	runningProcesses  map[int64]bool           // Tasks with running shell processes
 	tasksNeedingInput map[int64]bool           // Tasks waiting for user input (active input notification)
 	blockedByDeps     map[int64]int            // Tasks blocked by dependencies (task ID -> open blocker count)
+	teamStatuses      map[int64]*db.TeamStatus // Parent task ID -> team status (for team indicators)
 	hiddenDoneCount   int                      // Number of done tasks not shown (older ones)
 	originColumn      int                      // Column where detail view navigation started (-1 = not set)
 }
@@ -183,6 +184,19 @@ func (k *KanbanBoard) GetOpenBlockerCount(taskID int64) int {
 // IsBlockedByDeps returns true if the task is blocked by dependencies.
 func (k *KanbanBoard) IsBlockedByDeps(taskID int64) bool {
 	return k.GetOpenBlockerCount(taskID) > 0
+}
+
+// SetTeamStatuses updates the map of parent task IDs to their team statuses.
+func (k *KanbanBoard) SetTeamStatuses(teamStatuses map[int64]*db.TeamStatus) {
+	k.teamStatuses = teamStatuses
+}
+
+// GetTeamStatus returns the team status for a parent task, or nil if it has no team.
+func (k *KanbanBoard) GetTeamStatus(taskID int64) *db.TeamStatus {
+	if k.teamStatuses == nil {
+		return nil
+	}
+	return k.teamStatuses[taskID]
 }
 
 // SetOriginColumn sets the origin column for detail view navigation.
@@ -1039,6 +1053,20 @@ func (k *KanbanBoard) renderTaskCard(task *db.Task, width int, isSelected bool, 
 			indicators = append(indicators, pinStyle.Render(IconPin()))
 		}
 	}
+	// Team indicator for parent tasks (shows progress like "👥 3/5")
+	if ts := k.GetTeamStatus(task.ID); ts != nil {
+		teamText := fmt.Sprintf("👥%d/%d", ts.Done, ts.Total)
+		if isSelected {
+			indicators = append(indicators, teamText)
+		} else {
+			teamColor := lipgloss.Color("#61AFEF") // Blue
+			if ts.IsComplete() {
+				teamColor = lipgloss.Color("#98C379") // Green when all done
+			}
+			teamStyle := lipgloss.NewStyle().Foreground(teamColor)
+			indicators = append(indicators, teamStyle.Render(teamText))
+		}
+	}
 	// Keyboard shortcut hint (shown at the end)
 	if shortcutHint != "" {
 		if isSelected {
@@ -1046,6 +1074,18 @@ func (k *KanbanBoard) renderTaskCard(task *db.Task, width int, isSelected bool, 
 		} else {
 			shortcutStyle := lipgloss.NewStyle().Foreground(ColorMuted)
 			indicators = append(indicators, shortcutStyle.Render(shortcutHint))
+		}
+	}
+
+	// Child task indicator (shows parent link)
+	if task.ParentID > 0 {
+		parentText := fmt.Sprintf("↑#%d", task.ParentID)
+		if isSelected {
+			b.WriteString(" " + parentText)
+		} else {
+			parentStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#61AFEF")) // Blue
+			b.WriteString(" ")
+			b.WriteString(parentStyle.Render(parentText))
 		}
 	}
 

@@ -280,6 +280,54 @@ func (s *Server) handleRequest(req *jsonRPCRequest) {
 						"required": []string{"context"},
 					},
 				},
+				{
+					Name:        "taskyou_delegate_task",
+					Description: "Delegate a subtask to another agent. Creates a child task linked to the current task, automatically queues it for execution, and returns immediately. Use this to parallelize work across multiple agents. Each delegated task runs in its own isolated worktree. Use taskyou_get_team_status to monitor progress and taskyou_wait_for_task to collect results.",
+					InputSchema: map[string]interface{}{
+						"type": "object",
+						"properties": map[string]interface{}{
+							"title": map[string]interface{}{
+								"type":        "string",
+								"description": "Title of the subtask",
+							},
+							"body": map[string]interface{}{
+								"type":        "string",
+								"description": "Detailed instructions for the subtask agent",
+							},
+							"type": map[string]interface{}{
+								"type":        "string",
+								"description": "Task type (code, writing, thinking). Defaults to current task's type.",
+							},
+						},
+						"required": []string{"title"},
+					},
+				},
+				{
+					Name:        "taskyou_get_team_status",
+					Description: "Get the status of all subtasks delegated by the current task. Returns a summary showing how many subtasks are queued, processing, blocked, or done, plus details of each subtask.",
+					InputSchema: map[string]interface{}{
+						"type":       "object",
+						"properties": map[string]interface{}{},
+					},
+				},
+				{
+					Name:        "taskyou_wait_for_task",
+					Description: "Wait for a delegated subtask to complete. Polls the task status until it reaches 'done' or 'blocked' state, then returns the task's summary and final status. Use this after taskyou_delegate_task to collect results from a specific subtask.",
+					InputSchema: map[string]interface{}{
+						"type": "object",
+						"properties": map[string]interface{}{
+							"task_id": map[string]interface{}{
+								"type":        "integer",
+								"description": "The ID of the subtask to wait for",
+							},
+							"timeout_seconds": map[string]interface{}{
+								"type":        "integer",
+								"description": "Maximum seconds to wait (default: 300, max: 1800). Returns current status if timeout is reached.",
+							},
+						},
+						"required": []string{"task_id"},
+					},
+				},
 			},
 		})
 
@@ -680,6 +728,209 @@ This saves future tasks from re-exploring the codebase.`},
 		s.sendResult(id, toolCallResult{
 			Content: []contentBlock{
 				{Type: "text", Text: fmt.Sprintf("Project context saved for '%s'. Future tasks will use this context to skip codebase exploration.", currentTask.Project)},
+			},
+		})
+
+	case "taskyou_delegate_task":
+		title, _ := params.Arguments["title"].(string)
+		if title == "" {
+			s.sendError(id, -32602, "title is required")
+			return
+		}
+		body, _ := params.Arguments["body"].(string)
+		taskType, _ := params.Arguments["type"].(string)
+
+		// Get current task for context
+		currentTask, err := s.db.GetTask(s.taskID)
+		if err != nil || currentTask == nil {
+			s.sendError(id, -32603, "Failed to get current task")
+			return
+		}
+
+		// Default type to current task's type
+		if taskType == "" {
+			taskType = currentTask.Type
+		}
+
+		newTask := &db.Task{
+			Title:    title,
+			Body:     body,
+			Project:  currentTask.Project,
+			Type:     taskType,
+			Status:   db.StatusQueued, // Auto-queue for immediate execution
+			Executor: currentTask.Executor,
+			ParentID: s.taskID,
+		}
+
+		if err := s.db.CreateTask(newTask); err != nil {
+			s.sendError(id, -32603, fmt.Sprintf("Failed to create subtask: %v", err))
+			return
+		}
+
+		s.db.AppendTaskLog(s.taskID, "system", fmt.Sprintf("Delegated subtask #%d: %s", newTask.ID, title))
+
+		s.sendResult(id, toolCallResult{
+			Content: []contentBlock{
+				{Type: "text", Text: fmt.Sprintf("Delegated subtask #%d: %s\nStatus: queued (will start executing shortly)\n\nUse taskyou_get_team_status to monitor progress or taskyou_wait_for_task with task_id=%d to wait for completion.", newTask.ID, title, newTask.ID)},
+			},
+		})
+
+	case "taskyou_get_team_status":
+		// Get team status
+		teamStatus, err := s.db.GetTeamStatus(s.taskID)
+		if err != nil {
+			s.sendError(id, -32603, fmt.Sprintf("Failed to get team status: %v", err))
+			return
+		}
+
+		if teamStatus.Total == 0 {
+			s.sendResult(id, toolCallResult{
+				Content: []contentBlock{
+					{Type: "text", Text: "No subtasks delegated yet. Use taskyou_delegate_task to create subtasks for your team."},
+				},
+			})
+			return
+		}
+
+		// Get individual child tasks for details
+		children, err := s.db.GetChildTasks(s.taskID)
+		if err != nil {
+			s.sendError(id, -32603, fmt.Sprintf("Failed to get child tasks: %v", err))
+			return
+		}
+
+		var sb strings.Builder
+		sb.WriteString(fmt.Sprintf("## Team Status: %d/%d complete\n\n", teamStatus.Done, teamStatus.Total))
+
+		// Progress bar
+		if teamStatus.Total > 0 {
+			pct := teamStatus.Done * 100 / teamStatus.Total
+			filled := pct / 5 // 20 chars wide
+			empty := 20 - filled
+			bar := strings.Repeat("█", filled) + strings.Repeat("░", empty)
+			sb.WriteString(fmt.Sprintf("[%s] %d%%\n\n", bar, pct))
+		}
+
+		// Status breakdown
+		if teamStatus.Processing > 0 {
+			sb.WriteString(fmt.Sprintf("- **Processing:** %d\n", teamStatus.Processing))
+		}
+		if teamStatus.Queued > 0 {
+			sb.WriteString(fmt.Sprintf("- **Queued:** %d\n", teamStatus.Queued))
+		}
+		if teamStatus.Blocked > 0 {
+			sb.WriteString(fmt.Sprintf("- **Blocked:** %d\n", teamStatus.Blocked))
+		}
+		if teamStatus.Backlog > 0 {
+			sb.WriteString(fmt.Sprintf("- **Backlog:** %d\n", teamStatus.Backlog))
+		}
+		if teamStatus.Done > 0 {
+			sb.WriteString(fmt.Sprintf("- **Done:** %d\n", teamStatus.Done))
+		}
+
+		sb.WriteString("\n## Subtasks\n\n")
+		for _, child := range children {
+			statusIcon := "⏳"
+			switch child.Status {
+			case db.StatusProcessing:
+				statusIcon = "⚡"
+			case db.StatusQueued:
+				statusIcon = "📋"
+			case db.StatusBlocked:
+				statusIcon = "🔒"
+			case db.StatusDone:
+				statusIcon = "✅"
+			case db.StatusBacklog:
+				statusIcon = "📝"
+			}
+			sb.WriteString(fmt.Sprintf("%s **#%d** %s — %s", statusIcon, child.ID, child.Title, child.Status))
+			if child.Summary != "" {
+				sb.WriteString(fmt.Sprintf("\n   Summary: %s", child.Summary))
+			}
+			sb.WriteString("\n")
+		}
+
+		s.sendResult(id, toolCallResult{
+			Content: []contentBlock{
+				{Type: "text", Text: sb.String()},
+			},
+		})
+
+	case "taskyou_wait_for_task":
+		taskIDFloat, ok := params.Arguments["task_id"].(float64)
+		if !ok {
+			s.sendError(id, -32602, "task_id is required")
+			return
+		}
+		targetTaskID := int64(taskIDFloat)
+
+		timeoutSeconds := 300
+		if t, ok := params.Arguments["timeout_seconds"].(float64); ok {
+			timeoutSeconds = int(t)
+			if timeoutSeconds > 1800 {
+				timeoutSeconds = 1800
+			}
+			if timeoutSeconds < 5 {
+				timeoutSeconds = 5
+			}
+		}
+
+		// Verify the target task is a child of the current task
+		targetTask, err := s.db.GetTask(targetTaskID)
+		if err != nil || targetTask == nil {
+			s.sendError(id, -32602, fmt.Sprintf("Task #%d not found", targetTaskID))
+			return
+		}
+		if targetTask.ParentID != s.taskID {
+			s.sendError(id, -32602, fmt.Sprintf("Task #%d is not a subtask of the current task", targetTaskID))
+			return
+		}
+
+		// Poll until done, blocked, or timeout
+		deadline := time.Now().Add(time.Duration(timeoutSeconds) * time.Second)
+		for time.Now().Before(deadline) {
+			task, err := s.db.GetTask(targetTaskID)
+			if err != nil || task == nil {
+				s.sendError(id, -32603, fmt.Sprintf("Failed to check task #%d: %v", targetTaskID, err))
+				return
+			}
+
+			if task.Status == db.StatusDone || task.Status == db.StatusBlocked {
+				var sb strings.Builder
+				sb.WriteString(fmt.Sprintf("## Task #%d: %s\n\n", task.ID, task.Title))
+				sb.WriteString(fmt.Sprintf("**Status:** %s\n", task.Status))
+				if task.PRURL != "" {
+					sb.WriteString(fmt.Sprintf("**PR:** %s\n", task.PRURL))
+				}
+				if task.Summary != "" {
+					sb.WriteString(fmt.Sprintf("\n**Summary:** %s\n", task.Summary))
+				}
+				if task.Status == db.StatusBlocked {
+					if question, err := s.db.GetLastQuestion(task.ID); err == nil && question != "" {
+						sb.WriteString(fmt.Sprintf("\n**Needs input:** %s\n", question))
+					}
+				}
+
+				s.sendResult(id, toolCallResult{
+					Content: []contentBlock{
+						{Type: "text", Text: sb.String()},
+					},
+				})
+				return
+			}
+
+			time.Sleep(3 * time.Second)
+		}
+
+		// Timeout reached - return current status
+		task, _ := s.db.GetTask(targetTaskID)
+		statusText := "unknown"
+		if task != nil {
+			statusText = task.Status
+		}
+		s.sendResult(id, toolCallResult{
+			Content: []contentBlock{
+				{Type: "text", Text: fmt.Sprintf("Timeout waiting for task #%d. Current status: %s. Use taskyou_wait_for_task again to continue waiting, or taskyou_get_team_status to check all subtasks.", targetTaskID, statusText)},
 			},
 		})
 
