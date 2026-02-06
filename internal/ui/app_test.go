@@ -274,6 +274,121 @@ func TestShowChangeStatus_ExcludesCurrentStatus(t *testing.T) {
 	}
 }
 
+func TestQuitConfirmCtrlC_QuitsImmediately(t *testing.T) {
+	m := &AppModel{
+		width:  100,
+		height: 50,
+		keys:   DefaultKeyMap(),
+	}
+
+	// Show quit confirmation
+	m.showQuitConfirm()
+
+	if m.currentView != ViewQuitConfirm {
+		t.Fatalf("expected ViewQuitConfirm, got %v", m.currentView)
+	}
+	if m.quitConfirm == nil {
+		t.Fatal("expected quitConfirm form to be created")
+	}
+
+	// Press Ctrl+C while in quit confirm dialog
+	ctrlCMsg := tea.KeyMsg{Type: tea.KeyCtrlC}
+	_, cmd := m.updateQuitConfirm(ctrlCMsg)
+
+	// Should return tea.Quit command
+	if cmd == nil {
+		t.Fatal("expected tea.Quit command, got nil")
+	}
+
+	// Verify the command produces a QuitMsg
+	msg := cmd()
+	if _, ok := msg.(tea.QuitMsg); !ok {
+		t.Errorf("expected tea.QuitMsg, got %T", msg)
+	}
+}
+
+func TestQuitConfirmEsc_ReturnsToDashboard(t *testing.T) {
+	m := &AppModel{
+		width:  100,
+		height: 50,
+		keys:   DefaultKeyMap(),
+	}
+
+	// Show quit confirmation
+	m.showQuitConfirm()
+
+	// Press ESC
+	escMsg := tea.KeyMsg{Type: tea.KeyEscape}
+	model, _ := m.updateQuitConfirm(escMsg)
+	am := model.(*AppModel)
+
+	if am.currentView != ViewDashboard {
+		t.Errorf("expected ViewDashboard, got %v", am.currentView)
+	}
+	if am.quitConfirm != nil {
+		t.Error("expected quitConfirm to be nil after ESC")
+	}
+}
+
+func TestConfirmDialogsHandleCtrlC(t *testing.T) {
+	ctrlCMsg := tea.KeyMsg{Type: tea.KeyCtrlC}
+
+	t.Run("delete confirm", func(t *testing.T) {
+		m := &AppModel{
+			width:        100,
+			previousView: ViewDashboard,
+		}
+		task := &db.Task{ID: 1, Title: "Test", Status: db.StatusBacklog}
+		m.showDeleteConfirm(task)
+
+		model, _ := m.updateDeleteConfirm(ctrlCMsg)
+		am := model.(*AppModel)
+		if am.currentView != ViewDashboard {
+			t.Errorf("expected ViewDashboard, got %v", am.currentView)
+		}
+		if am.deleteConfirm != nil {
+			t.Error("expected deleteConfirm to be nil")
+		}
+	})
+
+	t.Run("close confirm", func(t *testing.T) {
+		m := &AppModel{
+			width:            100,
+			previousView:     ViewDashboard,
+			userClosedTaskIDs: make(map[int64]bool),
+		}
+		task := &db.Task{ID: 1, Title: "Test", Status: db.StatusQueued}
+		m.showCloseConfirm(task)
+
+		model, _ := m.updateCloseConfirm(ctrlCMsg)
+		am := model.(*AppModel)
+		if am.currentView != ViewDashboard {
+			t.Errorf("expected ViewDashboard, got %v", am.currentView)
+		}
+		if am.closeConfirm != nil {
+			t.Error("expected closeConfirm to be nil")
+		}
+	})
+
+	t.Run("archive confirm", func(t *testing.T) {
+		m := &AppModel{
+			width:        100,
+			previousView: ViewDashboard,
+		}
+		task := &db.Task{ID: 1, Title: "Test", Status: db.StatusDone}
+		m.showArchiveConfirm(task)
+
+		model, _ := m.updateArchiveConfirm(ctrlCMsg)
+		am := model.(*AppModel)
+		if am.currentView != ViewDashboard {
+			t.Errorf("expected ViewDashboard, got %v", am.currentView)
+		}
+		if am.archiveConfirm != nil {
+			t.Error("expected archiveConfirm to be nil")
+		}
+	})
+}
+
 func TestShowCloseConfirm_SetsUpConfirmation(t *testing.T) {
 	// Create a minimal app model
 	m := &AppModel{
