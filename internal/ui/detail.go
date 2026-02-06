@@ -1692,7 +1692,7 @@ func (m *DetailModel) breakTmuxPanes(saveHeight bool, resizeTUI bool) {
 	osExec.CommandContext(ctx, "tmux", "unbind-key", "-T", "root", "M-S-Down").Run()
 
 	// Reset pane title back to main view label
-	osExec.CommandContext(ctx, "tmux", "select-pane", "-t", "task-ui:.0", "-T", "Tasks").Run()
+	osExec.CommandContext(ctx, "tmux", "select-pane", "-t", m.uiSessionName+":.0", "-T", "Tasks").Run()
 
 	// Break the Claude pane back to task-daemon
 	if m.claudePaneID == "" {
