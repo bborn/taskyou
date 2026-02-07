@@ -46,6 +46,8 @@ type Task struct {
 	ArchiveCommit       string // Commit hash at time of archiving
 	ArchiveWorktreePath string // Original worktree path before archiving
 	ArchiveBranchName   string // Original branch name before archiving
+	// Shared worktree support - allows multiple tasks to work in the same worktree
+	SharedWorktreeTaskID int64 // ID of another task whose worktree to share (0 = own worktree)
 }
 
 // Task statuses
@@ -128,9 +130,9 @@ func (db *DB) CreateTask(t *Task) error {
 	t.Project = project.Name
 
 	result, err := db.Exec(`
-		INSERT INTO tasks (title, body, status, type, project, executor, pinned, tags, source_branch)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, t.Title, t.Body, t.Status, t.Type, t.Project, t.Executor, t.Pinned, t.Tags, t.SourceBranch)
+		INSERT INTO tasks (title, body, status, type, project, executor, pinned, tags, source_branch, shared_worktree_task_id)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, t.Title, t.Body, t.Status, t.Type, t.Project, t.Executor, t.Pinned, t.Tags, t.SourceBranch, t.SharedWorktreeTaskID)
 	if err != nil {
 		return fmt.Errorf("insert task: %w", err)
 	}
@@ -179,7 +181,8 @@ func (db *DB) GetTask(id int64) (*Task, error) {
 		       created_at, updated_at, started_at, completed_at,
 		       last_distilled_at, last_accessed_at,
 		       COALESCE(archive_ref, ''), COALESCE(archive_commit, ''),
-		       COALESCE(archive_worktree_path, ''), COALESCE(archive_branch_name, '')
+		       COALESCE(archive_worktree_path, ''), COALESCE(archive_branch_name, ''),
+		       COALESCE(shared_worktree_task_id, 0)
 		FROM tasks WHERE id = ?
 	`, id).Scan(
 		&t.ID, &t.Title, &t.Body, &t.Status, &t.Type, &t.Project, &t.Executor,
@@ -191,6 +194,7 @@ func (db *DB) GetTask(id int64) (*Task, error) {
 		&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
 		&t.LastDistilledAt, &t.LastAccessedAt,
 		&t.ArchiveRef, &t.ArchiveCommit, &t.ArchiveWorktreePath, &t.ArchiveBranchName,
+		&t.SharedWorktreeTaskID,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -224,7 +228,8 @@ func (db *DB) ListTasks(opts ListTasksOptions) ([]*Task, error) {
 		       created_at, updated_at, started_at, completed_at,
 		       last_distilled_at, last_accessed_at,
 		       COALESCE(archive_ref, ''), COALESCE(archive_commit, ''),
-		       COALESCE(archive_worktree_path, ''), COALESCE(archive_branch_name, '')
+		       COALESCE(archive_worktree_path, ''), COALESCE(archive_branch_name, ''),
+		       COALESCE(shared_worktree_task_id, 0)
 		FROM tasks WHERE 1=1
 	`
 	args := []interface{}{}
@@ -284,6 +289,7 @@ func (db *DB) ListTasks(opts ListTasksOptions) ([]*Task, error) {
 			&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
 			&t.LastDistilledAt, &t.LastAccessedAt,
 			&t.ArchiveRef, &t.ArchiveCommit, &t.ArchiveWorktreePath, &t.ArchiveBranchName,
+			&t.SharedWorktreeTaskID,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("scan task: %w", err)
@@ -309,7 +315,8 @@ func (db *DB) GetMostRecentlyCreatedTask() (*Task, error) {
 		       created_at, updated_at, started_at, completed_at,
 		       last_distilled_at, last_accessed_at,
 		       COALESCE(archive_ref, ''), COALESCE(archive_commit, ''),
-		       COALESCE(archive_worktree_path, ''), COALESCE(archive_branch_name, '')
+		       COALESCE(archive_worktree_path, ''), COALESCE(archive_branch_name, ''),
+		       COALESCE(shared_worktree_task_id, 0)
 		FROM tasks
 		ORDER BY created_at DESC, id DESC
 		LIMIT 1
@@ -323,6 +330,7 @@ func (db *DB) GetMostRecentlyCreatedTask() (*Task, error) {
 		&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
 		&t.LastDistilledAt, &t.LastAccessedAt,
 		&t.ArchiveRef, &t.ArchiveCommit, &t.ArchiveWorktreePath, &t.ArchiveBranchName,
+		&t.SharedWorktreeTaskID,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -352,7 +360,8 @@ func (db *DB) SearchTasks(query string, limit int) ([]*Task, error) {
 		       created_at, updated_at, started_at, completed_at,
 		       last_distilled_at, last_accessed_at,
 		       COALESCE(archive_ref, ''), COALESCE(archive_commit, ''),
-		       COALESCE(archive_worktree_path, ''), COALESCE(archive_branch_name, '')
+		       COALESCE(archive_worktree_path, ''), COALESCE(archive_branch_name, ''),
+		       COALESCE(shared_worktree_task_id, 0)
 		FROM tasks
 		WHERE (
 			title LIKE ? COLLATE NOCASE
@@ -385,6 +394,7 @@ func (db *DB) SearchTasks(query string, limit int) ([]*Task, error) {
 			&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
 			&t.LastDistilledAt, &t.LastAccessedAt,
 			&t.ArchiveRef, &t.ArchiveCommit, &t.ArchiveWorktreePath, &t.ArchiveBranchName,
+			&t.SharedWorktreeTaskID,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("scan task: %w", err)
@@ -473,13 +483,13 @@ func (db *DB) UpdateTask(t *Task) error {
 			title = ?, body = ?, status = ?, type = ?, project = ?, executor = ?,
 			worktree_path = ?, branch_name = ?, port = ?, claude_session_id = ?,
 			daemon_session = ?, pr_url = ?, pr_number = ?, dangerous_mode = ?,
-			pinned = ?, tags = ?, source_branch = ?,
+			pinned = ?, tags = ?, source_branch = ?, shared_worktree_task_id = ?,
 			updated_at = CURRENT_TIMESTAMP
 		WHERE id = ?
 	`, t.Title, t.Body, t.Status, t.Type, t.Project, t.Executor,
 		t.WorktreePath, t.BranchName, t.Port, t.ClaudeSessionID,
 		t.DaemonSession, t.PRURL, t.PRNumber, t.DangerousMode,
-		t.Pinned, t.Tags, t.SourceBranch, t.ID)
+		t.Pinned, t.Tags, t.SourceBranch, t.SharedWorktreeTaskID, t.ID)
 	if err != nil {
 		return fmt.Errorf("update task: %w", err)
 	}
@@ -705,6 +715,21 @@ func (db *DB) AllocatePort(taskID int64) (int, error) {
 	return 0, fmt.Errorf("no available ports in range %d-%d", PortRangeStart, PortRangeEnd)
 }
 
+// CountTasksSharingWorktree returns the number of active tasks (not done/archived)
+// that share the same worktree path, excluding the given task ID.
+// This is used to determine if a worktree can be safely removed.
+func (db *DB) CountTasksSharingWorktree(worktreePath string, excludeTaskID int64) (int, error) {
+	var count int
+	err := db.QueryRow(`
+		SELECT COUNT(*) FROM tasks
+		WHERE worktree_path = ? AND id != ? AND status NOT IN ('done', 'archived')
+	`, worktreePath, excludeTaskID).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("count tasks sharing worktree: %w", err)
+	}
+	return count, nil
+}
+
 // RetryTask clears logs, appends feedback to body, and re-queues a task.
 // Also clears stale tmux window/pane IDs to prevent duplicate window issues.
 func (db *DB) RetryTask(id int64, feedback string) error {
@@ -741,7 +766,8 @@ func (db *DB) GetNextQueuedTask() (*Task, error) {
 		       created_at, updated_at, started_at, completed_at,
 		       last_distilled_at, last_accessed_at,
 		       COALESCE(archive_ref, ''), COALESCE(archive_commit, ''),
-		       COALESCE(archive_worktree_path, ''), COALESCE(archive_branch_name, '')
+		       COALESCE(archive_worktree_path, ''), COALESCE(archive_branch_name, ''),
+		       COALESCE(shared_worktree_task_id, 0)
 		FROM tasks
 		WHERE status = ?
 		ORDER BY created_at ASC
@@ -756,6 +782,7 @@ func (db *DB) GetNextQueuedTask() (*Task, error) {
 		&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
 		&t.LastDistilledAt, &t.LastAccessedAt,
 		&t.ArchiveRef, &t.ArchiveCommit, &t.ArchiveWorktreePath, &t.ArchiveBranchName,
+		&t.SharedWorktreeTaskID,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -779,7 +806,8 @@ func (db *DB) GetQueuedTasks() ([]*Task, error) {
 		       created_at, updated_at, started_at, completed_at,
 		       last_distilled_at, last_accessed_at,
 		       COALESCE(archive_ref, ''), COALESCE(archive_commit, ''),
-		       COALESCE(archive_worktree_path, ''), COALESCE(archive_branch_name, '')
+		       COALESCE(archive_worktree_path, ''), COALESCE(archive_branch_name, ''),
+		       COALESCE(shared_worktree_task_id, 0)
 		FROM tasks
 		WHERE status = ?
 		ORDER BY created_at ASC
@@ -802,6 +830,7 @@ func (db *DB) GetQueuedTasks() ([]*Task, error) {
 			&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
 			&t.LastDistilledAt, &t.LastAccessedAt,
 			&t.ArchiveRef, &t.ArchiveCommit, &t.ArchiveWorktreePath, &t.ArchiveBranchName,
+			&t.SharedWorktreeTaskID,
 		); err != nil {
 			return nil, fmt.Errorf("scan task: %w", err)
 		}
@@ -824,7 +853,8 @@ func (db *DB) GetTasksWithBranches() ([]*Task, error) {
 		       created_at, updated_at, started_at, completed_at,
 		       last_distilled_at, last_accessed_at,
 		       COALESCE(archive_ref, ''), COALESCE(archive_commit, ''),
-		       COALESCE(archive_worktree_path, ''), COALESCE(archive_branch_name, '')
+		       COALESCE(archive_worktree_path, ''), COALESCE(archive_branch_name, ''),
+		       COALESCE(shared_worktree_task_id, 0)
 		FROM tasks
 		WHERE branch_name != '' AND status NOT IN (?, ?)
 		ORDER BY created_at DESC
@@ -847,6 +877,7 @@ func (db *DB) GetTasksWithBranches() ([]*Task, error) {
 			&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
 			&t.LastDistilledAt, &t.LastAccessedAt,
 			&t.ArchiveRef, &t.ArchiveCommit, &t.ArchiveWorktreePath, &t.ArchiveBranchName,
+			&t.SharedWorktreeTaskID,
 		); err != nil {
 			return nil, fmt.Errorf("scan task: %w", err)
 		}

@@ -1338,6 +1338,60 @@ func TestSpotlightSync(t *testing.T) {
 	}
 }
 
+func TestWorkflowCreateTaskWithSharedWorktree(t *testing.T) {
+	database := testDB(t)
+	parentTask := createTestTask(t, database)
+
+	request := map[string]interface{}{
+		"jsonrpc": "2.0",
+		"id":      1,
+		"method":  "tools/call",
+		"params": map[string]interface{}{
+			"name": "taskyou_create_task",
+			"arguments": map[string]interface{}{
+				"title":                  "Shared Worktree Task",
+				"body":                   "This task shares a worktree",
+				"shared_worktree_task_id": float64(parentTask.ID),
+			},
+		},
+	}
+	reqBytes, _ := json.Marshal(request)
+	reqBytes = append(reqBytes, '\n')
+
+	server, output := testServer(database, parentTask.ID, string(reqBytes))
+	server.Run()
+
+	var resp jsonRPCResponse
+	if err := json.Unmarshal(output.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to parse response: %v", err)
+	}
+
+	if resp.Error != nil {
+		t.Fatalf("unexpected error: %s", resp.Error.Message)
+	}
+
+	// Verify task was created with shared_worktree_task_id
+	tasks, err := database.ListTasks(db.ListTasksOptions{Project: "test-project"})
+	if err != nil {
+		t.Fatalf("failed to list tasks: %v", err)
+	}
+
+	var found bool
+	for _, tsk := range tasks {
+		if tsk.Title == "Shared Worktree Task" {
+			found = true
+			if tsk.SharedWorktreeTaskID != parentTask.ID {
+				t.Errorf("expected SharedWorktreeTaskID=%d, got %d", parentTask.ID, tsk.SharedWorktreeTaskID)
+			}
+			break
+		}
+	}
+
+	if !found {
+		t.Error("shared worktree task not found in database")
+	}
+}
+
 // runGit is a helper to run git commands in tests
 func runGit(t *testing.T, dir string, args ...string) {
 	t.Helper()

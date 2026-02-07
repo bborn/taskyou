@@ -3390,6 +3390,61 @@ func (e *Executor) setupWorktree(task *db.Task) (string, error) {
 		}
 	}
 
+	// If task is configured to share another task's worktree, use that worktree
+	if task.SharedWorktreeTaskID > 0 {
+		parentTask, err := e.db.GetTask(task.SharedWorktreeTaskID)
+		if err != nil {
+			return "", fmt.Errorf("get shared worktree task %d: %w", task.SharedWorktreeTaskID, err)
+		}
+		if parentTask == nil {
+			return "", fmt.Errorf("shared worktree task %d not found", task.SharedWorktreeTaskID)
+		}
+		if parentTask.WorktreePath == "" {
+			// Parent task doesn't have a worktree yet - set it up first
+			// (this happens when the parent task hasn't been executed yet)
+			e.logger.Info("Parent task has no worktree yet, setting up", "parentTaskID", parentTask.ID)
+			parentWorkDir, err := e.setupWorktree(parentTask)
+			if err != nil {
+				return "", fmt.Errorf("setup parent worktree for task %d: %w", parentTask.ID, err)
+			}
+			// Re-fetch parent task to get updated worktree path
+			parentTask, _ = e.db.GetTask(task.SharedWorktreeTaskID)
+			if parentTask == nil || parentTask.WorktreePath == "" {
+				return "", fmt.Errorf("parent task %d still has no worktree after setup (got %s)", task.SharedWorktreeTaskID, parentWorkDir)
+			}
+		}
+
+		worktreePath := parentTask.WorktreePath
+		if _, err := os.Stat(worktreePath); err != nil {
+			return "", fmt.Errorf("shared worktree directory does not exist: %s", worktreePath)
+		}
+
+		// Use the parent's worktree path and branch, but keep this task's own identity
+		task.WorktreePath = worktreePath
+		task.BranchName = parentTask.BranchName
+
+		// Allocate a port for this task if not already assigned
+		if task.Port == 0 {
+			port, err := e.db.AllocatePort(task.ID)
+			if err != nil {
+				e.logger.Warn("could not allocate port", "error", err)
+			} else {
+				task.Port = port
+			}
+		}
+
+		e.db.UpdateTask(task)
+		e.logLine(task.ID, "system", fmt.Sprintf("Sharing worktree with task #%d at %s (branch: %s)", parentTask.ID, worktreePath, parentTask.BranchName))
+
+		trustMiseConfig(worktreePath)
+		e.writeWorktreeEnvFile(projectDir, worktreePath, task, paths.configDir)
+		symlinkClaudeConfig(projectDir, worktreePath)
+		symlinkMCPConfig(projectDir, worktreePath)
+		copyMCPConfig(paths.configFile, projectDir, worktreePath)
+		e.runWorktreeInitScript(projectDir, worktreePath, task)
+		return worktreePath, nil
+	}
+
 	// If task already has a worktree path, reuse it (don't recalculate from title)
 	// This prevents creating duplicate worktrees when a task is renamed
 	if task.WorktreePath != "" {
@@ -4265,6 +4320,8 @@ func (e *Executor) updateTaskPRInfo(task *db.Task, projectDir string) {
 }
 
 // CleanupWorktree removes a task's worktree.
+// If the worktree is shared with other active tasks, only clears the reference
+// without removing the actual worktree directory.
 func (e *Executor) CleanupWorktree(task *db.Task) error {
 	if task.WorktreePath == "" {
 		return nil
@@ -4276,6 +4333,21 @@ func (e *Executor) CleanupWorktree(task *db.Task) error {
 		return nil
 	}
 	paths := e.claudePathsForProject(task.Project)
+
+	// Check if other active tasks share this worktree
+	sharedCount, err := e.db.CountTasksSharingWorktree(task.WorktreePath, task.ID)
+	if err != nil {
+		e.logger.Warn("could not check shared worktree count", "error", err)
+	}
+
+	if sharedCount > 0 {
+		// Other tasks are using this worktree - just clear our reference
+		e.logLine(task.ID, "system", fmt.Sprintf("Worktree shared with %d other task(s), keeping directory", sharedCount))
+		task.WorktreePath = ""
+		task.BranchName = ""
+		e.db.UpdateTask(task)
+		return nil
+	}
 
 	// Run teardown script before removing the worktree
 	e.runWorktreeTeardownScript(projectDir, task.WorktreePath, task)
@@ -4321,6 +4393,30 @@ func (e *Executor) CleanupWorktree(task *db.Task) error {
 // 4. Removes the worktree with --force
 func (e *Executor) ArchiveWorktree(task *db.Task) error {
 	if task.WorktreePath == "" {
+		return nil
+	}
+
+	// If this task shares a worktree from another task, just clear the reference
+	// without archiving state or removing the worktree directory
+	if task.SharedWorktreeTaskID > 0 {
+		e.logLine(task.ID, "system", fmt.Sprintf("Task shares worktree with #%d, clearing reference only", task.SharedWorktreeTaskID))
+		// Save archive state for reference (so we know what worktree it was using)
+		e.db.SaveArchiveState(task.ID, "", "", task.WorktreePath, task.BranchName)
+		e.db.ClearTaskWorktreePath(task.ID)
+		return nil
+	}
+
+	// Check if other active tasks share this worktree
+	sharedCount, err := e.db.CountTasksSharingWorktree(task.WorktreePath, task.ID)
+	if err != nil {
+		e.logger.Warn("could not check shared worktree count", "error", err)
+	}
+
+	if sharedCount > 0 {
+		// Other tasks are using this worktree - save state but don't remove directory
+		e.logLine(task.ID, "system", fmt.Sprintf("Worktree shared with %d other task(s), keeping directory", sharedCount))
+		e.db.SaveArchiveState(task.ID, "", "", task.WorktreePath, task.BranchName)
+		e.db.ClearTaskWorktreePath(task.ID)
 		return nil
 	}
 

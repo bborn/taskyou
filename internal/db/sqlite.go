@@ -251,6 +251,8 @@ func (db *DB) migrate() error {
 		`ALTER TABLE tasks ADD COLUMN archive_branch_name TEXT DEFAULT ''`,   // Original branch name before archiving
 		// Source branch for checking out existing branches in worktrees (e.g., for QA deployments)
 		`ALTER TABLE tasks ADD COLUMN source_branch TEXT DEFAULT ''`, // Existing branch to checkout instead of creating new branch
+		// Shared worktree support - allows multiple tasks to share one worktree
+		`ALTER TABLE tasks ADD COLUMN shared_worktree_task_id INTEGER DEFAULT 0`, // ID of another task whose worktree to share
 	}
 
 	for _, m := range alterMigrations {
