@@ -800,16 +800,13 @@ func (e *Executor) processNextTask(ctx context.Context) {
 	}
 
 	for _, task := range tasks {
-		// Skip if already running
-		e.mu.RLock()
-		alreadyRunning := e.runningTasks[task.ID]
-		e.mu.RUnlock()
-		if alreadyRunning {
+		// Atomically check-and-set to prevent race where two ticks
+		// both see the task as not-running and spawn duplicate goroutines
+		e.mu.Lock()
+		if e.runningTasks[task.ID] {
+			e.mu.Unlock()
 			continue
 		}
-
-		// Mark as running and spawn goroutine
-		e.mu.Lock()
 		e.runningTasks[task.ID] = true
 		e.mu.Unlock()
 
@@ -826,6 +823,15 @@ func (e *Executor) ExecuteNow(ctx context.Context, taskID int64) error {
 	if task == nil {
 		return fmt.Errorf("task %d not found", taskID)
 	}
+
+	// Register in runningTasks so the worker loop doesn't also pick it up
+	e.mu.Lock()
+	if e.runningTasks[taskID] {
+		e.mu.Unlock()
+		return fmt.Errorf("task %d is already running", taskID)
+	}
+	e.runningTasks[taskID] = true
+	e.mu.Unlock()
 
 	e.executeTask(ctx, task)
 	return nil
@@ -2896,6 +2902,11 @@ func (e *Executor) pollTmuxSession(ctx context.Context, taskID int64, sessionNam
 				if task.Status == db.StatusDone {
 					// Don't kill window - keep it so user can review Claude's work
 					return execResult{Success: true}
+				}
+				if task.Status == db.StatusQueued {
+					// Task was re-queued (e.g. retry) - stop polling so the
+					// worker can pick it up fresh without a duplicate session
+					return execResult{Interrupted: true}
 				}
 			}
 
