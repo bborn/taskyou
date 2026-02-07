@@ -4428,9 +4428,10 @@ func (e *Executor) ArchiveWorktree(task *db.Task) error {
 		}
 	}(task.WorktreePath, paths.configFile)
 
-	// Clear worktree info from task (but keep branch name for unarchiving reference)
-	task.WorktreePath = ""
-	e.db.UpdateTask(task)
+	// Clear worktree path (but keep branch name for unarchiving reference).
+	// Use targeted update to avoid overwriting other fields that may have
+	// changed concurrently (e.g., status set to archived before this runs).
+	e.db.ClearTaskWorktreePath(task.ID)
 
 	return nil
 }

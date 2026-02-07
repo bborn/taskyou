@@ -3288,30 +3288,34 @@ func (m *AppModel) archiveTask(id int64) tea.Cmd {
 			return taskArchivedMsg{err: err}
 		}
 
-		// Kill Claude process to free memory
-		exec.KillClaudeProcess(id)
-
-		// Kill the task window to clean up both Claude and workdir panes
-		windowTarget := executor.TmuxSessionName(id)
-		osExec.Command("tmux", "kill-window", "-t", windowTarget).Run()
-
-		// Archive worktree (saves uncommitted changes and removes worktree)
-		if task != nil && task.WorktreePath != "" {
-			if err := exec.ArchiveWorktree(task); err != nil {
-				// Log warning but continue with archiving
-				fmt.Fprintf(os.Stderr, "Warning: could not archive worktree: %v\n", err)
-			}
-		}
-
-		// Update status to archived
+		// Update status to archived immediately for instant UI feedback
 		err = database.UpdateTaskStatus(id, db.StatusArchived)
-		if err == nil {
-			if task, _ := database.GetTask(id); task != nil {
-				exec.NotifyTaskChange("status_changed", task)
-			}
+		if err != nil {
+			return taskArchivedMsg{err: err}
 		}
 
-		return taskArchivedMsg{err: err}
+		if task, _ := database.GetTask(id); task != nil {
+			exec.NotifyTaskChange("status_changed", task)
+		}
+
+		// Run expensive cleanup in the background so the UI doesn't block
+		go func() {
+			// Kill Claude process to free memory
+			exec.KillClaudeProcess(id)
+
+			// Kill the task window to clean up both Claude and workdir panes
+			windowTarget := executor.TmuxSessionName(id)
+			osExec.Command("tmux", "kill-window", "-t", windowTarget).Run()
+
+			// Archive worktree (saves uncommitted changes and removes worktree)
+			if task != nil && task.WorktreePath != "" {
+				if err := exec.ArchiveWorktree(task); err != nil {
+					fmt.Fprintf(os.Stderr, "Warning: could not archive worktree: %v\n", err)
+				}
+			}
+		}()
+
+		return taskArchivedMsg{err: nil}
 	}
 }
 
