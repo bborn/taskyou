@@ -1427,9 +1427,7 @@ func (k *KanbanBoard) handleClickDesktop(x, y int) *db.Task {
 	}
 
 	// Check if click is within column bounds (not on border)
-	colStartX := currentX
-	// Recalculate colStartX for the found column
-	colStartX = 0
+	colStartX := 0
 	for i := 0; i < colIdx; i++ {
 		if k.IsColumnCollapsed(i) {
 			colStartX += collapsedColumnWidth + 2 + 1
