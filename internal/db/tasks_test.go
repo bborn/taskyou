@@ -2175,3 +2175,172 @@ func TestOnboarding(t *testing.T) {
 		}
 	})
 }
+
+func TestSharedWorktreeTaskID(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	db, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer db.Close()
+
+	// Create project
+	if err := db.CreateProject(&Project{Name: "test", Path: tmpDir}); err != nil {
+		t.Fatalf("failed to create project: %v", err)
+	}
+
+	// Create parent task
+	parentTask := &Task{
+		Title:   "Parent Task",
+		Status:  StatusProcessing,
+		Project: "test",
+	}
+	if err := db.CreateTask(parentTask); err != nil {
+		t.Fatalf("failed to create parent task: %v", err)
+	}
+
+	// Set worktree path on parent
+	parentTask.WorktreePath = "/tmp/worktree-parent"
+	parentTask.BranchName = "task/1-parent-task"
+	if err := db.UpdateTask(parentTask); err != nil {
+		t.Fatalf("failed to update parent task: %v", err)
+	}
+
+	// Create child task that shares the parent's worktree
+	childTask := &Task{
+		Title:                "Child Task",
+		Status:               StatusBacklog,
+		Project:              "test",
+		SharedWorktreeTaskID: parentTask.ID,
+	}
+	if err := db.CreateTask(childTask); err != nil {
+		t.Fatalf("failed to create child task: %v", err)
+	}
+
+	// Verify the shared_worktree_task_id was saved
+	fetched, err := db.GetTask(childTask.ID)
+	if err != nil {
+		t.Fatalf("failed to get child task: %v", err)
+	}
+	if fetched.SharedWorktreeTaskID != parentTask.ID {
+		t.Errorf("expected SharedWorktreeTaskID=%d, got %d", parentTask.ID, fetched.SharedWorktreeTaskID)
+	}
+
+	// Create another task without shared worktree
+	independentTask := &Task{
+		Title:   "Independent Task",
+		Status:  StatusBacklog,
+		Project: "test",
+	}
+	if err := db.CreateTask(independentTask); err != nil {
+		t.Fatalf("failed to create independent task: %v", err)
+	}
+
+	// Verify it has SharedWorktreeTaskID == 0
+	fetched2, err := db.GetTask(independentTask.ID)
+	if err != nil {
+		t.Fatalf("failed to get independent task: %v", err)
+	}
+	if fetched2.SharedWorktreeTaskID != 0 {
+		t.Errorf("expected SharedWorktreeTaskID=0, got %d", fetched2.SharedWorktreeTaskID)
+	}
+}
+
+func TestCountTasksSharingWorktree(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	db, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer db.Close()
+
+	// Create project
+	if err := db.CreateProject(&Project{Name: "test", Path: tmpDir}); err != nil {
+		t.Fatalf("failed to create project: %v", err)
+	}
+
+	worktreePath := "/tmp/shared-worktree"
+
+	// Create parent task with worktree
+	parentTask := &Task{
+		Title:   "Parent Task",
+		Status:  StatusProcessing,
+		Project: "test",
+	}
+	if err := db.CreateTask(parentTask); err != nil {
+		t.Fatalf("failed to create parent task: %v", err)
+	}
+	parentTask.WorktreePath = worktreePath
+	parentTask.BranchName = "task/1-parent"
+	db.UpdateTask(parentTask)
+
+	// Create child task sharing the same worktree path
+	childTask := &Task{
+		Title:                "Child Task",
+		Status:               StatusProcessing,
+		Project:              "test",
+		SharedWorktreeTaskID: parentTask.ID,
+	}
+	if err := db.CreateTask(childTask); err != nil {
+		t.Fatalf("failed to create child task: %v", err)
+	}
+	childTask.WorktreePath = worktreePath
+	childTask.BranchName = "task/1-parent"
+	db.UpdateTask(childTask)
+
+	// Count from parent's perspective - should see child
+	count, err := db.CountTasksSharingWorktree(worktreePath, parentTask.ID)
+	if err != nil {
+		t.Fatalf("failed to count shared worktree tasks: %v", err)
+	}
+	if count != 1 {
+		t.Errorf("expected 1 task sharing worktree with parent, got %d", count)
+	}
+
+	// Count from child's perspective - should see parent
+	count, err = db.CountTasksSharingWorktree(worktreePath, childTask.ID)
+	if err != nil {
+		t.Fatalf("failed to count shared worktree tasks: %v", err)
+	}
+	if count != 1 {
+		t.Errorf("expected 1 task sharing worktree with child, got %d", count)
+	}
+
+	// Mark child as done - should no longer count
+	db.UpdateTaskStatus(childTask.ID, StatusDone)
+
+	count, err = db.CountTasksSharingWorktree(worktreePath, parentTask.ID)
+	if err != nil {
+		t.Fatalf("failed to count shared worktree tasks: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("expected 0 tasks sharing worktree after child done, got %d", count)
+	}
+
+	// Create a second child, also sharing the worktree
+	child2Task := &Task{
+		Title:                "Child Task 2",
+		Status:               StatusProcessing,
+		Project:              "test",
+		SharedWorktreeTaskID: parentTask.ID,
+	}
+	if err := db.CreateTask(child2Task); err != nil {
+		t.Fatalf("failed to create child2 task: %v", err)
+	}
+	child2Task.WorktreePath = worktreePath
+	child2Task.BranchName = "task/1-parent"
+	db.UpdateTask(child2Task)
+
+	// Count from parent - should see 1 active (child2)
+	count, err = db.CountTasksSharingWorktree(worktreePath, parentTask.ID)
+	if err != nil {
+		t.Fatalf("failed to count: %v", err)
+	}
+	if count != 1 {
+		t.Errorf("expected 1, got %d", count)
+	}
+}

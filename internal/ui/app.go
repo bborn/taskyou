@@ -2190,6 +2190,7 @@ func (m *AppModel) updateEditTaskForm(msg tea.Msg) (tea.Model, tea.Cmd) {
 			updatedTask.Status = m.editingTask.Status
 			updatedTask.WorktreePath = m.editingTask.WorktreePath
 			updatedTask.BranchName = m.editingTask.BranchName
+			updatedTask.SharedWorktreeTaskID = m.editingTask.SharedWorktreeTaskID
 			updatedTask.CreatedAt = m.editingTask.CreatedAt
 			updatedTask.StartedAt = m.editingTask.StartedAt
 			updatedTask.CompletedAt = m.editingTask.CompletedAt
@@ -3507,6 +3508,7 @@ func (m *AppModel) moveTaskToProject(newTaskData *db.Task, oldTask *db.Task) tea
 		newTaskData.Port = 0
 		newTaskData.ClaudeSessionID = ""
 		newTaskData.DaemonSession = ""
+		newTaskData.SharedWorktreeTaskID = 0
 		newTaskData.StartedAt = nil
 		newTaskData.CompletedAt = nil
 		// Keep the status - if it was backlog, stay backlog; if queued, stay queued

@@ -235,6 +235,10 @@ func (s *Server) handleRequest(req *jsonRPCRequest) {
 								"type":        "string",
 								"description": "Initial status (backlog, queued, defaults to backlog)",
 							},
+							"shared_worktree_task_id": map[string]interface{}{
+								"type":        "integer",
+								"description": "ID of another task whose worktree to share. When set, this task will run in the same worktree directory as the referenced task instead of creating its own.",
+							},
 						},
 						"required": []string{"title"},
 					},
@@ -518,6 +522,12 @@ func (s *Server) handleToolCall(id interface{}, params *toolCallParams) {
 		taskType, _ := params.Arguments["type"].(string)
 		status, _ := params.Arguments["status"].(string)
 
+		// Parse shared_worktree_task_id
+		var sharedWorktreeTaskID int64
+		if v, ok := params.Arguments["shared_worktree_task_id"].(float64); ok {
+			sharedWorktreeTaskID = int64(v)
+		}
+
 		// Default project to current task's project
 		if project == "" {
 			currentTask, err := s.db.GetTask(s.taskID)
@@ -531,11 +541,12 @@ func (s *Server) handleToolCall(id interface{}, params *toolCallParams) {
 		}
 
 		newTask := &db.Task{
-			Title:   title,
-			Body:    body,
-			Project: project,
-			Type:    taskType,
-			Status:  status,
+			Title:                title,
+			Body:                 body,
+			Project:              project,
+			Type:                 taskType,
+			Status:               status,
+			SharedWorktreeTaskID: sharedWorktreeTaskID,
 		}
 
 		if err := s.db.CreateTask(newTask); err != nil {

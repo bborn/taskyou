@@ -473,6 +473,7 @@ Examples:
 			tags, _ := cmd.Flags().GetString("tags")
 			pinned, _ := cmd.Flags().GetBool("pinned")
 			branch, _ := cmd.Flags().GetString("branch")
+			shareWorktree, _ := cmd.Flags().GetInt64("share-worktree")
 			outputJSON, _ := cmd.Flags().GetBool("json")
 
 			// Validate that either title or body is provided
@@ -575,15 +576,16 @@ Examples:
 
 			// Create the task
 			task := &db.Task{
-				Title:        title,
-				Body:         body,
-				Status:       status,
-				Type:         taskType,
-				Project:      project,
-				Executor:     taskExecutor,
-				Tags:         tags,
-				Pinned:       pinned,
-				SourceBranch: branch,
+				Title:                title,
+				Body:                 body,
+				Status:               status,
+				Type:                 taskType,
+				Project:              project,
+				Executor:             taskExecutor,
+				Tags:                 tags,
+				Pinned:               pinned,
+				SourceBranch:         branch,
+				SharedWorktreeTaskID: shareWorktree,
 			}
 
 			if err := database.CreateTask(task); err != nil {
@@ -603,12 +605,18 @@ Examples:
 				if task.SourceBranch != "" {
 					output["source_branch"] = task.SourceBranch
 				}
+				if task.SharedWorktreeTaskID > 0 {
+					output["shared_worktree_task_id"] = task.SharedWorktreeTaskID
+				}
 				jsonBytes, _ := json.Marshal(output)
 				fmt.Println(string(jsonBytes))
 			} else {
 				msg := fmt.Sprintf("Created task #%d: %s", task.ID, task.Title)
 				if branch != "" {
 					msg += fmt.Sprintf(" (branch: %s)", branch)
+				}
+				if shareWorktree > 0 {
+					msg += fmt.Sprintf(" (sharing worktree with #%d)", shareWorktree)
 				}
 				if execute {
 					msg += " (queued for execution)"
@@ -625,6 +633,7 @@ Examples:
 	createCmd.Flags().String("tags", "", "Task tags (comma-separated)")
 	createCmd.Flags().Bool("pinned", false, "Pin the task to the top of its column")
 	createCmd.Flags().StringP("branch", "b", "", "Existing branch to checkout for worktree (e.g., fix/ui-overflow)")
+	createCmd.Flags().Int64("share-worktree", 0, "Share worktree with another task by ID (e.g., --share-worktree 42)")
 	createCmd.Flags().Bool("json", false, "Output in JSON format")
 	rootCmd.AddCommand(createCmd)
 
