@@ -3138,7 +3138,14 @@ func (e *Executor) CheckPRStateAndUpdateTask(taskID int64) {
 	}
 
 	// Check if the branch has been merged (via git or PR status)
+	// NOTE: isBranchMerged can take 10-20s due to network calls (git fetch, ls-remote).
 	if e.isBranchMerged(task) {
+		// Re-check task status after the (potentially slow) merge check to avoid
+		// a race where the task was started/queued while we were checking.
+		freshTask, err := e.db.GetTask(task.ID)
+		if err != nil || freshTask == nil || freshTask.Status != db.StatusBacklog {
+			return
+		}
 		e.logger.Info("Branch merged, closing task", "id", task.ID, "branch", task.BranchName)
 		e.logLine(task.ID, "system", fmt.Sprintf("Branch %s has been merged - automatically closing task", task.BranchName))
 		e.updateStatus(task.ID, db.StatusDone)
@@ -3172,7 +3179,14 @@ func (e *Executor) checkMergedBranches() {
 		}
 
 		// Check if the branch has been merged (via git or PR status)
+		// NOTE: isBranchMerged can take 10-20s due to network calls (git fetch, ls-remote).
 		if e.isBranchMerged(task) {
+			// Re-check task status after the (potentially slow) merge check to avoid
+			// a race where the task was started/queued while we were checking.
+			freshTask, err := e.db.GetTask(task.ID)
+			if err != nil || freshTask == nil || freshTask.Status != db.StatusBacklog {
+				continue
+			}
 			e.logger.Info("Branch merged, closing task", "id", task.ID, "branch", task.BranchName)
 			e.logLine(task.ID, "system", fmt.Sprintf("Branch %s has been merged - automatically closing task", task.BranchName))
 			e.updateStatus(task.ID, db.StatusDone)
@@ -3238,11 +3252,9 @@ func (e *Executor) isBranchMerged(task *db.Task) bool {
 		branch = strings.TrimSpace(branch)
 		branch = strings.TrimPrefix(branch, "* ")
 
-		// Check both with and without origin/ prefix
+		// Match exactly: "origin/branchName" or any remote prefix ending with "/branchName"
 		branchName := task.BranchName
-		if strings.Contains(branch, branchName) ||
-			strings.HasSuffix(branch, "/"+branchName) ||
-			branch == "origin/"+branchName {
+		if branch == branchName || strings.HasSuffix(branch, "/"+branchName) {
 			return true
 		}
 	}
@@ -3255,16 +3267,11 @@ func (e *Executor) isBranchMerged(task *db.Task) bool {
 	lsRemoteCmd.Dir = projectDir
 	lsOutput, err := lsRemoteCmd.Output()
 	if err == nil && len(strings.TrimSpace(string(lsOutput))) == 0 {
-		// Branch doesn't exist on remote - check if it ever had commits
-		// that are now part of the default branch
-		logCtx, logCancel := context.WithTimeout(context.Background(), localTimeout)
-		defer logCancel()
-		logCmd := exec.CommandContext(logCtx, "git", "log", "--oneline", "-1", "origin/"+defaultBranch, "--grep="+task.BranchName)
-		logCmd.Dir = projectDir
-		logOutput, err := logCmd.Output()
-		if err == nil && len(strings.TrimSpace(string(logOutput))) > 0 {
-			return true
-		}
+		// Branch doesn't exist on remote - check if the local branch
+		// has been fully merged into the default branch.
+		// NOTE: We intentionally skip grep-based commit message matching here
+		// because git log --grep does substring matching, causing false positives
+		// (e.g., "task/10" matches commit messages mentioning "task/100" or "task/1066").
 
 		// Check if local branch exists
 		listCtx, listCancel := context.WithTimeout(context.Background(), localTimeout)
