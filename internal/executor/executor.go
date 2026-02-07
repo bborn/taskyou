@@ -875,6 +875,7 @@ func (e *Executor) executeTask(ctx context.Context, task *db.Task) {
 		e.hooks.OnStatusChange(task, db.StatusBlocked, "Worktree setup failed - cannot execute task safely")
 		return
 	}
+	e.events.EmitTaskWorktreeReady(task)
 
 	// Prepare attachments (write to .claude/attachments for seamless access)
 	attachmentPaths, cleanupAttachments := e.prepareAttachments(task.ID, workDir)
@@ -2368,6 +2369,14 @@ func (e *Executor) resumeClaudeDangerous(task *db.Task, workDir string) bool {
 
 	e.logLine(taskID, "system", "Claude restarted in dangerous mode (--dangerously-skip-permissions enabled)")
 
+	// Wait for Claude to be fully ready before sending input
+	time.Sleep(1 * time.Second)
+
+	// Automatically send "continue working" to resume the task
+	// This tells Claude to continue where it left off after the mode switch
+	exec.Command("tmux", "send-keys", "-t", windowTarget+".0", "continue working", "Enter").Run()
+	e.logLine(taskID, "system", "Sent 'continue working' to resume task")
+
 	// Don't poll for completion here - the process will continue running in tmux
 	// The existing polling infrastructure will handle it
 	return true
@@ -2525,6 +2534,14 @@ func (e *Executor) resumeClaudeSafe(task *db.Task, workDir string) bool {
 
 	e.logLine(taskID, "system", "Claude restarted in safe mode (permissions enabled)")
 
+	// Wait for Claude to be fully ready before sending input
+	time.Sleep(1 * time.Second)
+
+	// Automatically send "continue working" to resume the task
+	// This tells Claude to continue where it left off after the mode switch
+	exec.Command("tmux", "send-keys", "-t", windowTarget+".0", "continue working", "Enter").Run()
+	e.logLine(taskID, "system", "Sent 'continue working' to resume task")
+
 	// Don't poll for completion here - the process will continue running in tmux
 	// The existing polling infrastructure will handle it
 	return true
@@ -2622,6 +2639,15 @@ func (e *Executor) resumeCodexWithMode(task *db.Task, workDir string, dangerousM
 	}
 
 	e.logLine(taskID, "system", fmt.Sprintf("Codex restarted in %s mode", modeStr))
+
+	// Wait for Codex to be fully ready before sending input
+	time.Sleep(1 * time.Second)
+
+	// Automatically send "continue working" to resume the task
+	// This tells Codex to continue where it left off after the mode switch
+	exec.Command("tmux", "send-keys", "-t", windowTarget+".0", "continue working", "Enter").Run()
+	e.logLine(taskID, "system", "Sent 'continue working' to resume task")
+
 	return true
 }
 
@@ -2721,6 +2747,15 @@ func (e *Executor) resumeGeminiWithMode(task *db.Task, workDir string, dangerous
 	}
 
 	e.logLine(taskID, "system", fmt.Sprintf("Gemini restarted in %s mode", modeStr))
+
+	// Wait for Gemini to be fully ready before sending input
+	time.Sleep(1 * time.Second)
+
+	// Automatically send "continue working" to resume the task
+	// This tells Gemini to continue where it left off after the mode switch
+	exec.Command("tmux", "send-keys", "-t", windowTarget+".0", "continue working", "Enter").Run()
+	e.logLine(taskID, "system", "Sent 'continue working' to resume task")
+
 	return true
 }
 
@@ -3408,58 +3443,84 @@ func (e *Executor) setupWorktree(task *db.Task) (string, error) {
 		return worktreePath, nil
 	}
 
-	// Get default branch name
-	defaultBranch := e.getDefaultBranch(projectDir)
-
-	// Create new branch and worktree
-	cmd := exec.Command("git", "worktree", "add", "-b", branchName, worktreePath, defaultBranch)
-	cmd.Dir = projectDir
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		// Check if branch already exists
-		if strings.Contains(string(output), "already exists") {
-			// Try using existing branch
-			cmd = exec.Command("git", "worktree", "add", worktreePath, branchName)
-			cmd.Dir = projectDir
-			output2, err2 := cmd.CombinedOutput()
-			if err2 != nil {
-				// Check if worktree was created by another process
-				if strings.Contains(string(output2), "already checked out") {
-					// Worktree exists, reuse it
-					task.WorktreePath = worktreePath
-					task.BranchName = branchName
-
-					// Fetch PR information if available
-					e.updateTaskPRInfo(task, projectDir)
-
-					e.db.UpdateTask(task)
-					// Allocate a port if not already assigned
-					if task.Port == 0 {
-						port, err := e.db.AllocatePort(task.ID)
-						if err != nil {
-							e.logger.Warn("could not allocate port", "error", err)
-						} else {
-							task.Port = port
-						}
-					}
-					trustMiseConfig(worktreePath)
-					e.writeWorktreeEnvFile(projectDir, worktreePath, task, paths.configDir)
-					symlinkClaudeConfig(projectDir, worktreePath)
-					symlinkMCPConfig(projectDir, worktreePath)
-					copyMCPConfig(paths.configFile, projectDir, worktreePath)
-					e.runWorktreeInitScript(projectDir, worktreePath, task)
-					return worktreePath, nil
-				}
-				return "", fmt.Errorf("create worktree: %v\n%s\n%s", err, string(output), string(output2))
-			}
-		} else {
-			return "", fmt.Errorf("create worktree: %v\n%s", err, string(output))
+	// Check if task specifies an existing source branch to checkout
+	if task.SourceBranch != "" {
+		// Fetch the latest from origin to ensure we have the branch
+		fetchCmd := exec.Command("git", "fetch", "origin")
+		fetchCmd.Dir = projectDir
+		if fetchOutput, fetchErr := fetchCmd.CombinedOutput(); fetchErr != nil {
+			return "", fmt.Errorf("fetch origin: %v\n%s", fetchErr, string(fetchOutput))
 		}
-	}
 
-	// Update task with worktree info
-	task.WorktreePath = worktreePath
-	task.BranchName = branchName
+		// Create worktree from existing remote branch (no -b flag)
+		remoteBranch := "origin/" + task.SourceBranch
+		cmd := exec.Command("git", "worktree", "add", worktreePath, remoteBranch)
+		cmd.Dir = projectDir
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			return "", fmt.Errorf("create worktree from branch %s: %v\n%s", task.SourceBranch, err, string(output))
+		}
+
+		// Use the source branch name as the branch name for the task
+		branchName = task.SourceBranch
+
+		// Update task with worktree info
+		task.WorktreePath = worktreePath
+		task.BranchName = branchName
+	} else {
+		// Get default branch name
+		defaultBranch := e.getDefaultBranch(projectDir)
+
+		// Create new branch and worktree
+		cmd := exec.Command("git", "worktree", "add", "-b", branchName, worktreePath, defaultBranch)
+		cmd.Dir = projectDir
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			// Check if branch already exists
+			if strings.Contains(string(output), "already exists") {
+				// Try using existing branch
+				cmd = exec.Command("git", "worktree", "add", worktreePath, branchName)
+				cmd.Dir = projectDir
+				output2, err2 := cmd.CombinedOutput()
+				if err2 != nil {
+					// Check if worktree was created by another process
+					if strings.Contains(string(output2), "already checked out") {
+						// Worktree exists, reuse it
+						task.WorktreePath = worktreePath
+						task.BranchName = branchName
+
+						// Fetch PR information if available
+						e.updateTaskPRInfo(task, projectDir)
+
+						e.db.UpdateTask(task)
+						// Allocate a port if not already assigned
+						if task.Port == 0 {
+							port, err := e.db.AllocatePort(task.ID)
+							if err != nil {
+								e.logger.Warn("could not allocate port", "error", err)
+							} else {
+								task.Port = port
+							}
+						}
+						trustMiseConfig(worktreePath)
+						e.writeWorktreeEnvFile(projectDir, worktreePath, task, paths.configDir)
+						symlinkClaudeConfig(projectDir, worktreePath)
+						symlinkMCPConfig(projectDir, worktreePath)
+						copyMCPConfig(paths.configFile, projectDir, worktreePath)
+						e.runWorktreeInitScript(projectDir, worktreePath, task)
+						return worktreePath, nil
+					}
+					return "", fmt.Errorf("create worktree: %v\n%s\n%s", err, string(output), string(output2))
+				}
+			} else {
+				return "", fmt.Errorf("create worktree: %v\n%s", err, string(output))
+			}
+		}
+
+		// Update task with worktree info
+		task.WorktreePath = worktreePath
+		task.BranchName = branchName
+	}
 
 	// Fetch PR information if available
 	e.updateTaskPRInfo(task, projectDir)
@@ -3833,7 +3894,8 @@ func writeWorkflowMCPConfig(worktreePath string, taskID int64) error {
 		mcpServers = make(map[string]interface{})
 	}
 
-	// Add/update the taskyou server
+	// Add/update the taskyou server (and remove old "workflow" name if present)
+	delete(mcpServers, "workflow")
 	mcpServers["taskyou"] = taskyouServer
 	projectConfig["mcpServers"] = mcpServers
 	projects[worktreePath] = projectConfig

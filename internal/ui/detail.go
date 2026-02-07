@@ -1692,7 +1692,7 @@ func (m *DetailModel) breakTmuxPanes(saveHeight bool, resizeTUI bool) {
 	osExec.CommandContext(ctx, "tmux", "unbind-key", "-T", "root", "M-S-Down").Run()
 
 	// Reset pane title back to main view label
-	osExec.CommandContext(ctx, "tmux", "select-pane", "-t", "task-ui:.0", "-T", "Tasks").Run()
+	osExec.CommandContext(ctx, "tmux", "select-pane", "-t", m.uiSessionName+":.0", "-T", "Tasks").Run()
 
 	// Break the Claude pane back to task-daemon
 	if m.claudePaneID == "" {
@@ -2204,6 +2204,18 @@ func (m *DetailModel) renderHeader() string {
 			Foreground(dimmedTextFg).
 			Render(m.prInfo.StatusDescription())
 		meta.WriteString(prDesc)
+
+		// Diff stats (additions/deletions)
+		var diffStats string
+		if m.focused {
+			diffStats = PRDiffStatsBright(m.prInfo)
+		} else {
+			diffStats = PRDiffStats(m.prInfo)
+		}
+		if diffStats != "" {
+			meta.WriteString("  ")
+			meta.WriteString(diffStats)
+		}
 	}
 
 	// Running process indicator
@@ -2555,6 +2567,7 @@ func (m *DetailModel) renderHelp() string {
 	}
 
 	keys = append(keys, []helpKey{
+		{"b", "browser", false},
 		{"c", "close", false},
 		{"a", "archive", false},
 		{"d", "delete", false},

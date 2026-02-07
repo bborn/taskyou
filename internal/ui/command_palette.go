@@ -2,7 +2,9 @@ package ui
 
 import (
 	"fmt"
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/bborn/workflow/internal/db"
@@ -11,7 +13,15 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
-// CommandPaletteModel represents the Command+P task switcher.
+// Patterns for extracting task IDs and PR numbers from pasted input
+var (
+	// Matches branch names like "task/1068-description" or "task/1068"
+	branchTaskIDPattern = regexp.MustCompile(`(?:^|/)(\d+)(?:-|$)`)
+	// Matches GitHub PR URLs like "https://github.com/org/repo/pull/123"
+	githubPRURLPattern = regexp.MustCompile(`github\.com/[^/]+/[^/]+/pull/(\d+)`)
+)
+
+// CommandPaletteModel represents the Command+P task switcher and AI command input.
 type CommandPaletteModel struct {
 	db            *db.DB
 	allTasks      []*db.Task
@@ -24,17 +34,19 @@ type CommandPaletteModel struct {
 	maxVisible    int
 
 	// Result
-	selectedTask *db.Task
-	cancelled    bool
+	selectedTask     *db.Task
+	cancelled        bool
+	aiCommandRequest bool   // True when user pressed Enter with text that should go to AI
+	rawInput         string // The raw input text for AI command processing
 }
 
 // NewCommandPaletteModel creates a new command palette model.
 func NewCommandPaletteModel(database *db.DB, tasks []*db.Task, width, height int) *CommandPaletteModel {
 	searchInput := textinput.New()
-	searchInput.Placeholder = "Search tasks by title, ID, project, or PR URL/number..."
+	searchInput.Placeholder = "Search tasks or type a command..."
 	searchInput.Focus()
-	searchInput.CharLimit = 100
-	searchInput.Width = min(60, width-10)
+	searchInput.CharLimit = 200
+	searchInput.Width = min(70, width-10)
 
 	// Load projects for project-based filtering
 	projects, _ := database.ListProjects()
@@ -66,8 +78,14 @@ func (m *CommandPaletteModel) Update(msg tea.Msg) (*CommandPaletteModel, tea.Cmd
 			m.cancelled = true
 			return m, nil
 		case "enter":
+			query := strings.TrimSpace(m.searchInput.Value())
 			if len(m.filteredTasks) > 0 && m.selectedIndex < len(m.filteredTasks) {
+				// If there are matching tasks and we have a selection, select that task
 				m.selectedTask = m.filteredTasks[m.selectedIndex]
+			} else if query != "" {
+				// No matching tasks but user typed something - treat as AI command
+				m.aiCommandRequest = true
+				m.rawInput = query
 			}
 			return m, nil
 		case "up", "ctrl+p", "ctrl+k":
@@ -245,6 +263,20 @@ func (m *CommandPaletteModel) scoreTask(task *db.Task, query string) int {
 		return 1000 // ID matches are highest priority
 	}
 
+	// Try to extract a task ID from a pasted branch name (e.g., "task/1068-description")
+	if extractedID := extractTaskID(query); extractedID > 0 {
+		if task.ID == extractedID {
+			return 1000 // Extracted ID match is highest priority
+		}
+	}
+
+	// Try to extract a PR number from a pasted GitHub PR URL
+	if extractedPR := extractPRNumber(query); extractedPR > 0 {
+		if task.PRNumber == extractedPR {
+			return 900 // Extracted PR number match
+		}
+	}
+
 	// Check PR number (high priority for specific lookups)
 	if task.PRNumber > 0 {
 		prNumStr := fmt.Sprintf("%d", task.PRNumber)
@@ -261,6 +293,20 @@ func (m *CommandPaletteModel) scoreTask(task *db.Task, query string) int {
 	if task.PRURL != "" {
 		if strings.Contains(strings.ToLower(task.PRURL), query) {
 			return 800 // PR URL matches
+		}
+	}
+
+	// Check branch name (exact or substring match)
+	if task.BranchName != "" {
+		if strings.Contains(strings.ToLower(task.BranchName), query) {
+			return 850 // Branch name matches
+		}
+	}
+
+	// Check source branch
+	if task.SourceBranch != "" {
+		if strings.Contains(strings.ToLower(task.SourceBranch), query) {
+			return 850 // Source branch matches
 		}
 	}
 
@@ -288,6 +334,32 @@ func (m *CommandPaletteModel) scoreTask(task *db.Task, query string) int {
 	return bestScore
 }
 
+// extractTaskID tries to extract a task ID from a branch name pattern.
+// Supports patterns like "task/1068-description", "feature/1068-foo", "1068-description".
+func extractTaskID(input string) int64 {
+	matches := branchTaskIDPattern.FindStringSubmatch(input)
+	if len(matches) >= 2 {
+		id, err := strconv.ParseInt(matches[1], 10, 64)
+		if err == nil {
+			return id
+		}
+	}
+	return 0
+}
+
+// extractPRNumber extracts a PR number from a GitHub PR URL.
+// Supports URLs like "https://github.com/org/repo/pull/123".
+func extractPRNumber(input string) int {
+	matches := githubPRURLPattern.FindStringSubmatch(input)
+	if len(matches) >= 2 {
+		num, err := strconv.Atoi(matches[1])
+		if err == nil {
+			return num
+		}
+	}
+	return 0
+}
+
 // matchesQuery checks if a task matches the search query.
 func (m *CommandPaletteModel) matchesQuery(task *db.Task, query string) bool {
 	// Check task ID
@@ -301,6 +373,18 @@ func (m *CommandPaletteModel) matchesQuery(task *db.Task, query string) bool {
 			return true
 		}
 	}
+	// Check if query is a branch name containing a task ID
+	if extractedID := extractTaskID(query); extractedID > 0 {
+		if task.ID == extractedID {
+			return true
+		}
+	}
+	// Check if query is a GitHub PR URL containing a PR number
+	if extractedPR := extractPRNumber(query); extractedPR > 0 {
+		if task.PRNumber == extractedPR {
+			return true
+		}
+	}
 	// Check title
 	if strings.Contains(strings.ToLower(task.Title), query) {
 		return true
@@ -311,6 +395,14 @@ func (m *CommandPaletteModel) matchesQuery(task *db.Task, query string) bool {
 	}
 	// Check status
 	if strings.Contains(strings.ToLower(task.Status), query) {
+		return true
+	}
+	// Check branch name
+	if task.BranchName != "" && strings.Contains(strings.ToLower(task.BranchName), query) {
+		return true
+	}
+	// Check source branch
+	if task.SourceBranch != "" && strings.Contains(strings.ToLower(task.SourceBranch), query) {
 		return true
 	}
 	// Check PR URL (e.g., "https://github.com/offerlab/offerlab/pull/2382")
@@ -500,13 +592,18 @@ func isCamelCaseBoundary(str string, i int) bool {
 func (m *CommandPaletteModel) View() string {
 	// Modal dimensions
 	modalWidth := min(80, m.width-4)
+	query := strings.TrimSpace(m.searchInput.Value())
 
-	// Header
+	// Header - changes based on whether we have matching tasks
+	headerText := "Go to Task"
+	if len(m.filteredTasks) == 0 && query != "" {
+		headerText = "AI Command"
+	}
 	header := lipgloss.NewStyle().
 		Bold(true).
 		Foreground(ColorPrimary).
 		MarginBottom(1).
-		Render("Go to Task")
+		Render(headerText)
 
 	// Search input
 	inputStyle := lipgloss.NewStyle().
@@ -523,7 +620,12 @@ func (m *CommandPaletteModel) View() string {
 			Foreground(ColorMuted).
 			Italic(true).
 			Padding(1, 0)
-		taskList.WriteString(emptyStyle.Render("No tasks found"))
+		if query != "" {
+			// Show AI command hint when there's input but no matching tasks
+			taskList.WriteString(emptyStyle.Render("Press Enter to run as AI command"))
+		} else {
+			taskList.WriteString(emptyStyle.Render("Type to search tasks or enter a command"))
+		}
 	} else {
 		// Calculate visible range (for scrolling)
 		start := 0
@@ -576,11 +678,17 @@ func (m *CommandPaletteModel) View() string {
 		}
 	}
 
-	// Help text
+	// Help text - show different help based on context
 	helpStyle := lipgloss.NewStyle().
 		Foreground(ColorMuted).
 		MarginTop(1)
-	help := helpStyle.Render("Enter: select  Esc: cancel  " + IconArrowUp() + "/" + IconArrowDown() + ": navigate")
+	var helpText string
+	if len(m.filteredTasks) == 0 && query != "" {
+		helpText = "Enter: run command  Esc: cancel"
+	} else {
+		helpText = "Enter: select  Esc: cancel  " + IconArrowUp() + "/" + IconArrowDown() + ": navigate"
+	}
+	help := helpStyle.Render(helpText)
 
 	// Combine all parts
 	content := lipgloss.JoinVertical(lipgloss.Left,
@@ -675,6 +783,21 @@ func (m *CommandPaletteModel) SelectedTask() *db.Task {
 // IsCancelled returns true if the user cancelled the palette.
 func (m *CommandPaletteModel) IsCancelled() bool {
 	return m.cancelled
+}
+
+// IsAICommandRequest returns true if the user pressed Enter with text that should go to AI.
+func (m *CommandPaletteModel) IsAICommandRequest() bool {
+	return m.aiCommandRequest
+}
+
+// RawInput returns the raw input text for AI command processing.
+func (m *CommandPaletteModel) RawInput() string {
+	return m.rawInput
+}
+
+// Projects returns the available projects for AI context.
+func (m *CommandPaletteModel) Projects() []*db.Project {
+	return m.projects
 }
 
 // SetSize updates the command palette dimensions.

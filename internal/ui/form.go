@@ -1350,22 +1350,23 @@ func (m *FormModel) View() string {
 		cursor = cursorStyle.Render("▸")
 	}
 	attachmentInputView := m.attachmentsInput.View()
-	var attachmentChips []string
+	b.WriteString("\n")
+	b.WriteString(cursor + " " + labelStyle.Render("Attachments") + "\n")
 	if len(m.attachments) > 0 {
 		for i, path := range m.attachments {
 			style := AttachmentChip
 			if m.focused == FieldAttachments && m.attachmentSelectionActive() && m.attachmentCursor == i {
 				style = AttachmentChipSelected
 			}
-			attachmentChips = append(attachmentChips, style.Render(filepath.Base(path)))
+			chip := style.Render(filepath.Base(path))
+			for _, line := range strings.Split(chip, "\n") {
+				if line != "" {
+					b.WriteString("   " + line + "\n")
+				}
+			}
 		}
 	}
-	b.WriteString("\n")
-	b.WriteString(cursor + " " + labelStyle.Render("Attachments"))
-	if len(attachmentChips) > 0 {
-		b.WriteString(" " + strings.Join(attachmentChips, " "))
-	}
-	b.WriteString("  " + attachmentInputView + "\n")
+	b.WriteString("   " + attachmentInputView + "\n")
 	if len(m.attachments) > 0 {
 		help := Dim.Render(IconArrowLeft() + "/" + IconArrowRight() + " select • backspace/delete remove")
 		b.WriteString("   " + help + "\n")

@@ -1593,6 +1593,61 @@ func TestWriteWorkflowMCPConfig(t *testing.T) {
 		}
 	})
 
+	t.Run("removes old workflow entry and replaces with taskyou", func(t *testing.T) {
+		configPath := setupTempConfigDir(t)
+		worktreePath := t.TempDir()
+		taskID := int64(456)
+
+		// Create existing config with old "workflow" entry
+		existingConfig := map[string]interface{}{
+			"projects": map[string]interface{}{
+				worktreePath: map[string]interface{}{
+					"mcpServers": map[string]interface{}{
+						"workflow": map[string]interface{}{
+							"type":    "stdio",
+							"command": "/old/path/to/ty",
+							"args":    []string{"mcp-server", "--task-id", "99"},
+						},
+					},
+				},
+			},
+		}
+		existingData, _ := json.MarshalIndent(existingConfig, "", "  ")
+		if err := os.WriteFile(configPath, existingData, 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		err := writeWorkflowMCPConfig(worktreePath, taskID)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		// Read back and verify
+		data, err := os.ReadFile(configPath)
+		if err != nil {
+			t.Fatalf("failed to read claude.json: %v", err)
+		}
+
+		var config map[string]interface{}
+		if err := json.Unmarshal(data, &config); err != nil {
+			t.Fatalf("failed to parse claude.json: %v", err)
+		}
+
+		projects := config["projects"].(map[string]interface{})
+		projectConfig := projects[worktreePath].(map[string]interface{})
+		mcpServers := projectConfig["mcpServers"].(map[string]interface{})
+
+		// Old "workflow" entry should be gone
+		if _, ok := mcpServers["workflow"]; ok {
+			t.Error("expected old 'workflow' entry to be removed, but it still exists")
+		}
+
+		// New "taskyou" entry should exist
+		if _, ok := mcpServers["taskyou"]; !ok {
+			t.Fatal("expected 'taskyou' entry to be present")
+		}
+	})
+
 	t.Run("updates task ID on subsequent calls", func(t *testing.T) {
 		configPath := setupTempConfigDir(t)
 		worktreePath := t.TempDir()

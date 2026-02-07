@@ -5,6 +5,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/bborn/workflow/internal/config"
 	"github.com/bborn/workflow/internal/db"
 )
 
@@ -31,6 +32,158 @@ func TestDefaultKeyMap(t *testing.T) {
 
 	if keys.OpenWorktree.Help().Key != "o" {
 		t.Error("OpenWorktree key should have help text 'o'")
+	}
+}
+
+func TestApplyKeybindingsConfig_NilConfig(t *testing.T) {
+	// When config is nil, KeyMap should remain unchanged
+	original := DefaultKeyMap()
+	result := ApplyKeybindingsConfig(original, nil)
+
+	if result.New.Help().Key != "n" {
+		t.Error("New key should remain 'n' when config is nil")
+	}
+	if result.Quit.Help().Key != "ctrl+c" {
+		t.Error("Quit key should remain 'ctrl+c' when config is nil")
+	}
+}
+
+func TestApplyKeybindingsConfig_PartialOverride(t *testing.T) {
+	// Test that only specified keys are overridden
+	original := DefaultKeyMap()
+
+	cfg := &config.KeybindingsConfig{
+		New: &config.KeybindingConfig{
+			Keys: []string{"ctrl+n"},
+			Help: "create task",
+		},
+	}
+
+	result := ApplyKeybindingsConfig(original, cfg)
+
+	// New should be overridden
+	if result.New.Help().Key != "ctrl+n" {
+		t.Errorf("Expected New key help to be 'ctrl+n', got '%s'", result.New.Help().Key)
+	}
+	if result.New.Help().Desc != "create task" {
+		t.Errorf("Expected New help desc to be 'create task', got '%s'", result.New.Help().Desc)
+	}
+
+	// Other keys should remain unchanged
+	if result.Quit.Help().Key != "ctrl+c" {
+		t.Error("Quit key should remain unchanged")
+	}
+	if result.Filter.Help().Key != "/" {
+		t.Error("Filter key should remain unchanged")
+	}
+}
+
+func TestApplyKeybindingsConfig_MultipleKeys(t *testing.T) {
+	// Test binding with multiple keys
+	original := DefaultKeyMap()
+
+	cfg := &config.KeybindingsConfig{
+		CommandPalette: &config.KeybindingConfig{
+			Keys: []string{"ctrl+k", "cmd+k", "p"},
+			Help: "search",
+		},
+	}
+
+	result := ApplyKeybindingsConfig(original, cfg)
+
+	// Should use first key for help display
+	if result.CommandPalette.Help().Key != "ctrl+k" {
+		t.Errorf("Expected CommandPalette help key to be 'ctrl+k', got '%s'", result.CommandPalette.Help().Key)
+	}
+}
+
+func TestApplyKeybindingsConfig_PreservesHelpWhenEmpty(t *testing.T) {
+	// Test that help text is preserved when not specified in config
+	original := DefaultKeyMap()
+
+	cfg := &config.KeybindingsConfig{
+		Filter: &config.KeybindingConfig{
+			Keys: []string{"f"},
+			// Help not specified
+		},
+	}
+
+	result := ApplyKeybindingsConfig(original, cfg)
+
+	// Key should be changed but help should preserve original
+	if result.Filter.Help().Key != "f" {
+		t.Errorf("Expected Filter key to be 'f', got '%s'", result.Filter.Help().Key)
+	}
+}
+
+func TestApplyKeybindingsConfig_EmptyKeys(t *testing.T) {
+	// Test that binding is not changed when keys array is empty
+	original := DefaultKeyMap()
+
+	cfg := &config.KeybindingsConfig{
+		New: &config.KeybindingConfig{
+			Keys: []string{}, // Empty keys
+			Help: "create",
+		},
+	}
+
+	result := ApplyKeybindingsConfig(original, cfg)
+
+	// Should remain unchanged because keys is empty
+	if result.New.Help().Key != "n" {
+		t.Errorf("Expected New key to remain 'n' when keys is empty, got '%s'", result.New.Help().Key)
+	}
+}
+
+func TestApplyKeybindingsConfig_AllBindings(t *testing.T) {
+	// Test that all bindings can be overridden
+	original := DefaultKeyMap()
+
+	cfg := &config.KeybindingsConfig{
+		Left:               &config.KeybindingConfig{Keys: []string{"h"}, Help: "left"},
+		Right:              &config.KeybindingConfig{Keys: []string{"l"}, Help: "right"},
+		Up:                 &config.KeybindingConfig{Keys: []string{"k"}, Help: "up"},
+		Down:               &config.KeybindingConfig{Keys: []string{"j"}, Help: "down"},
+		Enter:              &config.KeybindingConfig{Keys: []string{"o"}, Help: "open"},
+		Back:               &config.KeybindingConfig{Keys: []string{"q"}, Help: "back"},
+		New:                &config.KeybindingConfig{Keys: []string{"a"}, Help: "add"},
+		Edit:               &config.KeybindingConfig{Keys: []string{"i"}, Help: "modify"},
+		Queue:              &config.KeybindingConfig{Keys: []string{"r"}, Help: "run"},
+		Retry:              &config.KeybindingConfig{Keys: []string{"R"}, Help: "redo"},
+		Close:              &config.KeybindingConfig{Keys: []string{"d"}, Help: "done"},
+		Archive:            &config.KeybindingConfig{Keys: []string{"A"}, Help: "arch"},
+		Delete:             &config.KeybindingConfig{Keys: []string{"D"}, Help: "del"},
+		Refresh:            &config.KeybindingConfig{Keys: []string{"ctrl+r"}, Help: "reload"},
+		Settings:           &config.KeybindingConfig{Keys: []string{"S"}, Help: "config"},
+		Help:               &config.KeybindingConfig{Keys: []string{"H"}, Help: "help"},
+		Quit:               &config.KeybindingConfig{Keys: []string{"Q"}, Help: "exit"},
+		ChangeStatus:       &config.KeybindingConfig{Keys: []string{"s"}, Help: "status"},
+		CommandPalette:     &config.KeybindingConfig{Keys: []string{"p"}, Help: "palette"},
+		ToggleDangerous:    &config.KeybindingConfig{Keys: []string{"!"}, Help: "danger"},
+		TogglePin:          &config.KeybindingConfig{Keys: []string{"t"}, Help: "pin"},
+		Filter:             &config.KeybindingConfig{Keys: []string{"/"}, Help: "search"},
+		OpenWorktree:       &config.KeybindingConfig{Keys: []string{"w"}, Help: "worktree"},
+		ToggleShellPane:    &config.KeybindingConfig{Keys: []string{"`"}, Help: "shell"},
+		JumpToNotification: &config.KeybindingConfig{Keys: []string{"g"}, Help: "notify"},
+		FocusBacklog:       &config.KeybindingConfig{Keys: []string{"1"}, Help: "col1"},
+		FocusInProgress:    &config.KeybindingConfig{Keys: []string{"2"}, Help: "col2"},
+		FocusBlocked:       &config.KeybindingConfig{Keys: []string{"3"}, Help: "col3"},
+		FocusDone:          &config.KeybindingConfig{Keys: []string{"4"}, Help: "col4"},
+		JumpToPinned:       &config.KeybindingConfig{Keys: []string{"ctrl+up"}, Help: "to pin"},
+		JumpToUnpinned:     &config.KeybindingConfig{Keys: []string{"ctrl+down"}, Help: "to unpin"},
+	}
+
+	result := ApplyKeybindingsConfig(original, cfg)
+
+	// Verify some key overrides
+	if result.Left.Help().Key != "h" {
+		t.Errorf("Expected Left key 'h', got '%s'", result.Left.Help().Key)
+	}
+	if result.Down.Help().Key != "j" {
+		t.Errorf("Expected Down key 'j', got '%s'", result.Down.Help().Key)
+	}
+	if result.FocusBacklog.Help().Key != "1" {
+		t.Errorf("Expected FocusBacklog key '1', got '%s'", result.FocusBacklog.Help().Key)
 	}
 }
 
@@ -119,6 +272,121 @@ func TestShowChangeStatus_ExcludesCurrentStatus(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestQuitConfirmCtrlC_QuitsImmediately(t *testing.T) {
+	m := &AppModel{
+		width:  100,
+		height: 50,
+		keys:   DefaultKeyMap(),
+	}
+
+	// Show quit confirmation
+	m.showQuitConfirm()
+
+	if m.currentView != ViewQuitConfirm {
+		t.Fatalf("expected ViewQuitConfirm, got %v", m.currentView)
+	}
+	if m.quitConfirm == nil {
+		t.Fatal("expected quitConfirm form to be created")
+	}
+
+	// Press Ctrl+C while in quit confirm dialog
+	ctrlCMsg := tea.KeyMsg{Type: tea.KeyCtrlC}
+	_, cmd := m.updateQuitConfirm(ctrlCMsg)
+
+	// Should return tea.Quit command
+	if cmd == nil {
+		t.Fatal("expected tea.Quit command, got nil")
+	}
+
+	// Verify the command produces a QuitMsg
+	msg := cmd()
+	if _, ok := msg.(tea.QuitMsg); !ok {
+		t.Errorf("expected tea.QuitMsg, got %T", msg)
+	}
+}
+
+func TestQuitConfirmEsc_ReturnsToDashboard(t *testing.T) {
+	m := &AppModel{
+		width:  100,
+		height: 50,
+		keys:   DefaultKeyMap(),
+	}
+
+	// Show quit confirmation
+	m.showQuitConfirm()
+
+	// Press ESC
+	escMsg := tea.KeyMsg{Type: tea.KeyEscape}
+	model, _ := m.updateQuitConfirm(escMsg)
+	am := model.(*AppModel)
+
+	if am.currentView != ViewDashboard {
+		t.Errorf("expected ViewDashboard, got %v", am.currentView)
+	}
+	if am.quitConfirm != nil {
+		t.Error("expected quitConfirm to be nil after ESC")
+	}
+}
+
+func TestConfirmDialogsHandleCtrlC(t *testing.T) {
+	ctrlCMsg := tea.KeyMsg{Type: tea.KeyCtrlC}
+
+	t.Run("delete confirm", func(t *testing.T) {
+		m := &AppModel{
+			width:        100,
+			previousView: ViewDashboard,
+		}
+		task := &db.Task{ID: 1, Title: "Test", Status: db.StatusBacklog}
+		m.showDeleteConfirm(task)
+
+		model, _ := m.updateDeleteConfirm(ctrlCMsg)
+		am := model.(*AppModel)
+		if am.currentView != ViewDashboard {
+			t.Errorf("expected ViewDashboard, got %v", am.currentView)
+		}
+		if am.deleteConfirm != nil {
+			t.Error("expected deleteConfirm to be nil")
+		}
+	})
+
+	t.Run("close confirm", func(t *testing.T) {
+		m := &AppModel{
+			width:            100,
+			previousView:     ViewDashboard,
+			userClosedTaskIDs: make(map[int64]bool),
+		}
+		task := &db.Task{ID: 1, Title: "Test", Status: db.StatusQueued}
+		m.showCloseConfirm(task)
+
+		model, _ := m.updateCloseConfirm(ctrlCMsg)
+		am := model.(*AppModel)
+		if am.currentView != ViewDashboard {
+			t.Errorf("expected ViewDashboard, got %v", am.currentView)
+		}
+		if am.closeConfirm != nil {
+			t.Error("expected closeConfirm to be nil")
+		}
+	})
+
+	t.Run("archive confirm", func(t *testing.T) {
+		m := &AppModel{
+			width:        100,
+			previousView: ViewDashboard,
+		}
+		task := &db.Task{ID: 1, Title: "Test", Status: db.StatusDone}
+		m.showArchiveConfirm(task)
+
+		model, _ := m.updateArchiveConfirm(ctrlCMsg)
+		am := model.(*AppModel)
+		if am.currentView != ViewDashboard {
+			t.Errorf("expected ViewDashboard, got %v", am.currentView)
+		}
+		if am.archiveConfirm != nil {
+			t.Error("expected archiveConfirm to be nil")
+		}
+	})
 }
 
 func TestShowCloseConfirm_SetsUpConfirmation(t *testing.T) {

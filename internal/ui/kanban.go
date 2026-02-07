@@ -9,6 +9,22 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
+// emptyColumnMessage returns a contextual message for empty columns.
+func emptyColumnMessage(status string) string {
+	switch status {
+	case db.StatusBacklog:
+		return "Press 'n' to create a task"
+	case db.StatusQueued:
+		return "Press 'x' to execute a task"
+	case db.StatusBlocked:
+		return "No tasks need input"
+	case db.StatusDone:
+		return "Completed tasks appear here"
+	default:
+		return "No tasks"
+	}
+}
+
 // KanbanColumn represents a column in the kanban board.
 type KanbanColumn struct {
 	Title  string
@@ -473,6 +489,25 @@ func (k *KanbanBoard) SelectTask(id int64) bool {
 	return false
 }
 
+// IsEmpty returns true if all columns have no tasks.
+func (k *KanbanBoard) IsEmpty() bool {
+	for _, col := range k.columns {
+		if len(col.Tasks) > 0 {
+			return false
+		}
+	}
+	return true
+}
+
+// TotalTaskCount returns the total number of tasks across all columns.
+func (k *KanbanBoard) TotalTaskCount() int {
+	count := 0
+	for _, col := range k.columns {
+		count += len(col.Tasks)
+	}
+	return count
+}
+
 // View renders the kanban board.
 func (k *KanbanBoard) View() string {
 	if k.width < 40 || k.height < 10 {
@@ -633,7 +668,7 @@ func (k *KanbanBoard) viewDesktop() string {
 			taskViews = append(taskViews, scrollIndicatorStyle.Render(indicatorText))
 		}
 
-		// Empty column placeholder
+		// Empty column placeholder with contextual message
 		if len(col.Tasks) == 0 {
 			emptyStyle := lipgloss.NewStyle().
 				Foreground(ColorMuted).
@@ -641,7 +676,8 @@ func (k *KanbanBoard) viewDesktop() string {
 				Align(lipgloss.Center).
 				Italic(true).
 				MarginTop(1)
-			taskViews = append(taskViews, emptyStyle.Render("No tasks"))
+			emptyMsg := emptyColumnMessage(col.Status)
+			taskViews = append(taskViews, emptyStyle.Render(emptyMsg))
 		}
 
 		// Combine tasks with spacing
@@ -819,7 +855,7 @@ func (k *KanbanBoard) viewMobile() string {
 		taskViews = append(taskViews, scrollIndicatorStyle.Render(indicatorText))
 	}
 
-	// Empty column placeholder
+	// Empty column placeholder with contextual message
 	if len(col.Tasks) == 0 {
 		emptyStyle := lipgloss.NewStyle().
 			Foreground(ColorMuted).
@@ -827,7 +863,8 @@ func (k *KanbanBoard) viewMobile() string {
 			Align(lipgloss.Center).
 			Italic(true).
 			MarginTop(1)
-		taskViews = append(taskViews, emptyStyle.Render("No tasks"))
+		emptyMsg := emptyColumnMessage(col.Status)
+		taskViews = append(taskViews, emptyStyle.Render(emptyMsg))
 	}
 
 	// Combine tasks with spacing

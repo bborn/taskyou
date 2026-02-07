@@ -456,7 +456,8 @@ Examples:
   task create "Write documentation" --body "Document the API endpoints" --execute
   task create "Refactor auth" --executor codex  # Use Codex instead of Claude
   task create "Urgent bug" --tags "bug,urgent" --pinned  # Tagged and pinned task
-  task create --body "The login button is broken on mobile devices" # AI generates title`,
+  task create --body "The login button is broken on mobile devices" # AI generates title
+  task create "QA: PR #2526" --branch fix/ui-overflow --project myapp  # Checkout existing branch`,
 		Args: cobra.MaximumNArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
 			var title string
@@ -471,6 +472,7 @@ Examples:
 			execute, _ := cmd.Flags().GetBool("execute")
 			tags, _ := cmd.Flags().GetString("tags")
 			pinned, _ := cmd.Flags().GetBool("pinned")
+			branch, _ := cmd.Flags().GetString("branch")
 			outputJSON, _ := cmd.Flags().GetBool("json")
 
 			// Validate that either title or body is provided
@@ -573,14 +575,15 @@ Examples:
 
 			// Create the task
 			task := &db.Task{
-				Title:    title,
-				Body:     body,
-				Status:   status,
-				Type:     taskType,
-				Project:  project,
-				Executor: taskExecutor,
-				Tags:     tags,
-				Pinned:   pinned,
+				Title:        title,
+				Body:         body,
+				Status:       status,
+				Type:         taskType,
+				Project:      project,
+				Executor:     taskExecutor,
+				Tags:         tags,
+				Pinned:       pinned,
+				SourceBranch: branch,
 			}
 
 			if err := database.CreateTask(task); err != nil {
@@ -597,10 +600,16 @@ Examples:
 					"project":  task.Project,
 					"executor": task.Executor,
 				}
+				if task.SourceBranch != "" {
+					output["source_branch"] = task.SourceBranch
+				}
 				jsonBytes, _ := json.Marshal(output)
 				fmt.Println(string(jsonBytes))
 			} else {
 				msg := fmt.Sprintf("Created task #%d: %s", task.ID, task.Title)
+				if branch != "" {
+					msg += fmt.Sprintf(" (branch: %s)", branch)
+				}
 				if execute {
 					msg += " (queued for execution)"
 				}
@@ -615,6 +624,7 @@ Examples:
 	createCmd.Flags().BoolP("execute", "x", false, "Queue task for immediate execution")
 	createCmd.Flags().String("tags", "", "Task tags (comma-separated)")
 	createCmd.Flags().Bool("pinned", false, "Pin the task to the top of its column")
+	createCmd.Flags().StringP("branch", "b", "", "Existing branch to checkout for worktree (e.g., fix/ui-overflow)")
 	createCmd.Flags().Bool("json", false, "Output in JSON format")
 	rootCmd.AddCommand(createCmd)
 
