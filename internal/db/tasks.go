@@ -557,6 +557,19 @@ func (db *DB) UpdateTaskPinned(taskID int64, pinned bool) error {
 	return nil
 }
 
+// ClearTaskWorktreePath clears just the worktree_path for a task.
+// Used during async archive cleanup to avoid overwriting other fields.
+func (db *DB) ClearTaskWorktreePath(taskID int64) error {
+	_, err := db.Exec(`
+		UPDATE tasks SET worktree_path = '', updated_at = CURRENT_TIMESTAMP
+		WHERE id = ?
+	`, taskID)
+	if err != nil {
+		return fmt.Errorf("clear task worktree path: %w", err)
+	}
+	return nil
+}
+
 // UpdateTaskDaemonSession updates the tmux daemon session name for a task.
 // This is used to track which daemon session owns the task's tmux window,
 // so we can properly kill the Claude process when the task completes.
