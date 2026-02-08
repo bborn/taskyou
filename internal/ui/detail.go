@@ -67,8 +67,8 @@ type DetailModel struct {
 	// Focus state - true when the detail pane is the active tmux pane
 	focused bool
 
-	// Track if join-pane has failed to prevent retry loop
-	joinPaneFailed bool
+	// Track if join-pane has failed (with cooldown to allow retries)
+	joinPaneFailedUntil time.Time
 
 	// Cached Glamour renderers (created once, reused)
 	glamourRendererFocused   *glamour.TermRenderer
@@ -236,8 +236,14 @@ func (m *DetailModel) Refresh() {
 		m.lastServerCheck = time.Now()
 	}
 
-	// Throttle pane join checks to every 5 seconds (runs tmux commands)
-	if time.Since(m.lastPaneCheck) >= 5*time.Second {
+	// Throttle pane join checks (runs tmux commands)
+	// Poll faster (1s) while loading to reduce latency for "create and execute" flow,
+	// slower (5s) once panes are established for normal health checks
+	paneCheckInterval := 5 * time.Second
+	if m.paneLoading {
+		paneCheckInterval = 1 * time.Second
+	}
+	if time.Since(m.lastPaneCheck) >= paneCheckInterval {
 		m.lastPaneCheck = time.Now()
 		// Ensure tmux panes are joined if available (handles external close/detach)
 		m.ensureTmuxPanesJoined()
@@ -527,7 +533,7 @@ func (m *DetailModel) ClearPaneState() {
 	m.workdirPaneID = ""
 	m.daemonSessionID = ""
 	m.cachedWindowTarget = ""
-	m.joinPaneFailed = false
+	m.joinPaneFailedUntil = time.Time{}
 }
 
 // RefreshPanesCmd returns a command to refresh the tmux panes.
@@ -765,8 +771,8 @@ func (m *DetailModel) ensureTmuxPanesJoined() {
 		return
 	}
 
-	// Don't retry if join has already failed for this task
-	if m.joinPaneFailed {
+	// Don't retry if join recently failed (5s cooldown to avoid spam, but allows recovery)
+	if !m.joinPaneFailedUntil.IsZero() && time.Now().Before(m.joinPaneFailedUntil) {
 		return
 	}
 
@@ -794,6 +800,11 @@ func (m *DetailModel) ensureTmuxPanesJoined() {
 	// If we have a session available, join it
 	if m.hasActiveTmuxSession() {
 		m.joinTmuxPanes()
+		// If join succeeded, clear the loading state
+		if m.claudePaneID != "" {
+			m.paneLoading = false
+			m.paneError = ""
+		}
 	}
 }
 
@@ -1125,13 +1136,13 @@ func (m *DetailModel) joinTmuxPanes() {
 			m.database.UpdateTaskWindowID(m.task.ID, "")
 			m.task.TmuxWindowID = ""
 		}
-		m.joinPaneFailed = true
+		m.joinPaneFailedUntil = time.Now().Add(5 * time.Second)
 		return
 	}
 	daemonPaneIDs := strings.Split(strings.TrimSpace(string(daemonPanesOut)), "\n")
 	if len(daemonPaneIDs) == 0 || daemonPaneIDs[0] == "" {
 		log.Error("joinTmuxPanes: no panes found in %q", windowTarget)
-		m.joinPaneFailed = true
+		m.joinPaneFailedUntil = time.Now().Add(5 * time.Second)
 		return
 	}
 	log.Debug("joinTmuxPanes: daemon pane IDs=%v", daemonPaneIDs)
@@ -1163,7 +1174,7 @@ func (m *DetailModel) joinTmuxPanes() {
 	joinOutput, err := joinCmd.CombinedOutput()
 	if err != nil {
 		log.Error("joinTmuxPanes: join-pane failed: %v, output: %s", err, string(joinOutput))
-		m.joinPaneFailed = true // Prevent retry loop
+		m.joinPaneFailedUntil = time.Now().Add(5 * time.Second) // Cooldown before retry
 		return
 	}
 	log.Debug("joinTmuxPanes: join-pane succeeded")
