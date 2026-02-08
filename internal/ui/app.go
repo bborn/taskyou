@@ -1921,12 +1921,6 @@ func (m *AppModel) updateDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	if key.Matches(keyMsg, m.keys.Back) {
-		// Check PR state asynchronously (don't block UI)
-		if m.selectedTask != nil {
-			taskID := m.selectedTask.ID
-			go m.executor.CheckPRStateAndUpdateTask(taskID)
-		}
-
 		m.currentView = ViewDashboard
 		// Clear origin column when exiting detail view
 		m.kanban.ClearOriginColumn()
@@ -3153,11 +3147,6 @@ func (m *AppModel) loadTaskWithFocus(id int64) tea.Cmd {
 }
 
 func (m *AppModel) loadTaskWithOptions(id int64, focusExecutor bool) tea.Cmd {
-	// Check PR state asynchronously (don't block UI)
-	if m.executor != nil {
-		go m.executor.CheckPRStateAndUpdateTask(id)
-	}
-
 	// Update last accessed timestamp (async, don't block UI)
 	if m.db != nil {
 		database := m.db
@@ -3260,9 +3249,6 @@ func (m *AppModel) closeTask(id int64) tea.Cmd {
 	database := m.db
 	exec := m.executor
 	return func() tea.Msg {
-		// Check PR state asynchronously (don't block UI)
-		go exec.CheckPRStateAndUpdateTask(id)
-
 		err := database.UpdateTaskStatus(id, db.StatusDone)
 		if err == nil {
 			if task, _ := database.GetTask(id); task != nil {

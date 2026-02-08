@@ -677,12 +677,10 @@ func (e *Executor) worker(ctx context.Context) {
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
 
-	// Check merged branches every 30 seconds (15 ticks)
 	// Check for idle blocked tasks to suspend every 60 seconds (30 ticks)
 	// Check for due scheduled tasks every 10 seconds (5 ticks)
 	// Check for inactive done tasks to cleanup every 5 minutes (150 ticks)
 	tickCount := 0
-	const mergeCheckInterval = 15
 	const suspendCheckInterval = 30
 	const doneCleanupInterval = 150 // 5 minutes at 2 second ticks
 
@@ -696,11 +694,6 @@ func (e *Executor) worker(ctx context.Context) {
 			e.processNextTask(ctx)
 
 			tickCount++
-
-			// Periodically check for merged branches
-			if tickCount%mergeCheckInterval == 0 {
-				e.checkMergedBranches()
-			}
 
 			// Periodically check for idle blocked tasks to suspend
 			if tickCount%suspendCheckInterval == 0 {
@@ -3124,218 +3117,6 @@ func (e *Executor) getConversationHistory(taskID int64) string {
 
 	sb.WriteString("Please continue with this context in mind.\n\n")
 	return sb.String()
-}
-
-// CheckPRStateAndUpdateTask checks the PR state for a specific task and updates it if merged.
-// This is called reactively when task views are opened/closed.
-func (e *Executor) CheckPRStateAndUpdateTask(taskID int64) {
-	task, err := e.db.GetTask(taskID)
-	if err != nil || task == nil {
-		return
-	}
-
-	// Only auto-close backlog tasks - if task ever started (queued/processing/blocked),
-	// let user decide what to do with it
-	if task.Status != db.StatusBacklog || task.BranchName == "" {
-		return
-	}
-
-	// Skip tasks currently being processed
-	e.mu.RLock()
-	isRunning := e.runningTasks[task.ID]
-	e.mu.RUnlock()
-	if isRunning {
-		return
-	}
-
-	// Check if the branch has been merged (via git or PR status)
-	// NOTE: isBranchMerged can take 10-20s due to network calls (git fetch, ls-remote).
-	if e.isBranchMerged(task) {
-		// Re-check task status after the (potentially slow) merge check to avoid
-		// a race where the task was started/queued while we were checking.
-		freshTask, err := e.db.GetTask(task.ID)
-		if err != nil || freshTask == nil || freshTask.Status != db.StatusBacklog {
-			return
-		}
-		e.logger.Info("Branch merged, closing task", "id", task.ID, "branch", task.BranchName)
-		e.logLine(task.ID, "system", fmt.Sprintf("Branch %s has been merged - automatically closing task", task.BranchName))
-		e.updateStatus(task.ID, db.StatusDone)
-		e.hooks.OnStatusChange(task, db.StatusDone, "PR merged")
-	}
-}
-
-// checkMergedBranches checks for tasks whose branches have been merged into the default branch.
-// If a task's branch is merged, it automatically closes the task.
-// This checks both via GitHub PR status (if available) and git merge detection.
-func (e *Executor) checkMergedBranches() {
-	// Get all tasks that have branches and aren't done
-	tasks, err := e.db.GetTasksWithBranches()
-	if err != nil {
-		e.logger.Debug("Failed to get tasks with branches", "error", err)
-		return
-	}
-
-	for _, task := range tasks {
-		// Only auto-close backlog tasks - if task ever started, let user decide
-		if task.Status != db.StatusBacklog {
-			continue
-		}
-
-		// Skip tasks currently being processed
-		e.mu.RLock()
-		isRunning := e.runningTasks[task.ID]
-		e.mu.RUnlock()
-		if isRunning {
-			continue
-		}
-
-		// Check if the branch has been merged (via git or PR status)
-		// NOTE: isBranchMerged can take 10-20s due to network calls (git fetch, ls-remote).
-		if e.isBranchMerged(task) {
-			// Re-check task status after the (potentially slow) merge check to avoid
-			// a race where the task was started/queued while we were checking.
-			freshTask, err := e.db.GetTask(task.ID)
-			if err != nil || freshTask == nil || freshTask.Status != db.StatusBacklog {
-				continue
-			}
-			e.logger.Info("Branch merged, closing task", "id", task.ID, "branch", task.BranchName)
-			e.logLine(task.ID, "system", fmt.Sprintf("Branch %s has been merged - automatically closing task", task.BranchName))
-			e.updateStatus(task.ID, db.StatusDone)
-			e.hooks.OnStatusChange(task, db.StatusDone, "PR merged")
-		}
-	}
-}
-
-// isBranchMerged checks if a task's branch has been merged into the default branch.
-// First checks GitHub API for PR merge status (most reliable), then falls back to git commands.
-// All commands have timeouts to prevent blocking.
-func (e *Executor) isBranchMerged(task *db.Task) bool {
-	projectDir := e.getProjectDir(task.Project)
-	if projectDir == "" {
-		return false
-	}
-
-	// Check if it's a git repo
-	gitDir := filepath.Join(projectDir, ".git")
-	if _, err := os.Stat(gitDir); os.IsNotExist(err) {
-		return false
-	}
-
-	// First, check GitHub API for PR merge status (most reliable method)
-	// This directly tells us if the PR was merged, regardless of branch deletion
-	if e.prCache != nil && task.BranchName != "" {
-		prInfo := e.prCache.GetPRForBranch(projectDir, task.BranchName)
-		if prInfo != nil && prInfo.State == github.PRStateMerged {
-			e.logger.Debug("PR detected as merged via GitHub API", "branch", task.BranchName, "pr", prInfo.Number)
-			return true
-		}
-	}
-
-	// Get the default branch
-	defaultBranch := e.getDefaultBranch(projectDir)
-
-	// Timeouts for git operations
-	const networkTimeout = 10 * time.Second // For network ops (fetch, ls-remote)
-	const localTimeout = 5 * time.Second    // For local ops
-
-	// Fetch from remote to get latest state (with timeout)
-	fetchCtx, fetchCancel := context.WithTimeout(context.Background(), networkTimeout)
-	defer fetchCancel()
-	fetchCmd := exec.CommandContext(fetchCtx, "git", "fetch", "--quiet", "origin")
-	fetchCmd.Dir = projectDir
-	fetchCmd.Run() // Ignore errors - might be offline or timeout
-
-	// Check if the branch has been merged into the default branch
-	// Use git branch --merged to see which branches have been merged
-	branchCtx, branchCancel := context.WithTimeout(context.Background(), localTimeout)
-	defer branchCancel()
-	cmd := exec.CommandContext(branchCtx, "git", "branch", "-r", "--merged", defaultBranch)
-	cmd.Dir = projectDir
-	output, err := cmd.Output()
-	if err != nil {
-		return false
-	}
-
-	// Look for our branch in the merged list
-	// Branches appear as "  origin/branch-name" or "* origin/branch-name"
-	mergedBranches := strings.Split(string(output), "\n")
-	for _, branch := range mergedBranches {
-		branch = strings.TrimSpace(branch)
-		branch = strings.TrimPrefix(branch, "* ")
-
-		// Match exactly: "origin/branchName" or any remote prefix ending with "/branchName"
-		branchName := task.BranchName
-		if branch == branchName || strings.HasSuffix(branch, "/"+branchName) {
-			return true
-		}
-	}
-
-	// Also check if the branch no longer exists on remote (was deleted after merge)
-	// This is common when PRs are merged and branches are auto-deleted
-	lsCtx, lsCancel := context.WithTimeout(context.Background(), networkTimeout)
-	defer lsCancel()
-	lsRemoteCmd := exec.CommandContext(lsCtx, "git", "ls-remote", "--heads", "origin", task.BranchName)
-	lsRemoteCmd.Dir = projectDir
-	lsOutput, err := lsRemoteCmd.Output()
-	if err == nil && len(strings.TrimSpace(string(lsOutput))) == 0 {
-		// Branch doesn't exist on remote - check if the local branch
-		// has been fully merged into the default branch.
-		// NOTE: We intentionally skip grep-based commit message matching here
-		// because git log --grep does substring matching, causing false positives
-		// (e.g., "task/10" matches commit messages mentioning "task/100" or "task/1066").
-
-		// Check if local branch exists
-		listCtx, listCancel := context.WithTimeout(context.Background(), localTimeout)
-		defer listCancel()
-		localLogCmd := exec.CommandContext(listCtx, "git", "branch", "--list", task.BranchName)
-		localLogCmd.Dir = projectDir
-		localOutput, _ := localLogCmd.Output()
-		if len(strings.TrimSpace(string(localOutput))) > 0 {
-			// Local branch exists - but we need to be careful not to flag newly created branches
-			// A newly created branch from main has no unique commits, so its tip equals merge-base
-			// Only consider it merged if:
-			// 1. The branch has unique commits (tip != merge-base with default)
-			// 2. AND all those commits are now in the default branch
-
-			// Get branch tip commit
-			tipCtx, tipCancel := context.WithTimeout(context.Background(), localTimeout)
-			defer tipCancel()
-			branchTipCmd := exec.CommandContext(tipCtx, "git", "rev-parse", task.BranchName)
-			branchTipCmd.Dir = projectDir
-			branchTip, err := branchTipCmd.Output()
-			if err != nil {
-				return false
-			}
-
-			// Get merge-base with default branch
-			mbCtx, mbCancel := context.WithTimeout(context.Background(), localTimeout)
-			defer mbCancel()
-			mergeBaseRevCmd := exec.CommandContext(mbCtx, "git", "merge-base", task.BranchName, defaultBranch)
-			mergeBaseRevCmd.Dir = projectDir
-			mergeBase, err := mergeBaseRevCmd.Output()
-			if err != nil {
-				return false
-			}
-
-			// If branch tip equals merge-base, the branch has no unique commits
-			// This means it's a newly created branch, NOT a merged branch
-			if strings.TrimSpace(string(branchTip)) == strings.TrimSpace(string(mergeBase)) {
-				return false // Newly created branch, not merged
-			}
-
-			// Branch has unique commits - check if they're all in default branch now
-			// (meaning the branch was merged)
-			ancestorCtx, ancestorCancel := context.WithTimeout(context.Background(), localTimeout)
-			defer ancestorCancel()
-			mergeCheckCmd := exec.CommandContext(ancestorCtx, "git", "merge-base", "--is-ancestor", task.BranchName, defaultBranch)
-			mergeCheckCmd.Dir = projectDir
-			if mergeCheckCmd.Run() == nil {
-				return true
-			}
-		}
-	}
-
-	return false
 }
 
 // setupWorktree creates a git worktree for the task if the project is a git repo.
