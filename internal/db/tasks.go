@@ -810,51 +810,6 @@ func (db *DB) GetQueuedTasks() ([]*Task, error) {
 	return tasks, nil
 }
 
-// GetTasksWithBranches returns tasks that have a branch name and aren't done or archived.
-// These are candidates for automatic closure when their PR is merged.
-func (db *DB) GetTasksWithBranches() ([]*Task, error) {
-	rows, err := db.Query(`
-		SELECT id, title, body, status, type, project, COALESCE(executor, 'claude'),
-		       worktree_path, branch_name, port, claude_session_id,
-		       COALESCE(daemon_session, ''), COALESCE(tmux_window_id, ''),
-		       COALESCE(claude_pane_id, ''), COALESCE(shell_pane_id, ''),
-		       COALESCE(pr_url, ''), COALESCE(pr_number, 0),
-		       COALESCE(dangerous_mode, 0), COALESCE(pinned, 0), COALESCE(tags, ''),
-		       COALESCE(source_branch, ''), COALESCE(summary, ''),
-		       created_at, updated_at, started_at, completed_at,
-		       last_distilled_at, last_accessed_at,
-		       COALESCE(archive_ref, ''), COALESCE(archive_commit, ''),
-		       COALESCE(archive_worktree_path, ''), COALESCE(archive_branch_name, '')
-		FROM tasks
-		WHERE branch_name != '' AND status NOT IN (?, ?)
-		ORDER BY created_at DESC
-	`, StatusDone, StatusArchived)
-	if err != nil {
-		return nil, fmt.Errorf("query tasks with branches: %w", err)
-	}
-	defer rows.Close()
-
-	var tasks []*Task
-	for rows.Next() {
-		t := &Task{}
-		if err := rows.Scan(
-			&t.ID, &t.Title, &t.Body, &t.Status, &t.Type, &t.Project, &t.Executor,
-			&t.WorktreePath, &t.BranchName, &t.Port, &t.ClaudeSessionID,
-			&t.DaemonSession, &t.TmuxWindowID, &t.ClaudePaneID, &t.ShellPaneID,
-			&t.PRURL, &t.PRNumber,
-			&t.DangerousMode, &t.Pinned, &t.Tags,
-			&t.SourceBranch, &t.Summary,
-			&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
-			&t.LastDistilledAt, &t.LastAccessedAt,
-			&t.ArchiveRef, &t.ArchiveCommit, &t.ArchiveWorktreePath, &t.ArchiveBranchName,
-		); err != nil {
-			return nil, fmt.Errorf("scan task: %w", err)
-		}
-		tasks = append(tasks, t)
-	}
-	return tasks, nil
-}
-
 // TaskLog represents a log entry for a task.
 type TaskLog struct {
 	ID        int64
