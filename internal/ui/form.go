@@ -1319,7 +1319,7 @@ func (m *FormModel) View() string {
 	ghostStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Italic(true)
 
 	// Cursor indicator for focused field
-	cursor := " "
+	var cursor string
 
 	// Project selector (only shown in advanced mode)
 	if m.showAdvanced {
