@@ -3395,6 +3395,9 @@ func handleNotificationHook(database *db.DB, taskID int64, input *ClaudeHookInpu
 			msg := "Waiting for user input"
 			if input.NotificationType == "permission_prompt" {
 				msg = "Waiting for permission"
+				if input.Message != "" {
+					msg = "Waiting for permission: " + input.Message
+				}
 			}
 			database.AppendTaskLog(taskID, "system", msg)
 		}

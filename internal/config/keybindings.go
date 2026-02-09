@@ -50,6 +50,8 @@ type KeybindingsConfig struct {
 	CollapseBacklog    *KeybindingConfig `yaml:"collapse_backlog,omitempty"`
 	CollapseDone       *KeybindingConfig `yaml:"collapse_done,omitempty"`
 	OpenBrowser        *KeybindingConfig `yaml:"open_browser,omitempty"`
+	ApprovePrompt      *KeybindingConfig `yaml:"approve_prompt,omitempty"`
+	DenyPrompt         *KeybindingConfig `yaml:"deny_prompt,omitempty"`
 }
 
 // DefaultKeybindingsConfigPath returns the default path for the keybindings config file.

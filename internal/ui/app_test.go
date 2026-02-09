@@ -963,6 +963,126 @@ func TestJumpToNotificationKey_NoNotification(t *testing.T) {
 	}
 }
 
+func TestStripAnsiCodes(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{"no ansi codes", "hello world", "hello world"},
+		{"color codes", "\x1b[31mred text\x1b[0m", "red text"},
+		{"bold", "\x1b[1mbold\x1b[0m", "bold"},
+		{"multiple codes", "\x1b[31m\x1b[1mred bold\x1b[0m", "red bold"},
+		{"empty string", "", ""},
+		{"only ansi", "\x1b[31m\x1b[0m", ""},
+		{"cursor movement", "\x1b[2Ahello", "hello"},
+		{"complex sequence", "\x1b[38;5;196mcolored\x1b[0m", "colored"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := stripAnsiCodes(tt.input)
+			if result != tt.expected {
+				t.Errorf("stripAnsiCodes(%q) = %q, want %q", tt.input, result, tt.expected)
+			}
+		})
+	}
+}
+
+func TestExtractPromptLines(t *testing.T) {
+	tests := []struct {
+		name     string
+		content  string
+		maxWidth int
+		want     int // expected number of non-empty lines
+	}{
+		{"empty content", "", 80, 0},
+		{"single line", "Allow Bash(npm test)?", 80, 1},
+		{"multiple lines", "Working on task...\n\nAllow Bash(npm test)?", 80, 2},
+		{"strips empty lines", "\n\n\nhello\n\nworld\n\n", 80, 2},
+		{"truncates long lines", "this is a very long line that should be truncated", 20, 1},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := extractPromptLines(tt.content, tt.maxWidth)
+			if len(result) != tt.want {
+				t.Errorf("extractPromptLines() returned %d lines, want %d: %v", len(result), tt.want, result)
+			}
+		})
+	}
+}
+
+func TestExtractPromptLinesContent(t *testing.T) {
+	content := "\x1b[31mAllow\x1b[0m Bash(npm test)?"
+	lines := extractPromptLines(content, 80)
+	if len(lines) != 1 {
+		t.Fatalf("expected 1 line, got %d", len(lines))
+	}
+	if lines[0] != "Allow Bash(npm test)?" {
+		t.Errorf("expected ANSI codes stripped, got %q", lines[0])
+	}
+}
+
+func TestRenderExecutorPromptPreview_NoPrompt(t *testing.T) {
+	m := &AppModel{
+		width:           100,
+		executorPrompts: make(map[int64]string),
+	}
+	task := &db.Task{ID: 42, Title: "Test task"}
+	result := m.renderExecutorPromptPreview(task)
+	if result == "" {
+		t.Error("expected non-empty result even with no prompt")
+	}
+	// Should contain the task ID and hint text
+	if !containsText(result, "#42") {
+		t.Error("expected result to contain task ID")
+	}
+}
+
+func TestRenderExecutorPromptPreview_WithPrompt(t *testing.T) {
+	m := &AppModel{
+		width: 100,
+		executorPrompts: map[int64]string{
+			42: "Allow Bash(npm test)?",
+		},
+	}
+	task := &db.Task{ID: 42, Title: "Test task"}
+	result := m.renderExecutorPromptPreview(task)
+	if result == "" {
+		t.Error("expected non-empty result")
+	}
+	// Should contain the prompt content and approve/deny hints
+	if !containsText(result, "approve") || !containsText(result, "deny") {
+		t.Error("expected result to contain approve/deny hints")
+	}
+}
+
+func TestDefaultKeyMap_ApproveAndDenyKeys(t *testing.T) {
+	keys := DefaultKeyMap()
+	if keys.ApprovePrompt.Help().Key != "y" {
+		t.Errorf("ApprovePrompt key should be 'y', got '%s'", keys.ApprovePrompt.Help().Key)
+	}
+	if keys.DenyPrompt.Help().Key != "N" {
+		t.Errorf("DenyPrompt key should be 'N', got '%s'", keys.DenyPrompt.Help().Key)
+	}
+}
+
+// containsText checks if rendered text contains a substring (ignoring ANSI codes).
+func containsText(rendered, substr string) bool {
+	cleaned := stripAnsiCodes(rendered)
+	return len(cleaned) > 0 && len(substr) > 0 && (cleaned == substr || len(cleaned) >= len(substr) && containsSubstr(cleaned, substr))
+}
+
+func containsSubstr(s, substr string) bool {
+	for i := 0; i <= len(s)-len(substr); i++ {
+		if s[i:i+len(substr)] == substr {
+			return true
+		}
+	}
+	return false
+}
+
 func TestJumpToNotificationKey_FocusExecutor(t *testing.T) {
 	// Create app model with kanban board and notification
 	tasks := []*db.Task{
