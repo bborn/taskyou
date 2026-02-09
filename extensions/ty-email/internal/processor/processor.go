@@ -110,17 +110,32 @@ func (p *Processor) ProcessEmail(ctx context.Context, email *adapter.Email) erro
 		}
 	}
 
-	// Get current tasks for context
-	tasks, err := p.bridge.ListTasks("")
-	if err != nil {
-		p.logger.Warn("failed to list tasks for context", "error", err)
-		tasks = []bridge.Task{}
-	}
+	// For new emails (not thread replies), skip the LLM and create a task directly.
+	// This saves API tokens for the common case - an allowed sender emailing a new task.
+	// Only use the LLM for ambiguous cases like thread replies or queries.
+	var action *classifier.Action
+	if threadTaskID == nil && email.InReplyTo == "" {
+		p.logger.Info("skipping LLM classification for new email (not a thread reply)")
+		action = &classifier.Action{
+			Type:       classifier.ActionCreate,
+			Title:      strings.TrimSpace(email.Subject),
+			Body:       strings.TrimSpace(email.Body),
+			Confidence: 1.0,
+			Reasoning:  "new email from allowed sender - created task directly without LLM",
+			Reply:      fmt.Sprintf("Got it! I'll create a task: %s", email.Subject),
+		}
+	} else {
+		// Thread reply or ambiguous case - use LLM
+		tasks, err := p.bridge.ListTasks("")
+		if err != nil {
+			p.logger.Warn("failed to list tasks for context", "error", err)
+			tasks = []bridge.Task{}
+		}
 
-	// Classify the email
-	action, err := p.classifier.Classify(ctx, email, bridge.ToClassifierTasks(tasks), threadTaskID)
-	if err != nil {
-		return fmt.Errorf("failed to classify email: %w", err)
+		action, err = p.classifier.Classify(ctx, email, bridge.ToClassifierTasks(tasks), threadTaskID)
+		if err != nil {
+			return fmt.Errorf("failed to classify email: %w", err)
+		}
 	}
 
 	p.logger.Info("classified email",
