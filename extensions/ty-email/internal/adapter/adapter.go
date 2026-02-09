@@ -31,6 +31,7 @@ type Attachment struct {
 // OutboundEmail represents an email to send.
 type OutboundEmail struct {
 	To        []string
+	From      string   // Reply-from address override (if empty, uses SMTP config)
 	Subject   string
 	Body      string
 	HTML      string

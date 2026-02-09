@@ -372,6 +372,9 @@ func (a *GmailAdapter) Send(ctx context.Context, email *OutboundEmail) error {
 
 	// Build raw email
 	var msg strings.Builder
+	if email.From != "" {
+		msg.WriteString(fmt.Sprintf("From: %s\r\n", email.From))
+	}
 	msg.WriteString(fmt.Sprintf("To: %s\r\n", strings.Join(email.To, ", ")))
 	msg.WriteString(fmt.Sprintf("Subject: %s\r\n", email.Subject))
 	if email.InReplyTo != "" {
