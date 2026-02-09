@@ -156,13 +156,16 @@ func TestWorkflowComplete(t *testing.T) {
 		t.Fatalf("unexpected error: %s", resp.Error.Message)
 	}
 
-	// Verify task status was updated
+	// Verify task status was NOT changed to done (only humans close tasks)
 	updatedTask, err := database.GetTask(task.ID)
 	if err != nil {
 		t.Fatalf("failed to get task: %v", err)
 	}
-	if updatedTask.Status != db.StatusDone {
-		t.Errorf("expected status 'done', got '%s'", updatedTask.Status)
+	if updatedTask.Status == db.StatusDone {
+		t.Errorf("expected status to NOT be 'done' (only humans should close tasks), got '%s'", updatedTask.Status)
+	}
+	if updatedTask.Status != db.StatusProcessing {
+		t.Errorf("expected status to remain 'processing', got '%s'", updatedTask.Status)
 	}
 }
 
