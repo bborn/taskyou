@@ -346,7 +346,7 @@ Note: ty-email replies will appear in your Inbox (not the ty-email label).
 	cfg.SMTP.Server = "smtp.gmail.com:587"
 	cfg.SMTP.Username = username
 	cfg.SMTP.PasswordCmd = passwordCmd
-	cfg.SMTP.From = username
+	cfg.SMTP.From = suggestedAlias
 
 	// Security - only allow emails from self
 	cfg.Security.AllowedSenders = []string{username}

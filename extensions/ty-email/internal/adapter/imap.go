@@ -330,9 +330,17 @@ func (a *IMAPAdapter) Send(ctx context.Context, email *OutboundEmail) error {
 	}
 	hostOnly := strings.Split(host, ":")[0]
 
+	// Use the From override if provided, otherwise fall back to SMTP config.
+	// This ensures replies come from the +ty alias address so that
+	// when the user replies, the reply routes back to ty-email.
+	fromAddr := a.smtp.From
+	if email.From != "" {
+		fromAddr = email.From
+	}
+
 	// Build message
 	var msg bytes.Buffer
-	msg.WriteString(fmt.Sprintf("From: %s\r\n", a.smtp.From))
+	msg.WriteString(fmt.Sprintf("From: %s\r\n", fromAddr))
 	msg.WriteString(fmt.Sprintf("To: %s\r\n", strings.Join(email.To, ", ")))
 	msg.WriteString(fmt.Sprintf("Subject: %s\r\n", email.Subject))
 	if email.InReplyTo != "" {
@@ -346,7 +354,7 @@ func (a *IMAPAdapter) Send(ctx context.Context, email *OutboundEmail) error {
 
 	// Send via SMTP
 	auth := smtp.PlainAuth("", a.smtp.Username, password, hostOnly)
-	if err := smtp.SendMail(host, auth, a.smtp.From, email.To, msg.Bytes()); err != nil {
+	if err := smtp.SendMail(host, auth, fromAddr, email.To, msg.Bytes()); err != nil {
 		return fmt.Errorf("failed to send email: %w", err)
 	}
 

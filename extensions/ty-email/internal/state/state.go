@@ -35,6 +35,7 @@ type ProcessedEmail struct {
 type OutboundEmail struct {
 	ID        int64
 	To        string
+	From      string // Reply-from address (e.g., the +ty alias)
 	Subject   string
 	Body      string
 	TaskID    *int64
@@ -116,7 +117,14 @@ func (s *DB) migrate() error {
 
 		CREATE INDEX IF NOT EXISTS idx_outbound_queue_attempts ON outbound_queue(attempts);
 	`)
-	return err
+	if err != nil {
+		return err
+	}
+
+	// Add from_addr column if it doesn't exist (migration for existing DBs)
+	_, _ = s.db.Exec(`ALTER TABLE outbound_queue ADD COLUMN from_addr TEXT DEFAULT ''`)
+
+	return nil
 }
 
 // LinkThread associates an email thread with a task.
@@ -179,10 +187,12 @@ func (s *DB) MarkProcessed(emailID string, taskID *int64, action string) error {
 }
 
 // QueueOutbound queues an email for sending.
-func (s *DB) QueueOutbound(to, subject, body string, taskID *int64, inReplyTo string) (int64, error) {
+// The from parameter specifies the reply-from address (e.g., the +ty alias).
+// If empty, the adapter's default SMTP from address is used.
+func (s *DB) QueueOutbound(to, from, subject, body string, taskID *int64, inReplyTo string) (int64, error) {
 	result, err := s.db.Exec(
-		`INSERT INTO outbound_queue (to_addr, subject, body, task_id, in_reply_to) VALUES (?, ?, ?, ?, ?)`,
-		to, subject, body, taskID, inReplyTo,
+		`INSERT INTO outbound_queue (to_addr, from_addr, subject, body, task_id, in_reply_to) VALUES (?, ?, ?, ?, ?, ?)`,
+		to, from, subject, body, taskID, inReplyTo,
 	)
 	if err != nil {
 		return 0, err
@@ -193,7 +203,7 @@ func (s *DB) QueueOutbound(to, subject, body string, taskID *int64, inReplyTo st
 // GetPendingOutbound returns emails that need to be sent.
 func (s *DB) GetPendingOutbound(maxAttempts int) ([]OutboundEmail, error) {
 	rows, err := s.db.Query(
-		`SELECT id, to_addr, subject, body, task_id, in_reply_to, attempts, last_error, created_at
+		`SELECT id, to_addr, from_addr, subject, body, task_id, in_reply_to, attempts, last_error, created_at
 		 FROM outbound_queue WHERE attempts < ? ORDER BY created_at ASC`,
 		maxAttempts,
 	)
@@ -206,12 +216,16 @@ func (s *DB) GetPendingOutbound(maxAttempts int) ([]OutboundEmail, error) {
 	for rows.Next() {
 		var e OutboundEmail
 		var lastError sql.NullString
-		err := rows.Scan(&e.ID, &e.To, &e.Subject, &e.Body, &e.TaskID, &e.InReplyTo, &e.Attempts, &lastError, &e.CreatedAt)
+		var fromAddr sql.NullString
+		err := rows.Scan(&e.ID, &e.To, &fromAddr, &e.Subject, &e.Body, &e.TaskID, &e.InReplyTo, &e.Attempts, &lastError, &e.CreatedAt)
 		if err != nil {
 			return nil, err
 		}
 		if lastError.Valid {
 			e.LastError = lastError.String
+		}
+		if fromAddr.Valid {
+			e.From = fromAddr.String
 		}
 		emails = append(emails, e)
 	}

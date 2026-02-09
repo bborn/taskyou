@@ -190,8 +190,17 @@ func (p *Processor) ProcessEmail(ctx context.Context, email *adapter.Email) erro
 			subject = "Re: " + subject
 		}
 
+		// Use the first To address from the inbound email as the reply From address.
+		// This ensures replies come FROM the +ty alias (e.g., user+ty@gmail.com)
+		// so that when the user replies back, routing is maintained.
+		replyFrom := ""
+		if len(email.To) > 0 {
+			replyFrom = email.To[0]
+		}
+
 		_, err = p.state.QueueOutbound(
 			email.From,
+			replyFrom,
 			subject,
 			replyText,
 			taskID,
@@ -319,6 +328,7 @@ func (p *Processor) SendPendingReplies(ctx context.Context) error {
 	for _, e := range emails {
 		outbound := &adapter.OutboundEmail{
 			To:        []string{e.To},
+			From:      e.From,
 			Subject:   e.Subject,
 			Body:      e.Body,
 			InReplyTo: e.InReplyTo,
@@ -370,7 +380,7 @@ func (p *Processor) CheckBlockedTasks(ctx context.Context, notifyAddress string)
 			task.ID, task.Body, output)
 
 		taskID := task.ID
-		_, err = p.state.QueueOutbound(notifyAddress, subject, body, &taskID, threadID)
+		_, err = p.state.QueueOutbound(notifyAddress, "", subject, body, &taskID, threadID)
 		if err != nil {
 			p.logger.Error("failed to queue blocked notification", "task", task.ID, "error", err)
 		}
