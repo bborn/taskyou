@@ -742,12 +742,6 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.notifyUntil = time.Now().Add(10 * time.Second)
 					m.notifyTaskID = t.ID
 					RingBell() // Ring terminal bell (writes to /dev/tty to bypass TUI)
-					// Mark task as needing input for kanban highlighting
-					m.tasksNeedingInput[t.ID] = true
-					// Read prompt message from DB (written by notification hook)
-					if prompt := m.latestPermissionPrompt(t.ID); prompt != "" {
-						m.executorPrompts[t.ID] = prompt
-					}
 				} else if t.Status == db.StatusDone && db.IsInProgress(prevStatus) {
 					// Task completed - ring bell and show notification
 					m.notification = fmt.Sprintf("%s Task #%d complete: %s (g to jump)", IconDone(), t.ID, t.Title)
@@ -755,10 +749,14 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.notifyTaskID = t.ID
 					RingBell() // Ring terminal bell (writes to /dev/tty to bypass TUI)
 				}
-				// Clear needing input flag when task leaves blocked status
-				if prevStatus == db.StatusBlocked && t.Status != db.StatusBlocked {
-					delete(m.tasksNeedingInput, t.ID)
-					delete(m.executorPrompts, t.ID)
+				// On any status change, re-validate cached prompt state.
+				// Handles external approval (e.g. from tmux) where PreToolUse
+				// logs "Claude resumed working" and transitions to processing.
+				if m.tasksNeedingInput[t.ID] {
+					if m.latestPermissionPrompt(t.ID) == "" {
+						delete(m.tasksNeedingInput, t.ID)
+						delete(m.executorPrompts, t.ID)
+					}
 				}
 			}
 			m.prevStatuses[t.ID] = t.Status
@@ -772,15 +770,22 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
-		// Detect blocked tasks that aren't yet marked as needing input
-		// (e.g. TUI opened after task was already blocked). Uses DB logs
-		// written by the notification hook — no process spawning.
+		// Sync permission prompt state for all active tasks from DB hook logs.
+		// This is status-agnostic: detects pending prompts on any task, and
+		// clears stale entries when prompts are resolved. Only queries tasks
+		// not already cached, so cost is minimal after initial detection.
 		for _, t := range m.tasks {
-			if t.Status == db.StatusBlocked && !m.tasksNeedingInput[t.ID] {
-				if prompt := m.latestPermissionPrompt(t.ID); prompt != "" {
-					m.tasksNeedingInput[t.ID] = true
-					m.executorPrompts[t.ID] = prompt
-				}
+			if t.Status == db.StatusDone || t.Status == db.StatusBacklog {
+				delete(m.tasksNeedingInput, t.ID)
+				delete(m.executorPrompts, t.ID)
+				continue
+			}
+			if m.tasksNeedingInput[t.ID] {
+				continue // already detected, cleared by executorRespondedMsg or next status change
+			}
+			if prompt := m.latestPermissionPrompt(t.ID); prompt != "" {
+				m.tasksNeedingInput[t.ID] = true
+				m.executorPrompts[t.ID] = prompt
 			}
 		}
 
@@ -1054,12 +1059,6 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 							m.notifyUntil = time.Now().Add(10 * time.Second)
 							m.notifyTaskID = event.TaskID
 							RingBell() // Ring terminal bell (writes to /dev/tty to bypass TUI)
-							// Mark task as needing input for kanban highlighting
-							m.tasksNeedingInput[event.TaskID] = true
-							// Read prompt message from DB (written by notification hook)
-							if prompt := m.latestPermissionPrompt(event.TaskID); prompt != "" {
-								m.executorPrompts[event.TaskID] = prompt
-							}
 						} else if event.Task.Status == db.StatusDone && db.IsInProgress(prevStatus) && !userClosed {
 							m.notification = fmt.Sprintf("✓ Task #%d complete: %s (g to jump)", event.TaskID, event.Task.Title)
 							m.notifyUntil = time.Now().Add(5 * time.Second)
@@ -1070,10 +1069,12 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 							m.notifyUntil = time.Now().Add(3 * time.Second)
 							m.notifyTaskID = event.TaskID
 						}
-						// Clear needing input flag when task leaves blocked status
-						if prevStatus == db.StatusBlocked && event.Task.Status != db.StatusBlocked {
-							delete(m.tasksNeedingInput, event.TaskID)
-							delete(m.executorPrompts, event.TaskID)
+						// Re-validate cached prompt state on any status change
+						if m.tasksNeedingInput[event.TaskID] {
+							if m.latestPermissionPrompt(event.TaskID) == "" {
+								delete(m.tasksNeedingInput, event.TaskID)
+								delete(m.executorPrompts, event.TaskID)
+							}
 						}
 						m.prevStatuses[event.TaskID] = event.Task.Status
 					}
@@ -3657,20 +3658,27 @@ func (m *AppModel) denyExecutorPrompt(taskID int64) tea.Cmd {
 	}
 }
 
-// latestPermissionPrompt reads the most recent "Waiting for permission" log entry
-// from the DB for a blocked task. Returns the prompt message, or "" if none found.
-// This uses data already written by the notification hook — no process spawning.
+// latestPermissionPrompt checks whether a task has a pending permission prompt
+// by reading recent DB logs written by the notification hook. Returns the prompt
+// message if still pending, or "" if resolved (e.g. "Claude resumed working",
+// user approved/denied). This is status-agnostic — works for any active task.
 func (m *AppModel) latestPermissionPrompt(taskID int64) string {
-	logs, err := m.db.GetTaskLogs(taskID, 5)
+	logs, err := m.db.GetTaskLogs(taskID, 10)
 	if err != nil {
 		return ""
 	}
+	// Logs are in DESC order (most recent first).
+	// A pending prompt is only valid if no subsequent log indicates resolution.
 	for _, l := range logs {
-		if l.LineType == "system" && strings.HasPrefix(l.Content, "Waiting for permission") {
+		switch {
+		case l.LineType == "system" && strings.HasPrefix(l.Content, "Waiting for permission"):
 			return l.Content
-		}
-		if l.LineType == "system" && strings.HasPrefix(l.Content, "Waiting for user input") {
+		case l.LineType == "system" && strings.HasPrefix(l.Content, "Waiting for user input"):
 			return l.Content
+		case l.LineType == "system" && l.Content == "Claude resumed working":
+			return "" // prompt was resolved
+		case l.LineType == "user" && (strings.HasPrefix(l.Content, "Approved") || strings.HasPrefix(l.Content, "Denied")):
+			return "" // user already responded
 		}
 	}
 	return ""
