@@ -23,7 +23,6 @@ Hey everyone! Wanted to share a roundup of recent Task You improvements. A lot h
 - **Email-based task management (ty-email)** - Create and manage tasks via email. Supports Gmail OAuth and IMAP. Run `ty-email init` to set up.
 - **AI-powered command palette** - The `p` command now interprets natural language. Type what you want and it figures out the right action.
 - **Customizable keyboard shortcuts** - Define your own keybindings in a YAML config file. Every shortcut is rebindable.
-- **Agentic workflows** - New built-in workflows: `code-simplifier`, `semantic-function-refactor`, and `daily-repo-status`.
 - **Event hooks** - New `task.worktree_ready` hook fires when a worktree is set up, so you can run setup scripts automatically.
 - **Project context caching** - Agents cache their codebase exploration and reuse it across tasks. No more redundant exploration on every task.
 
