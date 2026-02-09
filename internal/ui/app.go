@@ -353,7 +353,7 @@ type AppModel struct {
 	prevStatuses map[int64]string
 	// Track tasks with active input notifications (for UI highlighting)
 	tasksNeedingInput map[int64]bool
-	// Cached executor pane content for blocked tasks (for quick preview)
+	// Cached executor prompt messages for blocked tasks (from DB hook logs)
 	executorPrompts map[int64]string
 	// Track tasks the user closed manually (suppress notification for these)
 	userClosedTaskIDs map[int64]bool
@@ -744,8 +744,10 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					RingBell() // Ring terminal bell (writes to /dev/tty to bypass TUI)
 					// Mark task as needing input for kanban highlighting
 					m.tasksNeedingInput[t.ID] = true
-					// Capture executor pane content for preview
-					cmds = append(cmds, m.captureExecutorPrompt(t.ID))
+					// Read prompt message from DB (written by notification hook)
+					if prompt := m.latestPermissionPrompt(t.ID); prompt != "" {
+						m.executorPrompts[t.ID] = prompt
+					}
 				} else if t.Status == db.StatusDone && db.IsInProgress(prevStatus) {
 					// Task completed - ring bell and show notification
 					m.notification = fmt.Sprintf("%s Task #%d complete: %s (g to jump)", IconDone(), t.ID, t.Title)
@@ -766,6 +768,18 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.selectedTask = t
 				if m.detailView != nil {
 					m.detailView.UpdateTask(t)
+				}
+			}
+		}
+
+		// Detect blocked tasks that aren't yet marked as needing input
+		// (e.g. TUI opened after task was already blocked). Uses DB logs
+		// written by the notification hook — no process spawning.
+		for _, t := range m.tasks {
+			if t.Status == db.StatusBlocked && !m.tasksNeedingInput[t.ID] {
+				if prompt := m.latestPermissionPrompt(t.ID); prompt != "" {
+					m.tasksNeedingInput[t.ID] = true
+					m.executorPrompts[t.ID] = prompt
 				}
 			}
 		}
@@ -1001,13 +1015,6 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.notifyUntil = time.Now().Add(3 * time.Second)
 		}
 
-	case executorPromptMsg:
-		if msg.content != "" {
-			m.executorPrompts[msg.taskID] = msg.content
-		} else {
-			delete(m.executorPrompts, msg.taskID)
-		}
-
 	case executorRespondedMsg:
 		if msg.err != nil {
 			m.notification = fmt.Sprintf("%s Failed to %s: %s", IconBlocked(), msg.action, msg.err.Error())
@@ -1049,8 +1056,10 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 							RingBell() // Ring terminal bell (writes to /dev/tty to bypass TUI)
 							// Mark task as needing input for kanban highlighting
 							m.tasksNeedingInput[event.TaskID] = true
-							// Immediately capture the executor pane content for the preview
-							cmds = append(cmds, m.captureExecutorPrompt(event.TaskID))
+							// Read prompt message from DB (written by notification hook)
+							if prompt := m.latestPermissionPrompt(event.TaskID); prompt != "" {
+								m.executorPrompts[event.TaskID] = prompt
+							}
 						} else if event.Task.Status == db.StatusDone && db.IsInProgress(prevStatus) && !userClosed {
 							m.notification = fmt.Sprintf("✓ Task #%d complete: %s (g to jump)", event.TaskID, event.Task.Title)
 							m.notifyUntil = time.Now().Add(5 * time.Second)
@@ -1105,11 +1114,6 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				running[m.selectedTask.ID] = true
 			}
 			m.kanban.SetRunningProcesses(running)
-
-			// Capture executor pane content for selected blocked task needing input
-			if task := m.kanban.SelectedTask(); task != nil && m.tasksNeedingInput[task.ID] {
-				cmds = append(cmds, m.captureExecutorPrompt(task.ID))
-			}
 		}
 		cmds = append(cmds, m.tick())
 
@@ -1527,7 +1531,7 @@ func (m *AppModel) renderHelp() string {
 }
 
 // renderExecutorPromptPreview renders a compact preview of the executor's current prompt
-// for a blocked task that needs input. Shows the last few lines from the executor's tmux pane
+// for a blocked task that needs input. Shows the permission message from the hook log
 // with approve/deny hints.
 func (m *AppModel) renderExecutorPromptPreview(task *db.Task) string {
 	prompt := m.executorPrompts[task.ID]
@@ -1578,7 +1582,7 @@ func (m *AppModel) renderExecutorPromptPreview(task *db.Task) string {
 	return barStyle.Render(line)
 }
 
-// extractPromptLines extracts the last meaningful lines from tmux pane content.
+// extractPromptLines extracts the last meaningful lines from prompt content.
 // Strips empty lines, ANSI codes, and trims to fit the given width.
 func extractPromptLines(content string, maxWidth int) []string {
 	if content == "" {
@@ -3622,12 +3626,6 @@ func (m *AppModel) openBrowser(task *db.Task) tea.Cmd {
 	}
 }
 
-// executorPromptMsg is sent when executor pane content is captured.
-type executorPromptMsg struct {
-	taskID  int64
-	content string
-}
-
 // executorRespondedMsg is sent after approve/deny is sent to the executor.
 type executorRespondedMsg struct {
 	taskID int64
@@ -3659,12 +3657,23 @@ func (m *AppModel) denyExecutorPrompt(taskID int64) tea.Cmd {
 	}
 }
 
-// captureExecutorPrompt captures the last few lines from a task's executor pane.
-func (m *AppModel) captureExecutorPrompt(taskID int64) tea.Cmd {
-	return func() tea.Msg {
-		content := executor.CapturePaneContent(taskID, 8)
-		return executorPromptMsg{taskID: taskID, content: content}
+// latestPermissionPrompt reads the most recent "Waiting for permission" log entry
+// from the DB for a blocked task. Returns the prompt message, or "" if none found.
+// This uses data already written by the notification hook — no process spawning.
+func (m *AppModel) latestPermissionPrompt(taskID int64) string {
+	logs, err := m.db.GetTaskLogs(taskID, 5)
+	if err != nil {
+		return ""
 	}
+	for _, l := range logs {
+		if l.LineType == "system" && strings.HasPrefix(l.Content, "Waiting for permission") {
+			return l.Content
+		}
+		if l.LineType == "system" && strings.HasPrefix(l.Content, "Waiting for user input") {
+			return l.Content
+		}
+	}
+	return ""
 }
 
 // taskMovedMsg is returned when a task is moved to a different project.
