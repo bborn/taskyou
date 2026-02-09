@@ -4047,6 +4047,7 @@ func (e *Executor) updateTaskPRInfo(task *db.Task, projectDir string) {
 	if prInfo != nil {
 		task.PRURL = prInfo.URL
 		task.PRNumber = prInfo.Number
+		task.PRInfoJSON = github.MarshalPRInfo(prInfo)
 	}
 }
 

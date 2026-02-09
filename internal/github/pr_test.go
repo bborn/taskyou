@@ -258,6 +258,74 @@ func TestParseCheckState(t *testing.T) {
 	}
 }
 
+func TestMarshalUnmarshalPRInfo(t *testing.T) {
+	// Test nil
+	if got := MarshalPRInfo(nil); got != "" {
+		t.Errorf("MarshalPRInfo(nil) = %q, want empty", got)
+	}
+	if got := UnmarshalPRInfo(""); got != nil {
+		t.Errorf("UnmarshalPRInfo(\"\") = %v, want nil", got)
+	}
+
+	// Test round-trip
+	original := &PRInfo{
+		Number:     42,
+		URL:        "https://github.com/test/repo/pull/42",
+		State:      PRStateOpen,
+		IsDraft:    false,
+		Title:      "Fix things",
+		CheckState: CheckStatePassing,
+		Mergeable:  "MERGEABLE",
+		Additions:  10,
+		Deletions:  5,
+	}
+
+	jsonStr := MarshalPRInfo(original)
+	if jsonStr == "" {
+		t.Fatal("MarshalPRInfo returned empty string")
+	}
+
+	restored := UnmarshalPRInfo(jsonStr)
+	if restored == nil {
+		t.Fatal("UnmarshalPRInfo returned nil")
+	}
+
+	if restored.Number != original.Number {
+		t.Errorf("Number = %d, want %d", restored.Number, original.Number)
+	}
+	if restored.URL != original.URL {
+		t.Errorf("URL = %q, want %q", restored.URL, original.URL)
+	}
+	if restored.State != original.State {
+		t.Errorf("State = %q, want %q", restored.State, original.State)
+	}
+	if restored.CheckState != original.CheckState {
+		t.Errorf("CheckState = %q, want %q", restored.CheckState, original.CheckState)
+	}
+	if restored.Mergeable != original.Mergeable {
+		t.Errorf("Mergeable = %q, want %q", restored.Mergeable, original.Mergeable)
+	}
+	if restored.Title != original.Title {
+		t.Errorf("Title = %q, want %q", restored.Title, original.Title)
+	}
+
+	// Test invalid JSON
+	if got := UnmarshalPRInfo("not json"); got != nil {
+		t.Errorf("UnmarshalPRInfo(invalid) = %v, want nil", got)
+	}
+
+	// Test merged state round-trip
+	merged := &PRInfo{
+		Number: 42,
+		State:  PRStateMerged,
+	}
+	mergedJSON := MarshalPRInfo(merged)
+	restoredMerged := UnmarshalPRInfo(mergedJSON)
+	if restoredMerged.State != PRStateMerged {
+		t.Errorf("State = %q, want MERGED", restoredMerged.State)
+	}
+}
+
 func TestPRCacheInvalidate(t *testing.T) {
 	cache := NewPRCache()
 

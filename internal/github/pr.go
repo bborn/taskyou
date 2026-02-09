@@ -75,7 +75,7 @@ type cacheEntry struct {
 	fetchedAt time.Time
 }
 
-const cacheTTL = 30 * time.Second
+const cacheTTL = 15 * time.Second
 
 // NewPRCache creates a new PR cache.
 func NewPRCache() *PRCache {
@@ -371,6 +371,32 @@ func FetchAllPRsForRepo(repoDir string) map[string]*PRInfo {
 		}
 	}
 
+	// Also fetch recently closed PRs (last 10) to catch closures
+	ctx3, cancel3 := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel3()
+
+	cmd3 := exec.CommandContext(ctx3, "gh", "pr", "list",
+		"--state", "closed",
+		"--json", "number,url,state,isDraft,title,headRefName,mergeable,updatedAt,additions,deletions",
+		"--limit", "10")
+	cmd3.Dir = repoDir
+
+	output3, err := cmd3.Output()
+	if err == nil {
+		var closedPRs []ghPRListResponse
+		if json.Unmarshal(output3, &closedPRs) == nil {
+			for _, pr := range closedPRs {
+				// Only add if not already present (open/merged PR takes precedence)
+				if _, exists := result[pr.HeadRefName]; !exists && pr.HeadRefName != "" {
+					info := parsePRListResponse(&pr)
+					if info != nil {
+						result[pr.HeadRefName] = info
+					}
+				}
+			}
+		}
+	}
+
 	return result
 }
 
@@ -427,6 +453,30 @@ func (c *PRCache) UpdateCacheForRepo(repoDir string, prsByBranch map[string]*PRI
 			fetchedAt: now,
 		}
 	}
+}
+
+// MarshalPRInfo converts a PRInfo to JSON string for database storage.
+func MarshalPRInfo(info *PRInfo) string {
+	if info == nil {
+		return ""
+	}
+	data, err := json.Marshal(info)
+	if err != nil {
+		return ""
+	}
+	return string(data)
+}
+
+// UnmarshalPRInfo converts a JSON string from database back to PRInfo.
+func UnmarshalPRInfo(data string) *PRInfo {
+	if data == "" {
+		return nil
+	}
+	var info PRInfo
+	if err := json.Unmarshal([]byte(data), &info); err != nil {
+		return nil
+	}
+	return &info
 }
 
 // GetCachedPR returns cached PR info without fetching. Returns nil if not cached or expired.

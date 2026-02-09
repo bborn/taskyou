@@ -1482,6 +1482,95 @@ func TestUpdateTaskDangerousMode(t *testing.T) {
 	}
 }
 
+func TestUpdateTaskPRInfo(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	db, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer db.Close()
+	defer os.Remove(dbPath)
+
+	// Create a task
+	task := &Task{
+		Title:   "Test PR Info",
+		Status:  StatusProcessing,
+		Type:    TypeCode,
+		Project: "personal",
+	}
+	if err := db.CreateTask(task); err != nil {
+		t.Fatalf("failed to create task: %v", err)
+	}
+
+	// Verify initial PR info is empty
+	retrieved, err := db.GetTask(task.ID)
+	if err != nil {
+		t.Fatalf("failed to get task: %v", err)
+	}
+	if retrieved.PRURL != "" || retrieved.PRNumber != 0 || retrieved.PRInfoJSON != "" {
+		t.Error("expected empty PR info initially")
+	}
+
+	// Update PR info
+	prJSON := `{"number":42,"url":"https://github.com/test/repo/pull/42","state":"OPEN","checkState":"SUCCESS","mergeable":"MERGEABLE"}`
+	if err := db.UpdateTaskPRInfo(task.ID, "https://github.com/test/repo/pull/42", 42, prJSON); err != nil {
+		t.Fatalf("failed to update PR info: %v", err)
+	}
+
+	// Verify PR info is saved
+	retrieved, err = db.GetTask(task.ID)
+	if err != nil {
+		t.Fatalf("failed to get task: %v", err)
+	}
+	if retrieved.PRURL != "https://github.com/test/repo/pull/42" {
+		t.Errorf("expected PRURL to be set, got %q", retrieved.PRURL)
+	}
+	if retrieved.PRNumber != 42 {
+		t.Errorf("expected PRNumber to be 42, got %d", retrieved.PRNumber)
+	}
+	if retrieved.PRInfoJSON != prJSON {
+		t.Errorf("expected PRInfoJSON to be set, got %q", retrieved.PRInfoJSON)
+	}
+
+	// Update PR state to merged
+	mergedJSON := `{"number":42,"url":"https://github.com/test/repo/pull/42","state":"MERGED","checkState":"SUCCESS","mergeable":"MERGEABLE"}`
+	if err := db.UpdateTaskPRInfo(task.ID, "https://github.com/test/repo/pull/42", 42, mergedJSON); err != nil {
+		t.Fatalf("failed to update PR info to merged: %v", err)
+	}
+
+	// Verify PR state is updated
+	retrieved, err = db.GetTask(task.ID)
+	if err != nil {
+		t.Fatalf("failed to get task: %v", err)
+	}
+	if retrieved.PRInfoJSON != mergedJSON {
+		t.Errorf("expected PRInfoJSON to be updated to merged, got %q", retrieved.PRInfoJSON)
+	}
+
+	// Verify PR info persists through ListTasks
+	tasks, err := db.ListTasks(ListTasksOptions{})
+	if err != nil {
+		t.Fatalf("failed to list tasks: %v", err)
+	}
+	if len(tasks) == 0 {
+		t.Fatal("expected at least one task")
+	}
+	found := false
+	for _, lt := range tasks {
+		if lt.ID == task.ID {
+			found = true
+			if lt.PRInfoJSON != mergedJSON {
+				t.Errorf("expected PRInfoJSON in list to be merged, got %q", lt.PRInfoJSON)
+			}
+		}
+	}
+	if !found {
+		t.Error("task not found in list")
+	}
+}
+
 func TestTaskDangerousModeInListTasks(t *testing.T) {
 	// Create temporary database
 	tmpDir := t.TempDir()
