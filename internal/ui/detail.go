@@ -83,6 +83,7 @@ type DetailModel struct {
 
 	// Log count tracking for smarter refreshes
 	lastLogCount int
+	logsLoading  bool // true while async log loading is in progress
 
 	// Memory check throttling (don't check every refresh)
 	lastMemoryCheck time.Time
@@ -114,6 +115,13 @@ type panesJoinedMsg struct {
 	windowTarget    string
 	userMessage     string
 	err             error
+}
+
+// logsLoadedMsg is sent when async log loading completes.
+type logsLoadedMsg struct {
+	taskID   int64
+	logs     []*db.TaskLog
+	logCount int
 }
 
 type spinnerTickMsg struct{}
@@ -172,9 +180,10 @@ func (m *DetailModel) SetPRInfo(prInfo *github.PRInfo) {
 }
 
 // Refresh reloads task and logs from database.
-func (m *DetailModel) Refresh() {
+// Returns a tea.Cmd if async work (like log loading) needs to happen.
+func (m *DetailModel) Refresh() tea.Cmd {
 	if m.task == nil || m.database == nil {
-		return
+		return nil
 	}
 
 	prevTask := m.task
@@ -196,18 +205,17 @@ func (m *DetailModel) Refresh() {
 		}
 	}
 
-	// Check log count first to avoid loading all logs if unchanged
+	// Check log count first to avoid loading all logs if unchanged.
+	// Load logs asynchronously to avoid blocking the UI event loop.
+	var cmd tea.Cmd
 	logCount, err := m.database.GetTaskLogCount(m.task.ID)
-	if err == nil && logCount != m.lastLogCount {
-		// Log count changed, reload logs
-		logs, err := m.database.GetTaskLogs(m.task.ID, 500)
-		if err == nil {
-			m.logs = logs
-			m.lastLogCount = logCount
-
-			if m.ready {
-				m.viewport.SetContent(m.renderContent())
-			}
+	if err == nil && logCount != m.lastLogCount && !m.logsLoading {
+		m.logsLoading = true
+		taskID := m.task.ID
+		database := m.database
+		cmd = func() tea.Msg {
+			logs, _ := database.GetTaskLogs(taskID, 500)
+			return logsLoadedMsg{taskID: taskID, logs: logs, logCount: logCount}
 		}
 	}
 
@@ -247,6 +255,23 @@ func (m *DetailModel) Refresh() {
 		m.lastPaneCheck = time.Now()
 		// Ensure tmux panes are joined if available (handles external close/detach)
 		m.ensureTmuxPanesJoined()
+	}
+
+	return cmd
+}
+
+// HandleLogsLoaded processes the result of async log loading.
+func (m *DetailModel) HandleLogsLoaded(msg logsLoadedMsg) {
+	m.logsLoading = false
+	if msg.taskID != m.task.ID {
+		return // stale result from a different task
+	}
+	if msg.logs != nil {
+		m.logs = msg.logs
+		m.lastLogCount = msg.logCount
+		if m.ready {
+			m.viewport.SetContent(m.renderContent())
+		}
 	}
 }
 
@@ -481,6 +506,11 @@ func (m *DetailModel) Update(msg tea.Msg) (*DetailModel, tea.Cmd) {
 			}
 		}
 		m.viewport.SetContent(m.renderContent())
+		return m, nil
+
+	case logsLoadedMsg:
+		// Async log loading completed
+		m.HandleLogsLoaded(msg)
 		return m, nil
 
 	case spinnerTickMsg:

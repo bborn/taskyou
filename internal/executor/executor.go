@@ -3111,21 +3111,19 @@ func (e *Executor) logLine(taskID int64, lineType, content string) {
 
 // getConversationHistory builds a context section from previous task runs.
 // This includes questions asked, user responses, and continuation markers.
+// Uses a targeted DB query that only fetches conversation-relevant logs,
+// avoiding loading potentially large output/tool content.
 func (e *Executor) getConversationHistory(taskID int64) string {
-	logs, err := e.db.GetTaskLogs(taskID, 500)
-	if err != nil || len(logs) == 0 {
+	// Fast check: does this task have any continuation markers?
+	hasContinuation, err := e.db.HasContinuationMarker(taskID)
+	if err != nil || !hasContinuation {
 		return ""
 	}
 
-	// Look for continuation markers - if none, this is a fresh run
-	hasContinuation := false
-	for _, log := range logs {
-		if log.LineType == "system" && strings.Contains(log.Content, "--- Continuation ---") {
-			hasContinuation = true
-			break
-		}
-	}
-	if !hasContinuation {
+	// Only fetch conversation-relevant logs (questions, feedback, continuation markers)
+	// This skips large output/tool logs that aren't needed for history context
+	logs, err := e.db.GetConversationHistoryLogs(taskID)
+	if err != nil || len(logs) == 0 {
 		return ""
 	}
 
@@ -3133,20 +3131,16 @@ func (e *Executor) getConversationHistory(taskID int64) string {
 	sb.WriteString("## Previous Conversation\n\n")
 	sb.WriteString("This task was previously attempted. Here is the relevant history:\n\n")
 
-	// Extract questions and feedback from logs
+	// All returned logs are already filtered to relevant types
 	for _, log := range logs {
 		switch log.LineType {
 		case "question":
 			sb.WriteString(fmt.Sprintf("**Your question:** %s\n\n", log.Content))
 		case "text":
-			if strings.HasPrefix(log.Content, "Feedback: ") {
-				feedback := strings.TrimPrefix(log.Content, "Feedback: ")
-				sb.WriteString(fmt.Sprintf("**User's response:** %s\n\n", feedback))
-			}
+			feedback := strings.TrimPrefix(log.Content, "Feedback: ")
+			sb.WriteString(fmt.Sprintf("**User's response:** %s\n\n", feedback))
 		case "system":
-			if strings.Contains(log.Content, "--- Continuation ---") {
-				sb.WriteString("---\n\n")
-			}
+			sb.WriteString("---\n\n")
 		}
 	}
 

@@ -2178,3 +2178,152 @@ func TestOnboarding(t *testing.T) {
 		}
 	})
 }
+
+func TestGetConversationHistoryLogs(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	db, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer db.Close()
+
+	if err := db.CreateProject(&Project{Name: "test", Path: tmpDir}); err != nil {
+		t.Fatalf("failed to create project: %v", err)
+	}
+
+	task := &Task{Title: "Test Task", Status: StatusBacklog, Project: "test"}
+	if err := db.CreateTask(task); err != nil {
+		t.Fatalf("failed to create task: %v", err)
+	}
+
+	t.Run("empty logs", func(t *testing.T) {
+		logs, err := db.GetConversationHistoryLogs(task.ID)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(logs) != 0 {
+			t.Errorf("expected 0 logs, got %d", len(logs))
+		}
+	})
+
+	// Add various log types - only some should be returned
+	db.AppendTaskLog(task.ID, "system", "Starting task")
+	db.AppendTaskLog(task.ID, "output", "Some very large output content that should NOT be loaded")
+	db.AppendTaskLog(task.ID, "tool", "Tool use: Read file.go")
+	db.AppendTaskLog(task.ID, "question", "What database should I use?")
+	db.AppendTaskLog(task.ID, "system", "--- Continuation ---")
+	db.AppendTaskLog(task.ID, "text", "Feedback: Use PostgreSQL")
+	db.AppendTaskLog(task.ID, "output", "More large output")
+	db.AppendTaskLog(task.ID, "question", "Should I add an index?")
+	db.AppendTaskLog(task.ID, "system", "--- Continuation ---")
+	db.AppendTaskLog(task.ID, "text", "Feedback: Yes, add it")
+	db.AppendTaskLog(task.ID, "error", "Some error that should NOT be loaded")
+
+	t.Run("filters to conversation-relevant logs only", func(t *testing.T) {
+		logs, err := db.GetConversationHistoryLogs(task.ID)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		// Should only get: question, continuation, feedback, question, continuation, feedback = 6 logs
+		if len(logs) != 6 {
+			t.Errorf("expected 6 conversation history logs, got %d", len(logs))
+			for _, l := range logs {
+				t.Logf("  %s: %s", l.LineType, l.Content)
+			}
+		}
+
+		// Verify no output/tool/error logs are included
+		for _, l := range logs {
+			if l.LineType == "output" || l.LineType == "tool" || l.LineType == "error" {
+				t.Errorf("unexpected log type %q in conversation history", l.LineType)
+			}
+		}
+	})
+
+	t.Run("logs are ordered by ID ascending", func(t *testing.T) {
+		logs, err := db.GetConversationHistoryLogs(task.ID)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		for i := 1; i < len(logs); i++ {
+			if logs[i].ID < logs[i-1].ID {
+				t.Errorf("logs not in ascending order: ID %d before ID %d", logs[i-1].ID, logs[i].ID)
+			}
+		}
+	})
+}
+
+func TestHasContinuationMarker(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	db, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer db.Close()
+
+	if err := db.CreateProject(&Project{Name: "test", Path: tmpDir}); err != nil {
+		t.Fatalf("failed to create project: %v", err)
+	}
+
+	task := &Task{Title: "Test Task", Status: StatusBacklog, Project: "test"}
+	if err := db.CreateTask(task); err != nil {
+		t.Fatalf("failed to create task: %v", err)
+	}
+
+	t.Run("no continuation marker", func(t *testing.T) {
+		has, err := db.HasContinuationMarker(task.ID)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if has {
+			t.Error("expected no continuation marker")
+		}
+	})
+
+	// Add some logs without continuation marker
+	db.AppendTaskLog(task.ID, "system", "Starting task")
+	db.AppendTaskLog(task.ID, "output", "Some output")
+
+	t.Run("still no continuation marker", func(t *testing.T) {
+		has, err := db.HasContinuationMarker(task.ID)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if has {
+			t.Error("expected no continuation marker")
+		}
+	})
+
+	// Add continuation marker
+	db.AppendTaskLog(task.ID, "system", "--- Continuation ---")
+
+	t.Run("has continuation marker", func(t *testing.T) {
+		has, err := db.HasContinuationMarker(task.ID)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !has {
+			t.Error("expected continuation marker to be found")
+		}
+	})
+
+	// Test with different task (should not find markers from other task)
+	task2 := &Task{Title: "Other Task", Status: StatusBacklog, Project: "test"}
+	if err := db.CreateTask(task2); err != nil {
+		t.Fatalf("failed to create task: %v", err)
+	}
+
+	t.Run("different task has no marker", func(t *testing.T) {
+		has, err := db.HasContinuationMarker(task2.ID)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if has {
+			t.Error("expected no continuation marker for different task")
+		}
+	})
+}
