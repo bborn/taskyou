@@ -366,7 +366,7 @@ type AppModel struct {
 	prevStatuses map[int64]string
 	// Track tasks with active input notifications (for UI highlighting)
 	tasksNeedingInput map[int64]bool
-	// Cached executor pane content for blocked tasks (for quick preview)
+	// Cached executor prompt messages for blocked tasks (from DB hook logs)
 	executorPrompts map[int64]string
 	// Track tasks the user closed manually (suppress notification for these)
 	userClosedTaskIDs map[int64]bool
@@ -756,10 +756,6 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.notifyUntil = time.Now().Add(10 * time.Second)
 					m.notifyTaskID = t.ID
 					RingBell() // Ring terminal bell (writes to /dev/tty to bypass TUI)
-					// Mark task as needing input for kanban highlighting
-					m.tasksNeedingInput[t.ID] = true
-					// Capture executor pane content for preview
-					cmds = append(cmds, m.captureExecutorPrompt(t.ID))
 				} else if t.Status == db.StatusDone && db.IsInProgress(prevStatus) {
 					// Task completed - ring bell and show notification
 					m.notification = fmt.Sprintf("%s Task #%d complete: %s (g to jump)", IconDone(), t.ID, t.Title)
@@ -767,10 +763,14 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.notifyTaskID = t.ID
 					RingBell() // Ring terminal bell (writes to /dev/tty to bypass TUI)
 				}
-				// Clear needing input flag when task leaves blocked status
-				if prevStatus == db.StatusBlocked && t.Status != db.StatusBlocked {
-					delete(m.tasksNeedingInput, t.ID)
-					delete(m.executorPrompts, t.ID)
+				// On any status change, re-validate cached prompt state.
+				// Handles external approval (e.g. from tmux) where PreToolUse
+				// logs "Claude resumed working" and transitions to processing.
+				if m.tasksNeedingInput[t.ID] {
+					if m.latestPermissionPrompt(t.ID) == "" {
+						delete(m.tasksNeedingInput, t.ID)
+						delete(m.executorPrompts, t.ID)
+					}
 				}
 			}
 			m.prevStatuses[t.ID] = t.Status
@@ -781,6 +781,25 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if m.detailView != nil {
 					m.detailView.UpdateTask(t)
 				}
+			}
+		}
+
+		// Sync permission prompt state for all active tasks from DB hook logs.
+		// This is status-agnostic: detects pending prompts on any task, and
+		// clears stale entries when prompts are resolved. Only queries tasks
+		// not already cached, so cost is minimal after initial detection.
+		for _, t := range m.tasks {
+			if t.Status == db.StatusDone || t.Status == db.StatusBacklog {
+				delete(m.tasksNeedingInput, t.ID)
+				delete(m.executorPrompts, t.ID)
+				continue
+			}
+			if m.tasksNeedingInput[t.ID] {
+				continue // already detected, cleared by executorRespondedMsg or next status change
+			}
+			if prompt := m.latestPermissionPrompt(t.ID); prompt != "" {
+				m.tasksNeedingInput[t.ID] = true
+				m.executorPrompts[t.ID] = prompt
 			}
 		}
 
@@ -1030,13 +1049,6 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.notifyUntil = time.Now().Add(3 * time.Second)
 		}
 
-	case executorPromptMsg:
-		if msg.content != "" {
-			m.executorPrompts[msg.taskID] = msg.content
-		} else {
-			delete(m.executorPrompts, msg.taskID)
-		}
-
 	case executorRespondedMsg:
 		if msg.err != nil {
 			m.notification = fmt.Sprintf("%s Failed to %s: %s", IconBlocked(), msg.action, msg.err.Error())
@@ -1076,10 +1088,6 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 							m.notifyUntil = time.Now().Add(10 * time.Second)
 							m.notifyTaskID = event.TaskID
 							RingBell() // Ring terminal bell (writes to /dev/tty to bypass TUI)
-							// Mark task as needing input for kanban highlighting
-							m.tasksNeedingInput[event.TaskID] = true
-							// Immediately capture the executor pane content for the preview
-							cmds = append(cmds, m.captureExecutorPrompt(event.TaskID))
 						} else if event.Task.Status == db.StatusDone && db.IsInProgress(prevStatus) && !userClosed {
 							m.notification = fmt.Sprintf("✓ Task #%d complete: %s (g to jump)", event.TaskID, event.Task.Title)
 							m.notifyUntil = time.Now().Add(5 * time.Second)
@@ -1090,10 +1098,12 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 							m.notifyUntil = time.Now().Add(3 * time.Second)
 							m.notifyTaskID = event.TaskID
 						}
-						// Clear needing input flag when task leaves blocked status
-						if prevStatus == db.StatusBlocked && event.Task.Status != db.StatusBlocked {
-							delete(m.tasksNeedingInput, event.TaskID)
-							delete(m.executorPrompts, event.TaskID)
+						// Re-validate cached prompt state on any status change
+						if m.tasksNeedingInput[event.TaskID] {
+							if m.latestPermissionPrompt(event.TaskID) == "" {
+								delete(m.tasksNeedingInput, event.TaskID)
+								delete(m.executorPrompts, event.TaskID)
+							}
 						}
 						m.prevStatuses[event.TaskID] = event.Task.Status
 					}
@@ -1134,11 +1144,6 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				running[m.selectedTask.ID] = true
 			}
 			m.kanban.SetRunningProcesses(running)
-
-			// Capture executor pane content for selected blocked task needing input
-			if task := m.kanban.SelectedTask(); task != nil && m.tasksNeedingInput[task.ID] {
-				cmds = append(cmds, m.captureExecutorPrompt(task.ID))
-			}
 		}
 		cmds = append(cmds, m.tick())
 
@@ -1561,7 +1566,7 @@ func (m *AppModel) renderHelp() string {
 }
 
 // renderExecutorPromptPreview renders a compact preview of the executor's current prompt
-// for a blocked task that needs input. Shows the last few lines from the executor's tmux pane
+// for a blocked task that needs input. Shows the permission message from the hook log
 // with approve/deny hints.
 func (m *AppModel) renderExecutorPromptPreview(task *db.Task) string {
 	prompt := m.executorPrompts[task.ID]
@@ -1612,7 +1617,7 @@ func (m *AppModel) renderExecutorPromptPreview(task *db.Task) string {
 	return barStyle.Render(line)
 }
 
-// extractPromptLines extracts the last meaningful lines from tmux pane content.
+// extractPromptLines extracts the last meaningful lines from prompt content.
 // Strips empty lines, ANSI codes, and trims to fit the given width.
 func extractPromptLines(content string, maxWidth int) []string {
 	if content == "" {
@@ -3652,12 +3657,6 @@ func (m *AppModel) openBrowser(task *db.Task) tea.Cmd {
 	}
 }
 
-// executorPromptMsg is sent when executor pane content is captured.
-type executorPromptMsg struct {
-	taskID  int64
-	content string
-}
-
 // executorRespondedMsg is sent after approve/deny is sent to the executor.
 type executorRespondedMsg struct {
 	taskID int64
@@ -3689,12 +3688,30 @@ func (m *AppModel) denyExecutorPrompt(taskID int64) tea.Cmd {
 	}
 }
 
-// captureExecutorPrompt captures the last few lines from a task's executor pane.
-func (m *AppModel) captureExecutorPrompt(taskID int64) tea.Cmd {
-	return func() tea.Msg {
-		content := executor.CapturePaneContent(taskID, 8)
-		return executorPromptMsg{taskID: taskID, content: content}
+// latestPermissionPrompt checks whether a task has a pending permission prompt
+// by reading recent DB logs written by the notification hook. Returns the prompt
+// message if still pending, or "" if resolved (e.g. "Claude resumed working",
+// user approved/denied). This is status-agnostic — works for any active task.
+func (m *AppModel) latestPermissionPrompt(taskID int64) string {
+	logs, err := m.db.GetTaskLogs(taskID, 10)
+	if err != nil {
+		return ""
 	}
+	// Logs are in DESC order (most recent first).
+	// A pending prompt is only valid if no subsequent log indicates resolution.
+	for _, l := range logs {
+		switch {
+		case l.LineType == "system" && strings.HasPrefix(l.Content, "Waiting for permission"):
+			return l.Content
+		case l.LineType == "system" && strings.HasPrefix(l.Content, "Waiting for user input"):
+			return l.Content
+		case l.LineType == "system" && l.Content == "Claude resumed working":
+			return "" // prompt was resolved
+		case l.LineType == "user" && (strings.HasPrefix(l.Content, "Approved") || strings.HasPrefix(l.Content, "Denied")):
+			return "" // user already responded
+		}
+	}
+	return ""
 }
 
 // taskMovedMsg is returned when a task is moved to a different project.
