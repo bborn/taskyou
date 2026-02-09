@@ -596,6 +596,7 @@ func (m *AppModel) Init() tea.Cmd {
 // Update handles messages.
 func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
+	prevView := m.currentView
 
 	if sizeMsg, ok := msg.(tea.WindowSizeMsg); ok {
 		m.applyWindowSize(sizeMsg.Width, sizeMsg.Height)
@@ -764,6 +765,15 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.kanban.SetTasksNeedingInput(m.tasksNeedingInput)
 		m.kanban.SetBlockedByDeps(msg.blockedByDeps)
 
+		// Load cached PR info from database for instant display
+		for _, t := range m.tasks {
+			if t.PRInfoJSON != "" {
+				if info := github.UnmarshalPRInfo(t.PRInfoJSON); info != nil {
+					m.kanban.SetPRInfo(t.ID, info)
+				}
+			}
+		}
+
 		// Trigger initial PR refresh after first task load (subsequent refreshes via prRefreshTick)
 		if !m.initialPRRefreshDone {
 			m.initialPRRefreshDone = true
@@ -833,6 +843,9 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.detailView != nil && m.selectedTask != nil && m.selectedTask.ID == msg.taskID {
 				m.detailView.SetPRInfo(msg.info)
 			}
+			// Persist PR state to database for instant display on next startup
+			prJSON := github.MarshalPRInfo(msg.info)
+			m.db.UpdateTaskPRInfo(msg.taskID, msg.info.URL, msg.info.Number, prJSON)
 		}
 
 	case prBatchMsg:
@@ -844,14 +857,17 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if m.detailView != nil && m.selectedTask != nil && m.selectedTask.ID == result.taskID {
 					m.detailView.SetPRInfo(result.info)
 				}
+				// Persist PR state to database for instant display on next startup
+				prJSON := github.MarshalPRInfo(result.info)
+				m.db.UpdateTaskPRInfo(result.taskID, result.info.URL, result.info.Number, prJSON)
 			}
 		}
 
 	case prRefreshTickMsg:
-		// Periodically refresh PR info (every 30 seconds)
-		if m.currentView == ViewDashboard {
-			cmds = append(cmds, m.refreshAllPRs())
-		}
+		// Periodically refresh PR info (every 15 seconds)
+		// Always refresh regardless of view - PR state is persisted to DB
+		// so it stays current even when navigating between views
+		cmds = append(cmds, m.refreshAllPRs())
 		cmds = append(cmds, m.prRefreshTick())
 
 	case taskCreatedMsg:
@@ -1101,6 +1117,11 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				cmds = append(cmds, cmd)
 			}
 		}
+	}
+
+	// Trigger PR refresh when transitioning back to dashboard from another view
+	if m.currentView == ViewDashboard && prevView != ViewDashboard && m.initialPRRefreshDone {
+		cmds = append(cmds, m.refreshAllPRs())
 	}
 
 	// Dump debug state if enabled
@@ -3660,7 +3681,7 @@ func (m *AppModel) focusTick() tea.Cmd {
 }
 
 func (m *AppModel) prRefreshTick() tea.Cmd {
-	return tea.Tick(30*time.Second, func(t time.Time) tea.Msg {
+	return tea.Tick(15*time.Second, func(t time.Time) tea.Msg {
 		return prRefreshTickMsg(t)
 	})
 }

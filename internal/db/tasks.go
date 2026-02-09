@@ -28,6 +28,7 @@ type Task struct {
 	ShellPaneID     string // tmux pane ID (e.g., "%1235") for the shell pane
 	PRURL           string // Pull request URL (if associated with a PR)
 	PRNumber        int    // Pull request number (if associated with a PR)
+	PRInfoJSON      string // Cached PR state as JSON (state, checks, mergeable, etc.)
 	DangerousMode   bool   // Whether task is running in dangerous mode (--dangerously-skip-permissions)
 	Pinned          bool   // Whether the task is pinned to the top of its column
 	Tags            string // Comma-separated tags for categorization (e.g., "customer-support,email,influence-kit")
@@ -173,7 +174,7 @@ func (db *DB) GetTask(id int64) (*Task, error) {
 		       worktree_path, branch_name, port, claude_session_id,
 		       COALESCE(daemon_session, ''), COALESCE(tmux_window_id, ''),
 		       COALESCE(claude_pane_id, ''), COALESCE(shell_pane_id, ''),
-		       COALESCE(pr_url, ''), COALESCE(pr_number, 0),
+		       COALESCE(pr_url, ''), COALESCE(pr_number, 0), COALESCE(pr_info_json, ''),
 		       COALESCE(dangerous_mode, 0), COALESCE(pinned, 0), COALESCE(tags, ''),
 		       COALESCE(source_branch, ''), COALESCE(summary, ''),
 		       created_at, updated_at, started_at, completed_at,
@@ -185,7 +186,7 @@ func (db *DB) GetTask(id int64) (*Task, error) {
 		&t.ID, &t.Title, &t.Body, &t.Status, &t.Type, &t.Project, &t.Executor,
 		&t.WorktreePath, &t.BranchName, &t.Port, &t.ClaudeSessionID,
 		&t.DaemonSession, &t.TmuxWindowID, &t.ClaudePaneID, &t.ShellPaneID,
-		&t.PRURL, &t.PRNumber,
+		&t.PRURL, &t.PRNumber, &t.PRInfoJSON,
 		&t.DangerousMode, &t.Pinned, &t.Tags,
 		&t.SourceBranch, &t.Summary,
 		&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
@@ -218,7 +219,7 @@ func (db *DB) ListTasks(opts ListTasksOptions) ([]*Task, error) {
 		       worktree_path, branch_name, port, claude_session_id,
 		       COALESCE(daemon_session, ''), COALESCE(tmux_window_id, ''),
 		       COALESCE(claude_pane_id, ''), COALESCE(shell_pane_id, ''),
-		       COALESCE(pr_url, ''), COALESCE(pr_number, 0),
+		       COALESCE(pr_url, ''), COALESCE(pr_number, 0), COALESCE(pr_info_json, ''),
 		       COALESCE(dangerous_mode, 0), COALESCE(pinned, 0), COALESCE(tags, ''),
 		       COALESCE(source_branch, ''), COALESCE(summary, ''),
 		       created_at, updated_at, started_at, completed_at,
@@ -278,7 +279,7 @@ func (db *DB) ListTasks(opts ListTasksOptions) ([]*Task, error) {
 			&t.ID, &t.Title, &t.Body, &t.Status, &t.Type, &t.Project, &t.Executor,
 			&t.WorktreePath, &t.BranchName, &t.Port, &t.ClaudeSessionID,
 			&t.DaemonSession, &t.TmuxWindowID, &t.ClaudePaneID, &t.ShellPaneID,
-			&t.PRURL, &t.PRNumber,
+			&t.PRURL, &t.PRNumber, &t.PRInfoJSON,
 			&t.DangerousMode, &t.Pinned, &t.Tags,
 			&t.SourceBranch, &t.Summary,
 			&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
@@ -303,7 +304,7 @@ func (db *DB) GetMostRecentlyCreatedTask() (*Task, error) {
 		       worktree_path, branch_name, port, claude_session_id,
 		       COALESCE(daemon_session, ''), COALESCE(tmux_window_id, ''),
 		       COALESCE(claude_pane_id, ''), COALESCE(shell_pane_id, ''),
-		       COALESCE(pr_url, ''), COALESCE(pr_number, 0),
+		       COALESCE(pr_url, ''), COALESCE(pr_number, 0), COALESCE(pr_info_json, ''),
 		       COALESCE(dangerous_mode, 0), COALESCE(pinned, 0), COALESCE(tags, ''),
 		       COALESCE(source_branch, ''), COALESCE(summary, ''),
 		       created_at, updated_at, started_at, completed_at,
@@ -317,7 +318,7 @@ func (db *DB) GetMostRecentlyCreatedTask() (*Task, error) {
 		&t.ID, &t.Title, &t.Body, &t.Status, &t.Type, &t.Project, &t.Executor,
 		&t.WorktreePath, &t.BranchName, &t.Port, &t.ClaudeSessionID,
 		&t.DaemonSession, &t.TmuxWindowID, &t.ClaudePaneID, &t.ShellPaneID,
-		&t.PRURL, &t.PRNumber,
+		&t.PRURL, &t.PRNumber, &t.PRInfoJSON,
 		&t.DangerousMode, &t.Pinned, &t.Tags,
 		&t.SourceBranch, &t.Summary,
 		&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
@@ -346,7 +347,7 @@ func (db *DB) SearchTasks(query string, limit int) ([]*Task, error) {
 		       worktree_path, branch_name, port, claude_session_id,
 		       COALESCE(daemon_session, ''), COALESCE(tmux_window_id, ''),
 		       COALESCE(claude_pane_id, ''), COALESCE(shell_pane_id, ''),
-		       COALESCE(pr_url, ''), COALESCE(pr_number, 0),
+		       COALESCE(pr_url, ''), COALESCE(pr_number, 0), COALESCE(pr_info_json, ''),
 		       COALESCE(dangerous_mode, 0), COALESCE(pinned, 0), COALESCE(tags, ''),
 		       COALESCE(source_branch, ''), COALESCE(summary, ''),
 		       created_at, updated_at, started_at, completed_at,
@@ -379,7 +380,7 @@ func (db *DB) SearchTasks(query string, limit int) ([]*Task, error) {
 			&t.ID, &t.Title, &t.Body, &t.Status, &t.Type, &t.Project, &t.Executor,
 			&t.WorktreePath, &t.BranchName, &t.Port, &t.ClaudeSessionID,
 			&t.DaemonSession, &t.TmuxWindowID, &t.ClaudePaneID, &t.ShellPaneID,
-			&t.PRURL, &t.PRNumber,
+			&t.PRURL, &t.PRNumber, &t.PRInfoJSON,
 			&t.DangerousMode, &t.Pinned, &t.Tags,
 			&t.SourceBranch, &t.Summary,
 			&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
@@ -472,13 +473,13 @@ func (db *DB) UpdateTask(t *Task) error {
 		UPDATE tasks SET
 			title = ?, body = ?, status = ?, type = ?, project = ?, executor = ?,
 			worktree_path = ?, branch_name = ?, port = ?, claude_session_id = ?,
-			daemon_session = ?, pr_url = ?, pr_number = ?, dangerous_mode = ?,
+			daemon_session = ?, pr_url = ?, pr_number = ?, pr_info_json = ?, dangerous_mode = ?,
 			pinned = ?, tags = ?, source_branch = ?,
 			updated_at = CURRENT_TIMESTAMP
 		WHERE id = ?
 	`, t.Title, t.Body, t.Status, t.Type, t.Project, t.Executor,
 		t.WorktreePath, t.BranchName, t.Port, t.ClaudeSessionID,
-		t.DaemonSession, t.PRURL, t.PRNumber, t.DangerousMode,
+		t.DaemonSession, t.PRURL, t.PRNumber, t.PRInfoJSON, t.DangerousMode,
 		t.Pinned, t.Tags, t.SourceBranch, t.ID)
 	if err != nil {
 		return fmt.Errorf("update task: %w", err)
@@ -507,6 +508,19 @@ func (db *DB) UpdateTask(t *Task) error {
 		}
 	}
 
+	return nil
+}
+
+// UpdateTaskPRInfo updates only the PR-related fields for a task.
+// This is used to persist PR state from GitHub API responses without touching other fields.
+func (db *DB) UpdateTaskPRInfo(taskID int64, prURL string, prNumber int, prInfoJSON string) error {
+	_, err := db.Exec(`
+		UPDATE tasks SET pr_url = ?, pr_number = ?, pr_info_json = ?, updated_at = CURRENT_TIMESTAMP
+		WHERE id = ?
+	`, prURL, prNumber, prInfoJSON, taskID)
+	if err != nil {
+		return fmt.Errorf("update task pr info: %w", err)
+	}
 	return nil
 }
 
@@ -735,7 +749,7 @@ func (db *DB) GetNextQueuedTask() (*Task, error) {
 		       worktree_path, branch_name, port, claude_session_id,
 		       COALESCE(daemon_session, ''), COALESCE(tmux_window_id, ''),
 		       COALESCE(claude_pane_id, ''), COALESCE(shell_pane_id, ''),
-		       COALESCE(pr_url, ''), COALESCE(pr_number, 0),
+		       COALESCE(pr_url, ''), COALESCE(pr_number, 0), COALESCE(pr_info_json, ''),
 		       COALESCE(dangerous_mode, 0), COALESCE(pinned, 0), COALESCE(tags, ''),
 		       COALESCE(source_branch, ''), COALESCE(summary, ''),
 		       created_at, updated_at, started_at, completed_at,
@@ -750,7 +764,7 @@ func (db *DB) GetNextQueuedTask() (*Task, error) {
 		&t.ID, &t.Title, &t.Body, &t.Status, &t.Type, &t.Project, &t.Executor,
 		&t.WorktreePath, &t.BranchName, &t.Port, &t.ClaudeSessionID,
 		&t.DaemonSession, &t.TmuxWindowID, &t.ClaudePaneID, &t.ShellPaneID,
-		&t.PRURL, &t.PRNumber,
+		&t.PRURL, &t.PRNumber, &t.PRInfoJSON,
 		&t.DangerousMode, &t.Pinned, &t.Tags,
 		&t.SourceBranch, &t.Summary,
 		&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
@@ -773,7 +787,7 @@ func (db *DB) GetQueuedTasks() ([]*Task, error) {
 		       worktree_path, branch_name, port, claude_session_id,
 		       COALESCE(daemon_session, ''), COALESCE(tmux_window_id, ''),
 		       COALESCE(claude_pane_id, ''), COALESCE(shell_pane_id, ''),
-		       COALESCE(pr_url, ''), COALESCE(pr_number, 0),
+		       COALESCE(pr_url, ''), COALESCE(pr_number, 0), COALESCE(pr_info_json, ''),
 		       COALESCE(dangerous_mode, 0), COALESCE(pinned, 0), COALESCE(tags, ''),
 		       COALESCE(source_branch, ''), COALESCE(summary, ''),
 		       created_at, updated_at, started_at, completed_at,
@@ -796,7 +810,7 @@ func (db *DB) GetQueuedTasks() ([]*Task, error) {
 			&t.ID, &t.Title, &t.Body, &t.Status, &t.Type, &t.Project, &t.Executor,
 			&t.WorktreePath, &t.BranchName, &t.Port, &t.ClaudeSessionID,
 			&t.DaemonSession, &t.TmuxWindowID, &t.ClaudePaneID, &t.ShellPaneID,
-			&t.PRURL, &t.PRNumber,
+			&t.PRURL, &t.PRNumber, &t.PRInfoJSON,
 			&t.DangerousMode, &t.Pinned, &t.Tags,
 			&t.SourceBranch, &t.Summary,
 			&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
