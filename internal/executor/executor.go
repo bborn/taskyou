@@ -951,21 +951,15 @@ func (e *Executor) executeTask(ctx context.Context, task *db.Task) {
 		e.logLine(task.ID, "system", "Task waiting for input")
 		e.hooks.OnStatusChange(task, db.StatusBlocked, "Task waiting for input")
 	} else if currentStatus == db.StatusDone {
-		// Hooks/MCP already marked as done - respect that
+		// If somehow already marked as done (e.g. by human), respect that
 		e.logLine(task.ID, "system", "Task completed")
 		e.hooks.OnStatusChange(task, db.StatusDone, "Task completed")
-
-		// NOTE: We intentionally do NOT kill the executor here - keep it running so user can
-		// easily retry/resume the task. Old done task executors are cleaned up after 2h
-		// by the cleanupOrphanedClaudes routine.
 	} else if result.Success {
-		e.updateStatus(task.ID, db.StatusDone)
-		e.logLine(task.ID, "system", "Task completed successfully")
-		e.hooks.OnStatusChange(task, db.StatusDone, "Task completed successfully")
-
-		// NOTE: We intentionally do NOT kill the executor here - keep it running so user can
-		// easily retry/resume the task. Old done task executors are cleaned up after 2h
-		// by the cleanupOrphanedClaudes routine.
+		// Agent finished successfully - move to backlog for human review
+		// Only humans should mark tasks as done
+		e.updateStatus(task.ID, db.StatusBacklog)
+		e.logLine(task.ID, "system", "Agent finished - awaiting human review to close")
+		e.hooks.OnStatusChange(task, db.StatusBacklog, "Agent finished - awaiting human review to close")
 	} else if result.NeedsInput {
 		e.updateStatus(task.ID, db.StatusBlocked)
 		// Log the question with special type so UI can display it

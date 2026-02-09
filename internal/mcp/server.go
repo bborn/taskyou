@@ -329,20 +329,17 @@ func (s *Server) handleToolCall(id interface{}, params *toolCallParams) {
 			}
 		}
 
-		// Log the completion
+		// Log the completion summary (but don't move to done - only humans close tasks)
 		s.db.AppendTaskLog(s.taskID, "system", fmt.Sprintf("Task completed: %s", summary))
 
-		// Update task status
-		s.db.UpdateTaskStatus(s.taskID, db.StatusDone)
-
-		// Trigger callback
+		// Trigger callback (signals the agent is done, but doesn't change status to done)
 		if s.onComplete != nil {
 			s.onComplete()
 		}
 
 		s.sendResult(id, toolCallResult{
 			Content: []contentBlock{
-				{Type: "text", Text: "Task marked as complete." + contextReminder},
+				{Type: "text", Text: "Task summary recorded. A human will review and close this task." + contextReminder},
 			},
 		})
 
