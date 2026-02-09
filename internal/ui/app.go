@@ -1075,7 +1075,9 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		// Refresh detail view if active (for logs which may update frequently)
 		if m.currentView == ViewDetail && m.detailView != nil {
-			m.detailView.Refresh()
+			if cmd := m.detailView.Refresh(); cmd != nil {
+				cmds = append(cmds, cmd)
+			}
 		}
 		// Poll database for task changes (hooks run in separate process)
 		if m.currentView == ViewDashboard && !m.loading {
