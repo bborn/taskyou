@@ -1616,7 +1616,7 @@ func stripAnsiCodes(s string) string {
 			if i < len(s) && s[i] == '[' {
 				i++
 				// Skip until we hit a letter (the terminator)
-				for i < len(s) && !((s[i] >= 'A' && s[i] <= 'Z') || (s[i] >= 'a' && s[i] <= 'z')) {
+				for i < len(s) && (s[i] < 'A' || s[i] > 'Z') && (s[i] < 'a' || s[i] > 'z') {
 					i++
 				}
 				if i < len(s) {
