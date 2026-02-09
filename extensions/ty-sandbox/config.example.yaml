@@ -1,0 +1,15 @@
+# ty-sandbox configuration
+#
+# All values can also be set via flags or environment variables.
+
+# Listen address
+addr: ":8080"
+
+# Bearer token for API authentication (env: SANDBOX_AUTH_TOKEN)
+# auth_token: "your-secret-token"
+
+# Default working directory for agent sessions (env: SANDBOX_WORK_DIR)
+# work_dir: "/workspace"
+
+# Path to ty CLI for TaskYou integration (auto-detected if on PATH)
+# ty_path: "/usr/local/bin/ty"
