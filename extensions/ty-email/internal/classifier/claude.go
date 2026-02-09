@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os/exec"
 	"strings"
 
@@ -39,7 +40,7 @@ func NewClaudeClassifier(cfg *Config) (*ClaudeClassifier, error) {
 
 	model := cfg.Model
 	if model == "" {
-		model = "claude-sonnet-4-20250514"
+		model = "claude-haiku-4-5-20251001"
 	}
 
 	return &ClaudeClassifier{
@@ -57,17 +58,32 @@ func (c *ClaudeClassifier) IsAvailable() bool {
 }
 
 func (c *ClaudeClassifier) Classify(ctx context.Context, email *adapter.Email, tasks []Task, threadTaskID *int64) (*Action, error) {
-	prompt := c.buildPrompt(email, tasks, threadTaskID)
+	// Limit task context to avoid excessive input tokens
+	limitedTasks := tasks
+	if len(limitedTasks) > 10 {
+		limitedTasks = limitedTasks[:10]
+	}
+
+	prompt := c.buildPrompt(email, limitedTasks, threadTaskID)
 
 	resp, err := c.client.Messages.New(ctx, anthropic.MessageNewParams{
 		Model:     anthropic.F(c.model),
-		MaxTokens: anthropic.Int(1024),
+		MaxTokens: anthropic.Int(256),
 		Messages: anthropic.F([]anthropic.MessageParam{
 			anthropic.NewUserMessage(anthropic.NewTextBlock(prompt)),
 		}),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("claude API error: %w", err)
+	}
+
+	// Log token usage
+	if resp.Usage.InputTokens > 0 || resp.Usage.OutputTokens > 0 {
+		slog.Info("classifier token usage",
+			"model", c.model,
+			"input_tokens", resp.Usage.InputTokens,
+			"output_tokens", resp.Usage.OutputTokens,
+		)
 	}
 
 	// Extract text response
