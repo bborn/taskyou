@@ -66,10 +66,11 @@ func runInit(cmd *cobra.Command, args []string) error {
 	}
 
 	err := huh.NewSelect[string]().
-		Title("How will you receive emails?").
+		Title("How will you receive messages?").
 		Options(
 			huh.NewOption("Gmail", "gmail"),
 			huh.NewOption("Other IMAP (Fastmail, ProtonMail, etc.)", "imap"),
+			huh.NewOption("SMS via Twilio", "twilio"),
 		).
 		Value(&emailProvider).
 		Run()
@@ -77,19 +78,26 @@ func runInit(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	// Both use IMAP adapter, Gmail just has pre-filled servers
-	cfg.Adapter.Type = "imap"
-
-	if emailProvider == "gmail" {
-		if err := configureGmailIMAP(cfg, home); err != nil {
+	if emailProvider == "twilio" {
+		cfg.Adapter.Type = "twilio"
+		if err := configureTwilio(cfg); err != nil {
 			return err
 		}
 	} else {
-		if err := configureIMAP(cfg, home); err != nil {
-			return err
-		}
-		if err := configureSMTP(cfg); err != nil {
-			return err
+		// Both use IMAP adapter, Gmail just has pre-filled servers
+		cfg.Adapter.Type = "imap"
+
+		if emailProvider == "gmail" {
+			if err := configureGmailIMAP(cfg, home); err != nil {
+				return err
+			}
+		} else {
+			if err := configureIMAP(cfg, home); err != nil {
+				return err
+			}
+			if err := configureSMTP(cfg); err != nil {
+				return err
+			}
 		}
 	}
 
@@ -352,6 +360,127 @@ Note: ty-email replies will appear in your Inbox (not the ty-email label).
 	cfg.Security.AllowedSenders = []string{username}
 
 	fmt.Println(successStyle.Render("\n✓ Gmail configured (only emails from " + username + " will be processed)"))
+
+	return nil
+}
+
+func configureTwilio(cfg *Config) error {
+	fmt.Println(titleStyle.Render("\n📱 Twilio SMS"))
+
+	if cfg.Adapter.Twilio == nil {
+		cfg.Adapter.Twilio = &adapter.TwilioConfig{}
+	}
+
+	accountSIDCmd := cfg.Adapter.Twilio.AccountSIDCmd
+	authTokenCmd := cfg.Adapter.Twilio.AuthTokenCmd
+	phoneNumber := cfg.Adapter.Twilio.PhoneNumber
+	webhookListen := cfg.Adapter.Twilio.WebhookListen
+	if webhookListen == "" {
+		webhookListen = ":8080"
+	}
+
+	form := huh.NewForm(
+		huh.NewGroup(
+			huh.NewInput().
+				Title("Account SID Command").
+				Description("Command to retrieve your Twilio Account SID").
+				Placeholder("op read 'op://Private/Twilio/account_sid'").
+				Value(&accountSIDCmd).
+				Validate(func(s string) error {
+					if s == "" {
+						return fmt.Errorf("account SID command is required")
+					}
+					return nil
+				}),
+
+			huh.NewInput().
+				Title("Auth Token Command").
+				Description("Command to retrieve your Twilio Auth Token").
+				Placeholder("op read 'op://Private/Twilio/auth_token'").
+				Value(&authTokenCmd).
+				Validate(func(s string) error {
+					if s == "" {
+						return fmt.Errorf("auth token command is required")
+					}
+					return nil
+				}),
+
+			huh.NewInput().
+				Title("Twilio Phone Number").
+				Description("Your Twilio phone number (e.g., +15551234567)").
+				Value(&phoneNumber).
+				Validate(func(s string) error {
+					if s == "" || !strings.HasPrefix(s, "+") {
+						return fmt.Errorf("enter a phone number starting with + (e.g., +15551234567)")
+					}
+					return nil
+				}),
+
+			huh.NewInput().
+				Title("Webhook Listen Address").
+				Description("Local address for inbound SMS webhook").
+				Value(&webhookListen),
+		),
+	)
+
+	if err := form.Run(); err != nil {
+		return err
+	}
+
+	// Test Account SID command
+	fmt.Print("Testing Account SID command... ")
+	out, err := exec.Command("sh", "-c", accountSIDCmd).Output()
+	if err != nil {
+		fmt.Println(errorStyle.Render("FAILED: " + err.Error()))
+		return fmt.Errorf("account SID command failed - please check and re-run init")
+	} else if len(strings.TrimSpace(string(out))) == 0 {
+		fmt.Println(errorStyle.Render("FAILED: command returned empty"))
+		return fmt.Errorf("account SID command returned empty - please check and re-run init")
+	}
+	fmt.Println(successStyle.Render("OK"))
+
+	// Test Auth Token command
+	fmt.Print("Testing Auth Token command... ")
+	out, err = exec.Command("sh", "-c", authTokenCmd).Output()
+	if err != nil {
+		fmt.Println(errorStyle.Render("FAILED: " + err.Error()))
+		return fmt.Errorf("auth token command failed - please check and re-run init")
+	} else if len(strings.TrimSpace(string(out))) == 0 {
+		fmt.Println(errorStyle.Render("FAILED: command returned empty"))
+		return fmt.Errorf("auth token command returned empty - please check and re-run init")
+	}
+	fmt.Println(successStyle.Render("OK"))
+
+	cfg.Adapter.Twilio.AccountSIDCmd = accountSIDCmd
+	cfg.Adapter.Twilio.AuthTokenCmd = authTokenCmd
+	cfg.Adapter.Twilio.PhoneNumber = phoneNumber
+	cfg.Adapter.Twilio.WebhookListen = webhookListen
+	cfg.Adapter.Twilio.WebhookPath = "/sms"
+
+	// Security - add a prompt for allowed senders
+	fmt.Println(infoStyle.Render("\nFor security, only SMS from specific phone numbers will be processed."))
+
+	var allowedSender string
+	err = huh.NewInput().
+		Title("Your Phone Number").
+		Description("SMS from this number will be processed (e.g., +15559876543)").
+		Value(&allowedSender).
+		Validate(func(s string) error {
+			if s == "" || !strings.HasPrefix(s, "+") {
+				return fmt.Errorf("enter a phone number starting with +")
+			}
+			return nil
+		}).
+		Run()
+	if err != nil {
+		return err
+	}
+
+	cfg.Security.AllowedSenders = []string{allowedSender}
+
+	fmt.Println(successStyle.Render("\n✓ Twilio configured (only SMS from " + allowedSender + " will be processed)"))
+	fmt.Println(infoStyle.Render("\nNote: Configure your Twilio number's webhook URL to point to this server."))
+	fmt.Println(infoStyle.Render("  Webhook URL: http://your-server" + webhookListen + "/sms"))
 
 	return nil
 }

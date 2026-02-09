@@ -63,11 +63,12 @@ type Adapter interface {
 
 // Config holds adapter configuration.
 type Config struct {
-	Type string `yaml:"type"` // "gmail", "imap", "webhook"
+	Type string `yaml:"type"` // "gmail", "imap", "webhook", "twilio"
 
 	Gmail   *GmailConfig   `yaml:"gmail,omitempty"`
 	IMAP    *IMAPConfig    `yaml:"imap,omitempty"`
 	Webhook *WebhookConfig `yaml:"webhook,omitempty"`
+	Twilio  *TwilioConfig  `yaml:"twilio,omitempty"`
 }
 
 // GmailConfig holds Gmail OAuth configuration.
