@@ -1338,6 +1338,244 @@ func TestSpotlightSync(t *testing.T) {
 	}
 }
 
+// callTool is a helper to make a tool call and return the response.
+func callTool(t *testing.T, database *db.DB, taskID int64, toolName string, args map[string]interface{}) jsonRPCResponse {
+	t.Helper()
+	request := map[string]interface{}{
+		"jsonrpc": "2.0",
+		"id":      1,
+		"method":  "tools/call",
+		"params": map[string]interface{}{
+			"name":      toolName,
+			"arguments": args,
+		},
+	}
+	reqBytes, _ := json.Marshal(request)
+	reqBytes = append(reqBytes, '\n')
+
+	server, output := testServer(database, taskID, string(reqBytes))
+	server.Run()
+
+	var resp jsonRPCResponse
+	if err := json.Unmarshal(output.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to parse response: %v", err)
+	}
+	return resp
+}
+
+func TestOrchestrationCreateSubtask(t *testing.T) {
+	database := testDB(t)
+	task := createTestTask(t, database)
+
+	resp := callTool(t, database, task.ID, "taskyou_create_subtask", map[string]interface{}{
+		"title":  "Build the frontend",
+		"body":   "Create the React components",
+		"status": "backlog",
+	})
+
+	if resp.Error != nil {
+		t.Fatalf("unexpected error: %s", resp.Error.Message)
+	}
+
+	// Verify subtask was created with correct parent
+	subtasks, err := database.GetSubtasks(task.ID)
+	if err != nil {
+		t.Fatalf("failed to get subtasks: %v", err)
+	}
+	if len(subtasks) != 1 {
+		t.Fatalf("expected 1 subtask, got %d", len(subtasks))
+	}
+	if subtasks[0].Title != "Build the frontend" {
+		t.Errorf("expected title 'Build the frontend', got %q", subtasks[0].Title)
+	}
+	if subtasks[0].ParentID == nil || *subtasks[0].ParentID != task.ID {
+		t.Error("subtask should have parent_id pointing to the current task")
+	}
+	if subtasks[0].Project != task.Project {
+		t.Errorf("subtask should inherit project %q, got %q", task.Project, subtasks[0].Project)
+	}
+}
+
+func TestOrchestrationCreateSubtaskWithDependencies(t *testing.T) {
+	database := testDB(t)
+	task := createTestTask(t, database)
+
+	// Create first subtask
+	resp1 := callTool(t, database, task.ID, "taskyou_create_subtask", map[string]interface{}{
+		"title":  "Step 1: Design",
+		"status": "queued",
+	})
+	if resp1.Error != nil {
+		t.Fatalf("unexpected error creating subtask 1: %s", resp1.Error.Message)
+	}
+
+	// Get the first subtask's ID
+	subtasks, _ := database.GetSubtasks(task.ID)
+	if len(subtasks) != 1 {
+		t.Fatalf("expected 1 subtask, got %d", len(subtasks))
+	}
+	sub1ID := subtasks[0].ID
+
+	// Create second subtask that depends on the first
+	resp2 := callTool(t, database, task.ID, "taskyou_create_subtask", map[string]interface{}{
+		"title":      "Step 2: Implement",
+		"status":     "backlog",
+		"depends_on": []interface{}{float64(sub1ID)},
+	})
+	if resp2.Error != nil {
+		t.Fatalf("unexpected error creating subtask 2: %s", resp2.Error.Message)
+	}
+
+	// Verify dependency was created
+	subtasks, _ = database.GetSubtasks(task.ID)
+	if len(subtasks) != 2 {
+		t.Fatalf("expected 2 subtasks, got %d", len(subtasks))
+	}
+
+	blockers, err := database.GetBlockers(subtasks[1].ID)
+	if err != nil {
+		t.Fatalf("failed to get blockers: %v", err)
+	}
+	if len(blockers) != 1 {
+		t.Errorf("expected 1 blocker, got %d", len(blockers))
+	}
+}
+
+func TestOrchestrationWorkflowStatus(t *testing.T) {
+	database := testDB(t)
+	task := createTestTask(t, database)
+
+	// Create some subtasks
+	parentID := task.ID
+	sub1 := &db.Task{Title: "Sub 1", Status: db.StatusDone, Project: task.Project, ParentID: &parentID}
+	sub2 := &db.Task{Title: "Sub 2", Status: db.StatusProcessing, Project: task.Project, ParentID: &parentID}
+	database.CreateTask(sub1)
+	database.CreateTask(sub2)
+
+	resp := callTool(t, database, task.ID, "taskyou_get_workflow_status", map[string]interface{}{})
+	if resp.Error != nil {
+		t.Fatalf("unexpected error: %s", resp.Error.Message)
+	}
+
+	// Check response contains status info
+	result, ok := resp.Result.(map[string]interface{})
+	if !ok {
+		t.Fatal("expected result to be a map")
+	}
+	content, ok := result["content"].([]interface{})
+	if !ok || len(content) == 0 {
+		t.Fatal("expected content array")
+	}
+	block := content[0].(map[string]interface{})
+	text := block["text"].(string)
+
+	if !strings.Contains(text, "Total subtasks") {
+		t.Error("expected workflow status to contain total subtasks")
+	}
+	if !strings.Contains(text, "Done") {
+		t.Error("expected workflow status to contain done count")
+	}
+}
+
+func TestOrchestrationSetAndGetTaskOutput(t *testing.T) {
+	database := testDB(t)
+	task := createTestTask(t, database)
+
+	// Set output
+	resp := callTool(t, database, task.ID, "taskyou_set_task_output", map[string]interface{}{
+		"output": "API endpoints: /users, /posts, /comments",
+	})
+	if resp.Error != nil {
+		t.Fatalf("unexpected error setting output: %s", resp.Error.Message)
+	}
+
+	// Create another task in the same project to read the output
+	task2 := &db.Task{Title: "Reader task", Status: db.StatusProcessing, Project: task.Project}
+	database.CreateTask(task2)
+
+	// Get output from the first task
+	resp = callTool(t, database, task2.ID, "taskyou_get_task_output", map[string]interface{}{
+		"task_id": float64(task.ID),
+	})
+	if resp.Error != nil {
+		t.Fatalf("unexpected error getting output: %s", resp.Error.Message)
+	}
+
+	result, ok := resp.Result.(map[string]interface{})
+	if !ok {
+		t.Fatal("expected result to be a map")
+	}
+	content := result["content"].([]interface{})
+	block := content[0].(map[string]interface{})
+	text := block["text"].(string)
+
+	if !strings.Contains(text, "API endpoints") {
+		t.Error("expected output to contain the stored text")
+	}
+}
+
+func TestOrchestrationGetTaskOutputProjectIsolation(t *testing.T) {
+	database := testDB(t)
+	task := createTestTask(t, database)
+
+	// Create another project and task
+	database.CreateProject(&db.Project{Name: "other-project", Path: "/tmp/other"})
+	otherTask := &db.Task{Title: "Other task", Status: db.StatusProcessing, Project: "other-project"}
+	database.CreateTask(otherTask)
+	database.SetTaskOutput(otherTask.ID, "secret data")
+
+	// Try to read the other project's task output - should fail
+	resp := callTool(t, database, task.ID, "taskyou_get_task_output", map[string]interface{}{
+		"task_id": float64(otherTask.ID),
+	})
+	if resp.Error == nil {
+		t.Error("expected error when accessing task from different project")
+	}
+}
+
+func TestOrchestrationToolsInToolsList(t *testing.T) {
+	database := testDB(t)
+	task := createTestTask(t, database)
+
+	request := map[string]interface{}{
+		"jsonrpc": "2.0",
+		"id":      1,
+		"method":  "tools/list",
+	}
+	reqBytes, _ := json.Marshal(request)
+	reqBytes = append(reqBytes, '\n')
+
+	server, output := testServer(database, task.ID, string(reqBytes))
+	server.Run()
+
+	var resp jsonRPCResponse
+	json.Unmarshal(output.Bytes(), &resp)
+
+	result := resp.Result.(map[string]interface{})
+	tools := result["tools"].([]interface{})
+
+	expectedTools := map[string]bool{
+		"taskyou_create_subtask":     false,
+		"taskyou_get_workflow_status": false,
+		"taskyou_set_task_output":    false,
+		"taskyou_get_task_output":    false,
+	}
+
+	for _, toolI := range tools {
+		tool := toolI.(map[string]interface{})
+		name := tool["name"].(string)
+		if _, ok := expectedTools[name]; ok {
+			expectedTools[name] = true
+		}
+	}
+
+	for name, found := range expectedTools {
+		if !found {
+			t.Errorf("orchestration tool %q not found in tools list", name)
+		}
+	}
+}
+
 // runGit is a helper to run git commands in tests
 func runGit(t *testing.T, dir string, args ...string) {
 	t.Helper()

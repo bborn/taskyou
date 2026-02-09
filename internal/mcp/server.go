@@ -297,6 +297,74 @@ func (s *Server) handleRequest(req *jsonRPCRequest) {
 						"required": []string{"action"},
 					},
 				},
+				// Orchestration tools for long-running task workflows
+				{
+					Name:        "taskyou_create_subtask",
+					Description: "Create a subtask of the current task for orchestrating large workflows. Subtasks execute independently and the parent task auto-completes when all subtasks finish. Use this to decompose complex work into parallel or sequential steps. Subtasks can be chained with dependencies using 'depends_on' to create sequential workflows.",
+					InputSchema: map[string]interface{}{
+						"type": "object",
+						"properties": map[string]interface{}{
+							"title": map[string]interface{}{
+								"type":        "string",
+								"description": "Title of the subtask",
+							},
+							"body": map[string]interface{}{
+								"type":        "string",
+								"description": "Detailed description and instructions for the subtask",
+							},
+							"type": map[string]interface{}{
+								"type":        "string",
+								"description": "Task type (code, writing, thinking). Defaults to parent's type.",
+							},
+							"status": map[string]interface{}{
+								"type":        "string",
+								"description": "Initial status: 'backlog' (default) or 'queued' (starts immediately)",
+							},
+							"depends_on": map[string]interface{}{
+								"type":        "array",
+								"items":       map[string]interface{}{"type": "integer"},
+								"description": "List of subtask IDs that must complete before this one starts. Creates blocking dependencies with auto-queue.",
+							},
+						},
+						"required": []string{"title"},
+					},
+				},
+				{
+					Name:        "taskyou_get_workflow_status",
+					Description: "Get the overall progress of the current task's workflow (subtask completion status). Shows how many subtasks are pending, processing, blocked, and done. Use this to monitor orchestration progress.",
+					InputSchema: map[string]interface{}{
+						"type":       "object",
+						"properties": map[string]interface{}{},
+					},
+				},
+				{
+					Name:        "taskyou_set_task_output",
+					Description: "Store output/results from this task for use by downstream tasks or the parent workflow. Use this to pass context, data, or results to other tasks in an orchestration workflow.",
+					InputSchema: map[string]interface{}{
+						"type": "object",
+						"properties": map[string]interface{}{
+							"output": map[string]interface{}{
+								"type":        "string",
+								"description": "The output/results to store. This will be available to downstream tasks and the parent task.",
+							},
+						},
+						"required": []string{"output"},
+					},
+				},
+				{
+					Name:        "taskyou_get_task_output",
+					Description: "Read the stored output from another task. Use this to get results from upstream tasks in an orchestration workflow. Only works for tasks in the same project.",
+					InputSchema: map[string]interface{}{
+						"type": "object",
+						"properties": map[string]interface{}{
+							"task_id": map[string]interface{}{
+								"type":        "integer",
+								"description": "The ID of the task whose output to read",
+							},
+						},
+						"required": []string{"task_id"},
+					},
+				},
 			},
 		})
 
@@ -739,6 +807,218 @@ This saves future tasks from re-exploring the codebase.`},
 		s.sendResult(id, toolCallResult{
 			Content: []contentBlock{
 				{Type: "text", Text: result},
+			},
+		})
+
+	case "taskyou_create_subtask":
+		title, _ := params.Arguments["title"].(string)
+		if title == "" {
+			s.sendError(id, -32602, "title is required")
+			return
+		}
+		body, _ := params.Arguments["body"].(string)
+		taskType, _ := params.Arguments["type"].(string)
+		status, _ := params.Arguments["status"].(string)
+
+		// Get current task for defaults
+		currentTask, err := s.db.GetTask(s.taskID)
+		if err != nil || currentTask == nil {
+			s.sendError(id, -32603, "Failed to get current task")
+			return
+		}
+
+		// Default type to parent's type
+		if taskType == "" {
+			taskType = currentTask.Type
+		}
+
+		if status == "" {
+			status = db.StatusBacklog
+		}
+
+		parentID := s.taskID
+		newTask := &db.Task{
+			Title:    title,
+			Body:     body,
+			Project:  currentTask.Project,
+			Type:     taskType,
+			Status:   status,
+			ParentID: &parentID,
+		}
+
+		if err := s.db.CreateTask(newTask); err != nil {
+			s.sendError(id, -32603, fmt.Sprintf("Failed to create subtask: %v", err))
+			return
+		}
+
+		// Handle dependencies (depends_on)
+		if deps, ok := params.Arguments["depends_on"].([]interface{}); ok && len(deps) > 0 {
+			for _, dep := range deps {
+				if depID, ok := dep.(float64); ok {
+					if err := s.db.AddDependency(int64(depID), newTask.ID, true); err != nil {
+						// Log but don't fail - the subtask was already created
+						s.db.AppendTaskLog(s.taskID, "system", fmt.Sprintf("Warning: failed to add dependency %d -> #%d: %v", int64(depID), newTask.ID, err))
+					}
+				}
+			}
+		}
+
+		s.db.AppendTaskLog(s.taskID, "system", fmt.Sprintf("Created subtask #%d: %s", newTask.ID, newTask.Title))
+
+		s.sendResult(id, toolCallResult{
+			Content: []contentBlock{
+				{Type: "text", Text: fmt.Sprintf("Created subtask #%d: %s (status: %s, parent: #%d)", newTask.ID, newTask.Title, status, s.taskID)},
+			},
+		})
+
+	case "taskyou_get_workflow_status":
+		// Get workflow status for the current task (as parent)
+		status, err := s.db.GetWorkflowStatus(s.taskID)
+		if err != nil {
+			s.sendError(id, -32603, fmt.Sprintf("Failed to get workflow status: %v", err))
+			return
+		}
+
+		if status.Total == 0 {
+			// Check if current task is itself a subtask and report parent's workflow status
+			currentTask, err := s.db.GetTask(s.taskID)
+			if err == nil && currentTask != nil && currentTask.ParentID != nil {
+				status, err = s.db.GetWorkflowStatus(*currentTask.ParentID)
+				if err != nil {
+					s.sendError(id, -32603, fmt.Sprintf("Failed to get parent workflow status: %v", err))
+					return
+				}
+			}
+		}
+
+		if status.Total == 0 {
+			s.sendResult(id, toolCallResult{
+				Content: []contentBlock{
+					{Type: "text", Text: "No subtasks found. Use taskyou_create_subtask to decompose this task into a workflow."},
+				},
+			})
+			return
+		}
+
+		var sb strings.Builder
+		sb.WriteString(fmt.Sprintf("## Workflow Status: %s\n\n", status.ParentTitle))
+		sb.WriteString(fmt.Sprintf("**Total subtasks:** %d\n", status.Total))
+		sb.WriteString(fmt.Sprintf("**Done:** %d\n", status.Done))
+		sb.WriteString(fmt.Sprintf("**Processing:** %d\n", status.Processing))
+		sb.WriteString(fmt.Sprintf("**Pending:** %d\n", status.Pending))
+		sb.WriteString(fmt.Sprintf("**Blocked:** %d\n", status.Blocked))
+		if status.Archived > 0 {
+			sb.WriteString(fmt.Sprintf("**Archived:** %d\n", status.Archived))
+		}
+
+		progress := 0
+		if status.Total > 0 {
+			progress = (status.Done + status.Archived) * 100 / status.Total
+		}
+		sb.WriteString(fmt.Sprintf("\n**Progress:** %d%%\n", progress))
+
+		if status.IsComplete {
+			sb.WriteString("\n**All subtasks are complete!**\n")
+		}
+
+		// List individual subtasks
+		subtasks, err := s.db.GetSubtasks(status.ParentID)
+		if err == nil && len(subtasks) > 0 {
+			sb.WriteString("\n### Subtasks:\n")
+			for _, st := range subtasks {
+				statusIcon := "⏳"
+				switch st.Status {
+				case db.StatusDone:
+					statusIcon = "✅"
+				case db.StatusProcessing:
+					statusIcon = "🔄"
+				case db.StatusBlocked:
+					statusIcon = "🚫"
+				case db.StatusQueued:
+					statusIcon = "📋"
+				case db.StatusArchived:
+					statusIcon = "📦"
+				}
+				sb.WriteString(fmt.Sprintf("- %s #%d: %s (%s)\n", statusIcon, st.ID, st.Title, st.Status))
+			}
+		}
+
+		s.sendResult(id, toolCallResult{
+			Content: []contentBlock{
+				{Type: "text", Text: sb.String()},
+			},
+		})
+
+	case "taskyou_set_task_output":
+		output, _ := params.Arguments["output"].(string)
+		if output == "" {
+			s.sendError(id, -32602, "output is required")
+			return
+		}
+
+		if err := s.db.SetTaskOutput(s.taskID, output); err != nil {
+			s.sendError(id, -32603, fmt.Sprintf("Failed to set task output: %v", err))
+			return
+		}
+
+		s.db.AppendTaskLog(s.taskID, "system", fmt.Sprintf("Task output stored (%d bytes)", len(output)))
+
+		s.sendResult(id, toolCallResult{
+			Content: []contentBlock{
+				{Type: "text", Text: fmt.Sprintf("Output stored for task #%d (%d bytes). This will be available to downstream tasks and the parent workflow.", s.taskID, len(output))},
+			},
+		})
+
+	case "taskyou_get_task_output":
+		taskIDFloat, ok := params.Arguments["task_id"].(float64)
+		if !ok {
+			s.sendError(id, -32602, "task_id is required")
+			return
+		}
+		targetTaskID := int64(taskIDFloat)
+
+		// Get current task for project access control
+		currentTask, err := s.db.GetTask(s.taskID)
+		if err != nil || currentTask == nil {
+			s.sendError(id, -32603, "Failed to get current task")
+			return
+		}
+
+		// Get target task
+		targetTask, err := s.db.GetTask(targetTaskID)
+		if err != nil {
+			s.sendError(id, -32603, fmt.Sprintf("Failed to get task: %v", err))
+			return
+		}
+		if targetTask == nil {
+			s.sendError(id, -32602, fmt.Sprintf("Task #%d not found", targetTaskID))
+			return
+		}
+
+		// Enforce project isolation
+		if targetTask.Project != currentTask.Project {
+			s.sendError(id, -32602, fmt.Sprintf("Task #%d is in a different project and cannot be accessed", targetTaskID))
+			return
+		}
+
+		output, err := s.db.GetTaskOutput(targetTaskID)
+		if err != nil {
+			s.sendError(id, -32603, fmt.Sprintf("Failed to get task output: %v", err))
+			return
+		}
+
+		if output == "" {
+			s.sendResult(id, toolCallResult{
+				Content: []contentBlock{
+					{Type: "text", Text: fmt.Sprintf("Task #%d (%s) has no stored output.", targetTaskID, targetTask.Title)},
+				},
+			})
+			return
+		}
+
+		s.sendResult(id, toolCallResult{
+			Content: []contentBlock{
+				{Type: "text", Text: fmt.Sprintf("## Output from Task #%d: %s\n\n%s", targetTaskID, targetTask.Title, output)},
 			},
 		})
 

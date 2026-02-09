@@ -110,6 +110,7 @@ func (db *DB) GetBlockers(taskID int64) ([]*Task, error) {
 		       COALESCE(t.claude_pane_id, ''), COALESCE(t.shell_pane_id, ''),
 		       COALESCE(t.pr_url, ''), COALESCE(t.pr_number, 0),
 		       COALESCE(t.dangerous_mode, 0), COALESCE(t.pinned, 0), COALESCE(t.tags, ''), COALESCE(t.summary, ''),
+		       t.parent_id, COALESCE(t.output, ''),
 		       t.created_at, t.updated_at, t.started_at, t.completed_at,
 		       t.last_distilled_at, t.last_accessed_at
 		FROM tasks t
@@ -134,6 +135,7 @@ func (db *DB) GetBlockedBy(taskID int64) ([]*Task, error) {
 		       COALESCE(t.claude_pane_id, ''), COALESCE(t.shell_pane_id, ''),
 		       COALESCE(t.pr_url, ''), COALESCE(t.pr_number, 0),
 		       COALESCE(t.dangerous_mode, 0), COALESCE(t.pinned, 0), COALESCE(t.tags, ''), COALESCE(t.summary, ''),
+		       t.parent_id, COALESCE(t.output, ''),
 		       t.created_at, t.updated_at, t.started_at, t.completed_at,
 		       t.last_distilled_at, t.last_accessed_at
 		FROM tasks t
@@ -308,6 +310,7 @@ func scanTaskRows(rows *sql.Rows) ([]*Task, error) {
 			&t.DaemonSession, &t.TmuxWindowID, &t.ClaudePaneID, &t.ShellPaneID,
 			&t.PRURL, &t.PRNumber,
 			&t.DangerousMode, &t.Pinned, &t.Tags, &t.Summary,
+			&t.ParentID, &t.Output,
 			&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
 			&t.LastDistilledAt, &t.LastAccessedAt,
 		)
