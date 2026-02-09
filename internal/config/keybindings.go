@@ -48,6 +48,8 @@ type KeybindingsConfig struct {
 	JumpToPinned       *KeybindingConfig `yaml:"jump_to_pinned,omitempty"`
 	JumpToUnpinned     *KeybindingConfig `yaml:"jump_to_unpinned,omitempty"`
 	OpenBrowser        *KeybindingConfig `yaml:"open_browser,omitempty"`
+	ApprovePrompt      *KeybindingConfig `yaml:"approve_prompt,omitempty"`
+	DenyPrompt         *KeybindingConfig `yaml:"deny_prompt,omitempty"`
 }
 
 // DefaultKeybindingsConfigPath returns the default path for the keybindings config file.

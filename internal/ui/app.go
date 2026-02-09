@@ -84,6 +84,9 @@ type KeyMap struct {
 	JumpToUnpinned key.Binding
 	// Open browser
 	OpenBrowser key.Binding
+	// Quick approve/deny for executor prompts
+	ApprovePrompt key.Binding
+	DenyPrompt    key.Binding
 }
 
 // ShortHelp returns key bindings to show in the mini help.
@@ -236,6 +239,14 @@ func DefaultKeyMap() KeyMap {
 			key.WithKeys("b"),
 			key.WithHelp("b", "open in browser"),
 		),
+		ApprovePrompt: key.NewBinding(
+			key.WithKeys("y"),
+			key.WithHelp("y", "approve"),
+		),
+		DenyPrompt: key.NewBinding(
+			key.WithKeys("N"),
+			key.WithHelp("N", "deny"),
+		),
 	}
 }
 
@@ -295,6 +306,8 @@ func ApplyKeybindingsConfig(km KeyMap, cfg *config.KeybindingsConfig) KeyMap {
 	km.JumpToPinned = applyBinding(km.JumpToPinned, cfg.JumpToPinned)
 	km.JumpToUnpinned = applyBinding(km.JumpToUnpinned, cfg.JumpToUnpinned)
 	km.OpenBrowser = applyBinding(km.OpenBrowser, cfg.OpenBrowser)
+	km.ApprovePrompt = applyBinding(km.ApprovePrompt, cfg.ApprovePrompt)
+	km.DenyPrompt = applyBinding(km.DenyPrompt, cfg.DenyPrompt)
 
 	return km
 }
@@ -340,6 +353,8 @@ type AppModel struct {
 	prevStatuses map[int64]string
 	// Track tasks with active input notifications (for UI highlighting)
 	tasksNeedingInput map[int64]bool
+	// Cached executor pane content for blocked tasks (for quick preview)
+	executorPrompts map[int64]string
 	// Track tasks the user closed manually (suppress notification for these)
 	userClosedTaskIDs map[int64]bool
 
@@ -545,6 +560,7 @@ func NewAppModel(database *db.DB, exec *executor.Executor, workingDir string) *A
 		loading:            true,
 		prevStatuses:       make(map[int64]string),
 		tasksNeedingInput:  make(map[int64]bool),
+		executorPrompts:    make(map[int64]string),
 		userClosedTaskIDs:  make(map[int64]bool),
 		watcher:            watcher,
 		dbChangeCh:         dbChangeCh,
@@ -728,6 +744,8 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					RingBell() // Ring terminal bell (writes to /dev/tty to bypass TUI)
 					// Mark task as needing input for kanban highlighting
 					m.tasksNeedingInput[t.ID] = true
+					// Capture executor pane content for preview
+					cmds = append(cmds, m.captureExecutorPrompt(t.ID))
 				} else if t.Status == db.StatusDone && db.IsInProgress(prevStatus) {
 					// Task completed - ring bell and show notification
 					m.notification = fmt.Sprintf("%s Task #%d complete: %s (g to jump)", IconDone(), t.ID, t.Title)
@@ -738,6 +756,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// Clear needing input flag when task leaves blocked status
 				if prevStatus == db.StatusBlocked && t.Status != db.StatusBlocked {
 					delete(m.tasksNeedingInput, t.ID)
+					delete(m.executorPrompts, t.ID)
 				}
 			}
 			m.prevStatuses[t.ID] = t.Status
@@ -982,6 +1001,31 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.notifyUntil = time.Now().Add(3 * time.Second)
 		}
 
+	case executorPromptMsg:
+		if msg.content != "" {
+			m.executorPrompts[msg.taskID] = msg.content
+		} else {
+			delete(m.executorPrompts, msg.taskID)
+		}
+
+	case executorRespondedMsg:
+		if msg.err != nil {
+			m.notification = fmt.Sprintf("%s Failed to %s: %s", IconBlocked(), msg.action, msg.err.Error())
+			m.notifyUntil = time.Now().Add(5 * time.Second)
+		} else {
+			action := "Approved"
+			if msg.action == "deny" {
+				action = "Denied"
+			}
+			m.notification = fmt.Sprintf("%s %s executor prompt for task #%d", IconDone(), action, msg.taskID)
+			m.notifyUntil = time.Now().Add(3 * time.Second)
+			// Clear the cached prompt since we've responded
+			delete(m.executorPrompts, msg.taskID)
+			delete(m.tasksNeedingInput, msg.taskID)
+			m.kanban.SetTasksNeedingInput(m.tasksNeedingInput)
+		}
+		cmds = append(cmds, m.loadTasks())
+
 	case taskEventMsg:
 		// Real-time task update from executor
 		event := msg.event
@@ -1005,6 +1049,8 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 							RingBell() // Ring terminal bell (writes to /dev/tty to bypass TUI)
 							// Mark task as needing input for kanban highlighting
 							m.tasksNeedingInput[event.TaskID] = true
+							// Immediately capture the executor pane content for the preview
+							cmds = append(cmds, m.captureExecutorPrompt(event.TaskID))
 						} else if event.Task.Status == db.StatusDone && db.IsInProgress(prevStatus) && !userClosed {
 							m.notification = fmt.Sprintf("✓ Task #%d complete: %s (g to jump)", event.TaskID, event.Task.Title)
 							m.notifyUntil = time.Now().Add(5 * time.Second)
@@ -1018,6 +1064,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						// Clear needing input flag when task leaves blocked status
 						if prevStatus == db.StatusBlocked && event.Task.Status != db.StatusBlocked {
 							delete(m.tasksNeedingInput, event.TaskID)
+							delete(m.executorPrompts, event.TaskID)
 						}
 						m.prevStatuses[event.TaskID] = event.Task.Status
 					}
@@ -1058,6 +1105,11 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				running[m.selectedTask.ID] = true
 			}
 			m.kanban.SetRunningProcesses(running)
+
+			// Capture executor pane content for selected blocked task needing input
+			if task := m.kanban.SelectedTask(); task != nil && m.tasksNeedingInput[task.ID] {
+				cmds = append(cmds, m.captureExecutorPrompt(task.ID))
+			}
 		}
 		cmds = append(cmds, m.tick())
 
@@ -1278,6 +1330,14 @@ func (m *AppModel) viewDashboard() string {
 		filterBarHeight = lipgloss.Height(filterBar)
 	}
 
+	// Render executor prompt preview if applicable
+	promptPreview := ""
+	promptPreviewHeight := 0
+	if task := m.kanban.SelectedTask(); task != nil && m.tasksNeedingInput[task.ID] {
+		promptPreview = m.renderExecutorPromptPreview(task)
+		promptPreviewHeight = lipgloss.Height(promptPreview)
+	}
+
 	// Calculate heights dynamically
 	headerHeight := len(headerParts)
 
@@ -1285,7 +1345,7 @@ func (m *AppModel) viewDashboard() string {
 	helpView := m.renderHelp()
 	helpHeight := lipgloss.Height(helpView)
 
-	kanbanHeight := m.height - headerHeight - filterBarHeight - helpHeight
+	kanbanHeight := m.height - headerHeight - filterBarHeight - helpHeight - promptPreviewHeight
 
 	// Update kanban size
 	m.kanban.SetSize(m.width, kanbanHeight)
@@ -1309,7 +1369,12 @@ func (m *AppModel) viewDashboard() string {
 		welcomeView := m.renderWelcomeMessage(kanbanHeight)
 		contentParts = append(contentParts, welcomeView, helpView)
 	} else {
-		contentParts = append(contentParts, m.kanban.View(), helpView)
+		kanbanView := m.kanban.View()
+		if promptPreview != "" {
+			contentParts = append(contentParts, kanbanView, promptPreview, helpView)
+		} else {
+			contentParts = append(contentParts, kanbanView, helpView)
+		}
 	}
 
 	content := lipgloss.JoinVertical(lipgloss.Left, contentParts...)
@@ -1459,6 +1524,111 @@ func (m *AppModel) renderFilterBar() string {
 
 func (m *AppModel) renderHelp() string {
 	return m.help.View(m.keys)
+}
+
+// renderExecutorPromptPreview renders a compact preview of the executor's current prompt
+// for a blocked task that needs input. Shows the last few lines from the executor's tmux pane
+// with approve/deny hints.
+func (m *AppModel) renderExecutorPromptPreview(task *db.Task) string {
+	prompt := m.executorPrompts[task.ID]
+
+	// Extract the last meaningful lines from the captured pane content
+	promptLines := extractPromptLines(prompt, m.width-10)
+
+	// Dim style for the action hints
+	hintStyle := lipgloss.NewStyle().Foreground(ColorMuted)
+	hints := hintStyle.Render("y approve  N deny  enter detail")
+
+	// Warning style for the task reference
+	warnStyle := lipgloss.NewStyle().Foreground(ColorWarning)
+
+	if len(promptLines) == 0 {
+		// No captured content yet - show a minimal single-line hint
+		line := warnStyle.Render(fmt.Sprintf("#%d waiting for input", task.ID)) + "  " + hints
+		barStyle := lipgloss.NewStyle().
+			Width(m.width).
+			Padding(0, 1)
+		return barStyle.Render(line)
+	}
+
+	// Show last 2 lines of the prompt content (keep it compact)
+	maxLines := 2
+	if len(promptLines) > maxLines {
+		promptLines = promptLines[len(promptLines)-maxLines:]
+	}
+
+	// First line: task ID + last prompt line (most relevant) + action hints
+	lastLine := promptLines[len(promptLines)-1]
+	// Truncate to fit with hints
+	maxPromptWidth := m.width - lipgloss.Width(hints) - 10 // 10 for #ID, spaces, padding
+	if maxPromptWidth < 20 {
+		maxPromptWidth = 20
+	}
+	if len(lastLine) > maxPromptWidth {
+		lastLine = lastLine[:maxPromptWidth-1] + "…"
+	}
+
+	line := warnStyle.Render(fmt.Sprintf("#%d ", task.ID)) +
+		warnStyle.Render(lastLine) + "  " + hints
+
+	barStyle := lipgloss.NewStyle().
+		Width(m.width).
+		Padding(0, 1)
+
+	return barStyle.Render(line)
+}
+
+// extractPromptLines extracts the last meaningful lines from tmux pane content.
+// Strips empty lines, ANSI codes, and trims to fit the given width.
+func extractPromptLines(content string, maxWidth int) []string {
+	if content == "" {
+		return nil
+	}
+
+	lines := strings.Split(content, "\n")
+	var result []string
+
+	for _, line := range lines {
+		// Strip ANSI escape codes
+		cleaned := stripAnsiCodes(line)
+		cleaned = strings.TrimRight(cleaned, " \t")
+		if cleaned == "" {
+			continue
+		}
+		// Truncate long lines
+		if maxWidth > 0 && len(cleaned) > maxWidth {
+			cleaned = cleaned[:maxWidth-1] + "…"
+		}
+		result = append(result, cleaned)
+	}
+
+	return result
+}
+
+// stripAnsiCodes removes ANSI escape sequences from a string.
+func stripAnsiCodes(s string) string {
+	var result strings.Builder
+	i := 0
+	for i < len(s) {
+		if s[i] == '\x1b' {
+			// Skip ESC sequence
+			i++
+			if i < len(s) && s[i] == '[' {
+				i++
+				// Skip until we hit a letter (the terminator)
+				for i < len(s) && !((s[i] >= 'A' && s[i] <= 'Z') || (s[i] >= 'a' && s[i] <= 'z')) {
+					i++
+				}
+				if i < len(s) {
+					i++ // Skip the terminator letter
+				}
+			}
+		} else {
+			result.WriteByte(s[i])
+			i++
+		}
+	}
+	return result.String()
 }
 
 func (m *AppModel) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -1646,6 +1816,16 @@ func (m *AppModel) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, m.keys.Help):
 		m.help.ShowAll = !m.help.ShowAll
 		return m, nil
+
+	case key.Matches(msg, m.keys.ApprovePrompt):
+		if task := m.kanban.SelectedTask(); task != nil && m.tasksNeedingInput[task.ID] {
+			return m, m.approveExecutorPrompt(task.ID)
+		}
+
+	case key.Matches(msg, m.keys.DenyPrompt):
+		if task := m.kanban.SelectedTask(); task != nil && m.tasksNeedingInput[task.ID] {
+			return m, m.denyExecutorPrompt(task.ID)
+		}
 
 	case key.Matches(msg, m.keys.Filter):
 		// Enter filter mode
@@ -3439,6 +3619,51 @@ func (m *AppModel) openBrowser(task *db.Task) tea.Cmd {
 		}
 
 		return browserOpenedMsg{message: fmt.Sprintf("Opened %s", url)}
+	}
+}
+
+// executorPromptMsg is sent when executor pane content is captured.
+type executorPromptMsg struct {
+	taskID  int64
+	content string
+}
+
+// executorRespondedMsg is sent after approve/deny is sent to the executor.
+type executorRespondedMsg struct {
+	taskID int64
+	action string // "approve" or "deny"
+	err    error
+}
+
+// approveExecutorPrompt sends "y" to the executor's tmux pane to approve a permission prompt.
+func (m *AppModel) approveExecutorPrompt(taskID int64) tea.Cmd {
+	database := m.db
+	return func() tea.Msg {
+		err := executor.SendKeyToPane(taskID, "y")
+		if err == nil {
+			database.AppendTaskLog(taskID, "user", "Approved from kanban")
+		}
+		return executorRespondedMsg{taskID: taskID, action: "approve", err: err}
+	}
+}
+
+// denyExecutorPrompt sends "n" to the executor's tmux pane to deny a permission prompt.
+func (m *AppModel) denyExecutorPrompt(taskID int64) tea.Cmd {
+	database := m.db
+	return func() tea.Msg {
+		err := executor.SendKeyToPane(taskID, "n")
+		if err == nil {
+			database.AppendTaskLog(taskID, "user", "Denied from kanban")
+		}
+		return executorRespondedMsg{taskID: taskID, action: "deny", err: err}
+	}
+}
+
+// captureExecutorPrompt captures the last few lines from a task's executor pane.
+func (m *AppModel) captureExecutorPrompt(taskID int64) tea.Cmd {
+	return func() tea.Msg {
+		content := executor.CapturePaneContent(taskID, 8)
+		return executorPromptMsg{taskID: taskID, content: content}
 	}
 }
 

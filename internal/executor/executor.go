@@ -1417,6 +1417,47 @@ func TmuxSessionName(taskID int64) string {
 	return fmt.Sprintf("%s:%s", getDaemonSessionName(), TmuxWindowName(taskID))
 }
 
+// CapturePaneContent captures the last N lines from a task's tmux pane.
+// Returns the trimmed content, or empty string if the pane doesn't exist or capture fails.
+func CapturePaneContent(taskID int64, lines int) string {
+	sessionName := TmuxSessionName(taskID)
+
+	// Check if session exists first
+	if err := exec.Command("tmux", "has-session", "-t", sessionName).Run(); err != nil {
+		return ""
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	// Capture the last N lines from pane 0 (the executor pane)
+	target := sessionName + ".0"
+	startLine := fmt.Sprintf("-%d", lines)
+	out, err := exec.CommandContext(ctx, "tmux", "capture-pane", "-t", target, "-p", "-S", startLine).Output()
+	if err != nil {
+		return ""
+	}
+
+	// Trim trailing whitespace/empty lines
+	content := strings.TrimRight(string(out), " \t\n\r")
+	return content
+}
+
+// SendKeyToPane sends a key sequence to a task's executor tmux pane.
+// Used for quick approve/deny from the kanban view.
+func SendKeyToPane(taskID int64, keys ...string) error {
+	sessionName := TmuxSessionName(taskID)
+
+	// Check if session exists first
+	if err := exec.Command("tmux", "has-session", "-t", sessionName).Run(); err != nil {
+		return fmt.Errorf("session not found: %w", err)
+	}
+
+	target := sessionName + ".0"
+	args := append([]string{"send-keys", "-t", target}, keys...)
+	return exec.Command("tmux", args...).Run()
+}
+
 // killAllWindowsByNameAllSessions kills ALL windows with a given name across all daemon sessions.
 // Also kills any -shell variant windows.
 func killAllWindowsByNameAllSessions(windowName string) {
