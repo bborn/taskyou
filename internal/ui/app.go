@@ -82,6 +82,9 @@ type KeyMap struct {
 	// Jump to pinned/unpinned tasks
 	JumpToPinned   key.Binding
 	JumpToUnpinned key.Binding
+	// Column collapse
+	CollapseBacklog key.Binding
+	CollapseDone    key.Binding
 	// Open browser
 	OpenBrowser key.Binding
 }
@@ -96,7 +99,7 @@ func (k KeyMap) FullHelp() [][]key.Binding {
 	return [][]key.Binding{
 		{k.Left, k.Right, k.Up, k.Down},
 		{k.JumpToPinned, k.JumpToUnpinned},
-		{k.FocusBacklog, k.FocusInProgress, k.FocusBlocked, k.FocusDone},
+		{k.FocusBacklog, k.FocusInProgress, k.FocusBlocked, k.FocusDone, k.CollapseBacklog, k.CollapseDone},
 		{k.Enter, k.New, k.Queue, k.Close},
 		{k.Retry, k.Archive, k.Delete, k.OpenWorktree, k.OpenBrowser},
 		{k.Filter, k.CommandPalette, k.Settings},
@@ -232,6 +235,14 @@ func DefaultKeyMap() KeyMap {
 			key.WithKeys("shift+down"),
 			key.WithHelp(IconShiftDown(), "jump to unpinned"),
 		),
+		CollapseBacklog: key.NewBinding(
+			key.WithKeys("["),
+			key.WithHelp("[", "collapse backlog"),
+		),
+		CollapseDone: key.NewBinding(
+			key.WithKeys("]"),
+			key.WithHelp("]", "collapse done"),
+		),
 		OpenBrowser: key.NewBinding(
 			key.WithKeys("b"),
 			key.WithHelp("b", "open in browser"),
@@ -294,6 +305,8 @@ func ApplyKeybindingsConfig(km KeyMap, cfg *config.KeybindingsConfig) KeyMap {
 	km.FocusDone = applyBinding(km.FocusDone, cfg.FocusDone)
 	km.JumpToPinned = applyBinding(km.JumpToPinned, cfg.JumpToPinned)
 	km.JumpToUnpinned = applyBinding(km.JumpToUnpinned, cfg.JumpToUnpinned)
+	km.CollapseBacklog = applyBinding(km.CollapseBacklog, cfg.CollapseBacklog)
+	km.CollapseDone = applyBinding(km.CollapseDone, cfg.CollapseDone)
 	km.OpenBrowser = applyBinding(km.OpenBrowser, cfg.OpenBrowser)
 
 	return km
@@ -1563,6 +1576,15 @@ func (m *AppModel) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case key.Matches(msg, m.keys.FocusDone):
 		m.kanban.FocusColumn(3)
+		return m, nil
+
+	// Column collapse toggles
+	case key.Matches(msg, m.keys.CollapseBacklog):
+		m.kanban.ToggleColumnCollapse(0) // Backlog is column 0
+		return m, nil
+
+	case key.Matches(msg, m.keys.CollapseDone):
+		m.kanban.ToggleColumnCollapse(3) // Done is column 3
 		return m, nil
 
 	case key.Matches(msg, m.keys.JumpToNotification):

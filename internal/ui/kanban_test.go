@@ -1296,3 +1296,135 @@ func TestKanbanBoard_TotalTaskCount(t *testing.T) {
 		}
 	})
 }
+
+func TestKanbanBoard_ColumnCollapse(t *testing.T) {
+	board := NewKanbanBoard(200, 50)
+	tasks := []*db.Task{
+		{ID: 1, Title: "Task 1", Status: db.StatusBacklog},
+		{ID: 2, Title: "Task 2", Status: db.StatusQueued},
+		{ID: 3, Title: "Task 3", Status: db.StatusBlocked},
+		{ID: 4, Title: "Task 4", Status: db.StatusDone},
+	}
+	board.SetTasks(tasks)
+
+	t.Run("initially no columns collapsed", func(t *testing.T) {
+		for i := 0; i < 4; i++ {
+			if board.IsColumnCollapsed(i) {
+				t.Errorf("column %d should not be collapsed initially", i)
+			}
+		}
+	})
+
+	t.Run("toggle collapse backlog", func(t *testing.T) {
+		board.FocusColumn(1) // Move selection away from backlog first
+		board.ToggleColumnCollapse(0)
+		if !board.IsColumnCollapsed(0) {
+			t.Error("backlog should be collapsed")
+		}
+		// Toggle again to uncollapse
+		board.ToggleColumnCollapse(0)
+		if board.IsColumnCollapsed(0) {
+			t.Error("backlog should be uncollapsed")
+		}
+	})
+
+	t.Run("toggle collapse done", func(t *testing.T) {
+		board.FocusColumn(1)
+		board.ToggleColumnCollapse(3)
+		if !board.IsColumnCollapsed(3) {
+			t.Error("done should be collapsed")
+		}
+		board.ToggleColumnCollapse(3)
+		if board.IsColumnCollapsed(3) {
+			t.Error("done should be uncollapsed")
+		}
+	})
+
+	t.Run("collapsing selected column moves selection", func(t *testing.T) {
+		board.FocusColumn(0) // Select backlog
+		board.ToggleColumnCollapse(0)
+		if board.selectedCol == 0 {
+			t.Error("selection should have moved away from collapsed column")
+		}
+		if board.IsColumnCollapsed(board.selectedCol) {
+			t.Error("selection should be on a non-collapsed column")
+		}
+		board.ToggleColumnCollapse(0) // Uncollapse
+	})
+
+	t.Run("MoveLeft skips collapsed columns", func(t *testing.T) {
+		board.FocusColumn(1) // Select In Progress
+		board.ToggleColumnCollapse(0) // Collapse backlog
+		board.MoveLeft()
+		// Should not move to backlog since it's collapsed
+		if board.selectedCol == 0 {
+			t.Error("MoveLeft should skip collapsed backlog")
+		}
+		if board.selectedCol != 1 {
+			t.Errorf("should stay on column 1, got %d", board.selectedCol)
+		}
+		board.ToggleColumnCollapse(0) // Uncollapse
+	})
+
+	t.Run("MoveRight skips collapsed columns", func(t *testing.T) {
+		board.FocusColumn(2) // Select Blocked
+		board.ToggleColumnCollapse(3) // Collapse Done
+		board.MoveRight()
+		// Should not move to done since it's collapsed
+		if board.selectedCol == 3 {
+			t.Error("MoveRight should skip collapsed done")
+		}
+		if board.selectedCol != 2 {
+			t.Errorf("should stay on column 2, got %d", board.selectedCol)
+		}
+		board.ToggleColumnCollapse(3) // Uncollapse
+	})
+
+	t.Run("FocusColumn uncollapses collapsed column", func(t *testing.T) {
+		board.FocusColumn(1) // Move away
+		board.ToggleColumnCollapse(0) // Collapse backlog
+		if !board.IsColumnCollapsed(0) {
+			t.Error("backlog should be collapsed")
+		}
+		board.FocusColumn(0) // Focus backlog directly
+		if board.IsColumnCollapsed(0) {
+			t.Error("FocusColumn should uncollapse the column")
+		}
+		if board.selectedCol != 0 {
+			t.Errorf("should be on column 0, got %d", board.selectedCol)
+		}
+	})
+
+	t.Run("collapsed column renders as thin strip", func(t *testing.T) {
+		board.FocusColumn(1)
+		board.ToggleColumnCollapse(0) // Collapse backlog
+		board.ToggleColumnCollapse(3) // Collapse done
+		view := board.View()
+		if view == "" {
+			t.Error("view should not be empty")
+		}
+		// The view should still render
+		if !strings.Contains(view, "In Progress") {
+			t.Error("expanded columns should still show their title")
+		}
+		board.ToggleColumnCollapse(0)
+		board.ToggleColumnCollapse(3)
+	})
+
+	t.Run("visibleColumnCount", func(t *testing.T) {
+		if board.visibleColumnCount() != 4 {
+			t.Errorf("expected 4 visible columns, got %d", board.visibleColumnCount())
+		}
+		board.FocusColumn(1)
+		board.ToggleColumnCollapse(0)
+		if board.visibleColumnCount() != 3 {
+			t.Errorf("expected 3 visible columns, got %d", board.visibleColumnCount())
+		}
+		board.ToggleColumnCollapse(3)
+		if board.visibleColumnCount() != 2 {
+			t.Errorf("expected 2 visible columns, got %d", board.visibleColumnCount())
+		}
+		board.ToggleColumnCollapse(0) // Uncollapse
+		board.ToggleColumnCollapse(3) // Uncollapse
+	})
+}
