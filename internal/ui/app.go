@@ -1918,7 +1918,14 @@ func (m *AppModel) updateFilterMode(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Accept autocomplete if showing
 		if m.showFilterDropdown && m.filterAutocomplete.HasResults() {
 			if name := m.filterAutocomplete.Select(); name != "" {
-				m.filterInput.SetValue("[" + name + "] ")
+				// Replace from the last "[" onward with "[name] "
+				current := m.filterInput.Value()
+				lastBracket := strings.LastIndex(current, "[")
+				prefix := ""
+				if lastBracket > 0 {
+					prefix = current[:lastBracket]
+				}
+				m.filterInput.SetValue(prefix + "[" + name + "] ")
 				m.filterInput.SetCursor(len(m.filterInput.Value()))
 				m.filterText = m.filterInput.Value()
 				m.applyFilter()
@@ -1982,17 +1989,63 @@ func (m *AppModel) handleFilterInput(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.filterText = newText
 		m.applyFilter()
 
-		// Update autocomplete: show when typing "[project" but not after "] "
-		if strings.HasPrefix(newText, "[") && !strings.Contains(newText, "] ") {
-			query := strings.TrimSuffix(strings.TrimPrefix(newText, "["), "]")
-			m.filterAutocomplete.SetQuery(query)
-			m.showFilterDropdown = m.filterAutocomplete.HasResults()
+		// Update autocomplete: show when the last "[" is unclosed (no matching "]")
+		if lastBracket := strings.LastIndex(newText, "["); lastBracket >= 0 {
+			afterBracket := newText[lastBracket+1:]
+			if !strings.Contains(afterBracket, "]") {
+				// Still typing a project name after the last "["
+				query := afterBracket
+				m.filterAutocomplete.SetQuery(query)
+				m.showFilterDropdown = m.filterAutocomplete.HasResults()
+			} else {
+				m.showFilterDropdown = false
+				m.filterAutocomplete.Reset()
+			}
 		} else {
 			m.showFilterDropdown = false
 			m.filterAutocomplete.Reset()
 		}
 	}
 	return m, cmd
+}
+
+// resolveProjectAliases replaces project names in bracket tags with their canonical names.
+func (m *AppModel) resolveProjectAliases(query string) string {
+	var result strings.Builder
+	remaining := query
+	for {
+		start := strings.Index(remaining, "[")
+		if start == -1 {
+			result.WriteString(remaining)
+			break
+		}
+		result.WriteString(remaining[:start])
+		end := strings.Index(remaining[start:], "]")
+		if end == -1 {
+			// Unclosed bracket — resolve partial name too
+			name := remaining[start+1:]
+			if name != "" {
+				if p, err := m.db.GetProjectByName(name); err == nil && p != nil {
+					name = strings.ToLower(p.Name)
+				}
+			}
+			result.WriteString("[")
+			result.WriteString(name)
+			remaining = ""
+			break
+		}
+		name := remaining[start+1 : start+end]
+		if name != "" {
+			if p, err := m.db.GetProjectByName(name); err == nil && p != nil {
+				name = strings.ToLower(p.Name)
+			}
+		}
+		result.WriteString("[")
+		result.WriteString(name)
+		result.WriteString("]")
+		remaining = remaining[start+end+1:]
+	}
+	return result.String()
 }
 
 // applyFilter filters the tasks based on current filter text using fuzzy matching.
@@ -2006,28 +2059,9 @@ func (m *AppModel) applyFilter() {
 
 	queryLower := strings.ToLower(m.filterText)
 
-	// Resolve project aliases in "[project]" filter syntax
-	if strings.HasPrefix(queryLower, "[") {
-		var projectPart string
-		var rest string
-		if idx := strings.Index(queryLower, "] "); idx != -1 {
-			projectPart = queryLower[1:idx]
-			rest = queryLower[idx+2:]
-		} else {
-			projectPart = strings.TrimSuffix(strings.TrimPrefix(queryLower, "["), "]")
-		}
-		if projectPart != "" {
-			if p, err := m.db.GetProjectByName(projectPart); err == nil && p != nil {
-				canonical := strings.ToLower(p.Name)
-				if rest != "" {
-					queryLower = "[" + canonical + "] " + rest
-				} else if strings.HasSuffix(queryLower, "]") {
-					queryLower = "[" + canonical + "]"
-				} else {
-					queryLower = "[" + canonical
-				}
-			}
-		}
+	// Resolve project aliases in "[project]" filter syntax (supports multiple tags)
+	if strings.Contains(queryLower, "[") {
+		queryLower = m.resolveProjectAliases(queryLower)
 	}
 
 	// Score all tasks using fuzzy matching
@@ -2052,38 +2086,79 @@ func (m *AppModel) applyFilter() {
 	m.kanban.SetTasks(filtered)
 }
 
-// scoreTaskForFilter calculates a fuzzy match score for a task against the query.
-// Special: "[project" filters by project, "[project] keyword" filters within project.
-func scoreTaskForFilter(task *db.Task, query string) int {
-	// Handle "[project..." syntax
-	if strings.HasPrefix(query, "[") {
-		// "[project] keyword" pattern
-		if idx := strings.Index(query, "] "); idx != -1 {
-			projectName := strings.TrimPrefix(query[:idx], "[")
-			if !strings.EqualFold(task.Project, projectName) {
-				return -1
-			}
-			keyword := strings.TrimSpace(query[idx+2:])
-			if keyword == "" {
-				return 100
-			}
-			return scoreTaskFields(task, keyword, false)
+// parseFilterProjects extracts completed [project] tags, any trailing partial project,
+// and the keyword portion from a filter query. Supports multiple [project] tags.
+func parseFilterProjects(query string) (projects []string, keyword string, partialProject string) {
+	remaining := query
+	for {
+		start := strings.Index(remaining, "[")
+		if start == -1 {
+			break
 		}
-		// Still typing project name
-		projectQuery := strings.TrimSuffix(strings.TrimPrefix(query, "["), "]")
-		if projectQuery == "" {
-			if task.Project != "" {
-				return 100
+		end := strings.Index(remaining[start:], "]")
+		if end == -1 {
+			// Unclosed bracket — this is a partial project being typed
+			partialProject = remaining[start+1:]
+			remaining = remaining[:start]
+			break
+		}
+		name := remaining[start+1 : start+end]
+		if name != "" {
+			projects = append(projects, name)
+		}
+		remaining = remaining[:start] + remaining[start+end+1:]
+	}
+	keyword = strings.TrimSpace(remaining)
+	return
+}
+
+// scoreTaskForFilter calculates a fuzzy match score for a task against the query.
+// Supports multiple [project] tags as OR filters, plus optional keyword search.
+func scoreTaskForFilter(task *db.Task, query string) int {
+	if !strings.Contains(query, "[") {
+		return scoreTaskFields(task, query, true)
+	}
+
+	projects, keyword, partial := parseFilterProjects(query)
+
+	// If we have completed project tags, task must match at least one
+	if len(projects) > 0 {
+		matched := false
+		for _, p := range projects {
+			if strings.EqualFold(task.Project, p) {
+				matched = true
+				break
 			}
+		}
+
+		if partial != "" {
+			// Also include tasks matching the partial project name
+			if s := fuzzyScore(task.Project, partial); s > 0 {
+				matched = true
+			}
+		}
+
+		if !matched {
 			return -1
 		}
-		if s := fuzzyScore(task.Project, projectQuery); s > 0 {
-			return s
+
+		if keyword == "" {
+			return 100
+		}
+		return scoreTaskFields(task, keyword, false)
+	}
+
+	// No completed tags — just a partial project being typed (e.g. "[off")
+	if partial == "" {
+		if task.Project != "" {
+			return 100
 		}
 		return -1
 	}
-
-	return scoreTaskFields(task, query, true)
+	if s := fuzzyScore(task.Project, partial); s > 0 {
+		return s
+	}
+	return -1
 }
 
 // scoreTaskFields scores a task against a query, optionally including project field.
