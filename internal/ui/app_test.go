@@ -821,6 +821,56 @@ func TestScoreTaskForFilter(t *testing.T) {
 			wantMin: 100,
 			wantMax: 500,
 		},
+		// Multi-project filter tests
+		{
+			name:    "multi-project matches first project",
+			task:    &db.Task{ID: 1, Title: "Fix bug", Project: "offerlab"},
+			query:   "[offerlab] [workflow] ",
+			wantMin: 100,
+			wantMax: 100,
+		},
+		{
+			name:    "multi-project matches second project",
+			task:    &db.Task{ID: 1, Title: "Fix bug", Project: "workflow"},
+			query:   "[offerlab] [workflow] ",
+			wantMin: 100,
+			wantMax: 100,
+		},
+		{
+			name:    "multi-project excludes other project",
+			task:    &db.Task{ID: 1, Title: "Fix bug", Project: "personal"},
+			query:   "[offerlab] [workflow] ",
+			wantMin: -1,
+			wantMax: -1,
+		},
+		{
+			name:    "multi-project with keyword matches",
+			task:    &db.Task{ID: 1, Title: "Fix authentication", Project: "offerlab"},
+			query:   "[offerlab] [workflow] auth",
+			wantMin: 100,
+			wantMax: 500,
+		},
+		{
+			name:    "multi-project with keyword no match",
+			task:    &db.Task{ID: 1, Title: "Setup database", Project: "offerlab"},
+			query:   "[offerlab] [workflow] auth",
+			wantMin: -1,
+			wantMax: -1,
+		},
+		{
+			name:    "multi-project typing second project",
+			task:    &db.Task{ID: 1, Title: "Fix bug", Project: "workflow"},
+			query:   "[offerlab] [wor",
+			wantMin: 100,
+			wantMax: 500,
+		},
+		{
+			name:    "multi-project typing second includes first project tasks",
+			task:    &db.Task{ID: 1, Title: "Fix bug", Project: "offerlab"},
+			query:   "[offerlab] [wor",
+			wantMin: 100,
+			wantMax: 100,
+		},
 	}
 
 	for _, tt := range tests {
@@ -828,6 +878,48 @@ func TestScoreTaskForFilter(t *testing.T) {
 			score := scoreTaskForFilter(tt.task, tt.query)
 			if score < tt.wantMin || score > tt.wantMax {
 				t.Errorf("scoreTaskForFilter() = %d, want between %d and %d", score, tt.wantMin, tt.wantMax)
+			}
+		})
+	}
+}
+
+// TestParseFilterProjects tests extraction of project tags from filter text.
+func TestParseFilterProjects(t *testing.T) {
+	tests := []struct {
+		name           string
+		query          string
+		wantProjects   []string
+		wantKeyword    string
+		wantPartial    string
+	}{
+		{"empty", "", nil, "", ""},
+		{"just bracket", "[", nil, "", ""},
+		{"single partial", "[off", nil, "", "off"},
+		{"single complete", "[offerlab] ", []string{"offerlab"}, "", ""},
+		{"single complete with keyword", "[offerlab] auth", []string{"offerlab"}, "auth", ""},
+		{"two complete", "[offerlab] [workflow] ", []string{"offerlab", "workflow"}, "", ""},
+		{"two complete with keyword", "[offerlab] [workflow] bug", []string{"offerlab", "workflow"}, "bug", ""},
+		{"one complete one partial", "[offerlab] [wor", []string{"offerlab"}, "", "wor"},
+		{"plain text no brackets", "some search", nil, "some search", ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			projects, keyword, partial := parseFilterProjects(tt.query)
+			if len(projects) != len(tt.wantProjects) {
+				t.Errorf("projects = %v, want %v", projects, tt.wantProjects)
+			} else {
+				for i, p := range projects {
+					if p != tt.wantProjects[i] {
+						t.Errorf("projects[%d] = %q, want %q", i, p, tt.wantProjects[i])
+					}
+				}
+			}
+			if keyword != tt.wantKeyword {
+				t.Errorf("keyword = %q, want %q", keyword, tt.wantKeyword)
+			}
+			if partial != tt.wantPartial {
+				t.Errorf("partial = %q, want %q", partial, tt.wantPartial)
 			}
 		})
 	}
