@@ -1447,24 +1447,27 @@ func (m *AppModel) viewDashboard() string {
 }
 
 // renderWelcomeMessage renders a friendly getting started message for first-time users.
+// Focuses on demonstrating the mental model: describe what you want, AI does it, review.
 func (m *AppModel) renderWelcomeMessage(height int) string {
-	// Welcome title
+	// Styles
 	titleStyle := lipgloss.NewStyle().
 		Bold(true).
-		Foreground(ColorPrimary).
-		MarginBottom(1)
+		Foreground(ColorPrimary)
 
-	// Subtitle style
 	subtitleStyle := lipgloss.NewStyle().
-		Foreground(ColorSecondary).
-		MarginBottom(2)
+		Foreground(ColorSecondary)
 
-	// Action style for keyboard shortcuts
+	stepNumStyle := lipgloss.NewStyle().
+		Bold(true).
+		Foreground(ColorPrimary)
+
+	stepDescStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("252"))
+
 	actionStyle := lipgloss.NewStyle().
 		Bold(true).
 		Foreground(ColorPrimary)
 
-	// Description style
 	descStyle := lipgloss.NewStyle().
 		Foreground(ColorMuted)
 
@@ -1472,41 +1475,45 @@ func (m *AppModel) renderWelcomeMessage(height int) string {
 	var lines []string
 
 	lines = append(lines, titleStyle.Render("Welcome to TaskYou!"))
-	lines = append(lines, subtitleStyle.Render("Your AI-powered task management system"))
 	lines = append(lines, "")
 
-	// Key actions
+	// Mental model - how it works in 3 steps
+	lines = append(lines, subtitleStyle.Render("How it works:"))
+	lines = append(lines, "")
+
 	lines = append(lines, lipgloss.JoinHorizontal(lipgloss.Top,
+		stepNumStyle.Render("1. "),
+		stepDescStyle.Render("Describe what you want done"),
+	))
+	lines = append(lines, lipgloss.JoinHorizontal(lipgloss.Top,
+		stepNumStyle.Render("2. "),
+		stepDescStyle.Render("AI works on it autonomously"),
+	))
+	lines = append(lines, lipgloss.JoinHorizontal(lipgloss.Top,
+		stepNumStyle.Render("3. "),
+		stepDescStyle.Render("Review the result"),
+	))
+	lines = append(lines, "")
+
+	// Quick start action
+	lines = append(lines, lipgloss.JoinHorizontal(lipgloss.Top,
+		descStyle.Render("Press "),
 		actionStyle.Render("n"),
-		descStyle.Render("  Create your first task"),
-	))
-	lines = append(lines, "")
-
-	lines = append(lines, lipgloss.JoinHorizontal(lipgloss.Top,
-		actionStyle.Render("s"),
-		descStyle.Render("  Open settings to configure projects"),
-	))
-	lines = append(lines, "")
-
-	lines = append(lines, lipgloss.JoinHorizontal(lipgloss.Top,
-		actionStyle.Render("?"),
-		descStyle.Render("  Show all keyboard shortcuts"),
+		descStyle.Render(" to create your first task"),
 	))
 	lines = append(lines, "")
 
 	// Executor status
 	if len(m.availableExecutors) == 0 {
 		warningStyle := lipgloss.NewStyle().
-			Foreground(ColorWarning).
-			MarginTop(1)
-		lines = append(lines, warningStyle.Render(IconBlocked()+" Install an AI executor to run tasks"))
-		lines = append(lines, descStyle.Render("   Visit: https://code.claude.com/docs/en/overview"))
+			Foreground(ColorWarning)
+		lines = append(lines, warningStyle.Render(IconBlocked()+" No AI executor found"))
+		lines = append(lines, descStyle.Render("   Install one: claude, codex, or gemini"))
 	} else {
 		readyStyle := lipgloss.NewStyle().
-			Foreground(ColorDone).
-			MarginTop(1)
+			Foreground(ColorDone)
 		executorList := strings.Join(m.availableExecutors, ", ")
-		lines = append(lines, readyStyle.Render(IconDone()+" Ready to run tasks with: "+executorList))
+		lines = append(lines, readyStyle.Render(IconDone()+" Ready with: "+executorList))
 	}
 
 	content := lipgloss.JoinVertical(lipgloss.Left, lines...)
@@ -1515,8 +1522,8 @@ func (m *AppModel) renderWelcomeMessage(height int) string {
 	boxStyle := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(ColorPrimary).
-		Padding(2, 4).
-		Width(min(60, m.width-4))
+		Padding(1, 3).
+		Width(min(50, m.width-4))
 
 	boxed := boxStyle.Render(content)
 

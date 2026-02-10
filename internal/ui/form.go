@@ -86,6 +86,9 @@ type FormModel struct {
 
 	// Cancel confirmation state
 	showCancelConfirm bool
+
+	// Progressive disclosure: hide advanced fields for simpler first experience
+	showAdvanced bool
 }
 
 // Autocomplete message types for async LLM suggestions
@@ -199,6 +202,7 @@ func NewEditFormModel(database *db.DB, task *db.Task, width, height int, availab
 		autocompleteEnabled: autocompleteEnabled,
 		taskRefAutocomplete: NewTaskRefAutocompleteModel(database, width-24),
 		attachmentCursor:    -1,
+		showAdvanced:        true, // Always show all fields when editing
 	}
 
 	// Load task types from database
@@ -294,11 +298,12 @@ func NewFormModel(database *db.DB, width, height int, workingDir string, availab
 		db:                  database,
 		width:               width,
 		height:              height,
-		focused:             FieldProject,
+		focused:             FieldTitle, // Start on Title for simpler first experience
 		autocompleteSvc:     autocompleteSvc,
 		autocompleteEnabled: autocompleteEnabled,
 		taskRefAutocomplete: NewTaskRefAutocompleteModel(database, width-24),
 		attachmentCursor:    -1,
+		showAdvanced:        false, // Progressive disclosure: start with simple view
 	}
 
 	// Load task types from database
@@ -370,16 +375,17 @@ func NewFormModel(database *db.DB, width, height int, workingDir string, availab
 	// Load last used executor for the selected project (overrides default if available)
 	m.loadLastExecutorForProject()
 
-	// Title input
+	// Title input - focused by default for simpler first experience
 	m.titleInput = textinput.New()
-	m.titleInput.Placeholder = "What needs to be done? (optional if details provided)"
+	m.titleInput.Placeholder = "What needs to be done?"
 	m.titleInput.Prompt = ""
 	m.titleInput.Cursor.SetMode(cursor.CursorStatic)
 	m.titleInput.Width = width - 24
+	m.titleInput.Focus() // Start with title focused
 
 	// Body textarea
 	m.bodyInput = textarea.New()
-	m.bodyInput.Placeholder = "Details (AI generates title if left empty above)"
+	m.bodyInput.Placeholder = "Add more details, or leave empty (optional)"
 	m.bodyInput.Prompt = ""
 	m.bodyInput.ShowLineNumbers = false
 	m.bodyInput.Cursor.SetMode(cursor.CursorStatic)
@@ -571,6 +577,17 @@ func (m *FormModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 
+		case "ctrl+e":
+			// Toggle advanced fields (progressive disclosure)
+			m.showAdvanced = !m.showAdvanced
+			// If collapsing and currently on a hidden field, move to Title
+			if !m.showAdvanced && !m.isFieldVisible(m.focused) {
+				m.blurAll()
+				m.focused = FieldTitle
+				m.focusCurrent()
+			}
+			return m, nil
+
 		case "ctrl+s":
 			// Submit from anywhere
 			m.parseAttachments()
@@ -601,8 +618,8 @@ func (m *FormModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.focused == FieldBody {
 				break
 			}
-			// On last field, submit
-			if m.focused == FieldExecutor {
+			// On last visible field, submit
+			if m.isLastVisibleField() {
 				m.parseAttachments()
 				m.submitted = true
 				return m, nil
@@ -974,17 +991,46 @@ func (m *FormModel) rebuildExecutorListForProject() {
 	}
 }
 
+// isFieldVisible returns whether a field should be shown in the current view.
+// When showAdvanced is false, only Title and Body are visible.
+func (m *FormModel) isFieldVisible(field FormField) bool {
+	if m.showAdvanced {
+		return true
+	}
+	return field == FieldTitle || field == FieldBody
+}
+
+// isLastVisibleField returns whether the currently focused field is the last visible one.
+func (m *FormModel) isLastVisibleField() bool {
+	for i := m.focused + 1; i < FieldCount; i++ {
+		if m.isFieldVisible(i) {
+			return false
+		}
+	}
+	return true
+}
+
 func (m *FormModel) focusNext() {
 	m.blurAll()
 	m.cancelAutocomplete()
-	m.focused = (m.focused + 1) % FieldCount
+	for i := 0; i < int(FieldCount); i++ {
+		m.focused = (m.focused + 1) % FieldCount
+		if m.isFieldVisible(m.focused) {
+			break
+		}
+	}
 	m.focusCurrent()
 }
 
 func (m *FormModel) focusPrev() {
 	m.blurAll()
 	m.cancelAutocomplete()
-	m.focused = (m.focused - 1 + FieldCount) % FieldCount
+	for i := 0; i < int(FieldCount); i++ {
+		m.focused = (m.focused - 1 + FieldCount) % FieldCount
+		if m.isFieldVisible(m.focused) {
+			break
+		}
+	}
 	m.focusCurrent()
 }
 
@@ -1258,6 +1304,10 @@ func (m *FormModel) View() string {
 	if m.isEdit {
 		headerText = "Edit Task"
 	}
+	// Show project context in header when in simple mode
+	if !m.showAdvanced && !m.isEdit && m.project != "" {
+		headerText = "New Task · " + m.project
+	}
 	header := lipgloss.NewStyle().
 		Bold(true).
 		Foreground(ColorPrimary).
@@ -1268,13 +1318,18 @@ func (m *FormModel) View() string {
 	// Ghost text style for autocomplete suggestions
 	ghostStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Italic(true)
 
-	// Project selector (first for immediate context)
-	cursor := " "
-	if m.focused == FieldProject {
-		cursor = cursorStyle.Render("▸")
+	// Cursor indicator for focused field
+	var cursor string
+
+	// Project selector (only shown in advanced mode)
+	if m.showAdvanced {
+		cursor = " "
+		if m.focused == FieldProject {
+			cursor = cursorStyle.Render("▸")
+		}
+		b.WriteString(cursor + " " + labelStyle.Render("Project") + m.renderSelector(m.projects, m.projectIdx, m.focused == FieldProject, selectedStyle, optionStyle, dimStyle))
+		b.WriteString("\n\n")
 	}
-	b.WriteString(cursor + " " + labelStyle.Render("Project") + m.renderSelector(m.projects, m.projectIdx, m.focused == FieldProject, selectedStyle, optionStyle, dimStyle))
-	b.WriteString("\n\n")
 
 	// Title
 	cursor = " "
@@ -1344,59 +1399,83 @@ func (m *FormModel) View() string {
 		}
 	}
 
-	// Attachments (positioned after body - drag files from anywhere in the form)
-	cursor = " "
-	if m.focused == FieldAttachments {
-		cursor = cursorStyle.Render("▸")
-	}
-	attachmentInputView := m.attachmentsInput.View()
-	b.WriteString("\n")
-	b.WriteString(cursor + " " + labelStyle.Render("Attachments") + "\n")
-	if len(m.attachments) > 0 {
-		for i, path := range m.attachments {
-			style := AttachmentChip
-			if m.focused == FieldAttachments && m.attachmentSelectionActive() && m.attachmentCursor == i {
-				style = AttachmentChipSelected
-			}
-			chip := style.Render(filepath.Base(path))
-			for _, line := range strings.Split(chip, "\n") {
-				if line != "" {
-					b.WriteString("   " + line + "\n")
+	// Advanced fields (Attachments, Type, Executor) - hidden by default
+	if m.showAdvanced {
+		// Attachments (positioned after body - drag files from anywhere in the form)
+		cursor = " "
+		if m.focused == FieldAttachments {
+			cursor = cursorStyle.Render("▸")
+		}
+		attachmentInputView := m.attachmentsInput.View()
+		b.WriteString("\n")
+		b.WriteString(cursor + " " + labelStyle.Render("Attachments") + "\n")
+		if len(m.attachments) > 0 {
+			for i, path := range m.attachments {
+				style := AttachmentChip
+				if m.focused == FieldAttachments && m.attachmentSelectionActive() && m.attachmentCursor == i {
+					style = AttachmentChipSelected
+				}
+				chip := style.Render(filepath.Base(path))
+				for _, line := range strings.Split(chip, "\n") {
+					if line != "" {
+						b.WriteString("   " + line + "\n")
+					}
 				}
 			}
 		}
-	}
-	b.WriteString("   " + attachmentInputView + "\n")
-	if len(m.attachments) > 0 {
-		help := Dim.Render(IconArrowLeft() + "/" + IconArrowRight() + " select • backspace/delete remove")
-		b.WriteString("   " + help + "\n")
-	}
-	b.WriteString("\n")
-
-	// Type selector
-	cursor = " "
-	if m.focused == FieldType {
-		cursor = cursorStyle.Render("▸")
-	}
-	// Build type labels from m.types (replace empty string with "none")
-	typeLabels := make([]string, len(m.types))
-	for i, t := range m.types {
-		if t == "" {
-			typeLabels[i] = "none"
-		} else {
-			typeLabels[i] = t
+		b.WriteString("   " + attachmentInputView + "\n")
+		if len(m.attachments) > 0 {
+			help := Dim.Render(IconArrowLeft() + "/" + IconArrowRight() + " select • backspace/delete remove")
+			b.WriteString("   " + help + "\n")
 		}
-	}
-	b.WriteString(cursor + " " + labelStyle.Render("Type") + m.renderSelector(typeLabels, m.typeIdx, m.focused == FieldType, selectedStyle, optionStyle, dimStyle))
-	b.WriteString("\n\n")
+		b.WriteString("\n")
 
-	// Executor selector
-	cursor = " "
-	if m.focused == FieldExecutor {
-		cursor = cursorStyle.Render("▸")
+		// Type selector
+		cursor = " "
+		if m.focused == FieldType {
+			cursor = cursorStyle.Render("▸")
+		}
+		// Build type labels from m.types (replace empty string with "none")
+		typeLabels := make([]string, len(m.types))
+		for i, t := range m.types {
+			if t == "" {
+				typeLabels[i] = "none"
+			} else {
+				typeLabels[i] = t
+			}
+		}
+		b.WriteString(cursor + " " + labelStyle.Render("Type") + m.renderSelector(typeLabels, m.typeIdx, m.focused == FieldType, selectedStyle, optionStyle, dimStyle))
+		b.WriteString("\n\n")
+
+		// Executor selector
+		cursor = " "
+		if m.focused == FieldExecutor {
+			cursor = cursorStyle.Render("▸")
+		}
+		b.WriteString(cursor + " " + labelStyle.Render("Executor") + m.renderSelector(m.executors, m.executorIdx, m.focused == FieldExecutor, selectedStyle, optionStyle, dimStyle))
+		b.WriteString("\n\n")
+	} else {
+		// Show compact summary of defaults and toggle hint
+		b.WriteString("\n")
+		summaryParts := []string{}
+		if m.project != "" {
+			summaryParts = append(summaryParts, m.project)
+		}
+		if m.executor != "" {
+			summaryParts = append(summaryParts, m.executor)
+		}
+		if m.taskType != "" {
+			summaryParts = append(summaryParts, m.taskType)
+		}
+		defaultsLine := strings.Join(summaryParts, " · ")
+		if defaultsLine != "" {
+			defaultsLine = dimStyle.Render(defaultsLine+" ") + dimStyle.Foreground(ColorSecondary).Render("ctrl+e more options")
+		} else {
+			defaultsLine = dimStyle.Foreground(ColorSecondary).Render("ctrl+e more options")
+		}
+		b.WriteString("  " + defaultsLine)
+		b.WriteString("\n\n")
 	}
-	b.WriteString(cursor + " " + labelStyle.Render("Executor") + m.renderSelector(m.executors, m.executorIdx, m.focused == FieldExecutor, selectedStyle, optionStyle, dimStyle))
-	b.WriteString("\n\n")
 
 	// Cancel confirmation message
 	if m.showCancelConfirm {
@@ -1407,7 +1486,12 @@ func (m *FormModel) View() string {
 	}
 
 	// Help
-	helpText := "tab accept/navigate • # ref task • ctrl+space suggest • " + IconArrowLeft() + IconArrowRight() + " select • ctrl+s submit • esc dismiss/cancel"
+	var helpText string
+	if m.showAdvanced {
+		helpText = "tab accept/navigate • # ref task • ctrl+space suggest • " + IconArrowLeft() + IconArrowRight() + " select • ctrl+e fewer options • ctrl+s submit • esc cancel"
+	} else {
+		helpText = "tab accept/navigate • ctrl+space suggest • ctrl+e more options • ctrl+s submit • esc cancel"
+	}
 	b.WriteString("  " + dimStyle.Render(helpText))
 
 	// Wrap in box - use full height (subtract 2 for border)
