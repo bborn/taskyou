@@ -13,6 +13,7 @@ import (
 	"github.com/bborn/workflow/internal/db"
 	"github.com/bborn/workflow/internal/executor"
 	"github.com/bborn/workflow/internal/github"
+	"github.com/bborn/workflow/internal/spotlight"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/glamour"
@@ -2173,6 +2174,25 @@ func (m *DetailModel) renderHeader() string {
 		meta.WriteString("  ")
 	}
 
+	// Spotlight badge
+	if t.WorktreePath != "" && spotlight.IsActive(t.WorktreePath) {
+		var spotlightStyle lipgloss.Style
+		if m.focused {
+			spotlightStyle = lipgloss.NewStyle().
+				Padding(0, 1).
+				Background(lipgloss.Color("214")). // Amber/yellow
+				Foreground(lipgloss.Color("#000000")).
+				Bold(true)
+		} else {
+			spotlightStyle = lipgloss.NewStyle().
+				Padding(0, 1).
+				Background(dimmedBg).
+				Foreground(dimmedFg)
+		}
+		meta.WriteString(spotlightStyle.Render("🔦 SPOTLIGHT"))
+		meta.WriteString("  ")
+	}
+
 	if t.Pinned {
 		var pinStyle lipgloss.Style
 		if m.focused {
@@ -2605,6 +2625,16 @@ func (m *DetailModel) renderHelp() string {
 			toggleDesc = "show shell"
 		}
 		keys = append(keys, helpKey{"\\", toggleDesc, false})
+	}
+
+	// Spotlight mode
+	if m.task != nil && m.task.WorktreePath != "" {
+		if spotlight.IsActive(m.task.WorktreePath) {
+			keys = append(keys, helpKey{"f", "spotlight off", false})
+			keys = append(keys, helpKey{"F", "sync", false})
+		} else {
+			keys = append(keys, helpKey{"f", "spotlight", false})
+		}
 	}
 
 	keys = append(keys, []helpKey{
