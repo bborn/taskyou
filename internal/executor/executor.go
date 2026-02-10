@@ -62,6 +62,9 @@ type Executor struct {
 	taskSubsMu sync.RWMutex
 	taskSubs   []chan TaskEvent
 
+	// Wakeup channel to trigger immediate task processing (non-blocking send)
+	wakeupCh chan struct{}
+
 	// Silent mode suppresses log output (for TUI embedding)
 	silent bool
 
@@ -140,6 +143,7 @@ func New(database *db.DB, cfg *config.Config) *Executor {
 		prCache:         github.NewPRCache(),
 		executorFactory: NewExecutorFactory(),
 		stopCh:          make(chan struct{}),
+		wakeupCh:        make(chan struct{}, 1),
 		subs:            make(map[int64][]chan *db.TaskLog),
 		taskSubs:        make([]chan TaskEvent, 0),
 		runningTasks:    make(map[int64]bool),
@@ -177,6 +181,7 @@ func NewWithLogging(database *db.DB, cfg *config.Config, w io.Writer) *Executor 
 		prCache:         github.NewPRCache(),
 		executorFactory: NewExecutorFactory(),
 		stopCh:          make(chan struct{}),
+		wakeupCh:        make(chan struct{}, 1),
 		subs:            make(map[int64][]chan *db.TaskLog),
 		taskSubs:        make([]chan TaskEvent, 0),
 		runningTasks:    make(map[int64]bool),
@@ -622,6 +627,8 @@ func (e *Executor) broadcastTaskEvent(event TaskEvent) {
 }
 
 // NotifyTaskChange notifies subscribers of a task change (for use by UI/other components).
+// If the task is newly queued, it also triggers immediate processing so the executor
+// starts without waiting for the next poll cycle.
 func (e *Executor) NotifyTaskChange(eventType string, task *db.Task) {
 	event := TaskEvent{
 		Type:   eventType,
@@ -629,6 +636,21 @@ func (e *Executor) NotifyTaskChange(eventType string, task *db.Task) {
 		TaskID: task.ID,
 	}
 	e.broadcastTaskEvent(event)
+
+	// Trigger immediate processing when a task becomes queued
+	if task.Status == db.StatusQueued {
+		e.TriggerProcessing()
+	}
+}
+
+// TriggerProcessing wakes up the worker loop to process queued tasks immediately.
+// This is a non-blocking operation; if a wakeup is already pending, the call is a no-op.
+func (e *Executor) TriggerProcessing() {
+	select {
+	case e.wakeupCh <- struct{}{}:
+	default:
+		// Already has a pending wakeup, no need to send another
+	}
 }
 
 // updateStatus updates task status in DB and broadcasts the change.
@@ -690,6 +712,9 @@ func (e *Executor) worker(ctx context.Context) {
 			return
 		case <-e.stopCh:
 			return
+		case <-e.wakeupCh:
+			// Immediate wakeup: a task was just enqueued, process it now
+			e.processNextTask(ctx)
 		case <-ticker.C:
 			e.processNextTask(ctx)
 

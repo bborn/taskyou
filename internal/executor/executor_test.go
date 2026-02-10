@@ -1672,3 +1672,97 @@ func TestWriteWorkflowMCPConfig(t *testing.T) {
 		}
 	})
 }
+
+func TestTriggerProcessing(t *testing.T) {
+	t.Run("non-blocking when channel empty", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		dbPath := filepath.Join(tmpDir, "test.db")
+		database, err := db.Open(dbPath)
+		if err != nil {
+			t.Fatalf("failed to open database: %v", err)
+		}
+		defer database.Close()
+
+		cfg := &config.Config{}
+		exec := New(database, cfg)
+
+		// Should not block even when called multiple times
+		exec.TriggerProcessing()
+		exec.TriggerProcessing()
+		exec.TriggerProcessing()
+
+		// Channel should have exactly one pending signal (buffered size 1)
+		select {
+		case <-exec.wakeupCh:
+			// Good, got the signal
+		default:
+			t.Error("expected a signal in wakeupCh")
+		}
+
+		// Channel should now be empty
+		select {
+		case <-exec.wakeupCh:
+			t.Error("expected wakeupCh to be empty after draining")
+		default:
+			// Good, channel is empty
+		}
+	})
+
+	t.Run("NotifyTaskChange triggers processing for queued tasks", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		dbPath := filepath.Join(tmpDir, "test.db")
+		database, err := db.Open(dbPath)
+		if err != nil {
+			t.Fatalf("failed to open database: %v", err)
+		}
+		defer database.Close()
+
+		cfg := &config.Config{}
+		exec := New(database, cfg)
+
+		task := &db.Task{
+			ID:     1,
+			Title:  "Test task",
+			Status: db.StatusQueued,
+		}
+
+		exec.NotifyTaskChange("status_changed", task)
+
+		// Should have a wakeup signal because task is queued
+		select {
+		case <-exec.wakeupCh:
+			// Good
+		default:
+			t.Error("expected wakeup signal when task is queued")
+		}
+	})
+
+	t.Run("NotifyTaskChange does not trigger for non-queued tasks", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		dbPath := filepath.Join(tmpDir, "test.db")
+		database, err := db.Open(dbPath)
+		if err != nil {
+			t.Fatalf("failed to open database: %v", err)
+		}
+		defer database.Close()
+
+		cfg := &config.Config{}
+		exec := New(database, cfg)
+
+		task := &db.Task{
+			ID:     1,
+			Title:  "Test task",
+			Status: db.StatusProcessing,
+		}
+
+		exec.NotifyTaskChange("status_changed", task)
+
+		// Should NOT have a wakeup signal
+		select {
+		case <-exec.wakeupCh:
+			t.Error("did not expect wakeup signal for non-queued task")
+		default:
+			// Good
+		}
+	})
+}
