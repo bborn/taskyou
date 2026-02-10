@@ -3993,6 +3993,10 @@ func (m *AppModel) retryTaskWithAttachments(id int64, feedback string, attachmen
 
 		// Session dead - re-queue for executor to pick up with --resume
 		err := database.RetryTask(id, feedback)
+		if err == nil {
+			// Trigger immediate processing so executor starts without waiting for next poll
+			exec.TriggerProcessing()
+		}
 		return taskRetriedMsg{err: err}
 	}
 }
