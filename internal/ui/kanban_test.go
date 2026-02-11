@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -1068,4 +1069,362 @@ func TestKanbanBoard_OriginColumnEmptyColumn(t *testing.T) {
 	if board.HasNextTask() {
 		t.Error("HasNextTask() should return false for empty column")
 	}
+}
+
+// TestKanbanBoard_SelectByShortcut tests selecting tasks by keyboard shortcuts 1-18.
+func TestKanbanBoard_SelectByShortcut(t *testing.T) {
+	board := NewKanbanBoard(100, 80) // Taller to fit more tasks
+
+	// Set up 15 tasks in the first column
+	tasks := make([]*db.Task, 15)
+	for i := 0; i < 15; i++ {
+		tasks[i] = &db.Task{ID: int64(i + 1), Title: fmt.Sprintf("Task %d", i+1), Status: db.StatusBacklog}
+	}
+	board.SetTasks(tasks)
+
+	tests := []struct {
+		name       string
+		shortcut   int
+		wantTaskID int64
+		wantNil    bool
+	}{
+		{"shortcut 1 selects first task", 1, 1, false},
+		{"shortcut 2 selects second task", 2, 2, false},
+		{"shortcut 9 selects ninth task", 9, 9, false},
+		{"shortcut 10 selects tenth task", 10, 10, false},
+		{"shortcut 11 selects eleventh task", 11, 11, false},
+		{"shortcut 15 selects fifteenth task", 15, 15, false},
+		{"shortcut 16 returns nil (only 15 tasks)", 16, 0, true},
+		{"shortcut 0 returns nil (invalid)", 0, 0, true},
+		{"shortcut 19 returns nil (out of range)", 19, 0, true},
+		{"shortcut -1 returns nil (invalid)", -1, 0, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Reset selection
+			board.selectedRow = 0
+
+			task := board.SelectByShortcut(tt.shortcut)
+
+			if tt.wantNil {
+				if task != nil {
+					t.Errorf("SelectByShortcut(%d) = task %d, want nil", tt.shortcut, task.ID)
+				}
+			} else {
+				if task == nil {
+					t.Errorf("SelectByShortcut(%d) = nil, want task %d", tt.shortcut, tt.wantTaskID)
+				} else if task.ID != tt.wantTaskID {
+					t.Errorf("SelectByShortcut(%d) = task %d, want task %d", tt.shortcut, task.ID, tt.wantTaskID)
+				}
+			}
+		})
+	}
+}
+
+// TestKanbanBoard_SelectByShortcutEmptyColumn tests SelectByShortcut on an empty column.
+func TestKanbanBoard_SelectByShortcutEmptyColumn(t *testing.T) {
+	board := NewKanbanBoard(100, 50)
+	board.SetTasks([]*db.Task{})
+
+	// Should return nil for any shortcut
+	task := board.SelectByShortcut(1)
+	if task != nil {
+		t.Errorf("SelectByShortcut(1) on empty column returned task, want nil")
+	}
+}
+
+// TestKanbanBoard_SelectByShortcutWithPinnedTasks tests that shortcuts work correctly
+// when there are pinned tasks at the top.
+func TestKanbanBoard_SelectByShortcutWithPinnedTasks(t *testing.T) {
+	board := NewKanbanBoard(100, 50)
+
+	tasks := []*db.Task{
+		{ID: 1, Title: "Pinned 1", Status: db.StatusBacklog, Pinned: true},
+		{ID: 2, Title: "Pinned 2", Status: db.StatusBacklog, Pinned: true},
+		{ID: 3, Title: "Task 3", Status: db.StatusBacklog},
+		{ID: 4, Title: "Task 4", Status: db.StatusBacklog},
+	}
+	board.SetTasks(tasks)
+
+	// Shortcut 1 should select the first pinned task
+	task := board.SelectByShortcut(1)
+	if task == nil || task.ID != 1 {
+		t.Errorf("SelectByShortcut(1) = %v, want task 1", task)
+	}
+
+	// Shortcut 3 should select the first unpinned task
+	task = board.SelectByShortcut(3)
+	if task == nil || task.ID != 3 {
+		t.Errorf("SelectByShortcut(3) = %v, want task 3", task)
+	}
+
+	// Shortcut 4 should select task 4
+	task = board.SelectByShortcut(4)
+	if task == nil || task.ID != 4 {
+		t.Errorf("SelectByShortcut(4) = %v, want task 4", task)
+	}
+}
+
+// TestKanbanBoard_ColumnColors verifies that each column has the correct and distinct color.
+// This is a regression test to ensure blocked column doesn't incorrectly use the muted color.
+func TestKanbanBoard_ColumnColors(t *testing.T) {
+	board := NewKanbanBoard(100, 50)
+
+	// Verify we have 4 columns
+	if len(board.columns) != 4 {
+		t.Fatalf("Expected 4 columns, got %d", len(board.columns))
+	}
+
+	// Verify column order and expected colors
+	expectedColumns := []struct {
+		title string
+		color string // Expected color variable name for debugging
+	}{
+		{"Backlog", "ColorMuted"},
+		{"In Progress", "ColorInProgress"},
+		{"Blocked", "ColorBlocked"},
+		{"Done", "ColorDone"},
+	}
+
+	for i, expected := range expectedColumns {
+		if board.columns[i].Title != expected.title {
+			t.Errorf("Column %d: expected title %q, got %q", i, expected.title, board.columns[i].Title)
+		}
+	}
+
+	// CRITICAL: Verify Blocked column (index 2) has a DIFFERENT color than Backlog (index 0)
+	// This catches the bug where blocked was showing as gray instead of red
+	backlogColor := board.columns[0].Color
+	blockedColor := board.columns[2].Color
+
+	if backlogColor == blockedColor {
+		t.Errorf("BUG: Blocked column has same color as Backlog column (both are %v). "+
+			"Blocked should be red (ColorBlocked), not gray (ColorMuted)", blockedColor)
+	}
+
+	// Verify the colors match the expected color variables
+	if board.columns[0].Color != ColorMuted {
+		t.Errorf("Backlog column should use ColorMuted, got %v", board.columns[0].Color)
+	}
+	if board.columns[1].Color != ColorInProgress {
+		t.Errorf("In Progress column should use ColorInProgress, got %v", board.columns[1].Color)
+	}
+	if board.columns[2].Color != ColorBlocked {
+		t.Errorf("Blocked column should use ColorBlocked, got %v", board.columns[2].Color)
+	}
+	if board.columns[3].Color != ColorDone {
+		t.Errorf("Done column should use ColorDone, got %v", board.columns[3].Color)
+	}
+
+	// Also verify the actual color values are different
+	if ColorMuted == ColorBlocked {
+		t.Errorf("BUG: ColorMuted and ColorBlocked have the same value: %v. "+
+			"ColorBlocked should be red (#E06C75), ColorMuted should be gray (#5C6370)", ColorMuted)
+	}
+}
+
+func TestEmptyColumnMessage(t *testing.T) {
+	tests := []struct {
+		status   string
+		expected string
+	}{
+		{db.StatusBacklog, "Press 'n' to create a task"},
+		{db.StatusQueued, "Press 'x' to execute a task"},
+		{db.StatusBlocked, "No tasks need input"},
+		{db.StatusDone, "Completed tasks appear here"},
+		{"unknown", "No tasks"},
+		{"", "No tasks"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.status, func(t *testing.T) {
+			got := emptyColumnMessage(tt.status)
+			if got != tt.expected {
+				t.Errorf("emptyColumnMessage(%q) = %q, want %q", tt.status, got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestKanbanBoard_IsEmpty(t *testing.T) {
+	board := NewKanbanBoard(100, 50)
+
+	t.Run("empty board is empty", func(t *testing.T) {
+		board.SetTasks(nil)
+		if !board.IsEmpty() {
+			t.Error("expected empty board to be empty")
+		}
+	})
+
+	t.Run("board with tasks is not empty", func(t *testing.T) {
+		board.SetTasks([]*db.Task{
+			{ID: 1, Title: "Task 1", Status: db.StatusBacklog},
+		})
+		if board.IsEmpty() {
+			t.Error("expected board with tasks to not be empty")
+		}
+	})
+
+	t.Run("empty slice is empty", func(t *testing.T) {
+		board.SetTasks([]*db.Task{})
+		if !board.IsEmpty() {
+			t.Error("expected board with empty slice to be empty")
+		}
+	})
+}
+
+func TestKanbanBoard_TotalTaskCount(t *testing.T) {
+	board := NewKanbanBoard(100, 50)
+
+	t.Run("empty board has zero tasks", func(t *testing.T) {
+		board.SetTasks(nil)
+		if count := board.TotalTaskCount(); count != 0 {
+			t.Errorf("expected 0 tasks, got %d", count)
+		}
+	})
+
+	t.Run("counts tasks across all columns", func(t *testing.T) {
+		board.SetTasks([]*db.Task{
+			{ID: 1, Title: "Task 1", Status: db.StatusBacklog},
+			{ID: 2, Title: "Task 2", Status: db.StatusQueued},
+			{ID: 3, Title: "Task 3", Status: db.StatusBlocked},
+			{ID: 4, Title: "Task 4", Status: db.StatusDone},
+		})
+		if count := board.TotalTaskCount(); count != 4 {
+			t.Errorf("expected 4 tasks, got %d", count)
+		}
+	})
+}
+
+func TestKanbanBoard_ColumnCollapse(t *testing.T) {
+	board := NewKanbanBoard(200, 50)
+	tasks := []*db.Task{
+		{ID: 1, Title: "Task 1", Status: db.StatusBacklog},
+		{ID: 2, Title: "Task 2", Status: db.StatusQueued},
+		{ID: 3, Title: "Task 3", Status: db.StatusBlocked},
+		{ID: 4, Title: "Task 4", Status: db.StatusDone},
+	}
+	board.SetTasks(tasks)
+
+	t.Run("initially no columns collapsed", func(t *testing.T) {
+		for i := 0; i < 4; i++ {
+			if board.IsColumnCollapsed(i) {
+				t.Errorf("column %d should not be collapsed initially", i)
+			}
+		}
+	})
+
+	t.Run("toggle collapse backlog", func(t *testing.T) {
+		board.FocusColumn(1) // Move selection away from backlog first
+		board.ToggleColumnCollapse(0)
+		if !board.IsColumnCollapsed(0) {
+			t.Error("backlog should be collapsed")
+		}
+		// Toggle again to uncollapse
+		board.ToggleColumnCollapse(0)
+		if board.IsColumnCollapsed(0) {
+			t.Error("backlog should be uncollapsed")
+		}
+	})
+
+	t.Run("toggle collapse done", func(t *testing.T) {
+		board.FocusColumn(1)
+		board.ToggleColumnCollapse(3)
+		if !board.IsColumnCollapsed(3) {
+			t.Error("done should be collapsed")
+		}
+		board.ToggleColumnCollapse(3)
+		if board.IsColumnCollapsed(3) {
+			t.Error("done should be uncollapsed")
+		}
+	})
+
+	t.Run("collapsing selected column moves selection", func(t *testing.T) {
+		board.FocusColumn(0) // Select backlog
+		board.ToggleColumnCollapse(0)
+		if board.selectedCol == 0 {
+			t.Error("selection should have moved away from collapsed column")
+		}
+		if board.IsColumnCollapsed(board.selectedCol) {
+			t.Error("selection should be on a non-collapsed column")
+		}
+		board.ToggleColumnCollapse(0) // Uncollapse
+	})
+
+	t.Run("MoveLeft skips collapsed columns", func(t *testing.T) {
+		board.FocusColumn(1) // Select In Progress
+		board.ToggleColumnCollapse(0) // Collapse backlog
+		board.MoveLeft()
+		// Should not move to backlog since it's collapsed
+		if board.selectedCol == 0 {
+			t.Error("MoveLeft should skip collapsed backlog")
+		}
+		if board.selectedCol != 1 {
+			t.Errorf("should stay on column 1, got %d", board.selectedCol)
+		}
+		board.ToggleColumnCollapse(0) // Uncollapse
+	})
+
+	t.Run("MoveRight skips collapsed columns", func(t *testing.T) {
+		board.FocusColumn(2) // Select Blocked
+		board.ToggleColumnCollapse(3) // Collapse Done
+		board.MoveRight()
+		// Should not move to done since it's collapsed
+		if board.selectedCol == 3 {
+			t.Error("MoveRight should skip collapsed done")
+		}
+		if board.selectedCol != 2 {
+			t.Errorf("should stay on column 2, got %d", board.selectedCol)
+		}
+		board.ToggleColumnCollapse(3) // Uncollapse
+	})
+
+	t.Run("FocusColumn uncollapses collapsed column", func(t *testing.T) {
+		board.FocusColumn(1) // Move away
+		board.ToggleColumnCollapse(0) // Collapse backlog
+		if !board.IsColumnCollapsed(0) {
+			t.Error("backlog should be collapsed")
+		}
+		board.FocusColumn(0) // Focus backlog directly
+		if board.IsColumnCollapsed(0) {
+			t.Error("FocusColumn should uncollapse the column")
+		}
+		if board.selectedCol != 0 {
+			t.Errorf("should be on column 0, got %d", board.selectedCol)
+		}
+	})
+
+	t.Run("collapsed column renders as thin strip", func(t *testing.T) {
+		board.FocusColumn(1)
+		board.ToggleColumnCollapse(0) // Collapse backlog
+		board.ToggleColumnCollapse(3) // Collapse done
+		view := board.View()
+		if view == "" {
+			t.Error("view should not be empty")
+		}
+		// The view should still render
+		if !strings.Contains(view, "In Progress") {
+			t.Error("expanded columns should still show their title")
+		}
+		board.ToggleColumnCollapse(0)
+		board.ToggleColumnCollapse(3)
+	})
+
+	t.Run("visibleColumnCount", func(t *testing.T) {
+		if board.visibleColumnCount() != 4 {
+			t.Errorf("expected 4 visible columns, got %d", board.visibleColumnCount())
+		}
+		board.FocusColumn(1)
+		board.ToggleColumnCollapse(0)
+		if board.visibleColumnCount() != 3 {
+			t.Errorf("expected 3 visible columns, got %d", board.visibleColumnCount())
+		}
+		board.ToggleColumnCollapse(3)
+		if board.visibleColumnCount() != 2 {
+			t.Errorf("expected 2 visible columns, got %d", board.visibleColumnCount())
+		}
+		board.ToggleColumnCollapse(0) // Uncollapse
+		board.ToggleColumnCollapse(3) // Uncollapse
+	})
 }

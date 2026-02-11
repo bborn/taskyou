@@ -9,6 +9,23 @@ import (
 	"github.com/bborn/workflow/internal/db"
 )
 
+// waitForFile polls for a file to exist with given content, with timeout.
+// This is more robust than time.Sleep for async operations.
+func waitForFile(t *testing.T, path string, timeout time.Duration) ([]byte, error) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	var lastErr error
+	for time.Now().Before(deadline) {
+		content, err := os.ReadFile(path)
+		if err == nil {
+			return content, nil
+		}
+		lastErr = err
+		time.Sleep(50 * time.Millisecond)
+	}
+	return nil, lastErr
+}
+
 func TestEmitterRunsHook(t *testing.T) {
 	hooksDir := t.TempDir()
 	markerFile := filepath.Join(hooksDir, "marker")
@@ -25,10 +42,8 @@ echo "$TASK_ID:$TASK_TITLE" > "` + markerFile + `"
 	task := &db.Task{ID: 42, Title: "Test Task"}
 	emitter.EmitTaskCreated(task)
 
-	// Wait for async hook execution
-	time.Sleep(500 * time.Millisecond)
-
-	content, err := os.ReadFile(markerFile)
+	// Poll for async hook execution with timeout (more robust than fixed sleep)
+	content, err := waitForFile(t, markerFile, 5*time.Second)
 	if err != nil {
 		t.Fatalf("hook didn't run: %v", err)
 	}
@@ -53,13 +68,37 @@ echo "$TASK_STATUS:$TASK_PROJECT" > "` + markerFile + `"
 	task := &db.Task{ID: 1, Title: "Done", Status: "done", Project: "personal"}
 	emitter.Emit(Event{Type: TaskCompleted, TaskID: task.ID, Task: task})
 
-	time.Sleep(500 * time.Millisecond)
-
-	content, err := os.ReadFile(markerFile)
+	// Poll for async hook execution with timeout (more robust than fixed sleep)
+	content, err := waitForFile(t, markerFile, 5*time.Second)
 	if err != nil {
 		t.Fatalf("hook didn't run: %v", err)
 	}
 	if string(content) != "done:personal\n" {
+		t.Errorf("unexpected hook output: %q", content)
+	}
+}
+
+func TestEmitterWorktreeReadyPassesEnv(t *testing.T) {
+	hooksDir := t.TempDir()
+	markerFile := filepath.Join(hooksDir, "wt_marker")
+	hookScript := filepath.Join(hooksDir, TaskWorktreeReady)
+
+	script := `#!/bin/sh
+echo "$WORKTREE_PATH:$WORKTREE_BRANCH:$WORKTREE_PORT" > "` + markerFile + `"
+`
+	if err := os.WriteFile(hookScript, []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	emitter := New(hooksDir)
+	task := &db.Task{ID: 7, Title: "Setup", WorktreePath: "/tmp/wt/7-setup", BranchName: "task/7-setup", Port: 4200}
+	emitter.EmitTaskWorktreeReady(task)
+
+	content, err := waitForFile(t, markerFile, 5*time.Second)
+	if err != nil {
+		t.Fatalf("hook didn't run: %v", err)
+	}
+	if string(content) != "/tmp/wt/7-setup:task/7-setup:4200\n" {
 		t.Errorf("unexpected hook output: %q", content)
 	}
 }

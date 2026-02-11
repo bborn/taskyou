@@ -10,10 +10,13 @@ import (
 	"strings"
 	"time"
 
+	"github.com/bborn/workflow/internal/ai"
 	"github.com/bborn/workflow/internal/autocomplete"
+	"github.com/bborn/workflow/internal/config"
 	"github.com/bborn/workflow/internal/db"
 	"github.com/bborn/workflow/internal/executor"
 	"github.com/bborn/workflow/internal/github"
+	"github.com/bborn/workflow/internal/spotlight"
 	"github.com/bborn/workflow/internal/tasksummary"
 	"github.com/charmbracelet/bubbles/help"
 	"github.com/charmbracelet/bubbles/key"
@@ -22,6 +25,7 @@ import (
 	"github.com/charmbracelet/huh"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/fsnotify/fsnotify"
+	"github.com/muesli/termenv"
 )
 
 // View represents the current view.
@@ -71,8 +75,7 @@ type KeyMap struct {
 	Filter                   key.Binding
 	OpenWorktree             key.Binding
 	ToggleShellPane          key.Binding
-	JumpToNotification       key.Binding
-	JumpToNotificationDetail key.Binding // For detail view (uses Ctrl+g to avoid conflicting with text input)
+	JumpToNotification key.Binding
 	// Column focus shortcuts
 	FocusBacklog    key.Binding
 	FocusInProgress key.Binding
@@ -81,11 +84,22 @@ type KeyMap struct {
 	// Jump to pinned/unpinned tasks
 	JumpToPinned   key.Binding
 	JumpToUnpinned key.Binding
+	// Column collapse
+	CollapseBacklog key.Binding
+	CollapseDone    key.Binding
+	// Open browser
+	OpenBrowser key.Binding
+	// Quick approve/deny for executor prompts
+	ApprovePrompt key.Binding
+	DenyPrompt    key.Binding
+	// Spotlight mode
+	Spotlight     key.Binding
+	SpotlightSync key.Binding
 }
 
 // ShortHelp returns key bindings to show in the mini help.
 func (k KeyMap) ShortHelp() []key.Binding {
-	return []key.Binding{k.Left, k.Right, k.Up, k.Down, k.Enter, k.New, k.Queue, k.Filter, k.CommandPalette, k.Quit}
+	return []key.Binding{k.Left, k.Right, k.Up, k.Down, k.Enter, k.New, k.Queue, k.Filter, k.CommandPalette, k.OpenBrowser, k.Quit}
 }
 
 // FullHelp returns keybindings for the expanded help view.
@@ -93,9 +107,9 @@ func (k KeyMap) FullHelp() [][]key.Binding {
 	return [][]key.Binding{
 		{k.Left, k.Right, k.Up, k.Down},
 		{k.JumpToPinned, k.JumpToUnpinned},
-		{k.FocusBacklog, k.FocusInProgress, k.FocusBlocked, k.FocusDone},
+		{k.FocusBacklog, k.FocusInProgress, k.FocusBlocked, k.FocusDone, k.CollapseBacklog, k.CollapseDone},
 		{k.Enter, k.New, k.Queue, k.Close},
-		{k.Retry, k.Archive, k.Delete, k.OpenWorktree},
+		{k.Retry, k.Archive, k.Delete, k.OpenWorktree, k.OpenBrowser, k.Spotlight},
 		{k.Filter, k.CommandPalette, k.Settings},
 		{k.ChangeStatus, k.TogglePin, k.Refresh, k.Help},
 		{k.Quit},
@@ -205,10 +219,6 @@ func DefaultKeyMap() KeyMap {
 			key.WithKeys("g"),
 			key.WithHelp("g", "go to notification"),
 		),
-		JumpToNotificationDetail: key.NewBinding(
-			key.WithKeys("ctrl+g"),
-			key.WithHelp("ctrl+g", "go to notification"),
-		),
 		FocusBacklog: key.NewBinding(
 			key.WithKeys("B"),
 			key.WithHelp("B", "backlog"),
@@ -233,7 +243,116 @@ func DefaultKeyMap() KeyMap {
 			key.WithKeys("shift+down"),
 			key.WithHelp(IconShiftDown(), "jump to unpinned"),
 		),
+		CollapseBacklog: key.NewBinding(
+			key.WithKeys("["),
+			key.WithHelp("[", "collapse backlog"),
+		),
+		CollapseDone: key.NewBinding(
+			key.WithKeys("]"),
+			key.WithHelp("]", "collapse done"),
+		),
+		OpenBrowser: key.NewBinding(
+			key.WithKeys("b"),
+			key.WithHelp("b", "open in browser"),
+		),
+		ApprovePrompt: key.NewBinding(
+			key.WithKeys("y"),
+			key.WithHelp("y", "approve"),
+		),
+		DenyPrompt: key.NewBinding(
+			key.WithKeys("N"),
+			key.WithHelp("N", "deny"),
+		),
+		Spotlight: key.NewBinding(
+			key.WithKeys("f"),
+			key.WithHelp("f", "spotlight"),
+		),
+		SpotlightSync: key.NewBinding(
+			key.WithKeys("F"),
+			key.WithHelp("F", "spotlight sync"),
+		),
 	}
+}
+
+// ApplyKeybindingsConfig applies custom keybindings from a config to the KeyMap.
+// Only non-nil config values override the defaults.
+func ApplyKeybindingsConfig(km KeyMap, cfg *config.KeybindingsConfig) KeyMap {
+	if cfg == nil {
+		return km
+	}
+
+	// Helper to create a key binding from config
+	applyBinding := func(current key.Binding, kc *config.KeybindingConfig) key.Binding {
+		if kc == nil || len(kc.Keys) == 0 {
+			return current
+		}
+		help := kc.Help
+		if help == "" {
+			// Preserve existing help text if not specified
+			help = current.Help().Key
+		}
+		return key.NewBinding(
+			key.WithKeys(kc.Keys...),
+			key.WithHelp(kc.Keys[0], help),
+		)
+	}
+
+	// Apply each binding if configured
+	km.Left = applyBinding(km.Left, cfg.Left)
+	km.Right = applyBinding(km.Right, cfg.Right)
+	km.Up = applyBinding(km.Up, cfg.Up)
+	km.Down = applyBinding(km.Down, cfg.Down)
+	km.Enter = applyBinding(km.Enter, cfg.Enter)
+	km.Back = applyBinding(km.Back, cfg.Back)
+	km.New = applyBinding(km.New, cfg.New)
+	km.Edit = applyBinding(km.Edit, cfg.Edit)
+	km.Queue = applyBinding(km.Queue, cfg.Queue)
+	km.Retry = applyBinding(km.Retry, cfg.Retry)
+	km.Close = applyBinding(km.Close, cfg.Close)
+	km.Archive = applyBinding(km.Archive, cfg.Archive)
+	km.Delete = applyBinding(km.Delete, cfg.Delete)
+	km.Refresh = applyBinding(km.Refresh, cfg.Refresh)
+	km.Settings = applyBinding(km.Settings, cfg.Settings)
+	km.Help = applyBinding(km.Help, cfg.Help)
+	km.Quit = applyBinding(km.Quit, cfg.Quit)
+	km.ChangeStatus = applyBinding(km.ChangeStatus, cfg.ChangeStatus)
+	km.CommandPalette = applyBinding(km.CommandPalette, cfg.CommandPalette)
+	km.ToggleDangerous = applyBinding(km.ToggleDangerous, cfg.ToggleDangerous)
+	km.TogglePin = applyBinding(km.TogglePin, cfg.TogglePin)
+	km.Filter = applyBinding(km.Filter, cfg.Filter)
+	km.OpenWorktree = applyBinding(km.OpenWorktree, cfg.OpenWorktree)
+	km.ToggleShellPane = applyBinding(km.ToggleShellPane, cfg.ToggleShellPane)
+	km.JumpToNotification = applyBinding(km.JumpToNotification, cfg.JumpToNotification)
+	km.FocusBacklog = applyBinding(km.FocusBacklog, cfg.FocusBacklog)
+	km.FocusInProgress = applyBinding(km.FocusInProgress, cfg.FocusInProgress)
+	km.FocusBlocked = applyBinding(km.FocusBlocked, cfg.FocusBlocked)
+	km.FocusDone = applyBinding(km.FocusDone, cfg.FocusDone)
+	km.JumpToPinned = applyBinding(km.JumpToPinned, cfg.JumpToPinned)
+	km.JumpToUnpinned = applyBinding(km.JumpToUnpinned, cfg.JumpToUnpinned)
+	km.CollapseBacklog = applyBinding(km.CollapseBacklog, cfg.CollapseBacklog)
+	km.CollapseDone = applyBinding(km.CollapseDone, cfg.CollapseDone)
+	km.OpenBrowser = applyBinding(km.OpenBrowser, cfg.OpenBrowser)
+	km.ApprovePrompt = applyBinding(km.ApprovePrompt, cfg.ApprovePrompt)
+	km.DenyPrompt = applyBinding(km.DenyPrompt, cfg.DenyPrompt)
+	km.Spotlight = applyBinding(km.Spotlight, cfg.Spotlight)
+	km.SpotlightSync = applyBinding(km.SpotlightSync, cfg.SpotlightSync)
+
+	return km
+}
+
+// LoadKeyMap loads the KeyMap from the config file, falling back to defaults.
+func LoadKeyMap() KeyMap {
+	km := DefaultKeyMap()
+
+	cfg, err := config.LoadKeybindings()
+	if err != nil {
+		// Log error but continue with defaults
+		log := GetLogger()
+		log.Error("Failed to load keybindings config: %v", err)
+		return km
+	}
+
+	return ApplyKeybindingsConfig(km, cfg)
 }
 
 // AppModel is the main application model.
@@ -263,6 +382,10 @@ type AppModel struct {
 	prevStatuses map[int64]string
 	// Track tasks with active input notifications (for UI highlighting)
 	tasksNeedingInput map[int64]bool
+	// Cached executor prompt messages for blocked tasks (from DB hook logs)
+	executorPrompts map[int64]string
+	// Track tasks the user closed manually (suppress notification for these)
+	userClosedTaskIDs map[int64]bool
 
 	// Real-time event subscription
 	eventCh chan executor.TaskEvent
@@ -274,6 +397,10 @@ type AppModel struct {
 	// PR status cache
 	prCache              *github.PRCache
 	initialPRRefreshDone bool // Track if initial PR refresh after load is done
+
+	// Keyboard shortcut state for double-digit shortcuts (11, 22, etc.)
+	pendingShortcutDigit string    // First digit of a potential double-digit shortcut
+	shortcutTimeout      time.Time // When the pending digit expires
 
 	// Detail view state
 	selectedTask *db.Task
@@ -335,6 +462,12 @@ type AppModel struct {
 
 	// Command palette view state
 	commandPaletteView *CommandPaletteModel
+	// Track where to return after command palette (separate from previousView)
+	commandPaletteReturnView   View
+	commandPaletteReturnTaskID int64
+
+	// AI command service for natural language command interpretation
+	aiCommandService *ai.CommandService
 
 	// Filter state
 	filterInput        textinput.Model
@@ -349,6 +482,14 @@ type AppModel struct {
 	// Window size
 	width  int
 	height int
+
+	// Debug state file path
+	debugStatePath string
+
+	// First-time experience
+	isFirstLoad     bool // Track if this is the first load of tasks
+	showWelcome     bool // Show welcome message when kanban is empty
+	onboardingShown bool // Track if we've already shown the onboarding (to prevent double-triggering)
 }
 
 // taskExecutorDisplayName returns the display name for a task's executor.
@@ -393,6 +534,12 @@ func NewAppModel(database *db.DB, exec *executor.Executor, workingDir string) *A
 	log.Info("=== TaskYou TUI starting ===")
 	log.Info("NewAppModel: workingDir=%q", workingDir)
 
+	// Force TrueColor mode to ensure our theme colors render correctly.
+	// Without this, some terminals (especially when accessed via SSH) may
+	// approximate colors incorrectly, causing issues like the blocked column
+	// appearing gray instead of red.
+	lipgloss.SetColorProfile(termenv.TrueColor)
+
 	// Load saved theme from database
 	LoadThemeFromDB(database.GetSetting)
 
@@ -424,11 +571,18 @@ func NewAppModel(database *db.DB, exec *executor.Executor, workingDir string) *A
 	// Create filter autocomplete for project suggestions
 	filterAutocomplete := NewFilterAutocompleteModel(database)
 
+	// Initialize AI command service (uses ANTHROPIC_API_KEY or database setting)
+	var apiKey string
+	if database != nil {
+		apiKey, _ = database.GetSetting("anthropic_api_key")
+	}
+	aiCmdService := ai.NewCommandService(apiKey)
+
 	model := &AppModel{
 		db:                 database,
 		executor:           exec,
 		workingDir:         workingDir,
-		keys:               DefaultKeyMap(),
+		keys:               LoadKeyMap(),
 		help:               h,
 		currentView:        ViewDashboard,
 		kanban:             kanban,
@@ -436,6 +590,8 @@ func NewAppModel(database *db.DB, exec *executor.Executor, workingDir string) *A
 		prevStatuses:       make(map[int64]string),
 		tasksNeedingInput:  make(map[int64]bool),
 		lastViewedAt:       make(map[int64]time.Time),
+		executorPrompts:    make(map[int64]string),
+		userClosedTaskIDs:  make(map[int64]bool),
 		watcher:            watcher,
 		dbChangeCh:         dbChangeCh,
 		prCache:            github.NewPRCache(),
@@ -443,9 +599,24 @@ func NewAppModel(database *db.DB, exec *executor.Executor, workingDir string) *A
 		filterText:         "",
 		filterAutocomplete: filterAutocomplete,
 		availableExecutors: availableExecutors,
+		aiCommandService:   aiCmdService,
+		isFirstLoad:        true,  // Track first load for onboarding
+		showWelcome:        false, // Will be set true when kanban is empty
 	}
 
 	return model
+}
+
+// SetTasks sets the tasks for the model (useful for debugging/testing).
+func (m *AppModel) SetTasks(tasks []*db.Task) {
+	m.tasks = tasks
+	m.loading = false
+	m.kanban.SetTasks(tasks)
+}
+
+// SetDebugStatePath sets the path for dumping debug state.
+func (m *AppModel) SetDebugStatePath(path string) {
+	m.debugStatePath = path
 }
 
 // Init initializes the model.
@@ -471,6 +642,11 @@ func (m *AppModel) Init() tea.Cmd {
 // Update handles messages.
 func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
+	prevView := m.currentView
+
+	if sizeMsg, ok := msg.(tea.WindowSizeMsg); ok {
+		m.applyWindowSize(sizeMsg.Width, sizeMsg.Height)
+	}
 
 	// Handle form updates first (needs all message types)
 	if m.currentView == ViewNewTask && m.newTaskForm != nil {
@@ -534,7 +710,12 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Command palette works from any view
 		if key.Matches(msg, m.keys.CommandPalette) {
 			m.commandPaletteView = NewCommandPaletteModel(m.db, m.tasks, m.width, m.height)
-			m.previousView = m.currentView
+			m.commandPaletteReturnView = m.currentView
+			if m.currentView == ViewDetail && m.selectedTask != nil {
+				m.commandPaletteReturnTaskID = m.selectedTask.ID
+			} else {
+				m.commandPaletteReturnTaskID = 0
+			}
 			m.currentView = ViewCommandPalette
 			return m, m.commandPaletteView.Init()
 		}
@@ -558,34 +739,29 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
-	case tea.WindowSizeMsg:
-		m.width = msg.Width
-		m.height = msg.Height
-		m.help.Width = msg.Width
-		m.kanban.SetSize(msg.Width, msg.Height-4)
-		if m.detailView != nil {
-			m.detailView.SetSize(msg.Width, msg.Height)
-		}
-		if m.settingsView != nil {
-			m.settingsView.SetSize(msg.Width, msg.Height)
-		}
-		if m.retryView != nil {
-			m.retryView.SetSize(msg.Width, msg.Height)
-		}
-		if m.commandPaletteView != nil {
-			m.commandPaletteView.SetSize(msg.Width, msg.Height)
-		}
-		if m.newTaskForm != nil {
-			m.newTaskForm.SetSize(msg.Width, msg.Height)
-		}
-		if m.editTaskForm != nil {
-			m.editTaskForm.SetSize(msg.Width, msg.Height)
-		}
-
 	case tasksLoadedMsg:
 		m.loading = false
 		m.tasks = msg.tasks
 		m.err = msg.err
+
+		// First-time experience: auto-open new task form on first run when no tasks exist
+		if m.isFirstLoad {
+			m.isFirstLoad = false
+			m.showWelcome = len(msg.tasks) == 0
+
+			// If this is the very first run (no tasks, onboarding not completed), auto-open new task form
+			if len(msg.tasks) == 0 && m.db.IsFirstRun() && !m.onboardingShown {
+				m.onboardingShown = true
+				// Auto-open the new task form to guide users to create their first task
+				m.newTaskForm = NewFormModel(m.db, m.width, m.height, m.workingDir, m.availableExecutors)
+				m.previousView = m.currentView
+				m.currentView = ViewNewTask
+				return m, m.newTaskForm.Init()
+			}
+		}
+
+		// Update showWelcome based on current task count
+		m.showWelcome = len(msg.tasks) == 0
 
 		// Check for newly blocked/done tasks and notify
 		for _, t := range m.tasks {
@@ -597,26 +773,21 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.notifyUntil = time.Now().Add(10 * time.Second)
 					m.notifyTaskID = t.ID
 					RingBell() // Ring terminal bell (writes to /dev/tty to bypass TUI)
-					// Mark task as needing input for kanban highlighting
-					m.tasksNeedingInput[t.ID] = true
-					// Immediately update detail view notification if active
-					if m.currentView == ViewDetail && m.detailView != nil {
-						m.detailView.SetNotification(m.notification, m.notifyTaskID, m.notifyUntil)
-					}
 				} else if t.Status == db.StatusDone && db.IsInProgress(prevStatus) {
 					// Task completed - ring bell and show notification
 					m.notification = fmt.Sprintf("%s Task #%d complete: %s (g to jump)", IconDone(), t.ID, t.Title)
 					m.notifyUntil = time.Now().Add(5 * time.Second)
 					m.notifyTaskID = t.ID
 					RingBell() // Ring terminal bell (writes to /dev/tty to bypass TUI)
-					// Immediately update detail view notification if active
-					if m.currentView == ViewDetail && m.detailView != nil {
-						m.detailView.SetNotification(m.notification, m.notifyTaskID, m.notifyUntil)
-					}
 				}
-				// Clear needing input flag when task leaves blocked status
-				if prevStatus == db.StatusBlocked && t.Status != db.StatusBlocked {
-					delete(m.tasksNeedingInput, t.ID)
+				// On any status change, re-validate cached prompt state.
+				// Handles external approval (e.g. from tmux) where PreToolUse
+				// logs "Claude resumed working" and transitions to processing.
+				if m.tasksNeedingInput[t.ID] {
+					if m.latestPermissionPrompt(t.ID) == "" {
+						delete(m.tasksNeedingInput, t.ID)
+						delete(m.executorPrompts, t.ID)
+					}
 				}
 			}
 			m.prevStatuses[t.ID] = t.Status
@@ -627,6 +798,25 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if m.detailView != nil {
 					m.detailView.UpdateTask(t)
 				}
+			}
+		}
+
+		// Sync permission prompt state for all active tasks from DB hook logs.
+		// This is status-agnostic: detects pending prompts on any task, and
+		// clears stale entries when prompts are resolved. Only queries tasks
+		// not already cached, so cost is minimal after initial detection.
+		for _, t := range m.tasks {
+			if t.Status == db.StatusDone || t.Status == db.StatusBacklog {
+				delete(m.tasksNeedingInput, t.ID)
+				delete(m.executorPrompts, t.ID)
+				continue
+			}
+			if m.tasksNeedingInput[t.ID] {
+				continue // already detected, cleared by executorRespondedMsg or next status change
+			}
+			if prompt := m.latestPermissionPrompt(t.ID); prompt != "" {
+				m.tasksNeedingInput[t.ID] = true
+				m.executorPrompts[t.ID] = prompt
 			}
 		}
 
@@ -641,6 +831,16 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.kanban.SetRunningProcesses(running)
 		m.kanban.SetTasksNeedingInput(m.tasksNeedingInput)
+		m.kanban.SetBlockedByDeps(msg.blockedByDeps)
+
+		// Load cached PR info from database for instant display
+		for _, t := range m.tasks {
+			if t.PRInfoJSON != "" {
+				if info := github.UnmarshalPRInfo(t.PRInfoJSON); info != nil {
+					m.kanban.SetPRInfo(t.ID, info)
+				}
+			}
+		}
 
 		// Trigger initial PR refresh after first task load (subsequent refreshes via prRefreshTick)
 		if !m.initialPRRefreshDone {
@@ -656,7 +856,18 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.taskTransitionGraceUntil = time.Now().Add(500 * time.Millisecond)
 		if msg.err == nil {
 			m.selectedTask = msg.task
+			// Update last_accessed_at in m.tasks for command palette sorting
+			// The DB update happens async in loadTaskWithOptions, so we update the
+			// in-memory list here to ensure Ctrl+P shows recently visited tasks first
 			now := time.Now()
+			nowLocal := db.LocalTime{Time: now}
+			msg.task.LastAccessedAt = &nowLocal
+			for i, t := range m.tasks {
+				if t.ID == msg.task.ID {
+					m.tasks[i].LastAccessedAt = &nowLocal
+					break
+				}
+			}
 			lastViewed, hasLast := m.lastViewedAt[msg.task.ID]
 			m.lastViewedAt[msg.task.ID] = now
 			// Clean up any duplicate tmux windows for this task before switching
@@ -708,6 +919,9 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.detailView != nil && m.selectedTask != nil && m.selectedTask.ID == msg.taskID {
 				m.detailView.SetPRInfo(msg.info)
 			}
+			// Persist PR state to database for instant display on next startup
+			prJSON := github.MarshalPRInfo(msg.info)
+			m.db.UpdateTaskPRInfo(msg.taskID, msg.info.URL, msg.info.Number, prJSON)
 		}
 
 	case prBatchMsg:
@@ -719,20 +933,24 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if m.detailView != nil && m.selectedTask != nil && m.selectedTask.ID == result.taskID {
 					m.detailView.SetPRInfo(result.info)
 				}
+				// Persist PR state to database for instant display on next startup
+				prJSON := github.MarshalPRInfo(result.info)
+				m.db.UpdateTaskPRInfo(result.taskID, result.info.URL, result.info.Number, prJSON)
 			}
 		}
 
 	case prRefreshTickMsg:
-		// Periodically refresh PR info (every 30 seconds)
-		if m.currentView == ViewDashboard {
-			cmds = append(cmds, m.refreshAllPRs())
-		}
+		// Periodically refresh PR info (every 15 seconds)
+		// Always refresh regardless of view - PR state is persisted to DB
+		// so it stays current even when navigating between views
+		cmds = append(cmds, m.refreshAllPRs())
 		cmds = append(cmds, m.prRefreshTick())
 
 	case taskCreatedMsg:
 		if msg.err == nil {
 			m.currentView = ViewDashboard
 			m.newTaskForm = nil
+			m.showWelcome = false // Hide welcome message after first task is created
 			cmds = append(cmds, m.loadTasks())
 		} else {
 			m.err = msg.err
@@ -788,8 +1006,25 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		cmds = append(cmds, m.loadTasks())
 
-	case taskQueuedMsg, taskClosedMsg, taskArchivedMsg, taskDeletedMsg, taskRetriedMsg, taskStatusChangedMsg:
+	case taskQueuedMsg:
+		if msg.err == nil && m.selectedTask != nil && m.detailView != nil {
+			if task, err := m.db.GetTask(m.selectedTask.ID); err == nil && task != nil {
+				m.selectedTask = task
+				m.detailView.UpdateTask(task)
+			}
+		}
 		cmds = append(cmds, m.loadTasks())
+
+	case taskClosedMsg, taskArchivedMsg, taskUnarchivedMsg, taskDeletedMsg, taskRetriedMsg, taskStatusChangedMsg:
+		cmds = append(cmds, m.loadTasks())
+
+	case aiCommandMsg:
+		if msg.err != nil {
+			m.notification = fmt.Sprintf("%s %s", IconBlocked(), msg.err.Error())
+			m.notifyUntil = time.Now().Add(5 * time.Second)
+		} else if msg.cmd != nil {
+			cmds = append(cmds, m.handleAICommand(msg.cmd))
+		}
 
 	case taskDangerousModeToggledMsg:
 		cmds = append(cmds, m.loadTasks())
@@ -852,6 +1087,41 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
+	case browserOpenedMsg:
+		if msg.err != nil {
+			m.notification = fmt.Sprintf("%s %s", IconBlocked(), msg.err.Error())
+			m.notifyUntil = time.Now().Add(5 * time.Second)
+		} else if msg.message != "" {
+			m.notification = fmt.Sprintf("🌐 %s", msg.message)
+			m.notifyUntil = time.Now().Add(3 * time.Second)
+		}
+
+	case spotlightMsg:
+		if msg.err != nil {
+			m.notification = fmt.Sprintf("%s Spotlight: %s", IconBlocked(), msg.err.Error())
+		} else {
+			m.notification = fmt.Sprintf("🔦 %s", msg.message)
+		}
+		m.notifyUntil = time.Now().Add(5 * time.Second)
+
+	case executorRespondedMsg:
+		if msg.err != nil {
+			m.notification = fmt.Sprintf("%s Failed to %s: %s", IconBlocked(), msg.action, msg.err.Error())
+			m.notifyUntil = time.Now().Add(5 * time.Second)
+		} else {
+			action := "Approved"
+			if msg.action == "deny" {
+				action = "Denied"
+			}
+			m.notification = fmt.Sprintf("%s %s executor prompt for task #%d", IconDone(), action, msg.taskID)
+			m.notifyUntil = time.Now().Add(3 * time.Second)
+			// Clear the cached prompt since we've responded
+			delete(m.executorPrompts, msg.taskID)
+			delete(m.tasksNeedingInput, msg.taskID)
+			m.kanban.SetTasksNeedingInput(m.tasksNeedingInput)
+		}
+		cmds = append(cmds, m.loadTasks())
+
 	case taskEventMsg:
 		// Real-time task update from executor
 		event := msg.event
@@ -862,40 +1132,33 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					prevStatus := t.Status
 					m.tasks[i] = event.Task
 
-					// Show notification for status changes
+					// Show notification for status changes (skip if user closed this task manually)
 					if prevStatus != event.Task.Status {
+						userClosed := m.userClosedTaskIDs[event.TaskID]
+						if userClosed {
+							delete(m.userClosedTaskIDs, event.TaskID)
+						}
 						if event.Task.Status == db.StatusBlocked {
 							m.notification = fmt.Sprintf("⚠ Task #%d needs input: %s (g to jump)", event.TaskID, event.Task.Title)
 							m.notifyUntil = time.Now().Add(10 * time.Second)
 							m.notifyTaskID = event.TaskID
 							RingBell() // Ring terminal bell (writes to /dev/tty to bypass TUI)
-							// Mark task as needing input for kanban highlighting
-							m.tasksNeedingInput[event.TaskID] = true
-							// Immediately update detail view notification if active
-							if m.currentView == ViewDetail && m.detailView != nil {
-								m.detailView.SetNotification(m.notification, m.notifyTaskID, m.notifyUntil)
-							}
-						} else if event.Task.Status == db.StatusDone && db.IsInProgress(prevStatus) {
+						} else if event.Task.Status == db.StatusDone && db.IsInProgress(prevStatus) && !userClosed {
 							m.notification = fmt.Sprintf("✓ Task #%d complete: %s (g to jump)", event.TaskID, event.Task.Title)
 							m.notifyUntil = time.Now().Add(5 * time.Second)
 							m.notifyTaskID = event.TaskID
 							RingBell() // Ring terminal bell (writes to /dev/tty to bypass TUI)
-							// Immediately update detail view notification if active
-							if m.currentView == ViewDetail && m.detailView != nil {
-								m.detailView.SetNotification(m.notification, m.notifyTaskID, m.notifyUntil)
-							}
 						} else if db.IsInProgress(event.Task.Status) {
 							m.notification = fmt.Sprintf("%s Task #%d started: %s (g to jump)", IconInProgress(), event.TaskID, event.Task.Title)
 							m.notifyUntil = time.Now().Add(3 * time.Second)
 							m.notifyTaskID = event.TaskID
-							// Immediately update detail view notification if active
-							if m.currentView == ViewDetail && m.detailView != nil {
-								m.detailView.SetNotification(m.notification, m.notifyTaskID, m.notifyUntil)
-							}
 						}
-						// Clear needing input flag when task leaves blocked status
-						if prevStatus == db.StatusBlocked && event.Task.Status != db.StatusBlocked {
-							delete(m.tasksNeedingInput, event.TaskID)
+						// Re-validate cached prompt state on any status change
+						if m.tasksNeedingInput[event.TaskID] {
+							if m.latestPermissionPrompt(event.TaskID) == "" {
+								delete(m.tasksNeedingInput, event.TaskID)
+								delete(m.executorPrompts, event.TaskID)
+							}
 						}
 						m.prevStatuses[event.TaskID] = event.Task.Status
 					}
@@ -929,7 +1192,9 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			// Pass notification state to detail view
 			m.detailView.SetNotification(m.notification, m.notifyTaskID, m.notifyUntil)
-			m.detailView.Refresh()
+			if cmd := m.detailView.Refresh(); cmd != nil {
+				cmds = append(cmds, cmd)
+			}
 		}
 		// Poll database for task changes (hooks run in separate process)
 		if m.currentView == ViewDashboard && !m.loading {
@@ -955,6 +1220,19 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, m.focusTick())
 		}
 
+	case shortcutTimeoutMsg:
+		// Only handle if this timeout matches the current pending shortcut
+		// (prevents stale timeouts from firing after a successful double-digit)
+		if m.pendingShortcutDigit == msg.digit && msg.timeout.Equal(m.shortcutTimeout) {
+			m.pendingShortcutDigit = ""
+			if idx := TaskIndexFromShortcut(msg.digit); idx > 0 {
+				if task := m.kanban.SelectByShortcut(idx); task != nil {
+					return m, m.loadTask(task.ID)
+				}
+			}
+		}
+		return m, nil
+
 	case dbChangeMsg:
 		// Database file changed - reload tasks
 		cmds = append(cmds, m.loadTasks())
@@ -973,7 +1251,43 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	}
 
+	// Trigger PR refresh when transitioning back to dashboard from another view
+	if m.currentView == ViewDashboard && prevView != ViewDashboard && m.initialPRRefreshDone {
+		cmds = append(cmds, m.refreshAllPRs())
+	}
+
+	// Dump debug state if enabled
+	if m.debugStatePath != "" {
+		// Ignore errors during debug dump to avoid crashing UI
+		_ = m.DumpDebugStateToFile(m.debugStatePath)
+	}
+
 	return m, tea.Batch(cmds...)
+}
+
+func (m *AppModel) applyWindowSize(width, height int) {
+	m.width = width
+	m.height = height
+	m.help.Width = width
+	m.kanban.SetSize(width, height-4)
+	if m.detailView != nil {
+		m.detailView.SetSize(width, height)
+	}
+	if m.settingsView != nil {
+		m.settingsView.SetSize(width, height)
+	}
+	if m.retryView != nil {
+		m.retryView.SetSize(width, height)
+	}
+	if m.commandPaletteView != nil {
+		m.commandPaletteView.SetSize(width, height)
+	}
+	if m.newTaskForm != nil {
+		m.newTaskForm.SetSize(width, height)
+	}
+	if m.editTaskForm != nil {
+		m.editTaskForm.SetSize(width, height)
+	}
 }
 
 // View renders the current view.
@@ -1117,6 +1431,14 @@ func (m *AppModel) viewDashboard() string {
 		filterBarHeight = lipgloss.Height(filterBar)
 	}
 
+	// Render executor prompt preview if applicable
+	promptPreview := ""
+	promptPreviewHeight := 0
+	if task := m.kanban.SelectedTask(); task != nil && m.tasksNeedingInput[task.ID] {
+		promptPreview = m.renderExecutorPromptPreview(task)
+		promptPreviewHeight = lipgloss.Height(promptPreview)
+	}
+
 	// Calculate heights dynamically
 	headerHeight := len(headerParts)
 
@@ -1124,7 +1446,7 @@ func (m *AppModel) viewDashboard() string {
 	helpView := m.renderHelp()
 	helpHeight := lipgloss.Height(helpView)
 
-	kanbanHeight := m.height - headerHeight - filterBarHeight - helpHeight
+	kanbanHeight := m.height - headerHeight - filterBarHeight - helpHeight - promptPreviewHeight
 
 	// Update kanban size
 	m.kanban.SetSize(m.width, kanbanHeight)
@@ -1142,12 +1464,109 @@ func (m *AppModel) viewDashboard() string {
 	if filterBar != "" {
 		contentParts = append(contentParts, filterBar)
 	}
-	contentParts = append(contentParts, m.kanban.View(), helpView)
+
+	// Show welcome/getting started message when kanban is empty
+	if m.showWelcome && m.kanban.IsEmpty() {
+		welcomeView := m.renderWelcomeMessage(kanbanHeight)
+		contentParts = append(contentParts, welcomeView, helpView)
+	} else {
+		kanbanView := m.kanban.View()
+		if promptPreview != "" {
+			contentParts = append(contentParts, kanbanView, promptPreview, helpView)
+		} else {
+			contentParts = append(contentParts, kanbanView, helpView)
+		}
+	}
 
 	content := lipgloss.JoinVertical(lipgloss.Left, contentParts...)
 
 	// Use Place to fill the entire terminal
 	return lipgloss.Place(m.width, m.height, lipgloss.Left, lipgloss.Top, content)
+}
+
+// renderWelcomeMessage renders a friendly getting started message for first-time users.
+// Focuses on demonstrating the mental model: describe what you want, AI does it, review.
+func (m *AppModel) renderWelcomeMessage(height int) string {
+	// Styles
+	titleStyle := lipgloss.NewStyle().
+		Bold(true).
+		Foreground(ColorPrimary)
+
+	subtitleStyle := lipgloss.NewStyle().
+		Foreground(ColorSecondary)
+
+	stepNumStyle := lipgloss.NewStyle().
+		Bold(true).
+		Foreground(ColorPrimary)
+
+	stepDescStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("252"))
+
+	actionStyle := lipgloss.NewStyle().
+		Bold(true).
+		Foreground(ColorPrimary)
+
+	descStyle := lipgloss.NewStyle().
+		Foreground(ColorMuted)
+
+	// Build the welcome content
+	var lines []string
+
+	lines = append(lines, titleStyle.Render("Welcome to TaskYou!"))
+	lines = append(lines, "")
+
+	// Mental model - how it works in 3 steps
+	lines = append(lines, subtitleStyle.Render("How it works:"))
+	lines = append(lines, "")
+
+	lines = append(lines, lipgloss.JoinHorizontal(lipgloss.Top,
+		stepNumStyle.Render("1. "),
+		stepDescStyle.Render("Describe what you want done"),
+	))
+	lines = append(lines, lipgloss.JoinHorizontal(lipgloss.Top,
+		stepNumStyle.Render("2. "),
+		stepDescStyle.Render("AI works on it autonomously"),
+	))
+	lines = append(lines, lipgloss.JoinHorizontal(lipgloss.Top,
+		stepNumStyle.Render("3. "),
+		stepDescStyle.Render("Review the result"),
+	))
+	lines = append(lines, "")
+
+	// Quick start action
+	lines = append(lines, lipgloss.JoinHorizontal(lipgloss.Top,
+		descStyle.Render("Press "),
+		actionStyle.Render("n"),
+		descStyle.Render(" to create your first task"),
+	))
+	lines = append(lines, "")
+
+	// Executor status
+	if len(m.availableExecutors) == 0 {
+		warningStyle := lipgloss.NewStyle().
+			Foreground(ColorWarning)
+		lines = append(lines, warningStyle.Render(IconBlocked()+" No AI executor found"))
+		lines = append(lines, descStyle.Render("   Install one: claude, codex, or gemini"))
+	} else {
+		readyStyle := lipgloss.NewStyle().
+			Foreground(ColorDone)
+		executorList := strings.Join(m.availableExecutors, ", ")
+		lines = append(lines, readyStyle.Render(IconDone()+" Ready with: "+executorList))
+	}
+
+	content := lipgloss.JoinVertical(lipgloss.Left, lines...)
+
+	// Center the content in a box
+	boxStyle := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(ColorPrimary).
+		Padding(1, 3).
+		Width(min(50, m.width-4))
+
+	boxed := boxStyle.Render(content)
+
+	// Center in available space
+	return lipgloss.Place(m.width, height, lipgloss.Center, lipgloss.Center, boxed)
 }
 
 // renderFilterBar renders the filter input bar.
@@ -1215,6 +1634,111 @@ func (m *AppModel) renderHelp() string {
 	return m.help.View(m.keys)
 }
 
+// renderExecutorPromptPreview renders a compact preview of the executor's current prompt
+// for a blocked task that needs input. Shows the permission message from the hook log
+// with approve/deny hints.
+func (m *AppModel) renderExecutorPromptPreview(task *db.Task) string {
+	prompt := m.executorPrompts[task.ID]
+
+	// Extract the last meaningful lines from the captured pane content
+	promptLines := extractPromptLines(prompt, m.width-10)
+
+	// Dim style for the action hints
+	hintStyle := lipgloss.NewStyle().Foreground(ColorMuted)
+	hints := hintStyle.Render("y approve  N deny  enter detail")
+
+	// Warning style for the task reference
+	warnStyle := lipgloss.NewStyle().Foreground(ColorWarning)
+
+	if len(promptLines) == 0 {
+		// No captured content yet - show a minimal single-line hint
+		line := warnStyle.Render(fmt.Sprintf("#%d waiting for input", task.ID)) + "  " + hints
+		barStyle := lipgloss.NewStyle().
+			Width(m.width).
+			Padding(0, 1)
+		return barStyle.Render(line)
+	}
+
+	// Show last 2 lines of the prompt content (keep it compact)
+	maxLines := 2
+	if len(promptLines) > maxLines {
+		promptLines = promptLines[len(promptLines)-maxLines:]
+	}
+
+	// First line: task ID + last prompt line (most relevant) + action hints
+	lastLine := promptLines[len(promptLines)-1]
+	// Truncate to fit with hints
+	maxPromptWidth := m.width - lipgloss.Width(hints) - 10 // 10 for #ID, spaces, padding
+	if maxPromptWidth < 20 {
+		maxPromptWidth = 20
+	}
+	if len(lastLine) > maxPromptWidth {
+		lastLine = lastLine[:maxPromptWidth-1] + "…"
+	}
+
+	line := warnStyle.Render(fmt.Sprintf("#%d ", task.ID)) +
+		warnStyle.Render(lastLine) + "  " + hints
+
+	barStyle := lipgloss.NewStyle().
+		Width(m.width).
+		Padding(0, 1)
+
+	return barStyle.Render(line)
+}
+
+// extractPromptLines extracts the last meaningful lines from prompt content.
+// Strips empty lines, ANSI codes, and trims to fit the given width.
+func extractPromptLines(content string, maxWidth int) []string {
+	if content == "" {
+		return nil
+	}
+
+	lines := strings.Split(content, "\n")
+	var result []string
+
+	for _, line := range lines {
+		// Strip ANSI escape codes
+		cleaned := stripAnsiCodes(line)
+		cleaned = strings.TrimRight(cleaned, " \t")
+		if cleaned == "" {
+			continue
+		}
+		// Truncate long lines
+		if maxWidth > 0 && len(cleaned) > maxWidth {
+			cleaned = cleaned[:maxWidth-1] + "…"
+		}
+		result = append(result, cleaned)
+	}
+
+	return result
+}
+
+// stripAnsiCodes removes ANSI escape sequences from a string.
+func stripAnsiCodes(s string) string {
+	var result strings.Builder
+	i := 0
+	for i < len(s) {
+		if s[i] == '\x1b' {
+			// Skip ESC sequence
+			i++
+			if i < len(s) && s[i] == '[' {
+				i++
+				// Skip until we hit a letter (the terminator)
+				for i < len(s) && (s[i] < 'A' || s[i] > 'Z') && (s[i] < 'a' || s[i] > 'z') {
+					i++
+				}
+				if i < len(s) {
+					i++ // Skip the terminator letter
+				}
+			}
+		} else {
+			result.WriteByte(s[i])
+			i++
+		}
+	}
+	return result.String()
+}
+
 func (m *AppModel) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch {
 	// Column navigation
@@ -1234,6 +1758,43 @@ func (m *AppModel) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, m.keys.Down):
 		m.kanban.MoveDown()
 		return m, nil
+
+	// Numeric shortcuts 1-9 and double-digits (11, 22, etc.) to select visible tasks
+	case msg.String() == "1", msg.String() == "2", msg.String() == "3",
+		msg.String() == "4", msg.String() == "5", msg.String() == "6",
+		msg.String() == "7", msg.String() == "8", msg.String() == "9":
+		digit := msg.String()
+
+		// Check if this completes a double-digit shortcut
+		if m.pendingShortcutDigit != "" && time.Now().Before(m.shortcutTimeout) {
+			// Same digit pressed twice = double-digit shortcut (11, 22, etc.)
+			if digit == m.pendingShortcutDigit {
+				shortcut := digit + digit
+				m.pendingShortcutDigit = ""
+				if idx := TaskIndexFromShortcut(shortcut); idx > 0 {
+					if task := m.kanban.SelectByShortcut(idx); task != nil {
+						return m, m.loadTask(task.ID)
+					}
+				}
+				return m, nil
+			}
+			// Different digit - first use the pending single digit, then start new
+			if idx := TaskIndexFromShortcut(m.pendingShortcutDigit); idx > 0 {
+				if task := m.kanban.SelectByShortcut(idx); task != nil {
+					m.pendingShortcutDigit = ""
+					return m, m.loadTask(task.ID)
+				}
+			}
+		}
+
+		// Start a new pending shortcut with 300ms timeout for double-digit
+		m.pendingShortcutDigit = digit
+		m.shortcutTimeout = time.Now().Add(300 * time.Millisecond)
+
+		// Return a command that fires after timeout to execute single-digit shortcut
+		return m, tea.Tick(300*time.Millisecond, func(t time.Time) tea.Msg {
+			return shortcutTimeoutMsg{digit: digit, timeout: m.shortcutTimeout}
+		})
 
 	// Jump to pinned/unpinned tasks
 	case key.Matches(msg, m.keys.JumpToPinned):
@@ -1259,6 +1820,15 @@ func (m *AppModel) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case key.Matches(msg, m.keys.FocusDone):
 		m.kanban.FocusColumn(3)
+		return m, nil
+
+	// Column collapse toggles
+	case key.Matches(msg, m.keys.CollapseBacklog):
+		m.kanban.ToggleColumnCollapse(0) // Backlog is column 0
+		return m, nil
+
+	case key.Matches(msg, m.keys.CollapseDone):
+		m.kanban.ToggleColumnCollapse(3) // Done is column 3
 		return m, nil
 
 	case key.Matches(msg, m.keys.JumpToNotification):
@@ -1323,6 +1893,10 @@ func (m *AppModel) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case key.Matches(msg, m.keys.Archive):
 		if task := m.kanban.SelectedTask(); task != nil {
+			if task.Status == db.StatusArchived {
+				// Unarchive the task
+				return m, m.unarchiveTask(task.ID)
+			}
 			return m.showArchiveConfirm(task)
 		}
 
@@ -1334,6 +1908,21 @@ func (m *AppModel) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, m.keys.OpenWorktree):
 		if task := m.kanban.SelectedTask(); task != nil {
 			return m, m.openWorktreeInEditor(task)
+		}
+
+	case key.Matches(msg, m.keys.OpenBrowser):
+		if task := m.kanban.SelectedTask(); task != nil {
+			return m, m.openBrowser(task)
+		}
+
+	case key.Matches(msg, m.keys.Spotlight):
+		if task := m.kanban.SelectedTask(); task != nil && task.WorktreePath != "" {
+			return m, m.toggleSpotlight(task)
+		}
+
+	case key.Matches(msg, m.keys.SpotlightSync):
+		if task := m.kanban.SelectedTask(); task != nil && task.WorktreePath != "" {
+			return m, m.syncSpotlight(task)
 		}
 
 	case key.Matches(msg, m.keys.Settings):
@@ -1354,6 +1943,16 @@ func (m *AppModel) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, m.keys.Help):
 		m.help.ShowAll = !m.help.ShowAll
 		return m, nil
+
+	case key.Matches(msg, m.keys.ApprovePrompt):
+		if task := m.kanban.SelectedTask(); task != nil && m.tasksNeedingInput[task.ID] {
+			return m, m.approveExecutorPrompt(task.ID)
+		}
+
+	case key.Matches(msg, m.keys.DenyPrompt):
+		if task := m.kanban.SelectedTask(); task != nil && m.tasksNeedingInput[task.ID] {
+			return m, m.denyExecutorPrompt(task.ID)
+		}
 
 	case key.Matches(msg, m.keys.Filter):
 		// Enter filter mode
@@ -1403,7 +2002,14 @@ func (m *AppModel) updateFilterMode(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Accept autocomplete if showing
 		if m.showFilterDropdown && m.filterAutocomplete.HasResults() {
 			if name := m.filterAutocomplete.Select(); name != "" {
-				m.filterInput.SetValue("[" + name + "] ")
+				// Replace from the last "[" onward with "[name] "
+				current := m.filterInput.Value()
+				lastBracket := strings.LastIndex(current, "[")
+				prefix := ""
+				if lastBracket > 0 {
+					prefix = current[:lastBracket]
+				}
+				m.filterInput.SetValue(prefix + "[" + name + "] ")
 				m.filterInput.SetCursor(len(m.filterInput.Value()))
 				m.filterText = m.filterInput.Value()
 				m.applyFilter()
@@ -1467,17 +2073,63 @@ func (m *AppModel) handleFilterInput(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.filterText = newText
 		m.applyFilter()
 
-		// Update autocomplete: show when typing "[project" but not after "] "
-		if strings.HasPrefix(newText, "[") && !strings.Contains(newText, "] ") {
-			query := strings.TrimSuffix(strings.TrimPrefix(newText, "["), "]")
-			m.filterAutocomplete.SetQuery(query)
-			m.showFilterDropdown = m.filterAutocomplete.HasResults()
+		// Update autocomplete: show when the last "[" is unclosed (no matching "]")
+		if lastBracket := strings.LastIndex(newText, "["); lastBracket >= 0 {
+			afterBracket := newText[lastBracket+1:]
+			if !strings.Contains(afterBracket, "]") {
+				// Still typing a project name after the last "["
+				query := afterBracket
+				m.filterAutocomplete.SetQuery(query)
+				m.showFilterDropdown = m.filterAutocomplete.HasResults()
+			} else {
+				m.showFilterDropdown = false
+				m.filterAutocomplete.Reset()
+			}
 		} else {
 			m.showFilterDropdown = false
 			m.filterAutocomplete.Reset()
 		}
 	}
 	return m, cmd
+}
+
+// resolveProjectAliases replaces project names in bracket tags with their canonical names.
+func (m *AppModel) resolveProjectAliases(query string) string {
+	var result strings.Builder
+	remaining := query
+	for {
+		start := strings.Index(remaining, "[")
+		if start == -1 {
+			result.WriteString(remaining)
+			break
+		}
+		result.WriteString(remaining[:start])
+		end := strings.Index(remaining[start:], "]")
+		if end == -1 {
+			// Unclosed bracket — resolve partial name too
+			name := remaining[start+1:]
+			if name != "" {
+				if p, err := m.db.GetProjectByName(name); err == nil && p != nil {
+					name = strings.ToLower(p.Name)
+				}
+			}
+			result.WriteString("[")
+			result.WriteString(name)
+			remaining = ""
+			break
+		}
+		name := remaining[start+1 : start+end]
+		if name != "" {
+			if p, err := m.db.GetProjectByName(name); err == nil && p != nil {
+				name = strings.ToLower(p.Name)
+			}
+		}
+		result.WriteString("[")
+		result.WriteString(name)
+		result.WriteString("]")
+		remaining = remaining[start+end+1:]
+	}
+	return result.String()
 }
 
 // applyFilter filters the tasks based on current filter text using fuzzy matching.
@@ -1490,6 +2142,11 @@ func (m *AppModel) applyFilter() {
 	}
 
 	queryLower := strings.ToLower(m.filterText)
+
+	// Resolve project aliases in "[project]" filter syntax (supports multiple tags)
+	if strings.Contains(queryLower, "[") {
+		queryLower = m.resolveProjectAliases(queryLower)
+	}
 
 	// Score all tasks using fuzzy matching
 	var scored []scoredTask
@@ -1513,38 +2170,79 @@ func (m *AppModel) applyFilter() {
 	m.kanban.SetTasks(filtered)
 }
 
-// scoreTaskForFilter calculates a fuzzy match score for a task against the query.
-// Special: "[project" filters by project, "[project] keyword" filters within project.
-func scoreTaskForFilter(task *db.Task, query string) int {
-	// Handle "[project..." syntax
-	if strings.HasPrefix(query, "[") {
-		// "[project] keyword" pattern
-		if idx := strings.Index(query, "] "); idx != -1 {
-			projectName := strings.TrimPrefix(query[:idx], "[")
-			if !strings.EqualFold(task.Project, projectName) {
-				return -1
-			}
-			keyword := strings.TrimSpace(query[idx+2:])
-			if keyword == "" {
-				return 100
-			}
-			return scoreTaskFields(task, keyword, false)
+// parseFilterProjects extracts completed [project] tags, any trailing partial project,
+// and the keyword portion from a filter query. Supports multiple [project] tags.
+func parseFilterProjects(query string) (projects []string, keyword string, partialProject string) {
+	remaining := query
+	for {
+		start := strings.Index(remaining, "[")
+		if start == -1 {
+			break
 		}
-		// Still typing project name
-		projectQuery := strings.TrimSuffix(strings.TrimPrefix(query, "["), "]")
-		if projectQuery == "" {
-			if task.Project != "" {
-				return 100
+		end := strings.Index(remaining[start:], "]")
+		if end == -1 {
+			// Unclosed bracket — this is a partial project being typed
+			partialProject = remaining[start+1:]
+			remaining = remaining[:start]
+			break
+		}
+		name := remaining[start+1 : start+end]
+		if name != "" {
+			projects = append(projects, name)
+		}
+		remaining = remaining[:start] + remaining[start+end+1:]
+	}
+	keyword = strings.TrimSpace(remaining)
+	return
+}
+
+// scoreTaskForFilter calculates a fuzzy match score for a task against the query.
+// Supports multiple [project] tags as OR filters, plus optional keyword search.
+func scoreTaskForFilter(task *db.Task, query string) int {
+	if !strings.Contains(query, "[") {
+		return scoreTaskFields(task, query, true)
+	}
+
+	projects, keyword, partial := parseFilterProjects(query)
+
+	// If we have completed project tags, task must match at least one
+	if len(projects) > 0 {
+		matched := false
+		for _, p := range projects {
+			if strings.EqualFold(task.Project, p) {
+				matched = true
+				break
 			}
+		}
+
+		if partial != "" {
+			// Also include tasks matching the partial project name
+			if s := fuzzyScore(task.Project, partial); s > 0 {
+				matched = true
+			}
+		}
+
+		if !matched {
 			return -1
 		}
-		if s := fuzzyScore(task.Project, projectQuery); s > 0 {
-			return s
+
+		if keyword == "" {
+			return 100
+		}
+		return scoreTaskFields(task, keyword, false)
+	}
+
+	// No completed tags — just a partial project being typed (e.g. "[off")
+	if partial == "" {
+		if task.Project != "" {
+			return 100
 		}
 		return -1
 	}
-
-	return scoreTaskFields(task, query, true)
+	if s := fuzzyScore(task.Project, partial); s > 0 {
+		return s
+	}
+	return -1
 }
 
 // scoreTaskFields scores a task against a query, optionally including project field.
@@ -1605,38 +2303,12 @@ func (m *AppModel) updateDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	if key.Matches(keyMsg, m.keys.Back) {
-		// Check PR state asynchronously (don't block UI)
-		if m.selectedTask != nil {
-			taskID := m.selectedTask.ID
-			go m.executor.CheckPRStateAndUpdateTask(taskID)
-		}
-
 		m.currentView = ViewDashboard
 		// Clear origin column when exiting detail view
 		m.kanban.ClearOriginColumn()
 		if m.detailView != nil {
 			m.detailView.Cleanup()
 			m.detailView = nil
-		}
-		return m, nil
-	}
-
-	// Handle jump to notification from detail view (Ctrl+g)
-	if key.Matches(keyMsg, m.keys.JumpToNotificationDetail) {
-		if m.notifyTaskID > 0 && m.notification != "" {
-			taskID := m.notifyTaskID
-			// Clean up current detail view before switching
-			if m.detailView != nil {
-				m.detailView.CleanupWithoutSaving()
-				m.detailView = nil
-			}
-			// Clear origin column since we're jumping to a different task
-			m.kanban.ClearOriginColumn()
-			m.kanban.SelectTask(taskID)
-			// Clear notification after jumping
-			m.notification = ""
-			m.notifyTaskID = 0
-			return m, m.loadTask(taskID)
 		}
 		return m, nil
 	}
@@ -1676,6 +2348,15 @@ func (m *AppModel) updateDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.showCloseConfirm(m.selectedTask)
 	}
 	if key.Matches(keyMsg, m.keys.Archive) && m.selectedTask != nil {
+		if m.selectedTask.Status == db.StatusArchived {
+			// Unarchive the task - cleanup detail view since status will change
+			if m.detailView != nil {
+				m.detailView.Cleanup()
+				m.detailView = nil
+			}
+			m.currentView = ViewDashboard
+			return m, m.unarchiveTask(m.selectedTask.ID)
+		}
 		// Don't cleanup detail view yet - wait for confirmation
 		// If user cancels, we need to return to detail view
 		return m.showArchiveConfirm(m.selectedTask)
@@ -1711,6 +2392,15 @@ func (m *AppModel) updateDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 	if key.Matches(keyMsg, m.keys.OpenWorktree) && m.selectedTask != nil {
 		return m, m.openWorktreeInEditor(m.selectedTask)
+	}
+	if key.Matches(keyMsg, m.keys.OpenBrowser) && m.selectedTask != nil {
+		return m, m.openBrowser(m.selectedTask)
+	}
+	if key.Matches(keyMsg, m.keys.Spotlight) && m.selectedTask != nil && m.selectedTask.WorktreePath != "" {
+		return m, m.toggleSpotlight(m.selectedTask)
+	}
+	if key.Matches(keyMsg, m.keys.SpotlightSync) && m.selectedTask != nil && m.selectedTask.WorktreePath != "" {
+		return m, m.syncSpotlight(m.selectedTask)
 	}
 	if key.Matches(keyMsg, m.keys.ToggleShellPane) && m.detailView != nil {
 		m.detailView.ToggleShellPane()
@@ -1816,9 +2506,9 @@ func (m *AppModel) updateNewTaskForm(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m *AppModel) updateNewTaskConfirm(msg tea.Msg) (tea.Model, tea.Cmd) {
-	// Handle escape to go back
 	if keyMsg, ok := msg.(tea.KeyMsg); ok {
-		if keyMsg.String() == "esc" {
+		switch keyMsg.String() {
+		case "esc", "ctrl+c":
 			m.currentView = ViewNewTask
 			m.queueConfirm = nil
 			return m, nil
@@ -1831,7 +2521,12 @@ func (m *AppModel) updateNewTaskConfirm(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.queueConfirm = f
 	}
 
-	// Check if form completed
+	// Check if form completed or aborted
+	if m.queueConfirm.State == huh.StateAborted {
+		m.currentView = ViewNewTask
+		m.queueConfirm = nil
+		return m, nil
+	}
 	if m.queueConfirm.State == huh.StateCompleted {
 		if m.pendingTask != nil {
 			if m.queueValue {
@@ -1954,9 +2649,9 @@ func (m *AppModel) viewDeleteConfirm() string {
 }
 
 func (m *AppModel) updateDeleteConfirm(msg tea.Msg) (tea.Model, tea.Cmd) {
-	// Handle escape to cancel
 	if keyMsg, ok := msg.(tea.KeyMsg); ok {
-		if keyMsg.String() == "esc" {
+		switch keyMsg.String() {
+		case "esc", "ctrl+c":
 			m.currentView = m.previousView
 			m.deleteConfirm = nil
 			m.pendingDeleteTask = nil
@@ -1970,7 +2665,7 @@ func (m *AppModel) updateDeleteConfirm(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.deleteConfirm = f
 	}
 
-	// Check if form completed
+	// Check if form completed or aborted
 	if m.deleteConfirm.State == huh.StateCompleted {
 		if m.pendingDeleteTask != nil && m.deleteConfirmValue {
 			taskID := m.pendingDeleteTask.ID
@@ -1985,6 +2680,12 @@ func (m *AppModel) updateDeleteConfirm(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.deleteTask(taskID)
 		}
 		// Cancelled - return to previous view
+		m.pendingDeleteTask = nil
+		m.deleteConfirm = nil
+		m.currentView = m.previousView
+		return m, nil
+	}
+	if m.deleteConfirm.State == huh.StateAborted {
 		m.pendingDeleteTask = nil
 		m.deleteConfirm = nil
 		m.currentView = m.previousView
@@ -2050,9 +2751,9 @@ func (m *AppModel) viewProjectChangeConfirm() string {
 }
 
 func (m *AppModel) updateProjectChangeConfirm(msg tea.Msg) (tea.Model, tea.Cmd) {
-	// Handle escape to cancel
 	if keyMsg, ok := msg.(tea.KeyMsg); ok {
-		if keyMsg.String() == "esc" {
+		switch keyMsg.String() {
+		case "esc", "ctrl+c":
 			m.currentView = m.previousView
 			m.projectChangeConfirm = nil
 			m.pendingProjectChangeTask = nil
@@ -2065,7 +2766,7 @@ func (m *AppModel) updateProjectChangeConfirm(msg tea.Msg) (tea.Model, tea.Cmd) 
 	model, cmd := m.projectChangeConfirm.Update(msg)
 	m.projectChangeConfirm = model.(*huh.Form)
 
-	// Check if form completed
+	// Check if form completed or aborted
 	if m.projectChangeConfirm.State == huh.StateCompleted {
 		if m.pendingProjectChangeTask != nil && m.originalProjectChangeTask != nil && m.projectChangeConfirmValue {
 			// User confirmed - perform the project change
@@ -2078,6 +2779,13 @@ func (m *AppModel) updateProjectChangeConfirm(msg tea.Msg) (tea.Model, tea.Cmd) 
 			return m, m.moveTaskToProject(newTask, oldTask)
 		}
 		// Cancelled - return to previous view
+		m.pendingProjectChangeTask = nil
+		m.originalProjectChangeTask = nil
+		m.projectChangeConfirm = nil
+		m.currentView = m.previousView
+		return m, nil
+	}
+	if m.projectChangeConfirm.State == huh.StateAborted {
 		m.pendingProjectChangeTask = nil
 		m.originalProjectChangeTask = nil
 		m.projectChangeConfirm = nil
@@ -2141,12 +2849,20 @@ func (m *AppModel) viewQuitConfirm() string {
 }
 
 func (m *AppModel) updateQuitConfirm(msg tea.Msg) (tea.Model, tea.Cmd) {
-	// Handle escape to cancel
 	if keyMsg, ok := msg.(tea.KeyMsg); ok {
-		if keyMsg.String() == "esc" {
+		switch keyMsg.String() {
+		case "esc":
+			// Cancel and return to dashboard
 			m.currentView = ViewDashboard
 			m.quitConfirm = nil
 			return m, nil
+		case "ctrl+c":
+			// Ctrl+C in quit confirm should just quit immediately
+			if m.eventCh != nil {
+				m.executor.UnsubscribeTaskEvents(m.eventCh)
+			}
+			m.stopDatabaseWatcher()
+			return m, tea.Quit
 		}
 	}
 
@@ -2156,7 +2872,7 @@ func (m *AppModel) updateQuitConfirm(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.quitConfirm = f
 	}
 
-	// Check if form completed
+	// Check if form completed or aborted
 	if m.quitConfirm.State == huh.StateCompleted {
 		if m.quitConfirmValue {
 			// User confirmed quit - cleanup and exit
@@ -2167,6 +2883,11 @@ func (m *AppModel) updateQuitConfirm(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 		}
 		// Cancelled
+		m.quitConfirm = nil
+		m.currentView = ViewDashboard
+		return m, nil
+	}
+	if m.quitConfirm.State == huh.StateAborted {
 		m.quitConfirm = nil
 		m.currentView = ViewDashboard
 		return m, nil
@@ -2230,9 +2951,9 @@ func (m *AppModel) viewCloseConfirm() string {
 }
 
 func (m *AppModel) updateCloseConfirm(msg tea.Msg) (tea.Model, tea.Cmd) {
-	// Handle escape to cancel
 	if keyMsg, ok := msg.(tea.KeyMsg); ok {
-		if keyMsg.String() == "esc" {
+		switch keyMsg.String() {
+		case "esc", "ctrl+c":
 			m.currentView = m.previousView
 			m.closeConfirm = nil
 			m.pendingCloseTask = nil
@@ -2246,7 +2967,7 @@ func (m *AppModel) updateCloseConfirm(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.closeConfirm = f
 	}
 
-	// Check if form completed
+	// Check if form completed or aborted
 	if m.closeConfirm.State == huh.StateCompleted {
 		if m.pendingCloseTask != nil && m.closeConfirmValue {
 			taskID := m.pendingCloseTask.ID
@@ -2258,9 +2979,16 @@ func (m *AppModel) updateCloseConfirm(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.detailView = nil
 			}
 			m.currentView = ViewDashboard
+			m.userClosedTaskIDs[taskID] = true
 			return m, m.closeTask(taskID)
 		}
 		// Cancelled - return to previous view
+		m.pendingCloseTask = nil
+		m.closeConfirm = nil
+		m.currentView = m.previousView
+		return m, nil
+	}
+	if m.closeConfirm.State == huh.StateAborted {
 		m.pendingCloseTask = nil
 		m.closeConfirm = nil
 		m.currentView = m.previousView
@@ -2325,9 +3053,9 @@ func (m *AppModel) viewArchiveConfirm() string {
 }
 
 func (m *AppModel) updateArchiveConfirm(msg tea.Msg) (tea.Model, tea.Cmd) {
-	// Handle escape to cancel
 	if keyMsg, ok := msg.(tea.KeyMsg); ok {
-		if keyMsg.String() == "esc" {
+		switch keyMsg.String() {
+		case "esc", "ctrl+c":
 			m.currentView = m.previousView
 			m.archiveConfirm = nil
 			m.pendingArchiveTask = nil
@@ -2341,7 +3069,7 @@ func (m *AppModel) updateArchiveConfirm(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.archiveConfirm = f
 	}
 
-	// Check if form completed
+	// Check if form completed or aborted
 	if m.archiveConfirm.State == huh.StateCompleted {
 		if m.pendingArchiveTask != nil && m.archiveConfirmValue {
 			taskID := m.pendingArchiveTask.ID
@@ -2356,6 +3084,12 @@ func (m *AppModel) updateArchiveConfirm(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.archiveTask(taskID)
 		}
 		// Cancelled - return to previous view
+		m.pendingArchiveTask = nil
+		m.archiveConfirm = nil
+		m.currentView = m.previousView
+		return m, nil
+	}
+	if m.archiveConfirm.State == huh.StateAborted {
 		m.pendingArchiveTask = nil
 		m.archiveConfirm = nil
 		m.currentView = m.previousView
@@ -2492,23 +3226,10 @@ func (m *AppModel) changeTaskStatus(id int64, status string) tea.Cmd {
 	database := m.db
 	exec := m.executor
 	return func() tea.Msg {
-		// Get current task to check if we're moving from done to active
-		task, err := database.GetTask(id)
-		if err != nil {
-			return taskStatusChangedMsg{err: err}
-		}
-
-		// If moving from done to any active status (except backlog), set to queued
-		// so the executor can resume Claude with the stored session
-		actualStatus := status
-		if task.Status == db.StatusDone && status != db.StatusBacklog && status != db.StatusDone {
-			// If task has a Claude session, queue it so executor resumes Claude
-			if task.ClaudeSessionID != "" {
-				actualStatus = db.StatusQueued
-			}
-		}
-
-		err = database.UpdateTaskStatus(id, actualStatus)
+		// Just set the requested status directly. Don't auto-queue to avoid
+		// restarting the executor. Users can explicitly retry/requeue if they
+		// want to restart execution.
+		err := database.UpdateTaskStatus(id, status)
 		if err == nil {
 			if task, _ := database.GetTask(id); task != nil {
 				exec.NotifyTaskChange("status_changed", task)
@@ -2602,17 +3323,61 @@ func (m *AppModel) updateCommandPalette(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	// Check if user cancelled
 	if m.commandPaletteView.IsCancelled() {
-		m.currentView = ViewDashboard
+		returnView := m.commandPaletteReturnView
+		returnTaskID := m.commandPaletteReturnTaskID
+		if returnView == ViewDashboard && m.detailView != nil && m.selectedTask != nil {
+			returnView = ViewDetail
+			returnTaskID = m.selectedTask.ID
+		}
 		m.commandPaletteView = nil
+		m.commandPaletteReturnView = ViewDashboard
+		m.commandPaletteReturnTaskID = 0
+		m.currentView = returnView
+		if returnView == ViewDetail && m.detailView == nil && returnTaskID != 0 {
+			return m, m.loadTask(returnTaskID)
+		}
 		return m, nil
 	}
 
 	// Check if user selected a task
 	if selectedTask := m.commandPaletteView.SelectedTask(); selectedTask != nil {
+		taskID := selectedTask.ID
+		returnView := m.commandPaletteReturnView
+		returnTaskID := m.commandPaletteReturnTaskID
+		if returnView == ViewDashboard && m.detailView != nil && m.selectedTask != nil {
+			returnView = ViewDetail
+			returnTaskID = m.selectedTask.ID
+		}
 		m.commandPaletteView = nil
+		m.commandPaletteReturnView = ViewDashboard
+		m.commandPaletteReturnTaskID = 0
+
+		// If we were in detail view and selected the SAME task, just go back
+		if returnView == ViewDetail && returnTaskID != 0 && returnTaskID == taskID {
+			m.currentView = ViewDetail
+			return m, nil
+		}
+
+		// If we were in detail view and selected a DIFFERENT task, cleanup the old one
+		if returnView == ViewDetail && m.detailView != nil {
+			m.detailView.Cleanup()
+			m.detailView = nil
+		}
+
 		// Select the task on the kanban board and load its detail view
-		m.kanban.SelectTask(selectedTask.ID)
-		return m, m.loadTask(selectedTask.ID)
+		m.kanban.SelectTask(taskID)
+		return m, m.loadTask(taskID)
+	}
+
+	// Check if user requested an AI command
+	if m.commandPaletteView.IsAICommandRequest() {
+		rawInput := m.commandPaletteView.RawInput()
+		projects := m.commandPaletteView.Projects()
+		m.commandPaletteView = nil
+		m.currentView = ViewDashboard
+		m.notification = "Processing command..."
+		m.notifyUntil = time.Now().Add(30 * time.Second)
+		return m, m.executeAICommand(rawInput, projects)
 	}
 
 	return m, cmd
@@ -2622,7 +3387,8 @@ func (m *AppModel) updateCommandPalette(msg tea.Msg) (tea.Model, tea.Cmd) {
 type tasksLoadedMsg struct {
 	tasks           []*db.Task
 	err             error
-	hiddenDoneCount int // Number of done tasks not shown in kanban (older ones)
+	hiddenDoneCount int            // Number of done tasks not shown in kanban (older ones)
+	blockedByDeps   map[int64]int  // Tasks blocked by dependencies (task ID -> open blocker count)
 }
 
 type taskLoadedMsg struct {
@@ -2650,6 +3416,10 @@ type taskClosedMsg struct {
 }
 
 type taskArchivedMsg struct {
+	err error
+}
+
+type taskUnarchivedMsg struct {
 	err error
 }
 
@@ -2688,9 +3458,19 @@ type prRefreshTickMsg time.Time
 
 type dbChangeMsg struct{}
 
+type shortcutTimeoutMsg struct {
+	digit   string    // The digit that was pressed
+	timeout time.Time // The timeout value to compare
+}
+
 type prInfoMsg struct {
 	taskID int64
 	info   *github.PRInfo
+}
+
+type aiCommandMsg struct {
+	cmd *ai.Command
+	err error
 }
 
 const maxDoneTasksInKanban = 20
@@ -2723,9 +3503,18 @@ func (m *AppModel) loadTasks() tea.Cmd {
 			hiddenDone = 0
 		}
 
+		// Load dependency blocker counts for each task
+		blockedByDeps := make(map[int64]int)
+		for _, task := range tasks {
+			count, err := m.db.GetOpenBlockerCount(task.ID)
+			if err == nil && count > 0 {
+				blockedByDeps[task.ID] = count
+			}
+		}
+
 		// Note: PR/merge status is now checked via batch refresh (prRefreshTick)
 		// to avoid spawning processes for every task on every tick
-		return tasksLoadedMsg{tasks: tasks, err: err, hiddenDoneCount: hiddenDone}
+		return tasksLoadedMsg{tasks: tasks, err: err, hiddenDoneCount: hiddenDone, blockedByDeps: blockedByDeps}
 	}
 }
 
@@ -2740,9 +3529,10 @@ func (m *AppModel) loadTaskWithFocus(id int64) tea.Cmd {
 }
 
 func (m *AppModel) loadTaskWithOptions(id int64, focusExecutor bool) tea.Cmd {
-	// Check PR state asynchronously (don't block UI)
-	if m.executor != nil {
-		go m.executor.CheckPRStateAndUpdateTask(id)
+	// Update last accessed timestamp (async, don't block UI)
+	if m.db != nil {
+		database := m.db
+		go database.UpdateTaskLastAccessedAt(id)
 	}
 
 	return func() tea.Msg {
@@ -2804,6 +3594,9 @@ func (m *AppModel) createTaskWithAttachments(t *db.Task, attachmentPaths []strin
 			return taskCreatedMsg{task: t, err: err}
 		}
 
+		// Mark onboarding as complete when first task is created
+		database.CompleteOnboarding()
+
 		// Add attachments if provided
 		for _, attachmentPath := range attachmentPaths {
 			if attachmentPath != "" {
@@ -2838,9 +3631,6 @@ func (m *AppModel) closeTask(id int64) tea.Cmd {
 	database := m.db
 	exec := m.executor
 	return func() tea.Msg {
-		// Check PR state asynchronously (don't block UI)
-		go exec.CheckPRStateAndUpdateTask(id)
-
 		err := database.UpdateTaskStatus(id, db.StatusDone)
 		if err == nil {
 			if task, _ := database.GetTask(id); task != nil {
@@ -2884,18 +3674,69 @@ func (m *AppModel) archiveTask(id int64) tea.Cmd {
 	database := m.db
 	exec := m.executor
 	return func() tea.Msg {
-		err := database.UpdateTaskStatus(id, db.StatusArchived)
+		// Get the task first
+		task, err := database.GetTask(id)
+		if err != nil {
+			return taskArchivedMsg{err: err}
+		}
+
+		// Update status to archived immediately for instant UI feedback
+		err = database.UpdateTaskStatus(id, db.StatusArchived)
+		if err != nil {
+			return taskArchivedMsg{err: err}
+		}
+
+		if task, _ := database.GetTask(id); task != nil {
+			exec.NotifyTaskChange("status_changed", task)
+		}
+
+		// Run expensive cleanup in the background so the UI doesn't block
+		go func() {
+			// Kill Claude process to free memory
+			exec.KillClaudeProcess(id)
+
+			// Kill the task window to clean up both Claude and workdir panes
+			windowTarget := executor.TmuxSessionName(id)
+			osExec.Command("tmux", "kill-window", "-t", windowTarget).Run()
+
+			// Archive worktree (saves uncommitted changes and removes worktree)
+			if task != nil && task.WorktreePath != "" {
+				if err := exec.ArchiveWorktree(task); err != nil {
+					fmt.Fprintf(os.Stderr, "Warning: could not archive worktree: %v\n", err)
+				}
+			}
+		}()
+
+		return taskArchivedMsg{err: nil}
+	}
+}
+
+func (m *AppModel) unarchiveTask(id int64) tea.Cmd {
+	database := m.db
+	exec := m.executor
+	return func() tea.Msg {
+		// Get the task first
+		task, err := database.GetTask(id)
+		if err != nil {
+			return taskUnarchivedMsg{err: err}
+		}
+
+		// Unarchive worktree if there's saved archive state
+		if task != nil && task.HasArchiveState() {
+			if err := exec.UnarchiveWorktree(task); err != nil {
+				return taskUnarchivedMsg{err: fmt.Errorf("unarchive worktree: %w", err)}
+			}
+		}
+
+		// Update status back to backlog (user can then queue it if they want)
+		err = database.UpdateTaskStatus(id, db.StatusBacklog)
 		if err == nil {
 			if task, _ := database.GetTask(id); task != nil {
 				exec.NotifyTaskChange("status_changed", task)
 			}
 		}
 
-		// Kill the task window to clean up both Claude and workdir panes
-		windowTarget := executor.TmuxSessionName(id)
-		osExec.Command("tmux", "kill-window", "-t", windowTarget).Run()
-
-		return taskArchivedMsg{err: err}
+		return taskUnarchivedMsg{err: err}
 	}
 }
 
@@ -2974,6 +3815,142 @@ func (m *AppModel) openWorktreeInEditor(task *db.Task) tea.Cmd {
 
 		return worktreeOpenedMsg{message: fmt.Sprintf("Opened %s", filepath.Base(task.WorktreePath))}
 	}
+}
+
+// browserOpenedMsg is returned when attempting to open the browser.
+type browserOpenedMsg struct {
+	message string
+	err     error
+}
+
+// openBrowser opens the task's server URL in the default browser.
+// The URL is {server_url}:{port} where server_url is configurable (default: http://localhost).
+func (m *AppModel) openBrowser(task *db.Task) tea.Cmd {
+	return func() tea.Msg {
+		if task.Port == 0 {
+			return browserOpenedMsg{err: fmt.Errorf("no port allocated for task #%d", task.ID)}
+		}
+
+		// Get server URL from settings, default to http://localhost
+		serverURL := config.DefaultServerURL
+		if url, err := m.db.GetSetting(config.SettingServerURL); err == nil && url != "" {
+			serverURL = url
+		}
+
+		url := fmt.Sprintf("%s:%d", serverURL, task.Port)
+		cmd := osExec.Command("open", url)
+
+		if err := cmd.Start(); err != nil {
+			return browserOpenedMsg{err: fmt.Errorf("failed to open browser: %w", err)}
+		}
+
+		return browserOpenedMsg{message: fmt.Sprintf("Opened %s", url)}
+	}
+}
+
+// spotlightMsg is returned after a spotlight action completes.
+type spotlightMsg struct {
+	action  string // "start", "stop", "sync"
+	message string
+	err     error
+}
+
+// toggleSpotlight starts or stops spotlight mode for the given task.
+func (m *AppModel) toggleSpotlight(task *db.Task) tea.Cmd {
+	return func() tea.Msg {
+		if task.WorktreePath == "" {
+			return spotlightMsg{err: fmt.Errorf("no worktree for task #%d", task.ID)}
+		}
+
+		project, err := m.db.GetProjectByName(task.Project)
+		if err != nil || project == nil {
+			return spotlightMsg{err: fmt.Errorf("failed to get project directory")}
+		}
+
+		if spotlight.IsActive(task.WorktreePath) {
+			result, err := spotlight.Stop(task.WorktreePath, project.Path)
+			return spotlightMsg{action: "stop", message: result, err: err}
+		}
+		result, err := spotlight.Start(task.WorktreePath, project.Path)
+		return spotlightMsg{action: "start", message: result, err: err}
+	}
+}
+
+// syncSpotlight syncs worktree changes to the main repo.
+func (m *AppModel) syncSpotlight(task *db.Task) tea.Cmd {
+	return func() tea.Msg {
+		if task.WorktreePath == "" {
+			return spotlightMsg{err: fmt.Errorf("no worktree for task #%d", task.ID)}
+		}
+
+		project, err := m.db.GetProjectByName(task.Project)
+		if err != nil || project == nil {
+			return spotlightMsg{err: fmt.Errorf("failed to get project directory")}
+		}
+
+		if !spotlight.IsActive(task.WorktreePath) {
+			return spotlightMsg{err: fmt.Errorf("spotlight not active — press f to start")}
+		}
+
+		result, err := spotlight.Sync(task.WorktreePath, project.Path)
+		return spotlightMsg{action: "sync", message: result, err: err}
+	}
+}
+// executorRespondedMsg is sent after approve/deny is sent to the executor.
+type executorRespondedMsg struct {
+	taskID int64
+	action string // "approve" or "deny"
+	err    error
+}
+
+// approveExecutorPrompt sends "y" to the executor's tmux pane to approve a permission prompt.
+func (m *AppModel) approveExecutorPrompt(taskID int64) tea.Cmd {
+	database := m.db
+	return func() tea.Msg {
+		err := executor.SendKeyToPane(taskID, "y")
+		if err == nil {
+			database.AppendTaskLog(taskID, "user", "Approved from kanban")
+		}
+		return executorRespondedMsg{taskID: taskID, action: "approve", err: err}
+	}
+}
+
+// denyExecutorPrompt sends "n" to the executor's tmux pane to deny a permission prompt.
+func (m *AppModel) denyExecutorPrompt(taskID int64) tea.Cmd {
+	database := m.db
+	return func() tea.Msg {
+		err := executor.SendKeyToPane(taskID, "n")
+		if err == nil {
+			database.AppendTaskLog(taskID, "user", "Denied from kanban")
+		}
+		return executorRespondedMsg{taskID: taskID, action: "deny", err: err}
+	}
+}
+
+// latestPermissionPrompt checks whether a task has a pending permission prompt
+// by reading recent DB logs written by the notification hook. Returns the prompt
+// message if still pending, or "" if resolved (e.g. "Claude resumed working",
+// user approved/denied). This is status-agnostic — works for any active task.
+func (m *AppModel) latestPermissionPrompt(taskID int64) string {
+	logs, err := m.db.GetTaskLogs(taskID, 10)
+	if err != nil {
+		return ""
+	}
+	// Logs are in DESC order (most recent first).
+	// A pending prompt is only valid if no subsequent log indicates resolution.
+	for _, l := range logs {
+		switch {
+		case l.LineType == "system" && strings.HasPrefix(l.Content, "Waiting for permission"):
+			return l.Content
+		case l.LineType == "system" && strings.HasPrefix(l.Content, "Waiting for user input"):
+			return l.Content
+		case l.LineType == "system" && l.Content == "Claude resumed working":
+			return "" // prompt was resolved
+		case l.LineType == "user" && (strings.HasPrefix(l.Content, "Approved") || strings.HasPrefix(l.Content, "Denied")):
+			return "" // user already responded
+		}
+	}
+	return ""
 }
 
 // taskMovedMsg is returned when a task is moved to a different project.
@@ -3167,6 +4144,10 @@ func (m *AppModel) retryTaskWithAttachments(id int64, feedback string, attachmen
 
 		// Session dead - re-queue for executor to pick up with --resume
 		err := database.RetryTask(id, feedback)
+		if err == nil {
+			// Trigger immediate processing so executor starts without waiting for next poll
+			exec.TriggerProcessing()
+		}
 		return taskRetriedMsg{err: err}
 	}
 }
@@ -3194,7 +4175,7 @@ func (m *AppModel) focusTick() tea.Cmd {
 }
 
 func (m *AppModel) prRefreshTick() tea.Cmd {
-	return tea.Tick(30*time.Second, func(t time.Time) tea.Msg {
+	return tea.Tick(15*time.Second, func(t time.Time) tea.Msg {
 		return prRefreshTickMsg(t)
 	})
 }
@@ -3345,4 +4326,117 @@ func (m *AppModel) stopDatabaseWatcher() {
 	if m.dbChangeCh != nil {
 		close(m.dbChangeCh)
 	}
+}
+
+// executeAICommand sends the user input to the AI service for interpretation.
+func (m *AppModel) executeAICommand(input string, projects []*db.Project) tea.Cmd {
+	aiSvc := m.aiCommandService
+	tasks := m.tasks
+	return func() tea.Msg {
+		if aiSvc == nil || !aiSvc.IsAvailable() {
+			return aiCommandMsg{err: fmt.Errorf("AI command service not available (set ANTHROPIC_API_KEY)")}
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+
+		cmdCtx := &ai.Context{
+			Tasks:    tasks,
+			Projects: projects,
+		}
+
+		cmd, err := aiSvc.InterpretCommand(ctx, input, cmdCtx)
+		return aiCommandMsg{cmd: cmd, err: err}
+	}
+}
+
+// handleAICommand executes the parsed AI command.
+func (m *AppModel) handleAICommand(cmd *ai.Command) tea.Cmd {
+	switch cmd.Type {
+	case ai.CommandCreateTask:
+		// Create a new task
+		project := cmd.Project
+		if project == "" {
+			// Try to detect project from working directory or use last used project
+			if m.workingDir != "" {
+				for _, p := range m.getProjects() {
+					if strings.HasPrefix(m.workingDir, p.Path) {
+						project = p.Name
+						break
+					}
+				}
+			}
+			if project == "" {
+				lastProject, _ := m.db.GetSetting("last_used_project")
+				if lastProject != "" {
+					project = lastProject
+				} else {
+					project = "personal"
+				}
+			}
+		}
+
+		newTask := &db.Task{
+			Title:   cmd.Title,
+			Body:    cmd.Body,
+			Status:  db.StatusBacklog,
+			Project: project,
+		}
+		m.notification = fmt.Sprintf("%s %s", IconDone(), cmd.Message)
+		m.notifyUntil = time.Now().Add(5 * time.Second)
+		return m.createTaskWithAttachments(newTask, nil)
+
+	case ai.CommandUpdateStatus:
+		if cmd.TaskID == 0 {
+			m.notification = fmt.Sprintf("%s Could not find task ID", IconBlocked())
+			m.notifyUntil = time.Now().Add(3 * time.Second)
+			return nil
+		}
+
+		m.notification = fmt.Sprintf("%s %s", IconDone(), cmd.Message)
+		m.notifyUntil = time.Now().Add(3 * time.Second)
+
+		database := m.db
+		exec := m.executor
+		return func() tea.Msg {
+			err := database.UpdateTaskStatus(cmd.TaskID, cmd.Status)
+			if err == nil {
+				if task, _ := database.GetTask(cmd.TaskID); task != nil {
+					exec.NotifyTaskChange("status_changed", task)
+				}
+			}
+			return taskStatusChangedMsg{err: err}
+		}
+
+	case ai.CommandSelectTask:
+		if cmd.TaskID == 0 {
+			m.notification = fmt.Sprintf("%s Could not find task ID", IconBlocked())
+			m.notifyUntil = time.Now().Add(3 * time.Second)
+			return nil
+		}
+
+		m.notification = fmt.Sprintf("%s %s", IconDone(), cmd.Message)
+		m.notifyUntil = time.Now().Add(2 * time.Second)
+		m.kanban.SelectTask(cmd.TaskID)
+		return m.loadTask(cmd.TaskID)
+
+	case ai.CommandSearchTasks:
+		// Apply the search as a filter
+		m.filterText = cmd.Query
+		m.filterInput.SetValue(cmd.Query)
+		m.notification = fmt.Sprintf("%s %s", IconDone(), cmd.Message)
+		m.notifyUntil = time.Now().Add(3 * time.Second)
+		return m.loadTasks()
+
+	default:
+		m.notification = fmt.Sprintf("%s %s", IconBlocked(), cmd.Message)
+		m.notifyUntil = time.Now().Add(5 * time.Second)
+		return nil
+	}
+}
+
+// getProjects returns the list of projects from the database.
+func (m *AppModel) getProjects() []*db.Project {
+	projects, _ := m.db.ListProjects()
+	return projects
 }

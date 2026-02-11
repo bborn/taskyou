@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -84,7 +85,7 @@ func TestToolsList(t *testing.T) {
 		t.Fatalf("unexpected error: %s", resp.Error.Message)
 	}
 
-	// Check that the tools list includes workflow_screenshot
+	// Check that the tools list includes taskyou_screenshot
 	result, ok := resp.Result.(map[string]interface{})
 	if !ok {
 		t.Fatal("expected result to be a map")
@@ -100,7 +101,7 @@ func TestToolsList(t *testing.T) {
 		if !ok {
 			continue
 		}
-		if tool["name"] == "workflow_screenshot" {
+		if tool["name"] == "taskyou_screenshot" {
 			foundScreenshot = true
 			// Verify the tool has proper schema
 			schema, ok := tool["inputSchema"].(map[string]interface{})
@@ -121,7 +122,7 @@ func TestToolsList(t *testing.T) {
 	}
 
 	if !foundScreenshot {
-		t.Error("workflow_screenshot not found in tools list")
+		t.Error("taskyou_screenshot not found in tools list")
 	}
 }
 
@@ -134,7 +135,7 @@ func TestWorkflowComplete(t *testing.T) {
 		"id":      1,
 		"method":  "tools/call",
 		"params": map[string]interface{}{
-			"name": "workflow_complete",
+			"name": "taskyou_complete",
 			"arguments": map[string]interface{}{
 				"summary": "Task completed successfully",
 			},
@@ -155,13 +156,16 @@ func TestWorkflowComplete(t *testing.T) {
 		t.Fatalf("unexpected error: %s", resp.Error.Message)
 	}
 
-	// Verify task status was updated
+	// Verify task status was NOT changed to done (only humans close tasks)
 	updatedTask, err := database.GetTask(task.ID)
 	if err != nil {
 		t.Fatalf("failed to get task: %v", err)
 	}
-	if updatedTask.Status != db.StatusDone {
-		t.Errorf("expected status 'done', got '%s'", updatedTask.Status)
+	if updatedTask.Status == db.StatusDone {
+		t.Errorf("expected status to NOT be 'done' (only humans should close tasks), got '%s'", updatedTask.Status)
+	}
+	if updatedTask.Status != db.StatusProcessing {
+		t.Errorf("expected status to remain 'processing', got '%s'", updatedTask.Status)
 	}
 }
 
@@ -174,7 +178,7 @@ func TestWorkflowNeedsInput(t *testing.T) {
 		"id":      1,
 		"method":  "tools/call",
 		"params": map[string]interface{}{
-			"name": "workflow_needs_input",
+			"name": "taskyou_needs_input",
 			"arguments": map[string]interface{}{
 				"question": "What should I do next?",
 			},
@@ -274,8 +278,8 @@ func TestInitialize(t *testing.T) {
 	if !ok {
 		t.Fatal("expected serverInfo to be a map")
 	}
-	if serverInfo["name"] != "workflow-mcp" {
-		t.Errorf("expected server name 'workflow-mcp', got '%v'", serverInfo["name"])
+	if serverInfo["name"] != "taskyou-mcp" {
+		t.Errorf("expected server name 'taskyou-mcp', got '%v'", serverInfo["name"])
 	}
 }
 
@@ -288,7 +292,7 @@ func TestWorkflowCreateTask(t *testing.T) {
 		"id":      1,
 		"method":  "tools/call",
 		"params": map[string]interface{}{
-			"name": "workflow_create_task",
+			"name": "taskyou_create_task",
 			"arguments": map[string]interface{}{
 				"title":  "New Task",
 				"body":   "Description of new task",
@@ -356,7 +360,7 @@ func TestWorkflowListTasks(t *testing.T) {
 		"id":      1,
 		"method":  "tools/call",
 		"params": map[string]interface{}{
-			"name":      "workflow_list_tasks",
+			"name":      "taskyou_list_tasks",
 			"arguments": map[string]interface{}{},
 		},
 	}
@@ -407,7 +411,7 @@ func TestWorkflowGetProjectContext(t *testing.T) {
 		"id":      1,
 		"method":  "tools/call",
 		"params": map[string]interface{}{
-			"name":      "workflow_get_project_context",
+			"name":      "taskyou_get_project_context",
 			"arguments": map[string]interface{}{},
 		},
 	}
@@ -492,7 +496,7 @@ func TestWorkflowSetProjectContext(t *testing.T) {
 		"id":      1,
 		"method":  "tools/call",
 		"params": map[string]interface{}{
-			"name": "workflow_set_project_context",
+			"name": "taskyou_set_project_context",
 			"arguments": map[string]interface{}{
 				"context": testContext,
 			},
@@ -528,7 +532,7 @@ func TestWorkflowSetProjectContext(t *testing.T) {
 		"id":      2,
 		"method":  "tools/call",
 		"params": map[string]interface{}{
-			"name": "workflow_set_project_context",
+			"name": "taskyou_set_project_context",
 			"arguments": map[string]interface{}{
 				"context": "",
 			},
@@ -574,7 +578,7 @@ func TestProjectContextCachingFlow(t *testing.T) {
 		"id":      1,
 		"method":  "tools/call",
 		"params": map[string]interface{}{
-			"name":      "workflow_get_project_context",
+			"name":      "taskyou_get_project_context",
 			"arguments": map[string]interface{}{},
 		},
 	}
@@ -617,7 +621,7 @@ func TestProjectContextCachingFlow(t *testing.T) {
 		"id":      2,
 		"method":  "tools/call",
 		"params": map[string]interface{}{
-			"name": "workflow_set_project_context",
+			"name": "taskyou_set_project_context",
 			"arguments": map[string]interface{}{
 				"context": explorationContext,
 			},
@@ -652,7 +656,7 @@ func TestProjectContextCachingFlow(t *testing.T) {
 		"id":      3,
 		"method":  "tools/call",
 		"params": map[string]interface{}{
-			"name":      "workflow_get_project_context",
+			"name":      "taskyou_get_project_context",
 			"arguments": map[string]interface{}{},
 		},
 	}
@@ -717,7 +721,7 @@ func TestContextReminderOnComplete(t *testing.T) {
 		"id":      1,
 		"method":  "tools/call",
 		"params": map[string]interface{}{
-			"name":      "workflow_get_project_context",
+			"name":      "taskyou_get_project_context",
 			"arguments": map[string]interface{}{},
 		},
 	}
@@ -730,7 +734,7 @@ func TestContextReminderOnComplete(t *testing.T) {
 		"id":      2,
 		"method":  "tools/call",
 		"params": map[string]interface{}{
-			"name": "workflow_complete",
+			"name": "taskyou_complete",
 			"arguments": map[string]interface{}{
 				"summary": "Test completed without saving context",
 			},
@@ -769,8 +773,8 @@ func TestContextReminderOnComplete(t *testing.T) {
 	if !strings.Contains(text, "REMINDER") {
 		t.Errorf("expected reminder in completion response, got: %s", text)
 	}
-	if !strings.Contains(text, "workflow_set_project_context") {
-		t.Errorf("expected reminder to mention workflow_set_project_context, got: %s", text)
+	if !strings.Contains(text, "taskyou_set_project_context") {
+		t.Errorf("expected reminder to mention taskyou_set_project_context, got: %s", text)
 	}
 
 	t.Log("Context reminder on completion works correctly!")
@@ -801,7 +805,7 @@ func TestNoReminderWhenContextSaved(t *testing.T) {
 		"id":      1,
 		"method":  "tools/call",
 		"params": map[string]interface{}{
-			"name":      "workflow_get_project_context",
+			"name":      "taskyou_get_project_context",
 			"arguments": map[string]interface{}{},
 		},
 	}
@@ -811,7 +815,7 @@ func TestNoReminderWhenContextSaved(t *testing.T) {
 		"id":      2,
 		"method":  "tools/call",
 		"params": map[string]interface{}{
-			"name": "workflow_set_project_context",
+			"name": "taskyou_set_project_context",
 			"arguments": map[string]interface{}{
 				"context": "This is a test project context.",
 			},
@@ -823,7 +827,7 @@ func TestNoReminderWhenContextSaved(t *testing.T) {
 		"id":      3,
 		"method":  "tools/call",
 		"params": map[string]interface{}{
-			"name": "workflow_complete",
+			"name": "taskyou_complete",
 			"arguments": map[string]interface{}{
 				"summary": "Test completed after saving context",
 			},
@@ -865,4 +869,485 @@ func TestNoReminderWhenContextSaved(t *testing.T) {
 	}
 
 	t.Log("No reminder when context saved works correctly!")
+}
+
+// TestSpotlightStatus tests the spotlight status action when inactive
+func TestSpotlightStatus(t *testing.T) {
+	database := testDB(t)
+
+	// Create temp directories for worktree and main repo
+	worktreeDir := t.TempDir()
+	mainRepoDir := t.TempDir()
+
+	// Initialize git repos
+	runGit(t, mainRepoDir, "init")
+	runGit(t, mainRepoDir, "config", "user.email", "test@test.com")
+	runGit(t, mainRepoDir, "config", "user.name", "Test")
+	os.WriteFile(filepath.Join(mainRepoDir, "README.md"), []byte("# Test"), 0644)
+	runGit(t, mainRepoDir, "add", ".")
+	runGit(t, mainRepoDir, "commit", "-m", "initial")
+
+	runGit(t, worktreeDir, "init")
+	runGit(t, worktreeDir, "config", "user.email", "test@test.com")
+	runGit(t, worktreeDir, "config", "user.name", "Test")
+	os.WriteFile(filepath.Join(worktreeDir, "README.md"), []byte("# Test"), 0644)
+	runGit(t, worktreeDir, "add", ".")
+	runGit(t, worktreeDir, "commit", "-m", "initial")
+
+	// Create a project
+	if err := database.CreateProject(&db.Project{Name: "spotlight-test", Path: mainRepoDir}); err != nil {
+		t.Fatalf("failed to create project: %v", err)
+	}
+
+	// Create a task
+	task := &db.Task{
+		Title:   "Spotlight Test Task",
+		Status:  db.StatusProcessing,
+		Project: "spotlight-test",
+	}
+	if err := database.CreateTask(task); err != nil {
+		t.Fatalf("failed to create task: %v", err)
+	}
+
+	// Set the worktree path (normally done by executor)
+	task.WorktreePath = worktreeDir
+	if err := database.UpdateTask(task); err != nil {
+		t.Fatalf("failed to update task with worktree: %v", err)
+	}
+
+	request := map[string]interface{}{
+		"jsonrpc": "2.0",
+		"id":      1,
+		"method":  "tools/call",
+		"params": map[string]interface{}{
+			"name": "taskyou_spotlight",
+			"arguments": map[string]interface{}{
+				"action": "status",
+			},
+		},
+	}
+	reqBytes, _ := json.Marshal(request)
+	reqBytes = append(reqBytes, '\n')
+
+	server, output := testServer(database, task.ID, string(reqBytes))
+	server.Run()
+
+	var resp jsonRPCResponse
+	if err := json.Unmarshal(output.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to parse response: %v", err)
+	}
+
+	if resp.Error != nil {
+		t.Fatalf("unexpected error: %s", resp.Error.Message)
+	}
+
+	result := resp.Result.(map[string]interface{})
+	content := result["content"].([]interface{})
+	text := content[0].(map[string]interface{})["text"].(string)
+
+	if !strings.Contains(text, "INACTIVE") {
+		t.Errorf("expected spotlight status to be INACTIVE, got: %s", text)
+	}
+}
+
+// TestSpotlightStartStopFlow tests the full start/stop flow
+func TestSpotlightStartStopFlow(t *testing.T) {
+	database := testDB(t)
+
+	// Create temp directories for worktree and main repo
+	worktreeDir := t.TempDir()
+	mainRepoDir := t.TempDir()
+
+	// Initialize main repo
+	runGit(t, mainRepoDir, "init")
+	runGit(t, mainRepoDir, "config", "user.email", "test@test.com")
+	runGit(t, mainRepoDir, "config", "user.name", "Test")
+	os.WriteFile(filepath.Join(mainRepoDir, "README.md"), []byte("# Main Repo"), 0644)
+	runGit(t, mainRepoDir, "add", ".")
+	runGit(t, mainRepoDir, "commit", "-m", "initial")
+
+	// Initialize worktree with same structure
+	runGit(t, worktreeDir, "init")
+	runGit(t, worktreeDir, "config", "user.email", "test@test.com")
+	runGit(t, worktreeDir, "config", "user.name", "Test")
+	os.WriteFile(filepath.Join(worktreeDir, "README.md"), []byte("# Worktree Changes"), 0644)
+	os.WriteFile(filepath.Join(worktreeDir, "newfile.txt"), []byte("new content"), 0644)
+	runGit(t, worktreeDir, "add", "README.md")
+	runGit(t, worktreeDir, "commit", "-m", "initial")
+
+	// Create project
+	if err := database.CreateProject(&db.Project{Name: "spotlight-flow-test", Path: mainRepoDir}); err != nil {
+		t.Fatalf("failed to create project: %v", err)
+	}
+
+	// Create task
+	task := &db.Task{
+		Title:   "Spotlight Flow Test",
+		Status:  db.StatusProcessing,
+		Project: "spotlight-flow-test",
+	}
+	if err := database.CreateTask(task); err != nil {
+		t.Fatalf("failed to create task: %v", err)
+	}
+
+	// Set the worktree path (normally done by executor)
+	task.WorktreePath = worktreeDir
+	if err := database.UpdateTask(task); err != nil {
+		t.Fatalf("failed to update task with worktree: %v", err)
+	}
+
+	// Step 1: Start spotlight
+	startReq := map[string]interface{}{
+		"jsonrpc": "2.0",
+		"id":      1,
+		"method":  "tools/call",
+		"params": map[string]interface{}{
+			"name": "taskyou_spotlight",
+			"arguments": map[string]interface{}{
+				"action": "start",
+			},
+		},
+	}
+	reqBytes, _ := json.Marshal(startReq)
+	reqBytes = append(reqBytes, '\n')
+
+	server, output := testServer(database, task.ID, string(reqBytes))
+	server.Run()
+
+	var resp jsonRPCResponse
+	if err := json.Unmarshal(output.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to parse start response: %v", err)
+	}
+
+	if resp.Error != nil {
+		t.Fatalf("start failed: %s", resp.Error.Message)
+	}
+
+	result := resp.Result.(map[string]interface{})
+	content := result["content"].([]interface{})
+	text := content[0].(map[string]interface{})["text"].(string)
+
+	if !strings.Contains(text, "enabled") {
+		t.Errorf("expected spotlight to be enabled, got: %s", text)
+	}
+
+	// Verify state file was created
+	stateFile := filepath.Join(worktreeDir, ".spotlight-active")
+	if _, err := os.Stat(stateFile); os.IsNotExist(err) {
+		t.Error("spotlight state file not created")
+	}
+
+	// Verify files were synced
+	mainReadme, err := os.ReadFile(filepath.Join(mainRepoDir, "README.md"))
+	if err != nil {
+		t.Fatalf("failed to read main repo README: %v", err)
+	}
+	if string(mainReadme) != "# Worktree Changes" {
+		t.Errorf("README not synced, got: %s", string(mainReadme))
+	}
+
+	// Step 2: Check status (should be active)
+	statusReq := map[string]interface{}{
+		"jsonrpc": "2.0",
+		"id":      2,
+		"method":  "tools/call",
+		"params": map[string]interface{}{
+			"name": "taskyou_spotlight",
+			"arguments": map[string]interface{}{
+				"action": "status",
+			},
+		},
+	}
+	reqBytes, _ = json.Marshal(statusReq)
+	reqBytes = append(reqBytes, '\n')
+
+	server, output = testServer(database, task.ID, string(reqBytes))
+	server.Run()
+
+	if err := json.Unmarshal(output.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to parse status response: %v", err)
+	}
+
+	result = resp.Result.(map[string]interface{})
+	content = result["content"].([]interface{})
+	text = content[0].(map[string]interface{})["text"].(string)
+
+	if !strings.Contains(text, "ACTIVE") {
+		t.Errorf("expected spotlight to be ACTIVE, got: %s", text)
+	}
+
+	// Step 3: Stop spotlight
+	stopReq := map[string]interface{}{
+		"jsonrpc": "2.0",
+		"id":      3,
+		"method":  "tools/call",
+		"params": map[string]interface{}{
+			"name": "taskyou_spotlight",
+			"arguments": map[string]interface{}{
+				"action": "stop",
+			},
+		},
+	}
+	reqBytes, _ = json.Marshal(stopReq)
+	reqBytes = append(reqBytes, '\n')
+
+	server, output = testServer(database, task.ID, string(reqBytes))
+	server.Run()
+
+	if err := json.Unmarshal(output.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to parse stop response: %v", err)
+	}
+
+	if resp.Error != nil {
+		t.Fatalf("stop failed: %s", resp.Error.Message)
+	}
+
+	result = resp.Result.(map[string]interface{})
+	content = result["content"].([]interface{})
+	text = content[0].(map[string]interface{})["text"].(string)
+
+	if !strings.Contains(text, "disabled") {
+		t.Errorf("expected spotlight to be disabled, got: %s", text)
+	}
+
+	// Verify state file was removed
+	if _, err := os.Stat(stateFile); !os.IsNotExist(err) {
+		t.Error("spotlight state file should be removed")
+	}
+
+	// Verify main repo was restored
+	mainReadme, err = os.ReadFile(filepath.Join(mainRepoDir, "README.md"))
+	if err != nil {
+		t.Fatalf("failed to read main repo README: %v", err)
+	}
+	if string(mainReadme) != "# Main Repo" {
+		t.Errorf("README not restored, got: %s", string(mainReadme))
+	}
+}
+
+// TestSpotlightRequiresWorktree tests that spotlight fails without worktree
+func TestSpotlightRequiresWorktree(t *testing.T) {
+	database := testDB(t)
+	task := createTestTask(t, database)
+
+	// Task has no worktree path set
+	request := map[string]interface{}{
+		"jsonrpc": "2.0",
+		"id":      1,
+		"method":  "tools/call",
+		"params": map[string]interface{}{
+			"name": "taskyou_spotlight",
+			"arguments": map[string]interface{}{
+				"action": "status",
+			},
+		},
+	}
+	reqBytes, _ := json.Marshal(request)
+	reqBytes = append(reqBytes, '\n')
+
+	server, output := testServer(database, task.ID, string(reqBytes))
+	server.Run()
+
+	var resp jsonRPCResponse
+	if err := json.Unmarshal(output.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to parse response: %v", err)
+	}
+
+	if resp.Error == nil {
+		t.Fatal("expected error for task without worktree")
+	}
+
+	if !strings.Contains(resp.Error.Message, "worktree") {
+		t.Errorf("expected error about worktree, got: %s", resp.Error.Message)
+	}
+}
+
+// TestSpotlightSyncRequiresActive tests that sync fails when spotlight is not active
+func TestSpotlightSyncRequiresActive(t *testing.T) {
+	database := testDB(t)
+
+	// Create temp directories
+	worktreeDir := t.TempDir()
+	mainRepoDir := t.TempDir()
+
+	// Initialize repos
+	runGit(t, mainRepoDir, "init")
+	runGit(t, mainRepoDir, "config", "user.email", "test@test.com")
+	runGit(t, mainRepoDir, "config", "user.name", "Test")
+	os.WriteFile(filepath.Join(mainRepoDir, "file.txt"), []byte("original"), 0644)
+	runGit(t, mainRepoDir, "add", ".")
+	runGit(t, mainRepoDir, "commit", "-m", "initial")
+
+	runGit(t, worktreeDir, "init")
+	runGit(t, worktreeDir, "config", "user.email", "test@test.com")
+	runGit(t, worktreeDir, "config", "user.name", "Test")
+	os.WriteFile(filepath.Join(worktreeDir, "file.txt"), []byte("modified"), 0644)
+	runGit(t, worktreeDir, "add", ".")
+	runGit(t, worktreeDir, "commit", "-m", "initial")
+
+	// Create project
+	if err := database.CreateProject(&db.Project{Name: "spotlight-sync-inactive-test", Path: mainRepoDir}); err != nil {
+		t.Fatalf("failed to create project: %v", err)
+	}
+
+	// Create task
+	task := &db.Task{
+		Title:   "Spotlight Sync Inactive Test",
+		Status:  db.StatusProcessing,
+		Project: "spotlight-sync-inactive-test",
+	}
+	if err := database.CreateTask(task); err != nil {
+		t.Fatalf("failed to create task: %v", err)
+	}
+
+	task.WorktreePath = worktreeDir
+	if err := database.UpdateTask(task); err != nil {
+		t.Fatalf("failed to update task with worktree: %v", err)
+	}
+
+	// Try to sync WITHOUT starting spotlight first
+	syncReq := map[string]interface{}{
+		"jsonrpc": "2.0",
+		"id":      1,
+		"method":  "tools/call",
+		"params": map[string]interface{}{
+			"name": "taskyou_spotlight",
+			"arguments": map[string]interface{}{
+				"action": "sync",
+			},
+		},
+	}
+	reqBytes, _ := json.Marshal(syncReq)
+	reqBytes = append(reqBytes, '\n')
+
+	server, output := testServer(database, task.ID, string(reqBytes))
+	server.Run()
+
+	var resp jsonRPCResponse
+	if err := json.Unmarshal(output.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to parse response: %v", err)
+	}
+
+	// Should fail because spotlight is not active
+	if resp.Error == nil {
+		t.Fatal("expected error when syncing without spotlight active")
+	}
+
+	if !strings.Contains(resp.Error.Message, "not active") {
+		t.Errorf("expected error about spotlight not being active, got: %s", resp.Error.Message)
+	}
+}
+
+// TestSpotlightSync tests the sync action
+func TestSpotlightSync(t *testing.T) {
+	database := testDB(t)
+
+	// Create temp directories
+	worktreeDir := t.TempDir()
+	mainRepoDir := t.TempDir()
+
+	// Initialize repos
+	runGit(t, mainRepoDir, "init")
+	runGit(t, mainRepoDir, "config", "user.email", "test@test.com")
+	runGit(t, mainRepoDir, "config", "user.name", "Test")
+	os.WriteFile(filepath.Join(mainRepoDir, "file.txt"), []byte("original"), 0644)
+	runGit(t, mainRepoDir, "add", ".")
+	runGit(t, mainRepoDir, "commit", "-m", "initial")
+
+	runGit(t, worktreeDir, "init")
+	runGit(t, worktreeDir, "config", "user.email", "test@test.com")
+	runGit(t, worktreeDir, "config", "user.name", "Test")
+	os.WriteFile(filepath.Join(worktreeDir, "file.txt"), []byte("modified"), 0644)
+	runGit(t, worktreeDir, "add", ".")
+	runGit(t, worktreeDir, "commit", "-m", "initial")
+
+	// Create project
+	if err := database.CreateProject(&db.Project{Name: "spotlight-sync-test", Path: mainRepoDir}); err != nil {
+		t.Fatalf("failed to create project: %v", err)
+	}
+
+	// Create task
+	task := &db.Task{
+		Title:   "Spotlight Sync Test",
+		Status:  db.StatusProcessing,
+		Project: "spotlight-sync-test",
+	}
+	if err := database.CreateTask(task); err != nil {
+		t.Fatalf("failed to create task: %v", err)
+	}
+
+	// Set the worktree path (normally done by executor)
+	task.WorktreePath = worktreeDir
+	if err := database.UpdateTask(task); err != nil {
+		t.Fatalf("failed to update task with worktree: %v", err)
+	}
+
+	// First start spotlight
+	startReq := map[string]interface{}{
+		"jsonrpc": "2.0",
+		"id":      1,
+		"method":  "tools/call",
+		"params": map[string]interface{}{
+			"name": "taskyou_spotlight",
+			"arguments": map[string]interface{}{
+				"action": "start",
+			},
+		},
+	}
+	reqBytes, _ := json.Marshal(startReq)
+	reqBytes = append(reqBytes, '\n')
+
+	server, output := testServer(database, task.ID, string(reqBytes))
+	server.Run()
+	_ = output // first response not needed
+
+	// Now modify the worktree file
+	os.WriteFile(filepath.Join(worktreeDir, "file.txt"), []byte("modified again"), 0644)
+
+	// Sync changes
+	syncReq := map[string]interface{}{
+		"jsonrpc": "2.0",
+		"id":      2,
+		"method":  "tools/call",
+		"params": map[string]interface{}{
+			"name": "taskyou_spotlight",
+			"arguments": map[string]interface{}{
+				"action": "sync",
+			},
+		},
+	}
+	reqBytes, _ = json.Marshal(syncReq)
+	reqBytes = append(reqBytes, '\n')
+
+	server, output = testServer(database, task.ID, string(reqBytes))
+	server.Run()
+
+	var resp jsonRPCResponse
+	if err := json.Unmarshal(output.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to parse response: %v", err)
+	}
+
+	if resp.Error != nil {
+		t.Fatalf("sync failed: %s", resp.Error.Message)
+	}
+
+	// Verify file was synced
+	mainContent, err := os.ReadFile(filepath.Join(mainRepoDir, "file.txt"))
+	if err != nil {
+		t.Fatalf("failed to read main repo file: %v", err)
+	}
+	if string(mainContent) != "modified again" {
+		t.Errorf("file not synced, got: %s", string(mainContent))
+	}
+}
+
+// runGit is a helper to run git commands in tests
+func runGit(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %v failed: %v\n%s", args, err, string(output))
+	}
 }

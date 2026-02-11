@@ -180,6 +180,24 @@ func (db *DB) migrate() error {
 		`CREATE INDEX IF NOT EXISTS idx_event_log_event_type ON event_log(event_type)`,
 		`CREATE INDEX IF NOT EXISTS idx_event_log_created_at ON event_log(created_at)`,
 
+		// Task dependencies table for blocking/blocked relationships
+		`CREATE TABLE IF NOT EXISTS task_dependencies (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			blocker_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+			blocked_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+			auto_queue INTEGER DEFAULT 0,
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			UNIQUE(blocker_id, blocked_id),
+			CHECK(blocker_id != blocked_id)
+		)`,
+
+		`CREATE INDEX IF NOT EXISTS idx_task_dependencies_blocker ON task_dependencies(blocker_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_task_dependencies_blocked ON task_dependencies(blocked_id)`,
+
+		// Composite index for efficient conversation history queries
+		// Used by GetConversationHistoryLogs and HasContinuationMarker
+		`CREATE INDEX IF NOT EXISTS idx_task_logs_task_line_type ON task_logs(task_id, line_type)`,
+
 	}
 
 	for _, m := range migrations {
@@ -228,6 +246,17 @@ func (db *DB) migrate() error {
 		`ALTER TABLE tasks ADD COLUMN shell_pane_id TEXT DEFAULT ''`,  // tmux pane ID for shell pane (e.g., "%1235")
 		// Auto-generated project context for caching exploration results
 		`ALTER TABLE projects ADD COLUMN context TEXT DEFAULT ''`, // Auto-generated project context (codebase summary, patterns, etc.)
+		// Last accessed timestamp for tracking recently visited tasks in command palette
+		`ALTER TABLE tasks ADD COLUMN last_accessed_at DATETIME`, // When task was last accessed/opened in UI
+		// Archive state columns for preserving worktree state when archiving
+		`ALTER TABLE tasks ADD COLUMN archive_ref TEXT DEFAULT ''`,           // Git ref storing stashed changes (e.g., "refs/task-archive/123")
+		`ALTER TABLE tasks ADD COLUMN archive_commit TEXT DEFAULT ''`,        // Commit hash at time of archiving
+		`ALTER TABLE tasks ADD COLUMN archive_worktree_path TEXT DEFAULT ''`, // Original worktree path before archiving
+		`ALTER TABLE tasks ADD COLUMN archive_branch_name TEXT DEFAULT ''`,   // Original branch name before archiving
+		// Source branch for checking out existing branches in worktrees (e.g., for QA deployments)
+		`ALTER TABLE tasks ADD COLUMN source_branch TEXT DEFAULT ''`, // Existing branch to checkout instead of creating new branch
+		// Cached PR state as JSON for instant display on startup (avoids waiting for GitHub API)
+		`ALTER TABLE tasks ADD COLUMN pr_info_json TEXT DEFAULT ''`, // JSON blob of github.PRInfo
 	}
 
 	for _, m := range alterMigrations {
@@ -269,6 +298,11 @@ func (db *DB) migrate() error {
 	// Assign default colors to projects without colors
 	if err := db.ensureProjectColors(); err != nil {
 		return fmt.Errorf("ensure project colors: %w", err)
+	}
+
+	// Resolve any task project aliases to canonical project names
+	if err := db.migrateProjectAliases(); err != nil {
+		return fmt.Errorf("migrate project aliases: %w", err)
 	}
 
 	return nil
@@ -420,6 +454,28 @@ func (db *DB) ensureProjectColors() error {
 		_, err := db.Exec(`UPDATE projects SET color = ? WHERE id = ?`, color, p.ID)
 		if err != nil {
 			return fmt.Errorf("update project color: %w", err)
+		}
+	}
+
+	return nil
+}
+
+// migrateProjectAliases finds tasks whose project field contains an alias
+// instead of the canonical project name, and updates them to use the canonical name.
+func (db *DB) migrateProjectAliases() error {
+	projects, err := db.ListProjects()
+	if err != nil {
+		return fmt.Errorf("list projects: %w", err)
+	}
+
+	// Build a map of alias -> canonical name
+	for _, p := range projects {
+		for _, alias := range splitAliases(p.Aliases) {
+			// Update any tasks that have the alias as their project
+			_, err := db.Exec(`UPDATE tasks SET project = ? WHERE project = ?`, p.Name, alias)
+			if err != nil {
+				return fmt.Errorf("update tasks for alias %q -> %q: %w", alias, p.Name, err)
+			}
 		}
 	}
 

@@ -42,6 +42,22 @@ func (c *CodexExecutor) IsAvailable() bool {
 	return err == nil
 }
 
+// ensureAuthenticated checks if Codex has valid authentication and attempts to refresh if needed.
+// Codex OAuth tokens expire after ~1 hour, but running 'codex login status' can trigger a refresh
+// if a valid refresh_token exists. Returns true if authenticated, false otherwise.
+// For permanent auth without expiration, users can set up API key auth:
+//
+//	printenv OPENAI_API_KEY | codex login --with-api-key
+func (c *CodexExecutor) ensureAuthenticated() bool {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// Running 'codex login status' checks auth and may trigger token refresh
+	cmd := exec.CommandContext(ctx, "codex", "login", "status")
+	err := cmd.Run()
+	return err == nil
+}
+
 // Execute runs a task using Codex CLI.
 func (c *CodexExecutor) Execute(ctx context.Context, task *db.Task, workDir, prompt string) ExecResult {
 	return c.runCodex(ctx, task, workDir, prompt, "", false)
@@ -60,6 +76,12 @@ func (c *CodexExecutor) runCodex(ctx context.Context, task *db.Task, workDir, pr
 	if !c.IsAvailable() {
 		c.executor.logLine(task.ID, "error", "codex CLI is not installed - please install it from https://github.com/openai/codex")
 		return ExecResult{Message: "codex CLI is not installed"}
+	}
+
+	// Check if Codex is authenticated (also attempts token refresh if needed)
+	if !c.ensureAuthenticated() {
+		c.executor.logLine(task.ID, "error", "Codex is not authenticated. Run 'codex login' or for permanent auth: printenv OPENAI_API_KEY | codex login --with-api-key")
+		return ExecResult{Message: "codex not authenticated - run 'codex login' or use API key auth"}
 	}
 
 	// Check if tmux is available

@@ -132,92 +132,6 @@ func TestTaskLogsWithQuestion(t *testing.T) {
 	}
 }
 
-func TestGetTasksWithBranches(t *testing.T) {
-	// Create temporary database
-	tmpDir := t.TempDir()
-	dbPath := filepath.Join(tmpDir, "test.db")
-
-	db, err := Open(dbPath)
-	if err != nil {
-		t.Fatalf("failed to open database: %v", err)
-	}
-	defer db.Close()
-	defer os.Remove(dbPath)
-
-	// Create tasks with various states
-	taskNoBranch := &Task{
-		Title:  "Task without branch",
-		Status: StatusBacklog,
-		Type:   TypeCode,
-	}
-	taskWithBranch := &Task{
-		Title:      "Task with branch",
-		Status:     StatusBlocked,
-		Type:       TypeCode,
-		BranchName: "task/1-task-with-branch",
-	}
-	taskDoneWithBranch := &Task{
-		Title:      "Done task with branch",
-		Status:     StatusDone,
-		Type:       TypeCode,
-		BranchName: "task/2-done-task",
-	}
-	taskProcessingWithBranch := &Task{
-		Title:      "Processing task with branch",
-		Status:     StatusProcessing,
-		Type:       TypeCode,
-		BranchName: "task/3-processing-task",
-	}
-
-	for _, task := range []*Task{taskNoBranch, taskWithBranch, taskDoneWithBranch, taskProcessingWithBranch} {
-		if err := db.CreateTask(task); err != nil {
-			t.Fatalf("failed to create task: %v", err)
-		}
-		// Update branch name (CreateTask doesn't set it)
-		if task.BranchName != "" {
-			db.UpdateTask(task)
-		}
-	}
-
-	// Get tasks with branches
-	tasks, err := db.GetTasksWithBranches()
-	if err != nil {
-		t.Fatalf("failed to get tasks with branches: %v", err)
-	}
-
-	// Should return 2 tasks (with branch but not done)
-	if len(tasks) != 2 {
-		t.Errorf("expected 2 tasks, got %d", len(tasks))
-	}
-
-	// Verify we got the right tasks
-	foundBlocked := false
-	foundProcessing := false
-	for _, task := range tasks {
-		if task.BranchName == "task/1-task-with-branch" {
-			foundBlocked = true
-		}
-		if task.BranchName == "task/3-processing-task" {
-			foundProcessing = true
-		}
-		// Should never include done task
-		if task.Status == StatusDone {
-			t.Error("should not include done tasks")
-		}
-		// Should never include tasks without branches
-		if task.BranchName == "" {
-			t.Error("should not include tasks without branches")
-		}
-	}
-
-	if !foundBlocked {
-		t.Error("should include blocked task with branch")
-	}
-	if !foundProcessing {
-		t.Error("should include processing task with branch")
-	}
-}
-
 func TestGetProjectByPath(t *testing.T) {
 	// Create temporary database
 	tmpDir := t.TempDir()
@@ -1334,13 +1248,78 @@ func TestCreateTaskAllowsProjectAlias(t *testing.T) {
 		t.Fatalf("expected task creation with alias to succeed, got error: %v", err)
 	}
 
-	// Verify task was created with the alias (not the full name)
+	// Verify task was created with the canonical project name (not the alias)
 	retrieved, err := db.GetTask(task.ID)
 	if err != nil {
 		t.Fatalf("failed to get task: %v", err)
 	}
-	if retrieved.Project != "myproj" {
-		t.Errorf("expected project 'myproj', got '%s'", retrieved.Project)
+	if retrieved.Project != "my-long-project-name" {
+		t.Errorf("expected canonical project name 'my-long-project-name', got '%s'", retrieved.Project)
+	}
+
+	// Verify the task object itself was updated with the canonical name
+	if task.Project != "my-long-project-name" {
+		t.Errorf("expected task.Project to be updated to 'my-long-project-name', got '%s'", task.Project)
+	}
+}
+
+func TestListTasksResolvesProjectAlias(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	db, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer db.Close()
+	defer os.Remove(dbPath)
+
+	// Create a project with aliases
+	project := &Project{
+		Name:    "my-project",
+		Path:    tmpDir,
+		Aliases: "mp, myproj",
+	}
+	if err := db.CreateProject(project); err != nil {
+		t.Fatalf("failed to create project: %v", err)
+	}
+
+	// Create a task in the project (using canonical name)
+	task := &Task{
+		Title:   "Test Task",
+		Status:  StatusBacklog,
+		Type:    TypeCode,
+		Project: "my-project",
+	}
+	if err := db.CreateTask(task); err != nil {
+		t.Fatalf("failed to create task: %v", err)
+	}
+
+	// ListTasks with alias should find the task
+	tasks, err := db.ListTasks(ListTasksOptions{Project: "mp"})
+	if err != nil {
+		t.Fatalf("failed to list tasks: %v", err)
+	}
+	if len(tasks) != 1 {
+		t.Errorf("expected 1 task when filtering by alias 'mp', got %d", len(tasks))
+	}
+
+	// ListTasks with another alias should also find the task
+	tasks, err = db.ListTasks(ListTasksOptions{Project: "myproj"})
+	if err != nil {
+		t.Fatalf("failed to list tasks: %v", err)
+	}
+	if len(tasks) != 1 {
+		t.Errorf("expected 1 task when filtering by alias 'myproj', got %d", len(tasks))
+	}
+
+	// ListTasks with canonical name should still work
+	tasks, err = db.ListTasks(ListTasksOptions{Project: "my-project"})
+	if err != nil {
+		t.Fatalf("failed to list tasks: %v", err)
+	}
+	if len(tasks) != 1 {
+		t.Errorf("expected 1 task when filtering by canonical name, got %d", len(tasks))
 	}
 }
 
@@ -1500,6 +1479,95 @@ func TestUpdateTaskDangerousMode(t *testing.T) {
 	}
 	if retrieved.DangerousMode {
 		t.Error("expected DangerousMode to be false after disabling")
+	}
+}
+
+func TestUpdateTaskPRInfo(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	db, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer db.Close()
+	defer os.Remove(dbPath)
+
+	// Create a task
+	task := &Task{
+		Title:   "Test PR Info",
+		Status:  StatusProcessing,
+		Type:    TypeCode,
+		Project: "personal",
+	}
+	if err := db.CreateTask(task); err != nil {
+		t.Fatalf("failed to create task: %v", err)
+	}
+
+	// Verify initial PR info is empty
+	retrieved, err := db.GetTask(task.ID)
+	if err != nil {
+		t.Fatalf("failed to get task: %v", err)
+	}
+	if retrieved.PRURL != "" || retrieved.PRNumber != 0 || retrieved.PRInfoJSON != "" {
+		t.Error("expected empty PR info initially")
+	}
+
+	// Update PR info
+	prJSON := `{"number":42,"url":"https://github.com/test/repo/pull/42","state":"OPEN","checkState":"SUCCESS","mergeable":"MERGEABLE"}`
+	if err := db.UpdateTaskPRInfo(task.ID, "https://github.com/test/repo/pull/42", 42, prJSON); err != nil {
+		t.Fatalf("failed to update PR info: %v", err)
+	}
+
+	// Verify PR info is saved
+	retrieved, err = db.GetTask(task.ID)
+	if err != nil {
+		t.Fatalf("failed to get task: %v", err)
+	}
+	if retrieved.PRURL != "https://github.com/test/repo/pull/42" {
+		t.Errorf("expected PRURL to be set, got %q", retrieved.PRURL)
+	}
+	if retrieved.PRNumber != 42 {
+		t.Errorf("expected PRNumber to be 42, got %d", retrieved.PRNumber)
+	}
+	if retrieved.PRInfoJSON != prJSON {
+		t.Errorf("expected PRInfoJSON to be set, got %q", retrieved.PRInfoJSON)
+	}
+
+	// Update PR state to merged
+	mergedJSON := `{"number":42,"url":"https://github.com/test/repo/pull/42","state":"MERGED","checkState":"SUCCESS","mergeable":"MERGEABLE"}`
+	if err := db.UpdateTaskPRInfo(task.ID, "https://github.com/test/repo/pull/42", 42, mergedJSON); err != nil {
+		t.Fatalf("failed to update PR info to merged: %v", err)
+	}
+
+	// Verify PR state is updated
+	retrieved, err = db.GetTask(task.ID)
+	if err != nil {
+		t.Fatalf("failed to get task: %v", err)
+	}
+	if retrieved.PRInfoJSON != mergedJSON {
+		t.Errorf("expected PRInfoJSON to be updated to merged, got %q", retrieved.PRInfoJSON)
+	}
+
+	// Verify PR info persists through ListTasks
+	tasks, err := db.ListTasks(ListTasksOptions{})
+	if err != nil {
+		t.Fatalf("failed to list tasks: %v", err)
+	}
+	if len(tasks) == 0 {
+		t.Fatal("expected at least one task")
+	}
+	found := false
+	for _, lt := range tasks {
+		if lt.ID == task.ID {
+			found = true
+			if lt.PRInfoJSON != mergedJSON {
+				t.Errorf("expected PRInfoJSON in list to be merged, got %q", lt.PRInfoJSON)
+			}
+		}
+	}
+	if !found {
+		t.Error("task not found in list")
 	}
 }
 
@@ -1879,4 +1947,383 @@ func TestGetExecutorUsageByProject(t *testing.T) {
 	if len(usage) != 0 {
 		t.Errorf("expected empty usage map for nonexistent project, got %v", usage)
 	}
+}
+
+func TestClearTaskTmuxIDs(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	db, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer db.Close()
+	defer os.Remove(dbPath)
+
+	// Create task
+	task := &Task{
+		Title:   "Test Task",
+		Body:    "Test body",
+		Status:  StatusProcessing,
+		Type:    TypeCode,
+		Project: "personal",
+	}
+	if err := db.CreateTask(task); err != nil {
+		t.Fatalf("failed to create task: %v", err)
+	}
+
+	// Set tmux IDs
+	if err := db.UpdateTaskWindowID(task.ID, "@123"); err != nil {
+		t.Fatalf("failed to update window ID: %v", err)
+	}
+	if err := db.UpdateTaskPaneIDs(task.ID, "%456", "%789"); err != nil {
+		t.Fatalf("failed to update pane IDs: %v", err)
+	}
+
+	// Verify IDs are set
+	fetched, err := db.GetTask(task.ID)
+	if err != nil {
+		t.Fatalf("failed to get task: %v", err)
+	}
+	if fetched.TmuxWindowID != "@123" {
+		t.Errorf("expected window ID @123, got %q", fetched.TmuxWindowID)
+	}
+	if fetched.ClaudePaneID != "%456" {
+		t.Errorf("expected Claude pane ID %%456, got %q", fetched.ClaudePaneID)
+	}
+	if fetched.ShellPaneID != "%789" {
+		t.Errorf("expected Shell pane ID %%789, got %q", fetched.ShellPaneID)
+	}
+
+	// Clear tmux IDs
+	if err := db.ClearTaskTmuxIDs(task.ID); err != nil {
+		t.Fatalf("failed to clear tmux IDs: %v", err)
+	}
+
+	// Verify IDs are cleared
+	fetched, err = db.GetTask(task.ID)
+	if err != nil {
+		t.Fatalf("failed to get task: %v", err)
+	}
+	if fetched.TmuxWindowID != "" {
+		t.Errorf("expected empty window ID, got %q", fetched.TmuxWindowID)
+	}
+	if fetched.ClaudePaneID != "" {
+		t.Errorf("expected empty Claude pane ID, got %q", fetched.ClaudePaneID)
+	}
+	if fetched.ShellPaneID != "" {
+		t.Errorf("expected empty Shell pane ID, got %q", fetched.ShellPaneID)
+	}
+}
+
+func TestRetryTaskClearsTmuxIDs(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	db, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer db.Close()
+	defer os.Remove(dbPath)
+
+	// Create task
+	task := &Task{
+		Title:   "Test Task",
+		Body:    "Test body",
+		Status:  StatusBlocked,
+		Type:    TypeCode,
+		Project: "personal",
+	}
+	if err := db.CreateTask(task); err != nil {
+		t.Fatalf("failed to create task: %v", err)
+	}
+
+	// Set tmux IDs (simulate a running task)
+	if err := db.UpdateTaskWindowID(task.ID, "@999"); err != nil {
+		t.Fatalf("failed to update window ID: %v", err)
+	}
+	if err := db.UpdateTaskPaneIDs(task.ID, "%111", "%222"); err != nil {
+		t.Fatalf("failed to update pane IDs: %v", err)
+	}
+
+	// Retry the task with feedback
+	if err := db.RetryTask(task.ID, "Please try again"); err != nil {
+		t.Fatalf("failed to retry task: %v", err)
+	}
+
+	// Verify task status is queued and tmux IDs are cleared
+	fetched, err := db.GetTask(task.ID)
+	if err != nil {
+		t.Fatalf("failed to get task: %v", err)
+	}
+
+	if fetched.Status != StatusQueued {
+		t.Errorf("expected status %q, got %q", StatusQueued, fetched.Status)
+	}
+	if fetched.TmuxWindowID != "" {
+		t.Errorf("expected empty window ID after retry, got %q", fetched.TmuxWindowID)
+	}
+	if fetched.ClaudePaneID != "" {
+		t.Errorf("expected empty Claude pane ID after retry, got %q", fetched.ClaudePaneID)
+	}
+	if fetched.ShellPaneID != "" {
+		t.Errorf("expected empty Shell pane ID after retry, got %q", fetched.ShellPaneID)
+	}
+}
+
+func TestMigrateProjectAliases(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	db, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer db.Close()
+	defer os.Remove(dbPath)
+
+	// Create a project with aliases
+	project := &Project{
+		Name:    "my-project",
+		Path:    tmpDir,
+		Aliases: "mp, myp",
+	}
+	if err := db.CreateProject(project); err != nil {
+		t.Fatalf("failed to create project: %v", err)
+	}
+
+	// Manually insert a task with the alias as project (simulating old buggy behavior)
+	_, err = db.Exec(`INSERT INTO tasks (title, status, project) VALUES (?, ?, ?)`, "Aliased Task", StatusBacklog, "mp")
+	if err != nil {
+		t.Fatalf("failed to insert task with alias: %v", err)
+	}
+
+	// Run the migration
+	if err := db.migrateProjectAliases(); err != nil {
+		t.Fatalf("migration failed: %v", err)
+	}
+
+	// Verify the task was migrated to canonical name
+	tasks, err := db.ListTasks(ListTasksOptions{Project: "my-project"})
+	if err != nil {
+		t.Fatalf("failed to list tasks: %v", err)
+	}
+
+	found := false
+	for _, task := range tasks {
+		if task.Title == "Aliased Task" {
+			found = true
+			if task.Project != "my-project" {
+				t.Errorf("expected task project to be 'my-project' after migration, got '%s'", task.Project)
+			}
+		}
+	}
+	if !found {
+		t.Error("expected to find 'Aliased Task' in project 'my-project' after migration")
+	}
+}
+
+func TestOnboarding(t *testing.T) {
+	// Create temporary database
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	db, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer db.Close()
+
+	t.Run("IsFirstRun returns true initially", func(t *testing.T) {
+		// Clear any existing onboarding setting
+		db.Exec("DELETE FROM settings WHERE key = 'onboarding_completed'")
+
+		if !db.IsFirstRun() {
+			t.Error("expected IsFirstRun to return true initially")
+		}
+	})
+
+	t.Run("CompleteOnboarding marks onboarding complete", func(t *testing.T) {
+		// Complete onboarding
+		if err := db.CompleteOnboarding(); err != nil {
+			t.Fatalf("failed to complete onboarding: %v", err)
+		}
+
+		// Verify onboarding is marked complete
+		if db.IsFirstRun() {
+			t.Error("expected IsFirstRun to return false after CompleteOnboarding")
+		}
+	})
+
+	t.Run("IsFirstRun returns false after CompleteOnboarding", func(t *testing.T) {
+		// Onboarding was completed in previous test
+		if db.IsFirstRun() {
+			t.Error("expected IsFirstRun to return false")
+		}
+	})
+
+	t.Run("CompleteOnboarding is idempotent", func(t *testing.T) {
+		// Call CompleteOnboarding multiple times
+		if err := db.CompleteOnboarding(); err != nil {
+			t.Fatalf("first CompleteOnboarding failed: %v", err)
+		}
+		if err := db.CompleteOnboarding(); err != nil {
+			t.Fatalf("second CompleteOnboarding failed: %v", err)
+		}
+
+		// Should still return false
+		if db.IsFirstRun() {
+			t.Error("expected IsFirstRun to return false after multiple CompleteOnboarding calls")
+		}
+	})
+}
+
+func TestGetConversationHistoryLogs(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	db, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer db.Close()
+
+	if err := db.CreateProject(&Project{Name: "test", Path: tmpDir}); err != nil {
+		t.Fatalf("failed to create project: %v", err)
+	}
+
+	task := &Task{Title: "Test Task", Status: StatusBacklog, Project: "test"}
+	if err := db.CreateTask(task); err != nil {
+		t.Fatalf("failed to create task: %v", err)
+	}
+
+	t.Run("empty logs", func(t *testing.T) {
+		logs, err := db.GetConversationHistoryLogs(task.ID)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(logs) != 0 {
+			t.Errorf("expected 0 logs, got %d", len(logs))
+		}
+	})
+
+	// Add various log types - only some should be returned
+	db.AppendTaskLog(task.ID, "system", "Starting task")
+	db.AppendTaskLog(task.ID, "output", "Some very large output content that should NOT be loaded")
+	db.AppendTaskLog(task.ID, "tool", "Tool use: Read file.go")
+	db.AppendTaskLog(task.ID, "question", "What database should I use?")
+	db.AppendTaskLog(task.ID, "system", "--- Continuation ---")
+	db.AppendTaskLog(task.ID, "text", "Feedback: Use PostgreSQL")
+	db.AppendTaskLog(task.ID, "output", "More large output")
+	db.AppendTaskLog(task.ID, "question", "Should I add an index?")
+	db.AppendTaskLog(task.ID, "system", "--- Continuation ---")
+	db.AppendTaskLog(task.ID, "text", "Feedback: Yes, add it")
+	db.AppendTaskLog(task.ID, "error", "Some error that should NOT be loaded")
+
+	t.Run("filters to conversation-relevant logs only", func(t *testing.T) {
+		logs, err := db.GetConversationHistoryLogs(task.ID)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		// Should only get: question, continuation, feedback, question, continuation, feedback = 6 logs
+		if len(logs) != 6 {
+			t.Errorf("expected 6 conversation history logs, got %d", len(logs))
+			for _, l := range logs {
+				t.Logf("  %s: %s", l.LineType, l.Content)
+			}
+		}
+
+		// Verify no output/tool/error logs are included
+		for _, l := range logs {
+			if l.LineType == "output" || l.LineType == "tool" || l.LineType == "error" {
+				t.Errorf("unexpected log type %q in conversation history", l.LineType)
+			}
+		}
+	})
+
+	t.Run("logs are ordered by ID ascending", func(t *testing.T) {
+		logs, err := db.GetConversationHistoryLogs(task.ID)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		for i := 1; i < len(logs); i++ {
+			if logs[i].ID < logs[i-1].ID {
+				t.Errorf("logs not in ascending order: ID %d before ID %d", logs[i-1].ID, logs[i].ID)
+			}
+		}
+	})
+}
+
+func TestHasContinuationMarker(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	db, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer db.Close()
+
+	if err := db.CreateProject(&Project{Name: "test", Path: tmpDir}); err != nil {
+		t.Fatalf("failed to create project: %v", err)
+	}
+
+	task := &Task{Title: "Test Task", Status: StatusBacklog, Project: "test"}
+	if err := db.CreateTask(task); err != nil {
+		t.Fatalf("failed to create task: %v", err)
+	}
+
+	t.Run("no continuation marker", func(t *testing.T) {
+		has, err := db.HasContinuationMarker(task.ID)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if has {
+			t.Error("expected no continuation marker")
+		}
+	})
+
+	// Add some logs without continuation marker
+	db.AppendTaskLog(task.ID, "system", "Starting task")
+	db.AppendTaskLog(task.ID, "output", "Some output")
+
+	t.Run("still no continuation marker", func(t *testing.T) {
+		has, err := db.HasContinuationMarker(task.ID)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if has {
+			t.Error("expected no continuation marker")
+		}
+	})
+
+	// Add continuation marker
+	db.AppendTaskLog(task.ID, "system", "--- Continuation ---")
+
+	t.Run("has continuation marker", func(t *testing.T) {
+		has, err := db.HasContinuationMarker(task.ID)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !has {
+			t.Error("expected continuation marker to be found")
+		}
+	})
+
+	// Test with different task (should not find markers from other task)
+	task2 := &Task{Title: "Other Task", Status: StatusBacklog, Project: "test"}
+	if err := db.CreateTask(task2); err != nil {
+		t.Fatalf("failed to create task: %v", err)
+	}
+
+	t.Run("different task has no marker", func(t *testing.T) {
+		has, err := db.HasContinuationMarker(task2.ID)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if has {
+			t.Error("expected no continuation marker for different task")
+		}
+	})
 }

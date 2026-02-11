@@ -86,6 +86,7 @@ func (o *OpenCodeExecutor) runOpenCode(ctx context.Context, task *db.Task, workD
 	windowName := TmuxWindowName(task.ID)
 	windowTarget := fmt.Sprintf("%s:%s", daemonSession, windowName)
 
+	// Kill ALL existing windows with this name (handles duplicates)
 	killAllWindowsByNameAllSessions(windowName)
 
 	// Build the prompt content

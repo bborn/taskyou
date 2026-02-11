@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "taskyou": {
+      "args": [
+        "mcp-server",
+        "--task-id",
+        "963"
+      ],
+      "command": "/Users/bruno/Projects/workflow/bin/ty",
+      "type": "stdio"
+    }
+  }
+}

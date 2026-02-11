@@ -40,6 +40,8 @@ type PRInfo struct {
 	CheckState CheckState `json:"checkState"`
 	Mergeable  string     `json:"mergeable"` // "MERGEABLE", "CONFLICTING", "UNKNOWN"
 	UpdatedAt  time.Time  `json:"updatedAt"`
+	Additions  int        `json:"additions"`  // Lines added
+	Deletions  int        `json:"deletions"`  // Lines deleted
 }
 
 // ghPRResponse is the JSON response from gh pr view.
@@ -52,6 +54,8 @@ type ghPRResponse struct {
 	Mergeable         string    `json:"mergeable"`
 	StatusCheckRollup []ghCheck `json:"statusCheckRollup"`
 	UpdatedAt         string    `json:"updatedAt"`
+	Additions         int       `json:"additions"`
+	Deletions         int       `json:"deletions"`
 }
 
 type ghCheck struct {
@@ -71,7 +75,7 @@ type cacheEntry struct {
 	fetchedAt time.Time
 }
 
-const cacheTTL = 30 * time.Second
+const cacheTTL = 15 * time.Second
 
 // NewPRCache creates a new PR cache.
 func NewPRCache() *PRCache {
@@ -133,9 +137,9 @@ func fetchPRInfo(repoDir, branchName string) *PRInfo {
 	defer cancel()
 
 	// Query for PR associated with this branch
-	// gh pr view <branch> --json number,url,state,isDraft,title,mergeable,statusCheckRollup,updatedAt
+	// gh pr view <branch> --json number,url,state,isDraft,title,mergeable,statusCheckRollup,updatedAt,additions,deletions
 	cmd := exec.CommandContext(ctx, "gh", "pr", "view", branchName,
-		"--json", "number,url,state,isDraft,title,mergeable,statusCheckRollup,updatedAt")
+		"--json", "number,url,state,isDraft,title,mergeable,statusCheckRollup,updatedAt,additions,deletions")
 	cmd.Dir = repoDir
 
 	output, err := cmd.Output()
@@ -156,6 +160,8 @@ func fetchPRInfo(repoDir, branchName string) *PRInfo {
 		Title:     resp.Title,
 		IsDraft:   resp.IsDraft,
 		Mergeable: resp.Mergeable,
+		Additions: resp.Additions,
+		Deletions: resp.Deletions,
 	}
 
 	// Parse state
@@ -298,6 +304,8 @@ type ghPRListResponse struct {
 	Mergeable         string    `json:"mergeable"`
 	StatusCheckRollup []ghCheck `json:"statusCheckRollup"`
 	UpdatedAt         string    `json:"updatedAt"`
+	Additions         int       `json:"additions"`
+	Deletions         int       `json:"deletions"`
 }
 
 // FetchAllPRsForRepo fetches all open and recently merged PRs for a repo in a single API call.
@@ -316,7 +324,7 @@ func FetchAllPRsForRepo(repoDir string) map[string]*PRInfo {
 	// Get all open PRs in one call
 	cmd := exec.CommandContext(ctx, "gh", "pr", "list",
 		"--state", "open",
-		"--json", "number,url,state,isDraft,title,headRefName,mergeable,statusCheckRollup,updatedAt",
+		"--json", "number,url,state,isDraft,title,headRefName,mergeable,statusCheckRollup,updatedAt,additions,deletions",
 		"--limit", "100")
 	cmd.Dir = repoDir
 
@@ -343,7 +351,7 @@ func FetchAllPRsForRepo(repoDir string) map[string]*PRInfo {
 
 	cmd2 := exec.CommandContext(ctx2, "gh", "pr", "list",
 		"--state", "merged",
-		"--json", "number,url,state,isDraft,title,headRefName,mergeable,updatedAt",
+		"--json", "number,url,state,isDraft,title,headRefName,mergeable,updatedAt,additions,deletions",
 		"--limit", "20")
 	cmd2.Dir = repoDir
 
@@ -353,6 +361,32 @@ func FetchAllPRsForRepo(repoDir string) map[string]*PRInfo {
 		if json.Unmarshal(output2, &mergedPRs) == nil {
 			for _, pr := range mergedPRs {
 				// Only add if not already present (open PR takes precedence)
+				if _, exists := result[pr.HeadRefName]; !exists && pr.HeadRefName != "" {
+					info := parsePRListResponse(&pr)
+					if info != nil {
+						result[pr.HeadRefName] = info
+					}
+				}
+			}
+		}
+	}
+
+	// Also fetch recently closed PRs (last 10) to catch closures
+	ctx3, cancel3 := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel3()
+
+	cmd3 := exec.CommandContext(ctx3, "gh", "pr", "list",
+		"--state", "closed",
+		"--json", "number,url,state,isDraft,title,headRefName,mergeable,updatedAt,additions,deletions",
+		"--limit", "10")
+	cmd3.Dir = repoDir
+
+	output3, err := cmd3.Output()
+	if err == nil {
+		var closedPRs []ghPRListResponse
+		if json.Unmarshal(output3, &closedPRs) == nil {
+			for _, pr := range closedPRs {
+				// Only add if not already present (open/merged PR takes precedence)
 				if _, exists := result[pr.HeadRefName]; !exists && pr.HeadRefName != "" {
 					info := parsePRListResponse(&pr)
 					if info != nil {
@@ -374,6 +408,8 @@ func parsePRListResponse(pr *ghPRListResponse) *PRInfo {
 		Title:     pr.Title,
 		IsDraft:   pr.IsDraft,
 		Mergeable: pr.Mergeable,
+		Additions: pr.Additions,
+		Deletions: pr.Deletions,
 	}
 
 	// Parse state
@@ -417,6 +453,30 @@ func (c *PRCache) UpdateCacheForRepo(repoDir string, prsByBranch map[string]*PRI
 			fetchedAt: now,
 		}
 	}
+}
+
+// MarshalPRInfo converts a PRInfo to JSON string for database storage.
+func MarshalPRInfo(info *PRInfo) string {
+	if info == nil {
+		return ""
+	}
+	data, err := json.Marshal(info)
+	if err != nil {
+		return ""
+	}
+	return string(data)
+}
+
+// UnmarshalPRInfo converts a JSON string from database back to PRInfo.
+func UnmarshalPRInfo(data string) *PRInfo {
+	if data == "" {
+		return nil
+	}
+	var info PRInfo
+	if err := json.Unmarshal([]byte(data), &info); err != nil {
+		return nil
+	}
+	return &info
 }
 
 // GetCachedPR returns cached PR info without fetching. Returns nil if not cached or expired.

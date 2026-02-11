@@ -28,9 +28,11 @@ type Task struct {
 	ShellPaneID     string // tmux pane ID (e.g., "%1235") for the shell pane
 	PRURL           string // Pull request URL (if associated with a PR)
 	PRNumber        int    // Pull request number (if associated with a PR)
+	PRInfoJSON      string // Cached PR state as JSON (state, checks, mergeable, etc.)
 	DangerousMode   bool   // Whether task is running in dangerous mode (--dangerously-skip-permissions)
 	Pinned          bool   // Whether the task is pinned to the top of its column
 	Tags            string // Comma-separated tags for categorization (e.g., "customer-support,email,influence-kit")
+	SourceBranch    string // Existing branch to checkout for worktree (e.g., "fix/ui-overflow") instead of creating new branch
 	Summary         string // Distilled summary of what was accomplished (for search and context)
 	CreatedAt       LocalTime
 	UpdatedAt       LocalTime
@@ -38,6 +40,13 @@ type Task struct {
 	CompletedAt     *LocalTime
 	// Distillation tracking
 	LastDistilledAt *LocalTime // When task was last distilled for learnings
+	// UI tracking
+	LastAccessedAt *LocalTime // When task was last accessed/opened in the UI
+	// Archive state for preserving worktree state when archiving
+	ArchiveRef          string // Git ref storing stashed changes (e.g., "refs/task-archive/123")
+	ArchiveCommit       string // Commit hash at time of archiving
+	ArchiveWorktreePath string // Original worktree path before archiving
+	ArchiveBranchName   string // Original branch name before archiving
 }
 
 // Task statuses
@@ -109,7 +118,7 @@ func (db *DB) CreateTask(t *Task) error {
 		t.Executor = DefaultExecutor()
 	}
 
-	// Validate that the project exists
+	// Validate that the project exists and resolve aliases to canonical name
 	project, err := db.GetProjectByName(t.Project)
 	if err != nil {
 		return fmt.Errorf("validate project: %w", err)
@@ -117,11 +126,12 @@ func (db *DB) CreateTask(t *Task) error {
 	if project == nil {
 		return fmt.Errorf("%w: %s", ErrProjectNotFound, t.Project)
 	}
+	t.Project = project.Name
 
 	result, err := db.Exec(`
-		INSERT INTO tasks (title, body, status, type, project, executor, pinned, tags)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-	`, t.Title, t.Body, t.Status, t.Type, t.Project, t.Executor, t.Pinned, t.Tags)
+		INSERT INTO tasks (title, body, status, type, project, executor, pinned, tags, source_branch)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, t.Title, t.Body, t.Status, t.Type, t.Project, t.Executor, t.Pinned, t.Tags, t.SourceBranch)
 	if err != nil {
 		return fmt.Errorf("insert task: %w", err)
 	}
@@ -164,19 +174,24 @@ func (db *DB) GetTask(id int64) (*Task, error) {
 		       worktree_path, branch_name, port, claude_session_id,
 		       COALESCE(daemon_session, ''), COALESCE(tmux_window_id, ''),
 		       COALESCE(claude_pane_id, ''), COALESCE(shell_pane_id, ''),
-		       COALESCE(pr_url, ''), COALESCE(pr_number, 0),
-		       COALESCE(dangerous_mode, 0), COALESCE(pinned, 0), COALESCE(tags, ''), COALESCE(summary, ''),
+		       COALESCE(pr_url, ''), COALESCE(pr_number, 0), COALESCE(pr_info_json, ''),
+		       COALESCE(dangerous_mode, 0), COALESCE(pinned, 0), COALESCE(tags, ''),
+		       COALESCE(source_branch, ''), COALESCE(summary, ''),
 		       created_at, updated_at, started_at, completed_at,
-		       last_distilled_at
+		       last_distilled_at, last_accessed_at,
+		       COALESCE(archive_ref, ''), COALESCE(archive_commit, ''),
+		       COALESCE(archive_worktree_path, ''), COALESCE(archive_branch_name, '')
 		FROM tasks WHERE id = ?
 	`, id).Scan(
 		&t.ID, &t.Title, &t.Body, &t.Status, &t.Type, &t.Project, &t.Executor,
 		&t.WorktreePath, &t.BranchName, &t.Port, &t.ClaudeSessionID,
 		&t.DaemonSession, &t.TmuxWindowID, &t.ClaudePaneID, &t.ShellPaneID,
-		&t.PRURL, &t.PRNumber,
-		&t.DangerousMode, &t.Pinned, &t.Tags, &t.Summary,
+		&t.PRURL, &t.PRNumber, &t.PRInfoJSON,
+		&t.DangerousMode, &t.Pinned, &t.Tags,
+		&t.SourceBranch, &t.Summary,
 		&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
-		&t.LastDistilledAt,
+		&t.LastDistilledAt, &t.LastAccessedAt,
+		&t.ArchiveRef, &t.ArchiveCommit, &t.ArchiveWorktreePath, &t.ArchiveBranchName,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -204,10 +219,13 @@ func (db *DB) ListTasks(opts ListTasksOptions) ([]*Task, error) {
 		       worktree_path, branch_name, port, claude_session_id,
 		       COALESCE(daemon_session, ''), COALESCE(tmux_window_id, ''),
 		       COALESCE(claude_pane_id, ''), COALESCE(shell_pane_id, ''),
-		       COALESCE(pr_url, ''), COALESCE(pr_number, 0),
-		       COALESCE(dangerous_mode, 0), COALESCE(pinned, 0), COALESCE(tags, ''), COALESCE(summary, ''),
+		       COALESCE(pr_url, ''), COALESCE(pr_number, 0), COALESCE(pr_info_json, ''),
+		       COALESCE(dangerous_mode, 0), COALESCE(pinned, 0), COALESCE(tags, ''),
+		       COALESCE(source_branch, ''), COALESCE(summary, ''),
 		       created_at, updated_at, started_at, completed_at,
-		       last_distilled_at
+		       last_distilled_at, last_accessed_at,
+		       COALESCE(archive_ref, ''), COALESCE(archive_commit, ''),
+		       COALESCE(archive_worktree_path, ''), COALESCE(archive_branch_name, '')
 		FROM tasks WHERE 1=1
 	`
 	args := []interface{}{}
@@ -221,8 +239,13 @@ func (db *DB) ListTasks(opts ListTasksOptions) ([]*Task, error) {
 		args = append(args, opts.Type)
 	}
 	if opts.Project != "" {
+		// Resolve alias to canonical project name
+		projectName := opts.Project
+		if p, err := db.GetProjectByName(opts.Project); err == nil && p != nil {
+			projectName = p.Name
+		}
 		query += " AND project = ?"
-		args = append(args, opts.Project)
+		args = append(args, projectName)
 	}
 
 	// Exclude done and archived by default unless specifically querying for them or includeClosed is set
@@ -256,10 +279,12 @@ func (db *DB) ListTasks(opts ListTasksOptions) ([]*Task, error) {
 			&t.ID, &t.Title, &t.Body, &t.Status, &t.Type, &t.Project, &t.Executor,
 			&t.WorktreePath, &t.BranchName, &t.Port, &t.ClaudeSessionID,
 			&t.DaemonSession, &t.TmuxWindowID, &t.ClaudePaneID, &t.ShellPaneID,
-			&t.PRURL, &t.PRNumber,
-			&t.DangerousMode, &t.Pinned, &t.Tags, &t.Summary,
+			&t.PRURL, &t.PRNumber, &t.PRInfoJSON,
+			&t.DangerousMode, &t.Pinned, &t.Tags,
+			&t.SourceBranch, &t.Summary,
 			&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
-			&t.LastDistilledAt,
+			&t.LastDistilledAt, &t.LastAccessedAt,
+			&t.ArchiveRef, &t.ArchiveCommit, &t.ArchiveWorktreePath, &t.ArchiveBranchName,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("scan task: %w", err)
@@ -279,10 +304,13 @@ func (db *DB) GetMostRecentlyCreatedTask() (*Task, error) {
 		       worktree_path, branch_name, port, claude_session_id,
 		       COALESCE(daemon_session, ''), COALESCE(tmux_window_id, ''),
 		       COALESCE(claude_pane_id, ''), COALESCE(shell_pane_id, ''),
-		       COALESCE(pr_url, ''), COALESCE(pr_number, 0),
-		       COALESCE(dangerous_mode, 0), COALESCE(pinned, 0), COALESCE(tags, ''), COALESCE(summary, ''),
+		       COALESCE(pr_url, ''), COALESCE(pr_number, 0), COALESCE(pr_info_json, ''),
+		       COALESCE(dangerous_mode, 0), COALESCE(pinned, 0), COALESCE(tags, ''),
+		       COALESCE(source_branch, ''), COALESCE(summary, ''),
 		       created_at, updated_at, started_at, completed_at,
-		       last_distilled_at
+		       last_distilled_at, last_accessed_at,
+		       COALESCE(archive_ref, ''), COALESCE(archive_commit, ''),
+		       COALESCE(archive_worktree_path, ''), COALESCE(archive_branch_name, '')
 		FROM tasks
 		ORDER BY created_at DESC, id DESC
 		LIMIT 1
@@ -290,10 +318,12 @@ func (db *DB) GetMostRecentlyCreatedTask() (*Task, error) {
 		&t.ID, &t.Title, &t.Body, &t.Status, &t.Type, &t.Project, &t.Executor,
 		&t.WorktreePath, &t.BranchName, &t.Port, &t.ClaudeSessionID,
 		&t.DaemonSession, &t.TmuxWindowID, &t.ClaudePaneID, &t.ShellPaneID,
-		&t.PRURL, &t.PRNumber,
-		&t.DangerousMode, &t.Pinned, &t.Tags, &t.Summary,
+		&t.PRURL, &t.PRNumber, &t.PRInfoJSON,
+		&t.DangerousMode, &t.Pinned, &t.Tags,
+		&t.SourceBranch, &t.Summary,
 		&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
-		&t.LastDistilledAt,
+		&t.LastDistilledAt, &t.LastAccessedAt,
+		&t.ArchiveRef, &t.ArchiveCommit, &t.ArchiveWorktreePath, &t.ArchiveBranchName,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -317,10 +347,13 @@ func (db *DB) SearchTasks(query string, limit int) ([]*Task, error) {
 		       worktree_path, branch_name, port, claude_session_id,
 		       COALESCE(daemon_session, ''), COALESCE(tmux_window_id, ''),
 		       COALESCE(claude_pane_id, ''), COALESCE(shell_pane_id, ''),
-		       COALESCE(pr_url, ''), COALESCE(pr_number, 0),
-		       COALESCE(dangerous_mode, 0), COALESCE(pinned, 0), COALESCE(tags, ''), COALESCE(summary, ''),
+		       COALESCE(pr_url, ''), COALESCE(pr_number, 0), COALESCE(pr_info_json, ''),
+		       COALESCE(dangerous_mode, 0), COALESCE(pinned, 0), COALESCE(tags, ''),
+		       COALESCE(source_branch, ''), COALESCE(summary, ''),
 		       created_at, updated_at, started_at, completed_at,
-		       last_distilled_at
+		       last_distilled_at, last_accessed_at,
+		       COALESCE(archive_ref, ''), COALESCE(archive_commit, ''),
+		       COALESCE(archive_worktree_path, ''), COALESCE(archive_branch_name, '')
 		FROM tasks
 		WHERE (
 			title LIKE ? COLLATE NOCASE
@@ -347,10 +380,12 @@ func (db *DB) SearchTasks(query string, limit int) ([]*Task, error) {
 			&t.ID, &t.Title, &t.Body, &t.Status, &t.Type, &t.Project, &t.Executor,
 			&t.WorktreePath, &t.BranchName, &t.Port, &t.ClaudeSessionID,
 			&t.DaemonSession, &t.TmuxWindowID, &t.ClaudePaneID, &t.ShellPaneID,
-			&t.PRURL, &t.PRNumber,
-			&t.DangerousMode, &t.Pinned, &t.Tags, &t.Summary,
+			&t.PRURL, &t.PRNumber, &t.PRInfoJSON,
+			&t.DangerousMode, &t.Pinned, &t.Tags,
+			&t.SourceBranch, &t.Summary,
 			&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
-			&t.LastDistilledAt,
+			&t.LastDistilledAt, &t.LastAccessedAt,
+			&t.ArchiveRef, &t.ArchiveCommit, &t.ArchiveWorktreePath, &t.ArchiveBranchName,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("scan task: %w", err)
@@ -421,6 +456,11 @@ func (db *DB) UpdateTaskStatus(id int64, status string) error {
 		}
 	}
 
+	// Process dependent tasks when a blocker is completed
+	if status == StatusDone || status == StatusArchived {
+		db.ProcessCompletedBlocker(id)
+	}
+
 	return nil
 }
 
@@ -433,14 +473,14 @@ func (db *DB) UpdateTask(t *Task) error {
 		UPDATE tasks SET
 			title = ?, body = ?, status = ?, type = ?, project = ?, executor = ?,
 			worktree_path = ?, branch_name = ?, port = ?, claude_session_id = ?,
-			daemon_session = ?, pr_url = ?, pr_number = ?, dangerous_mode = ?,
-			pinned = ?, tags = ?,
+			daemon_session = ?, pr_url = ?, pr_number = ?, pr_info_json = ?, dangerous_mode = ?,
+			pinned = ?, tags = ?, source_branch = ?,
 			updated_at = CURRENT_TIMESTAMP
 		WHERE id = ?
 	`, t.Title, t.Body, t.Status, t.Type, t.Project, t.Executor,
 		t.WorktreePath, t.BranchName, t.Port, t.ClaudeSessionID,
-		t.DaemonSession, t.PRURL, t.PRNumber, t.DangerousMode,
-		t.Pinned, t.Tags, t.ID)
+		t.DaemonSession, t.PRURL, t.PRNumber, t.PRInfoJSON, t.DangerousMode,
+		t.Pinned, t.Tags, t.SourceBranch, t.ID)
 	if err != nil {
 		return fmt.Errorf("update task: %w", err)
 	}
@@ -468,6 +508,19 @@ func (db *DB) UpdateTask(t *Task) error {
 		}
 	}
 
+	return nil
+}
+
+// UpdateTaskPRInfo updates only the PR-related fields for a task.
+// This is used to persist PR state from GitHub API responses without touching other fields.
+func (db *DB) UpdateTaskPRInfo(taskID int64, prURL string, prNumber int, prInfoJSON string) error {
+	_, err := db.Exec(`
+		UPDATE tasks SET pr_url = ?, pr_number = ?, pr_info_json = ?, updated_at = CURRENT_TIMESTAMP
+		WHERE id = ?
+	`, prURL, prNumber, prInfoJSON, taskID)
+	if err != nil {
+		return fmt.Errorf("update task pr info: %w", err)
+	}
 	return nil
 }
 
@@ -550,6 +603,19 @@ func (db *DB) UpdateTaskSummary(taskID int64, summary string) error {
 	return nil
 }
 
+// ClearTaskWorktreePath clears just the worktree_path for a task.
+// Used during async archive cleanup to avoid overwriting other fields.
+func (db *DB) ClearTaskWorktreePath(taskID int64) error {
+	_, err := db.Exec(`
+		UPDATE tasks SET worktree_path = '', updated_at = CURRENT_TIMESTAMP
+		WHERE id = ?
+	`, taskID)
+	if err != nil {
+		return fmt.Errorf("clear task worktree path: %w", err)
+	}
+	return nil
+}
+
 // UpdateTaskDaemonSession updates the tmux daemon session name for a task.
 // This is used to track which daemon session owns the task's tmux window,
 // so we can properly kill the Claude process when the task completes.
@@ -587,6 +653,34 @@ func (db *DB) UpdateTaskPaneIDs(taskID int64, claudePaneID, shellPaneID string) 
 	`, claudePaneID, shellPaneID, taskID)
 	if err != nil {
 		return fmt.Errorf("update task pane ids: %w", err)
+	}
+	return nil
+}
+
+// UpdateTaskLastAccessedAt updates the last_accessed_at timestamp for a task.
+// This is used to track when a task was last accessed/opened in the UI,
+// enabling the command palette to show recently visited tasks first.
+func (db *DB) UpdateTaskLastAccessedAt(taskID int64) error {
+	_, err := db.Exec(`
+		UPDATE tasks SET last_accessed_at = CURRENT_TIMESTAMP
+		WHERE id = ?
+	`, taskID)
+	if err != nil {
+		return fmt.Errorf("update task last accessed at: %w", err)
+	}
+	return nil
+}
+
+// ClearTaskTmuxIDs clears all tmux-related IDs for a task.
+// This should be called before retrying/restarting a task to prevent stale references.
+// Clears: tmux_window_id, claude_pane_id, shell_pane_id
+func (db *DB) ClearTaskTmuxIDs(taskID int64) error {
+	_, err := db.Exec(`
+		UPDATE tasks SET tmux_window_id = '', claude_pane_id = '', shell_pane_id = '', updated_at = CURRENT_TIMESTAMP
+		WHERE id = ?
+	`, taskID)
+	if err != nil {
+		return fmt.Errorf("clear task tmux ids: %w", err)
 	}
 	return nil
 }
@@ -658,6 +752,7 @@ func (db *DB) AllocatePort(taskID int64) (int, error) {
 }
 
 // RetryTask clears logs, appends feedback to body, and re-queues a task.
+// Also clears stale tmux window/pane IDs to prevent duplicate window issues.
 func (db *DB) RetryTask(id int64, feedback string) error {
 	// Add continuation marker to logs
 	db.AppendTaskLog(id, "system", "--- Continuation ---")
@@ -665,6 +760,13 @@ func (db *DB) RetryTask(id int64, feedback string) error {
 	// Log feedback if provided
 	if feedback != "" {
 		db.AppendTaskLog(id, "text", "Feedback: "+feedback)
+	}
+
+	// Clear stale tmux IDs to prevent duplicate window issues on retry
+	// The new window/pane IDs will be set when the task restarts
+	if err := db.ClearTaskTmuxIDs(id); err != nil {
+		// Log but don't fail - this is cleanup, not critical
+		// The executor will still handle duplicates via name-based cleanup
 	}
 
 	// Re-queue the task
@@ -679,10 +781,13 @@ func (db *DB) GetNextQueuedTask() (*Task, error) {
 		       worktree_path, branch_name, port, claude_session_id,
 		       COALESCE(daemon_session, ''), COALESCE(tmux_window_id, ''),
 		       COALESCE(claude_pane_id, ''), COALESCE(shell_pane_id, ''),
-		       COALESCE(pr_url, ''), COALESCE(pr_number, 0),
-		       COALESCE(dangerous_mode, 0), COALESCE(pinned, 0), COALESCE(tags, ''), COALESCE(summary, ''),
+		       COALESCE(pr_url, ''), COALESCE(pr_number, 0), COALESCE(pr_info_json, ''),
+		       COALESCE(dangerous_mode, 0), COALESCE(pinned, 0), COALESCE(tags, ''),
+		       COALESCE(source_branch, ''), COALESCE(summary, ''),
 		       created_at, updated_at, started_at, completed_at,
-		       last_distilled_at
+		       last_distilled_at, last_accessed_at,
+		       COALESCE(archive_ref, ''), COALESCE(archive_commit, ''),
+		       COALESCE(archive_worktree_path, ''), COALESCE(archive_branch_name, '')
 		FROM tasks
 		WHERE status = ?
 		ORDER BY created_at ASC
@@ -691,10 +796,12 @@ func (db *DB) GetNextQueuedTask() (*Task, error) {
 		&t.ID, &t.Title, &t.Body, &t.Status, &t.Type, &t.Project, &t.Executor,
 		&t.WorktreePath, &t.BranchName, &t.Port, &t.ClaudeSessionID,
 		&t.DaemonSession, &t.TmuxWindowID, &t.ClaudePaneID, &t.ShellPaneID,
-		&t.PRURL, &t.PRNumber,
-		&t.DangerousMode, &t.Pinned, &t.Tags, &t.Summary,
+		&t.PRURL, &t.PRNumber, &t.PRInfoJSON,
+		&t.DangerousMode, &t.Pinned, &t.Tags,
+		&t.SourceBranch, &t.Summary,
 		&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
-		&t.LastDistilledAt,
+		&t.LastDistilledAt, &t.LastAccessedAt,
+		&t.ArchiveRef, &t.ArchiveCommit, &t.ArchiveWorktreePath, &t.ArchiveBranchName,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -712,10 +819,13 @@ func (db *DB) GetQueuedTasks() ([]*Task, error) {
 		       worktree_path, branch_name, port, claude_session_id,
 		       COALESCE(daemon_session, ''), COALESCE(tmux_window_id, ''),
 		       COALESCE(claude_pane_id, ''), COALESCE(shell_pane_id, ''),
-		       COALESCE(pr_url, ''), COALESCE(pr_number, 0),
-		       COALESCE(dangerous_mode, 0), COALESCE(pinned, 0), COALESCE(tags, ''), COALESCE(summary, ''),
+		       COALESCE(pr_url, ''), COALESCE(pr_number, 0), COALESCE(pr_info_json, ''),
+		       COALESCE(dangerous_mode, 0), COALESCE(pinned, 0), COALESCE(tags, ''),
+		       COALESCE(source_branch, ''), COALESCE(summary, ''),
 		       created_at, updated_at, started_at, completed_at,
-		       last_distilled_at
+		       last_distilled_at, last_accessed_at,
+		       COALESCE(archive_ref, ''), COALESCE(archive_commit, ''),
+		       COALESCE(archive_worktree_path, ''), COALESCE(archive_branch_name, '')
 		FROM tasks
 		WHERE status = ?
 		ORDER BY created_at ASC
@@ -732,50 +842,12 @@ func (db *DB) GetQueuedTasks() ([]*Task, error) {
 			&t.ID, &t.Title, &t.Body, &t.Status, &t.Type, &t.Project, &t.Executor,
 			&t.WorktreePath, &t.BranchName, &t.Port, &t.ClaudeSessionID,
 			&t.DaemonSession, &t.TmuxWindowID, &t.ClaudePaneID, &t.ShellPaneID,
-			&t.PRURL, &t.PRNumber,
-			&t.DangerousMode, &t.Pinned, &t.Tags, &t.Summary,
+			&t.PRURL, &t.PRNumber, &t.PRInfoJSON,
+			&t.DangerousMode, &t.Pinned, &t.Tags,
+			&t.SourceBranch, &t.Summary,
 			&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
-			&t.LastDistilledAt,
-		); err != nil {
-			return nil, fmt.Errorf("scan task: %w", err)
-		}
-		tasks = append(tasks, t)
-	}
-	return tasks, nil
-}
-
-// GetTasksWithBranches returns tasks that have a branch name and aren't done or archived.
-// These are candidates for automatic closure when their PR is merged.
-func (db *DB) GetTasksWithBranches() ([]*Task, error) {
-	rows, err := db.Query(`
-		SELECT id, title, body, status, type, project, COALESCE(executor, 'claude'),
-		       worktree_path, branch_name, port, claude_session_id,
-		       COALESCE(daemon_session, ''), COALESCE(tmux_window_id, ''),
-		       COALESCE(claude_pane_id, ''), COALESCE(shell_pane_id, ''),
-		       COALESCE(pr_url, ''), COALESCE(pr_number, 0),
-		       COALESCE(dangerous_mode, 0), COALESCE(pinned, 0), COALESCE(tags, ''), COALESCE(summary, ''),
-		       created_at, updated_at, started_at, completed_at,
-		       last_distilled_at
-		FROM tasks
-		WHERE branch_name != '' AND status NOT IN (?, ?)
-		ORDER BY created_at DESC
-	`, StatusDone, StatusArchived)
-	if err != nil {
-		return nil, fmt.Errorf("query tasks with branches: %w", err)
-	}
-	defer rows.Close()
-
-	var tasks []*Task
-	for rows.Next() {
-		t := &Task{}
-		if err := rows.Scan(
-			&t.ID, &t.Title, &t.Body, &t.Status, &t.Type, &t.Project, &t.Executor,
-			&t.WorktreePath, &t.BranchName, &t.Port, &t.ClaudeSessionID,
-			&t.DaemonSession, &t.TmuxWindowID, &t.ClaudePaneID, &t.ShellPaneID,
-			&t.PRURL, &t.PRNumber,
-			&t.DangerousMode, &t.Pinned, &t.Tags, &t.Summary,
-			&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
-			&t.LastDistilledAt,
+			&t.LastDistilledAt, &t.LastAccessedAt,
+			&t.ArchiveRef, &t.ArchiveCommit, &t.ArchiveWorktreePath, &t.ArchiveBranchName,
 		); err != nil {
 			return nil, fmt.Errorf("scan task: %w", err)
 		}
@@ -834,6 +906,55 @@ func (db *DB) GetTaskLogs(taskID int64, limit int) ([]*TaskLog, error) {
 	}
 
 	return logs, nil
+}
+
+// GetConversationHistoryLogs retrieves only logs relevant for building conversation history.
+// This is much more efficient than GetTaskLogs for the executor's prompt building,
+// as it skips large output/tool log content that isn't needed for conversation context.
+// Only fetches: continuation markers, questions, and user feedback.
+func (db *DB) GetConversationHistoryLogs(taskID int64) ([]*TaskLog, error) {
+	rows, err := db.Query(`
+		SELECT id, task_id, line_type, content, created_at
+		FROM task_logs
+		WHERE task_id = ?
+		  AND (
+		    (line_type = 'system' AND content = '--- Continuation ---')
+		    OR line_type = 'question'
+		    OR (line_type = 'text' AND content LIKE 'Feedback: %')
+		  )
+		ORDER BY id ASC
+	`, taskID)
+	if err != nil {
+		return nil, fmt.Errorf("query conversation history logs: %w", err)
+	}
+	defer rows.Close()
+
+	var logs []*TaskLog
+	for rows.Next() {
+		l := &TaskLog{}
+		err := rows.Scan(&l.ID, &l.TaskID, &l.LineType, &l.Content, &l.CreatedAt)
+		if err != nil {
+			return nil, fmt.Errorf("scan conversation history log: %w", err)
+		}
+		logs = append(logs, l)
+	}
+
+	return logs, nil
+}
+
+// HasContinuationMarker checks if a task has any continuation markers.
+// This is a fast EXISTS-style query to avoid loading logs just to check.
+func (db *DB) HasContinuationMarker(taskID int64) (bool, error) {
+	var count int
+	err := db.QueryRow(`
+		SELECT COUNT(*) FROM task_logs
+		WHERE task_id = ? AND line_type = 'system' AND content = '--- Continuation ---'
+		LIMIT 1
+	`, taskID).Scan(&count)
+	if err != nil {
+		return false, fmt.Errorf("check continuation marker: %w", err)
+	}
+	return count > 0, nil
 }
 
 // GetTaskLogCount returns the number of logs for a task.
@@ -1227,6 +1348,21 @@ func (db *DB) SetLastExecutorForProject(project, executor string) error {
 	return db.SetSetting("last_executor_"+project, executor)
 }
 
+// IsFirstRun returns true if this is the first time the app is being used.
+// This is determined by checking if onboarding has been completed.
+func (db *DB) IsFirstRun() bool {
+	val, err := db.GetSetting("onboarding_completed")
+	if err != nil || val != "true" {
+		return true
+	}
+	return false
+}
+
+// CompleteOnboarding marks the onboarding as complete.
+func (db *DB) CompleteOnboarding() error {
+	return db.SetSetting("onboarding_completed", "true")
+}
+
 // GetExecutorUsageByProject returns a map of executor names to their usage counts for a project.
 // This counts how many tasks have been created with each executor for the given project.
 func (db *DB) GetExecutorUsageByProject(project string) (map[string]int, error) {
@@ -1497,4 +1633,45 @@ func (db *DB) GetTagsList() ([]string, error) {
 		result = append(result, tag)
 	}
 	return result, nil
+}
+
+// SaveArchiveState saves the archive state for a task.
+// This stores the git ref, commit hash, worktree path, and branch name
+// that were active at the time of archiving.
+func (db *DB) SaveArchiveState(taskID int64, archiveRef, archiveCommit, worktreePath, branchName string) error {
+	_, err := db.Exec(`
+		UPDATE tasks SET
+			archive_ref = ?,
+			archive_commit = ?,
+			archive_worktree_path = ?,
+			archive_branch_name = ?,
+			updated_at = CURRENT_TIMESTAMP
+		WHERE id = ?
+	`, archiveRef, archiveCommit, worktreePath, branchName, taskID)
+	if err != nil {
+		return fmt.Errorf("save archive state: %w", err)
+	}
+	return nil
+}
+
+// ClearArchiveState clears the archive state for a task after unarchiving.
+func (db *DB) ClearArchiveState(taskID int64) error {
+	_, err := db.Exec(`
+		UPDATE tasks SET
+			archive_ref = '',
+			archive_commit = '',
+			archive_worktree_path = '',
+			archive_branch_name = '',
+			updated_at = CURRENT_TIMESTAMP
+		WHERE id = ?
+	`, taskID)
+	if err != nil {
+		return fmt.Errorf("clear archive state: %w", err)
+	}
+	return nil
+}
+
+// HasArchiveState returns true if the task has saved archive state.
+func (t *Task) HasArchiveState() bool {
+	return t.ArchiveRef != "" && t.ArchiveCommit != ""
 }

@@ -22,6 +22,7 @@ import (
 	"github.com/bborn/workflow/internal/db"
 	"github.com/bborn/workflow/internal/executor"
 	"github.com/bborn/workflow/internal/github"
+	"github.com/bborn/workflow/internal/mcp"
 	"github.com/bborn/workflow/internal/ui"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -78,8 +79,10 @@ func main() {
 				return
 			}
 
+			debugStatePath, _ := cmd.Flags().GetString("debug-state-file")
+
 			// Run locally
-			if err := runLocal(dangerous); err != nil {
+			if err := runLocal(dangerous, debugStatePath); err != nil {
 				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
 				os.Exit(1)
 			}
@@ -90,6 +93,70 @@ func main() {
 `)
 
 	rootCmd.PersistentFlags().BoolVar(&dangerous, "dangerous", false, "Run Claude with --dangerously-skip-permissions (for sandboxed environments)")
+	rootCmd.PersistentFlags().String("debug-state-file", "", "Path to write debug state JSON on update")
+
+	// Debug subcommand
+	debugCmd := &cobra.Command{
+		Use:   "debug",
+		Short: "Debugging tools",
+	}
+	rootCmd.AddCommand(debugCmd)
+
+	// Debug state subcommand
+	debugStateCmd := &cobra.Command{
+		Use:   "state",
+		Short: "Dump application state (Model) as JSON",
+		Long: `Dump the application state (Model) as structured JSON.
+		
+This is useful for debugging and for AI agents to verify UI logic.
+
+Examples:
+  ty debug state
+  ty debug state --keys "Down,Down,Enter"  # Simulate key presses
+  ty debug state --keys "n,test task,Enter" # Simulate creating a task`,
+		Run: func(cmd *cobra.Command, args []string) {
+			keys, _ := cmd.Flags().GetString("keys")
+
+			dbPath := db.DefaultPath()
+			database, err := db.Open(dbPath)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+			defer database.Close()
+
+			cwd, _ := os.Getwd()
+			exec := executor.New(database, config.New(database))
+			model := ui.NewAppModel(database, exec, cwd)
+			
+			// Load tasks synchronously to ensure model is populated
+			tasks, err := database.ListTasks(db.ListTasksOptions{
+				IncludeClosed: true,
+				Limit:         1000,
+			})
+			if err == nil {
+				model.SetTasks(tasks)
+				
+				// Also update window size to something reasonable
+				model.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+			}
+
+			// Simulate key presses if provided
+			if keys != "" {
+				keyEvents := parseKeyEvents(keys)
+				for _, msg := range keyEvents {
+					model.Update(msg)
+				}
+			}
+
+			// Generate and print state
+			state := model.GenerateDebugState()
+			data, _ := json.MarshalIndent(state, "", "  ")
+			fmt.Println(string(data))
+		},
+	}
+	debugStateCmd.Flags().String("keys", "", "Comma-separated list of keys to simulate (e.g., 'Down,Enter,n')")
+	debugCmd.AddCommand(debugStateCmd)
 
 	// Daemon subcommand - runs executor in background
 	daemonCmd := &cobra.Command{
@@ -258,6 +325,32 @@ Tasks will automatically reconnect to their agent sessions when viewed.`,
 	claudeHookCmd.Flags().String("event", "", "Hook event type (Notification, Stop, etc.)")
 	rootCmd.AddCommand(claudeHookCmd)
 
+	// MCP server subcommand - runs the workflow MCP server for a task (internal use)
+	mcpServerCmd := &cobra.Command{
+		Use:    "mcp-server",
+		Short:  "Run the workflow MCP server for a task",
+		Hidden: true, // Internal use only - invoked by Claude Code via .mcp.json
+		Run: func(cmd *cobra.Command, args []string) {
+			taskID, _ := cmd.Flags().GetInt64("task-id")
+			if taskID == 0 {
+				// Also check WORKTREE_TASK_ID environment variable
+				if taskIDStr := os.Getenv("WORKTREE_TASK_ID"); taskIDStr != "" {
+					fmt.Sscanf(taskIDStr, "%d", &taskID)
+				}
+			}
+			if taskID == 0 {
+				fmt.Fprintln(os.Stderr, "task-id is required (via --task-id flag or WORKTREE_TASK_ID env)")
+				os.Exit(1)
+			}
+			if err := runMCPServer(taskID); err != nil {
+				fmt.Fprintln(os.Stderr, "MCP server error:", err)
+				os.Exit(1)
+			}
+		},
+	}
+	mcpServerCmd.Flags().Int64("task-id", 0, "Task ID for the MCP server")
+	rootCmd.AddCommand(mcpServerCmd)
+
 	// Sessions subcommand - manage running agent sessions (supports all executors)
 	sessionsCmd := &cobra.Command{
 		Use:   "sessions",
@@ -362,7 +455,9 @@ Examples:
   task create "Add dark mode" --type code --project myapp
   task create "Write documentation" --body "Document the API endpoints" --execute
   task create "Refactor auth" --executor codex  # Use Codex instead of Claude
-  task create --body "The login button is broken on mobile devices" # AI generates title`,
+  task create "Urgent bug" --tags "bug,urgent" --pinned  # Tagged and pinned task
+  task create --body "The login button is broken on mobile devices" # AI generates title
+  task create "QA: PR #2526" --branch fix/ui-overflow --project myapp  # Checkout existing branch`,
 		Args: cobra.MaximumNArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
 			var title string
@@ -370,10 +465,14 @@ Examples:
 				title = args[0]
 			}
 			body, _ := cmd.Flags().GetString("body")
+			body = unescapeNewlines(body) // Convert literal \n to actual newlines
 			taskType, _ := cmd.Flags().GetString("type")
 			project, _ := cmd.Flags().GetString("project")
 			taskExecutor, _ := cmd.Flags().GetString("executor")
 			execute, _ := cmd.Flags().GetBool("execute")
+			tags, _ := cmd.Flags().GetString("tags")
+			pinned, _ := cmd.Flags().GetBool("pinned")
+			branch, _ := cmd.Flags().GetString("branch")
 			outputJSON, _ := cmd.Flags().GetBool("json")
 
 			// Validate that either title or body is provided
@@ -476,12 +575,15 @@ Examples:
 
 			// Create the task
 			task := &db.Task{
-				Title:    title,
-				Body:     body,
-				Status:   status,
-				Type:     taskType,
-				Project:  project,
-				Executor: taskExecutor,
+				Title:        title,
+				Body:         body,
+				Status:       status,
+				Type:         taskType,
+				Project:      project,
+				Executor:     taskExecutor,
+				Tags:         tags,
+				Pinned:       pinned,
+				SourceBranch: branch,
 			}
 
 			if err := database.CreateTask(task); err != nil {
@@ -498,10 +600,16 @@ Examples:
 					"project":  task.Project,
 					"executor": task.Executor,
 				}
+				if task.SourceBranch != "" {
+					output["source_branch"] = task.SourceBranch
+				}
 				jsonBytes, _ := json.Marshal(output)
 				fmt.Println(string(jsonBytes))
 			} else {
 				msg := fmt.Sprintf("Created task #%d: %s", task.ID, task.Title)
+				if branch != "" {
+					msg += fmt.Sprintf(" (branch: %s)", branch)
+				}
 				if execute {
 					msg += " (queued for execution)"
 				}
@@ -514,6 +622,9 @@ Examples:
 	createCmd.Flags().StringP("project", "p", "", "Project name (auto-detected from cwd if not specified)")
 	createCmd.Flags().StringP("executor", "e", "", "Task executor: claude, codex, gemini, pi, opencode, openclaw (default: claude)")
 	createCmd.Flags().BoolP("execute", "x", false, "Queue task for immediate execution")
+	createCmd.Flags().String("tags", "", "Task tags (comma-separated)")
+	createCmd.Flags().Bool("pinned", false, "Pin the task to the top of its column")
+	createCmd.Flags().StringP("branch", "b", "", "Existing branch to checkout for worktree (e.g., fix/ui-overflow)")
 	createCmd.Flags().Bool("json", false, "Output in JSON format")
 	rootCmd.AddCommand(createCmd)
 
@@ -975,7 +1086,10 @@ Examples:
 
 Examples:
   task update 42 --title "New title"
-  task update 42 --body "Updated description"`,
+  task update 42 --body "Updated description"
+  task update 42 --executor codex        # Switch to Codex executor
+  task update 42 --tags "bug,urgent"     # Set tags
+  task update 42 --pinned                # Pin the task`,
 		Args: cobra.ExactArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
 			var taskID int64
@@ -986,8 +1100,12 @@ Examples:
 
 			title, _ := cmd.Flags().GetString("title")
 			body, _ := cmd.Flags().GetString("body")
+			body = unescapeNewlines(body) // Convert literal \n to actual newlines
 			taskType, _ := cmd.Flags().GetString("type")
 			project, _ := cmd.Flags().GetString("project")
+			taskExecutor, _ := cmd.Flags().GetString("executor")
+			tags, _ := cmd.Flags().GetString("tags")
+			pinned, _ := cmd.Flags().GetBool("pinned")
 
 			// Open database
 			dbPath := db.DefaultPath()
@@ -1019,6 +1137,22 @@ Examples:
 				}
 			}
 
+			// Validate executor if provided
+			if taskExecutor != "" {
+				validExecutors := []string{db.ExecutorClaude, db.ExecutorCodex, db.ExecutorGemini, db.ExecutorPi, db.ExecutorOpenCode, db.ExecutorOpenClaw}
+				validExecutor := false
+				for _, e := range validExecutors {
+					if e == taskExecutor {
+						validExecutor = true
+						break
+					}
+				}
+				if !validExecutor {
+					fmt.Fprintln(os.Stderr, errorStyle.Render("Invalid executor. Must be one of: "+strings.Join(validExecutors, ", ")))
+					os.Exit(1)
+				}
+			}
+
 			task, err := database.GetTask(taskID)
 			if err != nil {
 				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
@@ -1042,6 +1176,15 @@ Examples:
 			if cmd.Flags().Changed("project") {
 				task.Project = project
 			}
+			if taskExecutor != "" {
+				task.Executor = taskExecutor
+			}
+			if cmd.Flags().Changed("tags") {
+				task.Tags = tags
+			}
+			if cmd.Flags().Changed("pinned") {
+				task.Pinned = pinned
+			}
 
 			if err := database.UpdateTask(task); err != nil {
 				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
@@ -1055,6 +1198,9 @@ Examples:
 	updateCmd.Flags().String("body", "", "Update task body/description")
 	updateCmd.Flags().StringP("type", "t", "", "Update task type: code, writing, thinking")
 	updateCmd.Flags().StringP("project", "p", "", "Update project name")
+	updateCmd.Flags().StringP("executor", "e", "", "Update task executor: claude, codex, gemini, pi, opencode, openclaw")
+	updateCmd.Flags().String("tags", "", "Update task tags (comma-separated)")
+	updateCmd.Flags().Bool("pinned", false, "Pin or unpin the task")
 	rootCmd.AddCommand(updateCmd)
 
 	// Move subcommand - move a task to a different project
@@ -1541,6 +1687,9 @@ Examples:
 	inputCmd.Flags().Bool("enter", false, "Just send Enter key (for confirming prompts)")
 	inputCmd.Flags().String("key", "", "Send a special key (e.g., Up, Down, Tab, Escape)")
 	rootCmd.AddCommand(inputCmd)
+
+	// Pi Wrapper subcommand - internal use for RPC mode
+	rootCmd.AddCommand(piWrapperCmd)
 
 	// Output subcommand - capture recent output from executor pane
 	outputCmd := &cobra.Command{
@@ -2034,6 +2183,602 @@ Examples:
 
 	rootCmd.AddCommand(projectsCmd)
 
+	// Block command - create a dependency between two tasks
+	blockCmd := &cobra.Command{
+		Use:   "block <blocked-task-id> --by <blocker-task-id>",
+		Short: "Block a task until another task completes",
+		Long: `Create a dependency where a task is blocked until another task completes.
+
+Example: ty block 5 --by 3
+This makes task #5 blocked by task #3. Task #5 cannot proceed until #3 is done.
+
+Use --auto-queue to automatically move the blocked task to 'queued' when unblocked.`,
+		Args: cobra.ExactArgs(1),
+		Run: func(cmd *cobra.Command, args []string) {
+			var blockedID int64
+			if _, err := fmt.Sscanf(args[0], "%d", &blockedID); err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Invalid task ID: "+args[0]))
+				os.Exit(1)
+			}
+
+			blockerID, _ := cmd.Flags().GetInt64("by")
+			if blockerID == 0 {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("--by flag is required"))
+				os.Exit(1)
+			}
+
+			autoQueue, _ := cmd.Flags().GetBool("auto-queue")
+
+			dbPath := db.DefaultPath()
+			database, err := db.Open(dbPath)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+			defer database.Close()
+
+			// Verify both tasks exist
+			blocker, err := database.GetTask(blockerID)
+			if err != nil || blocker == nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render(fmt.Sprintf("Blocker task #%d not found", blockerID)))
+				os.Exit(1)
+			}
+
+			blocked, err := database.GetTask(blockedID)
+			if err != nil || blocked == nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render(fmt.Sprintf("Blocked task #%d not found", blockedID)))
+				os.Exit(1)
+			}
+
+			if err := database.AddDependency(blockerID, blockedID, autoQueue); err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+
+			autoQueueStr := ""
+			if autoQueue {
+				autoQueueStr = " (will auto-queue when unblocked)"
+			}
+			fmt.Println(successStyle.Render(fmt.Sprintf("Task #%d is now blocked by #%d%s", blockedID, blockerID, autoQueueStr)))
+		},
+	}
+	blockCmd.Flags().Int64("by", 0, "ID of the blocker task (required)")
+	blockCmd.Flags().Bool("auto-queue", false, "Auto-queue blocked task when unblocked")
+	blockCmd.MarkFlagRequired("by")
+	rootCmd.AddCommand(blockCmd)
+
+	// Unblock command - remove a dependency
+	unblockCmd := &cobra.Command{
+		Use:   "unblock <blocked-task-id> --from <blocker-task-id>",
+		Short: "Remove a blocking dependency",
+		Long: `Remove a dependency so a task is no longer blocked by another.
+
+Example: ty unblock 5 --from 3
+This removes the dependency where task #5 was blocked by task #3.`,
+		Args: cobra.ExactArgs(1),
+		Run: func(cmd *cobra.Command, args []string) {
+			var blockedID int64
+			if _, err := fmt.Sscanf(args[0], "%d", &blockedID); err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Invalid task ID: "+args[0]))
+				os.Exit(1)
+			}
+
+			blockerID, _ := cmd.Flags().GetInt64("from")
+			if blockerID == 0 {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("--from flag is required"))
+				os.Exit(1)
+			}
+
+			dbPath := db.DefaultPath()
+			database, err := db.Open(dbPath)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+			defer database.Close()
+
+			if err := database.RemoveDependency(blockerID, blockedID); err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+
+			fmt.Println(successStyle.Render(fmt.Sprintf("Task #%d is no longer blocked by #%d", blockedID, blockerID)))
+		},
+	}
+	unblockCmd.Flags().Int64("from", 0, "ID of the blocker task to remove (required)")
+	unblockCmd.MarkFlagRequired("from")
+	rootCmd.AddCommand(unblockCmd)
+
+	// Deps command - show dependencies for a task
+	depsCmd := &cobra.Command{
+		Use:   "deps <task-id>",
+		Short: "Show dependencies for a task",
+		Long: `Display all dependencies for a task, showing:
+- Tasks that block this task (must complete before this task)
+- Tasks that this task blocks (waiting on this task)`,
+		Args: cobra.ExactArgs(1),
+		Run: func(cmd *cobra.Command, args []string) {
+			var taskID int64
+			if _, err := fmt.Sscanf(args[0], "%d", &taskID); err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Invalid task ID: "+args[0]))
+				os.Exit(1)
+			}
+
+			dbPath := db.DefaultPath()
+			database, err := db.Open(dbPath)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+			defer database.Close()
+
+			task, err := database.GetTask(taskID)
+			if err != nil || task == nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render(fmt.Sprintf("Task #%d not found", taskID)))
+				os.Exit(1)
+			}
+
+			blockers, blockedBy, err := database.GetAllDependencies(taskID)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+
+			fmt.Printf("%s #%d: %s\n\n", boldStyle.Render("Task"), taskID, task.Title)
+
+			if len(blockers) == 0 && len(blockedBy) == 0 {
+				fmt.Println(dimStyle.Render("No dependencies"))
+				return
+			}
+
+			if len(blockers) > 0 {
+				fmt.Println(boldStyle.Render("Blocked by:"))
+				for _, b := range blockers {
+					statusIcon := ""
+					if b.Status == db.StatusDone || b.Status == db.StatusArchived {
+						statusIcon = successStyle.Render(" [done]")
+					} else {
+						statusIcon = dimStyle.Render(fmt.Sprintf(" [%s]", b.Status))
+					}
+					fmt.Printf("  #%d: %s%s\n", b.ID, b.Title, statusIcon)
+				}
+				fmt.Println()
+			}
+
+			if len(blockedBy) > 0 {
+				fmt.Println(boldStyle.Render("Blocks:"))
+				for _, b := range blockedBy {
+					fmt.Printf("  #%d: %s %s\n", b.ID, b.Title, dimStyle.Render(fmt.Sprintf("[%s]", b.Status)))
+				}
+			}
+		},
+	}
+	rootCmd.AddCommand(depsCmd)
+
+	// Types command - manage task types
+	typesCmd := &cobra.Command{
+		Use:   "types",
+		Short: "Manage task types",
+		Long: `Manage task types used for organizing and customizing task behavior.
+
+Task types define prompt templates and instructions for different kinds of tasks.
+Built-in types (code, writing, thinking) can be edited but not deleted.
+
+Examples:
+  ty types                    # List all task types
+  ty types show code          # Show details of the 'code' type
+  ty types create             # Create a new task type
+  ty types edit research      # Edit the 'research' type
+  ty types delete research    # Delete a custom type`,
+		Run: func(cmd *cobra.Command, args []string) {
+			outputJSON, _ := cmd.Flags().GetBool("json")
+
+			dbPath := db.DefaultPath()
+			database, err := db.Open(dbPath)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+			defer database.Close()
+
+			taskTypes, err := database.ListTaskTypes()
+			if err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+
+			if outputJSON {
+				type typeOutput struct {
+					ID           int64  `json:"id"`
+					Name         string `json:"name"`
+					Label        string `json:"label"`
+					Instructions string `json:"instructions"`
+					SortOrder    int    `json:"sort_order"`
+					IsBuiltin    bool   `json:"is_builtin"`
+				}
+				output := make([]typeOutput, 0, len(taskTypes))
+				for _, t := range taskTypes {
+					output = append(output, typeOutput{
+						ID:           t.ID,
+						Name:         t.Name,
+						Label:        t.Label,
+						Instructions: t.Instructions,
+						SortOrder:    t.SortOrder,
+						IsBuiltin:    t.IsBuiltin,
+					})
+				}
+				data, _ := json.MarshalIndent(output, "", "  ")
+				fmt.Println(string(data))
+				return
+			}
+
+			fmt.Println(boldStyle.Render("Task Types"))
+			fmt.Println()
+
+			if len(taskTypes) == 0 {
+				fmt.Println(dimStyle.Render("No task types configured"))
+				return
+			}
+
+			for _, t := range taskTypes {
+				builtinTag := ""
+				if t.IsBuiltin {
+					builtinTag = dimStyle.Render(" [builtin]")
+				}
+				fmt.Printf("  %s%s\n", boldStyle.Render(t.Name), builtinTag)
+				fmt.Printf("    Label: %s\n", t.Label)
+				// Show truncated instructions
+				instr := t.Instructions
+				if len(instr) > 80 {
+					instr = instr[:77] + "..."
+				}
+				instr = strings.ReplaceAll(instr, "\n", " ")
+				fmt.Printf("    Instructions: %s\n", dimStyle.Render(instr))
+				fmt.Println()
+			}
+
+			fmt.Println(dimStyle.Render("Use 'ty types show <name>' to see full instructions"))
+		},
+	}
+	typesCmd.Flags().Bool("json", false, "Output in JSON format")
+
+	// Types list subcommand (alias for default behavior)
+	typesListCmd := &cobra.Command{
+		Use:   "list",
+		Short: "List all task types",
+		Run:   typesCmd.Run,
+	}
+	typesListCmd.Flags().Bool("json", false, "Output in JSON format")
+	typesCmd.AddCommand(typesListCmd)
+
+	// Types show subcommand
+	typesShowCmd := &cobra.Command{
+		Use:   "show <name>",
+		Short: "Show details of a task type",
+		Args:  cobra.ExactArgs(1),
+		Run: func(cmd *cobra.Command, args []string) {
+			name := args[0]
+			outputJSON, _ := cmd.Flags().GetBool("json")
+
+			dbPath := db.DefaultPath()
+			database, err := db.Open(dbPath)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+			defer database.Close()
+
+			taskType, err := database.GetTaskTypeByName(name)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+			if taskType == nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Task type not found: "+name))
+				os.Exit(1)
+			}
+
+			if outputJSON {
+				type typeOutput struct {
+					ID           int64  `json:"id"`
+					Name         string `json:"name"`
+					Label        string `json:"label"`
+					Instructions string `json:"instructions"`
+					SortOrder    int    `json:"sort_order"`
+					IsBuiltin    bool   `json:"is_builtin"`
+				}
+				output := typeOutput{
+					ID:           taskType.ID,
+					Name:         taskType.Name,
+					Label:        taskType.Label,
+					Instructions: taskType.Instructions,
+					SortOrder:    taskType.SortOrder,
+					IsBuiltin:    taskType.IsBuiltin,
+				}
+				data, _ := json.MarshalIndent(output, "", "  ")
+				fmt.Println(string(data))
+				return
+			}
+
+			builtinTag := ""
+			if taskType.IsBuiltin {
+				builtinTag = dimStyle.Render(" [builtin]")
+			}
+			fmt.Printf("%s%s\n", boldStyle.Render(taskType.Name), builtinTag)
+			fmt.Printf("Label: %s\n", taskType.Label)
+			fmt.Printf("Sort Order: %d\n", taskType.SortOrder)
+			fmt.Println()
+			fmt.Println(boldStyle.Render("Instructions:"))
+			fmt.Println(taskType.Instructions)
+		},
+	}
+	typesShowCmd.Flags().Bool("json", false, "Output in JSON format")
+	typesCmd.AddCommand(typesShowCmd)
+
+	// Types create subcommand
+	typesCreateCmd := &cobra.Command{
+		Use:   "create",
+		Short: "Create a new task type",
+		Long: `Create a new task type with custom instructions.
+
+The instructions field supports template variables:
+  {{project}}              - Project name
+  {{title}}                - Task title
+  {{body}}                 - Task body/description
+  {{branch}}               - Git branch name
+  {{tags}}                 - Task tags
+  {{pr_url}}               - Pull request URL (if set)
+  {{pr_number}}            - Pull request number (if set)
+  {{task_id}}              - Task ID
+  {{task_metadata}}        - Full task metadata section
+  {{project_instructions}} - Project-specific instructions
+  {{attachments}}          - File attachments content
+  {{history}}              - Conversation history
+
+Examples:
+  ty types create --name research --label "Research" --instructions "Research the topic: {{title}}"
+  ty types create --name review --label "Code Review" --instructions-file review.txt`,
+		Run: func(cmd *cobra.Command, args []string) {
+			name, _ := cmd.Flags().GetString("name")
+			label, _ := cmd.Flags().GetString("label")
+			instructions, _ := cmd.Flags().GetString("instructions")
+			instructionsFile, _ := cmd.Flags().GetString("instructions-file")
+			sortOrder, _ := cmd.Flags().GetInt("sort-order")
+
+			// Validate name is provided
+			if name == "" {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("--name is required"))
+				os.Exit(1)
+			}
+
+			// Validate name format (lowercase, no spaces)
+			if strings.ToLower(name) != name || strings.Contains(name, " ") {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Name must be lowercase with no spaces"))
+				os.Exit(1)
+			}
+
+			// Use name as label if not provided
+			if label == "" {
+				// Capitalize first letter for label
+				label = strings.ToUpper(name[:1]) + name[1:]
+			}
+
+			// Read instructions from file if provided
+			if instructionsFile != "" {
+				data, err := os.ReadFile(instructionsFile)
+				if err != nil {
+					fmt.Fprintln(os.Stderr, errorStyle.Render("Error reading instructions file: "+err.Error()))
+					os.Exit(1)
+				}
+				instructions = string(data)
+			}
+
+			if instructions == "" {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("--instructions or --instructions-file is required"))
+				os.Exit(1)
+			}
+
+			dbPath := db.DefaultPath()
+			database, err := db.Open(dbPath)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+			defer database.Close()
+
+			// Check if name already exists
+			existing, _ := database.GetTaskTypeByName(name)
+			if existing != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Task type already exists: "+name))
+				os.Exit(1)
+			}
+
+			taskType := &db.TaskType{
+				Name:         name,
+				Label:        label,
+				Instructions: instructions,
+				SortOrder:    sortOrder,
+				IsBuiltin:    false,
+			}
+
+			if err := database.CreateTaskType(taskType); err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error creating task type: "+err.Error()))
+				os.Exit(1)
+			}
+
+			fmt.Println(successStyle.Render("Created task type: " + name))
+		},
+	}
+	typesCreateCmd.Flags().String("name", "", "Type name (lowercase, no spaces) - required")
+	typesCreateCmd.Flags().String("label", "", "Display label (defaults to capitalized name)")
+	typesCreateCmd.Flags().String("instructions", "", "Prompt instructions template")
+	typesCreateCmd.Flags().String("instructions-file", "", "Read instructions from file")
+	typesCreateCmd.Flags().Int("sort-order", 100, "Sort order for display (lower = first)")
+	typesCmd.AddCommand(typesCreateCmd)
+
+	// Types edit subcommand
+	typesEditCmd := &cobra.Command{
+		Use:   "edit <name>",
+		Short: "Edit an existing task type",
+		Long: `Edit an existing task type. Built-in types can be edited but not deleted.
+
+All flags are optional - only specified values will be updated.
+
+Examples:
+  ty types edit code --label "Development"
+  ty types edit research --instructions "New instructions here"
+  ty types edit review --instructions-file updated_review.txt`,
+		Args: cobra.ExactArgs(1),
+		Run: func(cmd *cobra.Command, args []string) {
+			name := args[0]
+			newName, _ := cmd.Flags().GetString("name")
+			label, _ := cmd.Flags().GetString("label")
+			instructions, _ := cmd.Flags().GetString("instructions")
+			instructionsFile, _ := cmd.Flags().GetString("instructions-file")
+			sortOrder, _ := cmd.Flags().GetInt("sort-order")
+			sortOrderSet := cmd.Flags().Changed("sort-order")
+
+			dbPath := db.DefaultPath()
+			database, err := db.Open(dbPath)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+			defer database.Close()
+
+			taskType, err := database.GetTaskTypeByName(name)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+			if taskType == nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Task type not found: "+name))
+				os.Exit(1)
+			}
+
+			// Read instructions from file if provided
+			if instructionsFile != "" {
+				data, err := os.ReadFile(instructionsFile)
+				if err != nil {
+					fmt.Fprintln(os.Stderr, errorStyle.Render("Error reading instructions file: "+err.Error()))
+					os.Exit(1)
+				}
+				instructions = string(data)
+			}
+
+			// Update fields if provided
+			updated := false
+			if newName != "" {
+				if strings.ToLower(newName) != newName || strings.Contains(newName, " ") {
+					fmt.Fprintln(os.Stderr, errorStyle.Render("Name must be lowercase with no spaces"))
+					os.Exit(1)
+				}
+				// Check if new name conflicts with existing type
+				if newName != name {
+					existing, _ := database.GetTaskTypeByName(newName)
+					if existing != nil {
+						fmt.Fprintln(os.Stderr, errorStyle.Render("Task type already exists: "+newName))
+						os.Exit(1)
+					}
+				}
+				taskType.Name = newName
+				updated = true
+			}
+			if label != "" {
+				taskType.Label = label
+				updated = true
+			}
+			if instructions != "" {
+				taskType.Instructions = instructions
+				updated = true
+			}
+			if sortOrderSet {
+				taskType.SortOrder = sortOrder
+				updated = true
+			}
+
+			if !updated {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("No updates specified. Use --name, --label, --instructions, --instructions-file, or --sort-order"))
+				os.Exit(1)
+			}
+
+			if err := database.UpdateTaskType(taskType); err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error updating task type: "+err.Error()))
+				os.Exit(1)
+			}
+
+			fmt.Println(successStyle.Render("Updated task type: " + taskType.Name))
+		},
+	}
+	typesEditCmd.Flags().String("name", "", "New type name (lowercase, no spaces)")
+	typesEditCmd.Flags().String("label", "", "New display label")
+	typesEditCmd.Flags().String("instructions", "", "New prompt instructions template")
+	typesEditCmd.Flags().String("instructions-file", "", "Read new instructions from file")
+	typesEditCmd.Flags().Int("sort-order", 0, "New sort order for display")
+	typesCmd.AddCommand(typesEditCmd)
+
+	// Types delete subcommand
+	typesDeleteCmd := &cobra.Command{
+		Use:   "delete <name>",
+		Short: "Delete a custom task type",
+		Long: `Delete a custom task type. Built-in types (code, writing, thinking) cannot be deleted.
+
+Examples:
+  ty types delete research
+  ty types delete review --force`,
+		Args: cobra.ExactArgs(1),
+		Run: func(cmd *cobra.Command, args []string) {
+			name := args[0]
+			force, _ := cmd.Flags().GetBool("force")
+
+			dbPath := db.DefaultPath()
+			database, err := db.Open(dbPath)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+			defer database.Close()
+
+			taskType, err := database.GetTaskTypeByName(name)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+			if taskType == nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Task type not found: "+name))
+				os.Exit(1)
+			}
+
+			if taskType.IsBuiltin {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Cannot delete built-in task type: "+name))
+				os.Exit(1)
+			}
+
+			// Confirmation prompt unless --force
+			if !force {
+				fmt.Printf("Delete task type '%s'? This cannot be undone. [y/N] ", name)
+				reader := bufio.NewReader(os.Stdin)
+				response, _ := reader.ReadString('\n')
+				response = strings.TrimSpace(strings.ToLower(response))
+				if response != "y" && response != "yes" {
+					fmt.Println("Cancelled")
+					return
+				}
+			}
+
+			if err := database.DeleteTaskType(taskType.ID); err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error deleting task type: "+err.Error()))
+				os.Exit(1)
+			}
+
+			fmt.Println(successStyle.Render("Deleted task type: " + name))
+		},
+	}
+	typesDeleteCmd.Flags().BoolP("force", "f", false, "Skip confirmation prompt")
+	typesCmd.AddCommand(typesDeleteCmd)
+
+	rootCmd.AddCommand(typesCmd)
+
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
 		os.Exit(1)
@@ -2106,7 +2851,7 @@ func execInTmux() error {
 }
 
 // runLocal runs the TUI locally with a local SQLite database.
-func runLocal(dangerousMode bool) error {
+func runLocal(dangerousMode bool, debugStatePath string) error {
 	// Ensure daemon is running
 	if err := ensureDaemonRunning(dangerousMode); err != nil {
 		fmt.Fprintln(os.Stderr, dimStyle.Render("Warning: could not start daemon: "+err.Error()))
@@ -2134,6 +2879,9 @@ func runLocal(dangerousMode bool) error {
 
 	// Create and run TUI
 	model := ui.NewAppModel(database, exec, cwd)
+	if debugStatePath != "" {
+		model.SetDebugStatePath(debugStatePath)
+	}
 	p := tea.NewProgram(
 		model,
 		tea.WithAltScreen(),
@@ -2647,11 +3395,30 @@ func handleNotificationHook(database *db.DB, taskID int64, input *ClaudeHookInpu
 			msg := "Waiting for user input"
 			if input.NotificationType == "permission_prompt" {
 				msg = "Waiting for permission"
+				if input.Message != "" {
+					msg = "Waiting for permission: " + input.Message
+				}
 			}
 			database.AppendTaskLog(taskID, "system", msg)
 		}
 	}
 	return nil
+}
+
+// runMCPServer runs the workflow MCP server for a specific task.
+// This is invoked by Claude Code via the .mcp.json configuration.
+func runMCPServer(taskID int64) error {
+	// Open database
+	dbPath := db.DefaultPath()
+	database, err := db.Open(dbPath)
+	if err != nil {
+		return fmt.Errorf("open database: %w", err)
+	}
+	defer database.Close()
+
+	// Create and run MCP server
+	server := mcp.NewServer(database, taskID)
+	return server.Run()
 }
 
 // handleStopHook handles Stop hooks from Claude (agent finished responding).
@@ -2969,6 +3736,12 @@ func formatLogEntry(entry map[string]interface{}) string {
 	}
 
 	return ""
+}
+
+// unescapeNewlines converts literal "\n" sequences to actual newline characters
+// in CLI input. This allows users to enter multi-line text from the command line.
+func unescapeNewlines(s string) string {
+	return strings.ReplaceAll(s, "\\n", "\n")
 }
 
 // truncate shortens a string to maxLen, adding ellipsis if needed.
@@ -4138,4 +4911,63 @@ func deleteProjectCLI(name string, force bool) {
 	}
 
 	fmt.Println(successStyle.Render(fmt.Sprintf("Deleted project '%s'", name)))
+}
+
+// parseKeyEvents parses a comma-separated string of keys into bubbletea KeyMsgs.
+func parseKeyEvents(input string) []tea.Msg {
+	var msgs []tea.Msg
+	// Split by comma, but be careful about text input that might contain commas if we were robust.
+	// For now, simple split is fine as per instructions.
+	parts := strings.Split(input, ",")
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+
+		var msg tea.KeyMsg
+		// Check for special keys
+		switch strings.ToLower(part) {
+		case "enter":
+			msg = tea.KeyMsg{Type: tea.KeyEnter}
+		case "esc", "escape":
+			msg = tea.KeyMsg{Type: tea.KeyEsc}
+		case "tab":
+			msg = tea.KeyMsg{Type: tea.KeyTab}
+		case "space":
+			msg = tea.KeyMsg{Type: tea.KeySpace, Runes: []rune{' '}}
+		case "backspace":
+			msg = tea.KeyMsg{Type: tea.KeyBackspace}
+		case "delete":
+			msg = tea.KeyMsg{Type: tea.KeyDelete}
+		case "up":
+			msg = tea.KeyMsg{Type: tea.KeyUp}
+		case "down":
+			msg = tea.KeyMsg{Type: tea.KeyDown}
+		case "left":
+			msg = tea.KeyMsg{Type: tea.KeyLeft}
+		case "right":
+			msg = tea.KeyMsg{Type: tea.KeyRight}
+		case "pgup", "pageup":
+			msg = tea.KeyMsg{Type: tea.KeyPgUp}
+		case "pgdown", "pagedown":
+			msg = tea.KeyMsg{Type: tea.KeyPgDown}
+		case "home":
+			msg = tea.KeyMsg{Type: tea.KeyHome}
+		case "end":
+			msg = tea.KeyMsg{Type: tea.KeyEnd}
+		case "ctrl+c":
+			msg = tea.KeyMsg{Type: tea.KeyCtrlC}
+		default:
+			// Treat as text input
+			// If length is 1, it's a single rune keypress
+			// If length > 1, it's a sequence of rune keypresses
+			for _, r := range part {
+				msgs = append(msgs, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+			}
+			continue
+		}
+		msgs = append(msgs, msg)
+	}
+	return msgs
 }

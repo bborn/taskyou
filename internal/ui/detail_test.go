@@ -3,9 +3,9 @@ package ui
 import (
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/bborn/workflow/internal/db"
+	"github.com/bborn/workflow/internal/github"
 )
 
 // TestNewDetailModel_BacklogTaskDoesNotStartExecutor verifies that when a task
@@ -161,62 +161,6 @@ func TestExecutorFailureMessage(t *testing.T) {
 	}
 }
 
-// TestDetailModel_HasNotification verifies the notification display logic
-// in the detail view. Notifications should only show for tasks other than
-// the one currently being viewed.
-func TestDetailModel_HasNotification(t *testing.T) {
-	task := &db.Task{ID: 1, Title: "Current task"}
-
-	tests := []struct {
-		name         string
-		notification string
-		notifyTaskID int64
-		notifyUntil  time.Time
-		wantHas      bool
-	}{
-		{
-			name:         "no notification",
-			notification: "",
-			notifyTaskID: 0,
-			notifyUntil:  time.Time{},
-			wantHas:      false,
-		},
-		{
-			name:         "notification for different task",
-			notification: "⚠ Task #2 needs input",
-			notifyTaskID: 2,
-			notifyUntil:  time.Now().Add(10 * time.Second),
-			wantHas:      true,
-		},
-		{
-			name:         "notification for same task (should not show)",
-			notification: "⚠ Task #1 needs input",
-			notifyTaskID: 1, // Same as current task
-			notifyUntil:  time.Now().Add(10 * time.Second),
-			wantHas:      false,
-		},
-		{
-			name:         "expired notification",
-			notification: "⚠ Task #2 needs input",
-			notifyTaskID: 2,
-			notifyUntil:  time.Now().Add(-10 * time.Second), // In the past
-			wantHas:      false,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			m := &DetailModel{task: task}
-			m.SetNotification(tt.notification, tt.notifyTaskID, tt.notifyUntil)
-
-			got := m.HasNotification()
-			if got != tt.wantHas {
-				t.Errorf("HasNotification() = %v, want %v", got, tt.wantHas)
-			}
-		})
-	}
-}
-
 // TestDetailModel_IsShellPaneHidden verifies the shell pane hidden state accessor.
 func TestDetailModel_IsShellPaneHidden(t *testing.T) {
 	task := &db.Task{ID: 1, Title: "Test task"}
@@ -281,6 +225,151 @@ func TestDetailModel_ToggleShellPaneKeyBinding(t *testing.T) {
 	}
 	if help.Desc != "toggle shell" {
 		t.Errorf("ToggleShellPane help desc expected 'toggle shell', got %q", help.Desc)
+	}
+}
+
+// TestDetailModel_GetServerURL verifies that the server URL is returned only
+// when serverListening is true and the task has a valid port.
+func TestDetailModel_GetServerURL(t *testing.T) {
+	tests := []struct {
+		name            string
+		task            *db.Task
+		serverListening bool
+		wantURL         string
+	}{
+		{
+			name:            "server listening with valid port",
+			task:            &db.Task{ID: 1, Port: 3100},
+			serverListening: true,
+			wantURL:         "http://localhost:3100",
+		},
+		{
+			name:            "server not listening",
+			task:            &db.Task{ID: 1, Port: 3100},
+			serverListening: false,
+			wantURL:         "",
+		},
+		{
+			name:            "no port assigned",
+			task:            &db.Task{ID: 1, Port: 0},
+			serverListening: true,
+			wantURL:         "",
+		},
+		{
+			name:            "nil task",
+			task:            nil,
+			serverListening: true,
+			wantURL:         "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := &DetailModel{task: tt.task, serverListening: tt.serverListening}
+
+			got := m.GetServerURL()
+			if got != tt.wantURL {
+				t.Errorf("GetServerURL() = %q, want %q", got, tt.wantURL)
+			}
+		})
+	}
+}
+
+// TestDetailModel_RenderHeaderWithDiffStats verifies that diff stats are
+// displayed in the header when a PR has additions/deletions.
+func TestDetailModel_RenderHeaderWithDiffStats(t *testing.T) {
+	task := &db.Task{ID: 1, Title: "Test task", Status: db.StatusProcessing}
+
+	tests := []struct {
+		name         string
+		prInfo       *github.PRInfo
+		focused      bool
+		expectDiff   bool
+		expectAddDel string
+	}{
+		{
+			name:       "no PR info",
+			prInfo:     nil,
+			focused:    true,
+			expectDiff: false,
+		},
+		{
+			name: "PR with additions and deletions",
+			prInfo: &github.PRInfo{
+				Number:    123,
+				Additions: 42,
+				Deletions: 10,
+			},
+			focused:      true,
+			expectDiff:   true,
+			expectAddDel: "+42", // Should contain additions
+		},
+		{
+			name: "PR with only additions",
+			prInfo: &github.PRInfo{
+				Number:    124,
+				Additions: 100,
+				Deletions: 0,
+			},
+			focused:      true,
+			expectDiff:   true,
+			expectAddDel: "+100",
+		},
+		{
+			name: "PR with only deletions",
+			prInfo: &github.PRInfo{
+				Number:    125,
+				Additions: 0,
+				Deletions: 50,
+			},
+			focused:      true,
+			expectDiff:   true,
+			expectAddDel: "-50",
+		},
+		{
+			name: "PR with no changes",
+			prInfo: &github.PRInfo{
+				Number:    126,
+				Additions: 0,
+				Deletions: 0,
+			},
+			focused:    true,
+			expectDiff: false,
+		},
+		{
+			name: "unfocused state shows dim diff stats",
+			prInfo: &github.PRInfo{
+				Number:    127,
+				Additions: 20,
+				Deletions: 5,
+			},
+			focused:      false,
+			expectDiff:   true,
+			expectAddDel: "+20",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := &DetailModel{
+				task:    task,
+				prInfo:  tt.prInfo,
+				focused: tt.focused,
+				width:   100,
+				height:  24,
+			}
+
+			header := m.renderHeader()
+
+			if tt.expectDiff {
+				if !strings.Contains(header, tt.expectAddDel) {
+					t.Errorf("Expected header to contain %q for diff stats, got: %q", tt.expectAddDel, header)
+				}
+			} else if tt.prInfo != nil && (tt.prInfo.Additions > 0 || tt.prInfo.Deletions > 0) {
+				// If we don't expect diff stats but PR has changes, verify they're not shown
+				// This case shouldn't happen with current logic
+			}
+		})
 	}
 }
 

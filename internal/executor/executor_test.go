@@ -2,6 +2,7 @@ package executor
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1379,4 +1380,389 @@ func TestClaudeEnvPrefix(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestWriteWorkflowMCPConfig(t *testing.T) {
+	// Helper to set up a temp CLAUDE_CONFIG_DIR and return the config file path
+	setupTempConfigDir := func(t *testing.T) string {
+		t.Helper()
+		tempDir := t.TempDir()
+		configDir := filepath.Join(tempDir, ".claude")
+		t.Setenv("CLAUDE_CONFIG_DIR", configDir)
+		return configDir + ".json" // ClaudeConfigFilePath returns dir + ".json"
+	}
+
+	// Helper to read workflow config from claude.json for a given worktree path
+	readWorkflowConfig := func(t *testing.T, configPath, worktreePath string) map[string]interface{} {
+		t.Helper()
+		data, err := os.ReadFile(configPath)
+		if err != nil {
+			t.Fatalf("failed to read claude.json: %v", err)
+		}
+
+		var config map[string]interface{}
+		if err := json.Unmarshal(data, &config); err != nil {
+			t.Fatalf("failed to parse claude.json: %v", err)
+		}
+
+		projects, ok := config["projects"].(map[string]interface{})
+		if !ok {
+			t.Fatal("expected projects key in config")
+		}
+
+		projectConfig, ok := projects[worktreePath].(map[string]interface{})
+		if !ok {
+			t.Fatalf("expected project config for %s", worktreePath)
+		}
+
+		mcpServers, ok := projectConfig["mcpServers"].(map[string]interface{})
+		if !ok {
+			t.Fatal("expected mcpServers key in project config")
+		}
+
+		taskyou, ok := mcpServers["taskyou"].(map[string]interface{})
+		if !ok {
+			t.Fatal("expected taskyou key in mcpServers")
+		}
+
+		return taskyou
+	}
+
+	t.Run("creates taskyou config in claude.json", func(t *testing.T) {
+		configPath := setupTempConfigDir(t)
+		worktreePath := t.TempDir()
+		taskID := int64(123)
+
+		err := writeWorkflowMCPConfig(worktreePath, taskID)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		taskyou := readWorkflowConfig(t, configPath, worktreePath)
+
+		if taskyou["type"] != "stdio" {
+			t.Errorf("taskyou type = %v, want stdio", taskyou["type"])
+		}
+
+		args, ok := taskyou["args"].([]interface{})
+		if !ok {
+			t.Fatal("expected args array in taskyou config")
+		}
+		if len(args) != 3 || args[0] != "mcp-server" || args[1] != "--task-id" || args[2] != "123" {
+			t.Errorf("taskyou args = %v, want [mcp-server --task-id 123]", args)
+		}
+
+		// Verify autoApprove list is present with all taskyou tools
+		autoApprove, ok := taskyou["autoApprove"].([]interface{})
+		if !ok {
+			t.Fatal("expected autoApprove array in taskyou config")
+		}
+		expectedTools := []string{
+			"taskyou_complete",
+			"taskyou_needs_input",
+			"taskyou_screenshot",
+			"taskyou_show_task",
+			"taskyou_create_task",
+			"taskyou_list_tasks",
+			"taskyou_get_project_context",
+			"taskyou_set_project_context",
+		}
+		if len(autoApprove) != len(expectedTools) {
+			t.Errorf("autoApprove has %d items, want %d", len(autoApprove), len(expectedTools))
+		}
+		for i, tool := range expectedTools {
+			if i < len(autoApprove) && autoApprove[i] != tool {
+				t.Errorf("autoApprove[%d] = %v, want %v", i, autoApprove[i], tool)
+			}
+		}
+	})
+
+	t.Run("preserves existing MCP servers in project config", func(t *testing.T) {
+		configPath := setupTempConfigDir(t)
+		worktreePath := t.TempDir()
+		taskID := int64(456)
+
+		// Create existing claude.json with other servers for this project
+		existingConfig := map[string]interface{}{
+			"projects": map[string]interface{}{
+				worktreePath: map[string]interface{}{
+					"mcpServers": map[string]interface{}{
+						"github": map[string]interface{}{
+							"type":    "stdio",
+							"command": "gh-mcp",
+						},
+					},
+				},
+			},
+		}
+		existingData, _ := json.MarshalIndent(existingConfig, "", "  ")
+		if err := os.WriteFile(configPath, existingData, 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		err := writeWorkflowMCPConfig(worktreePath, taskID)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		// Read and verify both servers exist
+		data, err := os.ReadFile(configPath)
+		if err != nil {
+			t.Fatalf("failed to read claude.json: %v", err)
+		}
+
+		var config map[string]interface{}
+		if err := json.Unmarshal(data, &config); err != nil {
+			t.Fatalf("failed to parse claude.json: %v", err)
+		}
+
+		projects := config["projects"].(map[string]interface{})
+		projectConfig := projects[worktreePath].(map[string]interface{})
+		mcpServers := projectConfig["mcpServers"].(map[string]interface{})
+
+		// Check github server preserved
+		github, ok := mcpServers["github"].(map[string]interface{})
+		if !ok {
+			t.Fatal("expected github key in mcpServers - existing server not preserved")
+		}
+		if github["command"] != "gh-mcp" {
+			t.Errorf("github command = %v, want gh-mcp", github["command"])
+		}
+
+		// Check taskyou server added
+		if _, ok := mcpServers["taskyou"].(map[string]interface{}); !ok {
+			t.Fatal("expected taskyou key in mcpServers")
+		}
+	})
+
+	t.Run("preserves other project configs", func(t *testing.T) {
+		configPath := setupTempConfigDir(t)
+		worktreePath := t.TempDir()
+		otherProjectPath := "/some/other/project"
+		taskID := int64(789)
+
+		// Create existing claude.json with another project
+		existingConfig := map[string]interface{}{
+			"projects": map[string]interface{}{
+				otherProjectPath: map[string]interface{}{
+					"mcpServers": map[string]interface{}{
+						"other-server": map[string]interface{}{
+							"type":    "stdio",
+							"command": "other-cmd",
+						},
+					},
+				},
+			},
+		}
+		existingData, _ := json.MarshalIndent(existingConfig, "", "  ")
+		if err := os.WriteFile(configPath, existingData, 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		err := writeWorkflowMCPConfig(worktreePath, taskID)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		// Verify other project config was preserved
+		data, err := os.ReadFile(configPath)
+		if err != nil {
+			t.Fatalf("failed to read claude.json: %v", err)
+		}
+
+		var config map[string]interface{}
+		if err := json.Unmarshal(data, &config); err != nil {
+			t.Fatalf("failed to parse claude.json: %v", err)
+		}
+
+		projects := config["projects"].(map[string]interface{})
+
+		// Check other project preserved
+		otherProject, ok := projects[otherProjectPath].(map[string]interface{})
+		if !ok {
+			t.Fatal("expected other project config to be preserved")
+		}
+		otherServers := otherProject["mcpServers"].(map[string]interface{})
+		if _, ok := otherServers["other-server"]; !ok {
+			t.Fatal("expected other-server to be preserved")
+		}
+
+		// Check worktree project added
+		if _, ok := projects[worktreePath]; !ok {
+			t.Fatal("expected worktree project config to be added")
+		}
+	})
+
+	t.Run("removes old workflow entry and replaces with taskyou", func(t *testing.T) {
+		configPath := setupTempConfigDir(t)
+		worktreePath := t.TempDir()
+		taskID := int64(456)
+
+		// Create existing config with old "workflow" entry
+		existingConfig := map[string]interface{}{
+			"projects": map[string]interface{}{
+				worktreePath: map[string]interface{}{
+					"mcpServers": map[string]interface{}{
+						"workflow": map[string]interface{}{
+							"type":    "stdio",
+							"command": "/old/path/to/ty",
+							"args":    []string{"mcp-server", "--task-id", "99"},
+						},
+					},
+				},
+			},
+		}
+		existingData, _ := json.MarshalIndent(existingConfig, "", "  ")
+		if err := os.WriteFile(configPath, existingData, 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		err := writeWorkflowMCPConfig(worktreePath, taskID)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		// Read back and verify
+		data, err := os.ReadFile(configPath)
+		if err != nil {
+			t.Fatalf("failed to read claude.json: %v", err)
+		}
+
+		var config map[string]interface{}
+		if err := json.Unmarshal(data, &config); err != nil {
+			t.Fatalf("failed to parse claude.json: %v", err)
+		}
+
+		projects := config["projects"].(map[string]interface{})
+		projectConfig := projects[worktreePath].(map[string]interface{})
+		mcpServers := projectConfig["mcpServers"].(map[string]interface{})
+
+		// Old "workflow" entry should be gone
+		if _, ok := mcpServers["workflow"]; ok {
+			t.Error("expected old 'workflow' entry to be removed, but it still exists")
+		}
+
+		// New "taskyou" entry should exist
+		if _, ok := mcpServers["taskyou"]; !ok {
+			t.Fatal("expected 'taskyou' entry to be present")
+		}
+	})
+
+	t.Run("updates task ID on subsequent calls", func(t *testing.T) {
+		configPath := setupTempConfigDir(t)
+		worktreePath := t.TempDir()
+
+		// First call with task ID 100
+		err := writeWorkflowMCPConfig(worktreePath, 100)
+		if err != nil {
+			t.Fatalf("first call failed: %v", err)
+		}
+
+		// Second call with task ID 200
+		err = writeWorkflowMCPConfig(worktreePath, 200)
+		if err != nil {
+			t.Fatalf("second call failed: %v", err)
+		}
+
+		workflow := readWorkflowConfig(t, configPath, worktreePath)
+		args := workflow["args"].([]interface{})
+
+		if args[2] != "200" {
+			t.Errorf("task ID = %v, want 200", args[2])
+		}
+	})
+}
+
+func TestTriggerProcessing(t *testing.T) {
+	t.Run("non-blocking when channel empty", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		dbPath := filepath.Join(tmpDir, "test.db")
+		database, err := db.Open(dbPath)
+		if err != nil {
+			t.Fatalf("failed to open database: %v", err)
+		}
+		defer database.Close()
+
+		cfg := &config.Config{}
+		exec := New(database, cfg)
+
+		// Should not block even when called multiple times
+		exec.TriggerProcessing()
+		exec.TriggerProcessing()
+		exec.TriggerProcessing()
+
+		// Channel should have exactly one pending signal (buffered size 1)
+		select {
+		case <-exec.wakeupCh:
+			// Good, got the signal
+		default:
+			t.Error("expected a signal in wakeupCh")
+		}
+
+		// Channel should now be empty
+		select {
+		case <-exec.wakeupCh:
+			t.Error("expected wakeupCh to be empty after draining")
+		default:
+			// Good, channel is empty
+		}
+	})
+
+	t.Run("NotifyTaskChange triggers processing for queued tasks", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		dbPath := filepath.Join(tmpDir, "test.db")
+		database, err := db.Open(dbPath)
+		if err != nil {
+			t.Fatalf("failed to open database: %v", err)
+		}
+		defer database.Close()
+
+		cfg := &config.Config{}
+		exec := New(database, cfg)
+
+		task := &db.Task{
+			ID:     1,
+			Title:  "Test task",
+			Status: db.StatusQueued,
+		}
+
+		exec.NotifyTaskChange("status_changed", task)
+
+		// Should have a wakeup signal because task is queued
+		select {
+		case <-exec.wakeupCh:
+			// Good
+		default:
+			t.Error("expected wakeup signal when task is queued")
+		}
+	})
+
+	t.Run("NotifyTaskChange does not trigger for non-queued tasks", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		dbPath := filepath.Join(tmpDir, "test.db")
+		database, err := db.Open(dbPath)
+		if err != nil {
+			t.Fatalf("failed to open database: %v", err)
+		}
+		defer database.Close()
+
+		cfg := &config.Config{}
+		exec := New(database, cfg)
+
+		task := &db.Task{
+			ID:     1,
+			Title:  "Test task",
+			Status: db.StatusProcessing,
+		}
+
+		exec.NotifyTaskChange("status_changed", task)
+
+		// Should NOT have a wakeup signal
+		select {
+		case <-exec.wakeupCh:
+			t.Error("did not expect wakeup signal for non-queued task")
+		default:
+			// Good
+		}
+	})
 }

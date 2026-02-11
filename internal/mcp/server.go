@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/bborn/workflow/internal/db"
+	"github.com/bborn/workflow/internal/spotlight"
 	"github.com/bborn/workflow/internal/tasksummary"
 )
 
@@ -136,7 +137,7 @@ func (s *Server) handleRequest(req *jsonRPCRequest) {
 		s.sendResult(req.ID, initializeResult{
 			ProtocolVersion: "2024-11-05",
 			ServerInfo: serverInfo{
-				Name:    "workflow-mcp",
+				Name:    "taskyou-mcp",
 				Version: "1.0.0",
 			},
 			Capabilities: map[string]interface{}{
@@ -151,7 +152,7 @@ func (s *Server) handleRequest(req *jsonRPCRequest) {
 		s.sendResult(req.ID, toolsListResult{
 			Tools: []tool{
 				{
-					Name:        "workflow_complete",
+					Name:        "taskyou_complete",
 					Description: "Mark the current task as complete. Call this when you have finished the task successfully.",
 					InputSchema: map[string]interface{}{
 						"type": "object",
@@ -165,7 +166,7 @@ func (s *Server) handleRequest(req *jsonRPCRequest) {
 					},
 				},
 				{
-					Name:        "workflow_needs_input",
+					Name:        "taskyou_needs_input",
 					Description: "Request input from the user. Call this when you need clarification or additional information to proceed.",
 					InputSchema: map[string]interface{}{
 						"type": "object",
@@ -179,7 +180,7 @@ func (s *Server) handleRequest(req *jsonRPCRequest) {
 					},
 				},
 				{
-					Name:        "workflow_screenshot",
+					Name:        "taskyou_screenshot",
 					Description: "Take a screenshot of the entire screen and save it as an attachment to the current task. Use this to capture visual output of your work, especially for frontend/UI tasks. Screenshots are saved and can be reviewed by the user or included in PRs.",
 					InputSchema: map[string]interface{}{
 						"type": "object",
@@ -196,8 +197,8 @@ func (s *Server) handleRequest(req *jsonRPCRequest) {
 					},
 				},
 				{
-					Name:        "workflow_show_task",
-					Description: "Get details of a specific past task by ID. Use this after workflow_search_tasks to get full details of a relevant task. Only works for tasks in the same project.",
+					Name:        "taskyou_show_task",
+					Description: "Get details of a specific past task by ID. Use this after taskyou_search_tasks to get full details of a relevant task. Only works for tasks in the same project.",
 					InputSchema: map[string]interface{}{
 						"type": "object",
 						"properties": map[string]interface{}{
@@ -210,8 +211,8 @@ func (s *Server) handleRequest(req *jsonRPCRequest) {
 					},
 				},
 				{
-					Name:        "workflow_create_task",
-					Description: "Create a new task in the workflow system. Use this to break down complex work or track future tasks.",
+					Name:        "taskyou_create_task",
+					Description: "Create a new task in the system. Use this to break down complex work or track future tasks.",
 					InputSchema: map[string]interface{}{
 						"type": "object",
 						"properties": map[string]interface{}{
@@ -240,7 +241,7 @@ func (s *Server) handleRequest(req *jsonRPCRequest) {
 					},
 				},
 				{
-					Name:        "workflow_list_tasks",
+					Name:        "taskyou_list_tasks",
 					Description: "List active tasks (queued, processing, blocked, backlog) in the project. Use this to see what work is pending or in progress.",
 					InputSchema: map[string]interface{}{
 						"type": "object",
@@ -261,15 +262,15 @@ func (s *Server) handleRequest(req *jsonRPCRequest) {
 					},
 				},
 				{
-					Name:        "workflow_get_project_context",
-					Description: "Get cached project context (codebase structure, patterns, conventions). Call this FIRST before exploring the codebase. If context exists, use it to skip exploration. If empty, explore the codebase once and save a summary via workflow_set_project_context.",
+					Name:        "taskyou_get_project_context",
+					Description: "Get cached project context (codebase structure, patterns, conventions). Call this FIRST before exploring the codebase. If context exists, use it to skip exploration. If empty, explore the codebase once and save a summary via taskyou_set_project_context.",
 					InputSchema: map[string]interface{}{
 						"type":       "object",
 						"properties": map[string]interface{}{},
 					},
 				},
 				{
-					Name:        "workflow_set_project_context",
+					Name:        "taskyou_set_project_context",
 					Description: "Save auto-generated project context for future tasks. Call this after exploring a codebase to cache your findings (structure, patterns, key files, conventions). Future tasks will skip exploration by reading this context.",
 					InputSchema: map[string]interface{}{
 						"type": "object",
@@ -280,6 +281,21 @@ func (s *Server) handleRequest(req *jsonRPCRequest) {
 							},
 						},
 						"required": []string{"context"},
+					},
+				},
+				{
+					Name:        "taskyou_spotlight",
+					Description: "Enable spotlight mode to sync worktree changes back to the main repository for testing. This bridges the gap between isolated task development and application runtime by syncing git-tracked files to where your app runs. Use 'start' to enable, 'stop' to restore original state, 'sync' for manual sync, or 'status' to check current state.",
+					InputSchema: map[string]interface{}{
+						"type": "object",
+						"properties": map[string]interface{}{
+							"action": map[string]interface{}{
+								"type":        "string",
+								"enum":        []string{"start", "stop", "sync", "status"},
+								"description": "Action to perform: 'start' enables spotlight mode and syncs files, 'stop' disables and restores original state, 'sync' manually syncs files (while active), 'status' shows current spotlight state",
+							},
+						},
+						"required": []string{"action"},
 					},
 				},
 			},
@@ -300,7 +316,7 @@ func (s *Server) handleRequest(req *jsonRPCRequest) {
 
 func (s *Server) handleToolCall(id interface{}, params *toolCallParams) {
 	switch params.Name {
-	case "workflow_complete":
+	case "taskyou_complete":
 		summary, _ := params.Arguments["summary"].(string)
 
 		// Check if we should remind about saving project context
@@ -309,16 +325,13 @@ func (s *Server) handleToolCall(id interface{}, params *toolCallParams) {
 			// Check if context is still empty
 			if task, err := s.db.GetTask(s.taskID); err == nil && task != nil && task.Project != "" {
 				if ctx, err := s.db.GetProjectContext(task.Project); err == nil && ctx == "" {
-					contextReminder = "\n\n⚠️ REMINDER: You explored this codebase but didn't save project context. Consider calling workflow_set_project_context to help future tasks skip exploration."
+					contextReminder = "\n\n⚠️ REMINDER: You explored this codebase but didn't save project context. Consider calling taskyou_set_project_context to help future tasks skip exploration."
 				}
 			}
 		}
 
-		// Log the completion
+		// Log the completion summary (but don't move to done - only humans close tasks)
 		s.db.AppendTaskLog(s.taskID, "system", fmt.Sprintf("Task completed: %s", summary))
-
-		// Update task status
-		s.db.UpdateTaskStatus(s.taskID, db.StatusDone)
 
 		// Generate a concise activity summary in the background (if possible)
 		go func(taskID int64) {
@@ -327,18 +340,18 @@ func (s *Server) handleToolCall(id interface{}, params *toolCallParams) {
 			_, _ = tasksummary.GenerateAndStore(ctx, s.db, taskID)
 		}(s.taskID)
 
-		// Trigger callback
+		// Trigger callback (signals the agent is done, but doesn't change status to done)
 		if s.onComplete != nil {
 			s.onComplete()
 		}
 
 		s.sendResult(id, toolCallResult{
 			Content: []contentBlock{
-				{Type: "text", Text: "Task marked as complete." + contextReminder},
+				{Type: "text", Text: "Task summary recorded. A human will review and close this task." + contextReminder},
 			},
 		})
 
-	case "workflow_needs_input":
+	case "taskyou_needs_input":
 		question, _ := params.Arguments["question"].(string)
 
 		// Log the question
@@ -358,7 +371,7 @@ func (s *Server) handleToolCall(id interface{}, params *toolCallParams) {
 			},
 		})
 
-	case "workflow_screenshot":
+	case "taskyou_screenshot":
 		filename, _ := params.Arguments["filename"].(string)
 		description, _ := params.Arguments["description"].(string)
 
@@ -439,7 +452,7 @@ func (s *Server) handleToolCall(id interface{}, params *toolCallParams) {
 			},
 		})
 
-	case "workflow_show_task":
+	case "taskyou_show_task":
 		taskIDFloat, ok := params.Arguments["task_id"].(float64)
 		if !ok {
 			s.sendError(id, -32602, "task_id is required")
@@ -499,7 +512,7 @@ func (s *Server) handleToolCall(id interface{}, params *toolCallParams) {
 			},
 		})
 
-	case "workflow_create_task":
+	case "taskyou_create_task":
 		title, _ := params.Arguments["title"].(string)
 		if title == "" {
 			s.sendError(id, -32602, "title is required")
@@ -541,7 +554,7 @@ func (s *Server) handleToolCall(id interface{}, params *toolCallParams) {
 			},
 		})
 
-	case "workflow_list_tasks":
+	case "taskyou_list_tasks":
 		status, _ := params.Arguments["status"].(string)
 		project, _ := params.Arguments["project"].(string)
 
@@ -595,7 +608,7 @@ func (s *Server) handleToolCall(id interface{}, params *toolCallParams) {
 			},
 		})
 
-	case "workflow_get_project_context":
+	case "taskyou_get_project_context":
 		// Get current task's project
 		currentTask, err := s.db.GetTask(s.taskID)
 		if err != nil || currentTask == nil {
@@ -624,7 +637,7 @@ func (s *Server) handleToolCall(id interface{}, params *toolCallParams) {
 				Content: []contentBlock{
 					{Type: "text", Text: `No cached project context found.
 
-⚠️ IMPORTANT: After exploring this codebase, you MUST save context using workflow_set_project_context.
+⚠️ IMPORTANT: After exploring this codebase, you MUST save context using taskyou_set_project_context.
 
 Include in your context:
 - Project structure (key directories and their purposes)
@@ -660,7 +673,7 @@ This saves future tasks from re-exploring the codebase.`},
 			},
 		})
 
-	case "workflow_set_project_context":
+	case "taskyou_set_project_context":
 		context, _ := params.Arguments["context"].(string)
 		if context == "" {
 			s.sendError(id, -32602, "context is required")
@@ -689,6 +702,65 @@ This saves future tasks from re-exploring the codebase.`},
 		s.sendResult(id, toolCallResult{
 			Content: []contentBlock{
 				{Type: "text", Text: fmt.Sprintf("Project context saved for '%s'. Future tasks will use this context to skip codebase exploration.", currentTask.Project)},
+			},
+		})
+
+	case "taskyou_spotlight":
+		action, _ := params.Arguments["action"].(string)
+		if action == "" {
+			s.sendError(id, -32602, "action is required")
+			return
+		}
+
+		// Get current task
+		task, err := s.db.GetTask(s.taskID)
+		if err != nil || task == nil {
+			s.sendError(id, -32603, "Failed to get current task")
+			return
+		}
+
+		if task.WorktreePath == "" {
+			s.sendError(id, -32602, "Task has no worktree (spotlight requires a worktree)")
+			return
+		}
+
+		// Get the project directory (main repo)
+		project, err := s.db.GetProjectByName(task.Project)
+		if err != nil || project == nil {
+			s.sendError(id, -32603, "Failed to get project directory")
+			return
+		}
+		mainRepoDir := project.Path
+
+		// Handle spotlight actions
+		var result string
+		switch action {
+		case "start":
+			result, err = spotlight.Start(task.WorktreePath, mainRepoDir)
+		case "stop":
+			result, err = spotlight.Stop(task.WorktreePath, mainRepoDir)
+		case "sync":
+			if !spotlight.IsActive(task.WorktreePath) {
+				s.sendError(id, -32602, "Spotlight mode is not active. Use 'start' to enable spotlight before syncing")
+				return
+			}
+			result, err = spotlight.Sync(task.WorktreePath, mainRepoDir)
+		case "status":
+			result, err = spotlight.Status(task.WorktreePath, mainRepoDir)
+		default:
+			s.sendError(id, -32602, fmt.Sprintf("Unknown spotlight action: %s", action))
+			return
+		}
+		if err != nil {
+			s.sendError(id, -32603, err.Error())
+			return
+		}
+
+		s.db.AppendTaskLog(s.taskID, "system", fmt.Sprintf("Spotlight %s: %s", action, result))
+
+		s.sendResult(id, toolCallResult{
+			Content: []contentBlock{
+				{Type: "text", Text: result},
 			},
 		})
 

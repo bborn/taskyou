@@ -87,10 +87,22 @@ func (p *PiExecutor) BuildCommand(task *db.Task, sessionID, prompt string) strin
 		systemPromptFlag = fmt.Sprintf(`--append-system-prompt %q `, systemFile.Name())
 	}
 
+	// Determine explicit session path if not provided or if sessionID matches it
+	// If sessionID is provided (from task.ClaudeSessionID), use it as the path.
+	// If not, calculate it.
+	sessionPath := sessionID
+	if sessionPath == "" {
+		worktreesDir := filepath.Dir(task.WorktreePath)
+		sessionPath = filepath.Join(worktreesDir, "sessions", fmt.Sprintf("task-%d.jsonl", task.ID))
+	}
+
+	// Ensure session directory exists (for manual runs via BuildCommand)
+	os.MkdirAll(filepath.Dir(sessionPath), 0755)
+
 	// Build command - resume if we have a session ID, otherwise start fresh
 	if sessionID != "" {
-		cmd := fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q pi %s--continue`,
-			task.ID, worktreeSessionID, task.Port, task.WorktreePath, systemPromptFlag)
+		cmd := fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q pi --session %q %s--continue`,
+			task.ID, worktreeSessionID, task.Port, task.WorktreePath, sessionPath, systemPromptFlag)
 		if systemFile != nil {
 			cmd += fmt.Sprintf(`; rm -f %q`, systemFile.Name())
 		}
@@ -103,8 +115,8 @@ func (p *PiExecutor) BuildCommand(task *db.Task, sessionID, prompt string) strin
 		promptFile, err := os.CreateTemp("", "task-prompt-*.txt")
 		if err != nil {
 			p.logger.Error("BuildCommand: failed to create temp file", "error", err)
-			cmd := fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q pi %s`,
-				task.ID, worktreeSessionID, task.Port, task.WorktreePath, systemPromptFlag)
+			cmd := fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q pi --session %q %s`,
+				task.ID, worktreeSessionID, task.Port, task.WorktreePath, sessionPath, systemPromptFlag)
 			if systemFile != nil {
 				cmd += fmt.Sprintf(`; rm -f %q`, systemFile.Name())
 			}
@@ -113,16 +125,16 @@ func (p *PiExecutor) BuildCommand(task *db.Task, sessionID, prompt string) strin
 		promptFile.WriteString(prompt)
 		promptFile.Close()
 
-		cmd := fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q pi %s"$(cat %q)"; rm -f %q`,
-			task.ID, worktreeSessionID, task.Port, task.WorktreePath, systemPromptFlag, promptFile.Name(), promptFile.Name())
+		cmd := fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q pi --session %q %s"$(cat %q)"; rm -f %q`,
+			task.ID, worktreeSessionID, task.Port, task.WorktreePath, sessionPath, systemPromptFlag, promptFile.Name(), promptFile.Name())
 		if systemFile != nil {
 			cmd += fmt.Sprintf(` %q`, systemFile.Name())
 		}
 		return cmd
 	}
 
-	cmd := fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q pi %s`,
-		task.ID, worktreeSessionID, task.Port, task.WorktreePath, systemPromptFlag)
+	cmd := fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q pi --session %q %s`,
+		task.ID, worktreeSessionID, task.Port, task.WorktreePath, sessionPath, systemPromptFlag)
 	if systemFile != nil {
 		cmd += fmt.Sprintf(`; rm -f %q`, systemFile.Name())
 	}
@@ -159,8 +171,28 @@ func (p *PiExecutor) ResumeSafe(task *db.Task, workDir string) bool {
 }
 
 // findPiSessionID finds the most recent Pi session ID for a workDir.
-// Pi stores sessions in ~/.pi/agent/sessions/<escaped-path>/
+// It prioritizes explicit session paths in .task-worktrees/sessions/task-<ID>.jsonl
+// but falls back to Pi's internal storage (~/.pi/agent/sessions/...) for backward compatibility.
 func findPiSessionID(workDir string) string {
+	// 1. Try to find explicit session path based on task ID in directory name
+	// workDir format: .../123-slug
+	baseName := filepath.Base(workDir)
+	var taskID int64
+	// Try to parse ID from beginning of directory name
+	// Sscanf will match "123-" and stop at non-digit
+	// But baseName is "123-slug", so "%d-" might work if I just check for prefix
+	parts := strings.SplitN(baseName, "-", 2)
+	if len(parts) >= 2 {
+		if id, err := fmt.Sscanf(parts[0], "%d", &taskID); err == nil && id > 0 {
+			worktreesDir := filepath.Dir(workDir)
+			sessionPath := filepath.Join(worktreesDir, "sessions", fmt.Sprintf("task-%d.jsonl", taskID))
+			if piSessionExists(sessionPath) {
+				return sessionPath
+			}
+		}
+	}
+
+	// 2. Fallback to legacy path discovery
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return ""

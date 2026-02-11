@@ -22,7 +22,11 @@ const (
 	SettingShellPaneWidth     = "shell_pane_width"
 	SettingShellPaneHidden    = "shell_pane_hidden"
 	SettingIdleSuspendTimeout = "idle_suspend_timeout"
+	SettingServerURL          = "server_url"
 )
+
+// DefaultServerURL is the default base URL for opening tasks in the browser.
+const DefaultServerURL = "http://localhost"
 
 // New creates a config from database.
 func New(database *db.DB) *Config {

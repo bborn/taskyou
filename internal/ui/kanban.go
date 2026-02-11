@@ -9,6 +9,22 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
+// emptyColumnMessage returns a contextual message for empty columns.
+func emptyColumnMessage(status string) string {
+	switch status {
+	case db.StatusBacklog:
+		return "Press 'n' to create a task"
+	case db.StatusQueued:
+		return "Press 'x' to execute a task"
+	case db.StatusBlocked:
+		return "No tasks need input"
+	case db.StatusDone:
+		return "Completed tasks appear here"
+	default:
+		return "No tasks"
+	}
+}
+
 // KanbanColumn represents a column in the kanban board.
 type KanbanColumn struct {
 	Title  string
@@ -28,12 +44,14 @@ type KanbanBoard struct {
 	selectedCol       int
 	selectedRow       int
 	scrollOffsets     []int // Scroll offset per column
+	collapsedColumns  map[int]bool             // Columns that are collapsed (show only header)
 	width             int
 	height            int
 	allTasks          []*db.Task               // All tasks
 	prInfo            map[int64]*github.PRInfo // PR info by task ID
 	runningProcesses  map[int64]bool           // Tasks with running shell processes
 	tasksNeedingInput map[int64]bool           // Tasks waiting for user input (active input notification)
+	blockedByDeps     map[int64]int            // Tasks blocked by dependencies (task ID -> open blocker count)
 	hiddenDoneCount   int                      // Number of done tasks not shown (older ones)
 	originColumn      int                      // Column where detail view navigation started (-1 = not set)
 }
@@ -49,6 +67,7 @@ func NewKanbanBoard(width, height int) *KanbanBoard {
 	return &KanbanBoard{
 		columns:          columns,
 		scrollOffsets:    make([]int, len(columns)),
+		collapsedColumns: make(map[int]bool),
 		width:            width,
 		height:           height,
 		prInfo:           make(map[int64]*github.PRInfo),
@@ -148,6 +167,26 @@ func (k *KanbanBoard) NeedsInput(taskID int64) bool {
 	return k.tasksNeedingInput[taskID]
 }
 
+// SetBlockedByDeps updates the map of tasks blocked by dependencies.
+// The map contains task ID -> number of open blockers.
+func (k *KanbanBoard) SetBlockedByDeps(blockedByDeps map[int64]int) {
+	k.blockedByDeps = blockedByDeps
+}
+
+// GetOpenBlockerCount returns the number of open blockers for a task.
+// Returns 0 if the task has no blockers.
+func (k *KanbanBoard) GetOpenBlockerCount(taskID int64) int {
+	if k.blockedByDeps == nil {
+		return 0
+	}
+	return k.blockedByDeps[taskID]
+}
+
+// IsBlockedByDeps returns true if the task is blocked by dependencies.
+func (k *KanbanBoard) IsBlockedByDeps(taskID int64) bool {
+	return k.GetOpenBlockerCount(taskID) > 0
+}
+
 // SetOriginColumn sets the origin column for detail view navigation.
 // This preserves the column context even if the task moves to a different column.
 func (k *KanbanBoard) SetOriginColumn() {
@@ -162,6 +201,67 @@ func (k *KanbanBoard) ClearOriginColumn() {
 // HasOriginColumn returns true if an origin column is set.
 func (k *KanbanBoard) HasOriginColumn() bool {
 	return k.originColumn >= 0
+}
+
+// IsColumnCollapsed returns true if the column at the given index is collapsed.
+func (k *KanbanBoard) IsColumnCollapsed(colIdx int) bool {
+	if k.collapsedColumns == nil {
+		return false
+	}
+	return k.collapsedColumns[colIdx]
+}
+
+// ToggleColumnCollapse toggles the collapsed state of a column.
+// Cannot collapse the currently selected column.
+func (k *KanbanBoard) ToggleColumnCollapse(colIdx int) {
+	if colIdx < 0 || colIdx >= len(k.columns) {
+		return
+	}
+	if k.collapsedColumns == nil {
+		k.collapsedColumns = make(map[int]bool)
+	}
+	if k.collapsedColumns[colIdx] {
+		// Uncollapse
+		delete(k.collapsedColumns, colIdx)
+	} else {
+		// Collapse - but move selection away first if needed
+		if k.selectedCol == colIdx {
+			k.moveToNextVisibleColumn(colIdx)
+		}
+		k.collapsedColumns[colIdx] = true
+	}
+}
+
+// visibleColumnCount returns the number of non-collapsed columns.
+func (k *KanbanBoard) visibleColumnCount() int {
+	count := 0
+	for i := range k.columns {
+		if !k.IsColumnCollapsed(i) {
+			count++
+		}
+	}
+	return count
+}
+
+// moveToNextVisibleColumn moves selection to the nearest non-collapsed column.
+func (k *KanbanBoard) moveToNextVisibleColumn(fromCol int) {
+	// Try right first, then left
+	for i := fromCol + 1; i < len(k.columns); i++ {
+		if !k.IsColumnCollapsed(i) {
+			k.selectedCol = i
+			k.clampSelection()
+			k.ensureSelectedVisible()
+			return
+		}
+	}
+	for i := fromCol - 1; i >= 0; i-- {
+		if !k.IsColumnCollapsed(i) {
+			k.selectedCol = i
+			k.clampSelection()
+			k.ensureSelectedVisible()
+			return
+		}
+	}
 }
 
 // distributeTasksToColumns distributes tasks to their respective columns.
@@ -245,21 +345,27 @@ func (k *KanbanBoard) SetSize(width, height int) {
 	k.height = height
 }
 
-// MoveLeft moves selection to the left column.
+// MoveLeft moves selection to the left column, skipping collapsed columns.
 func (k *KanbanBoard) MoveLeft() {
-	if k.selectedCol > 0 {
-		k.selectedCol--
-		k.clampSelection()
-		k.ensureSelectedVisible()
+	for i := k.selectedCol - 1; i >= 0; i-- {
+		if !k.IsColumnCollapsed(i) {
+			k.selectedCol = i
+			k.clampSelection()
+			k.ensureSelectedVisible()
+			return
+		}
 	}
 }
 
-// MoveRight moves selection to the right column.
+// MoveRight moves selection to the right column, skipping collapsed columns.
 func (k *KanbanBoard) MoveRight() {
-	if k.selectedCol < len(k.columns)-1 {
-		k.selectedCol++
-		k.clampSelection()
-		k.ensureSelectedVisible()
+	for i := k.selectedCol + 1; i < len(k.columns); i++ {
+		if !k.IsColumnCollapsed(i) {
+			k.selectedCol = i
+			k.clampSelection()
+			k.ensureSelectedVisible()
+			return
+		}
 	}
 }
 
@@ -452,6 +558,25 @@ func (k *KanbanBoard) SelectTask(id int64) bool {
 	return false
 }
 
+// IsEmpty returns true if all columns have no tasks.
+func (k *KanbanBoard) IsEmpty() bool {
+	for _, col := range k.columns {
+		if len(col.Tasks) > 0 {
+			return false
+		}
+	}
+	return true
+}
+
+// TotalTaskCount returns the total number of tasks across all columns.
+func (k *KanbanBoard) TotalTaskCount() int {
+	count := 0
+	for _, col := range k.columns {
+		count += len(col.Tasks)
+	}
+	return count
+}
+
 // View renders the kanban board.
 func (k *KanbanBoard) View() string {
 	if k.width < 40 || k.height < 10 {
@@ -466,13 +591,27 @@ func (k *KanbanBoard) View() string {
 	return k.viewDesktop()
 }
 
+// collapsedColumnWidth is the fixed width for collapsed column strips.
+const collapsedColumnWidth = 3
+
 // viewDesktop renders the full kanban board with all columns side by side.
 func (k *KanbanBoard) viewDesktop() string {
-	// Calculate column width (subtract borders and gaps)
 	numCols := len(k.columns)
+
+	// Count collapsed columns and their total width
+	collapsedCount := 0
+	for i := range k.columns {
+		if k.IsColumnCollapsed(i) {
+			collapsedCount++
+		}
+	}
+	expandedCount := numCols - collapsedCount
+
+	// Calculate column width for expanded columns
 	// Account for borders (2 chars per column) and gaps between columns (1 char each)
-	availableWidth := k.width - (numCols * 2) - (numCols - 1)
-	colWidth := availableWidth / numCols
+	collapsedTotalWidth := collapsedCount * (collapsedColumnWidth + 2 + 1) // width + borders + gap
+	availableWidth := k.width - (expandedCount * 2) - (numCols - 1) - collapsedTotalWidth
+	colWidth := availableWidth / expandedCount
 	if colWidth < 20 {
 		colWidth = 20
 	}
@@ -485,6 +624,13 @@ func (k *KanbanBoard) viewDesktop() string {
 	var columnViews []string
 	for colIdx, col := range k.columns {
 		isSelectedCol := colIdx == k.selectedCol
+
+		// Render collapsed column as a thin vertical strip
+		if k.IsColumnCollapsed(colIdx) {
+			columnView := k.renderCollapsedColumn(colIdx, col, colHeight)
+			columnViews = append(columnViews, columnView)
+			continue
+		}
 
 		// Colored header bar at top of column
 		// Width matches the column content width (will be inside the border)
@@ -547,11 +693,20 @@ func (k *KanbanBoard) viewDesktop() string {
 
 		var taskViews []string
 
+		// Track shortcut number for the selected column (1-9)
+		shortcutNum := 0
+
 		// Render pinned tasks (always fixed at the top)
 		for i := 0; i < pinnedSlots; i++ {
 			task := pinnedTasks[i]
 			isSelected := isSelectedCol && i == k.selectedRow
-			taskView := k.renderTaskCard(task, colWidth-2, isSelected)
+			// Only show shortcuts in the selected column
+			var hint string
+			if isSelectedCol {
+				shortcutNum++
+				hint = TaskShortcutHint(shortcutNum)
+			}
+			taskView := k.renderTaskCard(task, colWidth, isSelected, hint)
 			taskViews = append(taskViews, taskView)
 		}
 
@@ -570,7 +725,13 @@ func (k *KanbanBoard) viewDesktop() string {
 			task := unpinnedTasks[i]
 			globalIndex := pinnedCount + i
 			isSelected := isSelectedCol && globalIndex == k.selectedRow
-			taskView := k.renderTaskCard(task, colWidth-2, isSelected)
+			// Only show shortcuts in the selected column
+			var hint string
+			if isSelectedCol {
+				shortcutNum++
+				hint = TaskShortcutHint(shortcutNum)
+			}
+			taskView := k.renderTaskCard(task, colWidth, isSelected, hint)
 			taskViews = append(taskViews, taskView)
 		}
 
@@ -597,7 +758,7 @@ func (k *KanbanBoard) viewDesktop() string {
 			taskViews = append(taskViews, scrollIndicatorStyle.Render(indicatorText))
 		}
 
-		// Empty column placeholder
+		// Empty column placeholder with contextual message
 		if len(col.Tasks) == 0 {
 			emptyStyle := lipgloss.NewStyle().
 				Foreground(ColorMuted).
@@ -605,15 +766,16 @@ func (k *KanbanBoard) viewDesktop() string {
 				Align(lipgloss.Center).
 				Italic(true).
 				MarginTop(1)
-			taskViews = append(taskViews, emptyStyle.Render("No tasks"))
+			emptyMsg := emptyColumnMessage(col.Status)
+			taskViews = append(taskViews, emptyStyle.Render(emptyMsg))
 		}
 
 		// Combine tasks with spacing
 		taskContent := lipgloss.JoinVertical(lipgloss.Left, taskViews...)
 
-		// Column container with border (rounded to match active task card style)
-		_, highlightBorder := GetThemeBorderColors()
-		borderColor := col.Color // Use column color for border
+		// Column container with subtle rounded border
+		normalBorder, highlightBorder := GetThemeBorderColors()
+		borderColor := normalBorder
 		borderStyle := lipgloss.RoundedBorder()
 		if isSelectedCol {
 			borderColor = highlightBorder
@@ -649,6 +811,33 @@ func (k *KanbanBoard) viewDesktop() string {
 	board := lipgloss.JoinHorizontal(lipgloss.Top, parts...)
 
 	return board
+}
+
+// renderCollapsedColumn renders a collapsed column as a thin vertical strip
+// showing the column icon and task count vertically.
+func (k *KanbanBoard) renderCollapsedColumn(colIdx int, col KanbanColumn, colHeight int) string {
+	normalBorder, _ := GetThemeBorderColors()
+
+	// Build vertical content: icon on top, then count
+	var lines []string
+	lines = append(lines, col.Icon)
+	countStr := fmt.Sprintf("%d", len(col.Tasks))
+	lines = append(lines, countStr)
+
+	content := lipgloss.JoinVertical(lipgloss.Center, lines...)
+
+	contentStyle := lipgloss.NewStyle().
+		Width(collapsedColumnWidth).
+		Height(colHeight).
+		Foreground(col.Color).
+		Align(lipgloss.Center).
+		AlignVertical(lipgloss.Center)
+
+	colStyle := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(normalBorder)
+
+	return colStyle.Render(contentStyle.Render(content))
 }
 
 // viewMobile renders a single-column view with tab navigation for narrow terminals.
@@ -726,11 +915,16 @@ func (k *KanbanBoard) viewMobile() string {
 
 	var taskViews []string
 
+	// Track shortcut number (1-9) for mobile view
+	shortcutNum := 0
+
 	// Render pinned tasks first
 	for i := 0; i < toRenderPinned; i++ {
 		task := pinnedTasks[i]
 		isSelected := i == k.selectedRow
-		taskView := k.renderTaskCard(task, colWidth-2, isSelected)
+		shortcutNum++
+		hint := TaskShortcutHint(shortcutNum)
+		taskView := k.renderTaskCard(task, colWidth, isSelected, hint)
 		taskViews = append(taskViews, taskView)
 	}
 
@@ -749,7 +943,9 @@ func (k *KanbanBoard) viewMobile() string {
 		task := unpinnedTasks[i]
 		globalIndex := len(pinnedTasks) + i
 		isSelected := globalIndex == k.selectedRow
-		taskView := k.renderTaskCard(task, colWidth-2, isSelected)
+		shortcutNum++
+		hint := TaskShortcutHint(shortcutNum)
+		taskView := k.renderTaskCard(task, colWidth, isSelected, hint)
 		taskViews = append(taskViews, taskView)
 	}
 
@@ -776,7 +972,7 @@ func (k *KanbanBoard) viewMobile() string {
 		taskViews = append(taskViews, scrollIndicatorStyle.Render(indicatorText))
 	}
 
-	// Empty column placeholder
+	// Empty column placeholder with contextual message
 	if len(col.Tasks) == 0 {
 		emptyStyle := lipgloss.NewStyle().
 			Foreground(ColorMuted).
@@ -784,13 +980,14 @@ func (k *KanbanBoard) viewMobile() string {
 			Align(lipgloss.Center).
 			Italic(true).
 			MarginTop(1)
-		taskViews = append(taskViews, emptyStyle.Render("No tasks"))
+		emptyMsg := emptyColumnMessage(col.Status)
+		taskViews = append(taskViews, emptyStyle.Render(emptyMsg))
 	}
 
 	// Combine tasks with spacing
 	taskContent := lipgloss.JoinVertical(lipgloss.Left, taskViews...)
 
-	// Column container with border
+	// Column container with subtle rounded border
 	_, highlightBorder := GetThemeBorderColors()
 	borderStyle := lipgloss.RoundedBorder()
 
@@ -848,10 +1045,9 @@ func (k *KanbanBoard) renderColumnTabs() string {
 			Padding(0, 0)
 
 		if isSelected {
-			// Selected tab has background color matching column
+			// Selected tab uses a simple color highlight
 			tabStyle = tabStyle.
-				Background(col.Color).
-				Foreground(lipgloss.Color("#000000")).
+				Foreground(col.Color).
 				Bold(true)
 		} else {
 			// Unselected tabs are dimmed
@@ -874,7 +1070,8 @@ func (k *KanbanBoard) renderColumnTabs() string {
 }
 
 // renderTaskCard renders a single task card.
-func (k *KanbanBoard) renderTaskCard(task *db.Task, width int, isSelected bool) string {
+// shortcutHint is an optional keyboard shortcut to display (e.g., "1", "2", etc.)
+func (k *KanbanBoard) renderTaskCard(task *db.Task, width int, isSelected bool, shortcutHint string) string {
 	if width < 10 {
 		width = 10
 	}
@@ -883,15 +1080,20 @@ func (k *KanbanBoard) renderTaskCard(task *db.Task, width int, isSelected bool) 
 
 	// Task ID with status indicator
 	statusIcon := StatusIcon(task.Status)
-	statusColor := StatusColor(task.Status)
-	statusStyle := lipgloss.NewStyle().Foreground(statusColor)
-	b.WriteString(statusStyle.Render(statusIcon))
-	b.WriteString(" ")
-	b.WriteString(Dim.Render(fmt.Sprintf("#%d", task.ID)))
+	if isSelected {
+		b.WriteString(statusIcon)
+		b.WriteString(" ")
+		b.WriteString(fmt.Sprintf("#%d", task.ID))
+	} else {
+		statusColor := StatusColor(task.Status)
+		statusStyle := lipgloss.NewStyle().Foreground(statusColor)
+		b.WriteString(statusStyle.Render(statusIcon))
+		b.WriteString(" ")
+		b.WriteString(Dim.Render(fmt.Sprintf("#%d", task.ID)))
+	}
 
 	// Project tag
 	if task.Project != "" {
-		projectStyle := lipgloss.NewStyle().Foreground(ProjectColor(task.Project))
 		shortProject := task.Project
 		switch task.Project {
 		case "offerlab":
@@ -899,38 +1101,81 @@ func (k *KanbanBoard) renderTaskCard(task *db.Task, width int, isSelected bool) 
 		case "influencekit":
 			shortProject = "ik"
 		}
-		b.WriteString(" ")
-		b.WriteString(projectStyle.Render("[" + shortProject + "]"))
+		if isSelected {
+			b.WriteString(" [" + shortProject + "]")
+		} else {
+			projectStyle := lipgloss.NewStyle().Foreground(ProjectColor(task.Project))
+			b.WriteString(" ")
+			b.WriteString(projectStyle.Render("[" + shortProject + "]"))
+		}
 	}
 
-	// PR status indicator
+	// Status indicators (right-aligned)
+	var indicators []string
 	if prInfo := k.prInfo[task.ID]; prInfo != nil {
-		b.WriteString(" ")
-		b.WriteString(PRStatusBadge(prInfo))
+		// Show diff stats first (like Conductor)
+		if diffStats := PRDiffStats(prInfo); diffStats != "" {
+			if isSelected {
+				indicators = append(indicators, PRDiffStatsPlain(prInfo))
+			} else {
+				indicators = append(indicators, diffStats)
+			}
+		}
+		// Then PR status badge
+		if isSelected {
+			indicators = append(indicators, PRStatusIcon(prInfo))
+		} else {
+			indicators = append(indicators, PRStatusBadge(prInfo))
+		}
 	}
-
-	// Running process indicator
 	if k.HasRunningProcess(task.ID) {
-		processStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("46")) // Bright green
-		b.WriteString(" ")
-		b.WriteString(processStyle.Render("●")) // Green dot for running process
+		if isSelected {
+			indicators = append(indicators, "●")
+		} else {
+			processStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("46")) // Bright green
+			indicators = append(indicators, processStyle.Render("●"))
+		}
 	}
-
 	// Dangerous mode indicator (red dot) - only shown when:
 	// - Task is in dangerous mode
 	// - Task is active (processing or blocked)
 	// - System is NOT in global dangerous mode (otherwise the global banner is shown)
 	if task.DangerousMode && (task.Status == db.StatusProcessing || task.Status == db.StatusBlocked) && !IsGlobalDangerousMode() {
-		dangerStyle := lipgloss.NewStyle().Foreground(ColorDangerous)
-		b.WriteString(" ")
-		b.WriteString(dangerStyle.Render("●")) // Red dot for dangerous mode
+		if isSelected {
+			indicators = append(indicators, "●")
+		} else {
+			dangerStyle := lipgloss.NewStyle().Foreground(ColorDangerous)
+			indicators = append(indicators, dangerStyle.Render("●"))
+		}
+	}
+	if task.Pinned {
+		if isSelected {
+			indicators = append(indicators, IconPin())
+		} else {
+			pinStyle := lipgloss.NewStyle().Foreground(ColorWarning)
+			indicators = append(indicators, pinStyle.Render(IconPin()))
+		}
+	}
+	// Keyboard shortcut hint (shown at the end)
+	if shortcutHint != "" {
+		if isSelected {
+			indicators = append(indicators, shortcutHint)
+		} else {
+			shortcutStyle := lipgloss.NewStyle().Foreground(ColorMuted)
+			indicators = append(indicators, shortcutStyle.Render(shortcutHint))
+		}
 	}
 
-	// Pin indicator
-	if task.Pinned {
-		pinStyle := lipgloss.NewStyle().Foreground(ColorWarning)
+	// Dependency blocker indicator (lock icon)
+	blockerCount := k.GetOpenBlockerCount(task.ID)
+	if blockerCount > 0 {
+		lockStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#F59E0B")) // Orange/amber
 		b.WriteString(" ")
-		b.WriteString(pinStyle.Render(IconPin()))
+		if blockerCount == 1 {
+			b.WriteString(lockStyle.Render("🔒"))
+		} else {
+			b.WriteString(lockStyle.Render(fmt.Sprintf("🔒%d", blockerCount)))
+		}
 	}
 
 	// Title (truncate if needed)
@@ -943,7 +1188,27 @@ func (k *KanbanBoard) renderTaskCard(task *db.Task, width int, isSelected bool) 
 		title = title[:maxTitleLen-1] + "…"
 	}
 
-	idLine := b.String()
+	leftLine := b.String()
+	indicatorText := strings.Join(indicators, " ")
+
+	lineWidth := width - 2 // account for horizontal padding
+	if lineWidth < 10 {
+		lineWidth = 10
+	}
+
+	idLine := leftLine
+	if indicatorText != "" {
+		space := lineWidth - lipgloss.Width(leftLine) - lipgloss.Width(indicatorText)
+		if space < 1 {
+			available := lineWidth - lipgloss.Width(indicatorText) - 1
+			if available < 4 {
+				available = 4
+			}
+			leftLine = lipgloss.NewStyle().MaxWidth(available).Render(leftLine)
+			space = 1
+		}
+		idLine = leftLine + strings.Repeat(" ", space) + indicatorText
+	}
 	titleLine := title
 
 	// Card style with bottom margin for separation
@@ -957,28 +1222,14 @@ func (k *KanbanBoard) renderTaskCard(task *db.Task, width int, isSelected bool) 
 
 	if isSelected {
 		cardBg, cardFg := GetThemeCardColors()
-		// Selected card has border and background
+		// Selected card uses a soft background highlight (no extra borders)
 		cardStyle = cardStyle.
 			Bold(true).
 			Background(cardBg).
-			Foreground(cardFg).
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(lipgloss.Color(currentTheme.CardBorderHi)).
-			MarginBottom(0) // Border adds visual separation
+			Foreground(cardFg)
 	} else if needsInput {
-		// Tasks with active input notification get yellow bottom border
-		cardStyle = cardStyle.
-			BorderBottom(true).
-			BorderStyle(lipgloss.NormalBorder()).
-			BorderForeground(ColorWarning).
-			MarginBottom(0)
-	} else {
-		// Non-selected cards have a subtle bottom border for separation
-		cardStyle = cardStyle.
-			BorderBottom(true).
-			BorderStyle(lipgloss.NormalBorder()).
-			BorderForeground(ColorMuted).
-			MarginBottom(0)
+		// Subtle warning tint for tasks needing input
+		cardStyle = cardStyle.Foreground(ColorWarning)
 	}
 
 	content := idLine + "\n" + titleLine
@@ -986,8 +1237,13 @@ func (k *KanbanBoard) renderTaskCard(task *db.Task, width int, isSelected bool) 
 }
 
 // FocusColumn moves selection to a specific column by index.
+// If the column is collapsed, it will be uncollapsed first.
 func (k *KanbanBoard) FocusColumn(colIdx int) {
 	if colIdx >= 0 && colIdx < len(k.columns) {
+		// Uncollapse the column if it's collapsed
+		if k.IsColumnCollapsed(colIdx) {
+			delete(k.collapsedColumns, colIdx)
+		}
 		k.selectedCol = colIdx
 		k.clampSelection()
 		k.ensureSelectedVisible()
@@ -1038,6 +1294,75 @@ func (k *KanbanBoard) HasNextTask() bool {
 	return k.selectedRow < len(col.Tasks)-1
 }
 
+// SelectByShortcut selects the Nth visible task in the current column (1-18).
+// Returns the selected task, or nil if the shortcut doesn't correspond to a visible task.
+func (k *KanbanBoard) SelectByShortcut(num int) *db.Task {
+	if num < 1 || num > 18 {
+		return nil
+	}
+
+	col := k.columns[k.selectedCol]
+	if len(col.Tasks) == 0 {
+		return nil
+	}
+
+	// Calculate visible tasks (pinned + visible unpinned)
+	pinnedTasks, unpinnedTasks := splitPinnedTasks(col.Tasks)
+
+	// Calculate how many tasks are visible
+	colHeight := k.height - 2
+	if k.IsMobileMode() {
+		colHeight = k.height - 4
+	}
+	cardHeight := 3
+	maxVisible := (colHeight - 3) / cardHeight
+	if maxVisible < 1 {
+		maxVisible = 1
+	}
+
+	pinnedSlots := len(pinnedTasks)
+	if pinnedSlots > maxVisible {
+		pinnedSlots = maxVisible
+	}
+	scrollCapacity := maxVisible - pinnedSlots
+	if scrollCapacity < 0 {
+		scrollCapacity = 0
+	}
+
+	// Get scroll offset
+	scrollOffset := 0
+	if k.selectedCol < len(k.scrollOffsets) {
+		scrollOffset = k.scrollOffsets[k.selectedCol]
+	}
+
+	// Build list of visible task indices (in column order)
+	var visibleIndices []int
+
+	// Add pinned tasks
+	for i := 0; i < pinnedSlots; i++ {
+		visibleIndices = append(visibleIndices, i)
+	}
+
+	// Add visible unpinned tasks
+	startIdx := scrollOffset
+	endIdx := scrollOffset + scrollCapacity
+	if endIdx > len(unpinnedTasks) {
+		endIdx = len(unpinnedTasks)
+	}
+	for i := startIdx; i < endIdx; i++ {
+		visibleIndices = append(visibleIndices, len(pinnedTasks)+i)
+	}
+
+	// Select the Nth visible task (1-indexed)
+	idx := num - 1
+	if idx >= len(visibleIndices) {
+		return nil
+	}
+
+	k.selectedRow = visibleIndices[idx]
+	return col.Tasks[k.selectedRow]
+}
+
 // HandleClick handles a mouse click at the given coordinates.
 // Returns the clicked task if a task card was clicked, nil otherwise.
 // Also updates the selection to the clicked task.
@@ -1056,29 +1381,60 @@ func (k *KanbanBoard) HandleClick(x, y int) *db.Task {
 
 // handleClickDesktop handles clicks in desktop (multi-column) mode.
 func (k *KanbanBoard) handleClickDesktop(x, y int) *db.Task {
-	// Calculate column layout (same as viewDesktop())
+	// Calculate column layout (same as viewDesktop()) accounting for collapsed columns
 	numCols := len(k.columns)
-	availableWidth := k.width - (numCols * 2) - (numCols - 1)
-	colWidth := availableWidth / numCols
+	collapsedCount := 0
+	for i := range k.columns {
+		if k.IsColumnCollapsed(i) {
+			collapsedCount++
+		}
+	}
+	expandedCount := numCols - collapsedCount
+
+	collapsedTotalWidth := collapsedCount * (collapsedColumnWidth + 2 + 1)
+	availableWidth := k.width - (expandedCount * 2) - (numCols - 1) - collapsedTotalWidth
+	colWidth := availableWidth / expandedCount
 	if colWidth < 20 {
 		colWidth = 20
 	}
 
-	// Each column has: 1 border + colWidth content + 1 border = colWidth + 2
-	// Columns are joined with no gap between them in lipgloss.JoinHorizontal
-	colTotalWidth := colWidth + 2
+	// Determine which column was clicked by walking column positions
+	currentX := 0
+	colIdx := -1
+	for i := range k.columns {
+		var thisColTotalWidth int
+		if k.IsColumnCollapsed(i) {
+			thisColTotalWidth = collapsedColumnWidth + 2
+		} else {
+			thisColTotalWidth = colWidth + 2
+		}
 
-	// Determine which column was clicked
-	colIdx := x / colTotalWidth
-	if colIdx >= numCols {
-		colIdx = numCols - 1
+		if x >= currentX && x < currentX+thisColTotalWidth {
+			colIdx = i
+			break
+		}
+		currentX += thisColTotalWidth + 1 // +1 for gap
 	}
+
 	if colIdx < 0 {
 		return nil
 	}
 
+	// If clicked on a collapsed column, uncollapse it
+	if k.IsColumnCollapsed(colIdx) {
+		k.FocusColumn(colIdx) // This uncollapses and focuses
+		return nil
+	}
+
 	// Check if click is within column bounds (not on border)
-	colStartX := colIdx * colTotalWidth
+	colStartX := 0
+	for i := 0; i < colIdx; i++ {
+		if k.IsColumnCollapsed(i) {
+			colStartX += collapsedColumnWidth + 2 + 1
+		} else {
+			colStartX += colWidth + 2 + 1
+		}
+	}
 	relX := x - colStartX
 	if relX < 1 || relX > colWidth {
 		// Clicked on border

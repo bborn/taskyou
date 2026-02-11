@@ -13,6 +13,7 @@ import (
 	"github.com/bborn/workflow/internal/db"
 	"github.com/bborn/workflow/internal/executor"
 	"github.com/bborn/workflow/internal/github"
+	"github.com/bborn/workflow/internal/spotlight"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/glamour"
@@ -67,8 +68,8 @@ type DetailModel struct {
 	// Focus state - true when the detail pane is the active tmux pane
 	focused bool
 
-	// Track if join-pane has failed to prevent retry loop
-	joinPaneFailed bool
+	// Track if join-pane has failed (with cooldown to allow retries)
+	joinPaneFailedUntil time.Time
 
 	// Cached Glamour renderers (created once, reused)
 	glamourRendererFocused   *glamour.TermRenderer
@@ -84,6 +85,7 @@ type DetailModel struct {
 
 	// Log count tracking for smarter refreshes
 	lastLogCount int
+	logsLoading  bool // true while async log loading is in progress
 
 	// Memory check throttling (don't check every refresh)
 	lastMemoryCheck time.Time
@@ -96,16 +98,15 @@ type DetailModel struct {
 	paneLoadingStart time.Time // when loading started (for spinner animation)
 	paneError        string    // user-visible error when panes fail to open
 
-	// Notification state (passed from app)
-	notification string // current notification message
-	notifyTaskID int64  // task that triggered the notification
-	notifyUntil  time.Time
-
-	// Focus executor pane after joining (e.g., when jumping from notification)
+	// Focus executor pane after joining (e.g., when jumping from kanban)
 	focusExecutorOnJoin bool
 
 	// Shell pane visibility toggle
 	shellPaneHidden bool // true when shell pane is collapsed to daemon
+
+	// Server detection for task port
+	serverListening   bool      // true when a server is listening on the task's port
+	lastServerCheck   time.Time // throttle server port checks
 }
 
 // Message types for async pane loading
@@ -116,6 +117,13 @@ type panesJoinedMsg struct {
 	windowTarget    string
 	userMessage     string
 	err             error
+}
+
+// logsLoadedMsg is sent when async log loading completes.
+type logsLoadedMsg struct {
+	taskID   int64
+	logs     []*db.TaskLog
+	logCount int
 }
 
 type spinnerTickMsg struct{}
@@ -173,35 +181,14 @@ func (m *DetailModel) SetPRInfo(prInfo *github.PRInfo) {
 	}
 }
 
-// SetNotification updates the notification state from the app.
-func (m *DetailModel) SetNotification(msg string, taskID int64, until time.Time) {
-	m.notification = msg
-	m.notifyTaskID = taskID
-	m.notifyUntil = until
-}
-
-// HasNotification returns true if there is an active notification for a different task.
-func (m *DetailModel) HasNotification() bool {
-	if m.notification == "" || m.notifyTaskID == 0 {
-		return false
-	}
-	// Only show notification if it's for a different task
-	if m.task != nil && m.notifyTaskID == m.task.ID {
-		return false
-	}
-	return time.Now().Before(m.notifyUntil)
-}
-
-// NotifyTaskID returns the task ID that triggered the notification.
-func (m *DetailModel) NotifyTaskID() int64 {
-	return m.notifyTaskID
-}
-
 // Refresh reloads task and logs from database.
-func (m *DetailModel) Refresh() {
+// Returns a tea.Cmd if async work (like log loading) needs to happen.
+func (m *DetailModel) Refresh() tea.Cmd {
 	if m.task == nil || m.database == nil {
-		return
+		return nil
 	}
+
+	prevTask := m.task
 
 	// Reload task
 	task, err := m.database.GetTask(m.task.ID)
@@ -209,18 +196,28 @@ func (m *DetailModel) Refresh() {
 		m.task = task
 	}
 
-	// Check log count first to avoid loading all logs if unchanged
-	logCount, err := m.database.GetTaskLogCount(m.task.ID)
-	if err == nil && logCount != m.lastLogCount {
-		// Log count changed, reload logs
-		logs, err := m.database.GetTaskLogs(m.task.ID, 500)
-		if err == nil {
-			m.logs = logs
-			m.lastLogCount = logCount
+	if m.ready && prevTask != nil && m.task != nil {
+		if prevTask.Status != m.task.Status ||
+			prevTask.DangerousMode != m.task.DangerousMode ||
+			prevTask.Pinned != m.task.Pinned ||
+			prevTask.Project != m.task.Project ||
+			prevTask.Type != m.task.Type ||
+			prevTask.Title != m.task.Title {
+			m.viewport.SetContent(m.renderContent())
+		}
+	}
 
-			if m.ready {
-				m.viewport.SetContent(m.renderContent())
-			}
+	// Check log count first to avoid loading all logs if unchanged.
+	// Load logs asynchronously to avoid blocking the UI event loop.
+	var cmd tea.Cmd
+	logCount, err := m.database.GetTaskLogCount(m.task.ID)
+	if err == nil && logCount != m.lastLogCount && !m.logsLoading {
+		m.logsLoading = true
+		taskID := m.task.ID
+		database := m.database
+		cmd = func() tea.Msg {
+			logs, _ := database.GetTaskLogs(taskID, 500)
+			return logsLoadedMsg{taskID: taskID, logs: logs, logCount: logCount}
 		}
 	}
 
@@ -243,11 +240,40 @@ func (m *DetailModel) Refresh() {
 
 	// Note: Focus state is checked by focusTick every 200ms, no need to duplicate here
 
-	// Throttle pane join checks to every 5 seconds (runs tmux commands)
-	if time.Since(m.lastPaneCheck) >= 5*time.Second {
+	// Throttle server port checks to every 2 seconds
+	if time.Since(m.lastServerCheck) >= 2*time.Second {
+		m.checkServerListening()
+		m.lastServerCheck = time.Now()
+	}
+
+	// Throttle pane join checks (runs tmux commands)
+	// Poll faster (1s) while loading to reduce latency for "create and execute" flow,
+	// slower (5s) once panes are established for normal health checks
+	paneCheckInterval := 5 * time.Second
+	if m.paneLoading {
+		paneCheckInterval = 1 * time.Second
+	}
+	if time.Since(m.lastPaneCheck) >= paneCheckInterval {
 		m.lastPaneCheck = time.Now()
 		// Ensure tmux panes are joined if available (handles external close/detach)
 		m.ensureTmuxPanesJoined()
+	}
+
+	return cmd
+}
+
+// HandleLogsLoaded processes the result of async log loading.
+func (m *DetailModel) HandleLogsLoaded(msg logsLoadedMsg) {
+	m.logsLoading = false
+	if msg.taskID != m.task.ID {
+		return // stale result from a different task
+	}
+	if msg.logs != nil {
+		m.logs = msg.logs
+		m.lastLogCount = msg.logCount
+		if m.ready {
+			m.viewport.SetContent(m.renderContent())
+		}
 	}
 }
 
@@ -484,6 +510,11 @@ func (m *DetailModel) Update(msg tea.Msg) (*DetailModel, tea.Cmd) {
 		m.viewport.SetContent(m.renderContent())
 		return m, nil
 
+	case logsLoadedMsg:
+		// Async log loading completed
+		m.HandleLogsLoaded(msg)
+		return m, nil
+
 	case spinnerTickMsg:
 		// Update spinner animation while loading
 		if m.paneLoading {
@@ -534,7 +565,7 @@ func (m *DetailModel) ClearPaneState() {
 	m.workdirPaneID = ""
 	m.daemonSessionID = ""
 	m.cachedWindowTarget = ""
-	m.joinPaneFailed = false
+	m.joinPaneFailedUntil = time.Time{}
 }
 
 // RefreshPanesCmd returns a command to refresh the tmux panes.
@@ -772,8 +803,8 @@ func (m *DetailModel) ensureTmuxPanesJoined() {
 		return
 	}
 
-	// Don't retry if join has already failed for this task
-	if m.joinPaneFailed {
+	// Don't retry if join recently failed (5s cooldown to avoid spam, but allows recovery)
+	if !m.joinPaneFailedUntil.IsZero() && time.Now().Before(m.joinPaneFailedUntil) {
 		return
 	}
 
@@ -801,6 +832,11 @@ func (m *DetailModel) ensureTmuxPanesJoined() {
 	// If we have a session available, join it
 	if m.hasActiveTmuxSession() {
 		m.joinTmuxPanes()
+		// If join succeeded, clear the loading state
+		if m.claudePaneID != "" {
+			m.paneLoading = false
+			m.paneError = ""
+		}
 	}
 }
 
@@ -1132,13 +1168,13 @@ func (m *DetailModel) joinTmuxPanes() {
 			m.database.UpdateTaskWindowID(m.task.ID, "")
 			m.task.TmuxWindowID = ""
 		}
-		m.joinPaneFailed = true
+		m.joinPaneFailedUntil = time.Now().Add(5 * time.Second)
 		return
 	}
 	daemonPaneIDs := strings.Split(strings.TrimSpace(string(daemonPanesOut)), "\n")
 	if len(daemonPaneIDs) == 0 || daemonPaneIDs[0] == "" {
 		log.Error("joinTmuxPanes: no panes found in %q", windowTarget)
-		m.joinPaneFailed = true
+		m.joinPaneFailedUntil = time.Now().Add(5 * time.Second)
 		return
 	}
 	log.Debug("joinTmuxPanes: daemon pane IDs=%v", daemonPaneIDs)
@@ -1170,7 +1206,7 @@ func (m *DetailModel) joinTmuxPanes() {
 	joinOutput, err := joinCmd.CombinedOutput()
 	if err != nil {
 		log.Error("joinTmuxPanes: join-pane failed: %v, output: %s", err, string(joinOutput))
-		m.joinPaneFailed = true // Prevent retry loop
+		m.joinPaneFailedUntil = time.Now().Add(5 * time.Second) // Cooldown before retry
 		return
 	}
 	log.Debug("joinTmuxPanes: join-pane succeeded")
@@ -1699,7 +1735,7 @@ func (m *DetailModel) breakTmuxPanes(saveHeight bool, resizeTUI bool) {
 	osExec.CommandContext(ctx, "tmux", "unbind-key", "-T", "root", "M-S-Down").Run()
 
 	// Reset pane title back to main view label
-	osExec.CommandContext(ctx, "tmux", "select-pane", "-t", "task-ui:.0", "-T", "Tasks").Run()
+	osExec.CommandContext(ctx, "tmux", "select-pane", "-t", m.uiSessionName+":.0", "-T", "Tasks").Run()
 
 	// Break the Claude pane back to task-daemon
 	if m.claudePaneID == "" {
@@ -1919,6 +1955,34 @@ func (m *DetailModel) HasRunningShellProcess() bool {
 	return command != "" && command != userShell
 }
 
+// checkServerListening checks if a server is listening on the task's port.
+// Uses lsof to check for listening processes on the port.
+func (m *DetailModel) checkServerListening() {
+	if m.task == nil || m.task.Port == 0 {
+		m.serverListening = false
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+
+	// Use lsof to check if any process is listening on the task's port
+	// -i :PORT checks for processes using that port
+	// -sTCP:LISTEN filters for listening sockets only
+	cmd := osExec.CommandContext(ctx, "lsof", "-i", fmt.Sprintf(":%d", m.task.Port), "-sTCP:LISTEN")
+	err := cmd.Run()
+	// lsof returns exit code 0 if it finds a match, non-zero otherwise
+	m.serverListening = err == nil
+}
+
+// GetServerURL returns the server URL if a server is listening on the task's port.
+func (m *DetailModel) GetServerURL() string {
+	if !m.serverListening || m.task == nil || m.task.Port == 0 {
+		return ""
+	}
+	return fmt.Sprintf("http://localhost:%d", m.task.Port)
+}
+
 // killPaneWithProcess kills a tmux pane AND the process running inside it.
 // This prevents orphaned processes when panes are closed.
 func (m *DetailModel) killPaneWithProcess(ctx context.Context, paneID string) {
@@ -2111,6 +2175,25 @@ func (m *DetailModel) renderHeader() string {
 		meta.WriteString("  ")
 	}
 
+	// Spotlight badge
+	if t.WorktreePath != "" && spotlight.IsActive(t.WorktreePath) {
+		var spotlightStyle lipgloss.Style
+		if m.focused {
+			spotlightStyle = lipgloss.NewStyle().
+				Padding(0, 1).
+				Background(lipgloss.Color("214")). // Amber/yellow
+				Foreground(lipgloss.Color("#000000")).
+				Bold(true)
+		} else {
+			spotlightStyle = lipgloss.NewStyle().
+				Padding(0, 1).
+				Background(dimmedBg).
+				Foreground(dimmedFg)
+		}
+		meta.WriteString(spotlightStyle.Render("🔦 SPOTLIGHT"))
+		meta.WriteString("  ")
+	}
+
 	if t.Pinned {
 		var pinStyle lipgloss.Style
 		if m.focused {
@@ -2183,6 +2266,18 @@ func (m *DetailModel) renderHeader() string {
 			Foreground(dimmedTextFg).
 			Render(m.prInfo.StatusDescription())
 		meta.WriteString(prDesc)
+
+		// Diff stats (additions/deletions)
+		var diffStats string
+		if m.focused {
+			diffStats = PRDiffStatsBright(m.prInfo)
+		} else {
+			diffStats = PRDiffStats(m.prInfo)
+		}
+		if diffStats != "" {
+			meta.WriteString("  ")
+			meta.WriteString(diffStats)
+		}
 	}
 
 	// Running process indicator
@@ -2235,29 +2330,26 @@ func (m *DetailModel) renderHeader() string {
 		}
 	}
 
-	// Build the first line with optional notification indicator
-	metaStr := meta.String()
-
-	// Add notification indicator if there's an active notification for a different task
-	var firstLine string
-	if m.HasNotification() {
-		// Create a subtle notification indicator
-		notifyStyle := lipgloss.NewStyle().
-			Background(lipgloss.Color("#4B5563")). // Muted gray background
-			Foreground(lipgloss.Color("#FFCC00")). // Yellow text
-			Padding(0, 1)
-		notifyIndicator := notifyStyle.Render(fmt.Sprintf("%s Task #%d (ctrl+g)", IconBlocked(), m.notifyTaskID))
-
-		// Add notification with spacing
-		firstLine = metaStr + "  " + notifyIndicator
-	} else {
-		firstLine = metaStr
+	// Server URL if a server is listening on the task's port
+	var serverLine string
+	if serverURL := m.GetServerURL(); serverURL != "" {
+		if m.focused {
+			serverLine = Dim.Render(fmt.Sprintf("Server: %s", serverURL))
+		} else {
+			serverLine = lipgloss.NewStyle().Foreground(dimmedTextFg).Render(fmt.Sprintf("Server: %s", serverURL))
+		}
 	}
 
+	// Build the first line
+	metaStr := meta.String()
+
 	// Create a block for the right-aligned content
-	rightContent := []string{firstLine}
+	rightContent := []string{metaStr}
 	if prLine != "" {
 		rightContent = append(rightContent, prLine)
+	}
+	if serverLine != "" {
+		rightContent = append(rightContent, serverLine)
 	}
 	rightBlock := lipgloss.JoinVertical(lipgloss.Right, rightContent...)
 
@@ -2405,6 +2497,51 @@ func (m *DetailModel) renderContent() string {
 		b.WriteString("\n")
 	}
 
+	// Dependencies section
+	if m.database != nil {
+		blockers, blockedBy, err := m.database.GetAllDependencies(t.ID)
+		if err == nil && (len(blockers) > 0 || len(blockedBy) > 0) {
+			b.WriteString("\n")
+			b.WriteString(Bold.Render("Dependencies"))
+			b.WriteString("\n\n")
+
+			if len(blockers) > 0 {
+				lockStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#F59E0B"))
+				b.WriteString(lockStyle.Render("Blocked by:"))
+				b.WriteString("\n")
+				for _, blocker := range blockers {
+					statusStr := ""
+					if blocker.Status == db.StatusDone || blocker.Status == db.StatusArchived {
+						statusStr = lipgloss.NewStyle().Foreground(lipgloss.Color("#10B981")).Render(" [done]")
+					} else {
+						statusStr = Dim.Render(fmt.Sprintf(" [%s]", blocker.Status))
+					}
+					if m.focused {
+						b.WriteString(fmt.Sprintf("  #%d: %s%s\n", blocker.ID, blocker.Title, statusStr))
+					} else {
+						b.WriteString(dimmedStyle.Render(fmt.Sprintf("  #%d: %s%s\n", blocker.ID, blocker.Title, statusStr)))
+					}
+				}
+			}
+
+			if len(blockedBy) > 0 {
+				if len(blockers) > 0 {
+					b.WriteString("\n")
+				}
+				b.WriteString(Bold.Render("Blocks:"))
+				b.WriteString("\n")
+				for _, blocked := range blockedBy {
+					statusStr := Dim.Render(fmt.Sprintf(" [%s]", blocked.Status))
+					if m.focused {
+						b.WriteString(fmt.Sprintf("  #%d: %s%s\n", blocked.ID, blocked.Title, statusStr))
+					} else {
+						b.WriteString(dimmedStyle.Render(fmt.Sprintf("  #%d: %s%s\n", blocked.ID, blocked.Title, statusStr)))
+					}
+				}
+			}
+		}
+	}
+
 	// Execution logs
 	if len(m.logs) > 0 {
 		b.WriteString("\n")
@@ -2527,12 +2664,18 @@ func (m *DetailModel) renderHelp() string {
 		keys = append(keys, helpKey{"\\", toggleDesc, false})
 	}
 
-	// Show jump to notification shortcut when there's an active notification
-	if m.HasNotification() {
-		keys = append(keys, helpKey{"ctrl+g", "jump to notification", false})
+	// Spotlight mode
+	if m.task != nil && m.task.WorktreePath != "" {
+		if spotlight.IsActive(m.task.WorktreePath) {
+			keys = append(keys, helpKey{"f", "spotlight off", false})
+			keys = append(keys, helpKey{"F", "sync", false})
+		} else {
+			keys = append(keys, helpKey{"f", "spotlight", false})
+		}
 	}
 
 	keys = append(keys, []helpKey{
+		{"b", "browser", false},
 		{"c", "close", false},
 		{"a", "archive", false},
 		{"d", "delete", false},

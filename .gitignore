@@ -11,7 +11,8 @@
 .env.local
 
 # Claude Code
-.claude/
+.claude/*
+!.claude/settings.json
 .crush/
 
 # Archives
@@ -38,4 +39,9 @@ bin/
 
 # Tmux
 tmux-*.log
+.playwright-mcp/.mcp.json
+
+# Spotlight mode
+.spotlight-active
 .playwright-mcp/
+.mcp.json
