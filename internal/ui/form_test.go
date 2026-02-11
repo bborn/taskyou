@@ -875,11 +875,11 @@ func TestFormDefaultsToFirstAvailableExecutor(t *testing.T) {
 }
 
 func TestFormProgressiveDisclosure(t *testing.T) {
-	t.Run("new form starts in simple mode focused on title", func(t *testing.T) {
+	t.Run("new form starts in advanced mode focused on title", func(t *testing.T) {
 		m := NewFormModel(nil, 100, 50, "", []string{"claude"})
 
-		if m.showAdvanced {
-			t.Error("expected new form to start with showAdvanced=false")
+		if !m.showAdvanced {
+			t.Error("expected new form to start with showAdvanced=true")
 		}
 		if m.focused != FieldTitle {
 			t.Errorf("expected focus on FieldTitle, got %d", m.focused)
@@ -900,6 +900,7 @@ func TestFormProgressiveDisclosure(t *testing.T) {
 
 	t.Run("simple mode hides advanced fields", func(t *testing.T) {
 		m := NewFormModel(nil, 100, 50, "", []string{"claude"})
+		m.showAdvanced = false // Switch to simple mode for this test
 
 		if m.isFieldVisible(FieldProject) {
 			t.Error("FieldProject should be hidden in simple mode")
@@ -924,25 +925,26 @@ func TestFormProgressiveDisclosure(t *testing.T) {
 	t.Run("ctrl+e toggles advanced mode", func(t *testing.T) {
 		m := NewFormModel(nil, 100, 50, "", []string{"claude"})
 
-		if m.showAdvanced {
-			t.Fatal("expected simple mode initially")
+		if !m.showAdvanced {
+			t.Fatal("expected advanced mode initially")
 		}
 
-		// Toggle to advanced
+		// Toggle to simple
+		m.Update(tea.KeyMsg{Type: tea.KeyCtrlE})
+		if m.showAdvanced {
+			t.Error("expected simple mode after ctrl+e")
+		}
+
+		// Toggle back to advanced
 		m.Update(tea.KeyMsg{Type: tea.KeyCtrlE})
 		if !m.showAdvanced {
-			t.Error("expected advanced mode after ctrl+e")
-		}
-
-		// Toggle back to simple
-		m.Update(tea.KeyMsg{Type: tea.KeyCtrlE})
-		if m.showAdvanced {
-			t.Error("expected simple mode after second ctrl+e")
+			t.Error("expected advanced mode after second ctrl+e")
 		}
 	})
 
 	t.Run("focusNext skips hidden fields in simple mode", func(t *testing.T) {
 		m := NewFormModel(nil, 100, 50, "", []string{"claude"})
+		m.showAdvanced = false // Switch to simple mode for this test
 
 		// Start on Title
 		if m.focused != FieldTitle {
@@ -964,6 +966,7 @@ func TestFormProgressiveDisclosure(t *testing.T) {
 
 	t.Run("simple mode view shows defaults summary", func(t *testing.T) {
 		m := NewFormModel(nil, 100, 50, "", []string{"claude"})
+		m.showAdvanced = false // Switch to simple mode for this test
 
 		view := m.View()
 
@@ -1014,6 +1017,7 @@ func TestFormProgressiveDisclosure(t *testing.T) {
 
 func TestFormHeaderShowsProjectInSimpleMode(t *testing.T) {
 	m := NewFormModel(nil, 100, 50, "", []string{"claude"})
+	m.showAdvanced = false // Switch to simple mode for this test
 	m.project = "myproject"
 
 	view := m.View()
