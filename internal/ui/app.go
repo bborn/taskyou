@@ -1190,8 +1190,6 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.selectedTask != nil {
 				m.lastViewedAt[m.selectedTask.ID] = time.Time(msg)
 			}
-			// Pass notification state to detail view
-			m.detailView.SetNotification(m.notification, m.notifyTaskID, m.notifyUntil)
 			if cmd := m.detailView.Refresh(); cmd != nil {
 				cmds = append(cmds, cmd)
 			}
