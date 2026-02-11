@@ -17,6 +17,7 @@ import (
 	"github.com/bborn/workflow/internal/executor"
 	"github.com/bborn/workflow/internal/github"
 	"github.com/bborn/workflow/internal/spotlight"
+	"github.com/bborn/workflow/internal/tasksummary"
 	"github.com/charmbracelet/bubbles/help"
 	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/textinput"
@@ -50,29 +51,29 @@ const (
 
 // KeyMap defines key bindings.
 type KeyMap struct {
-	Left            key.Binding
-	Right           key.Binding
-	Up              key.Binding
-	Down            key.Binding
-	Enter           key.Binding
-	Back            key.Binding
-	New             key.Binding
-	Edit            key.Binding
-	Queue           key.Binding
-	Retry           key.Binding
-	Close           key.Binding
-	Archive         key.Binding
-	Delete          key.Binding
-	Refresh         key.Binding
-	Settings        key.Binding
-	Help            key.Binding
-	Quit            key.Binding
-	ChangeStatus    key.Binding
-	CommandPalette  key.Binding
-	ToggleDangerous key.Binding
-	TogglePin       key.Binding
-	Filter       key.Binding
-	OpenWorktree key.Binding
+	Left                     key.Binding
+	Right                    key.Binding
+	Up                       key.Binding
+	Down                     key.Binding
+	Enter                    key.Binding
+	Back                     key.Binding
+	New                      key.Binding
+	Edit                     key.Binding
+	Queue                    key.Binding
+	Retry                    key.Binding
+	Close                    key.Binding
+	Archive                  key.Binding
+	Delete                   key.Binding
+	Refresh                  key.Binding
+	Settings                 key.Binding
+	Help                     key.Binding
+	Quit                     key.Binding
+	ChangeStatus             key.Binding
+	CommandPalette           key.Binding
+	ToggleDangerous          key.Binding
+	TogglePin                key.Binding
+	Filter                   key.Binding
+	OpenWorktree             key.Binding
 	ToggleShellPane          key.Binding
 	JumpToNotification key.Binding
 	// Column focus shortcuts
@@ -375,6 +376,7 @@ type AppModel struct {
 	notification string    // Notification banner text
 	notifyUntil  time.Time // When to hide notification
 	notifyTaskID int64     // Task ID that triggered the notification (for jumping to it)
+	lastViewedAt map[int64]time.Time
 
 	// Track task statuses to detect changes
 	prevStatuses map[int64]string
@@ -587,6 +589,7 @@ func NewAppModel(database *db.DB, exec *executor.Executor, workingDir string) *A
 		loading:            true,
 		prevStatuses:       make(map[int64]string),
 		tasksNeedingInput:  make(map[int64]bool),
+		lastViewedAt:       make(map[int64]time.Time),
 		executorPrompts:    make(map[int64]string),
 		userClosedTaskIDs:  make(map[int64]bool),
 		watcher:            watcher,
@@ -856,14 +859,17 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Update last_accessed_at in m.tasks for command palette sorting
 			// The DB update happens async in loadTaskWithOptions, so we update the
 			// in-memory list here to ensure Ctrl+P shows recently visited tasks first
-			now := db.LocalTime{Time: time.Now()}
-			msg.task.LastAccessedAt = &now
+			now := time.Now()
+			nowLocal := db.LocalTime{Time: now}
+			msg.task.LastAccessedAt = &nowLocal
 			for i, t := range m.tasks {
 				if t.ID == msg.task.ID {
-					m.tasks[i].LastAccessedAt = &now
+					m.tasks[i].LastAccessedAt = &nowLocal
 					break
 				}
 			}
+			lastViewed, hasLast := m.lastViewedAt[msg.task.ID]
+			m.lastViewedAt[msg.task.ID] = now
 			// Clean up any duplicate tmux windows for this task before switching
 			m.executor.CleanupDuplicateWindows(msg.task.ID)
 			// Resume task if it was suspended (blocked idle tasks get suspended to save memory)
@@ -895,6 +901,11 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Fetch PR info for the task
 			if prCmd := m.fetchPRInfo(msg.task); prCmd != nil {
 				cmds = append(cmds, prCmd)
+			}
+			if hasLast && now.Sub(lastViewed) > summaryRefreshAfter {
+				m.notification = fmt.Sprintf("%s Summarizing task #%d...", IconInProgress(), msg.task.ID)
+				m.notifyUntil = time.Now().Add(5 * time.Second)
+				cmds = append(cmds, m.summarizeTask(msg.task.ID, true))
 			}
 		} else {
 			m.err = msg.err
@@ -1054,6 +1065,28 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.notifyUntil = time.Now().Add(3 * time.Second)
 		}
 
+	case taskSummaryMsg:
+		if msg.err != nil {
+			if strings.Contains(msg.err.Error(), "no API key available") {
+				m.notification = fmt.Sprintf("%s No Anthropic API key set (Settings)", IconBlocked())
+			} else {
+				m.notification = fmt.Sprintf("%s %s", IconBlocked(), msg.err.Error())
+			}
+			m.notifyUntil = time.Now().Add(5 * time.Second)
+		} else {
+			m.notification = fmt.Sprintf("%s Summary updated", IconDone())
+			m.notifyUntil = time.Now().Add(3 * time.Second)
+		}
+		if m.selectedTask != nil && m.selectedTask.ID == msg.taskID {
+			task, _ := m.db.GetTask(msg.taskID)
+			if task != nil {
+				m.selectedTask = task
+				if m.detailView != nil {
+					m.detailView.UpdateTask(task)
+				}
+			}
+		}
+
 	case browserOpenedMsg:
 		if msg.err != nil {
 			m.notification = fmt.Sprintf("%s %s", IconBlocked(), msg.err.Error())
@@ -1154,6 +1187,9 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		// Refresh detail view if active (for logs which may update frequently)
 		if m.currentView == ViewDetail && m.detailView != nil {
+			if m.selectedTask != nil {
+				m.lastViewedAt[m.selectedTask.ID] = time.Time(msg)
+			}
 			if cmd := m.detailView.Refresh(); cmd != nil {
 				cmds = append(cmds, cmd)
 			}
@@ -3398,6 +3434,12 @@ type taskPinnedMsg struct {
 	err  error
 }
 
+type taskSummaryMsg struct {
+	taskID  int64
+	summary string
+	err     error
+}
+
 type taskRetriedMsg struct {
 	err error
 }
@@ -3430,6 +3472,7 @@ type aiCommandMsg struct {
 }
 
 const maxDoneTasksInKanban = 20
+const summaryRefreshAfter = 5 * time.Minute
 
 func (m *AppModel) loadTasks() tea.Cmd {
 	return func() tea.Msg {
@@ -3593,11 +3636,35 @@ func (m *AppModel) closeTask(id int64) tea.Cmd {
 			}
 		}
 
+		go func(taskID int64) {
+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+			defer cancel()
+			_, _ = tasksummary.GenerateAndStore(ctx, database, taskID)
+		}(id)
+
 		// Kill the task window to clean up both Claude and workdir panes
 		windowTarget := executor.TmuxSessionName(id)
 		osExec.Command("tmux", "kill-window", "-t", windowTarget).Run()
 
 		return taskClosedMsg{err: err}
+	}
+}
+
+func (m *AppModel) summarizeTask(id int64, force bool) tea.Cmd {
+	database := m.db
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cancel()
+
+		var summary string
+		var err error
+		if force {
+			summary, err = tasksummary.GenerateAndStoreForce(ctx, database, id)
+		} else {
+			summary, err = tasksummary.GenerateAndStore(ctx, database, id)
+		}
+
+		return taskSummaryMsg{taskID: id, summary: summary, err: err}
 	}
 }
 

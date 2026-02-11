@@ -5,6 +5,7 @@ package mcp
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -17,6 +18,7 @@ import (
 
 	"github.com/bborn/workflow/internal/db"
 	"github.com/bborn/workflow/internal/spotlight"
+	"github.com/bborn/workflow/internal/tasksummary"
 )
 
 // Server is an MCP server that provides workflow tools to Claude.
@@ -330,6 +332,13 @@ func (s *Server) handleToolCall(id interface{}, params *toolCallParams) {
 
 		// Log the completion summary (but don't move to done - only humans close tasks)
 		s.db.AppendTaskLog(s.taskID, "system", fmt.Sprintf("Task completed: %s", summary))
+
+		// Generate a concise activity summary in the background (if possible)
+		go func(taskID int64) {
+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+			defer cancel()
+			_, _ = tasksummary.GenerateAndStore(ctx, s.db, taskID)
+		}(s.taskID)
 
 		// Trigger callback (signals the agent is done, but doesn't change status to done)
 		if s.onComplete != nil {
@@ -787,4 +796,3 @@ func (s *Server) send(resp jsonRPCResponse) {
 	s.writer.Write(data)
 	s.writer.Write([]byte("\n"))
 }
-
