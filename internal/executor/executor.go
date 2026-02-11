@@ -1596,6 +1596,33 @@ func (e *Executor) CleanupDuplicateWindows(taskID int64) {
 	}
 }
 
+// GetActiveTaskWindows returns a set of task IDs that have active tmux windows.
+// This is a lightweight batch check (single tmux command) to detect which tasks
+// have executor panes available for quick input.
+func GetActiveTaskWindows() map[int64]bool {
+	result := make(map[int64]bool)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	out, err := exec.CommandContext(ctx, "tmux", "list-windows", "-a", "-F", "#{window_name}").Output()
+	if err != nil {
+		return result
+	}
+
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if !strings.HasPrefix(line, "task-") {
+			continue
+		}
+		var taskID int64
+		if _, err := fmt.Sscanf(line, "task-%d", &taskID); err == nil && taskID > 0 {
+			result[taskID] = true
+		}
+	}
+
+	return result
+}
+
 // GetTasksWithRunningShellProcess returns a map of task IDs that have a running process
 // in their shell pane. A process is considered "running" if the shell pane exists and
 // has a foreground command that differs from the user's default shell.

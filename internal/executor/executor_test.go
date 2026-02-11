@@ -1672,3 +1672,12 @@ func TestWriteWorkflowMCPConfig(t *testing.T) {
 		}
 	})
 }
+
+func TestGetActiveTaskWindows(t *testing.T) {
+	// GetActiveTaskWindows should return a valid (possibly empty) map
+	// even when tmux is not available or has no sessions
+	result := GetActiveTaskWindows()
+	if result == nil {
+		t.Error("GetActiveTaskWindows should return a non-nil map")
+	}
+}

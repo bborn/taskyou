@@ -784,6 +784,20 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
+		// Ensure blocked tasks with active executor panes are always in tasksNeedingInput.
+		// This catches: tasks already blocked on app startup, tasks that went through
+		// a quick blocked→processing→blocked cycle within one poll, and tasks where
+		// the needsInput flag was missed due to timing.
+		activeWindows := executor.GetActiveTaskWindows()
+		for _, t := range m.tasks {
+			if t.Status == db.StatusBlocked && !m.tasksNeedingInput[t.ID] {
+				if activeWindows[t.ID] {
+					m.tasksNeedingInput[t.ID] = true
+					cmds = append(cmds, m.captureExecutorPrompt(t.ID))
+				}
+			}
+		}
+
 		// Reapply filter if one is active
 		m.applyFilter()
 		m.kanban.SetHiddenDoneCount(msg.hiddenDoneCount)
@@ -1048,10 +1062,11 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.notification = fmt.Sprintf("%s %s executor prompt for task #%d", IconDone(), action, msg.taskID)
 			m.notifyUntil = time.Now().Add(3 * time.Second)
-			// Clear the cached prompt since we've responded
+			// Clear the cached prompt content so it gets refreshed on next tick.
+			// Don't clear tasksNeedingInput here - let the natural status transition
+			// (blocked → processing) handle it. Clearing prematurely causes the quick
+			// input to disappear even when the task is still blocked.
 			delete(m.executorPrompts, msg.taskID)
-			delete(m.tasksNeedingInput, msg.taskID)
-			m.kanban.SetTasksNeedingInput(m.tasksNeedingInput)
 		}
 		cmds = append(cmds, m.loadTasks())
 

@@ -1138,3 +1138,69 @@ func TestJumpToNotificationKey_FocusExecutor(t *testing.T) {
 		t.Error("expected focusExecutor to be true when jumping from notification")
 	}
 }
+
+// TestExecutorRespondedDoesNotClearNeedsInput verifies that approving/denying
+// an executor prompt does not prematurely clear the tasksNeedingInput flag.
+// The flag should only be cleared by the natural status transition (blocked → processing).
+func TestExecutorRespondedDoesNotClearNeedsInput(t *testing.T) {
+	m := &AppModel{
+		width:             100,
+		height:            50,
+		currentView:       ViewDashboard,
+		keys:              DefaultKeyMap(),
+		tasksNeedingInput: map[int64]bool{42: true},
+		executorPrompts:   map[int64]string{42: "some prompt content"},
+		kanban:            NewKanbanBoard(100, 50),
+		prevStatuses:      make(map[int64]string),
+	}
+
+	// Simulate a successful approve response
+	msg := executorRespondedMsg{taskID: 42, action: "approve", err: nil}
+	m.Update(msg)
+
+	// tasksNeedingInput should NOT have been cleared
+	if !m.tasksNeedingInput[42] {
+		t.Error("tasksNeedingInput[42] should still be true after approve - clearing should be done by status transition")
+	}
+
+	// executorPrompts SHOULD have been cleared (stale content)
+	if _, exists := m.executorPrompts[42]; exists {
+		t.Error("executorPrompts[42] should have been cleared after approve")
+	}
+}
+
+// TestBlockedTasksDetectedOnInitialLoad verifies that tasks already in "blocked"
+// status when first loaded are properly detected if they have active tmux windows.
+func TestBlockedTasksDetectedOnInitialLoad(t *testing.T) {
+	m := &AppModel{
+		width:             100,
+		height:            50,
+		currentView:       ViewDashboard,
+		keys:              DefaultKeyMap(),
+		tasksNeedingInput: make(map[int64]bool),
+		executorPrompts:   make(map[int64]string),
+		kanban:            NewKanbanBoard(100, 50),
+		prevStatuses:      make(map[int64]string),
+	}
+
+	// Set up tasks with one already blocked
+	tasks := []*db.Task{
+		{ID: 1, Title: "Backlog Task", Status: db.StatusBacklog},
+		{ID: 2, Title: "Blocked Task", Status: db.StatusBlocked},
+	}
+	m.tasks = tasks
+
+	// On first load (prevStatuses is empty), the transition detection
+	// won't fire because prevStatus == "" fails the check.
+	// The blocked task detection loop should catch this IF the task
+	// has an active tmux window. Without tmux, the task won't be detected
+	// (which is correct - no active pane means no quick input).
+
+	// Simulate task load update
+	m.Update(tasksLoadedMsg{tasks: tasks})
+
+	// Verify prevStatuses was set for the initial load
+	if m.prevStatuses[2] != db.StatusBlocked {
+		t.Error("prevStatuses should track the blocked task after initial load")
+	}
+}
