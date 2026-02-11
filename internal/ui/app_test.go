@@ -1230,3 +1230,33 @@ func TestJumpToNotificationKey_FocusExecutor(t *testing.T) {
 		t.Error("expected focusExecutor to be true when jumping from notification")
 	}
 }
+
+// TestExecutorRespondedClearsPromptState verifies that approving/denying an
+// executor prompt immediately clears both tasksNeedingInput and executorPrompts
+// for visual feedback. If the task still has a pending prompt, the
+// latestPermissionPrompt catch-up loop will re-detect it on the next poll.
+func TestExecutorRespondedClearsPromptState(t *testing.T) {
+	m := &AppModel{
+		width:             100,
+		height:            50,
+		currentView:       ViewDashboard,
+		keys:              DefaultKeyMap(),
+		tasksNeedingInput: map[int64]bool{42: true},
+		executorPrompts:   map[int64]string{42: "some prompt content"},
+		kanban:            NewKanbanBoard(100, 50),
+		prevStatuses:      make(map[int64]string),
+	}
+
+	// Simulate a successful approve response
+	msg := executorRespondedMsg{taskID: 42, action: "approve", err: nil}
+	m.Update(msg)
+
+	// Both should be cleared for immediate visual feedback
+	if m.tasksNeedingInput[42] {
+		t.Error("tasksNeedingInput[42] should be cleared after approve for visual feedback")
+	}
+	if _, exists := m.executorPrompts[42]; exists {
+		t.Error("executorPrompts[42] should be cleared after approve")
+	}
+}
+

@@ -1115,10 +1115,11 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.notification = fmt.Sprintf("%s %s executor prompt for task #%d", IconDone(), action, msg.taskID)
 			m.notifyUntil = time.Now().Add(3 * time.Second)
-			// Clear the cached prompt since we've responded
-			delete(m.executorPrompts, msg.taskID)
+			// Clear prompt state immediately for visual feedback. If the task is
+			// still blocked (e.g. another prompt queued), the latestPermissionPrompt
+			// catch-up loop will re-detect it on the next poll cycle.
 			delete(m.tasksNeedingInput, msg.taskID)
-			m.kanban.SetTasksNeedingInput(m.tasksNeedingInput)
+			delete(m.executorPrompts, msg.taskID)
 		}
 		cmds = append(cmds, m.loadTasks())
 
