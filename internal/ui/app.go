@@ -257,6 +257,7 @@ type AppModel struct {
 	notification string    // Notification banner text
 	notifyUntil  time.Time // When to hide notification
 	notifyTaskID int64     // Task ID that triggered the notification (for jumping to it)
+	lastViewedAt map[int64]time.Time
 
 	// Track task statuses to detect changes
 	prevStatuses map[int64]string
@@ -434,6 +435,7 @@ func NewAppModel(database *db.DB, exec *executor.Executor, workingDir string) *A
 		loading:            true,
 		prevStatuses:       make(map[int64]string),
 		tasksNeedingInput:  make(map[int64]bool),
+		lastViewedAt:       make(map[int64]time.Time),
 		watcher:            watcher,
 		dbChangeCh:         dbChangeCh,
 		prCache:            github.NewPRCache(),
@@ -654,6 +656,9 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.taskTransitionGraceUntil = time.Now().Add(500 * time.Millisecond)
 		if msg.err == nil {
 			m.selectedTask = msg.task
+			now := time.Now()
+			lastViewed, hasLast := m.lastViewedAt[msg.task.ID]
+			m.lastViewedAt[msg.task.ID] = now
 			// Clean up any duplicate tmux windows for this task before switching
 			m.executor.CleanupDuplicateWindows(msg.task.ID)
 			// Resume task if it was suspended (blocked idle tasks get suspended to save memory)
@@ -685,6 +690,11 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Fetch PR info for the task
 			if prCmd := m.fetchPRInfo(msg.task); prCmd != nil {
 				cmds = append(cmds, prCmd)
+			}
+			if hasLast && now.Sub(lastViewed) > summaryRefreshAfter {
+				m.notification = fmt.Sprintf("%s Summarizing task #%d...", IconInProgress(), msg.task.ID)
+				m.notifyUntil = time.Now().Add(5 * time.Second)
+				cmds = append(cmds, m.summarizeTask(msg.task.ID, true))
 			}
 		} else {
 			m.err = msg.err
@@ -820,6 +830,28 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.notifyUntil = time.Now().Add(3 * time.Second)
 		}
 
+	case taskSummaryMsg:
+		if msg.err != nil {
+			if strings.Contains(msg.err.Error(), "no API key available") {
+				m.notification = fmt.Sprintf("%s No Anthropic API key set (Settings)", IconBlocked())
+			} else {
+				m.notification = fmt.Sprintf("%s %s", IconBlocked(), msg.err.Error())
+			}
+			m.notifyUntil = time.Now().Add(5 * time.Second)
+		} else {
+			m.notification = fmt.Sprintf("%s Summary updated", IconDone())
+			m.notifyUntil = time.Now().Add(3 * time.Second)
+		}
+		if m.selectedTask != nil && m.selectedTask.ID == msg.taskID {
+			task, _ := m.db.GetTask(msg.taskID)
+			if task != nil {
+				m.selectedTask = task
+				if m.detailView != nil {
+					m.detailView.UpdateTask(task)
+				}
+			}
+		}
+
 	case taskEventMsg:
 		// Real-time task update from executor
 		event := msg.event
@@ -892,6 +924,9 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		// Refresh detail view if active (for logs which may update frequently)
 		if m.currentView == ViewDetail && m.detailView != nil {
+			if m.selectedTask != nil {
+				m.lastViewedAt[m.selectedTask.ID] = time.Time(msg)
+			}
 			// Pass notification state to detail view
 			m.detailView.SetNotification(m.notification, m.notifyTaskID, m.notifyUntil)
 			m.detailView.Refresh()
@@ -2631,6 +2666,12 @@ type taskPinnedMsg struct {
 	err  error
 }
 
+type taskSummaryMsg struct {
+	taskID  int64
+	summary string
+	err     error
+}
+
 type taskRetriedMsg struct {
 	err error
 }
@@ -2653,6 +2694,7 @@ type prInfoMsg struct {
 }
 
 const maxDoneTasksInKanban = 20
+const summaryRefreshAfter = 5 * time.Minute
 
 func (m *AppModel) loadTasks() tea.Cmd {
 	return func() tea.Msg {
@@ -2817,6 +2859,24 @@ func (m *AppModel) closeTask(id int64) tea.Cmd {
 		osExec.Command("tmux", "kill-window", "-t", windowTarget).Run()
 
 		return taskClosedMsg{err: err}
+	}
+}
+
+func (m *AppModel) summarizeTask(id int64, force bool) tea.Cmd {
+	database := m.db
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cancel()
+
+		var summary string
+		var err error
+		if force {
+			summary, err = tasksummary.GenerateAndStoreForce(ctx, database, id)
+		} else {
+			summary, err = tasksummary.GenerateAndStore(ctx, database, id)
+		}
+
+		return taskSummaryMsg{taskID: id, summary: summary, err: err}
 	}
 }
 

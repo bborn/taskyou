@@ -51,6 +51,14 @@ func (s *Service) IsAvailable() bool {
 }
 
 func GenerateAndStore(ctx context.Context, database *db.DB, taskID int64) (string, error) {
+	return generateAndStore(ctx, database, taskID, false)
+}
+
+func GenerateAndStoreForce(ctx context.Context, database *db.DB, taskID int64) (string, error) {
+	return generateAndStore(ctx, database, taskID, true)
+}
+
+func generateAndStore(ctx context.Context, database *db.DB, taskID int64, force bool) (string, error) {
 	task, err := database.GetTask(taskID)
 	if err != nil {
 		return "", err
@@ -58,7 +66,7 @@ func GenerateAndStore(ctx context.Context, database *db.DB, taskID int64) (strin
 	if task == nil {
 		return "", fmt.Errorf("task not found")
 	}
-	if strings.TrimSpace(task.Summary) != "" {
+	if !force && strings.TrimSpace(task.Summary) != "" {
 		return task.Summary, nil
 	}
 
