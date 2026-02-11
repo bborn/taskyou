@@ -571,6 +571,38 @@ func (db *DB) UpdateTaskPinned(taskID int64, pinned bool) error {
 	return nil
 }
 
+// UpdateTaskSummary updates the task summary and distillation timestamp.
+func (db *DB) UpdateTaskSummary(taskID int64, summary string) error {
+	oldTask, _ := db.GetTask(taskID)
+	oldSummary := ""
+	if oldTask != nil {
+		oldSummary = oldTask.Summary
+	}
+
+	_, err := db.Exec(`
+		UPDATE tasks
+		SET summary = ?, last_distilled_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+		WHERE id = ?
+	`, summary, taskID)
+	if err != nil {
+		return fmt.Errorf("update task summary: %w", err)
+	}
+
+	if oldTask != nil && oldSummary != summary {
+		task, err := db.GetTask(taskID)
+		if err == nil && task != nil {
+			db.emitTaskUpdated(task, map[string]interface{}{
+				"summary": map[string]string{
+					"old": oldSummary,
+					"new": summary,
+				},
+			})
+		}
+	}
+
+	return nil
+}
+
 // ClearTaskWorktreePath clears just the worktree_path for a task.
 // Used during async archive cleanup to avoid overwriting other fields.
 func (db *DB) ClearTaskWorktreePath(taskID int64) error {
@@ -874,6 +906,55 @@ func (db *DB) GetTaskLogs(taskID int64, limit int) ([]*TaskLog, error) {
 	}
 
 	return logs, nil
+}
+
+// GetConversationHistoryLogs retrieves only logs relevant for building conversation history.
+// This is much more efficient than GetTaskLogs for the executor's prompt building,
+// as it skips large output/tool log content that isn't needed for conversation context.
+// Only fetches: continuation markers, questions, and user feedback.
+func (db *DB) GetConversationHistoryLogs(taskID int64) ([]*TaskLog, error) {
+	rows, err := db.Query(`
+		SELECT id, task_id, line_type, content, created_at
+		FROM task_logs
+		WHERE task_id = ?
+		  AND (
+		    (line_type = 'system' AND content = '--- Continuation ---')
+		    OR line_type = 'question'
+		    OR (line_type = 'text' AND content LIKE 'Feedback: %')
+		  )
+		ORDER BY id ASC
+	`, taskID)
+	if err != nil {
+		return nil, fmt.Errorf("query conversation history logs: %w", err)
+	}
+	defer rows.Close()
+
+	var logs []*TaskLog
+	for rows.Next() {
+		l := &TaskLog{}
+		err := rows.Scan(&l.ID, &l.TaskID, &l.LineType, &l.Content, &l.CreatedAt)
+		if err != nil {
+			return nil, fmt.Errorf("scan conversation history log: %w", err)
+		}
+		logs = append(logs, l)
+	}
+
+	return logs, nil
+}
+
+// HasContinuationMarker checks if a task has any continuation markers.
+// This is a fast EXISTS-style query to avoid loading logs just to check.
+func (db *DB) HasContinuationMarker(taskID int64) (bool, error) {
+	var count int
+	err := db.QueryRow(`
+		SELECT COUNT(*) FROM task_logs
+		WHERE task_id = ? AND line_type = 'system' AND content = '--- Continuation ---'
+		LIMIT 1
+	`, taskID).Scan(&count)
+	if err != nil {
+		return false, fmt.Errorf("check continuation marker: %w", err)
+	}
+	return count > 0, nil
 }
 
 // GetTaskLogCount returns the number of logs for a task.

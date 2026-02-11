@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/bborn/workflow/internal/db"
 	tea "github.com/charmbracelet/bubbletea"
 )
 
@@ -870,5 +871,154 @@ func TestFormDefaultsToFirstAvailableExecutor(t *testing.T) {
 
 	if m.executor != "codex" {
 		t.Errorf("expected form to default to 'codex', got %q", m.executor)
+	}
+}
+
+func TestFormProgressiveDisclosure(t *testing.T) {
+	t.Run("new form starts in simple mode focused on title", func(t *testing.T) {
+		m := NewFormModel(nil, 100, 50, "", []string{"claude"})
+
+		if m.showAdvanced {
+			t.Error("expected new form to start with showAdvanced=false")
+		}
+		if m.focused != FieldTitle {
+			t.Errorf("expected focus on FieldTitle, got %d", m.focused)
+		}
+	})
+
+	t.Run("edit form starts in advanced mode", func(t *testing.T) {
+		m := NewEditFormModel(nil, &db.Task{
+			Title:    "test",
+			Project:  "personal",
+			Executor: "claude",
+		}, 100, 50, []string{"claude"})
+
+		if !m.showAdvanced {
+			t.Error("expected edit form to start with showAdvanced=true")
+		}
+	})
+
+	t.Run("simple mode hides advanced fields", func(t *testing.T) {
+		m := NewFormModel(nil, 100, 50, "", []string{"claude"})
+
+		if m.isFieldVisible(FieldProject) {
+			t.Error("FieldProject should be hidden in simple mode")
+		}
+		if !m.isFieldVisible(FieldTitle) {
+			t.Error("FieldTitle should be visible in simple mode")
+		}
+		if !m.isFieldVisible(FieldBody) {
+			t.Error("FieldBody should be visible in simple mode")
+		}
+		if m.isFieldVisible(FieldAttachments) {
+			t.Error("FieldAttachments should be hidden in simple mode")
+		}
+		if m.isFieldVisible(FieldType) {
+			t.Error("FieldType should be hidden in simple mode")
+		}
+		if m.isFieldVisible(FieldExecutor) {
+			t.Error("FieldExecutor should be hidden in simple mode")
+		}
+	})
+
+	t.Run("ctrl+e toggles advanced mode", func(t *testing.T) {
+		m := NewFormModel(nil, 100, 50, "", []string{"claude"})
+
+		if m.showAdvanced {
+			t.Fatal("expected simple mode initially")
+		}
+
+		// Toggle to advanced
+		m.Update(tea.KeyMsg{Type: tea.KeyCtrlE})
+		if !m.showAdvanced {
+			t.Error("expected advanced mode after ctrl+e")
+		}
+
+		// Toggle back to simple
+		m.Update(tea.KeyMsg{Type: tea.KeyCtrlE})
+		if m.showAdvanced {
+			t.Error("expected simple mode after second ctrl+e")
+		}
+	})
+
+	t.Run("focusNext skips hidden fields in simple mode", func(t *testing.T) {
+		m := NewFormModel(nil, 100, 50, "", []string{"claude"})
+
+		// Start on Title
+		if m.focused != FieldTitle {
+			t.Fatalf("expected focus on FieldTitle, got %d", m.focused)
+		}
+
+		// Tab should go to Body (skipping nothing, it's the next visible field)
+		m.focusNext()
+		if m.focused != FieldBody {
+			t.Errorf("expected focus on FieldBody after tab, got %d", m.focused)
+		}
+
+		// Tab again should wrap back to Title (skipping Attachments, Type, Executor, Project)
+		m.focusNext()
+		if m.focused != FieldTitle {
+			t.Errorf("expected focus to wrap back to FieldTitle, got %d", m.focused)
+		}
+	})
+
+	t.Run("simple mode view shows defaults summary", func(t *testing.T) {
+		m := NewFormModel(nil, 100, 50, "", []string{"claude"})
+
+		view := m.View()
+
+		if !strings.Contains(view, "more options") {
+			t.Error("expected simple mode view to show 'more options' hint")
+		}
+		if strings.Contains(view, "Attachments") {
+			t.Error("expected simple mode view to hide Attachments field")
+		}
+	})
+
+	t.Run("advanced mode view shows all fields", func(t *testing.T) {
+		m := NewFormModel(nil, 100, 50, "", []string{"claude"})
+		m.showAdvanced = true
+
+		view := m.View()
+
+		if !strings.Contains(view, "Project") {
+			t.Error("expected advanced mode view to show Project field")
+		}
+		if !strings.Contains(view, "Attachments") {
+			t.Error("expected advanced mode view to show Attachments field")
+		}
+		if !strings.Contains(view, "Type") {
+			t.Error("expected advanced mode view to show Type field")
+		}
+		if !strings.Contains(view, "Executor") {
+			t.Error("expected advanced mode view to show Executor field")
+		}
+		if !strings.Contains(view, "fewer options") {
+			t.Error("expected advanced mode view to show 'fewer options' hint")
+		}
+	})
+
+	t.Run("collapsing moves focus from hidden field to title", func(t *testing.T) {
+		m := NewFormModel(nil, 100, 50, "", []string{"claude"})
+		m.showAdvanced = true
+		m.focused = FieldExecutor
+
+		// Collapse
+		m.Update(tea.KeyMsg{Type: tea.KeyCtrlE})
+
+		if m.focused != FieldTitle {
+			t.Errorf("expected focus to move to FieldTitle when collapsing, got %d", m.focused)
+		}
+	})
+}
+
+func TestFormHeaderShowsProjectInSimpleMode(t *testing.T) {
+	m := NewFormModel(nil, 100, 50, "", []string{"claude"})
+	m.project = "myproject"
+
+	view := m.View()
+
+	if !strings.Contains(view, "myproject") {
+		t.Error("expected simple mode header to include project name")
 	}
 }

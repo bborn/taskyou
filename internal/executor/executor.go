@@ -62,6 +62,9 @@ type Executor struct {
 	taskSubsMu sync.RWMutex
 	taskSubs   []chan TaskEvent
 
+	// Wakeup channel to trigger immediate task processing (non-blocking send)
+	wakeupCh chan struct{}
+
 	// Silent mode suppresses log output (for TUI embedding)
 	silent bool
 
@@ -140,6 +143,7 @@ func New(database *db.DB, cfg *config.Config) *Executor {
 		prCache:         github.NewPRCache(),
 		executorFactory: NewExecutorFactory(),
 		stopCh:          make(chan struct{}),
+		wakeupCh:        make(chan struct{}, 1),
 		subs:            make(map[int64][]chan *db.TaskLog),
 		taskSubs:        make([]chan TaskEvent, 0),
 		runningTasks:    make(map[int64]bool),
@@ -177,6 +181,7 @@ func NewWithLogging(database *db.DB, cfg *config.Config, w io.Writer) *Executor 
 		prCache:         github.NewPRCache(),
 		executorFactory: NewExecutorFactory(),
 		stopCh:          make(chan struct{}),
+		wakeupCh:        make(chan struct{}, 1),
 		subs:            make(map[int64][]chan *db.TaskLog),
 		taskSubs:        make([]chan TaskEvent, 0),
 		runningTasks:    make(map[int64]bool),
@@ -622,6 +627,8 @@ func (e *Executor) broadcastTaskEvent(event TaskEvent) {
 }
 
 // NotifyTaskChange notifies subscribers of a task change (for use by UI/other components).
+// If the task is newly queued, it also triggers immediate processing so the executor
+// starts without waiting for the next poll cycle.
 func (e *Executor) NotifyTaskChange(eventType string, task *db.Task) {
 	event := TaskEvent{
 		Type:   eventType,
@@ -629,6 +636,21 @@ func (e *Executor) NotifyTaskChange(eventType string, task *db.Task) {
 		TaskID: task.ID,
 	}
 	e.broadcastTaskEvent(event)
+
+	// Trigger immediate processing when a task becomes queued
+	if task.Status == db.StatusQueued {
+		e.TriggerProcessing()
+	}
+}
+
+// TriggerProcessing wakes up the worker loop to process queued tasks immediately.
+// This is a non-blocking operation; if a wakeup is already pending, the call is a no-op.
+func (e *Executor) TriggerProcessing() {
+	select {
+	case e.wakeupCh <- struct{}{}:
+	default:
+		// Already has a pending wakeup, no need to send another
+	}
 }
 
 // updateStatus updates task status in DB and broadcasts the change.
@@ -690,6 +712,9 @@ func (e *Executor) worker(ctx context.Context) {
 			return
 		case <-e.stopCh:
 			return
+		case <-e.wakeupCh:
+			// Immediate wakeup: a task was just enqueued, process it now
+			e.processNextTask(ctx)
 		case <-ticker.C:
 			e.processNextTask(ctx)
 
@@ -1594,33 +1619,6 @@ func (e *Executor) CleanupDuplicateWindows(taskID int64) {
 		e.logger.Debug("Cleaning up duplicate window", "task", taskID, "windowID", windowID)
 		exec.CommandContext(ctx, "tmux", "kill-window", "-t", windowID).Run()
 	}
-}
-
-// GetActiveTaskWindows returns a set of task IDs that have active tmux windows.
-// This is a lightweight batch check (single tmux command) to detect which tasks
-// have executor panes available for quick input.
-func GetActiveTaskWindows() map[int64]bool {
-	result := make(map[int64]bool)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-
-	out, err := exec.CommandContext(ctx, "tmux", "list-windows", "-a", "-F", "#{window_name}").Output()
-	if err != nil {
-		return result
-	}
-
-	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		if !strings.HasPrefix(line, "task-") {
-			continue
-		}
-		var taskID int64
-		if _, err := fmt.Sscanf(line, "task-%d", &taskID); err == nil && taskID > 0 {
-			result[taskID] = true
-		}
-	}
-
-	return result
 }
 
 // GetTasksWithRunningShellProcess returns a map of task IDs that have a running process
@@ -3138,21 +3136,19 @@ func (e *Executor) logLine(taskID int64, lineType, content string) {
 
 // getConversationHistory builds a context section from previous task runs.
 // This includes questions asked, user responses, and continuation markers.
+// Uses a targeted DB query that only fetches conversation-relevant logs,
+// avoiding loading potentially large output/tool content.
 func (e *Executor) getConversationHistory(taskID int64) string {
-	logs, err := e.db.GetTaskLogs(taskID, 500)
-	if err != nil || len(logs) == 0 {
+	// Fast check: does this task have any continuation markers?
+	hasContinuation, err := e.db.HasContinuationMarker(taskID)
+	if err != nil || !hasContinuation {
 		return ""
 	}
 
-	// Look for continuation markers - if none, this is a fresh run
-	hasContinuation := false
-	for _, log := range logs {
-		if log.LineType == "system" && strings.Contains(log.Content, "--- Continuation ---") {
-			hasContinuation = true
-			break
-		}
-	}
-	if !hasContinuation {
+	// Only fetch conversation-relevant logs (questions, feedback, continuation markers)
+	// This skips large output/tool logs that aren't needed for history context
+	logs, err := e.db.GetConversationHistoryLogs(taskID)
+	if err != nil || len(logs) == 0 {
 		return ""
 	}
 
@@ -3160,20 +3156,16 @@ func (e *Executor) getConversationHistory(taskID int64) string {
 	sb.WriteString("## Previous Conversation\n\n")
 	sb.WriteString("This task was previously attempted. Here is the relevant history:\n\n")
 
-	// Extract questions and feedback from logs
+	// All returned logs are already filtered to relevant types
 	for _, log := range logs {
 		switch log.LineType {
 		case "question":
 			sb.WriteString(fmt.Sprintf("**Your question:** %s\n\n", log.Content))
 		case "text":
-			if strings.HasPrefix(log.Content, "Feedback: ") {
-				feedback := strings.TrimPrefix(log.Content, "Feedback: ")
-				sb.WriteString(fmt.Sprintf("**User's response:** %s\n\n", feedback))
-			}
+			feedback := strings.TrimPrefix(log.Content, "Feedback: ")
+			sb.WriteString(fmt.Sprintf("**User's response:** %s\n\n", feedback))
 		case "system":
-			if strings.Contains(log.Content, "--- Continuation ---") {
-				sb.WriteString("---\n\n")
-			}
+			sb.WriteString("---\n\n")
 		}
 	}
 

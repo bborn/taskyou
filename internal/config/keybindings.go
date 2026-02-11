@@ -52,6 +52,8 @@ type KeybindingsConfig struct {
 	OpenBrowser        *KeybindingConfig `yaml:"open_browser,omitempty"`
 	ApprovePrompt      *KeybindingConfig `yaml:"approve_prompt,omitempty"`
 	DenyPrompt         *KeybindingConfig `yaml:"deny_prompt,omitempty"`
+	Spotlight          *KeybindingConfig `yaml:"spotlight,omitempty"`
+	SpotlightSync      *KeybindingConfig `yaml:"spotlight_sync,omitempty"`
 }
 
 // DefaultKeybindingsConfigPath returns the default path for the keybindings config file.
@@ -249,5 +251,14 @@ collapse_done:
 open_browser:
   keys: ["b"]
   help: "open in browser"
+
+# Spotlight mode
+spotlight:
+  keys: ["f"]
+  help: "spotlight"
+
+spotlight_sync:
+  keys: ["F"]
+  help: "spotlight sync"
 `
 }
