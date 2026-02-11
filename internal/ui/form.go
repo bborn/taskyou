@@ -293,6 +293,14 @@ func NewFormModel(database *db.DB, width, height int, workingDir string, availab
 		autocompleteEnabled = false
 	}
 
+	// Load show_advanced preference (default: true)
+	showAdvanced := true
+	if database != nil {
+		if setting, _ := database.GetSetting("show_advanced"); setting == "false" {
+			showAdvanced = false
+		}
+	}
+
 	// Create form model first (executors will be set after project is determined)
 	m := &FormModel{
 		db:                  database,
@@ -303,7 +311,7 @@ func NewFormModel(database *db.DB, width, height int, workingDir string, availab
 		autocompleteEnabled: autocompleteEnabled,
 		taskRefAutocomplete: NewTaskRefAutocompleteModel(database, width-24),
 		attachmentCursor:    -1,
-		showAdvanced:        false, // Progressive disclosure: start with simple view
+		showAdvanced:        showAdvanced, // Load from user preference
 	}
 
 	// Load task types from database
@@ -580,6 +588,14 @@ func (m *FormModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "ctrl+e":
 			// Toggle advanced fields (progressive disclosure)
 			m.showAdvanced = !m.showAdvanced
+			// Save preference
+			if m.db != nil {
+				if m.showAdvanced {
+					m.db.SetSetting("show_advanced", "true")
+				} else {
+					m.db.SetSetting("show_advanced", "false")
+				}
+			}
 			// If collapsing and currently on a hidden field, move to Title
 			if !m.showAdvanced && !m.isFieldVisible(m.focused) {
 				m.blurAll()
