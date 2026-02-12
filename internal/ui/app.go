@@ -1995,6 +1995,42 @@ func (m *AppModel) updateFilterMode(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.filterAutocomplete.Reset()
 			return m, m.loadTasks()
 		}
+
+		// Check if we should delete a chip/label
+		currentValue := m.filterInput.Value()
+		cursorPos := m.filterInput.Position()
+
+		// If cursor is after a ']', delete the entire chip
+		if cursorPos > 0 && cursorPos <= len(currentValue) && currentValue[cursorPos-1] == ']' {
+			// Find the matching '[' before the cursor
+			openBracket := -1
+			for i := cursorPos - 2; i >= 0; i-- {
+				if currentValue[i] == '[' {
+					openBracket = i
+					break
+				}
+			}
+
+			if openBracket >= 0 {
+				// Delete the chip [project] and any trailing space
+				newValue := currentValue[:openBracket]
+				endPos := cursorPos
+				// Remove trailing space if present
+				if endPos < len(currentValue) && currentValue[endPos] == ' ' {
+					endPos++
+				}
+				newValue += currentValue[endPos:]
+
+				m.filterInput.SetValue(newValue)
+				m.filterInput.SetCursor(openBracket)
+				m.filterText = newValue
+				m.applyFilter()
+				m.showFilterDropdown = false
+				m.filterAutocomplete.Reset()
+				return m, nil
+			}
+		}
+
 		return m.handleFilterInput(msg)
 
 	case "tab", "enter":
