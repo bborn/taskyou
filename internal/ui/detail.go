@@ -547,6 +547,8 @@ func (m *DetailModel) Cleanup() {
 	if m.claudePaneID != "" || m.workdirPaneID != "" {
 		m.breakTmuxPanes(true, true) // saveHeight=true, resizeTUI=true
 	}
+	// Also break any extra panes
+	m.breakExtraPanes()
 }
 
 // CleanupWithoutSaving cleans up panes without saving the height.
@@ -556,6 +558,8 @@ func (m *DetailModel) CleanupWithoutSaving() {
 	if m.claudePaneID != "" || m.workdirPaneID != "" {
 		m.breakTmuxPanes(false, true) // saveHeight=false, resizeTUI=true
 	}
+	// Also break any extra panes
+	m.breakExtraPanes()
 }
 
 // ClearPaneState clears the cached pane state without breaking panes.

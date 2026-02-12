@@ -95,6 +95,9 @@ type KeyMap struct {
 	// Spotlight mode
 	Spotlight     key.Binding
 	SpotlightSync key.Binding
+	// Multiple panes support
+	NewShellPane  key.Binding
+	NewClaudePane key.Binding
 }
 
 // ShortHelp returns key bindings to show in the mini help.
@@ -270,6 +273,14 @@ func DefaultKeyMap() KeyMap {
 		SpotlightSync: key.NewBinding(
 			key.WithKeys("F"),
 			key.WithHelp("F", "spotlight sync"),
+		),
+		NewShellPane: key.NewBinding(
+			key.WithKeys("ctrl+n"),
+			key.WithHelp("ctrl+n", "new shell pane"),
+		),
+		NewClaudePane: key.NewBinding(
+			key.WithKeys("ctrl+shift+n", "ctrl+N"),
+			key.WithHelp("ctrl+shift+n", "new claude pane"),
 		),
 	}
 }
@@ -2403,6 +2414,20 @@ func (m *AppModel) updateDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 	if key.Matches(keyMsg, m.keys.ToggleShellPane) && m.detailView != nil {
 		m.detailView.ToggleShellPane()
+		return m, nil
+	}
+	if key.Matches(keyMsg, m.keys.NewShellPane) && m.detailView != nil {
+		_, err := m.detailView.CreateNewShellPane()
+		if err != nil {
+			GetLogger().Error("Failed to create new shell pane: %v", err)
+		}
+		return m, nil
+	}
+	if key.Matches(keyMsg, m.keys.NewClaudePane) && m.detailView != nil {
+		_, err := m.detailView.CreateNewClaudePane()
+		if err != nil {
+			GetLogger().Error("Failed to create new Claude pane: %v", err)
+		}
 		return m, nil
 	}
 
