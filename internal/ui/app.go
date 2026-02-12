@@ -3689,12 +3689,58 @@ func (m *AppModel) denyExecutorPrompt(taskID int64) tea.Cmd {
 	}
 }
 
-// captureExecutorPrompt captures the last few lines from a task's executor pane.
+// captureExecutorPrompt reads the latest notification message from task logs.
+// Falls back to capturing the tmux pane content if no log message is found.
 func (m *AppModel) captureExecutorPrompt(taskID int64) tea.Cmd {
+	database := m.db
 	return func() tea.Msg {
+		// First, try to get the notification message from task logs.
+		// The notification hook writes "Waiting for permission: <message>" when
+		// Claude needs input, which is more accurate than raw tmux pane content.
+		if database != nil {
+			if content := latestPromptFromLogs(database, taskID); content != "" {
+				return executorPromptMsg{taskID: taskID, content: content}
+			}
+		}
+
+		// Fall back to tmux pane capture
 		content := executor.CapturePaneContent(taskID, 8)
 		return executorPromptMsg{taskID: taskID, content: content}
 	}
+}
+
+// latestPromptFromLogs reads the most recent notification message from task logs.
+// It looks for "Waiting for permission" or "Waiting for user input" system log entries
+// which are written by the notification hook when Claude needs input.
+// Returns the message content, or empty string if not found.
+func latestPromptFromLogs(database *db.DB, taskID int64) string {
+	logs, err := database.GetTaskLogs(taskID, 10)
+	if err != nil {
+		return ""
+	}
+
+	// Logs are returned in DESC order (most recent first).
+	// Find the most recent notification message.
+	for _, log := range logs {
+		if log.LineType != "system" {
+			continue
+		}
+		// Check for permission prompt messages written by the notification hook
+		if strings.HasPrefix(log.Content, "Waiting for permission: ") {
+			return strings.TrimPrefix(log.Content, "Waiting for permission: ")
+		}
+		if log.Content == "Waiting for permission" || log.Content == "Waiting for user input" {
+			return log.Content
+		}
+		// If we see a "Claude resumed" log, the task is no longer waiting
+		if strings.Contains(log.Content, "resumed working") ||
+			strings.Contains(log.Content, "Approved") ||
+			strings.Contains(log.Content, "Denied") {
+			return ""
+		}
+	}
+
+	return ""
 }
 
 // taskMovedMsg is returned when a task is moved to a different project.

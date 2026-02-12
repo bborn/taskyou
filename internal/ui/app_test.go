@@ -1083,6 +1083,107 @@ func containsSubstr(s, substr string) bool {
 	return false
 }
 
+func TestLatestPromptFromLogs_PermissionMessage(t *testing.T) {
+	database, err := db.Open(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to create test database: %v", err)
+	}
+	defer database.Close()
+
+	// Create a task
+	task := &db.Task{Title: "Test task", Status: db.StatusBlocked}
+	if err := database.CreateTask(task); err != nil {
+		t.Fatalf("Failed to create task: %v", err)
+	}
+
+	// Log a permission message (as the notification hook would)
+	database.AppendTaskLog(task.ID, "system", "Waiting for permission: Edit(src/models/offer.rb)")
+
+	// Should return the permission message content
+	result := latestPromptFromLogs(database, task.ID)
+	if result != "Edit(src/models/offer.rb)" {
+		t.Errorf("expected 'Edit(src/models/offer.rb)', got '%s'", result)
+	}
+}
+
+func TestLatestPromptFromLogs_GenericWaiting(t *testing.T) {
+	database, err := db.Open(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to create test database: %v", err)
+	}
+	defer database.Close()
+
+	task := &db.Task{Title: "Test task", Status: db.StatusBlocked}
+	if err := database.CreateTask(task); err != nil {
+		t.Fatalf("Failed to create task: %v", err)
+	}
+
+	// Log a generic waiting message (no specific message from hook)
+	database.AppendTaskLog(task.ID, "system", "Waiting for permission")
+
+	result := latestPromptFromLogs(database, task.ID)
+	if result != "Waiting for permission" {
+		t.Errorf("expected 'Waiting for permission', got '%s'", result)
+	}
+}
+
+func TestLatestPromptFromLogs_ResumedClears(t *testing.T) {
+	database, err := db.Open(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to create test database: %v", err)
+	}
+	defer database.Close()
+
+	task := &db.Task{Title: "Test task", Status: db.StatusBlocked}
+	if err := database.CreateTask(task); err != nil {
+		t.Fatalf("Failed to create task: %v", err)
+	}
+
+	// Log a permission message, then a resumed message
+	database.AppendTaskLog(task.ID, "system", "Waiting for permission: Edit(file.go)")
+	database.AppendTaskLog(task.ID, "system", "Claude resumed working")
+
+	// Should return empty since Claude resumed
+	result := latestPromptFromLogs(database, task.ID)
+	if result != "" {
+		t.Errorf("expected empty string after resume, got '%s'", result)
+	}
+}
+
+func TestLatestPromptFromLogs_NoLogs(t *testing.T) {
+	database, err := db.Open(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to create test database: %v", err)
+	}
+	defer database.Close()
+
+	// No task or logs - should return empty
+	result := latestPromptFromLogs(database, 999)
+	if result != "" {
+		t.Errorf("expected empty string for nonexistent task, got '%s'", result)
+	}
+}
+
+func TestLatestPromptFromLogs_UserInputMessage(t *testing.T) {
+	database, err := db.Open(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to create test database: %v", err)
+	}
+	defer database.Close()
+
+	task := &db.Task{Title: "Test task", Status: db.StatusBlocked}
+	if err := database.CreateTask(task); err != nil {
+		t.Fatalf("Failed to create task: %v", err)
+	}
+
+	database.AppendTaskLog(task.ID, "system", "Waiting for user input")
+
+	result := latestPromptFromLogs(database, task.ID)
+	if result != "Waiting for user input" {
+		t.Errorf("expected 'Waiting for user input', got '%s'", result)
+	}
+}
+
 func TestJumpToNotificationKey_FocusExecutor(t *testing.T) {
 	// Create app model with kanban board and notification
 	tasks := []*db.Task{
