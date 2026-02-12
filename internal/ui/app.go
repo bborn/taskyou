@@ -940,7 +940,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case prRefreshTickMsg:
-		// Periodically refresh PR info (every 15 seconds)
+		// Periodically refresh PR info (every 60 seconds)
 		// Always refresh regardless of view - PR state is persisted to DB
 		// so it stays current even when navigating between views
 		cmds = append(cmds, m.refreshAllPRs())
@@ -4174,7 +4174,7 @@ func (m *AppModel) focusTick() tea.Cmd {
 }
 
 func (m *AppModel) prRefreshTick() tea.Cmd {
-	return tea.Tick(15*time.Second, func(t time.Time) tea.Msg {
+	return tea.Tick(60*time.Second, func(t time.Time) tea.Msg {
 		return prRefreshTickMsg(t)
 	})
 }

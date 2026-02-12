@@ -75,7 +75,7 @@ type cacheEntry struct {
 	fetchedAt time.Time
 }
 
-const cacheTTL = 15 * time.Second
+const cacheTTL = 90 * time.Second
 
 // NewPRCache creates a new PR cache.
 func NewPRCache() *PRCache {
@@ -144,6 +144,14 @@ func fetchPRInfo(repoDir, branchName string) *PRInfo {
 
 	output, err := cmd.Output()
 	if err != nil {
+		// Check if this is a rate limit error
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			stderr := string(exitErr.Stderr)
+			if strings.Contains(stderr, "rate limit") || strings.Contains(stderr, "API rate limit") {
+				// Return nil on rate limit (cache will be used if available)
+				return nil
+			}
+		}
 		// No PR exists for this branch, timeout, or other error
 		return nil
 	}
@@ -330,6 +338,14 @@ func FetchAllPRsForRepo(repoDir string) map[string]*PRInfo {
 
 	output, err := cmd.Output()
 	if err != nil {
+		// Check if this is a rate limit error
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			stderr := string(exitErr.Stderr)
+			if strings.Contains(stderr, "rate limit") || strings.Contains(stderr, "API rate limit") {
+				// Return nil to signal rate limit hit (caller can use cached data)
+				return nil
+			}
+		}
 		return result
 	}
 
@@ -355,8 +371,8 @@ func FetchAllPRsForRepo(repoDir string) map[string]*PRInfo {
 		"--limit", "20")
 	cmd2.Dir = repoDir
 
-	output2, err := cmd2.Output()
-	if err == nil {
+	output2, err2 := cmd2.Output()
+	if err2 == nil {
 		var mergedPRs []ghPRListResponse
 		if json.Unmarshal(output2, &mergedPRs) == nil {
 			for _, pr := range mergedPRs {
@@ -368,6 +384,12 @@ func FetchAllPRsForRepo(repoDir string) map[string]*PRInfo {
 					}
 				}
 			}
+		}
+	} else if exitErr, ok := err2.(*exec.ExitError); ok {
+		stderr := string(exitErr.Stderr)
+		if strings.Contains(stderr, "rate limit") || strings.Contains(stderr, "API rate limit") {
+			// Hit rate limit, skip closed PR fetch too
+			return result
 		}
 	}
 
@@ -381,8 +403,8 @@ func FetchAllPRsForRepo(repoDir string) map[string]*PRInfo {
 		"--limit", "10")
 	cmd3.Dir = repoDir
 
-	output3, err := cmd3.Output()
-	if err == nil {
+	output3, err3 := cmd3.Output()
+	if err3 == nil {
 		var closedPRs []ghPRListResponse
 		if json.Unmarshal(output3, &closedPRs) == nil {
 			for _, pr := range closedPRs {
