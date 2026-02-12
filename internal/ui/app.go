@@ -4251,6 +4251,11 @@ func (m *AppModel) refreshAllPRs() tea.Cmd {
 				// Create messages for tasks in this repo
 				for _, task := range tasks {
 					info := prsByBranch[task.BranchName]
+					// If batch fetch didn't include this branch (common for closed tasks
+					// with older closed PRs), fall back to individual fetch
+					if info == nil && task.BranchName != "" {
+						info = prCache.GetPRForBranch(repoDir, task.BranchName)
+					}
 					results = append(results, prInfoMsg{taskID: task.ID, info: info})
 				}
 			}
