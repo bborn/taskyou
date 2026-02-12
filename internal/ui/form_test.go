@@ -875,14 +875,14 @@ func TestFormDefaultsToFirstAvailableExecutor(t *testing.T) {
 }
 
 func TestFormProgressiveDisclosure(t *testing.T) {
-	t.Run("new form starts in advanced mode focused on title", func(t *testing.T) {
+	t.Run("new form starts in advanced mode focused on project", func(t *testing.T) {
 		m := NewFormModel(nil, 100, 50, "", []string{"claude"})
 
 		if !m.showAdvanced {
 			t.Error("expected new form to start with showAdvanced=true")
 		}
-		if m.focused != FieldTitle {
-			t.Errorf("expected focus on FieldTitle, got %d", m.focused)
+		if m.focused != FieldProject {
+			t.Errorf("expected focus on FieldProject, got %d", m.focused)
 		}
 	})
 
@@ -945,6 +945,7 @@ func TestFormProgressiveDisclosure(t *testing.T) {
 	t.Run("focusNext skips hidden fields in simple mode", func(t *testing.T) {
 		m := NewFormModel(nil, 100, 50, "", []string{"claude"})
 		m.showAdvanced = false // Switch to simple mode for this test
+		m.focused = FieldTitle // Manually set focus to first visible field for this test
 
 		// Start on Title
 		if m.focused != FieldTitle {

@@ -306,7 +306,7 @@ func NewFormModel(database *db.DB, width, height int, workingDir string, availab
 		db:                  database,
 		width:               width,
 		height:              height,
-		focused:             FieldTitle, // Start on Title for simpler first experience
+		focused:             FieldProject, // Project first for immediate context
 		autocompleteSvc:     autocompleteSvc,
 		autocompleteEnabled: autocompleteEnabled,
 		taskRefAutocomplete: NewTaskRefAutocompleteModel(database, width-24),
@@ -383,13 +383,17 @@ func NewFormModel(database *db.DB, width, height int, workingDir string, availab
 	// Load last used executor for the selected project (overrides default if available)
 	m.loadLastExecutorForProject()
 
-	// Title input - focused by default for simpler first experience
+	// Title input
 	m.titleInput = textinput.New()
 	m.titleInput.Placeholder = "What needs to be done?"
 	m.titleInput.Prompt = ""
 	m.titleInput.Cursor.SetMode(cursor.CursorStatic)
 	m.titleInput.Width = width - 24
-	m.titleInput.Focus() // Start with title focused
+	// Focus title only if project field is not visible (showAdvanced is false)
+	if !m.showAdvanced {
+		m.focused = FieldTitle
+		m.titleInput.Focus()
+	}
 
 	// Body textarea
 	m.bodyInput = textarea.New()
