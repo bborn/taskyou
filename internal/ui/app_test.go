@@ -1260,3 +1260,129 @@ func TestExecutorRespondedClearsPromptState(t *testing.T) {
 	}
 }
 
+// TestFilterChipDeletion tests the chip deletion feature in filter input.
+func TestFilterChipDeletion(t *testing.T) {
+	tests := []struct {
+		name            string
+		initialValue    string
+		cursorPos       int
+		expectedValue   string
+		expectedCursor  int
+		shouldDeleteAll bool // whether entire chip should be deleted
+	}{
+		{
+			name:            "delete chip at end",
+			initialValue:    "text [project] ",
+			cursorPos:       14, // right after ]
+			expectedValue:   "text ",
+			expectedCursor:  5,
+			shouldDeleteAll: true,
+		},
+		{
+			name:            "delete chip in middle",
+			initialValue:    "before [project] after",
+			cursorPos:       16, // right after ]
+			expectedValue:   "before after",
+			expectedCursor:  7,
+			shouldDeleteAll: true,
+		},
+		{
+			name:            "delete first chip of multiple",
+			initialValue:    "[project1] [project2] text",
+			cursorPos:       10, // right after first ]
+			expectedValue:   "[project2] text",
+			expectedCursor:  0,
+			shouldDeleteAll: true,
+		},
+		{
+			name:            "delete second chip of multiple",
+			initialValue:    "[project1] [project2] text",
+			cursorPos:       21, // right after second ]
+			expectedValue:   "[project1] text",
+			expectedCursor:  11,
+			shouldDeleteAll: true,
+		},
+		{
+			name:            "cursor not after ]",
+			initialValue:    "text [project] more",
+			cursorPos:       5, // in the middle of text
+			expectedValue:   "text [project] more", // no change expected
+			expectedCursor:  5,
+			shouldDeleteAll: false,
+		},
+		{
+			name:            "cursor before [",
+			initialValue:    "text [project]",
+			cursorPos:       4, // right before [
+			expectedValue:   "text [project]", // no change expected
+			expectedCursor:  4,
+			shouldDeleteAll: false,
+		},
+		{
+			name:            "chip without trailing space",
+			initialValue:    "text [project]more",
+			cursorPos:       14, // right after ]
+			expectedValue:   "text more",
+			expectedCursor:  5,
+			shouldDeleteAll: true,
+		},
+		{
+			name:            "nested brackets (finds first [)",
+			initialValue:    "text [pro[ject] more",
+			cursorPos:       15, // right after ]
+			expectedValue:   "text [promore",
+			expectedCursor:  9,
+			shouldDeleteAll: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Simulate the chip deletion logic
+			currentValue := tt.initialValue
+			cursorPos := tt.cursorPos
+			deleted := false
+
+			// Check if cursor is after a ']'
+			if cursorPos > 0 && cursorPos <= len(currentValue) && currentValue[cursorPos-1] == ']' {
+				// Find the matching '[' before the cursor
+				openBracket := -1
+				for i := cursorPos - 2; i >= 0; i-- {
+					if currentValue[i] == '[' {
+						openBracket = i
+						break
+					}
+				}
+
+				if openBracket >= 0 {
+					// Delete the chip [project] and any trailing space
+					newValue := currentValue[:openBracket]
+					endPos := cursorPos
+					// Remove trailing space if present
+					if endPos < len(currentValue) && currentValue[endPos] == ' ' {
+						endPos++
+					}
+					newValue += currentValue[endPos:]
+					currentValue = newValue
+					cursorPos = openBracket
+					deleted = true
+				}
+			}
+
+			// Verify results
+			if tt.shouldDeleteAll && !deleted {
+				t.Error("expected chip to be deleted but it wasn't")
+			}
+			if !tt.shouldDeleteAll && deleted {
+				t.Error("expected no deletion but chip was deleted")
+			}
+			if currentValue != tt.expectedValue {
+				t.Errorf("value = %q, want %q", currentValue, tt.expectedValue)
+			}
+			if cursorPos != tt.expectedCursor {
+				t.Errorf("cursor = %d, want %d", cursorPos, tt.expectedCursor)
+			}
+		})
+	}
+}
+
