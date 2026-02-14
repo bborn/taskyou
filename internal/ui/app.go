@@ -816,7 +816,12 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			if prompt := m.latestPermissionPrompt(t.ID); prompt != "" {
 				m.tasksNeedingInput[t.ID] = true
-				m.executorPrompts[t.ID] = prompt
+				// Extract just the meaningful part after "Waiting for permission: "
+				displayPrompt := prompt
+				if strings.HasPrefix(prompt, "Waiting for permission: ") {
+					displayPrompt = strings.TrimPrefix(prompt, "Waiting for permission: ")
+				}
+				m.executorPrompts[t.ID] = displayPrompt
 			}
 		}
 
