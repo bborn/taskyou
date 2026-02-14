@@ -1,11 +1,11 @@
 <script lang="ts">
-	import { onMount, onDestroy } from 'svelte';
+	import { onMount } from 'svelte';
 	import Header from './Header.svelte';
 	import TaskBoard from './TaskBoard.svelte';
 	import TaskDetail from './TaskDetail.svelte';
 	import NewTaskDialog from './NewTaskDialog.svelte';
 	import CommandPalette from './CommandPalette.svelte';
-	import { tasks, fetchTasks, queueTask, closeTask, createTask } from '$lib/stores/tasks';
+	import { taskState, fetchTasks, queueTask, closeTask, createTask } from '$lib/stores/tasks.svelte';
 	import { projects as projectsApi } from '$lib/api/client';
 	import type { User, Task, Project } from '$lib/types';
 
@@ -82,7 +82,7 @@
 	}
 
 	async function handleRetry(id: number) {
-		const task = $tasks.find((t) => t.id === id);
+		const task = taskState.tasks.find((t) => t.id === id);
 		if (task) selectedTask = task;
 	}
 
@@ -130,7 +130,7 @@
 	<CommandPalette
 		isOpen={showCommandPalette}
 		onClose={() => (showCommandPalette = false)}
-		tasks={$tasks}
+		tasks={taskState.tasks}
 		onSelectTask={(task) => (selectedTask = task)}
 		onNewTask={() => (showNewTask = true)}
 		{onSettings}

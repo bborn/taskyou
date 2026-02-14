@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { Plus, Inbox, Zap, AlertCircle, CheckCircle } from 'lucide-svelte';
-	import { backlogTasks, inProgressTasks, blockedTasks, doneTasks } from '$lib/stores/tasks';
+	import { getBacklogTasks, getInProgressTasks, getBlockedTasks, getDoneTasks } from '$lib/stores/tasks.svelte';
 	import TaskCard from './TaskCard.svelte';
 	import type { Task } from '$lib/types';
 
@@ -21,16 +21,16 @@
 		<div class="flex items-center gap-4">
 			<h1 class="text-2xl font-bold text-gradient">Tasks</h1>
 			<div class="flex items-center gap-2 text-sm text-muted-foreground">
-				{#if $inProgressTasks.length > 0}
+				{#if getInProgressTasks().length > 0}
 					<span class="flex items-center gap-1 px-2 py-1 rounded-full bg-[hsl(var(--status-processing-bg))] text-[hsl(var(--status-processing))]">
 						<Zap class="h-3.5 w-3.5" />
-						{$inProgressTasks.length} running
+						{getInProgressTasks().length} running
 					</span>
 				{/if}
-				{#if $blockedTasks.length > 0}
+				{#if getBlockedTasks().length > 0}
 					<span class="flex items-center gap-1 px-2 py-1 rounded-full bg-[hsl(var(--status-blocked-bg))] text-[hsl(var(--status-blocked))]">
 						<AlertCircle class="h-3.5 w-3.5" />
-						{$blockedTasks.length} blocked
+						{getBlockedTasks().length} blocked
 					</span>
 				{/if}
 			</div>
@@ -47,16 +47,16 @@
 	<!-- Kanban Board -->
 	<div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 h-[calc(100vh-180px)]">
 		<!-- Backlog Column -->
-		{@render column('Backlog', Inbox, 'No tasks waiting', 'hsl(var(--status-backlog))', $backlogTasks, true)}
+		{@render column('Backlog', Inbox, 'No tasks waiting', 'hsl(var(--status-backlog))', getBacklogTasks(), true)}
 
 		<!-- In Progress Column -->
-		{@render column('In Progress', Zap, 'Nothing running', 'hsl(var(--status-processing))', $inProgressTasks, false)}
+		{@render column('In Progress', Zap, 'Nothing running', 'hsl(var(--status-processing))', getInProgressTasks(), false)}
 
 		<!-- Needs Attention Column -->
-		{@render column('Needs Attention', AlertCircle, 'All clear!', 'hsl(var(--status-blocked))', $blockedTasks, false)}
+		{@render column('Needs Attention', AlertCircle, 'All clear!', 'hsl(var(--status-blocked))', getBlockedTasks(), false)}
 
 		<!-- Completed Column -->
-		{@render column('Completed', CheckCircle, 'Nothing completed yet', 'hsl(var(--status-done))', $doneTasks, false)}
+		{@render column('Completed', CheckCircle, 'Nothing completed yet', 'hsl(var(--status-done))', getDoneTasks(), false)}
 	</div>
 </div>
 
