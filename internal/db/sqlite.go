@@ -194,6 +194,10 @@ func (db *DB) migrate() error {
 		`CREATE INDEX IF NOT EXISTS idx_task_dependencies_blocker ON task_dependencies(blocker_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_task_dependencies_blocked ON task_dependencies(blocked_id)`,
 
+		// Composite index for efficient conversation history queries
+		// Used by GetConversationHistoryLogs and HasContinuationMarker
+		`CREATE INDEX IF NOT EXISTS idx_task_logs_task_line_type ON task_logs(task_id, line_type)`,
+
 	}
 
 	for _, m := range migrations {

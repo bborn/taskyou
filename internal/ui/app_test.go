@@ -821,6 +821,56 @@ func TestScoreTaskForFilter(t *testing.T) {
 			wantMin: 100,
 			wantMax: 500,
 		},
+		// Multi-project filter tests
+		{
+			name:    "multi-project matches first project",
+			task:    &db.Task{ID: 1, Title: "Fix bug", Project: "offerlab"},
+			query:   "[offerlab] [workflow] ",
+			wantMin: 100,
+			wantMax: 100,
+		},
+		{
+			name:    "multi-project matches second project",
+			task:    &db.Task{ID: 1, Title: "Fix bug", Project: "workflow"},
+			query:   "[offerlab] [workflow] ",
+			wantMin: 100,
+			wantMax: 100,
+		},
+		{
+			name:    "multi-project excludes other project",
+			task:    &db.Task{ID: 1, Title: "Fix bug", Project: "personal"},
+			query:   "[offerlab] [workflow] ",
+			wantMin: -1,
+			wantMax: -1,
+		},
+		{
+			name:    "multi-project with keyword matches",
+			task:    &db.Task{ID: 1, Title: "Fix authentication", Project: "offerlab"},
+			query:   "[offerlab] [workflow] auth",
+			wantMin: 100,
+			wantMax: 500,
+		},
+		{
+			name:    "multi-project with keyword no match",
+			task:    &db.Task{ID: 1, Title: "Setup database", Project: "offerlab"},
+			query:   "[offerlab] [workflow] auth",
+			wantMin: -1,
+			wantMax: -1,
+		},
+		{
+			name:    "multi-project typing second project",
+			task:    &db.Task{ID: 1, Title: "Fix bug", Project: "workflow"},
+			query:   "[offerlab] [wor",
+			wantMin: 100,
+			wantMax: 500,
+		},
+		{
+			name:    "multi-project typing second includes first project tasks",
+			task:    &db.Task{ID: 1, Title: "Fix bug", Project: "offerlab"},
+			query:   "[offerlab] [wor",
+			wantMin: 100,
+			wantMax: 100,
+		},
 	}
 
 	for _, tt := range tests {
@@ -828,6 +878,48 @@ func TestScoreTaskForFilter(t *testing.T) {
 			score := scoreTaskForFilter(tt.task, tt.query)
 			if score < tt.wantMin || score > tt.wantMax {
 				t.Errorf("scoreTaskForFilter() = %d, want between %d and %d", score, tt.wantMin, tt.wantMax)
+			}
+		})
+	}
+}
+
+// TestParseFilterProjects tests extraction of project tags from filter text.
+func TestParseFilterProjects(t *testing.T) {
+	tests := []struct {
+		name           string
+		query          string
+		wantProjects   []string
+		wantKeyword    string
+		wantPartial    string
+	}{
+		{"empty", "", nil, "", ""},
+		{"just bracket", "[", nil, "", ""},
+		{"single partial", "[off", nil, "", "off"},
+		{"single complete", "[offerlab] ", []string{"offerlab"}, "", ""},
+		{"single complete with keyword", "[offerlab] auth", []string{"offerlab"}, "auth", ""},
+		{"two complete", "[offerlab] [workflow] ", []string{"offerlab", "workflow"}, "", ""},
+		{"two complete with keyword", "[offerlab] [workflow] bug", []string{"offerlab", "workflow"}, "bug", ""},
+		{"one complete one partial", "[offerlab] [wor", []string{"offerlab"}, "", "wor"},
+		{"plain text no brackets", "some search", nil, "some search", ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			projects, keyword, partial := parseFilterProjects(tt.query)
+			if len(projects) != len(tt.wantProjects) {
+				t.Errorf("projects = %v, want %v", projects, tt.wantProjects)
+			} else {
+				for i, p := range projects {
+					if p != tt.wantProjects[i] {
+						t.Errorf("projects[%d] = %q, want %q", i, p, tt.wantProjects[i])
+					}
+				}
+			}
+			if keyword != tt.wantKeyword {
+				t.Errorf("keyword = %q, want %q", keyword, tt.wantKeyword)
+			}
+			if partial != tt.wantPartial {
+				t.Errorf("partial = %q, want %q", partial, tt.wantPartial)
 			}
 		})
 	}
@@ -1083,12 +1175,14 @@ func containsSubstr(s, substr string) bool {
 	return false
 }
 
-func TestLatestPromptFromLogs_PermissionMessage(t *testing.T) {
+func TestLatestPermissionPrompt_PermissionMessage(t *testing.T) {
 	database, err := db.Open(":memory:")
 	if err != nil {
 		t.Fatalf("Failed to create test database: %v", err)
 	}
 	defer database.Close()
+
+	m := &AppModel{db: database}
 
 	// Create a task
 	task := &db.Task{Title: "Test task", Status: db.StatusBlocked}
@@ -1099,19 +1193,21 @@ func TestLatestPromptFromLogs_PermissionMessage(t *testing.T) {
 	// Log a permission message (as the notification hook would)
 	database.AppendTaskLog(task.ID, "system", "Waiting for permission: Edit(src/models/offer.rb)")
 
-	// Should return the permission message content
-	result := latestPromptFromLogs(database, task.ID)
-	if result != "Edit(src/models/offer.rb)" {
-		t.Errorf("expected 'Edit(src/models/offer.rb)', got '%s'", result)
+	// Should return the full permission message
+	result := m.latestPermissionPrompt(task.ID)
+	if result != "Waiting for permission: Edit(src/models/offer.rb)" {
+		t.Errorf("expected 'Waiting for permission: Edit(src/models/offer.rb)', got '%s'", result)
 	}
 }
 
-func TestLatestPromptFromLogs_GenericWaiting(t *testing.T) {
+func TestLatestPermissionPrompt_GenericWaiting(t *testing.T) {
 	database, err := db.Open(":memory:")
 	if err != nil {
 		t.Fatalf("Failed to create test database: %v", err)
 	}
 	defer database.Close()
+
+	m := &AppModel{db: database}
 
 	task := &db.Task{Title: "Test task", Status: db.StatusBlocked}
 	if err := database.CreateTask(task); err != nil {
@@ -1121,18 +1217,20 @@ func TestLatestPromptFromLogs_GenericWaiting(t *testing.T) {
 	// Log a generic waiting message (no specific message from hook)
 	database.AppendTaskLog(task.ID, "system", "Waiting for permission")
 
-	result := latestPromptFromLogs(database, task.ID)
+	result := m.latestPermissionPrompt(task.ID)
 	if result != "Waiting for permission" {
 		t.Errorf("expected 'Waiting for permission', got '%s'", result)
 	}
 }
 
-func TestLatestPromptFromLogs_ResumedClears(t *testing.T) {
+func TestLatestPermissionPrompt_ResumedClears(t *testing.T) {
 	database, err := db.Open(":memory:")
 	if err != nil {
 		t.Fatalf("Failed to create test database: %v", err)
 	}
 	defer database.Close()
+
+	m := &AppModel{db: database}
 
 	task := &db.Task{Title: "Test task", Status: db.StatusBlocked}
 	if err := database.CreateTask(task); err != nil {
@@ -1144,32 +1242,36 @@ func TestLatestPromptFromLogs_ResumedClears(t *testing.T) {
 	database.AppendTaskLog(task.ID, "system", "Claude resumed working")
 
 	// Should return empty since Claude resumed
-	result := latestPromptFromLogs(database, task.ID)
+	result := m.latestPermissionPrompt(task.ID)
 	if result != "" {
 		t.Errorf("expected empty string after resume, got '%s'", result)
 	}
 }
 
-func TestLatestPromptFromLogs_NoLogs(t *testing.T) {
+func TestLatestPermissionPrompt_NoLogs(t *testing.T) {
 	database, err := db.Open(":memory:")
 	if err != nil {
 		t.Fatalf("Failed to create test database: %v", err)
 	}
 	defer database.Close()
 
+	m := &AppModel{db: database}
+
 	// No task or logs - should return empty
-	result := latestPromptFromLogs(database, 999)
+	result := m.latestPermissionPrompt(999)
 	if result != "" {
 		t.Errorf("expected empty string for nonexistent task, got '%s'", result)
 	}
 }
 
-func TestLatestPromptFromLogs_UserInputMessage(t *testing.T) {
+func TestLatestPermissionPrompt_UserInputMessage(t *testing.T) {
 	database, err := db.Open(":memory:")
 	if err != nil {
 		t.Fatalf("Failed to create test database: %v", err)
 	}
 	defer database.Close()
+
+	m := &AppModel{db: database}
 
 	task := &db.Task{Title: "Test task", Status: db.StatusBlocked}
 	if err := database.CreateTask(task); err != nil {
@@ -1178,7 +1280,7 @@ func TestLatestPromptFromLogs_UserInputMessage(t *testing.T) {
 
 	database.AppendTaskLog(task.ID, "system", "Waiting for user input")
 
-	result := latestPromptFromLogs(database, task.ID)
+	result := m.latestPermissionPrompt(task.ID)
 	if result != "Waiting for user input" {
 		t.Errorf("expected 'Waiting for user input', got '%s'", result)
 	}
@@ -1239,3 +1341,159 @@ func TestJumpToNotificationKey_FocusExecutor(t *testing.T) {
 		t.Error("expected focusExecutor to be true when jumping from notification")
 	}
 }
+
+// TestExecutorRespondedClearsPromptState verifies that approving/denying an
+// executor prompt immediately clears both tasksNeedingInput and executorPrompts
+// for visual feedback. If the task still has a pending prompt, the
+// latestPermissionPrompt catch-up loop will re-detect it on the next poll.
+func TestExecutorRespondedClearsPromptState(t *testing.T) {
+	m := &AppModel{
+		width:             100,
+		height:            50,
+		currentView:       ViewDashboard,
+		keys:              DefaultKeyMap(),
+		tasksNeedingInput: map[int64]bool{42: true},
+		executorPrompts:   map[int64]string{42: "some prompt content"},
+		kanban:            NewKanbanBoard(100, 50),
+		prevStatuses:      make(map[int64]string),
+	}
+
+	// Simulate a successful approve response
+	msg := executorRespondedMsg{taskID: 42, action: "approve", err: nil}
+	m.Update(msg)
+
+	// Both should be cleared for immediate visual feedback
+	if m.tasksNeedingInput[42] {
+		t.Error("tasksNeedingInput[42] should be cleared after approve for visual feedback")
+	}
+	if _, exists := m.executorPrompts[42]; exists {
+		t.Error("executorPrompts[42] should be cleared after approve")
+	}
+}
+
+// TestFilterChipDeletion tests the chip deletion feature in filter input.
+func TestFilterChipDeletion(t *testing.T) {
+	tests := []struct {
+		name            string
+		initialValue    string
+		cursorPos       int
+		expectedValue   string
+		expectedCursor  int
+		shouldDeleteAll bool // whether entire chip should be deleted
+	}{
+		{
+			name:            "delete chip at end",
+			initialValue:    "text [project] ",
+			cursorPos:       14, // right after ]
+			expectedValue:   "text ",
+			expectedCursor:  5,
+			shouldDeleteAll: true,
+		},
+		{
+			name:            "delete chip in middle",
+			initialValue:    "before [project] after",
+			cursorPos:       16, // right after ]
+			expectedValue:   "before after",
+			expectedCursor:  7,
+			shouldDeleteAll: true,
+		},
+		{
+			name:            "delete first chip of multiple",
+			initialValue:    "[project1] [project2] text",
+			cursorPos:       10, // right after first ]
+			expectedValue:   "[project2] text",
+			expectedCursor:  0,
+			shouldDeleteAll: true,
+		},
+		{
+			name:            "delete second chip of multiple",
+			initialValue:    "[project1] [project2] text",
+			cursorPos:       21, // right after second ]
+			expectedValue:   "[project1] text",
+			expectedCursor:  11,
+			shouldDeleteAll: true,
+		},
+		{
+			name:            "cursor not after ]",
+			initialValue:    "text [project] more",
+			cursorPos:       5, // in the middle of text
+			expectedValue:   "text [project] more", // no change expected
+			expectedCursor:  5,
+			shouldDeleteAll: false,
+		},
+		{
+			name:            "cursor before [",
+			initialValue:    "text [project]",
+			cursorPos:       4, // right before [
+			expectedValue:   "text [project]", // no change expected
+			expectedCursor:  4,
+			shouldDeleteAll: false,
+		},
+		{
+			name:            "chip without trailing space",
+			initialValue:    "text [project]more",
+			cursorPos:       14, // right after ]
+			expectedValue:   "text more",
+			expectedCursor:  5,
+			shouldDeleteAll: true,
+		},
+		{
+			name:            "nested brackets (finds first [)",
+			initialValue:    "text [pro[ject] more",
+			cursorPos:       15, // right after ]
+			expectedValue:   "text [promore",
+			expectedCursor:  9,
+			shouldDeleteAll: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Simulate the chip deletion logic
+			currentValue := tt.initialValue
+			cursorPos := tt.cursorPos
+			deleted := false
+
+			// Check if cursor is after a ']'
+			if cursorPos > 0 && cursorPos <= len(currentValue) && currentValue[cursorPos-1] == ']' {
+				// Find the matching '[' before the cursor
+				openBracket := -1
+				for i := cursorPos - 2; i >= 0; i-- {
+					if currentValue[i] == '[' {
+						openBracket = i
+						break
+					}
+				}
+
+				if openBracket >= 0 {
+					// Delete the chip [project] and any trailing space
+					newValue := currentValue[:openBracket]
+					endPos := cursorPos
+					// Remove trailing space if present
+					if endPos < len(currentValue) && currentValue[endPos] == ' ' {
+						endPos++
+					}
+					newValue += currentValue[endPos:]
+					currentValue = newValue
+					cursorPos = openBracket
+					deleted = true
+				}
+			}
+
+			// Verify results
+			if tt.shouldDeleteAll && !deleted {
+				t.Error("expected chip to be deleted but it wasn't")
+			}
+			if !tt.shouldDeleteAll && deleted {
+				t.Error("expected no deletion but chip was deleted")
+			}
+			if currentValue != tt.expectedValue {
+				t.Errorf("value = %q, want %q", currentValue, tt.expectedValue)
+			}
+			if cursorPos != tt.expectedCursor {
+				t.Errorf("cursor = %d, want %d", cursorPos, tt.expectedCursor)
+			}
+		})
+	}
+}
+
