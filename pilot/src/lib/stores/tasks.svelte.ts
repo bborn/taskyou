@@ -33,6 +33,10 @@ export function getDoneTasks(): Task[] {
 	return taskState.tasks.filter((t) => t.status === 'done').sort(byUpdatedDesc);
 }
 
+export function getFailedTasks(): Task[] {
+	return taskState.tasks.filter((t) => t.status === 'failed').sort(byUpdatedDesc);
+}
+
 export async function fetchTasks() {
 	taskState.loading = true;
 	try {
@@ -83,9 +87,9 @@ export async function closeTask(id: number): Promise<Task> {
 // Periodic refresh
 let pollInterval: ReturnType<typeof setInterval> | null = null;
 
-export function startPolling() {
+export function startPolling(interval = 5000) {
 	stopPolling();
-	pollInterval = setInterval(fetchTasks, 5000);
+	pollInterval = setInterval(fetchTasks, interval);
 }
 
 export function stopPolling() {

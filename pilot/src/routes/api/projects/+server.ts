@@ -14,12 +14,12 @@ export const GET: RequestHandler = async ({ locals, platform }) => {
 export const POST: RequestHandler = async ({ request, locals, platform }) => {
 	const user = locals.user!;
 	const db = platform!.env.DB;
-	const data = await request.json();
+	const data = await request.json() as { name?: string; path?: string; aliases?: string; instructions?: string; color?: string };
 
 	if (!data.name) {
 		return json({ error: 'Name is required' }, { status: 400 });
 	}
 
-	const project = await createProject(db, user.id, data);
+	const project = await createProject(db, user.id, { name: data.name!, path: data.path || '', ...data });
 	return json(project, { status: 201 });
 };

@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { X, Sparkles, Folder, Tag, FileText } from 'lucide-svelte';
+	import { X, Tag, FileText, Folder } from 'lucide-svelte';
 	import type { CreateTaskRequest, Project } from '$lib/types';
 
 	interface Props {
@@ -15,12 +15,27 @@
 	let type = $state('code');
 	let project = $state('personal');
 	let submitting = $state(false);
+	let dialogEl: HTMLDialogElement;
 
 	const taskTypes = [
 		{ value: 'code', label: 'Code', description: 'Write or modify code' },
 		{ value: 'writing', label: 'Writing', description: 'Documentation, content' },
 		{ value: 'thinking', label: 'Thinking', description: 'Research, analysis' },
 	];
+
+	$effect(() => {
+		if (dialogEl && !dialogEl.open) {
+			dialogEl.showModal();
+		}
+	});
+
+	function handleDialogClose() {
+		onClose();
+	}
+
+	function handleBackdropClick(e: MouseEvent) {
+		if (e.target === dialogEl) dialogEl.close();
+	}
 
 	async function handleSubmit(e: SubmitEvent) {
 		e.preventDefault();
@@ -34,76 +49,60 @@
 				type,
 				project,
 			});
-			onClose();
+			dialogEl.close();
 		} catch (error) {
 			console.error('Failed to create task:', error);
 		} finally {
 			submitting = false;
 		}
 	}
-
-	function handleKeydown(e: KeyboardEvent) {
-		if (e.key === 'Escape') onClose();
-	}
 </script>
 
-<!-- svelte-ignore a11y_click_events_have_key_events -->
-<!-- svelte-ignore a11y_no_static_element_interactions -->
-<div class="fixed inset-0 z-50 flex items-center justify-center p-4" onkeydown={handleKeydown}>
-	<!-- Backdrop -->
-	<div class="absolute inset-0 bg-black/60 backdrop-blur-sm" onclick={onClose}></div>
+<!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+<dialog
+	bind:this={dialogEl}
+	class="dialog w-full sm:max-w-lg"
+	aria-labelledby="new-task-title"
+	aria-describedby="new-task-desc"
+	onclose={handleDialogClose}
+	onclick={handleBackdropClick}
+>
+	<form onsubmit={handleSubmit}>
+		<header>
+			<h2 id="new-task-title">New Task</h2>
+			<p id="new-task-desc">What would you like AI to do?</p>
+		</header>
 
-	<!-- Dialog -->
-	<div class="relative w-full max-w-lg bg-card rounded-xl shadow-2xl border border-border overflow-hidden">
-		<form onsubmit={handleSubmit}>
-			<!-- Header -->
-			<div class="flex items-center justify-between px-6 py-4 border-b border-border">
-				<div class="flex items-center gap-2">
-					<div class="p-2 rounded-lg bg-primary/10">
-						<Sparkles class="h-5 w-5 text-primary" />
-					</div>
-					<div>
-						<h2 class="font-semibold">New Task</h2>
-						<p class="text-xs text-muted-foreground">What would you like AI to do?</p>
-					</div>
-				</div>
-				<button type="button" class="p-2 rounded-lg hover:bg-muted" onclick={onClose}>
-					<X class="h-4 w-4" />
-				</button>
-			</div>
-
-			<!-- Content -->
-			<div class="p-6 space-y-5">
+		<section>
+			<div class="form grid gap-4">
 				<!-- Title -->
-				<div>
-					<label class="flex items-center gap-2 text-sm font-medium mb-2">
+				<div class="grid gap-2">
+					<label for="task-title" class="flex items-center gap-2">
 						<FileText class="h-4 w-4 text-muted-foreground" />
 						What needs to be done?
 					</label>
 					<input
+						id="task-title"
 						bind:value={title}
 						placeholder="e.g., Fix the login bug, Add dark mode support..."
-						class="w-full h-10 px-3 rounded-lg border border-input bg-background text-base focus:outline-none focus:ring-2 focus:ring-ring"
 						autofocus
 					/>
 				</div>
 
 				<!-- Description -->
-				<div>
-					<label class="text-sm font-medium mb-2 block text-muted-foreground">
-						Additional details (optional)
-					</label>
+				<div class="grid gap-2">
+					<label for="task-body" class="text-muted-foreground">Additional details (optional)</label>
 					<textarea
+						id="task-body"
 						bind:value={body}
 						placeholder="Provide context, requirements, or specific instructions..."
 						rows="3"
-						class="w-full px-3 py-2 rounded-lg border border-input bg-background text-sm resize-none focus:outline-none focus:ring-2 focus:ring-ring"
 					></textarea>
 				</div>
 
 				<!-- Type Selection -->
-				<div>
-					<label class="flex items-center gap-2 text-sm font-medium mb-2">
+				<div class="grid gap-2">
+					<label class="flex items-center gap-2">
 						<Tag class="h-4 w-4 text-muted-foreground" />
 						Task type
 					</label>
@@ -122,15 +121,12 @@
 				</div>
 
 				<!-- Project Selection -->
-				<div>
-					<label class="flex items-center gap-2 text-sm font-medium mb-2">
+				<div class="grid gap-2">
+					<label for="task-project" class="flex items-center gap-2">
 						<Folder class="h-4 w-4 text-muted-foreground" />
 						Project
 					</label>
-					<select
-						bind:value={project}
-						class="w-full h-10 rounded-lg border border-input bg-background px-3 text-sm focus:outline-none focus:ring-2 focus:ring-ring"
-					>
+					<select id="task-project" bind:value={project}>
 						<option value="personal">Personal</option>
 						{#each projects as p}
 							<option value={p.name}>{p.name}</option>
@@ -138,25 +134,21 @@
 					</select>
 				</div>
 			</div>
+		</section>
 
-			<!-- Footer -->
-			<div class="flex items-center justify-end px-6 py-4 border-t border-border bg-muted/30 gap-2">
-				<button type="button" class="px-3 py-2 rounded-md text-sm hover:bg-muted" onclick={onClose}>
-					Cancel
-				</button>
-				<button
-					type="submit"
-					disabled={!title.trim() || submitting}
-					class="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-primary text-primary-foreground font-medium min-w-[100px] disabled:opacity-50"
-				>
-					{#if submitting}
-						<span class="h-4 w-4 border-2 border-current border-t-transparent rounded-full animate-spin"></span>
-						Creating...
-					{:else}
-						Create Task
-					{/if}
-				</button>
-			</div>
-		</form>
-	</div>
-</div>
+		<footer>
+			<button type="button" class="btn-outline" onclick={() => dialogEl.close()}>Cancel</button>
+			<button type="submit" class="btn" disabled={!title.trim() || submitting}>
+				{#if submitting}
+					Creating...
+				{:else}
+					Create Task
+				{/if}
+			</button>
+		</footer>
+
+		<button type="button" aria-label="Close dialog" title="Close (Esc)" onclick={() => dialogEl.close()}>
+			<X class="h-4 w-4" />
+		</button>
+	</form>
+</dialog>

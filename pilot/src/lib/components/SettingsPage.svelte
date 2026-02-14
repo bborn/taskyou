@@ -77,7 +77,7 @@
 		<div class="container mx-auto p-4 md:p-6 max-w-2xl">
 			<!-- Header -->
 			<div class="flex items-center gap-4 mb-8">
-				<button class="p-2 rounded-lg hover:bg-muted shrink-0" onclick={onBack}>
+				<button class="btn-sm-icon-ghost" onclick={onBack}>
 					<ArrowLeft class="h-5 w-5" />
 				</button>
 				<div>
@@ -88,7 +88,7 @@
 
 			<div class="space-y-6">
 				<!-- Appearance -->
-				<div class="rounded-xl border bg-card">
+				<div class="card">
 					<div class="p-6">
 						<div class="flex items-center gap-2 mb-4">
 							<div class="p-2 rounded-lg bg-primary/10">
@@ -117,7 +117,7 @@
 				</div>
 
 				<!-- Defaults -->
-				<div class="rounded-xl border bg-card">
+				<div class="card">
 					<div class="p-6">
 						<div class="flex items-center gap-2 mb-4">
 							<div class="p-2 rounded-lg bg-blue-500/10">
@@ -157,7 +157,7 @@
 				</div>
 
 				<!-- Projects -->
-				<div class="rounded-xl border bg-card">
+				<div class="card">
 					<div class="p-6">
 						<div class="flex items-center justify-between mb-4">
 							<div class="flex items-center gap-2">
@@ -169,10 +169,7 @@
 									<p class="text-xs text-muted-foreground">Manage your projects</p>
 								</div>
 							</div>
-							<button
-								class="inline-flex items-center gap-1 px-3 py-1.5 rounded-md text-sm bg-primary text-primary-foreground"
-								onclick={() => (showNewProject = true)}
-							>
+							<button class="btn-sm" onclick={() => (showNewProject = true)}>
 								<Plus class="h-4 w-4" />
 								Add
 							</button>
@@ -211,7 +208,7 @@
 				</div>
 
 				<!-- Data -->
-				<div class="rounded-xl border bg-card">
+				<div class="card">
 					<div class="p-6">
 						<div class="flex items-center gap-2 mb-4">
 							<div class="p-2 rounded-lg bg-orange-500/10">
@@ -233,12 +230,7 @@
 					<button
 						onclick={handleSave}
 						disabled={saving}
-						class="inline-flex items-center gap-2 px-6 py-2 rounded-lg font-medium min-w-[140px] transition-all"
-						class:bg-green-500={saved}
-						class:hover:bg-green-600={saved}
-						class:text-white={saved}
-						class:bg-primary={!saved}
-						class:text-primary-foreground={!saved}
+						class="btn min-w-[140px] transition-all {saved ? 'bg-green-500 hover:bg-green-600 text-white border-green-500' : ''}"
 					>
 						{#if saving}
 							<span class="h-4 w-4 border-2 border-current border-t-transparent rounded-full animate-spin"></span>

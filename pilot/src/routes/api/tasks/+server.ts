@@ -23,7 +23,7 @@ export const POST: RequestHandler = async ({ request, locals, platform }) => {
 	const user = locals.user!;
 	const db = platform!.env.DB;
 
-	const data = await request.json();
+	const data = await request.json() as { title?: string; body?: string; type?: string; project?: string };
 
 	if (!data.title) {
 		return json({ error: 'Title is required' }, { status: 400 });

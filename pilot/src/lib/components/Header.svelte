@@ -60,24 +60,23 @@
 			<button
 				onclick={onCommandPalette}
 				class="hidden md:flex items-center gap-2 px-3 py-1.5 rounded-lg border border-border bg-muted/50 hover:bg-muted text-sm text-muted-foreground transition-colors min-w-[280px]"
+				title="Search tasks (⌘K)"
 			>
 				<Search class="h-4 w-4" />
 				<span class="flex-1 text-left">Search tasks...</span>
-				<kbd class="flex items-center gap-0.5 px-1.5 py-0.5 text-xs bg-background rounded border border-border">
-					&#8984;K
-				</kbd>
+				<kbd class="kbd">&#8984;K</kbd>
 			</button>
 
 			<!-- Right side -->
 			<div class="flex items-center gap-2">
 				<!-- Mobile search -->
-				<button class="md:hidden p-2 rounded-lg hover:bg-muted transition-colors" onclick={onCommandPalette}>
+				<button class="btn-sm-icon-ghost md:hidden" onclick={onCommandPalette} title="Search (⌘K)">
 					<Search class="h-5 w-5" />
 				</button>
 
 				<!-- Theme toggle -->
 				<button
-					class="p-2 rounded-lg hover:bg-muted transition-colors"
+					class="btn-sm-icon-ghost"
 					onclick={cycleTheme}
 					title="Theme: {theme}"
 				>
@@ -91,7 +90,7 @@
 				</button>
 
 				<!-- Settings -->
-				<button class="p-2 rounded-lg hover:bg-muted transition-colors" onclick={onSettings}>
+				<button class="btn-sm-icon-ghost" onclick={onSettings}>
 					<Settings class="h-5 w-5" />
 				</button>
 

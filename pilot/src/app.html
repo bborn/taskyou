@@ -1,9 +1,11 @@
 <!doctype html>
 <html lang="en">
 	<head>
+		<script>document.documentElement.classList.toggle('dark', localStorage.theme === 'dark')</script>
 		<meta charset="utf-8" />
-		<link rel="icon" href="%sveltekit.assets%/favicon.png" />
+		<link rel="icon" href="%sveltekit.assets%/icon.svg" type="image/svg+xml" />
 		<meta name="viewport" content="width=device-width, initial-scale=1" />
+		<meta name="application-name" content="TaskYou" />
 		<title>TaskYou</title>
 		%sveltekit.head%
 	</head>

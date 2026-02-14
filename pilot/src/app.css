@@ -1,130 +1,243 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+@import "tailwindcss";
+@import "basecoat-css";
+
+@custom-variant dark (&:where(.dark, .dark *));
 
 @layer base {
   :root {
-    --background: 0 0% 100%;
-    --foreground: 240 10% 3.9%;
-    --card: 0 0% 100%;
-    --card-foreground: 240 10% 3.9%;
-    --primary: 262 83% 58%;
-    --primary-foreground: 0 0% 100%;
-    --secondary: 240 4.8% 95.9%;
-    --secondary-foreground: 240 5.9% 10%;
-    --muted: 240 4.8% 95.9%;
-    --muted-foreground: 240 3.8% 46.1%;
-    --accent: 262 83% 95%;
-    --accent-foreground: 262 83% 40%;
-    --destructive: 0 84.2% 60.2%;
-    --destructive-foreground: 0 0% 98%;
-    --border: 240 5.9% 90%;
-    --input: 240 5.9% 90%;
-    --ring: 262 83% 58%;
-    --radius: 0.75rem;
-
-    --status-backlog: 240 5% 65%;
-    --status-backlog-bg: 240 5% 96%;
-    --status-queued: 45 93% 47%;
-    --status-queued-bg: 45 93% 95%;
-    --status-processing: 217 91% 60%;
-    --status-processing-bg: 217 91% 95%;
-    --status-blocked: 0 84% 60%;
-    --status-blocked-bg: 0 84% 95%;
-    --status-done: 142 71% 45%;
-    --status-done-bg: 142 71% 95%;
-
-    --glow-primary: 0 0 20px hsla(262, 83%, 58%, 0.3);
+    --sidebar-width: 16rem;
+    --sidebar-collapsed-width: 4rem;
   }
 
   .dark {
-    --background: 240 10% 6%;
-    --foreground: 0 0% 98%;
-    --card: 240 10% 8%;
-    --card-foreground: 0 0% 98%;
-    --primary: 262 83% 65%;
-    --primary-foreground: 0 0% 100%;
-    --secondary: 240 4% 16%;
-    --secondary-foreground: 0 0% 98%;
-    --muted: 240 4% 16%;
-    --muted-foreground: 240 5% 64.9%;
-    --accent: 262 40% 20%;
-    --accent-foreground: 262 83% 75%;
-    --destructive: 0 62.8% 50%;
-    --destructive-foreground: 0 0% 98%;
-    --border: 240 4% 18%;
-    --input: 240 4% 18%;
-    --ring: 262 83% 65%;
-
-    --status-backlog: 240 5% 55%;
-    --status-backlog-bg: 240 5% 15%;
-    --status-queued: 45 93% 55%;
-    --status-queued-bg: 45 50% 15%;
-    --status-processing: 217 91% 65%;
-    --status-processing-bg: 217 50% 15%;
-    --status-blocked: 0 84% 60%;
-    --status-blocked-bg: 0 50% 15%;
-    --status-done: 142 71% 50%;
-    --status-done-bg: 142 40% 15%;
-
-    --glow-primary: 0 0 30px hsla(262, 83%, 65%, 0.4);
+    --sidebar-accent: oklch(0.32 0.01 260);
+    --sidebar-accent-foreground: oklch(0.985 0 0);
   }
-}
 
-@layer base {
-  * {
-    @apply border-border;
-  }
   body {
-    @apply bg-background text-foreground antialiased;
+    @apply antialiased;
   }
 }
 
-@layer utilities {
-  .scrollbar-thin {
-    scrollbar-width: thin;
-    scrollbar-color: hsl(var(--muted-foreground) / 0.3) transparent;
+/* Status colors */
+:root {
+  --status-backlog: oklch(0.65 0.01 285);
+  --status-backlog-bg: oklch(0.96 0.003 285);
+  --status-queued: oklch(0.7 0.17 85);
+  --status-queued-bg: oklch(0.95 0.05 85);
+  --status-processing: oklch(0.6 0.19 260);
+  --status-processing-bg: oklch(0.95 0.04 260);
+  --status-blocked: oklch(0.6 0.22 27);
+  --status-blocked-bg: oklch(0.95 0.04 27);
+  --status-done: oklch(0.55 0.17 150);
+  --status-done-bg: oklch(0.95 0.04 150);
+  --status-failed: oklch(0.55 0.2 27);
+  --status-failed-bg: oklch(0.95 0.04 27);
+}
+
+.dark {
+  --status-backlog: oklch(0.55 0.01 285);
+  --status-backlog-bg: oklch(0.2 0.005 285);
+  --status-queued: oklch(0.7 0.17 85);
+  --status-queued-bg: oklch(0.25 0.05 85);
+  --status-processing: oklch(0.65 0.19 260);
+  --status-processing-bg: oklch(0.22 0.04 260);
+  --status-blocked: oklch(0.6 0.22 27);
+  --status-blocked-bg: oklch(0.22 0.04 27);
+  --status-done: oklch(0.6 0.17 150);
+  --status-done-bg: oklch(0.22 0.04 150);
+  --status-failed: oklch(0.6 0.2 27);
+  --status-failed-bg: oklch(0.22 0.04 27);
+}
+
+/* Sidebar navigation item text truncation */
+.sidebar nav > section ul li > a,
+.sidebar nav > section ul li > button {
+  @apply flex items-center gap-2 min-w-0;
+}
+
+.sidebar nav > section ul li > a > span:not(.flex-shrink-0):not(.sidebar-item-initial),
+.sidebar nav > section ul li > button > span:not(.flex-shrink-0):not(.sidebar-item-initial) {
+  @apply truncate min-w-0;
+}
+
+/* Sidebar collapsed icon-rail state */
+.sidebar[data-collapsed] {
+  --sidebar-width: var(--sidebar-collapsed-width);
+
+  nav {
+    overflow: hidden;
   }
-  .scrollbar-thin::-webkit-scrollbar {
+
+  & + * {
+    --sidebar-width: var(--sidebar-collapsed-width);
+  }
+
+  [data-sidebar-label] {
+    @apply hidden;
+  }
+
+  [data-sidebar-collapsed-only] {
+    @apply block!;
+  }
+
+  nav > hr[role="separator"],
+  nav > section > h3,
+  nav > section > [role="group"] > h3,
+  nav > section [role="group"] h3 {
+    @apply hidden;
+  }
+
+  /* Hide delete buttons and other non-icon elements in collapsed chat items */
+  nav > section ul li > a > button,
+  nav > section ul li .group > button {
+    @apply hidden;
+  }
+
+  /* Center footer buttons */
+  nav > footer > button,
+  nav > footer > div {
+    @apply justify-center px-0;
+  }
+
+  nav > header > div {
+    @apply flex-col items-center gap-1.5 px-0;
+  }
+
+  nav > header > div > button {
+    @apply ml-0;
+  }
+
+  nav > section ul li > a,
+  nav > section ul li > button {
+    @apply justify-center px-0;
+  }
+
+  nav > section ul li > a > span:not(.sidebar-item-initial),
+  nav > section ul li > button > span:not(.sidebar-item-initial) {
+    @apply hidden;
+  }
+}
+
+/* Resize handle between panes */
+.resize-handle {
+  @apply w-1 flex-shrink-0 cursor-col-resize bg-transparent hover:bg-primary/20 transition-colors relative;
+}
+
+.resize-handle::after {
+  content: "";
+  @apply absolute inset-y-0 -left-1 -right-1;
+}
+
+.resize-handle.active {
+  @apply bg-primary/30;
+}
+
+/* Markdown content styling */
+.chat-markdown p {
+  margin: 0.25em 0;
+}
+.chat-markdown p:first-child {
+  margin-top: 0;
+}
+.chat-markdown p:last-child {
+  margin-bottom: 0;
+}
+.chat-markdown pre {
+  @apply bg-accent rounded-lg overflow-x-auto;
+  padding: 0.75rem 1rem;
+  margin: 0.5em 0;
+  font-size: 0.8125rem;
+}
+.chat-markdown code {
+  @apply bg-accent px-1 py-0.5 rounded;
+  font-size: 0.8125rem;
+}
+.chat-markdown pre code {
+  background: none;
+  padding: 0;
+}
+.chat-markdown ul, .chat-markdown ol {
+  padding-left: 1.25rem;
+  margin: 0.25em 0;
+}
+.chat-markdown li {
+  margin: 0.125em 0;
+}
+.chat-markdown blockquote {
+  @apply border-l-3 border-muted-foreground/30 pl-3 italic text-muted-foreground;
+  margin: 0.5em 0;
+}
+.chat-markdown table {
+  border-collapse: collapse;
+  margin: 0.5em 0;
+  font-size: 0.8125rem;
+}
+.chat-markdown th, .chat-markdown td {
+  @apply border border-border;
+  padding: 0.25rem 0.5rem;
+}
+
+/* Custom scrollbar utility */
+@utility scrollbar-thin {
+  scrollbar-width: thin;
+  scrollbar-color: oklch(0.556 0.015 285 / 0.3) transparent;
+  &::-webkit-scrollbar {
     width: 6px;
     height: 6px;
   }
-  .scrollbar-thin::-webkit-scrollbar-track {
+  &::-webkit-scrollbar-track {
     background: transparent;
   }
-  .scrollbar-thin::-webkit-scrollbar-thumb {
-    background: hsl(var(--muted-foreground) / 0.3);
+  &::-webkit-scrollbar-thumb {
+    background: oklch(0.556 0.015 285 / 0.3);
     border-radius: 3px;
   }
+}
 
-  .text-gradient {
-    background: linear-gradient(135deg, hsl(var(--primary)) 0%, hsl(262, 83%, 75%) 100%);
-    -webkit-background-clip: text;
-    -webkit-text-fill-color: transparent;
-    background-clip: text;
+/* Status border utilities */
+@utility border-status-backlog {
+  border-left: 3px solid var(--status-backlog);
+}
+@utility border-status-queued {
+  border-left: 3px solid var(--status-queued);
+}
+@utility border-status-processing {
+  border-left: 3px solid var(--status-processing);
+}
+@utility border-status-blocked {
+  border-left: 3px solid var(--status-blocked);
+}
+@utility border-status-done {
+  border-left: 3px solid var(--status-done);
+}
+@utility border-status-failed {
+  border-left: 3px solid var(--status-failed);
+}
+
+/* Ensure dialogs are visible when open (fallback if transition-discrete not supported) */
+dialog.dialog[open] {
+  opacity: 1;
+}
+dialog.dialog[open]::backdrop {
+  opacity: 1;
+}
+dialog.dialog[open] > * {
+  scale: 1;
+}
+
+/* Animations */
+@theme {
+  --animate-slide-in-right: slide-in-right 0.2s ease-out;
+  --animate-fade-in: fade-in 0.15s ease-out;
+
+  @keyframes slide-in-right {
+    from { transform: translateX(100%); opacity: 0; }
+    to { transform: translateX(0); opacity: 1; }
   }
 
-  .glow-primary {
-    box-shadow: var(--glow-primary);
+  @keyframes fade-in {
+    from { opacity: 0; }
+    to { opacity: 1; }
   }
-
-  .border-status-backlog { border-left: 3px solid hsl(var(--status-backlog)); }
-  .border-status-queued { border-left: 3px solid hsl(var(--status-queued)); }
-  .border-status-processing { border-left: 3px solid hsl(var(--status-processing)); }
-  .border-status-blocked { border-left: 3px solid hsl(var(--status-blocked)); }
-  .border-status-done { border-left: 3px solid hsl(var(--status-done)); }
-}
-
-.font-mono {
-  font-family: 'JetBrains Mono', 'Fira Code', 'SF Mono', Menlo, Monaco, 'Courier New', monospace;
-}
-
-:focus-visible {
-  outline: 2px solid hsl(var(--ring));
-  outline-offset: 2px;
-}
-
-::selection {
-  background: hsl(var(--primary) / 0.3);
-  color: inherit;
 }

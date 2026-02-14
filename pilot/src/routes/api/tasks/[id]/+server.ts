@@ -22,7 +22,7 @@ export const PUT: RequestHandler = async ({ params, request, locals, platform })
 	const db = platform!.env.DB;
 	const taskId = parseInt(params.id);
 
-	const data = await request.json();
+	const data = await request.json() as { title?: string; body?: string; status?: import('$lib/types').TaskStatus; type?: string; project?: string };
 	const task = await updateTask(db, user.id, taskId, data);
 	if (!task) {
 		return json({ error: 'Task not found' }, { status: 404 });

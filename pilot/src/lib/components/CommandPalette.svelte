@@ -92,7 +92,7 @@
 		<div class="absolute inset-0 bg-black/50 backdrop-blur-sm" onclick={onClose}></div>
 
 		<div
-			class="relative w-full max-w-lg bg-card rounded-xl shadow-2xl border border-border overflow-hidden"
+			class="card relative w-full max-w-lg overflow-hidden"
 			onkeydown={handleKeydown}
 		>
 			<!-- Search Input -->
@@ -104,7 +104,7 @@
 					placeholder="Search tasks or run a command..."
 					class="flex-1 bg-transparent text-sm outline-none placeholder:text-muted-foreground"
 				/>
-				<kbd class="text-xs text-muted-foreground px-1.5 py-0.5 rounded bg-muted border border-border">esc</kbd>
+				<kbd class="kbd">esc</kbd>
 			</div>
 
 			<!-- Results -->

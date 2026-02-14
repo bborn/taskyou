@@ -7,7 +7,7 @@ export const PUT: RequestHandler = async ({ params, request, locals, platform })
 	const user = locals.user!;
 	const db = platform!.env.DB;
 	const projectId = parseInt(params.id);
-	const data = await request.json();
+	const data = await request.json() as { name?: string; path?: string; aliases?: string; instructions?: string; color?: string };
 
 	const project = await updateProject(db, user.id, projectId, data);
 	if (!project) {

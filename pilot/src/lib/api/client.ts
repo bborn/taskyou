@@ -7,6 +7,13 @@ import type {
 	CreateProjectRequest,
 	UpdateProjectRequest,
 	TaskLog,
+	Chat,
+	Message,
+	Model,
+	AgentAction,
+	Integration,
+	Sandbox,
+	Workspace,
 } from '$lib/types';
 
 async function fetchJSON<T>(path: string, options?: RequestInit): Promise<T> {
@@ -20,7 +27,7 @@ async function fetchJSON<T>(path: string, options?: RequestInit): Promise<T> {
 	});
 
 	if (!response.ok) {
-		const error = await response.json().catch(() => ({ error: response.statusText }));
+		const error = await response.json().catch(() => ({ error: response.statusText })) as { error?: string };
 		throw new Error(error.error || 'Request failed');
 	}
 
@@ -91,6 +98,84 @@ export const projects = {
 		}),
 	delete: (id: number) =>
 		fetchJSON<void>(`/projects/${id}`, { method: 'DELETE' }),
+};
+
+// Chats API
+export const chats = {
+	list: () => fetchJSON<Chat[]>('/chats'),
+	get: (id: string) => fetchJSON<Chat>(`/chats/${id}`),
+	create: (data?: { title?: string; model_id?: string }) =>
+		fetchJSON<Chat>('/chats', {
+			method: 'POST',
+			body: JSON.stringify(data || {}),
+		}),
+	update: (id: string, data: { title?: string; model_id?: string }) =>
+		fetchJSON<Chat>(`/chats/${id}`, {
+			method: 'PUT',
+			body: JSON.stringify(data),
+		}),
+	delete: (id: string) =>
+		fetchJSON<void>(`/chats/${id}`, { method: 'DELETE' }),
+};
+
+// Messages API
+export const messages = {
+	list: (chatId: string) => fetchJSON<Message[]>(`/chats/${chatId}/messages`),
+};
+
+// Models API
+export const models = {
+	list: () => fetchJSON<Model[]>('/models'),
+};
+
+// Agent Actions API
+export const agentActions = {
+	list: (options?: { limit?: number; offset?: number }) => {
+		const params = new URLSearchParams();
+		if (options?.limit) params.set('limit', String(options.limit));
+		if (options?.offset) params.set('offset', String(options.offset));
+		const query = params.toString();
+		return fetchJSON<AgentAction[]>(`/agent-actions${query ? `?${query}` : ''}`);
+	},
+};
+
+// Integrations API
+export const integrations = {
+	list: () => fetchJSON<Integration[]>('/integrations'),
+};
+
+// Sandboxes API
+export const sandboxes = {
+	list: () => fetchJSON<Sandbox[]>('/sandboxes'),
+	create: (data?: { name?: string }) =>
+		fetchJSON<Sandbox>('/sandboxes', {
+			method: 'POST',
+			body: JSON.stringify(data || {}),
+		}),
+	start: (id: string) =>
+		fetchJSON<Sandbox>(`/sandboxes/${id}/start`, { method: 'POST' }),
+	stop: (id: string) =>
+		fetchJSON<Sandbox>(`/sandboxes/${id}/stop`, { method: 'POST' }),
+	delete: (id: string) =>
+		fetchJSON<void>(`/sandboxes/${id}`, { method: 'DELETE' }),
+};
+
+// Workspaces API
+export const workspaces = {
+	list: () => fetchJSON<Workspace[]>('/workspaces'),
+	get: (id: string) => fetchJSON<Workspace>(`/workspaces/${id}`),
+	create: (data: { name: string }) =>
+		fetchJSON<Workspace>('/workspaces', {
+			method: 'POST',
+			body: JSON.stringify(data),
+		}),
+	update: (id: string, data: { name?: string; autonomous_enabled?: boolean; weekly_budget_cents?: number }) =>
+		fetchJSON<Workspace>(`/workspaces/${id}`, {
+			method: 'PUT',
+			body: JSON.stringify(data),
+		}),
+	delete: (id: string) =>
+		fetchJSON<void>(`/workspaces/${id}`, { method: 'DELETE' }),
 };
 
 // Settings API

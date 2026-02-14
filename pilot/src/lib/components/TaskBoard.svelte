@@ -1,8 +1,13 @@
 <script lang="ts">
-	import { Plus, Inbox, Zap, AlertCircle, CheckCircle } from 'lucide-svelte';
-	import { getBacklogTasks, getInProgressTasks, getBlockedTasks, getDoneTasks } from '$lib/stores/tasks.svelte';
+	import { Plus, Inbox, Zap, AlertCircle, CheckCircle, XCircle, Play, RotateCcw, Pencil, Trash2, Copy, ExternalLink, X } from 'lucide-svelte';
+	import {
+		getBacklogTasks, getInProgressTasks, getBlockedTasks, getDoneTasks, getFailedTasks,
+		updateTask, deleteTask, fetchTasks,
+	} from '$lib/stores/tasks.svelte';
+	import { navState, setFocus } from '$lib/stores/nav.svelte';
 	import TaskCard from './TaskCard.svelte';
-	import type { Task } from '$lib/types';
+	import ContextMenu from './ContextMenu.svelte';
+	import type { Task, TaskStatus } from '$lib/types';
 
 	interface Props {
 		onQueue: (id: number) => void;
@@ -13,101 +18,401 @@
 	}
 
 	let { onQueue, onRetry, onClose, onTaskClick, onNewTask }: Props = $props();
+
+	// Drag-and-drop state
+	let draggedTask = $state<Task | null>(null);
+	let dragOverColumn = $state<string | null>(null);
+
+	// Multi-select state
+	let selectedIds = $state(new Set<number>());
+
+	let selectedCount = $derived(selectedIds.size);
+
+	function toggleSelect(taskId: number) {
+		const next = new Set(selectedIds);
+		if (next.has(taskId)) {
+			next.delete(taskId);
+		} else {
+			next.add(taskId);
+		}
+		selectedIds = next;
+	}
+
+	function clearSelection() {
+		selectedIds = new Set();
+	}
+
+	function isSelected(taskId: number): boolean {
+		return selectedIds.has(taskId);
+	}
+
+	// Bulk actions
+	async function bulkRun() {
+		const ids = [...selectedIds];
+		clearSelection();
+		for (const id of ids) {
+			onQueue(id);
+		}
+	}
+
+	async function bulkDelete() {
+		const count = selectedIds.size;
+		if (!confirm(`Delete ${count} task${count > 1 ? 's' : ''}?`)) return;
+		const ids = [...selectedIds];
+		clearSelection();
+		for (const id of ids) {
+			await deleteTask(id);
+		}
+		fetchTasks();
+	}
+
+	async function bulkMarkDone() {
+		const ids = [...selectedIds];
+		clearSelection();
+		for (const id of ids) {
+			onClose(id);
+		}
+	}
+
+	const columns = [
+		{ key: 'backlog', title: 'Backlog', icon: Inbox, emptyMessage: 'No tasks waiting', color: 'hsl(var(--status-backlog))', showAdd: true, targetStatus: 'backlog' as TaskStatus },
+		{ key: 'running', title: 'Running', icon: Zap, emptyMessage: 'Nothing running', color: 'hsl(var(--status-processing))', showAdd: false, targetStatus: 'queued' as TaskStatus },
+		{ key: 'blocked', title: 'Blocked', icon: AlertCircle, emptyMessage: 'All clear!', color: 'hsl(var(--status-blocked))', showAdd: false, targetStatus: 'blocked' as TaskStatus },
+		{ key: 'done', title: 'Done', icon: CheckCircle, emptyMessage: 'Nothing completed', color: 'hsl(var(--status-done))', showAdd: false, targetStatus: 'done' as TaskStatus },
+		{ key: 'failed', title: 'Failed', icon: XCircle, emptyMessage: 'No failures', color: 'hsl(var(--status-blocked))', showAdd: false, targetStatus: 'failed' as TaskStatus },
+	];
+
+	function getColumnTasks(key: string): Task[] {
+		switch (key) {
+			case 'backlog': return getBacklogTasks();
+			case 'running': return getInProgressTasks();
+			case 'blocked': return getBlockedTasks();
+			case 'done': return getDoneTasks();
+			case 'failed': return getFailedTasks();
+			default: return [];
+		}
+	}
+
+	// Drag handlers
+	function handleDragStart(e: DragEvent, task: Task) {
+		draggedTask = task;
+		if (e.dataTransfer) {
+			e.dataTransfer.effectAllowed = 'move';
+			e.dataTransfer.setData('text/plain', String(task.id));
+		}
+	}
+
+	function handleDragOver(e: DragEvent, columnKey: string) {
+		e.preventDefault();
+		if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
+		dragOverColumn = columnKey;
+	}
+
+	function handleDragLeave() {
+		dragOverColumn = null;
+	}
+
+	async function handleDrop(e: DragEvent, targetStatus: TaskStatus) {
+		e.preventDefault();
+		dragOverColumn = null;
+
+		if (!draggedTask) return;
+
+		const currentStatus = draggedTask.status;
+		if (currentStatus === targetStatus) {
+			draggedTask = null;
+			return;
+		}
+
+		let newStatus = targetStatus;
+		if (targetStatus === 'queued' && currentStatus === 'backlog') {
+			onQueue(draggedTask.id);
+		} else {
+			await updateTask(draggedTask.id, { status: newStatus });
+		}
+
+		draggedTask = null;
+	}
+
+	function handleDragEnd() {
+		draggedTask = null;
+		dragOverColumn = null;
+	}
+
+	// Context menu state
+	let contextMenu = $state<{ x: number; y: number; task: Task } | null>(null);
+
+	function handleContextMenu(e: MouseEvent, task: Task) {
+		e.preventDefault();
+		contextMenu = { x: e.clientX, y: e.clientY, task };
+	}
+
+	function getContextMenuItems(task: Task) {
+		const items: { label: string; icon?: typeof Play; action: () => void; variant?: 'default' | 'destructive'; separator?: boolean }[] = [];
+
+		items.push({ label: 'View Details', icon: ExternalLink, action: () => onTaskClick(task) });
+		items.push({ label: 'Edit', icon: Pencil, action: () => onTaskClick(task) });
+
+		if (task.status === 'backlog') {
+			items.push({ label: 'Execute', icon: Play, action: () => onQueue(task.id) });
+		}
+		if (task.status === 'blocked' || task.status === 'failed') {
+			items.push({ label: 'Retry', icon: RotateCcw, action: () => onRetry(task.id) });
+		}
+		if (task.status === 'processing' || task.status === 'blocked') {
+			items.push({ label: 'Mark Done', icon: CheckCircle, action: () => onClose(task.id) });
+		}
+
+		items.push({ label: 'Copy ID', icon: Copy, action: () => navigator.clipboard.writeText(String(task.id)), separator: true });
+
+		items.push({ label: 'Delete', icon: Trash2, action: () => deleteTask(task.id), variant: 'destructive', separator: true });
+
+		return items;
+	}
+
+	async function moveTaskToColumn(task: Task, targetColIdx: number) {
+		const targetStatus = columns[targetColIdx].targetStatus;
+		if (task.status === targetStatus) return;
+
+		if (targetStatus === 'queued' && task.status === 'backlog') {
+			onQueue(task.id);
+		} else {
+			await updateTask(task.id, { status: targetStatus });
+		}
+
+		setFocus(targetColIdx, navState.focusedRow);
+	}
+
+	async function deleteFocusedTask(task: Task) {
+		if (!confirm(`Delete "${task.title}"?`)) return;
+		await deleteTask(task.id);
+		const remaining = getColumnTasks(columns[navState.focusedColumn].key);
+		setFocus(navState.focusedColumn, Math.min(navState.focusedRow, Math.max(0, remaining.length - 2)));
+	}
+
+	// Keyboard navigation
+	function handleKeydown(e: KeyboardEvent) {
+		const target = e.target as HTMLElement;
+		if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable) return;
+		if (document.querySelector('dialog[open]')) return;
+
+		const col = navState.focusedColumn;
+		const row = navState.focusedRow;
+		const allColumnTasks = columns.map(c => getColumnTasks(c.key));
+		const currentTasks = allColumnTasks[col];
+		const focusedTask = currentTasks?.[row];
+
+		// Cmd+Enter — execute focused task
+		if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+			if (focusedTask && (focusedTask.status === 'backlog' || focusedTask.status === 'blocked' || focusedTask.status === 'failed')) {
+				e.preventDefault();
+				onQueue(focusedTask.id);
+			}
+			return;
+		}
+
+		// Cmd+Delete / Cmd+Backspace — delete focused task
+		if ((e.metaKey || e.ctrlKey) && (e.key === 'Delete' || e.key === 'Backspace')) {
+			if (focusedTask) {
+				e.preventDefault();
+				deleteFocusedTask(focusedTask);
+			}
+			return;
+		}
+
+		// Shift+Arrow — move task between columns
+		if (e.shiftKey && (e.key === 'ArrowLeft' || e.key === 'H')) {
+			if (focusedTask && col > 0) {
+				e.preventDefault();
+				moveTaskToColumn(focusedTask, col - 1);
+			}
+			return;
+		}
+		if (e.shiftKey && (e.key === 'ArrowRight' || e.key === 'L')) {
+			if (focusedTask && col < columns.length - 1) {
+				e.preventDefault();
+				moveTaskToColumn(focusedTask, col + 1);
+			}
+			return;
+		}
+
+		switch (e.key) {
+			case 'x': {
+				// Toggle select on focused task
+				if (focusedTask) {
+					e.preventDefault();
+					toggleSelect(focusedTask.id);
+				}
+				break;
+			}
+			case 'Escape': {
+				if (selectedCount > 0) {
+					e.preventDefault();
+					clearSelection();
+				}
+				break;
+			}
+			case 'h':
+			case 'ArrowLeft': {
+				e.preventDefault();
+				const newCol = Math.max(0, col - 1);
+				setFocus(newCol, Math.min(row, Math.max(0, allColumnTasks[newCol].length - 1)));
+				break;
+			}
+			case 'l':
+			case 'ArrowRight': {
+				e.preventDefault();
+				const newCol = Math.min(columns.length - 1, col + 1);
+				setFocus(newCol, Math.min(row, Math.max(0, allColumnTasks[newCol].length - 1)));
+				break;
+			}
+			case 'j':
+			case 'ArrowDown':
+				e.preventDefault();
+				setFocus(col, Math.min(row + 1, Math.max(0, allColumnTasks[col].length - 1)));
+				break;
+			case 'k':
+			case 'ArrowUp':
+				e.preventDefault();
+				setFocus(col, Math.max(0, row - 1));
+				break;
+			case 'Enter': {
+				e.preventDefault();
+				if (focusedTask) onTaskClick(focusedTask);
+				break;
+			}
+		}
+	}
 </script>
 
-<div class="h-full">
-	<!-- Header -->
-	<div class="flex items-center justify-between mb-6">
-		<div class="flex items-center gap-4">
-			<h1 class="text-2xl font-bold text-gradient">Tasks</h1>
-			<div class="flex items-center gap-2 text-sm text-muted-foreground">
-				{#if getInProgressTasks().length > 0}
-					<span class="flex items-center gap-1 px-2 py-1 rounded-full bg-[hsl(var(--status-processing-bg))] text-[hsl(var(--status-processing))]">
-						<Zap class="h-3.5 w-3.5" />
-						{getInProgressTasks().length} running
-					</span>
-				{/if}
-				{#if getBlockedTasks().length > 0}
-					<span class="flex items-center gap-1 px-2 py-1 rounded-full bg-[hsl(var(--status-blocked-bg))] text-[hsl(var(--status-blocked))]">
-						<AlertCircle class="h-3.5 w-3.5" />
-						{getBlockedTasks().length} blocked
-					</span>
-				{/if}
+<svelte:window on:keydown={handleKeydown} />
+
+<div class="h-full flex flex-col">
+	<!-- Bulk action bar -->
+	{#if selectedCount > 0}
+		<div class="flex items-center gap-3 mb-3 px-3 py-2 rounded-lg bg-primary/10 border border-primary/20 shrink-0">
+			<span class="text-sm font-medium">{selectedCount} selected</span>
+			<div class="flex items-center gap-1.5 ml-auto">
+				<button class="btn-sm" onclick={bulkRun} title="Run selected tasks">
+					<Play class="h-3.5 w-3.5" />
+					Run
+				</button>
+				<button class="btn-sm-secondary" onclick={bulkMarkDone} title="Mark selected as done">
+					<CheckCircle class="h-3.5 w-3.5" />
+					Done
+				</button>
+				<button class="btn-sm-destructive" onclick={bulkDelete} title="Delete selected tasks">
+					<Trash2 class="h-3.5 w-3.5" />
+					Delete
+				</button>
+				<button class="btn-sm-ghost" onclick={clearSelection} title="Clear selection (Esc)">
+					<X class="h-3.5 w-3.5" />
+				</button>
 			</div>
 		</div>
-		<button
-			onclick={onNewTask}
-			class="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-primary text-primary-foreground font-medium shadow-lg hover:shadow-xl transition-shadow"
-		>
-			<Plus class="h-4 w-4" />
-			New Task
-		</button>
-	</div>
+	{:else}
+		<!-- Header -->
+		<div class="flex items-center justify-between mb-4 shrink-0">
+			<div class="flex items-center gap-3">
+				<h1 class="text-xl font-bold text-gradient">Tasks</h1>
+				<div class="flex items-center gap-2 text-sm text-muted-foreground">
+					{#if getInProgressTasks().length > 0}
+						<span class="badge-outline text-xs" style="color: var(--status-processing); border-color: var(--status-processing);">
+							<Zap class="h-3 w-3" />
+							{getInProgressTasks().length}
+						</span>
+					{/if}
+					{#if getBlockedTasks().length > 0}
+						<span class="badge-outline text-xs" style="color: var(--status-blocked); border-color: var(--status-blocked);">
+							<AlertCircle class="h-3 w-3" />
+							{getBlockedTasks().length}
+						</span>
+					{/if}
+				</div>
+			</div>
+			<button class="btn-sm" onclick={onNewTask} title="New task (N)">
+				<Plus class="h-3.5 w-3.5" />
+				New
+			</button>
+		</div>
+	{/if}
 
 	<!-- Kanban Board -->
-	<div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 h-[calc(100vh-180px)]">
-		<!-- Backlog Column -->
-		{@render column('Backlog', Inbox, 'No tasks waiting', 'hsl(var(--status-backlog))', getBacklogTasks(), true)}
+	<div class="grid grid-cols-1 md:grid-cols-3 lg:grid-cols-5 gap-3 flex-1 min-h-0">
+		{#each columns as col, colIdx}
+			{@const columnTasks = getColumnTasks(col.key)}
+			<!-- svelte-ignore a11y_no_static_element_interactions -->
+			<div
+				class="flex flex-col rounded-xl border bg-card/50 overflow-hidden transition-colors {dragOverColumn === col.key ? 'border-primary bg-primary/5' : ''}"
+				ondragover={(e) => handleDragOver(e, col.key)}
+				ondragleave={handleDragLeave}
+				ondrop={(e) => handleDrop(e, col.targetStatus)}
+			>
+				<!-- Column Header -->
+				<div
+					class="flex items-center justify-between px-3 py-2 border-b"
+					style:border-bottom-color={columnTasks.length > 0 ? col.color : undefined}
+					style:border-bottom-width={columnTasks.length > 0 ? '2px' : '1px'}
+				>
+					<div class="flex items-center gap-1.5">
+						<span style:color={col.color}><col.icon class="h-3.5 w-3.5" /></span>
+						<h2 class="font-semibold text-xs">{col.title}</h2>
+					</div>
+					<span class="badge-secondary text-[10px]">
+						{columnTasks.length}
+					</span>
+				</div>
 
-		<!-- In Progress Column -->
-		{@render column('In Progress', Zap, 'Nothing running', 'hsl(var(--status-processing))', getInProgressTasks(), false)}
+				<!-- Column Content -->
+				<div class="flex-1 overflow-y-auto p-2 space-y-1.5 scrollbar-thin">
+					{#each columnTasks as task, rowIdx (task.id)}
+						<!-- svelte-ignore a11y_no_static_element_interactions -->
+						<div
+							draggable="true"
+							ondragstart={(e) => handleDragStart(e, task)}
+							ondragend={handleDragEnd}
+							oncontextmenu={(e) => handleContextMenu(e, task)}
+							class="rounded-lg"
+							class:ring-2={navState.focusedColumn === colIdx && navState.focusedRow === rowIdx && !isSelected(task.id)}
+							class:ring-primary={navState.focusedColumn === colIdx && navState.focusedRow === rowIdx && !isSelected(task.id)}
+							class:ring-2-selected={isSelected(task.id)}
+							class:opacity-50={draggedTask?.id === task.id}
+						>
+							<TaskCard
+								{task}
+								selected={isSelected(task.id)}
+								onClick={onTaskClick}
+							/>
+						</div>
+					{/each}
 
-		<!-- Needs Attention Column -->
-		{@render column('Needs Attention', AlertCircle, 'All clear!', 'hsl(var(--status-blocked))', getBlockedTasks(), false)}
+					{#if columnTasks.length === 0}
+						<div class="flex flex-col items-center justify-center py-8 text-muted-foreground">
+							<col.icon class="h-6 w-6 mb-1.5 opacity-20" />
+							<p class="text-xs">{col.emptyMessage}</p>
+						</div>
+					{/if}
+				</div>
 
-		<!-- Completed Column -->
-		{@render column('Completed', CheckCircle, 'Nothing completed yet', 'hsl(var(--status-done))', getDoneTasks(), false)}
+				<!-- Quick add for backlog -->
+				{#if col.showAdd}
+					<div class="p-2 border-t">
+						<button class="btn-sm-ghost w-full justify-start" onclick={onNewTask} title="Add task (N)">
+							<Plus class="h-3.5 w-3.5" />
+							Add task
+						</button>
+					</div>
+				{/if}
+			</div>
+		{/each}
 	</div>
 </div>
 
-{#snippet column(title: string, Icon: typeof Inbox, emptyMessage: string, accentColor: string, columnTasks: Task[], showAdd: boolean)}
-	<div class="flex flex-col rounded-xl border bg-card/50 overflow-hidden">
-		<!-- Column Header -->
-		<div
-			class="flex items-center justify-between px-4 py-3 border-b"
-			style:border-bottom-color={columnTasks.length > 0 ? accentColor : undefined}
-			style:border-bottom-width={columnTasks.length > 0 ? '2px' : '1px'}
-		>
-			<div class="flex items-center gap-2">
-				<span style:color={accentColor}><Icon class="h-4 w-4" /></span>
-				<h2 class="font-semibold text-sm">{title}</h2>
-			</div>
-			<span class="text-xs font-medium px-2 py-0.5 rounded-full {columnTasks.length > 0 ? 'bg-primary/10 text-primary' : 'bg-muted text-muted-foreground'}">
-				{columnTasks.length}
-			</span>
-		</div>
-
-		<!-- Column Content -->
-		<div class="flex-1 overflow-y-auto p-3 space-y-2 scrollbar-thin">
-			{#each columnTasks as task (task.id)}
-				<TaskCard
-					{task}
-					{onQueue}
-					{onRetry}
-					{onClose}
-					onClick={onTaskClick}
-				/>
-			{/each}
-
-			{#if columnTasks.length === 0}
-				<div class="flex flex-col items-center justify-center py-12 text-muted-foreground">
-					<Icon class="h-8 w-8 mb-2 opacity-30" />
-					<p class="text-sm">{emptyMessage}</p>
-				</div>
-			{/if}
-		</div>
-
-		<!-- Quick add button for backlog -->
-		{#if showAdd}
-			<div class="p-3 border-t">
-				<button
-					class="w-full flex items-center justify-start gap-2 px-3 py-2 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
-					onclick={onNewTask}
-				>
-					<Plus class="h-4 w-4" />
-					Add task
-				</button>
-			</div>
-		{/if}
-	</div>
-{/snippet}
+{#if contextMenu}
+	<ContextMenu
+		x={contextMenu.x}
+		y={contextMenu.y}
+		items={getContextMenuItems(contextMenu.task)}
+		onClose={() => (contextMenu = null)}
+	/>
+{/if}

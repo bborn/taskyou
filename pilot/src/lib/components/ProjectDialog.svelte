@@ -17,8 +17,23 @@
 	let instructions = $state(project?.instructions || '');
 	let color = $state(project?.color || '#888888');
 	let submitting = $state(false);
+	let dialogEl: HTMLDialogElement;
 
 	const isEditing = !!project;
+
+	$effect(() => {
+		if (dialogEl && !dialogEl.open) {
+			dialogEl.showModal();
+		}
+	});
+
+	function handleDialogClose() {
+		onClose();
+	}
+
+	function handleBackdropClick(e: MouseEvent) {
+		if (e.target === dialogEl) dialogEl.close();
+	}
 
 	async function handleSubmit(e: SubmitEvent) {
 		e.preventDefault();
@@ -27,7 +42,7 @@
 		submitting = true;
 		try {
 			await onSubmit({ name: name.trim(), path: path.trim(), aliases: aliases.trim(), instructions: instructions.trim(), color });
-			onClose();
+			dialogEl.close();
 		} catch (err) {
 			console.error(err);
 		} finally {
@@ -39,92 +54,71 @@
 		if (!confirm('Delete this project?')) return;
 		try {
 			await onDelete?.();
-			onClose();
+			dialogEl.close();
 		} catch (err) {
 			console.error(err);
 		}
 	}
 </script>
 
-<!-- svelte-ignore a11y_click_events_have_key_events -->
-<!-- svelte-ignore a11y_no_static_element_interactions -->
-<div class="fixed inset-0 z-50 flex items-center justify-center p-4">
-	<div class="absolute inset-0 bg-black/60 backdrop-blur-sm" onclick={onClose}></div>
+<!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+<dialog
+	bind:this={dialogEl}
+	class="dialog w-full sm:max-w-[425px]"
+	aria-labelledby="project-dialog-title"
+	onclose={handleDialogClose}
+	onclick={handleBackdropClick}
+>
+	<form onsubmit={handleSubmit}>
+		<header>
+			<h2 id="project-dialog-title">{isEditing ? 'Edit Project' : 'New Project'}</h2>
+		</header>
 
-	<div class="relative w-full max-w-md bg-card rounded-xl shadow-2xl border border-border overflow-hidden">
-		<form onsubmit={handleSubmit}>
-			<div class="flex items-center justify-between px-6 py-4 border-b border-border">
-				<h2 class="font-semibold">{isEditing ? 'Edit Project' : 'New Project'}</h2>
-				<button type="button" class="p-2 rounded-lg hover:bg-muted" onclick={onClose}>
-					<X class="h-4 w-4" />
-				</button>
-			</div>
-
-			<div class="p-6 space-y-4">
-				<div>
-					<label class="text-sm font-medium mb-1 block">Name</label>
-					<input
-						bind:value={name}
-						placeholder="Project name"
-						class="w-full h-10 px-3 rounded-lg border border-input bg-background text-sm"
-						autofocus
-					/>
+		<section>
+			<div class="form grid gap-4">
+				<div class="grid gap-2">
+					<label for="project-name">Name</label>
+					<input id="project-name" bind:value={name} placeholder="Project name" autofocus />
 				</div>
-				<div>
-					<label class="text-sm font-medium mb-1 block">Path</label>
-					<input
-						bind:value={path}
-						placeholder="/path/to/project"
-						class="w-full h-10 px-3 rounded-lg border border-input bg-background text-sm font-mono"
-					/>
+				<div class="grid gap-2">
+					<label for="project-path">Path</label>
+					<input id="project-path" bind:value={path} placeholder="/path/to/project" class="font-mono" />
 				</div>
-				<div>
-					<label class="text-sm font-medium mb-1 block">Aliases (comma-separated)</label>
-					<input
-						bind:value={aliases}
-						placeholder="alias1, alias2"
-						class="w-full h-10 px-3 rounded-lg border border-input bg-background text-sm"
-					/>
+				<div class="grid gap-2">
+					<label for="project-aliases">Aliases (comma-separated)</label>
+					<input id="project-aliases" bind:value={aliases} placeholder="alias1, alias2" />
 				</div>
-				<div>
-					<label class="text-sm font-medium mb-1 block">Instructions</label>
+				<div class="grid gap-2">
+					<label for="project-instructions">Instructions</label>
 					<textarea
+						id="project-instructions"
 						bind:value={instructions}
 						placeholder="Default instructions for AI when working on this project..."
 						rows="3"
-						class="w-full px-3 py-2 rounded-lg border border-input bg-background text-sm resize-none"
 					></textarea>
 				</div>
-				<div>
-					<label class="text-sm font-medium mb-1 block">Color</label>
-					<input bind:value={color} type="color" class="h-10 w-20 rounded border border-input cursor-pointer" />
+				<div class="grid gap-2">
+					<label for="project-color">Color</label>
+					<input id="project-color" bind:value={color} type="color" class="h-10 w-20 rounded border border-input cursor-pointer" />
 				</div>
 			</div>
+		</section>
 
-			<div class="flex items-center justify-between px-6 py-4 border-t border-border bg-muted/30">
-				{#if isEditing && onDelete}
-					<button
-						type="button"
-						class="inline-flex items-center gap-1 px-3 py-1.5 rounded-md text-sm text-destructive hover:bg-destructive/10"
-						onclick={handleDelete}
-					>
-						<Trash2 class="h-3.5 w-3.5" />
-						Delete
-					</button>
-				{:else}
-					<div></div>
-				{/if}
-				<div class="flex gap-2">
-					<button type="button" class="px-3 py-1.5 rounded-md text-sm hover:bg-muted" onclick={onClose}>Cancel</button>
-					<button
-						type="submit"
-						disabled={!name.trim() || submitting}
-						class="px-4 py-1.5 rounded-md text-sm bg-primary text-primary-foreground disabled:opacity-50"
-					>
-						{submitting ? 'Saving...' : isEditing ? 'Update' : 'Create'}
-					</button>
-				</div>
-			</div>
-		</form>
-	</div>
-</div>
+		<footer>
+			{#if isEditing && onDelete}
+				<button type="button" class="btn-destructive sm:mr-auto" onclick={handleDelete}>
+					<Trash2 class="h-3.5 w-3.5" />
+					Delete
+				</button>
+			{/if}
+			<button type="button" class="btn-outline" onclick={() => dialogEl.close()}>Cancel</button>
+			<button type="submit" class="btn" disabled={!name.trim() || submitting}>
+				{submitting ? 'Saving...' : isEditing ? 'Update' : 'Create'}
+			</button>
+		</footer>
+
+		<button type="button" aria-label="Close dialog" title="Close (Esc)" onclick={() => dialogEl.close()}>
+			<X class="h-4 w-4" />
+		</button>
+	</form>
+</dialog>

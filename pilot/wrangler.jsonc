@@ -45,5 +45,15 @@
   "vars": {
     // Set to "production" when deploying via Cloudflare dashboard or wrangler secret
     "ENVIRONMENT": "development"
-  }
+  },
+  // Secrets (set via `wrangler secret put`):
+  // ANTHROPIC_API_KEY - Required for LLM chat streaming
+  // GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET - For Google OAuth
+  // GITHUB_CLIENT_ID, GITHUB_CLIENT_SECRET - For GitHub OAuth
+  "r2_buckets": [
+    {
+      "binding": "STORAGE",
+      "bucket_name": "taskyou-pilot-storage"
+    }
+  ]
 }

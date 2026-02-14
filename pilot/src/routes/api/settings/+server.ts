@@ -14,7 +14,7 @@ export const GET: RequestHandler = async ({ locals, platform }) => {
 export const PUT: RequestHandler = async ({ request, locals, platform }) => {
 	const user = locals.user!;
 	const db = platform!.env.DB;
-	const data = await request.json();
+	const data = await request.json() as Record<string, string>;
 
 	await updateSettings(db, user.id, data);
 	return json({ success: true });
