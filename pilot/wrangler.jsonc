@@ -1,0 +1,48 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "taskyou-pilot",
+  "main": ".svelte-kit/cloudflare/_worker.js",
+  "compatibility_date": "2025-04-01",
+  "assets": {
+    "directory": ".svelte-kit/cloudflare",
+    "binding": "ASSETS"
+  },
+  // Containers config requires wrangler v4+. The adapter-cloudflare currently
+  // pins wrangler v3, so we keep this commented out until the adapter is updated.
+  // When deploying with wrangler v4, uncomment and add:
+  // "containers": [{
+  //   "class_name": "TaskSandbox",
+  //   "image": "./Dockerfile",
+  //   "max_instances": 10
+  // }],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "SANDBOX",
+        "class_name": "TaskSandbox"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["TaskSandbox"]
+    }
+  ],
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "taskyou-pilot-db",
+      "database_id": "placeholder-replace-with-actual-id"
+    }
+  ],
+  "kv_namespaces": [
+    {
+      "binding": "SESSIONS",
+      "id": "placeholder-replace-with-actual-id"
+    }
+  ],
+  "vars": {
+    "ENVIRONMENT": "production"
+  }
+}
