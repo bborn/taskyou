@@ -738,6 +738,10 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, m.loadTask(task.ID)
 			}
 		}
+		// Pass mouse events to detail view for scrolling
+		if m.currentView == ViewDetail {
+			return m.updateDetail(msg)
+		}
 
 	case tasksLoadedMsg:
 		m.loading = false
@@ -2448,10 +2452,7 @@ func (m *AppModel) updateDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	// Arrow key navigation to prev/next task in the same column
-	// Skip j/k in detail view - only use arrow keys (j/k reserved for other uses)
-	if keyMsg.String() == "j" || keyMsg.String() == "k" {
-		return m, nil
-	}
+	// j/k keys are passed through to the viewport for scrolling
 	if key.Matches(keyMsg, m.keys.Up) {
 		// Ignore if no previous task exists
 		if !m.kanban.HasPrevTask() {

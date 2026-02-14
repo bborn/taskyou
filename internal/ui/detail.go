@@ -2615,7 +2615,7 @@ func (m *DetailModel) renderHelp() string {
 
 	// Show scroll hint when content is scrollable
 	if m.viewport.TotalLineCount() > m.viewport.VisibleLineCount() {
-		keys = append(keys, helpKey{"PgUp/Dn", "scroll", false})
+		keys = append(keys, helpKey{"j/k/wheel", "scroll", false})
 	}
 
 	// Only show execute/retry when Claude is not running
