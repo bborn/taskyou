@@ -1,0 +1,9 @@
+node_modules
+.svelte-kit
+build
+.wrangler
+.env
+.env.*
+!.env.example
+.dev.vars
+package-lock.json

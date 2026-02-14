@@ -1,0 +1,130 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 0 0% 100%;
+    --foreground: 240 10% 3.9%;
+    --card: 0 0% 100%;
+    --card-foreground: 240 10% 3.9%;
+    --primary: 262 83% 58%;
+    --primary-foreground: 0 0% 100%;
+    --secondary: 240 4.8% 95.9%;
+    --secondary-foreground: 240 5.9% 10%;
+    --muted: 240 4.8% 95.9%;
+    --muted-foreground: 240 3.8% 46.1%;
+    --accent: 262 83% 95%;
+    --accent-foreground: 262 83% 40%;
+    --destructive: 0 84.2% 60.2%;
+    --destructive-foreground: 0 0% 98%;
+    --border: 240 5.9% 90%;
+    --input: 240 5.9% 90%;
+    --ring: 262 83% 58%;
+    --radius: 0.75rem;
+
+    --status-backlog: 240 5% 65%;
+    --status-backlog-bg: 240 5% 96%;
+    --status-queued: 45 93% 47%;
+    --status-queued-bg: 45 93% 95%;
+    --status-processing: 217 91% 60%;
+    --status-processing-bg: 217 91% 95%;
+    --status-blocked: 0 84% 60%;
+    --status-blocked-bg: 0 84% 95%;
+    --status-done: 142 71% 45%;
+    --status-done-bg: 142 71% 95%;
+
+    --glow-primary: 0 0 20px hsla(262, 83%, 58%, 0.3);
+  }
+
+  .dark {
+    --background: 240 10% 6%;
+    --foreground: 0 0% 98%;
+    --card: 240 10% 8%;
+    --card-foreground: 0 0% 98%;
+    --primary: 262 83% 65%;
+    --primary-foreground: 0 0% 100%;
+    --secondary: 240 4% 16%;
+    --secondary-foreground: 0 0% 98%;
+    --muted: 240 4% 16%;
+    --muted-foreground: 240 5% 64.9%;
+    --accent: 262 40% 20%;
+    --accent-foreground: 262 83% 75%;
+    --destructive: 0 62.8% 50%;
+    --destructive-foreground: 0 0% 98%;
+    --border: 240 4% 18%;
+    --input: 240 4% 18%;
+    --ring: 262 83% 65%;
+
+    --status-backlog: 240 5% 55%;
+    --status-backlog-bg: 240 5% 15%;
+    --status-queued: 45 93% 55%;
+    --status-queued-bg: 45 50% 15%;
+    --status-processing: 217 91% 65%;
+    --status-processing-bg: 217 50% 15%;
+    --status-blocked: 0 84% 60%;
+    --status-blocked-bg: 0 50% 15%;
+    --status-done: 142 71% 50%;
+    --status-done-bg: 142 40% 15%;
+
+    --glow-primary: 0 0 30px hsla(262, 83%, 65%, 0.4);
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply bg-background text-foreground antialiased;
+  }
+}
+
+@layer utilities {
+  .scrollbar-thin {
+    scrollbar-width: thin;
+    scrollbar-color: hsl(var(--muted-foreground) / 0.3) transparent;
+  }
+  .scrollbar-thin::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+  .scrollbar-thin::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  .scrollbar-thin::-webkit-scrollbar-thumb {
+    background: hsl(var(--muted-foreground) / 0.3);
+    border-radius: 3px;
+  }
+
+  .text-gradient {
+    background: linear-gradient(135deg, hsl(var(--primary)) 0%, hsl(262, 83%, 75%) 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+  }
+
+  .glow-primary {
+    box-shadow: var(--glow-primary);
+  }
+
+  .border-status-backlog { border-left: 3px solid hsl(var(--status-backlog)); }
+  .border-status-queued { border-left: 3px solid hsl(var(--status-queued)); }
+  .border-status-processing { border-left: 3px solid hsl(var(--status-processing)); }
+  .border-status-blocked { border-left: 3px solid hsl(var(--status-blocked)); }
+  .border-status-done { border-left: 3px solid hsl(var(--status-done)); }
+}
+
+.font-mono {
+  font-family: 'JetBrains Mono', 'Fira Code', 'SF Mono', Menlo, Monaco, 'Courier New', monospace;
+}
+
+:focus-visible {
+  outline: 2px solid hsl(var(--ring));
+  outline-offset: 2px;
+}
+
+::selection {
+  background: hsl(var(--primary) / 0.3);
+  color: inherit;
+}
