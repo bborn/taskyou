@@ -20,12 +20,23 @@ export const handle: Handle = async ({ event, resolve }) => {
 
 	// Dev mode: auto-authenticate with mock user
 	if (platform?.env?.ENVIRONMENT === 'development' || !platform?.env?.DB) {
-		event.locals.user = {
+		const devUser = {
 			id: 'dev-user',
 			email: 'dev@localhost',
 			name: 'Development User',
 			avatar_url: '',
 		};
+		// Ensure dev user exists in DB
+		if (platform?.env?.DB && dbInitialized) {
+			try {
+				await platform.env.DB.prepare(
+					`INSERT OR IGNORE INTO users (id, email, name, avatar_url, provider, provider_id) VALUES (?, ?, ?, ?, ?, ?)`
+				).bind(devUser.id, devUser.email, devUser.name, devUser.avatar_url, 'dev', 'dev').run();
+			} catch {
+				// ignore if already exists
+			}
+		}
+		event.locals.user = devUser;
 		event.locals.sessionId = 'dev-session';
 		return resolve(event);
 	}

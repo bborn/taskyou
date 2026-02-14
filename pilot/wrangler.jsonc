@@ -43,6 +43,7 @@
     }
   ],
   "vars": {
-    "ENVIRONMENT": "production"
+    // Set to "production" when deploying via Cloudflare dashboard or wrangler secret
+    "ENVIRONMENT": "development"
   }
 }

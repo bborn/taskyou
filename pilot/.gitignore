@@ -5,4 +5,5 @@ build
 .env
 .env.*
 !.env.example
+.dev.vars
 package-lock.json
