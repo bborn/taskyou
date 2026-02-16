@@ -67,9 +67,22 @@ func Open(path string) (*DB, error) {
 		return nil, fmt.Errorf("failed to create state directory: %w", err)
 	}
 
-	db, err := sql.Open("sqlite", path+"?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)")
+	db, err := sql.Open("sqlite", path)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open state database: %w", err)
+	}
+
+	// Single connection ensures PRAGMAs apply consistently.
+	// Note: _pragma DSN params do NOT work with modernc.org/sqlite.
+	db.SetMaxOpenConns(1)
+
+	if _, err := db.Exec("PRAGMA busy_timeout=5000"); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("failed to set busy timeout: %w", err)
+	}
+	if _, err := db.Exec("PRAGMA journal_mode=WAL"); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("failed to enable WAL: %w", err)
 	}
 
 	s := &DB{db: db}
