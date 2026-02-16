@@ -3983,8 +3983,6 @@ func (m *AppModel) latestPermissionPrompt(taskID int64) string {
 		switch {
 		case l.LineType == "system" && strings.HasPrefix(l.Content, "Waiting for permission"):
 			return l.Content
-		case l.LineType == "system" && strings.HasPrefix(l.Content, "Waiting for user input"):
-			return l.Content
 		case l.LineType == "system" && l.Content == "Claude resumed working":
 			return "" // prompt was resolved
 		case l.LineType == "user" && (strings.HasPrefix(l.Content, "Approved") || strings.HasPrefix(l.Content, "Denied")):

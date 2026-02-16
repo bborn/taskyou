@@ -1264,7 +1264,7 @@ func TestLatestPermissionPrompt_NoLogs(t *testing.T) {
 	}
 }
 
-func TestLatestPermissionPrompt_UserInputMessage(t *testing.T) {
+func TestLatestPermissionPrompt_UserInputMessage_Ignored(t *testing.T) {
 	database, err := db.Open(":memory:")
 	if err != nil {
 		t.Fatalf("Failed to create test database: %v", err)
@@ -1278,11 +1278,13 @@ func TestLatestPermissionPrompt_UserInputMessage(t *testing.T) {
 		t.Fatalf("Failed to create task: %v", err)
 	}
 
+	// "Waiting for user input" is idle waiting, not an actionable prompt —
+	// should NOT trigger the status line / prompt preview.
 	database.AppendTaskLog(task.ID, "system", "Waiting for user input")
 
 	result := m.latestPermissionPrompt(task.ID)
-	if result != "Waiting for user input" {
-		t.Errorf("expected 'Waiting for user input', got '%s'", result)
+	if result != "" {
+		t.Errorf("expected empty string for idle user input, got '%s'", result)
 	}
 }
 
