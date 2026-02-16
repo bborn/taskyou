@@ -100,6 +100,8 @@ func (k *KanbanBoard) RefreshTheme() {
 // SetTasks updates the tasks in the kanban board.
 func (k *KanbanBoard) SetTasks(tasks []*db.Task) {
 	var selectedID int64
+	prevCol := k.selectedCol
+	prevRow := k.selectedRow
 	if selected := k.SelectedTask(); selected != nil {
 		selectedID = selected.ID
 	}
@@ -116,7 +118,15 @@ func (k *KanbanBoard) SetTasks(tasks []*db.Task) {
 	}
 
 	if selectedID != 0 {
-		k.SelectTask(selectedID)
+		// Try to find the task in its (possibly new) position
+		found := k.SelectTask(selectedID)
+		if found && k.selectedCol != prevCol {
+			// Task moved to a different column (e.g. after permission grant).
+			// Stay in the original column and select the next task there.
+			k.selectedCol = prevCol
+			k.selectedRow = prevRow
+			k.clampSelection()
+		}
 	}
 }
 

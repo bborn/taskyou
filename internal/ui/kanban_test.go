@@ -954,7 +954,7 @@ func TestKanbanBoard_OriginColumnPreservesColumnOnTaskMove(t *testing.T) {
 	}
 }
 
-func TestKanbanBoard_NoOriginColumnFollowsTask(t *testing.T) {
+func TestKanbanBoard_NoOriginColumnStaysInPlace(t *testing.T) {
 	board := NewKanbanBoard(100, 50)
 
 	// Set up initial tasks - one blocked task
@@ -973,18 +973,81 @@ func TestKanbanBoard_NoOriginColumnFollowsTask(t *testing.T) {
 		t.Fatalf("Expected selectedCol to be 2 (blocked), got %d", board.selectedCol)
 	}
 
-	// Do NOT set origin column (normal dashboard behavior)
-
-	// Now simulate the task moving to a different column (e.g., to in-progress)
+	// Now simulate the task moving to a different column (e.g., to in-progress
+	// after permission grant). Focus should stay in the blocked column.
 	tasks = []*db.Task{
 		{ID: 1, Title: "Backlog Task", Status: db.StatusBacklog},
 		{ID: 2, Title: "Blocked Task", Status: db.StatusQueued}, // Moved to in-progress
 	}
 	board.SetTasks(tasks)
 
-	// selectedCol should follow the task to column 1 (in-progress)
-	if board.selectedCol != 1 {
-		t.Errorf("Expected selectedCol to follow task to 1 (in-progress), got %d", board.selectedCol)
+	// selectedCol should stay at 2 (blocked) - not follow the task
+	if board.selectedCol != 2 {
+		t.Errorf("Expected selectedCol to stay at 2 (blocked), got %d", board.selectedCol)
+	}
+}
+
+func TestKanbanBoard_FocusStaysInColumnAfterPermissionGrant(t *testing.T) {
+	board := NewKanbanBoard(100, 50)
+
+	// Simulate: two tasks in blocked column, user is focused on the first one
+	tasks := []*db.Task{
+		{ID: 1, Title: "Backlog Task", Status: db.StatusBacklog},
+		{ID: 2, Title: "Blocked Task 1", Status: db.StatusBlocked},
+		{ID: 3, Title: "Blocked Task 2", Status: db.StatusBlocked},
+	}
+	board.SetTasks(tasks)
+
+	// Focus on blocked column, first task
+	board.FocusColumn(2)
+	board.SelectTask(2)
+
+	if board.selectedCol != 2 || board.selectedRow != 0 {
+		t.Fatalf("Expected col=2 row=0, got col=%d row=%d", board.selectedCol, board.selectedRow)
+	}
+
+	// Grant permission: task 2 moves from blocked to processing (in-progress column)
+	tasks = []*db.Task{
+		{ID: 1, Title: "Backlog Task", Status: db.StatusBacklog},
+		{ID: 2, Title: "Blocked Task 1", Status: db.StatusProcessing}, // Moved to in-progress
+		{ID: 3, Title: "Blocked Task 2", Status: db.StatusBlocked},
+	}
+	board.SetTasks(tasks)
+
+	// Focus should stay in blocked column (col 2), on the next task (task 3)
+	if board.selectedCol != 2 {
+		t.Errorf("Expected focus to stay in blocked column (2), got %d", board.selectedCol)
+	}
+	selected := board.SelectedTask()
+	if selected == nil || selected.ID != 3 {
+		t.Errorf("Expected selected task to be 3 (next in blocked), got %v", selected)
+	}
+}
+
+func TestKanbanBoard_FocusStaysWhenTaskStaysInSameColumn(t *testing.T) {
+	board := NewKanbanBoard(100, 50)
+
+	// Task stays in same column after SetTasks - focus should follow it
+	tasks := []*db.Task{
+		{ID: 1, Title: "Backlog Task 1", Status: db.StatusBacklog},
+		{ID: 2, Title: "Backlog Task 2", Status: db.StatusBacklog},
+	}
+	board.SetTasks(tasks)
+
+	board.SelectTask(2)
+	if board.selectedCol != 0 || board.selectedRow != 1 {
+		t.Fatalf("Expected col=0 row=1, got col=%d row=%d", board.selectedCol, board.selectedRow)
+	}
+
+	// Re-set same tasks - focus should stay on task 2
+	board.SetTasks(tasks)
+
+	if board.selectedCol != 0 {
+		t.Errorf("Expected col=0, got %d", board.selectedCol)
+	}
+	selected := board.SelectedTask()
+	if selected == nil || selected.ID != 2 {
+		t.Errorf("Expected selected task 2, got %v", selected)
 	}
 }
 
