@@ -77,11 +77,23 @@ func Open(path string) (*DB, error) {
 		return nil, fmt.Errorf("create db directory: %w", err)
 	}
 
-	// Add busy timeout to handle concurrent access from executor + UI
-	dsn := path + "?_busy_timeout=5000"
-	db, err := sql.Open("sqlite", dsn)
+	db, err := sql.Open("sqlite", path)
 	if err != nil {
 		return nil, fmt.Errorf("open database: %w", err)
+	}
+
+	// Use a single connection to ensure PRAGMAs apply consistently.
+	// SQLite only supports one writer at a time, so multiple connections
+	// just create contention. A single connection with busy_timeout
+	// handles concurrent goroutines via database/sql's built-in serialization.
+	db.SetMaxOpenConns(1)
+
+	// Set busy timeout to retry on SQLITE_BUSY instead of failing immediately.
+	// This is critical for the daemon where multiple goroutines update task
+	// status concurrently. Note: _busy_timeout DSN param does NOT work with
+	// modernc.org/sqlite — must use PRAGMA.
+	if _, err := db.Exec("PRAGMA busy_timeout=5000"); err != nil {
+		return nil, fmt.Errorf("set busy timeout: %w", err)
 	}
 
 	// Enable WAL mode for better concurrent access

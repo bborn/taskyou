@@ -56,6 +56,25 @@ func TestTimestampLocalization(t *testing.T) {
 	}
 }
 
+func TestBusyTimeoutIsSet(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	database, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer database.Close()
+
+	var timeout int
+	if err := database.QueryRow("PRAGMA busy_timeout").Scan(&timeout); err != nil {
+		t.Fatalf("failed to query busy_timeout: %v", err)
+	}
+	if timeout != 5000 {
+		t.Errorf("expected busy_timeout=5000, got %d", timeout)
+	}
+}
+
 func TestPersonalProjectCreation(t *testing.T) {
 	// Create temporary database
 	tmpDir := t.TempDir()
