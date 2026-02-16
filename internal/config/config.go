@@ -21,8 +21,9 @@ const (
 	SettingDetailPaneHeight   = "detail_pane_height"
 	SettingShellPaneWidth     = "shell_pane_width"
 	SettingShellPaneHidden    = "shell_pane_hidden"
-	SettingIdleSuspendTimeout = "idle_suspend_timeout"
-	SettingServerURL          = "server_url"
+	SettingIdleSuspendTimeout    = "idle_suspend_timeout"
+	SettingServerURL             = "server_url"
+	SettingWorktreeCleanupMaxAge = "worktree_cleanup_max_age"
 )
 
 // DefaultServerURL is the default base URL for opening tasks in the browser.

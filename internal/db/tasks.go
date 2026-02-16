@@ -1675,3 +1675,55 @@ func (db *DB) ClearArchiveState(taskID int64) error {
 func (t *Task) HasArchiveState() bool {
 	return t.ArchiveRef != "" && t.ArchiveCommit != ""
 }
+
+// GetStaleWorktreeTasks returns done/archived tasks that have worktree paths set
+// and were completed more than maxAge ago. These are candidates for cleanup.
+func (db *DB) GetStaleWorktreeTasks(maxAge time.Duration) ([]*Task, error) {
+	cutoff := time.Now().Add(-maxAge).UTC()
+	query := `
+		SELECT id, title, body, status, type, project, COALESCE(executor, 'claude'),
+		       worktree_path, branch_name, port, claude_session_id,
+		       COALESCE(daemon_session, ''), COALESCE(tmux_window_id, ''),
+		       COALESCE(claude_pane_id, ''), COALESCE(shell_pane_id, ''),
+		       COALESCE(pr_url, ''), COALESCE(pr_number, 0), COALESCE(pr_info_json, ''),
+		       COALESCE(dangerous_mode, 0), COALESCE(pinned, 0), COALESCE(tags, ''),
+		       COALESCE(source_branch, ''), COALESCE(summary, ''),
+		       created_at, updated_at, started_at, completed_at,
+		       last_distilled_at, last_accessed_at,
+		       COALESCE(archive_ref, ''), COALESCE(archive_commit, ''),
+		       COALESCE(archive_worktree_path, ''), COALESCE(archive_branch_name, '')
+		FROM tasks
+		WHERE worktree_path != ''
+		  AND status IN ('done', 'archived')
+		  AND completed_at IS NOT NULL
+		  AND completed_at < ?
+		ORDER BY completed_at ASC
+	`
+	rows, err := db.Query(query, cutoff)
+	if err != nil {
+		return nil, fmt.Errorf("query stale worktree tasks: %w", err)
+	}
+	defer rows.Close()
+
+	var tasks []*Task
+	for rows.Next() {
+		t := &Task{}
+		err := rows.Scan(
+			&t.ID, &t.Title, &t.Body, &t.Status, &t.Type, &t.Project, &t.Executor,
+			&t.WorktreePath, &t.BranchName, &t.Port, &t.ClaudeSessionID,
+			&t.DaemonSession, &t.TmuxWindowID, &t.ClaudePaneID, &t.ShellPaneID,
+			&t.PRURL, &t.PRNumber, &t.PRInfoJSON,
+			&t.DangerousMode, &t.Pinned, &t.Tags,
+			&t.SourceBranch, &t.Summary,
+			&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
+			&t.LastDistilledAt, &t.LastAccessedAt,
+			&t.ArchiveRef, &t.ArchiveCommit, &t.ArchiveWorktreePath, &t.ArchiveBranchName,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("scan task: %w", err)
+		}
+		tasks = append(tasks, t)
+	}
+
+	return tasks, nil
+}

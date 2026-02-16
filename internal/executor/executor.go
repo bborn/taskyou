@@ -79,6 +79,10 @@ const DefaultSuspendIdleTimeout = 6 * time.Hour
 // This gives users time to review output or retry the task before the process is cleaned up.
 const DoneTaskCleanupTimeout = 30 * time.Minute
 
+// DefaultWorktreeCleanupMaxAge is the default time after completion before a done/archived
+// task's worktree is automatically archived and removed to reclaim disk space.
+const DefaultWorktreeCleanupMaxAge = 7 * 24 * time.Hour // 7 days
+
 const (
 	defaultExecutorSlug = "claude"
 	defaultExecutorName = "Claude"
@@ -234,6 +238,9 @@ func (e *Executor) Start(ctx context.Context) {
 
 	// Recover stale tmux references on startup (handles crash recovery)
 	e.recoverStaleTmuxRefs()
+
+	// Run stale worktree cleanup on startup (and then periodically in worker loop)
+	go e.cleanupStaleWorktrees()
 
 	e.logger.Info("Background executor started")
 
@@ -702,9 +709,11 @@ func (e *Executor) worker(ctx context.Context) {
 	// Check for idle blocked tasks to suspend every 60 seconds (30 ticks)
 	// Check for due scheduled tasks every 10 seconds (5 ticks)
 	// Check for inactive done tasks to cleanup every 5 minutes (150 ticks)
+	// Check for stale worktrees to archive every 1 hour (1800 ticks)
 	tickCount := 0
 	const suspendCheckInterval = 30
-	const doneCleanupInterval = 150 // 5 minutes at 2 second ticks
+	const doneCleanupInterval = 150        // 5 minutes at 2 second ticks
+	const staleWorktreeInterval = 1800     // 1 hour at 2 second ticks
 
 	for {
 		select {
@@ -728,6 +737,11 @@ func (e *Executor) worker(ctx context.Context) {
 			// Periodically cleanup Claude processes for inactive done tasks
 			if tickCount%doneCleanupInterval == 0 {
 				e.cleanupInactiveDoneTasks()
+			}
+
+			// Periodically archive and remove stale worktrees to reclaim disk space
+			if tickCount%staleWorktreeInterval == 0 {
+				e.cleanupStaleWorktrees()
 			}
 		}
 	}
@@ -806,6 +820,127 @@ func (e *Executor) cleanupInactiveDoneTasks() {
 		killAllWindowsByNameAllSessions(windowName)
 
 		e.logLine(task.ID, "system", "Claude process cleaned up (inactive done task)")
+	}
+}
+
+// cleanupStaleWorktrees archives and removes worktrees for done/archived tasks
+// that have been completed longer than the configured max age. This reclaims disk
+// space from the .task-worktrees directory which can grow very large over time.
+func (e *Executor) cleanupStaleWorktrees() {
+	maxAge := e.getWorktreeCleanupMaxAge()
+	if maxAge <= 0 {
+		return // Disabled
+	}
+
+	tasks, err := e.db.GetStaleWorktreeTasks(maxAge)
+	if err != nil {
+		e.logger.Debug("Failed to list stale worktree tasks", "error", err)
+		return
+	}
+
+	for _, task := range tasks {
+		// Skip tasks that are currently running
+		e.mu.RLock()
+		running := e.runningTasks[task.ID]
+		e.mu.RUnlock()
+		if running {
+			continue
+		}
+
+		// Skip if worktree path doesn't exist on disk (already cleaned up)
+		if _, err := os.Stat(task.WorktreePath); os.IsNotExist(err) {
+			// Path gone, just clear the DB reference
+			e.db.ClearTaskWorktreePath(task.ID)
+			continue
+		}
+
+		age := time.Since(task.CompletedAt.Time)
+		e.logger.Info("Archiving stale worktree",
+			"task", task.ID,
+			"project", task.Project,
+			"age", age.Round(time.Hour),
+		)
+
+		// Archive the worktree (preserves changes in git refs) then remove it
+		if err := e.ArchiveWorktree(task); err != nil {
+			e.logger.Warn("Failed to archive stale worktree",
+				"task", task.ID,
+				"error", err,
+			)
+			continue
+		}
+
+		e.logLine(task.ID, "system",
+			fmt.Sprintf("Worktree auto-archived after %s (use 'unarchive' to restore)", age.Round(time.Hour)))
+	}
+}
+
+// getWorktreeCleanupMaxAge returns the configured max age before stale worktrees are cleaned up.
+// Returns 0 to disable automatic cleanup.
+func (e *Executor) getWorktreeCleanupMaxAge() time.Duration {
+	if val, err := e.db.GetSetting(config.SettingWorktreeCleanupMaxAge); err == nil && val != "" {
+		if val == "0" || val == "disabled" {
+			return 0
+		}
+		if duration, err := time.ParseDuration(val); err == nil {
+			return duration
+		}
+	}
+	return DefaultWorktreeCleanupMaxAge
+}
+
+// CleanupStaleWorktreesManual runs stale worktree cleanup on demand and returns
+// the list of tasks that were cleaned up. If dryRun is true, no changes are made.
+func (e *Executor) CleanupStaleWorktreesManual(maxAge time.Duration, dryRun bool) ([]*db.Task, error) {
+	tasks, err := e.db.GetStaleWorktreeTasks(maxAge)
+	if err != nil {
+		return nil, fmt.Errorf("list stale worktree tasks: %w", err)
+	}
+
+	if dryRun {
+		return tasks, nil
+	}
+
+	var cleaned []*db.Task
+	for _, task := range tasks {
+		// Skip if worktree path doesn't exist on disk
+		if _, err := os.Stat(task.WorktreePath); os.IsNotExist(err) {
+			e.db.ClearTaskWorktreePath(task.ID)
+			cleaned = append(cleaned, task)
+			continue
+		}
+
+		if err := e.ArchiveWorktree(task); err != nil {
+			e.logger.Warn("Failed to archive stale worktree",
+				"task", task.ID,
+				"error", err,
+			)
+			continue
+		}
+		cleaned = append(cleaned, task)
+	}
+
+	// Also run git worktree prune on all project directories to clean up stale git refs
+	e.pruneAllProjectWorktrees()
+
+	return cleaned, nil
+}
+
+// pruneAllProjectWorktrees runs `git worktree prune` on all configured project directories
+// to clean up stale internal git worktree references.
+func (e *Executor) pruneAllProjectWorktrees() {
+	projects, err := e.db.ListProjects()
+	if err != nil {
+		return
+	}
+	for _, p := range projects {
+		dir := e.config.GetProjectDir(p.Name)
+		if dir == "" {
+			continue
+		}
+		cmd := exec.Command("git", "worktree", "prune")
+		cmd.Dir = dir
+		cmd.Run() // Ignore errors
 	}
 }
 
