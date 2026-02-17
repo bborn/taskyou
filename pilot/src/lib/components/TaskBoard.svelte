@@ -10,14 +10,11 @@
 	import type { Task, TaskStatus } from '$lib/types';
 
 	interface Props {
-		onQueue: (id: number) => void;
-		onRetry: (id: number) => void;
-		onClose: (id: number) => void;
 		onTaskClick: (task: Task) => void;
 		onNewTask: () => void;
 	}
 
-	let { onQueue, onRetry, onClose, onTaskClick, onNewTask }: Props = $props();
+	let { onTaskClick, onNewTask }: Props = $props();
 
 	// Drag-and-drop state
 	let draggedTask = $state<Task | null>(null);
@@ -51,7 +48,7 @@
 		const ids = [...selectedIds];
 		clearSelection();
 		for (const id of ids) {
-			onQueue(id);
+			await updateTask(id, { status: 'queued' });
 		}
 	}
 
@@ -70,7 +67,7 @@
 		const ids = [...selectedIds];
 		clearSelection();
 		for (const id of ids) {
-			onClose(id);
+			await updateTask(id, { status: 'done' });
 		}
 	}
 
@@ -124,13 +121,7 @@
 			return;
 		}
 
-		let newStatus = targetStatus;
-		if (targetStatus === 'queued' && currentStatus === 'backlog') {
-			onQueue(draggedTask.id);
-		} else {
-			await updateTask(draggedTask.id, { status: newStatus });
-		}
-
+		await updateTask(draggedTask.id, { status: targetStatus });
 		draggedTask = null;
 	}
 
@@ -154,13 +145,13 @@
 		items.push({ label: 'Edit', icon: Pencil, action: () => onTaskClick(task) });
 
 		if (task.status === 'backlog') {
-			items.push({ label: 'Execute', icon: Play, action: () => onQueue(task.id) });
+			items.push({ label: 'Queue', icon: Play, action: () => updateTask(task.id, { status: 'queued' }) });
 		}
 		if (task.status === 'blocked' || task.status === 'failed') {
-			items.push({ label: 'Retry', icon: RotateCcw, action: () => onRetry(task.id) });
+			items.push({ label: 'Retry', icon: RotateCcw, action: () => updateTask(task.id, { status: 'queued' }) });
 		}
 		if (task.status === 'processing' || task.status === 'blocked') {
-			items.push({ label: 'Mark Done', icon: CheckCircle, action: () => onClose(task.id) });
+			items.push({ label: 'Mark Done', icon: CheckCircle, action: () => updateTask(task.id, { status: 'done' }) });
 		}
 
 		items.push({ label: 'Copy ID', icon: Copy, action: () => navigator.clipboard.writeText(String(task.id)), separator: true });
@@ -174,12 +165,7 @@
 		const targetStatus = columns[targetColIdx].targetStatus;
 		if (task.status === targetStatus) return;
 
-		if (targetStatus === 'queued' && task.status === 'backlog') {
-			onQueue(task.id);
-		} else {
-			await updateTask(task.id, { status: targetStatus });
-		}
-
+		await updateTask(task.id, { status: targetStatus });
 		setFocus(targetColIdx, navState.focusedRow);
 	}
 
@@ -202,19 +188,19 @@
 		const currentTasks = allColumnTasks[col];
 		const focusedTask = currentTasks?.[row];
 
-		// Cmd+Enter — execute focused task
+		// Cmd+Enter — queue focused task
 		if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
 			if (focusedTask && (focusedTask.status === 'backlog' || focusedTask.status === 'blocked' || focusedTask.status === 'failed')) {
 				e.preventDefault();
-				onQueue(focusedTask.id);
+				updateTask(focusedTask.id, { status: 'queued' });
 			}
 			return;
 		}
 
 		// Cmd+Delete / Cmd+Backspace — delete focused task
 		if ((e.metaKey || e.ctrlKey) && (e.key === 'Delete' || e.key === 'Backspace')) {
+			e.preventDefault();
 			if (focusedTask) {
-				e.preventDefault();
 				deleteFocusedTask(focusedTask);
 			}
 			return;
@@ -343,7 +329,7 @@
 			{@const columnTasks = getColumnTasks(col.key)}
 			<!-- svelte-ignore a11y_no_static_element_interactions -->
 			<div
-				class="flex flex-col rounded-xl border bg-card/50 overflow-hidden transition-colors {dragOverColumn === col.key ? 'border-primary bg-primary/5' : ''}"
+				class="flex flex-col rounded-xl border bg-card/50 overflow-hidden transition-colors {dragOverColumn === col.key ? 'border-primary bg-primary/5' : ''} {navState.focusedColumn === colIdx && columnTasks.length === 0 ? 'ring-2 ring-primary/50' : ''}"
 				ondragover={(e) => handleDragOver(e, col.key)}
 				ondragleave={handleDragLeave}
 				ondrop={(e) => handleDrop(e, col.targetStatus)}

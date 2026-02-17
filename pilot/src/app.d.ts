@@ -10,7 +10,8 @@ declare global {
 		interface Platform {
 			env: {
 				DB: D1Database;
-				SANDBOX: DurableObjectNamespace;
+				TASKYOU_AGENT: DurableObjectNamespace;
+				TASK_WORKFLOW: Workflow;
 				SESSIONS: KVNamespace;
 				STORAGE?: R2Bucket;
 				GOOGLE_CLIENT_ID?: string;

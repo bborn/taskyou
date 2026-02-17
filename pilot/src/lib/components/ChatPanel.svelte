@@ -1,9 +1,9 @@
 <script lang="ts">
 	import { onMount, tick } from 'svelte';
 	import { Send, Bot, User, Loader2, Sparkles } from 'lucide-svelte';
-	import { chatState, sendMessage, createNewChat, fetchChats } from '$lib/stores/chat.svelte';
-	import { models as modelsApi } from '$lib/api/client';
-	import type { Model } from '$lib/types';
+	import { chatState, sendAgentChatMessage, createNewChat, fetchChats } from '$lib/stores/chat.svelte';
+	import { agentChatStream } from '$lib/stores/agent.svelte';
+	import { authState } from '$lib/stores/auth.svelte';
 	import { Marked } from 'marked';
 
 	const marked = new Marked({
@@ -22,38 +22,52 @@
 	let inputValue = $state('');
 	let inputEl: HTMLTextAreaElement;
 	let messagesEndEl: HTMLDivElement;
-	let models = $state<Model[]>([]);
 
 	onMount(async () => {
 		await fetchChats();
-		try {
-			models = await modelsApi.list();
-		} catch {
-			// ignore
-		}
 	});
 
 	$effect(() => {
 		// Auto-scroll when messages change or streaming content updates
-		if (chatState.messages.length || chatState.streamingContent) {
+		if (chatState.agentMessages.length || agentChatStream.streamingContent) {
 			tick().then(() => {
 				messagesEndEl?.scrollIntoView({ behavior: 'smooth' });
 			});
 		}
 	});
 
+	// Watch for completed messages from agent stream and add them to chat
+	$effect(() => {
+		const msg = agentChatStream.completedMessage;
+		if (msg) {
+			chatState.agentMessages = [...chatState.agentMessages, msg];
+			agentChatStream.completedMessage = null;
+		}
+	});
+
+	// Watch for errors from agent stream
+	$effect(() => {
+		const err = agentChatStream.lastError;
+		if (err) {
+			chatState.agentMessages = [...chatState.agentMessages, {
+				id: crypto.randomUUID(),
+				role: 'assistant',
+				content: `**Error:** ${err}`,
+				createdAt: new Date().toISOString(),
+			}];
+			agentChatStream.lastError = null;
+		}
+	});
+
 	async function handleSubmit(e?: SubmitEvent) {
 		e?.preventDefault();
 		const content = inputValue.trim();
-		if (!content || chatState.streaming) return;
+		if (!content || agentChatStream.streaming) return;
 
-		// Create chat if none active
-		if (!chatState.activeChat) {
-			await createNewChat();
-		}
+		if (!authState.user) return;
 
 		inputValue = '';
-		await sendMessage(content);
+		await sendAgentChatMessage(content, authState.user.id);
 
 		// Resize textarea back
 		if (inputEl) inputEl.style.height = 'auto';
@@ -73,28 +87,21 @@
 		}
 	}
 
-	async function changeModel(modelId: string) {
-		if (!chatState.activeChat) {
-			await createNewChat(modelId);
-		}
-	}
-
-	function formatTokens(n: number): string {
-		if (n >= 1000) return `${(n / 1000).toFixed(1)}k`;
-		return String(n);
-	}
-
 	const quickActions = [
 		{ label: 'Show Board', prompt: 'Show me the current state of the board' },
 		{ label: 'List Tasks', prompt: 'List all my current tasks' },
+		{ label: 'Create Task', prompt: 'Create a new task' },
 	];
 
 	async function handleQuickAction(prompt: string) {
-		if (chatState.streaming) return;
+		if (agentChatStream.streaming || !authState.user) return;
 		if (!chatState.activeChat) {
-			await createNewChat();
+			const chat = await createNewChat();
+			window.location.hash = `#/chat/${chat.id}`;
+			// Wait a tick for the WS connection to establish via hash routing
+			await new Promise(r => setTimeout(r, 500));
 		}
-		await sendMessage(prompt);
+		await sendAgentChatMessage(prompt, authState.user.id);
 	}
 </script>
 
@@ -105,24 +112,12 @@
 			<Sparkles class="h-4 w-4 text-primary" />
 			<h3 class="font-semibold text-sm">Pilot Chat</h3>
 		</div>
-		<div class="flex items-center gap-1.5">
-			<span class="text-[10px] text-muted-foreground hidden sm:inline">Model</span>
-			<select
-				class="select select-sm text-xs h-7 min-w-[100px] max-w-[140px]"
-				onchange={(e) => changeModel((e.target as HTMLSelectElement).value)}
-			>
-				{#each models as model}
-					<option value={model.id} selected={chatState.activeChat?.model_id === model.id}>
-						{model.name}
-					</option>
-				{/each}
-			</select>
-		</div>
+		<span class="text-[10px] text-muted-foreground">Claude Sonnet 4.5</span>
 	</div>
 
 	<!-- Messages -->
 	<div class="flex-1 overflow-y-auto scrollbar-thin px-4 py-4 space-y-4">
-		{#if chatState.messages.length === 0 && !chatState.streaming}
+		{#if chatState.agentMessages.length === 0 && !agentChatStream.streaming}
 			<!-- Empty state -->
 			<div class="flex flex-col items-center justify-center h-full text-center">
 				<div class="p-4 rounded-full bg-primary/10 mb-4">
@@ -136,7 +131,7 @@
 					{#each quickActions as action}
 						<button
 							onclick={() => handleQuickAction(action.prompt)}
-							disabled={chatState.streaming}
+							disabled={agentChatStream.streaming}
 							class="px-3 py-1.5 text-xs font-medium rounded-lg bg-muted hover:bg-muted/80 text-foreground border border-border transition-colors disabled:opacity-50"
 						>
 							{action.label}
@@ -145,8 +140,8 @@
 				</div>
 			</div>
 		{:else}
-			{#each chatState.messages as message (message.id)}
-				<div class="flex gap-3 {message.role === 'user' ? '' : ''}">
+			{#each chatState.agentMessages as message (message.id)}
+				<div class="flex gap-3">
 					<!-- Avatar -->
 					<div class="shrink-0 mt-0.5">
 						{#if message.role === 'user'}
@@ -164,11 +159,6 @@
 					<div class="flex-1 min-w-0">
 						<div class="flex items-center gap-2 mb-1">
 							<span class="text-xs font-medium">{message.role === 'user' ? 'You' : 'Pilot'}</span>
-							{#if message.input_tokens || message.output_tokens}
-								<span class="text-[10px] text-muted-foreground">
-									{formatTokens(message.input_tokens)}in / {formatTokens(message.output_tokens)}out
-								</span>
-							{/if}
 						</div>
 						{#if message.role === 'assistant'}
 							<div class="text-sm prose prose-sm dark:prose-invert max-w-none break-words chat-markdown">
@@ -179,12 +169,28 @@
 								{message.content}
 							</div>
 						{/if}
+
+						<!-- Tool invocations -->
+						{#if message.toolInvocations?.length}
+							<div class="mt-2 space-y-1">
+								{#each message.toolInvocations as tool}
+									<div class="text-xs text-muted-foreground bg-muted/50 rounded px-2 py-1">
+										<span class="font-mono">{tool.toolName}</span>
+										{#if tool.state === 'result'}
+											<span class="text-green-500 ml-1">done</span>
+										{:else}
+											<span class="text-blue-500 ml-1">running...</span>
+										{/if}
+									</div>
+								{/each}
+							</div>
+						{/if}
 					</div>
 				</div>
 			{/each}
 
 			<!-- Streaming indicator -->
-			{#if chatState.streaming}
+			{#if agentChatStream.streaming}
 				<div class="flex gap-3">
 					<div class="shrink-0 mt-0.5">
 						<div class="h-7 w-7 rounded-full bg-accent flex items-center justify-center">
@@ -196,8 +202,8 @@
 							<span class="text-xs font-medium">Pilot</span>
 							<Loader2 class="h-3 w-3 animate-spin text-primary" />
 						</div>
-						{#if chatState.streamingContent}
-							<div class="text-sm prose prose-sm dark:prose-invert max-w-none break-words chat-markdown">{@html renderMarkdown(chatState.streamingContent)}</div>
+						{#if agentChatStream.streamingContent}
+							<div class="text-sm prose prose-sm dark:prose-invert max-w-none break-words chat-markdown">{@html renderMarkdown(agentChatStream.streamingContent)}</div>
 						{:else}
 							<div class="flex gap-1">
 								<span class="h-2 w-2 rounded-full bg-muted-foreground/40 animate-bounce" style="animation-delay: 0ms"></span>
@@ -224,14 +230,14 @@
 				placeholder="Ask Pilot anything..."
 				rows="1"
 				class="input flex-1 text-sm h-9 resize-none min-h-[36px] max-h-[200px]"
-				disabled={chatState.streaming}
+				disabled={agentChatStream.streaming}
 			></textarea>
 			<button
 				type="submit"
-				disabled={!inputValue.trim() || chatState.streaming}
+				disabled={!inputValue.trim() || agentChatStream.streaming}
 				class="btn-sm h-9"
 			>
-				{#if chatState.streaming}
+				{#if agentChatStream.streaming}
 					<Loader2 class="h-4 w-4 animate-spin" />
 				{:else}
 					<Send class="h-4 w-4" />
@@ -240,4 +246,3 @@
 		</form>
 	</div>
 </div>
-

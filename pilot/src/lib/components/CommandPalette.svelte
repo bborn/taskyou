@@ -1,6 +1,10 @@
 <script lang="ts">
-	import { Search, Clock, Zap, AlertCircle, CheckCircle, Plus, Settings, ArrowRight } from 'lucide-svelte';
-	import type { Task } from '$lib/types';
+	import {
+		Search, Clock, Zap, AlertCircle, CheckCircle, Plus, Settings,
+		ArrowRight, LayoutDashboard, FolderOpen, PanelLeft, MessageSquare,
+		Link, ShieldCheck, Building2, RefreshCw, Keyboard, XCircle
+	} from 'lucide-svelte';
+	import type { Task, NavView } from '$lib/types';
 
 	interface Props {
 		isOpen: boolean;
@@ -8,10 +12,14 @@
 		tasks: Task[];
 		onSelectTask: (task: Task) => void;
 		onNewTask: () => void;
-		onSettings: () => void;
+		onNavigate: (view: NavView) => void;
+		onToggleSidebar: () => void;
+		onToggleChat: () => void;
+		onRefreshTasks: () => void;
+		onShowKeyboardHelp: () => void;
 	}
 
-	let { isOpen, onClose, tasks, onSelectTask, onNewTask, onSettings }: Props = $props();
+	let { isOpen, onClose, tasks, onSelectTask, onNewTask, onNavigate, onToggleSidebar, onToggleChat, onRefreshTasks, onShowKeyboardHelp }: Props = $props();
 
 	let query = $state('');
 	let selectedIndex = $state(0);
@@ -23,6 +31,7 @@
 		processing: { icon: Zap, color: 'text-[hsl(var(--status-processing))]' },
 		blocked: { icon: AlertCircle, color: 'text-[hsl(var(--status-blocked))]' },
 		done: { icon: CheckCircle, color: 'text-[hsl(var(--status-done))]' },
+		failed: { icon: XCircle, color: 'text-[hsl(var(--status-blocked))]' },
 	};
 
 	$effect(() => {
@@ -33,20 +42,41 @@
 		}
 	});
 
-	type Item = { id: string; type: 'task' | 'action'; task?: Task; label: string; description?: string; action?: () => void };
+	type Item = {
+		id: string;
+		type: 'task' | 'action';
+		task?: Task;
+		label: string;
+		description?: string;
+		shortcut?: string;
+		icon: typeof Clock;
+		iconColor?: string;
+		action?: () => void;
+	};
+
+	const actions: Item[] = [
+		{ id: 'new-task', type: 'action', label: 'New Task', description: 'Create a new task', shortcut: 'N', icon: Plus, iconColor: 'text-primary', action: () => { onClose(); onNewTask(); } },
+		{ id: 'go-dashboard', type: 'action', label: 'Go to Dashboard', description: 'View task board', shortcut: '1', icon: LayoutDashboard, iconColor: 'text-blue-500', action: () => { onClose(); onNavigate('dashboard'); } },
+		{ id: 'go-projects', type: 'action', label: 'Go to Projects', description: 'Manage projects & sandboxes', shortcut: '2', icon: FolderOpen, iconColor: 'text-green-500', action: () => { onClose(); onNavigate('projects'); } },
+		{ id: 'go-integrations', type: 'action', label: 'Go to Integrations', description: 'Connected services', icon: Link, iconColor: 'text-purple-500', action: () => { onClose(); onNavigate('integrations'); } },
+		{ id: 'go-approvals', type: 'action', label: 'Go to Approvals', description: 'Review agent actions', icon: ShieldCheck, iconColor: 'text-amber-500', action: () => { onClose(); onNavigate('approvals'); } },
+		{ id: 'go-workspaces', type: 'action', label: 'Go to Workspaces', description: 'Manage workspaces', icon: Building2, iconColor: 'text-cyan-500', action: () => { onClose(); onNavigate('workspaces'); } },
+		{ id: 'go-settings', type: 'action', label: 'Settings', description: 'Preferences & projects', icon: Settings, iconColor: 'text-muted-foreground', action: () => { onClose(); onNavigate('settings'); } },
+		{ id: 'toggle-sidebar', type: 'action', label: 'Toggle Sidebar', description: 'Show or hide the sidebar', shortcut: '[', icon: PanelLeft, iconColor: 'text-muted-foreground', action: () => { onClose(); onToggleSidebar(); } },
+		{ id: 'toggle-chat', type: 'action', label: 'Toggle Chat Panel', description: 'Show or hide the chat panel', shortcut: ']', icon: MessageSquare, iconColor: 'text-muted-foreground', action: () => { onClose(); onToggleChat(); } },
+		{ id: 'refresh-tasks', type: 'action', label: 'Refresh Tasks', description: 'Reload all tasks', shortcut: 'R', icon: RefreshCw, iconColor: 'text-muted-foreground', action: () => { onClose(); onRefreshTasks(); } },
+		{ id: 'keyboard-help', type: 'action', label: 'Keyboard Shortcuts', description: 'View all shortcuts', shortcut: '?', icon: Keyboard, iconColor: 'text-muted-foreground', action: () => { onClose(); onShowKeyboardHelp(); } },
+	];
 
 	let items = $derived.by((): Item[] => {
-		const actions: Item[] = [
-			{ id: 'new-task', type: 'action', label: 'New Task', description: 'Create a new task', action: () => { onClose(); onNewTask(); } },
-			{ id: 'settings', type: 'action', label: 'Settings', description: 'Open settings', action: () => { onClose(); onSettings(); } },
-		];
-
 		const taskItems: Item[] = tasks.map((t) => ({
 			id: `task-${t.id}`,
 			type: 'task' as const,
 			task: t,
 			label: t.title,
-			description: t.project !== 'personal' ? t.project : undefined,
+			description: t.project_id || t.status,
+			icon: (statusIcons[t.status] || statusIcons.backlog).icon,
+			iconColor: (statusIcons[t.status] || statusIcons.backlog).color,
 		}));
 
 		const all = [...actions, ...taskItems];
@@ -58,6 +88,13 @@
 				item.label.toLowerCase().includes(q) ||
 				(item.description && item.description.toLowerCase().includes(q)),
 		);
+	});
+
+	// Reset index when items change
+	$effect(() => {
+		if (items.length > 0 && selectedIndex >= items.length) {
+			selectedIndex = 0;
+		}
 	});
 
 	function handleKeydown(e: KeyboardEvent) {
@@ -108,7 +145,7 @@
 			</div>
 
 			<!-- Results -->
-			<div class="max-h-[300px] overflow-y-auto scrollbar-thin py-2">
+			<div class="max-h-[300px] overflow-y-auto scrollbar-thin py-1">
 				{#if items.length === 0}
 					<div class="px-4 py-8 text-center text-sm text-muted-foreground">
 						No results found
@@ -117,29 +154,23 @@
 					{#each items as item, i}
 						<!-- svelte-ignore a11y_no_static_element_interactions -->
 						<div
-							class="flex items-center gap-3 px-4 py-2.5 cursor-pointer transition-colors"
+							class="flex items-center gap-3 px-4 py-2 cursor-pointer transition-colors"
 							class:bg-accent={i === selectedIndex}
 							onclick={() => handleSelect(item)}
 							onmouseenter={() => (selectedIndex = i)}
 						>
-							{#if item.type === 'action'}
-								{#if item.id === 'new-task'}
-									<Plus class="h-4 w-4 text-primary shrink-0" />
-								{:else}
-									<Settings class="h-4 w-4 text-muted-foreground shrink-0" />
-								{/if}
-							{:else if item.task}
-								{@const si = statusIcons[item.task.status] || statusIcons.backlog}
-								<svelte:component this={si.icon} class="h-4 w-4 shrink-0 {si.color}" />
-							{/if}
+							<item.icon class="h-4 w-4 shrink-0 {item.iconColor || 'text-muted-foreground'}" />
 							<div class="flex-1 min-w-0">
 								<div class="text-sm truncate">{item.label}</div>
 								{#if item.description}
 									<div class="text-xs text-muted-foreground truncate">{item.description}</div>
 								{/if}
 							</div>
+							{#if item.shortcut}
+								<kbd class="kbd text-[10px]">{item.shortcut}</kbd>
+							{/if}
 							{#if i === selectedIndex}
-								<ArrowRight class="h-4 w-4 text-muted-foreground shrink-0" />
+								<ArrowRight class="h-3.5 w-3.5 text-muted-foreground shrink-0" />
 							{/if}
 						</div>
 					{/each}

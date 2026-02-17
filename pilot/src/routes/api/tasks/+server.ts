@@ -9,7 +9,7 @@ export const GET: RequestHandler = async ({ url, locals, platform }) => {
 
 	const options = {
 		status: url.searchParams.get('status') || undefined,
-		project: url.searchParams.get('project') || undefined,
+		project_id: url.searchParams.get('project_id') || undefined,
 		type: url.searchParams.get('type') || undefined,
 		includeClosed: url.searchParams.get('all') === 'true',
 	};
@@ -23,18 +23,24 @@ export const POST: RequestHandler = async ({ request, locals, platform }) => {
 	const user = locals.user!;
 	const db = platform!.env.DB;
 
-	const data = await request.json() as { title?: string; body?: string; type?: string; project?: string };
+	const data = await request.json() as { title?: string; body?: string; type?: string; project_id?: string; chat_id?: string };
 
 	if (!data.title) {
 		return json({ error: 'Title is required' }, { status: 400 });
 	}
 
-	const task = await createTask(db, user.id, {
-		title: data.title,
-		body: data.body,
-		type: data.type,
-		project: data.project,
-	});
+	try {
+		const task = await createTask(db, user.id, {
+			title: data.title,
+			body: data.body,
+			type: data.type,
+			project_id: data.project_id,
+			chat_id: data.chat_id,
+		});
 
-	return json(task, { status: 201 });
+		return json(task, { status: 201 });
+	} catch (e) {
+		console.error('Task creation failed:', e);
+		return json({ error: e instanceof Error ? e.message : String(e) }, { status: 500 });
+	}
 };

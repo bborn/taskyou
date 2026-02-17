@@ -1,55 +1,62 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "taskyou-pilot",
-  "main": ".svelte-kit/cloudflare/_worker.js",
-  "compatibility_date": "2025-04-01",
+  "main": "worker-entry.js",
+  "compatibility_date": "2025-12-01",
+  "compatibility_flags": ["nodejs_compat"],
   "assets": {
     "directory": ".svelte-kit/cloudflare",
     "binding": "ASSETS"
   },
-  // Containers config requires wrangler v4+. The adapter-cloudflare currently
-  // pins wrangler v3, so we keep this commented out until the adapter is updated.
-  // When deploying with wrangler v4, uncomment and add:
-  // "containers": [{
-  //   "class_name": "TaskSandbox",
-  //   "image": "./Dockerfile",
-  //   "max_instances": 10
-  // }],
+  "workflows": [
+    {
+      "name": "task-execution",
+      "binding": "TASK_WORKFLOW",
+      "class_name": "TaskExecutionWorkflow"
+    }
+  ],
   "durable_objects": {
     "bindings": [
       {
-        "name": "SANDBOX",
-        "class_name": "TaskSandbox"
+        "name": "TASKYOU_AGENT",
+        "class_name": "TaskYouAgent"
       }
     ]
   },
   "migrations": [
     {
       "tag": "v1",
-      "new_sqlite_classes": ["TaskSandbox"]
+      "new_sqlite_classes": ["Sandbox"]
+    },
+    {
+      "tag": "v2",
+      "deleted_classes": ["Sandbox"],
+      "new_sqlite_classes": ["TaskYouAgent"]
+    },
+    {
+      "tag": "v3",
+      "new_classes": ["TaskExecutionWorkflow"]
     }
   ],
   "d1_databases": [
     {
       "binding": "DB",
       "database_name": "taskyou-pilot-db",
-      "database_id": "placeholder-replace-with-actual-id"
+      "database_id": "00fd9e62-cb4c-411a-a1ca-6e3777cba0fd"
     }
   ],
   "kv_namespaces": [
     {
       "binding": "SESSIONS",
-      "id": "placeholder-replace-with-actual-id"
+      "id": "97030b57bfd9439cad190747ad778b81"
     }
   ],
   "vars": {
-    // Set to "production" when deploying via Cloudflare dashboard or wrangler secret
-    "ENVIRONMENT": "development"
+    "ENVIRONMENT": "production"
   },
   // Secrets (set via `wrangler secret put`):
-  // ANTHROPIC_API_KEY - Required for LLM chat streaming
-  // GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET - For Google OAuth
-  // GITHUB_CLIENT_ID, GITHUB_CLIENT_SECRET - For GitHub OAuth
+  // ANTHROPIC_API_KEY, GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET,
+  // GITHUB_CLIENT_ID, GITHUB_CLIENT_SECRET
   "r2_buckets": [
     {
       "binding": "STORAGE",

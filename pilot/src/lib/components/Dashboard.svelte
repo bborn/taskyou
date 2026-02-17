@@ -6,8 +6,8 @@
 	import NewTaskDialog from './NewTaskDialog.svelte';
 	import CommandPalette from './CommandPalette.svelte';
 	import ChatPanel from './ChatPanel.svelte';
-	import { taskState, fetchTasks, queueTask, closeTask, createTask } from '$lib/stores/tasks.svelte';
-	import { navState, toggleSidebar, toggleChatPanel, setBoardWidth } from '$lib/stores/nav.svelte';
+	import { taskState, fetchTasks, createTask } from '$lib/stores/tasks.svelte';
+	import { navState, navigate, toggleSidebar, toggleChatPanel, setBoardWidth } from '$lib/stores/nav.svelte';
 	import { projects as projectsApi } from '$lib/api/client';
 	import type { User, Task, Project } from '$lib/types';
 
@@ -33,12 +33,12 @@
 		}
 	});
 
-	onMount(async () => {
-		try {
-			projects = await projectsApi.list();
-		} catch (e) {
+	onMount(() => {
+		projectsApi.list().then((data) => {
+			projects = data;
+		}).catch((e) => {
 			console.error(e);
-		}
+		});
 	});
 
 	function handleKeydown(e: KeyboardEvent) {
@@ -106,19 +106,6 @@
 		selectedTask = updatedTask;
 	}
 
-	async function handleQueue(id: number) {
-		await queueTask(id);
-	}
-
-	async function handleRetry(id: number) {
-		const task = taskState.tasks.find((t) => t.id === id);
-		if (task) selectedTask = task;
-	}
-
-	async function handleClose(id: number) {
-		await closeTask(id);
-	}
-
 	// Resize handlers
 	function startResize(e: MouseEvent) {
 		e.preventDefault();
@@ -151,9 +138,6 @@
 		<div class="overflow-hidden flex flex-col {navState.chatPanelOpen ? 'flex-shrink-0' : 'flex-1'}" style={navState.chatPanelOpen ? `width: ${navState.boardWidth}%` : undefined}>
 			<div class="flex-1 overflow-y-auto p-4">
 				<TaskBoard
-					onQueue={handleQueue}
-					onRetry={handleRetry}
-					onClose={handleClose}
 					onTaskClick={handleTaskClick}
 					onNewTask={() => (showNewTask = true)}
 				/>
@@ -239,11 +223,7 @@
 						<h3 class="font-semibold text-xs uppercase tracking-wider text-muted-foreground mb-2">Actions</h3>
 						<div class="space-y-1.5">
 							<div class="flex justify-between"><span>New task</span><kbd class="kbd">N</kbd></div>
-							<div class="flex justify-between"><span>Execute task</span><span class="flex gap-1"><kbd class="kbd">⌘</kbd><kbd class="kbd">↵</kbd></span></div>
 							<div class="flex justify-between"><span>Refresh</span><kbd class="kbd">R</kbd></div>
-							<div class="flex justify-between"><span>Select / deselect task</span><kbd class="kbd">X</kbd></div>
-							<div class="flex justify-between"><span>Move task left/right</span><span class="flex gap-1"><kbd class="kbd">⇧</kbd><kbd class="kbd">←</kbd><kbd class="kbd">→</kbd></span></div>
-							<div class="flex justify-between"><span>Delete task</span><span class="flex gap-1"><kbd class="kbd">⌘</kbd><kbd class="kbd">⌫</kbd></span></div>
 						</div>
 					</div>
 					<div>
@@ -278,7 +258,11 @@
 	tasks={taskState.tasks}
 	onSelectTask={(task) => (selectedTask = task)}
 	onNewTask={() => (showNewTask = true)}
-	onSettings={() => {}}
+	onNavigate={navigate}
+	onToggleSidebar={toggleSidebar}
+	onToggleChat={toggleChatPanel}
+	onRefreshTasks={fetchTasks}
+	onShowKeyboardHelp={() => (showKeyboardHelp = true)}
 />
 
 {#if showNewTask}

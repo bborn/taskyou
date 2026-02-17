@@ -4,7 +4,7 @@
 
 	interface Props {
 		project?: Project;
-		onSubmit: (data: { name: string; path: string; aliases?: string; instructions?: string; color?: string }) => Promise<void>;
+		onSubmit: (data: { name: string; instructions?: string; color?: string }) => Promise<void>;
 		onDelete?: () => Promise<void>;
 		onClose: () => void;
 	}
@@ -12,8 +12,6 @@
 	let { project, onSubmit, onDelete, onClose }: Props = $props();
 
 	let name = $state(project?.name || '');
-	let path = $state(project?.path || '');
-	let aliases = $state(project?.aliases || '');
 	let instructions = $state(project?.instructions || '');
 	let color = $state(project?.color || '#888888');
 	let submitting = $state(false);
@@ -41,7 +39,7 @@
 
 		submitting = true;
 		try {
-			await onSubmit({ name: name.trim(), path: path.trim(), aliases: aliases.trim(), instructions: instructions.trim(), color });
+			await onSubmit({ name: name.trim(), instructions: instructions.trim(), color });
 			dialogEl.close();
 		} catch (err) {
 			console.error(err);
@@ -79,14 +77,6 @@
 				<div class="grid gap-2">
 					<label for="project-name">Name</label>
 					<input id="project-name" bind:value={name} placeholder="Project name" autofocus />
-				</div>
-				<div class="grid gap-2">
-					<label for="project-path">Path</label>
-					<input id="project-path" bind:value={path} placeholder="/path/to/project" class="font-mono" />
-				</div>
-				<div class="grid gap-2">
-					<label for="project-aliases">Aliases (comma-separated)</label>
-					<input id="project-aliases" bind:value={aliases} placeholder="alias1, alias2" />
 				</div>
 				<div class="grid gap-2">
 					<label for="project-instructions">Instructions</label>

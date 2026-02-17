@@ -2,11 +2,11 @@
 	import { onMount } from 'svelte';
 	import {
 		X, Play, RotateCcw, CheckCircle, Trash2, Edit3, Save,
-		GitPullRequest, GitBranch, Clock, Zap, AlertCircle,
-		Terminal, ExternalLink, XCircle, FileText, ListChecks,
-		Loader2, Pause,
+		Zap, AlertCircle, ExternalLink, XCircle, FileText,
+		Loader2,
 	} from 'lucide-svelte';
 	import { tasks as tasksApi } from '$lib/api/client';
+	import { updateTask as storeUpdateTask } from '$lib/stores/tasks.svelte';
 	import { Marked } from 'marked';
 	import type { Task, TaskLog, TaskStatus } from '$lib/types';
 
@@ -176,7 +176,7 @@
 
 	async function handleQueue() {
 		actionLoading = 'queue';
-		try { const updated = await tasksApi.queue(task.id); task = updated; onUpdate(updated); }
+		try { const updated = await storeUpdateTask(task.id, { status: 'queued' }); task = updated; onUpdate(updated); }
 		catch (err) { console.error(err); }
 		finally { actionLoading = null; }
 	}
@@ -184,16 +184,16 @@
 	async function handleRetry() {
 		actionLoading = 'retry';
 		try {
-			const updated = await tasksApi.retry(task.id, retryFeedback || undefined);
+			const updated = await storeUpdateTask(task.id, { status: 'queued' });
 			task = updated; onUpdate(updated);
 			retryDialogEl.close(); showRetryDialog = false; retryFeedback = '';
 		} catch (err) { console.error(err); }
 		finally { actionLoading = null; }
 	}
 
-	async function handleClose() {
+	async function handleMarkDone() {
 		actionLoading = 'close';
-		try { const updated = await tasksApi.close(task.id); task = updated; onUpdate(updated); }
+		try { const updated = await storeUpdateTask(task.id, { status: 'done' }); task = updated; onUpdate(updated); }
 		catch (err) { console.error(err); }
 		finally { actionLoading = null; }
 	}
@@ -279,11 +279,7 @@
 				{#if task.type}
 					<span class="badge-outline text-xs">{task.type}</span>
 				{/if}
-				{#if task.branch_name}
-					<span class="badge-secondary text-xs font-mono">{task.branch_name}</span>
-				{:else}
 					<span class="text-xs text-muted-foreground">#{task.id}</span>
-				{/if}
 				{#if isRunning}
 					<Loader2 class="size-4 animate-spin text-primary" />
 				{/if}
@@ -312,10 +308,10 @@
 					<button
 						class="btn-outline h-5 px-1.5 gap-1 text-[10px] text-amber-600 dark:text-amber-400 border-amber-500/30 hover:bg-amber-500/10 inline-flex items-center"
 						disabled={actionLoading !== null}
-						onclick={handleClose}
+						onclick={handleMarkDone}
 					>
-						<Pause class="size-2.5" />
-						Pause
+						<CheckCircle class="size-2.5" />
+						Done
 					</button>
 				{/if}
 				{#if !isEditing}
@@ -409,12 +405,6 @@
 							</div>
 						{/if}
 
-						{#if task.pr_url}
-							<a href={task.pr_url} target="_blank" rel="noopener noreferrer" class="btn-outline gap-1.5 w-full justify-center text-xs">
-								<ExternalLink class="size-3.5" />
-								View PR #{task.pr_number}
-							</a>
-						{/if}
 					</div>
 
 					<!-- Right pane: file viewer -->
@@ -560,12 +550,6 @@
 						</div>
 					{/if}
 
-					{#if task.pr_url}
-						<a href={task.pr_url} target="_blank" rel="noopener noreferrer" class="btn-outline gap-1.5 text-xs">
-							<ExternalLink class="size-3.5" />
-							PR #{task.pr_number}
-						</a>
-					{/if}
 				</div>
 			{/if}
 		</section>

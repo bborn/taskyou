@@ -1,32 +1,31 @@
-import { json } from '@sveltejs/kit';
+import { json, error } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
-import { updateProject, deleteProject } from '$lib/server/db';
+import { getProjectById, updateProject, deleteProject } from '$lib/server/db';
+
+// GET /api/projects/:id
+export const GET: RequestHandler = async ({ params, locals, platform }) => {
+	if (!locals.user || !platform?.env?.DB) throw error(401);
+
+	const project = await getProjectById(platform.env.DB, params.id);
+	if (!project) throw error(404, 'Project not found');
+	return json(project);
+};
 
 // PUT /api/projects/:id
 export const PUT: RequestHandler = async ({ params, request, locals, platform }) => {
-	const user = locals.user!;
-	const db = platform!.env.DB;
-	const projectId = parseInt(params.id);
-	const data = await request.json() as { name?: string; path?: string; aliases?: string; instructions?: string; color?: string };
+	if (!locals.user || !platform?.env?.DB) throw error(401);
 
-	const project = await updateProject(db, user.id, projectId, data);
-	if (!project) {
-		return json({ error: 'Project not found' }, { status: 404 });
-	}
-
+	const data = await request.json() as { name?: string; instructions?: string; color?: string };
+	const project = await updateProject(platform.env.DB, params.id, data);
+	if (!project) throw error(404, 'Project not found');
 	return json(project);
 };
 
 // DELETE /api/projects/:id
 export const DELETE: RequestHandler = async ({ params, locals, platform }) => {
-	const user = locals.user!;
-	const db = platform!.env.DB;
-	const projectId = parseInt(params.id);
+	if (!locals.user || !platform?.env?.DB) throw error(401);
 
-	const deleted = await deleteProject(db, user.id, projectId);
-	if (!deleted) {
-		return json({ error: 'Project not found' }, { status: 404 });
-	}
-
+	const deleted = await deleteProject(platform.env.DB, params.id);
+	if (!deleted) throw error(404, 'Project not found');
 	return new Response(null, { status: 204 });
 };

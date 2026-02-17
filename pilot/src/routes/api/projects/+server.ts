@@ -1,25 +1,19 @@
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
-import { listProjects, createProject } from '$lib/server/db';
+import { listProjects, createProject, updateProject } from '$lib/server/db';
 
 // GET /api/projects
 export const GET: RequestHandler = async ({ locals, platform }) => {
-	const user = locals.user!;
-	const db = platform!.env.DB;
-	const projects = await listProjects(db, user.id);
+	if (!locals.user || !platform?.env?.DB) return json([], { status: 401 });
+	const projects = await listProjects(platform.env.DB, locals.user.id);
 	return json(projects);
 };
 
-// POST /api/projects
-export const POST: RequestHandler = async ({ request, locals, platform }) => {
-	const user = locals.user!;
-	const db = platform!.env.DB;
-	const data = await request.json() as { name?: string; path?: string; aliases?: string; instructions?: string; color?: string };
+// POST /api/projects — create project record (user clicks Start to provision)
+export const POST: RequestHandler = async ({ locals, platform, request }) => {
+	if (!locals.user || !platform?.env?.DB) return json({ error: 'Unauthorized' }, { status: 401 });
 
-	if (!data.name) {
-		return json({ error: 'Name is required' }, { status: 400 });
-	}
-
-	const project = await createProject(db, user.id, { name: data.name!, path: data.path || '', ...data });
+	const data = (await request.json()) as { name?: string; instructions?: string; color?: string };
+	const project = await createProject(platform.env.DB, locals.user.id, data);
 	return json(project, { status: 201 });
 };

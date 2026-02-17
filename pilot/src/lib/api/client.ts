@@ -10,9 +10,7 @@ import type {
 	Chat,
 	Message,
 	Model,
-	AgentAction,
 	Integration,
-	Sandbox,
 	Workspace,
 } from '$lib/types';
 
@@ -46,10 +44,10 @@ export const auth = {
 
 // Tasks API
 export const tasks = {
-	list: (options?: { status?: string; project?: string; type?: string; all?: boolean }) => {
+	list: (options?: { status?: string; project_id?: string; type?: string; all?: boolean }) => {
 		const params = new URLSearchParams();
 		if (options?.status) params.set('status', options.status);
-		if (options?.project) params.set('project', options.project);
+		if (options?.project_id) params.set('project_id', options.project_id);
 		if (options?.type) params.set('type', options.type);
 		if (options?.all) params.set('all', 'true');
 		const query = params.toString();
@@ -68,15 +66,6 @@ export const tasks = {
 		}),
 	delete: (id: number) =>
 		fetchJSON<void>(`/tasks/${id}`, { method: 'DELETE' }),
-	queue: (id: number) =>
-		fetchJSON<Task>(`/tasks/${id}/queue`, { method: 'POST' }),
-	retry: (id: number, feedback?: string) =>
-		fetchJSON<Task>(`/tasks/${id}/retry`, {
-			method: 'POST',
-			body: JSON.stringify({ feedback }),
-		}),
-	close: (id: number) =>
-		fetchJSON<Task>(`/tasks/${id}/close`, { method: 'POST' }),
 	getLogs: (id: number, limit?: number) => {
 		const params = limit ? `?limit=${limit}` : '';
 		return fetchJSON<TaskLog[]>(`/tasks/${id}/logs${params}`);
@@ -86,17 +75,18 @@ export const tasks = {
 // Projects API
 export const projects = {
 	list: () => fetchJSON<Project[]>('/projects'),
-	create: (data: CreateProjectRequest) =>
+	get: (id: string) => fetchJSON<Project>(`/projects/${id}`),
+	create: (data?: CreateProjectRequest) =>
 		fetchJSON<Project>('/projects', {
 			method: 'POST',
-			body: JSON.stringify(data),
+			body: JSON.stringify(data || {}),
 		}),
-	update: (id: number, data: UpdateProjectRequest) =>
+	update: (id: string, data: UpdateProjectRequest) =>
 		fetchJSON<Project>(`/projects/${id}`, {
 			method: 'PUT',
 			body: JSON.stringify(data),
 		}),
-	delete: (id: number) =>
+	delete: (id: string) =>
 		fetchJSON<void>(`/projects/${id}`, { method: 'DELETE' }),
 };
 
@@ -104,7 +94,7 @@ export const projects = {
 export const chats = {
 	list: () => fetchJSON<Chat[]>('/chats'),
 	get: (id: string) => fetchJSON<Chat>(`/chats/${id}`),
-	create: (data?: { title?: string; model_id?: string }) =>
+	create: (data?: { title?: string; model_id?: string; project_id?: string }) =>
 		fetchJSON<Chat>('/chats', {
 			method: 'POST',
 			body: JSON.stringify(data || {}),
@@ -128,36 +118,9 @@ export const models = {
 	list: () => fetchJSON<Model[]>('/models'),
 };
 
-// Agent Actions API
-export const agentActions = {
-	list: (options?: { limit?: number; offset?: number }) => {
-		const params = new URLSearchParams();
-		if (options?.limit) params.set('limit', String(options.limit));
-		if (options?.offset) params.set('offset', String(options.offset));
-		const query = params.toString();
-		return fetchJSON<AgentAction[]>(`/agent-actions${query ? `?${query}` : ''}`);
-	},
-};
-
 // Integrations API
 export const integrations = {
 	list: () => fetchJSON<Integration[]>('/integrations'),
-};
-
-// Sandboxes API
-export const sandboxes = {
-	list: () => fetchJSON<Sandbox[]>('/sandboxes'),
-	create: (data?: { name?: string }) =>
-		fetchJSON<Sandbox>('/sandboxes', {
-			method: 'POST',
-			body: JSON.stringify(data || {}),
-		}),
-	start: (id: string) =>
-		fetchJSON<Sandbox>(`/sandboxes/${id}/start`, { method: 'POST' }),
-	stop: (id: string) =>
-		fetchJSON<Sandbox>(`/sandboxes/${id}/stop`, { method: 'POST' }),
-	delete: (id: string) =>
-		fetchJSON<void>(`/sandboxes/${id}`, { method: 'DELETE' }),
 };
 
 // Workspaces API

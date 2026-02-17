@@ -3,7 +3,7 @@
 
 	const features = [
 		{ icon: Sparkles, title: 'AI-Powered', description: 'Claude handles your tasks autonomously' },
-		{ icon: Shield, title: 'Private & Secure', description: 'Your data stays in your isolated sandbox' },
+		{ icon: Shield, title: 'Private & Secure', description: 'Your data stays in your isolated project environment' },
 		{ icon: GitBranch, title: 'Git Integration', description: 'Automatic branches and pull requests' },
 	];
 </script>

@@ -47,7 +47,6 @@
 				title: title.trim(),
 				body: body.trim() || undefined,
 				type,
-				project,
 			});
 			dialogEl.close();
 		} catch (error) {

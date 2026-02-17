@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { Loader2, GitPullRequest } from 'lucide-svelte';
+	import { Loader2 } from 'lucide-svelte';
 	import type { Task } from '$lib/types';
 
 	interface Props {
@@ -42,18 +42,6 @@
 	<div class="flex flex-wrap items-center gap-1 mt-1.5">
 		{#if task.type}
 			<span class="badge-outline text-[10px]">{task.type}</span>
-		{/if}
-		{#if task.branch_name}
-			<span class="badge-secondary text-[10px] font-mono">{task.branch_name}</span>
-		{/if}
-		{#if task.pr_url}
-			<a
-				href={task.pr_url}
-				target="_blank"
-				rel="noopener noreferrer"
-				onclick={(e) => e.stopPropagation()}
-				class="badge text-[10px]"
-			>PR #{task.pr_number}</a>
 		{/if}
 	</div>
 

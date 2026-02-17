@@ -1,4 +1,4 @@
-import type { Task, Chat, Message, Workspace, AgentAction, Sandbox, TaskStatus, TaskLog, Project, Model, Integration } from '$lib/types';
+import type { Task, Chat, Message, Workspace, TaskStatus, TaskLog, Project, Model, Integration } from '$lib/types';
 
 export async function initHostDB(db: D1Database): Promise<void> {
 	await db.batch([
@@ -41,6 +41,20 @@ export async function initHostDB(db: D1Database): Promise<void> {
 				FOREIGN KEY (workspace_id) REFERENCES workspaces(id)
 			)
 		`),
+		// Projects — organizational containers for tasks
+		db.prepare(`
+			CREATE TABLE IF NOT EXISTS projects (
+				id TEXT PRIMARY KEY,
+				workspace_id TEXT NOT NULL DEFAULT 'default',
+				user_id TEXT NOT NULL DEFAULT 'dev-user',
+				name TEXT NOT NULL DEFAULT 'Default',
+				instructions TEXT NOT NULL DEFAULT '',
+				color TEXT NOT NULL DEFAULT '#888888',
+				created_at TEXT NOT NULL DEFAULT (datetime('now')),
+				updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+				FOREIGN KEY (user_id) REFERENCES users(id)
+			)
+		`),
 		db.prepare(`
 			CREATE TABLE IF NOT EXISTS tasks (
 				id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -50,16 +64,13 @@ export async function initHostDB(db: D1Database): Promise<void> {
 				body TEXT NOT NULL DEFAULT '',
 				status TEXT NOT NULL DEFAULT 'backlog',
 				type TEXT NOT NULL DEFAULT 'code',
-				project TEXT NOT NULL DEFAULT 'personal',
+				project_id TEXT,
+				chat_id TEXT,
 				parent_task_id INTEGER,
 				subtasks_json TEXT,
 				cost_cents INTEGER NOT NULL DEFAULT 0,
 				output TEXT,
-				worktree_path TEXT,
-				branch_name TEXT,
-				port INTEGER,
-				pr_url TEXT,
-				pr_number INTEGER,
+				summary TEXT,
 				approval_status TEXT,
 				dangerous_mode INTEGER NOT NULL DEFAULT 0,
 				scheduled_at TEXT,
@@ -70,20 +81,9 @@ export async function initHostDB(db: D1Database): Promise<void> {
 				started_at TEXT,
 				completed_at TEXT,
 				FOREIGN KEY (user_id) REFERENCES users(id),
-				FOREIGN KEY (parent_task_id) REFERENCES tasks(id)
-			)
-		`),
-		db.prepare(`
-			CREATE TABLE IF NOT EXISTS projects (
-				id INTEGER PRIMARY KEY AUTOINCREMENT,
-				user_id TEXT NOT NULL,
-				name TEXT NOT NULL,
-				path TEXT NOT NULL DEFAULT '',
-				aliases TEXT NOT NULL DEFAULT '',
-				instructions TEXT NOT NULL DEFAULT '',
-				color TEXT NOT NULL DEFAULT '#888888',
-				created_at TEXT NOT NULL DEFAULT (datetime('now')),
-				FOREIGN KEY (user_id) REFERENCES users(id)
+				FOREIGN KEY (parent_task_id) REFERENCES tasks(id),
+				FOREIGN KEY (project_id) REFERENCES projects(id),
+				FOREIGN KEY (chat_id) REFERENCES chats(id)
 			)
 		`),
 		db.prepare(`
@@ -101,12 +101,13 @@ export async function initHostDB(db: D1Database): Promise<void> {
 				id TEXT PRIMARY KEY,
 				workspace_id TEXT NOT NULL DEFAULT 'default',
 				user_id TEXT NOT NULL,
+				project_id TEXT,
 				title TEXT NOT NULL DEFAULT 'New Chat',
 				model_id TEXT NOT NULL DEFAULT 'claude-sonnet-4-5-20250929',
-				sandbox_id TEXT,
 				created_at TEXT NOT NULL DEFAULT (datetime('now')),
 				updated_at TEXT NOT NULL DEFAULT (datetime('now')),
-				FOREIGN KEY (user_id) REFERENCES users(id)
+				FOREIGN KEY (user_id) REFERENCES users(id),
+				FOREIGN KEY (project_id) REFERENCES projects(id)
 			)
 		`),
 		db.prepare(`
@@ -123,34 +124,6 @@ export async function initHostDB(db: D1Database): Promise<void> {
 			)
 		`),
 		db.prepare(`
-			CREATE TABLE IF NOT EXISTS tool_calls (
-				id TEXT PRIMARY KEY,
-				message_id TEXT NOT NULL,
-				tool_name TEXT NOT NULL,
-				arguments_json TEXT NOT NULL DEFAULT '{}',
-				result_json TEXT,
-				status TEXT NOT NULL DEFAULT 'pending',
-				created_at TEXT NOT NULL DEFAULT (datetime('now')),
-				FOREIGN KEY (message_id) REFERENCES messages(id) ON DELETE CASCADE
-			)
-		`),
-		db.prepare(`
-			CREATE TABLE IF NOT EXISTS agent_actions (
-				id INTEGER PRIMARY KEY AUTOINCREMENT,
-				workspace_id TEXT NOT NULL DEFAULT 'default',
-				task_id INTEGER,
-				sandbox_id TEXT,
-				action_type TEXT NOT NULL,
-				description TEXT NOT NULL DEFAULT '',
-				reasoning TEXT,
-				risk_level TEXT NOT NULL DEFAULT 'low',
-				cost_cents INTEGER NOT NULL DEFAULT 0,
-				status TEXT NOT NULL DEFAULT 'completed',
-				created_at TEXT NOT NULL DEFAULT (datetime('now')),
-				FOREIGN KEY (task_id) REFERENCES tasks(id)
-			)
-		`),
-		db.prepare(`
 			CREATE TABLE IF NOT EXISTS integrations (
 				id INTEGER PRIMARY KEY AUTOINCREMENT,
 				workspace_id TEXT NOT NULL DEFAULT 'default',
@@ -160,17 +133,6 @@ export async function initHostDB(db: D1Database): Promise<void> {
 				access_token_encrypted TEXT,
 				refresh_token_encrypted TEXT,
 				token_expires_at TEXT,
-				created_at TEXT NOT NULL DEFAULT (datetime('now')),
-				updated_at TEXT NOT NULL DEFAULT (datetime('now'))
-			)
-		`),
-		db.prepare(`
-			CREATE TABLE IF NOT EXISTS sandboxes (
-				id TEXT PRIMARY KEY,
-				workspace_id TEXT NOT NULL DEFAULT 'default',
-				name TEXT NOT NULL DEFAULT 'Default',
-				status TEXT NOT NULL DEFAULT 'pending',
-				provider TEXT NOT NULL DEFAULT 'cloudflare',
 				created_at TEXT NOT NULL DEFAULT (datetime('now')),
 				updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 			)
@@ -257,7 +219,7 @@ export async function getUserById(
 export async function listTasks(
 	db: D1Database,
 	userId: string,
-	options: { status?: string; project?: string; type?: string; includeClosed?: boolean } = {},
+	options: { status?: string; project_id?: string; type?: string; includeClosed?: boolean } = {},
 ): Promise<Task[]> {
 	let query = 'SELECT * FROM tasks WHERE user_id = ?';
 	const params: (string | number)[] = [userId];
@@ -269,9 +231,9 @@ export async function listTasks(
 		query += " AND status NOT IN ('done', 'failed')";
 	}
 
-	if (options.project) {
-		query += ' AND project = ?';
-		params.push(options.project);
+	if (options.project_id) {
+		query += ' AND project_id = ?';
+		params.push(options.project_id);
 	}
 
 	if (options.type) {
@@ -296,13 +258,13 @@ export async function getTask(db: D1Database, userId: string, taskId: number): P
 export async function createTask(
 	db: D1Database,
 	userId: string,
-	data: { title: string; body?: string; type?: string; project?: string },
+	data: { title: string; body?: string; type?: string; project_id?: string; chat_id?: string },
 ): Promise<Task> {
 	const result = await db
 		.prepare(
-			'INSERT INTO tasks (user_id, title, body, type, project) VALUES (?, ?, ?, ?, ?) RETURNING *',
+			'INSERT INTO tasks (user_id, title, body, type, project_id, chat_id) VALUES (?, ?, ?, ?, ?, ?) RETURNING *',
 		)
-		.bind(userId, data.title, data.body || '', data.type || 'code', data.project || 'personal')
+		.bind(userId, data.title, data.body || '', data.type || 'code', data.project_id || null, data.chat_id || null)
 		.first<Task & { user_id: string; dangerous_mode: number }>();
 
 	return rowToTask(result!);
@@ -312,7 +274,7 @@ export async function updateTask(
 	db: D1Database,
 	userId: string,
 	taskId: number,
-	data: { title?: string; body?: string; status?: TaskStatus; type?: string; project?: string },
+	data: { title?: string; body?: string; status?: TaskStatus; type?: string; project_id?: string; output?: string; summary?: string },
 ): Promise<Task | null> {
 	const sets: string[] = [];
 	const params: (string | number)[] = [];
@@ -321,7 +283,9 @@ export async function updateTask(
 	if (data.body !== undefined) { sets.push('body = ?'); params.push(data.body); }
 	if (data.status !== undefined) { sets.push('status = ?'); params.push(data.status); }
 	if (data.type !== undefined) { sets.push('type = ?'); params.push(data.type); }
-	if (data.project !== undefined) { sets.push('project = ?'); params.push(data.project); }
+	if (data.project_id !== undefined) { sets.push('project_id = ?'); params.push(data.project_id); }
+	if (data.output !== undefined) { sets.push('output = ?'); params.push(data.output); }
+	if (data.summary !== undefined) { sets.push('summary = ?'); params.push(data.summary); }
 
 	if (sets.length === 0) return getTask(db, userId, taskId);
 
@@ -372,12 +336,12 @@ export async function getChat(db: D1Database, userId: string, chatId: string): P
 export async function createChat(
 	db: D1Database,
 	userId: string,
-	data: { title?: string; model_id?: string },
+	data: { title?: string; model_id?: string; project_id?: string },
 ): Promise<Chat> {
 	const id = crypto.randomUUID();
 	const result = await db
-		.prepare('INSERT INTO chats (id, user_id, title, model_id) VALUES (?, ?, ?, ?) RETURNING *')
-		.bind(id, userId, data.title || 'New Chat', data.model_id || 'claude-sonnet-4-5-20250929')
+		.prepare('INSERT INTO chats (id, user_id, title, model_id, project_id) VALUES (?, ?, ?, ?, ?) RETURNING *')
+		.bind(id, userId, data.title || 'New Chat', data.model_id || 'claude-sonnet-4-5-20250929', data.project_id || null)
 		.first<Chat>();
 	return result!;
 }
@@ -448,32 +412,6 @@ export async function listModels(db: D1Database): Promise<Model[]> {
 	}));
 }
 
-// ── Agent Action operations ──
-
-export async function listAgentActions(
-	db: D1Database,
-	options: { limit?: number; offset?: number } = {},
-): Promise<AgentAction[]> {
-	const limit = options.limit || 50;
-	const offset = options.offset || 0;
-	const result = await db
-		.prepare('SELECT * FROM agent_actions ORDER BY created_at DESC LIMIT ? OFFSET ?')
-		.bind(limit, offset)
-		.all<AgentAction>();
-	return result.results || [];
-}
-
-export async function createAgentAction(
-	db: D1Database,
-	data: { action_type: string; description: string; reasoning?: string; risk_level?: string; cost_cents?: number; task_id?: number },
-): Promise<AgentAction> {
-	const result = await db
-		.prepare('INSERT INTO agent_actions (action_type, description, reasoning, risk_level, cost_cents, task_id) VALUES (?, ?, ?, ?, ?, ?) RETURNING *')
-		.bind(data.action_type, data.description, data.reasoning || null, data.risk_level || 'low', data.cost_cents || 0, data.task_id || null)
-		.first<AgentAction>();
-	return result!;
-}
-
 // ── Workspace operations ──
 
 export async function listWorkspaces(db: D1Database, userId: string): Promise<Workspace[]> {
@@ -503,7 +441,6 @@ export async function createWorkspace(
 		.prepare('INSERT INTO workspaces (id, name, owner_id) VALUES (?, ?, ?) RETURNING *')
 		.bind(id, data.name, ownerId)
 		.first<Workspace>();
-	// Also add owner as member
 	await db
 		.prepare('INSERT INTO memberships (user_id, workspace_id, role) VALUES (?, ?, ?)')
 		.bind(ownerId, id, 'owner')
@@ -548,97 +485,66 @@ export async function listIntegrations(db: D1Database): Promise<Integration[]> {
 	return result.results || [];
 }
 
-// ── Sandbox operations ──
-
-export async function listSandboxes(db: D1Database): Promise<Sandbox[]> {
-	const result = await db
-		.prepare('SELECT * FROM sandboxes ORDER BY created_at DESC')
-		.all<Sandbox>();
-	return result.results || [];
-}
-
-export async function createSandbox(
-	db: D1Database,
-	data: { name?: string; provider?: string },
-): Promise<Sandbox> {
-	const id = crypto.randomUUID();
-	const result = await db
-		.prepare('INSERT INTO sandboxes (id, name, provider) VALUES (?, ?, ?) RETURNING *')
-		.bind(id, data.name || 'Default', data.provider || 'cloudflare')
-		.first<Sandbox>();
-	return result!;
-}
-
-export async function updateSandboxStatus(
-	db: D1Database,
-	sandboxId: string,
-	status: string,
-): Promise<Sandbox | null> {
-	return db
-		.prepare("UPDATE sandboxes SET status = ?, updated_at = datetime('now') WHERE id = ? RETURNING *")
-		.bind(status, sandboxId)
-		.first<Sandbox>();
-}
-
 // ── Project operations ──
 
 export async function listProjects(db: D1Database, userId: string): Promise<Project[]> {
 	const result = await db
-		.prepare('SELECT * FROM projects WHERE user_id = ? ORDER BY name')
+		.prepare('SELECT * FROM projects WHERE user_id = ? ORDER BY created_at DESC')
 		.bind(userId)
-		.all<Project & { user_id: string }>();
-	return (result.results || []).map(({ user_id, ...p }) => p as Project);
+		.all<Project>();
+	return result.results || [];
 }
 
 export async function createProject(
 	db: D1Database,
 	userId: string,
-	data: { name: string; path: string; aliases?: string; instructions?: string; color?: string },
+	data: { name?: string; instructions?: string; color?: string },
 ): Promise<Project> {
+	const id = crypto.randomUUID();
 	const result = await db
-		.prepare(
-			'INSERT INTO projects (user_id, name, path, aliases, instructions, color) VALUES (?, ?, ?, ?, ?, ?) RETURNING *',
-		)
-		.bind(userId, data.name, data.path, data.aliases || '', data.instructions || '', data.color || '#888888')
-		.first<Project & { user_id: string }>();
+		.prepare('INSERT INTO projects (id, user_id, name, instructions, color) VALUES (?, ?, ?, ?, ?) RETURNING *')
+		.bind(id, userId, data.name || 'Default', data.instructions || '', data.color || '#888888')
+		.first<Project>();
+	return result!;
+}
 
-	const { user_id, ...project } = result!;
-	return project as Project;
+export async function getProjectById(
+	db: D1Database,
+	projectId: string,
+): Promise<Project | null> {
+	return db
+		.prepare('SELECT * FROM projects WHERE id = ?')
+		.bind(projectId)
+		.first<Project>();
 }
 
 export async function updateProject(
 	db: D1Database,
-	userId: string,
-	projectId: number,
-	data: { name?: string; path?: string; aliases?: string; instructions?: string; color?: string },
+	projectId: string,
+	data: { name?: string; instructions?: string; color?: string },
 ): Promise<Project | null> {
 	const sets: string[] = [];
 	const params: (string | number)[] = [];
 
 	if (data.name !== undefined) { sets.push('name = ?'); params.push(data.name); }
-	if (data.path !== undefined) { sets.push('path = ?'); params.push(data.path); }
-	if (data.aliases !== undefined) { sets.push('aliases = ?'); params.push(data.aliases); }
 	if (data.instructions !== undefined) { sets.push('instructions = ?'); params.push(data.instructions); }
 	if (data.color !== undefined) { sets.push('color = ?'); params.push(data.color); }
 
-	if (sets.length === 0) return null;
+	if (sets.length === 0) return getProjectById(db, projectId);
 
-	params.push(projectId, userId);
+	sets.push("updated_at = datetime('now')");
+	params.push(projectId);
 
-	const row = await db
-		.prepare(`UPDATE projects SET ${sets.join(', ')} WHERE id = ? AND user_id = ? RETURNING *`)
+	return db
+		.prepare(`UPDATE projects SET ${sets.join(', ')} WHERE id = ? RETURNING *`)
 		.bind(...params)
-		.first<Project & { user_id: string }>();
-
-	if (!row) return null;
-	const { user_id, ...project } = row;
-	return project as Project;
+		.first<Project>();
 }
 
-export async function deleteProject(db: D1Database, userId: string, projectId: number): Promise<boolean> {
+export async function deleteProject(db: D1Database, projectId: string): Promise<boolean> {
 	const result = await db
-		.prepare('DELETE FROM projects WHERE id = ? AND user_id = ?')
-		.bind(projectId, userId)
+		.prepare('DELETE FROM projects WHERE id = ?')
+		.bind(projectId)
 		.run();
 	return (result.meta?.changes ?? 0) > 0;
 }
@@ -708,7 +614,8 @@ export async function updateSettings(
 	}
 }
 
-// Helper to convert DB row to Task
+// ── Helpers ──
+
 function rowToTask(row: Task & { user_id?: string; dangerous_mode: number | boolean }): Task {
 	const { user_id, ...task } = row as Task & { user_id?: string };
 	return {

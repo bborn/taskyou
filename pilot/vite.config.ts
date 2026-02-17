@@ -5,7 +5,7 @@ import { defineConfig } from 'vite';
 export default defineConfig({
 	plugins: [tailwindcss(), sveltekit()],
 	resolve: {
-		conditions: ['workerd', 'worker', 'browser'],
+		conditions: ['browser', 'workerd', 'worker'],
 	},
 	ssr: {
 		resolve: {

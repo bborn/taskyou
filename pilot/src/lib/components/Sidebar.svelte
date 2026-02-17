@@ -1,11 +1,11 @@
 <script lang="ts">
 	import {
-		Zap, LayoutDashboard, MessageSquare, Plus, Box, Plug, ShieldCheck,
+		Zap, LayoutDashboard, MessageSquare, Plus, FolderOpen, Plug, ShieldCheck,
 		Settings, LogOut, Moon, Sun, Monitor, Trash2,
 	} from 'lucide-svelte';
 	import { onMount } from 'svelte';
 	import { navState, navigate, toggleSidebar, closeMobileSidebar } from '$lib/stores/nav.svelte';
-	import { chatState, fetchChats, selectChat, createNewChat, deleteCurrentChat } from '$lib/stores/chat.svelte';
+	import { chatState, fetchChats, selectChat, createNewChat, deleteChat } from '$lib/stores/chat.svelte';
 	import type { User, Chat, NavView } from '$lib/types';
 
 	interface Props {
@@ -52,20 +52,23 @@
 	let collapsed = $derived(navState.sidebarCollapsed);
 
 	async function handleNewChat() {
-		await createNewChat();
-		navigate('dashboard');
-	}
-
-	function handleSelectChat(chat: Chat) {
-		selectChat(chat);
-		navigate('dashboard');
+		const chat = await createNewChat();
+		window.location.hash = `#/chat/${chat.id}`;
 		closeMobileSidebar();
 	}
 
-	function handleDeleteChat(e: MouseEvent, chatId: string) {
+	function handleSelectChat(chat: Chat) {
+		window.location.hash = `#/chat/${chat.id}`;
+		closeMobileSidebar();
+	}
+
+	async function handleDeleteChat(e: MouseEvent, chat: Chat) {
 		e.stopPropagation();
-		if (chatState.activeChat?.id === chatId) {
-			deleteCurrentChat();
+		if (!confirm(`Delete "${chat.title}"?`)) return;
+		const wasActive = chatState.activeChat?.id === chat.id;
+		await deleteChat(chat.id);
+		if (wasActive) {
+			window.location.hash = '#/dashboard';
 		}
 	}
 </script>
@@ -161,7 +164,7 @@
 							</span>
 							<span>{chat.title}</span>
 							<button
-								onclick={(e) => handleDeleteChat(e, chat.id)}
+								onclick={(e) => handleDeleteChat(e, chat)}
 								class="ml-auto opacity-0 group-hover:opacity-100 p-0.5 rounded hover:bg-destructive/10 transition-opacity flex-shrink-0"
 							>
 								<Trash2 class="size-3 text-destructive" />
@@ -180,17 +183,17 @@
 		<hr role="separator">
 
 		<section>
-			<h3 role="group" data-sidebar-label>Sandboxes</h3>
+			<h3 role="group" data-sidebar-label>Projects</h3>
 			<ul>
 				<li>
 					<!-- svelte-ignore a11y_missing_attribute -->
 					<a
-						href="#sandboxes"
-						onclick={(e) => { e.preventDefault(); navigate('sandboxes'); closeMobileSidebar(); }}
-						aria-current={navState.view === 'sandboxes' ? 'page' : undefined}
+						href="#projects"
+						onclick={(e) => { e.preventDefault(); navigate('projects'); closeMobileSidebar(); }}
+						aria-current={navState.view === 'projects' ? 'page' : undefined}
 					>
-						<Box class="size-4 flex-shrink-0" />
-						<span>Manage Sandboxes</span>
+						<FolderOpen class="size-4 flex-shrink-0" />
+						<span>Manage Projects</span>
 					</a>
 				</li>
 			</ul>

@@ -37,16 +37,12 @@ export interface Task {
 	body: string;
 	status: TaskStatus;
 	type: string;
-	project: string;
+	project_id: string;
+	chat_id?: string;
 	workspace_id: string;
 	parent_task_id?: number;
 	subtasks_json?: string;
 	cost_cents: number;
-	worktree_path?: string;
-	branch_name?: string;
-	port?: number;
-	pr_url?: string;
-	pr_number?: number;
 	output?: string;
 	summary?: string;
 	approval_status?: 'pending_review' | 'approved' | 'rejected';
@@ -64,7 +60,8 @@ export interface CreateTaskRequest {
 	title: string;
 	body?: string;
 	type?: string;
-	project?: string;
+	project_id?: string;
+	chat_id?: string;
 }
 
 export interface UpdateTaskRequest {
@@ -72,32 +69,29 @@ export interface UpdateTaskRequest {
 	body?: string;
 	status?: TaskStatus;
 	type?: string;
-	project?: string;
+	project_id?: string;
 }
 
-// Project types
+// Project types — organizational containers for tasks
 export interface Project {
-	id: number;
+	id: string;
+	workspace_id: string;
+	user_id: string;
 	name: string;
-	path: string;
-	aliases: string;
 	instructions: string;
 	color: string;
 	created_at: string;
+	updated_at: string;
 }
 
 export interface CreateProjectRequest {
 	name: string;
-	path: string;
-	aliases?: string;
 	instructions?: string;
 	color?: string;
 }
 
 export interface UpdateProjectRequest {
 	name?: string;
-	path?: string;
-	aliases?: string;
 	instructions?: string;
 	color?: string;
 }
@@ -107,9 +101,9 @@ export interface Chat {
 	id: string;
 	workspace_id: string;
 	user_id: string;
+	project_id?: string;
 	title: string;
 	model_id: string;
-	sandbox_id?: string;
 	created_at: string;
 	updated_at: string;
 }
@@ -127,34 +121,6 @@ export interface Message {
 	created_at: string;
 }
 
-export interface ToolCall {
-	id: string;
-	message_id: string;
-	tool_name: string;
-	arguments_json: string;
-	result_json?: string;
-	status: 'pending' | 'running' | 'completed' | 'failed';
-	created_at: string;
-}
-
-// Agent action types
-export type RiskLevel = 'low' | 'medium' | 'high';
-export type ActionStatus = 'completed' | 'pending_approval' | 'rejected' | 'failed';
-
-export interface AgentAction {
-	id: number;
-	workspace_id: string;
-	task_id?: number;
-	sandbox_id?: string;
-	action_type: string;
-	description: string;
-	reasoning?: string;
-	risk_level: RiskLevel;
-	cost_cents: number;
-	status: ActionStatus;
-	created_at: string;
-}
-
 // Integration types
 export interface Integration {
 	id: number;
@@ -162,19 +128,6 @@ export interface Integration {
 	provider: 'github' | 'gmail' | 'slack' | 'linear';
 	status: 'connected' | 'disconnected' | 'error';
 	external_id?: string;
-	created_at: string;
-	updated_at: string;
-}
-
-// Sandbox types
-export type SandboxStatus = 'pending' | 'provisioning' | 'running' | 'stopped' | 'error';
-
-export interface Sandbox {
-	id: string;
-	workspace_id: string;
-	name: string;
-	status: SandboxStatus;
-	provider: 'cloudflare' | 'local';
 	created_at: string;
 	updated_at: string;
 }
@@ -201,18 +154,22 @@ export interface TaskLog {
 	created_at: string;
 }
 
-// Inbound message types
-export interface InboundMessage {
-	id: number;
-	workspace_id: string;
-	channel: 'email' | 'telegram' | 'webhook';
-	sender: string;
-	subject?: string;
-	body: string;
-	processed: boolean;
-	chat_id?: string;
-	created_at: string;
+// Agent chat message (from AI SDK)
+export interface AgentChatMessage {
+	id: string;
+	role: 'user' | 'assistant';
+	content: string;
+	createdAt?: string;
+	toolInvocations?: ToolInvocation[];
+}
+
+export interface ToolInvocation {
+	toolCallId: string;
+	toolName: string;
+	args: Record<string, unknown>;
+	state: 'call' | 'result' | 'partial-call';
+	result?: unknown;
 }
 
 // Navigation
-export type NavView = 'dashboard' | 'workspaces' | 'sandboxes' | 'integrations' | 'approvals' | 'settings';
+export type NavView = 'dashboard' | 'workspaces' | 'projects' | 'integrations' | 'approvals' | 'settings';

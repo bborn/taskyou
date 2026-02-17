@@ -45,12 +45,12 @@
 		finally { saving = false; }
 	}
 
-	async function handleCreateProject(data: { name: string; path: string; aliases?: string; instructions?: string; color?: string }) {
+	async function handleCreateProject(data: { name: string; instructions?: string; color?: string }) {
 		const newProject = await projectsApi.create(data);
 		projects = [...projects, newProject];
 	}
 
-	async function handleUpdateProject(data: { name?: string; path?: string; aliases?: string; instructions?: string; color?: string }) {
+	async function handleUpdateProject(data: { name?: string; instructions?: string; color?: string }) {
 		if (!editingProject) return;
 		const updated = await projectsApi.update(editingProject.id, data);
 		projects = projects.map((p) => (p.id === editingProject!.id ? updated : p));
@@ -191,7 +191,7 @@
 											<div class="w-3 h-3 rounded-full shrink-0" style:background-color={project.color || '#888'}></div>
 											<div class="min-w-0">
 												<div class="font-medium text-sm">{project.name}</div>
-												<div class="text-xs text-muted-foreground truncate max-w-[200px]">{project.path}</div>
+												<div class="text-xs text-muted-foreground truncate max-w-[200px]">{project.instructions || 'No instructions'}</div>
 											</div>
 										</div>
 										<button

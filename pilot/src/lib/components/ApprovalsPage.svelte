@@ -44,7 +44,7 @@
 										{/if}
 										<div class="flex items-center gap-2 mt-2">
 											<span class="badge-secondary">{task.type}</span>
-											<span class="text-xs text-muted-foreground">{task.project}</span>
+											<span class="text-xs text-muted-foreground">{task.project_id}</span>
 										</div>
 									</div>
 									<div class="flex gap-2 shrink-0">

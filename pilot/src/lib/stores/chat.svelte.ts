@@ -1,14 +1,25 @@
-import type { Chat, Message } from '$lib/types';
+import type { Chat, Message, AgentChatMessage } from '$lib/types';
 import { chats as chatsApi, messages as messagesApi } from '$lib/api/client';
+import { sendChatViaWebSocket } from './agent-ws';
+import { agentState, agentChatStream, restoredMessages, setOnMessagesRestored } from './agent.svelte';
 
 export const chatState = $state({
 	chats: [] as Chat[],
 	activeChat: null as Chat | null,
 	messages: [] as Message[],
+	// Agent chat messages (from WebSocket)
+	agentMessages: [] as AgentChatMessage[],
 	loading: false,
-	streaming: false,
-	streamingContent: '',
 });
+
+// Derived streaming state from agent store (single source of truth)
+export function isStreaming() {
+	return agentChatStream.streaming;
+}
+
+export function getStreamingContent() {
+	return agentChatStream.streamingContent;
+}
 
 export async function fetchChats() {
 	try {
@@ -18,16 +29,11 @@ export async function fetchChats() {
 	}
 }
 
-export async function selectChat(chat: Chat) {
+export function selectChat(chat: Chat) {
 	chatState.activeChat = chat;
-	chatState.loading = true;
-	try {
-		chatState.messages = await messagesApi.list(chat.id);
-	} catch (e) {
-		console.error('Failed to fetch messages:', e);
-	} finally {
-		chatState.loading = false;
-	}
+	chatState.messages = [];
+	chatState.agentMessages = [];
+	// Agent DO handles persistence — messages restored via cf_agent_chat_messages on WS connect
 }
 
 export async function createNewChat(modelId?: string): Promise<Chat> {
@@ -35,138 +41,95 @@ export async function createNewChat(modelId?: string): Promise<Chat> {
 	chatState.chats = [chat, ...chatState.chats];
 	chatState.activeChat = chat;
 	chatState.messages = [];
+	chatState.agentMessages = [];
 	return chat;
 }
 
-export async function deleteCurrentChat() {
-	if (!chatState.activeChat) return;
-	await chatsApi.delete(chatState.activeChat.id);
-	chatState.chats = chatState.chats.filter(c => c.id !== chatState.activeChat!.id);
-	chatState.activeChat = null;
-	chatState.messages = [];
+export async function deleteChat(chatId: string) {
+	await chatsApi.delete(chatId);
+	chatState.chats = chatState.chats.filter(c => c.id !== chatId);
+	if (chatState.activeChat?.id === chatId) {
+		chatState.activeChat = null;
+		chatState.messages = [];
+		chatState.agentMessages = [];
+	}
 }
 
-export async function sendMessage(content: string) {
-	if (!chatState.activeChat || !content.trim()) return;
+/**
+ * Load persisted messages from the agent's DO storage.
+ * Called automatically when cf_agent_chat_messages is received via WebSocket.
+ */
+export function loadRestoredMessages() {
+	if (restoredMessages.length > 0) {
+		chatState.agentMessages = [...restoredMessages];
+	}
+}
 
-	const chatId = chatState.activeChat.id;
+// NOTE: setOnMessagesRestored(loadRestoredMessages) must be called from +page.svelte
+// to survive Vite tree-shaking. See memory note on tree-shaking.
+
+/**
+ * Send a message to the agent via WebSocket (AIChatAgent protocol).
+ * The agent handles persistence, streaming, and tool calling.
+ */
+export async function sendAgentChatMessage(content: string, _userId: string) {
+	if (!content.trim() || agentChatStream.streaming) return;
+
+	if (!agentState.connected) {
+		const errorMsg: AgentChatMessage = {
+			id: crypto.randomUUID(),
+			role: 'assistant',
+			content: '**Error:** Not connected to agent. Please wait for connection...',
+			createdAt: new Date().toISOString(),
+		};
+		chatState.agentMessages = [...chatState.agentMessages, errorMsg];
+		return;
+	}
+
+	if (!chatState.activeChat) {
+		const errorMsg: AgentChatMessage = {
+			id: crypto.randomUUID(),
+			role: 'assistant',
+			content: '**Error:** No active chat. Please create or select a chat first.',
+			createdAt: new Date().toISOString(),
+		};
+		chatState.agentMessages = [...chatState.agentMessages, errorMsg];
+		return;
+	}
 
 	// Add user message optimistically
-	const userMsg: Message = {
+	const userMsg: AgentChatMessage = {
 		id: crypto.randomUUID(),
-		chat_id: chatId,
 		role: 'user',
 		content: content.trim(),
-		input_tokens: 0,
-		output_tokens: 0,
-		created_at: new Date().toISOString(),
+		createdAt: new Date().toISOString(),
 	};
-	chatState.messages = [...chatState.messages, userMsg];
-
-	// Auto-title from first message
-	if (chatState.messages.filter(m => m.role === 'user').length === 1) {
+	chatState.agentMessages = [...chatState.agentMessages, userMsg];
+	if (chatState.agentMessages.filter(m => m.role === 'user').length === 1 && chatState.activeChat) {
 		const title = content.trim().slice(0, 60) + (content.length > 60 ? '...' : '');
 		chatState.activeChat = { ...chatState.activeChat, title };
 		chatState.chats = chatState.chats.map(c =>
-			c.id === chatId ? { ...c, title } : c
+			c.id === chatState.activeChat!.id ? { ...c, title } : c
 		);
 	}
 
-	// Stream LLM response
-	chatState.streaming = true;
-	chatState.streamingContent = '';
+	// Set streaming state before sending
+	agentChatStream.streaming = true;
+	agentChatStream.streamingContent = '';
+	agentChatStream.lastError = null;
+	agentChatStream.completedMessage = null;
 
-	try {
-		const response = await fetch('/api/chat/stream', {
-			method: 'POST',
-			headers: { 'Content-Type': 'application/json' },
-			body: JSON.stringify({ chat_id: chatId, content: content.trim() }),
-			credentials: 'include',
-		});
+	// Send all messages via WebSocket using AIChatAgent protocol
+	const requestId = sendChatViaWebSocket(chatState.agentMessages);
 
-		if (!response.ok) {
-			throw new Error(`Chat failed: ${response.statusText}`);
-		}
-
-		const reader = response.body?.getReader();
-		const decoder = new TextDecoder();
-		let fullContent = '';
-
-		if (reader) {
-			while (true) {
-				const { done, value } = await reader.read();
-				if (done) break;
-
-				const chunk = decoder.decode(value, { stream: true });
-				const lines = chunk.split('\n');
-
-				for (const line of lines) {
-					if (line.startsWith('data: ')) {
-						const data = line.slice(6);
-						if (data === '[DONE]') continue;
-
-						try {
-							const event = JSON.parse(data);
-							if (event.type === 'content_block_delta' && event.delta?.text) {
-								fullContent += event.delta.text;
-								chatState.streamingContent = fullContent;
-							} else if (event.type === 'message_complete') {
-								// Final message with token counts
-								if (event.message) {
-									const assistantMsg: Message = {
-										id: event.message.id || crypto.randomUUID(),
-										chat_id: chatId,
-										role: 'assistant',
-										content: fullContent,
-										input_tokens: event.message.input_tokens || 0,
-										output_tokens: event.message.output_tokens || 0,
-										model_id: event.message.model_id,
-										created_at: new Date().toISOString(),
-									};
-									chatState.messages = [...chatState.messages, assistantMsg];
-								}
-							} else if (event.type === 'tool_use') {
-								// Show tool call in stream
-								chatState.streamingContent = fullContent + `\n\n*Using tool: ${event.name}...*`;
-							} else if (event.type === 'error') {
-								fullContent += `\n\n**Error:** ${event.error}`;
-								chatState.streamingContent = fullContent;
-							}
-						} catch {
-							// Skip malformed JSON
-						}
-					}
-				}
-			}
-		}
-
-		// If no message_complete event, add the message manually
-		if (fullContent && !chatState.messages.some(m => m.content === fullContent && m.role === 'assistant')) {
-			const assistantMsg: Message = {
-				id: crypto.randomUUID(),
-				chat_id: chatId,
-				role: 'assistant',
-				content: fullContent,
-				input_tokens: 0,
-				output_tokens: 0,
-				created_at: new Date().toISOString(),
-			};
-			chatState.messages = [...chatState.messages, assistantMsg];
-		}
-	} catch (e) {
-		console.error('Streaming failed:', e);
-		const errorMsg: Message = {
+	if (!requestId) {
+		agentChatStream.streaming = false;
+		const errorMsg: AgentChatMessage = {
 			id: crypto.randomUUID(),
-			chat_id: chatId,
 			role: 'assistant',
-			content: `**Error:** ${e instanceof Error ? e.message : 'Failed to get response'}. Check that ANTHROPIC_API_KEY is configured.`,
-			input_tokens: 0,
-			output_tokens: 0,
-			created_at: new Date().toISOString(),
+			content: '**Error:** Failed to send message. WebSocket not connected.',
+			createdAt: new Date().toISOString(),
 		};
-		chatState.messages = [...chatState.messages, errorMsg];
-	} finally {
-		chatState.streaming = false;
-		chatState.streamingContent = '';
+		chatState.agentMessages = [...chatState.agentMessages, errorMsg];
 	}
 }

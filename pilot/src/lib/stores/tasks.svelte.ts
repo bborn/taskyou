@@ -66,28 +66,10 @@ export async function deleteTask(id: number): Promise<void> {
 	taskState.tasks = taskState.tasks.filter((t) => t.id !== id);
 }
 
-export async function queueTask(id: number): Promise<Task> {
-	const task = await tasksApi.queue(id);
-	taskState.tasks = taskState.tasks.map((t) => (t.id === id ? task : t));
-	return task;
-}
-
-export async function retryTask(id: number, feedback?: string): Promise<Task> {
-	const task = await tasksApi.retry(id, feedback);
-	taskState.tasks = taskState.tasks.map((t) => (t.id === id ? task : t));
-	return task;
-}
-
-export async function closeTask(id: number): Promise<Task> {
-	const task = await tasksApi.close(id);
-	taskState.tasks = taskState.tasks.map((t) => (t.id === id ? task : t));
-	return task;
-}
-
-// Periodic refresh
+// Periodic refresh (fallback when agent WebSocket is not connected)
 let pollInterval: ReturnType<typeof setInterval> | null = null;
 
-export function startPolling(interval = 5000) {
+export function startPolling(interval = 10000) {
 	stopPolling();
 	pollInterval = setInterval(fetchTasks, interval);
 }
