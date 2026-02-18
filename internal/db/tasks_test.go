@@ -2327,3 +2327,98 @@ func TestHasContinuationMarker(t *testing.T) {
 		}
 	})
 }
+
+func TestGetStaleWorktreeTasks(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	db, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer db.Close()
+
+	if err := db.CreateProject(&Project{Name: "test", Path: tmpDir}); err != nil {
+		t.Fatalf("failed to create project: %v", err)
+	}
+
+	// Create a done task with worktree, completed 10 days ago
+	oldDone := &Task{
+		Title:        "Old done task",
+		Status:       StatusDone,
+		Type:         TypeCode,
+		Project:      "test",
+		WorktreePath: "/tmp/worktree-old",
+		BranchName:   "task/1-old",
+	}
+	if err := db.CreateTask(oldDone); err != nil {
+		t.Fatalf("failed to create task: %v", err)
+	}
+	db.Exec("UPDATE tasks SET worktree_path = ?, branch_name = ?, completed_at = datetime('now', '-10 days') WHERE id = ?",
+		oldDone.WorktreePath, oldDone.BranchName, oldDone.ID)
+
+	// Create a done task with worktree, completed 1 day ago
+	recentDone := &Task{
+		Title:        "Recent done task",
+		Status:       StatusDone,
+		Type:         TypeCode,
+		Project:      "test",
+		WorktreePath: "/tmp/worktree-recent",
+		BranchName:   "task/2-recent",
+	}
+	if err := db.CreateTask(recentDone); err != nil {
+		t.Fatalf("failed to create task: %v", err)
+	}
+	db.Exec("UPDATE tasks SET worktree_path = ?, branch_name = ?, completed_at = datetime('now', '-1 day') WHERE id = ?",
+		recentDone.WorktreePath, recentDone.BranchName, recentDone.ID)
+
+	// Create a done task WITHOUT worktree (should not appear)
+	noWorktree := &Task{
+		Title:   "No worktree task",
+		Status:  StatusDone,
+		Type:    TypeCode,
+		Project: "test",
+	}
+	if err := db.CreateTask(noWorktree); err != nil {
+		t.Fatalf("failed to create task: %v", err)
+	}
+	db.Exec("UPDATE tasks SET completed_at = datetime('now', '-10 days') WHERE id = ?", noWorktree.ID)
+
+	// Create a processing task with worktree (should not appear - still active)
+	activeTask := &Task{
+		Title:        "Active task",
+		Status:       StatusProcessing,
+		Type:         TypeCode,
+		Project:      "test",
+		WorktreePath: "/tmp/worktree-active",
+		BranchName:   "task/4-active",
+	}
+	if err := db.CreateTask(activeTask); err != nil {
+		t.Fatalf("failed to create task: %v", err)
+	}
+	db.Exec("UPDATE tasks SET worktree_path = ?, branch_name = ? WHERE id = ?",
+		activeTask.WorktreePath, activeTask.BranchName, activeTask.ID)
+
+	// Query with 7 day threshold - should only get the old done task
+	tasks, err := db.GetStaleWorktreeTasks(7 * 24 * time.Hour)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(tasks) != 1 {
+		t.Fatalf("expected 1 stale task, got %d", len(tasks))
+	}
+	if tasks[0].ID != oldDone.ID {
+		t.Errorf("expected task %d, got %d", oldDone.ID, tasks[0].ID)
+	}
+
+	// Query with 0 threshold - should get both done tasks with worktrees
+	tasks, err = db.GetStaleWorktreeTasks(0)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(tasks) != 2 {
+		t.Fatalf("expected 2 stale tasks, got %d", len(tasks))
+	}
+}

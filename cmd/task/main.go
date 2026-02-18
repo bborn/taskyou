@@ -1838,6 +1838,92 @@ Examples:
 	purgeClaudeConfigCmd.Flags().String("config-dir", "", "Claude config directory (defaults to $CLAUDE_CONFIG_DIR or ~/.claude)")
 	rootCmd.AddCommand(purgeClaudeConfigCmd)
 
+	// Worktrees cleanup subcommand - remove stale worktrees to reclaim disk space
+	worktreesCmd := &cobra.Command{
+		Use:   "worktrees",
+		Short: "Manage git worktrees",
+	}
+
+	worktreesCleanupCmd := &cobra.Command{
+		Use:   "cleanup",
+		Short: "Archive and remove stale worktrees to reclaim disk space",
+		Long: `Archives and removes worktrees for done/archived tasks older than a threshold.
+
+Worktrees are archived first (preserving uncommitted changes in git refs),
+then the directory is removed. Archived tasks can be restored with 'unarchive'.
+
+The default max age is 7 days. Use --max-age to override.
+Use --dry-run to preview what would be cleaned up.
+
+Examples:
+  task worktrees cleanup
+  task worktrees cleanup --dry-run
+  task worktrees cleanup --max-age 72h
+  task worktrees cleanup --max-age 0  # clean up ALL done/archived worktrees`,
+		Run: func(cmd *cobra.Command, args []string) {
+			dryRun, _ := cmd.Flags().GetBool("dry-run")
+			maxAgeStr, _ := cmd.Flags().GetString("max-age")
+
+			maxAge := executor.DefaultWorktreeCleanupMaxAge
+			if maxAgeStr != "" {
+				if maxAgeStr == "0" {
+					maxAge = 0
+				} else {
+					parsed, err := time.ParseDuration(maxAgeStr)
+					if err != nil {
+						fmt.Fprintln(os.Stderr, errorStyle.Render("Invalid duration: "+maxAgeStr))
+						os.Exit(1)
+					}
+					maxAge = parsed
+				}
+			}
+
+			dbPath := db.DefaultPath()
+			database, err := db.Open(dbPath)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+			defer database.Close()
+
+			cfg := config.New(database)
+			exec := executor.New(database, cfg)
+
+			tasks, err := exec.CleanupStaleWorktreesManual(maxAge, dryRun)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+
+			if len(tasks) == 0 {
+				if maxAge == 0 {
+					fmt.Println(dimStyle.Render("No done/archived tasks with worktrees found"))
+				} else {
+					fmt.Println(dimStyle.Render(fmt.Sprintf("No stale worktrees older than %s found", maxAge)))
+				}
+				return
+			}
+
+			if dryRun {
+				fmt.Printf("Would archive and remove %d worktree(s):\n", len(tasks))
+				for _, t := range tasks {
+					age := time.Since(t.CompletedAt.Time).Round(time.Hour)
+					fmt.Printf("  #%-4d %-12s %-30s %s (age: %s)\n",
+						t.ID, t.Project, truncate(t.Title, 30), dimStyle.Render(t.WorktreePath), age)
+				}
+			} else {
+				fmt.Println(successStyle.Render(fmt.Sprintf("Archived and removed %d stale worktree(s)", len(tasks))))
+				for _, t := range tasks {
+					fmt.Printf("  #%-4d %s\n", t.ID, t.Title)
+				}
+			}
+		},
+	}
+	worktreesCleanupCmd.Flags().Bool("dry-run", false, "Show what would be removed without making changes")
+	worktreesCleanupCmd.Flags().String("max-age", "", "Maximum age before cleanup (e.g., 168h, 72h, 0 for all). Default: 168h (7 days)")
+	worktreesCmd.AddCommand(worktreesCleanupCmd)
+	rootCmd.AddCommand(worktreesCmd)
+
 	// Update command - self-update via install script
 	upgradeCmd := &cobra.Command{
 		Use:   "upgrade",
