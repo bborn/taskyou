@@ -89,6 +89,10 @@ type FormModel struct {
 
 	// Progressive disclosure: hide advanced fields for simpler first experience
 	showAdvanced bool
+
+	// Undo/redo stacks for text fields
+	titleUndo *undoStack
+	bodyUndo  *undoStack
 }
 
 // Autocomplete message types for async LLM suggestions
@@ -203,6 +207,8 @@ func NewEditFormModel(database *db.DB, task *db.Task, width, height int, availab
 		taskRefAutocomplete: NewTaskRefAutocompleteModel(database, width-24),
 		attachmentCursor:    -1,
 		showAdvanced:        true, // Always show all fields when editing
+		titleUndo:           newUndoStack(),
+		bodyUndo:            newUndoStack(),
 	}
 
 	// Load task types from database
@@ -312,6 +318,8 @@ func NewFormModel(database *db.DB, width, height int, workingDir string, availab
 		taskRefAutocomplete: NewTaskRefAutocompleteModel(database, width-24),
 		attachmentCursor:    -1,
 		showAdvanced:        showAdvanced, // Load from user preference
+		titleUndo:           newUndoStack(),
+		bodyUndo:            newUndoStack(),
 	}
 
 	// Load task types from database
@@ -614,6 +622,52 @@ func (m *FormModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.submitted = true
 			return m, nil
 
+		case "ctrl+z":
+			// Undo in text fields
+			if m.focused == FieldTitle {
+				if val, pos, ok := m.titleUndo.Undo(m.titleInput.Value(), m.titleInput.Position()); ok {
+					m.titleInput.SetValue(val)
+					m.titleInput.SetCursor(pos)
+					m.lastTitleValue = val
+					m.clearGhostText()
+				}
+				return m, nil
+			}
+			if m.focused == FieldBody {
+				if val, pos, ok := m.bodyUndo.Undo(m.bodyInput.Value(), m.bodyInput.LineInfo().ColumnOffset); ok {
+					m.bodyInput.SetValue(val)
+					m.bodyInput.SetCursor(pos)
+					m.lastBodyValue = val
+					m.updateBodyHeight()
+					m.clearGhostText()
+				}
+				return m, nil
+			}
+			return m, nil
+
+		case "ctrl+y", "ctrl+shift+z":
+			// Redo in text fields
+			if m.focused == FieldTitle {
+				if val, pos, ok := m.titleUndo.Redo(m.titleInput.Value(), m.titleInput.Position()); ok {
+					m.titleInput.SetValue(val)
+					m.titleInput.SetCursor(pos)
+					m.lastTitleValue = val
+					m.clearGhostText()
+				}
+				return m, nil
+			}
+			if m.focused == FieldBody {
+				if val, pos, ok := m.bodyUndo.Redo(m.bodyInput.Value(), m.bodyInput.LineInfo().ColumnOffset); ok {
+					m.bodyInput.SetValue(val)
+					m.bodyInput.SetCursor(pos)
+					m.lastBodyValue = val
+					m.updateBodyHeight()
+					m.clearGhostText()
+				}
+				return m, nil
+			}
+			return m, nil
+
 		case "tab":
 			// If there's ghost text, accept it instead of moving to next field
 			if m.ghostText != "" && (m.focused == FieldTitle || m.focused == FieldBody) {
@@ -739,11 +793,17 @@ func (m *FormModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	}
 
-	// Update the focused input
+	// Update the focused input, capturing state before for undo tracking
 	var cmd tea.Cmd
 	switch m.focused {
 	case FieldTitle:
+		prevValue := m.titleInput.Value()
+		prevCursor := m.titleInput.Position()
 		m.titleInput, cmd = m.titleInput.Update(msg)
+		// Save to undo stack if value changed
+		if m.titleInput.Value() != prevValue {
+			m.titleUndo.Save(prevValue, prevCursor)
+		}
 		// Trigger debounced autocomplete if title changed
 		if m.titleInput.Value() != m.lastTitleValue {
 			m.lastTitleValue = m.titleInput.Value()
@@ -752,7 +812,13 @@ func (m *FormModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Batch(cmd, debounceCmd)
 		}
 	case FieldBody:
+		prevValue := m.bodyInput.Value()
+		prevCursor := m.bodyInput.LineInfo().ColumnOffset
 		m.bodyInput, cmd = m.bodyInput.Update(msg)
+		// Save to undo stack if value changed
+		if m.bodyInput.Value() != prevValue {
+			m.bodyUndo.Save(prevValue, prevCursor)
+		}
 		m.updateBodyHeight() // Autogrow as content changes
 		// Check for task reference autocomplete trigger (#)
 		m.updateTaskRefAutocomplete()
