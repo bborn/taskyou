@@ -3398,6 +3398,10 @@ func handleNotificationHook(database *db.DB, taskID int64, input *ClaudeHookInpu
 				if input.Message != "" {
 					msg = "Waiting for permission: " + input.Message
 				}
+				// Append tool detail so the approval dialog shows what's being requested
+				if detail := formatPermissionDetail(input); detail != "" {
+					msg += "\n" + detail
+				}
 			}
 			database.AppendTaskLog(taskID, "system", msg)
 		}
@@ -3576,6 +3580,70 @@ func formatToolLogMessage(input *ClaudeHookInput) string {
 
 	// Default: just the tool name
 	return toolName
+}
+
+// formatPermissionDetail extracts a short detail string from the tool input
+// for display in permission approval dialogs. Returns "" if no detail available.
+func formatPermissionDetail(input *ClaudeHookInput) string {
+	if input.ToolName == "" || len(input.ToolInput) == 0 {
+		return ""
+	}
+
+	var toolInput map[string]interface{}
+	if err := json.Unmarshal(input.ToolInput, &toolInput); err != nil {
+		return ""
+	}
+
+	var detail string
+	switch input.ToolName {
+	case "Bash":
+		if cmd, ok := toolInput["command"].(string); ok {
+			detail = cmd
+		}
+	case "Read":
+		if path, ok := toolInput["file_path"].(string); ok {
+			detail = path
+		}
+	case "Write":
+		if path, ok := toolInput["file_path"].(string); ok {
+			detail = path
+		}
+	case "Edit":
+		if path, ok := toolInput["file_path"].(string); ok {
+			detail = path
+		}
+	case "Glob":
+		if pattern, ok := toolInput["pattern"].(string); ok {
+			detail = pattern
+		}
+	case "Grep":
+		if pattern, ok := toolInput["pattern"].(string); ok {
+			detail = pattern
+		}
+	case "Task":
+		if desc, ok := toolInput["description"].(string); ok {
+			detail = desc
+		}
+	case "WebFetch":
+		if url, ok := toolInput["url"].(string); ok {
+			detail = url
+		}
+	case "WebSearch":
+		if query, ok := toolInput["query"].(string); ok {
+			detail = query
+		}
+	}
+
+	if detail == "" {
+		return ""
+	}
+
+	// Truncate to keep the approval bar compact
+	if len(detail) > 200 {
+		detail = detail[:200] + "..."
+	}
+
+	return detail
 }
 
 // tailClaudeLogs tails all claude session logs for debugging.
