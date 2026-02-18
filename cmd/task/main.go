@@ -3514,8 +3514,10 @@ func handleNotificationHook(database *db.DB, taskID int64, input *ClaudeHookInpu
 				if input.Message != "" {
 					msg = "Waiting for permission: " + input.Message
 				}
-				// Append tool detail so the approval dialog shows what's being requested
-				if detail := formatPermissionDetail(input); detail != "" {
+				// The Notification hook doesn't include tool_name/tool_input, but the
+				// PreToolUse hook (which fires just before) stashes the detail as a
+				// "pending_tool" log entry. Retrieve and append to the permission message.
+				if detail := latestPendingToolDetail(database, taskID); detail != "" {
 					msg += "\n" + detail
 				}
 			}
@@ -3602,6 +3604,13 @@ func handlePreToolUseHook(database *db.DB, taskID int64, input *ClaudeHookInput)
 	if task.Status == db.StatusBlocked {
 		database.UpdateTaskStatus(taskID, db.StatusProcessing)
 		database.AppendTaskLog(taskID, "system", "Claude resumed working")
+	}
+
+	// Store tool detail so the Notification(permission_prompt) handler can show it.
+	// The Notification hook doesn't include tool_name/tool_input, but PreToolUse
+	// fires right before it, so we stash the detail here for retrieval.
+	if detail := formatPermissionDetail(input); detail != "" {
+		database.AppendTaskLog(taskID, "pending_tool", detail)
 	}
 
 	return nil
@@ -3760,6 +3769,23 @@ func formatPermissionDetail(input *ClaudeHookInput) string {
 	}
 
 	return detail
+}
+
+// latestPendingToolDetail retrieves the most recent "pending_tool" log entry
+// for a task. This is written by handlePreToolUseHook and consumed here by the
+// notification handler to show what tool/command is requesting permission.
+func latestPendingToolDetail(database *db.DB, taskID int64) string {
+	logs, err := database.GetTaskLogs(taskID, 5)
+	if err != nil {
+		return ""
+	}
+	// Logs are in DESC order (most recent first).
+	for _, l := range logs {
+		if l.LineType == "pending_tool" {
+			return l.Content
+		}
+	}
+	return ""
 }
 
 // tailClaudeLogs tails all claude session logs for debugging.
