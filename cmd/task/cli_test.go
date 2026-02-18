@@ -1367,3 +1367,89 @@ func TestUnescapeNewlines(t *testing.T) {
 		})
 	}
 }
+
+func TestFormatPermissionDetail(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    *ClaudeHookInput
+		expected string
+	}{
+		{
+			name:     "empty tool name",
+			input:    &ClaudeHookInput{},
+			expected: "",
+		},
+		{
+			name: "bash command",
+			input: &ClaudeHookInput{
+				ToolName:  "Bash",
+				ToolInput: []byte(`{"command": "git status"}`),
+			},
+			expected: "git status",
+		},
+		{
+			name: "read file",
+			input: &ClaudeHookInput{
+				ToolName:  "Read",
+				ToolInput: []byte(`{"file_path": "/src/main.go"}`),
+			},
+			expected: "/src/main.go",
+		},
+		{
+			name: "write file",
+			input: &ClaudeHookInput{
+				ToolName:  "Write",
+				ToolInput: []byte(`{"file_path": "/src/new.go"}`),
+			},
+			expected: "/src/new.go",
+		},
+		{
+			name: "edit file",
+			input: &ClaudeHookInput{
+				ToolName:  "Edit",
+				ToolInput: []byte(`{"file_path": "/src/app.go"}`),
+			},
+			expected: "/src/app.go",
+		},
+		{
+			name: "task tool",
+			input: &ClaudeHookInput{
+				ToolName:  "Task",
+				ToolInput: []byte(`{"description": "Run tests"}`),
+			},
+			expected: "Run tests",
+		},
+		{
+			name: "long command truncated",
+			input: &ClaudeHookInput{
+				ToolName:  "Bash",
+				ToolInput: []byte(`{"command": "` + strings.Repeat("a", 250) + `"}`),
+			},
+			expected: strings.Repeat("a", 200) + "...",
+		},
+		{
+			name: "no tool input",
+			input: &ClaudeHookInput{
+				ToolName: "Bash",
+			},
+			expected: "",
+		},
+		{
+			name: "unknown tool",
+			input: &ClaudeHookInput{
+				ToolName:  "CustomTool",
+				ToolInput: []byte(`{"foo": "bar"}`),
+			},
+			expected: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := formatPermissionDetail(tt.input)
+			if result != tt.expected {
+				t.Errorf("formatPermissionDetail() = %q, want %q", result, tt.expected)
+			}
+		})
+	}
+}

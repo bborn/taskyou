@@ -1673,23 +1673,36 @@ func (m *AppModel) renderExecutorPromptPreview(task *db.Task) string {
 		promptLines = promptLines[len(promptLines)-maxLines:]
 	}
 
-	// First line: task ID + last prompt line (most relevant) + action hints
-	lastLine := promptLines[len(promptLines)-1]
-	// Truncate to fit with hints
+	// First line: task ID + permission header + action hints
+	headerLine := promptLines[0]
 	maxPromptWidth := m.width - lipgloss.Width(hints) - 10 // 10 for #ID, spaces, padding
 	if maxPromptWidth < 20 {
 		maxPromptWidth = 20
 	}
-	if len(lastLine) > maxPromptWidth {
-		lastLine = lastLine[:maxPromptWidth-1] + "…"
+	if len(headerLine) > maxPromptWidth {
+		headerLine = headerLine[:maxPromptWidth-1] + "…"
 	}
 
 	line := warnStyle.Render(fmt.Sprintf("#%d ", task.ID)) +
-		warnStyle.Render(lastLine) + "  " + hints
+		warnStyle.Render(headerLine) + "  " + hints
 
 	barStyle := lipgloss.NewStyle().
 		Width(m.width).
 		Padding(0, 1)
+
+	// If there's a detail line (e.g. the actual command), show it below
+	if len(promptLines) > 1 {
+		detailLine := promptLines[len(promptLines)-1]
+		detailMaxWidth := m.width - 6 // padding + indent
+		if detailMaxWidth < 20 {
+			detailMaxWidth = 20
+		}
+		if len(detailLine) > detailMaxWidth {
+			detailLine = detailLine[:detailMaxWidth-1] + "…"
+		}
+		detailStyle := lipgloss.NewStyle().Foreground(ColorMuted)
+		return barStyle.Render(line) + "\n" + barStyle.Render("   "+detailStyle.Render(detailLine))
+	}
 
 	return barStyle.Render(line)
 }
