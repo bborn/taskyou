@@ -28,12 +28,14 @@ jobs:
       - name: Build binaries
         run: |
           mkdir -p dist
+          VERSION=${{ steps.version.outputs.VERSION }}
+          LDFLAGS="-s -w -X main.version=${VERSION}"
 
           # Build ty CLI for all platforms
-          GOOS=darwin GOARCH=amd64 go build -ldflags="-s -w" -o dist/ty-darwin-amd64 ./cmd/task
-          GOOS=darwin GOARCH=arm64 go build -ldflags="-s -w" -o dist/ty-darwin-arm64 ./cmd/task
-          GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o dist/ty-linux-amd64 ./cmd/task
-          GOOS=linux GOARCH=arm64 go build -ldflags="-s -w" -o dist/ty-linux-arm64 ./cmd/task
+          GOOS=darwin GOARCH=amd64 go build -ldflags="${LDFLAGS}" -o dist/ty-darwin-amd64 ./cmd/task
+          GOOS=darwin GOARCH=arm64 go build -ldflags="${LDFLAGS}" -o dist/ty-darwin-arm64 ./cmd/task
+          GOOS=linux GOARCH=amd64 go build -ldflags="${LDFLAGS}" -o dist/ty-linux-amd64 ./cmd/task
+          GOOS=linux GOARCH=arm64 go build -ldflags="${LDFLAGS}" -o dist/ty-linux-arm64 ./cmd/task
 
           # Build taskd daemon for Linux only
           GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o dist/taskd-linux-amd64 ./cmd/taskd
