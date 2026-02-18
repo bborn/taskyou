@@ -981,15 +981,11 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case taskMovedMsg:
 		if msg.err == nil {
-			// Task was moved successfully
+			// Task was moved successfully - stay on dashboard
 			m.selectedTask = msg.newTask
 			m.notification = fmt.Sprintf("%s Task moved to %s as #%d", IconDone(), msg.newTask.Project, msg.newTask.ID)
 			m.notifyUntil = time.Now().Add(5 * time.Second)
 			cmds = append(cmds, m.loadTasks())
-			// Navigate to the new task's detail view
-			if m.selectedTask != nil {
-				cmds = append(cmds, m.loadTask(m.selectedTask.ID))
-			}
 		} else {
 			m.err = msg.err
 		}
@@ -2829,6 +2825,12 @@ func (m *AppModel) updateProjectChangeConfirm(msg tea.Msg) (tea.Model, tea.Cmd) 
 			m.pendingProjectChangeTask = nil
 			m.originalProjectChangeTask = nil
 			m.projectChangeConfirm = nil
+			// Clean up the detail view's tmux panes before switching to dashboard
+			if m.detailView != nil {
+				m.detailView.Cleanup()
+				m.detailView = nil
+			}
+			m.kanban.ClearOriginColumn()
 			m.currentView = ViewDashboard
 			return m, m.moveTaskToProject(newTask, oldTask)
 		}
