@@ -2550,6 +2550,10 @@ func (m *DetailModel) renderContent() string {
 		b.WriteString("\n\n")
 
 		for _, log := range m.logs {
+			// Skip internal-only log entries not meant for display
+			if log.LineType == "pending_tool" {
+				continue
+			}
 			icon := "  "
 			switch log.LineType {
 			case "system":
