@@ -201,9 +201,9 @@ Examples:
 			// Small delay to ensure clean shutdown
 			time.Sleep(100 * time.Millisecond)
 
-			// Start daemon (inherit dangerous mode from environment if set)
-			dangerousMode := os.Getenv("WORKTREE_DANGEROUS_MODE") == "1"
-			if err := ensureDaemonRunning(dangerousMode); err != nil {
+			// Use --dangerous flag (persistent from root cmd), falling back to env var
+			restartDangerous := dangerous || os.Getenv("WORKTREE_DANGEROUS_MODE") == "1"
+			if err := ensureDaemonRunning(restartDangerous); err != nil {
 				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
 				os.Exit(1)
 			}
@@ -218,8 +218,13 @@ Examples:
 		Short: "Check daemon status",
 		Run: func(cmd *cobra.Command, args []string) {
 			pidFile := getPidFilePath()
+			modeFile := pidFile + ".mode"
 			if pid, err := readPidFile(pidFile); err == nil && processExists(pid) {
-				fmt.Println(successStyle.Render(fmt.Sprintf("Daemon running (pid %d)", pid)))
+				mode := "safe"
+				if m, err := os.ReadFile(modeFile); err == nil {
+					mode = string(m)
+				}
+				fmt.Println(successStyle.Render(fmt.Sprintf("Daemon running (pid %d, %s mode)", pid, mode)))
 			} else {
 				fmt.Println(dimStyle.Render("Daemon not running"))
 			}
@@ -3025,7 +3030,7 @@ func runLocal(dangerousMode bool, debugStatePath string) error {
 
 // ensureDaemonRunning starts the daemon if it's not already running.
 // If dangerousMode is true, sets WORKTREE_DANGEROUS_MODE=1 for the daemon.
-// If the daemon is running with a different mode, it will be restarted.
+// If the daemon is already running (even with a different mode), it is left as-is.
 func ensureDaemonRunning(dangerousMode bool) error {
 	pidFile := getPidFilePath()
 	modeFile := pidFile + ".mode"
@@ -3033,19 +3038,7 @@ func ensureDaemonRunning(dangerousMode bool) error {
 	// Check if daemon is already running
 	if pid, err := readPidFile(pidFile); err == nil {
 		if processExists(pid) {
-			// Check if running with correct mode
-			currentMode, _ := os.ReadFile(modeFile)
-			wantMode := "safe"
-			if dangerousMode {
-				wantMode = "dangerous"
-			}
-			if string(currentMode) == wantMode {
-				return nil // Already running with correct mode
-			}
-			// Mode mismatch - restart daemon
-			fmt.Fprintln(os.Stderr, dimStyle.Render(fmt.Sprintf("Restarting daemon (switching to %s mode)...", wantMode)))
-			stopDaemon()
-			time.Sleep(100 * time.Millisecond)
+			return nil // Already running, leave it alone regardless of mode
 		} else {
 			// Stale pid file, remove it
 			os.Remove(pidFile)
