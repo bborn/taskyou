@@ -876,6 +876,16 @@ func (e *Executor) executeTask(ctx context.Context, task *db.Task) {
 	}
 	e.events.EmitTaskWorktreeReady(task)
 
+	// Setup TaskYou MCP server so all executors can use taskyou_* tools
+	// This writes to both ~/.claude.json (for Claude Code, no approval needed)
+	// and .mcp.json in the worktree (for Codex, Gemini, and other CLI tools)
+	if err := writeWorkflowMCPConfig(workDir, task.ID); err != nil {
+		e.logger.Warn("could not setup TaskYou MCP config in claude.json", "error", err)
+	}
+	if err := writeWorktreeMCPConfig(workDir, task.ID); err != nil {
+		e.logger.Warn("could not setup TaskYou MCP config in .mcp.json", "error", err)
+	}
+
 	// Prepare attachments (write to .claude/attachments for seamless access)
 	attachmentPaths, cleanupAttachments := e.prepareAttachments(task.ID, workDir)
 	defer cleanupAttachments()
@@ -1969,11 +1979,7 @@ func (e *Executor) runClaude(ctx context.Context, task *db.Task, workDir, prompt
 		e.logger.Warn("could not setup Claude hooks", "error", err)
 	}
 	// Note: we don't clean up hooks config immediately - it needs to persist for the session
-
-	// Setup TaskYou MCP server in ~/.claude.json so Claude can use taskyou_* tools
-	if err := writeWorkflowMCPConfig(workDir, task.ID); err != nil {
-		e.logger.Warn("could not setup TaskYou MCP config", "error", err)
-	}
+	// Note: TaskYou MCP config is already set up by executeTask() before calling this method
 
 	// Create a temp file for the prompt (avoids quoting issues)
 	promptFile, err := os.CreateTemp("", "task-prompt-*.txt")
@@ -2145,11 +2151,7 @@ func (e *Executor) runClaudeResume(ctx context.Context, task *db.Task, workDir, 
 	if err != nil {
 		e.logger.Warn("could not setup Claude hooks", "error", err)
 	}
-
-	// Setup TaskYou MCP server in ~/.claude.json so Claude can use taskyou_* tools
-	if err := writeWorkflowMCPConfig(workDir, task.ID); err != nil {
-		e.logger.Warn("could not setup TaskYou MCP config", "error", err)
-	}
+	// Note: TaskYou MCP config is already set up by executeTask() before calling this method
 
 	// Create a temp file for the feedback (avoids quoting issues)
 	feedbackFile, err := os.CreateTemp("", "task-feedback-*.txt")
@@ -3743,6 +3745,65 @@ func writeWorkflowMCPConfig(worktreePath string, taskID int64) error {
 
 	if err := os.WriteFile(configPath, data, 0644); err != nil {
 		return fmt.Errorf("write claude.json: %w", err)
+	}
+
+	return nil
+}
+
+// writeWorktreeMCPConfig writes the TaskYou MCP server configuration to .mcp.json in the worktree.
+// This enables non-Claude executors (Codex, Gemini, etc.) to use TaskYou tools, since they read
+// MCP server config from .mcp.json rather than ~/.claude.json.
+// If .mcp.json already exists (e.g., symlinked from the project), it is resolved to a regular file
+// and the taskyou server is merged in. The task ID is always updated to match the current task.
+func writeWorktreeMCPConfig(worktreePath string, taskID int64) error {
+	mcpFile := filepath.Join(worktreePath, ".mcp.json")
+
+	// Get the path to the task executable
+	taskExecutable, err := os.Executable()
+	if err != nil {
+		taskExecutable = "task"
+	}
+
+	// Build the TaskYou MCP server config (same format as writeWorkflowMCPConfig)
+	taskyouServer := map[string]interface{}{
+		"type":    "stdio",
+		"command": taskExecutable,
+		"args":    []string{"mcp-server", "--task-id", fmt.Sprintf("%d", taskID)},
+	}
+
+	// Read existing .mcp.json (resolving symlinks)
+	var config map[string]interface{}
+	if data, err := os.ReadFile(mcpFile); err == nil {
+		if err := json.Unmarshal(data, &config); err != nil {
+			config = make(map[string]interface{})
+		}
+	} else {
+		config = make(map[string]interface{})
+	}
+
+	// Get or create mcpServers map
+	mcpServers, ok := config["mcpServers"].(map[string]interface{})
+	if !ok {
+		mcpServers = make(map[string]interface{})
+	}
+
+	// Add/update the taskyou server
+	mcpServers["taskyou"] = taskyouServer
+	config["mcpServers"] = mcpServers
+
+	// If the file is a symlink, remove it first so we write a regular file
+	// (we don't want to modify the project's shared .mcp.json)
+	if target, err := os.Readlink(mcpFile); err == nil && target != "" {
+		os.Remove(mcpFile)
+	}
+
+	data, err := json.MarshalIndent(config, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal .mcp.json: %w", err)
+	}
+
+	if err := os.WriteFile(mcpFile, data, 0644); err != nil {
+		return fmt.Errorf("write .mcp.json: %w", err)
 	}
 
 	return nil

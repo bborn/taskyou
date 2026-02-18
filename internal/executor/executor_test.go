@@ -1672,3 +1672,187 @@ func TestWriteWorkflowMCPConfig(t *testing.T) {
 		}
 	})
 }
+
+func TestWriteWorktreeMCPConfig(t *testing.T) {
+	// Helper to read .mcp.json and return the taskyou server config
+	readWorktreeMCP := func(t *testing.T, worktreePath string) map[string]interface{} {
+		t.Helper()
+		data, err := os.ReadFile(filepath.Join(worktreePath, ".mcp.json"))
+		if err != nil {
+			t.Fatalf("failed to read .mcp.json: %v", err)
+		}
+		var config map[string]interface{}
+		if err := json.Unmarshal(data, &config); err != nil {
+			t.Fatalf("failed to parse .mcp.json: %v", err)
+		}
+		mcpServers, ok := config["mcpServers"].(map[string]interface{})
+		if !ok {
+			t.Fatal("expected mcpServers key in .mcp.json")
+		}
+		taskyou, ok := mcpServers["taskyou"].(map[string]interface{})
+		if !ok {
+			t.Fatal("expected taskyou key in mcpServers")
+		}
+		return taskyou
+	}
+
+	t.Run("creates .mcp.json with taskyou config", func(t *testing.T) {
+		worktreePath := t.TempDir()
+		taskID := int64(42)
+
+		err := writeWorktreeMCPConfig(worktreePath, taskID)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		taskyou := readWorktreeMCP(t, worktreePath)
+
+		if taskyou["type"] != "stdio" {
+			t.Errorf("taskyou type = %v, want stdio", taskyou["type"])
+		}
+
+		args, ok := taskyou["args"].([]interface{})
+		if !ok {
+			t.Fatal("expected args array in taskyou config")
+		}
+		if len(args) != 3 || args[0] != "mcp-server" || args[1] != "--task-id" || args[2] != "42" {
+			t.Errorf("taskyou args = %v, want [mcp-server --task-id 42]", args)
+		}
+	})
+
+	t.Run("merges into existing .mcp.json", func(t *testing.T) {
+		worktreePath := t.TempDir()
+		taskID := int64(99)
+
+		// Create existing .mcp.json with another server
+		existingConfig := map[string]interface{}{
+			"mcpServers": map[string]interface{}{
+				"github": map[string]interface{}{
+					"type":    "stdio",
+					"command": "gh-mcp",
+				},
+			},
+		}
+		existingData, _ := json.MarshalIndent(existingConfig, "", "  ")
+		if err := os.WriteFile(filepath.Join(worktreePath, ".mcp.json"), existingData, 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		err := writeWorktreeMCPConfig(worktreePath, taskID)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		// Verify both servers exist
+		data, err := os.ReadFile(filepath.Join(worktreePath, ".mcp.json"))
+		if err != nil {
+			t.Fatalf("failed to read .mcp.json: %v", err)
+		}
+		var config map[string]interface{}
+		if err := json.Unmarshal(data, &config); err != nil {
+			t.Fatalf("failed to parse .mcp.json: %v", err)
+		}
+		mcpServers := config["mcpServers"].(map[string]interface{})
+
+		// Check github server preserved
+		github, ok := mcpServers["github"].(map[string]interface{})
+		if !ok {
+			t.Fatal("expected github server to be preserved")
+		}
+		if github["command"] != "gh-mcp" {
+			t.Errorf("github command = %v, want gh-mcp", github["command"])
+		}
+
+		// Check taskyou added
+		if _, ok := mcpServers["taskyou"].(map[string]interface{}); !ok {
+			t.Fatal("expected taskyou server to be added")
+		}
+	})
+
+	t.Run("replaces symlink with regular file", func(t *testing.T) {
+		worktreePath := t.TempDir()
+		projectDir := t.TempDir()
+		taskID := int64(55)
+
+		// Create .mcp.json in project directory
+		projectMCP := map[string]interface{}{
+			"mcpServers": map[string]interface{}{
+				"existing": map[string]interface{}{
+					"type":    "stdio",
+					"command": "existing-cmd",
+				},
+			},
+		}
+		projectData, _ := json.MarshalIndent(projectMCP, "", "  ")
+		projectMCPFile := filepath.Join(projectDir, ".mcp.json")
+		if err := os.WriteFile(projectMCPFile, projectData, 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		// Create symlink in worktree -> project
+		worktreeMCPFile := filepath.Join(worktreePath, ".mcp.json")
+		if err := os.Symlink(projectMCPFile, worktreeMCPFile); err != nil {
+			t.Fatal(err)
+		}
+
+		err := writeWorktreeMCPConfig(worktreePath, taskID)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		// Verify it's no longer a symlink
+		info, err := os.Lstat(worktreeMCPFile)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			t.Error("expected .mcp.json to be a regular file, not a symlink")
+		}
+
+		// Verify existing server was preserved and taskyou was added
+		data, err := os.ReadFile(worktreeMCPFile)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var config map[string]interface{}
+		if err := json.Unmarshal(data, &config); err != nil {
+			t.Fatal(err)
+		}
+		mcpServers := config["mcpServers"].(map[string]interface{})
+		if _, ok := mcpServers["existing"]; !ok {
+			t.Error("expected existing server to be preserved")
+		}
+		if _, ok := mcpServers["taskyou"]; !ok {
+			t.Error("expected taskyou server to be added")
+		}
+
+		// Verify the project's original file was NOT modified
+		projectData2, _ := os.ReadFile(projectMCPFile)
+		var projectConfig map[string]interface{}
+		json.Unmarshal(projectData2, &projectConfig)
+		projectServers := projectConfig["mcpServers"].(map[string]interface{})
+		if _, ok := projectServers["taskyou"]; ok {
+			t.Error("project .mcp.json should NOT have taskyou - symlink should have been broken")
+		}
+	})
+
+	t.Run("updates task ID on subsequent calls", func(t *testing.T) {
+		worktreePath := t.TempDir()
+
+		err := writeWorktreeMCPConfig(worktreePath, 100)
+		if err != nil {
+			t.Fatalf("first call failed: %v", err)
+		}
+
+		err = writeWorktreeMCPConfig(worktreePath, 200)
+		if err != nil {
+			t.Fatalf("second call failed: %v", err)
+		}
+
+		taskyou := readWorktreeMCP(t, worktreePath)
+		args := taskyou["args"].([]interface{})
+		if args[2] != "200" {
+			t.Errorf("task ID = %v, want 200", args[2])
+		}
+	})
+}
