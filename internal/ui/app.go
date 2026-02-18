@@ -903,7 +903,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				cmds = append(cmds, prCmd)
 			}
 			if hasLast && now.Sub(lastViewed) > summaryRefreshAfter {
-				m.notification = fmt.Sprintf("%s Summarizing task #%d...", IconInProgress(), msg.task.ID)
+				m.notification = fmt.Sprintf("%s Refreshing activity summary...", IconInProgress())
 				m.notifyUntil = time.Now().Add(5 * time.Second)
 				cmds = append(cmds, m.summarizeTask(msg.task.ID, true))
 			}
@@ -1074,7 +1074,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.notifyUntil = time.Now().Add(5 * time.Second)
 		} else {
-			m.notification = fmt.Sprintf("%s Summary updated", IconDone())
+			m.notification = fmt.Sprintf("%s Activity summary updated", IconDone())
 			m.notifyUntil = time.Now().Add(3 * time.Second)
 		}
 		if m.selectedTask != nil && m.selectedTask.ID == msg.taskID {
