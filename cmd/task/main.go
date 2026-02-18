@@ -3597,13 +3597,13 @@ func handlePreToolUseHook(database *db.DB, taskID int64, input *ClaudeHookInput)
 		return nil
 	}
 
-	// When Claude is about to use a tool, the task should be "processing"
+	// When the executor is about to use a tool, the task should be "processing"
 	// This handles the case where:
 	// 1. Task was blocked (waiting for input) and user responded
-	// 2. Task was in any other state but Claude is now actively working
+	// 2. Task was in any other state but executor is now actively working
 	if task.Status == db.StatusBlocked {
 		database.UpdateTaskStatus(taskID, db.StatusProcessing)
-		database.AppendTaskLog(taskID, "system", "Claude resumed working")
+		database.AppendTaskLog(taskID, "system", "Agent resumed working")
 	}
 
 	// Store tool detail so the Notification(permission_prompt) handler can show it.
@@ -3643,6 +3643,7 @@ func handlePostToolUseHook(database *db.DB, taskID int64, input *ClaudeHookInput
 	// Ensure task remains in "processing" state
 	if task.Status == db.StatusBlocked {
 		database.UpdateTaskStatus(taskID, db.StatusProcessing)
+		database.AppendTaskLog(taskID, "system", "Agent resumed working")
 	}
 
 	return nil

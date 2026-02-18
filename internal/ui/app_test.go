@@ -1239,9 +1239,9 @@ func TestLatestPermissionPrompt_ResumedClears(t *testing.T) {
 
 	// Log a permission message, then a resumed message
 	database.AppendTaskLog(task.ID, "system", "Waiting for permission: Edit(file.go)")
-	database.AppendTaskLog(task.ID, "system", "Claude resumed working")
+	database.AppendTaskLog(task.ID, "system", "Agent resumed working")
 
-	// Should return empty since Claude resumed
+	// Should return empty since agent resumed
 	result := m.latestPermissionPrompt(task.ID)
 	if result != "" {
 		t.Errorf("expected empty string after resume, got '%s'", result)

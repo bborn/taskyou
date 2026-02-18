@@ -1008,7 +1008,7 @@ func TestClaudeHookStatusHandling(t *testing.T) {
 			t.Fatalf("UpdateTaskStatus() error = %v", err)
 		}
 
-		// Simulate PreToolUse (Claude resumed working)
+		// Simulate PreToolUse (agent resumed working)
 		input := &ClaudeHookInput{}
 		err := handlePreToolUseHook(database, task.ID, input)
 		if err != nil {

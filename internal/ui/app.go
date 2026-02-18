@@ -786,7 +786,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				// On any status change, re-validate cached prompt state.
 				// Handles external approval (e.g. from tmux) where PreToolUse
-				// logs "Claude resumed working" and transitions to processing.
+				// logs "Agent resumed working" and transitions to processing.
 				if m.tasksNeedingInput[t.ID] {
 					if m.latestPermissionPrompt(t.ID) == "" {
 						delete(m.tasksNeedingInput, t.ID)
@@ -3985,7 +3985,7 @@ func (m *AppModel) denyExecutorPrompt(taskID int64) tea.Cmd {
 
 // latestPermissionPrompt checks whether a task has a pending permission prompt
 // by reading recent DB logs written by the notification hook. Returns the prompt
-// message if still pending, or "" if resolved (e.g. "Claude resumed working",
+// message if still pending, or "" if resolved (e.g. "Agent resumed working",
 // user approved/denied). This is status-agnostic — works for any active task.
 func (m *AppModel) latestPermissionPrompt(taskID int64) string {
 	logs, err := m.db.GetTaskLogs(taskID, 10)
@@ -3998,10 +3998,12 @@ func (m *AppModel) latestPermissionPrompt(taskID int64) string {
 		switch {
 		case l.LineType == "system" && strings.HasPrefix(l.Content, "Waiting for permission"):
 			return l.Content
-		case l.LineType == "system" && l.Content == "Claude resumed working":
+		case l.LineType == "system" && (l.Content == "Agent resumed working" || l.Content == "Claude resumed working"):
 			return "" // prompt was resolved
 		case l.LineType == "user" && (strings.HasPrefix(l.Content, "Approved") || strings.HasPrefix(l.Content, "Denied")):
 			return "" // user already responded
+		case l.LineType == "tool":
+			return "" // a tool ran after the permission prompt, so it was resolved
 		}
 	}
 	return ""
