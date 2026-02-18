@@ -942,6 +942,7 @@ Examples:
 					"branch":         task.BranchName,
 					"claude_pane_id": task.ClaudePaneID,
 					"shell_pane_id":  task.ShellPaneID,
+					"summary":        task.Summary,
 					"created_at":     task.CreatedAt.Time.Format(time.RFC3339),
 					"updated_at":     task.UpdatedAt.Time.Format(time.RFC3339),
 				}
@@ -1051,6 +1052,26 @@ Examples:
 					fmt.Println(task.Body)
 				}
 
+				// Summary (always shown if present)
+				if task.Summary != "" {
+					fmt.Println()
+					fmt.Println(boldStyle.Render("Summary:"))
+					fmt.Println(task.Summary)
+				}
+
+				// If blocked, show the last question
+				if task.Status == db.StatusBlocked {
+					logs, _ := database.GetTaskLogs(taskID, 50)
+					for _, l := range logs {
+						if l.LineType == "question" {
+							fmt.Println()
+							fmt.Println(lipgloss.NewStyle().Foreground(lipgloss.Color("#F59E0B")).Bold(true).Render("Waiting on:"))
+							fmt.Println(l.Content)
+							break
+						}
+					}
+				}
+
 				// Logs
 				if showLogs {
 					logs, _ := database.GetTaskLogs(taskID, 100)
@@ -1058,6 +1079,7 @@ Examples:
 						fmt.Println()
 						fmt.Println(boldStyle.Render("Recent Logs:"))
 						for _, l := range logs {
+							ts := dimStyle.Render(l.CreatedAt.Time.Format("15:04:05"))
 							prefix := ""
 							switch l.LineType {
 							case "system":
@@ -1066,8 +1088,14 @@ Examples:
 								prefix = errorStyle.Render("[error] ")
 							case "tool":
 								prefix = lipgloss.NewStyle().Foreground(lipgloss.Color("#8B5CF6")).Render("[tool] ")
+							case "question":
+								prefix = lipgloss.NewStyle().Foreground(lipgloss.Color("#F59E0B")).Render("[question] ")
+							case "output":
+								prefix = dimStyle.Render("[output] ")
+							case "text":
+								prefix = dimStyle.Render("[text] ")
 							}
-							fmt.Printf("%s%s\n", prefix, truncate(l.Content, 100))
+							fmt.Printf("%s %s%s\n", ts, prefix, truncate(l.Content, 200))
 						}
 					}
 				}
@@ -1738,6 +1766,7 @@ Examples:
 			paneID := task.ClaudePaneID
 			if paneID == "" {
 				fmt.Fprintln(os.Stderr, errorStyle.Render(fmt.Sprintf("Task #%d has no executor pane (not running?)", taskID)))
+				fmt.Fprintln(os.Stderr, dimStyle.Render("Tip: use 'task show' to see what the task accomplished"))
 				os.Exit(1)
 			}
 
@@ -1745,7 +1774,8 @@ Examples:
 			captureCmd := osexec.Command("tmux", "capture-pane", "-t", paneID, "-p", "-S", fmt.Sprintf("-%d", lines))
 			output, err := captureCmd.Output()
 			if err != nil {
-				fmt.Fprintln(os.Stderr, errorStyle.Render(fmt.Sprintf("Error capturing output (pane may not exist): %v", err)))
+				fmt.Fprintln(os.Stderr, errorStyle.Render(fmt.Sprintf("Executor pane no longer exists for task #%d", taskID)))
+				fmt.Fprintln(os.Stderr, dimStyle.Render("Tip: use 'task show' to see what the task accomplished, or 'task show --logs' for full activity"))
 				os.Exit(1)
 			}
 

@@ -506,6 +506,29 @@ func (s *Server) handleToolCall(id interface{}, params *toolCallParams) {
 		}
 		sb.WriteString("\n")
 
+		// Include summary if available
+		if targetTask.Summary != "" {
+			sb.WriteString("\n## Summary\n\n")
+			sb.WriteString(targetTask.Summary)
+			sb.WriteString("\n")
+		}
+
+		// Include recent logs for context on what the task did
+		logs, _ := s.db.GetTaskLogs(targetTaskID, 50)
+		if len(logs) > 0 {
+			sb.WriteString("\n## Recent Activity\n\n")
+			// Logs come newest-first; reverse for chronological order
+			for i := len(logs) - 1; i >= 0; i-- {
+				l := logs[i]
+				ts := l.CreatedAt.Time.Format("15:04:05")
+				content := l.Content
+				if len(content) > 300 {
+					content = content[:300] + "..."
+				}
+				sb.WriteString(fmt.Sprintf("- `%s` [%s] %s\n", ts, l.LineType, content))
+			}
+		}
+
 		s.sendResult(id, toolCallResult{
 			Content: []contentBlock{
 				{Type: "text", Text: sb.String()},
