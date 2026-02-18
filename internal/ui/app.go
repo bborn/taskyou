@@ -949,7 +949,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case prRefreshTickMsg:
-		// Periodically refresh PR info (every 60 seconds)
+		// Periodically refresh PR info (every 4 minutes)
 		// Always refresh regardless of view - PR state is persisted to DB
 		// so it stays current even when navigating between views
 		cmds = append(cmds, m.refreshAllPRs())
@@ -4214,7 +4214,7 @@ func (m *AppModel) focusTick() tea.Cmd {
 }
 
 func (m *AppModel) prRefreshTick() tea.Cmd {
-	return tea.Tick(60*time.Second, func(t time.Time) tea.Msg {
+	return tea.Tick(4*time.Minute, func(t time.Time) tea.Msg {
 		return prRefreshTickMsg(t)
 	})
 }
@@ -4252,11 +4252,19 @@ func (m *AppModel) refreshAllPRs() tea.Cmd {
 		return nil
 	}
 
-	// Group tasks by repo directory
+	// Group tasks by repo directory, skipping tasks with terminal PR states
 	repoTasks := make(map[string][]*db.Task)
 	for _, task := range m.tasks {
 		if task.BranchName == "" {
 			continue
+		}
+		// Skip tasks whose PRs are already merged or closed — their state won't change
+		if task.PRInfoJSON != "" {
+			if cached := github.UnmarshalPRInfo(task.PRInfoJSON); cached != nil {
+				if cached.State == github.PRStateMerged || cached.State == github.PRStateClosed {
+					continue
+				}
+			}
 		}
 		repoDir := m.executor.GetProjectDir(task.Project)
 		if repoDir == "" {
@@ -4288,14 +4296,12 @@ func (m *AppModel) refreshAllPRs() tea.Cmd {
 				// Update cache with batch results
 				prCache.UpdateCacheForRepo(repoDir, prsByBranch)
 
-				// Create messages for tasks in this repo
+				// Create messages for tasks in this repo.
+				// We don't fall back to individual fetches here — if a branch wasn't
+				// in the batch results, there's no open/recent PR for it. Individual
+				// lookups are done on-demand in fetchPRInfo (detail view) instead.
 				for _, task := range tasks {
 					info := prsByBranch[task.BranchName]
-					// If batch fetch didn't include this branch (common for closed tasks
-					// with older closed PRs), fall back to individual fetch
-					if info == nil && task.BranchName != "" {
-						info = prCache.GetPRForBranch(repoDir, task.BranchName)
-					}
 					results = append(results, prInfoMsg{taskID: task.ID, info: info})
 				}
 			}
