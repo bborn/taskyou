@@ -490,6 +490,10 @@ type AppModel struct {
 	isFirstLoad     bool // Track if this is the first load of tasks
 	showWelcome     bool // Show welcome message when kanban is empty
 	onboardingShown bool // Track if we've already shown the onboarding (to prevent double-triggering)
+
+	// Version upgrade notification
+	currentVersion string          // Current binary version (e.g. "v0.1.0" or "dev")
+	latestRelease  *github.LatestRelease // Latest release from GitHub (nil if not checked yet or same version)
 }
 
 // taskExecutorDisplayName returns the display name for a task's executor.
@@ -528,7 +532,7 @@ func (m *AppModel) updateTaskInList(task *db.Task) {
 }
 
 // NewAppModel creates a new application model.
-func NewAppModel(database *db.DB, exec *executor.Executor, workingDir string) *AppModel {
+func NewAppModel(database *db.DB, exec *executor.Executor, workingDir string, version ...string) *AppModel {
 	// Initialize logger and log startup
 	log := GetLogger()
 	log.Info("=== TaskYou TUI starting ===")
@@ -604,6 +608,11 @@ func NewAppModel(database *db.DB, exec *executor.Executor, workingDir string) *A
 		showWelcome:        false, // Will be set true when kanban is empty
 	}
 
+	// Set version if provided
+	if len(version) > 0 {
+		model.currentVersion = version[0]
+	}
+
 	return model
 }
 
@@ -636,7 +645,14 @@ func (m *AppModel) Init() tea.Cmd {
 		}
 	}
 
-	return tea.Batch(m.loadTasks(), m.waitForTaskEvent(), m.waitForDBChange(), m.tick(), m.prRefreshTick())
+	cmds := []tea.Cmd{m.loadTasks(), m.waitForTaskEvent(), m.waitForDBChange(), m.tick(), m.prRefreshTick()}
+
+	// Check for version upgrades in the background
+	if m.currentVersion != "" && m.currentVersion != "dev" {
+		cmds = append(cmds, m.checkVersion())
+	}
+
+	return tea.Batch(cmds...)
 }
 
 // Update handles messages.
@@ -1243,6 +1259,11 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Continue watching for more changes
 		cmds = append(cmds, m.waitForDBChange())
 
+	case versionCheckMsg:
+		if msg.release != nil {
+			m.latestRelease = msg.release
+		}
+
 	default:
 		// Route unknown messages to detail view if active
 		// This handles async messages like panesJoinedMsg and spinnerTickMsg
@@ -1404,6 +1425,18 @@ func (m *AppModel) viewDashboard() string {
 			Padding(0, 2).
 			Width(m.width)
 		headerParts = append(headerParts, dangerStyle.Render(IconBlocked()+" DANGEROUS MODE ENABLED"))
+	}
+
+	// Show version upgrade notification
+	if m.latestRelease != nil {
+		upgradeStyle := lipgloss.NewStyle().
+			Background(lipgloss.Color("#61AFEF")). // Blue background
+			Foreground(lipgloss.Color("#FFFFFF")).
+			Bold(true).
+			Padding(0, 2).
+			Width(m.width)
+		headerParts = append(headerParts, upgradeStyle.Render(
+			fmt.Sprintf("Update available: %s → %s  (run: ty upgrade)", m.currentVersion, m.latestRelease.Version)))
 	}
 
 	// Show notification banner if active
@@ -3529,6 +3562,10 @@ type aiCommandMsg struct {
 	err error
 }
 
+type versionCheckMsg struct {
+	release *github.LatestRelease
+}
+
 const maxDoneTasksInKanban = 20
 const summaryRefreshAfter = 5 * time.Minute
 
@@ -4234,6 +4271,17 @@ func (m *AppModel) prRefreshTick() tea.Cmd {
 	return tea.Tick(4*time.Minute, func(t time.Time) tea.Msg {
 		return prRefreshTickMsg(t)
 	})
+}
+
+// checkVersion fetches the latest release from GitHub and compares with current version.
+func (m *AppModel) checkVersion() tea.Cmd {
+	return func() tea.Msg {
+		release := github.FetchLatestRelease()
+		if release != nil && github.IsNewerVersion(m.currentVersion, release.Version) {
+			return versionCheckMsg{release: release}
+		}
+		return versionCheckMsg{release: nil}
+	}
 }
 
 // fetchPRInfo fetches PR info for a single task (used for detail view).

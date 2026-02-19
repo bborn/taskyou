@@ -127,8 +127,8 @@ Examples:
 
 			cwd, _ := os.Getwd()
 			exec := executor.New(database, config.New(database))
-			model := ui.NewAppModel(database, exec, cwd)
-			
+			model := ui.NewAppModel(database, exec, cwd, version)
+
 			// Load tasks synchronously to ensure model is populated
 			tasks, err := database.ListTasks(db.ListTasksOptions{
 				IncludeClosed: true,
@@ -2999,7 +2999,7 @@ func runLocal(dangerousMode bool, debugStatePath string) error {
 	cwd, _ := os.Getwd()
 
 	// Create and run TUI
-	model := ui.NewAppModel(database, exec, cwd)
+	model := ui.NewAppModel(database, exec, cwd, version)
 	if debugStatePath != "" {
 		model.SetDebugStatePath(debugStatePath)
 	}
