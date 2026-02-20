@@ -2928,6 +2928,12 @@ func execInTmux() error {
 
 	// Check if session already exists
 	if osexec.Command("tmux", "has-session", "-t", sessionName).Run() == nil {
+		// Reset window styling that may have been left over from a previous detail view
+		// (joinTmuxPanes sets window-style to dim inactive panes, but if the session
+		// wasn't cleanly shut down, the dimming persists on re-attach)
+		osexec.Command("tmux", "set-option", "-t", sessionName, "window-style", "default").Run()
+		osexec.Command("tmux", "set-option", "-t", sessionName, "window-active-style", "default").Run()
+
 		// Session exists, attach to it instead
 		cmd := osexec.Command("tmux", "attach-session", "-t", sessionName)
 		cmd.Stdin = os.Stdin
@@ -2950,6 +2956,10 @@ func execInTmux() error {
 	osexec.Command("tmux", "set-option", "-t", sessionName, "status-style", "bg=#1e293b,fg=#94a3b8").Run()
 	osexec.Command("tmux", "set-option", "-t", sessionName, "status-left", " ").Run()
 	osexec.Command("tmux", "set-option", "-t", sessionName, "status-right", " ").Run()
+
+	// Override global tmux window-style to prevent dimming from other tools (e.g. dmux)
+	osexec.Command("tmux", "set-option", "-t", sessionName, "window-style", "default").Run()
+	osexec.Command("tmux", "set-option", "-t", sessionName, "window-active-style", "default").Run()
 
 	// Enable pane border labels
 	osexec.Command("tmux", "set-option", "-t", sessionName, "pane-border-status", "top").Run()
