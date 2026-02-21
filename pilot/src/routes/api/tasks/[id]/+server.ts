@@ -28,6 +28,27 @@ export const PUT: RequestHandler = async ({ params, request, locals, platform })
 		return json({ error: 'Task not found' }, { status: 404 });
 	}
 
+	// Trigger execution when task is queued
+	if (data.status === 'queued') {
+		const env = platform!.env as any;
+		const apiKey = env.ANTHROPIC_API_KEY as string;
+		if (apiKey) {
+			platform!.context.waitUntil(
+				import('$lib/server/agent').then(({ executeTask }) =>
+					executeTask({
+						db: env.DB,
+						sandbox: env.SANDBOX,
+						sessions: env.SESSIONS,
+						storage: env.STORAGE,
+						apiKey,
+						userId: user.id,
+						taskId,
+					})
+				)
+			);
+		}
+	}
+
 	return json(task);
 };
 

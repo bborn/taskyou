@@ -400,11 +400,11 @@ export async function executeTask(opts: {
 			onStepFinish: async (event) => {
 				try {
 					for (const tc of event.toolCalls || []) {
-						const args = JSON.stringify(tc.args) || '';
+						const args = JSON.stringify((tc as any).args) || '';
 						await db.addTaskLog(database, taskId, "tool", `${tc.toolName}(${args.slice(0, 200)})`);
 					}
 					for (const tr of event.toolResults || []) {
-						const result = JSON.stringify(tr.result) || '';
+						const result = JSON.stringify((tr as any).result) || '';
 						await db.addTaskLog(database, taskId, "output", result.slice(0, 500));
 					}
 					if (event.text) {

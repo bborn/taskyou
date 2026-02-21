@@ -1,13 +1,17 @@
 import { AgentWorkflow, type AgentWorkflowEvent, type AgentWorkflowStep } from "agents/workflows";
-import { generateText, tool, stepCountIs } from "ai";
+import { generateText, stepCountIs } from "ai";
 import { createAnthropic } from "@ai-sdk/anthropic";
-import { z } from "zod";
 import * as db from "./db";
+import { buildSandboxTools, buildTaskExecutionPrompt } from "./agent";
 import type { TaskYouAgent } from "./agent";
+import type { GitContext } from "./agent";
 
 // Worker env type
 interface WorkflowEnv {
 	DB: D1Database;
+	SANDBOX: DurableObjectNamespace;
+	SESSIONS?: KVNamespace;
+	STORAGE?: R2Bucket;
 	ANTHROPIC_API_KEY?: string;
 	[key: string]: unknown;
 }
@@ -36,43 +40,62 @@ export class TaskExecutionWorkflow extends AgentWorkflow<TaskYouAgent, TaskParam
 
 		await this.reportProgress({ step: "processing", status: "running", taskId, title: task.title });
 
-		// Step 2: Execute with AI
+		// Step 2: Execute with AI + sandbox
 		const result = await step.do("ai-execute", { retries: { limit: 2, delay: "5 seconds", backoff: "linear" } }, async () => {
 			const anthropic = createAnthropic({
 				apiKey: env.ANTHROPIC_API_KEY,
 			});
 
-			const prompt = `You are an AI assistant executing a task.
-Task: ${task.title}
-${task.body ? `Details: ${task.body}` : ""}
-${task.type ? `Type: ${task.type}` : ""}
+			// Create sandbox for this task (dynamic import to avoid Vite bundling @cloudflare/sandbox)
+			const { getSandbox } = await import("@cloudflare/sandbox");
+			const sandbox = getSandbox(env.SANDBOX as any, `task-${taskId}`, {
+				normalizeId: true,
+				sleepAfter: "15m",
+			});
 
-Execute this task thoroughly. Use the available tools as needed.
-When you're done, provide a clear summary of what was accomplished.`;
+			// Load project and check for GitHub repo
+			let gitContext: GitContext | undefined;
+			let project: import("$lib/types").Project | null = null;
+			const loadedTask = await db.getTask(env.DB, userId, taskId);
+			if (loadedTask?.project_id) {
+				project = await db.getProjectById(env.DB, loadedTask.project_id);
+				if (project?.github_repo && env.SESSIONS) {
+					const token = await env.SESSIONS.get(`github-token:${userId}`);
+					if (token) {
+						const branch = project.github_branch || "main";
+
+						// Clone repo
+						const cloneResult = await sandbox.exec(
+							`git clone --depth=50 --branch ${branch} https://x-access-token:${token}@github.com/${project.github_repo}.git /workspace`,
+							{ cwd: "/" } as any,
+						);
+						if (cloneResult.success) {
+							await sandbox.exec('git config user.name "TaskYou Bot"', { cwd: "/workspace" } as any);
+							await sandbox.exec('git config user.email "bot@taskyou.dev"', { cwd: "/workspace" } as any);
+							await sandbox.exec(`git checkout -b taskyou/task-${taskId}`, { cwd: "/workspace" } as any);
+							await sandbox.exec(
+								`git config credential.helper '!f() { echo "username=x-access-token"; echo "password=${token}"; }; f'`,
+								{ cwd: "/workspace" } as any,
+							);
+							gitContext = { token, repo: project.github_repo, defaultBranch: branch };
+						}
+					}
+				}
+			}
+
+			const sandboxTools = buildSandboxTools(sandbox, env.DB, taskId, undefined, env.STORAGE, gitContext);
+
+			const prompt = `Execute this task:\nTitle: ${task.title}\n${task.body ? `Details: ${task.body}` : ""}\n${task.type ? `Type: ${task.type}` : ""}\n\nComplete this task thoroughly.${gitContext ? " The repo is already cloned at /workspace. Read existing code before making changes. After making changes, commit, push, and create a PR." : " Use write_file to create output files. For web apps, use serve_app after writing files."}`;
 
 			const response = await generateText({
 				model: anthropic("claude-sonnet-4-5-20250929"),
-				system: "You are a task execution agent. Complete the given task using the tools available. Be thorough but concise.",
+				system: buildTaskExecutionPrompt(project || undefined),
 				prompt,
-				tools: {
-					write_output: tool({
-						description: "Write the task output/result",
-						inputSchema: z.object({ content: z.string() }),
-						execute: async (args) => ({ written: true, length: args.content.length }),
-					}),
-					update_progress: tool({
-						description: "Report progress on the task",
-						inputSchema: z.object({ note: z.string() }),
-						execute: async (args) => {
-							await db.addTaskLog(env.DB, taskId, "text", args.note);
-							return { logged: true };
-						},
-					}),
-				},
-				stopWhen: stepCountIs(10),
+				tools: sandboxTools,
+				stopWhen: stepCountIs(15),
 			});
 
-			const usage = response.usage;
+			const usage = response.usage as { promptTokens?: number; completionTokens?: number } | undefined;
 			return {
 				output: response.text,
 				inputTokens: usage?.promptTokens || 0,
