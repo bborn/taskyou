@@ -53,6 +53,10 @@ type FormModel struct {
 	project            string
 	projectIdx         int
 	projects           []string
+	projectSearchMode  bool     // true when typing to search/filter projects
+	projectSearchQuery string   // current search query
+	projectFiltered    []string // filtered project list (fuzzy matched)
+	projectFilteredIdx int      // selected index in filtered list
 	taskType           string
 	typeIdx            int
 	types              []string
@@ -510,6 +514,61 @@ func (m *FormModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
+		// Handle project search mode when active
+		if m.projectSearchMode && m.focused == FieldProject {
+			switch msg.String() {
+			case "esc":
+				m.exitProjectSearch()
+				return m, nil
+			case "enter", "tab":
+				m.selectProjectFromSearch()
+				if msg.String() == "tab" {
+					m.focusNext()
+				}
+				return m, nil
+			case "up", "ctrl+p":
+				if m.projectFilteredIdx > 0 {
+					m.projectFilteredIdx--
+				}
+				return m, nil
+			case "down", "ctrl+n":
+				if m.projectFilteredIdx < len(m.projectFiltered)-1 {
+					m.projectFilteredIdx++
+				}
+				return m, nil
+			case "backspace", "ctrl+h":
+				if len(m.projectSearchQuery) > 0 {
+					m.projectSearchQuery = m.projectSearchQuery[:len(m.projectSearchQuery)-1]
+					m.filterProjects()
+				} else {
+					m.exitProjectSearch()
+				}
+				return m, nil
+			case "ctrl+c":
+				m.cancelled = true
+				return m, nil
+			case "ctrl+w":
+				// Delete word backward
+				m.projectSearchQuery = ""
+				m.filterProjects()
+				return m, nil
+			case "ctrl+u":
+				// Clear line
+				m.projectSearchQuery = ""
+				m.filterProjects()
+				return m, nil
+			default:
+				key := msg.String()
+				// Only accept printable single characters
+				if len(key) == 1 && key[0] >= 32 && key[0] < 127 {
+					m.projectSearchQuery += key
+					m.filterProjects()
+					return m, nil
+				}
+			}
+			return m, nil
+		}
+
 		// Handle task reference autocomplete when active
 		if m.showTaskRefAutocomplete && m.taskRefAutocomplete != nil && m.taskRefAutocomplete.HasResults() {
 			switch msg.String() {
@@ -638,6 +697,11 @@ func (m *FormModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.focused == FieldBody {
 				break
 			}
+			// On project field, enter opens search mode
+			if m.focused == FieldProject {
+				m.enterProjectSearch()
+				return m, nil
+			}
 			// On last visible field, submit
 			if m.isLastVisibleField() {
 				m.parseAttachments()
@@ -724,12 +788,29 @@ func (m *FormModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 
+		case "/":
+			// Slash to enter project search mode when on project field
+			if m.focused == FieldProject {
+				m.enterProjectSearch()
+				return m, nil
+			}
+
 		default:
 			if m.handleAttachmentRemovalKey(msg) {
 				return m, nil
 			}
-			// Type-to-select for selector fields
-			if m.focused == FieldProject || m.focused == FieldType || m.focused == FieldExecutor {
+			// Project field: any letter enters search mode
+			if m.focused == FieldProject {
+				key := msg.String()
+				if len(key) == 1 && key[0] >= 32 && key[0] < 127 {
+					m.enterProjectSearch()
+					m.projectSearchQuery = key
+					m.filterProjects()
+					return m, nil
+				}
+			}
+			// Type-to-select for other selector fields
+			if m.focused == FieldType || m.focused == FieldExecutor {
 				key := msg.String()
 				if len(key) == 1 && unicode.IsLetter(rune(key[0])) {
 					m.selectByPrefix(strings.ToLower(key))
@@ -897,19 +978,85 @@ func (m *FormModel) acceptGhostText() {
 	m.ghostFullText = ""
 }
 
-func (m *FormModel) selectByPrefix(prefix string) {
-	switch m.focused {
-	case FieldProject:
-		for i, p := range m.projects {
-			if strings.HasPrefix(strings.ToLower(p), prefix) {
-				m.projectIdx = i
-				m.project = p
-				m.loadLastTaskTypeForProject()
-				m.rebuildExecutorListForProject() // Re-sort by usage for new project
-				m.loadLastExecutorForProject()
-				return
+// enterProjectSearch activates the project search mode.
+func (m *FormModel) enterProjectSearch() {
+	m.projectSearchMode = true
+	m.projectSearchQuery = ""
+	m.projectFilteredIdx = 0
+	m.filterProjects()
+}
+
+// exitProjectSearch deactivates project search mode without selecting.
+func (m *FormModel) exitProjectSearch() {
+	m.projectSearchMode = false
+	m.projectSearchQuery = ""
+	m.projectFiltered = nil
+	m.projectFilteredIdx = 0
+}
+
+// selectProjectFromSearch selects the currently highlighted project in search results.
+func (m *FormModel) selectProjectFromSearch() {
+	if len(m.projectFiltered) == 0 {
+		m.exitProjectSearch()
+		return
+	}
+	if m.projectFilteredIdx >= len(m.projectFiltered) {
+		m.projectFilteredIdx = 0
+	}
+	selected := m.projectFiltered[m.projectFilteredIdx]
+	m.project = selected
+	// Update projectIdx to match
+	for i, p := range m.projects {
+		if p == selected {
+			m.projectIdx = i
+			break
+		}
+	}
+	m.exitProjectSearch()
+	m.loadLastTaskTypeForProject()
+	m.rebuildExecutorListForProject()
+	m.loadLastExecutorForProject()
+}
+
+// filterProjects updates the filtered project list based on the search query.
+func (m *FormModel) filterProjects() {
+	query := m.projectSearchQuery
+	if query == "" {
+		// Show all projects, with current project first
+		m.projectFiltered = make([]string, len(m.projects))
+		copy(m.projectFiltered, m.projects)
+		// Pre-select the current project
+		m.projectFilteredIdx = 0
+		for i, p := range m.projectFiltered {
+			if p == m.project {
+				m.projectFilteredIdx = i
+				break
 			}
 		}
+		return
+	}
+
+	type scored struct {
+		name  string
+		score int
+	}
+	var results []scored
+	for _, p := range m.projects {
+		s := fuzzyScore(p, query)
+		if s > 0 {
+			results = append(results, scored{p, s})
+		}
+	}
+	sort.Slice(results, func(i, j int) bool { return results[i].score > results[j].score })
+	m.projectFiltered = make([]string, len(results))
+	for i, r := range results {
+		m.projectFiltered[i] = r.name
+	}
+	m.projectFilteredIdx = 0
+}
+
+func (m *FormModel) selectByPrefix(prefix string) {
+	switch m.focused {
 	case FieldType:
 		for i, t := range m.types {
 			label := t
@@ -1075,6 +1222,9 @@ func (m *FormModel) blurAll() {
 	m.bodyInput.Blur()
 	m.attachmentsInput.Blur()
 	m.clearAttachmentSelection()
+	if m.projectSearchMode {
+		m.exitProjectSearch()
+	}
 }
 
 func (m *FormModel) focusCurrent() {
@@ -1347,8 +1497,70 @@ func (m *FormModel) View() string {
 		if m.focused == FieldProject {
 			cursor = cursorStyle.Render("▸")
 		}
-		b.WriteString(cursor + " " + labelStyle.Render("Project") + m.renderSelector(m.projects, m.projectIdx, m.focused == FieldProject, selectedStyle, optionStyle, dimStyle))
-		b.WriteString("\n\n")
+		if m.projectSearchMode && m.focused == FieldProject {
+			// Search mode: show search input and filtered dropdown
+			searchInputStyle := lipgloss.NewStyle().Foreground(ColorPrimary)
+			queryDisplay := m.projectSearchQuery
+			cursorChar := lipgloss.NewStyle().Background(ColorPrimary).Foreground(lipgloss.Color("0")).Render(" ")
+			b.WriteString(cursor + " " + labelStyle.Render("Project") + searchInputStyle.Render(queryDisplay) + cursorChar)
+			b.WriteString("\n")
+
+			// Show filtered results as a vertical dropdown
+			maxShow := 8
+			if len(m.projectFiltered) < maxShow {
+				maxShow = len(m.projectFiltered)
+			}
+
+			// Calculate scroll window
+			scrollStart := 0
+			if m.projectFilteredIdx >= maxShow {
+				scrollStart = m.projectFilteredIdx - maxShow + 1
+			}
+			scrollEnd := scrollStart + maxShow
+			if scrollEnd > len(m.projectFiltered) {
+				scrollEnd = len(m.projectFiltered)
+				scrollStart = scrollEnd - maxShow
+				if scrollStart < 0 {
+					scrollStart = 0
+				}
+			}
+
+			// Scroll-up indicator
+			if scrollStart > 0 {
+				b.WriteString("                 " + dimStyle.Render("↑ more") + "\n")
+			}
+
+			for i := scrollStart; i < scrollEnd; i++ {
+				p := m.projectFiltered[i]
+				if i == m.projectFilteredIdx {
+					b.WriteString("                 " + selectedStyle.Render(" "+p+" ") + "\n")
+				} else {
+					b.WriteString("                 " + optionStyle.Render(" "+p) + "\n")
+				}
+			}
+
+			// Scroll-down indicator
+			if scrollEnd < len(m.projectFiltered) {
+				b.WriteString("                 " + dimStyle.Render("↓ more") + "\n")
+			}
+
+			if len(m.projectFiltered) == 0 {
+				b.WriteString("                 " + dimStyle.Render("no matches") + "\n")
+			}
+			b.WriteString("\n")
+		} else {
+			// Normal mode: show current project with hint
+			projectDisplay := m.project
+			if projectDisplay == "" {
+				projectDisplay = "none"
+			}
+			if m.focused == FieldProject {
+				b.WriteString(cursor + " " + labelStyle.Render("Project") + selectedStyle.Render(" "+projectDisplay+" ") + "  " + dimStyle.Render("type to search · "+IconArrowLeft()+"/"+IconArrowRight()+" cycle"))
+			} else {
+				b.WriteString(cursor + " " + labelStyle.Render("Project") + optionStyle.Bold(true).Render(projectDisplay))
+			}
+			b.WriteString("\n\n")
+		}
 	}
 
 	// Title
