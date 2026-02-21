@@ -1,14 +1,15 @@
 <script lang="ts">
-	import { onMount } from 'svelte';
 	import {
 		X, Play, RotateCcw, CheckCircle, Trash2, Edit3, Save,
 		Zap, AlertCircle, ExternalLink, XCircle, FileText,
-		Loader2,
+		Loader2, Globe,
 	} from 'lucide-svelte';
 	import { tasks as tasksApi } from '$lib/api/client';
-	import { updateTask as storeUpdateTask } from '$lib/stores/tasks.svelte';
+	import { updateTask as storeUpdateTask, deleteTask as storeDeleteTask } from '$lib/stores/tasks.svelte';
+	import { authState } from '$lib/stores/auth.svelte';
+	import TaskChat from './TaskChat.svelte';
 	import { Marked } from 'marked';
-	import type { Task, TaskLog, TaskStatus } from '$lib/types';
+	import type { Task, TaskFile, TaskLog, TaskStatus } from '$lib/types';
 
 	interface Props {
 		task: Task;
@@ -33,31 +34,18 @@
 	let logsEndEl: HTMLDivElement;
 	let dialogEl: HTMLDialogElement;
 	let retryDialogEl: HTMLDialogElement;
-	let pollInterval: ReturnType<typeof setInterval> | null = null;
 
-	// File viewer state
-	interface FileEntry {
-		path: string;
-		changes: string;
-		additions: number;
-		deletions: number;
-	}
+	// File viewer state — loaded from API
+	let taskFiles = $state<TaskFile[]>([]);
+	let filesLoaded = $state(false);
 
-	let fileEntries = $derived.by<FileEntry[]>(() => {
-		if (!task.summary) return [];
-		return task.summary.split('\n').reduce<FileEntry[]>((acc, line) => {
-			let match = line.match(/^\s*(.+?)\s+\|\s+(\d+)\s*([+\-]*)/);
-			if (match) {
-				acc.push({ path: match[1].trim(), changes: match[2], additions: (match[3] || '').split('').filter(c => c === '+').length, deletions: (match[3] || '').split('').filter(c => c === '-').length });
-			} else {
-				match = line.match(/^\s*(.+?)\s+\|\s+Bin/);
-				if (match) acc.push({ path: match[1].trim(), changes: 'bin', additions: 0, deletions: 0 });
-			}
-			return acc;
-		}, []);
-	});
-
-	let hasFiles = $derived(fileEntries.length > 0);
+	let hasFiles = $derived(taskFiles.length > 0);
+	let htmlEntryFile = $derived(
+		taskFiles.find(f => f.path === 'index.html')?.path
+		|| taskFiles.find(f => f.path.endsWith('.html'))?.path
+		|| ''
+	);
+	let hasHtmlFile = $derived(htmlEntryFile !== '');
 	let selectedFile = $state<string | null>(null);
 	let fileViewMode = $state<'preview' | 'source' | 'diff'>('preview');
 	let fileContent = $state<string>('');
@@ -67,7 +55,7 @@
 	// Auto-select first file
 	$effect(() => {
 		if (hasFiles && !selectedFile) {
-			selectedFile = fileEntries[0].path;
+			selectedFile = taskFiles[0].path;
 		}
 	});
 
@@ -78,7 +66,7 @@
 		}
 	});
 
-	async function loadFileContent(taskId: number, path: string, mode: string) {
+	async function loadFileContent(taskId: number, path: string, _mode: string) {
 		const cacheKey = `${taskId}:${path}`;
 		fileLoading = true;
 		try {
@@ -86,12 +74,7 @@
 			if (fileCache.has(cacheKey)) {
 				content = fileCache.get(cacheKey)!;
 			} else {
-				const res = await fetch(`/api/tasks/${taskId}/file?path=${encodeURIComponent(path)}`);
-				if (!res.ok) {
-					content = `Error loading file: ${res.statusText}`;
-				} else {
-					content = await res.text();
-				}
+				content = await tasksApi.getFileContent(taskId, path);
 				fileCache.set(cacheKey, content);
 			}
 			fileContent = content;
@@ -100,6 +83,17 @@
 		} finally {
 			fileLoading = false;
 		}
+	}
+
+	async function loadTaskFiles() {
+		try {
+			const files = await tasksApi.listFiles(task.id);
+			taskFiles = files;
+		} catch (e) {
+			console.error('[TaskDetail] loadTaskFiles error:', e);
+			taskFiles = [];
+		}
+		filesLoaded = true;
 	}
 
 	$effect(() => {
@@ -132,6 +126,7 @@
 	});
 
 	let isRunning = $derived(task.status === 'processing' || task.status === 'queued');
+	let userId = $derived(authState.user?.id ?? '');
 
 	async function fetchLogs() {
 		try {
@@ -146,16 +141,25 @@
 		if (dialogEl && !dialogEl.open) dialogEl.showModal();
 	});
 
-	onMount(() => {
-		loading = true;
-		fetchLogs().then(() => { loading = false; });
+	// Use $effect instead of onMount to survive Vite tree-shaking in child components
+	$effect(() => {
+		// Track task.id to re-run when task changes
+		const id = task.id;
+		const running = task.status === 'processing' || task.status === 'queued';
 
-		if (isRunning) {
-			pollInterval = setInterval(fetchLogs, 1500);
+		loading = true;
+		Promise.all([fetchLogs(), loadTaskFiles()]).then(() => { loading = false; });
+
+		let interval: ReturnType<typeof setInterval> | null = null;
+		if (running) {
+			interval = setInterval(async () => {
+				await fetchLogs();
+				await loadTaskFiles();
+			}, 1500);
 		}
 
 		return () => {
-			if (pollInterval) clearInterval(pollInterval);
+			if (interval) clearInterval(interval);
 		};
 	});
 
@@ -201,7 +205,7 @@
 	async function handleDelete() {
 		if (!confirm('Are you sure you want to delete this task?')) return;
 		actionLoading = 'delete';
-		try { await tasksApi.delete(task.id); onDelete?.(); closeDialog(); }
+		try { await storeDeleteTask(task.id); onDelete?.(); closeDialog(); }
 		catch (err) { console.error(err); }
 		finally { actionLoading = null; }
 	}
@@ -265,14 +269,13 @@
 <dialog
 	bind:this={dialogEl}
 	class="dialog"
-	style={hasFiles ? 'width: 90vw; height: 85vh;' : 'width: fit-content; min-width: 32rem; max-width: 48rem;'}
 	aria-labelledby="task-detail-title"
 	onclose={handleDialogClose}
 	onclick={handleBackdropClick}
 >
-	<div style={hasFiles ? 'width: 90vw; max-width: 90vw; height: 85vh; max-height: 85vh; padding-bottom: 0;' : ''}>
+	<div class={hasFiles ? '!max-w-[90vw] !w-[90vw] !h-[85vh] !max-h-[85vh] !p-0 !gap-0 overflow-hidden !rounded-xl' : '!max-w-2xl !h-[85vh] !max-h-[85vh] !p-0 !gap-0 overflow-hidden'}>
 		<!-- Header -->
-		<header>
+		<header class={hasFiles ? 'px-8 pt-5 pb-3' : ''}>
 			<h2 id="task-detail-title">{task.title}</h2>
 			<div class="flex flex-wrap items-center gap-2 mt-1">
 				<span class="badge text-white text-xs" style="background-color: var(--status-{task.status});">{config.label}</span>
@@ -282,6 +285,17 @@
 					<span class="text-xs text-muted-foreground">#{task.id}</span>
 				{#if isRunning}
 					<Loader2 class="size-4 animate-spin text-primary" />
+				{/if}
+				{#if task.preview_url}
+					<a
+						href={task.preview_url}
+						target="_blank"
+						rel="noopener noreferrer"
+						class="btn h-5 px-1.5 gap-1 text-[10px] inline-flex items-center bg-green-600 hover:bg-green-700 text-white"
+					>
+						<Globe class="size-2.5" />
+						Open Preview
+					</a>
 				{/if}
 				{#if task.status === 'backlog' || task.status === 'blocked' || task.status === 'failed'}
 					<button
@@ -324,23 +338,26 @@
 						<Trash2 class="size-3" />
 					</button>
 				{/if}
-				<span class="text-[10px] text-muted-foreground/60">&middot; {timeAgo(task.created_at)}</span>
 				{#if task.started_at}
-					<span class="text-[10px] text-muted-foreground/60">&middot; started {timeAgo(task.started_at)}</span>
+					<span class="text-[10px] text-muted-foreground/60">started {timeAgo(task.started_at)}</span>
 				{/if}
 				{#if task.completed_at}
 					<span class="text-[10px] text-muted-foreground/60">&middot; completed {timeAgo(task.completed_at)}</span>
+				{:else if !task.started_at}
+					<span class="text-[10px] text-muted-foreground/60">{timeAgo(task.created_at)}</span>
 				{/if}
 			</div>
 		</header>
 
 		<!-- Content -->
-		<section class="!p-0 overflow-hidden !flex-1">
+		<section class="!p-0 overflow-hidden flex-1 min-h-0">
 			{#if hasFiles}
 				<!-- Two-pane layout for tasks with files -->
-				<div class="flex h-full">
-					<!-- Left pane: task info -->
-					<div class="w-1/3 shrink-0 border-r border-border overflow-y-auto p-4 space-y-3">
+				<div class="flex h-full overflow-hidden">
+					<!-- Left pane: task info + chat -->
+					<div class="w-1/3 min-w-[280px] shrink-0 border-r border-border flex flex-col">
+						<!-- Task info (scrollable) -->
+						<div class="overflow-y-auto px-8 py-4 space-y-3 shrink min-h-0">
 						{#if isEditing}
 							<div class="space-y-2">
 								<input bind:value={editTitle} class="input w-full text-sm font-semibold" />
@@ -353,14 +370,19 @@
 								</div>
 							</div>
 						{:else}
-							{#if task.body}
-								<div class="bg-muted rounded-lg p-3">
+							<div class="bg-muted rounded-lg p-3 relative group">
+								{#if task.body}
 									<div class="text-sm">{@html renderMarkdown(task.body)}</div>
-								</div>
-							{/if}
-							<button class="text-[10px] text-muted-foreground hover:text-foreground" onclick={() => (isEditing = true)}>
-								<Edit3 class="size-3 inline" /> Edit
-							</button>
+								{:else}
+									<p class="text-sm text-muted-foreground italic">No description</p>
+								{/if}
+								<button
+									class="absolute top-2 right-2 opacity-0 group-hover:opacity-100 transition-opacity text-[10px] text-muted-foreground hover:text-foreground bg-background/80 rounded px-1.5 py-0.5"
+									onclick={() => (isEditing = true)}
+								>
+									<Edit3 class="size-3 inline" /> Edit
+								</button>
+							</div>
 						{/if}
 
 						{#if subtasks.length > 0}
@@ -383,7 +405,7 @@
 
 						{#if task.output}
 							<div>
-								<p class="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground mb-1.5">Summary</p>
+								<p class="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground mb-1.5">Output</p>
 								<div class="bg-muted rounded-lg p-3 text-sm chat-markdown">
 									{@html renderMarkdown(task.output)}
 								</div>
@@ -404,7 +426,14 @@
 								</div>
 							</div>
 						{/if}
+						</div>
 
+						<!-- Task Chat -->
+						{#if userId}
+							<div class="border-t border-border min-h-[200px] h-[280px] shrink-0">
+								<TaskChat taskId={task.id} {task} {userId} />
+							</div>
+						{/if}
 					</div>
 
 					<!-- Right pane: file viewer -->
@@ -412,39 +441,57 @@
 						<!-- File tabs + view mode -->
 						<div class="flex items-end shrink-0 bg-muted/40 border-b border-border">
 							<div class="flex items-end gap-0 px-2 pt-2 overflow-x-auto flex-1 min-w-0">
-								{#each fileEntries as entry}
+								{#each taskFiles as file}
 									<button
-										class="relative px-3 py-1.5 text-[11px] font-medium whitespace-nowrap rounded-t-md transition-all {selectedFile === entry.path ? 'bg-background text-foreground shadow-sm z-10 border border-border border-b-background -mb-px' : 'text-muted-foreground hover:text-foreground hover:bg-muted/60'}"
-										onclick={() => { selectedFile = entry.path; fileViewMode = 'preview'; }}
-										title={entry.path}
+										class="relative px-3 py-1.5 text-[11px] font-medium whitespace-nowrap rounded-t-md transition-all {selectedFile === file.path ? 'bg-background text-foreground shadow-sm z-10 border border-border border-b-background -mb-px' : 'text-muted-foreground hover:text-foreground hover:bg-muted/60'}"
+										onclick={() => { selectedFile = file.path; fileViewMode = (file.path.endsWith('.html') || file.path.endsWith('.htm')) ? 'preview' : 'source'; }}
+										title={file.path}
 									>
 										<span class="flex items-center gap-1.5">
 											<FileText class="size-3 shrink-0 text-muted-foreground" />
-											{fileName(entry.path)}
+											{fileName(file.path)}
 										</span>
 									</button>
 								{/each}
 							</div>
-							<div class="flex gap-0.5 bg-muted/60 rounded-md p-0.5 shrink-0 mr-2 mb-1.5">
-								{#each ['preview', 'source', 'diff'] as mode}
-									<button
-										class="px-2 py-0.5 text-[10px] rounded font-medium {fileViewMode === mode ? 'bg-background text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'}"
-										onclick={() => (fileViewMode = mode as typeof fileViewMode)}
+							<div class="flex items-center gap-1.5 shrink-0 mr-10 mb-1.5">
+								<div class="flex gap-0.5 bg-muted/60 rounded-md p-0.5">
+									{#each (hasHtmlFile ? ['preview', 'source'] as const : ['source'] as const) as mode}
+										<button
+											class="px-2 py-0.5 text-[10px] rounded font-medium {fileViewMode === mode ? 'bg-background text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'}"
+											onclick={() => (fileViewMode = mode as typeof fileViewMode)}
+										>
+											{mode === 'preview' ? 'Preview' : 'Source'}
+										</button>
+									{/each}
+								</div>
+								{#if hasHtmlFile}
+									<a
+										href="/preview/tasks/{task.id}/{htmlEntryFile}"
+										target="_blank"
+										rel="noopener noreferrer"
+										class="text-muted-foreground hover:text-foreground transition-colors"
+										title="Open preview in new tab"
 									>
-										{mode === 'preview' ? 'Preview' : mode === 'source' ? 'Source' : 'Changes'}
-									</button>
-								{/each}
+										<ExternalLink class="size-3.5" />
+									</a>
+								{/if}
 							</div>
 						</div>
 
 						<!-- File content -->
 						<div class="flex-1 overflow-auto bg-background">
-							{#if fileLoading}
+							{#if fileViewMode === 'preview' && hasHtmlFile}
+								<!-- Live app preview: serves files from real URLs so relative paths work -->
+								<iframe
+									src="/preview/tasks/{task.id}/{htmlEntryFile}"
+									class="w-full h-full border-0"
+									title="App Preview"
+								></iframe>
+							{:else if fileLoading}
 								<div class="flex items-center justify-center py-12">
 									<Loader2 class="size-5 animate-spin text-muted-foreground" />
 								</div>
-							{:else if fileViewMode === 'diff'}
-								<pre class="text-xs font-mono leading-relaxed">{@html renderDiffHtml(fileContent)}</pre>
 							{:else if fileViewMode === 'source'}
 								<table class="text-xs font-mono leading-relaxed w-full">
 									<tbody>{@html renderSourceHtml(fileContent)}</tbody>
@@ -455,13 +502,6 @@
 									<div class="p-4 text-sm prose prose-sm dark:prose-invert max-w-none chat-markdown">
 										{@html renderMarkdown(fileContent)}
 									</div>
-								{:else if ext === '.html' || ext === '.htm'}
-									<iframe
-										srcdoc={fileContent}
-										sandbox="allow-same-origin"
-										class="w-full h-full border-0"
-										title="HTML Preview"
-									></iframe>
 								{:else if ext === '.json'}
 									<pre class="p-4 text-xs font-mono whitespace-pre-wrap">{(() => { try { return JSON.stringify(JSON.parse(fileContent), null, 2); } catch { return fileContent; } })()}</pre>
 								{:else}
@@ -475,7 +515,9 @@
 				</div>
 			{:else}
 				<!-- Single-column layout for tasks without files -->
-				<div class="space-y-3 overflow-y-auto p-4">
+				<div class="flex flex-col h-full">
+					<!-- Task info (scrollable) -->
+					<div class="space-y-3 overflow-y-auto p-4 flex-1 min-h-0">
 					{#if isEditing}
 						<div class="space-y-2">
 							<input bind:value={editTitle} class="input w-full text-sm font-semibold" />
@@ -488,14 +530,19 @@
 							</div>
 						</div>
 					{:else}
-						{#if task.body}
-							<div class="bg-muted rounded-lg p-3">
+						<div class="bg-muted rounded-lg p-3 relative group">
+							{#if task.body}
 								<div class="text-sm">{@html renderMarkdown(task.body)}</div>
-							</div>
-						{/if}
-						<button class="text-[10px] text-muted-foreground hover:text-foreground" onclick={() => (isEditing = true)}>
-							<Edit3 class="size-3 inline" /> Edit
-						</button>
+							{:else}
+								<p class="text-sm text-muted-foreground italic">No description</p>
+							{/if}
+							<button
+								class="absolute top-2 right-2 opacity-0 group-hover:opacity-100 transition-opacity text-[10px] text-muted-foreground hover:text-foreground bg-background/80 rounded px-1.5 py-0.5"
+								onclick={() => (isEditing = true)}
+							>
+								<Edit3 class="size-3 inline" /> Edit
+							</button>
+						</div>
 					{/if}
 
 					{#if subtasks.length > 0}
@@ -549,7 +596,14 @@
 							</div>
 						</div>
 					{/if}
+					</div>
 
+					<!-- Task Chat -->
+					{#if userId}
+						<div class="border-t border-border min-h-[200px] h-[40%] shrink-0">
+							<TaskChat taskId={task.id} {task} {userId} />
+						</div>
+					{/if}
 				</div>
 			{/if}
 		</section>
