@@ -99,7 +99,7 @@ func (c *ClaudeExecutor) BuildCommand(task *db.Task, sessionID, prompt string) s
 
 	// Build command - resume if we have a session ID, otherwise start fresh
 	if sessionID != "" {
-		cmd := fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q claude %s%s--chrome --resume %s`,
+		cmd := fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q claude %s%s--resume %s`,
 			task.ID, worktreeSessionID, task.Port, task.WorktreePath, dangerousFlag, systemPromptFlag, sessionID)
 		if systemFile != nil {
 			cmd += fmt.Sprintf(`; rm -f %q`, systemFile.Name())
@@ -113,7 +113,7 @@ func (c *ClaudeExecutor) BuildCommand(task *db.Task, sessionID, prompt string) s
 		promptFile, err := os.CreateTemp("", "task-prompt-*.txt")
 		if err != nil {
 			c.logger.Error("BuildCommand: failed to create temp file", "error", err)
-			cmd := fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q claude %s%s--chrome`,
+			cmd := fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q claude %s%s`,
 				task.ID, worktreeSessionID, task.Port, task.WorktreePath, dangerousFlag, systemPromptFlag)
 			if systemFile != nil {
 				cmd += fmt.Sprintf(`; rm -f %q`, systemFile.Name())
@@ -123,7 +123,7 @@ func (c *ClaudeExecutor) BuildCommand(task *db.Task, sessionID, prompt string) s
 		promptFile.WriteString(prompt)
 		promptFile.Close()
 
-		cmd := fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q claude %s%s--chrome "$(cat %q)"; rm -f %q`,
+		cmd := fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q claude %s%s"$(cat %q)"; rm -f %q`,
 			task.ID, worktreeSessionID, task.Port, task.WorktreePath, dangerousFlag, systemPromptFlag, promptFile.Name(), promptFile.Name())
 		if systemFile != nil {
 			cmd += fmt.Sprintf(` %q`, systemFile.Name())
@@ -131,7 +131,7 @@ func (c *ClaudeExecutor) BuildCommand(task *db.Task, sessionID, prompt string) s
 		return cmd
 	}
 
-	cmd := fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q claude %s%s--chrome`,
+	cmd := fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q claude %s%s`,
 		task.ID, worktreeSessionID, task.Port, task.WorktreePath, dangerousFlag, systemPromptFlag)
 	if systemFile != nil {
 		cmd += fmt.Sprintf(`; rm -f %q`, systemFile.Name())
