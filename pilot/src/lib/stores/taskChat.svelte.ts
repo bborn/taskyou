@@ -43,8 +43,15 @@ export function connectTaskChat(userId: string, taskId: number) {
 		return;
 	}
 
+	// Clear messages if switching to a different task
+	const switchingTask = currentTaskId !== null && currentTaskId !== taskId;
+
 	// Clean up any existing connection
 	disconnectTaskChat();
+
+	if (switchingTask) {
+		taskChatState.messages = [];
+	}
 
 	currentUserId = userId;
 	currentTaskId = taskId;
@@ -56,13 +63,16 @@ export function connectTaskChat(userId: string, taskId: number) {
 	const url = `${protocol}//${location.host}/agents/taskyou-agent/${agentName}`;
 
 	const ws = new WebSocket(url);
+	taskWs = ws;
 
 	ws.addEventListener('open', () => {
+		if (taskWs !== ws) return; // Stale socket
 		taskChatState.connected = true;
 		taskChatState.error = null;
 	});
 
 	ws.addEventListener('message', (event) => {
+		if (taskWs !== ws) return; // Stale socket
 		try {
 			const data = JSON.parse(event.data);
 			handleTaskChatMessage(data);
@@ -72,6 +82,7 @@ export function connectTaskChat(userId: string, taskId: number) {
 	});
 
 	ws.addEventListener('close', () => {
+		if (taskWs !== ws) return; // Stale socket — don't corrupt current state
 		taskChatState.connected = false;
 		taskWs = null;
 
@@ -86,10 +97,9 @@ export function connectTaskChat(userId: string, taskId: number) {
 	});
 
 	ws.addEventListener('error', () => {
+		if (taskWs !== ws) return; // Stale socket
 		taskChatState.error = 'WebSocket connection error';
 	});
-
-	taskWs = ws;
 }
 
 /**
@@ -105,17 +115,19 @@ export function disconnectTaskChat() {
 	}
 
 	if (taskWs) {
-		taskWs.close();
-		taskWs = null;
+		const ws = taskWs;
+		taskWs = null; // Clear reference BEFORE closing so close handler ignores
+		ws.close();
 	}
 
 	taskChatState.taskId = null;
 	taskChatState.connected = false;
-	taskChatState.messages = [];
 	taskChatState.streaming = false;
 	taskChatState.streamingContent = '';
 	taskChatState.error = null;
 	taskChatState.completedMessage = null;
+	// Note: messages are NOT cleared here — they persist until a new task connects
+	// or the server restores them via cf_agent_chat_messages on reconnect
 }
 
 /**

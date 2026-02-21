@@ -350,10 +350,10 @@
 		</header>
 
 		<!-- Content -->
-		<section class="!p-0 overflow-hidden flex-1 min-h-0">
+		<section class="!p-0 overflow-hidden flex-1 min-h-0 flex flex-col">
 			{#if hasFiles}
 				<!-- Two-pane layout for tasks with files -->
-				<div class="flex h-full overflow-hidden">
+				<div class="flex flex-1 min-h-0 overflow-hidden">
 					<!-- Left pane: task info + chat -->
 					<div class="w-1/3 min-w-[280px] shrink-0 border-r border-border flex flex-col">
 						<!-- Task info (scrollable) -->
@@ -430,7 +430,7 @@
 
 						<!-- Task Chat -->
 						{#if userId}
-							<div class="border-t border-border min-h-[200px] h-[280px] shrink-0">
+							<div class="border-t border-border min-h-[150px] flex-1">
 								<TaskChat taskId={task.id} {task} {userId} />
 							</div>
 						{/if}
@@ -515,7 +515,7 @@
 				</div>
 			{:else}
 				<!-- Single-column layout for tasks without files -->
-				<div class="flex flex-col h-full">
+				<div class="flex flex-col flex-1 min-h-0">
 					<!-- Task info (scrollable) -->
 					<div class="space-y-3 overflow-y-auto p-4 flex-1 min-h-0">
 					{#if isEditing}
@@ -600,7 +600,7 @@
 
 					<!-- Task Chat -->
 					{#if userId}
-						<div class="border-t border-border min-h-[200px] h-[40%] shrink-0">
+						<div class="border-t border-border min-h-[150px] flex-[0_0_35%]">
 							<TaskChat taskId={task.id} {task} {userId} />
 						</div>
 					{/if}
