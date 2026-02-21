@@ -1027,3 +1027,148 @@ func TestFormHeaderShowsProjectInSimpleMode(t *testing.T) {
 		t.Error("expected simple mode header to include project name")
 	}
 }
+
+func TestProjectSearchMode(t *testing.T) {
+	m := NewFormModel(nil, 100, 50, "", []string{"claude"})
+	m.showAdvanced = true
+	m.projects = []string{"personal", "workflow", "webapp", "marketing", "data-pipeline"}
+	m.project = "personal"
+	m.projectIdx = 0
+	m.focused = FieldProject
+
+	// Typing a letter should enter search mode
+	m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'w'}})
+	if !m.projectSearchMode {
+		t.Fatal("expected search mode to be active after typing a letter")
+	}
+	if m.projectSearchQuery != "w" {
+		t.Fatalf("expected search query 'w', got %q", m.projectSearchQuery)
+	}
+	if len(m.projectFiltered) < 1 {
+		t.Fatal("expected at least one filtered result for 'w'")
+	}
+	// "workflow" and "webapp" should match
+	found := false
+	for _, p := range m.projectFiltered {
+		if p == "workflow" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("expected 'workflow' to be in filtered results for query 'w'")
+	}
+
+	// Continue typing to narrow results
+	m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'o'}})
+	if m.projectSearchQuery != "wo" {
+		t.Fatalf("expected search query 'wo', got %q", m.projectSearchQuery)
+	}
+
+	// Remember the top result before selecting
+	topResult := m.projectFiltered[0]
+
+	// Select with enter
+	m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if m.projectSearchMode {
+		t.Fatal("expected search mode to be deactivated after enter")
+	}
+	if m.project != topResult {
+		t.Errorf("expected project to be %q, got %q", topResult, m.project)
+	}
+}
+
+func TestProjectSearchEscape(t *testing.T) {
+	m := NewFormModel(nil, 100, 50, "", []string{"claude"})
+	m.showAdvanced = true
+	m.projects = []string{"personal", "workflow"}
+	m.project = "personal"
+	m.projectIdx = 0
+	m.focused = FieldProject
+
+	// Enter search mode
+	m.enterProjectSearch()
+	if !m.projectSearchMode {
+		t.Fatal("expected search mode active")
+	}
+
+	// Escape should exit search mode without changing project
+	m.Update(tea.KeyMsg{Type: tea.KeyEscape})
+	if m.projectSearchMode {
+		t.Fatal("expected search mode to be deactivated after escape")
+	}
+	if m.project != "personal" {
+		t.Errorf("expected project unchanged after escape, got %q", m.project)
+	}
+}
+
+func TestProjectSearchBackspaceExitsWhenEmpty(t *testing.T) {
+	m := NewFormModel(nil, 100, 50, "", []string{"claude"})
+	m.showAdvanced = true
+	m.projects = []string{"personal", "workflow"}
+	m.project = "personal"
+	m.focused = FieldProject
+
+	// Enter search mode
+	m.enterProjectSearch()
+	if m.projectSearchQuery != "" {
+		t.Fatal("expected empty query on search start")
+	}
+
+	// Backspace on empty query should exit search mode
+	m.Update(tea.KeyMsg{Type: tea.KeyBackspace})
+	if m.projectSearchMode {
+		t.Fatal("expected backspace on empty query to exit search mode")
+	}
+}
+
+func TestProjectSearchViewShowsDropdown(t *testing.T) {
+	m := NewFormModel(nil, 100, 50, "", []string{"claude"})
+	m.showAdvanced = true
+	m.projects = []string{"personal", "workflow", "webapp"}
+	m.project = "personal"
+	m.projectIdx = 0
+	m.focused = FieldProject
+
+	// Enter search mode with query
+	m.enterProjectSearch()
+	m.projectSearchQuery = "w"
+	m.filterProjects()
+
+	view := m.View()
+
+	// Should show search results
+	if !strings.Contains(view, "workflow") {
+		t.Error("expected dropdown to show 'workflow' for query 'w'")
+	}
+}
+
+func TestProjectSearchFuzzyMatch(t *testing.T) {
+	m := NewFormModel(nil, 100, 50, "", []string{"claude"})
+	m.projects = []string{"personal", "data-pipeline", "design-portal", "deploy-prod"}
+
+	// Test fuzzy matching: "dp" should match "data-pipeline" and "deploy-prod" and "design-portal"
+	m.projectSearchQuery = "dp"
+	m.filterProjects()
+
+	if len(m.projectFiltered) == 0 {
+		t.Fatal("expected fuzzy match results for 'dp'")
+	}
+}
+
+func TestFilterProjectsEmptyQueryShowsAll(t *testing.T) {
+	m := NewFormModel(nil, 100, 50, "", []string{"claude"})
+	m.projects = []string{"personal", "workflow", "webapp"}
+	m.project = "workflow"
+
+	m.projectSearchQuery = ""
+	m.filterProjects()
+
+	if len(m.projectFiltered) != 3 {
+		t.Errorf("expected all 3 projects, got %d", len(m.projectFiltered))
+	}
+	// Current project should be pre-selected
+	if m.projectFiltered[m.projectFilteredIdx] != "workflow" {
+		t.Errorf("expected current project 'workflow' to be pre-selected, got %q", m.projectFiltered[m.projectFilteredIdx])
+	}
+}
