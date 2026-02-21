@@ -120,11 +120,16 @@ Available actions:
 
 `)
 
-	// Add current tasks context
+	// Add current tasks context (only title/status/project to minimize tokens)
 	if len(tasks) > 0 {
 		sb.WriteString("Current tasks:\n")
 		for _, t := range tasks {
-			sb.WriteString(fmt.Sprintf("- #%d: %s (status: %s, project: %s)\n", t.ID, t.Title, t.Status, t.Project))
+			line := fmt.Sprintf("- #%d: %s (status: %s", t.ID, t.Title, t.Status)
+			if t.Project != "" {
+				line += ", project: " + t.Project
+			}
+			line += ")\n"
+			sb.WriteString(line)
 		}
 		sb.WriteString("\n")
 	} else {
@@ -136,11 +141,16 @@ Available actions:
 		sb.WriteString(fmt.Sprintf("This email is part of a thread related to task #%d.\n\n", *threadTaskID))
 	}
 
-	// Add the email
+	// Add the email (truncate body to limit token usage)
 	sb.WriteString("Incoming email:\n")
 	sb.WriteString(fmt.Sprintf("From: %s\n", email.From))
 	sb.WriteString(fmt.Sprintf("Subject: %s\n", email.Subject))
-	sb.WriteString(fmt.Sprintf("Body:\n%s\n\n", email.Body))
+	body := email.Body
+	const maxBodyLen = 2000
+	if len(body) > maxBodyLen {
+		body = body[:maxBodyLen] + "\n[truncated]"
+	}
+	sb.WriteString(fmt.Sprintf("Body:\n%s\n\n", body))
 
 	// Instructions
 	sb.WriteString(`Analyze this email and respond with a JSON object:
