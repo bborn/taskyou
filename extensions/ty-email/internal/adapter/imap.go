@@ -363,9 +363,51 @@ func (a *IMAPAdapter) Send(ctx context.Context, email *OutboundEmail) error {
 }
 
 func (a *IMAPAdapter) MarkProcessed(ctx context.Context, emailID string) error {
-	// Mark as seen in IMAP
-	// This is a simplified implementation - in practice you'd need to
-	// look up the message by Message-ID and mark it
-	a.logger.Debug("marking email as processed", "id", emailID)
+	a.mu.Lock()
+	client := a.client
+	a.mu.Unlock()
+
+	if client == nil {
+		return fmt.Errorf("not connected")
+	}
+
+	folder := a.config.Folder
+	if folder == "" {
+		folder = "INBOX"
+	}
+
+	// Select folder
+	if _, err := client.Select(folder, nil).Wait(); err != nil {
+		return fmt.Errorf("failed to select folder: %w", err)
+	}
+
+	// Search for the message by Message-ID header
+	criteria := &imap.SearchCriteria{
+		Header: []imap.SearchCriteriaHeaderField{
+			{Key: "Message-ID", Value: emailID},
+		},
+	}
+	searchData, err := client.Search(criteria, nil).Wait()
+	if err != nil {
+		return fmt.Errorf("failed to search for message: %w", err)
+	}
+
+	seqNums := searchData.AllSeqNums()
+	if len(seqNums) == 0 {
+		a.logger.Debug("message not found for marking processed", "id", emailID)
+		return nil
+	}
+
+	// Add \Seen flag
+	seqSet := imap.SeqSetNum(seqNums...)
+	storeFlags := &imap.StoreFlags{
+		Op:    imap.StoreFlagsAdd,
+		Flags: []imap.Flag{imap.FlagSeen},
+	}
+	if err := client.Store(seqSet, storeFlags, nil).Close(); err != nil {
+		return fmt.Errorf("failed to mark message as seen: %w", err)
+	}
+
+	a.logger.Debug("marked email as processed", "id", emailID)
 	return nil
 }

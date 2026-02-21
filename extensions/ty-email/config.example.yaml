@@ -38,7 +38,7 @@ smtp:
 # LLM classifier configuration
 classifier:
   provider: claude  # Options: claude, openai, ollama
-  model: claude-sonnet-4-20250514  # Or claude-3-5-haiku-latest for cheaper
+  model: claude-haiku-4-5-20251001  # Default; use claude-sonnet-4-20250514 only if classification quality is insufficient
   api_key_cmd: "op read 'op://Private/Anthropic/api_key'"
   # Or set directly:
   # api_key: sk-ant-...

@@ -9,6 +9,7 @@ import (
 // Email represents an inbound email message.
 type Email struct {
 	ID          string       // Unique identifier (Message-ID header)
+	ProviderID  string       // Provider-specific ID (e.g., Gmail API ID) used for adapter operations
 	From        string       // Sender address
 	To          []string     // Recipient addresses
 	Subject     string       // Email subject
