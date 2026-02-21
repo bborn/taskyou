@@ -1,19 +1,60 @@
 ---
 name: taskyou
-description: "Orchestrate Task You from any AI agent via CLI. Manage tasks, view the Kanban board, execute work, and track progress without touching the TUI."
+description: "Install and manage TaskYou — a personal task management system with Kanban board, background AI execution, and git worktree isolation. Guides installation if not present, then orchestrates tasks via CLI."
 homepage: https://github.com/bborn/taskyou
-metadata: {"requires":{"anyBins":["ty","taskyou"]}}
 ---
 
-# Task You Orchestrator
+# TaskYou — Install & Manage
 
-You are an autonomous orchestrator for **Task You**, a personal task management system with a Kanban board, background execution, and git worktree isolation.
+You are an autonomous orchestrator for **TaskYou**, a personal task management system with a Kanban board, background AI execution, and git worktree isolation.
 
-**Your role:** Drive Task You via CLI commands to manage the task queue, execute work, and report progress. The user can always jump into the TUI (`ty` or `taskyou`) when they need direct control.
+## First: Check Installation
 
-**CLI commands:** Use `ty` (short) or `taskyou` (full) - both work identically.
+Before running any commands, verify TaskYou is installed:
 
-## Quick Reference
+```bash
+which ty || echo "NOT_INSTALLED"
+```
+
+### If NOT installed, guide the user through installation:
+
+**Quick install (recommended):**
+
+```bash
+curl -fsSL taskyou.dev/install.sh | bash
+```
+
+This auto-detects OS/arch (macOS and Linux, amd64 and arm64) and installs `ty` to `~/.local/bin/`.
+
+**Options:**
+- `--no-ssh-server` — Skip installing taskd (the SSH daemon for remote access)
+- Set `INSTALL_DIR=/custom/path` to change install location
+
+**After install, verify:**
+
+```bash
+ty --version
+```
+
+If `~/.local/bin` is not in PATH, tell the user to add it:
+
+```bash
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+**Upgrading an existing install:**
+
+```bash
+ty upgrade
+```
+
+### If already installed, proceed to task management below.
+
+---
+
+## CLI Reference
+
+Use `ty` (short) or `taskyou` (full) — both work identically.
 
 | Action | Command |
 |--------|---------|
@@ -27,7 +68,6 @@ You are an autonomous orchestrator for **Task You**, a personal task management 
 | Pin/prioritize | `ty pin <id>` |
 | Close/complete | `ty close <id>` |
 | Delete | `ty delete <id>` |
-| **Executor interaction** | |
 | See executor output | `ty output <id>` |
 | Send input to executor | `ty input <id> "message"` |
 | Confirm prompt | `ty input <id> --enter` |
@@ -77,7 +117,7 @@ Then retry with feedback:
 ty retry <id> --feedback "Here's the clarification you need..."
 ```
 
-### 3b. Direct Executor Interaction
+### 4. Direct Executor Interaction
 
 For running/blocked tasks, you can interact directly with the executor:
 
@@ -97,18 +137,18 @@ This is useful when:
 - You need to respond to a TUI prompt (use `--key` for navigation)
 - You want to see what's happening without attaching to tmux
 
-### 4. Create New Tasks
+### 5. Create New Tasks
 
 ```bash
 ty create "Implement feature X" --body "Detailed description here..."
 ```
 
 Optional flags:
-- `--project <name>` - Associate with a project
-- `--type <type>` - Task type (bug, feature, etc.)
-- `--dangerous` - Skip permission prompts in executor
+- `--project <name>` — Associate with a project
+- `--type <type>` — Task type (bug, feature, etc.)
+- `--dangerous` — Skip permission prompts in executor
 
-### 5. Manage Priority
+### 6. Manage Priority
 
 Pin important tasks to the top:
 
@@ -118,7 +158,7 @@ ty pin <id> --unpin   # Unpin
 ty pin <id> --toggle  # Toggle
 ```
 
-### 6. Change Status Manually
+### 7. Change Status
 
 Move tasks between columns:
 
@@ -128,14 +168,14 @@ ty status <id> queued      # Queue for execution
 ty status <id> done        # Mark complete
 ```
 
-### 7. Close and Cleanup
+### 8. Close and Cleanup
 
 ```bash
 ty close <id>    # Mark as done
 ty delete <id>   # Permanently remove
 ```
 
-## JSON Output for Automation
+## JSON Output
 
 All commands support `--json` for machine-readable output:
 
@@ -154,7 +194,13 @@ ty list --json | jq '.[] | select(.pinned == true)'  # Pinned tasks only
 
 ## Orchestration Patterns
 
-### Continuous Monitoring Loop
+### Auto-Execute Queued Tasks
+
+```bash
+ty list --status queued --json | jq -r '.[0].id' | xargs -I{} ty execute {}
+```
+
+### Continuous Monitoring
 
 ```bash
 while true; do
@@ -164,27 +210,6 @@ while true; do
   sleep 30
 done
 ```
-
-### Auto-Execute Queued Tasks
-
-```bash
-ty list --status queued --json | jq -r '.[0].id' | xargs -I{} ty execute {}
-```
-
-### Batch Status Updates
-
-```bash
-ty list --status backlog --json | jq -r '.[].id' | xargs -n1 ty status {} queued
-```
-
-## Best Practices
-
-1. **Always check the board first** - Understand context before acting
-2. **Use JSON output** - Structured data is easier to process and reason about
-3. **Provide meaningful feedback** - When retrying blocked tasks, give clear context
-4. **Monitor execution** - Use `ty show <id> --logs` to track progress
-5. **Respect priorities** - Check pinned tasks first
-6. **Create focused tasks** - One clear objective per task works best
 
 ## Task Lifecycle
 
@@ -199,55 +224,39 @@ backlog → queued → processing → done
 - **blocked**: Waiting for user input/clarification
 - **done**: Completed successfully
 
-## Integration Tips
+## MCP Tools (When Running Inside TaskYou)
 
-### With External Schedulers
+If you're running as the task executor inside a TaskYou worktree, you have access to MCP tools:
 
-Task You doesn't have built-in recurring tasks. Use cron or external schedulers:
+- `taskyou_complete` — Mark your task complete
+- `taskyou_needs_input` — Request user input (blocks task)
+- `taskyou_show_task` — Get your task details
+- `taskyou_create_task` — Create follow-up tasks
+- `taskyou_list_tasks` — See other active tasks
+- `taskyou_spotlight` — Sync worktree changes to main repo for testing
 
-```bash
-# Run daily standup at 9am
-0 9 * * * ty create "Daily standup review" && ty execute $(ty list --status backlog --json | jq -r '.[0].id')
-```
+Use these instead of CLI when executing inside a TaskYou worktree.
 
-### With Other AI Agents
+## Best Practices
 
-This skill works with any agent that can execute shell commands:
-- **Claude Code**: Native integration via hooks
-- **Codex**: Use `codex exec "ty board --json && ..."`
-- **Gemini**: Use `gemini code "Run ty board --json and summarize"`
-- **OpenCode/Pi**: Same pattern - shell out to `ty` CLI
-
-### Dashboard Mode
-
-For a rolling view of the board:
-
-```bash
-watch -n30 "ty board"
-```
+1. **Always check the board first** — Understand context before acting
+2. **Use JSON output** — Structured data is easier to process and reason about
+3. **Provide meaningful feedback** — When retrying blocked tasks, give clear context
+4. **Monitor execution** — Use `ty show <id> --logs` to track progress
+5. **Respect priorities** — Check pinned tasks first
+6. **Create focused tasks** — One clear objective per task works best
 
 ## Troubleshooting
 
 ### Task stuck in processing?
 
-Check if the executor is running and what it's doing:
 ```bash
 ty show <id> --logs
 ty output <id>  # See live terminal output
 ```
 
-### Executor waiting for input?
-
-Check the output and respond directly:
-```bash
-ty output <id>             # See what it's asking
-ty input <id> --enter      # Confirm a prompt
-ty input <id> "yes"        # Send specific input
-```
-
 ### No tasks executing?
 
-Ensure the daemon is running:
 ```bash
 ty daemon status
 ty daemon restart  # If needed
@@ -255,43 +264,6 @@ ty daemon restart  # If needed
 
 ### Can't find a task?
 
-Search by status:
 ```bash
 ty list --status done --json | jq '.[] | select(.title | contains("keyword"))'
 ```
-
-## MCP Tools (When Running Inside Task You)
-
-If you're running as the task executor, you have access to MCP tools:
-
-- `taskyou_complete` - Mark your task complete
-- `taskyou_needs_input` - Request user input (blocks task)
-- `taskyou_show_task` - Get your task details
-- `taskyou_create_task` - Create follow-up tasks
-- `taskyou_list_tasks` - See other active tasks
-- `taskyou_spotlight` - Sync worktree changes to main repo for testing
-
-Use these instead of CLI when executing inside a Task You worktree.
-
-### Spotlight Mode
-
-Spotlight mode bridges the gap between isolated worktree development and testing in the main repository. It syncs your worktree changes back to the main repo so you can run and test your app there.
-
-```
-# Enable spotlight (syncs changes to main repo)
-taskyou_spotlight(action="start")
-
-# Manually sync after more changes
-taskyou_spotlight(action="sync")
-
-# Check status
-taskyou_spotlight(action="status")
-
-# Disable and restore main repo to original state
-taskyou_spotlight(action="stop")
-```
-
-Use this when:
-- Your app has directory-dependent assumptions (needs to run from repo root)
-- You need to test with resources already configured in the main repo (databases, ports)
-- Your project has fast incremental rebuilds but slow initial builds
