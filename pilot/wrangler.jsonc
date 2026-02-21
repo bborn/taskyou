@@ -15,11 +15,23 @@
       "class_name": "TaskExecutionWorkflow"
     }
   ],
+  "containers": [
+    {
+      "class_name": "Sandbox",
+      "image": "./Dockerfile.sandbox",
+      "instance_type": "lite",
+      "max_instances": 5
+    }
+  ],
   "durable_objects": {
     "bindings": [
       {
         "name": "TASKYOU_AGENT",
         "class_name": "TaskYouAgent"
+      },
+      {
+        "name": "SANDBOX",
+        "class_name": "Sandbox"
       }
     ]
   },
@@ -30,12 +42,7 @@
     },
     {
       "tag": "v2",
-      "deleted_classes": ["Sandbox"],
       "new_sqlite_classes": ["TaskYouAgent"]
-    },
-    {
-      "tag": "v3",
-      "new_classes": ["TaskExecutionWorkflow"]
     }
   ],
   "d1_databases": [

@@ -1,11 +1,14 @@
 FROM docker.io/cloudflare/sandbox:0.7.4
 
-# Install Claude Code globally (persists in image)
-RUN npm install -g @anthropic-ai/claude-code
+# Install Claude Code and serve globally
+RUN npm install -g @anthropic-ai/claude-code serve
 
 # Set up git config
 RUN git config --global user.name "TaskYou Agent" && \
     git config --global user.email "agent@taskyou.dev"
 
 # Initialize workspace
-RUN mkdir -p /root/worktrees
+RUN mkdir -p /root/worktrees /workspace
+
+# Expose port for web app previews
+EXPOSE 8080

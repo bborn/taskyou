@@ -1,5 +1,6 @@
 
 import { routeAgentRequest } from "agents";
+import { proxyToSandbox } from "@cloudflare/sandbox";
 // src/worker.js
 import { Server } from "./.svelte-kit/output/server/index.js";
 import { manifest, prerendered, base_path } from "./.svelte-kit/cloudflare-tmp/manifest.js";
@@ -72,6 +73,15 @@ var worker_default = {
     // Route agent WebSocket/HTTP requests before SvelteKit
     const agentResponse = await routeAgentRequest(req, env2);
     if (agentResponse) return agentResponse;
+
+    // Proxy sandbox preview URLs (after agent routing)
+    // Only relevant with custom domains for preview URL subdomains
+    try {
+      const sandboxResponse = await proxyToSandbox(req, env2);
+      if (sandboxResponse && sandboxResponse.status !== 404) return sandboxResponse;
+    } catch (e) {
+      // Sandbox proxy not available — continue to SvelteKit
+    }
     if (!origin) {
       origin = new URL(req.url).origin;
     }
@@ -129,6 +139,7 @@ export {
   worker_default as default
 };
 
-// Re-export agent classes for Durable Object and Workflow bindings
+// Re-export agent classes for Durable Object, Workflow, and Container bindings
 export { TaskYouAgent } from "./src/lib/server/agent.ts";
 export { TaskExecutionWorkflow } from "./src/lib/server/workflow.ts";
+export { Sandbox } from "@cloudflare/sandbox";
