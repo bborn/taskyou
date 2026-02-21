@@ -36,13 +36,21 @@ export function selectChat(chat: Chat) {
 	// Agent DO handles persistence — messages restored via cf_agent_chat_messages on WS connect
 }
 
-export async function createNewChat(modelId?: string): Promise<Chat> {
-	const chat = await chatsApi.create({ model_id: modelId });
+export async function createNewChat(projectId?: string, modelId?: string): Promise<Chat> {
+	const chat = await chatsApi.create({ model_id: modelId, project_id: projectId });
 	chatState.chats = [chat, ...chatState.chats];
 	chatState.activeChat = chat;
 	chatState.messages = [];
 	chatState.agentMessages = [];
 	return chat;
+}
+
+export function getChatsByProject(projectId: string): Chat[] {
+	return chatState.chats.filter(c => c.project_id === projectId);
+}
+
+export function getScratchChats(): Chat[] {
+	return chatState.chats.filter(c => !c.project_id);
 }
 
 export async function deleteChat(chatId: string) {

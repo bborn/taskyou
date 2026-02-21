@@ -3,8 +3,9 @@
 	import { authState, fetchUser, logout } from '$lib/stores/auth.svelte';
 	import { fetchTasks } from '$lib/stores/tasks.svelte';
 	import { chatState, fetchChats, selectChat, loadRestoredMessages } from '$lib/stores/chat.svelte';
-	import { navState, navigate, toggleMobileSidebar } from '$lib/stores/nav.svelte';
+	import { navState, navigate, toggleMobileSidebar, setActiveProject } from '$lib/stores/nav.svelte';
 	import { handleAgentMessage, resetChatState, setOnMessagesRestored, setOnTasksUpdated } from '$lib/stores/agent.svelte';
+	import { fetchProjects } from '$lib/stores/projects.svelte';
 
 	// Wire up callbacks (must be in +page.svelte to survive tree-shaking)
 	setOnMessagesRestored(loadRestoredMessages);
@@ -15,7 +16,6 @@
 	import SettingsPage from '$lib/components/SettingsPage.svelte';
 	import ApprovalsPage from '$lib/components/ApprovalsPage.svelte';
 	import IntegrationsPage from '$lib/components/IntegrationsPage.svelte';
-	import ProjectsPage from '$lib/components/ProjectsPage.svelte';
 	import { Menu } from 'lucide-svelte';
 
 	let initialized = $state(false);
@@ -92,6 +92,10 @@
 				if (currentChatId !== chatId) {
 					currentChatId = chatId;
 					selectChat(chat);
+					// Set active project based on chat's project
+					if (chat.project_id) {
+						setActiveProject(chat.project_id);
+					}
 					if (authState.user) {
 						connectAgentWebSocket(authState.user.id, chatId);
 					}
@@ -122,6 +126,7 @@
 			fetchUser().then(async () => {
 				if (authState.user) {
 					fetchTasks();
+					fetchProjects();
 					await fetchChats();
 					// Route to chat if hash is present, otherwise just show dashboard
 					handleRoute();
@@ -176,8 +181,6 @@
 				<ApprovalsPage />
 			{:else if navState.view === 'integrations'}
 				<IntegrationsPage />
-			{:else if navState.view === 'projects'}
-				<ProjectsPage />
 			{/if}
 		</main>
 	</div>

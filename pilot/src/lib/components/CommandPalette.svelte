@@ -57,7 +57,7 @@
 	const actions: Item[] = [
 		{ id: 'new-task', type: 'action', label: 'New Task', description: 'Create a new task', shortcut: 'N', icon: Plus, iconColor: 'text-primary', action: () => { onClose(); onNewTask(); } },
 		{ id: 'go-dashboard', type: 'action', label: 'Go to Dashboard', description: 'View task board', shortcut: '1', icon: LayoutDashboard, iconColor: 'text-blue-500', action: () => { onClose(); onNavigate('dashboard'); } },
-		{ id: 'go-projects', type: 'action', label: 'Go to Projects', description: 'Manage projects & sandboxes', shortcut: '2', icon: FolderOpen, iconColor: 'text-green-500', action: () => { onClose(); onNavigate('projects'); } },
+		{ id: 'go-settings-projects', type: 'action', label: 'Go to Settings', description: 'Manage projects & preferences', shortcut: '2', icon: FolderOpen, iconColor: 'text-green-500', action: () => { onClose(); onNavigate('settings'); } },
 		{ id: 'go-integrations', type: 'action', label: 'Go to Integrations', description: 'Connected services', icon: Link, iconColor: 'text-purple-500', action: () => { onClose(); onNavigate('integrations'); } },
 		{ id: 'go-approvals', type: 'action', label: 'Go to Approvals', description: 'Review agent actions', icon: ShieldCheck, iconColor: 'text-amber-500', action: () => { onClose(); onNavigate('approvals'); } },
 		{ id: 'go-workspaces', type: 'action', label: 'Go to Workspaces', description: 'Manage workspaces', icon: Building2, iconColor: 'text-cyan-500', action: () => { onClose(); onNavigate('workspaces'); } },

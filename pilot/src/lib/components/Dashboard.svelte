@@ -1,6 +1,5 @@
 <script lang="ts">
-	import { onMount } from 'svelte';
-	import { X } from 'lucide-svelte';
+	import { X, Github, Pencil } from 'lucide-svelte';
 	import TaskBoard from './TaskBoard.svelte';
 	import TaskDetail from './TaskDetail.svelte';
 	import NewTaskDialog from './NewTaskDialog.svelte';
@@ -8,8 +7,8 @@
 	import ChatPanel from './ChatPanel.svelte';
 	import { taskState, fetchTasks, createTask } from '$lib/stores/tasks.svelte';
 	import { navState, navigate, toggleSidebar, toggleChatPanel, setBoardWidth } from '$lib/stores/nav.svelte';
-	import { projects as projectsApi } from '$lib/api/client';
-	import type { User, Task, Project } from '$lib/types';
+	import { projectState, getActiveProject } from '$lib/stores/projects.svelte';
+	import type { User, Task } from '$lib/types';
 
 	interface Props {
 		user: User;
@@ -17,7 +16,6 @@
 
 	let { user }: Props = $props();
 
-	let projects = $state<Project[]>([]);
 	let showNewTask = $state(false);
 	let selectedTask = $state<Task | null>(null);
 	let showCommandPalette = $state(false);
@@ -27,18 +25,12 @@
 	let isResizing = $state(false);
 	let containerEl: HTMLDivElement;
 
+	let activeProject = $derived(getActiveProject());
+
 	$effect(() => {
 		if (showKeyboardHelp && keyboardHelpEl && !keyboardHelpEl.open) {
 			keyboardHelpEl.showModal();
 		}
-	});
-
-	onMount(() => {
-		projectsApi.list().then((data) => {
-			projects = data;
-		}).catch((e) => {
-			console.error(e);
-		});
 	});
 
 	function handleKeydown(e: KeyboardEvent) {
@@ -132,6 +124,24 @@
 <svelte:window on:keydown={handleKeydown} />
 
 <div class="h-full flex flex-col" bind:this={containerEl}>
+	<!-- Project header -->
+	{#if activeProject}
+		<div class="flex items-center gap-3 px-5 py-2 border-b border-border shrink-0">
+			<div class="size-2 rounded-full flex-shrink-0" style:background-color={activeProject.color || 'var(--primary)'}></div>
+			<h2 class="font-semibold text-sm tracking-tight">{activeProject.name}</h2>
+			{#if activeProject.github_repo}
+				<span class="flex items-center gap-1.5 text-[11px] text-muted-foreground font-mono">
+					<Github class="size-3 opacity-50" />
+					{activeProject.github_repo}
+					{#if activeProject.github_branch}
+						<span class="opacity-40">/</span>
+						<span>{activeProject.github_branch}</span>
+					{/if}
+				</span>
+			{/if}
+		</div>
+	{/if}
+
 	<!-- Layout: Board | Resize | Chat -->
 	<div class="flex-1 flex min-h-0" class:select-none={isResizing}>
 		<!-- Board panel -->
@@ -163,7 +173,7 @@
 	</div>
 
 	<!-- Keyboard shortcuts hint -->
-	<div class="hidden lg:flex items-center gap-4 text-xs text-muted-foreground px-4 py-1.5 border-t border-border bg-card/50 shrink-0">
+	<div class="hidden lg:flex items-center gap-4 text-[11px] text-muted-foreground/50 px-5 py-1.5 border-t border-border shrink-0">
 		<span class="flex items-center gap-1">
 			<kbd class="kbd">←→↑↓</kbd>
 			navigate
@@ -267,7 +277,7 @@
 
 {#if showNewTask}
 	<NewTaskDialog
-		{projects}
+		projects={projectState.projects}
 		onSubmit={handleCreateTask}
 		onClose={() => (showNewTask = false)}
 	/>

@@ -45,12 +45,12 @@
 		finally { saving = false; }
 	}
 
-	async function handleCreateProject(data: { name: string; instructions?: string; color?: string }) {
+	async function handleCreateProject(data: { name: string; instructions?: string; color?: string; github_repo?: string; github_branch?: string }) {
 		const newProject = await projectsApi.create(data);
 		projects = [...projects, newProject];
 	}
 
-	async function handleUpdateProject(data: { name?: string; instructions?: string; color?: string }) {
+	async function handleUpdateProject(data: { name?: string; instructions?: string; color?: string; github_repo?: string; github_branch?: string }) {
 		if (!editingProject) return;
 		const updated = await projectsApi.update(editingProject.id, data);
 		projects = projects.map((p) => (p.id === editingProject!.id ? updated : p));

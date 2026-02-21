@@ -4,11 +4,10 @@
 
 	interface Props {
 		task: Task;
-		selected?: boolean;
 		onClick: (task: Task) => void;
 	}
 
-	let { task, selected = false, onClick }: Props = $props();
+	let { task, onClick }: Props = $props();
 
 	let isRunning = $derived(task.status === 'processing' || task.status === 'queued');
 
@@ -27,33 +26,20 @@
 <!-- svelte-ignore a11y_click_events_have_key_events -->
 <!-- svelte-ignore a11y_no_static_element_interactions -->
 <div
-	class="rounded-lg border p-2.5 hover:bg-accent/50 transition-colors cursor-pointer {selected ? 'border-primary bg-primary/5' : 'border-border bg-card'}"
+	class="rounded-lg px-2.5 py-2 cursor-pointer transition-colors hover:bg-accent/60"
 	onclick={() => onClick(task)}
 >
-	<!-- Title row -->
 	<div class="flex items-start justify-between gap-2">
-		<h4 class="text-sm font-medium leading-tight flex-1">{task.title}</h4>
+		<h4 class="text-[13px] font-medium leading-snug flex-1">{task.title}</h4>
 		{#if isRunning}
 			<Loader2 class="size-3 animate-spin text-primary flex-shrink-0 mt-0.5" />
 		{/if}
 	</div>
 
-	<!-- Metadata badges -->
-	<div class="flex flex-wrap items-center gap-1 mt-1.5">
+	<div class="flex items-center gap-1.5 mt-1 whitespace-nowrap overflow-hidden">
 		{#if task.type}
-			<span class="badge-outline text-[10px]">{task.type}</span>
+			<span class="text-[10px] font-medium text-muted-foreground/60 bg-muted px-1.5 py-0.5 rounded">{task.type}</span>
 		{/if}
-	</div>
-
-	<!-- Footer: ID + timestamp -->
-	<div class="text-[10px] text-muted-foreground mt-1.5">
-		#{task.id}
-		{#if task.started_at && isRunning}
-			&middot; Started {timeAgo(task.started_at)}
-		{:else if task.completed_at}
-			&middot; {timeAgo(task.completed_at)}
-		{:else if task.created_at}
-			&middot; {timeAgo(task.created_at)}
-		{/if}
+		<span class="text-[10px] text-muted-foreground/40 tabular-nums truncate">#{task.id}{#if task.started_at && isRunning} · {timeAgo(task.started_at)}{:else if task.completed_at} · {timeAgo(task.completed_at)}{:else if task.created_at} · {timeAgo(task.created_at)}{/if}</span>
 	</div>
 </div>

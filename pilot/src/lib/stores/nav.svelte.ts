@@ -22,6 +22,7 @@ function loadString(key: string, fallback: string): string {
 
 export const navState = $state({
 	view: 'dashboard' as NavView,
+	activeProjectId: loadString('ui:active-project', '') || null as string | null,
 	sidebarCollapsed: loadBool('ui:sidebar-collapsed', false),
 	sidebarMobileOpen: false,
 	chatPanelOpen: loadBool('ui:chat-panel-open', true),
@@ -38,6 +39,17 @@ function persist(key: string, value: string) {
 export function navigate(view: NavView) {
 	navState.view = view;
 	navState.sidebarMobileOpen = false;
+}
+
+export function setActiveProject(projectId: string | null) {
+	navState.activeProjectId = projectId;
+	navState.view = 'dashboard';
+	navState.sidebarMobileOpen = false;
+	if (projectId) {
+		persist('ui:active-project', projectId);
+	} else if (typeof localStorage !== 'undefined') {
+		localStorage.removeItem('ui:active-project');
+	}
 }
 
 export function toggleSidebar() {

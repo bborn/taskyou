@@ -176,6 +176,22 @@
 		setFocus(navState.focusedColumn, Math.min(navState.focusedRow, Math.max(0, remaining.length - 2)));
 	}
 
+	// Focus effect — uses DOM directly because Svelte 5 keyed {#each} doesn't
+	// re-render items when only external $state (navState) changes.
+	$effect(() => {
+		const col = navState.focusedColumn;
+		const row = navState.focusedRow;
+		// Clear previous focus
+		document.querySelectorAll('.focused-card').forEach(el => el.classList.remove('focused-card'));
+		// Apply to new target
+		const colEls = document.querySelectorAll('.kanban-column');
+		const target = colEls[col]?.querySelectorAll('[data-card]')?.[row];
+		if (target) {
+			target.classList.add('focused-card');
+			target.scrollIntoView({ block: 'nearest' });
+		}
+	});
+
 	// Keyboard navigation
 	function handleKeydown(e: KeyboardEvent) {
 		const target = e.target as HTMLElement;
@@ -300,7 +316,7 @@
 		<!-- Header -->
 		<div class="flex items-center justify-between mb-4 shrink-0">
 			<div class="flex items-center gap-3">
-				<h1 class="text-xl font-bold text-gradient">Tasks</h1>
+				<h1 class="text-xl font-bold">Tasks</h1>
 				<div class="flex items-center gap-2 text-sm text-muted-foreground">
 					{#if getInProgressTasks().length > 0}
 						<span class="badge-outline text-xs" style="color: var(--status-processing); border-color: var(--status-processing);">
@@ -316,7 +332,7 @@
 					{/if}
 				</div>
 			</div>
-			<button class="btn-sm" onclick={onNewTask} title="New task (N)">
+			<button class="btn-sm-secondary" onclick={onNewTask} title="New task (N)">
 				<Plus class="h-3.5 w-3.5" />
 				New
 			</button>
@@ -324,67 +340,65 @@
 	{/if}
 
 	<!-- Kanban Board -->
-	<div class="grid grid-cols-1 md:grid-cols-3 lg:grid-cols-5 gap-3 flex-1 min-h-0">
+	<div class="grid grid-cols-1 md:grid-cols-3 lg:grid-cols-5 gap-4 flex-1 min-h-0">
 		{#each columns as col, colIdx}
 			{@const columnTasks = getColumnTasks(col.key)}
 			<!-- svelte-ignore a11y_no_static_element_interactions -->
 			<div
-				class="flex flex-col rounded-xl border bg-card/50 overflow-hidden transition-colors {dragOverColumn === col.key ? 'border-primary bg-primary/5' : ''} {navState.focusedColumn === colIdx && columnTasks.length === 0 ? 'ring-2 ring-primary/50' : ''}"
+				class="kanban-column transition-colors {dragOverColumn === col.key ? 'bg-primary/5' : ''}"
+				class:focused-column={navState.focusedColumn === colIdx}
 				ondragover={(e) => handleDragOver(e, col.key)}
 				ondragleave={handleDragLeave}
 				ondrop={(e) => handleDrop(e, col.targetStatus)}
 			>
 				<!-- Column Header -->
 				<div
-					class="flex items-center justify-between px-3 py-2 border-b"
-					style:border-bottom-color={columnTasks.length > 0 ? col.color : undefined}
-					style:border-bottom-width={columnTasks.length > 0 ? '2px' : '1px'}
+					class="kanban-column-header"
+					data-has-tasks={columnTasks.length > 0 ? '' : undefined}
+					style:--col-color={col.color}
 				>
 					<div class="flex items-center gap-1.5">
-						<span style:color={col.color}><col.icon class="h-3.5 w-3.5" /></span>
-						<h2 class="font-semibold text-xs">{col.title}</h2>
+						<span class="size-1.5 rounded-full" style:background-color={col.color}></span>
+						<h2 class="font-medium text-xs uppercase tracking-wide text-muted-foreground">{col.title}</h2>
 					</div>
-					<span class="badge-secondary text-[10px]">
+					<span class="text-[10px] font-medium text-muted-foreground/70 tabular-nums">
 						{columnTasks.length}
 					</span>
 				</div>
 
 				<!-- Column Content -->
-				<div class="flex-1 overflow-y-auto p-2 space-y-1.5 scrollbar-thin">
+				<div class="flex-1 overflow-y-auto pt-2 space-y-1.5 scrollbar-thin">
 					{#each columnTasks as task, rowIdx (task.id)}
 						<!-- svelte-ignore a11y_no_static_element_interactions -->
 						<div
+							data-card
 							draggable="true"
 							ondragstart={(e) => handleDragStart(e, task)}
 							ondragend={handleDragEnd}
 							oncontextmenu={(e) => handleContextMenu(e, task)}
-							class="rounded-lg"
-							class:ring-2={navState.focusedColumn === colIdx && navState.focusedRow === rowIdx && !isSelected(task.id)}
-							class:ring-primary={navState.focusedColumn === colIdx && navState.focusedRow === rowIdx && !isSelected(task.id)}
-							class:ring-2-selected={isSelected(task.id)}
+							class="rounded-lg transition-colors"
+							class:selected-card={selectedIds.has(task.id)}
 							class:opacity-50={draggedTask?.id === task.id}
 						>
 							<TaskCard
 								{task}
-								selected={isSelected(task.id)}
 								onClick={onTaskClick}
 							/>
 						</div>
 					{/each}
 
 					{#if columnTasks.length === 0}
-						<div class="flex flex-col items-center justify-center py-8 text-muted-foreground">
-							<col.icon class="h-6 w-6 mb-1.5 opacity-20" />
-							<p class="text-xs">{col.emptyMessage}</p>
+						<div class="pt-4 px-1">
+							<p class="text-[11px] text-muted-foreground/40">{col.emptyMessage}</p>
 						</div>
 					{/if}
 				</div>
 
 				<!-- Quick add for backlog -->
 				{#if col.showAdd}
-					<div class="p-2 border-t">
-						<button class="btn-sm-ghost w-full justify-start" onclick={onNewTask} title="Add task (N)">
-							<Plus class="h-3.5 w-3.5" />
+					<div class="pt-2 mt-auto">
+						<button class="flex items-center gap-1.5 w-full px-1 py-1.5 text-xs text-muted-foreground/60 hover:text-foreground rounded transition-colors" onclick={onNewTask} title="Add task (N)">
+							<Plus class="h-3 w-3" />
 							Add task
 						</button>
 					</div>

@@ -1,5 +1,6 @@
 import type { Task, CreateTaskRequest, UpdateTaskRequest } from '$lib/types';
 import { tasks as tasksApi } from '$lib/api/client';
+import { navState } from './nav.svelte';
 
 export const taskState = $state<{ tasks: Task[]; loading: boolean }>({
 	tasks: [],
@@ -11,13 +12,19 @@ function byUpdatedDesc(a: Task, b: Task) {
 	return new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime();
 }
 
+function filterByProject(tasks: Task[]): Task[] {
+	const pid = navState.activeProjectId;
+	if (!pid) return tasks;
+	return tasks.filter(t => t.project_id === pid);
+}
+
 export function getBacklogTasks(): Task[] {
-	return taskState.tasks.filter((t) => t.status === 'backlog').sort(byUpdatedDesc);
+	return filterByProject(taskState.tasks.filter((t) => t.status === 'backlog')).sort(byUpdatedDesc);
 }
 
 export function getInProgressTasks(): Task[] {
-	return taskState.tasks
-		.filter((t) => t.status === 'queued' || t.status === 'processing')
+	return filterByProject(taskState.tasks
+		.filter((t) => t.status === 'queued' || t.status === 'processing'))
 		.sort((a, b) => {
 			if (a.status === 'processing' && b.status !== 'processing') return -1;
 			if (b.status === 'processing' && a.status !== 'processing') return 1;
@@ -26,15 +33,15 @@ export function getInProgressTasks(): Task[] {
 }
 
 export function getBlockedTasks(): Task[] {
-	return taskState.tasks.filter((t) => t.status === 'blocked').sort(byUpdatedDesc);
+	return filterByProject(taskState.tasks.filter((t) => t.status === 'blocked')).sort(byUpdatedDesc);
 }
 
 export function getDoneTasks(): Task[] {
-	return taskState.tasks.filter((t) => t.status === 'done').sort(byUpdatedDesc);
+	return filterByProject(taskState.tasks.filter((t) => t.status === 'done')).sort(byUpdatedDesc);
 }
 
 export function getFailedTasks(): Task[] {
-	return taskState.tasks.filter((t) => t.status === 'failed').sort(byUpdatedDesc);
+	return filterByProject(taskState.tasks.filter((t) => t.status === 'failed')).sort(byUpdatedDesc);
 }
 
 export async function fetchTasks() {

@@ -1,13 +1,14 @@
 <script lang="ts">
-	import { FolderOpen, Plus, Trash2, Pencil, X } from 'lucide-svelte';
+	import { FolderOpen, Plus, Pencil, Trash2, Github } from 'lucide-svelte';
 	import { projects as projectsApi } from '$lib/api/client';
 	import type { Project } from '$lib/types';
+	import ProjectDialog from './ProjectDialog.svelte';
 
 	let projectList = $state<Project[]>([]);
 	let loading = $state(true);
 	let initialized = $state(false);
-	let editingProject = $state<string | null>(null);
-	let editName = $state('');
+	let showNewProject = $state(false);
+	let editingProject = $state<Project | null>(null);
 
 	$effect(() => {
 		if (initialized) return;
@@ -22,41 +23,21 @@
 		});
 	});
 
-	async function handleCreate() {
-		try {
-			const project = await projectsApi.create({ name: `Project ${projectList.length + 1}` });
-			projectList = [project, ...projectList];
-		} catch (e) {
-			console.error(e);
-		}
+	async function handleCreate(data: { name: string; instructions?: string; color?: string; github_repo?: string; github_branch?: string }) {
+		const project = await projectsApi.create(data);
+		projectList = [project, ...projectList];
 	}
 
-	async function handleDelete(id: string) {
-		try {
-			await projectsApi.delete(id);
-			projectList = projectList.filter(p => p.id !== id);
-		} catch (e) {
-			console.error(e);
-		}
+	async function handleUpdate(data: { name?: string; instructions?: string; color?: string; github_repo?: string; github_branch?: string }) {
+		if (!editingProject) return;
+		const updated = await projectsApi.update(editingProject.id, data);
+		projectList = projectList.map(p => p.id === editingProject!.id ? updated : p);
 	}
 
-	function startEditing(project: Project) {
-		editingProject = project.id;
-		editName = project.name;
-	}
-
-	async function saveEdit(id: string) {
-		try {
-			const updated = await projectsApi.update(id, { name: editName });
-			projectList = projectList.map(p => p.id === id ? updated : p);
-		} catch (e) {
-			console.error(e);
-		}
-		editingProject = null;
-	}
-
-	function cancelEdit() {
-		editingProject = null;
+	async function handleDelete() {
+		if (!editingProject) return;
+		await projectsApi.delete(editingProject.id);
+		projectList = projectList.filter(p => p.id !== editingProject!.id);
 	}
 </script>
 
@@ -67,7 +48,7 @@
 				<FolderOpen class="h-6 w-6 text-primary" />
 				<h1 class="text-2xl font-bold">Projects</h1>
 			</div>
-			<button class="btn" onclick={handleCreate}>
+			<button class="btn" onclick={() => (showNewProject = true)}>
 				<Plus class="h-4 w-4" />
 				New Project
 			</button>
@@ -88,7 +69,7 @@
 				</div>
 				<h3 class="font-semibold mb-1">No Projects</h3>
 				<p class="text-sm text-muted-foreground mb-4">Create a project to organize your tasks</p>
-				<button class="btn" onclick={handleCreate}>
+				<button class="btn" onclick={() => (showNewProject = true)}>
 					<Plus class="h-4 w-4" />
 					Create Project
 				</button>
@@ -103,21 +84,15 @@
 									<FolderOpen class="h-5 w-5" style="color: {project.color};" />
 								</div>
 								<div>
-									{#if editingProject === project.id}
-										<form onsubmit={(e) => { e.preventDefault(); saveEdit(project.id); }} class="flex items-center gap-2">
-											<input
-												type="text"
-												bind:value={editName}
-												class="input input-sm text-sm"
-												autofocus
-											/>
-											<button type="submit" class="btn-sm">Save</button>
-											<button type="button" class="btn-sm-secondary" onclick={cancelEdit}>
-												<X class="h-3.5 w-3.5" />
-											</button>
-										</form>
-									{:else}
-										<h3 class="font-semibold">{project.name}</h3>
+									<h3 class="font-semibold">{project.name}</h3>
+									{#if project.github_repo}
+										<p class="text-xs text-muted-foreground mt-0.5 flex items-center gap-1">
+											<Github class="h-3 w-3" />
+											{project.github_repo}
+											{#if project.github_branch}
+												<span class="opacity-60">({project.github_branch})</span>
+											{/if}
+										</p>
 									{/if}
 									{#if project.instructions}
 										<p class="text-xs text-muted-foreground mt-0.5 line-clamp-1">{project.instructions}</p>
@@ -128,18 +103,16 @@
 								</div>
 							</div>
 							<div class="flex items-center gap-2">
-								{#if editingProject !== project.id}
-									<button
-										class="btn-sm-icon-ghost"
-										onclick={() => startEditing(project)}
-										title="Edit project"
-									>
-										<Pencil class="h-4 w-4 text-muted-foreground" />
-									</button>
-								{/if}
 								<button
 									class="btn-sm-icon-ghost"
-									onclick={() => handleDelete(project.id)}
+									onclick={() => (editingProject = project)}
+									title="Edit project"
+								>
+									<Pencil class="h-4 w-4 text-muted-foreground" />
+								</button>
+								<button
+									class="btn-sm-icon-ghost"
+									onclick={async () => { await projectsApi.delete(project.id); projectList = projectList.filter(p => p.id !== project.id); }}
 									title="Delete project"
 								>
 									<Trash2 class="h-4 w-4 text-muted-foreground hover:text-destructive" />
@@ -152,3 +125,19 @@
 		{/if}
 	</div>
 </div>
+
+{#if showNewProject}
+	<ProjectDialog
+		onSubmit={handleCreate}
+		onClose={() => (showNewProject = false)}
+	/>
+{/if}
+
+{#if editingProject}
+	<ProjectDialog
+		project={editingProject}
+		onSubmit={handleUpdate}
+		onDelete={handleDelete}
+		onClose={() => (editingProject = null)}
+	/>
+{/if}

@@ -4,6 +4,8 @@
 	import { chatState, sendAgentChatMessage, createNewChat, fetchChats } from '$lib/stores/chat.svelte';
 	import { agentChatStream } from '$lib/stores/agent.svelte';
 	import { authState } from '$lib/stores/auth.svelte';
+	import { navState } from '$lib/stores/nav.svelte';
+	import { getActiveProject } from '$lib/stores/projects.svelte';
 	import { Marked } from 'marked';
 
 	const marked = new Marked({
@@ -18,6 +20,8 @@
 			return content;
 		}
 	}
+
+	let chatProject = $derived(getActiveProject());
 
 	let inputValue = $state('');
 	let inputEl: HTMLTextAreaElement;
@@ -67,6 +71,15 @@
 		if (!authState.user) return;
 
 		inputValue = '';
+
+		// Create a chat and connect WebSocket if none exists
+		if (!chatState.activeChat) {
+			const chat = await createNewChat(navState.activeProjectId ?? undefined);
+			window.location.hash = `#/chat/${chat.id}`;
+			// Wait for the WS connection to establish via hash routing
+			await new Promise(r => setTimeout(r, 500));
+		}
+
 		await sendAgentChatMessage(content, authState.user.id);
 
 		// Resize textarea back
@@ -96,7 +109,7 @@
 	async function handleQuickAction(prompt: string) {
 		if (agentChatStream.streaming || !authState.user) return;
 		if (!chatState.activeChat) {
-			const chat = await createNewChat();
+			const chat = await createNewChat(navState.activeProjectId ?? undefined);
 			window.location.hash = `#/chat/${chat.id}`;
 			// Wait a tick for the WS connection to establish via hash routing
 			await new Promise(r => setTimeout(r, 500));
@@ -110,7 +123,12 @@
 	<div class="flex items-center justify-between px-4 py-3 border-b border-border shrink-0">
 		<div class="flex items-center gap-2">
 			<Sparkles class="h-4 w-4 text-primary" />
-			<h3 class="font-semibold text-sm">Pilot Chat</h3>
+			<div>
+				<h3 class="font-semibold text-sm">Pilot Chat</h3>
+				{#if chatProject}
+					<p class="text-[10px] text-muted-foreground">{chatProject.name}{chatProject.github_repo ? ` · ${chatProject.github_repo}` : ''}</p>
+				{/if}
+			</div>
 		</div>
 		<span class="text-[10px] text-muted-foreground">Claude Sonnet 4.5</span>
 	</div>
@@ -119,20 +137,16 @@
 	<div class="flex-1 overflow-y-auto scrollbar-thin px-4 py-4 space-y-4">
 		{#if chatState.agentMessages.length === 0 && !agentChatStream.streaming}
 			<!-- Empty state -->
-			<div class="flex flex-col items-center justify-center h-full text-center">
-				<div class="p-4 rounded-full bg-primary/10 mb-4">
-					<Bot class="h-8 w-8 text-primary" />
-				</div>
-				<h3 class="font-semibold mb-1">Chat with Pilot</h3>
-				<p class="text-sm text-muted-foreground mb-6 max-w-xs">
-					Ask me to create tasks, check progress, or help plan your work.
+			<div class="flex flex-col items-start justify-end h-full px-2 pb-2">
+				<p class="text-[13px] text-muted-foreground/60 mb-3 leading-relaxed">
+					Ask Pilot to create tasks, check progress, or plan your work.
 				</p>
-				<div class="flex flex-wrap gap-2 justify-center">
+				<div class="flex flex-wrap gap-1.5">
 					{#each quickActions as action}
 						<button
 							onclick={() => handleQuickAction(action.prompt)}
 							disabled={agentChatStream.streaming}
-							class="px-3 py-1.5 text-xs font-medium rounded-lg bg-muted hover:bg-muted/80 text-foreground border border-border transition-colors disabled:opacity-50"
+							class="px-2.5 py-1 text-[11px] font-medium rounded-full border border-border text-muted-foreground hover:text-foreground hover:border-foreground/20 transition-colors disabled:opacity-50"
 						>
 							{action.label}
 						</button>

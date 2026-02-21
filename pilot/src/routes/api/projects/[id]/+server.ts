@@ -15,7 +15,7 @@ export const GET: RequestHandler = async ({ params, locals, platform }) => {
 export const PUT: RequestHandler = async ({ params, request, locals, platform }) => {
 	if (!locals.user || !platform?.env?.DB) throw error(401);
 
-	const data = await request.json() as { name?: string; instructions?: string; color?: string };
+	const data = await request.json() as { name?: string; instructions?: string; color?: string; github_repo?: string; github_branch?: string };
 	const project = await updateProject(platform.env.DB, params.id, data);
 	if (!project) throw error(404, 'Project not found');
 	return json(project);

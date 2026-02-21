@@ -13,7 +13,7 @@ export const GET: RequestHandler = async ({ locals, platform }) => {
 export const POST: RequestHandler = async ({ locals, platform, request }) => {
 	if (!locals.user || !platform?.env?.DB) return json({ error: 'Unauthorized' }, { status: 401 });
 
-	const data = (await request.json()) as { name?: string; instructions?: string; color?: string };
+	const data = (await request.json()) as { name?: string; instructions?: string; color?: string; github_repo?: string; github_branch?: string };
 	const project = await createProject(platform.env.DB, locals.user.id, data);
 	return json(project, { status: 201 });
 };

@@ -3,54 +3,133 @@
 
 @custom-variant dark (&:where(.dark, .dark *));
 
+@theme {
+  --font-sans: 'Plus Jakarta Sans', ui-sans-serif, system-ui, sans-serif;
+}
+
 @layer base {
   :root {
-    --sidebar-width: 16rem;
-    --sidebar-collapsed-width: 4rem;
+    --sidebar-width: 15.5rem;
+    --sidebar-collapsed-width: 3.5rem;
+
+    /* Warm-tinted light palette */
+    --background: oklch(0.985 0.005 75);
+    --foreground: oklch(0.16 0.015 55);
+    --muted: oklch(0.945 0.008 75);
+    --muted-foreground: oklch(0.50 0.015 55);
+    --accent: oklch(0.94 0.01 75);
+    --accent-foreground: oklch(0.16 0.015 55);
+    --border: oklch(0.90 0.012 75);
+    --input: oklch(0.88 0.012 75);
+    --ring: oklch(0.60 0.16 55);
+
+    /* Warm amber primary */
+    --primary: oklch(0.55 0.16 55);
+    --primary-foreground: oklch(0.99 0.005 75);
+
+    --card: oklch(0.993 0.003 75);
+    --card-foreground: oklch(0.16 0.015 55);
+
+    --secondary: oklch(0.93 0.01 75);
+    --secondary-foreground: oklch(0.22 0.015 55);
+
+    --destructive: oklch(0.55 0.2 25);
+    --destructive-foreground: oklch(0.99 0.005 75);
+
+    --popover: oklch(0.993 0.003 75);
+    --popover-foreground: oklch(0.16 0.015 55);
+
+    /* Sidebar: slightly cooler to contrast the warm content */
+    --sidebar-background: oklch(0.975 0.004 260);
+    --sidebar-foreground: oklch(0.22 0.01 260);
+    --sidebar-accent: oklch(0.935 0.008 260);
+    --sidebar-accent-foreground: oklch(0.16 0.01 260);
+    --sidebar-border: oklch(0.91 0.008 260);
+    --sidebar-primary: oklch(0.55 0.16 55);
+    --sidebar-primary-foreground: oklch(0.99 0.005 75);
   }
 
   .dark {
-    --sidebar-accent: oklch(0.32 0.01 260);
-    --sidebar-accent-foreground: oklch(0.985 0 0);
+    --background: oklch(0.13 0.01 260);
+    --foreground: oklch(0.92 0.008 75);
+    --muted: oklch(0.20 0.01 260);
+    --muted-foreground: oklch(0.58 0.015 75);
+    --accent: oklch(0.22 0.012 260);
+    --accent-foreground: oklch(0.92 0.008 75);
+    --border: oklch(0.24 0.012 260);
+    --input: oklch(0.26 0.012 260);
+    --ring: oklch(0.65 0.16 55);
+
+    --primary: oklch(0.68 0.16 55);
+    --primary-foreground: oklch(0.13 0.01 55);
+
+    --card: oklch(0.155 0.01 260);
+    --card-foreground: oklch(0.92 0.008 75);
+
+    --secondary: oklch(0.22 0.012 260);
+    --secondary-foreground: oklch(0.88 0.008 75);
+
+    --destructive: oklch(0.60 0.2 25);
+    --destructive-foreground: oklch(0.99 0.005 75);
+
+    --popover: oklch(0.17 0.01 260);
+    --popover-foreground: oklch(0.92 0.008 75);
+
+    --sidebar-background: oklch(0.12 0.008 260);
+    --sidebar-foreground: oklch(0.88 0.008 260);
+    --sidebar-accent: oklch(0.20 0.012 260);
+    --sidebar-accent-foreground: oklch(0.92 0.008 260);
+    --sidebar-border: oklch(0.22 0.008 260);
+    --sidebar-primary: oklch(0.68 0.16 55);
+    --sidebar-primary-foreground: oklch(0.13 0.01 55);
   }
 
   body {
     @apply antialiased;
+    font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+    letter-spacing: -0.011em;
+  }
+
+  /* Tighter headings */
+  h1, h2, h3, h4 {
+    letter-spacing: -0.025em;
+    font-weight: 600;
   }
 }
 
-/* Status colors */
+/* Status colors — desaturated, warm-shifted */
 :root {
-  --status-backlog: oklch(0.65 0.01 285);
-  --status-backlog-bg: oklch(0.96 0.003 285);
-  --status-queued: oklch(0.7 0.17 85);
-  --status-queued-bg: oklch(0.95 0.05 85);
-  --status-processing: oklch(0.6 0.19 260);
-  --status-processing-bg: oklch(0.95 0.04 260);
-  --status-blocked: oklch(0.6 0.22 27);
-  --status-blocked-bg: oklch(0.95 0.04 27);
-  --status-done: oklch(0.55 0.17 150);
-  --status-done-bg: oklch(0.95 0.04 150);
-  --status-failed: oklch(0.55 0.2 27);
-  --status-failed-bg: oklch(0.95 0.04 27);
+  --status-backlog: oklch(0.58 0.03 260);
+  --status-backlog-bg: oklch(0.96 0.006 260);
+  --status-queued: oklch(0.62 0.14 80);
+  --status-queued-bg: oklch(0.96 0.03 80);
+  --status-processing: oklch(0.55 0.16 55);
+  --status-processing-bg: oklch(0.96 0.03 55);
+  --status-blocked: oklch(0.58 0.16 30);
+  --status-blocked-bg: oklch(0.96 0.03 30);
+  --status-done: oklch(0.52 0.14 155);
+  --status-done-bg: oklch(0.96 0.03 155);
+  --status-failed: oklch(0.52 0.18 25);
+  --status-failed-bg: oklch(0.96 0.03 25);
 }
 
 .dark {
-  --status-backlog: oklch(0.55 0.01 285);
-  --status-backlog-bg: oklch(0.2 0.005 285);
-  --status-queued: oklch(0.7 0.17 85);
-  --status-queued-bg: oklch(0.25 0.05 85);
-  --status-processing: oklch(0.65 0.19 260);
-  --status-processing-bg: oklch(0.22 0.04 260);
-  --status-blocked: oklch(0.6 0.22 27);
-  --status-blocked-bg: oklch(0.22 0.04 27);
-  --status-done: oklch(0.6 0.17 150);
-  --status-done-bg: oklch(0.22 0.04 150);
-  --status-failed: oklch(0.6 0.2 27);
-  --status-failed-bg: oklch(0.22 0.04 27);
+  --status-backlog: oklch(0.52 0.03 260);
+  --status-backlog-bg: oklch(0.19 0.008 260);
+  --status-queued: oklch(0.65 0.14 80);
+  --status-queued-bg: oklch(0.22 0.03 80);
+  --status-processing: oklch(0.65 0.16 55);
+  --status-processing-bg: oklch(0.20 0.03 55);
+  --status-blocked: oklch(0.60 0.16 30);
+  --status-blocked-bg: oklch(0.20 0.03 30);
+  --status-done: oklch(0.58 0.14 155);
+  --status-done-bg: oklch(0.20 0.03 155);
+  --status-failed: oklch(0.58 0.18 25);
+  --status-failed-bg: oklch(0.20 0.03 25);
 }
 
-/* Sidebar navigation item text truncation */
+/* ---- Sidebar ---- */
+
 .sidebar nav > section ul li > a,
 .sidebar nav > section ul li > button {
   @apply flex items-center gap-2 min-w-0;
@@ -61,7 +140,7 @@
   @apply truncate min-w-0;
 }
 
-/* Sidebar collapsed icon-rail state */
+/* Collapsed icon-rail */
 .sidebar[data-collapsed] {
   --sidebar-width: var(--sidebar-collapsed-width);
 
@@ -88,13 +167,11 @@
     @apply hidden;
   }
 
-  /* Hide delete buttons and other non-icon elements in collapsed chat items */
   nav > section ul li > a > button,
   nav > section ul li .group > button {
     @apply hidden;
   }
 
-  /* Center footer buttons */
   nav > footer > button,
   nav > footer > div {
     @apply justify-center px-0;
@@ -119,21 +196,46 @@
   }
 }
 
-/* Resize handle between panes */
-.resize-handle {
-  @apply w-1 flex-shrink-0 cursor-col-resize bg-transparent hover:bg-primary/20 transition-colors relative;
+/* ---- Kanban ---- */
+
+/* Column headers: clean top edge with status color */
+.kanban-column {
+  @apply flex flex-col overflow-hidden;
+  border-radius: 0;
+  background: transparent;
+  border: none;
 }
 
-.resize-handle::after {
-  content: "";
-  @apply absolute inset-y-0 -left-1 -right-1;
+.kanban-column-header {
+  @apply flex items-center justify-between px-1 pb-2;
+  border-bottom: 1px solid var(--border);
 }
 
-.resize-handle.active {
-  @apply bg-primary/30;
+.kanban-column-header[data-has-tasks] {
+  border-bottom-color: color-mix(in oklch, var(--col-color, var(--border)) 50%, var(--border));
 }
 
-/* Markdown content styling */
+/* Focused column: highlight header when navigated to */
+.kanban-column.focused-column > .kanban-column-header {
+  border-bottom-color: var(--col-color, var(--primary));
+}
+
+/* Focused card: visible bg shift */
+.focused-card {
+  background: var(--accent);
+  outline: 1.5px solid color-mix(in oklch, var(--foreground) 12%, transparent);
+  outline-offset: -1.5px;
+}
+
+/* Multi-selected card */
+.selected-card {
+  background: color-mix(in oklch, var(--primary) 8%, transparent);
+  outline: 1.5px solid color-mix(in oklch, var(--primary) 25%, transparent);
+  outline-offset: -1.5px;
+}
+
+/* ---- Chat markdown ---- */
+
 .chat-markdown p {
   margin: 0.25em 0;
 }
@@ -178,24 +280,26 @@
   padding: 0.25rem 0.5rem;
 }
 
-/* Custom scrollbar utility */
+/* ---- Scrollbar ---- */
+
 @utility scrollbar-thin {
   scrollbar-width: thin;
-  scrollbar-color: oklch(0.556 0.015 285 / 0.3) transparent;
+  scrollbar-color: oklch(0.556 0.015 55 / 0.25) transparent;
   &::-webkit-scrollbar {
-    width: 6px;
-    height: 6px;
+    width: 5px;
+    height: 5px;
   }
   &::-webkit-scrollbar-track {
     background: transparent;
   }
   &::-webkit-scrollbar-thumb {
-    background: oklch(0.556 0.015 285 / 0.3);
+    background: oklch(0.556 0.015 55 / 0.25);
     border-radius: 3px;
   }
 }
 
-/* Status border utilities */
+/* ---- Status borders ---- */
+
 @utility border-status-backlog {
   border-left: 3px solid var(--status-backlog);
 }
@@ -215,7 +319,8 @@
   border-left: 3px solid var(--status-failed);
 }
 
-/* Ensure dialogs are visible when open (fallback if transition-discrete not supported) */
+/* ---- Dialogs ---- */
+
 dialog.dialog[open] {
   opacity: 1;
 }
@@ -226,7 +331,8 @@ dialog.dialog[open] > * {
   scale: 1;
 }
 
-/* Animations */
+/* ---- Animations ---- */
+
 @theme {
   --animate-slide-in-right: slide-in-right 0.2s ease-out;
   --animate-fade-in: fade-in 0.15s ease-out;
@@ -240,4 +346,19 @@ dialog.dialog[open] > * {
     from { opacity: 0; }
     to { opacity: 1; }
   }
+}
+
+/* ---- Resize handle ---- */
+
+.resize-handle {
+  @apply w-1 flex-shrink-0 cursor-col-resize bg-transparent hover:bg-primary/20 transition-colors relative;
+}
+
+.resize-handle::after {
+  content: "";
+  @apply absolute inset-y-0 -left-1 -right-1;
+}
+
+.resize-handle.active {
+  @apply bg-primary/30;
 }
