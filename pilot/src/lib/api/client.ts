@@ -1,6 +1,7 @@
 import type {
 	User,
 	Task,
+	TaskFile,
 	CreateTaskRequest,
 	UpdateTaskRequest,
 	Project,
@@ -70,6 +71,9 @@ export const tasks = {
 		const params = limit ? `?limit=${limit}` : '';
 		return fetchJSON<TaskLog[]>(`/tasks/${id}/logs${params}`);
 	},
+	listFiles: (id: number) => fetchJSON<TaskFile[]>(`/tasks/${id}/files`),
+	getFileContent: (id: number, path: string) =>
+		fetch(`/api/tasks/${id}/file?path=${encodeURIComponent(path)}`, { credentials: 'include' }).then(r => r.text()),
 };
 
 // Projects API
@@ -139,6 +143,21 @@ export const workspaces = {
 		}),
 	delete: (id: string) =>
 		fetchJSON<void>(`/workspaces/${id}`, { method: 'DELETE' }),
+};
+
+// GitHub API
+export const github = {
+	status: () => fetchJSON<{ connected: boolean; login?: string; avatar_url?: string }>('/auth/github/status'),
+	startDeviceFlow: () =>
+		fetchJSON<{ device_code: string; user_code: string; verification_uri: string; expires_in: number; interval: number }>(
+			'/auth/github/device',
+			{ method: 'POST' },
+		),
+	pollDeviceFlow: (device_code: string) =>
+		fetchJSON<{ status: 'complete' | 'pending' | 'error'; error?: string; error_description?: string }>(
+			'/auth/github/device/poll',
+			{ method: 'POST', body: JSON.stringify({ device_code }) },
+		),
 };
 
 // Settings API

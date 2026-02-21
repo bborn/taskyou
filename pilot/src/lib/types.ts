@@ -45,6 +45,7 @@ export interface Task {
 	cost_cents: number;
 	output?: string;
 	summary?: string;
+	preview_url?: string;
 	approval_status?: 'pending_review' | 'approved' | 'rejected';
 	dangerous_mode: boolean;
 	scheduled_at?: string;
@@ -54,6 +55,15 @@ export interface Task {
 	updated_at: string;
 	started_at?: string;
 	completed_at?: string;
+}
+
+export interface TaskFile {
+	id: number;
+	task_id: number;
+	path: string;
+	mime_type: string;
+	size_bytes: number;
+	created_at: string;
 }
 
 export interface CreateTaskRequest {
@@ -80,6 +90,8 @@ export interface Project {
 	name: string;
 	instructions: string;
 	color: string;
+	github_repo?: string;
+	github_branch?: string;
 	created_at: string;
 	updated_at: string;
 }
@@ -88,12 +100,16 @@ export interface CreateProjectRequest {
 	name: string;
 	instructions?: string;
 	color?: string;
+	github_repo?: string;
+	github_branch?: string;
 }
 
 export interface UpdateProjectRequest {
 	name?: string;
 	instructions?: string;
 	color?: string;
+	github_repo?: string;
+	github_branch?: string;
 }
 
 // Chat types
@@ -172,4 +188,4 @@ export interface ToolInvocation {
 }
 
 // Navigation
-export type NavView = 'dashboard' | 'workspaces' | 'projects' | 'integrations' | 'approvals' | 'settings';
+export type NavView = 'dashboard' | 'workspaces' | 'integrations' | 'approvals' | 'settings';

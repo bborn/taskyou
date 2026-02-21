@@ -1,4 +1,4 @@
-import type { Task, Chat, Message, Workspace, TaskStatus, TaskLog, Project, Model, Integration } from '$lib/types';
+import type { Task, TaskFile, Chat, Message, Workspace, TaskStatus, TaskLog, Project, Model, Integration } from '$lib/types';
 
 export async function initHostDB(db: D1Database): Promise<void> {
 	await db.batch([
@@ -159,7 +159,26 @@ export async function initHostDB(db: D1Database): Promise<void> {
 				FOREIGN KEY (user_id) REFERENCES users(id)
 			)
 		`),
+		db.prepare(`
+			CREATE TABLE IF NOT EXISTS task_files (
+				id INTEGER PRIMARY KEY AUTOINCREMENT,
+				task_id INTEGER NOT NULL,
+				path TEXT NOT NULL,
+				mime_type TEXT NOT NULL DEFAULT 'text/plain',
+				size_bytes INTEGER NOT NULL DEFAULT 0,
+				created_at TEXT NOT NULL DEFAULT (datetime('now')),
+				FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE,
+				UNIQUE(task_id, path)
+			)
+		`),
 	]);
+
+	// Add preview_url column if missing (safe to run repeatedly)
+	await db.prepare(`ALTER TABLE tasks ADD COLUMN preview_url TEXT`).run().catch(() => {});
+
+	// Add GitHub repo fields to projects (safe to run repeatedly)
+	await db.prepare(`ALTER TABLE projects ADD COLUMN github_repo TEXT`).run().catch(() => {});
+	await db.prepare(`ALTER TABLE projects ADD COLUMN github_branch TEXT`).run().catch(() => {});
 
 	// Seed default models
 	await db.prepare(`INSERT OR IGNORE INTO models (id, name, provider, api_id, context_window, input_price_per_million, output_price_per_million) VALUES
@@ -274,7 +293,7 @@ export async function updateTask(
 	db: D1Database,
 	userId: string,
 	taskId: number,
-	data: { title?: string; body?: string; status?: TaskStatus; type?: string; project_id?: string; output?: string; summary?: string },
+	data: { title?: string; body?: string; status?: TaskStatus; type?: string; project_id?: string; output?: string; summary?: string; preview_url?: string },
 ): Promise<Task | null> {
 	const sets: string[] = [];
 	const params: (string | number)[] = [];
@@ -286,6 +305,7 @@ export async function updateTask(
 	if (data.project_id !== undefined) { sets.push('project_id = ?'); params.push(data.project_id); }
 	if (data.output !== undefined) { sets.push('output = ?'); params.push(data.output); }
 	if (data.summary !== undefined) { sets.push('summary = ?'); params.push(data.summary); }
+	if (data.preview_url !== undefined) { sets.push('preview_url = ?'); params.push(data.preview_url); }
 
 	if (sets.length === 0) return getTask(db, userId, taskId);
 
@@ -498,12 +518,12 @@ export async function listProjects(db: D1Database, userId: string): Promise<Proj
 export async function createProject(
 	db: D1Database,
 	userId: string,
-	data: { name?: string; instructions?: string; color?: string },
+	data: { name?: string; instructions?: string; color?: string; github_repo?: string; github_branch?: string },
 ): Promise<Project> {
 	const id = crypto.randomUUID();
 	const result = await db
-		.prepare('INSERT INTO projects (id, user_id, name, instructions, color) VALUES (?, ?, ?, ?, ?) RETURNING *')
-		.bind(id, userId, data.name || 'Default', data.instructions || '', data.color || '#888888')
+		.prepare('INSERT INTO projects (id, user_id, name, instructions, color, github_repo, github_branch) VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING *')
+		.bind(id, userId, data.name || 'Default', data.instructions || '', data.color || '#888888', data.github_repo || null, data.github_branch || null)
 		.first<Project>();
 	return result!;
 }
@@ -521,14 +541,16 @@ export async function getProjectById(
 export async function updateProject(
 	db: D1Database,
 	projectId: string,
-	data: { name?: string; instructions?: string; color?: string },
+	data: { name?: string; instructions?: string; color?: string; github_repo?: string; github_branch?: string },
 ): Promise<Project | null> {
 	const sets: string[] = [];
-	const params: (string | number)[] = [];
+	const params: (string | number | null)[] = [];
 
 	if (data.name !== undefined) { sets.push('name = ?'); params.push(data.name); }
 	if (data.instructions !== undefined) { sets.push('instructions = ?'); params.push(data.instructions); }
 	if (data.color !== undefined) { sets.push('color = ?'); params.push(data.color); }
+	if (data.github_repo !== undefined) { sets.push('github_repo = ?'); params.push(data.github_repo || null); }
+	if (data.github_branch !== undefined) { sets.push('github_branch = ?'); params.push(data.github_branch || null); }
 
 	if (sets.length === 0) return getProjectById(db, projectId);
 
@@ -612,6 +634,44 @@ export async function updateSettings(
 	if (stmts.length > 0) {
 		await db.batch(stmts);
 	}
+}
+
+// ── Task files ──
+
+export async function addTaskFile(
+	db: D1Database,
+	taskId: number,
+	path: string,
+	mimeType: string,
+	sizeBytes: number,
+): Promise<TaskFile> {
+	const result = await db
+		.prepare(
+			`INSERT INTO task_files (task_id, path, mime_type, size_bytes)
+			 VALUES (?, ?, ?, ?)
+			 ON CONFLICT(task_id, path) DO UPDATE SET mime_type = excluded.mime_type, size_bytes = excluded.size_bytes
+			 RETURNING *`,
+		)
+		.bind(taskId, path, mimeType, sizeBytes)
+		.first<TaskFile>();
+	return result!;
+}
+
+export async function listTaskFiles(
+	db: D1Database,
+	userId: string,
+	taskId: number,
+): Promise<TaskFile[]> {
+	const result = await db
+		.prepare(
+			`SELECT tf.* FROM task_files tf
+			 JOIN tasks t ON t.id = tf.task_id
+			 WHERE tf.task_id = ? AND t.user_id = ?
+			 ORDER BY tf.path ASC`,
+		)
+		.bind(taskId, userId)
+		.all<TaskFile>();
+	return result.results || [];
 }
 
 // ── Helpers ──
