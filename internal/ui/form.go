@@ -342,30 +342,30 @@ func NewFormModel(database *db.DB, width, height int, workingDir string, availab
 		}
 	}
 
-	// Default to last used project, or fall back to 'personal'
+	// Default project priority:
+	// 1. Last used project (always wins if available)
+	// 2. Detect from working directory
+	// 3. Fall back to 'personal'
 	m.project = "personal"
+
+	// Try detecting from working directory first
+	if workingDir != "" && database != nil {
+		if proj, err := database.GetProjectByPath(workingDir); err == nil && proj != nil {
+			m.project = proj.Name
+		}
+	}
+
+	// Last used project always takes priority
 	if database != nil {
 		if lastProject, err := database.GetLastUsedProject(); err == nil && lastProject != "" {
 			m.project = lastProject
 		}
 	}
+
 	for i, p := range m.projects {
 		if p == m.project {
 			m.projectIdx = i
 			break
-		}
-	}
-
-	// Detect project from working directory (overrides default)
-	if workingDir != "" && database != nil {
-		if proj, err := database.GetProjectByPath(workingDir); err == nil && proj != nil {
-			m.project = proj.Name
-			for i, p := range m.projects {
-				if p == proj.Name {
-					m.projectIdx = i
-					break
-				}
-			}
 		}
 	}
 
