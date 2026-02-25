@@ -1,8 +1,10 @@
 package ui
 
 import (
+	"strings"
 	"testing"
 
+	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/bborn/workflow/internal/config"
@@ -1702,3 +1704,270 @@ func TestFilterChipDeletion(t *testing.T) {
 	}
 }
 
+// TestReplyMode_RKeyEntersReplyMode verifies pressing 'r' on a blocked task
+// with a pending prompt enters reply mode.
+func TestReplyMode_RKeyEntersReplyMode(t *testing.T) {
+	database, err := db.Open(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to create test database: %v", err)
+	}
+	defer database.Close()
+
+	task := &db.Task{Title: "Test task", Status: db.StatusBlocked}
+	if err := database.CreateTask(task); err != nil {
+		t.Fatalf("Failed to create task: %v", err)
+	}
+
+	// Log a permission prompt
+	database.AppendTaskLog(task.ID, "system", "Waiting for permission: Choose option 1, 2, or 3")
+
+	replyInput := textinput.New()
+	replyInput.CharLimit = 200
+
+	m := &AppModel{
+		width:             100,
+		height:            50,
+		currentView:       ViewDashboard,
+		db:                database,
+		keys:              DefaultKeyMap(),
+		tasks:             []*db.Task{task},
+		tasksNeedingInput: map[int64]bool{task.ID: true},
+		executorPrompts:   map[int64]string{task.ID: "Choose option 1, 2, or 3"},
+		kanban:            NewKanbanBoard(100, 50),
+		prevStatuses:      map[int64]string{task.ID: db.StatusBlocked},
+		replyInput:        replyInput,
+	}
+	m.kanban.SetTasks(m.tasks)
+	m.kanban.SelectTask(task.ID)
+
+	// Press 'r' to enter reply mode
+	result, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
+	model := result.(*AppModel)
+
+	if !model.replyActive {
+		t.Error("replyActive should be true after pressing 'r' on a blocked task")
+	}
+	if model.replyTaskID != task.ID {
+		t.Errorf("replyTaskID should be %d, got %d", task.ID, model.replyTaskID)
+	}
+}
+
+// TestReplyMode_EscCancels verifies pressing Esc in reply mode cancels it.
+func TestReplyMode_EscCancels(t *testing.T) {
+	replyInput := textinput.New()
+	replyInput.CharLimit = 200
+	replyInput.Focus()
+
+	m := &AppModel{
+		width:             100,
+		height:            50,
+		currentView:       ViewDashboard,
+		keys:              DefaultKeyMap(),
+		replyActive:       true,
+		replyTaskID:       42,
+		replyInput:        replyInput,
+		tasksNeedingInput: make(map[int64]bool),
+		executorPrompts:   make(map[int64]string),
+	}
+
+	result, _ := m.Update(tea.KeyMsg{Type: tea.KeyEscape})
+	model := result.(*AppModel)
+
+	if model.replyActive {
+		t.Error("replyActive should be false after pressing Esc")
+	}
+	if model.replyTaskID != 0 {
+		t.Error("replyTaskID should be 0 after pressing Esc")
+	}
+}
+
+// TestReplyMode_EmptyEnterCancels verifies pressing Enter with empty input cancels reply mode.
+func TestReplyMode_EmptyEnterCancels(t *testing.T) {
+	replyInput := textinput.New()
+	replyInput.CharLimit = 200
+	replyInput.Focus()
+
+	m := &AppModel{
+		width:             100,
+		height:            50,
+		currentView:       ViewDashboard,
+		keys:              DefaultKeyMap(),
+		replyActive:       true,
+		replyTaskID:       42,
+		replyInput:        replyInput,
+		tasksNeedingInput: make(map[int64]bool),
+		executorPrompts:   make(map[int64]string),
+	}
+
+	result, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model := result.(*AppModel)
+
+	if model.replyActive {
+		t.Error("replyActive should be false after pressing Enter with empty input")
+	}
+}
+
+// TestReplyMode_RKeyIgnoredWithoutBlockedTask verifies 'r' does nothing
+// when the selected task doesn't need input.
+func TestReplyMode_RKeyIgnoredWithoutBlockedTask(t *testing.T) {
+	database, err := db.Open(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to create test database: %v", err)
+	}
+	defer database.Close()
+
+	task := &db.Task{Title: "Test task", Status: db.StatusProcessing}
+	if err := database.CreateTask(task); err != nil {
+		t.Fatalf("Failed to create task: %v", err)
+	}
+
+	replyInput := textinput.New()
+	replyInput.CharLimit = 200
+
+	m := &AppModel{
+		width:             100,
+		height:            50,
+		currentView:       ViewDashboard,
+		db:                database,
+		keys:              DefaultKeyMap(),
+		tasks:             []*db.Task{task},
+		tasksNeedingInput: make(map[int64]bool),
+		executorPrompts:   make(map[int64]string),
+		kanban:            NewKanbanBoard(100, 50),
+		prevStatuses:      map[int64]string{task.ID: db.StatusProcessing},
+		replyInput:        replyInput,
+	}
+	m.kanban.SetTasks(m.tasks)
+
+	result, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
+	model := result.(*AppModel)
+
+	if model.replyActive {
+		t.Error("replyActive should remain false when task doesn't need input")
+	}
+}
+
+// TestLatestPermissionPrompt_RepliedClears verifies that a "Replied from kanban" log
+// entry clears a pending permission prompt.
+func TestLatestPermissionPrompt_RepliedClears(t *testing.T) {
+	database, err := db.Open(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to create test database: %v", err)
+	}
+	defer database.Close()
+
+	task := &db.Task{Title: "Test task", Status: db.StatusBlocked}
+	if err := database.CreateTask(task); err != nil {
+		t.Fatalf("Failed to create task: %v", err)
+	}
+
+	// Log permission prompt then a reply
+	database.AppendTaskLog(task.ID, "system", "Waiting for permission: Choose 1, 2, or 3")
+	database.AppendTaskLog(task.ID, "user", "Replied from kanban: 2")
+
+	m := &AppModel{db: database}
+	result := m.latestPermissionPrompt(task.ID)
+	if result != "" {
+		t.Errorf("expected empty string after reply, got '%s'", result)
+	}
+}
+
+// TestRenderExecutorPromptPreview_ShowsReplyHint verifies the prompt preview
+// includes the reply hint alongside approve/deny.
+func TestRenderExecutorPromptPreview_ShowsReplyHint(t *testing.T) {
+	replyInput := textinput.New()
+	replyInput.CharLimit = 200
+
+	m := &AppModel{
+		width:           100,
+		height:          50,
+		executorPrompts: map[int64]string{1: "Choose option 1, 2, or 3"},
+		replyInput:      replyInput,
+	}
+
+	task := &db.Task{ID: 1, Title: "Test task"}
+	rendered := m.renderExecutorPromptPreview(task)
+
+	if !strings.Contains(rendered, "r reply") {
+		t.Error("prompt preview should include 'r reply' hint")
+	}
+	if !strings.Contains(rendered, "y approve") {
+		t.Error("prompt preview should still include 'y approve' hint")
+	}
+	if !strings.Contains(rendered, "N deny") {
+		t.Error("prompt preview should still include 'N deny' hint")
+	}
+}
+
+// TestRenderExecutorPromptPreview_ReplyInputActive verifies the prompt preview
+// shows the reply text input when reply mode is active for the task.
+func TestRenderExecutorPromptPreview_ReplyInputActive(t *testing.T) {
+	replyInput := textinput.New()
+	replyInput.CharLimit = 200
+	replyInput.Focus()
+
+	m := &AppModel{
+		width:           100,
+		height:          50,
+		executorPrompts: map[int64]string{1: "Choose option 1, 2, or 3"},
+		replyActive:     true,
+		replyTaskID:     1,
+		replyInput:      replyInput,
+	}
+
+	task := &db.Task{ID: 1, Title: "Test task"}
+	rendered := m.renderExecutorPromptPreview(task)
+
+	if !strings.Contains(rendered, "#1 reply:") {
+		t.Error("prompt preview should show reply input label when reply mode is active")
+	}
+	if !strings.Contains(rendered, "esc cancel") {
+		t.Error("prompt preview should show cancel hint when reply mode is active")
+	}
+}
+
+// TestExecutorRespondedMsg_ReplyAction verifies the executor responded handler
+// properly handles "reply" action.
+func TestExecutorRespondedMsg_ReplyAction(t *testing.T) {
+	database, err := db.Open(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to create test database: %v", err)
+	}
+	defer database.Close()
+
+	task := &db.Task{Title: "Test task", Status: db.StatusBlocked}
+	if err := database.CreateTask(task); err != nil {
+		t.Fatalf("Failed to create task: %v", err)
+	}
+
+	replyInput := textinput.New()
+	replyInput.CharLimit = 200
+
+	m := &AppModel{
+		width:             100,
+		height:            50,
+		currentView:       ViewDashboard,
+		db:                database,
+		keys:              DefaultKeyMap(),
+		tasks:             []*db.Task{task},
+		tasksNeedingInput: map[int64]bool{task.ID: true},
+		executorPrompts:   map[int64]string{task.ID: "Choose 1, 2, or 3"},
+		kanban:            NewKanbanBoard(100, 50),
+		prevStatuses:      map[int64]string{task.ID: db.StatusBlocked},
+		replyInput:        replyInput,
+	}
+
+	// Simulate executorRespondedMsg with reply action
+	result, _ := m.Update(executorRespondedMsg{taskID: task.ID, action: "reply"})
+	model := result.(*AppModel)
+
+	if model.tasksNeedingInput[task.ID] {
+		t.Error("tasksNeedingInput should be cleared after reply")
+	}
+	if _, exists := model.executorPrompts[task.ID]; exists {
+		t.Error("executorPrompts should be cleared after reply")
+	}
+	if !strings.Contains(model.notification, "Replied to") {
+		t.Errorf("notification should contain 'Replied to', got '%s'", model.notification)
+	}
+}
