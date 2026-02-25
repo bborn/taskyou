@@ -4029,7 +4029,7 @@ type executorRespondedMsg struct {
 func (m *AppModel) approveExecutorPrompt(taskID int64) tea.Cmd {
 	database := m.db
 	return func() tea.Msg {
-		err := executor.SendKeyToPane(taskID, "y")
+		err := executor.SendKeyToPane(taskID, "y", "Enter")
 		if err == nil {
 			database.AppendTaskLog(taskID, "user", "Approved from kanban")
 		}
@@ -4041,7 +4041,7 @@ func (m *AppModel) approveExecutorPrompt(taskID int64) tea.Cmd {
 func (m *AppModel) denyExecutorPrompt(taskID int64) tea.Cmd {
 	database := m.db
 	return func() tea.Msg {
-		err := executor.SendKeyToPane(taskID, "n")
+		err := executor.SendKeyToPane(taskID, "n", "Enter")
 		if err == nil {
 			database.AppendTaskLog(taskID, "user", "Denied from kanban")
 		}
