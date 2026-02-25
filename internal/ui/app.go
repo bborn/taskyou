@@ -470,9 +470,10 @@ type AppModel struct {
 	aiCommandService *ai.CommandService
 
 	// Reply input for executor prompts (multiple choice, free-form text)
-	replyInput    textinput.Model
-	replyActive   bool  // Whether reply mode is active (typing a response)
-	replyTaskID   int64 // Task ID the reply is for
+	replyInput       textinput.Model
+	replyActive      bool     // Whether reply mode is active (typing a response)
+	replyTaskID      int64    // Task ID the reply is for
+	replyPaneContent []string // Captured tmux pane lines shown above the reply input
 
 	// Filter state
 	filterInput        textinput.Model
@@ -858,12 +859,20 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			if prompt := m.latestPermissionPrompt(t.ID); prompt != "" {
 				m.tasksNeedingInput[t.ID] = true
-				// Extract just the meaningful part after "Waiting for permission: "
-				displayPrompt := prompt
-				if strings.HasPrefix(prompt, "Waiting for permission: ") {
-					displayPrompt = strings.TrimPrefix(prompt, "Waiting for permission: ")
+				// Capture the tmux pane content for richer display of the prompt.
+				// This shows the actual executor output (including multiple choice options)
+				// rather than just the hook log summary.
+				paneContent := executor.CapturePaneContent(t.ID, 15)
+				if paneContent != "" {
+					m.executorPrompts[t.ID] = paneContent
+				} else {
+					// Fall back to the hook log message
+					displayPrompt := prompt
+					if strings.HasPrefix(prompt, "Waiting for permission: ") {
+						displayPrompt = strings.TrimPrefix(prompt, "Waiting for permission: ")
+					}
+					m.executorPrompts[t.ID] = displayPrompt
 				}
-				m.executorPrompts[t.ID] = displayPrompt
 			}
 		}
 
@@ -1210,11 +1219,16 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 							}
 						} else if prompt := m.latestPermissionPrompt(event.TaskID); prompt != "" {
 							m.tasksNeedingInput[event.TaskID] = true
-							displayPrompt := prompt
-							if strings.HasPrefix(prompt, "Waiting for permission: ") {
-								displayPrompt = strings.TrimPrefix(prompt, "Waiting for permission: ")
+							paneContent := executor.CapturePaneContent(event.TaskID, 15)
+							if paneContent != "" {
+								m.executorPrompts[event.TaskID] = paneContent
+							} else {
+								displayPrompt := prompt
+								if strings.HasPrefix(prompt, "Waiting for permission: ") {
+									displayPrompt = strings.TrimPrefix(prompt, "Waiting for permission: ")
+								}
+								m.executorPrompts[event.TaskID] = displayPrompt
 							}
-							m.executorPrompts[event.TaskID] = displayPrompt
 						}
 						m.prevStatuses[event.TaskID] = event.Task.Status
 					}
@@ -1726,68 +1740,85 @@ func (m *AppModel) renderExecutorPromptPreview(task *db.Task) string {
 	// Warning style for the task reference
 	warnStyle := lipgloss.NewStyle().Foreground(ColorWarning)
 
+	barStyle := lipgloss.NewStyle().
+		Width(m.width).
+		Padding(0, 1)
+
 	if len(promptLines) == 0 {
 		// No captured content yet - show a minimal single-line hint
 		line := warnStyle.Render(fmt.Sprintf("#%d waiting for input", task.ID)) + "  " + hints
-		barStyle := lipgloss.NewStyle().
-			Width(m.width).
-			Padding(0, 1)
 		return barStyle.Render(line)
 	}
 
-	// Show last 2 lines of the prompt content (keep it compact)
-	maxLines := 2
+	// Show last few lines of the prompt content so user can see multiple choice options
+	maxLines := 5
 	if len(promptLines) > maxLines {
 		promptLines = promptLines[len(promptLines)-maxLines:]
 	}
 
-	// First line: task ID + permission header + action hints
-	headerLine := promptLines[0]
-	maxPromptWidth := m.width - lipgloss.Width(hints) - 10 // 10 for #ID, spaces, padding
-	if maxPromptWidth < 20 {
-		maxPromptWidth = 20
+	var lines []string
+
+	// Header line: task ID + action hints
+	headerLine := warnStyle.Render(fmt.Sprintf("#%d ", task.ID)) + hints
+	lines = append(lines, barStyle.Render(headerLine))
+
+	// Show prompt content lines
+	detailStyle := lipgloss.NewStyle().Foreground(ColorMuted)
+	detailMaxWidth := m.width - 6 // padding + indent
+	if detailMaxWidth < 20 {
+		detailMaxWidth = 20
 	}
-	if len(headerLine) > maxPromptWidth {
-		headerLine = headerLine[:maxPromptWidth-1] + "…"
-	}
-
-	line := warnStyle.Render(fmt.Sprintf("#%d ", task.ID)) +
-		warnStyle.Render(headerLine) + "  " + hints
-
-	barStyle := lipgloss.NewStyle().
-		Width(m.width).
-		Padding(0, 1)
-
-	// If there's a detail line (e.g. the actual command), show it below
-	if len(promptLines) > 1 {
-		detailLine := promptLines[len(promptLines)-1]
-		detailMaxWidth := m.width - 6 // padding + indent
-		if detailMaxWidth < 20 {
-			detailMaxWidth = 20
+	for _, pl := range promptLines {
+		if len(pl) > detailMaxWidth {
+			pl = pl[:detailMaxWidth-1] + "…"
 		}
-		if len(detailLine) > detailMaxWidth {
-			detailLine = detailLine[:detailMaxWidth-1] + "…"
-		}
-		detailStyle := lipgloss.NewStyle().Foreground(ColorMuted)
-		return barStyle.Render(line) + "\n" + barStyle.Render("   "+detailStyle.Render(detailLine))
+		lines = append(lines, barStyle.Render("  "+detailStyle.Render(pl)))
 	}
 
-	return barStyle.Render(line)
+	return strings.Join(lines, "\n")
 }
 
-// renderReplyInput renders the reply text input for a blocked task.
+// renderReplyInput renders the reply text input for a blocked task,
+// including captured tmux pane content so the user can see what they're responding to.
 func (m *AppModel) renderReplyInput(task *db.Task) string {
 	warnStyle := lipgloss.NewStyle().Foreground(ColorWarning)
 	hintStyle := lipgloss.NewStyle().Foreground(ColorMuted)
-
-	label := warnStyle.Render(fmt.Sprintf("#%d reply: ", task.ID))
-	hints := hintStyle.Render("  enter send  esc cancel")
+	detailStyle := lipgloss.NewStyle().Foreground(ColorMuted)
 
 	barStyle := lipgloss.NewStyle().
 		Width(m.width).
 		Padding(0, 1)
 
-	return barStyle.Render(label + m.replyInput.View() + hints)
+	var lines []string
+
+	// Show captured pane content (last N meaningful lines) so user can see the options
+	if len(m.replyPaneContent) > 0 {
+		// Show up to 8 lines of context from the tmux pane
+		paneLines := m.replyPaneContent
+		maxContextLines := 8
+		if len(paneLines) > maxContextLines {
+			paneLines = paneLines[len(paneLines)-maxContextLines:]
+		}
+		header := warnStyle.Render(fmt.Sprintf("#%d executor prompt:", task.ID))
+		lines = append(lines, barStyle.Render(header))
+		for _, pl := range paneLines {
+			maxWidth := m.width - 6
+			if maxWidth < 20 {
+				maxWidth = 20
+			}
+			if len(pl) > maxWidth {
+				pl = pl[:maxWidth-1] + "…"
+			}
+			lines = append(lines, barStyle.Render("  "+detailStyle.Render(pl)))
+		}
+	}
+
+	// Reply input line
+	label := warnStyle.Render("reply: ")
+	hints := hintStyle.Render("  enter send  esc cancel")
+	lines = append(lines, barStyle.Render(label+m.replyInput.View()+hints))
+
+	return strings.Join(lines, "\n")
 }
 
 // extractPromptLines extracts the last meaningful lines from prompt content.
@@ -1985,6 +2016,9 @@ func (m *AppModel) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.replyTaskID = task.ID
 				m.replyInput.SetValue("")
 				m.replyInput.Focus()
+				// Capture the tmux pane content so the user can see the prompt/options
+				paneContent := executor.CapturePaneContent(task.ID, 20)
+				m.replyPaneContent = extractPromptLines(paneContent, m.width-6)
 				return m, textinput.Blink
 			}
 			// Allow retry for blocked, done, or backlog tasks
@@ -2104,6 +2138,7 @@ func (m *AppModel) updateReplyMode(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Cancel reply mode
 		m.replyActive = false
 		m.replyTaskID = 0
+		m.replyPaneContent = nil
 		m.replyInput.SetValue("")
 		m.replyInput.Blur()
 		return m, nil
@@ -2115,12 +2150,14 @@ func (m *AppModel) updateReplyMode(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Empty reply - cancel
 			m.replyActive = false
 			m.replyTaskID = 0
+			m.replyPaneContent = nil
 			m.replyInput.Blur()
 			return m, nil
 		}
 		taskID := m.replyTaskID
 		m.replyActive = false
 		m.replyTaskID = 0
+		m.replyPaneContent = nil
 		m.replyInput.SetValue("")
 		m.replyInput.Blur()
 		return m, m.sendTextToExecutor(taskID, text)
@@ -4164,7 +4201,7 @@ func (m *AppModel) latestPermissionPrompt(taskID int64) string {
 	// A pending prompt is only valid if no subsequent log indicates resolution.
 	for _, l := range logs {
 		switch {
-		case l.LineType == "system" && strings.HasPrefix(l.Content, "Waiting for permission"):
+		case l.LineType == "system" && (strings.HasPrefix(l.Content, "Waiting for permission") || l.Content == "Waiting for user input"):
 			return l.Content
 		case l.LineType == "system" && (l.Content == "Agent resumed working" || l.Content == "Claude resumed working"):
 			return "" // prompt was resolved
@@ -4188,11 +4225,16 @@ func (m *AppModel) detectPermissionPrompt(taskID int64) bool {
 		return false
 	}
 	m.tasksNeedingInput[taskID] = true
-	displayPrompt := prompt
-	if strings.HasPrefix(prompt, "Waiting for permission: ") {
-		displayPrompt = strings.TrimPrefix(prompt, "Waiting for permission: ")
+	paneContent := executor.CapturePaneContent(taskID, 15)
+	if paneContent != "" {
+		m.executorPrompts[taskID] = paneContent
+	} else {
+		displayPrompt := prompt
+		if strings.HasPrefix(prompt, "Waiting for permission: ") {
+			displayPrompt = strings.TrimPrefix(prompt, "Waiting for permission: ")
+		}
+		m.executorPrompts[taskID] = displayPrompt
 	}
-	m.executorPrompts[taskID] = displayPrompt
 	m.kanban.SetTasksNeedingInput(m.tasksNeedingInput)
 	return true
 }
