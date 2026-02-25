@@ -1175,12 +1175,22 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 							m.notifyUntil = time.Now().Add(3 * time.Second)
 							m.notifyTaskID = event.TaskID
 						}
-						// Re-validate cached prompt state on any status change
+						// Sync cached prompt state on any status change.
+						// Re-validate existing entries, and detect new prompts for
+						// newly-blocked tasks so the user can approve/deny immediately
+						// without waiting for the next loadTasks poll.
 						if m.tasksNeedingInput[event.TaskID] {
 							if m.latestPermissionPrompt(event.TaskID) == "" {
 								delete(m.tasksNeedingInput, event.TaskID)
 								delete(m.executorPrompts, event.TaskID)
 							}
+						} else if prompt := m.latestPermissionPrompt(event.TaskID); prompt != "" {
+							m.tasksNeedingInput[event.TaskID] = true
+							displayPrompt := prompt
+							if strings.HasPrefix(prompt, "Waiting for permission: ") {
+								displayPrompt = strings.TrimPrefix(prompt, "Waiting for permission: ")
+							}
+							m.executorPrompts[event.TaskID] = displayPrompt
 						}
 						m.prevStatuses[event.TaskID] = event.Task.Status
 					}
@@ -1995,13 +2005,17 @@ func (m *AppModel) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case key.Matches(msg, m.keys.ApprovePrompt):
-		if task := m.kanban.SelectedTask(); task != nil && m.tasksNeedingInput[task.ID] {
-			return m, m.approveExecutorPrompt(task.ID)
+		if task := m.kanban.SelectedTask(); task != nil {
+			if m.tasksNeedingInput[task.ID] || m.detectPermissionPrompt(task.ID) {
+				return m, m.approveExecutorPrompt(task.ID)
+			}
 		}
 
 	case key.Matches(msg, m.keys.DenyPrompt):
-		if task := m.kanban.SelectedTask(); task != nil && m.tasksNeedingInput[task.ID] {
-			return m, m.denyExecutorPrompt(task.ID)
+		if task := m.kanban.SelectedTask(); task != nil {
+			if m.tasksNeedingInput[task.ID] || m.detectPermissionPrompt(task.ID) {
+				return m, m.denyExecutorPrompt(task.ID)
+			}
 		}
 
 	case key.Matches(msg, m.keys.Filter):
@@ -4044,6 +4058,26 @@ func (m *AppModel) latestPermissionPrompt(taskID int64) string {
 		}
 	}
 	return ""
+}
+
+// detectPermissionPrompt does a live DB check for a pending permission prompt
+// on the given task. If found, it populates tasksNeedingInput and executorPrompts
+// so the caller can proceed with approve/deny. This is a fallback for when the
+// poll-based detection hasn't caught up yet (e.g. a real-time event showed the
+// task as blocked before loadTasks detected the permission prompt).
+func (m *AppModel) detectPermissionPrompt(taskID int64) bool {
+	prompt := m.latestPermissionPrompt(taskID)
+	if prompt == "" {
+		return false
+	}
+	m.tasksNeedingInput[taskID] = true
+	displayPrompt := prompt
+	if strings.HasPrefix(prompt, "Waiting for permission: ") {
+		displayPrompt = strings.TrimPrefix(prompt, "Waiting for permission: ")
+	}
+	m.executorPrompts[taskID] = displayPrompt
+	m.kanban.SetTasksNeedingInput(m.tasksNeedingInput)
+	return true
 }
 
 // taskMovedMsg is returned when a task is moved to a different project.
