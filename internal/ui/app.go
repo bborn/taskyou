@@ -469,6 +469,11 @@ type AppModel struct {
 	// AI command service for natural language command interpretation
 	aiCommandService *ai.CommandService
 
+	// Reply input for executor prompts (multiple choice, free-form text)
+	replyInput    textinput.Model
+	replyActive   bool  // Whether reply mode is active (typing a response)
+	replyTaskID   int64 // Task ID the reply is for
+
 	// Filter state
 	filterInput        textinput.Model
 	filterActive       bool   // Whether filter mode is active (typing in filter)
@@ -561,6 +566,11 @@ func NewAppModel(database *db.DB, exec *executor.Executor, workingDir string, ve
 	watcher, _ := fsnotify.NewWatcher()
 	dbChangeCh := make(chan struct{}, 1)
 
+	// Setup reply input for executor prompts
+	replyInput := textinput.New()
+	replyInput.Placeholder = "Type response and press enter..."
+	replyInput.CharLimit = 200
+
 	// Setup filter input
 	filterInput := textinput.New()
 	filterInput.Placeholder = "Filter text, #id, or [project..."
@@ -599,6 +609,7 @@ func NewAppModel(database *db.DB, exec *executor.Executor, workingDir string, ve
 		watcher:            watcher,
 		dbChangeCh:         dbChangeCh,
 		prCache:            github.NewPRCache(),
+		replyInput:         replyInput,
 		filterInput:        filterInput,
 		filterText:         "",
 		filterAutocomplete: filterAutocomplete,
@@ -704,6 +715,11 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// Handle detail view feedback mode (needs all message types for text input)
 	if m.currentView == ViewDetail && m.detailView != nil && m.detailView.InFeedbackMode() {
 		return m.updateDetail(msg)
+	}
+
+	// Handle reply input mode (needs all message types for text input)
+	if m.currentView == ViewDashboard && m.replyActive {
+		return m.updateReplyMode(msg)
 	}
 
 	// Handle filter input mode (needs all message types for text input)
@@ -1139,6 +1155,8 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			action := "Approved"
 			if msg.action == "deny" {
 				action = "Denied"
+			} else if msg.action == "reply" {
+				action = "Replied to"
 			}
 			m.notification = fmt.Sprintf("%s %s executor prompt for task #%d", IconDone(), action, msg.taskID)
 			m.notifyUntil = time.Now().Add(3 * time.Second)
@@ -1689,8 +1707,13 @@ func (m *AppModel) renderHelp() string {
 
 // renderExecutorPromptPreview renders a compact preview of the executor's current prompt
 // for a blocked task that needs input. Shows the permission message from the hook log
-// with approve/deny hints.
+// with approve/deny/reply hints.
 func (m *AppModel) renderExecutorPromptPreview(task *db.Task) string {
+	// If reply mode is active for this task, show the reply input
+	if m.replyActive && m.replyTaskID == task.ID {
+		return m.renderReplyInput(task)
+	}
+
 	prompt := m.executorPrompts[task.ID]
 
 	// Extract the last meaningful lines from the captured pane content
@@ -1698,7 +1721,7 @@ func (m *AppModel) renderExecutorPromptPreview(task *db.Task) string {
 
 	// Dim style for the action hints
 	hintStyle := lipgloss.NewStyle().Foreground(ColorMuted)
-	hints := hintStyle.Render("y approve  N deny  enter detail")
+	hints := hintStyle.Render("y approve  N deny  r reply  enter detail")
 
 	// Warning style for the task reference
 	warnStyle := lipgloss.NewStyle().Foreground(ColorWarning)
@@ -1750,6 +1773,21 @@ func (m *AppModel) renderExecutorPromptPreview(task *db.Task) string {
 	}
 
 	return barStyle.Render(line)
+}
+
+// renderReplyInput renders the reply text input for a blocked task.
+func (m *AppModel) renderReplyInput(task *db.Task) string {
+	warnStyle := lipgloss.NewStyle().Foreground(ColorWarning)
+	hintStyle := lipgloss.NewStyle().Foreground(ColorMuted)
+
+	label := warnStyle.Render(fmt.Sprintf("#%d reply: ", task.ID))
+	hints := hintStyle.Render("  enter send  esc cancel")
+
+	barStyle := lipgloss.NewStyle().
+		Width(m.width).
+		Padding(0, 1)
+
+	return barStyle.Render(label + m.replyInput.View() + hints)
 }
 
 // extractPromptLines extracts the last meaningful lines from prompt content.
@@ -1941,6 +1979,14 @@ func (m *AppModel) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case key.Matches(msg, m.keys.Retry):
 		if task := m.kanban.SelectedTask(); task != nil {
+			// If task needs input, enter reply mode instead of retry
+			if m.tasksNeedingInput[task.ID] || m.detectPermissionPrompt(task.ID) {
+				m.replyActive = true
+				m.replyTaskID = task.ID
+				m.replyInput.SetValue("")
+				m.replyInput.Focus()
+				return m, textinput.Blink
+			}
 			// Allow retry for blocked, done, or backlog tasks
 			if task.Status == db.StatusBlocked || task.Status == db.StatusDone ||
 				task.Status == db.StatusBacklog {
@@ -2041,6 +2087,49 @@ func (m *AppModel) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	return m, nil
+}
+
+// updateReplyMode handles input when reply mode is active (typing a response to an executor prompt).
+func (m *AppModel) updateReplyMode(msg tea.Msg) (tea.Model, tea.Cmd) {
+	keyMsg, ok := msg.(tea.KeyMsg)
+	if !ok {
+		// Pass non-key messages (like blink) to the text input
+		var cmd tea.Cmd
+		m.replyInput, cmd = m.replyInput.Update(msg)
+		return m, cmd
+	}
+
+	switch keyMsg.String() {
+	case "esc":
+		// Cancel reply mode
+		m.replyActive = false
+		m.replyTaskID = 0
+		m.replyInput.SetValue("")
+		m.replyInput.Blur()
+		return m, nil
+
+	case "enter":
+		// Send the reply text to the executor
+		text := strings.TrimSpace(m.replyInput.Value())
+		if text == "" {
+			// Empty reply - cancel
+			m.replyActive = false
+			m.replyTaskID = 0
+			m.replyInput.Blur()
+			return m, nil
+		}
+		taskID := m.replyTaskID
+		m.replyActive = false
+		m.replyTaskID = 0
+		m.replyInput.SetValue("")
+		m.replyInput.Blur()
+		return m, m.sendTextToExecutor(taskID, text)
+	}
+
+	// Pass all other keys to the text input
+	var cmd tea.Cmd
+	m.replyInput, cmd = m.replyInput.Update(msg)
+	return m, cmd
 }
 
 // updateFilterMode handles input when filter mode is active.
@@ -4018,10 +4107,10 @@ func (m *AppModel) syncSpotlight(task *db.Task) tea.Cmd {
 		return spotlightMsg{action: "sync", message: result, err: err}
 	}
 }
-// executorRespondedMsg is sent after approve/deny is sent to the executor.
+// executorRespondedMsg is sent after approve/deny/reply is sent to the executor.
 type executorRespondedMsg struct {
 	taskID int64
-	action string // "approve" or "deny"
+	action string // "approve", "deny", or "reply"
 	err    error
 }
 
@@ -4049,6 +4138,19 @@ func (m *AppModel) denyExecutorPrompt(taskID int64) tea.Cmd {
 	}
 }
 
+// sendTextToExecutor sends arbitrary text followed by Enter to the executor's tmux pane.
+// Used for multiple choice responses (e.g. "1", "2", "3") and free-form text input.
+func (m *AppModel) sendTextToExecutor(taskID int64, text string) tea.Cmd {
+	database := m.db
+	return func() tea.Msg {
+		err := executor.SendKeyToPane(taskID, text, "Enter")
+		if err == nil {
+			database.AppendTaskLog(taskID, "user", fmt.Sprintf("Replied from kanban: %s", text))
+		}
+		return executorRespondedMsg{taskID: taskID, action: "reply", err: err}
+	}
+}
+
 // latestPermissionPrompt checks whether a task has a pending permission prompt
 // by reading recent DB logs written by the notification hook. Returns the prompt
 // message if still pending, or "" if resolved (e.g. "Agent resumed working",
@@ -4066,7 +4168,7 @@ func (m *AppModel) latestPermissionPrompt(taskID int64) string {
 			return l.Content
 		case l.LineType == "system" && (l.Content == "Agent resumed working" || l.Content == "Claude resumed working"):
 			return "" // prompt was resolved
-		case l.LineType == "user" && (strings.HasPrefix(l.Content, "Approved") || strings.HasPrefix(l.Content, "Denied")):
+		case l.LineType == "user" && (strings.HasPrefix(l.Content, "Approved") || strings.HasPrefix(l.Content, "Denied") || strings.HasPrefix(l.Content, "Replied")):
 			return "" // user already responded
 		case l.LineType == "tool":
 			return "" // a tool ran after the permission prompt, so it was resolved
