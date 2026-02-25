@@ -832,7 +832,13 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				continue
 			}
 			if m.tasksNeedingInput[t.ID] {
-				continue // already detected, cleared by executorRespondedMsg or next status change
+				// Re-validate: if task is no longer blocked, the user provided input
+				// (e.g., from the detail view tmux pane). Also re-check permission prompts.
+				if t.Status != db.StatusBlocked && m.latestPermissionPrompt(t.ID) == "" {
+					delete(m.tasksNeedingInput, t.ID)
+					delete(m.executorPrompts, t.ID)
+				}
+				continue
 			}
 			if prompt := m.latestPermissionPrompt(t.ID); prompt != "" {
 				m.tasksNeedingInput[t.ID] = true
@@ -3388,6 +3394,15 @@ func (m *AppModel) updateRetry(msg tea.Msg) (tea.Model, tea.Cmd) {
 		feedback := m.retryView.GetFeedback()
 		attachments := m.retryView.GetAttachments()
 		taskID := m.retryView.task.ID
+		// Clear kanban notification immediately for instant UI feedback
+		delete(m.tasksNeedingInput, taskID)
+		delete(m.executorPrompts, taskID)
+		m.kanban.SetTasksNeedingInput(m.tasksNeedingInput)
+		// Clear the notification banner if it's for this task
+		if m.notifyTaskID == taskID {
+			m.notification = ""
+			m.notifyTaskID = 0
+		}
 		m.currentView = ViewDashboard
 		m.retryView = nil
 		if m.detailView != nil {
