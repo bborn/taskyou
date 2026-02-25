@@ -1281,13 +1281,14 @@ func TestLatestPermissionPrompt_UserInputMessage_Ignored(t *testing.T) {
 		t.Fatalf("Failed to create task: %v", err)
 	}
 
-	// "Waiting for user input" is idle waiting, not an actionable prompt —
-	// should NOT trigger the status line / prompt preview.
+	// "Waiting for user input" means the executor is waiting for input (e.g.
+	// multiple choice, free text) — should trigger the status line / prompt preview
+	// so the user can reply from the kanban view.
 	database.AppendTaskLog(task.ID, "system", "Waiting for user input")
 
 	result := m.latestPermissionPrompt(task.ID)
-	if result != "" {
-		t.Errorf("expected empty string for idle user input, got '%s'", result)
+	if result != "Waiting for user input" {
+		t.Errorf("expected 'Waiting for user input', got '%s'", result)
 	}
 }
 
@@ -1434,8 +1435,8 @@ func TestDetectPermissionPrompt_NoPrompt(t *testing.T) {
 		t.Fatalf("Failed to create task: %v", err)
 	}
 
-	// Log "Waiting for user input" (not a permission prompt)
-	database.AppendTaskLog(task.ID, "system", "Waiting for user input")
+	// Log a non-prompt system message (task just started, not waiting for input)
+	database.AppendTaskLog(task.ID, "system", "Task started")
 
 	m := &AppModel{
 		db:                database,
@@ -1445,10 +1446,10 @@ func TestDetectPermissionPrompt_NoPrompt(t *testing.T) {
 	}
 
 	if m.detectPermissionPrompt(task.ID) {
-		t.Error("detectPermissionPrompt should return false for non-permission prompts")
+		t.Error("detectPermissionPrompt should return false when no input prompt exists")
 	}
 	if m.tasksNeedingInput[task.ID] {
-		t.Error("tasksNeedingInput should not be set for non-permission prompts")
+		t.Error("tasksNeedingInput should not be set when no input prompt exists")
 	}
 }
 
@@ -1907,22 +1908,29 @@ func TestRenderExecutorPromptPreview_ReplyInputActive(t *testing.T) {
 	replyInput.Focus()
 
 	m := &AppModel{
-		width:           100,
-		height:          50,
-		executorPrompts: map[int64]string{1: "Choose option 1, 2, or 3"},
-		replyActive:     true,
-		replyTaskID:     1,
-		replyInput:      replyInput,
+		width:            100,
+		height:           50,
+		executorPrompts:  map[int64]string{1: "Choose option 1, 2, or 3"},
+		replyActive:      true,
+		replyTaskID:      1,
+		replyInput:       replyInput,
+		replyPaneContent: []string{"Select an option:", "1) First option", "2) Second option"},
 	}
 
 	task := &db.Task{ID: 1, Title: "Test task"}
 	rendered := m.renderExecutorPromptPreview(task)
 
-	if !strings.Contains(rendered, "#1 reply:") {
+	if !strings.Contains(rendered, "reply:") {
 		t.Error("prompt preview should show reply input label when reply mode is active")
 	}
 	if !strings.Contains(rendered, "esc cancel") {
 		t.Error("prompt preview should show cancel hint when reply mode is active")
+	}
+	if !strings.Contains(rendered, "#1") {
+		t.Error("prompt preview should show task ID when reply mode is active")
+	}
+	if !strings.Contains(rendered, "First option") {
+		t.Error("prompt preview should show captured pane content with options")
 	}
 }
 
