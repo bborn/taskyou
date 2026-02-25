@@ -7,6 +7,7 @@ import (
 
 	"github.com/bborn/workflow/internal/config"
 	"github.com/bborn/workflow/internal/db"
+	"github.com/bborn/workflow/internal/executor"
 )
 
 func TestDefaultKeyMap(t *testing.T) {
@@ -1370,6 +1371,130 @@ func TestExecutorRespondedClearsPromptState(t *testing.T) {
 	}
 	if _, exists := m.executorPrompts[42]; exists {
 		t.Error("executorPrompts[42] should be cleared after approve")
+	}
+}
+
+// TestDetectPermissionPrompt_FallbackDetection verifies that detectPermissionPrompt
+// does a live DB check and populates tasksNeedingInput when a permission prompt
+// exists but hasn't been detected by the poll yet.
+func TestDetectPermissionPrompt_FallbackDetection(t *testing.T) {
+	database, err := db.Open(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to create test database: %v", err)
+	}
+	defer database.Close()
+
+	task := &db.Task{Title: "Test task", Status: db.StatusBlocked}
+	if err := database.CreateTask(task); err != nil {
+		t.Fatalf("Failed to create task: %v", err)
+	}
+
+	// Log a permission prompt (simulating the notification hook)
+	database.AppendTaskLog(task.ID, "system", "Waiting for permission: Edit(file.go)")
+
+	m := &AppModel{
+		db:                database,
+		tasksNeedingInput: make(map[int64]bool),
+		executorPrompts:   make(map[int64]string),
+		kanban:            NewKanbanBoard(100, 50),
+	}
+
+	// tasksNeedingInput is empty (poll hasn't detected the prompt yet)
+	if m.tasksNeedingInput[task.ID] {
+		t.Fatal("precondition: tasksNeedingInput should be empty before detect")
+	}
+
+	// detectPermissionPrompt should find the prompt via live DB check
+	if !m.detectPermissionPrompt(task.ID) {
+		t.Error("detectPermissionPrompt should return true when a permission prompt exists")
+	}
+
+	// Should now be populated
+	if !m.tasksNeedingInput[task.ID] {
+		t.Error("tasksNeedingInput should be set after detectPermissionPrompt")
+	}
+	if m.executorPrompts[task.ID] != "Edit(file.go)" {
+		t.Errorf("expected executor prompt 'Edit(file.go)', got '%s'", m.executorPrompts[task.ID])
+	}
+}
+
+// TestDetectPermissionPrompt_NoPrompt verifies that detectPermissionPrompt
+// returns false when there is no pending permission prompt.
+func TestDetectPermissionPrompt_NoPrompt(t *testing.T) {
+	database, err := db.Open(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to create test database: %v", err)
+	}
+	defer database.Close()
+
+	task := &db.Task{Title: "Test task", Status: db.StatusBlocked}
+	if err := database.CreateTask(task); err != nil {
+		t.Fatalf("Failed to create task: %v", err)
+	}
+
+	// Log "Waiting for user input" (not a permission prompt)
+	database.AppendTaskLog(task.ID, "system", "Waiting for user input")
+
+	m := &AppModel{
+		db:                database,
+		tasksNeedingInput: make(map[int64]bool),
+		executorPrompts:   make(map[int64]string),
+		kanban:            NewKanbanBoard(100, 50),
+	}
+
+	if m.detectPermissionPrompt(task.ID) {
+		t.Error("detectPermissionPrompt should return false for non-permission prompts")
+	}
+	if m.tasksNeedingInput[task.ID] {
+		t.Error("tasksNeedingInput should not be set for non-permission prompts")
+	}
+}
+
+// TestTaskEventDetectsPermissionPrompt verifies that when a real-time task event
+// transitions a task to blocked, the handler detects pending permission prompts
+// and populates tasksNeedingInput immediately (without waiting for the next poll).
+func TestTaskEventDetectsPermissionPrompt(t *testing.T) {
+	database, err := db.Open(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to create test database: %v", err)
+	}
+	defer database.Close()
+
+	task := &db.Task{Title: "Test task", Status: db.StatusBlocked}
+	if err := database.CreateTask(task); err != nil {
+		t.Fatalf("Failed to create task: %v", err)
+	}
+
+	// Log a permission prompt
+	database.AppendTaskLog(task.ID, "system", "Waiting for permission: Bash(rm -rf /)")
+
+	m := &AppModel{
+		width:             100,
+		height:            50,
+		currentView:       ViewDashboard,
+		db:                database,
+		keys:              DefaultKeyMap(),
+		tasks:             []*db.Task{{ID: task.ID, Title: "Test task", Status: db.StatusProcessing}},
+		tasksNeedingInput: make(map[int64]bool),
+		executorPrompts:   make(map[int64]string),
+		kanban:            NewKanbanBoard(100, 50),
+		prevStatuses:      map[int64]string{task.ID: db.StatusProcessing},
+	}
+
+	// Simulate a task event transitioning to blocked
+	event := taskEventMsg{event: executor.TaskEvent{
+		Type:   "status_changed",
+		TaskID: task.ID,
+		Task:   task,
+	}}
+	m.Update(event)
+
+	// The handler should have detected the permission prompt
+	if !m.tasksNeedingInput[task.ID] {
+		t.Error("tasksNeedingInput should be set when task event transitions to blocked with permission prompt")
+	}
+	if m.executorPrompts[task.ID] != "Bash(rm -rf /)" {
+		t.Errorf("expected executor prompt 'Bash(rm -rf /)', got '%s'", m.executorPrompts[task.ID])
 	}
 }
 
