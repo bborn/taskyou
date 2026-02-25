@@ -1498,6 +1498,84 @@ func TestTaskEventDetectsPermissionPrompt(t *testing.T) {
 	}
 }
 
+// TestTaskSyncClearsNeedsInputWhenNoLongerBlocked verifies that the task sync
+// loop clears tasksNeedingInput when a task is no longer blocked (e.g., the user
+// provided input from the detail view tmux pane).
+func TestTaskSyncClearsNeedsInputWhenNoLongerBlocked(t *testing.T) {
+	database, err := db.Open(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to create test database: %v", err)
+	}
+	defer database.Close()
+
+	task := &db.Task{Title: "Test task", Status: db.StatusProcessing}
+	if err := database.CreateTask(task); err != nil {
+		t.Fatalf("Failed to create task: %v", err)
+	}
+
+	m := &AppModel{
+		width:             100,
+		height:            50,
+		currentView:       ViewDashboard,
+		keys:              DefaultKeyMap(),
+		tasks:             []*db.Task{task},
+		tasksNeedingInput: map[int64]bool{task.ID: true},
+		executorPrompts:   map[int64]string{task.ID: "What should I do?"},
+		kanban:            NewKanbanBoard(100, 50),
+		prevStatuses:      map[int64]string{task.ID: db.StatusBlocked},
+		db:                database,
+		notification:      "⚠ Task #1 needs input",
+		notifyTaskID:      task.ID,
+	}
+	m.kanban.SetTasks(m.tasks)
+
+	// Simulate tasksLoadedMsg with the task now in processing status
+	msg := tasksLoadedMsg{tasks: []*db.Task{task}}
+	m.Update(msg)
+
+	if m.tasksNeedingInput[task.ID] {
+		t.Error("tasksNeedingInput should be cleared when task is no longer blocked")
+	}
+	if _, exists := m.executorPrompts[task.ID]; exists {
+		t.Error("executorPrompts should be cleared when task is no longer blocked")
+	}
+}
+
+// TestRetrySubmitClearsKanbanNotification verifies that submitting the retry
+// form clears both the tasksNeedingInput flag and the notification banner.
+func TestRetrySubmitClearsKanbanNotification(t *testing.T) {
+	task := &db.Task{ID: 42, Title: "Test task", Status: db.StatusBlocked}
+
+	m := &AppModel{
+		width:             100,
+		height:            50,
+		currentView:       ViewRetry,
+		keys:              DefaultKeyMap(),
+		tasksNeedingInput: map[int64]bool{42: true},
+		executorPrompts:   map[int64]string{42: "What should I do?"},
+		kanban:            NewKanbanBoard(100, 50),
+		prevStatuses:      make(map[int64]string),
+		notification:      "⚠ Task #42 needs input: Test task (g to jump)",
+		notifyTaskID:      42,
+		retryView:         &RetryModel{task: task, submitted: true},
+	}
+
+	m.Update(nil)
+
+	if m.tasksNeedingInput[42] {
+		t.Error("tasksNeedingInput[42] should be cleared after retry submit")
+	}
+	if _, exists := m.executorPrompts[42]; exists {
+		t.Error("executorPrompts[42] should be cleared after retry submit")
+	}
+	if m.notification != "" {
+		t.Errorf("notification should be cleared after retry submit, got %q", m.notification)
+	}
+	if m.notifyTaskID != 0 {
+		t.Error("notifyTaskID should be cleared after retry submit")
+	}
+}
+
 // TestFilterChipDeletion tests the chip deletion feature in filter input.
 func TestFilterChipDeletion(t *testing.T) {
 	tests := []struct {
