@@ -481,6 +481,11 @@ func setupAdapter(cfg *Config, logger *slog.Logger) (adapter.Adapter, error) {
 			return nil, fmt.Errorf("Gmail config required")
 		}
 		return adapter.NewGmailAdapter(cfg.Adapter.Gmail, logger), nil
+	case "twilio":
+		if cfg.Adapter.Twilio == nil {
+			return nil, fmt.Errorf("Twilio config required")
+		}
+		return adapter.NewTwilioAdapter(cfg.Adapter.Twilio, logger), nil
 	default:
 		return nil, fmt.Errorf("unsupported adapter type: %s", cfg.Adapter.Type)
 	}

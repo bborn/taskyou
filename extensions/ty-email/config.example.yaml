@@ -3,7 +3,7 @@
 
 # Email input adapter
 adapter:
-  type: imap  # Options: imap, gmail, webhook
+  type: imap  # Options: imap, gmail, webhook, twilio
 
   # IMAP configuration (for Fastmail, ProtonMail, etc.)
   imap:
@@ -28,7 +28,17 @@ adapter:
   #   path: /webhook/email
   #   secret: your-webhook-secret
 
-# SMTP for sending replies
+  # Twilio SMS configuration
+  # twilio:
+  #   account_sid_cmd: "op read 'op://Private/Twilio/account_sid'"
+  #   auth_token_cmd: "op read 'op://Private/Twilio/auth_token'"
+  #   phone_number: "+15551234567"  # Your Twilio phone number
+  #   webhook_listen: ":8080"       # Local server for inbound SMS
+  #   webhook_path: "/sms"          # Webhook endpoint path
+  #   validate_hmac: true           # Validate Twilio request signatures
+  #   webhook_url: "https://example.com/sms"  # Public URL (for signature validation)
+
+# SMTP for sending replies (not needed for Twilio adapter)
 smtp:
   server: smtp.fastmail.com:587
   username: you@yourdomain.com
