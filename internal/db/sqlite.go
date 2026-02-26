@@ -210,6 +210,19 @@ func (db *DB) migrate() error {
 		// Used by GetConversationHistoryLogs and HasContinuationMarker
 		`CREATE INDEX IF NOT EXISTS idx_task_logs_task_line_type ON task_logs(task_id, line_type)`,
 
+		// Task panes table for tracking multiple tmux panes per task
+		`CREATE TABLE IF NOT EXISTS task_panes (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+			pane_id TEXT NOT NULL,
+			pane_type TEXT NOT NULL,
+			title TEXT DEFAULT '',
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+		)`,
+
+		`CREATE INDEX IF NOT EXISTS idx_task_panes_task_id ON task_panes(task_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_task_panes_pane_id ON task_panes(pane_id)`,
+
 	}
 
 	for _, m := range migrations {
