@@ -1530,23 +1530,25 @@ func (m *AppModel) viewDashboard() string {
 		panePreviewHeight = lipgloss.Height(panePreview)
 	}
 
-	// Calculate heights dynamically
-	headerHeight := len(headerParts)
+	// Build the header first so we can measure its actual rendered height
+	header := ""
+	headerHeight := 0
+	if len(headerParts) > 0 {
+		header = lipgloss.JoinVertical(lipgloss.Left, headerParts...)
+		headerHeight = lipgloss.Height(header)
+	}
 
 	// Render help to measure its actual height
 	helpView := m.renderHelp()
 	helpHeight := lipgloss.Height(helpView)
 
 	kanbanHeight := m.height - headerHeight - filterBarHeight - helpHeight - panePreviewHeight
+	if kanbanHeight < 10 {
+		kanbanHeight = 10
+	}
 
 	// Update kanban size
 	m.kanban.SetSize(m.width, kanbanHeight)
-
-	// Build the view
-	header := ""
-	if len(headerParts) > 0 {
-		header = lipgloss.JoinVertical(lipgloss.Left, headerParts...)
-	}
 
 	var contentParts []string
 	if header != "" {
