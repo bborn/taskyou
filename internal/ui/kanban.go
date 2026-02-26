@@ -351,8 +351,14 @@ func splitPinnedTasks(tasks []*db.Task) (pinned []*db.Task, unpinned []*db.Task)
 
 // SetSize updates the board dimensions.
 func (k *KanbanBoard) SetSize(width, height int) {
+	heightChanged := k.height != height
 	k.width = width
 	k.height = height
+	// When height changes (e.g. quickview appearing/disappearing),
+	// recalculate scroll offsets so the selected task stays visible
+	if heightChanged {
+		k.ensureSelectedVisible()
+	}
 }
 
 // MoveLeft moves selection to the left column, skipping collapsed columns.
@@ -1468,8 +1474,8 @@ func (k *KanbanBoard) handleClickDesktop(x, y int) *db.Task {
 
 	// Calculate which task was clicked
 	col := k.columns[colIdx]
-	colHeight := k.height
-	maxTasks := (colHeight - 3) / taskCardHeight // -3 for header bar and minimal padding
+	colHeight := k.height - 2 // -2 for column borders (top + bottom)
+	maxTasks := (colHeight - 3) / taskCardHeight // -3 for header bar and scroll indicators
 	if maxTasks < 1 {
 		maxTasks = 1
 	}
