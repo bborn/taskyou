@@ -1119,40 +1119,35 @@ func TestExtractPromptLinesContent(t *testing.T) {
 	}
 }
 
-func TestRenderPanePreview_NoInput(t *testing.T) {
+func TestRenderExecutorPromptPreview_NoPrompt(t *testing.T) {
 	m := &AppModel{
-		width:             100,
-		executorPrompts:   make(map[int64]string),
-		tasksNeedingInput: make(map[int64]bool),
+		width:           100,
+		executorPrompts: make(map[int64]string),
 	}
-	task := &db.Task{ID: 42, Title: "Test task", Status: db.StatusProcessing}
-	result := m.renderPanePreview(task)
+	task := &db.Task{ID: 42, Title: "Test task"}
+	result := m.renderExecutorPromptPreview(task)
 	if result == "" {
-		t.Error("expected non-empty result even with no pane content")
+		t.Error("expected non-empty result even with no prompt")
 	}
-	// Should contain the task ID and input hint
+	// Should contain the task ID and hint text
 	if !containsText(result, "#42") {
 		t.Error("expected result to contain task ID")
 	}
-	if !containsText(result, "tab input") {
-		t.Error("expected result to contain 'tab input' hint")
-	}
 }
 
-func TestRenderPanePreview_NeedsInput(t *testing.T) {
+func TestRenderExecutorPromptPreview_WithPrompt(t *testing.T) {
 	m := &AppModel{
 		width: 100,
 		executorPrompts: map[int64]string{
 			42: "Allow Bash(npm test)?",
 		},
-		tasksNeedingInput: map[int64]bool{42: true},
 	}
-	task := &db.Task{ID: 42, Title: "Test task", Status: db.StatusBlocked}
-	result := m.renderPanePreview(task)
+	task := &db.Task{ID: 42, Title: "Test task"}
+	result := m.renderExecutorPromptPreview(task)
 	if result == "" {
 		t.Error("expected non-empty result")
 	}
-	// Should contain approve/deny hints when task needs input
+	// Should contain the prompt content and approve/deny hints
 	if !containsText(result, "approve") || !containsText(result, "deny") {
 		t.Error("expected result to contain approve/deny hints")
 	}
@@ -1202,7 +1197,7 @@ func TestLatestPermissionPrompt_PermissionMessage(t *testing.T) {
 	database.AppendTaskLog(task.ID, "system", "Waiting for permission: Edit(src/models/offer.rb)")
 
 	// Should return the full permission message
-	result := m.latestChoicePrompt(task.ID)
+	result := m.latestPermissionPrompt(task.ID)
 	if result != "Waiting for permission: Edit(src/models/offer.rb)" {
 		t.Errorf("expected 'Waiting for permission: Edit(src/models/offer.rb)', got '%s'", result)
 	}
@@ -1225,7 +1220,7 @@ func TestLatestPermissionPrompt_GenericWaiting(t *testing.T) {
 	// Log a generic waiting message (no specific message from hook)
 	database.AppendTaskLog(task.ID, "system", "Waiting for permission")
 
-	result := m.latestChoicePrompt(task.ID)
+	result := m.latestPermissionPrompt(task.ID)
 	if result != "Waiting for permission" {
 		t.Errorf("expected 'Waiting for permission', got '%s'", result)
 	}
@@ -1250,7 +1245,7 @@ func TestLatestPermissionPrompt_ResumedClears(t *testing.T) {
 	database.AppendTaskLog(task.ID, "system", "Agent resumed working")
 
 	// Should return empty since agent resumed
-	result := m.latestChoicePrompt(task.ID)
+	result := m.latestPermissionPrompt(task.ID)
 	if result != "" {
 		t.Errorf("expected empty string after resume, got '%s'", result)
 	}
@@ -1266,13 +1261,13 @@ func TestLatestPermissionPrompt_NoLogs(t *testing.T) {
 	m := &AppModel{db: database}
 
 	// No task or logs - should return empty
-	result := m.latestChoicePrompt(999)
+	result := m.latestPermissionPrompt(999)
 	if result != "" {
 		t.Errorf("expected empty string for nonexistent task, got '%s'", result)
 	}
 }
 
-func TestLatestChoicePrompt_UserInputMessage_NotMatched(t *testing.T) {
+func TestLatestPermissionPrompt_UserInputMessage_Ignored(t *testing.T) {
 	database, err := db.Open(":memory:")
 	if err != nil {
 		t.Fatalf("Failed to create test database: %v", err)
@@ -1286,14 +1281,14 @@ func TestLatestChoicePrompt_UserInputMessage_NotMatched(t *testing.T) {
 		t.Fatalf("Failed to create task: %v", err)
 	}
 
-	// "Waiting for user input" is a generic idle/end_turn scenario — should NOT
-	// trigger the yellow highlight or choice prompt detection. Only explicit
-	// "Waiting for permission" entries are real choice prompts.
+	// "Waiting for user input" means the executor is waiting for input (e.g.
+	// multiple choice, free text) — should trigger the status line / prompt preview
+	// so the user can reply from the kanban view.
 	database.AppendTaskLog(task.ID, "system", "Waiting for user input")
 
-	result := m.latestChoicePrompt(task.ID)
-	if result != "" {
-		t.Errorf("expected empty string for 'Waiting for user input', got '%s'", result)
+	result := m.latestPermissionPrompt(task.ID)
+	if result != "Waiting for user input" {
+		t.Errorf("expected 'Waiting for user input', got '%s'", result)
 	}
 }
 
@@ -1356,7 +1351,7 @@ func TestJumpToNotificationKey_FocusExecutor(t *testing.T) {
 // TestExecutorRespondedClearsPromptState verifies that approving/denying an
 // executor prompt immediately clears both tasksNeedingInput and executorPrompts
 // for visual feedback. If the task still has a pending prompt, the
-// latestChoicePrompt catch-up loop will re-detect it on the next poll.
+// latestPermissionPrompt catch-up loop will re-detect it on the next poll.
 func TestExecutorRespondedClearsPromptState(t *testing.T) {
 	m := &AppModel{
 		width:             100,
@@ -1710,9 +1705,112 @@ func TestFilterChipDeletion(t *testing.T) {
 	}
 }
 
-// TestQuickInput_TabFocusesInput verifies pressing Tab on a task with tmux session
-// focuses the quick input field.
-func TestQuickInput_TabFocusesInput(t *testing.T) {
+// TestReplyMode_RKeyEntersReplyMode verifies pressing 'r' on a blocked task
+// with a pending prompt enters reply mode.
+func TestReplyMode_RKeyEntersReplyMode(t *testing.T) {
+	database, err := db.Open(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to create test database: %v", err)
+	}
+	defer database.Close()
+
+	task := &db.Task{Title: "Test task", Status: db.StatusBlocked}
+	if err := database.CreateTask(task); err != nil {
+		t.Fatalf("Failed to create task: %v", err)
+	}
+
+	// Log a permission prompt
+	database.AppendTaskLog(task.ID, "system", "Waiting for permission: Choose option 1, 2, or 3")
+
+	replyInput := textinput.New()
+	replyInput.CharLimit = 200
+
+	m := &AppModel{
+		width:             100,
+		height:            50,
+		currentView:       ViewDashboard,
+		db:                database,
+		keys:              DefaultKeyMap(),
+		tasks:             []*db.Task{task},
+		tasksNeedingInput: map[int64]bool{task.ID: true},
+		executorPrompts:   map[int64]string{task.ID: "Choose option 1, 2, or 3"},
+		kanban:            NewKanbanBoard(100, 50),
+		prevStatuses:      map[int64]string{task.ID: db.StatusBlocked},
+		replyInput:        replyInput,
+	}
+	m.kanban.SetTasks(m.tasks)
+	m.kanban.SelectTask(task.ID)
+
+	// Press 'r' to enter reply mode
+	result, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
+	model := result.(*AppModel)
+
+	if !model.replyActive {
+		t.Error("replyActive should be true after pressing 'r' on a blocked task")
+	}
+	if model.replyTaskID != task.ID {
+		t.Errorf("replyTaskID should be %d, got %d", task.ID, model.replyTaskID)
+	}
+}
+
+// TestReplyMode_EscCancels verifies pressing Esc in reply mode cancels it.
+func TestReplyMode_EscCancels(t *testing.T) {
+	replyInput := textinput.New()
+	replyInput.CharLimit = 200
+	replyInput.Focus()
+
+	m := &AppModel{
+		width:             100,
+		height:            50,
+		currentView:       ViewDashboard,
+		keys:              DefaultKeyMap(),
+		replyActive:       true,
+		replyTaskID:       42,
+		replyInput:        replyInput,
+		tasksNeedingInput: make(map[int64]bool),
+		executorPrompts:   make(map[int64]string),
+	}
+
+	result, _ := m.Update(tea.KeyMsg{Type: tea.KeyEscape})
+	model := result.(*AppModel)
+
+	if model.replyActive {
+		t.Error("replyActive should be false after pressing Esc")
+	}
+	if model.replyTaskID != 0 {
+		t.Error("replyTaskID should be 0 after pressing Esc")
+	}
+}
+
+// TestReplyMode_EmptyEnterCancels verifies pressing Enter with empty input cancels reply mode.
+func TestReplyMode_EmptyEnterCancels(t *testing.T) {
+	replyInput := textinput.New()
+	replyInput.CharLimit = 200
+	replyInput.Focus()
+
+	m := &AppModel{
+		width:             100,
+		height:            50,
+		currentView:       ViewDashboard,
+		keys:              DefaultKeyMap(),
+		replyActive:       true,
+		replyTaskID:       42,
+		replyInput:        replyInput,
+		tasksNeedingInput: make(map[int64]bool),
+		executorPrompts:   make(map[int64]string),
+	}
+
+	result, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model := result.(*AppModel)
+
+	if model.replyActive {
+		t.Error("replyActive should be false after pressing Enter with empty input")
+	}
+}
+
+// TestReplyMode_RKeyIgnoredWithoutBlockedTask verifies 'r' does nothing
+// when the selected task doesn't need input.
+func TestReplyMode_RKeyIgnoredWithoutBlockedTask(t *testing.T) {
 	database, err := db.Open(":memory:")
 	if err != nil {
 		t.Fatalf("Failed to create test database: %v", err)
@@ -1741,109 +1839,12 @@ func TestQuickInput_TabFocusesInput(t *testing.T) {
 		replyInput:        replyInput,
 	}
 	m.kanban.SetTasks(m.tasks)
-	m.kanban.SelectTask(task.ID)
 
-	// Press Tab to focus quick input
-	result, _ := m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	result, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
 	model := result.(*AppModel)
 
-	if !model.quickInputFocused {
-		t.Error("quickInputFocused should be true after pressing Tab on a processing task")
-	}
-}
-
-// TestQuickInput_EscUnfocuses verifies pressing Esc in quick input mode unfocuses it.
-func TestQuickInput_EscUnfocuses(t *testing.T) {
-	replyInput := textinput.New()
-	replyInput.CharLimit = 200
-	replyInput.Focus()
-
-	m := &AppModel{
-		width:             100,
-		height:            50,
-		currentView:       ViewDashboard,
-		keys:              DefaultKeyMap(),
-		quickInputFocused: true,
-		replyInput:        replyInput,
-		tasksNeedingInput: make(map[int64]bool),
-		executorPrompts:   make(map[int64]string),
-	}
-
-	result, _ := m.Update(tea.KeyMsg{Type: tea.KeyEscape})
-	model := result.(*AppModel)
-
-	if model.quickInputFocused {
-		t.Error("quickInputFocused should be false after pressing Esc")
-	}
-}
-
-// TestQuickInput_EmptyEnterUnfocuses verifies pressing Enter with empty input unfocuses.
-func TestQuickInput_EmptyEnterUnfocuses(t *testing.T) {
-	replyInput := textinput.New()
-	replyInput.CharLimit = 200
-	replyInput.Focus()
-
-	kanban := NewKanbanBoard(100, 50)
-	task := &db.Task{ID: 42, Title: "Test task", Status: db.StatusProcessing}
-	kanban.SetTasks([]*db.Task{task})
-
-	m := &AppModel{
-		width:             100,
-		height:            50,
-		currentView:       ViewDashboard,
-		keys:              DefaultKeyMap(),
-		quickInputFocused: true,
-		replyInput:        replyInput,
-		tasksNeedingInput: make(map[int64]bool),
-		executorPrompts:   make(map[int64]string),
-		kanban:            kanban,
-	}
-
-	result, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	model := result.(*AppModel)
-
-	if model.quickInputFocused {
-		t.Error("quickInputFocused should be false after pressing Enter with empty input")
-	}
-}
-
-// TestQuickInput_TabIgnoredOnBacklogTask verifies Tab does nothing
-// when the selected task is in backlog (no tmux session).
-func TestQuickInput_TabIgnoredOnBacklogTask(t *testing.T) {
-	database, err := db.Open(":memory:")
-	if err != nil {
-		t.Fatalf("Failed to create test database: %v", err)
-	}
-	defer database.Close()
-
-	task := &db.Task{Title: "Test task", Status: db.StatusBacklog}
-	if err := database.CreateTask(task); err != nil {
-		t.Fatalf("Failed to create task: %v", err)
-	}
-
-	replyInput := textinput.New()
-	replyInput.CharLimit = 200
-
-	m := &AppModel{
-		width:             100,
-		height:            50,
-		currentView:       ViewDashboard,
-		db:                database,
-		keys:              DefaultKeyMap(),
-		tasks:             []*db.Task{task},
-		tasksNeedingInput: make(map[int64]bool),
-		executorPrompts:   make(map[int64]string),
-		kanban:            NewKanbanBoard(100, 50),
-		prevStatuses:      map[int64]string{task.ID: db.StatusBacklog},
-		replyInput:        replyInput,
-	}
-	m.kanban.SetTasks(m.tasks)
-
-	result, _ := m.Update(tea.KeyMsg{Type: tea.KeyTab})
-	model := result.(*AppModel)
-
-	if model.quickInputFocused {
-		t.Error("quickInputFocused should remain false on backlog task")
+	if model.replyActive {
+		t.Error("replyActive should remain false when task doesn't need input")
 	}
 }
 
@@ -1866,7 +1867,7 @@ func TestLatestPermissionPrompt_RepliedClears(t *testing.T) {
 	database.AppendTaskLog(task.ID, "user", "Replied from kanban: 2")
 
 	m := &AppModel{db: database}
-	result := m.latestChoicePrompt(task.ID)
+	result := m.latestPermissionPrompt(task.ID)
 	if result != "" {
 		t.Errorf("expected empty string after reply, got '%s'", result)
 	}
@@ -1874,59 +1875,62 @@ func TestLatestPermissionPrompt_RepliedClears(t *testing.T) {
 
 // TestRenderExecutorPromptPreview_ShowsReplyHint verifies the prompt preview
 // includes the reply hint alongside approve/deny.
-func TestRenderPanePreview_ShowsApproveHintsWhenNeedsInput(t *testing.T) {
+func TestRenderExecutorPromptPreview_ShowsReplyHint(t *testing.T) {
 	replyInput := textinput.New()
 	replyInput.CharLimit = 200
 
 	m := &AppModel{
-		width:             100,
-		height:            50,
-		executorPrompts:   map[int64]string{1: "Choose option 1, 2, or 3"},
-		tasksNeedingInput: map[int64]bool{1: true},
-		replyInput:        replyInput,
+		width:           100,
+		height:          50,
+		executorPrompts: map[int64]string{1: "Choose option 1, 2, or 3"},
+		replyInput:      replyInput,
 	}
 
-	task := &db.Task{ID: 1, Title: "Test task", Status: db.StatusBlocked}
-	rendered := m.renderPanePreview(task)
+	task := &db.Task{ID: 1, Title: "Test task"}
+	rendered := m.renderExecutorPromptPreview(task)
 
+	if !strings.Contains(rendered, "r reply") {
+		t.Error("prompt preview should include 'r reply' hint")
+	}
 	if !strings.Contains(rendered, "y approve") {
-		t.Error("pane preview should include 'y approve' hint when task needs input")
+		t.Error("prompt preview should still include 'y approve' hint")
 	}
 	if !strings.Contains(rendered, "N deny") {
-		t.Error("pane preview should include 'N deny' hint when task needs input")
-	}
-	if !strings.Contains(rendered, "tab input") {
-		t.Error("pane preview should include 'tab input' hint")
+		t.Error("prompt preview should still include 'N deny' hint")
 	}
 }
 
-// TestRenderPanePreview_QuickInputFocused verifies the pane preview
-// shows the text input field when quick input is focused.
-func TestRenderPanePreview_QuickInputFocused(t *testing.T) {
+// TestRenderExecutorPromptPreview_ReplyInputActive verifies the prompt preview
+// shows the reply text input when reply mode is active for the task.
+func TestRenderExecutorPromptPreview_ReplyInputActive(t *testing.T) {
 	replyInput := textinput.New()
 	replyInput.CharLimit = 200
 	replyInput.Focus()
 
 	m := &AppModel{
-		width:             100,
-		height:            50,
-		executorPrompts:   map[int64]string{1: "Choose option 1, 2, or 3"},
-		tasksNeedingInput: map[int64]bool{1: true},
-		quickInputFocused: true,
-		replyInput:        replyInput,
+		width:            100,
+		height:           50,
+		executorPrompts:  map[int64]string{1: "Choose option 1, 2, or 3"},
+		replyActive:      true,
+		replyTaskID:      1,
+		replyInput:       replyInput,
+		replyPaneContent: []string{"Select an option:", "1) First option", "2) Second option"},
 	}
 
-	task := &db.Task{ID: 1, Title: "Test task", Status: db.StatusBlocked}
-	rendered := m.renderPanePreview(task)
+	task := &db.Task{ID: 1, Title: "Test task"}
+	rendered := m.renderExecutorPromptPreview(task)
 
-	if !strings.Contains(rendered, "input:") {
-		t.Error("pane preview should show input label when quick input is focused")
+	if !strings.Contains(rendered, "reply:") {
+		t.Error("prompt preview should show reply input label when reply mode is active")
 	}
 	if !strings.Contains(rendered, "esc cancel") {
-		t.Error("pane preview should show cancel hint when quick input is focused")
+		t.Error("prompt preview should show cancel hint when reply mode is active")
 	}
 	if !strings.Contains(rendered, "#1") {
-		t.Error("pane preview should show task ID")
+		t.Error("prompt preview should show task ID when reply mode is active")
+	}
+	if !strings.Contains(rendered, "First option") {
+		t.Error("prompt preview should show captured pane content with options")
 	}
 }
 

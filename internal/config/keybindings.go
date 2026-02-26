@@ -54,7 +54,6 @@ type KeybindingsConfig struct {
 	DenyPrompt         *KeybindingConfig `yaml:"deny_prompt,omitempty"`
 	Spotlight          *KeybindingConfig `yaml:"spotlight,omitempty"`
 	SpotlightSync      *KeybindingConfig `yaml:"spotlight_sync,omitempty"`
-	QuickInput         *KeybindingConfig `yaml:"quick_input,omitempty"`
 }
 
 // DefaultKeybindingsConfigPath returns the default path for the keybindings config file.
