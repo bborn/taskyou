@@ -95,6 +95,8 @@ type KeyMap struct {
 	// Spotlight mode
 	Spotlight     key.Binding
 	SpotlightSync key.Binding
+	// Quick input focus
+	QuickInput key.Binding
 }
 
 // ShortHelp returns key bindings to show in the mini help.
@@ -271,6 +273,10 @@ func DefaultKeyMap() KeyMap {
 			key.WithKeys("F"),
 			key.WithHelp("F", "spotlight sync"),
 		),
+		QuickInput: key.NewBinding(
+			key.WithKeys("tab"),
+			key.WithHelp("tab", "input"),
+		),
 	}
 }
 
@@ -336,6 +342,7 @@ func ApplyKeybindingsConfig(km KeyMap, cfg *config.KeybindingsConfig) KeyMap {
 	km.DenyPrompt = applyBinding(km.DenyPrompt, cfg.DenyPrompt)
 	km.Spotlight = applyBinding(km.Spotlight, cfg.Spotlight)
 	km.SpotlightSync = applyBinding(km.SpotlightSync, cfg.SpotlightSync)
+	km.QuickInput = applyBinding(km.QuickInput, cfg.QuickInput)
 
 	return km
 }
@@ -469,11 +476,9 @@ type AppModel struct {
 	// AI command service for natural language command interpretation
 	aiCommandService *ai.CommandService
 
-	// Reply input for executor prompts (multiple choice, free-form text)
-	replyInput       textinput.Model
-	replyActive      bool     // Whether reply mode is active (typing a response)
-	replyTaskID      int64    // Task ID the reply is for
-	replyPaneContent []string // Captured tmux pane lines shown above the reply input
+	// Quick input for sending text to executor (always visible when task has tmux session)
+	replyInput        textinput.Model
+	quickInputFocused bool // Whether quick input field has keyboard focus
 
 	// Filter state
 	filterInput        textinput.Model
@@ -718,9 +723,9 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.updateDetail(msg)
 	}
 
-	// Handle reply input mode (needs all message types for text input)
-	if m.currentView == ViewDashboard && m.replyActive {
-		return m.updateReplyMode(msg)
+	// Handle quick input mode (needs all message types for text input)
+	if m.currentView == ViewDashboard && m.quickInputFocused {
+		return m.updateQuickInput(msg)
 	}
 
 	// Handle filter input mode (needs all message types for text input)
@@ -821,7 +826,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// Handles external approval (e.g. from tmux) where PreToolUse
 				// logs "Agent resumed working" and transitions to processing.
 				if m.tasksNeedingInput[t.ID] {
-					if m.latestPermissionPrompt(t.ID) == "" {
+					if m.latestChoicePrompt(t.ID) == "" {
 						delete(m.tasksNeedingInput, t.ID)
 						delete(m.executorPrompts, t.ID)
 					}
@@ -851,13 +856,13 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.tasksNeedingInput[t.ID] {
 				// Re-validate: if task is no longer blocked, the user provided input
 				// (e.g., from the detail view tmux pane). Also re-check permission prompts.
-				if t.Status != db.StatusBlocked && m.latestPermissionPrompt(t.ID) == "" {
+				if t.Status != db.StatusBlocked && m.latestChoicePrompt(t.ID) == "" {
 					delete(m.tasksNeedingInput, t.ID)
 					delete(m.executorPrompts, t.ID)
 				}
 				continue
 			}
-			if prompt := m.latestPermissionPrompt(t.ID); prompt != "" {
+			if prompt := m.latestChoicePrompt(t.ID); prompt != "" {
 				m.tasksNeedingInput[t.ID] = true
 				// Capture the tmux pane content for richer display of the prompt.
 				// This shows the actual executor output (including multiple choice options)
@@ -1170,7 +1175,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.notification = fmt.Sprintf("%s %s executor prompt for task #%d", IconDone(), action, msg.taskID)
 			m.notifyUntil = time.Now().Add(3 * time.Second)
 			// Clear prompt state immediately for visual feedback. If the task is
-			// still blocked (e.g. another prompt queued), the latestPermissionPrompt
+			// still blocked (e.g. another prompt queued), the latestChoicePrompt
 			// catch-up loop will re-detect it on the next poll cycle.
 			delete(m.tasksNeedingInput, msg.taskID)
 			delete(m.executorPrompts, msg.taskID)
@@ -1213,11 +1218,11 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						// newly-blocked tasks so the user can approve/deny immediately
 						// without waiting for the next loadTasks poll.
 						if m.tasksNeedingInput[event.TaskID] {
-							if m.latestPermissionPrompt(event.TaskID) == "" {
+							if m.latestChoicePrompt(event.TaskID) == "" {
 								delete(m.tasksNeedingInput, event.TaskID)
 								delete(m.executorPrompts, event.TaskID)
 							}
-						} else if prompt := m.latestPermissionPrompt(event.TaskID); prompt != "" {
+						} else if prompt := m.latestChoicePrompt(event.TaskID); prompt != "" {
 							m.tasksNeedingInput[event.TaskID] = true
 							paneContent := executor.CapturePaneContent(event.TaskID, 15)
 							if paneContent != "" {
@@ -1516,12 +1521,13 @@ func (m *AppModel) viewDashboard() string {
 		filterBarHeight = lipgloss.Height(filterBar)
 	}
 
-	// Render executor prompt preview if applicable
-	promptPreview := ""
-	promptPreviewHeight := 0
-	if task := m.kanban.SelectedTask(); task != nil && m.tasksNeedingInput[task.ID] {
-		promptPreview = m.renderExecutorPromptPreview(task)
-		promptPreviewHeight = lipgloss.Height(promptPreview)
+	// Render pane preview + quick input for any selected task with a tmux session
+	// (processing, queued, or blocked tasks all have active tmux sessions)
+	panePreview := ""
+	panePreviewHeight := 0
+	if task := m.kanban.SelectedTask(); task != nil && (db.IsInProgress(task.Status) || task.Status == db.StatusBlocked) {
+		panePreview = m.renderPanePreview(task)
+		panePreviewHeight = lipgloss.Height(panePreview)
 	}
 
 	// Build the header first so we can measure its actual rendered height
@@ -1536,7 +1542,7 @@ func (m *AppModel) viewDashboard() string {
 	helpView := m.renderHelp()
 	helpHeight := lipgloss.Height(helpView)
 
-	kanbanHeight := m.height - headerHeight - filterBarHeight - helpHeight - promptPreviewHeight
+	kanbanHeight := m.height - headerHeight - filterBarHeight - helpHeight - panePreviewHeight
 	if kanbanHeight < 10 {
 		kanbanHeight = 10
 	}
@@ -1558,8 +1564,8 @@ func (m *AppModel) viewDashboard() string {
 		contentParts = append(contentParts, welcomeView, helpView)
 	} else {
 		kanbanView := m.kanban.View()
-		if promptPreview != "" {
-			contentParts = append(contentParts, kanbanView, promptPreview, helpView)
+		if panePreview != "" {
+			contentParts = append(contentParts, kanbanView, panePreview, helpView)
 		} else {
 			contentParts = append(contentParts, kanbanView, helpView)
 		}
@@ -1721,104 +1727,64 @@ func (m *AppModel) renderHelp() string {
 	return m.help.View(m.keys)
 }
 
-// renderExecutorPromptPreview renders a compact preview of the executor's current prompt
-// for a blocked task that needs input. Shows the permission message from the hook log
-// with approve/deny/reply hints.
-func (m *AppModel) renderExecutorPromptPreview(task *db.Task) string {
-	// If reply mode is active for this task, show the reply input
-	if m.replyActive && m.replyTaskID == task.ID {
-		return m.renderReplyInput(task)
-	}
-
-	prompt := m.executorPrompts[task.ID]
-
-	// Extract the last meaningful lines from the captured pane content
-	promptLines := extractPromptLines(prompt, m.width-10)
-
-	// Dim style for the action hints
+// renderPanePreview renders a compact preview of the selected task's tmux pane content
+// with a quick input bar below it. When the task has a pending permission prompt,
+// shows approve/deny hints. The quick input field is always shown (focused or unfocused).
+func (m *AppModel) renderPanePreview(task *db.Task) string {
 	hintStyle := lipgloss.NewStyle().Foreground(ColorMuted)
-	hints := hintStyle.Render("y approve  N deny  r reply  enter detail")
-
-	// Warning style for the task reference
+	detailStyle := lipgloss.NewStyle().Foreground(ColorMuted)
 	warnStyle := lipgloss.NewStyle().Foreground(ColorWarning)
 
 	barStyle := lipgloss.NewStyle().
 		Width(m.width).
 		Padding(0, 1)
 
-	if len(promptLines) == 0 {
-		// No captured content yet - show a minimal single-line hint
-		line := warnStyle.Render(fmt.Sprintf("#%d waiting for input", task.ID)) + "  " + hints
-		return barStyle.Render(line)
-	}
-
-	// Show last few lines of the prompt content so user can see multiple choice options
-	maxLines := 5
-	if len(promptLines) > maxLines {
-		promptLines = promptLines[len(promptLines)-maxLines:]
-	}
-
 	var lines []string
 
-	// Header line: task ID + action hints
-	headerLine := warnStyle.Render(fmt.Sprintf("#%d ", task.ID)) + hints
+	// Fetch live pane content for the selected task
+	paneContent := executor.CapturePaneContent(task.ID, 5)
+	paneLines := extractPromptLines(paneContent, m.width-6)
+
+	// Build hints based on task state
+	needsInput := m.tasksNeedingInput[task.ID]
+	var hints string
+	if needsInput {
+		hints = hintStyle.Render("y approve  N deny  tab input  enter detail")
+	} else {
+		hints = hintStyle.Render("tab input  enter detail")
+	}
+
+	// Header line: task ID + hints
+	idStyle := warnStyle
+	if !needsInput {
+		idStyle = lipgloss.NewStyle().Foreground(ColorInProgress)
+	}
+	headerLine := idStyle.Render(fmt.Sprintf("#%d ", task.ID)) + hints
 	lines = append(lines, barStyle.Render(headerLine))
 
-	// Show prompt content lines
-	detailStyle := lipgloss.NewStyle().Foreground(ColorMuted)
-	detailMaxWidth := m.width - 6 // padding + indent
-	if detailMaxWidth < 20 {
-		detailMaxWidth = 20
-	}
-	for _, pl := range promptLines {
-		if len(pl) > detailMaxWidth {
-			pl = pl[:detailMaxWidth-1] + "…"
+	// Show last few lines of pane content
+	if len(paneLines) > 0 {
+		detailMaxWidth := m.width - 6
+		if detailMaxWidth < 20 {
+			detailMaxWidth = 20
 		}
-		lines = append(lines, barStyle.Render("  "+detailStyle.Render(pl)))
-	}
-
-	return strings.Join(lines, "\n")
-}
-
-// renderReplyInput renders the reply text input for a blocked task,
-// including captured tmux pane content so the user can see what they're responding to.
-func (m *AppModel) renderReplyInput(task *db.Task) string {
-	warnStyle := lipgloss.NewStyle().Foreground(ColorWarning)
-	hintStyle := lipgloss.NewStyle().Foreground(ColorMuted)
-	detailStyle := lipgloss.NewStyle().Foreground(ColorMuted)
-
-	barStyle := lipgloss.NewStyle().
-		Width(m.width).
-		Padding(0, 1)
-
-	var lines []string
-
-	// Show captured pane content (last N meaningful lines) so user can see the options
-	if len(m.replyPaneContent) > 0 {
-		// Show up to 8 lines of context from the tmux pane
-		paneLines := m.replyPaneContent
-		maxContextLines := 8
-		if len(paneLines) > maxContextLines {
-			paneLines = paneLines[len(paneLines)-maxContextLines:]
-		}
-		header := warnStyle.Render(fmt.Sprintf("#%d executor prompt:", task.ID))
-		lines = append(lines, barStyle.Render(header))
 		for _, pl := range paneLines {
-			maxWidth := m.width - 6
-			if maxWidth < 20 {
-				maxWidth = 20
-			}
-			if len(pl) > maxWidth {
-				pl = pl[:maxWidth-1] + "…"
+			if len(pl) > detailMaxWidth {
+				pl = pl[:detailMaxWidth-1] + "…"
 			}
 			lines = append(lines, barStyle.Render("  "+detailStyle.Render(pl)))
 		}
 	}
 
-	// Reply input line
-	label := warnStyle.Render("reply: ")
-	hints := hintStyle.Render("  enter send  esc cancel")
-	lines = append(lines, barStyle.Render(label+m.replyInput.View()+hints))
+	// Quick input bar (always visible)
+	if m.quickInputFocused {
+		label := warnStyle.Render("input: ")
+		inputHints := hintStyle.Render("  enter send  esc cancel")
+		lines = append(lines, barStyle.Render(label+m.replyInput.View()+inputHints))
+	} else {
+		unfocusedHint := hintStyle.Render("  tab  focus input")
+		lines = append(lines, barStyle.Render(unfocusedHint))
+	}
 
 	return strings.Join(lines, "\n")
 }
@@ -2012,17 +1978,6 @@ func (m *AppModel) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case key.Matches(msg, m.keys.Retry):
 		if task := m.kanban.SelectedTask(); task != nil {
-			// If task needs input, enter reply mode instead of retry
-			if m.tasksNeedingInput[task.ID] || m.detectPermissionPrompt(task.ID) {
-				m.replyActive = true
-				m.replyTaskID = task.ID
-				m.replyInput.SetValue("")
-				m.replyInput.Focus()
-				// Capture the tmux pane content so the user can see the prompt/options
-				paneContent := executor.CapturePaneContent(task.ID, 20)
-				m.replyPaneContent = extractPromptLines(paneContent, m.width-6)
-				return m, textinput.Blink
-			}
 			// Allow retry for blocked, done, or backlog tasks
 			if task.Status == db.StatusBlocked || task.Status == db.StatusDone ||
 				task.Status == db.StatusBacklog {
@@ -2071,6 +2026,15 @@ func (m *AppModel) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, m.keys.SpotlightSync):
 		if task := m.kanban.SelectedTask(); task != nil && task.WorktreePath != "" {
 			return m, m.syncSpotlight(task)
+		}
+
+	case key.Matches(msg, m.keys.QuickInput):
+		// Focus the quick input field if selected task has a tmux session
+		if task := m.kanban.SelectedTask(); task != nil && (db.IsInProgress(task.Status) || task.Status == db.StatusBlocked) {
+			m.quickInputFocused = true
+			m.replyInput.SetValue("")
+			m.replyInput.Focus()
+			return m, textinput.Blink
 		}
 
 	case key.Matches(msg, m.keys.Settings):
@@ -2125,8 +2089,8 @@ func (m *AppModel) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// updateReplyMode handles input when reply mode is active (typing a response to an executor prompt).
-func (m *AppModel) updateReplyMode(msg tea.Msg) (tea.Model, tea.Cmd) {
+// updateQuickInput handles input when the quick input field is focused.
+func (m *AppModel) updateQuickInput(msg tea.Msg) (tea.Model, tea.Cmd) {
 	keyMsg, ok := msg.(tea.KeyMsg)
 	if !ok {
 		// Pass non-key messages (like blink) to the text input
@@ -2136,30 +2100,31 @@ func (m *AppModel) updateReplyMode(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	switch keyMsg.String() {
-	case "esc":
-		// Cancel reply mode
-		m.replyActive = false
-		m.replyTaskID = 0
-		m.replyPaneContent = nil
+	case "esc", "shift+tab":
+		// Return focus to kanban
+		m.quickInputFocused = false
 		m.replyInput.SetValue("")
 		m.replyInput.Blur()
 		return m, nil
 
 	case "enter":
-		// Send the reply text to the executor
+		// Send the text to the selected task's executor
 		text := strings.TrimSpace(m.replyInput.Value())
 		if text == "" {
-			// Empty reply - cancel
-			m.replyActive = false
-			m.replyTaskID = 0
-			m.replyPaneContent = nil
+			// Empty input - just unfocus
+			m.quickInputFocused = false
 			m.replyInput.Blur()
 			return m, nil
 		}
-		taskID := m.replyTaskID
-		m.replyActive = false
-		m.replyTaskID = 0
-		m.replyPaneContent = nil
+		task := m.kanban.SelectedTask()
+		if task == nil {
+			m.quickInputFocused = false
+			m.replyInput.SetValue("")
+			m.replyInput.Blur()
+			return m, nil
+		}
+		taskID := task.ID
+		m.quickInputFocused = false
 		m.replyInput.SetValue("")
 		m.replyInput.Blur()
 		return m, m.sendTextToExecutor(taskID, text)
@@ -4190,11 +4155,13 @@ func (m *AppModel) sendTextToExecutor(taskID int64, text string) tea.Cmd {
 	}
 }
 
-// latestPermissionPrompt checks whether a task has a pending permission prompt
+// latestChoicePrompt checks whether a task has a pending permission/choice prompt
 // by reading recent DB logs written by the notification hook. Returns the prompt
 // message if still pending, or "" if resolved (e.g. "Agent resumed working",
 // user approved/denied). This is status-agnostic — works for any active task.
-func (m *AppModel) latestPermissionPrompt(taskID int64) string {
+// Only matches "Waiting for permission" entries (actual choice prompts), NOT
+// "Waiting for user input" (generic idle/end_turn scenarios).
+func (m *AppModel) latestChoicePrompt(taskID int64) string {
 	logs, err := m.db.GetTaskLogs(taskID, 10)
 	if err != nil {
 		return ""
@@ -4203,7 +4170,7 @@ func (m *AppModel) latestPermissionPrompt(taskID int64) string {
 	// A pending prompt is only valid if no subsequent log indicates resolution.
 	for _, l := range logs {
 		switch {
-		case l.LineType == "system" && (strings.HasPrefix(l.Content, "Waiting for permission") || l.Content == "Waiting for user input"):
+		case l.LineType == "system" && strings.HasPrefix(l.Content, "Waiting for permission"):
 			return l.Content
 		case l.LineType == "system" && (l.Content == "Agent resumed working" || l.Content == "Claude resumed working"):
 			return "" // prompt was resolved
@@ -4222,7 +4189,7 @@ func (m *AppModel) latestPermissionPrompt(taskID int64) string {
 // poll-based detection hasn't caught up yet (e.g. a real-time event showed the
 // task as blocked before loadTasks detected the permission prompt).
 func (m *AppModel) detectPermissionPrompt(taskID int64) bool {
-	prompt := m.latestPermissionPrompt(taskID)
+	prompt := m.latestChoicePrompt(taskID)
 	if prompt == "" {
 		return false
 	}
