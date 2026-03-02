@@ -125,7 +125,7 @@ func (g *GeminiExecutor) runGemini(ctx context.Context, task *db.Task, workDir, 
 	script := fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %sgemini %s%s-i "$(cat %q)"`,
 		task.ID, sessionID, task.Port, task.WorktreePath, envPrefix, dangerousFlag, resumeFlag, promptFile.Name())
 
-	actualSession, tmuxErr := createTmuxWindow(daemonSession, windowName, workDir, script)
+	actualSession, tmuxErr := createTmuxWindow(daemonSession, windowName, workDir, script, g.executor.getProjectDir(task.Project))
 	if tmuxErr != nil {
 		g.logger.Error("tmux new-window failed", "error", tmuxErr, "session", daemonSession)
 		g.executor.logLine(task.ID, "error", fmt.Sprintf("Failed to create tmux window: %s", tmuxErr.Error()))

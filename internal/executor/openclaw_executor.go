@@ -140,7 +140,7 @@ func (o *OpenClawExecutor) runOpenClaw(ctx context.Context, task *db.Task, workD
 	script := fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %sopenclaw tui --session %s %s--message "$(cat %q)"`,
 		task.ID, worktreeSessionID, task.Port, task.WorktreePath, envPrefix, sessionKey, thinkingFlag, promptFile.Name())
 
-	actualSession, tmuxErr := createTmuxWindow(daemonSession, windowName, workDir, script)
+	actualSession, tmuxErr := createTmuxWindow(daemonSession, windowName, workDir, script, o.executor.getProjectDir(task.Project))
 	if tmuxErr != nil {
 		o.logger.Error("tmux new-window failed", "error", tmuxErr, "session", daemonSession)
 		o.executor.logLine(task.ID, "error", fmt.Sprintf("Failed to create tmux window: %s", tmuxErr.Error()))

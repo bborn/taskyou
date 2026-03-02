@@ -1162,6 +1162,60 @@ func TestSpotlightRequiresWorktree(t *testing.T) {
 	}
 }
 
+// TestSpotlightRejectsNonWorktreeProject tests that spotlight returns an error for non-worktree projects
+func TestSpotlightRejectsNonWorktreeProject(t *testing.T) {
+	database := testDB(t)
+
+	// Create a non-worktree project
+	if err := database.CreateProject(&db.Project{Name: "no-wt-project", Path: t.TempDir(), UseWorktrees: false}); err != nil {
+		t.Fatalf("failed to create project: %v", err)
+	}
+
+	task := &db.Task{
+		Title:   "Non-Worktree Task",
+		Status:  db.StatusProcessing,
+		Project: "no-wt-project",
+	}
+	if err := database.CreateTask(task); err != nil {
+		t.Fatalf("failed to create task: %v", err)
+	}
+	// Set worktree path via update (CreateTask doesn't store it)
+	task.WorktreePath = "/some/path"
+	if err := database.UpdateTask(task); err != nil {
+		t.Fatalf("failed to update task: %v", err)
+	}
+
+	request := map[string]interface{}{
+		"jsonrpc": "2.0",
+		"id":      1,
+		"method":  "tools/call",
+		"params": map[string]interface{}{
+			"name": "taskyou_spotlight",
+			"arguments": map[string]interface{}{
+				"action": "status",
+			},
+		},
+	}
+	reqBytes, _ := json.Marshal(request)
+	reqBytes = append(reqBytes, '\n')
+
+	server, output := testServer(database, task.ID, string(reqBytes))
+	server.Run()
+
+	var resp jsonRPCResponse
+	if err := json.Unmarshal(output.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to parse response: %v", err)
+	}
+
+	if resp.Error == nil {
+		t.Fatal("expected error for non-worktree project")
+	}
+
+	if !strings.Contains(resp.Error.Message, "non-worktree") {
+		t.Errorf("expected error about non-worktree projects, got: %s", resp.Error.Message)
+	}
+}
+
 // TestSpotlightSyncRequiresActive tests that sync fails when spotlight is not active
 func TestSpotlightSyncRequiresActive(t *testing.T) {
 	database := testDB(t)

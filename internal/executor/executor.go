@@ -1933,12 +1933,10 @@ func ensureTmuxDaemon() (string, error) {
 
 // createTmuxWindow creates a new tmux window in the daemon session with retry logic.
 // If the session doesn't exist, it will re-create it and retry once.
-// SECURITY: workDir must be within a .task-worktrees directory to prevent Claude from
-// accidentally writing to the main project directory.
-func createTmuxWindow(daemonSession, windowName, workDir, script string) (string, error) {
-	// SECURITY: Validate that workDir is within a .task-worktrees directory,
-	// OR is a valid project directory (for non-worktree projects).
-	if !isValidWorkDir(workDir) {
+// SECURITY: workDir must be within a .task-worktrees directory, or match allowedProjectDir
+// for non-worktree projects. Pass empty allowedProjectDir to require worktree paths only.
+func createTmuxWindow(daemonSession, windowName, workDir, script, allowedProjectDir string) (string, error) {
+	if !isValidWorkDir(workDir, allowedProjectDir) {
 		return "", fmt.Errorf("security: refusing to create tmux window with invalid workDir: %s", workDir)
 	}
 
@@ -2224,7 +2222,7 @@ func (e *Executor) runClaude(ctx context.Context, task *db.Task, workDir, prompt
 	}
 
 	// Create new window in task-daemon session (with retry logic for race conditions)
-	actualSession, tmuxErr := createTmuxWindow(daemonSession, windowName, workDir, script)
+	actualSession, tmuxErr := createTmuxWindow(daemonSession, windowName, workDir, script, e.getProjectDir(task.Project))
 	if tmuxErr != nil {
 		e.logger.Error("tmux new-window failed", "error", tmuxErr, "session", daemonSession)
 		e.logLine(task.ID, "error", fmt.Sprintf("Failed to create tmux window: %s", tmuxErr.Error()))
@@ -2380,7 +2378,7 @@ func (e *Executor) runClaudeResume(ctx context.Context, task *db.Task, workDir, 
 		task.ID, taskSessionID, task.Port, task.WorktreePath, envPrefix, dangerousFlag, systemPromptFlag, claudeSessionID, feedbackFile.Name())
 
 	// Create new window in task-daemon session (with retry logic for race conditions)
-	actualSession, tmuxErr := createTmuxWindow(daemonSession, windowName, workDir, script)
+	actualSession, tmuxErr := createTmuxWindow(daemonSession, windowName, workDir, script, e.getProjectDir(task.Project))
 	if tmuxErr != nil {
 		e.logger.Error("tmux new-window failed", "error", tmuxErr, "session", daemonSession)
 		e.logLine(task.ID, "error", fmt.Sprintf("Failed to create tmux window: %s", tmuxErr.Error()))
@@ -2537,7 +2535,7 @@ func (e *Executor) resumeClaudeDangerous(task *db.Task, workDir string) bool {
 		taskID, taskSessionID, task.Port, task.WorktreePath, envPrefix, claudeSessionID)
 
 	// Create new window in task-daemon session (with retry logic for race conditions)
-	actualSession, tmuxErr := createTmuxWindow(daemonSession, windowName, workDir, script)
+	actualSession, tmuxErr := createTmuxWindow(daemonSession, windowName, workDir, script, e.getProjectDir(task.Project))
 	if tmuxErr != nil {
 		e.logger.Warn("tmux failed to create window", "error", tmuxErr, "session", daemonSession)
 		if cleanupHooks != nil {
@@ -2702,7 +2700,7 @@ func (e *Executor) resumeClaudeSafe(task *db.Task, workDir string) bool {
 		taskID, taskSessionID, task.Port, task.WorktreePath, envPrefix, claudeSessionID)
 
 	// Create new window in task-daemon session (with retry logic for race conditions)
-	actualSession, tmuxErr := createTmuxWindow(daemonSession, windowName, workDir, script)
+	actualSession, tmuxErr := createTmuxWindow(daemonSession, windowName, workDir, script, e.getProjectDir(task.Project))
 	if tmuxErr != nil {
 		e.logger.Warn("tmux failed to create window", "error", tmuxErr, "session", daemonSession)
 		if cleanupHooks != nil {
@@ -2819,7 +2817,7 @@ func (e *Executor) resumeCodexWithMode(task *db.Task, workDir string, dangerousM
 	script := fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %scodex %s--resume %s`,
 		taskID, taskSessionID, task.Port, task.WorktreePath, envPrefix, dangerousFlag, sessionID)
 
-	actualSession, tmuxErr := createTmuxWindow(daemonSession, windowName, workDir, script)
+	actualSession, tmuxErr := createTmuxWindow(daemonSession, windowName, workDir, script, e.getProjectDir(task.Project))
 	if tmuxErr != nil {
 		e.logger.Warn("tmux failed to create window", "error", tmuxErr, "session", daemonSession)
 		return false
@@ -2927,7 +2925,7 @@ func (e *Executor) resumeGeminiWithMode(task *db.Task, workDir string, dangerous
 	script := fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %sgemini %s--resume %s`,
 		taskID, taskSessionID, task.Port, task.WorktreePath, envPrefix, dangerousFlag, sessionID)
 
-	actualSession, tmuxErr := createTmuxWindow(daemonSession, windowName, workDir, script)
+	actualSession, tmuxErr := createTmuxWindow(daemonSession, windowName, workDir, script, e.getProjectDir(task.Project))
 	if tmuxErr != nil {
 		e.logger.Warn("tmux failed to create window", "error", tmuxErr, "session", daemonSession)
 		return false
@@ -4882,7 +4880,7 @@ func (e *Executor) runPi(ctx context.Context, task *db.Task, workDir, prompt str
 	}
 
 	// Create new window in task-daemon session (with retry logic for race conditions)
-	actualSession, tmuxErr := createTmuxWindow(daemonSession, windowName, workDir, script)
+	actualSession, tmuxErr := createTmuxWindow(daemonSession, windowName, workDir, script, e.getProjectDir(task.Project))
 	if tmuxErr != nil {
 		e.logger.Error("tmux new-window failed", "error", tmuxErr, "session", daemonSession)
 		e.logLine(task.ID, "error", fmt.Sprintf("Failed to create tmux window: %s", tmuxErr.Error()))
@@ -5004,7 +5002,7 @@ func (e *Executor) runPiResume(ctx context.Context, task *db.Task, workDir, prom
 		task.ID, taskSessionID, task.Port, task.WorktreePath, sessionPath, systemPromptFlag, feedbackFile.Name())
 
 	// Create new window in task-daemon session (with retry logic for race conditions)
-	actualSession, tmuxErr := createTmuxWindow(daemonSession, windowName, workDir, script)
+	actualSession, tmuxErr := createTmuxWindow(daemonSession, windowName, workDir, script, e.getProjectDir(task.Project))
 	if tmuxErr != nil {
 		e.logger.Error("tmux new-window failed", "error", tmuxErr, "session", daemonSession)
 		e.logLine(task.ID, "error", fmt.Sprintf("Failed to create tmux window: %s", tmuxErr.Error()))
@@ -5147,45 +5145,53 @@ func (e *Executor) KillPiProcess(taskID int64) bool {
 // isValidWorktreePath validates that a working directory is within a .task-worktrees directory.
 // This prevents Claude from accidentally writing to the main project directory.
 // Returns true if the path is valid for task execution.
-// isValidWorktreePath validates that a working directory is within a .task-worktrees directory.
 func isValidWorktreePath(workDir string) bool {
-	// Empty path is never valid
 	if workDir == "" {
 		return false
 	}
 
-	// Resolve symlinks and clean the path
 	absPath, err := filepath.Abs(workDir)
 	if err != nil {
 		return false
 	}
 
-	// Evaluate any symlinks in the path
 	resolvedPath, err := filepath.EvalSymlinks(absPath)
 	if err != nil {
-		// Path might not exist yet, use the absolute path
 		resolvedPath = absPath
 	}
 
-	// Check that the path contains .task-worktrees
 	// Valid paths look like: /path/to/project/.task-worktrees/123-task-slug
 	return strings.Contains(resolvedPath, string(filepath.Separator)+".task-worktrees"+string(filepath.Separator))
 }
 
 // isValidWorkDir validates that a working directory is either within a .task-worktrees directory
-// (for git worktree projects) or is an existing directory (for non-worktree projects).
-func isValidWorkDir(workDir string) bool {
-	// First check the traditional worktree path
+// (for git worktree projects) or matches a specific allowed project directory (for non-worktree
+// projects). The allowedProjectDir parameter restricts which non-worktree paths are accepted,
+// preventing arbitrary directory access.
+func isValidWorkDir(workDir string, allowedProjectDir string) bool {
 	if isValidWorktreePath(workDir) {
 		return true
 	}
 
-	// For non-worktree projects, the workDir is the project directory itself.
-	// Validate it exists and is a directory.
-	if workDir == "" {
+	// For non-worktree projects, only accept the exact configured project directory.
+	if workDir == "" || allowedProjectDir == "" {
 		return false
 	}
-	info, err := os.Stat(workDir)
+
+	absWork, err := filepath.Abs(workDir)
+	if err != nil {
+		return false
+	}
+	absAllowed, err := filepath.Abs(allowedProjectDir)
+	if err != nil {
+		return false
+	}
+
+	// Must match the allowed path AND exist as a directory
+	if absWork != absAllowed {
+		return false
+	}
+	info, err := os.Stat(absWork)
 	return err == nil && info.IsDir()
 }
 
