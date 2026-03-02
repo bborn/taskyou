@@ -62,6 +62,19 @@ func (c *Config) GetProjectDir(project string) string {
 	return filepath.Join(c.ProjectsDir, project)
 }
 
+// ProjectUsesWorktrees returns whether a project uses git worktrees for task isolation.
+// Returns true by default (for backward compatibility and unknown projects).
+func (c *Config) ProjectUsesWorktrees(project string) bool {
+	if project == "" {
+		return true
+	}
+	p, err := c.db.GetProjectByName(project)
+	if err == nil && p != nil {
+		return p.UsesWorktrees()
+	}
+	return true
+}
+
 // SetProjectsDir sets the default projects directory.
 func (c *Config) SetProjectsDir(dir string) error {
 	if err := c.db.SetSetting(SettingProjectsDir, dir); err != nil {
