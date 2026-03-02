@@ -897,6 +897,47 @@ func TestIsValidWorktreePathWithRealDirectory(t *testing.T) {
 	})
 }
 
+func TestIsValidWorkDir(t *testing.T) {
+	// Create a real temporary directory structure
+	tmpDir, err := os.MkdirTemp("", "test-workdir-validation-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	// Create the .task-worktrees structure
+	worktreesDir := tmpDir + "/.task-worktrees"
+	taskDir := worktreesDir + "/123-test-task"
+	if err := os.MkdirAll(taskDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("worktree path is valid", func(t *testing.T) {
+		if !isValidWorkDir(taskDir) {
+			t.Errorf("isValidWorkDir(%q) should return true for worktree directory", taskDir)
+		}
+	})
+
+	t.Run("project directory is valid for non-worktree projects", func(t *testing.T) {
+		// For non-worktree projects, the project directory itself is the work dir
+		if !isValidWorkDir(tmpDir) {
+			t.Errorf("isValidWorkDir(%q) should return true for existing project directory", tmpDir)
+		}
+	})
+
+	t.Run("empty path is not valid", func(t *testing.T) {
+		if isValidWorkDir("") {
+			t.Error("isValidWorkDir('') should return false")
+		}
+	})
+
+	t.Run("non-existent path is not valid", func(t *testing.T) {
+		if isValidWorkDir("/nonexistent/path/xyz") {
+			t.Error("isValidWorkDir should return false for non-existent path")
+		}
+	})
+}
+
 func TestDoneTaskCleanupTimeout(t *testing.T) {
 	// Verify the cleanup timeout constant is set correctly
 	if DoneTaskCleanupTimeout != 30*time.Minute {

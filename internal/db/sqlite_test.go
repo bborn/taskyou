@@ -193,3 +193,83 @@ func TestProjectContext(t *testing.T) {
 		t.Error("expected error when setting context for non-existent project")
 	}
 }
+
+func TestProjectUseWorktrees(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	db, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer db.Close()
+
+	// Default project (personal) should use worktrees
+	personal, err := db.GetProjectByName("personal")
+	if err != nil {
+		t.Fatalf("failed to get personal project: %v", err)
+	}
+	if !personal.UsesWorktrees() {
+		t.Error("personal project should default to using worktrees")
+	}
+
+	// Create a project with worktrees enabled (default)
+	gitProject := &Project{Name: "git-project", Path: filepath.Join(tmpDir, "git"), UseWorktrees: true}
+	if err := db.CreateProject(gitProject); err != nil {
+		t.Fatalf("failed to create git project: %v", err)
+	}
+
+	// Create a project with worktrees disabled
+	noGitProject := &Project{Name: "no-git-project", Path: filepath.Join(tmpDir, "nogit"), UseWorktrees: false}
+	if err := db.CreateProject(noGitProject); err != nil {
+		t.Fatalf("failed to create no-git project: %v", err)
+	}
+
+	// Verify via GetProjectByName
+	p, err := db.GetProjectByName("git-project")
+	if err != nil {
+		t.Fatalf("failed to get git-project: %v", err)
+	}
+	if !p.UsesWorktrees() {
+		t.Error("git-project should use worktrees")
+	}
+
+	p, err = db.GetProjectByName("no-git-project")
+	if err != nil {
+		t.Fatalf("failed to get no-git-project: %v", err)
+	}
+	if p.UsesWorktrees() {
+		t.Error("no-git-project should NOT use worktrees")
+	}
+
+	// Verify via ListProjects
+	projects, err := db.ListProjects()
+	if err != nil {
+		t.Fatalf("failed to list projects: %v", err)
+	}
+	for _, proj := range projects {
+		switch proj.Name {
+		case "git-project":
+			if !proj.UsesWorktrees() {
+				t.Error("git-project should use worktrees in list")
+			}
+		case "no-git-project":
+			if proj.UsesWorktrees() {
+				t.Error("no-git-project should NOT use worktrees in list")
+			}
+		}
+	}
+
+	// Test updating worktrees setting
+	noGitProject.UseWorktrees = true
+	if err := db.UpdateProject(noGitProject); err != nil {
+		t.Fatalf("failed to update project: %v", err)
+	}
+	p, err = db.GetProjectByName("no-git-project")
+	if err != nil {
+		t.Fatalf("failed to get updated project: %v", err)
+	}
+	if !p.UsesWorktrees() {
+		t.Error("no-git-project should use worktrees after update")
+	}
+}

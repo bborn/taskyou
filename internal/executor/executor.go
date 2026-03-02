@@ -847,6 +847,12 @@ func (e *Executor) cleanupStaleWorktrees() {
 			continue
 		}
 
+		// Skip non-worktree projects - they share the project directory and should not be archived
+		if !e.config.ProjectUsesWorktrees(task.Project) {
+			e.db.ClearTaskWorktreePath(task.ID)
+			continue
+		}
+
 		// Skip if worktree path doesn't exist on disk (already cleaned up)
 		if _, err := os.Stat(task.WorktreePath); os.IsNotExist(err) {
 			// Path gone, just clear the DB reference
@@ -903,6 +909,13 @@ func (e *Executor) CleanupStaleWorktreesManual(maxAge time.Duration, dryRun bool
 
 	var cleaned []*db.Task
 	for _, task := range tasks {
+		// Skip non-worktree projects
+		if !e.config.ProjectUsesWorktrees(task.Project) {
+			e.db.ClearTaskWorktreePath(task.ID)
+			cleaned = append(cleaned, task)
+			continue
+		}
+
 		// Skip if worktree path doesn't exist on disk
 		if _, err := os.Stat(task.WorktreePath); os.IsNotExist(err) {
 			e.db.ClearTaskWorktreePath(task.ID)
@@ -934,6 +947,10 @@ func (e *Executor) pruneAllProjectWorktrees() {
 		return
 	}
 	for _, p := range projects {
+		// Skip non-worktree projects - no git worktrees to prune
+		if !p.UsesWorktrees() {
+			continue
+		}
 		dir := e.config.GetProjectDir(p.Name)
 		if dir == "" {
 			continue
@@ -1919,10 +1936,10 @@ func ensureTmuxDaemon() (string, error) {
 // SECURITY: workDir must be within a .task-worktrees directory to prevent Claude from
 // accidentally writing to the main project directory.
 func createTmuxWindow(daemonSession, windowName, workDir, script string) (string, error) {
-	// SECURITY: Validate that workDir is within a .task-worktrees directory
-	// This prevents Claude from running in the main project directory
-	if !isValidWorktreePath(workDir) {
-		return "", fmt.Errorf("security: refusing to create tmux window with workDir outside .task-worktrees: %s", workDir)
+	// SECURITY: Validate that workDir is within a .task-worktrees directory,
+	// OR is a valid project directory (for non-worktree projects).
+	if !isValidWorkDir(workDir) {
+		return "", fmt.Errorf("security: refusing to create tmux window with invalid workDir: %s", workDir)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -3326,6 +3343,11 @@ func (e *Executor) setupWorktree(task *db.Task) (string, error) {
 		return "", fmt.Errorf("project directory not found for project: %s", task.Project)
 	}
 
+	// For non-worktree projects, all tasks share the project directory directly
+	if !e.config.ProjectUsesWorktrees(task.Project) {
+		return e.setupSharedWorkDir(task, projectDir, paths)
+	}
+
 	// Check if project is a git repo, initialize one if not
 	// Git is required for worktree isolation - tasks always run in worktrees
 	// NOTE: This should rarely happen now - git repos are initialized during project creation.
@@ -3538,6 +3560,36 @@ func (e *Executor) setupWorktree(task *db.Task) (string, error) {
 	e.runWorktreeInitScript(projectDir, worktreePath, task)
 
 	return worktreePath, nil
+}
+
+// setupSharedWorkDir sets up a task to use the project directory directly,
+// without git worktree isolation. Used for non-git projects.
+func (e *Executor) setupSharedWorkDir(task *db.Task, projectDir string, paths claudePaths) (string, error) {
+	// Ensure project directory exists
+	if err := os.MkdirAll(projectDir, 0755); err != nil {
+		return "", fmt.Errorf("create project dir: %w", err)
+	}
+
+	// Set worktree path to the project directory itself
+	task.WorktreePath = projectDir
+	task.BranchName = "" // No branch for non-git projects
+	e.db.UpdateTask(task)
+
+	// Allocate a port if not already assigned
+	if task.Port == 0 {
+		port, err := e.db.AllocatePort(task.ID)
+		if err != nil {
+			e.logger.Warn("could not allocate port", "error", err)
+		} else {
+			task.Port = port
+		}
+	}
+
+	e.logLine(task.ID, "system", fmt.Sprintf("Using shared working directory: %s (no worktree isolation)", projectDir))
+
+	e.writeWorktreeEnvFile(projectDir, projectDir, task, paths.configDir)
+
+	return projectDir, nil
 }
 
 // getUserShell returns the login shell for the given username.
@@ -4306,6 +4358,13 @@ func (e *Executor) ArchiveWorktree(task *db.Task) error {
 		return nil
 	}
 
+	// For non-worktree projects, just clear the worktree path reference.
+	// The shared working directory is never removed.
+	if !e.config.ProjectUsesWorktrees(task.Project) {
+		e.db.ClearTaskWorktreePath(task.ID)
+		return nil
+	}
+
 	// Get project directory to run git commands from
 	projectDir := e.getProjectDir(task.Project)
 	if projectDir == "" {
@@ -4427,6 +4486,18 @@ func (e *Executor) ArchiveWorktree(task *db.Task) error {
 // 3. Runs init script
 // 4. Clears the archive state from the database
 func (e *Executor) UnarchiveWorktree(task *db.Task) error {
+	// For non-worktree projects, just restore the worktree path to the project dir
+	if !e.config.ProjectUsesWorktrees(task.Project) {
+		projectDir := e.getProjectDir(task.Project)
+		if projectDir == "" {
+			return fmt.Errorf("could not find project directory for project: %s", task.Project)
+		}
+		task.WorktreePath = projectDir
+		task.BranchName = ""
+		e.db.UpdateTask(task)
+		return nil
+	}
+
 	// Check if task has archive state
 	if !task.HasArchiveState() {
 		return fmt.Errorf("task has no archive state to restore")
@@ -5076,6 +5147,7 @@ func (e *Executor) KillPiProcess(taskID int64) bool {
 // isValidWorktreePath validates that a working directory is within a .task-worktrees directory.
 // This prevents Claude from accidentally writing to the main project directory.
 // Returns true if the path is valid for task execution.
+// isValidWorktreePath validates that a working directory is within a .task-worktrees directory.
 func isValidWorktreePath(workDir string) bool {
 	// Empty path is never valid
 	if workDir == "" {
@@ -5098,6 +5170,23 @@ func isValidWorktreePath(workDir string) bool {
 	// Check that the path contains .task-worktrees
 	// Valid paths look like: /path/to/project/.task-worktrees/123-task-slug
 	return strings.Contains(resolvedPath, string(filepath.Separator)+".task-worktrees"+string(filepath.Separator))
+}
+
+// isValidWorkDir validates that a working directory is either within a .task-worktrees directory
+// (for git worktree projects) or is an existing directory (for non-worktree projects).
+func isValidWorkDir(workDir string) bool {
+	// First check the traditional worktree path
+	if isValidWorktreePath(workDir) {
+		return true
+	}
+
+	// For non-worktree projects, the workDir is the project directory itself.
+	// Validate it exists and is a directory.
+	if workDir == "" {
+		return false
+	}
+	info, err := os.Stat(workDir)
+	return err == nil && info.IsDir()
 }
 
 // slugify converts a string to a URL/branch-friendly slug.

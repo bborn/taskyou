@@ -269,6 +269,8 @@ func (db *DB) migrate() error {
 		`ALTER TABLE tasks ADD COLUMN source_branch TEXT DEFAULT ''`, // Existing branch to checkout instead of creating new branch
 		// Cached PR state as JSON for instant display on startup (avoids waiting for GitHub API)
 		`ALTER TABLE tasks ADD COLUMN pr_info_json TEXT DEFAULT ''`, // JSON blob of github.PRInfo
+		// Whether project uses git worktrees for task isolation (1=yes, 0=no, default 1 for backward compat)
+		`ALTER TABLE projects ADD COLUMN use_worktrees INTEGER DEFAULT 1`,
 	}
 
 	for _, m := range alterMigrations {

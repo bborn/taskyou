@@ -895,7 +895,7 @@ func TestSpotlightStatus(t *testing.T) {
 	runGit(t, worktreeDir, "commit", "-m", "initial")
 
 	// Create a project
-	if err := database.CreateProject(&db.Project{Name: "spotlight-test", Path: mainRepoDir}); err != nil {
+	if err := database.CreateProject(&db.Project{Name: "spotlight-test", Path: mainRepoDir, UseWorktrees: true}); err != nil {
 		t.Fatalf("failed to create project: %v", err)
 	}
 
@@ -976,7 +976,7 @@ func TestSpotlightStartStopFlow(t *testing.T) {
 	runGit(t, worktreeDir, "commit", "-m", "initial")
 
 	// Create project
-	if err := database.CreateProject(&db.Project{Name: "spotlight-flow-test", Path: mainRepoDir}); err != nil {
+	if err := database.CreateProject(&db.Project{Name: "spotlight-flow-test", Path: mainRepoDir, UseWorktrees: true}); err != nil {
 		t.Fatalf("failed to create project: %v", err)
 	}
 
@@ -1186,7 +1186,7 @@ func TestSpotlightSyncRequiresActive(t *testing.T) {
 	runGit(t, worktreeDir, "commit", "-m", "initial")
 
 	// Create project
-	if err := database.CreateProject(&db.Project{Name: "spotlight-sync-inactive-test", Path: mainRepoDir}); err != nil {
+	if err := database.CreateProject(&db.Project{Name: "spotlight-sync-inactive-test", Path: mainRepoDir, UseWorktrees: true}); err != nil {
 		t.Fatalf("failed to create project: %v", err)
 	}
 
@@ -1262,7 +1262,7 @@ func TestSpotlightSync(t *testing.T) {
 	runGit(t, worktreeDir, "commit", "-m", "initial")
 
 	// Create project
-	if err := database.CreateProject(&db.Project{Name: "spotlight-sync-test", Path: mainRepoDir}); err != nil {
+	if err := database.CreateProject(&db.Project{Name: "spotlight-sync-test", Path: mainRepoDir, UseWorktrees: true}); err != nil {
 		t.Fatalf("failed to create project: %v", err)
 	}
 
