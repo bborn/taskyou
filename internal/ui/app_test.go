@@ -1753,6 +1753,96 @@ func TestReplyMode_RKeyEntersReplyMode(t *testing.T) {
 	}
 }
 
+// TestReplyMode_RKeyOnDoneTaskRetries verifies that pressing 'r' on a done task
+// opens the retry view instead of entering reply mode, even if tasksNeedingInput is set.
+func TestReplyMode_RKeyOnDoneTaskRetries(t *testing.T) {
+	database, err := db.Open(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to create test database: %v", err)
+	}
+	defer database.Close()
+
+	task := &db.Task{Title: "Test task", Status: db.StatusDone}
+	if err := database.CreateTask(task); err != nil {
+		t.Fatalf("Failed to create task: %v", err)
+	}
+
+	replyInput := textinput.New()
+	replyInput.CharLimit = 200
+
+	m := &AppModel{
+		width:             100,
+		height:            50,
+		currentView:       ViewDashboard,
+		db:                database,
+		keys:              DefaultKeyMap(),
+		tasks:             []*db.Task{task},
+		tasksNeedingInput: map[int64]bool{task.ID: true},
+		executorPrompts:   map[int64]string{task.ID: "Choose option 1, 2, or 3"},
+		kanban:            NewKanbanBoard(100, 50),
+		prevStatuses:      map[int64]string{task.ID: db.StatusDone},
+		replyInput:        replyInput,
+	}
+	m.kanban.SetTasks(m.tasks)
+	m.kanban.SelectTask(task.ID)
+
+	// Press 'r' — should open retry view, not reply mode
+	result, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
+	model := result.(*AppModel)
+
+	if model.replyActive {
+		t.Error("replyActive should be false — done tasks should retry, not enter reply mode")
+	}
+	if model.currentView != ViewRetry {
+		t.Errorf("currentView should be ViewRetry, got %d", model.currentView)
+	}
+}
+
+// TestReplyMode_RKeyOnProcessingTaskEntersReply verifies that pressing 'r' on a
+// processing task with a pending prompt enters reply mode (not retry).
+func TestReplyMode_RKeyOnProcessingTaskEntersReply(t *testing.T) {
+	database, err := db.Open(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to create test database: %v", err)
+	}
+	defer database.Close()
+
+	task := &db.Task{Title: "Test task", Status: db.StatusProcessing}
+	if err := database.CreateTask(task); err != nil {
+		t.Fatalf("Failed to create task: %v", err)
+	}
+
+	replyInput := textinput.New()
+	replyInput.CharLimit = 200
+
+	m := &AppModel{
+		width:             100,
+		height:            50,
+		currentView:       ViewDashboard,
+		db:                database,
+		keys:              DefaultKeyMap(),
+		tasks:             []*db.Task{task},
+		tasksNeedingInput: map[int64]bool{task.ID: true},
+		executorPrompts:   map[int64]string{task.ID: "Choose option 1, 2, or 3"},
+		kanban:            NewKanbanBoard(100, 50),
+		prevStatuses:      map[int64]string{task.ID: db.StatusProcessing},
+		replyInput:        replyInput,
+	}
+	m.kanban.SetTasks(m.tasks)
+	m.kanban.SelectTask(task.ID)
+
+	// Press 'r' — should enter reply mode for processing task
+	result, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
+	model := result.(*AppModel)
+
+	if !model.replyActive {
+		t.Error("replyActive should be true after pressing 'r' on a processing task needing input")
+	}
+	if model.replyTaskID != task.ID {
+		t.Errorf("replyTaskID should be %d, got %d", task.ID, model.replyTaskID)
+	}
+}
+
 // TestReplyMode_EscCancels verifies pressing Esc in reply mode cancels it.
 func TestReplyMode_EscCancels(t *testing.T) {
 	replyInput := textinput.New()
