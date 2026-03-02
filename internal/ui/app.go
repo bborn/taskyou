@@ -2012,8 +2012,9 @@ func (m *AppModel) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case key.Matches(msg, m.keys.Retry):
 		if task := m.kanban.SelectedTask(); task != nil {
-			// If task needs input, enter reply mode instead of retry
-			if m.tasksNeedingInput[task.ID] || m.detectPermissionPrompt(task.ID) {
+			// Only focus quick input if task is in progress or blocked
+			if (task.Status == db.StatusProcessing || task.Status == db.StatusBlocked) &&
+				(m.tasksNeedingInput[task.ID] || m.detectPermissionPrompt(task.ID)) {
 				m.replyActive = true
 				m.replyTaskID = task.ID
 				m.replyInput.SetValue("")
