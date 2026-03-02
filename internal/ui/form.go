@@ -665,6 +665,8 @@ func (m *FormModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.focused = FieldTitle
 				m.focusCurrent()
 			}
+			// Recalculate body height since available space changes with mode
+			m.updateBodyHeight()
 			return m, nil
 
 		case "ctrl+s":
@@ -1805,51 +1807,35 @@ func (m *FormModel) SetSize(width, height int) {
 	m.updateBodyHeight()
 }
 
-// calculateBodyHeight calculates the appropriate height for the body textarea based on content.
-// Returns a height between minHeight (8) and maxHeight (50% of available screen height).
+// calculateBodyHeight calculates the appropriate height for the body textarea.
+// The body expands to fill all available screen space after accounting for other form elements.
 func (m *FormModel) calculateBodyHeight() int {
-	content := m.bodyInput.Value()
-
-	// Minimum height - increased from 4 to 8 to display more content by default
 	minHeight := 8
 
-	// Maximum height is 50% of screen height
-	// Account for other form elements: header(2) + title(2) + body label(1) + project(2) +
-	// type(2) + schedule(2) + attachments(2) + help(1) + padding/borders(~6) = ~19 lines
-	formOverhead := 22
-	maxHeight := (m.height - formOverhead) / 2
-	if maxHeight < minHeight {
-		maxHeight = minHeight
+	// Box chrome: border(2) + padding(2) + Height offset(2) = 6
+	boxChrome := 6
+
+	// Non-body content lines common to both modes:
+	// header(1) + blank(1) + title(1) + blank(1) + details label(1) + help(1) = 6
+	commonOverhead := 6
+
+	var modeOverhead int
+	if m.showAdvanced {
+		// Advanced adds: project(1+blank) + attachments(blank+label+input+blank=4) +
+		// type(1+blank) + executor(1+blank) = 10
+		modeOverhead = 10
+	} else {
+		// Simple adds: blank + summary + blank(2) = 3
+		modeOverhead = 3
 	}
 
-	// Count actual lines needed
-	lines := 1
-	if content != "" {
-		lines = strings.Count(content, "\n") + 1
+	totalOverhead := boxChrome + commonOverhead + modeOverhead
+	availableHeight := m.height - totalOverhead
+	if availableHeight < minHeight {
+		availableHeight = minHeight
 	}
 
-	// Account for line wrapping
-	textWidth := m.width - 24 // Same width as used in SetWidth
-	if textWidth > 0 {
-		for _, line := range strings.Split(content, "\n") {
-			// Each line might wrap based on character count
-			lineLen := len(line)
-			if lineLen > textWidth {
-				lines += lineLen / textWidth
-			}
-		}
-	}
-
-	// Apply min/max bounds
-	height := lines
-	if height < minHeight {
-		height = minHeight
-	}
-	if height > maxHeight {
-		height = maxHeight
-	}
-
-	return height
+	return availableHeight
 }
 
 // updateBodyHeight updates the body textarea height based on content.
