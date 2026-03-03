@@ -133,7 +133,7 @@ func (o *OpenCodeExecutor) runOpenCode(ctx context.Context, task *db.Task, workD
 			workDir, task.ID, worktreeSessionID, task.Port, task.WorktreePath, envPrefix, promptFile.Name(), promptFile.Name())
 	}
 
-	actualSession, tmuxErr := createTmuxWindow(daemonSession, windowName, workDir, script)
+	actualSession, tmuxErr := createTmuxWindow(daemonSession, windowName, workDir, script, o.executor.getProjectDir(task.Project))
 	if tmuxErr != nil {
 		o.logger.Error("tmux new-window failed", "error", tmuxErr, "session", daemonSession)
 		o.executor.logLine(task.ID, "error", fmt.Sprintf("Failed to create tmux window: %s", tmuxErr.Error()))

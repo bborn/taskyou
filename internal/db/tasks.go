@@ -1096,17 +1096,21 @@ func (p *Project) GetAction(trigger string) *ProjectAction {
 	return nil
 }
 
+// boolToInt converts a bool to an int for SQLite storage (1=true, 0=false).
+func boolToInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
+}
+
 // CreateProject creates a new project.
 func (db *DB) CreateProject(p *Project) error {
 	actionsJSON, _ := json.Marshal(p.Actions)
-	useWorktrees := 1
-	if !p.UseWorktrees {
-		useWorktrees = 0
-	}
 	result, err := db.Exec(`
 		INSERT INTO projects (name, path, aliases, instructions, actions, color, claude_config_dir, use_worktrees)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-	`, p.Name, p.Path, p.Aliases, p.Instructions, string(actionsJSON), p.Color, p.ClaudeConfigDir, useWorktrees)
+	`, p.Name, p.Path, p.Aliases, p.Instructions, string(actionsJSON), p.Color, p.ClaudeConfigDir, boolToInt(p.UseWorktrees))
 	if err != nil {
 		return fmt.Errorf("insert project: %w", err)
 	}
@@ -1118,14 +1122,10 @@ func (db *DB) CreateProject(p *Project) error {
 // UpdateProject updates a project.
 func (db *DB) UpdateProject(p *Project) error {
 	actionsJSON, _ := json.Marshal(p.Actions)
-	useWorktrees := 1
-	if !p.UseWorktrees {
-		useWorktrees = 0
-	}
 	_, err := db.Exec(`
 		UPDATE projects SET name = ?, path = ?, aliases = ?, instructions = ?, actions = ?, color = ?, claude_config_dir = ?, use_worktrees = ?
 		WHERE id = ?
-	`, p.Name, p.Path, p.Aliases, p.Instructions, string(actionsJSON), p.Color, p.ClaudeConfigDir, useWorktrees, p.ID)
+	`, p.Name, p.Path, p.Aliases, p.Instructions, string(actionsJSON), p.Color, p.ClaudeConfigDir, boolToInt(p.UseWorktrees), p.ID)
 	if err != nil {
 		return fmt.Errorf("update project: %w", err)
 	}

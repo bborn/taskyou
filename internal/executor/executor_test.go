@@ -912,27 +912,42 @@ func TestIsValidWorkDir(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	t.Run("worktree path is valid", func(t *testing.T) {
-		if !isValidWorkDir(taskDir) {
-			t.Errorf("isValidWorkDir(%q) should return true for worktree directory", taskDir)
+	t.Run("worktree path is valid regardless of allowedProjectDir", func(t *testing.T) {
+		if !isValidWorkDir(taskDir, "") {
+			t.Errorf("isValidWorkDir(%q, \"\") should return true for worktree directory", taskDir)
+		}
+		if !isValidWorkDir(taskDir, "/some/other/path") {
+			t.Errorf("isValidWorkDir(%q, other) should return true for worktree directory", taskDir)
 		}
 	})
 
-	t.Run("project directory is valid for non-worktree projects", func(t *testing.T) {
-		// For non-worktree projects, the project directory itself is the work dir
-		if !isValidWorkDir(tmpDir) {
-			t.Errorf("isValidWorkDir(%q) should return true for existing project directory", tmpDir)
+	t.Run("project directory is valid when it matches allowedProjectDir", func(t *testing.T) {
+		if !isValidWorkDir(tmpDir, tmpDir) {
+			t.Errorf("isValidWorkDir(%q, %q) should return true when paths match", tmpDir, tmpDir)
+		}
+	})
+
+	t.Run("project directory is rejected when allowedProjectDir differs", func(t *testing.T) {
+		if isValidWorkDir(tmpDir, "/some/other/path") {
+			t.Errorf("isValidWorkDir(%q, other) should return false when paths don't match", tmpDir)
+		}
+	})
+
+	t.Run("arbitrary directory is rejected without allowedProjectDir", func(t *testing.T) {
+		if isValidWorkDir(tmpDir, "") {
+			t.Errorf("isValidWorkDir(%q, \"\") should return false for non-worktree path with empty allowed", tmpDir)
 		}
 	})
 
 	t.Run("empty path is not valid", func(t *testing.T) {
-		if isValidWorkDir("") {
-			t.Error("isValidWorkDir('') should return false")
+		if isValidWorkDir("", tmpDir) {
+			t.Error("isValidWorkDir('', ...) should return false")
 		}
 	})
 
-	t.Run("non-existent path is not valid", func(t *testing.T) {
-		if isValidWorkDir("/nonexistent/path/xyz") {
+	t.Run("non-existent path is not valid even if allowed", func(t *testing.T) {
+		nonExistent := "/nonexistent/path/xyz"
+		if isValidWorkDir(nonExistent, nonExistent) {
 			t.Error("isValidWorkDir should return false for non-existent path")
 		}
 	})

@@ -272,4 +272,20 @@ func TestProjectUseWorktrees(t *testing.T) {
 	if !p.UsesWorktrees() {
 		t.Error("no-git-project should use worktrees after update")
 	}
+
+	// Test alias-based lookup preserves UseWorktrees
+	aliasProject := &Project{Name: "alias-proj", Path: filepath.Join(tmpDir, "alias"), Aliases: "ap,aliased", UseWorktrees: false}
+	if err := db.CreateProject(aliasProject); err != nil {
+		t.Fatalf("failed to create alias project: %v", err)
+	}
+	p, err = db.GetProjectByName("ap")
+	if err != nil {
+		t.Fatalf("failed to get project by alias: %v", err)
+	}
+	if p == nil {
+		t.Fatal("expected project from alias lookup, got nil")
+	}
+	if p.UsesWorktrees() {
+		t.Error("alias-proj looked up by alias should NOT use worktrees")
+	}
 }
