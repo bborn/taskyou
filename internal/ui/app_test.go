@@ -1754,6 +1754,51 @@ func TestQuickInput_TabEntersQuickInput(t *testing.T) {
 	}
 }
 
+// TestRetry_RKeyOnDoneTaskRetries verifies that pressing 'r' on a done task
+// opens the retry view (not quick input mode).
+func TestRetry_RKeyOnDoneTaskRetries(t *testing.T) {
+	database, err := db.Open(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to create test database: %v", err)
+	}
+	defer database.Close()
+
+	task := &db.Task{Title: "Test task", Status: db.StatusDone}
+	if err := database.CreateTask(task); err != nil {
+		t.Fatalf("Failed to create task: %v", err)
+	}
+
+	replyInput := textinput.New()
+	replyInput.CharLimit = 200
+
+	m := &AppModel{
+		width:             100,
+		height:            50,
+		currentView:       ViewDashboard,
+		db:                database,
+		keys:              DefaultKeyMap(),
+		tasks:             []*db.Task{task},
+		tasksNeedingInput: map[int64]bool{task.ID: true},
+		executorPrompts:   map[int64]string{task.ID: "Choose option 1, 2, or 3"},
+		kanban:            NewKanbanBoard(100, 50),
+		prevStatuses:      map[int64]string{task.ID: db.StatusDone},
+		replyInput:        replyInput,
+	}
+	m.kanban.SetTasks(m.tasks)
+	m.kanban.SelectTask(task.ID)
+
+	// Press 'r' — should open retry view
+	result, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
+	model := result.(*AppModel)
+
+	if model.quickInputFocused {
+		t.Error("quickInputFocused should be false — done tasks should retry, not focus input")
+	}
+	if model.currentView != ViewRetry {
+		t.Errorf("currentView should be ViewRetry, got %d", model.currentView)
+	}
+}
+
 // TestQuickInput_EscUnfocuses verifies pressing Esc in quick input mode unfocuses it.
 func TestQuickInput_EscUnfocuses(t *testing.T) {
 	replyInput := textinput.New()

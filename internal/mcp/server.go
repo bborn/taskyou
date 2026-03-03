@@ -755,6 +755,13 @@ This saves future tasks from re-exploring the codebase.`},
 		}
 		mainRepoDir := project.Path
 
+		// Spotlight requires worktree isolation - it syncs changes between a worktree and the main repo.
+		// For non-worktree projects, the task already runs in the project directory.
+		if !project.UsesWorktrees() {
+			s.sendError(id, -32602, "Spotlight is not available for non-worktree projects (task already runs in project directory)")
+			return
+		}
+
 		// Handle spotlight actions
 		var result string
 		switch action {

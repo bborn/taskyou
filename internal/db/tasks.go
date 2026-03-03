@@ -1076,7 +1076,14 @@ type Project struct {
 	Actions         []ProjectAction // actions triggered on task events (stored as JSON)
 	Color           string          // hex color for display (e.g., "#61AFEF")
 	ClaudeConfigDir string          // override CLAUDE_CONFIG_DIR for this project
+	UseWorktrees    bool            // whether to use git worktrees for task isolation (default true)
 	CreatedAt       LocalTime
+}
+
+// UsesWorktrees returns whether this project uses git worktrees for task isolation.
+// Defaults to true for backward compatibility.
+func (p *Project) UsesWorktrees() bool {
+	return p.UseWorktrees
 }
 
 // GetAction returns the action for a given trigger, or nil if not found.
@@ -1092,10 +1099,14 @@ func (p *Project) GetAction(trigger string) *ProjectAction {
 // CreateProject creates a new project.
 func (db *DB) CreateProject(p *Project) error {
 	actionsJSON, _ := json.Marshal(p.Actions)
+	useWorktrees := 1
+	if !p.UseWorktrees {
+		useWorktrees = 0
+	}
 	result, err := db.Exec(`
-		INSERT INTO projects (name, path, aliases, instructions, actions, color, claude_config_dir)
-		VALUES (?, ?, ?, ?, ?, ?, ?)
-	`, p.Name, p.Path, p.Aliases, p.Instructions, string(actionsJSON), p.Color, p.ClaudeConfigDir)
+		INSERT INTO projects (name, path, aliases, instructions, actions, color, claude_config_dir, use_worktrees)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+	`, p.Name, p.Path, p.Aliases, p.Instructions, string(actionsJSON), p.Color, p.ClaudeConfigDir, useWorktrees)
 	if err != nil {
 		return fmt.Errorf("insert project: %w", err)
 	}
@@ -1107,10 +1118,14 @@ func (db *DB) CreateProject(p *Project) error {
 // UpdateProject updates a project.
 func (db *DB) UpdateProject(p *Project) error {
 	actionsJSON, _ := json.Marshal(p.Actions)
+	useWorktrees := 1
+	if !p.UseWorktrees {
+		useWorktrees = 0
+	}
 	_, err := db.Exec(`
-		UPDATE projects SET name = ?, path = ?, aliases = ?, instructions = ?, actions = ?, color = ?, claude_config_dir = ?
+		UPDATE projects SET name = ?, path = ?, aliases = ?, instructions = ?, actions = ?, color = ?, claude_config_dir = ?, use_worktrees = ?
 		WHERE id = ?
-	`, p.Name, p.Path, p.Aliases, p.Instructions, string(actionsJSON), p.Color, p.ClaudeConfigDir, p.ID)
+	`, p.Name, p.Path, p.Aliases, p.Instructions, string(actionsJSON), p.Color, p.ClaudeConfigDir, useWorktrees, p.ID)
 	if err != nil {
 		return fmt.Errorf("update project: %w", err)
 	}
@@ -1151,7 +1166,7 @@ func (db *DB) CountTasksByProject(projectName string) (int, error) {
 // ListProjects returns all projects, with "personal" always first.
 func (db *DB) ListProjects() ([]*Project, error) {
 	rows, err := db.Query(`
-		SELECT id, name, path, aliases, instructions, COALESCE(actions, '[]'), COALESCE(color, ''), COALESCE(claude_config_dir, ''), created_at
+		SELECT id, name, path, aliases, instructions, COALESCE(actions, '[]'), COALESCE(color, ''), COALESCE(claude_config_dir, ''), COALESCE(use_worktrees, 1), created_at
 		FROM projects ORDER BY CASE WHEN name = 'personal' THEN 0 ELSE 1 END, name
 	`)
 	if err != nil {
@@ -1163,10 +1178,12 @@ func (db *DB) ListProjects() ([]*Project, error) {
 	for rows.Next() {
 		p := &Project{}
 		var actionsJSON string
-		if err := rows.Scan(&p.ID, &p.Name, &p.Path, &p.Aliases, &p.Instructions, &actionsJSON, &p.Color, &p.ClaudeConfigDir, &p.CreatedAt); err != nil {
+		var useWorktrees int
+		if err := rows.Scan(&p.ID, &p.Name, &p.Path, &p.Aliases, &p.Instructions, &actionsJSON, &p.Color, &p.ClaudeConfigDir, &useWorktrees, &p.CreatedAt); err != nil {
 			return nil, fmt.Errorf("scan project: %w", err)
 		}
 		json.Unmarshal([]byte(actionsJSON), &p.Actions)
+		p.UseWorktrees = useWorktrees != 0
 		projects = append(projects, p)
 	}
 	return projects, nil
@@ -1177,12 +1194,14 @@ func (db *DB) GetProjectByName(name string) (*Project, error) {
 	// First try exact name match
 	p := &Project{}
 	var actionsJSON string
+	var useWorktrees int
 	err := db.QueryRow(`
-		SELECT id, name, path, aliases, instructions, COALESCE(actions, '[]'), COALESCE(color, ''), COALESCE(claude_config_dir, ''), created_at
+		SELECT id, name, path, aliases, instructions, COALESCE(actions, '[]'), COALESCE(color, ''), COALESCE(claude_config_dir, ''), COALESCE(use_worktrees, 1), created_at
 		FROM projects WHERE name = ?
-	`, name).Scan(&p.ID, &p.Name, &p.Path, &p.Aliases, &p.Instructions, &actionsJSON, &p.Color, &p.ClaudeConfigDir, &p.CreatedAt)
+	`, name).Scan(&p.ID, &p.Name, &p.Path, &p.Aliases, &p.Instructions, &actionsJSON, &p.Color, &p.ClaudeConfigDir, &useWorktrees, &p.CreatedAt)
 	if err == nil {
 		json.Unmarshal([]byte(actionsJSON), &p.Actions)
+		p.UseWorktrees = useWorktrees != 0
 		return p, nil
 	}
 	if err != sql.ErrNoRows {
@@ -1190,7 +1209,7 @@ func (db *DB) GetProjectByName(name string) (*Project, error) {
 	}
 
 	// Try alias match
-	rows, err := db.Query(`SELECT id, name, path, aliases, instructions, COALESCE(actions, '[]'), COALESCE(color, ''), COALESCE(claude_config_dir, ''), created_at FROM projects`)
+	rows, err := db.Query(`SELECT id, name, path, aliases, instructions, COALESCE(actions, '[]'), COALESCE(color, ''), COALESCE(claude_config_dir, ''), COALESCE(use_worktrees, 1), created_at FROM projects`)
 	if err != nil {
 		return nil, fmt.Errorf("query projects: %w", err)
 	}
@@ -1198,10 +1217,11 @@ func (db *DB) GetProjectByName(name string) (*Project, error) {
 
 	for rows.Next() {
 		p := &Project{}
-		if err := rows.Scan(&p.ID, &p.Name, &p.Path, &p.Aliases, &p.Instructions, &actionsJSON, &p.Color, &p.ClaudeConfigDir, &p.CreatedAt); err != nil {
+		if err := rows.Scan(&p.ID, &p.Name, &p.Path, &p.Aliases, &p.Instructions, &actionsJSON, &p.Color, &p.ClaudeConfigDir, &useWorktrees, &p.CreatedAt); err != nil {
 			return nil, fmt.Errorf("scan project: %w", err)
 		}
 		json.Unmarshal([]byte(actionsJSON), &p.Actions)
+		p.UseWorktrees = useWorktrees != 0
 		for _, alias := range splitAliases(p.Aliases) {
 			if alias == name {
 				return p, nil

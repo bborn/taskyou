@@ -18,44 +18,36 @@ func TestCalculateBodyHeight(t *testing.T) {
 		wantMax      int
 	}{
 		{
-			name:         "empty content returns minimum height",
+			name:         "empty content fills available space",
 			content:      "",
 			screenHeight: 50,
 			screenWidth:  100,
-			wantMin:      8,
-			wantMax:      8,
+			wantMin:      20, // body fills available space (50 - overhead)
+			wantMax:      50,
 		},
 		{
-			name:         "single line returns minimum height",
+			name:         "single line fills available space",
 			content:      "hello world",
 			screenHeight: 50,
 			screenWidth:  100,
-			wantMin:      8,
-			wantMax:      8,
+			wantMin:      20,
+			wantMax:      50,
 		},
 		{
-			name:         "multiple lines grows height",
-			content:      "line1\nline2\nline3\nline4\nline5\nline6",
-			screenHeight: 50,
+			name:         "small screen uses minimum height",
+			content:      "",
+			screenHeight: 20,
 			screenWidth:  100,
-			wantMin:      8,
-			wantMax:      8,
+			wantMin:      8, // minimum height enforced
+			wantMax:      20,
 		},
 		{
-			name:         "many lines capped at max height (50% of screen)",
-			content:      strings.Repeat("line\n", 50),
-			screenHeight: 50,
+			name:         "large screen fills more space",
+			content:      "",
+			screenHeight: 100,
 			screenWidth:  100,
-			wantMin:      8,  // at least minimum
-			wantMax:      14, // (50-22)/2 = 14
-		},
-		{
-			name:         "long lines wrap and increase height",
-			content:      strings.Repeat("a", 200), // should wrap on ~76 char width
-			screenHeight: 50,
-			screenWidth:  100,
-			wantMin:      8,
-			wantMax:      8, // wrapped lines still within minimum
+			wantMin:      50, // more screen = more body space
+			wantMax:      100,
 		},
 	}
 
@@ -79,41 +71,37 @@ func TestCalculateBodyHeight(t *testing.T) {
 func TestUpdateBodyHeightSetsHeight(t *testing.T) {
 	m := NewFormModel(nil, 100, 50, "", nil)
 
-	// Initially should have minimum height of 8
+	// Should fill available space regardless of content
 	m.updateBodyHeight()
 	// The textarea height is internal, so we just verify no panic
 
-	// Add content and update
+	// Add content and update - height stays the same (fills available space)
 	m.bodyInput.SetValue("line1\nline2\nline3\nline4\nline5")
 	m.updateBodyHeight()
-	// Verify no panic and height should be 5
 
-	// Verify that with large content, height is capped
+	// Large content - height is the same (fills available space)
 	m.bodyInput.SetValue(strings.Repeat("line\n", 100))
 	m.updateBodyHeight()
-	// Should be capped at max height (50% of screen)
 }
 
-func TestMaxHeightIs50PercentOfScreen(t *testing.T) {
+func TestBodyHeightFillsAvailableSpace(t *testing.T) {
 	screenHeights := []int{40, 60, 80, 100}
 
 	for _, screenHeight := range screenHeights {
 		t.Run("screen_height_"+string(rune('0'+screenHeight/10)), func(t *testing.T) {
 			m := NewFormModel(nil, 100, screenHeight, "", nil)
 
-			// Add lots of content to trigger max height
-			m.bodyInput.SetValue(strings.Repeat("line\n", 100))
-
 			height := m.calculateBodyHeight()
 
-			// formOverhead is 22, so maxHeight = (screenHeight - 22) / 2
-			expectedMax := (screenHeight - 22) / 2
-			if expectedMax < 8 {
-				expectedMax = 8
+			// Body should fill available space (screen minus overhead)
+			// In advanced mode: boxChrome(6) + common(6) + advanced(10) = 22
+			expectedHeight := screenHeight - 22
+			if expectedHeight < 8 {
+				expectedHeight = 8
 			}
 
-			if height > expectedMax {
-				t.Errorf("height %d exceeds expected max %d for screen height %d", height, expectedMax, screenHeight)
+			if height != expectedHeight {
+				t.Errorf("height %d != expected %d for screen height %d", height, expectedHeight, screenHeight)
 			}
 		})
 	}
