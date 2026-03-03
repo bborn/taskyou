@@ -1,3 +1,7 @@
+[![CI](https://github.com/bborn/taskyou/actions/workflows/ci.yml/badge.svg)](https://github.com/bborn/taskyou/actions/workflows/ci.yml)
+[![Go Reference](https://pkg.go.dev/badge/github.com/bborn/workflow.svg)](https://pkg.go.dev/github.com/bborn/workflow)
+[![Go Report Card](https://goreportcard.com/badge/github.com/bborn/workflow)](https://goreportcard.com/report/github.com/bborn/workflow)
+
 # Task You
 
 A personal task management system with a beautiful terminal UI, SQLite storage, and background task execution via pluggable AI agents (Claude Code, OpenAI Codex, Gemini, Pi, OpenClaw, or OpenCode).

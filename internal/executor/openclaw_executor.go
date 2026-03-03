@@ -10,8 +10,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/bborn/workflow/internal/db"
 	"github.com/charmbracelet/log"
+
+	"github.com/bborn/workflow/internal/db"
 )
 
 // OpenClawExecutor implements TaskExecutor for OpenClaw AI assistant.
@@ -378,4 +379,3 @@ func (o *OpenClawExecutor) ResumeSafe(task *db.Task, workDir string) bool {
 	o.executor.logLine(task.ID, "system", "OpenClaw does not support dangerous mode toggle")
 	return false
 }
-

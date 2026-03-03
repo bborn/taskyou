@@ -4,9 +4,10 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/charmbracelet/lipgloss"
+
 	"github.com/bborn/workflow/internal/db"
 	"github.com/bborn/workflow/internal/github"
-	"github.com/charmbracelet/lipgloss"
 )
 
 // emptyColumnMessage returns a contextual message for empty columns.
@@ -43,8 +44,8 @@ type KanbanBoard struct {
 	columns           []KanbanColumn
 	selectedCol       int
 	selectedRow       int
-	scrollOffsets     []int // Scroll offset per column
-	collapsedColumns  map[int]bool             // Columns that are collapsed (show only header)
+	scrollOffsets     []int        // Scroll offset per column
+	collapsedColumns  map[int]bool // Columns that are collapsed (show only header)
 	width             int
 	height            int
 	allTasks          []*db.Task               // All tasks
@@ -1474,7 +1475,7 @@ func (k *KanbanBoard) handleClickDesktop(x, y int) *db.Task {
 
 	// Calculate which task was clicked
 	col := k.columns[colIdx]
-	colHeight := k.height - 2 // -2 for column borders (top + bottom)
+	colHeight := k.height - 2                    // -2 for column borders (top + bottom)
 	maxTasks := (colHeight - 3) / taskCardHeight // -3 for header bar and scroll indicators
 	if maxTasks < 1 {
 		maxTasks = 1

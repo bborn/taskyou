@@ -16,11 +16,11 @@ type Config struct {
 
 // Setting keys
 const (
-	SettingProjectsDir        = "projects_dir"
-	SettingTheme              = "theme"
-	SettingDetailPaneHeight   = "detail_pane_height"
-	SettingShellPaneWidth     = "shell_pane_width"
-	SettingShellPaneHidden    = "shell_pane_hidden"
+	SettingProjectsDir           = "projects_dir"
+	SettingTheme                 = "theme"
+	SettingDetailPaneHeight      = "detail_pane_height"
+	SettingShellPaneWidth        = "shell_pane_width"
+	SettingShellPaneHidden       = "shell_pane_hidden"
 	SettingIdleSuspendTimeout    = "idle_suspend_timeout"
 	SettingServerURL             = "server_url"
 	SettingWorktreeCleanupMaxAge = "worktree_cleanup_max_age"

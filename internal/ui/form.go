@@ -9,13 +9,14 @@ import (
 	"time"
 	"unicode"
 
-	"github.com/bborn/workflow/internal/autocomplete"
-	"github.com/bborn/workflow/internal/db"
 	"github.com/charmbracelet/bubbles/cursor"
 	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+
+	"github.com/bborn/workflow/internal/autocomplete"
+	"github.com/bborn/workflow/internal/db"
 )
 
 // FormField represents the currently focused field.
@@ -60,7 +61,7 @@ type FormModel struct {
 	taskType           string
 	typeIdx            int
 	types              []string
-	executor           string   // "claude", "codex", "gemini"
+	executor           string // "claude", "codex", "gemini"
 	executorIdx        int
 	executors          []string
 	availableExecutors []string // Original list of available executors (for rebuilding when project changes)

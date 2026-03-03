@@ -1416,7 +1416,7 @@ func TestKanbanBoard_ColumnCollapse(t *testing.T) {
 	})
 
 	t.Run("MoveLeft skips collapsed columns", func(t *testing.T) {
-		board.FocusColumn(1) // Select In Progress
+		board.FocusColumn(1)          // Select In Progress
 		board.ToggleColumnCollapse(0) // Collapse backlog
 		board.MoveLeft()
 		// Should not move to backlog since it's collapsed
@@ -1430,7 +1430,7 @@ func TestKanbanBoard_ColumnCollapse(t *testing.T) {
 	})
 
 	t.Run("MoveRight skips collapsed columns", func(t *testing.T) {
-		board.FocusColumn(2) // Select Blocked
+		board.FocusColumn(2)          // Select Blocked
 		board.ToggleColumnCollapse(3) // Collapse Done
 		board.MoveRight()
 		// Should not move to done since it's collapsed
@@ -1444,7 +1444,7 @@ func TestKanbanBoard_ColumnCollapse(t *testing.T) {
 	})
 
 	t.Run("FocusColumn uncollapses collapsed column", func(t *testing.T) {
-		board.FocusColumn(1) // Move away
+		board.FocusColumn(1)          // Move away
 		board.ToggleColumnCollapse(0) // Collapse backlog
 		if !board.IsColumnCollapsed(0) {
 			t.Error("backlog should be collapsed")

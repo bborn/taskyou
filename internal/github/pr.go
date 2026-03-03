@@ -41,8 +41,8 @@ type PRInfo struct {
 	CheckState CheckState `json:"checkState"`
 	Mergeable  string     `json:"mergeable"` // "MERGEABLE", "CONFLICTING", "UNKNOWN"
 	UpdatedAt  time.Time  `json:"updatedAt"`
-	Additions  int        `json:"additions"`  // Lines added
-	Deletions  int        `json:"deletions"`  // Lines deleted
+	Additions  int        `json:"additions"` // Lines added
+	Deletions  int        `json:"deletions"` // Lines deleted
 }
 
 // ghPRResponse is the JSON response from gh pr view.

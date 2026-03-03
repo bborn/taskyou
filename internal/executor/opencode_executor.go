@@ -10,8 +10,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/bborn/workflow/internal/db"
 	"github.com/charmbracelet/log"
+
+	"github.com/bborn/workflow/internal/db"
 )
 
 // OpenCodeExecutor implements TaskExecutor for OpenCode AI assistant.

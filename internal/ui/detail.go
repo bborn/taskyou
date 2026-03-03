@@ -9,15 +9,16 @@ import (
 	"strings"
 	"time"
 
+	"github.com/charmbracelet/bubbles/viewport"
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/glamour"
+	"github.com/charmbracelet/lipgloss"
+
 	"github.com/bborn/workflow/internal/config"
 	"github.com/bborn/workflow/internal/db"
 	"github.com/bborn/workflow/internal/executor"
 	"github.com/bborn/workflow/internal/github"
 	"github.com/bborn/workflow/internal/spotlight"
-	"github.com/charmbracelet/bubbles/viewport"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/glamour"
-	"github.com/charmbracelet/lipgloss"
 )
 
 // shouldSkipAutoExecutor returns true if the task should NOT automatically
@@ -105,8 +106,8 @@ type DetailModel struct {
 	shellPaneHidden bool // true when shell pane is collapsed to daemon
 
 	// Server detection for task port
-	serverListening   bool      // true when a server is listening on the task's port
-	lastServerCheck   time.Time // throttle server port checks
+	serverListening bool      // true when a server is listening on the task's port
+	lastServerCheck time.Time // throttle server port checks
 }
 
 // Message types for async pane loading

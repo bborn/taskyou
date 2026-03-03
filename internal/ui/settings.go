@@ -8,10 +8,11 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/bborn/workflow/internal/db"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/huh"
 	"github.com/charmbracelet/lipgloss"
+
+	"github.com/bborn/workflow/internal/db"
 )
 
 // SettingsModel represents the settings view.

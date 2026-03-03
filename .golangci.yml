@@ -1,5 +1,11 @@
 version: "2"
 linters:
+  enable:
+    - gosec
+    - misspell
+    - bodyclose
+    - unconvert
+    - errname
   disable:
     - errcheck
   settings:
@@ -17,6 +23,16 @@ linters:
       - common-false-positives
       - legacy
       - std-error-handling
+    rules:
+      - linters: [gosec]
+        text: "G204:"
+      - linters: [gosec]
+        text: "G115:"
+      - linters: [gosec]
+        text: "G306:"
+      - linters: [staticcheck]
+        text: "SA5011"
+        path: "_test\\.go"
     paths:
       - third_party$
       - builtin$
@@ -25,6 +41,12 @@ issues:
   max-issues-per-linter: 0
   max-same-issues: 0
 formatters:
+  enable:
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/bborn/workflow
   exclusions:
     generated: lax
     paths:

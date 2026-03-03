@@ -10,8 +10,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/bborn/workflow/internal/db"
 	"github.com/charmbracelet/log"
+
+	"github.com/bborn/workflow/internal/db"
 )
 
 // Event types for hooks

@@ -24,10 +24,10 @@ type IMAPAdapter struct {
 	logger   *slog.Logger
 	emailsCh chan *Email
 
-	mu       sync.Mutex
-	client   *imapclient.Client
-	stopCh   chan struct{}
-	stopped  bool
+	mu      sync.Mutex
+	client  *imapclient.Client
+	stopCh  chan struct{}
+	stopped bool
 }
 
 // SMTPConfig holds SMTP configuration for sending.

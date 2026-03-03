@@ -1113,7 +1113,7 @@ func TestPostToolUseHookLogging(t *testing.T) {
 
 		// Simulate PostToolUse with tool name
 		input := &ClaudeHookInput{
-			ToolName: "Read",
+			ToolName:  "Read",
 			ToolInput: []byte(`{"file_path": "/path/to/file.go"}`),
 		}
 		err := handlePostToolUseHook(database, task.ID, input)

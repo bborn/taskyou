@@ -7,9 +7,10 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/charmbracelet/lipgloss"
+
 	"github.com/bborn/workflow/internal/db"
 	"github.com/bborn/workflow/internal/github"
-	"github.com/charmbracelet/lipgloss"
 )
 
 // unicodeSupported caches whether the terminal supports Unicode.
@@ -43,9 +44,9 @@ const (
 	IconBacklogUnicode    = "◦"
 	IconInProgressUnicode = "▶"
 	IconBlockedUnicode    = "⚠"
-	IconDoneUnicode    = "✓"
-	IconPinUnicode     = "📌"
-	IconWarningUnicode = "⚠"
+	IconDoneUnicode       = "✓"
+	IconPinUnicode        = "📌"
+	IconWarningUnicode    = "⚠"
 	IconArrowUpUnicode    = "↑"
 	IconArrowDownUnicode  = "↓"
 	IconArrowLeftUnicode  = "←"
@@ -54,19 +55,19 @@ const (
 	IconShiftDownUnicode  = "⇧↓"
 
 	// ASCII fallbacks
-	IconBacklogASCII     = "o"
-	IconInProgressASCII  = ">"
-	IconProcessingASCII  = "~"
-	IconBlockedASCII     = "!"
-	IconDoneASCII    = "*"
-	IconPinASCII     = "P"
-	IconWarningASCII = "!"
-	IconArrowUpASCII     = "^"
-	IconArrowDownASCII   = "v"
-	IconArrowLeftASCII   = "<"
-	IconArrowRightASCII  = ">"
-	IconShiftUpASCII     = "^^"
-	IconShiftDownASCII   = "vv"
+	IconBacklogASCII      = "o"
+	IconInProgressASCII   = ">"
+	IconProcessingASCII   = "~"
+	IconBlockedASCII      = "!"
+	IconDoneASCII         = "*"
+	IconPinASCII          = "P"
+	IconWarningASCII      = "!"
+	IconArrowUpASCII      = "^"
+	IconArrowDownASCII    = "v"
+	IconArrowLeftASCII    = "<"
+	IconArrowRightASCII   = ">"
+	IconShiftUpASCII      = "^^"
+	IconShiftDownASCII    = "vv"
 	IconProcessingUnicode = "⋯"
 	IconDefaultUnicode    = "·"
 	IconDefaultASCII      = "."
@@ -459,10 +460,10 @@ func PRStatusDescription(pr *github.PRInfo) string {
 
 // Diff stat colors (git-style green/red)
 var (
-	ColorDiffAdd     = lipgloss.Color("#98C379") // Green for additions (bright)
-	ColorDiffDel     = lipgloss.Color("#E06C75") // Red for deletions (bright)
-	ColorDiffAddDim  = lipgloss.Color("#5C7A4A") // Dim green for unselected
-	ColorDiffDelDim  = lipgloss.Color("#8B4C52") // Dim red for unselected
+	ColorDiffAdd    = lipgloss.Color("#98C379") // Green for additions (bright)
+	ColorDiffDel    = lipgloss.Color("#E06C75") // Red for deletions (bright)
+	ColorDiffAddDim = lipgloss.Color("#5C7A4A") // Dim green for unselected
+	ColorDiffDelDim = lipgloss.Color("#8B4C52") // Dim red for unselected
 )
 
 // PRDiffStats returns a formatted diff stats string like "+123 -45" with dim colors.

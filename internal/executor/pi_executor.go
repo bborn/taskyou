@@ -9,8 +9,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/bborn/workflow/internal/db"
 	"github.com/charmbracelet/log"
+
+	"github.com/bborn/workflow/internal/db"
 )
 
 // PiExecutor implements TaskExecutor for Pi coding agent.

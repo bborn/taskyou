@@ -17,6 +17,11 @@ import (
 	"syscall"
 	"time"
 
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/log"
+	"github.com/spf13/cobra"
+
 	"github.com/bborn/workflow/internal/autocomplete"
 	"github.com/bborn/workflow/internal/config"
 	"github.com/bborn/workflow/internal/db"
@@ -24,10 +29,6 @@ import (
 	"github.com/bborn/workflow/internal/github"
 	"github.com/bborn/workflow/internal/mcp"
 	"github.com/bborn/workflow/internal/ui"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
-	"github.com/charmbracelet/log"
-	"github.com/spf13/cobra"
 )
 
 var (
@@ -136,7 +137,7 @@ Examples:
 			})
 			if err == nil {
 				model.SetTasks(tasks)
-				
+
 				// Also update window size to something reasonable
 				model.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
 			}
@@ -3406,13 +3407,13 @@ func runDaemon() error {
 
 // ClaudeHookInput is the JSON structure Claude sends to hooks via stdin.
 type ClaudeHookInput struct {
-	SessionID          string `json:"session_id"`
-	TranscriptPath     string `json:"transcript_path"`
-	Cwd                string `json:"cwd"`
-	HookEventName      string `json:"hook_event_name"`
-	NotificationType   string `json:"notification_type,omitempty"`   // For Notification hooks
-	Message            string `json:"message,omitempty"`             // General message field
-	StopReason string `json:"stop_reason,omitempty"` // For Stop hooks
+	SessionID        string `json:"session_id"`
+	TranscriptPath   string `json:"transcript_path"`
+	Cwd              string `json:"cwd"`
+	HookEventName    string `json:"hook_event_name"`
+	NotificationType string `json:"notification_type,omitempty"` // For Notification hooks
+	Message          string `json:"message,omitempty"`           // General message field
+	StopReason       string `json:"stop_reason,omitempty"`       // For Stop hooks
 	// Tool use fields (for PreToolUse and PostToolUse hooks)
 	ToolName     string          `json:"tool_name,omitempty"`     // Name of the tool being used
 	ToolInput    json.RawMessage `json:"tool_input,omitempty"`    // Tool-specific input parameters
