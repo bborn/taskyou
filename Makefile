@@ -114,16 +114,28 @@ logs:
 connect:
 	ssh -p 2222 cloud-claude
 
-# Create a new release (usage: make tag VERSION=v0.1.0)
-tag:
-ifndef VERSION
-	$(error VERSION is required. Usage: make tag VERSION=v0.1.0)
-endif
-	@echo "Creating release $(VERSION)..."
-	git tag -a $(VERSION) -m "Release $(VERSION)"
-	git push origin $(VERSION)
-	@echo "Done! GitHub Actions will build and publish the release."
-	@echo "View at: https://github.com/bborn/taskyou/releases/tag/$(VERSION)"
+# Cut a new patch release (auto-increments from latest tag)
+# Usage: make release          → v0.2.21 becomes v0.2.22
+#        make release BUMP=minor → v0.2.21 becomes v0.3.0
+#        make release BUMP=major → v0.2.21 becomes v1.0.0
+BUMP ?= patch
+release:
+	@LATEST=$$(git tag -l 'v*' --sort=-v:refname | head -1); \
+	if [ -z "$$LATEST" ]; then LATEST="v0.0.0"; fi; \
+	MAJOR=$$(echo $$LATEST | sed 's/^v//' | cut -d. -f1); \
+	MINOR=$$(echo $$LATEST | sed 's/^v//' | cut -d. -f2); \
+	PATCH=$$(echo $$LATEST | sed 's/^v//' | cut -d. -f3); \
+	case "$(BUMP)" in \
+		major) MAJOR=$$((MAJOR+1)); MINOR=0; PATCH=0;; \
+		minor) MINOR=$$((MINOR+1)); PATCH=0;; \
+		patch) PATCH=$$((PATCH+1));; \
+		*) echo "Invalid BUMP=$(BUMP). Use patch, minor, or major."; exit 1;; \
+	esac; \
+	NEXT="v$$MAJOR.$$MINOR.$$PATCH"; \
+	echo "$$LATEST → $$NEXT"; \
+	git tag -a $$NEXT -m "Release $$NEXT" && \
+	git push origin $$NEXT && \
+	echo "Done! View at: https://github.com/bborn/taskyou/releases/tag/$$NEXT"
 
 # Format code
 fmt:
