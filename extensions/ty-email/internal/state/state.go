@@ -18,16 +18,16 @@ type DB struct {
 
 // EmailThread tracks the mapping between email threads and tasks.
 type EmailThread struct {
-	EmailThreadID string    // Message-ID or thread reference
-	TaskID        int64     // TaskYou task ID
+	EmailThreadID string // Message-ID or thread reference
+	TaskID        int64  // TaskYou task ID
 	CreatedAt     time.Time
 }
 
 // ProcessedEmail tracks which emails have been handled.
 type ProcessedEmail struct {
-	EmailID     string    // Message-ID
-	TaskID      *int64    // Associated task (if any)
-	Action      string    // What action was taken
+	EmailID     string // Message-ID
+	TaskID      *int64 // Associated task (if any)
+	Action      string // What action was taken
 	ProcessedAt time.Time
 }
 

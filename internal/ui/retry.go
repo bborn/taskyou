@@ -5,10 +5,11 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/bborn/workflow/internal/db"
 	"github.com/charmbracelet/bubbles/textarea"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+
+	"github.com/bborn/workflow/internal/db"
 )
 
 // RetryModel handles retrying a blocked/failed task with optional feedback.

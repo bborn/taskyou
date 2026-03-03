@@ -10,14 +10,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/bborn/workflow/internal/ai"
-	"github.com/bborn/workflow/internal/autocomplete"
-	"github.com/bborn/workflow/internal/config"
-	"github.com/bborn/workflow/internal/db"
-	"github.com/bborn/workflow/internal/executor"
-	"github.com/bborn/workflow/internal/github"
-	"github.com/bborn/workflow/internal/spotlight"
-	"github.com/bborn/workflow/internal/tasksummary"
 	"github.com/charmbracelet/bubbles/help"
 	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/textinput"
@@ -26,6 +18,15 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/fsnotify/fsnotify"
 	"github.com/muesli/termenv"
+
+	"github.com/bborn/workflow/internal/ai"
+	"github.com/bborn/workflow/internal/autocomplete"
+	"github.com/bborn/workflow/internal/config"
+	"github.com/bborn/workflow/internal/db"
+	"github.com/bborn/workflow/internal/executor"
+	"github.com/bborn/workflow/internal/github"
+	"github.com/bborn/workflow/internal/spotlight"
+	"github.com/bborn/workflow/internal/tasksummary"
 )
 
 // View represents the current view.
@@ -51,30 +52,30 @@ const (
 
 // KeyMap defines key bindings.
 type KeyMap struct {
-	Left                     key.Binding
-	Right                    key.Binding
-	Up                       key.Binding
-	Down                     key.Binding
-	Enter                    key.Binding
-	Back                     key.Binding
-	New                      key.Binding
-	Edit                     key.Binding
-	Queue                    key.Binding
-	Retry                    key.Binding
-	Close                    key.Binding
-	Archive                  key.Binding
-	Delete                   key.Binding
-	Refresh                  key.Binding
-	Settings                 key.Binding
-	Help                     key.Binding
-	Quit                     key.Binding
-	ChangeStatus             key.Binding
-	CommandPalette           key.Binding
-	ToggleDangerous          key.Binding
-	TogglePin                key.Binding
-	Filter                   key.Binding
-	OpenWorktree             key.Binding
-	ToggleShellPane          key.Binding
+	Left               key.Binding
+	Right              key.Binding
+	Up                 key.Binding
+	Down               key.Binding
+	Enter              key.Binding
+	Back               key.Binding
+	New                key.Binding
+	Edit               key.Binding
+	Queue              key.Binding
+	Retry              key.Binding
+	Close              key.Binding
+	Archive            key.Binding
+	Delete             key.Binding
+	Refresh            key.Binding
+	Settings           key.Binding
+	Help               key.Binding
+	Quit               key.Binding
+	ChangeStatus       key.Binding
+	CommandPalette     key.Binding
+	ToggleDangerous    key.Binding
+	TogglePin          key.Binding
+	Filter             key.Binding
+	OpenWorktree       key.Binding
+	ToggleShellPane    key.Binding
 	JumpToNotification key.Binding
 	// Column focus shortcuts
 	FocusBacklog    key.Binding
@@ -503,7 +504,7 @@ type AppModel struct {
 	onboardingShown bool // Track if we've already shown the onboarding (to prevent double-triggering)
 
 	// Version upgrade notification
-	currentVersion string          // Current binary version (e.g. "v0.1.0" or "dev")
+	currentVersion string                // Current binary version (e.g. "v0.1.0" or "dev")
 	latestRelease  *github.LatestRelease // Latest release from GitHub (nil if not checked yet or same version)
 }
 
@@ -3594,8 +3595,8 @@ func (m *AppModel) updateCommandPalette(msg tea.Msg) (tea.Model, tea.Cmd) {
 type tasksLoadedMsg struct {
 	tasks           []*db.Task
 	err             error
-	hiddenDoneCount int            // Number of done tasks not shown in kanban (older ones)
-	blockedByDeps   map[int64]int  // Tasks blocked by dependencies (task ID -> open blocker count)
+	hiddenDoneCount int           // Number of done tasks not shown in kanban (older ones)
+	blockedByDeps   map[int64]int // Tasks blocked by dependencies (task ID -> open blocker count)
 }
 
 type taskLoadedMsg struct {
@@ -4107,6 +4108,7 @@ func (m *AppModel) syncSpotlight(task *db.Task) tea.Cmd {
 		return spotlightMsg{action: "sync", message: result, err: err}
 	}
 }
+
 // executorRespondedMsg is sent after approve/deny/reply is sent to the executor.
 type executorRespondedMsg struct {
 	taskID int64

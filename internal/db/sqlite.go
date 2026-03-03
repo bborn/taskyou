@@ -209,7 +209,6 @@ func (db *DB) migrate() error {
 		// Composite index for efficient conversation history queries
 		// Used by GetConversationHistoryLogs and HasContinuationMarker
 		`CREATE INDEX IF NOT EXISTS idx_task_logs_task_line_type ON task_logs(task_id, line_type)`,
-
 	}
 
 	for _, m := range migrations {

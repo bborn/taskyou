@@ -1,4 +1,6 @@
-.PHONY: build build-no-restart install clean test deploy
+.PHONY: build build-no-restart build-ty build-taskd restart-daemon build-linux \
+       install clean test vet vuln audit coverage run daemon \
+       deploy deploy-service deploy-full status logs connect tag fmt lint
 
 # Configuration
 SERVER ?= root@cloud-claude
@@ -8,6 +10,10 @@ REMOTE_DIR ?= /home/runner
 # Allow overriding the Go binary/toolchain (e.g. GO=go1.24.4 or mise exec -- go)
 GO ?= go
 
+# Version from git tag (e.g. v0.2.3 → 0.2.3), falls back to "dev"
+VERSION ?= $(shell git describe --tags --always 2>/dev/null | sed 's/^v//' || echo dev)
+LDFLAGS := -s -w -X main.version=$(VERSION)
+
 # Build all binaries and (optionally) restart daemon if running
 build: build-ty build-taskd restart-daemon
 
@@ -15,11 +21,11 @@ build: build-ty build-taskd restart-daemon
 build-no-restart: build-ty build-taskd
 
 build-ty:
-	$(GO) build -o bin/ty ./cmd/task
+	$(GO) build -ldflags="$(LDFLAGS)" -o bin/ty ./cmd/task
 	ln -sf ty bin/taskyou
 
 build-taskd:
-	$(GO) build -o bin/taskd ./cmd/taskd
+	$(GO) build -ldflags="$(LDFLAGS)" -o bin/taskd ./cmd/taskd
 
 # Restart daemon if it's running (silent if not). Never fail the build if we lack permissions.
 restart-daemon:
@@ -34,21 +40,38 @@ restart-daemon:
 
 # Build for Linux (server deployment)
 build-linux:
-	GOOS=linux GOARCH=amd64 go build -o bin/taskd-linux ./cmd/taskd
+	GOOS=linux GOARCH=amd64 go build -ldflags="$(LDFLAGS)" -o bin/taskd-linux ./cmd/taskd
 
 # Install to GOBIN (usually ~/go/bin) - installs as 'ty', 'taskyou' (symlink), and 'taskd'
 install:
-	go build -o $(shell go env GOBIN)/ty ./cmd/task
+	go build -ldflags="$(LDFLAGS)" -o $(shell go env GOBIN)/ty ./cmd/task
 	ln -sf ty $(shell go env GOBIN)/taskyou
-	go install ./cmd/taskd
+	go build -ldflags="$(LDFLAGS)" -o $(shell go env GOBIN)/taskd ./cmd/taskd
 
 # Clean build artifacts
 clean:
-	rm -rf bin/
+	rm -rf bin/ dist/
 
-# Run tests
+# Run tests with race detector
 test:
-	go test ./...
+	go test -race ./...
+
+# Run go vet
+vet:
+	go vet ./...
+
+# Run govulncheck
+vuln:
+	govulncheck ./...
+
+# Run all checks: vet, vuln, lint, test
+audit: vet vuln lint test
+
+# Generate HTML coverage report
+coverage:
+	go test -race -coverprofile=coverage.out ./...
+	go tool cover -html=coverage.out -o coverage.html
+	@echo "Coverage report: coverage.html"
 
 # Run the TUI locally (ty command)
 run:
@@ -101,15 +124,6 @@ endif
 	git push origin $(VERSION)
 	@echo "Done! GitHub Actions will build and publish the release."
 	@echo "View at: https://github.com/bborn/taskyou/releases/tag/$(VERSION)"
-
-# Build for release (all platforms)
-release:
-	GOOS=darwin GOARCH=amd64 go build -ldflags="-s -w" -o bin/ty-darwin-amd64 ./cmd/task
-	GOOS=darwin GOARCH=arm64 go build -ldflags="-s -w" -o bin/ty-darwin-arm64 ./cmd/task
-	GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o bin/ty-linux-amd64 ./cmd/task
-	GOOS=linux GOARCH=arm64 go build -ldflags="-s -w" -o bin/ty-linux-arm64 ./cmd/task
-	GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o bin/taskd-linux-amd64 ./cmd/taskd
-	GOOS=linux GOARCH=arm64 go build -ldflags="-s -w" -o bin/taskd-linux-arm64 ./cmd/taskd
 
 # Format code
 fmt:

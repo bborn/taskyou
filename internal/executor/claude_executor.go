@@ -6,8 +6,9 @@ import (
 	"os"
 	"os/exec"
 
-	"github.com/bborn/workflow/internal/db"
 	"github.com/charmbracelet/log"
+
+	"github.com/bborn/workflow/internal/db"
 )
 
 // ClaudeExecutor implements TaskExecutor for Claude Code CLI.

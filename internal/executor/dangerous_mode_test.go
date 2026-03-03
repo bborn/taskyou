@@ -32,11 +32,11 @@ func TestExecutorInterfaceImplementation(t *testing.T) {
 	exec := New(database, cfg)
 
 	tests := []struct {
-		name                    string
-		executorName            string
-		supportsSessionResume   bool
-		supportsDangerousMode   bool
-		dangerousFlag           string // The flag used for dangerous mode
+		name                  string
+		executorName          string
+		supportsSessionResume bool
+		supportsDangerousMode bool
+		dangerousFlag         string // The flag used for dangerous mode
 	}{
 		{
 			name:                  "Claude executor",
@@ -180,10 +180,10 @@ func TestBuildCommandDangerousMode(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			task := &db.Task{
-				ID:           1,
+				ID:            1,
 				DangerousMode: tt.dangerousMode,
-				Port:         8080,
-				WorktreePath: "/tmp/test-worktree",
+				Port:          8080,
+				WorktreePath:  "/tmp/test-worktree",
 			}
 
 			executor := exec.executorFactory.Get(tt.executorName)
@@ -235,10 +235,10 @@ func TestBuildCommandDangerousModeEnvVar(t *testing.T) {
 	defer os.Unsetenv("WORKTREE_DANGEROUS_MODE")
 
 	task := &db.Task{
-		ID:           1,
+		ID:            1,
 		DangerousMode: false, // Task field is false
-		Port:         8080,
-		WorktreePath: "/tmp/test-worktree",
+		Port:          8080,
+		WorktreePath:  "/tmp/test-worktree",
 	}
 
 	tests := []struct {
@@ -513,10 +513,10 @@ func TestBuildCommandWithSessionResume(t *testing.T) {
 	os.Unsetenv("WORKTREE_DANGEROUS_MODE")
 
 	task := &db.Task{
-		ID:           1,
+		ID:            1,
 		DangerousMode: false,
-		Port:         8080,
-		WorktreePath: "/tmp/test-worktree",
+		Port:          8080,
+		WorktreePath:  "/tmp/test-worktree",
 	}
 
 	tests := []struct {
@@ -593,10 +593,10 @@ func TestBuildCommandWithDangerousAndResume(t *testing.T) {
 	os.Unsetenv("WORKTREE_DANGEROUS_MODE")
 
 	task := &db.Task{
-		ID:           1,
+		ID:            1,
 		DangerousMode: true,
-		Port:         8080,
-		WorktreePath: "/tmp/test-worktree",
+		Port:          8080,
+		WorktreePath:  "/tmp/test-worktree",
 	}
 
 	tests := []struct {
@@ -661,10 +661,10 @@ func TestOpenClawDangerousModeNotSupported(t *testing.T) {
 
 	t.Run("BuildCommand does not include dangerous flags", func(t *testing.T) {
 		task := &db.Task{
-			ID:           1,
+			ID:            1,
 			DangerousMode: true, // Even when enabled on task
-			Port:         8080,
-			WorktreePath: "/tmp/test-worktree",
+			Port:          8080,
+			WorktreePath:  "/tmp/test-worktree",
 		}
 
 		cmd := executor.BuildCommand(task, "", "")
@@ -785,9 +785,9 @@ func TestToggleDangerousModeLogic(t *testing.T) {
 
 	tests := []struct {
 		name             string
-		currentMode      bool   // current task.DangerousMode value
-		expectSafeCall   bool   // should call ResumeSafe
-		expectDangerCall bool   // should call ResumeDangerous
+		currentMode      bool // current task.DangerousMode value
+		expectSafeCall   bool // should call ResumeSafe
+		expectDangerCall bool // should call ResumeDangerous
 	}{
 		{
 			name:             "switch from dangerous to safe",

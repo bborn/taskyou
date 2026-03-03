@@ -7,12 +7,13 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/bborn/workflow/extensions/ty-email/internal/adapter"
-	"github.com/bborn/workflow/extensions/ty-email/internal/state"
 	"github.com/charmbracelet/huh"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
+
+	"github.com/bborn/workflow/extensions/ty-email/internal/adapter"
+	"github.com/bborn/workflow/extensions/ty-email/internal/state"
 )
 
 var (

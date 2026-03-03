@@ -11,8 +11,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/bborn/workflow/internal/db"
 	"github.com/charmbracelet/log"
+
+	"github.com/bborn/workflow/internal/db"
 )
 
 // CodexExecutor implements TaskExecutor for OpenAI's Codex CLI.

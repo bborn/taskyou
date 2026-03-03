@@ -4,8 +4,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/bborn/workflow/internal/db"
 	tea "github.com/charmbracelet/bubbletea"
+
+	"github.com/bborn/workflow/internal/db"
 )
 
 func TestCalculateBodyHeight(t *testing.T) {

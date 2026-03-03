@@ -356,8 +356,8 @@ func TestConfirmDialogsHandleCtrlC(t *testing.T) {
 
 	t.Run("close confirm", func(t *testing.T) {
 		m := &AppModel{
-			width:            100,
-			previousView:     ViewDashboard,
+			width:             100,
+			previousView:      ViewDashboard,
 			userClosedTaskIDs: make(map[int64]bool),
 		}
 		task := &db.Task{ID: 1, Title: "Test", Status: db.StatusQueued}
@@ -889,11 +889,11 @@ func TestScoreTaskForFilter(t *testing.T) {
 // TestParseFilterProjects tests extraction of project tags from filter text.
 func TestParseFilterProjects(t *testing.T) {
 	tests := []struct {
-		name           string
-		query          string
-		wantProjects   []string
-		wantKeyword    string
-		wantPartial    string
+		name         string
+		query        string
+		wantProjects []string
+		wantKeyword  string
+		wantPartial  string
 	}{
 		{"empty", "", nil, "", ""},
 		{"just bracket", "[", nil, "", ""},
@@ -1628,7 +1628,7 @@ func TestFilterChipDeletion(t *testing.T) {
 		{
 			name:            "cursor not after ]",
 			initialValue:    "text [project] more",
-			cursorPos:       5, // in the middle of text
+			cursorPos:       5,                     // in the middle of text
 			expectedValue:   "text [project] more", // no change expected
 			expectedCursor:  5,
 			shouldDeleteAll: false,
@@ -1636,7 +1636,7 @@ func TestFilterChipDeletion(t *testing.T) {
 		{
 			name:            "cursor before [",
 			initialValue:    "text [project]",
-			cursorPos:       4, // right before [
+			cursorPos:       4,                // right before [
 			expectedValue:   "text [project]", // no change expected
 			expectedCursor:  4,
 			shouldDeleteAll: false,

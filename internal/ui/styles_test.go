@@ -234,10 +234,10 @@ func TestTaskShortcutHint(t *testing.T) {
 		index    int
 		expected string
 	}{
-		{0, ""},   // Invalid
-		{1, "1"},  // Single digit
-		{5, "5"},  // Single digit
-		{9, "9"},  // Last single digit
+		{0, ""},    // Invalid
+		{1, "1"},   // Single digit
+		{5, "5"},   // Single digit
+		{9, "9"},   // Last single digit
 		{10, "11"}, // First double digit
 		{11, "22"}, // Double digit
 		{12, "33"}, // Double digit

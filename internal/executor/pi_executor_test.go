@@ -202,7 +202,7 @@ func TestPiExecutor_BuildCommand(t *testing.T) {
 func TestFindPiSessionID(t *testing.T) {
 	// Create a temporary directory structure
 	tmpDir := t.TempDir()
-	
+
 	// Create .task-worktrees structure
 	worktreesDir := filepath.Join(tmpDir, ".task-worktrees")
 	sessionsDir := filepath.Join(worktreesDir, "sessions")
@@ -213,13 +213,13 @@ func TestFindPiSessionID(t *testing.T) {
 	taskID := int64(123)
 	slug := "test-slug"
 	workDir := filepath.Join(worktreesDir, fmt.Sprintf("%d-%s", taskID, slug))
-	
+
 	// 1. Test finding explicit session path
 	explicitSessionPath := filepath.Join(sessionsDir, fmt.Sprintf("task-%d.jsonl", taskID))
 	if err := os.WriteFile(explicitSessionPath, []byte("explicit"), 0644); err != nil {
 		t.Fatalf("failed to write explicit session file: %v", err)
 	}
-	
+
 	foundSession := findPiSessionID(workDir)
 	if foundSession != explicitSessionPath {
 		t.Errorf("expected explicit session %q, got %q", explicitSessionPath, foundSession)
@@ -251,7 +251,7 @@ func TestFindPiSessionID(t *testing.T) {
 
 func TestPiSessionExists(t *testing.T) {
 	tmpDir := t.TempDir()
-	
+
 	// Test non-existent session
 	if piSessionExists("") {
 		t.Error("empty session path should not exist")
@@ -378,9 +378,9 @@ func TestPiExecutor_Execute(t *testing.T) {
 
 // Helper function to check if a string contains a substring
 func containsString(s, substr string) bool {
-	return len(s) >= len(substr) && (s == substr || len(s) > len(substr) && 
-		(s[:len(substr)] == substr || s[len(s)-len(substr):] == substr || 
-		indexString(s, substr) >= 0))
+	return len(s) >= len(substr) && (s == substr || len(s) > len(substr) &&
+		(s[:len(substr)] == substr || s[len(s)-len(substr):] == substr ||
+			indexString(s, substr) >= 0))
 }
 
 func indexString(s, substr string) int {

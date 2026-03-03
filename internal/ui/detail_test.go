@@ -166,19 +166,19 @@ func TestDetailModel_IsShellPaneHidden(t *testing.T) {
 	task := &db.Task{ID: 1, Title: "Test task"}
 
 	tests := []struct {
-		name           string
+		name            string
 		shellPaneHidden bool
-		want           bool
+		want            bool
 	}{
 		{
-			name:           "shell pane visible",
+			name:            "shell pane visible",
 			shellPaneHidden: false,
-			want:           false,
+			want:            false,
 		},
 		{
-			name:           "shell pane hidden",
+			name:            "shell pane hidden",
 			shellPaneHidden: true,
-			want:           true,
+			want:            true,
 		},
 	}
 

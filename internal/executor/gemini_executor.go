@@ -11,8 +11,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/bborn/workflow/internal/db"
 	"github.com/charmbracelet/log"
+
+	"github.com/bborn/workflow/internal/db"
 )
 
 // GeminiExecutor implements TaskExecutor for Google's Gemini CLI.

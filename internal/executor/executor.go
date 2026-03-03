@@ -18,12 +18,13 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/charmbracelet/log"
+
 	"github.com/bborn/workflow/internal/config"
 	"github.com/bborn/workflow/internal/db"
 	"github.com/bborn/workflow/internal/events"
 	"github.com/bborn/workflow/internal/github"
 	"github.com/bborn/workflow/internal/hooks"
-	"github.com/charmbracelet/log"
 )
 
 // TaskEvent represents a change to a task.
@@ -712,8 +713,8 @@ func (e *Executor) worker(ctx context.Context) {
 	// Check for stale worktrees to archive every 1 hour (1800 ticks)
 	tickCount := 0
 	const suspendCheckInterval = 30
-	const doneCleanupInterval = 150        // 5 minutes at 2 second ticks
-	const staleWorktreeInterval = 1800     // 1 hour at 2 second ticks
+	const doneCleanupInterval = 150    // 5 minutes at 2 second ticks
+	const staleWorktreeInterval = 1800 // 1 hour at 2 second ticks
 
 	for {
 		select {
@@ -5230,4 +5231,3 @@ func slugify(s string, maxLen int) string {
 
 	return s
 }
-

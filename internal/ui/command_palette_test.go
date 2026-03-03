@@ -73,34 +73,34 @@ func TestFuzzyScore(t *testing.T) {
 func TestFuzzyScoreRanking(t *testing.T) {
 	// Test that better matches get higher scores
 	tests := []struct {
-		name       string
-		pattern    string
-		betterStr  string
-		worseStr   string
+		name      string
+		pattern   string
+		betterStr string
+		worseStr  string
 	}{
 		{
-			name:       "word boundary match beats random match",
-			pattern:    "fb",
-			betterStr:  "foo bar",      // matches at word boundaries
-			worseStr:   "foooobar",     // matches randomly
+			name:      "word boundary match beats random match",
+			pattern:   "fb",
+			betterStr: "foo bar",  // matches at word boundaries
+			worseStr:  "foooobar", // matches randomly
 		},
 		{
-			name:       "consecutive match beats scattered",
-			pattern:    "hello",
-			betterStr:  "hello world",       // consecutive match at start
-			worseStr:   "something hxexlxlxo", // scattered 'h', 'e', 'l', 'l', 'o' in word
+			name:      "consecutive match beats scattered",
+			pattern:   "hello",
+			betterStr: "hello world",         // consecutive match at start
+			worseStr:  "something hxexlxlxo", // scattered 'h', 'e', 'l', 'l', 'o' in word
 		},
 		{
-			name:       "start of string match beats middle",
-			pattern:    "foo",
-			betterStr:  "foo bar baz",  // matches at start
-			worseStr:   "bar foo baz",  // matches in middle
+			name:      "start of string match beats middle",
+			pattern:   "foo",
+			betterStr: "foo bar baz", // matches at start
+			worseStr:  "bar foo baz", // matches in middle
 		},
 		{
-			name:       "camelCase boundary match is good",
-			pattern:    "gU",
-			betterStr:  "getUser",      // matches at camelCase boundary
-			worseStr:   "configure",    // 'g' then 'u' scattered
+			name:      "camelCase boundary match is good",
+			pattern:   "gU",
+			betterStr: "getUser",   // matches at camelCase boundary
+			worseStr:  "configure", // 'g' then 'u' scattered
 		},
 	}
 
@@ -298,9 +298,9 @@ func TestFilterTasksStatusOrderingWithQueued(t *testing.T) {
 func TestFilterTasksScoreWithinSameStatus(t *testing.T) {
 	// Test that within the same status, tasks are sorted by fuzzy score
 	tasks := []*db.Task{
-		{ID: 1, Title: "unrelated dog", Status: db.StatusProcessing},       // "dog" matches later
-		{ID: 2, Title: "dog at the start", Status: db.StatusProcessing},    // "dog" matches at start
-		{ID: 3, Title: "big dog handler", Status: db.StatusProcessing},     // "dog" matches in middle
+		{ID: 1, Title: "unrelated dog", Status: db.StatusProcessing},    // "dog" matches later
+		{ID: 2, Title: "dog at the start", Status: db.StatusProcessing}, // "dog" matches at start
+		{ID: 3, Title: "big dog handler", Status: db.StatusProcessing},  // "dog" matches in middle
 	}
 
 	m := &CommandPaletteModel{
