@@ -2232,9 +2232,10 @@ Examples:
 			color, _ := cmd.Flags().GetString("color")
 			aliases, _ := cmd.Flags().GetString("aliases")
 			claudeConfigDir, _ := cmd.Flags().GetString("claude-config-dir")
+			noGit, _ := cmd.Flags().GetBool("no-git")
 			outputJSON, _ := cmd.Flags().GetBool("json")
 
-			createProjectCLI(args[0], path, instructions, color, aliases, claudeConfigDir, outputJSON)
+			createProjectCLI(args[0], path, instructions, color, aliases, claudeConfigDir, noGit, outputJSON)
 		},
 	}
 	projectsCreateCmd.Flags().StringP("path", "p", "", "Project directory path (required)")
@@ -2242,6 +2243,7 @@ Examples:
 	projectsCreateCmd.Flags().StringP("color", "c", "", "Hex color for display (e.g., #61AFEF)")
 	projectsCreateCmd.Flags().StringP("aliases", "a", "", "Comma-separated aliases for lookup")
 	projectsCreateCmd.Flags().String("claude-config-dir", "", "Override CLAUDE_CONFIG_DIR for this project")
+	projectsCreateCmd.Flags().Bool("no-git", false, "Disable git worktrees (for non-git projects)")
 	projectsCreateCmd.Flags().Bool("json", false, "Output in JSON format")
 	projectsCreateCmd.MarkFlagRequired("path")
 	projectsCmd.AddCommand(projectsCreateCmd)
@@ -2268,8 +2270,25 @@ Examples:
 			claudeConfigDir, _ := cmd.Flags().GetString("claude-config-dir")
 			projectContext, _ := cmd.Flags().GetString("context")
 			outputJSON, _ := cmd.Flags().GetBool("json")
+			noGit, _ := cmd.Flags().GetBool("no-git")
+			git, _ := cmd.Flags().GetBool("git")
 
-			updateProjectCLI(args[0], name, path, instructions, color, aliases, claudeConfigDir, projectContext, outputJSON)
+			if noGit && git {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: --no-git and --git are mutually exclusive"))
+				os.Exit(1)
+			}
+
+			// Determine git mode: nil means not specified
+			var useWorktrees *bool
+			if noGit {
+				v := false
+				useWorktrees = &v
+			} else if git {
+				v := true
+				useWorktrees = &v
+			}
+
+			updateProjectCLI(args[0], name, path, instructions, color, aliases, claudeConfigDir, projectContext, useWorktrees, outputJSON)
 		},
 	}
 	projectsUpdateCmd.Flags().StringP("name", "n", "", "New project name")
@@ -2279,6 +2298,8 @@ Examples:
 	projectsUpdateCmd.Flags().StringP("aliases", "a", "", "Comma-separated aliases for lookup")
 	projectsUpdateCmd.Flags().String("claude-config-dir", "", "Override CLAUDE_CONFIG_DIR for this project")
 	projectsUpdateCmd.Flags().String("context", "", "Cached project context summary")
+	projectsUpdateCmd.Flags().Bool("no-git", false, "Disable git worktrees (for non-git projects)")
+	projectsUpdateCmd.Flags().Bool("git", false, "Enable git worktrees (default)")
 	projectsUpdateCmd.Flags().Bool("json", false, "Output in JSON format")
 	projectsCmd.AddCommand(projectsUpdateCmd)
 
@@ -4817,13 +4838,14 @@ func showProjectCLI(name string, outputJSON bool) {
 
 	if outputJSON {
 		output := map[string]interface{}{
-			"id":         project.ID,
-			"name":       project.Name,
-			"path":       project.Path,
-			"color":      project.Color,
-			"aliases":    project.Aliases,
-			"task_count": taskCount,
-			"created_at": project.CreatedAt.Time.Format(time.RFC3339),
+			"id":             project.ID,
+			"name":           project.Name,
+			"path":           project.Path,
+			"color":          project.Color,
+			"aliases":        project.Aliases,
+			"use_worktrees":  project.UseWorktrees,
+			"task_count":     taskCount,
+			"created_at":     project.CreatedAt.Time.Format(time.RFC3339),
 		}
 		if project.Instructions != "" {
 			output["instructions"] = project.Instructions
@@ -4864,6 +4886,9 @@ func showProjectCLI(name string, outputJSON bool) {
 	if project.ClaudeConfigDir != "" {
 		fmt.Printf("%s %s\n", dimStyle.Render("Claude Config:"), project.ClaudeConfigDir)
 	}
+	if !project.UseWorktrees {
+		fmt.Printf("%s %s\n", dimStyle.Render("Git Worktrees:"), "disabled (non-git project)")
+	}
 
 	if project.Instructions != "" {
 		fmt.Println()
@@ -4892,7 +4917,7 @@ func showProjectCLI(name string, outputJSON bool) {
 }
 
 // createProjectCLI creates a new project.
-func createProjectCLI(name, path, instructions, color, aliases, claudeConfigDir string, outputJSON bool) {
+func createProjectCLI(name, path, instructions, color, aliases, claudeConfigDir string, noGit bool, outputJSON bool) {
 	// Validate name
 	if strings.TrimSpace(name) == "" {
 		fmt.Fprintln(os.Stderr, errorStyle.Render("Error: project name cannot be empty"))
@@ -4943,6 +4968,7 @@ func createProjectCLI(name, path, instructions, color, aliases, claudeConfigDir 
 		Color:           color,
 		Aliases:         aliases,
 		ClaudeConfigDir: claudeConfigDir,
+		UseWorktrees:    !noGit,
 	}
 
 	if err := database.CreateProject(project); err != nil {
@@ -4952,10 +4978,11 @@ func createProjectCLI(name, path, instructions, color, aliases, claudeConfigDir 
 
 	if outputJSON {
 		output := map[string]interface{}{
-			"id":         project.ID,
-			"name":       project.Name,
-			"path":       project.Path,
-			"created_at": project.CreatedAt.Time.Format(time.RFC3339),
+			"id":            project.ID,
+			"name":          project.Name,
+			"path":          project.Path,
+			"use_worktrees": project.UseWorktrees,
+			"created_at":    project.CreatedAt.Time.Format(time.RFC3339),
 		}
 		if project.Color != "" {
 			output["color"] = project.Color
@@ -4966,12 +4993,16 @@ func createProjectCLI(name, path, instructions, color, aliases, claudeConfigDir 
 		jsonBytes, _ := json.Marshal(output)
 		fmt.Println(string(jsonBytes))
 	} else {
-		fmt.Println(successStyle.Render(fmt.Sprintf("Created project '%s' at %s", name, absPath)))
+		suffix := ""
+		if !project.UseWorktrees {
+			suffix = " (non-git, worktrees disabled)"
+		}
+		fmt.Println(successStyle.Render(fmt.Sprintf("Created project '%s' at %s%s", name, absPath, suffix)))
 	}
 }
 
 // updateProjectCLI updates an existing project.
-func updateProjectCLI(currentName, newName, path, instructions, color, aliases, claudeConfigDir, projectContext string, outputJSON bool) {
+func updateProjectCLI(currentName, newName, path, instructions, color, aliases, claudeConfigDir, projectContext string, useWorktrees *bool, outputJSON bool) {
 	dbPath := db.DefaultPath()
 	database, err := db.Open(dbPath)
 	if err != nil {
@@ -5042,6 +5073,15 @@ func updateProjectCLI(currentName, newName, path, instructions, color, aliases, 
 	if claudeConfigDir != "" {
 		project.ClaudeConfigDir = claudeConfigDir
 		changes = append(changes, "claude_config_dir")
+	}
+
+	if useWorktrees != nil {
+		project.UseWorktrees = *useWorktrees
+		if *useWorktrees {
+			changes = append(changes, "git worktrees enabled")
+		} else {
+			changes = append(changes, "git worktrees disabled")
+		}
 	}
 
 	if len(changes) == 0 && projectContext == "" {
