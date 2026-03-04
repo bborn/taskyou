@@ -1035,6 +1035,11 @@ func (e *Executor) executeTask(ctx context.Context, task *db.Task) {
 		e.logger.Error("Failed to update status", "error", err)
 		return
 	}
+	// Keep the task struct in sync with the DB so that subsequent UpdateTask() calls
+	// (e.g. in setupWorktree/setupSharedWorkDir) don't accidentally reset the status
+	// back to the original value (e.g. "queued"), which would cause pollTmuxSession
+	// to immediately return {Interrupted: true} and create an infinite retry loop.
+	task.Status = db.StatusProcessing
 
 	// Log start and trigger hook
 	startMsg := fmt.Sprintf("Starting task #%d: %s", task.ID, task.Title)
@@ -1120,7 +1125,10 @@ func (e *Executor) executeTask(ctx context.Context, task *db.Task) {
 	// Update final status and trigger hooks
 	// Respect status set by hooks - don't override blocked with done
 	if result.Interrupted {
-		// Status already set by Interrupt(), just run hook
+		// Explicitly set to backlog - don't assume Interrupt() already did it,
+		// as the interruption may have come from pollTmuxSession detecting a
+		// stale status or context cancellation.
+		e.updateStatus(task.ID, db.StatusBacklog)
 		e.hooks.OnStatusChange(task, db.StatusBacklog, "Task interrupted by user")
 		// Kill executor process to free memory when task is interrupted
 		taskExecutor.Kill(task.ID)
@@ -4309,6 +4317,21 @@ func (e *Executor) CleanupWorktree(task *db.Task) error {
 		return nil
 	}
 	paths := e.claudePathsForProject(task.Project)
+
+	// Skip worktree removal for non-worktree tasks where WorktreePath is the
+	// project root itself. Running "git worktree remove" on the main working
+	// tree would fail with "fatal: is a main working tree".
+	isWorktree := task.WorktreePath != projectDir &&
+		strings.Contains(task.WorktreePath, string(filepath.Separator)+".task-worktrees"+string(filepath.Separator))
+
+	if !isWorktree {
+		// For non-worktree tasks, just clean up the .envrc and hooks files
+		// that were written to the project directory.
+		os.Remove(filepath.Join(task.WorktreePath, ".envrc"))
+		settingsPath := filepath.Join(task.WorktreePath, ".claude", "settings.local.json")
+		os.Remove(settingsPath)
+		return nil
+	}
 
 	// Run teardown script before removing the worktree
 	e.runWorktreeTeardownScript(projectDir, task.WorktreePath, task)

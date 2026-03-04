@@ -1822,3 +1822,114 @@ func TestTriggerProcessing(t *testing.T) {
 		}
 	})
 }
+
+// TestUpdateTaskDoesNotResetStatus verifies that UpdateTask() calls in
+// setupWorktree/setupSharedWorkDir don't accidentally reset the task status
+// back to "queued" after executeTask has set it to "processing".
+// This was the root cause of the daemon terminating Claude immediately
+// for project-based (non-worktree) tasks.
+func TestUpdateTaskDoesNotResetStatus(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+	database, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer database.Close()
+
+	// Create a project
+	if err := database.CreateProject(&db.Project{Name: "testproj", Path: tmpDir}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create a task in queued status (as processNextTask would see it)
+	task := &db.Task{
+		Title:   "Say hello",
+		Status:  db.StatusQueued,
+		Project: "testproj",
+	}
+	if err := database.CreateTask(task); err != nil {
+		t.Fatal(err)
+	}
+
+	// Simulate what executeTask does:
+	// 1. Update DB status to processing
+	if err := database.UpdateTaskStatus(task.ID, db.StatusProcessing); err != nil {
+		t.Fatal(err)
+	}
+	// 2. Keep the struct in sync (this is the fix)
+	task.Status = db.StatusProcessing
+
+	// 3. Simulate setupSharedWorkDir which calls UpdateTask
+	task.WorktreePath = tmpDir
+	task.BranchName = ""
+	if err := database.UpdateTask(task); err != nil {
+		t.Fatal(err)
+	}
+
+	// Verify the status is still "processing" (not reset to "queued")
+	updatedTask, err := database.GetTask(task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updatedTask.Status != db.StatusProcessing {
+		t.Errorf("expected status %q after UpdateTask, got %q (status was reset!)",
+			db.StatusProcessing, updatedTask.Status)
+	}
+}
+
+// TestCleanupWorktreeNonWorktreeTask verifies that CleanupWorktree handles
+// non-worktree tasks correctly (where WorktreePath is the project root).
+// It should NOT attempt "git worktree remove" on the main working tree.
+func TestCleanupWorktreeNonWorktreeTask(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+	database, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer database.Close()
+
+	projectDir := filepath.Join(tmpDir, "myproject")
+	os.MkdirAll(projectDir, 0755)
+
+	// Create project
+	if err := database.CreateProject(&db.Project{Name: "testproj", Path: projectDir}); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := config.New(database)
+	exec := New(database, cfg)
+
+	// Non-worktree task: WorktreePath == projectDir
+	task := &db.Task{
+		Title:        "Test task",
+		Status:       db.StatusBlocked,
+		Project:      "testproj",
+		WorktreePath: projectDir,
+	}
+	if err := database.CreateTask(task); err != nil {
+		t.Fatal(err)
+	}
+
+	// Write files that CleanupWorktree should remove
+	os.MkdirAll(filepath.Join(projectDir, ".claude"), 0755)
+	os.WriteFile(filepath.Join(projectDir, ".envrc"), []byte("export WORKTREE_TASK_ID=1"), 0644)
+	os.WriteFile(filepath.Join(projectDir, ".claude", "settings.local.json"), []byte("{}"), 0644)
+
+	// CleanupWorktree should NOT error (no git worktree remove on main tree)
+	err = exec.CleanupWorktree(task)
+	if err != nil {
+		t.Errorf("CleanupWorktree should not error for non-worktree tasks, got: %v", err)
+	}
+
+	// Verify .envrc was cleaned up
+	if _, err := os.Stat(filepath.Join(projectDir, ".envrc")); !os.IsNotExist(err) {
+		t.Error("expected .envrc to be removed")
+	}
+
+	// Verify settings.local.json was cleaned up
+	if _, err := os.Stat(filepath.Join(projectDir, ".claude", "settings.local.json")); !os.IsNotExist(err) {
+		t.Error("expected settings.local.json to be removed")
+	}
+}
