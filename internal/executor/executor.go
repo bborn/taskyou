@@ -362,7 +362,7 @@ func (e *Executor) SuspendTask(taskID int64) bool {
 		return false
 	}
 
-	if err := proc.Signal(syscall.SIGTSTP); err != nil {
+	if err := sendSIGTSTP(proc); err != nil {
 		e.logger.Debug("Failed to suspend process", "pid", pid, "error", err)
 		return false
 	}
@@ -405,7 +405,7 @@ func (e *Executor) ResumeTask(taskID int64) bool {
 		return false
 	}
 
-	if err := proc.Signal(syscall.SIGCONT); err != nil {
+	if err := sendSIGCONT(proc); err != nil {
 		e.logger.Debug("Failed to resume process", "pid", pid, "error", err)
 		return false
 	}

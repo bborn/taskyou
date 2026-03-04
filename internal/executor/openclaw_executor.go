@@ -257,7 +257,7 @@ func (o *OpenClawExecutor) Suspend(taskID int64) bool {
 		o.logger.Debug("Failed to find process", "pid", pid, "error", err)
 		return false
 	}
-	if err := proc.Signal(syscall.SIGTSTP); err != nil {
+	if err := sendSIGTSTP(proc); err != nil {
 		o.logger.Debug("Failed to suspend process", "pid", pid, "error", err)
 		return false
 	}
@@ -288,7 +288,7 @@ func (o *OpenClawExecutor) ResumeProcess(taskID int64) bool {
 		delete(o.suspendedTasks, taskID)
 		return false
 	}
-	if err := proc.Signal(syscall.SIGCONT); err != nil {
+	if err := sendSIGCONT(proc); err != nil {
 		o.logger.Debug("Failed to resume process", "pid", pid, "error", err)
 		return false
 	}
