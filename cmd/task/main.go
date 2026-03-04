@@ -4838,14 +4838,14 @@ func showProjectCLI(name string, outputJSON bool) {
 
 	if outputJSON {
 		output := map[string]interface{}{
-			"id":             project.ID,
-			"name":           project.Name,
-			"path":           project.Path,
-			"color":          project.Color,
-			"aliases":        project.Aliases,
-			"use_worktrees":  project.UseWorktrees,
-			"task_count":     taskCount,
-			"created_at":     project.CreatedAt.Time.Format(time.RFC3339),
+			"id":            project.ID,
+			"name":          project.Name,
+			"path":          project.Path,
+			"color":         project.Color,
+			"aliases":       project.Aliases,
+			"use_worktrees": project.UseWorktrees,
+			"task_count":    taskCount,
+			"created_at":    project.CreatedAt.Time.Format(time.RFC3339),
 		}
 		if project.Instructions != "" {
 			output["instructions"] = project.Instructions
