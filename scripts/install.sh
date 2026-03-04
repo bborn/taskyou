@@ -91,7 +91,8 @@ detect_arch() {
 # Get the latest release version from GitHub
 get_latest_version() {
     local version
-    version=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" 2>/dev/null | grep '"tag_name"' | sed -E 's/.*"([^"]+)".*/\1/')
+    # Extract version from the /releases/latest redirect URL (no API rate limits)
+    version=$(curl -fsSI "https://github.com/${REPO}/releases/latest" 2>/dev/null | grep -i '^location:' | sed -E 's|.*/tag/([^ \r]+).*|\1|')
     if [ -z "$version" ]; then
         error "Failed to fetch latest version. Check your internet connection or try again later."
     fi
