@@ -39,6 +39,9 @@ archives:
     format: tar.gz
     name_template: "taskd_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
 
+release:
+  draft: false
+
 checksum:
   name_template: "checksums.txt"
 
