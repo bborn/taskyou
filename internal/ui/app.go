@@ -390,6 +390,8 @@ type AppModel struct {
 	prevStatuses map[int64]string
 	// Track tasks with active input notifications (for UI highlighting)
 	tasksNeedingInput map[int64]bool
+	// Track which tasks have question prompts (vs permission prompts)
+	questionPrompts map[int64]bool
 	// Cached executor prompt messages for blocked tasks (from DB hook logs)
 	executorPrompts map[int64]string
 	// Track tasks the user closed manually (suppress notification for these)
@@ -610,6 +612,7 @@ func NewAppModel(database *db.DB, exec *executor.Executor, workingDir string, ve
 		loading:            true,
 		prevStatuses:       make(map[int64]string),
 		tasksNeedingInput:  make(map[int64]bool),
+		questionPrompts:    make(map[int64]bool),
 		lastViewedAt:       make(map[int64]time.Time),
 		executorPrompts:    make(map[int64]string),
 		userClosedTaskIDs:  make(map[int64]bool),
@@ -827,9 +830,12 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// Handles external approval (e.g. from tmux) where PreToolUse
 				// logs "Agent resumed working" and transitions to processing.
 				if m.tasksNeedingInput[t.ID] {
-					if m.latestChoicePrompt(t.ID) == "" {
+					if prompt, isQ := m.latestChoicePrompt(t.ID); prompt == "" {
 						delete(m.tasksNeedingInput, t.ID)
+						delete(m.questionPrompts, t.ID)
 						delete(m.executorPrompts, t.ID)
+					} else {
+						m.questionPrompts[t.ID] = isQ
 					}
 				}
 			}
@@ -851,20 +857,25 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		for _, t := range m.tasks {
 			if t.Status == db.StatusDone || t.Status == db.StatusBacklog {
 				delete(m.tasksNeedingInput, t.ID)
+				delete(m.questionPrompts, t.ID)
 				delete(m.executorPrompts, t.ID)
 				continue
 			}
 			if m.tasksNeedingInput[t.ID] {
 				// Re-validate: if task is no longer blocked, the user provided input
 				// (e.g., from the detail view tmux pane). Also re-check permission prompts.
-				if t.Status != db.StatusBlocked && m.latestChoicePrompt(t.ID) == "" {
+				if prompt, isQ := m.latestChoicePrompt(t.ID); t.Status != db.StatusBlocked && prompt == "" {
 					delete(m.tasksNeedingInput, t.ID)
+					delete(m.questionPrompts, t.ID)
 					delete(m.executorPrompts, t.ID)
+				} else {
+					m.questionPrompts[t.ID] = isQ
 				}
 				continue
 			}
-			if prompt := m.latestChoicePrompt(t.ID); prompt != "" {
+			if prompt, isQ := m.latestChoicePrompt(t.ID); prompt != "" {
 				m.tasksNeedingInput[t.ID] = true
+				m.questionPrompts[t.ID] = isQ
 				// Capture the tmux pane content for richer display of the prompt.
 				// This shows the actual executor output (including multiple choice options)
 				// rather than just the hook log summary.
@@ -1179,6 +1190,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// still blocked (e.g. another prompt queued), the latestChoicePrompt
 			// catch-up loop will re-detect it on the next poll cycle.
 			delete(m.tasksNeedingInput, msg.taskID)
+			delete(m.questionPrompts, msg.taskID)
 			delete(m.executorPrompts, msg.taskID)
 		}
 		cmds = append(cmds, m.loadTasks())
@@ -1219,12 +1231,16 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						// newly-blocked tasks so the user can approve/deny immediately
 						// without waiting for the next loadTasks poll.
 						if m.tasksNeedingInput[event.TaskID] {
-							if m.latestChoicePrompt(event.TaskID) == "" {
+							if prompt, isQ := m.latestChoicePrompt(event.TaskID); prompt == "" {
 								delete(m.tasksNeedingInput, event.TaskID)
+								delete(m.questionPrompts, event.TaskID)
 								delete(m.executorPrompts, event.TaskID)
+							} else {
+								m.questionPrompts[event.TaskID] = isQ
 							}
-						} else if prompt := m.latestChoicePrompt(event.TaskID); prompt != "" {
+						} else if prompt, isQ := m.latestChoicePrompt(event.TaskID); prompt != "" {
 							m.tasksNeedingInput[event.TaskID] = true
+							m.questionPrompts[event.TaskID] = isQ
 							paneContent := executor.CapturePaneContent(event.TaskID, 15)
 							if paneContent != "" {
 								m.executorPrompts[event.TaskID] = paneContent
@@ -1739,7 +1755,12 @@ func (m *AppModel) renderExecutorPromptPreview(task *db.Task) string {
 		Width(m.width).
 		Padding(0, 1)
 
-	hints := hintStyle.Render("y approve  N deny  tab input  enter detail")
+	var hints string
+	if m.questionPrompts[task.ID] {
+		hints = hintStyle.Render("tab reply  enter detail")
+	} else {
+		hints = hintStyle.Render("y approve  N deny  tab input  enter detail")
+	}
 
 	prompt := m.executorPrompts[task.ID]
 	promptLines := extractPromptLines(prompt, m.width-10)
@@ -3486,6 +3507,7 @@ func (m *AppModel) updateRetry(msg tea.Msg) (tea.Model, tea.Cmd) {
 		taskID := m.retryView.task.ID
 		// Clear kanban notification immediately for instant UI feedback
 		delete(m.tasksNeedingInput, taskID)
+		delete(m.questionPrompts, taskID)
 		delete(m.executorPrompts, taskID)
 		m.kanban.SetTasksNeedingInput(m.tasksNeedingInput)
 		// Clear the notification banner if it's for this task
@@ -4156,29 +4178,43 @@ func (m *AppModel) sendTextToExecutor(taskID int64, text string) tea.Cmd {
 // latestChoicePrompt checks whether a task has a pending permission/choice prompt
 // by reading recent DB logs written by the notification hook. Returns the prompt
 // message if still pending, or "" if resolved (e.g. "Agent resumed working",
-// user approved/denied). This is status-agnostic — works for any active task.
-// Only matches "Waiting for permission" entries (actual choice prompts), NOT
+// user approved/denied). The second return value isQuestion is true when the
+// prompt is a question (from MCP taskyou_needs_input) rather than a permission
+// prompt. Question prompts have different resolution semantics: they are NOT
+// cleared by "Agent resumed working" or tool logs, only by explicit user reply.
+// Only matches "Waiting for permission" and "question" entries, NOT
 // "Waiting for user input" (generic idle/end_turn scenarios).
-func (m *AppModel) latestChoicePrompt(taskID int64) string {
+func (m *AppModel) latestChoicePrompt(taskID int64) (string, bool) {
 	logs, err := m.db.GetTaskLogs(taskID, 10)
 	if err != nil {
-		return ""
+		return "", false
 	}
 	// Logs are in DESC order (most recent first).
 	// A pending prompt is only valid if no subsequent log indicates resolution.
+	// For permission prompts: "Agent resumed working", tool logs, and user
+	// approve/deny all resolve the prompt.
+	// For question prompts: only an explicit user reply resolves it.
+	permissionResolved := false
 	for _, l := range logs {
 		switch {
+		case l.LineType == "question":
+			// Question prompts are only resolved by explicit user reply,
+			// not by "Agent resumed working" or tool logs.
+			return l.Content, true
 		case l.LineType == "system" && strings.HasPrefix(l.Content, "Waiting for permission"):
-			return l.Content
+			if permissionResolved {
+				return "", false
+			}
+			return l.Content, false
 		case l.LineType == "system" && (l.Content == "Agent resumed working" || l.Content == "Claude resumed working"):
-			return "" // prompt was resolved
+			permissionResolved = true
 		case l.LineType == "user" && (strings.HasPrefix(l.Content, "Approved") || strings.HasPrefix(l.Content, "Denied") || strings.HasPrefix(l.Content, "Replied")):
-			return "" // user already responded
+			return "", false // user already responded (resolves both types)
 		case l.LineType == "tool":
-			return "" // a tool ran after the permission prompt, so it was resolved
+			permissionResolved = true
 		}
 	}
-	return ""
+	return "", false
 }
 
 // detectPermissionPrompt does a live DB check for a pending permission prompt
@@ -4187,11 +4223,12 @@ func (m *AppModel) latestChoicePrompt(taskID int64) string {
 // poll-based detection hasn't caught up yet (e.g. a real-time event showed the
 // task as blocked before loadTasks detected the permission prompt).
 func (m *AppModel) detectPermissionPrompt(taskID int64) bool {
-	prompt := m.latestChoicePrompt(taskID)
+	prompt, isQ := m.latestChoicePrompt(taskID)
 	if prompt == "" {
 		return false
 	}
 	m.tasksNeedingInput[taskID] = true
+	m.questionPrompts[taskID] = isQ
 	paneContent := executor.CapturePaneContent(taskID, 15)
 	if paneContent != "" {
 		m.executorPrompts[taskID] = paneContent

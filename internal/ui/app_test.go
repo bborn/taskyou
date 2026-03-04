@@ -1124,6 +1124,7 @@ func TestRenderExecutorPromptPreview_NoPrompt(t *testing.T) {
 		width:             100,
 		executorPrompts:   make(map[int64]string),
 		tasksNeedingInput: make(map[int64]bool),
+		questionPrompts:   make(map[int64]bool),
 	}
 	task := &db.Task{ID: 42, Title: "Test task"}
 	result := m.renderExecutorPromptPreview(task)
@@ -1200,10 +1201,13 @@ func TestLatestPermissionPrompt_PermissionMessage(t *testing.T) {
 	// Log a permission message (as the notification hook would)
 	database.AppendTaskLog(task.ID, "system", "Waiting for permission: Edit(src/models/offer.rb)")
 
-	// Should return the full permission message
-	result := m.latestChoicePrompt(task.ID)
+	// Should return the full permission message (not a question)
+	result, isQ := m.latestChoicePrompt(task.ID)
 	if result != "Waiting for permission: Edit(src/models/offer.rb)" {
 		t.Errorf("expected 'Waiting for permission: Edit(src/models/offer.rb)', got '%s'", result)
+	}
+	if isQ {
+		t.Error("expected isQuestion=false for permission prompt")
 	}
 }
 
@@ -1224,9 +1228,12 @@ func TestLatestPermissionPrompt_GenericWaiting(t *testing.T) {
 	// Log a generic waiting message (no specific message from hook)
 	database.AppendTaskLog(task.ID, "system", "Waiting for permission")
 
-	result := m.latestChoicePrompt(task.ID)
+	result, isQ := m.latestChoicePrompt(task.ID)
 	if result != "Waiting for permission" {
 		t.Errorf("expected 'Waiting for permission', got '%s'", result)
+	}
+	if isQ {
+		t.Error("expected isQuestion=false for permission prompt")
 	}
 }
 
@@ -1249,7 +1256,7 @@ func TestLatestPermissionPrompt_ResumedClears(t *testing.T) {
 	database.AppendTaskLog(task.ID, "system", "Agent resumed working")
 
 	// Should return empty since agent resumed
-	result := m.latestChoicePrompt(task.ID)
+	result, _ := m.latestChoicePrompt(task.ID)
 	if result != "" {
 		t.Errorf("expected empty string after resume, got '%s'", result)
 	}
@@ -1265,7 +1272,7 @@ func TestLatestPermissionPrompt_NoLogs(t *testing.T) {
 	m := &AppModel{db: database}
 
 	// No task or logs - should return empty
-	result := m.latestChoicePrompt(999)
+	result, _ := m.latestChoicePrompt(999)
 	if result != "" {
 		t.Errorf("expected empty string for nonexistent task, got '%s'", result)
 	}
@@ -1290,7 +1297,7 @@ func TestLatestChoicePrompt_UserInputMessage_NotMatched(t *testing.T) {
 	// entries are actual choice prompts.
 	database.AppendTaskLog(task.ID, "system", "Waiting for user input")
 
-	result := m.latestChoicePrompt(task.ID)
+	result, _ := m.latestChoicePrompt(task.ID)
 	if result != "" {
 		t.Errorf("expected empty string for 'Waiting for user input', got '%s'", result)
 	}
@@ -1402,6 +1409,7 @@ func TestDetectPermissionPrompt_FallbackDetection(t *testing.T) {
 	m := &AppModel{
 		db:                database,
 		tasksNeedingInput: make(map[int64]bool),
+		questionPrompts:   make(map[int64]bool),
 		executorPrompts:   make(map[int64]string),
 		kanban:            NewKanbanBoard(100, 50),
 	}
@@ -1445,6 +1453,7 @@ func TestDetectPermissionPrompt_NoPrompt(t *testing.T) {
 	m := &AppModel{
 		db:                database,
 		tasksNeedingInput: make(map[int64]bool),
+		questionPrompts:   make(map[int64]bool),
 		executorPrompts:   make(map[int64]string),
 		kanban:            NewKanbanBoard(100, 50),
 	}
@@ -1483,6 +1492,7 @@ func TestTaskEventDetectsPermissionPrompt(t *testing.T) {
 		keys:              DefaultKeyMap(),
 		tasks:             []*db.Task{{ID: task.ID, Title: "Test task", Status: db.StatusProcessing}},
 		tasksNeedingInput: make(map[int64]bool),
+		questionPrompts:   make(map[int64]bool),
 		executorPrompts:   make(map[int64]string),
 		kanban:            NewKanbanBoard(100, 50),
 		prevStatuses:      map[int64]string{task.ID: db.StatusProcessing},
@@ -1813,6 +1823,7 @@ func TestQuickInput_EscUnfocuses(t *testing.T) {
 		quickInputFocused: true,
 		replyInput:        replyInput,
 		tasksNeedingInput: make(map[int64]bool),
+		questionPrompts:   make(map[int64]bool),
 		executorPrompts:   make(map[int64]string),
 	}
 
@@ -1842,6 +1853,7 @@ func TestQuickInput_EmptyEnterUnfocuses(t *testing.T) {
 		quickInputFocused: true,
 		replyInput:        replyInput,
 		tasksNeedingInput: make(map[int64]bool),
+		questionPrompts:   make(map[int64]bool),
 		executorPrompts:   make(map[int64]string),
 		kanban:            kanban,
 	}
@@ -1879,6 +1891,7 @@ func TestQuickInput_TabIgnoredWithoutBlockedTask(t *testing.T) {
 		keys:              DefaultKeyMap(),
 		tasks:             []*db.Task{task},
 		tasksNeedingInput: make(map[int64]bool),
+		questionPrompts:   make(map[int64]bool),
 		executorPrompts:   make(map[int64]string),
 		kanban:            NewKanbanBoard(100, 50),
 		prevStatuses:      map[int64]string{task.ID: db.StatusProcessing},
@@ -1913,9 +1926,91 @@ func TestLatestPermissionPrompt_RepliedClears(t *testing.T) {
 	database.AppendTaskLog(task.ID, "user", "Replied from kanban: 2")
 
 	m := &AppModel{db: database}
-	result := m.latestChoicePrompt(task.ID)
+	result, _ := m.latestChoicePrompt(task.ID)
 	if result != "" {
 		t.Errorf("expected empty string after reply, got '%s'", result)
+	}
+}
+
+// TestLatestChoicePrompt_QuestionDetected verifies that question logs are detected
+// and returned with isQuestion=true.
+func TestLatestChoicePrompt_QuestionDetected(t *testing.T) {
+	database, err := db.Open(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to create test database: %v", err)
+	}
+	defer database.Close()
+
+	m := &AppModel{db: database}
+
+	task := &db.Task{Title: "Test task", Status: db.StatusBlocked}
+	if err := database.CreateTask(task); err != nil {
+		t.Fatalf("Failed to create task: %v", err)
+	}
+
+	database.AppendTaskLog(task.ID, "question", "What is your API key?")
+
+	result, isQ := m.latestChoicePrompt(task.ID)
+	if result != "What is your API key?" {
+		t.Errorf("expected 'What is your API key?', got '%s'", result)
+	}
+	if !isQ {
+		t.Error("expected isQuestion=true for question log")
+	}
+}
+
+// TestLatestChoicePrompt_QuestionSurvivesResumed verifies that question prompts
+// are NOT cleared by "Agent resumed working" or tool logs.
+func TestLatestChoicePrompt_QuestionSurvivesResumed(t *testing.T) {
+	database, err := db.Open(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to create test database: %v", err)
+	}
+	defer database.Close()
+
+	m := &AppModel{db: database}
+
+	task := &db.Task{Title: "Test task", Status: db.StatusBlocked}
+	if err := database.CreateTask(task); err != nil {
+		t.Fatalf("Failed to create task: %v", err)
+	}
+
+	// Question, then agent resumed and tool log — question should survive both
+	database.AppendTaskLog(task.ID, "question", "What environment?")
+	database.AppendTaskLog(task.ID, "system", "Agent resumed working")
+	database.AppendTaskLog(task.ID, "tool", "Bash: echo hello")
+
+	result, isQ := m.latestChoicePrompt(task.ID)
+	if result != "What environment?" {
+		t.Errorf("expected 'What environment?', got '%s'", result)
+	}
+	if !isQ {
+		t.Error("expected isQuestion=true")
+	}
+}
+
+// TestLatestChoicePrompt_QuestionResolvedByReply verifies that question prompts
+// ARE cleared when the user explicitly replies.
+func TestLatestChoicePrompt_QuestionResolvedByReply(t *testing.T) {
+	database, err := db.Open(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to create test database: %v", err)
+	}
+	defer database.Close()
+
+	m := &AppModel{db: database}
+
+	task := &db.Task{Title: "Test task", Status: db.StatusBlocked}
+	if err := database.CreateTask(task); err != nil {
+		t.Fatalf("Failed to create task: %v", err)
+	}
+
+	database.AppendTaskLog(task.ID, "question", "What environment?")
+	database.AppendTaskLog(task.ID, "user", "Replied from kanban: production")
+
+	result, _ := m.latestChoicePrompt(task.ID)
+	if result != "" {
+		t.Errorf("expected empty string after reply to question, got '%s'", result)
 	}
 }
 
@@ -1930,6 +2025,7 @@ func TestRenderExecutorPromptPreview_ShowsTabInputHint(t *testing.T) {
 		height:            50,
 		executorPrompts:   map[int64]string{1: "Choose option 1, 2, or 3"},
 		tasksNeedingInput: map[int64]bool{1: true},
+		questionPrompts:   map[int64]bool{},
 		replyInput:        replyInput,
 	}
 

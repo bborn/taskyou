@@ -3664,11 +3664,32 @@ func handlePostToolUseHook(database *db.DB, taskID int64, input *ClaudeHookInput
 		database.AppendTaskLog(taskID, "tool", logMsg)
 	}
 
-	// After a tool completes, Claude is still working (will process tool results)
-	// Ensure task remains in "processing" state
+	// Re-fetch task status — the MCP server may have changed it during
+	// tool execution (e.g. taskyou_needs_input sets blocked).
+	task, err = database.GetTask(taskID)
+	if err != nil || task == nil {
+		return err
+	}
+
+	// After a tool completes, Claude is still working (will process tool results).
+	// Ensure task remains in "processing" state — unless an MCP tool
+	// intentionally set it to blocked for user input.
 	if task.Status == db.StatusBlocked {
-		database.UpdateTaskStatus(taskID, db.StatusProcessing)
-		database.AppendTaskLog(taskID, "system", "Agent resumed working")
+		// Check if the blocked state is from a question prompt (MCP needs_input).
+		// If so, respect it. Otherwise, resume to processing.
+		hasQuestion := false
+		if logs, err := database.GetTaskLogs(taskID, 3); err == nil {
+			for _, l := range logs {
+				if l.LineType == "question" {
+					hasQuestion = true
+					break
+				}
+			}
+		}
+		if !hasQuestion {
+			database.UpdateTaskStatus(taskID, db.StatusProcessing)
+			database.AppendTaskLog(taskID, "system", "Agent resumed working")
+		}
 	}
 
 	return nil
