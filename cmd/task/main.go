@@ -883,6 +883,191 @@ that the TUI shows, either as formatted text or JSON for automation.`,
 	boardCmd.Flags().Int("limit", 5, "Maximum entries to show per column")
 	rootCmd.AddCommand(boardCmd)
 
+	// Tail subcommand - live updating task view grouped by project and status
+	tailCmd := &cobra.Command{
+		Use:   "tail",
+		Short: "Live view of tasks organized by project and status",
+		Long: `Show a continuously updating view of all active tasks,
+grouped by project and then by status. Refreshes automatically.
+Press Ctrl+C to stop.`,
+		Run: func(cmd *cobra.Command, args []string) {
+			interval, _ := cmd.Flags().GetDuration("interval")
+			showDone, _ := cmd.Flags().GetBool("done")
+
+			dbPath := db.DefaultPath()
+			database, err := db.Open(dbPath)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+			defer database.Close()
+
+			sigCh := make(chan os.Signal, 1)
+			signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+
+			ticker := time.NewTicker(interval)
+			defer ticker.Stop()
+
+			statusStyle := func(status string) lipgloss.Style {
+				switch status {
+				case db.StatusQueued:
+					return lipgloss.NewStyle().Foreground(lipgloss.Color("#F59E0B"))
+				case db.StatusProcessing:
+					return lipgloss.NewStyle().Foreground(lipgloss.Color("#3B82F6"))
+				case db.StatusBlocked:
+					return lipgloss.NewStyle().Foreground(lipgloss.Color("#EF4444"))
+				case db.StatusDone:
+					return lipgloss.NewStyle().Foreground(lipgloss.Color("#10B981"))
+				default:
+					return lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280"))
+				}
+			}
+
+			projectStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#A78BFA"))
+			headerStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#E5E7EB"))
+
+			statusOrder := []string{
+				db.StatusProcessing,
+				db.StatusBlocked,
+				db.StatusQueued,
+				db.StatusBacklog,
+			}
+			if showDone {
+				statusOrder = append(statusOrder, db.StatusDone)
+			}
+
+			statusLabels := map[string]string{
+				db.StatusProcessing: "In Progress",
+				db.StatusBlocked:    "Blocked",
+				db.StatusQueued:     "Queued",
+				db.StatusBacklog:    "Backlog",
+				db.StatusDone:       "Done",
+			}
+
+			logStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#9CA3AF")).Italic(true)
+
+			renderTail := func() {
+				opts := db.ListTasksOptions{
+					IncludeClosed: showDone,
+					Limit:         500,
+				}
+				tasks, err := database.ListTasks(opts)
+				if err != nil {
+					fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+					return
+				}
+
+				// Collect task IDs and fetch latest log per task
+				var taskIDs []int64
+				for _, t := range tasks {
+					taskIDs = append(taskIDs, t.ID)
+				}
+				latestLogs, _ := database.GetLatestLogPerTask(taskIDs)
+				if latestLogs == nil {
+					latestLogs = make(map[int64]*db.TaskLog)
+				}
+
+				// Group by project, then by status
+				type projectGroup struct {
+					name     string
+					statuses map[string][]*db.Task
+				}
+				projectMap := make(map[string]*projectGroup)
+				var projectOrder []string
+
+				for _, t := range tasks {
+					if t.Status == db.StatusArchived {
+						continue
+					}
+					proj := t.Project
+					if proj == "" {
+						proj = "(no project)"
+					}
+					pg, exists := projectMap[proj]
+					if !exists {
+						pg = &projectGroup{name: proj, statuses: make(map[string][]*db.Task)}
+						projectMap[proj] = pg
+						projectOrder = append(projectOrder, proj)
+					}
+					pg.statuses[t.Status] = append(pg.statuses[t.Status], t)
+				}
+
+				sort.Strings(projectOrder)
+
+				// Clear screen and move cursor to top
+				fmt.Print("\033[2J\033[H")
+
+				fmt.Println(headerStyle.Render("TaskYou — Live Tail") + "  " + dimStyle.Render(time.Now().Format("15:04:05")))
+				fmt.Println(dimStyle.Render(strings.Repeat("─", 60)))
+
+				if len(tasks) == 0 {
+					fmt.Println(dimStyle.Render("  No tasks found"))
+				}
+
+				for i, proj := range projectOrder {
+					pg := projectMap[proj]
+					// Count total tasks in this project
+					total := 0
+					for _, tl := range pg.statuses {
+						total += len(tl)
+					}
+					fmt.Printf("\n%s %s\n", projectStyle.Render(proj), dimStyle.Render(fmt.Sprintf("(%d)", total)))
+
+					for _, status := range statusOrder {
+						statusTasks := pg.statuses[status]
+						if len(statusTasks) == 0 {
+							continue
+						}
+						label := statusLabels[status]
+						fmt.Printf("  %s\n", statusStyle(status).Render(fmt.Sprintf("▸ %s (%d)", label, len(statusTasks))))
+						for _, t := range statusTasks {
+							title := truncate(t.Title, 70)
+							age := boardAgeHint(t)
+							line := fmt.Sprintf("    #%-4d %s", t.ID, title)
+							if age != "" {
+								line += "  " + dimStyle.Render(age)
+							}
+							fmt.Println(line)
+
+							// Show latest log line if available
+							if log, ok := latestLogs[t.ID]; ok && log.Content != "" {
+								content := strings.TrimSpace(log.Content)
+								// Take only the first line of multi-line content
+								if idx := strings.IndexByte(content, '\n'); idx != -1 {
+									content = content[:idx]
+								}
+								content = truncate(content, 80)
+								fmt.Printf("           %s\n", logStyle.Render(content))
+							}
+						}
+					}
+
+					if i < len(projectOrder)-1 {
+						fmt.Println()
+					}
+				}
+
+				fmt.Println()
+				fmt.Println(dimStyle.Render("Press Ctrl+C to stop • refreshing every " + interval.String()))
+			}
+
+			// Render immediately, then on each tick
+			renderTail()
+			for {
+				select {
+				case <-sigCh:
+					fmt.Println()
+					return
+				case <-ticker.C:
+					renderTail()
+				}
+			}
+		},
+	}
+	tailCmd.Flags().Duration("interval", 2*time.Second, "Refresh interval (e.g. 1s, 500ms)")
+	tailCmd.Flags().Bool("done", false, "Include completed tasks")
+	rootCmd.AddCommand(tailCmd)
+
 	// Show subcommand - show task details
 	showCmd := &cobra.Command{
 		Use:   "show <task-id>",

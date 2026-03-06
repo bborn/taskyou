@@ -908,6 +908,50 @@ func (db *DB) GetTaskLogs(taskID int64, limit int) ([]*TaskLog, error) {
 	return logs, nil
 }
 
+// GetLatestLogPerTask returns the most recent log entry for each of the given task IDs.
+// Returns a map of taskID -> latest TaskLog. Uses a single efficient query.
+func (db *DB) GetLatestLogPerTask(taskIDs []int64) (map[int64]*TaskLog, error) {
+	if len(taskIDs) == 0 {
+		return nil, nil
+	}
+
+	// Build placeholders
+	placeholders := make([]string, len(taskIDs))
+	args := make([]interface{}, len(taskIDs))
+	for i, id := range taskIDs {
+		placeholders[i] = "?"
+		args[i] = id
+	}
+
+	query := fmt.Sprintf(`
+		SELECT tl.id, tl.task_id, tl.line_type, tl.content, tl.created_at
+		FROM task_logs tl
+		INNER JOIN (
+			SELECT task_id, MAX(id) as max_id
+			FROM task_logs
+			WHERE task_id IN (%s)
+			GROUP BY task_id
+		) latest ON tl.id = latest.max_id
+	`, strings.Join(placeholders, ","))
+
+	rows, err := db.Query(query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("query latest logs: %w", err)
+	}
+	defer rows.Close()
+
+	result := make(map[int64]*TaskLog)
+	for rows.Next() {
+		l := &TaskLog{}
+		err := rows.Scan(&l.ID, &l.TaskID, &l.LineType, &l.Content, &l.CreatedAt)
+		if err != nil {
+			return nil, fmt.Errorf("scan latest log: %w", err)
+		}
+		result[l.TaskID] = l
+	}
+	return result, nil
+}
+
 // GetConversationHistoryLogs retrieves only logs relevant for building conversation history.
 // This is much more efficient than GetTaskLogs for the executor's prompt building,
 // as it skips large output/tool log content that isn't needed for conversation context.
