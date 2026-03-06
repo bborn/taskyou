@@ -944,6 +944,8 @@ Press Ctrl+C to stop.`,
 				db.StatusDone:       "Done",
 			}
 
+			logStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#9CA3AF")).Italic(true)
+
 			renderTail := func() {
 				opts := db.ListTasksOptions{
 					IncludeClosed: showDone,
@@ -953,6 +955,16 @@ Press Ctrl+C to stop.`,
 				if err != nil {
 					fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
 					return
+				}
+
+				// Collect task IDs and fetch latest log per task
+				var taskIDs []int64
+				for _, t := range tasks {
+					taskIDs = append(taskIDs, t.ID)
+				}
+				latestLogs, _ := database.GetLatestLogPerTask(taskIDs)
+				if latestLogs == nil {
+					latestLogs = make(map[int64]*db.TaskLog)
 				}
 
 				// Group by project, then by status
@@ -1016,6 +1028,17 @@ Press Ctrl+C to stop.`,
 								line += "  " + dimStyle.Render(age)
 							}
 							fmt.Println(line)
+
+							// Show latest log line if available
+							if log, ok := latestLogs[t.ID]; ok && log.Content != "" {
+								content := strings.TrimSpace(log.Content)
+								// Take only the first line of multi-line content
+								if idx := strings.IndexByte(content, '\n'); idx != -1 {
+									content = content[:idx]
+								}
+								content = truncate(content, 80)
+								fmt.Printf("           %s\n", logStyle.Render(content))
+							}
 						}
 					}
 
