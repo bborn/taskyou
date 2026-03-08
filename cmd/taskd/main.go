@@ -40,7 +40,7 @@ func main() {
 	home, _ := os.UserHomeDir()
 
 	if *dbPath == "" {
-		*dbPath = filepath.Join(home, ".local", "share", "task", "tasks.db")
+		*dbPath = db.DefaultPath()
 	}
 	if *hostKey == "" {
 		*hostKey = filepath.Join(home, ".ssh", "task_ed25519")

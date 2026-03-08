@@ -3305,8 +3305,9 @@ func ensureDaemonRunning(dangerousMode bool) error {
 }
 
 func getPidFilePath() string {
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".local", "share", "task", "daemon.pid")
+	// Colocate pid file with the database so isolated instances (e.g. VHS tests)
+	// don't conflict with the real daemon.
+	return filepath.Join(filepath.Dir(db.DefaultPath()), "daemon.pid")
 }
 
 func readPidFile(path string) (int, error) {

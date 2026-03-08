@@ -1,0 +1,6 @@
+# VHS output files — generated, not committed
+*.gif
+*.png
+*.mp4
+*.webm
+!.gitkeep
