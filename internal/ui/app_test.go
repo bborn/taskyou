@@ -2118,3 +2118,105 @@ func TestExecutorRespondedMsg_ReplyAction(t *testing.T) {
 		t.Errorf("notification should contain 'Replied to', got '%s'", model.notification)
 	}
 }
+
+// TestSystemMessages_NotSwallowedByOverlayViews verifies that chain messages
+// (tickMsg, dbChangeMsg, tasksLoadedMsg) are processed even when overlay views
+// are active. Previously, these messages were swallowed by view-specific handlers,
+// permanently breaking the tick/watcher/event chains.
+func TestSystemMessages_NotSwallowedByOverlayViews(t *testing.T) {
+	database, err := db.Open(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to create test database: %v", err)
+	}
+	defer database.Close()
+
+	task := &db.Task{Title: "Test task", Status: db.StatusQueued}
+	if err := database.CreateTask(task); err != nil {
+		t.Fatalf("Failed to create task: %v", err)
+	}
+
+	updatedTasks := []*db.Task{
+		{ID: task.ID, Title: "Test task", Status: db.StatusDone},
+	}
+
+	// Test overlay states that previously swallowed system messages
+	overlayStates := []struct {
+		name  string
+		setup func(m *AppModel)
+	}{
+		{
+			name: "quickInputFocused",
+			setup: func(m *AppModel) {
+				replyInput := textinput.New()
+				replyInput.Focus()
+				m.replyInput = replyInput
+				m.currentView = ViewDashboard
+				m.quickInputFocused = true
+			},
+		},
+		{
+			name: "filterActive",
+			setup: func(m *AppModel) {
+				m.currentView = ViewDashboard
+				m.filterActive = true
+			},
+		},
+		{
+			name: "ViewSettings",
+			setup: func(m *AppModel) {
+				m.currentView = ViewSettings
+				m.settingsView = &SettingsModel{width: 100, height: 50}
+			},
+		},
+	}
+
+	for _, overlay := range overlayStates {
+		t.Run("tasksLoadedMsg_"+overlay.name, func(t *testing.T) {
+			m := &AppModel{
+				width:             100,
+				height:            50,
+				db:                database,
+				keys:              DefaultKeyMap(),
+				kanban:            NewKanbanBoard(100, 50),
+				prevStatuses:      make(map[int64]string),
+				tasksNeedingInput: make(map[int64]bool),
+				questionPrompts:   make(map[int64]bool),
+				executorPrompts:   make(map[int64]string),
+			}
+			overlay.setup(m)
+
+			// Send tasksLoadedMsg - should be processed regardless of overlay
+			result, _ := m.Update(tasksLoadedMsg{tasks: updatedTasks})
+			model := result.(*AppModel)
+
+			if len(model.tasks) != 1 {
+				t.Fatalf("expected 1 task, got %d", len(model.tasks))
+			}
+			if model.tasks[0].Status != db.StatusDone {
+				t.Errorf("expected task status %q, got %q", db.StatusDone, model.tasks[0].Status)
+			}
+		})
+
+		t.Run("tickMsg_"+overlay.name, func(t *testing.T) {
+			m := &AppModel{
+				width:             100,
+				height:            50,
+				db:                database,
+				keys:              DefaultKeyMap(),
+				kanban:            NewKanbanBoard(100, 50),
+				prevStatuses:      make(map[int64]string),
+				tasksNeedingInput: make(map[int64]bool),
+				questionPrompts:   make(map[int64]bool),
+				executorPrompts:   make(map[int64]string),
+			}
+			overlay.setup(m)
+
+			// Send tickMsg - should produce continuation commands (not be swallowed)
+			_, cmd := m.Update(tickMsg{})
+
+			if cmd == nil {
+				t.Error("tickMsg should produce continuation commands, got nil (tick chain broken)")
+			}
+		})
+	}
+}
