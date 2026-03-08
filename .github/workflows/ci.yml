@@ -45,6 +45,7 @@ jobs:
   vulncheck:
     name: Vulnerability Check
     runs-on: ubuntu-latest
+    continue-on-error: true  # Advisory until Go 1.25.8 is available (stdlib vulns)
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
