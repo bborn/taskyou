@@ -685,56 +685,67 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.applyWindowSize(sizeMsg.Width, sizeMsg.Height)
 	}
 
-	// Handle form updates first (needs all message types)
-	if m.currentView == ViewNewTask && m.newTaskForm != nil {
-		return m.updateNewTaskForm(msg)
-	}
-	if m.currentView == ViewEditTask && m.editTaskForm != nil {
-		return m.updateEditTaskForm(msg)
-	}
-	if m.currentView == ViewNewTaskConfirm && m.queueConfirm != nil {
-		return m.updateNewTaskConfirm(msg)
-	}
-	if m.currentView == ViewProjectChangeConfirm && m.projectChangeConfirm != nil {
-		return m.updateProjectChangeConfirm(msg)
-	}
-	if m.currentView == ViewDeleteConfirm && m.deleteConfirm != nil {
-		return m.updateDeleteConfirm(msg)
-	}
-	if m.currentView == ViewCloseConfirm && m.closeConfirm != nil {
-		return m.updateCloseConfirm(msg)
-	}
-	if m.currentView == ViewArchiveConfirm && m.archiveConfirm != nil {
-		return m.updateArchiveConfirm(msg)
-	}
-	if m.currentView == ViewQuitConfirm && m.quitConfirm != nil {
-		return m.updateQuitConfirm(msg)
-	}
-	if m.currentView == ViewSettings && m.settingsView != nil {
-		return m.updateSettings(msg)
-	}
-	if m.currentView == ViewRetry && m.retryView != nil {
-		return m.updateRetry(msg)
-	}
-	if m.currentView == ViewChangeStatus && m.changeStatusForm != nil {
-		return m.updateChangeStatus(msg)
-	}
-	if m.currentView == ViewCommandPalette && m.commandPaletteView != nil {
-		return m.updateCommandPalette(msg)
-	}
-	// Handle detail view feedback mode (needs all message types for text input)
-	if m.currentView == ViewDetail && m.detailView != nil && m.detailView.InFeedbackMode() {
-		return m.updateDetail(msg)
+	// System messages that form chains (each handler schedules the next) must
+	// always reach the main switch below. If any view handler swallows one,
+	// the chain breaks permanently — polling stops, DB watcher stops, etc.
+	isSystemMsg := false
+	switch msg.(type) {
+	case tickMsg, focusTickMsg, dbChangeMsg, taskEventMsg, tasksLoadedMsg, prRefreshTickMsg:
+		isSystemMsg = true
 	}
 
-	// Handle quick input mode (needs all message types for text input)
-	if m.currentView == ViewDashboard && m.quickInputFocused {
-		return m.updateQuickInput(msg)
-	}
+	if !isSystemMsg {
+		// Handle form updates first (needs all message types)
+		if m.currentView == ViewNewTask && m.newTaskForm != nil {
+			return m.updateNewTaskForm(msg)
+		}
+		if m.currentView == ViewEditTask && m.editTaskForm != nil {
+			return m.updateEditTaskForm(msg)
+		}
+		if m.currentView == ViewNewTaskConfirm && m.queueConfirm != nil {
+			return m.updateNewTaskConfirm(msg)
+		}
+		if m.currentView == ViewProjectChangeConfirm && m.projectChangeConfirm != nil {
+			return m.updateProjectChangeConfirm(msg)
+		}
+		if m.currentView == ViewDeleteConfirm && m.deleteConfirm != nil {
+			return m.updateDeleteConfirm(msg)
+		}
+		if m.currentView == ViewCloseConfirm && m.closeConfirm != nil {
+			return m.updateCloseConfirm(msg)
+		}
+		if m.currentView == ViewArchiveConfirm && m.archiveConfirm != nil {
+			return m.updateArchiveConfirm(msg)
+		}
+		if m.currentView == ViewQuitConfirm && m.quitConfirm != nil {
+			return m.updateQuitConfirm(msg)
+		}
+		if m.currentView == ViewSettings && m.settingsView != nil {
+			return m.updateSettings(msg)
+		}
+		if m.currentView == ViewRetry && m.retryView != nil {
+			return m.updateRetry(msg)
+		}
+		if m.currentView == ViewChangeStatus && m.changeStatusForm != nil {
+			return m.updateChangeStatus(msg)
+		}
+		if m.currentView == ViewCommandPalette && m.commandPaletteView != nil {
+			return m.updateCommandPalette(msg)
+		}
+		// Handle detail view feedback mode (needs all message types for text input)
+		if m.currentView == ViewDetail && m.detailView != nil && m.detailView.InFeedbackMode() {
+			return m.updateDetail(msg)
+		}
 
-	// Handle filter input mode (needs all message types for text input)
-	if m.currentView == ViewDashboard && m.filterActive {
-		return m.updateFilterMode(msg)
+		// Handle quick input mode (needs all message types for text input)
+		if m.currentView == ViewDashboard && m.quickInputFocused {
+			return m.updateQuickInput(msg)
+		}
+
+		// Handle filter input mode (needs all message types for text input)
+		if m.currentView == ViewDashboard && m.filterActive {
+			return m.updateFilterMode(msg)
+		}
 	}
 
 	switch msg := msg.(type) {
