@@ -88,6 +88,13 @@ func Open(path string) (*DB, error) {
 	// handles concurrent goroutines via database/sql's built-in serialization.
 	db.SetMaxOpenConns(1)
 
+	// Recycle connections periodically so the next query opens a fresh
+	// connection that re-reads the WAL index from the shared-memory file.
+	// modernc.org/sqlite (pure-Go) uses file I/O instead of mmap for the
+	// WAL shared-memory, so a long-lived connection may cache a stale WAL
+	// index and miss writes from other processes (e.g., CLI commands).
+	db.SetConnMaxLifetime(2 * time.Second)
+
 	// Set busy timeout to retry on SQLITE_BUSY instead of failing immediately.
 	// This is critical for the daemon where multiple goroutines update task
 	// status concurrently. Note: _busy_timeout DSN param does NOT work with
