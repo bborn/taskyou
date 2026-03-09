@@ -457,7 +457,12 @@ func (e *Executor) getClaudePID(taskID int64) int {
 		pidStr := parts[1]
 
 		// Only match panes in windows named after this task
-		if !strings.Contains(target, windowName) {
+		// Parse target format: "session:window:pane"
+		targetParts := strings.SplitN(target, ":", 3)
+		if len(targetParts) < 2 {
+			continue
+		}
+		if targetParts[1] != windowName {
 			continue
 		}
 
@@ -5109,7 +5114,12 @@ func (e *Executor) getPiPID(taskID int64) int {
 		pidStr := parts[1]
 
 		// Only match panes in windows named after this task
-		if !strings.Contains(target, windowName) {
+		// Parse target format: "session:window:pane"
+		targetParts := strings.SplitN(target, ":", 3)
+		if len(targetParts) < 2 {
+			continue
+		}
+		if targetParts[1] != windowName {
 			continue
 		}
 
