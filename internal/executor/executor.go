@@ -427,21 +427,15 @@ func (e *Executor) IsSuspended(taskID int64) bool {
 	return suspended
 }
 
-// getClaudePID finds the PID of the Claude process for a task.
-// It first checks the stored daemon session, then searches all sessions for the task window.
-func (e *Executor) getClaudePID(taskID int64) int {
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-
-	windowName := TmuxWindowName(taskID)
-
-	// Search all tmux sessions for a window with this task's name
-	out, err := exec.CommandContext(ctx, "tmux", "list-panes", "-a", "-F", "#{session_name}:#{window_name}:#{pane_index} #{pane_pid}").Output()
-	if err != nil {
-		return 0
-	}
-
-	for _, line := range strings.Split(string(out), "\n") {
+// findPanesForWindow parses tmux list-panes output and returns PIDs for panes
+// in windows matching the given name exactly. The input format is one line per pane:
+//
+//	"session:window:pane pid"
+//
+// e.g. "task-daemon-123:task-5:0 12345"
+func findPanesForWindow(tmuxOutput, windowName string) []int {
+	var pids []int
+	for _, line := range strings.Split(tmuxOutput, "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" {
 			continue
@@ -456,8 +450,7 @@ func (e *Executor) getClaudePID(taskID int64) int {
 		target := parts[0]
 		pidStr := parts[1]
 
-		// Only match panes in windows named after this task
-		// Parse target format: "session:window:pane"
+		// Parse target format: "session:window:pane" and match window name exactly
 		targetParts := strings.SplitN(target, ":", 3)
 		if len(targetParts) < 2 {
 			continue
@@ -470,7 +463,26 @@ func (e *Executor) getClaudePID(taskID int64) int {
 		if err != nil {
 			continue
 		}
+		pids = append(pids, pid)
+	}
+	return pids
+}
 
+// getClaudePID finds the PID of the Claude process for a task.
+// It first checks the stored daemon session, then searches all sessions for the task window.
+func (e *Executor) getClaudePID(taskID int64) int {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	windowName := TmuxWindowName(taskID)
+
+	// Search all tmux sessions for a window with this task's name
+	out, err := exec.CommandContext(ctx, "tmux", "list-panes", "-a", "-F", "#{session_name}:#{window_name}:#{pane_index} #{pane_pid}").Output()
+	if err != nil {
+		return 0
+	}
+
+	for _, pid := range findPanesForWindow(string(out), windowName) {
 		// Check if this is a Claude process or has Claude as child
 		cmdOut, _ := exec.CommandContext(ctx, "ps", "-p", strconv.Itoa(pid), "-o", "comm=").Output()
 		if strings.Contains(string(cmdOut), "claude") {
@@ -5098,36 +5110,7 @@ func (e *Executor) getPiPID(taskID int64) int {
 		return 0
 	}
 
-	for _, line := range strings.Split(string(out), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-
-		// Parse "session:window:pane pid"
-		parts := strings.Fields(line)
-		if len(parts) != 2 {
-			continue
-		}
-
-		target := parts[0]
-		pidStr := parts[1]
-
-		// Only match panes in windows named after this task
-		// Parse target format: "session:window:pane"
-		targetParts := strings.SplitN(target, ":", 3)
-		if len(targetParts) < 2 {
-			continue
-		}
-		if targetParts[1] != windowName {
-			continue
-		}
-
-		pid, err := strconv.Atoi(pidStr)
-		if err != nil {
-			continue
-		}
-
+	for _, pid := range findPanesForWindow(string(out), windowName) {
 		// Check if this is a Pi process or has Pi as child
 		cmdOut, _ := exec.CommandContext(ctx, "ps", "-p", strconv.Itoa(pid), "-o", "comm=").Output()
 		if strings.Contains(string(cmdOut), "pi") || strings.Contains(string(cmdOut), "node") || strings.Contains(string(cmdOut), "ty") {
