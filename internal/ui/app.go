@@ -685,6 +685,13 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.applyWindowSize(sizeMsg.Width, sizeMsg.Height)
 	}
 
+	// Safety net: origin column is only meaningful while in detail view.
+	// If we're on the dashboard with a stale origin column (e.g. a missed
+	// ClearOriginColumn on an exit path), clear it to prevent focus snapping.
+	if m.currentView == ViewDashboard && m.kanban != nil && m.kanban.HasOriginColumn() {
+		m.kanban.ClearOriginColumn()
+	}
+
 	// System messages that form chains (each handler schedules the next) must
 	// always reach the main switch below. If any view handler swallows one,
 	// the chain breaks permanently — polling stops, DB watcher stops, etc.
@@ -2582,6 +2589,7 @@ func (m *AppModel) updateDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.detailView.Cleanup()
 				m.detailView = nil
 			}
+			m.kanban.ClearOriginColumn()
 			m.currentView = ViewDashboard
 			return m, m.unarchiveTask(m.selectedTask.ID)
 		}
@@ -2901,6 +2909,7 @@ func (m *AppModel) updateDeleteConfirm(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.detailView.Cleanup()
 				m.detailView = nil
 			}
+			m.kanban.ClearOriginColumn()
 			m.currentView = ViewDashboard
 			return m, m.deleteTask(taskID)
 		}
@@ -3209,6 +3218,7 @@ func (m *AppModel) updateCloseConfirm(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.detailView.Cleanup()
 				m.detailView = nil
 			}
+			m.kanban.ClearOriginColumn()
 			m.currentView = ViewDashboard
 			m.userClosedTaskIDs[taskID] = true
 			return m, m.closeTask(taskID)
@@ -3311,6 +3321,7 @@ func (m *AppModel) updateArchiveConfirm(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.detailView.Cleanup()
 				m.detailView = nil
 			}
+			m.kanban.ClearOriginColumn()
 			m.currentView = ViewDashboard
 			return m, m.archiveTask(taskID)
 		}
@@ -3526,6 +3537,7 @@ func (m *AppModel) updateRetry(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.notification = ""
 			m.notifyTaskID = 0
 		}
+		m.kanban.ClearOriginColumn()
 		m.currentView = ViewDashboard
 		m.retryView = nil
 		if m.detailView != nil {
