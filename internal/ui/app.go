@@ -1035,7 +1035,12 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.currentView = ViewDashboard
 			m.newTaskForm = nil
 			m.showWelcome = false // Hide welcome message after first task is created
-			cmds = append(cmds, m.loadTasks())
+			if msg.task != nil && msg.task.Status == db.StatusQueued {
+				// Navigate to detail view with executor pane focused when task is queued for execution
+				cmds = append(cmds, tea.Batch(m.loadTasks(), m.loadTaskWithFocus(msg.task.ID)))
+			} else {
+				cmds = append(cmds, m.loadTasks())
+			}
 		} else {
 			m.err = msg.err
 		}
@@ -1994,7 +1999,8 @@ func (m *AppModel) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			// Immediately update UI for responsiveness
 			task.Status = db.StatusQueued
 			m.updateTaskInList(task)
-			return m, m.queueTask(task.ID)
+			// Queue the task and navigate to detail view with executor pane focused
+			return m, tea.Batch(m.queueTask(task.ID), m.loadTaskWithFocus(task.ID))
 		}
 
 	case key.Matches(msg, m.keys.TogglePin):
