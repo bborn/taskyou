@@ -993,6 +993,10 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if prCmd := m.fetchPRInfo(msg.task); prCmd != nil {
 				cmds = append(cmds, prCmd)
 			}
+			// Start loading related tasks from QMD
+			if relatedCmd := m.detailView.StartRelatedTasksLoad(); relatedCmd != nil {
+				cmds = append(cmds, relatedCmd)
+			}
 			if hasLast && now.Sub(lastViewed) > summaryRefreshAfter {
 				m.notification = fmt.Sprintf("%s Refreshing activity summary...", IconInProgress())
 				m.notifyUntil = time.Now().Add(5 * time.Second)
