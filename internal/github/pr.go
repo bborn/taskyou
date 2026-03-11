@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"os/exec"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -40,8 +41,8 @@ type PRInfo struct {
 	CheckState CheckState `json:"checkState"`
 	Mergeable  string     `json:"mergeable"` // "MERGEABLE", "CONFLICTING", "UNKNOWN"
 	UpdatedAt  time.Time  `json:"updatedAt"`
-	Additions  int        `json:"additions"`  // Lines added
-	Deletions  int        `json:"deletions"`  // Lines deleted
+	Additions  int        `json:"additions"` // Lines added
+	Deletions  int        `json:"deletions"` // Lines deleted
 }
 
 // ghPRResponse is the JSON response from gh pr view.
@@ -75,7 +76,7 @@ type cacheEntry struct {
 	fetchedAt time.Time
 }
 
-const cacheTTL = 15 * time.Second
+const cacheTTL = 4 * time.Minute
 
 // NewPRCache creates a new PR cache.
 func NewPRCache() *PRCache {
@@ -144,6 +145,14 @@ func fetchPRInfo(repoDir, branchName string) *PRInfo {
 
 	output, err := cmd.Output()
 	if err != nil {
+		// Check if this is a rate limit error
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			stderr := string(exitErr.Stderr)
+			if strings.Contains(stderr, "rate limit") || strings.Contains(stderr, "API rate limit") {
+				// Return nil on rate limit (cache will be used if available)
+				return nil
+			}
+		}
 		// No PR exists for this branch, timeout, or other error
 		return nil
 	}
@@ -308,11 +317,37 @@ type ghPRListResponse struct {
 	Deletions         int       `json:"deletions"`
 }
 
+// graphQLRateLimitRemaining returns the remaining GraphQL rate limit budget.
+// Returns -1 if the check fails (caller should proceed optimistically).
+func graphQLRateLimitRemaining() int {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "gh", "api", "rate_limit", "--jq", ".resources.graphql.remaining")
+	output, err := cmd.Output()
+	if err != nil {
+		return -1
+	}
+	remaining, err := strconv.Atoi(strings.TrimSpace(string(output)))
+	if err != nil {
+		return -1
+	}
+	return remaining
+}
+
+// rateLimitThreshold is the minimum remaining GraphQL calls before we skip batch fetches.
+const rateLimitThreshold = 200
+
 // FetchAllPRsForRepo fetches all open and recently merged PRs for a repo in a single API call.
 // Returns a map of branch name -> PRInfo. This is much more efficient than fetching per-branch.
 func FetchAllPRsForRepo(repoDir string) map[string]*PRInfo {
 	if _, err := exec.LookPath("gh"); err != nil {
 		return nil
+	}
+
+	// Check rate limit before making batch calls
+	if remaining := graphQLRateLimitRemaining(); remaining >= 0 && remaining < rateLimitThreshold {
+		return nil // Signal to caller to use cached data
 	}
 
 	result := make(map[string]*PRInfo)
@@ -330,6 +365,14 @@ func FetchAllPRsForRepo(repoDir string) map[string]*PRInfo {
 
 	output, err := cmd.Output()
 	if err != nil {
+		// Check if this is a rate limit error
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			stderr := string(exitErr.Stderr)
+			if strings.Contains(stderr, "rate limit") || strings.Contains(stderr, "API rate limit") {
+				// Return nil to signal rate limit hit (caller can use cached data)
+				return nil
+			}
+		}
 		return result
 	}
 
@@ -345,48 +388,24 @@ func FetchAllPRsForRepo(repoDir string) map[string]*PRInfo {
 		}
 	}
 
-	// Also fetch recently merged PRs (last 20) to catch merges
+	// Also fetch recently merged PRs (last 5) to catch merges.
+	// We skip closed (non-merged) PRs entirely — they rarely change and
+	// individual lookups via GetPRForBranch handle them on demand.
 	ctx2, cancel2 := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel2()
 
 	cmd2 := exec.CommandContext(ctx2, "gh", "pr", "list",
 		"--state", "merged",
 		"--json", "number,url,state,isDraft,title,headRefName,mergeable,updatedAt,additions,deletions",
-		"--limit", "20")
+		"--limit", "5")
 	cmd2.Dir = repoDir
 
-	output2, err := cmd2.Output()
-	if err == nil {
+	output2, err2 := cmd2.Output()
+	if err2 == nil {
 		var mergedPRs []ghPRListResponse
 		if json.Unmarshal(output2, &mergedPRs) == nil {
 			for _, pr := range mergedPRs {
 				// Only add if not already present (open PR takes precedence)
-				if _, exists := result[pr.HeadRefName]; !exists && pr.HeadRefName != "" {
-					info := parsePRListResponse(&pr)
-					if info != nil {
-						result[pr.HeadRefName] = info
-					}
-				}
-			}
-		}
-	}
-
-	// Also fetch recently closed PRs (last 10) to catch closures
-	ctx3, cancel3 := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel3()
-
-	cmd3 := exec.CommandContext(ctx3, "gh", "pr", "list",
-		"--state", "closed",
-		"--json", "number,url,state,isDraft,title,headRefName,mergeable,updatedAt,additions,deletions",
-		"--limit", "10")
-	cmd3.Dir = repoDir
-
-	output3, err := cmd3.Output()
-	if err == nil {
-		var closedPRs []ghPRListResponse
-		if json.Unmarshal(output3, &closedPRs) == nil {
-			for _, pr := range closedPRs {
-				// Only add if not already present (open/merged PR takes precedence)
 				if _, exists := result[pr.HeadRefName]; !exists && pr.HeadRefName != "" {
 					info := parsePRListResponse(&pr)
 					if info != nil {

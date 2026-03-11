@@ -2,6 +2,7 @@ package processor
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/bborn/workflow/extensions/ty-email/internal/adapter"
@@ -11,14 +12,18 @@ import (
 
 // mockAdapter implements adapter.Adapter for testing.
 type mockAdapter struct {
-	sentEmails []*adapter.OutboundEmail
+	sentEmails          []*adapter.OutboundEmail
+	lastMarkProcessedID string
 }
 
-func (m *mockAdapter) Name() string                                        { return "mock" }
-func (m *mockAdapter) Start(ctx context.Context) error                     { return nil }
-func (m *mockAdapter) Stop() error                                         { return nil }
-func (m *mockAdapter) Emails() <-chan *adapter.Email                       { return nil }
-func (m *mockAdapter) MarkProcessed(ctx context.Context, id string) error  { return nil }
+func (m *mockAdapter) Name() string                    { return "mock" }
+func (m *mockAdapter) Start(ctx context.Context) error { return nil }
+func (m *mockAdapter) Stop() error                     { return nil }
+func (m *mockAdapter) Emails() <-chan *adapter.Email   { return nil }
+func (m *mockAdapter) MarkProcessed(ctx context.Context, id string) error {
+	m.lastMarkProcessedID = id
+	return nil
+}
 func (m *mockAdapter) Send(ctx context.Context, email *adapter.OutboundEmail) error {
 	m.sentEmails = append(m.sentEmails, email)
 	return nil
@@ -43,12 +48,12 @@ func TestReplyFromAddress(t *testing.T) {
 
 	// Test: QueueOutbound stores the from address
 	id, err := st.QueueOutbound(
-		"sender@gmail.com",         // to
-		"sender+ty@gmail.com",      // from (the +ty alias)
-		"Re: Test",                 // subject
-		"Reply body",               // body
-		nil,                        // taskID
-		"<msg123@gmail.com>",       // inReplyTo
+		"sender@gmail.com",    // to
+		"sender+ty@gmail.com", // from (the +ty alias)
+		"Re: Test",            // subject
+		"Reply body",          // body
+		nil,                   // taskID
+		"<msg123@gmail.com>",  // inReplyTo
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -126,7 +131,7 @@ func TestReplyFromEmptyFallsBackToDefault(t *testing.T) {
 	// Queue without a from address (e.g., from CheckBlockedTasks)
 	_, err = st.QueueOutbound(
 		"user@gmail.com",
-		"",          // no from override
+		"", // no from override
 		"Re: Task",
 		"Reply",
 		nil,
@@ -150,6 +155,49 @@ func TestReplyFromEmptyFallsBackToDefault(t *testing.T) {
 	}
 }
 
+func TestStripQuotedText(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{
+			name:     "plain text",
+			input:    "Please create a task for this",
+			expected: "Please create a task for this",
+		},
+		{
+			name:     "with signature",
+			input:    "Please create a task\n\n--\nJohn Doe\nCEO, Acme Corp",
+			expected: "Please create a task",
+		},
+		{
+			name:     "with quoted reply",
+			input:    "Sounds good, do it.\n\nOn Mon, Feb 20, 2026 at 12:00 PM Someone wrote:\n> Original message here\n> More original",
+			expected: "Sounds good, do it.",
+		},
+		{
+			name:     "with inline quotes",
+			input:    "My response\n> quoted line\nMore response",
+			expected: "My response\nMore response",
+		},
+		{
+			name:     "truncates long body",
+			input:    strings.Repeat("a", 3000),
+			expected: strings.Repeat("a", 2000) + "\n[truncated]",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := stripQuotedText(tt.input)
+			if got != tt.expected {
+				t.Errorf("stripQuotedText() = %q, want %q", got, tt.expected)
+			}
+		})
+	}
+}
+
 func TestRoundTripFromAddress(t *testing.T) {
 	// End-to-end: queue with +ty from, send, verify adapter gets +ty from
 	st, err := state.Open(t.TempDir() + "/test.db")
@@ -163,8 +211,8 @@ func TestRoundTripFromAddress(t *testing.T) {
 
 	// Simulate what ProcessEmail does: queue reply with the To address as From
 	_, err = st.QueueOutbound(
-		"bruno@gmail.com",        // to (reply recipient)
-		"bruno+ty@gmail.com",     // from (the +ty alias from original email's To)
+		"bruno@gmail.com",    // to (reply recipient)
+		"bruno+ty@gmail.com", // from (the +ty alias from original email's To)
 		"Re: New task",
 		"Got it! I'll create a task: New task",
 		nil,

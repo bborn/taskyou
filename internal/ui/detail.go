@@ -9,14 +9,17 @@ import (
 	"strings"
 	"time"
 
-	"github.com/bborn/workflow/internal/config"
-	"github.com/bborn/workflow/internal/db"
-	"github.com/bborn/workflow/internal/executor"
-	"github.com/bborn/workflow/internal/github"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/glamour"
 	"github.com/charmbracelet/lipgloss"
+
+	"github.com/bborn/workflow/internal/config"
+	"github.com/bborn/workflow/internal/db"
+	"github.com/bborn/workflow/internal/executor"
+	"github.com/bborn/workflow/internal/github"
+	"github.com/bborn/workflow/internal/qmd"
+	"github.com/bborn/workflow/internal/spotlight"
 )
 
 // shouldSkipAutoExecutor returns true if the task should NOT automatically
@@ -77,12 +80,14 @@ type DetailModel struct {
 
 	// Content caching to avoid unnecessary re-renders
 	lastRenderedBody    string
+	lastRenderedSummary string
 	lastRenderedLogHash uint64
 	lastRenderedFocused bool
 	cachedContent       string
 
 	// Log count tracking for smarter refreshes
 	lastLogCount int
+	logsLoading  bool // true while async log loading is in progress
 
 	// Memory check throttling (don't check every refresh)
 	lastMemoryCheck time.Time
@@ -102,8 +107,14 @@ type DetailModel struct {
 	shellPaneHidden bool // true when shell pane is collapsed to daemon
 
 	// Server detection for task port
-	serverListening   bool      // true when a server is listening on the task's port
-	lastServerCheck   time.Time // throttle server port checks
+	serverListening bool      // true when a server is listening on the task's port
+	lastServerCheck time.Time // throttle server port checks
+
+	// Related tasks from QMD semantic search
+	relatedTasks        []qmd.RelatedTask // cached related tasks
+	relatedTasksLoading bool              // true while loading related tasks
+	relatedTasksLoaded  bool              // true once loaded (even if empty)
+	lastRelatedSearch   string            // cache key for related task search
 }
 
 // Message types for async pane loading
@@ -116,7 +127,44 @@ type panesJoinedMsg struct {
 	err             error
 }
 
+// logsLoadedMsg is sent when async log loading completes.
+type logsLoadedMsg struct {
+	taskID   int64
+	logs     []*db.TaskLog
+	logCount int
+}
+
 type spinnerTickMsg struct{}
+
+// relatedTasksMsg is sent when related tasks are loaded from QMD
+type relatedTasksMsg struct {
+	taskID  int64
+	results []qmd.RelatedTask
+	err     error
+}
+
+// loadRelatedTasks fetches related tasks from QMD in the background
+func loadRelatedTasks(taskID int64, query string) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		results, err := qmd.DefaultClient.FindRelatedTasks(ctx, query, 5)
+		if err != nil {
+			return relatedTasksMsg{taskID: taskID, err: err}
+		}
+
+		// Filter out the current task from results
+		filtered := make([]qmd.RelatedTask, 0, len(results))
+		for _, r := range results {
+			if r.TaskID != taskID {
+				filtered = append(filtered, r)
+			}
+		}
+
+		return relatedTasksMsg{taskID: taskID, results: filtered}
+	}
+}
 
 // Spinner frames for loading animation
 var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
@@ -147,6 +195,36 @@ func (m *DetailModel) executorDisplayName() string {
 	return executor.DefaultExecutorName()
 }
 
+// StartRelatedTasksLoad starts loading related tasks from QMD if available.
+// Returns a tea.Cmd that can be batched with other commands.
+func (m *DetailModel) StartRelatedTasksLoad() tea.Cmd {
+	if m.task == nil || !qmd.DefaultClient.IsAvailable() {
+		return nil
+	}
+
+	// Build search query from task title and body
+	query := m.task.Title
+	if m.task.Body != "" {
+		// Truncate body to avoid overly long queries
+		body := m.task.Body
+		if len(body) > 200 {
+			body = body[:200]
+		}
+		query += " " + body
+	}
+
+	// Check if we already loaded for this query
+	if m.lastRelatedSearch == query && m.relatedTasksLoaded {
+		return nil
+	}
+
+	m.lastRelatedSearch = query
+	m.relatedTasksLoading = true
+	m.relatedTasksLoaded = false
+
+	return loadRelatedTasks(m.task.ID, query)
+}
+
 // UpdateTask updates the task and refreshes the view.
 func (m *DetailModel) UpdateTask(t *db.Task) {
 	m.task = t
@@ -172,9 +250,10 @@ func (m *DetailModel) SetPRInfo(prInfo *github.PRInfo) {
 }
 
 // Refresh reloads task and logs from database.
-func (m *DetailModel) Refresh() {
+// Returns a tea.Cmd if async work (like log loading) needs to happen.
+func (m *DetailModel) Refresh() tea.Cmd {
 	if m.task == nil || m.database == nil {
-		return
+		return nil
 	}
 
 	prevTask := m.task
@@ -196,18 +275,17 @@ func (m *DetailModel) Refresh() {
 		}
 	}
 
-	// Check log count first to avoid loading all logs if unchanged
+	// Check log count first to avoid loading all logs if unchanged.
+	// Load logs asynchronously to avoid blocking the UI event loop.
+	var cmd tea.Cmd
 	logCount, err := m.database.GetTaskLogCount(m.task.ID)
-	if err == nil && logCount != m.lastLogCount {
-		// Log count changed, reload logs
-		logs, err := m.database.GetTaskLogs(m.task.ID, 500)
-		if err == nil {
-			m.logs = logs
-			m.lastLogCount = logCount
-
-			if m.ready {
-				m.viewport.SetContent(m.renderContent())
-			}
+	if err == nil && logCount != m.lastLogCount && !m.logsLoading {
+		m.logsLoading = true
+		taskID := m.task.ID
+		database := m.database
+		cmd = func() tea.Msg {
+			logs, _ := database.GetTaskLogs(taskID, 500)
+			return logsLoadedMsg{taskID: taskID, logs: logs, logCount: logCount}
 		}
 	}
 
@@ -247,6 +325,23 @@ func (m *DetailModel) Refresh() {
 		m.lastPaneCheck = time.Now()
 		// Ensure tmux panes are joined if available (handles external close/detach)
 		m.ensureTmuxPanesJoined()
+	}
+
+	return cmd
+}
+
+// HandleLogsLoaded processes the result of async log loading.
+func (m *DetailModel) HandleLogsLoaded(msg logsLoadedMsg) {
+	m.logsLoading = false
+	if msg.taskID != m.task.ID {
+		return // stale result from a different task
+	}
+	if msg.logs != nil {
+		m.logs = msg.logs
+		m.lastLogCount = msg.logCount
+		if m.ready {
+			m.viewport.SetContent(m.renderContent())
+		}
 	}
 }
 
@@ -483,11 +578,28 @@ func (m *DetailModel) Update(msg tea.Msg) (*DetailModel, tea.Cmd) {
 		m.viewport.SetContent(m.renderContent())
 		return m, nil
 
+	case logsLoadedMsg:
+		// Async log loading completed
+		m.HandleLogsLoaded(msg)
+		return m, nil
+
 	case spinnerTickMsg:
 		// Update spinner animation while loading
 		if m.paneLoading {
 			m.viewport.SetContent(m.renderContent())
 			return m, m.spinnerTick()
+		}
+		return m, nil
+
+	case relatedTasksMsg:
+		// Related tasks loaded from QMD
+		if m.task != nil && msg.taskID == m.task.ID {
+			m.relatedTasksLoading = false
+			m.relatedTasksLoaded = true
+			if msg.err == nil {
+				m.relatedTasks = msg.results
+			}
+			m.viewport.SetContent(m.renderContent())
 		}
 		return m, nil
 
@@ -2143,6 +2255,25 @@ func (m *DetailModel) renderHeader() string {
 		meta.WriteString("  ")
 	}
 
+	// Spotlight badge
+	if t.WorktreePath != "" && spotlight.IsActive(t.WorktreePath) {
+		var spotlightStyle lipgloss.Style
+		if m.focused {
+			spotlightStyle = lipgloss.NewStyle().
+				Padding(0, 1).
+				Background(lipgloss.Color("214")). // Amber/yellow
+				Foreground(lipgloss.Color("#000000")).
+				Bold(true)
+		} else {
+			spotlightStyle = lipgloss.NewStyle().
+				Padding(0, 1).
+				Background(dimmedBg).
+				Foreground(dimmedFg)
+		}
+		meta.WriteString(spotlightStyle.Render("🔦 SPOTLIGHT"))
+		meta.WriteString("  ")
+	}
+
 	if t.Pinned {
 		var pinStyle lipgloss.Style
 		if m.focused {
@@ -2365,11 +2496,14 @@ func (m *DetailModel) renderContent() string {
 	t := m.task
 
 	// Check if we can use cached content
+	// Note: We don't cache when related tasks are loading/changing
 	logHash := m.computeLogHash()
 	if m.cachedContent != "" &&
 		m.lastRenderedBody == t.Body &&
+		m.lastRenderedSummary == t.Summary &&
 		m.lastRenderedLogHash == logHash &&
-		m.lastRenderedFocused == m.focused {
+		m.lastRenderedFocused == m.focused &&
+		!m.relatedTasksLoading {
 		return m.cachedContent
 	}
 
@@ -2399,6 +2533,73 @@ func (m *DetailModel) renderContent() string {
 					b.WriteString(t.Body)
 				} else {
 					b.WriteString(dimmedStyle.Render(t.Body))
+				}
+			} else {
+				if m.focused {
+					b.WriteString(strings.TrimSpace(rendered))
+				} else {
+					b.WriteString(dimmedStyle.Render(strings.TrimSpace(rendered)))
+				}
+			}
+		}
+		b.WriteString("\n")
+	}
+
+	// Related Tasks section (from QMD semantic search)
+	if m.relatedTasksLoading {
+		b.WriteString("\n")
+		b.WriteString(Bold.Render("Related Tasks"))
+		b.WriteString("\n\n")
+		if m.focused {
+			b.WriteString(Dim.Render("  Searching..."))
+		} else {
+			b.WriteString(dimmedStyle.Render("  Searching..."))
+		}
+		b.WriteString("\n")
+	} else if len(m.relatedTasks) > 0 {
+		b.WriteString("\n")
+		b.WriteString(Bold.Render("Related Tasks"))
+		b.WriteString("\n\n")
+		for _, related := range m.relatedTasks {
+			// Score indicator: high (>0.7), medium (>0.4), low
+			scoreIndicator := "○"
+			if related.Score > 0.7 {
+				scoreIndicator = "●"
+			} else if related.Score > 0.4 {
+				scoreIndicator = "◐"
+			}
+			line := fmt.Sprintf("  %s #%d: %s", scoreIndicator, related.TaskID, related.Title)
+			if m.focused {
+				b.WriteString(line)
+			} else {
+				b.WriteString(dimmedStyle.Render(line))
+			}
+			b.WriteString("\n")
+		}
+	}
+
+	// Activity summary
+	if t.Summary != "" && strings.TrimSpace(t.Summary) != "" {
+		if b.Len() > 0 {
+			b.WriteString("\n")
+		}
+		b.WriteString(Bold.Render("Activity Summary"))
+		b.WriteString("\n\n")
+
+		renderer := m.getGlamourRenderer(m.focused)
+		if renderer == nil {
+			if m.focused {
+				b.WriteString(t.Summary)
+			} else {
+				b.WriteString(dimmedStyle.Render(t.Summary))
+			}
+		} else {
+			rendered, err := renderer.Render(t.Summary)
+			if err != nil {
+				if m.focused {
+					b.WriteString(t.Summary)
+				} else {
+					b.WriteString(dimmedStyle.Render(t.Summary))
 				}
 			} else {
 				if m.focused {
@@ -2464,6 +2665,10 @@ func (m *DetailModel) renderContent() string {
 		b.WriteString("\n\n")
 
 		for _, log := range m.logs {
+			// Skip internal-only log entries not meant for display
+			if log.LineType == "pending_tool" {
+				continue
+			}
 			icon := "  "
 			switch log.LineType {
 			case "system":
@@ -2505,6 +2710,7 @@ func (m *DetailModel) renderContent() string {
 
 	// Cache the rendered content
 	m.lastRenderedBody = t.Body
+	m.lastRenderedSummary = t.Summary
 	m.lastRenderedLogHash = logHash
 	m.lastRenderedFocused = m.focused
 	m.cachedContent = content
@@ -2528,7 +2734,7 @@ func (m *DetailModel) renderHelp() string {
 
 	// Show scroll hint when content is scrollable
 	if m.viewport.TotalLineCount() > m.viewport.VisibleLineCount() {
-		keys = append(keys, helpKey{"PgUp/Dn", "scroll", false})
+		keys = append(keys, helpKey{"j/k/wheel", "scroll", false})
 	}
 
 	// Only show execute/retry when Claude is not running
@@ -2575,6 +2781,16 @@ func (m *DetailModel) renderHelp() string {
 			toggleDesc = "show shell"
 		}
 		keys = append(keys, helpKey{"\\", toggleDesc, false})
+	}
+
+	// Spotlight mode
+	if m.task != nil && m.task.WorktreePath != "" {
+		if spotlight.IsActive(m.task.WorktreePath) {
+			keys = append(keys, helpKey{"f", "spotlight off", false})
+			keys = append(keys, helpKey{"F", "sync", false})
+		} else {
+			keys = append(keys, helpKey{"f", "spotlight", false})
+		}
 	}
 
 	keys = append(keys, []helpKey{

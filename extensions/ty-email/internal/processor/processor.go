@@ -110,16 +110,17 @@ func (p *Processor) ProcessEmail(ctx context.Context, email *adapter.Email) erro
 		}
 	}
 
-	// For new emails (not thread replies), skip the LLM and create a task directly.
-	// This saves API tokens for the common case - an allowed sender emailing a new task.
-	// Only use the LLM for ambiguous cases like thread replies or queries.
+	// For new emails (not part of a known TaskYou thread), skip the LLM and create
+	// a task directly. This saves API tokens for the common case.
+	// Only use LLM when the email is part of a known TaskYou thread (threadTaskID != nil),
+	// as we need LLM to determine if it's providing input, querying status, etc.
 	var action *classifier.Action
-	if threadTaskID == nil && email.InReplyTo == "" {
-		p.logger.Info("skipping LLM classification for new email (not a thread reply)")
+	if threadTaskID == nil {
+		p.logger.Info("skipping LLM classification for email (no matching TaskYou thread)")
 		action = &classifier.Action{
 			Type:       classifier.ActionCreate,
 			Title:      strings.TrimSpace(email.Subject),
-			Body:       strings.TrimSpace(email.Body),
+			Body:       strings.TrimSpace(stripQuotedText(email.Body)),
 			Confidence: 1.0,
 			Reasoning:  "new email from allowed sender - created task directly without LLM",
 			Reply:      fmt.Sprintf("Got it! I'll create a task: %s", email.Subject),
@@ -212,8 +213,13 @@ func (p *Processor) ProcessEmail(ctx context.Context, email *adapter.Email) erro
 	}
 
 	// Mark email as processed in the adapter (move to folder, add label, etc.)
-	if err := p.adapter.MarkProcessed(ctx, email.ID); err != nil {
-		p.logger.Warn("failed to mark email as processed in adapter", "error", err)
+	// Use ProviderID (e.g., Gmail API ID) if available; fall back to ID (Message-ID header).
+	adapterID := email.ProviderID
+	if adapterID == "" {
+		adapterID = email.ID
+	}
+	if err := p.adapter.MarkProcessed(ctx, adapterID); err != nil {
+		p.logger.Warn("failed to mark email as processed in adapter", "id", adapterID, "error", err)
 	}
 
 	return nil
@@ -350,6 +356,45 @@ func (p *Processor) SendPendingReplies(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+// stripQuotedText removes quoted reply text and email signatures from a body.
+// This reduces token usage when sending email content to the classifier.
+func stripQuotedText(body string) string {
+	var lines []string
+	for _, line := range strings.Split(body, "\n") {
+		trimmed := strings.TrimSpace(line)
+
+		// Stop at common signature markers
+		if trimmed == "--" || trimmed == "-- " {
+			break
+		}
+
+		// Stop at common reply markers
+		if strings.HasPrefix(trimmed, "On ") && strings.HasSuffix(trimmed, "wrote:") {
+			break
+		}
+		if strings.HasPrefix(trimmed, "---------- Forwarded message") {
+			break
+		}
+
+		// Skip quoted lines (lines starting with ">")
+		if strings.HasPrefix(trimmed, ">") {
+			continue
+		}
+
+		lines = append(lines, line)
+	}
+
+	result := strings.TrimSpace(strings.Join(lines, "\n"))
+
+	// Truncate to ~2000 chars to limit token usage
+	const maxBodyLen = 2000
+	if len(result) > maxBodyLen {
+		result = result[:maxBodyLen] + "\n[truncated]"
+	}
+
+	return result
 }
 
 // CheckBlockedTasks checks for blocked tasks and sends notification emails.

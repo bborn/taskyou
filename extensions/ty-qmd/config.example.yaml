@@ -1,0 +1,35 @@
+# ty-qmd configuration
+# Copy to ~/.config/ty-qmd/config.yaml
+
+qmd:
+  # Path to qmd binary
+  binary: qmd
+  # QMD index location (default: ~/.cache/qmd/index.sqlite)
+  index: ""
+
+taskyou:
+  # Path to TaskYou database
+  db: ~/.local/share/taskyou/tasks.db
+  # Path to ty CLI binary
+  cli: ty
+
+sync:
+  # Automatically sync tasks on completion
+  auto: true
+  # Sync interval when running as daemon
+  interval: 5m
+  # Task statuses to index
+  statuses:
+    - done
+    - archived
+  # Include task logs in export
+  include_logs: false
+  # Maximum log lines to include
+  max_log_lines: 100
+
+collections:
+  # Collection name for tasks
+  tasks: ty-tasks
+  # Project-specific overrides
+  # projects:
+  #   myproject: myproject-tasks

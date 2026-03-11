@@ -134,6 +134,7 @@ func TestParseResponse_WithProject(t *testing.T) {
 
 func TestIsAvailable(t *testing.T) {
 	// Without API key
+	t.Setenv("ANTHROPIC_API_KEY", "")
 	s1 := NewCommandService("")
 	if s1.IsAvailable() {
 		t.Error("IsAvailable() should return false without API key")

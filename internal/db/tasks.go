@@ -571,6 +571,38 @@ func (db *DB) UpdateTaskPinned(taskID int64, pinned bool) error {
 	return nil
 }
 
+// UpdateTaskSummary updates the task summary and distillation timestamp.
+func (db *DB) UpdateTaskSummary(taskID int64, summary string) error {
+	oldTask, _ := db.GetTask(taskID)
+	oldSummary := ""
+	if oldTask != nil {
+		oldSummary = oldTask.Summary
+	}
+
+	_, err := db.Exec(`
+		UPDATE tasks
+		SET summary = ?, last_distilled_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+		WHERE id = ?
+	`, summary, taskID)
+	if err != nil {
+		return fmt.Errorf("update task summary: %w", err)
+	}
+
+	if oldTask != nil && oldSummary != summary {
+		task, err := db.GetTask(taskID)
+		if err == nil && task != nil {
+			db.emitTaskUpdated(task, map[string]interface{}{
+				"summary": map[string]string{
+					"old": oldSummary,
+					"new": summary,
+				},
+			})
+		}
+	}
+
+	return nil
+}
+
 // ClearTaskWorktreePath clears just the worktree_path for a task.
 // Used during async archive cleanup to avoid overwriting other fields.
 func (db *DB) ClearTaskWorktreePath(taskID int64) error {
@@ -876,6 +908,99 @@ func (db *DB) GetTaskLogs(taskID int64, limit int) ([]*TaskLog, error) {
 	return logs, nil
 }
 
+// GetLatestLogPerTask returns the most recent log entry for each of the given task IDs.
+// Returns a map of taskID -> latest TaskLog. Uses a single efficient query.
+func (db *DB) GetLatestLogPerTask(taskIDs []int64) (map[int64]*TaskLog, error) {
+	if len(taskIDs) == 0 {
+		return nil, nil
+	}
+
+	// Build placeholders
+	placeholders := make([]string, len(taskIDs))
+	args := make([]interface{}, len(taskIDs))
+	for i, id := range taskIDs {
+		placeholders[i] = "?"
+		args[i] = id
+	}
+
+	query := fmt.Sprintf(`
+		SELECT tl.id, tl.task_id, tl.line_type, tl.content, tl.created_at
+		FROM task_logs tl
+		INNER JOIN (
+			SELECT task_id, MAX(id) as max_id
+			FROM task_logs
+			WHERE task_id IN (%s)
+			GROUP BY task_id
+		) latest ON tl.id = latest.max_id
+	`, strings.Join(placeholders, ","))
+
+	rows, err := db.Query(query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("query latest logs: %w", err)
+	}
+	defer rows.Close()
+
+	result := make(map[int64]*TaskLog)
+	for rows.Next() {
+		l := &TaskLog{}
+		err := rows.Scan(&l.ID, &l.TaskID, &l.LineType, &l.Content, &l.CreatedAt)
+		if err != nil {
+			return nil, fmt.Errorf("scan latest log: %w", err)
+		}
+		result[l.TaskID] = l
+	}
+	return result, nil
+}
+
+// GetConversationHistoryLogs retrieves only logs relevant for building conversation history.
+// This is much more efficient than GetTaskLogs for the executor's prompt building,
+// as it skips large output/tool log content that isn't needed for conversation context.
+// Only fetches: continuation markers, questions, and user feedback.
+func (db *DB) GetConversationHistoryLogs(taskID int64) ([]*TaskLog, error) {
+	rows, err := db.Query(`
+		SELECT id, task_id, line_type, content, created_at
+		FROM task_logs
+		WHERE task_id = ?
+		  AND (
+		    (line_type = 'system' AND content = '--- Continuation ---')
+		    OR line_type = 'question'
+		    OR (line_type = 'text' AND content LIKE 'Feedback: %')
+		  )
+		ORDER BY id ASC
+	`, taskID)
+	if err != nil {
+		return nil, fmt.Errorf("query conversation history logs: %w", err)
+	}
+	defer rows.Close()
+
+	var logs []*TaskLog
+	for rows.Next() {
+		l := &TaskLog{}
+		err := rows.Scan(&l.ID, &l.TaskID, &l.LineType, &l.Content, &l.CreatedAt)
+		if err != nil {
+			return nil, fmt.Errorf("scan conversation history log: %w", err)
+		}
+		logs = append(logs, l)
+	}
+
+	return logs, nil
+}
+
+// HasContinuationMarker checks if a task has any continuation markers.
+// This is a fast EXISTS-style query to avoid loading logs just to check.
+func (db *DB) HasContinuationMarker(taskID int64) (bool, error) {
+	var count int
+	err := db.QueryRow(`
+		SELECT COUNT(*) FROM task_logs
+		WHERE task_id = ? AND line_type = 'system' AND content = '--- Continuation ---'
+		LIMIT 1
+	`, taskID).Scan(&count)
+	if err != nil {
+		return false, fmt.Errorf("check continuation marker: %w", err)
+	}
+	return count > 0, nil
+}
+
 // GetTaskLogCount returns the number of logs for a task.
 // This is a fast operation useful for checking if logs have changed.
 func (db *DB) GetTaskLogCount(taskID int64) (int, error) {
@@ -995,7 +1120,14 @@ type Project struct {
 	Actions         []ProjectAction // actions triggered on task events (stored as JSON)
 	Color           string          // hex color for display (e.g., "#61AFEF")
 	ClaudeConfigDir string          // override CLAUDE_CONFIG_DIR for this project
+	UseWorktrees    bool            // whether to use git worktrees for task isolation (default true)
 	CreatedAt       LocalTime
+}
+
+// UsesWorktrees returns whether this project uses git worktrees for task isolation.
+// Defaults to true for backward compatibility.
+func (p *Project) UsesWorktrees() bool {
+	return p.UseWorktrees
 }
 
 // GetAction returns the action for a given trigger, or nil if not found.
@@ -1008,13 +1140,21 @@ func (p *Project) GetAction(trigger string) *ProjectAction {
 	return nil
 }
 
+// boolToInt converts a bool to an int for SQLite storage (1=true, 0=false).
+func boolToInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
+}
+
 // CreateProject creates a new project.
 func (db *DB) CreateProject(p *Project) error {
 	actionsJSON, _ := json.Marshal(p.Actions)
 	result, err := db.Exec(`
-		INSERT INTO projects (name, path, aliases, instructions, actions, color, claude_config_dir)
-		VALUES (?, ?, ?, ?, ?, ?, ?)
-	`, p.Name, p.Path, p.Aliases, p.Instructions, string(actionsJSON), p.Color, p.ClaudeConfigDir)
+		INSERT INTO projects (name, path, aliases, instructions, actions, color, claude_config_dir, use_worktrees)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+	`, p.Name, p.Path, p.Aliases, p.Instructions, string(actionsJSON), p.Color, p.ClaudeConfigDir, boolToInt(p.UseWorktrees))
 	if err != nil {
 		return fmt.Errorf("insert project: %w", err)
 	}
@@ -1027,9 +1167,9 @@ func (db *DB) CreateProject(p *Project) error {
 func (db *DB) UpdateProject(p *Project) error {
 	actionsJSON, _ := json.Marshal(p.Actions)
 	_, err := db.Exec(`
-		UPDATE projects SET name = ?, path = ?, aliases = ?, instructions = ?, actions = ?, color = ?, claude_config_dir = ?
+		UPDATE projects SET name = ?, path = ?, aliases = ?, instructions = ?, actions = ?, color = ?, claude_config_dir = ?, use_worktrees = ?
 		WHERE id = ?
-	`, p.Name, p.Path, p.Aliases, p.Instructions, string(actionsJSON), p.Color, p.ClaudeConfigDir, p.ID)
+	`, p.Name, p.Path, p.Aliases, p.Instructions, string(actionsJSON), p.Color, p.ClaudeConfigDir, boolToInt(p.UseWorktrees), p.ID)
 	if err != nil {
 		return fmt.Errorf("update project: %w", err)
 	}
@@ -1070,7 +1210,7 @@ func (db *DB) CountTasksByProject(projectName string) (int, error) {
 // ListProjects returns all projects, with "personal" always first.
 func (db *DB) ListProjects() ([]*Project, error) {
 	rows, err := db.Query(`
-		SELECT id, name, path, aliases, instructions, COALESCE(actions, '[]'), COALESCE(color, ''), COALESCE(claude_config_dir, ''), created_at
+		SELECT id, name, path, aliases, instructions, COALESCE(actions, '[]'), COALESCE(color, ''), COALESCE(claude_config_dir, ''), COALESCE(use_worktrees, 1), created_at
 		FROM projects ORDER BY CASE WHEN name = 'personal' THEN 0 ELSE 1 END, name
 	`)
 	if err != nil {
@@ -1082,10 +1222,12 @@ func (db *DB) ListProjects() ([]*Project, error) {
 	for rows.Next() {
 		p := &Project{}
 		var actionsJSON string
-		if err := rows.Scan(&p.ID, &p.Name, &p.Path, &p.Aliases, &p.Instructions, &actionsJSON, &p.Color, &p.ClaudeConfigDir, &p.CreatedAt); err != nil {
+		var useWorktrees int
+		if err := rows.Scan(&p.ID, &p.Name, &p.Path, &p.Aliases, &p.Instructions, &actionsJSON, &p.Color, &p.ClaudeConfigDir, &useWorktrees, &p.CreatedAt); err != nil {
 			return nil, fmt.Errorf("scan project: %w", err)
 		}
 		json.Unmarshal([]byte(actionsJSON), &p.Actions)
+		p.UseWorktrees = useWorktrees != 0
 		projects = append(projects, p)
 	}
 	return projects, nil
@@ -1096,12 +1238,14 @@ func (db *DB) GetProjectByName(name string) (*Project, error) {
 	// First try exact name match
 	p := &Project{}
 	var actionsJSON string
+	var useWorktrees int
 	err := db.QueryRow(`
-		SELECT id, name, path, aliases, instructions, COALESCE(actions, '[]'), COALESCE(color, ''), COALESCE(claude_config_dir, ''), created_at
+		SELECT id, name, path, aliases, instructions, COALESCE(actions, '[]'), COALESCE(color, ''), COALESCE(claude_config_dir, ''), COALESCE(use_worktrees, 1), created_at
 		FROM projects WHERE name = ?
-	`, name).Scan(&p.ID, &p.Name, &p.Path, &p.Aliases, &p.Instructions, &actionsJSON, &p.Color, &p.ClaudeConfigDir, &p.CreatedAt)
+	`, name).Scan(&p.ID, &p.Name, &p.Path, &p.Aliases, &p.Instructions, &actionsJSON, &p.Color, &p.ClaudeConfigDir, &useWorktrees, &p.CreatedAt)
 	if err == nil {
 		json.Unmarshal([]byte(actionsJSON), &p.Actions)
+		p.UseWorktrees = useWorktrees != 0
 		return p, nil
 	}
 	if err != sql.ErrNoRows {
@@ -1109,7 +1253,7 @@ func (db *DB) GetProjectByName(name string) (*Project, error) {
 	}
 
 	// Try alias match
-	rows, err := db.Query(`SELECT id, name, path, aliases, instructions, COALESCE(actions, '[]'), COALESCE(color, ''), COALESCE(claude_config_dir, ''), created_at FROM projects`)
+	rows, err := db.Query(`SELECT id, name, path, aliases, instructions, COALESCE(actions, '[]'), COALESCE(color, ''), COALESCE(claude_config_dir, ''), COALESCE(use_worktrees, 1), created_at FROM projects`)
 	if err != nil {
 		return nil, fmt.Errorf("query projects: %w", err)
 	}
@@ -1117,10 +1261,11 @@ func (db *DB) GetProjectByName(name string) (*Project, error) {
 
 	for rows.Next() {
 		p := &Project{}
-		if err := rows.Scan(&p.ID, &p.Name, &p.Path, &p.Aliases, &p.Instructions, &actionsJSON, &p.Color, &p.ClaudeConfigDir, &p.CreatedAt); err != nil {
+		if err := rows.Scan(&p.ID, &p.Name, &p.Path, &p.Aliases, &p.Instructions, &actionsJSON, &p.Color, &p.ClaudeConfigDir, &useWorktrees, &p.CreatedAt); err != nil {
 			return nil, fmt.Errorf("scan project: %w", err)
 		}
 		json.Unmarshal([]byte(actionsJSON), &p.Actions)
+		p.UseWorktrees = useWorktrees != 0
 		for _, alias := range splitAliases(p.Aliases) {
 			if alias == name {
 				return p, nil
@@ -1593,4 +1738,56 @@ func (db *DB) ClearArchiveState(taskID int64) error {
 // HasArchiveState returns true if the task has saved archive state.
 func (t *Task) HasArchiveState() bool {
 	return t.ArchiveRef != "" && t.ArchiveCommit != ""
+}
+
+// GetStaleWorktreeTasks returns done/archived tasks that have worktree paths set
+// and were completed more than maxAge ago. These are candidates for cleanup.
+func (db *DB) GetStaleWorktreeTasks(maxAge time.Duration) ([]*Task, error) {
+	cutoff := time.Now().Add(-maxAge).UTC()
+	query := `
+		SELECT id, title, body, status, type, project, COALESCE(executor, 'claude'),
+		       worktree_path, branch_name, port, claude_session_id,
+		       COALESCE(daemon_session, ''), COALESCE(tmux_window_id, ''),
+		       COALESCE(claude_pane_id, ''), COALESCE(shell_pane_id, ''),
+		       COALESCE(pr_url, ''), COALESCE(pr_number, 0), COALESCE(pr_info_json, ''),
+		       COALESCE(dangerous_mode, 0), COALESCE(pinned, 0), COALESCE(tags, ''),
+		       COALESCE(source_branch, ''), COALESCE(summary, ''),
+		       created_at, updated_at, started_at, completed_at,
+		       last_distilled_at, last_accessed_at,
+		       COALESCE(archive_ref, ''), COALESCE(archive_commit, ''),
+		       COALESCE(archive_worktree_path, ''), COALESCE(archive_branch_name, '')
+		FROM tasks
+		WHERE worktree_path != ''
+		  AND status IN ('done', 'archived')
+		  AND completed_at IS NOT NULL
+		  AND completed_at < ?
+		ORDER BY completed_at ASC
+	`
+	rows, err := db.Query(query, cutoff)
+	if err != nil {
+		return nil, fmt.Errorf("query stale worktree tasks: %w", err)
+	}
+	defer rows.Close()
+
+	var tasks []*Task
+	for rows.Next() {
+		t := &Task{}
+		err := rows.Scan(
+			&t.ID, &t.Title, &t.Body, &t.Status, &t.Type, &t.Project, &t.Executor,
+			&t.WorktreePath, &t.BranchName, &t.Port, &t.ClaudeSessionID,
+			&t.DaemonSession, &t.TmuxWindowID, &t.ClaudePaneID, &t.ShellPaneID,
+			&t.PRURL, &t.PRNumber, &t.PRInfoJSON,
+			&t.DangerousMode, &t.Pinned, &t.Tags,
+			&t.SourceBranch, &t.Summary,
+			&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
+			&t.LastDistilledAt, &t.LastAccessedAt,
+			&t.ArchiveRef, &t.ArchiveCommit, &t.ArchiveWorktreePath, &t.ArchiveBranchName,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("scan task: %w", err)
+		}
+		tasks = append(tasks, t)
+	}
+
+	return tasks, nil
 }

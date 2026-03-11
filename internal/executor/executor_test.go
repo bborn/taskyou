@@ -897,6 +897,62 @@ func TestIsValidWorktreePathWithRealDirectory(t *testing.T) {
 	})
 }
 
+func TestIsValidWorkDir(t *testing.T) {
+	// Create a real temporary directory structure
+	tmpDir, err := os.MkdirTemp("", "test-workdir-validation-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	// Create the .task-worktrees structure
+	worktreesDir := tmpDir + "/.task-worktrees"
+	taskDir := worktreesDir + "/123-test-task"
+	if err := os.MkdirAll(taskDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("worktree path is valid regardless of allowedProjectDir", func(t *testing.T) {
+		if !isValidWorkDir(taskDir, "") {
+			t.Errorf("isValidWorkDir(%q, \"\") should return true for worktree directory", taskDir)
+		}
+		if !isValidWorkDir(taskDir, "/some/other/path") {
+			t.Errorf("isValidWorkDir(%q, other) should return true for worktree directory", taskDir)
+		}
+	})
+
+	t.Run("project directory is valid when it matches allowedProjectDir", func(t *testing.T) {
+		if !isValidWorkDir(tmpDir, tmpDir) {
+			t.Errorf("isValidWorkDir(%q, %q) should return true when paths match", tmpDir, tmpDir)
+		}
+	})
+
+	t.Run("project directory is rejected when allowedProjectDir differs", func(t *testing.T) {
+		if isValidWorkDir(tmpDir, "/some/other/path") {
+			t.Errorf("isValidWorkDir(%q, other) should return false when paths don't match", tmpDir)
+		}
+	})
+
+	t.Run("arbitrary directory is rejected without allowedProjectDir", func(t *testing.T) {
+		if isValidWorkDir(tmpDir, "") {
+			t.Errorf("isValidWorkDir(%q, \"\") should return false for non-worktree path with empty allowed", tmpDir)
+		}
+	})
+
+	t.Run("empty path is not valid", func(t *testing.T) {
+		if isValidWorkDir("", tmpDir) {
+			t.Error("isValidWorkDir('', ...) should return false")
+		}
+	})
+
+	t.Run("non-existent path is not valid even if allowed", func(t *testing.T) {
+		nonExistent := "/nonexistent/path/xyz"
+		if isValidWorkDir(nonExistent, nonExistent) {
+			t.Error("isValidWorkDir should return false for non-existent path")
+		}
+	})
+}
+
 func TestDoneTaskCleanupTimeout(t *testing.T) {
 	// Verify the cleanup timeout constant is set correctly
 	if DoneTaskCleanupTimeout != 30*time.Minute {
@@ -1855,4 +1911,209 @@ func TestWriteWorktreeMCPConfig(t *testing.T) {
 			t.Errorf("task ID = %v, want 200", args[2])
 		}
 	})
+}
+
+func TestTriggerProcessing(t *testing.T) {
+	t.Run("non-blocking when channel empty", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		dbPath := filepath.Join(tmpDir, "test.db")
+		database, err := db.Open(dbPath)
+		if err != nil {
+			t.Fatalf("failed to open database: %v", err)
+		}
+		defer database.Close()
+
+		cfg := &config.Config{}
+		exec := New(database, cfg)
+
+		// Should not block even when called multiple times
+		exec.TriggerProcessing()
+		exec.TriggerProcessing()
+		exec.TriggerProcessing()
+
+		// Channel should have exactly one pending signal (buffered size 1)
+		select {
+		case <-exec.wakeupCh:
+			// Good, got the signal
+		default:
+			t.Error("expected a signal in wakeupCh")
+		}
+
+		// Channel should now be empty
+		select {
+		case <-exec.wakeupCh:
+			t.Error("expected wakeupCh to be empty after draining")
+		default:
+			// Good, channel is empty
+		}
+	})
+
+	t.Run("NotifyTaskChange triggers processing for queued tasks", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		dbPath := filepath.Join(tmpDir, "test.db")
+		database, err := db.Open(dbPath)
+		if err != nil {
+			t.Fatalf("failed to open database: %v", err)
+		}
+		defer database.Close()
+
+		cfg := &config.Config{}
+		exec := New(database, cfg)
+
+		task := &db.Task{
+			ID:     1,
+			Title:  "Test task",
+			Status: db.StatusQueued,
+		}
+
+		exec.NotifyTaskChange("status_changed", task)
+
+		// Should have a wakeup signal because task is queued
+		select {
+		case <-exec.wakeupCh:
+			// Good
+		default:
+			t.Error("expected wakeup signal when task is queued")
+		}
+	})
+
+	t.Run("NotifyTaskChange does not trigger for non-queued tasks", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		dbPath := filepath.Join(tmpDir, "test.db")
+		database, err := db.Open(dbPath)
+		if err != nil {
+			t.Fatalf("failed to open database: %v", err)
+		}
+		defer database.Close()
+
+		cfg := &config.Config{}
+		exec := New(database, cfg)
+
+		task := &db.Task{
+			ID:     1,
+			Title:  "Test task",
+			Status: db.StatusProcessing,
+		}
+
+		exec.NotifyTaskChange("status_changed", task)
+
+		// Should NOT have a wakeup signal
+		select {
+		case <-exec.wakeupCh:
+			t.Error("did not expect wakeup signal for non-queued task")
+		default:
+			// Good
+		}
+	})
+}
+
+// TestUpdateTaskDoesNotResetStatus verifies that UpdateTask() calls in
+// setupWorktree/setupSharedWorkDir don't accidentally reset the task status
+// back to "queued" after executeTask has set it to "processing".
+// This was the root cause of the daemon terminating Claude immediately
+// for project-based (non-worktree) tasks.
+func TestUpdateTaskDoesNotResetStatus(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+	database, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer database.Close()
+
+	// Create a project
+	if err := database.CreateProject(&db.Project{Name: "testproj", Path: tmpDir}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create a task in queued status (as processNextTask would see it)
+	task := &db.Task{
+		Title:   "Say hello",
+		Status:  db.StatusQueued,
+		Project: "testproj",
+	}
+	if err := database.CreateTask(task); err != nil {
+		t.Fatal(err)
+	}
+
+	// Simulate what executeTask does:
+	// 1. Update DB status to processing
+	if err := database.UpdateTaskStatus(task.ID, db.StatusProcessing); err != nil {
+		t.Fatal(err)
+	}
+	// 2. Keep the struct in sync (this is the fix)
+	task.Status = db.StatusProcessing
+
+	// 3. Simulate setupSharedWorkDir which calls UpdateTask
+	task.WorktreePath = tmpDir
+	task.BranchName = ""
+	if err := database.UpdateTask(task); err != nil {
+		t.Fatal(err)
+	}
+
+	// Verify the status is still "processing" (not reset to "queued")
+	updatedTask, err := database.GetTask(task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updatedTask.Status != db.StatusProcessing {
+		t.Errorf("expected status %q after UpdateTask, got %q (status was reset!)",
+			db.StatusProcessing, updatedTask.Status)
+	}
+}
+
+// TestCleanupWorktreeNonWorktreeTask verifies that CleanupWorktree handles
+// non-worktree tasks correctly (where WorktreePath is the project root).
+// It should NOT attempt "git worktree remove" on the main working tree.
+func TestCleanupWorktreeNonWorktreeTask(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+	database, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer database.Close()
+
+	projectDir := filepath.Join(tmpDir, "myproject")
+	os.MkdirAll(projectDir, 0755)
+
+	// Create project
+	if err := database.CreateProject(&db.Project{Name: "testproj", Path: projectDir}); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := config.New(database)
+	exec := New(database, cfg)
+
+	// Non-worktree task: WorktreePath == projectDir
+	task := &db.Task{
+		Title:        "Test task",
+		Status:       db.StatusBlocked,
+		Project:      "testproj",
+		WorktreePath: projectDir,
+	}
+	if err := database.CreateTask(task); err != nil {
+		t.Fatal(err)
+	}
+
+	// Write files that CleanupWorktree should remove
+	os.MkdirAll(filepath.Join(projectDir, ".claude"), 0755)
+	os.WriteFile(filepath.Join(projectDir, ".envrc"), []byte("export WORKTREE_TASK_ID=1"), 0644)
+	os.WriteFile(filepath.Join(projectDir, ".claude", "settings.local.json"), []byte("{}"), 0644)
+
+	// CleanupWorktree should NOT error (no git worktree remove on main tree)
+	err = exec.CleanupWorktree(task)
+	if err != nil {
+		t.Errorf("CleanupWorktree should not error for non-worktree tasks, got: %v", err)
+	}
+
+	// Verify .envrc was cleaned up
+	if _, err := os.Stat(filepath.Join(projectDir, ".envrc")); !os.IsNotExist(err) {
+		t.Error("expected .envrc to be removed")
+	}
+
+	// Verify settings.local.json was cleaned up
+	if _, err := os.Stat(filepath.Join(projectDir, ".claude", "settings.local.json")); !os.IsNotExist(err) {
+		t.Error("expected settings.local.json to be removed")
+	}
 }

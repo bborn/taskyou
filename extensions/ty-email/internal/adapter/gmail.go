@@ -274,6 +274,7 @@ func (a *GmailAdapter) fetchMessage(ctx context.Context, id string) (*Email, err
 
 	email := &Email{
 		ID:         id,
+		ProviderID: id, // Preserve Gmail API ID for adapter operations
 		ReceivedAt: time.UnixMilli(msg.InternalDate),
 	}
 
@@ -394,7 +395,7 @@ func (a *GmailAdapter) Send(ctx context.Context, email *OutboundEmail) error {
 	return err
 }
 
-func (a *GmailAdapter) MarkProcessed(ctx context.Context, emailID string) error {
+func (a *GmailAdapter) MarkProcessed(ctx context.Context, providerID string) error {
 	a.mu.Lock()
 	service := a.service
 	a.mu.Unlock()
@@ -403,8 +404,12 @@ func (a *GmailAdapter) MarkProcessed(ctx context.Context, emailID string) error 
 		return fmt.Errorf("not connected")
 	}
 
-	// Remove UNREAD label
-	_, err := service.Users.Messages.Modify("me", emailID, &gmail.ModifyMessageRequest{
+	if providerID == "" {
+		return fmt.Errorf("no provider ID for marking processed")
+	}
+
+	// Remove UNREAD label using the Gmail API ID (not the Message-ID header)
+	_, err := service.Users.Messages.Modify("me", providerID, &gmail.ModifyMessageRequest{
 		RemoveLabelIds: []string{"UNREAD"},
 	}).Do()
 

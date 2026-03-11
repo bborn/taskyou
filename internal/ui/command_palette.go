@@ -7,10 +7,11 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/bborn/workflow/internal/db"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+
+	"github.com/bborn/workflow/internal/db"
 )
 
 // Patterns for extracting task IDs and PR numbers from pasted input
@@ -486,14 +487,14 @@ func fuzzyScore(str, pattern string) int {
 // that prefers word boundary matches and consecutive sequences
 func calculateBestScore(str, strLower, pattern, patternLower string) int {
 	const (
-		bonusWordStart     = 50  // Match at start of a word
-		bonusConsecutive   = 40  // Consecutive character match
-		bonusFirstChar     = 25  // Match at first character of string
-		bonusCamelCase     = 45  // Match at camelCase boundary
-		bonusCaseMatch     = 5   // Exact case match
-		penaltyUnmatched   = -3  // Each unmatched character before a match
-		penaltyLeading     = -5  // Leading characters before first match (per char, max 3)
-		maxLeadingPenalty  = -15 // Maximum leading penalty
+		bonusWordStart    = 50  // Match at start of a word
+		bonusConsecutive  = 40  // Consecutive character match
+		bonusFirstChar    = 25  // Match at first character of string
+		bonusCamelCase    = 45  // Match at camelCase boundary
+		bonusCaseMatch    = 5   // Exact case match
+		penaltyUnmatched  = -3  // Each unmatched character before a match
+		penaltyLeading    = -5  // Leading characters before first match (per char, max 3)
+		maxLeadingPenalty = -15 // Maximum leading penalty
 	)
 
 	score := 100 // Base score for matching

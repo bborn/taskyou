@@ -1,0 +1,11 @@
+{
+  "name": "taskyou",
+  "description": "Install and manage TaskYou — a personal task management system with Kanban board, background AI execution, and git worktree isolation.",
+  "version": "1.0.0",
+  "author": {
+    "name": "bborn"
+  },
+  "homepage": "https://github.com/bborn/taskyou",
+  "repository": "https://github.com/bborn/taskyou",
+  "license": "MIT"
+}

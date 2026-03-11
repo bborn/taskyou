@@ -17,6 +17,11 @@ import (
 	"syscall"
 	"time"
 
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/log"
+	"github.com/spf13/cobra"
+
 	"github.com/bborn/workflow/internal/autocomplete"
 	"github.com/bborn/workflow/internal/config"
 	"github.com/bborn/workflow/internal/db"
@@ -24,10 +29,6 @@ import (
 	"github.com/bborn/workflow/internal/github"
 	"github.com/bborn/workflow/internal/mcp"
 	"github.com/bborn/workflow/internal/ui"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
-	"github.com/charmbracelet/log"
-	"github.com/spf13/cobra"
 )
 
 var (
@@ -127,8 +128,8 @@ Examples:
 
 			cwd, _ := os.Getwd()
 			exec := executor.New(database, config.New(database))
-			model := ui.NewAppModel(database, exec, cwd)
-			
+			model := ui.NewAppModel(database, exec, cwd, version)
+
 			// Load tasks synchronously to ensure model is populated
 			tasks, err := database.ListTasks(db.ListTasksOptions{
 				IncludeClosed: true,
@@ -136,7 +137,7 @@ Examples:
 			})
 			if err == nil {
 				model.SetTasks(tasks)
-				
+
 				// Also update window size to something reasonable
 				model.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
 			}
@@ -201,9 +202,9 @@ Examples:
 			// Small delay to ensure clean shutdown
 			time.Sleep(100 * time.Millisecond)
 
-			// Start daemon (inherit dangerous mode from environment if set)
-			dangerousMode := os.Getenv("WORKTREE_DANGEROUS_MODE") == "1"
-			if err := ensureDaemonRunning(dangerousMode); err != nil {
+			// Use --dangerous flag (persistent from root cmd), falling back to env var
+			restartDangerous := dangerous || os.Getenv("WORKTREE_DANGEROUS_MODE") == "1"
+			if err := ensureDaemonRunning(restartDangerous); err != nil {
 				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
 				os.Exit(1)
 			}
@@ -218,8 +219,13 @@ Examples:
 		Short: "Check daemon status",
 		Run: func(cmd *cobra.Command, args []string) {
 			pidFile := getPidFilePath()
+			modeFile := pidFile + ".mode"
 			if pid, err := readPidFile(pidFile); err == nil && processExists(pid) {
-				fmt.Println(successStyle.Render(fmt.Sprintf("Daemon running (pid %d)", pid)))
+				mode := "safe"
+				if m, err := os.ReadFile(modeFile); err == nil {
+					mode = string(m)
+				}
+				fmt.Println(successStyle.Render(fmt.Sprintf("Daemon running (pid %d, %s mode)", pid, mode)))
 			} else {
 				fmt.Println(dimStyle.Render("Daemon not running"))
 			}
@@ -877,6 +883,43 @@ that the TUI shows, either as formatted text or JSON for automation.`,
 	boardCmd.Flags().Int("limit", 5, "Maximum entries to show per column")
 	rootCmd.AddCommand(boardCmd)
 
+	// Tail subcommand - live updating task view grouped by project and status
+	tailCmd := &cobra.Command{
+		Use:   "tail",
+		Short: "Live view of tasks organized by project and status",
+		Long: `Show a continuously updating view of all active tasks,
+grouped by project and then by status. Refreshes automatically.
+Press Ctrl+C to stop.`,
+		Run: func(cmd *cobra.Command, args []string) {
+			interval, _ := cmd.Flags().GetDuration("interval")
+			showDone, _ := cmd.Flags().GetBool("done")
+
+			dbPath := db.DefaultPath()
+			database, err := db.Open(dbPath)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+			defer database.Close()
+
+			p := tea.NewProgram(
+				tailModel{
+					db:       database,
+					interval: interval,
+					showDone: showDone,
+				},
+				tea.WithAltScreen(),
+			)
+			if _, err := p.Run(); err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+		},
+	}
+	tailCmd.Flags().Duration("interval", 2*time.Second, "Refresh interval (e.g. 1s, 500ms)")
+	tailCmd.Flags().Bool("done", false, "Include completed tasks")
+	rootCmd.AddCommand(tailCmd)
+
 	// Show subcommand - show task details
 	showCmd := &cobra.Command{
 		Use:   "show <task-id>",
@@ -942,6 +985,7 @@ Examples:
 					"branch":         task.BranchName,
 					"claude_pane_id": task.ClaudePaneID,
 					"shell_pane_id":  task.ShellPaneID,
+					"summary":        task.Summary,
 					"created_at":     task.CreatedAt.Time.Format(time.RFC3339),
 					"updated_at":     task.UpdatedAt.Time.Format(time.RFC3339),
 				}
@@ -1051,6 +1095,26 @@ Examples:
 					fmt.Println(task.Body)
 				}
 
+				// Summary (always shown if present)
+				if task.Summary != "" {
+					fmt.Println()
+					fmt.Println(boldStyle.Render("Summary:"))
+					fmt.Println(task.Summary)
+				}
+
+				// If blocked, show the last question
+				if task.Status == db.StatusBlocked {
+					logs, _ := database.GetTaskLogs(taskID, 50)
+					for _, l := range logs {
+						if l.LineType == "question" {
+							fmt.Println()
+							fmt.Println(lipgloss.NewStyle().Foreground(lipgloss.Color("#F59E0B")).Bold(true).Render("Waiting on:"))
+							fmt.Println(l.Content)
+							break
+						}
+					}
+				}
+
 				// Logs
 				if showLogs {
 					logs, _ := database.GetTaskLogs(taskID, 100)
@@ -1058,6 +1122,7 @@ Examples:
 						fmt.Println()
 						fmt.Println(boldStyle.Render("Recent Logs:"))
 						for _, l := range logs {
+							ts := dimStyle.Render(l.CreatedAt.Time.Format("15:04:05"))
 							prefix := ""
 							switch l.LineType {
 							case "system":
@@ -1066,8 +1131,14 @@ Examples:
 								prefix = errorStyle.Render("[error] ")
 							case "tool":
 								prefix = lipgloss.NewStyle().Foreground(lipgloss.Color("#8B5CF6")).Render("[tool] ")
+							case "question":
+								prefix = lipgloss.NewStyle().Foreground(lipgloss.Color("#F59E0B")).Render("[question] ")
+							case "output":
+								prefix = dimStyle.Render("[output] ")
+							case "text":
+								prefix = dimStyle.Render("[text] ")
 							}
-							fmt.Printf("%s%s\n", prefix, truncate(l.Content, 100))
+							fmt.Printf("%s %s%s\n", ts, prefix, truncate(l.Content, 200))
 						}
 					}
 				}
@@ -1738,6 +1809,7 @@ Examples:
 			paneID := task.ClaudePaneID
 			if paneID == "" {
 				fmt.Fprintln(os.Stderr, errorStyle.Render(fmt.Sprintf("Task #%d has no executor pane (not running?)", taskID)))
+				fmt.Fprintln(os.Stderr, dimStyle.Render("Tip: use 'task show' to see what the task accomplished"))
 				os.Exit(1)
 			}
 
@@ -1745,7 +1817,8 @@ Examples:
 			captureCmd := osexec.Command("tmux", "capture-pane", "-t", paneID, "-p", "-S", fmt.Sprintf("-%d", lines))
 			output, err := captureCmd.Output()
 			if err != nil {
-				fmt.Fprintln(os.Stderr, errorStyle.Render(fmt.Sprintf("Error capturing output (pane may not exist): %v", err)))
+				fmt.Fprintln(os.Stderr, errorStyle.Render(fmt.Sprintf("Executor pane no longer exists for task #%d", taskID)))
+				fmt.Fprintln(os.Stderr, dimStyle.Render("Tip: use 'task show' to see what the task accomplished, or 'task show --logs' for full activity"))
 				os.Exit(1)
 			}
 
@@ -1807,6 +1880,92 @@ Examples:
 	purgeClaudeConfigCmd.Flags().Bool("dry-run", false, "Show what would be removed without making changes")
 	purgeClaudeConfigCmd.Flags().String("config-dir", "", "Claude config directory (defaults to $CLAUDE_CONFIG_DIR or ~/.claude)")
 	rootCmd.AddCommand(purgeClaudeConfigCmd)
+
+	// Worktrees cleanup subcommand - remove stale worktrees to reclaim disk space
+	worktreesCmd := &cobra.Command{
+		Use:   "worktrees",
+		Short: "Manage git worktrees",
+	}
+
+	worktreesCleanupCmd := &cobra.Command{
+		Use:   "cleanup",
+		Short: "Archive and remove stale worktrees to reclaim disk space",
+		Long: `Archives and removes worktrees for done/archived tasks older than a threshold.
+
+Worktrees are archived first (preserving uncommitted changes in git refs),
+then the directory is removed. Archived tasks can be restored with 'unarchive'.
+
+The default max age is 7 days. Use --max-age to override.
+Use --dry-run to preview what would be cleaned up.
+
+Examples:
+  task worktrees cleanup
+  task worktrees cleanup --dry-run
+  task worktrees cleanup --max-age 72h
+  task worktrees cleanup --max-age 0  # clean up ALL done/archived worktrees`,
+		Run: func(cmd *cobra.Command, args []string) {
+			dryRun, _ := cmd.Flags().GetBool("dry-run")
+			maxAgeStr, _ := cmd.Flags().GetString("max-age")
+
+			maxAge := executor.DefaultWorktreeCleanupMaxAge
+			if maxAgeStr != "" {
+				if maxAgeStr == "0" {
+					maxAge = 0
+				} else {
+					parsed, err := time.ParseDuration(maxAgeStr)
+					if err != nil {
+						fmt.Fprintln(os.Stderr, errorStyle.Render("Invalid duration: "+maxAgeStr))
+						os.Exit(1)
+					}
+					maxAge = parsed
+				}
+			}
+
+			dbPath := db.DefaultPath()
+			database, err := db.Open(dbPath)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+			defer database.Close()
+
+			cfg := config.New(database)
+			exec := executor.New(database, cfg)
+
+			tasks, err := exec.CleanupStaleWorktreesManual(maxAge, dryRun)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+
+			if len(tasks) == 0 {
+				if maxAge == 0 {
+					fmt.Println(dimStyle.Render("No done/archived tasks with worktrees found"))
+				} else {
+					fmt.Println(dimStyle.Render(fmt.Sprintf("No stale worktrees older than %s found", maxAge)))
+				}
+				return
+			}
+
+			if dryRun {
+				fmt.Printf("Would archive and remove %d worktree(s):\n", len(tasks))
+				for _, t := range tasks {
+					age := time.Since(t.CompletedAt.Time).Round(time.Hour)
+					fmt.Printf("  #%-4d %-12s %-30s %s (age: %s)\n",
+						t.ID, t.Project, truncate(t.Title, 30), dimStyle.Render(t.WorktreePath), age)
+				}
+			} else {
+				fmt.Println(successStyle.Render(fmt.Sprintf("Archived and removed %d stale worktree(s)", len(tasks))))
+				for _, t := range tasks {
+					fmt.Printf("  #%-4d %s\n", t.ID, t.Title)
+				}
+			}
+		},
+	}
+	worktreesCleanupCmd.Flags().Bool("dry-run", false, "Show what would be removed without making changes")
+	worktreesCleanupCmd.Flags().String("max-age", "", "Maximum age before cleanup (e.g., 168h, 72h, 0 for all). Default: 168h (7 days)")
+	worktreesCmd.AddCommand(worktreesCleanupCmd)
+	rootCmd.AddCommand(worktreesCmd)
 
 	// Update command - self-update via install script
 	upgradeCmd := &cobra.Command{
@@ -2110,9 +2269,10 @@ Examples:
 			color, _ := cmd.Flags().GetString("color")
 			aliases, _ := cmd.Flags().GetString("aliases")
 			claudeConfigDir, _ := cmd.Flags().GetString("claude-config-dir")
+			noGit, _ := cmd.Flags().GetBool("no-git")
 			outputJSON, _ := cmd.Flags().GetBool("json")
 
-			createProjectCLI(args[0], path, instructions, color, aliases, claudeConfigDir, outputJSON)
+			createProjectCLI(args[0], path, instructions, color, aliases, claudeConfigDir, noGit, outputJSON)
 		},
 	}
 	projectsCreateCmd.Flags().StringP("path", "p", "", "Project directory path (required)")
@@ -2120,6 +2280,7 @@ Examples:
 	projectsCreateCmd.Flags().StringP("color", "c", "", "Hex color for display (e.g., #61AFEF)")
 	projectsCreateCmd.Flags().StringP("aliases", "a", "", "Comma-separated aliases for lookup")
 	projectsCreateCmd.Flags().String("claude-config-dir", "", "Override CLAUDE_CONFIG_DIR for this project")
+	projectsCreateCmd.Flags().Bool("no-git", false, "Disable git worktrees (for non-git projects)")
 	projectsCreateCmd.Flags().Bool("json", false, "Output in JSON format")
 	projectsCreateCmd.MarkFlagRequired("path")
 	projectsCmd.AddCommand(projectsCreateCmd)
@@ -2146,8 +2307,25 @@ Examples:
 			claudeConfigDir, _ := cmd.Flags().GetString("claude-config-dir")
 			projectContext, _ := cmd.Flags().GetString("context")
 			outputJSON, _ := cmd.Flags().GetBool("json")
+			noGit, _ := cmd.Flags().GetBool("no-git")
+			git, _ := cmd.Flags().GetBool("git")
 
-			updateProjectCLI(args[0], name, path, instructions, color, aliases, claudeConfigDir, projectContext, outputJSON)
+			if noGit && git {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: --no-git and --git are mutually exclusive"))
+				os.Exit(1)
+			}
+
+			// Determine git mode: nil means not specified
+			var useWorktrees *bool
+			if noGit {
+				v := false
+				useWorktrees = &v
+			} else if git {
+				v := true
+				useWorktrees = &v
+			}
+
+			updateProjectCLI(args[0], name, path, instructions, color, aliases, claudeConfigDir, projectContext, useWorktrees, outputJSON)
 		},
 	}
 	projectsUpdateCmd.Flags().StringP("name", "n", "", "New project name")
@@ -2157,6 +2335,8 @@ Examples:
 	projectsUpdateCmd.Flags().StringP("aliases", "a", "", "Comma-separated aliases for lookup")
 	projectsUpdateCmd.Flags().String("claude-config-dir", "", "Override CLAUDE_CONFIG_DIR for this project")
 	projectsUpdateCmd.Flags().String("context", "", "Cached project context summary")
+	projectsUpdateCmd.Flags().Bool("no-git", false, "Disable git worktrees (for non-git projects)")
+	projectsUpdateCmd.Flags().Bool("git", false, "Enable git worktrees (default)")
 	projectsUpdateCmd.Flags().Bool("json", false, "Output in JSON format")
 	projectsCmd.AddCommand(projectsUpdateCmd)
 
@@ -2785,6 +2965,206 @@ Examples:
 	}
 }
 
+// tailModel is a Bubble Tea model for the live tail view.
+// Uses alternate screen buffer to avoid scrollback pollution.
+type tailModel struct {
+	db       *db.DB
+	interval time.Duration
+	showDone bool
+	width    int
+	height   int
+}
+
+type tailTickMsg time.Time
+
+func (m tailModel) Init() tea.Cmd {
+	return tea.Tick(m.interval, func(t time.Time) tea.Msg {
+		return tailTickMsg(t)
+	})
+}
+
+func (m tailModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tea.KeyMsg:
+		switch msg.String() {
+		case "q", "ctrl+c", "esc":
+			return m, tea.Quit
+		}
+	case tea.WindowSizeMsg:
+		m.width = msg.Width
+		m.height = msg.Height
+	case tailTickMsg:
+		return m, tea.Tick(m.interval, func(t time.Time) tea.Msg {
+			return tailTickMsg(t)
+		})
+	}
+	return m, nil
+}
+
+func (m tailModel) View() string {
+	var b strings.Builder
+
+	statusStyle := func(status string) lipgloss.Style {
+		switch status {
+		case db.StatusQueued:
+			return lipgloss.NewStyle().Foreground(lipgloss.Color("#F59E0B"))
+		case db.StatusProcessing:
+			return lipgloss.NewStyle().Foreground(lipgloss.Color("#3B82F6"))
+		case db.StatusBlocked:
+			return lipgloss.NewStyle().Foreground(lipgloss.Color("#EF4444"))
+		case db.StatusDone:
+			return lipgloss.NewStyle().Foreground(lipgloss.Color("#10B981"))
+		default:
+			return lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280"))
+		}
+	}
+
+	projectStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#A78BFA"))
+	headerStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#E5E7EB"))
+	logStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#9CA3AF")).Italic(true)
+
+	statusOrder := []string{
+		db.StatusProcessing,
+		db.StatusBlocked,
+		db.StatusQueued,
+		db.StatusBacklog,
+	}
+	if m.showDone {
+		statusOrder = append(statusOrder, db.StatusDone)
+	}
+
+	statusLabels := map[string]string{
+		db.StatusProcessing: "In Progress",
+		db.StatusBlocked:    "Blocked",
+		db.StatusQueued:     "Queued",
+		db.StatusBacklog:    "Backlog",
+		db.StatusDone:       "Done",
+	}
+
+	opts := db.ListTasksOptions{
+		IncludeClosed: m.showDone,
+		Limit:         500,
+	}
+	tasks, err := m.db.ListTasks(opts)
+	if err != nil {
+		return errorStyle.Render("Error: " + err.Error())
+	}
+
+	var taskIDs []int64
+	for _, t := range tasks {
+		taskIDs = append(taskIDs, t.ID)
+	}
+	latestLogs, _ := m.db.GetLatestLogPerTask(taskIDs)
+	if latestLogs == nil {
+		latestLogs = make(map[int64]*db.TaskLog)
+	}
+
+	type projectGroup struct {
+		name     string
+		statuses map[string][]*db.Task
+	}
+	projectMap := make(map[string]*projectGroup)
+	var projectOrder []string
+
+	for _, t := range tasks {
+		if t.Status == db.StatusArchived {
+			continue
+		}
+		proj := t.Project
+		if proj == "" {
+			proj = "(no project)"
+		}
+		pg, exists := projectMap[proj]
+		if !exists {
+			pg = &projectGroup{name: proj, statuses: make(map[string][]*db.Task)}
+			projectMap[proj] = pg
+			projectOrder = append(projectOrder, proj)
+		}
+		pg.statuses[t.Status] = append(pg.statuses[t.Status], t)
+	}
+
+	sort.Strings(projectOrder)
+
+	// Header
+	separatorWidth := 60
+	if m.width > 0 && m.width < separatorWidth {
+		separatorWidth = m.width
+	}
+	b.WriteString(headerStyle.Render("TaskYou — Live Tail"))
+	b.WriteString("  ")
+	b.WriteString(dimStyle.Render(time.Now().Format("15:04:05")))
+	b.WriteByte('\n')
+	b.WriteString(dimStyle.Render(strings.Repeat("─", separatorWidth)))
+	b.WriteByte('\n')
+
+	if len(tasks) == 0 {
+		b.WriteString(dimStyle.Render("  No tasks found"))
+		b.WriteByte('\n')
+	}
+
+	maxTitleWidth := 70
+	if m.width > 20 {
+		maxTitleWidth = m.width - 20
+	}
+
+	for i, proj := range projectOrder {
+		pg := projectMap[proj]
+		total := 0
+		for _, tl := range pg.statuses {
+			total += len(tl)
+		}
+		b.WriteByte('\n')
+		fmt.Fprintf(&b, "%s %s\n", projectStyle.Render(proj), dimStyle.Render(fmt.Sprintf("(%d)", total)))
+
+		for _, status := range statusOrder {
+			statusTasks := pg.statuses[status]
+			if len(statusTasks) == 0 {
+				continue
+			}
+			label := statusLabels[status]
+			fmt.Fprintf(&b, "  %s\n", statusStyle(status).Render(fmt.Sprintf("▸ %s (%d)", label, len(statusTasks))))
+			for _, t := range statusTasks {
+				title := truncate(t.Title, maxTitleWidth)
+				age := boardAgeHint(t)
+				line := fmt.Sprintf("    #%-4d %s", t.ID, title)
+				if age != "" {
+					line += "  " + dimStyle.Render(age)
+				}
+				b.WriteString(line)
+				b.WriteByte('\n')
+
+				if log, ok := latestLogs[t.ID]; ok && log.Content != "" {
+					content := strings.TrimSpace(log.Content)
+					if idx := strings.IndexByte(content, '\n'); idx != -1 {
+						content = content[:idx]
+					}
+					content = truncate(content, 80)
+					fmt.Fprintf(&b, "           %s\n", logStyle.Render(content))
+				}
+			}
+		}
+
+		if i < len(projectOrder)-1 {
+			b.WriteByte('\n')
+		}
+	}
+
+	b.WriteByte('\n')
+	b.WriteString(dimStyle.Render("q/esc to quit • refreshing every " + m.interval.String()))
+
+	result := b.String()
+	if m.height > 0 {
+		lines := strings.Split(result, "\n")
+		if len(lines) > m.height {
+			lines = lines[:m.height-1]
+			lines = append(lines, dimStyle.Render("… (resize terminal to see all tasks)"))
+			result = strings.Join(lines, "\n")
+		}
+	}
+
+	return result
+}
+
 // execInTmux re-executes the current command inside a new tmux session.
 // Creates a split-pane layout with the task TUI on top and Claude on bottom.
 func execInTmux() error {
@@ -2807,6 +3187,12 @@ func execInTmux() error {
 
 	// Check if session already exists
 	if osexec.Command("tmux", "has-session", "-t", sessionName).Run() == nil {
+		// Reset window styling that may have been left over from a previous detail view
+		// (joinTmuxPanes sets window-style to dim inactive panes, but if the session
+		// wasn't cleanly shut down, the dimming persists on re-attach)
+		osexec.Command("tmux", "set-option", "-t", sessionName, "window-style", "default").Run()
+		osexec.Command("tmux", "set-option", "-t", sessionName, "window-active-style", "default").Run()
+
 		// Session exists, attach to it instead
 		cmd := osexec.Command("tmux", "attach-session", "-t", sessionName)
 		cmd.Stdin = os.Stdin
@@ -2829,6 +3215,10 @@ func execInTmux() error {
 	osexec.Command("tmux", "set-option", "-t", sessionName, "status-style", "bg=#1e293b,fg=#94a3b8").Run()
 	osexec.Command("tmux", "set-option", "-t", sessionName, "status-left", " ").Run()
 	osexec.Command("tmux", "set-option", "-t", sessionName, "status-right", " ").Run()
+
+	// Override global tmux window-style to prevent dimming from other tools (e.g. dmux)
+	osexec.Command("tmux", "set-option", "-t", sessionName, "window-style", "default").Run()
+	osexec.Command("tmux", "set-option", "-t", sessionName, "window-active-style", "default").Run()
 
 	// Enable pane border labels
 	osexec.Command("tmux", "set-option", "-t", sessionName, "pane-border-status", "top").Run()
@@ -2878,7 +3268,7 @@ func runLocal(dangerousMode bool, debugStatePath string) error {
 	cwd, _ := os.Getwd()
 
 	// Create and run TUI
-	model := ui.NewAppModel(database, exec, cwd)
+	model := ui.NewAppModel(database, exec, cwd, version)
 	if debugStatePath != "" {
 		model.SetDebugStatePath(debugStatePath)
 	}
@@ -2909,7 +3299,7 @@ func runLocal(dangerousMode bool, debugStatePath string) error {
 
 // ensureDaemonRunning starts the daemon if it's not already running.
 // If dangerousMode is true, sets WORKTREE_DANGEROUS_MODE=1 for the daemon.
-// If the daemon is running with a different mode, it will be restarted.
+// If the daemon is already running (even with a different mode), it is left as-is.
 func ensureDaemonRunning(dangerousMode bool) error {
 	pidFile := getPidFilePath()
 	modeFile := pidFile + ".mode"
@@ -2917,19 +3307,7 @@ func ensureDaemonRunning(dangerousMode bool) error {
 	// Check if daemon is already running
 	if pid, err := readPidFile(pidFile); err == nil {
 		if processExists(pid) {
-			// Check if running with correct mode
-			currentMode, _ := os.ReadFile(modeFile)
-			wantMode := "safe"
-			if dangerousMode {
-				wantMode = "dangerous"
-			}
-			if string(currentMode) == wantMode {
-				return nil // Already running with correct mode
-			}
-			// Mode mismatch - restart daemon
-			fmt.Fprintln(os.Stderr, dimStyle.Render(fmt.Sprintf("Restarting daemon (switching to %s mode)...", wantMode)))
-			stopDaemon()
-			time.Sleep(100 * time.Millisecond)
+			return nil // Already running, leave it alone regardless of mode
 		} else {
 			// Stale pid file, remove it
 			os.Remove(pidFile)
@@ -3287,13 +3665,13 @@ func runDaemon() error {
 
 // ClaudeHookInput is the JSON structure Claude sends to hooks via stdin.
 type ClaudeHookInput struct {
-	SessionID          string `json:"session_id"`
-	TranscriptPath     string `json:"transcript_path"`
-	Cwd                string `json:"cwd"`
-	HookEventName      string `json:"hook_event_name"`
-	NotificationType   string `json:"notification_type,omitempty"`   // For Notification hooks
-	Message            string `json:"message,omitempty"`             // General message field
-	StopReason string `json:"stop_reason,omitempty"` // For Stop hooks
+	SessionID        string `json:"session_id"`
+	TranscriptPath   string `json:"transcript_path"`
+	Cwd              string `json:"cwd"`
+	HookEventName    string `json:"hook_event_name"`
+	NotificationType string `json:"notification_type,omitempty"` // For Notification hooks
+	Message          string `json:"message,omitempty"`           // General message field
+	StopReason       string `json:"stop_reason,omitempty"`       // For Stop hooks
 	// Tool use fields (for PreToolUse and PostToolUse hooks)
 	ToolName     string          `json:"tool_name,omitempty"`     // Name of the tool being used
 	ToolInput    json.RawMessage `json:"tool_input,omitempty"`    // Tool-specific input parameters
@@ -3398,6 +3776,12 @@ func handleNotificationHook(database *db.DB, taskID int64, input *ClaudeHookInpu
 				if input.Message != "" {
 					msg = "Waiting for permission: " + input.Message
 				}
+				// The Notification hook doesn't include tool_name/tool_input, but the
+				// PreToolUse hook (which fires just before) stashes the detail as a
+				// "pending_tool" log entry. Retrieve and append to the permission message.
+				if detail := latestPendingToolDetail(database, taskID); detail != "" {
+					msg += "\n" + detail
+				}
 			}
 			database.AppendTaskLog(taskID, "system", msg)
 		}
@@ -3475,13 +3859,20 @@ func handlePreToolUseHook(database *db.DB, taskID int64, input *ClaudeHookInput)
 		return nil
 	}
 
-	// When Claude is about to use a tool, the task should be "processing"
+	// When the executor is about to use a tool, the task should be "processing"
 	// This handles the case where:
 	// 1. Task was blocked (waiting for input) and user responded
-	// 2. Task was in any other state but Claude is now actively working
+	// 2. Task was in any other state but executor is now actively working
 	if task.Status == db.StatusBlocked {
 		database.UpdateTaskStatus(taskID, db.StatusProcessing)
-		database.AppendTaskLog(taskID, "system", "Claude resumed working")
+		database.AppendTaskLog(taskID, "system", "Agent resumed working")
+	}
+
+	// Store tool detail so the Notification(permission_prompt) handler can show it.
+	// The Notification hook doesn't include tool_name/tool_input, but PreToolUse
+	// fires right before it, so we stash the detail here for retrieval.
+	if detail := formatPermissionDetail(input); detail != "" {
+		database.AppendTaskLog(taskID, "pending_tool", detail)
 	}
 
 	return nil
@@ -3510,10 +3901,32 @@ func handlePostToolUseHook(database *db.DB, taskID int64, input *ClaudeHookInput
 		database.AppendTaskLog(taskID, "tool", logMsg)
 	}
 
-	// After a tool completes, Claude is still working (will process tool results)
-	// Ensure task remains in "processing" state
+	// Re-fetch task status — the MCP server may have changed it during
+	// tool execution (e.g. taskyou_needs_input sets blocked).
+	task, err = database.GetTask(taskID)
+	if err != nil || task == nil {
+		return err
+	}
+
+	// After a tool completes, Claude is still working (will process tool results).
+	// Ensure task remains in "processing" state — unless an MCP tool
+	// intentionally set it to blocked for user input.
 	if task.Status == db.StatusBlocked {
-		database.UpdateTaskStatus(taskID, db.StatusProcessing)
+		// Check if the blocked state is from a question prompt (MCP needs_input).
+		// If so, respect it. Otherwise, resume to processing.
+		hasQuestion := false
+		if logs, err := database.GetTaskLogs(taskID, 3); err == nil {
+			for _, l := range logs {
+				if l.LineType == "question" {
+					hasQuestion = true
+					break
+				}
+			}
+		}
+		if !hasQuestion {
+			database.UpdateTaskStatus(taskID, db.StatusProcessing)
+			database.AppendTaskLog(taskID, "system", "Agent resumed working")
+		}
 	}
 
 	return nil
@@ -3576,6 +3989,87 @@ func formatToolLogMessage(input *ClaudeHookInput) string {
 
 	// Default: just the tool name
 	return toolName
+}
+
+// formatPermissionDetail extracts a short detail string from the tool input
+// for display in permission approval dialogs. Returns "" if no detail available.
+func formatPermissionDetail(input *ClaudeHookInput) string {
+	if input.ToolName == "" || len(input.ToolInput) == 0 {
+		return ""
+	}
+
+	var toolInput map[string]interface{}
+	if err := json.Unmarshal(input.ToolInput, &toolInput); err != nil {
+		return ""
+	}
+
+	var detail string
+	switch input.ToolName {
+	case "Bash":
+		if cmd, ok := toolInput["command"].(string); ok {
+			detail = cmd
+		}
+	case "Read":
+		if path, ok := toolInput["file_path"].(string); ok {
+			detail = path
+		}
+	case "Write":
+		if path, ok := toolInput["file_path"].(string); ok {
+			detail = path
+		}
+	case "Edit":
+		if path, ok := toolInput["file_path"].(string); ok {
+			detail = path
+		}
+	case "Glob":
+		if pattern, ok := toolInput["pattern"].(string); ok {
+			detail = pattern
+		}
+	case "Grep":
+		if pattern, ok := toolInput["pattern"].(string); ok {
+			detail = pattern
+		}
+	case "Task":
+		if desc, ok := toolInput["description"].(string); ok {
+			detail = desc
+		}
+	case "WebFetch":
+		if url, ok := toolInput["url"].(string); ok {
+			detail = url
+		}
+	case "WebSearch":
+		if query, ok := toolInput["query"].(string); ok {
+			detail = query
+		}
+	}
+
+	if detail == "" {
+		return ""
+	}
+
+	// Truncate to keep the approval bar compact
+	if len(detail) > 200 {
+		detail = detail[:200] + "..."
+	}
+
+	return detail
+}
+
+// latestPendingToolDetail retrieves the most recent "pending_tool" log entry
+// for a task. This is written by handlePreToolUseHook and consumed here by the
+// notification handler to show what tool/command is requesting permission.
+func latestPendingToolDetail(database *db.DB, taskID int64) string {
+	logs, err := database.GetTaskLogs(taskID, 5)
+	if err != nil {
+		return ""
+	}
+	// Logs are in DESC order (most recent first).
+	for _, l := range logs {
+		if l.LineType == "pending_tool" {
+			return l.Content
+		}
+	}
+	return ""
 }
 
 // tailClaudeLogs tails all claude session logs for debugging.
@@ -4602,13 +5096,14 @@ func showProjectCLI(name string, outputJSON bool) {
 
 	if outputJSON {
 		output := map[string]interface{}{
-			"id":         project.ID,
-			"name":       project.Name,
-			"path":       project.Path,
-			"color":      project.Color,
-			"aliases":    project.Aliases,
-			"task_count": taskCount,
-			"created_at": project.CreatedAt.Time.Format(time.RFC3339),
+			"id":            project.ID,
+			"name":          project.Name,
+			"path":          project.Path,
+			"color":         project.Color,
+			"aliases":       project.Aliases,
+			"use_worktrees": project.UseWorktrees,
+			"task_count":    taskCount,
+			"created_at":    project.CreatedAt.Time.Format(time.RFC3339),
 		}
 		if project.Instructions != "" {
 			output["instructions"] = project.Instructions
@@ -4649,6 +5144,9 @@ func showProjectCLI(name string, outputJSON bool) {
 	if project.ClaudeConfigDir != "" {
 		fmt.Printf("%s %s\n", dimStyle.Render("Claude Config:"), project.ClaudeConfigDir)
 	}
+	if !project.UseWorktrees {
+		fmt.Printf("%s %s\n", dimStyle.Render("Git Worktrees:"), "disabled (non-git project)")
+	}
 
 	if project.Instructions != "" {
 		fmt.Println()
@@ -4677,7 +5175,7 @@ func showProjectCLI(name string, outputJSON bool) {
 }
 
 // createProjectCLI creates a new project.
-func createProjectCLI(name, path, instructions, color, aliases, claudeConfigDir string, outputJSON bool) {
+func createProjectCLI(name, path, instructions, color, aliases, claudeConfigDir string, noGit bool, outputJSON bool) {
 	// Validate name
 	if strings.TrimSpace(name) == "" {
 		fmt.Fprintln(os.Stderr, errorStyle.Render("Error: project name cannot be empty"))
@@ -4728,6 +5226,7 @@ func createProjectCLI(name, path, instructions, color, aliases, claudeConfigDir 
 		Color:           color,
 		Aliases:         aliases,
 		ClaudeConfigDir: claudeConfigDir,
+		UseWorktrees:    !noGit,
 	}
 
 	if err := database.CreateProject(project); err != nil {
@@ -4737,10 +5236,11 @@ func createProjectCLI(name, path, instructions, color, aliases, claudeConfigDir 
 
 	if outputJSON {
 		output := map[string]interface{}{
-			"id":         project.ID,
-			"name":       project.Name,
-			"path":       project.Path,
-			"created_at": project.CreatedAt.Time.Format(time.RFC3339),
+			"id":            project.ID,
+			"name":          project.Name,
+			"path":          project.Path,
+			"use_worktrees": project.UseWorktrees,
+			"created_at":    project.CreatedAt.Time.Format(time.RFC3339),
 		}
 		if project.Color != "" {
 			output["color"] = project.Color
@@ -4751,12 +5251,16 @@ func createProjectCLI(name, path, instructions, color, aliases, claudeConfigDir 
 		jsonBytes, _ := json.Marshal(output)
 		fmt.Println(string(jsonBytes))
 	} else {
-		fmt.Println(successStyle.Render(fmt.Sprintf("Created project '%s' at %s", name, absPath)))
+		suffix := ""
+		if !project.UseWorktrees {
+			suffix = " (non-git, worktrees disabled)"
+		}
+		fmt.Println(successStyle.Render(fmt.Sprintf("Created project '%s' at %s%s", name, absPath, suffix)))
 	}
 }
 
 // updateProjectCLI updates an existing project.
-func updateProjectCLI(currentName, newName, path, instructions, color, aliases, claudeConfigDir, projectContext string, outputJSON bool) {
+func updateProjectCLI(currentName, newName, path, instructions, color, aliases, claudeConfigDir, projectContext string, useWorktrees *bool, outputJSON bool) {
 	dbPath := db.DefaultPath()
 	database, err := db.Open(dbPath)
 	if err != nil {
@@ -4827,6 +5331,15 @@ func updateProjectCLI(currentName, newName, path, instructions, color, aliases, 
 	if claudeConfigDir != "" {
 		project.ClaudeConfigDir = claudeConfigDir
 		changes = append(changes, "claude_config_dir")
+	}
+
+	if useWorktrees != nil {
+		project.UseWorktrees = *useWorktrees
+		if *useWorktrees {
+			changes = append(changes, "git worktrees enabled")
+		} else {
+			changes = append(changes, "git worktrees disabled")
+		}
 	}
 
 	if len(changes) == 0 && projectContext == "" {

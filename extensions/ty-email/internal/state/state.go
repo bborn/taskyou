@@ -18,16 +18,16 @@ type DB struct {
 
 // EmailThread tracks the mapping between email threads and tasks.
 type EmailThread struct {
-	EmailThreadID string    // Message-ID or thread reference
-	TaskID        int64     // TaskYou task ID
+	EmailThreadID string // Message-ID or thread reference
+	TaskID        int64  // TaskYou task ID
 	CreatedAt     time.Time
 }
 
 // ProcessedEmail tracks which emails have been handled.
 type ProcessedEmail struct {
-	EmailID     string    // Message-ID
-	TaskID      *int64    // Associated task (if any)
-	Action      string    // What action was taken
+	EmailID     string // Message-ID
+	TaskID      *int64 // Associated task (if any)
+	Action      string // What action was taken
 	ProcessedAt time.Time
 }
 
@@ -67,9 +67,22 @@ func Open(path string) (*DB, error) {
 		return nil, fmt.Errorf("failed to create state directory: %w", err)
 	}
 
-	db, err := sql.Open("sqlite", path+"?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)")
+	db, err := sql.Open("sqlite", path)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open state database: %w", err)
+	}
+
+	// Single connection ensures PRAGMAs apply consistently.
+	// Note: _pragma DSN params do NOT work with modernc.org/sqlite.
+	db.SetMaxOpenConns(1)
+
+	if _, err := db.Exec("PRAGMA busy_timeout=5000"); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("failed to set busy timeout: %w", err)
+	}
+	if _, err := db.Exec("PRAGMA journal_mode=WAL"); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("failed to enable WAL: %w", err)
 	}
 
 	s := &DB{db: db}

@@ -77,11 +77,30 @@ func Open(path string) (*DB, error) {
 		return nil, fmt.Errorf("create db directory: %w", err)
 	}
 
-	// Add busy timeout to handle concurrent access from executor + UI
-	dsn := path + "?_busy_timeout=5000"
-	db, err := sql.Open("sqlite", dsn)
+	db, err := sql.Open("sqlite", path)
 	if err != nil {
 		return nil, fmt.Errorf("open database: %w", err)
+	}
+
+	// Use a single connection to ensure PRAGMAs apply consistently.
+	// SQLite only supports one writer at a time, so multiple connections
+	// just create contention. A single connection with busy_timeout
+	// handles concurrent goroutines via database/sql's built-in serialization.
+	db.SetMaxOpenConns(1)
+
+	// Recycle connections periodically so the next query opens a fresh
+	// connection that re-reads the WAL index from the shared-memory file.
+	// modernc.org/sqlite (pure-Go) uses file I/O instead of mmap for the
+	// WAL shared-memory, so a long-lived connection may cache a stale WAL
+	// index and miss writes from other processes (e.g., CLI commands).
+	db.SetConnMaxLifetime(2 * time.Second)
+
+	// Set busy timeout to retry on SQLITE_BUSY instead of failing immediately.
+	// This is critical for the daemon where multiple goroutines update task
+	// status concurrently. Note: _busy_timeout DSN param does NOT work with
+	// modernc.org/sqlite — must use PRAGMA.
+	if _, err := db.Exec("PRAGMA busy_timeout=5000"); err != nil {
+		return nil, fmt.Errorf("set busy timeout: %w", err)
 	}
 
 	// Enable WAL mode for better concurrent access
@@ -194,6 +213,9 @@ func (db *DB) migrate() error {
 		`CREATE INDEX IF NOT EXISTS idx_task_dependencies_blocker ON task_dependencies(blocker_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_task_dependencies_blocked ON task_dependencies(blocked_id)`,
 
+		// Composite index for efficient conversation history queries
+		// Used by GetConversationHistoryLogs and HasContinuationMarker
+		`CREATE INDEX IF NOT EXISTS idx_task_logs_task_line_type ON task_logs(task_id, line_type)`,
 	}
 
 	for _, m := range migrations {
@@ -253,6 +275,8 @@ func (db *DB) migrate() error {
 		`ALTER TABLE tasks ADD COLUMN source_branch TEXT DEFAULT ''`, // Existing branch to checkout instead of creating new branch
 		// Cached PR state as JSON for instant display on startup (avoids waiting for GitHub API)
 		`ALTER TABLE tasks ADD COLUMN pr_info_json TEXT DEFAULT ''`, // JSON blob of github.PRInfo
+		// Whether project uses git worktrees for task isolation (1=yes, 0=no, default 1 for backward compat)
+		`ALTER TABLE projects ADD COLUMN use_worktrees INTEGER DEFAULT 1`,
 	}
 
 	for _, m := range alterMigrations {

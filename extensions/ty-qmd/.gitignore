@@ -1,0 +1,9 @@
+# Binary
+ty-qmd
+
+# Config
+config.yaml
+
+# Test artifacts
+*.test
+coverage.out

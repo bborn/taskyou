@@ -10,8 +10,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/bborn/workflow/internal/db"
 	"github.com/charmbracelet/log"
+
+	"github.com/bborn/workflow/internal/db"
 )
 
 // OpenClawExecutor implements TaskExecutor for OpenClaw AI assistant.
@@ -140,7 +141,7 @@ func (o *OpenClawExecutor) runOpenClaw(ctx context.Context, task *db.Task, workD
 	script := fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %sopenclaw tui --session %s %s--message "$(cat %q)"`,
 		task.ID, worktreeSessionID, task.Port, task.WorktreePath, envPrefix, sessionKey, thinkingFlag, promptFile.Name())
 
-	actualSession, tmuxErr := createTmuxWindow(daemonSession, windowName, workDir, script)
+	actualSession, tmuxErr := createTmuxWindow(daemonSession, windowName, workDir, script, o.executor.getProjectDir(task.Project))
 	if tmuxErr != nil {
 		o.logger.Error("tmux new-window failed", "error", tmuxErr, "session", daemonSession)
 		o.executor.logLine(task.ID, "error", fmt.Sprintf("Failed to create tmux window: %s", tmuxErr.Error()))
@@ -256,7 +257,7 @@ func (o *OpenClawExecutor) Suspend(taskID int64) bool {
 		o.logger.Debug("Failed to find process", "pid", pid, "error", err)
 		return false
 	}
-	if err := proc.Signal(syscall.SIGTSTP); err != nil {
+	if err := sendSIGTSTP(proc); err != nil {
 		o.logger.Debug("Failed to suspend process", "pid", pid, "error", err)
 		return false
 	}
@@ -287,7 +288,7 @@ func (o *OpenClawExecutor) ResumeProcess(taskID int64) bool {
 		delete(o.suspendedTasks, taskID)
 		return false
 	}
-	if err := proc.Signal(syscall.SIGCONT); err != nil {
+	if err := sendSIGCONT(proc); err != nil {
 		o.logger.Debug("Failed to resume process", "pid", pid, "error", err)
 		return false
 	}
@@ -378,4 +379,3 @@ func (o *OpenClawExecutor) ResumeSafe(task *db.Task, workDir string) bool {
 	o.executor.logLine(task.ID, "system", "OpenClaw does not support dangerous mode toggle")
 	return false
 }
-

@@ -4,9 +4,10 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/charmbracelet/lipgloss"
+
 	"github.com/bborn/workflow/internal/db"
 	"github.com/bborn/workflow/internal/github"
-	"github.com/charmbracelet/lipgloss"
 )
 
 // emptyColumnMessage returns a contextual message for empty columns.
@@ -43,8 +44,8 @@ type KanbanBoard struct {
 	columns           []KanbanColumn
 	selectedCol       int
 	selectedRow       int
-	scrollOffsets     []int // Scroll offset per column
-	collapsedColumns  map[int]bool             // Columns that are collapsed (show only header)
+	scrollOffsets     []int        // Scroll offset per column
+	collapsedColumns  map[int]bool // Columns that are collapsed (show only header)
 	width             int
 	height            int
 	allTasks          []*db.Task               // All tasks
@@ -100,6 +101,8 @@ func (k *KanbanBoard) RefreshTheme() {
 // SetTasks updates the tasks in the kanban board.
 func (k *KanbanBoard) SetTasks(tasks []*db.Task) {
 	var selectedID int64
+	prevCol := k.selectedCol
+	prevRow := k.selectedRow
 	if selected := k.SelectedTask(); selected != nil {
 		selectedID = selected.ID
 	}
@@ -116,7 +119,15 @@ func (k *KanbanBoard) SetTasks(tasks []*db.Task) {
 	}
 
 	if selectedID != 0 {
-		k.SelectTask(selectedID)
+		// Try to find the task in its (possibly new) position
+		found := k.SelectTask(selectedID)
+		if found && k.selectedCol != prevCol {
+			// Task moved to a different column (e.g. after permission grant).
+			// Stay in the original column and select the next task there.
+			k.selectedCol = prevCol
+			k.selectedRow = prevRow
+			k.clampSelection()
+		}
 	}
 }
 
@@ -341,8 +352,14 @@ func splitPinnedTasks(tasks []*db.Task) (pinned []*db.Task, unpinned []*db.Task)
 
 // SetSize updates the board dimensions.
 func (k *KanbanBoard) SetSize(width, height int) {
+	heightChanged := k.height != height
 	k.width = width
 	k.height = height
+	// When height changes (e.g. quickview appearing/disappearing),
+	// recalculate scroll offsets so the selected task stays visible
+	if heightChanged {
+		k.ensureSelectedVisible()
+	}
 }
 
 // MoveLeft moves selection to the left column, skipping collapsed columns.
@@ -1458,8 +1475,8 @@ func (k *KanbanBoard) handleClickDesktop(x, y int) *db.Task {
 
 	// Calculate which task was clicked
 	col := k.columns[colIdx]
-	colHeight := k.height
-	maxTasks := (colHeight - 3) / taskCardHeight // -3 for header bar and minimal padding
+	colHeight := k.height - 2                    // -2 for column borders (top + bottom)
+	maxTasks := (colHeight - 3) / taskCardHeight // -3 for header bar and scroll indicators
 	if maxTasks < 1 {
 		maxTasks = 1
 	}

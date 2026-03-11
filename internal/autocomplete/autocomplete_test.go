@@ -148,6 +148,7 @@ func TestNewService_WithAPIKey(t *testing.T) {
 }
 
 func TestService_IsAvailable(t *testing.T) {
+	t.Setenv("ANTHROPIC_API_KEY", "")
 	svc := NewService("")
 	if svc.IsAvailable() {
 		t.Error("IsAvailable() should return false without API key")
@@ -445,6 +446,7 @@ func TestBuildTitleGenerationPrompt(t *testing.T) {
 }
 
 func TestGenerateTitle_NoAPIKey(t *testing.T) {
+	t.Setenv("ANTHROPIC_API_KEY", "")
 	svc := NewService("")
 	_, err := svc.GenerateTitle(context.TODO(), "Some description", "")
 	if err == nil {

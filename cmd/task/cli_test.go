@@ -1,10 +1,14 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/bborn/workflow/internal/db"
 )
@@ -1008,7 +1012,7 @@ func TestClaudeHookStatusHandling(t *testing.T) {
 			t.Fatalf("UpdateTaskStatus() error = %v", err)
 		}
 
-		// Simulate PreToolUse (Claude resumed working)
+		// Simulate PreToolUse (agent resumed working)
 		input := &ClaudeHookInput{}
 		err := handlePreToolUseHook(database, task.ID, input)
 		if err != nil {
@@ -1113,7 +1117,7 @@ func TestPostToolUseHookLogging(t *testing.T) {
 
 		// Simulate PostToolUse with tool name
 		input := &ClaudeHookInput{
-			ToolName: "Read",
+			ToolName:  "Read",
 			ToolInput: []byte(`{"file_path": "/path/to/file.go"}`),
 		}
 		err := handlePostToolUseHook(database, task.ID, input)
@@ -1363,6 +1367,328 @@ func TestUnescapeNewlines(t *testing.T) {
 			result := unescapeNewlines(tt.input)
 			if result != tt.expected {
 				t.Errorf("unescapeNewlines(%q) = %q, want %q", tt.input, result, tt.expected)
+			}
+		})
+	}
+}
+
+// TestTailModelUpdate tests the tailModel Update method
+func TestTailModelUpdate(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+	database, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer database.Close()
+
+	m := tailModel{
+		db:       database,
+		interval: 2 * time.Second,
+		showDone: false,
+		width:    80,
+		height:   24,
+	}
+
+	t.Run("q quits", func(t *testing.T) {
+		msgs := parseKeyEvents("q")
+		_, cmd := m.Update(msgs[0])
+		if cmd == nil {
+			t.Error("expected quit command, got nil")
+		}
+	})
+
+	t.Run("esc quits", func(t *testing.T) {
+		msgs := parseKeyEvents("esc")
+		_, cmd := m.Update(msgs[0])
+		if cmd == nil {
+			t.Error("expected quit command, got nil")
+		}
+	})
+
+	t.Run("window resize updates dimensions", func(t *testing.T) {
+		updated, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+		um := updated.(tailModel)
+		if um.width != 120 || um.height != 40 {
+			t.Errorf("expected 120x40, got %dx%d", um.width, um.height)
+		}
+	})
+
+	t.Run("tick returns new tick command", func(t *testing.T) {
+		_, cmd := m.Update(tailTickMsg(time.Now()))
+		if cmd == nil {
+			t.Error("expected tick command, got nil")
+		}
+	})
+}
+
+// TestTailModelView tests the tailModel View method
+func TestTailModelView(t *testing.T) {
+	t.Run("empty database shows no tasks", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		dbPath := filepath.Join(tmpDir, "test.db")
+		database, err := db.Open(dbPath)
+		if err != nil {
+			t.Fatalf("failed to open database: %v", err)
+		}
+		defer database.Close()
+
+		m := tailModel{
+			db:       database,
+			interval: 2 * time.Second,
+			width:    80,
+			height:   24,
+		}
+
+		view := m.View()
+		if !strings.Contains(view, "Live Tail") {
+			t.Error("expected header with 'Live Tail'")
+		}
+		if !strings.Contains(view, "No tasks found") {
+			t.Error("expected 'No tasks found' message")
+		}
+		if !strings.Contains(view, "q/esc to quit") {
+			t.Error("expected quit hint in footer")
+		}
+	})
+
+	t.Run("renders tasks grouped by project", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		dbPath := filepath.Join(tmpDir, "test.db")
+		database, err := db.Open(dbPath)
+		if err != nil {
+			t.Fatalf("failed to open database: %v", err)
+		}
+		defer database.Close()
+
+		if err := database.CreateProject(&db.Project{Name: "myproject", Path: tmpDir}); err != nil {
+			t.Fatalf("failed to create project: %v", err)
+		}
+
+		tasks := []*db.Task{
+			{Title: "Processing task", Status: db.StatusProcessing, Type: db.TypeCode, Project: "myproject"},
+			{Title: "Queued task", Status: db.StatusQueued, Type: db.TypeCode, Project: "myproject"},
+			{Title: "Backlog task", Status: db.StatusBacklog, Type: db.TypeCode},
+		}
+		for _, task := range tasks {
+			if err := database.CreateTask(task); err != nil {
+				t.Fatalf("failed to create task: %v", err)
+			}
+		}
+
+		m := tailModel{
+			db:       database,
+			interval: 2 * time.Second,
+			width:    80,
+			height:   50,
+		}
+
+		view := m.View()
+		if !strings.Contains(view, "myproject") {
+			t.Error("expected 'myproject' in view")
+		}
+		if !strings.Contains(view, "Processing task") {
+			t.Error("expected 'Processing task' in view")
+		}
+		if !strings.Contains(view, "Queued task") {
+			t.Error("expected 'Queued task' in view")
+		}
+		if !strings.Contains(view, "Backlog task") {
+			t.Error("expected 'Backlog task' in view")
+		}
+		if !strings.Contains(view, "In Progress") {
+			t.Error("expected 'In Progress' status label")
+		}
+	})
+
+	t.Run("truncates to terminal height", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		dbPath := filepath.Join(tmpDir, "test.db")
+		database, err := db.Open(dbPath)
+		if err != nil {
+			t.Fatalf("failed to open database: %v", err)
+		}
+		defer database.Close()
+
+		for i := 0; i < 30; i++ {
+			task := &db.Task{
+				Title:  fmt.Sprintf("Task %d", i),
+				Status: db.StatusBacklog,
+				Type:   db.TypeCode,
+			}
+			if err := database.CreateTask(task); err != nil {
+				t.Fatalf("failed to create task: %v", err)
+			}
+		}
+
+		m := tailModel{
+			db:       database,
+			interval: 2 * time.Second,
+			width:    80,
+			height:   10,
+		}
+
+		view := m.View()
+		lines := strings.Split(view, "\n")
+		if len(lines) > 10 {
+			t.Errorf("expected at most 10 lines, got %d", len(lines))
+		}
+		if !strings.Contains(view, "resize terminal") {
+			t.Error("expected truncation message")
+		}
+	})
+
+	t.Run("done tasks hidden by default", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		dbPath := filepath.Join(tmpDir, "test.db")
+		database, err := db.Open(dbPath)
+		if err != nil {
+			t.Fatalf("failed to open database: %v", err)
+		}
+		defer database.Close()
+
+		tasks := []*db.Task{
+			{Title: "Active task", Status: db.StatusQueued, Type: db.TypeCode},
+			{Title: "Done task", Status: db.StatusDone, Type: db.TypeCode},
+		}
+		for _, task := range tasks {
+			if err := database.CreateTask(task); err != nil {
+				t.Fatalf("failed to create task: %v", err)
+			}
+		}
+
+		m := tailModel{
+			db:       database,
+			interval: 2 * time.Second,
+			showDone: false,
+			width:    80,
+			height:   50,
+		}
+
+		view := m.View()
+		if !strings.Contains(view, "Active task") {
+			t.Error("expected active task in view")
+		}
+		if strings.Contains(view, "Done task") {
+			t.Error("done task should be hidden when showDone is false")
+		}
+	})
+
+	t.Run("done tasks shown when enabled", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		dbPath := filepath.Join(tmpDir, "test.db")
+		database, err := db.Open(dbPath)
+		if err != nil {
+			t.Fatalf("failed to open database: %v", err)
+		}
+		defer database.Close()
+
+		tasks := []*db.Task{
+			{Title: "Active task", Status: db.StatusQueued, Type: db.TypeCode},
+			{Title: "Done task", Status: db.StatusDone, Type: db.TypeCode},
+		}
+		for _, task := range tasks {
+			if err := database.CreateTask(task); err != nil {
+				t.Fatalf("failed to create task: %v", err)
+			}
+		}
+
+		m := tailModel{
+			db:       database,
+			interval: 2 * time.Second,
+			showDone: true,
+			width:    80,
+			height:   50,
+		}
+
+		view := m.View()
+		if !strings.Contains(view, "Done task") {
+			t.Error("done task should be visible when showDone is true")
+		}
+	})
+}
+
+func TestFormatPermissionDetail(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    *ClaudeHookInput
+		expected string
+	}{
+		{
+			name:     "empty tool name",
+			input:    &ClaudeHookInput{},
+			expected: "",
+		},
+		{
+			name: "bash command",
+			input: &ClaudeHookInput{
+				ToolName:  "Bash",
+				ToolInput: []byte(`{"command": "git status"}`),
+			},
+			expected: "git status",
+		},
+		{
+			name: "read file",
+			input: &ClaudeHookInput{
+				ToolName:  "Read",
+				ToolInput: []byte(`{"file_path": "/src/main.go"}`),
+			},
+			expected: "/src/main.go",
+		},
+		{
+			name: "write file",
+			input: &ClaudeHookInput{
+				ToolName:  "Write",
+				ToolInput: []byte(`{"file_path": "/src/new.go"}`),
+			},
+			expected: "/src/new.go",
+		},
+		{
+			name: "edit file",
+			input: &ClaudeHookInput{
+				ToolName:  "Edit",
+				ToolInput: []byte(`{"file_path": "/src/app.go"}`),
+			},
+			expected: "/src/app.go",
+		},
+		{
+			name: "task tool",
+			input: &ClaudeHookInput{
+				ToolName:  "Task",
+				ToolInput: []byte(`{"description": "Run tests"}`),
+			},
+			expected: "Run tests",
+		},
+		{
+			name: "long command truncated",
+			input: &ClaudeHookInput{
+				ToolName:  "Bash",
+				ToolInput: []byte(`{"command": "` + strings.Repeat("a", 250) + `"}`),
+			},
+			expected: strings.Repeat("a", 200) + "...",
+		},
+		{
+			name: "no tool input",
+			input: &ClaudeHookInput{
+				ToolName: "Bash",
+			},
+			expected: "",
+		},
+		{
+			name: "unknown tool",
+			input: &ClaudeHookInput{
+				ToolName:  "CustomTool",
+				ToolInput: []byte(`{"foo": "bar"}`),
+			},
+			expected: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := formatPermissionDetail(tt.input)
+			if result != tt.expected {
+				t.Errorf("formatPermissionDetail() = %q, want %q", result, tt.expected)
 			}
 		})
 	}
