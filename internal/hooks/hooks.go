@@ -72,6 +72,7 @@ func (r *Runner) Run(event string, task *db.Task, message string) {
 		fmt.Sprintf("TASK_TYPE=%s", task.Type),
 		fmt.Sprintf("TASK_MESSAGE=%s", message),
 		fmt.Sprintf("TASK_EVENT=%s", event),
+		fmt.Sprintf("WORKTREE_PATH=%s", task.WorktreePath),
 	)
 
 	// Run in background, don't block
