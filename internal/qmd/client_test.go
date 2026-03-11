@@ -1,6 +1,7 @@
 package qmd
 
 import (
+	"context"
 	"testing"
 	"time"
 )
@@ -149,8 +150,8 @@ func TestFindRelatedTasksConversion(t *testing.T) {
 			{DocID: "1", Score: 0.95, Path: "/tmp/task-42.md", Title: "Fix auth bug"},
 			{DocID: "2", Score: 0.7, Path: "/tmp/task-99.md", Title: "Add login page"},
 			{DocID: "3", Score: 0.5, Path: "/tmp/readme.md", Title: "Project README"}, // not a task file
-			{DocID: "4", Score: 0.3, Path: "/tmp/task-abc.md", Title: "Bad ID"},         // unparseable
-			{DocID: "5", Score: 0.6, Path: "/tmp/task-7.md", Title: ""},                  // empty title, uses snippet
+			{DocID: "4", Score: 0.3, Path: "/tmp/task-abc.md", Title: "Bad ID"},       // unparseable
+			{DocID: "5", Score: 0.6, Path: "/tmp/task-7.md", Title: ""},               // empty title, uses snippet
 		},
 		timestamp: time.Now(),
 	}
@@ -159,7 +160,7 @@ func TestFindRelatedTasksConversion(t *testing.T) {
 	cached.results[4].Snippet = "Snippet fallback"
 	c.cache[cacheKey] = cached
 
-	related, err := c.FindRelatedTasks(nil, "test query", 5)
+	related, err := c.FindRelatedTasks(context.TODO(), "test query", 5)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -200,7 +201,7 @@ func TestIsAvailableLazyInit(t *testing.T) {
 func TestUnavailableClientReturnsNil(t *testing.T) {
 	c := NewClient("this-binary-does-not-exist-qmd-test")
 
-	results, err := c.Search(nil, "query", "col", 5)
+	results, err := c.Search(context.TODO(), "query", "col", 5)
 	if err != nil {
 		t.Errorf("expected nil error, got %v", err)
 	}
@@ -208,7 +209,7 @@ func TestUnavailableClientReturnsNil(t *testing.T) {
 		t.Errorf("expected nil results, got %v", results)
 	}
 
-	related, err := c.FindRelatedTasks(nil, "query", 5)
+	related, err := c.FindRelatedTasks(context.TODO(), "query", 5)
 	if err != nil {
 		t.Errorf("expected nil error, got %v", err)
 	}

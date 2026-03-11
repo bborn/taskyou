@@ -13,16 +13,16 @@ import (
 
 // Client wraps the QMD CLI for semantic search.
 type Client struct {
-	binary       string
-	available    bool
-	checkedOnce  sync.Once
-	mu           sync.RWMutex
+	binary      string
+	available   bool
+	checkedOnce sync.Once
+	mu          sync.RWMutex
 
 	// Cache for search results
-	cache       map[string]cachedResult
-	cacheMu     sync.RWMutex
-	cacheTTL    time.Duration
-	maxCache    int
+	cache    map[string]cachedResult
+	cacheMu  sync.RWMutex
+	cacheTTL time.Duration
+	maxCache int
 }
 
 type cachedResult struct {
