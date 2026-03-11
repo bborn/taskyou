@@ -12,12 +12,15 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/charmbracelet/log"
+
 	"github.com/bborn/workflow/internal/config"
 	"github.com/bborn/workflow/internal/db"
 	"github.com/bborn/workflow/internal/executor"
 	"github.com/bborn/workflow/internal/server"
-	"github.com/charmbracelet/log"
 )
+
+var version = "dev"
 
 func main() {
 	// Flags
@@ -31,6 +34,7 @@ func main() {
 		ReportTimestamp: true,
 		Prefix:          "taskd",
 	})
+	logger.Infof("taskd %s starting", version)
 
 	// Resolve paths
 	home, _ := os.UserHomeDir()

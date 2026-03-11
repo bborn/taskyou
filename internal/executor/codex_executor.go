@@ -11,8 +11,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/bborn/workflow/internal/db"
 	"github.com/charmbracelet/log"
+
+	"github.com/bborn/workflow/internal/db"
 )
 
 // CodexExecutor implements TaskExecutor for OpenAI's Codex CLI.
@@ -160,7 +161,7 @@ func (c *CodexExecutor) runCodex(ctx context.Context, task *db.Task, workDir, pr
 		task.ID, sessionID, task.Port, task.WorktreePath, envPrefix, dangerousFlag, resumeFlag, promptFile.Name())
 
 	// Create new window in task-daemon session
-	actualSession, tmuxErr := createTmuxWindow(daemonSession, windowName, workDir, script)
+	actualSession, tmuxErr := createTmuxWindow(daemonSession, windowName, workDir, script, c.executor.getProjectDir(task.Project))
 	if tmuxErr != nil {
 		c.logger.Error("tmux new-window failed", "error", tmuxErr, "session", daemonSession)
 		c.executor.logLine(task.ID, "error", fmt.Sprintf("Failed to create tmux window: %s", tmuxErr.Error()))
@@ -294,7 +295,7 @@ func (c *CodexExecutor) Suspend(taskID int64) bool {
 		return false
 	}
 
-	if err := proc.Signal(syscall.SIGTSTP); err != nil {
+	if err := sendSIGTSTP(proc); err != nil {
 		c.logger.Debug("Failed to suspend process", "pid", pid, "error", err)
 		return false
 	}
@@ -330,7 +331,7 @@ func (c *CodexExecutor) ResumeProcess(taskID int64) bool {
 		return false
 	}
 
-	if err := proc.Signal(syscall.SIGCONT); err != nil {
+	if err := sendSIGCONT(proc); err != nil {
 		c.logger.Debug("Failed to resume process", "pid", pid, "error", err)
 		return false
 	}

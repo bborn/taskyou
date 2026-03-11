@@ -8,21 +8,22 @@ import (
 	"os/exec"
 	"strings"
 
-	"github.com/bborn/workflow/internal/db"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/spf13/cobra"
+
+	"github.com/bborn/workflow/internal/db"
 )
 
 // PiRPCEvent represents a structured event from Pi in RPC mode
 type PiRPCEvent struct {
-	Type                  string                 `json:"type"`
-	Message               *PiMessage             `json:"message"`
+	Type                  string                   `json:"type"`
+	Message               *PiMessage               `json:"message"`
 	AssistantMessageEvent *PiAssistantMessageEvent `json:"assistantMessageEvent"`
-	ToolCallID            string                 `json:"toolCallId"`
-	ToolName              string                 `json:"toolName"`
-	Args                  map[string]interface{} `json:"args"`
-	Result                *PiToolResultContent   `json:"result"`
-	IsError               bool                   `json:"isError"`
+	ToolCallID            string                   `json:"toolCallId"`
+	ToolName              string                   `json:"toolName"`
+	Args                  map[string]interface{}   `json:"args"`
+	Result                *PiToolResultContent     `json:"result"`
+	IsError               bool                     `json:"isError"`
 }
 
 type PiMessage struct {
@@ -59,11 +60,11 @@ var piWrapperCmd = &cobra.Command{
 	Hidden: true,
 	Run: func(cmd *cobra.Command, args []string) {
 		taskID, _ := cmd.Flags().GetInt64("task-id")
-		
+
 		// Remaining args are passed to pi
 		// Check if --mode rpc is already present, if not add it
 		piArgs := []string{"--mode", "rpc"}
-		
+
 		// Add other args
 		// We need to be careful not to duplicate flags if they are already in args
 		for _, arg := range args {
@@ -115,10 +116,10 @@ func runPiWrapper(taskID int64, piArgs []string) error {
 	resultStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#8B5CF6"))          // Purple
 
 	scanner := bufio.NewScanner(stdout)
-	
+
 	// Text buffer for logging
 	var textBuffer strings.Builder
-	
+
 	// Flush buffer function
 	flushText := func() {
 		if textBuffer.Len() > 0 {
@@ -130,7 +131,7 @@ func runPiWrapper(taskID int64, piArgs []string) error {
 
 	for scanner.Scan() {
 		line := scanner.Bytes()
-		
+
 		var event PiRPCEvent
 		if err := json.Unmarshal(line, &event); err != nil {
 			// If not JSON, just print it (maybe raw output?)
@@ -147,14 +148,14 @@ func runPiWrapper(taskID int64, piArgs []string) error {
 					fmt.Println(userStyle.Render("\n> User"))
 					// Log to DB
 					database.AppendTaskLog(taskID, "system", "User input:")
-                    
-                    // User message content
-                    for _, content := range event.Message.Content {
-                        if content.Type == "text" {
-                            fmt.Println(content.Text)
+
+					// User message content
+					for _, content := range event.Message.Content {
+						if content.Type == "text" {
+							fmt.Println(content.Text)
 							database.AppendTaskLog(taskID, "question", content.Text)
-                        }
-                    }
+						}
+					}
 				} else if event.Message.Role == "assistant" {
 					fmt.Println(aiStyle.Render("\n> Pi"))
 				}
@@ -178,10 +179,10 @@ func runPiWrapper(taskID int64, piArgs []string) error {
 			toolName := event.ToolName
 			argsBytes, _ := json.Marshal(event.Args)
 			argsStr := string(argsBytes)
-			
+
 			display := fmt.Sprintf("\n[Tool Use] %s %s", toolName, argsStr)
 			fmt.Println(toolStyle.Render(display))
-			
+
 			// Log to DB
 			database.AppendTaskLog(taskID, "tool", fmt.Sprintf("Executing %s: %s", toolName, argsStr))
 
@@ -192,7 +193,7 @@ func runPiWrapper(taskID int64, piArgs []string) error {
 					if content.Type == "text" {
 						fmt.Println(resultStyle.Render("[Tool Result]"))
 						fmt.Println(content.Text)
-						
+
 						// Log to DB - truncate if too long?
 						// Executor usually logs full output, but maybe split into lines?
 						// AppendTaskLog handles single entry.

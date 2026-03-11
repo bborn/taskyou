@@ -4,10 +4,27 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/charmbracelet/lipgloss"
+
 	"github.com/bborn/workflow/internal/db"
 	"github.com/bborn/workflow/internal/github"
-	"github.com/charmbracelet/lipgloss"
 )
+
+// emptyColumnMessage returns a contextual message for empty columns.
+func emptyColumnMessage(status string) string {
+	switch status {
+	case db.StatusBacklog:
+		return "Press 'n' to create a task"
+	case db.StatusQueued:
+		return "Press 'x' to execute a task"
+	case db.StatusBlocked:
+		return "No tasks need input"
+	case db.StatusDone:
+		return "Completed tasks appear here"
+	default:
+		return "No tasks"
+	}
+}
 
 // KanbanColumn represents a column in the kanban board.
 type KanbanColumn struct {
@@ -27,7 +44,8 @@ type KanbanBoard struct {
 	columns           []KanbanColumn
 	selectedCol       int
 	selectedRow       int
-	scrollOffsets     []int // Scroll offset per column
+	scrollOffsets     []int        // Scroll offset per column
+	collapsedColumns  map[int]bool // Columns that are collapsed (show only header)
 	width             int
 	height            int
 	allTasks          []*db.Task               // All tasks
@@ -50,6 +68,7 @@ func NewKanbanBoard(width, height int) *KanbanBoard {
 	return &KanbanBoard{
 		columns:          columns,
 		scrollOffsets:    make([]int, len(columns)),
+		collapsedColumns: make(map[int]bool),
 		width:            width,
 		height:           height,
 		prInfo:           make(map[int64]*github.PRInfo),
@@ -82,6 +101,8 @@ func (k *KanbanBoard) RefreshTheme() {
 // SetTasks updates the tasks in the kanban board.
 func (k *KanbanBoard) SetTasks(tasks []*db.Task) {
 	var selectedID int64
+	prevCol := k.selectedCol
+	prevRow := k.selectedRow
 	if selected := k.SelectedTask(); selected != nil {
 		selectedID = selected.ID
 	}
@@ -98,7 +119,15 @@ func (k *KanbanBoard) SetTasks(tasks []*db.Task) {
 	}
 
 	if selectedID != 0 {
-		k.SelectTask(selectedID)
+		// Try to find the task in its (possibly new) position
+		found := k.SelectTask(selectedID)
+		if found && k.selectedCol != prevCol {
+			// Task moved to a different column (e.g. after permission grant).
+			// Stay in the original column and select the next task there.
+			k.selectedCol = prevCol
+			k.selectedRow = prevRow
+			k.clampSelection()
+		}
 	}
 }
 
@@ -185,6 +214,67 @@ func (k *KanbanBoard) HasOriginColumn() bool {
 	return k.originColumn >= 0
 }
 
+// IsColumnCollapsed returns true if the column at the given index is collapsed.
+func (k *KanbanBoard) IsColumnCollapsed(colIdx int) bool {
+	if k.collapsedColumns == nil {
+		return false
+	}
+	return k.collapsedColumns[colIdx]
+}
+
+// ToggleColumnCollapse toggles the collapsed state of a column.
+// Cannot collapse the currently selected column.
+func (k *KanbanBoard) ToggleColumnCollapse(colIdx int) {
+	if colIdx < 0 || colIdx >= len(k.columns) {
+		return
+	}
+	if k.collapsedColumns == nil {
+		k.collapsedColumns = make(map[int]bool)
+	}
+	if k.collapsedColumns[colIdx] {
+		// Uncollapse
+		delete(k.collapsedColumns, colIdx)
+	} else {
+		// Collapse - but move selection away first if needed
+		if k.selectedCol == colIdx {
+			k.moveToNextVisibleColumn(colIdx)
+		}
+		k.collapsedColumns[colIdx] = true
+	}
+}
+
+// visibleColumnCount returns the number of non-collapsed columns.
+func (k *KanbanBoard) visibleColumnCount() int {
+	count := 0
+	for i := range k.columns {
+		if !k.IsColumnCollapsed(i) {
+			count++
+		}
+	}
+	return count
+}
+
+// moveToNextVisibleColumn moves selection to the nearest non-collapsed column.
+func (k *KanbanBoard) moveToNextVisibleColumn(fromCol int) {
+	// Try right first, then left
+	for i := fromCol + 1; i < len(k.columns); i++ {
+		if !k.IsColumnCollapsed(i) {
+			k.selectedCol = i
+			k.clampSelection()
+			k.ensureSelectedVisible()
+			return
+		}
+	}
+	for i := fromCol - 1; i >= 0; i-- {
+		if !k.IsColumnCollapsed(i) {
+			k.selectedCol = i
+			k.clampSelection()
+			k.ensureSelectedVisible()
+			return
+		}
+	}
+}
+
 // distributeTasksToColumns distributes tasks to their respective columns.
 func (k *KanbanBoard) distributeTasksToColumns() {
 	// Clear all columns
@@ -262,25 +352,37 @@ func splitPinnedTasks(tasks []*db.Task) (pinned []*db.Task, unpinned []*db.Task)
 
 // SetSize updates the board dimensions.
 func (k *KanbanBoard) SetSize(width, height int) {
+	heightChanged := k.height != height
 	k.width = width
 	k.height = height
-}
-
-// MoveLeft moves selection to the left column.
-func (k *KanbanBoard) MoveLeft() {
-	if k.selectedCol > 0 {
-		k.selectedCol--
-		k.clampSelection()
+	// When height changes (e.g. quickview appearing/disappearing),
+	// recalculate scroll offsets so the selected task stays visible
+	if heightChanged {
 		k.ensureSelectedVisible()
 	}
 }
 
-// MoveRight moves selection to the right column.
+// MoveLeft moves selection to the left column, skipping collapsed columns.
+func (k *KanbanBoard) MoveLeft() {
+	for i := k.selectedCol - 1; i >= 0; i-- {
+		if !k.IsColumnCollapsed(i) {
+			k.selectedCol = i
+			k.clampSelection()
+			k.ensureSelectedVisible()
+			return
+		}
+	}
+}
+
+// MoveRight moves selection to the right column, skipping collapsed columns.
 func (k *KanbanBoard) MoveRight() {
-	if k.selectedCol < len(k.columns)-1 {
-		k.selectedCol++
-		k.clampSelection()
-		k.ensureSelectedVisible()
+	for i := k.selectedCol + 1; i < len(k.columns); i++ {
+		if !k.IsColumnCollapsed(i) {
+			k.selectedCol = i
+			k.clampSelection()
+			k.ensureSelectedVisible()
+			return
+		}
 	}
 }
 
@@ -473,6 +575,25 @@ func (k *KanbanBoard) SelectTask(id int64) bool {
 	return false
 }
 
+// IsEmpty returns true if all columns have no tasks.
+func (k *KanbanBoard) IsEmpty() bool {
+	for _, col := range k.columns {
+		if len(col.Tasks) > 0 {
+			return false
+		}
+	}
+	return true
+}
+
+// TotalTaskCount returns the total number of tasks across all columns.
+func (k *KanbanBoard) TotalTaskCount() int {
+	count := 0
+	for _, col := range k.columns {
+		count += len(col.Tasks)
+	}
+	return count
+}
+
 // View renders the kanban board.
 func (k *KanbanBoard) View() string {
 	if k.width < 40 || k.height < 10 {
@@ -487,13 +608,27 @@ func (k *KanbanBoard) View() string {
 	return k.viewDesktop()
 }
 
+// collapsedColumnWidth is the fixed width for collapsed column strips.
+const collapsedColumnWidth = 3
+
 // viewDesktop renders the full kanban board with all columns side by side.
 func (k *KanbanBoard) viewDesktop() string {
-	// Calculate column width (subtract borders and gaps)
 	numCols := len(k.columns)
+
+	// Count collapsed columns and their total width
+	collapsedCount := 0
+	for i := range k.columns {
+		if k.IsColumnCollapsed(i) {
+			collapsedCount++
+		}
+	}
+	expandedCount := numCols - collapsedCount
+
+	// Calculate column width for expanded columns
 	// Account for borders (2 chars per column) and gaps between columns (1 char each)
-	availableWidth := k.width - (numCols * 2) - (numCols - 1)
-	colWidth := availableWidth / numCols
+	collapsedTotalWidth := collapsedCount * (collapsedColumnWidth + 2 + 1) // width + borders + gap
+	availableWidth := k.width - (expandedCount * 2) - (numCols - 1) - collapsedTotalWidth
+	colWidth := availableWidth / expandedCount
 	if colWidth < 20 {
 		colWidth = 20
 	}
@@ -506,6 +641,13 @@ func (k *KanbanBoard) viewDesktop() string {
 	var columnViews []string
 	for colIdx, col := range k.columns {
 		isSelectedCol := colIdx == k.selectedCol
+
+		// Render collapsed column as a thin vertical strip
+		if k.IsColumnCollapsed(colIdx) {
+			columnView := k.renderCollapsedColumn(colIdx, col, colHeight)
+			columnViews = append(columnViews, columnView)
+			continue
+		}
 
 		// Colored header bar at top of column
 		// Width matches the column content width (will be inside the border)
@@ -633,7 +775,7 @@ func (k *KanbanBoard) viewDesktop() string {
 			taskViews = append(taskViews, scrollIndicatorStyle.Render(indicatorText))
 		}
 
-		// Empty column placeholder
+		// Empty column placeholder with contextual message
 		if len(col.Tasks) == 0 {
 			emptyStyle := lipgloss.NewStyle().
 				Foreground(ColorMuted).
@@ -641,7 +783,8 @@ func (k *KanbanBoard) viewDesktop() string {
 				Align(lipgloss.Center).
 				Italic(true).
 				MarginTop(1)
-			taskViews = append(taskViews, emptyStyle.Render("No tasks"))
+			emptyMsg := emptyColumnMessage(col.Status)
+			taskViews = append(taskViews, emptyStyle.Render(emptyMsg))
 		}
 
 		// Combine tasks with spacing
@@ -685,6 +828,33 @@ func (k *KanbanBoard) viewDesktop() string {
 	board := lipgloss.JoinHorizontal(lipgloss.Top, parts...)
 
 	return board
+}
+
+// renderCollapsedColumn renders a collapsed column as a thin vertical strip
+// showing the column icon and task count vertically.
+func (k *KanbanBoard) renderCollapsedColumn(colIdx int, col KanbanColumn, colHeight int) string {
+	normalBorder, _ := GetThemeBorderColors()
+
+	// Build vertical content: icon on top, then count
+	var lines []string
+	lines = append(lines, col.Icon)
+	countStr := fmt.Sprintf("%d", len(col.Tasks))
+	lines = append(lines, countStr)
+
+	content := lipgloss.JoinVertical(lipgloss.Center, lines...)
+
+	contentStyle := lipgloss.NewStyle().
+		Width(collapsedColumnWidth).
+		Height(colHeight).
+		Foreground(col.Color).
+		Align(lipgloss.Center).
+		AlignVertical(lipgloss.Center)
+
+	colStyle := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(normalBorder)
+
+	return colStyle.Render(contentStyle.Render(content))
 }
 
 // viewMobile renders a single-column view with tab navigation for narrow terminals.
@@ -819,7 +989,7 @@ func (k *KanbanBoard) viewMobile() string {
 		taskViews = append(taskViews, scrollIndicatorStyle.Render(indicatorText))
 	}
 
-	// Empty column placeholder
+	// Empty column placeholder with contextual message
 	if len(col.Tasks) == 0 {
 		emptyStyle := lipgloss.NewStyle().
 			Foreground(ColorMuted).
@@ -827,7 +997,8 @@ func (k *KanbanBoard) viewMobile() string {
 			Align(lipgloss.Center).
 			Italic(true).
 			MarginTop(1)
-		taskViews = append(taskViews, emptyStyle.Render("No tasks"))
+		emptyMsg := emptyColumnMessage(col.Status)
+		taskViews = append(taskViews, emptyStyle.Render(emptyMsg))
 	}
 
 	// Combine tasks with spacing
@@ -1083,8 +1254,13 @@ func (k *KanbanBoard) renderTaskCard(task *db.Task, width int, isSelected bool, 
 }
 
 // FocusColumn moves selection to a specific column by index.
+// If the column is collapsed, it will be uncollapsed first.
 func (k *KanbanBoard) FocusColumn(colIdx int) {
 	if colIdx >= 0 && colIdx < len(k.columns) {
+		// Uncollapse the column if it's collapsed
+		if k.IsColumnCollapsed(colIdx) {
+			delete(k.collapsedColumns, colIdx)
+		}
 		k.selectedCol = colIdx
 		k.clampSelection()
 		k.ensureSelectedVisible()
@@ -1222,29 +1398,60 @@ func (k *KanbanBoard) HandleClick(x, y int) *db.Task {
 
 // handleClickDesktop handles clicks in desktop (multi-column) mode.
 func (k *KanbanBoard) handleClickDesktop(x, y int) *db.Task {
-	// Calculate column layout (same as viewDesktop())
+	// Calculate column layout (same as viewDesktop()) accounting for collapsed columns
 	numCols := len(k.columns)
-	availableWidth := k.width - (numCols * 2) - (numCols - 1)
-	colWidth := availableWidth / numCols
+	collapsedCount := 0
+	for i := range k.columns {
+		if k.IsColumnCollapsed(i) {
+			collapsedCount++
+		}
+	}
+	expandedCount := numCols - collapsedCount
+
+	collapsedTotalWidth := collapsedCount * (collapsedColumnWidth + 2 + 1)
+	availableWidth := k.width - (expandedCount * 2) - (numCols - 1) - collapsedTotalWidth
+	colWidth := availableWidth / expandedCount
 	if colWidth < 20 {
 		colWidth = 20
 	}
 
-	// Each column has: 1 border + colWidth content + 1 border = colWidth + 2
-	// Columns are joined with no gap between them in lipgloss.JoinHorizontal
-	colTotalWidth := colWidth + 2
+	// Determine which column was clicked by walking column positions
+	currentX := 0
+	colIdx := -1
+	for i := range k.columns {
+		var thisColTotalWidth int
+		if k.IsColumnCollapsed(i) {
+			thisColTotalWidth = collapsedColumnWidth + 2
+		} else {
+			thisColTotalWidth = colWidth + 2
+		}
 
-	// Determine which column was clicked
-	colIdx := x / colTotalWidth
-	if colIdx >= numCols {
-		colIdx = numCols - 1
+		if x >= currentX && x < currentX+thisColTotalWidth {
+			colIdx = i
+			break
+		}
+		currentX += thisColTotalWidth + 1 // +1 for gap
 	}
+
 	if colIdx < 0 {
 		return nil
 	}
 
+	// If clicked on a collapsed column, uncollapse it
+	if k.IsColumnCollapsed(colIdx) {
+		k.FocusColumn(colIdx) // This uncollapses and focuses
+		return nil
+	}
+
 	// Check if click is within column bounds (not on border)
-	colStartX := colIdx * colTotalWidth
+	colStartX := 0
+	for i := 0; i < colIdx; i++ {
+		if k.IsColumnCollapsed(i) {
+			colStartX += collapsedColumnWidth + 2 + 1
+		} else {
+			colStartX += colWidth + 2 + 1
+		}
+	}
 	relX := x - colStartX
 	if relX < 1 || relX > colWidth {
 		// Clicked on border
@@ -1268,8 +1475,8 @@ func (k *KanbanBoard) handleClickDesktop(x, y int) *db.Task {
 
 	// Calculate which task was clicked
 	col := k.columns[colIdx]
-	colHeight := k.height
-	maxTasks := (colHeight - 3) / taskCardHeight // -3 for header bar and minimal padding
+	colHeight := k.height - 2                    // -2 for column borders (top + bottom)
+	maxTasks := (colHeight - 3) / taskCardHeight // -3 for header bar and scroll indicators
 	if maxTasks < 1 {
 		maxTasks = 1
 	}

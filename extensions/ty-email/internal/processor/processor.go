@@ -21,6 +21,7 @@ type Processor struct {
 	state          *state.DB
 	logger         *slog.Logger
 	allowedSenders []string
+	dangerous      bool
 }
 
 // Config holds processor configuration.
@@ -28,6 +29,7 @@ type Config struct {
 	DefaultProject string
 	FromAddress    string   // Reply-from address
 	AllowedSenders []string // Only process emails from these addresses
+	Dangerous      bool     // Enable dangerous mode for created tasks
 }
 
 // New creates a new processor.
@@ -43,8 +45,10 @@ func New(
 		logger = slog.Default()
 	}
 	var allowed []string
+	var dangerous bool
 	if cfg != nil {
 		allowed = cfg.AllowedSenders
+		dangerous = cfg.Dangerous
 	}
 	return &Processor{
 		adapter:        adp,
@@ -53,6 +57,7 @@ func New(
 		state:          st,
 		logger:         logger,
 		allowedSenders: allowed,
+		dangerous:      dangerous,
 	}
 }
 
@@ -105,17 +110,33 @@ func (p *Processor) ProcessEmail(ctx context.Context, email *adapter.Email) erro
 		}
 	}
 
-	// Get current tasks for context
-	tasks, err := p.bridge.ListTasks("")
-	if err != nil {
-		p.logger.Warn("failed to list tasks for context", "error", err)
-		tasks = []bridge.Task{}
-	}
+	// For new emails (not part of a known TaskYou thread), skip the LLM and create
+	// a task directly. This saves API tokens for the common case.
+	// Only use LLM when the email is part of a known TaskYou thread (threadTaskID != nil),
+	// as we need LLM to determine if it's providing input, querying status, etc.
+	var action *classifier.Action
+	if threadTaskID == nil {
+		p.logger.Info("skipping LLM classification for email (no matching TaskYou thread)")
+		action = &classifier.Action{
+			Type:       classifier.ActionCreate,
+			Title:      strings.TrimSpace(email.Subject),
+			Body:       strings.TrimSpace(stripQuotedText(email.Body)),
+			Confidence: 1.0,
+			Reasoning:  "new email from allowed sender - created task directly without LLM",
+			Reply:      fmt.Sprintf("Got it! I'll create a task: %s", email.Subject),
+		}
+	} else {
+		// Thread reply or ambiguous case - use LLM
+		tasks, err := p.bridge.ListTasks("")
+		if err != nil {
+			p.logger.Warn("failed to list tasks for context", "error", err)
+			tasks = []bridge.Task{}
+		}
 
-	// Classify the email
-	action, err := p.classifier.Classify(ctx, email, bridge.ToClassifierTasks(tasks), threadTaskID)
-	if err != nil {
-		return fmt.Errorf("failed to classify email: %w", err)
+		action, err = p.classifier.Classify(ctx, email, bridge.ToClassifierTasks(tasks), threadTaskID)
+		if err != nil {
+			return fmt.Errorf("failed to classify email: %w", err)
+		}
 	}
 
 	p.logger.Info("classified email",
@@ -170,8 +191,17 @@ func (p *Processor) ProcessEmail(ctx context.Context, email *adapter.Email) erro
 			subject = "Re: " + subject
 		}
 
+		// Use the first To address from the inbound email as the reply From address.
+		// This ensures replies come FROM the +ty alias (e.g., user+ty@gmail.com)
+		// so that when the user replies back, routing is maintained.
+		replyFrom := ""
+		if len(email.To) > 0 {
+			replyFrom = email.To[0]
+		}
+
 		_, err = p.state.QueueOutbound(
 			email.From,
+			replyFrom,
 			subject,
 			replyText,
 			taskID,
@@ -183,14 +213,23 @@ func (p *Processor) ProcessEmail(ctx context.Context, email *adapter.Email) erro
 	}
 
 	// Mark email as processed in the adapter (move to folder, add label, etc.)
-	if err := p.adapter.MarkProcessed(ctx, email.ID); err != nil {
-		p.logger.Warn("failed to mark email as processed in adapter", "error", err)
+	// Use ProviderID (e.g., Gmail API ID) if available; fall back to ID (Message-ID header).
+	adapterID := email.ProviderID
+	if adapterID == "" {
+		adapterID = email.ID
+	}
+	if err := p.adapter.MarkProcessed(ctx, adapterID); err != nil {
+		p.logger.Warn("failed to mark email as processed in adapter", "id", adapterID, "error", err)
 	}
 
 	return nil
 }
 
 func (p *Processor) handleCreate(ctx context.Context, action *classifier.Action) (*int64, string, error) {
+	// Apply dangerous mode from config
+	if p.dangerous {
+		action.Dangerous = true
+	}
 	result, err := p.bridge.CreateTask(action)
 	if err != nil {
 		return nil, "", fmt.Errorf("failed to create task: %w", err)
@@ -295,6 +334,7 @@ func (p *Processor) SendPendingReplies(ctx context.Context) error {
 	for _, e := range emails {
 		outbound := &adapter.OutboundEmail{
 			To:        []string{e.To},
+			From:      e.From,
 			Subject:   e.Subject,
 			Body:      e.Body,
 			InReplyTo: e.InReplyTo,
@@ -316,6 +356,45 @@ func (p *Processor) SendPendingReplies(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+// stripQuotedText removes quoted reply text and email signatures from a body.
+// This reduces token usage when sending email content to the classifier.
+func stripQuotedText(body string) string {
+	var lines []string
+	for _, line := range strings.Split(body, "\n") {
+		trimmed := strings.TrimSpace(line)
+
+		// Stop at common signature markers
+		if trimmed == "--" || trimmed == "-- " {
+			break
+		}
+
+		// Stop at common reply markers
+		if strings.HasPrefix(trimmed, "On ") && strings.HasSuffix(trimmed, "wrote:") {
+			break
+		}
+		if strings.HasPrefix(trimmed, "---------- Forwarded message") {
+			break
+		}
+
+		// Skip quoted lines (lines starting with ">")
+		if strings.HasPrefix(trimmed, ">") {
+			continue
+		}
+
+		lines = append(lines, line)
+	}
+
+	result := strings.TrimSpace(strings.Join(lines, "\n"))
+
+	// Truncate to ~2000 chars to limit token usage
+	const maxBodyLen = 2000
+	if len(result) > maxBodyLen {
+		result = result[:maxBodyLen] + "\n[truncated]"
+	}
+
+	return result
 }
 
 // CheckBlockedTasks checks for blocked tasks and sends notification emails.
@@ -346,7 +425,7 @@ func (p *Processor) CheckBlockedTasks(ctx context.Context, notifyAddress string)
 			task.ID, task.Body, output)
 
 		taskID := task.ID
-		_, err = p.state.QueueOutbound(notifyAddress, subject, body, &taskID, threadID)
+		_, err = p.state.QueueOutbound(notifyAddress, "", subject, body, &taskID, threadID)
 		if err != nil {
 			p.logger.Error("failed to queue blocked notification", "task", task.ID, "error", err)
 		}

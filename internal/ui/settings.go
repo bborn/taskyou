@@ -8,10 +8,11 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/bborn/workflow/internal/db"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/huh"
 	"github.com/charmbracelet/lipgloss"
+
+	"github.com/bborn/workflow/internal/db"
 )
 
 // SettingsModel represents the settings view.
@@ -39,6 +40,7 @@ type SettingsModel struct {
 	projectFormAliases         string
 	projectFormInstructions    string
 	projectFormClaudeConfigDir string
+	projectFormUseWorktrees    bool
 
 	// Task Types
 	taskTypes        []*db.TaskType
@@ -184,7 +186,7 @@ func (m *SettingsModel) Update(msg tea.Msg) (*SettingsModel, tea.Cmd) {
 			// New item (projects or task types section)
 			if m.section == 1 {
 				// For new project, first get name, then browse for path
-				return m.showProjectForm(&db.Project{})
+				return m.showProjectForm(&db.Project{UseWorktrees: true})
 			} else if m.section == 2 {
 				return m.showTaskTypeForm(nil)
 			}
@@ -270,6 +272,7 @@ func (m *SettingsModel) showProjectForm(project *db.Project) (*SettingsModel, te
 	m.projectFormAliases = project.Aliases
 	m.projectFormInstructions = project.Instructions
 	m.projectFormClaudeConfigDir = project.ClaudeConfigDir
+	m.projectFormUseWorktrees = project.UseWorktrees
 
 	title := "New Project"
 	description := "You'll choose a directory next"
@@ -308,6 +311,11 @@ func (m *SettingsModel) showProjectForm(project *db.Project) (*SettingsModel, te
 				Description("Overrides CLAUDE_CONFIG_DIR for this project").
 				Placeholder("~/.claude-other-account").
 				Value(&m.projectFormClaudeConfigDir),
+			huh.NewConfirm().
+				Key("use_worktrees").
+				Title("Use Git Worktrees").
+				Description("Isolate tasks in git worktrees. Disable for non-git projects.").
+				Value(&m.projectFormUseWorktrees),
 		).Title(title).Description(description),
 	).WithTheme(huh.ThemeDracula()).
 		WithWidth(modalWidth - 6).
@@ -517,12 +525,15 @@ func (m *SettingsModel) saveProject() (*SettingsModel, tea.Cmd) {
 		return m, nil
 	}
 
+	useWorktrees := m.projectFormUseWorktrees
+
 	// For new projects without a path, open file browser
 	if m.editProject.ID == 0 && m.editProject.Path == "" {
 		m.editProject.Name = name
 		m.editProject.Aliases = aliases
 		m.editProject.Instructions = instructions
 		m.editProject.ClaudeConfigDir = configDir
+		m.editProject.UseWorktrees = useWorktrees
 		m.editingProject = false
 		m.projectForm = nil
 		m.browsing = true
@@ -543,30 +554,41 @@ func (m *SettingsModel) saveProject() (*SettingsModel, tea.Cmd) {
 			return m, nil
 		}
 
-		if isGitRepo(path) {
-			// Existing git repo - check for nested repos
-			nested := findNestedGitRepos(path)
-			if len(nested) > 0 {
-				m.err = fmt.Errorf("directory contains %d nested git repo(s) - select a single repo instead", len(nested))
-				return m, nil
+		if useWorktrees {
+			if isGitRepo(path) {
+				// Existing git repo - check for nested repos
+				nested := findNestedGitRepos(path)
+				if len(nested) > 0 {
+					m.err = fmt.Errorf("directory contains %d nested git repo(s) - select a single repo instead", len(nested))
+					return m, nil
+				}
+				// Valid existing git repo - ensure it has at least one commit for worktrees
+				if err := ensureGitRepoHasCommit(path); err != nil {
+					m.err = fmt.Errorf("failed to initialize git commit: %w", err)
+					return m, nil
+				}
+			} else {
+				// Not a git repo - initialize it (required for worktree isolation)
+				if err := initGitRepo(path); err != nil {
+					m.err = fmt.Errorf("failed to initialize git: %w", err)
+					return m, nil
+				}
 			}
-			// Valid existing git repo - ensure it has at least one commit for worktrees
-			if err := ensureGitRepoHasCommit(path); err != nil {
-				m.err = fmt.Errorf("failed to initialize git commit: %w", err)
+		}
+		// When useWorktrees is false, skip git initialization entirely
+	} else {
+		if useWorktrees {
+			// Path doesn't exist - create and initialize git repo
+			if err := initGitRepo(path); err != nil {
+				m.err = fmt.Errorf("failed to create project: %w", err)
 				return m, nil
 			}
 		} else {
-			// Not a git repo - initialize it
-			if err := initGitRepo(path); err != nil {
-				m.err = fmt.Errorf("failed to initialize git: %w", err)
+			// Path doesn't exist - just create the directory
+			if err := os.MkdirAll(path, 0755); err != nil {
+				m.err = fmt.Errorf("failed to create project directory: %w", err)
 				return m, nil
 			}
-		}
-	} else {
-		// Path doesn't exist - create and initialize
-		if err := initGitRepo(path); err != nil {
-			m.err = fmt.Errorf("failed to create project: %w", err)
-			return m, nil
 		}
 	}
 
@@ -574,6 +596,7 @@ func (m *SettingsModel) saveProject() (*SettingsModel, tea.Cmd) {
 	m.editProject.Aliases = aliases
 	m.editProject.Instructions = instructions
 	m.editProject.ClaudeConfigDir = configDir
+	m.editProject.UseWorktrees = useWorktrees
 
 	if m.editProject.ID == 0 {
 		err = m.db.CreateProject(m.editProject)

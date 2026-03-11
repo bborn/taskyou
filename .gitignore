@@ -11,7 +11,8 @@
 .env.local
 
 # Claude Code
-.claude/
+.claude/*
+!.claude/settings.json
 .crush/
 
 # Archives
@@ -29,14 +30,21 @@ bin/
 *.out
 .task-worktrees
 
-# Build output
+# Build / release output
 /task
 /taskd
+dist/
+coverage.out
+coverage.html
 
 # Database
 *.db
 
 # Tmux
 tmux-*.log
+.playwright-mcp/.mcp.json
+
+# Spotlight mode
+.spotlight-active
 .playwright-mcp/
 .mcp.json

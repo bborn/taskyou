@@ -9,13 +9,14 @@ import (
 	"time"
 	"unicode"
 
-	"github.com/bborn/workflow/internal/autocomplete"
-	"github.com/bborn/workflow/internal/db"
 	"github.com/charmbracelet/bubbles/cursor"
 	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+
+	"github.com/bborn/workflow/internal/autocomplete"
+	"github.com/bborn/workflow/internal/db"
 )
 
 // FormField represents the currently focused field.
@@ -53,10 +54,14 @@ type FormModel struct {
 	project            string
 	projectIdx         int
 	projects           []string
+	projectSearchMode  bool     // true when typing to search/filter projects
+	projectSearchQuery string   // current search query
+	projectFiltered    []string // filtered project list (fuzzy matched)
+	projectFilteredIdx int      // selected index in filtered list
 	taskType           string
 	typeIdx            int
 	types              []string
-	executor           string   // "claude", "codex", "gemini"
+	executor           string // "claude", "codex", "gemini"
 	executorIdx        int
 	executors          []string
 	availableExecutors []string // Original list of available executors (for rebuilding when project changes)
@@ -86,6 +91,9 @@ type FormModel struct {
 
 	// Cancel confirmation state
 	showCancelConfirm bool
+
+	// Progressive disclosure: hide advanced fields for simpler first experience
+	showAdvanced bool
 }
 
 // Autocomplete message types for async LLM suggestions
@@ -199,6 +207,7 @@ func NewEditFormModel(database *db.DB, task *db.Task, width, height int, availab
 		autocompleteEnabled: autocompleteEnabled,
 		taskRefAutocomplete: NewTaskRefAutocompleteModel(database, width-24),
 		attachmentCursor:    -1,
+		showAdvanced:        true, // Always show all fields when editing
 	}
 
 	// Load task types from database
@@ -289,16 +298,25 @@ func NewFormModel(database *db.DB, width, height int, workingDir string, availab
 		autocompleteEnabled = false
 	}
 
+	// Load show_advanced preference (default: true)
+	showAdvanced := true
+	if database != nil {
+		if setting, _ := database.GetSetting("show_advanced"); setting == "false" {
+			showAdvanced = false
+		}
+	}
+
 	// Create form model first (executors will be set after project is determined)
 	m := &FormModel{
 		db:                  database,
 		width:               width,
 		height:              height,
-		focused:             FieldProject,
+		focused:             FieldProject, // Project first for immediate context
 		autocompleteSvc:     autocompleteSvc,
 		autocompleteEnabled: autocompleteEnabled,
 		taskRefAutocomplete: NewTaskRefAutocompleteModel(database, width-24),
 		attachmentCursor:    -1,
+		showAdvanced:        showAdvanced, // Load from user preference
 	}
 
 	// Load task types from database
@@ -325,30 +343,30 @@ func NewFormModel(database *db.DB, width, height int, workingDir string, availab
 		}
 	}
 
-	// Default to last used project, or fall back to 'personal'
+	// Default project priority:
+	// 1. Last used project (always wins if available)
+	// 2. Detect from working directory
+	// 3. Fall back to 'personal'
 	m.project = "personal"
+
+	// Try detecting from working directory first
+	if workingDir != "" && database != nil {
+		if proj, err := database.GetProjectByPath(workingDir); err == nil && proj != nil {
+			m.project = proj.Name
+		}
+	}
+
+	// Last used project always takes priority
 	if database != nil {
 		if lastProject, err := database.GetLastUsedProject(); err == nil && lastProject != "" {
 			m.project = lastProject
 		}
 	}
+
 	for i, p := range m.projects {
 		if p == m.project {
 			m.projectIdx = i
 			break
-		}
-	}
-
-	// Detect project from working directory (overrides default)
-	if workingDir != "" && database != nil {
-		if proj, err := database.GetProjectByPath(workingDir); err == nil && proj != nil {
-			m.project = proj.Name
-			for i, p := range m.projects {
-				if p == proj.Name {
-					m.projectIdx = i
-					break
-				}
-			}
 		}
 	}
 
@@ -372,14 +390,19 @@ func NewFormModel(database *db.DB, width, height int, workingDir string, availab
 
 	// Title input
 	m.titleInput = textinput.New()
-	m.titleInput.Placeholder = "What needs to be done? (optional if details provided)"
+	m.titleInput.Placeholder = "What needs to be done?"
 	m.titleInput.Prompt = ""
 	m.titleInput.Cursor.SetMode(cursor.CursorStatic)
 	m.titleInput.Width = width - 24
+	// Focus title only if project field is not visible (showAdvanced is false)
+	if !m.showAdvanced {
+		m.focused = FieldTitle
+		m.titleInput.Focus()
+	}
 
 	// Body textarea
 	m.bodyInput = textarea.New()
-	m.bodyInput.Placeholder = "Details (AI generates title if left empty above)"
+	m.bodyInput.Placeholder = "Add more details, or leave empty (optional)"
 	m.bodyInput.Prompt = ""
 	m.bodyInput.ShowLineNumbers = false
 	m.bodyInput.Cursor.SetMode(cursor.CursorStatic)
@@ -492,6 +515,61 @@ func (m *FormModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
+		// Handle project search mode when active
+		if m.projectSearchMode && m.focused == FieldProject {
+			switch msg.String() {
+			case "esc":
+				m.exitProjectSearch()
+				return m, nil
+			case "enter", "tab":
+				m.selectProjectFromSearch()
+				if msg.String() == "tab" {
+					m.focusNext()
+				}
+				return m, nil
+			case "up", "ctrl+p":
+				if m.projectFilteredIdx > 0 {
+					m.projectFilteredIdx--
+				}
+				return m, nil
+			case "down", "ctrl+n":
+				if m.projectFilteredIdx < len(m.projectFiltered)-1 {
+					m.projectFilteredIdx++
+				}
+				return m, nil
+			case "backspace", "ctrl+h":
+				if len(m.projectSearchQuery) > 0 {
+					m.projectSearchQuery = m.projectSearchQuery[:len(m.projectSearchQuery)-1]
+					m.filterProjects()
+				} else {
+					m.exitProjectSearch()
+				}
+				return m, nil
+			case "ctrl+c":
+				m.cancelled = true
+				return m, nil
+			case "ctrl+w":
+				// Delete word backward
+				m.projectSearchQuery = ""
+				m.filterProjects()
+				return m, nil
+			case "ctrl+u":
+				// Clear line
+				m.projectSearchQuery = ""
+				m.filterProjects()
+				return m, nil
+			default:
+				key := msg.String()
+				// Only accept printable single characters
+				if len(key) == 1 && key[0] >= 32 && key[0] < 127 {
+					m.projectSearchQuery += key
+					m.filterProjects()
+					return m, nil
+				}
+			}
+			return m, nil
+		}
+
 		// Handle task reference autocomplete when active
 		if m.showTaskRefAutocomplete && m.taskRefAutocomplete != nil && m.taskRefAutocomplete.HasResults() {
 			switch msg.String() {
@@ -571,6 +649,27 @@ func (m *FormModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 
+		case "ctrl+e":
+			// Toggle advanced fields (progressive disclosure)
+			m.showAdvanced = !m.showAdvanced
+			// Save preference
+			if m.db != nil {
+				if m.showAdvanced {
+					m.db.SetSetting("show_advanced", "true")
+				} else {
+					m.db.SetSetting("show_advanced", "false")
+				}
+			}
+			// If collapsing and currently on a hidden field, move to Title
+			if !m.showAdvanced && !m.isFieldVisible(m.focused) {
+				m.blurAll()
+				m.focused = FieldTitle
+				m.focusCurrent()
+			}
+			// Recalculate body height since available space changes with mode
+			m.updateBodyHeight()
+			return m, nil
+
 		case "ctrl+s":
 			// Submit from anywhere
 			m.parseAttachments()
@@ -601,8 +700,13 @@ func (m *FormModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.focused == FieldBody {
 				break
 			}
-			// On last field, submit
-			if m.focused == FieldExecutor {
+			// On project field, enter opens search mode
+			if m.focused == FieldProject {
+				m.enterProjectSearch()
+				return m, nil
+			}
+			// On last visible field, submit
+			if m.isLastVisibleField() {
 				m.parseAttachments()
 				m.submitted = true
 				return m, nil
@@ -687,12 +791,29 @@ func (m *FormModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 
+		case "/":
+			// Slash to enter project search mode when on project field
+			if m.focused == FieldProject {
+				m.enterProjectSearch()
+				return m, nil
+			}
+
 		default:
 			if m.handleAttachmentRemovalKey(msg) {
 				return m, nil
 			}
-			// Type-to-select for selector fields
-			if m.focused == FieldProject || m.focused == FieldType || m.focused == FieldExecutor {
+			// Project field: any letter enters search mode
+			if m.focused == FieldProject {
+				key := msg.String()
+				if len(key) == 1 && key[0] >= 32 && key[0] < 127 {
+					m.enterProjectSearch()
+					m.projectSearchQuery = key
+					m.filterProjects()
+					return m, nil
+				}
+			}
+			// Type-to-select for other selector fields
+			if m.focused == FieldType || m.focused == FieldExecutor {
 				key := msg.String()
 				if len(key) == 1 && unicode.IsLetter(rune(key[0])) {
 					m.selectByPrefix(strings.ToLower(key))
@@ -860,19 +981,85 @@ func (m *FormModel) acceptGhostText() {
 	m.ghostFullText = ""
 }
 
-func (m *FormModel) selectByPrefix(prefix string) {
-	switch m.focused {
-	case FieldProject:
-		for i, p := range m.projects {
-			if strings.HasPrefix(strings.ToLower(p), prefix) {
-				m.projectIdx = i
-				m.project = p
-				m.loadLastTaskTypeForProject()
-				m.rebuildExecutorListForProject() // Re-sort by usage for new project
-				m.loadLastExecutorForProject()
-				return
+// enterProjectSearch activates the project search mode.
+func (m *FormModel) enterProjectSearch() {
+	m.projectSearchMode = true
+	m.projectSearchQuery = ""
+	m.projectFilteredIdx = 0
+	m.filterProjects()
+}
+
+// exitProjectSearch deactivates project search mode without selecting.
+func (m *FormModel) exitProjectSearch() {
+	m.projectSearchMode = false
+	m.projectSearchQuery = ""
+	m.projectFiltered = nil
+	m.projectFilteredIdx = 0
+}
+
+// selectProjectFromSearch selects the currently highlighted project in search results.
+func (m *FormModel) selectProjectFromSearch() {
+	if len(m.projectFiltered) == 0 {
+		m.exitProjectSearch()
+		return
+	}
+	if m.projectFilteredIdx >= len(m.projectFiltered) {
+		m.projectFilteredIdx = 0
+	}
+	selected := m.projectFiltered[m.projectFilteredIdx]
+	m.project = selected
+	// Update projectIdx to match
+	for i, p := range m.projects {
+		if p == selected {
+			m.projectIdx = i
+			break
+		}
+	}
+	m.exitProjectSearch()
+	m.loadLastTaskTypeForProject()
+	m.rebuildExecutorListForProject()
+	m.loadLastExecutorForProject()
+}
+
+// filterProjects updates the filtered project list based on the search query.
+func (m *FormModel) filterProjects() {
+	query := m.projectSearchQuery
+	if query == "" {
+		// Show all projects, with current project first
+		m.projectFiltered = make([]string, len(m.projects))
+		copy(m.projectFiltered, m.projects)
+		// Pre-select the current project
+		m.projectFilteredIdx = 0
+		for i, p := range m.projectFiltered {
+			if p == m.project {
+				m.projectFilteredIdx = i
+				break
 			}
 		}
+		return
+	}
+
+	type scored struct {
+		name  string
+		score int
+	}
+	var results []scored
+	for _, p := range m.projects {
+		s := fuzzyScore(p, query)
+		if s > 0 {
+			results = append(results, scored{p, s})
+		}
+	}
+	sort.Slice(results, func(i, j int) bool { return results[i].score > results[j].score })
+	m.projectFiltered = make([]string, len(results))
+	for i, r := range results {
+		m.projectFiltered[i] = r.name
+	}
+	m.projectFilteredIdx = 0
+}
+
+func (m *FormModel) selectByPrefix(prefix string) {
+	switch m.focused {
 	case FieldType:
 		for i, t := range m.types {
 			label := t
@@ -974,17 +1161,46 @@ func (m *FormModel) rebuildExecutorListForProject() {
 	}
 }
 
+// isFieldVisible returns whether a field should be shown in the current view.
+// When showAdvanced is false, only Title and Body are visible.
+func (m *FormModel) isFieldVisible(field FormField) bool {
+	if m.showAdvanced {
+		return true
+	}
+	return field == FieldTitle || field == FieldBody
+}
+
+// isLastVisibleField returns whether the currently focused field is the last visible one.
+func (m *FormModel) isLastVisibleField() bool {
+	for i := m.focused + 1; i < FieldCount; i++ {
+		if m.isFieldVisible(i) {
+			return false
+		}
+	}
+	return true
+}
+
 func (m *FormModel) focusNext() {
 	m.blurAll()
 	m.cancelAutocomplete()
-	m.focused = (m.focused + 1) % FieldCount
+	for i := 0; i < int(FieldCount); i++ {
+		m.focused = (m.focused + 1) % FieldCount
+		if m.isFieldVisible(m.focused) {
+			break
+		}
+	}
 	m.focusCurrent()
 }
 
 func (m *FormModel) focusPrev() {
 	m.blurAll()
 	m.cancelAutocomplete()
-	m.focused = (m.focused - 1 + FieldCount) % FieldCount
+	for i := 0; i < int(FieldCount); i++ {
+		m.focused = (m.focused - 1 + FieldCount) % FieldCount
+		if m.isFieldVisible(m.focused) {
+			break
+		}
+	}
 	m.focusCurrent()
 }
 
@@ -1009,6 +1225,9 @@ func (m *FormModel) blurAll() {
 	m.bodyInput.Blur()
 	m.attachmentsInput.Blur()
 	m.clearAttachmentSelection()
+	if m.projectSearchMode {
+		m.exitProjectSearch()
+	}
 }
 
 func (m *FormModel) focusCurrent() {
@@ -1258,6 +1477,10 @@ func (m *FormModel) View() string {
 	if m.isEdit {
 		headerText = "Edit Task"
 	}
+	// Show project context in header when in simple mode
+	if !m.showAdvanced && !m.isEdit && m.project != "" {
+		headerText = "New Task · " + m.project
+	}
 	header := lipgloss.NewStyle().
 		Bold(true).
 		Foreground(ColorPrimary).
@@ -1268,13 +1491,80 @@ func (m *FormModel) View() string {
 	// Ghost text style for autocomplete suggestions
 	ghostStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Italic(true)
 
-	// Project selector (first for immediate context)
-	cursor := " "
-	if m.focused == FieldProject {
-		cursor = cursorStyle.Render("▸")
+	// Cursor indicator for focused field
+	var cursor string
+
+	// Project selector (only shown in advanced mode)
+	if m.showAdvanced {
+		cursor = " "
+		if m.focused == FieldProject {
+			cursor = cursorStyle.Render("▸")
+		}
+		if m.projectSearchMode && m.focused == FieldProject {
+			// Search mode: show search input and filtered dropdown
+			searchInputStyle := lipgloss.NewStyle().Foreground(ColorPrimary)
+			queryDisplay := m.projectSearchQuery
+			cursorChar := lipgloss.NewStyle().Background(ColorPrimary).Foreground(lipgloss.Color("0")).Render(" ")
+			b.WriteString(cursor + " " + labelStyle.Render("Project") + searchInputStyle.Render(queryDisplay) + cursorChar)
+			b.WriteString("\n")
+
+			// Show filtered results as a vertical dropdown
+			maxShow := 8
+			if len(m.projectFiltered) < maxShow {
+				maxShow = len(m.projectFiltered)
+			}
+
+			// Calculate scroll window
+			scrollStart := 0
+			if m.projectFilteredIdx >= maxShow {
+				scrollStart = m.projectFilteredIdx - maxShow + 1
+			}
+			scrollEnd := scrollStart + maxShow
+			if scrollEnd > len(m.projectFiltered) {
+				scrollEnd = len(m.projectFiltered)
+				scrollStart = scrollEnd - maxShow
+				if scrollStart < 0 {
+					scrollStart = 0
+				}
+			}
+
+			// Scroll-up indicator
+			if scrollStart > 0 {
+				b.WriteString("                 " + dimStyle.Render("↑ more") + "\n")
+			}
+
+			for i := scrollStart; i < scrollEnd; i++ {
+				p := m.projectFiltered[i]
+				if i == m.projectFilteredIdx {
+					b.WriteString("                 " + selectedStyle.Render(" "+p+" ") + "\n")
+				} else {
+					b.WriteString("                 " + optionStyle.Render(" "+p) + "\n")
+				}
+			}
+
+			// Scroll-down indicator
+			if scrollEnd < len(m.projectFiltered) {
+				b.WriteString("                 " + dimStyle.Render("↓ more") + "\n")
+			}
+
+			if len(m.projectFiltered) == 0 {
+				b.WriteString("                 " + dimStyle.Render("no matches") + "\n")
+			}
+			b.WriteString("\n")
+		} else {
+			// Normal mode: show current project with hint
+			projectDisplay := m.project
+			if projectDisplay == "" {
+				projectDisplay = "none"
+			}
+			if m.focused == FieldProject {
+				b.WriteString(cursor + " " + labelStyle.Render("Project") + selectedStyle.Render(" "+projectDisplay+" ") + "  " + dimStyle.Render("type to search · "+IconArrowLeft()+"/"+IconArrowRight()+" cycle"))
+			} else {
+				b.WriteString(cursor + " " + labelStyle.Render("Project") + optionStyle.Bold(true).Render(projectDisplay))
+			}
+			b.WriteString("\n\n")
+		}
 	}
-	b.WriteString(cursor + " " + labelStyle.Render("Project") + m.renderSelector(m.projects, m.projectIdx, m.focused == FieldProject, selectedStyle, optionStyle, dimStyle))
-	b.WriteString("\n\n")
 
 	// Title
 	cursor = " "
@@ -1344,58 +1634,83 @@ func (m *FormModel) View() string {
 		}
 	}
 
-	// Attachments (positioned after body - drag files from anywhere in the form)
-	cursor = " "
-	if m.focused == FieldAttachments {
-		cursor = cursorStyle.Render("▸")
-	}
-	attachmentInputView := m.attachmentsInput.View()
-	var attachmentChips []string
-	if len(m.attachments) > 0 {
-		for i, path := range m.attachments {
-			style := AttachmentChip
-			if m.focused == FieldAttachments && m.attachmentSelectionActive() && m.attachmentCursor == i {
-				style = AttachmentChipSelected
+	// Advanced fields (Attachments, Type, Executor) - hidden by default
+	if m.showAdvanced {
+		// Attachments (positioned after body - drag files from anywhere in the form)
+		cursor = " "
+		if m.focused == FieldAttachments {
+			cursor = cursorStyle.Render("▸")
+		}
+		attachmentInputView := m.attachmentsInput.View()
+		b.WriteString("\n")
+		b.WriteString(cursor + " " + labelStyle.Render("Attachments") + "\n")
+		if len(m.attachments) > 0 {
+			for i, path := range m.attachments {
+				style := AttachmentChip
+				if m.focused == FieldAttachments && m.attachmentSelectionActive() && m.attachmentCursor == i {
+					style = AttachmentChipSelected
+				}
+				chip := style.Render(filepath.Base(path))
+				for _, line := range strings.Split(chip, "\n") {
+					if line != "" {
+						b.WriteString("   " + line + "\n")
+					}
+				}
 			}
-			attachmentChips = append(attachmentChips, style.Render(filepath.Base(path)))
 		}
-	}
-	b.WriteString("\n")
-	b.WriteString(cursor + " " + labelStyle.Render("Attachments"))
-	if len(attachmentChips) > 0 {
-		b.WriteString(" " + strings.Join(attachmentChips, " "))
-	}
-	b.WriteString("  " + attachmentInputView + "\n")
-	if len(m.attachments) > 0 {
-		help := Dim.Render(IconArrowLeft() + "/" + IconArrowRight() + " select • backspace/delete remove")
-		b.WriteString("   " + help + "\n")
-	}
-	b.WriteString("\n")
+		b.WriteString("   " + attachmentInputView + "\n")
+		if len(m.attachments) > 0 {
+			help := Dim.Render(IconArrowLeft() + "/" + IconArrowRight() + " select • backspace/delete remove")
+			b.WriteString("   " + help + "\n")
+		}
+		b.WriteString("\n")
 
-	// Type selector
-	cursor = " "
-	if m.focused == FieldType {
-		cursor = cursorStyle.Render("▸")
-	}
-	// Build type labels from m.types (replace empty string with "none")
-	typeLabels := make([]string, len(m.types))
-	for i, t := range m.types {
-		if t == "" {
-			typeLabels[i] = "none"
+		// Type selector
+		cursor = " "
+		if m.focused == FieldType {
+			cursor = cursorStyle.Render("▸")
+		}
+		// Build type labels from m.types (replace empty string with "none")
+		typeLabels := make([]string, len(m.types))
+		for i, t := range m.types {
+			if t == "" {
+				typeLabels[i] = "none"
+			} else {
+				typeLabels[i] = t
+			}
+		}
+		b.WriteString(cursor + " " + labelStyle.Render("Type") + m.renderSelector(typeLabels, m.typeIdx, m.focused == FieldType, selectedStyle, optionStyle, dimStyle))
+		b.WriteString("\n\n")
+
+		// Executor selector
+		cursor = " "
+		if m.focused == FieldExecutor {
+			cursor = cursorStyle.Render("▸")
+		}
+		b.WriteString(cursor + " " + labelStyle.Render("Executor") + m.renderSelector(m.executors, m.executorIdx, m.focused == FieldExecutor, selectedStyle, optionStyle, dimStyle))
+		b.WriteString("\n\n")
+	} else {
+		// Show compact summary of defaults and toggle hint
+		b.WriteString("\n")
+		summaryParts := []string{}
+		if m.project != "" {
+			summaryParts = append(summaryParts, m.project)
+		}
+		if m.executor != "" {
+			summaryParts = append(summaryParts, m.executor)
+		}
+		if m.taskType != "" {
+			summaryParts = append(summaryParts, m.taskType)
+		}
+		defaultsLine := strings.Join(summaryParts, " · ")
+		if defaultsLine != "" {
+			defaultsLine = dimStyle.Render(defaultsLine+" ") + dimStyle.Foreground(ColorSecondary).Render("ctrl+e more options")
 		} else {
-			typeLabels[i] = t
+			defaultsLine = dimStyle.Foreground(ColorSecondary).Render("ctrl+e more options")
 		}
+		b.WriteString("  " + defaultsLine)
+		b.WriteString("\n\n")
 	}
-	b.WriteString(cursor + " " + labelStyle.Render("Type") + m.renderSelector(typeLabels, m.typeIdx, m.focused == FieldType, selectedStyle, optionStyle, dimStyle))
-	b.WriteString("\n\n")
-
-	// Executor selector
-	cursor = " "
-	if m.focused == FieldExecutor {
-		cursor = cursorStyle.Render("▸")
-	}
-	b.WriteString(cursor + " " + labelStyle.Render("Executor") + m.renderSelector(m.executors, m.executorIdx, m.focused == FieldExecutor, selectedStyle, optionStyle, dimStyle))
-	b.WriteString("\n\n")
 
 	// Cancel confirmation message
 	if m.showCancelConfirm {
@@ -1406,7 +1721,12 @@ func (m *FormModel) View() string {
 	}
 
 	// Help
-	helpText := "tab accept/navigate • # ref task • ctrl+space suggest • " + IconArrowLeft() + IconArrowRight() + " select • ctrl+s submit • esc dismiss/cancel"
+	var helpText string
+	if m.showAdvanced {
+		helpText = "tab accept/navigate • # ref task • ctrl+space suggest • " + IconArrowLeft() + IconArrowRight() + " select • ctrl+e fewer options • ctrl+s submit • esc cancel"
+	} else {
+		helpText = "tab accept/navigate • ctrl+space suggest • ctrl+e more options • ctrl+s submit • esc cancel"
+	}
 	b.WriteString("  " + dimStyle.Render(helpText))
 
 	// Wrap in box - use full height (subtract 2 for border)
@@ -1488,51 +1808,35 @@ func (m *FormModel) SetSize(width, height int) {
 	m.updateBodyHeight()
 }
 
-// calculateBodyHeight calculates the appropriate height for the body textarea based on content.
-// Returns a height between minHeight (8) and maxHeight (50% of available screen height).
+// calculateBodyHeight calculates the appropriate height for the body textarea.
+// The body expands to fill all available screen space after accounting for other form elements.
 func (m *FormModel) calculateBodyHeight() int {
-	content := m.bodyInput.Value()
-
-	// Minimum height - increased from 4 to 8 to display more content by default
 	minHeight := 8
 
-	// Maximum height is 50% of screen height
-	// Account for other form elements: header(2) + title(2) + body label(1) + project(2) +
-	// type(2) + schedule(2) + attachments(2) + help(1) + padding/borders(~6) = ~19 lines
-	formOverhead := 22
-	maxHeight := (m.height - formOverhead) / 2
-	if maxHeight < minHeight {
-		maxHeight = minHeight
+	// Box chrome: border(2) + padding(2) + Height offset(2) = 6
+	boxChrome := 6
+
+	// Non-body content lines common to both modes:
+	// header(1) + blank(1) + title(1) + blank(1) + details label(1) + help(1) = 6
+	commonOverhead := 6
+
+	var modeOverhead int
+	if m.showAdvanced {
+		// Advanced adds: project(1+blank) + attachments(blank+label+input+blank=4) +
+		// type(1+blank) + executor(1+blank) = 10
+		modeOverhead = 10
+	} else {
+		// Simple adds: blank + summary + blank(2) = 3
+		modeOverhead = 3
 	}
 
-	// Count actual lines needed
-	lines := 1
-	if content != "" {
-		lines = strings.Count(content, "\n") + 1
+	totalOverhead := boxChrome + commonOverhead + modeOverhead
+	availableHeight := m.height - totalOverhead
+	if availableHeight < minHeight {
+		availableHeight = minHeight
 	}
 
-	// Account for line wrapping
-	textWidth := m.width - 24 // Same width as used in SetWidth
-	if textWidth > 0 {
-		for _, line := range strings.Split(content, "\n") {
-			// Each line might wrap based on character count
-			lineLen := len(line)
-			if lineLen > textWidth {
-				lines += lineLen / textWidth
-			}
-		}
-	}
-
-	// Apply min/max bounds
-	height := lines
-	if height < minHeight {
-		height = minHeight
-	}
-	if height > maxHeight {
-		height = maxHeight
-	}
-
-	return height
+	return availableHeight
 }
 
 // updateBodyHeight updates the body textarea height based on content.

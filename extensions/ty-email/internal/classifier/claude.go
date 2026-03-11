@@ -4,11 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os/exec"
 	"strings"
 
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/option"
+
 	"github.com/bborn/workflow/extensions/ty-email/internal/adapter"
 )
 
@@ -39,7 +41,7 @@ func NewClaudeClassifier(cfg *Config) (*ClaudeClassifier, error) {
 
 	model := cfg.Model
 	if model == "" {
-		model = "claude-sonnet-4-20250514"
+		model = "claude-haiku-4-5-20251001"
 	}
 
 	return &ClaudeClassifier{
@@ -57,17 +59,32 @@ func (c *ClaudeClassifier) IsAvailable() bool {
 }
 
 func (c *ClaudeClassifier) Classify(ctx context.Context, email *adapter.Email, tasks []Task, threadTaskID *int64) (*Action, error) {
-	prompt := c.buildPrompt(email, tasks, threadTaskID)
+	// Limit task context to avoid excessive input tokens
+	limitedTasks := tasks
+	if len(limitedTasks) > 10 {
+		limitedTasks = limitedTasks[:10]
+	}
+
+	prompt := c.buildPrompt(email, limitedTasks, threadTaskID)
 
 	resp, err := c.client.Messages.New(ctx, anthropic.MessageNewParams{
 		Model:     anthropic.F(c.model),
-		MaxTokens: anthropic.Int(1024),
+		MaxTokens: anthropic.Int(256),
 		Messages: anthropic.F([]anthropic.MessageParam{
 			anthropic.NewUserMessage(anthropic.NewTextBlock(prompt)),
 		}),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("claude API error: %w", err)
+	}
+
+	// Log token usage
+	if resp.Usage.InputTokens > 0 || resp.Usage.OutputTokens > 0 {
+		slog.Info("classifier token usage",
+			"model", c.model,
+			"input_tokens", resp.Usage.InputTokens,
+			"output_tokens", resp.Usage.OutputTokens,
+		)
 	}
 
 	// Extract text response
@@ -104,11 +121,16 @@ Available actions:
 
 `)
 
-	// Add current tasks context
+	// Add current tasks context (only title/status/project to minimize tokens)
 	if len(tasks) > 0 {
 		sb.WriteString("Current tasks:\n")
 		for _, t := range tasks {
-			sb.WriteString(fmt.Sprintf("- #%d: %s (status: %s, project: %s)\n", t.ID, t.Title, t.Status, t.Project))
+			line := fmt.Sprintf("- #%d: %s (status: %s", t.ID, t.Title, t.Status)
+			if t.Project != "" {
+				line += ", project: " + t.Project
+			}
+			line += ")\n"
+			sb.WriteString(line)
 		}
 		sb.WriteString("\n")
 	} else {
@@ -120,11 +142,16 @@ Available actions:
 		sb.WriteString(fmt.Sprintf("This email is part of a thread related to task #%d.\n\n", *threadTaskID))
 	}
 
-	// Add the email
+	// Add the email (truncate body to limit token usage)
 	sb.WriteString("Incoming email:\n")
 	sb.WriteString(fmt.Sprintf("From: %s\n", email.From))
 	sb.WriteString(fmt.Sprintf("Subject: %s\n", email.Subject))
-	sb.WriteString(fmt.Sprintf("Body:\n%s\n\n", email.Body))
+	body := email.Body
+	const maxBodyLen = 2000
+	if len(body) > maxBodyLen {
+		body = body[:maxBodyLen] + "\n[truncated]"
+	}
+	sb.WriteString(fmt.Sprintf("Body:\n%s\n\n", body))
 
 	// Instructions
 	sb.WriteString(`Analyze this email and respond with a JSON object:

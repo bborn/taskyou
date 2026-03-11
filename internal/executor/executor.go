@@ -18,12 +18,13 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/charmbracelet/log"
+
 	"github.com/bborn/workflow/internal/config"
 	"github.com/bborn/workflow/internal/db"
 	"github.com/bborn/workflow/internal/events"
 	"github.com/bborn/workflow/internal/github"
 	"github.com/bborn/workflow/internal/hooks"
-	"github.com/charmbracelet/log"
 )
 
 // TaskEvent represents a change to a task.
@@ -62,6 +63,9 @@ type Executor struct {
 	taskSubsMu sync.RWMutex
 	taskSubs   []chan TaskEvent
 
+	// Wakeup channel to trigger immediate task processing (non-blocking send)
+	wakeupCh chan struct{}
+
 	// Silent mode suppresses log output (for TUI embedding)
 	silent bool
 
@@ -75,6 +79,10 @@ const DefaultSuspendIdleTimeout = 6 * time.Hour
 // DoneTaskCleanupTimeout is how long after a task is marked done before its Claude process is killed.
 // This gives users time to review output or retry the task before the process is cleaned up.
 const DoneTaskCleanupTimeout = 30 * time.Minute
+
+// DefaultWorktreeCleanupMaxAge is the default time after completion before a done/archived
+// task's worktree is automatically archived and removed to reclaim disk space.
+const DefaultWorktreeCleanupMaxAge = 7 * 24 * time.Hour // 7 days
 
 const (
 	defaultExecutorSlug = "claude"
@@ -140,6 +148,7 @@ func New(database *db.DB, cfg *config.Config) *Executor {
 		prCache:         github.NewPRCache(),
 		executorFactory: NewExecutorFactory(),
 		stopCh:          make(chan struct{}),
+		wakeupCh:        make(chan struct{}, 1),
 		subs:            make(map[int64][]chan *db.TaskLog),
 		taskSubs:        make([]chan TaskEvent, 0),
 		runningTasks:    make(map[int64]bool),
@@ -177,6 +186,7 @@ func NewWithLogging(database *db.DB, cfg *config.Config, w io.Writer) *Executor 
 		prCache:         github.NewPRCache(),
 		executorFactory: NewExecutorFactory(),
 		stopCh:          make(chan struct{}),
+		wakeupCh:        make(chan struct{}, 1),
 		subs:            make(map[int64][]chan *db.TaskLog),
 		taskSubs:        make([]chan TaskEvent, 0),
 		runningTasks:    make(map[int64]bool),
@@ -229,6 +239,9 @@ func (e *Executor) Start(ctx context.Context) {
 
 	// Recover stale tmux references on startup (handles crash recovery)
 	e.recoverStaleTmuxRefs()
+
+	// Run stale worktree cleanup on startup (and then periodically in worker loop)
+	go e.cleanupStaleWorktrees()
 
 	e.logger.Info("Background executor started")
 
@@ -349,7 +362,7 @@ func (e *Executor) SuspendTask(taskID int64) bool {
 		return false
 	}
 
-	if err := proc.Signal(syscall.SIGTSTP); err != nil {
+	if err := sendSIGTSTP(proc); err != nil {
 		e.logger.Debug("Failed to suspend process", "pid", pid, "error", err)
 		return false
 	}
@@ -392,7 +405,7 @@ func (e *Executor) ResumeTask(taskID int64) bool {
 		return false
 	}
 
-	if err := proc.Signal(syscall.SIGCONT); err != nil {
+	if err := sendSIGCONT(proc); err != nil {
 		e.logger.Debug("Failed to resume process", "pid", pid, "error", err)
 		return false
 	}
@@ -414,21 +427,15 @@ func (e *Executor) IsSuspended(taskID int64) bool {
 	return suspended
 }
 
-// getClaudePID finds the PID of the Claude process for a task.
-// It first checks the stored daemon session, then searches all sessions for the task window.
-func (e *Executor) getClaudePID(taskID int64) int {
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-
-	windowName := TmuxWindowName(taskID)
-
-	// Search all tmux sessions for a window with this task's name
-	out, err := exec.CommandContext(ctx, "tmux", "list-panes", "-a", "-F", "#{session_name}:#{window_name}:#{pane_index} #{pane_pid}").Output()
-	if err != nil {
-		return 0
-	}
-
-	for _, line := range strings.Split(string(out), "\n") {
+// findPanesForWindow parses tmux list-panes output and returns PIDs for panes
+// in windows matching the given name exactly. The input format is one line per pane:
+//
+//	"session:window:pane pid"
+//
+// e.g. "task-daemon-123:task-5:0 12345"
+func findPanesForWindow(tmuxOutput, windowName string) []int {
+	var pids []int
+	for _, line := range strings.Split(tmuxOutput, "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" {
 			continue
@@ -443,8 +450,12 @@ func (e *Executor) getClaudePID(taskID int64) int {
 		target := parts[0]
 		pidStr := parts[1]
 
-		// Only match panes in windows named after this task
-		if !strings.Contains(target, windowName) {
+		// Parse target format: "session:window:pane" and match window name exactly
+		targetParts := strings.SplitN(target, ":", 3)
+		if len(targetParts) < 2 {
+			continue
+		}
+		if targetParts[1] != windowName {
 			continue
 		}
 
@@ -452,7 +463,26 @@ func (e *Executor) getClaudePID(taskID int64) int {
 		if err != nil {
 			continue
 		}
+		pids = append(pids, pid)
+	}
+	return pids
+}
 
+// getClaudePID finds the PID of the Claude process for a task.
+// It first checks the stored daemon session, then searches all sessions for the task window.
+func (e *Executor) getClaudePID(taskID int64) int {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	windowName := TmuxWindowName(taskID)
+
+	// Search all tmux sessions for a window with this task's name
+	out, err := exec.CommandContext(ctx, "tmux", "list-panes", "-a", "-F", "#{session_name}:#{window_name}:#{pane_index} #{pane_pid}").Output()
+	if err != nil {
+		return 0
+	}
+
+	for _, pid := range findPanesForWindow(string(out), windowName) {
 		// Check if this is a Claude process or has Claude as child
 		cmdOut, _ := exec.CommandContext(ctx, "ps", "-p", strconv.Itoa(pid), "-o", "comm=").Output()
 		if strings.Contains(string(cmdOut), "claude") {
@@ -622,6 +652,8 @@ func (e *Executor) broadcastTaskEvent(event TaskEvent) {
 }
 
 // NotifyTaskChange notifies subscribers of a task change (for use by UI/other components).
+// If the task is newly queued, it also triggers immediate processing so the executor
+// starts without waiting for the next poll cycle.
 func (e *Executor) NotifyTaskChange(eventType string, task *db.Task) {
 	event := TaskEvent{
 		Type:   eventType,
@@ -629,6 +661,21 @@ func (e *Executor) NotifyTaskChange(eventType string, task *db.Task) {
 		TaskID: task.ID,
 	}
 	e.broadcastTaskEvent(event)
+
+	// Trigger immediate processing when a task becomes queued
+	if task.Status == db.StatusQueued {
+		e.TriggerProcessing()
+	}
+}
+
+// TriggerProcessing wakes up the worker loop to process queued tasks immediately.
+// This is a non-blocking operation; if a wakeup is already pending, the call is a no-op.
+func (e *Executor) TriggerProcessing() {
+	select {
+	case e.wakeupCh <- struct{}{}:
+	default:
+		// Already has a pending wakeup, no need to send another
+	}
 }
 
 // updateStatus updates task status in DB and broadcasts the change.
@@ -677,14 +724,14 @@ func (e *Executor) worker(ctx context.Context) {
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
 
-	// Check merged branches every 30 seconds (15 ticks)
 	// Check for idle blocked tasks to suspend every 60 seconds (30 ticks)
 	// Check for due scheduled tasks every 10 seconds (5 ticks)
 	// Check for inactive done tasks to cleanup every 5 minutes (150 ticks)
+	// Check for stale worktrees to archive every 1 hour (1800 ticks)
 	tickCount := 0
-	const mergeCheckInterval = 15
 	const suspendCheckInterval = 30
-	const doneCleanupInterval = 150 // 5 minutes at 2 second ticks
+	const doneCleanupInterval = 150    // 5 minutes at 2 second ticks
+	const staleWorktreeInterval = 1800 // 1 hour at 2 second ticks
 
 	for {
 		select {
@@ -692,15 +739,13 @@ func (e *Executor) worker(ctx context.Context) {
 			return
 		case <-e.stopCh:
 			return
+		case <-e.wakeupCh:
+			// Immediate wakeup: a task was just enqueued, process it now
+			e.processNextTask(ctx)
 		case <-ticker.C:
 			e.processNextTask(ctx)
 
 			tickCount++
-
-			// Periodically check for merged branches
-			if tickCount%mergeCheckInterval == 0 {
-				e.checkMergedBranches()
-			}
 
 			// Periodically check for idle blocked tasks to suspend
 			if tickCount%suspendCheckInterval == 0 {
@@ -710,6 +755,11 @@ func (e *Executor) worker(ctx context.Context) {
 			// Periodically cleanup Claude processes for inactive done tasks
 			if tickCount%doneCleanupInterval == 0 {
 				e.cleanupInactiveDoneTasks()
+			}
+
+			// Periodically archive and remove stale worktrees to reclaim disk space
+			if tickCount%staleWorktreeInterval == 0 {
+				e.cleanupStaleWorktrees()
 			}
 		}
 	}
@@ -791,6 +841,144 @@ func (e *Executor) cleanupInactiveDoneTasks() {
 	}
 }
 
+// cleanupStaleWorktrees archives and removes worktrees for done/archived tasks
+// that have been completed longer than the configured max age. This reclaims disk
+// space from the .task-worktrees directory which can grow very large over time.
+func (e *Executor) cleanupStaleWorktrees() {
+	maxAge := e.getWorktreeCleanupMaxAge()
+	if maxAge <= 0 {
+		return // Disabled
+	}
+
+	tasks, err := e.db.GetStaleWorktreeTasks(maxAge)
+	if err != nil {
+		e.logger.Debug("Failed to list stale worktree tasks", "error", err)
+		return
+	}
+
+	for _, task := range tasks {
+		// Skip tasks that are currently running
+		e.mu.RLock()
+		running := e.runningTasks[task.ID]
+		e.mu.RUnlock()
+		if running {
+			continue
+		}
+
+		// Skip non-worktree projects - they share the project directory and should not be archived
+		if !e.config.ProjectUsesWorktrees(task.Project) {
+			e.db.ClearTaskWorktreePath(task.ID)
+			continue
+		}
+
+		// Skip if worktree path doesn't exist on disk (already cleaned up)
+		if _, err := os.Stat(task.WorktreePath); os.IsNotExist(err) {
+			// Path gone, just clear the DB reference
+			e.db.ClearTaskWorktreePath(task.ID)
+			continue
+		}
+
+		age := time.Since(task.CompletedAt.Time)
+		e.logger.Info("Archiving stale worktree",
+			"task", task.ID,
+			"project", task.Project,
+			"age", age.Round(time.Hour),
+		)
+
+		// Archive the worktree (preserves changes in git refs) then remove it
+		if err := e.ArchiveWorktree(task); err != nil {
+			e.logger.Warn("Failed to archive stale worktree",
+				"task", task.ID,
+				"error", err,
+			)
+			continue
+		}
+
+		e.logLine(task.ID, "system",
+			fmt.Sprintf("Worktree auto-archived after %s (use 'unarchive' to restore)", age.Round(time.Hour)))
+	}
+}
+
+// getWorktreeCleanupMaxAge returns the configured max age before stale worktrees are cleaned up.
+// Returns 0 to disable automatic cleanup.
+func (e *Executor) getWorktreeCleanupMaxAge() time.Duration {
+	if val, err := e.db.GetSetting(config.SettingWorktreeCleanupMaxAge); err == nil && val != "" {
+		if val == "0" || val == "disabled" {
+			return 0
+		}
+		if duration, err := time.ParseDuration(val); err == nil {
+			return duration
+		}
+	}
+	return DefaultWorktreeCleanupMaxAge
+}
+
+// CleanupStaleWorktreesManual runs stale worktree cleanup on demand and returns
+// the list of tasks that were cleaned up. If dryRun is true, no changes are made.
+func (e *Executor) CleanupStaleWorktreesManual(maxAge time.Duration, dryRun bool) ([]*db.Task, error) {
+	tasks, err := e.db.GetStaleWorktreeTasks(maxAge)
+	if err != nil {
+		return nil, fmt.Errorf("list stale worktree tasks: %w", err)
+	}
+
+	if dryRun {
+		return tasks, nil
+	}
+
+	var cleaned []*db.Task
+	for _, task := range tasks {
+		// Skip non-worktree projects
+		if !e.config.ProjectUsesWorktrees(task.Project) {
+			e.db.ClearTaskWorktreePath(task.ID)
+			cleaned = append(cleaned, task)
+			continue
+		}
+
+		// Skip if worktree path doesn't exist on disk
+		if _, err := os.Stat(task.WorktreePath); os.IsNotExist(err) {
+			e.db.ClearTaskWorktreePath(task.ID)
+			cleaned = append(cleaned, task)
+			continue
+		}
+
+		if err := e.ArchiveWorktree(task); err != nil {
+			e.logger.Warn("Failed to archive stale worktree",
+				"task", task.ID,
+				"error", err,
+			)
+			continue
+		}
+		cleaned = append(cleaned, task)
+	}
+
+	// Also run git worktree prune on all project directories to clean up stale git refs
+	e.pruneAllProjectWorktrees()
+
+	return cleaned, nil
+}
+
+// pruneAllProjectWorktrees runs `git worktree prune` on all configured project directories
+// to clean up stale internal git worktree references.
+func (e *Executor) pruneAllProjectWorktrees() {
+	projects, err := e.db.ListProjects()
+	if err != nil {
+		return
+	}
+	for _, p := range projects {
+		// Skip non-worktree projects - no git worktrees to prune
+		if !p.UsesWorktrees() {
+			continue
+		}
+		dir := e.config.GetProjectDir(p.Name)
+		if dir == "" {
+			continue
+		}
+		cmd := exec.Command("git", "worktree", "prune")
+		cmd.Dir = dir
+		cmd.Run() // Ignore errors
+	}
+}
+
 func (e *Executor) processNextTask(ctx context.Context) {
 	// Get all queued tasks
 	tasks, err := e.db.GetQueuedTasks()
@@ -800,16 +988,13 @@ func (e *Executor) processNextTask(ctx context.Context) {
 	}
 
 	for _, task := range tasks {
-		// Skip if already running
-		e.mu.RLock()
-		alreadyRunning := e.runningTasks[task.ID]
-		e.mu.RUnlock()
-		if alreadyRunning {
+		// Atomically check-and-set to prevent race where two ticks
+		// both see the task as not-running and spawn duplicate goroutines
+		e.mu.Lock()
+		if e.runningTasks[task.ID] {
+			e.mu.Unlock()
 			continue
 		}
-
-		// Mark as running and spawn goroutine
-		e.mu.Lock()
 		e.runningTasks[task.ID] = true
 		e.mu.Unlock()
 
@@ -826,6 +1011,15 @@ func (e *Executor) ExecuteNow(ctx context.Context, taskID int64) error {
 	if task == nil {
 		return fmt.Errorf("task %d not found", taskID)
 	}
+
+	// Register in runningTasks so the worker loop doesn't also pick it up
+	e.mu.Lock()
+	if e.runningTasks[taskID] {
+		e.mu.Unlock()
+		return fmt.Errorf("task %d is already running", taskID)
+	}
+	e.runningTasks[taskID] = true
+	e.mu.Unlock()
 
 	e.executeTask(ctx, task)
 	return nil
@@ -858,6 +1052,11 @@ func (e *Executor) executeTask(ctx context.Context, task *db.Task) {
 		e.logger.Error("Failed to update status", "error", err)
 		return
 	}
+	// Keep the task struct in sync with the DB so that subsequent UpdateTask() calls
+	// (e.g. in setupWorktree/setupSharedWorkDir) don't accidentally reset the status
+	// back to the original value (e.g. "queued"), which would cause pollTmuxSession
+	// to immediately return {Interrupted: true} and create an infinite retry loop.
+	task.Status = db.StatusProcessing
 
 	// Log start and trigger hook
 	startMsg := fmt.Sprintf("Starting task #%d: %s", task.ID, task.Title)
@@ -875,6 +1074,7 @@ func (e *Executor) executeTask(ctx context.Context, task *db.Task) {
 		e.hooks.OnStatusChange(task, db.StatusBlocked, "Worktree setup failed - cannot execute task safely")
 		return
 	}
+	e.events.EmitTaskWorktreeReady(task)
 
 	// Prepare attachments (write to .claude/attachments for seamless access)
 	attachmentPaths, cleanupAttachments := e.prepareAttachments(task.ID, workDir)
@@ -942,7 +1142,10 @@ func (e *Executor) executeTask(ctx context.Context, task *db.Task) {
 	// Update final status and trigger hooks
 	// Respect status set by hooks - don't override blocked with done
 	if result.Interrupted {
-		// Status already set by Interrupt(), just run hook
+		// Explicitly set to backlog - don't assume Interrupt() already did it,
+		// as the interruption may have come from pollTmuxSession detecting a
+		// stale status or context cancellation.
+		e.updateStatus(task.ID, db.StatusBacklog)
 		e.hooks.OnStatusChange(task, db.StatusBacklog, "Task interrupted by user")
 		// Kill executor process to free memory when task is interrupted
 		taskExecutor.Kill(task.ID)
@@ -951,21 +1154,15 @@ func (e *Executor) executeTask(ctx context.Context, task *db.Task) {
 		e.logLine(task.ID, "system", "Task waiting for input")
 		e.hooks.OnStatusChange(task, db.StatusBlocked, "Task waiting for input")
 	} else if currentStatus == db.StatusDone {
-		// Hooks/MCP already marked as done - respect that
+		// If somehow already marked as done (e.g. by human), respect that
 		e.logLine(task.ID, "system", "Task completed")
 		e.hooks.OnStatusChange(task, db.StatusDone, "Task completed")
-
-		// NOTE: We intentionally do NOT kill the executor here - keep it running so user can
-		// easily retry/resume the task. Old done task executors are cleaned up after 2h
-		// by the cleanupOrphanedClaudes routine.
 	} else if result.Success {
-		e.updateStatus(task.ID, db.StatusDone)
-		e.logLine(task.ID, "system", "Task completed successfully")
-		e.hooks.OnStatusChange(task, db.StatusDone, "Task completed successfully")
-
-		// NOTE: We intentionally do NOT kill the executor here - keep it running so user can
-		// easily retry/resume the task. Old done task executors are cleaned up after 2h
-		// by the cleanupOrphanedClaudes routine.
+		// Agent finished successfully - move to backlog for human review
+		// Only humans should mark tasks as done
+		e.updateStatus(task.ID, db.StatusBacklog)
+		e.logLine(task.ID, "system", "Agent finished - awaiting human review to close")
+		e.hooks.OnStatusChange(task, db.StatusBacklog, "Agent finished - awaiting human review to close")
 	} else if result.NeedsInput {
 		e.updateStatus(task.ID, db.StatusBlocked)
 		// Log the question with special type so UI can display it
@@ -1423,6 +1620,47 @@ func TmuxSessionName(taskID int64) string {
 	return fmt.Sprintf("%s:%s", getDaemonSessionName(), TmuxWindowName(taskID))
 }
 
+// CapturePaneContent captures the last N lines from a task's tmux pane.
+// Returns the trimmed content, or empty string if the pane doesn't exist or capture fails.
+func CapturePaneContent(taskID int64, lines int) string {
+	sessionName := TmuxSessionName(taskID)
+
+	// Check if session exists first
+	if err := exec.Command("tmux", "has-session", "-t", sessionName).Run(); err != nil {
+		return ""
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	// Capture the last N lines from pane 0 (the executor pane)
+	target := sessionName + ".0"
+	startLine := fmt.Sprintf("-%d", lines)
+	out, err := exec.CommandContext(ctx, "tmux", "capture-pane", "-t", target, "-p", "-S", startLine).Output()
+	if err != nil {
+		return ""
+	}
+
+	// Trim trailing whitespace/empty lines
+	content := strings.TrimRight(string(out), " \t\n\r")
+	return content
+}
+
+// SendKeyToPane sends a key sequence to a task's executor tmux pane.
+// Used for quick approve/deny from the kanban view.
+func SendKeyToPane(taskID int64, keys ...string) error {
+	sessionName := TmuxSessionName(taskID)
+
+	// Check if session exists first
+	if err := exec.Command("tmux", "has-session", "-t", sessionName).Run(); err != nil {
+		return fmt.Errorf("session not found: %w", err)
+	}
+
+	target := sessionName + ".0"
+	args := append([]string{"send-keys", "-t", target}, keys...)
+	return exec.Command("tmux", args...).Run()
+}
+
 // killAllWindowsByNameAllSessions kills ALL windows with a given name across all daemon sessions.
 // Also kills any -shell variant windows.
 func killAllWindowsByNameAllSessions(windowName string) {
@@ -1721,13 +1959,11 @@ func ensureTmuxDaemon() (string, error) {
 
 // createTmuxWindow creates a new tmux window in the daemon session with retry logic.
 // If the session doesn't exist, it will re-create it and retry once.
-// SECURITY: workDir must be within a .task-worktrees directory to prevent Claude from
-// accidentally writing to the main project directory.
-func createTmuxWindow(daemonSession, windowName, workDir, script string) (string, error) {
-	// SECURITY: Validate that workDir is within a .task-worktrees directory
-	// This prevents Claude from running in the main project directory
-	if !isValidWorktreePath(workDir) {
-		return "", fmt.Errorf("security: refusing to create tmux window with workDir outside .task-worktrees: %s", workDir)
+// SECURITY: workDir must be within a .task-worktrees directory, or match allowedProjectDir
+// for non-worktree projects. Pass empty allowedProjectDir to require worktree paths only.
+func createTmuxWindow(daemonSession, windowName, workDir, script, allowedProjectDir string) (string, error) {
+	if !isValidWorkDir(workDir, allowedProjectDir) {
+		return "", fmt.Errorf("security: refusing to create tmux window with invalid workDir: %s", workDir)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -1997,7 +2233,7 @@ func (e *Executor) runClaude(ctx context.Context, task *db.Task, workDir, prompt
 	envPrefix := claudeEnvPrefix(paths.configDir)
 	if existingSessionID != "" && ClaudeSessionExists(existingSessionID, workDir, paths.configDir) {
 		e.logLine(task.ID, "system", fmt.Sprintf("Resuming existing session %s", existingSessionID))
-		script = fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %sclaude %s%s--chrome --resume %s "$(cat %q)"`,
+		script = fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %sclaude %s%s--resume %s "$(cat %q)"`,
 			task.ID, sessionID, task.Port, task.WorktreePath, envPrefix, dangerousFlag, systemPromptFlag, existingSessionID, promptFile.Name())
 	} else {
 		if existingSessionID != "" {
@@ -2007,12 +2243,12 @@ func (e *Executor) runClaude(ctx context.Context, task *db.Task, workDir, prompt
 				e.logger.Warn("failed to clear stale session ID", "task", task.ID, "error", err)
 			}
 		}
-		script = fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %sclaude %s%s--chrome "$(cat %q)"`,
+		script = fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %sclaude %s%s"$(cat %q)"`,
 			task.ID, sessionID, task.Port, task.WorktreePath, envPrefix, dangerousFlag, systemPromptFlag, promptFile.Name())
 	}
 
 	// Create new window in task-daemon session (with retry logic for race conditions)
-	actualSession, tmuxErr := createTmuxWindow(daemonSession, windowName, workDir, script)
+	actualSession, tmuxErr := createTmuxWindow(daemonSession, windowName, workDir, script, e.getProjectDir(task.Project))
 	if tmuxErr != nil {
 		e.logger.Error("tmux new-window failed", "error", tmuxErr, "session", daemonSession)
 		e.logLine(task.ID, "error", fmt.Sprintf("Failed to create tmux window: %s", tmuxErr.Error()))
@@ -2164,11 +2400,11 @@ func (e *Executor) runClaudeResume(ctx context.Context, task *db.Task, workDir, 
 	systemPromptFlag := fmt.Sprintf(`--append-system-prompt "$(cat %q)" `, systemFile.Name())
 
 	envPrefix := claudeEnvPrefix(paths.configDir)
-	script := fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %sclaude %s%s--chrome --resume %s "$(cat %q)"`,
+	script := fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %sclaude %s%s--resume %s "$(cat %q)"`,
 		task.ID, taskSessionID, task.Port, task.WorktreePath, envPrefix, dangerousFlag, systemPromptFlag, claudeSessionID, feedbackFile.Name())
 
 	// Create new window in task-daemon session (with retry logic for race conditions)
-	actualSession, tmuxErr := createTmuxWindow(daemonSession, windowName, workDir, script)
+	actualSession, tmuxErr := createTmuxWindow(daemonSession, windowName, workDir, script, e.getProjectDir(task.Project))
 	if tmuxErr != nil {
 		e.logger.Error("tmux new-window failed", "error", tmuxErr, "session", daemonSession)
 		e.logLine(task.ID, "error", fmt.Sprintf("Failed to create tmux window: %s", tmuxErr.Error()))
@@ -2321,11 +2557,11 @@ func (e *Executor) resumeClaudeDangerous(task *db.Task, workDir string) bool {
 
 	// Force dangerous mode regardless of WORKTREE_DANGEROUS_MODE setting
 	envPrefix := claudeEnvPrefix(paths.configDir)
-	script := fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %sclaude --dangerously-skip-permissions --chrome --resume %s`,
+	script := fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %sclaude --dangerously-skip-permissions --resume %s`,
 		taskID, taskSessionID, task.Port, task.WorktreePath, envPrefix, claudeSessionID)
 
 	// Create new window in task-daemon session (with retry logic for race conditions)
-	actualSession, tmuxErr := createTmuxWindow(daemonSession, windowName, workDir, script)
+	actualSession, tmuxErr := createTmuxWindow(daemonSession, windowName, workDir, script, e.getProjectDir(task.Project))
 	if tmuxErr != nil {
 		e.logger.Warn("tmux failed to create window", "error", tmuxErr, "session", daemonSession)
 		if cleanupHooks != nil {
@@ -2367,6 +2603,14 @@ func (e *Executor) resumeClaudeDangerous(task *db.Task, workDir string) bool {
 	}
 
 	e.logLine(taskID, "system", "Claude restarted in dangerous mode (--dangerously-skip-permissions enabled)")
+
+	// Wait for Claude to be fully ready before sending input
+	time.Sleep(1 * time.Second)
+
+	// Automatically send "continue working" to resume the task
+	// This tells Claude to continue where it left off after the mode switch
+	exec.Command("tmux", "send-keys", "-t", windowTarget+".0", "continue working", "Enter").Run()
+	e.logLine(taskID, "system", "Sent 'continue working' to resume task")
 
 	// Don't poll for completion here - the process will continue running in tmux
 	// The existing polling infrastructure will handle it
@@ -2478,11 +2722,11 @@ func (e *Executor) resumeClaudeSafe(task *db.Task, workDir string) bool {
 
 	// Resume without --dangerously-skip-permissions (safe mode)
 	envPrefix := claudeEnvPrefix(paths.configDir)
-	script := fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %sclaude --chrome --resume %s`,
+	script := fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %sclaude --resume %s`,
 		taskID, taskSessionID, task.Port, task.WorktreePath, envPrefix, claudeSessionID)
 
 	// Create new window in task-daemon session (with retry logic for race conditions)
-	actualSession, tmuxErr := createTmuxWindow(daemonSession, windowName, workDir, script)
+	actualSession, tmuxErr := createTmuxWindow(daemonSession, windowName, workDir, script, e.getProjectDir(task.Project))
 	if tmuxErr != nil {
 		e.logger.Warn("tmux failed to create window", "error", tmuxErr, "session", daemonSession)
 		if cleanupHooks != nil {
@@ -2524,6 +2768,14 @@ func (e *Executor) resumeClaudeSafe(task *db.Task, workDir string) bool {
 	}
 
 	e.logLine(taskID, "system", "Claude restarted in safe mode (permissions enabled)")
+
+	// Wait for Claude to be fully ready before sending input
+	time.Sleep(1 * time.Second)
+
+	// Automatically send "continue working" to resume the task
+	// This tells Claude to continue where it left off after the mode switch
+	exec.Command("tmux", "send-keys", "-t", windowTarget+".0", "continue working", "Enter").Run()
+	e.logLine(taskID, "system", "Sent 'continue working' to resume task")
 
 	// Don't poll for completion here - the process will continue running in tmux
 	// The existing polling infrastructure will handle it
@@ -2591,7 +2843,7 @@ func (e *Executor) resumeCodexWithMode(task *db.Task, workDir string, dangerousM
 	script := fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %scodex %s--resume %s`,
 		taskID, taskSessionID, task.Port, task.WorktreePath, envPrefix, dangerousFlag, sessionID)
 
-	actualSession, tmuxErr := createTmuxWindow(daemonSession, windowName, workDir, script)
+	actualSession, tmuxErr := createTmuxWindow(daemonSession, windowName, workDir, script, e.getProjectDir(task.Project))
 	if tmuxErr != nil {
 		e.logger.Warn("tmux failed to create window", "error", tmuxErr, "session", daemonSession)
 		return false
@@ -2622,6 +2874,15 @@ func (e *Executor) resumeCodexWithMode(task *db.Task, workDir string, dangerousM
 	}
 
 	e.logLine(taskID, "system", fmt.Sprintf("Codex restarted in %s mode", modeStr))
+
+	// Wait for Codex to be fully ready before sending input
+	time.Sleep(1 * time.Second)
+
+	// Automatically send "continue working" to resume the task
+	// This tells Codex to continue where it left off after the mode switch
+	exec.Command("tmux", "send-keys", "-t", windowTarget+".0", "continue working", "Enter").Run()
+	e.logLine(taskID, "system", "Sent 'continue working' to resume task")
+
 	return true
 }
 
@@ -2690,7 +2951,7 @@ func (e *Executor) resumeGeminiWithMode(task *db.Task, workDir string, dangerous
 	script := fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %sgemini %s--resume %s`,
 		taskID, taskSessionID, task.Port, task.WorktreePath, envPrefix, dangerousFlag, sessionID)
 
-	actualSession, tmuxErr := createTmuxWindow(daemonSession, windowName, workDir, script)
+	actualSession, tmuxErr := createTmuxWindow(daemonSession, windowName, workDir, script, e.getProjectDir(task.Project))
 	if tmuxErr != nil {
 		e.logger.Warn("tmux failed to create window", "error", tmuxErr, "session", daemonSession)
 		return false
@@ -2721,6 +2982,15 @@ func (e *Executor) resumeGeminiWithMode(task *db.Task, workDir string, dangerous
 	}
 
 	e.logLine(taskID, "system", fmt.Sprintf("Gemini restarted in %s mode", modeStr))
+
+	// Wait for Gemini to be fully ready before sending input
+	time.Sleep(1 * time.Second)
+
+	// Automatically send "continue working" to resume the task
+	// This tells Gemini to continue where it left off after the mode switch
+	exec.Command("tmux", "send-keys", "-t", windowTarget+".0", "continue working", "Enter").Run()
+	e.logLine(taskID, "system", "Sent 'continue working' to resume task")
+
 	return true
 }
 
@@ -2861,6 +3131,11 @@ func (e *Executor) pollTmuxSession(ctx context.Context, taskID int64, sessionNam
 				if task.Status == db.StatusDone {
 					// Don't kill window - keep it so user can review Claude's work
 					return execResult{Success: true}
+				}
+				if task.Status == db.StatusQueued {
+					// Task was re-queued (e.g. retry) - stop polling so the
+					// worker can pick it up fresh without a duplicate session
+					return execResult{Interrupted: true}
 				}
 			}
 
@@ -3037,21 +3312,19 @@ func (e *Executor) logLine(taskID int64, lineType, content string) {
 
 // getConversationHistory builds a context section from previous task runs.
 // This includes questions asked, user responses, and continuation markers.
+// Uses a targeted DB query that only fetches conversation-relevant logs,
+// avoiding loading potentially large output/tool content.
 func (e *Executor) getConversationHistory(taskID int64) string {
-	logs, err := e.db.GetTaskLogs(taskID, 500)
-	if err != nil || len(logs) == 0 {
+	// Fast check: does this task have any continuation markers?
+	hasContinuation, err := e.db.HasContinuationMarker(taskID)
+	if err != nil || !hasContinuation {
 		return ""
 	}
 
-	// Look for continuation markers - if none, this is a fresh run
-	hasContinuation := false
-	for _, log := range logs {
-		if log.LineType == "system" && strings.Contains(log.Content, "--- Continuation ---") {
-			hasContinuation = true
-			break
-		}
-	}
-	if !hasContinuation {
+	// Only fetch conversation-relevant logs (questions, feedback, continuation markers)
+	// This skips large output/tool logs that aren't needed for history context
+	logs, err := e.db.GetConversationHistoryLogs(taskID)
+	if err != nil || len(logs) == 0 {
 		return ""
 	}
 
@@ -3059,230 +3332,21 @@ func (e *Executor) getConversationHistory(taskID int64) string {
 	sb.WriteString("## Previous Conversation\n\n")
 	sb.WriteString("This task was previously attempted. Here is the relevant history:\n\n")
 
-	// Extract questions and feedback from logs
+	// All returned logs are already filtered to relevant types
 	for _, log := range logs {
 		switch log.LineType {
 		case "question":
 			sb.WriteString(fmt.Sprintf("**Your question:** %s\n\n", log.Content))
 		case "text":
-			if strings.HasPrefix(log.Content, "Feedback: ") {
-				feedback := strings.TrimPrefix(log.Content, "Feedback: ")
-				sb.WriteString(fmt.Sprintf("**User's response:** %s\n\n", feedback))
-			}
+			feedback := strings.TrimPrefix(log.Content, "Feedback: ")
+			sb.WriteString(fmt.Sprintf("**User's response:** %s\n\n", feedback))
 		case "system":
-			if strings.Contains(log.Content, "--- Continuation ---") {
-				sb.WriteString("---\n\n")
-			}
+			sb.WriteString("---\n\n")
 		}
 	}
 
 	sb.WriteString("Please continue with this context in mind.\n\n")
 	return sb.String()
-}
-
-// CheckPRStateAndUpdateTask checks the PR state for a specific task and updates it if merged.
-// This is called reactively when task views are opened/closed.
-func (e *Executor) CheckPRStateAndUpdateTask(taskID int64) {
-	task, err := e.db.GetTask(taskID)
-	if err != nil || task == nil {
-		return
-	}
-
-	// Only auto-close backlog tasks - if task ever started (queued/processing/blocked),
-	// let user decide what to do with it
-	if task.Status != db.StatusBacklog || task.BranchName == "" {
-		return
-	}
-
-	// Skip tasks currently being processed
-	e.mu.RLock()
-	isRunning := e.runningTasks[task.ID]
-	e.mu.RUnlock()
-	if isRunning {
-		return
-	}
-
-	// Check if the branch has been merged (via git or PR status)
-	if e.isBranchMerged(task) {
-		e.logger.Info("Branch merged, closing task", "id", task.ID, "branch", task.BranchName)
-		e.logLine(task.ID, "system", fmt.Sprintf("Branch %s has been merged - automatically closing task", task.BranchName))
-		e.updateStatus(task.ID, db.StatusDone)
-		e.hooks.OnStatusChange(task, db.StatusDone, "PR merged")
-	}
-}
-
-// checkMergedBranches checks for tasks whose branches have been merged into the default branch.
-// If a task's branch is merged, it automatically closes the task.
-// This checks both via GitHub PR status (if available) and git merge detection.
-func (e *Executor) checkMergedBranches() {
-	// Get all tasks that have branches and aren't done
-	tasks, err := e.db.GetTasksWithBranches()
-	if err != nil {
-		e.logger.Debug("Failed to get tasks with branches", "error", err)
-		return
-	}
-
-	for _, task := range tasks {
-		// Only auto-close backlog tasks - if task ever started, let user decide
-		if task.Status != db.StatusBacklog {
-			continue
-		}
-
-		// Skip tasks currently being processed
-		e.mu.RLock()
-		isRunning := e.runningTasks[task.ID]
-		e.mu.RUnlock()
-		if isRunning {
-			continue
-		}
-
-		// Check if the branch has been merged (via git or PR status)
-		if e.isBranchMerged(task) {
-			e.logger.Info("Branch merged, closing task", "id", task.ID, "branch", task.BranchName)
-			e.logLine(task.ID, "system", fmt.Sprintf("Branch %s has been merged - automatically closing task", task.BranchName))
-			e.updateStatus(task.ID, db.StatusDone)
-			e.hooks.OnStatusChange(task, db.StatusDone, "PR merged")
-		}
-	}
-}
-
-// isBranchMerged checks if a task's branch has been merged into the default branch.
-// First checks GitHub API for PR merge status (most reliable), then falls back to git commands.
-// All commands have timeouts to prevent blocking.
-func (e *Executor) isBranchMerged(task *db.Task) bool {
-	projectDir := e.getProjectDir(task.Project)
-	if projectDir == "" {
-		return false
-	}
-
-	// Check if it's a git repo
-	gitDir := filepath.Join(projectDir, ".git")
-	if _, err := os.Stat(gitDir); os.IsNotExist(err) {
-		return false
-	}
-
-	// First, check GitHub API for PR merge status (most reliable method)
-	// This directly tells us if the PR was merged, regardless of branch deletion
-	if e.prCache != nil && task.BranchName != "" {
-		prInfo := e.prCache.GetPRForBranch(projectDir, task.BranchName)
-		if prInfo != nil && prInfo.State == github.PRStateMerged {
-			e.logger.Debug("PR detected as merged via GitHub API", "branch", task.BranchName, "pr", prInfo.Number)
-			return true
-		}
-	}
-
-	// Get the default branch
-	defaultBranch := e.getDefaultBranch(projectDir)
-
-	// Timeouts for git operations
-	const networkTimeout = 10 * time.Second // For network ops (fetch, ls-remote)
-	const localTimeout = 5 * time.Second    // For local ops
-
-	// Fetch from remote to get latest state (with timeout)
-	fetchCtx, fetchCancel := context.WithTimeout(context.Background(), networkTimeout)
-	defer fetchCancel()
-	fetchCmd := exec.CommandContext(fetchCtx, "git", "fetch", "--quiet", "origin")
-	fetchCmd.Dir = projectDir
-	fetchCmd.Run() // Ignore errors - might be offline or timeout
-
-	// Check if the branch has been merged into the default branch
-	// Use git branch --merged to see which branches have been merged
-	branchCtx, branchCancel := context.WithTimeout(context.Background(), localTimeout)
-	defer branchCancel()
-	cmd := exec.CommandContext(branchCtx, "git", "branch", "-r", "--merged", defaultBranch)
-	cmd.Dir = projectDir
-	output, err := cmd.Output()
-	if err != nil {
-		return false
-	}
-
-	// Look for our branch in the merged list
-	// Branches appear as "  origin/branch-name" or "* origin/branch-name"
-	mergedBranches := strings.Split(string(output), "\n")
-	for _, branch := range mergedBranches {
-		branch = strings.TrimSpace(branch)
-		branch = strings.TrimPrefix(branch, "* ")
-
-		// Check both with and without origin/ prefix
-		branchName := task.BranchName
-		if strings.Contains(branch, branchName) ||
-			strings.HasSuffix(branch, "/"+branchName) ||
-			branch == "origin/"+branchName {
-			return true
-		}
-	}
-
-	// Also check if the branch no longer exists on remote (was deleted after merge)
-	// This is common when PRs are merged and branches are auto-deleted
-	lsCtx, lsCancel := context.WithTimeout(context.Background(), networkTimeout)
-	defer lsCancel()
-	lsRemoteCmd := exec.CommandContext(lsCtx, "git", "ls-remote", "--heads", "origin", task.BranchName)
-	lsRemoteCmd.Dir = projectDir
-	lsOutput, err := lsRemoteCmd.Output()
-	if err == nil && len(strings.TrimSpace(string(lsOutput))) == 0 {
-		// Branch doesn't exist on remote - check if it ever had commits
-		// that are now part of the default branch
-		logCtx, logCancel := context.WithTimeout(context.Background(), localTimeout)
-		defer logCancel()
-		logCmd := exec.CommandContext(logCtx, "git", "log", "--oneline", "-1", "origin/"+defaultBranch, "--grep="+task.BranchName)
-		logCmd.Dir = projectDir
-		logOutput, err := logCmd.Output()
-		if err == nil && len(strings.TrimSpace(string(logOutput))) > 0 {
-			return true
-		}
-
-		// Check if local branch exists
-		listCtx, listCancel := context.WithTimeout(context.Background(), localTimeout)
-		defer listCancel()
-		localLogCmd := exec.CommandContext(listCtx, "git", "branch", "--list", task.BranchName)
-		localLogCmd.Dir = projectDir
-		localOutput, _ := localLogCmd.Output()
-		if len(strings.TrimSpace(string(localOutput))) > 0 {
-			// Local branch exists - but we need to be careful not to flag newly created branches
-			// A newly created branch from main has no unique commits, so its tip equals merge-base
-			// Only consider it merged if:
-			// 1. The branch has unique commits (tip != merge-base with default)
-			// 2. AND all those commits are now in the default branch
-
-			// Get branch tip commit
-			tipCtx, tipCancel := context.WithTimeout(context.Background(), localTimeout)
-			defer tipCancel()
-			branchTipCmd := exec.CommandContext(tipCtx, "git", "rev-parse", task.BranchName)
-			branchTipCmd.Dir = projectDir
-			branchTip, err := branchTipCmd.Output()
-			if err != nil {
-				return false
-			}
-
-			// Get merge-base with default branch
-			mbCtx, mbCancel := context.WithTimeout(context.Background(), localTimeout)
-			defer mbCancel()
-			mergeBaseRevCmd := exec.CommandContext(mbCtx, "git", "merge-base", task.BranchName, defaultBranch)
-			mergeBaseRevCmd.Dir = projectDir
-			mergeBase, err := mergeBaseRevCmd.Output()
-			if err != nil {
-				return false
-			}
-
-			// If branch tip equals merge-base, the branch has no unique commits
-			// This means it's a newly created branch, NOT a merged branch
-			if strings.TrimSpace(string(branchTip)) == strings.TrimSpace(string(mergeBase)) {
-				return false // Newly created branch, not merged
-			}
-
-			// Branch has unique commits - check if they're all in default branch now
-			// (meaning the branch was merged)
-			ancestorCtx, ancestorCancel := context.WithTimeout(context.Background(), localTimeout)
-			defer ancestorCancel()
-			mergeCheckCmd := exec.CommandContext(ancestorCtx, "git", "merge-base", "--is-ancestor", task.BranchName, defaultBranch)
-			mergeCheckCmd.Dir = projectDir
-			if mergeCheckCmd.Run() == nil {
-				return true
-			}
-		}
-	}
-
-	return false
 }
 
 // setupWorktree creates a git worktree for the task if the project is a git repo.
@@ -3301,6 +3365,11 @@ func (e *Executor) setupWorktree(task *db.Task) (string, error) {
 
 	if projectDir == "" {
 		return "", fmt.Errorf("project directory not found for project: %s", task.Project)
+	}
+
+	// For non-worktree projects, all tasks share the project directory directly
+	if !e.config.ProjectUsesWorktrees(task.Project) {
+		return e.setupSharedWorkDir(task, projectDir, paths)
 	}
 
 	// Check if project is a git repo, initialize one if not
@@ -3408,58 +3477,84 @@ func (e *Executor) setupWorktree(task *db.Task) (string, error) {
 		return worktreePath, nil
 	}
 
-	// Get default branch name
-	defaultBranch := e.getDefaultBranch(projectDir)
-
-	// Create new branch and worktree
-	cmd := exec.Command("git", "worktree", "add", "-b", branchName, worktreePath, defaultBranch)
-	cmd.Dir = projectDir
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		// Check if branch already exists
-		if strings.Contains(string(output), "already exists") {
-			// Try using existing branch
-			cmd = exec.Command("git", "worktree", "add", worktreePath, branchName)
-			cmd.Dir = projectDir
-			output2, err2 := cmd.CombinedOutput()
-			if err2 != nil {
-				// Check if worktree was created by another process
-				if strings.Contains(string(output2), "already checked out") {
-					// Worktree exists, reuse it
-					task.WorktreePath = worktreePath
-					task.BranchName = branchName
-
-					// Fetch PR information if available
-					e.updateTaskPRInfo(task, projectDir)
-
-					e.db.UpdateTask(task)
-					// Allocate a port if not already assigned
-					if task.Port == 0 {
-						port, err := e.db.AllocatePort(task.ID)
-						if err != nil {
-							e.logger.Warn("could not allocate port", "error", err)
-						} else {
-							task.Port = port
-						}
-					}
-					trustMiseConfig(worktreePath)
-					e.writeWorktreeEnvFile(projectDir, worktreePath, task, paths.configDir)
-					symlinkClaudeConfig(projectDir, worktreePath)
-					symlinkMCPConfig(projectDir, worktreePath)
-					copyMCPConfig(paths.configFile, projectDir, worktreePath)
-					e.runWorktreeInitScript(projectDir, worktreePath, task)
-					return worktreePath, nil
-				}
-				return "", fmt.Errorf("create worktree: %v\n%s\n%s", err, string(output), string(output2))
-			}
-		} else {
-			return "", fmt.Errorf("create worktree: %v\n%s", err, string(output))
+	// Check if task specifies an existing source branch to checkout
+	if task.SourceBranch != "" {
+		// Fetch the latest from origin to ensure we have the branch
+		fetchCmd := exec.Command("git", "fetch", "origin")
+		fetchCmd.Dir = projectDir
+		if fetchOutput, fetchErr := fetchCmd.CombinedOutput(); fetchErr != nil {
+			return "", fmt.Errorf("fetch origin: %v\n%s", fetchErr, string(fetchOutput))
 		}
-	}
 
-	// Update task with worktree info
-	task.WorktreePath = worktreePath
-	task.BranchName = branchName
+		// Create worktree from existing remote branch (no -b flag)
+		remoteBranch := "origin/" + task.SourceBranch
+		cmd := exec.Command("git", "worktree", "add", worktreePath, remoteBranch)
+		cmd.Dir = projectDir
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			return "", fmt.Errorf("create worktree from branch %s: %v\n%s", task.SourceBranch, err, string(output))
+		}
+
+		// Use the source branch name as the branch name for the task
+		branchName = task.SourceBranch
+
+		// Update task with worktree info
+		task.WorktreePath = worktreePath
+		task.BranchName = branchName
+	} else {
+		// Get default branch name
+		defaultBranch := e.getDefaultBranch(projectDir)
+
+		// Create new branch and worktree
+		cmd := exec.Command("git", "worktree", "add", "-b", branchName, worktreePath, defaultBranch)
+		cmd.Dir = projectDir
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			// Check if branch already exists
+			if strings.Contains(string(output), "already exists") {
+				// Try using existing branch
+				cmd = exec.Command("git", "worktree", "add", worktreePath, branchName)
+				cmd.Dir = projectDir
+				output2, err2 := cmd.CombinedOutput()
+				if err2 != nil {
+					// Check if worktree was created by another process
+					if strings.Contains(string(output2), "already checked out") {
+						// Worktree exists, reuse it
+						task.WorktreePath = worktreePath
+						task.BranchName = branchName
+
+						// Fetch PR information if available
+						e.updateTaskPRInfo(task, projectDir)
+
+						e.db.UpdateTask(task)
+						// Allocate a port if not already assigned
+						if task.Port == 0 {
+							port, err := e.db.AllocatePort(task.ID)
+							if err != nil {
+								e.logger.Warn("could not allocate port", "error", err)
+							} else {
+								task.Port = port
+							}
+						}
+						trustMiseConfig(worktreePath)
+						e.writeWorktreeEnvFile(projectDir, worktreePath, task, paths.configDir)
+						symlinkClaudeConfig(projectDir, worktreePath)
+						symlinkMCPConfig(projectDir, worktreePath)
+						copyMCPConfig(paths.configFile, projectDir, worktreePath)
+						e.runWorktreeInitScript(projectDir, worktreePath, task)
+						return worktreePath, nil
+					}
+					return "", fmt.Errorf("create worktree: %v\n%s\n%s", err, string(output), string(output2))
+				}
+			} else {
+				return "", fmt.Errorf("create worktree: %v\n%s", err, string(output))
+			}
+		}
+
+		// Update task with worktree info
+		task.WorktreePath = worktreePath
+		task.BranchName = branchName
+	}
 
 	// Fetch PR information if available
 	e.updateTaskPRInfo(task, projectDir)
@@ -3489,6 +3584,36 @@ func (e *Executor) setupWorktree(task *db.Task) (string, error) {
 	e.runWorktreeInitScript(projectDir, worktreePath, task)
 
 	return worktreePath, nil
+}
+
+// setupSharedWorkDir sets up a task to use the project directory directly,
+// without git worktree isolation. Used for non-git projects.
+func (e *Executor) setupSharedWorkDir(task *db.Task, projectDir string, paths claudePaths) (string, error) {
+	// Ensure project directory exists
+	if err := os.MkdirAll(projectDir, 0755); err != nil {
+		return "", fmt.Errorf("create project dir: %w", err)
+	}
+
+	// Set worktree path to the project directory itself
+	task.WorktreePath = projectDir
+	task.BranchName = "" // No branch for non-git projects
+	e.db.UpdateTask(task)
+
+	// Allocate a port if not already assigned
+	if task.Port == 0 {
+		port, err := e.db.AllocatePort(task.ID)
+		if err != nil {
+			e.logger.Warn("could not allocate port", "error", err)
+		} else {
+			task.Port = port
+		}
+	}
+
+	e.logLine(task.ID, "system", fmt.Sprintf("Using shared working directory: %s (no worktree isolation)", projectDir))
+
+	e.writeWorktreeEnvFile(projectDir, projectDir, task, paths.configDir)
+
+	return projectDir, nil
 }
 
 // getUserShell returns the login shell for the given username.
@@ -3833,7 +3958,8 @@ func writeWorkflowMCPConfig(worktreePath string, taskID int64) error {
 		mcpServers = make(map[string]interface{})
 	}
 
-	// Add/update the taskyou server
+	// Add/update the taskyou server (and remove old "workflow" name if present)
+	delete(mcpServers, "workflow")
 	mcpServers["taskyou"] = taskyouServer
 	projectConfig["mcpServers"] = mcpServers
 	projects[worktreePath] = projectConfig
@@ -4192,6 +4318,7 @@ func (e *Executor) updateTaskPRInfo(task *db.Task, projectDir string) {
 	if prInfo != nil {
 		task.PRURL = prInfo.URL
 		task.PRNumber = prInfo.Number
+		task.PRInfoJSON = github.MarshalPRInfo(prInfo)
 	}
 }
 
@@ -4207,6 +4334,21 @@ func (e *Executor) CleanupWorktree(task *db.Task) error {
 		return nil
 	}
 	paths := e.claudePathsForProject(task.Project)
+
+	// Skip worktree removal for non-worktree tasks where WorktreePath is the
+	// project root itself. Running "git worktree remove" on the main working
+	// tree would fail with "fatal: is a main working tree".
+	isWorktree := task.WorktreePath != projectDir &&
+		strings.Contains(task.WorktreePath, string(filepath.Separator)+".task-worktrees"+string(filepath.Separator))
+
+	if !isWorktree {
+		// For non-worktree tasks, just clean up the .envrc and hooks files
+		// that were written to the project directory.
+		os.Remove(filepath.Join(task.WorktreePath, ".envrc"))
+		settingsPath := filepath.Join(task.WorktreePath, ".claude", "settings.local.json")
+		os.Remove(settingsPath)
+		return nil
+	}
 
 	// Run teardown script before removing the worktree
 	e.runWorktreeTeardownScript(projectDir, task.WorktreePath, task)
@@ -4252,6 +4394,13 @@ func (e *Executor) CleanupWorktree(task *db.Task) error {
 // 4. Removes the worktree with --force
 func (e *Executor) ArchiveWorktree(task *db.Task) error {
 	if task.WorktreePath == "" {
+		return nil
+	}
+
+	// For non-worktree projects, just clear the worktree path reference.
+	// The shared working directory is never removed.
+	if !e.config.ProjectUsesWorktrees(task.Project) {
+		e.db.ClearTaskWorktreePath(task.ID)
 		return nil
 	}
 
@@ -4359,9 +4508,10 @@ func (e *Executor) ArchiveWorktree(task *db.Task) error {
 		}
 	}(task.WorktreePath, paths.configFile)
 
-	// Clear worktree info from task (but keep branch name for unarchiving reference)
-	task.WorktreePath = ""
-	e.db.UpdateTask(task)
+	// Clear worktree path (but keep branch name for unarchiving reference).
+	// Use targeted update to avoid overwriting other fields that may have
+	// changed concurrently (e.g., status set to archived before this runs).
+	e.db.ClearTaskWorktreePath(task.ID)
 
 	return nil
 }
@@ -4375,6 +4525,18 @@ func (e *Executor) ArchiveWorktree(task *db.Task) error {
 // 3. Runs init script
 // 4. Clears the archive state from the database
 func (e *Executor) UnarchiveWorktree(task *db.Task) error {
+	// For non-worktree projects, just restore the worktree path to the project dir
+	if !e.config.ProjectUsesWorktrees(task.Project) {
+		projectDir := e.getProjectDir(task.Project)
+		if projectDir == "" {
+			return fmt.Errorf("could not find project directory for project: %s", task.Project)
+		}
+		task.WorktreePath = projectDir
+		task.BranchName = ""
+		e.db.UpdateTask(task)
+		return nil
+	}
+
 	// Check if task has archive state
 	if !task.HasArchiveState() {
 		return fmt.Errorf("task has no archive state to restore")
@@ -4759,7 +4921,7 @@ func (e *Executor) runPi(ctx context.Context, task *db.Task, workDir, prompt str
 	}
 
 	// Create new window in task-daemon session (with retry logic for race conditions)
-	actualSession, tmuxErr := createTmuxWindow(daemonSession, windowName, workDir, script)
+	actualSession, tmuxErr := createTmuxWindow(daemonSession, windowName, workDir, script, e.getProjectDir(task.Project))
 	if tmuxErr != nil {
 		e.logger.Error("tmux new-window failed", "error", tmuxErr, "session", daemonSession)
 		e.logLine(task.ID, "error", fmt.Sprintf("Failed to create tmux window: %s", tmuxErr.Error()))
@@ -4881,7 +5043,7 @@ func (e *Executor) runPiResume(ctx context.Context, task *db.Task, workDir, prom
 		task.ID, taskSessionID, task.Port, task.WorktreePath, sessionPath, systemPromptFlag, feedbackFile.Name())
 
 	// Create new window in task-daemon session (with retry logic for race conditions)
-	actualSession, tmuxErr := createTmuxWindow(daemonSession, windowName, workDir, script)
+	actualSession, tmuxErr := createTmuxWindow(daemonSession, windowName, workDir, script, e.getProjectDir(task.Project))
 	if tmuxErr != nil {
 		e.logger.Error("tmux new-window failed", "error", tmuxErr, "session", daemonSession)
 		e.logLine(task.ID, "error", fmt.Sprintf("Failed to create tmux window: %s", tmuxErr.Error()))
@@ -4948,31 +5110,7 @@ func (e *Executor) getPiPID(taskID int64) int {
 		return 0
 	}
 
-	for _, line := range strings.Split(string(out), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-
-		// Parse "session:window:pane pid"
-		parts := strings.Fields(line)
-		if len(parts) != 2 {
-			continue
-		}
-
-		target := parts[0]
-		pidStr := parts[1]
-
-		// Only match panes in windows named after this task
-		if !strings.Contains(target, windowName) {
-			continue
-		}
-
-		pid, err := strconv.Atoi(pidStr)
-		if err != nil {
-			continue
-		}
-
+	for _, pid := range findPanesForWindow(string(out), windowName) {
 		// Check if this is a Pi process or has Pi as child
 		cmdOut, _ := exec.CommandContext(ctx, "ps", "-p", strconv.Itoa(pid), "-o", "comm=").Output()
 		if strings.Contains(string(cmdOut), "pi") || strings.Contains(string(cmdOut), "node") || strings.Contains(string(cmdOut), "ty") {
@@ -5025,27 +5163,53 @@ func (e *Executor) KillPiProcess(taskID int64) bool {
 // This prevents Claude from accidentally writing to the main project directory.
 // Returns true if the path is valid for task execution.
 func isValidWorktreePath(workDir string) bool {
-	// Empty path is never valid
 	if workDir == "" {
 		return false
 	}
 
-	// Resolve symlinks and clean the path
 	absPath, err := filepath.Abs(workDir)
 	if err != nil {
 		return false
 	}
 
-	// Evaluate any symlinks in the path
 	resolvedPath, err := filepath.EvalSymlinks(absPath)
 	if err != nil {
-		// Path might not exist yet, use the absolute path
 		resolvedPath = absPath
 	}
 
-	// Check that the path contains .task-worktrees
 	// Valid paths look like: /path/to/project/.task-worktrees/123-task-slug
 	return strings.Contains(resolvedPath, string(filepath.Separator)+".task-worktrees"+string(filepath.Separator))
+}
+
+// isValidWorkDir validates that a working directory is either within a .task-worktrees directory
+// (for git worktree projects) or matches a specific allowed project directory (for non-worktree
+// projects). The allowedProjectDir parameter restricts which non-worktree paths are accepted,
+// preventing arbitrary directory access.
+func isValidWorkDir(workDir string, allowedProjectDir string) bool {
+	if isValidWorktreePath(workDir) {
+		return true
+	}
+
+	// For non-worktree projects, only accept the exact configured project directory.
+	if workDir == "" || allowedProjectDir == "" {
+		return false
+	}
+
+	absWork, err := filepath.Abs(workDir)
+	if err != nil {
+		return false
+	}
+	absAllowed, err := filepath.Abs(allowedProjectDir)
+	if err != nil {
+		return false
+	}
+
+	// Must match the allowed path AND exist as a directory
+	if absWork != absAllowed {
+		return false
+	}
+	info, err := os.Stat(absWork)
+	return err == nil && info.IsDir()
 }
 
 // slugify converts a string to a URL/branch-friendly slug.
@@ -5083,4 +5247,3 @@ func slugify(s string, maxLen int) string {
 
 	return s
 }
-

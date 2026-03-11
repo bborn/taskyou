@@ -15,13 +15,14 @@ import (
 
 // Event types for task lifecycle
 const (
-	TaskCreated   = "task.created"
-	TaskUpdated   = "task.updated"
-	TaskDeleted   = "task.deleted"
-	TaskStarted   = "task.started"
-	TaskBlocked   = "task.blocked" // Task needs input from user
-	TaskCompleted = "task.completed"
-	TaskFailed    = "task.failed"
+	TaskCreated       = "task.created"
+	TaskUpdated       = "task.updated"
+	TaskDeleted       = "task.deleted"
+	TaskStarted       = "task.started"
+	TaskWorktreeReady = "task.worktree_ready"
+	TaskBlocked       = "task.blocked" // Task needs input from user
+	TaskCompleted     = "task.completed"
+	TaskFailed        = "task.failed"
 )
 
 // Event represents a task lifecycle event.
@@ -75,6 +76,13 @@ func (e *Emitter) runHook(event Event) {
 			fmt.Sprintf("TASK_STATUS=%s", event.Task.Status),
 			fmt.Sprintf("TASK_PROJECT=%s", event.Task.Project),
 		)
+		if event.Task.WorktreePath != "" {
+			env = append(env,
+				fmt.Sprintf("WORKTREE_PATH=%s", event.Task.WorktreePath),
+				fmt.Sprintf("WORKTREE_BRANCH=%s", event.Task.BranchName),
+				fmt.Sprintf("WORKTREE_PORT=%d", event.Task.Port),
+			)
+		}
 	}
 
 	if len(event.Metadata) > 0 {
@@ -115,6 +123,14 @@ func (e *Emitter) EmitTaskUnpinned(task *db.Task) {
 
 func (e *Emitter) EmitTaskStarted(task *db.Task) {
 	e.Emit(Event{Type: TaskStarted, TaskID: task.ID, Task: task})
+}
+
+func (e *Emitter) EmitTaskWorktreeReady(task *db.Task) {
+	e.Emit(Event{Type: TaskWorktreeReady, TaskID: task.ID, Task: task, Metadata: map[string]interface{}{
+		"worktree_path": task.WorktreePath,
+		"branch_name":   task.BranchName,
+		"port":          task.Port,
+	}})
 }
 
 func (e *Emitter) EmitTaskBlocked(task *db.Task, reason string) {

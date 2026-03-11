@@ -47,6 +47,14 @@ type KeybindingsConfig struct {
 	FocusDone          *KeybindingConfig `yaml:"focus_done,omitempty"`
 	JumpToPinned       *KeybindingConfig `yaml:"jump_to_pinned,omitempty"`
 	JumpToUnpinned     *KeybindingConfig `yaml:"jump_to_unpinned,omitempty"`
+	CollapseBacklog    *KeybindingConfig `yaml:"collapse_backlog,omitempty"`
+	CollapseDone       *KeybindingConfig `yaml:"collapse_done,omitempty"`
+	OpenBrowser        *KeybindingConfig `yaml:"open_browser,omitempty"`
+	ApprovePrompt      *KeybindingConfig `yaml:"approve_prompt,omitempty"`
+	DenyPrompt         *KeybindingConfig `yaml:"deny_prompt,omitempty"`
+	Spotlight          *KeybindingConfig `yaml:"spotlight,omitempty"`
+	SpotlightSync      *KeybindingConfig `yaml:"spotlight_sync,omitempty"`
+	QuickInput         *KeybindingConfig `yaml:"quick_input,omitempty"`
 }
 
 // DefaultKeybindingsConfigPath returns the default path for the keybindings config file.
@@ -231,5 +239,27 @@ jump_to_pinned:
 jump_to_unpinned:
   keys: ["shift+down"]
   help: "jump to unpinned"
+
+# Column collapse toggles
+collapse_backlog:
+  keys: ["["]
+  help: "collapse backlog"
+
+collapse_done:
+  keys: ["]"]
+  help: "collapse done"
+
+open_browser:
+  keys: ["b"]
+  help: "open in browser"
+
+# Spotlight mode
+spotlight:
+  keys: ["f"]
+  help: "spotlight"
+
+spotlight_sync:
+  keys: ["F"]
+  help: "spotlight sync"
 `
 }

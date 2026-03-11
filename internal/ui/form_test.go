@@ -5,6 +5,8 @@ import (
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+
+	"github.com/bborn/workflow/internal/db"
 )
 
 func TestCalculateBodyHeight(t *testing.T) {
@@ -17,44 +19,36 @@ func TestCalculateBodyHeight(t *testing.T) {
 		wantMax      int
 	}{
 		{
-			name:         "empty content returns minimum height",
+			name:         "empty content fills available space",
 			content:      "",
 			screenHeight: 50,
 			screenWidth:  100,
-			wantMin:      8,
-			wantMax:      8,
+			wantMin:      20, // body fills available space (50 - overhead)
+			wantMax:      50,
 		},
 		{
-			name:         "single line returns minimum height",
+			name:         "single line fills available space",
 			content:      "hello world",
 			screenHeight: 50,
 			screenWidth:  100,
-			wantMin:      8,
-			wantMax:      8,
+			wantMin:      20,
+			wantMax:      50,
 		},
 		{
-			name:         "multiple lines grows height",
-			content:      "line1\nline2\nline3\nline4\nline5\nline6",
-			screenHeight: 50,
+			name:         "small screen uses minimum height",
+			content:      "",
+			screenHeight: 20,
 			screenWidth:  100,
-			wantMin:      8,
-			wantMax:      8,
+			wantMin:      8, // minimum height enforced
+			wantMax:      20,
 		},
 		{
-			name:         "many lines capped at max height (50% of screen)",
-			content:      strings.Repeat("line\n", 50),
-			screenHeight: 50,
+			name:         "large screen fills more space",
+			content:      "",
+			screenHeight: 100,
 			screenWidth:  100,
-			wantMin:      8,  // at least minimum
-			wantMax:      14, // (50-22)/2 = 14
-		},
-		{
-			name:         "long lines wrap and increase height",
-			content:      strings.Repeat("a", 200), // should wrap on ~76 char width
-			screenHeight: 50,
-			screenWidth:  100,
-			wantMin:      8,
-			wantMax:      8, // wrapped lines still within minimum
+			wantMin:      50, // more screen = more body space
+			wantMax:      100,
 		},
 	}
 
@@ -78,41 +72,37 @@ func TestCalculateBodyHeight(t *testing.T) {
 func TestUpdateBodyHeightSetsHeight(t *testing.T) {
 	m := NewFormModel(nil, 100, 50, "", nil)
 
-	// Initially should have minimum height of 8
+	// Should fill available space regardless of content
 	m.updateBodyHeight()
 	// The textarea height is internal, so we just verify no panic
 
-	// Add content and update
+	// Add content and update - height stays the same (fills available space)
 	m.bodyInput.SetValue("line1\nline2\nline3\nline4\nline5")
 	m.updateBodyHeight()
-	// Verify no panic and height should be 5
 
-	// Verify that with large content, height is capped
+	// Large content - height is the same (fills available space)
 	m.bodyInput.SetValue(strings.Repeat("line\n", 100))
 	m.updateBodyHeight()
-	// Should be capped at max height (50% of screen)
 }
 
-func TestMaxHeightIs50PercentOfScreen(t *testing.T) {
+func TestBodyHeightFillsAvailableSpace(t *testing.T) {
 	screenHeights := []int{40, 60, 80, 100}
 
 	for _, screenHeight := range screenHeights {
 		t.Run("screen_height_"+string(rune('0'+screenHeight/10)), func(t *testing.T) {
 			m := NewFormModel(nil, 100, screenHeight, "", nil)
 
-			// Add lots of content to trigger max height
-			m.bodyInput.SetValue(strings.Repeat("line\n", 100))
-
 			height := m.calculateBodyHeight()
 
-			// formOverhead is 22, so maxHeight = (screenHeight - 22) / 2
-			expectedMax := (screenHeight - 22) / 2
-			if expectedMax < 8 {
-				expectedMax = 8
+			// Body should fill available space (screen minus overhead)
+			// In advanced mode: boxChrome(6) + common(6) + advanced(10) = 22
+			expectedHeight := screenHeight - 22
+			if expectedHeight < 8 {
+				expectedHeight = 8
 			}
 
-			if height > expectedMax {
-				t.Errorf("height %d exceeds expected max %d for screen height %d", height, expectedMax, screenHeight)
+			if height != expectedHeight {
+				t.Errorf("height %d != expected %d for screen height %d", height, expectedHeight, screenHeight)
 			}
 		})
 	}
@@ -870,5 +860,304 @@ func TestFormDefaultsToFirstAvailableExecutor(t *testing.T) {
 
 	if m.executor != "codex" {
 		t.Errorf("expected form to default to 'codex', got %q", m.executor)
+	}
+}
+
+func TestFormProgressiveDisclosure(t *testing.T) {
+	t.Run("new form starts in advanced mode focused on project", func(t *testing.T) {
+		m := NewFormModel(nil, 100, 50, "", []string{"claude"})
+
+		if !m.showAdvanced {
+			t.Error("expected new form to start with showAdvanced=true")
+		}
+		if m.focused != FieldProject {
+			t.Errorf("expected focus on FieldProject, got %d", m.focused)
+		}
+	})
+
+	t.Run("edit form starts in advanced mode", func(t *testing.T) {
+		m := NewEditFormModel(nil, &db.Task{
+			Title:    "test",
+			Project:  "personal",
+			Executor: "claude",
+		}, 100, 50, []string{"claude"})
+
+		if !m.showAdvanced {
+			t.Error("expected edit form to start with showAdvanced=true")
+		}
+	})
+
+	t.Run("simple mode hides advanced fields", func(t *testing.T) {
+		m := NewFormModel(nil, 100, 50, "", []string{"claude"})
+		m.showAdvanced = false // Switch to simple mode for this test
+
+		if m.isFieldVisible(FieldProject) {
+			t.Error("FieldProject should be hidden in simple mode")
+		}
+		if !m.isFieldVisible(FieldTitle) {
+			t.Error("FieldTitle should be visible in simple mode")
+		}
+		if !m.isFieldVisible(FieldBody) {
+			t.Error("FieldBody should be visible in simple mode")
+		}
+		if m.isFieldVisible(FieldAttachments) {
+			t.Error("FieldAttachments should be hidden in simple mode")
+		}
+		if m.isFieldVisible(FieldType) {
+			t.Error("FieldType should be hidden in simple mode")
+		}
+		if m.isFieldVisible(FieldExecutor) {
+			t.Error("FieldExecutor should be hidden in simple mode")
+		}
+	})
+
+	t.Run("ctrl+e toggles advanced mode", func(t *testing.T) {
+		m := NewFormModel(nil, 100, 50, "", []string{"claude"})
+
+		if !m.showAdvanced {
+			t.Fatal("expected advanced mode initially")
+		}
+
+		// Toggle to simple
+		m.Update(tea.KeyMsg{Type: tea.KeyCtrlE})
+		if m.showAdvanced {
+			t.Error("expected simple mode after ctrl+e")
+		}
+
+		// Toggle back to advanced
+		m.Update(tea.KeyMsg{Type: tea.KeyCtrlE})
+		if !m.showAdvanced {
+			t.Error("expected advanced mode after second ctrl+e")
+		}
+	})
+
+	t.Run("focusNext skips hidden fields in simple mode", func(t *testing.T) {
+		m := NewFormModel(nil, 100, 50, "", []string{"claude"})
+		m.showAdvanced = false // Switch to simple mode for this test
+		m.focused = FieldTitle // Manually set focus to first visible field for this test
+
+		// Start on Title
+		if m.focused != FieldTitle {
+			t.Fatalf("expected focus on FieldTitle, got %d", m.focused)
+		}
+
+		// Tab should go to Body (skipping nothing, it's the next visible field)
+		m.focusNext()
+		if m.focused != FieldBody {
+			t.Errorf("expected focus on FieldBody after tab, got %d", m.focused)
+		}
+
+		// Tab again should wrap back to Title (skipping Attachments, Type, Executor, Project)
+		m.focusNext()
+		if m.focused != FieldTitle {
+			t.Errorf("expected focus to wrap back to FieldTitle, got %d", m.focused)
+		}
+	})
+
+	t.Run("simple mode view shows defaults summary", func(t *testing.T) {
+		m := NewFormModel(nil, 100, 50, "", []string{"claude"})
+		m.showAdvanced = false // Switch to simple mode for this test
+
+		view := m.View()
+
+		if !strings.Contains(view, "more options") {
+			t.Error("expected simple mode view to show 'more options' hint")
+		}
+		if strings.Contains(view, "Attachments") {
+			t.Error("expected simple mode view to hide Attachments field")
+		}
+	})
+
+	t.Run("advanced mode view shows all fields", func(t *testing.T) {
+		m := NewFormModel(nil, 100, 50, "", []string{"claude"})
+		m.showAdvanced = true
+
+		view := m.View()
+
+		if !strings.Contains(view, "Project") {
+			t.Error("expected advanced mode view to show Project field")
+		}
+		if !strings.Contains(view, "Attachments") {
+			t.Error("expected advanced mode view to show Attachments field")
+		}
+		if !strings.Contains(view, "Type") {
+			t.Error("expected advanced mode view to show Type field")
+		}
+		if !strings.Contains(view, "Executor") {
+			t.Error("expected advanced mode view to show Executor field")
+		}
+		if !strings.Contains(view, "fewer options") {
+			t.Error("expected advanced mode view to show 'fewer options' hint")
+		}
+	})
+
+	t.Run("collapsing moves focus from hidden field to title", func(t *testing.T) {
+		m := NewFormModel(nil, 100, 50, "", []string{"claude"})
+		m.showAdvanced = true
+		m.focused = FieldExecutor
+
+		// Collapse
+		m.Update(tea.KeyMsg{Type: tea.KeyCtrlE})
+
+		if m.focused != FieldTitle {
+			t.Errorf("expected focus to move to FieldTitle when collapsing, got %d", m.focused)
+		}
+	})
+}
+
+func TestFormHeaderShowsProjectInSimpleMode(t *testing.T) {
+	m := NewFormModel(nil, 100, 50, "", []string{"claude"})
+	m.showAdvanced = false // Switch to simple mode for this test
+	m.project = "myproject"
+
+	view := m.View()
+
+	if !strings.Contains(view, "myproject") {
+		t.Error("expected simple mode header to include project name")
+	}
+}
+
+func TestProjectSearchMode(t *testing.T) {
+	m := NewFormModel(nil, 100, 50, "", []string{"claude"})
+	m.showAdvanced = true
+	m.projects = []string{"personal", "workflow", "webapp", "marketing", "data-pipeline"}
+	m.project = "personal"
+	m.projectIdx = 0
+	m.focused = FieldProject
+
+	// Typing a letter should enter search mode
+	m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'w'}})
+	if !m.projectSearchMode {
+		t.Fatal("expected search mode to be active after typing a letter")
+	}
+	if m.projectSearchQuery != "w" {
+		t.Fatalf("expected search query 'w', got %q", m.projectSearchQuery)
+	}
+	if len(m.projectFiltered) < 1 {
+		t.Fatal("expected at least one filtered result for 'w'")
+	}
+	// "workflow" and "webapp" should match
+	found := false
+	for _, p := range m.projectFiltered {
+		if p == "workflow" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("expected 'workflow' to be in filtered results for query 'w'")
+	}
+
+	// Continue typing to narrow results
+	m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'o'}})
+	if m.projectSearchQuery != "wo" {
+		t.Fatalf("expected search query 'wo', got %q", m.projectSearchQuery)
+	}
+
+	// Remember the top result before selecting
+	topResult := m.projectFiltered[0]
+
+	// Select with enter
+	m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if m.projectSearchMode {
+		t.Fatal("expected search mode to be deactivated after enter")
+	}
+	if m.project != topResult {
+		t.Errorf("expected project to be %q, got %q", topResult, m.project)
+	}
+}
+
+func TestProjectSearchEscape(t *testing.T) {
+	m := NewFormModel(nil, 100, 50, "", []string{"claude"})
+	m.showAdvanced = true
+	m.projects = []string{"personal", "workflow"}
+	m.project = "personal"
+	m.projectIdx = 0
+	m.focused = FieldProject
+
+	// Enter search mode
+	m.enterProjectSearch()
+	if !m.projectSearchMode {
+		t.Fatal("expected search mode active")
+	}
+
+	// Escape should exit search mode without changing project
+	m.Update(tea.KeyMsg{Type: tea.KeyEscape})
+	if m.projectSearchMode {
+		t.Fatal("expected search mode to be deactivated after escape")
+	}
+	if m.project != "personal" {
+		t.Errorf("expected project unchanged after escape, got %q", m.project)
+	}
+}
+
+func TestProjectSearchBackspaceExitsWhenEmpty(t *testing.T) {
+	m := NewFormModel(nil, 100, 50, "", []string{"claude"})
+	m.showAdvanced = true
+	m.projects = []string{"personal", "workflow"}
+	m.project = "personal"
+	m.focused = FieldProject
+
+	// Enter search mode
+	m.enterProjectSearch()
+	if m.projectSearchQuery != "" {
+		t.Fatal("expected empty query on search start")
+	}
+
+	// Backspace on empty query should exit search mode
+	m.Update(tea.KeyMsg{Type: tea.KeyBackspace})
+	if m.projectSearchMode {
+		t.Fatal("expected backspace on empty query to exit search mode")
+	}
+}
+
+func TestProjectSearchViewShowsDropdown(t *testing.T) {
+	m := NewFormModel(nil, 100, 50, "", []string{"claude"})
+	m.showAdvanced = true
+	m.projects = []string{"personal", "workflow", "webapp"}
+	m.project = "personal"
+	m.projectIdx = 0
+	m.focused = FieldProject
+
+	// Enter search mode with query
+	m.enterProjectSearch()
+	m.projectSearchQuery = "w"
+	m.filterProjects()
+
+	view := m.View()
+
+	// Should show search results
+	if !strings.Contains(view, "workflow") {
+		t.Error("expected dropdown to show 'workflow' for query 'w'")
+	}
+}
+
+func TestProjectSearchFuzzyMatch(t *testing.T) {
+	m := NewFormModel(nil, 100, 50, "", []string{"claude"})
+	m.projects = []string{"personal", "data-pipeline", "design-portal", "deploy-prod"}
+
+	// Test fuzzy matching: "dp" should match "data-pipeline" and "deploy-prod" and "design-portal"
+	m.projectSearchQuery = "dp"
+	m.filterProjects()
+
+	if len(m.projectFiltered) == 0 {
+		t.Fatal("expected fuzzy match results for 'dp'")
+	}
+}
+
+func TestFilterProjectsEmptyQueryShowsAll(t *testing.T) {
+	m := NewFormModel(nil, 100, 50, "", []string{"claude"})
+	m.projects = []string{"personal", "workflow", "webapp"}
+	m.project = "workflow"
+
+	m.projectSearchQuery = ""
+	m.filterProjects()
+
+	if len(m.projectFiltered) != 3 {
+		t.Errorf("expected all 3 projects, got %d", len(m.projectFiltered))
+	}
+	// Current project should be pre-selected
+	if m.projectFiltered[m.projectFilteredIdx] != "workflow" {
+		t.Errorf("expected current project 'workflow' to be pre-selected, got %q", m.projectFiltered[m.projectFilteredIdx])
 	}
 }

@@ -16,6 +16,7 @@ import (
 	"github.com/bborn/workflow/extensions/ty-qmd/internal/exporter"
 	"github.com/bborn/workflow/extensions/ty-qmd/internal/qmd"
 	"github.com/bborn/workflow/extensions/ty-qmd/internal/tasks"
+	"github.com/bborn/workflow/internal/db"
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
 )
@@ -104,10 +105,6 @@ func syncCmd() *cobra.Command {
 			if project != "" {
 				opts.Project = project
 			}
-			if !all {
-				opts.NotSynced = true
-			}
-
 			taskList, err := taskDB.ListTasks(opts)
 			if err != nil {
 				return fmt.Errorf("failed to list tasks: %w", err)
@@ -120,19 +117,21 @@ func syncCmd() *cobra.Command {
 
 			logger.Info("syncing tasks", "count", len(taskList))
 
-			// Ensure collection exists
 			collection := cfg.Collections.Tasks
-			if err := q.EnsureCollection(collection); err != nil {
-				return fmt.Errorf("failed to ensure collection: %w", err)
-			}
 
 			// Export and index each task
 			exp := exporter.New(cfg.Sync.IncludeLogs, cfg.Sync.MaxLogLines)
 			synced := 0
 
 			for _, t := range taskList {
+				// Fetch logs if enabled
+				var taskLogs []*db.TaskLog
+				if cfg.Sync.IncludeLogs {
+					taskLogs, _ = taskDB.GetTaskLogs(t.ID, cfg.Sync.MaxLogLines)
+				}
+
 				// Export task to markdown
-				md := exp.Export(t)
+				md := exp.Export(t, taskLogs)
 
 				// Write to temp file
 				tmpDir := filepath.Join(os.TempDir(), "ty-qmd-export")
@@ -152,13 +151,15 @@ func syncCmd() *cobra.Command {
 					continue
 				}
 
-				// Mark as synced
-				if err := taskDB.MarkSynced(t.ID); err != nil {
-					logger.Warn("failed to mark task synced", "task", t.ID, "error", err)
-				}
-
 				synced++
 				logger.Debug("synced task", "id", t.ID, "title", t.Title)
+			}
+
+			// Update index once after all files are added
+			if synced > 0 {
+				if err := q.Update(); err != nil {
+					return fmt.Errorf("failed to update index: %w", err)
+				}
 			}
 
 			logger.Info("sync complete", "synced", synced, "total", len(taskList))
@@ -375,25 +376,6 @@ func statusCmd() *cobra.Command {
 				fmt.Printf("  Documents: %d\n", status.Documents)
 				fmt.Printf("  Embedded: %d\n", status.Embedded)
 			}
-
-			// Get tasks sync status
-			taskDB, err := tasks.Open(cfg.TaskYou.DB)
-			if err != nil {
-				fmt.Printf("\nTaskYou DB: error: %v\n", err)
-				return nil
-			}
-			defer taskDB.Close()
-
-			syncStats, err := taskDB.SyncStats()
-			if err != nil {
-				fmt.Printf("\nSync Status: error: %v\n", err)
-				return nil
-			}
-
-			fmt.Printf("\nSync Status:\n")
-			fmt.Printf("  Total completed: %d\n", syncStats.Total)
-			fmt.Printf("  Synced: %d\n", syncStats.Synced)
-			fmt.Printf("  Pending: %d\n", syncStats.Pending)
 
 			return nil
 		},

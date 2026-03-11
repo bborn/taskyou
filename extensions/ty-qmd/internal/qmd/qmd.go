@@ -2,17 +2,20 @@
 package qmd
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os/exec"
 	"strings"
+	"time"
 )
 
 // QMD wraps the qmd CLI for search operations.
 type QMD struct {
-	binary string
-	logger *slog.Logger
+	binary  string
+	logger  *slog.Logger
+	timeout time.Duration
 }
 
 // SearchResult represents a single search result.
@@ -37,8 +40,9 @@ func New(binary string, logger *slog.Logger) *QMD {
 		binary = "qmd"
 	}
 	return &QMD{
-		binary: binary,
-		logger: logger,
+		binary:  binary,
+		logger:  logger,
+		timeout: 30 * time.Second,
 	}
 }
 
@@ -58,7 +62,7 @@ func (q *QMD) Search(query, collection string, count int) ([]SearchResult, error
 		args = append(args, "-n", fmt.Sprintf("%d", count))
 	}
 
-	return q.runSearch(args)
+	return q.runSearch(context.Background(), args)
 }
 
 // VSearch performs a vector semantic search.
@@ -71,7 +75,7 @@ func (q *QMD) VSearch(query, collection string, count int) ([]SearchResult, erro
 		args = append(args, "-n", fmt.Sprintf("%d", count))
 	}
 
-	return q.runSearch(args)
+	return q.runSearch(context.Background(), args)
 }
 
 // Query performs a hybrid search with re-ranking.
@@ -84,12 +88,12 @@ func (q *QMD) Query(query, collection string, count int) ([]SearchResult, error)
 		args = append(args, "-n", fmt.Sprintf("%d", count))
 	}
 
-	return q.runSearch(args)
+	return q.runSearch(context.Background(), args)
 }
 
 // Get retrieves a document by path or docid.
 func (q *QMD) Get(pathOrDocID string) (string, error) {
-	out, err := q.run("get", pathOrDocID, "--full")
+	out, err := q.run(context.Background(), "get", pathOrDocID, "--full")
 	if err != nil {
 		return "", err
 	}
@@ -103,63 +107,36 @@ func (q *QMD) AddCollection(path, name, mask string) error {
 		args = append(args, "--mask", mask)
 	}
 
-	_, err := q.run(args...)
+	_, err := q.run(context.Background(), args...)
 	return err
 }
 
-// EnsureCollection creates a collection if it doesn't exist.
-func (q *QMD) EnsureCollection(name string) error {
-	// Check if collection exists by listing
-	out, err := q.run("collection", "list", "--json")
-	if err != nil {
-		// Collection list might fail if no collections exist yet
-		return nil
-	}
-
-	var collections []struct {
-		Name string `json:"name"`
-	}
-	if err := json.Unmarshal(out, &collections); err == nil {
-		for _, c := range collections {
-			if c.Name == name {
-				return nil // Already exists
-			}
-		}
-	}
-
-	// Create temp directory for the collection
-	// Note: qmd requires a path for collection, but for tasks we manage individual files
-	return nil
-}
-
-// IndexFile indexes a single file into a collection.
+// IndexFile adds a single file to a collection.
+// Call Update() after indexing all files to trigger re-indexing.
 func (q *QMD) IndexFile(path, collection string) error {
-	// Add file to collection and trigger embedding
 	args := []string{"collection", "add", path, "--name", collection}
-	if _, err := q.run(args...); err != nil {
-		// Might fail if collection already has this path, try update
-		q.logger.Debug("add collection failed, trying update", "error", err)
+	if _, err := q.run(context.Background(), args...); err != nil {
+		// Might fail if collection already has this path
+		q.logger.Debug("add collection failed", "error", err)
 	}
-
-	// Trigger index update
-	return q.Update()
+	return nil
 }
 
 // Update updates the index.
 func (q *QMD) Update() error {
-	_, err := q.run("update")
+	_, err := q.run(context.Background(), "update")
 	return err
 }
 
 // Embed generates embeddings for unembedded documents.
 func (q *QMD) Embed() error {
-	_, err := q.run("embed")
+	_, err := q.run(context.Background(), "embed")
 	return err
 }
 
 // Status returns the index status.
 func (q *QMD) Status() (*Status, error) {
-	out, err := q.run("status", "--json")
+	out, err := q.run(context.Background(), "status", "--json")
 	if err != nil {
 		return nil, err
 	}
@@ -183,8 +160,8 @@ func (q *QMD) Status() (*Status, error) {
 }
 
 // runSearch executes a search command and parses results.
-func (q *QMD) runSearch(args []string) ([]SearchResult, error) {
-	out, err := q.run(args...)
+func (q *QMD) runSearch(ctx context.Context, args []string) ([]SearchResult, error) {
+	out, err := q.run(ctx, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -197,11 +174,14 @@ func (q *QMD) runSearch(args []string) ([]SearchResult, error) {
 	return results, nil
 }
 
-// run executes a qmd command.
-func (q *QMD) run(args ...string) ([]byte, error) {
+// run executes a qmd command with a timeout.
+func (q *QMD) run(ctx context.Context, args ...string) ([]byte, error) {
 	q.logger.Debug("running qmd", "args", args)
 
-	cmd := exec.Command(q.binary, args...)
+	ctx, cancel := context.WithTimeout(ctx, q.timeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, q.binary, args...)
 	out, err := cmd.Output()
 	if err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok {

@@ -16,13 +16,18 @@ type Config struct {
 
 // Setting keys
 const (
-	SettingProjectsDir        = "projects_dir"
-	SettingTheme              = "theme"
-	SettingDetailPaneHeight   = "detail_pane_height"
-	SettingShellPaneWidth     = "shell_pane_width"
-	SettingShellPaneHidden    = "shell_pane_hidden"
-	SettingIdleSuspendTimeout = "idle_suspend_timeout"
+	SettingProjectsDir           = "projects_dir"
+	SettingTheme                 = "theme"
+	SettingDetailPaneHeight      = "detail_pane_height"
+	SettingShellPaneWidth        = "shell_pane_width"
+	SettingShellPaneHidden       = "shell_pane_hidden"
+	SettingIdleSuspendTimeout    = "idle_suspend_timeout"
+	SettingServerURL             = "server_url"
+	SettingWorktreeCleanupMaxAge = "worktree_cleanup_max_age"
 )
+
+// DefaultServerURL is the default base URL for opening tasks in the browser.
+const DefaultServerURL = "http://localhost"
 
 // New creates a config from database.
 func New(database *db.DB) *Config {
@@ -55,6 +60,19 @@ func (c *Config) GetProjectDir(project string) string {
 
 	// Default: projects_dir/project
 	return filepath.Join(c.ProjectsDir, project)
+}
+
+// ProjectUsesWorktrees returns whether a project uses git worktrees for task isolation.
+// Returns true by default (for backward compatibility and unknown projects).
+func (c *Config) ProjectUsesWorktrees(project string) bool {
+	if project == "" {
+		return true
+	}
+	p, err := c.db.GetProjectByName(project)
+	if err == nil && p != nil {
+		return p.UsesWorktrees()
+	}
+	return true
 }
 
 // SetProjectsDir sets the default projects directory.

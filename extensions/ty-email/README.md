@@ -169,6 +169,12 @@ echo -e "Subject: Fix the bug\n\nThe login is broken" | ty-email test
 
 # Check status
 ty-email status
+
+# Send an email (for tasks to report results)
+ty-email send --to user@example.com --subject "Results" --body "Task completed!"
+
+# Send with body from stdin
+echo "Task results" | ty-email send --to user@example.com --subject "Results"
 ```
 
 ## Usage Examples
@@ -221,6 +227,38 @@ Subject: What's happening with the checkout fix?
 
 You'll get a status update on matching tasks.
 
+### Send Results from Tasks
+
+Tasks can send results back via email using the `send` command:
+
+```bash
+# Send a simple email
+ty-email send --to user@example.com --subject "Task complete" --body "Results here"
+
+# Pipe content from a command
+cat output.log | ty-email send --to user@example.com --subject "Build results"
+
+# Include task ID for email threading
+ty-email send --to user@example.com --subject "Task #123 done" --task 123 --body "Done!"
+```
+
+This is useful for:
+- Notifying users when long-running tasks complete
+- Sending task output/results back to the original requester
+- Maintaining email thread context with `--task` flag
+
+### Dangerous Mode
+
+Enable dangerous mode to allow tasks to perform destructive operations (like `git push --force`):
+
+```yaml
+taskyou:
+  cli: ty
+  dangerous: true
+```
+
+When enabled, tasks created via email will have the `--dangerous` flag set. Use with caution.
+
 ## Configuration
 
 Config lives at `~/.config/ty-email/config.yaml`:
@@ -248,6 +286,7 @@ classifier:
 
 taskyou:
   cli: ty
+  dangerous: false  # Enable dangerous mode for tasks
 
 security:
   allowed_senders:

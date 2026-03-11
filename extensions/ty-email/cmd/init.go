@@ -7,12 +7,13 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/bborn/workflow/extensions/ty-email/internal/adapter"
-	"github.com/bborn/workflow/extensions/ty-email/internal/state"
 	"github.com/charmbracelet/huh"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
+
+	"github.com/bborn/workflow/extensions/ty-email/internal/adapter"
+	"github.com/bborn/workflow/extensions/ty-email/internal/state"
 )
 
 var (
@@ -346,7 +347,7 @@ Note: ty-email replies will appear in your Inbox (not the ty-email label).
 	cfg.SMTP.Server = "smtp.gmail.com:587"
 	cfg.SMTP.Username = username
 	cfg.SMTP.PasswordCmd = passwordCmd
-	cfg.SMTP.From = username
+	cfg.SMTP.From = suggestedAlias
 
 	// Security - only allow emails from self
 	cfg.Security.AllowedSenders = []string{username}

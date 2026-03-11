@@ -13,14 +13,16 @@ import (
 
 // Client wraps the QMD CLI for semantic search.
 type Client struct {
-	binary    string
-	available bool
-	mu        sync.RWMutex
+	binary       string
+	available    bool
+	checkedOnce  sync.Once
+	mu           sync.RWMutex
 
 	// Cache for search results
-	cache     map[string]cachedResult
-	cacheMu   sync.RWMutex
-	cacheTTL  time.Duration
+	cache       map[string]cachedResult
+	cacheMu     sync.RWMutex
+	cacheTTL    time.Duration
+	maxCache    int
 }
 
 type cachedResult struct {
@@ -53,26 +55,23 @@ func NewClient(binary string) *Client {
 	if binary == "" {
 		binary = "qmd"
 	}
-	c := &Client{
+	return &Client{
 		binary:   binary,
 		cache:    make(map[string]cachedResult),
 		cacheTTL: 5 * time.Minute,
+		maxCache: 50,
 	}
-	// Check availability on creation
-	c.checkAvailable()
-	return c
-}
-
-// checkAvailable checks if qmd is installed.
-func (c *Client) checkAvailable() {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	_, err := exec.LookPath(c.binary)
-	c.available = err == nil
 }
 
 // IsAvailable returns true if QMD is installed and usable.
+// Lazily checks on first call.
 func (c *Client) IsAvailable() bool {
+	c.checkedOnce.Do(func() {
+		_, err := exec.LookPath(c.binary)
+		c.mu.Lock()
+		c.available = err == nil
+		c.mu.Unlock()
+	})
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.available
@@ -130,8 +129,19 @@ func (c *Client) search(ctx context.Context, cmd, query, collection string, coun
 		return nil, err
 	}
 
-	// Cache results
+	// Cache results (evict oldest if at capacity)
 	c.cacheMu.Lock()
+	if len(c.cache) >= c.maxCache {
+		var oldestKey string
+		var oldestTime time.Time
+		for k, v := range c.cache {
+			if oldestKey == "" || v.timestamp.Before(oldestTime) {
+				oldestKey = k
+				oldestTime = v.timestamp
+			}
+		}
+		delete(c.cache, oldestKey)
+	}
 	c.cache[cacheKey] = cachedResult{results: results, timestamp: time.Now()}
 	c.cacheMu.Unlock()
 
@@ -203,9 +213,4 @@ func (c *Client) ClearCache() {
 	c.cacheMu.Lock()
 	c.cache = make(map[string]cachedResult)
 	c.cacheMu.Unlock()
-}
-
-// Refresh re-checks QMD availability.
-func (c *Client) Refresh() {
-	c.checkAvailable()
 }

@@ -4,19 +4,37 @@ Task You's Kanban UI is great for humans, but every action it performs is also a
 
 ## Using the Claude Code Skill
 
-Task You includes a `/taskyou` skill that teaches Claude Code (or any compatible agent) how to manage your task queue via CLI.
+TaskYou includes a `/taskyou` skill that teaches Claude Code (or any compatible agent) how to install and manage your task queue via CLI.
 
-**Automatic availability:** When working inside the Task You project, the skill is automatically loaded from `skills/taskyou/`.
+### Installation Methods
 
-**Global installation:** To use the skill from any project, run:
+**1. Quick install (recommended — no repo needed):**
+
+```bash
+curl -fsSL raw.githubusercontent.com/bborn/taskyou/main/scripts/install-skill.sh | bash
+```
+
+This downloads the skill to `~/.claude/skills/taskyou/` so you can use `/taskyou` from any project.
+
+**2. Plugin install (via Claude Code):**
+
+```
+/plugin install taskyou@bborn-taskyou
+```
+
+**3. From within the repo:**
 
 ```bash
 ./scripts/install-skill.sh
 ```
 
-This symlinks the skill to `~/.claude/skills/taskyou/` for personal access across all projects.
+This symlinks the skill from the repo to `~/.claude/skills/taskyou/`.
 
-Once available, you can say things like:
+**4. Automatic:** When working inside the TaskYou project, the skill is automatically loaded from `skills/taskyou/`.
+
+### What It Does
+
+The skill guides installation of the `ty` CLI if not present, then provides full orchestration capabilities. Once available, you can say things like:
 
 - "Show me my task board"
 - "Execute the top priority task"

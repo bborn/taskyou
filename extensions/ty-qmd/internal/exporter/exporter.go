@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/bborn/workflow/extensions/ty-qmd/internal/tasks"
+	"github.com/bborn/workflow/internal/db"
 )
 
 // Exporter converts tasks to markdown format.
@@ -23,7 +23,7 @@ func New(includeLogs bool, maxLogLines int) *Exporter {
 }
 
 // Export converts a task to markdown.
-func (e *Exporter) Export(t tasks.Task) string {
+func (e *Exporter) Export(t *db.Task, logs []*db.TaskLog) string {
 	var sb strings.Builder
 
 	// YAML frontmatter
@@ -71,49 +71,26 @@ func (e *Exporter) Export(t tasks.Task) string {
 	}
 
 	// Logs (if enabled)
-	if e.includeLogs && len(t.Logs) > 0 {
+	if e.includeLogs && len(logs) > 0 {
 		sb.WriteString("## Activity Log\n\n")
 
-		count := len(t.Logs)
+		count := len(logs)
 		if e.maxLogLines > 0 && count > e.maxLogLines {
 			count = e.maxLogLines
 		}
 
 		for i := 0; i < count; i++ {
-			log := t.Logs[i]
-			timestamp := log.Time.Format("2006-01-02 15:04")
+			log := logs[i]
+			timestamp := log.CreatedAt.Format("2006-01-02 15:04")
 			// Truncate long messages
-			msg := log.Message
+			msg := log.Content
 			if len(msg) > 500 {
 				msg = msg[:500] + "..."
 			}
-			sb.WriteString(fmt.Sprintf("- **%s** [%s]: %s\n", timestamp, log.Type, msg))
+			sb.WriteString(fmt.Sprintf("- **%s** [%s]: %s\n", timestamp, log.LineType, msg))
 		}
 		sb.WriteString("\n")
 	}
 
 	return sb.String()
-}
-
-// ExportSummary creates a brief summary for search context.
-func (e *Exporter) ExportSummary(t tasks.Task) string {
-	var parts []string
-
-	parts = append(parts, fmt.Sprintf("Task #%d: %s", t.ID, t.Title))
-
-	if t.Project != "" {
-		parts = append(parts, fmt.Sprintf("Project: %s", t.Project))
-	}
-
-	parts = append(parts, fmt.Sprintf("Status: %s", t.Status))
-
-	if t.Body != "" {
-		body := t.Body
-		if len(body) > 200 {
-			body = body[:200] + "..."
-		}
-		parts = append(parts, body)
-	}
-
-	return strings.Join(parts, "\n")
 }

@@ -24,10 +24,10 @@ type IMAPAdapter struct {
 	logger   *slog.Logger
 	emailsCh chan *Email
 
-	mu       sync.Mutex
-	client   *imapclient.Client
-	stopCh   chan struct{}
-	stopped  bool
+	mu      sync.Mutex
+	client  *imapclient.Client
+	stopCh  chan struct{}
+	stopped bool
 }
 
 // SMTPConfig holds SMTP configuration for sending.
@@ -330,9 +330,17 @@ func (a *IMAPAdapter) Send(ctx context.Context, email *OutboundEmail) error {
 	}
 	hostOnly := strings.Split(host, ":")[0]
 
+	// Use the From override if provided, otherwise fall back to SMTP config.
+	// This ensures replies come from the +ty alias address so that
+	// when the user replies, the reply routes back to ty-email.
+	fromAddr := a.smtp.From
+	if email.From != "" {
+		fromAddr = email.From
+	}
+
 	// Build message
 	var msg bytes.Buffer
-	msg.WriteString(fmt.Sprintf("From: %s\r\n", a.smtp.From))
+	msg.WriteString(fmt.Sprintf("From: %s\r\n", fromAddr))
 	msg.WriteString(fmt.Sprintf("To: %s\r\n", strings.Join(email.To, ", ")))
 	msg.WriteString(fmt.Sprintf("Subject: %s\r\n", email.Subject))
 	if email.InReplyTo != "" {
@@ -346,7 +354,7 @@ func (a *IMAPAdapter) Send(ctx context.Context, email *OutboundEmail) error {
 
 	// Send via SMTP
 	auth := smtp.PlainAuth("", a.smtp.Username, password, hostOnly)
-	if err := smtp.SendMail(host, auth, a.smtp.From, email.To, msg.Bytes()); err != nil {
+	if err := smtp.SendMail(host, auth, fromAddr, email.To, msg.Bytes()); err != nil {
 		return fmt.Errorf("failed to send email: %w", err)
 	}
 
@@ -355,9 +363,51 @@ func (a *IMAPAdapter) Send(ctx context.Context, email *OutboundEmail) error {
 }
 
 func (a *IMAPAdapter) MarkProcessed(ctx context.Context, emailID string) error {
-	// Mark as seen in IMAP
-	// This is a simplified implementation - in practice you'd need to
-	// look up the message by Message-ID and mark it
-	a.logger.Debug("marking email as processed", "id", emailID)
+	a.mu.Lock()
+	client := a.client
+	a.mu.Unlock()
+
+	if client == nil {
+		return fmt.Errorf("not connected")
+	}
+
+	folder := a.config.Folder
+	if folder == "" {
+		folder = "INBOX"
+	}
+
+	// Select folder
+	if _, err := client.Select(folder, nil).Wait(); err != nil {
+		return fmt.Errorf("failed to select folder: %w", err)
+	}
+
+	// Search for the message by Message-ID header
+	criteria := &imap.SearchCriteria{
+		Header: []imap.SearchCriteriaHeaderField{
+			{Key: "Message-ID", Value: emailID},
+		},
+	}
+	searchData, err := client.Search(criteria, nil).Wait()
+	if err != nil {
+		return fmt.Errorf("failed to search for message: %w", err)
+	}
+
+	seqNums := searchData.AllSeqNums()
+	if len(seqNums) == 0 {
+		a.logger.Debug("message not found for marking processed", "id", emailID)
+		return nil
+	}
+
+	// Add \Seen flag
+	seqSet := imap.SeqSetNum(seqNums...)
+	storeFlags := &imap.StoreFlags{
+		Op:    imap.StoreFlagsAdd,
+		Flags: []imap.Flag{imap.FlagSeen},
+	}
+	if err := client.Store(seqSet, storeFlags, nil).Close(); err != nil {
+		return fmt.Errorf("failed to mark message as seen: %w", err)
+	}
+
+	a.logger.Debug("marked email as processed", "id", emailID)
 	return nil
 }

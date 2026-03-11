@@ -13,11 +13,12 @@ type Action struct {
 	Type ActionType `json:"type"`
 
 	// For "create" action
-	Title   string `json:"title,omitempty"`
-	Body    string `json:"body,omitempty"`
-	Project string `json:"project,omitempty"`
-	TaskType string `json:"task_type,omitempty"` // code, writing, thinking
-	Execute bool   `json:"execute,omitempty"`    // Queue immediately
+	Title     string `json:"title,omitempty"`
+	Body      string `json:"body,omitempty"`
+	Project   string `json:"project,omitempty"`
+	TaskType  string `json:"task_type,omitempty"` // code, writing, thinking
+	Execute   bool   `json:"execute,omitempty"`   // Queue immediately
+	Dangerous bool   `json:"dangerous,omitempty"` // Enable dangerous mode (allows destructive operations)
 
 	// For "input" action
 	TaskID    int64  `json:"task_id,omitempty"`
@@ -71,9 +72,9 @@ type Classifier interface {
 
 // Config holds classifier configuration.
 type Config struct {
-	Provider  string `yaml:"provider"`      // "claude", "openai", "ollama"
-	Model     string `yaml:"model"`         // Model name/ID
-	APIKeyCmd string `yaml:"api_key_cmd"`   // Command to get API key
-	APIKey    string `yaml:"api_key"`       // Direct API key (less secure)
-	BaseURL   string `yaml:"base_url"`      // For Ollama or custom endpoints
+	Provider  string `yaml:"provider"`    // "claude", "openai", "ollama"
+	Model     string `yaml:"model"`       // Model name/ID
+	APIKeyCmd string `yaml:"api_key_cmd"` // Command to get API key
+	APIKey    string `yaml:"api_key"`     // Direct API key (less secure)
+	BaseURL   string `yaml:"base_url"`    // For Ollama or custom endpoints
 }
