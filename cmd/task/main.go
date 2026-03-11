@@ -902,165 +902,17 @@ Press Ctrl+C to stop.`,
 			}
 			defer database.Close()
 
-			sigCh := make(chan os.Signal, 1)
-			signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-
-			ticker := time.NewTicker(interval)
-			defer ticker.Stop()
-
-			statusStyle := func(status string) lipgloss.Style {
-				switch status {
-				case db.StatusQueued:
-					return lipgloss.NewStyle().Foreground(lipgloss.Color("#F59E0B"))
-				case db.StatusProcessing:
-					return lipgloss.NewStyle().Foreground(lipgloss.Color("#3B82F6"))
-				case db.StatusBlocked:
-					return lipgloss.NewStyle().Foreground(lipgloss.Color("#EF4444"))
-				case db.StatusDone:
-					return lipgloss.NewStyle().Foreground(lipgloss.Color("#10B981"))
-				default:
-					return lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280"))
-				}
-			}
-
-			projectStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#A78BFA"))
-			headerStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#E5E7EB"))
-
-			statusOrder := []string{
-				db.StatusProcessing,
-				db.StatusBlocked,
-				db.StatusQueued,
-				db.StatusBacklog,
-			}
-			if showDone {
-				statusOrder = append(statusOrder, db.StatusDone)
-			}
-
-			statusLabels := map[string]string{
-				db.StatusProcessing: "In Progress",
-				db.StatusBlocked:    "Blocked",
-				db.StatusQueued:     "Queued",
-				db.StatusBacklog:    "Backlog",
-				db.StatusDone:       "Done",
-			}
-
-			logStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#9CA3AF")).Italic(true)
-
-			renderTail := func() {
-				opts := db.ListTasksOptions{
-					IncludeClosed: showDone,
-					Limit:         500,
-				}
-				tasks, err := database.ListTasks(opts)
-				if err != nil {
-					fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
-					return
-				}
-
-				// Collect task IDs and fetch latest log per task
-				var taskIDs []int64
-				for _, t := range tasks {
-					taskIDs = append(taskIDs, t.ID)
-				}
-				latestLogs, _ := database.GetLatestLogPerTask(taskIDs)
-				if latestLogs == nil {
-					latestLogs = make(map[int64]*db.TaskLog)
-				}
-
-				// Group by project, then by status
-				type projectGroup struct {
-					name     string
-					statuses map[string][]*db.Task
-				}
-				projectMap := make(map[string]*projectGroup)
-				var projectOrder []string
-
-				for _, t := range tasks {
-					if t.Status == db.StatusArchived {
-						continue
-					}
-					proj := t.Project
-					if proj == "" {
-						proj = "(no project)"
-					}
-					pg, exists := projectMap[proj]
-					if !exists {
-						pg = &projectGroup{name: proj, statuses: make(map[string][]*db.Task)}
-						projectMap[proj] = pg
-						projectOrder = append(projectOrder, proj)
-					}
-					pg.statuses[t.Status] = append(pg.statuses[t.Status], t)
-				}
-
-				sort.Strings(projectOrder)
-
-				// Clear screen and move cursor to top
-				fmt.Print("\033[2J\033[H")
-
-				fmt.Println(headerStyle.Render("TaskYou — Live Tail") + "  " + dimStyle.Render(time.Now().Format("15:04:05")))
-				fmt.Println(dimStyle.Render(strings.Repeat("─", 60)))
-
-				if len(tasks) == 0 {
-					fmt.Println(dimStyle.Render("  No tasks found"))
-				}
-
-				for i, proj := range projectOrder {
-					pg := projectMap[proj]
-					// Count total tasks in this project
-					total := 0
-					for _, tl := range pg.statuses {
-						total += len(tl)
-					}
-					fmt.Printf("\n%s %s\n", projectStyle.Render(proj), dimStyle.Render(fmt.Sprintf("(%d)", total)))
-
-					for _, status := range statusOrder {
-						statusTasks := pg.statuses[status]
-						if len(statusTasks) == 0 {
-							continue
-						}
-						label := statusLabels[status]
-						fmt.Printf("  %s\n", statusStyle(status).Render(fmt.Sprintf("▸ %s (%d)", label, len(statusTasks))))
-						for _, t := range statusTasks {
-							title := truncate(t.Title, 70)
-							age := boardAgeHint(t)
-							line := fmt.Sprintf("    #%-4d %s", t.ID, title)
-							if age != "" {
-								line += "  " + dimStyle.Render(age)
-							}
-							fmt.Println(line)
-
-							// Show latest log line if available
-							if log, ok := latestLogs[t.ID]; ok && log.Content != "" {
-								content := strings.TrimSpace(log.Content)
-								// Take only the first line of multi-line content
-								if idx := strings.IndexByte(content, '\n'); idx != -1 {
-									content = content[:idx]
-								}
-								content = truncate(content, 80)
-								fmt.Printf("           %s\n", logStyle.Render(content))
-							}
-						}
-					}
-
-					if i < len(projectOrder)-1 {
-						fmt.Println()
-					}
-				}
-
-				fmt.Println()
-				fmt.Println(dimStyle.Render("Press Ctrl+C to stop • refreshing every " + interval.String()))
-			}
-
-			// Render immediately, then on each tick
-			renderTail()
-			for {
-				select {
-				case <-sigCh:
-					fmt.Println()
-					return
-				case <-ticker.C:
-					renderTail()
-				}
+			p := tea.NewProgram(
+				tailModel{
+					db:       database,
+					interval: interval,
+					showDone: showDone,
+				},
+				tea.WithAltScreen(),
+			)
+			if _, err := p.Run(); err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
 			}
 		},
 	}
@@ -3111,6 +2963,206 @@ Examples:
 		fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
 		os.Exit(1)
 	}
+}
+
+// tailModel is a Bubble Tea model for the live tail view.
+// Uses alternate screen buffer to avoid scrollback pollution.
+type tailModel struct {
+	db       *db.DB
+	interval time.Duration
+	showDone bool
+	width    int
+	height   int
+}
+
+type tailTickMsg time.Time
+
+func (m tailModel) Init() tea.Cmd {
+	return tea.Tick(m.interval, func(t time.Time) tea.Msg {
+		return tailTickMsg(t)
+	})
+}
+
+func (m tailModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tea.KeyMsg:
+		switch msg.String() {
+		case "q", "ctrl+c", "esc":
+			return m, tea.Quit
+		}
+	case tea.WindowSizeMsg:
+		m.width = msg.Width
+		m.height = msg.Height
+	case tailTickMsg:
+		return m, tea.Tick(m.interval, func(t time.Time) tea.Msg {
+			return tailTickMsg(t)
+		})
+	}
+	return m, nil
+}
+
+func (m tailModel) View() string {
+	var b strings.Builder
+
+	statusStyle := func(status string) lipgloss.Style {
+		switch status {
+		case db.StatusQueued:
+			return lipgloss.NewStyle().Foreground(lipgloss.Color("#F59E0B"))
+		case db.StatusProcessing:
+			return lipgloss.NewStyle().Foreground(lipgloss.Color("#3B82F6"))
+		case db.StatusBlocked:
+			return lipgloss.NewStyle().Foreground(lipgloss.Color("#EF4444"))
+		case db.StatusDone:
+			return lipgloss.NewStyle().Foreground(lipgloss.Color("#10B981"))
+		default:
+			return lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280"))
+		}
+	}
+
+	projectStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#A78BFA"))
+	headerStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#E5E7EB"))
+	logStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#9CA3AF")).Italic(true)
+
+	statusOrder := []string{
+		db.StatusProcessing,
+		db.StatusBlocked,
+		db.StatusQueued,
+		db.StatusBacklog,
+	}
+	if m.showDone {
+		statusOrder = append(statusOrder, db.StatusDone)
+	}
+
+	statusLabels := map[string]string{
+		db.StatusProcessing: "In Progress",
+		db.StatusBlocked:    "Blocked",
+		db.StatusQueued:     "Queued",
+		db.StatusBacklog:    "Backlog",
+		db.StatusDone:       "Done",
+	}
+
+	opts := db.ListTasksOptions{
+		IncludeClosed: m.showDone,
+		Limit:         500,
+	}
+	tasks, err := m.db.ListTasks(opts)
+	if err != nil {
+		return errorStyle.Render("Error: " + err.Error())
+	}
+
+	var taskIDs []int64
+	for _, t := range tasks {
+		taskIDs = append(taskIDs, t.ID)
+	}
+	latestLogs, _ := m.db.GetLatestLogPerTask(taskIDs)
+	if latestLogs == nil {
+		latestLogs = make(map[int64]*db.TaskLog)
+	}
+
+	type projectGroup struct {
+		name     string
+		statuses map[string][]*db.Task
+	}
+	projectMap := make(map[string]*projectGroup)
+	var projectOrder []string
+
+	for _, t := range tasks {
+		if t.Status == db.StatusArchived {
+			continue
+		}
+		proj := t.Project
+		if proj == "" {
+			proj = "(no project)"
+		}
+		pg, exists := projectMap[proj]
+		if !exists {
+			pg = &projectGroup{name: proj, statuses: make(map[string][]*db.Task)}
+			projectMap[proj] = pg
+			projectOrder = append(projectOrder, proj)
+		}
+		pg.statuses[t.Status] = append(pg.statuses[t.Status], t)
+	}
+
+	sort.Strings(projectOrder)
+
+	// Header
+	separatorWidth := 60
+	if m.width > 0 && m.width < separatorWidth {
+		separatorWidth = m.width
+	}
+	b.WriteString(headerStyle.Render("TaskYou — Live Tail"))
+	b.WriteString("  ")
+	b.WriteString(dimStyle.Render(time.Now().Format("15:04:05")))
+	b.WriteByte('\n')
+	b.WriteString(dimStyle.Render(strings.Repeat("─", separatorWidth)))
+	b.WriteByte('\n')
+
+	if len(tasks) == 0 {
+		b.WriteString(dimStyle.Render("  No tasks found"))
+		b.WriteByte('\n')
+	}
+
+	maxTitleWidth := 70
+	if m.width > 20 {
+		maxTitleWidth = m.width - 20
+	}
+
+	for i, proj := range projectOrder {
+		pg := projectMap[proj]
+		total := 0
+		for _, tl := range pg.statuses {
+			total += len(tl)
+		}
+		b.WriteByte('\n')
+		fmt.Fprintf(&b, "%s %s\n", projectStyle.Render(proj), dimStyle.Render(fmt.Sprintf("(%d)", total)))
+
+		for _, status := range statusOrder {
+			statusTasks := pg.statuses[status]
+			if len(statusTasks) == 0 {
+				continue
+			}
+			label := statusLabels[status]
+			fmt.Fprintf(&b, "  %s\n", statusStyle(status).Render(fmt.Sprintf("▸ %s (%d)", label, len(statusTasks))))
+			for _, t := range statusTasks {
+				title := truncate(t.Title, maxTitleWidth)
+				age := boardAgeHint(t)
+				line := fmt.Sprintf("    #%-4d %s", t.ID, title)
+				if age != "" {
+					line += "  " + dimStyle.Render(age)
+				}
+				b.WriteString(line)
+				b.WriteByte('\n')
+
+				if log, ok := latestLogs[t.ID]; ok && log.Content != "" {
+					content := strings.TrimSpace(log.Content)
+					if idx := strings.IndexByte(content, '\n'); idx != -1 {
+						content = content[:idx]
+					}
+					content = truncate(content, 80)
+					fmt.Fprintf(&b, "           %s\n", logStyle.Render(content))
+				}
+			}
+		}
+
+		if i < len(projectOrder)-1 {
+			b.WriteByte('\n')
+		}
+	}
+
+	b.WriteByte('\n')
+	b.WriteString(dimStyle.Render("q/esc to quit • refreshing every " + m.interval.String()))
+
+	result := b.String()
+	if m.height > 0 {
+		lines := strings.Split(result, "\n")
+		if len(lines) > m.height {
+			lines = lines[:m.height-1]
+			lines = append(lines, dimStyle.Render("… (resize terminal to see all tasks)"))
+			result = strings.Join(lines, "\n")
+		}
+	}
+
+	return result
 }
 
 // execInTmux re-executes the current command inside a new tmux session.

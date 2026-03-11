@@ -1,10 +1,14 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/bborn/workflow/internal/db"
 )
@@ -1366,6 +1370,242 @@ func TestUnescapeNewlines(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestTailModelUpdate tests the tailModel Update method
+func TestTailModelUpdate(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+	database, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer database.Close()
+
+	m := tailModel{
+		db:       database,
+		interval: 2 * time.Second,
+		showDone: false,
+		width:    80,
+		height:   24,
+	}
+
+	t.Run("q quits", func(t *testing.T) {
+		msgs := parseKeyEvents("q")
+		_, cmd := m.Update(msgs[0])
+		if cmd == nil {
+			t.Error("expected quit command, got nil")
+		}
+	})
+
+	t.Run("esc quits", func(t *testing.T) {
+		msgs := parseKeyEvents("esc")
+		_, cmd := m.Update(msgs[0])
+		if cmd == nil {
+			t.Error("expected quit command, got nil")
+		}
+	})
+
+	t.Run("window resize updates dimensions", func(t *testing.T) {
+		updated, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+		um := updated.(tailModel)
+		if um.width != 120 || um.height != 40 {
+			t.Errorf("expected 120x40, got %dx%d", um.width, um.height)
+		}
+	})
+
+	t.Run("tick returns new tick command", func(t *testing.T) {
+		_, cmd := m.Update(tailTickMsg(time.Now()))
+		if cmd == nil {
+			t.Error("expected tick command, got nil")
+		}
+	})
+}
+
+// TestTailModelView tests the tailModel View method
+func TestTailModelView(t *testing.T) {
+	t.Run("empty database shows no tasks", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		dbPath := filepath.Join(tmpDir, "test.db")
+		database, err := db.Open(dbPath)
+		if err != nil {
+			t.Fatalf("failed to open database: %v", err)
+		}
+		defer database.Close()
+
+		m := tailModel{
+			db:       database,
+			interval: 2 * time.Second,
+			width:    80,
+			height:   24,
+		}
+
+		view := m.View()
+		if !strings.Contains(view, "Live Tail") {
+			t.Error("expected header with 'Live Tail'")
+		}
+		if !strings.Contains(view, "No tasks found") {
+			t.Error("expected 'No tasks found' message")
+		}
+		if !strings.Contains(view, "q/esc to quit") {
+			t.Error("expected quit hint in footer")
+		}
+	})
+
+	t.Run("renders tasks grouped by project", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		dbPath := filepath.Join(tmpDir, "test.db")
+		database, err := db.Open(dbPath)
+		if err != nil {
+			t.Fatalf("failed to open database: %v", err)
+		}
+		defer database.Close()
+
+		if err := database.CreateProject(&db.Project{Name: "myproject", Path: tmpDir}); err != nil {
+			t.Fatalf("failed to create project: %v", err)
+		}
+
+		tasks := []*db.Task{
+			{Title: "Processing task", Status: db.StatusProcessing, Type: db.TypeCode, Project: "myproject"},
+			{Title: "Queued task", Status: db.StatusQueued, Type: db.TypeCode, Project: "myproject"},
+			{Title: "Backlog task", Status: db.StatusBacklog, Type: db.TypeCode},
+		}
+		for _, task := range tasks {
+			if err := database.CreateTask(task); err != nil {
+				t.Fatalf("failed to create task: %v", err)
+			}
+		}
+
+		m := tailModel{
+			db:       database,
+			interval: 2 * time.Second,
+			width:    80,
+			height:   50,
+		}
+
+		view := m.View()
+		if !strings.Contains(view, "myproject") {
+			t.Error("expected 'myproject' in view")
+		}
+		if !strings.Contains(view, "Processing task") {
+			t.Error("expected 'Processing task' in view")
+		}
+		if !strings.Contains(view, "Queued task") {
+			t.Error("expected 'Queued task' in view")
+		}
+		if !strings.Contains(view, "Backlog task") {
+			t.Error("expected 'Backlog task' in view")
+		}
+		if !strings.Contains(view, "In Progress") {
+			t.Error("expected 'In Progress' status label")
+		}
+	})
+
+	t.Run("truncates to terminal height", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		dbPath := filepath.Join(tmpDir, "test.db")
+		database, err := db.Open(dbPath)
+		if err != nil {
+			t.Fatalf("failed to open database: %v", err)
+		}
+		defer database.Close()
+
+		for i := 0; i < 30; i++ {
+			task := &db.Task{
+				Title:  fmt.Sprintf("Task %d", i),
+				Status: db.StatusBacklog,
+				Type:   db.TypeCode,
+			}
+			if err := database.CreateTask(task); err != nil {
+				t.Fatalf("failed to create task: %v", err)
+			}
+		}
+
+		m := tailModel{
+			db:       database,
+			interval: 2 * time.Second,
+			width:    80,
+			height:   10,
+		}
+
+		view := m.View()
+		lines := strings.Split(view, "\n")
+		if len(lines) > 10 {
+			t.Errorf("expected at most 10 lines, got %d", len(lines))
+		}
+		if !strings.Contains(view, "resize terminal") {
+			t.Error("expected truncation message")
+		}
+	})
+
+	t.Run("done tasks hidden by default", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		dbPath := filepath.Join(tmpDir, "test.db")
+		database, err := db.Open(dbPath)
+		if err != nil {
+			t.Fatalf("failed to open database: %v", err)
+		}
+		defer database.Close()
+
+		tasks := []*db.Task{
+			{Title: "Active task", Status: db.StatusQueued, Type: db.TypeCode},
+			{Title: "Done task", Status: db.StatusDone, Type: db.TypeCode},
+		}
+		for _, task := range tasks {
+			if err := database.CreateTask(task); err != nil {
+				t.Fatalf("failed to create task: %v", err)
+			}
+		}
+
+		m := tailModel{
+			db:       database,
+			interval: 2 * time.Second,
+			showDone: false,
+			width:    80,
+			height:   50,
+		}
+
+		view := m.View()
+		if !strings.Contains(view, "Active task") {
+			t.Error("expected active task in view")
+		}
+		if strings.Contains(view, "Done task") {
+			t.Error("done task should be hidden when showDone is false")
+		}
+	})
+
+	t.Run("done tasks shown when enabled", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		dbPath := filepath.Join(tmpDir, "test.db")
+		database, err := db.Open(dbPath)
+		if err != nil {
+			t.Fatalf("failed to open database: %v", err)
+		}
+		defer database.Close()
+
+		tasks := []*db.Task{
+			{Title: "Active task", Status: db.StatusQueued, Type: db.TypeCode},
+			{Title: "Done task", Status: db.StatusDone, Type: db.TypeCode},
+		}
+		for _, task := range tasks {
+			if err := database.CreateTask(task); err != nil {
+				t.Fatalf("failed to create task: %v", err)
+			}
+		}
+
+		m := tailModel{
+			db:       database,
+			interval: 2 * time.Second,
+			showDone: true,
+			width:    80,
+			height:   50,
+		}
+
+		view := m.View()
+		if !strings.Contains(view, "Done task") {
+			t.Error("done task should be visible when showDone is true")
+		}
+	})
 }
 
 func TestFormatPermissionDetail(t *testing.T) {
