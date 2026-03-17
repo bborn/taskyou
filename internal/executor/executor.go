@@ -169,6 +169,7 @@ func New(database *db.DB, cfg *config.Config) *Executor {
 	e.executorFactory.Register(NewOpenClawExecutor(e))
 	e.executorFactory.Register(NewOpenCodeExecutor(e))
 	e.executorFactory.Register(NewPiExecutor(e))
+	e.executorFactory.Register(NewVibeExecutor(e))
 
 	return e
 }
@@ -207,6 +208,7 @@ func NewWithLogging(database *db.DB, cfg *config.Config, w io.Writer) *Executor 
 	e.executorFactory.Register(NewOpenClawExecutor(e))
 	e.executorFactory.Register(NewOpenCodeExecutor(e))
 	e.executorFactory.Register(NewPiExecutor(e))
+	e.executorFactory.Register(NewVibeExecutor(e))
 
 	return e
 }
@@ -2990,6 +2992,90 @@ func (e *Executor) resumeGeminiWithMode(task *db.Task, workDir string, dangerous
 	// This tells Gemini to continue where it left off after the mode switch
 	exec.Command("tmux", "send-keys", "-t", windowTarget+".0", "continue working", "Enter").Run()
 	e.logLine(taskID, "system", "Sent 'continue working' to resume task")
+
+	return true
+}
+
+// resumeVibeWithMode kills the current Vibe process and restarts with the specified mode.
+// If dangerousMode is true, uses --dangerous flag.
+func (e *Executor) resumeVibeWithMode(task *db.Task, workDir string, dangerousMode bool) bool {
+	taskID := task.ID
+	paths := e.claudePathsForProject(task.Project)
+
+	modeStr := "safe"
+	if dangerousMode {
+		modeStr = "dangerous"
+	}
+	e.logLine(taskID, "system", fmt.Sprintf("Restarting Vibe in %s mode", modeStr))
+
+	if _, err := exec.LookPath("tmux"); err != nil {
+		e.logLine(taskID, "system", "Tmux not available - cannot resume")
+		return false
+	}
+
+	windowName := TmuxWindowName(taskID)
+	// Kill ALL existing windows with this name (handles duplicates)
+	killAllWindowsByNameAllSessions(windowName)
+
+	daemonSession, err := ensureTmuxDaemon()
+	if err != nil {
+		e.logger.Warn("could not create task-daemon session", "error", err)
+		return false
+	}
+
+	windowTarget := fmt.Sprintf("%s:%s", daemonSession, windowName)
+
+	taskSessionID := os.Getenv("WORKTREE_SESSION_ID")
+	if taskSessionID == "" {
+		taskSessionID = fmt.Sprintf("%d", os.Getpid())
+	}
+
+	// Build dangerous flag
+	dangerousFlag := ""
+	if dangerousMode {
+		flag := strings.TrimSpace(os.Getenv("VIBE_DANGEROUS_ARGS"))
+		if flag == "" {
+			flag = "--dangerous"
+		}
+		dangerousFlag = flag + " "
+	}
+
+	// Build script - Vibe doesn't support session resume, so we start fresh
+	envPrefix := claudeEnvPrefix(paths.configDir)
+	script := fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %svibe %s`,
+		taskID, taskSessionID, task.Port, task.WorktreePath, envPrefix, dangerousFlag)
+
+	actualSession, tmuxErr := createTmuxWindow(daemonSession, windowName, workDir, script, e.getProjectDir(task.Project))
+	if tmuxErr != nil {
+		e.logger.Warn("tmux failed to create window", "error", tmuxErr, "session", daemonSession)
+		return false
+	}
+
+	if actualSession != daemonSession {
+		windowTarget = fmt.Sprintf("%s:%s", actualSession, windowName)
+		daemonSession = actualSession
+	}
+
+	time.Sleep(200 * time.Millisecond)
+
+	if err := e.db.UpdateTaskDaemonSession(taskID, daemonSession); err != nil {
+		e.logger.Warn("failed to save daemon session", "task", taskID, "error", err)
+	}
+
+	if windowID := getWindowID(daemonSession, windowName); windowID != "" {
+		if err := e.db.UpdateTaskWindowID(taskID, windowID); err != nil {
+			e.logger.Warn("failed to save window ID", "task", taskID, "error", err)
+		}
+	}
+
+	e.ensureShellPane(windowTarget, workDir, task.ID, task.Port, task.WorktreePath, paths.configDir)
+	e.configureTmuxWindow(windowTarget)
+
+	if err := e.db.UpdateTaskDangerousMode(taskID, dangerousMode); err != nil {
+		e.logger.Warn("could not update task dangerous mode", "error", err)
+	}
+
+	e.logLine(taskID, "system", fmt.Sprintf("Vibe restarted in %s mode", modeStr))
 
 	return true
 }

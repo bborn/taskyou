@@ -79,6 +79,7 @@ const (
 	ExecutorOpenClaw = "openclaw" // OpenClaw AI assistant (https://openclaw.ai)
 	ExecutorOpenCode = "opencode" // OpenCode AI assistant (https://opencode.ai)
 	ExecutorPi       = "pi"       // Pi coding agent (https://github.com/mariozechner/pi-coding-agent)
+	ExecutorVibe     = "vibe"     // Mistral Vibe executor
 )
 
 // DefaultExecutor returns the default executor if none is specified.

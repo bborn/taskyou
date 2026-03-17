@@ -80,6 +80,13 @@ func TestExecutorInterfaceImplementation(t *testing.T) {
 			supportsDangerousMode: false, // Pi does not support dangerous mode
 			dangerousFlag:         "",
 		},
+		{
+			name:                  "Vibe executor",
+			executorName:          db.ExecutorVibe,
+			supportsSessionResume: false, // Vibe does not support session resume
+			supportsDangerousMode: true,  // Vibe supports --dangerous flag
+			dangerousFlag:         "--dangerous",
+		},
 	}
 
 	for _, tt := range tests {
@@ -1021,7 +1028,7 @@ func TestBuildCommandIncludesEnvironmentVariables(t *testing.T) {
 		WorktreePath: "/home/user/projects/myapp/.task-worktrees/42-fix-bug",
 	}
 
-	executors := []string{db.ExecutorClaude, db.ExecutorCodex, db.ExecutorGemini, db.ExecutorOpenClaw, db.ExecutorOpenCode}
+	executors := []string{db.ExecutorClaude, db.ExecutorCodex, db.ExecutorGemini, db.ExecutorOpenClaw, db.ExecutorOpenCode, db.ExecutorVibe}
 
 	for _, name := range executors {
 		t.Run(name, func(t *testing.T) {

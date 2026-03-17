@@ -524,7 +524,7 @@ Examples:
 			}
 
 			// Validate executor if provided
-			validExecutors := []string{db.ExecutorClaude, db.ExecutorCodex, db.ExecutorGemini, db.ExecutorPi, db.ExecutorOpenCode, db.ExecutorOpenClaw}
+			validExecutors := []string{db.ExecutorClaude, db.ExecutorCodex, db.ExecutorGemini, db.ExecutorPi, db.ExecutorOpenCode, db.ExecutorOpenClaw, db.ExecutorVibe}
 			if taskExecutor != "" {
 				validExecutor := false
 				for _, e := range validExecutors {
@@ -626,7 +626,7 @@ Examples:
 	createCmd.Flags().String("body", "", "Task body/description (if no title, AI generates from body)")
 	createCmd.Flags().StringP("type", "t", "", "Task type: code, writing, thinking (default: code)")
 	createCmd.Flags().StringP("project", "p", "", "Project name (auto-detected from cwd if not specified)")
-	createCmd.Flags().StringP("executor", "e", "", "Task executor: claude, codex, gemini, pi, opencode, openclaw (default: claude)")
+	createCmd.Flags().StringP("executor", "e", "", "Task executor: claude, codex, gemini, pi, opencode, openclaw, vibe (default: claude)")
 	createCmd.Flags().BoolP("execute", "x", false, "Queue task for immediate execution")
 	createCmd.Flags().String("tags", "", "Task tags (comma-separated)")
 	createCmd.Flags().Bool("pinned", false, "Pin the task to the top of its column")
@@ -1210,7 +1210,7 @@ Examples:
 
 			// Validate executor if provided
 			if taskExecutor != "" {
-				validExecutors := []string{db.ExecutorClaude, db.ExecutorCodex, db.ExecutorGemini, db.ExecutorPi, db.ExecutorOpenCode, db.ExecutorOpenClaw}
+				validExecutors := []string{db.ExecutorClaude, db.ExecutorCodex, db.ExecutorGemini, db.ExecutorPi, db.ExecutorOpenCode, db.ExecutorOpenClaw, db.ExecutorVibe}
 				validExecutor := false
 				for _, e := range validExecutors {
 					if e == taskExecutor {
@@ -1269,7 +1269,7 @@ Examples:
 	updateCmd.Flags().String("body", "", "Update task body/description")
 	updateCmd.Flags().StringP("type", "t", "", "Update task type: code, writing, thinking")
 	updateCmd.Flags().StringP("project", "p", "", "Update project name")
-	updateCmd.Flags().StringP("executor", "e", "", "Update task executor: claude, codex, gemini, pi, opencode, openclaw")
+	updateCmd.Flags().StringP("executor", "e", "", "Update task executor: claude, codex, gemini, pi, opencode, openclaw, vibe")
 	updateCmd.Flags().String("tags", "", "Update task tags (comma-separated)")
 	updateCmd.Flags().Bool("pinned", false, "Pin or unpin the task")
 	rootCmd.AddCommand(updateCmd)
