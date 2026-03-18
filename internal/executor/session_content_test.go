@@ -335,8 +335,8 @@ type mockTaskExecutor struct {
 	sessionContent string // returned by GetSessionContent
 }
 
-func (m *mockTaskExecutor) Name() string                          { return m.name }
-func (m *mockTaskExecutor) FindSessionID(workDir string) string   { return m.sessionID }
+func (m *mockTaskExecutor) Name() string                            { return m.name }
+func (m *mockTaskExecutor) FindSessionID(workDir string) string     { return m.sessionID }
 func (m *mockTaskExecutor) GetSessionContent(workDir string) string { return m.sessionContent }
 
 // Stubs for the rest of the interface — not exercised by these tests.
@@ -347,15 +347,15 @@ func (m *mockTaskExecutor) Resume(ctx context.Context, task *db.Task, workDir, p
 	return ExecResult{}
 }
 func (m *mockTaskExecutor) BuildCommand(task *db.Task, sessionID, prompt string) string { return "" }
-func (m *mockTaskExecutor) IsAvailable() bool                                          { return true }
-func (m *mockTaskExecutor) GetProcessID(taskID int64) int                              { return 0 }
-func (m *mockTaskExecutor) Kill(taskID int64) bool                                     { return false }
-func (m *mockTaskExecutor) Suspend(taskID int64) bool                                  { return false }
-func (m *mockTaskExecutor) IsSuspended(taskID int64) bool                              { return false }
-func (m *mockTaskExecutor) SupportsSessionResume() bool                                { return false }
-func (m *mockTaskExecutor) SupportsDangerousMode() bool                                { return false }
-func (m *mockTaskExecutor) ResumeDangerous(task *db.Task, workDir string) bool         { return false }
-func (m *mockTaskExecutor) ResumeSafe(task *db.Task, workDir string) bool              { return false }
+func (m *mockTaskExecutor) IsAvailable() bool                                           { return true }
+func (m *mockTaskExecutor) GetProcessID(taskID int64) int                               { return 0 }
+func (m *mockTaskExecutor) Kill(taskID int64) bool                                      { return false }
+func (m *mockTaskExecutor) Suspend(taskID int64) bool                                   { return false }
+func (m *mockTaskExecutor) IsSuspended(taskID int64) bool                               { return false }
+func (m *mockTaskExecutor) SupportsSessionResume() bool                                 { return false }
+func (m *mockTaskExecutor) SupportsDangerousMode() bool                                 { return false }
+func (m *mockTaskExecutor) ResumeDangerous(task *db.Task, workDir string) bool          { return false }
+func (m *mockTaskExecutor) ResumeSafe(task *db.Task, workDir string) bool               { return false }
 
 func TestGetPreviousSessionContent(t *testing.T) {
 	buildExecutor := func(executors ...TaskExecutor) *Executor {
