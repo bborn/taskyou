@@ -226,8 +226,20 @@ func (m *DetailModel) StartRelatedTasksLoad() tea.Cmd {
 }
 
 // UpdateTask updates the task and refreshes the view.
+// Detects executor changes and restarts the tmux session with the new executor.
 func (m *DetailModel) UpdateTask(t *db.Task) {
+	prevExecutor := ""
+	if m.task != nil {
+		prevExecutor = m.task.Executor
+	}
+
 	m.task = t
+
+	// Detect executor change — kill old session and restart with new executor
+	if prevExecutor != "" && prevExecutor != t.Executor && m.cachedWindowTarget != "" {
+		m.restartForExecutorSwitch(prevExecutor)
+	}
+
 	if m.ready {
 		m.viewport.SetContent(m.renderContent())
 	}
@@ -265,11 +277,6 @@ func (m *DetailModel) Refresh() tea.Cmd {
 	}
 
 	if m.ready && prevTask != nil && m.task != nil {
-		// Detect executor change — kill old session and restart with new executor
-		if prevTask.Executor != m.task.Executor && m.cachedWindowTarget != "" {
-			m.restartForExecutorSwitch(prevTask.Executor)
-		}
-
 		if prevTask.Status != m.task.Status ||
 			prevTask.DangerousMode != m.task.DangerousMode ||
 			prevTask.Pinned != m.task.Pinned ||
