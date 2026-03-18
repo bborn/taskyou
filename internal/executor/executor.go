@@ -1703,6 +1703,11 @@ func SendKeyToPane(taskID int64, keys ...string) error {
 
 // killAllWindowsByNameAllSessions kills ALL windows with a given name across all daemon sessions.
 // Also kills any -shell variant windows.
+// KillAllWindowsByNameAllSessions kills all tmux windows with the given name across all sessions.
+func KillAllWindowsByNameAllSessions(windowName string) {
+	killAllWindowsByNameAllSessions(windowName)
+}
+
 func killAllWindowsByNameAllSessions(windowName string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
