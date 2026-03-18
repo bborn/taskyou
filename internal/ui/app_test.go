@@ -163,6 +163,7 @@ func TestApplyKeybindingsConfig_AllBindings(t *testing.T) {
 		ChangeStatus:       &config.KeybindingConfig{Keys: []string{"s"}, Help: "status"},
 		CommandPalette:     &config.KeybindingConfig{Keys: []string{"p"}, Help: "palette"},
 		ToggleDangerous:    &config.KeybindingConfig{Keys: []string{"!"}, Help: "danger"},
+		QueueDangerous:     &config.KeybindingConfig{Keys: []string{"ctrl+x"}, Help: "exec danger"},
 		TogglePin:          &config.KeybindingConfig{Keys: []string{"t"}, Help: "pin"},
 		Filter:             &config.KeybindingConfig{Keys: []string{"/"}, Help: "search"},
 		OpenWorktree:       &config.KeybindingConfig{Keys: []string{"w"}, Help: "worktree"},
@@ -1165,6 +1166,104 @@ func TestDefaultKeyMap_ApproveAndDenyKeys(t *testing.T) {
 	}
 	if keys.DenyPrompt.Help().Key != "N" {
 		t.Errorf("DenyPrompt key should be 'N', got '%s'", keys.DenyPrompt.Help().Key)
+	}
+}
+
+func TestDefaultKeyMap_QueueDangerousKey(t *testing.T) {
+	keys := DefaultKeyMap()
+	if keys.QueueDangerous.Help().Key != "X" {
+		t.Errorf("QueueDangerous key should be 'X', got '%s'", keys.QueueDangerous.Help().Key)
+	}
+	if keys.QueueDangerous.Help().Desc != "execute dangerous" {
+		t.Errorf("QueueDangerous help desc should be 'execute dangerous', got '%s'", keys.QueueDangerous.Help().Desc)
+	}
+}
+
+func TestApplyKeybindingsConfig_QueueDangerous(t *testing.T) {
+	original := DefaultKeyMap()
+	cfg := &config.KeybindingsConfig{
+		QueueDangerous: &config.KeybindingConfig{Keys: []string{"ctrl+x"}, Help: "exec danger"},
+	}
+	result := ApplyKeybindingsConfig(original, cfg)
+	if result.QueueDangerous.Help().Key != "ctrl+x" {
+		t.Errorf("Expected QueueDangerous key 'ctrl+x', got '%s'", result.QueueDangerous.Help().Key)
+	}
+}
+
+func TestQueueDangerous_KanbanView(t *testing.T) {
+	database, err := db.Open(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to create test database: %v", err)
+	}
+	defer database.Close()
+
+	task := &db.Task{Title: "Test task", Status: db.StatusBacklog, Project: "personal"}
+	if err := database.CreateTask(task); err != nil {
+		t.Fatalf("Failed to create task: %v", err)
+	}
+
+	kanban := NewKanbanBoard(80, 24)
+	kanban.SetTasks([]*db.Task{task})
+
+	m := &AppModel{
+		db:                database,
+		keys:              DefaultKeyMap(),
+		currentView:       ViewDashboard,
+		tasks:             []*db.Task{task},
+		kanban:            kanban,
+		tasksNeedingInput: make(map[int64]bool),
+		questionPrompts:   make(map[int64]bool),
+		executorPrompts:   make(map[int64]string),
+	}
+
+	// Press X (QueueDangerous) on the selected task
+	keyMsg := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'X'}}
+	m.Update(keyMsg)
+
+	// Verify task status was updated to queued in the local model
+	if task.Status != db.StatusQueued {
+		t.Errorf("Expected task status to be queued, got %s", task.Status)
+	}
+
+	// Verify dangerous mode was set in the local model
+	if !task.DangerousMode {
+		t.Error("Expected task DangerousMode to be true")
+	}
+}
+
+func TestQueueDangerous_SkipsProcessingTask(t *testing.T) {
+	database, err := db.Open(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to create test database: %v", err)
+	}
+	defer database.Close()
+
+	task := &db.Task{Title: "Test task", Status: db.StatusProcessing, Project: "personal"}
+	if err := database.CreateTask(task); err != nil {
+		t.Fatalf("Failed to create task: %v", err)
+	}
+
+	kanban := NewKanbanBoard(80, 24)
+	kanban.SetTasks([]*db.Task{task})
+
+	m := &AppModel{
+		db:                database,
+		keys:              DefaultKeyMap(),
+		currentView:       ViewDashboard,
+		tasks:             []*db.Task{task},
+		kanban:            kanban,
+		tasksNeedingInput: make(map[int64]bool),
+		questionPrompts:   make(map[int64]bool),
+		executorPrompts:   make(map[int64]string),
+	}
+
+	// Press X (QueueDangerous) on a processing task
+	keyMsg := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'X'}}
+	m.Update(keyMsg)
+
+	// Task should remain processing (not re-queued)
+	if task.Status != db.StatusProcessing {
+		t.Errorf("Expected task status to remain processing, got %s", task.Status)
 	}
 }
 

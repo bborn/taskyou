@@ -236,6 +236,10 @@ func (s *Server) handleRequest(req *jsonRPCRequest) {
 								"type":        "string",
 								"description": "Initial status (backlog, queued, defaults to backlog)",
 							},
+							"dangerous_mode": map[string]interface{}{
+								"type":        "boolean",
+								"description": "Execute in dangerous mode (skip permission prompts). Only applies when status is 'queued'.",
+							},
 						},
 						"required": []string{"title"},
 					},
@@ -545,6 +549,7 @@ func (s *Server) handleToolCall(id interface{}, params *toolCallParams) {
 		project, _ := params.Arguments["project"].(string)
 		taskType, _ := params.Arguments["type"].(string)
 		status, _ := params.Arguments["status"].(string)
+		dangerousMode, _ := params.Arguments["dangerous_mode"].(bool)
 
 		// Default project to current task's project
 		if project == "" {
@@ -559,11 +564,12 @@ func (s *Server) handleToolCall(id interface{}, params *toolCallParams) {
 		}
 
 		newTask := &db.Task{
-			Title:   title,
-			Body:    body,
-			Project: project,
-			Type:    taskType,
-			Status:  status,
+			Title:         title,
+			Body:          body,
+			Project:       project,
+			Type:          taskType,
+			Status:        status,
+			DangerousMode: dangerousMode && status == db.StatusQueued,
 		}
 
 		if err := s.db.CreateTask(newTask); err != nil {

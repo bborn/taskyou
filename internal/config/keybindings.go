@@ -36,6 +36,7 @@ type KeybindingsConfig struct {
 	ChangeStatus       *KeybindingConfig `yaml:"change_status,omitempty"`
 	CommandPalette     *KeybindingConfig `yaml:"command_palette,omitempty"`
 	ToggleDangerous    *KeybindingConfig `yaml:"toggle_dangerous,omitempty"`
+	QueueDangerous     *KeybindingConfig `yaml:"queue_dangerous,omitempty"`
 	TogglePin          *KeybindingConfig `yaml:"toggle_pin,omitempty"`
 	Filter             *KeybindingConfig `yaml:"filter,omitempty"`
 	OpenWorktree       *KeybindingConfig `yaml:"open_worktree,omitempty"`
@@ -193,6 +194,10 @@ command_palette:
 toggle_dangerous:
   keys: ["!"]
   help: "dangerous mode"
+
+queue_dangerous:
+  keys: ["X"]
+  help: "execute dangerous"
 
 toggle_pin:
   keys: ["t"]

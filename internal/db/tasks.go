@@ -129,9 +129,9 @@ func (db *DB) CreateTask(t *Task) error {
 	t.Project = project.Name
 
 	result, err := db.Exec(`
-		INSERT INTO tasks (title, body, status, type, project, executor, pinned, tags, source_branch)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, t.Title, t.Body, t.Status, t.Type, t.Project, t.Executor, t.Pinned, t.Tags, t.SourceBranch)
+		INSERT INTO tasks (title, body, status, type, project, executor, pinned, tags, source_branch, dangerous_mode)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, t.Title, t.Body, t.Status, t.Type, t.Project, t.Executor, t.Pinned, t.Tags, t.SourceBranch, t.DangerousMode)
 	if err != nil {
 		return fmt.Errorf("insert task: %w", err)
 	}

@@ -476,6 +476,7 @@ Examples:
 			project, _ := cmd.Flags().GetString("project")
 			taskExecutor, _ := cmd.Flags().GetString("executor")
 			execute, _ := cmd.Flags().GetBool("execute")
+			createDangerous, _ := cmd.Flags().GetBool("dangerous")
 			tags, _ := cmd.Flags().GetString("tags")
 			pinned, _ := cmd.Flags().GetBool("pinned")
 			branch, _ := cmd.Flags().GetString("branch")
@@ -581,15 +582,16 @@ Examples:
 
 			// Create the task
 			task := &db.Task{
-				Title:        title,
-				Body:         body,
-				Status:       status,
-				Type:         taskType,
-				Project:      project,
-				Executor:     taskExecutor,
-				Tags:         tags,
-				Pinned:       pinned,
-				SourceBranch: branch,
+				Title:         title,
+				Body:          body,
+				Status:        status,
+				Type:          taskType,
+				Project:       project,
+				Executor:      taskExecutor,
+				Tags:          tags,
+				Pinned:        pinned,
+				SourceBranch:  branch,
+				DangerousMode: createDangerous && execute,
 			}
 
 			if err := database.CreateTask(task); err != nil {
@@ -617,7 +619,11 @@ Examples:
 					msg += fmt.Sprintf(" (branch: %s)", branch)
 				}
 				if execute {
-					msg += " (queued for execution)"
+					if createDangerous {
+						msg += " (queued for execution in dangerous mode)"
+					} else {
+						msg += " (queued for execution)"
+					}
 				}
 				fmt.Println(successStyle.Render(msg))
 			}
@@ -628,6 +634,7 @@ Examples:
 	createCmd.Flags().StringP("project", "p", "", "Project name (auto-detected from cwd if not specified)")
 	createCmd.Flags().StringP("executor", "e", "", "Task executor: claude, codex, gemini, pi, opencode, openclaw (default: claude)")
 	createCmd.Flags().BoolP("execute", "x", false, "Queue task for immediate execution")
+	createCmd.Flags().Bool("dangerous", false, "Execute in dangerous mode (requires --execute)")
 	createCmd.Flags().String("tags", "", "Task tags (comma-separated)")
 	createCmd.Flags().Bool("pinned", false, "Pin the task to the top of its column")
 	createCmd.Flags().StringP("branch", "b", "", "Existing branch to checkout for worktree (e.g., fix/ui-overflow)")
@@ -1343,6 +1350,7 @@ Examples:
 
 			oldProject := task.Project
 			execute, _ := cmd.Flags().GetBool("execute")
+			moveDangerous, _ := cmd.Flags().GetBool("dangerous")
 
 			// Confirm unless --force flag is set
 			force, _ := cmd.Flags().GetBool("force")
@@ -1368,16 +1376,27 @@ Examples:
 
 			// Queue for execution if requested
 			if execute {
+				if moveDangerous {
+					if err := database.UpdateTaskDangerousMode(newTaskID, true); err != nil {
+						fmt.Fprintln(os.Stderr, errorStyle.Render("Error setting dangerous mode: "+err.Error()))
+						os.Exit(1)
+					}
+				}
 				if err := database.UpdateTaskStatus(newTaskID, db.StatusQueued); err != nil {
 					fmt.Fprintln(os.Stderr, errorStyle.Render("Error queueing task: "+err.Error()))
 					os.Exit(1)
 				}
-				fmt.Println(successStyle.Render(fmt.Sprintf("Queued task #%d for execution", newTaskID)))
+				msg := fmt.Sprintf("Queued task #%d for execution", newTaskID)
+				if moveDangerous {
+					msg += " (dangerous mode)"
+				}
+				fmt.Println(successStyle.Render(msg))
 			}
 		},
 	}
 	moveCmd.Flags().BoolP("force", "f", false, "Skip confirmation prompt")
 	moveCmd.Flags().BoolP("execute", "e", false, "Queue the task for execution after moving")
+	moveCmd.Flags().Bool("dangerous", false, "Execute in dangerous mode (requires --execute)")
 	rootCmd.AddCommand(moveCmd)
 
 	// Execute subcommand - queue a task for execution
@@ -1390,7 +1409,8 @@ Examples:
 Examples:
   task execute 42
   task queue 42
-  task run 42`,
+  task run 42
+  task execute 42 --dangerous   # Execute in dangerous mode`,
 		Args: cobra.ExactArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
 			var taskID int64
@@ -1398,6 +1418,8 @@ Examples:
 				fmt.Fprintln(os.Stderr, errorStyle.Render("Invalid task ID: "+args[0]))
 				os.Exit(1)
 			}
+
+			executeDangerous, _ := cmd.Flags().GetBool("dangerous")
 
 			// Open database
 			dbPath := db.DefaultPath()
@@ -1428,14 +1450,27 @@ Examples:
 				return
 			}
 
+			// Set dangerous mode if requested
+			if executeDangerous {
+				if err := database.UpdateTaskDangerousMode(taskID, true); err != nil {
+					fmt.Fprintln(os.Stderr, errorStyle.Render("Error setting dangerous mode: "+err.Error()))
+					os.Exit(1)
+				}
+			}
+
 			if err := database.UpdateTaskStatus(taskID, db.StatusQueued); err != nil {
 				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
 				os.Exit(1)
 			}
 
-			fmt.Println(successStyle.Render(fmt.Sprintf("Queued task #%d: %s", taskID, task.Title)))
+			msg := fmt.Sprintf("Queued task #%d: %s", taskID, task.Title)
+			if executeDangerous {
+				msg += " (dangerous mode)"
+			}
+			fmt.Println(successStyle.Render(msg))
 		},
 	}
+	executeCmd.Flags().Bool("dangerous", false, "Execute in dangerous mode (skip permission prompts)")
 	rootCmd.AddCommand(executeCmd)
 
 	statusCmd := &cobra.Command{

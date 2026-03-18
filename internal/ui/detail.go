@@ -2741,6 +2741,7 @@ func (m *DetailModel) renderHelp() string {
 	claudeRunning := m.claudeMemoryMB > 0
 	if !claudeRunning {
 		keys = append(keys, helpKey{"x", "execute", false})
+		keys = append(keys, helpKey{"X", "execute dangerous", false})
 	}
 
 	hasPanes := m.claudePaneID != "" || m.workdirPaneID != ""
