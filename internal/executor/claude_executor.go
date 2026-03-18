@@ -140,6 +140,11 @@ func (c *ClaudeExecutor) BuildCommand(task *db.Task, sessionID, prompt string) s
 	return cmd
 }
 
+// GetSessionContent reads the Claude session for the given workDir and returns a conversation transcript.
+func (c *ClaudeExecutor) GetSessionContent(workDir string) string {
+	return ReadClaudeSessionContent(workDir, DefaultClaudeConfigDir())
+}
+
 // ---- Session and Dangerous Mode Support ----
 
 // SupportsSessionResume returns true - Claude supports session resume via --resume.

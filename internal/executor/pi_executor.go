@@ -171,6 +171,11 @@ func (p *PiExecutor) ResumeSafe(task *db.Task, workDir string) bool {
 	return false
 }
 
+// GetSessionContent reads the Pi session for the given workDir and returns a conversation transcript.
+func (p *PiExecutor) GetSessionContent(workDir string) string {
+	return ReadPiSessionContent(workDir)
+}
+
 // findPiSessionID finds the most recent Pi session ID for a workDir.
 // It prioritizes explicit session paths in .task-worktrees/sessions/task-<ID>.jsonl
 // but falls back to Pi's internal storage (~/.pi/agent/sessions/...) for backward compatibility.

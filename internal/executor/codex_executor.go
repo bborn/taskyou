@@ -413,6 +413,11 @@ func (c *CodexExecutor) ResumeSafe(task *db.Task, workDir string) bool {
 	return c.executor.resumeCodexWithMode(task, workDir, false)
 }
 
+// GetSessionContent reads the Codex session for the given workDir and returns a conversation transcript.
+func (c *CodexExecutor) GetSessionContent(workDir string) string {
+	return ReadCodexSessionContent(workDir)
+}
+
 // findCodexSessionID discovers the most recent Codex session ID for the given workDir.
 // Codex stores sessions in ~/.codex/sessions/ directory.
 func findCodexSessionID(workDir string) string {

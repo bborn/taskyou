@@ -71,6 +71,11 @@ type TaskExecutor interface {
 	// Returns empty string if no session is found or sessions aren't supported.
 	FindSessionID(workDir string) string
 
+	// GetSessionContent reads the session file for the given workDir and returns
+	// a human-readable conversation transcript. Used for preserving context when
+	// switching between executors on the same task.
+	GetSessionContent(workDir string) string
+
 	// ResumeDangerous kills the current process and restarts with dangerous mode enabled.
 	// Returns true if successfully restarted. Requires session resume support.
 	ResumeDangerous(task *db.Task, workDir string) bool
