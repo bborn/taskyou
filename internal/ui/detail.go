@@ -265,11 +265,17 @@ func (m *DetailModel) Refresh() tea.Cmd {
 	}
 
 	if m.ready && prevTask != nil && m.task != nil {
+		// Detect executor change — kill old session and restart with new executor
+		if prevTask.Executor != m.task.Executor && m.cachedWindowTarget != "" {
+			m.restartForExecutorSwitch(prevTask.Executor)
+		}
+
 		if prevTask.Status != m.task.Status ||
 			prevTask.DangerousMode != m.task.DangerousMode ||
 			prevTask.Pinned != m.task.Pinned ||
 			prevTask.Project != m.task.Project ||
 			prevTask.Type != m.task.Type ||
+			prevTask.Executor != m.task.Executor ||
 			prevTask.Title != m.task.Title {
 			m.viewport.SetContent(m.renderContent())
 		}
@@ -723,6 +729,45 @@ func (m *DetailModel) findTaskWindow() string {
 	}
 	log.Info("findTaskWindow: window not found for task %d", m.task.ID)
 	return ""
+}
+
+// restartForExecutorSwitch kills the current tmux session and starts a fresh one
+// with the new executor. Called when Refresh() detects the executor field changed.
+func (m *DetailModel) restartForExecutorSwitch(prevExecutor string) {
+	log := GetLogger()
+	log.Info("restartForExecutorSwitch: %s -> %s for task %d", prevExecutor, m.task.Executor, m.task.ID)
+
+	// Kill the old tmux window
+	windowName := executor.TmuxWindowName(m.task.ID)
+	executor.KillAllWindowsByNameAllSessions(windowName)
+
+	// Clear cached tmux state
+	m.cachedWindowTarget = ""
+	m.claudePaneID = ""
+	m.workdirPaneID = ""
+
+	// Clear the stale session ID (it belongs to the old executor)
+	m.database.UpdateTaskClaudeSessionID(m.task.ID, "")
+	m.task.ClaudeSessionID = ""
+
+	m.database.AppendTaskLog(m.task.ID, "system", fmt.Sprintf("Executor switched from %s to %s — restarting session", prevExecutor, m.task.Executor))
+
+	// Start fresh session with the new executor asynchronously
+	m.paneLoading = true
+	m.paneLoadingStart = time.Now()
+	// Use a goroutine so Refresh() can return its tea.Cmd
+	go func() {
+		if err := m.startResumableSession(""); err != nil {
+			log.Error("restartForExecutorSwitch: failed to start new session: %v", err)
+			return
+		}
+		// Find and join the new window
+		m.cachedWindowTarget = m.findTaskWindow()
+		if m.cachedWindowTarget != "" {
+			m.joinTmuxPane()
+		}
+		m.paneLoading = false
+	}()
 }
 
 // startResumableSession starts a new tmux window with the task's executor.
