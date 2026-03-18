@@ -803,6 +803,13 @@ func (m *DetailModel) startResumableSession(sessionID string) error {
 	if sessionID == "" {
 		// No session to resume - build prompt from task
 		var promptBuilder strings.Builder
+
+		// Check for previous session content from a different executor (executor switch)
+		if handoff := m.executor.GetPreviousSessionContent(taskExecutor, workDir); handoff != "" {
+			promptBuilder.WriteString(handoff)
+			m.database.AppendTaskLog(m.task.ID, "system", "Including previous session context from executor switch")
+		}
+
 		promptBuilder.WriteString(fmt.Sprintf("# Task: %s\n\n", m.task.Title))
 		if m.task.Body != "" {
 			promptBuilder.WriteString(m.task.Body)

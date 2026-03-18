@@ -360,6 +360,11 @@ func (o *OpenClawExecutor) SupportsDangerousMode() bool {
 	return false
 }
 
+// GetSessionContent returns empty - OpenClaw sessions are not file-based.
+func (o *OpenClawExecutor) GetSessionContent(workDir string) string {
+	return ""
+}
+
 // FindSessionID returns the session key for the given task.
 // OpenClaw uses explicit session keys rather than auto-discovering from files.
 func (o *OpenClawExecutor) FindSessionID(workDir string) string {

@@ -358,6 +358,11 @@ func (g *GeminiExecutor) ResumeSafe(task *db.Task, workDir string) bool {
 	return g.executor.resumeGeminiWithMode(task, workDir, false)
 }
 
+// GetSessionContent reads the Gemini session for the given workDir and returns a conversation transcript.
+func (g *GeminiExecutor) GetSessionContent(workDir string) string {
+	return ReadGeminiSessionContent(workDir)
+}
+
 // findGeminiSessionID discovers the most recent Gemini session ID for the given workDir.
 // Gemini stores sessions in ~/.gemini/tmp/<project_hash>/chats/ directory.
 func findGeminiSessionID(workDir string) string {

@@ -330,6 +330,11 @@ func (o *OpenCodeExecutor) SupportsDangerousMode() bool {
 	return false
 }
 
+// GetSessionContent returns empty - OpenCode doesn't support session discovery.
+func (o *OpenCodeExecutor) GetSessionContent(workDir string) string {
+	return ""
+}
+
 // FindSessionID returns empty - OpenCode doesn't support session discovery.
 func (o *OpenCodeExecutor) FindSessionID(workDir string) string {
 	return ""
