@@ -1,10 +1,13 @@
 package executor
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/bborn/workflow/internal/db"
 )
 
 func TestReadJSONLSessionContent(t *testing.T) {
@@ -321,6 +324,106 @@ func TestReadClaudeSessionContent(t *testing.T) {
 		result := ReadClaudeSessionContent("/nonexistent/workdir", tmpDir)
 		if result != "" {
 			t.Errorf("expected empty result, got: %s", result)
+		}
+	})
+}
+
+// mockTaskExecutor is a minimal TaskExecutor for testing GetPreviousSessionContent.
+type mockTaskExecutor struct {
+	name           string
+	sessionID      string // returned by FindSessionID
+	sessionContent string // returned by GetSessionContent
+}
+
+func (m *mockTaskExecutor) Name() string                          { return m.name }
+func (m *mockTaskExecutor) FindSessionID(workDir string) string   { return m.sessionID }
+func (m *mockTaskExecutor) GetSessionContent(workDir string) string { return m.sessionContent }
+
+// Stubs for the rest of the interface — not exercised by these tests.
+func (m *mockTaskExecutor) Execute(ctx context.Context, task *db.Task, workDir, prompt string) ExecResult {
+	return ExecResult{}
+}
+func (m *mockTaskExecutor) Resume(ctx context.Context, task *db.Task, workDir, prompt, feedback string) ExecResult {
+	return ExecResult{}
+}
+func (m *mockTaskExecutor) BuildCommand(task *db.Task, sessionID, prompt string) string { return "" }
+func (m *mockTaskExecutor) IsAvailable() bool                                          { return true }
+func (m *mockTaskExecutor) GetProcessID(taskID int64) int                              { return 0 }
+func (m *mockTaskExecutor) Kill(taskID int64) bool                                     { return false }
+func (m *mockTaskExecutor) Suspend(taskID int64) bool                                  { return false }
+func (m *mockTaskExecutor) IsSuspended(taskID int64) bool                              { return false }
+func (m *mockTaskExecutor) SupportsSessionResume() bool                                { return false }
+func (m *mockTaskExecutor) SupportsDangerousMode() bool                                { return false }
+func (m *mockTaskExecutor) ResumeDangerous(task *db.Task, workDir string) bool         { return false }
+func (m *mockTaskExecutor) ResumeSafe(task *db.Task, workDir string) bool              { return false }
+
+func TestGetPreviousSessionContent(t *testing.T) {
+	buildExecutor := func(executors ...TaskExecutor) *Executor {
+		factory := NewExecutorFactory()
+		for _, ex := range executors {
+			factory.Register(ex)
+		}
+		return &Executor{executorFactory: factory}
+	}
+
+	t.Run("returns empty when current executor has session", func(t *testing.T) {
+		current := &mockTaskExecutor{name: "codex", sessionID: "existing-session"}
+		other := &mockTaskExecutor{name: "claude", sessionID: "old-session", sessionContent: "**User:** hello"}
+
+		e := buildExecutor(current, other)
+		result := e.GetPreviousSessionContent(current, "/tmp/work")
+
+		if result != "" {
+			t.Errorf("expected empty (current has session), got: %s", result)
+		}
+	})
+
+	t.Run("returns handoff when other executor has session", func(t *testing.T) {
+		current := &mockTaskExecutor{name: "codex", sessionID: ""}
+		other := &mockTaskExecutor{name: "claude", sessionID: "old-session", sessionContent: "**User:** Fix the bug\n\n**Assistant:** On it."}
+
+		e := buildExecutor(current, other)
+		result := e.GetPreviousSessionContent(current, "/tmp/work")
+
+		if result == "" {
+			t.Fatal("expected handoff content, got empty")
+		}
+		if !strings.Contains(result, "## Previous Session Context") {
+			t.Error("expected session handoff header")
+		}
+		if !strings.Contains(result, "**claude**") {
+			t.Error("expected executor name in handoff")
+		}
+		if !strings.Contains(result, "Fix the bug") {
+			t.Error("expected session content in handoff")
+		}
+	})
+
+	t.Run("returns empty when no other executor has session", func(t *testing.T) {
+		current := &mockTaskExecutor{name: "codex", sessionID: ""}
+		other := &mockTaskExecutor{name: "claude", sessionID: ""}
+
+		e := buildExecutor(current, other)
+		result := e.GetPreviousSessionContent(current, "/tmp/work")
+
+		if result != "" {
+			t.Errorf("expected empty (no other sessions), got: %s", result)
+		}
+	})
+
+	t.Run("skips other executor with session ID but empty content", func(t *testing.T) {
+		current := &mockTaskExecutor{name: "codex", sessionID: ""}
+		noContent := &mockTaskExecutor{name: "gemini", sessionID: "some-id", sessionContent: ""}
+		hasContent := &mockTaskExecutor{name: "claude", sessionID: "old-session", sessionContent: "**User:** hello"}
+
+		e := buildExecutor(current, noContent, hasContent)
+		result := e.GetPreviousSessionContent(current, "/tmp/work")
+
+		if result == "" {
+			t.Fatal("expected handoff from claude, got empty")
+		}
+		if !strings.Contains(result, "**claude**") {
+			t.Errorf("expected claude handoff, got: %s", result)
 		}
 	})
 }
