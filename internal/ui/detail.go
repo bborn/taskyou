@@ -227,7 +227,8 @@ func (m *DetailModel) StartRelatedTasksLoad() tea.Cmd {
 
 // UpdateTask updates the task and refreshes the view.
 // Detects executor changes and restarts the tmux session with the new executor.
-func (m *DetailModel) UpdateTask(t *db.Task) {
+// Returns a tea.Cmd if an executor switch was triggered, nil otherwise.
+func (m *DetailModel) UpdateTask(t *db.Task) tea.Cmd {
 	prevExecutor := ""
 	if m.task != nil {
 		prevExecutor = m.task.Executor
@@ -236,13 +237,16 @@ func (m *DetailModel) UpdateTask(t *db.Task) {
 	m.task = t
 
 	// Detect executor change — kill old session and restart with new executor
+	var cmd tea.Cmd
 	if prevExecutor != "" && prevExecutor != t.Executor && m.cachedWindowTarget != "" {
-		m.restartForExecutorSwitch(prevExecutor)
+		restartCmd := m.restartForExecutorSwitch(prevExecutor)
+		cmd = tea.Batch(restartCmd, m.spinnerTick())
 	}
 
 	if m.ready {
 		m.viewport.SetContent(m.renderContent())
 	}
+	return cmd
 }
 
 // SetPosition updates the task's position in its column.
@@ -738,9 +742,10 @@ func (m *DetailModel) findTaskWindow() string {
 	return ""
 }
 
-// restartForExecutorSwitch kills the current tmux session and starts a fresh one
-// with the new executor. Called when Refresh() detects the executor field changed.
-func (m *DetailModel) restartForExecutorSwitch(prevExecutor string) {
+// restartForExecutorSwitch kills the current tmux session and returns a tea.Cmd
+// that starts a fresh session with the new executor. Uses the same panesJoinedMsg
+// pattern as startPanesAsync to avoid race conditions with the Bubble Tea render loop.
+func (m *DetailModel) restartForExecutorSwitch(prevExecutor string) tea.Cmd {
 	log := GetLogger()
 	log.Info("restartForExecutorSwitch: %s -> %s for task %d", prevExecutor, m.task.Executor, m.task.ID)
 
@@ -759,22 +764,38 @@ func (m *DetailModel) restartForExecutorSwitch(prevExecutor string) {
 
 	m.database.AppendTaskLog(m.task.ID, "system", fmt.Sprintf("Executor switched from %s to %s — restarting session", prevExecutor, m.task.Executor))
 
-	// Start fresh session with the new executor asynchronously
+	// Start fresh session with the new executor via tea.Cmd (not a raw goroutine)
 	m.paneLoading = true
 	m.paneLoadingStart = time.Now()
-	// Use a goroutine so Refresh() can return its tea.Cmd
-	go func() {
+
+	return func() tea.Msg {
 		if err := m.startResumableSession("", prevExecutor); err != nil {
 			log.Error("restartForExecutorSwitch: failed to start new session: %v", err)
-			return
+			userMsg := m.executorFailureMessage(err.Error())
+			return panesJoinedMsg{err: err, userMessage: userMsg}
 		}
-		// Find and join the new window
-		m.cachedWindowTarget = m.findTaskWindow()
-		if m.cachedWindowTarget != "" {
-			m.joinTmuxPane()
+
+		windowTarget := m.findTaskWindow()
+		if windowTarget == "" {
+			log.Error("restartForExecutorSwitch: failed to find window after starting session")
+			err := fmt.Errorf("%s session window not found", m.executorDisplayName())
+			userMsg := m.executorFailureMessage("the executor exited before panes could be created")
+			return panesJoinedMsg{err: err, userMessage: userMsg}
 		}
-		m.paneLoading = false
-	}()
+
+		m.cachedWindowTarget = windowTarget
+		m.joinTmuxPane()
+
+		log.Info("restartForExecutorSwitch: completed, claudePaneID=%q, workdirPaneID=%q",
+			m.claudePaneID, m.workdirPaneID)
+
+		return panesJoinedMsg{
+			claudePaneID:    m.claudePaneID,
+			workdirPaneID:   m.workdirPaneID,
+			daemonSessionID: m.daemonSessionID,
+			windowTarget:    windowTarget,
+		}
+	}
 }
 
 // startResumableSession starts a new tmux window with the task's executor.
