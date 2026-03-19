@@ -764,7 +764,7 @@ func (m *DetailModel) restartForExecutorSwitch(prevExecutor string) {
 	m.paneLoadingStart = time.Now()
 	// Use a goroutine so Refresh() can return its tea.Cmd
 	go func() {
-		if err := m.startResumableSession(""); err != nil {
+		if err := m.startResumableSession("", prevExecutor); err != nil {
 			log.Error("restartForExecutorSwitch: failed to start new session: %v", err)
 			return
 		}
@@ -779,9 +779,14 @@ func (m *DetailModel) restartForExecutorSwitch(prevExecutor string) {
 
 // startResumableSession starts a new tmux window with the task's executor.
 // This reconnects to a session that was previously running but whose tmux window was killed.
-func (m *DetailModel) startResumableSession(sessionID string) error {
+// prevExecutorName is the name of the executor being switched FROM (empty when not switching).
+func (m *DetailModel) startResumableSession(sessionID string, prevExecutorName ...string) error {
 	log := GetLogger()
-	log.Info("startResumableSession: called with sessionID=%q for task %d", sessionID, m.task.ID)
+	prevExec := ""
+	if len(prevExecutorName) > 0 {
+		prevExec = prevExecutorName[0]
+	}
+	log.Info("startResumableSession: called with sessionID=%q prevExecutor=%q for task %d", sessionID, prevExec, m.task.ID)
 
 	if m.task == nil {
 		log.Debug("startResumableSession: early return (task is nil)")
@@ -857,7 +862,7 @@ func (m *DetailModel) startResumableSession(sessionID string) error {
 		var promptBuilder strings.Builder
 
 		// Check for previous session content from a different executor (executor switch)
-		if handoff := m.executor.GetPreviousSessionContent(taskExecutor, workDir); handoff != "" {
+		if handoff := m.executor.GetPreviousSessionContent(taskExecutor, workDir, prevExec); handoff != "" {
 			promptBuilder.WriteString(handoff)
 			m.database.AppendTaskLog(m.task.ID, "system", "Including previous session context from executor switch")
 		}

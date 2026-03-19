@@ -1118,7 +1118,7 @@ func (e *Executor) executeTask(ctx context.Context, task *db.Task) {
 	// If this is a fresh start (not retry) and the current executor has no existing session,
 	// but another executor does, include that session's conversation as context.
 	if !isRetry {
-		if handoff := e.GetPreviousSessionContent(taskExecutor, workDir); handoff != "" {
+		if handoff := e.GetPreviousSessionContent(taskExecutor, workDir, ""); handoff != "" {
 			e.logLine(task.ID, "system", "Including previous session context from executor switch")
 			prompt = handoff + prompt
 		}
@@ -1210,14 +1210,31 @@ func (e *Executor) GetTaskExecutor(task *db.Task) TaskExecutor {
 
 // GetPreviousSessionContent checks if a different executor has session content
 // for the given workDir. This is used to preserve context when switching executors.
+// When prevExecutorName is provided (non-empty), it directly reads from that specific
+// executor, which is the correct behavior during an explicit executor switch.
 // Returns formatted session handoff text, or empty string if no previous session found.
-func (e *Executor) GetPreviousSessionContent(currentExecutor TaskExecutor, workDir string) string {
-	// If the current executor already has a session, no need for handoff
+func (e *Executor) GetPreviousSessionContent(currentExecutor TaskExecutor, workDir string, prevExecutorName string) string {
+	// If a specific previous executor is provided, read directly from it.
+	// This is the explicit executor-switch path — we always want handoff content
+	// regardless of whether the new executor has an existing session.
+	if prevExecutorName != "" {
+		prev := e.executorFactory.Get(prevExecutorName)
+		if prev == nil {
+			return ""
+		}
+		content := prev.GetSessionContent(workDir)
+		if content != "" {
+			return FormatSessionHandoff(prevExecutorName, content)
+		}
+		return ""
+	}
+
+	// Fallback: discover which executor has a session (used when prevExecutor is unknown).
+	// Skip if the current executor already has a session — no need for handoff.
 	if currentExecutor.FindSessionID(workDir) != "" {
 		return ""
 	}
 
-	// Check all other executors for session content
 	for _, name := range e.executorFactory.All() {
 		if name == currentExecutor.Name() {
 			continue
@@ -1226,7 +1243,6 @@ func (e *Executor) GetPreviousSessionContent(currentExecutor TaskExecutor, workD
 		if other == nil {
 			continue
 		}
-		// Check if this executor has a session for the workDir
 		if other.FindSessionID(workDir) == "" {
 			continue
 		}

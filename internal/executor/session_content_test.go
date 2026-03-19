@@ -366,24 +366,25 @@ func TestGetPreviousSessionContent(t *testing.T) {
 		return &Executor{executorFactory: factory}
 	}
 
-	t.Run("returns empty when current executor has session", func(t *testing.T) {
+	t.Run("returns empty when current executor has session (discovery mode)", func(t *testing.T) {
 		current := &mockTaskExecutor{name: "codex", sessionID: "existing-session"}
 		other := &mockTaskExecutor{name: "claude", sessionID: "old-session", sessionContent: "**User:** hello"}
 
 		e := buildExecutor(current, other)
-		result := e.GetPreviousSessionContent(current, "/tmp/work")
+		// Discovery mode (no prevExecutorName) - skips handoff when current has session
+		result := e.GetPreviousSessionContent(current, "/tmp/work", "")
 
 		if result != "" {
 			t.Errorf("expected empty (current has session), got: %s", result)
 		}
 	})
 
-	t.Run("returns handoff when other executor has session", func(t *testing.T) {
+	t.Run("returns handoff when other executor has session (discovery mode)", func(t *testing.T) {
 		current := &mockTaskExecutor{name: "codex", sessionID: ""}
 		other := &mockTaskExecutor{name: "claude", sessionID: "old-session", sessionContent: "**User:** Fix the bug\n\n**Assistant:** On it."}
 
 		e := buildExecutor(current, other)
-		result := e.GetPreviousSessionContent(current, "/tmp/work")
+		result := e.GetPreviousSessionContent(current, "/tmp/work", "")
 
 		if result == "" {
 			t.Fatal("expected handoff content, got empty")
@@ -404,7 +405,7 @@ func TestGetPreviousSessionContent(t *testing.T) {
 		other := &mockTaskExecutor{name: "claude", sessionID: ""}
 
 		e := buildExecutor(current, other)
-		result := e.GetPreviousSessionContent(current, "/tmp/work")
+		result := e.GetPreviousSessionContent(current, "/tmp/work", "")
 
 		if result != "" {
 			t.Errorf("expected empty (no other sessions), got: %s", result)
@@ -417,13 +418,55 @@ func TestGetPreviousSessionContent(t *testing.T) {
 		hasContent := &mockTaskExecutor{name: "claude", sessionID: "old-session", sessionContent: "**User:** hello"}
 
 		e := buildExecutor(current, noContent, hasContent)
-		result := e.GetPreviousSessionContent(current, "/tmp/work")
+		result := e.GetPreviousSessionContent(current, "/tmp/work", "")
 
 		if result == "" {
 			t.Fatal("expected handoff from claude, got empty")
 		}
 		if !strings.Contains(result, "**claude**") {
 			t.Errorf("expected claude handoff, got: %s", result)
+		}
+	})
+
+	t.Run("targeted: returns handoff from specified previous executor", func(t *testing.T) {
+		current := &mockTaskExecutor{name: "codex", sessionID: "existing-session"}
+		other := &mockTaskExecutor{name: "claude", sessionID: "old-session", sessionContent: "**User:** Fix the bug\n\n**Assistant:** On it."}
+
+		e := buildExecutor(current, other)
+		// Even though current executor has a session, targeted mode ignores that
+		result := e.GetPreviousSessionContent(current, "/tmp/work", "claude")
+
+		if result == "" {
+			t.Fatal("expected handoff content from targeted executor, got empty")
+		}
+		if !strings.Contains(result, "**claude**") {
+			t.Error("expected claude executor name in handoff")
+		}
+		if !strings.Contains(result, "Fix the bug") {
+			t.Error("expected session content in handoff")
+		}
+	})
+
+	t.Run("targeted: returns empty when previous executor has no content", func(t *testing.T) {
+		current := &mockTaskExecutor{name: "codex", sessionID: ""}
+		other := &mockTaskExecutor{name: "claude", sessionID: "", sessionContent: ""}
+
+		e := buildExecutor(current, other)
+		result := e.GetPreviousSessionContent(current, "/tmp/work", "claude")
+
+		if result != "" {
+			t.Errorf("expected empty (prev executor has no content), got: %s", result)
+		}
+	})
+
+	t.Run("targeted: returns empty when previous executor not registered", func(t *testing.T) {
+		current := &mockTaskExecutor{name: "codex", sessionID: ""}
+
+		e := buildExecutor(current)
+		result := e.GetPreviousSessionContent(current, "/tmp/work", "nonexistent")
+
+		if result != "" {
+			t.Errorf("expected empty (unknown executor), got: %s", result)
 		}
 	})
 }
