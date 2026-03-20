@@ -88,7 +88,7 @@ func (o *OpenCodeExecutor) runOpenCode(ctx context.Context, task *db.Task, workD
 	windowTarget := fmt.Sprintf("%s:%s", daemonSession, windowName)
 
 	// Kill ALL existing windows with this name (handles duplicates)
-	killAllWindowsByNameAllSessions(windowName)
+	KillAllWindowsByNameAllSessions(windowName)
 
 	// Build the prompt content
 	promptFile, err := os.CreateTemp("", "task-prompt-*.txt")

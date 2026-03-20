@@ -835,7 +835,7 @@ func (e *Executor) cleanupInactiveDoneTasks() {
 
 		// Also kill the tmux window to fully clean up
 		windowName := TmuxWindowName(task.ID)
-		killAllWindowsByNameAllSessions(windowName)
+		KillAllWindowsByNameAllSessions(windowName)
 
 		e.logLine(task.ID, "system", "Claude process cleaned up (inactive done task)")
 	}
@@ -1620,30 +1620,57 @@ func TmuxSessionName(taskID int64) string {
 	return fmt.Sprintf("%s:%s", getDaemonSessionName(), TmuxWindowName(taskID))
 }
 
-// CapturePaneContent captures the last N lines from a task's tmux pane.
-// Returns the trimmed content, or empty string if the pane doesn't exist or capture fails.
-func CapturePaneContent(taskID int64, lines int) string {
-	sessionName := TmuxSessionName(taskID)
-
-	// Check if session exists first
-	if err := exec.Command("tmux", "has-session", "-t", sessionName).Run(); err != nil {
+// CapturePaneContent captures the last N lines from a tmux pane.
+// target can be a pane ID (e.g., "%1234") or a window target (e.g., "task-daemon-XXX:2")
+// in which case ".0" is appended to select the first pane.
+// Returns the trimmed content, or empty string if capture fails.
+func CapturePaneContent(windowTarget string, lines int) string {
+	if windowTarget == "" {
 		return ""
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
+	// If it's already a pane ID (starts with %), use directly; otherwise append .0
+	target := windowTarget
+	if !strings.HasPrefix(windowTarget, "%") {
+		target = windowTarget + ".0"
+	}
 
-	// Capture the last N lines from pane 0 (the executor pane)
-	target := sessionName + ".0"
-	startLine := fmt.Sprintf("-%d", lines)
-	out, err := exec.CommandContext(ctx, "tmux", "capture-pane", "-t", target, "-p", "-S", startLine).Output()
-	if err != nil {
+	// Try capture with a 3-second timeout and one retry
+	for attempt := 0; attempt < 2; attempt++ {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		out, err := exec.CommandContext(ctx, "tmux", "capture-pane", "-t", target, "-p", "-S", fmt.Sprintf("-%d", lines)).Output()
+		cancel()
+
+		if err == nil {
+			content := strings.TrimRight(string(out), " \t\n\r")
+			if content != "" {
+				return content
+			}
+		}
+
+		// Only retry once after a short delay
+		if attempt == 0 {
+			time.Sleep(200 * time.Millisecond)
+		}
+	}
+
+	return ""
+}
+
+// FormatSessionHandoff formats captured pane content into a handoff prompt for the new executor.
+func FormatSessionHandoff(prevExecutor, capturedContent string) string {
+	if capturedContent == "" {
 		return ""
 	}
 
-	// Trim trailing whitespace/empty lines
-	content := strings.TrimRight(string(out), " \t\n\r")
-	return content
+	var sb strings.Builder
+	sb.WriteString("## Previous Session Context\n\n")
+	sb.WriteString(fmt.Sprintf("This task was previously worked on using **%s**. Below is the terminal output from that session.\n", prevExecutor))
+	sb.WriteString("Use this context to continue the work seamlessly.\n\n")
+	sb.WriteString("```\n")
+	sb.WriteString(capturedContent)
+	sb.WriteString("\n```\n\n---\n\n")
+	return sb.String()
 }
 
 // SendKeyToPane sends a key sequence to a task's executor tmux pane.
@@ -1661,9 +1688,9 @@ func SendKeyToPane(taskID int64, keys ...string) error {
 	return exec.Command("tmux", args...).Run()
 }
 
-// killAllWindowsByNameAllSessions kills ALL windows with a given name across all daemon sessions.
+// KillAllWindowsByNameAllSessions kills ALL windows with a given name across all daemon sessions.
 // Also kills any -shell variant windows.
-func killAllWindowsByNameAllSessions(windowName string) {
+func KillAllWindowsByNameAllSessions(windowName string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -2162,7 +2189,7 @@ func (e *Executor) runClaude(ctx context.Context, task *db.Task, workDir, prompt
 	windowTarget := fmt.Sprintf("%s:%s", daemonSession, windowName)
 
 	// Kill ALL existing windows with this name (handles duplicates)
-	killAllWindowsByNameAllSessions(windowName)
+	KillAllWindowsByNameAllSessions(windowName)
 
 	// Setup Claude hooks for status updates
 	cleanupHooks, err := e.setupClaudeHooks(workDir, task.ID)
@@ -2339,7 +2366,7 @@ func (e *Executor) runClaudeResume(ctx context.Context, task *db.Task, workDir, 
 	windowTarget := fmt.Sprintf("%s:%s", daemonSession, windowName)
 
 	// Kill ALL existing windows with this name (handles duplicates)
-	killAllWindowsByNameAllSessions(windowName)
+	KillAllWindowsByNameAllSessions(windowName)
 
 	// Setup Claude hooks for status updates
 	cleanupHooks, err := e.setupClaudeHooks(workDir, task.ID)
@@ -2527,7 +2554,7 @@ func (e *Executor) resumeClaudeDangerous(task *db.Task, workDir string) bool {
 	windowName := TmuxWindowName(taskID)
 
 	// Kill ALL existing windows with this name (handles duplicates)
-	killAllWindowsByNameAllSessions(windowName)
+	KillAllWindowsByNameAllSessions(windowName)
 
 	// Ensure task-daemon session exists for creating new window
 	daemonSession, err := ensureTmuxDaemon()
@@ -2692,7 +2719,7 @@ func (e *Executor) resumeClaudeSafe(task *db.Task, workDir string) bool {
 	windowName := TmuxWindowName(taskID)
 
 	// Kill ALL existing windows with this name (handles duplicates)
-	killAllWindowsByNameAllSessions(windowName)
+	KillAllWindowsByNameAllSessions(windowName)
 
 	// Ensure task-daemon session exists for creating new window
 	daemonSession, err := ensureTmuxDaemon()
@@ -2817,7 +2844,7 @@ func (e *Executor) resumeCodexWithMode(task *db.Task, workDir string, dangerousM
 
 	windowName := TmuxWindowName(taskID)
 	// Kill ALL existing windows with this name (handles duplicates)
-	killAllWindowsByNameAllSessions(windowName)
+	KillAllWindowsByNameAllSessions(windowName)
 
 	daemonSession, err := ensureTmuxDaemon()
 	if err != nil {
@@ -2921,7 +2948,7 @@ func (e *Executor) resumeGeminiWithMode(task *db.Task, workDir string, dangerous
 
 	windowName := TmuxWindowName(taskID)
 	// Kill ALL existing windows with this name (handles duplicates)
-	killAllWindowsByNameAllSessions(windowName)
+	KillAllWindowsByNameAllSessions(windowName)
 
 	daemonSession, err := ensureTmuxDaemon()
 	if err != nil {
@@ -4860,7 +4887,7 @@ func (e *Executor) runPi(ctx context.Context, task *db.Task, workDir, prompt str
 	windowTarget := fmt.Sprintf("%s:%s", daemonSession, windowName)
 
 	// Kill ALL existing windows with this name (handles duplicates)
-	killAllWindowsByNameAllSessions(windowName)
+	KillAllWindowsByNameAllSessions(windowName)
 
 	// Create a temp file for the prompt (avoids quoting issues)
 	promptFile, err := os.CreateTemp("", "task-prompt-*.txt")
@@ -5006,7 +5033,7 @@ func (e *Executor) runPiResume(ctx context.Context, task *db.Task, workDir, prom
 	windowTarget := fmt.Sprintf("%s:%s", daemonSession, windowName)
 
 	// Kill ALL existing windows with this name (handles duplicates)
-	killAllWindowsByNameAllSessions(windowName)
+	KillAllWindowsByNameAllSessions(windowName)
 
 	// Create a temp file for the feedback (avoids quoting issues)
 	feedbackFile, err := os.CreateTemp("", "task-feedback-*.txt")

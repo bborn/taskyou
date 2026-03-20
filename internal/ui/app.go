@@ -863,7 +863,9 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.selectedTask != nil && m.selectedTask.ID == t.ID {
 				m.selectedTask = t
 				if m.detailView != nil {
-					m.detailView.UpdateTask(t)
+					if cmd := m.detailView.UpdateTask(t); cmd != nil {
+						cmds = append(cmds, cmd)
+					}
 				}
 			}
 		}
@@ -897,7 +899,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// Capture the tmux pane content for richer display of the prompt.
 				// This shows the actual executor output (including multiple choice options)
 				// rather than just the hook log summary.
-				paneContent := executor.CapturePaneContent(t.ID, 15)
+				paneContent := executor.CapturePaneContent(executor.TmuxSessionName(t.ID), 15)
 				if paneContent != "" {
 					m.executorPrompts[t.ID] = paneContent
 				} else {
@@ -1057,7 +1059,9 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.selectedTask != nil && msg.task != nil && m.selectedTask.ID == msg.task.ID {
 				m.selectedTask = msg.task
 				if m.detailView != nil {
-					m.detailView.UpdateTask(msg.task)
+					if cmd := m.detailView.UpdateTask(msg.task); cmd != nil {
+						cmds = append(cmds, cmd)
+					}
 				}
 			}
 			cmds = append(cmds, m.loadTasks())
@@ -1085,7 +1089,9 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.selectedTask != nil && m.selectedTask.ID == msg.task.ID {
 				m.selectedTask = msg.task
 				if m.detailView != nil {
-					m.detailView.UpdateTask(msg.task)
+					if cmd := m.detailView.UpdateTask(msg.task); cmd != nil {
+						cmds = append(cmds, cmd)
+					}
 				}
 			}
 			if msg.task.Pinned {
@@ -1101,7 +1107,9 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err == nil && m.selectedTask != nil && m.detailView != nil {
 			if task, err := m.db.GetTask(m.selectedTask.ID); err == nil && task != nil {
 				m.selectedTask = task
-				m.detailView.UpdateTask(task)
+				if cmd := m.detailView.UpdateTask(task); cmd != nil {
+					cmds = append(cmds, cmd)
+				}
 			}
 		}
 		cmds = append(cmds, m.loadTasks())
@@ -1135,7 +1143,9 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if task != nil {
 					m.selectedTask = task
 					if m.detailView != nil {
-						m.detailView.UpdateTask(task)
+						if cmd := m.detailView.UpdateTask(task); cmd != nil {
+							cmds = append(cmds, cmd)
+						}
 					}
 					if task.DangerousMode {
 						m.notification = IconBlocked() + " Dangerous mode enabled"
@@ -1173,7 +1183,9 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if task != nil {
 				m.selectedTask = task
 				if m.detailView != nil {
-					m.detailView.UpdateTask(task)
+					if cmd := m.detailView.UpdateTask(task); cmd != nil {
+						cmds = append(cmds, cmd)
+					}
 				}
 			}
 		}
@@ -1263,7 +1275,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						} else if prompt, isQ := m.latestChoicePrompt(event.TaskID); prompt != "" {
 							m.tasksNeedingInput[event.TaskID] = true
 							m.questionPrompts[event.TaskID] = isQ
-							paneContent := executor.CapturePaneContent(event.TaskID, 15)
+							paneContent := executor.CapturePaneContent(executor.TmuxSessionName(event.TaskID), 15)
 							if paneContent != "" {
 								m.executorPrompts[event.TaskID] = paneContent
 							} else {
@@ -1286,7 +1298,9 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.selectedTask != nil && m.selectedTask.ID == event.TaskID {
 				m.selectedTask = event.Task
 				if m.detailView != nil {
-					m.detailView.UpdateTask(event.Task)
+					if cmd := m.detailView.UpdateTask(event.Task); cmd != nil {
+						cmds = append(cmds, cmd)
+					}
 				}
 			}
 		}
@@ -2560,11 +2574,15 @@ func (m *AppModel) updateDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		// Immediately update UI for responsiveness
 		m.selectedTask.Status = db.StatusQueued
+		var switchCmd tea.Cmd
 		if m.detailView != nil {
-			m.detailView.UpdateTask(m.selectedTask)
+			switchCmd = m.detailView.UpdateTask(m.selectedTask)
 		}
 		// Update task in the list and kanban
 		m.updateTaskInList(m.selectedTask)
+		if switchCmd != nil {
+			return m, tea.Batch(switchCmd, m.queueTask(m.selectedTask.ID))
+		}
 		return m, m.queueTask(m.selectedTask.ID)
 	}
 	if key.Matches(keyMsg, m.keys.Retry) && m.selectedTask != nil {
@@ -2623,7 +2641,7 @@ func (m *AppModel) updateDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Only allow toggling dangerous mode if task is processing or blocked
 		if m.selectedTask.Status == db.StatusProcessing || m.selectedTask.Status == db.StatusBlocked {
 			// Break panes back to daemon BEFORE toggling so the executor can kill them.
-			// If panes are joined to task-ui, killAllWindowsByNameAllSessions won't find them.
+			// If panes are joined to task-ui, KillAllWindowsByNameAllSessions won't find them.
 			if m.detailView != nil {
 				m.detailView.Cleanup()
 			}
@@ -3446,16 +3464,20 @@ func (m *AppModel) updateChangeStatus(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.updateTaskInList(m.pendingChangeStatusTask)
 
 			// Update detail view if showing this task
+			var switchCmd tea.Cmd
 			if m.selectedTask != nil && m.selectedTask.ID == taskID {
 				m.selectedTask.Status = newStatus
 				if m.detailView != nil {
-					m.detailView.UpdateTask(m.selectedTask)
+					switchCmd = m.detailView.UpdateTask(m.selectedTask)
 				}
 			}
 
 			m.pendingChangeStatusTask = nil
 			m.changeStatusForm = nil
 			m.currentView = m.previousView
+			if switchCmd != nil {
+				return m, tea.Batch(switchCmd, m.changeTaskStatus(taskID, newStatus))
+			}
 			return m, m.changeTaskStatus(taskID, newStatus)
 		}
 		// Cancelled or no selection
@@ -4256,7 +4278,7 @@ func (m *AppModel) detectPermissionPrompt(taskID int64) bool {
 	}
 	m.tasksNeedingInput[taskID] = true
 	m.questionPrompts[taskID] = isQ
-	paneContent := executor.CapturePaneContent(taskID, 15)
+	paneContent := executor.CapturePaneContent(executor.TmuxSessionName(taskID), 15)
 	if paneContent != "" {
 		m.executorPrompts[taskID] = paneContent
 	} else {

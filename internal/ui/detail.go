@@ -226,10 +226,101 @@ func (m *DetailModel) StartRelatedTasksLoad() tea.Cmd {
 }
 
 // UpdateTask updates the task and refreshes the view.
-func (m *DetailModel) UpdateTask(t *db.Task) {
+// Returns a tea.Cmd if the executor changed and a switch is needed.
+func (m *DetailModel) UpdateTask(t *db.Task) tea.Cmd {
+	prevExecutor := ""
+	if m.task != nil {
+		prevExecutor = m.task.Executor
+	}
+
 	m.task = t
 	if m.ready {
 		m.viewport.SetContent(m.renderContent())
+	}
+
+	// Detect executor change — trigger switch if we have an active window
+	if prevExecutor != "" && prevExecutor != t.Executor && m.cachedWindowTarget != "" {
+		return tea.Batch(m.restartForExecutorSwitch(prevExecutor), m.spinnerTick())
+	}
+
+	return nil
+}
+
+// restartForExecutorSwitch handles switching from one executor to another.
+// Captures pane content from the old executor, kills the window, and starts a new session.
+// All state flows back through panesJoinedMsg to avoid race conditions.
+func (m *DetailModel) restartForExecutorSwitch(prevExecutor string) tea.Cmd {
+	log := GetLogger()
+
+	// Capture pane content BEFORE killing the window.
+	// When panes are joined to the UI, the executor pane has been moved from the
+	// daemon window into the UI session — so capture from claudePaneID directly.
+	captureTarget := m.cachedWindowTarget // fallback to daemon window
+	if m.claudePaneID != "" {
+		captureTarget = m.claudePaneID // pane is in the UI session
+	}
+	capturedContent := executor.CapturePaneContent(captureTarget, 500)
+	log.Info("restartForExecutorSwitch: captured %d chars from %q (prev=%s, new=%s)",
+		len(capturedContent), captureTarget, prevExecutor, m.task.Executor)
+
+	// Kill the old executor window
+	windowName := executor.TmuxWindowName(m.task.ID)
+	executor.KillAllWindowsByNameAllSessions(windowName)
+
+	// Clear cached tmux state — new state arrives via panesJoinedMsg
+	m.cachedWindowTarget = ""
+	m.claudePaneID = ""
+	m.workdirPaneID = ""
+	m.paneLoading = true
+	m.paneLoadingStart = time.Now()
+	m.paneError = ""
+
+	// Clear stale session ID (belongs to old executor)
+	m.database.UpdateTaskClaudeSessionID(m.task.ID, "")
+	m.task.ClaudeSessionID = ""
+
+	// Log the switch
+	m.database.AppendTaskLog(m.task.ID, "system",
+		fmt.Sprintf("Switching executor from %s to %s", prevExecutor, m.task.Executor))
+
+	// Capture values needed for the goroutine — don't access m.* in the closure
+	taskID := m.task.ID
+	newExecutor := m.task.Executor
+
+	return func() tea.Msg {
+		// Build handoff context from captured pane content
+		handoffContext := executor.FormatSessionHandoff(prevExecutor, capturedContent)
+
+		// Start the new session with handoff context
+		if err := m.startResumableSession("", handoffContext); err != nil {
+			log.Error("restartForExecutorSwitch: failed to start %s: %v", newExecutor, err)
+			userMsg := m.executorFailureMessage(err.Error())
+			m.logExecutorFailure(userMsg)
+			return panesJoinedMsg{err: err, userMessage: userMsg}
+		}
+
+		// Find the new window
+		windowTarget := m.findTaskWindow()
+		if windowTarget == "" {
+			log.Error("restartForExecutorSwitch: window not found after starting %s for task %d", newExecutor, taskID)
+			err := fmt.Errorf("%s window not found after switch", newExecutor)
+			userMsg := m.executorFailureMessage("the executor exited before panes could be created")
+			m.logExecutorFailure(userMsg)
+			return panesJoinedMsg{err: err, userMessage: userMsg}
+		}
+
+		// Join panes — state flows back via panesJoinedMsg
+		m.cachedWindowTarget = windowTarget
+		m.joinTmuxPane()
+
+		log.Info("restartForExecutorSwitch: completed switch to %s, claudePaneID=%q", newExecutor, m.claudePaneID)
+
+		return panesJoinedMsg{
+			claudePaneID:    m.claudePaneID,
+			workdirPaneID:   m.workdirPaneID,
+			daemonSessionID: m.daemonSessionID,
+			windowTarget:    windowTarget,
+		}
 	}
 }
 
@@ -727,7 +818,7 @@ func (m *DetailModel) findTaskWindow() string {
 
 // startResumableSession starts a new tmux window with the task's executor.
 // This reconnects to a session that was previously running but whose tmux window was killed.
-func (m *DetailModel) startResumableSession(sessionID string) error {
+func (m *DetailModel) startResumableSession(sessionID string, handoffContext ...string) error {
 	log := GetLogger()
 	log.Info("startResumableSession: called with sessionID=%q for task %d", sessionID, m.task.ID)
 
@@ -803,6 +894,12 @@ func (m *DetailModel) startResumableSession(sessionID string) error {
 	if sessionID == "" {
 		// No session to resume - build prompt from task
 		var promptBuilder strings.Builder
+
+		// Include handoff context from previous executor if switching
+		if len(handoffContext) > 0 && handoffContext[0] != "" {
+			promptBuilder.WriteString(handoffContext[0])
+		}
+
 		promptBuilder.WriteString(fmt.Sprintf("# Task: %s\n\n", m.task.Title))
 		if m.task.Body != "" {
 			promptBuilder.WriteString(m.task.Body)
@@ -880,6 +977,11 @@ func (m *DetailModel) refreshTmuxWindowTarget() bool {
 // This handles cases where panes were externally closed or a session was created after opening the view.
 func (m *DetailModel) ensureTmuxPanesJoined() {
 	if os.Getenv("TMUX") == "" {
+		return
+	}
+
+	// Don't interfere while an executor switch or async pane setup is in progress
+	if m.paneLoading {
 		return
 	}
 
