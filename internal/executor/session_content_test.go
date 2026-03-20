@@ -11,15 +11,17 @@ import (
 )
 
 func TestReadJSONLSessionContent(t *testing.T) {
-	t.Run("claude-style JSONL with user and assistant messages", func(t *testing.T) {
+	t.Run("claude code JSONL format (type+message nesting)", func(t *testing.T) {
 		dir := t.TempDir()
 		sessionFile := filepath.Join(dir, "session.jsonl")
 
-		content := `{"type":"system","message":"system init"}
-{"role":"user","content":[{"type":"text","text":"Hello, can you help me fix a bug?"}]}
-{"role":"assistant","content":[{"type":"text","text":"Sure! What bug are you seeing?"},{"type":"tool_use","id":"123","name":"read_file"}]}
-{"role":"user","content":[{"type":"text","text":"The login page crashes when I submit"}]}
-{"role":"assistant","content":[{"type":"text","text":"I found the issue. The form handler has a null pointer dereference."}]}
+		// Real Claude Code format: type at top level, message nested.
+		// User content is a plain string. Assistant content is [{type:"text",text:"..."}].
+		content := `{"type":"file-history-snapshot","messageId":"abc","snapshot":{}}
+{"type":"user","message":{"role":"user","content":"Hello, can you help me fix a bug?"},"uuid":"u1","timestamp":"2025-01-01T00:00:00Z"}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Sure! What bug are you seeing?"},{"type":"tool_use","id":"123","name":"Read"}]},"uuid":"a1","timestamp":"2025-01-01T00:00:01Z"}
+{"type":"user","message":{"role":"user","content":"The login page crashes when I submit"},"uuid":"u2","timestamp":"2025-01-01T00:00:02Z"}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"I found the issue. The form handler has a null pointer dereference."}]},"uuid":"a2","timestamp":"2025-01-01T00:00:03Z"}
 `
 		if err := os.WriteFile(sessionFile, []byte(content), 0644); err != nil {
 			t.Fatal(err)
@@ -40,8 +42,33 @@ func TestReadJSONLSessionContent(t *testing.T) {
 			t.Errorf("expected second assistant message, got: %s", result)
 		}
 		// Tool use should be excluded
-		if strings.Contains(result, "tool_use") || strings.Contains(result, "read_file") {
+		if strings.Contains(result, "tool_use") || strings.Contains(result, "Read") {
 			t.Errorf("tool use details should not appear in output: %s", result)
+		}
+	})
+
+	t.Run("legacy JSONL format (top-level role)", func(t *testing.T) {
+		dir := t.TempDir()
+		sessionFile := filepath.Join(dir, "session.jsonl")
+
+		content := `{"type":"system","message":"system init"}
+{"role":"user","content":[{"type":"text","text":"Hello from legacy format"}]}
+{"role":"assistant","content":[{"type":"text","text":"Legacy response here"}]}
+`
+		if err := os.WriteFile(sessionFile, []byte(content), 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		result := readJSONLSessionContent(sessionFile)
+
+		if result == "" {
+			t.Fatal("expected non-empty result")
+		}
+		if !strings.Contains(result, "**User:** Hello from legacy format") {
+			t.Errorf("expected user message, got: %s", result)
+		}
+		if !strings.Contains(result, "**Assistant:** Legacy response here") {
+			t.Errorf("expected assistant message, got: %s", result)
 		}
 	})
 
@@ -297,9 +324,9 @@ func TestReadClaudeSessionContent(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		// Create a session file
-		sessionContent := `{"role":"user","content":[{"type":"text","text":"Fix the bug"}]}
-{"role":"assistant","content":[{"type":"text","text":"I'll fix it now."}]}
+		// Create a session file (real Claude Code format - user content is a string)
+		sessionContent := `{"type":"user","message":{"role":"user","content":"Fix the bug"},"uuid":"u1","timestamp":"2025-01-01T00:00:00Z"}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"I'll fix it now."}]},"uuid":"a1","timestamp":"2025-01-01T00:00:01Z"}
 `
 		sessionFile := filepath.Join(projectDir, "abc12345-1234-5678-abcd-123456789abc.jsonl")
 		if err := os.WriteFile(sessionFile, []byte(sessionContent), 0644); err != nil {

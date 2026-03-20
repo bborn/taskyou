@@ -97,6 +97,16 @@ func ReadPiSessionContent(workDir string) string {
 
 // readJSONLSessionContent parses a JSONL session file (used by Claude and Pi).
 // Each line is a JSON object. We extract user/assistant text messages.
+//
+// Claude Code JSONL format uses top-level "type" field ("user"/"assistant")
+// with the actual message nested in a "message" field:
+//
+//	{"type":"user",  "message":{"role":"user",      "content":["hello","world"]}}
+//	{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Hi!"}]}}
+//
+// Pi and older formats may use top-level "role" directly:
+//
+//	{"role":"user","content":[{"type":"text","text":"hello"}]}
 func readJSONLSessionContent(path string) string {
 	file, err := os.Open(path)
 	if err != nil {
@@ -120,27 +130,56 @@ func readJSONLSessionContent(path string) string {
 			continue
 		}
 
-		// Extract role-based messages
-		role, _ := entry["role"].(string)
-		if role != "user" && role != "assistant" {
-			continue
-		}
+		// Determine role and content source.
+		// Claude Code: top-level "type" is "user"/"assistant", content in "message" field.
+		// Pi/legacy: top-level "role" is "user"/"assistant", content at top level.
+		var role string
 
-		// Extract text from content array
-		content, ok := entry["content"].([]interface{})
-		if !ok {
-			continue
-		}
+		entryType, _ := entry["type"].(string)
+		topRole, _ := entry["role"].(string)
 
-		for _, item := range content {
-			itemMap, ok := item.(map[string]interface{})
-			if !ok {
-				continue
+		var rawContent interface{}
+
+		if entryType == "user" || entryType == "assistant" {
+			// Claude Code format: message data is nested
+			role = entryType
+			if msg, ok := entry["message"].(map[string]interface{}); ok {
+				rawContent = msg["content"]
 			}
-			if itemMap["type"] == "text" {
-				text, _ := itemMap["text"].(string)
-				if text != "" {
-					messages = append(messages, sessionMessage{Role: role, Text: text})
+		} else if topRole == "user" || topRole == "assistant" {
+			// Pi/legacy format: role and content at top level
+			role = topRole
+			rawContent = entry["content"]
+		} else {
+			continue
+		}
+
+		if rawContent == nil {
+			continue
+		}
+
+		// Extract text from content.
+		// Content can be: a plain string, an array of strings, or an array of objects.
+		switch cv := rawContent.(type) {
+		case string:
+			// Plain string content (Claude Code user messages)
+			if cv != "" {
+				messages = append(messages, sessionMessage{Role: role, Text: cv})
+			}
+		case []interface{}:
+			for _, item := range cv {
+				switch v := item.(type) {
+				case string:
+					if v != "" {
+						messages = append(messages, sessionMessage{Role: role, Text: v})
+					}
+				case map[string]interface{}:
+					if v["type"] == "text" {
+						text, _ := v["text"].(string)
+						if text != "" {
+							messages = append(messages, sessionMessage{Role: role, Text: text})
+						}
+					}
 				}
 			}
 		}
