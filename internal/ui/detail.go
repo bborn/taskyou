@@ -749,6 +749,11 @@ func (m *DetailModel) restartForExecutorSwitch(prevExecutor string) tea.Cmd {
 	log := GetLogger()
 	log.Info("restartForExecutorSwitch: %s -> %s for task %d", prevExecutor, m.task.Executor, m.task.ID)
 
+	// Capture the previous executor's pane content BEFORE killing the window.
+	// This is executor-agnostic: works for any executor since it reads the tmux pane.
+	capturedContent := executor.CapturePaneContent(m.task.ID, 500)
+	log.Info("restartForExecutorSwitch: captured %d chars of pane content", len(capturedContent))
+
 	// Kill the old tmux window
 	windowName := executor.TmuxWindowName(m.task.ID)
 	executor.KillAllWindowsByNameAllSessions(windowName)
@@ -769,7 +774,7 @@ func (m *DetailModel) restartForExecutorSwitch(prevExecutor string) tea.Cmd {
 	m.paneLoadingStart = time.Now()
 
 	return func() tea.Msg {
-		if err := m.startResumableSession("", prevExecutor); err != nil {
+		if err := m.startResumableSession("", prevExecutor, capturedContent); err != nil {
 			log.Error("restartForExecutorSwitch: failed to start new session: %v", err)
 			userMsg := m.executorFailureMessage(err.Error())
 			return panesJoinedMsg{err: err, userMessage: userMsg}
@@ -800,14 +805,18 @@ func (m *DetailModel) restartForExecutorSwitch(prevExecutor string) tea.Cmd {
 
 // startResumableSession starts a new tmux window with the task's executor.
 // This reconnects to a session that was previously running but whose tmux window was killed.
-// prevExecutorName is the name of the executor being switched FROM (empty when not switching).
-func (m *DetailModel) startResumableSession(sessionID string, prevExecutorName ...string) error {
+// switchContext is optional: [0]=prevExecutorName, [1]=capturedPaneContent (from executor switch).
+func (m *DetailModel) startResumableSession(sessionID string, switchContext ...string) error {
 	log := GetLogger()
 	prevExec := ""
-	if len(prevExecutorName) > 0 {
-		prevExec = prevExecutorName[0]
+	capturedContent := ""
+	if len(switchContext) > 0 {
+		prevExec = switchContext[0]
 	}
-	log.Info("startResumableSession: called with sessionID=%q prevExecutor=%q for task %d", sessionID, prevExec, m.task.ID)
+	if len(switchContext) > 1 {
+		capturedContent = switchContext[1]
+	}
+	log.Info("startResumableSession: called with sessionID=%q prevExecutor=%q capturedLen=%d for task %d", sessionID, prevExec, len(capturedContent), m.task.ID)
 
 	if m.task == nil {
 		log.Debug("startResumableSession: early return (task is nil)")
@@ -882,10 +891,18 @@ func (m *DetailModel) startResumableSession(sessionID string, prevExecutorName .
 		// No session to resume - build prompt from task
 		var promptBuilder strings.Builder
 
-		// Check for previous session content from a different executor (executor switch)
-		if handoff := m.executor.GetPreviousSessionContent(taskExecutor, workDir, prevExec); handoff != "" {
+		// Include previous session context when switching executors.
+		// Prefer captured pane content (executor-agnostic) over session file parsing.
+		if capturedContent != "" {
+			handoff := executor.FormatSessionHandoff(prevExec, capturedContent)
 			promptBuilder.WriteString(handoff)
-			m.database.AppendTaskLog(m.task.ID, "system", "Including previous session context from executor switch")
+			m.database.AppendTaskLog(m.task.ID, "system", fmt.Sprintf("Including captured pane content from %s (%d chars)", prevExec, len(capturedContent)))
+		} else if prevExec != "" {
+			// Fallback: try reading session files (works for Claude, Codex, Gemini, Pi)
+			if handoff := m.executor.GetPreviousSessionContent(taskExecutor, workDir, prevExec); handoff != "" {
+				promptBuilder.WriteString(handoff)
+				m.database.AppendTaskLog(m.task.ID, "system", "Including previous session content from executor switch")
+			}
 		}
 
 		promptBuilder.WriteString(fmt.Sprintf("# Task: %s\n\n", m.task.Title))
