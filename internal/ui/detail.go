@@ -892,17 +892,11 @@ func (m *DetailModel) startResumableSession(sessionID string, switchContext ...s
 		var promptBuilder strings.Builder
 
 		// Include previous session context when switching executors.
-		// Prefer captured pane content (executor-agnostic) over session file parsing.
+		// Uses captured tmux pane content — works for any executor.
 		if capturedContent != "" {
 			handoff := executor.FormatSessionHandoff(prevExec, capturedContent)
 			promptBuilder.WriteString(handoff)
 			m.database.AppendTaskLog(m.task.ID, "system", fmt.Sprintf("Including captured pane content from %s (%d chars)", prevExec, len(capturedContent)))
-		} else if prevExec != "" {
-			// Fallback: try reading session files (works for Claude, Codex, Gemini, Pi)
-			if handoff := m.executor.GetPreviousSessionContent(taskExecutor, workDir, prevExec); handoff != "" {
-				promptBuilder.WriteString(handoff)
-				m.database.AppendTaskLog(m.task.ID, "system", "Including previous session content from executor switch")
-			}
 		}
 
 		promptBuilder.WriteString(fmt.Sprintf("# Task: %s\n\n", m.task.Title))
