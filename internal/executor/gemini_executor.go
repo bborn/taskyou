@@ -83,7 +83,7 @@ func (g *GeminiExecutor) runGemini(ctx context.Context, task *db.Task, workDir, 
 	windowTarget := fmt.Sprintf("%s:%s", daemonSession, windowName)
 
 	// Kill ALL existing windows with this name (handles duplicates)
-	killAllWindowsByNameAllSessions(windowName)
+	KillAllWindowsByNameAllSessions(windowName)
 
 	promptFile, err := os.CreateTemp("", "task-prompt-*.txt")
 	if err != nil {
