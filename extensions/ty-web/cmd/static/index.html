@@ -1,0 +1,1018 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TaskYou</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<script src="https://cdn.tailwindcss.com"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3/dist/cdn.min.js"></script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5/css/xterm.min.css">
+<script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5/lib/xterm.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0/lib/addon-fit.min.js"></script>
+<script>
+tailwind.config = {
+  theme: {
+    extend: {
+      fontFamily: {
+        sans: ['Inter', 'system-ui', 'sans-serif'],
+        mono: ['JetBrains Mono', 'ui-monospace', 'monospace'],
+      },
+      colors: {
+        ln: {
+          bg: '#1b1b1f',
+          card: '#25252b',
+          'card-hover': '#2e2e35',
+          border: '#2e2e35',
+          'text-primary': '#e8e8ed',
+          'text-secondary': '#8b8b93',
+          'text-muted': '#5c5c66',
+        },
+        status: {
+          backlog: '#737373',
+          queued: '#60a5fa',
+          processing: '#fbbf24',
+          blocked: '#f87171',
+          done: '#4ade80',
+        },
+      },
+    },
+  },
+}
+</script>
+<style>
+  [x-cloak] { display: none !important; }
+  body { font-family: 'Inter', system-ui, sans-serif; }
+  .scrollbar-thin::-webkit-scrollbar { width: 4px; height: 4px; }
+  .scrollbar-thin::-webkit-scrollbar-track { background: transparent; }
+  .scrollbar-thin::-webkit-scrollbar-thumb { background: #2e2e35; border-radius: 2px; }
+  .scrollbar-thin::-webkit-scrollbar-thumb:hover { background: #3e3e45; }
+  .log-output { color: #4ade80; }
+  .log-error { color: #f87171; }
+  .log-system { color: #60a5fa; }
+  .log-tool { color: #fbbf24; }
+  .log-question { color: #c084fc; }
+  .log-default { color: #5c5c66; }
+  @keyframes pulse-dot { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+  .animate-pulse-dot { animation: pulse-dot 1.5s ease-in-out infinite; }
+  @keyframes slide-in { from { transform: translateX(100%); } to { transform: translateX(0); } }
+  @keyframes slide-out { from { transform: translateX(0); } to { transform: translateX(100%); } }
+  .slide-in { animation: slide-in 0.2s ease-out forwards; }
+  .slide-out { animation: slide-out 0.15s ease-in forwards; }
+</style>
+</head>
+<body class="bg-ln-bg text-ln-text-primary min-h-screen overflow-x-hidden" x-data="board()" x-init="init()">
+
+  <!-- Top bar with filter tabs -->
+  <header class="fixed top-0 left-0 right-0 h-11 bg-ln-bg border-b border-ln-border z-30 flex items-center px-5 gap-4">
+    <!-- Project filter -->
+    <div class="flex items-center gap-1">
+      <select class="bg-transparent border border-ln-border rounded px-2 py-1 text-[12px] text-ln-text-secondary outline-none focus:border-ln-text-muted cursor-pointer appearance-none pr-6"
+        style="background-image:url('data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 width=%2210%22 height=%2210%22 viewBox=%220 0 24 24%22 fill=%22none%22 stroke=%22%235c5c66%22 stroke-width=%222%22><polyline points=%226 9 12 15 18 9%22/></svg>');background-repeat:no-repeat;background-position:right 6px center;"
+        x-model="filterProject" @change="fetchBoard()">
+        <option value="">All Projects</option>
+        <template x-for="p in projects" :key="p">
+          <option :value="p" x-text="p"></option>
+        </template>
+      </select>
+    </div>
+
+    <div class="flex-1"></div>
+
+    <!-- Right side -->
+    <div class="flex items-center gap-3 shrink-0">
+      <div class="flex items-center gap-1.5 text-[10px] text-ln-text-muted">
+        <span class="w-1.5 h-1.5 rounded-full" :class="fetching ? 'bg-status-processing animate-pulse-dot' : 'bg-status-done'"></span>
+        <span x-text="fetching ? 'Syncing' : 'Live'"></span>
+      </div>
+      <button class="flex items-center gap-1.5 bg-[#5e6ad2] hover:bg-[#4f5bc0] text-white rounded px-2.5 py-1 text-[12px] font-medium transition-colors"
+        @click="showCreateModal = true">
+        <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>
+        New Task
+      </button>
+    </div>
+  </header>
+
+  <!-- Board -->
+  <main class="pt-11 h-screen flex flex-col">
+    <div class="flex-1 overflow-x-auto overflow-y-hidden">
+      <div class="flex h-full bg-ln-bg px-2 pt-2 pb-0 gap-0">
+        <template x-for="(col, colIdx) in filteredColumns" :key="col.status">
+          <div class="flex flex-col flex-1 min-w-[250px]"
+            @dragover.prevent="dragTargetStatus = col.status"
+            @dragleave="dragTargetStatus = null"
+            @drop.prevent="dropTask(col.status)">
+
+            <!-- Column header -->
+            <div class="flex items-center gap-2 px-3 py-2.5 shrink-0">
+              <span class="w-[7px] h-[7px] rounded-full shrink-0" :style="'background:' + columnColor(col.status)"></span>
+              <span class="text-[14px] font-medium text-ln-text-primary" x-text="col.label"></span>
+              <span class="text-[12px] text-ln-text-muted" x-text="col.count"></span>
+              <div class="flex-1"></div>
+              <button class="text-ln-text-muted hover:text-ln-text-secondary transition-colors opacity-0 group-hover:opacity-100">
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24"><path d="M12 6.75a.75.75 0 110-1.5.75.75 0 010 1.5zM12 12.75a.75.75 0 110-1.5.75.75 0 010 1.5zM12 18.75a.75.75 0 110-1.5.75.75 0 010 1.5z"/></svg>
+              </button>
+            </div>
+
+            <!-- Cards container -->
+            <div class="flex-1 overflow-y-auto scrollbar-thin px-1.5 pb-3 space-y-[2px] rounded transition-colors"
+              :class="dragTargetStatus === col.status ? 'bg-ln-card/30' : ''">
+              <template x-for="(task, rowIdx) in col.tasks" :key="task.id">
+                <div class="bg-ln-card hover:bg-ln-card-hover rounded-md p-3 cursor-pointer transition-colors border"
+                  :class="isSelected(colIdx, rowIdx) ? 'border-[#5e6ad2]' : 'border-transparent hover:border-ln-border'"
+                  :data-selected="isSelected(colIdx, rowIdx)"
+                  draggable="true"
+                  @dragstart="startDrag(task)"
+                  @dragend="endDrag()"
+                  @click="openTask(task.id)">
+
+                  <!-- Top row: ID left, pin icon right -->
+                  <div class="flex items-center justify-between mb-1.5">
+                    <span class="text-[12px] text-ln-text-muted font-mono" x-text="'TY-' + task.id"></span>
+                    <template x-if="task.pinned">
+                      <svg class="w-3 h-3 text-status-processing shrink-0" fill="currentColor" viewBox="0 0 16 16"><path d="M9.828.722a.5.5 0 0 1 .354.146l4.95 4.95a.5.5 0 0 1-.707.707l-.71-.71-3.18 3.18a5 5 0 0 1-1.39 1.05l-1.82.91a.5.5 0 0 1-.67-.67l.91-1.82a5 5 0 0 1 1.05-1.39l3.18-3.18-.71-.71a.5.5 0 0 1 .146-.853zM4.18 11.82L1.5 14.5l2.68-2.68z"/></svg>
+                    </template>
+                  </div>
+
+                  <!-- Title with status dot -->
+                  <div class="flex items-start gap-2">
+                    <span class="w-[5px] h-[5px] rounded-full shrink-0 mt-[6px]" :style="'background:' + columnColor(task.status)"></span>
+                    <span class="text-[14px] text-ln-text-primary leading-[1.4] break-words" x-text="task.title"></span>
+                  </div>
+
+                  <!-- Labels as colored dots -->
+                  <div class="flex items-center gap-3 mt-2.5 flex-wrap" x-show="task.project || task.type">
+                    <template x-if="task.project">
+                      <div class="flex items-center gap-1.5">
+                        <span class="w-[6px] h-[6px] rounded-full shrink-0" :style="'background:' + labelColor(task.project, 'project')"></span>
+                        <span class="text-[12px] text-ln-text-secondary" x-text="task.project"></span>
+                      </div>
+                    </template>
+                    <template x-if="task.type">
+                      <div class="flex items-center gap-1.5">
+                        <span class="w-[6px] h-[6px] rounded-full shrink-0" :style="'background:' + labelColor(task.type, 'type')"></span>
+                        <span class="text-[12px] text-ln-text-secondary" x-text="task.type"></span>
+                      </div>
+                    </template>
+                  </div>
+
+                  <!-- Created date -->
+                  <template x-if="task.age_hint">
+                    <div class="mt-2.5 text-[12px] text-ln-text-muted" x-text="task.age_hint"></div>
+                  </template>
+                </div>
+              </template>
+              <template x-if="col.tasks.length === 0">
+                <div class="text-[12px] text-ln-text-muted/40 text-center py-10">No tasks</div>
+              </template>
+            </div>
+          </div>
+        </template>
+      </div>
+    </div>
+  </main>
+
+  <!-- Detail panel (full screen) -->
+  <div class="fixed inset-0 bg-[#1b1b1f] z-50 flex flex-col"
+    x-show="detailOpen" x-cloak x-transition.opacity>
+    <template x-if="detail">
+      <div class="flex flex-col h-full">
+
+        <!-- Header -->
+        <div class="flex items-center gap-3 px-5 h-11 border-b border-ln-border shrink-0">
+          <button class="text-ln-text-muted hover:text-ln-text-primary rounded p-1 transition-colors" @click="closeDetail()">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M15 19l-7-7 7-7"/></svg>
+          </button>
+          <span class="text-[12px] text-ln-text-muted font-mono shrink-0">TY-<span x-text="detail.id"></span></span>
+          <span class="text-[13px] text-ln-text-primary font-medium truncate" x-text="detail.title"></span>
+          <div class="flex-1"></div>
+          <span class="text-[11px] font-bold uppercase px-1.5 py-0.5 rounded text-white shrink-0" :style="'background:' + columnColor(detail.status)" x-text="detail.status"></span>
+          <template x-if="detail.pinned"><span class="text-[11px] font-bold uppercase px-1.5 py-0.5 rounded bg-[#fbbf24] text-black shrink-0">PINNED</span></template>
+          <template x-if="detail.project"><span class="text-[11px] font-bold px-1.5 py-0.5 rounded text-white shrink-0" :style="'background:' + labelColor(detail.project, 'project')" x-text="detail.project"></span></template>
+          <template x-if="detail.type"><span class="text-[11px] font-bold px-1.5 py-0.5 rounded text-white shrink-0" :style="'background:' + labelColor(detail.type, 'type')" x-text="detail.type"></span></template>
+          <div class="w-px h-4 bg-ln-border mx-1"></div>
+          <div class="flex items-center gap-1 shrink-0" x-data="{ moveOpen: false }">
+            <div class="relative">
+              <button class="text-[12px] text-ln-text-secondary hover:text-ln-text-primary hover:bg-ln-card rounded px-2 py-1" @click="moveOpen = !moveOpen">Move</button>
+              <div class="absolute top-full right-0 mt-1 bg-ln-card border border-ln-border rounded-md min-w-[140px] z-[70] shadow-xl shadow-black/40"
+                x-show="moveOpen" @click.away="moveOpen = false" x-cloak x-transition>
+                <template x-for="s in allStatuses" :key="s">
+                  <button class="flex items-center gap-2 w-full px-3 py-1.5 text-[12px] text-ln-text-secondary hover:bg-ln-card-hover hover:text-ln-text-primary text-left capitalize"
+                    x-show="s !== detail.status" @click="moveTask(detail.id, s); moveOpen = false">
+                    <span class="w-[5px] h-[5px] rounded-full" :style="'background:' + columnColor(s)"></span>
+                    <span x-text="s"></span>
+                  </button>
+                </template>
+              </div>
+            </div>
+            <template x-if="detail.status !== 'done'"><button class="text-[12px] text-status-done hover:bg-status-done/10 rounded px-2 py-1" @click="moveTask(detail.id, 'done')">Close</button></template>
+            <template x-if="detail.status === 'backlog'"><button class="text-[12px] text-ln-text-secondary hover:bg-ln-card rounded px-2 py-1" @click="executeTask(detail.id)">Execute</button></template>
+            <template x-if="detail.status === 'done' || detail.status === 'blocked'"><button class="text-[12px] text-status-processing hover:bg-status-processing/10 rounded px-2 py-1" @click="showRetryModal = true">Retry</button></template>
+            <button class="text-[12px] text-ln-text-secondary hover:bg-ln-card rounded px-2 py-1" @click="togglePin(detail.id, detail.pinned)" x-text="detail.pinned ? 'Unpin' : 'Pin'"></button>
+            <button class="text-[12px] text-status-blocked hover:bg-status-blocked/10 rounded px-2 py-1" @click="showDeleteConfirm = true">Delete</button>
+          </div>
+        </div>
+
+        <!-- TOP PANE: Task details + logs -->
+        <div class="overflow-y-auto scrollbar-thin" :style="'height:' + topPaneHeight + 'px'">
+          <div class="px-5 py-4 space-y-4 max-w-4xl">
+            <template x-if="detail.body">
+              <div>
+                <div class="text-[13px] font-bold text-ln-text-primary mb-2">Description</div>
+                <div class="text-[13px] text-ln-text-secondary leading-relaxed whitespace-pre-wrap break-words" x-text="detail.body"></div>
+              </div>
+            </template>
+            <template x-if="detail.summary">
+              <div>
+                <div class="text-[13px] font-bold text-ln-text-primary mb-2">Activity Summary</div>
+                <div class="text-[13px] text-ln-text-secondary leading-relaxed whitespace-pre-wrap break-words" x-text="detail.summary"></div>
+              </div>
+            </template>
+            <div>
+              <div class="text-[13px] font-bold text-ln-text-primary mb-2">Execution Log</div>
+              <div class="font-mono text-[12px] leading-[1.6]">
+                <template x-for="log in logs" :key="log.id">
+                  <div class="whitespace-pre-wrap break-all">
+                    <span class="text-ln-text-muted" x-text="formatLogTime(log.created_at)"></span>
+                    <span x-text="' ' + logIcon(log.line_type) + ' '"></span>
+                    <span :class="logLineClass(log.line_type)" x-text="log.content"></span>
+                  </div>
+                </template>
+                <template x-if="logs.length === 0">
+                  <div class="text-ln-text-muted/30 italic py-2">No log entries yet.</div>
+                </template>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Resize handle -->
+        <div class="h-[5px] shrink-0 cursor-row-resize bg-ln-border hover:bg-[#5e6ad2]/60 transition-colors flex items-center justify-center"
+          @mousedown.prevent="startResize($event)">
+          <div class="w-10 h-[2px] rounded-full bg-ln-text-muted/40"></div>
+        </div>
+
+        <!-- BOTTOM PANE: Executor (xterm.js) -->
+        <div class="flex-1 flex flex-col min-h-[80px] overflow-hidden">
+          <div class="flex items-center gap-2 px-4 py-1.5 bg-[#111113] shrink-0">
+            <span class="text-[11px] font-medium text-ln-text-muted uppercase tracking-wider">Executor</span>
+            <template x-if="sseConnected"><span class="w-1.5 h-1.5 rounded-full bg-status-done animate-pulse-dot"></span></template>
+            <span class="text-[10px] text-ln-text-muted ml-auto" x-text="detail.executor || 'claude'"></span>
+          </div>
+          <div class="flex-1 bg-[#0a0a0c] overflow-hidden" x-ref="xtermContainer"></div>
+        </div>
+
+      </div>
+    </template>
+  </div>
+
+  <!-- Create task modal -->
+  <template x-if="showCreateModal">
+    <div class="fixed inset-0 bg-black/60 z-[80] flex items-center justify-center p-4" @click.self="showCreateModal = false">
+      <div class="bg-[#25252b] border border-ln-border rounded-lg w-full max-w-md shadow-2xl shadow-black/50" @keydown.escape.window="showCreateModal = false">
+        <div class="px-5 pt-5 pb-4">
+          <h3 class="text-[16px] font-medium text-ln-text-primary mb-5">New task</h3>
+
+          <div class="space-y-3.5">
+            <div>
+              <label class="block text-[11px] font-medium text-ln-text-muted uppercase tracking-wider mb-1.5">Title</label>
+              <input type="text"
+                class="w-full bg-ln-bg border border-ln-border rounded px-3 py-2 text-[13px] text-ln-text-primary placeholder:text-ln-text-muted outline-none focus:border-[#5e6ad2] transition-colors"
+                x-model="createForm.title" placeholder="Task title" @keydown.enter="createTask()">
+            </div>
+            <div>
+              <label class="block text-[11px] font-medium text-ln-text-muted uppercase tracking-wider mb-1.5">Description</label>
+              <textarea
+                class="w-full bg-ln-bg border border-ln-border rounded px-3 py-2 text-[13px] text-ln-text-primary placeholder:text-ln-text-muted outline-none focus:border-[#5e6ad2] transition-colors resize-y min-h-[72px]"
+                x-model="createForm.body" placeholder="Add description..."></textarea>
+            </div>
+            <div class="grid grid-cols-2 gap-3">
+              <div>
+                <label class="block text-[11px] font-medium text-ln-text-muted uppercase tracking-wider mb-1.5">Type</label>
+                <input type="text"
+                  class="w-full bg-ln-bg border border-ln-border rounded px-3 py-2 text-[13px] text-ln-text-primary placeholder:text-ln-text-muted outline-none focus:border-[#5e6ad2] transition-colors"
+                  x-model="createForm.type" placeholder="e.g. feature, bug">
+              </div>
+              <div>
+                <label class="block text-[11px] font-medium text-ln-text-muted uppercase tracking-wider mb-1.5">Project</label>
+                <input type="text"
+                  class="w-full bg-ln-bg border border-ln-border rounded px-3 py-2 text-[13px] text-ln-text-primary placeholder:text-ln-text-muted outline-none focus:border-[#5e6ad2] transition-colors"
+                  x-model="createForm.project" placeholder="Project name">
+              </div>
+            </div>
+            <div>
+              <label class="block text-[11px] font-medium text-ln-text-muted uppercase tracking-wider mb-1.5">Executor</label>
+              <input type="text"
+                class="w-full bg-ln-bg border border-ln-border rounded px-3 py-2 text-[13px] text-ln-text-primary placeholder:text-ln-text-muted outline-none focus:border-[#5e6ad2] transition-colors"
+                x-model="createForm.executor" placeholder="e.g. claude, aider">
+            </div>
+          </div>
+        </div>
+
+        <div class="flex justify-end gap-2 px-5 py-3.5 border-t border-ln-border">
+          <button class="text-[12px] text-ln-text-secondary hover:text-ln-text-primary hover:bg-ln-card rounded px-3 py-1.5 transition-colors" @click="showCreateModal = false">Cancel</button>
+          <button class="bg-[#5e6ad2] hover:bg-[#4f5bc0] text-white text-[12px] font-medium rounded px-3 py-1.5 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+            @click="createTask()" :disabled="!createForm.title.trim() || creatingTask">
+            <span x-text="creatingTask ? 'Creating...' : 'Create task'"></span>
+          </button>
+        </div>
+      </div>
+    </div>
+  </template>
+
+  <!-- Delete confirm modal -->
+  <template x-if="showDeleteConfirm && detail">
+    <div class="fixed inset-0 bg-black/60 z-[80] flex items-center justify-center p-4" @click.self="showDeleteConfirm = false">
+      <div class="bg-[#25252b] border border-ln-border rounded-lg w-full max-w-sm shadow-2xl shadow-black/50">
+        <div class="px-5 pt-5 pb-4">
+          <h3 class="text-[16px] font-medium text-ln-text-primary mb-2">Delete task</h3>
+          <p class="text-[13px] text-ln-text-secondary leading-relaxed">
+            Are you sure you want to delete <strong class="text-ln-text-primary" x-text="'TY-' + detail.id + ' ' + detail.title"></strong>? This cannot be undone.
+          </p>
+        </div>
+        <div class="flex justify-end gap-2 px-5 py-3.5 border-t border-ln-border">
+          <button class="text-[12px] text-ln-text-secondary hover:text-ln-text-primary hover:bg-ln-card rounded px-3 py-1.5 transition-colors" @click="showDeleteConfirm = false">Cancel</button>
+          <button class="bg-status-blocked/20 text-status-blocked hover:bg-status-blocked/30 text-[12px] font-medium rounded px-3 py-1.5 transition-colors" @click="deleteTask(detail.id)">Delete</button>
+        </div>
+      </div>
+    </div>
+  </template>
+
+  <!-- Retry modal -->
+  <template x-if="showRetryModal && detail">
+    <div class="fixed inset-0 bg-black/60 z-[80] flex items-center justify-center p-4" @click.self="showRetryModal = false">
+      <div class="bg-[#25252b] border border-ln-border rounded-lg w-full max-w-sm shadow-2xl shadow-black/50">
+        <div class="px-5 pt-5 pb-4">
+          <h3 class="text-[16px] font-medium text-ln-text-primary mb-4">Retry task</h3>
+          <div>
+            <label class="block text-[11px] font-medium text-ln-text-muted uppercase tracking-wider mb-1.5">Feedback</label>
+            <textarea
+              class="w-full bg-ln-bg border border-ln-border rounded px-3 py-2 text-[13px] text-ln-text-primary placeholder:text-ln-text-muted outline-none focus:border-[#5e6ad2] transition-colors resize-y min-h-[60px]"
+              x-model="retryFeedback" placeholder="What should be done differently?"></textarea>
+          </div>
+        </div>
+        <div class="flex justify-end gap-2 px-5 py-3.5 border-t border-ln-border">
+          <button class="text-[12px] text-ln-text-secondary hover:text-ln-text-primary hover:bg-ln-card rounded px-3 py-1.5 transition-colors" @click="showRetryModal = false; retryFeedback = ''">Cancel</button>
+          <button class="bg-status-processing/20 text-status-processing hover:bg-status-processing/30 text-[12px] font-medium rounded px-3 py-1.5 transition-colors" @click="retryTask(detail.id)">Retry</button>
+        </div>
+      </div>
+    </div>
+  </template>
+
+  <script>
+    function board() {
+      return {
+        columns: [],
+        fetching: false,
+        boardStream: null,
+
+        filterProject: '',
+        filterType: '',
+        filterStatus: '',
+        projects: [],
+        types: [],
+
+        detailOpen: false,
+        detail: null,
+        logs: [],
+        sseConnected: false,
+        eventSource: null,
+        lastLogId: 0,
+
+        inputMessage: '',
+        sendingInput: false,
+        topPaneHeight: Math.floor(window.innerHeight * 0.4),
+        resizing: false,
+        xterm: null,
+        xtermWs: null,
+
+        draggedTask: null,
+        dragTargetStatus: null,
+
+        showCreateModal: false,
+        creatingTask: false,
+        createForm: { title: '', body: '', type: '', project: '', executor: '' },
+
+        showDeleteConfirm: false,
+
+        showRetryModal: false,
+        retryFeedback: '',
+
+        allStatuses: ['backlog', 'processing', 'blocked', 'done'],
+
+        get filteredColumns() {
+          if (!this.filterStatus) return this.columns;
+          return this.columns.filter(col => col.status === this.filterStatus);
+        },
+
+        // Keyboard navigation state
+        selectedCol: 0,
+        selectedRow: 0,
+
+        init() {
+          this.fetchFilters();
+          this.connectBoardStream();
+          this.setupKeyboard();
+        },
+
+        setupKeyboard() {
+          document.addEventListener('keydown', (e) => {
+            // Don't handle keys when typing in inputs, textareas, or selects
+            const tag = e.target.tagName;
+            if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+
+            // Modals open — only Escape
+            if (this.showCreateModal || this.showDeleteConfirm || this.showRetryModal) {
+              if (e.key === 'Escape') {
+                this.showCreateModal = false;
+                this.showDeleteConfirm = false;
+                this.showRetryModal = false;
+                this.retryFeedback = '';
+              }
+              return;
+            }
+
+            // Detail view open
+            if (this.detailOpen) {
+              switch (e.key) {
+                case 'Escape':
+                case 'q':
+                  e.preventDefault();
+                  this.closeDetail();
+                  return;
+                case 'x':
+                  e.preventDefault();
+                  if (this.detail && this.detail.status === 'backlog') this.executeTask(this.detail.id);
+                  return;
+                case 'c':
+                  e.preventDefault();
+                  if (this.detail && this.detail.status !== 'done') this.moveTask(this.detail.id, 'done');
+                  return;
+                case 'r':
+                  e.preventDefault();
+                  if (this.detail && (this.detail.status === 'done' || this.detail.status === 'blocked')) this.showRetryModal = true;
+                  return;
+                case 'p':
+                  e.preventDefault();
+                  if (this.detail) this.togglePin(this.detail.id, this.detail.pinned);
+                  return;
+                case 'i':
+                  e.preventDefault();
+                  // Focus the input field
+                  const input = document.querySelector('[placeholder="Send input to executor..."]');
+                  if (input) input.focus();
+                  return;
+              }
+              return;
+            }
+
+            // Board view
+            const cols = this.filteredColumns;
+            if (!cols.length) return;
+
+            switch (e.key) {
+              case 'j':
+              case 'ArrowDown':
+                e.preventDefault();
+                if (cols[this.selectedCol] && cols[this.selectedCol].tasks) {
+                  this.selectedRow = Math.min(this.selectedRow + 1, cols[this.selectedCol].tasks.length - 1);
+                }
+                this.scrollSelectedIntoView();
+                break;
+              case 'k':
+              case 'ArrowUp':
+                e.preventDefault();
+                this.selectedRow = Math.max(this.selectedRow - 1, 0);
+                this.scrollSelectedIntoView();
+                break;
+              case 'h':
+              case 'ArrowLeft':
+                e.preventDefault();
+                if (this.selectedCol > 0) {
+                  this.selectedCol--;
+                  const taskCount = cols[this.selectedCol]?.tasks?.length || 0;
+                  this.selectedRow = Math.min(this.selectedRow, Math.max(taskCount - 1, 0));
+                }
+                this.scrollSelectedIntoView();
+                break;
+              case 'l':
+              case 'ArrowRight':
+                e.preventDefault();
+                if (this.selectedCol < cols.length - 1) {
+                  this.selectedCol++;
+                  const taskCount = cols[this.selectedCol]?.tasks?.length || 0;
+                  this.selectedRow = Math.min(this.selectedRow, Math.max(taskCount - 1, 0));
+                }
+                this.scrollSelectedIntoView();
+                break;
+              case 'Enter':
+                e.preventDefault();
+                const task = cols[this.selectedCol]?.tasks?.[this.selectedRow];
+                if (task) this.openTask(task.id);
+                break;
+              case 'n':
+                e.preventDefault();
+                this.showCreateModal = true;
+                break;
+              case 'Escape':
+                // Clear selection
+                this.selectedCol = 0;
+                this.selectedRow = 0;
+                break;
+            }
+          });
+        },
+
+        clampSelection() {
+          const cols = this.filteredColumns;
+          if (cols.length === 0) return;
+          if (this.selectedCol >= cols.length) this.selectedCol = cols.length - 1;
+          const taskCount = cols[this.selectedCol]?.tasks?.length || 0;
+          if (this.selectedRow >= taskCount) this.selectedRow = Math.max(taskCount - 1, 0);
+        },
+
+        isSelected(colIdx, rowIdx) {
+          return !this.detailOpen && this.selectedCol === colIdx && this.selectedRow === rowIdx;
+        },
+
+        scrollSelectedIntoView() {
+          this.$nextTick(() => {
+            const el = document.querySelector('[data-selected="true"]');
+            if (el) el.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+          });
+        },
+
+        connectBoardStream() {
+          const es = new EventSource('/api/board/stream');
+          es.addEventListener('board', (e) => {
+            try {
+              const data = JSON.parse(e.data);
+              this.columns = data.columns || [];
+              this.fetching = false;
+              this.clampSelection();
+
+              if (this.projects.length === 0 || this.types.length === 0) {
+                const seenProjects = new Set();
+                const seenTypes = new Set();
+                for (const col of this.columns) {
+                  for (const task of (col.tasks || [])) {
+                    if (task.project) seenProjects.add(task.project);
+                    if (task.type) seenTypes.add(task.type);
+                  }
+                }
+                if (this.projects.length === 0) this.projects = [...seenProjects].sort();
+                if (this.types.length === 0) this.types = [...seenTypes].sort();
+              }
+            } catch (err) {}
+          });
+          es.onerror = () => {
+            es.close();
+            setTimeout(() => this.connectBoardStream(), 3000);
+          };
+        },
+
+        async fetchFilters() {
+          try {
+            const resp = await fetch('/api/projects');
+            if (resp.ok) {
+              const data = await resp.json();
+              this.projects = (data || []).map(p => p.name).filter(Boolean);
+            }
+          } catch (e) {}
+        },
+
+        async fetchBoard() {
+          this.fetching = true;
+          try {
+            let url = '/api/board?limit=50';
+            if (this.filterProject) url += '&project=' + encodeURIComponent(this.filterProject);
+            const resp = await fetch(url);
+            if (resp.ok) {
+              const data = await resp.json();
+              this.columns = data.columns || [];
+
+              if (this.projects.length === 0 || this.types.length === 0) {
+                const seenProjects = new Set();
+                const seenTypes = new Set();
+                for (const col of this.columns) {
+                  for (const task of (col.tasks || [])) {
+                    if (task.project) seenProjects.add(task.project);
+                    if (task.type) seenTypes.add(task.type);
+                  }
+                }
+                if (this.projects.length === 0) this.projects = [...seenProjects].sort();
+                if (this.types.length === 0) this.types = [...seenTypes].sort();
+              }
+            }
+          } catch (e) {} finally {
+            this.fetching = false;
+          }
+        },
+
+        columnColor(status) {
+          const colors = {
+            'backlog': '#737373',
+            'queued': '#60a5fa',
+            'processing': '#fbbf24',
+            'blocked': '#f87171',
+            'done': '#4ade80',
+          };
+          return colors[status] || '#737373';
+        },
+
+        labelColor(label, category) {
+          const projectColors = ['#60a5fa', '#4ade80', '#c084fc', '#fb923c', '#f87171'];
+          const typeColors = ['#fbbf24', '#22d3ee', '#a78bfa'];
+          const palette = category === 'project' ? projectColors : typeColors;
+          let hash = 0;
+          for (let i = 0; i < label.length; i++) {
+            hash = ((hash << 5) - hash) + label.charCodeAt(i);
+            hash |= 0;
+          }
+          return palette[Math.abs(hash) % palette.length];
+        },
+
+        startDrag(task) {
+          this.draggedTask = task;
+        },
+        endDrag() {
+          this.draggedTask = null;
+          this.dragTargetStatus = null;
+        },
+        async dropTask(targetStatus) {
+          if (!this.draggedTask || this.draggedTask.status === targetStatus) {
+            this.dragTargetStatus = null;
+            return;
+          }
+          const taskId = this.draggedTask.id;
+          this.dragTargetStatus = null;
+          this.draggedTask = null;
+          await this.moveTask(taskId, targetStatus);
+        },
+
+        async moveTask(taskId, status) {
+          try {
+            const resp = await fetch('/api/tasks/' + taskId + '/status', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ status: status }),
+            });
+            if (resp.ok) {
+              if (this.detail && this.detail.id === taskId) {
+                this.detail.status = status;
+              }
+              this.fetchBoard();
+            }
+          } catch (e) {}
+        },
+
+        async executeTask(taskId) {
+          try {
+            const resp = await fetch('/api/tasks/' + taskId + '/execute', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+            });
+            if (resp.ok) {
+              if (this.detail && this.detail.id === taskId) {
+                this.detail.status = 'queued';
+              }
+              this.fetchBoard();
+            }
+          } catch (e) {}
+        },
+
+        async togglePin(taskId, currentlyPinned) {
+          try {
+            const resp = await fetch('/api/tasks/' + taskId + '/pin', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ pinned: !currentlyPinned }),
+            });
+            if (resp.ok) {
+              if (this.detail && this.detail.id === taskId) {
+                this.detail.pinned = !currentlyPinned;
+              }
+              this.fetchBoard();
+            }
+          } catch (e) {}
+        },
+
+        async deleteTask(taskId) {
+          try {
+            const resp = await fetch('/api/tasks/' + taskId, {
+              method: 'DELETE',
+            });
+            if (resp.ok) {
+              this.showDeleteConfirm = false;
+              this.closeDetail();
+              this.fetchBoard();
+            }
+          } catch (e) {}
+        },
+
+        async retryTask(taskId) {
+          try {
+            const resp = await fetch('/api/tasks/' + taskId + '/retry', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ feedback: this.retryFeedback }),
+            });
+            if (resp.ok) {
+              this.showRetryModal = false;
+              this.retryFeedback = '';
+              if (this.detail && this.detail.id === taskId) {
+                this.detail.status = 'queued';
+              }
+              this.fetchBoard();
+            }
+          } catch (e) {}
+        },
+
+        async createTask() {
+          if (!this.createForm.title.trim()) return;
+          this.creatingTask = true;
+          try {
+            const resp = await fetch('/api/tasks', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                title: this.createForm.title.trim(),
+                body: this.createForm.body.trim(),
+                type: this.createForm.type.trim(),
+                project: this.createForm.project.trim(),
+                executor: this.createForm.executor.trim(),
+              }),
+            });
+            if (resp.ok) {
+              this.showCreateModal = false;
+              this.createForm = { title: '', body: '', type: '', project: '', executor: '' };
+              this.fetchBoard();
+            }
+          } catch (e) {} finally {
+            this.creatingTask = false;
+          }
+        },
+
+        async openTask(id) {
+          this.closeSSE();
+
+          try {
+            const resp = await fetch('/api/tasks/' + id);
+            if (!resp.ok) return;
+            const data = await resp.json();
+            this.detail = data.task;
+            this.logs = data.logs || [];
+            this.lastLogId = this.logs.length > 0 ? this.logs[this.logs.length - 1].id : 0;
+            this.detailOpen = true;
+            this.inputMessage = '';
+
+            this.$nextTick(() => this.scrollLogsToBottom());
+            this.startSSE(id);
+            this.startTerminal(id);
+          } catch (e) {}
+        },
+
+        closeDetail() {
+          this.detailOpen = false;
+          this.closeSSE();
+          this.stopTerminal();
+          setTimeout(() => {
+            this.detail = null;
+            this.logs = [];
+          }, 250);
+        },
+
+        startTerminal(taskId) {
+          this.stopTerminal();
+          this.$nextTick(() => {
+            const container = this.$refs.xtermContainer;
+            if (!container) return;
+
+            const term = new Terminal({
+              cursorBlink: true,
+              fontSize: 13,
+              fontFamily: "'JetBrains Mono', 'Menlo', 'Monaco', monospace",
+              theme: {
+                background: '#0a0a0c',
+                foreground: '#e8e8ed',
+                cursor: '#5e6ad2',
+                selectionBackground: '#5e6ad233',
+              },
+            });
+            const fitAddon = new FitAddon.FitAddon();
+            term.loadAddon(fitAddon);
+            term.open(container);
+            fitAddon.fit();
+
+            // Connect WebSocket
+            const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const ws = new WebSocket(proto + '//' + location.host + '/api/tasks/' + taskId + '/terminal');
+            ws.binaryType = 'arraybuffer';
+
+            ws.onopen = () => {
+              // Tell server our size so capture-pane output matches
+              ws.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
+            };
+
+            ws.onmessage = (e) => {
+              if (e.data instanceof ArrayBuffer) {
+                term.write(new Uint8Array(e.data));
+              } else {
+                // Skip server size messages
+                if (e.data[0] === '{') {
+                  try {
+                    const msg = JSON.parse(e.data);
+                    if (msg.type === 'size') return;
+                  } catch (_) {}
+                }
+                term.write(e.data);
+              }
+            };
+
+            ws.onclose = () => {
+              term.write('\r\n\x1b[90m[connection closed]\x1b[0m\r\n');
+            };
+
+            // Send keyboard input to WebSocket
+            term.onData((data) => {
+              if (ws.readyState === WebSocket.OPEN) {
+                ws.send(data);
+              }
+            });
+
+
+            // Resize handling
+            this._fitAddon = fitAddon;
+            this._resizeHandler = () => {
+              fitAddon.fit();
+              if (ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
+              }
+            };
+            window.addEventListener('resize', this._resizeHandler);
+
+            this.xterm = term;
+            this.xtermWs = ws;
+          });
+        },
+
+        stopTerminal() {
+          if (this._resizeHandler) {
+            window.removeEventListener('resize', this._resizeHandler);
+            this._resizeHandler = null;
+          }
+          if (this.xtermWs) {
+            this.xtermWs.close();
+            this.xtermWs = null;
+          }
+          if (this.xterm) {
+            this.xterm.dispose();
+            this.xterm = null;
+          }
+          this._fitAddon = null;
+        },
+
+        startSSE(taskId) {
+          this.closeSSE();
+          const url = '/api/tasks/' + taskId + '/stream?since=' + this.lastLogId;
+          this.eventSource = new EventSource(url);
+          this.sseConnected = true;
+
+          this.eventSource.addEventListener('log', (event) => {
+            try {
+              const entry = JSON.parse(event.data);
+              this.logs.push(entry);
+              if (entry.id > this.lastLogId) {
+                this.lastLogId = entry.id;
+              }
+              this.$nextTick(() => this.scrollLogsToBottom());
+            } catch (e) {}
+          });
+
+          this.eventSource.addEventListener('heartbeat', () => {});
+
+          this.eventSource.onerror = () => {
+            this.sseConnected = false;
+          };
+
+          this.eventSource.onopen = () => {
+            this.sseConnected = true;
+          };
+        },
+
+        closeSSE() {
+          if (this.eventSource) {
+            this.eventSource.close();
+            this.eventSource = null;
+          }
+          this.sseConnected = false;
+        },
+
+        scrollLogsToBottom() {
+          const viewer = this.$refs.logViewer;
+          if (viewer) {
+            viewer.scrollTop = viewer.scrollHeight;
+          }
+        },
+
+        logLineClass(lineType) {
+          const classes = {
+            'output': 'log-output',
+            'error': 'log-error',
+            'system': 'log-system',
+            'tool': 'log-tool',
+            'question': 'log-question',
+          };
+          return classes[lineType] || 'log-default';
+        },
+
+        logIcon(lineType) {
+          const icons = {
+            'system': '\u{1F535}',
+            'text': '\u{1F4AC}',
+            'tool': '\u{1F527}',
+            'error': '\u274C',
+            'question': '\u2753',
+            'user': '\u{1F464}',
+            'output': '\u{1F4E4}',
+          };
+          return icons[lineType] || '  ';
+        },
+
+        startResize(e) {
+          this.resizing = true;
+          const startY = e.clientY;
+          const startHeight = this.topPaneHeight;
+          const onMove = (ev) => {
+            const delta = ev.clientY - startY;
+            const newHeight = Math.max(100, startHeight + delta);
+            this.topPaneHeight = newHeight;
+          };
+          const onUp = () => {
+            this.resizing = false;
+            document.removeEventListener('mousemove', onMove);
+            document.removeEventListener('mouseup', onUp);
+            document.body.style.cursor = '';
+            document.body.style.userSelect = '';
+          };
+          document.addEventListener('mousemove', onMove);
+          document.addEventListener('mouseup', onUp);
+          document.body.style.cursor = 'row-resize';
+          document.body.style.userSelect = 'none';
+        },
+
+        formatLogTime(isoStr) {
+          if (!isoStr) return '';
+          try {
+            const d = new Date(isoStr);
+            return d.toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
+          } catch (e) { return ''; }
+        },
+
+        async sendMessage() {
+          if (!this.inputMessage.trim() || !this.detail) return;
+          this.sendingInput = true;
+          try {
+            await fetch('/api/tasks/' + this.detail.id + '/input', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ message: this.inputMessage.trim(), enter: false, key: '' }),
+            });
+            this.inputMessage = '';
+          } catch (e) {} finally {
+            this.sendingInput = false;
+          }
+        },
+
+        async sendEnter() {
+          if (!this.detail) return;
+          this.sendingInput = true;
+          try {
+            await fetch('/api/tasks/' + this.detail.id + '/input', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ message: '', enter: true, key: '' }),
+            });
+          } catch (e) {} finally {
+            this.sendingInput = false;
+          }
+        },
+
+        formatTime(isoStr) {
+          if (!isoStr) return '-';
+          try {
+            const d = new Date(isoStr);
+            const pad = (n) => String(n).padStart(2, '0');
+            return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()) +
+              ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds());
+          } catch (e) {
+            return isoStr;
+          }
+        },
+      };
+    }
+  </script>
+</body>
+</html>

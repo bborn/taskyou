@@ -29,6 +29,7 @@ import (
 	"github.com/bborn/workflow/internal/github"
 	"github.com/bborn/workflow/internal/mcp"
 	"github.com/bborn/workflow/internal/ui"
+	"github.com/bborn/workflow/internal/web"
 )
 
 var (
@@ -846,7 +847,7 @@ that the TUI shows, either as formatted text or JSON for automation.`,
 				os.Exit(1)
 			}
 
-			snapshot := buildBoardSnapshot(tasks, limit)
+			snapshot := web.BuildBoardSnapshot(tasks, limit)
 
 			if outputJSON {
 				data, _ := json.MarshalIndent(snapshot, "", "  ")
@@ -2989,6 +2990,53 @@ Examples:
 
 	rootCmd.AddCommand(typesCmd)
 
+	// Serve subcommand - HTTP API server
+	serveCmd := &cobra.Command{
+		Use:   "serve",
+		Short: "Start an HTTP API server",
+		Long: `Start a lightweight HTTP API server exposing the same operations as the CLI.
+External frontends (like ty-web) can build on top of this API.
+The server shares the same SQLite database the daemon writes to (WAL mode).`,
+		Run: func(cmd *cobra.Command, args []string) {
+			port, _ := cmd.Flags().GetInt("port")
+			addr := fmt.Sprintf(":%d", port)
+
+			dbPath := db.DefaultPath()
+			database, err := db.Open(dbPath)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error opening database: "+err.Error()))
+				os.Exit(1)
+			}
+			defer database.Close()
+
+			runner := &execCommandRunner{}
+			srv := web.New(web.Config{
+				Addr:      addr,
+				DB:        database,
+				CmdRunner: runner,
+			})
+
+			// Handle signals for graceful shutdown
+			sigCh := make(chan os.Signal, 1)
+			signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+
+			go func() {
+				<-sigCh
+				fmt.Println("\nShutting down web server...")
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				srv.Shutdown(ctx)
+			}()
+
+			if err := srv.Start(); err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Server error: "+err.Error()))
+				os.Exit(1)
+			}
+		},
+	}
+	serveCmd.Flags().Int("port", 8080, "Port to listen on")
+	rootCmd.AddCommand(serveCmd)
+
 	// Completion command for shell tab completion
 	rootCmd.AddCommand(newCompletionCmd(rootCmd))
 
@@ -3408,85 +3456,6 @@ func readPidFile(path string) (int, error) {
 
 func writePidFile(path string, pid int) error {
 	return os.WriteFile(path, []byte(fmt.Sprintf("%d", pid)), 0644)
-}
-
-type boardSnapshot struct {
-	Columns []boardColumn `json:"columns"`
-}
-
-type boardColumn struct {
-	Status string       `json:"status"`
-	Label  string       `json:"label"`
-	Count  int          `json:"count"`
-	Tasks  []boardEntry `json:"tasks"`
-}
-
-type boardEntry struct {
-	ID      int64  `json:"id"`
-	Title   string `json:"title"`
-	Project string `json:"project"`
-	Type    string `json:"type"`
-	Pinned  bool   `json:"pinned"`
-	AgeHint string `json:"age_hint"`
-}
-
-func buildBoardSnapshot(tasks []*db.Task, limit int) boardSnapshot {
-	sections := []struct {
-		status string
-		label  string
-	}{
-		{db.StatusBacklog, "Backlog"},
-		{db.StatusQueued, "Queued"},
-		{db.StatusProcessing, "In Progress"},
-		{db.StatusBlocked, "Blocked"},
-		{db.StatusDone, "Done"},
-	}
-
-	grouped := make(map[string][]*db.Task)
-	for _, task := range tasks {
-		if task.Status == db.StatusArchived {
-			continue
-		}
-		grouped[task.Status] = append(grouped[task.Status], task)
-	}
-
-	var snapshot boardSnapshot
-	for _, section := range sections {
-		columnTasks := grouped[section.status]
-		if len(columnTasks) == 0 {
-			snapshot.Columns = append(snapshot.Columns, boardColumn{Status: section.status, Label: section.label, Count: 0})
-			continue
-		}
-
-		sortTasksForBoard(columnTasks)
-		column := boardColumn{Status: section.status, Label: section.label, Count: len(columnTasks)}
-		for i, task := range columnTasks {
-			if i >= limit {
-				break
-			}
-			entry := boardEntry{
-				ID:      task.ID,
-				Title:   truncate(task.Title, 80),
-				Project: task.Project,
-				Type:    task.Type,
-				Pinned:  task.Pinned,
-				AgeHint: boardAgeHint(task),
-			}
-			column.Tasks = append(column.Tasks, entry)
-		}
-		snapshot.Columns = append(snapshot.Columns, column)
-	}
-
-	return snapshot
-}
-
-func sortTasksForBoard(tasks []*db.Task) {
-	sort.SliceStable(tasks, func(i, j int) bool {
-		if tasks[i].Pinned != tasks[j].Pinned {
-			return tasks[i].Pinned
-		}
-		return boardReferenceTime(tasks[i]).After(boardReferenceTime(tasks[j]))
-	})
 }
 
 func boardReferenceTime(task *db.Task) time.Time {
@@ -4281,6 +4250,17 @@ func truncate(s string, maxLen int) string {
 		return s
 	}
 	return s[:maxLen-3] + "..."
+}
+
+// execCommandRunner implements web.CommandRunner using os/exec.
+type execCommandRunner struct{}
+
+func (r *execCommandRunner) Run(name string, args ...string) error {
+	return osexec.Command(name, args...).Run()
+}
+
+func (r *execCommandRunner) Output(name string, args ...string) ([]byte, error) {
+	return osexec.Command(name, args...).Output()
 }
 
 // listSessions lists all running agent task windows in task-daemon.

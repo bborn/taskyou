@@ -103,7 +103,7 @@ func (c *CodexExecutor) runCodex(ctx context.Context, task *db.Task, workDir, pr
 	windowTarget := fmt.Sprintf("%s:%s", daemonSession, windowName)
 
 	// Kill ALL existing windows with this name (handles duplicates)
-	killAllWindowsByNameAllSessions(windowName)
+	KillAllWindowsByNameAllSessions(windowName)
 
 	// Create a temp file for the prompt
 	promptFile, err := os.CreateTemp("", "task-prompt-*.txt")
