@@ -100,10 +100,10 @@ func main() {
 	// Version deprecation warning for CLI subcommands.
 	// Skip for root (TUI has its own check), upgrade, daemon, mcp-server, and claude-hook.
 	skipVersionCheck := map[string]bool{
-		"ty":         true, // root command (TUI)
-		"upgrade":    true,
-		"daemon":     true,
-		"mcp-server": true,
+		"ty":          true, // root command (TUI)
+		"upgrade":     true,
+		"daemon":      true,
+		"mcp-server":  true,
 		"claude-hook": true,
 	}
 	rootCmd.PersistentPostRun = func(cmd *cobra.Command, args []string) {

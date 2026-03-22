@@ -25,10 +25,10 @@ type LatestRelease struct {
 }
 
 const (
-	releaseRepo    = "bborn/taskyou"
-	releaseTimeout = 5 * time.Second
+	releaseRepo     = "bborn/taskyou"
+	releaseTimeout  = 5 * time.Second
 	versionCacheTTL = 24 * time.Hour
-	cacheFileName  = "version-check.json"
+	cacheFileName   = "version-check.json"
 )
 
 // versionCache is the on-disk cache for the latest release check.
