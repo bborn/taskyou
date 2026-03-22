@@ -40,6 +40,7 @@ var (
 	errorStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("#EF4444"))
 	dimStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280"))
 	boldStyle    = lipgloss.NewStyle().Bold(true)
+	warnStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("#F59E0B"))
 )
 
 // getSessionID returns a unique session identifier for this instance.
@@ -96,6 +97,27 @@ func main() {
 
 	rootCmd.PersistentFlags().BoolVar(&dangerous, "dangerous", false, "Run Claude with --dangerously-skip-permissions (for sandboxed environments)")
 	rootCmd.PersistentFlags().String("debug-state-file", "", "Path to write debug state JSON on update")
+
+	// Version deprecation warning for CLI subcommands.
+	// Skip for root (TUI has its own check), upgrade, daemon, mcp-server, and claude-hook.
+	skipVersionCheck := map[string]bool{
+		"ty":          true, // root command (TUI)
+		"upgrade":     true,
+		"daemon":      true,
+		"mcp-server":  true,
+		"claude-hook": true,
+	}
+	rootCmd.PersistentPostRun = func(cmd *cobra.Command, args []string) {
+		if skipVersionCheck[cmd.Name()] {
+			return
+		}
+		if release := github.CLIVersionCheck(version); release != nil {
+			fmt.Fprintln(os.Stderr, "")
+			fmt.Fprintln(os.Stderr, warnStyle.Render(
+				fmt.Sprintf("Update available: %s → %s  (run: ty upgrade)", version, release.Version),
+			))
+		}
+	}
 
 	// Debug subcommand
 	debugCmd := &cobra.Command{
