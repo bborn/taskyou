@@ -1565,8 +1565,8 @@ Valid statuses: backlog, queued, processing, blocked, done, archived.`,
 	closeCmd := &cobra.Command{
 		Use:               "close <task-id>",
 		ValidArgsFunction: completeTaskIDs,
-		Aliases: []string{"done", "complete"},
-		Short:   "Mark a task as done",
+		Aliases:           []string{"done", "complete"},
+		Short:             "Mark a task as done",
 		Long: `Mark a task as completed.
 
 Examples:
@@ -2392,7 +2392,7 @@ Examples:
 	blockCmd := &cobra.Command{
 		Use:               "block <blocked-task-id> --by <blocker-task-id>",
 		ValidArgsFunction: completeTaskIDs,
-		Short: "Block a task until another task completes",
+		Short:             "Block a task until another task completes",
 		Long: `Create a dependency where a task is blocked until another task completes.
 
 Example: ty block 5 --by 3
@@ -2457,7 +2457,7 @@ Use --auto-queue to automatically move the blocked task to 'queued' when unblock
 	unblockCmd := &cobra.Command{
 		Use:               "unblock <blocked-task-id> --from <blocker-task-id>",
 		ValidArgsFunction: completeTaskIDs,
-		Short: "Remove a blocking dependency",
+		Short:             "Remove a blocking dependency",
 		Long: `Remove a dependency so a task is no longer blocked by another.
 
 Example: ty unblock 5 --from 3
@@ -2500,7 +2500,7 @@ This removes the dependency where task #5 was blocked by task #3.`,
 	depsCmd := &cobra.Command{
 		Use:               "deps <task-id>",
 		ValidArgsFunction: completeTaskIDs,
-		Short: "Show dependencies for a task",
+		Short:             "Show dependencies for a task",
 		Long: `Display all dependencies for a task, showing:
 - Tasks that block this task (must complete before this task)
 - Tasks that this task blocks (waiting on this task)`,
@@ -2663,8 +2663,8 @@ Examples:
 	typesShowCmd := &cobra.Command{
 		Use:               "show <name>",
 		ValidArgsFunction: completeTypeNames,
-		Short: "Show details of a task type",
-		Args:  cobra.ExactArgs(1),
+		Short:             "Show details of a task type",
+		Args:              cobra.ExactArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
 			name := args[0]
 			outputJSON, _ := cmd.Flags().GetBool("json")
@@ -2829,7 +2829,7 @@ Examples:
 	typesEditCmd := &cobra.Command{
 		Use:               "edit <name>",
 		ValidArgsFunction: completeTypeNames,
-		Short: "Edit an existing task type",
+		Short:             "Edit an existing task type",
 		Long: `Edit an existing task type. Built-in types can be edited but not deleted.
 
 All flags are optional - only specified values will be updated.
@@ -2931,7 +2931,7 @@ Examples:
 	typesDeleteCmd := &cobra.Command{
 		Use:               "delete <name>",
 		ValidArgsFunction: completeTypeNames,
-		Short: "Delete a custom task type",
+		Short:             "Delete a custom task type",
 		Long: `Delete a custom task type. Built-in types (code, writing, thinking) cannot be deleted.
 
 Examples:
