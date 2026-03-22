@@ -4216,7 +4216,7 @@ func (m *AppModel) denyExecutorPrompt(taskID int64) tea.Cmd {
 func (m *AppModel) sendTextToExecutor(taskID int64, text string) tea.Cmd {
 	database := m.db
 	return func() tea.Msg {
-		err := executor.SendKeyToPane(taskID, text, "Enter")
+		err := executor.SendLiteralTextToPane(taskID, text)
 		if err == nil {
 			database.AppendTaskLog(taskID, "user", fmt.Sprintf("Replied from kanban: %s", text))
 		}

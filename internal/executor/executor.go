@@ -1688,6 +1688,28 @@ func SendKeyToPane(taskID int64, keys ...string) error {
 	return exec.Command("tmux", args...).Run()
 }
 
+// SendLiteralTextToPane sends literal text (using tmux -l flag) followed by Enter
+// to a task's executor tmux pane. Unlike SendKeyToPane, this ensures the text is
+// never interpreted as a tmux key name (e.g. "Enter", "Escape", "Space").
+func SendLiteralTextToPane(taskID int64, text string) error {
+	sessionName := TmuxSessionName(taskID)
+
+	// Check if session exists first
+	if err := exec.Command("tmux", "has-session", "-t", sessionName).Run(); err != nil {
+		return fmt.Errorf("session not found: %w", err)
+	}
+
+	target := sessionName + ".0"
+
+	// Send text literally (won't interpret key names)
+	if err := exec.Command("tmux", "send-keys", "-t", target, "-l", text).Run(); err != nil {
+		return err
+	}
+
+	// Send Enter as a key press
+	return exec.Command("tmux", "send-keys", "-t", target, "Enter").Run()
+}
+
 // KillAllWindowsByNameAllSessions kills ALL windows with a given name across all daemon sessions.
 // Also kills any -shell variant windows.
 func KillAllWindowsByNameAllSessions(windowName string) {
