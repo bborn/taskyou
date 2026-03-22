@@ -72,6 +72,7 @@ type KeyMap struct {
 	ChangeStatus       key.Binding
 	CommandPalette     key.Binding
 	ToggleDangerous    key.Binding
+	QueueDangerous     key.Binding
 	TogglePin          key.Binding
 	Filter             key.Binding
 	OpenWorktree       key.Binding
@@ -111,7 +112,7 @@ func (k KeyMap) FullHelp() [][]key.Binding {
 		{k.Left, k.Right, k.Up, k.Down},
 		{k.JumpToPinned, k.JumpToUnpinned},
 		{k.FocusBacklog, k.FocusInProgress, k.FocusBlocked, k.FocusDone, k.CollapseBacklog, k.CollapseDone},
-		{k.Enter, k.New, k.Queue, k.Close},
+		{k.Enter, k.New, k.Queue, k.QueueDangerous, k.Close},
 		{k.Retry, k.Archive, k.Delete, k.OpenWorktree, k.OpenBrowser, k.Spotlight},
 		{k.Filter, k.CommandPalette, k.Settings},
 		{k.ChangeStatus, k.TogglePin, k.Refresh, k.Help},
@@ -201,6 +202,10 @@ func DefaultKeyMap() KeyMap {
 		ToggleDangerous: key.NewBinding(
 			key.WithKeys("!"),
 			key.WithHelp("!", "dangerous mode"),
+		),
+		QueueDangerous: key.NewBinding(
+			key.WithKeys("X"),
+			key.WithHelp("X", "execute dangerous"),
 		),
 		TogglePin: key.NewBinding(
 			key.WithKeys("t"),
@@ -325,6 +330,7 @@ func ApplyKeybindingsConfig(km KeyMap, cfg *config.KeybindingsConfig) KeyMap {
 	km.ChangeStatus = applyBinding(km.ChangeStatus, cfg.ChangeStatus)
 	km.CommandPalette = applyBinding(km.CommandPalette, cfg.CommandPalette)
 	km.ToggleDangerous = applyBinding(km.ToggleDangerous, cfg.ToggleDangerous)
+	km.QueueDangerous = applyBinding(km.QueueDangerous, cfg.QueueDangerous)
 	km.TogglePin = applyBinding(km.TogglePin, cfg.TogglePin)
 	km.Filter = applyBinding(km.Filter, cfg.Filter)
 	km.OpenWorktree = applyBinding(km.OpenWorktree, cfg.OpenWorktree)
@@ -425,7 +431,7 @@ type AppModel struct {
 	pendingTask        *db.Task
 	pendingAttachments []string
 	queueConfirm       *huh.Form
-	queueValue         bool
+	queueValue         string
 
 	// Edit task form state
 	editTaskForm *FormModel
@@ -2028,6 +2034,19 @@ func (m *AppModel) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, tea.Batch(m.queueTask(task.ID), m.loadTaskWithFocus(task.ID))
 		}
 
+	case key.Matches(msg, m.keys.QueueDangerous):
+		if task := m.kanban.SelectedTask(); task != nil {
+			// Don't allow queueing if task is already processing
+			if task.Status == db.StatusProcessing {
+				return m, nil
+			}
+			// Immediately update UI for responsiveness
+			task.Status = db.StatusQueued
+			task.DangerousMode = true
+			m.updateTaskInList(task)
+			return m, m.queueTaskDangerous(task.ID)
+		}
+
 	case key.Matches(msg, m.keys.TogglePin):
 		if task := m.kanban.SelectedTask(); task != nil {
 			return m, m.toggleTaskPinned(task.ID)
@@ -2591,6 +2610,21 @@ func (m *AppModel) updateDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, m.queueTask(m.selectedTask.ID)
 	}
+	if key.Matches(keyMsg, m.keys.QueueDangerous) && m.selectedTask != nil {
+		// Don't allow queueing if task is already processing
+		if m.selectedTask.Status == db.StatusProcessing {
+			return m, nil
+		}
+		// Immediately update UI for responsiveness
+		m.selectedTask.Status = db.StatusQueued
+		m.selectedTask.DangerousMode = true
+		if m.detailView != nil {
+			m.detailView.UpdateTask(m.selectedTask)
+		}
+		// Update task in the list and kanban
+		m.updateTaskInList(m.selectedTask)
+		return m, m.queueTaskDangerous(m.selectedTask.ID)
+	}
 	if key.Matches(keyMsg, m.keys.Retry) && m.selectedTask != nil {
 		task := m.selectedTask
 		if task.Status == db.StatusBlocked || task.Status == db.StatusDone ||
@@ -2740,15 +2774,21 @@ func (m *AppModel) updateNewTaskForm(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Store pending task and create confirmation form
 			m.pendingTask = form.GetDBTask()
 			m.pendingAttachments = form.GetAttachments()
-			m.queueValue = false
+			// Default to last queue choice for this project
+			m.queueValue = "no"
+			if last, err := m.db.GetSetting("last_queue_choice:" + m.pendingTask.Project); err == nil && last != "" {
+				m.queueValue = last
+			}
 			m.queueConfirm = huh.NewForm(
 				huh.NewGroup(
-					huh.NewConfirm().
+					huh.NewSelect[string]().
 						Key("queue").
 						Title("Queue for execution?").
-						Description("Start processing immediately").
-						Affirmative("Yes").
-						Negative("No").
+						Options(
+							huh.NewOption("No — save to backlog", "no"),
+							huh.NewOption("Yes — execute now", "yes"),
+							huh.NewOption("Yes — execute in dangerous mode", "dangerous"),
+						).
 						Value(&m.queueValue),
 				),
 			).WithTheme(huh.ThemeDracula()).
@@ -2790,9 +2830,16 @@ func (m *AppModel) updateNewTaskConfirm(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 	if m.queueConfirm.State == huh.StateCompleted {
 		if m.pendingTask != nil {
-			if m.queueValue {
+			// Remember the choice for this project
+			m.db.SetSetting("last_queue_choice:"+m.pendingTask.Project, m.queueValue)
+
+			switch m.queueValue {
+			case "yes":
 				m.pendingTask.Status = db.StatusQueued
-			} else {
+			case "dangerous":
+				m.pendingTask.Status = db.StatusQueued
+				m.pendingTask.DangerousMode = true
+			default:
 				m.pendingTask.Status = db.StatusBacklog
 			}
 			task := m.pendingTask
@@ -3558,6 +3605,7 @@ func (m *AppModel) updateRetry(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if m.retryView.submitted {
 		feedback := m.retryView.GetFeedback()
 		attachments := m.retryView.GetAttachments()
+		dangerous := m.retryView.IsDangerous()
 		taskID := m.retryView.task.ID
 		// Clear kanban notification immediately for instant UI feedback
 		delete(m.tasksNeedingInput, taskID)
@@ -3576,7 +3624,7 @@ func (m *AppModel) updateRetry(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.detailView.Cleanup()
 			m.detailView = nil
 		}
-		return m, m.retryTaskWithAttachments(taskID, feedback, attachments)
+		return m, m.retryTaskWithAttachments(taskID, feedback, attachments, dangerous)
 	}
 
 	return m, cmd
@@ -3906,6 +3954,24 @@ func (m *AppModel) queueTask(id int64) tea.Cmd {
 	database := m.db
 	exec := m.executor
 	return func() tea.Msg {
+		err := database.UpdateTaskStatus(id, db.StatusQueued)
+		if err == nil {
+			if task, _ := database.GetTask(id); task != nil {
+				exec.NotifyTaskChange("status_changed", task)
+			}
+		}
+		return taskQueuedMsg{err: err}
+	}
+}
+
+func (m *AppModel) queueTaskDangerous(id int64) tea.Cmd {
+	database := m.db
+	exec := m.executor
+	return func() tea.Msg {
+		// Set dangerous mode before queueing
+		if err := database.UpdateTaskDangerousMode(id, true); err != nil {
+			return taskQueuedMsg{err: err}
+		}
 		err := database.UpdateTaskStatus(id, db.StatusQueued)
 		if err == nil {
 			if task, _ := database.GetTask(id); task != nil {
@@ -4416,10 +4482,15 @@ func (m *AppModel) toggleTaskPinned(id int64) tea.Cmd {
 	}
 }
 
-func (m *AppModel) retryTaskWithAttachments(id int64, feedback string, attachmentPaths []string) tea.Cmd {
+func (m *AppModel) retryTaskWithAttachments(id int64, feedback string, attachmentPaths []string, dangerous bool) tea.Cmd {
 	database := m.db
 	exec := m.executor
 	return func() tea.Msg {
+		// Set dangerous mode if requested
+		if dangerous {
+			database.UpdateTaskDangerousMode(id, true)
+		}
+
 		// Get task to find worktree path
 		task, _ := database.GetTask(id)
 

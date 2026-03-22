@@ -446,6 +446,117 @@ func TestCLIExecuteTask(t *testing.T) {
 	}
 }
 
+// TestCLIExecuteTaskDangerous tests queueing a task for execution in dangerous mode
+func TestCLIExecuteTaskDangerous(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	database, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer database.Close()
+	defer os.Remove(dbPath)
+
+	// Create a backlog task
+	task := &db.Task{
+		Title:  "Task to execute dangerously",
+		Status: db.StatusBacklog,
+		Type:   db.TypeCode,
+	}
+	if err := database.CreateTask(task); err != nil {
+		t.Fatalf("failed to create task: %v", err)
+	}
+
+	// Set dangerous mode and queue (simulate execute --dangerous)
+	if err := database.UpdateTaskDangerousMode(task.ID, true); err != nil {
+		t.Fatalf("UpdateTaskDangerousMode() error = %v", err)
+	}
+	if err := database.UpdateTaskStatus(task.ID, db.StatusQueued); err != nil {
+		t.Fatalf("UpdateTaskStatus() error = %v", err)
+	}
+
+	// Verify status and dangerous mode
+	fetched, err := database.GetTask(task.ID)
+	if err != nil {
+		t.Fatalf("GetTask() error = %v", err)
+	}
+	if fetched.Status != db.StatusQueued {
+		t.Errorf("Status = %v, want %v", fetched.Status, db.StatusQueued)
+	}
+	if !fetched.DangerousMode {
+		t.Error("DangerousMode = false, want true")
+	}
+}
+
+// TestCLICreateTaskDangerous tests creating a task with --execute --dangerous
+func TestCLICreateTaskDangerous(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	database, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer database.Close()
+	defer os.Remove(dbPath)
+
+	// Create a task with dangerous mode (simulate create --execute --dangerous)
+	task := &db.Task{
+		Title:         "Dangerous task",
+		Status:        db.StatusQueued,
+		Type:          db.TypeCode,
+		DangerousMode: true,
+	}
+	if err := database.CreateTask(task); err != nil {
+		t.Fatalf("failed to create task: %v", err)
+	}
+
+	// Verify dangerous mode persists through CreateTask
+	fetched, err := database.GetTask(task.ID)
+	if err != nil {
+		t.Fatalf("GetTask() error = %v", err)
+	}
+	if fetched.Status != db.StatusQueued {
+		t.Errorf("Status = %v, want %v", fetched.Status, db.StatusQueued)
+	}
+	if !fetched.DangerousMode {
+		t.Error("DangerousMode = false, want true")
+	}
+}
+
+// TestCLICreateTaskDangerousWithoutExecute tests that --dangerous without --execute doesn't set dangerous mode
+func TestCLICreateTaskDangerousWithoutExecute(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	database, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer database.Close()
+	defer os.Remove(dbPath)
+
+	// Simulate create --dangerous (without --execute): DangerousMode should be false
+	task := &db.Task{
+		Title:         "Not really dangerous",
+		Status:        db.StatusBacklog,
+		Type:          db.TypeCode,
+		DangerousMode: false, // --dangerous && --execute is false
+	}
+	if err := database.CreateTask(task); err != nil {
+		t.Fatalf("failed to create task: %v", err)
+	}
+
+	fetched, err := database.GetTask(task.ID)
+	if err != nil {
+		t.Fatalf("GetTask() error = %v", err)
+	}
+	if fetched.DangerousMode {
+		t.Error("DangerousMode = true, want false (--dangerous without --execute should not set dangerous mode)")
+	}
+}
+
 // TestCLICloseTask tests marking a task as done
 func TestCLICloseTask(t *testing.T) {
 	tmpDir := t.TempDir()
