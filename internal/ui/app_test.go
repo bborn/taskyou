@@ -2220,3 +2220,110 @@ func TestSystemMessages_NotSwallowedByOverlayViews(t *testing.T) {
 		})
 	}
 }
+
+func TestTaskCreatedMsg_QueuedTaskNavigatesToDetailView(t *testing.T) {
+	database, err := db.Open(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to create test database: %v", err)
+	}
+	defer database.Close()
+
+	task := &db.Task{Title: "Test task", Status: db.StatusQueued}
+	if err := database.CreateTask(task); err != nil {
+		t.Fatalf("Failed to create task: %v", err)
+	}
+
+	m := &AppModel{
+		width:             100,
+		height:            50,
+		db:                database,
+		keys:              DefaultKeyMap(),
+		kanban:            NewKanbanBoard(100, 50),
+		currentView:       ViewNewTaskConfirm,
+		prevStatuses:      make(map[int64]string),
+		tasksNeedingInput: make(map[int64]bool),
+		questionPrompts:   make(map[int64]bool),
+		executorPrompts:   make(map[int64]string),
+	}
+
+	// Send taskCreatedMsg with a queued task
+	model, cmd := m.Update(taskCreatedMsg{task: task, err: nil})
+	am := model.(*AppModel)
+
+	// Should temporarily be on dashboard (loadTaskWithFocus will switch to detail)
+	if am.currentView != ViewDashboard {
+		t.Errorf("expected ViewDashboard (temporary), got %v", am.currentView)
+	}
+
+	// Should have cleared the form
+	if am.newTaskForm != nil {
+		t.Error("expected newTaskForm to be nil")
+	}
+
+	// Should return commands (loadTasks + loadTaskWithFocus batched)
+	if cmd == nil {
+		t.Error("expected non-nil command for queued task (should include loadTaskWithFocus)")
+	}
+}
+
+func TestTaskCreatedMsg_BacklogTaskStaysOnDashboard(t *testing.T) {
+	database, err := db.Open(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to create test database: %v", err)
+	}
+	defer database.Close()
+
+	task := &db.Task{Title: "Test task", Status: db.StatusBacklog}
+	if err := database.CreateTask(task); err != nil {
+		t.Fatalf("Failed to create task: %v", err)
+	}
+
+	m := &AppModel{
+		width:             100,
+		height:            50,
+		db:                database,
+		keys:              DefaultKeyMap(),
+		kanban:            NewKanbanBoard(100, 50),
+		currentView:       ViewNewTaskConfirm,
+		prevStatuses:      make(map[int64]string),
+		tasksNeedingInput: make(map[int64]bool),
+		questionPrompts:   make(map[int64]bool),
+		executorPrompts:   make(map[int64]string),
+	}
+
+	// Send taskCreatedMsg with a backlog task
+	model, cmd := m.Update(taskCreatedMsg{task: task, err: nil})
+	am := model.(*AppModel)
+
+	// Should stay on dashboard
+	if am.currentView != ViewDashboard {
+		t.Errorf("expected ViewDashboard, got %v", am.currentView)
+	}
+
+	// Should return command (loadTasks only)
+	if cmd == nil {
+		t.Error("expected non-nil command for loadTasks")
+	}
+}
+
+func TestNewDetailModel_FocusExecutorOnJoinFlag(t *testing.T) {
+	database, err := db.Open(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to create test database: %v", err)
+	}
+	defer database.Close()
+
+	task := &db.Task{ID: 1, Title: "Test task", Status: db.StatusQueued}
+
+	// When focusExecutor is true, detail model should have focusExecutorOnJoin set
+	detail, _ := NewDetailModel(task, database, nil, 100, 50, true)
+	if !detail.focusExecutorOnJoin {
+		t.Error("expected focusExecutorOnJoin=true when focusExecutor=true")
+	}
+
+	// When focusExecutor is false, detail model should NOT have focusExecutorOnJoin set
+	detail2, _ := NewDetailModel(task, database, nil, 100, 50, false)
+	if detail2.focusExecutorOnJoin {
+		t.Error("expected focusExecutorOnJoin=false when focusExecutor=false")
+	}
+}
