@@ -1866,6 +1866,81 @@ func TestQuickInput_EmptyEnterUnfocuses(t *testing.T) {
 	}
 }
 
+// TestQuickInput_EnterWithTextSendsAndUnfocuses verifies pressing Enter with text
+// unfocuses quick input and produces a command (the sendTextToExecutor tea.Cmd).
+func TestQuickInput_EnterWithTextSendsAndUnfocuses(t *testing.T) {
+	replyInput := textinput.New()
+	replyInput.CharLimit = 200
+	replyInput.Focus()
+	replyInput.SetValue("hello world")
+
+	kanban := NewKanbanBoard(100, 50)
+	task := &db.Task{ID: 42, Title: "Test task", Status: db.StatusBlocked}
+	kanban.SetTasks([]*db.Task{task})
+	kanban.SelectTask(42)
+
+	m := &AppModel{
+		width:             100,
+		height:            50,
+		currentView:       ViewDashboard,
+		keys:              DefaultKeyMap(),
+		quickInputFocused: true,
+		replyInput:        replyInput,
+		tasksNeedingInput: map[int64]bool{42: true},
+		questionPrompts:   make(map[int64]bool),
+		executorPrompts:   make(map[int64]string),
+		kanban:            kanban,
+	}
+
+	result, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model := result.(*AppModel)
+
+	if model.quickInputFocused {
+		t.Error("quickInputFocused should be false after pressing Enter with text")
+	}
+	if model.replyInput.Value() != "" {
+		t.Error("replyInput should be cleared after sending")
+	}
+	if cmd == nil {
+		t.Error("expected a command to be returned for sending text to executor")
+	}
+}
+
+// TestQuickInput_EnterWithTextNoSelectedTask verifies pressing Enter with text
+// but no selected task gracefully unfocuses without crashing.
+func TestQuickInput_EnterWithTextNoSelectedTask(t *testing.T) {
+	replyInput := textinput.New()
+	replyInput.CharLimit = 200
+	replyInput.Focus()
+	replyInput.SetValue("some text")
+
+	kanban := NewKanbanBoard(100, 50)
+	// No tasks set - SelectedTask() returns nil
+
+	m := &AppModel{
+		width:             100,
+		height:            50,
+		currentView:       ViewDashboard,
+		keys:              DefaultKeyMap(),
+		quickInputFocused: true,
+		replyInput:        replyInput,
+		tasksNeedingInput: make(map[int64]bool),
+		questionPrompts:   make(map[int64]bool),
+		executorPrompts:   make(map[int64]string),
+		kanban:            kanban,
+	}
+
+	result, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model := result.(*AppModel)
+
+	if model.quickInputFocused {
+		t.Error("quickInputFocused should be false even without a selected task")
+	}
+	if model.replyInput.Value() != "" {
+		t.Error("replyInput should be cleared")
+	}
+}
+
 // TestQuickInput_TabIgnoredWithoutBlockedTask verifies Tab does nothing
 // when the selected task doesn't need input.
 func TestQuickInput_TabIgnoredWithoutBlockedTask(t *testing.T) {
