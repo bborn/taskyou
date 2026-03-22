@@ -402,9 +402,10 @@ Tasks will automatically reconnect to their agent sessions when viewed.`,
 
 	// Delete subcommand - delete a task, kill its agent session, and remove worktree
 	deleteCmd := &cobra.Command{
-		Use:   "delete <task-id>",
-		Short: "Delete a task, kill its agent session, and remove its worktree",
-		Args:  cobra.ExactArgs(1),
+		Use:               "delete <task-id>",
+		Short:             "Delete a task, kill its agent session, and remove its worktree",
+		Args:              cobra.ExactArgs(1),
+		ValidArgsFunction: completeTaskIDs,
 		Run: func(cmd *cobra.Command, args []string) {
 			var taskID int64
 			if _, err := fmt.Sscanf(args[0], "%d", &taskID); err != nil {
@@ -640,6 +641,9 @@ Examples:
 	createCmd.Flags().Bool("pinned", false, "Pin the task to the top of its column")
 	createCmd.Flags().StringP("branch", "b", "", "Existing branch to checkout for worktree (e.g., fix/ui-overflow)")
 	createCmd.Flags().Bool("json", false, "Output in JSON format")
+	createCmd.RegisterFlagCompletionFunc("project", completeFlagProjects)
+	createCmd.RegisterFlagCompletionFunc("type", completeFlagTypes)
+	createCmd.RegisterFlagCompletionFunc("executor", completeFlagExecutors)
 	rootCmd.AddCommand(createCmd)
 
 	// List subcommand - list tasks
@@ -818,6 +822,9 @@ Examples:
 	listCmd.Flags().IntP("limit", "n", 50, "Maximum number of tasks to return")
 	listCmd.Flags().Bool("json", false, "Output in JSON format")
 	listCmd.Flags().Bool("pr", false, "Show PR/CI status (requires network)")
+	listCmd.RegisterFlagCompletionFunc("status", completeFlagStatuses)
+	listCmd.RegisterFlagCompletionFunc("project", completeFlagProjects)
+	listCmd.RegisterFlagCompletionFunc("type", completeFlagTypes)
 	rootCmd.AddCommand(listCmd)
 
 	boardCmd := &cobra.Command{
@@ -930,8 +937,9 @@ Press Ctrl+C to stop.`,
 
 	// Show subcommand - show task details
 	showCmd := &cobra.Command{
-		Use:   "show <task-id>",
-		Short: "Show task details",
+		Use:               "show <task-id>",
+		Short:             "Show task details",
+		ValidArgsFunction: completeTaskIDs,
 		Long: `Show detailed information about a task.
 
 Examples:
@@ -1159,8 +1167,9 @@ Examples:
 
 	// Update subcommand - update task fields
 	updateCmd := &cobra.Command{
-		Use:   "update <task-id>",
-		Short: "Update a task",
+		Use:               "update <task-id>",
+		Short:             "Update a task",
+		ValidArgsFunction: completeTaskIDs,
 		Long: `Update task fields.
 
 Examples:
@@ -1280,12 +1289,16 @@ Examples:
 	updateCmd.Flags().StringP("executor", "e", "", "Update task executor: claude, codex, gemini, pi, opencode, openclaw")
 	updateCmd.Flags().String("tags", "", "Update task tags (comma-separated)")
 	updateCmd.Flags().Bool("pinned", false, "Pin or unpin the task")
+	updateCmd.RegisterFlagCompletionFunc("project", completeFlagProjects)
+	updateCmd.RegisterFlagCompletionFunc("type", completeFlagTypes)
+	updateCmd.RegisterFlagCompletionFunc("executor", completeFlagExecutors)
 	rootCmd.AddCommand(updateCmd)
 
 	// Move subcommand - move a task to a different project
 	moveCmd := &cobra.Command{
-		Use:   "move <task-id> <target-project>",
-		Short: "Move a task to a different project",
+		Use:               "move <task-id> <target-project>",
+		Short:             "Move a task to a different project",
+		ValidArgsFunction: completeTaskIDsThenProject,
 		Long: `Move a task to a different project.
 
 This properly cleans up the task's worktree and agent sessions from the old project,
@@ -1402,9 +1415,10 @@ Examples:
 
 	// Execute subcommand - queue a task for execution
 	executeCmd := &cobra.Command{
-		Use:     "execute <task-id>",
-		Aliases: []string{"queue", "run"},
-		Short:   "Queue a task for execution",
+		Use:               "execute <task-id>",
+		Aliases:           []string{"queue", "run"},
+		Short:             "Queue a task for execution",
+		ValidArgsFunction: completeTaskIDs,
 		Long: `Queue a task to be executed by the daemon.
 
 Examples:
@@ -1475,8 +1489,9 @@ Examples:
 	rootCmd.AddCommand(executeCmd)
 
 	statusCmd := &cobra.Command{
-		Use:   "status <task-id> <status>",
-		Short: "Set a task's status",
+		Use:               "status <task-id> <status>",
+		Short:             "Set a task's status",
+		ValidArgsFunction: completeTaskIDsThenStatus,
 		Long: `Manually update a task's status. Useful for automation/orchestration when
 you need to move cards between columns without opening the TUI.
 
@@ -1524,9 +1539,10 @@ Valid statuses: backlog, queued, processing, blocked, done, archived.`,
 	rootCmd.AddCommand(statusCmd)
 
 	pinCmd := &cobra.Command{
-		Use:   "pin <task-id>",
-		Short: "Pin, unpin, or toggle a task",
-		Args:  cobra.ExactArgs(1),
+		Use:               "pin <task-id>",
+		Short:             "Pin, unpin, or toggle a task",
+		Args:              cobra.ExactArgs(1),
+		ValidArgsFunction: completeTaskIDs,
 		Run: func(cmd *cobra.Command, args []string) {
 			var taskID int64
 			if _, err := fmt.Sscanf(args[0], "%d", &taskID); err != nil {
@@ -1582,9 +1598,10 @@ Valid statuses: backlog, queued, processing, blocked, done, archived.`,
 
 	// Close subcommand - mark a task as done
 	closeCmd := &cobra.Command{
-		Use:     "close <task-id>",
-		Aliases: []string{"done", "complete"},
-		Short:   "Mark a task as done",
+		Use:               "close <task-id>",
+		ValidArgsFunction: completeTaskIDs,
+		Aliases:           []string{"done", "complete"},
+		Short:             "Mark a task as done",
 		Long: `Mark a task as completed.
 
 Examples:
@@ -1639,8 +1656,9 @@ Examples:
 
 	// Retry subcommand - retry a blocked/failed task
 	retryCmd := &cobra.Command{
-		Use:   "retry <task-id>",
-		Short: "Retry a blocked or failed task",
+		Use:               "retry <task-id>",
+		Short:             "Retry a blocked or failed task",
+		ValidArgsFunction: completeTaskIDs,
 		Long: `Retry a task that is blocked or failed, optionally with feedback.
 
 Examples:
@@ -1689,8 +1707,9 @@ Examples:
 
 	// Input subcommand - send input directly to a running task's executor
 	inputCmd := &cobra.Command{
-		Use:   "input <task-id> [message]",
-		Short: "Send input to a task's executor",
+		Use:               "input <task-id> [message]",
+		Short:             "Send input to a task's executor",
+		ValidArgsFunction: completeTaskIDs,
 		Long: `Send input directly to a running task's executor via tmux.
 
 This allows you to interact with a blocked or running task without going through
@@ -1800,8 +1819,9 @@ Examples:
 
 	// Output subcommand - capture recent output from executor pane
 	outputCmd := &cobra.Command{
-		Use:   "output <task-id>",
-		Short: "Capture recent output from a task's executor",
+		Use:               "output <task-id>",
+		Short:             "Capture recent output from a task's executor",
+		ValidArgsFunction: completeTaskIDs,
 		Long: `Capture recent output from a running task's executor pane.
 
 This allows you to see what the executor has outputted without attaching to the tmux pane.
@@ -2074,8 +2094,9 @@ Examples:
 	}
 
 	settingsSetCmd := &cobra.Command{
-		Use:   "set <key> <value>",
-		Short: "Set a setting value",
+		Use:               "set <key> <value>",
+		Short:             "Set a setting value",
+		ValidArgsFunction: completeSettingKeys,
 		Long: `Set a configuration setting.
 
 Available settings:
@@ -2272,8 +2293,9 @@ Examples:
 
 	// Projects show subcommand
 	projectsShowCmd := &cobra.Command{
-		Use:   "show <name>",
-		Short: "Show project details",
+		Use:               "show <name>",
+		Short:             "Show project details",
+		ValidArgsFunction: completeProjectNames,
 		Long: `Show detailed information about a project including its instructions.
 
 Examples:
@@ -2323,8 +2345,9 @@ Examples:
 
 	// Projects update subcommand
 	projectsUpdateCmd := &cobra.Command{
-		Use:   "update <name>",
-		Short: "Update project settings",
+		Use:               "update <name>",
+		Short:             "Update project settings",
+		ValidArgsFunction: completeProjectNames,
 		Long: `Update settings for an existing project.
 
 Examples:
@@ -2378,8 +2401,9 @@ Examples:
 
 	// Projects delete subcommand
 	projectsDeleteCmd := &cobra.Command{
-		Use:   "delete <name>",
-		Short: "Delete a project",
+		Use:               "delete <name>",
+		Short:             "Delete a project",
+		ValidArgsFunction: completeProjectNames,
 		Long: `Delete a project. The 'personal' project cannot be deleted.
 
 Note: This only removes the project from the task system. It does not
@@ -2401,8 +2425,9 @@ Examples:
 
 	// Block command - create a dependency between two tasks
 	blockCmd := &cobra.Command{
-		Use:   "block <blocked-task-id> --by <blocker-task-id>",
-		Short: "Block a task until another task completes",
+		Use:               "block <blocked-task-id> --by <blocker-task-id>",
+		ValidArgsFunction: completeTaskIDs,
+		Short:             "Block a task until another task completes",
 		Long: `Create a dependency where a task is blocked until another task completes.
 
 Example: ty block 5 --by 3
@@ -2465,8 +2490,9 @@ Use --auto-queue to automatically move the blocked task to 'queued' when unblock
 
 	// Unblock command - remove a dependency
 	unblockCmd := &cobra.Command{
-		Use:   "unblock <blocked-task-id> --from <blocker-task-id>",
-		Short: "Remove a blocking dependency",
+		Use:               "unblock <blocked-task-id> --from <blocker-task-id>",
+		ValidArgsFunction: completeTaskIDs,
+		Short:             "Remove a blocking dependency",
 		Long: `Remove a dependency so a task is no longer blocked by another.
 
 Example: ty unblock 5 --from 3
@@ -2507,8 +2533,9 @@ This removes the dependency where task #5 was blocked by task #3.`,
 
 	// Deps command - show dependencies for a task
 	depsCmd := &cobra.Command{
-		Use:   "deps <task-id>",
-		Short: "Show dependencies for a task",
+		Use:               "deps <task-id>",
+		ValidArgsFunction: completeTaskIDs,
+		Short:             "Show dependencies for a task",
 		Long: `Display all dependencies for a task, showing:
 - Tasks that block this task (must complete before this task)
 - Tasks that this task blocks (waiting on this task)`,
@@ -2669,9 +2696,10 @@ Examples:
 
 	// Types show subcommand
 	typesShowCmd := &cobra.Command{
-		Use:   "show <name>",
-		Short: "Show details of a task type",
-		Args:  cobra.ExactArgs(1),
+		Use:               "show <name>",
+		ValidArgsFunction: completeTypeNames,
+		Short:             "Show details of a task type",
+		Args:              cobra.ExactArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
 			name := args[0]
 			outputJSON, _ := cmd.Flags().GetBool("json")
@@ -2834,8 +2862,9 @@ Examples:
 
 	// Types edit subcommand
 	typesEditCmd := &cobra.Command{
-		Use:   "edit <name>",
-		Short: "Edit an existing task type",
+		Use:               "edit <name>",
+		ValidArgsFunction: completeTypeNames,
+		Short:             "Edit an existing task type",
 		Long: `Edit an existing task type. Built-in types can be edited but not deleted.
 
 All flags are optional - only specified values will be updated.
@@ -2935,8 +2964,9 @@ Examples:
 
 	// Types delete subcommand
 	typesDeleteCmd := &cobra.Command{
-		Use:   "delete <name>",
-		Short: "Delete a custom task type",
+		Use:               "delete <name>",
+		ValidArgsFunction: completeTypeNames,
+		Short:             "Delete a custom task type",
 		Long: `Delete a custom task type. Built-in types (code, writing, thinking) cannot be deleted.
 
 Examples:
@@ -3041,6 +3071,9 @@ The server shares the same SQLite database the daemon writes to (WAL mode).`,
 	}
 	serveCmd.Flags().Int("port", 8080, "Port to listen on")
 	rootCmd.AddCommand(serveCmd)
+
+	// Completion command for shell tab completion
+	rootCmd.AddCommand(newCompletionCmd(rootCmd))
 
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
