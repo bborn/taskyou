@@ -2750,7 +2750,11 @@ func (m *AppModel) updateNewTaskForm(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Store pending task and create confirmation form
 			m.pendingTask = form.GetDBTask()
 			m.pendingAttachments = form.GetAttachments()
+			// Default to last queue choice for this project
 			m.queueValue = "no"
+			if last, err := m.db.GetSetting("last_queue_choice:" + m.pendingTask.Project); err == nil && last != "" {
+				m.queueValue = last
+			}
 			m.queueConfirm = huh.NewForm(
 				huh.NewGroup(
 					huh.NewSelect[string]().
@@ -2802,6 +2806,9 @@ func (m *AppModel) updateNewTaskConfirm(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 	if m.queueConfirm.State == huh.StateCompleted {
 		if m.pendingTask != nil {
+			// Remember the choice for this project
+			m.db.SetSetting("last_queue_choice:"+m.pendingTask.Project, m.queueValue)
+
 			switch m.queueValue {
 			case "yes":
 				m.pendingTask.Status = db.StatusQueued
