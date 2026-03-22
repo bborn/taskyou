@@ -1,6 +1,8 @@
 package ui
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -431,6 +433,79 @@ func TestDetailModel_CollapsedShellIndicator(t *testing.T) {
 			// The #88C0D0 color is used for the shell tab text
 			if tt.expectShellTab && !hasShellTab {
 				t.Errorf("Expected collapsed shell indicator in view when shell is hidden in TMUX")
+			}
+		})
+	}
+}
+
+// TestContainsSourceFiles verifies that containsSourceFiles correctly detects
+// directories with common project markers.
+func TestContainsSourceFiles(t *testing.T) {
+	tests := []struct {
+		name    string
+		files   []string
+		want    bool
+	}{
+		{
+			name:  "go project",
+			files: []string{"go.mod"},
+			want:  true,
+		},
+		{
+			name:  "node project",
+			files: []string{"package.json"},
+			want:  true,
+		},
+		{
+			name:  "rust project",
+			files: []string{"Cargo.toml"},
+			want:  true,
+		},
+		{
+			name:  "python project",
+			files: []string{"pyproject.toml"},
+			want:  true,
+		},
+		{
+			name:  "makefile project",
+			files: []string{"Makefile"},
+			want:  true,
+		},
+		{
+			name:  "typescript project",
+			files: []string{"tsconfig.json"},
+			want:  true,
+		},
+		{
+			name:  "empty directory",
+			files: []string{},
+			want:  false,
+		},
+		{
+			name:  "non-source files only",
+			files: []string{"README.md", "notes.txt", "image.png"},
+			want:  false,
+		},
+		{
+			name:  "git directory",
+			files: []string{".git"},
+			want:  true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			for _, f := range tt.files {
+				path := filepath.Join(dir, f)
+				if err := os.WriteFile(path, []byte{}, 0644); err != nil {
+					t.Fatalf("failed to create test file %s: %v", f, err)
+				}
+			}
+
+			got := containsSourceFiles(dir)
+			if got != tt.want {
+				t.Errorf("containsSourceFiles() = %v, want %v (files: %v)", got, tt.want, tt.files)
 			}
 		})
 	}

@@ -2009,7 +2009,11 @@ func (m *AppModel) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case key.Matches(msg, m.keys.OpenBrowser):
 		if task := m.kanban.SelectedTask(); task != nil {
-			return m, m.openBrowser(task)
+			// If process is running, open browser; otherwise open task directory
+			if m.executor.IsRunning(task.ID) && task.Port != 0 {
+				return m, m.openBrowser(task)
+			}
+			return m, m.openTaskDirectory(task)
 		}
 
 	case key.Matches(msg, m.keys.Spotlight):
@@ -2589,7 +2593,11 @@ func (m *AppModel) updateDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.openWorktreeInEditor(m.selectedTask)
 	}
 	if key.Matches(keyMsg, m.keys.OpenBrowser) && m.selectedTask != nil {
-		return m, m.openBrowser(m.selectedTask)
+		// If process is running, open browser; otherwise open task directory
+		if m.executor.IsRunning(m.selectedTask.ID) && m.selectedTask.Port != 0 {
+			return m, m.openBrowser(m.selectedTask)
+		}
+		return m, m.openTaskDirectory(m.selectedTask)
 	}
 	if key.Matches(keyMsg, m.keys.Spotlight) && m.selectedTask != nil && m.selectedTask.WorktreePath != "" {
 		return m, m.toggleSpotlight(m.selectedTask)
@@ -4057,6 +4065,57 @@ func (m *AppModel) openBrowser(task *db.Task) tea.Cmd {
 
 		return browserOpenedMsg{message: fmt.Sprintf("Opened %s", url)}
 	}
+}
+
+// openTaskDirectory opens the task's worktree directory in the most appropriate application.
+// If the directory contains source files (detected by common project markers), it opens in VS Code.
+// Otherwise, it falls back to opening the directory in the default file manager (Finder on macOS).
+func (m *AppModel) openTaskDirectory(task *db.Task) tea.Cmd {
+	return func() tea.Msg {
+		if task.WorktreePath == "" {
+			return browserOpenedMsg{err: fmt.Errorf("no worktree for task #%d", task.ID)}
+		}
+
+		// Check if worktree directory exists
+		if _, err := os.Stat(task.WorktreePath); os.IsNotExist(err) {
+			return browserOpenedMsg{err: fmt.Errorf("worktree not found: %s", task.WorktreePath)}
+		}
+
+		// Check if directory contains source files by looking for common project markers
+		if containsSourceFiles(task.WorktreePath) {
+			// Try to open in VS Code
+			cmd := osExec.Command("code", task.WorktreePath)
+			if err := cmd.Start(); err == nil {
+				return browserOpenedMsg{message: fmt.Sprintf("Opened %s in VS Code", filepath.Base(task.WorktreePath))}
+			}
+			// VS Code not available, fall through to file manager
+		}
+
+		// Fall back to opening in the default file manager
+		cmd := osExec.Command("open", task.WorktreePath)
+		if err := cmd.Start(); err != nil {
+			return browserOpenedMsg{err: fmt.Errorf("failed to open directory: %w", err)}
+		}
+
+		return browserOpenedMsg{message: fmt.Sprintf("Opened %s in Finder", filepath.Base(task.WorktreePath))}
+	}
+}
+
+// containsSourceFiles checks if a directory contains source code by looking for
+// common project markers (e.g., go.mod, package.json, Cargo.toml, etc.).
+func containsSourceFiles(dir string) bool {
+	markers := []string{
+		"go.mod", "package.json", "Cargo.toml", "pyproject.toml",
+		"requirements.txt", "Gemfile", "pom.xml", "build.gradle",
+		"Makefile", "CMakeLists.txt", ".git", "setup.py", "mix.exs",
+		"composer.json", "pubspec.yaml", "Pipfile", "tsconfig.json",
+	}
+	for _, marker := range markers {
+		if _, err := os.Stat(filepath.Join(dir, marker)); err == nil {
+			return true
+		}
+	}
+	return false
 }
 
 // spotlightMsg is returned after a spotlight action completes.
