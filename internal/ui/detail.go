@@ -2896,6 +2896,11 @@ func (m *DetailModel) renderHelp() string {
 		}
 	}
 
+	// Open PR shortcut (only when task has a PR)
+	if m.task != nil && m.task.PRURL != "" {
+		keys = append(keys, helpKey{"G", "open PR", false})
+	}
+
 	keys = append(keys, []helpKey{
 		{"b", "browser", false},
 		{"c", "close", false},

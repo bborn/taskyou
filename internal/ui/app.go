@@ -91,6 +91,8 @@ type KeyMap struct {
 	CollapseDone    key.Binding
 	// Open browser
 	OpenBrowser key.Binding
+	// Open PR
+	OpenPR key.Binding
 	// Quick approve/deny for executor prompts
 	ApprovePrompt key.Binding
 	DenyPrompt    key.Binding
@@ -263,6 +265,10 @@ func DefaultKeyMap() KeyMap {
 			key.WithKeys("b"),
 			key.WithHelp("b", "open in browser"),
 		),
+		OpenPR: key.NewBinding(
+			key.WithKeys("G"),
+			key.WithHelp("G", "open PR"),
+		),
 		ApprovePrompt: key.NewBinding(
 			key.WithKeys("y"),
 			key.WithHelp("y", "approve"),
@@ -345,6 +351,7 @@ func ApplyKeybindingsConfig(km KeyMap, cfg *config.KeybindingsConfig) KeyMap {
 	km.CollapseBacklog = applyBinding(km.CollapseBacklog, cfg.CollapseBacklog)
 	km.CollapseDone = applyBinding(km.CollapseDone, cfg.CollapseDone)
 	km.OpenBrowser = applyBinding(km.OpenBrowser, cfg.OpenBrowser)
+	km.OpenPR = applyBinding(km.OpenPR, cfg.OpenPR)
 	km.ApprovePrompt = applyBinding(km.ApprovePrompt, cfg.ApprovePrompt)
 	km.DenyPrompt = applyBinding(km.DenyPrompt, cfg.DenyPrompt)
 	km.Spotlight = applyBinding(km.Spotlight, cfg.Spotlight)
@@ -2694,6 +2701,9 @@ func (m *AppModel) updateDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if key.Matches(keyMsg, m.keys.OpenBrowser) && m.selectedTask != nil {
 		return m, m.openBrowser(m.selectedTask)
 	}
+	if key.Matches(keyMsg, m.keys.OpenPR) && m.selectedTask != nil && m.selectedTask.PRURL != "" {
+		return m, m.openPR(m.selectedTask)
+	}
 	if key.Matches(keyMsg, m.keys.Spotlight) && m.selectedTask != nil && m.selectedTask.WorktreePath != "" {
 		return m, m.toggleSpotlight(m.selectedTask)
 	}
@@ -4200,6 +4210,22 @@ func (m *AppModel) openBrowser(task *db.Task) tea.Cmd {
 		}
 
 		return browserOpenedMsg{message: fmt.Sprintf("Opened %s", url)}
+	}
+}
+
+// openPR opens the task's pull request URL in the default browser.
+func (m *AppModel) openPR(task *db.Task) tea.Cmd {
+	return func() tea.Msg {
+		if task.PRURL == "" {
+			return browserOpenedMsg{err: fmt.Errorf("no PR linked for task #%d", task.ID)}
+		}
+
+		cmd := osExec.Command("open", task.PRURL)
+		if err := cmd.Start(); err != nil {
+			return browserOpenedMsg{err: fmt.Errorf("failed to open PR: %w", err)}
+		}
+
+		return browserOpenedMsg{message: fmt.Sprintf("Opened PR #%d", task.PRNumber)}
 	}
 }
 
