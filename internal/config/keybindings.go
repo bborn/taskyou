@@ -51,6 +51,7 @@ type KeybindingsConfig struct {
 	CollapseBacklog    *KeybindingConfig `yaml:"collapse_backlog,omitempty"`
 	CollapseDone       *KeybindingConfig `yaml:"collapse_done,omitempty"`
 	OpenBrowser        *KeybindingConfig `yaml:"open_browser,omitempty"`
+	OpenPR             *KeybindingConfig `yaml:"open_pr,omitempty"`
 	ApprovePrompt      *KeybindingConfig `yaml:"approve_prompt,omitempty"`
 	DenyPrompt         *KeybindingConfig `yaml:"deny_prompt,omitempty"`
 	Spotlight          *KeybindingConfig `yaml:"spotlight,omitempty"`
@@ -257,6 +258,10 @@ collapse_done:
 open_browser:
   keys: ["b"]
   help: "open in browser"
+
+open_pr:
+  keys: ["G"]
+  help: "open PR"
 
 # Spotlight mode
 spotlight:
