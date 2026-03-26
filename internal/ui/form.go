@@ -29,6 +29,7 @@ const (
 	FieldAttachments // Moved after body for proximity - drag works from any field
 	FieldType
 	FieldExecutor
+	FieldStatus // Only shown in edit mode
 	FieldCount
 )
 
@@ -66,6 +67,9 @@ type FormModel struct {
 	executors          []string
 	availableExecutors []string // Original list of available executors (for rebuilding when project changes)
 	queue              bool
+	status             string // Task status (only used in edit mode)
+	statusIdx          int
+	statuses           []string // Available statuses for editing
 	attachments        []string // Parsed file paths
 	attachmentCursor   int      // Index of the currently selected attachment chip
 
@@ -208,6 +212,17 @@ func NewEditFormModel(database *db.DB, task *db.Task, width, height int, availab
 		taskRefAutocomplete: NewTaskRefAutocompleteModel(database, width-24),
 		attachmentCursor:    -1,
 		showAdvanced:        true, // Always show all fields when editing
+	}
+
+	// Set up status selector for edit mode
+	// Only include statuses that map to Kanban columns (Processing is system-managed)
+	m.statuses = []string{db.StatusBacklog, db.StatusQueued, db.StatusBlocked, db.StatusDone}
+	m.status = task.Status
+	for i, s := range m.statuses {
+		if s == task.Status {
+			m.statusIdx = i
+			break
+		}
 	}
 
 	// Load task types from database
@@ -737,6 +752,11 @@ func (m *FormModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.executor = m.executors[m.executorIdx]
 				return m, nil
 			}
+			if m.focused == FieldStatus && len(m.statuses) > 0 {
+				m.statusIdx = (m.statusIdx - 1 + len(m.statuses)) % len(m.statuses)
+				m.status = m.statuses[m.statusIdx]
+				return m, nil
+			}
 
 		case "right":
 			if m.handleAttachmentNavigation(1) {
@@ -758,6 +778,11 @@ func (m *FormModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.focused == FieldExecutor && len(m.executors) > 0 {
 				m.executorIdx = (m.executorIdx + 1) % len(m.executors)
 				m.executor = m.executors[m.executorIdx]
+				return m, nil
+			}
+			if m.focused == FieldStatus && len(m.statuses) > 0 {
+				m.statusIdx = (m.statusIdx + 1) % len(m.statuses)
+				m.status = m.statuses[m.statusIdx]
 				return m, nil
 			}
 
@@ -1163,7 +1188,11 @@ func (m *FormModel) rebuildExecutorListForProject() {
 
 // isFieldVisible returns whether a field should be shown in the current view.
 // When showAdvanced is false, only Title and Body are visible.
+// FieldStatus is only visible in edit mode.
 func (m *FormModel) isFieldVisible(field FormField) bool {
+	if field == FieldStatus {
+		return m.isEdit && m.showAdvanced
+	}
 	if m.showAdvanced {
 		return true
 	}
@@ -1689,6 +1718,16 @@ func (m *FormModel) View() string {
 		}
 		b.WriteString(cursor + " " + labelStyle.Render("Executor") + m.renderSelector(m.executors, m.executorIdx, m.focused == FieldExecutor, selectedStyle, optionStyle, dimStyle))
 		b.WriteString("\n\n")
+
+		// Status selector (only in edit mode)
+		if m.isEdit && len(m.statuses) > 0 {
+			cursor = " "
+			if m.focused == FieldStatus {
+				cursor = cursorStyle.Render("▸")
+			}
+			b.WriteString(cursor + " " + labelStyle.Render("Status") + m.renderSelector(m.statuses, m.statusIdx, m.focused == FieldStatus, selectedStyle, optionStyle, dimStyle))
+			b.WriteString("\n\n")
+		}
 	} else {
 		// Show compact summary of defaults and toggle hint
 		b.WriteString("\n")
@@ -1772,7 +1811,9 @@ func (m *FormModel) hasFormData() bool {
 // GetDBTask returns a db.Task from the form values.
 func (m *FormModel) GetDBTask() *db.Task {
 	status := db.StatusBacklog
-	if m.queue {
+	if m.isEdit && m.status != "" {
+		status = m.status
+	} else if m.queue {
 		status = db.StatusQueued
 	}
 

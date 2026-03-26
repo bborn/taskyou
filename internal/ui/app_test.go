@@ -29,10 +29,6 @@ func TestDefaultKeyMap(t *testing.T) {
 		t.Error("New key should have help text 'n'")
 	}
 
-	if keys.ChangeStatus.Help().Key != "S" {
-		t.Error("ChangeStatus key should have help text 'S'")
-	}
-
 	if keys.OpenWorktree.Help().Key != "o" {
 		t.Error("OpenWorktree key should have help text 'o'")
 	}
@@ -160,7 +156,6 @@ func TestApplyKeybindingsConfig_AllBindings(t *testing.T) {
 		Settings:           &config.KeybindingConfig{Keys: []string{"S"}, Help: "config"},
 		Help:               &config.KeybindingConfig{Keys: []string{"H"}, Help: "help"},
 		Quit:               &config.KeybindingConfig{Keys: []string{"Q"}, Help: "exit"},
-		ChangeStatus:       &config.KeybindingConfig{Keys: []string{"s"}, Help: "status"},
 		CommandPalette:     &config.KeybindingConfig{Keys: []string{"p"}, Help: "palette"},
 		ToggleDangerous:    &config.KeybindingConfig{Keys: []string{"!"}, Help: "danger"},
 		QueueDangerous:     &config.KeybindingConfig{Keys: []string{"ctrl+x"}, Help: "exec danger"},
@@ -191,90 +186,54 @@ func TestApplyKeybindingsConfig_AllBindings(t *testing.T) {
 	}
 }
 
-func TestShowChangeStatus_OnlyIncludesKanbanStatuses(t *testing.T) {
-	// Create a minimal app model
-	m := &AppModel{
-		width: 100,
-	}
-
-	// Create a task with backlog status
+func TestEditFormIncludesStatusField(t *testing.T) {
 	task := &db.Task{
 		ID:     1,
 		Title:  "Test Task",
 		Status: db.StatusBacklog,
 	}
 
-	// Call showChangeStatus
-	m.showChangeStatus(task)
+	form := NewEditFormModel(nil, task, 100, 50, []string{"claude"})
 
-	// Verify that the form was created
-	if m.changeStatusForm == nil {
-		t.Fatal("changeStatusForm was not created")
+	// Verify that the form has status set to the task's current status
+	if form.status != db.StatusBacklog {
+		t.Errorf("form.status = %q, want %q", form.status, db.StatusBacklog)
 	}
 
-	// Verify that the current view is set correctly
-	if m.currentView != ViewChangeStatus {
-		t.Errorf("currentView = %v, want %v", m.currentView, ViewChangeStatus)
+	// Verify that statuses contains the expected Kanban-mapped statuses
+	expectedStatuses := []string{db.StatusBacklog, db.StatusQueued, db.StatusBlocked, db.StatusDone}
+	if len(form.statuses) != len(expectedStatuses) {
+		t.Fatalf("form.statuses has %d items, want %d", len(form.statuses), len(expectedStatuses))
+	}
+	for i, s := range expectedStatuses {
+		if form.statuses[i] != s {
+			t.Errorf("form.statuses[%d] = %q, want %q", i, form.statuses[i], s)
+		}
 	}
 
-	// Verify that the pending task is set
-	if m.pendingChangeStatusTask != task {
-		t.Error("pendingChangeStatusTask was not set correctly")
+	// Verify GetDBTask returns the form's status
+	dbTask := form.GetDBTask()
+	if dbTask.Status != db.StatusBacklog {
+		t.Errorf("GetDBTask().Status = %q, want %q", dbTask.Status, db.StatusBacklog)
 	}
-
-	// The function should only offer statuses that map to Kanban columns
-	// We verify this by checking that the available statuses are only:
-	// - StatusQueued (In Progress)
-	// - StatusBlocked
-	// - StatusDone
-	// StatusProcessing should NOT be included as it's system-managed
-	// StatusBacklog is excluded because it's the current status
-
-	// Note: We can't directly inspect the form options without accessing
-	// internal huh.Form fields, but we've verified the code only includes
-	// the 4 Kanban-mapped statuses in the allStatuses slice
 }
 
-func TestShowChangeStatus_ExcludesCurrentStatus(t *testing.T) {
-	m := &AppModel{
-		width: 100,
+func TestEditFormStatusChange(t *testing.T) {
+	task := &db.Task{
+		ID:     1,
+		Title:  "Test Task",
+		Status: db.StatusBacklog,
 	}
 
-	tests := []struct {
-		name          string
-		currentStatus string
-	}{
-		{"backlog task", db.StatusBacklog},
-		{"queued task", db.StatusQueued},
-		{"blocked task", db.StatusBlocked},
-		{"done task", db.StatusDone},
-	}
+	form := NewEditFormModel(nil, task, 100, 50, []string{"claude"})
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			task := &db.Task{
-				ID:     1,
-				Title:  "Test Task",
-				Status: tt.currentStatus,
-			}
+	// Simulate changing status to "done"
+	form.status = db.StatusDone
+	form.statusIdx = 3
 
-			m.showChangeStatus(task)
-
-			if m.changeStatusForm == nil {
-				t.Fatal("changeStatusForm was not created")
-			}
-
-			// Verify the pending task is set correctly
-			if m.pendingChangeStatusTask != task {
-				t.Error("pendingChangeStatusTask was not set correctly")
-			}
-
-			// The form.Init() updates changeStatusValue to the first available option,
-			// so we verify that it's not the current status (which was excluded)
-			if m.changeStatusValue == tt.currentStatus {
-				t.Errorf("changeStatusValue should not equal current status %q after form init", tt.currentStatus)
-			}
-		})
+	dbTask := form.GetDBTask()
+	if dbTask.Status != db.StatusDone {
+		t.Errorf("GetDBTask().Status = %q after change, want %q", dbTask.Status, db.StatusDone)
 	}
 }
 

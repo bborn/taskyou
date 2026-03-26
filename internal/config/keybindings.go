@@ -33,7 +33,6 @@ type KeybindingsConfig struct {
 	Settings           *KeybindingConfig `yaml:"settings,omitempty"`
 	Help               *KeybindingConfig `yaml:"help,omitempty"`
 	Quit               *KeybindingConfig `yaml:"quit,omitempty"`
-	ChangeStatus       *KeybindingConfig `yaml:"change_status,omitempty"`
 	CommandPalette     *KeybindingConfig `yaml:"command_palette,omitempty"`
 	ToggleDangerous    *KeybindingConfig `yaml:"toggle_dangerous,omitempty"`
 	QueueDangerous     *KeybindingConfig `yaml:"queue_dangerous,omitempty"`

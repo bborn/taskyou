@@ -239,8 +239,6 @@ func viewName(v View) string {
 		return "retry"
 	case ViewAttachments:
 		return "attachments"
-	case ViewChangeStatus:
-		return "change_status"
 	case ViewCommandPalette:
 		return "command_palette"
 	default:

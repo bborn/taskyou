@@ -2856,7 +2856,6 @@ func (m *DetailModel) renderHelp() string {
 	}
 
 	// Always show status change option
-	keys = append(keys, helpKey{"S", "status", false})
 
 	if m.task != nil {
 		pinDesc := "pin task"

@@ -46,7 +46,6 @@ const (
 	ViewSettings
 	ViewRetry
 	ViewAttachments
-	ViewChangeStatus
 	ViewCommandPalette
 )
 
@@ -69,7 +68,6 @@ type KeyMap struct {
 	Settings           key.Binding
 	Help               key.Binding
 	Quit               key.Binding
-	ChangeStatus       key.Binding
 	CommandPalette     key.Binding
 	ToggleDangerous    key.Binding
 	QueueDangerous     key.Binding
@@ -117,7 +115,7 @@ func (k KeyMap) FullHelp() [][]key.Binding {
 		{k.Enter, k.New, k.Queue, k.QueueDangerous, k.Close},
 		{k.Retry, k.Archive, k.Delete, k.OpenWorktree, k.OpenBrowser, k.Spotlight},
 		{k.Filter, k.CommandPalette, k.Settings},
-		{k.ChangeStatus, k.TogglePin, k.Refresh, k.Help},
+		{k.TogglePin, k.Refresh, k.Help},
 		{k.Quit},
 	}
 }
@@ -192,10 +190,6 @@ func DefaultKeyMap() KeyMap {
 		Quit: key.NewBinding(
 			key.WithKeys("ctrl+c"),
 			key.WithHelp("ctrl+c", "quit"),
-		),
-		ChangeStatus: key.NewBinding(
-			key.WithKeys("S"),
-			key.WithHelp("S", "status"),
 		),
 		CommandPalette: key.NewBinding(
 			key.WithKeys("p", "ctrl+p"),
@@ -333,7 +327,6 @@ func ApplyKeybindingsConfig(km KeyMap, cfg *config.KeybindingsConfig) KeyMap {
 	km.Settings = applyBinding(km.Settings, cfg.Settings)
 	km.Help = applyBinding(km.Help, cfg.Help)
 	km.Quit = applyBinding(km.Quit, cfg.Quit)
-	km.ChangeStatus = applyBinding(km.ChangeStatus, cfg.ChangeStatus)
 	km.CommandPalette = applyBinding(km.CommandPalette, cfg.CommandPalette)
 	km.ToggleDangerous = applyBinding(km.ToggleDangerous, cfg.ToggleDangerous)
 	km.QueueDangerous = applyBinding(km.QueueDangerous, cfg.QueueDangerous)
@@ -477,11 +470,6 @@ type AppModel struct {
 
 	// Attachments view state
 	attachmentsView *AttachmentsModel
-
-	// Change status view state
-	changeStatusForm        *huh.Form
-	changeStatusValue       string
-	pendingChangeStatusTask *db.Task
 
 	// Command palette view state
 	commandPaletteView *CommandPaletteModel
@@ -745,9 +733,6 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if m.currentView == ViewRetry && m.retryView != nil {
 			return m.updateRetry(msg)
-		}
-		if m.currentView == ViewChangeStatus && m.changeStatusForm != nil {
-			return m.updateChangeStatus(msg)
 		}
 		if m.currentView == ViewCommandPalette && m.commandPaletteView != nil {
 			return m.updateCommandPalette(msg)
@@ -1493,8 +1478,6 @@ func (m *AppModel) View() string {
 		if m.attachmentsView != nil {
 			return m.attachmentsView.View()
 		}
-	case ViewChangeStatus:
-		return m.viewChangeStatus()
 	case ViewCommandPalette:
 		if m.commandPaletteView != nil {
 			return m.commandPaletteView.View()
@@ -2133,11 +2116,6 @@ func (m *AppModel) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.loading = true
 		return m, m.loadTasks()
 
-	case key.Matches(msg, m.keys.ChangeStatus):
-		if task := m.kanban.SelectedTask(); task != nil {
-			return m.showChangeStatus(task)
-		}
-
 	case key.Matches(msg, m.keys.Help):
 		m.help.ShowAll = !m.help.ShowAll
 		return m, nil
@@ -2678,9 +2656,6 @@ func (m *AppModel) updateDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.currentView = ViewEditTask
 		return m, m.editTaskForm.Init()
 	}
-	if key.Matches(keyMsg, m.keys.ChangeStatus) && m.selectedTask != nil {
-		return m.showChangeStatus(m.selectedTask)
-	}
 	if key.Matches(keyMsg, m.keys.TogglePin) && m.selectedTask != nil {
 		return m, m.toggleTaskPinned(m.selectedTask.ID)
 	}
@@ -2887,19 +2862,31 @@ func (m *AppModel) updateEditTaskForm(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 			// Preserve the original task's ID and other fields
 			updatedTask.ID = m.editingTask.ID
-			updatedTask.Status = m.editingTask.Status
 			updatedTask.WorktreePath = m.editingTask.WorktreePath
 			updatedTask.BranchName = m.editingTask.BranchName
 			updatedTask.CreatedAt = m.editingTask.CreatedAt
 			updatedTask.StartedAt = m.editingTask.StartedAt
 			updatedTask.CompletedAt = m.editingTask.CompletedAt
 
+			// Check if status changed
+			statusChanged := updatedTask.Status != m.editingTask.Status
+
 			// Capture old title before clearing editingTask
 			oldTitle := m.editingTask.Title
+			taskID := m.editingTask.ID
 
 			m.editTaskForm = nil
 			m.editingTask = nil
 			m.currentView = m.previousView
+
+			// If status changed, also trigger the status change command
+			// to notify the executor and update the task list
+			if statusChanged {
+				return m, tea.Batch(
+					m.updateTaskWithRename(updatedTask, oldTitle),
+					m.changeTaskStatus(taskID, updatedTask.Status),
+				)
+			}
 			return m, m.updateTaskWithRename(updatedTask, oldTitle)
 		}
 		if form.cancelled {
@@ -3419,133 +3406,6 @@ func (m *AppModel) updateArchiveConfirm(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if m.archiveConfirm.State == huh.StateAborted {
 		m.pendingArchiveTask = nil
 		m.archiveConfirm = nil
-		m.currentView = m.previousView
-		return m, nil
-	}
-
-	return m, cmd
-}
-
-func (m *AppModel) showChangeStatus(task *db.Task) (tea.Model, tea.Cmd) {
-	m.pendingChangeStatusTask = task
-	m.changeStatusValue = task.Status
-
-	// Build status options - exclude the current status
-	// Only include statuses that map to Kanban columns (Processing is system-managed)
-	statusOptions := []huh.Option[string]{}
-	allStatuses := []struct {
-		value string
-		label string
-	}{
-		{db.StatusBacklog, IconBacklog() + " Backlog"},
-		{db.StatusQueued, IconInProgress() + " In Progress"},
-		{db.StatusBlocked, IconBlocked() + " Blocked"},
-		{db.StatusDone, IconDone() + " Done"},
-	}
-
-	for _, s := range allStatuses {
-		if s.value != task.Status {
-			statusOptions = append(statusOptions, huh.NewOption(s.label, s.value))
-		}
-	}
-
-	modalWidth := min(50, m.width-8)
-	m.changeStatusForm = huh.NewForm(
-		huh.NewGroup(
-			huh.NewSelect[string]().
-				Key("status").
-				Title(fmt.Sprintf("Change status for task #%d", task.ID)).
-				Description(task.Title).
-				Options(statusOptions...).
-				Value(&m.changeStatusValue),
-		),
-	).WithTheme(huh.ThemeDracula()).
-		WithWidth(modalWidth - 6).
-		WithShowHelp(true)
-	m.previousView = m.currentView
-	m.currentView = ViewChangeStatus
-	return m, m.changeStatusForm.Init()
-}
-
-func (m *AppModel) viewChangeStatus() string {
-	if m.changeStatusForm == nil {
-		return ""
-	}
-
-	// Modal header
-	header := lipgloss.NewStyle().
-		Bold(true).
-		Foreground(ColorSecondary).
-		MarginBottom(1).
-		Render("⇄ Change Status")
-
-	formView := m.changeStatusForm.View()
-
-	// Modal box with border
-	modalWidth := min(50, m.width-8)
-	modalBox := lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(ColorSecondary).
-		Padding(1, 2).
-		Width(modalWidth)
-
-	modalContent := modalBox.Render(lipgloss.JoinVertical(lipgloss.Center, header, formView))
-
-	// Center the modal on screen
-	return lipgloss.NewStyle().
-		Width(m.width).
-		Height(m.height).
-		Align(lipgloss.Center, lipgloss.Center).
-		Render(modalContent)
-}
-
-func (m *AppModel) updateChangeStatus(msg tea.Msg) (tea.Model, tea.Cmd) {
-	// Handle escape to cancel
-	if keyMsg, ok := msg.(tea.KeyMsg); ok {
-		if keyMsg.String() == "esc" {
-			m.currentView = m.previousView
-			m.changeStatusForm = nil
-			m.pendingChangeStatusTask = nil
-			return m, nil
-		}
-	}
-
-	// Update the huh form
-	form, cmd := m.changeStatusForm.Update(msg)
-	if f, ok := form.(*huh.Form); ok {
-		m.changeStatusForm = f
-	}
-
-	// Check if form completed
-	if m.changeStatusForm.State == huh.StateCompleted {
-		if m.pendingChangeStatusTask != nil && m.changeStatusValue != "" {
-			taskID := m.pendingChangeStatusTask.ID
-			newStatus := m.changeStatusValue
-
-			// Update the task in the UI immediately for responsiveness
-			m.pendingChangeStatusTask.Status = newStatus
-			m.updateTaskInList(m.pendingChangeStatusTask)
-
-			// Update detail view if showing this task
-			var switchCmd tea.Cmd
-			if m.selectedTask != nil && m.selectedTask.ID == taskID {
-				m.selectedTask.Status = newStatus
-				if m.detailView != nil {
-					switchCmd = m.detailView.UpdateTask(m.selectedTask)
-				}
-			}
-
-			m.pendingChangeStatusTask = nil
-			m.changeStatusForm = nil
-			m.currentView = m.previousView
-			if switchCmd != nil {
-				return m, tea.Batch(switchCmd, m.changeTaskStatus(taskID, newStatus))
-			}
-			return m, m.changeTaskStatus(taskID, newStatus)
-		}
-		// Cancelled or no selection
-		m.pendingChangeStatusTask = nil
-		m.changeStatusForm = nil
 		m.currentView = m.previousView
 		return m, nil
 	}
