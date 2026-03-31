@@ -409,6 +409,37 @@ Tasks will automatically reconnect to their agent sessions when viewed.`,
 	sessionsCleanupCmd.Flags().BoolP("force", "f", false, "Use SIGKILL instead of SIGTERM to force kill processes")
 	sessionsCmd.AddCommand(sessionsCleanupCmd)
 
+	sessionsSuspendCmd := &cobra.Command{
+		Use:   "suspend [task-id...]",
+		Short: "Kill agent processes for blocked tasks while preserving resume capability",
+		Long: `Suspend blocked task sessions by killing their agent processes and tmux windows.
+The session ID is preserved in the database so tasks can be resumed later via 'ty retry'.
+
+By default, suspends all blocked tasks that have running sessions.
+Optionally specify one or more task IDs to suspend specific tasks.
+
+Examples:
+  ty sessions suspend           # Suspend all blocked tasks with running sessions
+  ty sessions suspend 42 43     # Suspend specific tasks
+  ty sessions suspend --all     # Suspend all tasks with running sessions (not just blocked)`,
+		Run: func(cmd *cobra.Command, args []string) {
+			all, _ := cmd.Flags().GetBool("all")
+			var taskIDs []int
+			for _, arg := range args {
+				var id int
+				if _, err := fmt.Sscanf(arg, "%d", &id); err == nil {
+					taskIDs = append(taskIDs, id)
+				} else {
+					fmt.Fprintln(os.Stderr, errorStyle.Render("Invalid task ID: "+arg))
+					os.Exit(1)
+				}
+			}
+			suspendSessions(taskIDs, all)
+		},
+	}
+	sessionsSuspendCmd.Flags().Bool("all", false, "Suspend all tasks with running sessions, not just blocked ones")
+	sessionsCmd.AddCommand(sessionsSuspendCmd)
+
 	rootCmd.AddCommand(sessionsCmd)
 
 	// Alias: claudes -> sessions (for backwards compatibility)
@@ -4572,6 +4603,148 @@ func killSession(taskID int) error {
 	}
 
 	return nil
+}
+
+// killSessionAcrossDaemons kills a task's tmux window across all task-daemon-* sessions.
+// Returns true if a window was found and killed.
+func killSessionAcrossDaemons(taskID int) bool {
+	sessionsOut, err := osexec.Command("tmux", "list-sessions", "-F", "#{session_name}").Output()
+	if err != nil {
+		return false
+	}
+
+	windowName := fmt.Sprintf("task-%d", taskID)
+	killed := false
+
+	for _, session := range strings.Split(strings.TrimSpace(string(sessionsOut)), "\n") {
+		if !strings.HasPrefix(session, "task-daemon-") {
+			continue
+		}
+		windowTarget := fmt.Sprintf("%s:%s", session, windowName)
+		if err := osexec.Command("tmux", "list-panes", "-t", windowTarget).Run(); err != nil {
+			continue // Window doesn't exist in this session
+		}
+		if err := osexec.Command("tmux", "kill-window", "-t", windowTarget).Run(); err == nil {
+			killed = true
+		}
+	}
+	return killed
+}
+
+// suspendSessions kills agent processes for tasks while preserving their session IDs
+// so they can be resumed later. If taskIDs is empty, suspends all blocked tasks with
+// running sessions. If all is true, suspends all tasks (not just blocked).
+func suspendSessions(taskIDs []int, all bool) {
+	// Get running sessions
+	sessions := getSessions()
+	if len(sessions) == 0 {
+		fmt.Println(dimStyle.Render("No agent sessions running"))
+		return
+	}
+
+	// Build a set of running task IDs for quick lookup
+	runningSessions := make(map[int]agentSession)
+	for _, s := range sessions {
+		runningSessions[s.taskID] = s
+	}
+
+	// Open database for status checks and tmux ID cleanup
+	dbPath := db.DefaultPath()
+	database, err := db.Open(dbPath)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, errorStyle.Render("Error opening database: "+err.Error()))
+		os.Exit(1)
+	}
+	defer database.Close()
+
+	// Determine which tasks to suspend
+	var toSuspend []agentSession
+	if len(taskIDs) > 0 {
+		// Suspend specific tasks
+		for _, id := range taskIDs {
+			s, running := runningSessions[id]
+			if !running {
+				fmt.Fprintf(os.Stderr, "%s\n", dimStyle.Render(fmt.Sprintf("task-%d: no running session, skipping", id)))
+				continue
+			}
+			toSuspend = append(toSuspend, s)
+		}
+	} else {
+		// Suspend based on status
+		for _, s := range sessions {
+			if all {
+				toSuspend = append(toSuspend, s)
+				continue
+			}
+			// Default: only blocked tasks
+			task, err := database.GetTask(int64(s.taskID))
+			if err != nil || task == nil {
+				continue
+			}
+			if task.Status == db.StatusBlocked {
+				toSuspend = append(toSuspend, s)
+			}
+		}
+	}
+
+	if len(toSuspend) == 0 {
+		if len(taskIDs) > 0 {
+			fmt.Println(dimStyle.Render("No matching running sessions found"))
+		} else if all {
+			fmt.Println(dimStyle.Render("No running sessions to suspend"))
+		} else {
+			fmt.Println(dimStyle.Render("No blocked tasks with running sessions to suspend"))
+		}
+		return
+	}
+
+	// Suspend each task
+	fmt.Printf("%s\n\n", boldStyle.Render(fmt.Sprintf("Suspending %d session(s):", len(toSuspend))))
+
+	totalFreedMB := 0
+	suspended := 0
+	for _, s := range toSuspend {
+		// Kill the tmux window (kills the agent process)
+		killed := killSessionAcrossDaemons(s.taskID)
+
+		// Clear tmux references in DB (window/pane IDs are now stale)
+		// but preserve claude_session_id for resume capability
+		database.ClearTaskTmuxIDs(int64(s.taskID))
+
+		// Also clear daemon_session since the window is gone
+		database.Exec(`UPDATE tasks SET daemon_session = '' WHERE id = ?`, int64(s.taskID))
+
+		title := s.taskTitle
+		if len(title) > 40 {
+			title = title[:37] + "..."
+		}
+
+		memStr := ""
+		if s.memoryMB > 0 {
+			memStr = fmt.Sprintf(" (%dMB freed)", s.memoryMB)
+			totalFreedMB += s.memoryMB
+		}
+
+		statusIcon := "✓"
+		if !killed {
+			statusIcon = "~"
+		}
+
+		fmt.Printf("  %s  %s  %s%s\n",
+			successStyle.Render(statusIcon),
+			successStyle.Render(fmt.Sprintf("task-%d", s.taskID)),
+			dimStyle.Render(title),
+			dimStyle.Render(memStr))
+		suspended++
+	}
+
+	fmt.Println()
+	if totalFreedMB > 0 {
+		fmt.Println(successStyle.Render(fmt.Sprintf("Suspended %d session(s), ~%dMB freed", suspended, totalFreedMB)))
+	} else {
+		fmt.Println(successStyle.Render(fmt.Sprintf("Suspended %d session(s)", suspended)))
+	}
+	fmt.Println(dimStyle.Render("Session IDs preserved — use 'ty retry <task-id>' to resume"))
 }
 
 // recoverStaleTmuxRefs clears stale daemon_session and tmux_window_id references
