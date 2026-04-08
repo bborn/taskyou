@@ -41,7 +41,7 @@ func BuildBoardSnapshot(tasks []*db.Task, limit int) BoardSnapshot {
 	}{
 		{db.StatusBacklog, "Backlog"},
 		{db.StatusProcessing, "In Progress"},
-		{db.StatusBlocked, "Blocked"},
+		{db.StatusBlocked, "Needs Input"},
 		{db.StatusDone, "Done"},
 	}
 

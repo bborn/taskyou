@@ -3204,7 +3204,7 @@ func (m tailModel) View() string {
 
 	statusLabels := map[string]string{
 		db.StatusProcessing: "In Progress",
-		db.StatusBlocked:    "Blocked",
+		db.StatusBlocked:    "Needs Input",
 		db.StatusQueued:     "Queued",
 		db.StatusBacklog:    "Backlog",
 		db.StatusDone:       "Done",
@@ -3352,7 +3352,12 @@ func execInTmux() error {
 	cmdStr := strings.Join(args, " ")
 
 	// Set WORKTREE_SESSION_ID env var so child processes use the same session ID
-	envCmd := fmt.Sprintf("WORKTREE_SESSION_ID=%s %s", sessionID, cmdStr)
+	// Also forward WORKTREE_DB_PATH if set, so isolated instances use the correct database
+	envParts := fmt.Sprintf("WORKTREE_SESSION_ID=%s", sessionID)
+	if dbPath := os.Getenv("WORKTREE_DB_PATH"); dbPath != "" {
+		envParts += fmt.Sprintf(" WORKTREE_DB_PATH=%s", dbPath)
+	}
+	envCmd := fmt.Sprintf("%s %s", envParts, cmdStr)
 
 	// Check if session already exists
 	if osexec.Command("tmux", "has-session", "-t", sessionName).Run() == nil {

@@ -82,7 +82,7 @@ func makeKanbanColumns() []KanbanColumn {
 	return []KanbanColumn{
 		{Title: "Backlog", Status: db.StatusBacklog, Color: ColorMuted, Icon: IconBacklog()},
 		{Title: "In Progress", Status: db.StatusQueued, Color: ColorInProgress, Icon: IconInProgress()}, // Also shows processing
-		{Title: "Blocked", Status: db.StatusBlocked, Color: ColorBlocked, Icon: IconBlocked()},
+		{Title: "Needs Input", Status: db.StatusBlocked, Color: ColorBlocked, Icon: IconBlocked()},
 		{Title: "Done", Status: db.StatusDone, Color: ColorDone, Icon: IconDone()},
 	}
 }
@@ -1045,8 +1045,8 @@ func (k *KanbanBoard) renderColumnTabs() string {
 			name += " Back"
 		case "In Progress":
 			name += " Prog"
-		case "Blocked":
-			name += " Block"
+		case "Needs Input":
+			name += " Input"
 		case "Done":
 			name += " Done"
 		default:

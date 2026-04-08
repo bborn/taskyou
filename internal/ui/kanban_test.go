@@ -1246,7 +1246,7 @@ func TestKanbanBoard_ColumnColors(t *testing.T) {
 	}{
 		{"Backlog", "ColorMuted"},
 		{"In Progress", "ColorInProgress"},
-		{"Blocked", "ColorBlocked"},
+		{"Needs Input", "ColorBlocked"},
 		{"Done", "ColorDone"},
 	}
 

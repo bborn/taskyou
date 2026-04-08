@@ -239,7 +239,7 @@ func DefaultKeyMap() KeyMap {
 		),
 		FocusBlocked: key.NewBinding(
 			key.WithKeys("L"),
-			key.WithHelp("L", "blocked"),
+			key.WithHelp("L", "needs input"),
 		),
 		FocusDone: key.NewBinding(
 			key.WithKeys("D"),
@@ -829,11 +829,17 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// If this is the very first run (no tasks, onboarding not completed), auto-open new task form
 			if len(msg.tasks) == 0 && m.db.IsFirstRun() && !m.onboardingShown {
 				m.onboardingShown = true
-				// Auto-open the new task form to guide users to create their first task
-				m.newTaskForm = NewFormModel(m.db, m.width, m.height, m.workingDir, m.availableExecutors)
-				m.previousView = m.currentView
-				m.currentView = ViewNewTask
-				return m, m.newTaskForm.Init()
+				// Create a sample task to demonstrate the workflow
+				sampleTask := &db.Task{
+					Title:   "Hello world — try executing me with x",
+					Body:    "This is a sample task to show how TaskYou works.\n\nPress x to execute it and watch the AI work.\nPress c to close it when done, or d to delete it.",
+					Project: "personal",
+					Status:  db.StatusBacklog,
+				}
+				if err := m.db.CreateTask(sampleTask); err == nil {
+					m.showWelcome = false
+					return m, m.loadTasks()
+				}
 			}
 		}
 
@@ -1696,12 +1702,32 @@ func (m *AppModel) renderWelcomeMessage(height int) string {
 	))
 	lines = append(lines, "")
 
-	// Quick start action
-	lines = append(lines, lipgloss.JoinHorizontal(lipgloss.Top,
-		descStyle.Render("Press "),
-		actionStyle.Render("n"),
-		descStyle.Render(" to create your first task"),
-	))
+	// Project setup suggestion
+	if suggestion := m.suggestedProjectFromCwd(); suggestion != "" {
+		hintStyle := lipgloss.NewStyle().
+			Foreground(ColorSecondary)
+		lines = append(lines, subtitleStyle.Render("Get started:"))
+		lines = append(lines, "")
+		lines = append(lines, lipgloss.JoinHorizontal(lipgloss.Top,
+			descStyle.Render("Press "),
+			actionStyle.Render("a"),
+			descStyle.Render(" to add "),
+			hintStyle.Render(suggestion),
+			descStyle.Render(" as a project"),
+		))
+		lines = append(lines, lipgloss.JoinHorizontal(lipgloss.Top,
+			descStyle.Render("Press "),
+			actionStyle.Render("n"),
+			descStyle.Render(" to create a task in "),
+			hintStyle.Render("personal"),
+		))
+	} else {
+		lines = append(lines, lipgloss.JoinHorizontal(lipgloss.Top,
+			descStyle.Render("Press "),
+			actionStyle.Render("n"),
+			descStyle.Render(" to create your first task"),
+		))
+	}
 	lines = append(lines, "")
 
 	// Executor status
@@ -1730,6 +1756,39 @@ func (m *AppModel) renderWelcomeMessage(height int) string {
 
 	// Center in available space
 	return lipgloss.Place(m.width, height, lipgloss.Center, lipgloss.Center, boxed)
+}
+
+// suggestedProjectFromCwd returns the directory name if the working directory
+// is a git repo that isn't already registered as a project. Returns "" otherwise.
+func (m *AppModel) suggestedProjectFromCwd() string {
+	if m.workingDir == "" {
+		return ""
+	}
+	// Check if cwd is a git repo
+	gitDir := filepath.Join(m.workingDir, ".git")
+	if _, err := os.Stat(gitDir); os.IsNotExist(err) {
+		return ""
+	}
+	// Check if already registered as a project
+	if projects, err := m.db.ListProjects(); err == nil {
+		for _, p := range projects {
+			if p.Path == m.workingDir {
+				return ""
+			}
+		}
+	}
+	return filepath.Base(m.workingDir)
+}
+
+// addCwdAsProject creates a new project from the current working directory.
+func (m *AppModel) addCwdAsProject() error {
+	name := filepath.Base(m.workingDir)
+	project := &db.Project{
+		Name:         name,
+		Path:         m.workingDir,
+		UseWorktrees: true,
+	}
+	return m.db.CreateProject(project)
 }
 
 // renderFilterBar renders the filter input bar.
@@ -2022,8 +2081,29 @@ func (m *AppModel) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, m.loadTask(task.ID)
 		}
 
+	// Add cwd as project (welcome screen only)
+	case m.showWelcome && msg.String() == "a":
+		if suggestion := m.suggestedProjectFromCwd(); suggestion != "" {
+			if err := m.addCwdAsProject(); err == nil {
+				m.notification = fmt.Sprintf("%s Added project: %s", IconDone(), suggestion)
+				m.notifyUntil = time.Now().Add(5 * time.Second)
+				m.showWelcome = false
+				// Open simplified new task form in the new project
+				m.newTaskForm = NewFormModel(m.db, m.width, m.height, m.workingDir, m.availableExecutors)
+				m.newTaskForm.SetSimpleMode()
+				m.previousView = m.currentView
+				m.currentView = ViewNewTask
+				return m, m.newTaskForm.Init()
+			}
+		}
+		return m, nil
+
 	case key.Matches(msg, m.keys.New):
 		m.newTaskForm = NewFormModel(m.db, m.width, m.height, m.workingDir, m.availableExecutors)
+		// Use simple mode on first run
+		if m.db.IsFirstRun() {
+			m.newTaskForm.SetSimpleMode()
+		}
 		m.previousView = m.currentView
 		m.currentView = ViewNewTask
 		return m, m.newTaskForm.Init()
@@ -3439,7 +3519,7 @@ func (m *AppModel) showChangeStatus(task *db.Task) (tea.Model, tea.Cmd) {
 	}{
 		{db.StatusBacklog, IconBacklog() + " Backlog"},
 		{db.StatusQueued, IconInProgress() + " In Progress"},
-		{db.StatusBlocked, IconBlocked() + " Blocked"},
+		{db.StatusBlocked, IconBlocked() + " Needs Input"},
 		{db.StatusDone, IconDone() + " Done"},
 	}
 

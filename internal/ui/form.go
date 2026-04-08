@@ -1161,6 +1161,14 @@ func (m *FormModel) rebuildExecutorListForProject() {
 	}
 }
 
+// SetSimpleMode hides advanced fields and focuses the title input.
+// Used for first-time users to reduce overwhelm.
+func (m *FormModel) SetSimpleMode() {
+	m.showAdvanced = false
+	m.focused = FieldTitle
+	m.titleInput.Focus()
+}
+
 // isFieldVisible returns whether a field should be shown in the current view.
 // When showAdvanced is false, only Title and Body are visible.
 func (m *FormModel) isFieldVisible(field FormField) bool {
