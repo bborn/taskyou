@@ -40,7 +40,12 @@ func main() {
 	home, _ := os.UserHomeDir()
 
 	if *dbPath == "" {
-		*dbPath = filepath.Join(home, ".local", "share", "task", "tasks.db")
+		// Check for explicit path from environment
+		if p := os.Getenv("WORKTREE_DB_PATH"); p != "" {
+			*dbPath = p
+		} else {
+			*dbPath = filepath.Join(home, ".local", "share", "task", "tasks.db")
+		}
 	}
 	if *hostKey == "" {
 		*hostKey = filepath.Join(home, ".ssh", "task_ed25519")
