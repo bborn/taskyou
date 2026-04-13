@@ -3125,6 +3125,9 @@ The server shares the same SQLite database the daemon writes to (WAL mode).`,
 	serveCmd.Flags().Int("port", 8080, "Port to listen on")
 	rootCmd.AddCommand(serveCmd)
 
+	// Bulk operations
+	rootCmd.AddCommand(newBulkCmd())
+
 	// Completion command for shell tab completion
 	rootCmd.AddCommand(newCompletionCmd(rootCmd))
 
