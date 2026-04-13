@@ -75,6 +75,38 @@ func TestBusyTimeoutIsSet(t *testing.T) {
 	}
 }
 
+func TestBusyTimeoutSurvivesConnectionRecycling(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	database, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer database.Close()
+
+	// Force connection recycling by waiting longer than ConnMaxLifetime (2s)
+	time.Sleep(3 * time.Second)
+
+	// After recycling, the new connection should still have busy_timeout
+	var timeout int
+	if err := database.QueryRow("PRAGMA busy_timeout").Scan(&timeout); err != nil {
+		t.Fatalf("failed to query busy_timeout after recycling: %v", err)
+	}
+	if timeout != 5000 {
+		t.Errorf("expected busy_timeout=5000 after connection recycling, got %d", timeout)
+	}
+
+	// Also verify WAL mode persists
+	var journalMode string
+	if err := database.QueryRow("PRAGMA journal_mode").Scan(&journalMode); err != nil {
+		t.Fatalf("failed to query journal_mode after recycling: %v", err)
+	}
+	if journalMode != "wal" {
+		t.Errorf("expected journal_mode=wal after connection recycling, got %s", journalMode)
+	}
+}
+
 func TestPersonalProjectCreation(t *testing.T) {
 	// Create temporary database
 	tmpDir := t.TempDir()
