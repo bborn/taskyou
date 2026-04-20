@@ -453,6 +453,16 @@ func (db *DB) UpdateTaskStatus(id int64, status string) error {
 				},
 			}
 			db.emitTaskUpdated(updatedTask, changes)
+			// Also emit lifecycle events so external watchers can react
+			// to blocked/completed transitions without parsing update metadata.
+			// These fire for every caller of UpdateTaskStatus — Claude hooks,
+			// MCP, CLI, TUI, and the executor — as long as an emitter is registered.
+			switch status {
+			case StatusBlocked:
+				db.emitTaskBlocked(updatedTask, "status change")
+			case StatusDone:
+				db.emitTaskCompleted(updatedTask)
+			}
 		}
 	}
 

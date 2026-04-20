@@ -1150,19 +1150,24 @@ func (e *Executor) executeTask(ctx context.Context, task *db.Task) {
 		// Kill executor process to free memory when task is interrupted
 		taskExecutor.Kill(task.ID)
 	} else if currentStatus == db.StatusBlocked {
-		// Hooks already marked as blocked - respect that
+		// Hooks already marked as blocked - respect that.
+		// The task.blocked hook already fired via db.UpdateTaskStatus in the Claude hook subprocess.
 		e.logLine(task.ID, "system", "Task waiting for input")
 		e.hooks.OnStatusChange(task, db.StatusBlocked, "Task waiting for input")
 	} else if currentStatus == db.StatusDone {
-		// If somehow already marked as done (e.g. by human), respect that
+		// If somehow already marked as done (e.g. by human), respect that.
+		// task.completed already fired via db.UpdateTaskStatus when the status was set.
 		e.logLine(task.ID, "system", "Task completed")
 		e.hooks.OnStatusChange(task, db.StatusDone, "Task completed")
 	} else if result.Success {
-		// Agent finished successfully - move to backlog for human review
-		// Only humans should mark tasks as done
+		// Agent finished successfully - move to backlog for human review.
+		// Only humans should mark tasks as done, but agent-success is the
+		// completion signal external watchers care about. StatusBacklog
+		// doesn't fire task.completed via the db emitter, so fire it here.
 		e.updateStatus(task.ID, db.StatusBacklog)
 		e.logLine(task.ID, "system", "Agent finished - awaiting human review to close")
 		e.hooks.OnStatusChange(task, db.StatusBacklog, "Agent finished - awaiting human review to close")
+		e.events.EmitTaskCompleted(task)
 	} else if result.NeedsInput {
 		e.updateStatus(task.ID, db.StatusBlocked)
 		// Log the question with special type so UI can display it
@@ -1174,6 +1179,9 @@ func (e *Executor) executeTask(ctx context.Context, task *db.Task) {
 		msg := fmt.Sprintf("Task failed: %s", result.Message)
 		e.logLine(task.ID, "error", msg)
 		e.hooks.OnStatusChange(task, db.StatusBlocked, msg)
+		// task.blocked already fired via updateStatus → db. Fire task.failed too
+		// so watchers can distinguish "needs input" from "agent died".
+		e.events.EmitTaskFailed(task, result.Message)
 	}
 
 	e.logger.Info("Task finished", "id", task.ID, "success", result.Success)

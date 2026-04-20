@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/bborn/workflow/internal/db"
@@ -38,6 +39,7 @@ type Event struct {
 // Emitter handles event emission via hooks.
 type Emitter struct {
 	hooksDir string
+	wg       sync.WaitGroup
 }
 
 // New creates a new event emitter.
@@ -46,6 +48,8 @@ func New(hooksDir string) *Emitter {
 }
 
 // Emit triggers a hook script if it exists for the event type.
+// Hooks run in a background goroutine — short-lived CLI commands should
+// call Wait before exiting so the hook actually runs.
 func (e *Emitter) Emit(event Event) {
 	if e.hooksDir == "" {
 		return
@@ -53,7 +57,18 @@ func (e *Emitter) Emit(event Event) {
 	if event.Timestamp.IsZero() {
 		event.Timestamp = time.Now()
 	}
-	go e.runHook(event)
+	e.wg.Add(1)
+	go func() {
+		defer e.wg.Done()
+		e.runHook(event)
+	}()
+}
+
+// Wait blocks until all in-flight hooks have completed.
+// CLI commands that exit after triggering a state change must call this,
+// otherwise the process terminates before the hook goroutine runs.
+func (e *Emitter) Wait() {
+	e.wg.Wait()
 }
 
 // runHook executes the hook script for an event.
