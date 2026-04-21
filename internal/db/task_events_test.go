@@ -31,12 +31,14 @@ func setupTestDB(t *testing.T) *DB {
 
 // MockEventEmitter implements EventEmitter for testing.
 type MockEventEmitter struct {
-	CreatedTasks  []*Task
-	UpdatedTasks  []*Task
-	DeletedTasks  []int64
-	PinnedTasks   []*Task
-	UnpinnedTasks []*Task
-	Changes       []map[string]interface{}
+	CreatedTasks   []*Task
+	UpdatedTasks   []*Task
+	DeletedTasks   []int64
+	PinnedTasks    []*Task
+	UnpinnedTasks  []*Task
+	BlockedTasks   []*Task
+	CompletedTasks []*Task
+	Changes        []map[string]interface{}
 }
 
 func (m *MockEventEmitter) EmitTaskCreated(task *Task) {
@@ -58,6 +60,14 @@ func (m *MockEventEmitter) EmitTaskPinned(task *Task) {
 
 func (m *MockEventEmitter) EmitTaskUnpinned(task *Task) {
 	m.UnpinnedTasks = append(m.UnpinnedTasks, task)
+}
+
+func (m *MockEventEmitter) EmitTaskBlocked(task *Task, _ string) {
+	m.BlockedTasks = append(m.BlockedTasks, task)
+}
+
+func (m *MockEventEmitter) EmitTaskCompleted(task *Task) {
+	m.CompletedTasks = append(m.CompletedTasks, task)
 }
 
 func TestUpdateTaskStatusEmitsEvents(t *testing.T) {
@@ -446,5 +456,51 @@ func TestUpdateTaskEmitsEventWithChanges(t *testing.T) {
 		if typeChange["new"] != "writing" {
 			t.Errorf("Expected new type 'writing', got '%s'", typeChange["new"])
 		}
+	}
+}
+
+func TestUpdateTaskStatusEmitsLifecycleEvents(t *testing.T) {
+	database := setupTestDB(t)
+	defer database.Close()
+
+	mockEmitter := &MockEventEmitter{}
+	database.SetEventEmitter(mockEmitter)
+
+	task := &Task{
+		Title:   "Lifecycle Task",
+		Status:  StatusProcessing,
+		Project: "personal",
+	}
+	if err := database.CreateTask(task); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	// Processing → Blocked should emit task.blocked (plus task.updated)
+	if err := database.UpdateTaskStatus(task.ID, StatusBlocked); err != nil {
+		t.Fatalf("update blocked: %v", err)
+	}
+	if got := len(mockEmitter.BlockedTasks); got != 1 {
+		t.Errorf("BlockedTasks after transition to blocked: got %d, want 1", got)
+	}
+	if got := len(mockEmitter.CompletedTasks); got != 0 {
+		t.Errorf("CompletedTasks after blocked transition: got %d, want 0", got)
+	}
+
+	// Blocked → Done should emit task.completed
+	if err := database.UpdateTaskStatus(task.ID, StatusDone); err != nil {
+		t.Fatalf("update done: %v", err)
+	}
+	if got := len(mockEmitter.CompletedTasks); got != 1 {
+		t.Errorf("CompletedTasks after transition to done: got %d, want 1", got)
+	}
+
+	// Same-status update should not re-fire.
+	mockEmitter.CompletedTasks = nil
+	mockEmitter.BlockedTasks = nil
+	if err := database.UpdateTaskStatus(task.ID, StatusDone); err != nil {
+		t.Fatalf("no-op update: %v", err)
+	}
+	if got := len(mockEmitter.CompletedTasks); got != 0 {
+		t.Errorf("CompletedTasks after no-op: got %d, want 0", got)
 	}
 }

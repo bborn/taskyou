@@ -25,8 +25,10 @@ import (
 	"github.com/bborn/workflow/internal/autocomplete"
 	"github.com/bborn/workflow/internal/config"
 	"github.com/bborn/workflow/internal/db"
+	"github.com/bborn/workflow/internal/events"
 	"github.com/bborn/workflow/internal/executor"
 	"github.com/bborn/workflow/internal/github"
+	"github.com/bborn/workflow/internal/hooks"
 	"github.com/bborn/workflow/internal/mcp"
 	"github.com/bborn/workflow/internal/ui"
 	"github.com/bborn/workflow/internal/web"
@@ -62,6 +64,35 @@ func getUISessionName() string {
 // getDaemonSessionName returns the task-daemon session name for this instance.
 func getDaemonSessionName() string {
 	return fmt.Sprintf("task-daemon-%s", getSessionID())
+}
+
+// taskEmitter holds the process-wide events emitter so short-lived CLI
+// commands can flush pending hooks via waitForEventHooks before exit.
+var taskEmitter *events.Emitter
+
+// openTaskDB opens the task database and registers the events emitter so any
+// caller of UpdateTaskStatus (CLI commands, TUI, Claude hooks, MCP) fires
+// task.blocked/task.completed lifecycle hooks. Otherwise only the daemon
+// process emits these events and external watchers miss most transitions.
+func openTaskDB(path string) (*db.DB, error) {
+	database, err := db.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	if taskEmitter == nil {
+		taskEmitter = events.New(hooks.DefaultHooksDir())
+	}
+	database.SetEventEmitter(taskEmitter)
+	return database, nil
+}
+
+// waitForEventHooks blocks until any in-flight hook scripts have completed.
+// CLI commands that mutate task state must defer this before exit, otherwise
+// the Go process terminates before the hook goroutine runs its subprocess.
+func waitForEventHooks() {
+	if taskEmitter != nil {
+		taskEmitter.Wait()
+	}
 }
 
 func main() {
@@ -108,6 +139,10 @@ func main() {
 		"claude-hook": true,
 	}
 	rootCmd.PersistentPostRun = func(cmd *cobra.Command, args []string) {
+		// Flush any pending event hook goroutines kicked off by the command.
+		// Without this, short-lived CLI commands exit before `task.completed`
+		// and similar hook scripts can append to notifications.jsonl.
+		waitForEventHooks()
 		if skipVersionCheck[cmd.Name()] {
 			return
 		}
@@ -142,7 +177,7 @@ Examples:
 			keys, _ := cmd.Flags().GetString("keys")
 
 			dbPath := db.DefaultPath()
-			database, err := db.Open(dbPath)
+			database, err := openTaskDB(dbPath)
 			if err != nil {
 				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
 				os.Exit(1)
@@ -468,7 +503,7 @@ Examples:
 
 			// Get task info for confirmation
 			dbPath := db.DefaultPath()
-			database, err := db.Open(dbPath)
+			database, err := openTaskDB(dbPath)
 			if err != nil {
 				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
 				os.Exit(1)
@@ -550,7 +585,7 @@ Examples:
 
 			// Open database
 			dbPath := db.DefaultPath()
-			database, err := db.Open(dbPath)
+			database, err := openTaskDB(dbPath)
 			if err != nil {
 				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
 				os.Exit(1)
@@ -722,7 +757,7 @@ Examples:
 
 			// Open database
 			dbPath := db.DefaultPath()
-			database, err := db.Open(dbPath)
+			database, err := openTaskDB(dbPath)
 			if err != nil {
 				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
 				os.Exit(1)
@@ -894,7 +929,7 @@ that the TUI shows, either as formatted text or JSON for automation.`,
 			}
 
 			dbPath := db.DefaultPath()
-			database, err := db.Open(dbPath)
+			database, err := openTaskDB(dbPath)
 			if err != nil {
 				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
 				os.Exit(1)
@@ -963,7 +998,7 @@ Press Ctrl+C to stop.`,
 			showDone, _ := cmd.Flags().GetBool("done")
 
 			dbPath := db.DefaultPath()
-			database, err := db.Open(dbPath)
+			database, err := openTaskDB(dbPath)
 			if err != nil {
 				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
 				os.Exit(1)
@@ -1012,7 +1047,7 @@ Examples:
 
 			// Open database
 			dbPath := db.DefaultPath()
-			database, err := db.Open(dbPath)
+			database, err := openTaskDB(dbPath)
 			if err != nil {
 				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
 				os.Exit(1)
@@ -1250,7 +1285,7 @@ Examples:
 
 			// Open database
 			dbPath := db.DefaultPath()
-			database, err := db.Open(dbPath)
+			database, err := openTaskDB(dbPath)
 			if err != nil {
 				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
 				os.Exit(1)
@@ -1380,7 +1415,7 @@ Examples:
 
 			// Open database
 			dbPath := db.DefaultPath()
-			database, err := db.Open(dbPath)
+			database, err := openTaskDB(dbPath)
 			if err != nil {
 				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
 				os.Exit(1)
@@ -1491,7 +1526,7 @@ Examples:
 
 			// Open database
 			dbPath := db.DefaultPath()
-			database, err := db.Open(dbPath)
+			database, err := openTaskDB(dbPath)
 			if err != nil {
 				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
 				os.Exit(1)
@@ -1564,7 +1599,7 @@ Valid statuses: backlog, queued, processing, blocked, done, archived.`,
 			}
 
 			dbPath := db.DefaultPath()
-			database, err := db.Open(dbPath)
+			database, err := openTaskDB(dbPath)
 			if err != nil {
 				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
 				os.Exit(1)
@@ -1607,7 +1642,7 @@ Valid statuses: backlog, queued, processing, blocked, done, archived.`,
 			toggle, _ := cmd.Flags().GetBool("toggle")
 
 			dbPath := db.DefaultPath()
-			database, err := db.Open(dbPath)
+			database, err := openTaskDB(dbPath)
 			if err != nil {
 				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
 				os.Exit(1)
@@ -1671,7 +1706,7 @@ Examples:
 
 			// Open database
 			dbPath := db.DefaultPath()
-			database, err := db.Open(dbPath)
+			database, err := openTaskDB(dbPath)
 			if err != nil {
 				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
 				os.Exit(1)
@@ -1730,7 +1765,7 @@ Examples:
 
 			// Open database
 			dbPath := db.DefaultPath()
-			database, err := db.Open(dbPath)
+			database, err := openTaskDB(dbPath)
 			if err != nil {
 				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
 				os.Exit(1)
@@ -1811,7 +1846,7 @@ Examples:
 
 			// Open database
 			dbPath := db.DefaultPath()
-			database, err := db.Open(dbPath)
+			database, err := openTaskDB(dbPath)
 			if err != nil {
 				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
 				os.Exit(1)
@@ -1897,7 +1932,7 @@ Examples:
 
 			// Open database
 			dbPath := db.DefaultPath()
-			database, err := db.Open(dbPath)
+			database, err := openTaskDB(dbPath)
 			if err != nil {
 				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
 				os.Exit(1)
@@ -2031,7 +2066,7 @@ Examples:
 			}
 
 			dbPath := db.DefaultPath()
-			database, err := db.Open(dbPath)
+			database, err := openTaskDB(dbPath)
 			if err != nil {
 				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
 				os.Exit(1)
@@ -2104,7 +2139,7 @@ Examples:
 		Short: "View and manage app settings",
 		Run: func(cmd *cobra.Command, args []string) {
 			dbPath := db.DefaultPath()
-			database, err := db.Open(dbPath)
+			database, err := openTaskDB(dbPath)
 			if err != nil {
 				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
 				os.Exit(1)
@@ -2186,7 +2221,7 @@ Available settings:
 			}
 
 			dbPath := db.DefaultPath()
-			database, err := db.Open(dbPath)
+			database, err := openTaskDB(dbPath)
 			if err != nil {
 				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
 				os.Exit(1)
@@ -2228,7 +2263,7 @@ Examples:
 			outputJSON, _ := cmd.Flags().GetBool("json")
 
 			dbPath := db.DefaultPath()
-			database, err := db.Open(dbPath)
+			database, err := openTaskDB(dbPath)
 			if err != nil {
 				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
 				os.Exit(1)
@@ -2504,7 +2539,7 @@ Use --auto-queue to automatically move the blocked task to 'queued' when unblock
 			autoQueue, _ := cmd.Flags().GetBool("auto-queue")
 
 			dbPath := db.DefaultPath()
-			database, err := db.Open(dbPath)
+			database, err := openTaskDB(dbPath)
 			if err != nil {
 				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
 				os.Exit(1)
@@ -2565,7 +2600,7 @@ This removes the dependency where task #5 was blocked by task #3.`,
 			}
 
 			dbPath := db.DefaultPath()
-			database, err := db.Open(dbPath)
+			database, err := openTaskDB(dbPath)
 			if err != nil {
 				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
 				os.Exit(1)
@@ -2601,7 +2636,7 @@ This removes the dependency where task #5 was blocked by task #3.`,
 			}
 
 			dbPath := db.DefaultPath()
-			database, err := db.Open(dbPath)
+			database, err := openTaskDB(dbPath)
 			if err != nil {
 				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
 				os.Exit(1)
@@ -2670,7 +2705,7 @@ Examples:
 			outputJSON, _ := cmd.Flags().GetBool("json")
 
 			dbPath := db.DefaultPath()
-			database, err := db.Open(dbPath)
+			database, err := openTaskDB(dbPath)
 			if err != nil {
 				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
 				os.Exit(1)
@@ -2758,7 +2793,7 @@ Examples:
 			outputJSON, _ := cmd.Flags().GetBool("json")
 
 			dbPath := db.DefaultPath()
-			database, err := db.Open(dbPath)
+			database, err := openTaskDB(dbPath)
 			if err != nil {
 				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
 				os.Exit(1)
@@ -2876,7 +2911,7 @@ Examples:
 			}
 
 			dbPath := db.DefaultPath()
-			database, err := db.Open(dbPath)
+			database, err := openTaskDB(dbPath)
 			if err != nil {
 				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
 				os.Exit(1)
@@ -2937,7 +2972,7 @@ Examples:
 			sortOrderSet := cmd.Flags().Changed("sort-order")
 
 			dbPath := db.DefaultPath()
-			database, err := db.Open(dbPath)
+			database, err := openTaskDB(dbPath)
 			if err != nil {
 				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
 				os.Exit(1)
@@ -3031,7 +3066,7 @@ Examples:
 			force, _ := cmd.Flags().GetBool("force")
 
 			dbPath := db.DefaultPath()
-			database, err := db.Open(dbPath)
+			database, err := openTaskDB(dbPath)
 			if err != nil {
 				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
 				os.Exit(1)
@@ -3090,7 +3125,7 @@ The server shares the same SQLite database the daemon writes to (WAL mode).`,
 			addr := fmt.Sprintf(":%d", port)
 
 			dbPath := db.DefaultPath()
-			database, err := db.Open(dbPath)
+			database, err := openTaskDB(dbPath)
 			if err != nil {
 				fmt.Fprintln(os.Stderr, errorStyle.Render("Error opening database: "+err.Error()))
 				os.Exit(1)
@@ -3421,7 +3456,7 @@ func runLocal(dangerousMode bool, debugStatePath string) error {
 
 	// Open database
 	dbPath := db.DefaultPath()
-	database, err := db.Open(dbPath)
+	database, err := openTaskDB(dbPath)
 	if err != nil {
 		return fmt.Errorf("open database: %w", err)
 	}
@@ -3723,7 +3758,7 @@ func runDaemon() error {
 
 	// Open database
 	dbPath := db.DefaultPath()
-	database, err := db.Open(dbPath)
+	database, err := openTaskDB(dbPath)
 	if err != nil {
 		return fmt.Errorf("open database: %w", err)
 	}
@@ -3795,7 +3830,7 @@ func handleClaudeHook(hookEvent string) error {
 
 	// Open database
 	dbPath := db.DefaultPath()
-	database, err := db.Open(dbPath)
+	database, err := openTaskDB(dbPath)
 	if err != nil {
 		return fmt.Errorf("open database: %w", err)
 	}
@@ -3887,7 +3922,7 @@ func handleNotificationHook(database *db.DB, taskID int64, input *ClaudeHookInpu
 func runMCPServer(taskID int64) error {
 	// Open database
 	dbPath := db.DefaultPath()
-	database, err := db.Open(dbPath)
+	database, err := openTaskDB(dbPath)
 	if err != nil {
 		return fmt.Errorf("open database: %w", err)
 	}
@@ -4653,7 +4688,7 @@ func suspendSessions(taskIDs []int, all bool) {
 
 	// Open database for status checks and tmux ID cleanup
 	dbPath := db.DefaultPath()
-	database, err := db.Open(dbPath)
+	database, err := openTaskDB(dbPath)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, errorStyle.Render("Error opening database: "+err.Error()))
 		os.Exit(1)
@@ -4755,7 +4790,7 @@ func suspendSessions(taskIDs []int, all bool) {
 // reconnect to their agent sessions when viewed.
 func recoverStaleTmuxRefs(dryRun bool) {
 	dbPath := db.DefaultPath()
-	database, err := db.Open(dbPath)
+	database, err := openTaskDB(dbPath)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, errorStyle.Render("Error opening database: "+err.Error()))
 		os.Exit(1)
@@ -4940,7 +4975,7 @@ func cleanupOrphanedSessions(force bool) {
 	// Step 1b: Get task IDs of done tasks older than 2 hours - these should be killed
 	doneOldTaskIDs := make(map[int]bool)
 	dbPath := db.DefaultPath()
-	database, err := db.Open(dbPath)
+	database, err := openTaskDB(dbPath)
 	if err == nil {
 		defer database.Close()
 		twoHoursAgo := time.Now().Add(-2 * time.Hour)
@@ -5146,7 +5181,7 @@ func moveTask(database *db.DB, oldTask *db.Task, targetProject string) (int64, e
 func deleteTask(taskID int64) error {
 	// Open database
 	dbPath := db.DefaultPath()
-	database, err := db.Open(dbPath)
+	database, err := openTaskDB(dbPath)
 	if err != nil {
 		return fmt.Errorf("open database: %w", err)
 	}
@@ -5245,7 +5280,7 @@ func listProjectsCLI(cmd *cobra.Command) {
 	outputJSON, _ := cmd.Flags().GetBool("json")
 
 	dbPath := db.DefaultPath()
-	database, err := db.Open(dbPath)
+	database, err := openTaskDB(dbPath)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
 		os.Exit(1)
@@ -5320,7 +5355,7 @@ func listProjectsCLI(cmd *cobra.Command) {
 // showProjectCLI shows detailed information about a single project.
 func showProjectCLI(name string, outputJSON bool) {
 	dbPath := db.DefaultPath()
-	database, err := db.Open(dbPath)
+	database, err := openTaskDB(dbPath)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
 		os.Exit(1)
@@ -5451,7 +5486,7 @@ func createProjectCLI(name, path, instructions, color, aliases, claudeConfigDir 
 	}
 
 	dbPath := db.DefaultPath()
-	database, err := db.Open(dbPath)
+	database, err := openTaskDB(dbPath)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
 		os.Exit(1)
@@ -5508,7 +5543,7 @@ func createProjectCLI(name, path, instructions, color, aliases, claudeConfigDir 
 // updateProjectCLI updates an existing project.
 func updateProjectCLI(currentName, newName, path, instructions, color, aliases, claudeConfigDir, projectContext string, useWorktrees *bool, outputJSON bool) {
 	dbPath := db.DefaultPath()
-	database, err := db.Open(dbPath)
+	database, err := openTaskDB(dbPath)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
 		os.Exit(1)
@@ -5624,7 +5659,7 @@ func updateProjectCLI(currentName, newName, path, instructions, color, aliases, 
 // deleteProjectCLI deletes a project.
 func deleteProjectCLI(name string, force bool) {
 	dbPath := db.DefaultPath()
-	database, err := db.Open(dbPath)
+	database, err := openTaskDB(dbPath)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
 		os.Exit(1)

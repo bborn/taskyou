@@ -451,12 +451,13 @@ chmod +x ~/.config/task/hooks/task.completed
 | Event | When Emitted |
 |-------|--------------|
 | `task.created` | New task created |
-| `task.updated` | Task fields changed |
+| `task.updated` | Task fields changed (including status transitions) |
 | `task.deleted` | Task removed |
 | `task.started` | Execution begins |
-| `task.blocked` | Task needs user input |
-| `task.completed` | Task finished |
-| `task.failed` | Execution failed |
+| `task.blocked` | Task needs user input (or agent failed) |
+| `task.completed` | Agent finished successfully (task moves to backlog for human review) |
+| `task.failed` | Agent execution failed |
+| `task.worktree_ready` | Worktree set up and ready for agent |
 
 ### Environment Variables
 
