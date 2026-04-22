@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -1159,5 +1160,64 @@ func TestFilterProjectsEmptyQueryShowsAll(t *testing.T) {
 	// Current project should be pre-selected
 	if m.projectFiltered[m.projectFilteredIdx] != "workflow" {
 		t.Errorf("expected current project 'workflow' to be pre-selected, got %q", m.projectFiltered[m.projectFilteredIdx])
+	}
+}
+
+func TestNewFormModelDefaultsToLastUsedProject(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	database, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer database.Close()
+
+	if err := database.CreateProject(&db.Project{Name: "work", Path: tmpDir}); err != nil {
+		t.Fatalf("failed to create work project: %v", err)
+	}
+
+	if err := database.SetLastUsedProject("work"); err != nil {
+		t.Fatalf("failed to set last used project: %v", err)
+	}
+
+	m := NewFormModel(database, 100, 50, "", nil)
+
+	if m.project != "work" {
+		t.Errorf("expected default project to be 'work' (last used), got %q", m.project)
+	}
+}
+
+func TestNewFormModelDefaultsToPersonalWithoutDatabase(t *testing.T) {
+	m := NewFormModel(nil, 100, 50, "", nil)
+
+	if m.project != "personal" {
+		t.Errorf("expected default project to be 'personal', got %q", m.project)
+	}
+}
+
+func TestNewFormModelLastUsedOverridesWorkingDir(t *testing.T) {
+	tmpDir1 := t.TempDir()
+	tmpDir2 := t.TempDir()
+	dbPath := filepath.Join(tmpDir1, "test.db")
+
+	database, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer database.Close()
+
+	if err := database.CreateProject(&db.Project{Name: "work", Path: tmpDir2}); err != nil {
+		t.Fatalf("failed to create work project: %v", err)
+	}
+
+	if err := database.SetLastUsedProject("work"); err != nil {
+		t.Fatalf("failed to set last used project: %v", err)
+	}
+
+	m := NewFormModel(database, 100, 50, tmpDir1, nil)
+
+	if m.project != "work" {
+		t.Errorf("expected project to be 'work' (last used should override working dir), got %q", m.project)
 	}
 }
