@@ -1852,6 +1852,49 @@ func TestCreateTaskSavesLastProject(t *testing.T) {
 	}
 }
 
+func TestUpdateTaskSavesLastProject(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	db, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer db.Close()
+	defer os.Remove(dbPath)
+
+	if err := db.CreateProject(&Project{Name: "work", Path: tmpDir + "/work"}); err != nil {
+		t.Fatalf("failed to create work project: %v", err)
+	}
+
+	task := &Task{
+		Title:   "Test Task",
+		Status:  StatusBacklog,
+		Project: "personal",
+	}
+	if err := db.CreateTask(task); err != nil {
+		t.Fatalf("failed to create task: %v", err)
+	}
+
+	lastProject, _ := db.GetLastUsedProject()
+	if lastProject != "personal" {
+		t.Errorf("expected 'personal' after create, got %q", lastProject)
+	}
+
+	task.Project = "work"
+	if err := db.UpdateTask(task); err != nil {
+		t.Fatalf("failed to update task: %v", err)
+	}
+
+	lastProject, err = db.GetLastUsedProject()
+	if err != nil {
+		t.Fatalf("failed to get last used project: %v", err)
+	}
+	if lastProject != "work" {
+		t.Errorf("expected 'work' after update, got %q", lastProject)
+	}
+}
+
 func TestGetExecutorUsageByProject(t *testing.T) {
 	// Create temporary database
 	tmpDir := t.TempDir()

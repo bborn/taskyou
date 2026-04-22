@@ -518,6 +518,11 @@ func (db *DB) UpdateTask(t *Task) error {
 		}
 	}
 
+	// Update last used project if project is set
+	if t.Project != "" {
+		db.SetLastUsedProject(t.Project)
+	}
+
 	return nil
 }
 
