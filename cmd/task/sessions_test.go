@@ -6,6 +6,7 @@ import (
 	osexec "os/exec"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/bborn/workflow/internal/db"
 )
@@ -44,6 +45,40 @@ func makeDaemonSession(t *testing.T, sessionID string, taskID int) func() {
 
 func windowExists(sessionName, windowName string) bool {
 	return osexec.Command("tmux", "list-panes", "-t", sessionName+":"+windowName).Run() == nil
+}
+
+// makeDaemonSessionWithName creates (or extends) a tmux daemon session by the
+// given full name, adding a task window. If the session already exists from
+// a previous call, only the new window is added.
+func makeDaemonSessionWithName(t *testing.T, sessionName string, taskID int) {
+	t.Helper()
+	windowName := fmt.Sprintf("task-%d", taskID)
+	hasSession := osexec.Command("tmux", "has-session", "-t", sessionName).Run() == nil
+	if hasSession {
+		if err := osexec.Command("tmux", "new-window", "-d", "-t", sessionName, "-n", windowName, "sleep", "60").Run(); err != nil {
+			t.Fatalf("add window %s: %v", windowName, err)
+		}
+		return
+	}
+	if err := osexec.Command("tmux", "new-session", "-d", "-s", sessionName, "-n", windowName, "sleep", "60").Run(); err != nil {
+		t.Fatalf("create session %s: %v", sessionName, err)
+	}
+}
+
+// suppressStdout redirects os.Stdout for the duration of the test so the
+// noisy "Killed PID" output from cleanup doesn't pollute test output.
+func suppressStdout(t *testing.T) {
+	t.Helper()
+	orig := os.Stdout
+	devnull, err := os.Open(os.DevNull)
+	if err != nil {
+		t.Fatalf("open /dev/null: %v", err)
+	}
+	os.Stdout = devnull
+	t.Cleanup(func() {
+		os.Stdout = orig
+		devnull.Close()
+	})
 }
 
 // TestKillSession_OnlySearchesCurrentDaemonSession documents the limitation of
@@ -163,4 +198,136 @@ func TestDeleteTask_KillsAgentInForeignDaemonSession(t *testing.T) {
 		t.Errorf("expected task row deleted, got: %+v", got)
 	}
 	_ = os.Remove(dbPath)
+}
+
+// setupCleanupTest builds an isolated DB and a daemon tmux session, then
+// returns the session name plus a teardown that the test should defer.
+func setupCleanupTest(t *testing.T, idTag string) (sessionName string) {
+	t.Helper()
+	requireTmux(t)
+
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+	t.Setenv("WORKTREE_DB_PATH", dbPath)
+	t.Setenv("WORKTREE_SESSION_ID", "")
+
+	if got := db.DefaultPath(); got != dbPath {
+		t.Skipf("db.DefaultPath() does not honor WORKTREE_DB_PATH (got %q)", got)
+	}
+
+	sessionName = "task-daemon-cleanup-" + idTag
+	t.Cleanup(func() {
+		osexec.Command("tmux", "kill-session", "-t", sessionName).Run()
+	})
+	suppressStdout(t)
+	return sessionName
+}
+
+// TestCleanupOrphanedSessions_KillsWindowForDeletedTask is the recovery path
+// for past delete-leak bugs: tmux still has a window for a task ID, but the
+// task no longer exists in the database. Cleanup should detect that and kill
+// the window so the agent process exits.
+func TestCleanupOrphanedSessions_KillsWindowForDeletedTask(t *testing.T) {
+	sessionName := setupCleanupTest(t, "deleted")
+
+	// Task ID has no row in the (empty) DB — pure orphan.
+	const orphanID = 992001
+	makeDaemonSessionWithName(t, sessionName, orphanID)
+
+	cleanupOrphanedSessions(false)
+
+	if windowExists(sessionName, fmt.Sprintf("task-%d", orphanID)) {
+		t.Error("orphan window still exists after cleanup; deleted-task windows should be killed")
+	}
+}
+
+// TestCleanupOrphanedSessions_KeepsWindowForActiveTask guards against false
+// positives: a window whose task still exists and is in an active state must
+// be preserved.
+func TestCleanupOrphanedSessions_KeepsWindowForActiveTask(t *testing.T) {
+	sessionName := setupCleanupTest(t, "active")
+
+	dbPath := os.Getenv("WORKTREE_DB_PATH")
+	database, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	task := &db.Task{Title: "Active task", Status: db.StatusBlocked, Type: db.TypeCode}
+	if err := database.CreateTask(task); err != nil {
+		database.Close()
+		t.Fatalf("create task: %v", err)
+	}
+	database.Close()
+
+	makeDaemonSessionWithName(t, sessionName, int(task.ID))
+
+	cleanupOrphanedSessions(false)
+
+	if !windowExists(sessionName, fmt.Sprintf("task-%d", task.ID)) {
+		t.Error("active task window was killed; cleanup should leave it alone")
+	}
+}
+
+// TestCleanupOrphanedSessions_KillsWindowForOldDoneTask preserves the existing
+// behavior of the function: tasks completed more than 2 hours ago should be
+// reaped.
+func TestCleanupOrphanedSessions_KillsWindowForOldDoneTask(t *testing.T) {
+	sessionName := setupCleanupTest(t, "done-old")
+
+	dbPath := os.Getenv("WORKTREE_DB_PATH")
+	database, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	task := &db.Task{Title: "Old done task", Status: db.StatusBacklog, Type: db.TypeCode}
+	if err := database.CreateTask(task); err != nil {
+		database.Close()
+		t.Fatalf("create task: %v", err)
+	}
+	// Mark done with a CompletedAt timestamp 3 hours ago.
+	threeHoursAgo := time.Now().Add(-3 * time.Hour)
+	if _, err := database.Exec(`UPDATE tasks SET status = ?, completed_at = ? WHERE id = ?`, db.StatusDone, threeHoursAgo, task.ID); err != nil {
+		database.Close()
+		t.Fatalf("set done+old: %v", err)
+	}
+	database.Close()
+
+	makeDaemonSessionWithName(t, sessionName, int(task.ID))
+
+	cleanupOrphanedSessions(false)
+
+	if windowExists(sessionName, fmt.Sprintf("task-%d", task.ID)) {
+		t.Error("old done task window survived cleanup")
+	}
+}
+
+// TestCleanupOrphanedSessions_KeepsWindowForRecentDoneTask: tasks finished in
+// the last 2 hours stay around for review.
+func TestCleanupOrphanedSessions_KeepsWindowForRecentDoneTask(t *testing.T) {
+	sessionName := setupCleanupTest(t, "done-recent")
+
+	dbPath := os.Getenv("WORKTREE_DB_PATH")
+	database, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	task := &db.Task{Title: "Recent done task", Status: db.StatusBacklog, Type: db.TypeCode}
+	if err := database.CreateTask(task); err != nil {
+		database.Close()
+		t.Fatalf("create task: %v", err)
+	}
+	tenMinAgo := time.Now().Add(-10 * time.Minute)
+	if _, err := database.Exec(`UPDATE tasks SET status = ?, completed_at = ? WHERE id = ?`, db.StatusDone, tenMinAgo, task.ID); err != nil {
+		database.Close()
+		t.Fatalf("set done+recent: %v", err)
+	}
+	database.Close()
+
+	makeDaemonSessionWithName(t, sessionName, int(task.ID))
+
+	cleanupOrphanedSessions(false)
+
+	if !windowExists(sessionName, fmt.Sprintf("task-%d", task.ID)) {
+		t.Error("recently-done task window was killed; should stay for review window")
+	}
 }

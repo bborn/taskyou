@@ -4935,172 +4935,136 @@ func quotedWindowList(windows map[string]bool) string {
 	return strings.Join(parts, ",")
 }
 
-// cleanupOrphanedSessions kills agent processes that aren't tied to any active task windows
-// or belong to done tasks older than 2 hours. Supports all executors.
+// cleanupOrphanedSessions kills tmux windows whose task ID is no longer in the
+// database (deleted-task orphans), and windows for tasks completed more than
+// two hours ago. Killing the window terminates the agent process running in
+// its pane via SIGHUP propagation.
+//
+// Tmux windows are the source of truth here. Earlier versions tried to find
+// orphaned agent processes via `pgrep -f <name>.*TERM_PROGRAM=tmux`, but
+// TERM_PROGRAM is an env var (not on the command line on macOS), so pgrep
+// returned nothing and cleanup quietly did nothing — leaving orphans alive
+// indefinitely. Working at the window level avoids depending on env vars
+// being visible to ps / pgrep.
 func cleanupOrphanedSessions(force bool) {
-	// Step 1: Get all task windows across ALL task-daemon-* sessions
-	activeTaskIDs := make(map[int]bool)
+	type windowRef struct {
+		session string
+		window  string
+		taskID  int
+	}
 
-	// List all tmux sessions
 	sessionsOut, err := osexec.Command("tmux", "list-sessions", "-F", "#{session_name}").Output()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, errorStyle.Render("Error listing tmux sessions: "+err.Error()))
 		return
 	}
 
+	var allWindows []windowRef
 	for _, session := range strings.Split(string(sessionsOut), "\n") {
 		session = strings.TrimSpace(session)
 		if !strings.HasPrefix(session, "task-daemon-") {
 			continue
 		}
-
-		// List windows in this daemon session
 		windowsOut, err := osexec.Command("tmux", "list-windows", "-t", session, "-F", "#{window_name}").Output()
 		if err != nil {
 			continue
 		}
-
 		for _, window := range strings.Split(string(windowsOut), "\n") {
 			window = strings.TrimSpace(window)
 			if !strings.HasPrefix(window, "task-") {
 				continue
 			}
 			var taskID int
-			if _, err := fmt.Sscanf(window, "task-%d", &taskID); err == nil {
-				activeTaskIDs[taskID] = true
+			if _, err := fmt.Sscanf(window, "task-%d", &taskID); err != nil {
+				continue
 			}
+			allWindows = append(allWindows, windowRef{session: session, window: window, taskID: taskID})
 		}
 	}
 
-	// Step 1b: Get task IDs of done tasks older than 2 hours - these should be killed
-	doneOldTaskIDs := make(map[int]bool)
+	existingTaskIDs := make(map[int]bool)
+	oldDoneTaskIDs := make(map[int]bool)
 	dbPath := db.DefaultPath()
-	database, err := openTaskDB(dbPath)
-	if err == nil {
+	if database, err := openTaskDB(dbPath); err == nil {
 		defer database.Close()
 		twoHoursAgo := time.Now().Add(-2 * time.Hour)
-		// Get done tasks completed more than 2 hours ago
-		tasks, err := database.ListTasks(db.ListTasksOptions{
-			Status: db.StatusDone,
-		})
-		if err == nil {
+		// IncludeClosed: done/archived tasks are excluded by default, but we need
+		// them here so windows for done tasks can be classified correctly. Limit:
+		// 0 maps to a default of 100 — set a large explicit limit so a busy queue
+		// isn't truncated and active tasks misclassified as deleted.
+		if tasks, err := database.ListTasks(db.ListTasksOptions{IncludeClosed: true, Limit: 100000}); err == nil {
 			for _, task := range tasks {
-				if task.CompletedAt != nil && task.CompletedAt.Before(twoHoursAgo) {
-					doneOldTaskIDs[int(task.ID)] = true
+				existingTaskIDs[int(task.ID)] = true
+				if task.Status == db.StatusDone && task.CompletedAt != nil && task.CompletedAt.Before(twoHoursAgo) {
+					oldDoneTaskIDs[int(task.ID)] = true
 				}
 			}
 		}
+	} else {
+		fmt.Fprintln(os.Stderr, dimStyle.Render(fmt.Sprintf("Warning: could not open database (%v); falling back to tmux-only orphan check", err)))
 	}
 
-	// Step 2: Get all agent processes running in tmux (supports all executors)
-	executorPatterns := []string{
-		"claude.*TERM_PROGRAM=tmux",
-		"codex.*TERM_PROGRAM=tmux",
-		"gemini.*TERM_PROGRAM=tmux",
-		"openclaw.*TERM_PROGRAM=tmux",
-		"opencode.*TERM_PROGRAM=tmux",
-		"pi.*TERM_PROGRAM=tmux",
-	}
-
-	var orphanedPIDs []int
-	var oldDonePIDs []int
-	seenPIDs := make(map[int]bool) // Avoid duplicates
-
-	for _, pattern := range executorPatterns {
-		pgrepOut, err := osexec.Command("pgrep", "-f", pattern).Output()
-		if err != nil {
-			continue // No processes found for this executor
+	var deletedWindows, oldDoneWindows []windowRef
+	for _, w := range allWindows {
+		if !existingTaskIDs[w.taskID] {
+			deletedWindows = append(deletedWindows, w)
+			continue
 		}
-
-		for _, pidStr := range strings.Split(string(pgrepOut), "\n") {
-			pidStr = strings.TrimSpace(pidStr)
-			if pidStr == "" {
-				continue
-			}
-			pid, err := strconv.Atoi(pidStr)
-			if err != nil {
-				continue
-			}
-
-			// Skip if already processed
-			if seenPIDs[pid] {
-				continue
-			}
-			seenPIDs[pid] = true
-
-			// Check if this PID's environment has WORKTREE_TASK_ID
-			// and if that task ID is in our active set
-			envOut, err := osexec.Command("ps", "-p", strconv.Itoa(pid), "-o", "command=").Output()
-			if err != nil {
-				orphanedPIDs = append(orphanedPIDs, pid)
-				continue
-			}
-
-			env := string(envOut)
-			isOrphaned := true
-			var extractedTaskID int
-
-			// Try to extract WORKTREE_TASK_ID from the command line
-			if idx := strings.Index(env, "WORKTREE_TASK_ID="); idx >= 0 {
-				if _, err := fmt.Sscanf(env[idx:], "WORKTREE_TASK_ID=%d", &extractedTaskID); err == nil {
-					if activeTaskIDs[extractedTaskID] {
-						isOrphaned = false
-					}
-				}
-			}
-
-			// Check if this is from an old done task
-			if !isOrphaned && extractedTaskID > 0 && doneOldTaskIDs[extractedTaskID] {
-				oldDonePIDs = append(oldDonePIDs, pid)
-				continue
-			}
-
-			if isOrphaned {
-				orphanedPIDs = append(orphanedPIDs, pid)
-			}
+		if oldDoneTaskIDs[w.taskID] {
+			oldDoneWindows = append(oldDoneWindows, w)
 		}
 	}
 
-	totalToKill := len(orphanedPIDs) + len(oldDonePIDs)
+	totalToKill := len(deletedWindows) + len(oldDoneWindows)
 	if totalToKill == 0 {
-		fmt.Println(successStyle.Render("No orphaned agent processes found"))
+		fmt.Println(successStyle.Render("No orphaned agent windows found"))
 		return
 	}
 
-	// Step 3: Kill orphaned processes
-	if len(orphanedPIDs) > 0 {
-		fmt.Printf("%s\n\n", boldStyle.Render(fmt.Sprintf("Found %d orphaned agent processes:", len(orphanedPIDs))))
+	if len(deletedWindows) > 0 {
+		fmt.Printf("%s\n", boldStyle.Render(fmt.Sprintf("Found %d windows for deleted tasks:", len(deletedWindows))))
 	}
-	if len(oldDonePIDs) > 0 {
-		fmt.Printf("%s\n\n", boldStyle.Render(fmt.Sprintf("Found %d agent processes from done tasks (>2h old):", len(oldDonePIDs))))
-	}
-
-	signal := syscall.SIGTERM
-	signalName := "SIGTERM"
-	if force {
-		signal = syscall.SIGKILL
-		signalName = "SIGKILL"
+	if len(oldDoneWindows) > 0 {
+		fmt.Printf("%s\n", boldStyle.Render(fmt.Sprintf("Found %d windows for done tasks (>2h old):", len(oldDoneWindows))))
 	}
 
 	killed := 0
-	allPIDs := append(orphanedPIDs, oldDonePIDs...)
-	for _, pid := range allPIDs {
-		proc, err := os.FindProcess(pid)
-		if err != nil {
-			fmt.Printf("  %s PID %d: %s\n", errorStyle.Render("✗"), pid, err.Error())
+	for _, w := range append(deletedWindows, oldDoneWindows...) {
+		target := w.session + ":" + w.window
+		if err := killWindow(target, force); err != nil {
+			fmt.Printf("  %s %s: %s\n", errorStyle.Render("✗"), target, err.Error())
 			continue
 		}
-
-		if err := proc.Signal(signal); err != nil {
-			fmt.Printf("  %s PID %d: %s\n", errorStyle.Render("✗"), pid, err.Error())
-			continue
-		}
-
-		fmt.Printf("  %s PID %d (%s)\n", successStyle.Render("✓ Killed"), pid, signalName)
+		fmt.Printf("  %s %s\n", successStyle.Render("✓ Killed"), target)
 		killed++
 	}
 
-	fmt.Printf("\n%s\n", dimStyle.Render(fmt.Sprintf("Killed %d/%d processes", killed, totalToKill)))
+	fmt.Printf("\n%s\n", dimStyle.Render(fmt.Sprintf("Killed %d/%d windows", killed, totalToKill)))
+}
+
+// killWindow terminates a tmux window. With force=true, it also sends SIGKILL
+// to every PID in the window's panes, which is needed for stuck processes
+// that don't respond to the SIGHUP that tmux kill-window normally delivers.
+func killWindow(target string, force bool) error {
+	if force {
+		// Best-effort: collect pane PIDs first so we can SIGKILL them after
+		// killing the window. tmux kill-window itself can't escalate signals.
+		out, _ := osexec.Command("tmux", "list-panes", "-t", target, "-F", "#{pane_pid}").Output()
+		if err := osexec.Command("tmux", "kill-window", "-t", target).Run(); err != nil {
+			return err
+		}
+		for _, pidStr := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+			pid, perr := strconv.Atoi(strings.TrimSpace(pidStr))
+			if perr != nil || pid == 0 {
+				continue
+			}
+			if proc, ferr := os.FindProcess(pid); ferr == nil {
+				_ = proc.Signal(syscall.SIGKILL)
+			}
+		}
+		return nil
+	}
+	return osexec.Command("tmux", "kill-window", "-t", target).Run()
 }
 
 // moveTask moves a task to a different project by cleaning up old resources,
