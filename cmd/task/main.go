@@ -2039,7 +2039,7 @@ Examples:
 Worktrees are archived first (preserving uncommitted changes in git refs),
 then the directory is removed. Archived tasks can be restored with 'unarchive'.
 
-The default max age is 7 days. Use --max-age to override.
+The default max age is 24 hours. Use --max-age to override.
 Use --dry-run to preview what would be cleaned up.
 
 Examples:
@@ -2107,7 +2107,7 @@ Examples:
 		},
 	}
 	worktreesCleanupCmd.Flags().Bool("dry-run", false, "Show what would be removed without making changes")
-	worktreesCleanupCmd.Flags().String("max-age", "", "Maximum age before cleanup (e.g., 168h, 72h, 0 for all). Default: 168h (7 days)")
+	worktreesCleanupCmd.Flags().String("max-age", "", "Maximum age before cleanup (e.g., 24h, 72h, 0 for all). Default: 24h (1 day)")
 	worktreesCmd.AddCommand(worktreesCleanupCmd)
 	rootCmd.AddCommand(worktreesCmd)
 
