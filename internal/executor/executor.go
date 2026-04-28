@@ -82,7 +82,9 @@ const DoneTaskCleanupTimeout = 30 * time.Minute
 
 // DefaultWorktreeCleanupMaxAge is the default time after completion before a done/archived
 // task's worktree is automatically archived and removed to reclaim disk space.
-const DefaultWorktreeCleanupMaxAge = 7 * 24 * time.Hour // 7 days
+// Each worktree can hold hundreds of megabytes (node_modules, build artifacts, binary
+// outputs like MP4s), so an aggressive default is important to prevent disk fill.
+const DefaultWorktreeCleanupMaxAge = 24 * time.Hour // 1 day
 
 const (
 	defaultExecutorSlug = "claude"
@@ -727,11 +729,11 @@ func (e *Executor) worker(ctx context.Context) {
 	// Check for idle blocked tasks to suspend every 60 seconds (30 ticks)
 	// Check for due scheduled tasks every 10 seconds (5 ticks)
 	// Check for inactive done tasks to cleanup every 5 minutes (150 ticks)
-	// Check for stale worktrees to archive every 1 hour (1800 ticks)
+	// Check for stale worktrees to archive every 10 minutes (300 ticks)
 	tickCount := 0
 	const suspendCheckInterval = 30
-	const doneCleanupInterval = 150    // 5 minutes at 2 second ticks
-	const staleWorktreeInterval = 1800 // 1 hour at 2 second ticks
+	const doneCleanupInterval = 150   // 5 minutes at 2 second ticks
+	const staleWorktreeInterval = 300 // 10 minutes at 2 second ticks
 
 	for {
 		select {
@@ -3480,6 +3482,32 @@ func (e *Executor) setupWorktree(task *db.Task) (string, error) {
 		// Worktree path was set but directory doesn't exist, clear it and create fresh
 		task.WorktreePath = ""
 		task.BranchName = ""
+	}
+
+	// Auto-restore from saved state if the task was previously closed and its
+	// worktree was saved (committed + uncommitted + tracked + untracked + any
+	// declared artifacts). This makes the worktree lifecycle invisible: when a
+	// done/archived task is queued for retry or moved back into an active state,
+	// its worktree (and via the existing --resume path, its executor session)
+	// transparently come back.
+	if task.HasArchiveState() {
+		e.logger.Info("Restoring saved worktree for task", "task", task.ID)
+		if err := e.UnarchiveWorktree(task); err != nil {
+			// Don't hard-fail; fall through to fresh-worktree creation so the
+			// task can still run. Log loudly so users notice.
+			e.logger.Warn("failed to restore saved worktree, creating fresh",
+				"task", task.ID, "error", err)
+			e.logLine(task.ID, "system", fmt.Sprintf("Could not restore prior worktree (%v); starting fresh", err))
+		} else if task.WorktreePath != "" {
+			// UnarchiveWorktree wrote the new path back to the DB. Re-run the
+			// path-exists branch above to wire env files / symlinks.
+			trustMiseConfig(task.WorktreePath)
+			e.writeWorktreeEnvFile(projectDir, task.WorktreePath, task, paths.configDir)
+			symlinkClaudeConfig(projectDir, task.WorktreePath)
+			symlinkMCPConfig(projectDir, task.WorktreePath)
+			copyMCPConfig(paths.configFile, projectDir, task.WorktreePath)
+			return task.WorktreePath, nil
+		}
 	}
 
 	// Create worktree directory inside the project
