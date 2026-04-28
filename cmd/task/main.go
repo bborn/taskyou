@@ -5112,8 +5112,11 @@ func moveTask(database *db.DB, oldTask *db.Task, targetProject string) (int64, e
 
 	// Step 1: Clean up old task's resources
 
-	// Kill agent session if running (ignore errors - session may not exist)
-	killSession(int(oldTask.ID))
+	// Kill agent session if running. Use the across-daemons variant because the
+	// CLI invocation's session ID rarely matches the daemon that originally
+	// spawned the window — the scoped killSession would silently miss it and
+	// leak the agent process. See sessions_test.go for repro.
+	killSessionAcrossDaemons(int(oldTask.ID))
 
 	// Clean up worktree and agent sessions if they exist
 	if oldTask.WorktreePath != "" {
@@ -5196,8 +5199,12 @@ func deleteTask(taskID int64) error {
 		return fmt.Errorf("task #%d not found", taskID)
 	}
 
-	// Kill agent session if running (ignore errors - session may not exist)
-	killSession(int(taskID))
+	// Kill agent session if running. Use the across-daemons variant: the CLI's
+	// session ID rarely matches the daemon that originally spawned the window
+	// (UI launches with WORKTREE_SESSION_ID set to its own PID; the daemon
+	// process has its own PID), so a scoped killSession would silently miss
+	// the window and leak the agent. See sessions_test.go for repro.
+	killSessionAcrossDaemons(int(taskID))
 
 	// Clean up worktree and agent sessions if they exist
 	if task.WorktreePath != "" {
