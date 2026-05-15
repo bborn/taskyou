@@ -16,7 +16,6 @@ import (
 func captureCSI(t *testing.T, input []byte) tea.Msg {
 	t.Helper()
 
-	type captureModel struct{ captured tea.Msg }
 	model := &captureCSIModel{}
 	prog := tea.NewProgram(
 		model,
