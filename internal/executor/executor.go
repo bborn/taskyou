@@ -113,6 +113,8 @@ func formatExecutorDisplayName(slug, raw string) string {
 		return defaultExecutorName
 	case "gemini":
 		return "Gemini"
+	case "antigravity":
+		return "Antigravity"
 	case "pi":
 		return "Pi"
 	}
@@ -168,6 +170,7 @@ func New(database *db.DB, cfg *config.Config) *Executor {
 	e.executorFactory.Register(NewClaudeExecutor(e))
 	e.executorFactory.Register(NewCodexExecutor(e))
 	e.executorFactory.Register(NewGeminiExecutor(e))
+	e.executorFactory.Register(NewAntigravityExecutor(e))
 	e.executorFactory.Register(NewOpenClawExecutor(e))
 	e.executorFactory.Register(NewOpenCodeExecutor(e))
 	e.executorFactory.Register(NewPiExecutor(e))
@@ -206,6 +209,7 @@ func NewWithLogging(database *db.DB, cfg *config.Config, w io.Writer) *Executor 
 	e.executorFactory.Register(NewClaudeExecutor(e))
 	e.executorFactory.Register(NewCodexExecutor(e))
 	e.executorFactory.Register(NewGeminiExecutor(e))
+	e.executorFactory.Register(NewAntigravityExecutor(e))
 	e.executorFactory.Register(NewOpenClawExecutor(e))
 	e.executorFactory.Register(NewOpenCodeExecutor(e))
 	e.executorFactory.Register(NewPiExecutor(e))

@@ -139,6 +139,7 @@ func completeFlagExecutors(cmd *cobra.Command, args []string, toComplete string)
 		"claude\tAnthropic Claude (default)",
 		"codex\tOpenAI Codex",
 		"gemini\tGoogle Gemini",
+		"antigravity\tGoogle Antigravity CLI (agy)",
 		"pi\tInflection Pi",
 		"opencode\tOpenCode",
 		"openclaw\tOpenClaw",

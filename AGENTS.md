@@ -9,7 +9,7 @@ Guide for AI agents working in this repository.
 This is **Task You** - a personal task management system with:
 - **SQLite storage** for tasks and projects
 - **SSH-accessible TUI** via Wish
-- **Background executor** with support for multiple AI coding agents (Claude, Codex, Gemini, Pi, OpenClaw, OpenCode)
+- **Background executor** with support for multiple AI coding agents (Claude, Codex, Gemini, Antigravity, Pi, OpenClaw, OpenCode)
 - **Beautiful terminal UI** built with Charm libraries (Kanban board)
 - **Git worktree isolation** for parallel task execution
 - **Task lifecycle hooks** for real-time task state tracking
@@ -270,7 +270,8 @@ TaskYou supports multiple AI coding agent backends:
 
 - **claude** (default) - Claude Code CLI with hooks and session resume
 - **codex** - OpenAI Codex CLI with dangerous mode support
-- **gemini** - Google Gemini CLI with configurable dangerous mode flags
+- **gemini** - Google Gemini CLI with configurable dangerous mode flags (deprecated by Google on 2026-06-18)
+- **antigravity** - Google Antigravity CLI (`agy`), successor to the Gemini CLI
 - **pi** - Pi coding agent with session continuity
 - **openclaw** - OpenClaw AI assistant
 - **opencode** - OpenCode AI assistant

@@ -60,6 +60,13 @@ func TestExecutorInterfaceImplementation(t *testing.T) {
 			dangerousFlag:         "--dangerously-allow-run",
 		},
 		{
+			name:                  "Antigravity executor",
+			executorName:          db.ExecutorAntigravity,
+			supportsSessionResume: false, // Antigravity CLI has no documented session-resume flag
+			supportsDangerousMode: false, // Auto-approve is configured in-app via /permissions
+			dangerousFlag:         "",
+		},
+		{
 			name:                  "OpenClaw executor",
 			executorName:          db.ExecutorOpenClaw,
 			supportsSessionResume: true,
@@ -1021,7 +1028,7 @@ func TestBuildCommandIncludesEnvironmentVariables(t *testing.T) {
 		WorktreePath: "/home/user/projects/myapp/.task-worktrees/42-fix-bug",
 	}
 
-	executors := []string{db.ExecutorClaude, db.ExecutorCodex, db.ExecutorGemini, db.ExecutorOpenClaw, db.ExecutorOpenCode}
+	executors := []string{db.ExecutorClaude, db.ExecutorCodex, db.ExecutorGemini, db.ExecutorAntigravity, db.ExecutorOpenClaw, db.ExecutorOpenCode}
 
 	for _, name := range executors {
 		t.Run(name, func(t *testing.T) {

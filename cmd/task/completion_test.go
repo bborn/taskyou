@@ -100,8 +100,8 @@ func TestCompleteFlagExecutors(t *testing.T) {
 	if directive != cobra.ShellCompDirectiveNoFileComp {
 		t.Errorf("expected NoFileComp directive")
 	}
-	if len(completions) != 6 {
-		t.Errorf("expected 6 executors, got %d", len(completions))
+	if len(completions) != 7 {
+		t.Errorf("expected 7 executors, got %d", len(completions))
 	}
 }
 

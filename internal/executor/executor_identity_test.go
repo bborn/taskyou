@@ -39,6 +39,17 @@ func TestDetectExecutorIdentityGemini(t *testing.T) {
 	}
 }
 
+func TestDetectExecutorIdentityAntigravity(t *testing.T) {
+	t.Setenv("TASK_EXECUTOR", "antigravity")
+	slug, display := detectExecutorIdentity()
+	if slug != "antigravity" {
+		t.Fatalf("expected slug antigravity, got %q", slug)
+	}
+	if display != "Antigravity" {
+		t.Fatalf("expected display Antigravity, got %q", display)
+	}
+}
+
 func TestDetectExecutorIdentityUnknown(t *testing.T) {
 	t.Setenv("TASK_EXECUTOR", "beta")
 	slug, display := detectExecutorIdentity()

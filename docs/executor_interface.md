@@ -29,3 +29,17 @@ Task executors live in `internal/executor` and implement the `TaskExecutor` inte
 The Gemini executor follows the same pattern as Codex: it starts a fresh CLI process for every run and replays the full prompt with appended feedback during retries. Gemini's dangerous-mode flag defaults to `--dangerously-allow-run` but can be overridden via the `GEMINI_DANGEROUS_ARGS` environment variable if Google updates the CLI syntax.
 
 Review `internal/executor/gemini_executor.go` for a reference implementation that satisfies all of the above requirements.
+
+## Antigravity CLI Notes
+
+The Antigravity executor (`agy`) is the successor to the Gemini CLI — Google deprecates the Gemini CLI on 2026-06-18. It is installed via `curl -fsSL https://antigravity.google/cli/install.sh | bash`, which drops the binary at `~/.local/bin/agy`.
+
+The Antigravity CLI is a TUI and does not currently expose documented flags for headless prompting, session resume, or auto-approve ("YOLO") mode — auto-approve is configured in-app via the `/permissions` command. The executor therefore:
+
+- Treats every run as **stateless** (`SupportsSessionResume()` returns `false`); retries replay the full prompt with appended feedback, like Codex and Gemini.
+- Reports **no dangerous mode** (`SupportsDangerousMode()` returns `false`); `ResumeDangerous`/`ResumeSafe` are no-ops.
+- Appends task guidance to the end of the prompt (the OpenClaw pattern), since the CLI has no separate system-prompt mechanism.
+
+To stay resilient while Google stabilizes the CLI surface, the invocation is overridable via environment variables: `ANTIGRAVITY_BIN` (binary name/path, default `agy`) and `ANTIGRAVITY_PROMPT_FLAG` (flag used to pass the initial prompt, default `-i `, matching the Gemini CLI it replaces). When Google documents resume/auto-approve flags, update `internal/executor/antigravity_executor.go` accordingly.
+
+Review `internal/executor/antigravity_executor.go` for the reference implementation.

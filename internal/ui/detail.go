@@ -179,6 +179,8 @@ func (m *DetailModel) executorDisplayName() string {
 			return "Claude"
 		case db.ExecutorGemini:
 			return "Gemini"
+		case db.ExecutorAntigravity:
+			return "Antigravity"
 		case db.ExecutorOpenClaw:
 			return "OpenClaw"
 		default:

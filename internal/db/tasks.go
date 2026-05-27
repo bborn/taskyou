@@ -17,7 +17,7 @@ type Task struct {
 	Status          string
 	Type            string
 	Project         string
-	Executor        string // Task executor: "claude" (default), "codex", "gemini"
+	Executor        string // Task executor: "claude" (default), "codex", "gemini", "antigravity", etc.
 	WorktreePath    string
 	BranchName      string
 	Port            int    // Unique port for running the application in this task's worktree
@@ -73,12 +73,13 @@ const (
 
 // Task executors
 const (
-	ExecutorClaude   = "claude"   // Claude Code CLI (default)
-	ExecutorCodex    = "codex"    // OpenAI Codex CLI
-	ExecutorGemini   = "gemini"   // Google Gemini CLI
-	ExecutorOpenClaw = "openclaw" // OpenClaw AI assistant (https://openclaw.ai)
-	ExecutorOpenCode = "opencode" // OpenCode AI assistant (https://opencode.ai)
-	ExecutorPi       = "pi"       // Pi coding agent (https://github.com/mariozechner/pi-coding-agent)
+	ExecutorClaude      = "claude"      // Claude Code CLI (default)
+	ExecutorCodex       = "codex"       // OpenAI Codex CLI
+	ExecutorGemini      = "gemini"      // Google Gemini CLI (deprecated by Google on 2026-06-18, superseded by antigravity)
+	ExecutorAntigravity = "antigravity" // Google Antigravity CLI - "agy" (https://antigravity.google), successor to Gemini CLI
+	ExecutorOpenClaw    = "openclaw"    // OpenClaw AI assistant (https://openclaw.ai)
+	ExecutorOpenCode    = "opencode"    // OpenCode AI assistant (https://opencode.ai)
+	ExecutorPi          = "pi"          // Pi coding agent (https://github.com/mariozechner/pi-coding-agent)
 )
 
 // DefaultExecutor returns the default executor if none is specified.

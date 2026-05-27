@@ -28,7 +28,7 @@ A personal task management system with a beautiful terminal UI, SQLite storage, 
 
 - **Kanban Board** - Visual task management with 4 columns (Backlog, In Progress, Blocked, Done)
 - **Git Worktrees** - Each task runs in an isolated worktree, no conflicts between parallel tasks
-- **Pluggable Executors** - Choose between Claude Code, OpenAI Codex, Gemini, Pi, OpenClaw, or OpenCode per task
+- **Pluggable Executors** - Choose between Claude Code, OpenAI Codex, Gemini, Antigravity, Pi, OpenClaw, or OpenCode per task
 - **Event Hooks** - Run scripts when tasks change state (see [Event Hooks](#event-hooks))
 - **Ghost Text Autocomplete** - LLM-powered suggestions for task titles and descriptions as you type
 - **VS Code-style Fuzzy Search** - Quick task navigation with smart matching (e.g., "dsno" matches "diseno website")
@@ -292,7 +292,8 @@ Task You supports multiple AI executors for processing tasks. You can choose the
 |----------|-----|-------------|
 | Claude (default) | `claude` | [Claude Code](https://claude.ai/claude-code) - Anthropic's coding agent with session resumption |
 | Codex | `codex` | [OpenAI Codex CLI](https://github.com/openai/codex) - OpenAI's coding assistant |
-| Gemini | `gemini` | [Gemini CLI](https://ai.google.dev/gemini-api/docs/cli) - Google's Gemini-based coding assistant |
+| Gemini | `gemini` | [Gemini CLI](https://ai.google.dev/gemini-api/docs/cli) - Google's Gemini-based coding assistant (deprecated by Google on 2026-06-18) |
+| Antigravity | `agy` | [Antigravity CLI](https://antigravity.google) - Google's terminal-first coding agent, successor to the Gemini CLI |
 | Pi | `pi` | [Pi Coding Agent](https://github.com/mariozechner/pi-coding-agent) - Multi-provider AI coding agent with session continuity |
 | OpenCode | `opencode` | [OpenCode](https://opencode.ai) - Open-source AI coding assistant with multi-LLM support |
 | OpenClaw | `openclaw` | [OpenClaw](https://openclaw.ai) - Open-source personal AI assistant with session resumption |
@@ -300,8 +301,10 @@ Task You supports multiple AI executors for processing tasks. You can choose the
 All executors run in tmux windows with the same worktree isolation and environment variables. The main differences:
 
 - **Claude Code**, **Pi**, and **OpenClaw** support session resumption - when you retry a task, they continue with full conversation history
-- **Codex** and **Gemini** start fresh on each execution but receive the full prompt with any feedback
+- **Codex**, **Gemini**, and **Antigravity** start fresh on each execution but receive the full prompt with any feedback
 - **OpenCode** does not support session resumption
+
+> **Gemini → Antigravity:** Google is replacing the Gemini CLI with the Antigravity CLI; the Gemini CLI stops serving requests on 2026-06-18. The `gemini` executor remains available until then, after which `antigravity` is the recommended Google executor.
 
 ### Installing Executors
 
@@ -316,6 +319,9 @@ npm install -g @openai/codex
 
 # Google Gemini CLI
 # See https://ai.google.dev/gemini-api/docs/cli for installation instructions
+
+# Google Antigravity CLI (agy) - successor to the Gemini CLI
+curl -fsSL https://antigravity.google/cli/install.sh | bash
 
 # Pi Coding Agent
 npm install -g @mariozechner/pi-coding-agent
