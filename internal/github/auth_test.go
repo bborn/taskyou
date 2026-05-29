@@ -65,6 +65,32 @@ func TestIsNotLoggedIn(t *testing.T) {
 	}
 }
 
+func TestClassifyUserErr(t *testing.T) {
+	tests := []struct {
+		name           string
+		stderr         string
+		wantLoggedIn   bool
+		wantTokenValid bool
+		wantUnknown    bool
+	}{
+		{"expired token", "HTTP 401: Bad credentials", true, false, false},
+		{"requires auth", "This endpoint requires authentication", true, false, false},
+		{"logged out", "You are not logged into any GitHub hosts. Run: gh auth login", false, false, false},
+		{"no accounts", "no accounts found", false, false, false},
+		{"network error is unknown", "dial tcp: i/o timeout", false, false, true},
+		{"empty is unknown", "", false, false, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := classifyUserErr(tt.stderr)
+			if got.loggedIn != tt.wantLoggedIn || got.tokenValid != tt.wantTokenValid || got.unknown != tt.wantUnknown {
+				t.Errorf("classifyUserErr(%q) = %+v, want loggedIn=%v tokenValid=%v unknown=%v",
+					tt.stderr, got, tt.wantLoggedIn, tt.wantTokenValid, tt.wantUnknown)
+			}
+		})
+	}
+}
+
 func TestFindings_NotInstalled(t *testing.T) {
 	s := AuthStatus{GHInstalled: false}
 	findings := s.Findings()

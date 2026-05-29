@@ -102,14 +102,10 @@ func CheckAuth(ctx context.Context) AuthStatus {
 		if exitErr, ok := err.(*exec.ExitError); ok {
 			stderr = string(exitErr.Stderr)
 		}
-		switch {
-		case isBadCredentials(stderr):
-			// Logged in (config present) but the token is expired/revoked.
-			status.LoggedIn = true
-			status.TokenValid = false
-		case isNotLoggedIn(stderr):
-			status.LoggedIn = false
-		default:
+		st := classifyUserErr(stderr)
+		status.LoggedIn = st.loggedIn
+		status.TokenValid = st.tokenValid
+		if st.unknown {
 			// Unknown failure (network, timeout). Surface it but don't crash.
 			status.Err = fmt.Errorf("gh api user failed: %w", err)
 		}
@@ -166,6 +162,33 @@ func classifyAccount(login, apiType string) AccountType {
 	return AccountTypeUnknown
 }
 
+// userErrState is the auth state inferred from a FAILED `gh api user` call.
+//
+//	stderr pattern         → state
+//	─────────────────────────────────────────────
+//	"Bad credentials"/401  → loggedIn, !tokenValid  (token expired/revoked)
+//	"not logged in"/…      → !loggedIn               (no auth configured)
+//	anything else          → unknown                 (network/timeout — caller sets Err)
+type userErrState struct {
+	loggedIn   bool
+	tokenValid bool
+	unknown    bool // stderr matched neither known pattern
+}
+
+// classifyUserErr maps `gh api user` stderr to an auth state. Pure and table-tested
+// so a future change to gh's wording is caught rather than silently mis-routed.
+func classifyUserErr(stderr string) userErrState {
+	switch {
+	case isBadCredentials(stderr):
+		// Config present (logged in) but the token is expired/revoked.
+		return userErrState{loggedIn: true, tokenValid: false}
+	case isNotLoggedIn(stderr):
+		return userErrState{loggedIn: false}
+	default:
+		return userErrState{unknown: true}
+	}
+}
+
 func isBadCredentials(stderr string) bool {
 	s := strings.ToLower(stderr)
 	return strings.Contains(s, "bad credentials") ||
@@ -182,8 +205,14 @@ func isNotLoggedIn(stderr string) bool {
 		strings.Contains(s, "gh auth login")
 }
 
-// graphQLLowThreshold is the remaining-points level below which we warn that the
-// bucket is close to exhaustion.
+// graphQLLowThreshold is the remaining-points level below which `ty doctor` warns
+// the OPERATOR that the bucket is close to exhaustion.
+//
+// This is intentionally higher than rateLimitThreshold (200) in pr.go, which gates
+// automatic batch PR fetches. The two serve different jobs and should not be merged:
+//   - rateLimitThreshold (200): the TUI's own self-throttle — stop spending budget.
+//   - graphQLLowThreshold (500): warn a human earlier, before automatic throttling
+//     kicks in, so they can act (e.g. re-provision a bot token) with headroom to spare.
 const graphQLLowThreshold = 500
 
 // Findings translates the auth status into ordered diagnostic findings. The most

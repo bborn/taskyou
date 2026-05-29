@@ -2147,8 +2147,14 @@ conditions that cause shared GraphQL bucket exhaustion across agent servers:
   - low remaining GraphQL headroom
 
 Each agent server should authenticate with its OWN GitHub App installation
-token (a bot identity), which gets an independent GraphQL bucket.`,
+token (a bot identity), which gets an independent GraphQL bucket.
+
+Exits non-zero on hard errors (gh missing, logged out, expired token). Pass
+--strict to also exit non-zero on warnings (e.g. personal-account auth), so a
+fleet sweep like 'for s in ...; do ssh $s ty doctor --strict; done' can flag
+servers programmatically.`,
 		Run: func(cmd *cobra.Command, args []string) {
+			strict, _ := cmd.Flags().GetBool("strict")
 			fmt.Println(boldStyle.Render("TaskYou Doctor"))
 			fmt.Println(dimStyle.Render("Checking GitHub authentication..."))
 			fmt.Println()
@@ -2189,11 +2195,12 @@ token (a bot identity), which gets an independent GraphQL bucket.`,
 				fmt.Println(successStyle.Render("All checks passed."))
 			}
 
-			if hasError {
+			if hasError || (strict && status.HasProblems()) {
 				os.Exit(1)
 			}
 		},
 	}
+	doctorCmd.Flags().Bool("strict", false, "Exit non-zero on warnings too (e.g. personal-account auth), for fleet health sweeps")
 	rootCmd.AddCommand(doctorCmd)
 
 	// Settings command
