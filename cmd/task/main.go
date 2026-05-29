@@ -2133,6 +2133,69 @@ Examples:
 	}
 	rootCmd.AddCommand(upgradeCmd)
 
+	// Doctor command - diagnose the agent server's GitHub auth health.
+	doctorCmd := &cobra.Command{
+		Use:   "doctor",
+		Short: "Diagnose agent server health (GitHub auth & rate limits)",
+		Long: `Checks the local GitHub CLI authentication used by agents and warns about
+conditions that cause shared GraphQL bucket exhaustion across agent servers:
+
+  - gh not installed or not logged in (GitHub operations silently fail)
+  - an expired/revoked token (401 Bad credentials)
+  - authentication as a PERSONAL account, whose 5,000 pt/hr GraphQL limit is
+    shared per-user across every server authed as that account
+  - low remaining GraphQL headroom
+
+Each agent server should authenticate with its OWN GitHub App installation
+token (a bot identity), which gets an independent GraphQL bucket.`,
+		Run: func(cmd *cobra.Command, args []string) {
+			fmt.Println(boldStyle.Render("TaskYou Doctor"))
+			fmt.Println(dimStyle.Render("Checking GitHub authentication..."))
+			fmt.Println()
+
+			status := github.CheckAuth(context.Background())
+			if status.Err != nil {
+				fmt.Println(warnStyle.Render("⚠ Could not fully probe gh: " + status.Err.Error()))
+				fmt.Println()
+			}
+
+			findings := status.Findings()
+			hasError := false
+			for _, f := range findings {
+				var icon, msg string
+				switch f.Severity {
+				case github.SeverityOK:
+					icon = successStyle.Render("✓")
+					msg = f.Message
+				case github.SeverityWarn:
+					icon = warnStyle.Render("⚠")
+					msg = warnStyle.Render(f.Message)
+				case github.SeverityError:
+					icon = errorStyle.Render("✗")
+					msg = errorStyle.Render(f.Message)
+					hasError = true
+				}
+				fmt.Printf("%s %s\n", icon, msg)
+				if f.Detail != "" {
+					fmt.Println(dimStyle.Render("    " + f.Detail))
+				}
+			}
+
+			fmt.Println()
+			if hasError || status.HasProblems() {
+				fmt.Println(dimStyle.Render("Tip: provision this server with its own GitHub App installation token,"))
+				fmt.Println(dimStyle.Render("mirroring the offerlab-devs[bot] pattern, for an independent rate-limit bucket."))
+			} else {
+				fmt.Println(successStyle.Render("All checks passed."))
+			}
+
+			if hasError {
+				os.Exit(1)
+			}
+		},
+	}
+	rootCmd.AddCommand(doctorCmd)
+
 	// Settings command
 	settingsCmd := &cobra.Command{
 		Use:   "settings",

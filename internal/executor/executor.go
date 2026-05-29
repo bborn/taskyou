@@ -1398,6 +1398,20 @@ Work on this task until completion. When you're done or need input:
   - If you see a path like .task-worktrees/, you're in the right place
   - The parent repo does NOT exist for you - only this worktree does
 
+🐙 GITHUB CLI (gh) — CONSERVE THE SHARED GRAPHQL BUCKET:
+  GitHub's GraphQL rate limit (5,000 points/hr) is PER-USER and is shared by
+  every agent server authenticated as the same account. It exhausts easily.
+
+  - Prefer REST for PR reads — it has a SEPARATE 5,000/hr bucket:
+      gh pr view --json ...        ❌ (GraphQL-backed)
+      gh api repos/{owner}/{repo}/pulls/{n}   ✅ (REST)
+  - NEVER busy-poll CI with "gh pr checks" in a loop. Instead use:
+      gh run watch <run-id>        ✅ (blocks server-side, no polling)
+    or poll REST check-runs with backoff:
+      gh api repos/{owner}/{repo}/commits/{sha}/check-runs
+  - If you see "GraphQL bucket is exhausted", switch to the REST equivalents
+    above and back off — do not retry the GraphQL call in a tight loop.
+
 The task system will automatically detect your status.
 ═══════════════════════════════════════════════════════════════`
 }
