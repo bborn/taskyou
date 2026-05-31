@@ -94,6 +94,10 @@ type FormModel struct {
 
 	// Progressive disclosure: hide advanced fields for simpler first experience
 	showAdvanced bool
+
+	// modal renders the form as a centered, content-sized modal overlay
+	// (used when editing from the detail view) rather than a full-screen form.
+	modal bool
 }
 
 // Autocomplete message types for async LLM suggestions
@@ -208,6 +212,7 @@ func NewEditFormModel(database *db.DB, task *db.Task, width, height int, availab
 		taskRefAutocomplete: NewTaskRefAutocompleteModel(database, width-24),
 		attachmentCursor:    -1,
 		showAdvanced:        true, // Always show all fields when editing
+		modal:               true, // Edit form is shown as a centered modal
 	}
 
 	// Load task types from database
@@ -276,6 +281,9 @@ func NewEditFormModel(database *db.DB, task *db.Task, width, height int, availab
 	m.attachmentsInput.Prompt = ""
 	m.attachmentsInput.Cursor.SetMode(cursor.CursorStatic)
 	m.attachmentsInput.Width = width - 24
+
+	// Apply modal-aware input widths and body height now that modal is set.
+	m.SetSize(width, height)
 
 	return m
 }
@@ -1488,6 +1496,16 @@ func (m *FormModel) View() string {
 	b.WriteString(header)
 	b.WriteString("\n\n")
 
+	// Discard confirmation warning. In modal mode it appears at the top of the
+	// modal (right under the header) so it's immediately visible.
+	confirmStyle := lipgloss.NewStyle().
+		Bold(true).
+		Foreground(lipgloss.Color("214")) // Orange/warning color
+	if m.modal && m.showCancelConfirm {
+		b.WriteString("  " + confirmStyle.Render("Discard changes? (y/n)"))
+		b.WriteString("\n\n")
+	}
+
 	// Ghost text style for autocomplete suggestions
 	ghostStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Italic(true)
 
@@ -1712,11 +1730,9 @@ func (m *FormModel) View() string {
 		b.WriteString("\n\n")
 	}
 
-	// Cancel confirmation message
-	if m.showCancelConfirm {
-		confirmStyle := lipgloss.NewStyle().
-			Bold(true).
-			Foreground(lipgloss.Color("214")) // Orange/warning color
+	// Cancel confirmation message. In modal mode this is rendered at the top
+	// (see above); in full-screen mode it appears here near the help text.
+	if m.showCancelConfirm && !m.modal {
 		b.WriteString("  " + confirmStyle.Render("Discard changes? (y/n)") + "\n")
 	}
 
@@ -1729,7 +1745,23 @@ func (m *FormModel) View() string {
 	}
 	b.WriteString("  " + dimStyle.Render(helpText))
 
-	// Wrap in box - use full height (subtract 2 for border)
+	// Modal mode: wrap in a content-sized box and center it on screen so the
+	// whole form (all fields) is visible at once, floating like a modal.
+	if m.modal {
+		modalBox := lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(ColorPrimary).
+			Padding(1, 2).
+			Width(m.modalBoxWidth())
+
+		return lipgloss.NewStyle().
+			Width(m.width).
+			Height(m.height).
+			Align(lipgloss.Center, lipgloss.Center).
+			Render(modalBox.Render(b.String()))
+	}
+
+	// Full-screen mode: wrap in box using full height (subtract 2 for border)
 	box := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(ColorPrimary).
@@ -1799,13 +1831,36 @@ func (m *FormModel) SetQueue(queue bool) {
 func (m *FormModel) SetSize(width, height int) {
 	m.width = width
 	m.height = height
-	// Update input widths
+	// Update input widths. In modal mode the form floats in a narrower
+	// centered box, so inputs are sized to the modal width instead of the
+	// full screen width.
 	inputWidth := width - 24
+	if m.modal {
+		// Modal content area = box width - padding(4) - label/cursor prefix(~18)
+		inputWidth = m.modalBoxWidth() - 22
+	}
+	if inputWidth < 10 {
+		inputWidth = 10
+	}
 	m.titleInput.Width = inputWidth
 	m.bodyInput.SetWidth(inputWidth)
 	m.attachmentsInput.Width = inputWidth
 	// Recalculate body height based on new dimensions
 	m.updateBodyHeight()
+}
+
+// modalBoxWidth returns the outer width of the floating edit modal.
+// It is capped so the modal stays readable on very wide terminals and
+// shrinks gracefully on narrow ones.
+func (m *FormModel) modalBoxWidth() int {
+	w := m.width - 8
+	if w > 90 {
+		w = 90
+	}
+	if w < 40 {
+		w = 40
+	}
+	return w
 }
 
 // calculateBodyHeight calculates the appropriate height for the body textarea.
@@ -1832,6 +1887,36 @@ func (m *FormModel) calculateBodyHeight() int {
 
 	totalOverhead := boxChrome + commonOverhead + modeOverhead
 	availableHeight := m.height - totalOverhead
+
+	if m.modal {
+		// In modal mode the form floats centered with margin around it, so
+		// size the body to its content within sensible bounds rather than
+		// stretching to fill the whole screen. This keeps every field visible
+		// at once while still giving long bodies a scrollable editing area.
+		const modalMinBody = 6
+		const modalMaxBody = 14
+		lines := m.bodyInput.LineCount()
+		switch {
+		case lines < modalMinBody:
+			availableHeight = modalMinBody
+		case lines > modalMaxBody:
+			availableHeight = modalMaxBody
+		default:
+			availableHeight = lines
+		}
+		// Never let the modal grow past what fits on screen. On large screens
+		// the content-sized body is well under this cap, which naturally
+		// leaves margin around the floating modal.
+		maxFit := m.height - totalOverhead
+		if maxFit < 3 {
+			maxFit = 3
+		}
+		if availableHeight > maxFit {
+			availableHeight = maxFit
+		}
+		return availableHeight
+	}
+
 	if availableHeight < minHeight {
 		availableHeight = minHeight
 	}
