@@ -429,6 +429,29 @@ func (e *Executor) IsSuspended(taskID int64) bool {
 	return suspended
 }
 
+// agentSendTargetForPane returns the tmux send-keys target for a task's agent
+// pane. It prefers the persisted pane id (the stable "%pane_id" captured at
+// window creation and used by the UI for capture) so input is never
+// misdelivered when the detail view has joined the agent pane into the UI
+// session — which collapses the shell pane onto window index 0. Falls back to
+// windowTarget+".0" when no pane id has been persisted yet.
+func agentSendTargetForPane(claudePaneID, windowTarget string) string {
+	if claudePaneID != "" {
+		return claudePaneID
+	}
+	return windowTarget + ".0"
+}
+
+// agentSendTarget resolves the send-keys target for a task's agent pane,
+// reading the persisted pane id from the database. See agentSendTargetForPane.
+func (e *Executor) agentSendTarget(taskID int64, windowTarget string) string {
+	claudePaneID := ""
+	if t, err := e.db.GetTask(taskID); err == nil && t != nil {
+		claudePaneID = t.ClaudePaneID
+	}
+	return agentSendTargetForPane(claudePaneID, windowTarget)
+}
+
 // findPanesForWindow parses tmux list-panes output and returns PIDs for panes
 // in windows matching the given name exactly. The input format is one line per pane:
 //
@@ -2680,7 +2703,7 @@ func (e *Executor) resumeClaudeDangerous(task *db.Task, workDir string) bool {
 
 	// Automatically send "continue working" to resume the task
 	// This tells Claude to continue where it left off after the mode switch
-	exec.Command("tmux", "send-keys", "-t", windowTarget+".0", "continue working", "Enter").Run()
+	exec.Command("tmux", "send-keys", "-t", e.agentSendTarget(task.ID, windowTarget), "continue working", "Enter").Run()
 	e.logLine(taskID, "system", "Sent 'continue working' to resume task")
 
 	// Don't poll for completion here - the process will continue running in tmux
@@ -2845,7 +2868,7 @@ func (e *Executor) resumeClaudeSafe(task *db.Task, workDir string) bool {
 
 	// Automatically send "continue working" to resume the task
 	// This tells Claude to continue where it left off after the mode switch
-	exec.Command("tmux", "send-keys", "-t", windowTarget+".0", "continue working", "Enter").Run()
+	exec.Command("tmux", "send-keys", "-t", e.agentSendTarget(task.ID, windowTarget), "continue working", "Enter").Run()
 	e.logLine(taskID, "system", "Sent 'continue working' to resume task")
 
 	// Don't poll for completion here - the process will continue running in tmux
@@ -2951,7 +2974,7 @@ func (e *Executor) resumeCodexWithMode(task *db.Task, workDir string, dangerousM
 
 	// Automatically send "continue working" to resume the task
 	// This tells Codex to continue where it left off after the mode switch
-	exec.Command("tmux", "send-keys", "-t", windowTarget+".0", "continue working", "Enter").Run()
+	exec.Command("tmux", "send-keys", "-t", e.agentSendTarget(task.ID, windowTarget), "continue working", "Enter").Run()
 	e.logLine(taskID, "system", "Sent 'continue working' to resume task")
 
 	return true
@@ -3059,7 +3082,7 @@ func (e *Executor) resumeGeminiWithMode(task *db.Task, workDir string, dangerous
 
 	// Automatically send "continue working" to resume the task
 	// This tells Gemini to continue where it left off after the mode switch
-	exec.Command("tmux", "send-keys", "-t", windowTarget+".0", "continue working", "Enter").Run()
+	exec.Command("tmux", "send-keys", "-t", e.agentSendTarget(task.ID, windowTarget), "continue working", "Enter").Run()
 	e.logLine(taskID, "system", "Sent 'continue working' to resume task")
 
 	return true
