@@ -454,6 +454,12 @@ func (m *FormModel) Init() tea.Cmd {
 
 // Update handles messages.
 func (m *FormModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	// Normalize modern CSI-u / modifyOtherKeys sequences (Shift+Enter,
+	// Option+Delete, Cmd+Delete on macOS terminals like Ghostty, WezTerm,
+	// Kitty, and iTerm2 with modifyOtherKeys) into standard tea.KeyMsg
+	// values so the rest of the form sees the keys it already handles.
+	msg = translateModernKey(msg)
+
 	switch msg := msg.(type) {
 	// Handle autocomplete debounce tick - fire the LLM request
 	case autocompleteTickMsg:
