@@ -1398,6 +1398,20 @@ Work on this task until completion. When you're done or need input:
   - If you see a path like .task-worktrees/, you're in the right place
   - The parent repo does NOT exist for you - only this worktree does
 
+🐙 GITHUB CLI (gh) — CONSERVE THE SHARED GRAPHQL BUCKET:
+  GitHub's GraphQL rate limit (5,000 points/hr) is PER-USER and is shared by
+  every agent server authenticated as the same account. It exhausts easily.
+
+  - Prefer REST for PR reads — it has a SEPARATE 5,000/hr bucket:
+      gh pr view --json ...        ❌ (GraphQL-backed)
+      gh api repos/{owner}/{repo}/pulls/{n}   ✅ (REST)
+  - NEVER busy-poll CI with "gh pr checks" in a loop. Instead use:
+      gh run watch <run-id>        ✅ (blocks server-side, no polling)
+    or poll REST check-runs with backoff:
+      gh api repos/{owner}/{repo}/commits/{sha}/check-runs
+  - If you see "GraphQL bucket is exhausted", switch to the REST equivalents
+    above and back off — do not retry the GraphQL call in a tight loop.
+
 The task system will automatically detect your status.
 ═══════════════════════════════════════════════════════════════`
 }
@@ -2278,6 +2292,8 @@ func (e *Executor) runClaude(ctx context.Context, task *db.Task, workDir, prompt
 	}
 	// Permission flag: dangerous, auto (acceptEdits), or none, honoring the task's mode
 	dangerousFlag := claudePermissionFlag(task)
+	// Build per-task effort override flag (empty = use Claude's global default)
+	effort := effortFlag(task.EffortLevel)
 	// Build system prompt flag - passes task guidance via system prompt to keep conversation clean
 	systemPromptFlag := fmt.Sprintf(`--append-system-prompt "$(cat %q)" `, systemFile.Name())
 
@@ -2289,8 +2305,8 @@ func (e *Executor) runClaude(ctx context.Context, task *db.Task, workDir, prompt
 	envPrefix := claudeEnvPrefix(paths.configDir)
 	if existingSessionID != "" && ClaudeSessionExists(existingSessionID, workDir, paths.configDir) {
 		e.logLine(task.ID, "system", fmt.Sprintf("Resuming existing session %s", existingSessionID))
-		script = fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %sclaude %s%s--resume %s "$(cat %q)"`,
-			task.ID, sessionID, task.Port, task.WorktreePath, envPrefix, dangerousFlag, systemPromptFlag, existingSessionID, promptFile.Name())
+		script = fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %sclaude %s%s%s--resume %s "$(cat %q)"`,
+			task.ID, sessionID, task.Port, task.WorktreePath, envPrefix, dangerousFlag, effort, systemPromptFlag, existingSessionID, promptFile.Name())
 	} else {
 		if existingSessionID != "" {
 			e.logLine(task.ID, "system", fmt.Sprintf("Session %s no longer exists, starting fresh", existingSessionID))
@@ -2299,8 +2315,8 @@ func (e *Executor) runClaude(ctx context.Context, task *db.Task, workDir, prompt
 				e.logger.Warn("failed to clear stale session ID", "task", task.ID, "error", err)
 			}
 		}
-		script = fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %sclaude %s%s"$(cat %q)"`,
-			task.ID, sessionID, task.Port, task.WorktreePath, envPrefix, dangerousFlag, systemPromptFlag, promptFile.Name())
+		script = fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %sclaude %s%s%s"$(cat %q)"`,
+			task.ID, sessionID, task.Port, task.WorktreePath, envPrefix, dangerousFlag, effort, systemPromptFlag, promptFile.Name())
 	}
 
 	// Create new window in task-daemon session (with retry logic for race conditions)
@@ -2449,12 +2465,14 @@ func (e *Executor) runClaudeResume(ctx context.Context, task *db.Task, workDir, 
 	}
 	// Permission flag: dangerous, auto (acceptEdits), or none, honoring the task's mode
 	dangerousFlag := claudePermissionFlag(task)
+	// Build per-task effort override flag (empty = use Claude's global default)
+	effort := effortFlag(task.EffortLevel)
 	// Build system prompt flag - passes task guidance via system prompt to keep conversation clean
 	systemPromptFlag := fmt.Sprintf(`--append-system-prompt "$(cat %q)" `, systemFile.Name())
 
 	envPrefix := claudeEnvPrefix(paths.configDir)
-	script := fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %sclaude %s%s--resume %s "$(cat %q)"`,
-		task.ID, taskSessionID, task.Port, task.WorktreePath, envPrefix, dangerousFlag, systemPromptFlag, claudeSessionID, feedbackFile.Name())
+	script := fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %sclaude %s%s%s--resume %s "$(cat %q)"`,
+		task.ID, taskSessionID, task.Port, task.WorktreePath, envPrefix, dangerousFlag, effort, systemPromptFlag, claudeSessionID, feedbackFile.Name())
 
 	// Create new window in task-daemon session (with retry logic for race conditions)
 	actualSession, tmuxErr := createTmuxWindow(daemonSession, windowName, workDir, script, e.getProjectDir(task.Project))

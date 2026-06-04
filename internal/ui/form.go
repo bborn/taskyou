@@ -29,6 +29,7 @@ const (
 	FieldAttachments // Moved after body for proximity - drag works from any field
 	FieldType
 	FieldExecutor
+	FieldEffort
 	FieldCount
 )
 
@@ -65,6 +66,9 @@ type FormModel struct {
 	executorIdx        int
 	executors          []string
 	availableExecutors []string // Original list of available executors (for rebuilding when project changes)
+	effortLevel        string   // Per-task Claude effort override ("" = use global/Claude default)
+	effortIdx          int
+	effortLevels       []string // Selectable effort values; "" (first) means "default"
 	queue              bool
 	attachments        []string // Parsed file paths
 	attachmentCursor   int      // Index of the currently selected attachment chip
@@ -136,6 +140,24 @@ func buildExecutorList(availableExecutors []string, usageCounts map[string]int) 
 	return result
 }
 
+// effortLevelOptions returns the selectable effort values for the form. The first
+// entry is the empty string, which represents "default" (no per-task override —
+// uses Claude's global default).
+func effortLevelOptions() []string {
+	return append([]string{""}, db.EffortLevels()...)
+}
+
+// effortIndexFor returns the index of the given effort level in the options list,
+// defaulting to 0 ("default") when not found.
+func effortIndexFor(options []string, level string) int {
+	for i, l := range options {
+		if l == level {
+			return i
+		}
+	}
+	return 0
+}
+
 // NewEditFormModel creates a form model pre-populated with an existing task's data for editing.
 func NewEditFormModel(database *db.DB, task *db.Task, width, height int, availableExecutors []string) *FormModel {
 	// Set executor to default if not specified
@@ -200,6 +222,9 @@ func NewEditFormModel(database *db.DB, task *db.Task, width, height int, availab
 		executorIdx:         executorIdx,
 		executors:           executors,
 		availableExecutors:  availableExecutors, // Store for rebuilding when project changes
+		effortLevel:         task.EffortLevel,
+		effortLevels:        effortLevelOptions(),
+		effortIdx:           effortIndexFor(effortLevelOptions(), task.EffortLevel),
 		isEdit:              true,
 		prURL:               task.PRURL,
 		prNumber:            task.PRNumber,
@@ -316,7 +341,8 @@ func NewFormModel(database *db.DB, width, height int, workingDir string, availab
 		autocompleteEnabled: autocompleteEnabled,
 		taskRefAutocomplete: NewTaskRefAutocompleteModel(database, width-24),
 		attachmentCursor:    -1,
-		showAdvanced:        showAdvanced, // Load from user preference
+		effortLevels:        effortLevelOptions(), // Defaults to "" (Claude's global default)
+		showAdvanced:        showAdvanced,         // Load from user preference
 	}
 
 	// Load task types from database
@@ -428,6 +454,12 @@ func (m *FormModel) Init() tea.Cmd {
 
 // Update handles messages.
 func (m *FormModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	// Normalize modern CSI-u / modifyOtherKeys sequences (Shift+Enter,
+	// Option+Delete, Cmd+Delete on macOS terminals like Ghostty, WezTerm,
+	// Kitty, and iTerm2 with modifyOtherKeys) into standard tea.KeyMsg
+	// values so the rest of the form sees the keys it already handles.
+	msg = translateModernKey(msg)
+
 	switch msg := msg.(type) {
 	// Handle autocomplete debounce tick - fire the LLM request
 	case autocompleteTickMsg:
@@ -737,6 +769,11 @@ func (m *FormModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.executor = m.executors[m.executorIdx]
 				return m, nil
 			}
+			if m.focused == FieldEffort && len(m.effortLevels) > 0 {
+				m.effortIdx = (m.effortIdx - 1 + len(m.effortLevels)) % len(m.effortLevels)
+				m.effortLevel = m.effortLevels[m.effortIdx]
+				return m, nil
+			}
 
 		case "right":
 			if m.handleAttachmentNavigation(1) {
@@ -758,6 +795,11 @@ func (m *FormModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.focused == FieldExecutor && len(m.executors) > 0 {
 				m.executorIdx = (m.executorIdx + 1) % len(m.executors)
 				m.executor = m.executors[m.executorIdx]
+				return m, nil
+			}
+			if m.focused == FieldEffort && len(m.effortLevels) > 0 {
+				m.effortIdx = (m.effortIdx + 1) % len(m.effortLevels)
+				m.effortLevel = m.effortLevels[m.effortIdx]
 				return m, nil
 			}
 
@@ -813,7 +855,7 @@ func (m *FormModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 			// Type-to-select for other selector fields
-			if m.focused == FieldType || m.focused == FieldExecutor {
+			if m.focused == FieldType || m.focused == FieldExecutor || m.focused == FieldEffort {
 				key := msg.String()
 				if len(key) == 1 && unicode.IsLetter(rune(key[0])) {
 					m.selectByPrefix(strings.ToLower(key))
@@ -1080,6 +1122,18 @@ func (m *FormModel) selectByPrefix(prefix string) {
 				return
 			}
 		}
+	case FieldEffort:
+		for i, l := range m.effortLevels {
+			label := l
+			if label == "" {
+				label = "default"
+			}
+			if strings.HasPrefix(strings.ToLower(label), prefix) {
+				m.effortIdx = i
+				m.effortLevel = l
+				return
+			}
+		}
 	}
 }
 
@@ -1164,6 +1218,11 @@ func (m *FormModel) rebuildExecutorListForProject() {
 // isFieldVisible returns whether a field should be shown in the current view.
 // When showAdvanced is false, only Title and Body are visible.
 func (m *FormModel) isFieldVisible(field FormField) bool {
+	if field == FieldEffort {
+		// Effort is a Claude-specific override (claude --effort), only shown in
+		// advanced mode and only when the Claude executor is selected.
+		return m.showAdvanced && m.executor == db.ExecutorClaude
+	}
 	if m.showAdvanced {
 		return true
 	}
@@ -1689,6 +1748,25 @@ func (m *FormModel) View() string {
 		}
 		b.WriteString(cursor + " " + labelStyle.Render("Executor") + m.renderSelector(m.executors, m.executorIdx, m.focused == FieldExecutor, selectedStyle, optionStyle, dimStyle))
 		b.WriteString("\n\n")
+
+		// Effort selector (Claude-specific; only shown for the Claude executor)
+		if m.isFieldVisible(FieldEffort) {
+			cursor = " "
+			if m.focused == FieldEffort {
+				cursor = cursorStyle.Render("▸")
+			}
+			// Build effort labels (replace "" with "default")
+			effortLabels := make([]string, len(m.effortLevels))
+			for i, l := range m.effortLevels {
+				if l == "" {
+					effortLabels[i] = "default"
+				} else {
+					effortLabels[i] = l
+				}
+			}
+			b.WriteString(cursor + " " + labelStyle.Render("Effort") + m.renderSelector(effortLabels, m.effortIdx, m.focused == FieldEffort, selectedStyle, optionStyle, dimStyle))
+			b.WriteString("\n\n")
+		}
 	} else {
 		// Show compact summary of defaults and toggle hint
 		b.WriteString("\n")
@@ -1785,6 +1863,11 @@ func (m *FormModel) GetDBTask() *db.Task {
 		Executor: m.executor,
 		PRURL:    m.prURL,
 		PRNumber: m.prNumber,
+	}
+
+	// Effort is a Claude-specific override; only carry it for the Claude executor.
+	if m.executor == db.ExecutorClaude {
+		task.EffortLevel = m.effortLevel
 	}
 
 	return task

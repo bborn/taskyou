@@ -338,6 +338,8 @@ func graphQLRateLimitRemaining() int {
 }
 
 // rateLimitThreshold is the minimum remaining GraphQL calls before we skip batch fetches.
+// This is the TUI's automatic self-throttle. `ty doctor` warns the operator earlier,
+// at the higher graphQLLowThreshold (500) in auth.go — see that constant for the rationale.
 const rateLimitThreshold = 200
 
 // FetchAllPRsForRepo fetches all open and recently merged PRs for a repo in a single API call.

@@ -35,6 +35,17 @@ func claudePermissionFlag(task *db.Task) string {
 	}
 }
 
+// effortFlag returns the `--effort <level> ` CLI flag (with a trailing space) for a
+// per-task effort override, or an empty string when no override is set. An empty
+// override means the task uses Claude's global default, leaving the user's global
+// effort setting untouched.
+func effortFlag(level string) string {
+	if level == "" {
+		return ""
+	}
+	return fmt.Sprintf("--effort %s ", level)
+}
+
 // NewClaudeExecutor creates a new Claude executor.
 func NewClaudeExecutor(e *Executor) *ClaudeExecutor {
 	return &ClaudeExecutor{
@@ -96,6 +107,9 @@ func (c *ClaudeExecutor) BuildCommand(task *db.Task, sessionID, prompt string) s
 	// Build permission mode flag (dangerous, auto/acceptEdits, or none)
 	dangerousFlag := claudePermissionFlag(task)
 
+	// Build per-task effort override flag (empty = use Claude's global default)
+	effort := effortFlag(task.EffortLevel)
+
 	// Get session ID for environment
 	worktreeSessionID := os.Getenv("WORKTREE_SESSION_ID")
 	if worktreeSessionID == "" {
@@ -114,8 +128,8 @@ func (c *ClaudeExecutor) BuildCommand(task *db.Task, sessionID, prompt string) s
 
 	// Build command - resume if we have a session ID, otherwise start fresh
 	if sessionID != "" {
-		cmd := fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q claude %s%s--resume %s`,
-			task.ID, worktreeSessionID, task.Port, task.WorktreePath, dangerousFlag, systemPromptFlag, sessionID)
+		cmd := fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q claude %s%s%s--resume %s`,
+			task.ID, worktreeSessionID, task.Port, task.WorktreePath, dangerousFlag, effort, systemPromptFlag, sessionID)
 		if systemFile != nil {
 			cmd += fmt.Sprintf(`; rm -f %q`, systemFile.Name())
 		}
@@ -128,8 +142,8 @@ func (c *ClaudeExecutor) BuildCommand(task *db.Task, sessionID, prompt string) s
 		promptFile, err := os.CreateTemp("", "task-prompt-*.txt")
 		if err != nil {
 			c.logger.Error("BuildCommand: failed to create temp file", "error", err)
-			cmd := fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q claude %s%s`,
-				task.ID, worktreeSessionID, task.Port, task.WorktreePath, dangerousFlag, systemPromptFlag)
+			cmd := fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q claude %s%s%s`,
+				task.ID, worktreeSessionID, task.Port, task.WorktreePath, dangerousFlag, effort, systemPromptFlag)
 			if systemFile != nil {
 				cmd += fmt.Sprintf(`; rm -f %q`, systemFile.Name())
 			}
@@ -138,16 +152,16 @@ func (c *ClaudeExecutor) BuildCommand(task *db.Task, sessionID, prompt string) s
 		promptFile.WriteString(prompt)
 		promptFile.Close()
 
-		cmd := fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q claude %s%s"$(cat %q)"; rm -f %q`,
-			task.ID, worktreeSessionID, task.Port, task.WorktreePath, dangerousFlag, systemPromptFlag, promptFile.Name(), promptFile.Name())
+		cmd := fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q claude %s%s%s"$(cat %q)"; rm -f %q`,
+			task.ID, worktreeSessionID, task.Port, task.WorktreePath, dangerousFlag, effort, systemPromptFlag, promptFile.Name(), promptFile.Name())
 		if systemFile != nil {
 			cmd += fmt.Sprintf(` %q`, systemFile.Name())
 		}
 		return cmd
 	}
 
-	cmd := fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q claude %s%s`,
-		task.ID, worktreeSessionID, task.Port, task.WorktreePath, dangerousFlag, systemPromptFlag)
+	cmd := fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q claude %s%s%s`,
+		task.ID, worktreeSessionID, task.Port, task.WorktreePath, dangerousFlag, effort, systemPromptFlag)
 	if systemFile != nil {
 		cmd += fmt.Sprintf(`; rm -f %q`, systemFile.Name())
 	}

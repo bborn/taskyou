@@ -1933,3 +1933,21 @@ func TestCleanupWorktreeNonWorktreeTask(t *testing.T) {
 		t.Error("expected settings.local.json to be removed")
 	}
 }
+
+func TestBuildSystemInstructions_GitHubGuidance(t *testing.T) {
+	instructions := (&Executor{}).buildSystemInstructions()
+
+	// The GitHub guidance must steer agents away from the shared GraphQL bucket.
+	wants := []string{
+		"GITHUB CLI",
+		"PER-USER",
+		"gh pr checks",
+		"gh run watch",
+		"REST",
+	}
+	for _, want := range wants {
+		if !strings.Contains(instructions, want) {
+			t.Errorf("buildSystemInstructions() missing %q", want)
+		}
+	}
+}

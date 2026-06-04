@@ -565,6 +565,7 @@ Examples:
 			taskType, _ := cmd.Flags().GetString("type")
 			project, _ := cmd.Flags().GetString("project")
 			taskExecutor, _ := cmd.Flags().GetString("executor")
+			effortLevel, _ := cmd.Flags().GetString("effort")
 			execute, _ := cmd.Flags().GetBool("execute")
 			createDangerous, _ := cmd.Flags().GetBool("dangerous")
 			permissionModeFlag, _ := cmd.Flags().GetString("permission-mode")
@@ -631,6 +632,13 @@ Examples:
 				}
 			}
 
+			// Validate effort level if provided (empty = use Claude's global default)
+			effortLevel = strings.ToLower(strings.TrimSpace(effortLevel))
+			if !db.IsValidEffortLevel(effortLevel) {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Invalid effort. Must be one of: "+strings.Join(db.EffortLevels(), ", ")))
+				os.Exit(1)
+			}
+
 			// If project not specified, try to detect from cwd
 			if project == "" {
 				if cwd, err := os.Getwd(); err == nil {
@@ -686,6 +694,7 @@ Examples:
 				Type:           taskType,
 				Project:        project,
 				Executor:       taskExecutor,
+				EffortLevel:    effortLevel,
 				Tags:           tags,
 				Pinned:         pinned,
 				SourceBranch:   branch,
@@ -709,6 +718,9 @@ Examples:
 				if task.SourceBranch != "" {
 					output["source_branch"] = task.SourceBranch
 				}
+				if task.EffortLevel != "" {
+					output["effort_level"] = task.EffortLevel
+				}
 				jsonBytes, _ := json.Marshal(output)
 				fmt.Println(string(jsonBytes))
 			} else {
@@ -731,6 +743,7 @@ Examples:
 	createCmd.Flags().StringP("type", "t", "", "Task type: code, writing, thinking (default: code)")
 	createCmd.Flags().StringP("project", "p", "", "Project name (auto-detected from cwd if not specified)")
 	createCmd.Flags().StringP("executor", "e", "", "Task executor: claude, codex, gemini, pi, opencode, openclaw (default: claude)")
+	createCmd.Flags().String("effort", "", "Per-task Claude effort override: low, medium, high, xhigh, max (default: Claude's global default)")
 	createCmd.Flags().BoolP("execute", "x", false, "Queue task for immediate execution")
 	createCmd.Flags().Bool("dangerous", false, "Execute in dangerous mode (alias for --permission-mode dangerous)")
 	createCmd.Flags().String("permission-mode", "", "Permission mode: default (prompt), auto (auto-accept edits), dangerous (skip all). Defaults to the project's setting")
@@ -741,6 +754,9 @@ Examples:
 	createCmd.RegisterFlagCompletionFunc("project", completeFlagProjects)
 	createCmd.RegisterFlagCompletionFunc("type", completeFlagTypes)
 	createCmd.RegisterFlagCompletionFunc("executor", completeFlagExecutors)
+	createCmd.RegisterFlagCompletionFunc("effort", func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		return db.EffortLevels(), cobra.ShellCompDirectiveNoFileComp
+	})
 	rootCmd.AddCommand(createCmd)
 
 	// List subcommand - list tasks
@@ -2151,6 +2167,76 @@ Examples:
 		},
 	}
 	rootCmd.AddCommand(upgradeCmd)
+
+	// Doctor command - diagnose the agent server's GitHub auth health.
+	doctorCmd := &cobra.Command{
+		Use:   "doctor",
+		Short: "Diagnose agent server health (GitHub auth & rate limits)",
+		Long: `Checks the local GitHub CLI authentication used by agents and warns about
+conditions that cause shared GraphQL bucket exhaustion across agent servers:
+
+  - gh not installed or not logged in (GitHub operations silently fail)
+  - an expired/revoked token (401 Bad credentials)
+  - authentication as a PERSONAL account, whose 5,000 pt/hr GraphQL limit is
+    shared per-user across every server authed as that account
+  - low remaining GraphQL headroom
+
+Each agent server should authenticate with its OWN GitHub App installation
+token (a bot identity), which gets an independent GraphQL bucket.
+
+Exits non-zero on hard errors (gh missing, logged out, expired token). Pass
+--strict to also exit non-zero on warnings (e.g. personal-account auth), so a
+fleet sweep like 'for s in ...; do ssh $s ty doctor --strict; done' can flag
+servers programmatically.`,
+		Run: func(cmd *cobra.Command, args []string) {
+			strict, _ := cmd.Flags().GetBool("strict")
+			fmt.Println(boldStyle.Render("TaskYou Doctor"))
+			fmt.Println(dimStyle.Render("Checking GitHub authentication..."))
+			fmt.Println()
+
+			status := github.CheckAuth(context.Background())
+			if status.Err != nil {
+				fmt.Println(warnStyle.Render("⚠ Could not fully probe gh: " + status.Err.Error()))
+				fmt.Println()
+			}
+
+			findings := status.Findings()
+			hasError := false
+			for _, f := range findings {
+				var icon, msg string
+				switch f.Severity {
+				case github.SeverityOK:
+					icon = successStyle.Render("✓")
+					msg = f.Message
+				case github.SeverityWarn:
+					icon = warnStyle.Render("⚠")
+					msg = warnStyle.Render(f.Message)
+				case github.SeverityError:
+					icon = errorStyle.Render("✗")
+					msg = errorStyle.Render(f.Message)
+					hasError = true
+				}
+				fmt.Printf("%s %s\n", icon, msg)
+				if f.Detail != "" {
+					fmt.Println(dimStyle.Render("    " + f.Detail))
+				}
+			}
+
+			fmt.Println()
+			if hasError || status.HasProblems() {
+				fmt.Println(dimStyle.Render("Tip: provision this server with its own GitHub App installation token,"))
+				fmt.Println(dimStyle.Render("mirroring the offerlab-devs[bot] pattern, for an independent rate-limit bucket."))
+			} else {
+				fmt.Println(successStyle.Render("All checks passed."))
+			}
+
+			if hasError || (strict && status.HasProblems()) {
+				os.Exit(1)
+			}
+		},
+	}
+	doctorCmd.Flags().Bool("strict", false, "Exit non-zero on warnings too (e.g. personal-account auth), for fleet health sweeps")
+	rootCmd.AddCommand(doctorCmd)
 
 	// Settings command
 	settingsCmd := &cobra.Command{
