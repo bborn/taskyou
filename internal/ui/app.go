@@ -48,6 +48,7 @@ const (
 	ViewAttachments
 	ViewChangeStatus
 	ViewCommandPalette
+	ViewProjectDetectConfirm // Offer to create a project for the current git repo
 )
 
 // KeyMap defines key bindings.
@@ -450,6 +451,13 @@ type AppModel struct {
 	pendingProjectChangeTask  *db.Task // The updated task data with new project
 	originalProjectChangeTask *db.Task // The original task to delete
 
+	// Project detection state (offer to create a project for the current git repo)
+	projectDetectConfirm      *huh.Form
+	projectDetectConfirmValue bool
+	detectedProject           *db.Project // Inferred project pending user confirmation
+	detectedInstructionSource string      // File the inferred instructions came from
+	projectDetectionOffered   bool        // Guard so we only offer once per session
+
 	// Delete confirmation state
 	deleteConfirm      *huh.Form
 	deleteConfirmValue bool
@@ -728,6 +736,9 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.currentView == ViewProjectChangeConfirm && m.projectChangeConfirm != nil {
 			return m.updateProjectChangeConfirm(msg)
 		}
+		if m.currentView == ViewProjectDetectConfirm && m.projectDetectConfirm != nil {
+			return m.updateProjectDetectConfirm(msg)
+		}
 		if m.currentView == ViewDeleteConfirm && m.deleteConfirm != nil {
 			return m.updateDeleteConfirm(msg)
 		}
@@ -825,6 +836,13 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.isFirstLoad {
 			m.isFirstLoad = false
 			m.showWelcome = len(msg.tasks) == 0
+
+			// If we're inside a git repo that has no TaskYou project yet, offer to
+			// create one (inferring details from the repo). This takes priority over
+			// the generic onboarding form since it's more directly useful.
+			if model, cmd, offered := m.maybeOfferProjectCreation(); offered {
+				return model, cmd
+			}
 
 			// If this is the very first run (no tasks, onboarding not completed), auto-open new task form
 			if len(msg.tasks) == 0 && m.db.IsFirstRun() && !m.onboardingShown {
@@ -1473,6 +1491,8 @@ func (m *AppModel) View() string {
 		return m.viewNewTaskConfirm()
 	case ViewProjectChangeConfirm:
 		return m.viewProjectChangeConfirm()
+	case ViewProjectDetectConfirm:
+		return m.viewProjectDetectConfirm()
 	case ViewDeleteConfirm:
 		return m.viewDeleteConfirm()
 	case ViewCloseConfirm:
@@ -3125,6 +3145,181 @@ func (m *AppModel) updateProjectChangeConfirm(msg tea.Msg) (tea.Model, tea.Cmd) 
 	}
 
 	return m, cmd
+}
+
+// maybeOfferProjectCreation checks whether the current working directory is a git
+// repo without an associated TaskYou project and, if so, opens a confirmation
+// modal offering to create one (with details inferred from the repo). The third
+// return value reports whether the offer was made; when false the caller should
+// continue with its normal flow.
+func (m *AppModel) maybeOfferProjectCreation() (tea.Model, tea.Cmd, bool) {
+	if m.projectDetectionOffered || m.db == nil || m.workingDir == "" {
+		return m, nil, false
+	}
+
+	// Only offer for git repos - non-git directories don't benefit from the
+	// worktree-based project model and aren't a clear signal of intent.
+	if !dirIsGitRepo(m.workingDir) {
+		return m, nil, false
+	}
+
+	// Skip if a project already covers this directory.
+	if proj, err := m.db.GetProjectByPath(m.workingDir); err == nil && proj != nil {
+		return m, nil, false
+	}
+
+	// Respect a previous decline for this path.
+	if v, _ := m.db.GetSetting(projectSuggestionDismissedKey(m.workingDir)); v != "" {
+		return m, nil, false
+	}
+
+	detected, source := detectProjectFromDir(m.workingDir)
+	if detected == nil {
+		return m, nil, false
+	}
+	detected.Name = uniqueProjectName(m.db, detected.Name)
+
+	m.projectDetectionOffered = true
+	model, cmd := m.showProjectDetectConfirm(detected, source)
+	return model, cmd, true
+}
+
+func (m *AppModel) showProjectDetectConfirm(project *db.Project, instructionSource string) (tea.Model, tea.Cmd) {
+	m.detectedProject = project
+	m.detectedInstructionSource = instructionSource
+	m.projectDetectConfirmValue = true
+
+	var desc strings.Builder
+	desc.WriteString(fmt.Sprintf("This directory is a git repo with no TaskYou project yet.\n\nName: %s\nPath: %s\n", project.Name, project.Path))
+	if instructionSource != "" {
+		desc.WriteString(fmt.Sprintf("Instructions: imported from %s\n", instructionSource))
+	} else {
+		desc.WriteString("Instructions: none found (add later in Settings)\n")
+	}
+	desc.WriteString("\nYou can edit any of this later in Settings.")
+
+	modalWidth := min(64, m.width-8)
+	m.projectDetectConfirm = huh.NewForm(
+		huh.NewGroup(
+			huh.NewConfirm().
+				Key("create_project").
+				Title("Create a TaskYou project for this repo?").
+				Description(desc.String()).
+				Affirmative("Create Project").
+				Negative("Not Now").
+				Value(&m.projectDetectConfirmValue),
+		),
+	).WithTheme(huh.ThemeDracula()).
+		WithWidth(modalWidth - 6).
+		WithShowHelp(true)
+
+	m.previousView = m.currentView
+	m.currentView = ViewProjectDetectConfirm
+	return m, m.projectDetectConfirm.Init()
+}
+
+func (m *AppModel) viewProjectDetectConfirm() string {
+	if m.projectDetectConfirm == nil {
+		return ""
+	}
+
+	header := lipgloss.NewStyle().
+		Bold(true).
+		Foreground(ColorPrimary).
+		MarginBottom(1).
+		Render("📁 New Project Detected")
+
+	formView := m.projectDetectConfirm.View()
+
+	modalWidth := min(64, m.width-8)
+	modalBox := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(ColorPrimary).
+		Padding(1, 2).
+		Width(modalWidth)
+
+	modalContent := modalBox.Render(lipgloss.JoinVertical(lipgloss.Center, header, formView))
+
+	return lipgloss.NewStyle().
+		Width(m.width).
+		Height(m.height).
+		Align(lipgloss.Center, lipgloss.Center).
+		Render(modalContent)
+}
+
+func (m *AppModel) updateProjectDetectConfirm(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if keyMsg, ok := msg.(tea.KeyMsg); ok {
+		switch keyMsg.String() {
+		case "esc", "ctrl+c":
+			// Treat dismissal like declining so we don't nag on every startup.
+			m.dismissProjectSuggestion()
+			return m, nil
+		}
+	}
+
+	model, cmd := m.projectDetectConfirm.Update(msg)
+	m.projectDetectConfirm = model.(*huh.Form)
+
+	if m.projectDetectConfirm.State == huh.StateCompleted {
+		confirmed := m.projectDetectConfirmValue
+		detected := m.detectedProject
+		m.projectDetectConfirm = nil
+		m.currentView = m.previousView
+
+		if confirmed && detected != nil {
+			m.detectedProject = nil
+			return m, m.createDetectedProject(detected)
+		}
+		m.dismissProjectSuggestion()
+		return m, nil
+	}
+	if m.projectDetectConfirm.State == huh.StateAborted {
+		m.dismissProjectSuggestion()
+		return m, nil
+	}
+
+	return m, cmd
+}
+
+// dismissProjectSuggestion records that the user declined to create a project for
+// the current directory and closes the modal.
+func (m *AppModel) dismissProjectSuggestion() {
+	if m.db != nil && m.workingDir != "" {
+		m.db.SetSetting(projectSuggestionDismissedKey(m.workingDir), "1")
+	}
+	m.projectDetectConfirm = nil
+	m.detectedProject = nil
+	m.currentView = m.previousView
+}
+
+// createDetectedProject persists the inferred project and reloads the board.
+func (m *AppModel) createDetectedProject(project *db.Project) tea.Cmd {
+	// Worktree isolation needs at least one commit to branch from. Detected repos
+	// almost always have commits, but guard against the empty-repo edge case so the
+	// first task doesn't fail to create a worktree.
+	if project.UseWorktrees && project.Path != "" {
+		if err := ensureGitRepoHasCommit(project.Path); err != nil {
+			m.notification = fmt.Sprintf("%s Failed to prepare git repo: %s", IconBlocked(), err.Error())
+			m.notifyUntil = time.Now().Add(5 * time.Second)
+			return nil
+		}
+	}
+
+	if err := m.db.CreateProject(project); err != nil {
+		m.notification = fmt.Sprintf("%s Failed to create project: %s", IconBlocked(), err.Error())
+		m.notifyUntil = time.Now().Add(5 * time.Second)
+		return nil
+	}
+
+	// Make the new project the default selection for the next task.
+	m.db.SetLastUsedProject(project.Name)
+	// Refresh project color cache so the new project renders consistently.
+	LoadProjectColors(m.db)
+
+	m.notification = fmt.Sprintf("%s Created project \"%s\"", IconDone(), project.Name)
+	m.notifyUntil = time.Now().Add(5 * time.Second)
+
+	return m.loadTasks()
 }
 
 func (m *AppModel) showQuitConfirm() (tea.Model, tea.Cmd) {

@@ -2,7 +2,6 @@ package ui
 
 import (
 	"fmt"
-	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -268,6 +267,7 @@ func (m *SettingsModel) updateBrowser(msg tea.Msg) (*SettingsModel, tea.Cmd) {
 func (m *SettingsModel) showProjectForm(project *db.Project) (*SettingsModel, tea.Cmd) {
 	m.editingProject = true
 	m.editProject = project
+	m.err = nil
 
 	// Initialize form values
 	m.projectFormName = project.Name
@@ -518,27 +518,6 @@ func ensureGitRepoHasCommit(path string) error {
 	return nil
 }
 
-// findNestedGitRepos searches for .git directories inside the given path (excluding root)
-func findNestedGitRepos(rootPath string) []string {
-	var nested []string
-	filepath.WalkDir(rootPath, func(path string, d fs.DirEntry, err error) error {
-		if err != nil || !d.IsDir() {
-			return nil
-		}
-		// Skip common dependency/build directories
-		if d.Name() == "node_modules" || d.Name() == "vendor" || d.Name() == ".task-worktrees" {
-			return filepath.SkipDir
-		}
-		// Check for nested .git (not the root one)
-		if d.Name() == ".git" && filepath.Dir(path) != rootPath {
-			nested = append(nested, filepath.Dir(path))
-			return filepath.SkipDir
-		}
-		return nil
-	})
-	return nested
-}
-
 // initGitRepo initializes a git repo with an initial commit
 func initGitRepo(path string) error {
 	// Create directory if needed
@@ -640,22 +619,17 @@ func (m *SettingsModel) saveProject() (*SettingsModel, tea.Cmd) {
 
 		if useWorktrees {
 			if isGitRepo(path) {
-				// Existing git repo - check for nested repos
-				nested := findNestedGitRepos(path)
-				if len(nested) > 0 {
-					m.err = fmt.Errorf("directory contains %d nested git repo(s) - select a single repo instead", len(nested))
-					return m, nil
-				}
-				// Valid existing git repo - ensure it has at least one commit for worktrees
+				// Existing git repo. Nested/sub git repos are allowed - they are
+				// simply left untracked by the parent repo and don't interfere
+				// with worktree isolation, so there's no reason to reject them.
+				// Ensure the repo has at least one commit so worktrees have a base.
 				if err := ensureGitRepoHasCommit(path); err != nil {
-					m.err = fmt.Errorf("failed to initialize git commit: %w", err)
-					return m, nil
+					return m.reshowProjectFormWithError(fmt.Errorf("failed to initialize git commit: %w", err))
 				}
 			} else {
 				// Not a git repo - initialize it (required for worktree isolation)
 				if err := initGitRepo(path); err != nil {
-					m.err = fmt.Errorf("failed to initialize git: %w", err)
-					return m, nil
+					return m.reshowProjectFormWithError(fmt.Errorf("failed to initialize git: %w", err))
 				}
 			}
 		}
@@ -664,14 +638,12 @@ func (m *SettingsModel) saveProject() (*SettingsModel, tea.Cmd) {
 		if useWorktrees {
 			// Path doesn't exist - create and initialize git repo
 			if err := initGitRepo(path); err != nil {
-				m.err = fmt.Errorf("failed to create project: %w", err)
-				return m, nil
+				return m.reshowProjectFormWithError(fmt.Errorf("failed to create project: %w", err))
 			}
 		} else {
 			// Path doesn't exist - just create the directory
 			if err := os.MkdirAll(path, 0755); err != nil {
-				m.err = fmt.Errorf("failed to create project directory: %w", err)
-				return m, nil
+				return m.reshowProjectFormWithError(fmt.Errorf("failed to create project directory: %w", err))
 			}
 		}
 	}
@@ -705,6 +677,25 @@ func (m *SettingsModel) saveProject() (*SettingsModel, tea.Cmd) {
 	m.err = nil
 	m.loadSettings()
 	return m, nil
+}
+
+// reshowProjectFormWithError re-opens the project form preserving the values the
+// user already entered, displaying err. This avoids dropping the user back to the
+// settings list (and losing their work) when saving fails - e.g. a git init error
+// that surfaces only after a directory has been selected in the file browser.
+func (m *SettingsModel) reshowProjectFormWithError(err error) (*SettingsModel, tea.Cmd) {
+	if m.editProject == nil {
+		m.editProject = &db.Project{}
+	}
+	m.editProject.Name = strings.TrimSpace(m.projectFormName)
+	m.editProject.Aliases = strings.TrimSpace(m.projectFormAliases)
+	m.editProject.Instructions = strings.TrimSpace(m.projectFormInstructions)
+	m.editProject.ClaudeConfigDir = strings.TrimSpace(m.projectFormClaudeConfigDir)
+	m.editProject.UseWorktrees = m.projectFormUseWorktrees
+
+	model, cmd := m.showProjectForm(m.editProject)
+	model.err = err
+	return model, cmd
 }
 
 func (m *SettingsModel) saveTaskType() (*SettingsModel, tea.Cmd) {
@@ -872,6 +863,15 @@ func (m *SettingsModel) viewProjectFormModal() string {
 	}
 
 	formView := m.projectForm.View()
+
+	// Surface any save error inline so the user can fix it without losing work.
+	if m.err != nil {
+		formView = lipgloss.JoinVertical(lipgloss.Left,
+			formView,
+			"",
+			Error.Render(m.err.Error()),
+		)
+	}
 
 	// Modal box with border
 	modalWidth := min(70, m.width-8)
