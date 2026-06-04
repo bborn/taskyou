@@ -16,6 +16,7 @@ chmod +x ~/.config/task/hooks/task.completed
 - `task.deleted` - Task removed
 - `task.started` - Execution begins
 - `task.blocked` - Task needs user input (also fires on failure via the status change)
+- `task.auth_required` - A processing task stalled because its executor session is logged out (e.g. expired Claude `/login`); fires alongside `task.blocked`. Use this to notify yourself to re-authenticate.
 - `task.completed` - Agent finished successfully (task moves to backlog for human review)
 - `task.failed` - Agent execution failed (distinct signal from the `task.blocked` fired by the status change)
 - `task.worktree_ready` - Worktree ready for the agent
