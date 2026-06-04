@@ -37,6 +37,7 @@ type SettingsModel struct {
 	editProject                *db.Project
 	projectForm                *huh.Form
 	projectFormName            string
+	projectFormPath            string
 	projectFormAliases         string
 	projectFormInstructions    string
 	projectFormClaudeConfigDir string
@@ -269,6 +270,7 @@ func (m *SettingsModel) showProjectForm(project *db.Project) (*SettingsModel, te
 
 	// Initialize form values
 	m.projectFormName = project.Name
+	m.projectFormPath = project.Path
 	m.projectFormAliases = project.Aliases
 	m.projectFormInstructions = project.Instructions
 	m.projectFormClaudeConfigDir = project.ClaudeConfigDir
@@ -278,45 +280,61 @@ func (m *SettingsModel) showProjectForm(project *db.Project) (*SettingsModel, te
 	description := "You'll choose a directory next"
 	if project.ID != 0 {
 		title = "Edit Project"
-		description = fmt.Sprintf("Path: %s", project.Path)
+		description = "Update project settings"
 	} else if project.Path != "" {
 		// New project but path already selected
 		description = fmt.Sprintf("Path: %s", project.Path)
 	}
 
+	fields := []huh.Field{
+		huh.NewInput().
+			Key("name").
+			Title("Name").
+			Placeholder("Project name").
+			Value(&m.projectFormName),
+	}
+
+	// For existing projects, allow editing the directory inline. New projects
+	// choose their directory via the file browser after the form is submitted.
+	if project.ID != 0 {
+		fields = append(fields, huh.NewInput().
+			Key("path").
+			Title("Directory").
+			Description("Project directory path (~ expands to home)").
+			Placeholder("~/Projects/myapp").
+			Value(&m.projectFormPath))
+	}
+
+	fields = append(fields,
+		huh.NewInput().
+			Key("aliases").
+			Title("Aliases").
+			Description("Comma-separated shortcuts").
+			Placeholder("alias1, alias2").
+			Value(&m.projectFormAliases),
+		huh.NewText().
+			Key("instructions").
+			Title("Instructions").
+			Description("Project-specific instructions for AI").
+			Placeholder("Instructions...").
+			CharLimit(5000).
+			Value(&m.projectFormInstructions),
+		huh.NewInput().
+			Key("claude_config_dir").
+			Title("Claude Config Directory").
+			Description("Overrides CLAUDE_CONFIG_DIR for this project").
+			Placeholder("~/.claude-other-account").
+			Value(&m.projectFormClaudeConfigDir),
+		huh.NewConfirm().
+			Key("use_worktrees").
+			Title("Use Git Worktrees").
+			Description("Isolate tasks in git worktrees. Disable for non-git projects.").
+			Value(&m.projectFormUseWorktrees),
+	)
+
 	modalWidth := min(70, m.width-8)
 	m.projectForm = huh.NewForm(
-		huh.NewGroup(
-			huh.NewInput().
-				Key("name").
-				Title("Name").
-				Placeholder("Project name").
-				Value(&m.projectFormName),
-			huh.NewInput().
-				Key("aliases").
-				Title("Aliases").
-				Description("Comma-separated shortcuts").
-				Placeholder("alias1, alias2").
-				Value(&m.projectFormAliases),
-			huh.NewText().
-				Key("instructions").
-				Title("Instructions").
-				Description("Project-specific instructions for AI").
-				Placeholder("Instructions...").
-				CharLimit(5000).
-				Value(&m.projectFormInstructions),
-			huh.NewInput().
-				Key("claude_config_dir").
-				Title("Claude Config Directory").
-				Description("Overrides CLAUDE_CONFIG_DIR for this project").
-				Placeholder("~/.claude-other-account").
-				Value(&m.projectFormClaudeConfigDir),
-			huh.NewConfirm().
-				Key("use_worktrees").
-				Title("Use Git Worktrees").
-				Description("Isolate tasks in git worktrees. Disable for non-git projects.").
-				Value(&m.projectFormUseWorktrees),
-		).Title(title).Description(description),
+		huh.NewGroup(fields...).Title(title).Description(description),
 	).WithTheme(huh.ThemeDracula()).
 		WithWidth(modalWidth - 6).
 		WithShowHelp(true)
@@ -425,6 +443,26 @@ func (m *SettingsModel) updateTaskTypeFormModal(msg tea.Msg) (*SettingsModel, te
 	return m, cmd
 }
 
+// resolveProjectPath expands a leading "~" to the user's home directory and
+// returns the absolute, cleaned path.
+func resolveProjectPath(path string) (string, error) {
+	expanded := path
+	if path == "~" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", err
+		}
+		expanded = home
+	} else if strings.HasPrefix(path, "~/") {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", err
+		}
+		expanded = filepath.Join(home, path[2:])
+	}
+	return filepath.Abs(expanded)
+}
+
 // isGitRepo checks if a directory contains a .git folder
 func isGitRepo(path string) bool {
 	gitDir := filepath.Join(path, ".git")
@@ -526,6 +564,30 @@ func (m *SettingsModel) saveProject() (*SettingsModel, tea.Cmd) {
 	}
 
 	useWorktrees := m.projectFormUseWorktrees
+
+	// For existing projects, the directory can be edited directly in the form.
+	if m.editProject.ID != 0 {
+		formPath := strings.TrimSpace(m.projectFormPath)
+		if formPath == "" {
+			m.err = fmt.Errorf("directory is required")
+			return m, nil
+		}
+		absPath, err := resolveProjectPath(formPath)
+		if err != nil {
+			m.err = fmt.Errorf("invalid path: %w", err)
+			return m, nil
+		}
+		// When pointing an existing project at a new directory, require that
+		// directory to already exist. This avoids silently creating (and
+		// git-initializing) a directory at a mistyped path.
+		if absPath != m.editProject.Path {
+			if _, statErr := os.Stat(absPath); os.IsNotExist(statErr) {
+				m.err = fmt.Errorf("path does not exist: %s", absPath)
+				return m, nil
+			}
+		}
+		m.editProject.Path = absPath
+	}
 
 	// For new projects without a path, open file browser
 	if m.editProject.ID == 0 && m.editProject.Path == "" {
