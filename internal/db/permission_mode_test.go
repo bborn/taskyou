@@ -44,28 +44,28 @@ func TestTaskEffectivePermissionMode(t *testing.T) {
 
 func TestGlobalDefaultPermissionMode(t *testing.T) {
 	t.Setenv("TASKYOU_DEFAULT_PERMISSION_MODE", "")
-	if got := GlobalDefaultPermissionMode(); got != PermissionModeDefault {
-		t.Errorf("default global = %q, want %q", got, PermissionModeDefault)
-	}
-	t.Setenv("TASKYOU_DEFAULT_PERMISSION_MODE", "auto")
 	if got := GlobalDefaultPermissionMode(); got != PermissionModeAuto {
-		t.Errorf("override global = %q, want %q", got, PermissionModeAuto)
+		t.Errorf("default global = %q, want %q", got, PermissionModeAuto)
+	}
+	t.Setenv("TASKYOU_DEFAULT_PERMISSION_MODE", "default")
+	if got := GlobalDefaultPermissionMode(); got != PermissionModeDefault {
+		t.Errorf("override global = %q, want %q", got, PermissionModeDefault)
 	}
 	t.Setenv("TASKYOU_DEFAULT_PERMISSION_MODE", "garbage")
-	if got := GlobalDefaultPermissionMode(); got != PermissionModeDefault {
-		t.Errorf("invalid override should fall back to default, got %q", got)
+	if got := GlobalDefaultPermissionMode(); got != PermissionModeAuto {
+		t.Errorf("invalid override should fall back to auto, got %q", got)
 	}
 }
 
 func TestProjectEffectiveDefaultPermissionMode(t *testing.T) {
 	t.Setenv("TASKYOU_DEFAULT_PERMISSION_MODE", "")
-	p := &Project{DefaultPermissionMode: PermissionModeAuto}
-	if got := p.EffectiveDefaultPermissionMode(); got != PermissionModeAuto {
-		t.Errorf("got %q, want auto", got)
+	p := &Project{DefaultPermissionMode: PermissionModeDangerous}
+	if got := p.EffectiveDefaultPermissionMode(); got != PermissionModeDangerous {
+		t.Errorf("got %q, want dangerous", got)
 	}
 	p = &Project{}
-	if got := p.EffectiveDefaultPermissionMode(); got != PermissionModeDefault {
-		t.Errorf("unset project should use global default, got %q", got)
+	if got := p.EffectiveDefaultPermissionMode(); got != PermissionModeAuto {
+		t.Errorf("unset project should use global default (auto), got %q", got)
 	}
 }
 

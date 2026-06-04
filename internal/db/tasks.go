@@ -96,13 +96,14 @@ func NormalizePermissionMode(mode string) string {
 
 // GlobalDefaultPermissionMode returns the fallback permission mode used when a
 // project has no explicit default. It can be overridden with the
-// TASKYOU_DEFAULT_PERMISSION_MODE environment variable. Defaults to "default"
-// (prompt) to preserve existing behavior for users who never opt in.
+// TASKYOU_DEFAULT_PERMISSION_MODE environment variable. Defaults to "auto"
+// (acceptEdits) so tasks start unblocked without a manual per-session toggle;
+// set the env var to "default" to restore prompt-for-every-permission behavior.
 func GlobalDefaultPermissionMode() string {
 	if m := NormalizePermissionMode(os.Getenv("TASKYOU_DEFAULT_PERMISSION_MODE")); m != "" {
 		return m
 	}
-	return PermissionModeDefault
+	return PermissionModeAuto
 }
 
 // EffectivePermissionMode resolves the permission mode a task should run with,

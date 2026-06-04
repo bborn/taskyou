@@ -275,16 +275,12 @@ func (m *SettingsModel) showProjectForm(project *db.Project) (*SettingsModel, te
 	m.projectFormClaudeConfigDir = project.ClaudeConfigDir
 	m.projectFormUseWorktrees = project.UseWorktrees
 
-	// Default permission mode. New projects default to "auto" (the recommended,
-	// low-friction mode); existing projects keep their stored value, falling back
-	// to "default" (prompt) when unset to preserve prior behavior.
+	// Default permission mode. Use the project's explicit setting when present,
+	// otherwise pre-select the effective default (auto) so the form mirrors the
+	// mode tasks will actually run in.
 	m.projectFormPermissionMode = db.NormalizePermissionMode(project.DefaultPermissionMode)
 	if m.projectFormPermissionMode == "" {
-		if project.ID == 0 {
-			m.projectFormPermissionMode = db.PermissionModeAuto
-		} else {
-			m.projectFormPermissionMode = db.PermissionModeDefault
-		}
+		m.projectFormPermissionMode = project.EffectiveDefaultPermissionMode()
 	}
 
 	title := "New Project"
