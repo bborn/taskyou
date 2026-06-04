@@ -108,6 +108,69 @@ func TestBodyHeightFillsAvailableSpace(t *testing.T) {
 	}
 }
 
+func TestEditFormIsModal(t *testing.T) {
+	task := &db.Task{Title: "Test task", Body: "Some body", Project: "proj"}
+	m := NewEditFormModel(nil, task, 120, 40, []string{"claude"})
+
+	if !m.modal {
+		t.Fatal("expected edit form to be rendered as a modal")
+	}
+
+	view := m.View()
+
+	// A centered modal floats within the screen, so the first line should be
+	// blank padding rather than the top border of a full-screen box.
+	firstLine := strings.SplitN(view, "\n", 2)[0]
+	if strings.Contains(firstLine, "╭") {
+		t.Errorf("expected modal to be centered with top margin, but first line is the border: %q", firstLine)
+	}
+
+	// The modal box should be narrower than the full screen width.
+	if !strings.Contains(view, "         ╭") {
+		t.Error("expected modal box to be indented (narrower than full width)")
+	}
+}
+
+func TestEditFormDiscardWarningAtTop(t *testing.T) {
+	task := &db.Task{Title: "Test task", Body: "Some body", Project: "proj"}
+	m := NewEditFormModel(nil, task, 120, 40, []string{"claude"})
+	m.showCancelConfirm = true
+
+	view := m.View()
+
+	discardIdx := strings.Index(view, "Discard changes?")
+	if discardIdx == -1 {
+		t.Fatal("expected discard warning to be rendered")
+	}
+
+	// In modal mode the warning must appear above the editable fields
+	// (Title/Details), i.e. at the top of the modal.
+	titleIdx := strings.Index(view, "Title")
+	if titleIdx == -1 {
+		t.Fatal("expected Title field to be rendered")
+	}
+	if discardIdx > titleIdx {
+		t.Errorf("expected discard warning (pos %d) to appear before Title field (pos %d)", discardIdx, titleIdx)
+	}
+}
+
+func TestEditFormModalBodyHeightBounded(t *testing.T) {
+	task := &db.Task{Title: "Test", Body: "one line"}
+
+	// Short body on a tall screen should stay compact (not fill the screen).
+	m := NewEditFormModel(nil, task, 120, 80, []string{"claude"})
+	if h := m.calculateBodyHeight(); h > 14 {
+		t.Errorf("modal body height %d should be bounded to <= 14 for a short body", h)
+	}
+
+	// A long body grows but is still capped so every field stays visible.
+	task.Body = strings.Repeat("line\n", 100)
+	big := NewEditFormModel(nil, task, 120, 80, []string{"claude"})
+	if h := big.calculateBodyHeight(); h > 14 {
+		t.Errorf("modal body height %d should be capped at 14 even for long bodies", h)
+	}
+}
+
 func TestRenderBodyScrollbar(t *testing.T) {
 	tests := []struct {
 		name          string
