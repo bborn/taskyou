@@ -2276,11 +2276,8 @@ func (e *Executor) runClaude(ctx context.Context, task *db.Task, workDir, prompt
 	if sessionID == "" {
 		sessionID = fmt.Sprintf("%d", os.Getpid())
 	}
-	// Use --dangerously-skip-permissions if task has dangerous mode enabled or WORKTREE_DANGEROUS_MODE is set
-	dangerousFlag := ""
-	if task.DangerousMode || os.Getenv("WORKTREE_DANGEROUS_MODE") == "1" {
-		dangerousFlag = "--dangerously-skip-permissions "
-	}
+	// Permission flag: dangerous, auto (acceptEdits), or none, honoring the task's mode
+	dangerousFlag := claudePermissionFlag(task)
 	// Build system prompt flag - passes task guidance via system prompt to keep conversation clean
 	systemPromptFlag := fmt.Sprintf(`--append-system-prompt "$(cat %q)" `, systemFile.Name())
 
@@ -2450,11 +2447,8 @@ func (e *Executor) runClaudeResume(ctx context.Context, task *db.Task, workDir, 
 	if taskSessionID == "" {
 		taskSessionID = fmt.Sprintf("%d", os.Getpid())
 	}
-	// Use --dangerously-skip-permissions if task has dangerous mode enabled or WORKTREE_DANGEROUS_MODE is set
-	dangerousFlag := ""
-	if task.DangerousMode || os.Getenv("WORKTREE_DANGEROUS_MODE") == "1" {
-		dangerousFlag = "--dangerously-skip-permissions "
-	}
+	// Permission flag: dangerous, auto (acceptEdits), or none, honoring the task's mode
+	dangerousFlag := claudePermissionFlag(task)
 	// Build system prompt flag - passes task guidance via system prompt to keep conversation clean
 	systemPromptFlag := fmt.Sprintf(`--append-system-prompt "$(cat %q)" `, systemFile.Name())
 

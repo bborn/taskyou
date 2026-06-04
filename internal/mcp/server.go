@@ -238,7 +238,12 @@ func (s *Server) handleRequest(req *jsonRPCRequest) {
 							},
 							"dangerous_mode": map[string]interface{}{
 								"type":        "boolean",
-								"description": "Execute in dangerous mode (skip permission prompts). Only applies when status is 'queued'.",
+								"description": "Execute in dangerous mode (skip permission prompts). Only applies when status is 'queued'. Prefer 'permission_mode' instead.",
+							},
+							"permission_mode": map[string]interface{}{
+								"type":        "string",
+								"description": "Permission mode for execution: 'default' (prompt), 'auto' (auto-accept edits), or 'dangerous' (skip all prompts). Defaults to the project's configured default.",
+								"enum":        []string{"default", "auto", "dangerous"},
 							},
 						},
 						"required": []string{"title"},
@@ -550,6 +555,7 @@ func (s *Server) handleToolCall(id interface{}, params *toolCallParams) {
 		taskType, _ := params.Arguments["type"].(string)
 		status, _ := params.Arguments["status"].(string)
 		dangerousMode, _ := params.Arguments["dangerous_mode"].(bool)
+		permissionMode, _ := params.Arguments["permission_mode"].(string)
 
 		// Default project to current task's project
 		if project == "" {
@@ -563,13 +569,20 @@ func (s *Server) handleToolCall(id interface{}, params *toolCallParams) {
 			status = db.StatusBacklog
 		}
 
+		// Resolve permission mode: explicit permission_mode wins, then the legacy
+		// dangerous_mode bool; empty falls back to the project default in CreateTask.
+		permissionMode = db.NormalizePermissionMode(permissionMode)
+		if permissionMode == "" && dangerousMode {
+			permissionMode = db.PermissionModeDangerous
+		}
+
 		newTask := &db.Task{
-			Title:         title,
-			Body:          body,
-			Project:       project,
-			Type:          taskType,
-			Status:        status,
-			DangerousMode: dangerousMode && status == db.StatusQueued,
+			Title:          title,
+			Body:           body,
+			Project:        project,
+			Type:           taskType,
+			Status:         status,
+			PermissionMode: permissionMode,
 		}
 
 		if err := s.db.CreateTask(newTask); err != nil {

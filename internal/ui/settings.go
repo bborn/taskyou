@@ -41,6 +41,7 @@ type SettingsModel struct {
 	projectFormInstructions    string
 	projectFormClaudeConfigDir string
 	projectFormUseWorktrees    bool
+	projectFormPermissionMode  string
 
 	// Task Types
 	taskTypes        []*db.TaskType
@@ -274,6 +275,18 @@ func (m *SettingsModel) showProjectForm(project *db.Project) (*SettingsModel, te
 	m.projectFormClaudeConfigDir = project.ClaudeConfigDir
 	m.projectFormUseWorktrees = project.UseWorktrees
 
+	// Default permission mode. New projects default to "auto" (the recommended,
+	// low-friction mode); existing projects keep their stored value, falling back
+	// to "default" (prompt) when unset to preserve prior behavior.
+	m.projectFormPermissionMode = db.NormalizePermissionMode(project.DefaultPermissionMode)
+	if m.projectFormPermissionMode == "" {
+		if project.ID == 0 {
+			m.projectFormPermissionMode = db.PermissionModeAuto
+		} else {
+			m.projectFormPermissionMode = db.PermissionModeDefault
+		}
+	}
+
 	title := "New Project"
 	description := "You'll choose a directory next"
 	if project.ID != 0 {
@@ -316,6 +329,16 @@ func (m *SettingsModel) showProjectForm(project *db.Project) (*SettingsModel, te
 				Title("Use Git Worktrees").
 				Description("Isolate tasks in git worktrees. Disable for non-git projects.").
 				Value(&m.projectFormUseWorktrees),
+			huh.NewSelect[string]().
+				Key("permission_mode").
+				Title("Default Permission Mode").
+				Description("How new tasks handle permissions. Auto handles ~99% without prompting.").
+				Options(
+					huh.NewOption("Auto — auto-accept edits (recommended)", db.PermissionModeAuto),
+					huh.NewOption("Prompt — ask for each permission", db.PermissionModeDefault),
+					huh.NewOption("Dangerous — skip all permission checks", db.PermissionModeDangerous),
+				).
+				Value(&m.projectFormPermissionMode),
 		).Title(title).Description(description),
 	).WithTheme(huh.ThemeDracula()).
 		WithWidth(modalWidth - 6).
@@ -511,6 +534,7 @@ func (m *SettingsModel) saveProject() (*SettingsModel, tea.Cmd) {
 	aliases := strings.TrimSpace(m.projectFormAliases)
 	instructions := strings.TrimSpace(m.projectFormInstructions)
 	configDir := strings.TrimSpace(m.projectFormClaudeConfigDir)
+	permissionMode := db.NormalizePermissionMode(m.projectFormPermissionMode)
 
 	// If form values are empty but editProject has values, use those
 	if name == "" && m.editProject.Name != "" {
@@ -518,6 +542,7 @@ func (m *SettingsModel) saveProject() (*SettingsModel, tea.Cmd) {
 		aliases = m.editProject.Aliases
 		instructions = m.editProject.Instructions
 		configDir = m.editProject.ClaudeConfigDir
+		permissionMode = m.editProject.DefaultPermissionMode
 	}
 
 	if name == "" {
@@ -534,6 +559,7 @@ func (m *SettingsModel) saveProject() (*SettingsModel, tea.Cmd) {
 		m.editProject.Instructions = instructions
 		m.editProject.ClaudeConfigDir = configDir
 		m.editProject.UseWorktrees = useWorktrees
+		m.editProject.DefaultPermissionMode = permissionMode
 		m.editingProject = false
 		m.projectForm = nil
 		m.browsing = true
@@ -597,6 +623,7 @@ func (m *SettingsModel) saveProject() (*SettingsModel, tea.Cmd) {
 	m.editProject.Instructions = instructions
 	m.editProject.ClaudeConfigDir = configDir
 	m.editProject.UseWorktrees = useWorktrees
+	m.editProject.DefaultPermissionMode = permissionMode
 
 	if m.editProject.ID == 0 {
 		err = m.db.CreateProject(m.editProject)
@@ -898,6 +925,9 @@ func (m *SettingsModel) View() string {
 			}
 			if strings.TrimSpace(p.ClaudeConfigDir) != "" {
 				line += Dim.Render(fmt.Sprintf(" [claude: %s]", p.ClaudeConfigDir))
+			}
+			if mode := db.NormalizePermissionMode(p.DefaultPermissionMode); mode != "" && mode != db.PermissionModeDefault {
+				line += Dim.Render(fmt.Sprintf(" [%s]", mode))
 			}
 			b.WriteString(lipgloss.NewStyle().Padding(0, 2).Render(style.Render(line)))
 			b.WriteString("\n")

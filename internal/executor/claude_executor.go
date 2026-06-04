@@ -18,6 +18,23 @@ type ClaudeExecutor struct {
 	logger   *log.Logger
 }
 
+// claudePermissionFlag returns the Claude CLI permission flag (with a trailing
+// space) for a task's effective permission mode. The WORKTREE_DANGEROUS_MODE
+// environment variable forces dangerous mode for sandboxed environments.
+func claudePermissionFlag(task *db.Task) string {
+	if os.Getenv("WORKTREE_DANGEROUS_MODE") == "1" {
+		return "--dangerously-skip-permissions "
+	}
+	switch task.EffectivePermissionMode() {
+	case db.PermissionModeDangerous:
+		return "--dangerously-skip-permissions "
+	case db.PermissionModeAuto:
+		return "--permission-mode acceptEdits "
+	default:
+		return ""
+	}
+}
+
 // NewClaudeExecutor creates a new Claude executor.
 func NewClaudeExecutor(e *Executor) *ClaudeExecutor {
 	return &ClaudeExecutor{
@@ -76,11 +93,8 @@ func (c *ClaudeExecutor) ResumeProcess(taskID int64) bool {
 
 // BuildCommand returns the shell command to start an interactive Claude session.
 func (c *ClaudeExecutor) BuildCommand(task *db.Task, sessionID, prompt string) string {
-	// Build dangerous mode flag
-	dangerousFlag := ""
-	if task.DangerousMode || os.Getenv("WORKTREE_DANGEROUS_MODE") == "1" {
-		dangerousFlag = "--dangerously-skip-permissions "
-	}
+	// Build permission mode flag (dangerous, auto/acceptEdits, or none)
+	dangerousFlag := claudePermissionFlag(task)
 
 	// Get session ID for environment
 	worktreeSessionID := os.Getenv("WORKTREE_SESSION_ID")

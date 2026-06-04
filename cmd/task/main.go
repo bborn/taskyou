@@ -567,6 +567,7 @@ Examples:
 			taskExecutor, _ := cmd.Flags().GetString("executor")
 			execute, _ := cmd.Flags().GetBool("execute")
 			createDangerous, _ := cmd.Flags().GetBool("dangerous")
+			permissionModeFlag, _ := cmd.Flags().GetString("permission-mode")
 			tags, _ := cmd.Flags().GetString("tags")
 			pinned, _ := cmd.Flags().GetBool("pinned")
 			branch, _ := cmd.Flags().GetString("branch")
@@ -670,18 +671,25 @@ Examples:
 				status = db.StatusQueued
 			}
 
+			// Resolve permission mode: an explicit --permission-mode wins, then the
+			// legacy --dangerous flag; empty inherits the project default in CreateTask.
+			permMode := db.NormalizePermissionMode(permissionModeFlag)
+			if permMode == "" && createDangerous {
+				permMode = db.PermissionModeDangerous
+			}
+
 			// Create the task
 			task := &db.Task{
-				Title:         title,
-				Body:          body,
-				Status:        status,
-				Type:          taskType,
-				Project:       project,
-				Executor:      taskExecutor,
-				Tags:          tags,
-				Pinned:        pinned,
-				SourceBranch:  branch,
-				DangerousMode: createDangerous && execute,
+				Title:          title,
+				Body:           body,
+				Status:         status,
+				Type:           taskType,
+				Project:        project,
+				Executor:       taskExecutor,
+				Tags:           tags,
+				Pinned:         pinned,
+				SourceBranch:   branch,
+				PermissionMode: permMode,
 			}
 
 			if err := database.CreateTask(task); err != nil {
@@ -724,7 +732,8 @@ Examples:
 	createCmd.Flags().StringP("project", "p", "", "Project name (auto-detected from cwd if not specified)")
 	createCmd.Flags().StringP("executor", "e", "", "Task executor: claude, codex, gemini, pi, opencode, openclaw (default: claude)")
 	createCmd.Flags().BoolP("execute", "x", false, "Queue task for immediate execution")
-	createCmd.Flags().Bool("dangerous", false, "Execute in dangerous mode (requires --execute)")
+	createCmd.Flags().Bool("dangerous", false, "Execute in dangerous mode (alias for --permission-mode dangerous)")
+	createCmd.Flags().String("permission-mode", "", "Permission mode: default (prompt), auto (auto-accept edits), dangerous (skip all). Defaults to the project's setting")
 	createCmd.Flags().String("tags", "", "Task tags (comma-separated)")
 	createCmd.Flags().Bool("pinned", false, "Pin the task to the top of its column")
 	createCmd.Flags().StringP("branch", "b", "", "Existing branch to checkout for worktree (e.g., fix/ui-overflow)")
@@ -1523,6 +1532,11 @@ Examples:
 			}
 
 			executeDangerous, _ := cmd.Flags().GetBool("dangerous")
+			executePermMode, _ := cmd.Flags().GetString("permission-mode")
+			executePermMode = db.NormalizePermissionMode(executePermMode)
+			if executePermMode == "" && executeDangerous {
+				executePermMode = db.PermissionModeDangerous
+			}
 
 			// Open database
 			dbPath := db.DefaultPath()
@@ -1553,12 +1567,13 @@ Examples:
 				return
 			}
 
-			// Set dangerous mode if requested
-			if executeDangerous {
-				if err := database.UpdateTaskDangerousMode(taskID, true); err != nil {
-					fmt.Fprintln(os.Stderr, errorStyle.Render("Error setting dangerous mode: "+err.Error()))
+			// Override the task's permission mode if explicitly requested.
+			if executePermMode != "" {
+				if err := database.UpdateTaskPermissionMode(taskID, executePermMode); err != nil {
+					fmt.Fprintln(os.Stderr, errorStyle.Render("Error setting permission mode: "+err.Error()))
 					os.Exit(1)
 				}
+				task.PermissionMode = executePermMode
 			}
 
 			if err := database.UpdateTaskStatus(taskID, db.StatusQueued); err != nil {
@@ -1567,13 +1582,17 @@ Examples:
 			}
 
 			msg := fmt.Sprintf("Queued task #%d: %s", taskID, task.Title)
-			if executeDangerous {
+			switch task.EffectivePermissionMode() {
+			case db.PermissionModeDangerous:
 				msg += " (dangerous mode)"
+			case db.PermissionModeAuto:
+				msg += " (auto mode)"
 			}
 			fmt.Println(successStyle.Render(msg))
 		},
 	}
-	executeCmd.Flags().Bool("dangerous", false, "Execute in dangerous mode (skip permission prompts)")
+	executeCmd.Flags().Bool("dangerous", false, "Execute in dangerous mode (alias for --permission-mode dangerous)")
+	executeCmd.Flags().String("permission-mode", "", "Override permission mode: default (prompt), auto (auto-accept edits), dangerous (skip all)")
 	rootCmd.AddCommand(executeCmd)
 
 	statusCmd := &cobra.Command{
@@ -2415,10 +2434,11 @@ Examples:
 			color, _ := cmd.Flags().GetString("color")
 			aliases, _ := cmd.Flags().GetString("aliases")
 			claudeConfigDir, _ := cmd.Flags().GetString("claude-config-dir")
+			permissionMode, _ := cmd.Flags().GetString("permission-mode")
 			noGit, _ := cmd.Flags().GetBool("no-git")
 			outputJSON, _ := cmd.Flags().GetBool("json")
 
-			createProjectCLI(args[0], path, instructions, color, aliases, claudeConfigDir, noGit, outputJSON)
+			createProjectCLI(args[0], path, instructions, color, aliases, claudeConfigDir, permissionMode, noGit, outputJSON)
 		},
 	}
 	projectsCreateCmd.Flags().StringP("path", "p", "", "Project directory path (required)")
@@ -2426,6 +2446,7 @@ Examples:
 	projectsCreateCmd.Flags().StringP("color", "c", "", "Hex color for display (e.g., #61AFEF)")
 	projectsCreateCmd.Flags().StringP("aliases", "a", "", "Comma-separated aliases for lookup")
 	projectsCreateCmd.Flags().String("claude-config-dir", "", "Override CLAUDE_CONFIG_DIR for this project")
+	projectsCreateCmd.Flags().String("permission-mode", "", "Default permission mode for tasks: default (prompt), auto (auto-accept edits), dangerous (skip all)")
 	projectsCreateCmd.Flags().Bool("no-git", false, "Disable git worktrees (for non-git projects)")
 	projectsCreateCmd.Flags().Bool("json", false, "Output in JSON format")
 	projectsCreateCmd.MarkFlagRequired("path")
@@ -2453,6 +2474,7 @@ Examples:
 			aliases, _ := cmd.Flags().GetString("aliases")
 			claudeConfigDir, _ := cmd.Flags().GetString("claude-config-dir")
 			projectContext, _ := cmd.Flags().GetString("context")
+			permissionMode, _ := cmd.Flags().GetString("permission-mode")
 			outputJSON, _ := cmd.Flags().GetBool("json")
 			noGit, _ := cmd.Flags().GetBool("no-git")
 			git, _ := cmd.Flags().GetBool("git")
@@ -2472,7 +2494,7 @@ Examples:
 				useWorktrees = &v
 			}
 
-			updateProjectCLI(args[0], name, path, instructions, color, aliases, claudeConfigDir, projectContext, useWorktrees, outputJSON)
+			updateProjectCLI(args[0], name, path, instructions, color, aliases, claudeConfigDir, projectContext, permissionMode, useWorktrees, outputJSON)
 		},
 	}
 	projectsUpdateCmd.Flags().StringP("name", "n", "", "New project name")
@@ -2482,6 +2504,7 @@ Examples:
 	projectsUpdateCmd.Flags().StringP("aliases", "a", "", "Comma-separated aliases for lookup")
 	projectsUpdateCmd.Flags().String("claude-config-dir", "", "Override CLAUDE_CONFIG_DIR for this project")
 	projectsUpdateCmd.Flags().String("context", "", "Cached project context summary")
+	projectsUpdateCmd.Flags().String("permission-mode", "", "Default permission mode for tasks: default (prompt), auto (auto-accept edits), dangerous (skip all)")
 	projectsUpdateCmd.Flags().Bool("no-git", false, "Disable git worktrees (for non-git projects)")
 	projectsUpdateCmd.Flags().Bool("git", false, "Enable git worktrees (default)")
 	projectsUpdateCmd.Flags().Bool("json", false, "Output in JSON format")
@@ -5348,14 +5371,15 @@ func showProjectCLI(name string, outputJSON bool) {
 
 	if outputJSON {
 		output := map[string]interface{}{
-			"id":            project.ID,
-			"name":          project.Name,
-			"path":          project.Path,
-			"color":         project.Color,
-			"aliases":       project.Aliases,
-			"use_worktrees": project.UseWorktrees,
-			"task_count":    taskCount,
-			"created_at":    project.CreatedAt.Time.Format(time.RFC3339),
+			"id":                      project.ID,
+			"name":                    project.Name,
+			"path":                    project.Path,
+			"color":                   project.Color,
+			"aliases":                 project.Aliases,
+			"use_worktrees":           project.UseWorktrees,
+			"default_permission_mode": project.EffectiveDefaultPermissionMode(),
+			"task_count":              taskCount,
+			"created_at":              project.CreatedAt.Time.Format(time.RFC3339),
 		}
 		if project.Instructions != "" {
 			output["instructions"] = project.Instructions
@@ -5399,6 +5423,7 @@ func showProjectCLI(name string, outputJSON bool) {
 	if !project.UseWorktrees {
 		fmt.Printf("%s %s\n", dimStyle.Render("Git Worktrees:"), "disabled (non-git project)")
 	}
+	fmt.Printf("%s %s\n", dimStyle.Render("Permission Mode:"), project.EffectiveDefaultPermissionMode())
 
 	if project.Instructions != "" {
 		fmt.Println()
@@ -5427,7 +5452,7 @@ func showProjectCLI(name string, outputJSON bool) {
 }
 
 // createProjectCLI creates a new project.
-func createProjectCLI(name, path, instructions, color, aliases, claudeConfigDir string, noGit bool, outputJSON bool) {
+func createProjectCLI(name, path, instructions, color, aliases, claudeConfigDir, permissionMode string, noGit bool, outputJSON bool) {
 	// Validate name
 	if strings.TrimSpace(name) == "" {
 		fmt.Fprintln(os.Stderr, errorStyle.Render("Error: project name cannot be empty"))
@@ -5472,13 +5497,14 @@ func createProjectCLI(name, path, instructions, color, aliases, claudeConfigDir 
 	}
 
 	project := &db.Project{
-		Name:            name,
-		Path:            absPath,
-		Instructions:    instructions,
-		Color:           color,
-		Aliases:         aliases,
-		ClaudeConfigDir: claudeConfigDir,
-		UseWorktrees:    !noGit,
+		Name:                  name,
+		Path:                  absPath,
+		Instructions:          instructions,
+		Color:                 color,
+		Aliases:               aliases,
+		ClaudeConfigDir:       claudeConfigDir,
+		UseWorktrees:          !noGit,
+		DefaultPermissionMode: db.NormalizePermissionMode(permissionMode),
 	}
 
 	if err := database.CreateProject(project); err != nil {
@@ -5512,7 +5538,7 @@ func createProjectCLI(name, path, instructions, color, aliases, claudeConfigDir 
 }
 
 // updateProjectCLI updates an existing project.
-func updateProjectCLI(currentName, newName, path, instructions, color, aliases, claudeConfigDir, projectContext string, useWorktrees *bool, outputJSON bool) {
+func updateProjectCLI(currentName, newName, path, instructions, color, aliases, claudeConfigDir, projectContext, permissionMode string, useWorktrees *bool, outputJSON bool) {
 	dbPath := db.DefaultPath()
 	database, err := openTaskDB(dbPath)
 	if err != nil {
@@ -5583,6 +5609,16 @@ func updateProjectCLI(currentName, newName, path, instructions, color, aliases, 
 	if claudeConfigDir != "" {
 		project.ClaudeConfigDir = claudeConfigDir
 		changes = append(changes, "claude_config_dir")
+	}
+
+	if permissionMode != "" {
+		normalized := db.NormalizePermissionMode(permissionMode)
+		if normalized == "" {
+			fmt.Fprintln(os.Stderr, errorStyle.Render("Error: invalid permission mode (use default, auto, or dangerous)"))
+			os.Exit(1)
+		}
+		project.DefaultPermissionMode = normalized
+		changes = append(changes, "default permission mode")
 	}
 
 	if useWorktrees != nil {

@@ -1157,12 +1157,21 @@ func (k *KanbanBoard) renderTaskCard(task *db.Task, width int, isSelected bool, 
 	// - Task is in dangerous mode
 	// - Task is active (processing or blocked)
 	// - System is NOT in global dangerous mode (otherwise the global banner is shown)
-	if task.DangerousMode && (task.Status == db.StatusProcessing || task.Status == db.StatusBlocked) && !IsGlobalDangerousMode() {
+	if task.IsDangerous() && (task.Status == db.StatusProcessing || task.Status == db.StatusBlocked) && !IsGlobalDangerousMode() {
 		if isSelected {
 			indicators = append(indicators, "●")
 		} else {
 			dangerStyle := lipgloss.NewStyle().Foreground(ColorDangerous)
 			indicators = append(indicators, dangerStyle.Render("●"))
+		}
+	}
+	// Auto mode indicator (green dot) for active tasks running in auto/acceptEdits mode.
+	if task.IsAutoPermission() && (task.Status == db.StatusProcessing || task.Status == db.StatusBlocked) {
+		if isSelected {
+			indicators = append(indicators, "●")
+		} else {
+			autoStyle := lipgloss.NewStyle().Foreground(ColorSuccess)
+			indicators = append(indicators, autoStyle.Render("●"))
 		}
 	}
 	if task.Pinned {

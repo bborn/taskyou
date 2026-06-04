@@ -269,6 +269,10 @@ func (db *DB) migrate() error {
 		`ALTER TABLE tasks ADD COLUMN pr_info_json TEXT DEFAULT ''`, // JSON blob of github.PRInfo
 		// Whether project uses git worktrees for task isolation (1=yes, 0=no, default 1 for backward compat)
 		`ALTER TABLE projects ADD COLUMN use_worktrees INTEGER DEFAULT 1`,
+		// Permission mode for task execution: "default" (prompt), "auto" (acceptEdits), "dangerous" (skip permissions)
+		`ALTER TABLE tasks ADD COLUMN permission_mode TEXT DEFAULT ''`,
+		// Per-project default permission mode inherited by new tasks (empty = global default)
+		`ALTER TABLE projects ADD COLUMN default_permission_mode TEXT DEFAULT ''`,
 	}
 
 	for _, m := range alterMigrations {
