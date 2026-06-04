@@ -1,0 +1,16 @@
+#!/bin/bash
+# Example hook: task.auth_required
+# Runs when a processing task stalls because its executor session is logged out
+# (e.g., the Claude cloud/login session expired). TASK_MESSAGE explains why.
+#
+# Re-authenticate by attaching to the task and running /login, then resume it.
+
+# Desktop notification (macOS)
+if command -v osascript &> /dev/null; then
+  osascript -e "display notification \"${TASK_MESSAGE:-Re-authentication required}\" with title \"Re-authenticate\" subtitle \"#$TASK_ID $TASK_TITLE\" sound name \"Sosumi\""
+fi
+
+# Desktop notification (Linux)
+if command -v notify-send &> /dev/null; then
+  notify-send -u critical "Re-authenticate" "#$TASK_ID $TASK_TITLE: ${TASK_MESSAGE:-session logged out}"
+fi

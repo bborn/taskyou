@@ -734,6 +734,7 @@ func (e *Executor) worker(ctx context.Context) {
 	const suspendCheckInterval = 30
 	const doneCleanupInterval = 150   // 5 minutes at 2 second ticks
 	const staleWorktreeInterval = 300 // 10 minutes at 2 second ticks
+	const authCheckInterval = 15      // 30 seconds at 2 second ticks
 
 	for {
 		select {
@@ -752,6 +753,12 @@ func (e *Executor) worker(ctx context.Context) {
 			// Periodically check for idle blocked tasks to suspend
 			if tickCount%suspendCheckInterval == 0 {
 				e.suspendIdleBlockedTasks()
+			}
+
+			// Periodically check for processing tasks stalled on a logged-out
+			// executor session (e.g. expired Claude login) and surface them.
+			if tickCount%authCheckInterval == 0 {
+				e.checkAuthStuckTasks()
 			}
 
 			// Periodically cleanup Claude processes for inactive done tasks

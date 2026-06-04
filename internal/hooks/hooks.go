@@ -17,10 +17,11 @@ import (
 
 // Event types for hooks
 const (
-	EventTaskBlocked = "task.blocked"
-	EventTaskDone    = "task.done"
-	EventTaskFailed  = "task.failed"
-	EventTaskStarted = "task.started"
+	EventTaskBlocked  = "task.blocked"
+	EventTaskDone     = "task.done"
+	EventTaskFailed   = "task.failed"
+	EventTaskStarted  = "task.started"
+	EventAuthRequired = "task.auth_required" // Executor session needs re-authentication
 )
 
 // Runner executes hooks for task events.
