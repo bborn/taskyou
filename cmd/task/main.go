@@ -565,6 +565,7 @@ Examples:
 			taskType, _ := cmd.Flags().GetString("type")
 			project, _ := cmd.Flags().GetString("project")
 			taskExecutor, _ := cmd.Flags().GetString("executor")
+			effortLevel, _ := cmd.Flags().GetString("effort")
 			execute, _ := cmd.Flags().GetBool("execute")
 			createDangerous, _ := cmd.Flags().GetBool("dangerous")
 			tags, _ := cmd.Flags().GetString("tags")
@@ -630,6 +631,13 @@ Examples:
 				}
 			}
 
+			// Validate effort level if provided (empty = use Claude's global default)
+			effortLevel = strings.ToLower(strings.TrimSpace(effortLevel))
+			if !db.IsValidEffortLevel(effortLevel) {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Invalid effort. Must be one of: "+strings.Join(db.EffortLevels(), ", ")))
+				os.Exit(1)
+			}
+
 			// If project not specified, try to detect from cwd
 			if project == "" {
 				if cwd, err := os.Getwd(); err == nil {
@@ -678,6 +686,7 @@ Examples:
 				Type:          taskType,
 				Project:       project,
 				Executor:      taskExecutor,
+				EffortLevel:   effortLevel,
 				Tags:          tags,
 				Pinned:        pinned,
 				SourceBranch:  branch,
@@ -701,6 +710,9 @@ Examples:
 				if task.SourceBranch != "" {
 					output["source_branch"] = task.SourceBranch
 				}
+				if task.EffortLevel != "" {
+					output["effort_level"] = task.EffortLevel
+				}
 				jsonBytes, _ := json.Marshal(output)
 				fmt.Println(string(jsonBytes))
 			} else {
@@ -723,6 +735,7 @@ Examples:
 	createCmd.Flags().StringP("type", "t", "", "Task type: code, writing, thinking (default: code)")
 	createCmd.Flags().StringP("project", "p", "", "Project name (auto-detected from cwd if not specified)")
 	createCmd.Flags().StringP("executor", "e", "", "Task executor: claude, codex, gemini, pi, opencode, openclaw (default: claude)")
+	createCmd.Flags().String("effort", "", "Per-task Claude effort override: low, medium, high, xhigh, max (default: Claude's global default)")
 	createCmd.Flags().BoolP("execute", "x", false, "Queue task for immediate execution")
 	createCmd.Flags().Bool("dangerous", false, "Execute in dangerous mode (requires --execute)")
 	createCmd.Flags().String("tags", "", "Task tags (comma-separated)")
@@ -732,6 +745,9 @@ Examples:
 	createCmd.RegisterFlagCompletionFunc("project", completeFlagProjects)
 	createCmd.RegisterFlagCompletionFunc("type", completeFlagTypes)
 	createCmd.RegisterFlagCompletionFunc("executor", completeFlagExecutors)
+	createCmd.RegisterFlagCompletionFunc("effort", func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		return db.EffortLevels(), cobra.ShellCompDirectiveNoFileComp
+	})
 	rootCmd.AddCommand(createCmd)
 
 	// List subcommand - list tasks

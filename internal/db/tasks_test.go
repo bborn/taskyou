@@ -1482,6 +1482,84 @@ func TestUpdateTaskDangerousMode(t *testing.T) {
 	}
 }
 
+func TestEffortLevelPersistence(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	db, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer db.Close()
+	defer os.Remove(dbPath)
+
+	// Create a task without an effort override (empty = global/Claude default)
+	task := &Task{
+		Title:   "Default effort task",
+		Status:  StatusBacklog,
+		Type:    TypeCode,
+		Project: "personal",
+	}
+	if err := db.CreateTask(task); err != nil {
+		t.Fatalf("failed to create task: %v", err)
+	}
+
+	retrieved, err := db.GetTask(task.ID)
+	if err != nil {
+		t.Fatalf("failed to get task: %v", err)
+	}
+	if retrieved.EffortLevel != "" {
+		t.Errorf("expected empty effort level by default, got %q", retrieved.EffortLevel)
+	}
+
+	// Create a task with a per-task effort override
+	override := &Task{
+		Title:       "High effort task",
+		Status:      StatusBacklog,
+		Type:        TypeCode,
+		Project:     "personal",
+		EffortLevel: EffortHigh,
+	}
+	if err := db.CreateTask(override); err != nil {
+		t.Fatalf("failed to create task: %v", err)
+	}
+	retrieved, err = db.GetTask(override.ID)
+	if err != nil {
+		t.Fatalf("failed to get task: %v", err)
+	}
+	if retrieved.EffortLevel != EffortHigh {
+		t.Errorf("expected effort level %q, got %q", EffortHigh, retrieved.EffortLevel)
+	}
+
+	// Update the effort level via UpdateTask
+	retrieved.EffortLevel = EffortMax
+	if err := db.UpdateTask(retrieved); err != nil {
+		t.Fatalf("failed to update task: %v", err)
+	}
+	updated, err := db.GetTask(override.ID)
+	if err != nil {
+		t.Fatalf("failed to get task: %v", err)
+	}
+	if updated.EffortLevel != EffortMax {
+		t.Errorf("expected effort level %q after update, got %q", EffortMax, updated.EffortLevel)
+	}
+}
+
+func TestIsValidEffortLevel(t *testing.T) {
+	valid := []string{"", EffortLow, EffortMedium, EffortHigh, EffortXHigh, EffortMax}
+	for _, v := range valid {
+		if !IsValidEffortLevel(v) {
+			t.Errorf("expected %q to be a valid effort level", v)
+		}
+	}
+	invalid := []string{"none", "LOW", "extreme", "0", "default"}
+	for _, v := range invalid {
+		if IsValidEffortLevel(v) {
+			t.Errorf("expected %q to be an invalid effort level", v)
+		}
+	}
+}
+
 func TestUpdateTaskPRInfo(t *testing.T) {
 	tmpDir := t.TempDir()
 	dbPath := filepath.Join(tmpDir, "test.db")

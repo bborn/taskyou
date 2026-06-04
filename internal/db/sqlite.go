@@ -269,6 +269,8 @@ func (db *DB) migrate() error {
 		`ALTER TABLE tasks ADD COLUMN pr_info_json TEXT DEFAULT ''`, // JSON blob of github.PRInfo
 		// Whether project uses git worktrees for task isolation (1=yes, 0=no, default 1 for backward compat)
 		`ALTER TABLE projects ADD COLUMN use_worktrees INTEGER DEFAULT 1`,
+		// Per-task Claude effort override ("" = use global/Claude default, otherwise low/medium/high/xhigh/max)
+		`ALTER TABLE tasks ADD COLUMN effort_level TEXT DEFAULT ''`,
 	}
 
 	for _, m := range alterMigrations {
