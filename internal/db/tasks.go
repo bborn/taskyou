@@ -18,6 +18,7 @@ type Task struct {
 	Type            string
 	Project         string
 	Executor        string // Task executor: "claude" (default), "codex", "gemini"
+	EffortLevel     string // Per-task Claude effort override ("" = use global/Claude default; otherwise low/medium/high/xhigh/max)
 	WorktreePath    string
 	BranchName      string
 	Port            int    // Unique port for running the application in this task's worktree
@@ -86,6 +87,33 @@ func DefaultExecutor() string {
 	return ExecutorClaude
 }
 
+// Effort levels are per-task overrides for Claude's reasoning effort (claude --effort).
+// An empty value means "no override" — the task uses Claude's global default, leaving
+// the user's global setting untouched.
+const (
+	EffortLow    = "low"
+	EffortMedium = "medium"
+	EffortHigh   = "high"
+	EffortXHigh  = "xhigh"
+	EffortMax    = "max"
+)
+
+// EffortLevels returns the valid per-task effort override values, in ascending order.
+func EffortLevels() []string {
+	return []string{EffortLow, EffortMedium, EffortHigh, EffortXHigh, EffortMax}
+}
+
+// IsValidEffortLevel reports whether s is a valid effort level. The empty string is
+// valid and means "use the global/Claude default" (no per-task override).
+func IsValidEffortLevel(s string) bool {
+	switch s {
+	case "", EffortLow, EffortMedium, EffortHigh, EffortXHigh, EffortMax:
+		return true
+	default:
+		return false
+	}
+}
+
 // Port allocation constants
 const (
 	PortRangeStart = 3100 // First port in the allocation range
@@ -129,9 +157,9 @@ func (db *DB) CreateTask(t *Task) error {
 	t.Project = project.Name
 
 	result, err := db.Exec(`
-		INSERT INTO tasks (title, body, status, type, project, executor, pinned, tags, source_branch, dangerous_mode)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, t.Title, t.Body, t.Status, t.Type, t.Project, t.Executor, t.Pinned, t.Tags, t.SourceBranch, t.DangerousMode)
+		INSERT INTO tasks (title, body, status, type, project, executor, pinned, tags, source_branch, dangerous_mode, effort_level)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, t.Title, t.Body, t.Status, t.Type, t.Project, t.Executor, t.Pinned, t.Tags, t.SourceBranch, t.DangerousMode, t.EffortLevel)
 	if err != nil {
 		return fmt.Errorf("insert task: %w", err)
 	}
@@ -176,7 +204,7 @@ func (db *DB) GetTask(id int64) (*Task, error) {
 		       COALESCE(claude_pane_id, ''), COALESCE(shell_pane_id, ''),
 		       COALESCE(pr_url, ''), COALESCE(pr_number, 0), COALESCE(pr_info_json, ''),
 		       COALESCE(dangerous_mode, 0), COALESCE(pinned, 0), COALESCE(tags, ''),
-		       COALESCE(source_branch, ''), COALESCE(summary, ''),
+		       COALESCE(source_branch, ''), COALESCE(summary, ''), COALESCE(effort_level, ''),
 		       created_at, updated_at, started_at, completed_at,
 		       last_distilled_at, last_accessed_at,
 		       COALESCE(archive_ref, ''), COALESCE(archive_commit, ''),
@@ -188,7 +216,7 @@ func (db *DB) GetTask(id int64) (*Task, error) {
 		&t.DaemonSession, &t.TmuxWindowID, &t.ClaudePaneID, &t.ShellPaneID,
 		&t.PRURL, &t.PRNumber, &t.PRInfoJSON,
 		&t.DangerousMode, &t.Pinned, &t.Tags,
-		&t.SourceBranch, &t.Summary,
+		&t.SourceBranch, &t.Summary, &t.EffortLevel,
 		&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
 		&t.LastDistilledAt, &t.LastAccessedAt,
 		&t.ArchiveRef, &t.ArchiveCommit, &t.ArchiveWorktreePath, &t.ArchiveBranchName,
@@ -221,7 +249,7 @@ func (db *DB) ListTasks(opts ListTasksOptions) ([]*Task, error) {
 		       COALESCE(claude_pane_id, ''), COALESCE(shell_pane_id, ''),
 		       COALESCE(pr_url, ''), COALESCE(pr_number, 0), COALESCE(pr_info_json, ''),
 		       COALESCE(dangerous_mode, 0), COALESCE(pinned, 0), COALESCE(tags, ''),
-		       COALESCE(source_branch, ''), COALESCE(summary, ''),
+		       COALESCE(source_branch, ''), COALESCE(summary, ''), COALESCE(effort_level, ''),
 		       created_at, updated_at, started_at, completed_at,
 		       last_distilled_at, last_accessed_at,
 		       COALESCE(archive_ref, ''), COALESCE(archive_commit, ''),
@@ -281,7 +309,7 @@ func (db *DB) ListTasks(opts ListTasksOptions) ([]*Task, error) {
 			&t.DaemonSession, &t.TmuxWindowID, &t.ClaudePaneID, &t.ShellPaneID,
 			&t.PRURL, &t.PRNumber, &t.PRInfoJSON,
 			&t.DangerousMode, &t.Pinned, &t.Tags,
-			&t.SourceBranch, &t.Summary,
+			&t.SourceBranch, &t.Summary, &t.EffortLevel,
 			&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
 			&t.LastDistilledAt, &t.LastAccessedAt,
 			&t.ArchiveRef, &t.ArchiveCommit, &t.ArchiveWorktreePath, &t.ArchiveBranchName,
@@ -306,7 +334,7 @@ func (db *DB) GetMostRecentlyCreatedTask() (*Task, error) {
 		       COALESCE(claude_pane_id, ''), COALESCE(shell_pane_id, ''),
 		       COALESCE(pr_url, ''), COALESCE(pr_number, 0), COALESCE(pr_info_json, ''),
 		       COALESCE(dangerous_mode, 0), COALESCE(pinned, 0), COALESCE(tags, ''),
-		       COALESCE(source_branch, ''), COALESCE(summary, ''),
+		       COALESCE(source_branch, ''), COALESCE(summary, ''), COALESCE(effort_level, ''),
 		       created_at, updated_at, started_at, completed_at,
 		       last_distilled_at, last_accessed_at,
 		       COALESCE(archive_ref, ''), COALESCE(archive_commit, ''),
@@ -320,7 +348,7 @@ func (db *DB) GetMostRecentlyCreatedTask() (*Task, error) {
 		&t.DaemonSession, &t.TmuxWindowID, &t.ClaudePaneID, &t.ShellPaneID,
 		&t.PRURL, &t.PRNumber, &t.PRInfoJSON,
 		&t.DangerousMode, &t.Pinned, &t.Tags,
-		&t.SourceBranch, &t.Summary,
+		&t.SourceBranch, &t.Summary, &t.EffortLevel,
 		&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
 		&t.LastDistilledAt, &t.LastAccessedAt,
 		&t.ArchiveRef, &t.ArchiveCommit, &t.ArchiveWorktreePath, &t.ArchiveBranchName,
@@ -349,7 +377,7 @@ func (db *DB) SearchTasks(query string, limit int) ([]*Task, error) {
 		       COALESCE(claude_pane_id, ''), COALESCE(shell_pane_id, ''),
 		       COALESCE(pr_url, ''), COALESCE(pr_number, 0), COALESCE(pr_info_json, ''),
 		       COALESCE(dangerous_mode, 0), COALESCE(pinned, 0), COALESCE(tags, ''),
-		       COALESCE(source_branch, ''), COALESCE(summary, ''),
+		       COALESCE(source_branch, ''), COALESCE(summary, ''), COALESCE(effort_level, ''),
 		       created_at, updated_at, started_at, completed_at,
 		       last_distilled_at, last_accessed_at,
 		       COALESCE(archive_ref, ''), COALESCE(archive_commit, ''),
@@ -382,7 +410,7 @@ func (db *DB) SearchTasks(query string, limit int) ([]*Task, error) {
 			&t.DaemonSession, &t.TmuxWindowID, &t.ClaudePaneID, &t.ShellPaneID,
 			&t.PRURL, &t.PRNumber, &t.PRInfoJSON,
 			&t.DangerousMode, &t.Pinned, &t.Tags,
-			&t.SourceBranch, &t.Summary,
+			&t.SourceBranch, &t.Summary, &t.EffortLevel,
 			&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
 			&t.LastDistilledAt, &t.LastAccessedAt,
 			&t.ArchiveRef, &t.ArchiveCommit, &t.ArchiveWorktreePath, &t.ArchiveBranchName,
@@ -484,13 +512,13 @@ func (db *DB) UpdateTask(t *Task) error {
 			title = ?, body = ?, status = ?, type = ?, project = ?, executor = ?,
 			worktree_path = ?, branch_name = ?, port = ?, claude_session_id = ?,
 			daemon_session = ?, pr_url = ?, pr_number = ?, pr_info_json = ?, dangerous_mode = ?,
-			pinned = ?, tags = ?, source_branch = ?,
+			pinned = ?, tags = ?, source_branch = ?, effort_level = ?,
 			updated_at = CURRENT_TIMESTAMP
 		WHERE id = ?
 	`, t.Title, t.Body, t.Status, t.Type, t.Project, t.Executor,
 		t.WorktreePath, t.BranchName, t.Port, t.ClaudeSessionID,
 		t.DaemonSession, t.PRURL, t.PRNumber, t.PRInfoJSON, t.DangerousMode,
-		t.Pinned, t.Tags, t.SourceBranch, t.ID)
+		t.Pinned, t.Tags, t.SourceBranch, t.EffortLevel, t.ID)
 	if err != nil {
 		return fmt.Errorf("update task: %w", err)
 	}
@@ -793,7 +821,7 @@ func (db *DB) GetNextQueuedTask() (*Task, error) {
 		       COALESCE(claude_pane_id, ''), COALESCE(shell_pane_id, ''),
 		       COALESCE(pr_url, ''), COALESCE(pr_number, 0), COALESCE(pr_info_json, ''),
 		       COALESCE(dangerous_mode, 0), COALESCE(pinned, 0), COALESCE(tags, ''),
-		       COALESCE(source_branch, ''), COALESCE(summary, ''),
+		       COALESCE(source_branch, ''), COALESCE(summary, ''), COALESCE(effort_level, ''),
 		       created_at, updated_at, started_at, completed_at,
 		       last_distilled_at, last_accessed_at,
 		       COALESCE(archive_ref, ''), COALESCE(archive_commit, ''),
@@ -808,7 +836,7 @@ func (db *DB) GetNextQueuedTask() (*Task, error) {
 		&t.DaemonSession, &t.TmuxWindowID, &t.ClaudePaneID, &t.ShellPaneID,
 		&t.PRURL, &t.PRNumber, &t.PRInfoJSON,
 		&t.DangerousMode, &t.Pinned, &t.Tags,
-		&t.SourceBranch, &t.Summary,
+		&t.SourceBranch, &t.Summary, &t.EffortLevel,
 		&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
 		&t.LastDistilledAt, &t.LastAccessedAt,
 		&t.ArchiveRef, &t.ArchiveCommit, &t.ArchiveWorktreePath, &t.ArchiveBranchName,
@@ -831,7 +859,7 @@ func (db *DB) GetQueuedTasks() ([]*Task, error) {
 		       COALESCE(claude_pane_id, ''), COALESCE(shell_pane_id, ''),
 		       COALESCE(pr_url, ''), COALESCE(pr_number, 0), COALESCE(pr_info_json, ''),
 		       COALESCE(dangerous_mode, 0), COALESCE(pinned, 0), COALESCE(tags, ''),
-		       COALESCE(source_branch, ''), COALESCE(summary, ''),
+		       COALESCE(source_branch, ''), COALESCE(summary, ''), COALESCE(effort_level, ''),
 		       created_at, updated_at, started_at, completed_at,
 		       last_distilled_at, last_accessed_at,
 		       COALESCE(archive_ref, ''), COALESCE(archive_commit, ''),
@@ -854,7 +882,7 @@ func (db *DB) GetQueuedTasks() ([]*Task, error) {
 			&t.DaemonSession, &t.TmuxWindowID, &t.ClaudePaneID, &t.ShellPaneID,
 			&t.PRURL, &t.PRNumber, &t.PRInfoJSON,
 			&t.DangerousMode, &t.Pinned, &t.Tags,
-			&t.SourceBranch, &t.Summary,
+			&t.SourceBranch, &t.Summary, &t.EffortLevel,
 			&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
 			&t.LastDistilledAt, &t.LastAccessedAt,
 			&t.ArchiveRef, &t.ArchiveCommit, &t.ArchiveWorktreePath, &t.ArchiveBranchName,
@@ -1761,7 +1789,7 @@ func (db *DB) GetStaleWorktreeTasks(maxAge time.Duration) ([]*Task, error) {
 		       COALESCE(claude_pane_id, ''), COALESCE(shell_pane_id, ''),
 		       COALESCE(pr_url, ''), COALESCE(pr_number, 0), COALESCE(pr_info_json, ''),
 		       COALESCE(dangerous_mode, 0), COALESCE(pinned, 0), COALESCE(tags, ''),
-		       COALESCE(source_branch, ''), COALESCE(summary, ''),
+		       COALESCE(source_branch, ''), COALESCE(summary, ''), COALESCE(effort_level, ''),
 		       created_at, updated_at, started_at, completed_at,
 		       last_distilled_at, last_accessed_at,
 		       COALESCE(archive_ref, ''), COALESCE(archive_commit, ''),
@@ -1788,7 +1816,7 @@ func (db *DB) GetStaleWorktreeTasks(maxAge time.Duration) ([]*Task, error) {
 			&t.DaemonSession, &t.TmuxWindowID, &t.ClaudePaneID, &t.ShellPaneID,
 			&t.PRURL, &t.PRNumber, &t.PRInfoJSON,
 			&t.DangerousMode, &t.Pinned, &t.Tags,
-			&t.SourceBranch, &t.Summary,
+			&t.SourceBranch, &t.Summary, &t.EffortLevel,
 			&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
 			&t.LastDistilledAt, &t.LastAccessedAt,
 			&t.ArchiveRef, &t.ArchiveCommit, &t.ArchiveWorktreePath, &t.ArchiveBranchName,

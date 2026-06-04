@@ -1161,3 +1161,57 @@ func TestFilterProjectsEmptyQueryShowsAll(t *testing.T) {
 		t.Errorf("expected current project 'workflow' to be pre-selected, got %q", m.projectFiltered[m.projectFilteredIdx])
 	}
 }
+
+func TestEffortFieldDefaultsToGlobal(t *testing.T) {
+	m := NewFormModel(nil, 100, 50, "", []string{db.ExecutorClaude})
+
+	// Effort options start with "" (the global/Claude default).
+	if len(m.effortLevels) == 0 || m.effortLevels[0] != "" {
+		t.Fatalf("expected first effort option to be the empty default, got %v", m.effortLevels)
+	}
+	if m.effortLevel != "" {
+		t.Errorf("expected default effort level to be empty, got %q", m.effortLevel)
+	}
+
+	// GetDBTask should not set an override when the user leaves the default.
+	if got := m.GetDBTask().EffortLevel; got != "" {
+		t.Errorf("expected GetDBTask to leave effort empty by default, got %q", got)
+	}
+}
+
+func TestEffortFieldCycleAndPersist(t *testing.T) {
+	m := NewFormModel(nil, 100, 50, "", []string{db.ExecutorClaude})
+	m.showAdvanced = true
+	m.focused = FieldEffort
+
+	// Cycling right from the default lands on the first real effort level.
+	m.Update(tea.KeyMsg{Type: tea.KeyRight})
+	if m.effortLevel != db.EffortLow {
+		t.Errorf("expected effort to be %q after one right press, got %q", db.EffortLow, m.effortLevel)
+	}
+
+	if got := m.GetDBTask().EffortLevel; got != db.EffortLow {
+		t.Errorf("expected GetDBTask to carry effort %q, got %q", db.EffortLow, got)
+	}
+
+	// Cycling left returns to the default (empty) override.
+	m.Update(tea.KeyMsg{Type: tea.KeyLeft})
+	if m.effortLevel != "" {
+		t.Errorf("expected effort to return to default, got %q", m.effortLevel)
+	}
+}
+
+func TestEffortFieldHiddenForNonClaude(t *testing.T) {
+	m := NewFormModel(nil, 100, 50, "", []string{db.ExecutorClaude})
+	m.showAdvanced = true
+
+	m.executor = db.ExecutorClaude
+	if !m.isFieldVisible(FieldEffort) {
+		t.Error("expected effort field to be visible for the Claude executor")
+	}
+
+	m.executor = db.ExecutorCodex
+	if m.isFieldVisible(FieldEffort) {
+		t.Error("expected effort field to be hidden for non-Claude executors")
+	}
+}
