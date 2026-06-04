@@ -71,6 +71,10 @@ type Executor struct {
 
 	executorSlug string
 	executorName string
+
+	// windowExistsFn reports whether a live executor tmux window exists for a
+	// task. Overridable in tests; nil means use tmuxWindowExistsForTask.
+	windowExistsFn func(taskID int64) bool
 }
 
 // DefaultSuspendIdleTimeout is the default time a blocked task must be idle before being suspended.
@@ -242,6 +246,11 @@ func (e *Executor) Start(ctx context.Context) {
 	// Recover stale tmux references on startup (handles crash recovery)
 	e.recoverStaleTmuxRefs()
 
+	// Reconcile tasks left in 'processing' with no live executor (e.g. after a
+	// daemon restart killed the executor panes). Without this they stay stuck in
+	// 'processing' forever and the board lies about them still running.
+	e.reconcileOrphanedTasks()
+
 	// Run stale worktree cleanup on startup (and then periodically in worker loop)
 	go e.cleanupStaleWorktrees()
 
@@ -290,6 +299,91 @@ func (e *Executor) recoverStaleTmuxRefs() {
 			"window_ids", staleWindow,
 		)
 	}
+}
+
+// reconcileOrphanedTasks moves tasks that are stuck in 'processing' but have no
+// live executor window back to 'blocked' so the board reflects reality. This
+// happens when the daemon is restarted (or crashes) while tasks are executing:
+// the executor tmux windows/processes are killed, but nothing transitions the
+// task out of 'processing', so it appears to be running forever.
+//
+// Tasks are moved to 'blocked' (rather than silently re-queued) so the failure
+// is visible and the user can retry, which resumes the saved Claude session.
+// Uncommitted work in the worktree is left untouched.
+func (e *Executor) reconcileOrphanedTasks() {
+	tasks, err := e.db.ListTasks(db.ListTasksOptions{Status: db.StatusProcessing, Limit: 1000})
+	if err != nil {
+		e.logger.Error("Failed to list processing tasks for orphan reconciliation", "error", err)
+		return
+	}
+
+	reconciled := 0
+	for _, task := range tasks {
+		// Skip tasks this executor is actively running (defensive: at startup the
+		// running set is empty, but reconcile must never touch a live task).
+		e.mu.RLock()
+		running := e.runningTasks[task.ID]
+		e.mu.RUnlock()
+		if running {
+			continue
+		}
+
+		// A processing task with a live executor window is genuinely still
+		// running (e.g. the tmux server survived a daemon restart) - leave it.
+		windowExists := tmuxWindowExistsForTask
+		if e.windowExistsFn != nil {
+			windowExists = e.windowExistsFn
+		}
+		if windowExists(task.ID) {
+			continue
+		}
+
+		msg := "Executor terminated (daemon restart) - task was 'processing' with no live executor. Moved to blocked; retry to resume."
+		if err := e.updateStatus(task.ID, db.StatusBlocked); err != nil {
+			e.logger.Error("Failed to reconcile orphaned task", "id", task.ID, "error", err)
+			continue
+		}
+		e.logLine(task.ID, "error", msg)
+		e.hooks.OnStatusChange(task, db.StatusBlocked, msg)
+		e.logger.Info("Reconciled orphaned processing task", "id", task.ID, "title", task.Title)
+		reconciled++
+	}
+
+	if reconciled > 0 {
+		e.logger.Info("Reconciled orphaned processing tasks", "count", reconciled)
+	}
+}
+
+// tmuxWindowExistsForTask reports whether a live executor tmux window exists for
+// the task in any daemon session. The executor runs inside a window named
+// "task-<id>" within a "task-daemon-*" session; if that window is gone, the
+// executor process is gone too.
+func tmuxWindowExistsForTask(taskID int64) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	out, err := exec.CommandContext(ctx, "tmux", "list-windows",
+		"-a", "-F", "#{session_name}:#{window_name}").Output()
+	if err != nil {
+		// tmux not running / no server => no windows exist.
+		return false
+	}
+
+	windowName := TmuxWindowName(taskID)
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if line == "" {
+			continue
+		}
+		parts := strings.SplitN(line, ":", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		sessionName, name := parts[0], parts[1]
+		if strings.HasPrefix(sessionName, "task-daemon-") && name == windowName {
+			return true
+		}
+	}
+	return false
 }
 
 // Stop stops the background worker.
