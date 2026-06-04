@@ -358,6 +358,7 @@ func (m *DetailModel) Refresh() tea.Cmd {
 	if m.ready && prevTask != nil && m.task != nil {
 		if prevTask.Status != m.task.Status ||
 			prevTask.DangerousMode != m.task.DangerousMode ||
+			prevTask.PermissionMode != m.task.PermissionMode ||
 			prevTask.Pinned != m.task.Pinned ||
 			prevTask.Project != m.task.Project ||
 			prevTask.Type != m.task.Type ||
@@ -2339,7 +2340,7 @@ func (m *DetailModel) renderHeader() string {
 	meta.WriteString("  ")
 
 	// Dangerous mode badge (only shown when in dangerous mode and task is active)
-	if t.DangerousMode && (t.Status == db.StatusProcessing || t.Status == db.StatusBlocked) {
+	if t.IsDangerous() && (t.Status == db.StatusProcessing || t.Status == db.StatusBlocked) {
 		var dangerousStyle lipgloss.Style
 		if m.focused {
 			dangerousStyle = lipgloss.NewStyle().
@@ -2354,6 +2355,25 @@ func (m *DetailModel) renderHeader() string {
 				Foreground(dimmedFg)
 		}
 		meta.WriteString(dangerousStyle.Render("DANGEROUS"))
+		meta.WriteString("  ")
+	}
+
+	// Auto mode badge (acceptEdits) for active tasks.
+	if t.IsAutoPermission() && (t.Status == db.StatusProcessing || t.Status == db.StatusBlocked) {
+		var autoStyle lipgloss.Style
+		if m.focused {
+			autoStyle = lipgloss.NewStyle().
+				Padding(0, 1).
+				Background(ColorSuccess).
+				Foreground(lipgloss.Color("#FFFFFF")).
+				Bold(true)
+		} else {
+			autoStyle = lipgloss.NewStyle().
+				Padding(0, 1).
+				Background(dimmedBg).
+				Foreground(dimmedFg)
+		}
+		meta.WriteString(autoStyle.Render("AUTO"))
 		meta.WriteString("  ")
 	}
 
