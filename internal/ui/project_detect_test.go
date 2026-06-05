@@ -162,3 +162,38 @@ func TestProjectSuggestionDismissedKey(t *testing.T) {
 		t.Fatalf("expected cleaned paths to produce equal keys: %q vs %q", k1, k2)
 	}
 }
+
+func TestIsProjectCandidate(t *testing.T) {
+	home, _ := os.UserHomeDir()
+
+	// Junk dir: home itself and standard bare children → never a candidate.
+	for _, junk := range []string{home, filepath.Join(home, "Desktop"), filepath.Join(home, "Downloads"), "/", "/tmp"} {
+		if isProjectCandidate(junk) {
+			t.Errorf("isProjectCandidate(%q) = true, want false", junk)
+		}
+	}
+
+	// A git repo is a candidate.
+	gitDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(gitDir, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if !isProjectCandidate(gitDir) {
+		t.Errorf("git repo %q should be a candidate", gitDir)
+	}
+
+	// A non-git dir with a project marker is a candidate.
+	markerDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(markerDir, "go.mod"), []byte("module x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if !isProjectCandidate(markerDir) {
+		t.Errorf("dir with go.mod %q should be a candidate", markerDir)
+	}
+
+	// An empty, signal-less dir is NOT a candidate.
+	emptyDir := t.TempDir()
+	if isProjectCandidate(emptyDir) {
+		t.Errorf("empty dir %q should not be a candidate", emptyDir)
+	}
+}

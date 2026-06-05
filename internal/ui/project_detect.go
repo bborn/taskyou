@@ -70,20 +70,69 @@ func readProjectInstructions(dir string) (instructions string, sourceFile string
 	return "", ""
 }
 
-// detectProjectFromDir builds a project pre-filled with values inferred from a
-// git repository at dir. It returns nil when dir is not a git repo. The returned
-// project is NOT persisted - callers decide whether to save it.
-func detectProjectFromDir(dir string) (project *db.Project, instructionSource string) {
-	if !dirIsGitRepo(dir) {
-		return nil, ""
+// projectMarkerFiles signal that a directory is a real project even without git.
+var projectMarkerFiles = []string{
+	".git", "package.json", "go.mod", "Cargo.toml", "pyproject.toml",
+	"requirements.txt", "Gemfile", "pom.xml", "build.gradle", "composer.json",
+	"AGENTS.md", "CLAUDE.md", ".cursorrules", "Makefile",
+}
+
+// denyListedHomeChildren are directory names that, directly under $HOME, are
+// never project candidates (system / dumping-ground folders).
+var denyListedHomeChildren = map[string]bool{
+	"Desktop": true, "Documents": true, "Downloads": true, "Music": true,
+	"Pictures": true, "Movies": true, "Public": true, "Library": true,
+	"Applications": true,
+}
+
+// isProjectCandidate reports whether dir is worth proactively offering as a
+// TaskYou project: it must not be a system/dumping dir, and must show at least
+// one positive signal (git repo or a project marker file).
+func isProjectCandidate(dir string) bool {
+	if dir == "" {
+		return false
+	}
+	clean := filepath.Clean(dir)
+
+	// Deny-list: root, temp, $HOME itself, and bare home children.
+	if clean == "/" || clean == filepath.Clean(os.TempDir()) || strings.HasPrefix(clean, "/tmp") {
+		return false
+	}
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		home = filepath.Clean(home)
+		if clean == home {
+			return false
+		}
+		if filepath.Dir(clean) == home && denyListedHomeChildren[filepath.Base(clean)] {
+			return false
+		}
 	}
 
+	// Positive signal: git repo or any marker file present.
+	if dirIsGitRepo(clean) {
+		return true
+	}
+	for _, marker := range projectMarkerFiles {
+		if _, err := os.Stat(filepath.Join(clean, marker)); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
+// detectProjectFromDir builds a project pre-filled with values inferred from a
+// candidate directory. Returns nil when dir is not a project candidate. Worktrees
+// default ON only for git repos (git is optional; non-git projects skip worktrees).
+func detectProjectFromDir(dir string) (project *db.Project, instructionSource string) {
+	if !isProjectCandidate(dir) {
+		return nil, ""
+	}
 	instructions, source := readProjectInstructions(dir)
 	return &db.Project{
 		Name:         inferProjectName(dir),
 		Path:         filepath.Clean(dir),
 		Instructions: instructions,
-		UseWorktrees: true,
+		UseWorktrees: dirIsGitRepo(dir),
 	}, source
 }
 
