@@ -86,7 +86,7 @@ func TestDismissProjectSuggestionPersists(t *testing.T) {
 	mkGitRepo(t, repo)
 	m, database := newDetectTestModel(t, repo)
 
-	m.dismissProjectSuggestion()
+	m.dismissProjectSuggestion(m.workingDir)
 
 	v, _ := database.GetSetting(projectSuggestionDismissedKey(repo))
 	if v != "1" {

@@ -687,6 +687,7 @@ func (m *SettingsModel) reshowProjectFormWithError(err error) (*SettingsModel, t
 	m.editProject.Instructions = strings.TrimSpace(m.projectFormInstructions)
 	m.editProject.ClaudeConfigDir = strings.TrimSpace(m.projectFormClaudeConfigDir)
 	m.editProject.UseWorktrees = m.projectFormUseWorktrees
+	m.editProject.DefaultPermissionMode = strings.TrimSpace(m.projectFormPermissionMode)
 
 	model, cmd := m.showProjectForm(m.editProject)
 	model.err = err

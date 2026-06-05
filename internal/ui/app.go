@@ -1505,6 +1505,12 @@ func (m *AppModel) applyWindowSize(width, height int) {
 	if m.editTaskForm != nil {
 		m.editTaskForm.SetSize(width, height)
 	}
+	if m.welcomeView != nil {
+		m.welcomeView.SetSize(m.width, m.height)
+	}
+	if m.folderPicker != nil {
+		m.folderPicker.SetSize(m.width, m.height)
+	}
 }
 
 // View renders the current view.
@@ -3241,6 +3247,13 @@ func (m *AppModel) onlyPersonalProject() bool {
 // handleFolderPicked builds a project from the chosen folder, enriches it via
 // inference, and shows the same confirm card used for auto-detected projects.
 func (m *AppModel) handleFolderPicked(path string) (tea.Model, tea.Cmd) {
+	if proj, err := m.db.GetProjectByPath(path); err == nil && proj != nil {
+		m.folderPicker = nil
+		m.notification = fmt.Sprintf("%s \"%s\" already covers that folder", IconDone(), proj.Name)
+		m.notifyUntil = time.Now().Add(4 * time.Second)
+		m.currentView = ViewDashboard
+		return m, m.loadTasks()
+	}
 	detected, source := detectProjectFromDir(path)
 	if detected == nil {
 		// Folder had no signals; treat the chosen dir as a plain (non-worktree) project.
@@ -3379,7 +3392,11 @@ func (m *AppModel) updateProjectDetectConfirm(msg tea.Msg) (tea.Model, tea.Cmd) 
 		switch keyMsg.String() {
 		case "esc", "ctrl+c":
 			// Treat dismissal like declining so we don't nag on every startup.
-			m.dismissProjectSuggestion()
+			dismissPath := m.workingDir
+			if m.detectedProject != nil && m.detectedProject.Path != "" {
+				dismissPath = m.detectedProject.Path
+			}
+			m.dismissProjectSuggestion(dismissPath)
 			return m, nil
 		}
 	}
@@ -3397,11 +3414,19 @@ func (m *AppModel) updateProjectDetectConfirm(msg tea.Msg) (tea.Model, tea.Cmd) 
 			m.detectedProject = nil
 			return m, m.createDetectedProject(detected)
 		}
-		m.dismissProjectSuggestion()
+		dismissPath := m.workingDir
+		if detected != nil && detected.Path != "" {
+			dismissPath = detected.Path
+		}
+		m.dismissProjectSuggestion(dismissPath)
 		return m, nil
 	}
 	if m.projectDetectConfirm.State == huh.StateAborted {
-		m.dismissProjectSuggestion()
+		dismissPath := m.workingDir
+		if m.detectedProject != nil && m.detectedProject.Path != "" {
+			dismissPath = m.detectedProject.Path
+		}
+		m.dismissProjectSuggestion(dismissPath)
 		return m, nil
 	}
 
@@ -3409,10 +3434,10 @@ func (m *AppModel) updateProjectDetectConfirm(msg tea.Msg) (tea.Model, tea.Cmd) 
 }
 
 // dismissProjectSuggestion records that the user declined to create a project for
-// the current directory and closes the modal.
-func (m *AppModel) dismissProjectSuggestion() {
-	if m.db != nil && m.workingDir != "" {
-		m.db.SetSetting(projectSuggestionDismissedKey(m.workingDir), "1")
+// the given path and closes the modal.
+func (m *AppModel) dismissProjectSuggestion(path string) {
+	if m.db != nil && path != "" {
+		m.db.SetSetting(projectSuggestionDismissedKey(path), "1")
 	}
 	m.projectDetectConfirm = nil
 	m.detectedProject = nil
