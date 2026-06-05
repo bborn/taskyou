@@ -92,6 +92,40 @@ scripts/qa/ty-qa-state.sh '.detail.has_panes'   # => true (panes joined)
 scripts/qa/ty-qa-down.sh --purge
 ```
 
+## Screenshots & PR evidence (VHS + R2)
+
+To attach real-TUI screenshots to a PR, render with **VHS** and publish to the
+public R2 evidence bucket — no manual uploads, no friction.
+
+```bash
+scripts/qa/ty-qa-up.sh                                  # build + isolated instance
+
+# Render screens (VHS sizes the terminal correctly; ty renders in-pane via TMUX env).
+# A fresh DB per shot => true first-run. Extra args are VHS tape lines.
+mkdir -p /tmp/ty-qa/shots
+scripts/qa/ty-qa-shoot.sh "$TY_QA_PROJECTS/demo"  /tmp/ty-qa/shots/01-card.png    "Sleep 9s"   # git-repo card (waits for claude -p)
+scripts/qa/ty-qa-shoot.sh /tmp/ty-qa/plainfolder  /tmp/ty-qa/shots/02-welcome.png "Sleep 5s"   # welcome fork
+scripts/qa/ty-qa-shoot.sh /tmp/ty-qa/plainfolder  /tmp/ty-qa/shots/03-picker.png \
+  "Sleep 5s" "Enter" "Sleep 1s" 'Type "ty"' "Sleep 2s"                                          # fork -> picker -> filter
+
+# Upload + get the markdown image block (prefix is usually the PR number).
+scripts/qa/ty-qa-publish.sh 555 /tmp/ty-qa/shots/*.png
+# -> ![01-card](https://pub-...r2.dev/taskyou-qa/<date>/555-01-card.png)  ...
+```
+
+Then paste the printed markdown into a PR comment (or `gh pr comment <n> -F -`).
+
+**Why VHS, not `tmux capture-pane`:** a detached tmux session mis-reports its
+width to bubbletea, so centred modals overflow and render corrupted. VHS runs
+the TUI in a correctly-sized headless terminal — screenshots match real users.
+
+**Tooling / config:** needs `vhs` and `imagemagick` (`brew install vhs imagemagick`),
+and a configured `rclone` remote. `ty-qa-publish.sh` writes to
+`r2-personal:qa-evidence/taskyou-qa/<date>/` and prints public
+`pub-….r2.dev` URLs. The write remote is **`r2-personal`** (the read-only `r2`
+remote returns 403 on PutObject); override via `TY_QA_R2_REMOTE`/`TY_QA_R2_BUCKET`/
+`TY_QA_R2_PUBLIC`. No credentials live in the scripts — they're in the rclone remote.
+
 ## Gotchas
 
 - The TUI must run **inside** `task-ui-<sid>` — `joinTmuxPane` attaches agent panes there.
