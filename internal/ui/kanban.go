@@ -1165,7 +1165,7 @@ func (k *KanbanBoard) renderTaskCard(task *db.Task, width int, isSelected bool, 
 			indicators = append(indicators, dangerStyle.Render("●"))
 		}
 	}
-	// Auto mode indicator (green dot) for active tasks running in auto/acceptEdits mode.
+	// Accept-edits indicator (green dot) for active tasks running in Claude's acceptEdits mode.
 	if task.IsAutoPermission() && (task.Status == db.StatusProcessing || task.Status == db.StatusBlocked) {
 		if isSelected {
 			indicators = append(indicators, "●")

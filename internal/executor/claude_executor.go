@@ -104,7 +104,7 @@ func (c *ClaudeExecutor) ResumeProcess(taskID int64) bool {
 
 // BuildCommand returns the shell command to start an interactive Claude session.
 func (c *ClaudeExecutor) BuildCommand(task *db.Task, sessionID, prompt string) string {
-	// Build permission mode flag (dangerous, auto/acceptEdits, or none)
+	// Build permission mode flag (dangerous, accept-edits/acceptEdits, or none)
 	dangerousFlag := claudePermissionFlag(task)
 
 	// Build per-task effort override flag (empty = use Claude's global default)

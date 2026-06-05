@@ -18,6 +18,7 @@ func TestClaudePermissionFlag(t *testing.T) {
 		{"default empty", &db.Task{}, ""},
 		{"explicit default", &db.Task{PermissionMode: db.PermissionModeDefault}, ""},
 		{"auto", &db.Task{PermissionMode: db.PermissionModeAuto}, "--permission-mode acceptEdits "},
+		{"accept-edits alias", &db.Task{PermissionMode: "accept-edits"}, "--permission-mode acceptEdits "},
 		{"dangerous", &db.Task{PermissionMode: db.PermissionModeDangerous}, "--dangerously-skip-permissions "},
 		{"legacy dangerous bool", &db.Task{DangerousMode: true}, "--dangerously-skip-permissions "},
 	}

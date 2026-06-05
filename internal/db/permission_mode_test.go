@@ -8,12 +8,16 @@ import (
 
 func TestNormalizePermissionMode(t *testing.T) {
 	cases := map[string]string{
-		"auto":      PermissionModeAuto,
-		"dangerous": PermissionModeDangerous,
-		"default":   PermissionModeDefault,
-		"prompt":    PermissionModeDefault,
-		"":          "",
-		"bogus":     "",
+		"auto":         PermissionModeAuto, // legacy alias, kept for back-compat
+		"accept-edits": PermissionModeAuto, // unambiguous spelling normalizes to the canonical value
+		"accept_edits": PermissionModeAuto,
+		"acceptEdits":  PermissionModeAuto, // Claude Code's own spelling
+		"  Auto  ":     PermissionModeAuto, // trimmed + case-insensitive
+		"dangerous":    PermissionModeDangerous,
+		"default":      PermissionModeDefault,
+		"prompt":       PermissionModeDefault,
+		"":             "",
+		"bogus":        "",
 	}
 	for in, want := range cases {
 		if got := NormalizePermissionMode(in); got != want {

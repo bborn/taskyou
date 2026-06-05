@@ -2900,7 +2900,7 @@ func (m *AppModel) updateNewTaskForm(msg tea.Msg) (tea.Model, tea.Cmd) {
 						Options(
 							huh.NewOption("No — save to backlog", "no"),
 							huh.NewOption("Yes — execute now", "yes"),
-							huh.NewOption("Yes — execute in auto mode", "auto"),
+							huh.NewOption("Yes — execute in accept-edits mode", "auto"),
 							huh.NewOption("Yes — execute in dangerous mode", "dangerous"),
 						).
 						Value(&m.queueValue),

@@ -2358,7 +2358,9 @@ func (m *DetailModel) renderHeader() string {
 		meta.WriteString("  ")
 	}
 
-	// Auto mode badge (acceptEdits) for active tasks.
+	// Accept-edits badge (Claude's acceptEdits mode) for active tasks. Labeled
+	// "ACCEPT EDITS" rather than "AUTO" so it isn't confused with Claude Code's
+	// separate auto mode (--enable-auto-mode).
 	if t.IsAutoPermission() && (t.Status == db.StatusProcessing || t.Status == db.StatusBlocked) {
 		var autoStyle lipgloss.Style
 		if m.focused {
@@ -2373,7 +2375,7 @@ func (m *DetailModel) renderHeader() string {
 				Background(dimmedBg).
 				Foreground(dimmedFg)
 		}
-		meta.WriteString(autoStyle.Render("AUTO"))
+		meta.WriteString(autoStyle.Render("ACCEPT EDITS"))
 		meta.WriteString("  ")
 	}
 
