@@ -743,7 +743,12 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.updateProjectChangeConfirm(msg)
 		}
 		if m.currentView == ViewProjectDetectConfirm && m.projectDetectConfirm != nil {
-			return m.updateProjectDetectConfirm(msg)
+			// Async inference results must reach the main switch (case
+			// projectInferredMsg) to enrich the card in place; all other
+			// messages (keys) drive the confirm form.
+			if _, ok := msg.(projectInferredMsg); !ok {
+				return m.updateProjectDetectConfirm(msg)
+			}
 		}
 		// Folder picker: route all messages (keys + cursor blink) to the picker
 		// so its text input stays live. The picker emits folderPickedMsg on enter
