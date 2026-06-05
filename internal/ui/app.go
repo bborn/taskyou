@@ -528,8 +528,8 @@ type AppModel struct {
 	debugStatePath string
 
 	// First-time experience
-	isFirstLoad     bool // Track if this is the first load of tasks
-	showWelcome     bool // Show welcome message when kanban is empty
+	isFirstLoad bool // Track if this is the first load of tasks
+	showWelcome bool // Show welcome message when kanban is empty
 
 	// Version upgrade notification
 	currentVersion string                // Current binary version (e.g. "v0.1.0" or "dev")
