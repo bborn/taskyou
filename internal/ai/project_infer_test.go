@@ -19,6 +19,12 @@ func TestParseInferenceJSON(t *testing.T) {
 	if _, err := parseInferenceJSON("not json at all"); err == nil {
 		t.Error("expected error on non-JSON")
 	}
+
+	// Prose containing a stray brace before the real JSON object.
+	meta, err = parseInferenceJSON(`note: use {curly} then {"name":"bar","alias":"b","description":"d"}`)
+	if err != nil || meta.Name != "bar" {
+		t.Errorf("stray-brace parse failed: %+v err=%v", meta, err)
+	}
 }
 
 func TestInferProjectMetadata_DegradesWhenClaudeMissing(t *testing.T) {

@@ -37,9 +37,10 @@ func InferProjectMetadata(dir, configDir string) (ProjectMetadata, error) {
 	cmd := exec.CommandContext(ctx, "claude", "-p", prompt)
 	cmd.Dir = dir
 	cmd.Env = append(os.Environ(), fmt.Sprintf("CLAUDE_CONFIG_DIR=%s", executor.ResolveClaudeConfigDir(configDir)))
-	out, err := cmd.Output()
+	cmd.WaitDelay = 2 * time.Second
+	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return ProjectMetadata{}, fmt.Errorf("claude -p inference failed: %w", err)
+		return ProjectMetadata{}, fmt.Errorf("claude -p inference failed: %w\noutput: %s", err, strings.TrimSpace(string(out)))
 	}
 	return parseInferenceJSON(string(out))
 }
@@ -105,20 +106,21 @@ func readmeSnippet(dir string) string {
 }
 
 // parseInferenceJSON extracts a ProjectMetadata from claude's output, tolerating
-// surrounding prose or fences by scanning for the first {...} block.
+// surrounding prose or fences by scanning forward from each '{' up to the last '}'.
 func parseInferenceJSON(raw string) (ProjectMetadata, error) {
 	s := strings.TrimSpace(raw)
-	start := strings.Index(s, "{")
 	end := strings.LastIndex(s, "}")
-	if start < 0 || end < 0 || end <= start {
+	if end < 0 {
 		return ProjectMetadata{}, fmt.Errorf("no JSON object found in inference output")
 	}
-	var meta ProjectMetadata
-	if err := json.Unmarshal([]byte(s[start:end+1]), &meta); err != nil {
-		return ProjectMetadata{}, fmt.Errorf("parse inference JSON: %w", err)
+	for i := 0; i < end; i++ {
+		if s[i] != '{' {
+			continue
+		}
+		var meta ProjectMetadata
+		if err := json.Unmarshal([]byte(s[i:end+1]), &meta); err == nil && strings.TrimSpace(meta.Name) != "" {
+			return meta, nil
+		}
 	}
-	if strings.TrimSpace(meta.Name) == "" {
-		return ProjectMetadata{}, fmt.Errorf("inference returned empty name")
-	}
-	return meta, nil
+	return ProjectMetadata{}, fmt.Errorf("no parseable JSON object with a name in inference output")
 }
