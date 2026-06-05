@@ -458,6 +458,7 @@ type AppModel struct {
 	projectDetectConfirmValue bool
 	detectedProject           *db.Project // Inferred project pending user confirmation
 	detectedInstructionSource string      // File the inferred instructions came from
+	detectedInferencePending  bool        // Async claude -p inference is still in flight for detectedProject
 	projectDetectionOffered   bool        // Guard so we only offer once per session
 
 	// First-run onboarding views
@@ -1021,6 +1022,19 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.initialPRRefreshDone = true
 			cmds = append(cmds, m.refreshAllPRs())
 		}
+
+	case projectInferredMsg:
+		// Only apply if the card for this exact path is still showing.
+		if m.currentView == ViewProjectDetectConfirm && m.detectedProject != nil && m.detectedProject.Path == msg.path {
+			m.detectedInferencePending = false
+			if msg.err == nil {
+				applyInferredMetadata(m.detectedProject, msg.meta)
+				m.detectedProject.Name = uniqueProjectName(m.db, m.detectedProject.Name)
+			}
+			m.buildProjectDetectForm()
+			return m, m.projectDetectConfirm.Init()
+		}
+		return m, nil
 
 	case taskLoadedMsg:
 		// Reset transition flag now that task is loaded
@@ -3244,8 +3258,9 @@ func (m *AppModel) onlyPersonalProject() bool {
 	return true
 }
 
-// handleFolderPicked builds a project from the chosen folder, enriches it via
-// inference, and shows the same confirm card used for auto-detected projects.
+// handleFolderPicked builds a project from the chosen folder and shows the same
+// confirm card used for auto-detected projects. Metadata inference runs
+// asynchronously (see showProjectDetectConfirm) so the card appears instantly.
 func (m *AppModel) handleFolderPicked(path string) (tea.Model, tea.Cmd) {
 	if proj, err := m.db.GetProjectByPath(path); err == nil && proj != nil {
 		m.folderPicker = nil
@@ -3258,9 +3273,6 @@ func (m *AppModel) handleFolderPicked(path string) (tea.Model, tea.Cmd) {
 	if detected == nil {
 		// Folder had no signals; treat the chosen dir as a plain (non-worktree) project.
 		detected = &db.Project{Name: inferProjectName(path), Path: filepath.Clean(path), UseWorktrees: dirIsGitRepo(path)}
-	}
-	if meta, err := ai.InferProjectMetadata(path, ""); err == nil {
-		applyInferredMetadata(detected, meta)
 	}
 	detected.Name = uniqueProjectName(m.db, detected.Name)
 	m.folderPicker = nil
@@ -3299,14 +3311,11 @@ func (m *AppModel) maybeOfferProjectCreation() (tea.Model, tea.Cmd, bool) {
 		return m, nil, false
 	}
 
-	// Enrich with claude -p inference; ignore failures (graceful degrade).
-	if meta, err := ai.InferProjectMetadata(m.workingDir, ""); err == nil {
-		applyInferredMetadata(detected, meta)
-	}
-
 	detected.Name = uniqueProjectName(m.db, detected.Name)
 
 	m.projectDetectionOffered = true
+	// showProjectDetectConfirm fires the claude -p inference asynchronously and
+	// enriches the card in place when projectInferredMsg arrives.
 	model, cmd := m.showProjectDetectConfirm(detected, source)
 	return model, cmd, true
 }
@@ -3314,16 +3323,39 @@ func (m *AppModel) maybeOfferProjectCreation() (tea.Model, tea.Cmd, bool) {
 func (m *AppModel) showProjectDetectConfirm(project *db.Project, instructionSource string) (tea.Model, tea.Cmd) {
 	m.detectedProject = project
 	m.detectedInstructionSource = instructionSource
+	m.detectedInferencePending = true
 	m.projectDetectConfirmValue = true
 
+	m.previousView = m.currentView
+	m.currentView = ViewProjectDetectConfirm
+	m.buildProjectDetectForm()
+
+	// Show the card instantly with rule-based values, then enrich it in place
+	// once the async claude -p inference returns (projectInferredMsg).
+	return m, tea.Batch(m.projectDetectConfirm.Init(), inferProjectCmd(project.Path, ""))
+}
+
+// buildProjectDetectForm (re)builds the detect-confirm huh form from the current
+// detectedProject / detectedInstructionSource / detectedInferencePending state.
+// It deliberately does NOT touch previousView or currentView so it can be called
+// again when async inference arrives to refresh the card in place.
+func (m *AppModel) buildProjectDetectForm() {
+	project := m.detectedProject
+	if project == nil {
+		return
+	}
+
 	var desc strings.Builder
+	if m.detectedInferencePending {
+		desc.WriteString("✨ Inferring project details…\n\n")
+	}
 	desc.WriteString(fmt.Sprintf("This directory looks like a project.\n\nName: %s\n", project.Name))
 	if project.Aliases != "" {
 		desc.WriteString(fmt.Sprintf("Alias: %s\n", project.Aliases))
 	}
 	desc.WriteString(fmt.Sprintf("Path: %s\n", project.Path))
-	if instructionSource != "" {
-		desc.WriteString(fmt.Sprintf("Instructions: imported from %s\n", instructionSource))
+	if m.detectedInstructionSource != "" {
+		desc.WriteString(fmt.Sprintf("Instructions: imported from %s\n", m.detectedInstructionSource))
 	} else if project.Instructions != "" {
 		desc.WriteString("Description: " + firstLine(project.Instructions) + "\n")
 	}
@@ -3344,10 +3376,6 @@ func (m *AppModel) showProjectDetectConfirm(project *db.Project, instructionSour
 	).WithTheme(huh.ThemeDracula()).
 		WithWidth(modalWidth - 6).
 		WithShowHelp(true)
-
-	m.previousView = m.currentView
-	m.currentView = ViewProjectDetectConfirm
-	return m, m.projectDetectConfirm.Init()
 }
 
 // firstLine returns the first line of s (without the trailing newline).
@@ -4077,6 +4105,22 @@ func (m *AppModel) updateCommandPalette(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	return m, cmd
+}
+
+// projectInferredMsg carries the result of an async claude -p inference for the
+// project currently being offered in the detect-confirm card.
+type projectInferredMsg struct {
+	path string
+	meta ai.ProjectMetadata
+	err  error
+}
+
+// inferProjectCmd runs project inference off the UI loop and reports the result.
+func inferProjectCmd(path, configDir string) tea.Cmd {
+	return func() tea.Msg {
+		meta, err := ai.InferProjectMetadata(path, configDir)
+		return projectInferredMsg{path: path, meta: meta, err: err}
+	}
 }
 
 // Messages
