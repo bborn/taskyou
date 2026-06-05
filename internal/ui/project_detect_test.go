@@ -130,6 +130,34 @@ func TestDetectProjectFromDir(t *testing.T) {
 	}
 }
 
+func TestDetectProjectFromDir_NonGitMarker(t *testing.T) {
+	// A dir with only go.mod (no .git) should be detected as a project
+	// with UseWorktrees==false.
+	markerDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(markerDir, "go.mod"), []byte("module example\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	p, _ := detectProjectFromDir(markerDir)
+	if p == nil {
+		t.Fatal("expected non-nil project for dir with go.mod, got nil")
+	}
+	if p.UseWorktrees {
+		t.Errorf("expected UseWorktrees false for non-git project, got true")
+	}
+	if p.Name == "" {
+		t.Errorf("expected non-empty Name")
+	}
+	if p.Path == "" {
+		t.Errorf("expected non-empty Path")
+	}
+
+	// An empty dir (no markers, no git) must return nil.
+	emptyDir := t.TempDir()
+	if p2, _ := detectProjectFromDir(emptyDir); p2 != nil {
+		t.Errorf("expected nil for empty dir, got %+v", p2)
+	}
+}
+
 func TestUniqueProjectName(t *testing.T) {
 	tmpDir := t.TempDir()
 	database, err := db.Open(filepath.Join(tmpDir, "test.db"))

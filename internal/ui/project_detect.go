@@ -72,7 +72,7 @@ func readProjectInstructions(dir string) (instructions string, sourceFile string
 
 // projectMarkerFiles signal that a directory is a real project even without git.
 var projectMarkerFiles = []string{
-	".git", "package.json", "go.mod", "Cargo.toml", "pyproject.toml",
+	"package.json", "go.mod", "Cargo.toml", "pyproject.toml",
 	"requirements.txt", "Gemfile", "pom.xml", "build.gradle", "composer.json",
 	"AGENTS.md", "CLAUDE.md", ".cursorrules", "Makefile",
 }
@@ -95,7 +95,7 @@ func isProjectCandidate(dir string) bool {
 	clean := filepath.Clean(dir)
 
 	// Deny-list: root, temp, $HOME itself, and bare home children.
-	if clean == "/" || clean == filepath.Clean(os.TempDir()) || strings.HasPrefix(clean, "/tmp") {
+	if clean == "/" || clean == filepath.Clean(os.TempDir()) || clean == "/tmp" {
 		return false
 	}
 	if home, err := os.UserHomeDir(); err == nil && home != "" {
