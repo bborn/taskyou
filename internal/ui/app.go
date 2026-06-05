@@ -530,7 +530,6 @@ type AppModel struct {
 	// First-time experience
 	isFirstLoad     bool // Track if this is the first load of tasks
 	showWelcome     bool // Show welcome message when kanban is empty
-	onboardingShown bool // Track if we've already shown the onboarding (to prevent double-triggering)
 
 	// Version upgrade notification
 	currentVersion string                // Current binary version (e.g. "v0.1.0" or "dev")
@@ -3255,19 +3254,20 @@ func (m *AppModel) handleFolderPicked(path string) (tea.Model, tea.Cmd) {
 	return m.showProjectDetectConfirm(detected, source)
 }
 
-// maybeOfferProjectCreation checks whether the current working directory is a git
-// repo without an associated TaskYou project and, if so, opens a confirmation
-// modal offering to create one (with details inferred from the repo). The third
-// return value reports whether the offer was made; when false the caller should
-// continue with its normal flow.
+// maybeOfferProjectCreation checks whether the current working directory is a
+// project candidate (git repo or recognised marker files) without an associated
+// TaskYou project and, if so, opens a confirmation modal offering to create one
+// (with details inferred from the directory). The third return value reports
+// whether the offer was made; when false the caller should continue with its
+// normal flow.
 func (m *AppModel) maybeOfferProjectCreation() (tea.Model, tea.Cmd, bool) {
 	if m.projectDetectionOffered || m.db == nil || m.workingDir == "" {
 		return m, nil, false
 	}
 
-	// Only offer for git repos - non-git directories don't benefit from the
-	// worktree-based project model and aren't a clear signal of intent.
-	if !dirIsGitRepo(m.workingDir) {
+	// Offer for any project candidate (git repo OR marker files), not just git.
+	// Non-git candidates become non-worktree projects (git stays optional).
+	if !isProjectCandidate(m.workingDir) {
 		return m, nil, false
 	}
 
