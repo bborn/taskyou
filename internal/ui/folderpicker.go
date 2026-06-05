@@ -32,6 +32,7 @@ type FolderPickerModel struct {
 	root     string
 	width    int
 	height   int
+	home     string
 }
 
 // NewFolderPickerModel seeds the picker from common project roots.
@@ -41,7 +42,8 @@ func NewFolderPickerModel(width, height int) *FolderPickerModel {
 	ti.Focus()
 	ti.Prompt = "> "
 
-	m := &FolderPickerModel{input: ti, width: width, height: height}
+	home, _ := os.UserHomeDir()
+	m := &FolderPickerModel{input: ti, width: width, height: height, home: home}
 	m.all = seedCandidateFolders()
 	m.filtered = m.all
 	return m
@@ -142,6 +144,9 @@ func (m *FolderPickerModel) Update(msg tea.Msg) (*FolderPickerModel, tea.Cmd) {
 	m.input, cmd = m.input.Update(msg)
 	m.filtered = fuzzyFilterFolders(m.all, m.input.Value())
 	if m.selected >= len(m.filtered) {
+		m.selected = len(m.filtered) - 1
+	}
+	if m.selected < 0 {
 		m.selected = 0
 	}
 	return m, cmd
@@ -149,10 +154,10 @@ func (m *FolderPickerModel) Update(msg tea.Msg) (*FolderPickerModel, tea.Cmd) {
 
 // descend repopulates the list with the candidate children of dir. If dir has no
 // sub-directories it is treated as a leaf and picked directly.
-func (m *FolderPickerModel) descend(dir string) tea.Cmd {
+func (m *FolderPickerModel) descend(dir string) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return nil
+		return
 	}
 	var children []folderEntry
 	for _, e := range entries {
@@ -163,14 +168,13 @@ func (m *FolderPickerModel) descend(dir string) tea.Cmd {
 		children = append(children, folderEntry{path: p, isGit: dirIsGitRepo(p)})
 	}
 	if len(children) == 0 {
-		return nil // leaf: user can press enter to pick it
+		return // leaf: user can press enter to pick it
 	}
 	m.root = dir
 	m.all = children
 	m.input.SetValue("")
 	m.filtered = m.all
 	m.selected = 0
-	return nil
 }
 
 func (m *FolderPickerModel) View() string {
@@ -200,7 +204,7 @@ func (m *FolderPickerModel) View() string {
 		if e.isGit {
 			tag = lipgloss.NewStyle().Foreground(ColorPrimary).Render("  git ●")
 		}
-		line := prefix + collapseHome(e.path) + tag
+		line := prefix + m.collapseHome(e.path) + tag
 		if i == m.selected {
 			line = Bold.Render(line)
 		}
@@ -218,9 +222,9 @@ func (m *FolderPickerModel) View() string {
 }
 
 // collapseHome shortens /home/u/... to ~/... for display.
-func collapseHome(p string) string {
-	if home, err := os.UserHomeDir(); err == nil && strings.HasPrefix(p, home) {
-		return "~" + strings.TrimPrefix(p, home)
+func (m *FolderPickerModel) collapseHome(p string) string {
+	if m.home != "" && strings.HasPrefix(p, m.home) {
+		return "~" + strings.TrimPrefix(p, m.home)
 	}
 	return p
 }
