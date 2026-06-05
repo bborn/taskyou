@@ -49,6 +49,8 @@ const (
 	ViewChangeStatus
 	ViewCommandPalette
 	ViewProjectDetectConfirm // Offer to create a project for the current git repo
+	ViewWelcome              // first-run fork: set up a project vs start a task
+	ViewFolderPicker         // fuzzy folder picker for "set up a project"
 )
 
 // KeyMap defines key bindings.
@@ -458,6 +460,10 @@ type AppModel struct {
 	detectedInstructionSource string      // File the inferred instructions came from
 	projectDetectionOffered   bool        // Guard so we only offer once per session
 
+	// First-run onboarding views
+	welcomeView  *WelcomeModel
+	folderPicker *FolderPickerModel
+
 	// Delete confirmation state
 	deleteConfirm      *huh.Form
 	deleteConfirmValue bool
@@ -739,6 +745,23 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.currentView == ViewProjectDetectConfirm && m.projectDetectConfirm != nil {
 			return m.updateProjectDetectConfirm(msg)
 		}
+		// Folder picker: route all messages (keys + cursor blink) to the picker
+		// so its text input stays live. The picker emits folderPickedMsg on enter
+		// (handled below), and esc closes it back to the Welcome fork.
+		if m.currentView == ViewFolderPicker && m.folderPicker != nil {
+			if picked, ok := msg.(folderPickedMsg); ok {
+				return m.handleFolderPicked(picked.path)
+			}
+			if key, ok := msg.(tea.KeyMsg); ok && (key.String() == "esc" || key.String() == "ctrl+c") {
+				m.folderPicker = nil
+				m.welcomeView = NewWelcomeModel(m.width, m.height)
+				m.currentView = ViewWelcome
+				return m, nil
+			}
+			var cmd tea.Cmd
+			m.folderPicker, cmd = m.folderPicker.Update(msg)
+			return m, cmd
+		}
 		if m.currentView == ViewDeleteConfirm && m.deleteConfirm != nil {
 			return m.updateDeleteConfirm(msg)
 		}
@@ -804,6 +827,36 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.commandPaletteView.Init()
 		}
 
+		// First-run Welcome fork key handling.
+		if m.currentView == ViewWelcome && m.welcomeView != nil {
+			switch msg.String() {
+			case "left", "h":
+				m.welcomeView.MoveLeft()
+				return m, nil
+			case "right", "l":
+				m.welcomeView.MoveRight()
+				return m, nil
+			case "enter":
+				switch m.welcomeView.Choice() {
+				case welcomeSetupProject:
+					m.welcomeView = nil
+					m.folderPicker = NewFolderPickerModel(m.width, m.height)
+					m.currentView = ViewFolderPicker
+					return m, m.folderPicker.Init()
+				case welcomeStartTask:
+					m.welcomeView = nil
+					m.newTaskForm = NewFormModel(m.db, m.width, m.height, m.workingDir, m.availableExecutors)
+					m.previousView = ViewDashboard
+					m.currentView = ViewNewTask
+					return m, m.newTaskForm.Init()
+				}
+			case "esc", "ctrl+c":
+				m.welcomeView = nil
+				m.currentView = ViewDashboard
+				return m, nil
+			}
+		}
+
 		// Route to current view
 		switch m.currentView {
 		case ViewDashboard:
@@ -832,26 +885,24 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.tasks = msg.tasks
 		m.err = msg.err
 
-		// First-time experience: auto-open new task form on first run when no tasks exist
+		// First-load onboarding routing (runs once per process start).
 		if m.isFirstLoad {
 			m.isFirstLoad = false
 			m.showWelcome = len(msg.tasks) == 0
 
-			// If we're inside a git repo that has no TaskYou project yet, offer to
-			// create one (inferring details from the repo). This takes priority over
-			// the generic onboarding form since it's more directly useful.
+			// 1. In a real project folder we don't yet track? Offer to set it up
+			//    (LLM-enriched). Works on every launch, until dismissed per-path.
 			if model, cmd, offered := m.maybeOfferProjectCreation(); offered {
 				return model, cmd
 			}
 
-			// If this is the very first run (no tasks, onboarding not completed), auto-open new task form
-			if len(msg.tasks) == 0 && m.db.IsFirstRun() && !m.onboardingShown {
-				m.onboardingShown = true
-				// Auto-open the new task form to guide users to create their first task
-				m.newTaskForm = NewFormModel(m.db, m.width, m.height, m.workingDir, m.availableExecutors)
+			// 2. No real projects yet (only "personal") and we're in a junk folder:
+			//    show the Welcome fork instead of dumping into a task form.
+			if m.shouldShowWelcomeFork(msg.tasks) {
+				m.welcomeView = NewWelcomeModel(m.width, m.height)
 				m.previousView = m.currentView
-				m.currentView = ViewNewTask
-				return m, m.newTaskForm.Init()
+				m.currentView = ViewWelcome
+				return m, nil
 			}
 		}
 
@@ -1493,6 +1544,14 @@ func (m *AppModel) View() string {
 		return m.viewProjectChangeConfirm()
 	case ViewProjectDetectConfirm:
 		return m.viewProjectDetectConfirm()
+	case ViewWelcome:
+		if m.welcomeView != nil {
+			return m.welcomeView.View()
+		}
+	case ViewFolderPicker:
+		if m.folderPicker != nil {
+			return m.folderPicker.View()
+		}
 	case ViewDeleteConfirm:
 		return m.viewDeleteConfirm()
 	case ViewCloseConfirm:
@@ -3147,6 +3206,55 @@ func (m *AppModel) updateProjectChangeConfirm(msg tea.Msg) (tea.Model, tea.Cmd) 
 	return m, cmd
 }
 
+// shouldShowWelcomeFork reports whether to show the first-run Welcome fork:
+// no real projects beyond "personal", and the cwd is not a project candidate
+// (otherwise maybeOfferProjectCreation handled it). Gated on "no tasks yet".
+func (m *AppModel) shouldShowWelcomeFork(tasks []*db.Task) bool {
+	if m.db == nil {
+		return false
+	}
+	if isProjectCandidate(m.workingDir) {
+		return false
+	}
+	if !m.onlyPersonalProject() {
+		return false
+	}
+	// We already checked onlyPersonalProject above; combining "no tasks" +
+	// "only personal" is the intended gate (per agreed design, not IsFirstRun).
+	return len(tasks) == 0
+}
+
+// onlyPersonalProject reports whether the only project is the auto-created
+// "personal" one (i.e. the user hasn't set up a real project yet).
+func (m *AppModel) onlyPersonalProject() bool {
+	projects, err := m.db.ListProjects()
+	if err != nil {
+		return false
+	}
+	for _, p := range projects {
+		if p.Name != "personal" {
+			return false
+		}
+	}
+	return true
+}
+
+// handleFolderPicked builds a project from the chosen folder, enriches it via
+// inference, and shows the same confirm card used for auto-detected projects.
+func (m *AppModel) handleFolderPicked(path string) (tea.Model, tea.Cmd) {
+	detected, source := detectProjectFromDir(path)
+	if detected == nil {
+		// Folder had no signals; treat the chosen dir as a plain (non-worktree) project.
+		detected = &db.Project{Name: inferProjectName(path), Path: filepath.Clean(path), UseWorktrees: dirIsGitRepo(path)}
+	}
+	if meta, err := ai.InferProjectMetadata(path, ""); err == nil {
+		applyInferredMetadata(detected, meta)
+	}
+	detected.Name = uniqueProjectName(m.db, detected.Name)
+	m.folderPicker = nil
+	return m.showProjectDetectConfirm(detected, source)
+}
+
 // maybeOfferProjectCreation checks whether the current working directory is a git
 // repo without an associated TaskYou project and, if so, opens a confirmation
 // modal offering to create one (with details inferred from the repo). The third
@@ -3177,6 +3285,12 @@ func (m *AppModel) maybeOfferProjectCreation() (tea.Model, tea.Cmd, bool) {
 	if detected == nil {
 		return m, nil, false
 	}
+
+	// Enrich with claude -p inference; ignore failures (graceful degrade).
+	if meta, err := ai.InferProjectMetadata(m.workingDir, ""); err == nil {
+		applyInferredMetadata(detected, meta)
+	}
+
 	detected.Name = uniqueProjectName(m.db, detected.Name)
 
 	m.projectDetectionOffered = true
@@ -3190,12 +3304,17 @@ func (m *AppModel) showProjectDetectConfirm(project *db.Project, instructionSour
 	m.projectDetectConfirmValue = true
 
 	var desc strings.Builder
-	desc.WriteString(fmt.Sprintf("This directory is a git repo with no TaskYou project yet.\n\nName: %s\nPath: %s\n", project.Name, project.Path))
+	desc.WriteString(fmt.Sprintf("This directory looks like a project.\n\nName: %s\n", project.Name))
+	if project.Aliases != "" {
+		desc.WriteString(fmt.Sprintf("Alias: %s\n", project.Aliases))
+	}
+	desc.WriteString(fmt.Sprintf("Path: %s\n", project.Path))
 	if instructionSource != "" {
 		desc.WriteString(fmt.Sprintf("Instructions: imported from %s\n", instructionSource))
-	} else {
-		desc.WriteString("Instructions: none found (add later in Settings)\n")
+	} else if project.Instructions != "" {
+		desc.WriteString("Description: " + firstLine(project.Instructions) + "\n")
 	}
+	desc.WriteString(fmt.Sprintf("Worktrees: %v\n", project.UseWorktrees))
 	desc.WriteString("\nYou can edit any of this later in Settings.")
 
 	modalWidth := min(64, m.width-8)
@@ -3216,6 +3335,14 @@ func (m *AppModel) showProjectDetectConfirm(project *db.Project, instructionSour
 	m.previousView = m.currentView
 	m.currentView = ViewProjectDetectConfirm
 	return m, m.projectDetectConfirm.Init()
+}
+
+// firstLine returns the first line of s (without the trailing newline).
+func firstLine(s string) string {
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		return s[:i]
+	}
+	return s
 }
 
 func (m *AppModel) viewProjectDetectConfirm() string {
