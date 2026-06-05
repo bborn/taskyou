@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/bborn/workflow/internal/ai"
 	"github.com/bborn/workflow/internal/db"
 )
 
@@ -188,6 +189,34 @@ func TestProjectSuggestionDismissedKey(t *testing.T) {
 	k2 := projectSuggestionDismissedKey("/tmp/foo")
 	if k1 != k2 {
 		t.Fatalf("expected cleaned paths to produce equal keys: %q vs %q", k1, k2)
+	}
+}
+
+func TestApplyInferredMetadata(t *testing.T) {
+	base := &db.Project{Name: "acme-rocket", Path: "/x"}
+
+	applyInferredMetadata(base, ai.ProjectMetadata{Name: "Acme Rocket", Alias: "acme", Description: "Rust CLI"})
+	if base.Name != "Acme Rocket" {
+		t.Errorf("name not applied: %q", base.Name)
+	}
+	if base.Aliases != "acme" {
+		t.Errorf("alias not applied: %q", base.Aliases)
+	}
+	if base.Instructions != "Rust CLI" {
+		t.Errorf("description should fill empty instructions: %q", base.Instructions)
+	}
+
+	// Empty inferred fields must NOT overwrite existing values.
+	applyInferredMetadata(base, ai.ProjectMetadata{})
+	if base.Name != "Acme Rocket" {
+		t.Errorf("empty inference erased name: %q", base.Name)
+	}
+
+	// Description must NOT overwrite non-empty existing instructions.
+	withInstr := &db.Project{Name: "x", Instructions: "imported from README.md"}
+	applyInferredMetadata(withInstr, ai.ProjectMetadata{Description: "should be ignored"})
+	if withInstr.Instructions != "imported from README.md" {
+		t.Errorf("description overwrote imported instructions: %q", withInstr.Instructions)
 	}
 }
 

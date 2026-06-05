@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/bborn/workflow/internal/ai"
 	"github.com/bborn/workflow/internal/db"
 )
 
@@ -162,4 +163,22 @@ func uniqueProjectName(database *db.DB, name string) string {
 // user declined the offer to create a project for a given path.
 func projectSuggestionDismissedKey(path string) string {
 	return "project_suggestion_dismissed:" + filepath.Clean(path)
+}
+
+// applyInferredMetadata overlays LLM-inferred fields onto a detected project.
+// Empty inferred fields are ignored so rule-based defaults are never erased.
+// The description fills Instructions only when no instructions were imported.
+func applyInferredMetadata(p *db.Project, meta ai.ProjectMetadata) {
+	if p == nil {
+		return
+	}
+	if n := strings.TrimSpace(meta.Name); n != "" {
+		p.Name = n
+	}
+	if a := strings.TrimSpace(meta.Alias); a != "" {
+		p.Aliases = a
+	}
+	if d := strings.TrimSpace(meta.Description); d != "" && strings.TrimSpace(p.Instructions) == "" {
+		p.Instructions = d
+	}
 }
