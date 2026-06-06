@@ -105,6 +105,12 @@ func (e *Emitter) runHook(event Event) {
 		if data, err := json.Marshal(event.Metadata); err == nil {
 			env = append(env, fmt.Sprintf("TASK_METADATA=%s", string(data)))
 		}
+		// When an update carries an assignment change, expose the previous GM
+		// directly so hooks can tell the direction of the change (newly mine vs.
+		// reassigned away) without having to parse TASK_METADATA as JSON.
+		if change, ok := event.Metadata["assigned_gm"].(map[string]string); ok {
+			env = append(env, fmt.Sprintf("TASK_PREVIOUS_ASSIGNED_GM=%s", change["old"]))
+		}
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)

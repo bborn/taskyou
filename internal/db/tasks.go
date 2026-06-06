@@ -629,6 +629,11 @@ func (db *DB) UpdateTask(t *Task) error {
 		if oldTask.Project != t.Project {
 			changes["project"] = map[string]string{"old": oldTask.Project, "new": t.Project}
 		}
+		// Emit assignment changes so per-GM channels can react to a task becoming
+		// theirs, being reassigned away, or returning to the unassigned pool.
+		if oldTask.AssignedGM != t.AssignedGM {
+			changes["assigned_gm"] = map[string]string{"old": oldTask.AssignedGM, "new": t.AssignedGM}
+		}
 		if len(changes) > 0 {
 			db.emitTaskUpdated(t, changes)
 		}

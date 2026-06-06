@@ -459,6 +459,63 @@ func TestUpdateTaskEmitsEventWithChanges(t *testing.T) {
 	}
 }
 
+func TestUpdateTaskEmitsAssignmentChange(t *testing.T) {
+	database := setupTestDB(t)
+	defer database.Close()
+
+	mockEmitter := &MockEventEmitter{}
+	database.SetEventEmitter(mockEmitter)
+
+	task := &Task{
+		Title:      "Assignable task",
+		Status:     StatusBacklog,
+		Type:       "code",
+		Project:    "personal",
+		AssignedGM: "cortex-gm",
+	}
+	if err := database.CreateTask(task); err != nil {
+		t.Fatalf("Failed to create task: %v", err)
+	}
+
+	// Clear created events.
+	mockEmitter.UpdatedTasks = nil
+	mockEmitter.Changes = nil
+
+	// Reassign to a different GM.
+	task.AssignedGM = "atlas-gm"
+	if err := database.UpdateTask(task); err != nil {
+		t.Fatalf("Failed to update task: %v", err)
+	}
+
+	if len(mockEmitter.UpdatedTasks) != 1 {
+		t.Fatalf("Expected 1 updated task event, got %d", len(mockEmitter.UpdatedTasks))
+	}
+	change, ok := mockEmitter.Changes[0]["assigned_gm"].(map[string]string)
+	if !ok {
+		t.Fatalf("Expected assigned_gm change in metadata, got %v", mockEmitter.Changes[0])
+	}
+	if change["old"] != "cortex-gm" {
+		t.Errorf("Expected old assigned_gm 'cortex-gm', got '%s'", change["old"])
+	}
+	if change["new"] != "atlas-gm" {
+		t.Errorf("Expected new assigned_gm 'atlas-gm', got '%s'", change["new"])
+	}
+
+	// An update that does not touch AssignedGM must not report an assignment change.
+	mockEmitter.UpdatedTasks = nil
+	mockEmitter.Changes = nil
+	task.Title = "Renamed task"
+	if err := database.UpdateTask(task); err != nil {
+		t.Fatalf("Failed to update task: %v", err)
+	}
+	if len(mockEmitter.Changes) != 1 {
+		t.Fatalf("Expected 1 change record for the title update, got %d", len(mockEmitter.Changes))
+	}
+	if _, ok := mockEmitter.Changes[0]["assigned_gm"]; ok {
+		t.Errorf("Did not expect an assigned_gm change when only the title changed: %v", mockEmitter.Changes[0])
+	}
+}
+
 func TestUpdateTaskStatusEmitsLifecycleEvents(t *testing.T) {
 	database := setupTestDB(t)
 	defer database.Close()
