@@ -2292,10 +2292,27 @@ func (e *Executor) runClaude(ctx context.Context, task *db.Task, workDir, prompt
 	}
 	// Permission flag: dangerous, auto (acceptEdits), or none, honoring the task's mode
 	dangerousFlag := claudePermissionFlag(task)
+	// Remote Control: launch claude as a remote-drivable session (claude.ai/code + phone)
+	rcFlag := ""
+	if task.RemoteControl {
+		rcName := task.Title
+		if rcName == "" {
+			rcName = fmt.Sprintf("task-%d", task.ID)
+		}
+		rcFlag = fmt.Sprintf("--remote-control %q ", rcName)
+	}
 	// Build per-task effort override flag (empty = use Claude's global default)
 	effort := effortFlag(task.EffortLevel)
 	// Build system prompt flag - passes task guidance via system prompt to keep conversation clean
 	systemPromptFlag := fmt.Sprintf(`--append-system-prompt "$(cat %q)" `, systemFile.Name())
+	if task.RemoteControl {
+		systemPromptFlag = ""
+	}
+	// Build trailing prompt arg - suppressed for Remote Control so claude starts with a blank session
+	promptArg := fmt.Sprintf(`"$(cat %q)"`, promptFile.Name())
+	if task.RemoteControl {
+		promptArg = ""
+	}
 
 	// Check for existing Claude session to resume instead of starting fresh
 	// Only use stored session ID - no file-based fallback to avoid cross-task contamination
@@ -2305,8 +2322,8 @@ func (e *Executor) runClaude(ctx context.Context, task *db.Task, workDir, prompt
 	envPrefix := claudeEnvPrefix(paths.configDir)
 	if existingSessionID != "" && ClaudeSessionExists(existingSessionID, workDir, paths.configDir) {
 		e.logLine(task.ID, "system", fmt.Sprintf("Resuming existing session %s", existingSessionID))
-		script = fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %sclaude %s%s%s--resume %s "$(cat %q)"`,
-			task.ID, sessionID, task.Port, task.WorktreePath, envPrefix, dangerousFlag, effort, systemPromptFlag, existingSessionID, promptFile.Name())
+		script = fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %sclaude %s%s%s%s--resume %s %s`,
+			task.ID, sessionID, task.Port, task.WorktreePath, envPrefix, dangerousFlag, rcFlag, effort, systemPromptFlag, existingSessionID, promptArg)
 	} else {
 		if existingSessionID != "" {
 			e.logLine(task.ID, "system", fmt.Sprintf("Session %s no longer exists, starting fresh", existingSessionID))
@@ -2315,8 +2332,8 @@ func (e *Executor) runClaude(ctx context.Context, task *db.Task, workDir, prompt
 				e.logger.Warn("failed to clear stale session ID", "task", task.ID, "error", err)
 			}
 		}
-		script = fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %sclaude %s%s%s"$(cat %q)"`,
-			task.ID, sessionID, task.Port, task.WorktreePath, envPrefix, dangerousFlag, effort, systemPromptFlag, promptFile.Name())
+		script = fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %sclaude %s%s%s%s%s`,
+			task.ID, sessionID, task.Port, task.WorktreePath, envPrefix, dangerousFlag, rcFlag, effort, systemPromptFlag, promptArg)
 	}
 
 	// Create new window in task-daemon session (with retry logic for race conditions)
@@ -2465,14 +2482,31 @@ func (e *Executor) runClaudeResume(ctx context.Context, task *db.Task, workDir, 
 	}
 	// Permission flag: dangerous, auto (acceptEdits), or none, honoring the task's mode
 	dangerousFlag := claudePermissionFlag(task)
+	// Remote Control: launch claude as a remote-drivable session (claude.ai/code + phone)
+	rcFlag := ""
+	if task.RemoteControl {
+		rcName := task.Title
+		if rcName == "" {
+			rcName = fmt.Sprintf("task-%d", task.ID)
+		}
+		rcFlag = fmt.Sprintf("--remote-control %q ", rcName)
+	}
 	// Build per-task effort override flag (empty = use Claude's global default)
 	effort := effortFlag(task.EffortLevel)
 	// Build system prompt flag - passes task guidance via system prompt to keep conversation clean
 	systemPromptFlag := fmt.Sprintf(`--append-system-prompt "$(cat %q)" `, systemFile.Name())
+	if task.RemoteControl {
+		systemPromptFlag = ""
+	}
+	// Build trailing prompt arg - suppressed for Remote Control so claude starts with a blank session
+	promptArg := fmt.Sprintf(`"$(cat %q)"`, feedbackFile.Name())
+	if task.RemoteControl {
+		promptArg = ""
+	}
 
 	envPrefix := claudeEnvPrefix(paths.configDir)
-	script := fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %sclaude %s%s%s--resume %s "$(cat %q)"`,
-		task.ID, taskSessionID, task.Port, task.WorktreePath, envPrefix, dangerousFlag, effort, systemPromptFlag, claudeSessionID, feedbackFile.Name())
+	script := fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %sclaude %s%s%s%s--resume %s %s`,
+		task.ID, taskSessionID, task.Port, task.WorktreePath, envPrefix, dangerousFlag, rcFlag, effort, systemPromptFlag, claudeSessionID, promptArg)
 
 	// Create new window in task-daemon session (with retry logic for race conditions)
 	actualSession, tmuxErr := createTmuxWindow(daemonSession, windowName, workDir, script, e.getProjectDir(task.Project))
