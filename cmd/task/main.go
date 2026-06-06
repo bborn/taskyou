@@ -570,6 +570,7 @@ Examples:
 			createDangerous, _ := cmd.Flags().GetBool("dangerous")
 			permissionModeFlag, _ := cmd.Flags().GetString("permission-mode")
 			tags, _ := cmd.Flags().GetString("tags")
+			assignedGM, _ := cmd.Flags().GetString("assigned-gm")
 			pinned, _ := cmd.Flags().GetBool("pinned")
 			branch, _ := cmd.Flags().GetString("branch")
 			outputJSON, _ := cmd.Flags().GetBool("json")
@@ -696,6 +697,7 @@ Examples:
 				Executor:       taskExecutor,
 				EffortLevel:    effortLevel,
 				Tags:           tags,
+				AssignedGM:     assignedGM,
 				Pinned:         pinned,
 				SourceBranch:   branch,
 				PermissionMode: permMode,
@@ -748,6 +750,7 @@ Examples:
 	createCmd.Flags().Bool("dangerous", false, "Execute in dangerous mode (alias for --permission-mode dangerous)")
 	createCmd.Flags().String("permission-mode", "", "Permission mode: default (prompt), auto (auto-accept edits), dangerous (skip all). Defaults to the project's setting")
 	createCmd.Flags().String("tags", "", "Task tags (comma-separated)")
+	createCmd.Flags().String("assigned-gm", "", "Slug of the GM (manager session) this task is assigned to")
 	createCmd.Flags().Bool("pinned", false, "Pin the task to the top of its column")
 	createCmd.Flags().StringP("branch", "b", "", "Existing branch to checkout for worktree (e.g., fix/ui-overflow)")
 	createCmd.Flags().Bool("json", false, "Output in JSON format")
@@ -775,6 +778,8 @@ Examples:
 			status, _ := cmd.Flags().GetString("status")
 			project, _ := cmd.Flags().GetString("project")
 			taskType, _ := cmd.Flags().GetString("type")
+			assignedGM, _ := cmd.Flags().GetString("assigned-gm")
+			unassigned, _ := cmd.Flags().GetBool("unassigned")
 			all, _ := cmd.Flags().GetBool("all")
 			limit, _ := cmd.Flags().GetInt("limit")
 			outputJSON, _ := cmd.Flags().GetBool("json")
@@ -793,6 +798,8 @@ Examples:
 				Status:        status,
 				Project:       project,
 				Type:          taskType,
+				AssignedGM:    assignedGM,
+				Unassigned:    unassigned,
 				Limit:         limit,
 				IncludeClosed: all,
 			}
@@ -931,6 +938,8 @@ Examples:
 	listCmd.Flags().StringP("status", "s", "", "Filter by status: backlog, queued, processing, blocked, done")
 	listCmd.Flags().StringP("project", "p", "", "Filter by project")
 	listCmd.Flags().StringP("type", "t", "", "Filter by type: code, writing, thinking")
+	listCmd.Flags().String("assigned-gm", "", "Filter by assigned GM slug")
+	listCmd.Flags().Bool("unassigned", false, "Show only tasks with no assigned GM (overrides --assigned-gm)")
 	listCmd.Flags().BoolP("all", "a", false, "Include completed tasks")
 	listCmd.Flags().IntP("limit", "n", 50, "Maximum number of tasks to return")
 	listCmd.Flags().Bool("json", false, "Output in JSON format")
@@ -1306,6 +1315,7 @@ Examples:
 			project, _ := cmd.Flags().GetString("project")
 			taskExecutor, _ := cmd.Flags().GetString("executor")
 			tags, _ := cmd.Flags().GetString("tags")
+			assignedGM, _ := cmd.Flags().GetString("assigned-gm")
 			pinned, _ := cmd.Flags().GetBool("pinned")
 
 			// Open database
@@ -1383,6 +1393,9 @@ Examples:
 			if cmd.Flags().Changed("tags") {
 				task.Tags = tags
 			}
+			if cmd.Flags().Changed("assigned-gm") {
+				task.AssignedGM = assignedGM
+			}
 			if cmd.Flags().Changed("pinned") {
 				task.Pinned = pinned
 			}
@@ -1401,6 +1414,7 @@ Examples:
 	updateCmd.Flags().StringP("project", "p", "", "Update project name")
 	updateCmd.Flags().StringP("executor", "e", "", "Update task executor: claude, codex, gemini, pi, opencode, openclaw")
 	updateCmd.Flags().String("tags", "", "Update task tags (comma-separated)")
+	updateCmd.Flags().String("assigned-gm", "", "Update the GM (manager session) slug this task is assigned to (empty string unassigns)")
 	updateCmd.Flags().Bool("pinned", false, "Pin or unpin the task")
 	updateCmd.RegisterFlagCompletionFunc("project", completeFlagProjects)
 	updateCmd.RegisterFlagCompletionFunc("type", completeFlagTypes)

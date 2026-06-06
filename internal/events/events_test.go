@@ -78,6 +78,31 @@ echo "$TASK_STATUS:$TASK_PROJECT" > "` + markerFile + `"
 	}
 }
 
+func TestEmitterPassesAssignedGM(t *testing.T) {
+	hooksDir := t.TempDir()
+	markerFile := filepath.Join(hooksDir, "gm_marker")
+	hookScript := filepath.Join(hooksDir, TaskCompleted)
+
+	script := `#!/bin/sh
+echo "$TASK_ASSIGNED_GM" > "` + markerFile + `"
+`
+	if err := os.WriteFile(hookScript, []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	emitter := New(hooksDir)
+	task := &db.Task{ID: 1, Title: "Done", Status: "done", Project: "personal", AssignedGM: "cortex-gm"}
+	emitter.Emit(Event{Type: TaskCompleted, TaskID: task.ID, Task: task})
+
+	content, err := waitForFile(t, markerFile, 5*time.Second)
+	if err != nil {
+		t.Fatalf("hook didn't run: %v", err)
+	}
+	if string(content) != "cortex-gm\n" {
+		t.Errorf("unexpected hook output: %q", content)
+	}
+}
+
 func TestEmitterWorktreeReadyPassesEnv(t *testing.T) {
 	hooksDir := t.TempDir()
 	markerFile := filepath.Join(hooksDir, "wt_marker")
