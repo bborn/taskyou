@@ -46,6 +46,21 @@ func effortFlag(level string) string {
 	return fmt.Sprintf("--effort %s ", level)
 }
 
+// rcFlag returns the `--remote-control %q ` CLI flag (with a trailing space)
+// for a task that has Remote Control enabled, or an empty string otherwise. The
+// session name is the task title, falling back to `task-<id>` when the title is
+// empty.
+func rcFlag(task *db.Task) string {
+	if !task.RemoteControl {
+		return ""
+	}
+	rcName := task.Title
+	if rcName == "" {
+		rcName = fmt.Sprintf("task-%d", task.ID)
+	}
+	return fmt.Sprintf("--remote-control %q ", rcName)
+}
+
 // NewClaudeExecutor creates a new Claude executor.
 func NewClaudeExecutor(e *Executor) *ClaudeExecutor {
 	return &ClaudeExecutor{

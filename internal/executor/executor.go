@@ -2293,14 +2293,7 @@ func (e *Executor) runClaude(ctx context.Context, task *db.Task, workDir, prompt
 	// Permission flag: dangerous, auto (acceptEdits), or none, honoring the task's mode
 	dangerousFlag := claudePermissionFlag(task)
 	// Remote Control: launch claude as a remote-drivable session (claude.ai/code + phone)
-	rcFlag := ""
-	if task.RemoteControl {
-		rcName := task.Title
-		if rcName == "" {
-			rcName = fmt.Sprintf("task-%d", task.ID)
-		}
-		rcFlag = fmt.Sprintf("--remote-control %q ", rcName)
-	}
+	rcFlag := rcFlag(task)
 	// Build per-task effort override flag (empty = use Claude's global default)
 	effort := effortFlag(task.EffortLevel)
 	// Build system prompt flag - passes task guidance via system prompt to keep conversation clean
@@ -2483,14 +2476,7 @@ func (e *Executor) runClaudeResume(ctx context.Context, task *db.Task, workDir, 
 	// Permission flag: dangerous, auto (acceptEdits), or none, honoring the task's mode
 	dangerousFlag := claudePermissionFlag(task)
 	// Remote Control: launch claude as a remote-drivable session (claude.ai/code + phone)
-	rcFlag := ""
-	if task.RemoteControl {
-		rcName := task.Title
-		if rcName == "" {
-			rcName = fmt.Sprintf("task-%d", task.ID)
-		}
-		rcFlag = fmt.Sprintf("--remote-control %q ", rcName)
-	}
+	rcFlag := rcFlag(task)
 	// Build per-task effort override flag (empty = use Claude's global default)
 	effort := effortFlag(task.EffortLevel)
 	// Build system prompt flag - passes task guidance via system prompt to keep conversation clean
