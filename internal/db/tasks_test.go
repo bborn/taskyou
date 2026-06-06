@@ -2500,3 +2500,138 @@ func TestGetStaleWorktreeTasks(t *testing.T) {
 		t.Fatalf("expected 2 stale tasks, got %d", len(tasks))
 	}
 }
+
+func TestAssignedGMPersistence(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	db, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer db.Close()
+	defer os.Remove(dbPath)
+
+	// A task created without an assignment is unassigned (empty string).
+	unassigned := &Task{
+		Title:   "Unassigned task",
+		Status:  StatusBacklog,
+		Type:    TypeCode,
+		Project: "personal",
+	}
+	if err := db.CreateTask(unassigned); err != nil {
+		t.Fatalf("failed to create task: %v", err)
+	}
+	retrieved, err := db.GetTask(unassigned.ID)
+	if err != nil {
+		t.Fatalf("failed to get task: %v", err)
+	}
+	if retrieved.AssignedGM != "" {
+		t.Errorf("expected empty assigned_gm by default, got %q", retrieved.AssignedGM)
+	}
+
+	// A task created with an assignment round-trips through CreateTask/GetTask.
+	assigned := &Task{
+		Title:      "Assigned task",
+		Status:     StatusBacklog,
+		Type:       TypeCode,
+		Project:    "personal",
+		AssignedGM: "cortex-gm",
+	}
+	if err := db.CreateTask(assigned); err != nil {
+		t.Fatalf("failed to create task: %v", err)
+	}
+	retrieved, err = db.GetTask(assigned.ID)
+	if err != nil {
+		t.Fatalf("failed to get task: %v", err)
+	}
+	if retrieved.AssignedGM != "cortex-gm" {
+		t.Errorf("expected assigned_gm %q, got %q", "cortex-gm", retrieved.AssignedGM)
+	}
+
+	// Reassignment via UpdateTask persists.
+	retrieved.AssignedGM = "atlas-gm"
+	if err := db.UpdateTask(retrieved); err != nil {
+		t.Fatalf("failed to update task: %v", err)
+	}
+	updated, err := db.GetTask(assigned.ID)
+	if err != nil {
+		t.Fatalf("failed to get task: %v", err)
+	}
+	if updated.AssignedGM != "atlas-gm" {
+		t.Errorf("expected assigned_gm %q after update, got %q", "atlas-gm", updated.AssignedGM)
+	}
+
+	// Clearing the assignment via UpdateTask unassigns the task.
+	updated.AssignedGM = ""
+	if err := db.UpdateTask(updated); err != nil {
+		t.Fatalf("failed to update task: %v", err)
+	}
+	cleared, err := db.GetTask(assigned.ID)
+	if err != nil {
+		t.Fatalf("failed to get task: %v", err)
+	}
+	if cleared.AssignedGM != "" {
+		t.Errorf("expected assigned_gm to be cleared, got %q", cleared.AssignedGM)
+	}
+}
+
+func TestListTasksFilterByAssignedGM(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	db, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer db.Close()
+	defer os.Remove(dbPath)
+
+	mk := func(title, gm string) int64 {
+		task := &Task{Title: title, Status: StatusBacklog, Type: TypeCode, Project: "personal", AssignedGM: gm}
+		if err := db.CreateTask(task); err != nil {
+			t.Fatalf("failed to create task: %v", err)
+		}
+		return task.ID
+	}
+	cortex := mk("Cortex task", "cortex-gm")
+	atlas := mk("Atlas task", "atlas-gm")
+	free := mk("Free task", "")
+
+	// Filter by a specific GM slug.
+	tasks, err := db.ListTasks(ListTasksOptions{AssignedGM: "cortex-gm"})
+	if err != nil {
+		t.Fatalf("failed to list tasks: %v", err)
+	}
+	if len(tasks) != 1 || tasks[0].ID != cortex {
+		t.Fatalf("expected only the cortex-gm task, got %d tasks", len(tasks))
+	}
+
+	// Filter to unassigned tasks only.
+	tasks, err = db.ListTasks(ListTasksOptions{Unassigned: true})
+	if err != nil {
+		t.Fatalf("failed to list tasks: %v", err)
+	}
+	if len(tasks) != 1 || tasks[0].ID != free {
+		t.Fatalf("expected only the unassigned task, got %d tasks", len(tasks))
+	}
+
+	// Unassigned takes precedence over an explicit slug filter.
+	tasks, err = db.ListTasks(ListTasksOptions{AssignedGM: "atlas-gm", Unassigned: true})
+	if err != nil {
+		t.Fatalf("failed to list tasks: %v", err)
+	}
+	if len(tasks) != 1 || tasks[0].ID != free {
+		t.Fatalf("expected Unassigned to override AssignedGM, got %d tasks", len(tasks))
+	}
+
+	// No filter returns all three.
+	tasks, err = db.ListTasks(ListTasksOptions{})
+	if err != nil {
+		t.Fatalf("failed to list tasks: %v", err)
+	}
+	if len(tasks) != 3 {
+		t.Fatalf("expected 3 tasks with no filter, got %d", len(tasks))
+	}
+	_ = atlas
+}
