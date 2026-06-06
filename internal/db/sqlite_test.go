@@ -3,6 +3,7 @@ package db
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -319,5 +320,92 @@ func TestProjectUseWorktrees(t *testing.T) {
 	}
 	if p.UsesWorktrees() {
 		t.Error("alias-proj looked up by alias should NOT use worktrees")
+	}
+}
+
+// TestDefaultCodeTaskTypeGuidance verifies the built-in "code" task type carries the
+// task-execution guidance that the executor previously injected via --append-system-prompt
+// (notably the GitHub CLI / shared-GraphQL-bucket etiquette), so default-config users get
+// the same steering through the task type instead of a hardcoded executor block.
+func TestDefaultCodeTaskTypeGuidance(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	db, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer db.Close()
+	defer os.Remove(dbPath)
+
+	codeType, err := db.GetTaskTypeByName("code")
+	if err != nil {
+		t.Fatalf("failed to get code task type: %v", err)
+	}
+	if codeType == nil {
+		t.Fatal("default code task type was not created")
+	}
+
+	wants := []string{
+		"GitHub CLI",
+		"per-user",
+		"gh pr checks",
+		"gh run watch",
+		"REST",
+		"taskyou_get_project_context",
+	}
+	for _, want := range wants {
+		if !strings.Contains(codeType.Instructions, want) {
+			t.Errorf("code task type instructions missing %q", want)
+		}
+	}
+}
+
+// TestMigrateCodeTaskTypeGuidance verifies the content-guarded migration upgrades a row
+// still holding the old default, while leaving a customized row untouched.
+func TestMigrateCodeTaskTypeGuidance(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// Case 1: a row holding the exact old default is upgraded.
+	dbPath1 := filepath.Join(tmpDir, "old.db")
+	db1, err := Open(dbPath1)
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer db1.Close()
+	if _, err := db1.Exec(`UPDATE task_types SET instructions = ? WHERE name = 'code'`, oldCodeTaskTypeInstructions); err != nil {
+		t.Fatalf("failed to set old instructions: %v", err)
+	}
+	if err := db1.migrateCodeTaskTypeGuidance(); err != nil {
+		t.Fatalf("migration failed: %v", err)
+	}
+	got, err := db1.GetTaskTypeByName("code")
+	if err != nil {
+		t.Fatalf("failed to get code task type: %v", err)
+	}
+	if got.Instructions != defaultCodeTaskTypeInstructions {
+		t.Error("expected old-default row to be upgraded to new default instructions")
+	}
+
+	// Case 2: a customized row is left untouched (idempotent / non-clobbering).
+	dbPath2 := filepath.Join(tmpDir, "custom.db")
+	db2, err := Open(dbPath2)
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer db2.Close()
+	const custom = "my custom code instructions"
+	if _, err := db2.Exec(`UPDATE task_types SET instructions = ? WHERE name = 'code'`, custom); err != nil {
+		t.Fatalf("failed to set custom instructions: %v", err)
+	}
+	if err := db2.migrateCodeTaskTypeGuidance(); err != nil {
+		t.Fatalf("migration failed: %v", err)
+	}
+	got2, err := db2.GetTaskTypeByName("code")
+	if err != nil {
+		t.Fatalf("failed to get code task type: %v", err)
+	}
+	if got2.Instructions != custom {
+		t.Errorf("customized row was clobbered: got %q", got2.Instructions)
 	}
 }

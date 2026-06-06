@@ -79,15 +79,6 @@ func (p *PiExecutor) BuildCommand(task *db.Task, sessionID, prompt string) strin
 		worktreeSessionID = fmt.Sprintf("%d", os.Getpid())
 	}
 
-	// Build system prompt flag
-	systemPromptFlag := ""
-	systemFile, err := os.CreateTemp("", "task-system-*.txt")
-	if err == nil {
-		systemFile.WriteString(p.executor.buildSystemInstructions())
-		systemFile.Close()
-		systemPromptFlag = fmt.Sprintf(`--append-system-prompt %q `, systemFile.Name())
-	}
-
 	// Determine explicit session path if not provided or if sessionID matches it
 	// If sessionID is provided (from task.ClaudeSessionID), use it as the path.
 	// If not, calculate it.
@@ -102,12 +93,8 @@ func (p *PiExecutor) BuildCommand(task *db.Task, sessionID, prompt string) strin
 
 	// Build command - resume if we have a session ID, otherwise start fresh
 	if sessionID != "" {
-		cmd := fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q pi --session %q %s--continue`,
-			task.ID, worktreeSessionID, task.Port, task.WorktreePath, sessionPath, systemPromptFlag)
-		if systemFile != nil {
-			cmd += fmt.Sprintf(`; rm -f %q`, systemFile.Name())
-		}
-		return cmd
+		return fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q pi --session %q --continue`,
+			task.ID, worktreeSessionID, task.Port, task.WorktreePath, sessionPath)
 	}
 
 	// Start fresh - if prompt is provided, write to temp file and pass it
@@ -116,30 +103,18 @@ func (p *PiExecutor) BuildCommand(task *db.Task, sessionID, prompt string) strin
 		promptFile, err := os.CreateTemp("", "task-prompt-*.txt")
 		if err != nil {
 			p.logger.Error("BuildCommand: failed to create temp file", "error", err)
-			cmd := fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q pi --session %q %s`,
-				task.ID, worktreeSessionID, task.Port, task.WorktreePath, sessionPath, systemPromptFlag)
-			if systemFile != nil {
-				cmd += fmt.Sprintf(`; rm -f %q`, systemFile.Name())
-			}
-			return cmd
+			return fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q pi --session %q`,
+				task.ID, worktreeSessionID, task.Port, task.WorktreePath, sessionPath)
 		}
 		promptFile.WriteString(prompt)
 		promptFile.Close()
 
-		cmd := fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q pi --session %q %s"$(cat %q)"; rm -f %q`,
-			task.ID, worktreeSessionID, task.Port, task.WorktreePath, sessionPath, systemPromptFlag, promptFile.Name(), promptFile.Name())
-		if systemFile != nil {
-			cmd += fmt.Sprintf(` %q`, systemFile.Name())
-		}
-		return cmd
+		return fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q pi --session %q "$(cat %q)"; rm -f %q`,
+			task.ID, worktreeSessionID, task.Port, task.WorktreePath, sessionPath, promptFile.Name(), promptFile.Name())
 	}
 
-	cmd := fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q pi --session %q %s`,
-		task.ID, worktreeSessionID, task.Port, task.WorktreePath, sessionPath, systemPromptFlag)
-	if systemFile != nil {
-		cmd += fmt.Sprintf(`; rm -f %q`, systemFile.Name())
-	}
-	return cmd
+	return fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q pi --session %q`,
+		task.ID, worktreeSessionID, task.Port, task.WorktreePath, sessionPath)
 }
 
 // ---- Session and Dangerous Mode Support ----
