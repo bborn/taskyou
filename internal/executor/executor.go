@@ -3185,6 +3185,15 @@ func (e *Executor) pollTmuxSession(ctx context.Context, taskID int64, sessionNam
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
 
+	// A single failed `tmux list-panes` must NOT be treated as "window gone". That
+	// command also fails when the tmux server is briefly busy or the 3s timeout trips
+	// under load, and because every concurrent poller shares one tmux server they trip
+	// together — producing a false, simultaneous mass-block of healthy tasks with
+	// "Task needs review". Require several consecutive misses (reset on any success)
+	// before concluding the window is actually gone.
+	missingChecks := 0
+	const missingThreshold = 3
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -3227,20 +3236,34 @@ func (e *Executor) pollTmuxSession(ctx context.Context, taskID int64, sessionNam
 				checkCancel()
 			}
 
-			if !windowExists {
-				// Window closed - check final status from hooks
-				task, _ := e.db.GetTask(taskID)
-				if task != nil {
-					if task.Status == db.StatusDone {
-						return execResult{Success: true}
-					}
-					if task.Status == db.StatusBacklog {
-						return execResult{Interrupted: true}
-					}
-				}
-				// Default: blocked (user must mark done or retry)
-				return execResult{NeedsInput: true, Message: "Task needs review"}
+			if windowExists {
+				// Healthy check — reset the transient-failure counter.
+				missingChecks = 0
+				continue
 			}
+
+			// Window appears gone. This may be a transient tmux failure, so only
+			// act after several consecutive misses.
+			missingChecks++
+			if missingChecks < missingThreshold {
+				e.logger.Debug("pollTmuxSession: window check failed, retrying",
+					"taskID", taskID, "miss", missingChecks, "threshold", missingThreshold)
+				continue
+			}
+
+			// Window genuinely gone for missingThreshold consecutive checks —
+			// check final status from hooks.
+			finalTask, _ := e.db.GetTask(taskID)
+			if finalTask != nil {
+				if finalTask.Status == db.StatusDone {
+					return execResult{Success: true}
+				}
+				if finalTask.Status == db.StatusBacklog {
+					return execResult{Interrupted: true}
+				}
+			}
+			// Default: blocked (user must mark done or retry)
+			return execResult{NeedsInput: true, Message: "Task needs review"}
 		}
 	}
 }
