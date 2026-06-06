@@ -2298,9 +2298,6 @@ func (e *Executor) runClaude(ctx context.Context, task *db.Task, workDir, prompt
 	effort := effortFlag(task.EffortLevel)
 	// Build system prompt flag - passes task guidance via system prompt to keep conversation clean
 	systemPromptFlag := fmt.Sprintf(`--append-system-prompt "$(cat %q)" `, systemFile.Name())
-	if task.RemoteControl {
-		systemPromptFlag = ""
-	}
 	// Build trailing prompt arg - suppressed for Remote Control so claude starts with a blank session
 	promptArg := fmt.Sprintf(`"$(cat %q)"`, promptFile.Name())
 	if task.RemoteControl {
@@ -2481,9 +2478,6 @@ func (e *Executor) runClaudeResume(ctx context.Context, task *db.Task, workDir, 
 	effort := effortFlag(task.EffortLevel)
 	// Build system prompt flag - passes task guidance via system prompt to keep conversation clean
 	systemPromptFlag := fmt.Sprintf(`--append-system-prompt "$(cat %q)" `, systemFile.Name())
-	if task.RemoteControl {
-		systemPromptFlag = ""
-	}
 	// Build trailing prompt arg - suppressed for Remote Control so claude starts with a blank session
 	promptArg := fmt.Sprintf(`"$(cat %q)"`, feedbackFile.Name())
 	if task.RemoteControl {
