@@ -2595,7 +2595,7 @@ func TestListTasksFilterByAssignedGM(t *testing.T) {
 		return task.ID
 	}
 	cortex := mk("Cortex task", "cortex-gm")
-	atlas := mk("Atlas task", "atlas-gm")
+	mk("Atlas task", "atlas-gm") // background data: must be excluded by the filters below
 	free := mk("Free task", "")
 
 	// Filter by a specific GM slug.
@@ -2633,5 +2633,4 @@ func TestListTasksFilterByAssignedGM(t *testing.T) {
 	if len(tasks) != 3 {
 		t.Fatalf("expected 3 tasks with no filter, got %d", len(tasks))
 	}
-	_ = atlas
 }

@@ -5232,13 +5232,14 @@ func moveTask(database *db.DB, oldTask *db.Task, targetProject string) (int64, e
 	// Step 3: Create new task in target project
 	// Reset execution-related fields but preserve content
 	newTask := &db.Task{
-		Title:    oldTask.Title,
-		Body:     oldTask.Body,
-		Type:     oldTask.Type,
-		Tags:     oldTask.Tags,
-		Project:  targetProject,
-		Executor: oldTask.Executor,
-		Pinned:   oldTask.Pinned,
+		Title:      oldTask.Title,
+		Body:       oldTask.Body,
+		Type:       oldTask.Type,
+		Tags:       oldTask.Tags,
+		AssignedGM: oldTask.AssignedGM,
+		Project:    targetProject,
+		Executor:   oldTask.Executor,
+		Pinned:     oldTask.Pinned,
 		// Reset execution state
 		WorktreePath:    "",
 		BranchName:      "",
