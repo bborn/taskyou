@@ -155,6 +155,96 @@ func TestListViewNavigationWraps(t *testing.T) {
 	}
 }
 
+func TestListViewJumpToPinned(t *testing.T) {
+	l := NewListView(120, 30)
+	tasks := makeListTasks()
+	tasks[1].Pinned = true // Bravo (ID 2) pinned -> floats to top
+	l.SetTasks(tasks)
+
+	// Move selection away from the top, then jump back to the pinned prefix.
+	l.selectedRow = 2
+	l.JumpToPinned()
+	if l.selectedRow != 0 {
+		t.Fatalf("JumpToPinned: selectedRow = %d, want 0", l.selectedRow)
+	}
+	if sel := l.SelectedTask(); sel == nil || sel.ID != 2 {
+		t.Fatalf("JumpToPinned: selected task = %v, want pinned task 2", sel)
+	}
+}
+
+func TestListViewJumpToPinnedNoPinnedTasks(t *testing.T) {
+	l := NewListView(120, 30)
+	l.SetTasks(makeListTasks())
+	l.selectedRow = 3
+	// With no pinned tasks, jumping to pinned still lands on the top row.
+	l.JumpToPinned()
+	if l.selectedRow != 0 {
+		t.Fatalf("JumpToPinned with no pinned tasks: selectedRow = %d, want 0", l.selectedRow)
+	}
+}
+
+func TestListViewJumpToPinnedEmpty(t *testing.T) {
+	l := NewListView(120, 30)
+	l.SetTasks(nil)
+	l.JumpToPinned() // must not panic
+	if l.selectedRow != 0 {
+		t.Fatalf("JumpToPinned on empty list: selectedRow = %d, want 0", l.selectedRow)
+	}
+}
+
+func TestListViewJumpToUnpinned(t *testing.T) {
+	l := NewListView(120, 30)
+	tasks := makeListTasks()
+	tasks[0].Pinned = true // Alpha (ID 1)
+	tasks[1].Pinned = true // Bravo (ID 2)
+	l.SetTasks(tasks)
+
+	// Two pinned tasks float to the top, so the first unpinned row is index 2.
+	l.selectedRow = 0
+	l.JumpToUnpinned()
+	if l.selectedRow != 2 {
+		t.Fatalf("JumpToUnpinned: selectedRow = %d, want 2", l.selectedRow)
+	}
+	if sel := l.SelectedTask(); sel == nil || sel.Pinned {
+		t.Fatalf("JumpToUnpinned: selected task = %v, want first unpinned task", sel)
+	}
+}
+
+func TestListViewJumpToUnpinnedAllPinned(t *testing.T) {
+	l := NewListView(120, 30)
+	tasks := makeListTasks()
+	for _, task := range tasks {
+		task.Pinned = true
+	}
+	l.SetTasks(tasks)
+	l.selectedRow = 1
+	// No unpinned tasks: selection stays put.
+	l.JumpToUnpinned()
+	if l.selectedRow != 1 {
+		t.Fatalf("JumpToUnpinned with all pinned: selectedRow = %d, want 1", l.selectedRow)
+	}
+}
+
+func TestListViewJumpToUnpinnedNoPinnedTasks(t *testing.T) {
+	l := NewListView(120, 30)
+	l.SetTasks(makeListTasks())
+	l.selectedRow = 3
+	// First row is already unpinned, so jump lands on row 0.
+	l.JumpToUnpinned()
+	if l.selectedRow != 0 {
+		t.Fatalf("JumpToUnpinned with no pinned tasks: selectedRow = %d, want 0", l.selectedRow)
+	}
+}
+
+func TestListViewJumpToUnpinnedEmpty(t *testing.T) {
+	l := NewListView(120, 30)
+	l.SetTasks(nil)
+	l.JumpToUnpinned() // must not panic
+	if l.selectedRow != 0 {
+		t.Fatalf("JumpToUnpinned on empty list: selectedRow = %d, want 0", l.selectedRow)
+	}
+}
+
 func TestListViewRendersWithoutPanic(t *testing.T) {
 	for _, w := range []int{40, 80, 120, 200} {
 		l := NewListView(w, 24)
