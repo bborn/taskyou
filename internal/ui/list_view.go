@@ -460,15 +460,22 @@ func (l *ListView) clampSelection() {
 	}
 }
 
+// List layout constants. Each visible row gets a blank spacer line for breathing
+// room (matching the board's card rhythm), so a row occupies listRowHeight lines.
+const (
+	listRowHeight   = 2 // one content line + one blank spacer
+	listChromeLines = 6 // chips(2) + blank(1) + header content+rule(2) + blank(1)
+	listFooterLines = 1 // scroll indicator
+	listHPadding    = 2 // left/right padding inside the list
+)
+
 // visibleRowCount returns how many task rows fit in the current height.
 func (l *ListView) visibleRowCount() int {
-	// Reserve: 3 lines for the filter/chip bar, 1 for the column header,
-	// 1 for the bottom scroll indicator.
-	avail := l.height - 5
-	if avail < 1 {
-		avail = 1
+	avail := l.height - listChromeLines - listFooterLines
+	if avail < listRowHeight {
+		return 1
 	}
-	return avail
+	return avail / listRowHeight
 }
 
 func (l *ListView) ensureSelectedVisible() {
@@ -506,7 +513,7 @@ type listColumns struct {
 
 // computeColumns returns column widths responsive to the available width.
 func (l *ListView) computeColumns() listColumns {
-	w := l.width - 2 // horizontal padding
+	w := l.width - 2*listHPadding // horizontal padding on both sides
 	c := listColumns{id: 5, status: 13, project: 12, pr: 4, updated: 9, created: 9}
 
 	// Progressively drop optional columns on narrow terminals.
@@ -545,7 +552,9 @@ func (l *ListView) View() string {
 	cols := l.computeColumns()
 	var lines []string
 	lines = append(lines, l.renderFilterChips())
+	lines = append(lines, "") // breathing room under the chips
 	lines = append(lines, l.renderColumnHeader(cols))
+	lines = append(lines, "") // breathing room under the header rule
 
 	capacity := l.visibleRowCount()
 	if len(l.rows) == 0 {
@@ -565,6 +574,7 @@ func (l *ListView) View() string {
 		}
 		for i := start; i < end; i++ {
 			lines = append(lines, l.renderRow(l.rows[i], cols, i == l.selectedRow))
+			lines = append(lines, "") // blank spacer between rows
 		}
 		// Scroll indicator
 		hiddenAbove := start
@@ -621,7 +631,7 @@ func (l *ListView) renderFilterChips() string {
 	hint := lipgloss.NewStyle().Foreground(ColorMuted).Italic(true).Render(
 		"←→ sort  ⎵ reverse  [ ] project  { } status  < > date  v board")
 
-	barStyle := lipgloss.NewStyle().Width(l.width).Padding(0, 1)
+	barStyle := lipgloss.NewStyle().Width(l.width).Padding(0, listHPadding)
 	return barStyle.Render(lipgloss.JoinVertical(lipgloss.Left, chipLine, hint))
 }
 
@@ -672,7 +682,7 @@ func (l *ListView) renderColumnHeader(cols listColumns) string {
 	row := joinCells(cells)
 	return lipgloss.NewStyle().
 		Width(l.width).
-		Padding(0, 1).
+		Padding(0, listHPadding).
 		BorderBottom(true).
 		BorderStyle(lipgloss.NormalBorder()).
 		BorderForeground(ColorMuted).
@@ -761,7 +771,7 @@ func (l *ListView) renderRow(task *db.Task, cols listColumns, selected bool) str
 
 	row := joinCells(cells)
 
-	rowStyle := lipgloss.NewStyle().Width(l.width).Padding(0, 1)
+	rowStyle := lipgloss.NewStyle().Width(l.width).Padding(0, listHPadding)
 	if selected {
 		cardBg, cardFg := GetThemeCardColors()
 		rowStyle = rowStyle.Background(cardBg).Foreground(cardFg).Bold(true)
@@ -774,14 +784,14 @@ func (l *ListView) renderRow(task *db.Task, cols listColumns, selected bool) str
 // HandleClick maps a click at (x, y) to a task row, updating the selection.
 // Returns the clicked task, or nil if the click was not on a row.
 func (l *ListView) HandleClick(x, y int) *db.Task {
-	// Layout: filter chips (2 lines) + hint (1 line) = 3 lines, then column
-	// header (1 line, plus its bottom border counts as part of the cell box).
-	headerLines := 3 + 1
-	rowY := y - headerLines
+	// The chrome above the rows occupies listChromeLines; each visible row then
+	// occupies listRowHeight lines (content + spacer).
+	rowY := y - listChromeLines
 	if rowY < 0 {
 		return nil
 	}
-	idx := l.scrollOff + rowY
+	displayed := rowY / listRowHeight
+	idx := l.scrollOff + displayed
 	if idx < 0 || idx >= len(l.rows) {
 		return nil
 	}
