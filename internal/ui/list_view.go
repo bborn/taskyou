@@ -356,6 +356,32 @@ func (l *ListView) MoveDown() {
 	l.ensureSelectedVisible()
 }
 
+// JumpToPinned moves the selection to the first pinned task. Pinned tasks always
+// float to the top of the list, so this jumps to the top row. Mirrors the
+// kanban board's shift+↑ behaviour. No-op when the list is empty.
+func (l *ListView) JumpToPinned() {
+	if len(l.rows) == 0 {
+		return
+	}
+	l.selectedRow = 0
+	l.ensureSelectedVisible()
+}
+
+// JumpToUnpinned moves the selection to the first unpinned task — the row just
+// past the pinned prefix. Mirrors the kanban board's shift+↓ behaviour. Stays
+// put when the list is empty or every task is pinned.
+func (l *ListView) JumpToUnpinned() {
+	if len(l.rows) == 0 {
+		return
+	}
+	pinned, unpinned := splitPinnedTasks(l.rows)
+	if len(unpinned) == 0 {
+		return
+	}
+	l.selectedRow = len(pinned)
+	l.ensureSelectedVisible()
+}
+
 // NextSortColumn advances to the next sortable column (←/→), resetting the
 // direction to that column's natural default.
 func (l *ListView) NextSortColumn() {

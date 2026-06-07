@@ -776,6 +776,13 @@ func (m *AppModel) updateListNav(msg tea.KeyMsg) (bool, tea.Cmd) {
 	case key.Matches(msg, m.keys.Right):
 		m.listView.NextSortColumn()
 		return true, nil
+	// shift+↑/↓ jump to the pinned/unpinned boundary, matching the kanban board.
+	case key.Matches(msg, m.keys.JumpToPinned):
+		m.listView.JumpToPinned()
+		return true, nil
+	case key.Matches(msg, m.keys.JumpToUnpinned):
+		m.listView.JumpToUnpinned()
+		return true, nil
 	}
 
 	switch msg.String() {
