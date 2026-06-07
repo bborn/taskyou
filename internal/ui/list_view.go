@@ -619,7 +619,7 @@ func (l *ListView) renderFilterChips() string {
 	chipLine := strings.Join(chips, lipgloss.NewStyle().Foreground(ColorMuted).Render("  •  "))
 
 	hint := lipgloss.NewStyle().Foreground(ColorMuted).Italic(true).Render(
-		"←→ sort  ⎵ reverse  [ ] status  { } project  < > date  v board")
+		"←→ sort  ⎵ reverse  [ ] project  { } status  < > date  v board")
 
 	barStyle := lipgloss.NewStyle().Width(l.width).Padding(0, 1)
 	return barStyle.Render(lipgloss.JoinVertical(lipgloss.Left, chipLine, hint))

@@ -776,17 +776,20 @@ func (m *AppModel) updateListNav(msg tea.KeyMsg) (bool, tea.Cmd) {
 	case " ":
 		m.listView.ToggleSortDirection()
 		return true, nil
+	// [ ] cycle the project filter, matching the kanban "/[project]" convention
+	// where square brackets already mean "project".
 	case "[":
-		m.listView.CycleStatusFilter(-1)
-		return true, nil
-	case "]":
-		m.listView.CycleStatusFilter(1)
-		return true, nil
-	case "{":
 		m.listView.CycleProjectFilter(-1)
 		return true, nil
-	case "}":
+	case "]":
 		m.listView.CycleProjectFilter(1)
+		return true, nil
+	// { } cycle the status filter.
+	case "{":
+		m.listView.CycleStatusFilter(-1)
+		return true, nil
+	case "}":
+		m.listView.CycleStatusFilter(1)
 		return true, nil
 	case "<":
 		m.listView.CycleDateFilter(-1)
