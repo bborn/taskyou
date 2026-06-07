@@ -8,6 +8,8 @@ import (
 	"strings"
 	"time"
 
+	tea "github.com/charmbracelet/bubbletea"
+
 	"github.com/bborn/workflow/internal/config"
 	"github.com/bborn/workflow/internal/db"
 	"github.com/bborn/workflow/internal/executor"
@@ -391,4 +393,87 @@ func (p *listExecutorPane) unbindStyleAndBind() {
 	osExec.CommandContext(ctx, "tmux", "set-option", "-t", s, "status-right", " ").Run()
 	osExec.CommandContext(ctx, "tmux", "set-option", "-t", s, "pane-border-lines", "single").Run()
 	osExec.CommandContext(ctx, "tmux", "set-option", "-t", s, "pane-border-indicators", "off").Run()
+}
+
+// --- AppModel wiring for the list-view executor preview ---
+
+// listPreviewTickMsg fires after the selection-change debounce; gen guards staleness.
+type listPreviewTickMsg struct{ gen int }
+
+// listPreviewUpdatedMsg carries the result of an async preview join/break.
+type listPreviewUpdatedMsg struct{ result previewResult }
+
+// armPreview schedules a debounced preview refresh for the current selection.
+// Returns a Cmd to be batched into the caller's return. No-op outside tmux.
+func (m *AppModel) armPreview() tea.Cmd {
+	if m.listPreview == nil || os.Getenv("TMUX") == "" {
+		return nil
+	}
+	m.previewGen++
+	gen := m.previewGen
+	return tea.Tick(300*time.Millisecond, func(time.Time) tea.Msg {
+		return listPreviewTickMsg{gen: gen}
+	})
+}
+
+// selectedHasExecutor reports whether task t has a live executor window to show.
+func (m *AppModel) selectedHasExecutor(t *db.Task) bool {
+	if t == nil {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	return findTaskWindowTarget(ctx, nil, t) != ""
+}
+
+// runPreviewAction dispatches the decided action as an async Cmd (serialized by
+// previewLoading). Call only from Update.
+func (m *AppModel) runPreviewAction(gen int) tea.Cmd {
+	if m.listPreview == nil || !m.listPreview.ensureIdentity() {
+		return nil
+	}
+	sel := m.listView.SelectedTask()
+	var selID int64
+	if sel != nil {
+		selID = sel.ID
+	}
+	action := decidePreviewAction(selID, m.selectedHasExecutor(sel), m.previewJoined.taskID, m.previewVisible)
+	if action == previewNoop {
+		return nil
+	}
+	if m.previewLoading {
+		m.previewDirty = true
+		return nil
+	}
+	m.previewLoading = true
+	prev := m.previewJoined
+	p := m.listPreview
+	switch action {
+	case previewCollapse:
+		return func() tea.Msg {
+			st := p.breakBack(prev, false)
+			return listPreviewUpdatedMsg{result: previewResult{gen: gen, state: st}}
+		}
+	default: // previewSwap
+		return func() tea.Msg {
+			p.breakBack(prev, false) // return the old pane first
+			st, err := p.joinRight(sel)
+			return listPreviewUpdatedMsg{result: previewResult{gen: gen, state: st, err: err}}
+		}
+	}
+}
+
+// teardownPreviewSync breaks the joined executor pane back to its daemon window
+// synchronously (so the executor is re-homed before detail view, board, or
+// quit). Safe to call when nothing is joined.
+func (m *AppModel) teardownPreviewSync(save bool) {
+	if m.listPreview == nil || m.previewJoined.paneID == "" {
+		return
+	}
+	m.listPreview.ensureIdentity()
+	m.listPreview.breakBack(m.previewJoined, save)
+	m.previewJoined = joinedState{}
+	m.previewLoading = false
+	m.previewDirty = false
+	m.previewGen++ // invalidate any in-flight debounce tick
 }

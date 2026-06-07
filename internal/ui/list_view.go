@@ -137,6 +137,16 @@ type ListView struct {
 	runningProcesses  map[int64]bool
 	tasksNeedingInput map[int64]bool
 	blockedByDeps     map[int64]int
+
+	previewHidden bool // true when the live executor preview pane is toggled off
+}
+
+// SetPreviewHidden records whether the live executor preview pane is hidden, so
+// the summary can surface the toggle affordance.
+func (l *ListView) SetPreviewHidden(v bool) {
+	if l != nil {
+		l.previewHidden = v
+	}
 }
 
 // NewListView creates a new list view.
@@ -630,6 +640,9 @@ func (l *ListView) renderFilterChips() string {
 		segs = append(segs, activeStyle.Render(a))
 	}
 	summary := strings.Join(segs, sep)
+	if l.previewHidden {
+		summary += sep + muted.Render("pane hidden (P)")
+	}
 
 	hint := muted.Italic(true).Render(
 		"←→ sort  ⎵ reverse  [ ] project  { } status  < > date  v board")

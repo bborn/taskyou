@@ -536,6 +536,14 @@ type AppModel struct {
 	filterAutocomplete *FilterAutocompleteModel
 	showFilterDropdown bool // Whether to show the project autocomplete dropdown
 
+	// List-view live executor preview
+	listPreview    *listExecutorPane
+	previewVisible bool        // P toggle; true = show executor pane for selected task
+	previewLoading bool        // a join/break op is in flight
+	previewDirty   bool        // a newer request arrived mid-flight
+	previewGen     int         // debounce generation; stale ticks ignored
+	previewJoined  joinedState // currently-joined pane state
+
 	// Available executors (cached on startup)
 	availableExecutors []string
 
@@ -656,6 +664,8 @@ func NewAppModel(database *db.DB, exec *executor.Executor, workingDir string, ve
 		currentView:        ViewDashboard,
 		kanban:             kanban,
 		listView:           listView,
+		listPreview:        newListExecutorPane(database),
+		previewVisible:     true,
 		loading:            true,
 		prevStatuses:       make(map[int64]string),
 		tasksNeedingInput:  make(map[int64]bool),
@@ -746,18 +756,22 @@ func (m *AppModel) dashboardMoveDown() {
 
 // toggleViewMode switches between the kanban board and the list view, carrying
 // the current selection across so the same task stays focused.
-func (m *AppModel) toggleViewMode() {
+func (m *AppModel) toggleViewMode() tea.Cmd {
 	if m.viewMode == ViewModeBoard {
 		m.viewMode = ViewModeList
 		if t := m.kanban.SelectedTask(); t != nil {
 			m.listView.SelectTask(t.ID)
 		}
-	} else {
-		m.viewMode = ViewModeBoard
-		if t := m.listView.SelectedTask(); t != nil {
-			m.kanban.SelectTask(t.ID)
-		}
+		// Entering list view: show the executor pane for the selection.
+		return m.armPreview()
 	}
+	// Leaving list view: re-home any joined executor pane before showing the board.
+	m.teardownPreviewSync(true)
+	m.viewMode = ViewModeBoard
+	if t := m.listView.SelectedTask(); t != nil {
+		m.kanban.SelectTask(t.ID)
+	}
+	return nil
 }
 
 // updateListNav handles navigation, sorting, and filtering keys that are specific
@@ -766,48 +780,59 @@ func (m *AppModel) updateListNav(msg tea.KeyMsg) (bool, tea.Cmd) {
 	switch {
 	case key.Matches(msg, m.keys.Up):
 		m.listView.MoveUp()
-		return true, nil
+		return true, m.armPreview()
 	case key.Matches(msg, m.keys.Down):
 		m.listView.MoveDown()
-		return true, nil
+		return true, m.armPreview()
 	case key.Matches(msg, m.keys.Left):
 		m.listView.PrevSortColumn()
-		return true, nil
+		return true, m.armPreview()
 	case key.Matches(msg, m.keys.Right):
 		m.listView.NextSortColumn()
-		return true, nil
+		return true, m.armPreview()
 	}
 
 	switch msg.String() {
 	case " ":
 		m.listView.ToggleSortDirection()
-		return true, nil
+		return true, m.armPreview()
 	// [ ] cycle the project filter, matching the kanban "/[project]" convention
 	// where square brackets already mean "project".
 	case "[":
 		m.listView.CycleProjectFilter(-1)
-		return true, nil
+		return true, m.armPreview()
 	case "]":
 		m.listView.CycleProjectFilter(1)
-		return true, nil
+		return true, m.armPreview()
 	// { } cycle the status filter.
 	case "{":
 		m.listView.CycleStatusFilter(-1)
-		return true, nil
+		return true, m.armPreview()
 	case "}":
 		m.listView.CycleStatusFilter(1)
-		return true, nil
+		return true, m.armPreview()
 	case "<":
 		m.listView.CycleDateFilter(-1)
-		return true, nil
+		return true, m.armPreview()
 	case ">":
 		m.listView.CycleDateFilter(1)
+		return true, m.armPreview()
+	// P toggles the live executor preview pane (list view only; on the board P
+	// focuses the In Progress column, which is handled after this).
+	case "P":
+		m.previewVisible = !m.previewVisible
+		m.listView.SetPreviewHidden(!m.previewVisible)
+		if m.previewVisible {
+			return true, m.armPreview()
+		}
+		m.teardownPreviewSync(true)
 		return true, nil
 	}
 
 	// Numeric shortcuts select and open the Nth visible row.
 	if s := msg.String(); len(s) == 1 && s >= "1" && s <= "9" {
 		if task := m.listView.SelectVisibleRow(int(s[0] - '0')); task != nil {
+			m.teardownPreviewSync(true) // re-home preview before detail joins
 			return true, m.loadTask(task.ID)
 		}
 		return true, nil
@@ -961,6 +986,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.executor.UnsubscribeTaskEvents(m.eventCh)
 			}
 			m.stopDatabaseWatcher()
+			m.teardownPreviewSync(true) // re-home executor pane so quitting never strands it
 			return m, tea.Quit
 		}
 
@@ -1023,6 +1049,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Check if clicking on a task card / row
 			if m.viewMode == ViewModeList {
 				if task := m.listView.HandleClick(msg.X, msg.Y); task != nil {
+					m.teardownPreviewSync(true) // re-home preview before detail joins
 					return m, m.loadTask(task.ID)
 				}
 			} else if task := m.kanban.HandleClick(msg.X, msg.Y); task != nil {
@@ -1033,6 +1060,21 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.currentView == ViewDetail {
 			return m.updateDetail(msg)
 		}
+
+	case listPreviewTickMsg:
+		if msg.gen != m.previewGen {
+			return m, nil // stale debounce tick
+		}
+		return m, m.runPreviewAction(msg.gen)
+
+	case listPreviewUpdatedMsg:
+		m.previewLoading = false
+		m.previewJoined = msg.result.state
+		if m.previewDirty {
+			m.previewDirty = false
+			return m, m.runPreviewAction(m.previewGen)
+		}
+		return m, nil
 
 	case tasksLoadedMsg:
 		m.loading = false
@@ -2185,8 +2227,7 @@ func stripAnsiCodes(s string) string {
 func (m *AppModel) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// Toggling between board and list works in either mode.
 	if key.Matches(msg, m.keys.ToggleView) {
-		m.toggleViewMode()
-		return m, nil
+		return m, m.toggleViewMode()
 	}
 
 	// In list mode, intercept navigation/sort/filter keys before the board
@@ -2296,6 +2337,7 @@ func (m *AppModel) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			// Clear notification after jumping
 			m.notification = ""
 			m.notifyTaskID = 0
+			m.teardownPreviewSync(true) // re-home preview before detail joins
 			// Use loadTaskWithFocus to automatically focus the executor pane
 			return m, m.loadTaskWithFocus(taskID)
 		}
@@ -2303,6 +2345,7 @@ func (m *AppModel) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case key.Matches(msg, m.keys.Enter):
 		if task := m.dashboardSelectedTask(); task != nil {
+			m.teardownPreviewSync(true) // re-home preview before detail joins
 			return m, m.loadTask(task.ID)
 		}
 
@@ -2627,6 +2670,7 @@ func (m *AppModel) updateFilterMode(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.executor.UnsubscribeTaskEvents(m.eventCh)
 		}
 		m.stopDatabaseWatcher()
+		m.teardownPreviewSync(true) // re-home executor pane so quitting never strands it
 		return m, tea.Quit
 	}
 
@@ -3754,6 +3798,7 @@ func (m *AppModel) updateQuitConfirm(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.executor.UnsubscribeTaskEvents(m.eventCh)
 			}
 			m.stopDatabaseWatcher()
+			m.teardownPreviewSync(true) // re-home executor pane so quitting never strands it
 			return m, tea.Quit
 		}
 	}
@@ -3772,6 +3817,7 @@ func (m *AppModel) updateQuitConfirm(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.executor.UnsubscribeTaskEvents(m.eventCh)
 			}
 			m.stopDatabaseWatcher()
+			m.teardownPreviewSync(true) // re-home executor pane so quitting never strands it
 			return m, tea.Quit
 		}
 		// Cancelled

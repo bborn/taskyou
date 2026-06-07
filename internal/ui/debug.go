@@ -40,6 +40,9 @@ type DebugList struct {
 	ProjectFilter string      `json:"project_filter"`
 	DateFilter    string      `json:"date_filter"`
 	Rows          []DebugTask `json:"rows"`
+
+	PreviewVisible      bool  `json:"preview_visible"`        // executor preview pane enabled (P)
+	PreviewJoinedTaskID int64 `json:"preview_joined_task_id"` // task whose executor pane is joined (0 = none)
 }
 
 type DebugColumn struct {
@@ -109,6 +112,8 @@ func (m *AppModel) GenerateDebugState() DebugState {
 		if m.viewMode == ViewModeList && m.listView != nil {
 			dash.ViewMode = "list"
 			dash.List = m.listView.debugState()
+			dash.List.PreviewVisible = m.previewVisible
+			dash.List.PreviewJoinedTaskID = m.previewJoined.taskID
 			if task := m.listView.SelectedTask(); task != nil {
 				dash.SelectedTask = task.ID
 			}
