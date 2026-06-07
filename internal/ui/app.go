@@ -3183,6 +3183,10 @@ func (m *AppModel) updateEditTaskForm(msg tea.Msg) (tea.Model, tea.Cmd) {
 			updatedTask.CreatedAt = m.editingTask.CreatedAt
 			updatedTask.StartedAt = m.editingTask.StartedAt
 			updatedTask.CompletedAt = m.editingTask.CompletedAt
+			// The edit form has no assignment field, so carry the existing value
+			// through; otherwise an unrelated edit would silently unassign the task
+			// and emit a spurious assignment-change event.
+			updatedTask.AssignedGM = m.editingTask.AssignedGM
 
 			// Capture old title before clearing editingTask
 			oldTitle := m.editingTask.Title
@@ -5019,6 +5023,9 @@ func (m *AppModel) moveTaskToProject(newTaskData *db.Task, oldTask *db.Task) tea
 		// Create the new task in the target project
 		// Reset fields that should be fresh for the new task
 		newTaskData.ID = 0
+		// Assignment is independent of project; carry it across the move (the edit
+		// form that produced newTaskData has no assignment field).
+		newTaskData.AssignedGM = oldTask.AssignedGM
 		newTaskData.WorktreePath = ""
 		newTaskData.BranchName = ""
 		newTaskData.Port = 0

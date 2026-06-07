@@ -245,6 +245,10 @@ func (s *Server) handleRequest(req *jsonRPCRequest) {
 								"description": "Permission mode for execution: 'default' (prompt), 'auto' (auto-accept edits), or 'dangerous' (skip all prompts). Defaults to the project's configured default.",
 								"enum":        []string{"default", "auto", "dangerous"},
 							},
+							"assigned_gm": map[string]interface{}{
+								"type":        "string",
+								"description": "Free-form slug of the GM (manager session) this task is assigned to. Used for multi-GM event scoping. Empty means unassigned.",
+							},
 						},
 						"required": []string{"title"},
 					},
@@ -556,6 +560,7 @@ func (s *Server) handleToolCall(id interface{}, params *toolCallParams) {
 		status, _ := params.Arguments["status"].(string)
 		dangerousMode, _ := params.Arguments["dangerous_mode"].(bool)
 		permissionMode, _ := params.Arguments["permission_mode"].(string)
+		assignedGM, _ := params.Arguments["assigned_gm"].(string)
 
 		// Default project to current task's project
 		if project == "" {
@@ -583,6 +588,7 @@ func (s *Server) handleToolCall(id interface{}, params *toolCallParams) {
 			Type:           taskType,
 			Status:         status,
 			PermissionMode: permissionMode,
+			AssignedGM:     assignedGM,
 		}
 
 		if err := s.db.CreateTask(newTask); err != nil {

@@ -91,6 +91,7 @@ func (e *Emitter) runHook(event Event) {
 			fmt.Sprintf("TASK_TITLE=%s", event.Task.Title),
 			fmt.Sprintf("TASK_STATUS=%s", event.Task.Status),
 			fmt.Sprintf("TASK_PROJECT=%s", event.Task.Project),
+			fmt.Sprintf("TASK_ASSIGNED_GM=%s", event.Task.AssignedGM),
 		)
 		if event.Task.WorktreePath != "" {
 			env = append(env,
@@ -104,6 +105,12 @@ func (e *Emitter) runHook(event Event) {
 	if len(event.Metadata) > 0 {
 		if data, err := json.Marshal(event.Metadata); err == nil {
 			env = append(env, fmt.Sprintf("TASK_METADATA=%s", string(data)))
+		}
+		// When an update carries an assignment change, expose the previous GM
+		// directly so hooks can tell the direction of the change (newly mine vs.
+		// reassigned away) without having to parse TASK_METADATA as JSON.
+		if change, ok := event.Metadata["assigned_gm"].(map[string]string); ok {
+			env = append(env, fmt.Sprintf("TASK_PREVIOUS_ASSIGNED_GM=%s", change["old"]))
 		}
 	}
 
