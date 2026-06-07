@@ -2923,6 +2923,10 @@ func (m *AppModel) updateDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.detailView.Cleanup()
 			m.detailView = nil
 		}
+		// Returning to the list: re-show the executor preview for the selection.
+		if m.viewMode == ViewModeList {
+			return m, m.armPreview()
+		}
 		return m, nil
 	}
 
