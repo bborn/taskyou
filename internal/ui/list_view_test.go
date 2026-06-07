@@ -81,6 +81,20 @@ func TestListViewStatusFilter(t *testing.T) {
 	l := NewListView(120, 30)
 	l.SetTasks(makeListTasks())
 
+	// Cycle status filter forward to "Active" (queued/processing/blocked).
+	l.CycleStatusFilter(1)
+	if statusFilterOptions[l.statusIdx].Label != "Active" {
+		t.Fatalf("expected Active filter, got %q", statusFilterOptions[l.statusIdx].Label)
+	}
+	if got := rowIDs(l); len(got) != 2 {
+		t.Fatalf("active filter rows = %v, want 2 rows (blocked + processing)", got)
+	}
+	for _, id := range rowIDs(l) {
+		if id != 3 && id != 4 { // Charlie (blocked), Delta (processing)
+			t.Fatalf("active filter unexpectedly included task %d", id)
+		}
+	}
+
 	// Cycle status filter forward to "Backlog".
 	l.CycleStatusFilter(1)
 	if statusFilterOptions[l.statusIdx].Label != "Backlog" {
@@ -97,6 +111,32 @@ func TestListViewStatusFilter(t *testing.T) {
 	}
 	if got := rowIDs(l); len(got) != 1 || got[0] != 4 {
 		t.Fatalf("in-progress filter rows = %v, want [4]", got)
+	}
+}
+
+func TestListViewActiveStatusFilter(t *testing.T) {
+	l := NewListView(120, 30)
+	// Add a queued task so Active covers all three of its statuses.
+	tasks := makeListTasks()
+	now := time.Now()
+	tasks = append(tasks, &db.Task{ID: 5, Title: "Echo", Status: db.StatusQueued, Project: "proj-a", CreatedAt: lt(now.Add(-4 * time.Hour)), UpdatedAt: lt(now.Add(-4 * time.Hour))})
+	l.SetTasks(tasks)
+
+	// Select the Active filter directly.
+	for statusFilterOptions[l.statusIdx].Label != "Active" {
+		l.CycleStatusFilter(1)
+	}
+
+	// Active = queued (5) + processing (4) + blocked (3); excludes backlog (1) and done (2).
+	got := rowIDs(l)
+	if len(got) != 3 {
+		t.Fatalf("active filter rows = %v, want 3 rows", got)
+	}
+	want := map[int64]bool{3: true, 4: true, 5: true}
+	for _, id := range got {
+		if !want[id] {
+			t.Fatalf("active filter unexpectedly included task %d (rows %v)", id, got)
+		}
 	}
 }
 

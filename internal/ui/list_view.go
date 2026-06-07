@@ -95,6 +95,7 @@ type statusFilterOption struct {
 
 var statusFilterOptions = []statusFilterOption{
 	{Label: "All"},
+	{Label: "Active", Statuses: []string{db.StatusQueued, db.StatusProcessing, db.StatusBlocked}},
 	{Label: "Backlog", Statuses: []string{db.StatusBacklog}},
 	{Label: "In Progress", Statuses: []string{db.StatusQueued, db.StatusProcessing}},
 	{Label: "Blocked", Statuses: []string{db.StatusBlocked}},
