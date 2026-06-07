@@ -2038,7 +2038,7 @@ func (m *AppModel) renderFilterBar() string {
 			parts = append(parts, helpStyle.Render(fmt.Sprintf("  (backspace: clear, Enter: done, %s: navigate, [: project)", navHelp)))
 		}
 	} else if m.filterText != "" {
-		parts = append(parts, helpStyle.Render("  (/: edit, Esc: clear)"))
+		parts = append(parts, helpStyle.Render("  (esc to clear)"))
 	}
 
 	filterContent := lipgloss.JoinHorizontal(lipgloss.Center, parts...)

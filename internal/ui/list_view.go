@@ -595,45 +595,47 @@ func (l *ListView) View() string {
 	return lipgloss.NewStyle().Width(l.width).Render(content)
 }
 
-// renderFilterChips renders the sort + filter status bar at the top of the list.
+// renderFilterChips renders a compact summary + hint bar at the top of the list.
+// The summary shows the visible/total count and only the filters that are actually
+// narrowing the list — default ("All"/"Any time") filters and the active sort are
+// omitted as noise, since the column header already shows the sort column + arrow.
 func (l *ListView) renderFilterChips() string {
-	chip := func(label, value string, active bool) string {
-		labelStyle := lipgloss.NewStyle().Foreground(ColorMuted)
-		valStyle := lipgloss.NewStyle().Bold(true)
-		if active {
-			valStyle = valStyle.Foreground(ColorPrimary)
-		} else {
-			valStyle = valStyle.Foreground(ColorSecondary)
-		}
-		return labelStyle.Render(label+": ") + valStyle.Render(value)
+	muted := lipgloss.NewStyle().Foreground(ColorMuted)
+	sep := muted.Render("  ·  ")
+
+	// Count: "N tasks" normally, "M of N" when a filter is hiding rows.
+	total := len(l.allTasks)
+	shown := len(l.rows)
+	countText := fmt.Sprintf("%d tasks", total)
+	if shown != total {
+		countText = fmt.Sprintf("%d of %d", shown, total)
 	}
 
-	arrow := IconArrowUp()
-	if l.sortDesc {
-		arrow = IconArrowDown()
+	// Collect only the filters that differ from their default.
+	var active []string
+	if l.statusIdx != 0 {
+		active = append(active, statusFilterOptions[l.statusIdx].Label)
 	}
-	sortVal := sortColumns[l.sortColIdx].label() + " " + arrow
-
-	projectName := "All"
 	projects := l.projects()
-	if l.projectIdx < len(projects) {
-		projectName = projects[l.projectIdx]
+	if l.projectIdx > 0 && l.projectIdx < len(projects) {
+		active = append(active, projects[l.projectIdx])
+	}
+	if l.dateIdx != 0 {
+		active = append(active, dateFilterOptions[l.dateIdx].Label)
 	}
 
-	chips := []string{
-		chip("Sort", sortVal, true),
-		chip("Status", statusFilterOptions[l.statusIdx].Label, l.statusIdx != 0),
-		chip("Project", projectName, l.projectIdx != 0),
-		chip("Updated", dateFilterOptions[l.dateIdx].Label, l.dateIdx != 0),
-		lipgloss.NewStyle().Foreground(ColorMuted).Render(fmt.Sprintf("(%d)", len(l.rows))),
+	segs := []string{lipgloss.NewStyle().Bold(true).Foreground(ColorSecondary).Render(countText)}
+	activeStyle := lipgloss.NewStyle().Foreground(ColorPrimary)
+	for _, a := range active {
+		segs = append(segs, activeStyle.Render(a))
 	}
-	chipLine := strings.Join(chips, lipgloss.NewStyle().Foreground(ColorMuted).Render("  •  "))
+	summary := strings.Join(segs, sep)
 
-	hint := lipgloss.NewStyle().Foreground(ColorMuted).Italic(true).Render(
+	hint := muted.Italic(true).Render(
 		"←→ sort  ⎵ reverse  [ ] project  { } status  < > date  v board")
 
 	barStyle := lipgloss.NewStyle().Width(l.width).Padding(0, listHPadding)
-	return barStyle.Render(lipgloss.JoinVertical(lipgloss.Left, chipLine, hint))
+	return barStyle.Render(lipgloss.JoinVertical(lipgloss.Left, summary, hint))
 }
 
 // renderColumnHeader renders the underlined column header row, highlighting the

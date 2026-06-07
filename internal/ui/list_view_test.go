@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -137,6 +138,32 @@ func TestListViewActiveStatusFilter(t *testing.T) {
 		if !want[id] {
 			t.Fatalf("active filter unexpectedly included task %d (rows %v)", id, got)
 		}
+	}
+}
+
+func TestListViewSummaryShowsActiveFiltersOnly(t *testing.T) {
+	l := NewListView(120, 30)
+	l.SetTasks(makeListTasks())
+
+	// At defaults the summary is just the count — no "All"/"Any time" noise.
+	out := l.View()
+	if !strings.Contains(out, "4 tasks") {
+		t.Fatalf("expected '4 tasks' summary at defaults, got:\n%s", out)
+	}
+	if strings.Contains(out, "All") {
+		t.Fatalf("default filters should be hidden, but 'All' appeared:\n%s", out)
+	}
+
+	// Once a filter is active it appears, and the count switches to "M of N".
+	for statusFilterOptions[l.statusIdx].Label != "Active" {
+		l.CycleStatusFilter(1)
+	}
+	out = l.View()
+	if !strings.Contains(out, "Active") {
+		t.Fatalf("expected 'Active' filter in summary, got:\n%s", out)
+	}
+	if !strings.Contains(out, "of 4") {
+		t.Fatalf("expected 'of 4' count when filtered, got:\n%s", out)
 	}
 }
 
