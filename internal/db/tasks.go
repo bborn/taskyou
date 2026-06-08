@@ -32,7 +32,7 @@ type Task struct {
 	PRNumber        int    // Pull request number (if associated with a PR)
 	PRInfoJSON      string // Cached PR state as JSON (state, checks, mergeable, etc.)
 	DangerousMode   bool   // Whether task is running in dangerous mode (--dangerously-skip-permissions). Kept for backward compat; PermissionMode is authoritative.
-	PermissionMode  string // Permission mode for execution: "default" (prompt), "auto"/"accept-edits" (Claude's acceptEdits — auto-accept file edits, still prompts for risky actions), "dangerous" (skip permissions). Empty falls back to DangerousMode/global default.
+	PermissionMode  string // Permission mode for execution: "default" (prompt), "accept-edits" (Claude's acceptEdits — auto-accept file edits, still prompts for risky actions), "auto" (Claude Code's auto mode — classifier auto-approves safe actions, blocks risky ones), "dangerous" (skip permissions). Empty falls back to DangerousMode/global default.
 	Pinned          bool   // Whether the task is pinned to the top of its column
 	Tags            string // Comma-separated tags for categorization (e.g., "customer-support,email,influence-kit")
 	SourceBranch    string // Existing branch to checkout for worktree (e.g., "fix/ui-overflow") instead of creating new branch
@@ -68,43 +68,43 @@ func IsInProgress(status string) bool {
 }
 
 // Permission modes control how the underlying agent handles permission prompts.
+// They map one-to-one onto Claude Code's --permission-mode choices (plus the
+// --dangerously-skip-permissions shortcut). There are four sets, from most to
+// least gated: default → accept-edits → auto → dangerous.
 //
-// IMPORTANT: the stored value "auto" is historical — it predates Claude Code's
-// own "auto mode" (the agentic permission flow gated by --enable-auto-mode).
-// In TaskYou, "auto" means Claude Code's ACCEPT-EDITS mode (--permission-mode
-// acceptEdits): auto-accept file edits while still prompting for risky actions.
-// It is NOT Claude Code's --enable-auto-mode. To avoid that overloaded word,
-// surface this mode to users and agents as "accept edits" / "accept-edits";
-// the "auto" value is kept only for back-compat (and accepted as an alias).
+// HISTORY: TaskYou originally used the value "auto" for what is really Claude's
+// acceptEdits mode — that predated Claude Code shipping its own "auto mode". The
+// value "auto" now means Claude Code's actual auto mode (--permission-mode
+// auto), and the old acceptEdits set has the explicit value "accept-edits".
+// A one-time DB migration rewrites pre-existing "auto" rows (which meant
+// acceptEdits) to "accept-edits"; see migrate() in sqlite.go.
 const (
-	// PermissionModeDefault prompts for permissions (the historical default).
+	// PermissionModeDefault prompts for every permission (the historical default).
+	// Maps to Claude's --permission-mode default.
 	PermissionModeDefault = "default"
-	// PermissionModeAuto maps to Claude Code's accept-edits mode
-	// (--permission-mode acceptEdits): auto-accept file edits but still gate
-	// risky actions. This is the low-friction mode most users want — it handles
-	// ~99% of permission prompts without fully bypassing permissions. Despite
-	// the stored "auto" value, this is NOT Claude Code's --enable-auto-mode;
-	// display it as "accept edits" (see PermissionModeAutoLabel).
+	// PermissionModeAcceptEdits auto-accepts file edits but still prompts for
+	// risky actions (shell, network, etc.). Maps to Claude's
+	// --permission-mode acceptEdits.
+	PermissionModeAcceptEdits = "accept-edits"
+	// PermissionModeAuto is Claude Code's auto mode (--permission-mode auto): an
+	// AI classifier auto-approves a broad set of safe actions (edits and safe
+	// commands) while still hard-denying dangerous ones. More autonomous than
+	// accept-edits, but far safer than fully bypassing permissions.
 	PermissionModeAuto = "auto"
 	// PermissionModeDangerous bypasses all permission checks
 	// (Claude's --dangerously-skip-permissions).
 	PermissionModeDangerous = "dangerous"
 )
 
-// PermissionModeAutoLabel is the unambiguous human-facing name for
-// PermissionModeAuto. We deliberately avoid the word "auto" in UI and prompts
-// because it collides with Claude Code's separate "auto mode"
-// (--enable-auto-mode), which TaskYou does not currently expose.
-const PermissionModeAutoLabel = "accept-edits"
-
 // NormalizePermissionMode coerces a raw value into a known permission mode.
-// "prompt" and "" are treated as default. The unambiguous "accept-edits" name
-// (and its variants, plus Claude's own "acceptEdits") all map to the canonical
-// PermissionModeAuto value, so callers can use the clearer spelling while old
-// "auto" values keep working. Unknown values return "".
+// "prompt" and "" are treated as default; Claude's own "acceptEdits" spelling
+// (and "accept_edits") normalizes to PermissionModeAcceptEdits. Matching is
+// case- and whitespace-insensitive. Unknown values return "".
 func NormalizePermissionMode(mode string) string {
 	switch strings.ToLower(strings.TrimSpace(mode)) {
-	case PermissionModeAuto, PermissionModeAutoLabel, "accept_edits", "acceptedits":
+	case PermissionModeAcceptEdits, "accept_edits", "acceptedits":
+		return PermissionModeAcceptEdits
+	case PermissionModeAuto:
 		return PermissionModeAuto
 	case PermissionModeDangerous:
 		return PermissionModeDangerous
@@ -117,8 +117,9 @@ func NormalizePermissionMode(mode string) string {
 // GlobalDefaultPermissionMode returns the fallback permission mode used when a
 // project has no explicit default. It can be overridden with the
 // TASKYOU_DEFAULT_PERMISSION_MODE environment variable. Defaults to "auto"
-// (acceptEdits) so tasks start unblocked without a manual per-session toggle;
-// set the env var to "default" to restore prompt-for-every-permission behavior.
+// (Claude Code's auto mode) so tasks start maximally unblocked while the
+// classifier still gates dangerous actions; set the env var to "accept-edits"
+// or "default" to dial back autonomy.
 func GlobalDefaultPermissionMode() string {
 	if m := NormalizePermissionMode(os.Getenv("TASKYOU_DEFAULT_PERMISSION_MODE")); m != "" {
 		return m
@@ -143,9 +144,14 @@ func (t *Task) IsDangerous() bool {
 	return t.EffectivePermissionMode() == PermissionModeDangerous
 }
 
-// IsAutoPermission reports whether the task runs in accept-edits (acceptEdits) mode.
+// IsAutoPermission reports whether the task runs in Claude Code's auto mode.
 func (t *Task) IsAutoPermission() bool {
 	return t.EffectivePermissionMode() == PermissionModeAuto
+}
+
+// IsAcceptEdits reports whether the task runs in accept-edits (acceptEdits) mode.
+func (t *Task) IsAcceptEdits() bool {
+	return t.EffectivePermissionMode() == PermissionModeAcceptEdits
 }
 
 // Task types (default values, actual types are stored in task_types table)

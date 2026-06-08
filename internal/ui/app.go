@@ -2900,7 +2900,8 @@ func (m *AppModel) updateNewTaskForm(msg tea.Msg) (tea.Model, tea.Cmd) {
 						Options(
 							huh.NewOption("No — save to backlog", "no"),
 							huh.NewOption("Yes — execute now", "yes"),
-							huh.NewOption("Yes — execute in accept-edits mode", "auto"),
+							huh.NewOption("Yes — execute in auto mode", "auto"),
+							huh.NewOption("Yes — execute in accept-edits mode", "accept-edits"),
 							huh.NewOption("Yes — execute in dangerous mode", "dangerous"),
 						).
 						Value(&m.queueValue),
@@ -2948,13 +2949,16 @@ func (m *AppModel) updateNewTaskConfirm(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.db.SetSetting("last_queue_choice:"+m.pendingTask.Project, m.queueValue)
 
 			// "yes" and "no" leave PermissionMode empty so CreateTask inherits the
-			// project's configured default; "auto"/"dangerous" force the mode.
+			// project's configured default; the explicit modes force themselves.
 			switch m.queueValue {
 			case "yes":
 				m.pendingTask.Status = db.StatusQueued
 			case "auto":
 				m.pendingTask.Status = db.StatusQueued
 				m.pendingTask.PermissionMode = db.PermissionModeAuto
+			case "accept-edits":
+				m.pendingTask.Status = db.StatusQueued
+				m.pendingTask.PermissionMode = db.PermissionModeAcceptEdits
 			case "dangerous":
 				m.pendingTask.Status = db.StatusQueued
 				m.pendingTask.PermissionMode = db.PermissionModeDangerous

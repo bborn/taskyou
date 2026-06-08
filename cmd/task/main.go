@@ -746,7 +746,7 @@ Examples:
 	createCmd.Flags().String("effort", "", "Per-task Claude effort override: low, medium, high, xhigh, max (default: Claude's global default)")
 	createCmd.Flags().BoolP("execute", "x", false, "Queue task for immediate execution")
 	createCmd.Flags().Bool("dangerous", false, "Execute in dangerous mode (alias for --permission-mode dangerous)")
-	createCmd.Flags().String("permission-mode", "", "Permission mode: default (prompt), accept-edits (auto-accept file edits, still prompt for risky actions; alias: auto), dangerous (skip all). Defaults to the project's setting")
+	createCmd.Flags().String("permission-mode", "", "Permission mode: default (prompt), accept-edits (auto-accept file edits), auto (Claude Code auto mode: auto-approve safe actions, block risky ones), dangerous (skip all). Defaults to the project's setting")
 	createCmd.Flags().String("tags", "", "Task tags (comma-separated)")
 	createCmd.Flags().Bool("pinned", false, "Pin the task to the top of its column")
 	createCmd.Flags().StringP("branch", "b", "", "Existing branch to checkout for worktree (e.g., fix/ui-overflow)")
@@ -1602,13 +1602,15 @@ Examples:
 			case db.PermissionModeDangerous:
 				msg += " (dangerous mode)"
 			case db.PermissionModeAuto:
+				msg += " (auto mode)"
+			case db.PermissionModeAcceptEdits:
 				msg += " (accept-edits mode)"
 			}
 			fmt.Println(successStyle.Render(msg))
 		},
 	}
 	executeCmd.Flags().Bool("dangerous", false, "Execute in dangerous mode (alias for --permission-mode dangerous)")
-	executeCmd.Flags().String("permission-mode", "", "Override permission mode: default (prompt), accept-edits (auto-accept file edits; alias: auto), dangerous (skip all)")
+	executeCmd.Flags().String("permission-mode", "", "Override permission mode: default (prompt), accept-edits (auto-accept file edits), auto (Claude Code auto mode), dangerous (skip all)")
 	rootCmd.AddCommand(executeCmd)
 
 	statusCmd := &cobra.Command{
@@ -2532,7 +2534,7 @@ Examples:
 	projectsCreateCmd.Flags().StringP("color", "c", "", "Hex color for display (e.g., #61AFEF)")
 	projectsCreateCmd.Flags().StringP("aliases", "a", "", "Comma-separated aliases for lookup")
 	projectsCreateCmd.Flags().String("claude-config-dir", "", "Override CLAUDE_CONFIG_DIR for this project")
-	projectsCreateCmd.Flags().String("permission-mode", "", "Default permission mode for tasks: default (prompt), accept-edits (auto-accept file edits; alias: auto), dangerous (skip all)")
+	projectsCreateCmd.Flags().String("permission-mode", "", "Default permission mode for tasks: default (prompt), accept-edits (auto-accept file edits), auto (Claude Code auto mode), dangerous (skip all)")
 	projectsCreateCmd.Flags().Bool("no-git", false, "Disable git worktrees (for non-git projects)")
 	projectsCreateCmd.Flags().Bool("json", false, "Output in JSON format")
 	projectsCreateCmd.MarkFlagRequired("path")
@@ -2590,7 +2592,7 @@ Examples:
 	projectsUpdateCmd.Flags().StringP("aliases", "a", "", "Comma-separated aliases for lookup")
 	projectsUpdateCmd.Flags().String("claude-config-dir", "", "Override CLAUDE_CONFIG_DIR for this project")
 	projectsUpdateCmd.Flags().String("context", "", "Cached project context summary")
-	projectsUpdateCmd.Flags().String("permission-mode", "", "Default permission mode for tasks: default (prompt), accept-edits (auto-accept file edits; alias: auto), dangerous (skip all)")
+	projectsUpdateCmd.Flags().String("permission-mode", "", "Default permission mode for tasks: default (prompt), accept-edits (auto-accept file edits), auto (Claude Code auto mode), dangerous (skip all)")
 	projectsUpdateCmd.Flags().Bool("no-git", false, "Disable git worktrees (for non-git projects)")
 	projectsUpdateCmd.Flags().Bool("git", false, "Enable git worktrees (default)")
 	projectsUpdateCmd.Flags().Bool("json", false, "Output in JSON format")
@@ -5700,7 +5702,7 @@ func updateProjectCLI(currentName, newName, path, instructions, color, aliases, 
 	if permissionMode != "" {
 		normalized := db.NormalizePermissionMode(permissionMode)
 		if normalized == "" {
-			fmt.Fprintln(os.Stderr, errorStyle.Render("Error: invalid permission mode (use default, accept-edits, or dangerous)"))
+			fmt.Fprintln(os.Stderr, errorStyle.Render("Error: invalid permission mode (use default, accept-edits, auto, or dangerous)"))
 			os.Exit(1)
 		}
 		project.DefaultPermissionMode = normalized

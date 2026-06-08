@@ -8,11 +8,11 @@ import (
 
 func TestNormalizePermissionMode(t *testing.T) {
 	cases := map[string]string{
-		"auto":         PermissionModeAuto, // legacy alias, kept for back-compat
-		"accept-edits": PermissionModeAuto, // unambiguous spelling normalizes to the canonical value
-		"accept_edits": PermissionModeAuto,
-		"acceptEdits":  PermissionModeAuto, // Claude Code's own spelling
-		"  Auto  ":     PermissionModeAuto, // trimmed + case-insensitive
+		"auto":         PermissionModeAuto,        // Claude Code's auto mode
+		"  Auto  ":     PermissionModeAuto,        // trimmed + case-insensitive
+		"accept-edits": PermissionModeAcceptEdits, // canonical acceptEdits value
+		"accept_edits": PermissionModeAcceptEdits,
+		"acceptEdits":  PermissionModeAcceptEdits, // Claude Code's own spelling
 		"dangerous":    PermissionModeDangerous,
 		"default":      PermissionModeDefault,
 		"prompt":       PermissionModeDefault,
@@ -33,6 +33,7 @@ func TestTaskEffectivePermissionMode(t *testing.T) {
 		want string
 	}{
 		{"explicit auto", Task{PermissionMode: PermissionModeAuto}, PermissionModeAuto},
+		{"explicit accept-edits", Task{PermissionMode: PermissionModeAcceptEdits}, PermissionModeAcceptEdits},
 		{"explicit dangerous", Task{PermissionMode: PermissionModeDangerous}, PermissionModeDangerous},
 		{"explicit default", Task{PermissionMode: PermissionModeDefault}, PermissionModeDefault},
 		{"legacy dangerous bool", Task{DangerousMode: true}, PermissionModeDangerous},
@@ -203,5 +204,47 @@ func TestProjectDefaultPermissionModePersists(t *testing.T) {
 	again, _ := database.GetProjectByName("p")
 	if again.DefaultPermissionMode != PermissionModeDangerous {
 		t.Errorf("updated project default not persisted, got %q", again.DefaultPermissionMode)
+	}
+}
+
+func TestLegacyAutoMigratesToAcceptEditsOnce(t *testing.T) {
+	t.Setenv("TASKYOU_DEFAULT_PERMISSION_MODE", "")
+	database := newPermTestDB(t)
+	if err := database.CreateProject(&Project{Name: "legacy", Path: t.TempDir()}); err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	task := &Task{Title: "T", Status: StatusQueued, Type: TypeCode, Project: "legacy"}
+	if err := database.CreateTask(task); err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+
+	// Simulate pre-migration rows: "auto" stored when it still meant acceptEdits,
+	// and clear the guard so the one-time migration runs again.
+	database.Exec(`UPDATE tasks SET permission_mode = 'auto' WHERE id = ?`, task.ID)
+	database.Exec(`UPDATE projects SET default_permission_mode = 'auto' WHERE name = 'legacy'`)
+	database.SetSetting(permModeAutoMigrationKey, "")
+
+	if err := database.migrate(); err != nil {
+		t.Fatalf("re-run migrate: %v", err)
+	}
+
+	got, _ := database.GetTask(task.ID)
+	if got.PermissionMode != PermissionModeAcceptEdits {
+		t.Errorf("legacy task 'auto' should migrate to accept-edits, got %q", got.PermissionMode)
+	}
+	proj, _ := database.GetProjectByName("legacy")
+	if proj.DefaultPermissionMode != PermissionModeAcceptEdits {
+		t.Errorf("legacy project 'auto' should migrate to accept-edits, got %q", proj.DefaultPermissionMode)
+	}
+
+	// One-time guard: a task later set to the NEW auto mode must NOT be rewritten
+	// on a subsequent boot.
+	database.Exec(`UPDATE tasks SET permission_mode = 'auto' WHERE id = ?`, task.ID)
+	if err := database.migrate(); err != nil {
+		t.Fatalf("re-run migrate (guarded): %v", err)
+	}
+	got, _ = database.GetTask(task.ID)
+	if got.PermissionMode != PermissionModeAuto {
+		t.Errorf("guard should preserve new auto-mode task, got %q", got.PermissionMode)
 	}
 }

@@ -278,8 +278,8 @@ func (m *SettingsModel) showProjectForm(project *db.Project) (*SettingsModel, te
 	m.projectFormUseWorktrees = project.UseWorktrees
 
 	// Default permission mode. Use the project's explicit setting when present,
-	// otherwise pre-select the effective default (accept-edits) so the form
-	// mirrors the mode tasks will actually run in.
+	// otherwise pre-select the effective default (auto) so the form mirrors the
+	// mode tasks will actually run in.
 	m.projectFormPermissionMode = db.NormalizePermissionMode(project.DefaultPermissionMode)
 	if m.projectFormPermissionMode == "" {
 		m.projectFormPermissionMode = project.EffectiveDefaultPermissionMode()
@@ -342,9 +342,10 @@ func (m *SettingsModel) showProjectForm(project *db.Project) (*SettingsModel, te
 		huh.NewSelect[string]().
 			Key("permission_mode").
 			Title("Default Permission Mode").
-			Description("How new tasks handle permissions. Accept Edits handles ~99% without prompting.").
+			Description("How new tasks handle permissions. Auto mode auto-approves safe actions and blocks risky ones.").
 			Options(
-				huh.NewOption("Accept Edits — auto-accept file edits, still prompt for risky actions (recommended)", db.PermissionModeAuto),
+				huh.NewOption("Auto — Claude Code auto mode: auto-approve safe actions, block risky ones (recommended)", db.PermissionModeAuto),
+				huh.NewOption("Accept Edits — auto-accept file edits, still prompt for risky actions", db.PermissionModeAcceptEdits),
 				huh.NewOption("Prompt — ask for each permission", db.PermissionModeDefault),
 				huh.NewOption("Dangerous — skip all permission checks", db.PermissionModeDangerous),
 			).

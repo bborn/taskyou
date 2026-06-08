@@ -2358,15 +2358,13 @@ func (m *DetailModel) renderHeader() string {
 		meta.WriteString("  ")
 	}
 
-	// Accept-edits badge (Claude's acceptEdits mode) for active tasks. Labeled
-	// "ACCEPT EDITS" rather than "AUTO" so it isn't confused with Claude Code's
-	// separate auto mode (--enable-auto-mode).
+	// Auto-mode badge (Claude Code's --permission-mode auto) for active tasks.
 	if t.IsAutoPermission() && (t.Status == db.StatusProcessing || t.Status == db.StatusBlocked) {
 		var autoStyle lipgloss.Style
 		if m.focused {
 			autoStyle = lipgloss.NewStyle().
 				Padding(0, 1).
-				Background(ColorSuccess).
+				Background(ColorPrimary).
 				Foreground(lipgloss.Color("#FFFFFF")).
 				Bold(true)
 		} else {
@@ -2375,7 +2373,27 @@ func (m *DetailModel) renderHeader() string {
 				Background(dimmedBg).
 				Foreground(dimmedFg)
 		}
-		meta.WriteString(autoStyle.Render("ACCEPT EDITS"))
+		meta.WriteString(autoStyle.Render("AUTO"))
+		meta.WriteString("  ")
+	}
+
+	// Accept-edits badge (Claude's acceptEdits mode) for active tasks. Distinct
+	// from AUTO above so the two permission sets are never confused.
+	if t.IsAcceptEdits() && (t.Status == db.StatusProcessing || t.Status == db.StatusBlocked) {
+		var aeStyle lipgloss.Style
+		if m.focused {
+			aeStyle = lipgloss.NewStyle().
+				Padding(0, 1).
+				Background(ColorSuccess).
+				Foreground(lipgloss.Color("#FFFFFF")).
+				Bold(true)
+		} else {
+			aeStyle = lipgloss.NewStyle().
+				Padding(0, 1).
+				Background(dimmedBg).
+				Foreground(dimmedFg)
+		}
+		meta.WriteString(aeStyle.Render("ACCEPT EDITS"))
 		meta.WriteString("  ")
 	}
 

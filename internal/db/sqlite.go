@@ -115,6 +115,11 @@ func Open(path string) (*DB, error) {
 	return wrapped, nil
 }
 
+// permModeAutoMigrationKey guards the one-time rewrite of legacy "auto"
+// permission_mode rows (which meant acceptEdits) to "accept-edits", now that
+// "auto" denotes Claude Code's real auto mode.
+const permModeAutoMigrationKey = "migration:auto_means_accept_edits_v1"
+
 // migrate runs database migrations.
 func (db *DB) migrate() error {
 	migrations := []string{
@@ -269,7 +274,7 @@ func (db *DB) migrate() error {
 		`ALTER TABLE tasks ADD COLUMN pr_info_json TEXT DEFAULT ''`, // JSON blob of github.PRInfo
 		// Whether project uses git worktrees for task isolation (1=yes, 0=no, default 1 for backward compat)
 		`ALTER TABLE projects ADD COLUMN use_worktrees INTEGER DEFAULT 1`,
-		// Permission mode for task execution: "default" (prompt), "auto" (acceptEdits), "dangerous" (skip permissions)
+		// Permission mode for task execution: "default" (prompt), "accept-edits" (acceptEdits), "auto" (Claude Code auto mode), "dangerous" (skip permissions)
 		`ALTER TABLE tasks ADD COLUMN permission_mode TEXT DEFAULT ''`,
 		// Per-project default permission mode inherited by new tasks (empty = global default)
 		`ALTER TABLE projects ADD COLUMN default_permission_mode TEXT DEFAULT ''`,
@@ -295,6 +300,17 @@ func (db *DB) migrate() error {
 
 	for _, m := range statusMigrations {
 		db.Exec(m)
+	}
+
+	// One-time: the value "auto" historically meant Claude's acceptEdits mode.
+	// It now means Claude Code's real auto mode, so rewrite pre-existing rows to
+	// the explicit "accept-edits" value to preserve their original behavior.
+	// Guarded by a settings flag so it runs exactly once and never clobbers tasks
+	// a user later sets to the new auto mode.
+	if done, _ := db.GetSetting(permModeAutoMigrationKey); done == "" {
+		db.Exec(`UPDATE tasks SET permission_mode = 'accept-edits' WHERE permission_mode = 'auto'`)
+		db.Exec(`UPDATE projects SET default_permission_mode = 'accept-edits' WHERE default_permission_mode = 'auto'`)
+		db.SetSetting(permModeAutoMigrationKey, "done")
 	}
 
 	// Ensure 'personal' project exists
