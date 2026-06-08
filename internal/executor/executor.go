@@ -71,6 +71,10 @@ type Executor struct {
 
 	executorSlug string
 	executorName string
+
+	// windowExistsFn reports whether a live executor tmux window exists for a
+	// task. Overridable in tests; nil means use tmuxWindowExistsForTask.
+	windowExistsFn func(taskID int64) bool
 }
 
 // DefaultSuspendIdleTimeout is the default time a blocked task must be idle before being suspended.
@@ -242,6 +246,11 @@ func (e *Executor) Start(ctx context.Context) {
 	// Recover stale tmux references on startup (handles crash recovery)
 	e.recoverStaleTmuxRefs()
 
+	// Reconcile tasks left in 'processing' with no live executor (e.g. after a
+	// daemon restart killed the executor panes). Without this they stay stuck in
+	// 'processing' forever and the board lies about them still running.
+	e.reconcileOrphanedTasks()
+
 	// Run stale worktree cleanup on startup (and then periodically in worker loop)
 	go e.cleanupStaleWorktrees()
 
@@ -290,6 +299,91 @@ func (e *Executor) recoverStaleTmuxRefs() {
 			"window_ids", staleWindow,
 		)
 	}
+}
+
+// reconcileOrphanedTasks moves tasks that are stuck in 'processing' but have no
+// live executor window back to 'blocked' so the board reflects reality. This
+// happens when the daemon is restarted (or crashes) while tasks are executing:
+// the executor tmux windows/processes are killed, but nothing transitions the
+// task out of 'processing', so it appears to be running forever.
+//
+// Tasks are moved to 'blocked' (rather than silently re-queued) so the failure
+// is visible and the user can retry, which resumes the saved Claude session.
+// Uncommitted work in the worktree is left untouched.
+func (e *Executor) reconcileOrphanedTasks() {
+	tasks, err := e.db.ListTasks(db.ListTasksOptions{Status: db.StatusProcessing, Limit: 1000})
+	if err != nil {
+		e.logger.Error("Failed to list processing tasks for orphan reconciliation", "error", err)
+		return
+	}
+
+	reconciled := 0
+	for _, task := range tasks {
+		// Skip tasks this executor is actively running (defensive: at startup the
+		// running set is empty, but reconcile must never touch a live task).
+		e.mu.RLock()
+		running := e.runningTasks[task.ID]
+		e.mu.RUnlock()
+		if running {
+			continue
+		}
+
+		// A processing task with a live executor window is genuinely still
+		// running (e.g. the tmux server survived a daemon restart) - leave it.
+		windowExists := tmuxWindowExistsForTask
+		if e.windowExistsFn != nil {
+			windowExists = e.windowExistsFn
+		}
+		if windowExists(task.ID) {
+			continue
+		}
+
+		msg := "Executor terminated (daemon restart) - task was 'processing' with no live executor. Moved to blocked; retry to resume."
+		if err := e.updateStatus(task.ID, db.StatusBlocked); err != nil {
+			e.logger.Error("Failed to reconcile orphaned task", "id", task.ID, "error", err)
+			continue
+		}
+		e.logLine(task.ID, "error", msg)
+		e.hooks.OnStatusChange(task, db.StatusBlocked, msg)
+		e.logger.Info("Reconciled orphaned processing task", "id", task.ID, "title", task.Title)
+		reconciled++
+	}
+
+	if reconciled > 0 {
+		e.logger.Info("Reconciled orphaned processing tasks", "count", reconciled)
+	}
+}
+
+// tmuxWindowExistsForTask reports whether a live executor tmux window exists for
+// the task in any daemon session. The executor runs inside a window named
+// "task-<id>" within a "task-daemon-*" session; if that window is gone, the
+// executor process is gone too.
+func tmuxWindowExistsForTask(taskID int64) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	out, err := exec.CommandContext(ctx, "tmux", "list-windows",
+		"-a", "-F", "#{session_name}:#{window_name}").Output()
+	if err != nil {
+		// tmux not running / no server => no windows exist.
+		return false
+	}
+
+	windowName := TmuxWindowName(taskID)
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if line == "" {
+			continue
+		}
+		parts := strings.SplitN(line, ":", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		sessionName, name := parts[0], parts[1]
+		if strings.HasPrefix(sessionName, "task-daemon-") && name == windowName {
+			return true
+		}
+	}
+	return false
 }
 
 // Stop stops the background worker.
@@ -427,6 +521,29 @@ func (e *Executor) IsSuspended(taskID int64) bool {
 	defer e.mu.RUnlock()
 	_, suspended := e.suspendedTasks[taskID]
 	return suspended
+}
+
+// agentSendTargetForPane returns the tmux send-keys target for a task's agent
+// pane. It prefers the persisted pane id (the stable "%pane_id" captured at
+// window creation and used by the UI for capture) so input is never
+// misdelivered when the detail view has joined the agent pane into the UI
+// session — which collapses the shell pane onto window index 0. Falls back to
+// windowTarget+".0" when no pane id has been persisted yet.
+func agentSendTargetForPane(claudePaneID, windowTarget string) string {
+	if claudePaneID != "" {
+		return claudePaneID
+	}
+	return windowTarget + ".0"
+}
+
+// agentSendTarget resolves the send-keys target for a task's agent pane,
+// reading the persisted pane id from the database. See agentSendTargetForPane.
+func (e *Executor) agentSendTarget(taskID int64, windowTarget string) string {
+	claudePaneID := ""
+	if t, err := e.db.GetTask(taskID); err == nil && t != nil {
+		claudePaneID = t.ClaudePaneID
+	}
+	return agentSendTargetForPane(claudePaneID, windowTarget)
 }
 
 // findPanesForWindow parses tmux list-panes output and returns PIDs for panes
@@ -734,6 +851,7 @@ func (e *Executor) worker(ctx context.Context) {
 	const suspendCheckInterval = 30
 	const doneCleanupInterval = 150   // 5 minutes at 2 second ticks
 	const staleWorktreeInterval = 300 // 10 minutes at 2 second ticks
+	const authCheckInterval = 15      // 30 seconds at 2 second ticks
 
 	for {
 		select {
@@ -752,6 +870,12 @@ func (e *Executor) worker(ctx context.Context) {
 			// Periodically check for idle blocked tasks to suspend
 			if tickCount%suspendCheckInterval == 0 {
 				e.suspendIdleBlockedTasks()
+			}
+
+			// Periodically check for processing tasks stalled on a logged-out
+			// executor session (e.g. expired Claude login) and surface them.
+			if tickCount%authCheckInterval == 0 {
+				e.checkAuthStuckTasks()
 			}
 
 			// Periodically cleanup Claude processes for inactive done tasks
@@ -2264,8 +2388,15 @@ func (e *Executor) runClaude(ctx context.Context, task *db.Task, workDir, prompt
 	}
 	// Permission flag: dangerous, auto (acceptEdits), or none, honoring the task's mode
 	dangerousFlag := claudePermissionFlag(task)
+	// Remote Control: launch claude as a remote-drivable session (claude.ai/code + phone)
+	rcFlag := rcFlag(task)
 	// Build per-task effort override flag (empty = use Claude's global default)
 	effort := effortFlag(task.EffortLevel)
+	// Build trailing prompt arg - suppressed for Remote Control so claude starts with a blank session
+	promptArg := fmt.Sprintf(`"$(cat %q)"`, promptFile.Name())
+	if task.RemoteControl {
+		promptArg = ""
+	}
 
 	// Check for existing Claude session to resume instead of starting fresh
 	// Only use stored session ID - no file-based fallback to avoid cross-task contamination
@@ -2275,8 +2406,8 @@ func (e *Executor) runClaude(ctx context.Context, task *db.Task, workDir, prompt
 	envPrefix := claudeEnvPrefix(paths.configDir)
 	if existingSessionID != "" && ClaudeSessionExists(existingSessionID, workDir, paths.configDir) {
 		e.logLine(task.ID, "system", fmt.Sprintf("Resuming existing session %s", existingSessionID))
-		script = fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %sclaude %s%s--resume %s "$(cat %q)"`,
-			task.ID, sessionID, task.Port, task.WorktreePath, envPrefix, dangerousFlag, effort, existingSessionID, promptFile.Name())
+		script = fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %sclaude %s%s%s--resume %s %s`,
+			task.ID, sessionID, task.Port, task.WorktreePath, envPrefix, dangerousFlag, rcFlag, effort, existingSessionID, promptArg)
 	} else {
 		if existingSessionID != "" {
 			e.logLine(task.ID, "system", fmt.Sprintf("Session %s no longer exists, starting fresh", existingSessionID))
@@ -2285,8 +2416,8 @@ func (e *Executor) runClaude(ctx context.Context, task *db.Task, workDir, prompt
 				e.logger.Warn("failed to clear stale session ID", "task", task.ID, "error", err)
 			}
 		}
-		script = fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %sclaude %s%s"$(cat %q)"`,
-			task.ID, sessionID, task.Port, task.WorktreePath, envPrefix, dangerousFlag, effort, promptFile.Name())
+		script = fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %sclaude %s%s%s%s`,
+			task.ID, sessionID, task.Port, task.WorktreePath, envPrefix, dangerousFlag, rcFlag, effort, promptArg)
 	}
 
 	// Create new window in task-daemon session (with retry logic for race conditions)
@@ -2420,12 +2551,19 @@ func (e *Executor) runClaudeResume(ctx context.Context, task *db.Task, workDir, 
 	}
 	// Permission flag: dangerous, auto (acceptEdits), or none, honoring the task's mode
 	dangerousFlag := claudePermissionFlag(task)
+	// Remote Control: launch claude as a remote-drivable session (claude.ai/code + phone)
+	rcFlag := rcFlag(task)
 	// Build per-task effort override flag (empty = use Claude's global default)
 	effort := effortFlag(task.EffortLevel)
+	// Build trailing prompt arg - suppressed for Remote Control so claude starts with a blank session
+	promptArg := fmt.Sprintf(`"$(cat %q)"`, feedbackFile.Name())
+	if task.RemoteControl {
+		promptArg = ""
+	}
 
 	envPrefix := claudeEnvPrefix(paths.configDir)
-	script := fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %sclaude %s%s--resume %s "$(cat %q)"`,
-		task.ID, taskSessionID, task.Port, task.WorktreePath, envPrefix, dangerousFlag, effort, claudeSessionID, feedbackFile.Name())
+	script := fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %sclaude %s%s%s--resume %s %s`,
+		task.ID, taskSessionID, task.Port, task.WorktreePath, envPrefix, dangerousFlag, rcFlag, effort, claudeSessionID, promptArg)
 
 	// Create new window in task-daemon session (with retry logic for race conditions)
 	actualSession, tmuxErr := createTmuxWindow(daemonSession, windowName, workDir, script, e.getProjectDir(task.Project))
@@ -2633,7 +2771,7 @@ func (e *Executor) resumeClaudeDangerous(task *db.Task, workDir string) bool {
 
 	// Automatically send "continue working" to resume the task
 	// This tells Claude to continue where it left off after the mode switch
-	exec.Command("tmux", "send-keys", "-t", windowTarget+".0", "continue working", "Enter").Run()
+	exec.Command("tmux", "send-keys", "-t", e.agentSendTarget(task.ID, windowTarget), "continue working", "Enter").Run()
 	e.logLine(taskID, "system", "Sent 'continue working' to resume task")
 
 	// Don't poll for completion here - the process will continue running in tmux
@@ -2798,7 +2936,7 @@ func (e *Executor) resumeClaudeSafe(task *db.Task, workDir string) bool {
 
 	// Automatically send "continue working" to resume the task
 	// This tells Claude to continue where it left off after the mode switch
-	exec.Command("tmux", "send-keys", "-t", windowTarget+".0", "continue working", "Enter").Run()
+	exec.Command("tmux", "send-keys", "-t", e.agentSendTarget(task.ID, windowTarget), "continue working", "Enter").Run()
 	e.logLine(taskID, "system", "Sent 'continue working' to resume task")
 
 	// Don't poll for completion here - the process will continue running in tmux
@@ -2904,7 +3042,7 @@ func (e *Executor) resumeCodexWithMode(task *db.Task, workDir string, dangerousM
 
 	// Automatically send "continue working" to resume the task
 	// This tells Codex to continue where it left off after the mode switch
-	exec.Command("tmux", "send-keys", "-t", windowTarget+".0", "continue working", "Enter").Run()
+	exec.Command("tmux", "send-keys", "-t", e.agentSendTarget(task.ID, windowTarget), "continue working", "Enter").Run()
 	e.logLine(taskID, "system", "Sent 'continue working' to resume task")
 
 	return true
@@ -3012,7 +3150,7 @@ func (e *Executor) resumeGeminiWithMode(task *db.Task, workDir string, dangerous
 
 	// Automatically send "continue working" to resume the task
 	// This tells Gemini to continue where it left off after the mode switch
-	exec.Command("tmux", "send-keys", "-t", windowTarget+".0", "continue working", "Enter").Run()
+	exec.Command("tmux", "send-keys", "-t", e.agentSendTarget(task.ID, windowTarget), "continue working", "Enter").Run()
 	e.logLine(taskID, "system", "Sent 'continue working' to resume task")
 
 	return true

@@ -559,8 +559,7 @@ func (m *SettingsModel) saveProject() (*SettingsModel, tea.Cmd) {
 	}
 
 	if name == "" {
-		m.err = fmt.Errorf("name is required")
-		return m, nil
+		return m.reshowProjectFormWithError(fmt.Errorf("name is required"))
 	}
 
 	useWorktrees := m.projectFormUseWorktrees
@@ -569,21 +568,18 @@ func (m *SettingsModel) saveProject() (*SettingsModel, tea.Cmd) {
 	if m.editProject.ID != 0 {
 		formPath := strings.TrimSpace(m.projectFormPath)
 		if formPath == "" {
-			m.err = fmt.Errorf("directory is required")
-			return m, nil
+			return m.reshowProjectFormWithError(fmt.Errorf("directory is required"))
 		}
 		absPath, err := resolveProjectPath(formPath)
 		if err != nil {
-			m.err = fmt.Errorf("invalid path: %w", err)
-			return m, nil
+			return m.reshowProjectFormWithError(fmt.Errorf("invalid path: %w", err))
 		}
 		// When pointing an existing project at a new directory, require that
 		// directory to already exist. This avoids silently creating (and
 		// git-initializing) a directory at a mistyped path.
 		if absPath != m.editProject.Path {
 			if _, statErr := os.Stat(absPath); os.IsNotExist(statErr) {
-				m.err = fmt.Errorf("path does not exist: %s", absPath)
-				return m, nil
+				return m.reshowProjectFormWithError(fmt.Errorf("path does not exist: %s", absPath))
 			}
 		}
 		m.editProject.Path = absPath
@@ -613,8 +609,7 @@ func (m *SettingsModel) saveProject() (*SettingsModel, tea.Cmd) {
 
 	if pathExists {
 		if !info.IsDir() {
-			m.err = fmt.Errorf("path is not a directory")
-			return m, nil
+			return m.reshowProjectFormWithError(fmt.Errorf("path is not a directory"))
 		}
 
 		if useWorktrees {
@@ -692,6 +687,7 @@ func (m *SettingsModel) reshowProjectFormWithError(err error) (*SettingsModel, t
 	m.editProject.Instructions = strings.TrimSpace(m.projectFormInstructions)
 	m.editProject.ClaudeConfigDir = strings.TrimSpace(m.projectFormClaudeConfigDir)
 	m.editProject.UseWorktrees = m.projectFormUseWorktrees
+	m.editProject.DefaultPermissionMode = strings.TrimSpace(m.projectFormPermissionMode)
 
 	model, cmd := m.showProjectForm(m.editProject)
 	model.err = err

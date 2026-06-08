@@ -5,11 +5,21 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strings"
 
 	"github.com/charmbracelet/log"
 
 	"github.com/bborn/workflow/internal/db"
 )
+
+// shellSingleQuote wraps s in single quotes for safe interpolation into a shell
+// command, escaping any embedded single quotes via the standard '\'' idiom.
+// Unlike fmt's %q (which produces Go-string quoting and leaves $, backticks,
+// and the like live for the shell), this neutralizes shell metacharacters and
+// is safe against command injection.
+func shellSingleQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
 
 // ClaudeExecutor implements TaskExecutor for Claude Code CLI.
 // This wraps the existing Claude execution logic in executor.go.
@@ -44,6 +54,23 @@ func effortFlag(level string) string {
 		return ""
 	}
 	return fmt.Sprintf("--effort %s ", level)
+}
+
+// rcFlag returns the `--remote-control <name> ` CLI flag (with a trailing
+// space) for a task that has Remote Control enabled, or an empty string
+// otherwise. The session name is the task title, falling back to `task-<id>`
+// when the title is empty. The name is shell-single-quoted because the returned
+// flag is concatenated into a script run via `sh -c`, and the title is
+// arbitrary user/MCP/daemon-supplied text.
+func rcFlag(task *db.Task) string {
+	if !task.RemoteControl {
+		return ""
+	}
+	rcName := task.Title
+	if rcName == "" {
+		rcName = fmt.Sprintf("task-%d", task.ID)
+	}
+	return fmt.Sprintf("--remote-control %s ", shellSingleQuote(rcName))
 }
 
 // NewClaudeExecutor creates a new Claude executor.
