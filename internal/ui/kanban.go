@@ -1165,21 +1165,23 @@ func (k *KanbanBoard) renderTaskCard(task *db.Task, width int, isSelected bool, 
 			indicators = append(indicators, dangerStyle.Render("●"))
 		}
 	}
-	// Auto-mode indicator (blue dot) for active tasks running in Claude Code's auto mode.
+	// Auto-mode indicator (yellow dot) for active tasks running in Claude Code's
+	// auto mode — matches Claude's own "auto mode on" status color.
 	if task.IsAutoPermission() && (task.Status == db.StatusProcessing || task.Status == db.StatusBlocked) {
 		if isSelected {
 			indicators = append(indicators, "●")
 		} else {
-			autoStyle := lipgloss.NewStyle().Foreground(ColorPrimary)
+			autoStyle := lipgloss.NewStyle().Foreground(ColorWarning)
 			indicators = append(indicators, autoStyle.Render("●"))
 		}
 	}
-	// Accept-edits indicator (green dot) for active tasks running in Claude's acceptEdits mode.
+	// Accept-edits indicator (violet dot) for active tasks running in Claude's
+	// acceptEdits mode — matches Claude's own "accept edits on" status color.
 	if task.IsAcceptEdits() && (task.Status == db.StatusProcessing || task.Status == db.StatusBlocked) {
 		if isSelected {
 			indicators = append(indicators, "●")
 		} else {
-			aeStyle := lipgloss.NewStyle().Foreground(ColorSuccess)
+			aeStyle := lipgloss.NewStyle().Foreground(ColorCode)
 			indicators = append(indicators, aeStyle.Render("●"))
 		}
 	}

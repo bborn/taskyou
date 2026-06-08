@@ -2359,13 +2359,14 @@ func (m *DetailModel) renderHeader() string {
 	}
 
 	// Auto-mode badge (Claude Code's --permission-mode auto) for active tasks.
+	// Yellow to match Claude Code's own "auto mode on" status color.
 	if t.IsAutoPermission() && (t.Status == db.StatusProcessing || t.Status == db.StatusBlocked) {
 		var autoStyle lipgloss.Style
 		if m.focused {
 			autoStyle = lipgloss.NewStyle().
 				Padding(0, 1).
-				Background(ColorPrimary).
-				Foreground(lipgloss.Color("#FFFFFF")).
+				Background(ColorWarning).
+				Foreground(lipgloss.Color("#000000")).
 				Bold(true)
 		} else {
 			autoStyle = lipgloss.NewStyle().
@@ -2377,14 +2378,15 @@ func (m *DetailModel) renderHeader() string {
 		meta.WriteString("  ")
 	}
 
-	// Accept-edits badge (Claude's acceptEdits mode) for active tasks. Distinct
-	// from AUTO above so the two permission sets are never confused.
+	// Accept-edits badge (Claude's acceptEdits mode) for active tasks. Violet to
+	// match Claude Code's own "accept edits on" status color — and distinct from
+	// AUTO above so the two permission sets are never confused.
 	if t.IsAcceptEdits() && (t.Status == db.StatusProcessing || t.Status == db.StatusBlocked) {
 		var aeStyle lipgloss.Style
 		if m.focused {
 			aeStyle = lipgloss.NewStyle().
 				Padding(0, 1).
-				Background(ColorSuccess).
+				Background(ColorCode).
 				Foreground(lipgloss.Color("#FFFFFF")).
 				Bold(true)
 		} else {
