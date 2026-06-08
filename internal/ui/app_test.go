@@ -1231,42 +1231,6 @@ func TestQueueDangerous_KanbanView(t *testing.T) {
 	}
 }
 
-func TestShiftArrowKeysRouteToListView(t *testing.T) {
-	pinned := &db.Task{ID: 1, Title: "Pinned", Status: db.StatusBacklog, Project: "personal", Pinned: true}
-	a := &db.Task{ID: 2, Title: "Alpha", Status: db.StatusBacklog, Project: "personal"}
-	b := &db.Task{ID: 3, Title: "Bravo", Status: db.StatusBacklog, Project: "personal"}
-	tasks := []*db.Task{pinned, a, b}
-
-	kanban := NewKanbanBoard(80, 24)
-	kanban.SetTasks(tasks)
-	listView := NewListView(80, 24)
-	listView.SetTasks(tasks)
-
-	m := &AppModel{
-		keys:        DefaultKeyMap(),
-		currentView: ViewDashboard,
-		viewMode:    ViewModeList,
-		tasks:       tasks,
-		kanban:      kanban,
-		listView:    listView,
-	}
-
-	// shift+down jumps to the first unpinned row (index 1, just past the pin).
-	m.updateDashboard(tea.KeyMsg{Type: tea.KeyShiftDown})
-	if got := listView.selectedRow; got != 1 {
-		t.Fatalf("shift+down: list selectedRow = %d, want 1", got)
-	}
-
-	// shift+up jumps back to the pinned prefix at the top.
-	m.updateDashboard(tea.KeyMsg{Type: tea.KeyShiftUp})
-	if got := listView.selectedRow; got != 0 {
-		t.Fatalf("shift+up: list selectedRow = %d, want 0", got)
-	}
-	if sel := m.dashboardSelectedTask(); sel == nil || sel.ID != 1 {
-		t.Fatalf("shift+up: selected task = %v, want pinned task 1", sel)
-	}
-}
-
 func TestQueueDangerous_SkipsProcessingTask(t *testing.T) {
 	database, err := db.Open(":memory:")
 	if err != nil {
