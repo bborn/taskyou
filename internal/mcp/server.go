@@ -245,6 +245,10 @@ func (s *Server) handleRequest(req *jsonRPCRequest) {
 								"description": "Permission mode for execution: 'default' (prompt), 'auto' (auto-accept edits), or 'dangerous' (skip all prompts). Defaults to the project's configured default.",
 								"enum":        []string{"default", "auto", "dangerous"},
 							},
+							"remote_control": map[string]interface{}{
+								"type":        "boolean",
+								"description": "Launch the task's Claude session with --remote-control (interactive, remote-drivable)",
+							},
 						},
 						"required": []string{"title"},
 					},
@@ -556,6 +560,7 @@ func (s *Server) handleToolCall(id interface{}, params *toolCallParams) {
 		status, _ := params.Arguments["status"].(string)
 		dangerousMode, _ := params.Arguments["dangerous_mode"].(bool)
 		permissionMode, _ := params.Arguments["permission_mode"].(string)
+		remoteControl, _ := params.Arguments["remote_control"].(bool)
 
 		// Default project to current task's project
 		if project == "" {
@@ -583,6 +588,7 @@ func (s *Server) handleToolCall(id interface{}, params *toolCallParams) {
 			Type:           taskType,
 			Status:         status,
 			PermissionMode: permissionMode,
+			RemoteControl:  remoteControl,
 		}
 
 		if err := s.db.CreateTask(newTask); err != nil {
