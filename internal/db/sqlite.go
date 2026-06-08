@@ -275,6 +275,8 @@ func (db *DB) migrate() error {
 		`ALTER TABLE projects ADD COLUMN default_permission_mode TEXT DEFAULT ''`,
 		// Per-task Claude effort override ("" = use global/Claude default, otherwise low/medium/high/xhigh/max)
 		`ALTER TABLE tasks ADD COLUMN effort_level TEXT DEFAULT ''`,
+
+		`ALTER TABLE tasks ADD COLUMN remote_control INTEGER DEFAULT 0`, // Whether to launch claude with --remote-control
 	}
 
 	for _, m := range alterMigrations {

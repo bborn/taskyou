@@ -571,6 +571,7 @@ Examples:
 			permissionModeFlag, _ := cmd.Flags().GetString("permission-mode")
 			tags, _ := cmd.Flags().GetString("tags")
 			pinned, _ := cmd.Flags().GetBool("pinned")
+			remoteControl, _ := cmd.Flags().GetBool("remote-control")
 			branch, _ := cmd.Flags().GetString("branch")
 			outputJSON, _ := cmd.Flags().GetBool("json")
 
@@ -699,6 +700,7 @@ Examples:
 				Pinned:         pinned,
 				SourceBranch:   branch,
 				PermissionMode: permMode,
+				RemoteControl:  remoteControl,
 			}
 
 			if err := database.CreateTask(task); err != nil {
@@ -749,6 +751,7 @@ Examples:
 	createCmd.Flags().String("permission-mode", "", "Permission mode: default (prompt), auto (auto-accept edits), dangerous (skip all). Defaults to the project's setting")
 	createCmd.Flags().String("tags", "", "Task tags (comma-separated)")
 	createCmd.Flags().Bool("pinned", false, "Pin the task to the top of its column")
+	createCmd.Flags().Bool("remote-control", false, "Launch Claude with --remote-control (interactive, remote-drivable session)")
 	createCmd.Flags().StringP("branch", "b", "", "Existing branch to checkout for worktree (e.g., fix/ui-overflow)")
 	createCmd.Flags().Bool("json", false, "Output in JSON format")
 	createCmd.RegisterFlagCompletionFunc("project", completeFlagProjects)
