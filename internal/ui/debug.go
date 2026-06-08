@@ -28,6 +28,18 @@ type DebugDashboard struct {
 	Columns       []DebugColumn `json:"columns"`
 	FocusedColumn int           `json:"focused_column"`
 	SelectedTask  int64         `json:"selected_task_id,omitempty"`
+	ViewMode      string        `json:"view_mode"`      // "board" or "list"
+	List          *DebugList    `json:"list,omitempty"` // populated when in list view
+}
+
+// DebugList captures the list view's sort/filter state for QA assertions.
+type DebugList struct {
+	Sort          string      `json:"sort"`
+	SortDesc      bool        `json:"sort_desc"`
+	StatusFilter  string      `json:"status_filter"`
+	ProjectFilter string      `json:"project_filter"`
+	DateFilter    string      `json:"date_filter"`
+	Rows          []DebugTask `json:"rows"`
 }
 
 type DebugColumn struct {
@@ -91,6 +103,15 @@ func (m *AppModel) GenerateDebugState() DebugState {
 	if m.currentView == ViewDashboard {
 		dash := &DebugDashboard{
 			FocusedColumn: m.kanban.selectedCol,
+			ViewMode:      "board",
+		}
+
+		if m.viewMode == ViewModeList && m.listView != nil {
+			dash.ViewMode = "list"
+			dash.List = m.listView.debugState()
+			if task := m.listView.SelectedTask(); task != nil {
+				dash.SelectedTask = task.ID
+			}
 		}
 
 		// Reconstruct columns from kanban state
@@ -114,8 +135,10 @@ func (m *AppModel) GenerateDebugState() DebugState {
 			dash.Columns = append(dash.Columns, dCol)
 		}
 
-		if task := m.kanban.SelectedTask(); task != nil {
-			dash.SelectedTask = task.ID
+		if m.viewMode != ViewModeList {
+			if task := m.kanban.SelectedTask(); task != nil {
+				dash.SelectedTask = task.ID
+			}
 		}
 
 		s.Dashboard = dash

@@ -1480,64 +1480,51 @@ func (e *Executor) buildPrompt(task *db.Task, attachmentPaths []string) string {
 		prompt.WriteString(e.buildGenericContextSection(projectInstructions, similarTasks, attachments, conversationHistory))
 	}
 
-	// Note: Task guidance is now passed via system prompt (Claude) or GEMINI.md (Gemini)
-	// to keep the user conversation thread clean. See buildSystemInstructions().
+	// Append universal guidance that applies to EVERY task type (including custom ones
+	// and the typeless/unknown fallback above): project-context caching, and — when the
+	// project uses worktrees — the worktree-safety constraint. This is injected here
+	// rather than baked into each task-type template because it depends on a runtime fact
+	// (does this project use worktrees?) a static template cannot express, and because the
+	// worktree guardrail must reach non-code tasks too (otherwise agents wander into the
+	// parent project directory).
+	if guidance := e.buildUniversalGuidance(task); guidance != "" {
+		prompt.WriteString("\n")
+		prompt.WriteString(guidance)
+		prompt.WriteString("\n")
+	}
 
 	return prompt.String()
 }
 
-// buildSystemInstructions returns the system-level instructions that guide task execution.
-// These instructions are passed via system prompt mechanisms (e.g., --append-system-prompt for Claude,
-// GEMINI.md for Gemini) rather than in the user conversation thread to keep it clean.
-func (e *Executor) buildSystemInstructions() string {
-	return `═══════════════════════════════════════════════════════════════
-                      TASK GUIDANCE
-═══════════════════════════════════════════════════════════════
+// buildUniversalGuidance returns task-type-agnostic execution guidance appended to every
+// prompt. The project-context section is always included; the worktree-safety constraint
+// is included only when the task's project uses git worktrees (UseWorktrees defaults to on,
+// so the guardrail is shown unless a project has explicitly opted out).
+func (e *Executor) buildUniversalGuidance(task *db.Task) string {
+	var b strings.Builder
 
-⚡ BEFORE EXPLORING THE CODEBASE:
-  Call taskyou_get_project_context first via MCP.
-  - If it returns context, use it and skip exploration
-  - If empty, explore once and save a summary via taskyou_set_project_context
-  This caches your exploration for future tasks in this project.
+	b.WriteString(`Project context:
+- Before exploring or starting work, call taskyou_get_project_context first via MCP. If it returns context, use it and skip exploration. If it is empty, explore once and save a summary via taskyou_set_project_context so future tasks in this project can reuse it.`)
 
-Work on this task until completion. When you're done or need input:
+	if e.taskUsesWorktrees(task) {
+		b.WriteString(`
 
-✓ WHEN TASK IS COMPLETE:
-  Provide a clear summary of what was accomplished
+Working directory constraint (isolated git worktree):
+- You are running in an isolated git worktree. This worktree IS your project - it is NOT a copy. NEVER access the original project directory or any path outside your current working directory.
+- ONLY use paths within your current working directory. Always use relative paths (e.g., "." or "./src") when searching or navigating - never absolute paths. The parent repo does not exist for you; only this worktree does.`)
+	}
 
-✓ WHEN YOU NEED INPUT/CLARIFICATION:
-  Ask your question clearly and wait for a response
+	return b.String()
+}
 
-✓ FOR VISUAL/FRONTEND WORK:
-  Use the taskyou_screenshot MCP tool to take screenshots of the
-  screen. This helps verify correctness and document changes.
-
-⚠ CRITICAL - WORKING DIRECTORY CONSTRAINT:
-  You are running in an isolated git worktree. This worktree IS your
-  project - it is NOT a copy. NEVER access the "original" project
-  directory or any path outside your current working directory.
-
-  - ONLY use paths within your current working directory
-  - NEVER read/write files in /Users/*/Projects/* except this worktree
-  - If you see a path like .task-worktrees/, you're in the right place
-  - The parent repo does NOT exist for you - only this worktree does
-
-🐙 GITHUB CLI (gh) — CONSERVE THE SHARED GRAPHQL BUCKET:
-  GitHub's GraphQL rate limit (5,000 points/hr) is PER-USER and is shared by
-  every agent server authenticated as the same account. It exhausts easily.
-
-  - Prefer REST for PR reads — it has a SEPARATE 5,000/hr bucket:
-      gh pr view --json ...        ❌ (GraphQL-backed)
-      gh api repos/{owner}/{repo}/pulls/{n}   ✅ (REST)
-  - NEVER busy-poll CI with "gh pr checks" in a loop. Instead use:
-      gh run watch <run-id>        ✅ (blocks server-side, no polling)
-    or poll REST check-runs with backoff:
-      gh api repos/{owner}/{repo}/commits/{sha}/check-runs
-  - If you see "GraphQL bucket is exhausted", switch to the REST equivalents
-    above and back off — do not retry the GraphQL call in a tight loop.
-
-The task system will automatically detect your status.
-═══════════════════════════════════════════════════════════════`
+// taskUsesWorktrees reports whether the task's project runs in git worktrees. It defaults
+// to true when the project cannot be loaded, matching the use_worktrees column default and
+// ensuring the worktree-safety guardrail is shown unless a project has explicitly opted out.
+func (e *Executor) taskUsesWorktrees(task *db.Task) bool {
+	if p, err := e.db.GetProjectByName(task.Project); err == nil && p != nil {
+		return p.UsesWorktrees()
+	}
+	return true
 }
 
 // applyTemplateSubstitutions replaces template placeholders in task type instructions.
@@ -2387,21 +2374,6 @@ func (e *Executor) runClaude(ctx context.Context, task *db.Task, workDir, prompt
 	promptFile.Close()
 	defer os.Remove(promptFile.Name())
 
-	// Create a temp file for system instructions (passed via --append-system-prompt)
-	// This keeps the task guidance out of the user conversation thread
-	systemFile, err := os.CreateTemp("", "task-system-*.txt")
-	if err != nil {
-		e.logger.Error("could not create system file", "error", err)
-		e.logLine(task.ID, "error", fmt.Sprintf("Failed to create system file: %s", err.Error()))
-		if cleanupHooks != nil {
-			cleanupHooks()
-		}
-		return execResult{Message: fmt.Sprintf("failed to create system file: %s", err.Error())}
-	}
-	systemFile.WriteString(e.buildSystemInstructions())
-	systemFile.Close()
-	defer os.Remove(systemFile.Name())
-
 	// Script that runs claude interactively with worktree environment variables
 	// Note: tmux starts in workDir (-c flag), so claude inherits proper permissions and hooks config
 	// Run interactively (no -p) so user can attach and see/interact in real-time
@@ -2416,10 +2388,15 @@ func (e *Executor) runClaude(ctx context.Context, task *db.Task, workDir, prompt
 	}
 	// Permission flag: dangerous, auto (acceptEdits), or none, honoring the task's mode
 	dangerousFlag := claudePermissionFlag(task)
+	// Remote Control: launch claude as a remote-drivable session (claude.ai/code + phone)
+	rcFlag := rcFlag(task)
 	// Build per-task effort override flag (empty = use Claude's global default)
 	effort := effortFlag(task.EffortLevel)
-	// Build system prompt flag - passes task guidance via system prompt to keep conversation clean
-	systemPromptFlag := fmt.Sprintf(`--append-system-prompt "$(cat %q)" `, systemFile.Name())
+	// Build trailing prompt arg - suppressed for Remote Control so claude starts with a blank session
+	promptArg := fmt.Sprintf(`"$(cat %q)"`, promptFile.Name())
+	if task.RemoteControl {
+		promptArg = ""
+	}
 
 	// Check for existing Claude session to resume instead of starting fresh
 	// Only use stored session ID - no file-based fallback to avoid cross-task contamination
@@ -2429,8 +2406,8 @@ func (e *Executor) runClaude(ctx context.Context, task *db.Task, workDir, prompt
 	envPrefix := claudeEnvPrefix(paths.configDir)
 	if existingSessionID != "" && ClaudeSessionExists(existingSessionID, workDir, paths.configDir) {
 		e.logLine(task.ID, "system", fmt.Sprintf("Resuming existing session %s", existingSessionID))
-		script = fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %sclaude %s%s%s--resume %s "$(cat %q)"`,
-			task.ID, sessionID, task.Port, task.WorktreePath, envPrefix, dangerousFlag, effort, systemPromptFlag, existingSessionID, promptFile.Name())
+		script = fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %sclaude %s%s%s--resume %s %s`,
+			task.ID, sessionID, task.Port, task.WorktreePath, envPrefix, dangerousFlag, rcFlag, effort, existingSessionID, promptArg)
 	} else {
 		if existingSessionID != "" {
 			e.logLine(task.ID, "system", fmt.Sprintf("Session %s no longer exists, starting fresh", existingSessionID))
@@ -2439,8 +2416,8 @@ func (e *Executor) runClaude(ctx context.Context, task *db.Task, workDir, prompt
 				e.logger.Warn("failed to clear stale session ID", "task", task.ID, "error", err)
 			}
 		}
-		script = fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %sclaude %s%s%s"$(cat %q)"`,
-			task.ID, sessionID, task.Port, task.WorktreePath, envPrefix, dangerousFlag, effort, systemPromptFlag, promptFile.Name())
+		script = fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %sclaude %s%s%s%s`,
+			task.ID, sessionID, task.Port, task.WorktreePath, envPrefix, dangerousFlag, rcFlag, effort, promptArg)
 	}
 
 	// Create new window in task-daemon session (with retry logic for race conditions)
@@ -2562,21 +2539,6 @@ func (e *Executor) runClaudeResume(ctx context.Context, task *db.Task, workDir, 
 	feedbackFile.Close()
 	defer os.Remove(feedbackFile.Name())
 
-	// Create a temp file for system instructions (passed via --append-system-prompt)
-	// This keeps the task guidance out of the user conversation thread
-	systemFile, err := os.CreateTemp("", "task-system-*.txt")
-	if err != nil {
-		e.logger.Error("could not create system file", "error", err)
-		e.logLine(task.ID, "error", fmt.Sprintf("Failed to create system file: %s", err.Error()))
-		if cleanupHooks != nil {
-			cleanupHooks()
-		}
-		return execResult{Message: fmt.Sprintf("failed to create system file: %s", err.Error())}
-	}
-	systemFile.WriteString(e.buildSystemInstructions())
-	systemFile.Close()
-	defer os.Remove(systemFile.Name())
-
 	// Script that resumes claude with session ID (interactive mode)
 	// Environment variables passed:
 	// - WORKTREE_TASK_ID: Task identifier for hooks
@@ -2589,14 +2551,19 @@ func (e *Executor) runClaudeResume(ctx context.Context, task *db.Task, workDir, 
 	}
 	// Permission flag: dangerous, auto (acceptEdits), or none, honoring the task's mode
 	dangerousFlag := claudePermissionFlag(task)
+	// Remote Control: launch claude as a remote-drivable session (claude.ai/code + phone)
+	rcFlag := rcFlag(task)
 	// Build per-task effort override flag (empty = use Claude's global default)
 	effort := effortFlag(task.EffortLevel)
-	// Build system prompt flag - passes task guidance via system prompt to keep conversation clean
-	systemPromptFlag := fmt.Sprintf(`--append-system-prompt "$(cat %q)" `, systemFile.Name())
+	// Build trailing prompt arg - suppressed for Remote Control so claude starts with a blank session
+	promptArg := fmt.Sprintf(`"$(cat %q)"`, feedbackFile.Name())
+	if task.RemoteControl {
+		promptArg = ""
+	}
 
 	envPrefix := claudeEnvPrefix(paths.configDir)
-	script := fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %sclaude %s%s%s--resume %s "$(cat %q)"`,
-		task.ID, taskSessionID, task.Port, task.WorktreePath, envPrefix, dangerousFlag, effort, systemPromptFlag, claudeSessionID, feedbackFile.Name())
+	script := fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %sclaude %s%s%s--resume %s %s`,
+		task.ID, taskSessionID, task.Port, task.WorktreePath, envPrefix, dangerousFlag, rcFlag, effort, claudeSessionID, promptArg)
 
 	// Create new window in task-daemon session (with retry logic for race conditions)
 	actualSession, tmuxErr := createTmuxWindow(daemonSession, windowName, workDir, script, e.getProjectDir(task.Project))
@@ -3300,6 +3267,31 @@ func (e *Executor) RenameClaudeSessionForTask(task *db.Task, newName string) {
 	}
 }
 
+// windowMissTracker debounces transient tmux window-check failures.
+//
+// A single failed `tmux list-panes` must NOT be treated as "window gone". That
+// command also fails when the tmux server is briefly busy or the 3s timeout trips
+// under load, and because every concurrent poller shares one tmux server they trip
+// together — producing a false, simultaneous mass-block of healthy tasks with
+// "Task needs review". The tracker requires `threshold` consecutive misses (reset
+// on any successful check) before concluding the window is actually gone.
+type windowMissTracker struct {
+	consecutive int
+	threshold   int
+}
+
+// record feeds a single window-check result and reports whether the window
+// should now be considered genuinely gone. Any successful check resets the
+// run of consecutive misses, so only `threshold` failures in a row trip it.
+func (w *windowMissTracker) record(windowExists bool) (gone bool) {
+	if windowExists {
+		w.consecutive = 0
+		return false
+	}
+	w.consecutive++
+	return w.consecutive >= w.threshold
+}
+
 // pollTmuxSession waits for the tmux session to end or task status to change.
 // Status is managed entirely by Claude hooks - we just wait and check the result.
 // Task only goes to "done" if user/MCP explicitly marks it done.
@@ -3308,6 +3300,9 @@ func (e *Executor) RenameClaudeSessionForTask(task *db.Task, newName string) {
 func (e *Executor) pollTmuxSession(ctx context.Context, taskID int64, sessionName string) execResult {
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
+
+	const missingThreshold = 3
+	misses := windowMissTracker{threshold: missingThreshold}
 
 	for {
 		select {
@@ -3351,20 +3346,29 @@ func (e *Executor) pollTmuxSession(ctx context.Context, taskID int64, sessionNam
 				checkCancel()
 			}
 
-			if !windowExists {
-				// Window closed - check final status from hooks
-				task, _ := e.db.GetTask(taskID)
-				if task != nil {
-					if task.Status == db.StatusDone {
-						return execResult{Success: true}
-					}
-					if task.Status == db.StatusBacklog {
-						return execResult{Interrupted: true}
-					}
+			// Feed the check result to the tracker. A healthy check resets the
+			// run of misses; a miss only "counts" once we've seen enough in a row.
+			if !misses.record(windowExists) {
+				if !windowExists {
+					e.logger.Debug("pollTmuxSession: window check failed, retrying",
+						"taskID", taskID, "miss", misses.consecutive, "threshold", missingThreshold)
 				}
-				// Default: blocked (user must mark done or retry)
-				return execResult{NeedsInput: true, Message: "Task needs review"}
+				continue
 			}
+
+			// Window genuinely gone for missingThreshold consecutive checks —
+			// check final status from hooks.
+			finalTask, _ := e.db.GetTask(taskID)
+			if finalTask != nil {
+				if finalTask.Status == db.StatusDone {
+					return execResult{Success: true}
+				}
+				if finalTask.Status == db.StatusBacklog {
+					return execResult{Interrupted: true}
+				}
+			}
+			// Default: blocked (user must mark done or retry)
+			return execResult{NeedsInput: true, Message: "Task needs review"}
 		}
 	}
 }
@@ -5094,25 +5098,11 @@ func (e *Executor) runPi(ctx context.Context, task *db.Task, workDir, prompt str
 	promptFile.Close()
 	defer os.Remove(promptFile.Name())
 
-	// Create a temp file for system instructions (passed via --append-system-prompt)
-	systemFile, err := os.CreateTemp("", "task-system-*.txt")
-	if err != nil {
-		e.logger.Error("could not create system file", "error", err)
-		e.logLine(task.ID, "error", fmt.Sprintf("Failed to create system file: %s", err.Error()))
-		return execResult{Message: fmt.Sprintf("failed to create system file: %s", err.Error())}
-	}
-	systemFile.WriteString(e.buildSystemInstructions())
-	systemFile.Close()
-	defer os.Remove(systemFile.Name())
-
 	// Script that runs pi interactively with worktree environment variables
 	sessionID := os.Getenv("WORKTREE_SESSION_ID")
 	if sessionID == "" {
 		sessionID = fmt.Sprintf("%d", os.Getpid())
 	}
-
-	// Build system prompt flag
-	systemPromptFlag := fmt.Sprintf(`--append-system-prompt %q `, systemFile.Name())
 
 	// Determine explicit session path
 	sessionPath := e.getPiSessionPath(workDir, task.ID)
@@ -5133,12 +5123,12 @@ func (e *Executor) runPi(ctx context.Context, task *db.Task, workDir, prompt str
 	var script string
 	if piSessionExists(sessionPath) {
 		e.logLine(task.ID, "system", fmt.Sprintf("Resuming existing session %s", filepath.Base(sessionPath)))
-		script = fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q pi --session %q %s--continue "$(cat %q)"`,
-			task.ID, sessionID, task.Port, task.WorktreePath, sessionPath, systemPromptFlag, promptFile.Name())
+		script = fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q pi --session %q --continue "$(cat %q)"`,
+			task.ID, sessionID, task.Port, task.WorktreePath, sessionPath, promptFile.Name())
 	} else {
 		// Start fresh using the explicit session path
-		script = fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q pi --session %q %s"$(cat %q)"`,
-			task.ID, sessionID, task.Port, task.WorktreePath, sessionPath, systemPromptFlag, promptFile.Name())
+		script = fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q pi --session %q "$(cat %q)"`,
+			task.ID, sessionID, task.Port, task.WorktreePath, sessionPath, promptFile.Name())
 	}
 
 	// Create new window in task-daemon session (with retry logic for race conditions)
@@ -5240,28 +5230,14 @@ func (e *Executor) runPiResume(ctx context.Context, task *db.Task, workDir, prom
 	feedbackFile.Close()
 	defer os.Remove(feedbackFile.Name())
 
-	// Create a temp file for system instructions
-	systemFile, err := os.CreateTemp("", "task-system-*.txt")
-	if err != nil {
-		e.logger.Error("could not create system file", "error", err)
-		e.logLine(task.ID, "error", fmt.Sprintf("Failed to create system file: %s", err.Error()))
-		return execResult{Message: fmt.Sprintf("failed to create system file: %s", err.Error())}
-	}
-	systemFile.WriteString(e.buildSystemInstructions())
-	systemFile.Close()
-	defer os.Remove(systemFile.Name())
-
 	// Script that resumes pi with session ID (interactive mode)
 	taskSessionID := os.Getenv("WORKTREE_SESSION_ID")
 	if taskSessionID == "" {
 		taskSessionID = fmt.Sprintf("%d", os.Getpid())
 	}
 
-	// Build system prompt flag
-	systemPromptFlag := fmt.Sprintf(`--append-system-prompt %q `, systemFile.Name())
-
-	script := fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q pi --session %q %s--continue "$(cat %q)"`,
-		task.ID, taskSessionID, task.Port, task.WorktreePath, sessionPath, systemPromptFlag, feedbackFile.Name())
+	script := fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q pi --session %q --continue "$(cat %q)"`,
+		task.ID, taskSessionID, task.Port, task.WorktreePath, sessionPath, feedbackFile.Name())
 
 	// Create new window in task-daemon session (with retry logic for race conditions)
 	actualSession, tmuxErr := createTmuxWindow(daemonSession, windowName, workDir, script, e.getProjectDir(task.Project))
