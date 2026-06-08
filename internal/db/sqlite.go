@@ -502,6 +502,40 @@ func (db *DB) migrateProjectAliases() error {
 	return nil
 }
 
+// defaultCodeTaskTypeInstructions is the default instructions template for the built-in
+// "code" task type. It carries only code-task workflow steering (explore, implement, test,
+// commit, open a PR) — deliberately NOT operational guidance like the worktree-safety
+// constraint or taskyou_get_project_context usage. That guidance is intrinsic to how
+// taskyou runs a task (every task type, conditional on worktrees) and is injected by the
+// executor for all task types (see Executor.buildUniversalGuidance), so it must not be
+// baked into a single task type's editable template.
+const defaultCodeTaskTypeInstructions = `You are working on: {{project}}
+
+{{project_instructions}}
+
+Task: {{title}}
+
+{{body}}
+
+{{attachments}}
+
+{{history}}
+
+Instructions:
+- Explore the codebase to understand the context
+- Implement the solution
+- Write tests if applicable
+- Commit your changes with clear messages
+- Submit a pull request when your work is complete
+
+IMPORTANT: Your objective is to submit a PR to complete this task. Always remember to create and submit a pull request as the final step of your work. This is how you signal that the implementation is ready for review and merging.
+
+When finished, provide a summary of what you did:
+- List files changed/created
+- Describe the key changes made
+- Include any relevant links (PRs, commits, etc.)
+- Note any follow-up items or concerns`
+
 // ensureDefaultTaskTypes creates the default task types if they don't exist.
 func (db *DB) ensureDefaultTaskTypes() error {
 	// Check if task types already exist
@@ -523,36 +557,10 @@ func (db *DB) ensureDefaultTaskTypes() error {
 		SortOrder    int
 	}{
 		{
-			Name:  "code",
-			Label: "Code",
-			Instructions: `You are working on: {{project}}
-
-{{project_instructions}}
-
-Task: {{title}}
-
-{{body}}
-
-{{attachments}}
-
-{{history}}
-
-Instructions:
-- Explore the codebase to understand the context
-- Always use relative paths (e.g., "." or "./src") when searching or navigating - never use absolute paths
-- Implement the solution
-- Write tests if applicable
-- Commit your changes with clear messages
-- Submit a pull request when your work is complete
-
-IMPORTANT: Your objective is to submit a PR to complete this task. Always remember to create and submit a pull request as the final step of your work. This is how you signal that the implementation is ready for review and merging.
-
-When finished, provide a summary of what you did:
-- List files changed/created
-- Describe the key changes made
-- Include any relevant links (PRs, commits, etc.)
-- Note any follow-up items or concerns`,
-			SortOrder: 1,
+			Name:         "code",
+			Label:        "Code",
+			Instructions: defaultCodeTaskTypeInstructions,
+			SortOrder:    1,
 		},
 		{
 			Name:  "writing",
