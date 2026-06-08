@@ -100,6 +100,13 @@ type DetailModel struct {
 	paneLoadingStart time.Time // when loading started (for spinner animation)
 	paneError        string    // user-visible error when panes fail to open
 
+	// waitingForExecutor is true when we're passively waiting for the daemon's
+	// executor to create the tmux window (e.g. a freshly created+queued task with
+	// no worktree yet). In this mode we still show the loading spinner, but unlike
+	// active async setup (startPanesAsync/restartForExecutorSwitch) we want
+	// ensureTmuxPanesJoined to keep polling and join the panes as soon as they exist.
+	waitingForExecutor bool
+
 	// Focus executor pane after joining (e.g., when jumping from kanban)
 	focusExecutorOnJoin bool
 
@@ -524,6 +531,7 @@ func NewDetailModel(t *db.Task, database *db.DB, exec *executor.Executor, width,
 	if t.Status == db.StatusQueued && t.WorktreePath == "" {
 		log.Info("NewDetailModel: task is queued without worktree, waiting for executor")
 		m.paneLoading = true
+		m.waitingForExecutor = true
 		m.paneLoadingStart = time.Now()
 		// Don't start panes, just show loading spinner and let ensureTmuxPanesJoined
 		// pick up the panes once executor creates them
@@ -651,6 +659,7 @@ func (m *DetailModel) Update(msg tea.Msg) (*DetailModel, tea.Cmd) {
 		// Async pane setup completed
 		log := GetLogger()
 		m.paneLoading = false
+		m.waitingForExecutor = false
 		if msg.err != nil {
 			log.Error("panesJoinedMsg: error=%v", msg.err)
 			m.paneError = msg.userMessage
@@ -974,6 +983,20 @@ func (m *DetailModel) refreshTmuxWindowTarget() bool {
 	return m.cachedWindowTarget != ""
 }
 
+// paneJoinBlockedByLoad reports whether ensureTmuxPanesJoined should stay out of
+// the way because another code path is actively setting up the panes.
+//
+// paneLoading is set both during active async setup (startPanesAsync /
+// restartForExecutorSwitch, which start a session in a goroutine and report back
+// via panesJoinedMsg) and while passively waiting for the daemon's executor to
+// create the window (a freshly created+queued task with no worktree yet). In the
+// passive case (waitingForExecutor) we must keep polling so the executor pane
+// shows up automatically — otherwise it only appears after leaving and re-entering
+// the detail view.
+func (m *DetailModel) paneJoinBlockedByLoad() bool {
+	return m.paneLoading && !m.waitingForExecutor
+}
+
 // ensureTmuxPanesJoined checks if tmux panes should be joined and joins them if needed.
 // This handles cases where panes were externally closed or a session was created after opening the view.
 func (m *DetailModel) ensureTmuxPanesJoined() {
@@ -981,8 +1004,12 @@ func (m *DetailModel) ensureTmuxPanesJoined() {
 		return
 	}
 
-	// Don't interfere while an executor switch or async pane setup is in progress
-	if m.paneLoading {
+	// Don't interfere while an executor switch or active async pane setup is in
+	// progress (startPanesAsync/restartForExecutorSwitch start the session in a
+	// goroutine and report back via panesJoinedMsg). When we're merely waiting for
+	// the daemon's executor to create the window, keep polling so we can join the
+	// panes as soon as they appear.
+	if m.paneJoinBlockedByLoad() {
 		return
 	}
 
@@ -1018,6 +1045,7 @@ func (m *DetailModel) ensureTmuxPanesJoined() {
 		// If join succeeded, clear the loading state
 		if m.claudePaneID != "" {
 			m.paneLoading = false
+			m.waitingForExecutor = false
 			m.paneError = ""
 		}
 	}

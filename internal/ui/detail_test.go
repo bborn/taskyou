@@ -101,6 +101,51 @@ func TestNewDetailModel_ArchivedTaskSkipsAutoExecutor(t *testing.T) {
 	}
 }
 
+// TestPaneJoinBlockedByLoad verifies that ensureTmuxPanesJoined keeps polling for
+// panes while we're passively waiting for the daemon's executor to create the
+// window, but stays out of the way during active async pane setup.
+//
+// Regression: a freshly created + queued task (no worktree yet) entered the detail
+// view with paneLoading=true and relied on ensureTmuxPanesJoined to join the panes
+// once the executor created them — but the loading guard short-circuited, so the
+// executor pane never appeared until the user left and re-entered the view.
+func TestPaneJoinBlockedByLoad(t *testing.T) {
+	tests := []struct {
+		name               string
+		paneLoading        bool
+		waitingForExecutor bool
+		wantBlocked        bool
+	}{
+		{
+			name:        "idle: not blocked",
+			wantBlocked: false,
+		},
+		{
+			name:        "active async setup blocks polling",
+			paneLoading: true,
+			wantBlocked: true,
+		},
+		{
+			name:               "passively waiting for executor keeps polling",
+			paneLoading:        true,
+			waitingForExecutor: true,
+			wantBlocked:        false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := &DetailModel{
+				paneLoading:        tt.paneLoading,
+				waitingForExecutor: tt.waitingForExecutor,
+			}
+			if got := m.paneJoinBlockedByLoad(); got != tt.wantBlocked {
+				t.Errorf("paneJoinBlockedByLoad() = %v, want %v", got, tt.wantBlocked)
+			}
+		})
+	}
+}
+
 // TestPercentageCalculationRounding verifies that percentage calculations
 // use proper rounding to avoid the progressive shrinking bug.
 // Without rounding, integer division truncates: (16 * 100) / 81 = 19 instead of 20
