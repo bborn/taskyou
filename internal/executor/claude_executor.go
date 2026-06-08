@@ -13,7 +13,11 @@ import (
 )
 
 // shellSingleQuote wraps s in single quotes for safe interpolation into a shell
-// command, escaping any embedded single quotes via the standard '\'' idiom.
+// command, escaping any embedded single quote via the standard close-escape-reopen
+// idiom:
+//
+//	'\''
+//
 // Unlike fmt's %q (which produces Go-string quoting and leaves $, backticks,
 // and the like live for the shell), this neutralizes shell metacharacters and
 // is safe against command injection.
