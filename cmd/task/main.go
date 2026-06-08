@@ -1838,13 +1838,18 @@ Examples:
 This allows you to interact with a blocked or running task without going through
 the retry mechanism. The input is sent directly to the executor's tmux pane.
 
+By default the message is submitted (Enter is pressed after the text), so the
+agent actually receives it. Pass --no-submit to only drop the text in the input
+field without submitting it.
+
 If no message is provided, reads from stdin (useful for piping).
 Use --enter to just send Enter (for confirming TUI prompts).
 Use --key to send special keys like "Up", "Down", "Tab", "Escape".
 
 Examples:
-  task input 42 "yes"
+  task input 42 "yes"                # Type "yes" and submit
   task input 42 "Try a different approach"
+  task input 42 "draft text" --no-submit   # Fill the field, don't submit
   task input 42 --enter              # Just press Enter
   task input 42 --key Down --enter   # Press Down then Enter
   echo "continue" | task input 42`,
@@ -1858,6 +1863,7 @@ Examples:
 
 			justEnter, _ := cmd.Flags().GetBool("enter")
 			specialKey, _ := cmd.Flags().GetString("key")
+			noSubmit, _ := cmd.Flags().GetBool("no-submit")
 
 			var message string
 			if len(args) > 1 {
@@ -1915,14 +1921,26 @@ Examples:
 				}
 			}
 
-			// Send message if provided, or just Enter if --enter flag
+			// Send the message text (literally, so a message that looks like a tmux
+			// key name such as "Enter" or "Up" isn't interpreted as a keypress).
 			if message != "" {
-				sendCmd := osexec.Command("tmux", "send-keys", "-t", paneID, message, "Enter")
+				sendCmd := osexec.Command("tmux", "send-keys", "-t", paneID, "-l", message)
 				if err := sendCmd.Run(); err != nil {
 					fmt.Fprintln(os.Stderr, errorStyle.Render(fmt.Sprintf("Error sending input to pane %s (task may have finished): %v", paneID, err)))
 					os.Exit(1)
 				}
-			} else if justEnter {
+			}
+
+			// Submit by pressing Enter unless --no-submit was passed. Enter is sent
+			// as a SEPARATE keypress after the text: agentic TUIs (Claude Code, etc.)
+			// use bracketed-paste / input debouncing, so an Enter bundled into the
+			// same send-keys call as the text gets absorbed as a newline instead of
+			// submitting. The brief pause lets the TUI register the text first.
+			submit := shouldSubmitInput(message, justEnter, noSubmit)
+			if submit {
+				if message != "" {
+					time.Sleep(100 * time.Millisecond)
+				}
 				sendCmd := osexec.Command("tmux", "send-keys", "-t", paneID, "Enter")
 				if err := sendCmd.Run(); err != nil {
 					fmt.Fprintln(os.Stderr, errorStyle.Render(fmt.Sprintf("Error sending Enter to pane %s (task may have finished): %v", paneID, err)))
@@ -1930,11 +1948,16 @@ Examples:
 				}
 			}
 
-			fmt.Println(successStyle.Render(fmt.Sprintf("Sent input to task #%d", taskID)))
+			if message != "" && !submit {
+				fmt.Println(successStyle.Render(fmt.Sprintf("Sent input to task #%d (not submitted)", taskID)))
+			} else {
+				fmt.Println(successStyle.Render(fmt.Sprintf("Sent input to task #%d", taskID)))
+			}
 		},
 	}
 	inputCmd.Flags().Bool("enter", false, "Just send Enter key (for confirming prompts)")
 	inputCmd.Flags().String("key", "", "Send a special key (e.g., Up, Down, Tab, Escape)")
+	inputCmd.Flags().Bool("no-submit", false, "Type the text but don't press Enter (leave it in the input field)")
 	rootCmd.AddCommand(inputCmd)
 
 	// Pi Wrapper subcommand - internal use for RPC mode
@@ -4226,6 +4249,17 @@ func formatToolLogMessage(input *ClaudeHookInput) string {
 
 	// Default: just the tool name
 	return toolName
+}
+
+// shouldSubmitInput decides whether `task input` should press Enter after the
+// text. By default a message is submitted so the agent actually receives it;
+// --no-submit leaves the text in the input field without submitting. The
+// --enter flag (justEnter) always submits, since pressing Enter is its purpose.
+func shouldSubmitInput(message string, justEnter, noSubmit bool) bool {
+	if justEnter {
+		return true
+	}
+	return message != "" && !noSubmit
 }
 
 // formatPermissionDetail extracts a short detail string from the tool input
