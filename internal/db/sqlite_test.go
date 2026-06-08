@@ -323,10 +323,12 @@ func TestProjectUseWorktrees(t *testing.T) {
 	}
 }
 
-// TestDefaultCodeTaskTypeGuidance verifies the built-in "code" task type carries the
-// task-execution guidance that the executor previously injected via --append-system-prompt
-// (notably the GitHub CLI / shared-GraphQL-bucket etiquette), so default-config users get
-// the same steering through the task type instead of a hardcoded executor block.
+// TestDefaultCodeTaskTypeGuidance verifies the built-in "code" task type carries only
+// code-task workflow steering and deliberately does NOT carry operational guidance that is
+// intrinsic to how taskyou runs a task (worktree-safety, taskyou_get_project_context) or
+// deployment-specific etiquette (GitHub/gh shared-GraphQL-bucket). That guidance is injected
+// by the executor for every task type — see Executor.buildUniversalGuidance — and must not
+// be baked into this editable, single-task-type template.
 func TestDefaultCodeTaskTypeGuidance(t *testing.T) {
 	tmpDir := t.TempDir()
 	dbPath := filepath.Join(tmpDir, "test.db")
@@ -346,69 +348,28 @@ func TestDefaultCodeTaskTypeGuidance(t *testing.T) {
 		t.Fatal("default code task type was not created")
 	}
 
-	// The code task type owns the code-specific guidance (GitHub CLI / shared-GraphQL
-	// etiquette). The universal worktree-safety and project-context guidance is injected
-	// by the executor for every task type, not folded into this template — see
-	// Executor.buildUniversalGuidance / TestBuildPromptUniversalGuidance.
 	wants := []string{
-		"GitHub CLI",
-		"per-user",
-		"gh pr checks",
-		"gh run watch",
-		"REST",
+		"Explore the codebase",
+		"Submit a pull request",
+		"{{title}}",
 	}
 	for _, want := range wants {
 		if !strings.Contains(codeType.Instructions, want) {
 			t.Errorf("code task type instructions missing %q", want)
 		}
 	}
-}
 
-// TestMigrateCodeTaskTypeGuidance verifies the content-guarded migration upgrades a row
-// still holding the old default, while leaving a customized row untouched.
-func TestMigrateCodeTaskTypeGuidance(t *testing.T) {
-	tmpDir := t.TempDir()
-
-	// Case 1: a row holding the exact old default is upgraded.
-	dbPath1 := filepath.Join(tmpDir, "old.db")
-	db1, err := Open(dbPath1)
-	if err != nil {
-		t.Fatalf("failed to open database: %v", err)
+	// Operational / deployment-specific guidance must not leak into the task-type template.
+	doesNotWant := []string{
+		"GitHub CLI",
+		"GraphQL",
+		"gh run watch",
+		"taskyou_get_project_context",
+		"isolated git worktree",
 	}
-	defer db1.Close()
-	if _, err := db1.Exec(`UPDATE task_types SET instructions = ? WHERE name = 'code'`, oldCodeTaskTypeInstructions); err != nil {
-		t.Fatalf("failed to set old instructions: %v", err)
-	}
-	if err := db1.migrateCodeTaskTypeGuidance(); err != nil {
-		t.Fatalf("migration failed: %v", err)
-	}
-	got, err := db1.GetTaskTypeByName("code")
-	if err != nil {
-		t.Fatalf("failed to get code task type: %v", err)
-	}
-	if got.Instructions != defaultCodeTaskTypeInstructions {
-		t.Error("expected old-default row to be upgraded to new default instructions")
-	}
-
-	// Case 2: a customized row is left untouched (idempotent / non-clobbering).
-	dbPath2 := filepath.Join(tmpDir, "custom.db")
-	db2, err := Open(dbPath2)
-	if err != nil {
-		t.Fatalf("failed to open database: %v", err)
-	}
-	defer db2.Close()
-	const custom = "my custom code instructions"
-	if _, err := db2.Exec(`UPDATE task_types SET instructions = ? WHERE name = 'code'`, custom); err != nil {
-		t.Fatalf("failed to set custom instructions: %v", err)
-	}
-	if err := db2.migrateCodeTaskTypeGuidance(); err != nil {
-		t.Fatalf("migration failed: %v", err)
-	}
-	got2, err := db2.GetTaskTypeByName("code")
-	if err != nil {
-		t.Fatalf("failed to get code task type: %v", err)
-	}
-	if got2.Instructions != custom {
-		t.Errorf("customized row was clobbered: got %q", got2.Instructions)
+	for _, unwanted := range doesNotWant {
+		if strings.Contains(codeType.Instructions, unwanted) {
+			t.Errorf("code task type instructions should not contain %q (it is executor-injected, not template-owned)", unwanted)
+		}
 	}
 }

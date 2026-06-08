@@ -315,12 +315,6 @@ func (db *DB) migrate() error {
 		return fmt.Errorf("ensure default task types: %w", err)
 	}
 
-	// Fold the former executor-injected TASK GUIDANCE into the built-in "code"
-	// task type for existing installs (content-guarded; never clobbers customizations).
-	if err := db.migrateCodeTaskTypeGuidance(); err != nil {
-		return fmt.Errorf("migrate code task type guidance: %w", err)
-	}
-
 	// Assign default colors to projects without colors
 	if err := db.ensureProjectColors(); err != nil {
 		return fmt.Errorf("ensure project colors: %w", err)
@@ -508,11 +502,14 @@ func (db *DB) migrateProjectAliases() error {
 	return nil
 }
 
-// oldCodeTaskTypeInstructions is the previous default instructions string for the
-// built-in "code" task type, before the executor's hardcoded TASK GUIDANCE block
-// was folded into this task type. Kept byte-exact so the content-guarded migration
-// in migrateCodeTaskTypeGuidance can match (and skip) user-customized rows.
-const oldCodeTaskTypeInstructions = `You are working on: {{project}}
+// defaultCodeTaskTypeInstructions is the default instructions template for the built-in
+// "code" task type. It carries only code-task workflow steering (explore, implement, test,
+// commit, open a PR) — deliberately NOT operational guidance like the worktree-safety
+// constraint or taskyou_get_project_context usage. That guidance is intrinsic to how
+// taskyou runs a task (every task type, conditional on worktrees) and is injected by the
+// executor for all task types (see Executor.buildUniversalGuidance), so it must not be
+// baked into a single task type's editable template.
+const defaultCodeTaskTypeInstructions = `You are working on: {{project}}
 
 {{project_instructions}}
 
@@ -526,7 +523,6 @@ Task: {{title}}
 
 Instructions:
 - Explore the codebase to understand the context
-- Always use relative paths (e.g., "." or "./src") when searching or navigating - never use absolute paths
 - Implement the solution
 - Write tests if applicable
 - Commit your changes with clear messages
@@ -539,63 +535,6 @@ When finished, provide a summary of what you did:
 - Describe the key changes made
 - Include any relevant links (PRs, commits, etc.)
 - Note any follow-up items or concerns`
-
-// defaultCodeTaskTypeInstructions is the current default instructions string for the
-// built-in "code" task type. It absorbs the code-specific task-execution guidance that
-// the executor previously injected via --append-system-prompt (GitHub CLI etiquette, the
-// PR-submission objective), so that default-config users get the same guidance while
-// custom task types (and edits to this one) stay in full user control via the task-type
-// UI. Note: the *universal* guidance — worktree-safety constraint and project-context
-// caching — is NOT folded in here; it is injected for every task type by the executor
-// (see Executor.buildUniversalGuidance), conditional on whether the project uses
-// worktrees, which a static template cannot express.
-const defaultCodeTaskTypeInstructions = `You are working on: {{project}}
-
-{{project_instructions}}
-
-Task: {{title}}
-
-{{body}}
-
-{{attachments}}
-
-{{history}}
-
-GitHub CLI (gh) - conserve the shared GraphQL bucket:
-- GitHub's GraphQL rate limit (5,000 points/hr) is per-user and shared by every agent authenticated as the same account.
-- Prefer REST for PR reads (separate 5,000/hr bucket): use "gh api repos/{owner}/{repo}/pulls/{n}" rather than "gh pr view --json ...".
-- Never busy-poll CI with "gh pr checks" in a loop. Use "gh run watch <run-id>" (blocks server-side) or poll REST check-runs with backoff.
-
-Instructions:
-- Implement the solution
-- Write tests if applicable
-- For visual/frontend work, use the taskyou_screenshot MCP tool to verify correctness and document changes
-- Commit your changes with clear messages
-- Submit a pull request when your work is complete
-
-IMPORTANT: Your objective is to submit a PR to complete this task. Always remember to create and submit a pull request as the final step of your work. This is how you signal that the implementation is ready for review and merging.
-
-When finished, provide a summary of what you did:
-- List files changed/created
-- Describe the key changes made
-- Include any relevant links (PRs, commits, etc.)
-- Note any follow-up items or concerns`
-
-// migrateCodeTaskTypeGuidance updates the built-in "code" task type's instructions to
-// defaultCodeTaskTypeInstructions, but ONLY when the existing row still holds the exact
-// previous default (oldCodeTaskTypeInstructions). This folds the former executor-injected
-// TASK GUIDANCE into the task type for existing installs without clobbering rows a user
-// has customized. It is idempotent: on the new schema the WHERE clause matches nothing.
-func (db *DB) migrateCodeTaskTypeGuidance() error {
-	_, err := db.Exec(
-		`UPDATE task_types SET instructions = ? WHERE name = 'code' AND instructions = ?`,
-		defaultCodeTaskTypeInstructions, oldCodeTaskTypeInstructions,
-	)
-	if err != nil {
-		return fmt.Errorf("migrate code task type guidance: %w", err)
-	}
-	return nil
-}
 
 // ensureDefaultTaskTypes creates the default task types if they don't exist.
 func (db *DB) ensureDefaultTaskTypes() error {
