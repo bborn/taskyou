@@ -6,6 +6,9 @@
 # captures. VHS runs the TUI in its own correctly-sized headless terminal, so
 # the screenshot matches what real users see. ty renders in-pane (runLocal)
 # whenever $TMUX is set, so we set a dummy TMUX and don't need a real tmux here.
+# Isolation note: TMUX="vhs" points at a non-existent socket, so any tmux call ty
+# makes (join-pane, bind-key -T root, …) errors out harmlessly — it can NEVER
+# reach the live default tmux server.
 #
 # Usage:
 #   ty-qa-shoot.sh <cwd> <out.png> [<vhs-line> ...]

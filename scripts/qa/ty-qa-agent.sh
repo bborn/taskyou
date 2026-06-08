@@ -24,24 +24,24 @@ git -C "$PROJECT_PATH" worktree remove --force "$WT" 2>/dev/null || true
 git -C "$PROJECT_PATH" worktree add -q "$WT" -b "qa-$TASK_ID" 2>/dev/null \
   || git -C "$PROJECT_PATH" worktree add -q "$WT"
 
-tmux has-session -t "$TY_DAEMON_SESSION" 2>/dev/null \
-  || tmux new-session -d -s "$TY_DAEMON_SESSION" -n _placeholder "tail -f /dev/null"
-tmux kill-window -t "$WIN" 2>/dev/null || true
+qtmux has-session -t "$TY_DAEMON_SESSION" 2>/dev/null \
+  || qtmux new-session -d -s "$TY_DAEMON_SESSION" -n _placeholder "tail -f /dev/null"
+qtmux kill-window -t "$WIN" 2>/dev/null || true
 
 runner="$TY_QA_ROOT/agent-$TASK_ID.sh"
 printf '#!/usr/bin/env bash\ncd %q\nexec %s\n' "$WT" "$AGENT_CMD" > "$runner"
 chmod +x "$runner"
 
-tmux new-window -d -t "$TY_DAEMON_SESSION" -n "task-$TASK_ID" -c "$WT" "bash $runner"
+qtmux new-window -d -t "$TY_DAEMON_SESSION" -n "task-$TASK_ID" -c "$WT" "bash $runner"
 sleep 6
-tmux send-keys -t "$WIN.0" Enter   # accept Claude folder-trust prompt if shown
+qtmux send-keys -t "$WIN.0" Enter   # accept Claude folder-trust prompt if shown
 sleep 6
-tmux split-window -h -t "$WIN.0" -c "$WT" "${SHELL:-/bin/zsh}"
+qtmux split-window -h -t "$WIN.0" -c "$WT" "${SHELL:-/bin/zsh}"
 sleep 1
 
-CLAUDE_PANE=$(tmux display-message -t "$WIN.0" -p '#{pane_id}')
-SHELL_PANE=$(tmux display-message -t "$WIN.1" -p '#{pane_id}')
-WIN_ID=$(tmux display-message -t "$WIN" -p '#{window_id}')
+CLAUDE_PANE=$(qtmux display-message -t "$WIN.0" -p '#{pane_id}')
+SHELL_PANE=$(qtmux display-message -t "$WIN.1" -p '#{pane_id}')
+WIN_ID=$(qtmux display-message -t "$WIN" -p '#{window_id}')
 
 sqlite3 "$WORKTREE_DB_PATH" "UPDATE tasks SET \
   status='processing', worktree_path='$WT', daemon_session='$TY_DAEMON_SESSION', \

@@ -19,10 +19,22 @@ Everything is namespaced off two env vars (set automatically by `lib.sh`):
 | | live instance | this harness |
 |---|---|---|
 | DB (`WORKTREE_DB_PATH`) | `~/.local/share/task/tasks.db` | `/tmp/ty-qa/tasks.db` |
-| tmux (`WORKTREE_SESSION_ID`) | pid-based | `task-{ui,daemon}-qa` |
+| tmux **server** | default socket | dedicated socket `tmux -L taskyou-qa-qa` |
+| tmux sessions (`WORKTREE_SESSION_ID`) | pid-based | `task-{ui,daemon}-qa` |
 | projects (`projects_dir`) | `~/Projects` | `/tmp/ty-qa/projects` |
 
 Override location/id with `TY_QA_ROOT` and `TY_QA_SID`.
+
+> **Isolation is critical — the harness runs on its own tmux server.** ty issues
+> raw `tmux` commands (join-pane, break-pane, and the **server-global**
+> `bind-key -T root`). If the harness shared the default tmux server with your
+> live ty daemon, a QA run could clobber the live instance's panes and root
+> key-bindings. So the harness uses a dedicated socket (`qtmux()` in `lib.sh` =
+> `tmux -L "$TY_QA_TMUX_SOCKET"`), and launches ty via `qtmux` so ty inherits
+> `$TMUX` and routes *its own* tmux calls to the same isolated server. Always use
+> `qtmux`, never bare `tmux`, in the harness. (`ty-qa-shoot.sh` is also safe: it
+> sets `TMUX=vhs`, a non-existent socket, so ty's tmux calls error out harmlessly
+> instead of reaching any real server.)
 
 ## Quickstart
 
@@ -36,7 +48,8 @@ scripts/qa/ty-qa-capture.sh            # or eyeball the rendered screen
 scripts/qa/ty-qa-down.sh               # stop (add --purge to delete the DB)
 ```
 
-To watch live while scripting: `tmux attach -t task-ui-qa`.
+To watch live while scripting: `tmux -L taskyou-qa-qa attach -t task-ui-qa`
+(the harness runs on its own tmux socket — bare `tmux attach` won't find it).
 
 ## Asserting state
 

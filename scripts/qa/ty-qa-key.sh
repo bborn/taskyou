@@ -15,5 +15,5 @@ if [[ $# -eq 0 ]]; then
   exit 1
 fi
 
-tmux send-keys -t "$TY_UI_PANE" "$@"
+qtmux send-keys -t "$TY_UI_PANE" "$@"
 sleep "${TY_QA_KEY_DELAY:-0.4}"

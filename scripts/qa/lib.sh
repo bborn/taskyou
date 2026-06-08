@@ -21,6 +21,16 @@ TY_UI_SESSION="task-ui-$TY_QA_SID"
 TY_DAEMON_SESSION="task-daemon-$TY_QA_SID"
 TY_UI_PANE="$TY_UI_SESSION:tui"
 
+# CRITICAL ISOLATION: the harness runs on its OWN tmux server (a dedicated
+# socket), never the default server the live ty instance/daemon use. ty launched
+# via qtmux inherits $TMUX pointing at this socket, so even ty's own bare `tmux`
+# calls — join-pane, break-pane, and especially the server-global `bind-key -T
+# root` — land on THIS server only. Using the default server here would let QA
+# clobber the live instance's panes and root key-bindings. Always use `qtmux`
+# (never bare `tmux`) in the harness, and launch ty via `qtmux`.
+export TY_QA_TMUX_SOCKET="${TY_QA_TMUX_SOCKET:-taskyou-qa-$TY_QA_SID}"
+qtmux() { tmux -L "$TY_QA_TMUX_SOCKET" "$@"; }
+
 # Run the isolated binary with the instance env.
 ty() { "$TY_BIN" "$@"; }
 
