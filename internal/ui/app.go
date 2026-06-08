@@ -29,16 +29,6 @@ import (
 	"github.com/bborn/workflow/internal/tasksummary"
 )
 
-// DashboardViewMode selects how the dashboard renders the task list.
-type DashboardViewMode int
-
-const (
-	// ViewModeBoard is the kanban board (default).
-	ViewModeBoard DashboardViewMode = iota
-	// ViewModeList is the sortable, filterable table.
-	ViewModeList
-)
-
 // View represents the current view.
 type View int
 
@@ -114,13 +104,11 @@ type KeyMap struct {
 	SpotlightSync key.Binding
 	// Quick input focus
 	QuickInput key.Binding
-	// Toggle between board and list views
-	ToggleView key.Binding
 }
 
 // ShortHelp returns key bindings to show in the mini help.
 func (k KeyMap) ShortHelp() []key.Binding {
-	return []key.Binding{k.Left, k.Right, k.Up, k.Down, k.Enter, k.New, k.Queue, k.Filter, k.ToggleView, k.CommandPalette, k.OpenBrowser, k.Help, k.Quit}
+	return []key.Binding{k.Left, k.Right, k.Up, k.Down, k.Enter, k.New, k.Queue, k.Filter, k.CommandPalette, k.OpenBrowser, k.Help, k.Quit}
 }
 
 // FullHelp returns keybindings for the expanded help view.
@@ -131,7 +119,7 @@ func (k KeyMap) FullHelp() [][]key.Binding {
 		{k.FocusBacklog, k.FocusInProgress, k.FocusBlocked, k.FocusDone, k.CollapseBacklog, k.CollapseDone},
 		{k.Enter, k.New, k.Queue, k.QueueDangerous, k.Close},
 		{k.Retry, k.Archive, k.Delete, k.OpenWorktree, k.OpenBrowser, k.Spotlight},
-		{k.Filter, k.ToggleView, k.CommandPalette, k.Settings},
+		{k.Filter, k.CommandPalette, k.Settings},
 		{k.ChangeStatus, k.TogglePin, k.Refresh, k.Help},
 		{k.Quit},
 	}
@@ -304,10 +292,6 @@ func DefaultKeyMap() KeyMap {
 			key.WithKeys("tab"),
 			key.WithHelp("tab", "input"),
 		),
-		ToggleView: key.NewBinding(
-			key.WithKeys("v"),
-			key.WithHelp("v", "board/list"),
-		),
 	}
 }
 
@@ -411,8 +395,6 @@ type AppModel struct {
 	// Dashboard state
 	tasks        []*db.Task
 	kanban       *KanbanBoard
-	listView     *ListView
-	viewMode     DashboardViewMode
 	loading      bool
 	err          error
 	notification string    // Notification banner text
@@ -587,7 +569,7 @@ func (m *AppModel) updateTaskInList(task *db.Task) {
 			break
 		}
 	}
-	m.setDashboardTasks(m.tasks)
+	m.kanban.SetTasks(m.tasks)
 }
 
 // NewAppModel creates a new application model.
@@ -611,7 +593,6 @@ func NewAppModel(database *db.DB, exec *executor.Executor, workingDir string, ve
 
 	// Start with zero size - will be set by WindowSizeMsg
 	kanban := NewKanbanBoard(0, 0)
-	listView := NewListView(0, 0)
 
 	// Setup help
 	h := help.New()
@@ -655,7 +636,6 @@ func NewAppModel(database *db.DB, exec *executor.Executor, workingDir string, ve
 		help:               h,
 		currentView:        ViewDashboard,
 		kanban:             kanban,
-		listView:           listView,
 		loading:            true,
 		prevStatuses:       make(map[int64]string),
 		tasksNeedingInput:  make(map[int64]bool),
@@ -689,138 +669,6 @@ func (m *AppModel) SetTasks(tasks []*db.Task) {
 	m.tasks = tasks
 	m.loading = false
 	m.kanban.SetTasks(tasks)
-	m.listView.SetTasks(tasks)
-}
-
-// setDashboardTasks updates both dashboard renderers (board + list) with the same
-// task set so switching views is instant and consistent.
-func (m *AppModel) setDashboardTasks(tasks []*db.Task) {
-	m.kanban.SetTasks(tasks)
-	if m.listView != nil {
-		m.listView.SetTasks(tasks)
-	}
-}
-
-// dashboardSelectedTask returns the selected task for whichever dashboard view is
-// currently active.
-func (m *AppModel) dashboardSelectedTask() *db.Task {
-	if m.viewMode == ViewModeList {
-		return m.listView.SelectedTask()
-	}
-	return m.kanban.SelectedTask()
-}
-
-// dashboardHasPrevTask reports whether the active view has a previous task.
-func (m *AppModel) dashboardHasPrevTask() bool {
-	if m.viewMode == ViewModeList {
-		return m.listView.HasPrevTask()
-	}
-	return m.kanban.HasPrevTask()
-}
-
-// dashboardHasNextTask reports whether the active view has a next task.
-func (m *AppModel) dashboardHasNextTask() bool {
-	if m.viewMode == ViewModeList {
-		return m.listView.HasNextTask()
-	}
-	return m.kanban.HasNextTask()
-}
-
-// dashboardMoveUp moves the selection up in the active view.
-func (m *AppModel) dashboardMoveUp() {
-	if m.viewMode == ViewModeList {
-		m.listView.MoveUp()
-		return
-	}
-	m.kanban.MoveUp()
-}
-
-// dashboardMoveDown moves the selection down in the active view.
-func (m *AppModel) dashboardMoveDown() {
-	if m.viewMode == ViewModeList {
-		m.listView.MoveDown()
-		return
-	}
-	m.kanban.MoveDown()
-}
-
-// toggleViewMode switches between the kanban board and the list view, carrying
-// the current selection across so the same task stays focused.
-func (m *AppModel) toggleViewMode() {
-	if m.viewMode == ViewModeBoard {
-		m.viewMode = ViewModeList
-		if t := m.kanban.SelectedTask(); t != nil {
-			m.listView.SelectTask(t.ID)
-		}
-	} else {
-		m.viewMode = ViewModeBoard
-		if t := m.listView.SelectedTask(); t != nil {
-			m.kanban.SelectTask(t.ID)
-		}
-	}
-}
-
-// updateListNav handles navigation, sorting, and filtering keys that are specific
-// to the list view. It returns handled=true when the key was consumed.
-func (m *AppModel) updateListNav(msg tea.KeyMsg) (bool, tea.Cmd) {
-	switch {
-	case key.Matches(msg, m.keys.Up):
-		m.listView.MoveUp()
-		return true, nil
-	case key.Matches(msg, m.keys.Down):
-		m.listView.MoveDown()
-		return true, nil
-	case key.Matches(msg, m.keys.Left):
-		m.listView.PrevSortColumn()
-		return true, nil
-	case key.Matches(msg, m.keys.Right):
-		m.listView.NextSortColumn()
-		return true, nil
-	// shift+↑/↓ jump to the pinned/unpinned boundary, matching the kanban board.
-	case key.Matches(msg, m.keys.JumpToPinned):
-		m.listView.JumpToPinned()
-		return true, nil
-	case key.Matches(msg, m.keys.JumpToUnpinned):
-		m.listView.JumpToUnpinned()
-		return true, nil
-	}
-
-	switch msg.String() {
-	case " ":
-		m.listView.ToggleSortDirection()
-		return true, nil
-	// [ ] cycle the project filter, matching the kanban "/[project]" convention
-	// where square brackets already mean "project".
-	case "[":
-		m.listView.CycleProjectFilter(-1)
-		return true, nil
-	case "]":
-		m.listView.CycleProjectFilter(1)
-		return true, nil
-	// { } cycle the status filter.
-	case "{":
-		m.listView.CycleStatusFilter(-1)
-		return true, nil
-	case "}":
-		m.listView.CycleStatusFilter(1)
-		return true, nil
-	case "<":
-		m.listView.CycleDateFilter(-1)
-		return true, nil
-	case ">":
-		m.listView.CycleDateFilter(1)
-		return true, nil
-	}
-
-	// Numeric shortcuts select and open the Nth visible row.
-	if s := msg.String(); len(s) == 1 && s >= "1" && s <= "9" {
-		if task := m.listView.SelectVisibleRow(int(s[0] - '0')); task != nil {
-			return true, m.loadTask(task.ID)
-		}
-		return true, nil
-	}
-
-	return false, nil
 }
 
 // SetDebugStatePath sets the path for dumping debug state.
@@ -1027,12 +875,8 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.MouseMsg:
 		// Handle mouse clicks on dashboard view
 		if m.currentView == ViewDashboard && msg.Action == tea.MouseActionRelease && msg.Button == tea.MouseButtonLeft {
-			// Check if clicking on a task card / row
-			if m.viewMode == ViewModeList {
-				if task := m.listView.HandleClick(msg.X, msg.Y); task != nil {
-					return m, m.loadTask(task.ID)
-				}
-			} else if task := m.kanban.HandleClick(msg.X, msg.Y); task != nil {
+			// Check if clicking on a task card
+			if task := m.kanban.HandleClick(msg.X, msg.Y); task != nil {
 				return m, m.loadTask(task.ID)
 			}
 		}
@@ -1168,16 +1012,12 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.kanban.SetRunningProcesses(running)
 		m.kanban.SetTasksNeedingInput(m.tasksNeedingInput)
 		m.kanban.SetBlockedByDeps(msg.blockedByDeps)
-		m.listView.SetRunningProcesses(running)
-		m.listView.SetTasksNeedingInput(m.tasksNeedingInput)
-		m.listView.SetBlockedByDeps(msg.blockedByDeps)
 
 		// Load cached PR info from database for instant display
 		for _, t := range m.tasks {
 			if t.PRInfoJSON != "" {
 				if info := github.UnmarshalPRInfo(t.PRInfoJSON); info != nil {
 					m.kanban.SetPRInfo(t.ID, info)
-					m.listView.SetPRInfo(t.ID, info)
 				}
 			}
 		}
@@ -1272,7 +1112,6 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Update PR info in kanban and detail view
 		if msg.info != nil {
 			m.kanban.SetPRInfo(msg.taskID, msg.info)
-			m.listView.SetPRInfo(msg.taskID, msg.info)
 			// Update detail view if showing this task
 			if m.detailView != nil && m.selectedTask != nil && m.selectedTask.ID == msg.taskID {
 				m.detailView.SetPRInfo(msg.info)
@@ -1287,7 +1126,6 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		for _, result := range msg.results {
 			if result.info != nil {
 				m.kanban.SetPRInfo(result.taskID, result.info)
-				m.listView.SetPRInfo(result.taskID, result.info)
 				// Update detail view if showing this task
 				if m.detailView != nil && m.selectedTask != nil && m.selectedTask.ID == result.taskID {
 					m.detailView.SetPRInfo(result.info)
@@ -1558,9 +1396,8 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					break
 				}
 			}
-			m.setDashboardTasks(m.tasks)
+			m.kanban.SetTasks(m.tasks)
 			m.kanban.SetTasksNeedingInput(m.tasksNeedingInput)
-			m.listView.SetTasksNeedingInput(m.tasksNeedingInput)
 
 			// Update detail view if showing this task
 			if m.selectedTask != nil && m.selectedTask.ID == event.TaskID {
@@ -1600,7 +1437,6 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				running[m.selectedTask.ID] = true
 			}
 			m.kanban.SetRunningProcesses(running)
-			m.listView.SetRunningProcesses(running)
 		}
 		cmds = append(cmds, m.tick())
 
@@ -1670,9 +1506,6 @@ func (m *AppModel) applyWindowSize(width, height int) {
 	m.height = height
 	m.help.Width = width
 	m.kanban.SetSize(width, height-4)
-	if m.listView != nil {
-		m.listView.SetSize(width, height-4)
-	}
 	if m.detailView != nil {
 		m.detailView.SetSize(width, height)
 	}
@@ -1865,7 +1698,7 @@ func (m *AppModel) viewDashboard() string {
 	// Render executor prompt preview if applicable
 	promptPreview := ""
 	promptPreviewHeight := 0
-	if task := m.dashboardSelectedTask(); task != nil && m.tasksNeedingInput[task.ID] {
+	if task := m.kanban.SelectedTask(); task != nil && m.tasksNeedingInput[task.ID] {
 		promptPreview = m.renderExecutorPromptPreview(task)
 		promptPreviewHeight = lipgloss.Height(promptPreview)
 	}
@@ -1887,9 +1720,8 @@ func (m *AppModel) viewDashboard() string {
 		kanbanHeight = 10
 	}
 
-	// Update view sizes
+	// Update kanban size
 	m.kanban.SetSize(m.width, kanbanHeight)
-	m.listView.SetSize(m.width, kanbanHeight)
 
 	var contentParts []string
 	if header != "" {
@@ -1899,22 +1731,16 @@ func (m *AppModel) viewDashboard() string {
 		contentParts = append(contentParts, filterBar)
 	}
 
-	// Show welcome/getting started message when the board is empty (only on the
-	// kanban view; the list view shows its own empty state with filters intact).
-	if m.viewMode == ViewModeBoard && m.showWelcome && m.kanban.IsEmpty() {
+	// Show welcome/getting started message when kanban is empty
+	if m.showWelcome && m.kanban.IsEmpty() {
 		welcomeView := m.renderWelcomeMessage(kanbanHeight)
 		contentParts = append(contentParts, welcomeView, helpView)
 	} else {
-		var boardView string
-		if m.viewMode == ViewModeList {
-			boardView = m.listView.View()
-		} else {
-			boardView = m.kanban.View()
-		}
+		kanbanView := m.kanban.View()
 		if promptPreview != "" {
-			contentParts = append(contentParts, boardView, promptPreview, helpView)
+			contentParts = append(contentParts, kanbanView, promptPreview, helpView)
 		} else {
-			contentParts = append(contentParts, boardView, helpView)
+			contentParts = append(contentParts, kanbanView, helpView)
 		}
 	}
 
@@ -2190,20 +2016,6 @@ func stripAnsiCodes(s string) string {
 }
 
 func (m *AppModel) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	// Toggling between board and list works in either mode.
-	if key.Matches(msg, m.keys.ToggleView) {
-		m.toggleViewMode()
-		return m, nil
-	}
-
-	// In list mode, intercept navigation/sort/filter keys before the board
-	// handlers below get a chance to act on the (hidden) kanban.
-	if m.viewMode == ViewModeList {
-		if handled, cmd := m.updateListNav(msg); handled {
-			return m, cmd
-		}
-	}
-
 	switch {
 	// Column navigation
 	case key.Matches(msg, m.keys.Left):
@@ -2309,7 +2121,7 @@ func (m *AppModel) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case key.Matches(msg, m.keys.Enter):
-		if task := m.dashboardSelectedTask(); task != nil {
+		if task := m.kanban.SelectedTask(); task != nil {
 			return m, m.loadTask(task.ID)
 		}
 
@@ -2320,7 +2132,7 @@ func (m *AppModel) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, m.newTaskForm.Init()
 
 	case key.Matches(msg, m.keys.Queue):
-		if task := m.dashboardSelectedTask(); task != nil {
+		if task := m.kanban.SelectedTask(); task != nil {
 			// Don't allow queueing if task is already processing
 			if task.Status == db.StatusProcessing {
 				return m, nil
@@ -2333,7 +2145,7 @@ func (m *AppModel) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 
 	case key.Matches(msg, m.keys.QueueDangerous):
-		if task := m.dashboardSelectedTask(); task != nil {
+		if task := m.kanban.SelectedTask(); task != nil {
 			// Don't allow queueing if task is already processing
 			if task.Status == db.StatusProcessing {
 				return m, nil
@@ -2346,13 +2158,13 @@ func (m *AppModel) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 
 	case key.Matches(msg, m.keys.TogglePin):
-		if task := m.dashboardSelectedTask(); task != nil {
+		if task := m.kanban.SelectedTask(); task != nil {
 			return m, m.toggleTaskPinned(task.ID)
 		}
 		return m, nil
 
 	case key.Matches(msg, m.keys.Retry):
-		if task := m.dashboardSelectedTask(); task != nil {
+		if task := m.kanban.SelectedTask(); task != nil {
 			// Allow retry for blocked, done, or backlog tasks
 			if task.Status == db.StatusBlocked || task.Status == db.StatusDone ||
 				task.Status == db.StatusBacklog {
@@ -2365,12 +2177,12 @@ func (m *AppModel) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 
 	case key.Matches(msg, m.keys.Close):
-		if task := m.dashboardSelectedTask(); task != nil {
+		if task := m.kanban.SelectedTask(); task != nil {
 			return m.showCloseConfirm(task)
 		}
 
 	case key.Matches(msg, m.keys.Archive):
-		if task := m.dashboardSelectedTask(); task != nil {
+		if task := m.kanban.SelectedTask(); task != nil {
 			if task.Status == db.StatusArchived {
 				// Unarchive the task
 				return m, m.unarchiveTask(task.ID)
@@ -2379,33 +2191,33 @@ func (m *AppModel) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 
 	case key.Matches(msg, m.keys.Delete):
-		if task := m.dashboardSelectedTask(); task != nil {
+		if task := m.kanban.SelectedTask(); task != nil {
 			return m.showDeleteConfirm(task)
 		}
 
 	case key.Matches(msg, m.keys.OpenWorktree):
-		if task := m.dashboardSelectedTask(); task != nil {
+		if task := m.kanban.SelectedTask(); task != nil {
 			return m, m.openWorktreeInEditor(task)
 		}
 
 	case key.Matches(msg, m.keys.OpenBrowser):
-		if task := m.dashboardSelectedTask(); task != nil {
+		if task := m.kanban.SelectedTask(); task != nil {
 			return m, m.openBrowser(task)
 		}
 
 	case key.Matches(msg, m.keys.Spotlight):
-		if task := m.dashboardSelectedTask(); task != nil && task.WorktreePath != "" {
+		if task := m.kanban.SelectedTask(); task != nil && task.WorktreePath != "" {
 			return m, m.toggleSpotlight(task)
 		}
 
 	case key.Matches(msg, m.keys.SpotlightSync):
-		if task := m.dashboardSelectedTask(); task != nil && task.WorktreePath != "" {
+		if task := m.kanban.SelectedTask(); task != nil && task.WorktreePath != "" {
 			return m, m.syncSpotlight(task)
 		}
 
 	case key.Matches(msg, m.keys.QuickInput):
 		// Focus the quick input field if selected task needs input
-		if task := m.dashboardSelectedTask(); task != nil {
+		if task := m.kanban.SelectedTask(); task != nil {
 			if m.tasksNeedingInput[task.ID] || m.detectPermissionPrompt(task.ID) {
 				m.quickInputFocused = true
 				m.replyInput.SetValue("")
@@ -2425,7 +2237,7 @@ func (m *AppModel) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, m.loadTasks()
 
 	case key.Matches(msg, m.keys.ChangeStatus):
-		if task := m.dashboardSelectedTask(); task != nil {
+		if task := m.kanban.SelectedTask(); task != nil {
 			return m.showChangeStatus(task)
 		}
 
@@ -2434,14 +2246,14 @@ func (m *AppModel) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case key.Matches(msg, m.keys.ApprovePrompt):
-		if task := m.dashboardSelectedTask(); task != nil {
+		if task := m.kanban.SelectedTask(); task != nil {
 			if m.tasksNeedingInput[task.ID] || m.detectPermissionPrompt(task.ID) {
 				return m, m.approveExecutorPrompt(task.ID)
 			}
 		}
 
 	case key.Matches(msg, m.keys.DenyPrompt):
-		if task := m.dashboardSelectedTask(); task != nil {
+		if task := m.kanban.SelectedTask(); task != nil {
 			if m.tasksNeedingInput[task.ID] || m.detectPermissionPrompt(task.ID) {
 				return m, m.denyExecutorPrompt(task.ID)
 			}
@@ -2493,7 +2305,7 @@ func (m *AppModel) updateQuickInput(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.replyInput.Blur()
 			return m, nil
 		}
-		task := m.dashboardSelectedTask()
+		task := m.kanban.SelectedTask()
 		if task == nil {
 			m.quickInputFocused = false
 			m.replyInput.SetValue("")
@@ -2713,7 +2525,7 @@ func (m *AppModel) resolveProjectAliases(query string) string {
 func (m *AppModel) applyFilter() {
 	if m.filterText == "" {
 		// No filter, show all tasks
-		m.setDashboardTasks(m.tasks)
+		m.kanban.SetTasks(m.tasks)
 		return
 	}
 
@@ -2743,7 +2555,7 @@ func (m *AppModel) applyFilter() {
 	for i, st := range scored {
 		filtered[i] = st.task
 	}
-	m.setDashboardTasks(filtered)
+	m.kanban.SetTasks(filtered)
 }
 
 // parseFilterProjects extracts completed [project] tags, any trailing partial project,
@@ -3009,8 +2821,8 @@ func (m *AppModel) updateDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// Arrow key navigation to prev/next task in the same column
 	// j/k keys are passed through to the viewport for scrolling
 	if key.Matches(keyMsg, m.keys.Up) {
-		// Ignore if no previous task exists (in the active dashboard view)
-		if !m.dashboardHasPrevTask() {
+		// Ignore if no previous task exists
+		if !m.kanban.HasPrevTask() {
 			return m, nil
 		}
 		// Ignore if transition already in progress to prevent duplicate panes
@@ -3023,18 +2835,18 @@ func (m *AppModel) updateDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.detailView.CleanupWithoutSaving()
 			m.detailView = nil
 		}
-		// Move selection up in the active view
-		m.dashboardMoveUp()
+		// Move selection up in the kanban
+		m.kanban.MoveUp()
 		// Load the new task
-		if task := m.dashboardSelectedTask(); task != nil {
+		if task := m.kanban.SelectedTask(); task != nil {
 			return m, m.loadTask(task.ID)
 		}
 		m.taskTransitionInProgress = false
 		return m, nil
 	}
 	if key.Matches(keyMsg, m.keys.Down) {
-		// Ignore if no next task exists (in the active dashboard view)
-		if !m.dashboardHasNextTask() {
+		// Ignore if no next task exists
+		if !m.kanban.HasNextTask() {
 			return m, nil
 		}
 		// Ignore if transition already in progress to prevent duplicate panes
@@ -3047,10 +2859,10 @@ func (m *AppModel) updateDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.detailView.CleanupWithoutSaving()
 			m.detailView = nil
 		}
-		// Move selection down in the active view
-		m.dashboardMoveDown()
+		// Move selection down in the kanban
+		m.kanban.MoveDown()
 		// Load the new task
-		if task := m.dashboardSelectedTask(); task != nil {
+		if task := m.kanban.SelectedTask(); task != nil {
 			return m, m.loadTask(task.ID)
 		}
 		m.taskTransitionInProgress = false
