@@ -342,11 +342,12 @@ func (m *SettingsModel) showProjectForm(project *db.Project) (*SettingsModel, te
 		huh.NewSelect[string]().
 			Key("permission_mode").
 			Title("Default Permission Mode").
-			Description("How new tasks handle permissions. Auto handles ~99% without prompting.").
+			Description("How new tasks handle permissions.").
 			Options(
-				huh.NewOption("Auto — auto-accept edits (recommended)", db.PermissionModeAuto),
+				huh.NewOption("Auto — approve safe actions, block risky (recommended)", db.PermissionModeAuto),
+				huh.NewOption("Accept Edits — auto-accept edits, prompt for risky", db.PermissionModeAcceptEdits),
 				huh.NewOption("Prompt — ask for each permission", db.PermissionModeDefault),
-				huh.NewOption("Dangerous — skip all permission checks", db.PermissionModeDangerous),
+				huh.NewOption("Dangerous — skip all checks", db.PermissionModeDangerous),
 			).
 			Value(&m.projectFormPermissionMode),
 	)

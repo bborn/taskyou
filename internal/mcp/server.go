@@ -242,8 +242,8 @@ func (s *Server) handleRequest(req *jsonRPCRequest) {
 							},
 							"permission_mode": map[string]interface{}{
 								"type":        "string",
-								"description": "Permission mode for execution: 'default' (prompt), 'auto' (auto-accept edits), or 'dangerous' (skip all prompts). Defaults to the project's configured default.",
-								"enum":        []string{"default", "auto", "dangerous"},
+								"description": "Permission mode for execution (most to least gated): 'default' (prompt for each permission), 'accept-edits' (Claude's acceptEdits / --permission-mode acceptEdits: auto-accept file edits but still prompt for risky actions), 'auto' (Claude Code's auto mode / --permission-mode auto: an AI classifier auto-approves safe actions, including safe commands, while still blocking dangerous ones), or 'dangerous' (skip all prompts / --dangerously-skip-permissions). Note: 'auto' and 'accept-edits' are DIFFERENT — 'auto' is more autonomous. Defaults to the project's configured default.",
+								"enum":        []string{"default", "accept-edits", "auto", "dangerous"},
 							},
 							"remote_control": map[string]interface{}{
 								"type":        "boolean",

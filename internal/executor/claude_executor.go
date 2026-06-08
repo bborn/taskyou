@@ -43,6 +43,8 @@ func claudePermissionFlag(task *db.Task) string {
 	case db.PermissionModeDangerous:
 		return "--dangerously-skip-permissions "
 	case db.PermissionModeAuto:
+		return "--permission-mode auto "
+	case db.PermissionModeAcceptEdits:
 		return "--permission-mode acceptEdits "
 	default:
 		return ""
@@ -135,7 +137,7 @@ func (c *ClaudeExecutor) ResumeProcess(taskID int64) bool {
 
 // BuildCommand returns the shell command to start an interactive Claude session.
 func (c *ClaudeExecutor) BuildCommand(task *db.Task, sessionID, prompt string) string {
-	// Build permission mode flag (dangerous, auto/acceptEdits, or none)
+	// Build permission mode flag (dangerous, auto, accept-edits, or none)
 	dangerousFlag := claudePermissionFlag(task)
 
 	// Build per-task effort override flag (empty = use Claude's global default)
