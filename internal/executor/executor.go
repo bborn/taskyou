@@ -3176,6 +3176,31 @@ func (e *Executor) RenameClaudeSessionForTask(task *db.Task, newName string) {
 	}
 }
 
+// windowMissTracker debounces transient tmux window-check failures.
+//
+// A single failed `tmux list-panes` must NOT be treated as "window gone". That
+// command also fails when the tmux server is briefly busy or the 3s timeout trips
+// under load, and because every concurrent poller shares one tmux server they trip
+// together — producing a false, simultaneous mass-block of healthy tasks with
+// "Task needs review". The tracker requires `threshold` consecutive misses (reset
+// on any successful check) before concluding the window is actually gone.
+type windowMissTracker struct {
+	consecutive int
+	threshold   int
+}
+
+// record feeds a single window-check result and reports whether the window
+// should now be considered genuinely gone. Any successful check resets the
+// run of consecutive misses, so only `threshold` failures in a row trip it.
+func (w *windowMissTracker) record(windowExists bool) (gone bool) {
+	if windowExists {
+		w.consecutive = 0
+		return false
+	}
+	w.consecutive++
+	return w.consecutive >= w.threshold
+}
+
 // pollTmuxSession waits for the tmux session to end or task status to change.
 // Status is managed entirely by Claude hooks - we just wait and check the result.
 // Task only goes to "done" if user/MCP explicitly marks it done.
@@ -3185,14 +3210,8 @@ func (e *Executor) pollTmuxSession(ctx context.Context, taskID int64, sessionNam
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
 
-	// A single failed `tmux list-panes` must NOT be treated as "window gone". That
-	// command also fails when the tmux server is briefly busy or the 3s timeout trips
-	// under load, and because every concurrent poller shares one tmux server they trip
-	// together — producing a false, simultaneous mass-block of healthy tasks with
-	// "Task needs review". Require several consecutive misses (reset on any success)
-	// before concluding the window is actually gone.
-	missingChecks := 0
 	const missingThreshold = 3
+	misses := windowMissTracker{threshold: missingThreshold}
 
 	for {
 		select {
@@ -3236,18 +3255,13 @@ func (e *Executor) pollTmuxSession(ctx context.Context, taskID int64, sessionNam
 				checkCancel()
 			}
 
-			if windowExists {
-				// Healthy check — reset the transient-failure counter.
-				missingChecks = 0
-				continue
-			}
-
-			// Window appears gone. This may be a transient tmux failure, so only
-			// act after several consecutive misses.
-			missingChecks++
-			if missingChecks < missingThreshold {
-				e.logger.Debug("pollTmuxSession: window check failed, retrying",
-					"taskID", taskID, "miss", missingChecks, "threshold", missingThreshold)
+			// Feed the check result to the tracker. A healthy check resets the
+			// run of misses; a miss only "counts" once we've seen enough in a row.
+			if !misses.record(windowExists) {
+				if !windowExists {
+					e.logger.Debug("pollTmuxSession: window check failed, retrying",
+						"taskID", taskID, "miss", misses.consecutive, "threshold", missingThreshold)
+				}
 				continue
 			}
 
