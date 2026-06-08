@@ -539,10 +539,14 @@ When finished, provide a summary of what you did:
 - Note any follow-up items or concerns`
 
 // defaultCodeTaskTypeInstructions is the current default instructions string for the
-// built-in "code" task type. It absorbs the task-execution guidance that the executor
-// previously injected for every task via --append-system-prompt, so that default-config
-// users get the same guidance while custom task types (and edits to this one) stay in
-// full user control via the existing task-type UI.
+// built-in "code" task type. It absorbs the code-specific task-execution guidance that
+// the executor previously injected via --append-system-prompt (GitHub CLI etiquette, the
+// PR-submission objective), so that default-config users get the same guidance while
+// custom task types (and edits to this one) stay in full user control via the task-type
+// UI. Note: the *universal* guidance — worktree-safety constraint and project-context
+// caching — is NOT folded in here; it is injected for every task type by the executor
+// (see Executor.buildUniversalGuidance), conditional on whether the project uses
+// worktrees, which a static template cannot express.
 const defaultCodeTaskTypeInstructions = `You are working on: {{project}}
 
 {{project_instructions}}
@@ -554,13 +558,6 @@ Task: {{title}}
 {{attachments}}
 
 {{history}}
-
-Before exploring the codebase:
-- Call taskyou_get_project_context first via MCP. If it returns context, use it and skip exploration. If empty, explore once and save a summary via taskyou_set_project_context. This caches your exploration for future tasks in this project.
-
-Working directory constraint:
-- You are running in an isolated git worktree. This worktree IS your project - it is NOT a copy. Only use paths within your current working directory, and never read or write files outside it.
-- Always use relative paths (e.g., "." or "./src") when searching or navigating - never use absolute paths.
 
 GitHub CLI (gh) - conserve the shared GraphQL bucket:
 - GitHub's GraphQL rate limit (5,000 points/hr) is per-user and shared by every agent authenticated as the same account.

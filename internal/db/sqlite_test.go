@@ -346,13 +346,16 @@ func TestDefaultCodeTaskTypeGuidance(t *testing.T) {
 		t.Fatal("default code task type was not created")
 	}
 
+	// The code task type owns the code-specific guidance (GitHub CLI / shared-GraphQL
+	// etiquette). The universal worktree-safety and project-context guidance is injected
+	// by the executor for every task type, not folded into this template — see
+	// Executor.buildUniversalGuidance / TestBuildPromptUniversalGuidance.
 	wants := []string{
 		"GitHub CLI",
 		"per-user",
 		"gh pr checks",
 		"gh run watch",
 		"REST",
-		"taskyou_get_project_context",
 	}
 	for _, want := range wants {
 		if !strings.Contains(codeType.Instructions, want) {

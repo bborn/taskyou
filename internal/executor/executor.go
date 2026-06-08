@@ -1356,7 +1356,51 @@ func (e *Executor) buildPrompt(task *db.Task, attachmentPaths []string) string {
 		prompt.WriteString(e.buildGenericContextSection(projectInstructions, similarTasks, attachments, conversationHistory))
 	}
 
+	// Append universal guidance that applies to EVERY task type (including custom ones
+	// and the typeless/unknown fallback above): project-context caching, and — when the
+	// project uses worktrees — the worktree-safety constraint. This is injected here
+	// rather than baked into each task-type template because it depends on a runtime fact
+	// (does this project use worktrees?) a static template cannot express, and because the
+	// worktree guardrail must reach non-code tasks too (otherwise agents wander into the
+	// parent project directory).
+	if guidance := e.buildUniversalGuidance(task); guidance != "" {
+		prompt.WriteString("\n")
+		prompt.WriteString(guidance)
+		prompt.WriteString("\n")
+	}
+
 	return prompt.String()
+}
+
+// buildUniversalGuidance returns task-type-agnostic execution guidance appended to every
+// prompt. The project-context section is always included; the worktree-safety constraint
+// is included only when the task's project uses git worktrees (UseWorktrees defaults to on,
+// so the guardrail is shown unless a project has explicitly opted out).
+func (e *Executor) buildUniversalGuidance(task *db.Task) string {
+	var b strings.Builder
+
+	b.WriteString(`Project context:
+- Before exploring or starting work, call taskyou_get_project_context first via MCP. If it returns context, use it and skip exploration. If it is empty, explore once and save a summary via taskyou_set_project_context so future tasks in this project can reuse it.`)
+
+	if e.taskUsesWorktrees(task) {
+		b.WriteString(`
+
+Working directory constraint (isolated git worktree):
+- You are running in an isolated git worktree. This worktree IS your project - it is NOT a copy. NEVER access the original project directory or any path outside your current working directory.
+- ONLY use paths within your current working directory. Always use relative paths (e.g., "." or "./src") when searching or navigating - never absolute paths. The parent repo does not exist for you; only this worktree does.`)
+	}
+
+	return b.String()
+}
+
+// taskUsesWorktrees reports whether the task's project runs in git worktrees. It defaults
+// to true when the project cannot be loaded, matching the use_worktrees column default and
+// ensuring the worktree-safety guardrail is shown unless a project has explicitly opted out.
+func (e *Executor) taskUsesWorktrees(task *db.Task) bool {
+	if p, err := e.db.GetProjectByName(task.Project); err == nil && p != nil {
+		return p.UsesWorktrees()
+	}
+	return true
 }
 
 // applyTemplateSubstitutions replaces template placeholders in task type instructions.
