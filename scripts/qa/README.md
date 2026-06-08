@@ -92,6 +92,35 @@ scripts/qa/ty-qa-state.sh '.detail.has_panes'   # => true (panes joined)
 scripts/qa/ty-qa-down.sh --purge
 ```
 
+## Profiling render performance
+
+To find rendering bottlenecks, run the harness with profiling enabled. The TUI
+accepts `--cpuprofile` / `--memprofile`; `ty-qa-profile.sh` launches the isolated
+instance with both, drives a render-heavy stress sequence, quits gracefully so
+the profiles flush, and prints the hottest render call stacks.
+
+```bash
+scripts/qa/ty-qa-up.sh                                  # build + isolated instance
+"$TY_BIN" create "perf" -p qa                           # seed a few tasks
+scripts/qa/ty-qa-profile.sh                             # capture + summarize
+
+# Inspect interactively:
+go tool pprof "$TY_BIN" /tmp/ty-qa/cpu.prof             # then: top / list KanbanBoard.View / web
+go tool pprof "$TY_BIN" /tmp/ty-qa/mem.prof             # heap allocations
+```
+
+The board render is cached by a signature of its inputs (see `KanbanBoard.View`),
+so idle re-renders (ticks, mouse motion, unrelated events) are nearly free; the
+profile's render time comes from cache-miss frames (navigation, task changes).
+
+For reproducible micro-measurements (and CI regression guarding), the Go
+benchmarks are the fastest loop:
+
+```bash
+go test ./internal/ui/ -run '^$' -bench 'BenchmarkKanbanView' -benchmem
+# add -cpuprofile=/tmp/c.prof to capture render call stacks from a benchmark
+```
+
 ## Screenshots & PR evidence (VHS + R2)
 
 To attach real-TUI screenshots to a PR, render with **VHS** and publish to the

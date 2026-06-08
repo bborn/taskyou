@@ -11,6 +11,8 @@ import (
 	osexec "os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
+	"runtime/pprof"
 	"sort"
 	"strconv"
 	"strings"
@@ -114,9 +116,11 @@ func main() {
 			}
 
 			debugStatePath, _ := cmd.Flags().GetString("debug-state-file")
+			cpuProfilePath, _ := cmd.Flags().GetString("cpuprofile")
+			memProfilePath, _ := cmd.Flags().GetString("memprofile")
 
 			// Run locally
-			if err := runLocal(dangerous, debugStatePath); err != nil {
+			if err := runLocal(dangerous, debugStatePath, cpuProfilePath, memProfilePath); err != nil {
 				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
 				os.Exit(1)
 			}
@@ -128,6 +132,8 @@ func main() {
 
 	rootCmd.PersistentFlags().BoolVar(&dangerous, "dangerous", false, "Run Claude with --dangerously-skip-permissions (for sandboxed environments)")
 	rootCmd.PersistentFlags().String("debug-state-file", "", "Path to write debug state JSON on update")
+	rootCmd.PersistentFlags().String("cpuprofile", "", "Write a CPU profile here while the TUI runs (analyze with: go tool pprof)")
+	rootCmd.PersistentFlags().String("memprofile", "", "Write a heap profile here when the TUI exits")
 
 	// Version deprecation warning for CLI subcommands.
 	// Skip for root (TUI has its own check), upgrade, daemon, mcp-server, and claude-hook.
@@ -3584,8 +3590,63 @@ func execInTmux() error {
 	return cmd.Run()
 }
 
+// setupProfiling starts CPU and/or heap profiling when paths are provided and
+// returns a stop function that flushes the profiles. The returned func is
+// idempotent (only the first call has an effect), so it can be both called
+// explicitly after the TUI exits — important because the tmux teardown can
+// SIGKILL this process and skip deferred flushes — and deferred as a safety net
+// for early-return error paths. Profiling failures only warn; they never abort
+// the TUI.
+func setupProfiling(cpuPath, memPath string) func() {
+	var cpuFile *os.File
+	if cpuPath != "" {
+		f, err := os.Create(cpuPath)
+		switch {
+		case err != nil:
+			fmt.Fprintln(os.Stderr, dimStyle.Render("Warning: could not create cpu profile: "+err.Error()))
+		default:
+			if err := pprof.StartCPUProfile(f); err != nil {
+				fmt.Fprintln(os.Stderr, dimStyle.Render("Warning: could not start cpu profile: "+err.Error()))
+				_ = f.Close()
+			} else {
+				cpuFile = f
+				fmt.Fprintln(os.Stderr, dimStyle.Render("CPU profiling to: "+cpuPath))
+			}
+		}
+	}
+
+	stopped := false
+	return func() {
+		if stopped {
+			return
+		}
+		stopped = true
+
+		if cpuFile != nil {
+			pprof.StopCPUProfile()
+			_ = cpuFile.Close()
+		}
+		if memPath != "" {
+			f, err := os.Create(memPath)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, dimStyle.Render("Warning: could not create mem profile: "+err.Error()))
+				return
+			}
+			defer f.Close()
+			runtime.GC() // get up-to-date allocation statistics
+			_ = pprof.WriteHeapProfile(f)
+		}
+	}
+}
+
 // runLocal runs the TUI locally with a local SQLite database.
-func runLocal(dangerousMode bool, debugStatePath string) error {
+func runLocal(dangerousMode bool, debugStatePath, cpuProfilePath, memProfilePath string) error {
+	// Optional performance profiling. The CPU profile captures the whole
+	// interactive session (including every render); the heap profile is written
+	// on exit. Analyze with `go tool pprof <binary> <profile>`.
+	stopProfiling := setupProfiling(cpuProfilePath, memProfilePath)
+	defer stopProfiling() // safety net for early-return error paths below
+
 	// Ensure daemon is running
 	if err := ensureDaemonRunning(dangerousMode); err != nil {
 		fmt.Fprintln(os.Stderr, dimStyle.Render("Warning: could not start daemon: "+err.Error()))
@@ -3625,6 +3686,10 @@ func runLocal(dangerousMode bool, debugStatePath string) error {
 	if _, err := p.Run(); err != nil {
 		return fmt.Errorf("run TUI: %w", err)
 	}
+
+	// Flush profiles now, before the tmux cleanup below may kill our own session
+	// (which would SIGKILL this process and skip the deferred flush).
+	stopProfiling()
 
 	// Kill task-ui tmux session on exit (if we're in it)
 	// This cleans up the session that was created by execInTmux()
