@@ -21,7 +21,8 @@ const (
 	TaskDeleted       = "task.deleted"
 	TaskStarted       = "task.started"
 	TaskWorktreeReady = "task.worktree_ready"
-	TaskBlocked       = "task.blocked" // Task needs input from user
+	TaskBlocked       = "task.blocked"       // Task needs input from user
+	TaskAuthRequired  = "task.auth_required" // Executor session needs re-authentication
 	TaskCompleted     = "task.completed"
 	TaskFailed        = "task.failed"
 )
@@ -150,6 +151,10 @@ func (e *Emitter) EmitTaskWorktreeReady(task *db.Task) {
 
 func (e *Emitter) EmitTaskBlocked(task *db.Task, reason string) {
 	e.Emit(Event{Type: TaskBlocked, TaskID: task.ID, Task: task, Message: reason})
+}
+
+func (e *Emitter) EmitTaskAuthRequired(task *db.Task, reason string) {
+	e.Emit(Event{Type: TaskAuthRequired, TaskID: task.ID, Task: task, Message: reason})
 }
 
 func (e *Emitter) EmitTaskCompleted(task *db.Task) {

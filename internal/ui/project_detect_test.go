@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/bborn/workflow/internal/ai"
 	"github.com/bborn/workflow/internal/db"
 )
 
@@ -130,6 +131,34 @@ func TestDetectProjectFromDir(t *testing.T) {
 	}
 }
 
+func TestDetectProjectFromDir_NonGitMarker(t *testing.T) {
+	// A dir with only go.mod (no .git) should be detected as a project
+	// with UseWorktrees==false.
+	markerDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(markerDir, "go.mod"), []byte("module example\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	p, _ := detectProjectFromDir(markerDir)
+	if p == nil {
+		t.Fatal("expected non-nil project for dir with go.mod, got nil")
+	}
+	if p.UseWorktrees {
+		t.Errorf("expected UseWorktrees false for non-git project, got true")
+	}
+	if p.Name == "" {
+		t.Errorf("expected non-empty Name")
+	}
+	if p.Path == "" {
+		t.Errorf("expected non-empty Path")
+	}
+
+	// An empty dir (no markers, no git) must return nil.
+	emptyDir := t.TempDir()
+	if p2, _ := detectProjectFromDir(emptyDir); p2 != nil {
+		t.Errorf("expected nil for empty dir, got %+v", p2)
+	}
+}
+
 func TestUniqueProjectName(t *testing.T) {
 	tmpDir := t.TempDir()
 	database, err := db.Open(filepath.Join(tmpDir, "test.db"))
@@ -160,5 +189,68 @@ func TestProjectSuggestionDismissedKey(t *testing.T) {
 	k2 := projectSuggestionDismissedKey("/tmp/foo")
 	if k1 != k2 {
 		t.Fatalf("expected cleaned paths to produce equal keys: %q vs %q", k1, k2)
+	}
+}
+
+func TestApplyInferredMetadata(t *testing.T) {
+	base := &db.Project{Name: "acme-rocket", Path: "/x"}
+
+	applyInferredMetadata(base, ai.ProjectMetadata{Name: "Acme Rocket", Alias: "acme", Description: "Rust CLI"})
+	if base.Name != "Acme Rocket" {
+		t.Errorf("name not applied: %q", base.Name)
+	}
+	if base.Aliases != "acme" {
+		t.Errorf("alias not applied: %q", base.Aliases)
+	}
+	if base.Instructions != "Rust CLI" {
+		t.Errorf("description should fill empty instructions: %q", base.Instructions)
+	}
+
+	// Empty inferred fields must NOT overwrite existing values.
+	applyInferredMetadata(base, ai.ProjectMetadata{})
+	if base.Name != "Acme Rocket" {
+		t.Errorf("empty inference erased name: %q", base.Name)
+	}
+
+	// Description must NOT overwrite non-empty existing instructions.
+	withInstr := &db.Project{Name: "x", Instructions: "imported from README.md"}
+	applyInferredMetadata(withInstr, ai.ProjectMetadata{Description: "should be ignored"})
+	if withInstr.Instructions != "imported from README.md" {
+		t.Errorf("description overwrote imported instructions: %q", withInstr.Instructions)
+	}
+}
+
+func TestIsProjectCandidate(t *testing.T) {
+	home, _ := os.UserHomeDir()
+
+	// Junk dir: home itself and standard bare children → never a candidate.
+	for _, junk := range []string{home, filepath.Join(home, "Desktop"), filepath.Join(home, "Downloads"), "/", "/tmp"} {
+		if isProjectCandidate(junk) {
+			t.Errorf("isProjectCandidate(%q) = true, want false", junk)
+		}
+	}
+
+	// A git repo is a candidate.
+	gitDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(gitDir, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if !isProjectCandidate(gitDir) {
+		t.Errorf("git repo %q should be a candidate", gitDir)
+	}
+
+	// A non-git dir with a project marker is a candidate.
+	markerDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(markerDir, "go.mod"), []byte("module x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if !isProjectCandidate(markerDir) {
+		t.Errorf("dir with go.mod %q should be a candidate", markerDir)
+	}
+
+	// An empty, signal-less dir is NOT a candidate.
+	emptyDir := t.TempDir()
+	if isProjectCandidate(emptyDir) {
+		t.Errorf("empty dir %q should not be a candidate", emptyDir)
 	}
 }

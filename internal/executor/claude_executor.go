@@ -5,11 +5,25 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strings"
 
 	"github.com/charmbracelet/log"
 
 	"github.com/bborn/workflow/internal/db"
 )
+
+// shellSingleQuote wraps s in single quotes for safe interpolation into a shell
+// command, escaping any embedded single quote via the standard close-escape-reopen
+// idiom:
+//
+//	'\''
+//
+// Unlike fmt's %q (which produces Go-string quoting and leaves $, backticks,
+// and the like live for the shell), this neutralizes shell metacharacters and
+// is safe against command injection.
+func shellSingleQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
 
 // ClaudeExecutor implements TaskExecutor for Claude Code CLI.
 // This wraps the existing Claude execution logic in executor.go.
@@ -44,6 +58,23 @@ func effortFlag(level string) string {
 		return ""
 	}
 	return fmt.Sprintf("--effort %s ", level)
+}
+
+// rcFlag returns the `--remote-control <name> ` CLI flag (with a trailing
+// space) for a task that has Remote Control enabled, or an empty string
+// otherwise. The session name is the task title, falling back to `task-<id>`
+// when the title is empty. The name is shell-single-quoted because the returned
+// flag is concatenated into a script run via `sh -c`, and the title is
+// arbitrary user/MCP/daemon-supplied text.
+func rcFlag(task *db.Task) string {
+	if !task.RemoteControl {
+		return ""
+	}
+	rcName := task.Title
+	if rcName == "" {
+		rcName = fmt.Sprintf("task-%d", task.ID)
+	}
+	return fmt.Sprintf("--remote-control %s ", shellSingleQuote(rcName))
 }
 
 // NewClaudeExecutor creates a new Claude executor.
@@ -116,24 +147,10 @@ func (c *ClaudeExecutor) BuildCommand(task *db.Task, sessionID, prompt string) s
 		worktreeSessionID = fmt.Sprintf("%d", os.Getpid())
 	}
 
-	// Build system prompt flag - passes task guidance via system prompt to keep conversation clean
-	systemPromptFlag := ""
-	systemFile, err := os.CreateTemp("", "task-system-*.txt")
-	if err == nil {
-		systemFile.WriteString(c.executor.buildSystemInstructions())
-		systemFile.Close()
-		// Note: temp file cleanup happens via rm -f at end of command
-		systemPromptFlag = fmt.Sprintf(`--append-system-prompt "$(cat %q)" `, systemFile.Name())
-	}
-
 	// Build command - resume if we have a session ID, otherwise start fresh
 	if sessionID != "" {
-		cmd := fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q claude %s%s%s--resume %s`,
-			task.ID, worktreeSessionID, task.Port, task.WorktreePath, dangerousFlag, effort, systemPromptFlag, sessionID)
-		if systemFile != nil {
-			cmd += fmt.Sprintf(`; rm -f %q`, systemFile.Name())
-		}
-		return cmd
+		return fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q claude %s%s--resume %s`,
+			task.ID, worktreeSessionID, task.Port, task.WorktreePath, dangerousFlag, effort, sessionID)
 	}
 
 	// Start fresh - if prompt is provided, write to temp file and pass it
@@ -142,30 +159,18 @@ func (c *ClaudeExecutor) BuildCommand(task *db.Task, sessionID, prompt string) s
 		promptFile, err := os.CreateTemp("", "task-prompt-*.txt")
 		if err != nil {
 			c.logger.Error("BuildCommand: failed to create temp file", "error", err)
-			cmd := fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q claude %s%s%s`,
-				task.ID, worktreeSessionID, task.Port, task.WorktreePath, dangerousFlag, effort, systemPromptFlag)
-			if systemFile != nil {
-				cmd += fmt.Sprintf(`; rm -f %q`, systemFile.Name())
-			}
-			return cmd
+			return fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q claude %s%s`,
+				task.ID, worktreeSessionID, task.Port, task.WorktreePath, dangerousFlag, effort)
 		}
 		promptFile.WriteString(prompt)
 		promptFile.Close()
 
-		cmd := fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q claude %s%s%s"$(cat %q)"; rm -f %q`,
-			task.ID, worktreeSessionID, task.Port, task.WorktreePath, dangerousFlag, effort, systemPromptFlag, promptFile.Name(), promptFile.Name())
-		if systemFile != nil {
-			cmd += fmt.Sprintf(` %q`, systemFile.Name())
-		}
-		return cmd
+		return fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q claude %s%s"$(cat %q)"; rm -f %q`,
+			task.ID, worktreeSessionID, task.Port, task.WorktreePath, dangerousFlag, effort, promptFile.Name(), promptFile.Name())
 	}
 
-	cmd := fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q claude %s%s%s`,
-		task.ID, worktreeSessionID, task.Port, task.WorktreePath, dangerousFlag, effort, systemPromptFlag)
-	if systemFile != nil {
-		cmd += fmt.Sprintf(`; rm -f %q`, systemFile.Name())
-	}
-	return cmd
+	return fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q claude %s%s`,
+		task.ID, worktreeSessionID, task.Port, task.WorktreePath, dangerousFlag, effort)
 }
 
 // ---- Session and Dangerous Mode Support ----

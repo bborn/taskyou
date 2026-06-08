@@ -29,6 +29,16 @@ import (
 	"github.com/bborn/workflow/internal/tasksummary"
 )
 
+// DashboardViewMode selects how the dashboard renders the task list.
+type DashboardViewMode int
+
+const (
+	// ViewModeBoard is the kanban board (default).
+	ViewModeBoard DashboardViewMode = iota
+	// ViewModeList is the sortable, filterable table.
+	ViewModeList
+)
+
 // View represents the current view.
 type View int
 
@@ -49,6 +59,8 @@ const (
 	ViewChangeStatus
 	ViewCommandPalette
 	ViewProjectDetectConfirm // Offer to create a project for the current git repo
+	ViewWelcome              // first-run fork: set up a project vs start a task
+	ViewFolderPicker         // fuzzy folder picker for "set up a project"
 )
 
 // KeyMap defines key bindings.
@@ -102,11 +114,13 @@ type KeyMap struct {
 	SpotlightSync key.Binding
 	// Quick input focus
 	QuickInput key.Binding
+	// Toggle between board and list views
+	ToggleView key.Binding
 }
 
 // ShortHelp returns key bindings to show in the mini help.
 func (k KeyMap) ShortHelp() []key.Binding {
-	return []key.Binding{k.Left, k.Right, k.Up, k.Down, k.Enter, k.New, k.Queue, k.Filter, k.CommandPalette, k.OpenBrowser, k.Help, k.Quit}
+	return []key.Binding{k.Left, k.Right, k.Up, k.Down, k.Enter, k.New, k.Queue, k.Filter, k.ToggleView, k.CommandPalette, k.OpenBrowser, k.Help, k.Quit}
 }
 
 // FullHelp returns keybindings for the expanded help view.
@@ -117,7 +131,7 @@ func (k KeyMap) FullHelp() [][]key.Binding {
 		{k.FocusBacklog, k.FocusInProgress, k.FocusBlocked, k.FocusDone, k.CollapseBacklog, k.CollapseDone},
 		{k.Enter, k.New, k.Queue, k.QueueDangerous, k.Close},
 		{k.Retry, k.Archive, k.Delete, k.OpenWorktree, k.OpenBrowser, k.Spotlight},
-		{k.Filter, k.CommandPalette, k.Settings},
+		{k.Filter, k.ToggleView, k.CommandPalette, k.Settings},
 		{k.ChangeStatus, k.TogglePin, k.Refresh, k.Help},
 		{k.Quit},
 	}
@@ -290,6 +304,10 @@ func DefaultKeyMap() KeyMap {
 			key.WithKeys("tab"),
 			key.WithHelp("tab", "input"),
 		),
+		ToggleView: key.NewBinding(
+			key.WithKeys("v"),
+			key.WithHelp("v", "board/list"),
+		),
 	}
 }
 
@@ -393,6 +411,8 @@ type AppModel struct {
 	// Dashboard state
 	tasks        []*db.Task
 	kanban       *KanbanBoard
+	listView     *ListView
+	viewMode     DashboardViewMode
 	loading      bool
 	err          error
 	notification string    // Notification banner text
@@ -456,7 +476,12 @@ type AppModel struct {
 	projectDetectConfirmValue bool
 	detectedProject           *db.Project // Inferred project pending user confirmation
 	detectedInstructionSource string      // File the inferred instructions came from
+	detectedInferencePending  bool        // Async claude -p inference is still in flight for detectedProject
 	projectDetectionOffered   bool        // Guard so we only offer once per session
+
+	// First-run onboarding views
+	welcomeView  *WelcomeModel
+	folderPicker *FolderPickerModel
 
 	// Delete confirmation state
 	deleteConfirm      *huh.Form
@@ -522,9 +547,8 @@ type AppModel struct {
 	debugStatePath string
 
 	// First-time experience
-	isFirstLoad     bool // Track if this is the first load of tasks
-	showWelcome     bool // Show welcome message when kanban is empty
-	onboardingShown bool // Track if we've already shown the onboarding (to prevent double-triggering)
+	isFirstLoad bool // Track if this is the first load of tasks
+	showWelcome bool // Show welcome message when kanban is empty
 
 	// Version upgrade notification
 	currentVersion string                // Current binary version (e.g. "v0.1.0" or "dev")
@@ -563,7 +587,7 @@ func (m *AppModel) updateTaskInList(task *db.Task) {
 			break
 		}
 	}
-	m.kanban.SetTasks(m.tasks)
+	m.setDashboardTasks(m.tasks)
 }
 
 // NewAppModel creates a new application model.
@@ -587,6 +611,7 @@ func NewAppModel(database *db.DB, exec *executor.Executor, workingDir string, ve
 
 	// Start with zero size - will be set by WindowSizeMsg
 	kanban := NewKanbanBoard(0, 0)
+	listView := NewListView(0, 0)
 
 	// Setup help
 	h := help.New()
@@ -630,6 +655,7 @@ func NewAppModel(database *db.DB, exec *executor.Executor, workingDir string, ve
 		help:               h,
 		currentView:        ViewDashboard,
 		kanban:             kanban,
+		listView:           listView,
 		loading:            true,
 		prevStatuses:       make(map[int64]string),
 		tasksNeedingInput:  make(map[int64]bool),
@@ -663,6 +689,138 @@ func (m *AppModel) SetTasks(tasks []*db.Task) {
 	m.tasks = tasks
 	m.loading = false
 	m.kanban.SetTasks(tasks)
+	m.listView.SetTasks(tasks)
+}
+
+// setDashboardTasks updates both dashboard renderers (board + list) with the same
+// task set so switching views is instant and consistent.
+func (m *AppModel) setDashboardTasks(tasks []*db.Task) {
+	m.kanban.SetTasks(tasks)
+	if m.listView != nil {
+		m.listView.SetTasks(tasks)
+	}
+}
+
+// dashboardSelectedTask returns the selected task for whichever dashboard view is
+// currently active.
+func (m *AppModel) dashboardSelectedTask() *db.Task {
+	if m.viewMode == ViewModeList {
+		return m.listView.SelectedTask()
+	}
+	return m.kanban.SelectedTask()
+}
+
+// dashboardHasPrevTask reports whether the active view has a previous task.
+func (m *AppModel) dashboardHasPrevTask() bool {
+	if m.viewMode == ViewModeList {
+		return m.listView.HasPrevTask()
+	}
+	return m.kanban.HasPrevTask()
+}
+
+// dashboardHasNextTask reports whether the active view has a next task.
+func (m *AppModel) dashboardHasNextTask() bool {
+	if m.viewMode == ViewModeList {
+		return m.listView.HasNextTask()
+	}
+	return m.kanban.HasNextTask()
+}
+
+// dashboardMoveUp moves the selection up in the active view.
+func (m *AppModel) dashboardMoveUp() {
+	if m.viewMode == ViewModeList {
+		m.listView.MoveUp()
+		return
+	}
+	m.kanban.MoveUp()
+}
+
+// dashboardMoveDown moves the selection down in the active view.
+func (m *AppModel) dashboardMoveDown() {
+	if m.viewMode == ViewModeList {
+		m.listView.MoveDown()
+		return
+	}
+	m.kanban.MoveDown()
+}
+
+// toggleViewMode switches between the kanban board and the list view, carrying
+// the current selection across so the same task stays focused.
+func (m *AppModel) toggleViewMode() {
+	if m.viewMode == ViewModeBoard {
+		m.viewMode = ViewModeList
+		if t := m.kanban.SelectedTask(); t != nil {
+			m.listView.SelectTask(t.ID)
+		}
+	} else {
+		m.viewMode = ViewModeBoard
+		if t := m.listView.SelectedTask(); t != nil {
+			m.kanban.SelectTask(t.ID)
+		}
+	}
+}
+
+// updateListNav handles navigation, sorting, and filtering keys that are specific
+// to the list view. It returns handled=true when the key was consumed.
+func (m *AppModel) updateListNav(msg tea.KeyMsg) (bool, tea.Cmd) {
+	switch {
+	case key.Matches(msg, m.keys.Up):
+		m.listView.MoveUp()
+		return true, nil
+	case key.Matches(msg, m.keys.Down):
+		m.listView.MoveDown()
+		return true, nil
+	case key.Matches(msg, m.keys.Left):
+		m.listView.PrevSortColumn()
+		return true, nil
+	case key.Matches(msg, m.keys.Right):
+		m.listView.NextSortColumn()
+		return true, nil
+	// shift+↑/↓ jump to the pinned/unpinned boundary, matching the kanban board.
+	case key.Matches(msg, m.keys.JumpToPinned):
+		m.listView.JumpToPinned()
+		return true, nil
+	case key.Matches(msg, m.keys.JumpToUnpinned):
+		m.listView.JumpToUnpinned()
+		return true, nil
+	}
+
+	switch msg.String() {
+	case " ":
+		m.listView.ToggleSortDirection()
+		return true, nil
+	// [ ] cycle the project filter, matching the kanban "/[project]" convention
+	// where square brackets already mean "project".
+	case "[":
+		m.listView.CycleProjectFilter(-1)
+		return true, nil
+	case "]":
+		m.listView.CycleProjectFilter(1)
+		return true, nil
+	// { } cycle the status filter.
+	case "{":
+		m.listView.CycleStatusFilter(-1)
+		return true, nil
+	case "}":
+		m.listView.CycleStatusFilter(1)
+		return true, nil
+	case "<":
+		m.listView.CycleDateFilter(-1)
+		return true, nil
+	case ">":
+		m.listView.CycleDateFilter(1)
+		return true, nil
+	}
+
+	// Numeric shortcuts select and open the Nth visible row.
+	if s := msg.String(); len(s) == 1 && s >= "1" && s <= "9" {
+		if task := m.listView.SelectVisibleRow(int(s[0] - '0')); task != nil {
+			return true, m.loadTask(task.ID)
+		}
+		return true, nil
+	}
+
+	return false, nil
 }
 
 // SetDebugStatePath sets the path for dumping debug state.
@@ -737,7 +895,29 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.updateProjectChangeConfirm(msg)
 		}
 		if m.currentView == ViewProjectDetectConfirm && m.projectDetectConfirm != nil {
-			return m.updateProjectDetectConfirm(msg)
+			// Async inference results must reach the main switch (case
+			// projectInferredMsg) to enrich the card in place; all other
+			// messages (keys) drive the confirm form.
+			if _, ok := msg.(projectInferredMsg); !ok {
+				return m.updateProjectDetectConfirm(msg)
+			}
+		}
+		// Folder picker: route all messages (keys + cursor blink) to the picker
+		// so its text input stays live. The picker emits folderPickedMsg on enter
+		// (handled below), and esc closes it back to the Welcome fork.
+		if m.currentView == ViewFolderPicker && m.folderPicker != nil {
+			if picked, ok := msg.(folderPickedMsg); ok {
+				return m.handleFolderPicked(picked.path)
+			}
+			if key, ok := msg.(tea.KeyMsg); ok && (key.String() == "esc" || key.String() == "ctrl+c") {
+				m.folderPicker = nil
+				m.welcomeView = NewWelcomeModel(m.width, m.height)
+				m.currentView = ViewWelcome
+				return m, nil
+			}
+			var cmd tea.Cmd
+			m.folderPicker, cmd = m.folderPicker.Update(msg)
+			return m, cmd
 		}
 		if m.currentView == ViewDeleteConfirm && m.deleteConfirm != nil {
 			return m.updateDeleteConfirm(msg)
@@ -804,6 +984,36 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.commandPaletteView.Init()
 		}
 
+		// First-run Welcome fork key handling.
+		if m.currentView == ViewWelcome && m.welcomeView != nil {
+			switch msg.String() {
+			case "left", "h":
+				m.welcomeView.MoveLeft()
+				return m, nil
+			case "right", "l":
+				m.welcomeView.MoveRight()
+				return m, nil
+			case "enter":
+				switch m.welcomeView.Choice() {
+				case welcomeSetupProject:
+					m.welcomeView = nil
+					m.folderPicker = NewFolderPickerModel(m.width, m.height)
+					m.currentView = ViewFolderPicker
+					return m, m.folderPicker.Init()
+				case welcomeStartTask:
+					m.welcomeView = nil
+					m.newTaskForm = NewFormModel(m.db, m.width, m.height, m.workingDir, m.availableExecutors)
+					m.previousView = ViewDashboard
+					m.currentView = ViewNewTask
+					return m, m.newTaskForm.Init()
+				}
+			case "esc", "ctrl+c":
+				m.welcomeView = nil
+				m.currentView = ViewDashboard
+				return m, nil
+			}
+		}
+
 		// Route to current view
 		switch m.currentView {
 		case ViewDashboard:
@@ -817,8 +1027,12 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.MouseMsg:
 		// Handle mouse clicks on dashboard view
 		if m.currentView == ViewDashboard && msg.Action == tea.MouseActionRelease && msg.Button == tea.MouseButtonLeft {
-			// Check if clicking on a task card
-			if task := m.kanban.HandleClick(msg.X, msg.Y); task != nil {
+			// Check if clicking on a task card / row
+			if m.viewMode == ViewModeList {
+				if task := m.listView.HandleClick(msg.X, msg.Y); task != nil {
+					return m, m.loadTask(task.ID)
+				}
+			} else if task := m.kanban.HandleClick(msg.X, msg.Y); task != nil {
 				return m, m.loadTask(task.ID)
 			}
 		}
@@ -832,26 +1046,24 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.tasks = msg.tasks
 		m.err = msg.err
 
-		// First-time experience: auto-open new task form on first run when no tasks exist
+		// First-load onboarding routing (runs once per process start).
 		if m.isFirstLoad {
 			m.isFirstLoad = false
 			m.showWelcome = len(msg.tasks) == 0
 
-			// If we're inside a git repo that has no TaskYou project yet, offer to
-			// create one (inferring details from the repo). This takes priority over
-			// the generic onboarding form since it's more directly useful.
+			// 1. In a real project folder we don't yet track? Offer to set it up
+			//    (LLM-enriched). Works on every launch, until dismissed per-path.
 			if model, cmd, offered := m.maybeOfferProjectCreation(); offered {
 				return model, cmd
 			}
 
-			// If this is the very first run (no tasks, onboarding not completed), auto-open new task form
-			if len(msg.tasks) == 0 && m.db.IsFirstRun() && !m.onboardingShown {
-				m.onboardingShown = true
-				// Auto-open the new task form to guide users to create their first task
-				m.newTaskForm = NewFormModel(m.db, m.width, m.height, m.workingDir, m.availableExecutors)
+			// 2. No real projects yet (only "personal") and we're in a junk folder:
+			//    show the Welcome fork instead of dumping into a task form.
+			if m.shouldShowWelcomeFork(msg.tasks) {
+				m.welcomeView = NewWelcomeModel(m.width, m.height)
 				m.previousView = m.currentView
-				m.currentView = ViewNewTask
-				return m, m.newTaskForm.Init()
+				m.currentView = ViewWelcome
+				return m, nil
 			}
 		}
 
@@ -956,12 +1168,16 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.kanban.SetRunningProcesses(running)
 		m.kanban.SetTasksNeedingInput(m.tasksNeedingInput)
 		m.kanban.SetBlockedByDeps(msg.blockedByDeps)
+		m.listView.SetRunningProcesses(running)
+		m.listView.SetTasksNeedingInput(m.tasksNeedingInput)
+		m.listView.SetBlockedByDeps(msg.blockedByDeps)
 
 		// Load cached PR info from database for instant display
 		for _, t := range m.tasks {
 			if t.PRInfoJSON != "" {
 				if info := github.UnmarshalPRInfo(t.PRInfoJSON); info != nil {
 					m.kanban.SetPRInfo(t.ID, info)
+					m.listView.SetPRInfo(t.ID, info)
 				}
 			}
 		}
@@ -971,6 +1187,19 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.initialPRRefreshDone = true
 			cmds = append(cmds, m.refreshAllPRs())
 		}
+
+	case projectInferredMsg:
+		// Only apply if the card for this exact path is still showing.
+		if m.currentView == ViewProjectDetectConfirm && m.detectedProject != nil && m.detectedProject.Path == msg.path {
+			m.detectedInferencePending = false
+			if msg.err == nil {
+				applyInferredMetadata(m.detectedProject, msg.meta)
+				m.detectedProject.Name = uniqueProjectName(m.db, m.detectedProject.Name)
+			}
+			m.buildProjectDetectForm()
+			return m, m.projectDetectConfirm.Init()
+		}
+		return m, nil
 
 	case taskLoadedMsg:
 		// Reset transition flag now that task is loaded
@@ -1043,6 +1272,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Update PR info in kanban and detail view
 		if msg.info != nil {
 			m.kanban.SetPRInfo(msg.taskID, msg.info)
+			m.listView.SetPRInfo(msg.taskID, msg.info)
 			// Update detail view if showing this task
 			if m.detailView != nil && m.selectedTask != nil && m.selectedTask.ID == msg.taskID {
 				m.detailView.SetPRInfo(msg.info)
@@ -1057,6 +1287,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		for _, result := range msg.results {
 			if result.info != nil {
 				m.kanban.SetPRInfo(result.taskID, result.info)
+				m.listView.SetPRInfo(result.taskID, result.info)
 				// Update detail view if showing this task
 				if m.detailView != nil && m.selectedTask != nil && m.selectedTask.ID == result.taskID {
 					m.detailView.SetPRInfo(result.info)
@@ -1327,8 +1558,9 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					break
 				}
 			}
-			m.kanban.SetTasks(m.tasks)
+			m.setDashboardTasks(m.tasks)
 			m.kanban.SetTasksNeedingInput(m.tasksNeedingInput)
+			m.listView.SetTasksNeedingInput(m.tasksNeedingInput)
 
 			// Update detail view if showing this task
 			if m.selectedTask != nil && m.selectedTask.ID == event.TaskID {
@@ -1368,6 +1600,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				running[m.selectedTask.ID] = true
 			}
 			m.kanban.SetRunningProcesses(running)
+			m.listView.SetRunningProcesses(running)
 		}
 		cmds = append(cmds, m.tick())
 
@@ -1437,6 +1670,9 @@ func (m *AppModel) applyWindowSize(width, height int) {
 	m.height = height
 	m.help.Width = width
 	m.kanban.SetSize(width, height-4)
+	if m.listView != nil {
+		m.listView.SetSize(width, height-4)
+	}
 	if m.detailView != nil {
 		m.detailView.SetSize(width, height)
 	}
@@ -1454,6 +1690,12 @@ func (m *AppModel) applyWindowSize(width, height int) {
 	}
 	if m.editTaskForm != nil {
 		m.editTaskForm.SetSize(width, height)
+	}
+	if m.welcomeView != nil {
+		m.welcomeView.SetSize(m.width, m.height)
+	}
+	if m.folderPicker != nil {
+		m.folderPicker.SetSize(m.width, m.height)
 	}
 }
 
@@ -1493,6 +1735,14 @@ func (m *AppModel) View() string {
 		return m.viewProjectChangeConfirm()
 	case ViewProjectDetectConfirm:
 		return m.viewProjectDetectConfirm()
+	case ViewWelcome:
+		if m.welcomeView != nil {
+			return m.welcomeView.View()
+		}
+	case ViewFolderPicker:
+		if m.folderPicker != nil {
+			return m.folderPicker.View()
+		}
 	case ViewDeleteConfirm:
 		return m.viewDeleteConfirm()
 	case ViewCloseConfirm:
@@ -1615,7 +1865,7 @@ func (m *AppModel) viewDashboard() string {
 	// Render executor prompt preview if applicable
 	promptPreview := ""
 	promptPreviewHeight := 0
-	if task := m.kanban.SelectedTask(); task != nil && m.tasksNeedingInput[task.ID] {
+	if task := m.dashboardSelectedTask(); task != nil && m.tasksNeedingInput[task.ID] {
 		promptPreview = m.renderExecutorPromptPreview(task)
 		promptPreviewHeight = lipgloss.Height(promptPreview)
 	}
@@ -1637,8 +1887,9 @@ func (m *AppModel) viewDashboard() string {
 		kanbanHeight = 10
 	}
 
-	// Update kanban size
+	// Update view sizes
 	m.kanban.SetSize(m.width, kanbanHeight)
+	m.listView.SetSize(m.width, kanbanHeight)
 
 	var contentParts []string
 	if header != "" {
@@ -1648,16 +1899,22 @@ func (m *AppModel) viewDashboard() string {
 		contentParts = append(contentParts, filterBar)
 	}
 
-	// Show welcome/getting started message when kanban is empty
-	if m.showWelcome && m.kanban.IsEmpty() {
+	// Show welcome/getting started message when the board is empty (only on the
+	// kanban view; the list view shows its own empty state with filters intact).
+	if m.viewMode == ViewModeBoard && m.showWelcome && m.kanban.IsEmpty() {
 		welcomeView := m.renderWelcomeMessage(kanbanHeight)
 		contentParts = append(contentParts, welcomeView, helpView)
 	} else {
-		kanbanView := m.kanban.View()
-		if promptPreview != "" {
-			contentParts = append(contentParts, kanbanView, promptPreview, helpView)
+		var boardView string
+		if m.viewMode == ViewModeList {
+			boardView = m.listView.View()
 		} else {
-			contentParts = append(contentParts, kanbanView, helpView)
+			boardView = m.kanban.View()
+		}
+		if promptPreview != "" {
+			contentParts = append(contentParts, boardView, promptPreview, helpView)
+		} else {
+			contentParts = append(contentParts, boardView, helpView)
 		}
 	}
 
@@ -1933,6 +2190,20 @@ func stripAnsiCodes(s string) string {
 }
 
 func (m *AppModel) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// Toggling between board and list works in either mode.
+	if key.Matches(msg, m.keys.ToggleView) {
+		m.toggleViewMode()
+		return m, nil
+	}
+
+	// In list mode, intercept navigation/sort/filter keys before the board
+	// handlers below get a chance to act on the (hidden) kanban.
+	if m.viewMode == ViewModeList {
+		if handled, cmd := m.updateListNav(msg); handled {
+			return m, cmd
+		}
+	}
+
 	switch {
 	// Column navigation
 	case key.Matches(msg, m.keys.Left):
@@ -2038,7 +2309,7 @@ func (m *AppModel) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case key.Matches(msg, m.keys.Enter):
-		if task := m.kanban.SelectedTask(); task != nil {
+		if task := m.dashboardSelectedTask(); task != nil {
 			return m, m.loadTask(task.ID)
 		}
 
@@ -2049,7 +2320,7 @@ func (m *AppModel) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, m.newTaskForm.Init()
 
 	case key.Matches(msg, m.keys.Queue):
-		if task := m.kanban.SelectedTask(); task != nil {
+		if task := m.dashboardSelectedTask(); task != nil {
 			// Don't allow queueing if task is already processing
 			if task.Status == db.StatusProcessing {
 				return m, nil
@@ -2062,7 +2333,7 @@ func (m *AppModel) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 
 	case key.Matches(msg, m.keys.QueueDangerous):
-		if task := m.kanban.SelectedTask(); task != nil {
+		if task := m.dashboardSelectedTask(); task != nil {
 			// Don't allow queueing if task is already processing
 			if task.Status == db.StatusProcessing {
 				return m, nil
@@ -2075,13 +2346,13 @@ func (m *AppModel) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 
 	case key.Matches(msg, m.keys.TogglePin):
-		if task := m.kanban.SelectedTask(); task != nil {
+		if task := m.dashboardSelectedTask(); task != nil {
 			return m, m.toggleTaskPinned(task.ID)
 		}
 		return m, nil
 
 	case key.Matches(msg, m.keys.Retry):
-		if task := m.kanban.SelectedTask(); task != nil {
+		if task := m.dashboardSelectedTask(); task != nil {
 			// Allow retry for blocked, done, or backlog tasks
 			if task.Status == db.StatusBlocked || task.Status == db.StatusDone ||
 				task.Status == db.StatusBacklog {
@@ -2094,12 +2365,12 @@ func (m *AppModel) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 
 	case key.Matches(msg, m.keys.Close):
-		if task := m.kanban.SelectedTask(); task != nil {
+		if task := m.dashboardSelectedTask(); task != nil {
 			return m.showCloseConfirm(task)
 		}
 
 	case key.Matches(msg, m.keys.Archive):
-		if task := m.kanban.SelectedTask(); task != nil {
+		if task := m.dashboardSelectedTask(); task != nil {
 			if task.Status == db.StatusArchived {
 				// Unarchive the task
 				return m, m.unarchiveTask(task.ID)
@@ -2108,33 +2379,33 @@ func (m *AppModel) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 
 	case key.Matches(msg, m.keys.Delete):
-		if task := m.kanban.SelectedTask(); task != nil {
+		if task := m.dashboardSelectedTask(); task != nil {
 			return m.showDeleteConfirm(task)
 		}
 
 	case key.Matches(msg, m.keys.OpenWorktree):
-		if task := m.kanban.SelectedTask(); task != nil {
+		if task := m.dashboardSelectedTask(); task != nil {
 			return m, m.openWorktreeInEditor(task)
 		}
 
 	case key.Matches(msg, m.keys.OpenBrowser):
-		if task := m.kanban.SelectedTask(); task != nil {
+		if task := m.dashboardSelectedTask(); task != nil {
 			return m, m.openBrowser(task)
 		}
 
 	case key.Matches(msg, m.keys.Spotlight):
-		if task := m.kanban.SelectedTask(); task != nil && task.WorktreePath != "" {
+		if task := m.dashboardSelectedTask(); task != nil && task.WorktreePath != "" {
 			return m, m.toggleSpotlight(task)
 		}
 
 	case key.Matches(msg, m.keys.SpotlightSync):
-		if task := m.kanban.SelectedTask(); task != nil && task.WorktreePath != "" {
+		if task := m.dashboardSelectedTask(); task != nil && task.WorktreePath != "" {
 			return m, m.syncSpotlight(task)
 		}
 
 	case key.Matches(msg, m.keys.QuickInput):
 		// Focus the quick input field if selected task needs input
-		if task := m.kanban.SelectedTask(); task != nil {
+		if task := m.dashboardSelectedTask(); task != nil {
 			if m.tasksNeedingInput[task.ID] || m.detectPermissionPrompt(task.ID) {
 				m.quickInputFocused = true
 				m.replyInput.SetValue("")
@@ -2154,7 +2425,7 @@ func (m *AppModel) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, m.loadTasks()
 
 	case key.Matches(msg, m.keys.ChangeStatus):
-		if task := m.kanban.SelectedTask(); task != nil {
+		if task := m.dashboardSelectedTask(); task != nil {
 			return m.showChangeStatus(task)
 		}
 
@@ -2163,14 +2434,14 @@ func (m *AppModel) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case key.Matches(msg, m.keys.ApprovePrompt):
-		if task := m.kanban.SelectedTask(); task != nil {
+		if task := m.dashboardSelectedTask(); task != nil {
 			if m.tasksNeedingInput[task.ID] || m.detectPermissionPrompt(task.ID) {
 				return m, m.approveExecutorPrompt(task.ID)
 			}
 		}
 
 	case key.Matches(msg, m.keys.DenyPrompt):
-		if task := m.kanban.SelectedTask(); task != nil {
+		if task := m.dashboardSelectedTask(); task != nil {
 			if m.tasksNeedingInput[task.ID] || m.detectPermissionPrompt(task.ID) {
 				return m, m.denyExecutorPrompt(task.ID)
 			}
@@ -2222,7 +2493,7 @@ func (m *AppModel) updateQuickInput(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.replyInput.Blur()
 			return m, nil
 		}
-		task := m.kanban.SelectedTask()
+		task := m.dashboardSelectedTask()
 		if task == nil {
 			m.quickInputFocused = false
 			m.replyInput.SetValue("")
@@ -2442,7 +2713,7 @@ func (m *AppModel) resolveProjectAliases(query string) string {
 func (m *AppModel) applyFilter() {
 	if m.filterText == "" {
 		// No filter, show all tasks
-		m.kanban.SetTasks(m.tasks)
+		m.setDashboardTasks(m.tasks)
 		return
 	}
 
@@ -2472,7 +2743,7 @@ func (m *AppModel) applyFilter() {
 	for i, st := range scored {
 		filtered[i] = st.task
 	}
-	m.kanban.SetTasks(filtered)
+	m.setDashboardTasks(filtered)
 }
 
 // parseFilterProjects extracts completed [project] tags, any trailing partial project,
@@ -2738,8 +3009,8 @@ func (m *AppModel) updateDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// Arrow key navigation to prev/next task in the same column
 	// j/k keys are passed through to the viewport for scrolling
 	if key.Matches(keyMsg, m.keys.Up) {
-		// Ignore if no previous task exists
-		if !m.kanban.HasPrevTask() {
+		// Ignore if no previous task exists (in the active dashboard view)
+		if !m.dashboardHasPrevTask() {
 			return m, nil
 		}
 		// Ignore if transition already in progress to prevent duplicate panes
@@ -2752,18 +3023,18 @@ func (m *AppModel) updateDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.detailView.CleanupWithoutSaving()
 			m.detailView = nil
 		}
-		// Move selection up in the kanban
-		m.kanban.MoveUp()
+		// Move selection up in the active view
+		m.dashboardMoveUp()
 		// Load the new task
-		if task := m.kanban.SelectedTask(); task != nil {
+		if task := m.dashboardSelectedTask(); task != nil {
 			return m, m.loadTask(task.ID)
 		}
 		m.taskTransitionInProgress = false
 		return m, nil
 	}
 	if key.Matches(keyMsg, m.keys.Down) {
-		// Ignore if no next task exists
-		if !m.kanban.HasNextTask() {
+		// Ignore if no next task exists (in the active dashboard view)
+		if !m.dashboardHasNextTask() {
 			return m, nil
 		}
 		// Ignore if transition already in progress to prevent duplicate panes
@@ -2776,10 +3047,10 @@ func (m *AppModel) updateDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.detailView.CleanupWithoutSaving()
 			m.detailView = nil
 		}
-		// Move selection down in the kanban
-		m.kanban.MoveDown()
+		// Move selection down in the active view
+		m.dashboardMoveDown()
 		// Load the new task
-		if task := m.kanban.SelectedTask(); task != nil {
+		if task := m.dashboardSelectedTask(); task != nil {
 			return m, m.loadTask(task.ID)
 		}
 		m.taskTransitionInProgress = false
@@ -3147,19 +3418,74 @@ func (m *AppModel) updateProjectChangeConfirm(msg tea.Msg) (tea.Model, tea.Cmd) 
 	return m, cmd
 }
 
-// maybeOfferProjectCreation checks whether the current working directory is a git
-// repo without an associated TaskYou project and, if so, opens a confirmation
-// modal offering to create one (with details inferred from the repo). The third
-// return value reports whether the offer was made; when false the caller should
-// continue with its normal flow.
+// shouldShowWelcomeFork reports whether to show the first-run Welcome fork:
+// no real projects beyond "personal", and the cwd is not a project candidate
+// (otherwise maybeOfferProjectCreation handled it). Gated on "no tasks yet".
+func (m *AppModel) shouldShowWelcomeFork(tasks []*db.Task) bool {
+	if m.db == nil {
+		return false
+	}
+	if isProjectCandidate(m.workingDir) {
+		return false
+	}
+	if !m.onlyPersonalProject() {
+		return false
+	}
+	// We already checked onlyPersonalProject above; combining "no tasks" +
+	// "only personal" is the intended gate (per agreed design, not IsFirstRun).
+	return len(tasks) == 0
+}
+
+// onlyPersonalProject reports whether the only project is the auto-created
+// "personal" one (i.e. the user hasn't set up a real project yet).
+func (m *AppModel) onlyPersonalProject() bool {
+	projects, err := m.db.ListProjects()
+	if err != nil {
+		return false
+	}
+	for _, p := range projects {
+		if p.Name != "personal" {
+			return false
+		}
+	}
+	return true
+}
+
+// handleFolderPicked builds a project from the chosen folder and shows the same
+// confirm card used for auto-detected projects. Metadata inference runs
+// asynchronously (see showProjectDetectConfirm) so the card appears instantly.
+func (m *AppModel) handleFolderPicked(path string) (tea.Model, tea.Cmd) {
+	if proj, err := m.db.GetProjectByPath(path); err == nil && proj != nil {
+		m.folderPicker = nil
+		m.notification = fmt.Sprintf("%s \"%s\" already covers that folder", IconDone(), proj.Name)
+		m.notifyUntil = time.Now().Add(4 * time.Second)
+		m.currentView = ViewDashboard
+		return m, m.loadTasks()
+	}
+	detected, source := detectProjectFromDir(path)
+	if detected == nil {
+		// Folder had no signals; treat the chosen dir as a plain (non-worktree) project.
+		detected = &db.Project{Name: inferProjectName(path), Path: filepath.Clean(path), UseWorktrees: dirIsGitRepo(path)}
+	}
+	detected.Name = uniqueProjectName(m.db, detected.Name)
+	m.folderPicker = nil
+	return m.showProjectDetectConfirm(detected, source)
+}
+
+// maybeOfferProjectCreation checks whether the current working directory is a
+// project candidate (git repo or recognised marker files) without an associated
+// TaskYou project and, if so, opens a confirmation modal offering to create one
+// (with details inferred from the directory). The third return value reports
+// whether the offer was made; when false the caller should continue with its
+// normal flow.
 func (m *AppModel) maybeOfferProjectCreation() (tea.Model, tea.Cmd, bool) {
 	if m.projectDetectionOffered || m.db == nil || m.workingDir == "" {
 		return m, nil, false
 	}
 
-	// Only offer for git repos - non-git directories don't benefit from the
-	// worktree-based project model and aren't a clear signal of intent.
-	if !dirIsGitRepo(m.workingDir) {
+	// Offer for any project candidate (git repo OR marker files), not just git.
+	// Non-git candidates become non-worktree projects (git stays optional).
+	if !isProjectCandidate(m.workingDir) {
 		return m, nil, false
 	}
 
@@ -3177,9 +3503,12 @@ func (m *AppModel) maybeOfferProjectCreation() (tea.Model, tea.Cmd, bool) {
 	if detected == nil {
 		return m, nil, false
 	}
+
 	detected.Name = uniqueProjectName(m.db, detected.Name)
 
 	m.projectDetectionOffered = true
+	// showProjectDetectConfirm fires the claude -p inference asynchronously and
+	// enriches the card in place when projectInferredMsg arrives.
 	model, cmd := m.showProjectDetectConfirm(detected, source)
 	return model, cmd, true
 }
@@ -3187,15 +3516,43 @@ func (m *AppModel) maybeOfferProjectCreation() (tea.Model, tea.Cmd, bool) {
 func (m *AppModel) showProjectDetectConfirm(project *db.Project, instructionSource string) (tea.Model, tea.Cmd) {
 	m.detectedProject = project
 	m.detectedInstructionSource = instructionSource
+	m.detectedInferencePending = true
 	m.projectDetectConfirmValue = true
 
-	var desc strings.Builder
-	desc.WriteString(fmt.Sprintf("This directory is a git repo with no TaskYou project yet.\n\nName: %s\nPath: %s\n", project.Name, project.Path))
-	if instructionSource != "" {
-		desc.WriteString(fmt.Sprintf("Instructions: imported from %s\n", instructionSource))
-	} else {
-		desc.WriteString("Instructions: none found (add later in Settings)\n")
+	m.previousView = m.currentView
+	m.currentView = ViewProjectDetectConfirm
+	m.buildProjectDetectForm()
+
+	// Show the card instantly with rule-based values, then enrich it in place
+	// once the async claude -p inference returns (projectInferredMsg).
+	return m, tea.Batch(m.projectDetectConfirm.Init(), inferProjectCmd(project.Path, ""))
+}
+
+// buildProjectDetectForm (re)builds the detect-confirm huh form from the current
+// detectedProject / detectedInstructionSource / detectedInferencePending state.
+// It deliberately does NOT touch previousView or currentView so it can be called
+// again when async inference arrives to refresh the card in place.
+func (m *AppModel) buildProjectDetectForm() {
+	project := m.detectedProject
+	if project == nil {
+		return
 	}
+
+	var desc strings.Builder
+	if m.detectedInferencePending {
+		desc.WriteString("✨ Inferring project details…\n\n")
+	}
+	desc.WriteString(fmt.Sprintf("This directory looks like a project.\n\nName: %s\n", project.Name))
+	if project.Aliases != "" {
+		desc.WriteString(fmt.Sprintf("Alias: %s\n", project.Aliases))
+	}
+	desc.WriteString(fmt.Sprintf("Path: %s\n", project.Path))
+	if m.detectedInstructionSource != "" {
+		desc.WriteString(fmt.Sprintf("Instructions: imported from %s\n", m.detectedInstructionSource))
+	} else if project.Instructions != "" {
+		desc.WriteString("Description: " + firstLine(project.Instructions) + "\n")
+	}
+	desc.WriteString(fmt.Sprintf("Worktrees: %v\n", project.UseWorktrees))
 	desc.WriteString("\nYou can edit any of this later in Settings.")
 
 	modalWidth := min(64, m.width-8)
@@ -3212,10 +3569,14 @@ func (m *AppModel) showProjectDetectConfirm(project *db.Project, instructionSour
 	).WithTheme(huh.ThemeDracula()).
 		WithWidth(modalWidth - 6).
 		WithShowHelp(true)
+}
 
-	m.previousView = m.currentView
-	m.currentView = ViewProjectDetectConfirm
-	return m, m.projectDetectConfirm.Init()
+// firstLine returns the first line of s (without the trailing newline).
+func firstLine(s string) string {
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		return s[:i]
+	}
+	return s
 }
 
 func (m *AppModel) viewProjectDetectConfirm() string {
@@ -3252,7 +3613,11 @@ func (m *AppModel) updateProjectDetectConfirm(msg tea.Msg) (tea.Model, tea.Cmd) 
 		switch keyMsg.String() {
 		case "esc", "ctrl+c":
 			// Treat dismissal like declining so we don't nag on every startup.
-			m.dismissProjectSuggestion()
+			dismissPath := m.workingDir
+			if m.detectedProject != nil && m.detectedProject.Path != "" {
+				dismissPath = m.detectedProject.Path
+			}
+			m.dismissProjectSuggestion(dismissPath)
 			return m, nil
 		}
 	}
@@ -3270,11 +3635,19 @@ func (m *AppModel) updateProjectDetectConfirm(msg tea.Msg) (tea.Model, tea.Cmd) 
 			m.detectedProject = nil
 			return m, m.createDetectedProject(detected)
 		}
-		m.dismissProjectSuggestion()
+		dismissPath := m.workingDir
+		if detected != nil && detected.Path != "" {
+			dismissPath = detected.Path
+		}
+		m.dismissProjectSuggestion(dismissPath)
 		return m, nil
 	}
 	if m.projectDetectConfirm.State == huh.StateAborted {
-		m.dismissProjectSuggestion()
+		dismissPath := m.workingDir
+		if m.detectedProject != nil && m.detectedProject.Path != "" {
+			dismissPath = m.detectedProject.Path
+		}
+		m.dismissProjectSuggestion(dismissPath)
 		return m, nil
 	}
 
@@ -3282,10 +3655,10 @@ func (m *AppModel) updateProjectDetectConfirm(msg tea.Msg) (tea.Model, tea.Cmd) 
 }
 
 // dismissProjectSuggestion records that the user declined to create a project for
-// the current directory and closes the modal.
-func (m *AppModel) dismissProjectSuggestion() {
-	if m.db != nil && m.workingDir != "" {
-		m.db.SetSetting(projectSuggestionDismissedKey(m.workingDir), "1")
+// the given path and closes the modal.
+func (m *AppModel) dismissProjectSuggestion(path string) {
+	if m.db != nil && path != "" {
+		m.db.SetSetting(projectSuggestionDismissedKey(path), "1")
 	}
 	m.projectDetectConfirm = nil
 	m.detectedProject = nil
@@ -3925,6 +4298,22 @@ func (m *AppModel) updateCommandPalette(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	return m, cmd
+}
+
+// projectInferredMsg carries the result of an async claude -p inference for the
+// project currently being offered in the detect-confirm card.
+type projectInferredMsg struct {
+	path string
+	meta ai.ProjectMetadata
+	err  error
+}
+
+// inferProjectCmd runs project inference off the UI loop and reports the result.
+func inferProjectCmd(path, configDir string) tea.Cmd {
+	return func() tea.Msg {
+		meta, err := ai.InferProjectMetadata(path, configDir)
+		return projectInferredMsg{path: path, meta: meta, err: err}
+	}
 }
 
 // Messages

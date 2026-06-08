@@ -3,6 +3,7 @@ package db
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -319,5 +320,56 @@ func TestProjectUseWorktrees(t *testing.T) {
 	}
 	if p.UsesWorktrees() {
 		t.Error("alias-proj looked up by alias should NOT use worktrees")
+	}
+}
+
+// TestDefaultCodeTaskTypeGuidance verifies the built-in "code" task type carries only
+// code-task workflow steering and deliberately does NOT carry operational guidance that is
+// intrinsic to how taskyou runs a task (worktree-safety, taskyou_get_project_context) or
+// deployment-specific etiquette (GitHub/gh shared-GraphQL-bucket). That guidance is injected
+// by the executor for every task type — see Executor.buildUniversalGuidance — and must not
+// be baked into this editable, single-task-type template.
+func TestDefaultCodeTaskTypeGuidance(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	db, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer db.Close()
+	defer os.Remove(dbPath)
+
+	codeType, err := db.GetTaskTypeByName("code")
+	if err != nil {
+		t.Fatalf("failed to get code task type: %v", err)
+	}
+	if codeType == nil {
+		t.Fatal("default code task type was not created")
+	}
+
+	wants := []string{
+		"Explore the codebase",
+		"Submit a pull request",
+		"{{title}}",
+	}
+	for _, want := range wants {
+		if !strings.Contains(codeType.Instructions, want) {
+			t.Errorf("code task type instructions missing %q", want)
+		}
+	}
+
+	// Operational / deployment-specific guidance must not leak into the task-type template.
+	doesNotWant := []string{
+		"GitHub CLI",
+		"GraphQL",
+		"gh run watch",
+		"taskyou_get_project_context",
+		"isolated git worktree",
+	}
+	for _, unwanted := range doesNotWant {
+		if strings.Contains(codeType.Instructions, unwanted) {
+			t.Errorf("code task type instructions should not contain %q (it is executor-injected, not template-owned)", unwanted)
+		}
 	}
 }
