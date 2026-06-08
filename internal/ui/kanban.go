@@ -70,6 +70,23 @@ type KanbanBoard struct {
 	// or one task changing status) only pays the lipgloss cost for the cards that
 	// actually changed. Bounded; reset wholesale once it grows past cardCacheMax.
 	cardCache map[uint64]string
+
+	// Live mode: an opt-in view that turns each active card into a window on
+	// what its agent is doing right now (latest activity line, elapsed time,
+	// animated spinner). Disabled by default to keep the board compact.
+	liveMode       bool
+	latestActivity map[int64]*db.TaskLog // Most recent log line per task (live mode only)
+	spinnerFrame   int                   // Current animation frame for running-task spinners
+}
+
+// cardHeight returns the number of vertical lines a task card occupies,
+// including its bottom margin. Live mode adds a third content line for the
+// activity/age sub-line, so cards are one row taller.
+func (k *KanbanBoard) cardHeight() int {
+	if k.liveMode {
+		return 4
+	}
+	return 3
 }
 
 // cardCacheMax bounds the per-card render cache. Steady-state usage is a few
@@ -489,7 +506,7 @@ func (k *KanbanBoard) ensureSelectedVisible() {
 	if k.IsMobileMode() {
 		colHeight = k.height - 4 // -2 for tab bar, -2 for column borders
 	}
-	cardHeight := 3                            // Most cards are 3 lines (2 content + 1 border)
+	cardHeight := k.cardHeight()               // 3 lines compact, 4 in live mode
 	maxVisible := (colHeight - 3) / cardHeight // -3 for header bar and scroll indicators
 	if maxVisible < 1 {
 		maxVisible = 1
@@ -700,6 +717,12 @@ func (k *KanbanBoard) renderSignature() uint64 {
 	h.int(k.selectedRow)
 	h.int(k.hiddenDoneCount)
 	h.boolean(IsGlobalDangerousMode())
+	// Live mode changes card height, adds a sub-line, and advances the
+	// running-task spinner — all of which must invalidate the cached render.
+	h.boolean(k.liveMode)
+	if k.liveMode {
+		h.int(k.spinnerFrame)
+	}
 
 	for _, off := range k.scrollOffsets {
 		h.int(off)
@@ -743,6 +766,18 @@ func (k *KanbanBoard) hashTaskCard(h *sigHasher, t *db.Task) {
 		h.int(pr.Deletions)
 	} else {
 		h.boolean(false)
+	}
+	// Live-mode sub-line inputs: the agent's latest activity and an elapsed
+	// bucket that ticks the age hint each minute (per-second changes on running
+	// tasks are already covered by the spinner-frame bump in renderSignature).
+	if k.liveMode {
+		if log := k.latestActivity[t.ID]; log != nil {
+			h.boolean(true)
+			h.str(log.Content)
+		} else {
+			h.boolean(false)
+		}
+		h.int(taskElapsedMinutes(t))
 	}
 }
 
@@ -801,7 +836,7 @@ func (k *KanbanBoard) viewDesktop() string {
 
 		// Task cards - calculate how many fit
 		// Non-selected cards: 2 lines content + 1 line border = 3 lines
-		cardHeight := 3
+		cardHeight := k.cardHeight()
 		maxTasks := (colHeight - 3) / cardHeight // -3 for scroll indicators and padding
 		if maxTasks < 1 {
 			maxTasks = 1
@@ -1024,7 +1059,7 @@ func (k *KanbanBoard) viewMobile() string {
 	headerBar := headerBarStyle.Render(headerText)
 
 	// Task cards - calculate how many fit
-	cardHeight := 3
+	cardHeight := k.cardHeight()
 	maxTasks := (colHeight - 3) / cardHeight
 	if maxTasks < 1 {
 		maxTasks = 1
@@ -1247,8 +1282,12 @@ func (k *KanbanBoard) renderTaskCard(task *db.Task, width int, isSelected bool, 
 
 	var b strings.Builder
 
-	// Task ID with status indicator
+	// Task ID with status indicator. In live mode, running tasks get an
+	// animated spinner instead of the static processing glyph.
 	statusIcon := StatusIcon(task.Status)
+	if k.liveMode && task.Status == db.StatusProcessing {
+		statusIcon = k.liveSpinner()
+	}
 	if isSelected {
 		b.WriteString(statusIcon)
 		b.WriteString(" ")
@@ -1413,6 +1452,9 @@ func (k *KanbanBoard) renderTaskCard(task *db.Task, width int, isSelected bool, 
 	}
 
 	content := idLine + "\n" + titleLine
+	if k.liveMode {
+		content += "\n" + k.cardSubLine(task, width, isSelected)
+	}
 	rendered := cardStyle.Render(content)
 
 	if k.cardCache == nil || len(k.cardCache) >= cardCacheMax {
@@ -1500,7 +1542,7 @@ func (k *KanbanBoard) SelectByShortcut(num int) *db.Task {
 	if k.IsMobileMode() {
 		colHeight = k.height - 4
 	}
-	cardHeight := 3
+	cardHeight := k.cardHeight()
 	maxVisible := (colHeight - 3) / cardHeight
 	if maxVisible < 1 {
 		maxVisible = 1
@@ -1630,7 +1672,7 @@ func (k *KanbanBoard) handleClickDesktop(x, y int) *db.Task {
 	// Calculate Y position within column
 	// Column structure: 1 border line at top, then header (1 line), then task cards
 	headerLines := 1 // Header bar is 1 line with no margin
-	taskCardHeight := 3
+	taskCardHeight := k.cardHeight()
 
 	// relY is position within the column content (after top border)
 	relY := y - 1 // -1 for top border
@@ -1752,7 +1794,7 @@ func (k *KanbanBoard) handleClickMobile(x, y int) *db.Task {
 	// Column layout: tab bar (2 lines), then border (1 line), header (1 line), task cards
 	colHeight := k.height - tabBarHeight - 2
 	headerLines := 1 // Header bar is 1 line with no margin
-	taskCardHeight := 3
+	taskCardHeight := k.cardHeight()
 
 	// relY is position within the column content (after tab bar and top border)
 	relY := y - tabBarHeight - 1 // -1 for top border
