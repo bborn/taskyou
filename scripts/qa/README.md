@@ -113,11 +113,26 @@ The board render is cached by a signature of its inputs (see `KanbanBoard.View`)
 so idle re-renders (ticks, mouse motion, unrelated events) are nearly free; the
 profile's render time comes from cache-miss frames (navigation, task changes).
 
+The **detail view** (Enter on a card) is tuned the same way:
+
+- **Opening is instant.** All tmux work — the window search plus the ~30-call
+  join/split/resize that happens when an executor is already running — runs off
+  the Bubble Tea update thread (`setupPanesAsync`), so the view paints
+  immediately with a loading spinner and the panes drop in when ready, instead
+  of freezing the UI for the whole join.
+- **`DetailModel.View()` is render-cached** by a signature of its inputs (same
+  trick as the board): idle frames skip the expensive `viewport.View()` +
+  bordered `box.Render()` (~2ms / ~2.7MB) and cost only the cheap header/help
+  render used to detect changes. See `viewSignature` and `detail_cache_test.go`.
+- The shell-process indicator is polled on a throttle in `Refresh()` instead of
+  shelling out to tmux from `renderHeader()` on every frame.
+
 For reproducible micro-measurements (and CI regression guarding), the Go
 benchmarks are the fastest loop:
 
 ```bash
 go test ./internal/ui/ -run '^$' -bench 'BenchmarkKanbanView' -benchmem
+go test ./internal/ui/ -run '^$' -bench 'BenchmarkDetail'     -benchmem
 # add -cpuprofile=/tmp/c.prof to capture render call stacks from a benchmark
 ```
 
