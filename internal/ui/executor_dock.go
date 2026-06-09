@@ -62,13 +62,18 @@ func NewDockModel(ctl paneController) *DockModel {
 // IsOpen reports whether the dock is visible.
 func (d *DockModel) IsOpen() bool { return d.open }
 
-// Toggle opens or closes the dock. Closing always reverts to snapshot mode.
+// Toggle opens or closes the dock. Closing while a pane is live first returns it
+// to its daemon window (Demote), so the executor is never stranded in the TUI
+// session; then it reverts to snapshot mode.
 func (d *DockModel) Toggle() {
-	d.open = !d.open
-	if !d.open {
+	if d.open {
+		d.Demote() // no-op unless live; returns the executor home + resets snapshot
+		d.open = false
 		d.mode = dockSnapshot
 		d.snapshot = ""
+		return
 	}
+	d.open = true
 }
 
 // Height returns the dock's rendered height for a given terminal height.

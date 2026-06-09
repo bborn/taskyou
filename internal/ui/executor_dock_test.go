@@ -153,6 +153,24 @@ func TestDock_PromoteJoinsAndFocuses(t *testing.T) {
 	}
 }
 
+func TestDock_CloseWhileLiveDemotes(t *testing.T) {
+	f := &fakePaneController{snapshot: "x"}
+	d := NewDockModel(f)
+	d.Toggle() // open
+	d.Promote(&db.Task{ID: 7}, 40)
+	if !d.IsLive() {
+		t.Fatal("precondition: should be live")
+	}
+	// Closing the dock while live must break the pane back (not strand it).
+	d.Toggle() // close
+	if d.IsOpen() {
+		t.Fatal("dock should be closed")
+	}
+	if len(f.broken) != 1 || f.broken[0] != 7 {
+		t.Fatalf("closing while live must demote: broken = %v, want [7]", f.broken)
+	}
+}
+
 func TestDock_PromoteNoopWhenClosedOrAlreadyLive(t *testing.T) {
 	f := &fakePaneController{}
 	d := NewDockModel(f)
