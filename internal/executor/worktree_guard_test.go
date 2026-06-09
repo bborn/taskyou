@@ -17,6 +17,17 @@ func toolInput(t *testing.T, m map[string]any) json.RawMessage {
 	return b
 }
 
+// applyPatch wraps one or more apply_patch marker lines in a full patch envelope,
+// mirroring what Codex passes as tool_input.command for the apply_patch tool.
+func applyPatch(markers ...string) string {
+	body := "*** Begin Patch\n"
+	for _, m := range markers {
+		body += m + "\n"
+	}
+	body += "*** End Patch\n"
+	return body
+}
+
 func TestEvaluateWorktreeWriteGuard(t *testing.T) {
 	cases := []struct {
 		name  string
@@ -81,6 +92,47 @@ func TestEvaluateWorktreeWriteGuard(t *testing.T) {
 			allow: []string{"/home/u/shared"},
 			in:    WorktreeGuardInput{ToolName: "Write", Cwd: wt},
 		},
+		// --- non-Claude executor tool vocabularies (same policy, one source of truth) ---
+		{
+			name: "gemini write_file outside asks",
+			root: wt,
+			in:   WorktreeGuardInput{ToolName: "write_file", Cwd: wt},
+			want: "ask",
+		},
+		{
+			name: "gemini write_file inside worktree allowed",
+			root: wt,
+			in:   WorktreeGuardInput{ToolName: "write_file", Cwd: wt},
+		},
+		{
+			name: "gemini replace outside asks",
+			root: wt,
+			in:   WorktreeGuardInput{ToolName: "replace", Cwd: wt},
+			want: "ask",
+		},
+		{
+			name: "gemini run_shell_command redirect outside asks",
+			root: wt,
+			in:   WorktreeGuardInput{ToolName: "run_shell_command", Cwd: wt},
+			want: "ask",
+		},
+		{
+			name: "codex apply_patch update outside asks",
+			root: wt,
+			in:   WorktreeGuardInput{ToolName: "apply_patch", Cwd: wt},
+			want: "ask",
+		},
+		{
+			name: "codex apply_patch update inside worktree allowed",
+			root: wt,
+			in:   WorktreeGuardInput{ToolName: "apply_patch", Cwd: wt},
+		},
+		{
+			name: "codex apply_patch outside in bypass mode denies",
+			root: wt,
+			in:   WorktreeGuardInput{ToolName: "apply_patch", Cwd: wt, PermissionMode: "bypassPermissions"},
+			want: "deny",
+		},
 	}
 
 	// Per-case tool inputs (kept out of the struct so we can use the helper).
@@ -95,6 +147,13 @@ func TestEvaluateWorktreeWriteGuard(t *testing.T) {
 		"multiedit outside asks":                              {"file_path": "/home/u/proj/Gemfile"},
 		"shared dir project (no .task-worktrees) is inert":    {"file_path": "/home/u/proj/app/x.rb"},
 		"allowlisted external path allowed":                   {"file_path": "/home/u/shared/cache.db"},
+		"gemini write_file outside asks":                      {"file_path": "/home/u/proj/config.yaml"},
+		"gemini write_file inside worktree allowed":           {"file_path": wt + "/config.yaml"},
+		"gemini replace outside asks":                         {"file_path": "/home/u/proj/app/models/event.rb"},
+		"gemini run_shell_command redirect outside asks":      {"command": "echo data > /home/u/proj/out.txt"},
+		"codex apply_patch update outside asks":               {"command": applyPatch("*** Update File: /home/u/proj/app/models/event.rb")},
+		"codex apply_patch update inside worktree allowed":    {"command": applyPatch("*** Update File: app/models/event.rb")},
+		"codex apply_patch outside in bypass mode denies":     {"command": applyPatch("*** Add File: /home/u/proj/new.rb")},
 	}
 
 	for _, c := range cases {
@@ -144,6 +203,49 @@ func TestWorktreeWriteGuardBash(t *testing.T) {
 			}
 			if gotDecision != c.want {
 				t.Errorf("command %q: decision = %q, want %q", c.command, gotDecision, c.want)
+			}
+		})
+	}
+}
+
+// TestWorktreeWriteGuardApplyPatch covers the Codex/OpenCode apply_patch envelope
+// parser: multi-file patches, Move destinations, and mixed in/out targets.
+func TestWorktreeWriteGuardApplyPatch(t *testing.T) {
+	cases := []struct {
+		name    string
+		markers []string
+		want    string
+	}{
+		{"single update inside allowed", []string{"*** Update File: app/x.rb"}, ""},
+		{"add inside allowed", []string{"*** Add File: pkg/new.go"}, ""},
+		{"update outside asks", []string{"*** Update File: /home/u/proj/app/x.rb"}, "ask"},
+		{"delete outside asks", []string{"*** Delete File: ../sibling/file.txt"}, "ask"},
+		{"move destination outside asks", []string{"*** Update File: app/x.rb", "*** Move to: /home/u/proj/x.rb"}, "ask"},
+		{
+			"multi-file one escapes asks",
+			[]string{"*** Update File: app/a.rb", "*** Add File: /etc/evil.conf", "*** Update File: app/b.rb"},
+			"ask",
+		},
+		{
+			"multi-file all inside allowed",
+			[]string{"*** Update File: app/a.rb", "*** Add File: app/b.rb"},
+			"",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			in := WorktreeGuardInput{
+				ToolName:  "apply_patch",
+				Cwd:       wt,
+				ToolInput: toolInput(t, map[string]any{"command": applyPatch(c.markers...)}),
+			}
+			got := EvaluateWorktreeWriteGuard(wt, nil, in)
+			gotDecision := ""
+			if got != nil {
+				gotDecision = got.Decision
+			}
+			if gotDecision != c.want {
+				t.Errorf("decision = %q, want %q (reason: %v)", gotDecision, c.want, reasonOf(got))
 			}
 		})
 	}

@@ -26,9 +26,16 @@ import (
 //   - Only taskyou-managed worktrees are guarded. "Shared dir" projects opted out
 //     of isolation, so there is no boundary to protect and the guard is inert.
 
-// WorktreeGuardInput is the minimal slice of a Claude PreToolUse payload the guard
-// needs. It is decoupled from the hook JSON struct so the guard can be unit-tested
-// without constructing full hook payloads.
+// WorktreeGuardInput is the canonical, executor-agnostic slice of a pre-tool-use
+// payload the guard needs. Every supported agent CLI (Claude, Codex, Gemini,
+// OpenCode) normalizes its native hook payload into this shape before evaluating
+// the guard, so the policy below has a single source of truth. It is also
+// decoupled from any hook JSON struct so the guard can be unit-tested without
+// constructing full hook payloads.
+//
+// ToolName uses each executor's real tool vocabulary (e.g. Claude "Write",
+// Codex "apply_patch", Gemini "write_file"/"run_shell_command"); externalWriteTargets
+// knows how to read the write destinations out of each.
 type WorktreeGuardInput struct {
 	ToolName       string
 	ToolInput      json.RawMessage
@@ -36,8 +43,12 @@ type WorktreeGuardInput struct {
 	PermissionMode string
 }
 
-// WorktreeGuardDecision maps directly onto Claude Code's
-// hookSpecificOutput.permissionDecision contract.
+// WorktreeGuardDecision is the executor-agnostic outcome. The transport layer for
+// each CLI maps it onto that CLI's wire format: Claude/Codex emit
+// hookSpecificOutput.permissionDecision; Gemini emits {decision,reason}; OpenCode
+// throws from its plugin. "ask" is only honored by Claude (whose hook protocol has
+// an interactive permission prompt); executors without one downgrade ask→deny to
+// fail safe.
 type WorktreeGuardDecision struct {
 	Decision string // "ask" or "deny"
 	Reason   string
@@ -97,14 +108,23 @@ func IsManagedWorktree(path string) bool {
 func externalWriteTargets(in WorktreeGuardInput, root string, allowExternal []string) []string {
 	var raw []string
 	switch in.ToolName {
-	case "Edit", "Write", "MultiEdit":
+	// File-edit tools whose target lives in a "file_path" field.
+	//   Claude: Edit / Write / MultiEdit   ·   Gemini: write_file / replace
+	// (The OpenCode plugin normalizes its write/edit tools to "Write" + file_path.)
+	case "Edit", "Write", "MultiEdit", "write_file", "replace":
 		raw = stringField(in.ToolInput, "file_path")
 	case "NotebookEdit":
 		raw = stringField(in.ToolInput, "notebook_path")
-	case "Bash":
+	// Shell tools whose command lives in a "command" field.
+	//   Claude: Bash   ·   Gemini: run_shell_command
+	case "Bash", "run_shell_command":
 		raw = bashWriteTargets(in.ToolInput)
+	// Codex (and the OpenCode plugin) edit files through apply_patch; the write
+	// targets live as marker lines inside the patch envelope carried in "command".
+	case "apply_patch":
+		raw = applyPatchWriteTargets(in.ToolInput)
 	default:
-		return nil // Read / Grep / Glob / etc. — reads are always allowed
+		return nil // Read / Grep / Glob / MCP / etc. — reads are always allowed
 	}
 
 	var escapes []string
@@ -167,6 +187,44 @@ func bashWriteTargets(rawInput json.RawMessage) []string {
 	// 4. Single-target mutators given an absolute/home/parent path (`rm -rf /x`).
 	for _, m := range reMutTarget.FindAllStringSubmatch(command, -1) {
 		targets = append(targets, m[2])
+	}
+	return targets
+}
+
+// --- apply_patch analysis (Codex / OpenCode) -------------------------------
+//
+// Codex performs all file edits through an apply_patch tool whose tool_input.command
+// holds a patch envelope. The mutated files are named by marker lines, e.g.:
+//
+//	*** Begin Patch
+//	*** Add File: path/to/new.go
+//	*** Update File: app/models/event.rb
+//	*** Move to: app/models/renamed.rb
+//	*** Delete File: old/thing.txt
+//	*** End Patch
+//
+// Paths are relative to the session cwd (the worktree) unless absolute. We extract
+// every Add/Update/Delete target plus any Move destination, then the shared path
+// logic decides whether any of them escape the worktree.
+var (
+	reApplyPatchFile = regexp.MustCompile(`(?m)^\s*\*\*\*\s+(?:Add|Update|Delete) File:\s*(.+?)\s*$`)
+	reApplyPatchMove = regexp.MustCompile(`(?m)^\s*\*\*\*\s+Move to:\s*(.+?)\s*$`)
+)
+
+// applyPatchWriteTargets extracts the files an apply_patch envelope would mutate.
+func applyPatchWriteTargets(rawInput json.RawMessage) []string {
+	cmds := stringField(rawInput, "command")
+	if len(cmds) == 0 {
+		return nil
+	}
+	patch := cmds[0]
+
+	var targets []string
+	for _, m := range reApplyPatchFile.FindAllStringSubmatch(patch, -1) {
+		targets = append(targets, strings.Trim(strings.TrimSpace(m[1]), `"'`))
+	}
+	for _, m := range reApplyPatchMove.FindAllStringSubmatch(patch, -1) {
+		targets = append(targets, strings.Trim(strings.TrimSpace(m[1]), `"'`))
 	}
 	return targets
 }

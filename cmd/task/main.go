@@ -395,6 +395,25 @@ Tasks will automatically reconnect to their agent sessions when viewed.`,
 	claudeHookCmd.Flags().String("event", "", "Hook event type (Notification, Stop, etc.)")
 	rootCmd.AddCommand(claudeHookCmd)
 
+	// Worktree write-guard subcommand - the executor-agnostic transport for the
+	// worktree write-guard used by the codex/gemini/opencode pre-tool hooks. Reads a
+	// normalized pre-tool payload on stdin, evaluates EvaluateWorktreeWriteGuard, and
+	// renders the decision in the format the given executor expects (internal use).
+	worktreeGuardCmd := &cobra.Command{
+		Use:    "worktree-guard",
+		Short:  "Evaluate the worktree write-guard for a pre-tool hook",
+		Hidden: true, // Internal use only - invoked by codex/gemini/opencode hooks
+		Run: func(cmd *cobra.Command, args []string) {
+			format, _ := cmd.Flags().GetString("format")
+			// Never block the agent on our own failure: handle errors by allowing.
+			if err := handleWorktreeGuardHook(format); err != nil {
+				os.Exit(0)
+			}
+		},
+	}
+	worktreeGuardCmd.Flags().String("format", "", "Output format: codex | gemini | opencode")
+	rootCmd.AddCommand(worktreeGuardCmd)
+
 	// MCP server subcommand - runs the workflow MCP server for a task (internal use)
 	mcpServerCmd := &cobra.Command{
 		Use:    "mcp-server",
@@ -4251,6 +4270,92 @@ func emitWorktreeGuardDecision(database *db.DB, taskID int64, task *db.Task, inp
 		},
 	}
 	if data, err := json.Marshal(out); err == nil {
+		fmt.Println(string(data))
+	}
+}
+
+// worktreeGuardHookInput is the normalized pre-tool payload the worktree-guard
+// subcommand reads on stdin. Codex (PreToolUse) and Gemini (BeforeTool) emit this
+// snake_case shape natively; the OpenCode plugin assembles it before piping it in.
+type worktreeGuardHookInput struct {
+	ToolName       string          `json:"tool_name"`
+	ToolInput      json.RawMessage `json:"tool_input"`
+	Cwd            string          `json:"cwd"`
+	PermissionMode string          `json:"permission_mode"`
+}
+
+// handleWorktreeGuardHook is the executor-agnostic transport for the worktree
+// write-guard, shared by the codex/gemini/opencode pre-tool hooks. It reads the
+// worktree root from WORKTREE_PATH (set by every executor when launching the CLI),
+// evaluates the single shared policy (EvaluateWorktreeWriteGuard), and renders the
+// decision in the requested executor's wire format. It fails open on any error so a
+// guard malfunction never wedges the agent.
+func handleWorktreeGuardHook(format string) error {
+	worktreePath := strings.TrimSpace(os.Getenv("WORKTREE_PATH"))
+	if worktreePath == "" {
+		return nil // no worktree context — nothing to guard
+	}
+
+	var in worktreeGuardHookInput
+	if err := json.NewDecoder(os.Stdin).Decode(&in); err != nil {
+		return nil // unparseable payload — allow rather than block
+	}
+
+	var allow []string
+	if projectDir := executor.ManagedWorktreeProjectDir(worktreePath); projectDir != "" {
+		allow = executor.WorktreeAllowExternalWrites(projectDir)
+	}
+
+	decision := executor.EvaluateWorktreeWriteGuard(worktreePath, allow, executor.WorktreeGuardInput{
+		ToolName:       in.ToolName,
+		ToolInput:      in.ToolInput,
+		Cwd:            in.Cwd,
+		PermissionMode: in.PermissionMode,
+	})
+
+	renderWorktreeGuardDecision(format, decision)
+	return nil
+}
+
+// renderWorktreeGuardDecision writes a guard decision in the wire format the given
+// executor's hook expects. None of codex/gemini/opencode support an interactive
+// "ask" in their pre-tool hook, so an "ask" is downgraded to a hard deny to fail
+// safe (the escape hatch is worktree.allow_external_writes in .taskyou.yml). When
+// the guard allows the call, nothing is emitted (and exit stays 0) so the CLI's own
+// approval flow proceeds unchanged.
+func renderWorktreeGuardDecision(format string, decision *executor.WorktreeGuardDecision) {
+	if decision == nil {
+		return // allowed
+	}
+
+	switch format {
+	case "codex":
+		// Codex PreToolUse contract: hookSpecificOutput.permissionDecision ∈ {allow,deny}.
+		emitJSONLine(map[string]any{
+			"hookSpecificOutput": map[string]any{
+				"hookEventName":            "PreToolUse",
+				"permissionDecision":       "deny",
+				"permissionDecisionReason": decision.Reason,
+			},
+		})
+	case "gemini":
+		// Gemini BeforeTool contract: {decision: allow|deny, reason, systemMessage}.
+		emitJSONLine(map[string]any{
+			"decision":      "deny",
+			"reason":        decision.Reason,
+			"systemMessage": "Worktree write-guard blocked an out-of-worktree write",
+		})
+	case "opencode":
+		// The OpenCode plugin reads the reason from stdout and treats exit code 1 as
+		// a denial (which it surfaces by throwing, aborting the tool call).
+		fmt.Println(decision.Reason)
+		os.Exit(1)
+	}
+}
+
+// emitJSONLine marshals v and prints it on a single line to stdout for a hook.
+func emitJSONLine(v any) {
+	if data, err := json.Marshal(v); err == nil {
 		fmt.Println(string(data))
 	}
 }

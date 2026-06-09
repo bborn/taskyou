@@ -105,6 +105,18 @@ func (c *CodexExecutor) runCodex(ctx context.Context, task *db.Task, workDir, pr
 	// Kill ALL existing windows with this name (handles duplicates)
 	KillAllWindowsByNameAllSessions(windowName)
 
+	// Worktree write-guard: install Codex's PreToolUse hook so writes that would
+	// escape the isolated worktree are denied. Cleaned up when the session ends.
+	cleanupGuard, guardErr := c.executor.setupCodexWorktreeGuard(workDir, c.executor.getProjectDir(task.Project))
+	if guardErr != nil {
+		c.logger.Warn("could not set up Codex worktree guard", "error", guardErr)
+	}
+	defer func() {
+		if cleanupGuard != nil {
+			cleanupGuard()
+		}
+	}()
+
 	// Create a temp file for the prompt
 	promptFile, err := os.CreateTemp("", "task-prompt-*.txt")
 	if err != nil {
