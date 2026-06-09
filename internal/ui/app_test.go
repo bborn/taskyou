@@ -11,6 +11,48 @@ import (
 	"github.com/bborn/workflow/internal/executor"
 )
 
+func TestToggleDock_OpensDockAndRendersBelowBoard(t *testing.T) {
+	kanban := NewKanbanBoard(100, 40)
+	task := &db.Task{ID: 4281, Title: "Test task", Status: db.StatusBlocked}
+	kanban.SetTasks([]*db.Task{task})
+	kanban.SelectTask(4281)
+
+	m := &AppModel{
+		width:             100,
+		height:            40,
+		currentView:       ViewDashboard,
+		keys:              DefaultKeyMap(),
+		kanban:            kanban,
+		dock:              NewDockModel(&fakePaneController{snapshot: "● Bash(ls)\nProceed?"}),
+		tasksNeedingInput: make(map[int64]bool),
+		questionPrompts:   make(map[int64]bool),
+		executorPrompts:   make(map[int64]string),
+	}
+
+	if m.dock.IsOpen() {
+		t.Fatal("dock should start closed")
+	}
+
+	// Press tab to toggle the dock open.
+	updated, _ := m.updateDashboard(tea.KeyMsg{Type: tea.KeyTab})
+	m = updated.(*AppModel)
+	if !m.dock.IsOpen() {
+		t.Fatal("tab should open the dock")
+	}
+
+	view := m.viewDashboard()
+	if !strings.Contains(view, "executor #") {
+		t.Fatalf("dashboard should render the dock after toggle:\n%s", view)
+	}
+
+	// Press tab again to close.
+	updated, _ = m.updateDashboard(tea.KeyMsg{Type: tea.KeyTab})
+	m = updated.(*AppModel)
+	if m.dock.IsOpen() {
+		t.Fatal("second tab should close the dock")
+	}
+}
+
 func TestDefaultKeyMap(t *testing.T) {
 	// Verify DefaultKeyMap creates valid key bindings
 	keys := DefaultKeyMap()

@@ -102,6 +102,8 @@ type KeyMap struct {
 	// Spotlight mode
 	Spotlight     key.Binding
 	SpotlightSync key.Binding
+	// Toggle the executor dock below the board
+	ToggleDock key.Binding
 }
 
 // ShortHelp returns key bindings to show in the mini help.
@@ -286,6 +288,10 @@ func DefaultKeyMap() KeyMap {
 			key.WithKeys("F"),
 			key.WithHelp("F", "spotlight sync"),
 		),
+		ToggleDock: key.NewBinding(
+			key.WithKeys("tab"),
+			key.WithHelp("tab", "executor dock"),
+		),
 	}
 }
 
@@ -388,6 +394,7 @@ type AppModel struct {
 	// Dashboard state
 	tasks        []*db.Task
 	kanban       *KanbanBoard
+	dock         *DockModel // executor dock below the board (toggleable)
 	loading      bool
 	err          error
 	notification string    // Notification banner text
@@ -624,6 +631,7 @@ func NewAppModel(database *db.DB, exec *executor.Executor, workingDir string, ve
 		help:               h,
 		currentView:        ViewDashboard,
 		kanban:             kanban,
+		dock:               NewDockModel(newTmuxPaneController("")),
 		loading:            true,
 		prevStatuses:       make(map[int64]string),
 		tasksNeedingInput:  make(map[int64]bool),
@@ -1317,6 +1325,14 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		cmds = append(cmds, m.loadTasks())
 
+	case dockTickMsg:
+		// Periodic snapshot refresh. Reschedule only while the dock is open so the
+		// tick chain dies (zero cost) when closed.
+		if m.dock != nil && m.dock.IsOpen() {
+			m.refreshDockForSelection()
+			cmds = append(cmds, dockTick())
+		}
+
 	case taskEventMsg:
 		// Real-time task update from executor
 		event := msg.event
@@ -1625,6 +1641,27 @@ func (m *AppModel) viewNewTaskConfirm() string {
 	return box.Render(lipgloss.JoinVertical(lipgloss.Left, header, formView))
 }
 
+// refreshDockForSelection re-captures the dock snapshot for the currently
+// highlighted task. Cheap no-op when the dock is closed.
+func (m *AppModel) refreshDockForSelection() {
+	if m.dock == nil || !m.dock.IsOpen() {
+		return
+	}
+	if task := m.kanban.SelectedTask(); task != nil {
+		m.dock.Refresh(task, m.height)
+	}
+}
+
+// dockTickMsg drives periodic dock snapshot refreshes while the dock is open.
+type dockTickMsg struct{}
+
+// dockTick schedules the next dock snapshot refresh. ~750ms keeps the snapshot
+// current without hammering tmux. The handler self-gates and reschedules only
+// while the dock is open, so the tick chain dies (zero cost) when closed.
+func dockTick() tea.Cmd {
+	return tea.Tick(750*time.Millisecond, func(time.Time) tea.Msg { return dockTickMsg{} })
+}
+
 func (m *AppModel) viewDashboard() string {
 	var headerParts []string
 
@@ -1691,6 +1728,14 @@ func (m *AppModel) viewDashboard() string {
 		promptPreviewHeight = lipgloss.Height(promptPreview)
 	}
 
+	// Render the executor dock if open (below the board)
+	dockView := ""
+	dockHeight := 0
+	if m.dock != nil && m.dock.IsOpen() {
+		dockView = m.dock.View(m.width, m.height, m.kanban.SelectedTask())
+		dockHeight = lipgloss.Height(dockView)
+	}
+
 	// Build the header first so we can measure its actual rendered height
 	header := ""
 	headerHeight := 0
@@ -1703,7 +1748,7 @@ func (m *AppModel) viewDashboard() string {
 	helpView := m.renderHelp()
 	helpHeight := lipgloss.Height(helpView)
 
-	kanbanHeight := m.height - headerHeight - filterBarHeight - helpHeight - promptPreviewHeight
+	kanbanHeight := m.height - headerHeight - filterBarHeight - helpHeight - promptPreviewHeight - dockHeight
 	if kanbanHeight < 10 {
 		kanbanHeight = 10
 	}
@@ -1725,11 +1770,14 @@ func (m *AppModel) viewDashboard() string {
 		contentParts = append(contentParts, welcomeView, helpView)
 	} else {
 		kanbanView := m.kanban.View()
+		contentParts = append(contentParts, kanbanView)
 		if promptPreview != "" {
-			contentParts = append(contentParts, kanbanView, promptPreview, helpView)
-		} else {
-			contentParts = append(contentParts, kanbanView, helpView)
+			contentParts = append(contentParts, promptPreview)
 		}
+		if dockView != "" {
+			contentParts = append(contentParts, dockView)
+		}
+		contentParts = append(contentParts, helpView)
 	}
 
 	content := lipgloss.JoinVertical(lipgloss.Left, contentParts...)
@@ -2001,19 +2049,23 @@ func (m *AppModel) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// Column navigation
 	case key.Matches(msg, m.keys.Left):
 		m.kanban.MoveLeft()
+		m.refreshDockForSelection()
 		return m, nil
 
 	case key.Matches(msg, m.keys.Right):
 		m.kanban.MoveRight()
+		m.refreshDockForSelection()
 		return m, nil
 
 	// Task navigation within column
 	case key.Matches(msg, m.keys.Up):
 		m.kanban.MoveUp()
+		m.refreshDockForSelection()
 		return m, nil
 
 	case key.Matches(msg, m.keys.Down):
 		m.kanban.MoveDown()
+		m.refreshDockForSelection()
 		return m, nil
 
 	// Numeric shortcuts 1-9 and double-digits (11, 22, etc.) to select visible tasks
@@ -2213,6 +2265,14 @@ func (m *AppModel) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case key.Matches(msg, m.keys.Help):
 		m.help.ShowAll = !m.help.ShowAll
+		return m, nil
+
+	case key.Matches(msg, m.keys.ToggleDock):
+		m.dock.Toggle()
+		if m.dock.IsOpen() {
+			m.refreshDockForSelection()
+			return m, dockTick()
+		}
 		return m, nil
 
 	case key.Matches(msg, m.keys.ApprovePrompt):
