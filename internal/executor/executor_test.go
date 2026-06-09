@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -1489,7 +1490,7 @@ func TestWriteWorkflowMCPConfig(t *testing.T) {
 		worktreePath := t.TempDir()
 		taskID := int64(123)
 
-		err := writeWorkflowMCPConfig(worktreePath, taskID)
+		err := writeWorkflowMCPConfig(worktreePath, taskID, "")
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -1516,12 +1517,12 @@ func TestWriteWorkflowMCPConfig(t *testing.T) {
 		expectedTools := []string{
 			"taskyou_complete",
 			"taskyou_needs_input",
-			"taskyou_screenshot",
 			"taskyou_show_task",
 			"taskyou_create_task",
 			"taskyou_list_tasks",
 			"taskyou_get_project_context",
 			"taskyou_set_project_context",
+			"taskyou_spotlight",
 		}
 		if len(autoApprove) != len(expectedTools) {
 			t.Errorf("autoApprove has %d items, want %d", len(autoApprove), len(expectedTools))
@@ -1556,7 +1557,7 @@ func TestWriteWorkflowMCPConfig(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		err := writeWorkflowMCPConfig(worktreePath, taskID)
+		err := writeWorkflowMCPConfig(worktreePath, taskID, "")
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -1615,7 +1616,7 @@ func TestWriteWorkflowMCPConfig(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		err := writeWorkflowMCPConfig(worktreePath, taskID)
+		err := writeWorkflowMCPConfig(worktreePath, taskID, "")
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -1673,7 +1674,7 @@ func TestWriteWorkflowMCPConfig(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		err := writeWorkflowMCPConfig(worktreePath, taskID)
+		err := writeWorkflowMCPConfig(worktreePath, taskID, "")
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -1709,13 +1710,13 @@ func TestWriteWorkflowMCPConfig(t *testing.T) {
 		worktreePath := t.TempDir()
 
 		// First call with task ID 100
-		err := writeWorkflowMCPConfig(worktreePath, 100)
+		err := writeWorkflowMCPConfig(worktreePath, 100, "")
 		if err != nil {
 			t.Fatalf("first call failed: %v", err)
 		}
 
 		// Second call with task ID 200
-		err = writeWorkflowMCPConfig(worktreePath, 200)
+		err = writeWorkflowMCPConfig(worktreePath, 200, "")
 		if err != nil {
 			t.Fatalf("second call failed: %v", err)
 		}
@@ -1725,6 +1726,129 @@ func TestWriteWorkflowMCPConfig(t *testing.T) {
 
 		if args[2] != "200" {
 			t.Errorf("task ID = %v, want 200", args[2])
+		}
+	})
+
+	t.Run("auto-approves taskyou_spotlight", func(t *testing.T) {
+		configPath := setupTempConfigDir(t)
+		worktreePath := t.TempDir()
+
+		if err := writeWorkflowMCPConfig(worktreePath, 1, ""); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		taskyou := readWorkflowConfig(t, configPath, worktreePath)
+		autoApprove, ok := taskyou["autoApprove"].([]interface{})
+		if !ok {
+			t.Fatal("expected autoApprove array")
+		}
+		var found bool
+		for _, v := range autoApprove {
+			if v == "taskyou_spotlight" {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("taskyou_spotlight missing from autoApprove list: %v", autoApprove)
+		}
+	})
+
+	t.Run("honors per-project CLAUDE_CONFIG_DIR override", func(t *testing.T) {
+		// Project with a custom claude config dir must get its MCP config
+		// written there, not to the default ~/.claude.json. Otherwise Claude
+		// Code reads the wrong file and the taskyou MCP server is invisible.
+		defaultConfigPath := setupTempConfigDir(t)
+		customDir := filepath.Join(t.TempDir(), "custom-claude")
+		customConfigPath := ClaudeConfigFilePath(customDir)
+		worktreePath := t.TempDir()
+
+		if err := writeWorkflowMCPConfig(worktreePath, 42, customDir); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		// Custom file should exist with the config.
+		if _, err := os.Stat(customConfigPath); err != nil {
+			t.Fatalf("expected config written to custom dir: %v", err)
+		}
+		data, _ := os.ReadFile(customConfigPath)
+		if !strings.Contains(string(data), "taskyou") {
+			t.Errorf("expected taskyou entry in custom config file:\n%s", data)
+		}
+
+		// Default file should NOT have been touched.
+		if _, err := os.Stat(defaultConfigPath); !os.IsNotExist(err) {
+			t.Errorf("expected default claude.json to remain untouched, but it exists at %s", defaultConfigPath)
+		}
+	})
+
+	t.Run("resolves symlinked ty binary", func(t *testing.T) {
+		// Claude Code spawns the configured command directly. If we record a
+		// symlinked PATH entry that points back into ty's install dir, an
+		// upgrade or PATH change can leave the MCP server pointing at a stale
+		// binary. Resolve the symlink at config-write time.
+		setupTempConfigDir(t)
+		worktreePath := t.TempDir()
+
+		if err := writeWorkflowMCPConfig(worktreePath, 1, ""); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		taskyou := readWorkflowConfig(t, ClaudeConfigFilePath(""), worktreePath)
+		cmd, _ := taskyou["command"].(string)
+		if cmd == "" {
+			t.Fatal("expected command to be set")
+		}
+		// Whatever path we record should already be symlink-free.
+		if resolved, err := filepath.EvalSymlinks(cmd); err == nil && resolved != cmd {
+			t.Errorf("expected command to be symlink-resolved: stored %q resolves to %q", cmd, resolved)
+		}
+	})
+
+	t.Run("concurrent writes do not lose entries", func(t *testing.T) {
+		// Two task starts hitting the same claude.json must not clobber each
+		// other. Before the fix, the read-modify-write race lost entries —
+		// which is one plausible cause of an executor seeing no MCP tools.
+		setupTempConfigDir(t)
+
+		const n = 10
+		paths := make([]string, n)
+		for i := 0; i < n; i++ {
+			paths[i] = t.TempDir()
+		}
+
+		var wg sync.WaitGroup
+		errCh := make(chan error, n)
+		for i := 0; i < n; i++ {
+			wg.Add(1)
+			go func(i int) {
+				defer wg.Done()
+				if err := writeWorkflowMCPConfig(paths[i], int64(1000+i), ""); err != nil {
+					errCh <- err
+				}
+			}(i)
+		}
+		wg.Wait()
+		close(errCh)
+		for err := range errCh {
+			t.Errorf("concurrent write failed: %v", err)
+		}
+
+		data, err := os.ReadFile(ClaudeConfigFilePath(""))
+		if err != nil {
+			t.Fatalf("failed to read claude.json: %v", err)
+		}
+		var config map[string]interface{}
+		if err := json.Unmarshal(data, &config); err != nil {
+			t.Fatalf("claude.json is corrupted: %v\n%s", err, data)
+		}
+		projects, ok := config["projects"].(map[string]interface{})
+		if !ok {
+			t.Fatal("expected projects map")
+		}
+		for i, p := range paths {
+			if _, ok := projects[p]; !ok {
+				t.Errorf("worktree %d (%s) missing from final config — concurrent write was lost", i, p)
+			}
 		}
 	})
 }
