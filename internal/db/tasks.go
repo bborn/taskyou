@@ -321,6 +321,14 @@ func (db *DB) CreateTask(t *Task) error {
 		db.SetLastExecutorForProject(t.Project, t.Executor)
 	}
 
+	// Save the last used effort and permission mode so the next task in this
+	// project defaults to the same choices. Effort is stored even when empty
+	// ("default") so switching back to the default sticks.
+	if t.Project != "" {
+		db.SetLastEffortForProject(t.Project, t.EffortLevel)
+		db.SetLastPermissionForProject(t.Project, t.PermissionMode)
+	}
+
 	// Save the last used project
 	if t.Project != "" {
 		db.SetLastUsedProject(t.Project)
@@ -1624,6 +1632,30 @@ func (db *DB) GetLastExecutorForProject(project string) (string, error) {
 // SetLastExecutorForProject saves the last used executor for a project.
 func (db *DB) SetLastExecutorForProject(project, executor string) error {
 	return db.SetSetting("last_executor_"+project, executor)
+}
+
+// GetLastEffortForProject returns the last used Claude effort override for a
+// project ("" means the global/Claude default was used).
+func (db *DB) GetLastEffortForProject(project string) (string, error) {
+	return db.GetSetting("last_effort_" + project)
+}
+
+// SetLastEffortForProject saves the last used Claude effort override for a
+// project so the next task in it defaults to the same choice.
+func (db *DB) SetLastEffortForProject(project, effort string) error {
+	return db.SetSetting("last_effort_"+project, effort)
+}
+
+// GetLastPermissionForProject returns the last used permission mode for a
+// project ("" means none recorded yet).
+func (db *DB) GetLastPermissionForProject(project string) (string, error) {
+	return db.GetSetting("last_permission_" + project)
+}
+
+// SetLastPermissionForProject saves the last used permission mode for a project
+// so the next task in it defaults to the same choice.
+func (db *DB) SetLastPermissionForProject(project, mode string) error {
+	return db.SetSetting("last_permission_"+project, mode)
 }
 
 // IsFirstRun returns true if this is the first time the app is being used.

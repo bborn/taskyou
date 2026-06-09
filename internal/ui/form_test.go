@@ -919,7 +919,7 @@ func TestApplyToOnlyTouchesEditableFields(t *testing.T) {
 		DaemonSession:   "ty-1",
 		Port:            4242,
 		PRInfoJSON:      `{"state":"open"}`,
-		DangerousMode:   true,
+		DangerousMode:   false,
 		PermissionMode:  "auto",
 		RemoteControl:   true,
 		Pinned:          true,
@@ -943,7 +943,9 @@ func TestApplyToOnlyTouchesEditableFields(t *testing.T) {
 		t.Errorf("Body = %q, want %q", updated.Body, "New body")
 	}
 
-	// Unexposed persisted fields are preserved.
+	// Persisted fields the edit form doesn't change are preserved. Permission
+	// mode IS an editable form field now, so it round-trips through the form
+	// (seeded from the task), and DangerousMode stays consistent with it.
 	preserved := []struct {
 		name string
 		got  any
@@ -953,7 +955,7 @@ func TestApplyToOnlyTouchesEditableFields(t *testing.T) {
 		{"DaemonSession", updated.DaemonSession, "ty-1"},
 		{"Port", updated.Port, 4242},
 		{"PRInfoJSON", updated.PRInfoJSON, `{"state":"open"}`},
-		{"DangerousMode", updated.DangerousMode, true},
+		{"DangerousMode", updated.DangerousMode, false},
 		{"PermissionMode", updated.PermissionMode, "auto"},
 		{"RemoteControl", updated.RemoteControl, true},
 		{"Pinned", updated.Pinned, true},
@@ -1340,4 +1342,156 @@ func TestEffortFieldHiddenForNonClaude(t *testing.T) {
 	if m.isFieldVisible(FieldEffort) {
 		t.Error("expected effort field to be hidden for non-Claude executors")
 	}
+}
+
+func TestPermissionFieldDefaultsToProjectDefault(t *testing.T) {
+	m := NewFormModel(nil, 100, 50, "", []string{db.ExecutorClaude})
+
+	// With no project record, the form falls back to the global default ("auto").
+	want := db.GlobalDefaultPermissionMode()
+	if m.permissionMode != want {
+		t.Errorf("permissionMode = %q, want default %q", m.permissionMode, want)
+	}
+	// "default" (prompt) is first so the less-restrictive modes follow it.
+	if len(m.permissionModes) == 0 || m.permissionModes[0] != db.PermissionModeDefault {
+		t.Fatalf("expected first permission option %q, got %v", db.PermissionModeDefault, m.permissionModes)
+	}
+	// The seeded default is carried onto the task so simple-mode tasks run in it.
+	if got := m.GetDBTask().PermissionMode; got != want {
+		t.Errorf("GetDBTask permission = %q, want %q", got, want)
+	}
+}
+
+func TestPermissionFieldCycleAndPersist(t *testing.T) {
+	m := NewFormModel(nil, 100, 50, "", []string{db.ExecutorClaude})
+	m.showAdvanced = true
+	m.focused = FieldPermission
+
+	// Start from "default" for a deterministic sequence regardless of the
+	// environment's configured default. The selector cycles in the canonical
+	// order: default -> accept-edits -> auto -> dangerous.
+	m.permissionIdx = permissionIndexFor(m.permissionModes, db.PermissionModeDefault)
+	m.permissionMode = db.PermissionModeDefault
+
+	// Right cycles default -> accept-edits and marks the field as user-chosen.
+	m.Update(tea.KeyMsg{Type: tea.KeyRight})
+	if m.permissionMode != db.PermissionModeAcceptEdits {
+		t.Errorf("after right, permission = %q, want %q", m.permissionMode, db.PermissionModeAcceptEdits)
+	}
+	if !m.permissionTouched {
+		t.Error("expected permissionTouched after a manual change")
+	}
+
+	// Three more rights -> auto -> dangerous; GetDBTask carries it and keeps
+	// DangerousMode in sync.
+	m.Update(tea.KeyMsg{Type: tea.KeyRight}) // -> auto
+	m.Update(tea.KeyMsg{Type: tea.KeyRight}) // -> dangerous
+	task := m.GetDBTask()
+	if task.PermissionMode != db.PermissionModeDangerous {
+		t.Errorf("GetDBTask permission = %q, want %q", task.PermissionMode, db.PermissionModeDangerous)
+	}
+	if !task.DangerousMode {
+		t.Error("expected DangerousMode true when permission is dangerous")
+	}
+}
+
+func TestPermissionAndEffortStickyPerProject(t *testing.T) {
+	database, err := db.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer database.Close()
+	if err := database.CreateProject(&db.Project{Name: "sticky", Path: t.TempDir()}); err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+
+	// A task created with a non-default effort + permission becomes the project's
+	// last-used choices.
+	first := &db.Task{
+		Title:          "first",
+		Status:         db.StatusQueued,
+		Type:           db.TypeCode,
+		Project:        "sticky",
+		Executor:       db.ExecutorClaude,
+		EffortLevel:    db.EffortHigh,
+		PermissionMode: db.PermissionModeDangerous,
+	}
+	if err := database.CreateTask(first); err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+
+	// The next new-task form for that project should default to the same choices.
+	m := NewFormModel(database, 100, 50, "", []string{db.ExecutorClaude})
+	if m.project != "sticky" {
+		t.Fatalf("expected form to default to last-used project 'sticky', got %q", m.project)
+	}
+	if m.effortLevel != db.EffortHigh {
+		t.Errorf("effort = %q, want sticky %q", m.effortLevel, db.EffortHigh)
+	}
+	if m.permissionMode != db.PermissionModeDangerous {
+		t.Errorf("permission = %q, want sticky %q", m.permissionMode, db.PermissionModeDangerous)
+	}
+}
+
+func TestPermissionFieldVisibility(t *testing.T) {
+	m := NewFormModel(nil, 100, 50, "", []string{db.ExecutorClaude})
+	m.showAdvanced = true
+
+	// Permission applies to every executor, so it shows for non-Claude too
+	// (unlike effort).
+	m.executor = db.ExecutorClaude
+	if !m.isFieldVisible(FieldPermission) {
+		t.Error("expected permission field visible in advanced mode for claude")
+	}
+	m.executor = db.ExecutorCodex
+	if !m.isFieldVisible(FieldPermission) {
+		t.Error("expected permission field visible in advanced mode for codex")
+	}
+
+	// Hidden in simple mode like the other advanced fields.
+	m.showAdvanced = false
+	if m.isFieldVisible(FieldPermission) {
+		t.Error("expected permission field hidden in simple mode")
+	}
+}
+
+func TestEditFormSeedsAndPreservesPermission(t *testing.T) {
+	t.Run("auto mode preserved", func(t *testing.T) {
+		m := NewEditFormModel(nil, &db.Task{
+			Title:          "t",
+			Project:        "personal",
+			Executor:       db.ExecutorClaude,
+			PermissionMode: db.PermissionModeAuto,
+		}, 100, 50, []string{db.ExecutorClaude})
+
+		if m.permissionMode != db.PermissionModeAuto {
+			t.Errorf("permissionMode = %q, want %q", m.permissionMode, db.PermissionModeAuto)
+		}
+		task := m.GetDBTask()
+		if task.PermissionMode != db.PermissionModeAuto {
+			t.Errorf("GetDBTask permission = %q, want %q", task.PermissionMode, db.PermissionModeAuto)
+		}
+		if task.DangerousMode {
+			t.Error("did not expect DangerousMode for auto")
+		}
+	})
+
+	t.Run("legacy dangerous flag preserved", func(t *testing.T) {
+		// A legacy task carrying only the boolean (no permission_mode) must not be
+		// silently downgraded when edited.
+		m := NewEditFormModel(nil, &db.Task{
+			Title:         "t",
+			Project:       "personal",
+			Executor:      db.ExecutorClaude,
+			DangerousMode: true,
+		}, 100, 50, []string{db.ExecutorClaude})
+
+		if m.permissionMode != db.PermissionModeDangerous {
+			t.Errorf("permissionMode = %q, want %q", m.permissionMode, db.PermissionModeDangerous)
+		}
+		task := m.GetDBTask()
+		if task.PermissionMode != db.PermissionModeDangerous || !task.DangerousMode {
+			t.Errorf("expected dangerous preserved: mode=%q dangerous=%v", task.PermissionMode, task.DangerousMode)
+		}
+	})
 }

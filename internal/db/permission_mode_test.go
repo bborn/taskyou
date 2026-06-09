@@ -6,6 +6,42 @@ import (
 	"testing"
 )
 
+// TestCreateTaskRemembersEffortAndPermission verifies that creating a task
+// records its effort and permission mode as the project's last-used choices so
+// the next task in that project can default to them.
+func TestCreateTaskRemembersEffortAndPermission(t *testing.T) {
+	tmpDir := t.TempDir()
+	database, err := Open(filepath.Join(tmpDir, "test.db"))
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer database.Close()
+
+	if err := database.CreateProject(&Project{Name: "p", Path: t.TempDir()}); err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+
+	task := &Task{
+		Title:          "T",
+		Status:         StatusQueued,
+		Type:           TypeCode,
+		Project:        "p",
+		Executor:       ExecutorClaude,
+		EffortLevel:    EffortHigh,
+		PermissionMode: PermissionModeDangerous,
+	}
+	if err := database.CreateTask(task); err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+
+	if got, _ := database.GetLastEffortForProject("p"); got != EffortHigh {
+		t.Errorf("last effort = %q, want %q", got, EffortHigh)
+	}
+	if got, _ := database.GetLastPermissionForProject("p"); got != PermissionModeDangerous {
+		t.Errorf("last permission = %q, want %q", got, PermissionModeDangerous)
+	}
+}
+
 func TestNormalizePermissionMode(t *testing.T) {
 	cases := map[string]string{
 		"auto":         PermissionModeAuto,        // Claude Code's auto mode

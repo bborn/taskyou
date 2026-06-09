@@ -742,7 +742,7 @@ func TestEditTaskFormPreservesRuntimeFields(t *testing.T) {
 	task.PRURL = "https://github.com/bborn/taskyou/pull/7"
 	task.PRNumber = 7
 	task.PRInfoJSON = `{"state":"open"}`
-	task.DangerousMode = true
+	task.DangerousMode = false
 	task.PermissionMode = "auto"
 	task.RemoteControl = true
 	task.Pinned = true
@@ -799,7 +799,7 @@ func TestEditTaskFormPreservesRuntimeFields(t *testing.T) {
 		{"PRURL", got.PRURL, "https://github.com/bborn/taskyou/pull/7"},
 		{"PRNumber", got.PRNumber, 7},
 		{"PRInfoJSON", got.PRInfoJSON, `{"state":"open"}`},
-		{"DangerousMode", got.DangerousMode, true},
+		{"DangerousMode", got.DangerousMode, false},
 		{"PermissionMode", got.PermissionMode, "auto"},
 		{"RemoteControl", got.RemoteControl, true},
 		{"Pinned", got.Pinned, true},

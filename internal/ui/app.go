@@ -2925,10 +2925,12 @@ func (m *AppModel) updateNewTaskForm(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Store pending task and create confirmation form
 			m.pendingTask = form.GetDBTask()
 			m.pendingAttachments = form.GetAttachments()
-			// Default to last queue choice for this project
+			// Default to last queue choice for this project. Permission mode now
+			// lives on the task form, so this is just execute-now vs backlog;
+			// fold any legacy "auto"/"dangerous" choices into "yes".
 			m.queueValue = "no"
-			if last, err := m.db.GetSetting("last_queue_choice:" + m.pendingTask.Project); err == nil && last != "" {
-				m.queueValue = last
+			if last, err := m.db.GetSetting("last_queue_choice:" + m.pendingTask.Project); err == nil && last != "" && last != "no" {
+				m.queueValue = "yes"
 			}
 			m.queueConfirm = huh.NewForm(
 				huh.NewGroup(
@@ -2936,11 +2938,8 @@ func (m *AppModel) updateNewTaskForm(msg tea.Msg) (tea.Model, tea.Cmd) {
 						Key("queue").
 						Title("Queue for execution?").
 						Options(
-							huh.NewOption("No — save to backlog", "no"),
 							huh.NewOption("Yes — execute now", "yes"),
-							huh.NewOption("Yes — execute in auto mode", "auto"),
-							huh.NewOption("Yes — execute in accept-edits mode", "accept-edits"),
-							huh.NewOption("Yes — execute in dangerous mode", "dangerous"),
+							huh.NewOption("No — save to backlog", "no"),
 						).
 						Value(&m.queueValue),
 				),
@@ -2986,20 +2985,11 @@ func (m *AppModel) updateNewTaskConfirm(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Remember the choice for this project
 			m.db.SetSetting("last_queue_choice:"+m.pendingTask.Project, m.queueValue)
 
-			// "yes" and "no" leave PermissionMode empty so CreateTask inherits the
-			// project's configured default; the explicit modes force themselves.
+			// Permission mode is already set on the task from the form; this
+			// choice only decides whether to run now or save to the backlog.
 			switch m.queueValue {
 			case "yes":
 				m.pendingTask.Status = db.StatusQueued
-			case "auto":
-				m.pendingTask.Status = db.StatusQueued
-				m.pendingTask.PermissionMode = db.PermissionModeAuto
-			case "accept-edits":
-				m.pendingTask.Status = db.StatusQueued
-				m.pendingTask.PermissionMode = db.PermissionModeAcceptEdits
-			case "dangerous":
-				m.pendingTask.Status = db.StatusQueued
-				m.pendingTask.PermissionMode = db.PermissionModeDangerous
 			default:
 				m.pendingTask.Status = db.StatusBacklog
 			}
