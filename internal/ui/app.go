@@ -1699,23 +1699,6 @@ func (m *AppModel) viewDashboard() string {
 		m.notifyTaskID = 0
 	}
 
-	// One-line fleet summary, shown only when there's something to report.
-	running := m.kanban.RunningTaskCount()
-	needInput := m.kanban.NeedsInputCount()
-	if running > 0 || needInput > 0 {
-		dimStyle := lipgloss.NewStyle().Foreground(ColorMuted)
-		var parts []string
-		if running > 0 {
-			parts = append(parts, lipgloss.NewStyle().Foreground(ColorInProgress).Render(
-				fmt.Sprintf("%s %d running", IconInProgress(), running)))
-		}
-		if needInput > 0 {
-			parts = append(parts, lipgloss.NewStyle().Foreground(ColorWarning).Render(
-				fmt.Sprintf("%s %d need input", IconBlocked(), needInput)))
-		}
-		headerParts = append(headerParts, strings.Join(parts, dimStyle.Render("  ·  ")))
-	}
-
 	// Show filter bar if filter is active or has text
 	filterBar := ""
 	filterBarHeight := 0
