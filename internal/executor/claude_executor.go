@@ -168,10 +168,17 @@ func (c *ClaudeExecutor) BuildCommand(task *db.Task, sessionID, prompt string) s
 		worktreeSessionID = fmt.Sprintf("%d", os.Getpid())
 	}
 
+	// Per-project CLAUDE_CONFIG_DIR prefix (empty for the default dir). The daemon
+	// launch path sets this via claudeEnvPrefix; the interactive/TUI launch path
+	// (DetailModel.startResumableSession) must too, or `claude --resume <id>` for a
+	// project with a custom config dir looks in the default ~/.claude, can't find the
+	// session, and exits — leaving only a placeholder pane ("lost executor pane").
+	configPrefix := c.configDirPrefix(task)
+
 	// Build command - resume if we have a session ID, otherwise start fresh
 	if sessionID != "" {
-		return fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q claude %s%s--resume %s`,
-			task.ID, worktreeSessionID, task.Port, task.WorktreePath, dangerousFlag, effort, sessionID)
+		return fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %sclaude %s%s--resume %s`,
+			task.ID, worktreeSessionID, task.Port, task.WorktreePath, configPrefix, dangerousFlag, effort, sessionID)
 	}
 
 	// Start fresh - if prompt is provided, write to temp file and pass it
@@ -180,18 +187,30 @@ func (c *ClaudeExecutor) BuildCommand(task *db.Task, sessionID, prompt string) s
 		promptFile, err := os.CreateTemp("", "task-prompt-*.txt")
 		if err != nil {
 			c.logger.Error("BuildCommand: failed to create temp file", "error", err)
-			return fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q claude %s%s`,
-				task.ID, worktreeSessionID, task.Port, task.WorktreePath, dangerousFlag, effort)
+			return fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %sclaude %s%s`,
+				task.ID, worktreeSessionID, task.Port, task.WorktreePath, configPrefix, dangerousFlag, effort)
 		}
 		promptFile.WriteString(prompt)
 		promptFile.Close()
 
-		return fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q claude %s%s"$(cat %q)"; rm -f %q`,
-			task.ID, worktreeSessionID, task.Port, task.WorktreePath, dangerousFlag, effort, promptFile.Name(), promptFile.Name())
+		return fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %sclaude %s%s"$(cat %q)"; rm -f %q`,
+			task.ID, worktreeSessionID, task.Port, task.WorktreePath, configPrefix, dangerousFlag, effort, promptFile.Name(), promptFile.Name())
 	}
 
-	return fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q claude %s%s`,
-		task.ID, worktreeSessionID, task.Port, task.WorktreePath, dangerousFlag, effort)
+	return fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %sclaude %s%s`,
+		task.ID, worktreeSessionID, task.Port, task.WorktreePath, configPrefix, dangerousFlag, effort)
+}
+
+// configDirPrefix returns the `CLAUDE_CONFIG_DIR=<dir> ` shell prefix for the task's
+// project, or "" when the project uses the default config dir. It mirrors the daemon
+// launch path (claudeEnvPrefix in executor.go), keeping the two command-builders from
+// diverging — a divergence that previously broke executor resume for projects with a
+// custom config dir.
+func (c *ClaudeExecutor) configDirPrefix(task *db.Task) string {
+	if c.executor == nil {
+		return ""
+	}
+	return claudeEnvPrefix(c.executor.claudePathsForProject(task.Project).configDir)
 }
 
 // ---- Session and Dangerous Mode Support ----
