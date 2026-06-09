@@ -64,6 +64,39 @@ func pendingPaneAction(task *db.Task) paneAction {
 	return paneActionStartExecutor
 }
 
+// liveExecutorInPaneCommands reports whether any of the given tmux pane
+// current-commands indicates a live executor process (Claude, Codex, Gemini, a
+// subprocess it spawned, etc.).
+//
+// While a detail view is closed, breakTmuxPanes joins the executor pane back into
+// its daemon window, so a healthy window holds the executor plus (optionally) a
+// shell. When an executor exits — e.g. a `claude --resume` that ran against the
+// wrong CLAUDE_CONFIG_DIR before the #577 fix — the window is left with only its
+// keep-alive `tail` placeholder and/or a plain shell. Such a window must be
+// rebuilt rather than rejoined, or the detail view rejoins a dead pane forever
+// ("lost executor pane") and never reruns BuildCommand. A command is therefore a
+// live executor unless it is blank, the `tail` placeholder, or a shell.
+func liveExecutorInPaneCommands(cmds []string) bool {
+	for _, c := range cmds {
+		c = strings.TrimSpace(c)
+		if c == "" || c == "tail" || isShellCommand(c) {
+			continue
+		}
+		return true
+	}
+	return false
+}
+
+// isShellCommand reports whether a tmux pane_current_command is an interactive
+// shell. Login shells report with a leading dash (e.g. "-zsh").
+func isShellCommand(cmd string) bool {
+	switch strings.TrimPrefix(cmd, "-") {
+	case "zsh", "bash", "sh", "fish", "dash", "ksh", "tcsh", "csh":
+		return true
+	}
+	return false
+}
+
 // DetailModel represents the task detail view.
 type DetailModel struct {
 	task     *db.Task
@@ -602,8 +635,19 @@ func (m *DetailModel) setupPanesAsync() tea.Cmd {
 		m.cachedWindowTarget = m.findTaskWindow()
 		log.Info("setupPanesAsync: cachedWindowTarget=%q", m.cachedWindowTarget)
 
-		// Fast path: an active window exists — join it. This is the heavy ~30-call
-		// path that used to block the UI thread.
+		// Fast path: an active window exists AND still holds a live executor — join
+		// it. This is the heavy ~30-call path that used to block the UI thread.
+		//
+		// A window left with only its `tail` placeholder and/or a shell (its executor
+		// exited — e.g. a pre-#577 resume against the wrong CLAUDE_CONFIG_DIR) must NOT
+		// be rejoined: doing so reconnects to a dead pane forever and never reruns
+		// BuildCommand. Kill the stale window so the start path below rebuilds the
+		// executor (with the correct per-project config dir).
+		if m.cachedWindowTarget != "" && !m.windowHasLiveExecutor(m.cachedWindowTarget) {
+			log.Info("setupPanesAsync: window %q has no live executor (stale placeholder); killing to rebuild", m.cachedWindowTarget)
+			m.killStaleWindow(m.cachedWindowTarget)
+			m.cachedWindowTarget = ""
+		}
 		if m.cachedWindowTarget != "" {
 			m.joinTmuxPane()
 			log.Info("setupPanesAsync: joined existing window, claudePaneID=%q, workdirPaneID=%q",
@@ -925,6 +969,42 @@ func (m *DetailModel) findTaskWindow() string {
 	}
 	log.Info("findTaskWindow: window not found for task %d", m.task.ID)
 	return ""
+}
+
+// windowHasLiveExecutor reports whether the given daemon task window currently
+// holds a live executor pane. A window with only its `tail` placeholder and/or a
+// shell is a stale leftover whose executor exited; it should be rebuilt rather
+// than rejoined (see liveExecutorInPaneCommands). If the window can't be inspected
+// we assume it is live and let the normal join path surface any error — we never
+// destroy a window we failed to look at.
+func (m *DetailModel) windowHasLiveExecutor(windowTarget string) bool {
+	if windowTarget == "" {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	out, err := osExec.CommandContext(ctx, "tmux", "list-panes", "-t", windowTarget, "-F", "#{pane_current_command}").Output()
+	if err != nil {
+		GetLogger().Debug("windowHasLiveExecutor: list-panes failed for %q: %v (assuming live)", windowTarget, err)
+		return true
+	}
+	return liveExecutorInPaneCommands(strings.Split(strings.TrimSpace(string(out)), "\n"))
+}
+
+// killStaleWindow removes a daemon task window that no longer has a live executor
+// pane so the caller can recreate it cleanly. Best-effort; also clears the stale
+// stored window ID so a later findTaskWindow doesn't resurrect the dead target.
+func (m *DetailModel) killStaleWindow(windowTarget string) {
+	if windowTarget == "" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	osExec.CommandContext(ctx, "tmux", "kill-window", "-t", windowTarget).Run()
+	if m.database != nil && m.task != nil {
+		m.database.UpdateTaskWindowID(m.task.ID, "")
+		m.task.TmuxWindowID = ""
+	}
 }
 
 // startResumableSession starts a new tmux window with the task's executor.
