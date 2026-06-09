@@ -3998,6 +3998,7 @@ type ClaudeHookInput struct {
 	SessionID        string `json:"session_id"`
 	TranscriptPath   string `json:"transcript_path"`
 	Cwd              string `json:"cwd"`
+	PermissionMode   string `json:"permission_mode,omitempty"` // e.g. "default", "acceptEdits", "bypassPermissions"
 	HookEventName    string `json:"hook_event_name"`
 	NotificationType string `json:"notification_type,omitempty"` // For Notification hooks
 	Message          string `json:"message,omitempty"`           // General message field
@@ -4205,7 +4206,53 @@ func handlePreToolUseHook(database *db.DB, taskID int64, input *ClaudeHookInput)
 		database.AppendTaskLog(taskID, "pending_tool", detail)
 	}
 
+	// Worktree write-guard: block/ask on writes that would escape the isolated
+	// worktree. Inert for non-worktree ("shared dir") tasks. Emitting the decision
+	// to stdout is what gives it teeth; an "ask" surfaces as a permission prompt,
+	// which the Notification(permission_prompt) hook turns into a blocked task on
+	// the board, so unattended runs route to needs-input rather than silently
+	// writing to the wrong tree.
+	emitWorktreeGuardDecision(database, taskID, task, input)
+
 	return nil
+}
+
+// emitWorktreeGuardDecision evaluates the worktree write-guard and, when a tool
+// call would write outside the worktree, prints a PreToolUse permission decision
+// (ask/deny) to stdout per Claude Code's hookSpecificOutput contract. It prints
+// nothing when the write is allowed, leaving Claude's normal permission flow intact.
+func emitWorktreeGuardDecision(database *db.DB, taskID int64, task *db.Task, input *ClaudeHookInput) {
+	if task == nil {
+		return
+	}
+	var allow []string
+	if projectDir := executor.ManagedWorktreeProjectDir(task.WorktreePath); projectDir != "" {
+		allow = executor.WorktreeAllowExternalWrites(projectDir)
+	}
+	decision := executor.EvaluateWorktreeWriteGuard(task.WorktreePath, allow, executor.WorktreeGuardInput{
+		ToolName:       input.ToolName,
+		ToolInput:      input.ToolInput,
+		Cwd:            input.Cwd,
+		PermissionMode: input.PermissionMode,
+	})
+	if decision == nil {
+		return
+	}
+
+	if decision.Decision == "deny" {
+		database.AppendTaskLog(taskID, "system", "Worktree guard denied an out-of-worktree write")
+	}
+
+	out := map[string]any{
+		"hookSpecificOutput": map[string]any{
+			"hookEventName":            "PreToolUse",
+			"permissionDecision":       decision.Decision,
+			"permissionDecisionReason": decision.Reason,
+		},
+	}
+	if data, err := json.Marshal(out); err == nil {
+		fmt.Println(string(data))
+	}
 }
 
 // handlePostToolUseHook handles PostToolUse hooks from Claude (after tool execution).
