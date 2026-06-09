@@ -13,6 +13,16 @@ TY_QA_SID="${TY_QA_SID:-qa}"
 export WORKTREE_DB_PATH="$TY_QA_ROOT/tasks.db"
 export WORKTREE_SESSION_ID="$TY_QA_SID"
 
+# Isolate ALL tmux usage onto a dedicated server socket so server-global state —
+# the root S-arrow key bindings and join/break-pane the TUI issues — never touches
+# the user's live tmux server. This function shadows the `tmux` binary for every
+# script that sources lib.sh, so bare `tmux ...` calls route to the isolated socket.
+# ty itself is launched *inside* this server (via `tmux new-session ... ty`), so it
+# inherits $TMUX and routes its own bare `tmux` calls to the same socket. Use
+# `command tmux` to reach the real binary on the default server.
+export TY_QA_TMUX_SOCKET="${TY_QA_TMUX_SOCKET:-taskyou-qa-$TY_QA_SID}"
+tmux() { command tmux -L "$TY_QA_TMUX_SOCKET" "$@"; }
+
 # Derived handles.
 TY_BIN="${TY_BIN:-$TY_QA_ROOT/ty}"
 TY_QA_PROJECTS="$TY_QA_ROOT/projects"
