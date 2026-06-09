@@ -70,6 +70,7 @@ type FormModel struct {
 	effortLevel        string   // Per-task Claude effort override ("" = use global/Claude default)
 	effortIdx          int
 	effortLevels       []string // Selectable effort values; "" (first) means "default"
+	effortTouched      bool     // user picked an effort explicitly; stop following project default
 	permissionMode     string   // Per-task permission mode ("default"/"auto"/"dangerous")
 	permissionIdx      int
 	permissionModes    []string // Selectable permission modes
@@ -171,7 +172,10 @@ func effortIndexFor(options []string, level string) int {
 // display order. "default" (prompt for each permission) comes first, then the
 // less-restrictive modes.
 func permissionModeOptions() []string {
-	return []string{db.PermissionModeDefault, db.PermissionModeAuto, db.PermissionModeDangerous}
+	// Mirror the canonical UI order (default → accept-edits → auto → dangerous)
+	// so the form stays in step with the rest of the app. Copy it since callers
+	// store and index the slice.
+	return append([]string(nil), db.PermissionModeCycle...)
 }
 
 // permissionIndexFor returns the index of the given permission mode in the
@@ -252,6 +256,7 @@ func NewEditFormModel(database *db.DB, task *db.Task, width, height int, availab
 		effortLevel:         task.EffortLevel,
 		effortLevels:        effortLevelOptions(),
 		effortIdx:           effortIndexFor(effortLevelOptions(), task.EffortLevel),
+		effortTouched:       true, // editing: keep the task's existing effort unless changed
 		permissionMode:      task.EffectivePermissionMode(),
 		permissionModes:     permissionModeOptions(),
 		permissionIdx:       permissionIndexFor(permissionModeOptions(), task.EffectivePermissionMode()),
@@ -450,9 +455,11 @@ func NewFormModel(database *db.DB, width, height int, workingDir string, availab
 	// Load last used executor for the selected project (overrides default if available)
 	m.loadLastExecutorForProject()
 
-	// Seed the permission selector from the project's default so new tasks start
-	// in the right mode without a manual toggle (auto for most users).
+	// Seed the permission and effort selectors from the project's defaults
+	// (last-used per project) so new tasks start with the same choices as the
+	// previous task in that project.
 	m.refreshPermissionDefaultForProject()
+	m.refreshEffortDefaultForProject()
 
 	// Title input
 	m.titleInput = textinput.New()
@@ -798,6 +805,7 @@ func (m *FormModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.rebuildExecutorListForProject() // Re-sort by usage for new project
 				m.loadLastExecutorForProject()
 				m.refreshPermissionDefaultForProject()
+				m.refreshEffortDefaultForProject()
 				return m, nil
 			}
 			if m.focused == FieldType {
@@ -813,6 +821,7 @@ func (m *FormModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.focused == FieldEffort && len(m.effortLevels) > 0 {
 				m.effortIdx = (m.effortIdx - 1 + len(m.effortLevels)) % len(m.effortLevels)
 				m.effortLevel = m.effortLevels[m.effortIdx]
+				m.effortTouched = true
 				return m, nil
 			}
 			if m.focused == FieldPermission && len(m.permissionModes) > 0 {
@@ -833,6 +842,7 @@ func (m *FormModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.rebuildExecutorListForProject() // Re-sort by usage for new project
 				m.loadLastExecutorForProject()
 				m.refreshPermissionDefaultForProject()
+				m.refreshEffortDefaultForProject()
 				return m, nil
 			}
 			if m.focused == FieldType {
@@ -848,6 +858,7 @@ func (m *FormModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.focused == FieldEffort && len(m.effortLevels) > 0 {
 				m.effortIdx = (m.effortIdx + 1) % len(m.effortLevels)
 				m.effortLevel = m.effortLevels[m.effortIdx]
+				m.effortTouched = true
 				return m, nil
 			}
 			if m.focused == FieldPermission && len(m.permissionModes) > 0 {
@@ -1116,6 +1127,7 @@ func (m *FormModel) selectProjectFromSearch() {
 	m.rebuildExecutorListForProject()
 	m.loadLastExecutorForProject()
 	m.refreshPermissionDefaultForProject()
+	m.refreshEffortDefaultForProject()
 }
 
 // filterProjects updates the filtered project list based on the search query.
@@ -1186,6 +1198,7 @@ func (m *FormModel) selectByPrefix(prefix string) {
 			if strings.HasPrefix(strings.ToLower(label), prefix) {
 				m.effortIdx = i
 				m.effortLevel = l
+				m.effortTouched = true
 				return
 			}
 		}
@@ -1250,11 +1263,27 @@ func (m *FormModel) loadLastExecutorForProject() {
 // tasks can be created and run without touching the permission field.
 func (m *FormModel) defaultPermissionForProject(project string) string {
 	if m.db != nil && project != "" {
+		// Stickiness: the last mode used in this project wins, so a per-task
+		// choice carries forward to the next task in the same project.
+		if last, err := m.db.GetLastPermissionForProject(project); err == nil {
+			if mode := db.NormalizePermissionMode(last); mode != "" {
+				return mode
+			}
+		}
 		if p, err := m.db.GetProjectByName(project); err == nil && p != nil {
 			return p.EffectiveDefaultPermissionMode()
 		}
 	}
 	return db.GlobalDefaultPermissionMode()
+}
+
+// resolvedPermissionMode returns the form's selected permission mode, normalized
+// and defaulting to "default" when unset.
+func (m *FormModel) resolvedPermissionMode() string {
+	if mode := db.NormalizePermissionMode(m.permissionMode); mode != "" {
+		return mode
+	}
+	return db.PermissionModeDefault
 }
 
 // refreshPermissionDefaultForProject re-seeds the permission selector from the
@@ -1266,6 +1295,29 @@ func (m *FormModel) refreshPermissionDefaultForProject() {
 	}
 	m.permissionMode = m.defaultPermissionForProject(m.project)
 	m.permissionIdx = permissionIndexFor(m.permissionModes, m.permissionMode)
+}
+
+// defaultEffortForProject returns the effort override a new task should start with
+// for the given project: the last effort used in it (stickiness), or "" (the
+// global/Claude default) when none was recorded.
+func (m *FormModel) defaultEffortForProject(project string) string {
+	if m.db != nil && project != "" {
+		if last, err := m.db.GetLastEffortForProject(project); err == nil && db.IsValidEffortLevel(last) {
+			return last
+		}
+	}
+	return ""
+}
+
+// refreshEffortDefaultForProject re-seeds the effort selector from the current
+// project's last-used effort, unless the user has explicitly chosen one. Called
+// when the selected project changes so the default follows the project.
+func (m *FormModel) refreshEffortDefaultForProject() {
+	if m.effortTouched {
+		return
+	}
+	m.effortLevel = m.defaultEffortForProject(m.project)
+	m.effortIdx = effortIndexFor(m.effortLevels, m.effortLevel)
 }
 
 // rebuildExecutorListForProject rebuilds the executor list sorted by usage for the current project.
@@ -1979,33 +2031,36 @@ func (m *FormModel) GetDBTask() *db.Task {
 		status = db.StatusQueued
 	}
 
-	task := &db.Task{
-		Title:    m.titleInput.Value(),
-		Body:     m.bodyInput.Value(),
-		Status:   status,
-		Type:     m.taskType,
-		Project:  m.project,
-		Executor: m.executor,
-		PRURL:    m.prURL,
-		PRNumber: m.prNumber,
-	}
+	task := &db.Task{Status: status}
+	m.ApplyTo(task)
+	return task
+}
+
+// ApplyTo overlays the form's editable fields onto task, leaving every other
+// persisted column untouched. Editing a task in place uses this so that saving
+// never resets fields the form doesn't expose (session IDs, pin state, tags,
+// source branch, PR info, ...). See issue #560. Permission mode IS exposed by
+// the form, so it is applied here (and kept in sync with DangerousMode).
+func (m *FormModel) ApplyTo(task *db.Task) {
+	task.Title = m.titleInput.Value()
+	task.Body = m.bodyInput.Value()
+	task.Type = m.taskType
+	task.Project = m.project
+	task.Executor = m.executor
+	task.PRURL = m.prURL
+	task.PRNumber = m.prNumber
 
 	// Effort is a Claude-specific override; only carry it for the Claude executor.
 	if m.executor == db.ExecutorClaude {
 		task.EffortLevel = m.effortLevel
+	} else {
+		task.EffortLevel = ""
 	}
 
-	// Permission mode is chosen inline on the form (seeded from the project's
-	// default). Carry it on the task so it runs in the selected mode. Keep the
-	// legacy DangerousMode boolean consistent with the resolved mode.
-	mode := db.NormalizePermissionMode(m.permissionMode)
-	if mode == "" {
-		mode = db.PermissionModeDefault
-	}
-	task.PermissionMode = mode
-	task.DangerousMode = mode == db.PermissionModeDangerous
-
-	return task
+	// Permission mode is now an editable field on the form, so carry it onto the
+	// task, keeping the legacy DangerousMode boolean consistent with it.
+	task.PermissionMode = m.resolvedPermissionMode()
+	task.DangerousMode = task.PermissionMode == db.PermissionModeDangerous
 }
 
 // SetQueue sets whether to queue the task.

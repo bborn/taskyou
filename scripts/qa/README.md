@@ -92,6 +92,50 @@ scripts/qa/ty-qa-state.sh '.detail.has_panes'   # => true (panes joined)
 scripts/qa/ty-qa-down.sh --purge
 ```
 
+## Profiling render performance
+
+To find rendering bottlenecks, run the harness with profiling enabled. The TUI
+accepts `--cpuprofile` / `--memprofile`; `ty-qa-profile.sh` launches the isolated
+instance with both, drives a render-heavy stress sequence, quits gracefully so
+the profiles flush, and prints the hottest render call stacks.
+
+```bash
+scripts/qa/ty-qa-up.sh                                  # build + isolated instance
+"$TY_BIN" create "perf" -p qa                           # seed a few tasks
+scripts/qa/ty-qa-profile.sh                             # capture + summarize
+
+# Inspect interactively:
+go tool pprof "$TY_BIN" /tmp/ty-qa/cpu.prof             # then: top / list KanbanBoard.View / web
+go tool pprof "$TY_BIN" /tmp/ty-qa/mem.prof             # heap allocations
+```
+
+The board render is cached by a signature of its inputs (see `KanbanBoard.View`),
+so idle re-renders (ticks, mouse motion, unrelated events) are nearly free; the
+profile's render time comes from cache-miss frames (navigation, task changes).
+
+The **detail view** (Enter on a card) is tuned the same way:
+
+- **Opening is instant.** All tmux work — the window search plus the ~30-call
+  join/split/resize that happens when an executor is already running — runs off
+  the Bubble Tea update thread (`setupPanesAsync`), so the view paints
+  immediately with a loading spinner and the panes drop in when ready, instead
+  of freezing the UI for the whole join.
+- **`DetailModel.View()` is render-cached** by a signature of its inputs (same
+  trick as the board): idle frames skip the expensive `viewport.View()` +
+  bordered `box.Render()` (~2ms / ~2.7MB) and cost only the cheap header/help
+  render used to detect changes. See `viewSignature` and `detail_cache_test.go`.
+- The shell-process indicator is polled on a throttle in `Refresh()` instead of
+  shelling out to tmux from `renderHeader()` on every frame.
+
+For reproducible micro-measurements (and CI regression guarding), the Go
+benchmarks are the fastest loop:
+
+```bash
+go test ./internal/ui/ -run '^$' -bench 'BenchmarkKanbanView' -benchmem
+go test ./internal/ui/ -run '^$' -bench 'BenchmarkDetail'     -benchmem
+# add -cpuprofile=/tmp/c.prof to capture render call stacks from a benchmark
+```
+
 ## Screenshots & PR evidence (VHS + R2)
 
 To attach real-TUI screenshots to a PR, render with **VHS** and publish to the

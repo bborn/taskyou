@@ -206,7 +206,7 @@ func DefaultKeyMap() KeyMap {
 		),
 		ToggleDangerous: key.NewBinding(
 			key.WithKeys("!"),
-			key.WithHelp("!", "dangerous mode"),
+			key.WithHelp("!", "cycle permission mode"),
 		),
 		QueueDangerous: key.NewBinding(
 			key.WithKeys("X"),
@@ -511,6 +511,10 @@ type AppModel struct {
 	replyInput        textinput.Model
 	quickInputFocused bool // Whether quick input field has keyboard focus
 
+	// liveSpinnerRunning guards the live-mode spinner animation loop so only one
+	// tick chain runs at a time.
+	liveSpinnerRunning bool
+
 	// Filter state
 	filterInput        textinput.Model
 	filterActive       bool   // Whether filter mode is active (typing in filter)
@@ -724,7 +728,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// the chain breaks permanently — polling stops, DB watcher stops, etc.
 	isSystemMsg := false
 	switch msg.(type) {
-	case tickMsg, focusTickMsg, dbChangeMsg, taskEventMsg, tasksLoadedMsg, prRefreshTickMsg:
+	case tickMsg, focusTickMsg, dbChangeMsg, taskEventMsg, tasksLoadedMsg, prRefreshTickMsg, liveSpinnerTickMsg:
 		isSystemMsg = true
 	}
 
@@ -1013,6 +1017,9 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.kanban.SetTasksNeedingInput(m.tasksNeedingInput)
 		m.kanban.SetBlockedByDeps(msg.blockedByDeps)
 
+		// Refresh per-agent activity lines for live mode (cheap no-op when off).
+		m.refreshLatestActivity()
+
 		// Load cached PR info from database for instant display
 		for _, t := range m.tasks {
 			if t.PRInfoJSON != "" {
@@ -1230,7 +1237,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, m.handleAICommand(msg.cmd))
 		}
 
-	case taskDangerousModeToggledMsg:
+	case taskPermissionModeCycledMsg:
 		cmds = append(cmds, m.loadTasks())
 		// Refresh the detail view panes since the executor window was recreated
 		if m.detailView != nil && m.selectedTask != nil {
@@ -1242,7 +1249,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil {
 			m.notification = fmt.Sprintf("%s %s", IconBlocked(), msg.err.Error())
 		} else {
-			// Reload the task to get updated dangerous_mode flag
+			// Reload the task to reflect the new permission mode
 			if m.selectedTask != nil {
 				task, _ := m.db.GetTask(m.selectedTask.ID)
 				if task != nil {
@@ -1252,11 +1259,11 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 							cmds = append(cmds, cmd)
 						}
 					}
-					if task.DangerousMode {
-						m.notification = IconBlocked() + " Dangerous mode enabled"
-					} else {
-						m.notification = IconDone() + " Safe mode enabled"
+					icon := IconDone()
+					if task.IsDangerous() {
+						icon = IconBlocked()
 					}
+					m.notification = fmt.Sprintf("%s %s mode enabled", icon, db.PermissionModeLabel(msg.mode))
 				}
 			}
 		}
@@ -1437,8 +1444,21 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				running[m.selectedTask.ID] = true
 			}
 			m.kanban.SetRunningProcesses(running)
+			// Resume the live-mode spinner if work appeared while it was idle.
+			cmds = append(cmds, m.startLiveSpinner())
 		}
 		cmds = append(cmds, m.tick())
+
+	case liveSpinnerTickMsg:
+		// Advance the running-task spinner and reschedule while the board is
+		// visible and has work to animate. When no tasks are running, the chain
+		// stops; the 1s tick restarts it once running tasks reappear.
+		if m.currentView == ViewDashboard && m.kanban.RunningTaskCount() > 0 {
+			m.kanban.AdvanceSpinner()
+			cmds = append(cmds, m.liveSpinnerTick())
+		} else {
+			m.liveSpinnerRunning = false
+		}
 
 	case focusTickMsg:
 		// Fast tick for responsive focus state changes in detail view
@@ -1677,14 +1697,6 @@ func (m *AppModel) viewDashboard() string {
 	} else {
 		m.notification = "" // Clear expired notification
 		m.notifyTaskID = 0
-	}
-
-	// Show current processing tasks if any
-	if runningIDs := m.executor.RunningTasks(); len(runningIDs) > 0 {
-		statusBar := lipgloss.NewStyle().
-			Foreground(ColorInProgress).
-			Render(fmt.Sprintf("%s Processing %d task(s)", IconProcessing(), len(runningIDs)))
-		headerParts = append(headerParts, statusBar)
 	}
 
 	// Show filter bar if filter is active or has text
@@ -2788,14 +2800,14 @@ func (m *AppModel) updateDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.toggleTaskPinned(m.selectedTask.ID)
 	}
 	if key.Matches(keyMsg, m.keys.ToggleDangerous) && m.selectedTask != nil {
-		// Only allow toggling dangerous mode if task is processing or blocked
+		// Only allow cycling permission mode if task is processing or blocked
 		if m.selectedTask.Status == db.StatusProcessing || m.selectedTask.Status == db.StatusBlocked {
-			// Break panes back to daemon BEFORE toggling so the executor can kill them.
+			// Break panes back to daemon BEFORE cycling so the executor can kill them.
 			// If panes are joined to task-ui, KillAllWindowsByNameAllSessions won't find them.
 			if m.detailView != nil {
 				m.detailView.Cleanup()
 			}
-			return m, m.toggleDangerousMode(m.selectedTask.ID)
+			return m, m.cyclePermissionMode(m.selectedTask.ID)
 		}
 	}
 	if key.Matches(keyMsg, m.keys.OpenWorktree) && m.selectedTask != nil {
@@ -2975,12 +2987,11 @@ func (m *AppModel) updateEditTaskForm(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if form, ok := model.(*FormModel); ok {
 		m.editTaskForm = form
 		if form.submitted {
-			// Get updated task data from form
-			updatedTask := form.GetDBTask()
-
-			// Check if project has changed - this requires special handling
+			// Moving to another project deletes this task and creates a fresh
+			// one, so build that from form data (moveTaskToProject resets the
+			// runtime fields on purpose).
 			if form.ProjectChanged() {
-				// Store the original task for the confirmation dialog
+				updatedTask := form.GetDBTask()
 				originalTask := m.editingTask
 
 				m.editTaskForm = nil
@@ -2988,14 +2999,13 @@ func (m *AppModel) updateEditTaskForm(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m.showProjectChangeConfirm(updatedTask, originalTask)
 			}
 
-			// Preserve the original task's ID and other fields
-			updatedTask.ID = m.editingTask.ID
-			updatedTask.Status = m.editingTask.Status
-			updatedTask.WorktreePath = m.editingTask.WorktreePath
-			updatedTask.BranchName = m.editingTask.BranchName
-			updatedTask.CreatedAt = m.editingTask.CreatedAt
-			updatedTask.StartedAt = m.editingTask.StartedAt
-			updatedTask.CompletedAt = m.editingTask.CompletedAt
+			// In-place edit: overlay only the fields the form exposes onto a
+			// copy of the original task. Starting from the original preserves
+			// every persisted column the form doesn't show (session IDs, pin
+			// state, permission mode, tags, source branch, PR info, port, ...)
+			// which would otherwise be reset to zero on save. See issue #560.
+			updatedTask := *m.editingTask
+			form.ApplyTo(&updatedTask)
 
 			// Capture old title before clearing editingTask
 			oldTitle := m.editingTask.Title
@@ -3003,7 +3013,7 @@ func (m *AppModel) updateEditTaskForm(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.editTaskForm = nil
 			m.editingTask = nil
 			m.currentView = m.previousView
-			return m, m.updateTaskWithRename(updatedTask, oldTitle)
+			return m, m.updateTaskWithRename(&updatedTask, oldTitle)
 		}
 		if form.cancelled {
 			m.currentView = m.previousView
@@ -4166,8 +4176,9 @@ type taskDeletedMsg struct {
 	err error
 }
 
-type taskDangerousModeToggledMsg struct {
-	err error
+type taskPermissionModeCycledMsg struct {
+	mode string
+	err  error
 }
 
 type taskPinnedMsg struct {
@@ -4195,6 +4206,9 @@ type focusTickMsg time.Time
 
 type prRefreshTickMsg time.Time
 
+// liveSpinnerTickMsg drives the running-task spinner animation on the board.
+type liveSpinnerTickMsg time.Time
+
 type dbChangeMsg struct{}
 
 type shortcutTimeoutMsg struct {
@@ -4218,6 +4232,29 @@ type versionCheckMsg struct {
 
 const maxDoneTasksInKanban = 20
 const summaryRefreshAfter = 5 * time.Minute
+
+// refreshLatestActivity loads the most recent log line for each active task and
+// feeds it to the board for the per-card activity sub-line.
+func (m *AppModel) refreshLatestActivity() {
+	if m.db == nil {
+		return
+	}
+	var ids []int64
+	for _, t := range m.tasks {
+		if t.Status == db.StatusProcessing || t.Status == db.StatusBlocked {
+			ids = append(ids, t.ID)
+		}
+	}
+	if len(ids) == 0 {
+		m.kanban.SetLatestActivity(nil)
+		return
+	}
+	activity, err := m.db.GetLatestLogPerTask(ids)
+	if err != nil {
+		return
+	}
+	m.kanban.SetLatestActivity(activity)
+}
 
 func (m *AppModel) loadTasks() tea.Cmd {
 	return func() tea.Msg {
@@ -4374,8 +4411,9 @@ func (m *AppModel) queueTaskDangerous(id int64) tea.Cmd {
 	database := m.db
 	exec := m.executor
 	return func() tea.Msg {
-		// Set dangerous mode before queueing
-		if err := database.UpdateTaskDangerousMode(id, true); err != nil {
+		// Set dangerous mode before queueing (writes permission_mode, the source of
+		// truth, keeping the dangerous_mode bool in sync).
+		if err := database.UpdateTaskPermissionMode(id, db.PermissionModeDangerous); err != nil {
 			return taskQueuedMsg{err: err}
 		}
 		err := database.UpdateTaskStatus(id, db.StatusQueued)
@@ -4858,32 +4896,24 @@ func (m *AppModel) moveTaskToProject(newTaskData *db.Task, oldTask *db.Task) tea
 	}
 }
 
-func (m *AppModel) toggleDangerousMode(id int64) tea.Cmd {
+func (m *AppModel) cyclePermissionMode(id int64) tea.Cmd {
 	exec := m.executor
 	database := m.db
 	return func() tea.Msg {
-		// Get the task to check current dangerous mode state
 		task, err := database.GetTask(id)
 		if err != nil || task == nil {
-			return taskDangerousModeToggledMsg{err: fmt.Errorf("failed to get task")}
+			return taskPermissionModeCycledMsg{err: fmt.Errorf("failed to get task")}
 		}
 
-		executorName := taskExecutorDisplayName(task)
-		var success bool
-		if task.DangerousMode {
-			// Currently in dangerous mode, switch to safe mode
-			success = exec.ResumeSafe(id)
-			if !success {
-				return taskDangerousModeToggledMsg{err: fmt.Errorf("failed to restart %s in safe mode", executorName)}
-			}
-		} else {
-			// Currently in safe mode, switch to dangerous mode
-			success = exec.ResumeDangerous(id)
-			if !success {
-				return taskDangerousModeToggledMsg{err: fmt.Errorf("failed to restart %s in dangerous mode", executorName)}
+		// Advance to the next mode in the cycle (default -> accept-edits -> auto ->
+		// dangerous) and relaunch the live session so it actually runs in that mode.
+		next := db.NextPermissionMode(task.EffectivePermissionMode())
+		if !exec.ResumeWithMode(id, next) {
+			return taskPermissionModeCycledMsg{
+				err: fmt.Errorf("failed to restart %s in %s mode", taskExecutorDisplayName(task), db.PermissionModeLabel(next)),
 			}
 		}
-		return taskDangerousModeToggledMsg{err: nil}
+		return taskPermissionModeCycledMsg{mode: next}
 	}
 }
 
@@ -4908,9 +4938,10 @@ func (m *AppModel) retryTaskWithAttachments(id int64, feedback string, attachmen
 	database := m.db
 	exec := m.executor
 	return func() tea.Msg {
-		// Set dangerous mode if requested
+		// Set dangerous mode if requested (writes permission_mode, the source of
+		// truth, keeping the dangerous_mode bool in sync).
 		if dangerous {
-			database.UpdateTaskDangerousMode(id, true)
+			database.UpdateTaskPermissionMode(id, db.PermissionModeDangerous)
 		}
 
 		// Get task to find worktree path
@@ -5016,6 +5047,27 @@ func (m *AppModel) prRefreshTick() tea.Cmd {
 	return tea.Tick(4*time.Minute, func(t time.Time) tea.Msg {
 		return prRefreshTickMsg(t)
 	})
+}
+
+// liveSpinnerTick schedules the next frame of the live-mode spinner animation.
+func (m *AppModel) liveSpinnerTick() tea.Cmd {
+	return tea.Tick(200*time.Millisecond, func(t time.Time) tea.Msg {
+		return liveSpinnerTickMsg(t)
+	})
+}
+
+// startLiveSpinner kicks off the spinner animation loop if it isn't already
+// running and there is running work to animate. Returns nil if no tick is
+// needed, so callers can append it unconditionally.
+func (m *AppModel) startLiveSpinner() tea.Cmd {
+	if m.liveSpinnerRunning {
+		return nil
+	}
+	if m.kanban.RunningTaskCount() == 0 {
+		return nil
+	}
+	m.liveSpinnerRunning = true
+	return m.liveSpinnerTick()
 }
 
 // checkVersion fetches the latest release from GitHub and compares with current version.

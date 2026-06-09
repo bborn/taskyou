@@ -905,6 +905,71 @@ func TestGetDBTaskUsesExecutorDirectly(t *testing.T) {
 	}
 }
 
+// TestApplyToOnlyTouchesEditableFields verifies that overlaying the edit form
+// onto an existing task changes only the fields the form exposes and leaves
+// every other persisted column untouched (regression guard for #560).
+func TestApplyToOnlyTouchesEditableFields(t *testing.T) {
+	original := &db.Task{
+		Title:           "Old title",
+		Body:            "Old body",
+		Type:            "code",
+		Project:         "proj",
+		Executor:        "claude",
+		ClaudeSessionID: "sess-abc",
+		DaemonSession:   "ty-1",
+		Port:            4242,
+		PRInfoJSON:      `{"state":"open"}`,
+		DangerousMode:   false,
+		PermissionMode:  "auto",
+		RemoteControl:   true,
+		Pinned:          true,
+		Tags:            "urgent,backend",
+		SourceBranch:    "main",
+		Summary:         "a summary",
+	}
+
+	m := NewEditFormModel(nil, original, 120, 40, []string{"claude"})
+	m.titleInput.SetValue("New title")
+	m.bodyInput.SetValue("New body")
+
+	updated := *original
+	m.ApplyTo(&updated)
+
+	// Edited fields are applied.
+	if updated.Title != "New title" {
+		t.Errorf("Title = %q, want %q", updated.Title, "New title")
+	}
+	if updated.Body != "New body" {
+		t.Errorf("Body = %q, want %q", updated.Body, "New body")
+	}
+
+	// Persisted fields the edit form doesn't change are preserved. Permission
+	// mode IS an editable form field now, so it round-trips through the form
+	// (seeded from the task), and DangerousMode stays consistent with it.
+	preserved := []struct {
+		name string
+		got  any
+		want any
+	}{
+		{"ClaudeSessionID", updated.ClaudeSessionID, "sess-abc"},
+		{"DaemonSession", updated.DaemonSession, "ty-1"},
+		{"Port", updated.Port, 4242},
+		{"PRInfoJSON", updated.PRInfoJSON, `{"state":"open"}`},
+		{"DangerousMode", updated.DangerousMode, false},
+		{"PermissionMode", updated.PermissionMode, "auto"},
+		{"RemoteControl", updated.RemoteControl, true},
+		{"Pinned", updated.Pinned, true},
+		{"Tags", updated.Tags, "urgent,backend"},
+		{"SourceBranch", updated.SourceBranch, "main"},
+		{"Summary", updated.Summary, "a summary"},
+	}
+	for _, c := range preserved {
+		if c.got != c.want {
+			t.Errorf("%s was modified by ApplyTo: got %v, want %v", c.name, c.got, c.want)
+		}
+	}
+}
+
 func TestFormDefaultsToAvailableExecutor(t *testing.T) {
 	// When claude is available, form should default to claude
 	m := NewFormModel(nil, 100, 50, "", []string{"claude"})
@@ -1303,27 +1368,68 @@ func TestPermissionFieldCycleAndPersist(t *testing.T) {
 	m.focused = FieldPermission
 
 	// Start from "default" for a deterministic sequence regardless of the
-	// environment's configured default.
+	// environment's configured default. The selector cycles in the canonical
+	// order: default -> accept-edits -> auto -> dangerous.
 	m.permissionIdx = permissionIndexFor(m.permissionModes, db.PermissionModeDefault)
 	m.permissionMode = db.PermissionModeDefault
 
-	// Right cycles default -> auto and marks the field as user-chosen.
+	// Right cycles default -> accept-edits and marks the field as user-chosen.
 	m.Update(tea.KeyMsg{Type: tea.KeyRight})
-	if m.permissionMode != db.PermissionModeAuto {
-		t.Errorf("after right, permission = %q, want %q", m.permissionMode, db.PermissionModeAuto)
+	if m.permissionMode != db.PermissionModeAcceptEdits {
+		t.Errorf("after right, permission = %q, want %q", m.permissionMode, db.PermissionModeAcceptEdits)
 	}
 	if !m.permissionTouched {
 		t.Error("expected permissionTouched after a manual change")
 	}
 
-	// Right again -> dangerous; GetDBTask carries it and keeps DangerousMode in sync.
-	m.Update(tea.KeyMsg{Type: tea.KeyRight})
+	// Three more rights -> auto -> dangerous; GetDBTask carries it and keeps
+	// DangerousMode in sync.
+	m.Update(tea.KeyMsg{Type: tea.KeyRight}) // -> auto
+	m.Update(tea.KeyMsg{Type: tea.KeyRight}) // -> dangerous
 	task := m.GetDBTask()
 	if task.PermissionMode != db.PermissionModeDangerous {
 		t.Errorf("GetDBTask permission = %q, want %q", task.PermissionMode, db.PermissionModeDangerous)
 	}
 	if !task.DangerousMode {
 		t.Error("expected DangerousMode true when permission is dangerous")
+	}
+}
+
+func TestPermissionAndEffortStickyPerProject(t *testing.T) {
+	database, err := db.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer database.Close()
+	if err := database.CreateProject(&db.Project{Name: "sticky", Path: t.TempDir()}); err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+
+	// A task created with a non-default effort + permission becomes the project's
+	// last-used choices.
+	first := &db.Task{
+		Title:          "first",
+		Status:         db.StatusQueued,
+		Type:           db.TypeCode,
+		Project:        "sticky",
+		Executor:       db.ExecutorClaude,
+		EffortLevel:    db.EffortHigh,
+		PermissionMode: db.PermissionModeDangerous,
+	}
+	if err := database.CreateTask(first); err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+
+	// The next new-task form for that project should default to the same choices.
+	m := NewFormModel(database, 100, 50, "", []string{db.ExecutorClaude})
+	if m.project != "sticky" {
+		t.Fatalf("expected form to default to last-used project 'sticky', got %q", m.project)
+	}
+	if m.effortLevel != db.EffortHigh {
+		t.Errorf("effort = %q, want sticky %q", m.effortLevel, db.EffortHigh)
+	}
+	if m.permissionMode != db.PermissionModeDangerous {
+		t.Errorf("permission = %q, want sticky %q", m.permissionMode, db.PermissionModeDangerous)
 	}
 }
 

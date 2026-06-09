@@ -11,6 +11,8 @@ import (
 	osexec "os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
+	"runtime/pprof"
 	"sort"
 	"strconv"
 	"strings"
@@ -114,9 +116,11 @@ func main() {
 			}
 
 			debugStatePath, _ := cmd.Flags().GetString("debug-state-file")
+			cpuProfilePath, _ := cmd.Flags().GetString("cpuprofile")
+			memProfilePath, _ := cmd.Flags().GetString("memprofile")
 
 			// Run locally
-			if err := runLocal(dangerous, debugStatePath); err != nil {
+			if err := runLocal(dangerous, debugStatePath, cpuProfilePath, memProfilePath); err != nil {
 				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
 				os.Exit(1)
 			}
@@ -128,6 +132,8 @@ func main() {
 
 	rootCmd.PersistentFlags().BoolVar(&dangerous, "dangerous", false, "Run Claude with --dangerously-skip-permissions (for sandboxed environments)")
 	rootCmd.PersistentFlags().String("debug-state-file", "", "Path to write debug state JSON on update")
+	rootCmd.PersistentFlags().String("cpuprofile", "", "Write a CPU profile here while the TUI runs (analyze with: go tool pprof)")
+	rootCmd.PersistentFlags().String("memprofile", "", "Write a heap profile here when the TUI exits")
 
 	// Version deprecation warning for CLI subcommands.
 	// Skip for root (TUI has its own check), upgrade, daemon, mcp-server, and claude-hook.
@@ -389,6 +395,25 @@ Tasks will automatically reconnect to their agent sessions when viewed.`,
 	claudeHookCmd.Flags().String("event", "", "Hook event type (Notification, Stop, etc.)")
 	rootCmd.AddCommand(claudeHookCmd)
 
+	// Worktree write-guard subcommand - the executor-agnostic transport for the
+	// worktree write-guard used by the codex/gemini/opencode pre-tool hooks. Reads a
+	// normalized pre-tool payload on stdin, evaluates EvaluateWorktreeWriteGuard, and
+	// renders the decision in the format the given executor expects (internal use).
+	worktreeGuardCmd := &cobra.Command{
+		Use:    "worktree-guard",
+		Short:  "Evaluate the worktree write-guard for a pre-tool hook",
+		Hidden: true, // Internal use only - invoked by codex/gemini/opencode hooks
+		Run: func(cmd *cobra.Command, args []string) {
+			format, _ := cmd.Flags().GetString("format")
+			// Never block the agent on our own failure: handle errors by allowing.
+			if err := handleWorktreeGuardHook(format); err != nil {
+				os.Exit(0)
+			}
+		},
+	}
+	worktreeGuardCmd.Flags().String("format", "", "Output format: codex | gemini | opencode")
+	rootCmd.AddCommand(worktreeGuardCmd)
+
 	// MCP server subcommand - runs the workflow MCP server for a task (internal use)
 	mcpServerCmd := &cobra.Command{
 		Use:    "mcp-server",
@@ -571,6 +596,7 @@ Examples:
 			permissionModeFlag, _ := cmd.Flags().GetString("permission-mode")
 			tags, _ := cmd.Flags().GetString("tags")
 			pinned, _ := cmd.Flags().GetBool("pinned")
+			remoteControl, _ := cmd.Flags().GetBool("remote-control")
 			branch, _ := cmd.Flags().GetString("branch")
 			outputJSON, _ := cmd.Flags().GetBool("json")
 
@@ -699,6 +725,7 @@ Examples:
 				Pinned:         pinned,
 				SourceBranch:   branch,
 				PermissionMode: permMode,
+				RemoteControl:  remoteControl,
 			}
 
 			if err := database.CreateTask(task); err != nil {
@@ -746,9 +773,10 @@ Examples:
 	createCmd.Flags().String("effort", "", "Per-task Claude effort override: low, medium, high, xhigh, max (default: Claude's global default)")
 	createCmd.Flags().BoolP("execute", "x", false, "Queue task for immediate execution")
 	createCmd.Flags().Bool("dangerous", false, "Execute in dangerous mode (alias for --permission-mode dangerous)")
-	createCmd.Flags().String("permission-mode", "", "Permission mode: default (prompt), auto (auto-accept edits), dangerous (skip all). Defaults to the project's setting")
+	createCmd.Flags().String("permission-mode", "", "Permission mode: default (prompt), accept-edits (auto-accept file edits), auto (Claude Code auto mode: auto-approve safe actions, block risky ones), dangerous (skip all). Defaults to the project's setting")
 	createCmd.Flags().String("tags", "", "Task tags (comma-separated)")
 	createCmd.Flags().Bool("pinned", false, "Pin the task to the top of its column")
+	createCmd.Flags().Bool("remote-control", false, "Launch Claude with --remote-control (interactive, remote-drivable session)")
 	createCmd.Flags().StringP("branch", "b", "", "Existing branch to checkout for worktree (e.g., fix/ui-overflow)")
 	createCmd.Flags().Bool("json", false, "Output in JSON format")
 	createCmd.RegisterFlagCompletionFunc("project", completeFlagProjects)
@@ -1603,12 +1631,14 @@ Examples:
 				msg += " (dangerous mode)"
 			case db.PermissionModeAuto:
 				msg += " (auto mode)"
+			case db.PermissionModeAcceptEdits:
+				msg += " (accept-edits mode)"
 			}
 			fmt.Println(successStyle.Render(msg))
 		},
 	}
 	executeCmd.Flags().Bool("dangerous", false, "Execute in dangerous mode (alias for --permission-mode dangerous)")
-	executeCmd.Flags().String("permission-mode", "", "Override permission mode: default (prompt), auto (auto-accept edits), dangerous (skip all)")
+	executeCmd.Flags().String("permission-mode", "", "Override permission mode: default (prompt), accept-edits (auto-accept file edits), auto (Claude Code auto mode), dangerous (skip all)")
 	rootCmd.AddCommand(executeCmd)
 
 	statusCmd := &cobra.Command{
@@ -1838,13 +1868,18 @@ Examples:
 This allows you to interact with a blocked or running task without going through
 the retry mechanism. The input is sent directly to the executor's tmux pane.
 
+By default the message is submitted (Enter is pressed after the text), so the
+agent actually receives it. Pass --no-submit to only drop the text in the input
+field without submitting it.
+
 If no message is provided, reads from stdin (useful for piping).
 Use --enter to just send Enter (for confirming TUI prompts).
 Use --key to send special keys like "Up", "Down", "Tab", "Escape".
 
 Examples:
-  task input 42 "yes"
+  task input 42 "yes"                # Type "yes" and submit
   task input 42 "Try a different approach"
+  task input 42 "draft text" --no-submit   # Fill the field, don't submit
   task input 42 --enter              # Just press Enter
   task input 42 --key Down --enter   # Press Down then Enter
   echo "continue" | task input 42`,
@@ -1858,6 +1893,7 @@ Examples:
 
 			justEnter, _ := cmd.Flags().GetBool("enter")
 			specialKey, _ := cmd.Flags().GetString("key")
+			noSubmit, _ := cmd.Flags().GetBool("no-submit")
 
 			var message string
 			if len(args) > 1 {
@@ -1915,14 +1951,26 @@ Examples:
 				}
 			}
 
-			// Send message if provided, or just Enter if --enter flag
+			// Send the message text (literally, so a message that looks like a tmux
+			// key name such as "Enter" or "Up" isn't interpreted as a keypress).
 			if message != "" {
-				sendCmd := osexec.Command("tmux", "send-keys", "-t", paneID, message, "Enter")
+				sendCmd := osexec.Command("tmux", "send-keys", "-t", paneID, "-l", message)
 				if err := sendCmd.Run(); err != nil {
 					fmt.Fprintln(os.Stderr, errorStyle.Render(fmt.Sprintf("Error sending input to pane %s (task may have finished): %v", paneID, err)))
 					os.Exit(1)
 				}
-			} else if justEnter {
+			}
+
+			// Submit by pressing Enter unless --no-submit was passed. Enter is sent
+			// as a SEPARATE keypress after the text: agentic TUIs (Claude Code, etc.)
+			// use bracketed-paste / input debouncing, so an Enter bundled into the
+			// same send-keys call as the text gets absorbed as a newline instead of
+			// submitting. The brief pause lets the TUI register the text first.
+			submit := shouldSubmitInput(message, justEnter, noSubmit)
+			if submit {
+				if message != "" {
+					time.Sleep(100 * time.Millisecond)
+				}
 				sendCmd := osexec.Command("tmux", "send-keys", "-t", paneID, "Enter")
 				if err := sendCmd.Run(); err != nil {
 					fmt.Fprintln(os.Stderr, errorStyle.Render(fmt.Sprintf("Error sending Enter to pane %s (task may have finished): %v", paneID, err)))
@@ -1930,11 +1978,16 @@ Examples:
 				}
 			}
 
-			fmt.Println(successStyle.Render(fmt.Sprintf("Sent input to task #%d", taskID)))
+			if message != "" && !submit {
+				fmt.Println(successStyle.Render(fmt.Sprintf("Sent input to task #%d (not submitted)", taskID)))
+			} else {
+				fmt.Println(successStyle.Render(fmt.Sprintf("Sent input to task #%d", taskID)))
+			}
 		},
 	}
 	inputCmd.Flags().Bool("enter", false, "Just send Enter key (for confirming prompts)")
 	inputCmd.Flags().String("key", "", "Send a special key (e.g., Up, Down, Tab, Escape)")
+	inputCmd.Flags().Bool("no-submit", false, "Type the text but don't press Enter (leave it in the input field)")
 	rootCmd.AddCommand(inputCmd)
 
 	// Pi Wrapper subcommand - internal use for RPC mode
@@ -2532,7 +2585,7 @@ Examples:
 	projectsCreateCmd.Flags().StringP("color", "c", "", "Hex color for display (e.g., #61AFEF)")
 	projectsCreateCmd.Flags().StringP("aliases", "a", "", "Comma-separated aliases for lookup")
 	projectsCreateCmd.Flags().String("claude-config-dir", "", "Override CLAUDE_CONFIG_DIR for this project")
-	projectsCreateCmd.Flags().String("permission-mode", "", "Default permission mode for tasks: default (prompt), auto (auto-accept edits), dangerous (skip all)")
+	projectsCreateCmd.Flags().String("permission-mode", "", "Default permission mode for tasks: default (prompt), accept-edits (auto-accept file edits), auto (Claude Code auto mode), dangerous (skip all)")
 	projectsCreateCmd.Flags().Bool("no-git", false, "Disable git worktrees (for non-git projects)")
 	projectsCreateCmd.Flags().Bool("json", false, "Output in JSON format")
 	projectsCreateCmd.MarkFlagRequired("path")
@@ -2590,7 +2643,7 @@ Examples:
 	projectsUpdateCmd.Flags().StringP("aliases", "a", "", "Comma-separated aliases for lookup")
 	projectsUpdateCmd.Flags().String("claude-config-dir", "", "Override CLAUDE_CONFIG_DIR for this project")
 	projectsUpdateCmd.Flags().String("context", "", "Cached project context summary")
-	projectsUpdateCmd.Flags().String("permission-mode", "", "Default permission mode for tasks: default (prompt), auto (auto-accept edits), dangerous (skip all)")
+	projectsUpdateCmd.Flags().String("permission-mode", "", "Default permission mode for tasks: default (prompt), accept-edits (auto-accept file edits), auto (Claude Code auto mode), dangerous (skip all)")
 	projectsUpdateCmd.Flags().Bool("no-git", false, "Disable git worktrees (for non-git projects)")
 	projectsUpdateCmd.Flags().Bool("git", false, "Enable git worktrees (default)")
 	projectsUpdateCmd.Flags().Bool("json", false, "Output in JSON format")
@@ -3556,8 +3609,63 @@ func execInTmux() error {
 	return cmd.Run()
 }
 
+// setupProfiling starts CPU and/or heap profiling when paths are provided and
+// returns a stop function that flushes the profiles. The returned func is
+// idempotent (only the first call has an effect), so it can be both called
+// explicitly after the TUI exits — important because the tmux teardown can
+// SIGKILL this process and skip deferred flushes — and deferred as a safety net
+// for early-return error paths. Profiling failures only warn; they never abort
+// the TUI.
+func setupProfiling(cpuPath, memPath string) func() {
+	var cpuFile *os.File
+	if cpuPath != "" {
+		f, err := os.Create(cpuPath)
+		switch {
+		case err != nil:
+			fmt.Fprintln(os.Stderr, dimStyle.Render("Warning: could not create cpu profile: "+err.Error()))
+		default:
+			if err := pprof.StartCPUProfile(f); err != nil {
+				fmt.Fprintln(os.Stderr, dimStyle.Render("Warning: could not start cpu profile: "+err.Error()))
+				_ = f.Close()
+			} else {
+				cpuFile = f
+				fmt.Fprintln(os.Stderr, dimStyle.Render("CPU profiling to: "+cpuPath))
+			}
+		}
+	}
+
+	stopped := false
+	return func() {
+		if stopped {
+			return
+		}
+		stopped = true
+
+		if cpuFile != nil {
+			pprof.StopCPUProfile()
+			_ = cpuFile.Close()
+		}
+		if memPath != "" {
+			f, err := os.Create(memPath)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, dimStyle.Render("Warning: could not create mem profile: "+err.Error()))
+				return
+			}
+			defer f.Close()
+			runtime.GC() // get up-to-date allocation statistics
+			_ = pprof.WriteHeapProfile(f)
+		}
+	}
+}
+
 // runLocal runs the TUI locally with a local SQLite database.
-func runLocal(dangerousMode bool, debugStatePath string) error {
+func runLocal(dangerousMode bool, debugStatePath, cpuProfilePath, memProfilePath string) error {
+	// Optional performance profiling. The CPU profile captures the whole
+	// interactive session (including every render); the heap profile is written
+	// on exit. Analyze with `go tool pprof <binary> <profile>`.
+	stopProfiling := setupProfiling(cpuProfilePath, memProfilePath)
+	defer stopProfiling() // safety net for early-return error paths below
+
 	// Ensure daemon is running
 	if err := ensureDaemonRunning(dangerousMode); err != nil {
 		fmt.Fprintln(os.Stderr, dimStyle.Render("Warning: could not start daemon: "+err.Error()))
@@ -3597,6 +3705,10 @@ func runLocal(dangerousMode bool, debugStatePath string) error {
 	if _, err := p.Run(); err != nil {
 		return fmt.Errorf("run TUI: %w", err)
 	}
+
+	// Flush profiles now, before the tmux cleanup below may kill our own session
+	// (which would SIGKILL this process and skip the deferred flush).
+	stopProfiling()
 
 	// Kill task-ui tmux session on exit (if we're in it)
 	// This cleans up the session that was created by execInTmux()
@@ -3905,6 +4017,7 @@ type ClaudeHookInput struct {
 	SessionID        string `json:"session_id"`
 	TranscriptPath   string `json:"transcript_path"`
 	Cwd              string `json:"cwd"`
+	PermissionMode   string `json:"permission_mode,omitempty"` // e.g. "default", "acceptEdits", "bypassPermissions"
 	HookEventName    string `json:"hook_event_name"`
 	NotificationType string `json:"notification_type,omitempty"` // For Notification hooks
 	Message          string `json:"message,omitempty"`           // General message field
@@ -4112,7 +4225,139 @@ func handlePreToolUseHook(database *db.DB, taskID int64, input *ClaudeHookInput)
 		database.AppendTaskLog(taskID, "pending_tool", detail)
 	}
 
+	// Worktree write-guard: block/ask on writes that would escape the isolated
+	// worktree. Inert for non-worktree ("shared dir") tasks. Emitting the decision
+	// to stdout is what gives it teeth; an "ask" surfaces as a permission prompt,
+	// which the Notification(permission_prompt) hook turns into a blocked task on
+	// the board, so unattended runs route to needs-input rather than silently
+	// writing to the wrong tree.
+	emitWorktreeGuardDecision(database, taskID, task, input)
+
 	return nil
+}
+
+// emitWorktreeGuardDecision evaluates the worktree write-guard and, when a tool
+// call would write outside the worktree, prints a PreToolUse permission decision
+// (ask/deny) to stdout per Claude Code's hookSpecificOutput contract. It prints
+// nothing when the write is allowed, leaving Claude's normal permission flow intact.
+func emitWorktreeGuardDecision(database *db.DB, taskID int64, task *db.Task, input *ClaudeHookInput) {
+	if task == nil {
+		return
+	}
+	var allow []string
+	if projectDir := executor.ManagedWorktreeProjectDir(task.WorktreePath); projectDir != "" {
+		allow = executor.WorktreeAllowExternalWrites(projectDir)
+	}
+	decision := executor.EvaluateWorktreeWriteGuard(task.WorktreePath, allow, executor.WorktreeGuardInput{
+		ToolName:       input.ToolName,
+		ToolInput:      input.ToolInput,
+		Cwd:            input.Cwd,
+		PermissionMode: input.PermissionMode,
+	})
+	if decision == nil {
+		return
+	}
+
+	if decision.Decision == "deny" {
+		database.AppendTaskLog(taskID, "system", "Worktree guard denied an out-of-worktree write")
+	}
+
+	out := map[string]any{
+		"hookSpecificOutput": map[string]any{
+			"hookEventName":            "PreToolUse",
+			"permissionDecision":       decision.Decision,
+			"permissionDecisionReason": decision.Reason,
+		},
+	}
+	if data, err := json.Marshal(out); err == nil {
+		fmt.Println(string(data))
+	}
+}
+
+// worktreeGuardHookInput is the normalized pre-tool payload the worktree-guard
+// subcommand reads on stdin. Codex (PreToolUse) and Gemini (BeforeTool) emit this
+// snake_case shape natively; the OpenCode plugin assembles it before piping it in.
+type worktreeGuardHookInput struct {
+	ToolName       string          `json:"tool_name"`
+	ToolInput      json.RawMessage `json:"tool_input"`
+	Cwd            string          `json:"cwd"`
+	PermissionMode string          `json:"permission_mode"`
+}
+
+// handleWorktreeGuardHook is the executor-agnostic transport for the worktree
+// write-guard, shared by the codex/gemini/opencode pre-tool hooks. It reads the
+// worktree root from WORKTREE_PATH (set by every executor when launching the CLI),
+// evaluates the single shared policy (EvaluateWorktreeWriteGuard), and renders the
+// decision in the requested executor's wire format. It fails open on any error so a
+// guard malfunction never wedges the agent.
+func handleWorktreeGuardHook(format string) error {
+	worktreePath := strings.TrimSpace(os.Getenv("WORKTREE_PATH"))
+	if worktreePath == "" {
+		return nil // no worktree context — nothing to guard
+	}
+
+	var in worktreeGuardHookInput
+	if err := json.NewDecoder(os.Stdin).Decode(&in); err != nil {
+		return nil // unparseable payload — allow rather than block
+	}
+
+	var allow []string
+	if projectDir := executor.ManagedWorktreeProjectDir(worktreePath); projectDir != "" {
+		allow = executor.WorktreeAllowExternalWrites(projectDir)
+	}
+
+	decision := executor.EvaluateWorktreeWriteGuard(worktreePath, allow, executor.WorktreeGuardInput{
+		ToolName:       in.ToolName,
+		ToolInput:      in.ToolInput,
+		Cwd:            in.Cwd,
+		PermissionMode: in.PermissionMode,
+	})
+
+	renderWorktreeGuardDecision(format, decision)
+	return nil
+}
+
+// renderWorktreeGuardDecision writes a guard decision in the wire format the given
+// executor's hook expects. None of codex/gemini/opencode support an interactive
+// "ask" in their pre-tool hook, so an "ask" is downgraded to a hard deny to fail
+// safe (the escape hatch is worktree.allow_external_writes in .taskyou.yml). When
+// the guard allows the call, nothing is emitted (and exit stays 0) so the CLI's own
+// approval flow proceeds unchanged.
+func renderWorktreeGuardDecision(format string, decision *executor.WorktreeGuardDecision) {
+	if decision == nil {
+		return // allowed
+	}
+
+	switch format {
+	case "codex":
+		// Codex PreToolUse contract: hookSpecificOutput.permissionDecision ∈ {allow,deny}.
+		emitJSONLine(map[string]any{
+			"hookSpecificOutput": map[string]any{
+				"hookEventName":            "PreToolUse",
+				"permissionDecision":       "deny",
+				"permissionDecisionReason": decision.Reason,
+			},
+		})
+	case "gemini":
+		// Gemini BeforeTool contract: {decision: allow|deny, reason, systemMessage}.
+		emitJSONLine(map[string]any{
+			"decision":      "deny",
+			"reason":        decision.Reason,
+			"systemMessage": "Worktree write-guard blocked an out-of-worktree write",
+		})
+	case "opencode":
+		// The OpenCode plugin reads the reason from stdout and treats exit code 1 as
+		// a denial (which it surfaces by throwing, aborting the tool call).
+		fmt.Println(decision.Reason)
+		os.Exit(1)
+	}
+}
+
+// emitJSONLine marshals v and prints it on a single line to stdout for a hook.
+func emitJSONLine(v any) {
+	if data, err := json.Marshal(v); err == nil {
+		fmt.Println(string(data))
+	}
 }
 
 // handlePostToolUseHook handles PostToolUse hooks from Claude (after tool execution).
@@ -4226,6 +4471,17 @@ func formatToolLogMessage(input *ClaudeHookInput) string {
 
 	// Default: just the tool name
 	return toolName
+}
+
+// shouldSubmitInput decides whether `task input` should press Enter after the
+// text. By default a message is submitted so the agent actually receives it;
+// --no-submit leaves the text in the input field without submitting. The
+// --enter flag (justEnter) always submits, since pressing Enter is its purpose.
+func shouldSubmitInput(message string, justEnter, noSubmit bool) bool {
+	if justEnter {
+		return true
+	}
+	return message != "" && !noSubmit
 }
 
 // formatPermissionDetail extracts a short detail string from the tool input
@@ -5700,7 +5956,7 @@ func updateProjectCLI(currentName, newName, path, instructions, color, aliases, 
 	if permissionMode != "" {
 		normalized := db.NormalizePermissionMode(permissionMode)
 		if normalized == "" {
-			fmt.Fprintln(os.Stderr, errorStyle.Render("Error: invalid permission mode (use default, auto, or dangerous)"))
+			fmt.Fprintln(os.Stderr, errorStyle.Render("Error: invalid permission mode (use default, accept-edits, auto, or dangerous)"))
 			os.Exit(1)
 		}
 		project.DefaultPermissionMode = normalized

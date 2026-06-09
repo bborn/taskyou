@@ -626,6 +626,112 @@ func TestEditTaskFormEscapeClosesImmediatelyWhenEmpty(t *testing.T) {
 	}
 }
 
+// TestEditTaskFormPreservesRuntimeFields guards against regression of #560:
+// editing a task in the TUI must not reset persisted columns the form does not
+// expose (session IDs, pin state, permission mode, tags, source branch, PR
+// info, port). Previously the save path rebuilt the task from form data and
+// only carried over a handful of fields, silently zeroing the rest.
+func TestEditTaskFormPreservesRuntimeFields(t *testing.T) {
+	database, err := db.Open(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to create test database: %v", err)
+	}
+	defer database.Close()
+
+	exec := executor.New(database, &config.Config{})
+
+	if err := database.CreateProject(&db.Project{Name: "proj", Path: t.TempDir()}); err != nil {
+		t.Fatalf("CreateProject: %v", err)
+	}
+
+	// Create a task, then persist runtime state the edit form never shows.
+	task := &db.Task{
+		Title:    "Original title",
+		Body:     "Original body",
+		Project:  "proj",
+		Executor: "claude",
+		Status:   db.StatusBacklog,
+	}
+	if err := database.CreateTask(task); err != nil {
+		t.Fatalf("CreateTask: %v", err)
+	}
+	task.ClaudeSessionID = "sess-abc"
+	task.DaemonSession = "ty-session-1"
+	task.Port = 4242
+	task.PRURL = "https://github.com/bborn/taskyou/pull/7"
+	task.PRNumber = 7
+	task.PRInfoJSON = `{"state":"open"}`
+	task.DangerousMode = false
+	task.PermissionMode = "auto"
+	task.RemoteControl = true
+	task.Pinned = true
+	task.Tags = "urgent,backend"
+	task.SourceBranch = "main"
+	if err := database.UpdateTask(task); err != nil {
+		t.Fatalf("UpdateTask (seed): %v", err)
+	}
+
+	// Reload so the form is built from the persisted task, as the TUI does.
+	reloaded, err := database.GetTask(task.ID)
+	if err != nil {
+		t.Fatalf("GetTask: %v", err)
+	}
+
+	m := &AppModel{
+		width:        100,
+		height:       50,
+		currentView:  ViewEditTask,
+		previousView: ViewDashboard,
+		db:           database,
+		executor:     exec,
+		editTaskForm: NewEditFormModel(database, reloaded, 100, 50, []string{"claude"}),
+		editingTask:  reloaded,
+	}
+
+	// User edits only the title, then submits with ctrl+s.
+	m.editTaskForm.titleInput.SetValue("Edited title")
+	_, cmd := m.updateEditTaskForm(tea.KeyMsg{Type: tea.KeyCtrlS})
+	if cmd == nil {
+		t.Fatal("expected an update command after submitting the edit form")
+	}
+	cmd() // perform the database update
+
+	got, err := database.GetTask(task.ID)
+	if err != nil {
+		t.Fatalf("GetTask after save: %v", err)
+	}
+
+	// The edited field is applied.
+	if got.Title != "Edited title" {
+		t.Errorf("Title = %q, want %q", got.Title, "Edited title")
+	}
+
+	// Every persisted runtime field must survive the edit untouched.
+	checks := []struct {
+		name string
+		got  any
+		want any
+	}{
+		{"ClaudeSessionID", got.ClaudeSessionID, "sess-abc"},
+		{"DaemonSession", got.DaemonSession, "ty-session-1"},
+		{"Port", got.Port, 4242},
+		{"PRURL", got.PRURL, "https://github.com/bborn/taskyou/pull/7"},
+		{"PRNumber", got.PRNumber, 7},
+		{"PRInfoJSON", got.PRInfoJSON, `{"state":"open"}`},
+		{"DangerousMode", got.DangerousMode, false},
+		{"PermissionMode", got.PermissionMode, "auto"},
+		{"RemoteControl", got.RemoteControl, true},
+		{"Pinned", got.Pinned, true},
+		{"Tags", got.Tags, "urgent,backend"},
+		{"SourceBranch", got.SourceBranch, "main"},
+	}
+	for _, c := range checks {
+		if c.got != c.want {
+			t.Errorf("%s was reset by edit: got %v, want %v", c.name, c.got, c.want)
+		}
+	}
+}
+
 func TestAppModelAvailableExecutors(t *testing.T) {
 	// Test that availableExecutors is properly stored
 	m := &AppModel{

@@ -361,6 +361,9 @@ func refreshStyles() {
 	TypeTag = lipgloss.NewStyle().
 		Foreground(ColorMuted).
 		Italic(true)
+
+	// Invalidate render caches that depend on themed colours.
+	bumpStyleGeneration()
 }
 
 // GetThemeCardColors returns card-specific colors from the current theme.
