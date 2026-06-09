@@ -226,16 +226,36 @@ backlog → queued → processing → done
 
 ## MCP Tools (When Running Inside TaskYou)
 
-If you're running as the task executor inside a TaskYou worktree, you have access to MCP tools:
+If you're running as the task executor inside a TaskYou worktree, the `taskyou`
+MCP server is auto-registered and these tools are auto-approved (no permission
+prompts). Use them instead of the CLI — the CLI is for orchestrators outside
+the worktree, not the executor inside it.
 
-- `taskyou_complete` — Mark your task complete
-- `taskyou_needs_input` — Request user input (blocks task)
-- `taskyou_show_task` — Get your task details
-- `taskyou_create_task` — Create follow-up tasks
-- `taskyou_list_tasks` — See other active tasks
-- `taskyou_spotlight` — Sync worktree changes to main repo for testing
+**Completion signaling (REQUIRED — nothing else watches for completion):**
+- `taskyou_complete` — Move your task to `done` with a summary. Call this
+  when you finish. Without it, the task stays in `processing`/`blocked` and
+  the orchestrator has to close it by hand.
+- `taskyou_needs_input` — Move your task to `blocked` with a question for
+  the user. Use this instead of prompting in the terminal.
 
-Use these instead of CLI when executing inside a TaskYou worktree.
+**Project context (call FIRST before exploring):**
+- `taskyou_get_project_context` — Read cached codebase summary from a prior
+  task. If present, skip exploration.
+- `taskyou_set_project_context` — Save your exploration summary so future
+  tasks in this project can skip it.
+
+**Visual evidence:**
+- `taskyou_screenshot` — Capture the screen and attach it to the task. Use
+  for UI/frontend work so the user can review without re-running.
+
+**Task introspection:**
+- `taskyou_show_task` — Get details of any task in the current project.
+- `taskyou_create_task` — Create a follow-up task.
+- `taskyou_list_tasks` — See other active tasks in this project.
+
+**Worktree sync:**
+- `taskyou_spotlight` — Sync worktree changes to the main repo so you can
+  exercise the running app against your changes (`start`/`stop`/`sync`/`status`).
 
 ## Best Practices
 

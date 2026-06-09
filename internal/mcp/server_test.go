@@ -130,6 +130,9 @@ func TestWorkflowComplete(t *testing.T) {
 	database := testDB(t)
 	task := createTestTask(t, database)
 
+	// Track that the onComplete callback fires so the executor session can shut down.
+	var completeCalled bool
+
 	request := map[string]interface{}{
 		"jsonrpc": "2.0",
 		"id":      1,
@@ -145,6 +148,7 @@ func TestWorkflowComplete(t *testing.T) {
 	reqBytes = append(reqBytes, '\n')
 
 	server, output := testServer(database, task.ID, string(reqBytes))
+	server.SetCallbacks(func() { completeCalled = true }, nil)
 	server.Run()
 
 	var resp jsonRPCResponse
@@ -156,16 +160,79 @@ func TestWorkflowComplete(t *testing.T) {
 		t.Fatalf("unexpected error: %s", resp.Error.Message)
 	}
 
-	// Verify task status was NOT changed to done (only humans close tasks)
+	// Verify task moved to done — agents are trusted to close their own tasks.
 	updatedTask, err := database.GetTask(task.ID)
 	if err != nil {
 		t.Fatalf("failed to get task: %v", err)
 	}
-	if updatedTask.Status == db.StatusDone {
-		t.Errorf("expected status to NOT be 'done' (only humans should close tasks), got '%s'", updatedTask.Status)
+	if updatedTask.Status != db.StatusDone {
+		t.Errorf("expected status 'done' after taskyou_complete, got '%s'", updatedTask.Status)
 	}
-	if updatedTask.Status != db.StatusProcessing {
-		t.Errorf("expected status to remain 'processing', got '%s'", updatedTask.Status)
+	if updatedTask.CompletedAt == nil {
+		t.Error("expected completed_at to be set when task moves to done")
+	}
+	if !completeCalled {
+		t.Error("expected onComplete callback to fire so executor session shuts down")
+	}
+
+	// Response text should reflect the new behavior.
+	result, ok := resp.Result.(map[string]interface{})
+	if !ok {
+		t.Fatal("expected result to be a map")
+	}
+	content := result["content"].([]interface{})
+	text := content[0].(map[string]interface{})["text"].(string)
+	if !strings.Contains(text, "done") {
+		t.Errorf("expected response text to mention task is done, got: %s", text)
+	}
+}
+
+// TestCompleteEndToEnd is the smoke test the bug report calls for: simulate the
+// executor speaking JSON-RPC to the MCP server, call taskyou_complete, and assert
+// the task transitions to 'done' without external intervention.
+func TestCompleteEndToEnd(t *testing.T) {
+	database := testDB(t)
+	task := createTestTask(t, database)
+
+	// initialize → tools/list → tools/call(taskyou_complete) — mirrors what
+	// Claude Code does when it spawns an MCP server via stdio.
+	initReq, _ := json.Marshal(map[string]interface{}{
+		"jsonrpc": "2.0",
+		"id":      1,
+		"method":  "initialize",
+	})
+	listReq, _ := json.Marshal(map[string]interface{}{
+		"jsonrpc": "2.0",
+		"id":      2,
+		"method":  "tools/list",
+	})
+	completeReq, _ := json.Marshal(map[string]interface{}{
+		"jsonrpc": "2.0",
+		"id":      3,
+		"method":  "tools/call",
+		"params": map[string]interface{}{
+			"name": "taskyou_complete",
+			"arguments": map[string]interface{}{
+				"summary": "Shipped PR #123, all checks green",
+			},
+		},
+	})
+	input := string(initReq) + "\n" + string(listReq) + "\n" + string(completeReq) + "\n"
+
+	server, output := testServer(database, task.ID, input)
+	server.Run()
+
+	// taskyou_complete must be in tools/list (otherwise executors think it doesn't exist).
+	if !strings.Contains(output.String(), `"taskyou_complete"`) {
+		t.Errorf("taskyou_complete missing from tools/list output:\n%s", output.String())
+	}
+
+	updatedTask, err := database.GetTask(task.ID)
+	if err != nil {
+		t.Fatalf("failed to get task: %v", err)
+	}
+	if updatedTask.Status != db.StatusDone {
+		t.Errorf("expected status 'done' after taskyou_complete end-to-end, got '%s'", updatedTask.Status)
 	}
 }
 

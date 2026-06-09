@@ -1376,13 +1376,19 @@ func (e *Executor) buildSystemInstructions() string {
   - If empty, explore once and save a summary via taskyou_set_project_context
   This caches your exploration for future tasks in this project.
 
-Work on this task until completion. When you're done or need input:
+Work on this task until completion. When you're done or need input
+you MUST signal the task system explicitly via the taskyou MCP tools —
+nothing else watches for completion.
 
 ✓ WHEN TASK IS COMPLETE:
-  Provide a clear summary of what was accomplished
+  Call taskyou_complete with a one-paragraph summary of what shipped
+  (PR link, files touched, follow-ups). This moves the task to 'done'.
+  Do NOT just print a summary and stop — without this call the task
+  stays in 'processing'/'blocked' forever.
 
 ✓ WHEN YOU NEED INPUT/CLARIFICATION:
-  Ask your question clearly and wait for a response
+  Call taskyou_needs_input with the question. This moves the task to
+  'blocked' so a human is notified. Do not prompt in the terminal.
 
 ✓ FOR VISUAL/FRONTEND WORK:
   Use the taskyou_screenshot MCP tool to take screenshots of the
@@ -1397,8 +1403,6 @@ Work on this task until completion. When you're done or need input:
   - NEVER read/write files in /Users/*/Projects/* except this worktree
   - If you see a path like .task-worktrees/, you're in the right place
   - The parent repo does NOT exist for you - only this worktree does
-
-The task system will automatically detect your status.
 ═══════════════════════════════════════════════════════════════`
 }
 
@@ -2231,7 +2235,7 @@ func (e *Executor) runClaude(ctx context.Context, task *db.Task, workDir, prompt
 	// Note: we don't clean up hooks config immediately - it needs to persist for the session
 
 	// Setup TaskYou MCP server in ~/.claude.json so Claude can use taskyou_* tools
-	if err := writeWorkflowMCPConfig(workDir, task.ID); err != nil {
+	if err := writeWorkflowMCPConfig(workDir, task.ID, paths.configDir); err != nil {
 		e.logger.Warn("could not setup TaskYou MCP config", "error", err)
 	}
 
@@ -2407,7 +2411,7 @@ func (e *Executor) runClaudeResume(ctx context.Context, task *db.Task, workDir, 
 	}
 
 	// Setup TaskYou MCP server in ~/.claude.json so Claude can use taskyou_* tools
-	if err := writeWorkflowMCPConfig(workDir, task.ID); err != nil {
+	if err := writeWorkflowMCPConfig(workDir, task.ID, paths.configDir); err != nil {
 		e.logger.Warn("could not setup TaskYou MCP config", "error", err)
 	}
 
@@ -3980,18 +3984,32 @@ func symlinkMCPConfig(projectDir, worktreePath string) error {
 	return nil
 }
 
-// writeWorkflowMCPConfig writes the TaskYou MCP server configuration to the user's ~/.claude.json
-// under the worktree's project path. This makes it a "local-scoped" server that doesn't require
-// approval prompts (unlike project-scoped servers in .mcp.json which require user approval).
-// This enables Claude Code to use TaskYou tools (taskyou_complete, taskyou_screenshot, etc.).
-func writeWorkflowMCPConfig(worktreePath string, taskID int64) error {
-	configPath := ClaudeConfigFilePath("")
+// claudeJSONMu serializes read-modify-write access to ~/.claude.json from within
+// a single ty process. Many task-start paths (claude, claude-resume) hit this concurrently
+// when the daemon enqueues several tasks at once, and JSON read/modify/write without
+// serialization will silently drop entries. The flock below covers cross-process safety.
+var claudeJSONMu sync.Mutex
 
-	// Get the path to the task executable
+// writeWorkflowMCPConfig writes the TaskYou MCP server configuration to the project's
+// claude.json under the worktree's project path. This makes it a "local-scoped" server
+// that doesn't require approval prompts (unlike project-scoped servers in .mcp.json
+// which require user approval). This enables Claude Code to use TaskYou tools
+// (taskyou_complete, taskyou_screenshot, etc.).
+//
+// configDir lets callers target a project-specific CLAUDE_CONFIG_DIR — passing "" falls
+// back to the user's default (~/.claude.json). Without this, projects with a custom
+// claude_config_dir end up with their MCP config written to the wrong file and the
+// executor session never sees the taskyou_* tools.
+func writeWorkflowMCPConfig(worktreePath string, taskID int64, configDir string) error {
+	configPath := ClaudeConfigFilePath(configDir)
+
+	// Get the path to the ty executable. We resolve symlinks so Claude Code spawns the
+	// real binary on disk, not whatever symlink the user happens to have in PATH today.
 	taskExecutable, err := os.Executable()
 	if err != nil {
-		// Fallback to just "task" and hope it's in PATH
-		taskExecutable = "task"
+		taskExecutable = "ty"
+	} else if resolved, err := filepath.EvalSymlinks(taskExecutable); err == nil {
+		taskExecutable = resolved
 	}
 
 	// Build the TaskYou MCP server config
@@ -4010,7 +4028,19 @@ func writeWorkflowMCPConfig(worktreePath string, taskID int64) error {
 			"taskyou_list_tasks",
 			"taskyou_get_project_context",
 			"taskyou_set_project_context",
+			"taskyou_spotlight",
 		},
+	}
+
+	claudeJSONMu.Lock()
+	defer claudeJSONMu.Unlock()
+
+	// Cross-process file lock so concurrent ty invocations (e.g. CLI + daemon, or
+	// multiple daemons) can't clobber each other's writes. Best-effort: if flock is
+	// unavailable for any reason we still proceed under the in-process mutex.
+	unlock, _ := lockClaudeJSON(configPath)
+	if unlock != nil {
+		defer unlock()
 	}
 
 	// Read existing claude.json config
@@ -4056,11 +4086,58 @@ func writeWorkflowMCPConfig(worktreePath string, taskID int64) error {
 		return fmt.Errorf("marshal claude.json: %w", err)
 	}
 
-	if err := os.WriteFile(configPath, data, 0644); err != nil {
-		return fmt.Errorf("write claude.json: %w", err)
+	// Atomic write via tmp+rename so an interrupted write can't leave a half-truncated
+	// file (which would make Claude Code skip MCP discovery entirely on the next read).
+	if err := os.MkdirAll(filepath.Dir(configPath), 0755); err != nil {
+		return fmt.Errorf("mkdir claude.json parent: %w", err)
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(configPath), ".claude.json.*.tmp")
+	if err != nil {
+		return fmt.Errorf("create temp claude.json: %w", err)
+	}
+	tmpPath := tmp.Name()
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		os.Remove(tmpPath)
+		return fmt.Errorf("write temp claude.json: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("close temp claude.json: %w", err)
+	}
+	if err := os.Chmod(tmpPath, 0644); err != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("chmod temp claude.json: %w", err)
+	}
+	if err := os.Rename(tmpPath, configPath); err != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("rename claude.json: %w", err)
 	}
 
 	return nil
+}
+
+// lockClaudeJSON acquires an advisory lock on claude.json. Returns an unlock function,
+// or nil if locking failed (caller should still proceed — we don't want a transient
+// lock failure to block task startup, and the in-process mutex covers same-process
+// races, which are by far the common case).
+func lockClaudeJSON(configPath string) (func(), error) {
+	lockPath := configPath + ".lock"
+	if err := os.MkdirAll(filepath.Dir(lockPath), 0755); err != nil {
+		return nil, err
+	}
+	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0644)
+	if err != nil {
+		return nil, err
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+		f.Close()
+		return nil, err
+	}
+	return func() {
+		_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+		f.Close()
+	}, nil
 }
 
 // copyMCPConfig copies the MCP server configuration from the source project to the worktree

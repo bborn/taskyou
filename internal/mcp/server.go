@@ -334,8 +334,16 @@ func (s *Server) handleToolCall(id interface{}, params *toolCallParams) {
 			}
 		}
 
-		// Log the completion summary (but don't move to done - only humans close tasks)
+		// Log the completion summary
 		s.db.AppendTaskLog(s.taskID, "system", fmt.Sprintf("Task completed: %s", summary))
+
+		// Mark the task as done. Agents are trusted to signal their own completion —
+		// otherwise tasks stall in `processing`/`blocked` and the orchestrator has to
+		// close them by hand. Humans can always reopen if the work isn't actually finished.
+		if err := s.db.UpdateTaskStatus(s.taskID, db.StatusDone); err != nil {
+			s.sendError(id, -32603, fmt.Sprintf("Failed to mark task done: %v", err))
+			return
+		}
 
 		// Generate a concise activity summary in the background (if possible)
 		go func(taskID int64) {
@@ -344,14 +352,14 @@ func (s *Server) handleToolCall(id interface{}, params *toolCallParams) {
 			_, _ = tasksummary.GenerateAndStore(ctx, s.db, taskID)
 		}(s.taskID)
 
-		// Trigger callback (signals the agent is done, but doesn't change status to done)
+		// Trigger callback so the executor can shut down the session
 		if s.onComplete != nil {
 			s.onComplete()
 		}
 
 		s.sendResult(id, toolCallResult{
 			Content: []contentBlock{
-				{Type: "text", Text: "Task summary recorded. A human will review and close this task." + contextReminder},
+				{Type: "text", Text: "Task marked done." + contextReminder},
 			},
 		})
 
