@@ -198,7 +198,7 @@ func (s *Server) handleRequest(req *jsonRPCRequest) {
 				},
 				{
 					Name:        "taskyou_show_task",
-					Description: "Get details of a specific past task by ID. Use this after taskyou_search_tasks to get full details of a relevant task. Only works for tasks in the same project.",
+					Description: "Get full details of any task by ID — title, status, body, recent activity logs, summary. Restricted to tasks in the same project as the current task. Useful for reading the spec/context of your own task or for inspecting a related task before creating a follow-up.",
 					InputSchema: map[string]interface{}{
 						"type": "object",
 						"properties": map[string]interface{}{
