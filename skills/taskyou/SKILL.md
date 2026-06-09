@@ -244,10 +244,6 @@ the worktree, not the executor inside it.
 - `taskyou_set_project_context` — Save your exploration summary so future
   tasks in this project can skip it.
 
-**Visual evidence:**
-- `taskyou_screenshot` — Capture the screen and attach it to the task. Use
-  for UI/frontend work so the user can review without re-running.
-
 **Task introspection:**
 - `taskyou_show_task` — Get details of any task in the current project.
 - `taskyou_create_task` — Create a follow-up task.

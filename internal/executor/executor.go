@@ -1390,10 +1390,6 @@ nothing else watches for completion.
   Call taskyou_needs_input with the question. This moves the task to
   'blocked' so a human is notified. Do not prompt in the terminal.
 
-✓ FOR VISUAL/FRONTEND WORK:
-  Use the taskyou_screenshot MCP tool to take screenshots of the
-  screen. This helps verify correctness and document changes.
-
 ⚠ CRITICAL - WORKING DIRECTORY CONSTRAINT:
   You are running in an isolated git worktree. This worktree IS your
   project - it is NOT a copy. NEVER access the "original" project
@@ -3994,7 +3990,7 @@ var claudeJSONMu sync.Mutex
 // claude.json under the worktree's project path. This makes it a "local-scoped" server
 // that doesn't require approval prompts (unlike project-scoped servers in .mcp.json
 // which require user approval). This enables Claude Code to use TaskYou tools
-// (taskyou_complete, taskyou_screenshot, etc.).
+// (taskyou_complete, taskyou_needs_input, etc.).
 //
 // configDir lets callers target a project-specific CLAUDE_CONFIG_DIR — passing "" falls
 // back to the user's default (~/.claude.json). Without this, projects with a custom
@@ -4022,7 +4018,6 @@ func writeWorkflowMCPConfig(worktreePath string, taskID int64, configDir string)
 		"autoApprove": []string{
 			"taskyou_complete",
 			"taskyou_needs_input",
-			"taskyou_screenshot",
 			"taskyou_show_task",
 			"taskyou_create_task",
 			"taskyou_list_tasks",

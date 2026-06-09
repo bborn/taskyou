@@ -85,7 +85,6 @@ func TestToolsList(t *testing.T) {
 		t.Fatalf("unexpected error: %s", resp.Error.Message)
 	}
 
-	// Check that the tools list includes taskyou_screenshot
 	result, ok := resp.Result.(map[string]interface{})
 	if !ok {
 		t.Fatal("expected result to be a map")
@@ -95,34 +94,38 @@ func TestToolsList(t *testing.T) {
 		t.Fatal("expected tools to be an array")
 	}
 
-	var foundScreenshot bool
+	// Every tool the executor needs to signal status or fetch context must be
+	// advertised here — otherwise an agent looking at its tool list (as #3386's
+	// agent did) won't even attempt the call.
+	want := map[string]bool{
+		"taskyou_complete":            false,
+		"taskyou_needs_input":         false,
+		"taskyou_show_task":           false,
+		"taskyou_create_task":         false,
+		"taskyou_list_tasks":          false,
+		"taskyou_get_project_context": false,
+		"taskyou_set_project_context": false,
+		"taskyou_spotlight":           false,
+	}
 	for _, toolI := range tools {
 		tool, ok := toolI.(map[string]interface{})
 		if !ok {
 			continue
 		}
-		if tool["name"] == "taskyou_screenshot" {
-			foundScreenshot = true
-			// Verify the tool has proper schema
-			schema, ok := tool["inputSchema"].(map[string]interface{})
-			if !ok {
-				t.Error("expected inputSchema to be a map")
-			}
-			props, ok := schema["properties"].(map[string]interface{})
-			if !ok {
-				t.Error("expected properties to be a map")
-			}
-			if _, ok := props["filename"]; !ok {
-				t.Error("expected filename property")
-			}
-			if _, ok := props["description"]; !ok {
-				t.Error("expected description property")
-			}
+		name, _ := tool["name"].(string)
+		if _, expected := want[name]; expected {
+			want[name] = true
+		}
+		// taskyou_screenshot was removed — it captured the whole desktop, only
+		// worked on GUI hosts, and was superseded by agent-driven browsers.
+		if name == "taskyou_screenshot" {
+			t.Error("taskyou_screenshot should no longer be advertised — it was removed")
 		}
 	}
-
-	if !foundScreenshot {
-		t.Error("taskyou_screenshot not found in tools list")
+	for name, found := range want {
+		if !found {
+			t.Errorf("expected tool %q in tools/list", name)
+		}
 	}
 }
 

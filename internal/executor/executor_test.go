@@ -1517,7 +1517,6 @@ func TestWriteWorkflowMCPConfig(t *testing.T) {
 		expectedTools := []string{
 			"taskyou_complete",
 			"taskyou_needs_input",
-			"taskyou_screenshot",
 			"taskyou_show_task",
 			"taskyou_create_task",
 			"taskyou_list_tasks",
