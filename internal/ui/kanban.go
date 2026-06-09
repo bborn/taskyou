@@ -1670,7 +1670,7 @@ func (k *KanbanBoard) handleClickDesktop(x, y int) *db.Task {
 
 	// Calculate which task was clicked
 	col := k.columns[colIdx]
-	colHeight := k.height - 2                    // -2 for column borders (top + bottom)
+	colHeight := k.height - 2                // -2 for column borders (top + bottom)
 	maxTasks := (colHeight - 3) / cardHeight // -3 for header bar and scroll indicators
 	if maxTasks < 1 {
 		maxTasks = 1
