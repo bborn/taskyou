@@ -905,6 +905,69 @@ func TestGetDBTaskUsesExecutorDirectly(t *testing.T) {
 	}
 }
 
+// TestApplyToOnlyTouchesEditableFields verifies that overlaying the edit form
+// onto an existing task changes only the fields the form exposes and leaves
+// every other persisted column untouched (regression guard for #560).
+func TestApplyToOnlyTouchesEditableFields(t *testing.T) {
+	original := &db.Task{
+		Title:           "Old title",
+		Body:            "Old body",
+		Type:            "code",
+		Project:         "proj",
+		Executor:        "claude",
+		ClaudeSessionID: "sess-abc",
+		DaemonSession:   "ty-1",
+		Port:            4242,
+		PRInfoJSON:      `{"state":"open"}`,
+		DangerousMode:   true,
+		PermissionMode:  "auto",
+		RemoteControl:   true,
+		Pinned:          true,
+		Tags:            "urgent,backend",
+		SourceBranch:    "main",
+		Summary:         "a summary",
+	}
+
+	m := NewEditFormModel(nil, original, 120, 40, []string{"claude"})
+	m.titleInput.SetValue("New title")
+	m.bodyInput.SetValue("New body")
+
+	updated := *original
+	m.ApplyTo(&updated)
+
+	// Edited fields are applied.
+	if updated.Title != "New title" {
+		t.Errorf("Title = %q, want %q", updated.Title, "New title")
+	}
+	if updated.Body != "New body" {
+		t.Errorf("Body = %q, want %q", updated.Body, "New body")
+	}
+
+	// Unexposed persisted fields are preserved.
+	preserved := []struct {
+		name string
+		got  any
+		want any
+	}{
+		{"ClaudeSessionID", updated.ClaudeSessionID, "sess-abc"},
+		{"DaemonSession", updated.DaemonSession, "ty-1"},
+		{"Port", updated.Port, 4242},
+		{"PRInfoJSON", updated.PRInfoJSON, `{"state":"open"}`},
+		{"DangerousMode", updated.DangerousMode, true},
+		{"PermissionMode", updated.PermissionMode, "auto"},
+		{"RemoteControl", updated.RemoteControl, true},
+		{"Pinned", updated.Pinned, true},
+		{"Tags", updated.Tags, "urgent,backend"},
+		{"SourceBranch", updated.SourceBranch, "main"},
+		{"Summary", updated.Summary, "a summary"},
+	}
+	for _, c := range preserved {
+		if c.got != c.want {
+			t.Errorf("%s was modified by ApplyTo: got %v, want %v", c.name, c.got, c.want)
+		}
+	}
+}
+
 func TestFormDefaultsToAvailableExecutor(t *testing.T) {
 	// When claude is available, form should default to claude
 	m := NewFormModel(nil, 100, 50, "", []string{"claude"})
