@@ -102,8 +102,8 @@ type KeyMap struct {
 	// Spotlight mode
 	Spotlight     key.Binding
 	SpotlightSync key.Binding
-	// Quick input focus
-	QuickInput key.Binding
+	// Toggle the executor dock below the board
+	ToggleDock key.Binding
 }
 
 // ShortHelp returns key bindings to show in the mini help.
@@ -288,9 +288,9 @@ func DefaultKeyMap() KeyMap {
 			key.WithKeys("F"),
 			key.WithHelp("F", "spotlight sync"),
 		),
-		QuickInput: key.NewBinding(
+		ToggleDock: key.NewBinding(
 			key.WithKeys("tab"),
-			key.WithHelp("tab", "input"),
+			key.WithHelp("tab", "executor dock"),
 		),
 	}
 }
@@ -359,7 +359,6 @@ func ApplyKeybindingsConfig(km KeyMap, cfg *config.KeybindingsConfig) KeyMap {
 	km.DenyPrompt = applyBinding(km.DenyPrompt, cfg.DenyPrompt)
 	km.Spotlight = applyBinding(km.Spotlight, cfg.Spotlight)
 	km.SpotlightSync = applyBinding(km.SpotlightSync, cfg.SpotlightSync)
-	km.QuickInput = applyBinding(km.QuickInput, cfg.QuickInput)
 
 	return km
 }
@@ -395,6 +394,7 @@ type AppModel struct {
 	// Dashboard state
 	tasks        []*db.Task
 	kanban       *KanbanBoard
+	dock         *DockModel // executor dock below the board (toggleable)
 	loading      bool
 	err          error
 	notification string    // Notification banner text
@@ -507,10 +507,6 @@ type AppModel struct {
 	// AI command service for natural language command interpretation
 	aiCommandService *ai.CommandService
 
-	// Quick input for sending text to executor (always visible when task needs input)
-	replyInput        textinput.Model
-	quickInputFocused bool // Whether quick input field has keyboard focus
-
 	// liveSpinnerRunning guards the live-mode spinner animation loop so only one
 	// tick chain runs at a time.
 	liveSpinnerRunning bool
@@ -606,11 +602,6 @@ func NewAppModel(database *db.DB, exec *executor.Executor, workingDir string, ve
 	watcher, _ := fsnotify.NewWatcher()
 	dbChangeCh := make(chan struct{}, 1)
 
-	// Setup reply input for executor prompts
-	replyInput := textinput.New()
-	replyInput.Placeholder = "Type response and press enter..."
-	replyInput.CharLimit = 200
-
 	// Setup filter input
 	filterInput := textinput.New()
 	filterInput.Placeholder = "Filter text, #id, or [project..."
@@ -640,6 +631,7 @@ func NewAppModel(database *db.DB, exec *executor.Executor, workingDir string, ve
 		help:               h,
 		currentView:        ViewDashboard,
 		kanban:             kanban,
+		dock:               NewDockModel(newTmuxPaneController()),
 		loading:            true,
 		prevStatuses:       make(map[int64]string),
 		tasksNeedingInput:  make(map[int64]bool),
@@ -650,7 +642,6 @@ func NewAppModel(database *db.DB, exec *executor.Executor, workingDir string, ve
 		watcher:            watcher,
 		dbChangeCh:         dbChangeCh,
 		prCache:            github.NewPRCache(),
-		replyInput:         replyInput,
 		filterInput:        filterInput,
 		filterText:         "",
 		filterAutocomplete: filterAutocomplete,
@@ -800,11 +791,6 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.updateDetail(msg)
 		}
 
-		// Handle quick input mode (needs all message types for text input)
-		if m.currentView == ViewDashboard && m.quickInputFocused {
-			return m.updateQuickInput(msg)
-		}
-
 		// Handle filter input mode (needs all message types for text input)
 		if m.currentView == ViewDashboard && m.filterActive {
 			return m.updateFilterMode(msg)
@@ -816,6 +802,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Global keys
 		if key.Matches(msg, m.keys.Quit) {
 			// Cleanup subscriptions and watchers
+			m.demoteDockIfLive()
 			if m.eventCh != nil {
 				m.executor.UnsubscribeTaskEvents(m.eventCh)
 			}
@@ -1070,6 +1057,13 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			lastViewed, hasLast := m.lastViewedAt[msg.task.ID]
 			m.lastViewedAt[msg.task.ID] = now
+			// If the executor dock has a live pane joined, return it to its daemon
+			// window before the detail view takes over pane management. Otherwise the
+			// detail view can't find the executor (it lives in the TUI session, not
+			// the daemon) and the panes collide.
+			if m.dock != nil && m.dock.IsLive() {
+				m.dock.Demote()
+			}
 			// Clean up any duplicate tmux windows for this task before switching
 			m.executor.CleanupDuplicateWindows(msg.task.ID)
 			// Resume task if it was suspended (blocked idle tasks get suspended to save memory)
@@ -1327,8 +1321,6 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			action := "Approved"
 			if msg.action == "deny" {
 				action = "Denied"
-			} else if msg.action == "reply" {
-				action = "Replied to"
 			}
 			m.notification = fmt.Sprintf("%s %s executor prompt for task #%d", IconDone(), action, msg.taskID)
 			m.notifyUntil = time.Now().Add(3 * time.Second)
@@ -1340,6 +1332,26 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			delete(m.executorPrompts, msg.taskID)
 		}
 		cmds = append(cmds, m.loadTasks())
+
+	case dockTickMsg:
+		// Periodic snapshot refresh. Reschedule only while the dock is open so the
+		// tick chain dies (zero cost) when closed.
+		if m.dock != nil && m.dock.IsOpen() {
+			m.refreshDockForSelection()
+			cmds = append(cmds, dockTick())
+		}
+
+	case dockFocusMsg:
+		// While a live pane is up, watch for the user shift-up'ing back to the
+		// board (handled by tmux). When that happens, demote and resume snapshot.
+		if m.dock != nil && m.dock.IsOpen() && m.dock.IsLive() {
+			if m.dock.BoardFocused() {
+				m.dock.Demote()
+				cmds = append(cmds, dockTick())
+			} else {
+				cmds = append(cmds, dockFocusPoll())
+			}
+		}
 
 	case taskEventMsg:
 		// Real-time task update from executor
@@ -1649,6 +1661,46 @@ func (m *AppModel) viewNewTaskConfirm() string {
 	return box.Render(lipgloss.JoinVertical(lipgloss.Left, header, formView))
 }
 
+// refreshDockForSelection re-captures the dock snapshot for the currently
+// highlighted task. If a live pane is up for a different task, it is demoted
+// first (the region must show the new task's snapshot). Cheap no-op when closed.
+func (m *AppModel) refreshDockForSelection() {
+	if m.dock == nil || !m.dock.IsOpen() {
+		return
+	}
+	m.dock.RefreshOrDemote(m.kanban.SelectedTask(), m.height)
+}
+
+// demoteDockIfLive returns any live executor pane to its daemon window. Called
+// before quitting so the executor is not stranded in the dying TUI session
+// (a pane left in task-ui can't be found by the daemon-only window search).
+func (m *AppModel) demoteDockIfLive() {
+	if m.dock != nil && m.dock.IsLive() {
+		m.dock.Demote()
+	}
+}
+
+// dockTickMsg drives periodic dock snapshot refreshes while the dock is open.
+type dockTickMsg struct{}
+
+// dockTick schedules the next dock snapshot refresh. ~750ms keeps the snapshot
+// current without hammering tmux. The handler self-gates and reschedules only
+// while the dock is open, so the tick chain dies (zero cost) when closed.
+func dockTick() tea.Cmd {
+	return tea.Tick(750*time.Millisecond, func(time.Time) tea.Msg { return dockTickMsg{} })
+}
+
+// dockFocusMsg drives focus polling while the dock holds a live pane. When the
+// user shift-ups back to the board pane (handled by tmux's root binding), the
+// poll detects the TUI pane regaining focus and demotes the live pane.
+type dockFocusMsg struct{}
+
+// dockFocusPoll schedules the next focus check. 200ms matches the detail view's
+// focus cadence — responsive without busy-looping.
+func dockFocusPoll() tea.Cmd {
+	return tea.Tick(200*time.Millisecond, func(time.Time) tea.Msg { return dockFocusMsg{} })
+}
+
 func (m *AppModel) viewDashboard() string {
 	var headerParts []string
 
@@ -1715,6 +1767,14 @@ func (m *AppModel) viewDashboard() string {
 		promptPreviewHeight = lipgloss.Height(promptPreview)
 	}
 
+	// Render the executor dock if open (below the board)
+	dockView := ""
+	dockHeight := 0
+	if m.dock != nil && m.dock.IsOpen() {
+		dockView = m.dock.View(m.width, m.height, m.kanban.SelectedTask())
+		dockHeight = lipgloss.Height(dockView)
+	}
+
 	// Build the header first so we can measure its actual rendered height
 	header := ""
 	headerHeight := 0
@@ -1727,7 +1787,7 @@ func (m *AppModel) viewDashboard() string {
 	helpView := m.renderHelp()
 	helpHeight := lipgloss.Height(helpView)
 
-	kanbanHeight := m.height - headerHeight - filterBarHeight - helpHeight - promptPreviewHeight
+	kanbanHeight := m.height - headerHeight - filterBarHeight - helpHeight - promptPreviewHeight - dockHeight
 	if kanbanHeight < 10 {
 		kanbanHeight = 10
 	}
@@ -1749,11 +1809,14 @@ func (m *AppModel) viewDashboard() string {
 		contentParts = append(contentParts, welcomeView, helpView)
 	} else {
 		kanbanView := m.kanban.View()
+		contentParts = append(contentParts, kanbanView)
 		if promptPreview != "" {
-			contentParts = append(contentParts, kanbanView, promptPreview, helpView)
-		} else {
-			contentParts = append(contentParts, kanbanView, helpView)
+			contentParts = append(contentParts, promptPreview)
 		}
+		if dockView != "" {
+			contentParts = append(contentParts, dockView)
+		}
+		contentParts = append(contentParts, helpView)
 	}
 
 	content := lipgloss.JoinVertical(lipgloss.Left, contentParts...)
@@ -1914,7 +1977,7 @@ func (m *AppModel) renderHelp() string {
 
 // renderExecutorPromptPreview renders a compact preview of the executor's current prompt
 // for a blocked task that needs input. Shows the permission message from the hook log
-// with approve/deny/tab-input hints. When quick input is focused, shows the text input.
+// with approve/deny/detail hints.
 func (m *AppModel) renderExecutorPromptPreview(task *db.Task) string {
 	hintStyle := lipgloss.NewStyle().Foreground(ColorMuted)
 	warnStyle := lipgloss.NewStyle().Foreground(ColorWarning)
@@ -1926,9 +1989,9 @@ func (m *AppModel) renderExecutorPromptPreview(task *db.Task) string {
 
 	var hints string
 	if m.questionPrompts[task.ID] {
-		hints = hintStyle.Render("tab reply  enter detail")
+		hints = hintStyle.Render("enter detail")
 	} else {
-		hints = hintStyle.Render("y approve  N deny  tab input  enter detail")
+		hints = hintStyle.Render("y approve  N deny  enter detail")
 	}
 
 	prompt := m.executorPrompts[task.ID]
@@ -1962,13 +2025,6 @@ func (m *AppModel) renderExecutorPromptPreview(task *db.Task) string {
 			}
 			lines = append(lines, barStyle.Render("  "+detailStyle.Render(pl)))
 		}
-	}
-
-	// Show quick input bar when focused
-	if m.quickInputFocused {
-		label := warnStyle.Render("input: ")
-		inputHints := hintStyle.Render("  enter send  esc cancel")
-		lines = append(lines, barStyle.Render(label+m.replyInput.View()+inputHints))
 	}
 
 	return strings.Join(lines, "\n")
@@ -2029,22 +2085,41 @@ func stripAnsiCodes(s string) string {
 
 func (m *AppModel) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch {
+	// Shift+Down/Right promotes the dock to a live, interactive executor pane for
+	// the highlighted task (must precede the plain nav cases). Once joined, tmux's
+	// root key bindings handle further shift-arrow pane cycling; we poll focus to
+	// detect the user shift-up'ing back to the board.
+	case msg.Type == tea.KeyShiftDown || msg.Type == tea.KeyShiftRight:
+		if m.dock != nil && m.dock.IsOpen() && !m.dock.IsLive() {
+			if task := m.kanban.SelectedTask(); task != nil {
+				m.dock.Promote(task, m.height)
+				if m.dock.IsLive() {
+					return m, dockFocusPoll()
+				}
+			}
+		}
+		return m, nil
+
 	// Column navigation
 	case key.Matches(msg, m.keys.Left):
 		m.kanban.MoveLeft()
+		m.refreshDockForSelection()
 		return m, nil
 
 	case key.Matches(msg, m.keys.Right):
 		m.kanban.MoveRight()
+		m.refreshDockForSelection()
 		return m, nil
 
 	// Task navigation within column
 	case key.Matches(msg, m.keys.Up):
 		m.kanban.MoveUp()
+		m.refreshDockForSelection()
 		return m, nil
 
 	case key.Matches(msg, m.keys.Down):
 		m.kanban.MoveDown()
+		m.refreshDockForSelection()
 		return m, nil
 
 	// Numeric shortcuts 1-9 and double-digits (11, 22, etc.) to select visible tasks
@@ -2227,17 +2302,6 @@ func (m *AppModel) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, m.syncSpotlight(task)
 		}
 
-	case key.Matches(msg, m.keys.QuickInput):
-		// Focus the quick input field if selected task needs input
-		if task := m.kanban.SelectedTask(); task != nil {
-			if m.tasksNeedingInput[task.ID] || m.detectPermissionPrompt(task.ID) {
-				m.quickInputFocused = true
-				m.replyInput.SetValue("")
-				m.replyInput.Focus()
-				return m, textinput.Blink
-			}
-		}
-
 	case key.Matches(msg, m.keys.Settings):
 		m.settingsView = NewSettingsModel(m.db, m.width, m.height)
 		m.previousView = m.currentView
@@ -2255,6 +2319,14 @@ func (m *AppModel) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case key.Matches(msg, m.keys.Help):
 		m.help.ShowAll = !m.help.ShowAll
+		return m, nil
+
+	case key.Matches(msg, m.keys.ToggleDock):
+		m.dock.Toggle()
+		if m.dock.IsOpen() {
+			m.refreshDockForSelection()
+			return m, dockTick()
+		}
 		return m, nil
 
 	case key.Matches(msg, m.keys.ApprovePrompt):
@@ -2288,53 +2360,6 @@ func (m *AppModel) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	return m, nil
-}
-
-// updateQuickInput handles input when the quick input field is focused.
-func (m *AppModel) updateQuickInput(msg tea.Msg) (tea.Model, tea.Cmd) {
-	keyMsg, ok := msg.(tea.KeyMsg)
-	if !ok {
-		// Pass non-key messages (like blink) to the text input
-		var cmd tea.Cmd
-		m.replyInput, cmd = m.replyInput.Update(msg)
-		return m, cmd
-	}
-
-	switch keyMsg.String() {
-	case "esc", "shift+tab":
-		// Return focus to kanban
-		m.quickInputFocused = false
-		m.replyInput.SetValue("")
-		m.replyInput.Blur()
-		return m, nil
-
-	case "enter":
-		// Send the text to the selected task's executor
-		text := strings.TrimSpace(m.replyInput.Value())
-		if text == "" {
-			// Empty input - just unfocus
-			m.quickInputFocused = false
-			m.replyInput.Blur()
-			return m, nil
-		}
-		task := m.kanban.SelectedTask()
-		if task == nil {
-			m.quickInputFocused = false
-			m.replyInput.SetValue("")
-			m.replyInput.Blur()
-			return m, nil
-		}
-		taskID := task.ID
-		m.quickInputFocused = false
-		m.replyInput.SetValue("")
-		m.replyInput.Blur()
-		return m, m.sendTextToExecutor(taskID, text)
-	}
-
-	// Pass all other keys to the text input
-	var cmd tea.Cmd
-	m.replyInput, cmd = m.replyInput.Update(msg)
-	return m, cmd
 }
 
 // updateFilterMode handles input when filter mode is active.
@@ -2454,6 +2479,7 @@ func (m *AppModel) updateFilterMode(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case "ctrl+c":
+		m.demoteDockIfLive()
 		if m.eventCh != nil {
 			m.executor.UnsubscribeTaskEvents(m.eventCh)
 		}
@@ -3583,6 +3609,7 @@ func (m *AppModel) updateQuitConfirm(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		case "ctrl+c":
 			// Ctrl+C in quit confirm should just quit immediately
+			m.demoteDockIfLive()
 			if m.eventCh != nil {
 				m.executor.UnsubscribeTaskEvents(m.eventCh)
 			}
@@ -3601,6 +3628,7 @@ func (m *AppModel) updateQuitConfirm(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if m.quitConfirm.State == huh.StateCompleted {
 		if m.quitConfirmValue {
 			// User confirmed quit - cleanup and exit
+			m.demoteDockIfLive()
 			if m.eventCh != nil {
 				m.executor.UnsubscribeTaskEvents(m.eventCh)
 			}
@@ -4722,10 +4750,10 @@ func (m *AppModel) syncSpotlight(task *db.Task) tea.Cmd {
 	}
 }
 
-// executorRespondedMsg is sent after approve/deny/reply is sent to the executor.
+// executorRespondedMsg is sent after approve/deny is sent to the executor.
 type executorRespondedMsg struct {
 	taskID int64
-	action string // "approve", "deny", or "reply"
+	action string // "approve" or "deny"
 	err    error
 }
 
@@ -4750,19 +4778,6 @@ func (m *AppModel) denyExecutorPrompt(taskID int64) tea.Cmd {
 			database.AppendTaskLog(taskID, "user", "Denied from kanban")
 		}
 		return executorRespondedMsg{taskID: taskID, action: "deny", err: err}
-	}
-}
-
-// sendTextToExecutor sends arbitrary text followed by Enter to the executor's tmux pane.
-// Used for multiple choice responses (e.g. "1", "2", "3") and free-form text input.
-func (m *AppModel) sendTextToExecutor(taskID int64, text string) tea.Cmd {
-	database := m.db
-	return func() tea.Msg {
-		err := executor.SendLiteralTextToPane(taskID, text)
-		if err == nil {
-			database.AppendTaskLog(taskID, "user", fmt.Sprintf("Replied from kanban: %s", text))
-		}
-		return executorRespondedMsg{taskID: taskID, action: "reply", err: err}
 	}
 }
 
