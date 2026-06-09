@@ -79,6 +79,18 @@ func (g *GeminiExecutor) runGemini(ctx context.Context, task *db.Task, workDir, 
 	// Kill ALL existing windows with this name (handles duplicates)
 	KillAllWindowsByNameAllSessions(windowName)
 
+	// Worktree write-guard: install Gemini's BeforeTool hook so writes that would
+	// escape the isolated worktree are denied. Cleaned up when the session ends.
+	cleanupGuard, guardErr := g.executor.setupGeminiWorktreeGuard(workDir, g.executor.getProjectDir(task.Project))
+	if guardErr != nil {
+		g.logger.Warn("could not set up Gemini worktree guard", "error", guardErr)
+	}
+	defer func() {
+		if cleanupGuard != nil {
+			cleanupGuard()
+		}
+	}()
+
 	promptFile, err := os.CreateTemp("", "task-prompt-*.txt")
 	if err != nil {
 		g.logger.Error("could not create temp file", "error", err)

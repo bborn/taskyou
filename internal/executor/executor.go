@@ -2201,14 +2201,7 @@ func (e *Executor) setupClaudeHooks(workDir string, taskID int64) (cleanup func(
 	settingsPath := filepath.Join(claudeDir, "settings.local.json")
 
 	// Find the task binary path - use absolute path for hooks
-	taskBin, err := os.Executable()
-	if err != nil {
-		// Fall back to PATH lookup
-		taskBin, _ = exec.LookPath("task")
-		if taskBin == "" {
-			taskBin = "task"
-		}
-	}
+	taskBin := resolveTaskBin()
 
 	// Configure hooks to call our task binary
 	// The WORKTREE_TASK_ID env var is set when launching Claude
