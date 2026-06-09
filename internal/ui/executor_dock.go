@@ -110,6 +110,15 @@ func (d *DockModel) Refresh(task *db.Task, termHeight int) bool {
 // IsLive reports whether a live executor pane is currently joined.
 func (d *DockModel) IsLive() bool { return d.mode == dockLive }
 
+// BoardFocused reports whether the board (TUI pane) currently holds focus — i.e.
+// the user has shift-up'd out of a live pane. Always true when not live.
+func (d *DockModel) BoardFocused() bool {
+	if d.mode != dockLive {
+		return true
+	}
+	return d.ctl.TUIPaneFocused()
+}
+
 // tuiHeightPercentFor returns the TUI pane height percent when the dock holds a
 // live pane occupying dockHeightPercent of the screen.
 func tuiHeightPercentFor() int { return 100 - dockHeightPercent }

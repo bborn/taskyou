@@ -1333,6 +1333,18 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, dockTick())
 		}
 
+	case dockFocusMsg:
+		// While a live pane is up, watch for the user shift-up'ing back to the
+		// board (handled by tmux). When that happens, demote and resume snapshot.
+		if m.dock != nil && m.dock.IsOpen() && m.dock.IsLive() {
+			if m.dock.BoardFocused() {
+				m.dock.Demote(m.kanban.SelectedTask())
+				cmds = append(cmds, dockTick())
+			} else {
+				cmds = append(cmds, dockFocusPoll())
+			}
+		}
+
 	case taskEventMsg:
 		// Real-time task update from executor
 		event := msg.event
@@ -1642,14 +1654,13 @@ func (m *AppModel) viewNewTaskConfirm() string {
 }
 
 // refreshDockForSelection re-captures the dock snapshot for the currently
-// highlighted task. Cheap no-op when the dock is closed.
+// highlighted task. If a live pane is up for a different task, it is demoted
+// first (the region must show the new task's snapshot). Cheap no-op when closed.
 func (m *AppModel) refreshDockForSelection() {
 	if m.dock == nil || !m.dock.IsOpen() {
 		return
 	}
-	if task := m.kanban.SelectedTask(); task != nil {
-		m.dock.Refresh(task, m.height)
-	}
+	m.dock.RefreshOrDemote(m.kanban.SelectedTask(), m.height)
 }
 
 // dockTickMsg drives periodic dock snapshot refreshes while the dock is open.
@@ -1660,6 +1671,17 @@ type dockTickMsg struct{}
 // while the dock is open, so the tick chain dies (zero cost) when closed.
 func dockTick() tea.Cmd {
 	return tea.Tick(750*time.Millisecond, func(time.Time) tea.Msg { return dockTickMsg{} })
+}
+
+// dockFocusMsg drives focus polling while the dock holds a live pane. When the
+// user shift-ups back to the board pane (handled by tmux's root binding), the
+// poll detects the TUI pane regaining focus and demotes the live pane.
+type dockFocusMsg struct{}
+
+// dockFocusPoll schedules the next focus check. 200ms matches the detail view's
+// focus cadence — responsive without busy-looping.
+func dockFocusPoll() tea.Cmd {
+	return tea.Tick(200*time.Millisecond, func(time.Time) tea.Msg { return dockFocusMsg{} })
 }
 
 func (m *AppModel) viewDashboard() string {
@@ -2046,6 +2068,21 @@ func stripAnsiCodes(s string) string {
 
 func (m *AppModel) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch {
+	// Shift+Down/Right promotes the dock to a live, interactive executor pane for
+	// the highlighted task (must precede the plain nav cases). Once joined, tmux's
+	// root key bindings handle further shift-arrow pane cycling; we poll focus to
+	// detect the user shift-up'ing back to the board.
+	case msg.Type == tea.KeyShiftDown || msg.Type == tea.KeyShiftRight:
+		if m.dock != nil && m.dock.IsOpen() && !m.dock.IsLive() {
+			if task := m.kanban.SelectedTask(); task != nil {
+				m.dock.Promote(task, m.height)
+				if m.dock.IsLive() {
+					return m, dockFocusPoll()
+				}
+			}
+		}
+		return m, nil
+
 	// Column navigation
 	case key.Matches(msg, m.keys.Left):
 		m.kanban.MoveLeft()

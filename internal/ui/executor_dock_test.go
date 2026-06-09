@@ -206,6 +206,27 @@ func TestDock_SelectionChangeWhileLiveDemotes(t *testing.T) {
 	}
 }
 
+func TestDock_BoardFocusedReflectsController(t *testing.T) {
+	f := &fakePaneController{}
+	d := NewDockModel(f)
+	// Not live -> always board-focused.
+	if !d.BoardFocused() {
+		t.Fatal("non-live dock should report board focused")
+	}
+	d.Toggle()
+	d.Promote(&db.Task{ID: 7}, 40)
+	// Live + controller says TUI not focused -> board not focused.
+	f.tuiFocused = false
+	if d.BoardFocused() {
+		t.Fatal("live pane focused -> board should NOT be focused")
+	}
+	// Controller says TUI focused (user shift-up'd) -> board focused.
+	f.tuiFocused = true
+	if !d.BoardFocused() {
+		t.Fatal("TUI focused -> board should be focused")
+	}
+}
+
 func TestDock_SelectionStaysOnSameLiveTask(t *testing.T) {
 	f := &fakePaneController{snapshot: "z"}
 	d := NewDockModel(f)

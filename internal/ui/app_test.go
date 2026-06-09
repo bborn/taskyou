@@ -53,6 +53,46 @@ func TestToggleDock_OpensDockAndRendersBelowBoard(t *testing.T) {
 	}
 }
 
+func TestUpdateDashboard_ShiftDownPromotesLivePane(t *testing.T) {
+	kanban := NewKanbanBoard(100, 40)
+	task := &db.Task{ID: 4281, Title: "Test task", Status: db.StatusBlocked}
+	kanban.SetTasks([]*db.Task{task})
+	kanban.SelectTask(4281)
+
+	fake := &fakePaneController{snapshot: "● working"}
+	m := &AppModel{
+		width:             100,
+		height:            40,
+		currentView:       ViewDashboard,
+		keys:              DefaultKeyMap(),
+		kanban:            kanban,
+		dock:              NewDockModel(fake),
+		tasksNeedingInput: make(map[int64]bool),
+		questionPrompts:   make(map[int64]bool),
+		executorPrompts:   make(map[int64]string),
+	}
+
+	// Shift+Down while the dock is closed must NOT promote.
+	m.updateDashboard(tea.KeyMsg{Type: tea.KeyShiftDown})
+	if m.dock.IsLive() {
+		t.Fatal("shift+down should not promote when dock is closed")
+	}
+
+	// Open the dock, then shift+down should promote to a live pane.
+	m.dock.Toggle()
+	updated, cmd := m.updateDashboard(tea.KeyMsg{Type: tea.KeyShiftDown})
+	m = updated.(*AppModel)
+	if !m.dock.IsLive() {
+		t.Fatal("shift+down should promote the dock to live mode")
+	}
+	if len(fake.joined) != 1 || fake.joined[0] != 4281 {
+		t.Fatalf("expected join for task 4281, got %v", fake.joined)
+	}
+	if cmd == nil {
+		t.Fatal("promotion should return a focus-poll command")
+	}
+}
+
 func TestDefaultKeyMap(t *testing.T) {
 	// Verify DefaultKeyMap creates valid key bindings
 	keys := DefaultKeyMap()
