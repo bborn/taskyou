@@ -41,7 +41,6 @@ type SettingsModel struct {
 	projectFormInstructions    string
 	projectFormClaudeConfigDir string
 	projectFormUseWorktrees    bool
-	projectFormPermissionMode  string
 
 	// Task Types
 	taskTypes        []*db.TaskType
@@ -186,8 +185,14 @@ func (m *SettingsModel) Update(msg tea.Msg) (*SettingsModel, tea.Cmd) {
 		case "n":
 			// New item (projects or task types section)
 			if m.section == 1 {
-				// For new project, first get name, then browse for path
-				return m.showProjectForm(&db.Project{UseWorktrees: true})
+				// New project: pick the folder first, then fill in the rest. The
+				// name defaults to the folder name, so often all that's left is an
+				// optional alias.
+				m.editProject = &db.Project{}
+				m.browsing = true
+				home, _ := os.UserHomeDir()
+				m.fileBrowser = NewFileBrowserModel(home, m.width, m.height)
+				return m, nil
 			} else if m.section == 2 {
 				return m.showTaskTypeForm(nil)
 			}
@@ -277,12 +282,14 @@ func (m *SettingsModel) showProjectForm(project *db.Project) (*SettingsModel, te
 	m.projectFormClaudeConfigDir = project.ClaudeConfigDir
 	m.projectFormUseWorktrees = project.UseWorktrees
 
-	// Default permission mode. Use the project's explicit setting when present,
-	// otherwise pre-select the effective default (auto) so the form mirrors the
-	// mode tasks will actually run in.
-	m.projectFormPermissionMode = db.NormalizePermissionMode(project.DefaultPermissionMode)
-	if m.projectFormPermissionMode == "" {
-		m.projectFormPermissionMode = project.EffectiveDefaultPermissionMode()
+	// For a new project the folder is chosen first, so default the name to the
+	// folder name (the user can still override it) and auto-detect worktree
+	// support from whether the folder is a git repo.
+	if project.ID == 0 && project.Path != "" {
+		if m.projectFormName == "" {
+			m.projectFormName = filepath.Base(strings.TrimRight(project.Path, string(os.PathSeparator)))
+		}
+		m.projectFormUseWorktrees = isGitRepo(project.Path)
 	}
 
 	title := "New Project"
@@ -339,16 +346,6 @@ func (m *SettingsModel) showProjectForm(project *db.Project) (*SettingsModel, te
 			Title("Use Git Worktrees").
 			Description("Isolate tasks in git worktrees. Disable for non-git projects.").
 			Value(&m.projectFormUseWorktrees),
-		huh.NewSelect[string]().
-			Key("permission_mode").
-			Title("Default Permission Mode").
-			Description("How new tasks handle permissions. Auto handles ~99% without prompting.").
-			Options(
-				huh.NewOption("Auto — auto-accept edits (recommended)", db.PermissionModeAuto),
-				huh.NewOption("Prompt — ask for each permission", db.PermissionModeDefault),
-				huh.NewOption("Dangerous — skip all permission checks", db.PermissionModeDangerous),
-			).
-			Value(&m.projectFormPermissionMode),
 	)
 
 	modalWidth := min(70, m.width-8)
@@ -547,7 +544,6 @@ func (m *SettingsModel) saveProject() (*SettingsModel, tea.Cmd) {
 	aliases := strings.TrimSpace(m.projectFormAliases)
 	instructions := strings.TrimSpace(m.projectFormInstructions)
 	configDir := strings.TrimSpace(m.projectFormClaudeConfigDir)
-	permissionMode := db.NormalizePermissionMode(m.projectFormPermissionMode)
 
 	// If form values are empty but editProject has values, use those
 	if name == "" && m.editProject.Name != "" {
@@ -555,7 +551,11 @@ func (m *SettingsModel) saveProject() (*SettingsModel, tea.Cmd) {
 		aliases = m.editProject.Aliases
 		instructions = m.editProject.Instructions
 		configDir = m.editProject.ClaudeConfigDir
-		permissionMode = m.editProject.DefaultPermissionMode
+	}
+
+	// Default the name to the folder name when not provided.
+	if name == "" && m.editProject.Path != "" {
+		name = filepath.Base(strings.TrimRight(m.editProject.Path, string(os.PathSeparator)))
 	}
 
 	if name == "" {
@@ -592,7 +592,6 @@ func (m *SettingsModel) saveProject() (*SettingsModel, tea.Cmd) {
 		m.editProject.Instructions = instructions
 		m.editProject.ClaudeConfigDir = configDir
 		m.editProject.UseWorktrees = useWorktrees
-		m.editProject.DefaultPermissionMode = permissionMode
 		m.editingProject = false
 		m.projectForm = nil
 		m.browsing = true
@@ -648,7 +647,6 @@ func (m *SettingsModel) saveProject() (*SettingsModel, tea.Cmd) {
 	m.editProject.Instructions = instructions
 	m.editProject.ClaudeConfigDir = configDir
 	m.editProject.UseWorktrees = useWorktrees
-	m.editProject.DefaultPermissionMode = permissionMode
 
 	if m.editProject.ID == 0 {
 		err = m.db.CreateProject(m.editProject)
@@ -687,7 +685,6 @@ func (m *SettingsModel) reshowProjectFormWithError(err error) (*SettingsModel, t
 	m.editProject.Instructions = strings.TrimSpace(m.projectFormInstructions)
 	m.editProject.ClaudeConfigDir = strings.TrimSpace(m.projectFormClaudeConfigDir)
 	m.editProject.UseWorktrees = m.projectFormUseWorktrees
-	m.editProject.DefaultPermissionMode = strings.TrimSpace(m.projectFormPermissionMode)
 
 	model, cmd := m.showProjectForm(m.editProject)
 	model.err = err

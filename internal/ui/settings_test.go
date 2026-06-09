@@ -118,6 +118,67 @@ func TestSaveProjectRejectsMissingPath(t *testing.T) {
 	}
 }
 
+// TestShowProjectFormDefaultsNameToFolder verifies that for a new project (folder
+// chosen first), the form pre-fills the name from the folder name.
+func TestShowProjectFormDefaultsNameToFolder(t *testing.T) {
+	database, err := db.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer database.Close()
+
+	dir := t.TempDir()
+	m := &SettingsModel{db: database, width: 100, height: 40}
+	m.showProjectForm(&db.Project{Path: dir}) // new project: ID == 0, path already picked
+
+	if m.projectFormName != filepath.Base(dir) {
+		t.Errorf("projectFormName = %q, want folder name %q", m.projectFormName, filepath.Base(dir))
+	}
+	// A fresh (non-git) folder auto-disables worktrees.
+	if m.projectFormUseWorktrees {
+		t.Error("expected worktrees auto-disabled for a non-git folder")
+	}
+}
+
+// TestSaveProjectDefaultsNameToFolder verifies that saving a new project with a
+// blank name falls back to the folder name, and that the simplified form no
+// longer sets a per-project permission default.
+func TestSaveProjectDefaultsNameToFolder(t *testing.T) {
+	database, err := db.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer database.Close()
+
+	dir := t.TempDir()
+	wantName := filepath.Base(dir)
+
+	m := &SettingsModel{db: database, width: 100, height: 40}
+	m.loadSettings()
+
+	// Simulate folder-first creation: path picked, name left blank.
+	m.editProject = &db.Project{Path: dir}
+	m.showProjectForm(m.editProject)
+	m.projectFormName = "" // user cleared the pre-filled name
+	m.saveProject()
+
+	if m.err != nil {
+		t.Fatalf("saveProject returned error: %v", m.err)
+	}
+
+	got, err := database.GetProjectByName(wantName)
+	if err != nil {
+		t.Fatalf("get project: %v", err)
+	}
+	if got == nil {
+		t.Fatalf("expected project named %q to be created", wantName)
+	}
+	// Permission mode is no longer a project setting; it must stay empty.
+	if got.DefaultPermissionMode != "" {
+		t.Errorf("DefaultPermissionMode = %q, want empty (moved to task level)", got.DefaultPermissionMode)
+	}
+}
+
 // TestShowProjectFormIncludesPathForExisting verifies the edit form pre-fills
 // the editable directory field for an existing project.
 func TestShowProjectFormIncludesPathForExisting(t *testing.T) {

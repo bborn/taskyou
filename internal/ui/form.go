@@ -30,6 +30,7 @@ const (
 	FieldType
 	FieldExecutor
 	FieldEffort
+	FieldPermission
 	FieldCount
 )
 
@@ -69,6 +70,10 @@ type FormModel struct {
 	effortLevel        string   // Per-task Claude effort override ("" = use global/Claude default)
 	effortIdx          int
 	effortLevels       []string // Selectable effort values; "" (first) means "default"
+	permissionMode     string   // Per-task permission mode ("default"/"auto"/"dangerous")
+	permissionIdx      int
+	permissionModes    []string // Selectable permission modes
+	permissionTouched  bool     // user picked a permission explicitly; stop following project default
 	queue              bool
 	attachments        []string // Parsed file paths
 	attachmentCursor   int      // Index of the currently selected attachment chip
@@ -162,6 +167,24 @@ func effortIndexFor(options []string, level string) int {
 	return 0
 }
 
+// permissionModeOptions returns the selectable permission modes for the form, in
+// display order. "default" (prompt for each permission) comes first, then the
+// less-restrictive modes.
+func permissionModeOptions() []string {
+	return []string{db.PermissionModeDefault, db.PermissionModeAuto, db.PermissionModeDangerous}
+}
+
+// permissionIndexFor returns the index of the given permission mode in the
+// options list, defaulting to 0 ("default") when not found.
+func permissionIndexFor(options []string, mode string) int {
+	for i, o := range options {
+		if o == mode {
+			return i
+		}
+	}
+	return 0
+}
+
 // NewEditFormModel creates a form model pre-populated with an existing task's data for editing.
 func NewEditFormModel(database *db.DB, task *db.Task, width, height int, availableExecutors []string) *FormModel {
 	// Set executor to default if not specified
@@ -229,6 +252,10 @@ func NewEditFormModel(database *db.DB, task *db.Task, width, height int, availab
 		effortLevel:         task.EffortLevel,
 		effortLevels:        effortLevelOptions(),
 		effortIdx:           effortIndexFor(effortLevelOptions(), task.EffortLevel),
+		permissionMode:      task.EffectivePermissionMode(),
+		permissionModes:     permissionModeOptions(),
+		permissionIdx:       permissionIndexFor(permissionModeOptions(), task.EffectivePermissionMode()),
+		permissionTouched:   true, // editing: keep the task's existing mode unless changed
 		isEdit:              true,
 		prURL:               task.PRURL,
 		prNumber:            task.PRNumber,
@@ -350,7 +377,8 @@ func NewFormModel(database *db.DB, width, height int, workingDir string, availab
 		taskRefAutocomplete: NewTaskRefAutocompleteModel(database, width-24),
 		attachmentCursor:    -1,
 		effortLevels:        effortLevelOptions(), // Defaults to "" (Claude's global default)
-		showAdvanced:        showAdvanced,         // Load from user preference
+		permissionModes:     permissionModeOptions(),
+		showAdvanced:        showAdvanced, // Load from user preference
 	}
 
 	// Load task types from database
@@ -421,6 +449,10 @@ func NewFormModel(database *db.DB, width, height int, workingDir string, availab
 
 	// Load last used executor for the selected project (overrides default if available)
 	m.loadLastExecutorForProject()
+
+	// Seed the permission selector from the project's default so new tasks start
+	// in the right mode without a manual toggle (auto for most users).
+	m.refreshPermissionDefaultForProject()
 
 	// Title input
 	m.titleInput = textinput.New()
@@ -765,6 +797,7 @@ func (m *FormModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.loadLastTaskTypeForProject()
 				m.rebuildExecutorListForProject() // Re-sort by usage for new project
 				m.loadLastExecutorForProject()
+				m.refreshPermissionDefaultForProject()
 				return m, nil
 			}
 			if m.focused == FieldType {
@@ -782,6 +815,12 @@ func (m *FormModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.effortLevel = m.effortLevels[m.effortIdx]
 				return m, nil
 			}
+			if m.focused == FieldPermission && len(m.permissionModes) > 0 {
+				m.permissionIdx = (m.permissionIdx - 1 + len(m.permissionModes)) % len(m.permissionModes)
+				m.permissionMode = m.permissionModes[m.permissionIdx]
+				m.permissionTouched = true
+				return m, nil
+			}
 
 		case "right":
 			if m.handleAttachmentNavigation(1) {
@@ -793,6 +832,7 @@ func (m *FormModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.loadLastTaskTypeForProject()
 				m.rebuildExecutorListForProject() // Re-sort by usage for new project
 				m.loadLastExecutorForProject()
+				m.refreshPermissionDefaultForProject()
 				return m, nil
 			}
 			if m.focused == FieldType {
@@ -808,6 +848,12 @@ func (m *FormModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.focused == FieldEffort && len(m.effortLevels) > 0 {
 				m.effortIdx = (m.effortIdx + 1) % len(m.effortLevels)
 				m.effortLevel = m.effortLevels[m.effortIdx]
+				return m, nil
+			}
+			if m.focused == FieldPermission && len(m.permissionModes) > 0 {
+				m.permissionIdx = (m.permissionIdx + 1) % len(m.permissionModes)
+				m.permissionMode = m.permissionModes[m.permissionIdx]
+				m.permissionTouched = true
 				return m, nil
 			}
 
@@ -863,7 +909,7 @@ func (m *FormModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 			// Type-to-select for other selector fields
-			if m.focused == FieldType || m.focused == FieldExecutor || m.focused == FieldEffort {
+			if m.focused == FieldType || m.focused == FieldExecutor || m.focused == FieldEffort || m.focused == FieldPermission {
 				key := msg.String()
 				if len(key) == 1 && unicode.IsLetter(rune(key[0])) {
 					m.selectByPrefix(strings.ToLower(key))
@@ -1069,6 +1115,7 @@ func (m *FormModel) selectProjectFromSearch() {
 	m.loadLastTaskTypeForProject()
 	m.rebuildExecutorListForProject()
 	m.loadLastExecutorForProject()
+	m.refreshPermissionDefaultForProject()
 }
 
 // filterProjects updates the filtered project list based on the search query.
@@ -1142,6 +1189,15 @@ func (m *FormModel) selectByPrefix(prefix string) {
 				return
 			}
 		}
+	case FieldPermission:
+		for i, p := range m.permissionModes {
+			if strings.HasPrefix(strings.ToLower(p), prefix) {
+				m.permissionIdx = i
+				m.permissionMode = p
+				m.permissionTouched = true
+				return
+			}
+		}
 	}
 }
 
@@ -1186,6 +1242,30 @@ func (m *FormModel) loadLastExecutorForProject() {
 			return
 		}
 	}
+}
+
+// defaultPermissionForProject resolves the permission mode a new task should
+// start in for the given project: the project's configured default, falling back
+// to the global default ("auto"). This is the value the form pre-selects so most
+// tasks can be created and run without touching the permission field.
+func (m *FormModel) defaultPermissionForProject(project string) string {
+	if m.db != nil && project != "" {
+		if p, err := m.db.GetProjectByName(project); err == nil && p != nil {
+			return p.EffectiveDefaultPermissionMode()
+		}
+	}
+	return db.GlobalDefaultPermissionMode()
+}
+
+// refreshPermissionDefaultForProject re-seeds the permission selector from the
+// current project's default, unless the user has explicitly chosen a mode. Called
+// when the selected project changes so the default follows the project.
+func (m *FormModel) refreshPermissionDefaultForProject() {
+	if m.permissionTouched {
+		return
+	}
+	m.permissionMode = m.defaultPermissionForProject(m.project)
+	m.permissionIdx = permissionIndexFor(m.permissionModes, m.permissionMode)
 }
 
 // rebuildExecutorListForProject rebuilds the executor list sorted by usage for the current project.
@@ -1785,6 +1865,16 @@ func (m *FormModel) View() string {
 			b.WriteString(cursor + " " + labelStyle.Render("Effort") + m.renderSelector(effortLabels, m.effortIdx, m.focused == FieldEffort, selectedStyle, optionStyle, dimStyle))
 			b.WriteString("\n\n")
 		}
+
+		// Permission selector
+		if m.isFieldVisible(FieldPermission) {
+			cursor = " "
+			if m.focused == FieldPermission {
+				cursor = cursorStyle.Render("▸")
+			}
+			b.WriteString(cursor + " " + labelStyle.Render("Permission") + m.renderSelector(m.permissionModes, m.permissionIdx, m.focused == FieldPermission, selectedStyle, optionStyle, dimStyle))
+			b.WriteString("\n\n")
+		}
 	} else {
 		// Show compact summary of defaults and toggle hint
 		b.WriteString("\n")
@@ -1797,6 +1887,9 @@ func (m *FormModel) View() string {
 		}
 		if m.taskType != "" {
 			summaryParts = append(summaryParts, m.taskType)
+		}
+		if m.permissionMode != "" {
+			summaryParts = append(summaryParts, m.permissionMode)
 		}
 		defaultsLine := strings.Join(summaryParts, " · ")
 		if defaultsLine != "" {
@@ -1901,6 +1994,16 @@ func (m *FormModel) GetDBTask() *db.Task {
 	if m.executor == db.ExecutorClaude {
 		task.EffortLevel = m.effortLevel
 	}
+
+	// Permission mode is chosen inline on the form (seeded from the project's
+	// default). Carry it on the task so it runs in the selected mode. Keep the
+	// legacy DangerousMode boolean consistent with the resolved mode.
+	mode := db.NormalizePermissionMode(m.permissionMode)
+	if mode == "" {
+		mode = db.PermissionModeDefault
+	}
+	task.PermissionMode = mode
+	task.DangerousMode = mode == db.PermissionModeDangerous
 
 	return task
 }
