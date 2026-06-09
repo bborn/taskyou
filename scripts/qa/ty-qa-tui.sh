@@ -14,7 +14,11 @@ tmux kill-session -t "$TY_UI_SESSION" 2>/dev/null || true
 
 # Inside tmux, TMUX is set automatically, so ty runs the bubbletea TUI in-pane (runLocal).
 # --debug-state-file dumps UI state as JSON on every update for assertions.
-tmux new-session -d -s "$TY_UI_SESSION" -x "$COLS" -y "$ROWS" -n tui \
+# -c "$TY_QA_ROOT": launch from a NON-git dir so ty doesn't see the cwd as a new
+# repo and pop the "New Project Detected" modal (which, with no TTY answer, makes
+# the TUI exit). The isolated 'qa' project is already registered by ty-qa-up.sh.
+mkdir -p "$TY_QA_ROOT"
+tmux new-session -d -s "$TY_UI_SESSION" -x "$COLS" -y "$ROWS" -n tui -c "$TY_QA_ROOT" \
   "WORKTREE_DB_PATH='$WORKTREE_DB_PATH' WORKTREE_SESSION_ID='$WORKTREE_SESSION_ID' '$TY_BIN' --debug-state-file '$TY_QA_STATE'"
 
 sleep 4
