@@ -4,8 +4,9 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/bborn/workflow/internal/db"
 	"github.com/charmbracelet/lipgloss"
+
+	"github.com/bborn/workflow/internal/db"
 )
 
 // dockMode is the dock's current display mode.
