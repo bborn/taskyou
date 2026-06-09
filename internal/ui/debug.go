@@ -11,7 +11,6 @@ type DebugState struct {
 	View         string             `json:"view"`
 	Size         DebugSize          `json:"size"`
 	Dashboard    *DebugDashboard    `json:"dashboard,omitempty"`
-	Dock         *DebugDock         `json:"dock,omitempty"`
 	Detail       *DebugDetail       `json:"detail,omitempty"`
 	Form         *DebugForm         `json:"form,omitempty"`
 	Modals       *DebugModals       `json:"modals,omitempty"`
@@ -45,13 +44,6 @@ type DebugTask struct {
 	Project  string `json:"project"`
 	Selected bool   `json:"is_selected"`
 	Pinned   bool   `json:"is_pinned,omitempty"`
-}
-
-type DebugDock struct {
-	Open        bool   `json:"open"`
-	Mode        string `json:"mode"` // "snapshot" | "live"
-	LiveTaskID  int64  `json:"live_task_id,omitempty"`
-	HasSnapshot bool   `json:"has_snapshot"`
 }
 
 type DebugDetail struct {
@@ -127,15 +119,6 @@ func (m *AppModel) GenerateDebugState() DebugState {
 		}
 
 		s.Dashboard = dash
-
-		if m.dock != nil && m.dock.IsOpen() {
-			s.Dock = &DebugDock{
-				Open:        true,
-				Mode:        m.dock.Mode(),
-				LiveTaskID:  m.dock.LiveTaskID(),
-				HasSnapshot: m.dock.HasSnapshot(),
-			}
-		}
 	}
 
 	// Detail State

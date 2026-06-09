@@ -381,6 +381,70 @@ func splitPinnedTasks(tasks []*db.Task) (pinned []*db.Task, unpinned []*db.Task)
 	return tasks[:idx], tasks[idx:]
 }
 
+// maxVisibleCards returns how many task cards fit in a column at the current
+// board height. Mirrors the colHeight math used by the view/click handlers so
+// scrolling and rendering agree.
+func (k *KanbanBoard) maxVisibleCards() int {
+	colHeight := k.height - 2 // -2 for column borders
+	if k.IsMobileMode() {
+		colHeight = k.height - 4 // -2 for tab bar, -2 for column borders
+	}
+	m := (colHeight - 3) / cardHeight // -3 for header bar and scroll indicators
+	if m < 1 {
+		m = 1
+	}
+	return m
+}
+
+// columnLayout describes how a column's tasks map onto the viewport.
+type columnLayout struct {
+	fixedPinned    int // leading pinned tasks rendered fixed at the top: rows [0, fixedPinned)
+	scrollCapacity int // number of scrolling-region cards visible at once
+	scrollOffset   int // clamped offset into the scrolling region (region starts at fixedPinned)
+}
+
+// columnLayoutFor computes the viewport layout for a column given how many cards
+// fit (maxVisible). Pinned tasks stay fixed at the top while they leave room to
+// scroll the rest; but once pinned tasks alone fill the viewport they scroll
+// along with everything else (fixedPinned == 0), so the selection can never fall
+// off-screen in an all-pinned column. The scrolling region is col.Tasks[fixedPinned:].
+func (k *KanbanBoard) columnLayoutFor(colIdx, maxVisible int) columnLayout {
+	if maxVisible < 1 {
+		maxVisible = 1
+	}
+	col := k.columns[colIdx]
+	pinned, _ := splitPinnedTasks(col.Tasks)
+	pinnedCount := len(pinned)
+
+	fixedPinned := pinnedCount
+	if pinnedCount >= maxVisible {
+		// Pinned tasks overflow the viewport — there is no room to keep them
+		// fixed, so scroll the whole list instead.
+		fixedPinned = 0
+	}
+	scrollCapacity := maxVisible - fixedPinned
+	if scrollCapacity < 1 {
+		scrollCapacity = 1
+	}
+
+	offset := 0
+	if colIdx >= 0 && colIdx < len(k.scrollOffsets) {
+		offset = k.scrollOffsets[colIdx]
+	}
+	regionLen := len(col.Tasks) - fixedPinned
+	maxOffset := regionLen - scrollCapacity
+	if maxOffset < 0 {
+		maxOffset = 0
+	}
+	if offset > maxOffset {
+		offset = maxOffset
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	return columnLayout{fixedPinned: fixedPinned, scrollCapacity: scrollCapacity, scrollOffset: offset}
+}
+
 // SetSize updates the board dimensions.
 func (k *KanbanBoard) SetSize(width, height int) {
 	heightChanged := k.height != height
@@ -490,73 +554,35 @@ func (k *KanbanBoard) ensureSelectedVisible() {
 		k.scrollOffsets = append(k.scrollOffsets, 0)
 	}
 
+	lay := k.columnLayoutFor(k.selectedCol, k.maxVisibleCards())
+
+	// Tasks pinned to the fixed header are always visible — don't move scroll.
+	if k.selectedRow < lay.fixedPinned {
+		k.scrollOffsets[k.selectedCol] = lay.scrollOffset
+		return
+	}
+
+	// Scroll the region so the selected task is within the visible window.
 	col := k.columns[k.selectedCol]
-	pinnedTasks, unpinnedTasks := splitPinnedTasks(col.Tasks)
-	pinnedCount := len(pinnedTasks)
-
-	// Calculate how many tasks fit in the visible area
-	// Must match viewDesktop()/viewMobile() calculation
-	colHeight := k.height - 2 // -2 for column borders
-	if k.IsMobileMode() {
-		colHeight = k.height - 4 // -2 for tab bar, -2 for column borders
-	}
-	maxVisible := (colHeight - 3) / cardHeight // -3 for header bar and scroll indicators
-	if maxVisible < 1 {
-		maxVisible = 1
-	}
-
-	// Pinned tasks always stay at the top, so only the remaining slots scroll
-	pinnedSlots := pinnedCount
-	if pinnedSlots > maxVisible {
-		pinnedSlots = maxVisible
-	}
-	scrollCapacity := maxVisible - pinnedSlots
-	if scrollCapacity < 0 {
-		scrollCapacity = 0
-	}
-
-	offset := k.scrollOffsets[k.selectedCol]
-	if offset < 0 {
-		offset = 0
-	}
-	maxOffset := 0
-	if scrollCapacity > 0 {
-		maxOffset = len(unpinnedTasks) - scrollCapacity
-		if maxOffset < 0 {
-			maxOffset = 0
-		}
-	}
-	if offset > maxOffset {
-		offset = maxOffset
-	}
-
-	// Selecting pinned tasks never adjusts scroll offset
-	if k.selectedRow < pinnedCount {
-		k.scrollOffsets[k.selectedCol] = offset
-		return
-	}
-
-	if scrollCapacity == 0 {
-		k.scrollOffsets[k.selectedCol] = 0
-		return
-	}
-
-	// Work with the index relative to the first unpinned task
-	relIndex := k.selectedRow - pinnedCount
+	relIndex := k.selectedRow - lay.fixedPinned
+	offset := lay.scrollOffset
 	if relIndex < offset {
 		offset = relIndex
-	}
-	if relIndex >= offset+scrollCapacity {
-		offset = relIndex - scrollCapacity + 1
+	} else if relIndex >= offset+lay.scrollCapacity {
+		offset = relIndex - lay.scrollCapacity + 1
 	}
 
+	regionLen := len(col.Tasks) - lay.fixedPinned
+	maxOffset := regionLen - lay.scrollCapacity
+	if maxOffset < 0 {
+		maxOffset = 0
+	}
 	if offset > maxOffset {
 		offset = maxOffset
 	}
 	if offset < 0 {
 		offset = 0
 	}
-
 	k.scrollOffsets[k.selectedCol] = offset
 }
 
@@ -832,43 +858,11 @@ func (k *KanbanBoard) viewDesktop() string {
 			maxTasks = 1
 		}
 
-		pinnedTasks, unpinnedTasks := splitPinnedTasks(col.Tasks)
-		pinnedCount := len(pinnedTasks)
-		pinnedSlots := pinnedCount
-		if pinnedSlots > maxTasks {
-			pinnedSlots = maxTasks
-		}
-		scrollCapacity := maxTasks - pinnedSlots
-		if scrollCapacity < 0 {
-			scrollCapacity = 0
-		}
-
-		// Get scroll offset for this column (only for unpinned tasks)
-		scrollOffset := 0
-		if colIdx < len(k.scrollOffsets) {
-			scrollOffset = k.scrollOffsets[colIdx]
-		}
-
-		// Clamp scroll offset to valid range
-		maxOffset := 0
-		if scrollCapacity > 0 {
-			maxOffset = len(unpinnedTasks) - scrollCapacity
-			if maxOffset < 0 {
-				maxOffset = 0
-			}
-		}
-		if scrollOffset > maxOffset {
-			scrollOffset = maxOffset
-		}
-		if scrollOffset < 0 {
-			scrollOffset = 0
-		}
-
-		// Calculate visible range for unpinned tasks
-		startIdx := scrollOffset
-		endIdx := scrollOffset + scrollCapacity
-		if endIdx > len(unpinnedTasks) {
-			endIdx = len(unpinnedTasks)
+		lay := k.columnLayoutFor(colIdx, maxTasks)
+		regionStart := lay.fixedPinned + lay.scrollOffset
+		regionEnd := regionStart + lay.scrollCapacity
+		if regionEnd > len(col.Tasks) {
+			regionEnd = len(col.Tasks)
 		}
 
 		var taskViews []string
@@ -876,9 +870,8 @@ func (k *KanbanBoard) viewDesktop() string {
 		// Track shortcut number for the selected column (1-9)
 		shortcutNum := 0
 
-		// Render pinned tasks (always fixed at the top)
-		for i := 0; i < pinnedSlots; i++ {
-			task := pinnedTasks[i]
+		// Render pinned tasks fixed at the top (when they fit)
+		for i := 0; i < lay.fixedPinned; i++ {
 			isSelected := isSelectedCol && i == k.selectedRow
 			// Only show shortcuts in the selected column
 			var hint string
@@ -886,37 +879,33 @@ func (k *KanbanBoard) viewDesktop() string {
 				shortcutNum++
 				hint = TaskShortcutHint(shortcutNum)
 			}
-			taskView := k.renderTaskCard(task, colWidth, isSelected, hint)
-			taskViews = append(taskViews, taskView)
+			taskViews = append(taskViews, k.renderTaskCard(col.Tasks[i], colWidth, isSelected, hint))
 		}
 
-		// Show "more above" indicator for unpinned tasks
-		if scrollCapacity > 0 && scrollOffset > 0 {
+		// Show "more above" indicator for the scrolling region
+		if lay.scrollOffset > 0 {
 			scrollIndicatorStyle := lipgloss.NewStyle().
 				Foreground(ColorMuted).
 				Width(colWidth - 2).
 				Align(lipgloss.Center).
 				Italic(true)
-			taskViews = append(taskViews, scrollIndicatorStyle.Render(fmt.Sprintf("%s %d more", IconArrowUp(), scrollOffset)))
+			taskViews = append(taskViews, scrollIndicatorStyle.Render(fmt.Sprintf("%s %d more", IconArrowUp(), lay.scrollOffset)))
 		}
 
-		// Render visible unpinned tasks
-		for i := startIdx; i < endIdx; i++ {
-			task := unpinnedTasks[i]
-			globalIndex := pinnedCount + i
-			isSelected := isSelectedCol && globalIndex == k.selectedRow
+		// Render visible scrolling-region tasks
+		for i := regionStart; i < regionEnd; i++ {
+			isSelected := isSelectedCol && i == k.selectedRow
 			// Only show shortcuts in the selected column
 			var hint string
 			if isSelectedCol {
 				shortcutNum++
 				hint = TaskShortcutHint(shortcutNum)
 			}
-			taskView := k.renderTaskCard(task, colWidth, isSelected, hint)
-			taskViews = append(taskViews, taskView)
+			taskViews = append(taskViews, k.renderTaskCard(col.Tasks[i], colWidth, isSelected, hint))
 		}
 
 		// Show "more below" indicator (combined with hidden done count for Done column)
-		remainingBelow := len(unpinnedTasks) - endIdx
+		remainingBelow := len(col.Tasks) - regionEnd
 		isDoneCol := col.Status == db.StatusDone
 		hasHiddenDone := isDoneCol && k.hiddenDoneCount > 0
 
@@ -1054,42 +1043,11 @@ func (k *KanbanBoard) viewMobile() string {
 		maxTasks = 1
 	}
 
-	pinnedTasks, unpinnedTasks := splitPinnedTasks(col.Tasks)
-	toRenderPinned := len(pinnedTasks)
-	if toRenderPinned > maxTasks {
-		toRenderPinned = maxTasks
-	}
-	scrollCapacity := maxTasks - toRenderPinned
-	if scrollCapacity < 0 {
-		scrollCapacity = 0
-	}
-
-	// Get scroll offset for this column
-	scrollOffset := 0
-	if k.selectedCol < len(k.scrollOffsets) {
-		scrollOffset = k.scrollOffsets[k.selectedCol]
-	}
-
-	// Clamp scroll offset to valid range
-	maxOffset := 0
-	if scrollCapacity > 0 {
-		maxOffset = len(unpinnedTasks) - scrollCapacity
-		if maxOffset < 0 {
-			maxOffset = 0
-		}
-	}
-	if scrollOffset > maxOffset {
-		scrollOffset = maxOffset
-	}
-	if scrollOffset < 0 {
-		scrollOffset = 0
-	}
-
-	// Calculate visible task range for unpinned tasks
-	startIdx := scrollOffset
-	endIdx := scrollOffset + scrollCapacity
-	if endIdx > len(unpinnedTasks) {
-		endIdx = len(unpinnedTasks)
+	lay := k.columnLayoutFor(k.selectedCol, maxTasks)
+	regionStart := lay.fixedPinned + lay.scrollOffset
+	regionEnd := regionStart + lay.scrollCapacity
+	if regionEnd > len(col.Tasks) {
+		regionEnd = len(col.Tasks)
 	}
 
 	var taskViews []string
@@ -1097,39 +1055,34 @@ func (k *KanbanBoard) viewMobile() string {
 	// Track shortcut number (1-9) for mobile view
 	shortcutNum := 0
 
-	// Render pinned tasks first
-	for i := 0; i < toRenderPinned; i++ {
-		task := pinnedTasks[i]
+	// Render pinned tasks fixed at the top (when they fit)
+	for i := 0; i < lay.fixedPinned; i++ {
 		isSelected := i == k.selectedRow
 		shortcutNum++
 		hint := TaskShortcutHint(shortcutNum)
-		taskView := k.renderTaskCard(task, colWidth, isSelected, hint)
-		taskViews = append(taskViews, taskView)
+		taskViews = append(taskViews, k.renderTaskCard(col.Tasks[i], colWidth, isSelected, hint))
 	}
 
-	// Show "more above" indicator for unpinned tasks
-	if scrollCapacity > 0 && scrollOffset > 0 {
+	// Show "more above" indicator for the scrolling region
+	if lay.scrollOffset > 0 {
 		scrollIndicatorStyle := lipgloss.NewStyle().
 			Foreground(ColorMuted).
 			Width(colWidth - 2).
 			Align(lipgloss.Center).
 			Italic(true)
-		taskViews = append(taskViews, scrollIndicatorStyle.Render(fmt.Sprintf("%s %d more", IconArrowUp(), scrollOffset)))
+		taskViews = append(taskViews, scrollIndicatorStyle.Render(fmt.Sprintf("%s %d more", IconArrowUp(), lay.scrollOffset)))
 	}
 
-	// Render visible unpinned tasks
-	for i := startIdx; i < endIdx; i++ {
-		task := unpinnedTasks[i]
-		globalIndex := len(pinnedTasks) + i
-		isSelected := globalIndex == k.selectedRow
+	// Render visible scrolling-region tasks
+	for i := regionStart; i < regionEnd; i++ {
+		isSelected := i == k.selectedRow
 		shortcutNum++
 		hint := TaskShortcutHint(shortcutNum)
-		taskView := k.renderTaskCard(task, colWidth, isSelected, hint)
-		taskViews = append(taskViews, taskView)
+		taskViews = append(taskViews, k.renderTaskCard(col.Tasks[i], colWidth, isSelected, hint))
 	}
 
 	// Show "more below" indicator (combined with hidden done count for Done column)
-	remainingBelow := len(unpinnedTasks) - endIdx
+	remainingBelow := len(col.Tasks) - regionEnd
 	isDoneCol := col.Status == db.StatusDone
 	hasHiddenDone := isDoneCol && k.hiddenDoneCount > 0
 
@@ -1520,50 +1473,21 @@ func (k *KanbanBoard) SelectByShortcut(num int) *db.Task {
 		return nil
 	}
 
-	// Calculate visible tasks (pinned + visible unpinned)
-	pinnedTasks, unpinnedTasks := splitPinnedTasks(col.Tasks)
+	lay := k.columnLayoutFor(k.selectedCol, k.maxVisibleCards())
 
-	// Calculate how many tasks are visible
-	colHeight := k.height - 2
-	if k.IsMobileMode() {
-		colHeight = k.height - 4
-	}
-	maxVisible := (colHeight - 3) / cardHeight
-	if maxVisible < 1 {
-		maxVisible = 1
-	}
-
-	pinnedSlots := len(pinnedTasks)
-	if pinnedSlots > maxVisible {
-		pinnedSlots = maxVisible
-	}
-	scrollCapacity := maxVisible - pinnedSlots
-	if scrollCapacity < 0 {
-		scrollCapacity = 0
-	}
-
-	// Get scroll offset
-	scrollOffset := 0
-	if k.selectedCol < len(k.scrollOffsets) {
-		scrollOffset = k.scrollOffsets[k.selectedCol]
-	}
-
-	// Build list of visible task indices (in column order)
+	// Build list of visible task indices in render order: fixed pinned first,
+	// then the visible slice of the scrolling region.
 	var visibleIndices []int
-
-	// Add pinned tasks
-	for i := 0; i < pinnedSlots; i++ {
+	for i := 0; i < lay.fixedPinned; i++ {
 		visibleIndices = append(visibleIndices, i)
 	}
-
-	// Add visible unpinned tasks
-	startIdx := scrollOffset
-	endIdx := scrollOffset + scrollCapacity
-	if endIdx > len(unpinnedTasks) {
-		endIdx = len(unpinnedTasks)
+	start := lay.fixedPinned + lay.scrollOffset
+	end := start + lay.scrollCapacity
+	if end > len(col.Tasks) {
+		end = len(col.Tasks)
 	}
-	for i := startIdx; i < endIdx; i++ {
-		visibleIndices = append(visibleIndices, len(pinnedTasks)+i)
+	for i := start; i < end; i++ {
+		visibleIndices = append(visibleIndices, i)
 	}
 
 	// Select the Nth visible task (1-indexed)
@@ -1676,41 +1600,13 @@ func (k *KanbanBoard) handleClickDesktop(x, y int) *db.Task {
 		maxTasks = 1
 	}
 
-	pinnedTasks, unpinnedTasks := splitPinnedTasks(col.Tasks)
-	pinnedCount := len(pinnedTasks)
-	pinnedSlots := pinnedCount
-	if pinnedSlots > maxTasks {
-		pinnedSlots = maxTasks
-	}
-	scrollCapacity := maxTasks - pinnedSlots
-	if scrollCapacity < 0 {
-		scrollCapacity = 0
-	}
+	lay := k.columnLayoutFor(colIdx, maxTasks)
 
-	// Get scroll offset for this column
-	scrollOffset := 0
-	if colIdx < len(k.scrollOffsets) {
-		scrollOffset = k.scrollOffsets[colIdx]
-	}
-	maxOffset := 0
-	if scrollCapacity > 0 {
-		maxOffset = len(unpinnedTasks) - scrollCapacity
-		if maxOffset < 0 {
-			maxOffset = 0
-		}
-	}
-	if scrollOffset > maxOffset {
-		scrollOffset = maxOffset
-	}
-	if scrollOffset < 0 {
-		scrollOffset = 0
-	}
-
-	// Check pinned block first
-	pinnedAreaLines := pinnedSlots * cardHeight
+	// Check the fixed pinned block first
+	pinnedAreaLines := lay.fixedPinned * cardHeight
 	if taskAreaY < pinnedAreaLines {
 		pinnedIdx := taskAreaY / cardHeight
-		if pinnedIdx >= pinnedSlots {
+		if pinnedIdx >= lay.fixedPinned {
 			return nil
 		}
 		k.selectedCol = colIdx
@@ -1719,12 +1615,8 @@ func (k *KanbanBoard) handleClickDesktop(x, y int) *db.Task {
 	}
 	taskAreaY -= pinnedAreaLines
 
-	if scrollCapacity == 0 {
-		return nil
-	}
-
 	// Account for scroll indicator line when scrolled
-	if scrollOffset > 0 {
+	if lay.scrollOffset > 0 {
 		taskAreaY -= 1 // Subtract 1 for the "↑ N more" indicator line
 		if taskAreaY < 0 {
 			// Clicked on the scroll indicator
@@ -1733,12 +1625,12 @@ func (k *KanbanBoard) handleClickDesktop(x, y int) *db.Task {
 	}
 
 	visibleTaskIdx := taskAreaY / cardHeight
-	if visibleTaskIdx >= scrollCapacity {
+	if visibleTaskIdx >= lay.scrollCapacity {
 		return nil
 	}
 
 	// Convert visible index to actual task index
-	taskIdx := pinnedCount + scrollOffset + visibleTaskIdx
+	taskIdx := lay.fixedPinned + lay.scrollOffset + visibleTaskIdx
 	if taskIdx >= len(col.Tasks) {
 		return nil
 	}
@@ -1796,40 +1688,13 @@ func (k *KanbanBoard) handleClickMobile(x, y int) *db.Task {
 		maxTasks = 1
 	}
 
-	pinnedTasks, unpinnedTasks := splitPinnedTasks(col.Tasks)
-	pinnedSlots := len(pinnedTasks)
-	if pinnedSlots > maxTasks {
-		pinnedSlots = maxTasks
-	}
-	scrollCapacity := maxTasks - pinnedSlots
-	if scrollCapacity < 0 {
-		scrollCapacity = 0
-	}
+	lay := k.columnLayoutFor(k.selectedCol, maxTasks)
 
-	// Get scroll offset for this column
-	scrollOffset := 0
-	if k.selectedCol < len(k.scrollOffsets) {
-		scrollOffset = k.scrollOffsets[k.selectedCol]
-	}
-	maxOffset := 0
-	if scrollCapacity > 0 {
-		maxOffset = len(unpinnedTasks) - scrollCapacity
-		if maxOffset < 0 {
-			maxOffset = 0
-		}
-	}
-	if scrollOffset > maxOffset {
-		scrollOffset = maxOffset
-	}
-	if scrollOffset < 0 {
-		scrollOffset = 0
-	}
-
-	// Check pinned block first
-	pinnedAreaLines := pinnedSlots * cardHeight
+	// Check the fixed pinned block first
+	pinnedAreaLines := lay.fixedPinned * cardHeight
 	if taskAreaY < pinnedAreaLines {
 		pinnedIdx := taskAreaY / cardHeight
-		if pinnedIdx >= pinnedSlots {
+		if pinnedIdx >= lay.fixedPinned {
 			return nil
 		}
 		k.selectedRow = pinnedIdx
@@ -1837,12 +1702,8 @@ func (k *KanbanBoard) handleClickMobile(x, y int) *db.Task {
 	}
 	taskAreaY -= pinnedAreaLines
 
-	if scrollCapacity == 0 {
-		return nil
-	}
-
 	// Account for scroll indicator line when scrolled
-	if scrollOffset > 0 {
+	if lay.scrollOffset > 0 {
 		taskAreaY -= 1 // Subtract 1 for the "↑ N more" indicator line
 		if taskAreaY < 0 {
 			return nil
@@ -1850,12 +1711,12 @@ func (k *KanbanBoard) handleClickMobile(x, y int) *db.Task {
 	}
 
 	visibleTaskIdx := taskAreaY / cardHeight
-	if visibleTaskIdx >= scrollCapacity {
+	if visibleTaskIdx >= lay.scrollCapacity {
 		return nil
 	}
 
 	// Convert visible index to actual task index
-	taskIdx := len(pinnedTasks) + scrollOffset + visibleTaskIdx
+	taskIdx := lay.fixedPinned + lay.scrollOffset + visibleTaskIdx
 	if taskIdx >= len(col.Tasks) {
 		return nil
 	}

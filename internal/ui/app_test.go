@@ -11,88 +11,6 @@ import (
 	"github.com/bborn/workflow/internal/executor"
 )
 
-func TestToggleDock_OpensDockAndRendersBelowBoard(t *testing.T) {
-	kanban := NewKanbanBoard(100, 40)
-	task := &db.Task{ID: 4281, Title: "Test task", Status: db.StatusBlocked}
-	kanban.SetTasks([]*db.Task{task})
-	kanban.SelectTask(4281)
-
-	m := &AppModel{
-		width:             100,
-		height:            40,
-		currentView:       ViewDashboard,
-		keys:              DefaultKeyMap(),
-		kanban:            kanban,
-		dock:              NewDockModel(&fakePaneController{snapshot: "● Bash(ls)\nProceed?"}),
-		tasksNeedingInput: make(map[int64]bool),
-		questionPrompts:   make(map[int64]bool),
-		executorPrompts:   make(map[int64]string),
-	}
-
-	if m.dock.IsOpen() {
-		t.Fatal("dock should start closed")
-	}
-
-	// Press tab to toggle the dock open.
-	updated, _ := m.updateDashboard(tea.KeyMsg{Type: tea.KeyTab})
-	m = updated.(*AppModel)
-	if !m.dock.IsOpen() {
-		t.Fatal("tab should open the dock")
-	}
-
-	view := m.viewDashboard()
-	if !strings.Contains(view, "executor #") {
-		t.Fatalf("dashboard should render the dock after toggle:\n%s", view)
-	}
-
-	// Press tab again to close.
-	updated, _ = m.updateDashboard(tea.KeyMsg{Type: tea.KeyTab})
-	m = updated.(*AppModel)
-	if m.dock.IsOpen() {
-		t.Fatal("second tab should close the dock")
-	}
-}
-
-func TestUpdateDashboard_ShiftDownPromotesLivePane(t *testing.T) {
-	kanban := NewKanbanBoard(100, 40)
-	task := &db.Task{ID: 4281, Title: "Test task", Status: db.StatusBlocked}
-	kanban.SetTasks([]*db.Task{task})
-	kanban.SelectTask(4281)
-
-	fake := &fakePaneController{snapshot: "● working"}
-	m := &AppModel{
-		width:             100,
-		height:            40,
-		currentView:       ViewDashboard,
-		keys:              DefaultKeyMap(),
-		kanban:            kanban,
-		dock:              NewDockModel(fake),
-		tasksNeedingInput: make(map[int64]bool),
-		questionPrompts:   make(map[int64]bool),
-		executorPrompts:   make(map[int64]string),
-	}
-
-	// Shift+Down while the dock is closed must NOT promote.
-	m.updateDashboard(tea.KeyMsg{Type: tea.KeyShiftDown})
-	if m.dock.IsLive() {
-		t.Fatal("shift+down should not promote when dock is closed")
-	}
-
-	// Open the dock, then shift+down should promote to a live pane.
-	m.dock.Toggle()
-	updated, cmd := m.updateDashboard(tea.KeyMsg{Type: tea.KeyShiftDown})
-	m = updated.(*AppModel)
-	if !m.dock.IsLive() {
-		t.Fatal("shift+down should promote the dock to live mode")
-	}
-	if len(fake.joined) != 1 || fake.joined[0] != 4281 {
-		t.Fatalf("expected join for task 4281, got %v", fake.joined)
-	}
-	if cmd == nil {
-		t.Fatal("promotion should return a focus-poll command")
-	}
-}
-
 func TestDefaultKeyMap(t *testing.T) {
 	// Verify DefaultKeyMap creates valid key bindings
 	keys := DefaultKeyMap()
@@ -1272,93 +1190,6 @@ func TestStripAnsiCodes(t *testing.T) {
 	}
 }
 
-func TestExtractPromptLines(t *testing.T) {
-	tests := []struct {
-		name     string
-		content  string
-		maxWidth int
-		want     int // expected number of non-empty lines
-	}{
-		{"empty content", "", 80, 0},
-		{"single line", "Allow Bash(npm test)?", 80, 1},
-		{"multiple lines", "Working on task...\n\nAllow Bash(npm test)?", 80, 2},
-		{"strips empty lines", "\n\n\nhello\n\nworld\n\n", 80, 2},
-		{"truncates long lines", "this is a very long line that should be truncated", 20, 1},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := extractPromptLines(tt.content, tt.maxWidth)
-			if len(result) != tt.want {
-				t.Errorf("extractPromptLines() returned %d lines, want %d: %v", len(result), tt.want, result)
-			}
-		})
-	}
-}
-
-func TestExtractPromptLinesContent(t *testing.T) {
-	content := "\x1b[31mAllow\x1b[0m Bash(npm test)?"
-	lines := extractPromptLines(content, 80)
-	if len(lines) != 1 {
-		t.Fatalf("expected 1 line, got %d", len(lines))
-	}
-	if lines[0] != "Allow Bash(npm test)?" {
-		t.Errorf("expected ANSI codes stripped, got %q", lines[0])
-	}
-}
-
-func TestRenderExecutorPromptPreview_NoPrompt(t *testing.T) {
-	m := &AppModel{
-		width:             100,
-		executorPrompts:   make(map[int64]string),
-		tasksNeedingInput: make(map[int64]bool),
-		questionPrompts:   make(map[int64]bool),
-	}
-	task := &db.Task{ID: 42, Title: "Test task"}
-	result := m.renderExecutorPromptPreview(task)
-	if result == "" {
-		t.Error("expected non-empty result even with no prompt")
-	}
-	// Should contain the task ID and hint text
-	if !containsText(result, "#42") {
-		t.Error("expected result to contain task ID")
-	}
-	if !containsText(result, "enter detail") {
-		t.Error("expected result to contain 'enter detail' hint")
-	}
-	if containsText(result, "tab input") {
-		t.Error("quick-input 'tab input' hint should be gone")
-	}
-}
-
-func TestRenderExecutorPromptPreview_WithPrompt(t *testing.T) {
-	m := &AppModel{
-		width: 100,
-		executorPrompts: map[int64]string{
-			42: "Allow Bash(npm test)?",
-		},
-	}
-	task := &db.Task{ID: 42, Title: "Test task"}
-	result := m.renderExecutorPromptPreview(task)
-	if result == "" {
-		t.Error("expected non-empty result")
-	}
-	// Should contain the prompt content and approve/deny hints
-	if !containsText(result, "approve") || !containsText(result, "deny") {
-		t.Error("expected result to contain approve/deny hints")
-	}
-}
-
-func TestDefaultKeyMap_ApproveAndDenyKeys(t *testing.T) {
-	keys := DefaultKeyMap()
-	if keys.ApprovePrompt.Help().Key != "y" {
-		t.Errorf("ApprovePrompt key should be 'y', got '%s'", keys.ApprovePrompt.Help().Key)
-	}
-	if keys.DenyPrompt.Help().Key != "N" {
-		t.Errorf("DenyPrompt key should be 'N', got '%s'", keys.DenyPrompt.Help().Key)
-	}
-}
-
 func TestDefaultKeyMap_QueueDangerousKey(t *testing.T) {
 	keys := DefaultKeyMap()
 	if keys.QueueDangerous.Help().Key != "X" {
@@ -1455,6 +1286,33 @@ func TestQueueDangerous_SkipsProcessingTask(t *testing.T) {
 	if task.Status != db.StatusProcessing {
 		t.Errorf("Expected task status to remain processing, got %s", task.Status)
 	}
+}
+
+// stripAnsiCodes removes ANSI escape sequences from a string. Test-only helper
+// used by containsText to compare rendered (styled) output against plain text.
+func stripAnsiCodes(s string) string {
+	var result strings.Builder
+	i := 0
+	for i < len(s) {
+		if s[i] == '\x1b' {
+			// Skip ESC sequence
+			i++
+			if i < len(s) && s[i] == '[' {
+				i++
+				// Skip until we hit a letter (the terminator)
+				for i < len(s) && (s[i] < 'A' || s[i] > 'Z') && (s[i] < 'a' || s[i] > 'z') {
+					i++
+				}
+				if i < len(s) {
+					i++ // Skip the terminator letter
+				}
+			}
+		} else {
+			result.WriteByte(s[i])
+			i++
+		}
+	}
+	return result.String()
 }
 
 // containsText checks if rendered text contains a substring (ignoring ANSI codes).
@@ -1645,113 +1503,6 @@ func TestJumpToNotificationKey_FocusExecutor(t *testing.T) {
 
 	if !loadedMsg.focusExecutor {
 		t.Error("expected focusExecutor to be true when jumping from notification")
-	}
-}
-
-// TestExecutorRespondedClearsPromptState verifies that approving/denying an
-// executor prompt immediately clears both tasksNeedingInput and executorPrompts
-// for visual feedback. If the task still has a pending prompt, the
-// latestChoicePrompt catch-up loop will re-detect it on the next poll.
-func TestExecutorRespondedClearsPromptState(t *testing.T) {
-	m := &AppModel{
-		width:             100,
-		height:            50,
-		currentView:       ViewDashboard,
-		keys:              DefaultKeyMap(),
-		tasksNeedingInput: map[int64]bool{42: true},
-		executorPrompts:   map[int64]string{42: "some prompt content"},
-		kanban:            NewKanbanBoard(100, 50),
-		prevStatuses:      make(map[int64]string),
-	}
-
-	// Simulate a successful approve response
-	msg := executorRespondedMsg{taskID: 42, action: "approve", err: nil}
-	m.Update(msg)
-
-	// Both should be cleared for immediate visual feedback
-	if m.tasksNeedingInput[42] {
-		t.Error("tasksNeedingInput[42] should be cleared after approve for visual feedback")
-	}
-	if _, exists := m.executorPrompts[42]; exists {
-		t.Error("executorPrompts[42] should be cleared after approve")
-	}
-}
-
-// TestDetectPermissionPrompt_FallbackDetection verifies that detectPermissionPrompt
-// does a live DB check and populates tasksNeedingInput when a permission prompt
-// exists but hasn't been detected by the poll yet.
-func TestDetectPermissionPrompt_FallbackDetection(t *testing.T) {
-	database, err := db.Open(":memory:")
-	if err != nil {
-		t.Fatalf("Failed to create test database: %v", err)
-	}
-	defer database.Close()
-
-	task := &db.Task{Title: "Test task", Status: db.StatusBlocked}
-	if err := database.CreateTask(task); err != nil {
-		t.Fatalf("Failed to create task: %v", err)
-	}
-
-	// Log a permission prompt (simulating the notification hook)
-	database.AppendTaskLog(task.ID, "system", "Waiting for permission: Edit(file.go)")
-
-	m := &AppModel{
-		db:                database,
-		tasksNeedingInput: make(map[int64]bool),
-		questionPrompts:   make(map[int64]bool),
-		executorPrompts:   make(map[int64]string),
-		kanban:            NewKanbanBoard(100, 50),
-	}
-
-	// tasksNeedingInput is empty (poll hasn't detected the prompt yet)
-	if m.tasksNeedingInput[task.ID] {
-		t.Fatal("precondition: tasksNeedingInput should be empty before detect")
-	}
-
-	// detectPermissionPrompt should find the prompt via live DB check
-	if !m.detectPermissionPrompt(task.ID) {
-		t.Error("detectPermissionPrompt should return true when a permission prompt exists")
-	}
-
-	// Should now be populated
-	if !m.tasksNeedingInput[task.ID] {
-		t.Error("tasksNeedingInput should be set after detectPermissionPrompt")
-	}
-	if m.executorPrompts[task.ID] != "Edit(file.go)" {
-		t.Errorf("expected executor prompt 'Edit(file.go)', got '%s'", m.executorPrompts[task.ID])
-	}
-}
-
-// TestDetectPermissionPrompt_NoPrompt verifies that detectPermissionPrompt
-// returns false when there is no pending permission prompt.
-func TestDetectPermissionPrompt_NoPrompt(t *testing.T) {
-	database, err := db.Open(":memory:")
-	if err != nil {
-		t.Fatalf("Failed to create test database: %v", err)
-	}
-	defer database.Close()
-
-	task := &db.Task{Title: "Test task", Status: db.StatusBlocked}
-	if err := database.CreateTask(task); err != nil {
-		t.Fatalf("Failed to create task: %v", err)
-	}
-
-	// Log a non-prompt system message (task just started, not waiting for input)
-	database.AppendTaskLog(task.ID, "system", "Task started")
-
-	m := &AppModel{
-		db:                database,
-		tasksNeedingInput: make(map[int64]bool),
-		questionPrompts:   make(map[int64]bool),
-		executorPrompts:   make(map[int64]string),
-		kanban:            NewKanbanBoard(100, 50),
-	}
-
-	if m.detectPermissionPrompt(task.ID) {
-		t.Error("detectPermissionPrompt should return false when no input prompt exists")
-	}
-	if m.tasksNeedingInput[task.ID] {
-		t.Error("tasksNeedingInput should not be set when no input prompt exists")
 	}
 }
 
@@ -2150,76 +1901,6 @@ func TestLatestChoicePrompt_QuestionResolvedByReply(t *testing.T) {
 	result, _ := m.latestChoicePrompt(task.ID)
 	if result != "" {
 		t.Errorf("expected empty string after reply to question, got '%s'", result)
-	}
-}
-
-// TestRenderExecutorPromptPreview_ShowsApproveDenyDetailHints verifies the prompt
-// preview includes approve/deny/detail hints and no longer advertises quick input.
-func TestRenderExecutorPromptPreview_ShowsApproveDenyDetailHints(t *testing.T) {
-	m := &AppModel{
-		width:             100,
-		height:            50,
-		executorPrompts:   map[int64]string{1: "Choose option 1, 2, or 3"},
-		tasksNeedingInput: map[int64]bool{1: true},
-		questionPrompts:   map[int64]bool{},
-	}
-
-	task := &db.Task{ID: 1, Title: "Test task"}
-	rendered := m.renderExecutorPromptPreview(task)
-
-	if !strings.Contains(rendered, "y approve") {
-		t.Error("prompt preview should include 'y approve' hint")
-	}
-	if !strings.Contains(rendered, "N deny") {
-		t.Error("prompt preview should include 'N deny' hint")
-	}
-	if !strings.Contains(rendered, "enter detail") {
-		t.Error("prompt preview should include 'enter detail' hint")
-	}
-	if strings.Contains(rendered, "tab input") {
-		t.Error("prompt preview should no longer include the removed 'tab input' hint")
-	}
-}
-
-// TestExecutorRespondedMsg_ApproveAction verifies the executor responded handler
-// clears pending-input state and notifies on approval.
-func TestExecutorRespondedMsg_ApproveAction(t *testing.T) {
-	database, err := db.Open(":memory:")
-	if err != nil {
-		t.Fatalf("Failed to create test database: %v", err)
-	}
-	defer database.Close()
-
-	task := &db.Task{Title: "Test task", Status: db.StatusBlocked}
-	if err := database.CreateTask(task); err != nil {
-		t.Fatalf("Failed to create task: %v", err)
-	}
-
-	m := &AppModel{
-		width:             100,
-		height:            50,
-		currentView:       ViewDashboard,
-		db:                database,
-		keys:              DefaultKeyMap(),
-		tasks:             []*db.Task{task},
-		tasksNeedingInput: map[int64]bool{task.ID: true},
-		executorPrompts:   map[int64]string{task.ID: "Choose 1, 2, or 3"},
-		kanban:            NewKanbanBoard(100, 50),
-		prevStatuses:      map[int64]string{task.ID: db.StatusBlocked},
-	}
-
-	// Simulate executorRespondedMsg with approve action
-	result, _ := m.Update(executorRespondedMsg{taskID: task.ID, action: "approve"})
-	model := result.(*AppModel)
-
-	if model.tasksNeedingInput[task.ID] {
-		t.Error("tasksNeedingInput should be cleared after approve")
-	}
-	if _, exists := model.executorPrompts[task.ID]; exists {
-		t.Error("executorPrompts should be cleared after approve")
-	}
-	if !strings.Contains(model.notification, "Approved") {
-		t.Errorf("notification should contain 'Approved', got '%s'", model.notification)
 	}
 }
 

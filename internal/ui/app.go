@@ -96,14 +96,9 @@ type KeyMap struct {
 	OpenBrowser key.Binding
 	// Open PR
 	OpenPR key.Binding
-	// Quick approve/deny for executor prompts
-	ApprovePrompt key.Binding
-	DenyPrompt    key.Binding
 	// Spotlight mode
 	Spotlight     key.Binding
 	SpotlightSync key.Binding
-	// Toggle the executor dock below the board
-	ToggleDock key.Binding
 }
 
 // ShortHelp returns key bindings to show in the mini help.
@@ -272,14 +267,6 @@ func DefaultKeyMap() KeyMap {
 			key.WithKeys("G"),
 			key.WithHelp("G", "open PR"),
 		),
-		ApprovePrompt: key.NewBinding(
-			key.WithKeys("y"),
-			key.WithHelp("y", "approve"),
-		),
-		DenyPrompt: key.NewBinding(
-			key.WithKeys("N"),
-			key.WithHelp("N", "deny"),
-		),
 		Spotlight: key.NewBinding(
 			key.WithKeys("f"),
 			key.WithHelp("f", "spotlight"),
@@ -287,10 +274,6 @@ func DefaultKeyMap() KeyMap {
 		SpotlightSync: key.NewBinding(
 			key.WithKeys("F"),
 			key.WithHelp("F", "spotlight sync"),
-		),
-		ToggleDock: key.NewBinding(
-			key.WithKeys("tab"),
-			key.WithHelp("tab", "executor dock"),
 		),
 	}
 }
@@ -355,8 +338,6 @@ func ApplyKeybindingsConfig(km KeyMap, cfg *config.KeybindingsConfig) KeyMap {
 	km.CollapseDone = applyBinding(km.CollapseDone, cfg.CollapseDone)
 	km.OpenBrowser = applyBinding(km.OpenBrowser, cfg.OpenBrowser)
 	km.OpenPR = applyBinding(km.OpenPR, cfg.OpenPR)
-	km.ApprovePrompt = applyBinding(km.ApprovePrompt, cfg.ApprovePrompt)
-	km.DenyPrompt = applyBinding(km.DenyPrompt, cfg.DenyPrompt)
 	km.Spotlight = applyBinding(km.Spotlight, cfg.Spotlight)
 	km.SpotlightSync = applyBinding(km.SpotlightSync, cfg.SpotlightSync)
 
@@ -394,7 +375,6 @@ type AppModel struct {
 	// Dashboard state
 	tasks        []*db.Task
 	kanban       *KanbanBoard
-	dock         *DockModel // executor dock below the board (toggleable)
 	loading      bool
 	err          error
 	notification string    // Notification banner text
@@ -631,7 +611,6 @@ func NewAppModel(database *db.DB, exec *executor.Executor, workingDir string, ve
 		help:               h,
 		currentView:        ViewDashboard,
 		kanban:             kanban,
-		dock:               NewDockModel(newTmuxPaneController()),
 		loading:            true,
 		prevStatuses:       make(map[int64]string),
 		tasksNeedingInput:  make(map[int64]bool),
@@ -802,7 +781,6 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Global keys
 		if key.Matches(msg, m.keys.Quit) {
 			// Cleanup subscriptions and watchers
-			m.demoteDockIfLive()
 			if m.eventCh != nil {
 				m.executor.UnsubscribeTaskEvents(m.eventCh)
 			}
@@ -1057,13 +1035,6 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			lastViewed, hasLast := m.lastViewedAt[msg.task.ID]
 			m.lastViewedAt[msg.task.ID] = now
-			// If the executor dock has a live pane joined, return it to its daemon
-			// window before the detail view takes over pane management. Otherwise the
-			// detail view can't find the executor (it lives in the TUI session, not
-			// the daemon) and the panes collide.
-			if m.dock != nil && m.dock.IsLive() {
-				m.dock.Demote()
-			}
 			// Clean up any duplicate tmux windows for this task before switching
 			m.executor.CleanupDuplicateWindows(msg.task.ID)
 			// Resume task if it was suspended (blocked idle tasks get suspended to save memory)
@@ -1313,46 +1284,6 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.notifyUntil = time.Now().Add(5 * time.Second)
 
-	case executorRespondedMsg:
-		if msg.err != nil {
-			m.notification = fmt.Sprintf("%s Failed to %s: %s", IconBlocked(), msg.action, msg.err.Error())
-			m.notifyUntil = time.Now().Add(5 * time.Second)
-		} else {
-			action := "Approved"
-			if msg.action == "deny" {
-				action = "Denied"
-			}
-			m.notification = fmt.Sprintf("%s %s executor prompt for task #%d", IconDone(), action, msg.taskID)
-			m.notifyUntil = time.Now().Add(3 * time.Second)
-			// Clear prompt state immediately for visual feedback. If the task is
-			// still blocked (e.g. another prompt queued), the latestChoicePrompt
-			// catch-up loop will re-detect it on the next poll cycle.
-			delete(m.tasksNeedingInput, msg.taskID)
-			delete(m.questionPrompts, msg.taskID)
-			delete(m.executorPrompts, msg.taskID)
-		}
-		cmds = append(cmds, m.loadTasks())
-
-	case dockTickMsg:
-		// Periodic snapshot refresh. Reschedule only while the dock is open so the
-		// tick chain dies (zero cost) when closed.
-		if m.dock != nil && m.dock.IsOpen() {
-			m.refreshDockForSelection()
-			cmds = append(cmds, dockTick())
-		}
-
-	case dockFocusMsg:
-		// While a live pane is up, watch for the user shift-up'ing back to the
-		// board (handled by tmux). When that happens, demote and resume snapshot.
-		if m.dock != nil && m.dock.IsOpen() && m.dock.IsLive() {
-			if m.dock.BoardFocused() {
-				m.dock.Demote()
-				cmds = append(cmds, dockTick())
-			} else {
-				cmds = append(cmds, dockFocusPoll())
-			}
-		}
-
 	case taskEventMsg:
 		// Real-time task update from executor
 		event := msg.event
@@ -1415,7 +1346,11 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					break
 				}
 			}
-			m.kanban.SetTasks(m.tasks)
+			// Reapply the active filter (if any) instead of resetting to all
+			// tasks — otherwise a real-time event repopulates the board with the
+			// full task list while a filter is active, making the filtered column
+			// jump under the user mid-navigation.
+			m.applyFilter()
 			m.kanban.SetTasksNeedingInput(m.tasksNeedingInput)
 
 			// Update detail view if showing this task
@@ -1661,46 +1596,6 @@ func (m *AppModel) viewNewTaskConfirm() string {
 	return box.Render(lipgloss.JoinVertical(lipgloss.Left, header, formView))
 }
 
-// refreshDockForSelection re-captures the dock snapshot for the currently
-// highlighted task. If a live pane is up for a different task, it is demoted
-// first (the region must show the new task's snapshot). Cheap no-op when closed.
-func (m *AppModel) refreshDockForSelection() {
-	if m.dock == nil || !m.dock.IsOpen() {
-		return
-	}
-	m.dock.RefreshOrDemote(m.kanban.SelectedTask(), m.height)
-}
-
-// demoteDockIfLive returns any live executor pane to its daemon window. Called
-// before quitting so the executor is not stranded in the dying TUI session
-// (a pane left in task-ui can't be found by the daemon-only window search).
-func (m *AppModel) demoteDockIfLive() {
-	if m.dock != nil && m.dock.IsLive() {
-		m.dock.Demote()
-	}
-}
-
-// dockTickMsg drives periodic dock snapshot refreshes while the dock is open.
-type dockTickMsg struct{}
-
-// dockTick schedules the next dock snapshot refresh. ~750ms keeps the snapshot
-// current without hammering tmux. The handler self-gates and reschedules only
-// while the dock is open, so the tick chain dies (zero cost) when closed.
-func dockTick() tea.Cmd {
-	return tea.Tick(750*time.Millisecond, func(time.Time) tea.Msg { return dockTickMsg{} })
-}
-
-// dockFocusMsg drives focus polling while the dock holds a live pane. When the
-// user shift-ups back to the board pane (handled by tmux's root binding), the
-// poll detects the TUI pane regaining focus and demotes the live pane.
-type dockFocusMsg struct{}
-
-// dockFocusPoll schedules the next focus check. 200ms matches the detail view's
-// focus cadence — responsive without busy-looping.
-func dockFocusPoll() tea.Cmd {
-	return tea.Tick(200*time.Millisecond, func(time.Time) tea.Msg { return dockFocusMsg{} })
-}
-
 func (m *AppModel) viewDashboard() string {
 	var headerParts []string
 
@@ -1759,22 +1654,6 @@ func (m *AppModel) viewDashboard() string {
 		filterBarHeight = lipgloss.Height(filterBar)
 	}
 
-	// Render executor prompt preview if applicable
-	promptPreview := ""
-	promptPreviewHeight := 0
-	if task := m.kanban.SelectedTask(); task != nil && m.tasksNeedingInput[task.ID] {
-		promptPreview = m.renderExecutorPromptPreview(task)
-		promptPreviewHeight = lipgloss.Height(promptPreview)
-	}
-
-	// Render the executor dock if open (below the board)
-	dockView := ""
-	dockHeight := 0
-	if m.dock != nil && m.dock.IsOpen() {
-		dockView = m.dock.View(m.width, m.height, m.kanban.SelectedTask())
-		dockHeight = lipgloss.Height(dockView)
-	}
-
 	// Build the header first so we can measure its actual rendered height
 	header := ""
 	headerHeight := 0
@@ -1787,7 +1666,7 @@ func (m *AppModel) viewDashboard() string {
 	helpView := m.renderHelp()
 	helpHeight := lipgloss.Height(helpView)
 
-	kanbanHeight := m.height - headerHeight - filterBarHeight - helpHeight - promptPreviewHeight - dockHeight
+	kanbanHeight := m.height - headerHeight - filterBarHeight - helpHeight
 	if kanbanHeight < 10 {
 		kanbanHeight = 10
 	}
@@ -1810,12 +1689,6 @@ func (m *AppModel) viewDashboard() string {
 	} else {
 		kanbanView := m.kanban.View()
 		contentParts = append(contentParts, kanbanView)
-		if promptPreview != "" {
-			contentParts = append(contentParts, promptPreview)
-		}
-		if dockView != "" {
-			contentParts = append(contentParts, dockView)
-		}
 		contentParts = append(contentParts, helpView)
 	}
 
@@ -1975,151 +1848,24 @@ func (m *AppModel) renderHelp() string {
 	return m.help.View(m.keys)
 }
 
-// renderExecutorPromptPreview renders a compact preview of the executor's current prompt
-// for a blocked task that needs input. Shows the permission message from the hook log
-// with approve/deny/detail hints.
-func (m *AppModel) renderExecutorPromptPreview(task *db.Task) string {
-	hintStyle := lipgloss.NewStyle().Foreground(ColorMuted)
-	warnStyle := lipgloss.NewStyle().Foreground(ColorWarning)
-	detailStyle := lipgloss.NewStyle().Foreground(ColorMuted)
-
-	barStyle := lipgloss.NewStyle().
-		Width(m.width).
-		Padding(0, 1)
-
-	var hints string
-	if m.questionPrompts[task.ID] {
-		hints = hintStyle.Render("enter detail")
-	} else {
-		hints = hintStyle.Render("y approve  N deny  enter detail")
-	}
-
-	prompt := m.executorPrompts[task.ID]
-	promptLines := extractPromptLines(prompt, m.width-10)
-
-	var lines []string
-
-	if len(promptLines) == 0 {
-		// No captured content yet - show a minimal single-line hint
-		line := warnStyle.Render(fmt.Sprintf("#%d waiting for input", task.ID)) + "  " + hints
-		lines = append(lines, barStyle.Render(line))
-	} else {
-		// Show last few lines of the prompt content so user can see multiple choice options
-		maxLines := 5
-		if len(promptLines) > maxLines {
-			promptLines = promptLines[len(promptLines)-maxLines:]
-		}
-
-		// Header line: task ID + action hints
-		headerLine := warnStyle.Render(fmt.Sprintf("#%d ", task.ID)) + hints
-		lines = append(lines, barStyle.Render(headerLine))
-
-		// Show prompt content lines
-		detailMaxWidth := m.width - 6
-		if detailMaxWidth < 20 {
-			detailMaxWidth = 20
-		}
-		for _, pl := range promptLines {
-			if len(pl) > detailMaxWidth {
-				pl = pl[:detailMaxWidth-1] + "…"
-			}
-			lines = append(lines, barStyle.Render("  "+detailStyle.Render(pl)))
-		}
-	}
-
-	return strings.Join(lines, "\n")
-}
-
-// extractPromptLines extracts the last meaningful lines from prompt content.
-// Strips empty lines, ANSI codes, and trims to fit the given width.
-func extractPromptLines(content string, maxWidth int) []string {
-	if content == "" {
-		return nil
-	}
-
-	lines := strings.Split(content, "\n")
-	var result []string
-
-	for _, line := range lines {
-		// Strip ANSI escape codes
-		cleaned := stripAnsiCodes(line)
-		cleaned = strings.TrimRight(cleaned, " \t")
-		if cleaned == "" {
-			continue
-		}
-		// Truncate long lines
-		if maxWidth > 0 && len(cleaned) > maxWidth {
-			cleaned = cleaned[:maxWidth-1] + "…"
-		}
-		result = append(result, cleaned)
-	}
-
-	return result
-}
-
-// stripAnsiCodes removes ANSI escape sequences from a string.
-func stripAnsiCodes(s string) string {
-	var result strings.Builder
-	i := 0
-	for i < len(s) {
-		if s[i] == '\x1b' {
-			// Skip ESC sequence
-			i++
-			if i < len(s) && s[i] == '[' {
-				i++
-				// Skip until we hit a letter (the terminator)
-				for i < len(s) && (s[i] < 'A' || s[i] > 'Z') && (s[i] < 'a' || s[i] > 'z') {
-					i++
-				}
-				if i < len(s) {
-					i++ // Skip the terminator letter
-				}
-			}
-		} else {
-			result.WriteByte(s[i])
-			i++
-		}
-	}
-	return result.String()
-}
-
 func (m *AppModel) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch {
-	// Shift+Down/Right promotes the dock to a live, interactive executor pane for
-	// the highlighted task (must precede the plain nav cases). Once joined, tmux's
-	// root key bindings handle further shift-arrow pane cycling; we poll focus to
-	// detect the user shift-up'ing back to the board.
-	case msg.Type == tea.KeyShiftDown || msg.Type == tea.KeyShiftRight:
-		if m.dock != nil && m.dock.IsOpen() && !m.dock.IsLive() {
-			if task := m.kanban.SelectedTask(); task != nil {
-				m.dock.Promote(task, m.height)
-				if m.dock.IsLive() {
-					return m, dockFocusPoll()
-				}
-			}
-		}
-		return m, nil
-
 	// Column navigation
 	case key.Matches(msg, m.keys.Left):
 		m.kanban.MoveLeft()
-		m.refreshDockForSelection()
 		return m, nil
 
 	case key.Matches(msg, m.keys.Right):
 		m.kanban.MoveRight()
-		m.refreshDockForSelection()
 		return m, nil
 
 	// Task navigation within column
 	case key.Matches(msg, m.keys.Up):
 		m.kanban.MoveUp()
-		m.refreshDockForSelection()
 		return m, nil
 
 	case key.Matches(msg, m.keys.Down):
 		m.kanban.MoveDown()
-		m.refreshDockForSelection()
 		return m, nil
 
 	// Numeric shortcuts 1-9 and double-digits (11, 22, etc.) to select visible tasks
@@ -2321,28 +2067,6 @@ func (m *AppModel) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.help.ShowAll = !m.help.ShowAll
 		return m, nil
 
-	case key.Matches(msg, m.keys.ToggleDock):
-		m.dock.Toggle()
-		if m.dock.IsOpen() {
-			m.refreshDockForSelection()
-			return m, dockTick()
-		}
-		return m, nil
-
-	case key.Matches(msg, m.keys.ApprovePrompt):
-		if task := m.kanban.SelectedTask(); task != nil {
-			if m.tasksNeedingInput[task.ID] || m.detectPermissionPrompt(task.ID) {
-				return m, m.approveExecutorPrompt(task.ID)
-			}
-		}
-
-	case key.Matches(msg, m.keys.DenyPrompt):
-		if task := m.kanban.SelectedTask(); task != nil {
-			if m.tasksNeedingInput[task.ID] || m.detectPermissionPrompt(task.ID) {
-				return m, m.denyExecutorPrompt(task.ID)
-			}
-		}
-
 	case key.Matches(msg, m.keys.Filter):
 		// Enter filter mode
 		m.filterActive = true
@@ -2479,7 +2203,6 @@ func (m *AppModel) updateFilterMode(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case "ctrl+c":
-		m.demoteDockIfLive()
 		if m.eventCh != nil {
 			m.executor.UnsubscribeTaskEvents(m.eventCh)
 		}
@@ -3599,7 +3322,6 @@ func (m *AppModel) updateQuitConfirm(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		case "ctrl+c":
 			// Ctrl+C in quit confirm should just quit immediately
-			m.demoteDockIfLive()
 			if m.eventCh != nil {
 				m.executor.UnsubscribeTaskEvents(m.eventCh)
 			}
@@ -3618,7 +3340,6 @@ func (m *AppModel) updateQuitConfirm(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if m.quitConfirm.State == huh.StateCompleted {
 		if m.quitConfirmValue {
 			// User confirmed quit - cleanup and exit
-			m.demoteDockIfLive()
 			if m.eventCh != nil {
 				m.executor.UnsubscribeTaskEvents(m.eventCh)
 			}
@@ -4740,37 +4461,6 @@ func (m *AppModel) syncSpotlight(task *db.Task) tea.Cmd {
 	}
 }
 
-// executorRespondedMsg is sent after approve/deny is sent to the executor.
-type executorRespondedMsg struct {
-	taskID int64
-	action string // "approve" or "deny"
-	err    error
-}
-
-// approveExecutorPrompt sends "y" to the executor's tmux pane to approve a permission prompt.
-func (m *AppModel) approveExecutorPrompt(taskID int64) tea.Cmd {
-	database := m.db
-	return func() tea.Msg {
-		err := executor.SendKeyToPane(taskID, "y", "Enter")
-		if err == nil {
-			database.AppendTaskLog(taskID, "user", "Approved from kanban")
-		}
-		return executorRespondedMsg{taskID: taskID, action: "approve", err: err}
-	}
-}
-
-// denyExecutorPrompt sends "n" to the executor's tmux pane to deny a permission prompt.
-func (m *AppModel) denyExecutorPrompt(taskID int64) tea.Cmd {
-	database := m.db
-	return func() tea.Msg {
-		err := executor.SendKeyToPane(taskID, "n", "Enter")
-		if err == nil {
-			database.AppendTaskLog(taskID, "user", "Denied from kanban")
-		}
-		return executorRespondedMsg{taskID: taskID, action: "deny", err: err}
-	}
-}
-
 // latestChoicePrompt checks whether a task has a pending permission/choice prompt
 // by reading recent DB logs written by the notification hook. Returns the prompt
 // message if still pending, or "" if resolved (e.g. "Agent resumed working",
@@ -4811,32 +4501,6 @@ func (m *AppModel) latestChoicePrompt(taskID int64) (string, bool) {
 		}
 	}
 	return "", false
-}
-
-// detectPermissionPrompt does a live DB check for a pending permission prompt
-// on the given task. If found, it populates tasksNeedingInput and executorPrompts
-// so the caller can proceed with approve/deny. This is a fallback for when the
-// poll-based detection hasn't caught up yet (e.g. a real-time event showed the
-// task as blocked before loadTasks detected the permission prompt).
-func (m *AppModel) detectPermissionPrompt(taskID int64) bool {
-	prompt, isQ := m.latestChoicePrompt(taskID)
-	if prompt == "" {
-		return false
-	}
-	m.tasksNeedingInput[taskID] = true
-	m.questionPrompts[taskID] = isQ
-	paneContent := executor.CapturePaneContent(executor.TmuxSessionName(taskID), 15)
-	if paneContent != "" {
-		m.executorPrompts[taskID] = paneContent
-	} else {
-		displayPrompt := prompt
-		if strings.HasPrefix(prompt, "Waiting for permission: ") {
-			displayPrompt = strings.TrimPrefix(prompt, "Waiting for permission: ")
-		}
-		m.executorPrompts[taskID] = displayPrompt
-	}
-	m.kanban.SetTasksNeedingInput(m.tasksNeedingInput)
-	return true
 }
 
 // taskMovedMsg is returned when a task is moved to a different project.

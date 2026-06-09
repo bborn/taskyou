@@ -1814,24 +1814,9 @@ func FormatSessionHandoff(prevExecutor, capturedContent string) string {
 	return sb.String()
 }
 
-// SendKeyToPane sends a key sequence to a task's executor tmux pane.
-// Used for quick approve/deny from the kanban view.
-func SendKeyToPane(taskID int64, keys ...string) error {
-	sessionName := TmuxSessionName(taskID)
-
-	// Check if session exists first
-	if err := exec.Command("tmux", "has-session", "-t", sessionName).Run(); err != nil {
-		return fmt.Errorf("session not found: %w", err)
-	}
-
-	target := sessionName + ".0"
-	args := append([]string{"send-keys", "-t", target}, keys...)
-	return exec.Command("tmux", args...).Run()
-}
-
 // SendLiteralTextToPane sends literal text (using tmux -l flag) followed by Enter
-// to a task's executor tmux pane. Unlike SendKeyToPane, this ensures the text is
-// never interpreted as a tmux key name (e.g. "Enter", "Escape", "Space").
+// to a task's executor tmux pane. The -l flag ensures the text is never
+// interpreted as a tmux key name (e.g. "Enter", "Escape", "Space").
 func SendLiteralTextToPane(taskID int64, text string) error {
 	sessionName := TmuxSessionName(taskID)
 

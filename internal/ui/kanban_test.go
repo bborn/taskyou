@@ -592,6 +592,53 @@ func TestPinnedTasksStayVisibleWhenScrolling(t *testing.T) {
 	}
 }
 
+// TestAllPinnedColumnKeepsSelectionVisible is a regression test for the bug
+// where arrowing down through a column whose tasks are (almost) all pinned made
+// the selection disappear off-screen. Pinned tasks were rendered fixed at the
+// top and excluded from scrolling, so once they overflowed the viewport the
+// selection moved past the visible slots and was never rendered. The fix scrolls
+// the whole list when pinned tasks alone overflow the viewport.
+func TestAllPinnedColumnKeepsSelectionVisible(t *testing.T) {
+	// height 18 -> maxVisible = (18-2-3)/4 = 3 cards, far fewer than our pins.
+	board := NewKanbanBoard(100, 18)
+
+	var tasks []*db.Task
+	for i := 1; i <= 10; i++ {
+		tasks = append(tasks, &db.Task{
+			ID:     int64(i),
+			Title:  fmt.Sprintf("PinTask%02d", i),
+			Status: db.StatusBacklog,
+			Pinned: true,
+		})
+	}
+	board.SetTasks(tasks)
+	board.selectedCol = 0
+	board.selectedRow = 0
+	board.ensureSelectedVisible()
+
+	// Arrow down to the last task; the selection must stay rendered the whole way.
+	for board.selectedRow < len(tasks)-1 {
+		board.MoveDown()
+		sel := board.SelectedTask()
+		if sel == nil {
+			t.Fatalf("selection became nil at row %d", board.selectedRow)
+		}
+		if view := board.View(); !strings.Contains(view, sel.Title) {
+			t.Fatalf("selected task %q (row %d) is not visible — focus disappeared:\n%s",
+				sel.Title, board.selectedRow, view)
+		}
+	}
+
+	// Wrapping from the bottom back to the top must also keep focus on-screen.
+	board.MoveDown() // wraps to row 0
+	if board.selectedRow != 0 {
+		t.Fatalf("MoveDown at bottom should wrap to row 0, got %d", board.selectedRow)
+	}
+	if view := board.View(); !strings.Contains(view, "PinTask01") {
+		t.Fatalf("after wrapping to the top, the first task is not visible:\n%s", view)
+	}
+}
+
 // TestKanbanBoard_FirstTaskClickable is a regression test for the bug where
 // clicking on the first task in a kanban column did not work because the
 // click handler expected the task area to start at y=4 instead of y=2.
