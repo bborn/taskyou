@@ -87,6 +87,20 @@ func (d *DockModel) Height(termHeight int) int {
 // Snapshot returns the most recently captured snapshot text.
 func (d *DockModel) Snapshot() string { return d.snapshot }
 
+// Mode returns the dock mode as a string ("snapshot" | "live") for debug state.
+func (d *DockModel) Mode() string {
+	if d.mode == dockLive {
+		return "live"
+	}
+	return "snapshot"
+}
+
+// LiveTaskID returns the task id of the currently-joined live pane (0 if none).
+func (d *DockModel) LiveTaskID() int64 { return d.liveTaskID }
+
+// HasSnapshot reports whether the dock currently holds non-empty snapshot text.
+func (d *DockModel) HasSnapshot() bool { return strings.TrimSpace(d.snapshot) != "" }
+
 // Refresh re-captures the selected task's executor into the snapshot, but only
 // when the dock is open and in snapshot mode. termHeight sizes the capture so we
 // read roughly enough lines to fill the dock. No-op otherwise (zero cost when
