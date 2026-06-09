@@ -4,7 +4,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/bborn/workflow/internal/config"
@@ -1242,8 +1241,11 @@ func TestRenderExecutorPromptPreview_NoPrompt(t *testing.T) {
 	if !containsText(result, "#42") {
 		t.Error("expected result to contain task ID")
 	}
-	if !containsText(result, "tab input") {
-		t.Error("expected result to contain 'tab input' hint")
+	if !containsText(result, "enter detail") {
+		t.Error("expected result to contain 'enter detail' hint")
+	}
+	if containsText(result, "tab input") {
+		t.Error("quick-input 'tab input' hint should be gone")
 	}
 }
 
@@ -1924,53 +1926,8 @@ func TestFilterChipDeletion(t *testing.T) {
 	}
 }
 
-// TestQuickInput_TabEntersQuickInput verifies pressing Tab on a blocked task
-// with a pending prompt focuses the quick input field.
-func TestQuickInput_TabEntersQuickInput(t *testing.T) {
-	database, err := db.Open(":memory:")
-	if err != nil {
-		t.Fatalf("Failed to create test database: %v", err)
-	}
-	defer database.Close()
-
-	task := &db.Task{Title: "Test task", Status: db.StatusBlocked}
-	if err := database.CreateTask(task); err != nil {
-		t.Fatalf("Failed to create task: %v", err)
-	}
-
-	// Log a permission prompt
-	database.AppendTaskLog(task.ID, "system", "Waiting for permission: Choose option 1, 2, or 3")
-
-	replyInput := textinput.New()
-	replyInput.CharLimit = 200
-
-	m := &AppModel{
-		width:             100,
-		height:            50,
-		currentView:       ViewDashboard,
-		db:                database,
-		keys:              DefaultKeyMap(),
-		tasks:             []*db.Task{task},
-		tasksNeedingInput: map[int64]bool{task.ID: true},
-		executorPrompts:   map[int64]string{task.ID: "Choose option 1, 2, or 3"},
-		kanban:            NewKanbanBoard(100, 50),
-		prevStatuses:      map[int64]string{task.ID: db.StatusBlocked},
-		replyInput:        replyInput,
-	}
-	m.kanban.SetTasks(m.tasks)
-	m.kanban.SelectTask(task.ID)
-
-	// Press Tab to focus quick input
-	result, _ := m.Update(tea.KeyMsg{Type: tea.KeyTab})
-	model := result.(*AppModel)
-
-	if !model.quickInputFocused {
-		t.Error("quickInputFocused should be true after pressing Tab on a blocked task")
-	}
-}
-
 // TestRetry_RKeyOnDoneTaskRetries verifies that pressing 'r' on a done task
-// opens the retry view (not quick input mode).
+// opens the retry view.
 func TestRetry_RKeyOnDoneTaskRetries(t *testing.T) {
 	database, err := db.Open(":memory:")
 	if err != nil {
@@ -1983,9 +1940,6 @@ func TestRetry_RKeyOnDoneTaskRetries(t *testing.T) {
 		t.Fatalf("Failed to create task: %v", err)
 	}
 
-	replyInput := textinput.New()
-	replyInput.CharLimit = 200
-
 	m := &AppModel{
 		width:             100,
 		height:            50,
@@ -1997,7 +1951,6 @@ func TestRetry_RKeyOnDoneTaskRetries(t *testing.T) {
 		executorPrompts:   map[int64]string{task.ID: "Choose option 1, 2, or 3"},
 		kanban:            NewKanbanBoard(100, 50),
 		prevStatuses:      map[int64]string{task.ID: db.StatusDone},
-		replyInput:        replyInput,
 	}
 	m.kanban.SetTasks(m.tasks)
 	m.kanban.SelectTask(task.ID)
@@ -2006,184 +1959,8 @@ func TestRetry_RKeyOnDoneTaskRetries(t *testing.T) {
 	result, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
 	model := result.(*AppModel)
 
-	if model.quickInputFocused {
-		t.Error("quickInputFocused should be false — done tasks should retry, not focus input")
-	}
 	if model.currentView != ViewRetry {
 		t.Errorf("currentView should be ViewRetry, got %d", model.currentView)
-	}
-}
-
-// TestQuickInput_EscUnfocuses verifies pressing Esc in quick input mode unfocuses it.
-func TestQuickInput_EscUnfocuses(t *testing.T) {
-	replyInput := textinput.New()
-	replyInput.CharLimit = 200
-	replyInput.Focus()
-
-	m := &AppModel{
-		width:             100,
-		height:            50,
-		currentView:       ViewDashboard,
-		keys:              DefaultKeyMap(),
-		quickInputFocused: true,
-		replyInput:        replyInput,
-		tasksNeedingInput: make(map[int64]bool),
-		questionPrompts:   make(map[int64]bool),
-		executorPrompts:   make(map[int64]string),
-	}
-
-	result, _ := m.Update(tea.KeyMsg{Type: tea.KeyEscape})
-	model := result.(*AppModel)
-
-	if model.quickInputFocused {
-		t.Error("quickInputFocused should be false after pressing Esc")
-	}
-}
-
-// TestQuickInput_EmptyEnterUnfocuses verifies pressing Enter with empty input unfocuses.
-func TestQuickInput_EmptyEnterUnfocuses(t *testing.T) {
-	replyInput := textinput.New()
-	replyInput.CharLimit = 200
-	replyInput.Focus()
-
-	kanban := NewKanbanBoard(100, 50)
-	task := &db.Task{ID: 42, Title: "Test task", Status: db.StatusBlocked}
-	kanban.SetTasks([]*db.Task{task})
-
-	m := &AppModel{
-		width:             100,
-		height:            50,
-		currentView:       ViewDashboard,
-		keys:              DefaultKeyMap(),
-		quickInputFocused: true,
-		replyInput:        replyInput,
-		tasksNeedingInput: make(map[int64]bool),
-		questionPrompts:   make(map[int64]bool),
-		executorPrompts:   make(map[int64]string),
-		kanban:            kanban,
-	}
-
-	result, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	model := result.(*AppModel)
-
-	if model.quickInputFocused {
-		t.Error("quickInputFocused should be false after pressing Enter with empty input")
-	}
-}
-
-// TestQuickInput_EnterWithTextSendsAndUnfocuses verifies pressing Enter with text
-// unfocuses quick input and produces a command (the sendTextToExecutor tea.Cmd).
-func TestQuickInput_EnterWithTextSendsAndUnfocuses(t *testing.T) {
-	replyInput := textinput.New()
-	replyInput.CharLimit = 200
-	replyInput.Focus()
-	replyInput.SetValue("hello world")
-
-	kanban := NewKanbanBoard(100, 50)
-	task := &db.Task{ID: 42, Title: "Test task", Status: db.StatusBlocked}
-	kanban.SetTasks([]*db.Task{task})
-	kanban.SelectTask(42)
-
-	m := &AppModel{
-		width:             100,
-		height:            50,
-		currentView:       ViewDashboard,
-		keys:              DefaultKeyMap(),
-		quickInputFocused: true,
-		replyInput:        replyInput,
-		tasksNeedingInput: map[int64]bool{42: true},
-		questionPrompts:   make(map[int64]bool),
-		executorPrompts:   make(map[int64]string),
-		kanban:            kanban,
-	}
-
-	result, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	model := result.(*AppModel)
-
-	if model.quickInputFocused {
-		t.Error("quickInputFocused should be false after pressing Enter with text")
-	}
-	if model.replyInput.Value() != "" {
-		t.Error("replyInput should be cleared after sending")
-	}
-	if cmd == nil {
-		t.Error("expected a command to be returned for sending text to executor")
-	}
-}
-
-// TestQuickInput_EnterWithTextNoSelectedTask verifies pressing Enter with text
-// but no selected task gracefully unfocuses without crashing.
-func TestQuickInput_EnterWithTextNoSelectedTask(t *testing.T) {
-	replyInput := textinput.New()
-	replyInput.CharLimit = 200
-	replyInput.Focus()
-	replyInput.SetValue("some text")
-
-	kanban := NewKanbanBoard(100, 50)
-	// No tasks set - SelectedTask() returns nil
-
-	m := &AppModel{
-		width:             100,
-		height:            50,
-		currentView:       ViewDashboard,
-		keys:              DefaultKeyMap(),
-		quickInputFocused: true,
-		replyInput:        replyInput,
-		tasksNeedingInput: make(map[int64]bool),
-		questionPrompts:   make(map[int64]bool),
-		executorPrompts:   make(map[int64]string),
-		kanban:            kanban,
-	}
-
-	result, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	model := result.(*AppModel)
-
-	if model.quickInputFocused {
-		t.Error("quickInputFocused should be false even without a selected task")
-	}
-	if model.replyInput.Value() != "" {
-		t.Error("replyInput should be cleared")
-	}
-}
-
-// TestQuickInput_TabIgnoredWithoutBlockedTask verifies Tab does nothing
-// when the selected task doesn't need input.
-func TestQuickInput_TabIgnoredWithoutBlockedTask(t *testing.T) {
-	database, err := db.Open(":memory:")
-	if err != nil {
-		t.Fatalf("Failed to create test database: %v", err)
-	}
-	defer database.Close()
-
-	task := &db.Task{Title: "Test task", Status: db.StatusProcessing}
-	if err := database.CreateTask(task); err != nil {
-		t.Fatalf("Failed to create task: %v", err)
-	}
-
-	replyInput := textinput.New()
-	replyInput.CharLimit = 200
-
-	m := &AppModel{
-		width:             100,
-		height:            50,
-		currentView:       ViewDashboard,
-		db:                database,
-		keys:              DefaultKeyMap(),
-		tasks:             []*db.Task{task},
-		tasksNeedingInput: make(map[int64]bool),
-		questionPrompts:   make(map[int64]bool),
-		executorPrompts:   make(map[int64]string),
-		kanban:            NewKanbanBoard(100, 50),
-		prevStatuses:      map[int64]string{task.ID: db.StatusProcessing},
-		replyInput:        replyInput,
-	}
-	m.kanban.SetTasks(m.tasks)
-
-	result, _ := m.Update(tea.KeyMsg{Type: tea.KeyTab})
-	model := result.(*AppModel)
-
-	if model.quickInputFocused {
-		t.Error("quickInputFocused should remain false when task doesn't need input")
 	}
 }
 
@@ -2294,19 +2071,15 @@ func TestLatestChoicePrompt_QuestionResolvedByReply(t *testing.T) {
 	}
 }
 
-// TestRenderExecutorPromptPreview_ShowsTabInputHint verifies the prompt preview
-// includes the tab input hint alongside approve/deny.
-func TestRenderExecutorPromptPreview_ShowsTabInputHint(t *testing.T) {
-	replyInput := textinput.New()
-	replyInput.CharLimit = 200
-
+// TestRenderExecutorPromptPreview_ShowsApproveDenyDetailHints verifies the prompt
+// preview includes approve/deny/detail hints and no longer advertises quick input.
+func TestRenderExecutorPromptPreview_ShowsApproveDenyDetailHints(t *testing.T) {
 	m := &AppModel{
 		width:             100,
 		height:            50,
 		executorPrompts:   map[int64]string{1: "Choose option 1, 2, or 3"},
 		tasksNeedingInput: map[int64]bool{1: true},
 		questionPrompts:   map[int64]bool{},
-		replyInput:        replyInput,
 	}
 
 	task := &db.Task{ID: 1, Title: "Test task"}
@@ -2318,44 +2091,17 @@ func TestRenderExecutorPromptPreview_ShowsTabInputHint(t *testing.T) {
 	if !strings.Contains(rendered, "N deny") {
 		t.Error("prompt preview should include 'N deny' hint")
 	}
-	if !strings.Contains(rendered, "tab input") {
-		t.Error("prompt preview should include 'tab input' hint")
+	if !strings.Contains(rendered, "enter detail") {
+		t.Error("prompt preview should include 'enter detail' hint")
+	}
+	if strings.Contains(rendered, "tab input") {
+		t.Error("prompt preview should no longer include the removed 'tab input' hint")
 	}
 }
 
-// TestRenderExecutorPromptPreview_QuickInputFocused verifies the prompt preview
-// shows the text input field when quick input is focused.
-func TestRenderExecutorPromptPreview_QuickInputFocused(t *testing.T) {
-	replyInput := textinput.New()
-	replyInput.CharLimit = 200
-	replyInput.Focus()
-
-	m := &AppModel{
-		width:             100,
-		height:            50,
-		executorPrompts:   map[int64]string{1: "Choose option 1, 2, or 3"},
-		tasksNeedingInput: map[int64]bool{1: true},
-		quickInputFocused: true,
-		replyInput:        replyInput,
-	}
-
-	task := &db.Task{ID: 1, Title: "Test task"}
-	rendered := m.renderExecutorPromptPreview(task)
-
-	if !strings.Contains(rendered, "input:") {
-		t.Error("prompt preview should show input label when quick input is focused")
-	}
-	if !strings.Contains(rendered, "esc cancel") {
-		t.Error("prompt preview should show cancel hint when quick input is focused")
-	}
-	if !strings.Contains(rendered, "#1") {
-		t.Error("prompt preview should show task ID")
-	}
-}
-
-// TestExecutorRespondedMsg_ReplyAction verifies the executor responded handler
-// properly handles "reply" action.
-func TestExecutorRespondedMsg_ReplyAction(t *testing.T) {
+// TestExecutorRespondedMsg_ApproveAction verifies the executor responded handler
+// clears pending-input state and notifies on approval.
+func TestExecutorRespondedMsg_ApproveAction(t *testing.T) {
 	database, err := db.Open(":memory:")
 	if err != nil {
 		t.Fatalf("Failed to create test database: %v", err)
@@ -2366,9 +2112,6 @@ func TestExecutorRespondedMsg_ReplyAction(t *testing.T) {
 	if err := database.CreateTask(task); err != nil {
 		t.Fatalf("Failed to create task: %v", err)
 	}
-
-	replyInput := textinput.New()
-	replyInput.CharLimit = 200
 
 	m := &AppModel{
 		width:             100,
@@ -2381,21 +2124,20 @@ func TestExecutorRespondedMsg_ReplyAction(t *testing.T) {
 		executorPrompts:   map[int64]string{task.ID: "Choose 1, 2, or 3"},
 		kanban:            NewKanbanBoard(100, 50),
 		prevStatuses:      map[int64]string{task.ID: db.StatusBlocked},
-		replyInput:        replyInput,
 	}
 
-	// Simulate executorRespondedMsg with reply action
-	result, _ := m.Update(executorRespondedMsg{taskID: task.ID, action: "reply"})
+	// Simulate executorRespondedMsg with approve action
+	result, _ := m.Update(executorRespondedMsg{taskID: task.ID, action: "approve"})
 	model := result.(*AppModel)
 
 	if model.tasksNeedingInput[task.ID] {
-		t.Error("tasksNeedingInput should be cleared after reply")
+		t.Error("tasksNeedingInput should be cleared after approve")
 	}
 	if _, exists := model.executorPrompts[task.ID]; exists {
-		t.Error("executorPrompts should be cleared after reply")
+		t.Error("executorPrompts should be cleared after approve")
 	}
-	if !strings.Contains(model.notification, "Replied to") {
-		t.Errorf("notification should contain 'Replied to', got '%s'", model.notification)
+	if !strings.Contains(model.notification, "Approved") {
+		t.Errorf("notification should contain 'Approved', got '%s'", model.notification)
 	}
 }
 
@@ -2424,16 +2166,6 @@ func TestSystemMessages_NotSwallowedByOverlayViews(t *testing.T) {
 		name  string
 		setup func(m *AppModel)
 	}{
-		{
-			name: "quickInputFocused",
-			setup: func(m *AppModel) {
-				replyInput := textinput.New()
-				replyInput.Focus()
-				m.replyInput = replyInput
-				m.currentView = ViewDashboard
-				m.quickInputFocused = true
-			},
-		},
 		{
 			name: "filterActive",
 			setup: func(m *AppModel) {

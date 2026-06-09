@@ -102,8 +102,6 @@ type KeyMap struct {
 	// Spotlight mode
 	Spotlight     key.Binding
 	SpotlightSync key.Binding
-	// Quick input focus
-	QuickInput key.Binding
 }
 
 // ShortHelp returns key bindings to show in the mini help.
@@ -288,10 +286,6 @@ func DefaultKeyMap() KeyMap {
 			key.WithKeys("F"),
 			key.WithHelp("F", "spotlight sync"),
 		),
-		QuickInput: key.NewBinding(
-			key.WithKeys("tab"),
-			key.WithHelp("tab", "input"),
-		),
 	}
 }
 
@@ -359,7 +353,6 @@ func ApplyKeybindingsConfig(km KeyMap, cfg *config.KeybindingsConfig) KeyMap {
 	km.DenyPrompt = applyBinding(km.DenyPrompt, cfg.DenyPrompt)
 	km.Spotlight = applyBinding(km.Spotlight, cfg.Spotlight)
 	km.SpotlightSync = applyBinding(km.SpotlightSync, cfg.SpotlightSync)
-	km.QuickInput = applyBinding(km.QuickInput, cfg.QuickInput)
 
 	return km
 }
@@ -507,10 +500,6 @@ type AppModel struct {
 	// AI command service for natural language command interpretation
 	aiCommandService *ai.CommandService
 
-	// Quick input for sending text to executor (always visible when task needs input)
-	replyInput        textinput.Model
-	quickInputFocused bool // Whether quick input field has keyboard focus
-
 	// liveSpinnerRunning guards the live-mode spinner animation loop so only one
 	// tick chain runs at a time.
 	liveSpinnerRunning bool
@@ -606,11 +595,6 @@ func NewAppModel(database *db.DB, exec *executor.Executor, workingDir string, ve
 	watcher, _ := fsnotify.NewWatcher()
 	dbChangeCh := make(chan struct{}, 1)
 
-	// Setup reply input for executor prompts
-	replyInput := textinput.New()
-	replyInput.Placeholder = "Type response and press enter..."
-	replyInput.CharLimit = 200
-
 	// Setup filter input
 	filterInput := textinput.New()
 	filterInput.Placeholder = "Filter text, #id, or [project..."
@@ -650,7 +634,6 @@ func NewAppModel(database *db.DB, exec *executor.Executor, workingDir string, ve
 		watcher:            watcher,
 		dbChangeCh:         dbChangeCh,
 		prCache:            github.NewPRCache(),
-		replyInput:         replyInput,
 		filterInput:        filterInput,
 		filterText:         "",
 		filterAutocomplete: filterAutocomplete,
@@ -798,11 +781,6 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Handle detail view feedback mode (needs all message types for text input)
 		if m.currentView == ViewDetail && m.detailView != nil && m.detailView.InFeedbackMode() {
 			return m.updateDetail(msg)
-		}
-
-		// Handle quick input mode (needs all message types for text input)
-		if m.currentView == ViewDashboard && m.quickInputFocused {
-			return m.updateQuickInput(msg)
 		}
 
 		// Handle filter input mode (needs all message types for text input)
@@ -1327,8 +1305,6 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			action := "Approved"
 			if msg.action == "deny" {
 				action = "Denied"
-			} else if msg.action == "reply" {
-				action = "Replied to"
 			}
 			m.notification = fmt.Sprintf("%s %s executor prompt for task #%d", IconDone(), action, msg.taskID)
 			m.notifyUntil = time.Now().Add(3 * time.Second)
@@ -1914,7 +1890,7 @@ func (m *AppModel) renderHelp() string {
 
 // renderExecutorPromptPreview renders a compact preview of the executor's current prompt
 // for a blocked task that needs input. Shows the permission message from the hook log
-// with approve/deny/tab-input hints. When quick input is focused, shows the text input.
+// with approve/deny/detail hints.
 func (m *AppModel) renderExecutorPromptPreview(task *db.Task) string {
 	hintStyle := lipgloss.NewStyle().Foreground(ColorMuted)
 	warnStyle := lipgloss.NewStyle().Foreground(ColorWarning)
@@ -1926,9 +1902,9 @@ func (m *AppModel) renderExecutorPromptPreview(task *db.Task) string {
 
 	var hints string
 	if m.questionPrompts[task.ID] {
-		hints = hintStyle.Render("tab reply  enter detail")
+		hints = hintStyle.Render("enter detail")
 	} else {
-		hints = hintStyle.Render("y approve  N deny  tab input  enter detail")
+		hints = hintStyle.Render("y approve  N deny  enter detail")
 	}
 
 	prompt := m.executorPrompts[task.ID]
@@ -1962,13 +1938,6 @@ func (m *AppModel) renderExecutorPromptPreview(task *db.Task) string {
 			}
 			lines = append(lines, barStyle.Render("  "+detailStyle.Render(pl)))
 		}
-	}
-
-	// Show quick input bar when focused
-	if m.quickInputFocused {
-		label := warnStyle.Render("input: ")
-		inputHints := hintStyle.Render("  enter send  esc cancel")
-		lines = append(lines, barStyle.Render(label+m.replyInput.View()+inputHints))
 	}
 
 	return strings.Join(lines, "\n")
@@ -2227,17 +2196,6 @@ func (m *AppModel) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, m.syncSpotlight(task)
 		}
 
-	case key.Matches(msg, m.keys.QuickInput):
-		// Focus the quick input field if selected task needs input
-		if task := m.kanban.SelectedTask(); task != nil {
-			if m.tasksNeedingInput[task.ID] || m.detectPermissionPrompt(task.ID) {
-				m.quickInputFocused = true
-				m.replyInput.SetValue("")
-				m.replyInput.Focus()
-				return m, textinput.Blink
-			}
-		}
-
 	case key.Matches(msg, m.keys.Settings):
 		m.settingsView = NewSettingsModel(m.db, m.width, m.height)
 		m.previousView = m.currentView
@@ -2288,53 +2246,6 @@ func (m *AppModel) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	return m, nil
-}
-
-// updateQuickInput handles input when the quick input field is focused.
-func (m *AppModel) updateQuickInput(msg tea.Msg) (tea.Model, tea.Cmd) {
-	keyMsg, ok := msg.(tea.KeyMsg)
-	if !ok {
-		// Pass non-key messages (like blink) to the text input
-		var cmd tea.Cmd
-		m.replyInput, cmd = m.replyInput.Update(msg)
-		return m, cmd
-	}
-
-	switch keyMsg.String() {
-	case "esc", "shift+tab":
-		// Return focus to kanban
-		m.quickInputFocused = false
-		m.replyInput.SetValue("")
-		m.replyInput.Blur()
-		return m, nil
-
-	case "enter":
-		// Send the text to the selected task's executor
-		text := strings.TrimSpace(m.replyInput.Value())
-		if text == "" {
-			// Empty input - just unfocus
-			m.quickInputFocused = false
-			m.replyInput.Blur()
-			return m, nil
-		}
-		task := m.kanban.SelectedTask()
-		if task == nil {
-			m.quickInputFocused = false
-			m.replyInput.SetValue("")
-			m.replyInput.Blur()
-			return m, nil
-		}
-		taskID := task.ID
-		m.quickInputFocused = false
-		m.replyInput.SetValue("")
-		m.replyInput.Blur()
-		return m, m.sendTextToExecutor(taskID, text)
-	}
-
-	// Pass all other keys to the text input
-	var cmd tea.Cmd
-	m.replyInput, cmd = m.replyInput.Update(msg)
-	return m, cmd
 }
 
 // updateFilterMode handles input when filter mode is active.
@@ -4722,10 +4633,10 @@ func (m *AppModel) syncSpotlight(task *db.Task) tea.Cmd {
 	}
 }
 
-// executorRespondedMsg is sent after approve/deny/reply is sent to the executor.
+// executorRespondedMsg is sent after approve/deny is sent to the executor.
 type executorRespondedMsg struct {
 	taskID int64
-	action string // "approve", "deny", or "reply"
+	action string // "approve" or "deny"
 	err    error
 }
 
@@ -4750,19 +4661,6 @@ func (m *AppModel) denyExecutorPrompt(taskID int64) tea.Cmd {
 			database.AppendTaskLog(taskID, "user", "Denied from kanban")
 		}
 		return executorRespondedMsg{taskID: taskID, action: "deny", err: err}
-	}
-}
-
-// sendTextToExecutor sends arbitrary text followed by Enter to the executor's tmux pane.
-// Used for multiple choice responses (e.g. "1", "2", "3") and free-form text input.
-func (m *AppModel) sendTextToExecutor(taskID int64, text string) tea.Cmd {
-	database := m.db
-	return func() tea.Msg {
-		err := executor.SendLiteralTextToPane(taskID, text)
-		if err == nil {
-			database.AppendTaskLog(taskID, "user", fmt.Sprintf("Replied from kanban: %s", text))
-		}
-		return executorRespondedMsg{taskID: taskID, action: "reply", err: err}
 	}
 }
 
