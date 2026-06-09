@@ -35,6 +35,6 @@ func (c *tmuxPaneController) JoinBelow(task *db.Task, tuiHeightPercent int) (str
 	return "", nil
 }
 func (c *tmuxPaneController) BreakBack(task *db.Task, paneID string) error { return nil }
-func (c *tmuxPaneController) FocusPane(paneID string) error               { return nil }
-func (c *tmuxPaneController) TUIPaneFocused() bool                        { return true }
-func (c *tmuxPaneController) ResizeTUIFull()                              {}
+func (c *tmuxPaneController) FocusPane(paneID string) error                { return nil }
+func (c *tmuxPaneController) TUIPaneFocused() bool                         { return true }
+func (c *tmuxPaneController) ResizeTUIFull()                               {}
