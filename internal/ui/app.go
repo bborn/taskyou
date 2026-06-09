@@ -2985,12 +2985,11 @@ func (m *AppModel) updateEditTaskForm(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if form, ok := model.(*FormModel); ok {
 		m.editTaskForm = form
 		if form.submitted {
-			// Get updated task data from form
-			updatedTask := form.GetDBTask()
-
-			// Check if project has changed - this requires special handling
+			// Moving to another project deletes this task and creates a fresh
+			// one, so build that from form data (moveTaskToProject resets the
+			// runtime fields on purpose).
 			if form.ProjectChanged() {
-				// Store the original task for the confirmation dialog
+				updatedTask := form.GetDBTask()
 				originalTask := m.editingTask
 
 				m.editTaskForm = nil
@@ -2998,14 +2997,13 @@ func (m *AppModel) updateEditTaskForm(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m.showProjectChangeConfirm(updatedTask, originalTask)
 			}
 
-			// Preserve the original task's ID and other fields
-			updatedTask.ID = m.editingTask.ID
-			updatedTask.Status = m.editingTask.Status
-			updatedTask.WorktreePath = m.editingTask.WorktreePath
-			updatedTask.BranchName = m.editingTask.BranchName
-			updatedTask.CreatedAt = m.editingTask.CreatedAt
-			updatedTask.StartedAt = m.editingTask.StartedAt
-			updatedTask.CompletedAt = m.editingTask.CompletedAt
+			// In-place edit: overlay only the fields the form exposes onto a
+			// copy of the original task. Starting from the original preserves
+			// every persisted column the form doesn't show (session IDs, pin
+			// state, permission mode, tags, source branch, PR info, port, ...)
+			// which would otherwise be reset to zero on save. See issue #560.
+			updatedTask := *m.editingTask
+			form.ApplyTo(&updatedTask)
 
 			// Capture old title before clearing editingTask
 			oldTitle := m.editingTask.Title
@@ -3013,7 +3011,7 @@ func (m *AppModel) updateEditTaskForm(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.editTaskForm = nil
 			m.editingTask = nil
 			m.currentView = m.previousView
-			return m, m.updateTaskWithRename(updatedTask, oldTitle)
+			return m, m.updateTaskWithRename(&updatedTask, oldTitle)
 		}
 		if form.cancelled {
 			m.currentView = m.previousView

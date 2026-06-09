@@ -1886,23 +1886,30 @@ func (m *FormModel) GetDBTask() *db.Task {
 		status = db.StatusQueued
 	}
 
-	task := &db.Task{
-		Title:    m.titleInput.Value(),
-		Body:     m.bodyInput.Value(),
-		Status:   status,
-		Type:     m.taskType,
-		Project:  m.project,
-		Executor: m.executor,
-		PRURL:    m.prURL,
-		PRNumber: m.prNumber,
-	}
+	task := &db.Task{Status: status}
+	m.ApplyTo(task)
+	return task
+}
+
+// ApplyTo overlays the form's editable fields onto task, leaving every other
+// persisted column untouched. Editing a task in place uses this so that saving
+// never resets fields the form doesn't expose (session IDs, pin state,
+// permission mode, tags, source branch, PR info, ...). See issue #560.
+func (m *FormModel) ApplyTo(task *db.Task) {
+	task.Title = m.titleInput.Value()
+	task.Body = m.bodyInput.Value()
+	task.Type = m.taskType
+	task.Project = m.project
+	task.Executor = m.executor
+	task.PRURL = m.prURL
+	task.PRNumber = m.prNumber
 
 	// Effort is a Claude-specific override; only carry it for the Claude executor.
 	if m.executor == db.ExecutorClaude {
 		task.EffortLevel = m.effortLevel
+	} else {
+		task.EffortLevel = ""
 	}
-
-	return task
 }
 
 // SetQueue sets whether to queue the task.
