@@ -107,6 +107,63 @@ func (d *DockModel) Refresh(task *db.Task, termHeight int) bool {
 	return true
 }
 
+// IsLive reports whether a live executor pane is currently joined.
+func (d *DockModel) IsLive() bool { return d.mode == dockLive }
+
+// tuiHeightPercentFor returns the TUI pane height percent when the dock holds a
+// live pane occupying dockHeightPercent of the screen.
+func tuiHeightPercentFor() int { return 100 - dockHeightPercent }
+
+// Promote joins the highlighted task's executor pane below the board and moves
+// focus into it. Expensive on cold tasks, cheap (warm) on revisit. No-op unless
+// open and currently in snapshot mode.
+func (d *DockModel) Promote(task *db.Task, termHeight int) {
+	if !d.open || d.mode != dockSnapshot || task == nil {
+		return
+	}
+	paneID, err := d.ctl.JoinBelow(task, tuiHeightPercentFor())
+	if err != nil || paneID == "" {
+		return // stay in snapshot mode on failure
+	}
+	d.livePaneID = paneID
+	d.liveTaskID = task.ID
+	d.mode = dockLive
+	_ = d.ctl.FocusPane(paneID)
+}
+
+// Demote returns the live pane to its daemon window and reverts to snapshot mode.
+func (d *DockModel) Demote(task *db.Task) {
+	if d.mode != dockLive {
+		return
+	}
+	_ = d.ctl.BreakBack(task, d.livePaneID)
+	d.ctl.ResizeTUIFull()
+	d.livePaneID = ""
+	d.liveTaskID = 0
+	d.mode = dockSnapshot
+	d.snapshot = ""
+	d.contentVersion++
+}
+
+// RefreshOrDemote is called on selection change. If a live pane is up for a
+// different task, demote it first (the region must show the new task's snapshot),
+// then refresh. If live for the SAME task, leave it. Otherwise just refresh.
+func (d *DockModel) RefreshOrDemote(task *db.Task, termHeight int) {
+	if !d.open || task == nil {
+		return
+	}
+	if d.mode == dockLive {
+		if d.liveTaskID == task.ID {
+			return // same task still live; leave it
+		}
+		// Different task selected: demote the old live pane back to its daemon
+		// window. Resolution is by task id, so a synthetic task carrying the live
+		// id is sufficient to target the right window.
+		d.Demote(&db.Task{ID: d.liveTaskID})
+	}
+	d.Refresh(task, termHeight)
+}
+
 // View renders the dock for the given terminal size and highlighted task.
 // Returns "" when closed. In live mode the region is occupied by the real tmux
 // pane, so we render only a one-line title bar (the pane draws itself).

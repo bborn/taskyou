@@ -131,3 +131,94 @@ func TestDock_ViewEmptyWhenClosed(t *testing.T) {
 		t.Fatal("closed dock View should be empty")
 	}
 }
+
+func TestDock_PromoteJoinsAndFocuses(t *testing.T) {
+	f := &fakePaneController{snapshot: "x"}
+	d := NewDockModel(f)
+	d.Toggle()
+	task := &db.Task{ID: 7}
+
+	d.Promote(task, 40)
+	if !d.IsLive() {
+		t.Fatal("promote should switch to live mode")
+	}
+	if len(f.joined) != 1 || f.joined[0] != 7 {
+		t.Fatalf("joined = %v, want [7]", f.joined)
+	}
+	if len(f.focused) != 1 || f.focused[0] != "%99" {
+		t.Fatalf("focused = %v, want [%%99]", f.focused)
+	}
+	if d.liveTaskID != 7 || d.livePaneID != "%99" {
+		t.Fatalf("live state = (%d,%q)", d.liveTaskID, d.livePaneID)
+	}
+}
+
+func TestDock_PromoteNoopWhenClosedOrAlreadyLive(t *testing.T) {
+	f := &fakePaneController{}
+	d := NewDockModel(f)
+	task := &db.Task{ID: 7}
+	d.Promote(task, 40) // closed
+	if len(f.joined) != 0 {
+		t.Fatal("promote while closed must not join")
+	}
+	d.Toggle()
+	d.Promote(task, 40)
+	d.Promote(task, 40) // already live
+	if len(f.joined) != 1 {
+		t.Fatalf("joined %d times, want 1", len(f.joined))
+	}
+}
+
+func TestDock_DemoteBreaksBackToSnapshot(t *testing.T) {
+	f := &fakePaneController{snapshot: "y"}
+	d := NewDockModel(f)
+	d.Toggle()
+	task := &db.Task{ID: 7}
+	d.Promote(task, 40)
+
+	d.Demote(task)
+	if d.IsLive() {
+		t.Fatal("demote should return to snapshot mode")
+	}
+	if len(f.broken) != 1 || f.broken[0] != 7 {
+		t.Fatalf("broken = %v, want [7]", f.broken)
+	}
+	if d.livePaneID != "" || d.liveTaskID != 0 {
+		t.Fatal("live state should be cleared after demote")
+	}
+}
+
+func TestDock_SelectionChangeWhileLiveDemotes(t *testing.T) {
+	f := &fakePaneController{snapshot: "z"}
+	d := NewDockModel(f)
+	d.Toggle()
+	a := &db.Task{ID: 1}
+	b := &db.Task{ID: 2}
+	d.Promote(a, 40)
+
+	// Refresh now targets a different task -> must demote A first, then snapshot B.
+	d.RefreshOrDemote(b, 40)
+	if d.IsLive() {
+		t.Fatal("moving selection off a live task should demote it")
+	}
+	if len(f.broken) != 1 || f.broken[0] != 1 {
+		t.Fatalf("broken = %v, want [1]", f.broken)
+	}
+}
+
+func TestDock_SelectionStaysOnSameLiveTask(t *testing.T) {
+	f := &fakePaneController{snapshot: "z"}
+	d := NewDockModel(f)
+	d.Toggle()
+	a := &db.Task{ID: 1}
+	d.Promote(a, 40)
+
+	// Refresh on the same task must NOT demote.
+	d.RefreshOrDemote(a, 40)
+	if !d.IsLive() {
+		t.Fatal("staying on the same task should keep the live pane")
+	}
+	if len(f.broken) != 0 {
+		t.Fatalf("broken = %v, want []", f.broken)
+	}
+}
