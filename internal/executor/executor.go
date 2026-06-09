@@ -2759,9 +2759,10 @@ func (e *Executor) resumeClaudeDangerous(task *db.Task, workDir string) bool {
 	// Configure tmux window with helpful status bar
 	e.configureTmuxWindow(windowTarget)
 
-	// Update the task's dangerous mode flag in the database
-	if err := e.db.UpdateTaskDangerousMode(taskID, true); err != nil {
-		e.logger.Warn("could not update task dangerous mode", "error", err)
+	// Persist the mode through permission_mode (the source of truth), which keeps
+	// the legacy dangerous_mode bool in sync — so the badge and the live session agree.
+	if err := e.db.UpdateTaskPermissionMode(taskID, db.PermissionModeDangerous); err != nil {
+		e.logger.Warn("could not update task permission mode", "error", err)
 	}
 
 	e.logLine(taskID, "system", "Claude restarted in dangerous mode (--dangerously-skip-permissions enabled)")
@@ -2818,6 +2819,43 @@ func (e *Executor) ResumeSafe(taskID int64) bool {
 
 	// Delegate to the executor's implementation
 	return exec.ResumeSafe(task, workDir)
+}
+
+// ResumeWithMode persists a new permission mode for a running task and relaunches
+// its agent so the live session matches the stored mode. This is the single entry
+// point for changing a running task's permission mode: it writes permission_mode
+// (the source of truth) first so the resume builds the right CLI flag, then routes
+// to the dangerous or non-dangerous resume path. On failure it rolls the stored
+// mode back so the badge never claims a mode the live session isn't actually in.
+func (e *Executor) ResumeWithMode(taskID int64, mode string) bool {
+	mode = db.NormalizePermissionMode(mode)
+	if mode == "" {
+		mode = db.PermissionModeDefault
+	}
+
+	prev := mode
+	if t, err := e.db.GetTask(taskID); err == nil && t != nil {
+		prev = t.EffectivePermissionMode()
+	}
+
+	if err := e.db.UpdateTaskPermissionMode(taskID, mode); err != nil {
+		e.logger.Error("Failed to set permission mode", "taskID", taskID, "mode", mode, "error", err)
+		return false
+	}
+
+	var ok bool
+	if mode == db.PermissionModeDangerous {
+		ok = e.ResumeDangerous(taskID)
+	} else {
+		ok = e.ResumeSafe(taskID)
+	}
+
+	if !ok && prev != mode {
+		if err := e.db.UpdateTaskPermissionMode(taskID, prev); err != nil {
+			e.logger.Warn("could not roll back permission mode", "taskID", taskID, "error", err)
+		}
+	}
+	return ok
 }
 
 // resumeClaudeSafe is the Claude-specific implementation of safe mode resume.
@@ -2882,10 +2920,13 @@ func (e *Executor) resumeClaudeSafe(task *db.Task, workDir string) bool {
 		taskSessionID = fmt.Sprintf("%d", os.Getpid())
 	}
 
-	// Resume without --dangerously-skip-permissions (safe mode)
+	// Resume honoring the task's configured non-dangerous mode (auto / accept-edits
+	// / default) instead of always dropping to prompt-for-everything. "Safe" must
+	// never mean bypass, so a still-dangerous task degrades to default.
+	safeMode := safePermissionMode(task.EffectivePermissionMode())
 	envPrefix := claudeEnvPrefix(paths.configDir)
-	script := fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %sclaude --resume %s`,
-		taskID, taskSessionID, task.Port, task.WorktreePath, envPrefix, claudeSessionID)
+	script := fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %sclaude %s--resume %s`,
+		taskID, taskSessionID, task.Port, task.WorktreePath, envPrefix, permissionFlagForMode(safeMode), claudeSessionID)
 
 	// Create new window in task-daemon session (with retry logic for race conditions)
 	actualSession, tmuxErr := createTmuxWindow(daemonSession, windowName, workDir, script, e.getProjectDir(task.Project))
@@ -2924,12 +2965,14 @@ func (e *Executor) resumeClaudeSafe(task *db.Task, workDir string) bool {
 	// Configure tmux window with helpful status bar
 	e.configureTmuxWindow(windowTarget)
 
-	// Update the task's dangerous mode flag in the database
-	if err := e.db.UpdateTaskDangerousMode(taskID, false); err != nil {
-		e.logger.Warn("could not update task dangerous mode", "error", err)
+	// Persist the resolved mode through permission_mode (the source of truth),
+	// which keeps the legacy dangerous_mode bool in sync — so the badge and the
+	// live session always agree.
+	if err := e.db.UpdateTaskPermissionMode(taskID, safeMode); err != nil {
+		e.logger.Warn("could not update task permission mode", "error", err)
 	}
 
-	e.logLine(taskID, "system", "Claude restarted in safe mode (permissions enabled)")
+	e.logLine(taskID, "system", fmt.Sprintf("Claude restarted in %s mode", db.PermissionModeLabel(safeMode)))
 
 	// Wait for Claude to be fully ready before sending input
 	time.Sleep(1 * time.Second)

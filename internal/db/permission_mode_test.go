@@ -47,6 +47,90 @@ func TestTaskEffectivePermissionMode(t *testing.T) {
 	}
 }
 
+func TestNextPermissionMode(t *testing.T) {
+	cases := map[string]string{
+		PermissionModeDefault:     PermissionModeAcceptEdits,
+		PermissionModeAcceptEdits: PermissionModeAuto,
+		PermissionModeAuto:        PermissionModeDangerous,
+		PermissionModeDangerous:   PermissionModeDefault, // wraps around
+		"":                        PermissionModeAcceptEdits,
+		"bogus":                   PermissionModeAcceptEdits,
+	}
+	for in, want := range cases {
+		if got := NextPermissionMode(in); got != want {
+			t.Errorf("NextPermissionMode(%q) = %q, want %q", in, got, want)
+		}
+	}
+
+	// Cycling four times returns to the start, covering all modes exactly once.
+	seen := map[string]bool{}
+	mode := PermissionModeDefault
+	for i := 0; i < len(PermissionModeCycle); i++ {
+		seen[mode] = true
+		mode = NextPermissionMode(mode)
+	}
+	if mode != PermissionModeDefault {
+		t.Errorf("cycle did not return to start, ended at %q", mode)
+	}
+	if len(seen) != 4 {
+		t.Errorf("cycle did not visit all 4 modes, saw %d: %v", len(seen), seen)
+	}
+}
+
+func TestPermissionModeLabel(t *testing.T) {
+	cases := map[string]string{
+		PermissionModeDefault:     "Prompt",
+		PermissionModeAcceptEdits: "Accept-edits",
+		PermissionModeAuto:        "Auto",
+		PermissionModeDangerous:   "Dangerous",
+		"":                        "Prompt",
+	}
+	for in, want := range cases {
+		if got := PermissionModeLabel(in); got != want {
+			t.Errorf("PermissionModeLabel(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// TestUpdateTaskPermissionModeKeepsBoolInSync guards the single-source-of-truth
+// invariant the resume/cycle fix relies on: writing permission_mode must keep the
+// legacy dangerous_mode bool consistent, so the badge and the live session can
+// never disagree (the root cause of tasks "stored dangerous but still prompting").
+func TestUpdateTaskPermissionModeKeepsBoolInSync(t *testing.T) {
+	t.Setenv("TASKYOU_DEFAULT_PERMISSION_MODE", "")
+	database := newPermTestDB(t)
+	if err := database.CreateProject(&Project{Name: "p", Path: t.TempDir()}); err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	task := &Task{Title: "T", Status: StatusQueued, Type: TypeCode, Project: "p"}
+	if err := database.CreateTask(task); err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+
+	cases := []struct {
+		mode          string
+		wantEffective string
+		wantDangerous bool
+	}{
+		{PermissionModeDangerous, PermissionModeDangerous, true},
+		{PermissionModeAuto, PermissionModeAuto, false}, // dangerous bool must clear
+		{PermissionModeAcceptEdits, PermissionModeAcceptEdits, false},
+		{PermissionModeDefault, PermissionModeDefault, false},
+	}
+	for _, c := range cases {
+		if err := database.UpdateTaskPermissionMode(task.ID, c.mode); err != nil {
+			t.Fatalf("update to %q: %v", c.mode, err)
+		}
+		got, _ := database.GetTask(task.ID)
+		if got.EffectivePermissionMode() != c.wantEffective {
+			t.Errorf("after set %q: EffectivePermissionMode = %q, want %q", c.mode, got.EffectivePermissionMode(), c.wantEffective)
+		}
+		if got.DangerousMode != c.wantDangerous {
+			t.Errorf("after set %q: DangerousMode = %v, want %v", c.mode, got.DangerousMode, c.wantDangerous)
+		}
+	}
+}
+
 func TestGlobalDefaultPermissionMode(t *testing.T) {
 	t.Setenv("TASKYOU_DEFAULT_PERMISSION_MODE", "")
 	if got := GlobalDefaultPermissionMode(); got != PermissionModeAuto {

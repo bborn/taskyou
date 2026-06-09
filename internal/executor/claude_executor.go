@@ -32,14 +32,12 @@ type ClaudeExecutor struct {
 	logger   *log.Logger
 }
 
-// claudePermissionFlag returns the Claude CLI permission flag (with a trailing
-// space) for a task's effective permission mode. The WORKTREE_DANGEROUS_MODE
-// environment variable forces dangerous mode for sandboxed environments.
-func claudePermissionFlag(task *db.Task) string {
-	if os.Getenv("WORKTREE_DANGEROUS_MODE") == "1" {
-		return "--dangerously-skip-permissions "
-	}
-	switch task.EffectivePermissionMode() {
+// permissionFlagForMode returns the Claude CLI permission flag (with a trailing
+// space) for an explicit permission mode, or "" for default/prompt mode. This is
+// the single mapping from a stored mode to a CLI flag; every launch and resume
+// path goes through it so the live session always matches the task's mode.
+func permissionFlagForMode(mode string) string {
+	switch mode {
 	case db.PermissionModeDangerous:
 		return "--dangerously-skip-permissions "
 	case db.PermissionModeAuto:
@@ -49,6 +47,27 @@ func claudePermissionFlag(task *db.Task) string {
 	default:
 		return ""
 	}
+}
+
+// safePermissionMode maps a task's mode to the mode a "safe" (non-bypass) resume
+// should use: every non-dangerous mode is preserved (so resuming an auto or
+// accept-edits task keeps that mode instead of dropping to prompt-for-everything),
+// and dangerous degrades to default so "safe" can never mean "bypass all".
+func safePermissionMode(mode string) string {
+	if mode == db.PermissionModeDangerous {
+		return db.PermissionModeDefault
+	}
+	return mode
+}
+
+// claudePermissionFlag returns the Claude CLI permission flag (with a trailing
+// space) for a task's effective permission mode. The WORKTREE_DANGEROUS_MODE
+// environment variable forces dangerous mode for sandboxed environments.
+func claudePermissionFlag(task *db.Task) string {
+	if os.Getenv("WORKTREE_DANGEROUS_MODE") == "1" {
+		return "--dangerously-skip-permissions "
+	}
+	return permissionFlagForMode(task.EffectivePermissionMode())
 }
 
 // effortFlag returns the `--effort <level> ` CLI flag (with a trailing space) for a

@@ -115,6 +115,43 @@ func NormalizePermissionMode(mode string) string {
 	return ""
 }
 
+// PermissionModeCycle is the order the UI cycles permission modes, from most to
+// least gated. Cycling keeps the four modes reachable on a running task; each
+// step relaunches the live session so it matches the stored mode.
+var PermissionModeCycle = []string{
+	PermissionModeDefault,
+	PermissionModeAcceptEdits,
+	PermissionModeAuto,
+	PermissionModeDangerous,
+}
+
+// NextPermissionMode returns the next mode after the given one in
+// PermissionModeCycle, wrapping around. Unknown input starts the cycle at
+// accept-edits (one past default), so "advance from wherever you are" is sane.
+func NextPermissionMode(mode string) string {
+	mode = NormalizePermissionMode(mode)
+	for i, m := range PermissionModeCycle {
+		if m == mode {
+			return PermissionModeCycle[(i+1)%len(PermissionModeCycle)]
+		}
+	}
+	return PermissionModeAcceptEdits
+}
+
+// PermissionModeLabel returns a short human-facing label for a permission mode.
+func PermissionModeLabel(mode string) string {
+	switch NormalizePermissionMode(mode) {
+	case PermissionModeAcceptEdits:
+		return "Accept-edits"
+	case PermissionModeAuto:
+		return "Auto"
+	case PermissionModeDangerous:
+		return "Dangerous"
+	default:
+		return "Prompt"
+	}
+}
+
 // GlobalDefaultPermissionMode returns the fallback permission mode used when a
 // project has no explicit default. It can be overridden with the
 // TASKYOU_DEFAULT_PERMISSION_MODE environment variable. Defaults to "auto"

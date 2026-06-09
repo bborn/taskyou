@@ -38,3 +38,40 @@ func TestClaudePermissionFlagGlobalDangerousEnv(t *testing.T) {
 		t.Errorf("WORKTREE_DANGEROUS_MODE should force dangerous, got %q", got)
 	}
 }
+
+func TestPermissionFlagForMode(t *testing.T) {
+	cases := map[string]string{
+		db.PermissionModeDefault:     "",
+		db.PermissionModeAcceptEdits: "--permission-mode acceptEdits ",
+		db.PermissionModeAuto:        "--permission-mode auto ",
+		db.PermissionModeDangerous:   "--dangerously-skip-permissions ",
+	}
+	for mode, want := range cases {
+		if got := permissionFlagForMode(mode); got != want {
+			t.Errorf("permissionFlagForMode(%q) = %q, want %q", mode, got, want)
+		}
+	}
+}
+
+// TestSafeResumeFlagPreservesMode is the regression for the bug where the safe
+// side of the permission-mode toggle relaunched with a bare `claude --resume`,
+// silently dropping an auto/accept-edits task into prompt-for-everything. A safe
+// resume must keep the task's non-dangerous mode, and dangerous must degrade to
+// default (never to a bypass flag).
+func TestSafeResumeFlagPreservesMode(t *testing.T) {
+	cases := []struct {
+		mode string
+		want string // flag a "safe" resume should launch with
+	}{
+		{db.PermissionModeAuto, "--permission-mode auto "},               // was bug: came back as ""
+		{db.PermissionModeAcceptEdits, "--permission-mode acceptEdits "}, // was bug: came back as ""
+		{db.PermissionModeDefault, ""},
+		{db.PermissionModeDangerous, ""}, // safe can never mean bypass
+	}
+	for _, c := range cases {
+		got := permissionFlagForMode(safePermissionMode(c.mode))
+		if got != c.want {
+			t.Errorf("safe resume of %q: flag = %q, want %q", c.mode, got, c.want)
+		}
+	}
+}
