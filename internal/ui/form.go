@@ -29,6 +29,7 @@ const (
 	FieldAttachments // Moved after body for proximity - drag works from any field
 	FieldType
 	FieldExecutor
+	FieldEffort
 	FieldCount
 )
 
@@ -65,6 +66,9 @@ type FormModel struct {
 	executorIdx        int
 	executors          []string
 	availableExecutors []string // Original list of available executors (for rebuilding when project changes)
+	effortLevel        string   // Per-task Claude effort override ("" = use global/Claude default)
+	effortIdx          int
+	effortLevels       []string // Selectable effort values; "" (first) means "default"
 	queue              bool
 	attachments        []string // Parsed file paths
 	attachmentCursor   int      // Index of the currently selected attachment chip
@@ -94,6 +98,10 @@ type FormModel struct {
 
 	// Progressive disclosure: hide advanced fields for simpler first experience
 	showAdvanced bool
+
+	// modal renders the form as a centered, content-sized modal overlay
+	// (used when editing from the detail view) rather than a full-screen form.
+	modal bool
 }
 
 // Autocomplete message types for async LLM suggestions
@@ -134,6 +142,24 @@ func buildExecutorList(availableExecutors []string, usageCounts map[string]int) 
 	}
 
 	return result
+}
+
+// effortLevelOptions returns the selectable effort values for the form. The first
+// entry is the empty string, which represents "default" (no per-task override —
+// uses Claude's global default).
+func effortLevelOptions() []string {
+	return append([]string{""}, db.EffortLevels()...)
+}
+
+// effortIndexFor returns the index of the given effort level in the options list,
+// defaulting to 0 ("default") when not found.
+func effortIndexFor(options []string, level string) int {
+	for i, l := range options {
+		if l == level {
+			return i
+		}
+	}
+	return 0
 }
 
 // NewEditFormModel creates a form model pre-populated with an existing task's data for editing.
@@ -200,6 +226,9 @@ func NewEditFormModel(database *db.DB, task *db.Task, width, height int, availab
 		executorIdx:         executorIdx,
 		executors:           executors,
 		availableExecutors:  availableExecutors, // Store for rebuilding when project changes
+		effortLevel:         task.EffortLevel,
+		effortLevels:        effortLevelOptions(),
+		effortIdx:           effortIndexFor(effortLevelOptions(), task.EffortLevel),
 		isEdit:              true,
 		prURL:               task.PRURL,
 		prNumber:            task.PRNumber,
@@ -208,6 +237,7 @@ func NewEditFormModel(database *db.DB, task *db.Task, width, height int, availab
 		taskRefAutocomplete: NewTaskRefAutocompleteModel(database, width-24),
 		attachmentCursor:    -1,
 		showAdvanced:        true, // Always show all fields when editing
+		modal:               true, // Edit form is shown as a centered modal
 	}
 
 	// Load task types from database
@@ -277,6 +307,9 @@ func NewEditFormModel(database *db.DB, task *db.Task, width, height int, availab
 	m.attachmentsInput.Cursor.SetMode(cursor.CursorStatic)
 	m.attachmentsInput.Width = width - 24
 
+	// Apply modal-aware input widths and body height now that modal is set.
+	m.SetSize(width, height)
+
 	return m
 }
 
@@ -316,7 +349,8 @@ func NewFormModel(database *db.DB, width, height int, workingDir string, availab
 		autocompleteEnabled: autocompleteEnabled,
 		taskRefAutocomplete: NewTaskRefAutocompleteModel(database, width-24),
 		attachmentCursor:    -1,
-		showAdvanced:        showAdvanced, // Load from user preference
+		effortLevels:        effortLevelOptions(), // Defaults to "" (Claude's global default)
+		showAdvanced:        showAdvanced,         // Load from user preference
 	}
 
 	// Load task types from database
@@ -428,6 +462,12 @@ func (m *FormModel) Init() tea.Cmd {
 
 // Update handles messages.
 func (m *FormModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	// Normalize modern CSI-u / modifyOtherKeys sequences (Shift+Enter,
+	// Option+Delete, Cmd+Delete on macOS terminals like Ghostty, WezTerm,
+	// Kitty, and iTerm2 with modifyOtherKeys) into standard tea.KeyMsg
+	// values so the rest of the form sees the keys it already handles.
+	msg = translateModernKey(msg)
+
 	switch msg := msg.(type) {
 	// Handle autocomplete debounce tick - fire the LLM request
 	case autocompleteTickMsg:
@@ -737,6 +777,11 @@ func (m *FormModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.executor = m.executors[m.executorIdx]
 				return m, nil
 			}
+			if m.focused == FieldEffort && len(m.effortLevels) > 0 {
+				m.effortIdx = (m.effortIdx - 1 + len(m.effortLevels)) % len(m.effortLevels)
+				m.effortLevel = m.effortLevels[m.effortIdx]
+				return m, nil
+			}
 
 		case "right":
 			if m.handleAttachmentNavigation(1) {
@@ -758,6 +803,11 @@ func (m *FormModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.focused == FieldExecutor && len(m.executors) > 0 {
 				m.executorIdx = (m.executorIdx + 1) % len(m.executors)
 				m.executor = m.executors[m.executorIdx]
+				return m, nil
+			}
+			if m.focused == FieldEffort && len(m.effortLevels) > 0 {
+				m.effortIdx = (m.effortIdx + 1) % len(m.effortLevels)
+				m.effortLevel = m.effortLevels[m.effortIdx]
 				return m, nil
 			}
 
@@ -813,7 +863,7 @@ func (m *FormModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 			// Type-to-select for other selector fields
-			if m.focused == FieldType || m.focused == FieldExecutor {
+			if m.focused == FieldType || m.focused == FieldExecutor || m.focused == FieldEffort {
 				key := msg.String()
 				if len(key) == 1 && unicode.IsLetter(rune(key[0])) {
 					m.selectByPrefix(strings.ToLower(key))
@@ -1080,6 +1130,18 @@ func (m *FormModel) selectByPrefix(prefix string) {
 				return
 			}
 		}
+	case FieldEffort:
+		for i, l := range m.effortLevels {
+			label := l
+			if label == "" {
+				label = "default"
+			}
+			if strings.HasPrefix(strings.ToLower(label), prefix) {
+				m.effortIdx = i
+				m.effortLevel = l
+				return
+			}
+		}
 	}
 }
 
@@ -1164,6 +1226,11 @@ func (m *FormModel) rebuildExecutorListForProject() {
 // isFieldVisible returns whether a field should be shown in the current view.
 // When showAdvanced is false, only Title and Body are visible.
 func (m *FormModel) isFieldVisible(field FormField) bool {
+	if field == FieldEffort {
+		// Effort is a Claude-specific override (claude --effort), only shown in
+		// advanced mode and only when the Claude executor is selected.
+		return m.showAdvanced && m.executor == db.ExecutorClaude
+	}
 	if m.showAdvanced {
 		return true
 	}
@@ -1488,6 +1555,16 @@ func (m *FormModel) View() string {
 	b.WriteString(header)
 	b.WriteString("\n\n")
 
+	// Discard confirmation warning. In modal mode it appears at the top of the
+	// modal (right under the header) so it's immediately visible.
+	confirmStyle := lipgloss.NewStyle().
+		Bold(true).
+		Foreground(lipgloss.Color("214")) // Orange/warning color
+	if m.modal && m.showCancelConfirm {
+		b.WriteString("  " + confirmStyle.Render("Discard changes? (y/n)"))
+		b.WriteString("\n\n")
+	}
+
 	// Ghost text style for autocomplete suggestions
 	ghostStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Italic(true)
 
@@ -1689,6 +1766,25 @@ func (m *FormModel) View() string {
 		}
 		b.WriteString(cursor + " " + labelStyle.Render("Executor") + m.renderSelector(m.executors, m.executorIdx, m.focused == FieldExecutor, selectedStyle, optionStyle, dimStyle))
 		b.WriteString("\n\n")
+
+		// Effort selector (Claude-specific; only shown for the Claude executor)
+		if m.isFieldVisible(FieldEffort) {
+			cursor = " "
+			if m.focused == FieldEffort {
+				cursor = cursorStyle.Render("▸")
+			}
+			// Build effort labels (replace "" with "default")
+			effortLabels := make([]string, len(m.effortLevels))
+			for i, l := range m.effortLevels {
+				if l == "" {
+					effortLabels[i] = "default"
+				} else {
+					effortLabels[i] = l
+				}
+			}
+			b.WriteString(cursor + " " + labelStyle.Render("Effort") + m.renderSelector(effortLabels, m.effortIdx, m.focused == FieldEffort, selectedStyle, optionStyle, dimStyle))
+			b.WriteString("\n\n")
+		}
 	} else {
 		// Show compact summary of defaults and toggle hint
 		b.WriteString("\n")
@@ -1712,11 +1808,9 @@ func (m *FormModel) View() string {
 		b.WriteString("\n\n")
 	}
 
-	// Cancel confirmation message
-	if m.showCancelConfirm {
-		confirmStyle := lipgloss.NewStyle().
-			Bold(true).
-			Foreground(lipgloss.Color("214")) // Orange/warning color
+	// Cancel confirmation message. In modal mode this is rendered at the top
+	// (see above); in full-screen mode it appears here near the help text.
+	if m.showCancelConfirm && !m.modal {
 		b.WriteString("  " + confirmStyle.Render("Discard changes? (y/n)") + "\n")
 	}
 
@@ -1729,7 +1823,23 @@ func (m *FormModel) View() string {
 	}
 	b.WriteString("  " + dimStyle.Render(helpText))
 
-	// Wrap in box - use full height (subtract 2 for border)
+	// Modal mode: wrap in a content-sized box and center it on screen so the
+	// whole form (all fields) is visible at once, floating like a modal.
+	if m.modal {
+		modalBox := lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(ColorPrimary).
+			Padding(1, 2).
+			Width(m.modalBoxWidth())
+
+		return lipgloss.NewStyle().
+			Width(m.width).
+			Height(m.height).
+			Align(lipgloss.Center, lipgloss.Center).
+			Render(modalBox.Render(b.String()))
+	}
+
+	// Full-screen mode: wrap in box using full height (subtract 2 for border)
 	box := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(ColorPrimary).
@@ -1776,18 +1886,30 @@ func (m *FormModel) GetDBTask() *db.Task {
 		status = db.StatusQueued
 	}
 
-	task := &db.Task{
-		Title:    m.titleInput.Value(),
-		Body:     m.bodyInput.Value(),
-		Status:   status,
-		Type:     m.taskType,
-		Project:  m.project,
-		Executor: m.executor,
-		PRURL:    m.prURL,
-		PRNumber: m.prNumber,
-	}
-
+	task := &db.Task{Status: status}
+	m.ApplyTo(task)
 	return task
+}
+
+// ApplyTo overlays the form's editable fields onto task, leaving every other
+// persisted column untouched. Editing a task in place uses this so that saving
+// never resets fields the form doesn't expose (session IDs, pin state,
+// permission mode, tags, source branch, PR info, ...). See issue #560.
+func (m *FormModel) ApplyTo(task *db.Task) {
+	task.Title = m.titleInput.Value()
+	task.Body = m.bodyInput.Value()
+	task.Type = m.taskType
+	task.Project = m.project
+	task.Executor = m.executor
+	task.PRURL = m.prURL
+	task.PRNumber = m.prNumber
+
+	// Effort is a Claude-specific override; only carry it for the Claude executor.
+	if m.executor == db.ExecutorClaude {
+		task.EffortLevel = m.effortLevel
+	} else {
+		task.EffortLevel = ""
+	}
 }
 
 // SetQueue sets whether to queue the task.
@@ -1799,13 +1921,36 @@ func (m *FormModel) SetQueue(queue bool) {
 func (m *FormModel) SetSize(width, height int) {
 	m.width = width
 	m.height = height
-	// Update input widths
+	// Update input widths. In modal mode the form floats in a narrower
+	// centered box, so inputs are sized to the modal width instead of the
+	// full screen width.
 	inputWidth := width - 24
+	if m.modal {
+		// Modal content area = box width - padding(4) - label/cursor prefix(~18)
+		inputWidth = m.modalBoxWidth() - 22
+	}
+	if inputWidth < 10 {
+		inputWidth = 10
+	}
 	m.titleInput.Width = inputWidth
 	m.bodyInput.SetWidth(inputWidth)
 	m.attachmentsInput.Width = inputWidth
 	// Recalculate body height based on new dimensions
 	m.updateBodyHeight()
+}
+
+// modalBoxWidth returns the outer width of the floating edit modal.
+// It is capped so the modal stays readable on very wide terminals and
+// shrinks gracefully on narrow ones.
+func (m *FormModel) modalBoxWidth() int {
+	w := m.width - 8
+	if w > 90 {
+		w = 90
+	}
+	if w < 40 {
+		w = 40
+	}
+	return w
 }
 
 // calculateBodyHeight calculates the appropriate height for the body textarea.
@@ -1832,6 +1977,36 @@ func (m *FormModel) calculateBodyHeight() int {
 
 	totalOverhead := boxChrome + commonOverhead + modeOverhead
 	availableHeight := m.height - totalOverhead
+
+	if m.modal {
+		// In modal mode the form floats centered with margin around it, so
+		// size the body to its content within sensible bounds rather than
+		// stretching to fill the whole screen. This keeps every field visible
+		// at once while still giving long bodies a scrollable editing area.
+		const modalMinBody = 6
+		const modalMaxBody = 14
+		lines := m.bodyInput.LineCount()
+		switch {
+		case lines < modalMinBody:
+			availableHeight = modalMinBody
+		case lines > modalMaxBody:
+			availableHeight = modalMaxBody
+		default:
+			availableHeight = lines
+		}
+		// Never let the modal grow past what fits on screen. On large screens
+		// the content-sized body is well under this cap, which naturally
+		// leaves margin around the floating modal.
+		maxFit := m.height - totalOverhead
+		if maxFit < 3 {
+			maxFit = 3
+		}
+		if availableHeight > maxFit {
+			availableHeight = maxFit
+		}
+		return availableHeight
+	}
+
 	if availableHeight < minHeight {
 		availableHeight = minHeight
 	}

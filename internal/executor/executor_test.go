@@ -2057,3 +2057,65 @@ func TestCleanupWorktreeNonWorktreeTask(t *testing.T) {
 		t.Error("expected settings.local.json to be removed")
 	}
 }
+
+// TestBuildPromptUniversalGuidance verifies that the worktree-safety constraint and the
+// project-context guidance reach EVERY task type (not just "code"), and that the worktree
+// guardrail is suppressed when the project opts out of worktrees. This guards the parity
+// fix for PR #559: folding the former executor-injected TASK GUIDANCE into only the "code"
+// task type would have silently dropped these for writing/thinking/custom/typeless tasks.
+func TestBuildPromptUniversalGuidance(t *testing.T) {
+	newExec := func(t *testing.T, useWorktrees bool) (*Executor, *db.Task) {
+		t.Helper()
+		tmpFile, err := os.CreateTemp("", "test-*.db")
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { os.Remove(tmpFile.Name()) })
+		tmpFile.Close()
+
+		database, err := db.Open(tmpFile.Name())
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { database.Close() })
+
+		if err := database.CreateProject(&db.Project{Name: "proj", Path: "/tmp/proj", UseWorktrees: useWorktrees}); err != nil {
+			t.Fatal(err)
+		}
+		exec := New(database, &config.Config{})
+		return exec, &db.Task{Title: "Do a thing", Body: "details", Project: "proj"}
+	}
+
+	// Every default task type, plus a typeless task, must carry the universal guidance.
+	for _, taskType := range []string{"code", "writing", "thinking", ""} {
+		t.Run("worktree project type="+taskType, func(t *testing.T) {
+			exec, task := newExec(t, true)
+			task.Type = taskType
+			if err := exec.db.CreateTask(task); err != nil {
+				t.Fatal(err)
+			}
+			prompt := exec.buildPrompt(task, nil)
+			if !strings.Contains(prompt, "taskyou_get_project_context") {
+				t.Errorf("type=%q: prompt missing project-context guidance", taskType)
+			}
+			if !strings.Contains(prompt, "isolated git worktree") {
+				t.Errorf("type=%q: prompt missing worktree-safety constraint", taskType)
+			}
+		})
+	}
+
+	t.Run("non-worktree project omits worktree constraint", func(t *testing.T) {
+		exec, task := newExec(t, false)
+		task.Type = "code"
+		if err := exec.db.CreateTask(task); err != nil {
+			t.Fatal(err)
+		}
+		prompt := exec.buildPrompt(task, nil)
+		if !strings.Contains(prompt, "taskyou_get_project_context") {
+			t.Error("project-context guidance should still be present without worktrees")
+		}
+		if strings.Contains(prompt, "isolated git worktree") {
+			t.Error("worktree constraint should be omitted when project does not use worktrees")
+		}
+	})
+}

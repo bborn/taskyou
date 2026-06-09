@@ -219,7 +219,16 @@ func (s *Server) handleRequest(req *jsonRPCRequest) {
 							},
 							"dangerous_mode": map[string]interface{}{
 								"type":        "boolean",
-								"description": "Execute in dangerous mode (skip permission prompts). Only applies when status is 'queued'.",
+								"description": "Execute in dangerous mode (skip permission prompts). Only applies when status is 'queued'. Prefer 'permission_mode' instead.",
+							},
+							"permission_mode": map[string]interface{}{
+								"type":        "string",
+								"description": "Permission mode for execution (most to least gated): 'default' (prompt for each permission), 'accept-edits' (Claude's acceptEdits / --permission-mode acceptEdits: auto-accept file edits but still prompt for risky actions), 'auto' (Claude Code's auto mode / --permission-mode auto: an AI classifier auto-approves safe actions, including safe commands, while still blocking dangerous ones), or 'dangerous' (skip all prompts / --dangerously-skip-permissions). Note: 'auto' and 'accept-edits' are DIFFERENT — 'auto' is more autonomous. Defaults to the project's configured default.",
+								"enum":        []string{"default", "accept-edits", "auto", "dangerous"},
+							},
+							"remote_control": map[string]interface{}{
+								"type":        "boolean",
+								"description": "Launch the task's Claude session with --remote-control (interactive, remote-drivable)",
 							},
 						},
 						"required": []string{"title"},
@@ -458,6 +467,8 @@ func (s *Server) handleToolCall(id interface{}, params *toolCallParams) {
 		taskType, _ := params.Arguments["type"].(string)
 		status, _ := params.Arguments["status"].(string)
 		dangerousMode, _ := params.Arguments["dangerous_mode"].(bool)
+		permissionMode, _ := params.Arguments["permission_mode"].(string)
+		remoteControl, _ := params.Arguments["remote_control"].(bool)
 
 		// Default project to current task's project
 		if project == "" {
@@ -471,13 +482,21 @@ func (s *Server) handleToolCall(id interface{}, params *toolCallParams) {
 			status = db.StatusBacklog
 		}
 
+		// Resolve permission mode: explicit permission_mode wins, then the legacy
+		// dangerous_mode bool; empty falls back to the project default in CreateTask.
+		permissionMode = db.NormalizePermissionMode(permissionMode)
+		if permissionMode == "" && dangerousMode {
+			permissionMode = db.PermissionModeDangerous
+		}
+
 		newTask := &db.Task{
-			Title:         title,
-			Body:          body,
-			Project:       project,
-			Type:          taskType,
-			Status:        status,
-			DangerousMode: dangerousMode && status == db.StatusQueued,
+			Title:          title,
+			Body:           body,
+			Project:        project,
+			Type:           taskType,
+			Status:         status,
+			PermissionMode: permissionMode,
+			RemoteControl:  remoteControl,
 		}
 
 		if err := s.db.CreateTask(newTask); err != nil {

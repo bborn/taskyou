@@ -48,6 +48,9 @@ const (
 	ViewAttachments
 	ViewChangeStatus
 	ViewCommandPalette
+	ViewProjectDetectConfirm // Offer to create a project for the current git repo
+	ViewWelcome              // first-run fork: set up a project vs start a task
+	ViewFolderPicker         // fuzzy folder picker for "set up a project"
 )
 
 // KeyMap defines key bindings.
@@ -203,7 +206,7 @@ func DefaultKeyMap() KeyMap {
 		),
 		ToggleDangerous: key.NewBinding(
 			key.WithKeys("!"),
-			key.WithHelp("!", "dangerous mode"),
+			key.WithHelp("!", "cycle permission mode"),
 		),
 		QueueDangerous: key.NewBinding(
 			key.WithKeys("X"),
@@ -450,6 +453,18 @@ type AppModel struct {
 	pendingProjectChangeTask  *db.Task // The updated task data with new project
 	originalProjectChangeTask *db.Task // The original task to delete
 
+	// Project detection state (offer to create a project for the current git repo)
+	projectDetectConfirm      *huh.Form
+	projectDetectConfirmValue bool
+	detectedProject           *db.Project // Inferred project pending user confirmation
+	detectedInstructionSource string      // File the inferred instructions came from
+	detectedInferencePending  bool        // Async claude -p inference is still in flight for detectedProject
+	projectDetectionOffered   bool        // Guard so we only offer once per session
+
+	// First-run onboarding views
+	welcomeView  *WelcomeModel
+	folderPicker *FolderPickerModel
+
 	// Delete confirmation state
 	deleteConfirm      *huh.Form
 	deleteConfirmValue bool
@@ -496,6 +511,10 @@ type AppModel struct {
 	replyInput        textinput.Model
 	quickInputFocused bool // Whether quick input field has keyboard focus
 
+	// liveSpinnerRunning guards the live-mode spinner animation loop so only one
+	// tick chain runs at a time.
+	liveSpinnerRunning bool
+
 	// Filter state
 	filterInput        textinput.Model
 	filterActive       bool   // Whether filter mode is active (typing in filter)
@@ -514,9 +533,8 @@ type AppModel struct {
 	debugStatePath string
 
 	// First-time experience
-	isFirstLoad     bool // Track if this is the first load of tasks
-	showWelcome     bool // Show welcome message when kanban is empty
-	onboardingShown bool // Track if we've already shown the onboarding (to prevent double-triggering)
+	isFirstLoad bool // Track if this is the first load of tasks
+	showWelcome bool // Show welcome message when kanban is empty
 
 	// Version upgrade notification
 	currentVersion string                // Current binary version (e.g. "v0.1.0" or "dev")
@@ -710,7 +728,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// the chain breaks permanently — polling stops, DB watcher stops, etc.
 	isSystemMsg := false
 	switch msg.(type) {
-	case tickMsg, focusTickMsg, dbChangeMsg, taskEventMsg, tasksLoadedMsg, prRefreshTickMsg:
+	case tickMsg, focusTickMsg, dbChangeMsg, taskEventMsg, tasksLoadedMsg, prRefreshTickMsg, liveSpinnerTickMsg:
 		isSystemMsg = true
 	}
 
@@ -727,6 +745,31 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if m.currentView == ViewProjectChangeConfirm && m.projectChangeConfirm != nil {
 			return m.updateProjectChangeConfirm(msg)
+		}
+		if m.currentView == ViewProjectDetectConfirm && m.projectDetectConfirm != nil {
+			// Async inference results must reach the main switch (case
+			// projectInferredMsg) to enrich the card in place; all other
+			// messages (keys) drive the confirm form.
+			if _, ok := msg.(projectInferredMsg); !ok {
+				return m.updateProjectDetectConfirm(msg)
+			}
+		}
+		// Folder picker: route all messages (keys + cursor blink) to the picker
+		// so its text input stays live. The picker emits folderPickedMsg on enter
+		// (handled below), and esc closes it back to the Welcome fork.
+		if m.currentView == ViewFolderPicker && m.folderPicker != nil {
+			if picked, ok := msg.(folderPickedMsg); ok {
+				return m.handleFolderPicked(picked.path)
+			}
+			if key, ok := msg.(tea.KeyMsg); ok && (key.String() == "esc" || key.String() == "ctrl+c") {
+				m.folderPicker = nil
+				m.welcomeView = NewWelcomeModel(m.width, m.height)
+				m.currentView = ViewWelcome
+				return m, nil
+			}
+			var cmd tea.Cmd
+			m.folderPicker, cmd = m.folderPicker.Update(msg)
+			return m, cmd
 		}
 		if m.currentView == ViewDeleteConfirm && m.deleteConfirm != nil {
 			return m.updateDeleteConfirm(msg)
@@ -793,6 +836,36 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.commandPaletteView.Init()
 		}
 
+		// First-run Welcome fork key handling.
+		if m.currentView == ViewWelcome && m.welcomeView != nil {
+			switch msg.String() {
+			case "left", "h":
+				m.welcomeView.MoveLeft()
+				return m, nil
+			case "right", "l":
+				m.welcomeView.MoveRight()
+				return m, nil
+			case "enter":
+				switch m.welcomeView.Choice() {
+				case welcomeSetupProject:
+					m.welcomeView = nil
+					m.folderPicker = NewFolderPickerModel(m.width, m.height)
+					m.currentView = ViewFolderPicker
+					return m, m.folderPicker.Init()
+				case welcomeStartTask:
+					m.welcomeView = nil
+					m.newTaskForm = NewFormModel(m.db, m.width, m.height, m.workingDir, m.availableExecutors)
+					m.previousView = ViewDashboard
+					m.currentView = ViewNewTask
+					return m, m.newTaskForm.Init()
+				}
+			case "esc", "ctrl+c":
+				m.welcomeView = nil
+				m.currentView = ViewDashboard
+				return m, nil
+			}
+		}
+
 		// Route to current view
 		switch m.currentView {
 		case ViewDashboard:
@@ -821,19 +894,24 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.tasks = msg.tasks
 		m.err = msg.err
 
-		// First-time experience: auto-open new task form on first run when no tasks exist
+		// First-load onboarding routing (runs once per process start).
 		if m.isFirstLoad {
 			m.isFirstLoad = false
 			m.showWelcome = len(msg.tasks) == 0
 
-			// If this is the very first run (no tasks, onboarding not completed), auto-open new task form
-			if len(msg.tasks) == 0 && m.db.IsFirstRun() && !m.onboardingShown {
-				m.onboardingShown = true
-				// Auto-open the new task form to guide users to create their first task
-				m.newTaskForm = NewFormModel(m.db, m.width, m.height, m.workingDir, m.availableExecutors)
+			// 1. In a real project folder we don't yet track? Offer to set it up
+			//    (LLM-enriched). Works on every launch, until dismissed per-path.
+			if model, cmd, offered := m.maybeOfferProjectCreation(); offered {
+				return model, cmd
+			}
+
+			// 2. No real projects yet (only "personal") and we're in a junk folder:
+			//    show the Welcome fork instead of dumping into a task form.
+			if m.shouldShowWelcomeFork(msg.tasks) {
+				m.welcomeView = NewWelcomeModel(m.width, m.height)
 				m.previousView = m.currentView
-				m.currentView = ViewNewTask
-				return m, m.newTaskForm.Init()
+				m.currentView = ViewWelcome
+				return m, nil
 			}
 		}
 
@@ -939,6 +1017,9 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.kanban.SetTasksNeedingInput(m.tasksNeedingInput)
 		m.kanban.SetBlockedByDeps(msg.blockedByDeps)
 
+		// Refresh per-agent activity lines for live mode (cheap no-op when off).
+		m.refreshLatestActivity()
+
 		// Load cached PR info from database for instant display
 		for _, t := range m.tasks {
 			if t.PRInfoJSON != "" {
@@ -953,6 +1034,19 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.initialPRRefreshDone = true
 			cmds = append(cmds, m.refreshAllPRs())
 		}
+
+	case projectInferredMsg:
+		// Only apply if the card for this exact path is still showing.
+		if m.currentView == ViewProjectDetectConfirm && m.detectedProject != nil && m.detectedProject.Path == msg.path {
+			m.detectedInferencePending = false
+			if msg.err == nil {
+				applyInferredMetadata(m.detectedProject, msg.meta)
+				m.detectedProject.Name = uniqueProjectName(m.db, m.detectedProject.Name)
+			}
+			m.buildProjectDetectForm()
+			return m, m.projectDetectConfirm.Init()
+		}
+		return m, nil
 
 	case taskLoadedMsg:
 		// Reset transition flag now that task is loaded
@@ -1143,7 +1237,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, m.handleAICommand(msg.cmd))
 		}
 
-	case taskDangerousModeToggledMsg:
+	case taskPermissionModeCycledMsg:
 		cmds = append(cmds, m.loadTasks())
 		// Refresh the detail view panes since the executor window was recreated
 		if m.detailView != nil && m.selectedTask != nil {
@@ -1155,7 +1249,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil {
 			m.notification = fmt.Sprintf("%s %s", IconBlocked(), msg.err.Error())
 		} else {
-			// Reload the task to get updated dangerous_mode flag
+			// Reload the task to reflect the new permission mode
 			if m.selectedTask != nil {
 				task, _ := m.db.GetTask(m.selectedTask.ID)
 				if task != nil {
@@ -1165,11 +1259,11 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 							cmds = append(cmds, cmd)
 						}
 					}
-					if task.DangerousMode {
-						m.notification = IconBlocked() + " Dangerous mode enabled"
-					} else {
-						m.notification = IconDone() + " Safe mode enabled"
+					icon := IconDone()
+					if task.IsDangerous() {
+						icon = IconBlocked()
 					}
+					m.notification = fmt.Sprintf("%s %s mode enabled", icon, db.PermissionModeLabel(msg.mode))
 				}
 			}
 		}
@@ -1350,8 +1444,21 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				running[m.selectedTask.ID] = true
 			}
 			m.kanban.SetRunningProcesses(running)
+			// Resume the live-mode spinner if work appeared while it was idle.
+			cmds = append(cmds, m.startLiveSpinner())
 		}
 		cmds = append(cmds, m.tick())
+
+	case liveSpinnerTickMsg:
+		// Advance the running-task spinner and reschedule while the board is
+		// visible and has work to animate. When no tasks are running, the chain
+		// stops; the 1s tick restarts it once running tasks reappear.
+		if m.currentView == ViewDashboard && m.kanban.RunningTaskCount() > 0 {
+			m.kanban.AdvanceSpinner()
+			cmds = append(cmds, m.liveSpinnerTick())
+		} else {
+			m.liveSpinnerRunning = false
+		}
 
 	case focusTickMsg:
 		// Fast tick for responsive focus state changes in detail view
@@ -1437,6 +1544,12 @@ func (m *AppModel) applyWindowSize(width, height int) {
 	if m.editTaskForm != nil {
 		m.editTaskForm.SetSize(width, height)
 	}
+	if m.welcomeView != nil {
+		m.welcomeView.SetSize(m.width, m.height)
+	}
+	if m.folderPicker != nil {
+		m.folderPicker.SetSize(m.width, m.height)
+	}
 }
 
 // View renders the current view.
@@ -1473,6 +1586,16 @@ func (m *AppModel) View() string {
 		return m.viewNewTaskConfirm()
 	case ViewProjectChangeConfirm:
 		return m.viewProjectChangeConfirm()
+	case ViewProjectDetectConfirm:
+		return m.viewProjectDetectConfirm()
+	case ViewWelcome:
+		if m.welcomeView != nil {
+			return m.welcomeView.View()
+		}
+	case ViewFolderPicker:
+		if m.folderPicker != nil {
+			return m.folderPicker.View()
+		}
 	case ViewDeleteConfirm:
 		return m.viewDeleteConfirm()
 	case ViewCloseConfirm:
@@ -1574,14 +1697,6 @@ func (m *AppModel) viewDashboard() string {
 	} else {
 		m.notification = "" // Clear expired notification
 		m.notifyTaskID = 0
-	}
-
-	// Show current processing tasks if any
-	if runningIDs := m.executor.RunningTasks(); len(runningIDs) > 0 {
-		statusBar := lipgloss.NewStyle().
-			Foreground(ColorInProgress).
-			Render(fmt.Sprintf("%s Processing %d task(s)", IconProcessing(), len(runningIDs)))
-		headerParts = append(headerParts, statusBar)
 	}
 
 	// Show filter bar if filter is active or has text
@@ -2685,14 +2800,14 @@ func (m *AppModel) updateDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.toggleTaskPinned(m.selectedTask.ID)
 	}
 	if key.Matches(keyMsg, m.keys.ToggleDangerous) && m.selectedTask != nil {
-		// Only allow toggling dangerous mode if task is processing or blocked
+		// Only allow cycling permission mode if task is processing or blocked
 		if m.selectedTask.Status == db.StatusProcessing || m.selectedTask.Status == db.StatusBlocked {
-			// Break panes back to daemon BEFORE toggling so the executor can kill them.
+			// Break panes back to daemon BEFORE cycling so the executor can kill them.
 			// If panes are joined to task-ui, KillAllWindowsByNameAllSessions won't find them.
 			if m.detailView != nil {
 				m.detailView.Cleanup()
 			}
-			return m, m.toggleDangerousMode(m.selectedTask.ID)
+			return m, m.cyclePermissionMode(m.selectedTask.ID)
 		}
 	}
 	if key.Matches(keyMsg, m.keys.OpenWorktree) && m.selectedTask != nil {
@@ -2797,6 +2912,8 @@ func (m *AppModel) updateNewTaskForm(msg tea.Msg) (tea.Model, tea.Cmd) {
 						Options(
 							huh.NewOption("No — save to backlog", "no"),
 							huh.NewOption("Yes — execute now", "yes"),
+							huh.NewOption("Yes — execute in auto mode", "auto"),
+							huh.NewOption("Yes — execute in accept-edits mode", "accept-edits"),
 							huh.NewOption("Yes — execute in dangerous mode", "dangerous"),
 						).
 						Value(&m.queueValue),
@@ -2843,12 +2960,20 @@ func (m *AppModel) updateNewTaskConfirm(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Remember the choice for this project
 			m.db.SetSetting("last_queue_choice:"+m.pendingTask.Project, m.queueValue)
 
+			// "yes" and "no" leave PermissionMode empty so CreateTask inherits the
+			// project's configured default; the explicit modes force themselves.
 			switch m.queueValue {
 			case "yes":
 				m.pendingTask.Status = db.StatusQueued
+			case "auto":
+				m.pendingTask.Status = db.StatusQueued
+				m.pendingTask.PermissionMode = db.PermissionModeAuto
+			case "accept-edits":
+				m.pendingTask.Status = db.StatusQueued
+				m.pendingTask.PermissionMode = db.PermissionModeAcceptEdits
 			case "dangerous":
 				m.pendingTask.Status = db.StatusQueued
-				m.pendingTask.DangerousMode = true
+				m.pendingTask.PermissionMode = db.PermissionModeDangerous
 			default:
 				m.pendingTask.Status = db.StatusBacklog
 			}
@@ -2872,12 +2997,11 @@ func (m *AppModel) updateEditTaskForm(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if form, ok := model.(*FormModel); ok {
 		m.editTaskForm = form
 		if form.submitted {
-			// Get updated task data from form
-			updatedTask := form.GetDBTask()
-
-			// Check if project has changed - this requires special handling
+			// Moving to another project deletes this task and creates a fresh
+			// one, so build that from form data (moveTaskToProject resets the
+			// runtime fields on purpose).
 			if form.ProjectChanged() {
-				// Store the original task for the confirmation dialog
+				updatedTask := form.GetDBTask()
 				originalTask := m.editingTask
 
 				m.editTaskForm = nil
@@ -2885,14 +3009,13 @@ func (m *AppModel) updateEditTaskForm(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m.showProjectChangeConfirm(updatedTask, originalTask)
 			}
 
-			// Preserve the original task's ID and other fields
-			updatedTask.ID = m.editingTask.ID
-			updatedTask.Status = m.editingTask.Status
-			updatedTask.WorktreePath = m.editingTask.WorktreePath
-			updatedTask.BranchName = m.editingTask.BranchName
-			updatedTask.CreatedAt = m.editingTask.CreatedAt
-			updatedTask.StartedAt = m.editingTask.StartedAt
-			updatedTask.CompletedAt = m.editingTask.CompletedAt
+			// In-place edit: overlay only the fields the form exposes onto a
+			// copy of the original task. Starting from the original preserves
+			// every persisted column the form doesn't show (session IDs, pin
+			// state, permission mode, tags, source branch, PR info, port, ...)
+			// which would otherwise be reset to zero on save. See issue #560.
+			updatedTask := *m.editingTask
+			form.ApplyTo(&updatedTask)
 
 			// Capture old title before clearing editingTask
 			oldTitle := m.editingTask.Title
@@ -2900,7 +3023,7 @@ func (m *AppModel) updateEditTaskForm(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.editTaskForm = nil
 			m.editingTask = nil
 			m.currentView = m.previousView
-			return m, m.updateTaskWithRename(updatedTask, oldTitle)
+			return m, m.updateTaskWithRename(&updatedTask, oldTitle)
 		}
 		if form.cancelled {
 			m.currentView = m.previousView
@@ -3119,6 +3242,283 @@ func (m *AppModel) updateProjectChangeConfirm(msg tea.Msg) (tea.Model, tea.Cmd) 
 	}
 
 	return m, cmd
+}
+
+// shouldShowWelcomeFork reports whether to show the first-run Welcome fork:
+// no real projects beyond "personal", and the cwd is not a project candidate
+// (otherwise maybeOfferProjectCreation handled it). Gated on "no tasks yet".
+func (m *AppModel) shouldShowWelcomeFork(tasks []*db.Task) bool {
+	if m.db == nil {
+		return false
+	}
+	if isProjectCandidate(m.workingDir) {
+		return false
+	}
+	if !m.onlyPersonalProject() {
+		return false
+	}
+	// We already checked onlyPersonalProject above; combining "no tasks" +
+	// "only personal" is the intended gate (per agreed design, not IsFirstRun).
+	return len(tasks) == 0
+}
+
+// onlyPersonalProject reports whether the only project is the auto-created
+// "personal" one (i.e. the user hasn't set up a real project yet).
+func (m *AppModel) onlyPersonalProject() bool {
+	projects, err := m.db.ListProjects()
+	if err != nil {
+		return false
+	}
+	for _, p := range projects {
+		if p.Name != "personal" {
+			return false
+		}
+	}
+	return true
+}
+
+// handleFolderPicked builds a project from the chosen folder and shows the same
+// confirm card used for auto-detected projects. Metadata inference runs
+// asynchronously (see showProjectDetectConfirm) so the card appears instantly.
+func (m *AppModel) handleFolderPicked(path string) (tea.Model, tea.Cmd) {
+	if proj, err := m.db.GetProjectByPath(path); err == nil && proj != nil {
+		m.folderPicker = nil
+		m.notification = fmt.Sprintf("%s \"%s\" already covers that folder", IconDone(), proj.Name)
+		m.notifyUntil = time.Now().Add(4 * time.Second)
+		m.currentView = ViewDashboard
+		return m, m.loadTasks()
+	}
+	detected, source := detectProjectFromDir(path)
+	if detected == nil {
+		// Folder had no signals; treat the chosen dir as a plain (non-worktree) project.
+		detected = &db.Project{Name: inferProjectName(path), Path: filepath.Clean(path), UseWorktrees: dirIsGitRepo(path)}
+	}
+	detected.Name = uniqueProjectName(m.db, detected.Name)
+	m.folderPicker = nil
+	return m.showProjectDetectConfirm(detected, source)
+}
+
+// maybeOfferProjectCreation checks whether the current working directory is a
+// project candidate (git repo or recognised marker files) without an associated
+// TaskYou project and, if so, opens a confirmation modal offering to create one
+// (with details inferred from the directory). The third return value reports
+// whether the offer was made; when false the caller should continue with its
+// normal flow.
+func (m *AppModel) maybeOfferProjectCreation() (tea.Model, tea.Cmd, bool) {
+	if m.projectDetectionOffered || m.db == nil || m.workingDir == "" {
+		return m, nil, false
+	}
+
+	// Offer for any project candidate (git repo OR marker files), not just git.
+	// Non-git candidates become non-worktree projects (git stays optional).
+	if !isProjectCandidate(m.workingDir) {
+		return m, nil, false
+	}
+
+	// Skip if a project already covers this directory.
+	if proj, err := m.db.GetProjectByPath(m.workingDir); err == nil && proj != nil {
+		return m, nil, false
+	}
+
+	// Respect a previous decline for this path.
+	if v, _ := m.db.GetSetting(projectSuggestionDismissedKey(m.workingDir)); v != "" {
+		return m, nil, false
+	}
+
+	detected, source := detectProjectFromDir(m.workingDir)
+	if detected == nil {
+		return m, nil, false
+	}
+
+	detected.Name = uniqueProjectName(m.db, detected.Name)
+
+	m.projectDetectionOffered = true
+	// showProjectDetectConfirm fires the claude -p inference asynchronously and
+	// enriches the card in place when projectInferredMsg arrives.
+	model, cmd := m.showProjectDetectConfirm(detected, source)
+	return model, cmd, true
+}
+
+func (m *AppModel) showProjectDetectConfirm(project *db.Project, instructionSource string) (tea.Model, tea.Cmd) {
+	m.detectedProject = project
+	m.detectedInstructionSource = instructionSource
+	m.detectedInferencePending = true
+	m.projectDetectConfirmValue = true
+
+	m.previousView = m.currentView
+	m.currentView = ViewProjectDetectConfirm
+	m.buildProjectDetectForm()
+
+	// Show the card instantly with rule-based values, then enrich it in place
+	// once the async claude -p inference returns (projectInferredMsg).
+	return m, tea.Batch(m.projectDetectConfirm.Init(), inferProjectCmd(project.Path, ""))
+}
+
+// buildProjectDetectForm (re)builds the detect-confirm huh form from the current
+// detectedProject / detectedInstructionSource / detectedInferencePending state.
+// It deliberately does NOT touch previousView or currentView so it can be called
+// again when async inference arrives to refresh the card in place.
+func (m *AppModel) buildProjectDetectForm() {
+	project := m.detectedProject
+	if project == nil {
+		return
+	}
+
+	var desc strings.Builder
+	if m.detectedInferencePending {
+		desc.WriteString("✨ Inferring project details…\n\n")
+	}
+	desc.WriteString(fmt.Sprintf("This directory looks like a project.\n\nName: %s\n", project.Name))
+	if project.Aliases != "" {
+		desc.WriteString(fmt.Sprintf("Alias: %s\n", project.Aliases))
+	}
+	desc.WriteString(fmt.Sprintf("Path: %s\n", project.Path))
+	if m.detectedInstructionSource != "" {
+		desc.WriteString(fmt.Sprintf("Instructions: imported from %s\n", m.detectedInstructionSource))
+	} else if project.Instructions != "" {
+		desc.WriteString("Description: " + firstLine(project.Instructions) + "\n")
+	}
+	desc.WriteString(fmt.Sprintf("Worktrees: %v\n", project.UseWorktrees))
+	desc.WriteString("\nYou can edit any of this later in Settings.")
+
+	modalWidth := min(64, m.width-8)
+	m.projectDetectConfirm = huh.NewForm(
+		huh.NewGroup(
+			huh.NewConfirm().
+				Key("create_project").
+				Title("Create a TaskYou project for this repo?").
+				Description(desc.String()).
+				Affirmative("Create Project").
+				Negative("Not Now").
+				Value(&m.projectDetectConfirmValue),
+		),
+	).WithTheme(huh.ThemeDracula()).
+		WithWidth(modalWidth - 6).
+		WithShowHelp(true)
+}
+
+// firstLine returns the first line of s (without the trailing newline).
+func firstLine(s string) string {
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		return s[:i]
+	}
+	return s
+}
+
+func (m *AppModel) viewProjectDetectConfirm() string {
+	if m.projectDetectConfirm == nil {
+		return ""
+	}
+
+	header := lipgloss.NewStyle().
+		Bold(true).
+		Foreground(ColorPrimary).
+		MarginBottom(1).
+		Render("📁 New Project Detected")
+
+	formView := m.projectDetectConfirm.View()
+
+	modalWidth := min(64, m.width-8)
+	modalBox := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(ColorPrimary).
+		Padding(1, 2).
+		Width(modalWidth)
+
+	modalContent := modalBox.Render(lipgloss.JoinVertical(lipgloss.Center, header, formView))
+
+	return lipgloss.NewStyle().
+		Width(m.width).
+		Height(m.height).
+		Align(lipgloss.Center, lipgloss.Center).
+		Render(modalContent)
+}
+
+func (m *AppModel) updateProjectDetectConfirm(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if keyMsg, ok := msg.(tea.KeyMsg); ok {
+		switch keyMsg.String() {
+		case "esc", "ctrl+c":
+			// Treat dismissal like declining so we don't nag on every startup.
+			dismissPath := m.workingDir
+			if m.detectedProject != nil && m.detectedProject.Path != "" {
+				dismissPath = m.detectedProject.Path
+			}
+			m.dismissProjectSuggestion(dismissPath)
+			return m, nil
+		}
+	}
+
+	model, cmd := m.projectDetectConfirm.Update(msg)
+	m.projectDetectConfirm = model.(*huh.Form)
+
+	if m.projectDetectConfirm.State == huh.StateCompleted {
+		confirmed := m.projectDetectConfirmValue
+		detected := m.detectedProject
+		m.projectDetectConfirm = nil
+		m.currentView = m.previousView
+
+		if confirmed && detected != nil {
+			m.detectedProject = nil
+			return m, m.createDetectedProject(detected)
+		}
+		dismissPath := m.workingDir
+		if detected != nil && detected.Path != "" {
+			dismissPath = detected.Path
+		}
+		m.dismissProjectSuggestion(dismissPath)
+		return m, nil
+	}
+	if m.projectDetectConfirm.State == huh.StateAborted {
+		dismissPath := m.workingDir
+		if m.detectedProject != nil && m.detectedProject.Path != "" {
+			dismissPath = m.detectedProject.Path
+		}
+		m.dismissProjectSuggestion(dismissPath)
+		return m, nil
+	}
+
+	return m, cmd
+}
+
+// dismissProjectSuggestion records that the user declined to create a project for
+// the given path and closes the modal.
+func (m *AppModel) dismissProjectSuggestion(path string) {
+	if m.db != nil && path != "" {
+		m.db.SetSetting(projectSuggestionDismissedKey(path), "1")
+	}
+	m.projectDetectConfirm = nil
+	m.detectedProject = nil
+	m.currentView = m.previousView
+}
+
+// createDetectedProject persists the inferred project and reloads the board.
+func (m *AppModel) createDetectedProject(project *db.Project) tea.Cmd {
+	// Worktree isolation needs at least one commit to branch from. Detected repos
+	// almost always have commits, but guard against the empty-repo edge case so the
+	// first task doesn't fail to create a worktree.
+	if project.UseWorktrees && project.Path != "" {
+		if err := ensureGitRepoHasCommit(project.Path); err != nil {
+			m.notification = fmt.Sprintf("%s Failed to prepare git repo: %s", IconBlocked(), err.Error())
+			m.notifyUntil = time.Now().Add(5 * time.Second)
+			return nil
+		}
+	}
+
+	if err := m.db.CreateProject(project); err != nil {
+		m.notification = fmt.Sprintf("%s Failed to create project: %s", IconBlocked(), err.Error())
+		m.notifyUntil = time.Now().Add(5 * time.Second)
+		return nil
+	}
+
+	// Make the new project the default selection for the next task.
+	m.db.SetLastUsedProject(project.Name)
+	// Refresh project color cache so the new project renders consistently.
+	LoadProjectColors(m.db)
+
+	m.notification = fmt.Sprintf("%s Created project \"%s\"", IconDone(), project.Name)
+	m.notifyUntil = time.Now().Add(5 * time.Second)
+
+	return m.loadTasks()
 }
 
 func (m *AppModel) showQuitConfirm() (tea.Model, tea.Cmd) {
@@ -3726,6 +4126,22 @@ func (m *AppModel) updateCommandPalette(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
+// projectInferredMsg carries the result of an async claude -p inference for the
+// project currently being offered in the detect-confirm card.
+type projectInferredMsg struct {
+	path string
+	meta ai.ProjectMetadata
+	err  error
+}
+
+// inferProjectCmd runs project inference off the UI loop and reports the result.
+func inferProjectCmd(path, configDir string) tea.Cmd {
+	return func() tea.Msg {
+		meta, err := ai.InferProjectMetadata(path, configDir)
+		return projectInferredMsg{path: path, meta: meta, err: err}
+	}
+}
+
 // Messages
 type tasksLoadedMsg struct {
 	tasks           []*db.Task
@@ -3770,8 +4186,9 @@ type taskDeletedMsg struct {
 	err error
 }
 
-type taskDangerousModeToggledMsg struct {
-	err error
+type taskPermissionModeCycledMsg struct {
+	mode string
+	err  error
 }
 
 type taskPinnedMsg struct {
@@ -3799,6 +4216,9 @@ type focusTickMsg time.Time
 
 type prRefreshTickMsg time.Time
 
+// liveSpinnerTickMsg drives the running-task spinner animation on the board.
+type liveSpinnerTickMsg time.Time
+
 type dbChangeMsg struct{}
 
 type shortcutTimeoutMsg struct {
@@ -3822,6 +4242,29 @@ type versionCheckMsg struct {
 
 const maxDoneTasksInKanban = 20
 const summaryRefreshAfter = 5 * time.Minute
+
+// refreshLatestActivity loads the most recent log line for each active task and
+// feeds it to the board for the per-card activity sub-line.
+func (m *AppModel) refreshLatestActivity() {
+	if m.db == nil {
+		return
+	}
+	var ids []int64
+	for _, t := range m.tasks {
+		if t.Status == db.StatusProcessing || t.Status == db.StatusBlocked {
+			ids = append(ids, t.ID)
+		}
+	}
+	if len(ids) == 0 {
+		m.kanban.SetLatestActivity(nil)
+		return
+	}
+	activity, err := m.db.GetLatestLogPerTask(ids)
+	if err != nil {
+		return
+	}
+	m.kanban.SetLatestActivity(activity)
+}
 
 func (m *AppModel) loadTasks() tea.Cmd {
 	return func() tea.Msg {
@@ -3978,8 +4421,9 @@ func (m *AppModel) queueTaskDangerous(id int64) tea.Cmd {
 	database := m.db
 	exec := m.executor
 	return func() tea.Msg {
-		// Set dangerous mode before queueing
-		if err := database.UpdateTaskDangerousMode(id, true); err != nil {
+		// Set dangerous mode before queueing (writes permission_mode, the source of
+		// truth, keeping the dangerous_mode bool in sync).
+		if err := database.UpdateTaskPermissionMode(id, db.PermissionModeDangerous); err != nil {
 			return taskQueuedMsg{err: err}
 		}
 		err := database.UpdateTaskStatus(id, db.StatusQueued)
@@ -4462,32 +4906,24 @@ func (m *AppModel) moveTaskToProject(newTaskData *db.Task, oldTask *db.Task) tea
 	}
 }
 
-func (m *AppModel) toggleDangerousMode(id int64) tea.Cmd {
+func (m *AppModel) cyclePermissionMode(id int64) tea.Cmd {
 	exec := m.executor
 	database := m.db
 	return func() tea.Msg {
-		// Get the task to check current dangerous mode state
 		task, err := database.GetTask(id)
 		if err != nil || task == nil {
-			return taskDangerousModeToggledMsg{err: fmt.Errorf("failed to get task")}
+			return taskPermissionModeCycledMsg{err: fmt.Errorf("failed to get task")}
 		}
 
-		executorName := taskExecutorDisplayName(task)
-		var success bool
-		if task.DangerousMode {
-			// Currently in dangerous mode, switch to safe mode
-			success = exec.ResumeSafe(id)
-			if !success {
-				return taskDangerousModeToggledMsg{err: fmt.Errorf("failed to restart %s in safe mode", executorName)}
-			}
-		} else {
-			// Currently in safe mode, switch to dangerous mode
-			success = exec.ResumeDangerous(id)
-			if !success {
-				return taskDangerousModeToggledMsg{err: fmt.Errorf("failed to restart %s in dangerous mode", executorName)}
+		// Advance to the next mode in the cycle (default -> accept-edits -> auto ->
+		// dangerous) and relaunch the live session so it actually runs in that mode.
+		next := db.NextPermissionMode(task.EffectivePermissionMode())
+		if !exec.ResumeWithMode(id, next) {
+			return taskPermissionModeCycledMsg{
+				err: fmt.Errorf("failed to restart %s in %s mode", taskExecutorDisplayName(task), db.PermissionModeLabel(next)),
 			}
 		}
-		return taskDangerousModeToggledMsg{err: nil}
+		return taskPermissionModeCycledMsg{mode: next}
 	}
 }
 
@@ -4512,9 +4948,10 @@ func (m *AppModel) retryTaskWithAttachments(id int64, feedback string, attachmen
 	database := m.db
 	exec := m.executor
 	return func() tea.Msg {
-		// Set dangerous mode if requested
+		// Set dangerous mode if requested (writes permission_mode, the source of
+		// truth, keeping the dangerous_mode bool in sync).
 		if dangerous {
-			database.UpdateTaskDangerousMode(id, true)
+			database.UpdateTaskPermissionMode(id, db.PermissionModeDangerous)
 		}
 
 		// Get task to find worktree path
@@ -4620,6 +5057,27 @@ func (m *AppModel) prRefreshTick() tea.Cmd {
 	return tea.Tick(4*time.Minute, func(t time.Time) tea.Msg {
 		return prRefreshTickMsg(t)
 	})
+}
+
+// liveSpinnerTick schedules the next frame of the live-mode spinner animation.
+func (m *AppModel) liveSpinnerTick() tea.Cmd {
+	return tea.Tick(200*time.Millisecond, func(t time.Time) tea.Msg {
+		return liveSpinnerTickMsg(t)
+	})
+}
+
+// startLiveSpinner kicks off the spinner animation loop if it isn't already
+// running and there is running work to animate. Returns nil if no tick is
+// needed, so callers can append it unconditionally.
+func (m *AppModel) startLiveSpinner() tea.Cmd {
+	if m.liveSpinnerRunning {
+		return nil
+	}
+	if m.kanban.RunningTaskCount() == 0 {
+		return nil
+	}
+	m.liveSpinnerRunning = true
+	return m.liveSpinnerTick()
 }
 
 // checkVersion fetches the latest release from GitHub and compares with current version.

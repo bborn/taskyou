@@ -108,6 +108,69 @@ func TestBodyHeightFillsAvailableSpace(t *testing.T) {
 	}
 }
 
+func TestEditFormIsModal(t *testing.T) {
+	task := &db.Task{Title: "Test task", Body: "Some body", Project: "proj"}
+	m := NewEditFormModel(nil, task, 120, 40, []string{"claude"})
+
+	if !m.modal {
+		t.Fatal("expected edit form to be rendered as a modal")
+	}
+
+	view := m.View()
+
+	// A centered modal floats within the screen, so the first line should be
+	// blank padding rather than the top border of a full-screen box.
+	firstLine := strings.SplitN(view, "\n", 2)[0]
+	if strings.Contains(firstLine, "╭") {
+		t.Errorf("expected modal to be centered with top margin, but first line is the border: %q", firstLine)
+	}
+
+	// The modal box should be narrower than the full screen width.
+	if !strings.Contains(view, "         ╭") {
+		t.Error("expected modal box to be indented (narrower than full width)")
+	}
+}
+
+func TestEditFormDiscardWarningAtTop(t *testing.T) {
+	task := &db.Task{Title: "Test task", Body: "Some body", Project: "proj"}
+	m := NewEditFormModel(nil, task, 120, 40, []string{"claude"})
+	m.showCancelConfirm = true
+
+	view := m.View()
+
+	discardIdx := strings.Index(view, "Discard changes?")
+	if discardIdx == -1 {
+		t.Fatal("expected discard warning to be rendered")
+	}
+
+	// In modal mode the warning must appear above the editable fields
+	// (Title/Details), i.e. at the top of the modal.
+	titleIdx := strings.Index(view, "Title")
+	if titleIdx == -1 {
+		t.Fatal("expected Title field to be rendered")
+	}
+	if discardIdx > titleIdx {
+		t.Errorf("expected discard warning (pos %d) to appear before Title field (pos %d)", discardIdx, titleIdx)
+	}
+}
+
+func TestEditFormModalBodyHeightBounded(t *testing.T) {
+	task := &db.Task{Title: "Test", Body: "one line"}
+
+	// Short body on a tall screen should stay compact (not fill the screen).
+	m := NewEditFormModel(nil, task, 120, 80, []string{"claude"})
+	if h := m.calculateBodyHeight(); h > 14 {
+		t.Errorf("modal body height %d should be bounded to <= 14 for a short body", h)
+	}
+
+	// A long body grows but is still capped so every field stays visible.
+	task.Body = strings.Repeat("line\n", 100)
+	big := NewEditFormModel(nil, task, 120, 80, []string{"claude"})
+	if h := big.calculateBodyHeight(); h > 14 {
+		t.Errorf("modal body height %d should be capped at 14 even for long bodies", h)
+	}
+}
+
 func TestRenderBodyScrollbar(t *testing.T) {
 	tests := []struct {
 		name          string
@@ -842,6 +905,69 @@ func TestGetDBTaskUsesExecutorDirectly(t *testing.T) {
 	}
 }
 
+// TestApplyToOnlyTouchesEditableFields verifies that overlaying the edit form
+// onto an existing task changes only the fields the form exposes and leaves
+// every other persisted column untouched (regression guard for #560).
+func TestApplyToOnlyTouchesEditableFields(t *testing.T) {
+	original := &db.Task{
+		Title:           "Old title",
+		Body:            "Old body",
+		Type:            "code",
+		Project:         "proj",
+		Executor:        "claude",
+		ClaudeSessionID: "sess-abc",
+		DaemonSession:   "ty-1",
+		Port:            4242,
+		PRInfoJSON:      `{"state":"open"}`,
+		DangerousMode:   true,
+		PermissionMode:  "auto",
+		RemoteControl:   true,
+		Pinned:          true,
+		Tags:            "urgent,backend",
+		SourceBranch:    "main",
+		Summary:         "a summary",
+	}
+
+	m := NewEditFormModel(nil, original, 120, 40, []string{"claude"})
+	m.titleInput.SetValue("New title")
+	m.bodyInput.SetValue("New body")
+
+	updated := *original
+	m.ApplyTo(&updated)
+
+	// Edited fields are applied.
+	if updated.Title != "New title" {
+		t.Errorf("Title = %q, want %q", updated.Title, "New title")
+	}
+	if updated.Body != "New body" {
+		t.Errorf("Body = %q, want %q", updated.Body, "New body")
+	}
+
+	// Unexposed persisted fields are preserved.
+	preserved := []struct {
+		name string
+		got  any
+		want any
+	}{
+		{"ClaudeSessionID", updated.ClaudeSessionID, "sess-abc"},
+		{"DaemonSession", updated.DaemonSession, "ty-1"},
+		{"Port", updated.Port, 4242},
+		{"PRInfoJSON", updated.PRInfoJSON, `{"state":"open"}`},
+		{"DangerousMode", updated.DangerousMode, true},
+		{"PermissionMode", updated.PermissionMode, "auto"},
+		{"RemoteControl", updated.RemoteControl, true},
+		{"Pinned", updated.Pinned, true},
+		{"Tags", updated.Tags, "urgent,backend"},
+		{"SourceBranch", updated.SourceBranch, "main"},
+		{"Summary", updated.Summary, "a summary"},
+	}
+	for _, c := range preserved {
+		if c.got != c.want {
+			t.Errorf("%s was modified by ApplyTo: got %v, want %v", c.name, c.got, c.want)
+		}
+	}
+}
+
 func TestFormDefaultsToAvailableExecutor(t *testing.T) {
 	// When claude is available, form should default to claude
 	m := NewFormModel(nil, 100, 50, "", []string{"claude"})
@@ -1159,5 +1285,59 @@ func TestFilterProjectsEmptyQueryShowsAll(t *testing.T) {
 	// Current project should be pre-selected
 	if m.projectFiltered[m.projectFilteredIdx] != "workflow" {
 		t.Errorf("expected current project 'workflow' to be pre-selected, got %q", m.projectFiltered[m.projectFilteredIdx])
+	}
+}
+
+func TestEffortFieldDefaultsToGlobal(t *testing.T) {
+	m := NewFormModel(nil, 100, 50, "", []string{db.ExecutorClaude})
+
+	// Effort options start with "" (the global/Claude default).
+	if len(m.effortLevels) == 0 || m.effortLevels[0] != "" {
+		t.Fatalf("expected first effort option to be the empty default, got %v", m.effortLevels)
+	}
+	if m.effortLevel != "" {
+		t.Errorf("expected default effort level to be empty, got %q", m.effortLevel)
+	}
+
+	// GetDBTask should not set an override when the user leaves the default.
+	if got := m.GetDBTask().EffortLevel; got != "" {
+		t.Errorf("expected GetDBTask to leave effort empty by default, got %q", got)
+	}
+}
+
+func TestEffortFieldCycleAndPersist(t *testing.T) {
+	m := NewFormModel(nil, 100, 50, "", []string{db.ExecutorClaude})
+	m.showAdvanced = true
+	m.focused = FieldEffort
+
+	// Cycling right from the default lands on the first real effort level.
+	m.Update(tea.KeyMsg{Type: tea.KeyRight})
+	if m.effortLevel != db.EffortLow {
+		t.Errorf("expected effort to be %q after one right press, got %q", db.EffortLow, m.effortLevel)
+	}
+
+	if got := m.GetDBTask().EffortLevel; got != db.EffortLow {
+		t.Errorf("expected GetDBTask to carry effort %q, got %q", db.EffortLow, got)
+	}
+
+	// Cycling left returns to the default (empty) override.
+	m.Update(tea.KeyMsg{Type: tea.KeyLeft})
+	if m.effortLevel != "" {
+		t.Errorf("expected effort to return to default, got %q", m.effortLevel)
+	}
+}
+
+func TestEffortFieldHiddenForNonClaude(t *testing.T) {
+	m := NewFormModel(nil, 100, 50, "", []string{db.ExecutorClaude})
+	m.showAdvanced = true
+
+	m.executor = db.ExecutorClaude
+	if !m.isFieldVisible(FieldEffort) {
+		t.Error("expected effort field to be visible for the Claude executor")
+	}
+
+	m.executor = db.ExecutorCodex
+	if m.isFieldVisible(FieldEffort) {
+		t.Error("expected effort field to be hidden for non-Claude executors")
 	}
 }
