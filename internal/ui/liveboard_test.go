@@ -121,6 +121,30 @@ func TestKanbanBoard_SpinnerAdvances(t *testing.T) {
 	}
 }
 
+// Regression: the per-card cardCache key must include the spinner frame for
+// processing tasks in live mode. Without it the board-level cache invalidates
+// on spinner advance but the per-card cache serves the previous glyph, freezing
+// the animation while the chain ticks happily underneath.
+func TestKanbanBoard_SpinnerAdvanceChangesRenderedCard(t *testing.T) {
+	board := NewKanbanBoard(120, 50)
+	board.SetTasks([]*db.Task{
+		{ID: 42, Title: "Refactor auth", Status: db.StatusProcessing},
+	})
+	board.SetLiveMode(true)
+
+	first := board.View()
+	board.AdvanceSpinner()
+	second := board.View()
+	if first == second {
+		t.Fatal("View() should differ after AdvanceSpinner — cardCache may be serving stale glyph")
+	}
+
+	// And the new frame must be present in the new render.
+	if !strings.Contains(second, spinnerFrames[1]) {
+		t.Errorf("expected new spinner frame %q in view after advance, got:\n%s", spinnerFrames[1], second)
+	}
+}
+
 func TestFormatShortDuration(t *testing.T) {
 	cases := []struct {
 		in   time.Duration

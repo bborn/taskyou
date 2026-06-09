@@ -767,9 +767,10 @@ func (k *KanbanBoard) hashTaskCard(h *sigHasher, t *db.Task) {
 	} else {
 		h.boolean(false)
 	}
-	// Live-mode sub-line inputs: the agent's latest activity and an elapsed
-	// bucket that ticks the age hint each minute (per-second changes on running
-	// tasks are already covered by the spinner-frame bump in renderSignature).
+	// Live-mode per-card inputs: the agent's latest activity, an elapsed bucket
+	// that ticks the age hint each minute, and (for processing tasks only) the
+	// spinner frame — without this last bit the cardCache serves a stale glyph
+	// even though renderSignature already invalidates the board-level cache.
 	if k.liveMode {
 		if log := k.latestActivity[t.ID]; log != nil {
 			h.boolean(true)
@@ -778,6 +779,9 @@ func (k *KanbanBoard) hashTaskCard(h *sigHasher, t *db.Task) {
 			h.boolean(false)
 		}
 		h.int(taskElapsedMinutes(t))
+		if t.Status == db.StatusProcessing {
+			h.int(k.spinnerFrame)
+		}
 	}
 }
 
