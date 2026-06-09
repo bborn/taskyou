@@ -113,7 +113,7 @@ func TestRenderCacheInvalidation(t *testing.T) {
 func TestRenderCacheScroll(t *testing.T) {
 	forceColor(t)
 	k := benchBoard()
-	k.SetSize(160, 14) // small enough that the backlog column overflows
+	k.SetSize(160, 18) // small enough that the backlog column overflows
 	assertNoStaleRender(t, "scroll offset", k, func(k *KanbanBoard) {
 		k.scrollOffsets[0] = 1
 	})

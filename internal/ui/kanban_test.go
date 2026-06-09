@@ -87,7 +87,7 @@ func TestKanbanBoard_HandleClick(t *testing.T) {
 		{
 			name:       "click on second task in backlog column",
 			x:          colTotalWidth / 2, // Middle of first column
-			y:          5,                 // Second task (card height = 3, so y=5 is second task)
+			y:          6,                 // Second task (card height = 4: 1 border + 1 header + 4 first card = y=6)
 			wantTaskID: 2,
 		},
 		{
@@ -533,7 +533,7 @@ func TestKanbanBoard_DesktopViewAtThreshold(t *testing.T) {
 }
 
 func TestPinnedSelectionDoesNotResetScroll(t *testing.T) {
-	board := NewKanbanBoard(100, 16)
+	board := NewKanbanBoard(100, 18)
 
 	tasks := []*db.Task{
 		{ID: 1, Title: "Pinned 1", Status: db.StatusBacklog, Pinned: true},
@@ -566,7 +566,7 @@ func TestPinnedSelectionDoesNotResetScroll(t *testing.T) {
 }
 
 func TestPinnedTasksStayVisibleWhenScrolling(t *testing.T) {
-	board := NewKanbanBoard(100, 16)
+	board := NewKanbanBoard(100, 18)
 
 	tasks := []*db.Task{
 		{ID: 1, Title: "Pinned Alpha", Status: db.StatusBacklog, Pinned: true},

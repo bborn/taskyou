@@ -8,87 +8,40 @@ import (
 	"github.com/bborn/workflow/internal/db"
 )
 
-func TestKanbanBoard_ToggleLiveMode(t *testing.T) {
-	board := NewKanbanBoard(100, 50)
-
-	if board.LiveMode() {
-		t.Fatal("live mode should be off by default")
-	}
-	if got := board.cardHeight(); got != 3 {
-		t.Errorf("compact cardHeight = %d, want 3", got)
-	}
-
-	if on := board.ToggleLiveMode(); !on {
-		t.Fatal("ToggleLiveMode should return true after enabling")
-	}
-	if !board.LiveMode() {
-		t.Fatal("live mode should be on after toggle")
-	}
-	if got := board.cardHeight(); got != 4 {
-		t.Errorf("live cardHeight = %d, want 4", got)
-	}
-
-	if on := board.ToggleLiveMode(); on {
-		t.Fatal("ToggleLiveMode should return false after disabling")
-	}
-	if board.LiveMode() {
-		t.Fatal("live mode should be off after second toggle")
-	}
-}
-
-func TestKanbanBoard_LiveModeRendersActivity(t *testing.T) {
+func TestKanbanBoard_RendersActivity(t *testing.T) {
 	board := NewKanbanBoard(120, 50)
 	board.SetTasks([]*db.Task{
 		{ID: 7, Title: "Refactor auth", Status: db.StatusProcessing},
 	})
-	board.SetLiveMode(true)
 	board.SetLatestActivity(map[int64]*db.TaskLog{
 		7: {TaskID: 7, LineType: "system", Content: "Editing store.go"},
 	})
 
 	out := board.View()
 	if !strings.Contains(out, "Editing store.go") {
-		t.Errorf("live view should show the agent activity line, got:\n%s", out)
+		t.Errorf("board should show the agent activity line, got:\n%s", out)
 	}
 }
 
-func TestKanbanBoard_CompactModeHidesActivity(t *testing.T) {
-	board := NewKanbanBoard(120, 50)
-	board.SetTasks([]*db.Task{
-		{ID: 7, Title: "Refactor auth", Status: db.StatusProcessing},
-	})
-	// Live mode OFF (default). Activity is provided but must not render.
-	board.SetLatestActivity(map[int64]*db.TaskLog{
-		7: {TaskID: 7, LineType: "system", Content: "Editing store.go"},
-	})
-
-	out := board.View()
-	if strings.Contains(out, "Editing store.go") {
-		t.Errorf("compact view must not show activity lines, got:\n%s", out)
-	}
-}
-
-func TestKanbanBoard_LiveModeShowsAgeHint(t *testing.T) {
+func TestKanbanBoard_ShowsAgeHint(t *testing.T) {
 	board := NewKanbanBoard(120, 50)
 	board.SetTasks([]*db.Task{
 		{ID: 9, Title: "Write docs", Status: db.StatusBacklog,
 			CreatedAt: db.LocalTime{Time: time.Now().Add(-5 * time.Minute)}},
 	})
-	board.SetLiveMode(true)
 
 	out := board.View()
 	if !strings.Contains(out, "created 5m") {
-		t.Errorf("live view should show an age hint for backlog tasks, got:\n%s", out)
+		t.Errorf("board should show an age hint for backlog tasks, got:\n%s", out)
 	}
 }
 
-func TestKanbanBoard_LiveModeNeedsInputPrompt(t *testing.T) {
+func TestKanbanBoard_NeedsInputPrompt(t *testing.T) {
 	board := NewKanbanBoard(120, 50)
 	board.SetTasks([]*db.Task{
 		{ID: 11, Title: "Add webhooks", Status: db.StatusBlocked},
 	})
 	board.SetTasksNeedingInput(map[int64]bool{11: true})
-	board.SetLiveMode(true)
 
 	out := board.View()
 	if !strings.Contains(out, "needs your input") {
@@ -122,15 +75,14 @@ func TestKanbanBoard_SpinnerAdvances(t *testing.T) {
 }
 
 // Regression: the per-card cardCache key must include the spinner frame for
-// processing tasks in live mode. Without it the board-level cache invalidates
-// on spinner advance but the per-card cache serves the previous glyph, freezing
-// the animation while the chain ticks happily underneath.
+// processing tasks. Without it the board-level cache invalidates on spinner
+// advance but the per-card cache serves the previous glyph, freezing the
+// animation while the chain ticks happily underneath.
 func TestKanbanBoard_SpinnerAdvanceChangesRenderedCard(t *testing.T) {
 	board := NewKanbanBoard(120, 50)
 	board.SetTasks([]*db.Task{
 		{ID: 42, Title: "Refactor auth", Status: db.StatusProcessing},
 	})
-	board.SetLiveMode(true)
 
 	first := board.View()
 	board.AdvanceSpinner()
@@ -138,8 +90,6 @@ func TestKanbanBoard_SpinnerAdvanceChangesRenderedCard(t *testing.T) {
 	if first == second {
 		t.Fatal("View() should differ after AdvanceSpinner — cardCache may be serving stale glyph")
 	}
-
-	// And the new frame must be present in the new render.
 	if !strings.Contains(second, spinnerFrames[1]) {
 		t.Errorf("expected new spinner frame %q in view after advance, got:\n%s", spinnerFrames[1], second)
 	}

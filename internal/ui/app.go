@@ -104,8 +104,6 @@ type KeyMap struct {
 	SpotlightSync key.Binding
 	// Quick input focus
 	QuickInput key.Binding
-	// Toggle live mode (live activity board)
-	ToggleLiveMode key.Binding
 }
 
 // ShortHelp returns key bindings to show in the mini help.
@@ -122,7 +120,7 @@ func (k KeyMap) FullHelp() [][]key.Binding {
 		{k.Enter, k.New, k.Queue, k.QueueDangerous, k.Close},
 		{k.Retry, k.Archive, k.Delete, k.OpenWorktree, k.OpenBrowser, k.Spotlight},
 		{k.Filter, k.CommandPalette, k.Settings},
-		{k.ChangeStatus, k.TogglePin, k.ToggleLiveMode, k.Refresh, k.Help},
+		{k.ChangeStatus, k.TogglePin, k.Refresh, k.Help},
 		{k.Quit},
 	}
 }
@@ -293,10 +291,6 @@ func DefaultKeyMap() KeyMap {
 		QuickInput: key.NewBinding(
 			key.WithKeys("tab"),
 			key.WithHelp("tab", "input"),
-		),
-		ToggleLiveMode: key.NewBinding(
-			key.WithKeys("m"),
-			key.WithHelp("m", "live mode"),
 		),
 	}
 }
@@ -603,11 +597,6 @@ func NewAppModel(database *db.DB, exec *executor.Executor, workingDir string, ve
 
 	// Start with zero size - will be set by WindowSizeMsg
 	kanban := NewKanbanBoard(0, 0)
-
-	// Restore the saved board mode (live vs compact). Compact is the default.
-	if mode, _ := database.GetSetting(settingBoardLiveMode); mode == "1" {
-		kanban.SetLiveMode(true)
-	}
 
 	// Setup help
 	h := help.New()
@@ -1461,9 +1450,10 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, m.tick())
 
 	case liveSpinnerTickMsg:
-		// Advance the running-task spinner and reschedule, but only while live
-		// mode is on, the board is visible, and there is work to animate.
-		if m.kanban.LiveMode() && m.currentView == ViewDashboard && m.kanban.RunningTaskCount() > 0 {
+		// Advance the running-task spinner and reschedule while the board is
+		// visible and has work to animate. When no tasks are running, the chain
+		// stops; the 1s tick restarts it once running tasks reappear.
+		if m.currentView == ViewDashboard && m.kanban.RunningTaskCount() > 0 {
 			m.kanban.AdvanceSpinner()
 			cmds = append(cmds, m.liveSpinnerTick())
 		} else {
@@ -1709,24 +1699,21 @@ func (m *AppModel) viewDashboard() string {
 		m.notifyTaskID = 0
 	}
 
-	// Live mode shows a one-line fleet summary that doubles as the mode
-	// indicator; otherwise fall back to the plain processing count.
-	if m.kanban.LiveMode() {
+	// One-line fleet summary, shown only when there's something to report.
+	running := m.kanban.RunningTaskCount()
+	needInput := m.kanban.NeedsInputCount()
+	if running > 0 || needInput > 0 {
 		dimStyle := lipgloss.NewStyle().Foreground(ColorMuted)
-		parts := []string{
-			lipgloss.NewStyle().Bold(true).Foreground(ColorPrimary).Render(IconInProgress() + " LIVE"),
-			dimStyle.Render(fmt.Sprintf("%d running", m.kanban.RunningTaskCount())),
+		var parts []string
+		if running > 0 {
+			parts = append(parts, lipgloss.NewStyle().Foreground(ColorInProgress).Render(
+				fmt.Sprintf("%s %d running", IconInProgress(), running)))
 		}
-		if n := m.kanban.NeedsInputCount(); n > 0 {
-			parts = append(parts, lipgloss.NewStyle().Foreground(ColorWarning).Render(fmt.Sprintf("%d need input", n)))
+		if needInput > 0 {
+			parts = append(parts, lipgloss.NewStyle().Foreground(ColorWarning).Render(
+				fmt.Sprintf("%s %d need input", IconBlocked(), needInput)))
 		}
-		parts = append(parts, dimStyle.Render("m: exit"))
 		headerParts = append(headerParts, strings.Join(parts, dimStyle.Render("  ·  ")))
-	} else if runningIDs := m.executor.RunningTasks(); len(runningIDs) > 0 {
-		statusBar := lipgloss.NewStyle().
-			Foreground(ColorInProgress).
-			Render(fmt.Sprintf("%s Processing %d task(s)", IconProcessing(), len(runningIDs)))
-		headerParts = append(headerParts, statusBar)
 	}
 
 	// Show filter bar if filter is active or has text
@@ -2285,23 +2272,6 @@ func (m *AppModel) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case key.Matches(msg, m.keys.Help):
 		m.help.ShowAll = !m.help.ShowAll
-		return m, nil
-
-	case key.Matches(msg, m.keys.ToggleLiveMode):
-		on := m.kanban.ToggleLiveMode()
-		if m.db != nil {
-			val := "0"
-			if on {
-				val = "1"
-			}
-			m.db.SetSetting(settingBoardLiveMode, val)
-		}
-		if on {
-			// Populate activity immediately so the first frame isn't blank,
-			// and start the spinner animation loop.
-			m.refreshLatestActivity()
-			return m, m.startLiveSpinner()
-		}
 		return m, nil
 
 	case key.Matches(msg, m.keys.ApprovePrompt):
@@ -4264,11 +4234,8 @@ type focusTickMsg time.Time
 
 type prRefreshTickMsg time.Time
 
-// liveSpinnerTickMsg drives the running-task spinner animation in live mode.
+// liveSpinnerTickMsg drives the running-task spinner animation on the board.
 type liveSpinnerTickMsg time.Time
-
-// settingBoardLiveMode is the DB settings key persisting the board mode.
-const settingBoardLiveMode = "board_live_mode"
 
 type dbChangeMsg struct{}
 
@@ -4295,10 +4262,9 @@ const maxDoneTasksInKanban = 20
 const summaryRefreshAfter = 5 * time.Minute
 
 // refreshLatestActivity loads the most recent log line for each active task and
-// feeds it to the board for live-mode activity rendering. No-op when live mode
-// is off, so the query cost is only paid when the feature is in use.
+// feeds it to the board for the per-card activity sub-line.
 func (m *AppModel) refreshLatestActivity() {
-	if m.db == nil || !m.kanban.LiveMode() {
+	if m.db == nil {
 		return
 	}
 	var ids []int64
@@ -5131,7 +5097,7 @@ func (m *AppModel) startLiveSpinner() tea.Cmd {
 	if m.liveSpinnerRunning {
 		return nil
 	}
-	if !m.kanban.LiveMode() || m.kanban.RunningTaskCount() == 0 {
+	if m.kanban.RunningTaskCount() == 0 {
 		return nil
 	}
 	m.liveSpinnerRunning = true

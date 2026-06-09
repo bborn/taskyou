@@ -10,35 +10,13 @@ import (
 	"github.com/bborn/workflow/internal/db"
 )
 
-// Live mode turns the kanban board into a real-time window on what each agent
-// is doing: a per-card activity line, elapsed time, and an animated spinner on
-// running tasks. It is opt-in (toggled with the live-mode key) and never the
-// default, so the compact board stays untouched for users who prefer it.
-
-// SetLiveMode enables or disables live mode.
-func (k *KanbanBoard) SetLiveMode(on bool) {
-	if k.liveMode == on {
-		return
-	}
-	k.liveMode = on
-	// Card height changes with the mode, so re-derive scroll so the selected
-	// task stays on screen.
-	k.ensureSelectedVisible()
-}
-
-// ToggleLiveMode flips live mode and returns the new state.
-func (k *KanbanBoard) ToggleLiveMode() bool {
-	k.SetLiveMode(!k.liveMode)
-	return k.liveMode
-}
-
-// LiveMode reports whether live mode is active.
-func (k *KanbanBoard) LiveMode() bool {
-	return k.liveMode
-}
+// The board renders a live sub-line on every card: an activity line for
+// running agents, an attention prompt for tasks needing input, or a concise
+// age hint otherwise. Running tasks get an animated braille spinner driven by
+// a 200 ms tick gated on whether any task is processing.
 
 // SetLatestActivity updates the most-recent-log-per-task map used to render
-// activity lines in live mode.
+// activity lines.
 func (k *KanbanBoard) SetLatestActivity(activity map[int64]*db.TaskLog) {
 	k.latestActivity = activity
 }
