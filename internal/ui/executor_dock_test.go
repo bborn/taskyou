@@ -176,7 +176,7 @@ func TestDock_DemoteBreaksBackToSnapshot(t *testing.T) {
 	task := &db.Task{ID: 7}
 	d.Promote(task, 40)
 
-	d.Demote(task)
+	d.Demote()
 	if d.IsLive() {
 		t.Fatal("demote should return to snapshot mode")
 	}

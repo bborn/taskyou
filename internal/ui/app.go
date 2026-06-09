@@ -631,7 +631,7 @@ func NewAppModel(database *db.DB, exec *executor.Executor, workingDir string, ve
 		help:               h,
 		currentView:        ViewDashboard,
 		kanban:             kanban,
-		dock:               NewDockModel(newTmuxPaneController("")),
+		dock:               NewDockModel(newTmuxPaneController()),
 		loading:            true,
 		prevStatuses:       make(map[int64]string),
 		tasksNeedingInput:  make(map[int64]bool),
@@ -802,6 +802,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Global keys
 		if key.Matches(msg, m.keys.Quit) {
 			// Cleanup subscriptions and watchers
+			m.demoteDockIfLive()
 			if m.eventCh != nil {
 				m.executor.UnsubscribeTaskEvents(m.eventCh)
 			}
@@ -1056,6 +1057,13 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			lastViewed, hasLast := m.lastViewedAt[msg.task.ID]
 			m.lastViewedAt[msg.task.ID] = now
+			// If the executor dock has a live pane joined, return it to its daemon
+			// window before the detail view takes over pane management. Otherwise the
+			// detail view can't find the executor (it lives in the TUI session, not
+			// the daemon) and the panes collide.
+			if m.dock != nil && m.dock.IsLive() {
+				m.dock.Demote()
+			}
 			// Clean up any duplicate tmux windows for this task before switching
 			m.executor.CleanupDuplicateWindows(msg.task.ID)
 			// Resume task if it was suspended (blocked idle tasks get suspended to save memory)
@@ -1338,7 +1346,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// board (handled by tmux). When that happens, demote and resume snapshot.
 		if m.dock != nil && m.dock.IsOpen() && m.dock.IsLive() {
 			if m.dock.BoardFocused() {
-				m.dock.Demote(m.kanban.SelectedTask())
+				m.dock.Demote()
 				cmds = append(cmds, dockTick())
 			} else {
 				cmds = append(cmds, dockFocusPoll())
@@ -1661,6 +1669,15 @@ func (m *AppModel) refreshDockForSelection() {
 		return
 	}
 	m.dock.RefreshOrDemote(m.kanban.SelectedTask(), m.height)
+}
+
+// demoteDockIfLive returns any live executor pane to its daemon window. Called
+// before quitting so the executor is not stranded in the dying TUI session
+// (a pane left in task-ui can't be found by the daemon-only window search).
+func (m *AppModel) demoteDockIfLive() {
+	if m.dock != nil && m.dock.IsLive() {
+		m.dock.Demote()
+	}
 }
 
 // dockTickMsg drives periodic dock snapshot refreshes while the dock is open.
@@ -2462,6 +2479,7 @@ func (m *AppModel) updateFilterMode(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case "ctrl+c":
+		m.demoteDockIfLive()
 		if m.eventCh != nil {
 			m.executor.UnsubscribeTaskEvents(m.eventCh)
 		}
@@ -3591,6 +3609,7 @@ func (m *AppModel) updateQuitConfirm(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		case "ctrl+c":
 			// Ctrl+C in quit confirm should just quit immediately
+			m.demoteDockIfLive()
 			if m.eventCh != nil {
 				m.executor.UnsubscribeTaskEvents(m.eventCh)
 			}
@@ -3609,6 +3628,7 @@ func (m *AppModel) updateQuitConfirm(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if m.quitConfirm.State == huh.StateCompleted {
 		if m.quitConfirmValue {
 			// User confirmed quit - cleanup and exit
+			m.demoteDockIfLive()
 			if m.eventCh != nil {
 				m.executor.UnsubscribeTaskEvents(m.eventCh)
 			}

@@ -141,11 +141,15 @@ func (d *DockModel) Promote(task *db.Task, termHeight int) {
 }
 
 // Demote returns the live pane to its daemon window and reverts to snapshot mode.
-func (d *DockModel) Demote(task *db.Task) {
+// It always breaks back the live task (by id), independent of the current board
+// selection. No-op when not live.
+func (d *DockModel) Demote() {
 	if d.mode != dockLive {
 		return
 	}
-	_ = d.ctl.BreakBack(task, d.livePaneID)
+	// Resolution is by task id, so a synthetic task carrying the live id targets
+	// the right daemon window.
+	_ = d.ctl.BreakBack(&db.Task{ID: d.liveTaskID}, d.livePaneID)
 	d.ctl.ResizeTUIFull()
 	d.livePaneID = ""
 	d.liveTaskID = 0
@@ -165,10 +169,8 @@ func (d *DockModel) RefreshOrDemote(task *db.Task, termHeight int) {
 		if d.liveTaskID == task.ID {
 			return // same task still live; leave it
 		}
-		// Different task selected: demote the old live pane back to its daemon
-		// window. Resolution is by task id, so a synthetic task carrying the live
-		// id is sufficient to target the right window.
-		d.Demote(&db.Task{ID: d.liveTaskID})
+		// Different task selected: demote the old live pane back to its daemon window.
+		d.Demote()
 	}
 	d.Refresh(task, termHeight)
 }

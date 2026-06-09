@@ -13,15 +13,16 @@ import (
 
 // tmuxPaneController is the real paneController backed by tmux + the executor pkg.
 // It joins a single executor pane below the TUI pane (no shell, unlike the detail
-// view) and tracks the live/TUI pane ids so focus can be polled cheaply.
+// view) and tracks the live/TUI pane ids so focus can be polled cheaply. The TUI
+// pane id is captured live at join time (via display-message), so no session name
+// needs to be threaded in.
 type tmuxPaneController struct {
-	uiSessionName string // e.g. "task-ui-<pid>"
-	livePaneID    string // the currently-joined live pane id (set by JoinBelow)
-	tuiPaneID     string // the TUI pane id captured at join (for resize-back)
+	livePaneID string // the currently-joined live pane id (set by JoinBelow)
+	tuiPaneID  string // the TUI pane id captured at join (for resize-back)
 }
 
-func newTmuxPaneController(uiSessionName string) *tmuxPaneController {
-	return &tmuxPaneController{uiSessionName: uiSessionName}
+func newTmuxPaneController() *tmuxPaneController {
+	return &tmuxPaneController{}
 }
 
 // Capture reads the task's executor pane read-only. Prefer the stored pane id
