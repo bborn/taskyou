@@ -206,7 +206,7 @@ func DefaultKeyMap() KeyMap {
 		),
 		ToggleDangerous: key.NewBinding(
 			key.WithKeys("!"),
-			key.WithHelp("!", "dangerous mode"),
+			key.WithHelp("!", "cycle permission mode"),
 		),
 		QueueDangerous: key.NewBinding(
 			key.WithKeys("X"),
@@ -1237,7 +1237,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, m.handleAICommand(msg.cmd))
 		}
 
-	case taskDangerousModeToggledMsg:
+	case taskPermissionModeCycledMsg:
 		cmds = append(cmds, m.loadTasks())
 		// Refresh the detail view panes since the executor window was recreated
 		if m.detailView != nil && m.selectedTask != nil {
@@ -1249,7 +1249,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil {
 			m.notification = fmt.Sprintf("%s %s", IconBlocked(), msg.err.Error())
 		} else {
-			// Reload the task to get updated dangerous_mode flag
+			// Reload the task to reflect the new permission mode
 			if m.selectedTask != nil {
 				task, _ := m.db.GetTask(m.selectedTask.ID)
 				if task != nil {
@@ -1259,11 +1259,11 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 							cmds = append(cmds, cmd)
 						}
 					}
-					if task.DangerousMode {
-						m.notification = IconBlocked() + " Dangerous mode enabled"
-					} else {
-						m.notification = IconDone() + " Safe mode enabled"
+					icon := IconDone()
+					if task.IsDangerous() {
+						icon = IconBlocked()
 					}
+					m.notification = fmt.Sprintf("%s %s mode enabled", icon, db.PermissionModeLabel(msg.mode))
 				}
 			}
 		}
@@ -2817,14 +2817,14 @@ func (m *AppModel) updateDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.toggleTaskPinned(m.selectedTask.ID)
 	}
 	if key.Matches(keyMsg, m.keys.ToggleDangerous) && m.selectedTask != nil {
-		// Only allow toggling dangerous mode if task is processing or blocked
+		// Only allow cycling permission mode if task is processing or blocked
 		if m.selectedTask.Status == db.StatusProcessing || m.selectedTask.Status == db.StatusBlocked {
-			// Break panes back to daemon BEFORE toggling so the executor can kill them.
+			// Break panes back to daemon BEFORE cycling so the executor can kill them.
 			// If panes are joined to task-ui, KillAllWindowsByNameAllSessions won't find them.
 			if m.detailView != nil {
 				m.detailView.Cleanup()
 			}
-			return m, m.toggleDangerousMode(m.selectedTask.ID)
+			return m, m.cyclePermissionMode(m.selectedTask.ID)
 		}
 	}
 	if key.Matches(keyMsg, m.keys.OpenWorktree) && m.selectedTask != nil {
@@ -4205,8 +4205,9 @@ type taskDeletedMsg struct {
 	err error
 }
 
-type taskDangerousModeToggledMsg struct {
-	err error
+type taskPermissionModeCycledMsg struct {
+	mode string
+	err  error
 }
 
 type taskPinnedMsg struct {
@@ -4439,8 +4440,9 @@ func (m *AppModel) queueTaskDangerous(id int64) tea.Cmd {
 	database := m.db
 	exec := m.executor
 	return func() tea.Msg {
-		// Set dangerous mode before queueing
-		if err := database.UpdateTaskDangerousMode(id, true); err != nil {
+		// Set dangerous mode before queueing (writes permission_mode, the source of
+		// truth, keeping the dangerous_mode bool in sync).
+		if err := database.UpdateTaskPermissionMode(id, db.PermissionModeDangerous); err != nil {
 			return taskQueuedMsg{err: err}
 		}
 		err := database.UpdateTaskStatus(id, db.StatusQueued)
@@ -4923,32 +4925,24 @@ func (m *AppModel) moveTaskToProject(newTaskData *db.Task, oldTask *db.Task) tea
 	}
 }
 
-func (m *AppModel) toggleDangerousMode(id int64) tea.Cmd {
+func (m *AppModel) cyclePermissionMode(id int64) tea.Cmd {
 	exec := m.executor
 	database := m.db
 	return func() tea.Msg {
-		// Get the task to check current dangerous mode state
 		task, err := database.GetTask(id)
 		if err != nil || task == nil {
-			return taskDangerousModeToggledMsg{err: fmt.Errorf("failed to get task")}
+			return taskPermissionModeCycledMsg{err: fmt.Errorf("failed to get task")}
 		}
 
-		executorName := taskExecutorDisplayName(task)
-		var success bool
-		if task.DangerousMode {
-			// Currently in dangerous mode, switch to safe mode
-			success = exec.ResumeSafe(id)
-			if !success {
-				return taskDangerousModeToggledMsg{err: fmt.Errorf("failed to restart %s in safe mode", executorName)}
-			}
-		} else {
-			// Currently in safe mode, switch to dangerous mode
-			success = exec.ResumeDangerous(id)
-			if !success {
-				return taskDangerousModeToggledMsg{err: fmt.Errorf("failed to restart %s in dangerous mode", executorName)}
+		// Advance to the next mode in the cycle (default -> accept-edits -> auto ->
+		// dangerous) and relaunch the live session so it actually runs in that mode.
+		next := db.NextPermissionMode(task.EffectivePermissionMode())
+		if !exec.ResumeWithMode(id, next) {
+			return taskPermissionModeCycledMsg{
+				err: fmt.Errorf("failed to restart %s in %s mode", taskExecutorDisplayName(task), db.PermissionModeLabel(next)),
 			}
 		}
-		return taskDangerousModeToggledMsg{err: nil}
+		return taskPermissionModeCycledMsg{mode: next}
 	}
 }
 
@@ -4973,9 +4967,10 @@ func (m *AppModel) retryTaskWithAttachments(id int64, feedback string, attachmen
 	database := m.db
 	exec := m.executor
 	return func() tea.Msg {
-		// Set dangerous mode if requested
+		// Set dangerous mode if requested (writes permission_mode, the source of
+		// truth, keeping the dangerous_mode bool in sync).
 		if dangerous {
-			database.UpdateTaskDangerousMode(id, true)
+			database.UpdateTaskPermissionMode(id, db.PermissionModeDangerous)
 		}
 
 		// Get task to find worktree path
