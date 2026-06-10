@@ -31,6 +31,8 @@ export interface Toast {
 
 export type PermissionMode = "" | "auto" | "dangerous";
 
+export type ThemePreference = "system" | "light" | "dark";
+
 export interface AppState {
   booted: boolean;
   bootError: string | null;
@@ -45,6 +47,7 @@ export interface AppState {
   filterOpen: boolean;
   collapsed: { backlog: boolean; done: boolean };
   permissionMode: PermissionMode;
+  theme: ThemePreference;
   dialog: Dialog;
   form: FormState;
   paletteOpen: boolean;
@@ -68,6 +71,7 @@ class Store {
     filterOpen: false,
     collapsed: { backlog: false, done: false },
     permissionMode: "",
+    theme: (localStorage.getItem("theme") as ThemePreference) || "system",
     dialog: null,
     form: null,
     paletteOpen: false,
@@ -235,6 +239,11 @@ class Store {
     });
   }
 
+  setTheme(theme: ThemePreference) {
+    localStorage.setItem("theme", theme);
+    this.set({ theme });
+  }
+
   // --- Toasts (sonner) ---
 
   toast(toast: Toast) {
@@ -255,7 +264,13 @@ class Store {
     });
   }
 
-  // --- Task mutations (refresh after each) ---
+  // --- Task mutations (optimistic + refresh) ---
+
+  private optimisticStatus(id: number, status: Task["status"]) {
+    this.set({
+      tasks: this.state.tasks.map((t) => (t.id === id ? { ...t, status } : t)),
+    });
+  }
 
   private async mutate(action: () => Promise<unknown>, errorTitle: string) {
     try {
@@ -271,6 +286,7 @@ class Store {
   }
 
   executeTask(id: number, dangerous = false) {
+    this.optimisticStatus(id, "queued");
     return this.mutate(async () => {
       const mode = dangerous ? "dangerous" : this.state.permissionMode;
       if (mode) {
@@ -281,10 +297,12 @@ class Store {
   }
 
   closeTask(id: number) {
+    this.optimisticStatus(id, "done");
     return this.mutate(() => api.closeTask(id), `Failed to close #${id}`);
   }
 
   archiveTask(id: number) {
+    this.optimisticStatus(id, "archived");
     return this.mutate(() => api.setStatus(id, "archived"), `Failed to archive #${id}`);
   }
 
@@ -301,6 +319,7 @@ class Store {
   }
 
   setTaskStatus(id: number, status: string) {
+    this.optimisticStatus(id, status as Task["status"]);
     return this.mutate(() => api.setStatus(id, status), `Failed to set status on #${id}`);
   }
 

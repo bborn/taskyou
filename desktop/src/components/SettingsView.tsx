@@ -4,6 +4,13 @@ import type { Project, TaskType } from "../api/types";
 import { inTauri, supervisorGetConfig, supervisorSetConfig, supervisorStatus } from "../tauri";
 import { store, useAppState } from "../store";
 import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
@@ -117,7 +124,7 @@ function ProjectSettings() {
   return (
     <>
       <SectionHeading>Projects</SectionHeading>
-      <div className="divide-y divide-white/[0.06] rounded-lg border border-white/[0.08]">
+      <div className="divide-y rounded-lg border">
         {projects.map((p) => (
           <div key={p.name} className="flex items-center gap-3 px-3 py-2 text-[12.5px]">
             <span
@@ -177,8 +184,13 @@ function ProjectSettings() {
         Add project
       </Button>
 
-      {editing && (
-        <div className="mt-3 rounded-lg border border-white/[0.08] p-3.5">
+      <Dialog open={editing !== null} onOpenChange={(open) => !open && setEditing(null)}>
+        <DialogContent className="max-w-xl">
+          <DialogHeader>
+            <DialogTitle>{isNew ? "Add project" : `Edit project ${editing?.name ?? ""}`}</DialogTitle>
+          </DialogHeader>
+          {editing && (
+            <>
           <div className="grid grid-cols-2 gap-3.5">
             <div className="grid gap-1.5">
               <Label>Name</Label>
@@ -237,16 +249,18 @@ function ProjectSettings() {
               onChange={(e) => setEditing({ ...editing, instructions: e.target.value })}
             />
           </div>
-          <div className="mt-3 flex justify-end gap-2">
+          <DialogFooter>
             <Button variant="outline" size="sm" onClick={() => setEditing(null)}>
               Cancel
             </Button>
             <Button size="sm" onClick={() => void save()}>
               Save project
             </Button>
-          </div>
-        </div>
-      )}
+          </DialogFooter>
+            </>
+          )}
+        </DialogContent>
+      </Dialog>
     </>
   );
 }
@@ -281,7 +295,7 @@ function TypeSettings() {
   return (
     <>
       <SectionHeading>Task types</SectionHeading>
-      <div className="divide-y divide-white/[0.06] rounded-lg border border-white/[0.08]">
+      <div className="divide-y rounded-lg border">
         {types.map((t) => (
           <div key={t.name} className="flex items-center gap-3 px-3 py-2 text-[12.5px]">
             <span className="font-medium">{t.name}</span>
@@ -336,8 +350,13 @@ function TypeSettings() {
         Add type
       </Button>
 
-      {editing && (
-        <div className="mt-3 rounded-lg border border-white/[0.08] p-3.5">
+      <Dialog open={editing !== null} onOpenChange={(open) => !open && setEditing(null)}>
+        <DialogContent className="max-w-xl">
+          <DialogHeader>
+            <DialogTitle>{isNew ? "Add task type" : `Edit type ${editing?.name ?? ""}`}</DialogTitle>
+          </DialogHeader>
+          {editing && (
+            <>
           <div className="grid grid-cols-2 gap-3.5">
             <div className="grid gap-1.5">
               <Label>Name</Label>
@@ -363,16 +382,18 @@ function TypeSettings() {
               onChange={(e) => setEditing({ ...editing, instructions: e.target.value })}
             />
           </div>
-          <div className="mt-3 flex justify-end gap-2">
+          <DialogFooter>
             <Button variant="outline" size="sm" onClick={() => setEditing(null)}>
               Cancel
             </Button>
             <Button size="sm" onClick={() => void save()}>
               Save type
             </Button>
-          </div>
-        </div>
-      )}
+          </DialogFooter>
+            </>
+          )}
+        </DialogContent>
+      </Dialog>
     </>
   );
 }

@@ -3,36 +3,72 @@
 
 @custom-variant dark (&:is(.dark *));
 
-/* shadcn zinc palette, dark-only. --background carries alpha so the macOS
-   vibrancy material shows through the (transparent) webview. */
-:root,
+/* shadcn zinc palette — light by default, .dark overrides. Tokens are OPAQUE
+   (dialogs, popovers, menus must be readable); the vibrancy translucency is
+   applied only on the app shell via the .app-shell class below. */
+:root {
+  --background: oklch(0.985 0.001 286);
+  --foreground: oklch(0.141 0.005 285.823);
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.141 0.005 285.823);
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.141 0.005 285.823);
+  --primary: oklch(0.21 0.006 285.885);
+  --primary-foreground: oklch(0.985 0 0);
+  --secondary: oklch(0.92 0.003 286.375);
+  --secondary-foreground: oklch(0.21 0.006 285.885);
+  --muted: oklch(0.943 0.002 286.375);
+  --muted-foreground: oklch(0.48 0.014 285.938);
+  --accent: oklch(0.92 0.003 286.375);
+  --accent-foreground: oklch(0.21 0.006 285.885);
+  --destructive: oklch(0.577 0.245 27.325);
+  --destructive-foreground: oklch(0.985 0 0);
+  --border: oklch(0 0 0 / 9%);
+  --input: oklch(0 0 0 / 11%);
+  --ring: oklch(0.705 0.015 286.067);
+  --radius: 0.625rem;
+
+  /* status accents — darker in light mode for contrast */
+  --status-backlog: oklch(0.52 0.15 245);
+  --status-processing: oklch(0.55 0.14 145);
+  --status-blocked: oklch(0.58 0.19 18);
+  --status-done: oklch(0.55 0.02 286);
+
+  /* surface tints used across the shell (cards, columns, headers) */
+  --surface-1: oklch(0 0 0 / 2.5%);
+  --surface-2: oklch(0 0 0 / 4.5%);
+  --surface-3: oklch(0 0 0 / 7%);
+}
+
 .dark {
-  --background: oklch(0.141 0.005 285.823 / 72%);
-  --foreground: oklch(0.985 0 0);
-  --card: oklch(0.21 0.006 285.885 / 65%);
-  --card-foreground: oklch(0.985 0 0);
-  --popover: oklch(0.18 0.006 285.885);
-  --popover-foreground: oklch(0.985 0 0);
+  --background: oklch(0.155 0.005 285.823);
+  --foreground: oklch(0.97 0 0);
+  --card: oklch(0.205 0.006 285.885);
+  --card-foreground: oklch(0.97 0 0);
+  --popover: oklch(0.19 0.006 285.885);
+  --popover-foreground: oklch(0.97 0 0);
   --primary: oklch(0.92 0.004 286.32);
   --primary-foreground: oklch(0.21 0.006 285.885);
-  --secondary: oklch(0.274 0.006 286.033 / 80%);
+  --secondary: oklch(0.274 0.006 286.033);
   --secondary-foreground: oklch(0.985 0 0);
-  --muted: oklch(0.274 0.006 286.033 / 60%);
-  --muted-foreground: oklch(0.705 0.015 286.067);
-  --accent: oklch(0.274 0.006 286.033 / 80%);
+  --muted: oklch(0.26 0.006 286.033);
+  --muted-foreground: oklch(0.712 0.013 286.067);
+  --accent: oklch(0.274 0.006 286.033);
   --accent-foreground: oklch(0.985 0 0);
   --destructive: oklch(0.704 0.191 22.216);
   --destructive-foreground: oklch(0.985 0 0);
   --border: oklch(1 0 0 / 10%);
-  --input: oklch(1 0 0 / 12%);
+  --input: oklch(1 0 0 / 13%);
   --ring: oklch(0.552 0.016 285.938);
-  --radius: 0.625rem;
 
-  /* status accents (used by board columns/badges) */
   --status-backlog: oklch(0.82 0.09 230);
   --status-processing: oklch(0.8 0.13 130);
   --status-blocked: oklch(0.72 0.15 15);
   --status-done: oklch(0.65 0.02 286);
+
+  --surface-1: oklch(1 0 0 / 3%);
+  --surface-2: oklch(1 0 0 / 5%);
+  --surface-3: oklch(1 0 0 / 8%);
 }
 
 @theme inline {
@@ -59,6 +95,9 @@
   --color-status-processing: var(--status-processing);
   --color-status-blocked: var(--status-blocked);
   --color-status-done: var(--status-done);
+  --color-surface-1: var(--surface-1);
+  --color-surface-2: var(--surface-2);
+  --color-surface-3: var(--surface-3);
   --radius-sm: calc(var(--radius) - 4px);
   --radius-md: calc(var(--radius) - 2px);
   --radius-lg: var(--radius);
@@ -88,7 +127,8 @@
     height: 100%;
   }
   body {
-    /* Transparent so the vibrancy material shows; .app paints --background. */
+    /* Transparent so the vibrancy material shows; .app-shell paints a
+       translucent --background over it. */
     background: transparent;
     @apply text-foreground font-sans text-[13px] antialiased select-none overflow-hidden overscroll-none;
   }
@@ -99,6 +139,12 @@
 }
 
 @layer components {
+  /* The window surface: translucent over vibrancy. Everything overlaid
+     (dialogs, popovers, toasts) uses opaque tokens and stays readable. */
+  .app-shell {
+    background: color-mix(in oklab, var(--background) 86%, transparent);
+  }
+
   /* --- Markdown --- */
   .markdown {
     @apply text-[13px] leading-relaxed select-text;
@@ -121,10 +167,10 @@
     @apply my-1.5;
   }
   .markdown code {
-    @apply font-mono text-xs bg-white/[0.07] rounded px-1 py-0.5;
+    @apply font-mono text-xs bg-surface-3 rounded px-1 py-0.5;
   }
   .markdown pre {
-    @apply bg-black/30 border rounded-md p-2.5 overflow-x-auto my-2;
+    @apply bg-surface-2 border rounded-md p-2.5 overflow-x-auto my-2;
   }
   .markdown pre code {
     @apply bg-transparent p-0;
@@ -145,7 +191,7 @@
     @apply max-w-full rounded;
   }
 
-  /* --- Terminal host --- */
+  /* --- Terminal host (always a dark surface; terminals read best dark) --- */
   .terminal-host {
     @apply flex-1 min-h-0 px-1.5 pb-1.5;
   }
@@ -154,7 +200,7 @@
   }
 
   .kbd {
-    @apply font-mono text-[11px] bg-white/[0.07] border rounded px-1.5 py-px;
+    @apply font-mono text-[11px] bg-surface-3 border rounded px-1.5 py-px;
   }
 }
 
@@ -163,7 +209,7 @@
   height: 8px;
 }
 ::-webkit-scrollbar-thumb {
-  background: oklch(1 0 0 / 14%);
+  background: color-mix(in oklab, var(--foreground) 18%, transparent);
   border-radius: 4px;
 }
 ::-webkit-scrollbar-track {

@@ -97,7 +97,12 @@ function RetryDialog({ taskId }: { taskId: number }) {
 
   return (
     <Dialog open onOpenChange={(open) => !open && store.setDialog(null)}>
-      <DialogContent>
+      <DialogContent
+        onOpenAutoFocus={(e) => {
+          e.preventDefault();
+          (document.getElementById("retry-feedback") as HTMLTextAreaElement | null)?.focus();
+        }}
+      >
         <DialogHeader>
           <DialogTitle>
             Reply to #{taskId}
@@ -106,7 +111,7 @@ function RetryDialog({ taskId }: { taskId: number }) {
         </DialogHeader>
         <div className="flex flex-col gap-3">
           <Textarea
-            autoFocus
+            id="retry-feedback"
             rows={5}
             value={feedback}
             placeholder="Answer the executor's question or give new instructions…"

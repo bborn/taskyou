@@ -129,7 +129,7 @@ export function DetailView({ taskId }: { taskId: number }) {
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-white/[0.06] bg-white/[0.02] px-4 py-2.5">
+      <div className="flex shrink-0 flex-wrap items-center gap-2 border-b bg-surface-1 px-4 py-2.5">
         <Badge variant="outline" className={STATUS_BADGE[task.status] ?? ""}>
           {task.status}
         </Badge>
@@ -219,7 +219,7 @@ export function DetailView({ taskId }: { taskId: number }) {
       </div>
 
       <div className="flex min-h-0 flex-1 flex-col">
-        <div className="max-h-[38%] shrink-0 overflow-y-auto border-b border-white/[0.06] px-5 py-3.5 select-text">
+        <div className="max-h-[38%] shrink-0 overflow-y-auto border-b px-5 py-3.5 select-text">
           {task.body ? (
             <Markdown source={task.body} />
           ) : (

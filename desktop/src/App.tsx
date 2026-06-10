@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
-import { Plus, Search, Settings2, ChevronLeft } from "lucide-react";
+import { AnimatePresence, motion } from "motion/react";
+import { Plus, Search, Settings2, ChevronLeft, Sun, Moon, MonitorSmartphone } from "lucide-react";
+import logoUrl from "./assets/logo.png";
 import { setApiBase } from "./api/client";
 import { applyFilter, buildColumns } from "./lib/board";
 import { store, useAppState } from "./store";
@@ -75,6 +77,25 @@ export default function App() {
       void unlisten.then((fn) => fn());
     };
   }, []);
+
+  // --- Theme: follow system or explicit preference; sync window chrome ---
+  useEffect(() => {
+    const media = window.matchMedia("(prefers-color-scheme: dark)");
+    const apply = () => {
+      const resolved = state.theme === "system" ? (media.matches ? "dark" : "light") : state.theme;
+      document.documentElement.classList.toggle("dark", resolved === "dark");
+      if (inTauri()) {
+        void import("@tauri-apps/api/window").then(({ getCurrentWindow }) =>
+          getCurrentWindow()
+            .setTheme(state.theme === "system" ? null : state.theme)
+            .catch(() => {}),
+        );
+      }
+    };
+    apply();
+    media.addEventListener("change", apply);
+    return () => media.removeEventListener("change", apply);
+  }, [state.theme]);
 
   const projectNames = useMemo(() => state.projects.map((p) => p.name), [state.projects]);
   const filteredTasks = useMemo(
@@ -285,7 +306,7 @@ export default function App() {
     return (
       <div
         data-tauri-drag-region
-        className="flex h-full flex-col items-center justify-center gap-4 bg-background text-muted-foreground"
+        className="app-shell flex h-full flex-col items-center justify-center gap-4 text-muted-foreground"
       >
         <h1 className="text-lg font-semibold text-foreground">TaskYou</h1>
         {bootPhase === "error" ? (
@@ -303,15 +324,16 @@ export default function App() {
   const permLabel = state.permissionMode === "" ? "default" : state.permissionMode;
 
   return (
-    <div className="flex h-full flex-col bg-background">
+    <div className="app-shell flex h-full flex-col">
       {/* Titlebar: overlay style — traffic lights sit in the left inset; the
           whole bar is a drag region. */}
       <header
         data-tauri-drag-region
-        className={`flex h-11 shrink-0 items-center gap-1.5 border-b border-white/[0.06] bg-white/[0.03] pr-2 ${
+        className={`flex h-11 shrink-0 items-center gap-1.5 border-b bg-surface-1 pr-2 ${
           inTauri() ? "pl-20" : "pl-3"
         }`}
       >
+        <img src={logoUrl} alt="" data-tauri-drag-region className="size-5 rounded" />
         <span
           data-tauri-drag-region
           className="text-[13px] font-semibold tracking-tight text-foreground/90"
@@ -355,6 +377,24 @@ export default function App() {
           variant="ghost"
           size="icon"
           className="size-7"
+          title={`Theme: ${state.theme} (click to cycle)`}
+          onClick={() => {
+            const order = ["system", "light", "dark"] as const;
+            store.setTheme(order[(order.indexOf(state.theme) + 1) % order.length]);
+          }}
+        >
+          {state.theme === "light" ? (
+            <Sun className="size-4" />
+          ) : state.theme === "dark" ? (
+            <Moon className="size-4" />
+          ) : (
+            <MonitorSmartphone className="size-4" />
+          )}
+        </Button>
+        <Button
+          variant="ghost"
+          size="icon"
+          className="size-7"
           title="Settings (⌘,)"
           onClick={() => store.openSettings()}
         >
@@ -362,19 +402,41 @@ export default function App() {
         </Button>
       </header>
 
-      {state.view.kind === "board" && (
-        <div className="flex min-h-0 flex-1 flex-col">
-          {state.filterOpen && <FilterBar />}
-          <Board columns={columns} collapsed={state.collapsed} />
-        </div>
-      )}
-      {state.view.kind === "detail" && <DetailView taskId={state.view.taskId} key={state.view.taskId} />}
-      {state.view.kind === "settings" && <SettingsView />}
+      <AnimatePresence mode="wait" initial={false}>
+        <motion.div
+          key={state.view.kind === "detail" ? `detail-${state.view.taskId}` : state.view.kind}
+          className="flex min-h-0 flex-1 flex-col"
+          initial={{ opacity: 0, y: 4 }}
+          animate={{ opacity: 1, y: 0 }}
+          exit={{ opacity: 0, y: -4 }}
+          transition={{ duration: 0.14, ease: "easeOut" }}
+        >
+          {state.view.kind === "board" && (
+            <div className="flex min-h-0 flex-1 flex-col">
+              {state.filterOpen && <FilterBar />}
+              <Board columns={columns} collapsed={state.collapsed} />
+            </div>
+          )}
+          {state.view.kind === "detail" && <DetailView taskId={state.view.taskId} />}
+          {state.view.kind === "settings" && <SettingsView />}
+        </motion.div>
+      </AnimatePresence>
 
       {state.paletteOpen && <Palette />}
       {state.form && <TaskForm form={state.form} />}
       <Dialogs />
-      <Toaster position="bottom-right" richColors closeButton />
+      <Toaster
+        position="bottom-right"
+        richColors
+        closeButton
+        theme={
+          state.theme === "system"
+            ? window.matchMedia("(prefers-color-scheme: dark)").matches
+              ? "dark"
+              : "light"
+            : state.theme
+        }
+      />
     </div>
   );
 }

@@ -4,7 +4,7 @@ import { FitAddon } from "@xterm/addon-fit";
 import { api } from "../api/client";
 import type { Task } from "../api/types";
 import { attachTaskTerminal, inTauri, ptyKill, ptyResize, ptyWrite } from "../tauri";
-import { store } from "../store";
+import { store, useAppState } from "../store";
 import { Button } from "@/components/ui/button";
 
 type TermState =
@@ -22,8 +22,8 @@ function base64ToBytes(data: string): Uint8Array {
   return bytes;
 }
 
-const XTERM_THEME = {
-  background: "#131318",
+const XTERM_DARK = {
+  background: "#16161e",
   foreground: "#c0caf5",
   cursor: "#c0caf5",
   selectionBackground: "#33467c",
@@ -45,12 +45,40 @@ const XTERM_THEME = {
   brightWhite: "#c0caf5",
 };
 
+const XTERM_LIGHT = {
+  background: "#fafafa",
+  foreground: "#343b58",
+  cursor: "#343b58",
+  selectionBackground: "#b6bdd9",
+  black: "#0f0f14",
+  red: "#8c4351",
+  green: "#485e30",
+  yellow: "#8f5e15",
+  blue: "#34548a",
+  magenta: "#5a4a78",
+  cyan: "#0f4b6e",
+  white: "#828594",
+  brightBlack: "#5e626e",
+  brightRed: "#8c4351",
+  brightGreen: "#485e30",
+  brightYellow: "#8f5e15",
+  brightBlue: "#34548a",
+  brightMagenta: "#5a4a78",
+  brightCyan: "#0f4b6e",
+  brightWhite: "#343b58",
+};
+
+function currentXtermTheme() {
+  return document.documentElement.classList.contains("dark") ? XTERM_DARK : XTERM_LIGHT;
+}
+
 /**
  * The executor terminal: a real xterm.js terminal backed by a Rust PTY running
  * a tmux client attached (via a grouped view session) to the task's daemon
  * window. Fully interactive — keystrokes, mouse, resize all flow through.
  */
 export function TerminalPane({ task }: { task: Task }) {
+  const { theme } = useAppState();
   const hostRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
@@ -91,7 +119,7 @@ export function TerminalPane({ task }: { task: Task }) {
       // Fresh terminal per attach.
       termRef.current?.dispose();
       const term = new Terminal({
-        theme: XTERM_THEME,
+        theme: currentXtermTheme(),
         fontFamily: '"SF Mono", ui-monospace, Menlo, monospace',
         fontSize: 12.5,
         cursorBlink: true,
@@ -147,6 +175,11 @@ export function TerminalPane({ task }: { task: Task }) {
     };
   }, [attach, detach]);
 
+  // Re-theme the live terminal when the app theme changes.
+  useEffect(() => {
+    if (termRef.current) termRef.current.options.theme = currentXtermTheme();
+  }, [theme]);
+
   // Refit on container resize.
   useEffect(() => {
     const host = hostRef.current;
@@ -193,8 +226,8 @@ export function TerminalPane({ task }: { task: Task }) {
   }
 
   return (
-    <div className="flex min-h-[160px] flex-1 flex-col bg-black/40">
-      <div className="flex items-center gap-2 border-b border-white/[0.06] px-3 py-1 text-[11px] text-muted-foreground">
+    <div className="flex min-h-[160px] flex-1 flex-col bg-surface-1">
+      <div className="flex items-center gap-2 border-b px-3 py-1 text-[11px] text-muted-foreground">
         <span>Executor terminal</span>
         {state.kind === "attached" && <span className="text-status-processing">● live</span>}
         <div className="flex-1" />

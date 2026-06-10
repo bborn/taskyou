@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useRef, useState } from "react";
 import { X } from "lucide-react";
 import { api } from "../api/client";
 import { store, useAppState, type FormState } from "../store";
@@ -70,10 +70,6 @@ export function TaskForm({ form }: { form: NonNullable<FormState> }) {
 
   const titleRef = useRef<HTMLInputElement>(null);
   const ghostTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  useEffect(() => {
-    titleRef.current?.focus();
-  }, []);
 
   // Ghost-text autocomplete on the title, debounced; best-effort.
   function onTitleChange(value: string) {
@@ -153,6 +149,10 @@ export function TaskForm({ form }: { form: NonNullable<FormState> }) {
     <Dialog open onOpenChange={(open) => !open && close()}>
       <DialogContent
         className="max-w-2xl"
+        onOpenAutoFocus={(e) => {
+          e.preventDefault();
+          titleRef.current?.focus();
+        }}
         onDragOver={(e) => e.preventDefault()}
         onDrop={(e) => {
           e.preventDefault();
