@@ -263,6 +263,17 @@ const handlers = {
   },
 };
 
+chrome.commands.onCommand.addListener(async (command) => {
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (!tab?.id) return;
+  if (command === 'annotate') {
+    await handlers.startAnnotate({ tabId: tab.id });
+  } else if (command === 'send-annotations') {
+    const r = await sendAnnotations(tab.id, null, '');
+    if (r.error) chrome.tabs.sendMessage(tab.id, { type: 'ty-toast', message: r.error }).catch(() => {});
+  }
+});
+
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   const handler = handlers[msg?.type];
   if (!handler) return false;

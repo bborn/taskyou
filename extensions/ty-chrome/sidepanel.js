@@ -35,18 +35,31 @@ async function getActiveTab() {
   return tab || null;
 }
 
+function updateCount(count) {
+  const chip = $('annotation-count');
+  chip.textContent = count;
+  chip.classList.toggle('zero', count === 0);
+  $('send-btn').disabled = count === 0 || !currentTask;
+}
+
 async function refresh() {
   const tab = await getActiveTab();
   activeTabId = tab?.id ?? null;
   const state = await send({ type: 'getState', tabId: activeTabId });
 
   $('status-dot').classList.toggle('ok', !!state.connected);
+  $('status-dot-fallback').classList.toggle('ok', !!state.connected);
   $('server-url').value = state.serverUrl;
+  try {
+    $('server-label').textContent = new URL(state.serverUrl).host;
+  } catch {
+    $('server-label').textContent = state.serverUrl;
+  }
   $('no-connection').classList.toggle('hidden', !!state.connected);
 
   currentTask = state.task || null;
   renderTask();
-  $('annotation-count').textContent = `${state.annotationCount} annotation${state.annotationCount === 1 ? '' : 's'} pinned`;
+  updateCount(state.annotationCount);
 
   if (!currentTask && state.connected) loadCandidates();
   schedulePolling();
@@ -145,6 +158,38 @@ function renderExecutor(raw, consoleEl) {
   consoleEl.replaceChildren(frag);
 }
 
+// Auto-reload: when the executor transitions from working to idle, its batch
+// of edits is complete — reload the page so the user sees the result. Never
+// reload while annotations are still pinned (unsent work on the page).
+let executorBusy = false;
+let idleStreak = 0;
+
+function maybeAutoReload() {
+  if (!$('auto-reload').checked || activeTabId == null) return;
+  if (!$('annotation-count').classList.contains('zero')) return;
+  chrome.tabs.reload(activeTabId);
+  $('executor-state').textContent = '↻ page reloaded';
+}
+
+function trackExecutorActivity(raw) {
+  const busy = /esc to interrupt/.test(raw);
+  const idleAtPrompt = /shift\+tab to cycle/.test(raw) && !busy;
+  if (busy) {
+    executorBusy = true;
+    idleStreak = 0;
+    $('executor-state').textContent = 'working…';
+  } else if (idleAtPrompt) {
+    idleStreak++;
+    if (executorBusy && idleStreak >= 2) {
+      executorBusy = false;
+      maybeAutoReload();
+    }
+    if (!executorBusy && $('executor-state').textContent === 'working…') {
+      $('executor-state').textContent = 'live';
+    }
+  }
+}
+
 async function poll() {
   if (document.visibilityState !== 'visible' || !currentTask?.has_executor) return;
   const r = await send({ type: 'getOutput', taskId: currentTask.id, lines: 250 });
@@ -157,6 +202,7 @@ async function poll() {
     const atBottom = consoleEl.scrollHeight - consoleEl.scrollTop - consoleEl.clientHeight < 30;
     renderExecutor(r.output, consoleEl);
     if (atBottom) consoleEl.scrollTop = consoleEl.scrollHeight;
+    trackExecutorActivity(r.output);
   }
 }
 
@@ -197,12 +243,13 @@ $('send-btn').addEventListener('click', async () => {
     tabId: activeTabId,
     instruction: $('instruction').value.trim(),
   });
-  $('send-btn').disabled = false;
   if (r.ok) {
     $('send-result').textContent = `Sent to task #${r.taskId}${r.nudged ? ' — executor nudged ✓' : ' (bundle saved; no live executor)'}`;
     $('instruction').value = '';
+    updateCount(0);
   } else {
     $('send-result').textContent = r.error || 'Send failed';
+    $('send-btn').disabled = false;
   }
 });
 
@@ -224,8 +271,16 @@ $('followup').addEventListener('keydown', (e) => {
 
 chrome.runtime.onMessage.addListener((msg) => {
   if (msg?.type === 'ty-annotations-count') {
-    $('annotation-count').textContent = `${msg.count} annotation${msg.count === 1 ? '' : 's'} pinned`;
+    updateCount(msg.count);
   }
+});
+
+// Auto-reload preference
+chrome.storage.local.get('autoReload').then(({ autoReload }) => {
+  if (autoReload === false) $('auto-reload').checked = false;
+});
+$('auto-reload').addEventListener('change', (e) => {
+  chrome.storage.local.set({ autoReload: e.target.checked });
 });
 
 chrome.tabs.onActivated.addListener(refresh);

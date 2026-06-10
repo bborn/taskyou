@@ -91,6 +91,10 @@
   const btnClose = button('✕', teardownOrHide);
   btnClose.classList.add('close');
   btnClose.title = 'Clear annotations and hide';
+  btnSelect.title = 'Pick an element — S';
+  btnBox.title = 'Draw a region — B';
+  btnNote.title = 'Page-level note — N';
+  btnSend.title = 'Send to executor — ⌘↩ (or ⌥S anywhere)';
   toolbar.append(btnSelect, btnBox, btnNote, countChip, btnSend, btnClose);
   root.appendChild(toolbar);
   updateCount();
@@ -162,11 +166,34 @@
   }
   document.addEventListener('mouseover', onMouseOver, true);
   document.addEventListener('click', onClick, true);
+
+  // Shortcuts while the overlay is up: S/B/N switch modes, Esc exits,
+  // Cmd/Ctrl+Enter sends. Never fire while typing in any input.
+  function isTyping(e) {
+    const t = e.composedPath()[0];
+    return t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable);
+  }
   document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape' && mode !== 'none') {
+    if (host.style.display === 'none') return;
+    if (e.key === 'Escape' && mode !== 'none' && !isTyping(e)) {
       e.stopPropagation();
       setMode('none');
+      return;
     }
+    if (isTyping(e) || popover) return;
+    if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+      e.preventDefault();
+      doSend();
+      return;
+    }
+    if (e.metaKey || e.ctrlKey || e.altKey) return;
+    const k = e.key.toLowerCase();
+    if (k === 's') setMode('select');
+    else if (k === 'b') setMode('box');
+    else if (k === 'n') setMode('note');
+    else return;
+    e.preventDefault();
+    e.stopPropagation();
   }, true);
 
   // Box mode drag handling.
@@ -407,6 +434,10 @@
         break;
       case 'ty-get-count':
         sendResponse({ count: annotations.length });
+        break;
+      case 'ty-toast':
+        toast(msg.message, 4000);
+        sendResponse({ ok: true });
         break;
       default:
         return false;

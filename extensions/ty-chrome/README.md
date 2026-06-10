@@ -42,8 +42,24 @@ Requires the taskyou build from this branch or later (the
    - **Box** — drag a rectangle over a region
    - **Note** — page-level comment
 4. Optionally add an overall instruction, then **Send**.
-5. Watch the executor pick it up in the side panel's live console; the page
-   reloads as it edits. Annotate again. Loop.
+5. Watch the executor pick it up in the side panel's live console. When it
+   finishes its turn, the page auto-reloads (toggle in the Executor header) —
+   no hot-reload setup needed in your app. Annotate again. Loop.
+
+## Shortcuts
+
+- **⌥A** — annotate the current page (global, configurable at
+  `chrome://extensions/shortcuts`)
+- **⌥S** — send annotations to the executor (global)
+- On page while annotating: **S** select · **B** box · **N** note ·
+  **Esc** exit mode · **⌘↩** send (also saves an open comment)
+
+## Auto-reload
+
+The panel watches the executor pane for the working→idle transition (the
+`esc to interrupt` marker disappearing) and reloads the matched tab when the
+executor finishes a turn — the right moment for apps that don't hot-reload.
+It never reloads while you still have unsent annotations pinned.
 
 ## Configuration
 
