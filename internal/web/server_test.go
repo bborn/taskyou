@@ -244,6 +244,37 @@ func TestHandleDeleteTask(t *testing.T) {
 	}
 }
 
+func TestTaskJSON_IncludesPortWorktreeExecutor(t *testing.T) {
+	srv, database, _ := setupServer(t)
+
+	task := &db.Task{Title: "Rich task", Status: db.StatusProcessing, Project: "personal"}
+	database.CreateTask(task)
+	task.Port = 3142
+	task.WorktreePath = "/tmp/wt"
+	database.UpdateTask(task)
+	database.UpdateTaskPaneIDs(task.ID, "%7", "")
+
+	req := httptest.NewRequest("GET", "/api/tasks", nil)
+	w := httptest.NewRecorder()
+	srv.handleListTasks(w, req)
+
+	var tasks []*taskJSON
+	json.NewDecoder(w.Body).Decode(&tasks)
+	if len(tasks) != 1 {
+		t.Fatalf("expected 1 task, got %d", len(tasks))
+	}
+	got := tasks[0]
+	if got.Port != 3142 {
+		t.Errorf("port = %d, want 3142", got.Port)
+	}
+	if got.WorktreePath != "/tmp/wt" {
+		t.Errorf("worktree_path = %q, want /tmp/wt", got.WorktreePath)
+	}
+	if !got.HasExecutor {
+		t.Error("has_executor = false, want true")
+	}
+}
+
 // --- Task actions ---
 
 func TestHandleExecuteTask(t *testing.T) {
