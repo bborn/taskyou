@@ -138,7 +138,10 @@ export default function App() {
           case "X":
             return void store.executeTask(task.id, true);
           case "r":
-            if (task.status === "blocked") return void store.setDialog({ kind: "retry", taskId: task.id });
+            if (task.status === "blocked") {
+              e.preventDefault();
+              return void store.setDialog({ kind: "retry", taskId: task.id });
+            }
             break;
           case "c":
             return void store.closeTask(task.id);
@@ -163,8 +166,10 @@ export default function App() {
           case "t":
             return void store.pinTask(task.id);
           case "S":
+            e.preventDefault();
             return void store.setDialog({ kind: "status", taskId: task.id });
           case "e":
+            e.preventDefault();
             return void store.setForm({ kind: "edit", taskId: task.id });
           case "o":
             if (task.worktree_path) void openInEditor(task.worktree_path);
@@ -190,9 +195,11 @@ export default function App() {
         case "!":
           return void store.cyclePermissionMode();
         case "n":
+          e.preventDefault();
           return void store.setForm({ kind: "new" });
         case "p":
         case "f":
+          e.preventDefault();
           return void store.setPalette(true);
         case "R":
           return void store.refreshTasks();

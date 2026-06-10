@@ -31,7 +31,7 @@ export function TaskForm({ form }: { form: NonNullable<FormState> }) {
   const [project, setProject] = useState(
     editing?.project ?? (form.kind === "new" ? (form.initialProject ?? projects[0]?.name ?? "") : ""),
   );
-  const [type, setType] = useState(editing?.type ?? "task");
+  const [type, setType] = useState(editing?.type ?? types[0]?.name ?? "");
   const [executor, setExecutor] = useState(editing?.executor ?? "");
   const [effort, setEffort] = useState(editing?.effort_level ?? "");
   const [permission, setPermission] = useState(
@@ -51,7 +51,7 @@ export function TaskForm({ form }: { form: NonNullable<FormState> }) {
       setTitle(editing.title);
       setBody(editing.body);
       setProject(editing.project);
-      setType(editing.type || "task");
+      setType(editing.type || types[0]?.name || "");
       setExecutor(editing.executor || "");
       setEffort(editing.effort_level ?? "");
     }

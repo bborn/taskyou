@@ -82,7 +82,7 @@ func attachmentToMap(a *db.Attachment) map[string]interface{} {
 		"filename":   a.Filename,
 		"mime_type":  a.MimeType,
 		"size":       a.Size,
-		"created_at": a.CreatedAt.Time.Format("2006-01-02T15:04:05Z"),
+		"created_at": apiTime(a.CreatedAt.Time),
 	}
 }
 
@@ -303,7 +303,7 @@ func (s *Server) handleLatestLogs(w http.ResponseWriter, r *http.Request) {
 			ID:        l.ID,
 			LineType:  l.LineType,
 			Content:   l.Content,
-			CreatedAt: l.CreatedAt.Time.Format("2006-01-02T15:04:05Z"),
+			CreatedAt: apiTime(l.CreatedAt.Time),
 		}
 	}
 	jsonOK(w, result)

@@ -1,6 +1,6 @@
-mod pty;
-mod supervisor;
-mod terminal;
+pub mod pty;
+pub mod supervisor;
+pub mod terminal;
 
 use pty::{PtyEvent, PtyManager, SpawnOptions};
 use serde::Serialize;
@@ -106,14 +106,21 @@ fn supervisor_set_config(
 /// Open a URL or path with the system default handler (macOS `open`).
 #[tauri::command]
 fn open_external(target: String) -> Result<(), String> {
-    if !(target.starts_with("http://") || target.starts_with("https://") || target.starts_with('/')) {
+    if !(target.starts_with("http://") || target.starts_with("https://") || target.starts_with('/'))
+    {
         return Err("only absolute paths and http(s) URLs can be opened".into());
     }
     Command::new("open")
         .arg(&target)
         .status()
         .map_err(|e| e.to_string())
-        .and_then(|s| if s.success() { Ok(()) } else { Err("open failed".into()) })
+        .and_then(|s| {
+            if s.success() {
+                Ok(())
+            } else {
+                Err("open failed".into())
+            }
+        })
 }
 
 /// Open a directory in the user's code editor; falls back to Finder.
@@ -134,7 +141,13 @@ fn open_in_editor(path: String) -> Result<(), String> {
                 .arg(&path)
                 .status()
                 .map_err(|e| e.to_string())
-                .and_then(|s| if s.success() { Ok(()) } else { Err(format!("{editor} failed")) });
+                .and_then(|s| {
+                    if s.success() {
+                        Ok(())
+                    } else {
+                        Err(format!("{editor} failed"))
+                    }
+                });
         }
     }
     open_external(path)

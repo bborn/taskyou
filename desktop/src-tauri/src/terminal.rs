@@ -37,7 +37,11 @@ fn tmux(args: &[&str]) -> Result<String, String> {
 
 /// Prepare a grouped tmux view session focused on `window` (a window name like
 /// "task-42" or index) of `daemon_session`, and return the attach plan.
-pub fn prepare_attach(task_id: i64, daemon_session: &str, window: &str) -> Result<AttachPlan, String> {
+pub fn prepare_attach(
+    task_id: i64,
+    daemon_session: &str,
+    window: &str,
+) -> Result<AttachPlan, String> {
     if daemon_session.is_empty() {
         return Err("task has no daemon session".into());
     }
@@ -50,11 +54,18 @@ pub fn prepare_attach(task_id: i64, daemon_session: &str, window: &str) -> Resul
     );
 
     // Grouped session: shares the daemon session's windows, independent focus.
-    tmux(&["new-session", "-d", "-s", &view_session, "-t", daemon_session])?;
+    tmux(&[
+        "new-session",
+        "-d",
+        "-s",
+        &view_session,
+        "-t",
+        daemon_session,
+    ])?;
 
-    // View-session behavior: vanish when the GUI client detaches, no status
-    // bar chrome inside the GUI pane, mouse support for pane focus/scroll.
-    let _ = tmux(&["set-option", "-t", &view_session, "destroy-unattached", "on"]);
+    // View-session chrome: no status bar inside the GUI pane, mouse support
+    // for pane focus/scroll. (destroy-unattached is set during attach — see
+    // below — to avoid tmux GC'ing the session before the client connects.)
     let _ = tmux(&["set-option", "-t", &view_session, "status", "off"]);
     let _ = tmux(&["set-option", "-t", &view_session, "mouse", "on"]);
 
@@ -66,12 +77,19 @@ pub fn prepare_attach(task_id: i64, daemon_session: &str, window: &str) -> Resul
         return Err(e);
     }
 
+    // Attach, then mark the session for destruction on detach. Chaining via
+    // tmux's ";" separator means destroy-unattached only applies once a
+    // client is actually connected.
     Ok(AttachPlan {
         command: vec![
             "tmux".into(),
             "attach-session".into(),
             "-t".into(),
             view_session.clone(),
+            ";".into(),
+            "set-option".into(),
+            "destroy-unattached".into(),
+            "on".into(),
         ],
         view_session,
     })
@@ -89,8 +107,16 @@ mod tests {
 
     #[test]
     fn view_session_names_are_unique() {
-        let a = format!("ty-gui-1-{}-{}", std::process::id(), VIEW_COUNTER.fetch_add(1, Ordering::SeqCst));
-        let b = format!("ty-gui-1-{}-{}", std::process::id(), VIEW_COUNTER.fetch_add(1, Ordering::SeqCst));
+        let a = format!(
+            "ty-gui-1-{}-{}",
+            std::process::id(),
+            VIEW_COUNTER.fetch_add(1, Ordering::SeqCst)
+        );
+        let b = format!(
+            "ty-gui-1-{}-{}",
+            std::process::id(),
+            VIEW_COUNTER.fetch_add(1, Ordering::SeqCst)
+        );
         assert_ne!(a, b);
     }
 }

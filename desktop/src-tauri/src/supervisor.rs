@@ -145,9 +145,8 @@ impl Supervisor {
     /// Ensure both sidecars are running, spawning them when needed.
     pub fn ensure(&self) -> Result<SupervisorStatus, String> {
         let config = self.config.lock().unwrap().clone();
-        let ty = discover_ty(&config).ok_or(
-            "ty binary not found — install TaskYou or set its path in Settings",
-        )?;
+        let ty = discover_ty(&config)
+            .ok_or("ty binary not found — install TaskYou or set its path in Settings")?;
 
         if !server_healthy(config.port) {
             let child = Command::new(&ty)
@@ -168,7 +167,10 @@ impl Supervisor {
                 std::thread::sleep(Duration::from_millis(250));
             }
             if !server_healthy(config.port) {
-                return Err(format!("ty serve did not become healthy on port {}", config.port));
+                return Err(format!(
+                    "ty serve did not become healthy on port {}",
+                    config.port
+                ));
             }
         }
 

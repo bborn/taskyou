@@ -4,11 +4,19 @@ import (
 	"encoding/json"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/bborn/workflow/internal/db"
 )
 
 // --- JSON helpers ---
+
+// apiTime renders a timestamp for API responses. Times are stored/handled in
+// local time internally (db.LocalTime); convert to UTC so the trailing Z is
+// actually true — clients parse these as UTC.
+func apiTime(t time.Time) string {
+	return t.UTC().Format(time.RFC3339)
+}
 
 func jsonOK(w http.ResponseWriter, v interface{}) {
 	w.Header().Set("Content-Type", "application/json")
@@ -1079,14 +1087,14 @@ func toTaskJSON(t *db.Task) *taskJSON {
 		PRURL:          t.PRURL,
 		PRNumber:       t.PRNumber,
 		Summary:        t.Summary,
-		CreatedAt:      t.CreatedAt.Time.Format("2006-01-02T15:04:05Z"),
-		UpdatedAt:      t.UpdatedAt.Time.Format("2006-01-02T15:04:05Z"),
+		CreatedAt:      apiTime(t.CreatedAt.Time),
+		UpdatedAt:      apiTime(t.UpdatedAt.Time),
 	}
 	if t.StartedAt != nil {
-		tj.StartedAt = t.StartedAt.Time.Format("2006-01-02T15:04:05Z")
+		tj.StartedAt = apiTime(t.StartedAt.Time)
 	}
 	if t.CompletedAt != nil {
-		tj.CompletedAt = t.CompletedAt.Time.Format("2006-01-02T15:04:05Z")
+		tj.CompletedAt = apiTime(t.CompletedAt.Time)
 	}
 	return tj
 }
@@ -1106,7 +1114,7 @@ func toLogJSONSlice(logs []*db.TaskLog) []*logJSON {
 			ID:        l.ID,
 			LineType:  l.LineType,
 			Content:   l.Content,
-			CreatedAt: l.CreatedAt.Time.Format("2006-01-02T15:04:05Z"),
+			CreatedAt: apiTime(l.CreatedAt.Time),
 		}
 	}
 	return result

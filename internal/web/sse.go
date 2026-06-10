@@ -62,7 +62,7 @@ func (s *Server) handleTaskStream(w http.ResponseWriter, r *http.Request) {
 					ID:        l.ID,
 					LineType:  l.LineType,
 					Content:   l.Content,
-					CreatedAt: l.CreatedAt.Time.Format("2006-01-02T15:04:05Z"),
+					CreatedAt: apiTime(l.CreatedAt.Time),
 				}
 				data, _ := json.Marshal(entry)
 				fmt.Fprintf(w, "event: log\ndata: %s\n\n", data)
