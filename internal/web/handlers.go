@@ -198,13 +198,15 @@ func (s *Server) handleTaskDetail(w http.ResponseWriter, r *http.Request) {
 }
 
 type updateTaskRequest struct {
-	Title    *string `json:"title"`
-	Body     *string `json:"body"`
-	Type     *string `json:"type"`
-	Project  *string `json:"project"`
-	Executor *string `json:"executor"`
-	Tags     *string `json:"tags"`
-	Pinned   *bool   `json:"pinned"`
+	Title          *string `json:"title"`
+	Body           *string `json:"body"`
+	Type           *string `json:"type"`
+	Project        *string `json:"project"`
+	Executor       *string `json:"executor"`
+	Tags           *string `json:"tags"`
+	Pinned         *bool   `json:"pinned"`
+	PermissionMode *string `json:"permission_mode"`
+	EffortLevel    *string `json:"effort_level"`
 }
 
 func (s *Server) handleUpdateTask(w http.ResponseWriter, r *http.Request) {
@@ -243,6 +245,12 @@ func (s *Server) handleUpdateTask(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Pinned != nil {
 		task.Pinned = *req.Pinned
+	}
+	if req.PermissionMode != nil {
+		task.PermissionMode = db.NormalizePermissionMode(*req.PermissionMode)
+	}
+	if req.EffortLevel != nil {
+		task.EffortLevel = *req.EffortLevel
 	}
 
 	if err := s.db.UpdateTask(task); err != nil {
@@ -1021,7 +1029,17 @@ type taskJSON struct {
 	Tags           string `json:"tags"`
 	PermissionMode string `json:"permission_mode"`
 	BranchName     string `json:"branch_name"`
+	Port           int    `json:"port,omitempty"`
+	WorktreePath   string `json:"worktree_path,omitempty"`
+	HasExecutor    bool   `json:"has_executor"`
+	EffortLevel    string `json:"effort_level,omitempty"`
+	SourceBranch   string `json:"source_branch,omitempty"`
+	DaemonSession  string `json:"daemon_session,omitempty"`
+	TmuxWindowID   string `json:"tmux_window_id,omitempty"`
+	ClaudePaneID   string `json:"claude_pane_id,omitempty"`
+	ShellPaneID    string `json:"shell_pane_id,omitempty"`
 	PRURL          string `json:"pr_url"`
+	PRNumber       int    `json:"pr_number,omitempty"`
 	Summary        string `json:"summary,omitempty"`
 	CreatedAt      string `json:"created_at"`
 	UpdatedAt      string `json:"updated_at"`
@@ -1049,7 +1067,17 @@ func toTaskJSON(t *db.Task) *taskJSON {
 		Tags:           t.Tags,
 		PermissionMode: t.EffectivePermissionMode(),
 		BranchName:     t.BranchName,
+		Port:           t.Port,
+		WorktreePath:   t.WorktreePath,
+		HasExecutor:    t.ClaudePaneID != "",
+		EffortLevel:    t.EffortLevel,
+		SourceBranch:   t.SourceBranch,
+		DaemonSession:  t.DaemonSession,
+		TmuxWindowID:   t.TmuxWindowID,
+		ClaudePaneID:   t.ClaudePaneID,
+		ShellPaneID:    t.ShellPaneID,
 		PRURL:          t.PRURL,
+		PRNumber:       t.PRNumber,
 		Summary:        t.Summary,
 		CreatedAt:      t.CreatedAt.Time.Format("2006-01-02T15:04:05Z"),
 		UpdatedAt:      t.UpdatedAt.Time.Format("2006-01-02T15:04:05Z"),

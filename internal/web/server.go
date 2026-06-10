@@ -9,8 +9,10 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"sync"
 	"time"
 
+	"github.com/bborn/workflow/internal/autocomplete"
 	"github.com/bborn/workflow/internal/db"
 )
 
@@ -25,13 +27,18 @@ type Config struct {
 	Addr      string // e.g. ":8080"
 	DB        *db.DB
 	CmdRunner CommandRunner
+	Sessions  SessionManager // optional; enables /api/executors and session bootstrap
 }
 
 // Server is the HTTP API server.
 type Server struct {
-	db     *db.DB
-	srv    *http.Server
-	runner CommandRunner
+	db       *db.DB
+	srv      *http.Server
+	runner   CommandRunner
+	sessions SessionManager
+
+	autocompleteMu sync.Mutex
+	autocomplete   *autocomplete.Service
 }
 
 // cors wraps a handler with permissive CORS headers for local development.
@@ -51,8 +58,9 @@ func cors(next http.Handler) http.Handler {
 // New creates a new API server.
 func New(cfg Config) *Server {
 	s := &Server{
-		db:     cfg.DB,
-		runner: cfg.CmdRunner,
+		db:       cfg.DB,
+		runner:   cfg.CmdRunner,
+		sessions: cfg.Sessions,
 	}
 
 	mux := http.NewServeMux()
@@ -82,6 +90,21 @@ func New(cfg Config) *Server {
 	mux.HandleFunc("GET /api/tasks/{id}/stream", s.handleTaskStream)
 	mux.HandleFunc("GET /api/tasks/{id}/output", s.handleTaskOutput)
 	mux.HandleFunc("GET /api/tasks/{id}/terminal", s.handleTerminal)
+	mux.HandleFunc("GET /api/tasks/{id}/terminal-info", s.handleTerminalInfo)
+	mux.HandleFunc("POST /api/tasks/{id}/session", s.handleEnsureSession)
+	mux.HandleFunc("GET /api/tasks/latest-logs", s.handleLatestLogs)
+
+	// Attachments
+	mux.HandleFunc("GET /api/tasks/{id}/attachments", s.handleListAttachments)
+	mux.HandleFunc("POST /api/tasks/{id}/attachments", s.handleAddAttachment)
+	mux.HandleFunc("GET /api/attachments/{id}", s.handleGetAttachment)
+	mux.HandleFunc("DELETE /api/attachments/{id}", s.handleDeleteAttachment)
+
+	// Settings, executors, autocomplete
+	mux.HandleFunc("GET /api/settings", s.handleGetSettings)
+	mux.HandleFunc("PATCH /api/settings", s.handleUpdateSettings)
+	mux.HandleFunc("GET /api/executors", s.handleListExecutors)
+	mux.HandleFunc("POST /api/autocomplete", s.handleAutocomplete)
 
 	// Dependencies
 	mux.HandleFunc("GET /api/tasks/{id}/deps", s.handleGetDeps)
