@@ -462,6 +462,28 @@ func TestHandleTaskInput_NoPaneID(t *testing.T) {
 	}
 }
 
+func TestHandleTaskOutput_JoinsWrappedLines(t *testing.T) {
+	srv, database, runner := setupServer(t)
+	runner.outputVal = []byte("pane content")
+
+	task := &db.Task{Title: "Out task", Status: db.StatusProcessing, Project: "personal"}
+	database.CreateTask(task)
+	database.UpdateTaskPaneIDs(task.ID, "%5", "")
+
+	req := httptest.NewRequest("GET", fmt.Sprintf("/api/tasks/%d/output", task.ID), nil)
+	req.SetPathValue("id", fmt.Sprintf("%d", task.ID))
+	w := httptest.NewRecorder()
+	srv.handleTaskOutput(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	expected := []string{"tmux", "capture-pane", "-t", "%5", "-p", "-J", "-S", "-200"}
+	if fmt.Sprint(runner.calls[0]) != fmt.Sprint(expected) {
+		t.Errorf("call = %v, want %v", runner.calls[0], expected)
+	}
+}
+
 // --- Projects ---
 
 func TestHandleListProjects(t *testing.T) {

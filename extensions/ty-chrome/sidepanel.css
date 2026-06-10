@@ -91,10 +91,15 @@ button.primary:disabled { background: #cbd5e1; cursor: default; }
 
 #console {
   flex: 1; margin: 0; padding: 8px; overflow: auto;
-  background: #0b1220; color: #d1e7dd; border-radius: 8px;
-  font-family: ui-monospace, Menlo, monospace; font-size: 11px; line-height: 1.45;
-  white-space: pre-wrap; word-break: break-word;
+  background: #0b1220; color: #cbd5e1; border-radius: 8px;
+  font-family: ui-monospace, Menlo, monospace; font-size: 11px; line-height: 1.5;
 }
+.x-line { white-space: pre-wrap; word-break: break-word; min-height: 1em; }
+.x-add { color: #4ade80; }
+.x-del { color: #f87171; }
+.x-action { color: #f8fafc; font-weight: 600; }
+.x-meta { color: #64748b; }
+.x-status { color: #5eead4; font-style: italic; }
 
 .input-row { display: flex; gap: 6px; margin-top: 8px; }
 .input-row input {

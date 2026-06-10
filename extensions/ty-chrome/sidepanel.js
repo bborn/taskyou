@@ -7,6 +7,7 @@ const $ = (id) => document.getElementById(id);
 let activeTabId = null;
 let currentTask = null;
 let pollTimer = null;
+let reconnectTimer = null;
 
 const send = (msg) => chrome.runtime.sendMessage(msg);
 
@@ -49,6 +50,12 @@ async function refresh() {
 
   if (!currentTask && state.connected) loadCandidates();
   schedulePolling();
+
+  // Self-heal: keep retrying while disconnected (auto-discovery runs in the SW)
+  clearTimeout(reconnectTimer);
+  if (!state.connected && document.visibilityState === 'visible') {
+    reconnectTimer = setTimeout(refresh, 3000);
+  }
 }
 
 function renderTask() {
@@ -92,9 +99,55 @@ function schedulePolling() {
   poll();
 }
 
+// Turn a raw tmux pane capture into a readable activity feed: drop the
+// input-box chrome, prompt, footers, and tips; colorize diffs and actions.
+function classifyLine(line) {
+  const t = line.trim();
+  if (/^\s*\d+\s*\+/.test(line) || /^\+/.test(t)) return 'x-add';
+  if (/^\s*\d+\s*-/.test(line)) return 'x-del';
+  if (/^⏺/.test(t)) return 'x-action';
+  if (/^⎿/.test(t)) return 'x-meta';
+  if (/^[✳✻✽✶✢✴✦∗*·]\s.*…/.test(t)) return 'x-status';
+  return '';
+}
+
+function renderExecutor(raw, consoleEl) {
+  const lines = stripAnsi(raw).split('\n');
+  const frag = document.createDocumentFragment();
+  let skipTip = false;
+  let blanks = 0;
+  for (const line of lines) {
+    const t = line.trim();
+    if (/^[─━]{6,}$/.test(t)) continue; // input box / separator rules
+    if (/^[╭╰│]/.test(t)) continue; // box borders
+    if (t === '❯' || /^❯\s*$/.test(t)) continue; // empty prompt
+    if (/^⏵⏵/.test(t) || /shift\+tab to cycle/.test(t)) continue; // mode footer
+    if (/Tip: /.test(t)) {
+      skipTip = true;
+      continue;
+    }
+    if (skipTip) {
+      if (t === '') skipTip = false;
+      continue;
+    }
+    if (t === '') {
+      if (++blanks > 1) continue;
+    } else {
+      blanks = 0;
+    }
+    const div = document.createElement('div');
+    div.className = 'x-line ' + classifyLine(line);
+    div.textContent = line || ' ';
+    frag.appendChild(div);
+  }
+  // Trim trailing blank lines
+  while (frag.lastChild && frag.lastChild.textContent.trim() === '') frag.removeChild(frag.lastChild);
+  consoleEl.replaceChildren(frag);
+}
+
 async function poll() {
   if (document.visibilityState !== 'visible' || !currentTask?.has_executor) return;
-  const r = await send({ type: 'getOutput', taskId: currentTask.id, lines: 150 });
+  const r = await send({ type: 'getOutput', taskId: currentTask.id, lines: 250 });
   const consoleEl = $('console');
   if (r.gone) {
     $('executor-state').textContent = 'pane gone';
@@ -102,7 +155,7 @@ async function poll() {
   }
   if (r.output != null) {
     const atBottom = consoleEl.scrollHeight - consoleEl.scrollTop - consoleEl.clientHeight < 30;
-    consoleEl.textContent = stripAnsi(r.output).replace(/\n{3,}/g, '\n\n').trimEnd();
+    renderExecutor(r.output, consoleEl);
     if (atBottom) consoleEl.scrollTop = consoleEl.scrollHeight;
   }
 }

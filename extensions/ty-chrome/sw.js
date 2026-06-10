@@ -14,6 +14,50 @@ async function getServerUrl() {
   return (serverUrl || DEFAULT_SERVER).replace(/\/+$/, '');
 }
 
+// Auto-discovery: when the configured URL isn't answering, probe common
+// ty serve locations and adopt the first one that responds.
+const CANDIDATE_SERVERS = [
+  'http://127.0.0.1:8080',
+  'http://localhost:8080',
+  'http://127.0.0.1:8765', // isolated demo instance
+];
+let probePromise = null;
+let lastFailedSweep = 0;
+
+async function isAlive(base) {
+  try {
+    const res = await fetch(base + '/api/status', { signal: AbortSignal.timeout(800) });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+// Concurrent callers share one in-flight sweep; the cooldown only applies
+// after a sweep that found nothing (so a panel retry can't get a stale "no").
+async function ensureServer() {
+  const current = await getServerUrl();
+  if (await isAlive(current)) return { serverUrl: current, connected: true };
+  if (Date.now() - lastFailedSweep < 5_000) return { serverUrl: current, connected: false };
+  if (!probePromise) {
+    probePromise = (async () => {
+      for (const candidate of CANDIDATE_SERVERS) {
+        if (candidate !== current && (await isAlive(candidate))) {
+          await chrome.storage.local.set({ serverUrl: candidate });
+          matches.clear();
+          return candidate;
+        }
+      }
+      lastFailedSweep = Date.now();
+      return null;
+    })().finally(() => {
+      probePromise = null;
+    });
+  }
+  const found = await probePromise;
+  return found ? { serverUrl: found, connected: true } : { serverUrl: current, connected: false };
+}
+
 async function api(path, opts) {
   const base = await getServerUrl();
   const res = await fetch(base + path, opts);
@@ -140,12 +184,7 @@ async function sendAnnotations(tabId, payload, instruction) {
 
 const handlers = {
   async getState({ tabId }) {
-    const serverUrl = await getServerUrl();
-    let connected = false;
-    try {
-      await api('/api/status');
-      connected = true;
-    } catch {}
+    const { serverUrl, connected } = await ensureServer();
     const task = tabId != null ? await resolveTask(tabId) : null;
     let annotationCount = 0;
     if (tabId != null) {

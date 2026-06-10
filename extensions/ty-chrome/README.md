@@ -47,8 +47,11 @@ Requires the taskyou build from this branch or later (the
 
 ## Configuration
 
-Gear icon in the side panel → set the `ty serve` URL (default
-`http://127.0.0.1:8080`). Stored in `chrome.storage.local`.
+None needed in the common case: the extension defaults to
+`http://127.0.0.1:8080` (where `ty serve` comes up) and, if that isn't
+answering, auto-probes common ports and adopts the first responding server.
+The gear icon in the side panel overrides it manually
+(`chrome.storage.local`).
 
 ## API endpoints used
 

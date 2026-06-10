@@ -14,7 +14,7 @@
   <div id="settings" class="card hidden">
     <label for="server-url">ty serve URL</label>
     <input id="server-url" type="text" placeholder="http://127.0.0.1:8080" />
-    <small>Press Enter to save. Run <code>ty serve</code> to start the API.</small>
+    <small>Press Enter to save. Auto-detected when <code>ty serve</code> is running on a common port.</small>
   </div>
 
   <div id="task-card" class="card">
@@ -55,7 +55,8 @@
       <span id="executor-state" class="muted"></span>
     </div>
     <pre id="console"></pre>
-    <div class="input-row">
+    <!-- Executor is read-only for now; unhide to re-enable follow-up input -->
+    <div class="input-row hidden">
       <input id="followup" type="text" placeholder="Say something to the executor…" />
       <button id="followup-send">↵</button>
     </div>
