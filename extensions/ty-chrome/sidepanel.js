@@ -18,7 +18,18 @@ const stripAnsi = (s) =>
 
 // --- State refresh -----------------------------------------------------------
 
+// ?tab=<id> pins the panel to a specific tab — used when opening
+// sidepanel.html as a regular tab (debugging / scripted demos).
+const forcedTabId = new URLSearchParams(location.search).get('tab');
+
 async function getActiveTab() {
+  if (forcedTabId) {
+    try {
+      return await chrome.tabs.get(Number(forcedTabId));
+    } catch {
+      return null;
+    }
+  }
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   return tab || null;
 }

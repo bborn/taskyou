@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "description": "Point, click, and annotate pages served by a taskyou task; deliver context straight to the task's executor.",
   "permissions": ["storage", "tabs", "sidePanel", "scripting"],
-  "host_permissions": ["http://localhost/*", "http://127.0.0.1/*"],
+  "host_permissions": ["<all_urls>"],
   "background": { "service_worker": "sw.js" },
   "action": { "default_title": "TaskYou Annotate" },
   "side_panel": { "default_path": "sidepanel.html" },

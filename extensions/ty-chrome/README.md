@@ -60,7 +60,14 @@ Gear icon in the side panel → set the `ty serve` URL (default
 
 ## Security
 
-Same trust model as `ty serve`: an unauthenticated localhost API. Host
-permissions are limited to `http://localhost/*` and `http://127.0.0.1/*`.
-Annotation bundles are written by the daemon, only inside the task's worktree
-under `.taskyou/annotations/` (self-gitignored).
+Same trust model as `ty serve`: an unauthenticated localhost API. Annotation
+bundles are written by the daemon, only inside the task's worktree under
+`.taskyou/annotations/` (self-gitignored).
+
+Host permissions are `<all_urls>` because Chrome's `captureVisibleTab` (used
+to bake your markers into the screenshot) accepts only `<all_urls>` or
+`activeTab` — and `activeTab` grants die on every page reload, which would
+silently drop screenshots in the edit loop this tool exists for. Tab→task
+auto-matching still only ever targets `localhost`/`127.0.0.1` ports; other
+pages are annotatable only if you manually pick a task. This is a
+load-unpacked dev tool talking to your own machine.

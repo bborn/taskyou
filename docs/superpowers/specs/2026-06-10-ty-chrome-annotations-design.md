@@ -168,11 +168,17 @@ requested changes.
 ## Security posture
 
 Same trust model as `ty serve` today: unauthenticated localhost API with
-permissive CORS. The extension's host permissions are restricted to
-`localhost`/`127.0.0.1`, and it talks to a server the user explicitly runs.
+permissive CORS. The extension talks to a server the user explicitly runs.
 The annotation endpoint only writes inside the task's worktree under
 `.taskyou/annotations/` (path is server-derived from a timestamp, never from
 client input).
+
+**Amendment (discovered in implementation):** host permissions are
+`<all_urls>` rather than localhost-only, because `captureVisibleTab` accepts
+only `<all_urls>` or `activeTab`, and `activeTab` grants expire on page
+reload — which would silently drop screenshots in the reload-heavy edit loop
+this tool targets. Functional scoping is preserved in code: tab→task
+auto-matching only considers `localhost`/`127.0.0.1` ports.
 
 ## Testing
 
