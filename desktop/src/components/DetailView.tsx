@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { ChevronDown, ChevronRight, GitPullRequest, Pin, Code2 } from "lucide-react";
 import { api } from "../api/client";
 import { subscribeTaskLogs } from "../api/sse";
 import type { Dependencies, LogLine, Task } from "../api/types";
@@ -8,6 +9,38 @@ import { AttachmentsPanel } from "./AttachmentsPanel";
 import { LogList } from "./LogList";
 import { Markdown } from "./Markdown";
 import { TerminalPane } from "./TerminalPane";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+
+const STATUS_BADGE: Record<string, string> = {
+  backlog: "border-status-backlog/50 text-status-backlog",
+  queued: "border-amber-300/50 text-amber-300",
+  processing: "border-status-processing/50 text-status-processing",
+  blocked: "border-status-blocked/50 text-status-blocked",
+  done: "text-muted-foreground",
+  archived: "text-muted-foreground",
+};
+
+function SectionTitle({ children, onClick }: { children: React.ReactNode; onClick?: () => void }) {
+  return (
+    <h3
+      className={`mb-1.5 mt-4 flex items-center gap-1 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground ${
+        onClick ? "hover:text-foreground" : ""
+      }`}
+      onClick={onClick}
+    >
+      {children}
+    </h3>
+  );
+}
 
 function AddBlockerInput({ taskId, onAdded }: { taskId: number; onAdded: () => void }) {
   const [value, setValue] = useState("");
@@ -29,22 +62,13 @@ function AddBlockerInput({ taskId, onAdded }: { taskId: number; onAdded: () => v
   }
 
   return (
-    <div className="dep" style={{ marginTop: 4 }}>
-      <input
-        value={value}
-        placeholder="block on #id"
-        style={{
-          background: "var(--bg)",
-          border: "1px solid var(--border)",
-          borderRadius: 5,
-          padding: "3px 8px",
-          width: 110,
-          outline: "none",
-        }}
-        onChange={(e) => setValue(e.target.value)}
-        onKeyDown={(e) => e.key === "Enter" && void add()}
-      />
-    </div>
+    <Input
+      className="mt-1 h-6 w-28 text-xs"
+      value={value}
+      placeholder="block on #id"
+      onChange={(e) => setValue(e.target.value)}
+      onKeyDown={(e) => e.key === "Enter" && void add()}
+    />
   );
 }
 
@@ -94,141 +118,167 @@ export function DetailView({ taskId }: { taskId: number }) {
 
   if (!task) {
     return (
-      <div className="detail">
-        <div className="boot-screen">Loading task #{taskId}…</div>
+      <div className="flex flex-1 items-center justify-center text-muted-foreground">
+        Loading task #{taskId}…
       </div>
     );
   }
 
   const blocked = task.status === "blocked";
+  const refreshDeps = () => api.deps(task.id).then(setDeps).catch(() => {});
 
   return (
-    <div className="detail">
-      <div className="detail-header">
-        <span className={`status-badge ${task.status}`}>{task.status}</span>
-        <span className="card-id">#{task.id}</span>
-        <span className="detail-title" title={task.title}>
+    <div className="flex min-h-0 flex-1 flex-col">
+      <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-white/[0.06] bg-white/[0.02] px-4 py-2.5">
+        <Badge variant="outline" className={STATUS_BADGE[task.status] ?? ""}>
+          {task.status}
+        </Badge>
+        <span className="font-mono text-[11px] text-muted-foreground">#{task.id}</span>
+        <span className="max-w-[44ch] truncate text-sm font-semibold" title={task.title}>
           {task.title}
         </span>
-        {task.pinned && <span className="badge pinned">📌</span>}
+        {task.pinned && <Pin className="size-3.5 text-amber-300" />}
         {task.permission_mode && task.permission_mode !== "default" && (
-          <span
-            className={`badge ${task.permission_mode === "dangerous" ? "needs-input" : ""}`}
+          <Badge
+            variant={task.permission_mode === "dangerous" ? "destructive" : "outline"}
             title="Permission mode"
           >
             {task.permission_mode}
-          </span>
+          </Badge>
         )}
 
-        <div className="spacer" style={{ flex: 1 }} />
+        <div className="flex-1" />
 
-        <select
+        <Select
           value={task.executor || "claude"}
-          title="Executor"
-          onChange={async (e) => {
-            await api.updateTask(task.id, { executor: e.target.value }).catch(() => {});
+          onValueChange={async (v) => {
+            await api.updateTask(task.id, { executor: v }).catch(() => {});
             void store.refreshTasks();
           }}
         >
-          {(executors.length ? executors : [{ name: "claude", available: true, default: true }]).map(
-            (ex) => (
-              <option key={ex.name} value={ex.name} disabled={!ex.available}>
-                {ex.name}
-                {ex.available ? "" : " (not installed)"}
-              </option>
-            ),
-          )}
-        </select>
+          <SelectTrigger size="sm" className="w-32" title="Executor">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            {(executors.length ? executors : [{ name: "claude", available: true, default: true }]).map(
+              (ex) => (
+                <SelectItem key={ex.name} value={ex.name} disabled={!ex.available}>
+                  {ex.name}
+                  {ex.available ? "" : " (not installed)"}
+                </SelectItem>
+              ),
+            )}
+          </SelectContent>
+        </Select>
 
         {blocked ? (
-          <button
-            className="btn primary"
-            onClick={() => store.setDialog({ kind: "retry", taskId: task.id })}
-          >
+          <Button size="sm" onClick={() => store.setDialog({ kind: "retry", taskId: task.id })}>
             Reply
-          </button>
+          </Button>
         ) : (
-          <button
-            className="btn primary"
+          <Button
+            size="sm"
             disabled={task.status === "processing" || task.status === "queued"}
             onClick={() => void store.executeTask(task.id)}
           >
             Execute
-          </button>
+          </Button>
         )}
-        <button className="btn" onClick={() => store.setForm({ kind: "edit", taskId: task.id })}>
+        <Button variant="outline" size="sm" onClick={() => store.setForm({ kind: "edit", taskId: task.id })}>
           Edit
-        </button>
+        </Button>
         {task.worktree_path && (
-          <button className="btn" title="Open worktree in editor (o)" onClick={() => void openInEditor(task.worktree_path!)}>
-            Editor
-          </button>
+          <Button
+            variant="outline"
+            size="sm"
+            title="Open worktree in editor (o)"
+            onClick={() => void openInEditor(task.worktree_path!)}
+          >
+            <Code2 className="size-3.5" /> Editor
+          </Button>
         )}
         {task.pr_url && (
-          <button className="btn" title="Open PR (G)" onClick={() => void openExternal(task.pr_url)}>
-            PR{task.pr_number ? ` #${task.pr_number}` : ""}
-          </button>
+          <Button
+            variant="outline"
+            size="sm"
+            title="Open PR (G)"
+            onClick={() => void openExternal(task.pr_url)}
+          >
+            <GitPullRequest className="size-3.5" />
+            {task.pr_number ? `#${task.pr_number}` : "PR"}
+          </Button>
         )}
-        <button className="btn" title="More actions (S)" onClick={() => store.setDialog({ kind: "status", taskId: task.id })}>
+        <Button
+          variant="outline"
+          size="sm"
+          title="Change status (S)"
+          onClick={() => store.setDialog({ kind: "status", taskId: task.id })}
+        >
           Status
-        </button>
+        </Button>
       </div>
 
-      <div className="detail-body">
-        <div className="detail-content" style={{ flex: "0 0 auto", maxHeight: "38%" }}>
-          {task.body ? <Markdown source={task.body} /> : <span className="empty-hint">No description</span>}
+      <div className="flex min-h-0 flex-1 flex-col">
+        <div className="max-h-[38%] shrink-0 overflow-y-auto border-b border-white/[0.06] px-5 py-3.5 select-text">
+          {task.body ? (
+            <Markdown source={task.body} />
+          ) : (
+            <span className="text-xs text-muted-foreground">No description</span>
+          )}
 
           {task.summary && (
             <>
-              <h3 className="section">Summary</h3>
+              <SectionTitle>Summary</SectionTitle>
               <Markdown source={task.summary} />
             </>
           )}
 
-          <h3 className="section">Dependencies</h3>
-          <div className="deps-list">
+          <SectionTitle>Dependencies</SectionTitle>
+          <div className="flex flex-col gap-1 text-[12.5px]">
             {deps?.blockers?.map((d) => (
-              <div key={`blocker-${d.id}`} className="dep">
-                <span>🔒 blocked by</span>
-                <a onClick={() => store.openDetail(d.id)}>
+              <div key={`blocker-${d.id}`} className="flex items-center gap-2">
+                <span className="text-muted-foreground">🔒 blocked by</span>
+                <a onClick={() => store.openDetail(d.id)} className="text-status-backlog">
                   #{d.id} {d.title}
                 </a>
-                <span className={`status-badge ${d.status}`}>{d.status}</span>
-                <button
-                  className="icon-btn"
+                <Badge variant="outline" className={`h-4.5 px-1.5 text-[10px] ${STATUS_BADGE[d.status] ?? ""}`}>
+                  {d.status}
+                </Badge>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="size-5"
                   title="Remove dependency"
                   onClick={async () => {
                     await api.removeBlocker(task.id, d.id).catch(() => {});
-                    api.deps(task.id).then(setDeps).catch(() => {});
+                    refreshDeps();
                   }}
                 >
                   ✕
-                </button>
+                </Button>
               </div>
             ))}
             {deps?.blocked_by?.map((d) => (
-              <div key={`blocks-${d.id}`} className="dep">
-                <span>⛓ blocks</span>
-                <a onClick={() => store.openDetail(d.id)}>
+              <div key={`blocks-${d.id}`} className="flex items-center gap-2">
+                <span className="text-muted-foreground">⛓ blocks</span>
+                <a onClick={() => store.openDetail(d.id)} className="text-status-backlog">
                   #{d.id} {d.title}
                 </a>
               </div>
             ))}
             {!deps?.blockers?.length && !deps?.blocked_by?.length && (
-              <span className="empty-hint">No dependencies</span>
+              <span className="text-xs text-muted-foreground">No dependencies</span>
             )}
-            <AddBlockerInput
-              taskId={task.id}
-              onAdded={() => api.deps(task.id).then(setDeps).catch(() => {})}
-            />
+            <AddBlockerInput taskId={task.id} onAdded={refreshDeps} />
           </div>
 
-          <h3 className="section">Attachments</h3>
+          <SectionTitle>Attachments</SectionTitle>
           <AttachmentsPanel taskId={task.id} />
 
-          <h3 className="section" style={{ cursor: "pointer" }} onClick={() => setShowLogs(!showLogs)}>
-            Execution log {showLogs ? "▾" : "▸"} <span style={{ fontWeight: 400 }}>({logs.length})</span>
-          </h3>
+          <SectionTitle onClick={() => setShowLogs(!showLogs)}>
+            {showLogs ? <ChevronDown className="size-3" /> : <ChevronRight className="size-3" />}
+            Execution log <span className="font-normal">({logs.length})</span>
+          </SectionTitle>
           {showLogs && <LogList logs={logs} />}
         </div>
 

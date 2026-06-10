@@ -1,7 +1,15 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useMemo, useState } from "react";
 import type { Task } from "../api/types";
 import { fuzzyScore } from "../lib/fuzzy";
 import { store, useAppState } from "../store";
+import {
+  CommandDialog,
+  CommandEmpty,
+  CommandInput,
+  CommandItem,
+  CommandList,
+} from "@/components/ui/command";
+import { Badge } from "@/components/ui/badge";
 
 const STATUS_PRIORITY: Record<string, number> = {
   blocked: 0,
@@ -12,23 +20,24 @@ const STATUS_PRIORITY: Record<string, number> = {
   archived: 5,
 };
 
+const STATUS_BADGE: Record<string, string> = {
+  backlog: "border-status-backlog/50 text-status-backlog",
+  queued: "border-amber-300/50 text-amber-300",
+  processing: "border-status-processing/50 text-status-processing",
+  blocked: "border-status-blocked/50 text-status-blocked",
+  done: "text-muted-foreground",
+  archived: "text-muted-foreground",
+};
+
 export function Palette() {
   const { tasks } = useAppState();
   const [query, setQuery] = useState("");
-  const [active, setActive] = useState(0);
-  const inputRef = useRef<HTMLInputElement>(null);
-
-  useEffect(() => {
-    inputRef.current?.focus();
-  }, []);
 
   const results = useMemo(() => {
     const q = query.trim();
     let matched: { task: Task; score: number }[];
     if (!q) {
-      matched = tasks
-        .filter((t) => t.status !== "archived")
-        .map((task) => ({ task, score: 0 }));
+      matched = tasks.filter((t) => t.status !== "archived").map((task) => ({ task, score: 0 }));
     } else {
       matched = tasks
         .map((task) => {
@@ -47,53 +56,38 @@ export function Palette() {
     return matched.slice(0, 30).map((r) => r.task);
   }, [tasks, query]);
 
-  useEffect(() => {
-    setActive(0);
-  }, [query]);
-
-  function select(task: Task) {
-    store.setPalette(false);
-    store.openDetail(task.id);
-  }
-
   return (
-    <div className="overlay" onMouseDown={() => store.setPalette(false)}>
-      <div className="modal palette" onMouseDown={(e) => e.stopPropagation()}>
-        <input
-          ref={inputRef}
-          value={query}
-          placeholder="Jump to task — type a title or #id"
-          onChange={(e) => setQuery(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "ArrowDown") {
-              e.preventDefault();
-              setActive((a) => Math.min(results.length - 1, a + 1));
-            } else if (e.key === "ArrowUp") {
-              e.preventDefault();
-              setActive((a) => Math.max(0, a - 1));
-            } else if (e.key === "Enter" && results[active]) {
-              select(results[active]);
-            } else if (e.key === "Escape") {
+    <CommandDialog
+      open
+      onOpenChange={(open) => !open && store.setPalette(false)}
+      shouldFilter={false}
+      title="Jump to task"
+      description="Search tasks by title or #id"
+    >
+      <CommandInput
+        placeholder="Jump to task — type a title or #id"
+        value={query}
+        onValueChange={setQuery}
+      />
+      <CommandList>
+        <CommandEmpty>No matching tasks</CommandEmpty>
+        {results.map((task) => (
+          <CommandItem
+            key={task.id}
+            value={String(task.id)}
+            onSelect={() => {
               store.setPalette(false);
-            }
-          }}
-        />
-        <div className="palette-results">
-          {results.length === 0 && <div className="column-empty">No matching tasks</div>}
-          {results.map((task, i) => (
-            <div
-              key={task.id}
-              className={`palette-item ${i === active ? "active" : ""}`}
-              onMouseEnter={() => setActive(i)}
-              onClick={() => select(task)}
-            >
-              <span className={`status-badge ${task.status}`}>{task.status}</span>
-              <span className="card-id">#{task.id}</span>
-              <span className="title">{task.title}</span>
-            </div>
-          ))}
-        </div>
-      </div>
-    </div>
+              store.openDetail(task.id);
+            }}
+          >
+            <Badge variant="outline" className={`h-4.5 px-1.5 text-[10px] ${STATUS_BADGE[task.status] ?? ""}`}>
+              {task.status}
+            </Badge>
+            <span className="font-mono text-[11px] text-muted-foreground">#{task.id}</span>
+            <span className="truncate">{task.title}</span>
+          </CommandItem>
+        ))}
+      </CommandList>
+    </CommandDialog>
   );
 }

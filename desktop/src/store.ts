@@ -1,4 +1,5 @@
 import { useSyncExternalStore } from "react";
+import { toast as sonnerToast } from "sonner";
 import { api } from "./api/client";
 import { subscribeBoard } from "./api/sse";
 import type { ExecutorInfo, LogLine, Project, Task, TaskType } from "./api/types";
@@ -22,7 +23,6 @@ export type FormState =
   | null;
 
 export interface Toast {
-  id: number;
   taskId?: number;
   title: string;
   body?: string;
@@ -45,7 +45,6 @@ export interface AppState {
   filterOpen: boolean;
   collapsed: { backlog: boolean; done: boolean };
   permissionMode: PermissionMode;
-  toasts: Toast[];
   dialog: Dialog;
   form: FormState;
   paletteOpen: boolean;
@@ -53,8 +52,6 @@ export interface AppState {
 }
 
 type Listener = () => void;
-
-let toastCounter = 0;
 
 class Store {
   private state: AppState = {
@@ -71,7 +68,6 @@ class Store {
     filterOpen: false,
     collapsed: { backlog: false, done: false },
     permissionMode: "",
-    toasts: [],
     dialog: null,
     form: null,
     paletteOpen: false,
@@ -239,18 +235,24 @@ class Store {
     });
   }
 
-  // --- Toasts ---
+  // --- Toasts (sonner) ---
 
-  toast(toast: Omit<Toast, "id">) {
-    const entry = { ...toast, id: ++toastCounter };
-    this.set({ toasts: [...this.state.toasts, entry] });
-    setTimeout(() => {
-      this.set({ toasts: this.state.toasts.filter((t) => t.id !== entry.id) });
-    }, toast.kind === "warning" || toast.kind === "error" ? 10000 : 5000);
-  }
-
-  dismissToast(id: number) {
-    this.set({ toasts: this.state.toasts.filter((t) => t.id !== id) });
+  toast(toast: Toast) {
+    const fn =
+      toast.kind === "success"
+        ? sonnerToast.success
+        : toast.kind === "warning"
+          ? sonnerToast.warning
+          : toast.kind === "error"
+            ? sonnerToast.error
+            : sonnerToast.info;
+    fn(toast.title, {
+      description: toast.body,
+      duration: toast.kind === "warning" || toast.kind === "error" ? 10000 : 5000,
+      action: toast.taskId
+        ? { label: "Open", onClick: () => this.openDetail(toast.taskId!) }
+        : undefined,
+    });
   }
 
   // --- Task mutations (refresh after each) ---
@@ -300,6 +302,29 @@ class Store {
 
   setTaskStatus(id: number, status: string) {
     return this.mutate(() => api.setStatus(id, status), `Failed to set status on #${id}`);
+  }
+
+  /** Drag-and-drop a card onto a column. Columns map to actions: In Progress
+   * queues the task for execution, Done closes it, others set the status. */
+  moveTaskToColumn(id: number, column: string) {
+    const task = this.state.tasks.find((t) => t.id === id);
+    if (!task) return;
+    switch (column) {
+      case "processing":
+        if (task.status !== "processing" && task.status !== "queued") {
+          void this.executeTask(id);
+        }
+        break;
+      case "done":
+        if (task.status !== "done") void this.closeTask(id);
+        break;
+      case "backlog":
+        if (task.status !== "backlog") void this.setTaskStatus(id, "backlog");
+        break;
+      case "blocked":
+        if (task.status !== "blocked") void this.setTaskStatus(id, "blocked");
+        break;
+    }
   }
 }
 

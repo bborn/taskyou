@@ -5,6 +5,7 @@ import { api } from "../api/client";
 import type { Task } from "../api/types";
 import { attachTaskTerminal, inTauri, ptyKill, ptyResize, ptyWrite } from "../tauri";
 import { store } from "../store";
+import { Button } from "@/components/ui/button";
 
 type TermState =
   | { kind: "loading" }
@@ -192,15 +193,15 @@ export function TerminalPane({ task }: { task: Task }) {
   }
 
   return (
-    <div className="terminal-area">
-      <div className="terminal-toolbar">
+    <div className="flex min-h-[160px] flex-1 flex-col bg-black/40">
+      <div className="flex items-center gap-2 border-b border-white/[0.06] px-3 py-1 text-[11px] text-muted-foreground">
         <span>Executor terminal</span>
-        {state.kind === "attached" && <span style={{ color: "var(--green)" }}>● live</span>}
-        <div className="spacer" style={{ flex: 1 }} />
+        {state.kind === "attached" && <span className="text-status-processing">● live</span>}
+        <div className="flex-1" />
         {state.kind === "attached" && (
-          <button className="icon-btn" title="Detach" onClick={() => detach(true)}>
+          <Button variant="ghost" size="icon" className="size-5" title="Detach" onClick={() => detach(true)}>
             ⏏
-          </button>
+          </Button>
         )}
       </div>
 
@@ -211,7 +212,7 @@ export function TerminalPane({ task }: { task: Task }) {
       />
 
       {state.kind !== "attached" && (
-        <div className="terminal-placeholder">
+        <div className="flex flex-1 flex-col items-center justify-center gap-2.5 text-muted-foreground">
           {state.kind === "loading" && <span>Connecting…</span>}
           {state.kind === "unsupported" && (
             <span>Terminal requires the desktop app (running in browser)</span>
@@ -224,26 +225,24 @@ export function TerminalPane({ task }: { task: Task }) {
                   : "No executor session running for this task"}
               </span>
               {task.status !== "queued" && task.status !== "processing" && (
-                <button className="btn primary" disabled={starting} onClick={() => void startSession()}>
+                <Button disabled={starting} onClick={() => void startSession()}>
                   {starting ? "Starting…" : `Start ${task.executor || "claude"} session`}
-                </button>
+                </Button>
               )}
             </>
           )}
           {state.kind === "exited" && (
             <>
               <span>Terminal detached</span>
-              <button className="btn primary" onClick={() => void attach()}>
-                Reattach
-              </button>
+              <Button onClick={() => void attach()}>Reattach</Button>
             </>
           )}
           {state.kind === "error" && (
             <>
-              <span style={{ color: "var(--red)" }}>{state.message}</span>
-              <button className="btn" onClick={() => void attach()}>
+              <span className="text-destructive">{state.message}</span>
+              <Button variant="outline" onClick={() => void attach()}>
                 Retry
-              </button>
+              </Button>
             </>
           )}
         </div>

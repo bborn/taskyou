@@ -3,6 +3,7 @@ import { api } from "../api/client";
 import type { Attachment } from "../api/types";
 import { openExternal } from "../tauri";
 import { store } from "../store";
+import { Button } from "@/components/ui/button";
 
 function formatSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -65,14 +66,20 @@ export function AttachmentsPanel({ taskId }: { taskId: number }) {
         if (e.dataTransfer.files.length) void upload(e.dataTransfer.files);
       }}
     >
-      <div className="attach-list">
-        {attachments.length === 0 && <span className="empty-hint">No attachments — drop files here</span>}
+      <div className="flex flex-col gap-1 text-[12.5px]">
+        {attachments.length === 0 && (
+          <span className="text-xs text-muted-foreground">No attachments — drop files here</span>
+        )}
         {attachments.map((a) => (
-          <div key={a.id} className="attach">
-            <a onClick={() => void openExternal(api.attachmentUrl(a.id))}>{a.filename}</a>
-            <span style={{ color: "var(--text-dim)" }}>{formatSize(a.size)}</span>
-            <button
-              className="icon-btn"
+          <div key={a.id} className="flex items-center gap-2">
+            <a className="text-status-backlog" onClick={() => void openExternal(api.attachmentUrl(a.id))}>
+              {a.filename}
+            </a>
+            <span className="text-muted-foreground">{formatSize(a.size)}</span>
+            <Button
+              variant="ghost"
+              size="icon"
+              className="size-5"
               title="Delete attachment"
               onClick={async () => {
                 await api.deleteAttachment(a.id).catch(() => {});
@@ -80,18 +87,19 @@ export function AttachmentsPanel({ taskId }: { taskId: number }) {
               }}
             >
               ✕
-            </button>
+            </Button>
           </div>
         ))}
       </div>
-      <button
-        className="btn"
-        style={{ marginTop: 8 }}
+      <Button
+        variant="outline"
+        size="sm"
+        className="mt-2"
         disabled={uploading}
         onClick={() => fileInputRef.current?.click()}
       >
         {uploading ? "Uploading…" : "Add files"}
-      </button>
+      </Button>
       <input
         ref={fileInputRef}
         type="file"

@@ -1,6 +1,26 @@
 import { useEffect, useRef, useState } from "react";
+import { X } from "lucide-react";
 import { api } from "../api/client";
 import { store, useAppState, type FormState } from "../store";
+import {
+  Dialog,
+  DialogContent,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Textarea } from "@/components/ui/textarea";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 
 async function fileToBase64(file: File): Promise<string> {
   const buf = await file.arrayBuffer();
@@ -13,14 +33,19 @@ async function fileToBase64(file: File): Promise<string> {
   return btoa(bin);
 }
 
+// Radix Select forbids empty-string item values; map "" through a sentinel.
+const NONE = "_default";
+const fromSelect = (v: string) => (v === NONE ? "" : v);
+const toSelect = (v: string) => (v === "" ? NONE : v);
+
 const PERMISSION_MODES = [
-  { value: "", label: "default (prompt)" },
+  { value: NONE, label: "default (prompt)" },
   { value: "accept-edits", label: "accept edits" },
   { value: "auto", label: "auto-approve safe" },
   { value: "dangerous", label: "dangerous (skip prompts)" },
 ];
 
-const EFFORT_LEVELS = ["", "low", "medium", "high"];
+const EFFORT_LEVELS = [NONE, "low", "medium", "high"];
 
 export function TaskForm({ form }: { form: NonNullable<FormState> }) {
   const { projects, types, executors, tasks, permissionMode } = useAppState();
@@ -47,16 +72,7 @@ export function TaskForm({ form }: { form: NonNullable<FormState> }) {
   const ghostTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
-    if (editing) {
-      setTitle(editing.title);
-      setBody(editing.body);
-      setProject(editing.project);
-      setType(editing.type || types[0]?.name || "");
-      setExecutor(editing.executor || "");
-      setEffort(editing.effort_level ?? "");
-    }
     titleRef.current?.focus();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Ghost-text autocomplete on the title, debounced; best-effort.
@@ -134,10 +150,9 @@ export function TaskForm({ form }: { form: NonNullable<FormState> }) {
   }
 
   return (
-    <div className="overlay" onMouseDown={close}>
-      <div
-        className="modal wide"
-        onMouseDown={(e) => e.stopPropagation()}
+    <Dialog open onOpenChange={(open) => !open && close()}>
+      <DialogContent
+        className="max-w-2xl"
         onDragOver={(e) => e.preventDefault()}
         onDrop={(e) => {
           e.preventDefault();
@@ -155,24 +170,36 @@ export function TaskForm({ form }: { form: NonNullable<FormState> }) {
           }
         }}
       >
-        <div className="modal-header">{form.kind === "new" ? "New task" : `Edit #${editing?.id}`}</div>
-        <div className="modal-body">
-          <div className="form-row">
-            <label>Project</label>
-            <select value={project} onChange={(e) => setProject(e.target.value)}>
-              {projects.map((p) => (
-                <option key={p.name} value={p.name}>
-                  {p.name}
-                </option>
-              ))}
-              {projects.length === 0 && <option value="">(no projects)</option>}
-            </select>
+        <DialogHeader>
+          <DialogTitle>{form.kind === "new" ? "New task" : `Edit #${editing?.id}`}</DialogTitle>
+        </DialogHeader>
+
+        <div className="flex max-h-[62vh] flex-col gap-3.5 overflow-y-auto pr-1">
+          <div className="grid gap-1.5">
+            <Label>Project</Label>
+            <Select value={project || NONE} onValueChange={(v) => setProject(fromSelect(v))}>
+              <SelectTrigger className="w-full">
+                <SelectValue placeholder="Select project" />
+              </SelectTrigger>
+              <SelectContent>
+                {projects.map((p) => (
+                  <SelectItem key={p.name} value={p.name}>
+                    <span
+                      className="mr-1 inline-block size-2 rounded-full"
+                      style={{ background: p.color || "var(--muted-foreground)" }}
+                    />
+                    {p.name}
+                  </SelectItem>
+                ))}
+                {projects.length === 0 && <SelectItem value={NONE}>(no projects)</SelectItem>}
+              </SelectContent>
+            </Select>
           </div>
 
-          <div className="form-row">
-            <label>Title</label>
-            <div className="ghost-wrap">
-              <input
+          <div className="grid gap-1.5">
+            <Label>Title</Label>
+            <div className="relative">
+              <Input
                 ref={titleRef}
                 value={title}
                 placeholder="What needs doing?"
@@ -186,112 +213,145 @@ export function TaskForm({ form }: { form: NonNullable<FormState> }) {
                 }}
               />
               {ghost && (
-                <div className="ghost-suggestion">
-                  <span style={{ visibility: "hidden" }}>{title}</span>
+                <div className="pointer-events-none absolute inset-0 flex items-center overflow-hidden whitespace-pre px-3 text-sm text-muted-foreground">
+                  <span className="invisible">{title}</span>
                   {ghost}
                 </div>
               )}
             </div>
-            {ghost && <span className="hint">Tab to accept suggestion</span>}
+            {ghost && (
+              <span className="text-[11px] text-muted-foreground">
+                <span className="kbd">Tab</span> to accept suggestion
+              </span>
+            )}
           </div>
 
-          <div className="form-row">
-            <label>Description (markdown)</label>
-            <textarea rows={7} value={body} onChange={(e) => setBody(e.target.value)} />
+          <div className="grid gap-1.5">
+            <Label>Description (markdown)</Label>
+            <Textarea rows={7} value={body} onChange={(e) => setBody(e.target.value)} />
           </div>
 
           {files.length > 0 && (
-            <div className="form-row">
-              <label>Attachments</label>
-              <div className="attach-list">
+            <div className="grid gap-1.5">
+              <Label>Attachments</Label>
+              <div className="flex flex-col gap-1">
                 {files.map((f, i) => (
-                  <div key={`${f.name}-${i}`} className="attach">
+                  <div key={`${f.name}-${i}`} className="flex items-center gap-2 text-xs">
                     <span>{f.name}</span>
-                    <button
-                      className="icon-btn"
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="size-5"
                       onClick={() => setFiles(files.filter((_, j) => j !== i))}
                     >
-                      ✕
-                    </button>
+                      <X className="size-3" />
+                    </Button>
                   </div>
                 ))}
               </div>
             </div>
           )}
 
-          <div className="form-grid">
-            <div className="form-row">
-              <label>Type</label>
-              <select value={type} onChange={(e) => setType(e.target.value)}>
-                {types.map((t) => (
-                  <option key={t.name} value={t.name}>
-                    {t.label || t.name}
-                  </option>
-                ))}
-                {types.length === 0 && <option value="task">task</option>}
-              </select>
+          <div className="grid grid-cols-2 gap-3.5">
+            <div className="grid gap-1.5">
+              <Label>Type</Label>
+              <Select value={type || NONE} onValueChange={(v) => setType(fromSelect(v))}>
+                <SelectTrigger className="w-full">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {types.map((t) => (
+                    <SelectItem key={t.name} value={t.name}>
+                      {t.label || t.name}
+                    </SelectItem>
+                  ))}
+                  {types.length === 0 && <SelectItem value={NONE}>default</SelectItem>}
+                </SelectContent>
+              </Select>
             </div>
-            <div className="form-row">
-              <label>Executor</label>
-              <select value={executor} onChange={(e) => setExecutor(e.target.value)}>
-                <option value="">default</option>
-                {executors.map((ex) => (
-                  <option key={ex.name} value={ex.name} disabled={!ex.available}>
-                    {ex.name}
-                    {ex.available ? "" : " (not installed)"}
-                  </option>
-                ))}
-              </select>
+            <div className="grid gap-1.5">
+              <Label>Executor</Label>
+              <Select value={toSelect(executor)} onValueChange={(v) => setExecutor(fromSelect(v))}>
+                <SelectTrigger className="w-full">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value={NONE}>default</SelectItem>
+                  {executors.map((ex) => (
+                    <SelectItem key={ex.name} value={ex.name} disabled={!ex.available}>
+                      {ex.name}
+                      {ex.available ? "" : " (not installed)"}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
             </div>
           </div>
 
-          <button className="icon-btn" onClick={() => setShowAdvanced(!showAdvanced)}>
+          <button
+            className="self-start text-xs text-muted-foreground hover:text-foreground"
+            onClick={() => setShowAdvanced(!showAdvanced)}
+          >
             {showAdvanced ? "▾" : "▸"} Advanced
           </button>
           {showAdvanced && (
-            <div className="form-grid" style={{ marginTop: 8 }}>
-              <div className="form-row">
-                <label>Effort</label>
-                <select value={effort} onChange={(e) => setEffort(e.target.value)}>
-                  {EFFORT_LEVELS.map((l) => (
-                    <option key={l} value={l}>
-                      {l || "default"}
-                    </option>
-                  ))}
-                </select>
+            <div className="grid grid-cols-2 gap-3.5">
+              <div className="grid gap-1.5">
+                <Label>Effort</Label>
+                <Select value={toSelect(effort)} onValueChange={(v) => setEffort(fromSelect(v))}>
+                  <SelectTrigger className="w-full">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {EFFORT_LEVELS.map((l) => (
+                      <SelectItem key={l} value={l}>
+                        {l === NONE ? "default" : l}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
               </div>
-              <div className="form-row">
-                <label>Permission mode</label>
-                <select value={permission} onChange={(e) => setPermission(e.target.value)}>
-                  {PERMISSION_MODES.map((m) => (
-                    <option key={m.value} value={m.value}>
-                      {m.label}
-                    </option>
-                  ))}
-                </select>
+              <div className="grid gap-1.5">
+                <Label>Permission mode</Label>
+                <Select value={toSelect(permission)} onValueChange={(v) => setPermission(fromSelect(v))}>
+                  <SelectTrigger className="w-full">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {PERMISSION_MODES.map((m) => (
+                      <SelectItem key={m.value} value={m.value}>
+                        {m.label}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
               </div>
             </div>
           )}
         </div>
-        <div className="modal-footer">
+
+        <DialogFooter className="items-center">
           {form.kind === "new" && (
-            <label style={{ display: "flex", gap: 6, alignItems: "center", marginRight: "auto" }}>
-              <input
-                type="checkbox"
+            <div className="mr-auto flex items-center gap-2">
+              <Checkbox
+                id="execute-now"
                 checked={executeNow}
-                onChange={(e) => setExecuteNow(e.target.checked)}
+                onCheckedChange={(v) => setExecuteNow(v === true)}
               />
-              Execute immediately
-            </label>
+              <Label htmlFor="execute-now" className="text-xs font-normal">
+                Execute immediately
+              </Label>
+            </div>
           )}
-          <button className="btn" onClick={close}>
+          <Button variant="outline" onClick={close}>
             Cancel
-          </button>
-          <button className="btn primary" disabled={saving} onClick={() => void submit()}>
-            {saving ? "Saving…" : form.kind === "new" ? "Create (⌘S)" : "Save (⌘S)"}
-          </button>
-        </div>
-      </div>
-    </div>
+          </Button>
+          <Button disabled={saving} onClick={() => void submit()}>
+            {saving ? "Saving…" : form.kind === "new" ? "Create" : "Save"}
+            <span className="kbd ml-1">⌘S</span>
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }

@@ -153,12 +153,112 @@ fn open_in_editor(path: String) -> Result<(), String> {
     open_external(path)
 }
 
+/// Native menu bar. Standard Edit roles make ⌘C/⌘V/⌘Z work in the webview;
+/// app-specific items emit a "menu" event the frontend routes.
+fn build_menu(app: &tauri::App) -> tauri::Result<()> {
+    use tauri::menu::{AboutMetadata, Menu, MenuItem, PredefinedMenuItem, Submenu};
+
+    let handle = app.handle();
+    let app_menu = Submenu::with_items(
+        handle,
+        "TaskYou",
+        true,
+        &[
+            &PredefinedMenuItem::about(handle, None, Some(AboutMetadata::default()))?,
+            &PredefinedMenuItem::separator(handle)?,
+            &MenuItem::with_id(handle, "settings", "Settings…", true, Some("Cmd+,"))?,
+            &PredefinedMenuItem::separator(handle)?,
+            &PredefinedMenuItem::services(handle, None)?,
+            &PredefinedMenuItem::separator(handle)?,
+            &PredefinedMenuItem::hide(handle, None)?,
+            &PredefinedMenuItem::hide_others(handle, None)?,
+            &PredefinedMenuItem::show_all(handle, None)?,
+            &PredefinedMenuItem::separator(handle)?,
+            &PredefinedMenuItem::quit(handle, None)?,
+        ],
+    )?;
+    let file_menu = Submenu::with_items(
+        handle,
+        "File",
+        true,
+        &[&MenuItem::with_id(
+            handle,
+            "new-task",
+            "New Task",
+            true,
+            Some("Cmd+N"),
+        )?],
+    )?;
+    let edit_menu = Submenu::with_items(
+        handle,
+        "Edit",
+        true,
+        &[
+            &PredefinedMenuItem::undo(handle, None)?,
+            &PredefinedMenuItem::redo(handle, None)?,
+            &PredefinedMenuItem::separator(handle)?,
+            &PredefinedMenuItem::cut(handle, None)?,
+            &PredefinedMenuItem::copy(handle, None)?,
+            &PredefinedMenuItem::paste(handle, None)?,
+            &PredefinedMenuItem::select_all(handle, None)?,
+        ],
+    )?;
+    let view_menu = Submenu::with_items(
+        handle,
+        "View",
+        true,
+        &[
+            &MenuItem::with_id(handle, "board", "Board", true, Some("Cmd+1"))?,
+            &MenuItem::with_id(handle, "search", "Search Tasks…", true, Some("Cmd+P"))?,
+            &PredefinedMenuItem::separator(handle)?,
+            &PredefinedMenuItem::fullscreen(handle, None)?,
+        ],
+    )?;
+    let window_menu = Submenu::with_items(
+        handle,
+        "Window",
+        true,
+        &[
+            &PredefinedMenuItem::minimize(handle, None)?,
+            &PredefinedMenuItem::maximize(handle, None)?,
+            &PredefinedMenuItem::separator(handle)?,
+            &PredefinedMenuItem::close_window(handle, None)?,
+        ],
+    )?;
+    let menu = Menu::with_items(
+        handle,
+        &[&app_menu, &file_menu, &edit_menu, &view_menu, &window_menu],
+    )?;
+    app.set_menu(menu)?;
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
         .manage(PtyManager::default())
         .manage(Supervisor::new(supervisor::load_config()))
+        .setup(|app| {
+            build_menu(app)?;
+
+            // Translucent macOS material behind the (transparent) webview.
+            #[cfg(target_os = "macos")]
+            if let Some(window) = app.get_webview_window("main") {
+                use window_vibrancy::{apply_vibrancy, NSVisualEffectMaterial};
+                let _ = apply_vibrancy(
+                    &window,
+                    NSVisualEffectMaterial::UnderWindowBackground,
+                    None,
+                    None,
+                );
+            }
+            Ok(())
+        })
+        .on_menu_event(|app, event| {
+            use tauri::Emitter;
+            let _ = app.emit("menu", event.id().0.clone());
+        })
         .invoke_handler(tauri::generate_handler![
             pty_spawn,
             pty_write,

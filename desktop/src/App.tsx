@@ -1,4 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { listen } from "@tauri-apps/api/event";
+import { Plus, Search, Settings2, ChevronLeft } from "lucide-react";
 import { setApiBase } from "./api/client";
 import { applyFilter, buildColumns } from "./lib/board";
 import { store, useAppState } from "./store";
@@ -9,8 +11,10 @@ import { SettingsView } from "./components/SettingsView";
 import { Palette } from "./components/Palette";
 import { TaskForm } from "./components/TaskForm";
 import { Dialogs } from "./components/Dialogs";
-import { Toasts } from "./components/Toasts";
 import { FilterBar } from "./components/FilterBar";
+import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
+import { Toaster } from "@/components/ui/sonner";
 
 function isEditableTarget(target: EventTarget | null): boolean {
   if (!(target instanceof HTMLElement)) return false;
@@ -52,14 +56,32 @@ export default function App() {
     })();
   }, []);
 
+  // --- Native menu events ---
+  useEffect(() => {
+    if (!inTauri()) return;
+    const unlisten = listen<string>("menu", ({ payload }) => {
+      switch (payload) {
+        case "new-task":
+          return void store.setForm({ kind: "new" });
+        case "settings":
+          return void store.openSettings();
+        case "board":
+          return void store.openBoard();
+        case "search":
+          return void store.setPalette(true);
+      }
+    });
+    return () => {
+      void unlisten.then((fn) => fn());
+    };
+  }, []);
+
   const projectNames = useMemo(() => state.projects.map((p) => p.name), [state.projects]);
   const filteredTasks = useMemo(
     () => applyFilter(state.tasks, state.filter, projectNames),
     [state.tasks, state.filter, projectNames],
   );
   const columns = useMemo(() => buildColumns(filteredTasks), [filteredTasks]);
-
-  const selectedTask = state.tasks.find((t) => t.id === state.selectedTaskId) ?? null;
 
   // --- Selection helpers (shared by keyboard + board) ---
   const selectionPos = useMemo(() => {
@@ -261,21 +283,15 @@ export default function App() {
 
   if (bootPhase !== "ready") {
     return (
-      <div className="boot-screen">
-        <h1>TaskYou</h1>
+      <div
+        data-tauri-drag-region
+        className="flex h-full flex-col items-center justify-center gap-4 bg-background text-muted-foreground"
+      >
+        <h1 className="text-lg font-semibold text-foreground">TaskYou</h1>
         {bootPhase === "error" ? (
           <>
-            <div className="error">{bootMessage}</div>
-            <button
-              className="btn primary"
-              onClick={() => {
-                bootedRef.current = false;
-                setBootPhase("starting");
-                window.location.reload();
-              }}
-            >
-              Retry
-            </button>
+            <div className="max-w-md select-text text-center text-destructive">{bootMessage}</div>
+            <Button onClick={() => window.location.reload()}>Retry</Button>
           </>
         ) : (
           <div>{bootMessage}</div>
@@ -284,38 +300,70 @@ export default function App() {
     );
   }
 
+  const permLabel = state.permissionMode === "" ? "default" : state.permissionMode;
+
   return (
-    <div className="app">
-      <div className="topbar">
-        <h1 onClick={() => store.openBoard()} style={{ cursor: "pointer" }}>
-          TaskYou
-        </h1>
-        {state.view.kind !== "board" && (
-          <button className="icon-btn" onClick={() => store.openBoard()}>
-            ← Board
-          </button>
-        )}
-        <div className="spacer" />
+    <div className="flex h-full flex-col bg-background">
+      {/* Titlebar: overlay style — traffic lights sit in the left inset; the
+          whole bar is a drag region. */}
+      <header
+        data-tauri-drag-region
+        className={`flex h-11 shrink-0 items-center gap-1.5 border-b border-white/[0.06] bg-white/[0.03] pr-2 ${
+          inTauri() ? "pl-20" : "pl-3"
+        }`}
+      >
         <span
-          className={`perm-badge ${state.permissionMode || "default"}`}
+          data-tauri-drag-region
+          className="text-[13px] font-semibold tracking-tight text-foreground/90"
+          onDoubleClick={() => store.openBoard()}
+        >
+          TaskYou
+        </span>
+        {state.view.kind !== "board" && (
+          <Button variant="ghost" size="sm" className="h-7 px-2" onClick={() => store.openBoard()}>
+            <ChevronLeft data-no-drag /> Board
+          </Button>
+        )}
+        <div data-tauri-drag-region className="flex-1" />
+        <Badge
+          variant={state.permissionMode === "dangerous" ? "destructive" : "outline"}
+          className={state.permissionMode === "auto" ? "border-status-processing/50 text-status-processing" : ""}
           title="Permission mode for new executions (press !)"
           onClick={() => store.cyclePermissionMode()}
         >
-          {state.permissionMode === "" ? "default" : state.permissionMode}
-        </span>
-        <button className="icon-btn" title="New task (n)" onClick={() => store.setForm({ kind: "new" })}>
-          ＋ New
-        </button>
-        <button className="icon-btn" title="Search (p)" onClick={() => store.setPalette(true)}>
-          ⌕
-        </button>
-        <button className="icon-btn" title="Settings (s)" onClick={() => store.openSettings()}>
-          ⚙
-        </button>
-      </div>
+          {permLabel}
+        </Badge>
+        <Button
+          variant="ghost"
+          size="sm"
+          className="h-7"
+          title="New task (n / ⌘N)"
+          onClick={() => store.setForm({ kind: "new" })}
+        >
+          <Plus className="size-4" /> New
+        </Button>
+        <Button
+          variant="ghost"
+          size="icon"
+          className="size-7"
+          title="Search (⌘P)"
+          onClick={() => store.setPalette(true)}
+        >
+          <Search className="size-4" />
+        </Button>
+        <Button
+          variant="ghost"
+          size="icon"
+          className="size-7"
+          title="Settings (⌘,)"
+          onClick={() => store.openSettings()}
+        >
+          <Settings2 className="size-4" />
+        </Button>
+      </header>
 
       {state.view.kind === "board" && (
-        <div className="app-main">
+        <div className="flex min-h-0 flex-1 flex-col">
           {state.filterOpen && <FilterBar />}
           <Board columns={columns} collapsed={state.collapsed} />
         </div>
@@ -326,8 +374,7 @@ export default function App() {
       {state.paletteOpen && <Palette />}
       {state.form && <TaskForm form={state.form} />}
       <Dialogs />
-      <Toasts />
-      {selectedTask && null}
+      <Toaster position="bottom-right" richColors closeButton />
     </div>
   );
 }

@@ -1,5 +1,33 @@
-import { useEffect, useRef, useState } from "react";
+import { useState } from "react";
 import { store, useAppState } from "../store";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
+import {
+  Dialog,
+  DialogContent,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Label } from "@/components/ui/label";
+import { Textarea } from "@/components/ui/textarea";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 
 export function Dialogs() {
   const { dialog } = useAppState();
@@ -28,34 +56,27 @@ function ConfirmDialog({
   danger?: boolean;
   onConfirm: () => void;
 }) {
-  const confirmRef = useRef<HTMLButtonElement>(null);
-  useEffect(() => confirmRef.current?.focus(), []);
-
-  function confirm() {
-    store.setDialog(null);
-    onConfirm();
-  }
-
   return (
-    <div className="overlay" onMouseDown={() => store.setDialog(null)}>
-      <div className="modal" onMouseDown={(e) => e.stopPropagation()}>
-        <div className="modal-header">{title}</div>
-        <div className="modal-body">{message}</div>
-        <div className="modal-footer">
-          <button className="btn" onClick={() => store.setDialog(null)}>
-            Cancel
-          </button>
-          <button
-            ref={confirmRef}
-            className={`btn ${danger ? "danger" : "primary"}`}
-            onClick={confirm}
-            onKeyDown={(e) => e.key === "Enter" && confirm()}
+    <AlertDialog open onOpenChange={(open) => !open && store.setDialog(null)}>
+      <AlertDialogContent>
+        <AlertDialogHeader>
+          <AlertDialogTitle>{title}</AlertDialogTitle>
+          <AlertDialogDescription>{message}</AlertDialogDescription>
+        </AlertDialogHeader>
+        <AlertDialogFooter>
+          <AlertDialogCancel>Cancel</AlertDialogCancel>
+          <AlertDialogAction
+            className={danger ? "bg-destructive text-white hover:bg-destructive/90" : ""}
+            onClick={() => {
+              store.setDialog(null);
+              onConfirm();
+            }}
           >
             Confirm
-          </button>
-        </div>
-      </div>
-    </div>
+          </AlertDialogAction>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
   );
 }
 
@@ -64,8 +85,6 @@ function RetryDialog({ taskId }: { taskId: number }) {
   const task = tasks.find((t) => t.id === taskId);
   const [feedback, setFeedback] = useState("");
   const [dangerous, setDangerous] = useState(false);
-  const textareaRef = useRef<HTMLTextAreaElement>(null);
-  useEffect(() => textareaRef.current?.focus(), []);
 
   async function submit() {
     store.setDialog(null);
@@ -77,45 +96,46 @@ function RetryDialog({ taskId }: { taskId: number }) {
   }
 
   return (
-    <div className="overlay" onMouseDown={() => store.setDialog(null)}>
-      <div className="modal" onMouseDown={(e) => e.stopPropagation()}>
-        <div className="modal-header">
-          Reply to #{taskId} {task ? `— ${task.title}` : ""}
-        </div>
-        <div className="modal-body">
-          <div className="form-row">
-            <label>Feedback / answer</label>
-            <textarea
-              ref={textareaRef}
-              rows={5}
-              value={feedback}
-              placeholder="Answer the executor's question or give new instructions…"
-              onChange={(e) => setFeedback(e.target.value)}
-              onKeyDown={(e) => {
-                if ((e.metaKey || e.ctrlKey) && e.key === "Enter") void submit();
-              }}
-            />
-            <span className="hint">⌘↩ to send</span>
-          </div>
-          <label style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 12 }}>
-            <input
-              type="checkbox"
+    <Dialog open onOpenChange={(open) => !open && store.setDialog(null)}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>
+            Reply to #{taskId}
+            {task ? ` — ${task.title}` : ""}
+          </DialogTitle>
+        </DialogHeader>
+        <div className="flex flex-col gap-3">
+          <Textarea
+            autoFocus
+            rows={5}
+            value={feedback}
+            placeholder="Answer the executor's question or give new instructions…"
+            onChange={(e) => setFeedback(e.target.value)}
+            onKeyDown={(e) => {
+              if ((e.metaKey || e.ctrlKey) && e.key === "Enter") void submit();
+            }}
+          />
+          <div className="flex items-center gap-2">
+            <Checkbox
+              id="retry-dangerous"
               checked={dangerous}
-              onChange={(e) => setDangerous(e.target.checked)}
+              onCheckedChange={(v) => setDangerous(v === true)}
             />
-            Resume in dangerous mode (skip permission prompts)
-          </label>
+            <Label htmlFor="retry-dangerous" className="text-xs font-normal">
+              Resume in dangerous mode (skip permission prompts)
+            </Label>
+          </div>
         </div>
-        <div className="modal-footer">
-          <button className="btn" onClick={() => store.setDialog(null)}>
+        <DialogFooter>
+          <Button variant="outline" onClick={() => store.setDialog(null)}>
             Cancel
-          </button>
-          <button className="btn primary" onClick={() => void submit()}>
-            Send & resume
-          </button>
-        </div>
-      </div>
-    </div>
+          </Button>
+          <Button onClick={() => void submit()}>
+            Send & resume <span className="kbd ml-1">⌘↩</span>
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
 
@@ -127,44 +147,45 @@ function StatusDialog({ taskId }: { taskId: number }) {
   const [status, setStatus] = useState<string>(task?.status ?? "backlog");
 
   return (
-    <div className="overlay" onMouseDown={() => store.setDialog(null)}>
-      <div className="modal" onMouseDown={(e) => e.stopPropagation()}>
-        <div className="modal-header">Change status of #{taskId}</div>
-        <div className="modal-body">
-          <div className="form-row">
-            <label>Status</label>
-            <select value={status} onChange={(e) => setStatus(e.target.value)} autoFocus>
-              {STATUSES.map((s) => (
-                <option key={s} value={s}>
-                  {s}
-                </option>
-              ))}
-            </select>
-          </div>
-        </div>
-        <div className="modal-footer">
-          <button className="btn" onClick={() => store.setDialog(null)}>
+    <Dialog open onOpenChange={(open) => !open && store.setDialog(null)}>
+      <DialogContent className="max-w-sm">
+        <DialogHeader>
+          <DialogTitle>Change status of #{taskId}</DialogTitle>
+        </DialogHeader>
+        <Select value={status} onValueChange={setStatus}>
+          <SelectTrigger className="w-full">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            {STATUSES.map((s) => (
+              <SelectItem key={s} value={s}>
+                {s}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+        <DialogFooter>
+          <Button variant="outline" onClick={() => store.setDialog(null)}>
             Cancel
-          </button>
-          <button
-            className="btn primary"
+          </Button>
+          <Button
             onClick={() => {
               store.setDialog(null);
               void store.setTaskStatus(taskId, status);
             }}
           >
             Apply
-          </button>
-        </div>
-      </div>
-    </div>
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
 
 const HELP: [string, string][] = [
   ["↑↓←→", "Navigate board"],
   ["Enter", "Open task"],
-  ["n", "New task"],
+  ["n / ⌘N", "New task"],
   ["e", "Edit task"],
   ["x / X", "Execute / execute dangerously"],
   ["r", "Reply to blocked task"],
@@ -187,26 +208,26 @@ const HELP: [string, string][] = [
 
 function HelpDialog() {
   return (
-    <div className="overlay" onMouseDown={() => store.setDialog(null)}>
-      <div className="modal" onMouseDown={(e) => e.stopPropagation()}>
-        <div className="modal-header">Keyboard shortcuts</div>
-        <div className="modal-body">
-          <div className="help-grid">
-            {HELP.map(([key, desc]) => (
-              <KeyRow key={key} k={key} desc={desc} />
-            ))}
-          </div>
+    <Dialog open onOpenChange={(open) => !open && store.setDialog(null)}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Keyboard shortcuts</DialogTitle>
+        </DialogHeader>
+        <div className="grid grid-cols-[auto_1fr_auto_1fr] gap-x-4 gap-y-1.5 text-[12.5px]">
+          {HELP.map(([key, desc]) => (
+            <KeyRow key={key} k={key} desc={desc} />
+          ))}
         </div>
-      </div>
-    </div>
+      </DialogContent>
+    </Dialog>
   );
 }
 
 function KeyRow({ k, desc }: { k: string; desc: string }) {
   return (
     <>
-      <span className="kbd">{k}</span>
-      <span>{desc}</span>
+      <span className="kbd justify-self-start">{k}</span>
+      <span className="text-muted-foreground">{desc}</span>
     </>
   );
 }

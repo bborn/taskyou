@@ -3,10 +3,23 @@ import { api } from "../api/client";
 import type { Project, TaskType } from "../api/types";
 import { inTauri, supervisorGetConfig, supervisorSetConfig, supervisorStatus } from "../tauri";
 import { store, useAppState } from "../store";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Switch } from "@/components/ui/switch";
+import { Textarea } from "@/components/ui/textarea";
+
+function SectionHeading({ children }: { children: React.ReactNode }) {
+  return (
+    <h2 className="mb-2.5 mt-7 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground first:mt-0">
+      {children}
+    </h2>
+  );
+}
 
 export function SettingsView() {
   return (
-    <div className="settings">
+    <div className="max-w-3xl flex-1 overflow-y-auto px-6 py-5">
       <ConnectionSettings />
       <ProjectSettings />
       <TypeSettings />
@@ -36,21 +49,26 @@ function ConnectionSettings() {
 
   return (
     <>
-      <h2>Connection</h2>
-      <div className="form-grid">
-        <div className="form-row">
-          <label>API port</label>
-          <input value={port} onChange={(e) => setPort(e.target.value)} />
+      <SectionHeading>Connection</SectionHeading>
+      <div className="grid grid-cols-2 gap-3.5">
+        <div className="grid gap-1.5">
+          <Label>API port</Label>
+          <Input value={port} onChange={(e) => setPort(e.target.value)} />
         </div>
-        <div className="form-row">
-          <label>ty binary path (blank = auto-detect)</label>
-          <input value={tyPath} placeholder="/usr/local/bin/ty" onChange={(e) => setTyPath(e.target.value)} />
+        <div className="grid gap-1.5">
+          <Label>ty binary path (blank = auto-detect)</Label>
+          <Input
+            value={tyPath}
+            placeholder="/usr/local/bin/ty"
+            onChange={(e) => setTyPath(e.target.value)}
+          />
         </div>
       </div>
-      <div className="empty-hint">{status}</div>
-      <button
-        className="btn"
-        style={{ marginTop: 8 }}
+      <p className="mt-2 text-xs text-muted-foreground">{status}</p>
+      <Button
+        variant="outline"
+        size="sm"
+        className="mt-2"
         onClick={async () => {
           const parsed = parseInt(port, 10);
           if (!parsed || parsed < 1 || parsed > 65535) {
@@ -62,7 +80,7 @@ function ConnectionSettings() {
         }}
       >
         Save connection settings
-      </button>
+      </Button>
     </>
   );
 }
@@ -98,126 +116,134 @@ function ProjectSettings() {
 
   return (
     <>
-      <h2>Projects</h2>
-      <table>
-        <tbody>
-          {projects.map((p) => (
-            <tr key={p.name}>
-              <td style={{ color: p.color || undefined }}>{p.name}</td>
-              <td style={{ color: "var(--text-dim)" }}>{p.path}</td>
-              <td style={{ color: "var(--text-dim)" }}>{p.task_count} tasks</td>
-              <td className="actions">
-                <button
-                  className="icon-btn"
-                  onClick={() => {
-                    setEditing({ ...p });
-                    setIsNew(false);
-                  }}
-                >
-                  Edit
-                </button>
-                <button
-                  className="icon-btn"
-                  onClick={() =>
-                    store.setDialog({
-                      kind: "confirm",
-                      title: `Delete project ${p.name}?`,
-                      message: "Tasks keep their project label but lose project settings.",
-                      danger: true,
-                      onConfirm: async () => {
-                        await api.deleteProject(p.name).catch((e) =>
-                          store.toast({ title: "Delete failed", body: String(e), kind: "error" }),
-                        );
-                        await store.loadAll();
-                      },
-                    })
-                  }
-                >
-                  Delete
-                </button>
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-      <button
-        className="btn"
-        style={{ marginTop: 8 }}
+      <SectionHeading>Projects</SectionHeading>
+      <div className="divide-y divide-white/[0.06] rounded-lg border border-white/[0.08]">
+        {projects.map((p) => (
+          <div key={p.name} className="flex items-center gap-3 px-3 py-2 text-[12.5px]">
+            <span
+              className="inline-block size-2 shrink-0 rounded-full"
+              style={{ background: p.color || "var(--muted-foreground)" }}
+            />
+            <span className="font-medium">{p.name}</span>
+            <span className="truncate text-muted-foreground">{p.path}</span>
+            <span className="ml-auto shrink-0 text-muted-foreground">{p.task_count} tasks</span>
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-6 px-2"
+              onClick={() => {
+                setEditing({ ...p });
+                setIsNew(false);
+              }}
+            >
+              Edit
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-6 px-2 text-destructive"
+              onClick={() =>
+                store.setDialog({
+                  kind: "confirm",
+                  title: `Delete project ${p.name}?`,
+                  message: "Tasks keep their project label but lose project settings.",
+                  danger: true,
+                  onConfirm: async () => {
+                    await api
+                      .deleteProject(p.name)
+                      .catch((e) => store.toast({ title: "Delete failed", body: String(e), kind: "error" }));
+                    await store.loadAll();
+                  },
+                })
+              }
+            >
+              Delete
+            </Button>
+          </div>
+        ))}
+        {projects.length === 0 && (
+          <div className="px-3 py-4 text-center text-xs text-muted-foreground">No projects yet</div>
+        )}
+      </div>
+      <Button
+        variant="outline"
+        size="sm"
+        className="mt-2"
         onClick={() => {
           setEditing({ ...EMPTY_PROJECT });
           setIsNew(true);
         }}
       >
         Add project
-      </button>
+      </Button>
 
       {editing && (
-        <div style={{ marginTop: 12, padding: 12, border: "1px solid var(--border)", borderRadius: 8 }}>
-          <div className="form-grid">
-            <div className="form-row">
-              <label>Name</label>
-              <input
+        <div className="mt-3 rounded-lg border border-white/[0.08] p-3.5">
+          <div className="grid grid-cols-2 gap-3.5">
+            <div className="grid gap-1.5">
+              <Label>Name</Label>
+              <Input
                 value={editing.name ?? ""}
                 disabled={!isNew}
                 onChange={(e) => setEditing({ ...editing, name: e.target.value })}
               />
             </div>
-            <div className="form-row">
-              <label>Path</label>
-              <input
+            <div className="grid gap-1.5">
+              <Label>Path</Label>
+              <Input
                 value={editing.path ?? ""}
                 placeholder="/Users/you/Projects/app"
                 onChange={(e) => setEditing({ ...editing, path: e.target.value })}
               />
             </div>
-            <div className="form-row">
-              <label>Color</label>
-              <input
+            <div className="grid gap-1.5">
+              <Label>Color</Label>
+              <Input
                 value={editing.color ?? ""}
                 placeholder="#7aa2f7"
                 onChange={(e) => setEditing({ ...editing, color: e.target.value })}
               />
             </div>
-            <div className="form-row">
-              <label>Aliases (comma-separated)</label>
-              <input
+            <div className="grid gap-1.5">
+              <Label>Aliases (comma-separated)</Label>
+              <Input
                 value={editing.aliases ?? ""}
                 onChange={(e) => setEditing({ ...editing, aliases: e.target.value })}
               />
             </div>
-            <div className="form-row">
-              <label>Claude config dir</label>
-              <input
+            <div className="grid gap-1.5">
+              <Label>Claude config dir</Label>
+              <Input
                 value={editing.claude_config_dir ?? ""}
                 onChange={(e) => setEditing({ ...editing, claude_config_dir: e.target.value })}
               />
             </div>
-            <div className="form-row">
-              <label>Use worktrees</label>
-              <select
-                value={editing.use_worktrees === false ? "no" : "yes"}
-                onChange={(e) => setEditing({ ...editing, use_worktrees: e.target.value === "yes" })}
-              >
-                <option value="yes">yes</option>
-                <option value="no">no</option>
-              </select>
+            <div className="flex items-center gap-2 self-end pb-1.5">
+              <Switch
+                id="use-worktrees"
+                checked={editing.use_worktrees !== false}
+                onCheckedChange={(v) => setEditing({ ...editing, use_worktrees: v })}
+              />
+              <Label htmlFor="use-worktrees" className="font-normal">
+                Use worktrees
+              </Label>
             </div>
           </div>
-          <div className="form-row">
-            <label>Instructions</label>
-            <textarea
+          <div className="mt-3 grid gap-1.5">
+            <Label>Instructions</Label>
+            <Textarea
               rows={4}
               value={editing.instructions ?? ""}
               onChange={(e) => setEditing({ ...editing, instructions: e.target.value })}
             />
           </div>
-          <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
-            <button className="btn" onClick={() => setEditing(null)}>
+          <div className="mt-3 flex justify-end gap-2">
+            <Button variant="outline" size="sm" onClick={() => setEditing(null)}>
               Cancel
-            </button>
-            <button className="btn primary" onClick={() => void save()}>
+            </Button>
+            <Button size="sm" onClick={() => void save()}>
               Save project
-            </button>
+            </Button>
           </div>
         </div>
       )}
@@ -254,94 +280,96 @@ function TypeSettings() {
 
   return (
     <>
-      <h2>Task types</h2>
-      <table>
-        <tbody>
-          {types.map((t) => (
-            <tr key={t.name}>
-              <td>{t.name}</td>
-              <td style={{ color: "var(--text-dim)" }}>{t.label}</td>
-              <td className="actions">
-                <button
-                  className="icon-btn"
-                  onClick={() => {
-                    setEditing({ ...t });
-                    setIsNew(false);
-                  }}
-                >
-                  Edit
-                </button>
-                {!t.is_builtin && (
-                  <button
-                    className="icon-btn"
-                    onClick={() =>
-                      store.setDialog({
-                        kind: "confirm",
-                        title: `Delete type ${t.name}?`,
-                        message: "Existing tasks keep the label.",
-                        danger: true,
-                        onConfirm: async () => {
-                          await api.deleteType(t.name).catch((e) =>
-                            store.toast({ title: "Delete failed", body: String(e), kind: "error" }),
-                          );
-                          await store.loadAll();
-                        },
-                      })
-                    }
-                  >
-                    Delete
-                  </button>
-                )}
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-      <button
-        className="btn"
-        style={{ marginTop: 8 }}
+      <SectionHeading>Task types</SectionHeading>
+      <div className="divide-y divide-white/[0.06] rounded-lg border border-white/[0.08]">
+        {types.map((t) => (
+          <div key={t.name} className="flex items-center gap-3 px-3 py-2 text-[12.5px]">
+            <span className="font-medium">{t.name}</span>
+            <span className="text-muted-foreground">{t.label}</span>
+            <div className="ml-auto" />
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-6 px-2"
+              onClick={() => {
+                setEditing({ ...t });
+                setIsNew(false);
+              }}
+            >
+              Edit
+            </Button>
+            {!t.is_builtin && (
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-6 px-2 text-destructive"
+                onClick={() =>
+                  store.setDialog({
+                    kind: "confirm",
+                    title: `Delete type ${t.name}?`,
+                    message: "Existing tasks keep the label.",
+                    danger: true,
+                    onConfirm: async () => {
+                      await api
+                        .deleteType(t.name)
+                        .catch((e) => store.toast({ title: "Delete failed", body: String(e), kind: "error" }));
+                      await store.loadAll();
+                    },
+                  })
+                }
+              >
+                Delete
+              </Button>
+            )}
+          </div>
+        ))}
+      </div>
+      <Button
+        variant="outline"
+        size="sm"
+        className="mt-2"
         onClick={() => {
           setEditing({ name: "", label: "", instructions: "" });
           setIsNew(true);
         }}
       >
         Add type
-      </button>
+      </Button>
 
       {editing && (
-        <div style={{ marginTop: 12, padding: 12, border: "1px solid var(--border)", borderRadius: 8 }}>
-          <div className="form-grid">
-            <div className="form-row">
-              <label>Name</label>
-              <input
+        <div className="mt-3 rounded-lg border border-white/[0.08] p-3.5">
+          <div className="grid grid-cols-2 gap-3.5">
+            <div className="grid gap-1.5">
+              <Label>Name</Label>
+              <Input
                 value={editing.name ?? ""}
                 disabled={!isNew}
                 onChange={(e) => setEditing({ ...editing, name: e.target.value })}
               />
             </div>
-            <div className="form-row">
-              <label>Label</label>
-              <input
+            <div className="grid gap-1.5">
+              <Label>Label</Label>
+              <Input
                 value={editing.label ?? ""}
                 onChange={(e) => setEditing({ ...editing, label: e.target.value })}
               />
             </div>
           </div>
-          <div className="form-row">
-            <label>Instructions (added to executor prompt)</label>
-            <textarea
+          <div className="mt-3 grid gap-1.5">
+            <Label>Instructions (added to executor prompt)</Label>
+            <Textarea
               rows={4}
               value={editing.instructions ?? ""}
               onChange={(e) => setEditing({ ...editing, instructions: e.target.value })}
             />
           </div>
-          <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
-            <button className="btn" onClick={() => setEditing(null)}>
+          <div className="mt-3 flex justify-end gap-2">
+            <Button variant="outline" size="sm" onClick={() => setEditing(null)}>
               Cancel
-            </button>
-            <button className="btn primary" onClick={() => void save()}>
+            </Button>
+            <Button size="sm" onClick={() => void save()}>
               Save type
-            </button>
+            </Button>
           </div>
         </div>
       )}

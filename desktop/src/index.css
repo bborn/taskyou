@@ -1,0 +1,171 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+
+@custom-variant dark (&:is(.dark *));
+
+/* shadcn zinc palette, dark-only. --background carries alpha so the macOS
+   vibrancy material shows through the (transparent) webview. */
+:root,
+.dark {
+  --background: oklch(0.141 0.005 285.823 / 72%);
+  --foreground: oklch(0.985 0 0);
+  --card: oklch(0.21 0.006 285.885 / 65%);
+  --card-foreground: oklch(0.985 0 0);
+  --popover: oklch(0.18 0.006 285.885);
+  --popover-foreground: oklch(0.985 0 0);
+  --primary: oklch(0.92 0.004 286.32);
+  --primary-foreground: oklch(0.21 0.006 285.885);
+  --secondary: oklch(0.274 0.006 286.033 / 80%);
+  --secondary-foreground: oklch(0.985 0 0);
+  --muted: oklch(0.274 0.006 286.033 / 60%);
+  --muted-foreground: oklch(0.705 0.015 286.067);
+  --accent: oklch(0.274 0.006 286.033 / 80%);
+  --accent-foreground: oklch(0.985 0 0);
+  --destructive: oklch(0.704 0.191 22.216);
+  --destructive-foreground: oklch(0.985 0 0);
+  --border: oklch(1 0 0 / 10%);
+  --input: oklch(1 0 0 / 12%);
+  --ring: oklch(0.552 0.016 285.938);
+  --radius: 0.625rem;
+
+  /* status accents (used by board columns/badges) */
+  --status-backlog: oklch(0.82 0.09 230);
+  --status-processing: oklch(0.8 0.13 130);
+  --status-blocked: oklch(0.72 0.15 15);
+  --status-done: oklch(0.65 0.02 286);
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-status-backlog: var(--status-backlog);
+  --color-status-processing: var(--status-processing);
+  --color-status-blocked: var(--status-blocked);
+  --color-status-done: var(--status-done);
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  --font-mono: "SF Mono", ui-monospace, "JetBrains Mono", Menlo, monospace;
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+    /* Native apps use the arrow cursor on controls, not the hand. */
+    cursor: default;
+  }
+  a,
+  [role="link"] {
+    cursor: pointer;
+  }
+  input,
+  textarea,
+  [contenteditable] {
+    cursor: text;
+  }
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+  body {
+    /* Transparent so the vibrancy material shows; .app paints --background. */
+    background: transparent;
+    @apply text-foreground font-sans text-[13px] antialiased select-none overflow-hidden overscroll-none;
+  }
+  input,
+  textarea {
+    @apply select-text;
+  }
+}
+
+@layer components {
+  /* --- Markdown --- */
+  .markdown {
+    @apply text-[13px] leading-relaxed select-text;
+  }
+  .markdown h1,
+  .markdown h2,
+  .markdown h3 {
+    @apply text-foreground font-semibold mt-4 mb-1.5;
+  }
+  .markdown h1 {
+    @apply text-base;
+  }
+  .markdown h2 {
+    @apply text-sm;
+  }
+  .markdown h3 {
+    @apply text-[13px];
+  }
+  .markdown p {
+    @apply my-1.5;
+  }
+  .markdown code {
+    @apply font-mono text-xs bg-white/[0.07] rounded px-1 py-0.5;
+  }
+  .markdown pre {
+    @apply bg-black/30 border rounded-md p-2.5 overflow-x-auto my-2;
+  }
+  .markdown pre code {
+    @apply bg-transparent p-0;
+  }
+  .markdown a {
+    @apply text-status-backlog underline-offset-2 hover:underline;
+  }
+  .markdown ul {
+    @apply list-disc my-1.5 pl-5;
+  }
+  .markdown ol {
+    @apply list-decimal my-1.5 pl-5;
+  }
+  .markdown blockquote {
+    @apply border-l-2 pl-2.5 my-1.5 text-muted-foreground;
+  }
+  .markdown img {
+    @apply max-w-full rounded;
+  }
+
+  /* --- Terminal host --- */
+  .terminal-host {
+    @apply flex-1 min-h-0 px-1.5 pb-1.5;
+  }
+  .terminal-host .xterm {
+    height: 100%;
+  }
+
+  .kbd {
+    @apply font-mono text-[11px] bg-white/[0.07] border rounded px-1.5 py-px;
+  }
+}
+
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-thumb {
+  background: oklch(1 0 0 / 14%);
+  border-radius: 4px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
