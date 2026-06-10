@@ -76,6 +76,7 @@ func New(cfg Config) *Server {
 	mux.HandleFunc("POST /api/tasks/{id}/retry", s.handleRetryTask)
 	mux.HandleFunc("POST /api/tasks/{id}/pin", s.handlePinTask)
 	mux.HandleFunc("POST /api/tasks/{id}/input", s.handleTaskInput)
+	mux.HandleFunc("POST /api/tasks/{id}/annotations", s.handleTaskAnnotations)
 
 	// Task logs, streaming, executor output & terminal
 	mux.HandleFunc("GET /api/tasks/{id}/logs", s.handleTaskLogs)
