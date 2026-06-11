@@ -24,10 +24,13 @@ port. No match? Pick the task manually in the side panel.
 
 ## Install
 
-1. Run the API server: `ty serve` (default `:8080`)
+1. Get the extension: either clone this repo, or download `ty-chrome.zip`
+   from the [latest release](https://github.com/bborn/taskyou/releases) and
+   unzip it
 2. Chrome → `chrome://extensions` → enable **Developer mode** → **Load
-   unpacked** → select this directory (`extensions/ty-chrome`)
-3. Pin the extension. Click it to open the side panel.
+   unpacked** → select the `ty-chrome` directory
+3. Run the API server: `ty serve` (the extension finds it automatically)
+4. Pin the extension. Click it to open the side panel.
 
 Requires a `ty` build that has the `/api/tasks/{id}/annotations` and
 `/api/tasks/{id}/browser` endpoints (any build including this extension does).
