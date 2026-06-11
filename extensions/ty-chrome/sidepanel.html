@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <link rel="stylesheet" href="sidepanel.css" />
+</head>
+<body>
+  <div id="no-connection" class="banner hidden">
+    Can't reach <code>ty serve</code> — probing common ports, retrying…
+  </div>
+
+  <div id="settings" class="card hidden">
+    <label for="server-url">ty serve URL</label>
+    <input id="server-url" type="text" placeholder="http://127.0.0.1:8080" />
+    <small>Press Enter to save. Auto-detected when <code>ty serve</code> is running on a common port.</small>
+  </div>
+
+  <section id="task-card" class="card">
+    <div id="task-match" class="hidden">
+      <div class="task-line">
+        <span id="status-dot" class="dot" title="ty serve connection"></span>
+        <span id="task-id" class="task-id"></span>
+        <span id="task-title"></span>
+      </div>
+      <div class="task-sub">
+        <span id="task-status" class="pill"></span>
+        <span id="task-port" class="mono"></span>
+        <span id="task-branch" class="mono"></span>
+      </div>
+    </div>
+    <div id="task-picker" class="hidden">
+      <div class="task-line">
+        <span id="status-dot-fallback" class="dot"></span>
+        <span class="muted">No task matches this tab's port</span>
+      </div>
+      <div class="picker-row">
+        <select id="task-select"></select>
+        <button id="refresh-tasks" title="Refresh">↻</button>
+      </div>
+    </div>
+  </section>
+
+  <section class="card">
+    <div class="sec-head">
+      <h2>Annotate</h2>
+      <span id="annotation-count" class="chip zero">0</span>
+    </div>
+    <button id="annotate-btn" class="secondary">✏️ Annotate page <kbd>⌥A</kbd></button>
+    <textarea id="instruction" rows="2" placeholder="Overall instruction (optional)"></textarea>
+    <button id="send-btn" class="primary" disabled>Send to executor <kbd>⌥S</kbd></button>
+    <p id="send-result" class="muted"></p>
+  </section>
+
+  <section class="card executor">
+    <div class="sec-head">
+      <h2>Executor</h2>
+      <span id="executor-state" class="muted"></span>
+      <label class="auto-reload" title="Reload the page when the executor finishes working">
+        <input type="checkbox" id="auto-reload" checked /> auto-reload
+      </label>
+    </div>
+    <pre id="console"></pre>
+    <!-- Executor is read-only for now; unhide to re-enable follow-up input -->
+    <div class="input-row hidden">
+      <input id="followup" type="text" placeholder="Say something to the executor…" />
+      <button id="followup-send">↵</button>
+    </div>
+  </section>
+
+  <footer>
+    <span class="hint">on page: <kbd>S</kbd>elect · <kbd>B</kbd>ox · <kbd>N</kbd>ote · <kbd>⌘↩</kbd> send</span>
+    <button id="settings-btn" title="Server settings">⚙ <span id="server-label"></span></button>
+  </footer>
+
+  <script src="sidepanel.js"></script>
+</body>
+</html>

@@ -9,6 +9,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -36,6 +37,8 @@ type Server struct {
 	srv      *http.Server
 	runner   CommandRunner
 	sessions SessionManager
+	relay    *browserRelay
+	baseURL  string
 
 	autocompleteMu sync.Mutex
 	autocomplete   *autocomplete.Service
@@ -61,6 +64,8 @@ func New(cfg Config) *Server {
 		db:       cfg.DB,
 		runner:   cfg.CmdRunner,
 		sessions: cfg.Sessions,
+		relay:    newBrowserRelay(),
+		baseURL:  baseURLFromAddr(cfg.Addr),
 	}
 
 	mux := http.NewServeMux()
@@ -84,6 +89,12 @@ func New(cfg Config) *Server {
 	mux.HandleFunc("POST /api/tasks/{id}/retry", s.handleRetryTask)
 	mux.HandleFunc("POST /api/tasks/{id}/pin", s.handlePinTask)
 	mux.HandleFunc("POST /api/tasks/{id}/input", s.handleTaskInput)
+	mux.HandleFunc("POST /api/tasks/{id}/annotations", s.handleTaskAnnotations)
+
+	// Browser bridge (executor ↔ ty-chrome extension)
+	mux.HandleFunc("POST /api/tasks/{id}/browser", s.handleBrowserExec)
+	mux.HandleFunc("GET /api/tasks/{id}/browser/poll", s.handleBrowserPoll)
+	mux.HandleFunc("POST /api/tasks/{id}/browser/result", s.handleBrowserResult)
 
 	// Task logs, streaming, executor output & terminal
 	mux.HandleFunc("GET /api/tasks/{id}/logs", s.handleTaskLogs)
@@ -140,6 +151,19 @@ func New(cfg Config) *Server {
 	}
 
 	return s
+}
+
+// baseURLFromAddr turns a listen address like ":8080" into a URL the executor
+// can curl from inside the worktree.
+func baseURLFromAddr(addr string) string {
+	host, port, ok := strings.Cut(addr, ":")
+	if !ok || port == "" {
+		return "http://127.0.0.1:8080"
+	}
+	if host == "" || host == "0.0.0.0" || host == "::" {
+		host = "127.0.0.1"
+	}
+	return fmt.Sprintf("http://%s:%s", host, port)
 }
 
 // Start begins listening. It blocks until the server shuts down.

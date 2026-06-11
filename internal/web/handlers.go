@@ -520,7 +520,8 @@ func (s *Server) handleTaskOutput(w http.ResponseWriter, r *http.Request) {
 		lines = v
 	}
 
-	output, err := s.runner.Output("tmux", "capture-pane", "-t", paneID, "-p", "-S", "-"+lines)
+	// -J joins wrapped lines so clients can reflow to their own width.
+	output, err := s.runner.Output("tmux", "capture-pane", "-t", paneID, "-p", "-J", "-S", "-"+lines)
 	if err != nil {
 		jsonErr(w, "executor pane not available", http.StatusGone)
 		return
