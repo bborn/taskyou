@@ -5,7 +5,7 @@ before:
     # Package the Chrome extension as a release asset (load-unpacked install;
     # not distributed via the Web Store). demo/ is dev tooling, excluded.
     - mkdir -p dist
-    - sh -c 'cd extensions && zip -r ../dist/ty-chrome.zip ty-chrome -x "ty-chrome/demo/*"'
+    - sh -c 'cd extensions && zip -r ../dist/ty-chrome.zip ty-chrome -x "ty-chrome/demo/*" -x "ty-chrome/screenshots/*"'
 
 builds:
   - id: ty
