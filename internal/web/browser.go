@@ -150,7 +150,7 @@ func (s *Server) handleBrowserExec(w http.ResponseWriter, r *http.Request) {
 func (s *Server) materializeBrowserResult(task *db.Task, action string, raw json.RawMessage) interface{} {
 	var result map[string]interface{}
 	if err := json.Unmarshal(raw, &result); err != nil {
-		return json.RawMessage(raw)
+		return raw
 	}
 
 	root := s.resolveTaskRoot(task)

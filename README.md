@@ -842,6 +842,23 @@ go build -o ty-email ./cmd
 
 See [extensions/ty-email/README.md](extensions/ty-email/README.md) for full documentation.
 
+### ty-chrome
+
+Chrome extension for visual product development in a loop. Annotate any page
+served by a task's dev server (point at elements, draw boxes, comment) and the
+context — selectors, DOM excerpts, a screenshot with your markers — lands
+directly in the task's executor, which makes the change while you watch its
+live output in the side panel. The executor can also see and drive your tab
+through the browser bridge (screenshot/snapshot/console/click/type) instead of
+launching its own browser, and the page auto-reloads when it finishes a turn.
+
+```
+chrome://extensions → Developer mode → Load unpacked → extensions/ty-chrome
+ty serve   # the extension auto-discovers it
+```
+
+See [extensions/ty-chrome/README.md](extensions/ty-chrome/README.md) for full documentation.
+
 ## Development
 
 ```bash

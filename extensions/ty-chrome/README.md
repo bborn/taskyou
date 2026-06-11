@@ -29,8 +29,8 @@ port. No match? Pick the task manually in the side panel.
    unpacked** → select this directory (`extensions/ty-chrome`)
 3. Pin the extension. Click it to open the side panel.
 
-Requires the taskyou build from this branch or later (the
-`/api/tasks/{id}/annotations` endpoint and `port`/`has_executor` task fields).
+Requires a `ty` build that has the `/api/tasks/{id}/annotations` and
+`/api/tasks/{id}/browser` endpoints (any build including this extension does).
 
 ## Use
 
