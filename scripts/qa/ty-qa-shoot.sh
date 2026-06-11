@@ -45,6 +45,17 @@ GIF="${OUT%.png}.gif"
   echo 'Env TMUX "vhs"'                                   # make ty render in-pane
   echo "Env WORKTREE_DB_PATH \"$WORKTREE_DB_PATH\""
   echo "Env WORKTREE_SESSION_ID \"$WORKTREE_SESSION_ID\""
+  # Routines isolation (see internal/routine): without these the VHS-launched
+  # ty reads the user's real ~/.config/task/routines.
+  if [ -n "${TY_ROUTINES_DIR:-}" ]; then
+    echo "Env TY_ROUTINES_DIR \"$TY_ROUTINES_DIR\""
+  fi
+  if [ -n "${TY_ROUTINES_STATE_DIR:-}" ]; then
+    echo "Env TY_ROUTINES_STATE_DIR \"$TY_ROUTINES_STATE_DIR\""
+  fi
+  if [ -n "${TY_ROUTINES_LAUNCHD_DIR:-}" ]; then
+    echo "Env TY_ROUTINES_LAUNCHD_DIR \"$TY_ROUTINES_LAUNCHD_DIR\""
+  fi
   echo 'Hide'
   if [ -n "${TY_QA_SHOT_KEEP_DB:-}" ]; then
     # Keep the (seeded) DB — for board/detail shots with data.

@@ -215,7 +215,7 @@ blocked can return to processing via retry
 4. **blocked** - Waiting for user input/clarification
 5. **done** - Completed successfully
 
-Recurring scheduling has been removed from TaskYou. Use external schedulers (cron, calendar apps, etc.) to invoke the CLI whenever a task should repeat.
+Recurring scheduling has been removed from TaskYou. Use external schedulers (cron, calendar apps, etc.) to invoke the CLI whenever a task should repeat. For recurring *agent* jobs (scouts, monitors), use routines: `ty run <name>` executes a managed headless run defined in `~/.config/task/routines/<name>/` (see `internal/routine`); the external scheduler still owns the clock.
 
 ## Key Bindings (TUI)
 

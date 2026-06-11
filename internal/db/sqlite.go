@@ -213,6 +213,21 @@ func (db *DB) migrate() error {
 		// Composite index for efficient conversation history queries
 		// Used by GetConversationHistoryLogs and HasContinuationMarker
 		`CREATE INDEX IF NOT EXISTS idx_task_logs_task_line_type ON task_logs(task_id, line_type)`,
+
+		// Routine run history (routine definitions live on disk under
+		// ~/.config/task/routines; see internal/routine)
+		`CREATE TABLE IF NOT EXISTS routine_runs (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			routine TEXT NOT NULL,
+			status TEXT DEFAULT 'running',
+			exit_code INTEGER DEFAULT 0,
+			output TEXT DEFAULT '',
+			log_path TEXT DEFAULT '',
+			started_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			finished_at DATETIME
+		)`,
+
+		`CREATE INDEX IF NOT EXISTS idx_routine_runs_routine ON routine_runs(routine, id)`,
 	}
 
 	for _, m := range migrations {
