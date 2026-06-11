@@ -3213,8 +3213,13 @@ func (m *DetailModel) renderHelp() string {
 		keys = append(keys, helpKey{"G", "open PR", false})
 	}
 
+	// Show contextual label for 'b' key based on whether process is running
+	browserLabel := "open dir"
+	if m.task != nil && m.task.Port != 0 && m.executor != nil && m.executor.IsRunning(m.task.ID) {
+		browserLabel = "browser"
+	}
 	keys = append(keys, []helpKey{
-		{"b", "browser", false},
+		{"b", browserLabel, false},
 		{"c", "close", false},
 		{"a", "archive", false},
 		{"d", "delete", false},
