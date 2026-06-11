@@ -25,6 +25,11 @@ const (
 	TaskAuthRequired  = "task.auth_required" // Executor session needs re-authentication
 	TaskCompleted     = "task.completed"
 	TaskFailed        = "task.failed"
+
+	// RoutineFailed fires when a `ty run <routine>` execution fails (non-zero
+	// exit, env.sh failure, or timeout). Event.Task is nil; routine name, run
+	// ID, exit code, and log path arrive via Metadata.
+	RoutineFailed = "routine.failed"
 )
 
 // Event represents a task lifecycle event.

@@ -1557,7 +1557,7 @@ Examples:
 	// Execute subcommand - queue a task for execution
 	executeCmd := &cobra.Command{
 		Use:               "execute <task-id>",
-		Aliases:           []string{"queue", "run"},
+		Aliases:           []string{"queue"},
 		Short:             "Queue a task for execution",
 		ValidArgsFunction: completeTaskIDs,
 		Long: `Queue a task to be executed by the daemon.
@@ -1565,7 +1565,7 @@ Examples:
 Examples:
   task execute 42
   task queue 42
-  task run 42
+  task run 42                   # "run" with a task ID also queues it
   task execute 42 --dangerous   # Execute in dangerous mode`,
 		Args: cobra.ExactArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
@@ -1640,6 +1640,11 @@ Examples:
 	executeCmd.Flags().Bool("dangerous", false, "Execute in dangerous mode (alias for --permission-mode dangerous)")
 	executeCmd.Flags().String("permission-mode", "", "Override permission mode: default (prompt), accept-edits (auto-accept file edits), auto (Claude Code auto mode), dangerous (skip all)")
 	rootCmd.AddCommand(executeCmd)
+
+	// Routines: named unattended agent runs (ty run <name>, ty routines ...).
+	// `ty run <task-id>` keeps the old execute-alias behavior via dispatch.
+	rootCmd.AddCommand(newRunCmd(executeCmd))
+	rootCmd.AddCommand(newRoutinesCmd())
 
 	statusCmd := &cobra.Command{
 		Use:               "status <task-id> <status>",
