@@ -4,8 +4,11 @@ before:
   hooks:
     # Package the Chrome extension as a release asset (load-unpacked install;
     # not distributed via the Web Store). demo/ is dev tooling, excluded.
-    - mkdir -p dist
-    - sh -c 'cd extensions && zip -r ../dist/ty-chrome.zip ty-chrome -x "ty-chrome/demo/*" -x "ty-chrome/screenshots/*"'
+    # Must NOT write into dist/ — before hooks run ahead of goreleaser's
+    # "dist must be empty" check, so anything placed there fails the release.
+    # Must be a relative path — extra_files globs reject absolute paths.
+    # ty-chrome.zip is gitignored so leftovers don't trip the dirty-state check.
+    - sh -c 'rm -f ty-chrome.zip && cd extensions && zip -r ../ty-chrome.zip ty-chrome -x "ty-chrome/demo/*" -x "ty-chrome/screenshots/*"'
 
 builds:
   - id: ty
@@ -49,7 +52,7 @@ archives:
 release:
   draft: false
   extra_files:
-    - glob: dist/ty-chrome.zip
+    - glob: ./ty-chrome.zip
 
 checksum:
   name_template: "checksums.txt"

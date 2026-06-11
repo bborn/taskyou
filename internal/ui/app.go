@@ -2035,7 +2035,11 @@ func (m *AppModel) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case key.Matches(msg, m.keys.OpenBrowser):
 		if task := m.kanban.SelectedTask(); task != nil {
-			return m, m.openBrowser(task)
+			// If process is running, open browser; otherwise open task directory
+			if m.executor.IsRunning(task.ID) && task.Port != 0 {
+				return m, m.openBrowser(task)
+			}
+			return m, m.openTaskDirectory(task)
 		}
 
 	case key.Matches(msg, m.keys.Spotlight):
@@ -2563,7 +2567,11 @@ func (m *AppModel) updateDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.openWorktreeInEditor(m.selectedTask)
 	}
 	if key.Matches(keyMsg, m.keys.OpenBrowser) && m.selectedTask != nil {
-		return m, m.openBrowser(m.selectedTask)
+		// If process is running, open browser; otherwise open task directory
+		if m.executor.IsRunning(m.selectedTask.ID) && m.selectedTask.Port != 0 {
+			return m, m.openBrowser(m.selectedTask)
+		}
+		return m, m.openTaskDirectory(m.selectedTask)
 	}
 	if key.Matches(keyMsg, m.keys.OpenPR) && m.selectedTask != nil && m.selectedTask.PRURL != "" {
 		return m, m.openPR(m.selectedTask)
@@ -4013,8 +4021,10 @@ func (m *AppModel) loadTasks() tea.Cmd {
 			return tasksLoadedMsg{err: err}
 		}
 
-		// Load limited done tasks (most recent)
-		doneTasks, err := m.db.ListTasks(db.ListTasksOptions{Status: db.StatusDone, Limit: maxDoneTasksInKanban})
+		// Load limited done tasks (most recently completed). OrderByRecency keeps
+		// old pinned tasks from crowding newer ones out of the capped slice; the
+		// kanban still floats pinned tasks to the top of the visible column.
+		doneTasks, err := m.db.ListTasks(db.ListTasksOptions{Status: db.StatusDone, Limit: maxDoneTasksInKanban, OrderByRecency: true})
 		if err != nil {
 			return tasksLoadedMsg{err: err}
 		}
@@ -4344,10 +4354,7 @@ func (m *AppModel) openWorktreeInEditor(task *db.Task) tea.Cmd {
 		}
 
 		// Try VISUAL, then EDITOR, then fall back to "open" command
-		editor := os.Getenv("VISUAL")
-		if editor == "" {
-			editor = os.Getenv("EDITOR")
-		}
+		editor := resolveEditor()
 
 		var cmd *osExec.Cmd
 		if editor != "" {
@@ -4394,6 +4401,68 @@ func (m *AppModel) openBrowser(task *db.Task) tea.Cmd {
 
 		return browserOpenedMsg{message: fmt.Sprintf("Opened %s", url)}
 	}
+}
+
+// openTaskDirectory opens the task's worktree directory in the most appropriate application.
+// If the directory contains source files (detected by common project markers), it opens in the
+// configured editor (VISUAL, then EDITOR). Otherwise, or when no editor is configured, it falls
+// back to opening the directory in the default file manager (Finder on macOS).
+func (m *AppModel) openTaskDirectory(task *db.Task) tea.Cmd {
+	return func() tea.Msg {
+		if task.WorktreePath == "" {
+			return browserOpenedMsg{err: fmt.Errorf("no worktree for task #%d", task.ID)}
+		}
+
+		// Check if worktree directory exists
+		if _, err := os.Stat(task.WorktreePath); os.IsNotExist(err) {
+			return browserOpenedMsg{err: fmt.Errorf("worktree not found: %s", task.WorktreePath)}
+		}
+
+		// Check if directory contains source files by looking for common project markers
+		if containsSourceFiles(task.WorktreePath) {
+			if editor := resolveEditor(); editor != "" {
+				cmd := osExec.Command(editor, task.WorktreePath)
+				if err := cmd.Start(); err == nil {
+					return browserOpenedMsg{message: fmt.Sprintf("Opened %s in %s", filepath.Base(task.WorktreePath), filepath.Base(editor))}
+				}
+				// Editor failed to start, fall through to file manager
+			}
+		}
+
+		// Fall back to opening in the default file manager
+		cmd := osExec.Command("open", task.WorktreePath)
+		if err := cmd.Start(); err != nil {
+			return browserOpenedMsg{err: fmt.Errorf("failed to open directory: %w", err)}
+		}
+
+		return browserOpenedMsg{message: fmt.Sprintf("Opened %s in Finder", filepath.Base(task.WorktreePath))}
+	}
+}
+
+// resolveEditor returns the user's configured editor: VISUAL, then EDITOR.
+// Returns an empty string when neither is set.
+func resolveEditor() string {
+	if editor := os.Getenv("VISUAL"); editor != "" {
+		return editor
+	}
+	return os.Getenv("EDITOR")
+}
+
+// containsSourceFiles checks if a directory contains source code by looking for
+// common project markers (e.g., go.mod, package.json, Cargo.toml, etc.).
+func containsSourceFiles(dir string) bool {
+	markers := []string{
+		"go.mod", "package.json", "Cargo.toml", "pyproject.toml",
+		"requirements.txt", "Gemfile", "pom.xml", "build.gradle",
+		"Makefile", "CMakeLists.txt", ".git", "setup.py", "mix.exs",
+		"composer.json", "pubspec.yaml", "Pipfile", "tsconfig.json",
+	}
+	for _, marker := range markers {
+		if _, err := os.Stat(filepath.Join(dir, marker)); err == nil {
+			return true
+		}
+	}
+	return false
 }
 
 // openPR opens the task's pull request URL in the default browser.
