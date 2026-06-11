@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
-import { AnimatePresence, motion } from "motion/react";
+import { motion } from "motion/react";
 import { Plus, Search, Settings2, ChevronLeft, Sun, Moon, MonitorSmartphone } from "lucide-react";
 import logoUrl from "./assets/logo.png";
 import { setApiBase } from "./api/client";
@@ -406,15 +406,15 @@ export default function App() {
         </Button>
       </header>
 
-      <AnimatePresence mode="wait" initial={false}>
-        <motion.div
-          key={state.view.kind === "detail" ? `detail-${state.view.taskId}` : state.view.kind}
-          className="flex min-h-0 flex-1 flex-col"
-          initial={{ opacity: 0, y: 4 }}
-          animate={{ opacity: 1, y: 0 }}
-          exit={{ opacity: 0, y: -4 }}
-          transition={{ duration: 0.14, ease: "easeOut" }}
-        >
+      {/* Keyed remount with a fast fade-in only — exit animations make view
+          switches feel sluggish, so views swap immediately. */}
+      <motion.div
+        key={state.view.kind === "detail" ? `detail-${state.view.taskId}` : state.view.kind}
+        className="flex min-h-0 flex-1 flex-col"
+        initial={{ opacity: 0 }}
+        animate={{ opacity: 1 }}
+        transition={{ duration: 0.09, ease: "easeOut" }}
+      >
           {state.view.kind === "board" && (
             <div className="flex min-h-0 flex-1 flex-col">
               {(state.filterOpen || state.filter !== "") && <FilterBar />}
@@ -423,8 +423,7 @@ export default function App() {
           )}
           {state.view.kind === "detail" && <DetailView taskId={state.view.taskId} />}
           {state.view.kind === "settings" && <SettingsView />}
-        </motion.div>
-      </AnimatePresence>
+      </motion.div>
 
       {state.paletteOpen && <Palette />}
       {state.form && <TaskForm form={state.form} />}

@@ -352,3 +352,10 @@ export const store = new Store();
 export function useAppState(): AppState {
   return useSyncExternalStore(store.subscribe, store.getState);
 }
+
+/** Narrow subscription: re-renders only when the selected slice changes
+ * (reference equality). Keeps hot components (board cards) off the global
+ * re-render path. */
+export function useAppSelector<T>(selector: (state: AppState) => T): T {
+  return useSyncExternalStore(store.subscribe, () => selector(store.getState()));
+}

@@ -204,6 +204,15 @@
   }
 }
 
+/* Snappier overlay animations — the tw-animate defaults read as sluggish. */
+[data-slot="dialog-content"],
+[data-slot="alert-dialog-content"],
+[data-slot="dialog-overlay"],
+[data-slot="alert-dialog-overlay"],
+[data-slot="select-content"] {
+  animation-duration: 120ms !important;
+}
+
 ::-webkit-scrollbar {
   width: 8px;
   height: 8px;
