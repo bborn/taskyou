@@ -207,6 +207,7 @@ const HELP: [string, string][] = [
   ["g", "Go to last notification"],
   ["!", "Cycle permission mode"],
   ["s", "Settings"],
+  ["u", "Routines"],
   ["R", "Refresh"],
   ["Esc", "Back / close"],
 ];

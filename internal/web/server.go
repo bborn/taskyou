@@ -137,6 +137,12 @@ func New(cfg Config) *Server {
 	mux.HandleFunc("PATCH /api/types/{name}", s.handleUpdateType)
 	mux.HandleFunc("DELETE /api/types/{name}", s.handleDeleteType)
 
+	// Routines (named unattended agent runs)
+	mux.HandleFunc("GET /api/routines", s.handleListRoutines)
+	mux.HandleFunc("GET /api/routines/{name}/runs", s.handleListRoutineRuns)
+	mux.HandleFunc("GET /api/routines/{name}/runs/{run}/log", s.handleRoutineRunLog)
+	mux.HandleFunc("POST /api/routines/{name}/run", s.handleRunRoutine)
+
 	// Events
 	mux.HandleFunc("GET /api/events", s.handleListEvents)
 

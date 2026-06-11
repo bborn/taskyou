@@ -1,5 +1,7 @@
 import type {
   Attachment,
+  Routine,
+  RoutineRun,
   Dependencies,
   ExecutorInfo,
   LogLine,
@@ -158,6 +160,18 @@ export const api = {
       project,
       context,
     }),
+
+  // Routines
+  listRoutines: () => request<Routine[]>("GET", "/api/routines"),
+  routineRuns: (name: string, limit = 20) =>
+    request<RoutineRun[]>("GET", `/api/routines/${encodeURIComponent(name)}/runs?limit=${limit}`),
+  routineRunLog: (name: string, runId: number) =>
+    request<{ log: string; note?: string }>(
+      "GET",
+      `/api/routines/${encodeURIComponent(name)}/runs/${runId}/log`,
+    ),
+  runRoutine: (name: string) =>
+    request<{ started: boolean }>("POST", `/api/routines/${encodeURIComponent(name)}/run`, {}),
 
   status: () => request<{ status: string; tasks: Record<string, number> }>("GET", "/api/status"),
 };

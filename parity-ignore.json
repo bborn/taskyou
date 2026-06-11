@@ -1,5 +1,4 @@
 {
-  "Routines": "GUI routines view not built yet \u2014 acknowledged gap (2026-06-11). Needs /api/routines endpoints first; remove this entry when the GUI ships it.",
   "SpotlightSync": "macOS Spotlight metadata export is a local-indexing concern; intentionally TUI/CLI-only.",
   "ToggleShellPane": "The GUI terminal renders the full tmux window (executor + shell panes together), so there is no separate shell pane to toggle."
 }

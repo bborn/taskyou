@@ -129,3 +129,25 @@ export interface EnvironmentReport {
   tmux_version: string | null;
   executors: ToolCheck[];
 }
+
+export interface RoutineRun {
+  id: number;
+  routine: string;
+  status: "running" | "ok" | "failed";
+  exit_code: number;
+  output: string;
+  log_path: string;
+  started_at: string;
+  finished_at?: string;
+}
+
+export interface Routine {
+  name: string;
+  project?: string;
+  model: string;
+  permission_mode: string;
+  timeout: string;
+  disabled: boolean;
+  schedule?: { backend: string; detail: string };
+  last_run?: RoutineRun;
+}

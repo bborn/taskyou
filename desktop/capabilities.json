@@ -124,6 +124,13 @@
     "Right": {
       "note": "Arrow keys move board selection"
     },
+    "Routines": {
+      "api": [
+        "GET /api/routines",
+        "POST /api/routines/{name}/run"
+      ],
+      "note": "u / \u2318U \u2014 fleet view with last-run status, schedules, run-now, log viewer"
+    },
     "Settings": {
       "note": "s, \u2318,, titlebar gear"
     },
