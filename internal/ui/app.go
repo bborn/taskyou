@@ -4013,8 +4013,10 @@ func (m *AppModel) loadTasks() tea.Cmd {
 			return tasksLoadedMsg{err: err}
 		}
 
-		// Load limited done tasks (most recent)
-		doneTasks, err := m.db.ListTasks(db.ListTasksOptions{Status: db.StatusDone, Limit: maxDoneTasksInKanban})
+		// Load limited done tasks (most recently completed). OrderByRecency keeps
+		// old pinned tasks from crowding newer ones out of the capped slice; the
+		// kanban still floats pinned tasks to the top of the visible column.
+		doneTasks, err := m.db.ListTasks(db.ListTasksOptions{Status: db.StatusDone, Limit: maxDoneTasksInKanban, OrderByRecency: true})
 		if err != nil {
 			return tasksLoadedMsg{err: err}
 		}
