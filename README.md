@@ -4,22 +4,19 @@
 
 # Task You
 
-A personal task management system with a beautiful terminal UI, SQLite storage, and background task execution via pluggable AI agents (Claude Code, OpenAI Codex, Gemini, Pi, OpenClaw, or OpenCode).
+A personal task management system with background task execution via pluggable AI agents (Claude Code, OpenAI Codex, Gemini, Pi, OpenClaw, or OpenCode). Tasks live in SQLite, run in isolated git worktrees, and are tracked on a Kanban board.
 
-## Desktop App
+One engine — `ty` — three interfaces:
 
-Just want the GUI? Grab a prebuilt bundle from the [latest release](https://github.com/bborn/taskyou/releases/latest):
+| Interface | What it is |
+|-----------|------------|
+| **[TUI](#the-tui--first-class)** | The first-class interface. The full experience in your terminal: Kanban board, task detail with live executor panes, forms, fuzzy search. Just run `ty`. |
+| **[CLI](#the-cli)** | 100% of TaskYou is scriptable. Every TUI action has a command, so scripts and AI agents can drive your entire queue. |
+| **[GUI](#the-gui)** | A desktop app for macOS and Linux — and the same UI in your browser via `ty serve`. |
 
-- **macOS**: `TaskYou-macos-arm64.dmg` (Apple Silicon) or `TaskYou-macos-x64.dmg` (Intel)
-- **Linux**: `TaskYou-linux-x64.AppImage` or `.deb`
+## The TUI — first class
 
-The app is self-contained — it ships its own `ty` engine and starts the server and daemon for you. Two things must be installed on your machine: **tmux** (`brew install tmux`) and at least one executor CLI (e.g. [Claude Code](https://claude.com/claude-code)).
-
-The macOS bundles are unsigned for now: on first launch, right-click the app → Open (or `xattr -dr com.apple.quarantine /Applications/TaskYou.app`).
-
-The same UI is also served in your browser at `http://localhost:8484` whenever `ty serve` runs with the embedded UI (`make build-ui build`). Desktop gets a real PTY executor terminal; the browser falls back to a live terminal mirror. Source lives in [`desktop/`](desktop/).
-
-## Screenshots
+The terminal UI is TaskYou's primary interface — everything ships here first. Launch it with `ty`.
 
 ### Kanban Board
 ![Kanban Board](docs/screenshots/kanban-board.png)
@@ -36,6 +33,31 @@ The same UI is also served in your browser at `http://localhost:8484` whenever `
 ### New Task Form
 ![New Task Form](docs/screenshots/new-task-form.png)
 *Creating a new task with project selection, type, scheduling, and attachments*
+
+## The CLI
+
+Everything the TUI can do, the CLI can do too — create, execute, retry, and inspect tasks, read executor output, even send keystrokes to a running executor. That makes TaskYou trivial to drive from scripts, cron jobs, and AI agents.
+
+![CLI](docs/screenshots/cli-board.png)
+*Creating a task and checking the board without leaving your shell*
+
+See [Full CLI Scriptability](#full-cli-scriptability) for the complete command surface.
+
+## The GUI
+
+![Web UI](docs/screenshots/gui-board.png)
+*The same Kanban board in the desktop app or any browser*
+
+Just want the GUI? Grab a prebuilt bundle from the [latest release](https://github.com/bborn/taskyou/releases/latest):
+
+- **macOS**: `TaskYou-macos-arm64.dmg` (Apple Silicon) or `TaskYou-macos-x64.dmg` (Intel)
+- **Linux**: `TaskYou-linux-x64.AppImage` or `.deb`
+
+The app is self-contained — it ships its own `ty` engine and starts the server and daemon for you. Two things must be installed on your machine: **tmux** (`brew install tmux`) and at least one executor CLI (e.g. [Claude Code](https://claude.com/claude-code)).
+
+The macOS bundles are unsigned for now: on first launch, right-click the app → Open (or `xattr -dr com.apple.quarantine /Applications/TaskYou.app`).
+
+The same UI is also served in your browser at `http://localhost:8484` whenever `ty serve` runs with the embedded UI (`make build-ui build`). Desktop gets a real PTY executor terminal; the browser falls back to a live terminal mirror. Source lives in [`desktop/`](desktop/).
 
 ## Features
 
