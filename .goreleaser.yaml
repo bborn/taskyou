@@ -53,6 +53,15 @@ release:
   draft: false
   extra_files:
     - glob: ./ty-chrome.zip
+  footer: |
+    ## macOS desktop app — first launch
+
+    The macOS `.dmg` bundles are ad-hoc signed but not notarized. After dragging
+    **TaskYou.app** to Applications, right-click it → **Open** → **Open**, or run:
+
+    ```sh
+    xattr -dr com.apple.quarantine /Applications/TaskYou.app
+    ```
 
 checksum:
   name_template: "checksums.txt"

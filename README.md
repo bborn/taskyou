@@ -55,7 +55,11 @@ Just want the GUI? Grab a prebuilt bundle from the [latest release](https://gith
 
 The app is self-contained — it ships its own `ty` engine and starts the server and daemon for you. Two things must be installed on your machine: **tmux** (`brew install tmux`) and at least one executor CLI (e.g. [Claude Code](https://claude.com/claude-code)).
 
-The macOS bundles are unsigned for now: on first launch, right-click the app → Open (or `xattr -dr com.apple.quarantine /Applications/TaskYou.app`).
+The macOS bundles are ad-hoc signed but not notarized, so macOS flags them on first launch. Drag **TaskYou.app** to Applications, then either right-click it → **Open** → **Open**, or clear the download quarantine flag:
+
+```sh
+xattr -dr com.apple.quarantine /Applications/TaskYou.app
+```
 
 The same UI is also served in your browser at `http://localhost:8484` whenever `ty serve` runs with the embedded UI (`make build-ui build`). Desktop gets a real PTY executor terminal; the browser falls back to a live terminal mirror. Source lives in [`desktop/`](desktop/).
 
