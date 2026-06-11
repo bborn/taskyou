@@ -90,6 +90,18 @@ func (o *OpenCodeExecutor) runOpenCode(ctx context.Context, task *db.Task, workD
 	// Kill ALL existing windows with this name (handles duplicates)
 	KillAllWindowsByNameAllSessions(windowName)
 
+	// Worktree write-guard: install OpenCode's tool.execute.before plugin so writes
+	// that would escape the isolated worktree are denied. Cleaned up at session end.
+	cleanupGuard, guardErr := o.executor.setupOpenCodeWorktreeGuard(workDir, o.executor.getProjectDir(task.Project))
+	if guardErr != nil {
+		o.logger.Warn("could not set up OpenCode worktree guard", "error", guardErr)
+	}
+	defer func() {
+		if cleanupGuard != nil {
+			cleanupGuard()
+		}
+	}()
+
 	// Build the prompt content
 	promptFile, err := os.CreateTemp("", "task-prompt-*.txt")
 	if err != nil {

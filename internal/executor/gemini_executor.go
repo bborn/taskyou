@@ -66,12 +66,6 @@ func (g *GeminiExecutor) runGemini(ctx context.Context, task *db.Task, workDir, 
 		return ExecResult{Message: "tmux is not installed"}
 	}
 
-	// Write system instructions to .gemini/GEMINI.md in the worktree
-	// This keeps task guidance out of the user conversation thread
-	if err := g.writeGeminiInstructions(workDir); err != nil {
-		g.logger.Warn("could not write GEMINI.md", "error", err)
-	}
-
 	daemonSession, err := ensureTmuxDaemon()
 	if err != nil {
 		g.logger.Error("could not create task-daemon session", "error", err)
@@ -84,6 +78,18 @@ func (g *GeminiExecutor) runGemini(ctx context.Context, task *db.Task, workDir, 
 
 	// Kill ALL existing windows with this name (handles duplicates)
 	KillAllWindowsByNameAllSessions(windowName)
+
+	// Worktree write-guard: install Gemini's BeforeTool hook so writes that would
+	// escape the isolated worktree are denied. Cleaned up when the session ends.
+	cleanupGuard, guardErr := g.executor.setupGeminiWorktreeGuard(workDir, g.executor.getProjectDir(task.Project))
+	if guardErr != nil {
+		g.logger.Warn("could not set up Gemini worktree guard", "error", guardErr)
+	}
+	defer func() {
+		if cleanupGuard != nil {
+			cleanupGuard()
+		}
+	}()
 
 	promptFile, err := os.CreateTemp("", "task-prompt-*.txt")
 	if err != nil {
@@ -276,14 +282,6 @@ func (g *GeminiExecutor) ResumeProcess(taskID int64) bool {
 
 // BuildCommand returns the shell command to start an interactive Gemini session.
 func (g *GeminiExecutor) BuildCommand(task *db.Task, sessionID, prompt string) string {
-	// Write system instructions to .gemini/GEMINI.md in the worktree
-	// This keeps task guidance out of the user conversation thread
-	if task.WorktreePath != "" {
-		if err := g.writeGeminiInstructions(task.WorktreePath); err != nil {
-			g.logger.Warn("BuildCommand: could not write GEMINI.md", "error", err)
-		}
-	}
-
 	dangerousFlag := buildGeminiDangerousFlag(task.DangerousMode)
 
 	worktreeSessionID := os.Getenv("WORKTREE_SESSION_ID")
@@ -445,23 +443,4 @@ func geminiSessionExists(sessionID string) bool {
 	})
 
 	return found
-}
-
-// writeGeminiInstructions writes task guidance to .gemini/GEMINI.md in the worktree.
-// Gemini CLI automatically loads this file and uses it as project-specific instructions,
-// keeping the guidance out of the user conversation thread.
-func (g *GeminiExecutor) writeGeminiInstructions(workDir string) error {
-	geminiDir := filepath.Join(workDir, ".gemini")
-	if err := os.MkdirAll(geminiDir, 0755); err != nil {
-		return fmt.Errorf("failed to create .gemini directory: %w", err)
-	}
-
-	geminiMdPath := filepath.Join(geminiDir, "GEMINI.md")
-	instructions := g.executor.buildSystemInstructions()
-
-	if err := os.WriteFile(geminiMdPath, []byte(instructions), 0644); err != nil {
-		return fmt.Errorf("failed to write GEMINI.md: %w", err)
-	}
-
-	return nil
 }
