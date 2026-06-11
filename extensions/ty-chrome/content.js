@@ -266,14 +266,106 @@
 
   // --- Comment popover -------------------------------------------------------
   let popover = null;
+  let provisionalEl = null;
+
+  // Keep the drawn box / picked element visible while the comment popover is
+  // open. Region boxes stay interactive (drag to move, corner handles to
+  // resize) until saved; Save reads the final geometry, Cancel removes it.
+  function showProvisional(draft, interactive) {
+    if (!draft.rect || (draft.kind !== 'region' && draft.kind !== 'element')) return;
+    provisionalEl = el('div', 'region');
+    if (draft.kind === 'element') {
+      provisionalEl.style.borderStyle = 'solid';
+      provisionalEl.style.background = 'rgba(208,80,16,.06)';
+    }
+    Object.assign(provisionalEl.style, {
+      left: draft.rect.x + 'px',
+      top: draft.rect.y + 'px',
+      width: draft.rect.w + 'px',
+      height: draft.rect.h + 'px',
+    });
+    if (interactive) makeInteractive(provisionalEl);
+    layer.appendChild(provisionalEl);
+  }
+
+  function readProvisionalRect() {
+    return {
+      x: parseFloat(provisionalEl.style.left),
+      y: parseFloat(provisionalEl.style.top),
+      w: parseFloat(provisionalEl.style.width),
+      h: parseFloat(provisionalEl.style.height),
+    };
+  }
+
+  function makeInteractive(box) {
+    box.style.cursor = 'move';
+    const corners = [
+      ['nw', 'left:-7px;top:-7px;cursor:nwse-resize'],
+      ['ne', 'right:-7px;top:-7px;cursor:nesw-resize'],
+      ['sw', 'left:-7px;bottom:-7px;cursor:nesw-resize'],
+      ['se', 'right:-7px;bottom:-7px;cursor:nwse-resize'],
+    ];
+    for (const [name, pos] of corners) {
+      const h = el('div');
+      h.dataset.corner = name;
+      h.style.cssText = `position:absolute;width:12px;height:12px;background:#fff;border:2px solid ${TEAL};border-radius:50%;${pos}`;
+      box.appendChild(h);
+    }
+    box.addEventListener('mousedown', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const corner = e.target.dataset?.corner || '';
+      const start = {
+        sx: e.clientX, sy: e.clientY,
+        x: parseFloat(box.style.left), y: parseFloat(box.style.top),
+        w: parseFloat(box.style.width), h: parseFloat(box.style.height),
+      };
+      const onMove = (ev) => {
+        const dx = ev.clientX - start.sx;
+        const dy = ev.clientY - start.sy;
+        let { x, y, w, h } = start;
+        if (!corner) {
+          x += dx;
+          y += dy;
+        } else {
+          if (corner.includes('w')) { x = Math.min(start.x + dx, start.x + start.w - 10); w = Math.max(10, start.w - dx); }
+          if (corner.includes('e')) { w = Math.max(10, start.w + dx); }
+          if (corner.includes('n')) { y = Math.min(start.y + dy, start.y + start.h - 10); h = Math.max(10, start.h - dy); }
+          if (corner.includes('s')) { h = Math.max(10, start.h + dy); }
+        }
+        Object.assign(box.style, { left: x + 'px', top: y + 'px', width: w + 'px', height: h + 'px' });
+      };
+      const onUp = () => {
+        document.removeEventListener('mousemove', onMove, true);
+        document.removeEventListener('mouseup', onUp, true);
+      };
+      document.addEventListener('mousemove', onMove, true);
+      document.addEventListener('mouseup', onUp, true);
+    });
+  }
+
+  let editingHidden = null; // annotation whose visuals are hidden while editing
+
   function closePopover() {
     popover?.remove();
     popover = null;
+    provisionalEl?.remove();
+    provisionalEl = null;
+    editingHidden?.els.forEach((e) => (e.style.display = ''));
+    editingHidden = null;
   }
   // draft: annotation fields (without label/comment) + viewportX/Y for placement.
   // existing: pass an annotation object to view/edit/delete it instead.
   function openPopover(draft, existing) {
     closePopover();
+    if (!existing) {
+      showProvisional(draft, draft.kind === 'region');
+    } else if (existing.kind === 'region') {
+      // Re-open the saved box as an adjustable provisional
+      existing.els.forEach((e) => (e.style.display = 'none'));
+      editingHidden = existing;
+      showProvisional({ kind: 'region', rect: existing.rect }, true);
+    }
     popover = el('div', 'popover');
     Object.assign(popover.style, { left: draft.viewportX + 'px', top: draft.viewportY + 'px' });
 
@@ -289,7 +381,13 @@
       if (!comment) return;
       if (existing) {
         existing.comment = comment;
+        if (existing.kind === 'region' && provisionalEl) {
+          existing.rect = readProvisionalRect();
+          editingHidden = null; // visuals rebuilt below; nothing left to unhide
+          attachVisuals(existing, 0);
+        }
       } else {
+        if (draft.kind === 'region' && provisionalEl) draft.rect = readProvisionalRect();
         addAnnotation({ ...draft, comment });
       }
       closePopover();
@@ -318,14 +416,13 @@
   }
 
   // --- Annotation store + markers ---------------------------------------------
-  function addAnnotation(a) {
-    a.label = nextLabel++;
+  function attachVisuals(a, noteIndex) {
+    a.els?.forEach((e) => e.remove());
     a.els = [];
-    const noteStack = annotations.filter((x) => x.kind === 'note').length;
     let mx, my;
     if (a.kind === 'note') {
       mx = scrollX + 10;
-      my = scrollY + 10 + noteStack * 28;
+      my = scrollY + 10 + noteIndex * 28;
     } else {
       mx = a.rect.x + a.rect.w - 11;
       my = a.rect.y - 11;
@@ -347,6 +444,12 @@
     });
     layer.appendChild(m);
     a.els.push(m);
+  }
+
+  function addAnnotation(a) {
+    a.label = nextLabel++;
+    const noteStack = annotations.filter((x) => x.kind === 'note').length;
+    attachVisuals(a, noteStack);
     annotations.push(a);
     updateCount();
   }
