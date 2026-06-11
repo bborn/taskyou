@@ -852,6 +852,10 @@ live output in the side panel. The executor can also see and drive your tab
 through the browser bridge (screenshot/snapshot/console/click/type) instead of
 launching its own browser, and the page auto-reloads when it finishes a turn.
 
+| Annotate the live page | Side panel: task + live executor |
+|---|---|
+| ![Annotating a page: numbered marker, draggable region box, comment popover](extensions/ty-chrome/screenshots/annotate.png) | ![Side panel with matched task, annotation count, and live executor console](extensions/ty-chrome/screenshots/sidepanel.png) |
+
 ```
 chrome://extensions → Developer mode → Load unpacked → extensions/ty-chrome
 ty serve   # the extension auto-discovers it
