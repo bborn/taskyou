@@ -24,9 +24,13 @@ git -C "$PROJECT_PATH" worktree remove --force "$WT" 2>/dev/null || true
 git -C "$PROJECT_PATH" worktree add -q "$WT" -b "qa-$TASK_ID" 2>/dev/null \
   || git -C "$PROJECT_PATH" worktree add -q "$WT"
 
-tmux has-session -t "$TY_DAEMON_SESSION" 2>/dev/null \
-  || tmux new-session -d -s "$TY_DAEMON_SESSION" -n _placeholder "tail -f /dev/null"
-tmux kill-window -t "$WIN" 2>/dev/null || true
+# NOTE: these guards intentionally bypass lib.sh's tmux() wrapper: /bin/bash
+# 3.2 (macOS default) aborts on a failing *function* under set -e even inside
+# || lists, so a missing session/window would silently kill the script.
+# Direct `command tmux` calls in || lists are safe.
+command tmux -L "$TY_QA_TMUX_SOCKET" has-session -t "$TY_DAEMON_SESSION" 2>/dev/null \
+  || command tmux -L "$TY_QA_TMUX_SOCKET" new-session -d -s "$TY_DAEMON_SESSION" -n _placeholder "tail -f /dev/null"
+command tmux -L "$TY_QA_TMUX_SOCKET" kill-window -t "$WIN" 2>/dev/null || true
 
 runner="$TY_QA_ROOT/agent-$TASK_ID.sh"
 printf '#!/usr/bin/env bash\ncd %q\nexec %s\n' "$WT" "$AGENT_CMD" > "$runner"
