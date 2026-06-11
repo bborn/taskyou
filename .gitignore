@@ -52,3 +52,4 @@ tmux-*.log
 
 # goreleaser before-hook output (release.extra_files)
 ty-chrome.zip
+.superpowers/
