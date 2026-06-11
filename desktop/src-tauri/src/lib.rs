@@ -211,6 +211,7 @@ fn build_menu(app: &tauri::App) -> tauri::Result<()> {
         &[
             &MenuItem::with_id(handle, "board", "Board", true, Some("Cmd+1"))?,
             &MenuItem::with_id(handle, "search", "Search Tasks…", true, Some("Cmd+P"))?,
+            &MenuItem::with_id(handle, "routines", "Routines", true, Some("Cmd+U"))?,
             &PredefinedMenuItem::separator(handle)?,
             &PredefinedMenuItem::fullscreen(handle, None)?,
         ],

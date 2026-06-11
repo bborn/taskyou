@@ -9,6 +9,7 @@ import { store, useAppState } from "./store";
 import { checkEnvironment, inTauri, openExternal, openInEditor, supervisorEnsure } from "./tauri";
 import { Board } from "./components/Board";
 import { SetupCheck } from "./components/SetupCheck";
+import { RoutinesView } from "./components/RoutinesView";
 import { DetailView } from "./components/DetailView";
 import { SettingsView } from "./components/SettingsView";
 import { Palette } from "./components/Palette";
@@ -82,6 +83,8 @@ export default function App() {
           return void store.setForm({ kind: "new" });
         case "settings":
           return void store.openSettings();
+        case "routines":
+          return void store.openRoutines();
         case "board":
           return void store.openBoard();
         case "search":
@@ -293,6 +296,8 @@ export default function App() {
             return;
           case "s":
             return void store.openSettings();
+          case "u":
+            return void store.openRoutines();
           case "[":
             return void store.toggleCollapsed("backlog");
           case "]":
@@ -463,6 +468,7 @@ export default function App() {
           )}
           {state.view.kind === "detail" && <DetailView taskId={state.view.taskId} />}
           {state.view.kind === "settings" && <SettingsView />}
+          {state.view.kind === "routines" && <RoutinesView />}
       </motion.div>
 
       {state.paletteOpen && <Palette />}

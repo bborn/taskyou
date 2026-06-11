@@ -8,7 +8,8 @@ import { notify } from "./tauri";
 export type View =
   | { kind: "board" }
   | { kind: "detail"; taskId: number }
-  | { kind: "settings" };
+  | { kind: "settings" }
+  | { kind: "routines" };
 
 export type Dialog =
   | { kind: "confirm"; title: string; message: string; danger?: boolean; onConfirm: () => void }
@@ -197,6 +198,10 @@ class Store {
 
   openSettings() {
     this.set({ view: { kind: "settings" } });
+  }
+
+  openRoutines() {
+    this.set({ view: { kind: "routines" } });
   }
 
   selectTask(taskId: number | null) {
