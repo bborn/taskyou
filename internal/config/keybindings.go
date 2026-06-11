@@ -31,6 +31,7 @@ type KeybindingsConfig struct {
 	Delete             *KeybindingConfig `yaml:"delete,omitempty"`
 	Refresh            *KeybindingConfig `yaml:"refresh,omitempty"`
 	Settings           *KeybindingConfig `yaml:"settings,omitempty"`
+	Routines           *KeybindingConfig `yaml:"routines,omitempty"`
 	Help               *KeybindingConfig `yaml:"help,omitempty"`
 	Quit               *KeybindingConfig `yaml:"quit,omitempty"`
 	ChangeStatus       *KeybindingConfig `yaml:"change_status,omitempty"`

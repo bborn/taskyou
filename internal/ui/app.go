@@ -51,6 +51,7 @@ const (
 	ViewProjectDetectConfirm // Offer to create a project for the current git repo
 	ViewWelcome              // first-run fork: set up a project vs start a task
 	ViewFolderPicker         // fuzzy folder picker for "set up a project"
+	ViewRoutines             // global routines fleet-health view
 )
 
 // KeyMap defines key bindings.
@@ -70,6 +71,7 @@ type KeyMap struct {
 	Delete             key.Binding
 	Refresh            key.Binding
 	Settings           key.Binding
+	Routines           key.Binding
 	Help               key.Binding
 	Quit               key.Binding
 	ChangeStatus       key.Binding
@@ -114,7 +116,7 @@ func (k KeyMap) FullHelp() [][]key.Binding {
 		{k.FocusBacklog, k.FocusInProgress, k.FocusBlocked, k.FocusDone, k.CollapseBacklog, k.CollapseDone},
 		{k.Enter, k.New, k.Queue, k.QueueDangerous, k.Close},
 		{k.Retry, k.Archive, k.Delete, k.OpenWorktree, k.OpenBrowser, k.Spotlight},
-		{k.Filter, k.CommandPalette, k.Settings},
+		{k.Filter, k.CommandPalette, k.Settings, k.Routines},
 		{k.ChangeStatus, k.TogglePin, k.Refresh, k.Help},
 		{k.Quit},
 	}
@@ -182,6 +184,10 @@ func DefaultKeyMap() KeyMap {
 		Settings: key.NewBinding(
 			key.WithKeys("s"),
 			key.WithHelp("s", "settings"),
+		),
+		Routines: key.NewBinding(
+			key.WithKeys("u"),
+			key.WithHelp("u", "routines"),
 		),
 		Help: key.NewBinding(
 			key.WithKeys("?"),
@@ -317,6 +323,7 @@ func ApplyKeybindingsConfig(km KeyMap, cfg *config.KeybindingsConfig) KeyMap {
 	km.Delete = applyBinding(km.Delete, cfg.Delete)
 	km.Refresh = applyBinding(km.Refresh, cfg.Refresh)
 	km.Settings = applyBinding(km.Settings, cfg.Settings)
+	km.Routines = applyBinding(km.Routines, cfg.Routines)
 	km.Help = applyBinding(km.Help, cfg.Help)
 	km.Quit = applyBinding(km.Quit, cfg.Quit)
 	km.ChangeStatus = applyBinding(km.ChangeStatus, cfg.ChangeStatus)
@@ -466,6 +473,7 @@ type AppModel struct {
 
 	// Settings view state
 	settingsView *SettingsModel
+	routinesView *RoutinesModel
 
 	// Retry view state
 	retryView *RetryModel
@@ -755,6 +763,9 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if m.currentView == ViewSettings && m.settingsView != nil {
 			return m.updateSettings(msg)
+		}
+		if m.currentView == ViewRoutines && m.routinesView != nil {
+			return m.updateRoutines(msg)
 		}
 		if m.currentView == ViewRetry && m.retryView != nil {
 			return m.updateRetry(msg)
@@ -1479,6 +1490,9 @@ func (m *AppModel) applyWindowSize(width, height int) {
 	if m.settingsView != nil {
 		m.settingsView.SetSize(width, height)
 	}
+	if m.routinesView != nil {
+		m.routinesView.SetSize(width, height)
+	}
 	if m.retryView != nil {
 		m.retryView.SetSize(width, height)
 	}
@@ -1554,6 +1568,10 @@ func (m *AppModel) View() string {
 	case ViewSettings:
 		if m.settingsView != nil {
 			return m.settingsView.View()
+		}
+	case ViewRoutines:
+		if m.routinesView != nil {
+			return m.routinesView.View()
 		}
 	case ViewRetry:
 		if m.retryView != nil {
@@ -2057,6 +2075,12 @@ func (m *AppModel) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.previousView = m.currentView
 		m.currentView = ViewSettings
 		return m, m.settingsView.Init()
+
+	case key.Matches(msg, m.keys.Routines):
+		m.routinesView = NewRoutinesModel(m.db, m.width, m.height)
+		m.previousView = m.currentView
+		m.currentView = ViewRoutines
+		return m, m.routinesView.Init()
 
 	case key.Matches(msg, m.keys.Refresh):
 		m.loading = true
@@ -3743,6 +3767,20 @@ func (m *AppModel) updateSettings(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	return m, nil
+}
+
+func (m *AppModel) updateRoutines(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if m.routinesView == nil {
+		return m, nil
+	}
+	var cmd tea.Cmd
+	m.routinesView, cmd = m.routinesView.Update(msg)
+	if m.routinesView.done {
+		m.currentView = m.previousView
+		m.routinesView = nil
+		return m, nil
+	}
+	return m, cmd
 }
 
 func (m *AppModel) updateRetry(msg tea.Msg) (tea.Model, tea.Cmd) {
