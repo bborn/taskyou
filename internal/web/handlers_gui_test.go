@@ -518,3 +518,58 @@ func TestHandleUpdateTask_PermissionAndEffort(t *testing.T) {
 		t.Errorf("effort_level = %q, want high", fresh.EffortLevel)
 	}
 }
+
+func TestHandleTerminalInfo_PaneBorrowedByTUI(t *testing.T) {
+	srv, database, runner := setupServer(t)
+	task := createTestTask(t, database, &db.Task{Title: "borrowed", Status: db.StatusProcessing})
+	if err := database.UpdateTaskPaneIDs(task.ID, "%41", "%42"); err != nil {
+		t.Fatal(err)
+	}
+	// Daemon window is gone (TUI joined the panes away), but the pane is
+	// alive inside the TUI session.
+	runner.outputByCmd = map[string][]byte{
+		"list-windows": []byte("task-ui-123:0:detail\n"),
+		"list-panes":   []byte("%40 some-other\n%41 task-ui-123\n"),
+	}
+
+	req := httptest.NewRequest("GET", "/api/tasks/1/terminal-info", nil)
+	req.SetPathValue("id", fmt.Sprint(task.ID))
+	w := httptest.NewRecorder()
+	srv.handleTerminalInfo(w, req)
+
+	var info terminalInfoJSON
+	if err := json.NewDecoder(w.Body).Decode(&info); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if info.WindowExists {
+		t.Error("expected window_exists=false while pane is borrowed")
+	}
+	if info.PaneBorrowedBy != "task-ui-123" {
+		t.Errorf("pane_borrowed_by = %q, want task-ui-123", info.PaneBorrowedBy)
+	}
+}
+
+func TestHandleEnsureSession_RefusesWhileBorrowed(t *testing.T) {
+	sessions := &mockSessions{target: "x", created: true}
+	srv, database, runner := setupServerWithSessions(t, sessions)
+	task := createTestTask(t, database, &db.Task{Title: "borrowed", Status: db.StatusProcessing})
+	if err := database.UpdateTaskPaneIDs(task.ID, "%41", "%42"); err != nil {
+		t.Fatal(err)
+	}
+	runner.outputByCmd = map[string][]byte{
+		"list-windows": []byte("task-ui-123:0:detail\n"),
+		"list-panes":   []byte("%41 task-ui-123\n"),
+	}
+
+	req := httptest.NewRequest("POST", "/api/tasks/1/session", nil)
+	req.SetPathValue("id", fmt.Sprint(task.ID))
+	w := httptest.NewRecorder()
+	srv.handleEnsureSession(w, req)
+
+	if w.Code != http.StatusConflict {
+		t.Fatalf("expected 409 while pane is borrowed, got %d", w.Code)
+	}
+	if len(sessions.ensured) != 0 {
+		t.Error("EnsureTaskWindow must not run while the pane is borrowed")
+	}
+}

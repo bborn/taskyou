@@ -318,7 +318,13 @@ type terminalInfoJSON struct {
 	ShellPaneID   string `json:"shell_pane_id"`
 	WindowTarget  string `json:"window_target"`
 	WindowExists  bool   `json:"window_exists"`
-	Workdir       string `json:"workdir"`
+	// PaneBorrowedBy is set when the executor pane is alive but currently
+	// joined into another session (the TUI moves panes into its own session
+	// while a detail view is open, destroying the daemon window). Clients
+	// should report this and re-poll: the pane returns to a daemon window
+	// when the TUI releases it.
+	PaneBorrowedBy string `json:"pane_borrowed_by,omitempty"`
+	Workdir        string `json:"workdir"`
 }
 
 // findTaskWindowTarget scans tmux for the task's window in any task-daemon
@@ -341,6 +347,26 @@ func (s *Server) findTaskWindowTarget(taskID int64) string {
 	return ""
 }
 
+// findPaneSession locates a pane by ID anywhere on the tmux server and
+// returns the session holding it, or "". Pane IDs are stable across
+// join-pane moves, unlike window names.
+func (s *Server) findPaneSession(paneID string) string {
+	if s.runner == nil || paneID == "" {
+		return ""
+	}
+	out, err := s.runner.Output("tmux", "list-panes", "-a", "-F", "#{pane_id} #{session_name}")
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		parts := strings.SplitN(line, " ", 2)
+		if len(parts) == 2 && parts[0] == paneID {
+			return parts[1]
+		}
+	}
+	return ""
+}
+
 func (s *Server) taskWorkdir(task *db.Task) string {
 	if task.WorktreePath != "" {
 		return task.WorktreePath
@@ -355,7 +381,7 @@ func (s *Server) taskWorkdir(task *db.Task) string {
 
 func (s *Server) terminalInfo(task *db.Task) terminalInfoJSON {
 	target := s.findTaskWindowTarget(task.ID)
-	return terminalInfoJSON{
+	info := terminalInfoJSON{
 		DaemonSession: task.DaemonSession,
 		TmuxWindowID:  task.TmuxWindowID,
 		ClaudePaneID:  task.ClaudePaneID,
@@ -364,6 +390,14 @@ func (s *Server) terminalInfo(task *db.Task) terminalInfoJSON {
 		WindowExists:  target != "",
 		Workdir:       s.taskWorkdir(task),
 	}
+	// No daemon window, but the executor pane may still be alive inside
+	// another session (TUI detail view borrows panes via join-pane).
+	if target == "" {
+		if session := s.findPaneSession(task.ClaudePaneID); session != "" {
+			info.PaneBorrowedBy = session
+		}
+	}
+	return info
 }
 
 func (s *Server) handleTerminalInfo(w http.ResponseWriter, r *http.Request) {
@@ -385,6 +419,16 @@ func (s *Server) handleEnsureSession(w http.ResponseWriter, r *http.Request) {
 	if s.sessions == nil {
 		jsonErr(w, "executor manager not configured", http.StatusServiceUnavailable)
 		return
+	}
+
+	// Refuse to start a second session while the live pane is joined into
+	// another session (e.g. a TUI detail view) — it would duplicate the
+	// executor. The pane returns to a daemon window when released.
+	if s.findTaskWindowTarget(task.ID) == "" {
+		if session := s.findPaneSession(task.ClaudePaneID); session != "" {
+			jsonErr(w, "executor pane is currently attached to "+session, http.StatusConflict)
+			return
+		}
 	}
 
 	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)

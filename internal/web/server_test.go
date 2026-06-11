@@ -19,6 +19,9 @@ type mockRunner struct {
 	err       error
 	outputVal []byte
 	outputErr error
+	// outputByCmd, when set, selects output by the first argument
+	// (e.g. "list-windows", "list-panes"); falls back to outputVal.
+	outputByCmd map[string][]byte
 }
 
 func (m *mockRunner) Run(name string, args ...string) error {
@@ -30,6 +33,11 @@ func (m *mockRunner) Output(name string, args ...string) ([]byte, error) {
 	m.calls = append(m.calls, append([]string{name}, args...))
 	if m.outputErr != nil {
 		return nil, m.outputErr
+	}
+	if m.outputByCmd != nil && len(args) > 0 {
+		if out, ok := m.outputByCmd[args[0]]; ok {
+			return out, nil
+		}
 	}
 	return m.outputVal, nil
 }

@@ -11,6 +11,7 @@ type TermState =
   | { kind: "loading" }
   | { kind: "attached" }
   | { kind: "no-window" }
+  | { kind: "borrowed"; by: string }
   | { kind: "exited" }
   | { kind: "unsupported" }
   | { kind: "error"; message: string };
@@ -103,7 +104,11 @@ export function TerminalPane({ task }: { task: Task }) {
     try {
       const info = await api.terminalInfo(task.id);
       if (!info.window_exists) {
-        setState({ kind: "no-window" });
+        setState(
+          info.pane_borrowed_by
+            ? { kind: "borrowed", by: info.pane_borrowed_by }
+            : { kind: "no-window" },
+        );
         return;
       }
 
@@ -189,17 +194,22 @@ export function TerminalPane({ task }: { task: Task }) {
     return () => observer.disconnect();
   }, []);
 
-  // While the daemon hasn't created the window yet (queued/just-executed
-  // tasks), poll until it appears, then attach automatically.
+  // Poll until the daemon window is attachable: covers tasks whose executor
+  // hasn't started yet AND panes temporarily borrowed by an open TUI detail
+  // view (the daemon window is rebuilt when the TUI releases them).
   useEffect(() => {
-    if (state.kind !== "no-window") return;
-    if (!(task.status === "queued" || task.status === "processing")) return;
+    const waiting =
+      state.kind === "borrowed" ||
+      (state.kind === "no-window" && (task.status === "queued" || task.status === "processing"));
+    if (!waiting) return;
     const id = setInterval(async () => {
       try {
         const info = await api.terminalInfo(task.id);
         if (info.window_exists) {
           clearInterval(id);
           void attach();
+        } else if (state.kind === "borrowed" && !info.pane_borrowed_by) {
+          setState({ kind: "no-window" });
         }
       } catch {
         // keep polling
@@ -249,6 +259,15 @@ export function TerminalPane({ task }: { task: Task }) {
           {state.kind === "loading" && <span>Connecting…</span>}
           {state.kind === "unsupported" && (
             <span>Terminal requires the desktop app (running in browser)</span>
+          )}
+          {state.kind === "borrowed" && (
+            <>
+              <span className="max-w-md text-center">
+                The executor is currently attached to the TUI ({state.by}). It will appear here
+                automatically when the TUI releases it — close the task's detail view there.
+              </span>
+              <span className="text-status-processing">● running elsewhere</span>
+            </>
           )}
           {state.kind === "no-window" && (
             <>

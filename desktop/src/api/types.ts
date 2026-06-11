@@ -87,6 +87,9 @@ export interface TerminalInfo {
   shell_pane_id: string;
   window_target: string;
   window_exists: boolean;
+  /** Set when the executor pane is alive but joined into another session
+   * (e.g. an open TUI detail view). */
+  pane_borrowed_by?: string;
   workdir: string;
 }
 
