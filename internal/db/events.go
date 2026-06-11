@@ -8,6 +8,8 @@ type EventEmitter interface {
 	EmitTaskDeleted(taskID int64, title string)
 	EmitTaskPinned(task *Task)
 	EmitTaskUnpinned(task *Task)
+	EmitTaskBlocked(task *Task, reason string)
+	EmitTaskCompleted(task *Task)
 }
 
 // SetEventEmitter sets the event emitter for this database.
@@ -48,5 +50,19 @@ func (db *DB) emitTaskPinned(task *Task) {
 func (db *DB) emitTaskUnpinned(task *Task) {
 	if db.eventEmitter != nil {
 		db.eventEmitter.EmitTaskUnpinned(task)
+	}
+}
+
+// emitTaskBlocked emits a task blocked event if an emitter is configured.
+func (db *DB) emitTaskBlocked(task *Task, reason string) {
+	if db.eventEmitter != nil {
+		db.eventEmitter.EmitTaskBlocked(task, reason)
+	}
+}
+
+// emitTaskCompleted emits a task completed event if an emitter is configured.
+func (db *DB) emitTaskCompleted(task *Task) {
+	if db.eventEmitter != nil {
+		db.eventEmitter.EmitTaskCompleted(task)
 	}
 }

@@ -48,3 +48,4 @@ tmux-*.log
 .spotlight-active
 .playwright-mcp/
 .mcp.json
+.gstack/

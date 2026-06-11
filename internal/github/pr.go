@@ -303,18 +303,20 @@ func (p *PRInfo) StatusDescription() string {
 }
 
 // ghPRListResponse is a single PR from gh pr list.
+// statusCheckRollup is intentionally omitted from the batch path — it forces
+// GraphQL to expand every check run per PR, blowing up cost. The per-task
+// detail fetch (fetchPRInfo) still pulls it for the selected task.
 type ghPRListResponse struct {
-	Number            int       `json:"number"`
-	URL               string    `json:"url"`
-	State             string    `json:"state"`
-	IsDraft           bool      `json:"isDraft"`
-	Title             string    `json:"title"`
-	HeadRefName       string    `json:"headRefName"`
-	Mergeable         string    `json:"mergeable"`
-	StatusCheckRollup []ghCheck `json:"statusCheckRollup"`
-	UpdatedAt         string    `json:"updatedAt"`
-	Additions         int       `json:"additions"`
-	Deletions         int       `json:"deletions"`
+	Number      int    `json:"number"`
+	URL         string `json:"url"`
+	State       string `json:"state"`
+	IsDraft     bool   `json:"isDraft"`
+	Title       string `json:"title"`
+	HeadRefName string `json:"headRefName"`
+	Mergeable   string `json:"mergeable"`
+	UpdatedAt   string `json:"updatedAt"`
+	Additions   int    `json:"additions"`
+	Deletions   int    `json:"deletions"`
 }
 
 // graphQLRateLimitRemaining returns the remaining GraphQL rate limit budget.
@@ -336,6 +338,8 @@ func graphQLRateLimitRemaining() int {
 }
 
 // rateLimitThreshold is the minimum remaining GraphQL calls before we skip batch fetches.
+// This is the TUI's automatic self-throttle. `ty doctor` warns the operator earlier,
+// at the higher graphQLLowThreshold (500) in auth.go — see that constant for the rationale.
 const rateLimitThreshold = 200
 
 // FetchAllPRsForRepo fetches all open and recently merged PRs for a repo in a single API call.
@@ -359,7 +363,7 @@ func FetchAllPRsForRepo(repoDir string) map[string]*PRInfo {
 	// Get all open PRs in one call
 	cmd := exec.CommandContext(ctx, "gh", "pr", "list",
 		"--state", "open",
-		"--json", "number,url,state,isDraft,title,headRefName,mergeable,statusCheckRollup,updatedAt,additions,deletions",
+		"--json", "number,url,state,isDraft,title,headRefName,mergeable,updatedAt,additions,deletions",
 		"--limit", "100")
 	cmd.Dir = repoDir
 
@@ -447,8 +451,9 @@ func parsePRListResponse(pr *ghPRListResponse) *PRInfo {
 		info.State = PRStateOpen
 	}
 
-	// Parse check state
-	info.CheckState = parseCheckState(pr.StatusCheckRollup)
+	// CheckState left as CheckStateNone — the batch query no longer fetches
+	// statusCheckRollup. The per-task detail fetch in GetPRForBranch fills it
+	// in when a task is selected.
 
 	// Parse updated time
 	if t, err := time.Parse(time.RFC3339, pr.UpdatedAt); err == nil {
