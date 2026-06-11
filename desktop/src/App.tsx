@@ -151,7 +151,7 @@ export default function App() {
         if (s.paletteOpen) return void store.setPalette(false);
         if (s.dialog) return void store.setDialog(null);
         if (s.form) return void store.setForm(null);
-        if (s.filterOpen) {
+        if (s.filterOpen || s.filter !== "") {
           store.setFilterOpen(false);
           store.setFilter("");
           return;
@@ -263,7 +263,11 @@ export default function App() {
             return;
           case "/":
             e.preventDefault();
-            return void store.setFilterOpen(true);
+            store.setFilterOpen(true);
+            requestAnimationFrame(() =>
+              document.querySelector<HTMLInputElement>("#board-filter")?.focus(),
+            );
+            return;
           case "s":
             return void store.openSettings();
           case "[":
@@ -413,7 +417,7 @@ export default function App() {
         >
           {state.view.kind === "board" && (
             <div className="flex min-h-0 flex-1 flex-col">
-              {state.filterOpen && <FilterBar />}
+              {(state.filterOpen || state.filter !== "") && <FilterBar />}
               <Board columns={columns} collapsed={state.collapsed} />
             </div>
           )}
