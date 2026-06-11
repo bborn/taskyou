@@ -53,6 +53,9 @@ GIF="${OUT%.png}.gif"
   if [ -n "${TY_ROUTINES_STATE_DIR:-}" ]; then
     echo "Env TY_ROUTINES_STATE_DIR \"$TY_ROUTINES_STATE_DIR\""
   fi
+  if [ -n "${TY_ROUTINES_LAUNCHD_DIR:-}" ]; then
+    echo "Env TY_ROUTINES_LAUNCHD_DIR \"$TY_ROUTINES_LAUNCHD_DIR\""
+  fi
   echo 'Hide'
   if [ -n "${TY_QA_SHOT_KEEP_DB:-}" ]; then
     # Keep the (seeded) DB — for board/detail shots with data.

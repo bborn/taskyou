@@ -142,7 +142,7 @@ logs, run history, and failure alerting (a pinned task + routine.failed hook).`,
 			fmt.Printf("  %s %s\n", dimStyle.Render("Edit the prompt:"), rt.Dir+"/prompt.md")
 			fmt.Printf("  %s %s\n", dimStyle.Render("Optional secrets/checks:"), rt.Dir+"/env.sh (sourced before each run)")
 			fmt.Printf("  %s ty run %s\n", dimStyle.Render("Run it:"), rt.Name)
-			fmt.Printf("  %s\n", dimStyle.Render("Schedule it with anything, e.g. cron: */30 * * * * ty run "+rt.Name))
+			fmt.Printf("  %s ty routines schedule %s --every 30m\n", dimStyle.Render("Schedule it:"), rt.Name)
 		},
 	})
 
@@ -173,9 +173,56 @@ logs, run history, and failure alerting (a pinned task + routine.failed hook).`,
 		},
 	})
 
+	scheduleCmd := &cobra.Command{
+		Use:   "schedule <name>",
+		Short: "Register the routine with the OS scheduler (launchd/cron)",
+		Long: `Register the routine with the OS scheduler. ty writes the config and hands
+the clock to the OS — it keeps no schedule state of its own, so the OS entry
+(a launchd plist labelled com.taskyou.routine.<name>, or a tagged crontab
+line) is the single source of truth.
+
+--every uses launchd on macOS and cron elsewhere; --cron always uses cron.
+The generated config captures your current PATH so the agent can find ty,
+claude, and anything env.sh needs.
+
+Examples:
+  ty routines schedule my-scout --every 30m
+  ty routines schedule my-scout --cron "0 8 * * 1-5"
+  ty routines schedule my-scout --every 30m --print   # show config, install nothing`,
+		Args: cobra.ExactArgs(1),
+		Run: func(cmd *cobra.Command, args []string) {
+			every, _ := cmd.Flags().GetDuration("every")
+			cron, _ := cmd.Flags().GetString("cron")
+			print, _ := cmd.Flags().GetBool("print")
+			scheduleRoutine(args[0], routine.ScheduleOptions{Every: every, Cron: cron}, print)
+		},
+	}
+	scheduleCmd.Flags().Duration("every", 0, "Run interval, e.g. 30m, 1h (launchd on macOS, cron elsewhere)")
+	scheduleCmd.Flags().String("cron", "", "Five-field cron expression, e.g. \"0 8 * * 1-5\"")
+	scheduleCmd.Flags().Bool("print", false, "Print the generated scheduler config without installing it")
+	routinesCmd.AddCommand(scheduleCmd)
+
+	routinesCmd.AddCommand(&cobra.Command{
+		Use:   "unschedule <name>",
+		Short: "Remove the routine's ty-managed OS scheduler entry",
+		Args:  cobra.ExactArgs(1),
+		Run: func(cmd *cobra.Command, args []string) {
+			removed, err := routine.RemoveSchedule(args[0])
+			if err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+			if removed {
+				fmt.Println(successStyle.Render(fmt.Sprintf("Unscheduled %q — the routine still exists; run it manually with: ty run %s", args[0], args[0])))
+			} else {
+				fmt.Println(dimStyle.Render(fmt.Sprintf("No ty-managed schedule found for %q", args[0])))
+			}
+		},
+	})
+
 	deleteCmd := &cobra.Command{
 		Use:   "delete <name>",
-		Short: "Delete a routine, its state dir, and its run history",
+		Short: "Delete a routine, its schedule, its state dir, and its run history",
 		Args:  cobra.ExactArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
 			force, _ := cmd.Flags().GetBool("force")
@@ -224,6 +271,12 @@ func listRoutines() {
 		os.Exit(1)
 	}
 
+	names := make([]string, len(routines))
+	for i, rt := range routines {
+		names[i] = rt.Name
+	}
+	schedules, _ := routine.LoadSchedules(names)
+
 	fmt.Println(boldStyle.Render("Routines"))
 	fmt.Println(dimStyle.Render(strings.Repeat("─", 60)))
 	for _, rt := range routines {
@@ -231,7 +284,12 @@ func listRoutines() {
 		if rt.Disabled {
 			state = dimStyle.Render("◌")
 		}
-		fmt.Printf("%s %s %s\n", state, boldStyle.Render(rt.Name), dimStyle.Render("("+rt.Model+")"))
+		meta := "(" + rt.Model
+		if sched := schedules[rt.Name]; sched != nil {
+			meta += " · " + sched.Detail
+		}
+		meta += ")"
+		fmt.Printf("%s %s %s\n", state, boldStyle.Render(rt.Name), dimStyle.Render(meta))
 		if rt.Disabled {
 			fmt.Printf("  %s\n", dimStyle.Render("disabled"))
 		}
@@ -259,6 +317,11 @@ func showRoutine(name string) {
 	}
 	fmt.Printf("%s %s\n", dimStyle.Render("Timeout:"), rt.Timeout)
 	fmt.Printf("%s %s\n", dimStyle.Render("Permissions:"), rt.PermissionMode)
+	if sched, err := routine.ScheduledFor(rt.Name); err == nil && sched != nil {
+		fmt.Printf("%s %s via %s (%s)\n", dimStyle.Render("Schedule:"), sched.Detail, sched.Backend, sched.Path)
+	} else {
+		fmt.Printf("%s %s\n", dimStyle.Render("Schedule:"), dimStyle.Render("none — add one with: ty routines schedule "+rt.Name+" --every 30m"))
+	}
 	if _, ok := rt.EnvPath(); ok {
 		fmt.Printf("%s env.sh sourced before each run\n", dimStyle.Render("Env:"))
 	}
@@ -339,6 +402,33 @@ func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
+func scheduleRoutine(name string, opts routine.ScheduleOptions, printOnly bool) {
+	if _, err := routine.Load(name); err != nil {
+		fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+		os.Exit(1)
+	}
+
+	if printOnly {
+		backend, content, err := routine.RenderSchedule(name, opts)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+			os.Exit(1)
+		}
+		fmt.Println(dimStyle.Render("# backend: " + backend))
+		fmt.Println(content)
+		return
+	}
+
+	sched, err := routine.InstallSchedule(name, opts)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+		os.Exit(1)
+	}
+	fmt.Println(successStyle.Render(fmt.Sprintf("Scheduled %q — %s via %s", name, sched.Detail, sched.Backend)))
+	fmt.Println(dimStyle.Render("  " + sched.Path))
+	fmt.Println(dimStyle.Render("  The OS owns the clock from here; ty records each run. Pause with: ty routines disable " + name))
+}
+
 func deleteRoutine(name string, force bool) {
 	rt, err := routine.Load(name)
 	if err != nil {
@@ -348,7 +438,7 @@ func deleteRoutine(name string, force bool) {
 
 	// Confirm unless --force flag is set
 	if !force {
-		fmt.Printf("Delete routine %q, its state dir, and its run history? [y/N] ", rt.Name)
+		fmt.Printf("Delete routine %q, its schedule, its state dir, and its run history? [y/N] ", rt.Name)
 		reader := bufio.NewReader(os.Stdin)
 		response, _ := reader.ReadString('\n')
 		response = strings.TrimSpace(strings.ToLower(response))
@@ -365,6 +455,14 @@ func deleteRoutine(name string, force bool) {
 	}
 	defer database.Close()
 
+	// Unschedule first so a deleted routine can't leave an orphaned plist or
+	// crontab line firing `ty run` against nothing.
+	if removed, err := routine.RemoveSchedule(rt.Name); err != nil {
+		fmt.Fprintln(os.Stderr, errorStyle.Render("Error removing schedule: "+err.Error()))
+		os.Exit(1)
+	} else if removed {
+		fmt.Println(dimStyle.Render("Removed OS schedule"))
+	}
 	if err := database.DeleteRoutineRuns(rt.Name); err != nil {
 		fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
 		os.Exit(1)

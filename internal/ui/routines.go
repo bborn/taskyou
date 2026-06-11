@@ -24,10 +24,11 @@ type RoutinesModel struct {
 	width    int
 	height   int
 
-	routines []*routine.Routine
-	latest   map[string]*db.RoutineRun
-	cursor   int
-	loadErr  error
+	routines  []*routine.Routine
+	latest    map[string]*db.RoutineRun
+	schedules map[string]*routine.Schedule
+	cursor    int
+	loadErr   error
 
 	// viewingLog switches to a scrollable view of the selected routine's
 	// latest run log.
@@ -64,6 +65,18 @@ func (m *RoutinesModel) reload() {
 		return
 	}
 	m.latest = latest
+
+	names := make([]string, len(routines))
+	for i, rt := range routines {
+		names[i] = rt.Name
+	}
+	// Live OS-scheduler lookup — ty keeps no schedule state of its own.
+	schedules, err := routine.LoadSchedules(names)
+	if err != nil {
+		m.loadErr = err
+		return
+	}
+	m.schedules = schedules
 	if m.cursor >= len(m.routines) {
 		m.cursor = max(0, len(m.routines)-1)
 	}
@@ -196,9 +209,9 @@ func (m *RoutinesModel) tableView() string {
 	if len(m.routines) == 0 {
 		b.WriteString(Dim.Render("No routines yet. Create one with: ty routines create <name>") + "\n")
 	} else {
-		header := fmt.Sprintf("  %-24s %-12s %-8s %-9s %s", "NAME", "PROJECT", "MODEL", "STATE", "LAST RUN")
+		header := fmt.Sprintf("  %-20s %-10s %-7s %-9s %-12s %s", "NAME", "PROJECT", "MODEL", "STATE", "SCHEDULE", "LAST RUN")
 		b.WriteString(Dim.Render(header) + "\n")
-		b.WriteString(Dim.Render("  "+strings.Repeat("─", min(m.width-4, 76))) + "\n")
+		b.WriteString(Dim.Render("  "+strings.Repeat("─", min(m.width-4, 84))) + "\n")
 
 		for i, rt := range m.routines {
 			cursor := "  "
@@ -216,9 +229,14 @@ func (m *RoutinesModel) tableView() string {
 				project = "personal"
 			}
 
-			line := fmt.Sprintf("%s%-24s %-12s %-8s %s %s",
-				cursor, truncateRunes(rt.Name, 24), truncateRunes(project, 12), truncateRunes(rt.Model, 8),
-				state, m.renderLastRun(rt.Name))
+			schedule := "—"
+			if sched := m.schedules[rt.Name]; sched != nil {
+				schedule = sched.Detail
+			}
+
+			line := fmt.Sprintf("%s%-20s %-10s %-7s %s %-12s %s",
+				cursor, truncateRunes(rt.Name, 20), truncateRunes(project, 10), truncateRunes(rt.Model, 7),
+				state, truncateRunes(schedule, 12), m.renderLastRun(rt.Name))
 			if i == m.cursor {
 				line = lipgloss.NewStyle().Bold(true).Render(line)
 			}

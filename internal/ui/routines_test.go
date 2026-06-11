@@ -16,6 +16,7 @@ func setupRoutinesView(t *testing.T) *RoutinesModel {
 	routinesDir := t.TempDir()
 	t.Setenv("TY_ROUTINES_DIR", routinesDir)
 	t.Setenv("TY_ROUTINES_STATE_DIR", filepath.Join(t.TempDir(), "state"))
+	t.Setenv("TY_ROUTINES_LAUNCHD_DIR", t.TempDir())
 
 	for _, name := range []string{"alpha-scout", "beta-scout"} {
 		dir := filepath.Join(routinesDir, name)
