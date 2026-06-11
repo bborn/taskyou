@@ -4354,10 +4354,7 @@ func (m *AppModel) openWorktreeInEditor(task *db.Task) tea.Cmd {
 		}
 
 		// Try VISUAL, then EDITOR, then fall back to "open" command
-		editor := os.Getenv("VISUAL")
-		if editor == "" {
-			editor = os.Getenv("EDITOR")
-		}
+		editor := resolveEditor()
 
 		var cmd *osExec.Cmd
 		if editor != "" {
@@ -4407,8 +4404,9 @@ func (m *AppModel) openBrowser(task *db.Task) tea.Cmd {
 }
 
 // openTaskDirectory opens the task's worktree directory in the most appropriate application.
-// If the directory contains source files (detected by common project markers), it opens in VS Code.
-// Otherwise, it falls back to opening the directory in the default file manager (Finder on macOS).
+// If the directory contains source files (detected by common project markers), it opens in the
+// configured editor (VISUAL, then EDITOR). Otherwise, or when no editor is configured, it falls
+// back to opening the directory in the default file manager (Finder on macOS).
 func (m *AppModel) openTaskDirectory(task *db.Task) tea.Cmd {
 	return func() tea.Msg {
 		if task.WorktreePath == "" {
@@ -4422,12 +4420,13 @@ func (m *AppModel) openTaskDirectory(task *db.Task) tea.Cmd {
 
 		// Check if directory contains source files by looking for common project markers
 		if containsSourceFiles(task.WorktreePath) {
-			// Try to open in VS Code
-			cmd := osExec.Command("code", task.WorktreePath)
-			if err := cmd.Start(); err == nil {
-				return browserOpenedMsg{message: fmt.Sprintf("Opened %s in VS Code", filepath.Base(task.WorktreePath))}
+			if editor := resolveEditor(); editor != "" {
+				cmd := osExec.Command(editor, task.WorktreePath)
+				if err := cmd.Start(); err == nil {
+					return browserOpenedMsg{message: fmt.Sprintf("Opened %s in %s", filepath.Base(task.WorktreePath), filepath.Base(editor))}
+				}
+				// Editor failed to start, fall through to file manager
 			}
-			// VS Code not available, fall through to file manager
 		}
 
 		// Fall back to opening in the default file manager
@@ -4438,6 +4437,15 @@ func (m *AppModel) openTaskDirectory(task *db.Task) tea.Cmd {
 
 		return browserOpenedMsg{message: fmt.Sprintf("Opened %s in Finder", filepath.Base(task.WorktreePath))}
 	}
+}
+
+// resolveEditor returns the user's configured editor: VISUAL, then EDITOR.
+// Returns an empty string when neither is set.
+func resolveEditor() string {
+	if editor := os.Getenv("VISUAL"); editor != "" {
+		return editor
+	}
+	return os.Getenv("EDITOR")
 }
 
 // containsSourceFiles checks if a directory contains source code by looking for
@@ -4472,6 +4480,7 @@ func (m *AppModel) openPR(task *db.Task) tea.Cmd {
 		return browserOpenedMsg{message: fmt.Sprintf("Opened PR #%d", task.PRNumber)}
 	}
 }
+
 // spotlightMsg is returned after a spotlight action completes.
 type spotlightMsg struct {
 	action  string // "start", "stop", "sync"

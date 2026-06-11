@@ -483,13 +483,38 @@ func TestDetailModel_CollapsedShellIndicator(t *testing.T) {
 	}
 }
 
+// TestResolveEditor verifies that resolveEditor prefers VISUAL over EDITOR
+// and returns empty when neither is set.
+func TestResolveEditor(t *testing.T) {
+	tests := []struct {
+		name   string
+		visual string
+		editor string
+		want   string
+	}{
+		{name: "visual preferred", visual: "subl", editor: "vim", want: "subl"},
+		{name: "editor fallback", visual: "", editor: "vim", want: "vim"},
+		{name: "neither set", visual: "", editor: "", want: ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("VISUAL", tt.visual)
+			t.Setenv("EDITOR", tt.editor)
+			if got := resolveEditor(); got != tt.want {
+				t.Errorf("resolveEditor() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 // TestContainsSourceFiles verifies that containsSourceFiles correctly detects
 // directories with common project markers.
 func TestContainsSourceFiles(t *testing.T) {
 	tests := []struct {
-		name    string
-		files   []string
-		want    bool
+		name  string
+		files []string
+		want  bool
 	}{
 		{
 			name:  "go project",
