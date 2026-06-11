@@ -77,7 +77,16 @@ func Open(path string) (*DB, error) {
 		return nil, fmt.Errorf("create db directory: %w", err)
 	}
 
-	db, err := sql.Open("sqlite", path)
+	// Pass PRAGMAs via DSN so they are applied to EVERY new connection.
+	// This is critical because SetConnMaxLifetime causes periodic connection
+	// recycling, and PRAGMAs set via Exec() only apply to the initial
+	// connection — new connections from the pool would lack busy_timeout
+	// and fail immediately with SQLITE_BUSY under contention.
+	// Note: the bare _busy_timeout DSN param does NOT work with
+	// modernc.org/sqlite, but _pragma=busy_timeout(N) does.
+	dsn := path + "?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)"
+
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open database: %w", err)
 	}
@@ -93,25 +102,8 @@ func Open(path string) (*DB, error) {
 	// modernc.org/sqlite (pure-Go) uses file I/O instead of mmap for the
 	// WAL shared-memory, so a long-lived connection may cache a stale WAL
 	// index and miss writes from other processes (e.g., CLI commands).
+	// PRAGMAs are re-applied automatically via the DSN _pragma parameters.
 	db.SetConnMaxLifetime(2 * time.Second)
-
-	// Set busy timeout to retry on SQLITE_BUSY instead of failing immediately.
-	// This is critical for the daemon where multiple goroutines update task
-	// status concurrently. Note: _busy_timeout DSN param does NOT work with
-	// modernc.org/sqlite — must use PRAGMA.
-	if _, err := db.Exec("PRAGMA busy_timeout=5000"); err != nil {
-		return nil, fmt.Errorf("set busy timeout: %w", err)
-	}
-
-	// Enable WAL mode for better concurrent access
-	if _, err := db.Exec("PRAGMA journal_mode=WAL"); err != nil {
-		return nil, fmt.Errorf("enable WAL: %w", err)
-	}
-
-	// Enable foreign keys
-	if _, err := db.Exec("PRAGMA foreign_keys=ON"); err != nil {
-		return nil, fmt.Errorf("enable foreign keys: %w", err)
-	}
 
 	wrapped := &DB{DB: db, path: path}
 
@@ -122,6 +114,11 @@ func Open(path string) (*DB, error) {
 
 	return wrapped, nil
 }
+
+// permModeAutoMigrationKey guards the one-time rewrite of legacy "auto"
+// permission_mode rows (which meant acceptEdits) to "accept-edits", now that
+// "auto" denotes Claude Code's real auto mode.
+const permModeAutoMigrationKey = "migration:auto_means_accept_edits_v1"
 
 // migrate runs database migrations.
 func (db *DB) migrate() error {
@@ -277,6 +274,14 @@ func (db *DB) migrate() error {
 		`ALTER TABLE tasks ADD COLUMN pr_info_json TEXT DEFAULT ''`, // JSON blob of github.PRInfo
 		// Whether project uses git worktrees for task isolation (1=yes, 0=no, default 1 for backward compat)
 		`ALTER TABLE projects ADD COLUMN use_worktrees INTEGER DEFAULT 1`,
+		// Permission mode for task execution: "default" (prompt), "accept-edits" (acceptEdits), "auto" (Claude Code auto mode), "dangerous" (skip permissions)
+		`ALTER TABLE tasks ADD COLUMN permission_mode TEXT DEFAULT ''`,
+		// Per-project default permission mode inherited by new tasks (empty = global default)
+		`ALTER TABLE projects ADD COLUMN default_permission_mode TEXT DEFAULT ''`,
+		// Per-task Claude effort override ("" = use global/Claude default, otherwise low/medium/high/xhigh/max)
+		`ALTER TABLE tasks ADD COLUMN effort_level TEXT DEFAULT ''`,
+
+		`ALTER TABLE tasks ADD COLUMN remote_control INTEGER DEFAULT 0`, // Whether to launch claude with --remote-control
 	}
 
 	for _, m := range alterMigrations {
@@ -297,6 +302,17 @@ func (db *DB) migrate() error {
 
 	for _, m := range statusMigrations {
 		db.Exec(m)
+	}
+
+	// One-time: the value "auto" historically meant Claude's acceptEdits mode.
+	// It now means Claude Code's real auto mode, so rewrite pre-existing rows to
+	// the explicit "accept-edits" value to preserve their original behavior.
+	// Guarded by a settings flag so it runs exactly once and never clobbers tasks
+	// a user later sets to the new auto mode.
+	if done, _ := db.GetSetting(permModeAutoMigrationKey); done == "" {
+		db.Exec(`UPDATE tasks SET permission_mode = 'accept-edits' WHERE permission_mode = 'auto'`)
+		db.Exec(`UPDATE projects SET default_permission_mode = 'accept-edits' WHERE default_permission_mode = 'auto'`)
+		db.SetSetting(permModeAutoMigrationKey, "done")
 	}
 
 	// Ensure 'personal' project exists
@@ -502,6 +518,40 @@ func (db *DB) migrateProjectAliases() error {
 	return nil
 }
 
+// defaultCodeTaskTypeInstructions is the default instructions template for the built-in
+// "code" task type. It carries only code-task workflow steering (explore, implement, test,
+// commit, open a PR) — deliberately NOT operational guidance like the worktree-safety
+// constraint or taskyou_get_project_context usage. That guidance is intrinsic to how
+// taskyou runs a task (every task type, conditional on worktrees) and is injected by the
+// executor for all task types (see Executor.buildUniversalGuidance), so it must not be
+// baked into a single task type's editable template.
+const defaultCodeTaskTypeInstructions = `You are working on: {{project}}
+
+{{project_instructions}}
+
+Task: {{title}}
+
+{{body}}
+
+{{attachments}}
+
+{{history}}
+
+Instructions:
+- Explore the codebase to understand the context
+- Implement the solution
+- Write tests if applicable
+- Commit your changes with clear messages
+- Submit a pull request when your work is complete
+
+IMPORTANT: Your objective is to submit a PR to complete this task. Always remember to create and submit a pull request as the final step of your work. This is how you signal that the implementation is ready for review and merging.
+
+When finished, provide a summary of what you did:
+- List files changed/created
+- Describe the key changes made
+- Include any relevant links (PRs, commits, etc.)
+- Note any follow-up items or concerns`
+
 // ensureDefaultTaskTypes creates the default task types if they don't exist.
 func (db *DB) ensureDefaultTaskTypes() error {
 	// Check if task types already exist
@@ -523,36 +573,10 @@ func (db *DB) ensureDefaultTaskTypes() error {
 		SortOrder    int
 	}{
 		{
-			Name:  "code",
-			Label: "Code",
-			Instructions: `You are working on: {{project}}
-
-{{project_instructions}}
-
-Task: {{title}}
-
-{{body}}
-
-{{attachments}}
-
-{{history}}
-
-Instructions:
-- Explore the codebase to understand the context
-- Always use relative paths (e.g., "." or "./src") when searching or navigating - never use absolute paths
-- Implement the solution
-- Write tests if applicable
-- Commit your changes with clear messages
-- Submit a pull request when your work is complete
-
-IMPORTANT: Your objective is to submit a PR to complete this task. Always remember to create and submit a pull request as the final step of your work. This is how you signal that the implementation is ready for review and merging.
-
-When finished, provide a summary of what you did:
-- List files changed/created
-- Describe the key changes made
-- Include any relevant links (PRs, commits, etc.)
-- Note any follow-up items or concerns`,
-			SortOrder: 1,
+			Name:         "code",
+			Label:        "Code",
+			Instructions: defaultCodeTaskTypeInstructions,
+			SortOrder:    1,
 		},
 		{
 			Name:  "writing",

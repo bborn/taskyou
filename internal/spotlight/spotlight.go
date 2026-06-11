@@ -41,14 +41,16 @@ func Start(worktreePath, mainRepoDir string) (string, error) {
 		hasChanges = true // staged changes exist
 	}
 
-	// Stash changes if any exist
+	// Stash changes if any exist — fail if stash fails, since Stop()
+	// will run git checkout . which would destroy uncommitted work.
 	stashCreated := false
 	if hasChanges {
 		stashCmd := exec.Command("git", "stash", "push", "-m", "spotlight-backup-"+time.Now().Format("20060102-150405"))
 		stashCmd.Dir = mainRepoDir
-		if err := stashCmd.Run(); err == nil {
-			stashCreated = true
+		if output, err := stashCmd.CombinedOutput(); err != nil {
+			return "", fmt.Errorf("failed to stash main repo changes (aborting to protect uncommitted work): %s", strings.TrimSpace(string(output)))
 		}
+		stashCreated = true
 	}
 
 	// Create the state file to track that spotlight is active

@@ -55,7 +55,38 @@ type KanbanBoard struct {
 	blockedByDeps     map[int64]int            // Tasks blocked by dependencies (task ID -> open blocker count)
 	hiddenDoneCount   int                      // Number of done tasks not shown (older ones)
 	originColumn      int                      // Column where detail view navigation started (-1 = not set)
+
+	// Render cache. View() is called on every Bubble Tea Update (key, tick,
+	// mouse move, task event), but the board's pixels only change when one of
+	// its inputs does. We hash all rendering inputs into a signature and reuse
+	// the previously rendered string when the signature is unchanged, so idle
+	// re-renders (the common case) cost a hash instead of a full lipgloss pass.
+	cachedView    string
+	cachedViewSig uint64
+	cachedViewOK  bool
+
+	// cardCache memoizes individual rendered task cards by a signature of their
+	// inputs, so a board re-render (cache miss above — e.g. moving the selection
+	// or one task changing status) only pays the lipgloss cost for the cards that
+	// actually changed. Bounded; reset wholesale once it grows past cardCacheMax.
+	cardCache map[uint64]string
+
+	// Each card carries a live sub-line: what the running agent is doing right
+	// now (from latestActivity), the question it's blocked on, or an age hint
+	// for idle statuses. spinnerFrame drives the animated braille glyph on
+	// processing tasks.
+	latestActivity map[int64]*db.TaskLog
+	spinnerFrame   int
 }
+
+// cardHeight is the number of vertical lines a task card occupies, including
+// its bottom margin. Three content lines (id, title, sub-line) + 1 margin.
+const cardHeight = 4
+
+// cardCacheMax bounds the per-card render cache. Steady-state usage is a few
+// dozen entries; the cap guards against unbounded growth over a long session as
+// task titles/statuses churn.
+const cardCacheMax = 4096
 
 // IsMobileMode returns true if the board should show single-column mode.
 func (k *KanbanBoard) IsMobileMode() bool {
@@ -350,6 +381,70 @@ func splitPinnedTasks(tasks []*db.Task) (pinned []*db.Task, unpinned []*db.Task)
 	return tasks[:idx], tasks[idx:]
 }
 
+// maxVisibleCards returns how many task cards fit in a column at the current
+// board height. Mirrors the colHeight math used by the view/click handlers so
+// scrolling and rendering agree.
+func (k *KanbanBoard) maxVisibleCards() int {
+	colHeight := k.height - 2 // -2 for column borders
+	if k.IsMobileMode() {
+		colHeight = k.height - 4 // -2 for tab bar, -2 for column borders
+	}
+	m := (colHeight - 3) / cardHeight // -3 for header bar and scroll indicators
+	if m < 1 {
+		m = 1
+	}
+	return m
+}
+
+// columnLayout describes how a column's tasks map onto the viewport.
+type columnLayout struct {
+	fixedPinned    int // leading pinned tasks rendered fixed at the top: rows [0, fixedPinned)
+	scrollCapacity int // number of scrolling-region cards visible at once
+	scrollOffset   int // clamped offset into the scrolling region (region starts at fixedPinned)
+}
+
+// columnLayoutFor computes the viewport layout for a column given how many cards
+// fit (maxVisible). Pinned tasks stay fixed at the top while they leave room to
+// scroll the rest; but once pinned tasks alone fill the viewport they scroll
+// along with everything else (fixedPinned == 0), so the selection can never fall
+// off-screen in an all-pinned column. The scrolling region is col.Tasks[fixedPinned:].
+func (k *KanbanBoard) columnLayoutFor(colIdx, maxVisible int) columnLayout {
+	if maxVisible < 1 {
+		maxVisible = 1
+	}
+	col := k.columns[colIdx]
+	pinned, _ := splitPinnedTasks(col.Tasks)
+	pinnedCount := len(pinned)
+
+	fixedPinned := pinnedCount
+	if pinnedCount >= maxVisible {
+		// Pinned tasks overflow the viewport — there is no room to keep them
+		// fixed, so scroll the whole list instead.
+		fixedPinned = 0
+	}
+	scrollCapacity := maxVisible - fixedPinned
+	if scrollCapacity < 1 {
+		scrollCapacity = 1
+	}
+
+	offset := 0
+	if colIdx >= 0 && colIdx < len(k.scrollOffsets) {
+		offset = k.scrollOffsets[colIdx]
+	}
+	regionLen := len(col.Tasks) - fixedPinned
+	maxOffset := regionLen - scrollCapacity
+	if maxOffset < 0 {
+		maxOffset = 0
+	}
+	if offset > maxOffset {
+		offset = maxOffset
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	return columnLayout{fixedPinned: fixedPinned, scrollCapacity: scrollCapacity, scrollOffset: offset}
+}
+
 // SetSize updates the board dimensions.
 func (k *KanbanBoard) SetSize(width, height int) {
 	heightChanged := k.height != height
@@ -459,74 +554,35 @@ func (k *KanbanBoard) ensureSelectedVisible() {
 		k.scrollOffsets = append(k.scrollOffsets, 0)
 	}
 
+	lay := k.columnLayoutFor(k.selectedCol, k.maxVisibleCards())
+
+	// Tasks pinned to the fixed header are always visible — don't move scroll.
+	if k.selectedRow < lay.fixedPinned {
+		k.scrollOffsets[k.selectedCol] = lay.scrollOffset
+		return
+	}
+
+	// Scroll the region so the selected task is within the visible window.
 	col := k.columns[k.selectedCol]
-	pinnedTasks, unpinnedTasks := splitPinnedTasks(col.Tasks)
-	pinnedCount := len(pinnedTasks)
-
-	// Calculate how many tasks fit in the visible area
-	// Must match viewDesktop()/viewMobile() calculation
-	colHeight := k.height - 2 // -2 for column borders
-	if k.IsMobileMode() {
-		colHeight = k.height - 4 // -2 for tab bar, -2 for column borders
-	}
-	cardHeight := 3                            // Most cards are 3 lines (2 content + 1 border)
-	maxVisible := (colHeight - 3) / cardHeight // -3 for header bar and scroll indicators
-	if maxVisible < 1 {
-		maxVisible = 1
-	}
-
-	// Pinned tasks always stay at the top, so only the remaining slots scroll
-	pinnedSlots := pinnedCount
-	if pinnedSlots > maxVisible {
-		pinnedSlots = maxVisible
-	}
-	scrollCapacity := maxVisible - pinnedSlots
-	if scrollCapacity < 0 {
-		scrollCapacity = 0
-	}
-
-	offset := k.scrollOffsets[k.selectedCol]
-	if offset < 0 {
-		offset = 0
-	}
-	maxOffset := 0
-	if scrollCapacity > 0 {
-		maxOffset = len(unpinnedTasks) - scrollCapacity
-		if maxOffset < 0 {
-			maxOffset = 0
-		}
-	}
-	if offset > maxOffset {
-		offset = maxOffset
-	}
-
-	// Selecting pinned tasks never adjusts scroll offset
-	if k.selectedRow < pinnedCount {
-		k.scrollOffsets[k.selectedCol] = offset
-		return
-	}
-
-	if scrollCapacity == 0 {
-		k.scrollOffsets[k.selectedCol] = 0
-		return
-	}
-
-	// Work with the index relative to the first unpinned task
-	relIndex := k.selectedRow - pinnedCount
+	relIndex := k.selectedRow - lay.fixedPinned
+	offset := lay.scrollOffset
 	if relIndex < offset {
 		offset = relIndex
-	}
-	if relIndex >= offset+scrollCapacity {
-		offset = relIndex - scrollCapacity + 1
+	} else if relIndex >= offset+lay.scrollCapacity {
+		offset = relIndex - lay.scrollCapacity + 1
 	}
 
+	regionLen := len(col.Tasks) - lay.fixedPinned
+	maxOffset := regionLen - lay.scrollCapacity
+	if maxOffset < 0 {
+		maxOffset = 0
+	}
 	if offset > maxOffset {
 		offset = maxOffset
 	}
 	if offset < 0 {
 		offset = 0
 	}
-
 	k.scrollOffsets[k.selectedCol] = offset
 }
 
@@ -595,17 +651,152 @@ func (k *KanbanBoard) TotalTaskCount() int {
 }
 
 // View renders the kanban board.
+//
+// View is called on every Bubble Tea Update — including periodic ticks, mouse
+// motion, and task events that don't change the board — so it is the single
+// hottest path in the TUI. We compute a signature over every input that affects
+// the rendered output and return the previously rendered string when nothing has
+// changed, turning idle re-renders into a cheap hash instead of a full lipgloss
+// layout pass.
 func (k *KanbanBoard) View() string {
 	if k.width < 40 || k.height < 10 {
+		// Tiny, cheap to render; not worth caching.
 		return lipgloss.Place(k.width, k.height, lipgloss.Center, lipgloss.Center, "Terminal too small")
 	}
 
-	// Use mobile view for narrow terminals
-	if k.IsMobileMode() {
-		return k.viewMobile()
+	sig := k.renderSignature()
+	if k.cachedViewOK && k.cachedViewSig == sig {
+		return k.cachedView
 	}
 
-	return k.viewDesktop()
+	var out string
+	if k.IsMobileMode() {
+		// Use single-column view for narrow terminals.
+		out = k.viewMobile()
+	} else {
+		out = k.viewDesktop()
+	}
+
+	k.cachedView = out
+	k.cachedViewSig = sig
+	k.cachedViewOK = true
+	return out
+}
+
+// FNV-1a constants for the allocation-free render signature.
+const (
+	fnvOffset64 uint64 = 14695981039346656037
+	fnvPrime64  uint64 = 1099511628211
+)
+
+// sigHasher is a tiny, stack-allocated FNV-1a hasher used to build the render
+// signature without allocating (unlike hash/fnv, which heap-allocates the hasher).
+type sigHasher struct{ h uint64 }
+
+func newSigHasher() sigHasher { return sigHasher{h: fnvOffset64} }
+
+func (s *sigHasher) byte(b byte) {
+	s.h ^= uint64(b)
+	s.h *= fnvPrime64
+}
+
+func (s *sigHasher) str(v string) {
+	for i := 0; i < len(v); i++ {
+		s.byte(v[i])
+	}
+	s.byte(0) // separator so "ab"+"c" != "a"+"bc"
+}
+
+func (s *sigHasher) u64(v uint64) {
+	for i := 0; i < 8; i++ {
+		s.byte(byte(v >> (uint(i) * 8)))
+	}
+}
+
+func (s *sigHasher) int(v int) { s.u64(uint64(v)) }
+func (s *sigHasher) boolean(b bool) {
+	if b {
+		s.byte(1)
+	} else {
+		s.byte(0)
+	}
+}
+
+// renderSignature hashes every input that affects the board's rendered output.
+//
+// IMPORTANT: when adding a new field to renderTaskCard / viewDesktop / viewMobile
+// that changes what is drawn, add it here too, or the render cache will show stale
+// output. Themed colours are covered globally by StyleGeneration().
+func (k *KanbanBoard) renderSignature() uint64 {
+	h := newSigHasher()
+	h.u64(StyleGeneration()) // any themed/project colour change
+	h.int(k.width)
+	h.int(k.height)
+	h.int(k.selectedCol)
+	h.int(k.selectedRow)
+	h.int(k.hiddenDoneCount)
+	h.boolean(IsGlobalDangerousMode())
+	// The running-task spinner advances on its own tick; invalidate the board
+	// cache whenever the frame changes so the new glyph reaches the screen.
+	h.int(k.spinnerFrame)
+
+	for _, off := range k.scrollOffsets {
+		h.int(off)
+	}
+	for i := range k.columns {
+		h.boolean(k.IsColumnCollapsed(i))
+	}
+
+	for ci := range k.columns {
+		col := &k.columns[ci]
+		h.str(col.Status)
+		h.str(string(col.Color))
+		h.str(col.Icon)
+		h.int(len(col.Tasks))
+		for _, t := range col.Tasks {
+			k.hashTaskCard(&h, t)
+		}
+	}
+	return h.h
+}
+
+// hashTaskCard mirrors every field renderTaskCard reads for a single task.
+func (k *KanbanBoard) hashTaskCard(h *sigHasher, t *db.Task) {
+	h.u64(uint64(t.ID))
+	h.str(t.Status)
+	h.str(t.Project)
+	h.str(t.Title)
+	h.boolean(t.Pinned)
+	h.boolean(t.IsDangerous())
+	h.boolean(t.IsAutoPermission())
+	h.boolean(t.IsAcceptEdits())
+	h.boolean(k.HasRunningProcess(t.ID))
+	h.boolean(k.NeedsInput(t.ID))
+	h.int(k.GetOpenBlockerCount(t.ID))
+	if pr := k.prInfo[t.ID]; pr != nil {
+		h.boolean(true)
+		h.str(string(pr.State))
+		h.str(string(pr.CheckState))
+		h.str(pr.Mergeable)
+		h.int(pr.Additions)
+		h.int(pr.Deletions)
+	} else {
+		h.boolean(false)
+	}
+	// Per-card sub-line inputs: the agent's latest activity, an elapsed bucket
+	// that ticks the age hint each minute, and (for processing tasks) the
+	// spinner frame — without this last bit cardCache serves a stale glyph
+	// even though renderSignature already invalidates the board-level cache.
+	if log := k.latestActivity[t.ID]; log != nil {
+		h.boolean(true)
+		h.str(log.Content)
+	} else {
+		h.boolean(false)
+	}
+	h.int(taskElapsedMinutes(t))
+	if t.Status == db.StatusProcessing {
+		h.int(k.spinnerFrame)
+	}
 }
 
 // collapsedColumnWidth is the fixed width for collapsed column strips.
@@ -662,50 +853,16 @@ func (k *KanbanBoard) viewDesktop() string {
 		headerBar := headerBarStyle.Render(headerText)
 
 		// Task cards - calculate how many fit
-		// Non-selected cards: 2 lines content + 1 line border = 3 lines
-		cardHeight := 3
 		maxTasks := (colHeight - 3) / cardHeight // -3 for scroll indicators and padding
 		if maxTasks < 1 {
 			maxTasks = 1
 		}
 
-		pinnedTasks, unpinnedTasks := splitPinnedTasks(col.Tasks)
-		pinnedCount := len(pinnedTasks)
-		pinnedSlots := pinnedCount
-		if pinnedSlots > maxTasks {
-			pinnedSlots = maxTasks
-		}
-		scrollCapacity := maxTasks - pinnedSlots
-		if scrollCapacity < 0 {
-			scrollCapacity = 0
-		}
-
-		// Get scroll offset for this column (only for unpinned tasks)
-		scrollOffset := 0
-		if colIdx < len(k.scrollOffsets) {
-			scrollOffset = k.scrollOffsets[colIdx]
-		}
-
-		// Clamp scroll offset to valid range
-		maxOffset := 0
-		if scrollCapacity > 0 {
-			maxOffset = len(unpinnedTasks) - scrollCapacity
-			if maxOffset < 0 {
-				maxOffset = 0
-			}
-		}
-		if scrollOffset > maxOffset {
-			scrollOffset = maxOffset
-		}
-		if scrollOffset < 0 {
-			scrollOffset = 0
-		}
-
-		// Calculate visible range for unpinned tasks
-		startIdx := scrollOffset
-		endIdx := scrollOffset + scrollCapacity
-		if endIdx > len(unpinnedTasks) {
-			endIdx = len(unpinnedTasks)
+		lay := k.columnLayoutFor(colIdx, maxTasks)
+		regionStart := lay.fixedPinned + lay.scrollOffset
+		regionEnd := regionStart + lay.scrollCapacity
+		if regionEnd > len(col.Tasks) {
+			regionEnd = len(col.Tasks)
 		}
 
 		var taskViews []string
@@ -713,9 +870,8 @@ func (k *KanbanBoard) viewDesktop() string {
 		// Track shortcut number for the selected column (1-9)
 		shortcutNum := 0
 
-		// Render pinned tasks (always fixed at the top)
-		for i := 0; i < pinnedSlots; i++ {
-			task := pinnedTasks[i]
+		// Render pinned tasks fixed at the top (when they fit)
+		for i := 0; i < lay.fixedPinned; i++ {
 			isSelected := isSelectedCol && i == k.selectedRow
 			// Only show shortcuts in the selected column
 			var hint string
@@ -723,37 +879,33 @@ func (k *KanbanBoard) viewDesktop() string {
 				shortcutNum++
 				hint = TaskShortcutHint(shortcutNum)
 			}
-			taskView := k.renderTaskCard(task, colWidth, isSelected, hint)
-			taskViews = append(taskViews, taskView)
+			taskViews = append(taskViews, k.renderTaskCard(col.Tasks[i], colWidth, isSelected, hint))
 		}
 
-		// Show "more above" indicator for unpinned tasks
-		if scrollCapacity > 0 && scrollOffset > 0 {
+		// Show "more above" indicator for the scrolling region
+		if lay.scrollOffset > 0 {
 			scrollIndicatorStyle := lipgloss.NewStyle().
 				Foreground(ColorMuted).
 				Width(colWidth - 2).
 				Align(lipgloss.Center).
 				Italic(true)
-			taskViews = append(taskViews, scrollIndicatorStyle.Render(fmt.Sprintf("%s %d more", IconArrowUp(), scrollOffset)))
+			taskViews = append(taskViews, scrollIndicatorStyle.Render(fmt.Sprintf("%s %d more", IconArrowUp(), lay.scrollOffset)))
 		}
 
-		// Render visible unpinned tasks
-		for i := startIdx; i < endIdx; i++ {
-			task := unpinnedTasks[i]
-			globalIndex := pinnedCount + i
-			isSelected := isSelectedCol && globalIndex == k.selectedRow
+		// Render visible scrolling-region tasks
+		for i := regionStart; i < regionEnd; i++ {
+			isSelected := isSelectedCol && i == k.selectedRow
 			// Only show shortcuts in the selected column
 			var hint string
 			if isSelectedCol {
 				shortcutNum++
 				hint = TaskShortcutHint(shortcutNum)
 			}
-			taskView := k.renderTaskCard(task, colWidth, isSelected, hint)
-			taskViews = append(taskViews, taskView)
+			taskViews = append(taskViews, k.renderTaskCard(col.Tasks[i], colWidth, isSelected, hint))
 		}
 
 		// Show "more below" indicator (combined with hidden done count for Done column)
-		remainingBelow := len(unpinnedTasks) - endIdx
+		remainingBelow := len(col.Tasks) - regionEnd
 		isDoneCol := col.Status == db.StatusDone
 		hasHiddenDone := isDoneCol && k.hiddenDoneCount > 0
 
@@ -886,48 +1038,16 @@ func (k *KanbanBoard) viewMobile() string {
 	headerBar := headerBarStyle.Render(headerText)
 
 	// Task cards - calculate how many fit
-	cardHeight := 3
 	maxTasks := (colHeight - 3) / cardHeight
 	if maxTasks < 1 {
 		maxTasks = 1
 	}
 
-	pinnedTasks, unpinnedTasks := splitPinnedTasks(col.Tasks)
-	toRenderPinned := len(pinnedTasks)
-	if toRenderPinned > maxTasks {
-		toRenderPinned = maxTasks
-	}
-	scrollCapacity := maxTasks - toRenderPinned
-	if scrollCapacity < 0 {
-		scrollCapacity = 0
-	}
-
-	// Get scroll offset for this column
-	scrollOffset := 0
-	if k.selectedCol < len(k.scrollOffsets) {
-		scrollOffset = k.scrollOffsets[k.selectedCol]
-	}
-
-	// Clamp scroll offset to valid range
-	maxOffset := 0
-	if scrollCapacity > 0 {
-		maxOffset = len(unpinnedTasks) - scrollCapacity
-		if maxOffset < 0 {
-			maxOffset = 0
-		}
-	}
-	if scrollOffset > maxOffset {
-		scrollOffset = maxOffset
-	}
-	if scrollOffset < 0 {
-		scrollOffset = 0
-	}
-
-	// Calculate visible task range for unpinned tasks
-	startIdx := scrollOffset
-	endIdx := scrollOffset + scrollCapacity
-	if endIdx > len(unpinnedTasks) {
-		endIdx = len(unpinnedTasks)
+	lay := k.columnLayoutFor(k.selectedCol, maxTasks)
+	regionStart := lay.fixedPinned + lay.scrollOffset
+	regionEnd := regionStart + lay.scrollCapacity
+	if regionEnd > len(col.Tasks) {
+		regionEnd = len(col.Tasks)
 	}
 
 	var taskViews []string
@@ -935,39 +1055,34 @@ func (k *KanbanBoard) viewMobile() string {
 	// Track shortcut number (1-9) for mobile view
 	shortcutNum := 0
 
-	// Render pinned tasks first
-	for i := 0; i < toRenderPinned; i++ {
-		task := pinnedTasks[i]
+	// Render pinned tasks fixed at the top (when they fit)
+	for i := 0; i < lay.fixedPinned; i++ {
 		isSelected := i == k.selectedRow
 		shortcutNum++
 		hint := TaskShortcutHint(shortcutNum)
-		taskView := k.renderTaskCard(task, colWidth, isSelected, hint)
-		taskViews = append(taskViews, taskView)
+		taskViews = append(taskViews, k.renderTaskCard(col.Tasks[i], colWidth, isSelected, hint))
 	}
 
-	// Show "more above" indicator for unpinned tasks
-	if scrollCapacity > 0 && scrollOffset > 0 {
+	// Show "more above" indicator for the scrolling region
+	if lay.scrollOffset > 0 {
 		scrollIndicatorStyle := lipgloss.NewStyle().
 			Foreground(ColorMuted).
 			Width(colWidth - 2).
 			Align(lipgloss.Center).
 			Italic(true)
-		taskViews = append(taskViews, scrollIndicatorStyle.Render(fmt.Sprintf("%s %d more", IconArrowUp(), scrollOffset)))
+		taskViews = append(taskViews, scrollIndicatorStyle.Render(fmt.Sprintf("%s %d more", IconArrowUp(), lay.scrollOffset)))
 	}
 
-	// Render visible unpinned tasks
-	for i := startIdx; i < endIdx; i++ {
-		task := unpinnedTasks[i]
-		globalIndex := len(pinnedTasks) + i
-		isSelected := globalIndex == k.selectedRow
+	// Render visible scrolling-region tasks
+	for i := regionStart; i < regionEnd; i++ {
+		isSelected := i == k.selectedRow
 		shortcutNum++
 		hint := TaskShortcutHint(shortcutNum)
-		taskView := k.renderTaskCard(task, colWidth, isSelected, hint)
-		taskViews = append(taskViews, taskView)
+		taskViews = append(taskViews, k.renderTaskCard(col.Tasks[i], colWidth, isSelected, hint))
 	}
 
 	// Show "more below" indicator (combined with hidden done count for Done column)
-	remainingBelow := len(unpinnedTasks) - endIdx
+	remainingBelow := len(col.Tasks) - regionEnd
 	isDoneCol := col.Status == db.StatusDone
 	hasHiddenDone := isDoneCol && k.hiddenDoneCount > 0
 
@@ -1093,18 +1208,34 @@ func (k *KanbanBoard) renderTaskCard(task *db.Task, width int, isSelected bool, 
 		width = 10
 	}
 
+	// Per-card render cache: hash everything that affects this card's output and
+	// reuse the previous render on a hit. Uses the same hashTaskCard inputs as the
+	// board signature so the two caches stay consistent by construction.
+	keyHasher := newSigHasher()
+	keyHasher.int(width)
+	keyHasher.boolean(isSelected)
+	keyHasher.str(shortcutHint)
+	keyHasher.u64(StyleGeneration())
+	k.hashTaskCard(&keyHasher, task)
+	cardKey := keyHasher.h
+	if cached, ok := k.cardCache[cardKey]; ok {
+		return cached
+	}
+
 	var b strings.Builder
 
-	// Task ID with status indicator
+	// Task ID with status indicator. Running tasks get an animated braille
+	// spinner instead of the static processing glyph.
 	statusIcon := StatusIcon(task.Status)
+	if task.Status == db.StatusProcessing {
+		statusIcon = k.liveSpinner()
+	}
 	if isSelected {
 		b.WriteString(statusIcon)
 		b.WriteString(" ")
 		b.WriteString(fmt.Sprintf("#%d", task.ID))
 	} else {
-		statusColor := StatusColor(task.Status)
-		statusStyle := lipgloss.NewStyle().Foreground(statusColor)
-		b.WriteString(statusStyle.Render(statusIcon))
+		b.WriteString(FgStyle(StatusColor(task.Status)).Render(statusIcon))
 		b.WriteString(" ")
 		b.WriteString(Dim.Render(fmt.Sprintf("#%d", task.ID)))
 	}
@@ -1121,9 +1252,8 @@ func (k *KanbanBoard) renderTaskCard(task *db.Task, width int, isSelected bool, 
 		if isSelected {
 			b.WriteString(" [" + shortProject + "]")
 		} else {
-			projectStyle := lipgloss.NewStyle().Foreground(ProjectColor(task.Project))
 			b.WriteString(" ")
-			b.WriteString(projectStyle.Render("[" + shortProject + "]"))
+			b.WriteString(FgStyle(ProjectColor(task.Project)).Render("[" + shortProject + "]"))
 		}
 	}
 
@@ -1149,28 +1279,43 @@ func (k *KanbanBoard) renderTaskCard(task *db.Task, width int, isSelected bool, 
 		if isSelected {
 			indicators = append(indicators, "●")
 		} else {
-			processStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("46")) // Bright green
-			indicators = append(indicators, processStyle.Render("●"))
+			indicators = append(indicators, FgStyle(lipgloss.Color("46")).Render("●")) // Bright green
 		}
 	}
 	// Dangerous mode indicator (red dot) - only shown when:
 	// - Task is in dangerous mode
 	// - Task is active (processing or blocked)
 	// - System is NOT in global dangerous mode (otherwise the global banner is shown)
-	if task.DangerousMode && (task.Status == db.StatusProcessing || task.Status == db.StatusBlocked) && !IsGlobalDangerousMode() {
+	if task.IsDangerous() && (task.Status == db.StatusProcessing || task.Status == db.StatusBlocked) && !IsGlobalDangerousMode() {
 		if isSelected {
 			indicators = append(indicators, "●")
 		} else {
-			dangerStyle := lipgloss.NewStyle().Foreground(ColorDangerous)
-			indicators = append(indicators, dangerStyle.Render("●"))
+			indicators = append(indicators, FgStyle(ColorDangerous).Render("●"))
+		}
+	}
+	// Auto-mode indicator (yellow dot) for active tasks running in Claude Code's
+	// auto mode — matches Claude's own "auto mode on" status color.
+	if task.IsAutoPermission() && (task.Status == db.StatusProcessing || task.Status == db.StatusBlocked) {
+		if isSelected {
+			indicators = append(indicators, "●")
+		} else {
+			indicators = append(indicators, FgStyle(ColorWarning).Render("●"))
+		}
+	}
+	// Accept-edits indicator (violet dot) for active tasks running in Claude's
+	// acceptEdits mode — matches Claude's own "accept edits on" status color.
+	if task.IsAcceptEdits() && (task.Status == db.StatusProcessing || task.Status == db.StatusBlocked) {
+		if isSelected {
+			indicators = append(indicators, "●")
+		} else {
+			indicators = append(indicators, FgStyle(ColorCode).Render("●"))
 		}
 	}
 	if task.Pinned {
 		if isSelected {
 			indicators = append(indicators, IconPin())
 		} else {
-			pinStyle := lipgloss.NewStyle().Foreground(ColorWarning)
-			indicators = append(indicators, pinStyle.Render(IconPin()))
+			indicators = append(indicators, FgStyle(ColorWarning).Render(IconPin()))
 		}
 	}
 	// Keyboard shortcut hint (shown at the end)
@@ -1178,15 +1323,14 @@ func (k *KanbanBoard) renderTaskCard(task *db.Task, width int, isSelected bool, 
 		if isSelected {
 			indicators = append(indicators, shortcutHint)
 		} else {
-			shortcutStyle := lipgloss.NewStyle().Foreground(ColorMuted)
-			indicators = append(indicators, shortcutStyle.Render(shortcutHint))
+			indicators = append(indicators, FgStyle(ColorMuted).Render(shortcutHint))
 		}
 	}
 
 	// Dependency blocker indicator (lock icon)
 	blockerCount := k.GetOpenBlockerCount(task.ID)
 	if blockerCount > 0 {
-		lockStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#F59E0B")) // Orange/amber
+		lockStyle := FgStyle(lipgloss.Color("#F59E0B")) // Orange/amber
 		b.WriteString(" ")
 		if blockerCount == 1 {
 			b.WriteString(lockStyle.Render("🔒"))
@@ -1249,8 +1393,14 @@ func (k *KanbanBoard) renderTaskCard(task *db.Task, width int, isSelected bool, 
 		cardStyle = cardStyle.Foreground(ColorWarning)
 	}
 
-	content := idLine + "\n" + titleLine
-	return cardStyle.Render(content)
+	content := idLine + "\n" + titleLine + "\n" + k.cardSubLine(task, width, isSelected)
+	rendered := cardStyle.Render(content)
+
+	if k.cardCache == nil || len(k.cardCache) >= cardCacheMax {
+		k.cardCache = make(map[uint64]string, 128)
+	}
+	k.cardCache[cardKey] = rendered
+	return rendered
 }
 
 // FocusColumn moves selection to a specific column by index.
@@ -1323,51 +1473,21 @@ func (k *KanbanBoard) SelectByShortcut(num int) *db.Task {
 		return nil
 	}
 
-	// Calculate visible tasks (pinned + visible unpinned)
-	pinnedTasks, unpinnedTasks := splitPinnedTasks(col.Tasks)
+	lay := k.columnLayoutFor(k.selectedCol, k.maxVisibleCards())
 
-	// Calculate how many tasks are visible
-	colHeight := k.height - 2
-	if k.IsMobileMode() {
-		colHeight = k.height - 4
-	}
-	cardHeight := 3
-	maxVisible := (colHeight - 3) / cardHeight
-	if maxVisible < 1 {
-		maxVisible = 1
-	}
-
-	pinnedSlots := len(pinnedTasks)
-	if pinnedSlots > maxVisible {
-		pinnedSlots = maxVisible
-	}
-	scrollCapacity := maxVisible - pinnedSlots
-	if scrollCapacity < 0 {
-		scrollCapacity = 0
-	}
-
-	// Get scroll offset
-	scrollOffset := 0
-	if k.selectedCol < len(k.scrollOffsets) {
-		scrollOffset = k.scrollOffsets[k.selectedCol]
-	}
-
-	// Build list of visible task indices (in column order)
+	// Build list of visible task indices in render order: fixed pinned first,
+	// then the visible slice of the scrolling region.
 	var visibleIndices []int
-
-	// Add pinned tasks
-	for i := 0; i < pinnedSlots; i++ {
+	for i := 0; i < lay.fixedPinned; i++ {
 		visibleIndices = append(visibleIndices, i)
 	}
-
-	// Add visible unpinned tasks
-	startIdx := scrollOffset
-	endIdx := scrollOffset + scrollCapacity
-	if endIdx > len(unpinnedTasks) {
-		endIdx = len(unpinnedTasks)
+	start := lay.fixedPinned + lay.scrollOffset
+	end := start + lay.scrollCapacity
+	if end > len(col.Tasks) {
+		end = len(col.Tasks)
 	}
-	for i := startIdx; i < endIdx; i++ {
-		visibleIndices = append(visibleIndices, len(pinnedTasks)+i)
+	for i := start; i < end; i++ {
+		visibleIndices = append(visibleIndices, i)
 	}
 
 	// Select the Nth visible task (1-indexed)
@@ -1461,7 +1581,6 @@ func (k *KanbanBoard) handleClickDesktop(x, y int) *db.Task {
 	// Calculate Y position within column
 	// Column structure: 1 border line at top, then header (1 line), then task cards
 	headerLines := 1 // Header bar is 1 line with no margin
-	taskCardHeight := 3
 
 	// relY is position within the column content (after top border)
 	relY := y - 1 // -1 for top border
@@ -1475,47 +1594,19 @@ func (k *KanbanBoard) handleClickDesktop(x, y int) *db.Task {
 
 	// Calculate which task was clicked
 	col := k.columns[colIdx]
-	colHeight := k.height - 2                    // -2 for column borders (top + bottom)
-	maxTasks := (colHeight - 3) / taskCardHeight // -3 for header bar and scroll indicators
+	colHeight := k.height - 2                // -2 for column borders (top + bottom)
+	maxTasks := (colHeight - 3) / cardHeight // -3 for header bar and scroll indicators
 	if maxTasks < 1 {
 		maxTasks = 1
 	}
 
-	pinnedTasks, unpinnedTasks := splitPinnedTasks(col.Tasks)
-	pinnedCount := len(pinnedTasks)
-	pinnedSlots := pinnedCount
-	if pinnedSlots > maxTasks {
-		pinnedSlots = maxTasks
-	}
-	scrollCapacity := maxTasks - pinnedSlots
-	if scrollCapacity < 0 {
-		scrollCapacity = 0
-	}
+	lay := k.columnLayoutFor(colIdx, maxTasks)
 
-	// Get scroll offset for this column
-	scrollOffset := 0
-	if colIdx < len(k.scrollOffsets) {
-		scrollOffset = k.scrollOffsets[colIdx]
-	}
-	maxOffset := 0
-	if scrollCapacity > 0 {
-		maxOffset = len(unpinnedTasks) - scrollCapacity
-		if maxOffset < 0 {
-			maxOffset = 0
-		}
-	}
-	if scrollOffset > maxOffset {
-		scrollOffset = maxOffset
-	}
-	if scrollOffset < 0 {
-		scrollOffset = 0
-	}
-
-	// Check pinned block first
-	pinnedAreaLines := pinnedSlots * taskCardHeight
+	// Check the fixed pinned block first
+	pinnedAreaLines := lay.fixedPinned * cardHeight
 	if taskAreaY < pinnedAreaLines {
-		pinnedIdx := taskAreaY / taskCardHeight
-		if pinnedIdx >= pinnedSlots {
+		pinnedIdx := taskAreaY / cardHeight
+		if pinnedIdx >= lay.fixedPinned {
 			return nil
 		}
 		k.selectedCol = colIdx
@@ -1524,12 +1615,8 @@ func (k *KanbanBoard) handleClickDesktop(x, y int) *db.Task {
 	}
 	taskAreaY -= pinnedAreaLines
 
-	if scrollCapacity == 0 {
-		return nil
-	}
-
 	// Account for scroll indicator line when scrolled
-	if scrollOffset > 0 {
+	if lay.scrollOffset > 0 {
 		taskAreaY -= 1 // Subtract 1 for the "↑ N more" indicator line
 		if taskAreaY < 0 {
 			// Clicked on the scroll indicator
@@ -1537,13 +1624,13 @@ func (k *KanbanBoard) handleClickDesktop(x, y int) *db.Task {
 		}
 	}
 
-	visibleTaskIdx := taskAreaY / taskCardHeight
-	if visibleTaskIdx >= scrollCapacity {
+	visibleTaskIdx := taskAreaY / cardHeight
+	if visibleTaskIdx >= lay.scrollCapacity {
 		return nil
 	}
 
 	// Convert visible index to actual task index
-	taskIdx := pinnedCount + scrollOffset + visibleTaskIdx
+	taskIdx := lay.fixedPinned + lay.scrollOffset + visibleTaskIdx
 	if taskIdx >= len(col.Tasks) {
 		return nil
 	}
@@ -1583,7 +1670,6 @@ func (k *KanbanBoard) handleClickMobile(x, y int) *db.Task {
 	// Column layout: tab bar (2 lines), then border (1 line), header (1 line), task cards
 	colHeight := k.height - tabBarHeight - 2
 	headerLines := 1 // Header bar is 1 line with no margin
-	taskCardHeight := 3
 
 	// relY is position within the column content (after tab bar and top border)
 	relY := y - tabBarHeight - 1 // -1 for top border
@@ -1597,45 +1683,18 @@ func (k *KanbanBoard) handleClickMobile(x, y int) *db.Task {
 
 	// Calculate which task was clicked
 	col := k.columns[k.selectedCol]
-	maxTasks := (colHeight - 3) / taskCardHeight
+	maxTasks := (colHeight - 3) / cardHeight
 	if maxTasks < 1 {
 		maxTasks = 1
 	}
 
-	pinnedTasks, unpinnedTasks := splitPinnedTasks(col.Tasks)
-	pinnedSlots := len(pinnedTasks)
-	if pinnedSlots > maxTasks {
-		pinnedSlots = maxTasks
-	}
-	scrollCapacity := maxTasks - pinnedSlots
-	if scrollCapacity < 0 {
-		scrollCapacity = 0
-	}
+	lay := k.columnLayoutFor(k.selectedCol, maxTasks)
 
-	// Get scroll offset for this column
-	scrollOffset := 0
-	if k.selectedCol < len(k.scrollOffsets) {
-		scrollOffset = k.scrollOffsets[k.selectedCol]
-	}
-	maxOffset := 0
-	if scrollCapacity > 0 {
-		maxOffset = len(unpinnedTasks) - scrollCapacity
-		if maxOffset < 0 {
-			maxOffset = 0
-		}
-	}
-	if scrollOffset > maxOffset {
-		scrollOffset = maxOffset
-	}
-	if scrollOffset < 0 {
-		scrollOffset = 0
-	}
-
-	// Check pinned block first
-	pinnedAreaLines := pinnedSlots * taskCardHeight
+	// Check the fixed pinned block first
+	pinnedAreaLines := lay.fixedPinned * cardHeight
 	if taskAreaY < pinnedAreaLines {
-		pinnedIdx := taskAreaY / taskCardHeight
-		if pinnedIdx >= pinnedSlots {
+		pinnedIdx := taskAreaY / cardHeight
+		if pinnedIdx >= lay.fixedPinned {
 			return nil
 		}
 		k.selectedRow = pinnedIdx
@@ -1643,25 +1702,21 @@ func (k *KanbanBoard) handleClickMobile(x, y int) *db.Task {
 	}
 	taskAreaY -= pinnedAreaLines
 
-	if scrollCapacity == 0 {
-		return nil
-	}
-
 	// Account for scroll indicator line when scrolled
-	if scrollOffset > 0 {
+	if lay.scrollOffset > 0 {
 		taskAreaY -= 1 // Subtract 1 for the "↑ N more" indicator line
 		if taskAreaY < 0 {
 			return nil
 		}
 	}
 
-	visibleTaskIdx := taskAreaY / taskCardHeight
-	if visibleTaskIdx >= scrollCapacity {
+	visibleTaskIdx := taskAreaY / cardHeight
+	if visibleTaskIdx >= lay.scrollCapacity {
 		return nil
 	}
 
 	// Convert visible index to actual task index
-	taskIdx := len(pinnedTasks) + scrollOffset + visibleTaskIdx
+	taskIdx := lay.fixedPinned + lay.scrollOffset + visibleTaskIdx
 	if taskIdx >= len(col.Tasks) {
 		return nil
 	}
