@@ -111,6 +111,16 @@ func (db *DB) LatestRoutineRuns() (map[string]*RoutineRun, error) {
 	return latest, nil
 }
 
+// DeleteRoutineRuns removes all recorded runs for a routine. Used when the
+// routine itself is deleted so run history doesn't orphan.
+func (db *DB) DeleteRoutineRuns(routine string) error {
+	_, err := db.Exec(`DELETE FROM routine_runs WHERE routine = ?`, routine)
+	if err != nil {
+		return fmt.Errorf("delete routine runs: %w", err)
+	}
+	return nil
+}
+
 // HasOpenTaskWithTitle reports whether a non-done, non-archived task with the
 // exact title exists. Used to dedupe automatically created alert tasks.
 func (db *DB) HasOpenTaskWithTitle(title string) (bool, error) {

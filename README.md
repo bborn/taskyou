@@ -451,8 +451,13 @@ ty run my-scout                 # run it now (cron/launchd call this too)
 ty routines                     # health: last run, status, duration
 ty routines show my-scout       # config + recent run history
 ty routines logs my-scout       # full log of the latest run
+ty routines edit my-scout       # open prompt.md in $EDITOR (re-validates on save)
 ty routines disable my-scout    # pause (ty run becomes a no-op)
+ty routines delete my-scout     # remove routine, state dir, and run history
 ```
+
+In the TUI, press `u` for the routines fleet-health view: last run status per
+routine, `enter` to read the latest run log, `d` to enable/disable.
 
 ```cron
 # Schedule with whatever you already use, e.g. cron:

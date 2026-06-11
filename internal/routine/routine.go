@@ -222,6 +222,22 @@ func parseFrontmatter(content string) (map[string]string, string, error) {
 	return meta, body, nil
 }
 
+// Delete removes the routine's definition directory and its state directory
+// (including logs). Run history in the database is the caller's to prune via
+// db.DeleteRoutineRuns.
+func Delete(name string) error {
+	if err := ValidateName(name); err != nil {
+		return err
+	}
+	if err := os.RemoveAll(filepath.Join(RoutinesDir(), name)); err != nil {
+		return fmt.Errorf("delete routine dir: %w", err)
+	}
+	if err := os.RemoveAll(StateDir(name)); err != nil {
+		return fmt.Errorf("delete routine state dir: %w", err)
+	}
+	return nil
+}
+
 // Scaffold creates a new routine directory with a template prompt.md.
 func Scaffold(name string) (*Routine, error) {
 	if err := ValidateName(name); err != nil {

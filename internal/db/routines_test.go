@@ -117,6 +117,38 @@ func TestLatestRoutineRuns(t *testing.T) {
 	}
 }
 
+func TestDeleteRoutineRuns(t *testing.T) {
+	database := openRoutineTestDB(t)
+
+	if _, err := database.CreateRoutineRun("scout"); err != nil {
+		t.Fatalf("create run: %v", err)
+	}
+	if _, err := database.CreateRoutineRun("scout"); err != nil {
+		t.Fatalf("create run: %v", err)
+	}
+	otherID, err := database.CreateRoutineRun("other")
+	if err != nil {
+		t.Fatalf("create run: %v", err)
+	}
+
+	if err := database.DeleteRoutineRuns("scout"); err != nil {
+		t.Fatalf("delete runs: %v", err)
+	}
+
+	runs, err := database.ListRoutineRuns("scout", 10)
+	if err != nil {
+		t.Fatalf("list runs: %v", err)
+	}
+	if len(runs) != 0 {
+		t.Errorf("expected scout runs deleted, got %d", len(runs))
+	}
+	// Other routines' history is untouched.
+	run, err := database.GetRoutineRun(otherID)
+	if err != nil || run == nil {
+		t.Errorf("other routine's run should survive: %v %v", run, err)
+	}
+}
+
 func TestHasOpenTaskWithTitle(t *testing.T) {
 	// db.Open seeds a default "personal" project for the task to live in.
 	database := openRoutineTestDB(t)

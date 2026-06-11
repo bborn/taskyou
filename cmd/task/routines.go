@@ -1,9 +1,12 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -161,6 +164,27 @@ logs, run history, and failure alerting (a pinned task + routine.failed hook).`,
 		},
 	})
 
+	routinesCmd.AddCommand(&cobra.Command{
+		Use:   "edit <name>",
+		Short: "Open the routine's prompt.md in $EDITOR",
+		Args:  cobra.ExactArgs(1),
+		Run: func(cmd *cobra.Command, args []string) {
+			editRoutine(args[0])
+		},
+	})
+
+	deleteCmd := &cobra.Command{
+		Use:   "delete <name>",
+		Short: "Delete a routine, its state dir, and its run history",
+		Args:  cobra.ExactArgs(1),
+		Run: func(cmd *cobra.Command, args []string) {
+			force, _ := cmd.Flags().GetBool("force")
+			deleteRoutine(args[0], force)
+		},
+	}
+	deleteCmd.Flags().BoolP("force", "f", false, "Skip confirmation prompt")
+	routinesCmd.AddCommand(deleteCmd)
+
 	logsCmd := &cobra.Command{
 		Use:   "logs <name>",
 		Short: "Print the log of a routine's most recent run",
@@ -281,6 +305,75 @@ func setRoutineDisabled(name string, disabled bool) {
 	} else {
 		fmt.Println(successStyle.Render(fmt.Sprintf("Enabled %q", name)))
 	}
+}
+
+func editRoutine(name string) {
+	rt, err := routine.Load(name)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+		os.Exit(1)
+	}
+	editor := os.Getenv("EDITOR")
+	if editor == "" {
+		editor = "vim"
+	}
+	// $EDITOR may be a command with flags (e.g. "code --wait"), so run via shell.
+	promptPath := filepath.Join(rt.Dir, "prompt.md")
+	editCmd := exec.Command("sh", "-c", editor+" "+shellQuote(promptPath))
+	editCmd.Stdin = os.Stdin
+	editCmd.Stdout = os.Stdout
+	editCmd.Stderr = os.Stderr
+	if err := editCmd.Run(); err != nil {
+		fmt.Fprintln(os.Stderr, errorStyle.Render("Editor failed: "+err.Error()))
+		os.Exit(1)
+	}
+	// Re-validate so a bad frontmatter edit fails here, not at the next cron fire.
+	if _, err := routine.Load(name); err != nil {
+		fmt.Fprintln(os.Stderr, warnStyle.Render("Warning: routine no longer loads: "+err.Error()))
+		os.Exit(1)
+	}
+	fmt.Println(successStyle.Render("Saved — routine loads cleanly"))
+}
+
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+func deleteRoutine(name string, force bool) {
+	rt, err := routine.Load(name)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+		os.Exit(1)
+	}
+
+	// Confirm unless --force flag is set
+	if !force {
+		fmt.Printf("Delete routine %q, its state dir, and its run history? [y/N] ", rt.Name)
+		reader := bufio.NewReader(os.Stdin)
+		response, _ := reader.ReadString('\n')
+		response = strings.TrimSpace(strings.ToLower(response))
+		if response != "y" && response != "yes" {
+			fmt.Println("Cancelled")
+			return
+		}
+	}
+
+	database, err := openTaskDB(db.DefaultPath())
+	if err != nil {
+		fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+		os.Exit(1)
+	}
+	defer database.Close()
+
+	if err := database.DeleteRoutineRuns(rt.Name); err != nil {
+		fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+		os.Exit(1)
+	}
+	if err := routine.Delete(rt.Name); err != nil {
+		fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+		os.Exit(1)
+	}
+	fmt.Println(successStyle.Render(fmt.Sprintf("Deleted routine %q", rt.Name)))
 }
 
 func printRoutineLog(name string, runID int64) {
