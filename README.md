@@ -9,11 +9,11 @@ A personal task management system with a beautiful terminal UI, SQLite storage, 
 ## Screenshots
 
 ### Kanban Board
-![Kanban Board](docs/screenshots/kanban-board.jpeg)
+![Kanban Board](docs/screenshots/kanban-board.png)
 *The main view showing tasks organized across Backlog, In Progress, Blocked, and Done columns*
 
 ### Task Detail View
-![Task Detail View](docs/screenshots/task-detail-view.jpeg)
+![Task Detail View](docs/screenshots/task-detail-view.png)
 *Viewing a task with Claude's output and shell access in split panes*
 
 ### Execution Log

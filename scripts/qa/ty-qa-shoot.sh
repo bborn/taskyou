@@ -46,7 +46,12 @@ GIF="${OUT%.png}.gif"
   echo "Env WORKTREE_DB_PATH \"$WORKTREE_DB_PATH\""
   echo "Env WORKTREE_SESSION_ID \"$WORKTREE_SESSION_ID\""
   echo 'Hide'
-  echo "Type \"rm -f $WORKTREE_DB_PATH && cd $CWD && clear\""   # fresh DB => true first run
+  if [ -n "${TY_QA_SHOT_KEEP_DB:-}" ]; then
+    # Keep the (seeded) DB — for board/detail shots with data.
+    echo "Type \"cd $CWD && clear\""
+  else
+    echo "Type \"rm -f $WORKTREE_DB_PATH && cd $CWD && clear\""   # fresh DB => true first run
+  fi
   echo 'Enter'
   echo 'Show'
   echo "Type \"$TY_BIN\""
