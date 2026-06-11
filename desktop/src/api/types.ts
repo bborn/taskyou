@@ -118,3 +118,14 @@ export interface DesktopConfig {
   port: number;
   ty_path: string | null;
 }
+
+export interface ToolCheck {
+  name: string;
+  path: string | null;
+}
+
+export interface EnvironmentReport {
+  tmux: string | null;
+  tmux_version: string | null;
+  executors: ToolCheck[];
+}

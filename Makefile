@@ -43,7 +43,13 @@ build-ui:
 
 # Self-contained desktop bundle: stages a UI-embedded ty as the Tauri sidecar
 # (the app spawns its own serve/daemon), then builds the platform bundles.
+# Note: cargo check/test in desktop/src-tauri need a staged sidecar too —
+# run `make desktop-sidecar` once after a fresh clone.
 RUST_TRIPLE = $(shell rustc -vV 2>/dev/null | awk '/^host/{print $$2}')
+desktop-sidecar:
+	mkdir -p desktop/src-tauri/binaries
+	$(GO) build $(GO_TAGS) -ldflags="$(LDFLAGS)" -o desktop/src-tauri/binaries/ty-$(RUST_TRIPLE) ./cmd/task
+
 desktop-bundle: build-ui
 	mkdir -p desktop/src-tauri/binaries
 	$(GO) build -tags ui -ldflags="$(LDFLAGS)" -o desktop/src-tauri/binaries/ty-$(RUST_TRIPLE) ./cmd/task

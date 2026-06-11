@@ -6,8 +6,9 @@ import logoUrl from "./assets/logo.png";
 import { setApiBase } from "./api/client";
 import { applyFilter, buildColumns } from "./lib/board";
 import { store, useAppState } from "./store";
-import { inTauri, openExternal, openInEditor, supervisorEnsure } from "./tauri";
+import { checkEnvironment, inTauri, openExternal, openInEditor, supervisorEnsure } from "./tauri";
 import { Board } from "./components/Board";
+import { SetupCheck } from "./components/SetupCheck";
 import { DetailView } from "./components/DetailView";
 import { SettingsView } from "./components/SettingsView";
 import { Palette } from "./components/Palette";
@@ -33,30 +34,44 @@ function isEditableTarget(target: EventTarget | null): boolean {
 
 export default function App() {
   const state = useAppState();
-  const [bootPhase, setBootPhase] = useState<"starting" | "ready" | "error">("starting");
+  const [bootPhase, setBootPhase] = useState<"starting" | "setup" | "ready" | "error">("starting");
   const [bootMessage, setBootMessage] = useState("Starting TaskYou…");
+  const [envReport, setEnvReport] = useState<import("./api/types").EnvironmentReport | null>(null);
+  const setupSkippedRef = useRef(false);
   const bootedRef = useRef(false);
 
   // --- Boot: supervise sidecars, then load data ---
   useEffect(() => {
     if (bootedRef.current) return;
     bootedRef.current = true;
-    (async () => {
-      try {
-        if (inTauri()) {
-          setBootMessage("Checking TaskYou server…");
-          const status = await supervisorEnsure();
-          setApiBase(`http://127.0.0.1:${status.port}`);
-        }
-        setBootMessage("Loading board…");
-        await store.boot();
-        setBootPhase("ready");
-      } catch (e) {
-        setBootMessage(e instanceof Error ? e.message : String(e));
-        setBootPhase("error");
-      }
-    })();
+    void bootApp();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  async function bootApp() {
+    try {
+      if (inTauri()) {
+        // First-run gate: tmux + an executor CLI are machine prerequisites.
+        if (!setupSkippedRef.current) {
+          const report = await checkEnvironment().catch(() => null);
+          if (report && (!report.tmux || !report.executors.some((e) => e.path))) {
+            setEnvReport(report);
+            setBootPhase("setup");
+            return;
+          }
+        }
+        setBootMessage("Checking TaskYou server…");
+        const status = await supervisorEnsure();
+        setApiBase(`http://127.0.0.1:${status.port}`);
+      }
+      setBootMessage("Loading board…");
+      await store.boot();
+      setBootPhase("ready");
+    } catch (e) {
+      setBootMessage(e instanceof Error ? e.message : String(e));
+      setBootPhase("error");
+    }
+  }
 
   // --- Native menu events ---
   useEffect(() => {
@@ -313,6 +328,23 @@ export default function App() {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   });
+
+  if (bootPhase === "setup" && envReport) {
+    return (
+      <SetupCheck
+        report={envReport}
+        onReady={() => {
+          setBootPhase("starting");
+          void bootApp();
+        }}
+        onSkip={() => {
+          setupSkippedRef.current = true;
+          setBootPhase("starting");
+          void bootApp();
+        }}
+      />
+    );
+  }
 
   if (bootPhase !== "ready") {
     return (

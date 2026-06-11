@@ -1,3 +1,4 @@
+pub mod env_check;
 pub mod pty;
 pub mod supervisor;
 pub mod terminal;
@@ -233,8 +234,17 @@ fn build_menu(app: &tauri::App) -> tauri::Result<()> {
     Ok(())
 }
 
+#[tauri::command]
+fn check_environment() -> env_check::EnvironmentReport {
+    env_check::check_environment()
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Finder launches strip the user's PATH; repair it before anything
+    // (supervisor, env checks, ty's tmux calls) resolves binaries.
+    env_check::fix_path_from_login_shell();
+
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
         .manage(PtyManager::default())
@@ -271,6 +281,7 @@ pub fn run() {
             supervisor_set_config,
             open_external,
             open_in_editor,
+            check_environment,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

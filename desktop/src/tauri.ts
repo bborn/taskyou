@@ -1,7 +1,7 @@
 // Bridge to the Rust core. Falls back gracefully when running in a plain
 // browser (vite dev without Tauri) so the data UI remains testable.
 import { invoke, Channel } from "@tauri-apps/api/core";
-import type { DesktopConfig, SupervisorStatus } from "./api/types";
+import type { DesktopConfig, EnvironmentReport, SupervisorStatus } from "./api/types";
 
 export type PtyEvent = { type: "data"; data: string } | { type: "exit" };
 
@@ -109,4 +109,8 @@ export async function notify(title: string, body: string): Promise<void> {
   } catch {
     // notifications are best-effort
   }
+}
+
+export async function checkEnvironment(): Promise<EnvironmentReport> {
+  return invoke("check_environment");
 }
