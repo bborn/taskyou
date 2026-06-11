@@ -6,6 +6,10 @@ screenshot with numbered markers — straight into the task's executor pane.
 The side panel "teleports" the executor into Chrome: watch its output live and
 send follow-ups without leaving the page.
 
+| Annotate the live page | Side panel: task + live executor |
+|---|---|
+| ![Annotating a page: numbered marker, draggable region box, comment popover](screenshots/annotate.png) | ![Side panel with matched task, annotation count, and live executor console](screenshots/sidepanel.png) |
+
 ## How it works
 
 ```
