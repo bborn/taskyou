@@ -36,6 +36,7 @@ type KeybindingsConfig struct {
 	ChangeStatus       *KeybindingConfig `yaml:"change_status,omitempty"`
 	CommandPalette     *KeybindingConfig `yaml:"command_palette,omitempty"`
 	ToggleDangerous    *KeybindingConfig `yaml:"toggle_dangerous,omitempty"`
+	QueueDangerous     *KeybindingConfig `yaml:"queue_dangerous,omitempty"`
 	TogglePin          *KeybindingConfig `yaml:"toggle_pin,omitempty"`
 	Filter             *KeybindingConfig `yaml:"filter,omitempty"`
 	OpenWorktree       *KeybindingConfig `yaml:"open_worktree,omitempty"`
@@ -50,11 +51,9 @@ type KeybindingsConfig struct {
 	CollapseBacklog    *KeybindingConfig `yaml:"collapse_backlog,omitempty"`
 	CollapseDone       *KeybindingConfig `yaml:"collapse_done,omitempty"`
 	OpenBrowser        *KeybindingConfig `yaml:"open_browser,omitempty"`
-	ApprovePrompt      *KeybindingConfig `yaml:"approve_prompt,omitempty"`
-	DenyPrompt         *KeybindingConfig `yaml:"deny_prompt,omitempty"`
+	OpenPR             *KeybindingConfig `yaml:"open_pr,omitempty"`
 	Spotlight          *KeybindingConfig `yaml:"spotlight,omitempty"`
 	SpotlightSync      *KeybindingConfig `yaml:"spotlight_sync,omitempty"`
-	QuickInput         *KeybindingConfig `yaml:"quick_input,omitempty"`
 }
 
 // DefaultKeybindingsConfigPath returns the default path for the keybindings config file.
@@ -194,6 +193,10 @@ toggle_dangerous:
   keys: ["!"]
   help: "dangerous mode"
 
+queue_dangerous:
+  keys: ["X"]
+  help: "execute dangerous"
+
 toggle_pin:
   keys: ["t"]
   help: "pin/unpin"
@@ -252,6 +255,10 @@ collapse_done:
 open_browser:
   keys: ["b"]
   help: "open in browser"
+
+open_pr:
+  keys: ["G"]
+  help: "open PR"
 
 # Spotlight mode
 spotlight:

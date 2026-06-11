@@ -11,23 +11,29 @@ import (
 	osexec "os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
+	"runtime/pprof"
 	"sort"
 	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
-	"github.com/bborn/workflow/internal/autocomplete"
-	"github.com/bborn/workflow/internal/config"
-	"github.com/bborn/workflow/internal/db"
-	"github.com/bborn/workflow/internal/executor"
-	"github.com/bborn/workflow/internal/github"
-	"github.com/bborn/workflow/internal/mcp"
-	"github.com/bborn/workflow/internal/ui"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/log"
 	"github.com/spf13/cobra"
+
+	"github.com/bborn/workflow/internal/autocomplete"
+	"github.com/bborn/workflow/internal/config"
+	"github.com/bborn/workflow/internal/db"
+	"github.com/bborn/workflow/internal/events"
+	"github.com/bborn/workflow/internal/executor"
+	"github.com/bborn/workflow/internal/github"
+	"github.com/bborn/workflow/internal/hooks"
+	"github.com/bborn/workflow/internal/mcp"
+	"github.com/bborn/workflow/internal/ui"
+	"github.com/bborn/workflow/internal/web"
 )
 
 var (
@@ -38,6 +44,7 @@ var (
 	errorStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("#EF4444"))
 	dimStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280"))
 	boldStyle    = lipgloss.NewStyle().Bold(true)
+	warnStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("#F59E0B"))
 )
 
 // getSessionID returns a unique session identifier for this instance.
@@ -61,6 +68,35 @@ func getDaemonSessionName() string {
 	return fmt.Sprintf("task-daemon-%s", getSessionID())
 }
 
+// taskEmitter holds the process-wide events emitter so short-lived CLI
+// commands can flush pending hooks via waitForEventHooks before exit.
+var taskEmitter *events.Emitter
+
+// openTaskDB opens the task database and registers the events emitter so any
+// caller of UpdateTaskStatus (CLI commands, TUI, Claude hooks, MCP) fires
+// task.blocked/task.completed lifecycle hooks. Otherwise only the daemon
+// process emits these events and external watchers miss most transitions.
+func openTaskDB(path string) (*db.DB, error) {
+	database, err := db.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	if taskEmitter == nil {
+		taskEmitter = events.New(hooks.DefaultHooksDir())
+	}
+	database.SetEventEmitter(taskEmitter)
+	return database, nil
+}
+
+// waitForEventHooks blocks until any in-flight hook scripts have completed.
+// CLI commands that mutate task state must defer this before exit, otherwise
+// the Go process terminates before the hook goroutine runs its subprocess.
+func waitForEventHooks() {
+	if taskEmitter != nil {
+		taskEmitter.Wait()
+	}
+}
+
 func main() {
 	var dangerous bool
 
@@ -80,9 +116,11 @@ func main() {
 			}
 
 			debugStatePath, _ := cmd.Flags().GetString("debug-state-file")
+			cpuProfilePath, _ := cmd.Flags().GetString("cpuprofile")
+			memProfilePath, _ := cmd.Flags().GetString("memprofile")
 
 			// Run locally
-			if err := runLocal(dangerous, debugStatePath); err != nil {
+			if err := runLocal(dangerous, debugStatePath, cpuProfilePath, memProfilePath); err != nil {
 				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
 				os.Exit(1)
 			}
@@ -94,6 +132,33 @@ func main() {
 
 	rootCmd.PersistentFlags().BoolVar(&dangerous, "dangerous", false, "Run Claude with --dangerously-skip-permissions (for sandboxed environments)")
 	rootCmd.PersistentFlags().String("debug-state-file", "", "Path to write debug state JSON on update")
+	rootCmd.PersistentFlags().String("cpuprofile", "", "Write a CPU profile here while the TUI runs (analyze with: go tool pprof)")
+	rootCmd.PersistentFlags().String("memprofile", "", "Write a heap profile here when the TUI exits")
+
+	// Version deprecation warning for CLI subcommands.
+	// Skip for root (TUI has its own check), upgrade, daemon, mcp-server, and claude-hook.
+	skipVersionCheck := map[string]bool{
+		"ty":          true, // root command (TUI)
+		"upgrade":     true,
+		"daemon":      true,
+		"mcp-server":  true,
+		"claude-hook": true,
+	}
+	rootCmd.PersistentPostRun = func(cmd *cobra.Command, args []string) {
+		// Flush any pending event hook goroutines kicked off by the command.
+		// Without this, short-lived CLI commands exit before `task.completed`
+		// and similar hook scripts can append to notifications.jsonl.
+		waitForEventHooks()
+		if skipVersionCheck[cmd.Name()] {
+			return
+		}
+		if release := github.CLIVersionCheck(version); release != nil {
+			fmt.Fprintln(os.Stderr, "")
+			fmt.Fprintln(os.Stderr, warnStyle.Render(
+				fmt.Sprintf("Update available: %s → %s  (run: ty upgrade)", version, release.Version),
+			))
+		}
+	}
 
 	// Debug subcommand
 	debugCmd := &cobra.Command{
@@ -118,7 +183,7 @@ Examples:
 			keys, _ := cmd.Flags().GetString("keys")
 
 			dbPath := db.DefaultPath()
-			database, err := db.Open(dbPath)
+			database, err := openTaskDB(dbPath)
 			if err != nil {
 				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
 				os.Exit(1)
@@ -136,7 +201,7 @@ Examples:
 			})
 			if err == nil {
 				model.SetTasks(tasks)
-				
+
 				// Also update window size to something reasonable
 				model.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
 			}
@@ -330,6 +395,25 @@ Tasks will automatically reconnect to their agent sessions when viewed.`,
 	claudeHookCmd.Flags().String("event", "", "Hook event type (Notification, Stop, etc.)")
 	rootCmd.AddCommand(claudeHookCmd)
 
+	// Worktree write-guard subcommand - the executor-agnostic transport for the
+	// worktree write-guard used by the codex/gemini/opencode pre-tool hooks. Reads a
+	// normalized pre-tool payload on stdin, evaluates EvaluateWorktreeWriteGuard, and
+	// renders the decision in the format the given executor expects (internal use).
+	worktreeGuardCmd := &cobra.Command{
+		Use:    "worktree-guard",
+		Short:  "Evaluate the worktree write-guard for a pre-tool hook",
+		Hidden: true, // Internal use only - invoked by codex/gemini/opencode hooks
+		Run: func(cmd *cobra.Command, args []string) {
+			format, _ := cmd.Flags().GetString("format")
+			// Never block the agent on our own failure: handle errors by allowing.
+			if err := handleWorktreeGuardHook(format); err != nil {
+				os.Exit(0)
+			}
+		},
+	}
+	worktreeGuardCmd.Flags().String("format", "", "Output format: codex | gemini | opencode")
+	rootCmd.AddCommand(worktreeGuardCmd)
+
 	// MCP server subcommand - runs the workflow MCP server for a task (internal use)
 	mcpServerCmd := &cobra.Command{
 		Use:    "mcp-server",
@@ -385,6 +469,37 @@ Tasks will automatically reconnect to their agent sessions when viewed.`,
 	sessionsCleanupCmd.Flags().BoolP("force", "f", false, "Use SIGKILL instead of SIGTERM to force kill processes")
 	sessionsCmd.AddCommand(sessionsCleanupCmd)
 
+	sessionsSuspendCmd := &cobra.Command{
+		Use:   "suspend [task-id...]",
+		Short: "Kill agent processes for blocked tasks while preserving resume capability",
+		Long: `Suspend blocked task sessions by killing their agent processes and tmux windows.
+The session ID is preserved in the database so tasks can be resumed later via 'ty retry'.
+
+By default, suspends all blocked tasks that have running sessions.
+Optionally specify one or more task IDs to suspend specific tasks.
+
+Examples:
+  ty sessions suspend           # Suspend all blocked tasks with running sessions
+  ty sessions suspend 42 43     # Suspend specific tasks
+  ty sessions suspend --all     # Suspend all tasks with running sessions (not just blocked)`,
+		Run: func(cmd *cobra.Command, args []string) {
+			all, _ := cmd.Flags().GetBool("all")
+			var taskIDs []int
+			for _, arg := range args {
+				var id int
+				if _, err := fmt.Sscanf(arg, "%d", &id); err == nil {
+					taskIDs = append(taskIDs, id)
+				} else {
+					fmt.Fprintln(os.Stderr, errorStyle.Render("Invalid task ID: "+arg))
+					os.Exit(1)
+				}
+			}
+			suspendSessions(taskIDs, all)
+		},
+	}
+	sessionsSuspendCmd.Flags().Bool("all", false, "Suspend all tasks with running sessions, not just blocked ones")
+	sessionsCmd.AddCommand(sessionsSuspendCmd)
+
 	rootCmd.AddCommand(sessionsCmd)
 
 	// Alias: claudes -> sessions (for backwards compatibility)
@@ -400,9 +515,10 @@ Tasks will automatically reconnect to their agent sessions when viewed.`,
 
 	// Delete subcommand - delete a task, kill its agent session, and remove worktree
 	deleteCmd := &cobra.Command{
-		Use:   "delete <task-id>",
-		Short: "Delete a task, kill its agent session, and remove its worktree",
-		Args:  cobra.ExactArgs(1),
+		Use:               "delete <task-id>",
+		Short:             "Delete a task, kill its agent session, and remove its worktree",
+		Args:              cobra.ExactArgs(1),
+		ValidArgsFunction: completeTaskIDs,
 		Run: func(cmd *cobra.Command, args []string) {
 			var taskID int64
 			if _, err := fmt.Sscanf(args[0], "%d", &taskID); err != nil {
@@ -412,7 +528,7 @@ Tasks will automatically reconnect to their agent sessions when viewed.`,
 
 			// Get task info for confirmation
 			dbPath := db.DefaultPath()
-			database, err := db.Open(dbPath)
+			database, err := openTaskDB(dbPath)
 			if err != nil {
 				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
 				os.Exit(1)
@@ -474,9 +590,13 @@ Examples:
 			taskType, _ := cmd.Flags().GetString("type")
 			project, _ := cmd.Flags().GetString("project")
 			taskExecutor, _ := cmd.Flags().GetString("executor")
+			effortLevel, _ := cmd.Flags().GetString("effort")
 			execute, _ := cmd.Flags().GetBool("execute")
+			createDangerous, _ := cmd.Flags().GetBool("dangerous")
+			permissionModeFlag, _ := cmd.Flags().GetString("permission-mode")
 			tags, _ := cmd.Flags().GetString("tags")
 			pinned, _ := cmd.Flags().GetBool("pinned")
+			remoteControl, _ := cmd.Flags().GetBool("remote-control")
 			branch, _ := cmd.Flags().GetString("branch")
 			outputJSON, _ := cmd.Flags().GetBool("json")
 
@@ -493,7 +613,7 @@ Examples:
 
 			// Open database
 			dbPath := db.DefaultPath()
-			database, err := db.Open(dbPath)
+			database, err := openTaskDB(dbPath)
 			if err != nil {
 				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
 				os.Exit(1)
@@ -538,6 +658,13 @@ Examples:
 				}
 			}
 
+			// Validate effort level if provided (empty = use Claude's global default)
+			effortLevel = strings.ToLower(strings.TrimSpace(effortLevel))
+			if !db.IsValidEffortLevel(effortLevel) {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Invalid effort. Must be one of: "+strings.Join(db.EffortLevels(), ", ")))
+				os.Exit(1)
+			}
+
 			// If project not specified, try to detect from cwd
 			if project == "" {
 				if cwd, err := os.Getwd(); err == nil {
@@ -578,17 +705,27 @@ Examples:
 				status = db.StatusQueued
 			}
 
+			// Resolve permission mode: an explicit --permission-mode wins, then the
+			// legacy --dangerous flag; empty inherits the project default in CreateTask.
+			permMode := db.NormalizePermissionMode(permissionModeFlag)
+			if permMode == "" && createDangerous {
+				permMode = db.PermissionModeDangerous
+			}
+
 			// Create the task
 			task := &db.Task{
-				Title:        title,
-				Body:         body,
-				Status:       status,
-				Type:         taskType,
-				Project:      project,
-				Executor:     taskExecutor,
-				Tags:         tags,
-				Pinned:       pinned,
-				SourceBranch: branch,
+				Title:          title,
+				Body:           body,
+				Status:         status,
+				Type:           taskType,
+				Project:        project,
+				Executor:       taskExecutor,
+				EffortLevel:    effortLevel,
+				Tags:           tags,
+				Pinned:         pinned,
+				SourceBranch:   branch,
+				PermissionMode: permMode,
+				RemoteControl:  remoteControl,
 			}
 
 			if err := database.CreateTask(task); err != nil {
@@ -608,6 +745,9 @@ Examples:
 				if task.SourceBranch != "" {
 					output["source_branch"] = task.SourceBranch
 				}
+				if task.EffortLevel != "" {
+					output["effort_level"] = task.EffortLevel
+				}
 				jsonBytes, _ := json.Marshal(output)
 				fmt.Println(string(jsonBytes))
 			} else {
@@ -616,7 +756,11 @@ Examples:
 					msg += fmt.Sprintf(" (branch: %s)", branch)
 				}
 				if execute {
-					msg += " (queued for execution)"
+					if createDangerous {
+						msg += " (queued for execution in dangerous mode)"
+					} else {
+						msg += " (queued for execution)"
+					}
 				}
 				fmt.Println(successStyle.Render(msg))
 			}
@@ -626,11 +770,21 @@ Examples:
 	createCmd.Flags().StringP("type", "t", "", "Task type: code, writing, thinking (default: code)")
 	createCmd.Flags().StringP("project", "p", "", "Project name (auto-detected from cwd if not specified)")
 	createCmd.Flags().StringP("executor", "e", "", "Task executor: claude, codex, gemini, pi, opencode, openclaw (default: claude)")
+	createCmd.Flags().String("effort", "", "Per-task Claude effort override: low, medium, high, xhigh, max (default: Claude's global default)")
 	createCmd.Flags().BoolP("execute", "x", false, "Queue task for immediate execution")
+	createCmd.Flags().Bool("dangerous", false, "Execute in dangerous mode (alias for --permission-mode dangerous)")
+	createCmd.Flags().String("permission-mode", "", "Permission mode: default (prompt), accept-edits (auto-accept file edits), auto (Claude Code auto mode: auto-approve safe actions, block risky ones), dangerous (skip all). Defaults to the project's setting")
 	createCmd.Flags().String("tags", "", "Task tags (comma-separated)")
 	createCmd.Flags().Bool("pinned", false, "Pin the task to the top of its column")
+	createCmd.Flags().Bool("remote-control", false, "Launch Claude with --remote-control (interactive, remote-drivable session)")
 	createCmd.Flags().StringP("branch", "b", "", "Existing branch to checkout for worktree (e.g., fix/ui-overflow)")
 	createCmd.Flags().Bool("json", false, "Output in JSON format")
+	createCmd.RegisterFlagCompletionFunc("project", completeFlagProjects)
+	createCmd.RegisterFlagCompletionFunc("type", completeFlagTypes)
+	createCmd.RegisterFlagCompletionFunc("executor", completeFlagExecutors)
+	createCmd.RegisterFlagCompletionFunc("effort", func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		return db.EffortLevels(), cobra.ShellCompDirectiveNoFileComp
+	})
 	rootCmd.AddCommand(createCmd)
 
 	// List subcommand - list tasks
@@ -656,7 +810,7 @@ Examples:
 
 			// Open database
 			dbPath := db.DefaultPath()
-			database, err := db.Open(dbPath)
+			database, err := openTaskDB(dbPath)
 			if err != nil {
 				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
 				os.Exit(1)
@@ -809,6 +963,9 @@ Examples:
 	listCmd.Flags().IntP("limit", "n", 50, "Maximum number of tasks to return")
 	listCmd.Flags().Bool("json", false, "Output in JSON format")
 	listCmd.Flags().Bool("pr", false, "Show PR/CI status (requires network)")
+	listCmd.RegisterFlagCompletionFunc("status", completeFlagStatuses)
+	listCmd.RegisterFlagCompletionFunc("project", completeFlagProjects)
+	listCmd.RegisterFlagCompletionFunc("type", completeFlagTypes)
 	rootCmd.AddCommand(listCmd)
 
 	boardCmd := &cobra.Command{
@@ -825,7 +982,7 @@ that the TUI shows, either as formatted text or JSON for automation.`,
 			}
 
 			dbPath := db.DefaultPath()
-			database, err := db.Open(dbPath)
+			database, err := openTaskDB(dbPath)
 			if err != nil {
 				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
 				os.Exit(1)
@@ -838,7 +995,7 @@ that the TUI shows, either as formatted text or JSON for automation.`,
 				os.Exit(1)
 			}
 
-			snapshot := buildBoardSnapshot(tasks, limit)
+			snapshot := web.BuildBoardSnapshot(tasks, limit)
 
 			if outputJSON {
 				data, _ := json.MarshalIndent(snapshot, "", "  ")
@@ -882,10 +1039,48 @@ that the TUI shows, either as formatted text or JSON for automation.`,
 	boardCmd.Flags().Int("limit", 5, "Maximum entries to show per column")
 	rootCmd.AddCommand(boardCmd)
 
+	// Tail subcommand - live updating task view grouped by project and status
+	tailCmd := &cobra.Command{
+		Use:   "tail",
+		Short: "Live view of tasks organized by project and status",
+		Long: `Show a continuously updating view of all active tasks,
+grouped by project and then by status. Refreshes automatically.
+Press Ctrl+C to stop.`,
+		Run: func(cmd *cobra.Command, args []string) {
+			interval, _ := cmd.Flags().GetDuration("interval")
+			showDone, _ := cmd.Flags().GetBool("done")
+
+			dbPath := db.DefaultPath()
+			database, err := openTaskDB(dbPath)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+			defer database.Close()
+
+			p := tea.NewProgram(
+				tailModel{
+					db:       database,
+					interval: interval,
+					showDone: showDone,
+				},
+				tea.WithAltScreen(),
+			)
+			if _, err := p.Run(); err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+		},
+	}
+	tailCmd.Flags().Duration("interval", 2*time.Second, "Refresh interval (e.g. 1s, 500ms)")
+	tailCmd.Flags().Bool("done", false, "Include completed tasks")
+	rootCmd.AddCommand(tailCmd)
+
 	// Show subcommand - show task details
 	showCmd := &cobra.Command{
-		Use:   "show <task-id>",
-		Short: "Show task details",
+		Use:               "show <task-id>",
+		Short:             "Show task details",
+		ValidArgsFunction: completeTaskIDs,
 		Long: `Show detailed information about a task.
 
 Examples:
@@ -905,7 +1100,7 @@ Examples:
 
 			// Open database
 			dbPath := db.DefaultPath()
-			database, err := db.Open(dbPath)
+			database, err := openTaskDB(dbPath)
 			if err != nil {
 				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
 				os.Exit(1)
@@ -1113,8 +1308,9 @@ Examples:
 
 	// Update subcommand - update task fields
 	updateCmd := &cobra.Command{
-		Use:   "update <task-id>",
-		Short: "Update a task",
+		Use:               "update <task-id>",
+		Short:             "Update a task",
+		ValidArgsFunction: completeTaskIDs,
 		Long: `Update task fields.
 
 Examples:
@@ -1142,7 +1338,7 @@ Examples:
 
 			// Open database
 			dbPath := db.DefaultPath()
-			database, err := db.Open(dbPath)
+			database, err := openTaskDB(dbPath)
 			if err != nil {
 				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
 				os.Exit(1)
@@ -1234,12 +1430,16 @@ Examples:
 	updateCmd.Flags().StringP("executor", "e", "", "Update task executor: claude, codex, gemini, pi, opencode, openclaw")
 	updateCmd.Flags().String("tags", "", "Update task tags (comma-separated)")
 	updateCmd.Flags().Bool("pinned", false, "Pin or unpin the task")
+	updateCmd.RegisterFlagCompletionFunc("project", completeFlagProjects)
+	updateCmd.RegisterFlagCompletionFunc("type", completeFlagTypes)
+	updateCmd.RegisterFlagCompletionFunc("executor", completeFlagExecutors)
 	rootCmd.AddCommand(updateCmd)
 
 	// Move subcommand - move a task to a different project
 	moveCmd := &cobra.Command{
-		Use:   "move <task-id> <target-project>",
-		Short: "Move a task to a different project",
+		Use:               "move <task-id> <target-project>",
+		Short:             "Move a task to a different project",
+		ValidArgsFunction: completeTaskIDsThenProject,
 		Long: `Move a task to a different project.
 
 This properly cleans up the task's worktree and agent sessions from the old project,
@@ -1268,7 +1468,7 @@ Examples:
 
 			// Open database
 			dbPath := db.DefaultPath()
-			database, err := db.Open(dbPath)
+			database, err := openTaskDB(dbPath)
 			if err != nil {
 				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
 				os.Exit(1)
@@ -1305,6 +1505,7 @@ Examples:
 
 			oldProject := task.Project
 			execute, _ := cmd.Flags().GetBool("execute")
+			moveDangerous, _ := cmd.Flags().GetBool("dangerous")
 
 			// Confirm unless --force flag is set
 			force, _ := cmd.Flags().GetBool("force")
@@ -1330,29 +1531,42 @@ Examples:
 
 			// Queue for execution if requested
 			if execute {
+				if moveDangerous {
+					if err := database.UpdateTaskDangerousMode(newTaskID, true); err != nil {
+						fmt.Fprintln(os.Stderr, errorStyle.Render("Error setting dangerous mode: "+err.Error()))
+						os.Exit(1)
+					}
+				}
 				if err := database.UpdateTaskStatus(newTaskID, db.StatusQueued); err != nil {
 					fmt.Fprintln(os.Stderr, errorStyle.Render("Error queueing task: "+err.Error()))
 					os.Exit(1)
 				}
-				fmt.Println(successStyle.Render(fmt.Sprintf("Queued task #%d for execution", newTaskID)))
+				msg := fmt.Sprintf("Queued task #%d for execution", newTaskID)
+				if moveDangerous {
+					msg += " (dangerous mode)"
+				}
+				fmt.Println(successStyle.Render(msg))
 			}
 		},
 	}
 	moveCmd.Flags().BoolP("force", "f", false, "Skip confirmation prompt")
 	moveCmd.Flags().BoolP("execute", "e", false, "Queue the task for execution after moving")
+	moveCmd.Flags().Bool("dangerous", false, "Execute in dangerous mode (requires --execute)")
 	rootCmd.AddCommand(moveCmd)
 
 	// Execute subcommand - queue a task for execution
 	executeCmd := &cobra.Command{
-		Use:     "execute <task-id>",
-		Aliases: []string{"queue", "run"},
-		Short:   "Queue a task for execution",
+		Use:               "execute <task-id>",
+		Aliases:           []string{"queue", "run"},
+		Short:             "Queue a task for execution",
+		ValidArgsFunction: completeTaskIDs,
 		Long: `Queue a task to be executed by the daemon.
 
 Examples:
   task execute 42
   task queue 42
-  task run 42`,
+  task run 42
+  task execute 42 --dangerous   # Execute in dangerous mode`,
 		Args: cobra.ExactArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
 			var taskID int64
@@ -1361,9 +1575,16 @@ Examples:
 				os.Exit(1)
 			}
 
+			executeDangerous, _ := cmd.Flags().GetBool("dangerous")
+			executePermMode, _ := cmd.Flags().GetString("permission-mode")
+			executePermMode = db.NormalizePermissionMode(executePermMode)
+			if executePermMode == "" && executeDangerous {
+				executePermMode = db.PermissionModeDangerous
+			}
+
 			// Open database
 			dbPath := db.DefaultPath()
-			database, err := db.Open(dbPath)
+			database, err := openTaskDB(dbPath)
 			if err != nil {
 				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
 				os.Exit(1)
@@ -1390,19 +1611,40 @@ Examples:
 				return
 			}
 
+			// Override the task's permission mode if explicitly requested.
+			if executePermMode != "" {
+				if err := database.UpdateTaskPermissionMode(taskID, executePermMode); err != nil {
+					fmt.Fprintln(os.Stderr, errorStyle.Render("Error setting permission mode: "+err.Error()))
+					os.Exit(1)
+				}
+				task.PermissionMode = executePermMode
+			}
+
 			if err := database.UpdateTaskStatus(taskID, db.StatusQueued); err != nil {
 				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
 				os.Exit(1)
 			}
 
-			fmt.Println(successStyle.Render(fmt.Sprintf("Queued task #%d: %s", taskID, task.Title)))
+			msg := fmt.Sprintf("Queued task #%d: %s", taskID, task.Title)
+			switch task.EffectivePermissionMode() {
+			case db.PermissionModeDangerous:
+				msg += " (dangerous mode)"
+			case db.PermissionModeAuto:
+				msg += " (auto mode)"
+			case db.PermissionModeAcceptEdits:
+				msg += " (accept-edits mode)"
+			}
+			fmt.Println(successStyle.Render(msg))
 		},
 	}
+	executeCmd.Flags().Bool("dangerous", false, "Execute in dangerous mode (alias for --permission-mode dangerous)")
+	executeCmd.Flags().String("permission-mode", "", "Override permission mode: default (prompt), accept-edits (auto-accept file edits), auto (Claude Code auto mode), dangerous (skip all)")
 	rootCmd.AddCommand(executeCmd)
 
 	statusCmd := &cobra.Command{
-		Use:   "status <task-id> <status>",
-		Short: "Set a task's status",
+		Use:               "status <task-id> <status>",
+		Short:             "Set a task's status",
+		ValidArgsFunction: completeTaskIDsThenStatus,
 		Long: `Manually update a task's status. Useful for automation/orchestration when
 you need to move cards between columns without opening the TUI.
 
@@ -1422,7 +1664,7 @@ Valid statuses: backlog, queued, processing, blocked, done, archived.`,
 			}
 
 			dbPath := db.DefaultPath()
-			database, err := db.Open(dbPath)
+			database, err := openTaskDB(dbPath)
 			if err != nil {
 				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
 				os.Exit(1)
@@ -1450,9 +1692,10 @@ Valid statuses: backlog, queued, processing, blocked, done, archived.`,
 	rootCmd.AddCommand(statusCmd)
 
 	pinCmd := &cobra.Command{
-		Use:   "pin <task-id>",
-		Short: "Pin, unpin, or toggle a task",
-		Args:  cobra.ExactArgs(1),
+		Use:               "pin <task-id>",
+		Short:             "Pin, unpin, or toggle a task",
+		Args:              cobra.ExactArgs(1),
+		ValidArgsFunction: completeTaskIDs,
 		Run: func(cmd *cobra.Command, args []string) {
 			var taskID int64
 			if _, err := fmt.Sscanf(args[0], "%d", &taskID); err != nil {
@@ -1464,7 +1707,7 @@ Valid statuses: backlog, queued, processing, blocked, done, archived.`,
 			toggle, _ := cmd.Flags().GetBool("toggle")
 
 			dbPath := db.DefaultPath()
-			database, err := db.Open(dbPath)
+			database, err := openTaskDB(dbPath)
 			if err != nil {
 				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
 				os.Exit(1)
@@ -1508,9 +1751,10 @@ Valid statuses: backlog, queued, processing, blocked, done, archived.`,
 
 	// Close subcommand - mark a task as done
 	closeCmd := &cobra.Command{
-		Use:     "close <task-id>",
-		Aliases: []string{"done", "complete"},
-		Short:   "Mark a task as done",
+		Use:               "close <task-id>",
+		ValidArgsFunction: completeTaskIDs,
+		Aliases:           []string{"done", "complete"},
+		Short:             "Mark a task as done",
 		Long: `Mark a task as completed.
 
 Examples:
@@ -1527,7 +1771,7 @@ Examples:
 
 			// Open database
 			dbPath := db.DefaultPath()
-			database, err := db.Open(dbPath)
+			database, err := openTaskDB(dbPath)
 			if err != nil {
 				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
 				os.Exit(1)
@@ -1565,8 +1809,9 @@ Examples:
 
 	// Retry subcommand - retry a blocked/failed task
 	retryCmd := &cobra.Command{
-		Use:   "retry <task-id>",
-		Short: "Retry a blocked or failed task",
+		Use:               "retry <task-id>",
+		Short:             "Retry a blocked or failed task",
+		ValidArgsFunction: completeTaskIDs,
 		Long: `Retry a task that is blocked or failed, optionally with feedback.
 
 Examples:
@@ -1585,7 +1830,7 @@ Examples:
 
 			// Open database
 			dbPath := db.DefaultPath()
-			database, err := db.Open(dbPath)
+			database, err := openTaskDB(dbPath)
 			if err != nil {
 				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
 				os.Exit(1)
@@ -1615,20 +1860,26 @@ Examples:
 
 	// Input subcommand - send input directly to a running task's executor
 	inputCmd := &cobra.Command{
-		Use:   "input <task-id> [message]",
-		Short: "Send input to a task's executor",
+		Use:               "input <task-id> [message]",
+		Short:             "Send input to a task's executor",
+		ValidArgsFunction: completeTaskIDs,
 		Long: `Send input directly to a running task's executor via tmux.
 
 This allows you to interact with a blocked or running task without going through
 the retry mechanism. The input is sent directly to the executor's tmux pane.
+
+By default the message is submitted (Enter is pressed after the text), so the
+agent actually receives it. Pass --no-submit to only drop the text in the input
+field without submitting it.
 
 If no message is provided, reads from stdin (useful for piping).
 Use --enter to just send Enter (for confirming TUI prompts).
 Use --key to send special keys like "Up", "Down", "Tab", "Escape".
 
 Examples:
-  task input 42 "yes"
+  task input 42 "yes"                # Type "yes" and submit
   task input 42 "Try a different approach"
+  task input 42 "draft text" --no-submit   # Fill the field, don't submit
   task input 42 --enter              # Just press Enter
   task input 42 --key Down --enter   # Press Down then Enter
   echo "continue" | task input 42`,
@@ -1642,6 +1893,7 @@ Examples:
 
 			justEnter, _ := cmd.Flags().GetBool("enter")
 			specialKey, _ := cmd.Flags().GetString("key")
+			noSubmit, _ := cmd.Flags().GetBool("no-submit")
 
 			var message string
 			if len(args) > 1 {
@@ -1665,7 +1917,7 @@ Examples:
 
 			// Open database
 			dbPath := db.DefaultPath()
-			database, err := db.Open(dbPath)
+			database, err := openTaskDB(dbPath)
 			if err != nil {
 				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
 				os.Exit(1)
@@ -1699,14 +1951,26 @@ Examples:
 				}
 			}
 
-			// Send message if provided, or just Enter if --enter flag
+			// Send the message text (literally, so a message that looks like a tmux
+			// key name such as "Enter" or "Up" isn't interpreted as a keypress).
 			if message != "" {
-				sendCmd := osexec.Command("tmux", "send-keys", "-t", paneID, message, "Enter")
+				sendCmd := osexec.Command("tmux", "send-keys", "-t", paneID, "-l", message)
 				if err := sendCmd.Run(); err != nil {
 					fmt.Fprintln(os.Stderr, errorStyle.Render(fmt.Sprintf("Error sending input to pane %s (task may have finished): %v", paneID, err)))
 					os.Exit(1)
 				}
-			} else if justEnter {
+			}
+
+			// Submit by pressing Enter unless --no-submit was passed. Enter is sent
+			// as a SEPARATE keypress after the text: agentic TUIs (Claude Code, etc.)
+			// use bracketed-paste / input debouncing, so an Enter bundled into the
+			// same send-keys call as the text gets absorbed as a newline instead of
+			// submitting. The brief pause lets the TUI register the text first.
+			submit := shouldSubmitInput(message, justEnter, noSubmit)
+			if submit {
+				if message != "" {
+					time.Sleep(100 * time.Millisecond)
+				}
 				sendCmd := osexec.Command("tmux", "send-keys", "-t", paneID, "Enter")
 				if err := sendCmd.Run(); err != nil {
 					fmt.Fprintln(os.Stderr, errorStyle.Render(fmt.Sprintf("Error sending Enter to pane %s (task may have finished): %v", paneID, err)))
@@ -1714,11 +1978,16 @@ Examples:
 				}
 			}
 
-			fmt.Println(successStyle.Render(fmt.Sprintf("Sent input to task #%d", taskID)))
+			if message != "" && !submit {
+				fmt.Println(successStyle.Render(fmt.Sprintf("Sent input to task #%d (not submitted)", taskID)))
+			} else {
+				fmt.Println(successStyle.Render(fmt.Sprintf("Sent input to task #%d", taskID)))
+			}
 		},
 	}
 	inputCmd.Flags().Bool("enter", false, "Just send Enter key (for confirming prompts)")
 	inputCmd.Flags().String("key", "", "Send a special key (e.g., Up, Down, Tab, Escape)")
+	inputCmd.Flags().Bool("no-submit", false, "Type the text but don't press Enter (leave it in the input field)")
 	rootCmd.AddCommand(inputCmd)
 
 	// Pi Wrapper subcommand - internal use for RPC mode
@@ -1726,8 +1995,9 @@ Examples:
 
 	// Output subcommand - capture recent output from executor pane
 	outputCmd := &cobra.Command{
-		Use:   "output <task-id>",
-		Short: "Capture recent output from a task's executor",
+		Use:               "output <task-id>",
+		Short:             "Capture recent output from a task's executor",
+		ValidArgsFunction: completeTaskIDs,
 		Long: `Capture recent output from a running task's executor pane.
 
 This allows you to see what the executor has outputted without attaching to the tmux pane.
@@ -1750,7 +2020,7 @@ Examples:
 
 			// Open database
 			dbPath := db.DefaultPath()
-			database, err := db.Open(dbPath)
+			database, err := openTaskDB(dbPath)
 			if err != nil {
 				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
 				os.Exit(1)
@@ -1857,7 +2127,7 @@ Examples:
 Worktrees are archived first (preserving uncommitted changes in git refs),
 then the directory is removed. Archived tasks can be restored with 'unarchive'.
 
-The default max age is 7 days. Use --max-age to override.
+The default max age is 24 hours. Use --max-age to override.
 Use --dry-run to preview what would be cleaned up.
 
 Examples:
@@ -1884,7 +2154,7 @@ Examples:
 			}
 
 			dbPath := db.DefaultPath()
-			database, err := db.Open(dbPath)
+			database, err := openTaskDB(dbPath)
 			if err != nil {
 				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
 				os.Exit(1)
@@ -1925,7 +2195,7 @@ Examples:
 		},
 	}
 	worktreesCleanupCmd.Flags().Bool("dry-run", false, "Show what would be removed without making changes")
-	worktreesCleanupCmd.Flags().String("max-age", "", "Maximum age before cleanup (e.g., 168h, 72h, 0 for all). Default: 168h (7 days)")
+	worktreesCleanupCmd.Flags().String("max-age", "", "Maximum age before cleanup (e.g., 24h, 72h, 0 for all). Default: 24h (1 day)")
 	worktreesCmd.AddCommand(worktreesCleanupCmd)
 	rootCmd.AddCommand(worktreesCmd)
 
@@ -1951,13 +2221,83 @@ Examples:
 	}
 	rootCmd.AddCommand(upgradeCmd)
 
+	// Doctor command - diagnose the agent server's GitHub auth health.
+	doctorCmd := &cobra.Command{
+		Use:   "doctor",
+		Short: "Diagnose agent server health (GitHub auth & rate limits)",
+		Long: `Checks the local GitHub CLI authentication used by agents and warns about
+conditions that cause shared GraphQL bucket exhaustion across agent servers:
+
+  - gh not installed or not logged in (GitHub operations silently fail)
+  - an expired/revoked token (401 Bad credentials)
+  - authentication as a PERSONAL account, whose 5,000 pt/hr GraphQL limit is
+    shared per-user across every server authed as that account
+  - low remaining GraphQL headroom
+
+Each agent server should authenticate with its OWN GitHub App installation
+token (a bot identity), which gets an independent GraphQL bucket.
+
+Exits non-zero on hard errors (gh missing, logged out, expired token). Pass
+--strict to also exit non-zero on warnings (e.g. personal-account auth), so a
+fleet sweep like 'for s in ...; do ssh $s ty doctor --strict; done' can flag
+servers programmatically.`,
+		Run: func(cmd *cobra.Command, args []string) {
+			strict, _ := cmd.Flags().GetBool("strict")
+			fmt.Println(boldStyle.Render("TaskYou Doctor"))
+			fmt.Println(dimStyle.Render("Checking GitHub authentication..."))
+			fmt.Println()
+
+			status := github.CheckAuth(context.Background())
+			if status.Err != nil {
+				fmt.Println(warnStyle.Render("⚠ Could not fully probe gh: " + status.Err.Error()))
+				fmt.Println()
+			}
+
+			findings := status.Findings()
+			hasError := false
+			for _, f := range findings {
+				var icon, msg string
+				switch f.Severity {
+				case github.SeverityOK:
+					icon = successStyle.Render("✓")
+					msg = f.Message
+				case github.SeverityWarn:
+					icon = warnStyle.Render("⚠")
+					msg = warnStyle.Render(f.Message)
+				case github.SeverityError:
+					icon = errorStyle.Render("✗")
+					msg = errorStyle.Render(f.Message)
+					hasError = true
+				}
+				fmt.Printf("%s %s\n", icon, msg)
+				if f.Detail != "" {
+					fmt.Println(dimStyle.Render("    " + f.Detail))
+				}
+			}
+
+			fmt.Println()
+			if hasError || status.HasProblems() {
+				fmt.Println(dimStyle.Render("Tip: provision this server with its own GitHub App installation token,"))
+				fmt.Println(dimStyle.Render("mirroring the offerlab-devs[bot] pattern, for an independent rate-limit bucket."))
+			} else {
+				fmt.Println(successStyle.Render("All checks passed."))
+			}
+
+			if hasError || (strict && status.HasProblems()) {
+				os.Exit(1)
+			}
+		},
+	}
+	doctorCmd.Flags().Bool("strict", false, "Exit non-zero on warnings too (e.g. personal-account auth), for fleet health sweeps")
+	rootCmd.AddCommand(doctorCmd)
+
 	// Settings command
 	settingsCmd := &cobra.Command{
 		Use:   "settings",
 		Short: "View and manage app settings",
 		Run: func(cmd *cobra.Command, args []string) {
 			dbPath := db.DefaultPath()
-			database, err := db.Open(dbPath)
+			database, err := openTaskDB(dbPath)
 			if err != nil {
 				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
 				os.Exit(1)
@@ -2000,8 +2340,9 @@ Examples:
 	}
 
 	settingsSetCmd := &cobra.Command{
-		Use:   "set <key> <value>",
-		Short: "Set a setting value",
+		Use:               "set <key> <value>",
+		Short:             "Set a setting value",
+		ValidArgsFunction: completeSettingKeys,
 		Long: `Set a configuration setting.
 
 Available settings:
@@ -2038,7 +2379,7 @@ Available settings:
 			}
 
 			dbPath := db.DefaultPath()
-			database, err := db.Open(dbPath)
+			database, err := openTaskDB(dbPath)
 			if err != nil {
 				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
 				os.Exit(1)
@@ -2080,7 +2421,7 @@ Examples:
 			outputJSON, _ := cmd.Flags().GetBool("json")
 
 			dbPath := db.DefaultPath()
-			database, err := db.Open(dbPath)
+			database, err := openTaskDB(dbPath)
 			if err != nil {
 				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
 				os.Exit(1)
@@ -2198,8 +2539,9 @@ Examples:
 
 	// Projects show subcommand
 	projectsShowCmd := &cobra.Command{
-		Use:   "show <name>",
-		Short: "Show project details",
+		Use:               "show <name>",
+		Short:             "Show project details",
+		ValidArgsFunction: completeProjectNames,
 		Long: `Show detailed information about a project including its instructions.
 
 Examples:
@@ -2231,9 +2573,11 @@ Examples:
 			color, _ := cmd.Flags().GetString("color")
 			aliases, _ := cmd.Flags().GetString("aliases")
 			claudeConfigDir, _ := cmd.Flags().GetString("claude-config-dir")
+			permissionMode, _ := cmd.Flags().GetString("permission-mode")
+			noGit, _ := cmd.Flags().GetBool("no-git")
 			outputJSON, _ := cmd.Flags().GetBool("json")
 
-			createProjectCLI(args[0], path, instructions, color, aliases, claudeConfigDir, outputJSON)
+			createProjectCLI(args[0], path, instructions, color, aliases, claudeConfigDir, permissionMode, noGit, outputJSON)
 		},
 	}
 	projectsCreateCmd.Flags().StringP("path", "p", "", "Project directory path (required)")
@@ -2241,14 +2585,17 @@ Examples:
 	projectsCreateCmd.Flags().StringP("color", "c", "", "Hex color for display (e.g., #61AFEF)")
 	projectsCreateCmd.Flags().StringP("aliases", "a", "", "Comma-separated aliases for lookup")
 	projectsCreateCmd.Flags().String("claude-config-dir", "", "Override CLAUDE_CONFIG_DIR for this project")
+	projectsCreateCmd.Flags().String("permission-mode", "", "Default permission mode for tasks: default (prompt), accept-edits (auto-accept file edits), auto (Claude Code auto mode), dangerous (skip all)")
+	projectsCreateCmd.Flags().Bool("no-git", false, "Disable git worktrees (for non-git projects)")
 	projectsCreateCmd.Flags().Bool("json", false, "Output in JSON format")
 	projectsCreateCmd.MarkFlagRequired("path")
 	projectsCmd.AddCommand(projectsCreateCmd)
 
 	// Projects update subcommand
 	projectsUpdateCmd := &cobra.Command{
-		Use:   "update <name>",
-		Short: "Update project settings",
+		Use:               "update <name>",
+		Short:             "Update project settings",
+		ValidArgsFunction: completeProjectNames,
 		Long: `Update settings for an existing project.
 
 Examples:
@@ -2266,9 +2613,27 @@ Examples:
 			aliases, _ := cmd.Flags().GetString("aliases")
 			claudeConfigDir, _ := cmd.Flags().GetString("claude-config-dir")
 			projectContext, _ := cmd.Flags().GetString("context")
+			permissionMode, _ := cmd.Flags().GetString("permission-mode")
 			outputJSON, _ := cmd.Flags().GetBool("json")
+			noGit, _ := cmd.Flags().GetBool("no-git")
+			git, _ := cmd.Flags().GetBool("git")
 
-			updateProjectCLI(args[0], name, path, instructions, color, aliases, claudeConfigDir, projectContext, outputJSON)
+			if noGit && git {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: --no-git and --git are mutually exclusive"))
+				os.Exit(1)
+			}
+
+			// Determine git mode: nil means not specified
+			var useWorktrees *bool
+			if noGit {
+				v := false
+				useWorktrees = &v
+			} else if git {
+				v := true
+				useWorktrees = &v
+			}
+
+			updateProjectCLI(args[0], name, path, instructions, color, aliases, claudeConfigDir, projectContext, permissionMode, useWorktrees, outputJSON)
 		},
 	}
 	projectsUpdateCmd.Flags().StringP("name", "n", "", "New project name")
@@ -2278,13 +2643,17 @@ Examples:
 	projectsUpdateCmd.Flags().StringP("aliases", "a", "", "Comma-separated aliases for lookup")
 	projectsUpdateCmd.Flags().String("claude-config-dir", "", "Override CLAUDE_CONFIG_DIR for this project")
 	projectsUpdateCmd.Flags().String("context", "", "Cached project context summary")
+	projectsUpdateCmd.Flags().String("permission-mode", "", "Default permission mode for tasks: default (prompt), accept-edits (auto-accept file edits), auto (Claude Code auto mode), dangerous (skip all)")
+	projectsUpdateCmd.Flags().Bool("no-git", false, "Disable git worktrees (for non-git projects)")
+	projectsUpdateCmd.Flags().Bool("git", false, "Enable git worktrees (default)")
 	projectsUpdateCmd.Flags().Bool("json", false, "Output in JSON format")
 	projectsCmd.AddCommand(projectsUpdateCmd)
 
 	// Projects delete subcommand
 	projectsDeleteCmd := &cobra.Command{
-		Use:   "delete <name>",
-		Short: "Delete a project",
+		Use:               "delete <name>",
+		Short:             "Delete a project",
+		ValidArgsFunction: completeProjectNames,
 		Long: `Delete a project. The 'personal' project cannot be deleted.
 
 Note: This only removes the project from the task system. It does not
@@ -2306,8 +2675,9 @@ Examples:
 
 	// Block command - create a dependency between two tasks
 	blockCmd := &cobra.Command{
-		Use:   "block <blocked-task-id> --by <blocker-task-id>",
-		Short: "Block a task until another task completes",
+		Use:               "block <blocked-task-id> --by <blocker-task-id>",
+		ValidArgsFunction: completeTaskIDs,
+		Short:             "Block a task until another task completes",
 		Long: `Create a dependency where a task is blocked until another task completes.
 
 Example: ty block 5 --by 3
@@ -2331,7 +2701,7 @@ Use --auto-queue to automatically move the blocked task to 'queued' when unblock
 			autoQueue, _ := cmd.Flags().GetBool("auto-queue")
 
 			dbPath := db.DefaultPath()
-			database, err := db.Open(dbPath)
+			database, err := openTaskDB(dbPath)
 			if err != nil {
 				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
 				os.Exit(1)
@@ -2370,8 +2740,9 @@ Use --auto-queue to automatically move the blocked task to 'queued' when unblock
 
 	// Unblock command - remove a dependency
 	unblockCmd := &cobra.Command{
-		Use:   "unblock <blocked-task-id> --from <blocker-task-id>",
-		Short: "Remove a blocking dependency",
+		Use:               "unblock <blocked-task-id> --from <blocker-task-id>",
+		ValidArgsFunction: completeTaskIDs,
+		Short:             "Remove a blocking dependency",
 		Long: `Remove a dependency so a task is no longer blocked by another.
 
 Example: ty unblock 5 --from 3
@@ -2391,7 +2762,7 @@ This removes the dependency where task #5 was blocked by task #3.`,
 			}
 
 			dbPath := db.DefaultPath()
-			database, err := db.Open(dbPath)
+			database, err := openTaskDB(dbPath)
 			if err != nil {
 				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
 				os.Exit(1)
@@ -2412,8 +2783,9 @@ This removes the dependency where task #5 was blocked by task #3.`,
 
 	// Deps command - show dependencies for a task
 	depsCmd := &cobra.Command{
-		Use:   "deps <task-id>",
-		Short: "Show dependencies for a task",
+		Use:               "deps <task-id>",
+		ValidArgsFunction: completeTaskIDs,
+		Short:             "Show dependencies for a task",
 		Long: `Display all dependencies for a task, showing:
 - Tasks that block this task (must complete before this task)
 - Tasks that this task blocks (waiting on this task)`,
@@ -2426,7 +2798,7 @@ This removes the dependency where task #5 was blocked by task #3.`,
 			}
 
 			dbPath := db.DefaultPath()
-			database, err := db.Open(dbPath)
+			database, err := openTaskDB(dbPath)
 			if err != nil {
 				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
 				os.Exit(1)
@@ -2495,7 +2867,7 @@ Examples:
 			outputJSON, _ := cmd.Flags().GetBool("json")
 
 			dbPath := db.DefaultPath()
-			database, err := db.Open(dbPath)
+			database, err := openTaskDB(dbPath)
 			if err != nil {
 				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
 				os.Exit(1)
@@ -2574,15 +2946,16 @@ Examples:
 
 	// Types show subcommand
 	typesShowCmd := &cobra.Command{
-		Use:   "show <name>",
-		Short: "Show details of a task type",
-		Args:  cobra.ExactArgs(1),
+		Use:               "show <name>",
+		ValidArgsFunction: completeTypeNames,
+		Short:             "Show details of a task type",
+		Args:              cobra.ExactArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
 			name := args[0]
 			outputJSON, _ := cmd.Flags().GetBool("json")
 
 			dbPath := db.DefaultPath()
-			database, err := db.Open(dbPath)
+			database, err := openTaskDB(dbPath)
 			if err != nil {
 				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
 				os.Exit(1)
@@ -2700,7 +3073,7 @@ Examples:
 			}
 
 			dbPath := db.DefaultPath()
-			database, err := db.Open(dbPath)
+			database, err := openTaskDB(dbPath)
 			if err != nil {
 				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
 				os.Exit(1)
@@ -2739,8 +3112,9 @@ Examples:
 
 	// Types edit subcommand
 	typesEditCmd := &cobra.Command{
-		Use:   "edit <name>",
-		Short: "Edit an existing task type",
+		Use:               "edit <name>",
+		ValidArgsFunction: completeTypeNames,
+		Short:             "Edit an existing task type",
 		Long: `Edit an existing task type. Built-in types can be edited but not deleted.
 
 All flags are optional - only specified values will be updated.
@@ -2760,7 +3134,7 @@ Examples:
 			sortOrderSet := cmd.Flags().Changed("sort-order")
 
 			dbPath := db.DefaultPath()
-			database, err := db.Open(dbPath)
+			database, err := openTaskDB(dbPath)
 			if err != nil {
 				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
 				os.Exit(1)
@@ -2840,8 +3214,9 @@ Examples:
 
 	// Types delete subcommand
 	typesDeleteCmd := &cobra.Command{
-		Use:   "delete <name>",
-		Short: "Delete a custom task type",
+		Use:               "delete <name>",
+		ValidArgsFunction: completeTypeNames,
+		Short:             "Delete a custom task type",
 		Long: `Delete a custom task type. Built-in types (code, writing, thinking) cannot be deleted.
 
 Examples:
@@ -2853,7 +3228,7 @@ Examples:
 			force, _ := cmd.Flags().GetBool("force")
 
 			dbPath := db.DefaultPath()
-			database, err := db.Open(dbPath)
+			database, err := openTaskDB(dbPath)
 			if err != nil {
 				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
 				os.Exit(1)
@@ -2900,10 +3275,263 @@ Examples:
 
 	rootCmd.AddCommand(typesCmd)
 
+	// Serve subcommand - HTTP API server
+	serveCmd := &cobra.Command{
+		Use:   "serve",
+		Short: "Start an HTTP API server",
+		Long: `Start a lightweight HTTP API server exposing the same operations as the CLI.
+External frontends (like ty-web) can build on top of this API.
+The server shares the same SQLite database the daemon writes to (WAL mode).`,
+		Run: func(cmd *cobra.Command, args []string) {
+			port, _ := cmd.Flags().GetInt("port")
+			addr := fmt.Sprintf(":%d", port)
+
+			dbPath := db.DefaultPath()
+			database, err := openTaskDB(dbPath)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error opening database: "+err.Error()))
+				os.Exit(1)
+			}
+			defer database.Close()
+
+			runner := &execCommandRunner{}
+			srv := web.New(web.Config{
+				Addr:      addr,
+				DB:        database,
+				CmdRunner: runner,
+			})
+
+			// Handle signals for graceful shutdown
+			sigCh := make(chan os.Signal, 1)
+			signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+
+			go func() {
+				<-sigCh
+				fmt.Println("\nShutting down web server...")
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				srv.Shutdown(ctx)
+			}()
+
+			if err := srv.Start(); err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Server error: "+err.Error()))
+				os.Exit(1)
+			}
+		},
+	}
+	serveCmd.Flags().Int("port", 8080, "Port to listen on")
+	rootCmd.AddCommand(serveCmd)
+
+	// Bulk operations
+	rootCmd.AddCommand(newBulkCmd())
+
+	// Completion command for shell tab completion
+	rootCmd.AddCommand(newCompletionCmd(rootCmd))
+
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
 		os.Exit(1)
 	}
+}
+
+// tailModel is a Bubble Tea model for the live tail view.
+// Uses alternate screen buffer to avoid scrollback pollution.
+type tailModel struct {
+	db       *db.DB
+	interval time.Duration
+	showDone bool
+	width    int
+	height   int
+}
+
+type tailTickMsg time.Time
+
+func (m tailModel) Init() tea.Cmd {
+	return tea.Tick(m.interval, func(t time.Time) tea.Msg {
+		return tailTickMsg(t)
+	})
+}
+
+func (m tailModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tea.KeyMsg:
+		switch msg.String() {
+		case "q", "ctrl+c", "esc":
+			return m, tea.Quit
+		}
+	case tea.WindowSizeMsg:
+		m.width = msg.Width
+		m.height = msg.Height
+	case tailTickMsg:
+		return m, tea.Tick(m.interval, func(t time.Time) tea.Msg {
+			return tailTickMsg(t)
+		})
+	}
+	return m, nil
+}
+
+func (m tailModel) View() string {
+	var b strings.Builder
+
+	statusStyle := func(status string) lipgloss.Style {
+		switch status {
+		case db.StatusQueued:
+			return lipgloss.NewStyle().Foreground(lipgloss.Color("#F59E0B"))
+		case db.StatusProcessing:
+			return lipgloss.NewStyle().Foreground(lipgloss.Color("#3B82F6"))
+		case db.StatusBlocked:
+			return lipgloss.NewStyle().Foreground(lipgloss.Color("#EF4444"))
+		case db.StatusDone:
+			return lipgloss.NewStyle().Foreground(lipgloss.Color("#10B981"))
+		default:
+			return lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280"))
+		}
+	}
+
+	projectStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#A78BFA"))
+	headerStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#E5E7EB"))
+	logStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#9CA3AF")).Italic(true)
+
+	statusOrder := []string{
+		db.StatusProcessing,
+		db.StatusBlocked,
+		db.StatusQueued,
+		db.StatusBacklog,
+	}
+	if m.showDone {
+		statusOrder = append(statusOrder, db.StatusDone)
+	}
+
+	statusLabels := map[string]string{
+		db.StatusProcessing: "In Progress",
+		db.StatusBlocked:    "Blocked",
+		db.StatusQueued:     "Queued",
+		db.StatusBacklog:    "Backlog",
+		db.StatusDone:       "Done",
+	}
+
+	opts := db.ListTasksOptions{
+		IncludeClosed: m.showDone,
+		Limit:         500,
+	}
+	tasks, err := m.db.ListTasks(opts)
+	if err != nil {
+		return errorStyle.Render("Error: " + err.Error())
+	}
+
+	var taskIDs []int64
+	for _, t := range tasks {
+		taskIDs = append(taskIDs, t.ID)
+	}
+	latestLogs, _ := m.db.GetLatestLogPerTask(taskIDs)
+	if latestLogs == nil {
+		latestLogs = make(map[int64]*db.TaskLog)
+	}
+
+	type projectGroup struct {
+		name     string
+		statuses map[string][]*db.Task
+	}
+	projectMap := make(map[string]*projectGroup)
+	var projectOrder []string
+
+	for _, t := range tasks {
+		if t.Status == db.StatusArchived {
+			continue
+		}
+		proj := t.Project
+		if proj == "" {
+			proj = "(no project)"
+		}
+		pg, exists := projectMap[proj]
+		if !exists {
+			pg = &projectGroup{name: proj, statuses: make(map[string][]*db.Task)}
+			projectMap[proj] = pg
+			projectOrder = append(projectOrder, proj)
+		}
+		pg.statuses[t.Status] = append(pg.statuses[t.Status], t)
+	}
+
+	sort.Strings(projectOrder)
+
+	// Header
+	separatorWidth := 60
+	if m.width > 0 && m.width < separatorWidth {
+		separatorWidth = m.width
+	}
+	b.WriteString(headerStyle.Render("TaskYou — Live Tail"))
+	b.WriteString("  ")
+	b.WriteString(dimStyle.Render(time.Now().Format("15:04:05")))
+	b.WriteByte('\n')
+	b.WriteString(dimStyle.Render(strings.Repeat("─", separatorWidth)))
+	b.WriteByte('\n')
+
+	if len(tasks) == 0 {
+		b.WriteString(dimStyle.Render("  No tasks found"))
+		b.WriteByte('\n')
+	}
+
+	maxTitleWidth := 70
+	if m.width > 20 {
+		maxTitleWidth = m.width - 20
+	}
+
+	for i, proj := range projectOrder {
+		pg := projectMap[proj]
+		total := 0
+		for _, tl := range pg.statuses {
+			total += len(tl)
+		}
+		b.WriteByte('\n')
+		fmt.Fprintf(&b, "%s %s\n", projectStyle.Render(proj), dimStyle.Render(fmt.Sprintf("(%d)", total)))
+
+		for _, status := range statusOrder {
+			statusTasks := pg.statuses[status]
+			if len(statusTasks) == 0 {
+				continue
+			}
+			label := statusLabels[status]
+			fmt.Fprintf(&b, "  %s\n", statusStyle(status).Render(fmt.Sprintf("▸ %s (%d)", label, len(statusTasks))))
+			for _, t := range statusTasks {
+				title := truncate(t.Title, maxTitleWidth)
+				age := boardAgeHint(t)
+				line := fmt.Sprintf("    #%-4d %s", t.ID, title)
+				if age != "" {
+					line += "  " + dimStyle.Render(age)
+				}
+				b.WriteString(line)
+				b.WriteByte('\n')
+
+				if log, ok := latestLogs[t.ID]; ok && log.Content != "" {
+					content := strings.TrimSpace(log.Content)
+					if idx := strings.IndexByte(content, '\n'); idx != -1 {
+						content = content[:idx]
+					}
+					content = truncate(content, 80)
+					fmt.Fprintf(&b, "           %s\n", logStyle.Render(content))
+				}
+			}
+		}
+
+		if i < len(projectOrder)-1 {
+			b.WriteByte('\n')
+		}
+	}
+
+	b.WriteByte('\n')
+	b.WriteString(dimStyle.Render("q/esc to quit • refreshing every " + m.interval.String()))
+
+	result := b.String()
+	if m.height > 0 {
+		lines := strings.Split(result, "\n")
+		if len(lines) > m.height {
+			lines = lines[:m.height-1]
+			lines = append(lines, dimStyle.Render("… (resize terminal to see all tasks)"))
+			result = strings.Join(lines, "\n")
+		}
+	}
+
+	return result
 }
 
 // execInTmux re-executes the current command inside a new tmux session.
@@ -2981,8 +3609,63 @@ func execInTmux() error {
 	return cmd.Run()
 }
 
+// setupProfiling starts CPU and/or heap profiling when paths are provided and
+// returns a stop function that flushes the profiles. The returned func is
+// idempotent (only the first call has an effect), so it can be both called
+// explicitly after the TUI exits — important because the tmux teardown can
+// SIGKILL this process and skip deferred flushes — and deferred as a safety net
+// for early-return error paths. Profiling failures only warn; they never abort
+// the TUI.
+func setupProfiling(cpuPath, memPath string) func() {
+	var cpuFile *os.File
+	if cpuPath != "" {
+		f, err := os.Create(cpuPath)
+		switch {
+		case err != nil:
+			fmt.Fprintln(os.Stderr, dimStyle.Render("Warning: could not create cpu profile: "+err.Error()))
+		default:
+			if err := pprof.StartCPUProfile(f); err != nil {
+				fmt.Fprintln(os.Stderr, dimStyle.Render("Warning: could not start cpu profile: "+err.Error()))
+				_ = f.Close()
+			} else {
+				cpuFile = f
+				fmt.Fprintln(os.Stderr, dimStyle.Render("CPU profiling to: "+cpuPath))
+			}
+		}
+	}
+
+	stopped := false
+	return func() {
+		if stopped {
+			return
+		}
+		stopped = true
+
+		if cpuFile != nil {
+			pprof.StopCPUProfile()
+			_ = cpuFile.Close()
+		}
+		if memPath != "" {
+			f, err := os.Create(memPath)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, dimStyle.Render("Warning: could not create mem profile: "+err.Error()))
+				return
+			}
+			defer f.Close()
+			runtime.GC() // get up-to-date allocation statistics
+			_ = pprof.WriteHeapProfile(f)
+		}
+	}
+}
+
 // runLocal runs the TUI locally with a local SQLite database.
-func runLocal(dangerousMode bool, debugStatePath string) error {
+func runLocal(dangerousMode bool, debugStatePath, cpuProfilePath, memProfilePath string) error {
+	// Optional performance profiling. The CPU profile captures the whole
+	// interactive session (including every render); the heap profile is written
+	// on exit. Analyze with `go tool pprof <binary> <profile>`.
+	stopProfiling := setupProfiling(cpuProfilePath, memProfilePath)
+	defer stopProfiling() // safety net for early-return error paths below
+
 	// Ensure daemon is running
 	if err := ensureDaemonRunning(dangerousMode); err != nil {
 		fmt.Fprintln(os.Stderr, dimStyle.Render("Warning: could not start daemon: "+err.Error()))
@@ -2990,7 +3673,7 @@ func runLocal(dangerousMode bool, debugStatePath string) error {
 
 	// Open database
 	dbPath := db.DefaultPath()
-	database, err := db.Open(dbPath)
+	database, err := openTaskDB(dbPath)
 	if err != nil {
 		return fmt.Errorf("open database: %w", err)
 	}
@@ -3022,6 +3705,10 @@ func runLocal(dangerousMode bool, debugStatePath string) error {
 	if _, err := p.Run(); err != nil {
 		return fmt.Errorf("run TUI: %w", err)
 	}
+
+	// Flush profiles now, before the tmux cleanup below may kill our own session
+	// (which would SIGKILL this process and skip the deferred flush).
+	stopProfiling()
 
 	// Kill task-ui tmux session on exit (if we're in it)
 	// This cleans up the session that was created by execInTmux()
@@ -3116,85 +3803,6 @@ func readPidFile(path string) (int, error) {
 
 func writePidFile(path string, pid int) error {
 	return os.WriteFile(path, []byte(fmt.Sprintf("%d", pid)), 0644)
-}
-
-type boardSnapshot struct {
-	Columns []boardColumn `json:"columns"`
-}
-
-type boardColumn struct {
-	Status string       `json:"status"`
-	Label  string       `json:"label"`
-	Count  int          `json:"count"`
-	Tasks  []boardEntry `json:"tasks"`
-}
-
-type boardEntry struct {
-	ID      int64  `json:"id"`
-	Title   string `json:"title"`
-	Project string `json:"project"`
-	Type    string `json:"type"`
-	Pinned  bool   `json:"pinned"`
-	AgeHint string `json:"age_hint"`
-}
-
-func buildBoardSnapshot(tasks []*db.Task, limit int) boardSnapshot {
-	sections := []struct {
-		status string
-		label  string
-	}{
-		{db.StatusBacklog, "Backlog"},
-		{db.StatusQueued, "Queued"},
-		{db.StatusProcessing, "In Progress"},
-		{db.StatusBlocked, "Blocked"},
-		{db.StatusDone, "Done"},
-	}
-
-	grouped := make(map[string][]*db.Task)
-	for _, task := range tasks {
-		if task.Status == db.StatusArchived {
-			continue
-		}
-		grouped[task.Status] = append(grouped[task.Status], task)
-	}
-
-	var snapshot boardSnapshot
-	for _, section := range sections {
-		columnTasks := grouped[section.status]
-		if len(columnTasks) == 0 {
-			snapshot.Columns = append(snapshot.Columns, boardColumn{Status: section.status, Label: section.label, Count: 0})
-			continue
-		}
-
-		sortTasksForBoard(columnTasks)
-		column := boardColumn{Status: section.status, Label: section.label, Count: len(columnTasks)}
-		for i, task := range columnTasks {
-			if i >= limit {
-				break
-			}
-			entry := boardEntry{
-				ID:      task.ID,
-				Title:   truncate(task.Title, 80),
-				Project: task.Project,
-				Type:    task.Type,
-				Pinned:  task.Pinned,
-				AgeHint: boardAgeHint(task),
-			}
-			column.Tasks = append(column.Tasks, entry)
-		}
-		snapshot.Columns = append(snapshot.Columns, column)
-	}
-
-	return snapshot
-}
-
-func sortTasksForBoard(tasks []*db.Task) {
-	sort.SliceStable(tasks, func(i, j int) bool {
-		if tasks[i].Pinned != tasks[j].Pinned {
-			return tasks[i].Pinned
-		}
-		return boardReferenceTime(tasks[i]).After(boardReferenceTime(tasks[j]))
-	})
 }
 
 func boardReferenceTime(task *db.Task) time.Time {
@@ -3371,7 +3979,7 @@ func runDaemon() error {
 
 	// Open database
 	dbPath := db.DefaultPath()
-	database, err := db.Open(dbPath)
+	database, err := openTaskDB(dbPath)
 	if err != nil {
 		return fmt.Errorf("open database: %w", err)
 	}
@@ -3406,13 +4014,14 @@ func runDaemon() error {
 
 // ClaudeHookInput is the JSON structure Claude sends to hooks via stdin.
 type ClaudeHookInput struct {
-	SessionID          string `json:"session_id"`
-	TranscriptPath     string `json:"transcript_path"`
-	Cwd                string `json:"cwd"`
-	HookEventName      string `json:"hook_event_name"`
-	NotificationType   string `json:"notification_type,omitempty"`   // For Notification hooks
-	Message            string `json:"message,omitempty"`             // General message field
-	StopReason string `json:"stop_reason,omitempty"` // For Stop hooks
+	SessionID        string `json:"session_id"`
+	TranscriptPath   string `json:"transcript_path"`
+	Cwd              string `json:"cwd"`
+	PermissionMode   string `json:"permission_mode,omitempty"` // e.g. "default", "acceptEdits", "bypassPermissions"
+	HookEventName    string `json:"hook_event_name"`
+	NotificationType string `json:"notification_type,omitempty"` // For Notification hooks
+	Message          string `json:"message,omitempty"`           // General message field
+	StopReason       string `json:"stop_reason,omitempty"`       // For Stop hooks
 	// Tool use fields (for PreToolUse and PostToolUse hooks)
 	ToolName     string          `json:"tool_name,omitempty"`     // Name of the tool being used
 	ToolInput    json.RawMessage `json:"tool_input,omitempty"`    // Tool-specific input parameters
@@ -3443,7 +4052,7 @@ func handleClaudeHook(hookEvent string) error {
 
 	// Open database
 	dbPath := db.DefaultPath()
-	database, err := db.Open(dbPath)
+	database, err := openTaskDB(dbPath)
 	if err != nil {
 		return fmt.Errorf("open database: %w", err)
 	}
@@ -3535,7 +4144,7 @@ func handleNotificationHook(database *db.DB, taskID int64, input *ClaudeHookInpu
 func runMCPServer(taskID int64) error {
 	// Open database
 	dbPath := db.DefaultPath()
-	database, err := db.Open(dbPath)
+	database, err := openTaskDB(dbPath)
 	if err != nil {
 		return fmt.Errorf("open database: %w", err)
 	}
@@ -3616,7 +4225,139 @@ func handlePreToolUseHook(database *db.DB, taskID int64, input *ClaudeHookInput)
 		database.AppendTaskLog(taskID, "pending_tool", detail)
 	}
 
+	// Worktree write-guard: block/ask on writes that would escape the isolated
+	// worktree. Inert for non-worktree ("shared dir") tasks. Emitting the decision
+	// to stdout is what gives it teeth; an "ask" surfaces as a permission prompt,
+	// which the Notification(permission_prompt) hook turns into a blocked task on
+	// the board, so unattended runs route to needs-input rather than silently
+	// writing to the wrong tree.
+	emitWorktreeGuardDecision(database, taskID, task, input)
+
 	return nil
+}
+
+// emitWorktreeGuardDecision evaluates the worktree write-guard and, when a tool
+// call would write outside the worktree, prints a PreToolUse permission decision
+// (ask/deny) to stdout per Claude Code's hookSpecificOutput contract. It prints
+// nothing when the write is allowed, leaving Claude's normal permission flow intact.
+func emitWorktreeGuardDecision(database *db.DB, taskID int64, task *db.Task, input *ClaudeHookInput) {
+	if task == nil {
+		return
+	}
+	var allow []string
+	if projectDir := executor.ManagedWorktreeProjectDir(task.WorktreePath); projectDir != "" {
+		allow = executor.WorktreeAllowExternalWrites(projectDir)
+	}
+	decision := executor.EvaluateWorktreeWriteGuard(task.WorktreePath, allow, executor.WorktreeGuardInput{
+		ToolName:       input.ToolName,
+		ToolInput:      input.ToolInput,
+		Cwd:            input.Cwd,
+		PermissionMode: input.PermissionMode,
+	})
+	if decision == nil {
+		return
+	}
+
+	if decision.Decision == "deny" {
+		database.AppendTaskLog(taskID, "system", "Worktree guard denied an out-of-worktree write")
+	}
+
+	out := map[string]any{
+		"hookSpecificOutput": map[string]any{
+			"hookEventName":            "PreToolUse",
+			"permissionDecision":       decision.Decision,
+			"permissionDecisionReason": decision.Reason,
+		},
+	}
+	if data, err := json.Marshal(out); err == nil {
+		fmt.Println(string(data))
+	}
+}
+
+// worktreeGuardHookInput is the normalized pre-tool payload the worktree-guard
+// subcommand reads on stdin. Codex (PreToolUse) and Gemini (BeforeTool) emit this
+// snake_case shape natively; the OpenCode plugin assembles it before piping it in.
+type worktreeGuardHookInput struct {
+	ToolName       string          `json:"tool_name"`
+	ToolInput      json.RawMessage `json:"tool_input"`
+	Cwd            string          `json:"cwd"`
+	PermissionMode string          `json:"permission_mode"`
+}
+
+// handleWorktreeGuardHook is the executor-agnostic transport for the worktree
+// write-guard, shared by the codex/gemini/opencode pre-tool hooks. It reads the
+// worktree root from WORKTREE_PATH (set by every executor when launching the CLI),
+// evaluates the single shared policy (EvaluateWorktreeWriteGuard), and renders the
+// decision in the requested executor's wire format. It fails open on any error so a
+// guard malfunction never wedges the agent.
+func handleWorktreeGuardHook(format string) error {
+	worktreePath := strings.TrimSpace(os.Getenv("WORKTREE_PATH"))
+	if worktreePath == "" {
+		return nil // no worktree context — nothing to guard
+	}
+
+	var in worktreeGuardHookInput
+	if err := json.NewDecoder(os.Stdin).Decode(&in); err != nil {
+		return nil // unparseable payload — allow rather than block
+	}
+
+	var allow []string
+	if projectDir := executor.ManagedWorktreeProjectDir(worktreePath); projectDir != "" {
+		allow = executor.WorktreeAllowExternalWrites(projectDir)
+	}
+
+	decision := executor.EvaluateWorktreeWriteGuard(worktreePath, allow, executor.WorktreeGuardInput{
+		ToolName:       in.ToolName,
+		ToolInput:      in.ToolInput,
+		Cwd:            in.Cwd,
+		PermissionMode: in.PermissionMode,
+	})
+
+	renderWorktreeGuardDecision(format, decision)
+	return nil
+}
+
+// renderWorktreeGuardDecision writes a guard decision in the wire format the given
+// executor's hook expects. None of codex/gemini/opencode support an interactive
+// "ask" in their pre-tool hook, so an "ask" is downgraded to a hard deny to fail
+// safe (the escape hatch is worktree.allow_external_writes in .taskyou.yml). When
+// the guard allows the call, nothing is emitted (and exit stays 0) so the CLI's own
+// approval flow proceeds unchanged.
+func renderWorktreeGuardDecision(format string, decision *executor.WorktreeGuardDecision) {
+	if decision == nil {
+		return // allowed
+	}
+
+	switch format {
+	case "codex":
+		// Codex PreToolUse contract: hookSpecificOutput.permissionDecision ∈ {allow,deny}.
+		emitJSONLine(map[string]any{
+			"hookSpecificOutput": map[string]any{
+				"hookEventName":            "PreToolUse",
+				"permissionDecision":       "deny",
+				"permissionDecisionReason": decision.Reason,
+			},
+		})
+	case "gemini":
+		// Gemini BeforeTool contract: {decision: allow|deny, reason, systemMessage}.
+		emitJSONLine(map[string]any{
+			"decision":      "deny",
+			"reason":        decision.Reason,
+			"systemMessage": "Worktree write-guard blocked an out-of-worktree write",
+		})
+	case "opencode":
+		// The OpenCode plugin reads the reason from stdout and treats exit code 1 as
+		// a denial (which it surfaces by throwing, aborting the tool call).
+		fmt.Println(decision.Reason)
+		os.Exit(1)
+	}
+}
+
+// emitJSONLine marshals v and prints it on a single line to stdout for a hook.
+func emitJSONLine(v any) {
+	if data, err := json.Marshal(v); err == nil {
+		fmt.Println(string(data))
+	}
 }
 
 // handlePostToolUseHook handles PostToolUse hooks from Claude (after tool execution).
@@ -3642,11 +4383,32 @@ func handlePostToolUseHook(database *db.DB, taskID int64, input *ClaudeHookInput
 		database.AppendTaskLog(taskID, "tool", logMsg)
 	}
 
-	// After a tool completes, Claude is still working (will process tool results)
-	// Ensure task remains in "processing" state
+	// Re-fetch task status — the MCP server may have changed it during
+	// tool execution (e.g. taskyou_needs_input sets blocked).
+	task, err = database.GetTask(taskID)
+	if err != nil || task == nil {
+		return err
+	}
+
+	// After a tool completes, Claude is still working (will process tool results).
+	// Ensure task remains in "processing" state — unless an MCP tool
+	// intentionally set it to blocked for user input.
 	if task.Status == db.StatusBlocked {
-		database.UpdateTaskStatus(taskID, db.StatusProcessing)
-		database.AppendTaskLog(taskID, "system", "Agent resumed working")
+		// Check if the blocked state is from a question prompt (MCP needs_input).
+		// If so, respect it. Otherwise, resume to processing.
+		hasQuestion := false
+		if logs, err := database.GetTaskLogs(taskID, 3); err == nil {
+			for _, l := range logs {
+				if l.LineType == "question" {
+					hasQuestion = true
+					break
+				}
+			}
+		}
+		if !hasQuestion {
+			database.UpdateTaskStatus(taskID, db.StatusProcessing)
+			database.AppendTaskLog(taskID, "system", "Agent resumed working")
+		}
 	}
 
 	return nil
@@ -3709,6 +4471,17 @@ func formatToolLogMessage(input *ClaudeHookInput) string {
 
 	// Default: just the tool name
 	return toolName
+}
+
+// shouldSubmitInput decides whether `task input` should press Enter after the
+// text. By default a message is submitted so the agent actually receives it;
+// --no-submit leaves the text in the input field without submitting. The
+// --enter flag (justEnter) always submits, since pressing Enter is its purpose.
+func shouldSubmitInput(message string, justEnter, noSubmit bool) bool {
+	if justEnter {
+		return true
+	}
+	return message != "" && !noSubmit
 }
 
 // formatPermissionDetail extracts a short detail string from the tool input
@@ -3970,6 +4743,17 @@ func truncate(s string, maxLen int) string {
 	return s[:maxLen-3] + "..."
 }
 
+// execCommandRunner implements web.CommandRunner using os/exec.
+type execCommandRunner struct{}
+
+func (r *execCommandRunner) Run(name string, args ...string) error {
+	return osexec.Command(name, args...).Run()
+}
+
+func (r *execCommandRunner) Output(name string, args ...string) ([]byte, error) {
+	return osexec.Command(name, args...).Output()
+}
+
 // listSessions lists all running agent task windows in task-daemon.
 func listSessions() {
 	sessions := getSessions()
@@ -4224,12 +5008,154 @@ func killSession(taskID int) error {
 	return nil
 }
 
+// killSessionAcrossDaemons kills a task's tmux window across all task-daemon-* sessions.
+// Returns true if a window was found and killed.
+func killSessionAcrossDaemons(taskID int) bool {
+	sessionsOut, err := osexec.Command("tmux", "list-sessions", "-F", "#{session_name}").Output()
+	if err != nil {
+		return false
+	}
+
+	windowName := fmt.Sprintf("task-%d", taskID)
+	killed := false
+
+	for _, session := range strings.Split(strings.TrimSpace(string(sessionsOut)), "\n") {
+		if !strings.HasPrefix(session, "task-daemon-") {
+			continue
+		}
+		windowTarget := fmt.Sprintf("%s:%s", session, windowName)
+		if err := osexec.Command("tmux", "list-panes", "-t", windowTarget).Run(); err != nil {
+			continue // Window doesn't exist in this session
+		}
+		if err := osexec.Command("tmux", "kill-window", "-t", windowTarget).Run(); err == nil {
+			killed = true
+		}
+	}
+	return killed
+}
+
+// suspendSessions kills agent processes for tasks while preserving their session IDs
+// so they can be resumed later. If taskIDs is empty, suspends all blocked tasks with
+// running sessions. If all is true, suspends all tasks (not just blocked).
+func suspendSessions(taskIDs []int, all bool) {
+	// Get running sessions
+	sessions := getSessions()
+	if len(sessions) == 0 {
+		fmt.Println(dimStyle.Render("No agent sessions running"))
+		return
+	}
+
+	// Build a set of running task IDs for quick lookup
+	runningSessions := make(map[int]agentSession)
+	for _, s := range sessions {
+		runningSessions[s.taskID] = s
+	}
+
+	// Open database for status checks and tmux ID cleanup
+	dbPath := db.DefaultPath()
+	database, err := openTaskDB(dbPath)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, errorStyle.Render("Error opening database: "+err.Error()))
+		os.Exit(1)
+	}
+	defer database.Close()
+
+	// Determine which tasks to suspend
+	var toSuspend []agentSession
+	if len(taskIDs) > 0 {
+		// Suspend specific tasks
+		for _, id := range taskIDs {
+			s, running := runningSessions[id]
+			if !running {
+				fmt.Fprintf(os.Stderr, "%s\n", dimStyle.Render(fmt.Sprintf("task-%d: no running session, skipping", id)))
+				continue
+			}
+			toSuspend = append(toSuspend, s)
+		}
+	} else {
+		// Suspend based on status
+		for _, s := range sessions {
+			if all {
+				toSuspend = append(toSuspend, s)
+				continue
+			}
+			// Default: only blocked tasks
+			task, err := database.GetTask(int64(s.taskID))
+			if err != nil || task == nil {
+				continue
+			}
+			if task.Status == db.StatusBlocked {
+				toSuspend = append(toSuspend, s)
+			}
+		}
+	}
+
+	if len(toSuspend) == 0 {
+		if len(taskIDs) > 0 {
+			fmt.Println(dimStyle.Render("No matching running sessions found"))
+		} else if all {
+			fmt.Println(dimStyle.Render("No running sessions to suspend"))
+		} else {
+			fmt.Println(dimStyle.Render("No blocked tasks with running sessions to suspend"))
+		}
+		return
+	}
+
+	// Suspend each task
+	fmt.Printf("%s\n\n", boldStyle.Render(fmt.Sprintf("Suspending %d session(s):", len(toSuspend))))
+
+	totalFreedMB := 0
+	suspended := 0
+	for _, s := range toSuspend {
+		// Kill the tmux window (kills the agent process)
+		killed := killSessionAcrossDaemons(s.taskID)
+
+		// Clear tmux references in DB (window/pane IDs are now stale)
+		// but preserve claude_session_id for resume capability
+		database.ClearTaskTmuxIDs(int64(s.taskID))
+
+		// Also clear daemon_session since the window is gone
+		database.Exec(`UPDATE tasks SET daemon_session = '' WHERE id = ?`, int64(s.taskID))
+
+		title := s.taskTitle
+		if len(title) > 40 {
+			title = title[:37] + "..."
+		}
+
+		memStr := ""
+		if s.memoryMB > 0 {
+			memStr = fmt.Sprintf(" (%dMB freed)", s.memoryMB)
+			totalFreedMB += s.memoryMB
+		}
+
+		statusIcon := "✓"
+		if !killed {
+			statusIcon = "~"
+		}
+
+		fmt.Printf("  %s  %s  %s%s\n",
+			successStyle.Render(statusIcon),
+			successStyle.Render(fmt.Sprintf("task-%d", s.taskID)),
+			dimStyle.Render(title),
+			dimStyle.Render(memStr))
+		suspended++
+	}
+
+	fmt.Println()
+	if totalFreedMB > 0 {
+		fmt.Println(successStyle.Render(fmt.Sprintf("Suspended %d session(s), ~%dMB freed", suspended, totalFreedMB)))
+	} else {
+		fmt.Println(successStyle.Render(fmt.Sprintf("Suspended %d session(s)", suspended)))
+	}
+	fmt.Println(dimStyle.Render("Session IDs preserved — use 'ty retry <task-id>' to resume"))
+}
+
 // recoverStaleTmuxRefs clears stale daemon_session and tmux_window_id references
 // from tasks after a crash or daemon restart. This allows tasks to automatically
 // reconnect to their agent sessions when viewed.
 func recoverStaleTmuxRefs(dryRun bool) {
 	dbPath := db.DefaultPath()
-	database, err := db.Open(dbPath)
+	database, err := openTaskDB(dbPath)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, errorStyle.Render("Error opening database: "+err.Error()))
 		os.Exit(1)
@@ -4374,172 +5300,136 @@ func quotedWindowList(windows map[string]bool) string {
 	return strings.Join(parts, ",")
 }
 
-// cleanupOrphanedSessions kills agent processes that aren't tied to any active task windows
-// or belong to done tasks older than 2 hours. Supports all executors.
+// cleanupOrphanedSessions kills tmux windows whose task ID is no longer in the
+// database (deleted-task orphans), and windows for tasks completed more than
+// two hours ago. Killing the window terminates the agent process running in
+// its pane via SIGHUP propagation.
+//
+// Tmux windows are the source of truth here. Earlier versions tried to find
+// orphaned agent processes via `pgrep -f <name>.*TERM_PROGRAM=tmux`, but
+// TERM_PROGRAM is an env var (not on the command line on macOS), so pgrep
+// returned nothing and cleanup quietly did nothing — leaving orphans alive
+// indefinitely. Working at the window level avoids depending on env vars
+// being visible to ps / pgrep.
 func cleanupOrphanedSessions(force bool) {
-	// Step 1: Get all task windows across ALL task-daemon-* sessions
-	activeTaskIDs := make(map[int]bool)
+	type windowRef struct {
+		session string
+		window  string
+		taskID  int
+	}
 
-	// List all tmux sessions
 	sessionsOut, err := osexec.Command("tmux", "list-sessions", "-F", "#{session_name}").Output()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, errorStyle.Render("Error listing tmux sessions: "+err.Error()))
 		return
 	}
 
+	var allWindows []windowRef
 	for _, session := range strings.Split(string(sessionsOut), "\n") {
 		session = strings.TrimSpace(session)
 		if !strings.HasPrefix(session, "task-daemon-") {
 			continue
 		}
-
-		// List windows in this daemon session
 		windowsOut, err := osexec.Command("tmux", "list-windows", "-t", session, "-F", "#{window_name}").Output()
 		if err != nil {
 			continue
 		}
-
 		for _, window := range strings.Split(string(windowsOut), "\n") {
 			window = strings.TrimSpace(window)
 			if !strings.HasPrefix(window, "task-") {
 				continue
 			}
 			var taskID int
-			if _, err := fmt.Sscanf(window, "task-%d", &taskID); err == nil {
-				activeTaskIDs[taskID] = true
+			if _, err := fmt.Sscanf(window, "task-%d", &taskID); err != nil {
+				continue
 			}
+			allWindows = append(allWindows, windowRef{session: session, window: window, taskID: taskID})
 		}
 	}
 
-	// Step 1b: Get task IDs of done tasks older than 2 hours - these should be killed
-	doneOldTaskIDs := make(map[int]bool)
+	existingTaskIDs := make(map[int]bool)
+	oldDoneTaskIDs := make(map[int]bool)
 	dbPath := db.DefaultPath()
-	database, err := db.Open(dbPath)
-	if err == nil {
+	if database, err := openTaskDB(dbPath); err == nil {
 		defer database.Close()
 		twoHoursAgo := time.Now().Add(-2 * time.Hour)
-		// Get done tasks completed more than 2 hours ago
-		tasks, err := database.ListTasks(db.ListTasksOptions{
-			Status: db.StatusDone,
-		})
-		if err == nil {
+		// IncludeClosed: done/archived tasks are excluded by default, but we need
+		// them here so windows for done tasks can be classified correctly. Limit:
+		// 0 maps to a default of 100 — set a large explicit limit so a busy queue
+		// isn't truncated and active tasks misclassified as deleted.
+		if tasks, err := database.ListTasks(db.ListTasksOptions{IncludeClosed: true, Limit: 100000}); err == nil {
 			for _, task := range tasks {
-				if task.CompletedAt != nil && task.CompletedAt.Before(twoHoursAgo) {
-					doneOldTaskIDs[int(task.ID)] = true
+				existingTaskIDs[int(task.ID)] = true
+				if task.Status == db.StatusDone && task.CompletedAt != nil && task.CompletedAt.Before(twoHoursAgo) {
+					oldDoneTaskIDs[int(task.ID)] = true
 				}
 			}
 		}
+	} else {
+		fmt.Fprintln(os.Stderr, dimStyle.Render(fmt.Sprintf("Warning: could not open database (%v); falling back to tmux-only orphan check", err)))
 	}
 
-	// Step 2: Get all agent processes running in tmux (supports all executors)
-	executorPatterns := []string{
-		"claude.*TERM_PROGRAM=tmux",
-		"codex.*TERM_PROGRAM=tmux",
-		"gemini.*TERM_PROGRAM=tmux",
-		"openclaw.*TERM_PROGRAM=tmux",
-		"opencode.*TERM_PROGRAM=tmux",
-		"pi.*TERM_PROGRAM=tmux",
-	}
-
-	var orphanedPIDs []int
-	var oldDonePIDs []int
-	seenPIDs := make(map[int]bool) // Avoid duplicates
-
-	for _, pattern := range executorPatterns {
-		pgrepOut, err := osexec.Command("pgrep", "-f", pattern).Output()
-		if err != nil {
-			continue // No processes found for this executor
+	var deletedWindows, oldDoneWindows []windowRef
+	for _, w := range allWindows {
+		if !existingTaskIDs[w.taskID] {
+			deletedWindows = append(deletedWindows, w)
+			continue
 		}
-
-		for _, pidStr := range strings.Split(string(pgrepOut), "\n") {
-			pidStr = strings.TrimSpace(pidStr)
-			if pidStr == "" {
-				continue
-			}
-			pid, err := strconv.Atoi(pidStr)
-			if err != nil {
-				continue
-			}
-
-			// Skip if already processed
-			if seenPIDs[pid] {
-				continue
-			}
-			seenPIDs[pid] = true
-
-			// Check if this PID's environment has WORKTREE_TASK_ID
-			// and if that task ID is in our active set
-			envOut, err := osexec.Command("ps", "-p", strconv.Itoa(pid), "-o", "command=").Output()
-			if err != nil {
-				orphanedPIDs = append(orphanedPIDs, pid)
-				continue
-			}
-
-			env := string(envOut)
-			isOrphaned := true
-			var extractedTaskID int
-
-			// Try to extract WORKTREE_TASK_ID from the command line
-			if idx := strings.Index(env, "WORKTREE_TASK_ID="); idx >= 0 {
-				if _, err := fmt.Sscanf(env[idx:], "WORKTREE_TASK_ID=%d", &extractedTaskID); err == nil {
-					if activeTaskIDs[extractedTaskID] {
-						isOrphaned = false
-					}
-				}
-			}
-
-			// Check if this is from an old done task
-			if !isOrphaned && extractedTaskID > 0 && doneOldTaskIDs[extractedTaskID] {
-				oldDonePIDs = append(oldDonePIDs, pid)
-				continue
-			}
-
-			if isOrphaned {
-				orphanedPIDs = append(orphanedPIDs, pid)
-			}
+		if oldDoneTaskIDs[w.taskID] {
+			oldDoneWindows = append(oldDoneWindows, w)
 		}
 	}
 
-	totalToKill := len(orphanedPIDs) + len(oldDonePIDs)
+	totalToKill := len(deletedWindows) + len(oldDoneWindows)
 	if totalToKill == 0 {
-		fmt.Println(successStyle.Render("No orphaned agent processes found"))
+		fmt.Println(successStyle.Render("No orphaned agent windows found"))
 		return
 	}
 
-	// Step 3: Kill orphaned processes
-	if len(orphanedPIDs) > 0 {
-		fmt.Printf("%s\n\n", boldStyle.Render(fmt.Sprintf("Found %d orphaned agent processes:", len(orphanedPIDs))))
+	if len(deletedWindows) > 0 {
+		fmt.Printf("%s\n", boldStyle.Render(fmt.Sprintf("Found %d windows for deleted tasks:", len(deletedWindows))))
 	}
-	if len(oldDonePIDs) > 0 {
-		fmt.Printf("%s\n\n", boldStyle.Render(fmt.Sprintf("Found %d agent processes from done tasks (>2h old):", len(oldDonePIDs))))
-	}
-
-	signal := syscall.SIGTERM
-	signalName := "SIGTERM"
-	if force {
-		signal = syscall.SIGKILL
-		signalName = "SIGKILL"
+	if len(oldDoneWindows) > 0 {
+		fmt.Printf("%s\n", boldStyle.Render(fmt.Sprintf("Found %d windows for done tasks (>2h old):", len(oldDoneWindows))))
 	}
 
 	killed := 0
-	allPIDs := append(orphanedPIDs, oldDonePIDs...)
-	for _, pid := range allPIDs {
-		proc, err := os.FindProcess(pid)
-		if err != nil {
-			fmt.Printf("  %s PID %d: %s\n", errorStyle.Render("✗"), pid, err.Error())
+	for _, w := range append(deletedWindows, oldDoneWindows...) {
+		target := w.session + ":" + w.window
+		if err := killWindow(target, force); err != nil {
+			fmt.Printf("  %s %s: %s\n", errorStyle.Render("✗"), target, err.Error())
 			continue
 		}
-
-		if err := proc.Signal(signal); err != nil {
-			fmt.Printf("  %s PID %d: %s\n", errorStyle.Render("✗"), pid, err.Error())
-			continue
-		}
-
-		fmt.Printf("  %s PID %d (%s)\n", successStyle.Render("✓ Killed"), pid, signalName)
+		fmt.Printf("  %s %s\n", successStyle.Render("✓ Killed"), target)
 		killed++
 	}
 
-	fmt.Printf("\n%s\n", dimStyle.Render(fmt.Sprintf("Killed %d/%d processes", killed, totalToKill)))
+	fmt.Printf("\n%s\n", dimStyle.Render(fmt.Sprintf("Killed %d/%d windows", killed, totalToKill)))
+}
+
+// killWindow terminates a tmux window. With force=true, it also sends SIGKILL
+// to every PID in the window's panes, which is needed for stuck processes
+// that don't respond to the SIGHUP that tmux kill-window normally delivers.
+func killWindow(target string, force bool) error {
+	if force {
+		// Best-effort: collect pane PIDs first so we can SIGKILL them after
+		// killing the window. tmux kill-window itself can't escalate signals.
+		out, _ := osexec.Command("tmux", "list-panes", "-t", target, "-F", "#{pane_pid}").Output()
+		if err := osexec.Command("tmux", "kill-window", "-t", target).Run(); err != nil {
+			return err
+		}
+		for _, pidStr := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+			pid, perr := strconv.Atoi(strings.TrimSpace(pidStr))
+			if perr != nil || pid == 0 {
+				continue
+			}
+			if proc, ferr := os.FindProcess(pid); ferr == nil {
+				_ = proc.Signal(syscall.SIGKILL)
+			}
+		}
+		return nil
+	}
+	return osexec.Command("tmux", "kill-window", "-t", target).Run()
 }
 
 // moveTask moves a task to a different project by cleaning up old resources,
@@ -4551,8 +5441,11 @@ func moveTask(database *db.DB, oldTask *db.Task, targetProject string) (int64, e
 
 	// Step 1: Clean up old task's resources
 
-	// Kill agent session if running (ignore errors - session may not exist)
-	killSession(int(oldTask.ID))
+	// Kill agent session if running. Use the across-daemons variant because the
+	// CLI invocation's session ID rarely matches the daemon that originally
+	// spawned the window — the scoped killSession would silently miss it and
+	// leak the agent process. See sessions_test.go for repro.
+	killSessionAcrossDaemons(int(oldTask.ID))
 
 	// Clean up worktree and agent sessions if they exist
 	if oldTask.WorktreePath != "" {
@@ -4620,7 +5513,7 @@ func moveTask(database *db.DB, oldTask *db.Task, targetProject string) (int64, e
 func deleteTask(taskID int64) error {
 	// Open database
 	dbPath := db.DefaultPath()
-	database, err := db.Open(dbPath)
+	database, err := openTaskDB(dbPath)
 	if err != nil {
 		return fmt.Errorf("open database: %w", err)
 	}
@@ -4635,8 +5528,12 @@ func deleteTask(taskID int64) error {
 		return fmt.Errorf("task #%d not found", taskID)
 	}
 
-	// Kill agent session if running (ignore errors - session may not exist)
-	killSession(int(taskID))
+	// Kill agent session if running. Use the across-daemons variant: the CLI's
+	// session ID rarely matches the daemon that originally spawned the window
+	// (UI launches with WORKTREE_SESSION_ID set to its own PID; the daemon
+	// process has its own PID), so a scoped killSession would silently miss
+	// the window and leak the agent. See sessions_test.go for repro.
+	killSessionAcrossDaemons(int(taskID))
 
 	// Clean up worktree and agent sessions if they exist
 	if task.WorktreePath != "" {
@@ -4719,7 +5616,7 @@ func listProjectsCLI(cmd *cobra.Command) {
 	outputJSON, _ := cmd.Flags().GetBool("json")
 
 	dbPath := db.DefaultPath()
-	database, err := db.Open(dbPath)
+	database, err := openTaskDB(dbPath)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
 		os.Exit(1)
@@ -4794,7 +5691,7 @@ func listProjectsCLI(cmd *cobra.Command) {
 // showProjectCLI shows detailed information about a single project.
 func showProjectCLI(name string, outputJSON bool) {
 	dbPath := db.DefaultPath()
-	database, err := db.Open(dbPath)
+	database, err := openTaskDB(dbPath)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
 		os.Exit(1)
@@ -4816,13 +5713,15 @@ func showProjectCLI(name string, outputJSON bool) {
 
 	if outputJSON {
 		output := map[string]interface{}{
-			"id":         project.ID,
-			"name":       project.Name,
-			"path":       project.Path,
-			"color":      project.Color,
-			"aliases":    project.Aliases,
-			"task_count": taskCount,
-			"created_at": project.CreatedAt.Time.Format(time.RFC3339),
+			"id":                      project.ID,
+			"name":                    project.Name,
+			"path":                    project.Path,
+			"color":                   project.Color,
+			"aliases":                 project.Aliases,
+			"use_worktrees":           project.UseWorktrees,
+			"default_permission_mode": project.EffectiveDefaultPermissionMode(),
+			"task_count":              taskCount,
+			"created_at":              project.CreatedAt.Time.Format(time.RFC3339),
 		}
 		if project.Instructions != "" {
 			output["instructions"] = project.Instructions
@@ -4863,6 +5762,10 @@ func showProjectCLI(name string, outputJSON bool) {
 	if project.ClaudeConfigDir != "" {
 		fmt.Printf("%s %s\n", dimStyle.Render("Claude Config:"), project.ClaudeConfigDir)
 	}
+	if !project.UseWorktrees {
+		fmt.Printf("%s %s\n", dimStyle.Render("Git Worktrees:"), "disabled (non-git project)")
+	}
+	fmt.Printf("%s %s\n", dimStyle.Render("Permission Mode:"), project.EffectiveDefaultPermissionMode())
 
 	if project.Instructions != "" {
 		fmt.Println()
@@ -4891,7 +5794,7 @@ func showProjectCLI(name string, outputJSON bool) {
 }
 
 // createProjectCLI creates a new project.
-func createProjectCLI(name, path, instructions, color, aliases, claudeConfigDir string, outputJSON bool) {
+func createProjectCLI(name, path, instructions, color, aliases, claudeConfigDir, permissionMode string, noGit bool, outputJSON bool) {
 	// Validate name
 	if strings.TrimSpace(name) == "" {
 		fmt.Fprintln(os.Stderr, errorStyle.Render("Error: project name cannot be empty"))
@@ -4921,7 +5824,7 @@ func createProjectCLI(name, path, instructions, color, aliases, claudeConfigDir 
 	}
 
 	dbPath := db.DefaultPath()
-	database, err := db.Open(dbPath)
+	database, err := openTaskDB(dbPath)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
 		os.Exit(1)
@@ -4936,12 +5839,14 @@ func createProjectCLI(name, path, instructions, color, aliases, claudeConfigDir 
 	}
 
 	project := &db.Project{
-		Name:            name,
-		Path:            absPath,
-		Instructions:    instructions,
-		Color:           color,
-		Aliases:         aliases,
-		ClaudeConfigDir: claudeConfigDir,
+		Name:                  name,
+		Path:                  absPath,
+		Instructions:          instructions,
+		Color:                 color,
+		Aliases:               aliases,
+		ClaudeConfigDir:       claudeConfigDir,
+		UseWorktrees:          !noGit,
+		DefaultPermissionMode: db.NormalizePermissionMode(permissionMode),
 	}
 
 	if err := database.CreateProject(project); err != nil {
@@ -4951,10 +5856,11 @@ func createProjectCLI(name, path, instructions, color, aliases, claudeConfigDir 
 
 	if outputJSON {
 		output := map[string]interface{}{
-			"id":         project.ID,
-			"name":       project.Name,
-			"path":       project.Path,
-			"created_at": project.CreatedAt.Time.Format(time.RFC3339),
+			"id":            project.ID,
+			"name":          project.Name,
+			"path":          project.Path,
+			"use_worktrees": project.UseWorktrees,
+			"created_at":    project.CreatedAt.Time.Format(time.RFC3339),
 		}
 		if project.Color != "" {
 			output["color"] = project.Color
@@ -4965,14 +5871,18 @@ func createProjectCLI(name, path, instructions, color, aliases, claudeConfigDir 
 		jsonBytes, _ := json.Marshal(output)
 		fmt.Println(string(jsonBytes))
 	} else {
-		fmt.Println(successStyle.Render(fmt.Sprintf("Created project '%s' at %s", name, absPath)))
+		suffix := ""
+		if !project.UseWorktrees {
+			suffix = " (non-git, worktrees disabled)"
+		}
+		fmt.Println(successStyle.Render(fmt.Sprintf("Created project '%s' at %s%s", name, absPath, suffix)))
 	}
 }
 
 // updateProjectCLI updates an existing project.
-func updateProjectCLI(currentName, newName, path, instructions, color, aliases, claudeConfigDir, projectContext string, outputJSON bool) {
+func updateProjectCLI(currentName, newName, path, instructions, color, aliases, claudeConfigDir, projectContext, permissionMode string, useWorktrees *bool, outputJSON bool) {
 	dbPath := db.DefaultPath()
-	database, err := db.Open(dbPath)
+	database, err := openTaskDB(dbPath)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
 		os.Exit(1)
@@ -5043,6 +5953,25 @@ func updateProjectCLI(currentName, newName, path, instructions, color, aliases, 
 		changes = append(changes, "claude_config_dir")
 	}
 
+	if permissionMode != "" {
+		normalized := db.NormalizePermissionMode(permissionMode)
+		if normalized == "" {
+			fmt.Fprintln(os.Stderr, errorStyle.Render("Error: invalid permission mode (use default, accept-edits, auto, or dangerous)"))
+			os.Exit(1)
+		}
+		project.DefaultPermissionMode = normalized
+		changes = append(changes, "default permission mode")
+	}
+
+	if useWorktrees != nil {
+		project.UseWorktrees = *useWorktrees
+		if *useWorktrees {
+			changes = append(changes, "git worktrees enabled")
+		} else {
+			changes = append(changes, "git worktrees disabled")
+		}
+	}
+
 	if len(changes) == 0 && projectContext == "" {
 		fmt.Fprintln(os.Stderr, errorStyle.Render("Error: no changes specified"))
 		os.Exit(1)
@@ -5079,7 +6008,7 @@ func updateProjectCLI(currentName, newName, path, instructions, color, aliases, 
 // deleteProjectCLI deletes a project.
 func deleteProjectCLI(name string, force bool) {
 	dbPath := db.DefaultPath()
-	database, err := db.Open(dbPath)
+	database, err := openTaskDB(dbPath)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
 		os.Exit(1)

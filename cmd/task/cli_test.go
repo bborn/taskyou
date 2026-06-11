@@ -1,10 +1,14 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/bborn/workflow/internal/db"
 )
@@ -439,6 +443,117 @@ func TestCLIExecuteTask(t *testing.T) {
 	}
 	if fetched.Status != db.StatusQueued {
 		t.Errorf("Status = %v, want %v", fetched.Status, db.StatusQueued)
+	}
+}
+
+// TestCLIExecuteTaskDangerous tests queueing a task for execution in dangerous mode
+func TestCLIExecuteTaskDangerous(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	database, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer database.Close()
+	defer os.Remove(dbPath)
+
+	// Create a backlog task
+	task := &db.Task{
+		Title:  "Task to execute dangerously",
+		Status: db.StatusBacklog,
+		Type:   db.TypeCode,
+	}
+	if err := database.CreateTask(task); err != nil {
+		t.Fatalf("failed to create task: %v", err)
+	}
+
+	// Set dangerous mode and queue (simulate execute --dangerous)
+	if err := database.UpdateTaskDangerousMode(task.ID, true); err != nil {
+		t.Fatalf("UpdateTaskDangerousMode() error = %v", err)
+	}
+	if err := database.UpdateTaskStatus(task.ID, db.StatusQueued); err != nil {
+		t.Fatalf("UpdateTaskStatus() error = %v", err)
+	}
+
+	// Verify status and dangerous mode
+	fetched, err := database.GetTask(task.ID)
+	if err != nil {
+		t.Fatalf("GetTask() error = %v", err)
+	}
+	if fetched.Status != db.StatusQueued {
+		t.Errorf("Status = %v, want %v", fetched.Status, db.StatusQueued)
+	}
+	if !fetched.DangerousMode {
+		t.Error("DangerousMode = false, want true")
+	}
+}
+
+// TestCLICreateTaskDangerous tests creating a task with --execute --dangerous
+func TestCLICreateTaskDangerous(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	database, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer database.Close()
+	defer os.Remove(dbPath)
+
+	// Create a task with dangerous mode (simulate create --execute --dangerous)
+	task := &db.Task{
+		Title:         "Dangerous task",
+		Status:        db.StatusQueued,
+		Type:          db.TypeCode,
+		DangerousMode: true,
+	}
+	if err := database.CreateTask(task); err != nil {
+		t.Fatalf("failed to create task: %v", err)
+	}
+
+	// Verify dangerous mode persists through CreateTask
+	fetched, err := database.GetTask(task.ID)
+	if err != nil {
+		t.Fatalf("GetTask() error = %v", err)
+	}
+	if fetched.Status != db.StatusQueued {
+		t.Errorf("Status = %v, want %v", fetched.Status, db.StatusQueued)
+	}
+	if !fetched.DangerousMode {
+		t.Error("DangerousMode = false, want true")
+	}
+}
+
+// TestCLICreateTaskDangerousWithoutExecute tests that --dangerous without --execute doesn't set dangerous mode
+func TestCLICreateTaskDangerousWithoutExecute(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	database, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer database.Close()
+	defer os.Remove(dbPath)
+
+	// Simulate create --dangerous (without --execute): DangerousMode should be false
+	task := &db.Task{
+		Title:         "Not really dangerous",
+		Status:        db.StatusBacklog,
+		Type:          db.TypeCode,
+		DangerousMode: false, // --dangerous && --execute is false
+	}
+	if err := database.CreateTask(task); err != nil {
+		t.Fatalf("failed to create task: %v", err)
+	}
+
+	fetched, err := database.GetTask(task.ID)
+	if err != nil {
+		t.Fatalf("GetTask() error = %v", err)
+	}
+	if fetched.DangerousMode {
+		t.Error("DangerousMode = true, want false (--dangerous without --execute should not set dangerous mode)")
 	}
 }
 
@@ -1113,7 +1228,7 @@ func TestPostToolUseHookLogging(t *testing.T) {
 
 		// Simulate PostToolUse with tool name
 		input := &ClaudeHookInput{
-			ToolName: "Read",
+			ToolName:  "Read",
 			ToolInput: []byte(`{"file_path": "/path/to/file.go"}`),
 		}
 		err := handlePostToolUseHook(database, task.ID, input)
@@ -1368,6 +1483,242 @@ func TestUnescapeNewlines(t *testing.T) {
 	}
 }
 
+// TestTailModelUpdate tests the tailModel Update method
+func TestTailModelUpdate(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+	database, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer database.Close()
+
+	m := tailModel{
+		db:       database,
+		interval: 2 * time.Second,
+		showDone: false,
+		width:    80,
+		height:   24,
+	}
+
+	t.Run("q quits", func(t *testing.T) {
+		msgs := parseKeyEvents("q")
+		_, cmd := m.Update(msgs[0])
+		if cmd == nil {
+			t.Error("expected quit command, got nil")
+		}
+	})
+
+	t.Run("esc quits", func(t *testing.T) {
+		msgs := parseKeyEvents("esc")
+		_, cmd := m.Update(msgs[0])
+		if cmd == nil {
+			t.Error("expected quit command, got nil")
+		}
+	})
+
+	t.Run("window resize updates dimensions", func(t *testing.T) {
+		updated, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+		um := updated.(tailModel)
+		if um.width != 120 || um.height != 40 {
+			t.Errorf("expected 120x40, got %dx%d", um.width, um.height)
+		}
+	})
+
+	t.Run("tick returns new tick command", func(t *testing.T) {
+		_, cmd := m.Update(tailTickMsg(time.Now()))
+		if cmd == nil {
+			t.Error("expected tick command, got nil")
+		}
+	})
+}
+
+// TestTailModelView tests the tailModel View method
+func TestTailModelView(t *testing.T) {
+	t.Run("empty database shows no tasks", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		dbPath := filepath.Join(tmpDir, "test.db")
+		database, err := db.Open(dbPath)
+		if err != nil {
+			t.Fatalf("failed to open database: %v", err)
+		}
+		defer database.Close()
+
+		m := tailModel{
+			db:       database,
+			interval: 2 * time.Second,
+			width:    80,
+			height:   24,
+		}
+
+		view := m.View()
+		if !strings.Contains(view, "Live Tail") {
+			t.Error("expected header with 'Live Tail'")
+		}
+		if !strings.Contains(view, "No tasks found") {
+			t.Error("expected 'No tasks found' message")
+		}
+		if !strings.Contains(view, "q/esc to quit") {
+			t.Error("expected quit hint in footer")
+		}
+	})
+
+	t.Run("renders tasks grouped by project", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		dbPath := filepath.Join(tmpDir, "test.db")
+		database, err := db.Open(dbPath)
+		if err != nil {
+			t.Fatalf("failed to open database: %v", err)
+		}
+		defer database.Close()
+
+		if err := database.CreateProject(&db.Project{Name: "myproject", Path: tmpDir}); err != nil {
+			t.Fatalf("failed to create project: %v", err)
+		}
+
+		tasks := []*db.Task{
+			{Title: "Processing task", Status: db.StatusProcessing, Type: db.TypeCode, Project: "myproject"},
+			{Title: "Queued task", Status: db.StatusQueued, Type: db.TypeCode, Project: "myproject"},
+			{Title: "Backlog task", Status: db.StatusBacklog, Type: db.TypeCode},
+		}
+		for _, task := range tasks {
+			if err := database.CreateTask(task); err != nil {
+				t.Fatalf("failed to create task: %v", err)
+			}
+		}
+
+		m := tailModel{
+			db:       database,
+			interval: 2 * time.Second,
+			width:    80,
+			height:   50,
+		}
+
+		view := m.View()
+		if !strings.Contains(view, "myproject") {
+			t.Error("expected 'myproject' in view")
+		}
+		if !strings.Contains(view, "Processing task") {
+			t.Error("expected 'Processing task' in view")
+		}
+		if !strings.Contains(view, "Queued task") {
+			t.Error("expected 'Queued task' in view")
+		}
+		if !strings.Contains(view, "Backlog task") {
+			t.Error("expected 'Backlog task' in view")
+		}
+		if !strings.Contains(view, "In Progress") {
+			t.Error("expected 'In Progress' status label")
+		}
+	})
+
+	t.Run("truncates to terminal height", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		dbPath := filepath.Join(tmpDir, "test.db")
+		database, err := db.Open(dbPath)
+		if err != nil {
+			t.Fatalf("failed to open database: %v", err)
+		}
+		defer database.Close()
+
+		for i := 0; i < 30; i++ {
+			task := &db.Task{
+				Title:  fmt.Sprintf("Task %d", i),
+				Status: db.StatusBacklog,
+				Type:   db.TypeCode,
+			}
+			if err := database.CreateTask(task); err != nil {
+				t.Fatalf("failed to create task: %v", err)
+			}
+		}
+
+		m := tailModel{
+			db:       database,
+			interval: 2 * time.Second,
+			width:    80,
+			height:   10,
+		}
+
+		view := m.View()
+		lines := strings.Split(view, "\n")
+		if len(lines) > 10 {
+			t.Errorf("expected at most 10 lines, got %d", len(lines))
+		}
+		if !strings.Contains(view, "resize terminal") {
+			t.Error("expected truncation message")
+		}
+	})
+
+	t.Run("done tasks hidden by default", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		dbPath := filepath.Join(tmpDir, "test.db")
+		database, err := db.Open(dbPath)
+		if err != nil {
+			t.Fatalf("failed to open database: %v", err)
+		}
+		defer database.Close()
+
+		tasks := []*db.Task{
+			{Title: "Active task", Status: db.StatusQueued, Type: db.TypeCode},
+			{Title: "Done task", Status: db.StatusDone, Type: db.TypeCode},
+		}
+		for _, task := range tasks {
+			if err := database.CreateTask(task); err != nil {
+				t.Fatalf("failed to create task: %v", err)
+			}
+		}
+
+		m := tailModel{
+			db:       database,
+			interval: 2 * time.Second,
+			showDone: false,
+			width:    80,
+			height:   50,
+		}
+
+		view := m.View()
+		if !strings.Contains(view, "Active task") {
+			t.Error("expected active task in view")
+		}
+		if strings.Contains(view, "Done task") {
+			t.Error("done task should be hidden when showDone is false")
+		}
+	})
+
+	t.Run("done tasks shown when enabled", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		dbPath := filepath.Join(tmpDir, "test.db")
+		database, err := db.Open(dbPath)
+		if err != nil {
+			t.Fatalf("failed to open database: %v", err)
+		}
+		defer database.Close()
+
+		tasks := []*db.Task{
+			{Title: "Active task", Status: db.StatusQueued, Type: db.TypeCode},
+			{Title: "Done task", Status: db.StatusDone, Type: db.TypeCode},
+		}
+		for _, task := range tasks {
+			if err := database.CreateTask(task); err != nil {
+				t.Fatalf("failed to create task: %v", err)
+			}
+		}
+
+		m := tailModel{
+			db:       database,
+			interval: 2 * time.Second,
+			showDone: true,
+			width:    80,
+			height:   50,
+		}
+
+		view := m.View()
+		if !strings.Contains(view, "Done task") {
+			t.Error("done task should be visible when showDone is true")
+		}
+	})
+}
+
 func TestFormatPermissionDetail(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -1449,6 +1800,35 @@ func TestFormatPermissionDetail(t *testing.T) {
 			result := formatPermissionDetail(tt.input)
 			if result != tt.expected {
 				t.Errorf("formatPermissionDetail() = %q, want %q", result, tt.expected)
+			}
+		})
+	}
+}
+
+// TestShouldSubmitInput verifies the submit decision used by `task input`:
+// by default a non-empty message is submitted (Enter pressed), --no-submit
+// leaves it in the field, and --enter always submits.
+func TestShouldSubmitInput(t *testing.T) {
+	tests := []struct {
+		name      string
+		message   string
+		justEnter bool
+		noSubmit  bool
+		want      bool
+	}{
+		{name: "message submits by default", message: "yes", want: true},
+		{name: "message with --no-submit stays in field", message: "yes", noSubmit: true, want: false},
+		{name: "--enter alone submits", justEnter: true, want: true},
+		{name: "--enter wins over --no-submit", justEnter: true, noSubmit: true, want: true},
+		{name: "empty message does not submit", message: "", want: false},
+		{name: "empty message with --no-submit does not submit", message: "", noSubmit: true, want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := shouldSubmitInput(tt.message, tt.justEnter, tt.noSubmit); got != tt.want {
+				t.Errorf("shouldSubmitInput(%q, %v, %v) = %v, want %v",
+					tt.message, tt.justEnter, tt.noSubmit, got, tt.want)
 			}
 		})
 	}

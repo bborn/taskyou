@@ -4,16 +4,17 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/bborn/workflow/internal/db"
 	"github.com/charmbracelet/lipgloss"
+
+	"github.com/bborn/workflow/internal/db"
 )
 
 // FilterAutocompleteModel provides project name autocomplete for the filter.
 type FilterAutocompleteModel struct {
-	db        *db.DB
-	projects  []*db.Project // filtered results
-	selected  int
-	maxShow   int
+	db       *db.DB
+	projects []*db.Project // filtered results
+	selected int
+	maxShow  int
 }
 
 // NewFilterAutocompleteModel creates a new filter autocomplete model.

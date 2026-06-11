@@ -5,10 +5,11 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/bborn/workflow/internal/db"
 	"github.com/charmbracelet/bubbles/textarea"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+
+	"github.com/bborn/workflow/internal/db"
 )
 
 // RetryModel handles retrying a blocked/failed task with optional feedback.
@@ -19,6 +20,7 @@ type RetryModel struct {
 	height    int
 	submitted bool
 	cancelled bool
+	dangerous bool // submit retry in dangerous mode
 
 	// Form inputs
 	textarea    textarea.Model
@@ -82,6 +84,10 @@ func (m *RetryModel) Update(msg tea.Msg) (*RetryModel, tea.Cmd) {
 		case "ctrl+s":
 			m.submitted = true
 			return m, nil
+		case "ctrl+d":
+			m.submitted = true
+			m.dangerous = true
+			return m, nil
 		}
 	}
 
@@ -137,7 +143,7 @@ func (m *RetryModel) View() string {
 	}
 
 	// Help
-	helpText := "ctrl+s submit • esc cancel"
+	helpText := "ctrl+s submit • ctrl+d submit dangerous • esc cancel"
 	content.WriteString(Dim.Render(helpText))
 
 	box := lipgloss.NewStyle().
@@ -165,6 +171,11 @@ func (m *RetryModel) GetAttachment() string {
 // GetAttachments returns all attachment paths.
 func (m *RetryModel) GetAttachments() []string {
 	return m.attachments
+}
+
+// IsDangerous returns whether the retry should execute in dangerous mode.
+func (m *RetryModel) IsDangerous() bool {
+	return m.dangerous
 }
 
 // SetSize updates the size.

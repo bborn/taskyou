@@ -2,16 +2,16 @@ package ui
 
 import (
 	"fmt"
-	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 
-	"github.com/bborn/workflow/internal/db"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/huh"
 	"github.com/charmbracelet/lipgloss"
+
+	"github.com/bborn/workflow/internal/db"
 )
 
 // SettingsModel represents the settings view.
@@ -36,6 +36,7 @@ type SettingsModel struct {
 	editProject                *db.Project
 	projectForm                *huh.Form
 	projectFormName            string
+	projectFormPath            string
 	projectFormAliases         string
 	projectFormInstructions    string
 	projectFormClaudeConfigDir string
@@ -184,8 +185,14 @@ func (m *SettingsModel) Update(msg tea.Msg) (*SettingsModel, tea.Cmd) {
 		case "n":
 			// New item (projects or task types section)
 			if m.section == 1 {
-				// For new project, first get name, then browse for path
-				return m.showProjectForm(&db.Project{UseWorktrees: true})
+				// New project: pick the folder first, then fill in the rest. The
+				// name defaults to the folder name, so often all that's left is an
+				// optional alias.
+				m.editProject = &db.Project{}
+				m.browsing = true
+				home, _ := os.UserHomeDir()
+				m.fileBrowser = NewFileBrowserModel(home, m.width, m.height)
+				return m, nil
 			} else if m.section == 2 {
 				return m.showTaskTypeForm(nil)
 			}
@@ -265,57 +272,85 @@ func (m *SettingsModel) updateBrowser(msg tea.Msg) (*SettingsModel, tea.Cmd) {
 func (m *SettingsModel) showProjectForm(project *db.Project) (*SettingsModel, tea.Cmd) {
 	m.editingProject = true
 	m.editProject = project
+	m.err = nil
 
 	// Initialize form values
 	m.projectFormName = project.Name
+	m.projectFormPath = project.Path
 	m.projectFormAliases = project.Aliases
 	m.projectFormInstructions = project.Instructions
 	m.projectFormClaudeConfigDir = project.ClaudeConfigDir
 	m.projectFormUseWorktrees = project.UseWorktrees
 
+	// For a new project the folder is chosen first, so default the name to the
+	// folder name (the user can still override it) and auto-detect worktree
+	// support from whether the folder is a git repo.
+	if project.ID == 0 && project.Path != "" {
+		if m.projectFormName == "" {
+			m.projectFormName = filepath.Base(strings.TrimRight(project.Path, string(os.PathSeparator)))
+		}
+		m.projectFormUseWorktrees = isGitRepo(project.Path)
+	}
+
 	title := "New Project"
 	description := "You'll choose a directory next"
 	if project.ID != 0 {
 		title = "Edit Project"
-		description = fmt.Sprintf("Path: %s", project.Path)
+		description = "Update project settings"
 	} else if project.Path != "" {
 		// New project but path already selected
 		description = fmt.Sprintf("Path: %s", project.Path)
 	}
 
+	fields := []huh.Field{
+		huh.NewInput().
+			Key("name").
+			Title("Name").
+			Placeholder("Project name").
+			Value(&m.projectFormName),
+	}
+
+	// For existing projects, allow editing the directory inline. New projects
+	// choose their directory via the file browser after the form is submitted.
+	if project.ID != 0 {
+		fields = append(fields, huh.NewInput().
+			Key("path").
+			Title("Directory").
+			Description("Project directory path (~ expands to home)").
+			Placeholder("~/Projects/myapp").
+			Value(&m.projectFormPath))
+	}
+
+	fields = append(fields,
+		huh.NewInput().
+			Key("aliases").
+			Title("Aliases").
+			Description("Comma-separated shortcuts").
+			Placeholder("alias1, alias2").
+			Value(&m.projectFormAliases),
+		huh.NewText().
+			Key("instructions").
+			Title("Instructions").
+			Description("Project-specific instructions for AI").
+			Placeholder("Instructions...").
+			CharLimit(5000).
+			Value(&m.projectFormInstructions),
+		huh.NewInput().
+			Key("claude_config_dir").
+			Title("Claude Config Directory").
+			Description("Overrides CLAUDE_CONFIG_DIR for this project").
+			Placeholder("~/.claude-other-account").
+			Value(&m.projectFormClaudeConfigDir),
+		huh.NewConfirm().
+			Key("use_worktrees").
+			Title("Use Git Worktrees").
+			Description("Isolate tasks in git worktrees. Disable for non-git projects.").
+			Value(&m.projectFormUseWorktrees),
+	)
+
 	modalWidth := min(70, m.width-8)
 	m.projectForm = huh.NewForm(
-		huh.NewGroup(
-			huh.NewInput().
-				Key("name").
-				Title("Name").
-				Placeholder("Project name").
-				Value(&m.projectFormName),
-			huh.NewInput().
-				Key("aliases").
-				Title("Aliases").
-				Description("Comma-separated shortcuts").
-				Placeholder("alias1, alias2").
-				Value(&m.projectFormAliases),
-			huh.NewText().
-				Key("instructions").
-				Title("Instructions").
-				Description("Project-specific instructions for AI").
-				Placeholder("Instructions...").
-				CharLimit(5000).
-				Value(&m.projectFormInstructions),
-			huh.NewInput().
-				Key("claude_config_dir").
-				Title("Claude Config Directory").
-				Description("Overrides CLAUDE_CONFIG_DIR for this project").
-				Placeholder("~/.claude-other-account").
-				Value(&m.projectFormClaudeConfigDir),
-			huh.NewConfirm().
-				Key("use_worktrees").
-				Title("Use Git Worktrees").
-				Description("Isolate tasks in git worktrees. Disable for non-git projects.").
-				Value(&m.projectFormUseWorktrees),
-		).Title(title).Description(description),
+		huh.NewGroup(fields...).Title(title).Description(description),
 	).WithTheme(huh.ThemeDracula()).
 		WithWidth(modalWidth - 6).
 		WithShowHelp(true)
@@ -424,6 +459,26 @@ func (m *SettingsModel) updateTaskTypeFormModal(msg tea.Msg) (*SettingsModel, te
 	return m, cmd
 }
 
+// resolveProjectPath expands a leading "~" to the user's home directory and
+// returns the absolute, cleaned path.
+func resolveProjectPath(path string) (string, error) {
+	expanded := path
+	if path == "~" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", err
+		}
+		expanded = home
+	} else if strings.HasPrefix(path, "~/") {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", err
+		}
+		expanded = filepath.Join(home, path[2:])
+	}
+	return filepath.Abs(expanded)
+}
+
 // isGitRepo checks if a directory contains a .git folder
 func isGitRepo(path string) bool {
 	gitDir := filepath.Join(path, ".git")
@@ -458,27 +513,6 @@ func ensureGitRepoHasCommit(path string) error {
 	}
 
 	return nil
-}
-
-// findNestedGitRepos searches for .git directories inside the given path (excluding root)
-func findNestedGitRepos(rootPath string) []string {
-	var nested []string
-	filepath.WalkDir(rootPath, func(path string, d fs.DirEntry, err error) error {
-		if err != nil || !d.IsDir() {
-			return nil
-		}
-		// Skip common dependency/build directories
-		if d.Name() == "node_modules" || d.Name() == "vendor" || d.Name() == ".task-worktrees" {
-			return filepath.SkipDir
-		}
-		// Check for nested .git (not the root one)
-		if d.Name() == ".git" && filepath.Dir(path) != rootPath {
-			nested = append(nested, filepath.Dir(path))
-			return filepath.SkipDir
-		}
-		return nil
-	})
-	return nested
 }
 
 // initGitRepo initializes a git repo with an initial commit
@@ -519,12 +553,37 @@ func (m *SettingsModel) saveProject() (*SettingsModel, tea.Cmd) {
 		configDir = m.editProject.ClaudeConfigDir
 	}
 
+	// Default the name to the folder name when not provided.
+	if name == "" && m.editProject.Path != "" {
+		name = filepath.Base(strings.TrimRight(m.editProject.Path, string(os.PathSeparator)))
+	}
+
 	if name == "" {
-		m.err = fmt.Errorf("name is required")
-		return m, nil
+		return m.reshowProjectFormWithError(fmt.Errorf("name is required"))
 	}
 
 	useWorktrees := m.projectFormUseWorktrees
+
+	// For existing projects, the directory can be edited directly in the form.
+	if m.editProject.ID != 0 {
+		formPath := strings.TrimSpace(m.projectFormPath)
+		if formPath == "" {
+			return m.reshowProjectFormWithError(fmt.Errorf("directory is required"))
+		}
+		absPath, err := resolveProjectPath(formPath)
+		if err != nil {
+			return m.reshowProjectFormWithError(fmt.Errorf("invalid path: %w", err))
+		}
+		// When pointing an existing project at a new directory, require that
+		// directory to already exist. This avoids silently creating (and
+		// git-initializing) a directory at a mistyped path.
+		if absPath != m.editProject.Path {
+			if _, statErr := os.Stat(absPath); os.IsNotExist(statErr) {
+				return m.reshowProjectFormWithError(fmt.Errorf("path does not exist: %s", absPath))
+			}
+		}
+		m.editProject.Path = absPath
+	}
 
 	// For new projects without a path, open file browser
 	if m.editProject.ID == 0 && m.editProject.Path == "" {
@@ -549,28 +608,22 @@ func (m *SettingsModel) saveProject() (*SettingsModel, tea.Cmd) {
 
 	if pathExists {
 		if !info.IsDir() {
-			m.err = fmt.Errorf("path is not a directory")
-			return m, nil
+			return m.reshowProjectFormWithError(fmt.Errorf("path is not a directory"))
 		}
 
 		if useWorktrees {
 			if isGitRepo(path) {
-				// Existing git repo - check for nested repos
-				nested := findNestedGitRepos(path)
-				if len(nested) > 0 {
-					m.err = fmt.Errorf("directory contains %d nested git repo(s) - select a single repo instead", len(nested))
-					return m, nil
-				}
-				// Valid existing git repo - ensure it has at least one commit for worktrees
+				// Existing git repo. Nested/sub git repos are allowed - they are
+				// simply left untracked by the parent repo and don't interfere
+				// with worktree isolation, so there's no reason to reject them.
+				// Ensure the repo has at least one commit so worktrees have a base.
 				if err := ensureGitRepoHasCommit(path); err != nil {
-					m.err = fmt.Errorf("failed to initialize git commit: %w", err)
-					return m, nil
+					return m.reshowProjectFormWithError(fmt.Errorf("failed to initialize git commit: %w", err))
 				}
 			} else {
 				// Not a git repo - initialize it (required for worktree isolation)
 				if err := initGitRepo(path); err != nil {
-					m.err = fmt.Errorf("failed to initialize git: %w", err)
-					return m, nil
+					return m.reshowProjectFormWithError(fmt.Errorf("failed to initialize git: %w", err))
 				}
 			}
 		}
@@ -579,14 +632,12 @@ func (m *SettingsModel) saveProject() (*SettingsModel, tea.Cmd) {
 		if useWorktrees {
 			// Path doesn't exist - create and initialize git repo
 			if err := initGitRepo(path); err != nil {
-				m.err = fmt.Errorf("failed to create project: %w", err)
-				return m, nil
+				return m.reshowProjectFormWithError(fmt.Errorf("failed to create project: %w", err))
 			}
 		} else {
 			// Path doesn't exist - just create the directory
 			if err := os.MkdirAll(path, 0755); err != nil {
-				m.err = fmt.Errorf("failed to create project directory: %w", err)
-				return m, nil
+				return m.reshowProjectFormWithError(fmt.Errorf("failed to create project directory: %w", err))
 			}
 		}
 	}
@@ -619,6 +670,25 @@ func (m *SettingsModel) saveProject() (*SettingsModel, tea.Cmd) {
 	m.err = nil
 	m.loadSettings()
 	return m, nil
+}
+
+// reshowProjectFormWithError re-opens the project form preserving the values the
+// user already entered, displaying err. This avoids dropping the user back to the
+// settings list (and losing their work) when saving fails - e.g. a git init error
+// that surfaces only after a directory has been selected in the file browser.
+func (m *SettingsModel) reshowProjectFormWithError(err error) (*SettingsModel, tea.Cmd) {
+	if m.editProject == nil {
+		m.editProject = &db.Project{}
+	}
+	m.editProject.Name = strings.TrimSpace(m.projectFormName)
+	m.editProject.Aliases = strings.TrimSpace(m.projectFormAliases)
+	m.editProject.Instructions = strings.TrimSpace(m.projectFormInstructions)
+	m.editProject.ClaudeConfigDir = strings.TrimSpace(m.projectFormClaudeConfigDir)
+	m.editProject.UseWorktrees = m.projectFormUseWorktrees
+
+	model, cmd := m.showProjectForm(m.editProject)
+	model.err = err
+	return model, cmd
 }
 
 func (m *SettingsModel) saveTaskType() (*SettingsModel, tea.Cmd) {
@@ -787,6 +857,15 @@ func (m *SettingsModel) viewProjectFormModal() string {
 
 	formView := m.projectForm.View()
 
+	// Surface any save error inline so the user can fix it without losing work.
+	if m.err != nil {
+		formView = lipgloss.JoinVertical(lipgloss.Left,
+			formView,
+			"",
+			Error.Render(m.err.Error()),
+		)
+	}
+
 	// Modal box with border
 	modalWidth := min(70, m.width-8)
 	modalBox := lipgloss.NewStyle().
@@ -897,6 +976,9 @@ func (m *SettingsModel) View() string {
 			}
 			if strings.TrimSpace(p.ClaudeConfigDir) != "" {
 				line += Dim.Render(fmt.Sprintf(" [claude: %s]", p.ClaudeConfigDir))
+			}
+			if mode := db.NormalizePermissionMode(p.DefaultPermissionMode); mode != "" && mode != db.PermissionModeDefault {
+				line += Dim.Render(fmt.Sprintf(" [%s]", mode))
 			}
 			b.WriteString(lipgloss.NewStyle().Padding(0, 2).Render(style.Render(line)))
 			b.WriteString("\n")

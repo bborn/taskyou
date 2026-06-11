@@ -739,6 +739,75 @@ func TestListTasksPinnedFirst(t *testing.T) {
 	}
 }
 
+func TestListTasksOrderByRecencyIgnoresPinned(t *testing.T) {
+	// Create temporary database
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	database, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer database.Close()
+	defer os.Remove(dbPath)
+
+	if err := database.CreateProject(&Project{Name: "test", Path: tmpDir}); err != nil {
+		t.Fatalf("failed to create project: %v", err)
+	}
+
+	makeTask := func(title string) *Task {
+		return &Task{Title: title, Status: StatusBacklog, Type: TypeCode, Project: "test"}
+	}
+
+	pinned := makeTask("Pinned older task")
+	recent := makeTask("Recent task")
+	newest := makeTask("Newest task")
+
+	for _, task := range []*Task{pinned, recent, newest} {
+		if err := database.CreateTask(task); err != nil {
+			t.Fatalf("failed to create task %q: %v", task.Title, err)
+		}
+		if err := database.UpdateTaskStatus(task.ID, StatusDone); err != nil {
+			t.Fatalf("failed to complete task %q: %v", task.Title, err)
+		}
+	}
+
+	// Give each task a distinct completed_at so ordering is deterministic
+	for _, tc := range []struct {
+		id     int64
+		offset string
+	}{
+		{pinned.ID, "-10 minutes"},
+		{recent.ID, "-1 minute"},
+		{newest.ID, "-1 second"},
+	} {
+		if _, err := database.Exec(`UPDATE tasks SET completed_at = datetime('now', ?) WHERE id = ?`, tc.offset, tc.id); err != nil {
+			t.Fatalf("failed to adjust completed_at: %v", err)
+		}
+	}
+
+	if err := database.UpdateTaskPinned(pinned.ID, true); err != nil {
+		t.Fatalf("failed to pin task: %v", err)
+	}
+
+	// With OrderByRecency, a capped slice must return the most recently
+	// completed tasks — an old pinned task must not crowd out newer ones.
+	tasks, err := database.ListTasks(ListTasksOptions{Status: StatusDone, Limit: 2, OrderByRecency: true})
+	if err != nil {
+		t.Fatalf("failed to list tasks: %v", err)
+	}
+	if len(tasks) != 2 {
+		t.Fatalf("expected 2 tasks, got %d", len(tasks))
+	}
+
+	if tasks[0].ID != newest.ID {
+		t.Fatalf("expected newest task #%d first, got #%d", newest.ID, tasks[0].ID)
+	}
+	if tasks[1].ID != recent.ID {
+		t.Fatalf("expected recent task #%d second, got #%d", recent.ID, tasks[1].ID)
+	}
+}
+
 func TestCreateTaskSavesLastType(t *testing.T) {
 	// Create temporary database
 	tmpDir := t.TempDir()
@@ -1479,6 +1548,84 @@ func TestUpdateTaskDangerousMode(t *testing.T) {
 	}
 	if retrieved.DangerousMode {
 		t.Error("expected DangerousMode to be false after disabling")
+	}
+}
+
+func TestEffortLevelPersistence(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	db, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer db.Close()
+	defer os.Remove(dbPath)
+
+	// Create a task without an effort override (empty = global/Claude default)
+	task := &Task{
+		Title:   "Default effort task",
+		Status:  StatusBacklog,
+		Type:    TypeCode,
+		Project: "personal",
+	}
+	if err := db.CreateTask(task); err != nil {
+		t.Fatalf("failed to create task: %v", err)
+	}
+
+	retrieved, err := db.GetTask(task.ID)
+	if err != nil {
+		t.Fatalf("failed to get task: %v", err)
+	}
+	if retrieved.EffortLevel != "" {
+		t.Errorf("expected empty effort level by default, got %q", retrieved.EffortLevel)
+	}
+
+	// Create a task with a per-task effort override
+	override := &Task{
+		Title:       "High effort task",
+		Status:      StatusBacklog,
+		Type:        TypeCode,
+		Project:     "personal",
+		EffortLevel: EffortHigh,
+	}
+	if err := db.CreateTask(override); err != nil {
+		t.Fatalf("failed to create task: %v", err)
+	}
+	retrieved, err = db.GetTask(override.ID)
+	if err != nil {
+		t.Fatalf("failed to get task: %v", err)
+	}
+	if retrieved.EffortLevel != EffortHigh {
+		t.Errorf("expected effort level %q, got %q", EffortHigh, retrieved.EffortLevel)
+	}
+
+	// Update the effort level via UpdateTask
+	retrieved.EffortLevel = EffortMax
+	if err := db.UpdateTask(retrieved); err != nil {
+		t.Fatalf("failed to update task: %v", err)
+	}
+	updated, err := db.GetTask(override.ID)
+	if err != nil {
+		t.Fatalf("failed to get task: %v", err)
+	}
+	if updated.EffortLevel != EffortMax {
+		t.Errorf("expected effort level %q after update, got %q", EffortMax, updated.EffortLevel)
+	}
+}
+
+func TestIsValidEffortLevel(t *testing.T) {
+	valid := []string{"", EffortLow, EffortMedium, EffortHigh, EffortXHigh, EffortMax}
+	for _, v := range valid {
+		if !IsValidEffortLevel(v) {
+			t.Errorf("expected %q to be a valid effort level", v)
+		}
+	}
+	invalid := []string{"none", "LOW", "extreme", "0", "default"}
+	for _, v := range invalid {
+		if IsValidEffortLevel(v) {
+			t.Errorf("expected %q to be an invalid effort level", v)
+		}
 	}
 }
 

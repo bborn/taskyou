@@ -11,8 +11,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/bborn/workflow/internal/db"
 	"github.com/charmbracelet/log"
+
+	"github.com/bborn/workflow/internal/db"
 )
 
 // CodexExecutor implements TaskExecutor for OpenAI's Codex CLI.
@@ -102,7 +103,19 @@ func (c *CodexExecutor) runCodex(ctx context.Context, task *db.Task, workDir, pr
 	windowTarget := fmt.Sprintf("%s:%s", daemonSession, windowName)
 
 	// Kill ALL existing windows with this name (handles duplicates)
-	killAllWindowsByNameAllSessions(windowName)
+	KillAllWindowsByNameAllSessions(windowName)
+
+	// Worktree write-guard: install Codex's PreToolUse hook so writes that would
+	// escape the isolated worktree are denied. Cleaned up when the session ends.
+	cleanupGuard, guardErr := c.executor.setupCodexWorktreeGuard(workDir, c.executor.getProjectDir(task.Project))
+	if guardErr != nil {
+		c.logger.Warn("could not set up Codex worktree guard", "error", guardErr)
+	}
+	defer func() {
+		if cleanupGuard != nil {
+			cleanupGuard()
+		}
+	}()
 
 	// Create a temp file for the prompt
 	promptFile, err := os.CreateTemp("", "task-prompt-*.txt")
@@ -112,13 +125,11 @@ func (c *CodexExecutor) runCodex(ctx context.Context, task *db.Task, workDir, pr
 		return ExecResult{Message: fmt.Sprintf("failed to create temp file: %s", err.Error())}
 	}
 
-	// Build the full prompt with system instructions
-	// Codex doesn't have a safe way to pass system instructions (AGENTS.md could overwrite project files)
+	// Build the full prompt
 	fullPrompt := prompt
 	if isResume && feedback != "" {
 		fullPrompt = prompt + "\n\n## User Feedback\n\n" + feedback
 	}
-	fullPrompt = fullPrompt + "\n\n" + c.executor.buildSystemInstructions()
 	promptFile.WriteString(fullPrompt)
 	promptFile.Close()
 	defer os.Remove(promptFile.Name())
@@ -294,7 +305,7 @@ func (c *CodexExecutor) Suspend(taskID int64) bool {
 		return false
 	}
 
-	if err := proc.Signal(syscall.SIGTSTP); err != nil {
+	if err := sendSIGTSTP(proc); err != nil {
 		c.logger.Debug("Failed to suspend process", "pid", pid, "error", err)
 		return false
 	}
@@ -330,7 +341,7 @@ func (c *CodexExecutor) ResumeProcess(taskID int64) bool {
 		return false
 	}
 
-	if err := proc.Signal(syscall.SIGCONT); err != nil {
+	if err := sendSIGCONT(proc); err != nil {
 		c.logger.Debug("Failed to resume process", "pid", pid, "error", err)
 		return false
 	}
@@ -371,9 +382,7 @@ func (c *CodexExecutor) BuildCommand(task *db.Task, sessionID, prompt string) st
 			return fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q codex %s%s`,
 				task.ID, worktreeSessionID, task.Port, task.WorktreePath, dangerousFlag, resumeFlag)
 		}
-		// Include system instructions in prompt (AGENTS.md could overwrite project files)
-		fullPrompt := prompt + "\n\n" + c.executor.buildSystemInstructions()
-		promptFile.WriteString(fullPrompt)
+		promptFile.WriteString(prompt)
 		promptFile.Close()
 
 		return fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q codex %s%s"$(cat %q)"; rm -f %q`,

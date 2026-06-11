@@ -4,7 +4,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/bborn/workflow/internal/config"
@@ -163,6 +162,7 @@ func TestApplyKeybindingsConfig_AllBindings(t *testing.T) {
 		ChangeStatus:       &config.KeybindingConfig{Keys: []string{"s"}, Help: "status"},
 		CommandPalette:     &config.KeybindingConfig{Keys: []string{"p"}, Help: "palette"},
 		ToggleDangerous:    &config.KeybindingConfig{Keys: []string{"!"}, Help: "danger"},
+		QueueDangerous:     &config.KeybindingConfig{Keys: []string{"ctrl+x"}, Help: "exec danger"},
 		TogglePin:          &config.KeybindingConfig{Keys: []string{"t"}, Help: "pin"},
 		Filter:             &config.KeybindingConfig{Keys: []string{"/"}, Help: "search"},
 		OpenWorktree:       &config.KeybindingConfig{Keys: []string{"w"}, Help: "worktree"},
@@ -356,8 +356,8 @@ func TestConfirmDialogsHandleCtrlC(t *testing.T) {
 
 	t.Run("close confirm", func(t *testing.T) {
 		m := &AppModel{
-			width:            100,
-			previousView:     ViewDashboard,
+			width:             100,
+			previousView:      ViewDashboard,
 			userClosedTaskIDs: make(map[int64]bool),
 		}
 		task := &db.Task{ID: 1, Title: "Test", Status: db.StatusQueued}
@@ -625,6 +625,112 @@ func TestEditTaskFormEscapeClosesImmediatelyWhenEmpty(t *testing.T) {
 	}
 }
 
+// TestEditTaskFormPreservesRuntimeFields guards against regression of #560:
+// editing a task in the TUI must not reset persisted columns the form does not
+// expose (session IDs, pin state, permission mode, tags, source branch, PR
+// info, port). Previously the save path rebuilt the task from form data and
+// only carried over a handful of fields, silently zeroing the rest.
+func TestEditTaskFormPreservesRuntimeFields(t *testing.T) {
+	database, err := db.Open(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to create test database: %v", err)
+	}
+	defer database.Close()
+
+	exec := executor.New(database, &config.Config{})
+
+	if err := database.CreateProject(&db.Project{Name: "proj", Path: t.TempDir()}); err != nil {
+		t.Fatalf("CreateProject: %v", err)
+	}
+
+	// Create a task, then persist runtime state the edit form never shows.
+	task := &db.Task{
+		Title:    "Original title",
+		Body:     "Original body",
+		Project:  "proj",
+		Executor: "claude",
+		Status:   db.StatusBacklog,
+	}
+	if err := database.CreateTask(task); err != nil {
+		t.Fatalf("CreateTask: %v", err)
+	}
+	task.ClaudeSessionID = "sess-abc"
+	task.DaemonSession = "ty-session-1"
+	task.Port = 4242
+	task.PRURL = "https://github.com/bborn/taskyou/pull/7"
+	task.PRNumber = 7
+	task.PRInfoJSON = `{"state":"open"}`
+	task.DangerousMode = false
+	task.PermissionMode = "auto"
+	task.RemoteControl = true
+	task.Pinned = true
+	task.Tags = "urgent,backend"
+	task.SourceBranch = "main"
+	if err := database.UpdateTask(task); err != nil {
+		t.Fatalf("UpdateTask (seed): %v", err)
+	}
+
+	// Reload so the form is built from the persisted task, as the TUI does.
+	reloaded, err := database.GetTask(task.ID)
+	if err != nil {
+		t.Fatalf("GetTask: %v", err)
+	}
+
+	m := &AppModel{
+		width:        100,
+		height:       50,
+		currentView:  ViewEditTask,
+		previousView: ViewDashboard,
+		db:           database,
+		executor:     exec,
+		editTaskForm: NewEditFormModel(database, reloaded, 100, 50, []string{"claude"}),
+		editingTask:  reloaded,
+	}
+
+	// User edits only the title, then submits with ctrl+s.
+	m.editTaskForm.titleInput.SetValue("Edited title")
+	_, cmd := m.updateEditTaskForm(tea.KeyMsg{Type: tea.KeyCtrlS})
+	if cmd == nil {
+		t.Fatal("expected an update command after submitting the edit form")
+	}
+	cmd() // perform the database update
+
+	got, err := database.GetTask(task.ID)
+	if err != nil {
+		t.Fatalf("GetTask after save: %v", err)
+	}
+
+	// The edited field is applied.
+	if got.Title != "Edited title" {
+		t.Errorf("Title = %q, want %q", got.Title, "Edited title")
+	}
+
+	// Every persisted runtime field must survive the edit untouched.
+	checks := []struct {
+		name string
+		got  any
+		want any
+	}{
+		{"ClaudeSessionID", got.ClaudeSessionID, "sess-abc"},
+		{"DaemonSession", got.DaemonSession, "ty-session-1"},
+		{"Port", got.Port, 4242},
+		{"PRURL", got.PRURL, "https://github.com/bborn/taskyou/pull/7"},
+		{"PRNumber", got.PRNumber, 7},
+		{"PRInfoJSON", got.PRInfoJSON, `{"state":"open"}`},
+		{"DangerousMode", got.DangerousMode, false},
+		{"PermissionMode", got.PermissionMode, "auto"},
+		{"RemoteControl", got.RemoteControl, true},
+		{"Pinned", got.Pinned, true},
+		{"Tags", got.Tags, "urgent,backend"},
+		{"SourceBranch", got.SourceBranch, "main"},
+	}
+	for _, c := range checks {
+		if c.got != c.want {
+			t.Errorf("%s was reset by edit: got %v, want %v", c.name, c.got, c.want)
+		}
+	}
+}
+
 func TestAppModelAvailableExecutors(t *testing.T) {
 	// Test that availableExecutors is properly stored
 	m := &AppModel{
@@ -889,11 +995,11 @@ func TestScoreTaskForFilter(t *testing.T) {
 // TestParseFilterProjects tests extraction of project tags from filter text.
 func TestParseFilterProjects(t *testing.T) {
 	tests := []struct {
-		name           string
-		query          string
-		wantProjects   []string
-		wantKeyword    string
-		wantPartial    string
+		name         string
+		query        string
+		wantProjects []string
+		wantKeyword  string
+		wantPartial  string
 	}{
 		{"empty", "", nil, "", ""},
 		{"just bracket", "[", nil, "", ""},
@@ -1084,87 +1190,129 @@ func TestStripAnsiCodes(t *testing.T) {
 	}
 }
 
-func TestExtractPromptLines(t *testing.T) {
-	tests := []struct {
-		name     string
-		content  string
-		maxWidth int
-		want     int // expected number of non-empty lines
-	}{
-		{"empty content", "", 80, 0},
-		{"single line", "Allow Bash(npm test)?", 80, 1},
-		{"multiple lines", "Working on task...\n\nAllow Bash(npm test)?", 80, 2},
-		{"strips empty lines", "\n\n\nhello\n\nworld\n\n", 80, 2},
-		{"truncates long lines", "this is a very long line that should be truncated", 20, 1},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := extractPromptLines(tt.content, tt.maxWidth)
-			if len(result) != tt.want {
-				t.Errorf("extractPromptLines() returned %d lines, want %d: %v", len(result), tt.want, result)
-			}
-		})
-	}
-}
-
-func TestExtractPromptLinesContent(t *testing.T) {
-	content := "\x1b[31mAllow\x1b[0m Bash(npm test)?"
-	lines := extractPromptLines(content, 80)
-	if len(lines) != 1 {
-		t.Fatalf("expected 1 line, got %d", len(lines))
-	}
-	if lines[0] != "Allow Bash(npm test)?" {
-		t.Errorf("expected ANSI codes stripped, got %q", lines[0])
-	}
-}
-
-func TestRenderExecutorPromptPreview_NoPrompt(t *testing.T) {
-	m := &AppModel{
-		width:             100,
-		executorPrompts:   make(map[int64]string),
-		tasksNeedingInput: make(map[int64]bool),
-	}
-	task := &db.Task{ID: 42, Title: "Test task"}
-	result := m.renderExecutorPromptPreview(task)
-	if result == "" {
-		t.Error("expected non-empty result even with no prompt")
-	}
-	// Should contain the task ID and hint text
-	if !containsText(result, "#42") {
-		t.Error("expected result to contain task ID")
-	}
-	if !containsText(result, "tab input") {
-		t.Error("expected result to contain 'tab input' hint")
-	}
-}
-
-func TestRenderExecutorPromptPreview_WithPrompt(t *testing.T) {
-	m := &AppModel{
-		width: 100,
-		executorPrompts: map[int64]string{
-			42: "Allow Bash(npm test)?",
-		},
-	}
-	task := &db.Task{ID: 42, Title: "Test task"}
-	result := m.renderExecutorPromptPreview(task)
-	if result == "" {
-		t.Error("expected non-empty result")
-	}
-	// Should contain the prompt content and approve/deny hints
-	if !containsText(result, "approve") || !containsText(result, "deny") {
-		t.Error("expected result to contain approve/deny hints")
-	}
-}
-
-func TestDefaultKeyMap_ApproveAndDenyKeys(t *testing.T) {
+func TestDefaultKeyMap_QueueDangerousKey(t *testing.T) {
 	keys := DefaultKeyMap()
-	if keys.ApprovePrompt.Help().Key != "y" {
-		t.Errorf("ApprovePrompt key should be 'y', got '%s'", keys.ApprovePrompt.Help().Key)
+	if keys.QueueDangerous.Help().Key != "X" {
+		t.Errorf("QueueDangerous key should be 'X', got '%s'", keys.QueueDangerous.Help().Key)
 	}
-	if keys.DenyPrompt.Help().Key != "N" {
-		t.Errorf("DenyPrompt key should be 'N', got '%s'", keys.DenyPrompt.Help().Key)
+	if keys.QueueDangerous.Help().Desc != "execute dangerous" {
+		t.Errorf("QueueDangerous help desc should be 'execute dangerous', got '%s'", keys.QueueDangerous.Help().Desc)
 	}
+}
+
+func TestApplyKeybindingsConfig_QueueDangerous(t *testing.T) {
+	original := DefaultKeyMap()
+	cfg := &config.KeybindingsConfig{
+		QueueDangerous: &config.KeybindingConfig{Keys: []string{"ctrl+x"}, Help: "exec danger"},
+	}
+	result := ApplyKeybindingsConfig(original, cfg)
+	if result.QueueDangerous.Help().Key != "ctrl+x" {
+		t.Errorf("Expected QueueDangerous key 'ctrl+x', got '%s'", result.QueueDangerous.Help().Key)
+	}
+}
+
+func TestQueueDangerous_KanbanView(t *testing.T) {
+	database, err := db.Open(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to create test database: %v", err)
+	}
+	defer database.Close()
+
+	task := &db.Task{Title: "Test task", Status: db.StatusBacklog, Project: "personal"}
+	if err := database.CreateTask(task); err != nil {
+		t.Fatalf("Failed to create task: %v", err)
+	}
+
+	kanban := NewKanbanBoard(80, 24)
+	kanban.SetTasks([]*db.Task{task})
+
+	m := &AppModel{
+		db:                database,
+		keys:              DefaultKeyMap(),
+		currentView:       ViewDashboard,
+		tasks:             []*db.Task{task},
+		kanban:            kanban,
+		tasksNeedingInput: make(map[int64]bool),
+		questionPrompts:   make(map[int64]bool),
+		executorPrompts:   make(map[int64]string),
+	}
+
+	// Press X (QueueDangerous) on the selected task
+	keyMsg := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'X'}}
+	m.Update(keyMsg)
+
+	// Verify task status was updated to queued in the local model
+	if task.Status != db.StatusQueued {
+		t.Errorf("Expected task status to be queued, got %s", task.Status)
+	}
+
+	// Verify dangerous mode was set in the local model
+	if !task.DangerousMode {
+		t.Error("Expected task DangerousMode to be true")
+	}
+}
+
+func TestQueueDangerous_SkipsProcessingTask(t *testing.T) {
+	database, err := db.Open(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to create test database: %v", err)
+	}
+	defer database.Close()
+
+	task := &db.Task{Title: "Test task", Status: db.StatusProcessing, Project: "personal"}
+	if err := database.CreateTask(task); err != nil {
+		t.Fatalf("Failed to create task: %v", err)
+	}
+
+	kanban := NewKanbanBoard(80, 24)
+	kanban.SetTasks([]*db.Task{task})
+
+	m := &AppModel{
+		db:                database,
+		keys:              DefaultKeyMap(),
+		currentView:       ViewDashboard,
+		tasks:             []*db.Task{task},
+		kanban:            kanban,
+		tasksNeedingInput: make(map[int64]bool),
+		questionPrompts:   make(map[int64]bool),
+		executorPrompts:   make(map[int64]string),
+	}
+
+	// Press X (QueueDangerous) on a processing task
+	keyMsg := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'X'}}
+	m.Update(keyMsg)
+
+	// Task should remain processing (not re-queued)
+	if task.Status != db.StatusProcessing {
+		t.Errorf("Expected task status to remain processing, got %s", task.Status)
+	}
+}
+
+// stripAnsiCodes removes ANSI escape sequences from a string. Test-only helper
+// used by containsText to compare rendered (styled) output against plain text.
+func stripAnsiCodes(s string) string {
+	var result strings.Builder
+	i := 0
+	for i < len(s) {
+		if s[i] == '\x1b' {
+			// Skip ESC sequence
+			i++
+			if i < len(s) && s[i] == '[' {
+				i++
+				// Skip until we hit a letter (the terminator)
+				for i < len(s) && (s[i] < 'A' || s[i] > 'Z') && (s[i] < 'a' || s[i] > 'z') {
+					i++
+				}
+				if i < len(s) {
+					i++ // Skip the terminator letter
+				}
+			}
+		} else {
+			result.WriteByte(s[i])
+			i++
+		}
+	}
+	return result.String()
 }
 
 // containsText checks if rendered text contains a substring (ignoring ANSI codes).
@@ -1200,10 +1348,13 @@ func TestLatestPermissionPrompt_PermissionMessage(t *testing.T) {
 	// Log a permission message (as the notification hook would)
 	database.AppendTaskLog(task.ID, "system", "Waiting for permission: Edit(src/models/offer.rb)")
 
-	// Should return the full permission message
-	result := m.latestChoicePrompt(task.ID)
+	// Should return the full permission message (not a question)
+	result, isQ := m.latestChoicePrompt(task.ID)
 	if result != "Waiting for permission: Edit(src/models/offer.rb)" {
 		t.Errorf("expected 'Waiting for permission: Edit(src/models/offer.rb)', got '%s'", result)
+	}
+	if isQ {
+		t.Error("expected isQuestion=false for permission prompt")
 	}
 }
 
@@ -1224,9 +1375,12 @@ func TestLatestPermissionPrompt_GenericWaiting(t *testing.T) {
 	// Log a generic waiting message (no specific message from hook)
 	database.AppendTaskLog(task.ID, "system", "Waiting for permission")
 
-	result := m.latestChoicePrompt(task.ID)
+	result, isQ := m.latestChoicePrompt(task.ID)
 	if result != "Waiting for permission" {
 		t.Errorf("expected 'Waiting for permission', got '%s'", result)
+	}
+	if isQ {
+		t.Error("expected isQuestion=false for permission prompt")
 	}
 }
 
@@ -1249,7 +1403,7 @@ func TestLatestPermissionPrompt_ResumedClears(t *testing.T) {
 	database.AppendTaskLog(task.ID, "system", "Agent resumed working")
 
 	// Should return empty since agent resumed
-	result := m.latestChoicePrompt(task.ID)
+	result, _ := m.latestChoicePrompt(task.ID)
 	if result != "" {
 		t.Errorf("expected empty string after resume, got '%s'", result)
 	}
@@ -1265,7 +1419,7 @@ func TestLatestPermissionPrompt_NoLogs(t *testing.T) {
 	m := &AppModel{db: database}
 
 	// No task or logs - should return empty
-	result := m.latestChoicePrompt(999)
+	result, _ := m.latestChoicePrompt(999)
 	if result != "" {
 		t.Errorf("expected empty string for nonexistent task, got '%s'", result)
 	}
@@ -1290,7 +1444,7 @@ func TestLatestChoicePrompt_UserInputMessage_NotMatched(t *testing.T) {
 	// entries are actual choice prompts.
 	database.AppendTaskLog(task.ID, "system", "Waiting for user input")
 
-	result := m.latestChoicePrompt(task.ID)
+	result, _ := m.latestChoicePrompt(task.ID)
 	if result != "" {
 		t.Errorf("expected empty string for 'Waiting for user input', got '%s'", result)
 	}
@@ -1352,111 +1506,6 @@ func TestJumpToNotificationKey_FocusExecutor(t *testing.T) {
 	}
 }
 
-// TestExecutorRespondedClearsPromptState verifies that approving/denying an
-// executor prompt immediately clears both tasksNeedingInput and executorPrompts
-// for visual feedback. If the task still has a pending prompt, the
-// latestChoicePrompt catch-up loop will re-detect it on the next poll.
-func TestExecutorRespondedClearsPromptState(t *testing.T) {
-	m := &AppModel{
-		width:             100,
-		height:            50,
-		currentView:       ViewDashboard,
-		keys:              DefaultKeyMap(),
-		tasksNeedingInput: map[int64]bool{42: true},
-		executorPrompts:   map[int64]string{42: "some prompt content"},
-		kanban:            NewKanbanBoard(100, 50),
-		prevStatuses:      make(map[int64]string),
-	}
-
-	// Simulate a successful approve response
-	msg := executorRespondedMsg{taskID: 42, action: "approve", err: nil}
-	m.Update(msg)
-
-	// Both should be cleared for immediate visual feedback
-	if m.tasksNeedingInput[42] {
-		t.Error("tasksNeedingInput[42] should be cleared after approve for visual feedback")
-	}
-	if _, exists := m.executorPrompts[42]; exists {
-		t.Error("executorPrompts[42] should be cleared after approve")
-	}
-}
-
-// TestDetectPermissionPrompt_FallbackDetection verifies that detectPermissionPrompt
-// does a live DB check and populates tasksNeedingInput when a permission prompt
-// exists but hasn't been detected by the poll yet.
-func TestDetectPermissionPrompt_FallbackDetection(t *testing.T) {
-	database, err := db.Open(":memory:")
-	if err != nil {
-		t.Fatalf("Failed to create test database: %v", err)
-	}
-	defer database.Close()
-
-	task := &db.Task{Title: "Test task", Status: db.StatusBlocked}
-	if err := database.CreateTask(task); err != nil {
-		t.Fatalf("Failed to create task: %v", err)
-	}
-
-	// Log a permission prompt (simulating the notification hook)
-	database.AppendTaskLog(task.ID, "system", "Waiting for permission: Edit(file.go)")
-
-	m := &AppModel{
-		db:                database,
-		tasksNeedingInput: make(map[int64]bool),
-		executorPrompts:   make(map[int64]string),
-		kanban:            NewKanbanBoard(100, 50),
-	}
-
-	// tasksNeedingInput is empty (poll hasn't detected the prompt yet)
-	if m.tasksNeedingInput[task.ID] {
-		t.Fatal("precondition: tasksNeedingInput should be empty before detect")
-	}
-
-	// detectPermissionPrompt should find the prompt via live DB check
-	if !m.detectPermissionPrompt(task.ID) {
-		t.Error("detectPermissionPrompt should return true when a permission prompt exists")
-	}
-
-	// Should now be populated
-	if !m.tasksNeedingInput[task.ID] {
-		t.Error("tasksNeedingInput should be set after detectPermissionPrompt")
-	}
-	if m.executorPrompts[task.ID] != "Edit(file.go)" {
-		t.Errorf("expected executor prompt 'Edit(file.go)', got '%s'", m.executorPrompts[task.ID])
-	}
-}
-
-// TestDetectPermissionPrompt_NoPrompt verifies that detectPermissionPrompt
-// returns false when there is no pending permission prompt.
-func TestDetectPermissionPrompt_NoPrompt(t *testing.T) {
-	database, err := db.Open(":memory:")
-	if err != nil {
-		t.Fatalf("Failed to create test database: %v", err)
-	}
-	defer database.Close()
-
-	task := &db.Task{Title: "Test task", Status: db.StatusBlocked}
-	if err := database.CreateTask(task); err != nil {
-		t.Fatalf("Failed to create task: %v", err)
-	}
-
-	// Log a non-prompt system message (task just started, not waiting for input)
-	database.AppendTaskLog(task.ID, "system", "Task started")
-
-	m := &AppModel{
-		db:                database,
-		tasksNeedingInput: make(map[int64]bool),
-		executorPrompts:   make(map[int64]string),
-		kanban:            NewKanbanBoard(100, 50),
-	}
-
-	if m.detectPermissionPrompt(task.ID) {
-		t.Error("detectPermissionPrompt should return false when no input prompt exists")
-	}
-	if m.tasksNeedingInput[task.ID] {
-		t.Error("tasksNeedingInput should not be set when no input prompt exists")
-	}
-}
-
 // TestTaskEventDetectsPermissionPrompt verifies that when a real-time task event
 // transitions a task to blocked, the handler detects pending permission prompts
 // and populates tasksNeedingInput immediately (without waiting for the next poll).
@@ -1483,6 +1532,7 @@ func TestTaskEventDetectsPermissionPrompt(t *testing.T) {
 		keys:              DefaultKeyMap(),
 		tasks:             []*db.Task{{ID: task.ID, Title: "Test task", Status: db.StatusProcessing}},
 		tasksNeedingInput: make(map[int64]bool),
+		questionPrompts:   make(map[int64]bool),
 		executorPrompts:   make(map[int64]string),
 		kanban:            NewKanbanBoard(100, 50),
 		prevStatuses:      map[int64]string{task.ID: db.StatusProcessing},
@@ -1628,7 +1678,7 @@ func TestFilterChipDeletion(t *testing.T) {
 		{
 			name:            "cursor not after ]",
 			initialValue:    "text [project] more",
-			cursorPos:       5, // in the middle of text
+			cursorPos:       5,                     // in the middle of text
 			expectedValue:   "text [project] more", // no change expected
 			expectedCursor:  5,
 			shouldDeleteAll: false,
@@ -1636,7 +1686,7 @@ func TestFilterChipDeletion(t *testing.T) {
 		{
 			name:            "cursor before [",
 			initialValue:    "text [project]",
-			cursorPos:       4, // right before [
+			cursorPos:       4,                // right before [
 			expectedValue:   "text [project]", // no change expected
 			expectedCursor:  4,
 			shouldDeleteAll: false,
@@ -1709,53 +1759,8 @@ func TestFilterChipDeletion(t *testing.T) {
 	}
 }
 
-// TestQuickInput_TabEntersQuickInput verifies pressing Tab on a blocked task
-// with a pending prompt focuses the quick input field.
-func TestQuickInput_TabEntersQuickInput(t *testing.T) {
-	database, err := db.Open(":memory:")
-	if err != nil {
-		t.Fatalf("Failed to create test database: %v", err)
-	}
-	defer database.Close()
-
-	task := &db.Task{Title: "Test task", Status: db.StatusBlocked}
-	if err := database.CreateTask(task); err != nil {
-		t.Fatalf("Failed to create task: %v", err)
-	}
-
-	// Log a permission prompt
-	database.AppendTaskLog(task.ID, "system", "Waiting for permission: Choose option 1, 2, or 3")
-
-	replyInput := textinput.New()
-	replyInput.CharLimit = 200
-
-	m := &AppModel{
-		width:             100,
-		height:            50,
-		currentView:       ViewDashboard,
-		db:                database,
-		keys:              DefaultKeyMap(),
-		tasks:             []*db.Task{task},
-		tasksNeedingInput: map[int64]bool{task.ID: true},
-		executorPrompts:   map[int64]string{task.ID: "Choose option 1, 2, or 3"},
-		kanban:            NewKanbanBoard(100, 50),
-		prevStatuses:      map[int64]string{task.ID: db.StatusBlocked},
-		replyInput:        replyInput,
-	}
-	m.kanban.SetTasks(m.tasks)
-	m.kanban.SelectTask(task.ID)
-
-	// Press Tab to focus quick input
-	result, _ := m.Update(tea.KeyMsg{Type: tea.KeyTab})
-	model := result.(*AppModel)
-
-	if !model.quickInputFocused {
-		t.Error("quickInputFocused should be true after pressing Tab on a blocked task")
-	}
-}
-
 // TestRetry_RKeyOnDoneTaskRetries verifies that pressing 'r' on a done task
-// opens the retry view (not quick input mode).
+// opens the retry view.
 func TestRetry_RKeyOnDoneTaskRetries(t *testing.T) {
 	database, err := db.Open(":memory:")
 	if err != nil {
@@ -1768,9 +1773,6 @@ func TestRetry_RKeyOnDoneTaskRetries(t *testing.T) {
 		t.Fatalf("Failed to create task: %v", err)
 	}
 
-	replyInput := textinput.New()
-	replyInput.CharLimit = 200
-
 	m := &AppModel{
 		width:             100,
 		height:            50,
@@ -1782,7 +1784,6 @@ func TestRetry_RKeyOnDoneTaskRetries(t *testing.T) {
 		executorPrompts:   map[int64]string{task.ID: "Choose option 1, 2, or 3"},
 		kanban:            NewKanbanBoard(100, 50),
 		prevStatuses:      map[int64]string{task.ID: db.StatusDone},
-		replyInput:        replyInput,
 	}
 	m.kanban.SetTasks(m.tasks)
 	m.kanban.SelectTask(task.ID)
@@ -1791,106 +1792,8 @@ func TestRetry_RKeyOnDoneTaskRetries(t *testing.T) {
 	result, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
 	model := result.(*AppModel)
 
-	if model.quickInputFocused {
-		t.Error("quickInputFocused should be false — done tasks should retry, not focus input")
-	}
 	if model.currentView != ViewRetry {
 		t.Errorf("currentView should be ViewRetry, got %d", model.currentView)
-	}
-}
-
-// TestQuickInput_EscUnfocuses verifies pressing Esc in quick input mode unfocuses it.
-func TestQuickInput_EscUnfocuses(t *testing.T) {
-	replyInput := textinput.New()
-	replyInput.CharLimit = 200
-	replyInput.Focus()
-
-	m := &AppModel{
-		width:             100,
-		height:            50,
-		currentView:       ViewDashboard,
-		keys:              DefaultKeyMap(),
-		quickInputFocused: true,
-		replyInput:        replyInput,
-		tasksNeedingInput: make(map[int64]bool),
-		executorPrompts:   make(map[int64]string),
-	}
-
-	result, _ := m.Update(tea.KeyMsg{Type: tea.KeyEscape})
-	model := result.(*AppModel)
-
-	if model.quickInputFocused {
-		t.Error("quickInputFocused should be false after pressing Esc")
-	}
-}
-
-// TestQuickInput_EmptyEnterUnfocuses verifies pressing Enter with empty input unfocuses.
-func TestQuickInput_EmptyEnterUnfocuses(t *testing.T) {
-	replyInput := textinput.New()
-	replyInput.CharLimit = 200
-	replyInput.Focus()
-
-	kanban := NewKanbanBoard(100, 50)
-	task := &db.Task{ID: 42, Title: "Test task", Status: db.StatusBlocked}
-	kanban.SetTasks([]*db.Task{task})
-
-	m := &AppModel{
-		width:             100,
-		height:            50,
-		currentView:       ViewDashboard,
-		keys:              DefaultKeyMap(),
-		quickInputFocused: true,
-		replyInput:        replyInput,
-		tasksNeedingInput: make(map[int64]bool),
-		executorPrompts:   make(map[int64]string),
-		kanban:            kanban,
-	}
-
-	result, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	model := result.(*AppModel)
-
-	if model.quickInputFocused {
-		t.Error("quickInputFocused should be false after pressing Enter with empty input")
-	}
-}
-
-// TestQuickInput_TabIgnoredWithoutBlockedTask verifies Tab does nothing
-// when the selected task doesn't need input.
-func TestQuickInput_TabIgnoredWithoutBlockedTask(t *testing.T) {
-	database, err := db.Open(":memory:")
-	if err != nil {
-		t.Fatalf("Failed to create test database: %v", err)
-	}
-	defer database.Close()
-
-	task := &db.Task{Title: "Test task", Status: db.StatusProcessing}
-	if err := database.CreateTask(task); err != nil {
-		t.Fatalf("Failed to create task: %v", err)
-	}
-
-	replyInput := textinput.New()
-	replyInput.CharLimit = 200
-
-	m := &AppModel{
-		width:             100,
-		height:            50,
-		currentView:       ViewDashboard,
-		db:                database,
-		keys:              DefaultKeyMap(),
-		tasks:             []*db.Task{task},
-		tasksNeedingInput: make(map[int64]bool),
-		executorPrompts:   make(map[int64]string),
-		kanban:            NewKanbanBoard(100, 50),
-		prevStatuses:      map[int64]string{task.ID: db.StatusProcessing},
-		replyInput:        replyInput,
-	}
-	m.kanban.SetTasks(m.tasks)
-
-	result, _ := m.Update(tea.KeyMsg{Type: tea.KeyTab})
-	model := result.(*AppModel)
-
-	if model.quickInputFocused {
-		t.Error("quickInputFocused should remain false when task doesn't need input")
 	}
 }
 
@@ -1913,112 +1816,289 @@ func TestLatestPermissionPrompt_RepliedClears(t *testing.T) {
 	database.AppendTaskLog(task.ID, "user", "Replied from kanban: 2")
 
 	m := &AppModel{db: database}
-	result := m.latestChoicePrompt(task.ID)
+	result, _ := m.latestChoicePrompt(task.ID)
 	if result != "" {
 		t.Errorf("expected empty string after reply, got '%s'", result)
 	}
 }
 
-// TestRenderExecutorPromptPreview_ShowsTabInputHint verifies the prompt preview
-// includes the tab input hint alongside approve/deny.
-func TestRenderExecutorPromptPreview_ShowsTabInputHint(t *testing.T) {
-	replyInput := textinput.New()
-	replyInput.CharLimit = 200
-
-	m := &AppModel{
-		width:             100,
-		height:            50,
-		executorPrompts:   map[int64]string{1: "Choose option 1, 2, or 3"},
-		tasksNeedingInput: map[int64]bool{1: true},
-		replyInput:        replyInput,
-	}
-
-	task := &db.Task{ID: 1, Title: "Test task"}
-	rendered := m.renderExecutorPromptPreview(task)
-
-	if !strings.Contains(rendered, "y approve") {
-		t.Error("prompt preview should include 'y approve' hint")
-	}
-	if !strings.Contains(rendered, "N deny") {
-		t.Error("prompt preview should include 'N deny' hint")
-	}
-	if !strings.Contains(rendered, "tab input") {
-		t.Error("prompt preview should include 'tab input' hint")
-	}
-}
-
-// TestRenderExecutorPromptPreview_QuickInputFocused verifies the prompt preview
-// shows the text input field when quick input is focused.
-func TestRenderExecutorPromptPreview_QuickInputFocused(t *testing.T) {
-	replyInput := textinput.New()
-	replyInput.CharLimit = 200
-	replyInput.Focus()
-
-	m := &AppModel{
-		width:             100,
-		height:            50,
-		executorPrompts:   map[int64]string{1: "Choose option 1, 2, or 3"},
-		tasksNeedingInput: map[int64]bool{1: true},
-		quickInputFocused: true,
-		replyInput:        replyInput,
-	}
-
-	task := &db.Task{ID: 1, Title: "Test task"}
-	rendered := m.renderExecutorPromptPreview(task)
-
-	if !strings.Contains(rendered, "input:") {
-		t.Error("prompt preview should show input label when quick input is focused")
-	}
-	if !strings.Contains(rendered, "esc cancel") {
-		t.Error("prompt preview should show cancel hint when quick input is focused")
-	}
-	if !strings.Contains(rendered, "#1") {
-		t.Error("prompt preview should show task ID")
-	}
-}
-
-// TestExecutorRespondedMsg_ReplyAction verifies the executor responded handler
-// properly handles "reply" action.
-func TestExecutorRespondedMsg_ReplyAction(t *testing.T) {
+// TestLatestChoicePrompt_QuestionDetected verifies that question logs are detected
+// and returned with isQuestion=true.
+func TestLatestChoicePrompt_QuestionDetected(t *testing.T) {
 	database, err := db.Open(":memory:")
 	if err != nil {
 		t.Fatalf("Failed to create test database: %v", err)
 	}
 	defer database.Close()
 
+	m := &AppModel{db: database}
+
 	task := &db.Task{Title: "Test task", Status: db.StatusBlocked}
 	if err := database.CreateTask(task); err != nil {
 		t.Fatalf("Failed to create task: %v", err)
 	}
 
-	replyInput := textinput.New()
-	replyInput.CharLimit = 200
+	database.AppendTaskLog(task.ID, "question", "What is your API key?")
+
+	result, isQ := m.latestChoicePrompt(task.ID)
+	if result != "What is your API key?" {
+		t.Errorf("expected 'What is your API key?', got '%s'", result)
+	}
+	if !isQ {
+		t.Error("expected isQuestion=true for question log")
+	}
+}
+
+// TestLatestChoicePrompt_QuestionSurvivesResumed verifies that question prompts
+// are NOT cleared by "Agent resumed working" or tool logs.
+func TestLatestChoicePrompt_QuestionSurvivesResumed(t *testing.T) {
+	database, err := db.Open(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to create test database: %v", err)
+	}
+	defer database.Close()
+
+	m := &AppModel{db: database}
+
+	task := &db.Task{Title: "Test task", Status: db.StatusBlocked}
+	if err := database.CreateTask(task); err != nil {
+		t.Fatalf("Failed to create task: %v", err)
+	}
+
+	// Question, then agent resumed and tool log — question should survive both
+	database.AppendTaskLog(task.ID, "question", "What environment?")
+	database.AppendTaskLog(task.ID, "system", "Agent resumed working")
+	database.AppendTaskLog(task.ID, "tool", "Bash: echo hello")
+
+	result, isQ := m.latestChoicePrompt(task.ID)
+	if result != "What environment?" {
+		t.Errorf("expected 'What environment?', got '%s'", result)
+	}
+	if !isQ {
+		t.Error("expected isQuestion=true")
+	}
+}
+
+// TestLatestChoicePrompt_QuestionResolvedByReply verifies that question prompts
+// ARE cleared when the user explicitly replies.
+func TestLatestChoicePrompt_QuestionResolvedByReply(t *testing.T) {
+	database, err := db.Open(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to create test database: %v", err)
+	}
+	defer database.Close()
+
+	m := &AppModel{db: database}
+
+	task := &db.Task{Title: "Test task", Status: db.StatusBlocked}
+	if err := database.CreateTask(task); err != nil {
+		t.Fatalf("Failed to create task: %v", err)
+	}
+
+	database.AppendTaskLog(task.ID, "question", "What environment?")
+	database.AppendTaskLog(task.ID, "user", "Replied from kanban: production")
+
+	result, _ := m.latestChoicePrompt(task.ID)
+	if result != "" {
+		t.Errorf("expected empty string after reply to question, got '%s'", result)
+	}
+}
+
+// TestSystemMessages_NotSwallowedByOverlayViews verifies that chain messages
+// (tickMsg, dbChangeMsg, tasksLoadedMsg) are processed even when overlay views
+// are active. Previously, these messages were swallowed by view-specific handlers,
+// permanently breaking the tick/watcher/event chains.
+func TestSystemMessages_NotSwallowedByOverlayViews(t *testing.T) {
+	database, err := db.Open(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to create test database: %v", err)
+	}
+	defer database.Close()
+
+	task := &db.Task{Title: "Test task", Status: db.StatusQueued}
+	if err := database.CreateTask(task); err != nil {
+		t.Fatalf("Failed to create task: %v", err)
+	}
+
+	updatedTasks := []*db.Task{
+		{ID: task.ID, Title: "Test task", Status: db.StatusDone},
+	}
+
+	// Test overlay states that previously swallowed system messages
+	overlayStates := []struct {
+		name  string
+		setup func(m *AppModel)
+	}{
+		{
+			name: "filterActive",
+			setup: func(m *AppModel) {
+				m.currentView = ViewDashboard
+				m.filterActive = true
+			},
+		},
+		{
+			name: "ViewSettings",
+			setup: func(m *AppModel) {
+				m.currentView = ViewSettings
+				m.settingsView = &SettingsModel{width: 100, height: 50}
+			},
+		},
+	}
+
+	for _, overlay := range overlayStates {
+		t.Run("tasksLoadedMsg_"+overlay.name, func(t *testing.T) {
+			m := &AppModel{
+				width:             100,
+				height:            50,
+				db:                database,
+				keys:              DefaultKeyMap(),
+				kanban:            NewKanbanBoard(100, 50),
+				prevStatuses:      make(map[int64]string),
+				tasksNeedingInput: make(map[int64]bool),
+				questionPrompts:   make(map[int64]bool),
+				executorPrompts:   make(map[int64]string),
+			}
+			overlay.setup(m)
+
+			// Send tasksLoadedMsg - should be processed regardless of overlay
+			result, _ := m.Update(tasksLoadedMsg{tasks: updatedTasks})
+			model := result.(*AppModel)
+
+			if len(model.tasks) != 1 {
+				t.Fatalf("expected 1 task, got %d", len(model.tasks))
+			}
+			if model.tasks[0].Status != db.StatusDone {
+				t.Errorf("expected task status %q, got %q", db.StatusDone, model.tasks[0].Status)
+			}
+		})
+
+		t.Run("tickMsg_"+overlay.name, func(t *testing.T) {
+			m := &AppModel{
+				width:             100,
+				height:            50,
+				db:                database,
+				keys:              DefaultKeyMap(),
+				kanban:            NewKanbanBoard(100, 50),
+				prevStatuses:      make(map[int64]string),
+				tasksNeedingInput: make(map[int64]bool),
+				questionPrompts:   make(map[int64]bool),
+				executorPrompts:   make(map[int64]string),
+			}
+			overlay.setup(m)
+
+			// Send tickMsg - should produce continuation commands (not be swallowed)
+			_, cmd := m.Update(tickMsg{})
+
+			if cmd == nil {
+				t.Error("tickMsg should produce continuation commands, got nil (tick chain broken)")
+			}
+		})
+	}
+}
+
+func TestTaskCreatedMsg_QueuedTaskNavigatesToDetailView(t *testing.T) {
+	database, err := db.Open(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to create test database: %v", err)
+	}
+	defer database.Close()
+
+	task := &db.Task{Title: "Test task", Status: db.StatusQueued}
+	if err := database.CreateTask(task); err != nil {
+		t.Fatalf("Failed to create task: %v", err)
+	}
 
 	m := &AppModel{
 		width:             100,
 		height:            50,
-		currentView:       ViewDashboard,
 		db:                database,
 		keys:              DefaultKeyMap(),
-		tasks:             []*db.Task{task},
-		tasksNeedingInput: map[int64]bool{task.ID: true},
-		executorPrompts:   map[int64]string{task.ID: "Choose 1, 2, or 3"},
 		kanban:            NewKanbanBoard(100, 50),
-		prevStatuses:      map[int64]string{task.ID: db.StatusBlocked},
-		replyInput:        replyInput,
+		currentView:       ViewNewTaskConfirm,
+		prevStatuses:      make(map[int64]string),
+		tasksNeedingInput: make(map[int64]bool),
+		questionPrompts:   make(map[int64]bool),
+		executorPrompts:   make(map[int64]string),
 	}
 
-	// Simulate executorRespondedMsg with reply action
-	result, _ := m.Update(executorRespondedMsg{taskID: task.ID, action: "reply"})
-	model := result.(*AppModel)
+	// Send taskCreatedMsg with a queued task
+	model, cmd := m.Update(taskCreatedMsg{task: task, err: nil})
+	am := model.(*AppModel)
 
-	if model.tasksNeedingInput[task.ID] {
-		t.Error("tasksNeedingInput should be cleared after reply")
+	// Should temporarily be on dashboard (loadTaskWithFocus will switch to detail)
+	if am.currentView != ViewDashboard {
+		t.Errorf("expected ViewDashboard (temporary), got %v", am.currentView)
 	}
-	if _, exists := model.executorPrompts[task.ID]; exists {
-		t.Error("executorPrompts should be cleared after reply")
+
+	// Should have cleared the form
+	if am.newTaskForm != nil {
+		t.Error("expected newTaskForm to be nil")
 	}
-	if !strings.Contains(model.notification, "Replied to") {
-		t.Errorf("notification should contain 'Replied to', got '%s'", model.notification)
+
+	// Should return commands (loadTasks + loadTaskWithFocus batched)
+	if cmd == nil {
+		t.Error("expected non-nil command for queued task (should include loadTaskWithFocus)")
+	}
+}
+
+func TestTaskCreatedMsg_BacklogTaskStaysOnDashboard(t *testing.T) {
+	database, err := db.Open(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to create test database: %v", err)
+	}
+	defer database.Close()
+
+	task := &db.Task{Title: "Test task", Status: db.StatusBacklog}
+	if err := database.CreateTask(task); err != nil {
+		t.Fatalf("Failed to create task: %v", err)
+	}
+
+	m := &AppModel{
+		width:             100,
+		height:            50,
+		db:                database,
+		keys:              DefaultKeyMap(),
+		kanban:            NewKanbanBoard(100, 50),
+		currentView:       ViewNewTaskConfirm,
+		prevStatuses:      make(map[int64]string),
+		tasksNeedingInput: make(map[int64]bool),
+		questionPrompts:   make(map[int64]bool),
+		executorPrompts:   make(map[int64]string),
+	}
+
+	// Send taskCreatedMsg with a backlog task
+	model, cmd := m.Update(taskCreatedMsg{task: task, err: nil})
+	am := model.(*AppModel)
+
+	// Should stay on dashboard
+	if am.currentView != ViewDashboard {
+		t.Errorf("expected ViewDashboard, got %v", am.currentView)
+	}
+
+	// Should return command (loadTasks only)
+	if cmd == nil {
+		t.Error("expected non-nil command for loadTasks")
+	}
+}
+
+func TestNewDetailModel_FocusExecutorOnJoinFlag(t *testing.T) {
+	database, err := db.Open(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to create test database: %v", err)
+	}
+	defer database.Close()
+
+	task := &db.Task{ID: 1, Title: "Test task", Status: db.StatusQueued}
+
+	// When focusExecutor is true, detail model should have focusExecutorOnJoin set
+	detail, _ := NewDetailModel(task, database, nil, 100, 50, true)
+	if !detail.focusExecutorOnJoin {
+		t.Error("expected focusExecutorOnJoin=true when focusExecutor=true")
+	}
+
+	// When focusExecutor is false, detail model should NOT have focusExecutorOnJoin set
+	detail2, _ := NewDetailModel(task, database, nil, 100, 50, false)
+	if detail2.focusExecutorOnJoin {
+		t.Error("expected focusExecutorOnJoin=false when focusExecutor=false")
 	}
 }

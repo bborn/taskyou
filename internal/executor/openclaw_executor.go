@@ -10,8 +10,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/bborn/workflow/internal/db"
 	"github.com/charmbracelet/log"
+
+	"github.com/bborn/workflow/internal/db"
 )
 
 // OpenClawExecutor implements TaskExecutor for OpenClaw AI assistant.
@@ -84,7 +85,7 @@ func (o *OpenClawExecutor) runOpenClaw(ctx context.Context, task *db.Task, workD
 	windowTarget := fmt.Sprintf("%s:%s", daemonSession, windowName)
 
 	// Kill ALL existing windows with this name (handles duplicates)
-	killAllWindowsByNameAllSessions(windowName)
+	KillAllWindowsByNameAllSessions(windowName)
 
 	// Build the prompt content
 	promptFile, err := os.CreateTemp("", "task-prompt-*.txt")
@@ -106,10 +107,6 @@ func (o *OpenClawExecutor) runOpenClaw(ctx context.Context, task *db.Task, workD
 		fullPrompt.WriteString("\n\n## User Feedback\n\n")
 		fullPrompt.WriteString(feedback)
 	}
-	// Append system instructions - OpenClaw doesn't have a system prompt option
-	// so we include task guidance at the end of the prompt
-	fullPrompt.WriteString("\n\n")
-	fullPrompt.WriteString(o.executor.buildSystemInstructions())
 	promptFile.WriteString(fullPrompt.String())
 	promptFile.Close()
 	defer os.Remove(promptFile.Name())
@@ -256,7 +253,7 @@ func (o *OpenClawExecutor) Suspend(taskID int64) bool {
 		o.logger.Debug("Failed to find process", "pid", pid, "error", err)
 		return false
 	}
-	if err := proc.Signal(syscall.SIGTSTP); err != nil {
+	if err := sendSIGTSTP(proc); err != nil {
 		o.logger.Debug("Failed to suspend process", "pid", pid, "error", err)
 		return false
 	}
@@ -287,7 +284,7 @@ func (o *OpenClawExecutor) ResumeProcess(taskID int64) bool {
 		delete(o.suspendedTasks, taskID)
 		return false
 	}
-	if err := proc.Signal(syscall.SIGCONT); err != nil {
+	if err := sendSIGCONT(proc); err != nil {
 		o.logger.Debug("Failed to resume process", "pid", pid, "error", err)
 		return false
 	}
@@ -324,9 +321,7 @@ func (o *OpenClawExecutor) BuildCommand(task *db.Task, sessionID, prompt string)
 			return fmt.Sprintf(`%s openclaw tui --session %s %s`,
 				envVars, sessionKey, thinkingFlag)
 		}
-		// Include system instructions at the end of prompt since OpenClaw doesn't have a system prompt option
-		fullPrompt := prompt + "\n\n" + o.executor.buildSystemInstructions()
-		promptFile.WriteString(fullPrompt)
+		promptFile.WriteString(prompt)
 		promptFile.Close()
 		return fmt.Sprintf(`%s openclaw tui --session %s %s--message "$(cat %q)"; rm -f %q`,
 			envVars, sessionKey, thinkingFlag, promptFile.Name(), promptFile.Name())
@@ -378,4 +373,3 @@ func (o *OpenClawExecutor) ResumeSafe(task *db.Task, workDir string) bool {
 	o.executor.logLine(task.ID, "system", "OpenClaw does not support dangerous mode toggle")
 	return false
 }
-

@@ -5,8 +5,9 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/bborn/workflow/internal/db"
 	"github.com/charmbracelet/lipgloss"
+
+	"github.com/bborn/workflow/internal/db"
 )
 
 // TaskRefAutocompleteModel provides inline autocomplete for task references (#123).

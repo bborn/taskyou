@@ -16,11 +16,11 @@ type mockAdapter struct {
 	lastMarkProcessedID string
 }
 
-func (m *mockAdapter) Name() string                                        { return "mock" }
-func (m *mockAdapter) Start(ctx context.Context) error                     { return nil }
-func (m *mockAdapter) Stop() error                                         { return nil }
-func (m *mockAdapter) Emails() <-chan *adapter.Email                       { return nil }
-func (m *mockAdapter) MarkProcessed(ctx context.Context, id string) error  {
+func (m *mockAdapter) Name() string                    { return "mock" }
+func (m *mockAdapter) Start(ctx context.Context) error { return nil }
+func (m *mockAdapter) Stop() error                     { return nil }
+func (m *mockAdapter) Emails() <-chan *adapter.Email   { return nil }
+func (m *mockAdapter) MarkProcessed(ctx context.Context, id string) error {
 	m.lastMarkProcessedID = id
 	return nil
 }
@@ -48,12 +48,12 @@ func TestReplyFromAddress(t *testing.T) {
 
 	// Test: QueueOutbound stores the from address
 	id, err := st.QueueOutbound(
-		"sender@gmail.com",         // to
-		"sender+ty@gmail.com",      // from (the +ty alias)
-		"Re: Test",                 // subject
-		"Reply body",               // body
-		nil,                        // taskID
-		"<msg123@gmail.com>",       // inReplyTo
+		"sender@gmail.com",    // to
+		"sender+ty@gmail.com", // from (the +ty alias)
+		"Re: Test",            // subject
+		"Reply body",          // body
+		nil,                   // taskID
+		"<msg123@gmail.com>",  // inReplyTo
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -131,7 +131,7 @@ func TestReplyFromEmptyFallsBackToDefault(t *testing.T) {
 	// Queue without a from address (e.g., from CheckBlockedTasks)
 	_, err = st.QueueOutbound(
 		"user@gmail.com",
-		"",          // no from override
+		"", // no from override
 		"Re: Task",
 		"Reply",
 		nil,
@@ -211,8 +211,8 @@ func TestRoundTripFromAddress(t *testing.T) {
 
 	// Simulate what ProcessEmail does: queue reply with the To address as From
 	_, err = st.QueueOutbound(
-		"bruno@gmail.com",        // to (reply recipient)
-		"bruno+ty@gmail.com",     // from (the +ty alias from original email's To)
+		"bruno@gmail.com",    // to (reply recipient)
+		"bruno+ty@gmail.com", // from (the +ty alias from original email's To)
 		"Re: New task",
 		"Got it! I'll create a task: New task",
 		nil,

@@ -32,12 +32,12 @@ type Attachment struct {
 // OutboundEmail represents an email to send.
 type OutboundEmail struct {
 	To        []string
-	From      string   // Reply-from address override (if empty, uses SMTP config)
+	From      string // Reply-from address override (if empty, uses SMTP config)
 	Subject   string
 	Body      string
 	HTML      string
-	InReplyTo string   // Message-ID to reply to (for threading)
-	TaskID    int64    // Associated task (for tracking)
+	InReplyTo string // Message-ID to reply to (for threading)
+	TaskID    int64  // Associated task (for tracking)
 }
 
 // Adapter is the interface for email providers.
@@ -82,7 +82,7 @@ type GmailConfig struct {
 
 // IMAPConfig holds IMAP configuration.
 type IMAPConfig struct {
-	Server       string `yaml:"server"`        // e.g., "imap.fastmail.com:993"
+	Server       string `yaml:"server"` // e.g., "imap.fastmail.com:993"
 	Username     string `yaml:"username"`
 	PasswordCmd  string `yaml:"password_cmd"`  // Command to get password
 	Folder       string `yaml:"folder"`        // e.g., "INBOX"

@@ -1,6 +1,12 @@
 package github
 
-import "testing"
+import (
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"testing"
+	"time"
+)
 
 func TestIsNewerVersion(t *testing.T) {
 	tests := []struct {
@@ -60,5 +66,79 @@ func TestParseVersion(t *testing.T) {
 				t.Errorf("parseVersion(%q) returned %v, expected nil", tt.input, result)
 			}
 		})
+	}
+}
+
+func TestCLIVersionCheck_DevSkipped(t *testing.T) {
+	if release := CLIVersionCheck("dev"); release != nil {
+		t.Error("expected nil for dev version")
+	}
+	if release := CLIVersionCheck(""); release != nil {
+		t.Error("expected nil for empty version")
+	}
+}
+
+func TestCLIVersionCheck_CachedNewerVersion(t *testing.T) {
+	// Set up a temp directory for the cache
+	tmp := t.TempDir()
+	t.Setenv("WORKTREE_DB_PATH", filepath.Join(tmp, "tasks.db"))
+
+	// Write a fresh cache entry with a "newer" version
+	c := versionCache{
+		Version:   "v99.0.0",
+		URL:       "https://github.com/bborn/taskyou/releases/tag/v99.0.0",
+		CheckedAt: time.Now(),
+	}
+	data, _ := json.Marshal(c)
+	_ = os.WriteFile(filepath.Join(tmp, cacheFileName), data, 0o644)
+
+	release := CLIVersionCheck("v1.0.0")
+	if release == nil {
+		t.Fatal("expected non-nil release for cached newer version")
+	}
+	if release.Version != "v99.0.0" {
+		t.Errorf("got version %q, want v99.0.0", release.Version)
+	}
+}
+
+func TestCLIVersionCheck_CachedSameVersion(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("WORKTREE_DB_PATH", filepath.Join(tmp, "tasks.db"))
+
+	c := versionCache{
+		Version:   "v1.0.0",
+		URL:       "https://github.com/bborn/taskyou/releases/tag/v1.0.0",
+		CheckedAt: time.Now(),
+	}
+	data, _ := json.Marshal(c)
+	_ = os.WriteFile(filepath.Join(tmp, cacheFileName), data, 0o644)
+
+	release := CLIVersionCheck("v1.0.0")
+	if release != nil {
+		t.Error("expected nil when cached version equals current")
+	}
+}
+
+func TestReadWriteCache(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("WORKTREE_DB_PATH", filepath.Join(tmp, "tasks.db"))
+
+	// No cache yet
+	if c := readCache(); c != nil {
+		t.Error("expected nil for missing cache")
+	}
+
+	// Write cache
+	writeCache(&LatestRelease{Version: "v2.0.0", URL: "https://example.com"})
+
+	c := readCache()
+	if c == nil {
+		t.Fatal("expected non-nil cache after write")
+	}
+	if c.Version != "v2.0.0" {
+		t.Errorf("got version %q, want v2.0.0", c.Version)
+	}
+	if time.Since(c.CheckedAt) > time.Minute {
+		t.Error("cache CheckedAt should be recent")
 	}
 }

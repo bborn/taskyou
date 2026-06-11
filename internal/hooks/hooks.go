@@ -10,16 +10,18 @@ import (
 	"strings"
 	"time"
 
-	"github.com/bborn/workflow/internal/db"
 	"github.com/charmbracelet/log"
+
+	"github.com/bborn/workflow/internal/db"
 )
 
 // Event types for hooks
 const (
-	EventTaskBlocked = "task.blocked"
-	EventTaskDone    = "task.done"
-	EventTaskFailed  = "task.failed"
-	EventTaskStarted = "task.started"
+	EventTaskBlocked  = "task.blocked"
+	EventTaskDone     = "task.done"
+	EventTaskFailed   = "task.failed"
+	EventTaskStarted  = "task.started"
+	EventAuthRequired = "task.auth_required" // Executor session needs re-authentication
 )
 
 // Runner executes hooks for task events.
@@ -71,6 +73,7 @@ func (r *Runner) Run(event string, task *db.Task, message string) {
 		fmt.Sprintf("TASK_TYPE=%s", task.Type),
 		fmt.Sprintf("TASK_MESSAGE=%s", message),
 		fmt.Sprintf("TASK_EVENT=%s", event),
+		fmt.Sprintf("WORKTREE_PATH=%s", task.WorktreePath),
 	)
 
 	// Run in background, don't block

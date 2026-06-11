@@ -30,9 +30,12 @@ bin/
 *.out
 .task-worktrees
 
-# Build output
+# Build / release output
 /task
 /taskd
+dist/
+coverage.out
+coverage.html
 
 # Database
 *.db
@@ -45,3 +48,7 @@ tmux-*.log
 .spotlight-active
 .playwright-mcp/
 .mcp.json
+.gstack/
+
+# goreleaser before-hook output (release.extra_files)
+ty-chrome.zip

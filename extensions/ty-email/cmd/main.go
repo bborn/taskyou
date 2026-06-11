@@ -12,13 +12,14 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/spf13/cobra"
+	"gopkg.in/yaml.v3"
+
 	"github.com/bborn/workflow/extensions/ty-email/internal/adapter"
 	"github.com/bborn/workflow/extensions/ty-email/internal/bridge"
 	"github.com/bborn/workflow/extensions/ty-email/internal/classifier"
 	"github.com/bborn/workflow/extensions/ty-email/internal/processor"
 	"github.com/bborn/workflow/extensions/ty-email/internal/state"
-	"github.com/spf13/cobra"
-	"gopkg.in/yaml.v3"
 )
 
 // Config holds the full configuration.
@@ -26,7 +27,7 @@ type Config struct {
 	Adapter    adapter.Config     `yaml:"adapter"`
 	SMTP       adapter.SMTPConfig `yaml:"smtp"`
 	Classifier classifier.Config  `yaml:"classifier"`
-	TaskYou struct {
+	TaskYou    struct {
 		CLI       string `yaml:"cli"`
 		Dangerous bool   `yaml:"dangerous"` // Enable dangerous mode for created tasks
 	} `yaml:"taskyou"`

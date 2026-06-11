@@ -1,0 +1,66 @@
+version: 2
+
+before:
+  hooks:
+    # Package the Chrome extension as a release asset (load-unpacked install;
+    # not distributed via the Web Store). demo/ is dev tooling, excluded.
+    # Must NOT write into dist/ — before hooks run ahead of goreleaser's
+    # "dist must be empty" check, so anything placed there fails the release.
+    # Must be a relative path — extra_files globs reject absolute paths.
+    # ty-chrome.zip is gitignored so leftovers don't trip the dirty-state check.
+    - sh -c 'rm -f ty-chrome.zip && cd extensions && zip -r ../ty-chrome.zip ty-chrome -x "ty-chrome/demo/*" -x "ty-chrome/screenshots/*"'
+
+builds:
+  - id: ty
+    main: ./cmd/task
+    binary: ty
+    ldflags:
+      - -s -w -X main.version={{.Version}}
+    goos:
+      - darwin
+      - linux
+    goarch:
+      - amd64
+      - arm64
+
+  - id: taskd
+    main: ./cmd/taskd
+    binary: taskd
+    # taskd is a daemon — no Windows build
+    ldflags:
+      - -s -w -X main.version={{.Version}}
+    goos:
+      - darwin
+      - linux
+    goarch:
+      - amd64
+      - arm64
+
+archives:
+  - id: ty
+    builds:
+      - ty
+    format: tar.gz
+    name_template: "ty_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+
+  - id: taskd
+    builds:
+      - taskd
+    format: tar.gz
+    name_template: "taskd_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+
+release:
+  draft: false
+  extra_files:
+    - glob: ./ty-chrome.zip
+
+checksum:
+  name_template: "checksums.txt"
+
+changelog:
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^ci:"
+      - "^Merge"

@@ -10,8 +10,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/bborn/workflow/internal/db"
 	"github.com/charmbracelet/log"
+
+	"github.com/bborn/workflow/internal/db"
 )
 
 // OpenCodeExecutor implements TaskExecutor for OpenCode AI assistant.
@@ -87,7 +88,19 @@ func (o *OpenCodeExecutor) runOpenCode(ctx context.Context, task *db.Task, workD
 	windowTarget := fmt.Sprintf("%s:%s", daemonSession, windowName)
 
 	// Kill ALL existing windows with this name (handles duplicates)
-	killAllWindowsByNameAllSessions(windowName)
+	KillAllWindowsByNameAllSessions(windowName)
+
+	// Worktree write-guard: install OpenCode's tool.execute.before plugin so writes
+	// that would escape the isolated worktree are denied. Cleaned up at session end.
+	cleanupGuard, guardErr := o.executor.setupOpenCodeWorktreeGuard(workDir, o.executor.getProjectDir(task.Project))
+	if guardErr != nil {
+		o.logger.Warn("could not set up OpenCode worktree guard", "error", guardErr)
+	}
+	defer func() {
+		if cleanupGuard != nil {
+			cleanupGuard()
+		}
+	}()
 
 	// Build the prompt content
 	promptFile, err := os.CreateTemp("", "task-prompt-*.txt")
@@ -249,7 +262,7 @@ func (o *OpenCodeExecutor) Suspend(taskID int64) bool {
 		o.logger.Debug("Failed to find process", "pid", pid, "error", err)
 		return false
 	}
-	if err := proc.Signal(syscall.SIGTSTP); err != nil {
+	if err := sendSIGTSTP(proc); err != nil {
 		o.logger.Debug("Failed to suspend process", "pid", pid, "error", err)
 		return false
 	}
@@ -280,7 +293,7 @@ func (o *OpenCodeExecutor) ResumeProcess(taskID int64) bool {
 		delete(o.suspendedTasks, taskID)
 		return false
 	}
-	if err := proc.Signal(syscall.SIGCONT); err != nil {
+	if err := sendSIGCONT(proc); err != nil {
 		o.logger.Debug("Failed to resume process", "pid", pid, "error", err)
 		return false
 	}

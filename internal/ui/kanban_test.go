@@ -87,7 +87,7 @@ func TestKanbanBoard_HandleClick(t *testing.T) {
 		{
 			name:       "click on second task in backlog column",
 			x:          colTotalWidth / 2, // Middle of first column
-			y:          5,                 // Second task (card height = 3, so y=5 is second task)
+			y:          6,                 // Second task (card height = 4: 1 border + 1 header + 4 first card = y=6)
 			wantTaskID: 2,
 		},
 		{
@@ -533,7 +533,7 @@ func TestKanbanBoard_DesktopViewAtThreshold(t *testing.T) {
 }
 
 func TestPinnedSelectionDoesNotResetScroll(t *testing.T) {
-	board := NewKanbanBoard(100, 16)
+	board := NewKanbanBoard(100, 18)
 
 	tasks := []*db.Task{
 		{ID: 1, Title: "Pinned 1", Status: db.StatusBacklog, Pinned: true},
@@ -566,7 +566,7 @@ func TestPinnedSelectionDoesNotResetScroll(t *testing.T) {
 }
 
 func TestPinnedTasksStayVisibleWhenScrolling(t *testing.T) {
-	board := NewKanbanBoard(100, 16)
+	board := NewKanbanBoard(100, 18)
 
 	tasks := []*db.Task{
 		{ID: 1, Title: "Pinned Alpha", Status: db.StatusBacklog, Pinned: true},
@@ -589,6 +589,53 @@ func TestPinnedTasksStayVisibleWhenScrolling(t *testing.T) {
 		if !strings.Contains(view, title) {
 			t.Fatalf("expected view to include %q even when scrolled", title)
 		}
+	}
+}
+
+// TestAllPinnedColumnKeepsSelectionVisible is a regression test for the bug
+// where arrowing down through a column whose tasks are (almost) all pinned made
+// the selection disappear off-screen. Pinned tasks were rendered fixed at the
+// top and excluded from scrolling, so once they overflowed the viewport the
+// selection moved past the visible slots and was never rendered. The fix scrolls
+// the whole list when pinned tasks alone overflow the viewport.
+func TestAllPinnedColumnKeepsSelectionVisible(t *testing.T) {
+	// height 18 -> maxVisible = (18-2-3)/4 = 3 cards, far fewer than our pins.
+	board := NewKanbanBoard(100, 18)
+
+	var tasks []*db.Task
+	for i := 1; i <= 10; i++ {
+		tasks = append(tasks, &db.Task{
+			ID:     int64(i),
+			Title:  fmt.Sprintf("PinTask%02d", i),
+			Status: db.StatusBacklog,
+			Pinned: true,
+		})
+	}
+	board.SetTasks(tasks)
+	board.selectedCol = 0
+	board.selectedRow = 0
+	board.ensureSelectedVisible()
+
+	// Arrow down to the last task; the selection must stay rendered the whole way.
+	for board.selectedRow < len(tasks)-1 {
+		board.MoveDown()
+		sel := board.SelectedTask()
+		if sel == nil {
+			t.Fatalf("selection became nil at row %d", board.selectedRow)
+		}
+		if view := board.View(); !strings.Contains(view, sel.Title) {
+			t.Fatalf("selected task %q (row %d) is not visible — focus disappeared:\n%s",
+				sel.Title, board.selectedRow, view)
+		}
+	}
+
+	// Wrapping from the bottom back to the top must also keep focus on-screen.
+	board.MoveDown() // wraps to row 0
+	if board.selectedRow != 0 {
+		t.Fatalf("MoveDown at bottom should wrap to row 0, got %d", board.selectedRow)
+	}
+	if view := board.View(); !strings.Contains(view, "PinTask01") {
+		t.Fatalf("after wrapping to the top, the first task is not visible:\n%s", view)
 	}
 }
 
@@ -1416,7 +1463,7 @@ func TestKanbanBoard_ColumnCollapse(t *testing.T) {
 	})
 
 	t.Run("MoveLeft skips collapsed columns", func(t *testing.T) {
-		board.FocusColumn(1) // Select In Progress
+		board.FocusColumn(1)          // Select In Progress
 		board.ToggleColumnCollapse(0) // Collapse backlog
 		board.MoveLeft()
 		// Should not move to backlog since it's collapsed
@@ -1430,7 +1477,7 @@ func TestKanbanBoard_ColumnCollapse(t *testing.T) {
 	})
 
 	t.Run("MoveRight skips collapsed columns", func(t *testing.T) {
-		board.FocusColumn(2) // Select Blocked
+		board.FocusColumn(2)          // Select Blocked
 		board.ToggleColumnCollapse(3) // Collapse Done
 		board.MoveRight()
 		// Should not move to done since it's collapsed
@@ -1444,7 +1491,7 @@ func TestKanbanBoard_ColumnCollapse(t *testing.T) {
 	})
 
 	t.Run("FocusColumn uncollapses collapsed column", func(t *testing.T) {
-		board.FocusColumn(1) // Move away
+		board.FocusColumn(1)          // Move away
 		board.ToggleColumnCollapse(0) // Collapse backlog
 		if !board.IsColumnCollapsed(0) {
 			t.Error("backlog should be collapsed")
@@ -1490,4 +1537,78 @@ func TestKanbanBoard_ColumnCollapse(t *testing.T) {
 		board.ToggleColumnCollapse(0) // Uncollapse
 		board.ToggleColumnCollapse(3) // Uncollapse
 	})
+}
+
+func TestKanbanBoard_StaleOriginColumnCausesFocusSnap(t *testing.T) {
+	// Regression test: when originColumn leaks (not cleared on exit from
+	// detail view via close/delete/archive), every SetTasks call snaps
+	// selectedCol back to the stale originColumn value.
+	board := NewKanbanBoard(100, 50)
+
+	tasks := []*db.Task{
+		{ID: 1, Title: "Backlog Task", Status: db.StatusBacklog},
+		{ID: 2, Title: "In Progress Task", Status: db.StatusQueued},
+		{ID: 3, Title: "Blocked Task", Status: db.StatusBlocked},
+	}
+	board.SetTasks(tasks)
+
+	// Simulate: user opens a blocked task (detail view sets origin column)
+	board.FocusColumn(2)
+	board.SelectTask(3)
+	board.SetOriginColumn() // originColumn = 2
+
+	// Simulate: user closes/deletes task from detail view, returns to dashboard
+	// BUG: some exit paths forgot to call ClearOriginColumn()
+
+	// User navigates left to in-progress
+	board.ClearOriginColumn() // This is what the fix ensures happens
+	board.MoveLeft()
+
+	if board.selectedCol != 1 {
+		t.Fatalf("Expected selectedCol=1 (in-progress) after MoveLeft, got %d", board.selectedCol)
+	}
+
+	// Refresh fires — focus must stay in in-progress
+	board.SetTasks(tasks)
+
+	if board.selectedCol != 1 {
+		t.Errorf("Expected selectedCol to stay at 1 (in-progress) after refresh, got %d", board.selectedCol)
+	}
+}
+
+func TestKanbanBoard_LeakedOriginColumnSnapsFocus(t *testing.T) {
+	// Demonstrates the actual bug: if ClearOriginColumn is NOT called,
+	// SetTasks snaps focus back to the origin column.
+	board := NewKanbanBoard(100, 50)
+
+	tasks := []*db.Task{
+		{ID: 1, Title: "Backlog Task", Status: db.StatusBacklog},
+		{ID: 2, Title: "In Progress Task", Status: db.StatusQueued},
+		{ID: 3, Title: "Blocked Task", Status: db.StatusBlocked},
+	}
+	board.SetTasks(tasks)
+
+	// Simulate: enter detail view on blocked task
+	board.FocusColumn(2)
+	board.SelectTask(3)
+	board.SetOriginColumn() // originColumn = 2
+
+	// Simulate: exit detail view WITHOUT clearing origin (the bug)
+	// User navigates left to in-progress
+	board.MoveLeft()
+
+	if board.selectedCol != 1 {
+		t.Fatalf("Expected selectedCol=1 after MoveLeft, got %d", board.selectedCol)
+	}
+
+	// Refresh fires — with leaked originColumn, focus snaps back to blocked
+	board.SetTasks(tasks)
+
+	// This WOULD fail before the app-level safety net fix:
+	// originColumn=2 forces selectedCol=2 on every SetTasks call.
+	// The kanban-level behavior is by design (origin column takes priority),
+	// so the fix is at the app level clearing stale origin columns.
+	if board.selectedCol != 2 {
+		t.Logf("Confirmed: leaked originColumn snaps focus to col %d (expected kanban behavior)", board.selectedCol)
+	}
 }

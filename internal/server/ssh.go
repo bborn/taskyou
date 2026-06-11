@@ -8,9 +8,6 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/bborn/workflow/internal/db"
-	"github.com/bborn/workflow/internal/executor"
-	"github.com/bborn/workflow/internal/ui"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/log"
 	"github.com/charmbracelet/ssh"
@@ -19,6 +16,10 @@ import (
 	"github.com/charmbracelet/wish/bubbletea"
 	"github.com/charmbracelet/wish/logging"
 	"github.com/muesli/termenv"
+
+	"github.com/bborn/workflow/internal/db"
+	"github.com/bborn/workflow/internal/executor"
+	"github.com/bborn/workflow/internal/ui"
 )
 
 // Server is the SSH server.

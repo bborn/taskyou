@@ -4,8 +4,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/bborn/workflow/internal/db"
 	tea "github.com/charmbracelet/bubbletea"
+
+	"github.com/bborn/workflow/internal/db"
 )
 
 func TestCalculateBodyHeight(t *testing.T) {
@@ -104,6 +105,69 @@ func TestBodyHeightFillsAvailableSpace(t *testing.T) {
 				t.Errorf("height %d != expected %d for screen height %d", height, expectedHeight, screenHeight)
 			}
 		})
+	}
+}
+
+func TestEditFormIsModal(t *testing.T) {
+	task := &db.Task{Title: "Test task", Body: "Some body", Project: "proj"}
+	m := NewEditFormModel(nil, task, 120, 40, []string{"claude"})
+
+	if !m.modal {
+		t.Fatal("expected edit form to be rendered as a modal")
+	}
+
+	view := m.View()
+
+	// A centered modal floats within the screen, so the first line should be
+	// blank padding rather than the top border of a full-screen box.
+	firstLine := strings.SplitN(view, "\n", 2)[0]
+	if strings.Contains(firstLine, "╭") {
+		t.Errorf("expected modal to be centered with top margin, but first line is the border: %q", firstLine)
+	}
+
+	// The modal box should be narrower than the full screen width.
+	if !strings.Contains(view, "         ╭") {
+		t.Error("expected modal box to be indented (narrower than full width)")
+	}
+}
+
+func TestEditFormDiscardWarningAtTop(t *testing.T) {
+	task := &db.Task{Title: "Test task", Body: "Some body", Project: "proj"}
+	m := NewEditFormModel(nil, task, 120, 40, []string{"claude"})
+	m.showCancelConfirm = true
+
+	view := m.View()
+
+	discardIdx := strings.Index(view, "Discard changes?")
+	if discardIdx == -1 {
+		t.Fatal("expected discard warning to be rendered")
+	}
+
+	// In modal mode the warning must appear above the editable fields
+	// (Title/Details), i.e. at the top of the modal.
+	titleIdx := strings.Index(view, "Title")
+	if titleIdx == -1 {
+		t.Fatal("expected Title field to be rendered")
+	}
+	if discardIdx > titleIdx {
+		t.Errorf("expected discard warning (pos %d) to appear before Title field (pos %d)", discardIdx, titleIdx)
+	}
+}
+
+func TestEditFormModalBodyHeightBounded(t *testing.T) {
+	task := &db.Task{Title: "Test", Body: "one line"}
+
+	// Short body on a tall screen should stay compact (not fill the screen).
+	m := NewEditFormModel(nil, task, 120, 80, []string{"claude"})
+	if h := m.calculateBodyHeight(); h > 14 {
+		t.Errorf("modal body height %d should be bounded to <= 14 for a short body", h)
+	}
+
+	// A long body grows but is still capped so every field stays visible.
+	task.Body = strings.Repeat("line\n", 100)
+	big := NewEditFormModel(nil, task, 120, 80, []string{"claude"})
+	if h := big.calculateBodyHeight(); h > 14 {
+		t.Errorf("modal body height %d should be capped at 14 even for long bodies", h)
 	}
 }
 
@@ -841,6 +905,71 @@ func TestGetDBTaskUsesExecutorDirectly(t *testing.T) {
 	}
 }
 
+// TestApplyToOnlyTouchesEditableFields verifies that overlaying the edit form
+// onto an existing task changes only the fields the form exposes and leaves
+// every other persisted column untouched (regression guard for #560).
+func TestApplyToOnlyTouchesEditableFields(t *testing.T) {
+	original := &db.Task{
+		Title:           "Old title",
+		Body:            "Old body",
+		Type:            "code",
+		Project:         "proj",
+		Executor:        "claude",
+		ClaudeSessionID: "sess-abc",
+		DaemonSession:   "ty-1",
+		Port:            4242,
+		PRInfoJSON:      `{"state":"open"}`,
+		DangerousMode:   false,
+		PermissionMode:  "auto",
+		RemoteControl:   true,
+		Pinned:          true,
+		Tags:            "urgent,backend",
+		SourceBranch:    "main",
+		Summary:         "a summary",
+	}
+
+	m := NewEditFormModel(nil, original, 120, 40, []string{"claude"})
+	m.titleInput.SetValue("New title")
+	m.bodyInput.SetValue("New body")
+
+	updated := *original
+	m.ApplyTo(&updated)
+
+	// Edited fields are applied.
+	if updated.Title != "New title" {
+		t.Errorf("Title = %q, want %q", updated.Title, "New title")
+	}
+	if updated.Body != "New body" {
+		t.Errorf("Body = %q, want %q", updated.Body, "New body")
+	}
+
+	// Persisted fields the edit form doesn't change are preserved. Permission
+	// mode IS an editable form field now, so it round-trips through the form
+	// (seeded from the task), and DangerousMode stays consistent with it.
+	preserved := []struct {
+		name string
+		got  any
+		want any
+	}{
+		{"ClaudeSessionID", updated.ClaudeSessionID, "sess-abc"},
+		{"DaemonSession", updated.DaemonSession, "ty-1"},
+		{"Port", updated.Port, 4242},
+		{"PRInfoJSON", updated.PRInfoJSON, `{"state":"open"}`},
+		{"DangerousMode", updated.DangerousMode, false},
+		{"PermissionMode", updated.PermissionMode, "auto"},
+		{"RemoteControl", updated.RemoteControl, true},
+		{"Pinned", updated.Pinned, true},
+		{"Tags", updated.Tags, "urgent,backend"},
+		{"SourceBranch", updated.SourceBranch, "main"},
+		{"Summary", updated.Summary, "a summary"},
+	}
+	for _, c := range preserved {
+		if c.got != c.want {
+			t.Errorf("%s was modified by ApplyTo: got %v, want %v", c.name, c.got, c.want)
+		}
+	}
+}
+
 func TestFormDefaultsToAvailableExecutor(t *testing.T) {
 	// When claude is available, form should default to claude
 	m := NewFormModel(nil, 100, 50, "", []string{"claude"})
@@ -1159,4 +1288,210 @@ func TestFilterProjectsEmptyQueryShowsAll(t *testing.T) {
 	if m.projectFiltered[m.projectFilteredIdx] != "workflow" {
 		t.Errorf("expected current project 'workflow' to be pre-selected, got %q", m.projectFiltered[m.projectFilteredIdx])
 	}
+}
+
+func TestEffortFieldDefaultsToGlobal(t *testing.T) {
+	m := NewFormModel(nil, 100, 50, "", []string{db.ExecutorClaude})
+
+	// Effort options start with "" (the global/Claude default).
+	if len(m.effortLevels) == 0 || m.effortLevels[0] != "" {
+		t.Fatalf("expected first effort option to be the empty default, got %v", m.effortLevels)
+	}
+	if m.effortLevel != "" {
+		t.Errorf("expected default effort level to be empty, got %q", m.effortLevel)
+	}
+
+	// GetDBTask should not set an override when the user leaves the default.
+	if got := m.GetDBTask().EffortLevel; got != "" {
+		t.Errorf("expected GetDBTask to leave effort empty by default, got %q", got)
+	}
+}
+
+func TestEffortFieldCycleAndPersist(t *testing.T) {
+	m := NewFormModel(nil, 100, 50, "", []string{db.ExecutorClaude})
+	m.showAdvanced = true
+	m.focused = FieldEffort
+
+	// Cycling right from the default lands on the first real effort level.
+	m.Update(tea.KeyMsg{Type: tea.KeyRight})
+	if m.effortLevel != db.EffortLow {
+		t.Errorf("expected effort to be %q after one right press, got %q", db.EffortLow, m.effortLevel)
+	}
+
+	if got := m.GetDBTask().EffortLevel; got != db.EffortLow {
+		t.Errorf("expected GetDBTask to carry effort %q, got %q", db.EffortLow, got)
+	}
+
+	// Cycling left returns to the default (empty) override.
+	m.Update(tea.KeyMsg{Type: tea.KeyLeft})
+	if m.effortLevel != "" {
+		t.Errorf("expected effort to return to default, got %q", m.effortLevel)
+	}
+}
+
+func TestEffortFieldHiddenForNonClaude(t *testing.T) {
+	m := NewFormModel(nil, 100, 50, "", []string{db.ExecutorClaude})
+	m.showAdvanced = true
+
+	m.executor = db.ExecutorClaude
+	if !m.isFieldVisible(FieldEffort) {
+		t.Error("expected effort field to be visible for the Claude executor")
+	}
+
+	m.executor = db.ExecutorCodex
+	if m.isFieldVisible(FieldEffort) {
+		t.Error("expected effort field to be hidden for non-Claude executors")
+	}
+}
+
+func TestPermissionFieldDefaultsToProjectDefault(t *testing.T) {
+	m := NewFormModel(nil, 100, 50, "", []string{db.ExecutorClaude})
+
+	// With no project record, the form falls back to the global default ("auto").
+	want := db.GlobalDefaultPermissionMode()
+	if m.permissionMode != want {
+		t.Errorf("permissionMode = %q, want default %q", m.permissionMode, want)
+	}
+	// "default" (prompt) is first so the less-restrictive modes follow it.
+	if len(m.permissionModes) == 0 || m.permissionModes[0] != db.PermissionModeDefault {
+		t.Fatalf("expected first permission option %q, got %v", db.PermissionModeDefault, m.permissionModes)
+	}
+	// The seeded default is carried onto the task so simple-mode tasks run in it.
+	if got := m.GetDBTask().PermissionMode; got != want {
+		t.Errorf("GetDBTask permission = %q, want %q", got, want)
+	}
+}
+
+func TestPermissionFieldCycleAndPersist(t *testing.T) {
+	m := NewFormModel(nil, 100, 50, "", []string{db.ExecutorClaude})
+	m.showAdvanced = true
+	m.focused = FieldPermission
+
+	// Start from "default" for a deterministic sequence regardless of the
+	// environment's configured default. The selector cycles in the canonical
+	// order: default -> accept-edits -> auto -> dangerous.
+	m.permissionIdx = permissionIndexFor(m.permissionModes, db.PermissionModeDefault)
+	m.permissionMode = db.PermissionModeDefault
+
+	// Right cycles default -> accept-edits and marks the field as user-chosen.
+	m.Update(tea.KeyMsg{Type: tea.KeyRight})
+	if m.permissionMode != db.PermissionModeAcceptEdits {
+		t.Errorf("after right, permission = %q, want %q", m.permissionMode, db.PermissionModeAcceptEdits)
+	}
+	if !m.permissionTouched {
+		t.Error("expected permissionTouched after a manual change")
+	}
+
+	// Three more rights -> auto -> dangerous; GetDBTask carries it and keeps
+	// DangerousMode in sync.
+	m.Update(tea.KeyMsg{Type: tea.KeyRight}) // -> auto
+	m.Update(tea.KeyMsg{Type: tea.KeyRight}) // -> dangerous
+	task := m.GetDBTask()
+	if task.PermissionMode != db.PermissionModeDangerous {
+		t.Errorf("GetDBTask permission = %q, want %q", task.PermissionMode, db.PermissionModeDangerous)
+	}
+	if !task.DangerousMode {
+		t.Error("expected DangerousMode true when permission is dangerous")
+	}
+}
+
+func TestPermissionAndEffortStickyPerProject(t *testing.T) {
+	database, err := db.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer database.Close()
+	if err := database.CreateProject(&db.Project{Name: "sticky", Path: t.TempDir()}); err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+
+	// A task created with a non-default effort + permission becomes the project's
+	// last-used choices.
+	first := &db.Task{
+		Title:          "first",
+		Status:         db.StatusQueued,
+		Type:           db.TypeCode,
+		Project:        "sticky",
+		Executor:       db.ExecutorClaude,
+		EffortLevel:    db.EffortHigh,
+		PermissionMode: db.PermissionModeDangerous,
+	}
+	if err := database.CreateTask(first); err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+
+	// The next new-task form for that project should default to the same choices.
+	m := NewFormModel(database, 100, 50, "", []string{db.ExecutorClaude})
+	if m.project != "sticky" {
+		t.Fatalf("expected form to default to last-used project 'sticky', got %q", m.project)
+	}
+	if m.effortLevel != db.EffortHigh {
+		t.Errorf("effort = %q, want sticky %q", m.effortLevel, db.EffortHigh)
+	}
+	if m.permissionMode != db.PermissionModeDangerous {
+		t.Errorf("permission = %q, want sticky %q", m.permissionMode, db.PermissionModeDangerous)
+	}
+}
+
+func TestPermissionFieldVisibility(t *testing.T) {
+	m := NewFormModel(nil, 100, 50, "", []string{db.ExecutorClaude})
+	m.showAdvanced = true
+
+	// Permission applies to every executor, so it shows for non-Claude too
+	// (unlike effort).
+	m.executor = db.ExecutorClaude
+	if !m.isFieldVisible(FieldPermission) {
+		t.Error("expected permission field visible in advanced mode for claude")
+	}
+	m.executor = db.ExecutorCodex
+	if !m.isFieldVisible(FieldPermission) {
+		t.Error("expected permission field visible in advanced mode for codex")
+	}
+
+	// Hidden in simple mode like the other advanced fields.
+	m.showAdvanced = false
+	if m.isFieldVisible(FieldPermission) {
+		t.Error("expected permission field hidden in simple mode")
+	}
+}
+
+func TestEditFormSeedsAndPreservesPermission(t *testing.T) {
+	t.Run("auto mode preserved", func(t *testing.T) {
+		m := NewEditFormModel(nil, &db.Task{
+			Title:          "t",
+			Project:        "personal",
+			Executor:       db.ExecutorClaude,
+			PermissionMode: db.PermissionModeAuto,
+		}, 100, 50, []string{db.ExecutorClaude})
+
+		if m.permissionMode != db.PermissionModeAuto {
+			t.Errorf("permissionMode = %q, want %q", m.permissionMode, db.PermissionModeAuto)
+		}
+		task := m.GetDBTask()
+		if task.PermissionMode != db.PermissionModeAuto {
+			t.Errorf("GetDBTask permission = %q, want %q", task.PermissionMode, db.PermissionModeAuto)
+		}
+		if task.DangerousMode {
+			t.Error("did not expect DangerousMode for auto")
+		}
+	})
+
+	t.Run("legacy dangerous flag preserved", func(t *testing.T) {
+		// A legacy task carrying only the boolean (no permission_mode) must not be
+		// silently downgraded when edited.
+		m := NewEditFormModel(nil, &db.Task{
+			Title:         "t",
+			Project:       "personal",
+			Executor:      db.ExecutorClaude,
+			DangerousMode: true,
+		}, 100, 50, []string{db.ExecutorClaude})
+
+		if m.permissionMode != db.PermissionModeDangerous {
+			t.Errorf("permissionMode = %q, want %q", m.permissionMode, db.PermissionModeDangerous)
+		}
+		task := m.GetDBTask()
+		if task.PermissionMode != db.PermissionModeDangerous || !task.DangerousMode {
+			t.Errorf("expected dangerous preserved: mode=%q dangerous=%v", task.PermissionMode, task.DangerousMode)
+		}
+	})
 }

@@ -91,7 +91,8 @@ detect_arch() {
 # Get the latest release version from GitHub
 get_latest_version() {
     local version
-    version=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" 2>/dev/null | grep '"tag_name"' | sed -E 's/.*"([^"]+)".*/\1/')
+    # Extract version from the /releases/latest redirect URL (no API rate limits)
+    version=$(curl -fsSI "https://github.com/${REPO}/releases/latest" 2>/dev/null | grep -i '^location:' | sed -E 's|.*/tag/||' | tr -d '[:space:]')
     if [ -z "$version" ]; then
         error "Failed to fetch latest version. Check your internet connection or try again later."
     fi
@@ -137,16 +138,17 @@ install_ty() {
     local version=$3
     local tmp_dir=$4
 
-    local filename="ty-${os}-${arch}"
+    local filename="ty_${version#v}_${os}_${arch}.tar.gz"
     local url="https://github.com/${REPO}/releases/download/${version}/${filename}"
 
     info "Downloading ty ${version} for ${os}/${arch}..."
 
-    # Download binary
-    if ! curl -fsSL "$url" -o "${tmp_dir}/ty"; then
+    # Download and extract tarball
+    if ! curl -fsSL "$url" -o "${tmp_dir}/ty.tar.gz"; then
         error "Failed to download from ${url}"
     fi
 
+    tar -xzf "${tmp_dir}/ty.tar.gz" -C "${tmp_dir}"
     chmod +x "${tmp_dir}/ty"
 
     # Install binary
@@ -171,16 +173,17 @@ install_taskd() {
         return 0
     fi
 
-    local filename="taskd-${os}-${arch}"
+    local filename="taskd_${version#v}_${os}_${arch}.tar.gz"
     local url="https://github.com/${REPO}/releases/download/${version}/${filename}"
 
     info "Downloading taskd ${version} for ${os}/${arch}..."
 
-    # Download binary
-    if ! curl -fsSL "$url" -o "${tmp_dir}/taskd"; then
+    # Download and extract tarball
+    if ! curl -fsSL "$url" -o "${tmp_dir}/taskd.tar.gz"; then
         error "Failed to download taskd from ${url}"
     fi
 
+    tar -xzf "${tmp_dir}/taskd.tar.gz" -C "${tmp_dir}"
     chmod +x "${tmp_dir}/taskd"
 
     # Install binary
