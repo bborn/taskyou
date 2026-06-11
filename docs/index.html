@@ -1,177 +1,323 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>TaskYou - Personal Task Management</title>
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@500;700;800;900&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
-    <style>
-        :root {
-            --midnight-navy: #0a2540;
-            --deep-navy: #1a365d;
-            --electric-purple: #635bff;
-            --violet: #a855f7;
-            --cyan-glow: #80e9ff;
-            --cloud-white: #f6f9fc;
-            --pure-white: #ffffff;
-            --slate: #94a3b8;
-        }
-        * { box-sizing: border-box; margin: 0; padding: 0; }
-        body {
-            font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
-            background: linear-gradient(135deg, var(--midnight-navy) 0%, var(--deep-navy) 100%);
-            color: var(--pure-white);
-            min-height: 100vh;
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            justify-content: center;
-            padding: 2rem;
-        }
-        .container {
-            max-width: 700px;
-            text-align: center;
-        }
-        h1 {
-            font-size: clamp(3rem, 10vw, 5rem);
-            font-weight: 900;
-            letter-spacing: -3px;
-            margin-bottom: 1rem;
-            background: linear-gradient(135deg, var(--pure-white) 0%, var(--cyan-glow) 100%);
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
-            background-clip: text;
-        }
-        .tagline {
-            font-size: 1.5rem;
-            font-weight: 500;
-            color: var(--slate);
-            margin-bottom: 2.5rem;
-        }
-        .demo-video {
-            width: 100%;
-            max-width: 640px;
-            border-radius: 16px;
-            cursor: pointer;
-            margin: 2rem 0;
-            box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
-        }
-        .install-box {
-            background: rgba(255, 255, 255, 0.05);
-            border: 1px solid rgba(255, 255, 255, 0.1);
-            border-radius: 24px;
-            padding: 2rem;
-            margin: 2rem 0;
-        }
-        .install-label {
-            font-size: 0.875rem;
-            font-weight: 600;
-            color: var(--slate);
-            text-transform: uppercase;
-            letter-spacing: 1px;
-            margin-bottom: 1rem;
-        }
-        .install-cmd {
-            font-family: 'JetBrains Mono', monospace;
-            font-size: 1rem;
-            font-weight: 500;
-            color: var(--cyan-glow);
-            background: var(--midnight-navy);
-            padding: 1rem 1.5rem;
-            border-radius: 12px;
-            cursor: pointer;
-            transition: all 0.2s ease;
-        }
-        .install-cmd:hover {
-            background: #0d2d4d;
-            transform: translateY(-1px);
-        }
-        .links {
-            margin-top: 2.5rem;
-            display: flex;
-            justify-content: center;
-            gap: 1rem;
-        }
-        .links a {
-            font-family: 'JetBrains Mono', monospace;
-            font-size: 0.875rem;
-            font-weight: 600;
-            color: var(--pure-white);
-            text-decoration: none;
-            padding: 12px 24px;
-            border-radius: 100px;
-            background: rgba(255, 255, 255, 0.1);
-            transition: all 0.2s ease;
-        }
-        .links a:hover {
-            background: var(--electric-purple);
-            transform: translateY(-1px);
-        }
-        .copied {
-            color: var(--electric-purple) !important;
-        }
-    </style>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TaskYou — Kanban for code agents</title>
+<meta name="description" content="A Kanban board for Claude Code that runs in your terminal. Drop a task in a column and TaskYou puts an agent on it — an agent for every task, a worktree for every agent.">
+<link rel="icon" href="images/logo.webp">
+
+<!-- Open Graph / Twitter -->
+<meta property="og:title" content="TaskYou — Kanban for code agents">
+<meta property="og:description" content="Calm, cool, a little crazy. An agent for every task. A worktree for every agent.">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://taskyou.dev/">
+<meta property="og:image" content="https://taskyou.dev/images/logo.webp">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:site" content="@taskyoudev">
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:#0e0b16; --panel:#15111f; --panel2:#1b1628; --line:#241e38; --line2:#2e2746;
+    --text:#f3eaff; --muted:#9b93bd; --dim:#6f6790;
+    --orange:#ff7a3c; --orange-d:#c9432a; --green:#7cf6b0; --yellow:#ffd23f;
+  }
+  *{box-sizing:border-box; margin:0; padding:0;}
+  html{scroll-behavior:smooth;}
+  body{
+    font-family:'Space Grotesk',system-ui,-apple-system,sans-serif; background:var(--bg); color:var(--text);
+    line-height:1.55; -webkit-font-smoothing:antialiased; overflow-x:hidden;
+  }
+  /* CRT scanlines */
+  body::before{
+    content:""; position:fixed; inset:0; pointer-events:none; z-index:9999; opacity:.5;
+    background:repeating-linear-gradient(0deg, rgba(255,255,255,.022) 0 1px, transparent 1px 3px);
+  }
+  .grid-bg{
+    position:fixed; inset:0; z-index:-1; pointer-events:none;
+    background-image:linear-gradient(rgba(255,255,255,.025) 1px,transparent 1px),linear-gradient(90deg,rgba(255,255,255,.025) 1px,transparent 1px);
+    background-size:26px 26px;
+    -webkit-mask-image:radial-gradient(120% 90% at 50% 0%, #000 0%, transparent 75%);
+            mask-image:radial-gradient(120% 90% at 50% 0%, #000 0%, transparent 75%);
+  }
+  .wrap{max-width:1080px; margin:0 auto; padding:0 1.5rem;}
+  a{color:inherit; text-decoration:none;}
+  .mono{font-family:'JetBrains Mono',monospace;}
+
+  /* NAV */
+  nav{position:sticky; top:0; z-index:100; backdrop-filter:blur(10px); -webkit-backdrop-filter:blur(10px); background:rgba(14,11,22,.72); border-bottom:1px solid var(--line);}
+  nav .wrap{display:flex; align-items:center; justify-content:space-between; height:60px;}
+  .brand{display:flex; align-items:center; gap:.55rem; font-weight:700; font-size:1.05rem;}
+  .brand img{height:26px; width:auto; image-rendering:pixelated;}
+  .navlinks{display:flex; align-items:center; gap:1.4rem; font-family:'JetBrains Mono',monospace; font-size:.8rem; color:var(--muted);}
+  .navlinks a:hover{color:var(--text);}
+  .navlinks .desktop-only{display:inline;}
+  @media(max-width:640px){.navlinks .desktop-only{display:none;}}
+  .btn{display:inline-flex; align-items:center; gap:.5rem; font-family:'JetBrains Mono',monospace; font-weight:700; font-size:.8rem; padding:.5rem .9rem; border-radius:8px; transition:transform .12s ease;}
+  .btn:hover{transform:translateY(-1px);}
+  .btn-primary{background:var(--orange); color:#1a1320; box-shadow:0 4px 0 var(--orange-d);}
+  .btn-primary:active{transform:translateY(3px); box-shadow:0 1px 0 var(--orange-d);}
+
+  /* HERO */
+  header.hero{padding:5rem 0 3rem; position:relative;}
+  .hero-grid{display:grid; grid-template-columns:1.05fr .95fr; gap:3rem; align-items:center;}
+  @media(max-width:860px){.hero-grid{grid-template-columns:1fr; gap:2rem;}}
+  .mascot-lg{height:92px; width:auto; image-rendering:pixelated; margin-bottom:1.1rem; filter:drop-shadow(0 0 22px rgba(255,122,60,.45));}
+  h1.headline{
+    font-weight:700; font-size:clamp(2.6rem,5.6vw,3.9rem); line-height:1.02; letter-spacing:-.02em; margin-bottom:.7rem;
+    filter:url(#fx-aberration);
+  }
+  h1.headline .t{color:var(--orange);}
+  .lede{font-family:'JetBrains Mono',monospace; font-size:1.05rem; color:var(--green); margin-bottom:.5rem;}
+  .supp{color:var(--muted); font-size:1.02rem; margin-bottom:1.7rem; max-width:30ch;}
+  .badges{display:flex; gap:.5rem; flex-wrap:wrap; margin-top:1.5rem;}
+  .chip{font-family:'JetBrains Mono',monospace; font-size:.68rem; color:var(--muted); border:1px solid var(--line2); border-radius:999px; padding:.28rem .65rem;}
+  .chip b{color:var(--green); font-weight:600;}
+
+  .install .lbl{font-family:'JetBrains Mono',monospace; font-size:.66rem; text-transform:uppercase; letter-spacing:.12em; color:var(--dim); margin-bottom:.45rem;}
+  .cmd{
+    font-family:'JetBrains Mono',monospace; font-size:.84rem; color:var(--green); background:#0a0812;
+    border:1px solid var(--line2); border-radius:10px; padding:.85rem 1rem; cursor:pointer; display:flex; align-items:center; justify-content:space-between; gap:1rem;
+    transition:border-color .15s ease; overflow:hidden;
+  }
+  .cmd:hover{border-color:var(--orange);}
+  .cmd .ctext{white-space:nowrap; overflow:hidden; text-overflow:ellipsis; min-width:0;}
+  .cmd .copy{color:var(--dim); font-size:.7rem; flex-shrink:0;}
+  .cmd.copied .copy{color:var(--green);}
+  .cmd .prompt{color:var(--orange);}
+
+  /* terminal window */
+  .win{border:1px solid var(--line2); border-radius:12px; overflow:hidden; background:#0c0a14; box-shadow:0 34px 70px -28px rgba(0,0,0,.85);}
+  .win .bar{display:flex; align-items:center; gap:.45rem; padding:.55rem .75rem; background:#181426; border-bottom:1px solid var(--line2);}
+  .win .bar i{width:11px; height:11px; border-radius:50%; display:inline-block;}
+  .win .bar .ttl{font-family:'JetBrains Mono',monospace; font-size:.68rem; color:var(--dim); margin-left:.6rem;}
+  .win img, .win video{width:100%; display:block;}
+  .win video{cursor:pointer; background:#0c0a14;}
+
+  /* SECTIONS */
+  section{padding:4.5rem 0;}
+  .eyebrow{font-family:'JetBrains Mono',monospace; font-size:.72rem; letter-spacing:.14em; text-transform:uppercase; color:var(--orange); margin-bottom:.7rem;}
+  h2.sec{font-weight:700; font-size:clamp(1.8rem,3.6vw,2.5rem); letter-spacing:-.01em; margin-bottom:.6rem;}
+  .sec-sub{color:var(--muted); max-width:54ch; margin-bottom:2.5rem;}
+
+  /* how it works */
+  .steps{display:grid; grid-template-columns:repeat(3,1fr); gap:1.2rem;}
+  @media(max-width:860px){.steps{grid-template-columns:1fr;}}
+  .step{background:var(--panel); border:1px solid var(--line); border-radius:14px; padding:1.4rem;}
+  .step .num{font-family:'JetBrains Mono',monospace; font-weight:700; font-size:.8rem; color:#1a1320; background:var(--orange); width:1.9rem; height:1.9rem; border-radius:7px; display:flex; align-items:center; justify-content:center; margin-bottom:1rem;}
+  .step h3{font-size:1.15rem; margin-bottom:.4rem;}
+  .step p{color:var(--muted); font-size:.92rem; margin-bottom:1rem;}
+  .step .mini{border:1px solid var(--line2); border-radius:8px; overflow:hidden; background:#0c0a14;}
+  .step .mini img{width:100%; display:block;}
+
+  /* features */
+  .feats{display:grid; grid-template-columns:repeat(3,1fr); gap:1rem;}
+  @media(max-width:860px){.feats{grid-template-columns:1fr 1fr;}}
+  @media(max-width:560px){.feats{grid-template-columns:1fr;}}
+  .feat{background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:1.3rem; transition:border-color .15s ease, transform .15s ease;}
+  .feat:hover{border-color:var(--line2); transform:translateY(-2px);}
+  .feat .ic{display:block; margin-bottom:.9rem; color:var(--orange);}
+  .feat .ic svg{width:26px; height:26px; fill:none; stroke:currentColor; stroke-width:2; stroke-linecap:round; stroke-linejoin:round;}
+  .feat h3{font-size:1.02rem; margin-bottom:.3rem;}
+  .feat p{color:var(--muted); font-size:.88rem;}
+
+  /* install section */
+  .install-deck{display:grid; grid-template-columns:1fr 1fr; gap:1rem; margin-top:1.5rem;}
+  @media(max-width:760px){.install-deck{grid-template-columns:1fr;}}
+  .install-card{background:var(--panel); border:1px solid var(--line); border-radius:14px; padding:1.4rem;}
+  .install-card .lbl{display:flex; align-items:center; gap:.5rem; font-family:'JetBrains Mono',monospace; font-size:.7rem; text-transform:uppercase; letter-spacing:.1em; color:var(--dim); margin-bottom:.8rem;}
+  .note{margin-top:1.5rem; font-size:.86rem; color:var(--dim); font-family:'JetBrains Mono',monospace;}
+  .note b{color:var(--muted); font-weight:500;}
+
+  /* footer */
+  footer{border-top:1px solid var(--line); padding:2.5rem 0 3.5rem; color:var(--dim);}
+  footer .wrap{display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:1rem;}
+  footer .fbrand{display:flex; align-items:center; gap:.5rem; color:var(--muted); font-weight:600;}
+  footer .fbrand img{height:22px; width:auto; image-rendering:pixelated;}
+  footer .flinks{display:flex; gap:1.3rem; font-family:'JetBrains Mono',monospace; font-size:.78rem;}
+  footer .flinks a:hover{color:var(--text);}
+  footer .meta{width:100%; font-family:'JetBrains Mono',monospace; font-size:.72rem; color:var(--dim); display:flex; gap:1rem; flex-wrap:wrap; margin-top:.4rem;}
+  footer .meta a{color:var(--dim); text-decoration:underline;}
+</style>
 </head>
 <body>
-    <div class="container">
-        <img src="images/logo.webp" alt="TaskYou mascot" style="width: 120px; height: auto; margin-bottom: 1rem;">
-        <h1>TaskYou</h1>
-        <p class="tagline">Kanban for Claude Code.</p>
+<div class="grid-bg"></div>
 
-        <video class="demo-video" autoplay muted playsinline onclick="toggleVideo(this)" onended="this.currentTime=0; this.muted=true;">
-            <source src="TaskYouDemo.mp4" type="video/mp4">
-        </video>
+<!-- CRT chromatic-aberration filter for the hero headline -->
+<svg width="0" height="0" style="position:absolute;pointer-events:none" aria-hidden="true"><defs>
+  <filter id="fx-aberration" x="-8%" y="-25%" width="116%" height="150%">
+    <feColorMatrix in="SourceGraphic" type="matrix" values="1 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0 0 0 1 0"/>
+    <feOffset dx="1.6" dy="0"/><feGaussianBlur stdDeviation="0.5" result="r"/>
+    <feColorMatrix in="SourceGraphic" type="matrix" values="0 0 0 0 0  0 1 0 0 0  0 0 0 0 0  0 0 0 1 0" result="g"/>
+    <feColorMatrix in="SourceGraphic" type="matrix" values="0 0 0 0 0  0 0 0 0 0  0 0 1 0 0  0 0 0 1 0"/>
+    <feOffset dx="-1.6" dy="0"/><feGaussianBlur stdDeviation="0.5" result="b"/>
+    <feBlend in="r" in2="g" mode="screen" result="rg"/>
+    <feBlend in="rg" in2="b" mode="screen"/>
+  </filter>
+</defs></svg>
 
-        <div class="links">
-            <a href="https://github.com/bborn/taskyou">GitHub</a>
-            <a href="https://github.com/bborn/taskyou#readme">Docs</a>
-            <a href="https://twitter.com/taskyoudev">@taskyoudev</a>
+<nav>
+  <div class="wrap">
+    <a class="brand" href="/"><img src="images/logo.webp" alt="">taskyou</a>
+    <div class="navlinks">
+      <a class="desktop-only" href="#how">How it works</a>
+      <a class="desktop-only" href="#features">Features</a>
+      <a href="https://github.com/bborn/taskyou">GitHub</a>
+      <a href="#install" class="btn btn-primary">Install ↓</a>
+    </div>
+  </div>
+</nav>
+
+<header class="hero">
+  <div class="wrap hero-grid">
+    <div>
+      <img class="mascot-lg" src="images/logo.webp" alt="TaskYou mascot — a pixel coffee mug in sunglasses">
+      <h1 class="headline">Kanban for <span class="t">code agents</span>.</h1>
+      <p class="lede">Calm, cool, a little crazy.</p>
+      <p class="supp">An agent for every task. A worktree for every agent.</p>
+
+      <div class="install" style="margin-top:1.8rem; max-width:430px;">
+        <div class="lbl">Install with one command</div>
+        <div class="cmd" onclick="copyCmd(this,'curl -fsSL taskyou.dev/install.sh | bash')">
+          <span class="ctext"><span class="prompt">$</span> curl -fsSL taskyou.dev/install.sh | bash</span>
+          <span class="copy">COPY</span>
         </div>
+      </div>
 
-        <div class="install-box">
-            <div class="install-label">Install with one command</div>
-            <div class="install-cmd" onclick="copyInstall(this, 'curl -fsSL taskyou.dev/install.sh | bash')">
-                curl -fsSL taskyou.dev/install.sh | bash
-            </div>
-        </div>
-
-        <div class="install-box">
-            <div class="install-label">Or run instantly on <a href="https://exe.dev" style="color: var(--cyan-glow); text-decoration: none;">exe.dev</a></div>
-            <div class="install-cmd" data-cmd="VM=$(ssh exe.dev 'new --json --no-email' | jq -r .vm_name) && ssh -t $VM.exe.xyz 'curl -fsSL taskyou.dev/install.sh | bash && ~/.local/bin/ty'" onclick="copyInstall(this)">
-                VM=$(ssh exe.dev 'new --json --no-email' | jq -r .vm_name) && ssh -t $VM.exe.xyz 'curl -fsSL taskyou.dev/install.sh | bash && ~/.local/bin/ty'
-            </div>
-        </div>
-
-        <p style="margin-top: 2rem; font-size: 0.75rem; color: var(--slate);">
-            Music: <a href="https://zevboomer.bandcamp.com" style="color: var(--slate); text-decoration: underline;">Zev Boomer</a>
-        </p>
+      <div class="badges">
+        <span class="chip"><b>◆</b> open source · MIT</span>
+        <span class="chip"><b>◆</b> terminal-native</span>
+        <span class="chip"><b>◆</b> works with Claude Code</span>
+      </div>
     </div>
 
-    <script>
-        function toggleVideo(video) {
-            if (video.muted) {
-                video.currentTime = 0;
-                video.muted = false;
-                video.play();
-            } else if (video.paused) {
-                video.play();
-            } else {
-                video.pause();
-            }
-        }
-        function copyInstall(el, cmd) {
-            const text = cmd || el.dataset.cmd;
-            navigator.clipboard.writeText(text);
-            el.classList.add('copied');
-            const original = el.textContent;
-            el.textContent = 'Copied!';
-            setTimeout(() => {
-                el.classList.remove('copied');
-                el.textContent = original;
-            }, 2000);
-        }
-    </script>
+    <div class="win">
+      <div class="bar"><i style="background:#ff5f57"></i><i style="background:#febc2e"></i><i style="background:#28c840"></i><span class="ttl">~/projects/storefront — ty</span></div>
+      <img src="screenshots/kanban-board.png" alt="TaskYou Kanban board running in the terminal" loading="lazy">
+    </div>
+  </div>
+</header>
+
+<!-- DEMO -->
+<section id="demo" style="padding-top:1.5rem;">
+  <div class="wrap">
+    <div class="eyebrow">See it run</div>
+    <h2 class="sec">Watch the board clear itself.</h2>
+    <p class="sec-sub">Queue up work, hand it to the agents, and watch cards march from Backlog to Done.</p>
+    <div class="win">
+      <div class="bar"><i style="background:#ff5f57"></i><i style="background:#febc2e"></i><i style="background:#28c840"></i><span class="ttl">taskyou — demo</span></div>
+      <video src="TaskYouDemo.mp4" poster="screenshots/kanban-board.png" autoplay muted loop playsinline preload="metadata" onclick="toggleSound(this)"></video>
+    </div>
+    <p class="note" style="text-align:center;">▸ click the video for sound</p>
+  </div>
+</section>
+
+<!-- HOW IT WORKS -->
+<section id="how">
+  <div class="wrap">
+    <div class="eyebrow">How it works</div>
+    <h2 class="sec">Drop a task. Walk away. Merge the diff.</h2>
+    <p class="sec-sub">TaskYou is a Kanban board that runs in your terminal — but the cards do the work. Move one into play and ty puts a Claude Code agent on it, in its own isolated git worktree.</p>
+
+    <div class="steps">
+      <div class="step">
+        <div class="num">1</div>
+        <h3>Add a task</h3>
+        <p>Write what you want done in plain language and drop it on the board.</p>
+        <div class="mini"><img src="screenshots/new-task-form.png" alt="Creating a new task in TaskYou" loading="lazy"></div>
+      </div>
+      <div class="step">
+        <div class="num">2</div>
+        <h3>An agent picks it up</h3>
+        <p>ty spins up a Claude Code agent in a fresh worktree and runs it in the background.</p>
+        <div class="mini"><img src="screenshots/execution-log.png" alt="Live agent execution log" loading="lazy"></div>
+      </div>
+      <div class="step">
+        <div class="num">3</div>
+        <h3>Review &amp; merge</h3>
+        <p>Read the diff and the run log, then merge straight from the board.</p>
+        <div class="mini"><img src="screenshots/task-detail-view.png" alt="Task detail view with diff" loading="lazy"></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- FEATURES -->
+<section id="features" style="padding-top:1rem;">
+  <div class="wrap">
+    <div class="eyebrow">Why it's different</div>
+    <h2 class="sec">Built for running many agents at once.</h2>
+    <p class="sec-sub">Not a chat window. A board you can stack with work and let rip — every task isolated, every agent accountable.</p>
+
+    <div class="feats">
+      <div class="feat"><span class="ic"><svg viewBox="0 0 24 24"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg></span><h3>Terminal-native</h3><p>A full Kanban TUI. Keyboard-driven and fast — no browser, no context switch.</p></div>
+      <div class="feat"><span class="ic"><svg viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><line x1="9" y1="1" x2="9" y2="4"/><line x1="15" y1="1" x2="15" y2="4"/><line x1="9" y1="20" x2="9" y2="23"/><line x1="15" y1="20" x2="15" y2="23"/><line x1="20" y1="9" x2="23" y2="9"/><line x1="20" y1="14" x2="23" y2="14"/><line x1="1" y1="9" x2="4" y2="9"/><line x1="1" y1="14" x2="4" y2="14"/></svg></span><h3>An agent per task</h3><p>Every card gets its own Claude Code agent. Run a whole column in parallel.</p></div>
+      <div class="feat"><span class="ic"><svg viewBox="0 0 24 24"><line x1="6" y1="3" x2="6" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/></svg></span><h3>Worktree isolation</h3><p>Each agent works in its own git worktree. They never step on your working tree — or each other.</p></div>
+      <div class="feat"><span class="ic"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><polyline points="12 7 12 12 15 14"/></svg></span><h3>Background execution</h3><p>Queue a stack of tasks, walk away, come back to a column full of diffs.</p></div>
+      <div class="feat"><span class="ic"><svg viewBox="0 0 24 24"><circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><path d="M6 21V9a9 9 0 0 0 9 9"/></svg></span><h3>Review &amp; merge</h3><p>Inspect the diff, read the execution log, and merge — all from the board.</p></div>
+      <div class="feat"><span class="ic"><svg viewBox="0 0 24 24"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg></span><h3>Open source</h3><p>MIT-licensed and free. Runs locally, drives the Claude Code you already have.</p></div>
+    </div>
+  </div>
+</section>
+
+<!-- INSTALL -->
+<section id="install" style="padding-top:1rem;">
+  <div class="wrap">
+    <div class="eyebrow">Install</div>
+    <h2 class="sec">One command and you're on the board.</h2>
+    <p class="sec-sub">Grab the binary, or spin it up on a fresh cloud VM in seconds.</p>
+
+    <div class="install-deck">
+      <div class="install-card">
+        <div class="lbl">◆ Local — macOS / Linux</div>
+        <div class="cmd" onclick="copyCmd(this,'curl -fsSL taskyou.dev/install.sh | bash')">
+          <span class="ctext"><span class="prompt">$</span> curl -fsSL taskyou.dev/install.sh | bash</span>
+          <span class="copy">COPY</span>
+        </div>
+      </div>
+      <div class="install-card">
+        <div class="lbl">☁ Instant — on <a href="https://exe.dev" style="color:var(--green);">exe.dev</a></div>
+        <div class="cmd" onclick="copyCmd(this, this.dataset.cmd)" data-cmd="VM=$(ssh exe.dev 'new --json --no-email' | jq -r .vm_name) && ssh -t $VM.exe.xyz 'curl -fsSL taskyou.dev/install.sh | bash && ~/.local/bin/ty'">
+          <span class="ctext"><span class="prompt">$</span> ssh exe.dev — new VM + ty, one line</span>
+          <span class="copy">COPY</span>
+        </div>
+      </div>
+    </div>
+    <p class="note"><b>Needs Claude Code.</b> ty drives the agent you already have installed.</p>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    <span class="fbrand"><img src="images/logo.webp" alt="">taskyou</span>
+    <span class="flinks">
+      <a href="https://github.com/bborn/taskyou">GitHub</a>
+      <a href="https://github.com/bborn/taskyou#readme">Docs</a>
+      <a href="https://twitter.com/taskyoudev">@taskyoudev</a>
+    </span>
+    <span class="meta">
+      <span>MIT License</span>
+      <span>Music: <a href="https://zevboomer.bandcamp.com">Zev Boomer</a></span>
+      <span>calm, cool, a little crazy.</span>
+    </span>
+  </div>
+</footer>
+
+<script>
+  function toggleSound(v){
+    v.muted = !v.muted;
+    if(!v.muted){ v.currentTime = 0; }
+    v.play();
+  }
+  function copyCmd(el, cmd){
+    if(navigator.clipboard){ navigator.clipboard.writeText(cmd); }
+    el.classList.add('copied');
+    const c = el.querySelector('.copy'); const o = c.textContent; c.textContent = 'COPIED!';
+    setTimeout(()=>{ el.classList.remove('copied'); c.textContent = o; }, 1600);
+  }
+</script>
 </body>
 </html>
