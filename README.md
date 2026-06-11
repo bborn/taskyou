@@ -6,6 +6,19 @@
 
 A personal task management system with a beautiful terminal UI, SQLite storage, and background task execution via pluggable AI agents (Claude Code, OpenAI Codex, Gemini, Pi, OpenClaw, or OpenCode).
 
+## Desktop App
+
+Just want the GUI? Grab a prebuilt bundle from the [latest release](https://github.com/bborn/taskyou/releases/latest):
+
+- **macOS**: `TaskYou-macos-arm64.dmg` (Apple Silicon) or `TaskYou-macos-x64.dmg` (Intel)
+- **Linux**: `TaskYou-linux-x64.AppImage` or `.deb`
+
+The app is self-contained — it ships its own `ty` engine and starts the server and daemon for you. Two things must be installed on your machine: **tmux** (`brew install tmux`) and at least one executor CLI (e.g. [Claude Code](https://claude.com/claude-code)).
+
+The macOS bundles are unsigned for now: on first launch, right-click the app → Open (or `xattr -dr com.apple.quarantine /Applications/TaskYou.app`).
+
+The same UI is also served in your browser at `http://localhost:8484` whenever `ty serve` runs with the embedded UI (`make build-ui build`). Desktop gets a real PTY executor terminal; the browser falls back to a live terminal mirror. Source lives in [`desktop/`](desktop/).
+
 ## Screenshots
 
 ### Kanban Board

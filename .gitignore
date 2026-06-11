@@ -49,6 +49,7 @@ tmux-*.log
 .playwright-mcp/
 .mcp.json
 .gstack/
+internal/web/ui/dist/
 
 # goreleaser before-hook output (release.extra_files)
 ty-chrome.zip

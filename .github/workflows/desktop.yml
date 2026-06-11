@@ -1,0 +1,126 @@
+name: Desktop
+
+# Builds the self-contained TaskYou Desktop bundles (the app ships its own
+# `ty` sidecar with the web UI embedded) and attaches them to the GitHub
+# release created by the Release workflow. tmux + an executor CLI (claude,
+# codex, …) remain machine prerequisites — they can't be bundled.
+#
+# No Windows target: task execution runs on tmux.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  bundle:
+    name: Bundle (${{ matrix.name }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macos-arm64
+            runner: macos-14
+            triple: aarch64-apple-darwin
+            bundles: "dmg"
+          - name: macos-x64
+            runner: macos-13
+            triple: x86_64-apple-darwin
+            bundles: "dmg"
+          - name: linux-x64
+            runner: ubuntu-22.04
+            triple: x86_64-unknown-linux-gnu
+            bundles: "appimage deb"
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install Linux webview deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev \
+            librsvg2-dev patchelf libgtk-3-dev
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: "1.25"
+          check-latest: true
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop/src-tauri
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: desktop/pnpm-lock.yaml
+
+      - name: Build frontend
+        run: |
+          cd desktop
+          pnpm install --frozen-lockfile
+          pnpm build
+
+      - name: Build ty sidecar (web UI embedded)
+        run: |
+          rm -rf internal/web/ui/dist
+          cp -R desktop/dist internal/web/ui/dist
+          mkdir -p desktop/src-tauri/binaries
+          go build -tags ui -ldflags="-s -w" \
+            -o "desktop/src-tauri/binaries/ty-${{ matrix.triple }}" ./cmd/task
+
+      - name: Build desktop bundles
+        run: |
+          cd desktop
+          pnpm tauri build --target ${{ matrix.triple }} --bundles ${{ matrix.bundles }}
+
+      - name: Collect artifacts
+        id: collect
+        run: |
+          mkdir -p out
+          find desktop/src-tauri/target/${{ matrix.triple }}/release/bundle \
+            \( -name "*.dmg" -o -name "*.AppImage" -o -name "*.deb" \) \
+            -exec cp {} out/ \;
+          cd out
+          for f in *; do
+            base="${f%.*}"; ext="${f##*.}"
+            mv "$f" "TaskYou-${{ matrix.name }}.${ext}"
+          done
+          ls -la
+
+      - name: Upload workflow artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: taskyou-desktop-${{ matrix.name }}
+          path: out/*
+
+      - name: Attach to release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          # The Release workflow (goreleaser) creates the release; wait for it.
+          for i in $(seq 1 30); do
+            if gh release view "$TAG" >/dev/null 2>&1; then break; fi
+            sleep 20
+          done
+          gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --title "$TAG" --draft=false
+          gh release upload "$TAG" out/* --clobber

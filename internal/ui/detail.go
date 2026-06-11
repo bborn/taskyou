@@ -1021,131 +1021,23 @@ func (m *DetailModel) startResumableSession(sessionID string, handoffContext ...
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	windowName := executor.TmuxWindowName(m.task.ID)
-	log.Debug("startResumableSession: windowName=%q", windowName)
-
-	// IMPORTANT: Check if a window with this name already exists in ANY daemon session
-	// to avoid creating duplicates. If found, update the cached target and return.
-	existingOut, err := osExec.CommandContext(ctx, "tmux", "list-windows", "-a", "-F", "#{session_name}:#{window_index}:#{window_name}").Output()
-	if err == nil {
-		for _, line := range strings.Split(strings.TrimSpace(string(existingOut)), "\n") {
-			parts := strings.SplitN(line, ":", 3)
-			if len(parts) == 3 && parts[2] == windowName && strings.HasPrefix(parts[0], "task-daemon-") {
-				// Window already exists - use session:index format to avoid ambiguity
-				m.cachedWindowTarget = parts[0] + ":" + parts[1]
-				log.Info("startResumableSession: window already exists at %q, reusing", m.cachedWindowTarget)
-				return nil
-			}
-		}
+	handoff := ""
+	if len(handoffContext) > 0 {
+		handoff = handoffContext[0]
 	}
 
-	// Find or create a task-daemon session to put the window in
-	// First, look for any existing task-daemon-* session
-	out, err := osExec.CommandContext(ctx, "tmux", "list-sessions", "-F", "#{session_name}").Output()
+	// The bootstrap logic (find-or-create daemon session, build executor
+	// command, create window + shell pane) is shared with the HTTP API.
+	target, created, err := m.executor.EnsureTaskWindow(ctx, m.task, sessionID, handoff)
 	if err != nil {
-		log.Error("startResumableSession: list-sessions failed: %v", err)
-		return fmt.Errorf("tmux list-sessions failed: %w", err)
+		log.Error("startResumableSession: %v", err)
+		return err
 	}
-	log.Debug("startResumableSession: sessions: %q", strings.TrimSpace(string(out)))
-
-	var daemonSession string
-	for _, session := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		if strings.HasPrefix(session, "task-daemon-") {
-			daemonSession = session
-			break
-		}
+	if !created {
+		// Window already exists - cache its session:index target for joins.
+		m.cachedWindowTarget = target
+		log.Info("startResumableSession: window already exists at %q, reusing", target)
 	}
-
-	// If no daemon session exists, create one
-	if daemonSession == "" {
-		daemonSession = fmt.Sprintf("task-daemon-%d", os.Getpid())
-		log.Info("startResumableSession: creating new daemon session %q", daemonSession)
-		// Use "tail -f /dev/null" to keep placeholder alive (empty windows exit immediately)
-		err := osExec.CommandContext(ctx, "tmux", "new-session", "-d", "-s", daemonSession, "-n", "_placeholder", "tail", "-f", "/dev/null").Run()
-		if err != nil {
-			log.Error("startResumableSession: new-session failed: %v", err)
-			return fmt.Errorf("tmux new-session failed: %w", err)
-		}
-	} else {
-		log.Debug("startResumableSession: using existing daemon session %q", daemonSession)
-	}
-
-	workDir := m.getWorkdir()
-	log.Debug("startResumableSession: workDir=%q", workDir)
-
-	// Get the appropriate executor for this task
-	taskExecutor := m.executor.GetTaskExecutor(m.task)
-	if taskExecutor == nil {
-		log.Error("startResumableSession: no executor found for task")
-		return fmt.Errorf("no executor configured for task")
-	}
-
-	// Build prompt with task details (for executors that need it)
-	var prompt string
-	if sessionID == "" {
-		// No session to resume - build prompt from task
-		var promptBuilder strings.Builder
-
-		// Include handoff context from previous executor if switching
-		if len(handoffContext) > 0 && handoffContext[0] != "" {
-			promptBuilder.WriteString(handoffContext[0])
-		}
-
-		promptBuilder.WriteString(fmt.Sprintf("# Task: %s\n\n", m.task.Title))
-		if m.task.Body != "" {
-			promptBuilder.WriteString(m.task.Body)
-			promptBuilder.WriteString("\n")
-		}
-		prompt = promptBuilder.String()
-	}
-
-	// Get the command from the executor
-	script := taskExecutor.BuildCommand(m.task, sessionID, prompt)
-	log.Debug("startResumableSession: script=%q", script)
-
-	// Log the session start
-	executorName := taskExecutor.Name()
-	if sessionID != "" {
-		m.database.AppendTaskLog(m.task.ID, "system", fmt.Sprintf("Reconnecting to %s session %s", executorName, sessionID))
-	} else {
-		m.database.AppendTaskLog(m.task.ID, "system", fmt.Sprintf("Starting new %s session", executorName))
-	}
-
-	// Create new window in the daemon session
-	log.Info("startResumableSession: creating new window in %q", daemonSession)
-	err = osExec.CommandContext(ctx, "tmux", "new-window", "-d",
-		"-t", daemonSession,
-		"-n", windowName,
-		"-c", workDir,
-		"sh", "-c", script).Run()
-	if err != nil {
-		log.Error("startResumableSession: new-window failed: %v", err)
-		return fmt.Errorf("tmux new-window failed: %w", err)
-	}
-
-	// Give tmux a moment to create the window
-	time.Sleep(100 * time.Millisecond)
-
-	// Create shell pane alongside Claude
-	// Use user's default shell, fallback to zsh
-	shell := os.Getenv("SHELL")
-	if shell == "" {
-		shell = "/bin/zsh"
-	}
-	windowTarget := daemonSession + ":" + windowName
-	log.Debug("startResumableSession: creating shell pane at %q", windowTarget)
-	err = osExec.CommandContext(ctx, "tmux", "split-window",
-		"-h",                    // horizontal split
-		"-t", windowTarget+".0", // split from Claude pane
-		"-c", workDir, // start in task workdir
-		shell).Run() // user's shell to prevent immediate exit
-	if err != nil {
-		log.Warn("startResumableSession: split-window for shell failed: %v", err)
-	}
-
-	// Set pane titles
-	osExec.CommandContext(ctx, "tmux", "select-pane", "-t", windowTarget+".0", "-T", m.executorDisplayName()).Run()
-	osExec.CommandContext(ctx, "tmux", "select-pane", "-t", windowTarget+".1", "-T", "Shell").Run()
 	log.Info("startResumableSession: completed for task %d", m.task.ID)
 	return nil
 }

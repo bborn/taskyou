@@ -203,6 +203,11 @@ func TestCalendarCronUsesLaunchdOnDarwin(t *testing.T) {
 
 func TestInstallAndRemoveLaunchdSchedule(t *testing.T) {
 	agents, _ := setupScheduleTest(t)
+	// Interval schedules pick launchd only on darwin; force it so the test
+	// exercises the launchd path on Linux CI too (everything else is stubbed).
+	prev := osGOOS
+	osGOOS = "darwin"
+	t.Cleanup(func() { osGOOS = prev })
 
 	sched, err := InstallSchedule("scout", ScheduleOptions{Every: 30 * time.Minute})
 	if err != nil {
