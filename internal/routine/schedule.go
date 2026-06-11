@@ -47,10 +47,11 @@ func launchdPlistPath(name string) string {
 	return filepath.Join(launchdDir(), launchdLabelPrefix+name+".plist")
 }
 
-// launchctlBin and crontabBin are overridable for tests.
+// launchctlBin, crontabBin, and osGOOS are overridable for tests.
 var (
 	launchctlBin = "launchctl"
 	crontabBin   = "crontab"
+	osGOOS       = runtime.GOOS
 )
 
 // ScheduleOptions describes the requested cadence. Exactly one of Every or
@@ -74,15 +75,22 @@ func (o ScheduleOptions) validate() error {
 	return nil
 }
 
-// backendFor picks the scheduler backend for the requested cadence.
+// backendFor picks the scheduler backend for the requested cadence. On macOS,
+// launchd is preferred whenever it can express the cadence — its
+// StartCalendarInterval fires missed events on wake, where cron just skips
+// them on a sleeping laptop. Cron expressions launchd can't express (ranges,
+// lists, step values) fall through to crontab.
 func (o ScheduleOptions) backendFor(goos string) string {
-	if o.Cron != "" {
+	if goos != "darwin" {
 		return "cron"
 	}
-	if goos == "darwin" {
-		return "launchd"
+	if o.Cron != "" {
+		if _, ok := parseSimpleCron(o.Cron); ok {
+			return "launchd"
+		}
+		return "cron"
 	}
-	return "cron"
+	return "launchd"
 }
 
 // RenderSchedule returns the scheduler config that InstallSchedule would
@@ -91,10 +99,10 @@ func RenderSchedule(name string, opts ScheduleOptions) (backend, content string,
 	if err := opts.validate(); err != nil {
 		return "", "", err
 	}
-	backend = opts.backendFor(runtime.GOOS)
+	backend = opts.backendFor(osGOOS)
 	switch backend {
 	case "launchd":
-		return backend, renderPlist(name, opts.Every), nil
+		return backend, renderPlist(name, opts), nil
 	default:
 		line, err := renderCronLine(name, opts)
 		return backend, line, err
@@ -107,10 +115,25 @@ func RenderSchedule(name string, opts ScheduleOptions) (backend, content string,
 // program is wrapped in /bin/bash so macOS's "Background Items Added"
 // notification attributes the agent to an Apple-signed binary instead of
 // nagging about an unsigned one on every ty upgrade.
-func renderPlist(name string, every time.Duration) string {
+func renderPlist(name string, opts ScheduleOptions) string {
 	tyBin := executablePath()
 	logPath := filepath.Join(StateDir(name), "launchd.log")
 	cmd := fmt.Sprintf("exec %q run %q", tyBin, name)
+
+	var trigger string
+	if opts.Every > 0 {
+		trigger = fmt.Sprintf("\t<key>StartInterval</key>\n\t<integer>%d</integer>", int(opts.Every.Seconds()))
+	} else {
+		cal, _ := parseSimpleCron(opts.Cron)
+		trigger = "\t<key>StartCalendarInterval</key>\n\t<dict>\n" +
+			fmt.Sprintf("\t\t<key>Minute</key>\n\t\t<integer>%d</integer>\n", cal.minute) +
+			fmt.Sprintf("\t\t<key>Hour</key>\n\t\t<integer>%d</integer>\n", cal.hour)
+		if cal.weekday >= 0 {
+			trigger += fmt.Sprintf("\t\t<key>Weekday</key>\n\t\t<integer>%d</integer>\n", cal.weekday)
+		}
+		trigger += "\t</dict>"
+	}
+
 	return fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -130,15 +153,52 @@ func renderPlist(name string, every time.Duration) string {
 		<string>-c</string>
 		<string>%s</string>
 	</array>
-	<key>StartInterval</key>
-	<integer>%d</integer>
+%s
 	<key>StandardOutPath</key>
 	<string>%s</string>
 	<key>StandardErrorPath</key>
 	<string>%s</string>
 </dict>
 </plist>
-`, launchdLabelPrefix, name, os.Getenv("HOME"), os.Getenv("PATH"), xmlEscape(cmd), int(every.Seconds()), logPath, logPath)
+`, launchdLabelPrefix, name, os.Getenv("HOME"), os.Getenv("PATH"), xmlEscape(cmd), trigger, logPath, logPath)
+}
+
+// calendarSpec is a launchd-expressible calendar cadence: a fixed minute+hour,
+// daily or on one weekday.
+type calendarSpec struct {
+	minute, hour int
+	weekday      int // 0=Sun..6=Sat, -1 = every day
+}
+
+// parseSimpleCron recognizes the cron subset launchd's StartCalendarInterval
+// can express: "M H * * *" (daily) and "M H * * D" (weekly, single numeric
+// day-of-week, 7 normalized to 0). Anything else (ranges, lists, steps,
+// day-of-month) returns false and stays on the cron backend.
+func parseSimpleCron(expr string) (*calendarSpec, bool) {
+	f := strings.Fields(expr)
+	if len(f) != 5 || f[2] != "*" || f[3] != "*" {
+		return nil, false
+	}
+	minute, err := strconv.Atoi(f[0])
+	if err != nil || minute < 0 || minute > 59 {
+		return nil, false
+	}
+	hour, err := strconv.Atoi(f[1])
+	if err != nil || hour < 0 || hour > 23 {
+		return nil, false
+	}
+	weekday := -1
+	if f[4] != "*" {
+		w, err := strconv.Atoi(f[4])
+		if err != nil || w < 0 || w > 7 {
+			return nil, false
+		}
+		if w == 7 {
+			w = 0
+		}
+		weekday = w
+	}
+	return &calendarSpec{minute: minute, hour: hour, weekday: weekday}, true
 }
 
 func renderCronLine(name string, opts ScheduleOptions) (string, error) {
@@ -232,7 +292,14 @@ func ScheduledFor(name string) (*Schedule, error) {
 	return schedules[name], nil
 }
 
-var startIntervalRe = regexp.MustCompile(`<key>StartInterval</key>\s*<integer>(\d+)</integer>`)
+var (
+	startIntervalRe = regexp.MustCompile(`<key>StartInterval</key>\s*<integer>(\d+)</integer>`)
+	calMinuteRe     = regexp.MustCompile(`<key>Minute</key>\s*<integer>(\d+)</integer>`)
+	calHourRe       = regexp.MustCompile(`<key>Hour</key>\s*<integer>(\d+)</integer>`)
+	calWeekdayRe    = regexp.MustCompile(`<key>Weekday</key>\s*<integer>(\d+)</integer>`)
+)
+
+var weekdayNames = []string{"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"}
 
 // LoadSchedules resolves live schedules for many routines with one pass over
 // the LaunchAgents dir and one crontab read (the TUI and list call this).
@@ -249,6 +316,19 @@ func LoadSchedules(names []string) (map[string]*Schedule, error) {
 		if m := startIntervalRe.FindSubmatch(data); m != nil {
 			secs, _ := strconv.Atoi(string(m[1]))
 			detail = "every " + cleanDuration(time.Duration(secs)*time.Second)
+		} else if hm := calHourRe.FindSubmatch(data); hm != nil {
+			hour, _ := strconv.Atoi(string(hm[1]))
+			minute := 0
+			if mm := calMinuteRe.FindSubmatch(data); mm != nil {
+				minute, _ = strconv.Atoi(string(mm[1]))
+			}
+			day := "daily"
+			if wm := calWeekdayRe.FindSubmatch(data); wm != nil {
+				if w, _ := strconv.Atoi(string(wm[1])); w >= 0 && w < 7 {
+					day = weekdayNames[w]
+				}
+			}
+			detail = fmt.Sprintf("%s %d:%02d", day, hour, minute)
 		}
 		result[name] = &Schedule{Backend: "launchd", Detail: detail, Path: plist}
 	}

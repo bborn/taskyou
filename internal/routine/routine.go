@@ -43,6 +43,7 @@ type Routine struct {
 	Project        string        // project for emitted/alert tasks (frontmatter "project")
 	PermissionMode string        // frontmatter "permission-mode", default dangerous (headless runs can't answer prompts)
 	Timeout        time.Duration // frontmatter "timeout" (Go duration), default 30m
+	WorkDir        string        // frontmatter "dir": run cwd override (for repo context / project-scoped MCP); default = state dir
 	Disabled       bool          // presence of a "disabled" file in Dir
 }
 
@@ -121,6 +122,12 @@ func Load(name string) (*Routine, error) {
 			r.Project = value
 		case "permission-mode":
 			r.PermissionMode = value
+		case "dir":
+			if strings.HasPrefix(value, "~/") {
+				home, _ := os.UserHomeDir()
+				value = filepath.Join(home, value[2:])
+			}
+			r.WorkDir = value
 		case "timeout":
 			d, err := time.ParseDuration(value)
 			if err != nil {
@@ -128,7 +135,7 @@ func Load(name string) (*Routine, error) {
 			}
 			r.Timeout = d
 		default:
-			return nil, fmt.Errorf("routine %q: unknown frontmatter key %q (valid: model, project, permission-mode, timeout)", name, key)
+			return nil, fmt.Errorf("routine %q: unknown frontmatter key %q (valid: model, project, permission-mode, timeout, dir)", name, key)
 		}
 	}
 

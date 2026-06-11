@@ -118,8 +118,19 @@ exec "$TY_ROUTINE_CLAUDE_BIN" -p --model "$TY_ROUTINE_MODEL" $TY_ROUTINE_PERMISS
 	ctx, cancel := context.WithTimeout(ctx, rt.Timeout)
 	defer cancel()
 
+	// Default cwd is the private state dir; "dir:" frontmatter overrides it so
+	// a routine can run inside a repo (project-scoped MCP, CLAUDE.md, gh
+	// context). A missing dir fails the run fast, which triggers the alert.
+	workDir := stateDir
+	if rt.WorkDir != "" {
+		if _, err := os.Stat(rt.WorkDir); err != nil {
+			return -1, fmt.Errorf("routine dir %q: %w", rt.WorkDir, err)
+		}
+		workDir = rt.WorkDir
+	}
+
 	cmd := exec.CommandContext(ctx, "bash", "-c", script)
-	cmd.Dir = stateDir
+	cmd.Dir = workDir
 	cmd.Stdin = strings.NewReader(rt.Prompt)
 	cmd.Stdout = out
 	cmd.Stderr = out

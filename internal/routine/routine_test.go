@@ -127,7 +127,7 @@ func TestLoadDefaults(t *testing.T) {
 
 func TestLoadFrontmatterOverrides(t *testing.T) {
 	dir := setupRoutinesDir(t)
-	writeRoutine(t, dir, "scout", "---\nmodel: opus\nproject: oss\ntimeout: 5m\npermission-mode: auto\n---\nprompt body")
+	writeRoutine(t, dir, "scout", "---\nmodel: opus\nproject: oss\ntimeout: 5m\npermission-mode: auto\ndir: ~/Projects/somerepo\n---\nprompt body")
 
 	rt, err := Load("scout")
 	if err != nil {
@@ -135,6 +135,10 @@ func TestLoadFrontmatterOverrides(t *testing.T) {
 	}
 	if rt.Model != "opus" || rt.Project != "oss" || rt.Timeout != 5*time.Minute || rt.PermissionMode != "auto" {
 		t.Errorf("overrides not applied: %+v", rt)
+	}
+	home, _ := os.UserHomeDir()
+	if rt.WorkDir != filepath.Join(home, "Projects", "somerepo") {
+		t.Errorf("dir not expanded: %q", rt.WorkDir)
 	}
 }
 

@@ -119,7 +119,7 @@ func TestCleanDuration(t *testing.T) {
 
 func TestRenderPlistContent(t *testing.T) {
 	setupScheduleTest(t)
-	content := renderPlist("scout", 30*time.Minute)
+	content := renderPlist("scout", ScheduleOptions{Every: 30 * time.Minute})
 
 	for _, want := range []string{
 		"<string>com.taskyou.routine.scout</string>",
@@ -134,6 +134,70 @@ func TestRenderPlistContent(t *testing.T) {
 	}
 	if !strings.Contains(content, os.Getenv("PATH")) {
 		t.Error("plist should capture the invoking shell's PATH")
+	}
+}
+
+func TestParseSimpleCron(t *testing.T) {
+	tests := []struct {
+		expr string
+		want *calendarSpec
+	}{
+		{"0 6 * * *", &calendarSpec{minute: 0, hour: 6, weekday: -1}},
+		{"11 8 * * *", &calendarSpec{minute: 11, hour: 8, weekday: -1}},
+		{"0 6 * * 4", &calendarSpec{minute: 0, hour: 6, weekday: 4}},
+		{"0 6 * * 7", &calendarSpec{minute: 0, hour: 6, weekday: 0}}, // 7 normalizes to Sunday
+		{"*/30 * * * *", nil}, // step values
+		{"0 8 * * 1-5", nil},  // ranges
+		{"0 8 1 * *", nil},    // day-of-month
+		{"0 8 * 6 *", nil},    // month
+	}
+	for _, tt := range tests {
+		got, ok := parseSimpleCron(tt.expr)
+		if tt.want == nil {
+			if ok {
+				t.Errorf("parseSimpleCron(%q): expected not parseable, got %+v", tt.expr, got)
+			}
+			continue
+		}
+		if !ok || *got != *tt.want {
+			t.Errorf("parseSimpleCron(%q) = %+v ok=%v, want %+v", tt.expr, got, ok, tt.want)
+		}
+	}
+}
+
+func TestCalendarCronUsesLaunchdOnDarwin(t *testing.T) {
+	setupScheduleTest(t)
+	prev := osGOOS
+	osGOOS = "darwin"
+	t.Cleanup(func() { osGOOS = prev })
+
+	// Simple weekly expression -> launchd StartCalendarInterval
+	backend, content, err := RenderSchedule("scout", ScheduleOptions{Cron: "0 6 * * 4"})
+	if err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	if backend != "launchd" {
+		t.Fatalf("expected launchd for simple cron on darwin, got %q", backend)
+	}
+	for _, want := range []string{"StartCalendarInterval", "<key>Hour</key>", "<integer>6</integer>", "<key>Weekday</key>", "<integer>4</integer>"} {
+		if !strings.Contains(content, want) {
+			t.Errorf("plist missing %q:\n%s", want, content)
+		}
+	}
+
+	// Complex expression -> cron backend even on darwin
+	backend, _, err = RenderSchedule("scout", ScheduleOptions{Cron: "0 8 * * 1-5"})
+	if err != nil || backend != "cron" {
+		t.Errorf("expected cron for complex expression, got %q (%v)", backend, err)
+	}
+
+	// Live lookup renders the calendar detail
+	if _, err := InstallSchedule("scout", ScheduleOptions{Cron: "0 6 * * 4"}); err != nil {
+		t.Fatalf("install: %v", err)
+	}
+	sched, err := ScheduledFor("scout")
+	if err != nil || sched == nil || sched.Detail != "Thu 6:00" {
+		t.Errorf("expected detail 'Thu 6:00', got %+v (%v)", sched, err)
 	}
 }
 
@@ -218,6 +282,22 @@ func TestInstallAndRemoveCronSchedule(t *testing.T) {
 	}
 	if !strings.Contains(string(data), "backup.sh") {
 		t.Error("user's own line should survive removal")
+	}
+}
+
+func TestLinuxAlwaysUsesCron(t *testing.T) {
+	setupScheduleTest(t)
+	prev := osGOOS
+	osGOOS = "linux"
+	t.Cleanup(func() { osGOOS = prev })
+
+	backend, _, err := RenderSchedule("scout", ScheduleOptions{Cron: "0 6 * * *"})
+	if err != nil || backend != "cron" {
+		t.Errorf("expected cron on linux, got %q (%v)", backend, err)
+	}
+	backend, _, err = RenderSchedule("scout", ScheduleOptions{Every: 30 * time.Minute})
+	if err != nil || backend != "cron" {
+		t.Errorf("expected cron on linux for --every, got %q (%v)", backend, err)
 	}
 }
 
