@@ -14,6 +14,13 @@ GO ?= go
 VERSION ?= $(shell git describe --tags --always 2>/dev/null | sed 's/^v//' || echo dev)
 LDFLAGS := -s -w -X main.version=$(VERSION)
 
+# Embed the web UI when its build output is present (run `make build-ui`).
+ifneq (,$(wildcard internal/web/ui/dist/index.html))
+GO_TAGS := -tags ui
+else
+GO_TAGS :=
+endif
+
 # Build all binaries and (optionally) restart daemon if running
 build: build-ty build-taskd restart-daemon
 
@@ -21,11 +28,32 @@ build: build-ty build-taskd restart-daemon
 build-no-restart: build-ty build-taskd
 
 build-ty:
-	$(GO) build -ldflags="$(LDFLAGS)" -o bin/ty ./cmd/task
+	$(GO) build $(GO_TAGS) -ldflags="$(LDFLAGS)" -o bin/ty ./cmd/task
 	ln -sf ty bin/taskyou
 
 build-taskd:
-	$(GO) build -ldflags="$(LDFLAGS)" -o bin/taskd ./cmd/taskd
+	$(GO) build $(GO_TAGS) -ldflags="$(LDFLAGS)" -o bin/taskd ./cmd/taskd
+
+# Build the web/desktop frontend and stage it for embedding into ty serve.
+# After this, `make build` produces a ty whose `serve` hosts the UI at /.
+build-ui:
+	cd desktop && pnpm install --silent && pnpm build
+	rm -rf internal/web/ui/dist
+	cp -R desktop/dist internal/web/ui/dist
+
+# Self-contained desktop bundle: stages a UI-embedded ty as the Tauri sidecar
+# (the app spawns its own serve/daemon), then builds the platform bundles.
+# Note: cargo check/test in desktop/src-tauri need a staged sidecar too —
+# run `make desktop-sidecar` once after a fresh clone.
+RUST_TRIPLE = $(shell rustc -vV 2>/dev/null | awk '/^host/{print $$2}')
+desktop-sidecar:
+	mkdir -p desktop/src-tauri/binaries
+	$(GO) build $(GO_TAGS) -ldflags="$(LDFLAGS)" -o desktop/src-tauri/binaries/ty-$(RUST_TRIPLE) ./cmd/task
+
+desktop-bundle: build-ui
+	mkdir -p desktop/src-tauri/binaries
+	$(GO) build -tags ui -ldflags="$(LDFLAGS)" -o desktop/src-tauri/binaries/ty-$(RUST_TRIPLE) ./cmd/task
+	cd desktop && pnpm tauri build
 
 # Restart daemon if it's running (silent if not). Never fail the build if we lack permissions.
 restart-daemon:

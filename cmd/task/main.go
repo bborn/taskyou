@@ -3300,10 +3300,14 @@ The server shares the same SQLite database the daemon writes to (WAL mode).`,
 			defer database.Close()
 
 			runner := &execCommandRunner{}
+			// Give the API access to executor metadata and interactive session
+			// bootstrap (used by GUI clients to start/attach executor terminals).
+			exec := executor.New(database, config.New(database))
 			srv := web.New(web.Config{
 				Addr:      addr,
 				DB:        database,
 				CmdRunner: runner,
+				Sessions:  exec,
 			})
 
 			// Handle signals for graceful shutdown
