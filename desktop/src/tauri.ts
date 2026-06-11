@@ -94,6 +94,9 @@ export async function openInEditor(path: string): Promise<void> {
 
 export async function notify(title: string, body: string): Promise<void> {
   if (!inTauri()) return;
+  // Native-app etiquette: when the window is focused the in-app toast is
+  // enough; only notify the system when the user is elsewhere.
+  if (document.hasFocus()) return;
   try {
     const { isPermissionGranted, requestPermission, sendNotification } = await import(
       "@tauri-apps/plugin-notification"
