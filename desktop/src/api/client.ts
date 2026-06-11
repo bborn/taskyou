@@ -10,7 +10,14 @@ import type {
   TerminalInfo,
 } from "./types";
 
-let baseUrl = "http://127.0.0.1:8484";
+// Default API base: when the production bundle is served by `ty serve` itself,
+// the API is same-origin; in vite dev and in the Tauri shell (tauri://) we
+// start from the standard local port — the desktop supervisor overrides it
+// with the configured port during boot anyway.
+let baseUrl =
+  !import.meta.env.DEV && typeof window !== "undefined" && window.location.protocol.startsWith("http")
+    ? window.location.origin
+    : "http://127.0.0.1:8484";
 
 export function setApiBase(url: string) {
   baseUrl = url.replace(/\/$/, "");

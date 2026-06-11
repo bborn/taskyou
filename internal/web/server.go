@@ -15,6 +15,7 @@ import (
 
 	"github.com/bborn/workflow/internal/autocomplete"
 	"github.com/bborn/workflow/internal/db"
+	"github.com/bborn/workflow/internal/web/ui"
 )
 
 // CommandRunner abstracts command execution for testability.
@@ -141,6 +142,10 @@ func New(cfg Config) *Server {
 
 	// Status
 	mux.HandleFunc("GET /api/status", s.handleStatus)
+
+	// Embedded web UI (same React app as the desktop shell); /api/* patterns
+	// are more specific and keep precedence.
+	mux.Handle("GET /", ui.Handler())
 
 	s.srv = &http.Server{
 		Addr:         cfg.Addr,

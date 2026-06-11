@@ -49,3 +49,4 @@ tmux-*.log
 .playwright-mcp/
 .mcp.json
 .gstack/
+internal/web/ui/dist/
