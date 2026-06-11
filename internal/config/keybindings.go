@@ -52,11 +52,8 @@ type KeybindingsConfig struct {
 	CollapseDone       *KeybindingConfig `yaml:"collapse_done,omitempty"`
 	OpenBrowser        *KeybindingConfig `yaml:"open_browser,omitempty"`
 	OpenPR             *KeybindingConfig `yaml:"open_pr,omitempty"`
-	ApprovePrompt      *KeybindingConfig `yaml:"approve_prompt,omitempty"`
-	DenyPrompt         *KeybindingConfig `yaml:"deny_prompt,omitempty"`
 	Spotlight          *KeybindingConfig `yaml:"spotlight,omitempty"`
 	SpotlightSync      *KeybindingConfig `yaml:"spotlight_sync,omitempty"`
-	QuickInput         *KeybindingConfig `yaml:"quick_input,omitempty"`
 }
 
 // DefaultKeybindingsConfigPath returns the default path for the keybindings config file.

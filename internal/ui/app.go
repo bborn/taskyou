@@ -48,6 +48,9 @@ const (
 	ViewAttachments
 	ViewChangeStatus
 	ViewCommandPalette
+	ViewProjectDetectConfirm // Offer to create a project for the current git repo
+	ViewWelcome              // first-run fork: set up a project vs start a task
+	ViewFolderPicker         // fuzzy folder picker for "set up a project"
 )
 
 // KeyMap defines key bindings.
@@ -93,14 +96,9 @@ type KeyMap struct {
 	OpenBrowser key.Binding
 	// Open PR
 	OpenPR key.Binding
-	// Quick approve/deny for executor prompts
-	ApprovePrompt key.Binding
-	DenyPrompt    key.Binding
 	// Spotlight mode
 	Spotlight     key.Binding
 	SpotlightSync key.Binding
-	// Quick input focus
-	QuickInput key.Binding
 }
 
 // ShortHelp returns key bindings to show in the mini help.
@@ -203,7 +201,7 @@ func DefaultKeyMap() KeyMap {
 		),
 		ToggleDangerous: key.NewBinding(
 			key.WithKeys("!"),
-			key.WithHelp("!", "dangerous mode"),
+			key.WithHelp("!", "cycle permission mode"),
 		),
 		QueueDangerous: key.NewBinding(
 			key.WithKeys("X"),
@@ -269,14 +267,6 @@ func DefaultKeyMap() KeyMap {
 			key.WithKeys("G"),
 			key.WithHelp("G", "open PR"),
 		),
-		ApprovePrompt: key.NewBinding(
-			key.WithKeys("y"),
-			key.WithHelp("y", "approve"),
-		),
-		DenyPrompt: key.NewBinding(
-			key.WithKeys("N"),
-			key.WithHelp("N", "deny"),
-		),
 		Spotlight: key.NewBinding(
 			key.WithKeys("f"),
 			key.WithHelp("f", "spotlight"),
@@ -284,10 +274,6 @@ func DefaultKeyMap() KeyMap {
 		SpotlightSync: key.NewBinding(
 			key.WithKeys("F"),
 			key.WithHelp("F", "spotlight sync"),
-		),
-		QuickInput: key.NewBinding(
-			key.WithKeys("tab"),
-			key.WithHelp("tab", "input"),
 		),
 	}
 }
@@ -352,11 +338,8 @@ func ApplyKeybindingsConfig(km KeyMap, cfg *config.KeybindingsConfig) KeyMap {
 	km.CollapseDone = applyBinding(km.CollapseDone, cfg.CollapseDone)
 	km.OpenBrowser = applyBinding(km.OpenBrowser, cfg.OpenBrowser)
 	km.OpenPR = applyBinding(km.OpenPR, cfg.OpenPR)
-	km.ApprovePrompt = applyBinding(km.ApprovePrompt, cfg.ApprovePrompt)
-	km.DenyPrompt = applyBinding(km.DenyPrompt, cfg.DenyPrompt)
 	km.Spotlight = applyBinding(km.Spotlight, cfg.Spotlight)
 	km.SpotlightSync = applyBinding(km.SpotlightSync, cfg.SpotlightSync)
-	km.QuickInput = applyBinding(km.QuickInput, cfg.QuickInput)
 
 	return km
 }
@@ -450,6 +433,18 @@ type AppModel struct {
 	pendingProjectChangeTask  *db.Task // The updated task data with new project
 	originalProjectChangeTask *db.Task // The original task to delete
 
+	// Project detection state (offer to create a project for the current git repo)
+	projectDetectConfirm      *huh.Form
+	projectDetectConfirmValue bool
+	detectedProject           *db.Project // Inferred project pending user confirmation
+	detectedInstructionSource string      // File the inferred instructions came from
+	detectedInferencePending  bool        // Async claude -p inference is still in flight for detectedProject
+	projectDetectionOffered   bool        // Guard so we only offer once per session
+
+	// First-run onboarding views
+	welcomeView  *WelcomeModel
+	folderPicker *FolderPickerModel
+
 	// Delete confirmation state
 	deleteConfirm      *huh.Form
 	deleteConfirmValue bool
@@ -492,9 +487,9 @@ type AppModel struct {
 	// AI command service for natural language command interpretation
 	aiCommandService *ai.CommandService
 
-	// Quick input for sending text to executor (always visible when task needs input)
-	replyInput        textinput.Model
-	quickInputFocused bool // Whether quick input field has keyboard focus
+	// liveSpinnerRunning guards the live-mode spinner animation loop so only one
+	// tick chain runs at a time.
+	liveSpinnerRunning bool
 
 	// Filter state
 	filterInput        textinput.Model
@@ -514,9 +509,8 @@ type AppModel struct {
 	debugStatePath string
 
 	// First-time experience
-	isFirstLoad     bool // Track if this is the first load of tasks
-	showWelcome     bool // Show welcome message when kanban is empty
-	onboardingShown bool // Track if we've already shown the onboarding (to prevent double-triggering)
+	isFirstLoad bool // Track if this is the first load of tasks
+	showWelcome bool // Show welcome message when kanban is empty
 
 	// Version upgrade notification
 	currentVersion string                // Current binary version (e.g. "v0.1.0" or "dev")
@@ -588,11 +582,6 @@ func NewAppModel(database *db.DB, exec *executor.Executor, workingDir string, ve
 	watcher, _ := fsnotify.NewWatcher()
 	dbChangeCh := make(chan struct{}, 1)
 
-	// Setup reply input for executor prompts
-	replyInput := textinput.New()
-	replyInput.Placeholder = "Type response and press enter..."
-	replyInput.CharLimit = 200
-
 	// Setup filter input
 	filterInput := textinput.New()
 	filterInput.Placeholder = "Filter text, #id, or [project..."
@@ -632,7 +621,6 @@ func NewAppModel(database *db.DB, exec *executor.Executor, workingDir string, ve
 		watcher:            watcher,
 		dbChangeCh:         dbChangeCh,
 		prCache:            github.NewPRCache(),
-		replyInput:         replyInput,
 		filterInput:        filterInput,
 		filterText:         "",
 		filterAutocomplete: filterAutocomplete,
@@ -710,7 +698,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// the chain breaks permanently — polling stops, DB watcher stops, etc.
 	isSystemMsg := false
 	switch msg.(type) {
-	case tickMsg, focusTickMsg, dbChangeMsg, taskEventMsg, tasksLoadedMsg, prRefreshTickMsg:
+	case tickMsg, focusTickMsg, dbChangeMsg, taskEventMsg, tasksLoadedMsg, prRefreshTickMsg, liveSpinnerTickMsg:
 		isSystemMsg = true
 	}
 
@@ -727,6 +715,31 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if m.currentView == ViewProjectChangeConfirm && m.projectChangeConfirm != nil {
 			return m.updateProjectChangeConfirm(msg)
+		}
+		if m.currentView == ViewProjectDetectConfirm && m.projectDetectConfirm != nil {
+			// Async inference results must reach the main switch (case
+			// projectInferredMsg) to enrich the card in place; all other
+			// messages (keys) drive the confirm form.
+			if _, ok := msg.(projectInferredMsg); !ok {
+				return m.updateProjectDetectConfirm(msg)
+			}
+		}
+		// Folder picker: route all messages (keys + cursor blink) to the picker
+		// so its text input stays live. The picker emits folderPickedMsg on enter
+		// (handled below), and esc closes it back to the Welcome fork.
+		if m.currentView == ViewFolderPicker && m.folderPicker != nil {
+			if picked, ok := msg.(folderPickedMsg); ok {
+				return m.handleFolderPicked(picked.path)
+			}
+			if key, ok := msg.(tea.KeyMsg); ok && (key.String() == "esc" || key.String() == "ctrl+c") {
+				m.folderPicker = nil
+				m.welcomeView = NewWelcomeModel(m.width, m.height)
+				m.currentView = ViewWelcome
+				return m, nil
+			}
+			var cmd tea.Cmd
+			m.folderPicker, cmd = m.folderPicker.Update(msg)
+			return m, cmd
 		}
 		if m.currentView == ViewDeleteConfirm && m.deleteConfirm != nil {
 			return m.updateDeleteConfirm(msg)
@@ -755,11 +768,6 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Handle detail view feedback mode (needs all message types for text input)
 		if m.currentView == ViewDetail && m.detailView != nil && m.detailView.InFeedbackMode() {
 			return m.updateDetail(msg)
-		}
-
-		// Handle quick input mode (needs all message types for text input)
-		if m.currentView == ViewDashboard && m.quickInputFocused {
-			return m.updateQuickInput(msg)
 		}
 
 		// Handle filter input mode (needs all message types for text input)
@@ -793,6 +801,36 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.commandPaletteView.Init()
 		}
 
+		// First-run Welcome fork key handling.
+		if m.currentView == ViewWelcome && m.welcomeView != nil {
+			switch msg.String() {
+			case "left", "h":
+				m.welcomeView.MoveLeft()
+				return m, nil
+			case "right", "l":
+				m.welcomeView.MoveRight()
+				return m, nil
+			case "enter":
+				switch m.welcomeView.Choice() {
+				case welcomeSetupProject:
+					m.welcomeView = nil
+					m.folderPicker = NewFolderPickerModel(m.width, m.height)
+					m.currentView = ViewFolderPicker
+					return m, m.folderPicker.Init()
+				case welcomeStartTask:
+					m.welcomeView = nil
+					m.newTaskForm = NewFormModel(m.db, m.width, m.height, m.workingDir, m.availableExecutors)
+					m.previousView = ViewDashboard
+					m.currentView = ViewNewTask
+					return m, m.newTaskForm.Init()
+				}
+			case "esc", "ctrl+c":
+				m.welcomeView = nil
+				m.currentView = ViewDashboard
+				return m, nil
+			}
+		}
+
 		// Route to current view
 		switch m.currentView {
 		case ViewDashboard:
@@ -821,19 +859,24 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.tasks = msg.tasks
 		m.err = msg.err
 
-		// First-time experience: auto-open new task form on first run when no tasks exist
+		// First-load onboarding routing (runs once per process start).
 		if m.isFirstLoad {
 			m.isFirstLoad = false
 			m.showWelcome = len(msg.tasks) == 0
 
-			// If this is the very first run (no tasks, onboarding not completed), auto-open new task form
-			if len(msg.tasks) == 0 && m.db.IsFirstRun() && !m.onboardingShown {
-				m.onboardingShown = true
-				// Auto-open the new task form to guide users to create their first task
-				m.newTaskForm = NewFormModel(m.db, m.width, m.height, m.workingDir, m.availableExecutors)
+			// 1. In a real project folder we don't yet track? Offer to set it up
+			//    (LLM-enriched). Works on every launch, until dismissed per-path.
+			if model, cmd, offered := m.maybeOfferProjectCreation(); offered {
+				return model, cmd
+			}
+
+			// 2. No real projects yet (only "personal") and we're in a junk folder:
+			//    show the Welcome fork instead of dumping into a task form.
+			if m.shouldShowWelcomeFork(msg.tasks) {
+				m.welcomeView = NewWelcomeModel(m.width, m.height)
 				m.previousView = m.currentView
-				m.currentView = ViewNewTask
-				return m, m.newTaskForm.Init()
+				m.currentView = ViewWelcome
+				return m, nil
 			}
 		}
 
@@ -939,6 +982,9 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.kanban.SetTasksNeedingInput(m.tasksNeedingInput)
 		m.kanban.SetBlockedByDeps(msg.blockedByDeps)
 
+		// Refresh per-agent activity lines for live mode (cheap no-op when off).
+		m.refreshLatestActivity()
+
 		// Load cached PR info from database for instant display
 		for _, t := range m.tasks {
 			if t.PRInfoJSON != "" {
@@ -953,6 +999,19 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.initialPRRefreshDone = true
 			cmds = append(cmds, m.refreshAllPRs())
 		}
+
+	case projectInferredMsg:
+		// Only apply if the card for this exact path is still showing.
+		if m.currentView == ViewProjectDetectConfirm && m.detectedProject != nil && m.detectedProject.Path == msg.path {
+			m.detectedInferencePending = false
+			if msg.err == nil {
+				applyInferredMetadata(m.detectedProject, msg.meta)
+				m.detectedProject.Name = uniqueProjectName(m.db, m.detectedProject.Name)
+			}
+			m.buildProjectDetectForm()
+			return m, m.projectDetectConfirm.Init()
+		}
+		return m, nil
 
 	case taskLoadedMsg:
 		// Reset transition flag now that task is loaded
@@ -1143,7 +1202,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, m.handleAICommand(msg.cmd))
 		}
 
-	case taskDangerousModeToggledMsg:
+	case taskPermissionModeCycledMsg:
 		cmds = append(cmds, m.loadTasks())
 		// Refresh the detail view panes since the executor window was recreated
 		if m.detailView != nil && m.selectedTask != nil {
@@ -1155,7 +1214,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil {
 			m.notification = fmt.Sprintf("%s %s", IconBlocked(), msg.err.Error())
 		} else {
-			// Reload the task to get updated dangerous_mode flag
+			// Reload the task to reflect the new permission mode
 			if m.selectedTask != nil {
 				task, _ := m.db.GetTask(m.selectedTask.ID)
 				if task != nil {
@@ -1165,11 +1224,11 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 							cmds = append(cmds, cmd)
 						}
 					}
-					if task.DangerousMode {
-						m.notification = IconBlocked() + " Dangerous mode enabled"
-					} else {
-						m.notification = IconDone() + " Safe mode enabled"
+					icon := IconDone()
+					if task.IsDangerous() {
+						icon = IconBlocked()
 					}
+					m.notification = fmt.Sprintf("%s %s mode enabled", icon, db.PermissionModeLabel(msg.mode))
 				}
 			}
 		}
@@ -1224,28 +1283,6 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.notification = fmt.Sprintf("🔦 %s", msg.message)
 		}
 		m.notifyUntil = time.Now().Add(5 * time.Second)
-
-	case executorRespondedMsg:
-		if msg.err != nil {
-			m.notification = fmt.Sprintf("%s Failed to %s: %s", IconBlocked(), msg.action, msg.err.Error())
-			m.notifyUntil = time.Now().Add(5 * time.Second)
-		} else {
-			action := "Approved"
-			if msg.action == "deny" {
-				action = "Denied"
-			} else if msg.action == "reply" {
-				action = "Replied to"
-			}
-			m.notification = fmt.Sprintf("%s %s executor prompt for task #%d", IconDone(), action, msg.taskID)
-			m.notifyUntil = time.Now().Add(3 * time.Second)
-			// Clear prompt state immediately for visual feedback. If the task is
-			// still blocked (e.g. another prompt queued), the latestChoicePrompt
-			// catch-up loop will re-detect it on the next poll cycle.
-			delete(m.tasksNeedingInput, msg.taskID)
-			delete(m.questionPrompts, msg.taskID)
-			delete(m.executorPrompts, msg.taskID)
-		}
-		cmds = append(cmds, m.loadTasks())
 
 	case taskEventMsg:
 		// Real-time task update from executor
@@ -1309,7 +1346,11 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					break
 				}
 			}
-			m.kanban.SetTasks(m.tasks)
+			// Reapply the active filter (if any) instead of resetting to all
+			// tasks — otherwise a real-time event repopulates the board with the
+			// full task list while a filter is active, making the filtered column
+			// jump under the user mid-navigation.
+			m.applyFilter()
 			m.kanban.SetTasksNeedingInput(m.tasksNeedingInput)
 
 			// Update detail view if showing this task
@@ -1350,8 +1391,21 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				running[m.selectedTask.ID] = true
 			}
 			m.kanban.SetRunningProcesses(running)
+			// Resume the live-mode spinner if work appeared while it was idle.
+			cmds = append(cmds, m.startLiveSpinner())
 		}
 		cmds = append(cmds, m.tick())
+
+	case liveSpinnerTickMsg:
+		// Advance the running-task spinner and reschedule while the board is
+		// visible and has work to animate. When no tasks are running, the chain
+		// stops; the 1s tick restarts it once running tasks reappear.
+		if m.currentView == ViewDashboard && m.kanban.RunningTaskCount() > 0 {
+			m.kanban.AdvanceSpinner()
+			cmds = append(cmds, m.liveSpinnerTick())
+		} else {
+			m.liveSpinnerRunning = false
+		}
 
 	case focusTickMsg:
 		// Fast tick for responsive focus state changes in detail view
@@ -1437,6 +1491,12 @@ func (m *AppModel) applyWindowSize(width, height int) {
 	if m.editTaskForm != nil {
 		m.editTaskForm.SetSize(width, height)
 	}
+	if m.welcomeView != nil {
+		m.welcomeView.SetSize(m.width, m.height)
+	}
+	if m.folderPicker != nil {
+		m.folderPicker.SetSize(m.width, m.height)
+	}
 }
 
 // View renders the current view.
@@ -1473,6 +1533,16 @@ func (m *AppModel) View() string {
 		return m.viewNewTaskConfirm()
 	case ViewProjectChangeConfirm:
 		return m.viewProjectChangeConfirm()
+	case ViewProjectDetectConfirm:
+		return m.viewProjectDetectConfirm()
+	case ViewWelcome:
+		if m.welcomeView != nil {
+			return m.welcomeView.View()
+		}
+	case ViewFolderPicker:
+		if m.folderPicker != nil {
+			return m.folderPicker.View()
+		}
 	case ViewDeleteConfirm:
 		return m.viewDeleteConfirm()
 	case ViewCloseConfirm:
@@ -1576,28 +1646,12 @@ func (m *AppModel) viewDashboard() string {
 		m.notifyTaskID = 0
 	}
 
-	// Show current processing tasks if any
-	if runningIDs := m.executor.RunningTasks(); len(runningIDs) > 0 {
-		statusBar := lipgloss.NewStyle().
-			Foreground(ColorInProgress).
-			Render(fmt.Sprintf("%s Processing %d task(s)", IconProcessing(), len(runningIDs)))
-		headerParts = append(headerParts, statusBar)
-	}
-
 	// Show filter bar if filter is active or has text
 	filterBar := ""
 	filterBarHeight := 0
 	if m.filterActive || m.filterText != "" {
 		filterBar = m.renderFilterBar()
 		filterBarHeight = lipgloss.Height(filterBar)
-	}
-
-	// Render executor prompt preview if applicable
-	promptPreview := ""
-	promptPreviewHeight := 0
-	if task := m.kanban.SelectedTask(); task != nil && m.tasksNeedingInput[task.ID] {
-		promptPreview = m.renderExecutorPromptPreview(task)
-		promptPreviewHeight = lipgloss.Height(promptPreview)
 	}
 
 	// Build the header first so we can measure its actual rendered height
@@ -1612,7 +1666,7 @@ func (m *AppModel) viewDashboard() string {
 	helpView := m.renderHelp()
 	helpHeight := lipgloss.Height(helpView)
 
-	kanbanHeight := m.height - headerHeight - filterBarHeight - helpHeight - promptPreviewHeight
+	kanbanHeight := m.height - headerHeight - filterBarHeight - helpHeight
 	if kanbanHeight < 10 {
 		kanbanHeight = 10
 	}
@@ -1634,11 +1688,8 @@ func (m *AppModel) viewDashboard() string {
 		contentParts = append(contentParts, welcomeView, helpView)
 	} else {
 		kanbanView := m.kanban.View()
-		if promptPreview != "" {
-			contentParts = append(contentParts, kanbanView, promptPreview, helpView)
-		} else {
-			contentParts = append(contentParts, kanbanView, helpView)
-		}
+		contentParts = append(contentParts, kanbanView)
+		contentParts = append(contentParts, helpView)
 	}
 
 	content := lipgloss.JoinVertical(lipgloss.Left, contentParts...)
@@ -1795,121 +1846,6 @@ func (m *AppModel) renderFilterBar() string {
 
 func (m *AppModel) renderHelp() string {
 	return m.help.View(m.keys)
-}
-
-// renderExecutorPromptPreview renders a compact preview of the executor's current prompt
-// for a blocked task that needs input. Shows the permission message from the hook log
-// with approve/deny/tab-input hints. When quick input is focused, shows the text input.
-func (m *AppModel) renderExecutorPromptPreview(task *db.Task) string {
-	hintStyle := lipgloss.NewStyle().Foreground(ColorMuted)
-	warnStyle := lipgloss.NewStyle().Foreground(ColorWarning)
-	detailStyle := lipgloss.NewStyle().Foreground(ColorMuted)
-
-	barStyle := lipgloss.NewStyle().
-		Width(m.width).
-		Padding(0, 1)
-
-	var hints string
-	if m.questionPrompts[task.ID] {
-		hints = hintStyle.Render("tab reply  enter detail")
-	} else {
-		hints = hintStyle.Render("y approve  N deny  tab input  enter detail")
-	}
-
-	prompt := m.executorPrompts[task.ID]
-	promptLines := extractPromptLines(prompt, m.width-10)
-
-	var lines []string
-
-	if len(promptLines) == 0 {
-		// No captured content yet - show a minimal single-line hint
-		line := warnStyle.Render(fmt.Sprintf("#%d waiting for input", task.ID)) + "  " + hints
-		lines = append(lines, barStyle.Render(line))
-	} else {
-		// Show last few lines of the prompt content so user can see multiple choice options
-		maxLines := 5
-		if len(promptLines) > maxLines {
-			promptLines = promptLines[len(promptLines)-maxLines:]
-		}
-
-		// Header line: task ID + action hints
-		headerLine := warnStyle.Render(fmt.Sprintf("#%d ", task.ID)) + hints
-		lines = append(lines, barStyle.Render(headerLine))
-
-		// Show prompt content lines
-		detailMaxWidth := m.width - 6
-		if detailMaxWidth < 20 {
-			detailMaxWidth = 20
-		}
-		for _, pl := range promptLines {
-			if len(pl) > detailMaxWidth {
-				pl = pl[:detailMaxWidth-1] + "…"
-			}
-			lines = append(lines, barStyle.Render("  "+detailStyle.Render(pl)))
-		}
-	}
-
-	// Show quick input bar when focused
-	if m.quickInputFocused {
-		label := warnStyle.Render("input: ")
-		inputHints := hintStyle.Render("  enter send  esc cancel")
-		lines = append(lines, barStyle.Render(label+m.replyInput.View()+inputHints))
-	}
-
-	return strings.Join(lines, "\n")
-}
-
-// extractPromptLines extracts the last meaningful lines from prompt content.
-// Strips empty lines, ANSI codes, and trims to fit the given width.
-func extractPromptLines(content string, maxWidth int) []string {
-	if content == "" {
-		return nil
-	}
-
-	lines := strings.Split(content, "\n")
-	var result []string
-
-	for _, line := range lines {
-		// Strip ANSI escape codes
-		cleaned := stripAnsiCodes(line)
-		cleaned = strings.TrimRight(cleaned, " \t")
-		if cleaned == "" {
-			continue
-		}
-		// Truncate long lines
-		if maxWidth > 0 && len(cleaned) > maxWidth {
-			cleaned = cleaned[:maxWidth-1] + "…"
-		}
-		result = append(result, cleaned)
-	}
-
-	return result
-}
-
-// stripAnsiCodes removes ANSI escape sequences from a string.
-func stripAnsiCodes(s string) string {
-	var result strings.Builder
-	i := 0
-	for i < len(s) {
-		if s[i] == '\x1b' {
-			// Skip ESC sequence
-			i++
-			if i < len(s) && s[i] == '[' {
-				i++
-				// Skip until we hit a letter (the terminator)
-				for i < len(s) && (s[i] < 'A' || s[i] > 'Z') && (s[i] < 'a' || s[i] > 'z') {
-					i++
-				}
-				if i < len(s) {
-					i++ // Skip the terminator letter
-				}
-			}
-		} else {
-			result.WriteByte(s[i])
-			i++
-		}
-	}
-	return result.String()
 }
 
 func (m *AppModel) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -2112,17 +2048,6 @@ func (m *AppModel) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, m.syncSpotlight(task)
 		}
 
-	case key.Matches(msg, m.keys.QuickInput):
-		// Focus the quick input field if selected task needs input
-		if task := m.kanban.SelectedTask(); task != nil {
-			if m.tasksNeedingInput[task.ID] || m.detectPermissionPrompt(task.ID) {
-				m.quickInputFocused = true
-				m.replyInput.SetValue("")
-				m.replyInput.Focus()
-				return m, textinput.Blink
-			}
-		}
-
 	case key.Matches(msg, m.keys.Settings):
 		m.settingsView = NewSettingsModel(m.db, m.width, m.height)
 		m.previousView = m.currentView
@@ -2142,20 +2067,6 @@ func (m *AppModel) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.help.ShowAll = !m.help.ShowAll
 		return m, nil
 
-	case key.Matches(msg, m.keys.ApprovePrompt):
-		if task := m.kanban.SelectedTask(); task != nil {
-			if m.tasksNeedingInput[task.ID] || m.detectPermissionPrompt(task.ID) {
-				return m, m.approveExecutorPrompt(task.ID)
-			}
-		}
-
-	case key.Matches(msg, m.keys.DenyPrompt):
-		if task := m.kanban.SelectedTask(); task != nil {
-			if m.tasksNeedingInput[task.ID] || m.detectPermissionPrompt(task.ID) {
-				return m, m.denyExecutorPrompt(task.ID)
-			}
-		}
-
 	case key.Matches(msg, m.keys.Filter):
 		// Enter filter mode
 		m.filterActive = true
@@ -2173,53 +2084,6 @@ func (m *AppModel) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	return m, nil
-}
-
-// updateQuickInput handles input when the quick input field is focused.
-func (m *AppModel) updateQuickInput(msg tea.Msg) (tea.Model, tea.Cmd) {
-	keyMsg, ok := msg.(tea.KeyMsg)
-	if !ok {
-		// Pass non-key messages (like blink) to the text input
-		var cmd tea.Cmd
-		m.replyInput, cmd = m.replyInput.Update(msg)
-		return m, cmd
-	}
-
-	switch keyMsg.String() {
-	case "esc", "shift+tab":
-		// Return focus to kanban
-		m.quickInputFocused = false
-		m.replyInput.SetValue("")
-		m.replyInput.Blur()
-		return m, nil
-
-	case "enter":
-		// Send the text to the selected task's executor
-		text := strings.TrimSpace(m.replyInput.Value())
-		if text == "" {
-			// Empty input - just unfocus
-			m.quickInputFocused = false
-			m.replyInput.Blur()
-			return m, nil
-		}
-		task := m.kanban.SelectedTask()
-		if task == nil {
-			m.quickInputFocused = false
-			m.replyInput.SetValue("")
-			m.replyInput.Blur()
-			return m, nil
-		}
-		taskID := task.ID
-		m.quickInputFocused = false
-		m.replyInput.SetValue("")
-		m.replyInput.Blur()
-		return m, m.sendTextToExecutor(taskID, text)
-	}
-
-	// Pass all other keys to the text input
-	var cmd tea.Cmd
-	m.replyInput, cmd = m.replyInput.Update(msg)
-	return m, cmd
 }
 
 // updateFilterMode handles input when filter mode is active.
@@ -2685,14 +2549,14 @@ func (m *AppModel) updateDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.toggleTaskPinned(m.selectedTask.ID)
 	}
 	if key.Matches(keyMsg, m.keys.ToggleDangerous) && m.selectedTask != nil {
-		// Only allow toggling dangerous mode if task is processing or blocked
+		// Only allow cycling permission mode if task is processing or blocked
 		if m.selectedTask.Status == db.StatusProcessing || m.selectedTask.Status == db.StatusBlocked {
-			// Break panes back to daemon BEFORE toggling so the executor can kill them.
+			// Break panes back to daemon BEFORE cycling so the executor can kill them.
 			// If panes are joined to task-ui, KillAllWindowsByNameAllSessions won't find them.
 			if m.detailView != nil {
 				m.detailView.Cleanup()
 			}
-			return m, m.toggleDangerousMode(m.selectedTask.ID)
+			return m, m.cyclePermissionMode(m.selectedTask.ID)
 		}
 	}
 	if key.Matches(keyMsg, m.keys.OpenWorktree) && m.selectedTask != nil {
@@ -2784,10 +2648,12 @@ func (m *AppModel) updateNewTaskForm(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Store pending task and create confirmation form
 			m.pendingTask = form.GetDBTask()
 			m.pendingAttachments = form.GetAttachments()
-			// Default to last queue choice for this project
+			// Default to last queue choice for this project. Permission mode now
+			// lives on the task form, so this is just execute-now vs backlog;
+			// fold any legacy "auto"/"dangerous" choices into "yes".
 			m.queueValue = "no"
-			if last, err := m.db.GetSetting("last_queue_choice:" + m.pendingTask.Project); err == nil && last != "" {
-				m.queueValue = last
+			if last, err := m.db.GetSetting("last_queue_choice:" + m.pendingTask.Project); err == nil && last != "" && last != "no" {
+				m.queueValue = "yes"
 			}
 			m.queueConfirm = huh.NewForm(
 				huh.NewGroup(
@@ -2795,9 +2661,8 @@ func (m *AppModel) updateNewTaskForm(msg tea.Msg) (tea.Model, tea.Cmd) {
 						Key("queue").
 						Title("Queue for execution?").
 						Options(
-							huh.NewOption("No — save to backlog", "no"),
 							huh.NewOption("Yes — execute now", "yes"),
-							huh.NewOption("Yes — execute in dangerous mode", "dangerous"),
+							huh.NewOption("No — save to backlog", "no"),
 						).
 						Value(&m.queueValue),
 				),
@@ -2843,12 +2708,11 @@ func (m *AppModel) updateNewTaskConfirm(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Remember the choice for this project
 			m.db.SetSetting("last_queue_choice:"+m.pendingTask.Project, m.queueValue)
 
+			// Permission mode is already set on the task from the form; this
+			// choice only decides whether to run now or save to the backlog.
 			switch m.queueValue {
 			case "yes":
 				m.pendingTask.Status = db.StatusQueued
-			case "dangerous":
-				m.pendingTask.Status = db.StatusQueued
-				m.pendingTask.DangerousMode = true
 			default:
 				m.pendingTask.Status = db.StatusBacklog
 			}
@@ -2872,12 +2736,11 @@ func (m *AppModel) updateEditTaskForm(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if form, ok := model.(*FormModel); ok {
 		m.editTaskForm = form
 		if form.submitted {
-			// Get updated task data from form
-			updatedTask := form.GetDBTask()
-
-			// Check if project has changed - this requires special handling
+			// Moving to another project deletes this task and creates a fresh
+			// one, so build that from form data (moveTaskToProject resets the
+			// runtime fields on purpose).
 			if form.ProjectChanged() {
-				// Store the original task for the confirmation dialog
+				updatedTask := form.GetDBTask()
 				originalTask := m.editingTask
 
 				m.editTaskForm = nil
@@ -2885,14 +2748,13 @@ func (m *AppModel) updateEditTaskForm(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m.showProjectChangeConfirm(updatedTask, originalTask)
 			}
 
-			// Preserve the original task's ID and other fields
-			updatedTask.ID = m.editingTask.ID
-			updatedTask.Status = m.editingTask.Status
-			updatedTask.WorktreePath = m.editingTask.WorktreePath
-			updatedTask.BranchName = m.editingTask.BranchName
-			updatedTask.CreatedAt = m.editingTask.CreatedAt
-			updatedTask.StartedAt = m.editingTask.StartedAt
-			updatedTask.CompletedAt = m.editingTask.CompletedAt
+			// In-place edit: overlay only the fields the form exposes onto a
+			// copy of the original task. Starting from the original preserves
+			// every persisted column the form doesn't show (session IDs, pin
+			// state, permission mode, tags, source branch, PR info, port, ...)
+			// which would otherwise be reset to zero on save. See issue #560.
+			updatedTask := *m.editingTask
+			form.ApplyTo(&updatedTask)
 
 			// Capture old title before clearing editingTask
 			oldTitle := m.editingTask.Title
@@ -2900,7 +2762,7 @@ func (m *AppModel) updateEditTaskForm(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.editTaskForm = nil
 			m.editingTask = nil
 			m.currentView = m.previousView
-			return m, m.updateTaskWithRename(updatedTask, oldTitle)
+			return m, m.updateTaskWithRename(&updatedTask, oldTitle)
 		}
 		if form.cancelled {
 			m.currentView = m.previousView
@@ -3119,6 +2981,283 @@ func (m *AppModel) updateProjectChangeConfirm(msg tea.Msg) (tea.Model, tea.Cmd) 
 	}
 
 	return m, cmd
+}
+
+// shouldShowWelcomeFork reports whether to show the first-run Welcome fork:
+// no real projects beyond "personal", and the cwd is not a project candidate
+// (otherwise maybeOfferProjectCreation handled it). Gated on "no tasks yet".
+func (m *AppModel) shouldShowWelcomeFork(tasks []*db.Task) bool {
+	if m.db == nil {
+		return false
+	}
+	if isProjectCandidate(m.workingDir) {
+		return false
+	}
+	if !m.onlyPersonalProject() {
+		return false
+	}
+	// We already checked onlyPersonalProject above; combining "no tasks" +
+	// "only personal" is the intended gate (per agreed design, not IsFirstRun).
+	return len(tasks) == 0
+}
+
+// onlyPersonalProject reports whether the only project is the auto-created
+// "personal" one (i.e. the user hasn't set up a real project yet).
+func (m *AppModel) onlyPersonalProject() bool {
+	projects, err := m.db.ListProjects()
+	if err != nil {
+		return false
+	}
+	for _, p := range projects {
+		if p.Name != "personal" {
+			return false
+		}
+	}
+	return true
+}
+
+// handleFolderPicked builds a project from the chosen folder and shows the same
+// confirm card used for auto-detected projects. Metadata inference runs
+// asynchronously (see showProjectDetectConfirm) so the card appears instantly.
+func (m *AppModel) handleFolderPicked(path string) (tea.Model, tea.Cmd) {
+	if proj, err := m.db.GetProjectByPath(path); err == nil && proj != nil {
+		m.folderPicker = nil
+		m.notification = fmt.Sprintf("%s \"%s\" already covers that folder", IconDone(), proj.Name)
+		m.notifyUntil = time.Now().Add(4 * time.Second)
+		m.currentView = ViewDashboard
+		return m, m.loadTasks()
+	}
+	detected, source := detectProjectFromDir(path)
+	if detected == nil {
+		// Folder had no signals; treat the chosen dir as a plain (non-worktree) project.
+		detected = &db.Project{Name: inferProjectName(path), Path: filepath.Clean(path), UseWorktrees: dirIsGitRepo(path)}
+	}
+	detected.Name = uniqueProjectName(m.db, detected.Name)
+	m.folderPicker = nil
+	return m.showProjectDetectConfirm(detected, source)
+}
+
+// maybeOfferProjectCreation checks whether the current working directory is a
+// project candidate (git repo or recognised marker files) without an associated
+// TaskYou project and, if so, opens a confirmation modal offering to create one
+// (with details inferred from the directory). The third return value reports
+// whether the offer was made; when false the caller should continue with its
+// normal flow.
+func (m *AppModel) maybeOfferProjectCreation() (tea.Model, tea.Cmd, bool) {
+	if m.projectDetectionOffered || m.db == nil || m.workingDir == "" {
+		return m, nil, false
+	}
+
+	// Offer for any project candidate (git repo OR marker files), not just git.
+	// Non-git candidates become non-worktree projects (git stays optional).
+	if !isProjectCandidate(m.workingDir) {
+		return m, nil, false
+	}
+
+	// Skip if a project already covers this directory.
+	if proj, err := m.db.GetProjectByPath(m.workingDir); err == nil && proj != nil {
+		return m, nil, false
+	}
+
+	// Respect a previous decline for this path.
+	if v, _ := m.db.GetSetting(projectSuggestionDismissedKey(m.workingDir)); v != "" {
+		return m, nil, false
+	}
+
+	detected, source := detectProjectFromDir(m.workingDir)
+	if detected == nil {
+		return m, nil, false
+	}
+
+	detected.Name = uniqueProjectName(m.db, detected.Name)
+
+	m.projectDetectionOffered = true
+	// showProjectDetectConfirm fires the claude -p inference asynchronously and
+	// enriches the card in place when projectInferredMsg arrives.
+	model, cmd := m.showProjectDetectConfirm(detected, source)
+	return model, cmd, true
+}
+
+func (m *AppModel) showProjectDetectConfirm(project *db.Project, instructionSource string) (tea.Model, tea.Cmd) {
+	m.detectedProject = project
+	m.detectedInstructionSource = instructionSource
+	m.detectedInferencePending = true
+	m.projectDetectConfirmValue = true
+
+	m.previousView = m.currentView
+	m.currentView = ViewProjectDetectConfirm
+	m.buildProjectDetectForm()
+
+	// Show the card instantly with rule-based values, then enrich it in place
+	// once the async claude -p inference returns (projectInferredMsg).
+	return m, tea.Batch(m.projectDetectConfirm.Init(), inferProjectCmd(project.Path, ""))
+}
+
+// buildProjectDetectForm (re)builds the detect-confirm huh form from the current
+// detectedProject / detectedInstructionSource / detectedInferencePending state.
+// It deliberately does NOT touch previousView or currentView so it can be called
+// again when async inference arrives to refresh the card in place.
+func (m *AppModel) buildProjectDetectForm() {
+	project := m.detectedProject
+	if project == nil {
+		return
+	}
+
+	var desc strings.Builder
+	if m.detectedInferencePending {
+		desc.WriteString("✨ Inferring project details…\n\n")
+	}
+	desc.WriteString(fmt.Sprintf("This directory looks like a project.\n\nName: %s\n", project.Name))
+	if project.Aliases != "" {
+		desc.WriteString(fmt.Sprintf("Alias: %s\n", project.Aliases))
+	}
+	desc.WriteString(fmt.Sprintf("Path: %s\n", project.Path))
+	if m.detectedInstructionSource != "" {
+		desc.WriteString(fmt.Sprintf("Instructions: imported from %s\n", m.detectedInstructionSource))
+	} else if project.Instructions != "" {
+		desc.WriteString("Description: " + firstLine(project.Instructions) + "\n")
+	}
+	desc.WriteString(fmt.Sprintf("Worktrees: %v\n", project.UseWorktrees))
+	desc.WriteString("\nYou can edit any of this later in Settings.")
+
+	modalWidth := min(64, m.width-8)
+	m.projectDetectConfirm = huh.NewForm(
+		huh.NewGroup(
+			huh.NewConfirm().
+				Key("create_project").
+				Title("Create a TaskYou project for this repo?").
+				Description(desc.String()).
+				Affirmative("Create Project").
+				Negative("Not Now").
+				Value(&m.projectDetectConfirmValue),
+		),
+	).WithTheme(huh.ThemeDracula()).
+		WithWidth(modalWidth - 6).
+		WithShowHelp(true)
+}
+
+// firstLine returns the first line of s (without the trailing newline).
+func firstLine(s string) string {
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		return s[:i]
+	}
+	return s
+}
+
+func (m *AppModel) viewProjectDetectConfirm() string {
+	if m.projectDetectConfirm == nil {
+		return ""
+	}
+
+	header := lipgloss.NewStyle().
+		Bold(true).
+		Foreground(ColorPrimary).
+		MarginBottom(1).
+		Render("📁 New Project Detected")
+
+	formView := m.projectDetectConfirm.View()
+
+	modalWidth := min(64, m.width-8)
+	modalBox := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(ColorPrimary).
+		Padding(1, 2).
+		Width(modalWidth)
+
+	modalContent := modalBox.Render(lipgloss.JoinVertical(lipgloss.Center, header, formView))
+
+	return lipgloss.NewStyle().
+		Width(m.width).
+		Height(m.height).
+		Align(lipgloss.Center, lipgloss.Center).
+		Render(modalContent)
+}
+
+func (m *AppModel) updateProjectDetectConfirm(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if keyMsg, ok := msg.(tea.KeyMsg); ok {
+		switch keyMsg.String() {
+		case "esc", "ctrl+c":
+			// Treat dismissal like declining so we don't nag on every startup.
+			dismissPath := m.workingDir
+			if m.detectedProject != nil && m.detectedProject.Path != "" {
+				dismissPath = m.detectedProject.Path
+			}
+			m.dismissProjectSuggestion(dismissPath)
+			return m, nil
+		}
+	}
+
+	model, cmd := m.projectDetectConfirm.Update(msg)
+	m.projectDetectConfirm = model.(*huh.Form)
+
+	if m.projectDetectConfirm.State == huh.StateCompleted {
+		confirmed := m.projectDetectConfirmValue
+		detected := m.detectedProject
+		m.projectDetectConfirm = nil
+		m.currentView = m.previousView
+
+		if confirmed && detected != nil {
+			m.detectedProject = nil
+			return m, m.createDetectedProject(detected)
+		}
+		dismissPath := m.workingDir
+		if detected != nil && detected.Path != "" {
+			dismissPath = detected.Path
+		}
+		m.dismissProjectSuggestion(dismissPath)
+		return m, nil
+	}
+	if m.projectDetectConfirm.State == huh.StateAborted {
+		dismissPath := m.workingDir
+		if m.detectedProject != nil && m.detectedProject.Path != "" {
+			dismissPath = m.detectedProject.Path
+		}
+		m.dismissProjectSuggestion(dismissPath)
+		return m, nil
+	}
+
+	return m, cmd
+}
+
+// dismissProjectSuggestion records that the user declined to create a project for
+// the given path and closes the modal.
+func (m *AppModel) dismissProjectSuggestion(path string) {
+	if m.db != nil && path != "" {
+		m.db.SetSetting(projectSuggestionDismissedKey(path), "1")
+	}
+	m.projectDetectConfirm = nil
+	m.detectedProject = nil
+	m.currentView = m.previousView
+}
+
+// createDetectedProject persists the inferred project and reloads the board.
+func (m *AppModel) createDetectedProject(project *db.Project) tea.Cmd {
+	// Worktree isolation needs at least one commit to branch from. Detected repos
+	// almost always have commits, but guard against the empty-repo edge case so the
+	// first task doesn't fail to create a worktree.
+	if project.UseWorktrees && project.Path != "" {
+		if err := ensureGitRepoHasCommit(project.Path); err != nil {
+			m.notification = fmt.Sprintf("%s Failed to prepare git repo: %s", IconBlocked(), err.Error())
+			m.notifyUntil = time.Now().Add(5 * time.Second)
+			return nil
+		}
+	}
+
+	if err := m.db.CreateProject(project); err != nil {
+		m.notification = fmt.Sprintf("%s Failed to create project: %s", IconBlocked(), err.Error())
+		m.notifyUntil = time.Now().Add(5 * time.Second)
+		return nil
+	}
+
+	// Make the new project the default selection for the next task.
+	m.db.SetLastUsedProject(project.Name)
+	// Refresh project color cache so the new project renders consistently.
+	LoadProjectColors(m.db)
+
+	m.notification = fmt.Sprintf("%s Created project \"%s\"", IconDone(), project.Name)
+	m.notifyUntil = time.Now().Add(5 * time.Second)
+
+	return m.loadTasks()
 }
 
 func (m *AppModel) showQuitConfirm() (tea.Model, tea.Cmd) {
@@ -3726,6 +3865,22 @@ func (m *AppModel) updateCommandPalette(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
+// projectInferredMsg carries the result of an async claude -p inference for the
+// project currently being offered in the detect-confirm card.
+type projectInferredMsg struct {
+	path string
+	meta ai.ProjectMetadata
+	err  error
+}
+
+// inferProjectCmd runs project inference off the UI loop and reports the result.
+func inferProjectCmd(path, configDir string) tea.Cmd {
+	return func() tea.Msg {
+		meta, err := ai.InferProjectMetadata(path, configDir)
+		return projectInferredMsg{path: path, meta: meta, err: err}
+	}
+}
+
 // Messages
 type tasksLoadedMsg struct {
 	tasks           []*db.Task
@@ -3770,8 +3925,9 @@ type taskDeletedMsg struct {
 	err error
 }
 
-type taskDangerousModeToggledMsg struct {
-	err error
+type taskPermissionModeCycledMsg struct {
+	mode string
+	err  error
 }
 
 type taskPinnedMsg struct {
@@ -3799,6 +3955,9 @@ type focusTickMsg time.Time
 
 type prRefreshTickMsg time.Time
 
+// liveSpinnerTickMsg drives the running-task spinner animation on the board.
+type liveSpinnerTickMsg time.Time
+
 type dbChangeMsg struct{}
 
 type shortcutTimeoutMsg struct {
@@ -3822,6 +3981,29 @@ type versionCheckMsg struct {
 
 const maxDoneTasksInKanban = 20
 const summaryRefreshAfter = 5 * time.Minute
+
+// refreshLatestActivity loads the most recent log line for each active task and
+// feeds it to the board for the per-card activity sub-line.
+func (m *AppModel) refreshLatestActivity() {
+	if m.db == nil {
+		return
+	}
+	var ids []int64
+	for _, t := range m.tasks {
+		if t.Status == db.StatusProcessing || t.Status == db.StatusBlocked {
+			ids = append(ids, t.ID)
+		}
+	}
+	if len(ids) == 0 {
+		m.kanban.SetLatestActivity(nil)
+		return
+	}
+	activity, err := m.db.GetLatestLogPerTask(ids)
+	if err != nil {
+		return
+	}
+	m.kanban.SetLatestActivity(activity)
+}
 
 func (m *AppModel) loadTasks() tea.Cmd {
 	return func() tea.Msg {
@@ -3978,8 +4160,9 @@ func (m *AppModel) queueTaskDangerous(id int64) tea.Cmd {
 	database := m.db
 	exec := m.executor
 	return func() tea.Msg {
-		// Set dangerous mode before queueing
-		if err := database.UpdateTaskDangerousMode(id, true); err != nil {
+		// Set dangerous mode before queueing (writes permission_mode, the source of
+		// truth, keeping the dangerous_mode bool in sync).
+		if err := database.UpdateTaskPermissionMode(id, db.PermissionModeDangerous); err != nil {
 			return taskQueuedMsg{err: err}
 		}
 		err := database.UpdateTaskStatus(id, db.StatusQueued)
@@ -4278,50 +4461,6 @@ func (m *AppModel) syncSpotlight(task *db.Task) tea.Cmd {
 	}
 }
 
-// executorRespondedMsg is sent after approve/deny/reply is sent to the executor.
-type executorRespondedMsg struct {
-	taskID int64
-	action string // "approve", "deny", or "reply"
-	err    error
-}
-
-// approveExecutorPrompt sends "y" to the executor's tmux pane to approve a permission prompt.
-func (m *AppModel) approveExecutorPrompt(taskID int64) tea.Cmd {
-	database := m.db
-	return func() tea.Msg {
-		err := executor.SendKeyToPane(taskID, "y", "Enter")
-		if err == nil {
-			database.AppendTaskLog(taskID, "user", "Approved from kanban")
-		}
-		return executorRespondedMsg{taskID: taskID, action: "approve", err: err}
-	}
-}
-
-// denyExecutorPrompt sends "n" to the executor's tmux pane to deny a permission prompt.
-func (m *AppModel) denyExecutorPrompt(taskID int64) tea.Cmd {
-	database := m.db
-	return func() tea.Msg {
-		err := executor.SendKeyToPane(taskID, "n", "Enter")
-		if err == nil {
-			database.AppendTaskLog(taskID, "user", "Denied from kanban")
-		}
-		return executorRespondedMsg{taskID: taskID, action: "deny", err: err}
-	}
-}
-
-// sendTextToExecutor sends arbitrary text followed by Enter to the executor's tmux pane.
-// Used for multiple choice responses (e.g. "1", "2", "3") and free-form text input.
-func (m *AppModel) sendTextToExecutor(taskID int64, text string) tea.Cmd {
-	database := m.db
-	return func() tea.Msg {
-		err := executor.SendLiteralTextToPane(taskID, text)
-		if err == nil {
-			database.AppendTaskLog(taskID, "user", fmt.Sprintf("Replied from kanban: %s", text))
-		}
-		return executorRespondedMsg{taskID: taskID, action: "reply", err: err}
-	}
-}
-
 // latestChoicePrompt checks whether a task has a pending permission/choice prompt
 // by reading recent DB logs written by the notification hook. Returns the prompt
 // message if still pending, or "" if resolved (e.g. "Agent resumed working",
@@ -4362,32 +4501,6 @@ func (m *AppModel) latestChoicePrompt(taskID int64) (string, bool) {
 		}
 	}
 	return "", false
-}
-
-// detectPermissionPrompt does a live DB check for a pending permission prompt
-// on the given task. If found, it populates tasksNeedingInput and executorPrompts
-// so the caller can proceed with approve/deny. This is a fallback for when the
-// poll-based detection hasn't caught up yet (e.g. a real-time event showed the
-// task as blocked before loadTasks detected the permission prompt).
-func (m *AppModel) detectPermissionPrompt(taskID int64) bool {
-	prompt, isQ := m.latestChoicePrompt(taskID)
-	if prompt == "" {
-		return false
-	}
-	m.tasksNeedingInput[taskID] = true
-	m.questionPrompts[taskID] = isQ
-	paneContent := executor.CapturePaneContent(executor.TmuxSessionName(taskID), 15)
-	if paneContent != "" {
-		m.executorPrompts[taskID] = paneContent
-	} else {
-		displayPrompt := prompt
-		if strings.HasPrefix(prompt, "Waiting for permission: ") {
-			displayPrompt = strings.TrimPrefix(prompt, "Waiting for permission: ")
-		}
-		m.executorPrompts[taskID] = displayPrompt
-	}
-	m.kanban.SetTasksNeedingInput(m.tasksNeedingInput)
-	return true
 }
 
 // taskMovedMsg is returned when a task is moved to a different project.
@@ -4462,32 +4575,24 @@ func (m *AppModel) moveTaskToProject(newTaskData *db.Task, oldTask *db.Task) tea
 	}
 }
 
-func (m *AppModel) toggleDangerousMode(id int64) tea.Cmd {
+func (m *AppModel) cyclePermissionMode(id int64) tea.Cmd {
 	exec := m.executor
 	database := m.db
 	return func() tea.Msg {
-		// Get the task to check current dangerous mode state
 		task, err := database.GetTask(id)
 		if err != nil || task == nil {
-			return taskDangerousModeToggledMsg{err: fmt.Errorf("failed to get task")}
+			return taskPermissionModeCycledMsg{err: fmt.Errorf("failed to get task")}
 		}
 
-		executorName := taskExecutorDisplayName(task)
-		var success bool
-		if task.DangerousMode {
-			// Currently in dangerous mode, switch to safe mode
-			success = exec.ResumeSafe(id)
-			if !success {
-				return taskDangerousModeToggledMsg{err: fmt.Errorf("failed to restart %s in safe mode", executorName)}
-			}
-		} else {
-			// Currently in safe mode, switch to dangerous mode
-			success = exec.ResumeDangerous(id)
-			if !success {
-				return taskDangerousModeToggledMsg{err: fmt.Errorf("failed to restart %s in dangerous mode", executorName)}
+		// Advance to the next mode in the cycle (default -> accept-edits -> auto ->
+		// dangerous) and relaunch the live session so it actually runs in that mode.
+		next := db.NextPermissionMode(task.EffectivePermissionMode())
+		if !exec.ResumeWithMode(id, next) {
+			return taskPermissionModeCycledMsg{
+				err: fmt.Errorf("failed to restart %s in %s mode", taskExecutorDisplayName(task), db.PermissionModeLabel(next)),
 			}
 		}
-		return taskDangerousModeToggledMsg{err: nil}
+		return taskPermissionModeCycledMsg{mode: next}
 	}
 }
 
@@ -4512,9 +4617,10 @@ func (m *AppModel) retryTaskWithAttachments(id int64, feedback string, attachmen
 	database := m.db
 	exec := m.executor
 	return func() tea.Msg {
-		// Set dangerous mode if requested
+		// Set dangerous mode if requested (writes permission_mode, the source of
+		// truth, keeping the dangerous_mode bool in sync).
 		if dangerous {
-			database.UpdateTaskDangerousMode(id, true)
+			database.UpdateTaskPermissionMode(id, db.PermissionModeDangerous)
 		}
 
 		// Get task to find worktree path
@@ -4620,6 +4726,27 @@ func (m *AppModel) prRefreshTick() tea.Cmd {
 	return tea.Tick(4*time.Minute, func(t time.Time) tea.Msg {
 		return prRefreshTickMsg(t)
 	})
+}
+
+// liveSpinnerTick schedules the next frame of the live-mode spinner animation.
+func (m *AppModel) liveSpinnerTick() tea.Cmd {
+	return tea.Tick(200*time.Millisecond, func(t time.Time) tea.Msg {
+		return liveSpinnerTickMsg(t)
+	})
+}
+
+// startLiveSpinner kicks off the spinner animation loop if it isn't already
+// running and there is running work to animate. Returns nil if no tick is
+// needed, so callers can append it unconditionally.
+func (m *AppModel) startLiveSpinner() tea.Cmd {
+	if m.liveSpinnerRunning {
+		return nil
+	}
+	if m.kanban.RunningTaskCount() == 0 {
+		return nil
+	}
+	m.liveSpinnerRunning = true
+	return m.liveSpinnerTick()
 }
 
 // checkVersion fetches the latest release from GitHub and compares with current version.

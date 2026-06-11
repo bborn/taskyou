@@ -6,12 +6,43 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/bborn/workflow/internal/db"
 	"github.com/bborn/workflow/internal/github"
 )
+
+// styleGeneration increments whenever anything that affects rendered colors
+// changes (theme switch via refreshStyles, or project colors via SetProjectColors).
+// Render caches include the current generation in their signature so a colour
+// change forces a re-render without any explicit cache-busting wiring.
+var styleGeneration atomic.Uint64
+
+// StyleGeneration returns the current style generation counter. Callers that
+// cache rendered output should include this in their cache key.
+func StyleGeneration() uint64 { return styleGeneration.Load() }
+
+// bumpStyleGeneration is called whenever themed colours change.
+func bumpStyleGeneration() { styleGeneration.Add(1) }
+
+// fgStyleCache memoizes foreground-only lipgloss styles by colour, avoiding a
+// lipgloss.NewStyle allocation on every render. lipgloss.Color is a string type,
+// so it is a valid (comparable) map key. Entries are keyed by the concrete colour
+// value, so a theme change simply produces new entries — no invalidation needed.
+var fgStyleCache sync.Map // lipgloss.Color -> lipgloss.Style
+
+// FgStyle returns a cached foreground-only style for the given colour.
+// Use this instead of lipgloss.NewStyle().Foreground(c) in per-frame render paths.
+func FgStyle(c lipgloss.Color) lipgloss.Style {
+	if v, ok := fgStyleCache.Load(c); ok {
+		return v.(lipgloss.Style)
+	}
+	s := lipgloss.NewStyle().Foreground(c)
+	fgStyleCache.Store(c, s)
+	return s
+}
 
 // unicodeSupported caches whether the terminal supports Unicode.
 // Initialized once on first call to SupportsUnicode().
@@ -284,15 +315,17 @@ var (
 // This should be called when projects are loaded.
 func SetProjectColors(colors map[string]string) {
 	projectColorMu.Lock()
-	defer projectColorMu.Unlock()
 	projectColorCache = colors
+	projectColorMu.Unlock()
+	bumpStyleGeneration()
 }
 
 // SetProjectColor sets the color for a single project.
 func SetProjectColor(project, color string) {
 	projectColorMu.Lock()
-	defer projectColorMu.Unlock()
 	projectColorCache[project] = color
+	projectColorMu.Unlock()
+	bumpStyleGeneration()
 }
 
 // GetDefaultProjectColor returns a default color for a project based on its index.

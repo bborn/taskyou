@@ -1804,3 +1804,32 @@ func TestFormatPermissionDetail(t *testing.T) {
 		})
 	}
 }
+
+// TestShouldSubmitInput verifies the submit decision used by `task input`:
+// by default a non-empty message is submitted (Enter pressed), --no-submit
+// leaves it in the field, and --enter always submits.
+func TestShouldSubmitInput(t *testing.T) {
+	tests := []struct {
+		name      string
+		message   string
+		justEnter bool
+		noSubmit  bool
+		want      bool
+	}{
+		{name: "message submits by default", message: "yes", want: true},
+		{name: "message with --no-submit stays in field", message: "yes", noSubmit: true, want: false},
+		{name: "--enter alone submits", justEnter: true, want: true},
+		{name: "--enter wins over --no-submit", justEnter: true, noSubmit: true, want: true},
+		{name: "empty message does not submit", message: "", want: false},
+		{name: "empty message with --no-submit does not submit", message: "", noSubmit: true, want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := shouldSubmitInput(tt.message, tt.justEnter, tt.noSubmit); got != tt.want {
+				t.Errorf("shouldSubmitInput(%q, %v, %v) = %v, want %v",
+					tt.message, tt.justEnter, tt.noSubmit, got, tt.want)
+			}
+		})
+	}
+}

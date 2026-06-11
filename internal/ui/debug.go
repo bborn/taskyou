@@ -192,6 +192,8 @@ func (m *AppModel) GenerateDebugState() DebugState {
 		s.Modals = &DebugModals{ActiveConfirm: "quit_confirm"}
 	} else if m.currentView == ViewProjectChangeConfirm {
 		s.Modals = &DebugModals{ActiveConfirm: "project_change_confirm"}
+	} else if m.currentView == ViewProjectDetectConfirm {
+		s.Modals = &DebugModals{ActiveConfirm: "project_detect_confirm"}
 	}
 
 	// Filter

@@ -108,14 +108,15 @@ func (s *Server) handleListTasks(w http.ResponseWriter, r *http.Request) {
 }
 
 type createTaskRequest struct {
-	Title    string `json:"title"`
-	Body     string `json:"body"`
-	Type     string `json:"type"`
-	Project  string `json:"project"`
-	Executor string `json:"executor"`
-	Execute  bool   `json:"execute"`
-	Tags     string `json:"tags"`
-	Pinned   bool   `json:"pinned"`
+	Title          string `json:"title"`
+	Body           string `json:"body"`
+	Type           string `json:"type"`
+	Project        string `json:"project"`
+	Executor       string `json:"executor"`
+	Execute        bool   `json:"execute"`
+	Tags           string `json:"tags"`
+	Pinned         bool   `json:"pinned"`
+	PermissionMode string `json:"permission_mode"`
 }
 
 func (s *Server) handleCreateTask(w http.ResponseWriter, r *http.Request) {
@@ -153,14 +154,15 @@ func (s *Server) handleCreateTask(w http.ResponseWriter, r *http.Request) {
 	}
 
 	task := &db.Task{
-		Title:    title,
-		Body:     req.Body,
-		Type:     req.Type,
-		Project:  req.Project,
-		Executor: req.Executor,
-		Status:   status,
-		Tags:     req.Tags,
-		Pinned:   req.Pinned,
+		Title:          title,
+		Body:           req.Body,
+		Type:           req.Type,
+		Project:        req.Project,
+		Executor:       req.Executor,
+		Status:         status,
+		Tags:           req.Tags,
+		Pinned:         req.Pinned,
+		PermissionMode: db.NormalizePermissionMode(req.PermissionMode),
 	}
 
 	if err := s.db.CreateTask(task); err != nil {
@@ -502,7 +504,8 @@ func (s *Server) handleTaskOutput(w http.ResponseWriter, r *http.Request) {
 		lines = v
 	}
 
-	output, err := s.runner.Output("tmux", "capture-pane", "-t", paneID, "-p", "-S", "-"+lines)
+	// -J joins wrapped lines so clients can reflow to their own width.
+	output, err := s.runner.Output("tmux", "capture-pane", "-t", paneID, "-p", "-J", "-S", "-"+lines)
 	if err != nil {
 		jsonErr(w, "executor pane not available", http.StatusGone)
 		return
@@ -636,6 +639,7 @@ type createProjectRequest struct {
 	Aliases         string `json:"aliases"`
 	ClaudeConfigDir string `json:"claude_config_dir"`
 	UseWorktrees    *bool  `json:"use_worktrees"`
+	PermissionMode  string `json:"default_permission_mode"`
 }
 
 func (s *Server) handleCreateProject(w http.ResponseWriter, r *http.Request) {
@@ -661,13 +665,14 @@ func (s *Server) handleCreateProject(w http.ResponseWriter, r *http.Request) {
 	}
 
 	p := &db.Project{
-		Name:            req.Name,
-		Path:            req.Path,
-		Instructions:    req.Instructions,
-		Color:           req.Color,
-		Aliases:         req.Aliases,
-		ClaudeConfigDir: req.ClaudeConfigDir,
-		UseWorktrees:    useWorktrees,
+		Name:                  req.Name,
+		Path:                  req.Path,
+		Instructions:          req.Instructions,
+		Color:                 req.Color,
+		Aliases:               req.Aliases,
+		ClaudeConfigDir:       req.ClaudeConfigDir,
+		UseWorktrees:          useWorktrees,
+		DefaultPermissionMode: db.NormalizePermissionMode(req.PermissionMode),
 	}
 
 	if err := s.db.CreateProject(p); err != nil {
@@ -704,6 +709,7 @@ type updateProjectRequest struct {
 	ClaudeConfigDir *string `json:"claude_config_dir"`
 	UseWorktrees    *bool   `json:"use_worktrees"`
 	Context         *string `json:"context"`
+	PermissionMode  *string `json:"default_permission_mode"`
 }
 
 func (s *Server) handleUpdateProject(w http.ResponseWriter, r *http.Request) {
@@ -744,6 +750,9 @@ func (s *Server) handleUpdateProject(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.UseWorktrees != nil {
 		p.UseWorktrees = *req.UseWorktrees
+	}
+	if req.PermissionMode != nil {
+		p.DefaultPermissionMode = db.NormalizePermissionMode(*req.PermissionMode)
 	}
 
 	if err := s.db.UpdateProject(p); err != nil {
@@ -1002,22 +1011,26 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 // --- JSON conversion helpers ---
 
 type taskJSON struct {
-	ID          int64  `json:"id"`
-	Title       string `json:"title"`
-	Body        string `json:"body"`
-	Status      string `json:"status"`
-	Type        string `json:"type"`
-	Project     string `json:"project"`
-	Executor    string `json:"executor"`
-	Pinned      bool   `json:"pinned"`
-	Tags        string `json:"tags"`
-	BranchName  string `json:"branch_name"`
-	PRURL       string `json:"pr_url"`
-	Summary     string `json:"summary,omitempty"`
-	CreatedAt   string `json:"created_at"`
-	UpdatedAt   string `json:"updated_at"`
-	StartedAt   string `json:"started_at,omitempty"`
-	CompletedAt string `json:"completed_at,omitempty"`
+	ID             int64  `json:"id"`
+	Title          string `json:"title"`
+	Body           string `json:"body"`
+	Status         string `json:"status"`
+	Type           string `json:"type"`
+	Project        string `json:"project"`
+	Executor       string `json:"executor"`
+	Pinned         bool   `json:"pinned"`
+	Tags           string `json:"tags"`
+	PermissionMode string `json:"permission_mode"`
+	BranchName     string `json:"branch_name"`
+	Port           int    `json:"port,omitempty"`
+	WorktreePath   string `json:"worktree_path,omitempty"`
+	HasExecutor    bool   `json:"has_executor"`
+	PRURL          string `json:"pr_url"`
+	Summary        string `json:"summary,omitempty"`
+	CreatedAt      string `json:"created_at"`
+	UpdatedAt      string `json:"updated_at"`
+	StartedAt      string `json:"started_at,omitempty"`
+	CompletedAt    string `json:"completed_at,omitempty"`
 }
 
 type logJSON struct {
@@ -1029,20 +1042,24 @@ type logJSON struct {
 
 func toTaskJSON(t *db.Task) *taskJSON {
 	tj := &taskJSON{
-		ID:         t.ID,
-		Title:      t.Title,
-		Body:       t.Body,
-		Status:     t.Status,
-		Type:       t.Type,
-		Project:    t.Project,
-		Executor:   t.Executor,
-		Pinned:     t.Pinned,
-		Tags:       t.Tags,
-		BranchName: t.BranchName,
-		PRURL:      t.PRURL,
-		Summary:    t.Summary,
-		CreatedAt:  t.CreatedAt.Time.Format("2006-01-02T15:04:05Z"),
-		UpdatedAt:  t.UpdatedAt.Time.Format("2006-01-02T15:04:05Z"),
+		ID:             t.ID,
+		Title:          t.Title,
+		Body:           t.Body,
+		Status:         t.Status,
+		Type:           t.Type,
+		Project:        t.Project,
+		Executor:       t.Executor,
+		Pinned:         t.Pinned,
+		Tags:           t.Tags,
+		PermissionMode: t.EffectivePermissionMode(),
+		BranchName:     t.BranchName,
+		Port:           t.Port,
+		WorktreePath:   t.WorktreePath,
+		HasExecutor:    t.ClaudePaneID != "",
+		PRURL:          t.PRURL,
+		Summary:        t.Summary,
+		CreatedAt:      t.CreatedAt.Time.Format("2006-01-02T15:04:05Z"),
+		UpdatedAt:      t.UpdatedAt.Time.Format("2006-01-02T15:04:05Z"),
 	}
 	if t.StartedAt != nil {
 		tj.StartedAt = t.StartedAt.Time.Format("2006-01-02T15:04:05Z")
@@ -1076,15 +1093,16 @@ func toLogJSONSlice(logs []*db.TaskLog) []*logJSON {
 
 func projectToMap(p *db.Project, taskCount int) map[string]interface{} {
 	return map[string]interface{}{
-		"id":                p.ID,
-		"name":              p.Name,
-		"path":              p.Path,
-		"aliases":           p.Aliases,
-		"instructions":      p.Instructions,
-		"color":             p.Color,
-		"claude_config_dir": p.ClaudeConfigDir,
-		"use_worktrees":     p.UseWorktrees,
-		"task_count":        taskCount,
+		"id":                      p.ID,
+		"name":                    p.Name,
+		"path":                    p.Path,
+		"aliases":                 p.Aliases,
+		"instructions":            p.Instructions,
+		"color":                   p.Color,
+		"claude_config_dir":       p.ClaudeConfigDir,
+		"use_worktrees":           p.UseWorktrees,
+		"default_permission_mode": p.EffectiveDefaultPermissionMode(),
+		"task_count":              taskCount,
 	}
 }
 
