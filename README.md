@@ -430,6 +430,46 @@ This means when you retry a blocked task with feedback, Claude doesn't start ove
 | Task deleted | Window killed, worktree removed, teardown script runs |
 | Daemon restart | Orphaned windows are cleaned up on next poll |
 
+## Routines
+
+Routines are named, unattended agent runs — scouts and monitors that watch
+something on a schedule and feed your queue. TaskYou deliberately has **no
+scheduler**: trigger runs with `ty run <name>` from cron, launchd, or anything
+else that can run a command. TaskYou owns everything around the run: state,
+logs, history, and failure alerting.
+
+A routine is a directory under `~/.config/task/routines/<name>/`:
+
+- `prompt.md` — the agent prompt, with optional frontmatter (`model`, `project`,
+  `timeout`, `permission-mode`)
+- `env.sh` — optional; sourced before each run for secrets and fail-fast checks
+  (a non-zero exit fails the run before the agent starts)
+
+```bash
+ty routines create my-scout     # scaffold a new routine
+ty run my-scout                 # run it now (cron/launchd call this too)
+ty routines                     # health: last run, status, duration
+ty routines show my-scout       # config + recent run history
+ty routines logs my-scout       # full log of the latest run
+ty routines disable my-scout    # pause (ty run becomes a no-op)
+```
+
+```cron
+# Schedule with whatever you already use, e.g. cron:
+*/30 * * * * ty run my-scout
+```
+
+Each run executes `claude -p` headlessly (default model: sonnet, default
+timeout: 30m) with the prompt on stdin, working directory set to the routine's
+private state dir (`~/.local/share/task/routines/<name>/`, also exported as
+`$ROUTINE_STATE_DIR`) so cross-run state like seen-IDs has an obvious home.
+Output is logged per run and recorded in run history.
+
+When a run fails — agent error, `env.sh` failure (expired credentials), or
+timeout — TaskYou pins a `Routine failed: <name>` task to your board (deduped
+while one is open) and fires a `routine.failed` event hook. Silent failure is
+the one thing a routine is not allowed to do.
+
 ## Event Hooks
 
 TaskYou runs scripts in `~/.config/task/hooks/` when tasks change state.
