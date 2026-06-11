@@ -381,12 +381,13 @@ func (db *DB) GetTask(id int64) (*Task, error) {
 
 // ListTasksOptions defines options for listing tasks.
 type ListTasksOptions struct {
-	Status        string
-	Type          string
-	Project       string
-	Limit         int
-	Offset        int
-	IncludeClosed bool // Include closed tasks even when Status is empty
+	Status         string
+	Type           string
+	Project        string
+	Limit          int
+	Offset         int
+	IncludeClosed  bool // Include closed tasks even when Status is empty
+	OrderByRecency bool // Sort purely by recency, ignoring pinned-first ordering
 }
 
 // ListTasks retrieves tasks with optional filters.
@@ -430,9 +431,18 @@ func (db *DB) ListTasks(opts ListTasksOptions) ([]*Task, error) {
 		query += " AND status NOT IN ('done', 'archived')"
 	}
 
-	// Pinning takes precedence, then sort done/blocked tasks by completed_at (most recently closed first)
-	// and other tasks by created_at (newest first). Use id DESC as secondary sort for consistency.
-	query += " ORDER BY pinned DESC, CASE WHEN status IN ('done', 'blocked') THEN completed_at ELSE created_at END DESC, id DESC"
+	// Sort done/blocked tasks by completed_at (most recently closed first) and
+	// other tasks by created_at (newest first). Use id DESC as secondary sort for
+	// consistency. Pinning takes precedence unless OrderByRecency is set: a capped
+	// slice (e.g. the kanban's Done column) must select the most recent tasks, and
+	// pinned-first selection would let old pinned tasks crowd newer ones out of the
+	// limit entirely.
+	recency := " CASE WHEN status IN ('done', 'blocked') THEN completed_at ELSE created_at END DESC, id DESC"
+	if opts.OrderByRecency {
+		query += " ORDER BY" + recency
+	} else {
+		query += " ORDER BY pinned DESC," + recency
+	}
 
 	if opts.Limit > 0 {
 		query += fmt.Sprintf(" LIMIT %d", opts.Limit)
