@@ -244,6 +244,37 @@ func TestHandleDeleteTask(t *testing.T) {
 	}
 }
 
+func TestTaskJSON_IncludesPortWorktreeExecutor(t *testing.T) {
+	srv, database, _ := setupServer(t)
+
+	task := &db.Task{Title: "Rich task", Status: db.StatusProcessing, Project: "personal"}
+	database.CreateTask(task)
+	task.Port = 3142
+	task.WorktreePath = "/tmp/wt"
+	database.UpdateTask(task)
+	database.UpdateTaskPaneIDs(task.ID, "%7", "")
+
+	req := httptest.NewRequest("GET", "/api/tasks", nil)
+	w := httptest.NewRecorder()
+	srv.handleListTasks(w, req)
+
+	var tasks []*taskJSON
+	json.NewDecoder(w.Body).Decode(&tasks)
+	if len(tasks) != 1 {
+		t.Fatalf("expected 1 task, got %d", len(tasks))
+	}
+	got := tasks[0]
+	if got.Port != 3142 {
+		t.Errorf("port = %d, want 3142", got.Port)
+	}
+	if got.WorktreePath != "/tmp/wt" {
+		t.Errorf("worktree_path = %q, want /tmp/wt", got.WorktreePath)
+	}
+	if !got.HasExecutor {
+		t.Error("has_executor = false, want true")
+	}
+}
+
 // --- Task actions ---
 
 func TestHandleExecuteTask(t *testing.T) {
@@ -428,6 +459,28 @@ func TestHandleTaskInput_NoPaneID(t *testing.T) {
 
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d", w.Code)
+	}
+}
+
+func TestHandleTaskOutput_JoinsWrappedLines(t *testing.T) {
+	srv, database, runner := setupServer(t)
+	runner.outputVal = []byte("pane content")
+
+	task := &db.Task{Title: "Out task", Status: db.StatusProcessing, Project: "personal"}
+	database.CreateTask(task)
+	database.UpdateTaskPaneIDs(task.ID, "%5", "")
+
+	req := httptest.NewRequest("GET", fmt.Sprintf("/api/tasks/%d/output", task.ID), nil)
+	req.SetPathValue("id", fmt.Sprintf("%d", task.ID))
+	w := httptest.NewRecorder()
+	srv.handleTaskOutput(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	expected := []string{"tmux", "capture-pane", "-t", "%5", "-p", "-J", "-S", "-200"}
+	if fmt.Sprint(runner.calls[0]) != fmt.Sprint(expected) {
+		t.Errorf("call = %v, want %v", runner.calls[0], expected)
 	}
 }
 

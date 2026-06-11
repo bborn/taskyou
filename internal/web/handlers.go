@@ -504,7 +504,8 @@ func (s *Server) handleTaskOutput(w http.ResponseWriter, r *http.Request) {
 		lines = v
 	}
 
-	output, err := s.runner.Output("tmux", "capture-pane", "-t", paneID, "-p", "-S", "-"+lines)
+	// -J joins wrapped lines so clients can reflow to their own width.
+	output, err := s.runner.Output("tmux", "capture-pane", "-t", paneID, "-p", "-J", "-S", "-"+lines)
 	if err != nil {
 		jsonErr(w, "executor pane not available", http.StatusGone)
 		return
@@ -1021,6 +1022,9 @@ type taskJSON struct {
 	Tags           string `json:"tags"`
 	PermissionMode string `json:"permission_mode"`
 	BranchName     string `json:"branch_name"`
+	Port           int    `json:"port,omitempty"`
+	WorktreePath   string `json:"worktree_path,omitempty"`
+	HasExecutor    bool   `json:"has_executor"`
 	PRURL          string `json:"pr_url"`
 	Summary        string `json:"summary,omitempty"`
 	CreatedAt      string `json:"created_at"`
@@ -1049,6 +1053,9 @@ func toTaskJSON(t *db.Task) *taskJSON {
 		Tags:           t.Tags,
 		PermissionMode: t.EffectivePermissionMode(),
 		BranchName:     t.BranchName,
+		Port:           t.Port,
+		WorktreePath:   t.WorktreePath,
+		HasExecutor:    t.ClaudePaneID != "",
 		PRURL:          t.PRURL,
 		Summary:        t.Summary,
 		CreatedAt:      t.CreatedAt.Time.Format("2006-01-02T15:04:05Z"),
