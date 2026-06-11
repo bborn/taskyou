@@ -1,0 +1,153 @@
+{
+  "covers": {
+    "Archive": {
+      "api": [
+        "POST /api/tasks/{id}/status"
+      ],
+      "note": "a with confirm"
+    },
+    "Back": {
+      "note": "Esc walks back through overlays/views"
+    },
+    "ChangeStatus": {
+      "api": [
+        "POST /api/tasks/{id}/status"
+      ],
+      "note": "S dialog"
+    },
+    "Close": {
+      "api": [
+        "POST /api/tasks/{id}/close"
+      ],
+      "note": "c, drag to Done"
+    },
+    "CollapseBacklog": {
+      "note": "["
+    },
+    "CollapseDone": {
+      "note": "]"
+    },
+    "CommandPalette": {
+      "note": "p, f, \u2318P \u2014 cmdk palette"
+    },
+    "Delete": {
+      "api": [
+        "DELETE /api/tasks/{id}"
+      ],
+      "note": "d with confirm"
+    },
+    "Down": {
+      "note": "Arrow keys move board selection"
+    },
+    "Edit": {
+      "api": [
+        "PATCH /api/tasks/{id}"
+      ],
+      "note": "e, detail Edit button"
+    },
+    "Enter": {
+      "note": "Open task detail"
+    },
+    "Filter": {
+      "note": "/ \u2014 text, #id, [project] with autocomplete dropdown"
+    },
+    "FocusBacklog": {
+      "note": "B"
+    },
+    "FocusBlocked": {
+      "note": "L"
+    },
+    "FocusDone": {
+      "note": "D"
+    },
+    "FocusInProgress": {
+      "note": "P"
+    },
+    "Help": {
+      "note": "? shortcut overlay"
+    },
+    "JumpToNotification": {
+      "note": "g; toasts also carry an Open action"
+    },
+    "JumpToPinned": {
+      "note": "shift+\u2191 jumps to first pinned task in column"
+    },
+    "JumpToUnpinned": {
+      "note": "shift+\u2193 jumps to first unpinned task in column"
+    },
+    "Left": {
+      "note": "Arrow keys move board selection"
+    },
+    "New": {
+      "api": [
+        "POST /api/tasks"
+      ],
+      "note": "n, \u2318N, titlebar button"
+    },
+    "OpenBrowser": {
+      "note": "b \u2014 opens task branch in browser"
+    },
+    "OpenPR": {
+      "note": "G / PR button"
+    },
+    "OpenWorktree": {
+      "note": "o / Editor button \u2014 opens worktree in code editor"
+    },
+    "Queue": {
+      "api": [
+        "POST /api/tasks/{id}/execute"
+      ],
+      "note": "x, Execute button, drag to In Progress"
+    },
+    "QueueDangerous": {
+      "api": [
+        "PATCH /api/tasks/{id}",
+        "POST /api/tasks/{id}/execute"
+      ],
+      "note": "X"
+    },
+    "Quit": {
+      "note": "\u2318Q / native window close"
+    },
+    "Refresh": {
+      "api": [
+        "GET /api/tasks"
+      ],
+      "note": "R; SSE keeps board live anyway"
+    },
+    "Retry": {
+      "api": [
+        "POST /api/tasks/{id}/retry"
+      ],
+      "note": "r, Reply dialog"
+    },
+    "Right": {
+      "note": "Arrow keys move board selection"
+    },
+    "Settings": {
+      "note": "s, \u2318,, titlebar gear"
+    },
+    "Spotlight": {
+      "note": "f opens the fuzzy task palette"
+    },
+    "ToggleDangerous": {
+      "note": "! cycles permission mode for new executions"
+    },
+    "TogglePin": {
+      "api": [
+        "POST /api/tasks/{id}/pin"
+      ],
+      "note": "t"
+    },
+    "Up": {
+      "note": "Arrow keys move board selection"
+    }
+  },
+  "gui_only": [
+    "BrowserMirrorTerminal",
+    "DragAndDropBoard",
+    "NativeNotifications",
+    "RealPtyTerminal",
+    "ThemeToggle"
+  ]
+}

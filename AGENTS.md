@@ -43,6 +43,38 @@ Local:  ty -l (launches TUI + daemon)
 Remote: ssh -p 2222 user@server
 ```
 
+## Multi-Surface Parity (CI-enforced)
+
+TaskYou has three user surfaces over one Go core: **CLI** (cobra), **TUI**
+(Bubble Tea), and **GUI** (`desktop/`, also served in the browser by
+`ty serve`). Parity between them is enforced — not watched — by
+`internal/parity`, which runs in the normal test suite and fails CI on drift.
+
+**The rule: a user-facing feature is not done until its logic lives below
+`internal/ui` and is reachable through the HTTP API.** UIs are thin views;
+putting logic only in TUI keybinding handlers makes it invisible to the GUI,
+the browser, and agents.
+
+How the harness works:
+
+1. The TUI's capability surface is derived mechanically from `ui.KeyMap` —
+   every exported `key.Binding` field is a user-facing action.
+2. Every action must appear in **`desktop/capabilities.json`** (the GUI covers
+   it; optional `api` entries are verified against the routes registered in
+   `internal/web/server.go`) **or** in **`parity-ignore.json`** with a written
+   reason. Anything else fails the build.
+3. Stale entries (covering or ignoring actions that no longer exist) also fail,
+   so the files cannot rot.
+
+When you add a TUI feature:
+
+- Implement it in the GUI too and add it to `desktop/capabilities.json`, **or**
+- Make skipping the GUI a deliberate decision: add it to `parity-ignore.json`
+  with a reason (and ideally a date). Deleting the ignore entry later is the
+  signal that the gap was closed.
+
+Do not weaken the parity test to get CI green.
+
 ## Repository Structure
 
 ```
