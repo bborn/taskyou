@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -18,6 +19,7 @@ type Task struct {
 	Type            string
 	Project         string
 	Executor        string // Task executor: "claude" (default), "codex", "gemini"
+	EffortLevel     string // Per-task Claude effort override ("" = use global/Claude default; otherwise low/medium/high/xhigh/max)
 	WorktreePath    string
 	BranchName      string
 	Port            int    // Unique port for running the application in this task's worktree
@@ -29,7 +31,9 @@ type Task struct {
 	PRURL           string // Pull request URL (if associated with a PR)
 	PRNumber        int    // Pull request number (if associated with a PR)
 	PRInfoJSON      string // Cached PR state as JSON (state, checks, mergeable, etc.)
-	DangerousMode   bool   // Whether task is running in dangerous mode (--dangerously-skip-permissions)
+	DangerousMode   bool   // Whether task is running in dangerous mode (--dangerously-skip-permissions). Kept for backward compat; PermissionMode is authoritative.
+	PermissionMode  string // Permission mode for execution: "default" (prompt), "accept-edits" (Claude's acceptEdits — auto-accept file edits, still prompts for risky actions), "auto" (Claude Code's auto mode — classifier auto-approves safe actions, blocks risky ones), "dangerous" (skip permissions). Empty falls back to DangerousMode/global default.
+	RemoteControl   bool   // Whether to launch claude with --remote-control (interactive, remote-drivable)
 	Pinned          bool   // Whether the task is pinned to the top of its column
 	Tags            string // Comma-separated tags for categorization (e.g., "customer-support,email,influence-kit")
 	SourceBranch    string // Existing branch to checkout for worktree (e.g., "fix/ui-overflow") instead of creating new branch
@@ -64,6 +68,130 @@ func IsInProgress(status string) bool {
 	return status == StatusQueued || status == StatusProcessing
 }
 
+// Permission modes control how the underlying agent handles permission prompts.
+// They map one-to-one onto Claude Code's --permission-mode choices (plus the
+// --dangerously-skip-permissions shortcut). There are four sets, from most to
+// least gated: default → accept-edits → auto → dangerous.
+//
+// HISTORY: TaskYou originally used the value "auto" for what is really Claude's
+// acceptEdits mode — that predated Claude Code shipping its own "auto mode". The
+// value "auto" now means Claude Code's actual auto mode (--permission-mode
+// auto), and the old acceptEdits set has the explicit value "accept-edits".
+// A one-time DB migration rewrites pre-existing "auto" rows (which meant
+// acceptEdits) to "accept-edits"; see migrate() in sqlite.go.
+const (
+	// PermissionModeDefault prompts for every permission (the historical default).
+	// Maps to Claude's --permission-mode default.
+	PermissionModeDefault = "default"
+	// PermissionModeAcceptEdits auto-accepts file edits but still prompts for
+	// risky actions (shell, network, etc.). Maps to Claude's
+	// --permission-mode acceptEdits.
+	PermissionModeAcceptEdits = "accept-edits"
+	// PermissionModeAuto is Claude Code's auto mode (--permission-mode auto): an
+	// AI classifier auto-approves a broad set of safe actions (edits and safe
+	// commands) while still hard-denying dangerous ones. More autonomous than
+	// accept-edits, but far safer than fully bypassing permissions.
+	PermissionModeAuto = "auto"
+	// PermissionModeDangerous bypasses all permission checks
+	// (Claude's --dangerously-skip-permissions).
+	PermissionModeDangerous = "dangerous"
+)
+
+// NormalizePermissionMode coerces a raw value into a known permission mode.
+// "prompt" and "" are treated as default; Claude's own "acceptEdits" spelling
+// (and "accept_edits") normalizes to PermissionModeAcceptEdits. Matching is
+// case- and whitespace-insensitive. Unknown values return "".
+func NormalizePermissionMode(mode string) string {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case PermissionModeAcceptEdits, "accept_edits", "acceptedits":
+		return PermissionModeAcceptEdits
+	case PermissionModeAuto:
+		return PermissionModeAuto
+	case PermissionModeDangerous:
+		return PermissionModeDangerous
+	case PermissionModeDefault, "prompt":
+		return PermissionModeDefault
+	}
+	return ""
+}
+
+// PermissionModeCycle is the order the UI cycles permission modes, from most to
+// least gated. Cycling keeps the four modes reachable on a running task; each
+// step relaunches the live session so it matches the stored mode.
+var PermissionModeCycle = []string{
+	PermissionModeDefault,
+	PermissionModeAcceptEdits,
+	PermissionModeAuto,
+	PermissionModeDangerous,
+}
+
+// NextPermissionMode returns the next mode after the given one in
+// PermissionModeCycle, wrapping around. Unknown input starts the cycle at
+// accept-edits (one past default), so "advance from wherever you are" is sane.
+func NextPermissionMode(mode string) string {
+	mode = NormalizePermissionMode(mode)
+	for i, m := range PermissionModeCycle {
+		if m == mode {
+			return PermissionModeCycle[(i+1)%len(PermissionModeCycle)]
+		}
+	}
+	return PermissionModeAcceptEdits
+}
+
+// PermissionModeLabel returns a short human-facing label for a permission mode.
+func PermissionModeLabel(mode string) string {
+	switch NormalizePermissionMode(mode) {
+	case PermissionModeAcceptEdits:
+		return "Accept-edits"
+	case PermissionModeAuto:
+		return "Auto"
+	case PermissionModeDangerous:
+		return "Dangerous"
+	default:
+		return "Prompt"
+	}
+}
+
+// GlobalDefaultPermissionMode returns the fallback permission mode used when a
+// project has no explicit default. It can be overridden with the
+// TASKYOU_DEFAULT_PERMISSION_MODE environment variable. Defaults to "auto"
+// (Claude Code's auto mode) so tasks start maximally unblocked while the
+// classifier still gates dangerous actions; set the env var to "accept-edits"
+// or "default" to dial back autonomy.
+func GlobalDefaultPermissionMode() string {
+	if m := NormalizePermissionMode(os.Getenv("TASKYOU_DEFAULT_PERMISSION_MODE")); m != "" {
+		return m
+	}
+	return PermissionModeAuto
+}
+
+// EffectivePermissionMode resolves the permission mode a task should run with,
+// falling back to the legacy DangerousMode boolean and finally the default.
+func (t *Task) EffectivePermissionMode() string {
+	if m := NormalizePermissionMode(t.PermissionMode); m != "" {
+		return m
+	}
+	if t.DangerousMode {
+		return PermissionModeDangerous
+	}
+	return PermissionModeDefault
+}
+
+// IsDangerous reports whether the task runs with permissions fully bypassed.
+func (t *Task) IsDangerous() bool {
+	return t.EffectivePermissionMode() == PermissionModeDangerous
+}
+
+// IsAutoPermission reports whether the task runs in Claude Code's auto mode.
+func (t *Task) IsAutoPermission() bool {
+	return t.EffectivePermissionMode() == PermissionModeAuto
+}
+
+// IsAcceptEdits reports whether the task runs in accept-edits (acceptEdits) mode.
+func (t *Task) IsAcceptEdits() bool {
+	return t.EffectivePermissionMode() == PermissionModeAcceptEdits
+}
+
 // Task types (default values, actual types are stored in task_types table)
 const (
 	TypeCode     = "code"
@@ -84,6 +212,33 @@ const (
 // DefaultExecutor returns the default executor if none is specified.
 func DefaultExecutor() string {
 	return ExecutorClaude
+}
+
+// Effort levels are per-task overrides for Claude's reasoning effort (claude --effort).
+// An empty value means "no override" — the task uses Claude's global default, leaving
+// the user's global setting untouched.
+const (
+	EffortLow    = "low"
+	EffortMedium = "medium"
+	EffortHigh   = "high"
+	EffortXHigh  = "xhigh"
+	EffortMax    = "max"
+)
+
+// EffortLevels returns the valid per-task effort override values, in ascending order.
+func EffortLevels() []string {
+	return []string{EffortLow, EffortMedium, EffortHigh, EffortXHigh, EffortMax}
+}
+
+// IsValidEffortLevel reports whether s is a valid effort level. The empty string is
+// valid and means "use the global/Claude default" (no per-task override).
+func IsValidEffortLevel(s string) bool {
+	switch s {
+	case "", EffortLow, EffortMedium, EffortHigh, EffortXHigh, EffortMax:
+		return true
+	default:
+		return false
+	}
 }
 
 // Port allocation constants
@@ -128,10 +283,24 @@ func (db *DB) CreateTask(t *Task) error {
 	}
 	t.Project = project.Name
 
+	// Resolve the permission mode: an explicit value wins, otherwise inherit the
+	// project's configured default so tasks start in the right mode without a
+	// manual per-session toggle.
+	t.PermissionMode = NormalizePermissionMode(t.PermissionMode)
+	if t.PermissionMode == "" {
+		if t.DangerousMode {
+			t.PermissionMode = PermissionModeDangerous
+		} else {
+			t.PermissionMode = project.EffectiveDefaultPermissionMode()
+		}
+	}
+	// Keep the legacy boolean consistent with the resolved mode.
+	t.DangerousMode = t.PermissionMode == PermissionModeDangerous
+
 	result, err := db.Exec(`
-		INSERT INTO tasks (title, body, status, type, project, executor, pinned, tags, source_branch)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, t.Title, t.Body, t.Status, t.Type, t.Project, t.Executor, t.Pinned, t.Tags, t.SourceBranch)
+		INSERT INTO tasks (title, body, status, type, project, executor, pinned, tags, source_branch, dangerous_mode, permission_mode, remote_control, effort_level)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, t.Title, t.Body, t.Status, t.Type, t.Project, t.Executor, t.Pinned, t.Tags, t.SourceBranch, t.DangerousMode, t.PermissionMode, t.RemoteControl, t.EffortLevel)
 	if err != nil {
 		return fmt.Errorf("insert task: %w", err)
 	}
@@ -150,6 +319,14 @@ func (db *DB) CreateTask(t *Task) error {
 	// Save the last used executor for this project
 	if t.Executor != "" {
 		db.SetLastExecutorForProject(t.Project, t.Executor)
+	}
+
+	// Save the last used effort and permission mode so the next task in this
+	// project defaults to the same choices. Effort is stored even when empty
+	// ("default") so switching back to the default sticks.
+	if t.Project != "" {
+		db.SetLastEffortForProject(t.Project, t.EffortLevel)
+		db.SetLastPermissionForProject(t.Project, t.PermissionMode)
 	}
 
 	// Save the last used project
@@ -175,8 +352,8 @@ func (db *DB) GetTask(id int64) (*Task, error) {
 		       COALESCE(daemon_session, ''), COALESCE(tmux_window_id, ''),
 		       COALESCE(claude_pane_id, ''), COALESCE(shell_pane_id, ''),
 		       COALESCE(pr_url, ''), COALESCE(pr_number, 0), COALESCE(pr_info_json, ''),
-		       COALESCE(dangerous_mode, 0), COALESCE(pinned, 0), COALESCE(tags, ''),
-		       COALESCE(source_branch, ''), COALESCE(summary, ''),
+		       COALESCE(dangerous_mode, 0), COALESCE(permission_mode, ''), COALESCE(remote_control, 0), COALESCE(pinned, 0), COALESCE(tags, ''),
+		       COALESCE(source_branch, ''), COALESCE(summary, ''), COALESCE(effort_level, ''),
 		       created_at, updated_at, started_at, completed_at,
 		       last_distilled_at, last_accessed_at,
 		       COALESCE(archive_ref, ''), COALESCE(archive_commit, ''),
@@ -187,8 +364,8 @@ func (db *DB) GetTask(id int64) (*Task, error) {
 		&t.WorktreePath, &t.BranchName, &t.Port, &t.ClaudeSessionID,
 		&t.DaemonSession, &t.TmuxWindowID, &t.ClaudePaneID, &t.ShellPaneID,
 		&t.PRURL, &t.PRNumber, &t.PRInfoJSON,
-		&t.DangerousMode, &t.Pinned, &t.Tags,
-		&t.SourceBranch, &t.Summary,
+		&t.DangerousMode, &t.PermissionMode, &t.RemoteControl, &t.Pinned, &t.Tags,
+		&t.SourceBranch, &t.Summary, &t.EffortLevel,
 		&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
 		&t.LastDistilledAt, &t.LastAccessedAt,
 		&t.ArchiveRef, &t.ArchiveCommit, &t.ArchiveWorktreePath, &t.ArchiveBranchName,
@@ -220,8 +397,8 @@ func (db *DB) ListTasks(opts ListTasksOptions) ([]*Task, error) {
 		       COALESCE(daemon_session, ''), COALESCE(tmux_window_id, ''),
 		       COALESCE(claude_pane_id, ''), COALESCE(shell_pane_id, ''),
 		       COALESCE(pr_url, ''), COALESCE(pr_number, 0), COALESCE(pr_info_json, ''),
-		       COALESCE(dangerous_mode, 0), COALESCE(pinned, 0), COALESCE(tags, ''),
-		       COALESCE(source_branch, ''), COALESCE(summary, ''),
+		       COALESCE(dangerous_mode, 0), COALESCE(permission_mode, ''), COALESCE(remote_control, 0), COALESCE(pinned, 0), COALESCE(tags, ''),
+		       COALESCE(source_branch, ''), COALESCE(summary, ''), COALESCE(effort_level, ''),
 		       created_at, updated_at, started_at, completed_at,
 		       last_distilled_at, last_accessed_at,
 		       COALESCE(archive_ref, ''), COALESCE(archive_commit, ''),
@@ -280,8 +457,8 @@ func (db *DB) ListTasks(opts ListTasksOptions) ([]*Task, error) {
 			&t.WorktreePath, &t.BranchName, &t.Port, &t.ClaudeSessionID,
 			&t.DaemonSession, &t.TmuxWindowID, &t.ClaudePaneID, &t.ShellPaneID,
 			&t.PRURL, &t.PRNumber, &t.PRInfoJSON,
-			&t.DangerousMode, &t.Pinned, &t.Tags,
-			&t.SourceBranch, &t.Summary,
+			&t.DangerousMode, &t.PermissionMode, &t.RemoteControl, &t.Pinned, &t.Tags,
+			&t.SourceBranch, &t.Summary, &t.EffortLevel,
 			&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
 			&t.LastDistilledAt, &t.LastAccessedAt,
 			&t.ArchiveRef, &t.ArchiveCommit, &t.ArchiveWorktreePath, &t.ArchiveBranchName,
@@ -305,8 +482,8 @@ func (db *DB) GetMostRecentlyCreatedTask() (*Task, error) {
 		       COALESCE(daemon_session, ''), COALESCE(tmux_window_id, ''),
 		       COALESCE(claude_pane_id, ''), COALESCE(shell_pane_id, ''),
 		       COALESCE(pr_url, ''), COALESCE(pr_number, 0), COALESCE(pr_info_json, ''),
-		       COALESCE(dangerous_mode, 0), COALESCE(pinned, 0), COALESCE(tags, ''),
-		       COALESCE(source_branch, ''), COALESCE(summary, ''),
+		       COALESCE(dangerous_mode, 0), COALESCE(permission_mode, ''), COALESCE(remote_control, 0), COALESCE(pinned, 0), COALESCE(tags, ''),
+		       COALESCE(source_branch, ''), COALESCE(summary, ''), COALESCE(effort_level, ''),
 		       created_at, updated_at, started_at, completed_at,
 		       last_distilled_at, last_accessed_at,
 		       COALESCE(archive_ref, ''), COALESCE(archive_commit, ''),
@@ -319,8 +496,8 @@ func (db *DB) GetMostRecentlyCreatedTask() (*Task, error) {
 		&t.WorktreePath, &t.BranchName, &t.Port, &t.ClaudeSessionID,
 		&t.DaemonSession, &t.TmuxWindowID, &t.ClaudePaneID, &t.ShellPaneID,
 		&t.PRURL, &t.PRNumber, &t.PRInfoJSON,
-		&t.DangerousMode, &t.Pinned, &t.Tags,
-		&t.SourceBranch, &t.Summary,
+		&t.DangerousMode, &t.PermissionMode, &t.RemoteControl, &t.Pinned, &t.Tags,
+		&t.SourceBranch, &t.Summary, &t.EffortLevel,
 		&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
 		&t.LastDistilledAt, &t.LastAccessedAt,
 		&t.ArchiveRef, &t.ArchiveCommit, &t.ArchiveWorktreePath, &t.ArchiveBranchName,
@@ -348,8 +525,8 @@ func (db *DB) SearchTasks(query string, limit int) ([]*Task, error) {
 		       COALESCE(daemon_session, ''), COALESCE(tmux_window_id, ''),
 		       COALESCE(claude_pane_id, ''), COALESCE(shell_pane_id, ''),
 		       COALESCE(pr_url, ''), COALESCE(pr_number, 0), COALESCE(pr_info_json, ''),
-		       COALESCE(dangerous_mode, 0), COALESCE(pinned, 0), COALESCE(tags, ''),
-		       COALESCE(source_branch, ''), COALESCE(summary, ''),
+		       COALESCE(dangerous_mode, 0), COALESCE(permission_mode, ''), COALESCE(remote_control, 0), COALESCE(pinned, 0), COALESCE(tags, ''),
+		       COALESCE(source_branch, ''), COALESCE(summary, ''), COALESCE(effort_level, ''),
 		       created_at, updated_at, started_at, completed_at,
 		       last_distilled_at, last_accessed_at,
 		       COALESCE(archive_ref, ''), COALESCE(archive_commit, ''),
@@ -381,8 +558,8 @@ func (db *DB) SearchTasks(query string, limit int) ([]*Task, error) {
 			&t.WorktreePath, &t.BranchName, &t.Port, &t.ClaudeSessionID,
 			&t.DaemonSession, &t.TmuxWindowID, &t.ClaudePaneID, &t.ShellPaneID,
 			&t.PRURL, &t.PRNumber, &t.PRInfoJSON,
-			&t.DangerousMode, &t.Pinned, &t.Tags,
-			&t.SourceBranch, &t.Summary,
+			&t.DangerousMode, &t.PermissionMode, &t.RemoteControl, &t.Pinned, &t.Tags,
+			&t.SourceBranch, &t.Summary, &t.EffortLevel,
 			&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
 			&t.LastDistilledAt, &t.LastAccessedAt,
 			&t.ArchiveRef, &t.ArchiveCommit, &t.ArchiveWorktreePath, &t.ArchiveBranchName,
@@ -453,6 +630,16 @@ func (db *DB) UpdateTaskStatus(id int64, status string) error {
 				},
 			}
 			db.emitTaskUpdated(updatedTask, changes)
+			// Also emit lifecycle events so external watchers can react
+			// to blocked/completed transitions without parsing update metadata.
+			// These fire for every caller of UpdateTaskStatus — Claude hooks,
+			// MCP, CLI, TUI, and the executor — as long as an emitter is registered.
+			switch status {
+			case StatusBlocked:
+				db.emitTaskBlocked(updatedTask, "status change")
+			case StatusDone:
+				db.emitTaskCompleted(updatedTask)
+			}
 		}
 	}
 
@@ -473,14 +660,14 @@ func (db *DB) UpdateTask(t *Task) error {
 		UPDATE tasks SET
 			title = ?, body = ?, status = ?, type = ?, project = ?, executor = ?,
 			worktree_path = ?, branch_name = ?, port = ?, claude_session_id = ?,
-			daemon_session = ?, pr_url = ?, pr_number = ?, pr_info_json = ?, dangerous_mode = ?,
-			pinned = ?, tags = ?, source_branch = ?,
+			daemon_session = ?, pr_url = ?, pr_number = ?, pr_info_json = ?, dangerous_mode = ?, permission_mode = ?, remote_control = ?,
+			pinned = ?, tags = ?, source_branch = ?, effort_level = ?,
 			updated_at = CURRENT_TIMESTAMP
 		WHERE id = ?
 	`, t.Title, t.Body, t.Status, t.Type, t.Project, t.Executor,
 		t.WorktreePath, t.BranchName, t.Port, t.ClaudeSessionID,
-		t.DaemonSession, t.PRURL, t.PRNumber, t.PRInfoJSON, t.DangerousMode,
-		t.Pinned, t.Tags, t.SourceBranch, t.ID)
+		t.DaemonSession, t.PRURL, t.PRNumber, t.PRInfoJSON, t.DangerousMode, t.PermissionMode, t.RemoteControl,
+		t.Pinned, t.Tags, t.SourceBranch, t.EffortLevel, t.ID)
 	if err != nil {
 		return fmt.Errorf("update task: %w", err)
 	}
@@ -536,14 +723,37 @@ func (db *DB) UpdateTaskClaudeSessionID(taskID int64, sessionID string) error {
 	return nil
 }
 
-// UpdateTaskDangerousMode updates only the dangerous_mode flag for a task.
+// UpdateTaskDangerousMode updates the dangerous_mode flag for a task, keeping
+// the authoritative permission_mode column in sync. Toggling dangerous off
+// resets the task to the default (prompt) mode.
 func (db *DB) UpdateTaskDangerousMode(taskID int64, dangerousMode bool) error {
+	mode := PermissionModeDefault
+	if dangerousMode {
+		mode = PermissionModeDangerous
+	}
 	_, err := db.Exec(`
-		UPDATE tasks SET dangerous_mode = ?, updated_at = CURRENT_TIMESTAMP
+		UPDATE tasks SET dangerous_mode = ?, permission_mode = ?, updated_at = CURRENT_TIMESTAMP
 		WHERE id = ?
-	`, dangerousMode, taskID)
+	`, dangerousMode, mode, taskID)
 	if err != nil {
 		return fmt.Errorf("update task dangerous mode: %w", err)
+	}
+	return nil
+}
+
+// UpdateTaskPermissionMode updates the permission_mode for a task and keeps the
+// legacy dangerous_mode boolean consistent.
+func (db *DB) UpdateTaskPermissionMode(taskID int64, mode string) error {
+	mode = NormalizePermissionMode(mode)
+	if mode == "" {
+		mode = PermissionModeDefault
+	}
+	_, err := db.Exec(`
+		UPDATE tasks SET permission_mode = ?, dangerous_mode = ?, updated_at = CURRENT_TIMESTAMP
+		WHERE id = ?
+	`, mode, mode == PermissionModeDangerous, taskID)
+	if err != nil {
+		return fmt.Errorf("update task permission mode: %w", err)
 	}
 	return nil
 }
@@ -782,8 +992,8 @@ func (db *DB) GetNextQueuedTask() (*Task, error) {
 		       COALESCE(daemon_session, ''), COALESCE(tmux_window_id, ''),
 		       COALESCE(claude_pane_id, ''), COALESCE(shell_pane_id, ''),
 		       COALESCE(pr_url, ''), COALESCE(pr_number, 0), COALESCE(pr_info_json, ''),
-		       COALESCE(dangerous_mode, 0), COALESCE(pinned, 0), COALESCE(tags, ''),
-		       COALESCE(source_branch, ''), COALESCE(summary, ''),
+		       COALESCE(dangerous_mode, 0), COALESCE(permission_mode, ''), COALESCE(remote_control, 0), COALESCE(pinned, 0), COALESCE(tags, ''),
+		       COALESCE(source_branch, ''), COALESCE(summary, ''), COALESCE(effort_level, ''),
 		       created_at, updated_at, started_at, completed_at,
 		       last_distilled_at, last_accessed_at,
 		       COALESCE(archive_ref, ''), COALESCE(archive_commit, ''),
@@ -797,8 +1007,8 @@ func (db *DB) GetNextQueuedTask() (*Task, error) {
 		&t.WorktreePath, &t.BranchName, &t.Port, &t.ClaudeSessionID,
 		&t.DaemonSession, &t.TmuxWindowID, &t.ClaudePaneID, &t.ShellPaneID,
 		&t.PRURL, &t.PRNumber, &t.PRInfoJSON,
-		&t.DangerousMode, &t.Pinned, &t.Tags,
-		&t.SourceBranch, &t.Summary,
+		&t.DangerousMode, &t.PermissionMode, &t.RemoteControl, &t.Pinned, &t.Tags,
+		&t.SourceBranch, &t.Summary, &t.EffortLevel,
 		&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
 		&t.LastDistilledAt, &t.LastAccessedAt,
 		&t.ArchiveRef, &t.ArchiveCommit, &t.ArchiveWorktreePath, &t.ArchiveBranchName,
@@ -820,8 +1030,8 @@ func (db *DB) GetQueuedTasks() ([]*Task, error) {
 		       COALESCE(daemon_session, ''), COALESCE(tmux_window_id, ''),
 		       COALESCE(claude_pane_id, ''), COALESCE(shell_pane_id, ''),
 		       COALESCE(pr_url, ''), COALESCE(pr_number, 0), COALESCE(pr_info_json, ''),
-		       COALESCE(dangerous_mode, 0), COALESCE(pinned, 0), COALESCE(tags, ''),
-		       COALESCE(source_branch, ''), COALESCE(summary, ''),
+		       COALESCE(dangerous_mode, 0), COALESCE(permission_mode, ''), COALESCE(remote_control, 0), COALESCE(pinned, 0), COALESCE(tags, ''),
+		       COALESCE(source_branch, ''), COALESCE(summary, ''), COALESCE(effort_level, ''),
 		       created_at, updated_at, started_at, completed_at,
 		       last_distilled_at, last_accessed_at,
 		       COALESCE(archive_ref, ''), COALESCE(archive_commit, ''),
@@ -843,8 +1053,8 @@ func (db *DB) GetQueuedTasks() ([]*Task, error) {
 			&t.WorktreePath, &t.BranchName, &t.Port, &t.ClaudeSessionID,
 			&t.DaemonSession, &t.TmuxWindowID, &t.ClaudePaneID, &t.ShellPaneID,
 			&t.PRURL, &t.PRNumber, &t.PRInfoJSON,
-			&t.DangerousMode, &t.Pinned, &t.Tags,
-			&t.SourceBranch, &t.Summary,
+			&t.DangerousMode, &t.PermissionMode, &t.RemoteControl, &t.Pinned, &t.Tags,
+			&t.SourceBranch, &t.Summary, &t.EffortLevel,
 			&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
 			&t.LastDistilledAt, &t.LastAccessedAt,
 			&t.ArchiveRef, &t.ArchiveCommit, &t.ArchiveWorktreePath, &t.ArchiveBranchName,
@@ -1121,13 +1331,25 @@ type Project struct {
 	Color           string          // hex color for display (e.g., "#61AFEF")
 	ClaudeConfigDir string          // override CLAUDE_CONFIG_DIR for this project
 	UseWorktrees    bool            // whether to use git worktrees for task isolation (default true)
-	CreatedAt       LocalTime
+	// DefaultPermissionMode is the permission mode new tasks in this project
+	// inherit ("default", "auto", "dangerous"). Empty means use the global default.
+	DefaultPermissionMode string
+	CreatedAt             LocalTime
 }
 
 // UsesWorktrees returns whether this project uses git worktrees for task isolation.
 // Defaults to true for backward compatibility.
 func (p *Project) UsesWorktrees() bool {
 	return p.UseWorktrees
+}
+
+// EffectiveDefaultPermissionMode returns the permission mode new tasks in this
+// project should inherit, falling back to the global default when unset.
+func (p *Project) EffectiveDefaultPermissionMode() string {
+	if m := NormalizePermissionMode(p.DefaultPermissionMode); m != "" {
+		return m
+	}
+	return GlobalDefaultPermissionMode()
 }
 
 // GetAction returns the action for a given trigger, or nil if not found.
@@ -1152,9 +1374,9 @@ func boolToInt(b bool) int {
 func (db *DB) CreateProject(p *Project) error {
 	actionsJSON, _ := json.Marshal(p.Actions)
 	result, err := db.Exec(`
-		INSERT INTO projects (name, path, aliases, instructions, actions, color, claude_config_dir, use_worktrees)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-	`, p.Name, p.Path, p.Aliases, p.Instructions, string(actionsJSON), p.Color, p.ClaudeConfigDir, boolToInt(p.UseWorktrees))
+		INSERT INTO projects (name, path, aliases, instructions, actions, color, claude_config_dir, use_worktrees, default_permission_mode)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, p.Name, p.Path, p.Aliases, p.Instructions, string(actionsJSON), p.Color, p.ClaudeConfigDir, boolToInt(p.UseWorktrees), NormalizePermissionMode(p.DefaultPermissionMode))
 	if err != nil {
 		return fmt.Errorf("insert project: %w", err)
 	}
@@ -1167,9 +1389,9 @@ func (db *DB) CreateProject(p *Project) error {
 func (db *DB) UpdateProject(p *Project) error {
 	actionsJSON, _ := json.Marshal(p.Actions)
 	_, err := db.Exec(`
-		UPDATE projects SET name = ?, path = ?, aliases = ?, instructions = ?, actions = ?, color = ?, claude_config_dir = ?, use_worktrees = ?
+		UPDATE projects SET name = ?, path = ?, aliases = ?, instructions = ?, actions = ?, color = ?, claude_config_dir = ?, use_worktrees = ?, default_permission_mode = ?
 		WHERE id = ?
-	`, p.Name, p.Path, p.Aliases, p.Instructions, string(actionsJSON), p.Color, p.ClaudeConfigDir, boolToInt(p.UseWorktrees), p.ID)
+	`, p.Name, p.Path, p.Aliases, p.Instructions, string(actionsJSON), p.Color, p.ClaudeConfigDir, boolToInt(p.UseWorktrees), NormalizePermissionMode(p.DefaultPermissionMode), p.ID)
 	if err != nil {
 		return fmt.Errorf("update project: %w", err)
 	}
@@ -1210,7 +1432,7 @@ func (db *DB) CountTasksByProject(projectName string) (int, error) {
 // ListProjects returns all projects, with "personal" always first.
 func (db *DB) ListProjects() ([]*Project, error) {
 	rows, err := db.Query(`
-		SELECT id, name, path, aliases, instructions, COALESCE(actions, '[]'), COALESCE(color, ''), COALESCE(claude_config_dir, ''), COALESCE(use_worktrees, 1), created_at
+		SELECT id, name, path, aliases, instructions, COALESCE(actions, '[]'), COALESCE(color, ''), COALESCE(claude_config_dir, ''), COALESCE(use_worktrees, 1), COALESCE(default_permission_mode, ''), created_at
 		FROM projects ORDER BY CASE WHEN name = 'personal' THEN 0 ELSE 1 END, name
 	`)
 	if err != nil {
@@ -1223,7 +1445,7 @@ func (db *DB) ListProjects() ([]*Project, error) {
 		p := &Project{}
 		var actionsJSON string
 		var useWorktrees int
-		if err := rows.Scan(&p.ID, &p.Name, &p.Path, &p.Aliases, &p.Instructions, &actionsJSON, &p.Color, &p.ClaudeConfigDir, &useWorktrees, &p.CreatedAt); err != nil {
+		if err := rows.Scan(&p.ID, &p.Name, &p.Path, &p.Aliases, &p.Instructions, &actionsJSON, &p.Color, &p.ClaudeConfigDir, &useWorktrees, &p.DefaultPermissionMode, &p.CreatedAt); err != nil {
 			return nil, fmt.Errorf("scan project: %w", err)
 		}
 		json.Unmarshal([]byte(actionsJSON), &p.Actions)
@@ -1240,9 +1462,9 @@ func (db *DB) GetProjectByName(name string) (*Project, error) {
 	var actionsJSON string
 	var useWorktrees int
 	err := db.QueryRow(`
-		SELECT id, name, path, aliases, instructions, COALESCE(actions, '[]'), COALESCE(color, ''), COALESCE(claude_config_dir, ''), COALESCE(use_worktrees, 1), created_at
+		SELECT id, name, path, aliases, instructions, COALESCE(actions, '[]'), COALESCE(color, ''), COALESCE(claude_config_dir, ''), COALESCE(use_worktrees, 1), COALESCE(default_permission_mode, ''), created_at
 		FROM projects WHERE name = ?
-	`, name).Scan(&p.ID, &p.Name, &p.Path, &p.Aliases, &p.Instructions, &actionsJSON, &p.Color, &p.ClaudeConfigDir, &useWorktrees, &p.CreatedAt)
+	`, name).Scan(&p.ID, &p.Name, &p.Path, &p.Aliases, &p.Instructions, &actionsJSON, &p.Color, &p.ClaudeConfigDir, &useWorktrees, &p.DefaultPermissionMode, &p.CreatedAt)
 	if err == nil {
 		json.Unmarshal([]byte(actionsJSON), &p.Actions)
 		p.UseWorktrees = useWorktrees != 0
@@ -1253,7 +1475,7 @@ func (db *DB) GetProjectByName(name string) (*Project, error) {
 	}
 
 	// Try alias match
-	rows, err := db.Query(`SELECT id, name, path, aliases, instructions, COALESCE(actions, '[]'), COALESCE(color, ''), COALESCE(claude_config_dir, ''), COALESCE(use_worktrees, 1), created_at FROM projects`)
+	rows, err := db.Query(`SELECT id, name, path, aliases, instructions, COALESCE(actions, '[]'), COALESCE(color, ''), COALESCE(claude_config_dir, ''), COALESCE(use_worktrees, 1), COALESCE(default_permission_mode, ''), created_at FROM projects`)
 	if err != nil {
 		return nil, fmt.Errorf("query projects: %w", err)
 	}
@@ -1261,7 +1483,7 @@ func (db *DB) GetProjectByName(name string) (*Project, error) {
 
 	for rows.Next() {
 		p := &Project{}
-		if err := rows.Scan(&p.ID, &p.Name, &p.Path, &p.Aliases, &p.Instructions, &actionsJSON, &p.Color, &p.ClaudeConfigDir, &useWorktrees, &p.CreatedAt); err != nil {
+		if err := rows.Scan(&p.ID, &p.Name, &p.Path, &p.Aliases, &p.Instructions, &actionsJSON, &p.Color, &p.ClaudeConfigDir, &useWorktrees, &p.DefaultPermissionMode, &p.CreatedAt); err != nil {
 			return nil, fmt.Errorf("scan project: %w", err)
 		}
 		json.Unmarshal([]byte(actionsJSON), &p.Actions)
@@ -1410,6 +1632,30 @@ func (db *DB) GetLastExecutorForProject(project string) (string, error) {
 // SetLastExecutorForProject saves the last used executor for a project.
 func (db *DB) SetLastExecutorForProject(project, executor string) error {
 	return db.SetSetting("last_executor_"+project, executor)
+}
+
+// GetLastEffortForProject returns the last used Claude effort override for a
+// project ("" means the global/Claude default was used).
+func (db *DB) GetLastEffortForProject(project string) (string, error) {
+	return db.GetSetting("last_effort_" + project)
+}
+
+// SetLastEffortForProject saves the last used Claude effort override for a
+// project so the next task in it defaults to the same choice.
+func (db *DB) SetLastEffortForProject(project, effort string) error {
+	return db.SetSetting("last_effort_"+project, effort)
+}
+
+// GetLastPermissionForProject returns the last used permission mode for a
+// project ("" means none recorded yet).
+func (db *DB) GetLastPermissionForProject(project string) (string, error) {
+	return db.GetSetting("last_permission_" + project)
+}
+
+// SetLastPermissionForProject saves the last used permission mode for a project
+// so the next task in it defaults to the same choice.
+func (db *DB) SetLastPermissionForProject(project, mode string) error {
+	return db.SetSetting("last_permission_"+project, mode)
 }
 
 // IsFirstRun returns true if this is the first time the app is being used.
@@ -1750,8 +1996,8 @@ func (db *DB) GetStaleWorktreeTasks(maxAge time.Duration) ([]*Task, error) {
 		       COALESCE(daemon_session, ''), COALESCE(tmux_window_id, ''),
 		       COALESCE(claude_pane_id, ''), COALESCE(shell_pane_id, ''),
 		       COALESCE(pr_url, ''), COALESCE(pr_number, 0), COALESCE(pr_info_json, ''),
-		       COALESCE(dangerous_mode, 0), COALESCE(pinned, 0), COALESCE(tags, ''),
-		       COALESCE(source_branch, ''), COALESCE(summary, ''),
+		       COALESCE(dangerous_mode, 0), COALESCE(permission_mode, ''), COALESCE(remote_control, 0), COALESCE(pinned, 0), COALESCE(tags, ''),
+		       COALESCE(source_branch, ''), COALESCE(summary, ''), COALESCE(effort_level, ''),
 		       created_at, updated_at, started_at, completed_at,
 		       last_distilled_at, last_accessed_at,
 		       COALESCE(archive_ref, ''), COALESCE(archive_commit, ''),
@@ -1777,8 +2023,8 @@ func (db *DB) GetStaleWorktreeTasks(maxAge time.Duration) ([]*Task, error) {
 			&t.WorktreePath, &t.BranchName, &t.Port, &t.ClaudeSessionID,
 			&t.DaemonSession, &t.TmuxWindowID, &t.ClaudePaneID, &t.ShellPaneID,
 			&t.PRURL, &t.PRNumber, &t.PRInfoJSON,
-			&t.DangerousMode, &t.Pinned, &t.Tags,
-			&t.SourceBranch, &t.Summary,
+			&t.DangerousMode, &t.PermissionMode, &t.RemoteControl, &t.Pinned, &t.Tags,
+			&t.SourceBranch, &t.Summary, &t.EffortLevel,
 			&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
 			&t.LastDistilledAt, &t.LastAccessedAt,
 			&t.ArchiveRef, &t.ArchiveCommit, &t.ArchiveWorktreePath, &t.ArchiveBranchName,

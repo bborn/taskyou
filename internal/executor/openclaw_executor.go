@@ -85,7 +85,7 @@ func (o *OpenClawExecutor) runOpenClaw(ctx context.Context, task *db.Task, workD
 	windowTarget := fmt.Sprintf("%s:%s", daemonSession, windowName)
 
 	// Kill ALL existing windows with this name (handles duplicates)
-	killAllWindowsByNameAllSessions(windowName)
+	KillAllWindowsByNameAllSessions(windowName)
 
 	// Build the prompt content
 	promptFile, err := os.CreateTemp("", "task-prompt-*.txt")
@@ -107,10 +107,6 @@ func (o *OpenClawExecutor) runOpenClaw(ctx context.Context, task *db.Task, workD
 		fullPrompt.WriteString("\n\n## User Feedback\n\n")
 		fullPrompt.WriteString(feedback)
 	}
-	// Append system instructions - OpenClaw doesn't have a system prompt option
-	// so we include task guidance at the end of the prompt
-	fullPrompt.WriteString("\n\n")
-	fullPrompt.WriteString(o.executor.buildSystemInstructions())
 	promptFile.WriteString(fullPrompt.String())
 	promptFile.Close()
 	defer os.Remove(promptFile.Name())
@@ -325,9 +321,7 @@ func (o *OpenClawExecutor) BuildCommand(task *db.Task, sessionID, prompt string)
 			return fmt.Sprintf(`%s openclaw tui --session %s %s`,
 				envVars, sessionKey, thinkingFlag)
 		}
-		// Include system instructions at the end of prompt since OpenClaw doesn't have a system prompt option
-		fullPrompt := prompt + "\n\n" + o.executor.buildSystemInstructions()
-		promptFile.WriteString(fullPrompt)
+		promptFile.WriteString(prompt)
 		promptFile.Close()
 		return fmt.Sprintf(`%s openclaw tui --session %s %s--message "$(cat %q)"; rm -f %q`,
 			envVars, sessionKey, thinkingFlag, promptFile.Name(), promptFile.Name())

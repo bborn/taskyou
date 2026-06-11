@@ -3,6 +3,7 @@ package executor
 import (
 	"os"
 	"path/filepath"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -20,6 +21,11 @@ type WorktreeConfig struct {
 	// TeardownScript is the path to a script that runs before worktree deletion.
 	// Can be relative to the project root (e.g., "bin/worktree-teardown").
 	TeardownScript string `yaml:"teardown_script"`
+	// AllowExternalWrites is an allowlist of path prefixes a task may write to even
+	// though they live outside its worktree. Used by the worktree write-guard to
+	// pre-approve known-safe external writes (e.g. a shared scratch dir) so they
+	// don't prompt. Paths may be absolute or start with ~.
+	AllowExternalWrites []string `yaml:"allow_external_writes"`
 }
 
 // ConfigFileNames are the supported configuration file names, in order of precedence.
@@ -58,6 +64,27 @@ func loadConfigFile(path string) (*ProjectConfig, error) {
 	}
 
 	return &config, nil
+}
+
+// ManagedWorktreeProjectDir returns the project root for a managed worktree path
+// (the part before the .task-worktrees/ segment), or "" if the path is not a
+// managed worktree.
+func ManagedWorktreeProjectDir(worktreePath string) string {
+	idx := strings.Index(worktreePath, taskWorktreesSegment)
+	if idx < 0 {
+		return ""
+	}
+	return worktreePath[:idx]
+}
+
+// WorktreeAllowExternalWrites returns the configured allowlist of external write
+// prefixes for a project, or nil if none is configured.
+func WorktreeAllowExternalWrites(projectDir string) []string {
+	config, err := LoadProjectConfig(projectDir)
+	if err != nil || config == nil {
+		return nil
+	}
+	return config.Worktree.AllowExternalWrites
 }
 
 // GetWorktreeInitScript returns the path to the worktree init script for a project.

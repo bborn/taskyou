@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/bborn/workflow/internal/db"
@@ -20,7 +21,8 @@ const (
 	TaskDeleted       = "task.deleted"
 	TaskStarted       = "task.started"
 	TaskWorktreeReady = "task.worktree_ready"
-	TaskBlocked       = "task.blocked" // Task needs input from user
+	TaskBlocked       = "task.blocked"       // Task needs input from user
+	TaskAuthRequired  = "task.auth_required" // Executor session needs re-authentication
 	TaskCompleted     = "task.completed"
 	TaskFailed        = "task.failed"
 )
@@ -38,6 +40,7 @@ type Event struct {
 // Emitter handles event emission via hooks.
 type Emitter struct {
 	hooksDir string
+	wg       sync.WaitGroup
 }
 
 // New creates a new event emitter.
@@ -46,6 +49,8 @@ func New(hooksDir string) *Emitter {
 }
 
 // Emit triggers a hook script if it exists for the event type.
+// Hooks run in a background goroutine — short-lived CLI commands should
+// call Wait before exiting so the hook actually runs.
 func (e *Emitter) Emit(event Event) {
 	if e.hooksDir == "" {
 		return
@@ -53,7 +58,18 @@ func (e *Emitter) Emit(event Event) {
 	if event.Timestamp.IsZero() {
 		event.Timestamp = time.Now()
 	}
-	go e.runHook(event)
+	e.wg.Add(1)
+	go func() {
+		defer e.wg.Done()
+		e.runHook(event)
+	}()
+}
+
+// Wait blocks until all in-flight hooks have completed.
+// CLI commands that exit after triggering a state change must call this,
+// otherwise the process terminates before the hook goroutine runs.
+func (e *Emitter) Wait() {
+	e.wg.Wait()
 }
 
 // runHook executes the hook script for an event.
@@ -135,6 +151,10 @@ func (e *Emitter) EmitTaskWorktreeReady(task *db.Task) {
 
 func (e *Emitter) EmitTaskBlocked(task *db.Task, reason string) {
 	e.Emit(Event{Type: TaskBlocked, TaskID: task.ID, Task: task, Message: reason})
+}
+
+func (e *Emitter) EmitTaskAuthRequired(task *db.Task, reason string) {
+	e.Emit(Event{Type: TaskAuthRequired, TaskID: task.ID, Task: task, Message: reason})
 }
 
 func (e *Emitter) EmitTaskCompleted(task *db.Task) {

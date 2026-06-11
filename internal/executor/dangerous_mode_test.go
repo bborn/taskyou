@@ -776,58 +776,31 @@ func TestOpenCodeDangerousModeNotSupported(t *testing.T) {
 	})
 }
 
-// TestToggleDangerousModeLogic tests that the toggle logic correctly determines
-// whether to call ResumeSafe or ResumeDangerous based on current task state.
-// This verifies the core toggle decision flow used by the UI's "!" key handler.
-func TestToggleDangerousModeLogic(t *testing.T) {
-	// This test verifies the toggle logic: when DangerousMode is true, we switch to safe;
-	// when DangerousMode is false, we switch to dangerous.
-
+// TestCyclePermissionModeRouting verifies the decision flow behind the UI's "!"
+// key: cycling advances the mode (default -> accept-edits -> auto -> dangerous ->
+// default) and ResumeWithMode routes the dangerous target to ResumeDangerous and
+// every other target to ResumeSafe (which now honors the task's non-dangerous mode).
+func TestCyclePermissionModeRouting(t *testing.T) {
 	tests := []struct {
-		name             string
-		currentMode      bool // current task.DangerousMode value
-		expectSafeCall   bool // should call ResumeSafe
-		expectDangerCall bool // should call ResumeDangerous
+		from             string
+		wantNext         string
+		expectDangerCall bool // ResumeWithMode routes dangerous -> ResumeDangerous, else ResumeSafe
 	}{
-		{
-			name:             "switch from dangerous to safe",
-			currentMode:      true,
-			expectSafeCall:   true,
-			expectDangerCall: false,
-		},
-		{
-			name:             "switch from safe to dangerous",
-			currentMode:      false,
-			expectSafeCall:   false,
-			expectDangerCall: true,
-		},
+		{db.PermissionModeDefault, db.PermissionModeAcceptEdits, false},
+		{db.PermissionModeAcceptEdits, db.PermissionModeAuto, false},
+		{db.PermissionModeAuto, db.PermissionModeDangerous, true},
+		{db.PermissionModeDangerous, db.PermissionModeDefault, false},
 	}
 
 	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			// Simulate the toggle logic from app.go toggleDangerousMode function:
-			// if task.DangerousMode {
-			//     success = exec.ResumeSafe(id)
-			// } else {
-			//     success = exec.ResumeDangerous(id)
-			// }
-
-			var safeCalled, dangerousCalled bool
-
-			// Simulate the toggle decision
-			if tt.currentMode {
-				// Currently in dangerous mode, switch to safe mode
-				safeCalled = true
-			} else {
-				// Currently in safe mode, switch to dangerous mode
-				dangerousCalled = true
+		t.Run(tt.from, func(t *testing.T) {
+			next := db.NextPermissionMode(tt.from)
+			if next != tt.wantNext {
+				t.Fatalf("NextPermissionMode(%q) = %q, want %q", tt.from, next, tt.wantNext)
 			}
-
-			if safeCalled != tt.expectSafeCall {
-				t.Errorf("ResumeSafe called = %v, want %v", safeCalled, tt.expectSafeCall)
-			}
-			if dangerousCalled != tt.expectDangerCall {
-				t.Errorf("ResumeDangerous called = %v, want %v", dangerousCalled, tt.expectDangerCall)
+			gotDanger := next == db.PermissionModeDangerous
+			if gotDanger != tt.expectDangerCall {
+				t.Errorf("from %q -> %q: routes to ResumeDangerous = %v, want %v", tt.from, next, gotDanger, tt.expectDangerCall)
 			}
 		})
 	}

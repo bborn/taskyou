@@ -39,6 +39,7 @@ A personal task management system with a beautiful terminal UI, SQLite storage, 
 - **Fully Scriptable CLI** - 100% of Task You is controllable via CLI—agents can manage tasks, read executor output, and send input to running executors programmatically (see [Full CLI Scriptability](#full-cli-scriptability))
 - **SSH Access** - Run as an SSH server to access your tasks from anywhere (see [SSH Access & Deployment](#ssh-access--deployment))
 - **Project Context Caching** - AI agents automatically cache codebase exploration results and reuse them across tasks, eliminating redundant exploration (see [Project Context](#project-context))
+- **Shell Completion** - Tab completion for commands, task IDs, projects, statuses, and flags in bash, zsh, fish, and PowerShell (see [Shell Completion](#shell-completion))
 
 ## Project Context
 
@@ -450,12 +451,13 @@ chmod +x ~/.config/task/hooks/task.completed
 | Event | When Emitted |
 |-------|--------------|
 | `task.created` | New task created |
-| `task.updated` | Task fields changed |
+| `task.updated` | Task fields changed (including status transitions) |
 | `task.deleted` | Task removed |
 | `task.started` | Execution begins |
-| `task.blocked` | Task needs user input |
-| `task.completed` | Task finished |
-| `task.failed` | Execution failed |
+| `task.blocked` | Task needs user input (or agent failed) |
+| `task.completed` | Agent finished successfully (task moves to backlog for human review) |
+| `task.failed` | Agent execution failed |
+| `task.worktree_ready` | Worktree set up and ready for agent |
 
 ### Environment Variables
 
@@ -694,6 +696,53 @@ npm install
 cp .env.example .env.local
 ```
 
+## Shell Completion
+
+TaskYou supports tab completion for all CLI commands, subcommands, flags, and dynamic values (task IDs, project names, statuses, etc.).
+
+### Setup
+
+**Zsh** (macOS default):
+```bash
+# Enable completion if not already done:
+echo "autoload -U compinit; compinit" >> ~/.zshrc
+
+# Generate and install the completion script:
+ty completion zsh > "${fpath[1]}/_ty"
+
+# Restart your shell or run:
+source ~/.zshrc
+```
+
+**Bash**:
+```bash
+# Linux:
+ty completion bash > /etc/bash_completion.d/ty
+
+# macOS (with Homebrew):
+ty completion bash > $(brew --prefix)/etc/bash_completion.d/ty
+```
+
+**Fish**:
+```bash
+ty completion fish > ~/.config/fish/completions/ty.fish
+```
+
+**PowerShell**:
+```powershell
+ty completion powershell >> $PROFILE
+```
+
+### What completes
+
+- **Subcommands** — `ty <TAB>` shows all available commands
+- **Task IDs** — `ty show <TAB>` lists tasks with their status and title
+- **Statuses** — `ty status 42 <TAB>` suggests backlog, queued, processing, etc.
+- **Projects** — `ty move 42 <TAB>` and `--project <TAB>` complete project names
+- **Task types** — `--type <TAB>` completes from your configured task types
+- **Executors** — `--executor <TAB>` suggests claude, codex, gemini, etc.
+- **Settings** — `ty settings set <TAB>` shows available setting keys
+
 ## SSH Access & Deployment
 
 Task You can run as an SSH server, allowing you to access your task board from anywhere.
@@ -792,6 +841,27 @@ go build -o ty-email ./cmd
 ```
 
 See [extensions/ty-email/README.md](extensions/ty-email/README.md) for full documentation.
+
+### ty-chrome
+
+Chrome extension for visual product development in a loop. Annotate any page
+served by a task's dev server (point at elements, draw boxes, comment) and the
+context — selectors, DOM excerpts, a screenshot with your markers — lands
+directly in the task's executor, which makes the change while you watch its
+live output in the side panel. The executor can also see and drive your tab
+through the browser bridge (screenshot/snapshot/console/click/type) instead of
+launching its own browser, and the page auto-reloads when it finishes a turn.
+
+| Annotate the live page | Side panel: task + live executor |
+|---|---|
+| ![Annotating a page: numbered marker, draggable region box, comment popover](extensions/ty-chrome/screenshots/annotate.png) | ![Side panel with matched task, annotation count, and live executor console](extensions/ty-chrome/screenshots/sidepanel.png) |
+
+```
+chrome://extensions → Developer mode → Load unpacked → extensions/ty-chrome
+ty serve   # the extension auto-discovers it
+```
+
+See [extensions/ty-chrome/README.md](extensions/ty-chrome/README.md) for full documentation.
 
 ## Development
 
