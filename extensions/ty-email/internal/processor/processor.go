@@ -5,7 +5,9 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net/mail"
 	"strings"
+	"time"
 
 	"github.com/bborn/workflow/extensions/ty-email/internal/adapter"
 	"github.com/bborn/workflow/extensions/ty-email/internal/bridge"
@@ -13,30 +15,52 @@ import (
 	"github.com/bborn/workflow/extensions/ty-email/internal/state"
 )
 
+// maxClassifyAttempts is how many times an email may fail classification
+// before it is marked processed and abandoned. Without this cap a persistent
+// classifier error (API outage, malformed response) retries on every poll
+// cycle forever, burning tokens.
+const maxClassifyAttempts = 3
+
+// TaskBridge is the subset of bridge.Bridge the processor uses.
+// It exists so tests can substitute a mock.
+type TaskBridge interface {
+	ListTasks(status string) ([]bridge.Task, error)
+	CreateTask(action *classifier.Action) (*bridge.CreateResult, error)
+	SendInput(taskID int64, input string) error
+	ExecuteTask(taskID int64) error
+	GetBlockedTasks() ([]bridge.Task, error)
+	GetTaskOutput(taskID int64, lines int) (string, error)
+}
+
 // Processor handles the email → classify → execute → reply pipeline.
 type Processor struct {
 	adapter        adapter.Adapter
 	classifier     classifier.Classifier
-	bridge         *bridge.Bridge
+	bridge         TaskBridge
 	state          *state.DB
 	logger         *slog.Logger
 	allowedSenders []string
 	dangerous      bool
+	defaultProject string
+	autoExecute    bool
+	maxPerHour     int
 }
 
 // Config holds processor configuration.
 type Config struct {
-	DefaultProject string
-	FromAddress    string   // Reply-from address
-	AllowedSenders []string // Only process emails from these addresses
-	Dangerous      bool     // Enable dangerous mode for created tasks
+	DefaultProject  string
+	FromAddress     string   // Reply-from address
+	AllowedSenders  []string // Only process emails from these addresses
+	Dangerous       bool     // Enable dangerous mode for created tasks
+	AutoExecute     bool     // Queue email-created tasks for execution immediately
+	MaxTasksPerHour int      // Max emails processed per hour (0 = unlimited)
 }
 
 // New creates a new processor.
 func New(
 	adp adapter.Adapter,
 	cls classifier.Classifier,
-	br *bridge.Bridge,
+	br TaskBridge,
 	st *state.DB,
 	cfg *Config,
 	logger *slog.Logger,
@@ -44,21 +68,50 @@ func New(
 	if logger == nil {
 		logger = slog.Default()
 	}
-	var allowed []string
-	var dangerous bool
+	p := &Processor{
+		adapter:    adp,
+		classifier: cls,
+		bridge:     br,
+		state:      st,
+		logger:     logger,
+	}
 	if cfg != nil {
-		allowed = cfg.AllowedSenders
-		dangerous = cfg.Dangerous
+		p.allowedSenders = cfg.AllowedSenders
+		p.dangerous = cfg.Dangerous
+		p.defaultProject = cfg.DefaultProject
+		p.autoExecute = cfg.AutoExecute
+		p.maxPerHour = cfg.MaxTasksPerHour
 	}
-	return &Processor{
-		adapter:        adp,
-		classifier:     cls,
-		bridge:         br,
-		state:          st,
-		logger:         logger,
-		allowedSenders: allowed,
-		dangerous:      dangerous,
+	return p
+}
+
+// senderAllowed checks the From address against the allowlist using exact
+// (case-insensitive) address comparison. The previous substring match could
+// be bypassed by display-name spoofing ("you@gmail.com" <evil@attacker.com>)
+// or domain suffixing (you@gmail.com.attacker.com).
+func (p *Processor) senderAllowed(from string) bool {
+	if len(p.allowedSenders) == 0 {
+		return true
 	}
+	addr := from
+	if parsed, err := mail.ParseAddress(from); err == nil {
+		addr = parsed.Address
+	}
+	addr = strings.ToLower(strings.TrimSpace(addr))
+	for _, a := range p.allowedSenders {
+		if strings.ToLower(strings.TrimSpace(a)) == addr {
+			return true
+		}
+	}
+	return false
+}
+
+// adapterID returns the ID to use for adapter operations (mark seen, label).
+func adapterID(email *adapter.Email) string {
+	if email.ProviderID != "" {
+		return email.ProviderID
+	}
+	return email.ID
 }
 
 // ProcessEmail handles a single inbound email.
@@ -70,19 +123,9 @@ func (p *Processor) ProcessEmail(ctx context.Context, email *adapter.Email) erro
 	)
 
 	// Check if sender is allowed
-	if len(p.allowedSenders) > 0 {
-		allowed := false
-		senderLower := strings.ToLower(email.From)
-		for _, addr := range p.allowedSenders {
-			if strings.ToLower(addr) == senderLower || strings.Contains(senderLower, strings.ToLower(addr)) {
-				allowed = true
-				break
-			}
-		}
-		if !allowed {
-			p.logger.Warn("ignoring email from unauthorized sender", "from", email.From)
-			return nil
-		}
+	if !p.senderAllowed(email.From) {
+		p.logger.Warn("ignoring email from unauthorized sender", "from", email.From)
+		return nil
 	}
 
 	// Check if already processed
@@ -93,6 +136,33 @@ func (p *Processor) ProcessEmail(ctx context.Context, email *adapter.Email) erro
 	if processed {
 		p.logger.Debug("email already processed", "id", email.ID)
 		return nil
+	}
+
+	// Skip auto-generated mail (vacation responders, bounces, mailing lists,
+	// or ty-email's own outbound). This breaks mail loops: an auto-responder
+	// replying to our replies would otherwise create tasks forever.
+	if email.AutoReply {
+		p.logger.Warn("ignoring auto-generated email", "from", email.From, "subject", email.Subject)
+		p.state.MarkProcessed(email.ID, nil, "ignore:auto-reply")
+		if err := p.adapter.MarkProcessed(ctx, adapterID(email)); err != nil {
+			p.logger.Warn("failed to mark auto-reply as processed in adapter", "error", err)
+		}
+		return nil
+	}
+
+	// Rate limit: defer processing when too many emails were handled in the
+	// last hour. The email stays unseen in the mailbox, so it is retried on a
+	// later poll once the window clears. This caps task-creation floods.
+	if p.maxPerHour > 0 {
+		n, err := p.state.CountProcessedSince(time.Now().Add(-time.Hour))
+		if err != nil {
+			return fmt.Errorf("failed to check rate limit: %w", err)
+		}
+		if n >= p.maxPerHour {
+			p.logger.Warn("rate limit reached, deferring email",
+				"limit", p.maxPerHour, "from", email.From, "subject", email.Subject)
+			return nil
+		}
 	}
 
 	// Check if this is part of an existing thread
@@ -117,13 +187,31 @@ func (p *Processor) ProcessEmail(ctx context.Context, email *adapter.Email) erro
 	var action *classifier.Action
 	if threadTaskID == nil {
 		p.logger.Info("skipping LLM classification for email (no matching TaskYou thread)")
+		title := strings.TrimSpace(email.Subject)
+		body := strings.TrimSpace(stripQuotedText(email.Body))
+		if title == "" {
+			// ty create requires a title; fall back to the first line of the body
+			if i := strings.IndexByte(body, '\n'); i > 0 {
+				title = body[:i]
+			} else {
+				title = body
+			}
+			if len(title) > 80 {
+				title = title[:80]
+			}
+			if title == "" {
+				title = "Task from email"
+			}
+		}
 		action = &classifier.Action{
 			Type:       classifier.ActionCreate,
-			Title:      strings.TrimSpace(email.Subject),
-			Body:       strings.TrimSpace(stripQuotedText(email.Body)),
+			Title:      title,
+			Body:       body,
+			Project:    p.defaultProject,
+			Execute:    p.autoExecute,
 			Confidence: 1.0,
 			Reasoning:  "new email from allowed sender - created task directly without LLM",
-			Reply:      fmt.Sprintf("Got it! I'll create a task: %s", email.Subject),
+			Reply:      fmt.Sprintf("Got it! I'll create a task: %s", title),
 		}
 	} else {
 		// Thread reply or ambiguous case - use LLM
@@ -135,6 +223,21 @@ func (p *Processor) ProcessEmail(ctx context.Context, email *adapter.Email) erro
 
 		action, err = p.classifier.Classify(ctx, email, bridge.ToClassifierTasks(tasks), threadTaskID)
 		if err != nil {
+			// Track failures: without a cap, an email that consistently fails
+			// classification is re-fetched and re-classified every poll cycle
+			// forever (this class of bug previously caused a $52/month bill).
+			attempts, recErr := p.state.RecordClassifyFailure(email.ID)
+			if recErr != nil {
+				p.logger.Error("failed to record classify failure", "error", recErr)
+			} else if attempts >= maxClassifyAttempts {
+				p.logger.Error("giving up on email after repeated classification failures",
+					"id", email.ID, "attempts", attempts, "error", err)
+				p.state.MarkProcessed(email.ID, nil, "classify:giveup")
+				if markErr := p.adapter.MarkProcessed(ctx, adapterID(email)); markErr != nil {
+					p.logger.Warn("failed to mark abandoned email in adapter", "error", markErr)
+				}
+				return nil
+			}
 			return fmt.Errorf("failed to classify email: %w", err)
 		}
 	}
@@ -214,12 +317,8 @@ func (p *Processor) ProcessEmail(ctx context.Context, email *adapter.Email) erro
 
 	// Mark email as processed in the adapter (move to folder, add label, etc.)
 	// Use ProviderID (e.g., Gmail API ID) if available; fall back to ID (Message-ID header).
-	adapterID := email.ProviderID
-	if adapterID == "" {
-		adapterID = email.ID
-	}
-	if err := p.adapter.MarkProcessed(ctx, adapterID); err != nil {
-		p.logger.Warn("failed to mark email as processed in adapter", "id", adapterID, "error", err)
+	if err := p.adapter.MarkProcessed(ctx, adapterID(email)); err != nil {
+		p.logger.Warn("failed to mark email as processed in adapter", "id", adapterID(email), "error", err)
 	}
 
 	return nil
@@ -229,6 +328,9 @@ func (p *Processor) handleCreate(ctx context.Context, action *classifier.Action)
 	// Apply dangerous mode from config
 	if p.dangerous {
 		action.Dangerous = true
+	}
+	if action.Project == "" {
+		action.Project = p.defaultProject
 	}
 	result, err := p.bridge.CreateTask(action)
 	if err != nil {
@@ -259,6 +361,11 @@ func (p *Processor) handleInput(ctx context.Context, action *classifier.Action, 
 	err := p.bridge.SendInput(taskID, action.InputText)
 	if err != nil {
 		return nil, "", fmt.Errorf("failed to send input: %w", err)
+	}
+
+	// Allow a fresh notification if the task blocks again after this input
+	if err := p.state.ClearBlockedNotification(taskID); err != nil {
+		p.logger.Warn("failed to clear blocked notification", "task", taskID, "error", err)
 	}
 
 	reply := fmt.Sprintf("Sent your input to task #%d.", taskID)
@@ -313,7 +420,7 @@ func (p *Processor) handleQuery(ctx context.Context, action *classifier.Action) 
 	statusOrder := []string{"processing", "blocked", "queued", "backlog"}
 	for _, status := range statusOrder {
 		if ts, ok := byStatus[status]; ok && len(ts) > 0 {
-			sb.WriteString(fmt.Sprintf("## %s\n", strings.Title(status)))
+			sb.WriteString(fmt.Sprintf("## %s\n", strings.ToUpper(status[:1])+status[1:]))
 			for _, t := range ts {
 				sb.WriteString(fmt.Sprintf("- #%d: %s (%s)\n", t.ID, t.Title, t.Project))
 			}
@@ -417,6 +524,17 @@ func (p *Processor) CheckBlockedTasks(ctx context.Context, notifyAddress string)
 			continue
 		}
 
+		// Notify once per blocked period: without this, every check cycle
+		// would queue another email for the same blocked task.
+		notified, err := p.state.WasNotifiedBlocked(task.ID)
+		if err != nil {
+			p.logger.Warn("failed to check notification state", "task", task.ID, "error", err)
+			continue
+		}
+		if notified {
+			continue
+		}
+
 		// Get recent output to include in the notification
 		output, _ := p.bridge.GetTaskOutput(task.ID, 50)
 
@@ -428,6 +546,10 @@ func (p *Processor) CheckBlockedTasks(ctx context.Context, notifyAddress string)
 		_, err = p.state.QueueOutbound(notifyAddress, "", subject, body, &taskID, threadID)
 		if err != nil {
 			p.logger.Error("failed to queue blocked notification", "task", task.ID, "error", err)
+			continue
+		}
+		if err := p.state.MarkNotifiedBlocked(task.ID); err != nil {
+			p.logger.Error("failed to record notification", "task", task.ID, "error", err)
 		}
 	}
 
