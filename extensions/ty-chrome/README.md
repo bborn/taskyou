@@ -75,8 +75,9 @@ the panel.
 
 ## Toolbar badge
 
-The number on the extension icon is the **task id** matched to that tab (by
-dev-server port). Hover the icon for the full task title.
+An orange **✓** on the extension icon means this tab is matched to a task (by
+dev-server port). Hover the icon for the task id and title; the side panel
+shows the full task.
 
 ## Auto-reload
 

@@ -113,8 +113,9 @@ async function matchTab(tabId, url) {
 }
 
 function setBadge(tabId, task) {
-  const text = task ? String(task.id) : '';
-  chrome.action.setBadgeText({ tabId, text }).catch(() => {});
+  // Badge is a match indicator only — task ids run 4+ digits and Chrome
+  // badges fit ~4 chars. The id lives in the tooltip and the side panel.
+  chrome.action.setBadgeText({ tabId, text: task ? '✓' : '' }).catch(() => {});
   chrome.action.setBadgeBackgroundColor({ tabId, color: '#d05010' }).catch(() => {});
   const title = task
     ? `TaskYou — this tab matches task #${task.id}: ${task.title}`
