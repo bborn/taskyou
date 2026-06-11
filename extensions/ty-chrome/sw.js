@@ -115,7 +115,16 @@ async function matchTab(tabId, url) {
 function setBadge(tabId, task) {
   const text = task ? String(task.id) : '';
   chrome.action.setBadgeText({ tabId, text }).catch(() => {});
-  chrome.action.setBadgeBackgroundColor({ tabId, color: '#0d9488' }).catch(() => {});
+  chrome.action.setBadgeBackgroundColor({ tabId, color: '#d05010' }).catch(() => {});
+  const title = task
+    ? `TaskYou — this tab matches task #${task.id}: ${task.title}`
+    : 'TaskYou Annotate';
+  chrome.action.setTitle({ tabId, title }).catch(() => {});
+}
+
+async function ensureInjected(tabId) {
+  await chrome.scripting.executeScript({ target: { tabId }, files: ['content.js'] });
+  await chrome.scripting.executeScript({ target: { tabId }, files: ['console-tap.js'], world: 'MAIN' });
 }
 
 chrome.tabs.onActivated.addListener(async ({ tabId }) => {
@@ -251,6 +260,82 @@ const handlers = {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ message, enter: true }),
       });
+      return { ok: true };
+    } catch (e) {
+      return { error: e.message };
+    }
+  },
+
+  // --- Browser bridge: the panel polls ty serve for executor commands and
+  // executes them against the user's live tab. ---
+
+  async browserPoll({ taskId }) {
+    const base = await getServerUrl();
+    try {
+      const res = await fetch(`${base}/api/tasks/${taskId}/browser/poll`, {
+        signal: AbortSignal.timeout(25_000),
+      });
+      if (res.status === 204) return { none: true };
+      if (!res.ok) return { error: `poll failed: HTTP ${res.status}` };
+      return { command: await res.json() };
+    } catch (e) {
+      return { error: e.message };
+    }
+  },
+
+  async browserResult({ taskId, id, result }) {
+    try {
+      await api(`/api/tasks/${taskId}/browser/result`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id, result }),
+      });
+      return { ok: true };
+    } catch (e) {
+      return { error: e.message };
+    }
+  },
+
+  async browserExec({ tabId, command }) {
+    try {
+      switch (command.action) {
+        case 'screenshot': {
+          const tab = await chrome.tabs.get(tabId);
+          const data = await chrome.tabs.captureVisibleTab(tab.windowId, { format: 'png' });
+          return { data };
+        }
+        case 'reload':
+          await chrome.tabs.reload(tabId);
+          return { ok: true };
+        case 'navigate': {
+          const url = new URL(command.params?.url || '');
+          if (url.hostname !== 'localhost' && url.hostname !== '127.0.0.1') {
+            return { error: 'navigate is restricted to localhost' };
+          }
+          await chrome.tabs.update(tabId, { url: url.href });
+          return { ok: true, url: url.href };
+        }
+        case 'snapshot':
+        case 'click':
+        case 'type':
+        case 'console':
+          await ensureInjected(tabId);
+          return await chrome.tabs.sendMessage(tabId, {
+            type: 'ty-cmd',
+            action: command.action,
+            params: command.params || {},
+          });
+        default:
+          return { error: 'unknown action: ' + command.action };
+      }
+    } catch (e) {
+      return { error: e.message };
+    }
+  },
+
+  async ensureBridge({ tabId }) {
+    try {
+      await ensureInjected(tabId);
       return { ok: true };
     } catch (e) {
       return { error: e.message };

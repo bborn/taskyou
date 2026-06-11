@@ -122,6 +122,9 @@ func (s *Server) handleTaskAnnotations(w http.ResponseWriter, r *http.Request) {
 			nudge += " and view the screenshot.png next to it"
 		}
 		nudge += ", then make the requested changes."
+		if s.relay.connected(task.ID) {
+			nudge += " The user's live browser is connected — read .taskyou/browser/HOWTO.md to view and interact with the page directly."
+		}
 		if err := s.runner.Run("tmux", "send-keys", "-t", task.ClaudePaneID, "-l", nudge); err == nil {
 			if err := s.runner.Run("tmux", "send-keys", "-t", task.ClaudePaneID, "Enter"); err == nil {
 				nudged = true

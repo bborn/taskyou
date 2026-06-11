@@ -63,6 +63,7 @@ async function refresh() {
 
   if (!currentTask && state.connected) loadCandidates();
   schedulePolling();
+  if (state.connected && currentTask) bridgeLoop();
 
   // Self-heal: keep retrying while disconnected (auto-discovery runs in the SW)
   clearTimeout(reconnectTimer);
@@ -274,6 +275,36 @@ chrome.runtime.onMessage.addListener((msg) => {
     updateCount(msg.count);
   }
 });
+
+// --- Browser bridge: while the panel is open and a task is matched, long-poll
+// ty serve for executor commands and run them against the live tab. This is
+// what lets the executor see/drive the page without its own browser.
+let bridgeActive = false;
+
+async function bridgeLoop() {
+  if (bridgeActive) return;
+  bridgeActive = true;
+  try {
+    let injected = false;
+    while (document.visibilityState === 'visible' && currentTask && activeTabId != null) {
+      if (!injected) {
+        // Early console-tap injection so logs accumulate before the executor asks
+        await send({ type: 'ensureBridge', tabId: activeTabId });
+        injected = true;
+      }
+      const taskId = currentTask.id;
+      const r = await send({ type: 'browserPoll', taskId });
+      if (r?.command) {
+        const result = await send({ type: 'browserExec', tabId: activeTabId, command: r.command });
+        await send({ type: 'browserResult', taskId, id: r.command.id, result: result ?? { error: 'no result' } });
+      } else if (r?.error) {
+        await new Promise((res) => setTimeout(res, 3000));
+      }
+    }
+  } finally {
+    bridgeActive = false;
+  }
+}
 
 // Auto-reload preference
 chrome.storage.local.get('autoReload').then(({ autoReload }) => {

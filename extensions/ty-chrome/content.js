@@ -3,12 +3,9 @@
 // real DOM positioned in page coordinates, so chrome.tabs.captureVisibleTab
 // bakes them into the screenshot sent to the executor.
 (() => {
-  if (window.__tyAnnotate) {
-    window.__tyAnnotate.show();
-    return;
-  }
+  if (window.__tyAnnotate) return; // idempotent; visibility is message-driven
 
-  const TEAL = '#0d9488';
+  const TEAL = '#d05010'; // taskyou logo orange (accent)
   let mode = 'none'; // none | select | box | note
   let annotations = []; // {kind,label,selector,tag,text,html,rect,styles,comment,els:[]}
   let nextLabel = 1;
@@ -17,6 +14,7 @@
   const host = document.createElement('div');
   host.id = 'ty-annotate-host';
   host.style.cssText = 'position:absolute;top:0;left:0;width:0;height:0;z-index:2147483647;';
+  host.style.display = 'none'; // shown via ty-enter-select; bridge injection stays invisible
   document.documentElement.appendChild(host);
   const root = host.attachShadow({ mode: 'open' });
 
@@ -40,15 +38,15 @@
     .toolbar .count { background: #1f2937; border-radius: 999px; padding: 4px 10px; color: #9ca3af; }
     .toolbar .close { background: transparent; color: #9ca3af; padding: 6px 8px; }
     .hl { position: fixed; pointer-events: none; border: 2px solid ${TEAL};
-      background: rgba(13,148,136,.08); border-radius: 2px; display: none; }
+      background: rgba(208,80,16,.08); border-radius: 2px; display: none; }
     .marker {
       position: absolute; width: 22px; height: 22px; border-radius: 50%;
       background: ${TEAL}; color: #fff; font-size: 12px; font-weight: 700;
       display: flex; align-items: center; justify-content: center;
       box-shadow: 0 1px 4px rgba(0,0,0,.4); cursor: pointer; user-select: none;
     }
-    .region { position: absolute; border: 2px dashed ${TEAL}; background: rgba(13,148,136,.12); border-radius: 2px; }
-    .dragrect { position: fixed; border: 2px dashed ${TEAL}; background: rgba(13,148,136,.12); display: none; }
+    .region { position: absolute; border: 2px dashed ${TEAL}; background: rgba(208,80,16,.12); border-radius: 2px; }
+    .dragrect { position: fixed; border: 2px dashed ${TEAL}; background: rgba(208,80,16,.12); display: none; }
     .boxlayer { position: fixed; inset: 0; cursor: crosshair; }
     .popover {
       position: fixed; width: 260px; background: #fff; border-radius: 10px;
@@ -417,9 +415,59 @@
     host.style.display = 'none';
   }
 
+  // --- Browser bridge: console buffer + executor commands ----------------------
+  const consoleBuf = [];
+  window.addEventListener('message', (e) => {
+    if (e.source === window && e.data && e.data.__tyConsole) {
+      consoleBuf.push(e.data.__tyConsole);
+      if (consoleBuf.length > 300) consoleBuf.shift();
+    }
+  });
+
+  function runBridgeCommand(action, params) {
+    switch (action) {
+      case 'snapshot': {
+        let html = document.documentElement.outerHTML;
+        if (html.length > 800_000) html = html.slice(0, 800_000) + '\n<!-- …truncated -->';
+        return { html, title: document.title, url: location.href };
+      }
+      case 'click': {
+        const el = document.querySelector(params.selector || '');
+        if (!el) return { error: `no element matches ${params.selector}` };
+        el.scrollIntoView({ block: 'center', behavior: 'instant' });
+        el.click();
+        return { ok: true, tag: el.localName, text: (el.innerText || '').trim().slice(0, 80) };
+      }
+      case 'type': {
+        const el = document.querySelector(params.selector || '');
+        if (!el) return { error: `no element matches ${params.selector}` };
+        el.focus();
+        if (el.isContentEditable) {
+          el.textContent = params.text ?? '';
+        } else {
+          el.value = params.text ?? '';
+        }
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+        return { ok: true, tag: el.localName };
+      }
+      case 'console':
+        return { logs: consoleBuf.slice(-Number(params.limit || 100)) };
+      default:
+        return { error: 'unknown action: ' + action };
+    }
+  }
+
   // --- Messages from SW / side panel -------------------------------------------
   chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     switch (msg?.type) {
+      case 'ty-cmd':
+        try {
+          sendResponse(runBridgeCommand(msg.action, msg.params || {}));
+        } catch (e) {
+          sendResponse({ error: e.message });
+        }
+        break;
       case 'ty-enter-select':
         host.style.display = '';
         setMode('select');

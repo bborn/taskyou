@@ -54,6 +54,30 @@ Requires the taskyou build from this branch or later (the
 - On page while annotating: **S** select · **B** box · **N** note ·
   **Esc** exit mode · **⌘↩** send (also saves an open comment)
 
+## Browser bridge (executor → your browser)
+
+While the side panel is open on a matched task, the executor can see and drive
+your live tab instead of launching its own browser. On first connect the
+daemon drops `.taskyou/browser/HOWTO.md` into the worktree with ready-to-use
+curl commands, and annotation nudges mention the bridge — so the executor
+discovers it on its own:
+
+- `screenshot` / `snapshot` — written into the worktree as PNG/HTML files the
+  executor can Read directly (the PNG is its "eyes")
+- `console` — real page console logs + uncaught JS errors (MAIN-world tap)
+- `click` / `type` — interact via CSS selectors
+- `navigate` (localhost-only) / `reload`
+
+Transport: the panel long-polls `GET /api/tasks/{id}/browser/poll`; the
+executor POSTs to `/api/tasks/{id}/browser` and blocks until the result comes
+back. Panel closed → executor gets a fast 503 telling it to ask you to open
+the panel.
+
+## Toolbar badge
+
+The number on the extension icon is the **task id** matched to that tab (by
+dev-server port). Hover the icon for the full task title.
+
 ## Auto-reload
 
 The panel watches the executor pane for the working→idle transition (the

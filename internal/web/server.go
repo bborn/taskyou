@@ -9,6 +9,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/bborn/workflow/internal/db"
@@ -29,9 +30,11 @@ type Config struct {
 
 // Server is the HTTP API server.
 type Server struct {
-	db     *db.DB
-	srv    *http.Server
-	runner CommandRunner
+	db      *db.DB
+	srv     *http.Server
+	runner  CommandRunner
+	relay   *browserRelay
+	baseURL string
 }
 
 // cors wraps a handler with permissive CORS headers for local development.
@@ -51,8 +54,10 @@ func cors(next http.Handler) http.Handler {
 // New creates a new API server.
 func New(cfg Config) *Server {
 	s := &Server{
-		db:     cfg.DB,
-		runner: cfg.CmdRunner,
+		db:      cfg.DB,
+		runner:  cfg.CmdRunner,
+		relay:   newBrowserRelay(),
+		baseURL: baseURLFromAddr(cfg.Addr),
 	}
 
 	mux := http.NewServeMux()
@@ -77,6 +82,11 @@ func New(cfg Config) *Server {
 	mux.HandleFunc("POST /api/tasks/{id}/pin", s.handlePinTask)
 	mux.HandleFunc("POST /api/tasks/{id}/input", s.handleTaskInput)
 	mux.HandleFunc("POST /api/tasks/{id}/annotations", s.handleTaskAnnotations)
+
+	// Browser bridge (executor ↔ ty-chrome extension)
+	mux.HandleFunc("POST /api/tasks/{id}/browser", s.handleBrowserExec)
+	mux.HandleFunc("GET /api/tasks/{id}/browser/poll", s.handleBrowserPoll)
+	mux.HandleFunc("POST /api/tasks/{id}/browser/result", s.handleBrowserResult)
 
 	// Task logs, streaming, executor output & terminal
 	mux.HandleFunc("GET /api/tasks/{id}/logs", s.handleTaskLogs)
@@ -118,6 +128,19 @@ func New(cfg Config) *Server {
 	}
 
 	return s
+}
+
+// baseURLFromAddr turns a listen address like ":8080" into a URL the executor
+// can curl from inside the worktree.
+func baseURLFromAddr(addr string) string {
+	host, port, ok := strings.Cut(addr, ":")
+	if !ok || port == "" {
+		return "http://127.0.0.1:8080"
+	}
+	if host == "" || host == "0.0.0.0" || host == "::" {
+		host = "127.0.0.1"
+	}
+	return fmt.Sprintf("http://%s:%s", host, port)
 }
 
 // Start begins listening. It blocks until the server shuts down.

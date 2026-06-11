@@ -1,6 +1,6 @@
 :root {
-  --teal: #0d9488;
-  --teal-dark: #0f766e;
+  --accent: #d05010;
+  --accent-dark: #b03e08;
   --bg: #eef2f6;
   --card: #ffffff;
   --border: #e2e8f0;
@@ -63,7 +63,7 @@ body {
 }
 
 .chip {
-  background: var(--teal);
+  background: var(--accent);
   color: #fff;
   border-radius: 999px;
   min-width: 18px;
@@ -83,11 +83,11 @@ body {
 .dot.ok { background: #22c55e; }
 
 .task-line { display: flex; gap: 7px; align-items: center; font-weight: 600; }
-.task-id { color: var(--teal); font-weight: 700; }
+.task-id { color: var(--accent); font-weight: 700; }
 .task-sub { display: flex; gap: 8px; margin-top: 6px; margin-left: 15px; align-items: center; flex-wrap: wrap; }
 
 .pill {
-  background: #ccfbf1; color: #115e59; border-radius: 999px;
+  background: #ffedd5; color: #9a3412; border-radius: 999px;
   padding: 1px 8px; font-size: 11px; font-weight: 600;
 }
 .pill.blocked { background: #fef3c7; color: #92400e; }
@@ -113,10 +113,10 @@ button.primary, button.secondary {
 
 button.primary {
   border: 0;
-  background: var(--teal);
+  background: var(--accent);
   color: #fff;
 }
-button.primary:hover:not(:disabled) { background: var(--teal-dark); }
+button.primary:hover:not(:disabled) { background: var(--accent-dark); }
 button.primary:disabled { background: #e2e8f0; color: #94a3b8; cursor: default; }
 
 button.secondary {
@@ -146,7 +146,7 @@ button.primary:disabled kbd { background: rgba(15, 23, 42, 0.06); color: #94a3b8
   font-family: inherit;
   font-size: 13px;
   resize: vertical;
-  outline-color: var(--teal);
+  outline-color: var(--accent);
 }
 
 #send-result { margin: 8px 0 0; font-size: 12px; }
@@ -160,7 +160,7 @@ button.primary:disabled kbd { background: rgba(15, 23, 42, 0.06); color: #94a3b8
   margin-left: auto; display: flex; align-items: center; gap: 4px;
   font-size: 11px; color: var(--muted); cursor: pointer; user-select: none;
 }
-.auto-reload input { accent-color: var(--teal); margin: 0; }
+.auto-reload input { accent-color: var(--accent); margin: 0; }
 
 #console {
   flex: 1; margin: 0; padding: 10px; overflow: auto;
@@ -172,14 +172,14 @@ button.primary:disabled kbd { background: rgba(15, 23, 42, 0.06); color: #94a3b8
 .x-del { color: #f87171; }
 .x-action { color: #f8fafc; font-weight: 600; }
 .x-meta { color: #64748b; }
-.x-status { color: #5eead4; font-style: italic; }
+.x-status { color: #fdba74; font-style: italic; }
 
 .input-row { display: flex; gap: 6px; margin-top: 8px; }
 .input-row input {
   flex: 1; padding: 6px 8px; border: 1px solid var(--border); border-radius: 6px;
 }
 .input-row button {
-  border: 0; background: var(--teal); color: #fff; border-radius: 6px;
+  border: 0; background: var(--accent); color: #fff; border-radius: 6px;
   width: 32px; cursor: pointer; font-size: 14px;
 }
 
