@@ -41,6 +41,14 @@ build-ui:
 	rm -rf internal/web/ui/dist
 	cp -R desktop/dist internal/web/ui/dist
 
+# Self-contained desktop bundle: stages a UI-embedded ty as the Tauri sidecar
+# (the app spawns its own serve/daemon), then builds the platform bundles.
+RUST_TRIPLE = $(shell rustc -vV 2>/dev/null | awk '/^host/{print $$2}')
+desktop-bundle: build-ui
+	mkdir -p desktop/src-tauri/binaries
+	$(GO) build -tags ui -ldflags="$(LDFLAGS)" -o desktop/src-tauri/binaries/ty-$(RUST_TRIPLE) ./cmd/task
+	cd desktop && pnpm tauri build
+
 # Restart daemon if it's running (silent if not). Never fail the build if we lack permissions.
 restart-daemon:
 	@if pgrep -f "ty daemon" > /dev/null; then \

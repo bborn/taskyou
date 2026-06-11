@@ -126,9 +126,12 @@
   #root {
     height: 100%;
   }
+  html {
+    /* Opaque by default (browser, Linux); the macOS desktop shell clears
+       this at boot so the vibrancy material can show through. */
+    background: var(--background);
+  }
   body {
-    /* Transparent so the vibrancy material shows; .app-shell paints a
-       translucent --background over it. */
     background: transparent;
     @apply text-foreground font-sans text-[13px] antialiased select-none overflow-hidden overscroll-none;
   }

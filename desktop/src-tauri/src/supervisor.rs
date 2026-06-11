@@ -72,12 +72,27 @@ pub fn save_config(config: &DesktopConfig) -> Result<(), String> {
     std::fs::write(path, data).map_err(|e| e.to_string())
 }
 
-/// Locate the ty binary: explicit config, PATH, then common install spots.
+/// Path of the `ty` sidecar bundled inside the app (Tauri externalBin lands
+/// next to the app executable, e.g. Contents/MacOS/ty). Absent in dev runs.
+fn bundled_ty() -> Option<String> {
+    let exe = std::env::current_exe().ok()?;
+    let candidate = exe.parent()?.join("ty");
+    candidate
+        .exists()
+        .then(|| candidate.to_string_lossy().into_owned())
+}
+
+/// Locate the ty binary: explicit config, the bundled sidecar (makes the app
+/// self-contained), PATH, then common install spots.
 pub fn discover_ty(config: &DesktopConfig) -> Option<String> {
     if let Some(path) = &config.ty_path {
         if !path.is_empty() && std::path::Path::new(path).exists() {
             return Some(path.clone());
         }
+    }
+
+    if let Some(path) = bundled_ty() {
+        return Some(path);
     }
 
     if let Ok(out) = Command::new("which").arg("ty").output() {

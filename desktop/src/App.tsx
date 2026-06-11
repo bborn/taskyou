@@ -78,6 +78,14 @@ export default function App() {
     };
   }, []);
 
+  // Vibrancy shows through only in the macOS shell; everywhere else the
+  // page keeps an opaque background.
+  useEffect(() => {
+    if (inTauri() && /Mac/.test(navigator.userAgent)) {
+      document.documentElement.style.background = "transparent";
+    }
+  }, []);
+
   // --- Theme: follow system or explicit preference; sync window chrome ---
   useEffect(() => {
     const media = window.matchMedia("(prefers-color-scheme: dark)");
