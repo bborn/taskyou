@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 
 	"github.com/bborn/workflow/internal/db"
 )
@@ -1495,3 +1496,52 @@ func TestEditFormSeedsAndPreservesPermission(t *testing.T) {
 		}
 	})
 }
+
+// TestSelectorCollapsesWhenUnfocused verifies the form's single-choice fields
+// render as a compact "‹ value ›" stepper when not focused, and expand into the
+// full option list only when focused. This keeps the advanced section calm and
+// scannable instead of showing every option for every field at once.
+func TestSelectorCollapsesWhenUnfocused(t *testing.T) {
+	m := NewFormModel(nil, 120, 40, "myproject", nil)
+	selStyle := dummyStyle()
+	optStyle := dummyStyle()
+	dimStyle := dummyStyle()
+	options := []string{"default", "accept-edits", "auto", "dangerous"}
+
+	// Collapsed (unfocused): only the chosen value is shown, wrapped in chevrons.
+	collapsed := m.renderSelector(options, 3, false, selStyle, optStyle, dimStyle)
+	if !strings.Contains(collapsed, "dangerous") {
+		t.Errorf("collapsed selector should show the chosen value, got %q", collapsed)
+	}
+	if !strings.Contains(collapsed, "‹") || !strings.Contains(collapsed, "›") {
+		t.Errorf("collapsed selector should include chevron affordance, got %q", collapsed)
+	}
+	for _, other := range []string{"default", "accept-edits", "auto"} {
+		if strings.Contains(collapsed, other) {
+			t.Errorf("collapsed selector should hide non-selected option %q, got %q", other, collapsed)
+		}
+	}
+
+	// Expanded (focused): every option is visible so any choice is one keystroke away.
+	expanded := m.renderSelector(options, 3, true, selStyle, optStyle, dimStyle)
+	for _, opt := range options {
+		if !strings.Contains(expanded, opt) {
+			t.Errorf("expanded selector should show option %q, got %q", opt, expanded)
+		}
+	}
+	if strings.Contains(expanded, "‹") {
+		t.Errorf("expanded selector should not show the collapsed chevron, got %q", expanded)
+	}
+}
+
+// TestUnfocusedSelectorEmptyOptionShowsNone verifies an empty-string option
+// (e.g. "no type") collapses to the friendly "none" label.
+func TestUnfocusedSelectorEmptyOptionShowsNone(t *testing.T) {
+	m := NewFormModel(nil, 120, 40, "myproject", nil)
+	collapsed := m.renderSelector([]string{"", "code", "writing"}, 0, false, dummyStyle(), dummyStyle(), dummyStyle())
+	if !strings.Contains(collapsed, "none") {
+		t.Errorf("empty option should render as 'none', got %q", collapsed)
+	}
+}
+
+func dummyStyle() lipgloss.Style { return lipgloss.NewStyle() }
