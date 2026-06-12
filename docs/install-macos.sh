@@ -72,14 +72,15 @@ require_command() {
     command -v "$1" >/dev/null 2>&1 || error "Required command not found: $1"
 }
 
-# Map the machine architecture to a release DMG asset
+# Map the machine architecture to a release DMG asset.
+# TaskYou Desktop is Apple Silicon only.
 detect_asset() {
     local arch
     arch=$(uname -m)
     case "$arch" in
         arm64) echo "TaskYou-macos-arm64.dmg" ;;
-        x86_64) echo "TaskYou-macos-x64.dmg" ;;
-        *) error "Unsupported architecture: ${arch}. TaskYou Desktop ships for arm64 (Apple Silicon) and x86_64 (Intel)." ;;
+        x86_64) error "TaskYou Desktop is Apple Silicon only — there is no Intel (x86_64) build. Run the CLI instead: curl -fsSL taskyou.dev/install.sh | bash" ;;
+        *) error "Unsupported architecture: ${arch}. TaskYou Desktop requires an Apple Silicon Mac." ;;
     esac
 }
 

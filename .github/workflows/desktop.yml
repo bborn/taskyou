@@ -22,17 +22,13 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # macOS is Apple Silicon only. No Intel (x86_64) desktop build:
+          # GitHub retired the Intel macos-13 runners and the cross-compile
+          # job starved in the macos-14 queue, so we don't ship an Intel DMG.
           - name: macos-arm64
             runner: macos-14
             triple: aarch64-apple-darwin
             goarch: arm64
-            bundles: "dmg"
-          # GitHub retired the Intel macos-13 runners (jobs queue forever),
-          # so the x64 build cross-compiles on Apple Silicon instead.
-          - name: macos-x64
-            runner: macos-14
-            triple: x86_64-apple-darwin
-            goarch: amd64
             bundles: "dmg"
           - name: linux-x64
             runner: ubuntu-22.04
