@@ -991,8 +991,8 @@ func (e *Executor) cleanupStaleWorktrees() {
 			continue
 		}
 
-		// Skip non-worktree projects - they share the project directory and should not be archived
-		if !e.config.ProjectUsesWorktrees(task.Project) {
+		// Skip non-worktree tasks - they share the project directory and should not be archived
+		if !e.taskUsesWorktrees(task) {
 			e.db.ClearTaskWorktreePath(task.ID)
 			continue
 		}
@@ -1053,8 +1053,8 @@ func (e *Executor) CleanupStaleWorktreesManual(maxAge time.Duration, dryRun bool
 
 	var cleaned []*db.Task
 	for _, task := range tasks {
-		// Skip non-worktree projects
-		if !e.config.ProjectUsesWorktrees(task.Project) {
+		// Skip non-worktree tasks
+		if !e.taskUsesWorktrees(task) {
 			e.db.ClearTaskWorktreePath(task.ID)
 			cleaned = append(cleaned, task)
 			continue
@@ -1498,8 +1498,8 @@ func (e *Executor) buildPrompt(task *db.Task, attachmentPaths []string) string {
 
 // buildUniversalGuidance returns task-type-agnostic execution guidance appended to every
 // prompt. The project-context section is always included; the worktree-safety constraint
-// is included only when the task's project uses git worktrees (UseWorktrees defaults to on,
-// so the guardrail is shown unless a project has explicitly opted out).
+// is included only when the task runs in a git worktree (the task's WorktreeMode override
+// or, by default, the project's UseWorktrees setting, which defaults to on).
 func (e *Executor) buildUniversalGuidance(task *db.Task) string {
 	var b strings.Builder
 
@@ -1523,14 +1523,16 @@ Working directory constraint (isolated git worktree):
 	return b.String()
 }
 
-// taskUsesWorktrees reports whether the task's project runs in git worktrees. It defaults
-// to true when the project cannot be loaded, matching the use_worktrees column default and
-// ensuring the worktree-safety guardrail is shown unless a project has explicitly opted out.
+// taskUsesWorktrees reports whether the task runs in a git worktree: the task's
+// WorktreeMode override wins, otherwise the project's UseWorktrees setting
+// decides. It defaults to true when the project cannot be loaded, matching the
+// use_worktrees column default.
 func (e *Executor) taskUsesWorktrees(task *db.Task) bool {
-	if p, err := e.db.GetProjectByName(task.Project); err == nil && p != nil {
-		return p.UsesWorktrees()
+	var project *db.Project
+	if p, err := e.db.GetProjectByName(task.Project); err == nil {
+		project = p
 	}
-	return true
+	return db.ShouldUseWorktree(project, task)
 }
 
 // applyTemplateSubstitutions replaces template placeholders in task type instructions.
@@ -3593,8 +3595,9 @@ func (e *Executor) setupWorktree(task *db.Task) (string, error) {
 		return "", fmt.Errorf("project directory not found for project: %s", task.Project)
 	}
 
-	// For non-worktree projects, all tasks share the project directory directly
-	if !e.config.ProjectUsesWorktrees(task.Project) {
+	// Non-worktree tasks (per-task in-place override, or a project with
+	// worktrees off) run in the project directory directly
+	if !e.taskUsesWorktrees(task) {
 		return e.setupSharedWorkDir(task, projectDir, paths)
 	}
 
@@ -3754,11 +3757,11 @@ func (e *Executor) setupWorktree(task *db.Task) (string, error) {
 		task.WorktreePath = worktreePath
 		task.BranchName = branchName
 	} else {
-		// Get default branch name
-		defaultBranch := e.getDefaultBranch(projectDir)
+		// Branch from the task's base branch when set, otherwise the default branch
+		baseRef := db.ResolveWorktreeBase(task, e.getDefaultBranch(projectDir))
 
 		// Create new branch and worktree
-		cmd := exec.Command("git", "worktree", "add", "-b", branchName, worktreePath, defaultBranch)
+		cmd := exec.Command("git", "worktree", "add", "-b", branchName, worktreePath, baseRef)
 		cmd.Dir = projectDir
 		output, err := cmd.CombinedOutput()
 		if err != nil {
@@ -4721,9 +4724,9 @@ func (e *Executor) ArchiveWorktree(task *db.Task) error {
 		return nil
 	}
 
-	// For non-worktree projects, just clear the worktree path reference.
+	// For non-worktree tasks, just clear the worktree path reference.
 	// The shared working directory is never removed.
-	if !e.config.ProjectUsesWorktrees(task.Project) {
+	if !e.taskUsesWorktrees(task) {
 		e.db.ClearTaskWorktreePath(task.ID)
 		return nil
 	}
@@ -4849,8 +4852,8 @@ func (e *Executor) ArchiveWorktree(task *db.Task) error {
 // 3. Runs init script
 // 4. Clears the archive state from the database
 func (e *Executor) UnarchiveWorktree(task *db.Task) error {
-	// For non-worktree projects, just restore the worktree path to the project dir
-	if !e.config.ProjectUsesWorktrees(task.Project) {
+	// For non-worktree tasks, just restore the worktree path to the project dir
+	if !e.taskUsesWorktrees(task) {
 		projectDir := e.getProjectDir(task.Project)
 		if projectDir == "" {
 			return fmt.Errorf("could not find project directory for project: %s", task.Project)
