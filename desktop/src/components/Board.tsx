@@ -1,9 +1,11 @@
 import { memo, useEffect, useRef, useState } from "react";
 import { AnimatePresence, motion } from "motion/react";
 import { GitPullRequest, Pin } from "lucide-react";
+import { api } from "../api/client";
 import type { LogLine, Task } from "../api/types";
 import { ageHint, type Column } from "../lib/board";
 import { store, useAppSelector } from "../store";
+import { checkEnvironment, inTauri } from "../tauri";
 import { cn } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
 
@@ -266,6 +268,41 @@ function BoardColumn({ column, collapsed }: { column: Column; collapsed: boolean
   );
 }
 
+/** Empty-board confidence beat: a fresh install looks bare, so show which
+ * executor CLIs were detected on this machine. Renders nothing until the
+ * check resolves with at least one agent. */
+function DetectedAgents() {
+  const [agents, setAgents] = useState<string[]>([]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const load = async () => {
+      // The Tauri shell probes the machine directly; in the browser the
+      // server reports which executors it found on its side.
+      const names = inTauri()
+        ? (await checkEnvironment()).executors.filter((e) => e.path !== null).map((e) => e.name)
+        : (await api.listExecutors()).filter((e) => e.available).map((e) => e.name);
+      if (!cancelled) setAgents(names);
+    };
+    load().catch(() => {}); // best-effort: stay quiet when detection fails
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  if (agents.length === 0) return null;
+  return (
+    <div className="flex flex-wrap items-center justify-center gap-1.5 px-3.5 pb-4 text-[11px] text-muted-foreground">
+      <span>Detected agents on this machine:</span>
+      {agents.map((name) => (
+        <Badge key={name} variant="outline" className="h-4 px-1.5 text-[10px]">
+          {name}
+        </Badge>
+      ))}
+    </div>
+  );
+}
+
 export function Board({
   columns,
   collapsed,
@@ -273,18 +310,23 @@ export function Board({
   columns: Column[];
   collapsed: { backlog: boolean; done: boolean };
 }) {
+  const noTasks = useAppSelector((s) => s.tasks.length === 0);
+
   return (
-    <div className="flex min-h-0 flex-1 gap-3 overflow-x-auto p-3.5">
-      {columns.map((column) => (
-        <BoardColumn
-          key={column.status}
-          column={column}
-          collapsed={
-            (column.status === "backlog" && collapsed.backlog) ||
-            (column.status === "done" && collapsed.done)
-          }
-        />
-      ))}
+    <div className="flex min-h-0 flex-1 flex-col">
+      <div className="flex min-h-0 flex-1 gap-3 overflow-x-auto p-3.5">
+        {columns.map((column) => (
+          <BoardColumn
+            key={column.status}
+            column={column}
+            collapsed={
+              (column.status === "backlog" && collapsed.backlog) ||
+              (column.status === "done" && collapsed.done)
+            }
+          />
+        ))}
+      </div>
+      {noTasks && <DetectedAgents />}
     </div>
   );
 }
