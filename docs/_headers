@@ -2,3 +2,6 @@
 /install.sh
   Content-Type: text/plain; charset=utf-8
   Cache-Control: no-cache
+/install-macos.sh
+  Content-Type: text/plain; charset=utf-8
+  Cache-Control: no-cache

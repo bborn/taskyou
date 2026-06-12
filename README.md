@@ -48,14 +48,22 @@ See [Full CLI Scriptability](#full-cli-scriptability) for the complete command s
 ![Web UI](docs/screenshots/gui-board.png)
 *The same Kanban board in the desktop app or any browser*
 
-Just want the GUI? Grab a prebuilt bundle from the [latest release](https://github.com/bborn/taskyou/releases/latest):
+Just want the GUI? On macOS, install it with one command:
+
+```sh
+curl -fsSL taskyou.dev/install-macos.sh | bash
+```
+
+This downloads the latest DMG, verifies it, installs **TaskYou.app** to `~/Applications`, and launches it — no Gatekeeper prompts, no sudo. Set `TASKYOU_INSTALL_SYSTEM=1` to install to `/Applications` for all users instead.
+
+Or grab a prebuilt bundle from the [latest release](https://github.com/bborn/taskyou/releases/latest):
 
 - **macOS**: `TaskYou-macos-arm64.dmg` (Apple Silicon) or `TaskYou-macos-x64.dmg` (Intel)
 - **Linux**: `TaskYou-linux-x64.AppImage` or `.deb`
 
 The app is self-contained — it ships its own `ty` engine and starts the server and daemon for you. Two things must be installed on your machine: **tmux** (`brew install tmux`) and at least one executor CLI (e.g. [Claude Code](https://claude.com/claude-code)).
 
-The macOS bundles are ad-hoc signed but not notarized, so macOS flags them on first launch. Drag **TaskYou.app** to Applications, then either right-click it → **Open** → **Open**, or clear the download quarantine flag:
+The macOS bundles are ad-hoc signed but not notarized, so macOS flags DMGs downloaded in a browser on first launch (the install script above avoids this entirely). If you installed from a browser-downloaded DMG, drag **TaskYou.app** to Applications, then either right-click it → **Open** → **Open**, or clear the download quarantine flag:
 
 ```sh
 xattr -dr com.apple.quarantine /Applications/TaskYou.app
