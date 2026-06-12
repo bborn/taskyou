@@ -75,7 +75,7 @@ func projectSuggestionDismissedKey(path string) string
 - Modify: `internal/ui/project_detect.go`
 - Test: `internal/ui/project_detect_test.go` (create)
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Create `internal/ui/project_detect_test.go`:
 ```go
@@ -123,12 +123,12 @@ func TestIsProjectCandidate(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run it; expect FAIL (undefined: isProjectCandidate)**
+- [x] **Step 2: Run it; expect FAIL (undefined: isProjectCandidate)**
 
 Run: `go test ./internal/ui/ -run TestIsProjectCandidate -v`
 Expected: FAIL — `undefined: isProjectCandidate`.
 
-- [ ] **Step 3: Implement the heuristic**
+- [x] **Step 3: Implement the heuristic**
 
 Append to `internal/ui/project_detect.go` (and ensure `runtime` is NOT needed; uses `os`, `path/filepath`, `strings` already imported):
 ```go
@@ -183,7 +183,7 @@ func isProjectCandidate(dir string) bool {
 }
 ```
 
-- [ ] **Step 4: Update `detectProjectFromDir` to use the heuristic and git-aware worktrees**
+- [x] **Step 4: Update `detectProjectFromDir` to use the heuristic and git-aware worktrees**
 
 Replace the body of `detectProjectFromDir` in `internal/ui/project_detect.go`:
 ```go
@@ -204,12 +204,12 @@ func detectProjectFromDir(dir string) (project *db.Project, instructionSource st
 }
 ```
 
-- [ ] **Step 5: Run tests; expect PASS**
+- [x] **Step 5: Run tests; expect PASS**
 
 Run: `go test ./internal/ui/ -run TestIsProjectCandidate -v`
 Expected: PASS.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add internal/ui/project_detect.go internal/ui/project_detect_test.go
@@ -224,7 +224,7 @@ git commit -m "feat(onboarding): folder-candidacy heuristic (git or markers, min
 - Create: `internal/ai/project_infer.go`
 - Test: `internal/ai/project_infer_test.go`
 
-- [ ] **Step 1: Write the failing test (pure parser + degradation)**
+- [x] **Step 1: Write the failing test (pure parser + degradation)**
 
 Create `internal/ai/project_infer_test.go`:
 ```go
@@ -265,12 +265,12 @@ func TestInferProjectMetadata_DegradesWhenClaudeMissing(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run it; expect FAIL (undefined symbols)**
+- [x] **Step 2: Run it; expect FAIL (undefined symbols)**
 
 Run: `go test ./internal/ai/ -run 'TestParseInferenceJSON|TestInferProjectMetadata' -v`
 Expected: FAIL — `undefined: parseInferenceJSON` / `InferProjectMetadata`.
 
-- [ ] **Step 3: Implement the helper**
+- [x] **Step 3: Implement the helper**
 
 Create `internal/ai/project_infer.go`:
 ```go
@@ -405,7 +405,7 @@ func parseInferenceJSON(raw string) (ProjectMetadata, error) {
 }
 ```
 
-- [ ] **Step 4: Run tests; expect PASS**
+- [x] **Step 4: Run tests; expect PASS**
 
 Run: `go test ./internal/ai/ -run 'TestParseInferenceJSON|TestInferProjectMetadata' -v`
 Expected: PASS (the degradation test passes because `claude` is unreachable via the emptied PATH).
@@ -414,7 +414,7 @@ Note: verify no import cycle (`internal/ai` importing `internal/executor`). If `
 Run: `go build ./internal/ai/`
 Expected: builds clean.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add internal/ai/project_infer.go internal/ai/project_infer_test.go
@@ -429,7 +429,7 @@ git commit -m "feat(onboarding): infer project name/alias/description via claude
 - Modify: `internal/ui/project_detect.go`
 - Test: `internal/ui/project_detect_test.go`
 
-- [ ] **Step 1: Write the failing test (enrichment merges, never erases)**
+- [x] **Step 1: Write the failing test (enrichment merges, never erases)**
 
 Add to `internal/ui/project_detect_test.go`:
 ```go
@@ -454,12 +454,12 @@ func dbProjectStub() *db.Project { return &db.Project{Name: "acme-rocket", Path:
 ```
 (Adjust import of `db` if needed — `github.com/bborn/workflow/internal/db`.)
 
-- [ ] **Step 2: Run it; expect FAIL (undefined: applyInferredMetadata)**
+- [x] **Step 2: Run it; expect FAIL (undefined: applyInferredMetadata)**
 
 Run: `go test ./internal/ui/ -run TestApplyInferredMetadata -v`
 Expected: FAIL.
 
-- [ ] **Step 3: Implement `applyInferredMetadata`**
+- [x] **Step 3: Implement `applyInferredMetadata`**
 
 Append to `internal/ui/project_detect.go` (add import `aipkg "github.com/bborn/workflow/internal/ai"`):
 ```go
@@ -483,12 +483,12 @@ func applyInferredMetadata(p *db.Project, meta aipkg.ProjectMetadata) {
 }
 ```
 
-- [ ] **Step 4: Run tests; expect PASS**
+- [x] **Step 4: Run tests; expect PASS**
 
 Run: `go test ./internal/ui/ -run 'TestApplyInferredMetadata|TestIsProjectCandidate' -v`
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add internal/ui/project_detect.go internal/ui/project_detect_test.go
@@ -503,7 +503,7 @@ git commit -m "feat(onboarding): merge inferred metadata without erasing default
 - Create: `internal/ui/folderpicker.go`
 - Test: `internal/ui/folderpicker_test.go`
 
-- [ ] **Step 1: Write the failing test (candidate-root seeding + fuzzy filter, pure)**
+- [x] **Step 1: Write the failing test (candidate-root seeding + fuzzy filter, pure)**
 
 Create `internal/ui/folderpicker_test.go`:
 ```go
@@ -528,12 +528,12 @@ func TestFuzzyFilterFolders(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run it; expect FAIL**
+- [x] **Step 2: Run it; expect FAIL**
 
 Run: `go test ./internal/ui/ -run TestFuzzyFilterFolders -v`
 Expected: FAIL — `undefined: folderEntry / fuzzyFilterFolders`.
 
-- [ ] **Step 3: Implement the picker**
+- [x] **Step 3: Implement the picker**
 
 Create `internal/ui/folderpicker.go`:
 ```go
@@ -767,12 +767,12 @@ func (m *FolderPickerModel) OnCancel(fn func()) { m.onCancel = fn }
 
 Note: `Bold`, `HelpBar`, `HelpKey`, `HelpDesc`, `ColorPrimary` are existing styles in `internal/ui` (used by `filebrowser.go`). Confirm names with `grep -n 'HelpBar\|HelpKey\|HelpDesc\|ColorPrimary\|^var Bold' internal/ui/*.go` before relying on them; substitute the actual identifiers if different.
 
-- [ ] **Step 4: Run tests; expect PASS, and build**
+- [x] **Step 4: Run tests; expect PASS, and build**
 
 Run: `go test ./internal/ui/ -run TestFuzzyFilterFolders -v && go build ./internal/ui/`
 Expected: PASS + clean build.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add internal/ui/folderpicker.go internal/ui/folderpicker_test.go
@@ -788,7 +788,7 @@ git commit -m "feat(onboarding): fuzzy folder picker (type-to-search, git-tagged
 
 (UI-only; verified by build + harness in Task 8. No unit test — rendering/return-value model has no pure logic worth isolating.)
 
-- [ ] **Step 1: Implement the Welcome fork**
+- [x] **Step 1: Implement the Welcome fork**
 
 Create `internal/ui/welcome.go`:
 ```go
@@ -858,12 +858,12 @@ func (m *WelcomeModel) View() string {
 }
 ```
 
-- [ ] **Step 2: Build**
+- [x] **Step 2: Build**
 
 Run: `go build ./internal/ui/`
 Expected: clean build (substitute style identifiers if grep in Task 4 showed different names).
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add internal/ui/welcome.go
@@ -879,7 +879,7 @@ git commit -m "feat(onboarding): first-run Welcome fork model"
 
 This rewires the first-load flow. UI integration — verified by build + harness (Task 8).
 
-- [ ] **Step 1: Add view constants**
+- [x] **Step 1: Add view constants**
 
 In `internal/ui/app.go`, in the `const (...)` View block (after `ViewProjectDetectConfirm`, ~line 41), add:
 ```go
@@ -887,7 +887,7 @@ In `internal/ui/app.go`, in the `const (...)` View block (after `ViewProjectDete
 	ViewFolderPicker // fuzzy folder picker for "set up a project"
 ```
 
-- [ ] **Step 2: Add model fields**
+- [x] **Step 2: Add model fields**
 
 In the `AppModel` struct (near `projectDetectConfirm`), add:
 ```go
@@ -895,7 +895,7 @@ In the `AppModel` struct (near `projectDetectConfirm`), add:
 	folderPicker  *FolderPickerModel
 ```
 
-- [ ] **Step 3: Replace the first-load routing block**
+- [x] **Step 3: Replace the first-load routing block**
 
 Replace `app.go:835-855` (the `if m.isFirstLoad { ... }` block inside `case tasksLoadedMsg:`) with:
 ```go
@@ -921,7 +921,7 @@ Replace `app.go:835-855` (the `if m.isFirstLoad { ... }` block inside `case task
 		}
 ```
 
-- [ ] **Step 4: Add the welcome-fork gate and helpers**
+- [x] **Step 4: Add the welcome-fork gate and helpers**
 
 Add to `app.go` (near `maybeOfferProjectCreation`):
 ```go
@@ -958,7 +958,7 @@ func (m *AppModel) onlyPersonalProject() bool {
 ```
 Confirm the list method name: `grep -n 'func (db \*DB) ListProjects\|func (db \*DB) GetProjects\|func (db \*DB) AllProjects' internal/db/*.go` and use the actual one.
 
-- [ ] **Step 5: Make `maybeOfferProjectCreation` enrich via inference**
+- [x] **Step 5: Make `maybeOfferProjectCreation` enrich via inference**
 
 Replace the inference section of `maybeOfferProjectCreation` (`app.go:3176-3184`) so it overlays inferred metadata before showing the card:
 ```go
@@ -980,7 +980,7 @@ Add import `aipkg "github.com/bborn/workflow/internal/ai"` to `app.go` if not pr
 
 Note on blocking: `InferProjectMetadata` runs synchronously here (≤12s timeout). If a follow-up wants the non-blocking spinner from the design, move this into a `tea.Cmd` that emits a `projectInferredMsg`; for v1 the synchronous call with timeout is acceptable and far simpler. Keep v1 synchronous.
 
-- [ ] **Step 6: Update the suggestion card copy to show inferred fields**
+- [x] **Step 6: Update the suggestion card copy to show inferred fields**
 
 In `showProjectDetectConfirm` (`app.go:3192-3199`), include alias/description in the description builder:
 ```go
@@ -1009,7 +1009,7 @@ func firstLine(s string) string {
 }
 ```
 
-- [ ] **Step 7: Render + route the new views**
+- [x] **Step 7: Render + route the new views**
 
 In `View()` switch (`app.go:1475`), add cases:
 ```go
@@ -1061,7 +1061,7 @@ In `Update()`'s key handling, add a routed update for the two views. Near the ot
 		}
 ```
 
-- [ ] **Step 8: Wire folder-picker selection → create+enrich project**
+- [x] **Step 8: Wire folder-picker selection → create+enrich project**
 
 Define the OnSelect/OnCancel callbacks (replace the placeholder in Step 7) so picking a folder builds a detected project, enriches it, and shows the same suggestion card (reusing `showProjectDetectConfirm`):
 ```go
@@ -1108,12 +1108,12 @@ type folderPickedMsg struct{ path string }
 ```
 Then in `app.go` `Update`, add a top-level `case folderPickedMsg:` that performs detect → enrich → `showProjectDetectConfirm` and returns its `tea.Cmd`. Remove the `onSelect`/`pendingCmd` plumbing.
 
-- [ ] **Step 9: Build the whole binary**
+- [x] **Step 9: Build the whole binary**
 
 Run: `go build ./cmd/task && go vet ./internal/ui/`
 Expected: clean build.
 
-- [ ] **Step 10: Commit**
+- [x] **Step 10: Commit**
 
 ```bash
 git add internal/ui/app.go internal/ui/folderpicker.go
@@ -1127,7 +1127,7 @@ git commit -m "feat(onboarding): launch decision tree, welcome fork, picker→en
 **Files:**
 - Modify: `internal/ui/settings.go`
 
-- [ ] **Step 1: Route the bail-out validation branches through the state-preserving reshow**
+- [x] **Step 1: Route the bail-out validation branches through the state-preserving reshow**
 
 In `saveProject` (`settings.go`), change the two branches that currently set `m.err` and `return m, nil` to use `reshowProjectFormWithError`, so every field is retained.
 
@@ -1147,16 +1147,16 @@ Replace `settings.go:615-617` (`path is not a directory`):
 ```
 Also locate any "name is required" / duplicate-name validation in `saveProject` and route it the same way (grep: `grep -n 'm.err =' internal/ui/settings.go`). For each project-form validation, prefer `return m.reshowProjectFormWithError(err)` over `m.err = err; return m, nil`.
 
-- [ ] **Step 2: Ensure non-git folders skip worktrees/git entirely (git optional)**
+- [x] **Step 2: Ensure non-git folders skip worktrees/git entirely (git optional)**
 
 Confirm `saveProject` already does this (`settings.go:620-648`): when `useWorktrees` is false it does NOT init git. The new detection sets `UseWorktrees=false` for non-git folders, so this path is exercised. Add a guard so a non-git, worktrees-off project never triggers `initGitRepo`. No code change expected if the existing `if useWorktrees { ... }` guards hold — verify by reading the branch and add a regression note.
 
-- [ ] **Step 3: Build + manual reasoning check**
+- [x] **Step 3: Build + manual reasoning check**
 
 Run: `go build ./internal/ui/`
 Expected: clean build.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add internal/ui/settings.go
@@ -1170,7 +1170,7 @@ git commit -m "fix(onboarding): preserve project-form input on validation errors
 **Files:**
 - Create: `scripts/qa/ty-qa-firstrun.sh`
 
-- [ ] **Step 1: Write the scenario script**
+- [x] **Step 1: Write the scenario script**
 
 Create `scripts/qa/ty-qa-firstrun.sh` (mirrors the existing harness; controls cwd, asserts via screen capture):
 ```bash
@@ -1212,20 +1212,20 @@ echo "### Scenario B: plain folder → welcome fork";  launch "$PLAIN";  cap | h
 echo "==> tmux attach -t $SID to drive manually; ty-qa-down.sh to tear down"
 ```
 
-- [ ] **Step 2: Run it; eyeball both scenarios**
+- [x] **Step 2: Run it; eyeball both scenarios**
 
 Run: `chmod +x scripts/qa/ty-qa-firstrun.sh && scripts/qa/ty-qa-firstrun.sh`
 Expected:
 - Scenario A shows the upgraded suggestion card with `Name:` (LLM or basename), `Alias:`, `Worktrees: true`.
 - Scenario B shows the Welcome fork: "Welcome to TaskYou 👋", `[Set up a project] [Just start a task]`.
 
-- [ ] **Step 3: Drive the fork → picker → create, and verify a non-git project**
+- [x] **Step 3: Drive the fork → picker → create, and verify a non-git project**
 
 Manually (or scripted with `ty-qa-key.sh`): from Scenario B press `enter` on "Set up a project" → fuzzy picker appears; type to filter; `enter` to pick `just-a-folder` → suggestion card → confirm → board shows a project with worktrees off. Assert no git repo was created in `just-a-folder`:
 Run: `test ! -d /tmp/ty-qa/firstrun/just-a-folder/.git && echo "OK: non-git project, no git created"`
 Expected: `OK: ...`.
 
-- [ ] **Step 4: Nested-repo worktree sanity (the open question from the design)**
+- [x] **Step 4: Nested-repo worktree sanity (the open question from the design)**
 
 Create a parent git repo with a nested git repo inside, register it as a worktree project, create a task, and confirm the worktree is created without error:
 ```bash
@@ -1241,7 +1241,7 @@ ls "$P/.task-worktrees" 2>/dev/null && echo "OK: worktree created with nested re
 ```
 Expected: a worktree directory is created; no fatal error about the nested repo.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add scripts/qa/ty-qa-firstrun.sh
@@ -1252,20 +1252,78 @@ git commit -m "test(onboarding): scripted first-run QA scenario"
 
 ## Task 9: Full regression + lint
 
-- [ ] **Step 1: Run the full suite**
+- [x] **Step 1: Run the full suite**
 
 Run: `go build ./... && go test ./internal/ui/... ./internal/ai/... -v`
 Expected: build clean, tests PASS.
 
-- [ ] **Step 2: Lint (per project)**
+- [x] **Step 2: Lint (per project)**
 
 Run: `gofmt -l internal/ui internal/ai && go vet ./internal/ui/... ./internal/ai/...`
 Expected: no files listed by gofmt, no vet errors.
 
-- [ ] **Step 3: Tear down QA instance**
+- [x] **Step 3: Tear down QA instance**
 
 Run: `scripts/qa/ty-qa-down.sh --purge`
 Expected: sessions killed, isolated DB removed.
+
+---
+
+## Addendum: Welcome-view machine readiness (added 2026-06-12)
+
+Two small additions beyond Tasks 1–9, inspired by competitor onboarding research
+(detection does the work, nothing blocks):
+
+1. **Dependency check on the Welcome fork.** When the Welcome view shows, it also
+   reports machine prerequisites: tmux on PATH (`tmuxAvailable()`, mirroring the
+   desktop app's `checkEnvironment` which treats tmux as a prerequisite) and at
+   least one executor CLI (reusing the existing `availableExecutors` detection in
+   `AppModel`). Missing prerequisites render as clearly visible but **non-blocking**
+   warning lines on the existing Welcome card with exact install hints
+   (`tmux not found — brew install tmux`,
+   `no coding agent found — npm install -g @anthropic-ai/claude-code`). No new
+   wizard step; the fork choices stay live.
+
+2. **Detected-agents confidence beat.** When executor CLIs *are* found, the Welcome
+   card shows `Detected agents: claude, codex` from the same detection — a cheap,
+   warm signal that the machine is ready.
+
+**Implementation:** pure formatting/notice logic (`formatDetectedAgents`,
+`missingPrereqNotices`) lives in `internal/ui/welcome.go` and is TDD-covered in
+`internal/ui/welcome_test.go` (plus a render-level assertion that notices never
+hide the fork). `NewWelcomeModel` now takes `(width, height, detectedAgents,
+tmuxFound)`; both `app.go` call sites pass `m.availableExecutors` and
+`tmuxAvailable()`.
+
+- [x] Failing tests written first (`TestFormatDetectedAgents`,
+  `TestMissingPrereqNotices`, `TestWelcomeViewShowsEnvironmentStatus`), then
+  implementation, then PASS.
+
+---
+
+## Execution record (2026-06-12)
+
+Tasks 1–9 were found already implemented and merged to `main` (commit range
+`25a64f80` … `34991e5d`, the `feat/fix/test(onboarding)` commits). This branch
+verified each task against the plan's named commands instead of re-implementing:
+
+- Task 1: `go test ./internal/ui/ -run TestIsProjectCandidate` — PASS
+- Task 2: `go test ./internal/ai/ -run 'TestParseInferenceJSON|TestInferProjectMetadata'` — PASS
+  (degradation test passes without a reachable `claude` binary, as designed)
+- Task 3: `go test ./internal/ui/ -run TestApplyInferredMetadata` — PASS
+- Task 4: `go test ./internal/ui/ -run TestFuzzyFilterFolders` — PASS
+- Task 5/6: `go build ./cmd/task && go vet ./internal/ui/` — clean; decision tree,
+  `ViewWelcome`/`ViewFolderPicker`, `folderPickedMsg` routing (option (a)) all wired
+- Task 7: all `saveProject` validation branches route through
+  `reshowProjectFormWithError`; git init only runs when `useWorktrees` is true
+- Task 8: `scripts/qa/ty-qa-firstrun.sh` exists; re-run on this branch
+- Task 9: full `go build ./...` + `go test ./internal/ui/... ./internal/ai/...`,
+  `gofmt -l` clean, `go vet` clean
+
+The three flagged verification points resolved as: style identifiers
+(`Bold`/`HelpBar`/`HelpKey`/`HelpDesc`/`ColorPrimary`) exist as named; the DB
+method is `ListProjects` (`internal/db/tasks.go:1443`); no `internal/ai` →
+`internal/executor` import cycle (executor does not import `internal/ai`).
 
 ---
 
