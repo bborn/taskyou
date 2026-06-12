@@ -21,7 +21,13 @@ export WORKTREE_SESSION_ID="$TY_QA_SID"
 # inherits $TMUX and routes its own bare `tmux` calls to the same socket. Use
 # `command tmux` to reach the real binary on the default server.
 export TY_QA_TMUX_SOCKET="${TY_QA_TMUX_SOCKET:-taskyou-qa-$TY_QA_SID}"
-tmux() { command tmux -L "$TY_QA_TMUX_SOCKET" "$@"; }
+# Resolve the real binary once instead of using `command tmux` inside the
+# wrapper: macOS stock bash 3.2 has an errexit bug where a failing
+# `command foo || true` still aborts a `set -e` script, which broke every
+# ty-qa script at the first `tmux kill-session` against a not-yet-running
+# QA server.
+TY_QA_TMUX_BIN="$(command -v tmux)"
+tmux() { "$TY_QA_TMUX_BIN" -L "$TY_QA_TMUX_SOCKET" "$@"; }
 
 # Derived handles.
 TY_BIN="${TY_BIN:-$TY_QA_ROOT/ty}"
