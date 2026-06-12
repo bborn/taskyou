@@ -1,11 +1,14 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
+import { Unicode11Addon } from "@xterm/addon-unicode11";
 import { api, apiBase } from "../api/client";
-import type { Task } from "../api/types";
+import type { Task, TerminalInfo } from "../api/types";
 import { attachTaskTerminal, inTauri, ptyKill, ptyResize, ptyWrite } from "../tauri";
 import { store, useAppState } from "../store";
 import { Button } from "@/components/ui/button";
+
+type TerminalTab = "agent" | "shell";
 
 type TermState =
   | { kind: "loading" }
@@ -22,10 +25,16 @@ function base64ToBytes(data: string): Uint8Array {
   return bytes;
 }
 
+// ANSI palettes (Tokyo Night-ish). The background stays transparent so the
+// app's CSS theme variables (light/dark, vibrancy material) show through and
+// the terminal blends with the rest of the GUI instead of being a hard-edged
+// foreign rectangle.
+const TRANSPARENT = "#00000000";
+
 const XTERM_DARK = {
-  background: "#16161e",
-  foreground: "#c0caf5",
-  cursor: "#c0caf5",
+  background: TRANSPARENT,
+  foreground: "#c5cbe3",
+  cursor: "#c5cbe3",
   selectionBackground: "#33467c",
   black: "#15161e",
   red: "#f7768e",
@@ -46,7 +55,7 @@ const XTERM_DARK = {
 };
 
 const XTERM_LIGHT = {
-  background: "#fafafa",
+  background: TRANSPARENT,
   foreground: "#343b58",
   cursor: "#343b58",
   selectionBackground: "#b6bdd9",
@@ -73,11 +82,57 @@ function currentXtermTheme() {
 }
 
 /**
- * The executor terminal: a real xterm.js terminal backed by a Rust PTY running
- * a tmux client attached (via a grouped view session) to the task's daemon
- * window. Fully interactive — keystrokes, mouse, resize all flow through.
+ * The task terminal panel: "Agent" and "Shell" tabs above a real xterm.js
+ * terminal. Each tab is its own xterm instance attached to its own tmux pane
+ * — the executor pane or the task's workdir shell pane — instead of mirroring
+ * the raw side-by-side tmux window layout.
  */
 export function TerminalPane({ task }: { task: Task }) {
+  const [tab, setTab] = useState<TerminalTab>("agent");
+  // Remount per task and per tab: only the active tab holds a live attach
+  // (single-pane tmux views can't be attached concurrently — zoom is a
+  // window-level flag shared across the session group).
+  return <TerminalSurface key={`${task.id}:${tab}`} task={task} tab={tab} onTabChange={setTab} />;
+}
+
+function TabButton({
+  active,
+  live,
+  onClick,
+  children,
+}: {
+  active: boolean;
+  live: boolean;
+  onClick: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`relative -mb-px flex items-center gap-1.5 border-b-2 px-2.5 py-1.5 text-[11px] font-medium transition-colors ${
+        active
+          ? "border-foreground/70 text-foreground"
+          : "border-transparent text-muted-foreground hover:text-foreground"
+      }`}
+    >
+      <span
+        className={`size-1.5 rounded-full ${live ? "bg-status-processing" : "bg-muted-foreground/30"}`}
+      />
+      {children}
+    </button>
+  );
+}
+
+function TerminalSurface({
+  task,
+  tab,
+  onTabChange,
+}: {
+  task: Task;
+  tab: TerminalTab;
+  onTabChange: (tab: TerminalTab) => void;
+}) {
   const { theme } = useAppState();
   const hostRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
@@ -85,6 +140,7 @@ export function TerminalPane({ task }: { task: Task }) {
   const ptyIdRef = useRef<number | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const [state, setState] = useState<TermState>({ kind: "loading" });
+  const [info, setInfo] = useState<TerminalInfo | null>(null);
   const [starting, setStarting] = useState(false);
 
   const detach = useCallback((showExited = false) => {
@@ -107,12 +163,18 @@ export function TerminalPane({ task }: { task: Task }) {
     termRef.current?.dispose();
     const term = new Terminal({
       theme: currentXtermTheme(),
-      fontFamily: '"SF Mono", ui-monospace, Menlo, monospace',
+      allowTransparency: true,
+      fontFamily:
+        '"SF Mono", SFMono-Regular, ui-monospace, "Cascadia Code", "JetBrains Mono", Menlo, Monaco, "DejaVu Sans Mono", monospace',
       fontSize: 12.5,
       cursorBlink: true,
       macOptionIsMeta: true,
       scrollback: 1000,
     });
+    // Unicode 11 width tables: agent CLIs lean on symbols (⏺, ✶, spinners)
+    // that render as gaps/overlaps under xterm's legacy width handling.
+    term.loadAddon(new Unicode11Addon());
+    term.unicode.activeVersion = "11";
     const fit = new FitAddon();
     term.loadAddon(fit);
     term.open(host);
@@ -122,21 +184,44 @@ export function TerminalPane({ task }: { task: Task }) {
     return term;
   }, []);
 
-  /** Browser fallback: no PTY available, so mirror the executor pane over the
+  /** Resolve terminal info, ensuring the shell pane exists for the Shell tab.
+   * Returns null (after setting a waiting state) when not attachable. */
+  const resolveInfo = useCallback(async (): Promise<TerminalInfo | null> => {
+    const current = await api.terminalInfo(task.id);
+    if (!current.window_exists) {
+      setInfo(current);
+      setState(
+        current.pane_borrowed_by
+          ? { kind: "borrowed", by: current.pane_borrowed_by }
+          : { kind: "no-window" },
+      );
+      return null;
+    }
+    const resolved = tab === "shell" ? await api.ensureShellPane(task.id) : current;
+    setInfo(resolved);
+    return resolved;
+  }, [task.id, tab]);
+
+  /** Browser fallback: no PTY available, so mirror the tmux pane over the
    * server's capture-pane WebSocket. Input flows via tmux send-keys; works by
    * pane ID, so it keeps working even while the TUI borrows the pane. */
   const attachBrowser = useCallback(async () => {
     setState({ kind: "loading" });
     try {
-      const info = await api.terminalInfo(task.id);
-      if (!info.claude_pane_id) {
+      const resolved = await resolveInfo();
+      if (!resolved) return;
+      const paneId = tab === "shell" ? resolved.shell_pane_id : resolved.claude_pane_id;
+      if (!paneId) {
         setState({ kind: "no-window" });
         return;
       }
       const term = buildTerm();
       if (!term) return;
 
-      const ws = new WebSocket(`${apiBase().replace(/^http/, "ws")}/api/tasks/${task.id}/terminal`);
+      const paneQuery = tab === "shell" ? "?pane=shell" : "";
+      const ws = new WebSocket(
+        `${apiBase().replace(/^http/, "ws")}/api/tasks/${task.id}/terminal${paneQuery}`,
+      );
       wsRef.current = ws;
       ws.onmessage = (event) => {
         const data = String(event.data);
@@ -170,7 +255,7 @@ export function TerminalPane({ task }: { task: Task }) {
     } catch (e) {
       setState({ kind: "error", message: e instanceof Error ? e.message : String(e) });
     }
-  }, [task.id, buildTerm]);
+  }, [task.id, tab, buildTerm, resolveInfo]);
 
   const attach = useCallback(async () => {
     if (!inTauri()) {
@@ -178,21 +263,15 @@ export function TerminalPane({ task }: { task: Task }) {
     }
     setState({ kind: "loading" });
     try {
-      const info = await api.terminalInfo(task.id);
-      if (!info.window_exists) {
-        setState(
-          info.pane_borrowed_by
-            ? { kind: "borrowed", by: info.pane_borrowed_by }
-            : { kind: "no-window" },
-        );
-        return;
-      }
+      const resolved = await resolveInfo();
+      if (!resolved) return;
 
       // window_target is "session:index"; attach the grouped view to that
-      // session and select the same window.
-      const sep = info.window_target.indexOf(":");
-      const daemonSession = info.window_target.slice(0, sep);
-      const windowSpec = info.window_target.slice(sep + 1);
+      // session, select the same window, and zoom this tab's pane.
+      const sep = resolved.window_target.indexOf(":");
+      const daemonSession = resolved.window_target.slice(0, sep);
+      const windowSpec = resolved.window_target.slice(sep + 1);
+      const paneId = tab === "shell" ? resolved.shell_pane_id : resolved.claude_pane_id;
 
       const term = buildTerm();
       if (!term) return;
@@ -201,6 +280,7 @@ export function TerminalPane({ task }: { task: Task }) {
         task.id,
         daemonSession,
         windowSpec,
+        paneId || null,
         term.cols,
         term.rows,
         (event) => {
@@ -227,9 +307,9 @@ export function TerminalPane({ task }: { task: Task }) {
     } catch (e) {
       setState({ kind: "error", message: e instanceof Error ? e.message : String(e) });
     }
-  }, [task.id, buildTerm, attachBrowser]);
+  }, [task.id, tab, buildTerm, attachBrowser, resolveInfo]);
 
-  // Initial attach + cleanup on unmount/task change.
+  // Initial attach + cleanup on unmount/task/tab change.
   useEffect(() => {
     void attach();
     return () => {
@@ -263,11 +343,12 @@ export function TerminalPane({ task }: { task: Task }) {
     if (!waiting) return;
     const id = setInterval(async () => {
       try {
-        const info = await api.terminalInfo(task.id);
-        if (info.window_exists) {
+        const current = await api.terminalInfo(task.id);
+        setInfo(current);
+        if (current.window_exists) {
           clearInterval(id);
           void attach();
-        } else if (state.kind === "borrowed" && !info.pane_borrowed_by) {
+        } else if (state.kind === "borrowed" && !current.pane_borrowed_by) {
           setState({ kind: "no-window" });
         }
       } catch {
@@ -294,14 +375,25 @@ export function TerminalPane({ task }: { task: Task }) {
     }
   }
 
+  const windowLive = info?.window_exists ?? false;
+  const agentLive =
+    (tab === "agent" && state.kind === "attached") || (windowLive && !!info?.claude_pane_id);
+  const shellLive =
+    (tab === "shell" && state.kind === "attached") || (windowLive && !!info?.shell_pane_id);
+
   return (
-    <div className="flex min-h-[160px] flex-1 flex-col bg-surface-1">
-      <div className="flex items-center gap-2 border-b px-3 py-1 text-[11px] text-muted-foreground">
-        <span>Executor terminal</span>
+    <div className="flex min-h-0 flex-1 flex-col bg-surface-1">
+      <div className="flex shrink-0 items-center gap-1 border-b px-2 text-[11px] text-muted-foreground">
+        <TabButton active={tab === "agent"} live={agentLive} onClick={() => onTabChange("agent")}>
+          Agent
+        </TabButton>
+        <TabButton active={tab === "shell"} live={shellLive} onClick={() => onTabChange("shell")}>
+          Shell
+        </TabButton>
+        <div className="flex-1" />
         {state.kind === "attached" && (
           <span className="text-status-processing">{inTauri() ? "● live" : "● live (mirror)"}</span>
         )}
-        <div className="flex-1" />
         {state.kind === "attached" && (
           <Button variant="ghost" size="icon" className="size-5" title="Detach" onClick={() => detach(true)}>
             ⏏
@@ -332,7 +424,9 @@ export function TerminalPane({ task }: { task: Task }) {
               <span>
                 {task.status === "queued" || task.status === "processing"
                   ? "Waiting for the executor to start…"
-                  : "No executor session running for this task"}
+                  : tab === "shell"
+                    ? "No session running for this task — the shell opens alongside the executor"
+                    : "No executor session running for this task"}
               </span>
               {task.status !== "queued" && task.status !== "processing" && (
                 <Button disabled={starting} onClick={() => void startSession()}>

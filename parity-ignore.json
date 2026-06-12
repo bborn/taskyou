@@ -1,4 +1,3 @@
 {
-  "SpotlightSync": "macOS Spotlight metadata export is a local-indexing concern; intentionally TUI/CLI-only.",
-  "ToggleShellPane": "The GUI terminal renders the full tmux window (executor + shell panes together), so there is no separate shell pane to toggle."
+  "SpotlightSync": "macOS Spotlight metadata export is a local-indexing concern; intentionally TUI/CLI-only."
 }

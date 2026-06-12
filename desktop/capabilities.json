@@ -146,6 +146,13 @@
       ],
       "note": "t"
     },
+    "ToggleShellPane": {
+      "api": [
+        "POST /api/tasks/{id}/shell",
+        "GET /api/tasks/{id}/terminal"
+      ],
+      "note": "Shell tab in the detail terminal panel — own xterm attached to the task's workdir shell pane"
+    },
     "Up": {
       "note": "Arrow keys move board selection"
     }
