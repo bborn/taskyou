@@ -466,6 +466,102 @@ func TestHandleEnsureSession_Error(t *testing.T) {
 	}
 }
 
+// --- Shell pane bootstrap ---
+
+func ensureShellPaneRequest(t *testing.T, srv *Server, taskID int64) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest("POST", fmt.Sprintf("/api/tasks/%d/shell", taskID), nil)
+	req.SetPathValue("id", fmt.Sprint(taskID))
+	w := httptest.NewRecorder()
+	srv.handleEnsureShellPane(w, req)
+	return w
+}
+
+func TestHandleEnsureShellPane_CreatesPane(t *testing.T) {
+	srv, database, runner := setupServer(t)
+	task := createTestTask(t, database, &db.Task{Title: "shell", Status: db.StatusProcessing})
+	if err := database.UpdateTaskPaneIDs(task.ID, "%10", ""); err != nil {
+		t.Fatal(err)
+	}
+	runner.outputByCmd = map[string][]byte{
+		"list-windows": []byte(fmt.Sprintf("task-daemon-99:3:task-%d\n", task.ID)),
+		"list-panes":   []byte("%10\n"),
+		"split-window": []byte("%11\n"),
+	}
+
+	w := ensureShellPaneRequest(t, srv, task.ID)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var info terminalInfoJSON
+	if err := json.NewDecoder(w.Body).Decode(&info); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if info.ShellPaneID != "%11" {
+		t.Errorf("shell_pane_id = %q, want %%11", info.ShellPaneID)
+	}
+
+	// Pane IDs must be persisted for other clients (TUI, websocket mirror).
+	fresh, err := database.GetTask(task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fresh.ShellPaneID != "%11" || fresh.ClaudePaneID != "%10" {
+		t.Errorf("persisted panes = (%q, %q), want (%%10, %%11)", fresh.ClaudePaneID, fresh.ShellPaneID)
+	}
+
+	// The split must anchor on the executor pane and run in a shell.
+	var split []string
+	for _, call := range runner.calls {
+		if len(call) > 1 && call[1] == "split-window" {
+			split = call
+		}
+	}
+	if split == nil {
+		t.Fatal("split-window was never invoked")
+	}
+	joined := strings.Join(split, " ")
+	if !strings.Contains(joined, "-t %10") {
+		t.Errorf("split-window not anchored on executor pane: %v", split)
+	}
+}
+
+func TestHandleEnsureShellPane_AlreadyExists(t *testing.T) {
+	srv, database, runner := setupServer(t)
+	task := createTestTask(t, database, &db.Task{Title: "shell", Status: db.StatusProcessing})
+	if err := database.UpdateTaskPaneIDs(task.ID, "%10", "%11"); err != nil {
+		t.Fatal(err)
+	}
+	runner.outputByCmd = map[string][]byte{
+		"list-windows": []byte(fmt.Sprintf("task-daemon-99:3:task-%d\n", task.ID)),
+		"list-panes":   []byte("%10\n%11\n"),
+	}
+
+	w := ensureShellPaneRequest(t, srv, task.ID)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	for _, call := range runner.calls {
+		if len(call) > 1 && call[1] == "split-window" {
+			t.Fatalf("split-window invoked although shell pane exists: %v", call)
+		}
+	}
+}
+
+func TestHandleEnsureShellPane_NoWindow(t *testing.T) {
+	srv, database, runner := setupServer(t)
+	task := createTestTask(t, database, &db.Task{Title: "shell", Status: db.StatusBacklog})
+	runner.outputByCmd = map[string][]byte{
+		"list-windows": []byte("other-session:1:vim\n"),
+	}
+
+	w := ensureShellPaneRequest(t, srv, task.ID)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("expected 409, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
 // --- Extended task JSON ---
 
 func TestTaskJSONIncludesTerminalFields(t *testing.T) {

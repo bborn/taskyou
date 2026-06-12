@@ -20,6 +20,13 @@ pub struct AttachPlan {
     pub command: Vec<String>,
 }
 
+/// Whether the window containing `pane` is currently zoomed.
+fn zoomed(pane: &str) -> bool {
+    tmux(&["display-message", "-p", "-t", pane, "#{window_zoomed_flag}"])
+        .map(|out| out.trim() == "1")
+        .unwrap_or(false)
+}
+
 fn tmux(args: &[&str]) -> Result<String, String> {
     let out = Command::new("tmux")
         .args(args)
@@ -37,10 +44,18 @@ fn tmux(args: &[&str]) -> Result<String, String> {
 
 /// Prepare a grouped tmux view session focused on `window` (a window name like
 /// "task-42" or index) of `daemon_session`, and return the attach plan.
+///
+/// When `pane` is given (a global tmux pane ID like "%42"), that pane is
+/// focused and zoomed so the GUI shows exactly one pane instead of the raw
+/// side-by-side tmux layout — the Agent and Shell tabs each attach their own
+/// view zoomed to their own pane. Zoom is a window-level flag shared across
+/// the session group, so callers attach at most one view per window at a time
+/// (the GUI mounts only the active tab).
 pub fn prepare_attach(
     task_id: i64,
     daemon_session: &str,
     window: &str,
+    pane: Option<&str>,
 ) -> Result<AttachPlan, String> {
     if daemon_session.is_empty() {
         return Err("task has no daemon session".into());
@@ -77,6 +92,25 @@ pub fn prepare_attach(
         return Err(e);
     }
 
+    // Single-pane view: focus the requested pane and zoom it. Reset any
+    // existing zoom first — `resize-pane -Z` toggles, and a previous attach
+    // may have left the window zoomed on a different pane.
+    if let Some(pane) = pane.filter(|p| !p.is_empty()) {
+        if zoomed(pane) {
+            let _ = tmux(&["resize-pane", "-Z", "-t", pane]);
+        }
+        if let Err(e) = tmux(&["select-pane", "-t", pane]) {
+            let _ = tmux(&["kill-session", "-t", &view_session]);
+            return Err(e);
+        }
+        let multi_pane = tmux(&["display-message", "-p", "-t", pane, "#{window_panes}"])
+            .map(|out| out.trim() != "1")
+            .unwrap_or(false);
+        if multi_pane {
+            let _ = tmux(&["resize-pane", "-Z", "-t", pane]);
+        }
+    }
+
     // Attach, then mark the session for destruction on detach. Chaining via
     // tmux's ";" separator means destroy-unattached only applies once a
     // client is actually connected.
@@ -101,7 +135,13 @@ mod tests {
 
     #[test]
     fn rejects_missing_daemon_session() {
-        let err = prepare_attach(1, "", "task-1").unwrap_err();
+        let err = prepare_attach(1, "", "task-1", None).unwrap_err();
+        assert!(err.contains("daemon session"));
+    }
+
+    #[test]
+    fn rejects_missing_daemon_session_with_pane() {
+        let err = prepare_attach(1, "", "task-1", Some("%5")).unwrap_err();
         assert!(err.contains("daemon session"));
     }
 

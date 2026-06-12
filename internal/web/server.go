@@ -104,6 +104,7 @@ func New(cfg Config) *Server {
 	mux.HandleFunc("GET /api/tasks/{id}/terminal", s.handleTerminal)
 	mux.HandleFunc("GET /api/tasks/{id}/terminal-info", s.handleTerminalInfo)
 	mux.HandleFunc("POST /api/tasks/{id}/session", s.handleEnsureSession)
+	mux.HandleFunc("POST /api/tasks/{id}/shell", s.handleEnsureShellPane)
 	mux.HandleFunc("GET /api/tasks/latest-logs", s.handleLatestLogs)
 
 	// Attachments

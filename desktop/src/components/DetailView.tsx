@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { ChevronDown, ChevronRight, GitPullRequest, Pin, Code2 } from "lucide-react";
 import { api } from "../api/client";
 import { subscribeTaskLogs } from "../api/sse";
@@ -19,6 +19,18 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+
+// Terminal panel sizing: user-draggable (like the TUI's pane divider),
+// persisted across sessions, double-click resets.
+const TERMINAL_HEIGHT_KEY = "ty-terminal-height";
+const DEFAULT_TERMINAL_HEIGHT = 320;
+const MIN_TERMINAL_HEIGHT = 140;
+const MIN_CONTENT_HEIGHT = 140;
+
+function storedTerminalHeight(): number {
+  const raw = Number(localStorage.getItem(TERMINAL_HEIGHT_KEY));
+  return Number.isFinite(raw) && raw >= MIN_TERMINAL_HEIGHT ? raw : DEFAULT_TERMINAL_HEIGHT;
+}
 
 const STATUS_BADGE: Record<string, string> = {
   backlog: "border-status-backlog/50 text-status-backlog",
@@ -78,6 +90,35 @@ export function DetailView({ taskId }: { taskId: number }) {
   const [logs, setLogs] = useState<LogLine[]>([]);
   const [deps, setDeps] = useState<Dependencies | null>(null);
   const [showLogs, setShowLogs] = useState(false);
+
+  // Detail/terminal split: drag the divider to resize, double-click to reset.
+  const splitRef = useRef<HTMLDivElement>(null);
+  const [terminalHeight, setTerminalHeight] = useState(storedTerminalHeight);
+  const [resizing, setResizing] = useState(false);
+
+  const onDividerPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    e.currentTarget.setPointerCapture(e.pointerId);
+    setResizing(true);
+  };
+  const onDividerPointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (!resizing) return;
+    const container = splitRef.current;
+    if (!container) return;
+    const rect = container.getBoundingClientRect();
+    const max = Math.max(MIN_TERMINAL_HEIGHT, rect.height - MIN_CONTENT_HEIGHT);
+    setTerminalHeight(Math.min(max, Math.max(MIN_TERMINAL_HEIGHT, rect.bottom - e.clientY)));
+  };
+  const onDividerPointerUp = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (!resizing) return;
+    e.currentTarget.releasePointerCapture?.(e.pointerId);
+    setResizing(false);
+    localStorage.setItem(TERMINAL_HEIGHT_KEY, String(Math.round(terminalHeight)));
+  };
+  const resetTerminalHeight = () => {
+    localStorage.removeItem(TERMINAL_HEIGHT_KEY);
+    setTerminalHeight(DEFAULT_TERMINAL_HEIGHT);
+  };
 
   // Keep the local task fresh when the store refreshes (status changes, etc.).
   const storeTask = tasks.find((t) => t.id === taskId);
@@ -218,8 +259,8 @@ export function DetailView({ taskId }: { taskId: number }) {
         </Button>
       </div>
 
-      <div className="flex min-h-0 flex-1 flex-col">
-        <div className="max-h-[38%] shrink-0 overflow-y-auto border-b px-5 py-3.5 select-text">
+      <div ref={splitRef} className="flex min-h-0 flex-1 flex-col">
+        <div className="min-h-[140px] flex-1 overflow-y-auto px-5 py-3.5 select-text">
           {task.body ? (
             <Markdown source={task.body} />
           ) : (
@@ -282,7 +323,32 @@ export function DetailView({ taskId }: { taskId: number }) {
           {showLogs && <LogList logs={logs} />}
         </div>
 
-        <TerminalPane task={task} />
+        <div
+          role="separator"
+          aria-orientation="horizontal"
+          title="Drag to resize · double-click to reset"
+          className="group relative z-10 -my-1 h-2.5 shrink-0 cursor-row-resize touch-none"
+          onPointerDown={onDividerPointerDown}
+          onPointerMove={onDividerPointerMove}
+          onPointerUp={onDividerPointerUp}
+          onPointerCancel={onDividerPointerUp}
+          onDoubleClick={resetTerminalHeight}
+        >
+          <div
+            className={`pointer-events-none absolute inset-x-0 top-1/2 -translate-y-1/2 transition-[background-color,height] ${
+              resizing
+                ? "h-[3px] bg-status-backlog"
+                : "h-px bg-border group-hover:h-[3px] group-hover:bg-status-backlog/60"
+            }`}
+          />
+        </div>
+
+        <div
+          className="flex min-h-[140px] flex-col"
+          style={{ height: terminalHeight, maxHeight: "calc(100% - 140px)" }}
+        >
+          <TerminalPane task={task} />
+        </div>
       </div>
     </div>
   );

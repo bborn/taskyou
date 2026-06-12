@@ -120,6 +120,7 @@ export const api = {
   // Terminal
   terminalInfo: (id: number) => request<TerminalInfo>("GET", `/api/tasks/${id}/terminal-info`),
   ensureSession: (id: number) => request<TerminalInfo>("POST", `/api/tasks/${id}/session`, {}),
+  ensureShellPane: (id: number) => request<TerminalInfo>("POST", `/api/tasks/${id}/shell`, {}),
 
   // Attachments
   listAttachments: (taskId: number) => request<Attachment[]>("GET", `/api/tasks/${taskId}/attachments`),

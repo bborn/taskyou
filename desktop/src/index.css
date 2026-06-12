@@ -194,9 +194,11 @@
     @apply max-w-full rounded;
   }
 
-  /* --- Terminal host (always a dark surface; terminals read best dark) --- */
+  /* --- Terminal host. The xterm background is transparent so the app
+     theme (light/dark, vibrancy) shows through; comfortable padding keeps
+     the grid off the panel edges. --- */
   .terminal-host {
-    @apply flex-1 min-h-0 px-1.5 pb-1.5;
+    @apply flex-1 min-h-0 px-3 py-2;
   }
   .terminal-host .xterm {
     height: 100%;
