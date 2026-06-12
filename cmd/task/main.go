@@ -578,7 +578,10 @@ Examples:
   task create "Refactor auth" --executor codex  # Use Codex instead of Claude
   task create "Urgent bug" --tags "bug,urgent" --pinned  # Tagged and pinned task
   task create --body "The login button is broken on mobile devices" # AI generates title
-  task create "QA: PR #2526" --branch fix/ui-overflow --project myapp  # Checkout existing branch`,
+  task create "QA: PR #2526" --branch fix/ui-overflow --project myapp  # Checkout existing branch
+  task create "Quick fix" --in-place               # Run in the project dir, no worktree
+  task create "Risky refactor" --worktree          # Force a fresh worktree
+  task create "Backport fix" --base-branch release/2.0  # Worktree branches from release/2.0`,
 		Args: cobra.MaximumNArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
 			var title string
@@ -598,6 +601,9 @@ Examples:
 			pinned, _ := cmd.Flags().GetBool("pinned")
 			remoteControl, _ := cmd.Flags().GetBool("remote-control")
 			branch, _ := cmd.Flags().GetString("branch")
+			forceWorktree, _ := cmd.Flags().GetBool("worktree")
+			inPlace, _ := cmd.Flags().GetBool("in-place")
+			baseBranch, _ := cmd.Flags().GetString("base-branch")
 			outputJSON, _ := cmd.Flags().GetBool("json")
 
 			// Validate that either title or body is provided
@@ -712,6 +718,15 @@ Examples:
 				permMode = db.PermissionModeDangerous
 			}
 
+			// Resolve worktree mode: --worktree and --in-place are mutually
+			// exclusive (enforced by cobra); neither inherits the project setting.
+			worktreeMode := db.WorktreeModeInherit
+			if forceWorktree {
+				worktreeMode = db.WorktreeModeWorktree
+			} else if inPlace {
+				worktreeMode = db.WorktreeModeInPlace
+			}
+
 			// Create the task
 			task := &db.Task{
 				Title:          title,
@@ -724,6 +739,8 @@ Examples:
 				Tags:           tags,
 				Pinned:         pinned,
 				SourceBranch:   branch,
+				WorktreeMode:   worktreeMode,
+				BaseBranch:     baseBranch,
 				PermissionMode: permMode,
 				RemoteControl:  remoteControl,
 			}
@@ -744,6 +761,12 @@ Examples:
 				}
 				if task.SourceBranch != "" {
 					output["source_branch"] = task.SourceBranch
+				}
+				if task.WorktreeMode != "" {
+					output["worktree_mode"] = task.WorktreeMode
+				}
+				if task.BaseBranch != "" {
+					output["base_branch"] = task.BaseBranch
 				}
 				if task.EffortLevel != "" {
 					output["effort_level"] = task.EffortLevel
@@ -778,6 +801,10 @@ Examples:
 	createCmd.Flags().Bool("pinned", false, "Pin the task to the top of its column")
 	createCmd.Flags().Bool("remote-control", false, "Launch Claude with --remote-control (interactive, remote-drivable session)")
 	createCmd.Flags().StringP("branch", "b", "", "Existing branch to checkout for worktree (e.g., fix/ui-overflow)")
+	createCmd.Flags().Bool("worktree", false, "Force a fresh git worktree even if the project default is off")
+	createCmd.Flags().Bool("in-place", false, "Run directly in the project directory on the current checkout (no worktree)")
+	createCmd.Flags().String("base-branch", "", "Git ref a new worktree branches from (default: the project's default branch)")
+	createCmd.MarkFlagsMutuallyExclusive("worktree", "in-place")
 	createCmd.Flags().Bool("json", false, "Output in JSON format")
 	createCmd.RegisterFlagCompletionFunc("project", completeFlagProjects)
 	createCmd.RegisterFlagCompletionFunc("type", completeFlagTypes)
