@@ -31,6 +31,8 @@ const (
 	FieldExecutor
 	FieldEffort
 	FieldPermission
+	FieldWorktree
+	FieldBaseBranch
 	FieldCount
 )
 
@@ -51,33 +53,38 @@ type FormModel struct {
 	titleInput       textinput.Model
 	bodyInput        textarea.Model
 	attachmentsInput textinput.Model
+	baseBranchInput  textinput.Model
 
 	// Select values
-	project            string
-	projectIdx         int
-	projects           []string
-	projectSearchMode  bool     // true when typing to search/filter projects
-	projectSearchQuery string   // current search query
-	projectFiltered    []string // filtered project list (fuzzy matched)
-	projectFilteredIdx int      // selected index in filtered list
-	taskType           string
-	typeIdx            int
-	types              []string
-	executor           string // "claude", "codex", "gemini"
-	executorIdx        int
-	executors          []string
-	availableExecutors []string // Original list of available executors (for rebuilding when project changes)
-	effortLevel        string   // Per-task Claude effort override ("" = use global/Claude default)
-	effortIdx          int
-	effortLevels       []string // Selectable effort values; "" (first) means "default"
-	effortTouched      bool     // user picked an effort explicitly; stop following project default
-	permissionMode     string   // Per-task permission mode ("default"/"auto"/"dangerous")
-	permissionIdx      int
-	permissionModes    []string // Selectable permission modes
-	permissionTouched  bool     // user picked a permission explicitly; stop following project default
-	queue              bool
-	attachments        []string // Parsed file paths
-	attachmentCursor   int      // Index of the currently selected attachment chip
+	project              string
+	projectIdx           int
+	projects             []string
+	projectSearchMode    bool     // true when typing to search/filter projects
+	projectSearchQuery   string   // current search query
+	projectFiltered      []string // filtered project list (fuzzy matched)
+	projectFilteredIdx   int      // selected index in filtered list
+	taskType             string
+	typeIdx              int
+	types                []string
+	executor             string // "claude", "codex", "gemini"
+	executorIdx          int
+	executors            []string
+	availableExecutors   []string // Original list of available executors (for rebuilding when project changes)
+	effortLevel          string   // Per-task Claude effort override ("" = use global/Claude default)
+	effortIdx            int
+	effortLevels         []string // Selectable effort values; "" (first) means "default"
+	effortTouched        bool     // user picked an effort explicitly; stop following project default
+	permissionMode       string   // Per-task permission mode ("default"/"auto"/"dangerous")
+	permissionIdx        int
+	permissionModes      []string // Selectable permission modes
+	permissionTouched    bool     // user picked a permission explicitly; stop following project default
+	worktreeMode         string   // Per-task worktree override ("" = project default, "worktree", "in-place")
+	worktreeModeIdx      int
+	worktreeModes        []string // Selectable worktree modes; "" (first) means "project default"
+	projectUsesWorktrees bool     // selected project's UseWorktrees setting (drives base-branch visibility)
+	queue                bool
+	attachments          []string // Parsed file paths
+	attachmentCursor     int      // Index of the currently selected attachment chip
 
 	// Magic paste fields (populated when pasting URLs)
 	prURL    string // GitHub PR URL if pasted
@@ -189,6 +196,36 @@ func permissionIndexFor(options []string, mode string) int {
 	return 0
 }
 
+// worktreeModeOptions returns the selectable worktree modes for the form. The
+// first entry is the empty string, which represents "project default" (inherit
+// the project's UseWorktrees setting — no per-task override).
+func worktreeModeOptions() []string {
+	return []string{db.WorktreeModeInherit, db.WorktreeModeWorktree, db.WorktreeModeInPlace}
+}
+
+// worktreeModeLabel returns the display label for a worktree mode option.
+func worktreeModeLabel(mode string) string {
+	switch mode {
+	case db.WorktreeModeWorktree:
+		return "worktree"
+	case db.WorktreeModeInPlace:
+		return "in place"
+	default:
+		return "project default"
+	}
+}
+
+// worktreeModeIndexFor returns the index of the given worktree mode in the
+// options list, defaulting to 0 ("project default") when not found.
+func worktreeModeIndexFor(options []string, mode string) int {
+	for i, o := range options {
+		if o == mode {
+			return i
+		}
+	}
+	return 0
+}
+
 // NewEditFormModel creates a form model pre-populated with an existing task's data for editing.
 func NewEditFormModel(database *db.DB, task *db.Task, width, height int, availableExecutors []string) *FormModel {
 	// Set executor to default if not specified
@@ -261,6 +298,9 @@ func NewEditFormModel(database *db.DB, task *db.Task, width, height int, availab
 		permissionModes:     permissionModeOptions(),
 		permissionIdx:       permissionIndexFor(permissionModeOptions(), task.EffectivePermissionMode()),
 		permissionTouched:   true, // editing: keep the task's existing mode unless changed
+		worktreeMode:        db.NormalizeWorktreeMode(task.WorktreeMode),
+		worktreeModes:       worktreeModeOptions(),
+		worktreeModeIdx:     worktreeModeIndexFor(worktreeModeOptions(), db.NormalizeWorktreeMode(task.WorktreeMode)),
 		isEdit:              true,
 		prURL:               task.PRURL,
 		prNumber:            task.PRNumber,
@@ -339,6 +379,17 @@ func NewEditFormModel(database *db.DB, task *db.Task, width, height int, availab
 	m.attachmentsInput.Cursor.SetMode(cursor.CursorStatic)
 	m.attachmentsInput.Width = width - 24
 
+	// Base branch input - pre-populate with existing base branch
+	m.baseBranchInput = textinput.New()
+	m.baseBranchInput.Placeholder = "Base branch (default branch if empty)"
+	m.baseBranchInput.Prompt = ""
+	m.baseBranchInput.Cursor.SetMode(cursor.CursorStatic)
+	m.baseBranchInput.Width = width - 24
+	m.baseBranchInput.SetValue(task.BaseBranch)
+
+	// Load the project's worktree setting for base-branch visibility
+	m.refreshProjectWorktreeSetting()
+
 	// Apply modal-aware input widths and body height now that modal is set.
 	m.SetSize(width, height)
 
@@ -383,7 +434,8 @@ func NewFormModel(database *db.DB, width, height int, workingDir string, availab
 		attachmentCursor:    -1,
 		effortLevels:        effortLevelOptions(), // Defaults to "" (Claude's global default)
 		permissionModes:     permissionModeOptions(),
-		showAdvanced:        showAdvanced, // Load from user preference
+		worktreeModes:       worktreeModeOptions(), // Defaults to "" (project default)
+		showAdvanced:        showAdvanced,          // Load from user preference
 	}
 
 	// Load task types from database
@@ -460,6 +512,7 @@ func NewFormModel(database *db.DB, width, height int, workingDir string, availab
 	// previous task in that project.
 	m.refreshPermissionDefaultForProject()
 	m.refreshEffortDefaultForProject()
+	m.refreshProjectWorktreeSetting()
 
 	// Title input
 	m.titleInput = textinput.New()
@@ -490,6 +543,13 @@ func NewFormModel(database *db.DB, width, height int, workingDir string, availab
 	m.attachmentsInput.Prompt = ""
 	m.attachmentsInput.Cursor.SetMode(cursor.CursorStatic)
 	m.attachmentsInput.Width = width - 24
+
+	// Base branch input (shown only when the task will run in a worktree)
+	m.baseBranchInput = textinput.New()
+	m.baseBranchInput.Placeholder = "Base branch (default branch if empty)"
+	m.baseBranchInput.Prompt = ""
+	m.baseBranchInput.Cursor.SetMode(cursor.CursorStatic)
+	m.baseBranchInput.Width = width - 24
 
 	return m
 }
@@ -806,6 +866,7 @@ func (m *FormModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.loadLastExecutorForProject()
 				m.refreshPermissionDefaultForProject()
 				m.refreshEffortDefaultForProject()
+				m.refreshProjectWorktreeSetting()
 				return m, nil
 			}
 			if m.focused == FieldType {
@@ -830,6 +891,11 @@ func (m *FormModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.permissionTouched = true
 				return m, nil
 			}
+			if m.focused == FieldWorktree && len(m.worktreeModes) > 0 {
+				m.worktreeModeIdx = (m.worktreeModeIdx - 1 + len(m.worktreeModes)) % len(m.worktreeModes)
+				m.worktreeMode = m.worktreeModes[m.worktreeModeIdx]
+				return m, nil
+			}
 
 		case "right":
 			if m.handleAttachmentNavigation(1) {
@@ -843,6 +909,7 @@ func (m *FormModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.loadLastExecutorForProject()
 				m.refreshPermissionDefaultForProject()
 				m.refreshEffortDefaultForProject()
+				m.refreshProjectWorktreeSetting()
 				return m, nil
 			}
 			if m.focused == FieldType {
@@ -865,6 +932,11 @@ func (m *FormModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.permissionIdx = (m.permissionIdx + 1) % len(m.permissionModes)
 				m.permissionMode = m.permissionModes[m.permissionIdx]
 				m.permissionTouched = true
+				return m, nil
+			}
+			if m.focused == FieldWorktree && len(m.worktreeModes) > 0 {
+				m.worktreeModeIdx = (m.worktreeModeIdx + 1) % len(m.worktreeModes)
+				m.worktreeMode = m.worktreeModes[m.worktreeModeIdx]
 				return m, nil
 			}
 
@@ -920,7 +992,7 @@ func (m *FormModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 			// Type-to-select for other selector fields
-			if m.focused == FieldType || m.focused == FieldExecutor || m.focused == FieldEffort || m.focused == FieldPermission {
+			if m.focused == FieldType || m.focused == FieldExecutor || m.focused == FieldEffort || m.focused == FieldPermission || m.focused == FieldWorktree {
 				key := msg.String()
 				if len(key) == 1 && unicode.IsLetter(rune(key[0])) {
 					m.selectByPrefix(strings.ToLower(key))
@@ -961,6 +1033,8 @@ func (m *FormModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.attachmentsInput.Value() != "" && m.attachmentCursor != -1 {
 			m.clearAttachmentSelection()
 		}
+	case FieldBaseBranch:
+		m.baseBranchInput, cmd = m.baseBranchInput.Update(msg)
 	}
 
 	return m, cmd
@@ -1128,6 +1202,7 @@ func (m *FormModel) selectProjectFromSearch() {
 	m.loadLastExecutorForProject()
 	m.refreshPermissionDefaultForProject()
 	m.refreshEffortDefaultForProject()
+	m.refreshProjectWorktreeSetting()
 }
 
 // filterProjects updates the filtered project list based on the search query.
@@ -1208,6 +1283,14 @@ func (m *FormModel) selectByPrefix(prefix string) {
 				m.permissionIdx = i
 				m.permissionMode = p
 				m.permissionTouched = true
+				return
+			}
+		}
+	case FieldWorktree:
+		for i, mode := range m.worktreeModes {
+			if strings.HasPrefix(strings.ToLower(worktreeModeLabel(mode)), prefix) {
+				m.worktreeModeIdx = i
+				m.worktreeMode = mode
 				return
 			}
 		}
@@ -1320,6 +1403,32 @@ func (m *FormModel) refreshEffortDefaultForProject() {
 	m.effortIdx = effortIndexFor(m.effortLevels, m.effortLevel)
 }
 
+// refreshProjectWorktreeSetting reloads the selected project's UseWorktrees
+// setting, which drives whether the base-branch input is relevant when the
+// worktree mode is "project default". Defaults to true (the use_worktrees
+// column default) when the project cannot be loaded.
+func (m *FormModel) refreshProjectWorktreeSetting() {
+	m.projectUsesWorktrees = true
+	if m.db != nil && m.project != "" {
+		if p, err := m.db.GetProjectByName(m.project); err == nil && p != nil {
+			m.projectUsesWorktrees = p.UsesWorktrees()
+		}
+	}
+}
+
+// baseBranchRelevant reports whether the base-branch input applies: only when
+// the task will run in a fresh worktree (forced per task, or inherited from a
+// worktrees-on project).
+func (m *FormModel) baseBranchRelevant() bool {
+	switch m.worktreeMode {
+	case db.WorktreeModeWorktree:
+		return true
+	case db.WorktreeModeInPlace:
+		return false
+	}
+	return m.projectUsesWorktrees
+}
+
 // rebuildExecutorListForProject rebuilds the executor list sorted by usage for the current project.
 // This should be called when the project changes to re-sort executors by usage count.
 func (m *FormModel) rebuildExecutorListForProject() {
@@ -1362,6 +1471,10 @@ func (m *FormModel) isFieldVisible(field FormField) bool {
 		// Effort is a Claude-specific override (claude --effort), only shown in
 		// advanced mode and only when the Claude executor is selected.
 		return m.showAdvanced && m.executor == db.ExecutorClaude
+	}
+	if field == FieldBaseBranch {
+		// Base branch only applies when a fresh worktree will be created.
+		return m.showAdvanced && m.baseBranchRelevant()
 	}
 	if m.showAdvanced {
 		return true
@@ -1423,6 +1536,7 @@ func (m *FormModel) blurAll() {
 	m.titleInput.Blur()
 	m.bodyInput.Blur()
 	m.attachmentsInput.Blur()
+	m.baseBranchInput.Blur()
 	m.clearAttachmentSelection()
 	if m.projectSearchMode {
 		m.exitProjectSearch()
@@ -1437,6 +1551,8 @@ func (m *FormModel) focusCurrent() {
 		m.bodyInput.Focus()
 	case FieldAttachments:
 		m.attachmentsInput.Focus()
+	case FieldBaseBranch:
+		m.baseBranchInput.Focus()
 	}
 }
 
@@ -1927,6 +2043,30 @@ func (m *FormModel) View() string {
 			b.WriteString(cursor + " " + labelStyle.Render("Permission") + m.renderSelector(m.permissionModes, m.permissionIdx, m.focused == FieldPermission, selectedStyle, optionStyle, dimStyle))
 			b.WriteString("\n\n")
 		}
+
+		// Worktree selector (per-task override of the project's worktree setting)
+		if m.isFieldVisible(FieldWorktree) {
+			cursor = " "
+			if m.focused == FieldWorktree {
+				cursor = cursorStyle.Render("▸")
+			}
+			worktreeLabels := make([]string, len(m.worktreeModes))
+			for i, mode := range m.worktreeModes {
+				worktreeLabels[i] = worktreeModeLabel(mode)
+			}
+			b.WriteString(cursor + " " + labelStyle.Render("Worktree") + m.renderSelector(worktreeLabels, m.worktreeModeIdx, m.focused == FieldWorktree, selectedStyle, optionStyle, dimStyle))
+			b.WriteString("\n\n")
+		}
+
+		// Base branch input (only when a fresh worktree will be created)
+		if m.isFieldVisible(FieldBaseBranch) {
+			cursor = " "
+			if m.focused == FieldBaseBranch {
+				cursor = cursorStyle.Render("▸")
+			}
+			b.WriteString(cursor + " " + labelStyle.Render("Base branch") + m.baseBranchInput.View())
+			b.WriteString("\n\n")
+		}
 	} else {
 		// Show compact summary of defaults and toggle hint
 		b.WriteString("\n")
@@ -2021,6 +2161,7 @@ func (m *FormModel) hasFormData() bool {
 	return strings.TrimSpace(m.titleInput.Value()) != "" ||
 		strings.TrimSpace(m.bodyInput.Value()) != "" ||
 		strings.TrimSpace(m.attachmentsInput.Value()) != "" ||
+		strings.TrimSpace(m.baseBranchInput.Value()) != "" ||
 		len(m.attachments) > 0
 }
 
@@ -2061,6 +2202,15 @@ func (m *FormModel) ApplyTo(task *db.Task) {
 	// task, keeping the legacy DangerousMode boolean consistent with it.
 	task.PermissionMode = m.resolvedPermissionMode()
 	task.DangerousMode = task.PermissionMode == db.PermissionModeDangerous
+
+	// Worktree override; the base branch only applies when a worktree will be
+	// created, so don't carry it for in-place tasks.
+	task.WorktreeMode = db.NormalizeWorktreeMode(m.worktreeMode)
+	if m.baseBranchRelevant() {
+		task.BaseBranch = strings.TrimSpace(m.baseBranchInput.Value())
+	} else {
+		task.BaseBranch = ""
+	}
 }
 
 // SetQueue sets whether to queue the task.
@@ -2086,6 +2236,7 @@ func (m *FormModel) SetSize(width, height int) {
 	m.titleInput.Width = inputWidth
 	m.bodyInput.SetWidth(inputWidth)
 	m.attachmentsInput.Width = inputWidth
+	m.baseBranchInput.Width = inputWidth
 	// Recalculate body height based on new dimensions
 	m.updateBodyHeight()
 }
