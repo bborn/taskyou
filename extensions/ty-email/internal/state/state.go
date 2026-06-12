@@ -129,6 +129,17 @@ func (s *DB) migrate() error {
 		);
 
 		CREATE INDEX IF NOT EXISTS idx_outbound_queue_attempts ON outbound_queue(attempts);
+
+		CREATE TABLE IF NOT EXISTS classify_failures (
+			email_id TEXT PRIMARY KEY,
+			attempts INTEGER NOT NULL DEFAULT 0,
+			last_attempt TIMESTAMP
+		);
+
+		CREATE TABLE IF NOT EXISTS blocked_notifications (
+			task_id INTEGER PRIMARY KEY,
+			notified_at TIMESTAMP
+		);
 	`)
 	if err != nil {
 		return err
@@ -257,5 +268,60 @@ func (s *DB) MarkOutboundFailed(id int64, errMsg string) error {
 		`UPDATE outbound_queue SET attempts = attempts + 1, last_error = ? WHERE id = ?`,
 		errMsg, id,
 	)
+	return err
+}
+
+// RecordClassifyFailure increments the failure counter for an email and
+// returns the total number of attempts so far. Used to give up on emails
+// that repeatedly fail classification instead of retrying forever.
+func (s *DB) RecordClassifyFailure(emailID string) (int, error) {
+	_, err := s.db.Exec(
+		`INSERT INTO classify_failures (email_id, attempts, last_attempt) VALUES (?, 1, ?)
+		 ON CONFLICT(email_id) DO UPDATE SET attempts = attempts + 1, last_attempt = excluded.last_attempt`,
+		emailID, time.Now(),
+	)
+	if err != nil {
+		return 0, err
+	}
+	var attempts int
+	err = s.db.QueryRow(
+		`SELECT attempts FROM classify_failures WHERE email_id = ?`, emailID,
+	).Scan(&attempts)
+	return attempts, err
+}
+
+// CountProcessedSince returns the number of emails processed after t.
+// Used for rate limiting.
+func (s *DB) CountProcessedSince(t time.Time) (int, error) {
+	var count int
+	err := s.db.QueryRow(
+		`SELECT COUNT(*) FROM processed_emails WHERE processed_at > ?`, t,
+	).Scan(&count)
+	return count, err
+}
+
+// WasNotifiedBlocked reports whether a blocked-task notification has already
+// been sent for this task (and not cleared since).
+func (s *DB) WasNotifiedBlocked(taskID int64) (bool, error) {
+	var count int
+	err := s.db.QueryRow(
+		`SELECT COUNT(*) FROM blocked_notifications WHERE task_id = ?`, taskID,
+	).Scan(&count)
+	return count > 0, err
+}
+
+// MarkNotifiedBlocked records that a blocked-task notification was sent.
+func (s *DB) MarkNotifiedBlocked(taskID int64) error {
+	_, err := s.db.Exec(
+		`INSERT OR REPLACE INTO blocked_notifications (task_id, notified_at) VALUES (?, ?)`,
+		taskID, time.Now(),
+	)
+	return err
+}
+
+// ClearBlockedNotification clears the notification record for a task so it
+// can be re-notified if it blocks again (called when input is sent).
+func (s *DB) ClearBlockedNotification(taskID int64) error {
+	_, err := s.db.Exec(`DELETE FROM blocked_notifications WHERE task_id = ?`, taskID)
 	return err
 }

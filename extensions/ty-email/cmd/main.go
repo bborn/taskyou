@@ -33,10 +33,46 @@ type Config struct {
 	} `yaml:"taskyou"`
 	Routing struct {
 		DefaultProject string `yaml:"default_project"`
+		AutoExecute    bool   `yaml:"auto_execute"` // Queue email-created tasks for execution immediately
 	} `yaml:"routing"`
 	Security struct {
-		AllowedSenders []string `yaml:"allowed_senders"` // Only process emails from these addresses
+		AllowedSenders  []string `yaml:"allowed_senders"`    // Only process emails from these addresses (exact match)
+		Notify          string   `yaml:"notify"`             // Address for blocked-task notifications (default: first allowed sender)
+		MaxTasksPerHour int      `yaml:"max_tasks_per_hour"` // Rate limit (default 20, -1 to disable)
 	} `yaml:"security"`
+}
+
+// defaultMaxTasksPerHour caps how many emails are processed per hour when
+// the config doesn't specify a limit.
+const defaultMaxTasksPerHour = 20
+
+// processorConfig builds the processor config from the loaded YAML config.
+func processorConfig(cfg *Config) *processor.Config {
+	maxPerHour := cfg.Security.MaxTasksPerHour
+	switch {
+	case maxPerHour == 0:
+		maxPerHour = defaultMaxTasksPerHour
+	case maxPerHour < 0:
+		maxPerHour = 0 // disabled
+	}
+	return &processor.Config{
+		AllowedSenders:  cfg.Security.AllowedSenders,
+		Dangerous:       cfg.TaskYou.Dangerous,
+		DefaultProject:  cfg.Routing.DefaultProject,
+		AutoExecute:     cfg.Routing.AutoExecute,
+		MaxTasksPerHour: maxPerHour,
+	}
+}
+
+// notifyAddress returns where blocked-task notifications should go.
+func notifyAddress(cfg *Config) string {
+	if cfg.Security.Notify != "" {
+		return cfg.Security.Notify
+	}
+	if len(cfg.Security.AllowedSenders) > 0 {
+		return cfg.Security.AllowedSenders[0]
+	}
+	return ""
 }
 
 var (
@@ -100,11 +136,7 @@ func serveCmd() *cobra.Command {
 			}
 			defer st.Close()
 
-			procCfg := &processor.Config{
-				AllowedSenders: cfg.Security.AllowedSenders,
-				Dangerous:      cfg.TaskYou.Dangerous,
-			}
-			proc := processor.New(adp, cls, br, st, procCfg, logger)
+			proc := processor.New(adp, cls, br, st, processorConfig(cfg), logger)
 
 			// Setup signal handling
 			ctx, cancel := context.WithCancel(context.Background())
@@ -125,6 +157,11 @@ func serveCmd() *cobra.Command {
 			replyTicker := time.NewTicker(10 * time.Second)
 			defer replyTicker.Stop()
 
+			// Notify (once per blocked period) when email-created tasks need input
+			notifyAddr := notifyAddress(cfg)
+			blockedTicker := time.NewTicker(time.Minute)
+			defer blockedTicker.Stop()
+
 			for {
 				select {
 				case <-sigCh:
@@ -139,6 +176,14 @@ func serveCmd() *cobra.Command {
 				case <-replyTicker.C:
 					if err := proc.SendPendingReplies(ctx); err != nil {
 						logger.Error("failed to send replies", "error", err)
+					}
+
+				case <-blockedTicker.C:
+					if notifyAddr == "" {
+						continue
+					}
+					if err := proc.CheckBlockedTasks(ctx, notifyAddr); err != nil {
+						logger.Error("failed to check blocked tasks", "error", err)
 					}
 				}
 			}
@@ -175,11 +220,7 @@ func processCmd() *cobra.Command {
 			}
 			defer st.Close()
 
-			procCfg := &processor.Config{
-				AllowedSenders: cfg.Security.AllowedSenders,
-				Dangerous:      cfg.TaskYou.Dangerous,
-			}
-			proc := processor.New(adp, cls, br, st, procCfg, logger)
+			proc := processor.New(adp, cls, br, st, processorConfig(cfg), logger)
 
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 			defer cancel()
@@ -479,7 +520,7 @@ func setupAdapter(cfg *Config, logger *slog.Logger) (adapter.Adapter, error) {
 		return adapter.NewIMAPAdapter(cfg.Adapter.IMAP, &cfg.SMTP, logger), nil
 	case "gmail":
 		if cfg.Adapter.Gmail == nil {
-			return nil, fmt.Errorf("Gmail config required")
+			return nil, fmt.Errorf("gmail config required")
 		}
 		return adapter.NewGmailAdapter(cfg.Adapter.Gmail, logger), nil
 	default:

@@ -288,17 +288,48 @@ taskyou:
   cli: ty
   dangerous: false  # Enable dangerous mode for tasks
 
+routing:
+  default_project: personal  # Project for email-created tasks
+  auto_execute: false        # true = queue email-created tasks for execution immediately
+
 security:
   allowed_senders:
-    - you@gmail.com  # Only process emails from yourself
+    - you@gmail.com  # Only process emails from these exact addresses
+  notify: you@gmail.com      # Where blocked-task notifications go (default: first allowed sender)
+  max_tasks_per_hour: 20     # Rate limit (-1 to disable)
 ```
 
-## Security
+## Security & Loop Protection
 
-- **Sender whitelist** - Only emails from `security.allowed_senders` are processed. Random people can't create tasks by emailing your +ty address.
-- **No code execution** - ty-email only calls `ty` CLI commands. The LLM just classifies intent.
+- **Sender allowlist (exact match)** - Only emails whose From *address* exactly matches an entry in `security.allowed_senders` are processed (case-insensitive). Display names and substrings are ignored, so `"you@gmail.com" <evil@attacker.com>` and `you@gmail.com.attacker.com` are rejected.
+- **Auto-reply detection** - Inbound mail with `Auto-Submitted`, `Precedence: bulk/junk/auto_reply`, `X-Autoreply`, or ty-email's own `X-TY-Email` header is ignored. Outbound replies carry `Auto-Submitted: auto-replied`, `X-Auto-Response-Suppress: All`, and `X-TY-Email` headers. Together these break mail loops with vacation responders, bounces, and ty-email itself.
+- **Rate limiting** - At most `security.max_tasks_per_hour` emails (default 20) are processed per hour. Excess mail is deferred (stays unread) and picked up when the window clears, so an inbox flood can't fan out into unbounded task creation.
+- **Bounded LLM retries** - An email that repeatedly fails classification (API outage, malformed response) is abandoned after 3 attempts instead of retrying every poll cycle forever.
+- **No code execution in ty-email** - ty-email only calls `ty` CLI commands. The LLM just classifies intent.
 - **Local credentials** - Email passwords and API keys stay local, never sent to LLM.
 - **State tracking** - Processed emails are tracked in `~/.local/share/ty-email/state.db` to avoid duplicates.
+
+**Residual risks to be aware of:**
+
+- *From spoofing*: the allowlist trusts the From header. Gmail-to-Gmail this is protected by DKIM/SPF filtering, but a sufficiently motivated attacker who can land a spoofed email in your labeled folder can create tasks. Keep `dangerous: false` (the default) so executed tasks still go through Claude's permission prompts inside an isolated worktree.
+- *Prompt injection*: email subject/body become the task prompt executed by an agent. Treat the +ty address like you treat your terminal.
+
+## Email an agent address (custom domain)
+
+To get `agent@yourdomain.com` → TaskYou, you don't need any new infrastructure — just forward the address into the +ty pipeline:
+
+1. Set up forwarding from `agent@yourdomain.com` to `yourname+ty@gmail.com` (Cloudflare Email Routing, Fastmail rules, or your registrar's forwarding all work).
+2. Your existing Gmail filter (`To: yourname+ty@gmail.com` → label `ty-email`, skip inbox) catches the forwarded mail.
+3. Add the addresses you'll send *from* to `security.allowed_senders`.
+4. To have emailed tasks start executing immediately (instead of landing in backlog), set:
+
+```yaml
+routing:
+  default_project: personal
+  auto_execute: true
+```
+
+Replies still come from the +ty alias, and blocked-task notifications go to `security.notify` (default: the first allowed sender).
 
 ## Troubleshooting
 

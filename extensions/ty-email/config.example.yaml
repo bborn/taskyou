@@ -58,14 +58,21 @@ taskyou:
   cli: ty  # Path to ty binary
   dangerous: false  # Enable dangerous mode (allows destructive operations like force pushes)
 
-# Routing rules (optional)
+# Routing (optional)
 routing:
   default_project: personal
-  # Rules are evaluated in order, first match wins
-  # rules:
-  #   - match: "from:support@"
-  #     project: customer-support
-  #   - match: "subject:[urgent]"
-  #     execute: true  # Auto-queue for execution
-  #   - match: "to:dev@"
-  #     project: development
+  # Queue email-created tasks for execution immediately (default: false,
+  # tasks land in backlog and you run `ty execute` when ready)
+  auto_execute: false
+
+# Security
+security:
+  # Only process emails from these exact addresses (case-insensitive).
+  # Display names and lookalike domains are rejected.
+  allowed_senders:
+    - you@gmail.com
+  # Where blocked-task notifications go (default: first allowed sender)
+  # notify: you@gmail.com
+  # Max emails processed per hour; excess mail is deferred, not dropped.
+  # Default 20; set -1 to disable.
+  # max_tasks_per_hour: 20

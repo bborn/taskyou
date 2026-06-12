@@ -478,7 +478,7 @@ func configureLLM(cfg *Config) error {
 			return fmt.Errorf("ANTHROPIC_API_KEY environment variable is not set")
 		}
 		fmt.Println(successStyle.Render("✓ ANTHROPIC_API_KEY is set"))
-		apiKeyCmd = "echo $ANTHROPIC_API_KEY"
+		apiKeyCmd = "echo $ANTHROPIC_API_KEY" //nolint:gosec // shell command to read the key, not a credential
 
 		form := huh.NewForm(
 			huh.NewGroup(
