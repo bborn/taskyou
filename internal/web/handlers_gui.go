@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"mime"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -442,6 +443,97 @@ func (s *Server) handleEnsureSession(w http.ResponseWriter, r *http.Request) {
 	// Re-read the task: EnsureTaskWindow persists pane IDs and daemon session.
 	if fresh, err := s.db.GetTask(task.ID); err == nil && fresh != nil {
 		task = fresh
+	}
+	jsonOK(w, s.terminalInfo(task))
+}
+
+// handleEnsureShellPane makes sure the task's daemon window has a workdir
+// shell pane (the TUI shows one next to the executor; the GUI shows it as the
+// Shell tab), creating it when missing, and returns fresh terminal info.
+//
+// Minimal mirror of the shell-pane bootstrap in executor.ensureShellPane and
+// the TUI's joinTmuxPanes: split the daemon window, run the user's shell in
+// the task workdir, title the pane "Shell", export the task context env vars,
+// and persist the pane ID so every client can target it.
+func (s *Server) handleEnsureShellPane(w http.ResponseWriter, r *http.Request) {
+	task, ok := s.requireTask(w, r)
+	if !ok {
+		return
+	}
+	if s.runner == nil {
+		jsonErr(w, "command runner not configured", http.StatusServiceUnavailable)
+		return
+	}
+
+	target := s.findTaskWindowTarget(task.ID)
+	if target == "" {
+		jsonErr(w, "no executor session running for this task", http.StatusConflict)
+		return
+	}
+
+	// Live panes in the task window, in order.
+	out, err := s.runner.Output("tmux", "list-panes", "-t", target, "-F", "#{pane_id}")
+	if err != nil {
+		jsonErr(w, "failed to inspect task window", http.StatusInternalServerError)
+		return
+	}
+	panes := strings.Fields(strings.TrimSpace(string(out)))
+	for _, p := range panes {
+		if p == task.ShellPaneID {
+			// Shell pane already alive in the daemon window.
+			jsonOK(w, s.terminalInfo(task))
+			return
+		}
+	}
+
+	// Anchor the split on the executor pane when it lives in this window so
+	// the shell lands beside it; otherwise split the window itself.
+	splitTarget := target
+	claudePaneID := task.ClaudePaneID
+	claudeInWindow := false
+	for _, p := range panes {
+		if p == claudePaneID {
+			claudeInWindow = true
+			break
+		}
+	}
+	if claudeInWindow {
+		splitTarget = claudePaneID
+	} else if len(panes) > 0 {
+		claudePaneID = panes[0]
+		splitTarget = panes[0]
+	}
+
+	// User's shell so the pane doesn't exit immediately.
+	shell := os.Getenv("SHELL")
+	if shell == "" {
+		shell = "/bin/zsh"
+	}
+	args := []string{"split-window", "-h", "-d", "-P", "-F", "#{pane_id}", "-t", splitTarget}
+	if workdir := s.taskWorkdir(task); workdir != "" {
+		args = append(args, "-c", workdir)
+	}
+	args = append(args, shell)
+	out, err = s.runner.Output("tmux", args...)
+	if err != nil {
+		jsonErr(w, "failed to create shell pane: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	shellPaneID := strings.TrimSpace(string(out))
+	if shellPaneID == "" {
+		jsonErr(w, "failed to create shell pane", http.StatusInternalServerError)
+		return
+	}
+	_ = s.runner.Run("tmux", "select-pane", "-t", shellPaneID, "-T", "Shell")
+
+	// Task context env vars, matching what the TUI exports in its shell pane.
+	envCmd := fmt.Sprintf("export WORKTREE_TASK_ID=%d WORKTREE_PORT=%d WORKTREE_PATH=%q", task.ID, task.Port, task.WorktreePath)
+	_ = s.runner.Run("tmux", "send-keys", "-t", shellPaneID, envCmd, "Enter")
+	_ = s.runner.Run("tmux", "send-keys", "-t", shellPaneID, "clear", "Enter")
+
+	if err := s.db.UpdateTaskPaneIDs(task.ID, claudePaneID, shellPaneID); err == nil {
+		task.ClaudePaneID = claudePaneID
+		task.ShellPaneID = shellPaneID
 	}
 	jsonOK(w, s.terminalInfo(task))
 }

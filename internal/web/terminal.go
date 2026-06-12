@@ -22,6 +22,9 @@ var upgrader = websocket.Upgrader{
 // Input: forwards keyboard data via tmux send-keys.
 // The xterm.js terminal is sized to match the tmux pane (read-only size),
 // so the rendering matches what the TUI shows.
+//
+// By default the executor (Claude) pane is mirrored; ?pane=shell mirrors the
+// task's workdir shell pane instead (the GUI's Shell tab).
 func (s *Server) handleTerminal(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil {
@@ -36,6 +39,13 @@ func (s *Server) handleTerminal(w http.ResponseWriter, r *http.Request) {
 	}
 
 	paneID := task.ClaudePaneID
+	if r.URL.Query().Get("pane") == "shell" {
+		paneID = task.ShellPaneID
+		if paneID == "" {
+			http.Error(w, "task has no shell pane", http.StatusBadRequest)
+			return
+		}
+	}
 	if paneID == "" {
 		http.Error(w, "task has no executor pane", http.StatusBadRequest)
 		return
