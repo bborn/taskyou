@@ -47,17 +47,20 @@ struct AttachResult {
 
 /// Create a grouped tmux view of the task's daemon window and attach a real
 /// PTY client to it. Returns the PTY id streaming to `on_event`.
+/// `pane` (a tmux pane ID) optionally zooms the view onto a single pane —
+/// the Agent/Shell tabs each attach to their own pane.
 #[tauri::command]
 fn attach_task_terminal(
     manager: State<'_, PtyManager>,
     task_id: i64,
     daemon_session: String,
     window: String,
+    pane: Option<String>,
     cols: u16,
     rows: u16,
     on_event: Channel<PtyEvent>,
 ) -> Result<AttachResult, String> {
-    let plan = terminal::prepare_attach(task_id, &daemon_session, &window)?;
+    let plan = terminal::prepare_attach(task_id, &daemon_session, &window, pane.as_deref())?;
     let pty_id = manager.spawn(
         SpawnOptions {
             command: plan.command,
