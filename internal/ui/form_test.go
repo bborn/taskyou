@@ -94,9 +94,17 @@ func TestBodyHeightFillsAvailableSpace(t *testing.T) {
 
 			height := m.calculateBodyHeight()
 
-			// Body should fill available space (screen minus overhead)
-			// In advanced mode: boxChrome(6) + common(6) + advanced(10) = 22
-			expectedHeight := screenHeight - 22
+			// Body should fill available space (screen minus overhead).
+			// In advanced mode: boxChrome(6) + common(6) + advanced(10) plus
+			// 2 per visible conditional row (Effort/Permission/Worktree/Base
+			// branch) — mirror the model so the expectation tracks visibility.
+			overhead := 22
+			for _, f := range []FormField{FieldEffort, FieldPermission, FieldWorktree, FieldBaseBranch} {
+				if m.isFieldVisible(f) {
+					overhead += 2
+				}
+			}
+			expectedHeight := screenHeight - overhead
 			if expectedHeight < 8 {
 				expectedHeight = 8
 			}

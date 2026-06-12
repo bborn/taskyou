@@ -2272,6 +2272,17 @@ func (m *FormModel) calculateBodyHeight() int {
 		// Advanced adds: project(1+blank) + attachments(blank+label+input+blank=4) +
 		// type(1+blank) + executor(1+blank) = 10
 		modeOverhead = 10
+		// Attachment chips render one line each plus a help line.
+		if n := len(m.attachments); n > 0 {
+			modeOverhead += n + 1
+		}
+		// Conditional rows (Effort/Permission/Worktree/Base branch) each render
+		// as a selector line plus a blank when visible.
+		for _, f := range []FormField{FieldEffort, FieldPermission, FieldWorktree, FieldBaseBranch} {
+			if m.isFieldVisible(f) {
+				modeOverhead += 2
+			}
+		}
 	} else {
 		// Simple adds: blank + summary + blank(2) = 3
 		modeOverhead = 3
