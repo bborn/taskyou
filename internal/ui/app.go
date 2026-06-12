@@ -741,7 +741,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			if key, ok := msg.(tea.KeyMsg); ok && (key.String() == "esc" || key.String() == "ctrl+c") {
 				m.folderPicker = nil
-				m.welcomeView = NewWelcomeModel(m.width, m.height)
+				m.welcomeView = NewWelcomeModel(m.width, m.height, m.availableExecutors, tmuxAvailable())
 				m.currentView = ViewWelcome
 				return m, nil
 			}
@@ -884,7 +884,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// 2. No real projects yet (only "personal") and we're in a junk folder:
 			//    show the Welcome fork instead of dumping into a task form.
 			if m.shouldShowWelcomeFork(msg.tasks) {
-				m.welcomeView = NewWelcomeModel(m.width, m.height)
+				m.welcomeView = NewWelcomeModel(m.width, m.height, m.availableExecutors, tmuxAvailable())
 				m.previousView = m.currentView
 				m.currentView = ViewWelcome
 				return m, nil
