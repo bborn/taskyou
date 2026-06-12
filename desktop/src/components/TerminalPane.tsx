@@ -164,6 +164,9 @@ function TerminalSurface({
     const term = new Terminal({
       theme: currentXtermTheme(),
       allowTransparency: true,
+      // Unicode11Addon registers a UnicodeVersionProvider, which xterm still
+      // gates behind the proposed-API flag.
+      allowProposedApi: true,
       fontFamily:
         '"SF Mono", SFMono-Regular, ui-monospace, "Cascadia Code", "JetBrains Mono", Menlo, Monaco, "DejaVu Sans Mono", monospace',
       fontSize: 12.5,
