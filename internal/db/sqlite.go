@@ -297,6 +297,12 @@ func (db *DB) migrate() error {
 		`ALTER TABLE tasks ADD COLUMN effort_level TEXT DEFAULT ''`,
 
 		`ALTER TABLE tasks ADD COLUMN remote_control INTEGER DEFAULT 0`, // Whether to launch claude with --remote-control
+
+		// Per-task worktree override: "" inherits the project's use_worktrees setting,
+		// "worktree" forces a fresh worktree, "in-place" runs directly in the project dir
+		`ALTER TABLE tasks ADD COLUMN worktree_mode TEXT DEFAULT ''`,
+		// Git ref a new worktree branches from ("" = project's default branch)
+		`ALTER TABLE tasks ADD COLUMN base_branch TEXT DEFAULT ''`,
 	}
 
 	for _, m := range alterMigrations {
