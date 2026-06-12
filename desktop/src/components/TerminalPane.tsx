@@ -1,11 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
+import { SendHorizontal } from "lucide-react";
 import { api, apiBase } from "../api/client";
 import type { Task } from "../api/types";
 import { attachTaskTerminal, inTauri, ptyKill, ptyResize, ptyWrite } from "../tauri";
 import { store, useAppState } from "../store";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 
 type TermState =
   | { kind: "loading" }
@@ -86,6 +88,9 @@ export function TerminalPane({ task }: { task: Task }) {
   const wsRef = useRef<WebSocket | null>(null);
   const [state, setState] = useState<TermState>({ kind: "loading" });
   const [starting, setStarting] = useState(false);
+  const [composer, setComposer] = useState("");
+  const [sending, setSending] = useState(false);
+  const composerRef = useRef<HTMLInputElement>(null);
 
   const detach = useCallback((showExited = false) => {
     if (ptyIdRef.current !== null) {
@@ -277,6 +282,28 @@ export function TerminalPane({ task }: { task: Task }) {
     return () => clearInterval(id);
   }, [state.kind, task.id, task.status, attach]);
 
+  /** Composer: send a line to the agent via the server's input endpoint
+   * (tmux send-keys + Enter against the executor pane) — the same transport
+   * the WebSocket mirror uses for keystrokes, minus the fiddly xterm typing. */
+  async function sendComposer() {
+    const message = composer.trim();
+    if (!message || sending) return;
+    setSending(true);
+    try {
+      await api.sendInput(task.id, message);
+      setComposer("");
+    } catch (e) {
+      store.toast({
+        title: "Failed to send input",
+        body: e instanceof Error ? e.message : String(e),
+        kind: "error",
+      });
+    } finally {
+      setSending(false);
+      composerRef.current?.focus();
+    }
+  }
+
   async function startSession() {
     setStarting(true);
     try {
@@ -314,6 +341,45 @@ export function TerminalPane({ task }: { task: Task }) {
         ref={hostRef}
         style={{ display: state.kind === "attached" ? "block" : "none" }}
       />
+
+      {state.kind === "attached" && (
+        <form
+          className="flex shrink-0 items-center gap-1.5 border-t px-2 py-1.5"
+          onSubmit={(e) => {
+            e.preventDefault();
+            void sendComposer();
+          }}
+        >
+          <Input
+            ref={composerRef}
+            value={composer}
+            onChange={(e) => setComposer(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Escape") {
+                // Hand focus back to the terminal instead of letting the
+                // app-level Escape handler navigate away from the detail view.
+                e.preventDefault();
+                e.stopPropagation();
+                termRef.current?.focus();
+              }
+            }}
+            placeholder="Send input to terminal…"
+            spellCheck={false}
+            autoComplete="off"
+            className="h-7 flex-1 text-xs shadow-none md:text-xs"
+          />
+          <Button
+            type="submit"
+            variant="ghost"
+            size="icon"
+            className="size-7 shrink-0"
+            title="Send to terminal (Enter)"
+            disabled={sending || composer.trim() === ""}
+          >
+            <SendHorizontal className="size-3.5" />
+          </Button>
+        </form>
+      )}
 
       {state.kind !== "attached" && (
         <div className="flex flex-1 flex-col items-center justify-center gap-2.5 text-muted-foreground">
