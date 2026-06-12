@@ -1889,7 +1889,7 @@ func (m *FormModel) View() string {
 			}
 		}
 		b.WriteString(cursor + " " + labelStyle.Render("Type") + m.renderSelector(typeLabels, m.typeIdx, m.focused == FieldType, selectedStyle, optionStyle, dimStyle))
-		b.WriteString("\n\n")
+		b.WriteString("\n")
 
 		// Executor selector
 		cursor = " "
@@ -1897,7 +1897,7 @@ func (m *FormModel) View() string {
 			cursor = cursorStyle.Render("▸")
 		}
 		b.WriteString(cursor + " " + labelStyle.Render("Executor") + m.renderSelector(m.executors, m.executorIdx, m.focused == FieldExecutor, selectedStyle, optionStyle, dimStyle))
-		b.WriteString("\n\n")
+		b.WriteString("\n")
 
 		// Effort selector (Claude-specific; only shown for the Claude executor)
 		if m.isFieldVisible(FieldEffort) {
@@ -1915,7 +1915,7 @@ func (m *FormModel) View() string {
 				}
 			}
 			b.WriteString(cursor + " " + labelStyle.Render("Effort") + m.renderSelector(effortLabels, m.effortIdx, m.focused == FieldEffort, selectedStyle, optionStyle, dimStyle))
-			b.WriteString("\n\n")
+			b.WriteString("\n")
 		}
 
 		// Permission selector
@@ -1925,8 +1925,11 @@ func (m *FormModel) View() string {
 				cursor = cursorStyle.Render("▸")
 			}
 			b.WriteString(cursor + " " + labelStyle.Render("Permission") + m.renderSelector(m.permissionModes, m.permissionIdx, m.focused == FieldPermission, selectedStyle, optionStyle, dimStyle))
-			b.WriteString("\n\n")
+			b.WriteString("\n")
 		}
+
+		// Trailing gap to separate the selector list from the help line.
+		b.WriteString("\n")
 	} else {
 		// Show compact summary of defaults and toggle hint
 		b.WriteString("\n")
@@ -1995,19 +1998,34 @@ func (m *FormModel) View() string {
 	return box.Render(b.String())
 }
 
+// renderSelector renders a single-choice field. When the field is not focused
+// it collapses to just the chosen value wrapped in dim ‹ › chevrons, so the
+// form reads like a calm settings list instead of a wall of options. When the
+// field is focused it expands into the full segmented control, putting every
+// option one keystroke away.
 func (m *FormModel) renderSelector(options []string, selected int, focused bool, selectedStyle, optionStyle, dimStyle lipgloss.Style) string {
-	var parts []string
-	for i, opt := range options {
-		label := opt
-		if label == "" {
-			label = "none"
+	labelFor := func(i int) string {
+		if i < 0 || i >= len(options) {
+			return ""
 		}
+		if options[i] == "" {
+			return "none"
+		}
+		return options[i]
+	}
+
+	// Collapsed: show only the current value with a stepper affordance.
+	if !focused {
+		value := optionStyle.Bold(true).Render(labelFor(selected))
+		return dimStyle.Render("‹ ") + value + dimStyle.Render(" ›")
+	}
+
+	// Expanded: full segmented control for the focused field.
+	var parts []string
+	for i := range options {
+		label := labelFor(i)
 		if i == selected {
-			if focused {
-				parts = append(parts, selectedStyle.Render(" "+label+" "))
-			} else {
-				parts = append(parts, optionStyle.Bold(true).Render(label))
-			}
+			parts = append(parts, selectedStyle.Render(" "+label+" "))
 		} else {
 			parts = append(parts, dimStyle.Render(label))
 		}
