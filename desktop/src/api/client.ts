@@ -78,6 +78,8 @@ export const api = {
     pinned?: boolean;
     permission_mode?: string;
     tags?: string;
+    worktree_mode?: string;
+    base_branch?: string;
   }) => request<Task>("POST", "/api/tasks", task),
   updateTask: (
     id: number,
@@ -93,6 +95,8 @@ export const api = {
         | "pinned"
         | "permission_mode"
         | "effort_level"
+        | "worktree_mode"
+        | "base_branch"
       >
     >,
   ) => request<Task>("PATCH", `/api/tasks/${id}`, patch),

@@ -156,6 +156,37 @@ func TestHandleCreateTask(t *testing.T) {
 	}
 }
 
+func TestHandleCreateTask_WorktreeFields(t *testing.T) {
+	srv, database, _ := setupServer(t)
+
+	body := `{"title":"Override task","type":"code","project":"personal","worktree_mode":"in-place","base_branch":"release/2.0"}`
+	req := httptest.NewRequest("POST", "/api/tasks", strings.NewReader(body))
+	w := httptest.NewRecorder()
+	srv.handleCreateTask(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var task taskJSON
+	json.NewDecoder(w.Body).Decode(&task)
+	if task.WorktreeMode != db.WorktreeModeInPlace {
+		t.Errorf("worktree_mode = %q, want %q", task.WorktreeMode, db.WorktreeModeInPlace)
+	}
+	if task.BaseBranch != "release/2.0" {
+		t.Errorf("base_branch = %q, want %q", task.BaseBranch, "release/2.0")
+	}
+
+	stored, err := database.GetTask(task.ID)
+	if err != nil || stored == nil {
+		t.Fatalf("get stored task: %v", err)
+	}
+	if stored.WorktreeMode != db.WorktreeModeInPlace || stored.BaseBranch != "release/2.0" {
+		t.Errorf("stored worktree fields = %q/%q, want in-place/release/2.0",
+			stored.WorktreeMode, stored.BaseBranch)
+	}
+}
+
 func TestHandleCreateTask_Empty(t *testing.T) {
 	srv, _, _ := setupServer(t)
 

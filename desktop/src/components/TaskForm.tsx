@@ -47,6 +47,12 @@ const PERMISSION_MODES = [
 
 const EFFORT_LEVELS = [NONE, "low", "medium", "high"];
 
+const WORKTREE_MODES = [
+  { value: NONE, label: "Project default" },
+  { value: "worktree", label: "Worktree" },
+  { value: "in-place", label: "In place" },
+];
+
 export function TaskForm({ form }: { form: NonNullable<FormState> }) {
   const { projects, types, executors, tasks, permissionMode } = useAppState();
   const editing = form.kind === "edit" ? tasks.find((t) => t.id === form.taskId) : null;
@@ -62,6 +68,8 @@ export function TaskForm({ form }: { form: NonNullable<FormState> }) {
   const [permission, setPermission] = useState(
     editing && editing.permission_mode !== "default" ? editing.permission_mode : permissionMode,
   );
+  const [worktreeMode, setWorktreeMode] = useState(editing?.worktree_mode ?? "");
+  const [baseBranch, setBaseBranch] = useState(editing?.base_branch ?? "");
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [files, setFiles] = useState<File[]>([]);
   const [executeNow, setExecuteNow] = useState(false);
@@ -70,6 +78,13 @@ export function TaskForm({ form }: { form: NonNullable<FormState> }) {
 
   const titleRef = useRef<HTMLInputElement>(null);
   const ghostTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Base branch only applies when a fresh worktree will be created: forced per
+  // task, or inherited from a project with worktrees enabled.
+  const projectUsesWorktrees = projects.find((p) => p.name === project)?.use_worktrees !== false;
+  const baseBranchRelevant =
+    worktreeMode === "worktree" || (worktreeMode === "" && projectUsesWorktrees);
+  const effectiveBaseBranch = baseBranchRelevant ? baseBranch.trim() : "";
 
   // Ghost-text autocomplete on the title, debounced; best-effort.
   function onTitleChange(value: string) {
@@ -109,6 +124,8 @@ export function TaskForm({ form }: { form: NonNullable<FormState> }) {
           executor,
           execute: executeNow || dangerous,
           permission_mode: dangerous ? "dangerous" : permission,
+          worktree_mode: worktreeMode,
+          base_branch: effectiveBaseBranch,
         });
         if (effort) await api.updateTask(created.id, { effort_level: effort }).catch(() => {});
         for (const file of files) {
@@ -125,6 +142,8 @@ export function TaskForm({ form }: { form: NonNullable<FormState> }) {
           executor,
           effort_level: effort,
           permission_mode: permission,
+          worktree_mode: worktreeMode,
+          base_branch: effectiveBaseBranch,
         });
         for (const file of files) {
           const data = await fileToBase64(file);
@@ -296,6 +315,31 @@ export function TaskForm({ form }: { form: NonNullable<FormState> }) {
           </button>
           {showAdvanced && (
             <div className="grid grid-cols-2 gap-3.5">
+              <div className="grid gap-1.5">
+                <Label>Worktree</Label>
+                <Select value={toSelect(worktreeMode)} onValueChange={(v) => setWorktreeMode(fromSelect(v))}>
+                  <SelectTrigger className="w-full">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {WORKTREE_MODES.map((m) => (
+                      <SelectItem key={m.value} value={m.value}>
+                        {m.label}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+              {baseBranchRelevant && (
+                <div className="grid gap-1.5">
+                  <Label>Base branch</Label>
+                  <Input
+                    value={baseBranch}
+                    placeholder="Default branch if empty"
+                    onChange={(e) => setBaseBranch(e.target.value)}
+                  />
+                </div>
+              )}
               <div className="grid gap-1.5">
                 <Label>Effort</Label>
                 <Select value={toSelect(effort)} onValueChange={(v) => setEffort(fromSelect(v))}>

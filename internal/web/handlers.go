@@ -125,6 +125,8 @@ type createTaskRequest struct {
 	Tags           string `json:"tags"`
 	Pinned         bool   `json:"pinned"`
 	PermissionMode string `json:"permission_mode"`
+	WorktreeMode   string `json:"worktree_mode"`
+	BaseBranch     string `json:"base_branch"`
 }
 
 func (s *Server) handleCreateTask(w http.ResponseWriter, r *http.Request) {
@@ -171,6 +173,8 @@ func (s *Server) handleCreateTask(w http.ResponseWriter, r *http.Request) {
 		Tags:           req.Tags,
 		Pinned:         req.Pinned,
 		PermissionMode: db.NormalizePermissionMode(req.PermissionMode),
+		WorktreeMode:   db.NormalizeWorktreeMode(req.WorktreeMode),
+		BaseBranch:     req.BaseBranch,
 	}
 
 	if err := s.db.CreateTask(task); err != nil {
@@ -215,6 +219,8 @@ type updateTaskRequest struct {
 	Pinned         *bool   `json:"pinned"`
 	PermissionMode *string `json:"permission_mode"`
 	EffortLevel    *string `json:"effort_level"`
+	WorktreeMode   *string `json:"worktree_mode"`
+	BaseBranch     *string `json:"base_branch"`
 }
 
 func (s *Server) handleUpdateTask(w http.ResponseWriter, r *http.Request) {
@@ -259,6 +265,12 @@ func (s *Server) handleUpdateTask(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.EffortLevel != nil {
 		task.EffortLevel = *req.EffortLevel
+	}
+	if req.WorktreeMode != nil {
+		task.WorktreeMode = db.NormalizeWorktreeMode(*req.WorktreeMode)
+	}
+	if req.BaseBranch != nil {
+		task.BaseBranch = *req.BaseBranch
 	}
 
 	if err := s.db.UpdateTask(task); err != nil {
@@ -1043,6 +1055,8 @@ type taskJSON struct {
 	HasExecutor    bool   `json:"has_executor"`
 	EffortLevel    string `json:"effort_level,omitempty"`
 	SourceBranch   string `json:"source_branch,omitempty"`
+	WorktreeMode   string `json:"worktree_mode,omitempty"`
+	BaseBranch     string `json:"base_branch,omitempty"`
 	DaemonSession  string `json:"daemon_session,omitempty"`
 	TmuxWindowID   string `json:"tmux_window_id,omitempty"`
 	ClaudePaneID   string `json:"claude_pane_id,omitempty"`
@@ -1081,6 +1095,8 @@ func toTaskJSON(t *db.Task) *taskJSON {
 		HasExecutor:    t.ClaudePaneID != "",
 		EffortLevel:    t.EffortLevel,
 		SourceBranch:   t.SourceBranch,
+		WorktreeMode:   t.WorktreeMode,
+		BaseBranch:     t.BaseBranch,
 		DaemonSession:  t.DaemonSession,
 		TmuxWindowID:   t.TmuxWindowID,
 		ClaudePaneID:   t.ClaudePaneID,

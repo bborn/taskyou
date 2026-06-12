@@ -23,6 +23,8 @@ export interface Task {
   has_executor: boolean;
   effort_level?: string;
   source_branch?: string;
+  worktree_mode?: string;
+  base_branch?: string;
   daemon_session?: string;
   tmux_window_id?: string;
   claude_pane_id?: string;
