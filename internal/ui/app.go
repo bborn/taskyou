@@ -4940,16 +4940,26 @@ func (m *AppModel) refreshAllPRs() tea.Cmd {
 		// Fetch PRs for each repo sequentially (avoids memory spikes)
 		for repoDir, tasks := range repoTasksCopy {
 			prsByBranch := github.FetchAllPRsForRepo(repoDir)
-			if prsByBranch != nil {
-				// Update cache with batch results
-				prCache.UpdateCacheForRepo(repoDir, prsByBranch)
+			if prsByBranch == nil {
+				// nil signals rate-limit/throttle — keep cached state, skip this repo.
+				continue
+			}
+			// Update cache with batch results
+			prCache.UpdateCacheForRepo(repoDir, prsByBranch)
 
-				// Create messages for tasks in this repo.
-				// We don't fall back to individual fetches here — if a branch wasn't
-				// in the batch results, there's no open/recent PR for it. Individual
-				// lookups are done on-demand in fetchPRInfo (detail view) instead.
-				for _, task := range tasks {
-					info := prsByBranch[task.BranchName]
+			// Create messages for tasks in this repo. The batch lists only OPEN
+			// PRs, so a task with a known PR number whose branch is absent has
+			// merged or closed — reconcile its terminal state with one targeted
+			// fetch. Without this, merged/closed PRs stay frozen at OPEN on the
+			// board. Bypass the cache so a stale OPEN entry from the prior batch
+			// can't mask the transition.
+			for _, task := range tasks {
+				info := prsByBranch[task.BranchName]
+				if info == nil && github.NeedsReconcile(prsByBranch, task.BranchName, task.PRNumber) {
+					prCache.InvalidateCache(repoDir, task.BranchName)
+					info = prCache.GetPRForBranch(repoDir, task.BranchName)
+				}
+				if info != nil {
 					results = append(results, prInfoMsg{taskID: task.ID, info: info})
 				}
 			}

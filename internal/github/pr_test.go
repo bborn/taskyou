@@ -347,3 +347,36 @@ func TestPRCacheInvalidate(t *testing.T) {
 		t.Error("cache should be empty after invalidation")
 	}
 }
+
+func TestNeedsReconcile(t *testing.T) {
+	open := map[string]*PRInfo{
+		"feature/open-pr": {Number: 10, State: PRStateOpen},
+	}
+
+	cases := []struct {
+		name   string
+		branch string
+		number int
+		want   bool
+	}{
+		// A known PR whose branch is absent from the open batch has merged or
+		// closed — it must be reconciled. This is the bug we are guarding against:
+		// merged PRs were left frozen at OPEN because the batch (open-only) can't
+		// see them and nothing fetched their terminal state.
+		{"merged/closed PR no longer open", "task/3970-universal-cart", 3162, true},
+		// Still open and present in the batch — already covered, no extra fetch.
+		{"still-open PR in batch", "feature/open-pr", 10, false},
+		// No PR was ever associated — never spend a lookup on it.
+		{"no PR number", "task/no-pr", 0, false},
+		// Defensive: a blank branch can't be looked up.
+		{"empty branch", "", 99, false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := NeedsReconcile(open, tc.branch, tc.number); got != tc.want {
+				t.Errorf("NeedsReconcile(%q, %d) = %v, want %v", tc.branch, tc.number, got, tc.want)
+			}
+		})
+	}
+}

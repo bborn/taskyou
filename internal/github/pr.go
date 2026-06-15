@@ -342,8 +342,32 @@ func graphQLRateLimitRemaining() int {
 // at the higher graphQLLowThreshold (500) in auth.go — see that constant for the rationale.
 const rateLimitThreshold = 200
 
-// FetchAllPRsForRepo fetches all open and recently merged PRs for a repo in a single API call.
-// Returns a map of branch name -> PRInfo. This is much more efficient than fetching per-branch.
+// NeedsReconcile reports whether a task's PR state must be reconciled with a
+// targeted per-branch lookup.
+//
+// FetchAllPRsForRepo only lists OPEN PRs, so a branch that is absent from that
+// batch but for which we already know a PR number has necessarily left the open
+// set — it merged or closed. The batch can't see that transition, so the caller
+// must fetch the branch individually to learn its terminal state. Without this,
+// merged/closed PRs stay frozen at their last-seen OPEN state on the board.
+func NeedsReconcile(openPRs map[string]*PRInfo, branchName string, prNumber int) bool {
+	if branchName == "" || prNumber <= 0 {
+		return false
+	}
+	_, stillOpen := openPRs[branchName]
+	return !stillOpen
+}
+
+// FetchAllPRsForRepo fetches all open PRs for a repo in a single API call.
+// Returns a map of branch name -> PRInfo. This is much more efficient than
+// fetching per-branch.
+//
+// Only OPEN PRs are listed. Merged/closed transitions are not discoverable here
+// (a merged PR is simply absent); callers detect those via NeedsReconcile and a
+// targeted GetPRForBranch lookup. An earlier version fetched the 5 most recently
+// merged PRs to catch merges, but that window is far too small for busy repos
+// (dozens of merges between ticks) and gh sorts that list by PR number, not merge
+// time — so most merges were silently missed.
 func FetchAllPRsForRepo(repoDir string) map[string]*PRInfo {
 	if _, err := exec.LookPath("gh"); err != nil {
 		return nil
@@ -389,34 +413,6 @@ func FetchAllPRsForRepo(repoDir string) map[string]*PRInfo {
 		info := parsePRListResponse(&pr)
 		if info != nil && pr.HeadRefName != "" {
 			result[pr.HeadRefName] = info
-		}
-	}
-
-	// Also fetch recently merged PRs (last 5) to catch merges.
-	// We skip closed (non-merged) PRs entirely — they rarely change and
-	// individual lookups via GetPRForBranch handle them on demand.
-	ctx2, cancel2 := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel2()
-
-	cmd2 := exec.CommandContext(ctx2, "gh", "pr", "list",
-		"--state", "merged",
-		"--json", "number,url,state,isDraft,title,headRefName,mergeable,updatedAt,additions,deletions",
-		"--limit", "5")
-	cmd2.Dir = repoDir
-
-	output2, err2 := cmd2.Output()
-	if err2 == nil {
-		var mergedPRs []ghPRListResponse
-		if json.Unmarshal(output2, &mergedPRs) == nil {
-			for _, pr := range mergedPRs {
-				// Only add if not already present (open PR takes precedence)
-				if _, exists := result[pr.HeadRefName]; !exists && pr.HeadRefName != "" {
-					info := parsePRListResponse(&pr)
-					if info != nil {
-						result[pr.HeadRefName] = info
-					}
-				}
-			}
 		}
 	}
 
