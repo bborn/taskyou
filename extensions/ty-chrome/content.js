@@ -30,6 +30,7 @@
     .toolbar button {
       border: 0; border-radius: 999px; padding: 6px 12px; cursor: pointer;
       background: #1f2937; color: #f9fafb; font-size: 13px;
+      touch-action: manipulation;
     }
     .toolbar button:hover { background: #374151; }
     .toolbar button.active { background: ${TEAL}; color: #fff; }
@@ -44,10 +45,11 @@
       background: ${TEAL}; color: #fff; font-size: 12px; font-weight: 700;
       display: flex; align-items: center; justify-content: center;
       box-shadow: 0 1px 4px rgba(0,0,0,.4); cursor: pointer; user-select: none;
+      touch-action: none;
     }
-    .region { position: absolute; border: 2px dashed ${TEAL}; background: rgba(208,80,16,.12); border-radius: 2px; }
+    .region { position: absolute; border: 2px dashed ${TEAL}; background: rgba(208,80,16,.12); border-radius: 2px; touch-action: none; }
     .dragrect { position: fixed; border: 2px dashed ${TEAL}; background: rgba(208,80,16,.12); display: none; }
-    .boxlayer { position: fixed; inset: 0; cursor: crosshair; }
+    .boxlayer { position: fixed; inset: 0; cursor: crosshair; touch-action: none; }
     .popover {
       position: fixed; width: 260px; background: #fff; border-radius: 10px;
       box-shadow: 0 8px 30px rgba(0,0,0,.3); padding: 10px; font-size: 13px; color: #111827;
@@ -57,7 +59,7 @@
       padding: 6px; font-size: 13px; resize: vertical; outline-color: ${TEAL};
     }
     .popover .row { display: flex; justify-content: flex-end; gap: 6px; margin-top: 8px; }
-    .popover button { border: 0; border-radius: 6px; padding: 5px 12px; cursor: pointer; font-size: 13px; }
+    .popover button { border: 0; border-radius: 6px; padding: 5px 12px; cursor: pointer; font-size: 13px; touch-action: manipulation; }
     .popover .save { background: ${TEAL}; color: #fff; }
     .popover .cancel { background: #e5e7eb; }
     .popover .del { background: #fee2e2; color: #b91c1c; margin-right: auto; }
@@ -134,7 +136,10 @@
   }
 
   // Select mode: hover highlight + capture-phase click interception.
-  function onMouseOver(e) {
+  // Driven by pointer events so it also tracks under Chrome's mobile/touch
+  // emulation (where mouseover never fires). On touch the finger position is
+  // the "hover" target while pressed; a tap still resolves to a click below.
+  function onPointerHover(e) {
     if (mode !== 'select') return;
     const t = realTarget(e);
     if (!t) return;
@@ -162,7 +167,8 @@
     const t = e.target;
     return t && t.nodeType === 1 ? t : null;
   }
-  document.addEventListener('mouseover', onMouseOver, true);
+  document.addEventListener('pointermove', onPointerHover, true);
+  document.addEventListener('pointerover', onPointerHover, true);
   document.addEventListener('click', onClick, true);
 
   // Shortcuts while the overlay is up: S/B/N switch modes, Esc exits,
@@ -194,17 +200,23 @@
     e.stopPropagation();
   }, true);
 
-  // Box mode drag handling.
+  // Box mode drag handling. Pointer events (not mouse) so the drag works with
+  // a touch/pen as well as a mouse — Chrome's mobile responsive emulation
+  // dispatches pointer/touch, not mouse, events. Pointer capture keeps the
+  // gesture bound to the layer even if it leaves the surface; touch-action:none
+  // (set in CSS) stops the browser stealing the drag to scroll/zoom.
   let dragStart = null;
-  boxLayer.addEventListener('mousedown', (e) => {
+  boxLayer.addEventListener('pointerdown', (e) => {
+    e.preventDefault();
+    boxLayer.setPointerCapture?.(e.pointerId);
     dragStart = { x: e.clientX, y: e.clientY };
     dragRect.style.display = 'block';
     sizeDragRect(e);
   });
-  boxLayer.addEventListener('mousemove', (e) => {
+  boxLayer.addEventListener('pointermove', (e) => {
     if (dragStart) sizeDragRect(e);
   });
-  boxLayer.addEventListener('mouseup', (e) => {
+  boxLayer.addEventListener('pointerup', (e) => {
     if (!dragStart) return;
     const r = normRect(dragStart, { x: e.clientX, y: e.clientY });
     dragStart = null;
@@ -311,10 +323,15 @@
       h.style.cssText = `position:absolute;width:12px;height:12px;background:#fff;border:2px solid ${TEAL};border-radius:50%;${pos}`;
       box.appendChild(h);
     }
-    box.addEventListener('mousedown', (e) => {
+    // Pointer events (not mouse) so move/resize works with touch + pen under
+    // Chrome's mobile emulation. Pointer capture routes the move/up stream to
+    // the box even when the pointer leaves it; touch-action:none (CSS) stops
+    // the gesture being consumed as a page scroll.
+    box.addEventListener('pointerdown', (e) => {
       e.preventDefault();
       e.stopPropagation();
       const corner = e.target.dataset?.corner || '';
+      box.setPointerCapture?.(e.pointerId);
       const start = {
         sx: e.clientX, sy: e.clientY,
         x: parseFloat(box.style.left), y: parseFloat(box.style.top),
@@ -336,11 +353,11 @@
         Object.assign(box.style, { left: x + 'px', top: y + 'px', width: w + 'px', height: h + 'px' });
       };
       const onUp = () => {
-        document.removeEventListener('mousemove', onMove, true);
-        document.removeEventListener('mouseup', onUp, true);
+        document.removeEventListener('pointermove', onMove, true);
+        document.removeEventListener('pointerup', onUp, true);
       };
-      document.addEventListener('mousemove', onMove, true);
-      document.addEventListener('mouseup', onUp, true);
+      document.addEventListener('pointermove', onMove, true);
+      document.addEventListener('pointerup', onUp, true);
     });
   }
 
