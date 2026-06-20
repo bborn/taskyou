@@ -57,7 +57,11 @@ jobs:
           check-latest: true  # use the newest released 1.25.x, not a stale cached patch, so stdlib CVE fixes (e.g. 1.25.11) are present
 
       - name: Install govulncheck
-        run: go install golang.org/x/vuln/cmd/govulncheck@latest
+        # Pinned: v1.4.0 (2026-06-17) bundles golang.org/x/tools@v0.46.0, whose SSA
+        # callgraph pass panics on Go generics ("ForEachElement called on type
+        # containing *types.TypeParam"), failing every run. @latest silently broke
+        # CI the day v1.4.0 shipped. Pin until a fixed release is out.
+        run: go install golang.org/x/vuln/cmd/govulncheck@v1.3.0
 
       - name: Run govulncheck
         run: govulncheck ./...
