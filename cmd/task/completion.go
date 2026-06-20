@@ -115,6 +115,8 @@ func completeSettingKeys(cmd *cobra.Command, args []string, toComplete string) (
 			"anthropic_api_key\tAPI key for ghost text autocomplete",
 			"autocomplete_enabled\tEnable/disable ghost text (true/false)",
 			"idle_suspend_timeout\tIdle timeout before suspending (e.g. 6h)",
+			"http_api_port\tPort for the daemon-hosted HTTP API (default 8080)",
+			"http_api_disabled\tDisable the daemon-hosted HTTP API (true/false)",
 		}, cobra.ShellCompDirectiveNoFileComp
 	}
 	return nil, cobra.ShellCompDirectiveNoFileComp

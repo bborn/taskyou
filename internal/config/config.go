@@ -24,7 +24,17 @@ const (
 	SettingIdleSuspendTimeout    = "idle_suspend_timeout"
 	SettingServerURL             = "server_url"
 	SettingWorktreeCleanupMaxAge = "worktree_cleanup_max_age"
+	// SettingHTTPAPIPort is the port the daemon-hosted HTTP API listens on.
+	SettingHTTPAPIPort = "http_api_port"
+	// SettingHTTPAPIDisabled, when "true", stops the daemon from hosting the
+	// HTTP API (for headless/security-sensitive boxes). The API is on by default.
+	SettingHTTPAPIDisabled = "http_api_disabled"
 )
+
+// DefaultHTTPAPIPort is the port the daemon-hosted HTTP API binds by default.
+// Matches the standalone `ty serve` default so existing clients (ty-web, the
+// ty-chrome extension) keep working without reconfiguration.
+const DefaultHTTPAPIPort = 8080
 
 // DefaultServerURL is the default base URL for opening tasks in the browser.
 const DefaultServerURL = "http://localhost"
