@@ -721,6 +721,39 @@ func (db *DB) UpdateTaskPRInfo(taskID int64, prURL string, prNumber int, prInfoJ
 	return nil
 }
 
+// prAutoDoneLineType is the task_logs line_type used to record that a specific PR
+// already drove a task to 'done'. It is an internal marker (not shown in the UI)
+// that makes auto-completion idempotent: once a task has been auto-completed for
+// PR #N, reopening the task and finishing again against that same merged/closed PR
+// must NOT bounce it straight back to 'done'. A genuinely new PR (different number)
+// is not marked, so it can still auto-complete when it merges.
+const prAutoDoneLineType = "pr_done_marker"
+
+// MarkPRAutoCompleted records that PR #prNumber has auto-completed this task, so a
+// later reconcile pass won't re-complete the task for the same PR after a human
+// reopens it to keep working.
+func (db *DB) MarkPRAutoCompleted(taskID int64, prNumber int) error {
+	return db.AppendTaskLog(taskID, prAutoDoneLineType, fmt.Sprintf("%d", prNumber))
+}
+
+// WasPRAutoCompleted reports whether PR #prNumber has already auto-completed this
+// task in a prior reconcile pass.
+func (db *DB) WasPRAutoCompleted(taskID int64, prNumber int) (bool, error) {
+	var exists int
+	err := db.QueryRow(`
+		SELECT 1 FROM task_logs
+		WHERE task_id = ? AND line_type = ? AND content = ?
+		LIMIT 1
+	`, taskID, prAutoDoneLineType, fmt.Sprintf("%d", prNumber)).Scan(&exists)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("query pr auto-done marker: %w", err)
+	}
+	return true, nil
+}
+
 // UpdateTaskClaudeSessionID updates only the Claude session ID for a task.
 func (db *DB) UpdateTaskClaudeSessionID(taskID int64, sessionID string) error {
 	_, err := db.Exec(`
