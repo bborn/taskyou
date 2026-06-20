@@ -2354,7 +2354,9 @@ Available settings:
   anthropic_api_key     API key for ghost text autocomplete (uses Anthropic API
                         directly for speed). Get yours at console.anthropic.com
   autocomplete_enabled  Enable/disable ghost text autocomplete (true/false)
-  idle_suspend_timeout  How long blocked tasks wait before suspending (e.g. 6h, 30m, 24h)`,
+  idle_suspend_timeout  How long blocked tasks wait before suspending (e.g. 6h, 30m, 24h)
+  http_api_port         Port the daemon-hosted HTTP API listens on (default 8080)
+  http_api_disabled     Stop the daemon from hosting the HTTP API (true/false)`,
 		Args: cobra.ExactArgs(2),
 		Run: func(cmd *cobra.Command, args []string) {
 			key := args[0]
@@ -2377,9 +2379,19 @@ Available settings:
 					fmt.Println(errorStyle.Render("Invalid duration format. Examples: 6h, 30m, 24h, 1h30m"))
 					return
 				}
+			case config.SettingHTTPAPIPort:
+				if p, err := strconv.Atoi(value); err != nil || p < 1 || p > 65535 {
+					fmt.Println(errorStyle.Render("Value must be a port number between 1 and 65535"))
+					return
+				}
+			case config.SettingHTTPAPIDisabled:
+				if value != "true" && value != "false" {
+					fmt.Println(errorStyle.Render("Value must be 'true' or 'false'"))
+					return
+				}
 			default:
 				fmt.Println(errorStyle.Render("Unknown setting: " + key))
-				fmt.Println(dimStyle.Render("Available: anthropic_api_key, autocomplete_enabled, idle_suspend_timeout"))
+				fmt.Println(dimStyle.Render("Available: anthropic_api_key, autocomplete_enabled, idle_suspend_timeout, http_api_port, http_api_disabled"))
 				return
 			}
 
@@ -4009,6 +4021,12 @@ func runDaemon() error {
 
 	logger.Info("Executor started, waiting for tasks...")
 
+	// Host the HTTP API in-process so external clients (ty-web, the ty-chrome
+	// extension) can reach it whenever the daemon is up — no separate `ty serve`
+	// needed. Failures here (e.g. port already bound) are logged but never bring
+	// down the executor; the daemon's job is running tasks first and foremost.
+	httpSrv := startDaemonHTTPAPI(database, exec, logger)
+
 	// Handle signals
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
@@ -4016,9 +4034,60 @@ func runDaemon() error {
 	// Wait for signal
 	sig := <-sigCh
 	logger.Info("Received signal, shutting down", "signal", sig)
+	if httpSrv != nil {
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		httpSrv.Shutdown(shutdownCtx)
+		shutdownCancel()
+	}
 	exec.Stop()
 
 	return nil
+}
+
+// startDaemonHTTPAPI launches the HTTP API server in a background goroutine,
+// reusing the daemon's already-running executor for session bootstrap. It
+// returns the server so the caller can shut it down gracefully, or nil if the
+// API is disabled. A bind failure is logged and tolerated — it must never stop
+// the daemon from executing tasks.
+func startDaemonHTTPAPI(database *db.DB, exec *executor.Executor, logger *log.Logger) *web.Server {
+	if disabled, _ := database.GetSetting(config.SettingHTTPAPIDisabled); disabled == "true" {
+		logger.Info("HTTP API disabled via setting", "key", config.SettingHTTPAPIDisabled)
+		return nil
+	}
+
+	port := config.DefaultHTTPAPIPort
+	if v, _ := database.GetSetting(config.SettingHTTPAPIPort); v != "" {
+		if p, err := strconv.Atoi(v); err == nil && p > 0 {
+			port = p
+		} else {
+			logger.Warn("Invalid HTTP API port setting, using default", "value", v, "default", port)
+		}
+	}
+
+	srv := web.New(web.Config{
+		Addr:      fmt.Sprintf(":%d", port),
+		DB:        database,
+		CmdRunner: &execCommandRunner{},
+		Sessions:  exec,
+	})
+
+	go func() {
+		// Belt-and-suspenders: a panic outside an HTTP handler (net/http already
+		// recovers per-request panics) must not take down the executor.
+		defer func() {
+			if r := recover(); r != nil {
+				logger.Error("HTTP API goroutine panicked; executor continues", "panic", r)
+			}
+		}()
+		if err := srv.Start(); err != nil {
+			// Most commonly "address already in use" (e.g. a stale `ty serve`).
+			// The executor keeps running regardless.
+			logger.Warn("HTTP API not started", "error", err)
+		}
+	}()
+
+	logger.Info("HTTP API listening", "port", port)
+	return srv
 }
 
 // ClaudeHookInput is the JSON structure Claude sends to hooks via stdin.
