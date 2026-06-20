@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/bborn/workflow/internal/db"
+	"github.com/bborn/workflow/internal/github"
 	"github.com/bborn/workflow/internal/spotlight"
 	"github.com/bborn/workflow/internal/tasksummary"
 )
@@ -49,6 +50,28 @@ func NewServer(database *db.DB, taskID int64) *Server {
 func (s *Server) SetCallbacks(onComplete func(), onNeedsInput func(question string)) {
 	s.onComplete = onComplete
 	s.onNeedsInput = onNeedsInput
+}
+
+// lookupPR returns the PR number and URL associated with the task's branch, or
+// (0, "") if the task has no PR. It prefers a live `gh` lookup — the agent often
+// opens the PR moments before calling taskyou_complete, so the DB copy is stale —
+// and persists any fresh result so the board and the daemon reconciler both see
+// it. Falls back to whatever PR info is already stored on the task.
+func (s *Server) lookupPR(task *db.Task) (int, string) {
+	if task == nil {
+		return 0, ""
+	}
+	if task.BranchName != "" {
+		repoDir := task.WorktreePath
+		if repoDir == "" {
+			repoDir, _ = os.Getwd()
+		}
+		if info := github.NewPRCache().GetPRForBranch(repoDir, task.BranchName); info != nil {
+			_ = s.db.UpdateTaskPRInfo(task.ID, info.URL, info.Number, github.MarshalPRInfo(info))
+			return info.Number, info.URL
+		}
+	}
+	return task.PRNumber, task.PRURL
 }
 
 // JSON-RPC types
@@ -313,23 +336,54 @@ func (s *Server) handleToolCall(id interface{}, params *toolCallParams) {
 	case "taskyou_complete":
 		summary, _ := params.Arguments["summary"].(string)
 
+		task, _ := s.db.GetTask(s.taskID)
+
 		// Check if we should remind about saving project context
 		var contextReminder string
-		if s.contextWasEmpty {
-			// Check if context is still empty
-			if task, err := s.db.GetTask(s.taskID); err == nil && task != nil && task.Project != "" {
-				if ctx, err := s.db.GetProjectContext(task.Project); err == nil && ctx == "" {
-					contextReminder = "\n\n⚠️ REMINDER: You explored this codebase but didn't save project context. Consider calling taskyou_set_project_context to help future tasks skip exploration."
-				}
+		if s.contextWasEmpty && task != nil && task.Project != "" {
+			if ctx, err := s.db.GetProjectContext(task.Project); err == nil && ctx == "" {
+				contextReminder = "\n\n⚠️ REMINDER: You explored this codebase but didn't save project context. Consider calling taskyou_set_project_context to help future tasks skip exploration."
 			}
 		}
 
 		// Log the completion summary
 		s.db.AppendTaskLog(s.taskID, "system", fmt.Sprintf("Task completed: %s", summary))
 
-		// Mark the task as done. Agents are trusted to signal their own completion —
-		// otherwise tasks stall in `processing`/`blocked` and the orchestrator has to
-		// close them by hand. Humans can always reopen if the work isn't actually finished.
+		// Decide where the finished task lands. A task that produced a PR is NOT
+		// truly done until a human merges/closes that PR — auto-marking it 'done'
+		// buries an open PR in the Done column where it gets overlooked. So PR-bearing
+		// tasks park in 'blocked' (the "human's turn" lane, alongside needs-input
+		// questions) and the daemon promotes them to 'done' once the PR merges/closes
+		// (see reconcileReviewTasks). Tasks with no PR (e.g. "move file X to Y") are
+		// genuinely complete the moment the agent signals it.
+		prNumber, prURL := s.lookupPR(task)
+		if prNumber > 0 {
+			if err := s.db.UpdateTaskStatus(s.taskID, db.StatusBlocked); err != nil {
+				s.sendError(id, -32603, fmt.Sprintf("Failed to move task to review: %v", err))
+				return
+			}
+			// Surface it in the blocked lane like a needs-input item so it's easy to spot.
+			reviewMsg := fmt.Sprintf("✅ PR #%d ready for review — merge or close it to complete this task.", prNumber)
+			if prURL != "" {
+				reviewMsg += " " + prURL
+			}
+			s.db.AppendTaskLog(s.taskID, "question", reviewMsg)
+
+			// The agent's turn is over; let the executor tear down the session.
+			if s.onComplete != nil {
+				s.onComplete()
+			}
+
+			resultText := fmt.Sprintf("Work finished. PR #%d is up for review — the task is now 'blocked' awaiting a human merge, and will move to 'done' automatically once the PR is merged or closed. Do not call taskyou_complete again.", prNumber)
+			s.sendResult(id, toolCallResult{
+				Content: []contentBlock{
+					{Type: "text", Text: resultText + contextReminder},
+				},
+			})
+			return
+		}
+
+		// No PR — the task is genuinely done.
 		if err := s.db.UpdateTaskStatus(s.taskID, db.StatusDone); err != nil {
 			s.sendError(id, -32603, fmt.Sprintf("Failed to mark task done: %v", err))
 			return

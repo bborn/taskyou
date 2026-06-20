@@ -849,9 +849,10 @@ func (e *Executor) worker(ctx context.Context) {
 	// Check for stale worktrees to archive every 10 minutes (300 ticks)
 	tickCount := 0
 	const suspendCheckInterval = 30
-	const doneCleanupInterval = 150   // 5 minutes at 2 second ticks
-	const staleWorktreeInterval = 300 // 10 minutes at 2 second ticks
-	const authCheckInterval = 15      // 30 seconds at 2 second ticks
+	const doneCleanupInterval = 150    // 5 minutes at 2 second ticks
+	const staleWorktreeInterval = 300  // 10 minutes at 2 second ticks
+	const authCheckInterval = 15       // 30 seconds at 2 second ticks
+	const reviewReconcileInterval = 30 // 60 seconds at 2 second ticks
 
 	for {
 		select {
@@ -878,6 +879,12 @@ func (e *Executor) worker(ctx context.Context) {
 				e.checkAuthStuckTasks()
 			}
 
+			// Periodically promote blocked "PR ready for review" tasks to done
+			// once their PR has merged or closed.
+			if tickCount%reviewReconcileInterval == 0 {
+				e.reconcileReviewTasks()
+			}
+
 			// Periodically cleanup Claude processes for inactive done tasks
 			if tickCount%doneCleanupInterval == 0 {
 				e.cleanupInactiveDoneTasks()
@@ -887,6 +894,88 @@ func (e *Executor) worker(ctx context.Context) {
 			if tickCount%staleWorktreeInterval == 0 {
 				e.cleanupStaleWorktrees()
 			}
+		}
+	}
+}
+
+// shouldPromoteReviewTask reports whether a PR's state means its task is finished
+// and should move to 'done' — i.e. the PR has merged or been closed. An open or
+// draft PR is still awaiting the human, so the task stays in 'blocked'.
+func shouldPromoteReviewTask(info *github.PRInfo) bool {
+	return info != nil && (info.State == github.PRStateMerged || info.State == github.PRStateClosed)
+}
+
+// reconcileReviewTasks promotes blocked "PR ready for review" tasks to 'done' once
+// a human has merged or closed their PR. This is the other half of the completion
+// flow: taskyou_complete parks PR-bearing tasks in 'blocked' (see internal/mcp),
+// and this loop watches those PRs and finishes the task when the PR reaches a
+// terminal state. It runs daemon-side so it works whether or not the TUI is open
+// (the TUI only ever refreshed PR state for display, never the task status).
+//
+// Idempotency: each promotion is recorded against the PR number via
+// MarkPRAutoCompleted. If a human reopens an already-completed task to keep working
+// against the same merged/closed PR, this loop will not bounce it straight back to
+// 'done' — only a genuinely new PR (different number) can auto-complete it again.
+func (e *Executor) reconcileReviewTasks() {
+	if e.prCache == nil {
+		return
+	}
+
+	tasks, err := e.db.ListTasks(db.ListTasksOptions{Status: db.StatusBlocked, Limit: 200})
+	if err != nil {
+		return
+	}
+
+	// Group candidate tasks by project so each repo's open PRs are fetched once.
+	byProject := make(map[string][]*db.Task)
+	for _, task := range tasks {
+		if task.PRNumber > 0 && task.BranchName != "" {
+			byProject[task.Project] = append(byProject[task.Project], task)
+		}
+	}
+
+	for project, ptasks := range byProject {
+		projectDir := e.getProjectDir(project)
+		if projectDir == "" {
+			continue
+		}
+
+		// One API call lists the repo's OPEN PRs. A task whose PR is absent here has
+		// left the open set (merged or closed) — the only case worth a targeted fetch.
+		openPRs := github.FetchAllPRsForRepo(projectDir)
+
+		for _, task := range ptasks {
+			// Skip PRs that have already auto-completed this task (reopen-after-merge).
+			if done, _ := e.db.WasPRAutoCompleted(task.ID, task.PRNumber); done {
+				continue
+			}
+			// Still in the open set → the human hasn't merged/closed it yet.
+			if !github.NeedsReconcile(openPRs, task.BranchName, task.PRNumber) {
+				continue
+			}
+
+			// Fetch the terminal state, bypassing any stale OPEN cache entry.
+			e.prCache.InvalidateCache(projectDir, task.BranchName)
+			info := e.prCache.GetPRForBranch(projectDir, task.BranchName)
+			if !shouldPromoteReviewTask(info) {
+				continue
+			}
+
+			verb := "merged"
+			if info.State == github.PRStateClosed {
+				verb = "closed"
+			}
+
+			e.db.UpdateTaskPRInfo(task.ID, info.URL, info.Number, github.MarshalPRInfo(info))
+			if err := e.db.MarkPRAutoCompleted(task.ID, task.PRNumber); err != nil {
+				e.logger.Warn("reconcileReviewTasks: failed to record auto-done marker", "task", task.ID, "error", err)
+			}
+			e.db.AppendTaskLog(task.ID, "system", fmt.Sprintf("PR #%d %s — task auto-completed.", info.Number, verb))
+			if err := e.db.UpdateTaskStatus(task.ID, db.StatusDone); err != nil {
+				e.logger.Error("reconcileReviewTasks: failed to mark task done", "task", task.ID, "error", err)
+				continue
+			}
+			e.logger.Info("Auto-completed reviewed task", "task", task.ID, "pr", info.Number, "state", verb)
 		}
 	}
 }
@@ -1509,7 +1598,9 @@ func (e *Executor) buildUniversalGuidance(task *db.Task) string {
 	b.WriteString(`
 
 Completion signaling (REQUIRED — nothing else watches for completion):
-- When the task is done, call taskyou_complete with a one-paragraph summary (PR link, files touched, follow-ups). This moves the task to 'done'. Do NOT just print a summary and stop — without this call the task stays in 'processing'/'blocked' forever and a human has to close it by hand.
+- When your work is finished, call taskyou_complete with a one-paragraph summary (PR link, files touched, follow-ups). Do NOT just print a summary and stop — without this call the task stalls forever and a human has to close it by hand.
+  - If you opened a PR: the task moves to 'blocked' and waits for a human to review and merge it. It is promoted to 'done' automatically once the PR is merged or closed — so calling taskyou_complete does NOT mean the work shipped, you must NOT wait for the merge yourself, and you must NOT call taskyou_complete more than once.
+  - If the task produced no PR (e.g. a quick config change or moving a file): it moves straight to 'done'.
 - When you need clarification, call taskyou_needs_input with the question. This moves the task to 'blocked' so a human is notified. Do not prompt in the terminal — the task system can't see TTY prompts.`)
 
 	if e.taskUsesWorktrees(task) {
