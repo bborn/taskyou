@@ -230,6 +230,21 @@ func (c *ClaudeExecutor) FindSessionID(workDir string) string {
 	return FindClaudeSessionID(workDir)
 }
 
+// SessionExists reports whether the stored Claude session file still exists on
+// disk for this task, resolving the same per-project config dir and worktree the
+// resume command would use. Claude prunes session JSONLs after cleanupPeriodDays
+// (default 30), so a long-parked task's stored session ID often points at a
+// deleted file; EnsureTaskWindow uses this to start fresh instead of resuming
+// into a dead "lost executor pane".
+func (c *ClaudeExecutor) SessionExists(task *db.Task, sessionID string) bool {
+	if sessionID == "" || task == nil || c.executor == nil {
+		return false
+	}
+	workDir := c.executor.taskWorkdir(task)
+	configDir := c.executor.claudePathsForProject(task.Project).configDir
+	return ClaudeSessionExists(sessionID, workDir, configDir)
+}
+
 // ResumeDangerous kills the current Claude process and restarts with --dangerously-skip-permissions.
 func (c *ClaudeExecutor) ResumeDangerous(task *db.Task, workDir string) bool {
 	return c.executor.resumeClaudeDangerous(task, workDir)

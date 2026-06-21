@@ -11,6 +11,15 @@ import (
 	"github.com/bborn/workflow/internal/db"
 )
 
+// sessionValidator is an optional capability for executors that can verify
+// whether a stored session still exists. EnsureTaskWindow uses it to avoid
+// resuming into a dead session (see the "lost executor pane" recovery there).
+// Executors that don't implement it are always treated as resumable, preserving
+// their existing behavior.
+type sessionValidator interface {
+	SessionExists(task *db.Task, sessionID string) bool
+}
+
 // EnsureTaskWindow ensures a tmux window running the task's executor session
 // exists in a task-daemon session, creating the daemon session and window if
 // needed. It is shared by the TUI detail view and the HTTP API so the
@@ -45,6 +54,23 @@ func (e *Executor) EnsureTaskWindow(ctx context.Context, task *db.Task, sessionI
 	taskExecutor := e.GetTaskExecutor(task)
 	if taskExecutor == nil {
 		return "", false, fmt.Errorf("no executor configured for task")
+	}
+
+	// Don't resume a session that no longer exists on disk. Claude prunes session
+	// JSONLs after cleanupPeriodDays (default 30), so a long-parked task's stored
+	// session ID usually points at a deleted file. Resuming it runs
+	// `claude --resume <id>` against a missing session; claude exits immediately,
+	// leaving a dead "lost executor pane". Fall back to a fresh session and clear
+	// the stale ID — the same recovery the daemon launch path already performs.
+	if sessionID != "" {
+		if v, ok := taskExecutor.(sessionValidator); ok && !v.SessionExists(task, sessionID) {
+			e.db.AppendTaskLog(task.ID, "system", fmt.Sprintf("Session %s no longer exists, starting fresh", sessionID))
+			if err := e.db.UpdateTaskClaudeSessionID(task.ID, ""); err != nil {
+				e.logger.Warn("failed to clear stale session ID", "task", task.ID, "error", err)
+			}
+			task.ClaudeSessionID = "" // keep the caller's in-memory copy consistent
+			sessionID = ""
+		}
 	}
 
 	// Build prompt with task details when starting fresh (no session to resume).
