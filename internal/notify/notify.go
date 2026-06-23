@@ -104,29 +104,43 @@ func (n *Notifier) Enabled() bool {
 }
 
 // Notify is the events.Notifier entry point. It is called for every emitted
-// event; non-notifiable types and disabled/unconfigured setups are dropped
-// silently. Safe to call from a goroutine.
-func (n *Notifier) Notify(eventType string, task *db.Task, message string) {
+// event and reads all of its state (settings, task logs) synchronously, while
+// the caller's DB handle is guaranteed open. It returns a delivery closure that
+// performs the (slow, network-bound) send, or nil when there is nothing to send
+// — non-notifiable types, notifications disabled, or no providers configured.
+// The returned closure touches no database, so it is safe to run after the
+// caller has closed its DB.
+func (n *Notifier) Notify(eventType string, task *db.Task, message string) func() {
 	if !n.Enabled() {
-		return
+		return nil
 	}
 	spec, ok := notifiableEvents[eventType]
 	if !ok {
-		return
+		return nil
 	}
 	providers := n.providers()
 	if len(providers) == 0 {
-		return
+		return nil
 	}
 
 	msg := n.buildMessage(spec, task, message)
 
-	ctx, cancel := context.WithTimeout(context.Background(), sendTimeout)
-	defer cancel()
-	for _, p := range providers {
-		if err := p.Send(ctx, msg); err != nil {
-			n.logErr("notify: %s delivery failed: %v", p.Name(), err)
+	return func() {
+		ctx, cancel := context.WithTimeout(context.Background(), sendTimeout)
+		defer cancel()
+		for _, p := range providers {
+			if err := p.Send(ctx, msg); err != nil {
+				n.logErr("notify: %s delivery failed: %v", p.Name(), err)
+			}
 		}
+	}
+}
+
+// Deliver reads state and sends synchronously in one call. It is a convenience
+// for callers (and tests) that aren't driving the events.Emitter wait group.
+func (n *Notifier) Deliver(eventType string, task *db.Task, message string) {
+	if deliver := n.Notify(eventType, task, message); deliver != nil {
+		deliver()
 	}
 }
 

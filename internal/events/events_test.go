@@ -110,10 +110,12 @@ type recordingNotifier struct {
 	events []string
 }
 
-func (r *recordingNotifier) Notify(eventType string, task *db.Task, message string) {
+func (r *recordingNotifier) Notify(eventType string, task *db.Task, message string) func() {
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	r.events = append(r.events, eventType)
+	r.mu.Unlock()
+	// Return a no-op delivery closure to exercise the emitter's async path.
+	return func() {}
 }
 
 func (r *recordingNotifier) seen() []string {

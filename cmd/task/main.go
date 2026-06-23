@@ -87,7 +87,13 @@ func openTaskDB(path string) (*db.DB, error) {
 	}
 	// Bind the push notifier to the database this caller is using so settings
 	// (and the latest needs-input question) are read from the live handle.
-	taskEmitter.SetNotifier(notify.New(database))
+	ntf := notify.New(database)
+	if os.Getenv("TY_NOTIFY_DEBUG") != "" {
+		ntf.SetLogf(func(format string, args ...any) {
+			fmt.Fprintf(os.Stderr, "[notify] "+format+"\n", args...)
+		})
+	}
+	taskEmitter.SetNotifier(ntf)
 	database.SetEventEmitter(taskEmitter)
 	return database, nil
 }

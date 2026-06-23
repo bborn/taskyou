@@ -47,7 +47,7 @@ func TestNotifyDisabledByDefault(t *testing.T) {
 	if n.Enabled() {
 		t.Fatal("expected notifications disabled when notify_enabled unset")
 	}
-	n.Notify("task.blocked", sampleTask(), "needs input") // should be a no-op
+	n.Deliver("task.blocked", sampleTask(), "needs input") // should be a no-op
 }
 
 func TestNtfyDeliversBlockedWithAction(t *testing.T) {
@@ -71,7 +71,7 @@ func TestNtfyDeliversBlockedWithAction(t *testing.T) {
 		config.SettingNotifyBaseURL: "https://ty.example.ts.net:8080",
 	}))
 
-	n.Notify("task.blocked", sampleTask(), "Which database should I use?")
+	n.Deliver("task.blocked", sampleTask(), "Which database should I use?")
 
 	if got.Topic != "ty-bruno" {
 		t.Errorf("topic = %q, want ty-bruno", got.Topic)
@@ -122,13 +122,13 @@ func TestNotifyIgnoresNonNotifiableEvents(t *testing.T) {
 		config.SettingNtfyTopic:     "ty-bruno",
 	}))
 
-	n.Notify("task.created", sampleTask(), "")
-	n.Notify("task.updated", sampleTask(), "")
+	n.Deliver("task.created", sampleTask(), "")
+	n.Deliver("task.updated", sampleTask(), "")
 	if called {
 		t.Fatal("non-notifiable events must not trigger delivery")
 	}
 
-	n.Notify("task.completed", sampleTask(), "")
+	n.Deliver("task.completed", sampleTask(), "")
 	if !called {
 		t.Fatal("task.completed should trigger delivery")
 	}

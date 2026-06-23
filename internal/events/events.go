@@ -45,8 +45,15 @@ type Event struct {
 // Notifier receives every emitted event so it can deliver push notifications.
 // It is implemented by internal/notify. Kept as an interface here so the events
 // package stays free of provider/config dependencies.
+//
+// Notify is invoked synchronously while the caller's database handle is still
+// open, so it must read any state it needs (settings, task logs) before
+// returning. It returns a delivery closure to run asynchronously — or nil if
+// nothing should be sent. Splitting it this way keeps slow network I/O off the
+// caller's path while ensuring DB reads never race a deferred db.Close() in
+// short-lived CLI/MCP commands.
 type Notifier interface {
-	Notify(eventType string, task *db.Task, message string)
+	Notify(eventType string, task *db.Task, message string) func()
 }
 
 // Emitter handles event emission via hooks.
@@ -84,15 +91,18 @@ func (e *Emitter) Emit(event Event) {
 		}()
 	}
 
-	// Fan the event out to the push notifier on the same wait group so
-	// short-lived CLI/MCP commands flush notifications via Wait before exit.
-	// This runs independently of hooks — a notifier works even with no hooks dir.
+	// Fan the event out to the push notifier. The notifier reads state
+	// synchronously here (DB still open) and hands back a delivery closure that
+	// we run on the same wait group, so short-lived CLI/MCP commands flush
+	// notifications via Wait before exit. Works even with no hooks dir.
 	if e.notifier != nil {
-		e.wg.Add(1)
-		go func() {
-			defer e.wg.Done()
-			e.notifier.Notify(event.Type, event.Task, event.Message)
-		}()
+		if deliver := e.notifier.Notify(event.Type, event.Task, event.Message); deliver != nil {
+			e.wg.Add(1)
+			go func() {
+				defer e.wg.Done()
+				deliver()
+			}()
+		}
 	}
 }
 

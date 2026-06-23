@@ -168,7 +168,13 @@ func New(database *db.DB, cfg *config.Config) *Executor {
 
 	// Attach the push notifier so lifecycle events (blocked/needs-input,
 	// auth-required, completed, failed) can deliver pushes. OFF unless configured.
-	eventsEmitter.SetNotifier(notify.New(database))
+	// Surface delivery failures in the executor log — pushes are best-effort, so
+	// this is the only place a misconfigured topic/token shows up.
+	ntf := notify.New(database)
+	ntf.SetLogf(func(format string, args ...any) {
+		e.logger.Warn(fmt.Sprintf(format, args...))
+	})
+	eventsEmitter.SetNotifier(ntf)
 
 	// Register the events emitter with the database for event emission
 	database.SetEventEmitter(eventsEmitter)
@@ -210,7 +216,13 @@ func NewWithLogging(database *db.DB, cfg *config.Config, w io.Writer) *Executor 
 
 	// Attach the push notifier so lifecycle events (blocked/needs-input,
 	// auth-required, completed, failed) can deliver pushes. OFF unless configured.
-	eventsEmitter.SetNotifier(notify.New(database))
+	// Surface delivery failures in the executor log — pushes are best-effort, so
+	// this is the only place a misconfigured topic/token shows up.
+	ntf := notify.New(database)
+	ntf.SetLogf(func(format string, args ...any) {
+		e.logger.Warn(fmt.Sprintf(format, args...))
+	})
+	eventsEmitter.SetNotifier(ntf)
 
 	// Register the events emitter with the database for event emission
 	database.SetEventEmitter(eventsEmitter)
