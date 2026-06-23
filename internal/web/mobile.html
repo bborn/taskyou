@@ -55,7 +55,21 @@
     white-space: pre-wrap; word-break: break-word; color: #a9b1d6; max-height: 45vh;
     overflow-y: auto; margin: 12px 0; }
   .summary { background: var(--card); border: 1px solid var(--line); border-radius: 10px;
-    padding: 11px 12px; margin: 12px 0; white-space: pre-wrap; }
+    padding: 11px 12px; margin: 12px 0; }
+  .summary > :first-child { margin-top: 0; }
+  .summary > :last-child { margin-bottom: 0; }
+  .summary p { margin: 0 0 8px; }
+  .summary ul, .summary ol { margin: 6px 0; padding-left: 20px; }
+  .summary li { margin: 3px 0; }
+  .summary h1, .summary h2, .summary h3, .summary h4 { font-size: 14px; margin: 12px 0 4px;
+    letter-spacing: .2px; }
+  .summary strong { color: #fff; font-weight: 700; }
+  .summary a { color: var(--accent); }
+  .summary code { background: #0e0f17; border: 1px solid var(--line); border-radius: 5px;
+    padding: 1px 5px; font: 12.5px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .summary pre { background: #0e0f17; border: 1px solid var(--line); border-radius: 8px;
+    padding: 10px; overflow-x: auto; margin: 8px 0; }
+  .summary pre code { background: none; border: none; padding: 0; }
   textarea { width: 100%; background: var(--card); color: var(--fg);
     border: 1px solid var(--line); border-radius: 10px; padding: 11px;
     font: inherit; resize: vertical; min-height: 84px; }
@@ -105,6 +119,70 @@ let currentTaskId = null;
 function esc(s) {
   return (s || "").replace(/[&<>"']/g, c => (
     { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+// mdInline renders inline Markdown (bold/italic/code/links) for one line.
+// The whole string is HTML-escaped first; the only tags emitted are the ones
+// added here, so it stays XSS-safe. Splitting on `code` spans keeps their
+// contents from being re-formatted.
+function mdInline(t) {
+  return esc(t).split(/(`[^`]+`)/).map(seg => {
+    if (seg.length > 1 && seg[0] === "`" && seg[seg.length - 1] === "`") {
+      return "<code>" + seg.slice(1, -1) + "</code>";
+    }
+    return seg
+      .replace(/\[([^\]]+)\]\(((?:https?:\/\/|mailto:|\/)[^\s)]+)\)/g,
+        (m, txt, u) => `<a href="${u}" target="_blank" rel="noopener">${txt}</a>`)
+      .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+      .replace(/__([^_]+)__/g, "<strong>$1</strong>")
+      .replace(/\*([^*\n]+)\*/g, "<em>$1</em>")
+      .replace(/(^|[^a-zA-Z0-9_])_([^_\n]+)_/g, "$1<em>$2</em>");
+  }).join("");
+}
+// md renders a safe subset of block Markdown: headings, bullet/ordered lists,
+// fenced code, and paragraphs. Agent summaries are written in Markdown.
+function md(src) {
+  if (!src) return "";
+  const lines = String(src).replace(/\r\n/g, "\n").split("\n");
+  const out = [];
+  let listType = null, listItems = [], para = [], i = 0;
+  const flushList = () => {
+    if (listType) { out.push(`<${listType}>${listItems.join("")}</${listType}>`); listItems = []; listType = null; }
+  };
+  const flushPara = () => {
+    if (para.length) { out.push("<p>" + para.map(mdInline).join("<br>") + "</p>"); para = []; }
+  };
+  while (i < lines.length) {
+    const line = lines[i];
+    if (/^```/.test(line)) {
+      flushPara(); flushList();
+      const buf = []; i++;
+      while (i < lines.length && !/^```/.test(lines[i])) { buf.push(lines[i]); i++; }
+      i++; // skip closing fence
+      out.push("<pre><code>" + esc(buf.join("\n")) + "</code></pre>");
+      continue;
+    }
+    const heading = line.match(/^(#{1,6})\s+(.*)$/);
+    if (heading) {
+      flushPara(); flushList();
+      const lvl = Math.min(heading[1].length, 4);
+      out.push(`<h${lvl}>${mdInline(heading[2])}</h${lvl}>`); i++; continue;
+    }
+    const ul = line.match(/^\s*[-*+]\s+(.*)$/);
+    const ol = line.match(/^\s*\d+\.\s+(.*)$/);
+    if (ul || ol) {
+      flushPara();
+      const t = ul ? "ul" : "ol";
+      if (listType && listType !== t) flushList();
+      listType = t;
+      listItems.push("<li>" + mdInline((ul || ol)[1]) + "</li>");
+      i++; continue;
+    }
+    if (line.trim() === "") { flushPara(); flushList(); i++; continue; }
+    flushList();
+    para.push(line); i++;
+  }
+  flushPara(); flushList();
+  return out.join("");
 }
 function toast(msg) {
   const t = document.getElementById("toast");
@@ -207,7 +285,7 @@ async function refreshTask() {
       ${esc(t.project || "")} ${t.branch_name ? "· " + esc(t.branch_name) : ""}
     </div>
     ${t.pr_url ? `<a class="pr" href="${esc(t.pr_url)}" target="_blank" rel="noopener">View PR #${t.pr_number || ""} ↗</a>` : ""}
-    ${t.summary ? `<div class="summary">${esc(t.summary)}</div>` : ""}
+    ${t.summary ? `<div class="summary">${md(t.summary)}</div>` : ""}
     ${actions}
     <div class="section-title" style="margin-left:0">Latest output</div>
     <div class="logs" id="logs">${esc(logs) || "No output yet."}</div>`;

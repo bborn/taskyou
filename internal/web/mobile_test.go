@@ -21,7 +21,8 @@ func TestHandleMobileServesConsole(t *testing.T) {
 		t.Errorf("content-type = %q, want text/html", ct)
 	}
 	body := rec.Body.String()
-	for _, want := range []string{"<title>TaskYou", "/api/board", "/api/tasks/", "Needs you"} {
+	for _, want := range []string{"<title>TaskYou", "/api/board", "/api/tasks/", "Needs you",
+		"function md(", "function mdInline(", "<strong>"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("mobile console missing %q", want)
 		}
