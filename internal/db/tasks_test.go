@@ -2619,3 +2619,100 @@ func TestPRAutoCompletedMarker(t *testing.T) {
 		}
 	}
 }
+
+func TestListTasksTagFilterDelimiterSafe(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	database, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer database.Close()
+	defer os.Remove(dbPath)
+
+	if err := database.CreateProject(&Project{Name: "test", Path: tmpDir}); err != nil {
+		t.Fatalf("failed to create test project: %v", err)
+	}
+
+	// Three tasks with overlapping tag prefixes. The filter for "gm:cortex"
+	// must match only the exact tag, never the longer "gm:cortex-2".
+	cortex := &Task{Title: "cortex task", Status: StatusBacklog, Type: TypeCode, Project: "test", Tags: "gm:cortex"}
+	cortex2 := &Task{Title: "cortex-2 task", Status: StatusBacklog, Type: TypeCode, Project: "test", Tags: "gm:cortex-2"}
+	multi := &Task{Title: "multi-tag task", Status: StatusBacklog, Type: TypeCode, Project: "test", Tags: "urgent,gm:cortex,backend"}
+
+	for _, tk := range []*Task{cortex, cortex2, multi} {
+		if err := database.CreateTask(tk); err != nil {
+			t.Fatalf("failed to create task %q: %v", tk.Title, err)
+		}
+	}
+
+	tasks, err := database.ListTasks(ListTasksOptions{Tag: "gm:cortex"})
+	if err != nil {
+		t.Fatalf("ListTasks with tag filter failed: %v", err)
+	}
+
+	got := map[int64]bool{}
+	for _, tk := range tasks {
+		got[tk.ID] = true
+	}
+
+	if !got[cortex.ID] {
+		t.Errorf("expected task with exact tag gm:cortex to match, but it did not")
+	}
+	if !got[multi.ID] {
+		t.Errorf("expected task with gm:cortex among multiple tags to match, but it did not")
+	}
+	if got[cortex2.ID] {
+		t.Errorf("tag filter gm:cortex must NOT match gm:cortex-2 (delimiter-unsafe substring match)")
+	}
+	if len(tasks) != 2 {
+		t.Errorf("expected exactly 2 matching tasks, got %d", len(tasks))
+	}
+}
+
+func TestListTasksTagFilterEscapesLikeWildcards(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	database, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer database.Close()
+	defer os.Remove(dbPath)
+
+	if err := database.CreateProject(&Project{Name: "test", Path: tmpDir}); err != nil {
+		t.Fatalf("failed to create test project: %v", err)
+	}
+
+	// A tag value containing LIKE metacharacters must match literally, never
+	// as a wildcard. Without ESCAPE, "%" matches any run and "_" matches any
+	// single char, so the decoys below would false-match.
+	pct := &Task{Title: "pct", Status: StatusBacklog, Type: TypeCode, Project: "test", Tags: "gm:c%x"}
+	pctDecoy := &Task{Title: "pctDecoy", Status: StatusBacklog, Type: TypeCode, Project: "test", Tags: "gm:cZZZx"}
+	und := &Task{Title: "und", Status: StatusBacklog, Type: TypeCode, Project: "test", Tags: "gm:a_b"}
+	undDecoy := &Task{Title: "undDecoy", Status: StatusBacklog, Type: TypeCode, Project: "test", Tags: "gm:aXb"}
+
+	for _, tk := range []*Task{pct, pctDecoy, und, undDecoy} {
+		if err := database.CreateTask(tk); err != nil {
+			t.Fatalf("failed to create task %q: %v", tk.Title, err)
+		}
+	}
+
+	pctTasks, err := database.ListTasks(ListTasksOptions{Tag: "gm:c%x"})
+	if err != nil {
+		t.Fatalf("ListTasks with '%%' tag filter failed: %v", err)
+	}
+	if len(pctTasks) != 1 || pctTasks[0].ID != pct.ID {
+		t.Errorf("tag filter %q must match only the literal tag, got %d tasks", "gm:c%x", len(pctTasks))
+	}
+
+	undTasks, err := database.ListTasks(ListTasksOptions{Tag: "gm:a_b"})
+	if err != nil {
+		t.Fatalf("ListTasks with '_' tag filter failed: %v", err)
+	}
+	if len(undTasks) != 1 || undTasks[0].ID != und.ID {
+		t.Errorf("tag filter %q must match only the literal tag, got %d tasks", "gm:a_b", len(undTasks))
+	}
+}
