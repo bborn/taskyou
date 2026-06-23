@@ -430,8 +430,14 @@ func (db *DB) ListTasks(opts ListTasksOptions) ([]*Task, error) {
 		// Tags are stored comma-separated (e.g. "a,gm:cortex,b"). A naive
 		// LIKE '%gm:cortex%' would false-match "gm:cortex-2", so normalize the
 		// stored value to ",a,gm:cortex,b," and match the delimited ",tag,".
-		query += " AND (',' || REPLACE(COALESCE(tags, ''), ' ', '') || ',') LIKE ?"
-		args = append(args, "%,"+strings.ReplaceAll(opts.Tag, " ", "")+",%")
+		// Escape LIKE metacharacters (\, %, _) in the needle so a tag value
+		// containing them matches literally rather than as a wildcard pattern.
+		needle := strings.ReplaceAll(opts.Tag, " ", "")
+		needle = strings.ReplaceAll(needle, `\`, `\\`)
+		needle = strings.ReplaceAll(needle, "%", `\%`)
+		needle = strings.ReplaceAll(needle, "_", `\_`)
+		query += ` AND (',' || REPLACE(COALESCE(tags, ''), ' ', '') || ',') LIKE ? ESCAPE '\'`
+		args = append(args, "%,"+needle+",%")
 	}
 
 	// Exclude done and archived by default unless specifically querying for them or includeClosed is set
