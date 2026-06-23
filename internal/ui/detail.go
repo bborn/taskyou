@@ -3061,9 +3061,11 @@ func (m *DetailModel) renderContent() string {
 	return content
 }
 
-// timelineEventIcon maps an event type to a small glyph for the timeline.
-func timelineEventIcon(eventType string) string {
-	switch eventType {
+// timelineEntryIcon maps a timeline entry to a small glyph. Status transitions
+// (task.updated rows labeled "old → new") are keyed off their target status so a
+// finish shows ✅, a block ⛔, etc; other events key off their type.
+func timelineEntryIcon(e db.TaskTimelineEntry) string {
+	switch e.EventType {
 	case "task.created":
 		return "✨"
 	case "task.completed":
@@ -3074,7 +3076,24 @@ func timelineEventIcon(eventType string) string {
 		return "🔁"
 	case "task.deleted":
 		return "🗑️"
-	default: // task.updated and anything else
+	case "task.updated":
+		// Pick an icon from the transition target, e.g. "queued → processing".
+		if idx := strings.LastIndex(e.Label, "→ "); idx >= 0 {
+			switch strings.TrimSpace(e.Label[idx+len("→ "):]) {
+			case db.StatusDone, db.StatusArchived:
+				return "✅"
+			case db.StatusBlocked:
+				return "⛔"
+			case db.StatusProcessing:
+				return "⚙️"
+			case db.StatusQueued:
+				return "⏳"
+			case db.StatusBacklog:
+				return "📋"
+			}
+		}
+		return "•"
+	default:
 		return "•"
 	}
 }
@@ -3084,7 +3103,7 @@ func timelineEventIcon(eventType string) string {
 func (m *DetailModel) renderTimeline(dimmedStyle lipgloss.Style) string {
 	var b strings.Builder
 	for _, e := range m.timeline {
-		icon := timelineEventIcon(e.EventType)
+		icon := timelineEntryIcon(e)
 		ts := e.CreatedAt.Time.Format("Jan 2 15:04:05")
 		label := e.Label
 		if e.Detail != "" {

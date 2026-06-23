@@ -65,15 +65,91 @@ func TestGetTaskTimelineChronological(t *testing.T) {
 		t.Errorf("expected a 'queued → processing' transition entry; got %+v", labels(entries))
 	}
 
-	// The terminal completion must be present.
-	var sawCompleted bool
+	// The terminal completion is represented by the "processing → done"
+	// transition; the redundant bare task.completed/task.blocked lifecycle rows
+	// are suppressed so each finish/block appears once.
+	var sawDoneTransition bool
 	for _, e := range entries {
-		if e.EventType == "task.completed" {
-			sawCompleted = true
+		if e.Label == "blocked → done" {
+			sawDoneTransition = true
+		}
+		if e.EventType == "task.completed" || e.EventType == "task.blocked" {
+			t.Errorf("redundant lifecycle event %s should be suppressed", e.EventType)
 		}
 	}
-	if !sawCompleted {
-		t.Errorf("expected a task.completed entry; got %+v", labels(entries))
+	if !sawDoneTransition {
+		t.Errorf("expected a 'blocked → done' transition entry; got %+v", labels(entries))
+	}
+}
+
+func TestGetTaskTimelineSuppressesRedundantLifecycle(t *testing.T) {
+	database := setupTestDB(t)
+	defer database.Close()
+
+	task := &Task{Title: "Lifecycle Task", Status: StatusProcessing, Project: "personal"}
+	if err := database.CreateTask(task); err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	// processing -> blocked emits task.updated + task.blocked; blocked -> done
+	// emits task.updated + task.completed. Only the transitions should survive.
+	if err := database.UpdateTaskStatus(task.ID, StatusBlocked); err != nil {
+		t.Fatalf("block: %v", err)
+	}
+	if err := database.UpdateTaskStatus(task.ID, StatusDone); err != nil {
+		t.Fatalf("done: %v", err)
+	}
+
+	entries, err := database.GetTaskTimeline(task.ID, 0)
+	if err != nil {
+		t.Fatalf("get timeline: %v", err)
+	}
+
+	counts := map[string]int{}
+	for _, e := range entries {
+		counts[e.EventType]++
+	}
+	if counts["task.blocked"] != 0 {
+		t.Errorf("expected task.blocked to be suppressed, found %d", counts["task.blocked"])
+	}
+	if counts["task.completed"] != 0 {
+		t.Errorf("expected task.completed to be suppressed, found %d", counts["task.completed"])
+	}
+
+	var sawBlockedTransition, sawDoneTransition bool
+	for _, e := range entries {
+		switch e.Label {
+		case "processing → blocked":
+			sawBlockedTransition = true
+		case "blocked → done":
+			sawDoneTransition = true
+		}
+	}
+	if !sawBlockedTransition {
+		t.Errorf("expected 'processing → blocked' transition; got %+v", labels(entries))
+	}
+	if !sawDoneTransition {
+		t.Errorf("expected 'blocked → done' transition; got %+v", labels(entries))
+	}
+}
+
+func TestIsRedundantLifecycleEvent(t *testing.T) {
+	cases := []struct {
+		eventType string
+		message   string
+		want      bool
+	}{
+		{"task.completed", "anything", true},
+		{"task.blocked", "status change", true},
+		{"task.blocked", "", true},
+		{"task.blocked", "needs human input", false},
+		{"task.updated", "", false},
+		{"task.created", "", false},
+		{"task.retry", "", false},
+	}
+	for _, tc := range cases {
+		if got := isRedundantLifecycleEvent(tc.eventType, tc.message); got != tc.want {
+			t.Errorf("isRedundantLifecycleEvent(%q,%q)=%v want %v", tc.eventType, tc.message, got, tc.want)
+		}
 	}
 }
 

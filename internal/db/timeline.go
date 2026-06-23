@@ -54,6 +54,13 @@ func (db *DB) GetTaskTimeline(taskID int64, limit int) ([]TaskTimelineEntry, err
 		if err := rows.Scan(&id, &eventType, &message, &metadata, &createdAt); err != nil {
 			return nil, fmt.Errorf("scan timeline row: %w", err)
 		}
+		// The blocked/completed lifecycle events are emitted alongside the
+		// status-transition task.updated row (e.g. "processing → done"), so
+		// surfacing both would double every block/finish at the same second.
+		// Drop the redundant lifecycle row and keep the richer transition.
+		if isRedundantLifecycleEvent(eventType, message) {
+			continue
+		}
 		label, detail := timelineLabel(eventType, message, metadata)
 		entries = append(entries, TaskTimelineEntry{
 			ID:        id,
@@ -67,6 +74,21 @@ func (db *DB) GetTaskTimeline(taskID int64, limit int) ([]TaskTimelineEntry, err
 		return nil, fmt.Errorf("iterate timeline rows: %w", err)
 	}
 	return entries, nil
+}
+
+// isRedundantLifecycleEvent reports whether an event is a bare lifecycle marker
+// that duplicates a status-transition task.updated row. task.completed is always
+// redundant with a "… → done" transition; task.blocked is redundant only when it
+// carries the generic "status change" reason (a real reason is kept).
+func isRedundantLifecycleEvent(eventType, message string) bool {
+	switch eventType {
+	case "task.completed":
+		return true
+	case "task.blocked":
+		return message == "" || message == "status change"
+	default:
+		return false
+	}
 }
 
 // timelineLabel maps a raw event_log row into a short label and optional detail
