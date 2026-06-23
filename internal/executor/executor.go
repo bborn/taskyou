@@ -3386,18 +3386,43 @@ func (e *Executor) pollTmuxSession(ctx context.Context, taskID int64, sessionNam
 			// Window genuinely gone for missingThreshold consecutive checks —
 			// check final status from hooks.
 			finalTask, _ := e.db.GetTask(taskID)
-			if finalTask != nil {
-				if finalTask.Status == db.StatusDone {
-					return execResult{Success: true}
-				}
-				if finalTask.Status == db.StatusBacklog {
-					return execResult{Interrupted: true}
-				}
-			}
-			// Default: blocked (user must mark done or retry)
-			return execResult{NeedsInput: true, Message: "Task needs review"}
+			return windowDeathResult(finalTask)
 		}
 	}
+}
+
+// windowDeathResult decides a task's outcome when its tmux window has genuinely
+// disappeared (the executor process exited) without an explicit terminal status
+// already recorded by hooks/MCP/the CLI.
+//
+// For most executors (Claude, Codex, …) a clean window death with no recorded
+// status is ambiguous, so we surface it as NeedsInput and let a human review it.
+//
+// The Pi executor has no hooks and no MCP server: it self-reports its terminal
+// state via the `task status` CLI as change #2 of board-completion parity. A
+// hands-off Pi run by a "junior" local model may finish (or be killed) without
+// ever calling the CLI, which would otherwise strand it in "needs input". So for
+// Pi we treat a clean exit as agent-success — landing it in Backlog
+// ("awaiting human review", exactly how Claude's agent-success is handled by the
+// caller) instead of Blocked. The CLI self-report remains the primary done
+// signal; this is the belt-and-suspenders backstop.
+func windowDeathResult(finalTask *db.Task) execResult {
+	if finalTask != nil {
+		if finalTask.Status == db.StatusDone {
+			return execResult{Success: true}
+		}
+		if finalTask.Status == db.StatusBacklog {
+			return execResult{Interrupted: true}
+		}
+		// Pi backstop: a clean exit with no self-reported blocked state is treated
+		// as agent-success. If the agent DID self-report blocked via the CLI, fall
+		// through to NeedsInput so that explicit blocked state is preserved.
+		if finalTask.Executor == db.ExecutorPi && finalTask.Status != db.StatusBlocked {
+			return execResult{Success: true}
+		}
+	}
+	// Default: needs input (user must mark done or retry)
+	return execResult{NeedsInput: true, Message: "Task needs review"}
 }
 
 // ensureShellPane creates a shell pane alongside the Claude pane in the daemon window.
@@ -5218,16 +5243,20 @@ func (e *Executor) runPi(ctx context.Context, task *db.Task, workDir, prompt str
 		}
 	}
 
+	// Model profile + completion self-reporting flags. piExtraFlags is the single
+	// source of truth shared with PiExecutor.BuildCommand so the daemon and TUI
+	// command builders stay in sync (see reference_executor_command_builder_divergence).
+	e.ensurePiModelProfile(task)
+	extraFlags := piExtraFlags(task)
+
 	// Check if session file exists at the explicit path to decide whether to resume
 	var script string
 	if piSessionExists(sessionPath) {
 		e.logLine(task.ID, "system", fmt.Sprintf("Resuming existing session %s", filepath.Base(sessionPath)))
-		script = fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q pi --session %q --continue "$(cat %q)"`,
-			task.ID, sessionID, task.Port, task.WorktreePath, sessionPath, promptFile.Name())
+		script = buildPiDaemonScript(task, sessionID, extraFlags, sessionPath, promptFile.Name(), true)
 	} else {
 		// Start fresh using the explicit session path
-		script = fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q pi --session %q "$(cat %q)"`,
-			task.ID, sessionID, task.Port, task.WorktreePath, sessionPath, promptFile.Name())
+		script = buildPiDaemonScript(task, sessionID, extraFlags, sessionPath, promptFile.Name(), false)
 	}
 
 	// Create new window in task-daemon session (with retry logic for race conditions)
@@ -5335,8 +5364,11 @@ func (e *Executor) runPiResume(ctx context.Context, task *db.Task, workDir, prom
 		taskSessionID = fmt.Sprintf("%d", os.Getpid())
 	}
 
-	script := fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q pi --session %q --continue "$(cat %q)"`,
-		task.ID, taskSessionID, task.Port, task.WorktreePath, sessionPath, feedbackFile.Name())
+	// Model profile + completion flags (kept in sync with runPi / BuildCommand).
+	e.ensurePiModelProfile(task)
+	extraFlags := piExtraFlags(task)
+
+	script := buildPiDaemonScript(task, taskSessionID, extraFlags, sessionPath, feedbackFile.Name(), true)
 
 	// Create new window in task-daemon session (with retry logic for race conditions)
 	actualSession, tmuxErr := createTmuxWindow(daemonSession, windowName, workDir, script, e.getProjectDir(task.Project))
@@ -5391,6 +5423,31 @@ func (e *Executor) getPiSessionPath(workDir string, taskID int64) string {
 // ensurePiSessionDir ensures the directory for the Pi session exists.
 func (e *Executor) ensurePiSessionDir(sessionPath string) error {
 	return os.MkdirAll(filepath.Dir(sessionPath), 0755)
+}
+
+// ensurePiModelProfile registers a custom OpenAI-compatible provider in Pi's
+// models.json when the task's model profile points at a base_url (e.g. a local
+// Ollama/vLLM server). It is a no-op for built-in providers (OpenRouter etc.)
+// and for tasks without a profile. Errors are logged but non-fatal — Pi will
+// surface a clearer error if the model truly can't be resolved.
+func (e *Executor) ensurePiModelProfile(task *db.Task) {
+	if task == nil || task.ModelProfile == "" {
+		return
+	}
+	prof, err := GetPiModelProfile(task.ModelProfile)
+	if err != nil {
+		e.logLine(task.ID, "system", fmt.Sprintf("Model profile %q: %s", task.ModelProfile, err.Error()))
+		return
+	}
+	if prof == nil {
+		e.logLine(task.ID, "system", fmt.Sprintf("Model profile %q not found; using Pi default model", task.ModelProfile))
+		return
+	}
+	if err := EnsurePiCustomProvider(piModelsJSONPath(), prof); err != nil {
+		e.logLine(task.ID, "system", fmt.Sprintf("Model profile %q: failed to register provider: %s", task.ModelProfile, err.Error()))
+		return
+	}
+	e.logLine(task.ID, "system", fmt.Sprintf("Using model profile %q (provider=%s model=%s)", prof.Name, prof.Provider, prof.Model))
 }
 
 // getPiPID finds the PID of the Pi process for a task.
