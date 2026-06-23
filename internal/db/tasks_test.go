@@ -1718,6 +1718,62 @@ func TestUpdateTaskPRInfo(t *testing.T) {
 	}
 }
 
+// UpdateTaskPRInfo must emit a board-change event when the PR JSON actually
+// changes (so the web SSE re-pushes), and must stay quiet on a no-op update so
+// idle refreshes don't spam the change feed.
+func TestUpdateTaskPRInfoEmitsEventOnChange(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	db, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer db.Close()
+
+	task := &Task{Title: "PR events", Status: StatusProcessing, Type: TypeCode, Project: "personal"}
+	if err := db.CreateTask(task); err != nil {
+		t.Fatalf("failed to create task: %v", err)
+	}
+
+	prEvents := func() int {
+		var n int
+		if err := db.QueryRow(`SELECT COUNT(*) FROM event_log WHERE task_id = ? AND message = 'pr status'`, task.ID).Scan(&n); err != nil {
+			t.Fatalf("count events: %v", err)
+		}
+		return n
+	}
+
+	if got := prEvents(); got != 0 {
+		t.Fatalf("expected 0 pr events initially, got %d", got)
+	}
+
+	openJSON := `{"number":1,"url":"u","state":"OPEN"}`
+	if err := db.UpdateTaskPRInfo(task.ID, "u", 1, openJSON); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	if got := prEvents(); got != 1 {
+		t.Fatalf("expected 1 pr event after first change, got %d", got)
+	}
+
+	// Same payload again — no new event.
+	if err := db.UpdateTaskPRInfo(task.ID, "u", 1, openJSON); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	if got := prEvents(); got != 1 {
+		t.Fatalf("expected no new event on no-op update, got %d", got)
+	}
+
+	// Changed payload — one more event.
+	mergedJSON := `{"number":1,"url":"u","state":"MERGED"}`
+	if err := db.UpdateTaskPRInfo(task.ID, "u", 1, mergedJSON); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	if got := prEvents(); got != 2 {
+		t.Fatalf("expected 2 pr events after state change, got %d", got)
+	}
+}
+
 func TestTaskDangerousModeInListTasks(t *testing.T) {
 	// Create temporary database
 	tmpDir := t.TempDir()

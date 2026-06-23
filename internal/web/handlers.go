@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/bborn/workflow/internal/db"
+	"github.com/bborn/workflow/internal/github"
 )
 
 // --- JSON helpers ---
@@ -1027,33 +1028,48 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 // --- JSON conversion helpers ---
 
 type taskJSON struct {
-	ID             int64  `json:"id"`
-	Title          string `json:"title"`
-	Body           string `json:"body"`
-	Status         string `json:"status"`
-	Type           string `json:"type"`
-	Project        string `json:"project"`
-	Executor       string `json:"executor"`
-	Pinned         bool   `json:"pinned"`
-	Tags           string `json:"tags"`
-	PermissionMode string `json:"permission_mode"`
-	BranchName     string `json:"branch_name"`
-	Port           int    `json:"port,omitempty"`
-	WorktreePath   string `json:"worktree_path,omitempty"`
-	HasExecutor    bool   `json:"has_executor"`
-	EffortLevel    string `json:"effort_level,omitempty"`
-	SourceBranch   string `json:"source_branch,omitempty"`
-	DaemonSession  string `json:"daemon_session,omitempty"`
-	TmuxWindowID   string `json:"tmux_window_id,omitempty"`
-	ClaudePaneID   string `json:"claude_pane_id,omitempty"`
-	ShellPaneID    string `json:"shell_pane_id,omitempty"`
-	PRURL          string `json:"pr_url"`
-	PRNumber       int    `json:"pr_number,omitempty"`
-	Summary        string `json:"summary,omitempty"`
-	CreatedAt      string `json:"created_at"`
-	UpdatedAt      string `json:"updated_at"`
-	StartedAt      string `json:"started_at,omitempty"`
-	CompletedAt    string `json:"completed_at,omitempty"`
+	ID             int64         `json:"id"`
+	Title          string        `json:"title"`
+	Body           string        `json:"body"`
+	Status         string        `json:"status"`
+	Type           string        `json:"type"`
+	Project        string        `json:"project"`
+	Executor       string        `json:"executor"`
+	Pinned         bool          `json:"pinned"`
+	Tags           string        `json:"tags"`
+	PermissionMode string        `json:"permission_mode"`
+	BranchName     string        `json:"branch_name"`
+	Port           int           `json:"port,omitempty"`
+	WorktreePath   string        `json:"worktree_path,omitempty"`
+	HasExecutor    bool          `json:"has_executor"`
+	EffortLevel    string        `json:"effort_level,omitempty"`
+	SourceBranch   string        `json:"source_branch,omitempty"`
+	DaemonSession  string        `json:"daemon_session,omitempty"`
+	TmuxWindowID   string        `json:"tmux_window_id,omitempty"`
+	ClaudePaneID   string        `json:"claude_pane_id,omitempty"`
+	ShellPaneID    string        `json:"shell_pane_id,omitempty"`
+	PRURL          string        `json:"pr_url"`
+	PRNumber       int           `json:"pr_number,omitempty"`
+	PR             *prStatusJSON `json:"pr,omitempty"`
+	Summary        string        `json:"summary,omitempty"`
+	CreatedAt      string        `json:"created_at"`
+	UpdatedAt      string        `json:"updated_at"`
+	StartedAt      string        `json:"started_at,omitempty"`
+	CompletedAt    string        `json:"completed_at,omitempty"`
+}
+
+// prStatusJSON is the live PR badge payload surfaced on board cards: the PR's
+// state plus its CI rollup and diff size. It mirrors the cached github.PRInfo
+// persisted in tasks.pr_info_json, lower-cased for the web client. CheckState is
+// "" when no checks are known (the batch refresh path doesn't fetch them).
+type prStatusJSON struct {
+	Number     int    `json:"number"`
+	URL        string `json:"url"`
+	State      string `json:"state"`       // open | draft | merged | closed
+	CheckState string `json:"check_state"` // passing | failing | pending | ""
+	Mergeable  string `json:"mergeable"`   // MERGEABLE | CONFLICTING | UNKNOWN
+	Additions  int    `json:"additions"`
+	Deletions  int    `json:"deletions"`
 }
 
 type logJSON struct {
@@ -1087,6 +1103,7 @@ func toTaskJSON(t *db.Task) *taskJSON {
 		ShellPaneID:    t.ShellPaneID,
 		PRURL:          t.PRURL,
 		PRNumber:       t.PRNumber,
+		PR:             toPRStatusJSON(t.PRInfoJSON),
 		Summary:        t.Summary,
 		CreatedAt:      apiTime(t.CreatedAt.Time),
 		UpdatedAt:      apiTime(t.UpdatedAt.Time),
@@ -1098,6 +1115,55 @@ func toTaskJSON(t *db.Task) *taskJSON {
 		tj.CompletedAt = apiTime(t.CompletedAt.Time)
 	}
 	return tj
+}
+
+// toPRStatusJSON decodes the cached github.PRInfo JSON persisted on a task into
+// the web badge payload. Returns nil when there's no associated PR so the field
+// is omitted entirely.
+func toPRStatusJSON(prInfoJSON string) *prStatusJSON {
+	info := github.UnmarshalPRInfo(prInfoJSON)
+	if info == nil {
+		return nil
+	}
+	return &prStatusJSON{
+		Number:     info.Number,
+		URL:        info.URL,
+		State:      prStateString(info.State),
+		CheckState: checkStateString(info.CheckState),
+		Mergeable:  info.Mergeable,
+		Additions:  info.Additions,
+		Deletions:  info.Deletions,
+	}
+}
+
+// prStateString maps a github.PRState to the lower-case token the web client uses.
+func prStateString(s github.PRState) string {
+	switch s {
+	case github.PRStateMerged:
+		return "merged"
+	case github.PRStateClosed:
+		return "closed"
+	case github.PRStateDraft:
+		return "draft"
+	case github.PRStateOpen:
+		return "open"
+	default:
+		return ""
+	}
+}
+
+// checkStateString maps a github.CheckState to a web token; "" means no checks known.
+func checkStateString(s github.CheckState) string {
+	switch s {
+	case github.CheckStatePassing:
+		return "passing"
+	case github.CheckStateFailing:
+		return "failing"
+	case github.CheckStatePending:
+		return "pending"
+	default:
+		return ""
+	}
 }
 
 func toTaskJSONSlice(tasks []*db.Task) []*taskJSON {
