@@ -3,6 +3,7 @@ package events
 import (
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -101,6 +102,50 @@ echo "$WORKTREE_PATH:$WORKTREE_BRANCH:$WORKTREE_PORT" > "` + markerFile + `"
 	if string(content) != "/tmp/wt/7-setup:task/7-setup:4200\n" {
 		t.Errorf("unexpected hook output: %q", content)
 	}
+}
+
+// recordingNotifier captures the events forwarded to it.
+type recordingNotifier struct {
+	mu     sync.Mutex
+	events []string
+}
+
+func (r *recordingNotifier) Notify(eventType string, task *db.Task, message string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.events = append(r.events, eventType)
+}
+
+func (r *recordingNotifier) seen() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]string(nil), r.events...)
+}
+
+func TestEmitterForwardsToNotifier(t *testing.T) {
+	// No hooks dir: notifier must still receive every emitted event.
+	emitter := New("")
+	rec := &recordingNotifier{}
+	emitter.SetNotifier(rec)
+
+	emitter.EmitTaskBlocked(&db.Task{ID: 1, Title: "Blocked"}, "needs input")
+	emitter.EmitTaskCompleted(&db.Task{ID: 1, Title: "Done"})
+	emitter.Wait()
+
+	seen := rec.seen()
+	if len(seen) != 2 {
+		t.Fatalf("notifier saw %d events, want 2: %v", len(seen), seen)
+	}
+	if seen[0] != TaskBlocked || seen[1] != TaskCompleted {
+		t.Errorf("notifier saw %v, want [%s %s]", seen, TaskBlocked, TaskCompleted)
+	}
+}
+
+func TestEmitterNoNotifier(t *testing.T) {
+	// No notifier set: emitting must not panic.
+	emitter := New("")
+	emitter.Emit(Event{Type: TaskBlocked, TaskID: 1})
+	emitter.Wait()
 }
 
 func TestEmitterNoHooksDir(t *testing.T) {

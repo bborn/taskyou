@@ -29,7 +29,44 @@ const (
 	// SettingHTTPAPIDisabled, when "true", stops the daemon from hosting the
 	// HTTP API (for headless/security-sensitive boxes). The API is on by default.
 	SettingHTTPAPIDisabled = "http_api_disabled"
+
+	// Push notification settings. OFF by default — nothing is sent unless
+	// SettingNotifyEnabled is "true" AND a provider is configured. See
+	// internal/notify for the delivery logic.
+
+	// SettingNotifyEnabled, when "true", turns on push notifications for task
+	// lifecycle events (blocked/needs-input, auth-required, completed, failed).
+	SettingNotifyEnabled = "notify_enabled"
+	// SettingNotifyBaseURL is the externally reachable base URL of the daemon
+	// HTTP API, used to build one-tap action links in notifications (e.g.
+	// "https://ty.my-tailnet.ts.net:8080"). Falls back to http://localhost:<port>.
+	SettingNotifyBaseURL = "notify_base_url"
+	// SettingNotifyUnblockReply is the canned reply sent to a blocked task when
+	// the user taps the one-tap action button. Defaults to "continue".
+	SettingNotifyUnblockReply = "notify_unblock_reply"
+
+	// ntfy (https://ntfy.sh) provider.
+	// SettingNtfyServer is the ntfy server base URL (default https://ntfy.sh).
+	SettingNtfyServer = "notify_ntfy_server"
+	// SettingNtfyTopic is the ntfy topic to publish to. A bare topic name or a
+	// full topic URL. Empty disables the ntfy provider.
+	SettingNtfyTopic = "notify_ntfy_topic"
+	// SettingNtfyToken is an optional ntfy access token for protected topics.
+	// Treated as a secret (hidden from `ty settings` and the settings API).
+	SettingNtfyToken = "notify_ntfy_token" //nolint:gosec // G101: this is a settings-key name, not a credential
+
+	// Telegram bot provider.
+	// SettingTelegramToken is the Telegram bot token. Secret. Empty disables it.
+	SettingTelegramToken = "notify_telegram_token" //nolint:gosec // G101: this is a settings-key name, not a credential
+	// SettingTelegramChatID is the Telegram chat ID to deliver messages to.
+	SettingTelegramChatID = "notify_telegram_chat_id"
 )
+
+// DefaultNtfyServer is the ntfy server used when SettingNtfyServer is unset.
+const DefaultNtfyServer = "https://ntfy.sh"
+
+// DefaultUnblockReply is the canned reply sent on a one-tap unblock action.
+const DefaultUnblockReply = "continue"
 
 // DefaultHTTPAPIPort is the port the daemon-hosted HTTP API binds by default.
 // Matches the standalone `ty serve` default so existing clients (ty-web, the

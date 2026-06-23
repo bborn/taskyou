@@ -117,6 +117,14 @@ func completeSettingKeys(cmd *cobra.Command, args []string, toComplete string) (
 			"idle_suspend_timeout\tIdle timeout before suspending (e.g. 6h)",
 			"http_api_port\tPort for the daemon-hosted HTTP API (default 8080)",
 			"http_api_disabled\tDisable the daemon-hosted HTTP API (true/false)",
+			"notify_enabled\tEnable push notifications (true/false)",
+			"notify_base_url\tExternally reachable HTTP API base for one-tap actions",
+			"notify_unblock_reply\tCanned reply sent on a one-tap unblock",
+			"notify_ntfy_server\tntfy server base URL (default https://ntfy.sh)",
+			"notify_ntfy_topic\tntfy topic to publish to",
+			"notify_ntfy_token\tntfy access token for protected topics (secret)",
+			"notify_telegram_token\tTelegram bot token (secret)",
+			"notify_telegram_chat_id\tTelegram chat ID to deliver to",
 		}, cobra.ShellCompDirectiveNoFileComp
 	}
 	return nil, cobra.ShellCompDirectiveNoFileComp

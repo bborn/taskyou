@@ -42,9 +42,17 @@ type Event struct {
 	Timestamp time.Time              `json:"timestamp"`
 }
 
+// Notifier receives every emitted event so it can deliver push notifications.
+// It is implemented by internal/notify. Kept as an interface here so the events
+// package stays free of provider/config dependencies.
+type Notifier interface {
+	Notify(eventType string, task *db.Task, message string)
+}
+
 // Emitter handles event emission via hooks.
 type Emitter struct {
 	hooksDir string
+	notifier Notifier
 	wg       sync.WaitGroup
 }
 
@@ -53,21 +61,39 @@ func New(hooksDir string) *Emitter {
 	return &Emitter{hooksDir: hooksDir}
 }
 
+// SetNotifier attaches a push notifier. Once set, every emitted event is also
+// forwarded to it (the notifier itself decides what, if anything, to send).
+func (e *Emitter) SetNotifier(n Notifier) {
+	e.notifier = n
+}
+
 // Emit triggers a hook script if it exists for the event type.
 // Hooks run in a background goroutine — short-lived CLI commands should
 // call Wait before exiting so the hook actually runs.
 func (e *Emitter) Emit(event Event) {
-	if e.hooksDir == "" {
-		return
-	}
 	if event.Timestamp.IsZero() {
 		event.Timestamp = time.Now()
 	}
-	e.wg.Add(1)
-	go func() {
-		defer e.wg.Done()
-		e.runHook(event)
-	}()
+
+	// Run the matching hook script (if a hooks dir is configured).
+	if e.hooksDir != "" {
+		e.wg.Add(1)
+		go func() {
+			defer e.wg.Done()
+			e.runHook(event)
+		}()
+	}
+
+	// Fan the event out to the push notifier on the same wait group so
+	// short-lived CLI/MCP commands flush notifications via Wait before exit.
+	// This runs independently of hooks — a notifier works even with no hooks dir.
+	if e.notifier != nil {
+		e.wg.Add(1)
+		go func() {
+			defer e.wg.Done()
+			e.notifier.Notify(event.Type, event.Task, event.Message)
+		}()
+	}
 }
 
 // Wait blocks until all in-flight hooks have completed.

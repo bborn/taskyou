@@ -25,6 +25,7 @@ import (
 	"github.com/bborn/workflow/internal/events"
 	"github.com/bborn/workflow/internal/github"
 	"github.com/bborn/workflow/internal/hooks"
+	"github.com/bborn/workflow/internal/notify"
 )
 
 // TaskEvent represents a change to a task.
@@ -165,6 +166,10 @@ func New(database *db.DB, cfg *config.Config) *Executor {
 		executorName:    display,
 	}
 
+	// Attach the push notifier so lifecycle events (blocked/needs-input,
+	// auth-required, completed, failed) can deliver pushes. OFF unless configured.
+	eventsEmitter.SetNotifier(notify.New(database))
+
 	// Register the events emitter with the database for event emission
 	database.SetEventEmitter(eventsEmitter)
 
@@ -202,6 +207,10 @@ func NewWithLogging(database *db.DB, cfg *config.Config, w io.Writer) *Executor 
 		executorSlug:    slug,
 		executorName:    display,
 	}
+
+	// Attach the push notifier so lifecycle events (blocked/needs-input,
+	// auth-required, completed, failed) can deliver pushes. OFF unless configured.
+	eventsEmitter.SetNotifier(notify.New(database))
 
 	// Register the events emitter with the database for event emission
 	database.SetEventEmitter(eventsEmitter)

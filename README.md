@@ -77,6 +77,7 @@ The same UI is also served in your browser at `http://localhost:8484` whenever `
 - **Git Worktrees** - Each task runs in an isolated worktree, no conflicts between parallel tasks
 - **Pluggable Executors** - Choose between Claude Code, OpenAI Codex, Gemini, Pi, OpenClaw, or OpenCode per task
 - **Event Hooks** - Run scripts when tasks change state (see [Event Hooks](#event-hooks))
+- **Push Notifications** - Get a push (ntfy or Telegram) when a task needs you, with a one-tap reply to unblock it from your phone (see [docs/notifications.md](docs/notifications.md))
 - **Ghost Text Autocomplete** - LLM-powered suggestions for task titles and descriptions as you type
 - **VS Code-style Fuzzy Search** - Quick task navigation with smart matching (e.g., "dsno" matches "diseno website")
 - **Markdown Rendering** - Task descriptions render with proper formatting in the detail view

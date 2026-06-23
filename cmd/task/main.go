@@ -32,6 +32,7 @@ import (
 	"github.com/bborn/workflow/internal/github"
 	"github.com/bborn/workflow/internal/hooks"
 	"github.com/bborn/workflow/internal/mcp"
+	"github.com/bborn/workflow/internal/notify"
 	"github.com/bborn/workflow/internal/ui"
 	"github.com/bborn/workflow/internal/web"
 )
@@ -84,6 +85,9 @@ func openTaskDB(path string) (*db.DB, error) {
 	if taskEmitter == nil {
 		taskEmitter = events.New(hooks.DefaultHooksDir())
 	}
+	// Bind the push notifier to the database this caller is using so settings
+	// (and the latest needs-input question) are read from the live handle.
+	taskEmitter.SetNotifier(notify.New(database))
 	database.SetEventEmitter(taskEmitter)
 	return database, nil
 }
@@ -2339,6 +2343,25 @@ servers programmatically.`,
 			}
 			fmt.Printf("idle_suspend_timeout: %s\n", idleTimeout)
 
+			// Push notifications
+			notifyEnabled, _ := database.GetSetting(config.SettingNotifyEnabled)
+			if notifyEnabled == "" {
+				notifyEnabled = "false (default)"
+			}
+			fmt.Printf("notify_enabled: %s\n", notifyEnabled)
+			if ntfyTopic, _ := database.GetSetting(config.SettingNtfyTopic); ntfyTopic != "" {
+				fmt.Printf("notify_ntfy_topic: %s\n", ntfyTopic)
+			}
+			if ntfyToken, _ := database.GetSetting(config.SettingNtfyToken); ntfyToken != "" {
+				fmt.Printf("notify_ntfy_token: %s\n", dimStyle.Render("(set — hidden)"))
+			}
+			if tgToken, _ := database.GetSetting(config.SettingTelegramToken); tgToken != "" {
+				fmt.Printf("notify_telegram_token: %s\n", dimStyle.Render("(set — hidden)"))
+			}
+			if baseURL, _ := database.GetSetting(config.SettingNotifyBaseURL); baseURL != "" {
+				fmt.Printf("notify_base_url: %s\n", baseURL)
+			}
+
 			fmt.Println()
 			fmt.Println(dimStyle.Render("Use 'task settings set <key> <value>' to change settings"))
 		},
@@ -2356,7 +2379,18 @@ Available settings:
   autocomplete_enabled  Enable/disable ghost text autocomplete (true/false)
   idle_suspend_timeout  How long blocked tasks wait before suspending (e.g. 6h, 30m, 24h)
   http_api_port         Port the daemon-hosted HTTP API listens on (default 8080)
-  http_api_disabled     Stop the daemon from hosting the HTTP API (true/false)`,
+  http_api_disabled     Stop the daemon from hosting the HTTP API (true/false)
+
+Push notifications (off by default; see docs/notifications.md):
+  notify_enabled        Turn push notifications on/off (true/false)
+  notify_base_url       Externally reachable HTTP API base for one-tap actions
+                        (e.g. https://ty.my-tailnet.ts.net:8080)
+  notify_unblock_reply  Canned reply sent on a one-tap unblock (default "continue")
+  notify_ntfy_server    ntfy server base URL (default https://ntfy.sh)
+  notify_ntfy_topic     ntfy topic to publish to (enables the ntfy provider)
+  notify_ntfy_token     ntfy access token for protected topics (secret)
+  notify_telegram_token       Telegram bot token (secret; enables Telegram)
+  notify_telegram_chat_id     Telegram chat ID to deliver to`,
 		Args: cobra.ExactArgs(2),
 		Run: func(cmd *cobra.Command, args []string) {
 			key := args[0]
@@ -2389,9 +2423,27 @@ Available settings:
 					fmt.Println(errorStyle.Render("Value must be 'true' or 'false'"))
 					return
 				}
+			case config.SettingNotifyEnabled:
+				if value != "true" && value != "false" {
+					fmt.Println(errorStyle.Render("Value must be 'true' or 'false'"))
+					return
+				}
+			case config.SettingNotifyBaseURL, config.SettingNtfyServer:
+				if !strings.HasPrefix(value, "http://") && !strings.HasPrefix(value, "https://") {
+					fmt.Println(errorStyle.Render("Value must be an http:// or https:// URL"))
+					return
+				}
+			case config.SettingNotifyUnblockReply,
+				config.SettingNtfyTopic, config.SettingNtfyToken,
+				config.SettingTelegramToken, config.SettingTelegramChatID:
+				// Free-form strings; no validation beyond being non-empty.
+				if value == "" {
+					fmt.Println(errorStyle.Render("Value must not be empty"))
+					return
+				}
 			default:
 				fmt.Println(errorStyle.Render("Unknown setting: " + key))
-				fmt.Println(dimStyle.Render("Available: anthropic_api_key, autocomplete_enabled, idle_suspend_timeout, http_api_port, http_api_disabled"))
+				fmt.Println(dimStyle.Render("Available: anthropic_api_key, autocomplete_enabled, idle_suspend_timeout, http_api_port, http_api_disabled, notify_enabled, notify_base_url, notify_unblock_reply, notify_ntfy_server, notify_ntfy_topic, notify_ntfy_token, notify_telegram_token, notify_telegram_chat_id"))
 				return
 			}
 
