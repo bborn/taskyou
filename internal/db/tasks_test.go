@@ -2569,3 +2569,53 @@ func TestGetStaleWorktreeTasks(t *testing.T) {
 		t.Fatalf("expected 2 stale tasks, got %d", len(tasks))
 	}
 }
+
+func TestPRAutoCompletedMarker(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	db, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer db.Close()
+
+	if err := db.CreateProject(&Project{Name: "test", Path: tmpDir}); err != nil {
+		t.Fatalf("failed to create test project: %v", err)
+	}
+	task := &Task{Title: "t", Status: StatusBlocked, Type: TypeCode, Project: "test"}
+	if err := db.CreateTask(task); err != nil {
+		t.Fatalf("failed to create task: %v", err)
+	}
+
+	// No marker yet.
+	if done, err := db.WasPRAutoCompleted(task.ID, 100); err != nil || done {
+		t.Fatalf("expected not auto-completed, got done=%v err=%v", done, err)
+	}
+
+	// Mark PR #100 as having auto-completed the task.
+	if err := db.MarkPRAutoCompleted(task.ID, 100); err != nil {
+		t.Fatalf("MarkPRAutoCompleted: %v", err)
+	}
+
+	// PR #100 is now consumed (reopen-after-merge must not re-complete).
+	if done, err := db.WasPRAutoCompleted(task.ID, 100); err != nil || !done {
+		t.Fatalf("expected PR #100 auto-completed, got done=%v err=%v", done, err)
+	}
+
+	// A different PR number is still eligible to auto-complete.
+	if done, err := db.WasPRAutoCompleted(task.ID, 101); err != nil || done {
+		t.Fatalf("expected PR #101 not auto-completed, got done=%v err=%v", done, err)
+	}
+
+	// The marker must not leak into the displayed conversation log.
+	logs, err := db.GetTaskLogs(task.ID, 100)
+	if err != nil {
+		t.Fatalf("GetTaskLogs: %v", err)
+	}
+	for _, l := range logs {
+		if l.LineType == "question" || l.LineType == "output" || l.LineType == "text" {
+			t.Fatalf("unexpected visible log line_type %q from marker", l.LineType)
+		}
+	}
+}

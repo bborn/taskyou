@@ -2972,7 +2972,7 @@ func (m *DetailModel) renderContent() string {
 
 		for _, log := range m.logs {
 			// Skip internal-only log entries not meant for display
-			if log.LineType == "pending_tool" {
+			if log.LineType == "pending_tool" || log.LineType == "pr_done_marker" {
 				continue
 			}
 			icon := "  "

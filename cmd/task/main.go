@@ -2383,7 +2383,9 @@ Available settings:
   notify_provider       Delivery method: ntfy (default) or webhook
   notify_target         ntfy topic URL (e.g. https://ntfy.sh/my-ty) or webhook URL
   notify_events         Comma list: blocked,auth_required,completed,failed (default)
-  notify_url            Base URL for notification deep links (e.g. http://my-host:8080)`,
+  notify_url            Base URL for notification deep links (e.g. http://my-host:8080)
+  http_api_port         Port the daemon-hosted HTTP API listens on (default 8080)
+  http_api_disabled     Stop the daemon from hosting the HTTP API (true/false)`,
 		Args: cobra.ExactArgs(2),
 		Run: func(cmd *cobra.Command, args []string) {
 			key := args[0]
@@ -2418,9 +2420,19 @@ Available settings:
 				}
 			case notify.SettingTarget, notify.SettingEvents, notify.SettingURL:
 				// Free-form strings; no validation.
+			case config.SettingHTTPAPIPort:
+				if p, err := strconv.Atoi(value); err != nil || p < 1 || p > 65535 {
+					fmt.Println(errorStyle.Render("Value must be a port number between 1 and 65535"))
+					return
+				}
+			case config.SettingHTTPAPIDisabled:
+				if value != "true" && value != "false" {
+					fmt.Println(errorStyle.Render("Value must be 'true' or 'false'"))
+					return
+				}
 			default:
 				fmt.Println(errorStyle.Render("Unknown setting: " + key))
-				fmt.Println(dimStyle.Render("Available: anthropic_api_key, autocomplete_enabled, idle_suspend_timeout, notify_enabled, notify_provider, notify_target, notify_events, notify_url"))
+				fmt.Println(dimStyle.Render("Available: anthropic_api_key, autocomplete_enabled, idle_suspend_timeout, notify_enabled, notify_provider, notify_target, notify_events, notify_url, http_api_port, http_api_disabled"))
 				return
 			}
 
@@ -3764,6 +3776,18 @@ func runLocal(dangerousMode bool, debugStatePath, cpuProfilePath, memProfilePath
 	stopProfiling := setupProfiling(cpuProfilePath, memProfilePath)
 	defer stopProfiling() // safety net for early-return error paths below
 
+	// Only one interactive TUI may run at a time. A second one fights the first
+	// over the executor tmux panes and traps every task in a "claude --resume"
+	// interrupt loop (see acquireTUILock). Refuse to start rather than corrupt
+	// the running sessions; the daemon, desktop app, and web viewer are
+	// unaffected (they don't borrow panes).
+	releaseTUILock, err := acquireTUILock()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, dimStyle.Render("A ty session is already running on this machine — only one interactive TUI can manage the executor panes at a time. Close the other session first."))
+		return nil
+	}
+	defer releaseTUILock()
+
 	// Ensure daemon is running
 	if err := ensureDaemonRunning(dangerousMode); err != nil {
 		fmt.Fprintln(os.Stderr, dimStyle.Render("Warning: could not start daemon: "+err.Error()))
@@ -3880,6 +3904,45 @@ func ensureDaemonRunning(dangerousMode bool) error {
 
 	fmt.Fprintln(os.Stderr, dimStyle.Render(fmt.Sprintf("Started daemon (pid %d, %s mode)", cmd.Process.Pid, modeStr)))
 	return nil
+}
+
+// acquireTUILock takes an exclusive, process-lifetime lock so only one
+// interactive TUI runs at a time. Two concurrent TUIs fight over the executor
+// tmux panes — each borrows the Claude pane into its own session via join-pane,
+// which leaves the daemon window looking empty, so EnsureTaskWindow recreates it
+// with `claude --resume`. That resume replays into the in-flight tool call and
+// Claude Code records "[Request interrupted by user for tool use]", producing an
+// endless "Interrupted" loop that makes no progress.
+//
+// flock is tied to the open file description, so the lock is released
+// automatically when the holding process exits — a crashed TUI never leaves a
+// stale lock (unlike a pidfile). The lock lives next to the database so isolated
+// instances (custom WORKTREE_DB_PATH, e.g. QA harnesses) don't contend with the
+// real one.
+//
+// It retries briefly so a `ty restart` that momentarily overlaps the outgoing
+// TUI doesn't spuriously fail. Returns a release func, or an error when another
+// TUI already holds the lock.
+func acquireTUILock() (func(), error) {
+	lockPath := filepath.Join(filepath.Dir(db.DefaultPath()), "tui.lock")
+	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0644)
+	if err != nil {
+		return nil, fmt.Errorf("open TUI lock file: %w", err)
+	}
+
+	const attempts = 10
+	for i := 0; i < attempts; i++ {
+		if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err == nil {
+			return func() {
+				_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+				_ = f.Close()
+			}, nil
+		}
+		time.Sleep(150 * time.Millisecond)
+	}
+
+	_ = f.Close()
+	return nil, fmt.Errorf("another ty session is already running")
 }
 
 func getPidFilePath() string {
@@ -4098,6 +4161,12 @@ func runDaemon() error {
 
 	logger.Info("Executor started, waiting for tasks...")
 
+	// Host the HTTP API in-process so external clients (ty-web, the ty-chrome
+	// extension) can reach it whenever the daemon is up — no separate `ty serve`
+	// needed. Failures here (e.g. port already bound) are logged but never bring
+	// down the executor; the daemon's job is running tasks first and foremost.
+	httpSrv := startDaemonHTTPAPI(database, exec, logger)
+
 	// Handle signals
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
@@ -4105,9 +4174,60 @@ func runDaemon() error {
 	// Wait for signal
 	sig := <-sigCh
 	logger.Info("Received signal, shutting down", "signal", sig)
+	if httpSrv != nil {
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		httpSrv.Shutdown(shutdownCtx)
+		shutdownCancel()
+	}
 	exec.Stop()
 
 	return nil
+}
+
+// startDaemonHTTPAPI launches the HTTP API server in a background goroutine,
+// reusing the daemon's already-running executor for session bootstrap. It
+// returns the server so the caller can shut it down gracefully, or nil if the
+// API is disabled. A bind failure is logged and tolerated — it must never stop
+// the daemon from executing tasks.
+func startDaemonHTTPAPI(database *db.DB, exec *executor.Executor, logger *log.Logger) *web.Server {
+	if disabled, _ := database.GetSetting(config.SettingHTTPAPIDisabled); disabled == "true" {
+		logger.Info("HTTP API disabled via setting", "key", config.SettingHTTPAPIDisabled)
+		return nil
+	}
+
+	port := config.DefaultHTTPAPIPort
+	if v, _ := database.GetSetting(config.SettingHTTPAPIPort); v != "" {
+		if p, err := strconv.Atoi(v); err == nil && p > 0 {
+			port = p
+		} else {
+			logger.Warn("Invalid HTTP API port setting, using default", "value", v, "default", port)
+		}
+	}
+
+	srv := web.New(web.Config{
+		Addr:      fmt.Sprintf(":%d", port),
+		DB:        database,
+		CmdRunner: &execCommandRunner{},
+		Sessions:  exec,
+	})
+
+	go func() {
+		// Belt-and-suspenders: a panic outside an HTTP handler (net/http already
+		// recovers per-request panics) must not take down the executor.
+		defer func() {
+			if r := recover(); r != nil {
+				logger.Error("HTTP API goroutine panicked; executor continues", "panic", r)
+			}
+		}()
+		if err := srv.Start(); err != nil {
+			// Most commonly "address already in use" (e.g. a stale `ty serve`).
+			// The executor keeps running regardless.
+			logger.Warn("HTTP API not started", "error", err)
+		}
+	}()
+
+	logger.Info("HTTP API listening", "port", port)
+	return srv
 }
 
 // ClaudeHookInput is the JSON structure Claude sends to hooks via stdin.

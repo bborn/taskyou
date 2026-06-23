@@ -48,6 +48,10 @@ Requires a `ty` build that has the `/api/tasks/{id}/annotations` and
    - **Select** — click any element, describe what should change
    - **Box** — drag a rectangle over a region
    - **Note** — page-level comment
+
+   Select/Box/region drags use pointer events, so they work the same whether
+   you're on a real pointer or in Chrome DevTools' mobile/responsive
+   (touch-emulation) mode.
 4. Optionally add an overall instruction, then **Send**.
 5. Watch the executor pick it up in the side panel's live console. When it
    finishes its turn, the page auto-reloads (toggle in the Executor header) —
