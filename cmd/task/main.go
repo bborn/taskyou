@@ -578,7 +578,9 @@ Examples:
   task create "Refactor auth" --executor codex  # Use Codex instead of Claude
   task create "Urgent bug" --tags "bug,urgent" --pinned  # Tagged and pinned task
   task create --body "The login button is broken on mobile devices" # AI generates title
-  task create "QA: PR #2526" --branch fix/ui-overflow --project myapp  # Checkout existing branch`,
+  task create "QA: PR #2526" --branch fix/ui-overflow --project myapp  # Checkout existing branch
+  task create --from-issue https://github.com/owner/repo/issues/123  # Create from a GitHub issue
+  task create --from-issue https://github.com/owner/repo/pull/45 --branch-from-pr  # Import a PR and check out its branch`,
 		Args: cobra.MaximumNArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
 			var title string
@@ -598,7 +600,43 @@ Examples:
 			pinned, _ := cmd.Flags().GetBool("pinned")
 			remoteControl, _ := cmd.Flags().GetBool("remote-control")
 			branch, _ := cmd.Flags().GetString("branch")
+			fromIssue, _ := cmd.Flags().GetString("from-issue")
+			branchFromPR, _ := cmd.Flags().GetBool("branch-from-pr")
 			outputJSON, _ := cmd.Flags().GetBool("json")
+
+			// --from-issue: pull title/body/labels from a GitHub issue, PR, or
+			// discussion and pre-fill the task. Detected values only fill fields
+			// the user did not explicitly set.
+			var sourceRef *github.SourceRef
+			if fromIssue != "" {
+				ref, err := github.ParseSourceURL(fromIssue)
+				if err != nil {
+					fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+					os.Exit(1)
+				}
+				item, err := github.FetchSourceItem(ref)
+				if err != nil {
+					fmt.Fprintln(os.Stderr, errorStyle.Render("Error fetching "+string(ref.Kind)+": "+err.Error()))
+					os.Exit(1)
+				}
+				sourceRef = &ref
+
+				if strings.TrimSpace(title) == "" {
+					title = item.Title
+				}
+				body = mergeSourceBody(body, item)
+				tags = mergeSourceTags(tags, item.Labels)
+
+				// For PRs, optionally check out the PR's branch (unless the user
+				// already gave an explicit --branch).
+				if ref.Kind == github.SourcePR && branchFromPR && branch == "" {
+					branch = item.HeadBranch
+				}
+
+				if !outputJSON {
+					fmt.Println(dimStyle.Render(fmt.Sprintf("Imported %s %s/%s#%d", string(ref.Kind), ref.Owner, ref.Repo, ref.Number)))
+				}
+			}
 
 			// Validate that either title or body is provided
 			if strings.TrimSpace(title) == "" && strings.TrimSpace(body) == "" {
@@ -670,6 +708,17 @@ Examples:
 				if cwd, err := os.Getwd(); err == nil {
 					if p, err := database.GetProjectByPath(cwd); err == nil && p != nil {
 						project = p.Name
+					}
+				}
+			}
+
+			// If still unset and we imported from a GitHub URL, try to match a
+			// project whose git remote points at the same owner/repo.
+			if project == "" && sourceRef != nil {
+				if name := detectProjectByRepo(database, sourceRef.NameWithOwner()); name != "" {
+					project = name
+					if !outputJSON {
+						fmt.Println(dimStyle.Render("Detected project from repo: " + project))
 					}
 				}
 			}
@@ -778,6 +827,8 @@ Examples:
 	createCmd.Flags().Bool("pinned", false, "Pin the task to the top of its column")
 	createCmd.Flags().Bool("remote-control", false, "Launch Claude with --remote-control (interactive, remote-drivable session)")
 	createCmd.Flags().StringP("branch", "b", "", "Existing branch to checkout for worktree (e.g., fix/ui-overflow)")
+	createCmd.Flags().String("from-issue", "", "Create the task from a GitHub issue, PR, or discussion URL (pre-fills title/body, carries labels as tags, links back, auto-detects project)")
+	createCmd.Flags().Bool("branch-from-pr", false, "When --from-issue points at a PR, check out the PR's branch in the worktree")
 	createCmd.Flags().Bool("json", false, "Output in JSON format")
 	createCmd.RegisterFlagCompletionFunc("project", completeFlagProjects)
 	createCmd.RegisterFlagCompletionFunc("type", completeFlagTypes)
@@ -4807,6 +4858,74 @@ func formatLogEntry(entry map[string]interface{}) string {
 // in CLI input. This allows users to enter multi-line text from the command line.
 func unescapeNewlines(s string) string {
 	return strings.ReplaceAll(s, "\\n", "\n")
+}
+
+// mergeSourceBody combines a user-provided body with the imported issue/PR body
+// and a link back to the source. If the user supplied their own body it is kept
+// at the top, followed by the source link; otherwise the imported body is used.
+func mergeSourceBody(userBody string, item *github.SourceItem) string {
+	link := fmt.Sprintf("Source: %s", item.URL)
+
+	var sections []string
+	if strings.TrimSpace(userBody) != "" {
+		sections = append(sections, strings.TrimRight(userBody, "\n"))
+	} else if strings.TrimSpace(item.Body) != "" {
+		sections = append(sections, strings.TrimRight(item.Body, "\n"))
+	}
+	sections = append(sections, link)
+	return strings.Join(sections, "\n\n")
+}
+
+// mergeSourceTags merges existing comma-separated tags with imported labels,
+// preserving order and dropping duplicates (case-insensitive).
+func mergeSourceTags(existing string, labels []string) string {
+	var merged []string
+	seen := make(map[string]bool)
+	add := func(tag string) {
+		tag = strings.TrimSpace(tag)
+		if tag == "" {
+			return
+		}
+		key := strings.ToLower(tag)
+		if seen[key] {
+			return
+		}
+		seen[key] = true
+		merged = append(merged, tag)
+	}
+
+	for _, t := range strings.Split(existing, ",") {
+		add(t)
+	}
+	for _, l := range labels {
+		add(l)
+	}
+	return strings.Join(merged, ",")
+}
+
+// detectProjectByRepo returns the name of the project whose git origin remote
+// points at the given "owner/repo" slug, or an empty string if none match.
+func detectProjectByRepo(database *db.DB, nameWithOwner string) string {
+	if nameWithOwner == "" {
+		return ""
+	}
+	projects, err := database.ListProjects()
+	if err != nil {
+		return ""
+	}
+	for _, p := range projects {
+		if p.Path == "" {
+			continue
+		}
+		out, err := osexec.Command("git", "-C", p.Path, "remote", "get-url", "origin").Output()
+		if err != nil {
+			continue
+		}
+		if strings.EqualFold(github.RepoSlugFromRemote(string(out)), nameWithOwner) {
+			return p.Name
+		}
+	}
+	return ""
 }
 
 // truncate shortens a string to maxLen, adding ellipsis if needed.
