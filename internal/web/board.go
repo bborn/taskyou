@@ -25,12 +25,13 @@ type BoardColumn struct {
 
 // BoardEntry is a single task card in the board.
 type BoardEntry struct {
-	ID      int64  `json:"id"`
-	Title   string `json:"title"`
-	Project string `json:"project"`
-	Type    string `json:"type"`
-	Pinned  bool   `json:"pinned"`
-	AgeHint string `json:"age_hint"`
+	ID      int64         `json:"id"`
+	Title   string        `json:"title"`
+	Project string        `json:"project"`
+	Type    string        `json:"type"`
+	Pinned  bool          `json:"pinned"`
+	AgeHint string        `json:"age_hint"`
+	PR      *prStatusJSON `json:"pr,omitempty"`
 }
 
 // BuildBoardSnapshot groups tasks into kanban columns.
@@ -79,6 +80,7 @@ func BuildBoardSnapshot(tasks []*db.Task, limit int) BoardSnapshot {
 				Type:    task.Type,
 				Pinned:  task.Pinned,
 				AgeHint: boardAgeHint(task),
+				PR:      toPRStatusJSON(task.PRInfoJSON),
 			}
 			column.Tasks = append(column.Tasks, entry)
 		}

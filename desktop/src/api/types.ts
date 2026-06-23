@@ -29,11 +29,26 @@ export interface Task {
   shell_pane_id?: string;
   pr_url: string;
   pr_number?: number;
+  pr?: PRStatus;
   summary?: string;
   created_at: string;
   updated_at: string;
   started_at?: string;
   completed_at?: string;
+}
+
+export type PRState = "open" | "draft" | "merged" | "closed";
+export type PRCheckState = "passing" | "failing" | "pending" | "";
+
+// Live PR badge payload mirrored from the cached github.PRInfo on the server.
+export interface PRStatus {
+  number: number;
+  url: string;
+  state: PRState;
+  check_state: PRCheckState;
+  mergeable: string;
+  additions: number;
+  deletions: number;
 }
 
 export interface LogLine {

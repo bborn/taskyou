@@ -724,13 +724,28 @@ func (db *DB) UpdateTask(t *Task) error {
 
 // UpdateTaskPRInfo updates only the PR-related fields for a task.
 // This is used to persist PR state from GitHub API responses without touching other fields.
+//
+// When the cached PR JSON actually changes, it records a board-change event so the
+// HTTP API's SSE stream re-pushes the board — this is how a live PR badge reaches
+// the web/desktop without a restart. We compare against the stored value first so
+// idle refreshes (state unchanged) don't spam the change feed every tick.
 func (db *DB) UpdateTaskPRInfo(taskID int64, prURL string, prNumber int, prInfoJSON string) error {
+	var prevJSON string
+	// Best-effort read of the prior value to detect real changes. A scan error
+	// (e.g. task gone) leaves prevJSON empty, so we fall through and emit — the
+	// UPDATE below will no-op on a missing row anyway.
+	_ = db.QueryRow(`SELECT pr_info_json FROM tasks WHERE id = ?`, taskID).Scan(&prevJSON)
+
 	_, err := db.Exec(`
 		UPDATE tasks SET pr_url = ?, pr_number = ?, pr_info_json = ?, updated_at = CURRENT_TIMESTAMP
 		WHERE id = ?
 	`, prURL, prNumber, prInfoJSON, taskID)
 	if err != nil {
 		return fmt.Errorf("update task pr info: %w", err)
+	}
+
+	if prevJSON != prInfoJSON {
+		db.recordEvent("task.updated", taskID, "pr status")
 	}
 	return nil
 }

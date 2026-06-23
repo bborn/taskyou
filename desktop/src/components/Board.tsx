@@ -1,8 +1,8 @@
 import { memo, useEffect, useRef, useState } from "react";
 import { AnimatePresence, motion } from "motion/react";
-import { GitPullRequest, Pin } from "lucide-react";
+import { Check, Clock, GitMerge, GitPullRequest, GitPullRequestClosed, Pin, X } from "lucide-react";
 import { api } from "../api/client";
-import type { LogLine, Task } from "../api/types";
+import type { LogLine, PRStatus, Task } from "../api/types";
 import { ageHint, type Column } from "../lib/board";
 import { store, useAppSelector } from "../store";
 import { checkEnvironment, inTauri } from "../tauri";
@@ -34,6 +34,91 @@ const COLUMN_DOT: Record<string, string> = {
   blocked: "bg-status-blocked",
   done: "bg-status-done",
 };
+
+/** Per-state visual treatment for the PR badge (icon + border/text color),
+ * mirroring the TUI's PRStatusBadge palette. */
+const PR_STATE_STYLE: Record<
+  PRStatus["state"],
+  { Icon: typeof GitPullRequest; className: string; label: string }
+> = {
+  open: {
+    Icon: GitPullRequest,
+    className: "border-emerald-400/40 text-emerald-600 dark:text-emerald-300",
+    label: "open",
+  },
+  draft: {
+    Icon: GitPullRequest,
+    className: "border-muted-foreground/40 text-muted-foreground",
+    label: "draft",
+  },
+  merged: {
+    Icon: GitMerge,
+    className: "border-purple-400/40 text-purple-600 dark:text-purple-300",
+    label: "merged",
+  },
+  closed: {
+    Icon: GitPullRequestClosed,
+    className: "border-red-400/40 text-red-600 dark:text-red-300",
+    label: "closed",
+  },
+};
+
+/** CI check rollup indicator appended to the badge. Conflicting merges read as a
+ * failure (parity with the TUI, where conflicts outrank check status). */
+function CheckMark({ pr }: { pr: PRStatus }) {
+  if (pr.state === "merged" || pr.state === "closed") return null;
+  if (pr.mergeable === "CONFLICTING") {
+    return <X className="size-2.5 text-red-500" aria-label="merge conflicts" />;
+  }
+  switch (pr.check_state) {
+    case "passing":
+      return <Check className="size-2.5 text-emerald-500" aria-label="checks passing" />;
+    case "failing":
+      return <X className="size-2.5 text-red-500" aria-label="checks failing" />;
+    case "pending":
+      return <Clock className="size-2.5 text-amber-500" aria-label="checks running" />;
+    default:
+      return null;
+  }
+}
+
+/** Live PR badge: state, CI checks, and diff size. Falls back to a bare PR chip
+ * for legacy rows that have a URL but no cached PR state yet. */
+function PRBadge({ task }: { task: Task }) {
+  const pr = task.pr;
+  if (!pr) {
+    if (!task.pr_url) return null;
+    return (
+      <Badge
+        variant="outline"
+        className="h-4 gap-0.5 border-purple-400/40 px-1.5 text-[10px] text-purple-600 dark:text-purple-300"
+      >
+        <GitPullRequest className="size-2.5" />
+        {task.pr_number ? `#${task.pr_number}` : "PR"}
+      </Badge>
+    );
+  }
+  const style = PR_STATE_STYLE[pr.state] ?? PR_STATE_STYLE.open;
+  const { Icon } = style;
+  const title = `PR #${pr.number} — ${style.label}${pr.check_state ? ` · checks ${pr.check_state}` : ""}`;
+  return (
+    <Badge
+      variant="outline"
+      className={cn("h-4 gap-0.5 px-1.5 text-[10px]", style.className)}
+      title={title}
+    >
+      <Icon className="size-2.5" />
+      {pr.number ? `#${pr.number}` : "PR"}
+      <CheckMark pr={pr} />
+      {(pr.additions > 0 || pr.deletions > 0) && (
+        <span className="ml-0.5 font-mono text-muted-foreground">
+          {pr.additions > 0 && <span className="text-emerald-600 dark:text-emerald-400">+{pr.additions}</span>}
+          {pr.deletions > 0 && <span className="ml-0.5 text-red-600 dark:text-red-400">−{pr.deletions}</span>}
+        </span>
+      )}
+    </Badge>
+  );
+}
 
 function useSpinner(active: boolean): string {
   const [frame, setFrame] = useState(0);
@@ -67,6 +152,11 @@ function cardPropsEqual(prev: CardProps, next: CardProps): boolean {
     a.pinned === b.pinned &&
     a.pr_url === b.pr_url &&
     a.pr_number === b.pr_number &&
+    a.pr?.state === b.pr?.state &&
+    a.pr?.check_state === b.pr?.check_state &&
+    a.pr?.mergeable === b.pr?.mergeable &&
+    a.pr?.additions === b.pr?.additions &&
+    a.pr?.deletions === b.pr?.deletions &&
     a.executor === b.executor &&
     a.project === b.project &&
     a.updated_at === b.updated_at
@@ -146,15 +236,7 @@ const CardSlot = memo(function CardSlot({ task, selected, projectColor, latest }
               needs input
             </Badge>
           )}
-          {task.pr_url && (
-            <Badge
-              variant="outline"
-              className="h-4 gap-0.5 border-purple-400/40 px-1.5 text-[10px] text-purple-600 dark:text-purple-300"
-            >
-              <GitPullRequest className="size-2.5" />
-              {task.pr_number ? `#${task.pr_number}` : "PR"}
-            </Badge>
-          )}
+          <PRBadge task={task} />
           {task.executor && task.executor !== "claude" && (
             <Badge variant="outline" className="h-4 px-1.5 text-[10px]">
               {task.executor}
