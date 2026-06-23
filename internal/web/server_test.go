@@ -7,8 +7,10 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/bborn/workflow/internal/db"
 )
@@ -596,6 +598,73 @@ func TestHandleListEvents(t *testing.T) {
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", w.Code)
+	}
+}
+
+func TestHandleTaskTimeline(t *testing.T) {
+	srv, database, _ := setupServer(t)
+
+	task := &db.Task{Title: "Timeline Web Task", Status: db.StatusBacklog, Project: "personal"}
+	if err := database.CreateTask(task); err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	if err := database.UpdateTaskStatus(task.ID, db.StatusQueued); err != nil {
+		t.Fatalf("update status: %v", err)
+	}
+	if err := database.UpdateTaskStatus(task.ID, db.StatusProcessing); err != nil {
+		t.Fatalf("update status: %v", err)
+	}
+
+	req := httptest.NewRequest("GET", "/api/tasks/1/timeline", nil)
+	req.SetPathValue("id", strconv.FormatInt(task.ID, 10))
+	w := httptest.NewRecorder()
+	srv.handleTaskTimeline(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+
+	var entries []timelineEntryJSON
+	if err := json.NewDecoder(w.Body).Decode(&entries); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(entries) == 0 {
+		t.Fatal("expected timeline entries, got none")
+	}
+	if entries[0].EventType != "task.created" {
+		t.Errorf("expected first entry task.created, got %s", entries[0].EventType)
+	}
+	// Every entry must carry a real, parseable UTC timestamp.
+	for i, e := range entries {
+		if e.CreatedAt == "" {
+			t.Errorf("entry %d missing created_at", i)
+		}
+		if _, err := time.Parse(time.RFC3339, e.CreatedAt); err != nil {
+			t.Errorf("entry %d created_at not RFC3339: %q", i, e.CreatedAt)
+		}
+	}
+	// The queued→processing transition should be present.
+	var sawTransition bool
+	for _, e := range entries {
+		if e.Label == "queued → processing" {
+			sawTransition = true
+		}
+	}
+	if !sawTransition {
+		t.Error("expected a 'queued → processing' entry in web timeline")
+	}
+}
+
+func TestHandleTaskTimeline_InvalidID(t *testing.T) {
+	srv, _, _ := setupServer(t)
+
+	req := httptest.NewRequest("GET", "/api/tasks/abc/timeline", nil)
+	req.SetPathValue("id", "abc")
+	w := httptest.NewRecorder()
+	srv.handleTaskTimeline(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", w.Code)
 	}
 }
 

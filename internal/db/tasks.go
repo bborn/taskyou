@@ -1022,6 +1022,10 @@ func (db *DB) RetryTask(id int64, feedback string) error {
 		// The executor will still handle duplicates via name-based cleanup
 	}
 
+	// Record a distinct retry event so the activity timeline can show it
+	// separately from an ordinary re-queue transition.
+	db.recordEvent("task.retry", id, feedback)
+
 	// Re-queue the task
 	return db.UpdateTaskStatus(id, StatusQueued)
 }

@@ -1003,6 +1003,58 @@ func (s *Server) handleListEvents(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, events)
 }
 
+// --- Timeline ---
+
+// timelineEntryJSON is the wire form of a db.TaskTimelineEntry, with the
+// timestamp rendered as a real UTC RFC3339 string (matching the rest of the API).
+type timelineEntryJSON struct {
+	ID        int64  `json:"id"`
+	EventType string `json:"event_type"`
+	Label     string `json:"label"`
+	Detail    string `json:"detail,omitempty"`
+	CreatedAt string `json:"created_at"`
+}
+
+func toTimelineJSON(e db.TaskTimelineEntry) timelineEntryJSON {
+	return timelineEntryJSON{
+		ID:        e.ID,
+		EventType: e.EventType,
+		Label:     e.Label,
+		Detail:    e.Detail,
+		CreatedAt: apiTime(e.CreatedAt.Time),
+	}
+}
+
+// handleTaskTimeline returns a task's chronological activity timeline, built
+// from the event_log: state transitions, retries, blocks, and completion with
+// real timestamps and short labels.
+func (s *Server) handleTaskTimeline(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		jsonErr(w, "invalid task id", http.StatusBadRequest)
+		return
+	}
+
+	limit := 0 // GetTaskTimeline applies its own default
+	if v := r.URL.Query().Get("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			limit = n
+		}
+	}
+
+	entries, err := s.db.GetTaskTimeline(id, limit)
+	if err != nil {
+		jsonErr(w, "failed to query timeline", http.StatusInternalServerError)
+		return
+	}
+
+	out := make([]timelineEntryJSON, 0, len(entries))
+	for _, e := range entries {
+		out = append(out, toTimelineJSON(e))
+	}
+	jsonOK(w, out)
+}
+
 // --- Status ---
 
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {

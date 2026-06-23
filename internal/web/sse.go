@@ -42,6 +42,14 @@ func (s *Server) handleTaskStream(w http.ResponseWriter, r *http.Request) {
 	heartbeat := time.NewTicker(15 * time.Second)
 	defer heartbeat.Stop()
 
+	// Track the newest activity-timeline event we've already streamed so we only
+	// push new lifecycle events. Clients fetch the initial timeline via the REST
+	// endpoint, so we start from the current max and stream forward from there.
+	var lastTimelineID int64
+	if entries, err := s.db.GetTaskTimeline(id, 1); err == nil && len(entries) > 0 {
+		lastTimelineID = entries[len(entries)-1].ID
+	}
+
 	ctx := r.Context()
 	for {
 		select {
@@ -71,8 +79,34 @@ func (s *Server) handleTaskStream(w http.ResponseWriter, r *http.Request) {
 			if len(logs) > 0 {
 				flusher.Flush()
 			}
+
+			// Stream any new activity-timeline events.
+			lastTimelineID = s.streamTimelineSince(w, flusher, id, lastTimelineID)
 		}
 	}
+}
+
+// streamTimelineSince writes any timeline entries newer than lastID as SSE
+// "timeline" events and returns the new high-water mark.
+func (s *Server) streamTimelineSince(w http.ResponseWriter, flusher http.Flusher, taskID, lastID int64) int64 {
+	entries, err := s.db.GetTaskTimeline(taskID, 200)
+	if err != nil {
+		return lastID
+	}
+	var wrote bool
+	for _, e := range entries {
+		if e.ID <= lastID {
+			continue
+		}
+		data, _ := json.Marshal(toTimelineJSON(e))
+		fmt.Fprintf(w, "event: timeline\ndata: %s\n\n", data)
+		lastID = e.ID
+		wrote = true
+	}
+	if wrote {
+		flusher.Flush()
+	}
+	return lastID
 }
 
 // handleBoardStream sends SSE events when the board changes.

@@ -580,3 +580,48 @@ func TestContainsSourceFiles(t *testing.T) {
 		})
 	}
 }
+
+// TestDetailTimelineRendersAndUpdatesLive verifies the Activity Timeline section
+// appears in the detail content with real lifecycle entries, and that new events
+// landing in the event_log are picked up live on Refresh().
+func TestDetailTimelineRendersAndUpdatesLive(t *testing.T) {
+	database, err := db.Open(filepath.Join(t.TempDir(), "timeline.db"))
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer database.Close()
+
+	task := &db.Task{Title: "Timeline UI Task", Status: db.StatusBacklog, Body: "body"}
+	if err := database.CreateTask(task); err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	if err := database.UpdateTaskStatus(task.ID, db.StatusQueued); err != nil {
+		t.Fatalf("update status: %v", err)
+	}
+
+	m, _ := NewDetailModel(task, database, nil, 160, 50, false)
+
+	content := m.renderContent()
+	if !strings.Contains(content, "Activity Timeline") {
+		t.Fatalf("expected Activity Timeline section in detail content:\n%s", content)
+	}
+	if !strings.Contains(content, "Created") {
+		t.Error("expected a 'Created' timeline entry")
+	}
+	if !strings.Contains(content, "queued") {
+		t.Error("expected the queued transition to appear in the timeline")
+	}
+
+	// A new lifecycle event should be reflected after Refresh().
+	beforeHash := m.lastTimelineHash
+	if err := database.UpdateTaskStatus(task.ID, db.StatusProcessing); err != nil {
+		t.Fatalf("update status: %v", err)
+	}
+	m.Refresh()
+	if m.lastTimelineHash == beforeHash {
+		t.Error("expected timeline hash to change after a new event landed")
+	}
+	if !strings.Contains(m.renderContent(), "processing") {
+		t.Error("expected the processing transition to appear after live refresh")
+	}
+}

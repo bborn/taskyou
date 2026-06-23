@@ -99,6 +99,7 @@ func New(cfg Config) *Server {
 
 	// Task logs, streaming, executor output & terminal
 	mux.HandleFunc("GET /api/tasks/{id}/logs", s.handleTaskLogs)
+	mux.HandleFunc("GET /api/tasks/{id}/timeline", s.handleTaskTimeline)
 	mux.HandleFunc("GET /api/tasks/{id}/stream", s.handleTaskStream)
 	mux.HandleFunc("GET /api/tasks/{id}/output", s.handleTaskOutput)
 	mux.HandleFunc("GET /api/tasks/{id}/terminal", s.handleTerminal)

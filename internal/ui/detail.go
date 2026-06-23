@@ -141,12 +141,18 @@ type DetailModel struct {
 	glamourRendererUnfocused *glamour.TermRenderer
 	glamourWidth             int // Width the renderers were created for
 
+	// Activity timeline (task lifecycle events from the event_log), refreshed
+	// on the periodic Refresh() tick so it updates live as new events land.
+	timeline         []db.TaskTimelineEntry
+	lastTimelineHash uint64
+
 	// Content caching to avoid unnecessary re-renders
-	lastRenderedBody    string
-	lastRenderedSummary string
-	lastRenderedLogHash uint64
-	lastRenderedFocused bool
-	cachedContent       string
+	lastRenderedBody         string
+	lastRenderedSummary      string
+	lastRenderedLogHash      uint64
+	lastRenderedTimelineHash uint64
+	lastRenderedFocused      bool
+	cachedContent            string
 
 	// View render cache. View() runs on every Bubble Tea update while the detail
 	// view is open (focus ticks, polls, pane events), but its pixels only change
@@ -465,6 +471,19 @@ func (m *DetailModel) Refresh() tea.Cmd {
 		}
 	}
 
+	// Refresh the activity timeline. The query is small (bounded, indexed by
+	// task_id), so we reload it here and only re-render when it actually changed
+	// — this is what makes the timeline update live as new events land.
+	if timeline, tlErr := m.database.GetTaskTimeline(m.task.ID, 100); tlErr == nil {
+		if h := timelineHash(timeline); h != m.lastTimelineHash {
+			m.timeline = timeline
+			m.lastTimelineHash = h
+			if m.ready {
+				m.setViewportContent()
+			}
+		}
+	}
+
 	// Check log count first to avoid loading all logs if unchanged.
 	// Load logs asynchronously to avoid blocking the UI event loop.
 	var cmd tea.Cmd
@@ -580,6 +599,13 @@ func NewDetailModel(t *db.Task, database *db.DB, exec *executor.Executor, width,
 	// Load logs
 	logs, _ := database.GetTaskLogs(t.ID, 100)
 	m.logs = logs
+
+	// Load the activity timeline so it paints immediately; later events arrive
+	// via the periodic Refresh() tick.
+	if timeline, err := database.GetTaskTimeline(t.ID, 100); err == nil {
+		m.timeline = timeline
+		m.lastTimelineHash = timelineHash(timeline)
+	}
 
 	m.initViewport()
 
@@ -2804,10 +2830,12 @@ func (m *DetailModel) renderContent() string {
 	// Check if we can use cached content
 	// Note: We don't cache when related tasks are loading/changing
 	logHash := m.computeLogHash()
+	tlHash := m.lastTimelineHash
 	if m.cachedContent != "" &&
 		m.lastRenderedBody == t.Body &&
 		m.lastRenderedSummary == t.Summary &&
 		m.lastRenderedLogHash == logHash &&
+		m.lastRenderedTimelineHash == tlHash &&
 		m.lastRenderedFocused == m.focused &&
 		!m.relatedTasksLoading {
 		return m.cachedContent
@@ -2963,6 +2991,14 @@ func (m *DetailModel) renderContent() string {
 		}
 	}
 
+	// Activity timeline (task lifecycle from the event_log)
+	if len(m.timeline) > 0 {
+		b.WriteString("\n")
+		b.WriteString(Bold.Render("Activity Timeline"))
+		b.WriteString("\n\n")
+		b.WriteString(m.renderTimeline(dimmedStyle))
+	}
+
 	// Execution logs
 	if len(m.logs) > 0 {
 		b.WriteString("\n")
@@ -3018,10 +3054,66 @@ func (m *DetailModel) renderContent() string {
 	m.lastRenderedBody = t.Body
 	m.lastRenderedSummary = t.Summary
 	m.lastRenderedLogHash = logHash
+	m.lastRenderedTimelineHash = tlHash
 	m.lastRenderedFocused = m.focused
 	m.cachedContent = content
 
 	return content
+}
+
+// timelineEventIcon maps an event type to a small glyph for the timeline.
+func timelineEventIcon(eventType string) string {
+	switch eventType {
+	case "task.created":
+		return "✨"
+	case "task.completed":
+		return "✅"
+	case "task.blocked":
+		return "⛔"
+	case "task.retry":
+		return "🔁"
+	case "task.deleted":
+		return "🗑️"
+	default: // task.updated and anything else
+		return "•"
+	}
+}
+
+// renderTimeline renders the activity timeline entries as a compact, chronological
+// list with real timestamps and short labels.
+func (m *DetailModel) renderTimeline(dimmedStyle lipgloss.Style) string {
+	var b strings.Builder
+	for _, e := range m.timeline {
+		icon := timelineEventIcon(e.EventType)
+		ts := e.CreatedAt.Time.Format("Jan 2 15:04:05")
+		label := e.Label
+		if e.Detail != "" {
+			label = fmt.Sprintf("%s — %s", label, e.Detail)
+		}
+		var line string
+		if m.focused {
+			line = fmt.Sprintf("%s %s %s", Dim.Render(ts), icon, label)
+		} else {
+			line = fmt.Sprintf("%s %s %s", dimmedStyle.Render(ts), icon, dimmedStyle.Render(label))
+		}
+		b.WriteString(line)
+		b.WriteString("\n")
+	}
+	return b.String()
+}
+
+// timelineHash is a fast change-detection proxy for the activity timeline: the
+// entry count combined with the newest entry's id. New events always increase
+// the id, so any change flips the hash and triggers a re-render. The count is
+// multiplied by a prime before mixing so it can't cancel the id (for a single
+// task the ids are sequential and a plain XOR would collide to zero).
+func timelineHash(entries []db.TaskTimelineEntry) uint64 {
+	if len(entries) == 0 {
+		return 0
+	}
+	hash := uint64(len(entries)) * 1000003
+	hash ^= uint64(entries[len(entries)-1].ID)
+	return hash
 }
 
 func (m *DetailModel) renderHelp() string {
