@@ -101,6 +101,8 @@ type KeyMap struct {
 	// Spotlight mode
 	Spotlight     key.Binding
 	SpotlightSync key.Binding
+	// Read-only file/diff viewer in the detail view
+	ViewDiff key.Binding
 }
 
 // ShortHelp returns key bindings to show in the mini help.
@@ -280,6 +282,10 @@ func DefaultKeyMap() KeyMap {
 		SpotlightSync: key.NewBinding(
 			key.WithKeys("F"),
 			key.WithHelp("F", "spotlight sync"),
+		),
+		ViewDiff: key.NewBinding(
+			key.WithKeys("v"),
+			key.WithHelp("v", "review changes"),
 		),
 	}
 }
@@ -2479,6 +2485,15 @@ func (m *AppModel) updateDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
+	// When the read-only file/diff viewer is open, let it consume navigation
+	// keys (file up/down, mode toggle, esc to close) before the normal detail
+	// keybindings. Keys it doesn't consume (j/k scrolling, etc.) fall through.
+	if m.detailView != nil && m.detailView.FileViewerActive() {
+		if handled, vcmd := m.detailView.HandleFileViewerKey(keyMsg); handled {
+			return m, vcmd
+		}
+	}
+
 	if key.Matches(keyMsg, m.keys.Back) {
 		m.currentView = ViewDashboard
 		// Clear origin column when exiting detail view
@@ -2609,6 +2624,9 @@ func (m *AppModel) updateDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if key.Matches(keyMsg, m.keys.ToggleShellPane) && m.detailView != nil {
 		m.detailView.ToggleShellPane()
 		return m, nil
+	}
+	if key.Matches(keyMsg, m.keys.ViewDiff) && m.detailView != nil && m.selectedTask != nil {
+		return m, m.detailView.OpenFileViewer()
 	}
 
 	// Arrow key navigation to prev/next task in the same column
