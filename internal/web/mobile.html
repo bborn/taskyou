@@ -1,0 +1,257 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta name="theme-color" content="#16161e" />
+<title>TaskYou — remote</title>
+<style>
+  :root {
+    --bg: #16161e; --panel: #1a1b26; --card: #1f2335; --line: #2a2e42;
+    --fg: #c0caf5; --dim: #565f89; --accent: #7aa2f7; --warn: #e0af68;
+    --bad: #f7768e; --good: #9ece6a; --run: #7dcfff;
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin: 0; background: var(--bg); color: var(--fg);
+    font: 16px/1.4 -apple-system, system-ui, "Segoe UI", Roboto, sans-serif; }
+  body { padding: env(safe-area-inset-top) 0 env(safe-area-inset-bottom); }
+  header { position: sticky; top: 0; z-index: 5; background: var(--panel);
+    border-bottom: 1px solid var(--line); padding: 14px 16px;
+    display: flex; align-items: center; justify-content: space-between; }
+  header h1 { font-size: 17px; margin: 0; letter-spacing: .3px; }
+  header .meta { color: var(--dim); font-size: 12px; }
+  main { padding: 12px 12px 80px; max-width: 720px; margin: 0 auto; }
+  .section-title { color: var(--dim); font-size: 12px; text-transform: uppercase;
+    letter-spacing: .8px; margin: 18px 6px 8px; display: flex; gap: 8px; align-items: center; }
+  .section-title .n { background: var(--card); color: var(--fg); border-radius: 10px;
+    padding: 1px 8px; font-size: 11px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px;
+    padding: 13px 14px; margin-bottom: 10px; display: block; width: 100%; text-align: left;
+    color: inherit; font: inherit; cursor: pointer; }
+  .card:active { background: #262b40; }
+  .card .title { font-weight: 600; }
+  .card .sub { color: var(--dim); font-size: 12.5px; margin-top: 5px;
+    display: flex; gap: 8px; flex-wrap: wrap; }
+  .pill { border-radius: 8px; padding: 1px 7px; font-size: 11px; }
+  .pill.blocked { background: rgba(224,175,104,.16); color: var(--warn); }
+  .pill.processing { background: rgba(125,207,255,.16); color: var(--run); }
+  .pill.done { background: rgba(158,206,106,.16); color: var(--good); }
+  .pill.backlog { background: rgba(86,95,137,.18); color: var(--dim); }
+  .card.attention { border-color: var(--warn); box-shadow: 0 0 0 1px rgba(224,175,104,.25) inset; }
+  .empty { color: var(--dim); font-size: 13px; padding: 6px; }
+  /* Detail overlay */
+  #overlay { position: fixed; inset: 0; background: var(--bg); z-index: 20;
+    overflow-y: auto; display: none; flex-direction: column; }
+  #overlay.open { display: flex; }
+  .ov-head { position: sticky; top: 0; background: var(--panel);
+    border-bottom: 1px solid var(--line); padding: 12px 14px;
+    display: flex; align-items: center; gap: 12px; }
+  .ov-head button.back { background: none; border: none; color: var(--accent);
+    font-size: 16px; padding: 6px 4px; cursor: pointer; }
+  .ov-body { padding: 14px; max-width: 720px; width: 100%; margin: 0 auto; }
+  .ov-body h2 { font-size: 18px; margin: 0 0 8px; }
+  .logs { background: #0e0f17; border: 1px solid var(--line); border-radius: 10px;
+    padding: 10px; font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
+    white-space: pre-wrap; word-break: break-word; color: #a9b1d6; max-height: 45vh;
+    overflow-y: auto; margin: 12px 0; }
+  .summary { background: var(--card); border: 1px solid var(--line); border-radius: 10px;
+    padding: 11px 12px; margin: 12px 0; white-space: pre-wrap; }
+  textarea { width: 100%; background: var(--card); color: var(--fg);
+    border: 1px solid var(--line); border-radius: 10px; padding: 11px;
+    font: inherit; resize: vertical; min-height: 84px; }
+  .actions { display: flex; gap: 8px; flex-wrap: wrap; margin: 10px 0; }
+  button.act { flex: 1 1 auto; min-width: 120px; background: var(--accent); color: #0b0f1a;
+    border: none; border-radius: 10px; padding: 13px; font-size: 15px; font-weight: 600;
+    cursor: pointer; }
+  button.act.ghost { background: transparent; color: var(--fg); border: 1px solid var(--line); }
+  button.act.warn { background: var(--warn); }
+  button.act:active { filter: brightness(.9); }
+  a.pr { color: var(--accent); text-decoration: none; font-size: 14px; }
+  .toast { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%);
+    background: var(--card); border: 1px solid var(--line); color: var(--fg);
+    padding: 10px 16px; border-radius: 10px; font-size: 14px; z-index: 50;
+    opacity: 0; transition: opacity .2s; pointer-events: none; }
+  .toast.show { opacity: 1; }
+  .hint { color: var(--dim); font-size: 12px; margin: 6px 2px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>TaskYou</h1>
+  <span class="meta" id="status">connecting…</span>
+</header>
+<main id="board"><div class="empty">Loading…</div></main>
+
+<div id="overlay">
+  <div class="ov-head">
+    <button class="back" onclick="closeTask()">‹ Board</button>
+    <span class="meta" id="ov-status"></span>
+  </div>
+  <div class="ov-body" id="ov-body"></div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+const SECTIONS = [
+  { status: "blocked",    label: "Needs you",   attention: true },
+  { status: "processing", label: "Running" },
+  { status: "backlog",    label: "Queue" },
+  { status: "done",       label: "Recent" },
+];
+let pollTimer = null;
+let currentTaskId = null;
+
+function esc(s) {
+  return (s || "").replace(/[&<>"']/g, c => (
+    { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+function toast(msg) {
+  const t = document.getElementById("toast");
+  t.textContent = msg; t.classList.add("show");
+  clearTimeout(t._h); t._h = setTimeout(() => t.classList.remove("show"), 1800);
+}
+async function api(method, path, body) {
+  const opt = { method, headers: {} };
+  if (body !== undefined) { opt.headers["Content-Type"] = "application/json"; opt.body = JSON.stringify(body); }
+  const r = await fetch(path, opt);
+  if (!r.ok) throw new Error((await r.text()) || r.statusText);
+  const ct = r.headers.get("content-type") || "";
+  return ct.includes("json") ? r.json() : r.text();
+}
+
+async function loadBoard() {
+  try {
+    const board = await api("GET", "/api/board?limit=100");
+    renderBoard(board);
+    document.getElementById("status").textContent =
+      "updated " + new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  } catch (e) {
+    document.getElementById("status").textContent = "offline";
+  }
+}
+
+function renderBoard(board) {
+  const byStatus = {};
+  (board.columns || []).forEach(c => { byStatus[c.status] = c; });
+  let html = "";
+  for (const s of SECTIONS) {
+    const col = byStatus[s.status];
+    const tasks = (col && col.tasks) || [];
+    const count = (col && col.count) || 0;
+    if (s.status === "done" && tasks.length === 0) continue;
+    html += `<div class="section-title">${s.label}<span class="n">${count}</span></div>`;
+    if (tasks.length === 0) {
+      html += `<div class="empty">Nothing here.</div>`;
+      continue;
+    }
+    for (const t of tasks) {
+      const cls = "card" + (s.attention ? " attention" : "");
+      html += `<button class="${cls}" onclick="openTask(${t.id})">
+        <div class="title">${esc(t.title)}</div>
+        <div class="sub">
+          <span class="pill ${s.status}">${esc(s.label)}</span>
+          ${t.project ? `<span>${esc(t.project)}</span>` : ""}
+          ${t.age_hint ? `<span>${esc(t.age_hint)}</span>` : ""}
+        </div>
+      </button>`;
+    }
+  }
+  document.getElementById("board").innerHTML = html || `<div class="empty">No tasks.</div>`;
+}
+
+async function openTask(id) {
+  currentTaskId = id;
+  history.replaceState(null, "", "?task=" + id);
+  const ov = document.getElementById("overlay");
+  ov.classList.add("open");
+  document.getElementById("ov-body").innerHTML = `<div class="empty">Loading…</div>`;
+  await refreshTask();
+}
+
+async function refreshTask() {
+  if (currentTaskId == null) return;
+  let data;
+  try { data = await api("GET", "/api/tasks/" + currentTaskId); }
+  catch (e) { document.getElementById("ov-body").innerHTML = `<div class="empty">Couldn't load task.</div>`; return; }
+  const t = data.task || {};
+  const logs = (data.logs || []).slice(-60).map(l => l.content).join("\n");
+  document.getElementById("ov-status").textContent = "#" + t.id + " · " + (t.status || "");
+
+  const blocked = t.status === "blocked";
+  const finished = t.status === "done" || t.status === "failed";
+  let actions = "";
+  if (blocked) {
+    actions = `
+      <div class="hint">This task is waiting for you. Reply to keep it moving.</div>
+      <textarea id="reply" placeholder="Type a reply to the agent…"></textarea>
+      <div class="actions">
+        <button class="act" onclick="sendReply()">Send reply</button>
+        <button class="act ghost" onclick="quick('yes')">Approve</button>
+        <button class="act ghost" onclick="quick('continue')">Continue</button>
+      </div>`;
+  } else if (finished) {
+    actions = `
+      <div class="hint">Send it back with feedback to pick the work back up.</div>
+      <textarea id="reply" placeholder="Optional feedback for the retry…"></textarea>
+      <div class="actions">
+        <button class="act warn" onclick="retryTask()">Retry</button>
+      </div>`;
+  } else {
+    actions = `<div class="hint">Agent is working. You'll get a push when it needs you.</div>`;
+  }
+
+  document.getElementById("ov-body").innerHTML = `
+    <h2>${esc(t.title)}</h2>
+    <div class="sub" style="color:var(--dim);font-size:13px;margin-bottom:6px">
+      ${esc(t.project || "")} ${t.branch_name ? "· " + esc(t.branch_name) : ""}
+    </div>
+    ${t.pr_url ? `<a class="pr" href="${esc(t.pr_url)}" target="_blank" rel="noopener">View PR #${t.pr_number || ""} ↗</a>` : ""}
+    ${t.summary ? `<div class="summary">${esc(t.summary)}</div>` : ""}
+    ${actions}
+    <div class="section-title" style="margin-left:0">Latest output</div>
+    <div class="logs" id="logs">${esc(logs) || "No output yet."}</div>`;
+  const lg = document.getElementById("logs");
+  if (lg) lg.scrollTop = lg.scrollHeight;
+}
+
+function closeTask() {
+  currentTaskId = null;
+  history.replaceState(null, "", location.pathname);
+  document.getElementById("overlay").classList.remove("open");
+  loadBoard();
+}
+
+async function sendReply() {
+  const el = document.getElementById("reply");
+  const msg = (el.value || "").trim();
+  if (!msg) { toast("Type a reply first"); return; }
+  try { await api("POST", "/api/tasks/" + currentTaskId + "/input", { message: msg }); el.value = "";
+    toast("Sent"); setTimeout(refreshTask, 600); }
+  catch (e) { toast("Failed: " + e.message); }
+}
+async function quick(text) {
+  try { await api("POST", "/api/tasks/" + currentTaskId + "/input", { message: text });
+    toast("Sent “" + text + "”"); setTimeout(refreshTask, 600); }
+  catch (e) { toast("Failed: " + e.message); }
+}
+async function retryTask() {
+  const el = document.getElementById("reply");
+  const feedback = el ? (el.value || "").trim() : "";
+  try { await api("POST", "/api/tasks/" + currentTaskId + "/retry", { feedback });
+    toast("Retrying"); setTimeout(refreshTask, 600); }
+  catch (e) { toast("Failed: " + e.message); }
+}
+
+function tick() {
+  if (currentTaskId != null) refreshTask(); else loadBoard();
+}
+
+// Boot: auto-open a deep-linked task, then poll.
+const deepLink = new URLSearchParams(location.search).get("task");
+if (deepLink) openTask(parseInt(deepLink, 10)); else loadBoard();
+pollTimer = setInterval(tick, 5000);
+document.addEventListener("visibilitychange", () => { if (!document.hidden) tick(); });
+</script>
+</body>
+</html>

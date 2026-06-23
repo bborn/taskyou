@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/bborn/workflow/internal/db"
+	"github.com/bborn/workflow/internal/notify"
 )
 
 // Event types for task lifecycle
@@ -45,6 +46,7 @@ type Event struct {
 // Emitter handles event emission via hooks.
 type Emitter struct {
 	hooksDir string
+	notifier *notify.Notifier
 	wg       sync.WaitGroup
 }
 
@@ -53,11 +55,18 @@ func New(hooksDir string) *Emitter {
 	return &Emitter{hooksDir: hooksDir}
 }
 
+// SetNotifier attaches a push notifier so lifecycle events also fan out to the
+// user's phone (ntfy/webhook). Safe to pass nil to disable.
+func (e *Emitter) SetNotifier(n *notify.Notifier) {
+	e.notifier = n
+}
+
 // Emit triggers a hook script if it exists for the event type.
 // Hooks run in a background goroutine — short-lived CLI commands should
 // call Wait before exiting so the hook actually runs.
 func (e *Emitter) Emit(event Event) {
-	if e.hooksDir == "" {
+	// Nothing to dispatch to: no hook scripts and no push notifier.
+	if e.hooksDir == "" && e.notifier == nil {
 		return
 	}
 	if event.Timestamp.IsZero() {
@@ -67,7 +76,35 @@ func (e *Emitter) Emit(event Event) {
 	go func() {
 		defer e.wg.Done()
 		e.runHook(event)
+		e.runNotify(event)
 	}()
+}
+
+// runNotify pushes the event to the user's phone if a notifier is configured.
+// Best-effort: delivery errors are swallowed, like hooks.
+func (e *Emitter) runNotify(event Event) {
+	if e.notifier == nil {
+		return
+	}
+	key := notify.EventKey(event.Type)
+	if key == "" {
+		return
+	}
+	note := notify.Notification{
+		Event:   key,
+		TaskID:  event.TaskID,
+		Message: event.Message,
+	}
+	if event.Task != nil {
+		note.Title = event.Task.Title
+		note.Status = event.Task.Status
+		note.Project = event.Task.Project
+		// Prefer a distilled summary over a bare status for completed tasks.
+		if note.Message == "" && key == "completed" && event.Task.Summary != "" {
+			note.Message = event.Task.Summary
+		}
+	}
+	_ = e.notifier.Notify(note)
 }
 
 // Wait blocks until all in-flight hooks have completed.
