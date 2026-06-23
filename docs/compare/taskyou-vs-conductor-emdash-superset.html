@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TaskYou vs Conductor / Emdash / Superset — TaskYou</title>
+<meta name="description" content="Conductor, Emdash, and Superset isolate a worktree per branch and help you review">
+<link rel="icon" href="../images/logo.webp">
+<meta property="og:title" content="TaskYou vs Conductor / Emdash / Superset — TaskYou">
+<meta property="og:description" content="Conductor, Emdash, and Superset isolate a worktree per branch and help you review">
+<meta property="og:type" content="website">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="compare.css">
+</head>
+<body>
+<div class="grid-bg"></div>
+<nav>
+  <div class="wrap">
+    <a class="brand" href="/"><img src="../images/logo.webp" alt="">taskyou</a>
+    <div class="navlinks">
+      <a class="desktop-only" href="/#how">How it works</a>
+      <a class="desktop-only" href="/#features">Features</a>
+      <a class="active" href="/compare/">Compare</a>
+      <a href="https://github.com/bborn/taskyou">GitHub</a>
+      <a href="/#install" class="btn btn-primary">Install ↓</a>
+    </div>
+  </div>
+</nav>
+<section class="body">
+  <div class="wrap prose">
+<h1 class="headline">TaskYou vs Conductor / Emdash / Superset</h1>
+<p><strong>One line:</strong> Conductor, Emdash, and Superset isolate a worktree per branch and help you review the diff; TaskYou does that <em>and</em> runs the work in the background on a queue, across six executors, on whatever surface you happen to be holding.</p>
+<p>This is the comparison closest to TaskYou's own job. These tools share TaskYou's core insight — <strong>give every agent its own isolated git worktree</strong> — so the differences are about everything <em>around</em> the worktree: the queue, the lifecycle, the executor choice, and where you can drive it from.</p>
+<hr>
+<h2>What they share with TaskYou</h2>
+<p>Conductor, Emdash, and Superset are worktree-orchestration tools for coding agents. Like TaskYou, they:</p>
+<ul><li>Run each agent in an <strong>isolated git worktree</strong> so parallel work doesn't collide.</li><li>Center the workflow on <strong>diffs and pull requests</strong> rather than raw terminal panes.</li><li>Aim to let you run <strong>multiple agents in parallel</strong> on the same repo.</li></ul>
+<p>If the terminal-multiplexer tools are one camp, this is the "worktree orchestrator" camp — and TaskYou lives here too. So we'll be precise about the differences instead of hand-waving.</p>
+<h2>What TaskYou does differently</h2>
+<div class="tablewrap"><table><thead><tr><th></th><th class="c"><strong>TaskYou</strong></th><th class="c">Conductor / Emdash / Superset</th></tr></thead><tbody><tr><td>Worktree-per-task isolation</td><td class="val"><span class="mark yes">✓︎</span></td><td class="val"><span class="mark yes">✓︎</span><span class="anno">(the shared idea)</span></td></tr><tr><td>Diff / PR review flow</td><td class="val"><span class="mark yes">✓︎</span><span class="anno">+ PR-aware completion lifecycle</span></td><td class="val"><span class="mark yes">✓︎</span></td></tr><tr><td><strong>Kanban board</strong> as the home surface</td><td class="val"><span class="mark yes">✓︎</span><span class="anno">Backlog / In Progress / Blocked / Done</span></td><td class="val"><span class="mark partial">◐︎</span><span class="anno">varies; often a list or per-agent view</span></td></tr><tr><td><strong>Queue + background execution</strong></td><td class="val"><span class="mark yes">✓︎</span><span class="anno">stack a column, walk away</span></td><td class="val"><span class="mark partial">◐︎</span><span class="anno">varies by tool</span></td></tr><tr><td><strong>Pluggable executors</strong></td><td class="val"><span class="mark yes">✓︎</span><span class="anno">Claude, Codex, Gemini, Pi, OpenClaw, OpenCode — per task</span></td><td class="val"><span class="mark partial">◐︎</span><span class="anno">usually one or two</span></td></tr><tr><td><strong>Routines</strong> — scheduled unattended runs feeding the queue</td><td class="val"><span class="mark yes">✓︎</span></td><td class="val"><span class="mark no">✕︎</span></td></tr><tr><td><strong>PR-aware completion</strong> (task auto-<code>done</code> on merge/close)</td><td class="val"><span class="mark yes">✓︎</span></td><td class="val"><span class="mark partial">◐︎</span></td></tr><tr><td><strong>Multi-surface</strong> (TUI · web · desktop · email · SSH · Chrome)</td><td class="val"><span class="mark yes">✓︎</span></td><td class="val"><span class="mark partial">◐︎</span><span class="anno">usually one app (often desktop or web)</span></td></tr><tr><td><strong>Fully scriptable CLI + MCP</strong> for agents to drive the queue</td><td class="val"><span class="mark yes">✓︎</span></td><td class="val"><span class="mark partial">◐︎</span></td></tr><tr><td>Open source</td><td class="val"><span class="mark yes">✓︎</span><span class="anno">MIT</span></td><td class="val"><span class="mark partial">◐︎</span><span class="anno">varies</span></td></tr></tbody></table></div>
+<p>The pattern: this camp tends to ship <strong>one polished surface</strong> (a desktop app or a web app), <strong>one or two agents</strong>, and a <strong>worktree-plus-diff</strong> flow. TaskYou matches the worktree-plus-diff flow, then adds the things that make it an <em>orchestrator</em> rather than a launcher:</p>
+<ol><li><strong>A real queue.</strong> Drop ten tasks and walk away. The board works the column down in the</li></ol>
+<p>background — you're not launching agents one at a time.</p>
+<ol><li><strong>Executor choice per task.</strong> Claude Code for the gnarly refactor, Codex for the boilerplate,</li></ol>
+<p>Gemini or Pi or OpenClaw or OpenCode for whatever fits — on the same board.</p>
+<ol><li><strong>PR-aware completion.</strong> A task that opens a PR goes to <code>blocked</code> for human review, then is</li></ol>
+<p>promoted to <code>done</code> automatically when the PR merges or closes. The board mirrors your repo.</p>
+<ol><li><strong>Routines.</strong> Named, unattended agent runs — scouts and monitors — that wake on a schedule and</li></ol>
+<p><em>file tasks into your queue</em>. Your backlog can fill itself.</p>
+<ol><li><strong>Surface independence.</strong> The same board in a terminal, a browser, a desktop app, your email,</li></ol>
+<p>and over SSH. Most tools in this camp are a single app.</p>
+<hr>
+<h2>When to pick which</h2>
+<p><strong>Pick Conductor / Emdash / Superset when:</strong></p>
+<ul><li>You want a single, polished, opinionated app and that app's chosen agent fits your workflow.</li><li>A focused worktree-and-diff experience is exactly the scope you want — no queue, no scheduler,</li></ul>
+<p>no extra surfaces.</p>
+<ul><li>Their specific UX or integrations match how your team already works.</li></ul>
+<p><strong>Pick TaskYou when:</strong></p>
+<ul><li>You want the worktree-and-diff flow <strong>plus a queue you can stack and walk away from.</strong></li><li>You want to <strong>mix executors</strong> across tasks instead of being locked to one agent.</li><li>You want <strong>routines</strong> that feed your backlog on a schedule, unattended.</li><li>You want to <strong>drive from anywhere</strong> — terminal, browser, desktop, phone (email), or SSH.</li><li>You want it <strong>open source (MIT)</strong> and scriptable to the last command.</li></ul>
+<hr>
+<p class="note"><em>Accuracy note: TaskYou capabilities are documented in the <a href="https://github.com/bborn/taskyou#readme">README</a> and the <code>extensions/ty-*</code> READMEs. The competitor column is deliberately marked <code><span class="mark partial">◐︎</span></code> where these tools differ in scope or have shipped features we haven't individually verified — this page describes the <strong>category</strong> difference (launcher vs orchestrator), not a feature-by-feature audit of each product. Corrections welcome via PR.</em></p>
+<div class="pager"><a href="/compare/">← All comparisons</a><a href="/">taskyou.dev →</a></div>
+  </div>
+</section>
+<footer>
+  <div class="wrap">
+    <span class="fbrand"><img src="../images/logo.webp" alt="">taskyou</span>
+    <span class="flinks">
+      <a href="/">Home</a>
+      <a href="/compare/">Compare</a>
+      <a href="https://github.com/bborn/taskyou">GitHub</a>
+      <a href="https://github.com/bborn/taskyou#readme">Docs</a>
+    </span>
+  </div>
+</footer>
+</body>
+</html>

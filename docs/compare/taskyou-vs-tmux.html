@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TaskYou vs tmux / Zellij — TaskYou</title>
+<meta name="description" content="tmux and Zellij multiplex terminals; TaskYou multiplexes tasks — and since">
+<link rel="icon" href="../images/logo.webp">
+<meta property="og:title" content="TaskYou vs tmux / Zellij — TaskYou">
+<meta property="og:description" content="tmux and Zellij multiplex terminals; TaskYou multiplexes tasks — and since">
+<meta property="og:type" content="website">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="compare.css">
+</head>
+<body>
+<div class="grid-bg"></div>
+<nav>
+  <div class="wrap">
+    <a class="brand" href="/"><img src="../images/logo.webp" alt="">taskyou</a>
+    <div class="navlinks">
+      <a class="desktop-only" href="/#how">How it works</a>
+      <a class="desktop-only" href="/#features">Features</a>
+      <a class="active" href="/compare/">Compare</a>
+      <a href="https://github.com/bborn/taskyou">GitHub</a>
+      <a href="/#install" class="btn btn-primary">Install ↓</a>
+    </div>
+  </div>
+</nav>
+<section class="body">
+  <div class="wrap prose">
+<h1 class="headline">TaskYou vs tmux / Zellij</h1>
+<p><strong>One line:</strong> tmux and Zellij multiplex <em>terminals</em>; TaskYou multiplexes <em>tasks</em> — and since TaskYou is built on tmux under the hood, you get the panes anyway.</p>
+<p>This is the friendliest comparison on the list, because it isn't really a competition. tmux and Zellij are terminal multiplexers — they keep sessions alive and tile panes. TaskYou is an autonomy-first task orchestrator that <em>uses</em> a multiplexer as plumbing. The question isn't "which one" — it's "what sits on top."</p>
+<hr>
+<h2>What TaskYou is</h2>
+<p>A Kanban board for coding agents. You drop a task in a column, an agent picks it up in its own isolated git worktree, runs in the background, and the card tracks itself to a merged PR. One agent per task, a worktree per agent.</p>
+<p>Under the hood, each executor runs in a <strong>tmux window</strong> inside a daemon session:</p>
+<pre><code>task-daemon-{PID}              (tmux session)
+├── _placeholder               (keeps the session alive)
+├── task-123                   (window for task 123)
+│   ├── pane 0: executor       (Claude / Codex / … output)
+│   └── pane 1: shell          (workdir access)
+├── task-124                   (window for task 124)
+└── ...</code></pre>
+<p>So TaskYou doesn't replace tmux — it <em>programs</em> it. The difference is everything that wraps those panes: a board, a queue, worktree isolation, PR tracking, and a database that remembers what every task is doing.</p>
+<h2>What tmux / Zellij give you</h2>
+<ul><li><strong>Persistent sessions</strong> — your work survives a disconnect; reattach later.</li><li><strong>Panes and windows</strong> — tile, split, and navigate terminals by hand.</li><li><strong>Scriptability</strong> — tmux especially is automatable (TaskYou leans on exactly this).</li><li><strong>Zellij extras</strong> — a modern, discoverable UX with layouts, a status bar, and plugins.</li></ul>
+<p>What they <em>don't</em> do — by design, because they're general-purpose terminal tools — is understand your work. A pane is a pane. tmux doesn't know that window 3 is an agent, that it's blocked waiting on you, that it's working in an isolated worktree, or that it just opened a PR.</p>
+<hr>
+<h2>What TaskYou adds on top of the multiplexer</h2>
+<div class="tablewrap"><table><thead><tr><th></th><th class="c"><strong>TaskYou</strong></th><th class="c"><strong>tmux / Zellij</strong></th></tr></thead><tbody><tr><td>Persistent sessions</td><td class="val"><span class="mark yes">✓︎</span><span class="anno">(via the daemon)</span></td><td class="val"><span class="mark yes">✓︎</span></td></tr><tr><td>Tiled panes</td><td class="val"><span class="mark yes">✓︎</span><span class="anno">(executor + shell per task)</span></td><td class="val"><span class="mark yes">✓︎</span></td></tr><tr><td><strong>Knows a pane is an agent</strong></td><td class="val"><span class="mark yes">✓︎</span></td><td class="val"><span class="mark no">✕︎</span></td></tr><tr><td><strong>Kanban board</strong> of work</td><td class="val"><span class="mark yes">✓︎</span></td><td class="val"><span class="mark no">✕︎</span></td></tr><tr><td><strong>Queue + background execution</strong></td><td class="val"><span class="mark yes">✓︎</span></td><td class="val"><span class="mark no">✕︎</span><span class="anno">— you launch every process by hand</span></td></tr><tr><td><strong>Worktree-per-task isolation</strong></td><td class="val"><span class="mark yes">✓︎</span><span class="anno">automatic</span></td><td class="val"><span class="mark no">✕︎</span><span class="anno">— you <code>git worktree add</code> yourself</span></td></tr><tr><td><strong>PR-aware completion</strong></td><td class="val"><span class="mark yes">✓︎</span></td><td class="val"><span class="mark no">✕︎</span></td></tr><tr><td><strong>Pluggable AI executors</strong></td><td class="val"><span class="mark yes">✓︎</span><span class="anno">6 of them</span></td><td class="val"><span class="mark no">✕︎</span><span class="anno">— not its job</span></td></tr><tr><td><strong>Task database + history</strong></td><td class="val"><span class="mark yes">✓︎</span><span class="anno">SQLite</span></td><td class="val"><span class="mark no">✕︎</span><span class="anno">— panes are ephemeral state</span></td></tr><tr><td><strong>Routines</strong> (scheduled unattended runs)</td><td class="val"><span class="mark yes">✓︎</span></td><td class="val"><span class="mark no">✕︎</span></td></tr><tr><td><strong>Web / desktop / email / SSH surfaces</strong></td><td class="val"><span class="mark yes">✓︎</span></td><td class="val"><span class="anno plain">terminal only</span></td></tr></tbody></table></div>
+<p>The honest way to say it: <strong>you <em>could</em> build a poor man's TaskYou out of tmux</strong> — a session per task, a <code>git worktree add</code> for each, a shell loop to launch agents, and a wall of sticky notes to track which is which. TaskYou is what you get when someone builds that properly and adds a board, a queue, worktree lifecycle, PR tracking, and a database so nothing gets lost.</p>
+<hr>
+<h2>When to pick which</h2>
+<p><strong>Reach for tmux / Zellij when:</strong></p>
+<ul><li>You want a general-purpose multiplexer for <em>any</em> terminal work, not just agents.</li><li>You want to hand-manage panes and sessions yourself.</li><li>You're composing your own tooling and want the lowest-level, most scriptable substrate.</li></ul>
+<p><strong>Reach for TaskYou when:</strong></p>
+<ul><li>Your terminals are mostly <strong>coding agents</strong> and you want to manage them as <em>work</em>, not panes.</li><li>You want <strong>queue + background execution + worktree isolation + PR tracking</strong> without scripting</li></ul>
+<p>it together yourself.</p>
+<ul><li>You want the same board on the <strong>web, a desktop app, email, and over SSH</strong> — not just in a</li></ul>
+<p>terminal.</p>
+<p><strong>You're already using both.</strong> TaskYou runs on tmux. If you live in tmux today, TaskYou is the task layer that sits on top of it — and you can still <code>tmux attach</code> to the daemon session and poke at any task's panes by hand whenever you want to take the wheel.</p>
+<hr>
+<p class="note"><em>Accuracy note: the tmux architecture shown above is TaskYou's actual executor model, documented in the <a href="https://github.com/bborn/taskyou#readme">README</a> under "How Task Executors Work." Zellij/tmux capabilities are their standard documented features.</em></p>
+<div class="pager"><a href="/compare/">← All comparisons</a><a href="/">taskyou.dev →</a></div>
+  </div>
+</section>
+<footer>
+  <div class="wrap">
+    <span class="fbrand"><img src="../images/logo.webp" alt="">taskyou</span>
+    <span class="flinks">
+      <a href="/">Home</a>
+      <a href="/compare/">Compare</a>
+      <a href="https://github.com/bborn/taskyou">GitHub</a>
+      <a href="https://github.com/bborn/taskyou#readme">Docs</a>
+    </span>
+  </div>
+</footer>
+</body>
+</html>

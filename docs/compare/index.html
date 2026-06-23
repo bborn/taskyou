@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Compare — TaskYou</title>
+<meta name="description" content="TaskYou is an autonomy-first task orchestrator for coding agents.">
+<link rel="icon" href="../images/logo.webp">
+<meta property="og:title" content="Compare — TaskYou">
+<meta property="og:description" content="TaskYou is an autonomy-first task orchestrator for coding agents.">
+<meta property="og:type" content="website">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="compare.css">
+</head>
+<body>
+<div class="grid-bg"></div>
+<nav>
+  <div class="wrap">
+    <a class="brand" href="/"><img src="../images/logo.webp" alt="">taskyou</a>
+    <div class="navlinks">
+      <a class="desktop-only" href="/#how">How it works</a>
+      <a class="desktop-only" href="/#features">Features</a>
+      <a class="active" href="/compare/">Compare</a>
+      <a href="https://github.com/bborn/taskyou">GitHub</a>
+      <a href="/#install" class="btn btn-primary">Install ↓</a>
+    </div>
+  </div>
+</nav>
+<section class="body">
+  <div class="wrap prose">
+<h1 class="headline">TaskYou vs everything else</h1>
+<p><strong>TaskYou is an autonomy-first task orchestrator for coding agents.</strong> You drop a task on a board, an agent picks it up and works in its own isolated git worktree in the background, and the card tracks all the way to a merged PR. One agent per task. A worktree per agent.</p>
+<p>That's a different job from a terminal multiplexer, a process dashboard, or a worktree-diff tool. This page lays the whole landscape on one grid, then links to a detailed page for each contender. We try to be fair: where a tool genuinely beats us at <em>its</em> job, we say so.</p>
+<blockquote><p><strong>The short version:</strong> most of these tools help you <em>watch and drive</em> agents you launch by</p><p>hand. TaskYou helps you <em>queue outcomes and walk away.</em> If your mental model is "panes I'm</p><p>babysitting," you want a multiplexer. If it's "a backlog that clears itself," you want TaskYou.</p></blockquote>
+<hr>
+<h2>Capability matrix</h2>
+<div class="tablewrap"><table><thead><tr><th>Capability</th><th class="c"><strong>TaskYou</strong></th><th class="c">tmux / Zellij</th><th class="c">cmux / Warp</th><th class="c">Conductor / Emdash / Superset</th></tr></thead><tbody><tr><td>Unit of work is a <strong>task / outcome</strong> (not a pane)</td><td class="val"><span class="mark yes">✓︎</span></td><td class="val"><span class="mark no">✕︎</span></td><td class="val"><span class="mark no">✕︎</span></td><td class="val"><span class="mark yes">✓︎</span></td></tr><tr><td><strong>Queue + background execution</strong> (stack work, walk away)</td><td class="val"><span class="mark yes">✓︎</span></td><td class="val"><span class="mark no">✕︎</span></td><td class="val"><span class="mark no">✕︎</span></td><td class="val"><span class="mark partial">◐︎</span></td></tr><tr><td><strong>Kanban board</strong> (Backlog / In Progress / Blocked / Done)</td><td class="val"><span class="mark yes">✓︎</span></td><td class="val"><span class="mark no">✕︎</span></td><td class="val"><span class="mark no">✕︎</span></td><td class="val"><span class="mark partial">◐︎</span></td></tr><tr><td><strong>Worktree-per-task isolation</strong>, automatic</td><td class="val"><span class="mark yes">✓︎</span></td><td class="val"><span class="mark no">✕︎</span></td><td class="val"><span class="mark partial">◐︎</span></td><td class="val"><span class="mark yes">✓︎</span></td></tr><tr><td><strong>PR-aware completion</strong> (task state follows the PR to merge)</td><td class="val"><span class="mark yes">✓︎</span></td><td class="val"><span class="mark no">✕︎</span></td><td class="val"><span class="mark no">✕︎</span></td><td class="val"><span class="mark partial">◐︎</span></td></tr><tr><td><strong>Pluggable executors</strong> (Claude, Codex, Gemini, Pi, OpenClaw, OpenCode)</td><td class="val"><span class="mark yes">✓︎</span></td><td class="val"><span class="anno plain">n/a</span></td><td class="val"><span class="mark no">✕︎</span></td><td class="val"><span class="mark partial">◐︎</span></td></tr><tr><td><strong>Routines</strong> — scheduled unattended runs that feed the queue</td><td class="val"><span class="mark yes">✓︎</span></td><td class="val"><span class="mark no">✕︎</span></td><td class="val"><span class="mark no">✕︎</span></td><td class="val"><span class="mark no">✕︎</span></td></tr><tr><td><strong>Live executor panes</strong> to watch/drive an agent</td><td class="val"><span class="mark yes">✓︎</span></td><td class="val"><span class="mark yes">✓︎</span></td><td class="val"><span class="mark yes">✓︎</span></td><td class="val"><span class="mark partial">◐︎</span></td></tr><tr><td>Runs over <strong>SSH</strong> (board from anywhere)</td><td class="val"><span class="mark yes">✓︎</span></td><td class="val"><span class="mark yes">✓︎</span></td><td class="val"><span class="mark no">✕︎</span></td><td class="val"><span class="mark no">✕︎</span></td></tr><tr><td><strong>Web UI</strong> (same board in a browser)</td><td class="val"><span class="mark yes">✓︎</span></td><td class="val"><span class="mark no">✕︎</span></td><td class="val"><span class="mark no">✕︎</span></td><td class="val"><span class="mark partial">◐︎</span></td></tr><tr><td><strong>Desktop app</strong> (macOS / Linux)</td><td class="val"><span class="mark yes">✓︎</span></td><td class="val"><span class="mark no">✕︎</span></td><td class="val"><span class="mark yes">✓︎</span></td><td class="val"><span class="mark yes">✓︎</span></td></tr><tr><td><strong>Email control</strong> (create + unblock tasks from your phone)</td><td class="val"><span class="mark yes">✓︎</span></td><td class="val"><span class="mark no">✕︎</span></td><td class="val"><span class="mark no">✕︎</span></td><td class="val"><span class="mark no">✕︎</span></td></tr><tr><td><strong>Fully scriptable CLI / agent API</strong></td><td class="val"><span class="mark yes">✓︎</span></td><td class="val"><span class="mark partial">◐︎</span></td><td class="val"><span class="mark partial">◐︎</span></td><td class="val"><span class="mark partial">◐︎</span></td></tr><tr><td>Open source</td><td class="val"><span class="mark yes">✓︎</span><span class="anno">MIT</span></td><td class="val"><span class="mark yes">✓︎</span></td><td class="val"><span class="mark partial">◐︎</span></td><td class="val"><span class="mark partial">◐︎</span></td></tr></tbody></table></div>
+<p><span class="mark yes">✓︎</span> first-class · <span class="mark partial">◐︎</span> partial / possible-but-not-the-point · <span class="mark no">✕︎</span> no · n/a not applicable <em>(<code><span class="mark partial">◐︎</span></code> and <code><span class="mark no">✕︎</span></code> for other tools reflect their stated positioning as of mid-2026; correct us with a PR if a tool has shipped past this.)</em></p>
+<hr>
+<h2>Pick your comparison</h2>
+<ul><li><strong><a href="taskyou-vs-tmux.html">TaskYou vs tmux / Zellij</a></strong> — TaskYou <em>runs on</em> tmux; here's what it adds on top.</li><li><strong><a href="taskyou-vs-conductor-emdash-superset.html">TaskYou vs Conductor / Emdash / Superset</a></strong> — the other worktree-orchestrator camp.</li><li><strong><a href="taskyou-vs-cmux-warp.html">TaskYou vs cmux / Warp</a></strong> — desktop agent apps vs a board that runs anywhere.</li></ul>
+<hr>
+<h2>One-liners</h2>
+<ul><li><strong>vs tmux / Zellij:</strong> tmux multiplexes terminals; TaskYou multiplexes <em>tasks</em> — and it's built on tmux, so you get the panes anyway.</li><li><strong>vs Conductor / Emdash / Superset:</strong> they isolate a worktree per branch and help you review the diff; TaskYou does that <em>and</em> runs the work in the background on a queue, across six executors, on whatever surface you're holding.</li><li><strong>vs cmux / Warp:</strong> they're polished Mac apps for agents; TaskYou is the same board in your terminal, your browser, your desktop, your inbox, and over SSH.</li></ul>
+<div class="pager"><a href="/compare/">← All comparisons</a></div>
+  </div>
+</section>
+<footer>
+  <div class="wrap">
+    <span class="fbrand"><img src="../images/logo.webp" alt="">taskyou</span>
+    <span class="flinks">
+      <a href="/">Home</a>
+      <a href="/compare/">Compare</a>
+      <a href="https://github.com/bborn/taskyou">GitHub</a>
+      <a href="https://github.com/bborn/taskyou#readme">Docs</a>
+    </span>
+  </div>
+</footer>
+</body>
+</html>

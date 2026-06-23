@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TaskYou vs cmux / Warp — TaskYou</title>
+<meta name="description" content="cmux and Warp are polished apps for running agents on your machine; TaskYou is the">
+<link rel="icon" href="../images/logo.webp">
+<meta property="og:title" content="TaskYou vs cmux / Warp — TaskYou">
+<meta property="og:description" content="cmux and Warp are polished apps for running agents on your machine; TaskYou is the">
+<meta property="og:type" content="website">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="compare.css">
+</head>
+<body>
+<div class="grid-bg"></div>
+<nav>
+  <div class="wrap">
+    <a class="brand" href="/"><img src="../images/logo.webp" alt="">taskyou</a>
+    <div class="navlinks">
+      <a class="desktop-only" href="/#how">How it works</a>
+      <a class="desktop-only" href="/#features">Features</a>
+      <a class="active" href="/compare/">Compare</a>
+      <a href="https://github.com/bborn/taskyou">GitHub</a>
+      <a href="/#install" class="btn btn-primary">Install ↓</a>
+    </div>
+  </div>
+</nav>
+<section class="body">
+  <div class="wrap prose">
+<h1 class="headline">TaskYou vs cmux / Warp</h1>
+<p><strong>One line:</strong> cmux and Warp are polished apps for running agents on your machine; TaskYou is the same job as a board that runs <em>anywhere</em> — terminal, browser, desktop, email, and over SSH — and is built to queue work and walk away.</p>
+<p>cmux (a Mac terminal app for agents) and Warp (an agentic development platform / terminal) both bet on a beautiful, local, GUI-forward experience. TaskYou bets on <strong>autonomy and reach</strong>: file an outcome, let an agent run it in the background in an isolated worktree, and pick up the result from whatever device you have.</p>
+<hr>
+<h2>What cmux / Warp are good at</h2>
+<ul><li><strong>Polished, native UX.</strong> Warp in particular is a gorgeous terminal with first-class agent</li></ul>
+<p>features; cmux is a focused Mac app for driving agents. If you want a beautiful local cockpit, this is the camp.</p>
+<ul><li><strong>Low friction on your own machine.</strong> Install the app, open it, go. No daemon mental model, no</li></ul>
+<p>SSH server to think about.</p>
+<ul><li><strong>Rich interactive features</strong> baked into the app — completions, blocks, agent panes, and so on.</li></ul>
+<p>If you primarily work on one Mac and want the most polished local agent experience, these are strong, and TaskYou doesn't try to out-pretty them.</p>
+<h2>Where TaskYou is different</h2>
+<div class="tablewrap"><table><thead><tr><th></th><th class="c"><strong>TaskYou</strong></th><th class="c">cmux / Warp</th></tr></thead><tbody><tr><td>Center of gravity</td><td class="val"><span class="anno plain">A <strong>task board</strong> + queue</span></td><td class="val"><span class="anno plain">A polished terminal/app you drive</span></td></tr><tr><td>Queue + background execution</td><td class="val"><span class="mark yes">✓︎</span><span class="anno">stack work, walk away</span></td><td class="val"><span class="mark no">✕︎</span><span class="anno">you drive sessions live</span></td></tr><tr><td>Worktree-per-task isolation</td><td class="val"><span class="mark yes">✓︎</span><span class="anno">automatic</span></td><td class="val"><span class="mark partial">◐︎</span><span class="anno">varies</span></td></tr><tr><td>PR-aware completion</td><td class="val"><span class="mark yes">✓︎</span></td><td class="val"><span class="mark no">✕︎</span></td></tr><tr><td>Pluggable executors (6)</td><td class="val"><span class="mark yes">✓︎</span><span class="anno">per task</span></td><td class="val"><span class="mark partial">◐︎</span><span class="anno">tied to the app's agent(s)</span></td></tr><tr><td>Routines (scheduled unattended runs)</td><td class="val"><span class="mark yes">✓︎</span></td><td class="val"><span class="mark no">✕︎</span></td></tr><tr><td>Runs on a <strong>headless server / over SSH</strong></td><td class="val"><span class="mark yes">✓︎</span><span class="anno"><code>taskd</code></span></td><td class="val"><span class="mark no">✕︎</span><span class="anno">desktop-bound (cmux); <span class="mark partial">◐︎</span> (Warp)</span></td></tr><tr><td>Same board on <strong>web + email + Chrome</strong></td><td class="val"><span class="mark yes">✓︎</span></td><td class="val"><span class="mark no">✕︎</span></td></tr><tr><td>Open source</td><td class="val"><span class="mark yes">✓︎</span><span class="anno">MIT</span></td><td class="val"><span class="mark partial">◐︎</span></td></tr></tbody></table></div>
+<p>Two differences matter most:</p>
+<ol><li><strong>Autonomy.</strong> cmux and Warp are places you <em>drive</em> agents. TaskYou is a place you <em>hand off</em></li></ol>
+<p>work: queue a column, walk away, come back to diffs. The board, the worktrees, and the PR-aware lifecycle exist so you don't have to sit in the loop.</p>
+<ol><li><strong>Reach beyond the desktop.</strong> A desktop app lives on the desktop. TaskYou runs the same board</li></ol>
+<p>in your <strong>terminal</strong>, your <strong>browser</strong> (<code>ty serve</code>), a <strong>desktop app</strong>, over <strong>SSH</strong> (<code>taskd</code>, so it can live on a remote box or a cloud VM), via <strong>email</strong> (create and unblock tasks from your phone with the <code>ty-email</code> extension), and through a <strong>Chrome extension</strong> for annotate-and-fix loops. You can kick off work from a VM you SSH into and review it from your phone.</p>
+<hr>
+<h2>When to pick which</h2>
+<p><strong>Pick cmux / Warp when:</strong></p>
+<ul><li>You want the most polished <strong>local, GUI</strong> agent experience and you live on one machine.</li><li>You're driving agents hands-on and don't need a queue, a scheduler, or remote surfaces.</li><li>Native app niceties (blocks, completions, design) are what you're optimizing for.</li></ul>
+<p><strong>Pick TaskYou when:</strong></p>
+<ul><li>You want to <strong>queue outcomes and walk away</strong>, not drive every session by hand.</li><li>You want <strong>worktree isolation + PR-aware tracking</strong> as defaults.</li><li>You need to run agents on a <strong>remote/cloud box</strong> and triage them from <strong>any device</strong> —</li></ul>
+<p>including your <strong>phone</strong>, by email.</p>
+<ul><li>You want <strong>multiple executors</strong> and <strong>scheduled routines</strong> on one open-source (MIT) board.</li></ul>
+<p><strong>They can coexist:</strong> TaskYou can run on a server and own the queue and worktrees while you use a slick local terminal (Warp, cmux, or anything else) as the place you drop in to take the wheel on a single task.</p>
+<hr>
+<p class="note"><em>Accuracy note: TaskYou capabilities are documented in the <a href="https://github.com/bborn/taskyou#readme">README</a> and the <code>extensions/ty-*</code> READMEs. cmux/Warp entries reflect their general positioning as desktop/terminal agent apps; <code><span class="mark partial">◐︎</span></code> marks places their scope varies or we haven't individually verified a feature. This is a category comparison, not a feature audit. PRs welcome to correct anything.</em></p>
+<div class="pager"><a href="/compare/">← All comparisons</a><a href="/">taskyou.dev →</a></div>
+  </div>
+</section>
+<footer>
+  <div class="wrap">
+    <span class="fbrand"><img src="../images/logo.webp" alt="">taskyou</span>
+    <span class="flinks">
+      <a href="/">Home</a>
+      <a href="/compare/">Compare</a>
+      <a href="https://github.com/bborn/taskyou">GitHub</a>
+      <a href="https://github.com/bborn/taskyou#readme">Docs</a>
+    </span>
+  </div>
+</footer>
+</body>
+</html>
