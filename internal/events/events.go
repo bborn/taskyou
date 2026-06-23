@@ -96,6 +96,7 @@ func (e *Emitter) runHook(event Event) {
 			fmt.Sprintf("TASK_TITLE=%s", event.Task.Title),
 			fmt.Sprintf("TASK_STATUS=%s", event.Task.Status),
 			fmt.Sprintf("TASK_PROJECT=%s", event.Task.Project),
+			fmt.Sprintf("TASK_TAGS=%s", event.Task.Tags),
 		)
 		if event.Task.WorktreePath != "" {
 			env = append(env,

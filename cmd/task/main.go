@@ -803,6 +803,7 @@ Examples:
 			status, _ := cmd.Flags().GetString("status")
 			project, _ := cmd.Flags().GetString("project")
 			taskType, _ := cmd.Flags().GetString("type")
+			tag, _ := cmd.Flags().GetString("tag")
 			all, _ := cmd.Flags().GetBool("all")
 			limit, _ := cmd.Flags().GetInt("limit")
 			outputJSON, _ := cmd.Flags().GetBool("json")
@@ -821,6 +822,7 @@ Examples:
 				Status:        status,
 				Project:       project,
 				Type:          taskType,
+				Tag:           tag,
 				Limit:         limit,
 				IncludeClosed: all,
 			}
@@ -959,6 +961,7 @@ Examples:
 	listCmd.Flags().StringP("status", "s", "", "Filter by status: backlog, queued, processing, blocked, done")
 	listCmd.Flags().StringP("project", "p", "", "Filter by project")
 	listCmd.Flags().StringP("type", "t", "", "Filter by type: code, writing, thinking")
+	listCmd.Flags().String("tag", "", "Filter by tag (exact match, e.g. gm:cortex)")
 	listCmd.Flags().BoolP("all", "a", false, "Include completed tasks")
 	listCmd.Flags().IntP("limit", "n", 50, "Maximum number of tasks to return")
 	listCmd.Flags().Bool("json", false, "Output in JSON format")

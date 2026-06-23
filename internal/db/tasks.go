@@ -384,6 +384,7 @@ type ListTasksOptions struct {
 	Status         string
 	Type           string
 	Project        string
+	Tag            string // Filter to tasks carrying this exact tag (delimiter-safe; "gm:cortex" does not match "gm:cortex-2")
 	Limit          int
 	Offset         int
 	IncludeClosed  bool // Include closed tasks even when Status is empty
@@ -424,6 +425,13 @@ func (db *DB) ListTasks(opts ListTasksOptions) ([]*Task, error) {
 		}
 		query += " AND project = ?"
 		args = append(args, projectName)
+	}
+	if opts.Tag != "" {
+		// Tags are stored comma-separated (e.g. "a,gm:cortex,b"). A naive
+		// LIKE '%gm:cortex%' would false-match "gm:cortex-2", so normalize the
+		// stored value to ",a,gm:cortex,b," and match the delimited ",tag,".
+		query += " AND (',' || REPLACE(COALESCE(tags, ''), ' ', '') || ',') LIKE ?"
+		args = append(args, "%,"+strings.ReplaceAll(opts.Tag, " ", "")+",%")
 	}
 
 	// Exclude done and archived by default unless specifically querying for them or includeClosed is set

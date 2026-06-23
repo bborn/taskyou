@@ -2619,3 +2619,54 @@ func TestPRAutoCompletedMarker(t *testing.T) {
 		}
 	}
 }
+
+func TestListTasksTagFilterDelimiterSafe(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	database, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer database.Close()
+	defer os.Remove(dbPath)
+
+	if err := database.CreateProject(&Project{Name: "test", Path: tmpDir}); err != nil {
+		t.Fatalf("failed to create test project: %v", err)
+	}
+
+	// Three tasks with overlapping tag prefixes. The filter for "gm:cortex"
+	// must match only the exact tag, never the longer "gm:cortex-2".
+	cortex := &Task{Title: "cortex task", Status: StatusBacklog, Type: TypeCode, Project: "test", Tags: "gm:cortex"}
+	cortex2 := &Task{Title: "cortex-2 task", Status: StatusBacklog, Type: TypeCode, Project: "test", Tags: "gm:cortex-2"}
+	multi := &Task{Title: "multi-tag task", Status: StatusBacklog, Type: TypeCode, Project: "test", Tags: "urgent,gm:cortex,backend"}
+
+	for _, tk := range []*Task{cortex, cortex2, multi} {
+		if err := database.CreateTask(tk); err != nil {
+			t.Fatalf("failed to create task %q: %v", tk.Title, err)
+		}
+	}
+
+	tasks, err := database.ListTasks(ListTasksOptions{Tag: "gm:cortex"})
+	if err != nil {
+		t.Fatalf("ListTasks with tag filter failed: %v", err)
+	}
+
+	got := map[int64]bool{}
+	for _, tk := range tasks {
+		got[tk.ID] = true
+	}
+
+	if !got[cortex.ID] {
+		t.Errorf("expected task with exact tag gm:cortex to match, but it did not")
+	}
+	if !got[multi.ID] {
+		t.Errorf("expected task with gm:cortex among multiple tags to match, but it did not")
+	}
+	if got[cortex2.ID] {
+		t.Errorf("tag filter gm:cortex must NOT match gm:cortex-2 (delimiter-unsafe substring match)")
+	}
+	if len(tasks) != 2 {
+		t.Errorf("expected exactly 2 matching tasks, got %d", len(tasks))
+	}
+}
