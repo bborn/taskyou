@@ -328,6 +328,157 @@ func TestFileViewerKeyIgnoredWhenInactive(t *testing.T) {
 	}
 }
 
+// --- interactive review comments ------------------------------------------
+
+func TestComposeReviewLineSingleLine(t *testing.T) {
+	comments := []reviewComment{
+		{file: "server.go", line: "mux.HandleFunc(\"/healthz\", s.health)", body: "guard against nil mux"},
+		{file: "README.md", body: "mention the timeout flag"},
+	}
+	out := composeReviewLine("feature/add-health-check", comments)
+	if strings.Contains(out, "\n") {
+		t.Errorf("review line must be single-line (no newlines), got:\n%q", out)
+	}
+	for _, want := range []string{"feature/add-health-check", "(2 comments)", "server.go", "README.md", "guard against nil mux", "mention the timeout flag", "Please address"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("review line missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestComposeReviewBlockMultiLine(t *testing.T) {
+	out := composeReviewBlock("br", []reviewComment{{file: "a.go", body: "x"}})
+	if !strings.Contains(out, "\n") {
+		t.Error("review block should be multi-line")
+	}
+	if !strings.Contains(out, "1. a.go") {
+		t.Errorf("review block should number comments:\n%s", out)
+	}
+}
+
+func TestCursorMovementAndAnchor(t *testing.T) {
+	dir := newTestRepo(t)
+	m := newViewerModel(t, dir)
+	m.OpenFileViewer()
+	// Simulate a loaded diff with raw lines.
+	m.diff.files = []diffFileEntry{{path: "server.go", status: "M"}}
+	m.diff.selected = 0
+	m.diff.showRendered = false
+	m.diff.rendered = "@@ -1 +1 @@\n-old line\n+new line"
+	m.diff.rawLines = []string{"@@ -1 +1 @@", "-old line", "+new line"}
+	m.diff.cursor = 0
+
+	if !m.diff.cursorActive() {
+		t.Fatal("cursor should be active in diff mode with raw lines")
+	}
+	// j moves the cursor down (consumed), k moves up.
+	if handled, _ := m.HandleFileViewerKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")}); !handled {
+		t.Error("j should be consumed as cursor movement in diff mode")
+	}
+	if m.diff.cursor != 1 {
+		t.Errorf("cursor = %d, want 1 after j", m.diff.cursor)
+	}
+	// Anchor strips the +/- marker.
+	if got := m.diff.cursorAnchor(); got != "old line" {
+		t.Errorf("cursorAnchor = %q, want %q", got, "old line")
+	}
+	m.HandleFileViewerKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
+	if got := m.diff.cursorAnchor(); got != "new line" {
+		t.Errorf("cursorAnchor = %q, want %q", got, "new line")
+	}
+}
+
+func TestCommentInputFlow(t *testing.T) {
+	dir := newTestRepo(t)
+	m := newViewerModel(t, dir)
+	m.OpenFileViewer()
+	m.diff.files = []diffFileEntry{{path: "server.go", status: "M"}}
+	m.diff.selected = 0
+	m.diff.rawLines = []string{"+added line"}
+	m.diff.cursor = 0
+
+	// Open the comment input via the viewer key.
+	handled, _ := m.HandleFileViewerKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("c")})
+	if !handled || !m.InCommentInput() {
+		t.Fatal("c should open the comment input")
+	}
+	// Type some text, then Enter to save.
+	m.UpdateCommentInput(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("needs a test")})
+	m.UpdateCommentInput(tea.KeyMsg{Type: tea.KeyEnter})
+	if m.InCommentInput() {
+		t.Error("enter should close the comment input")
+	}
+	if len(m.diff.comments) != 1 {
+		t.Fatalf("expected 1 comment, got %d", len(m.diff.comments))
+	}
+	c := m.diff.comments[0]
+	if c.file != "server.go" || c.body != "needs a test" || c.line != "added line" {
+		t.Errorf("unexpected comment: %+v", c)
+	}
+}
+
+func TestCommentInputCancel(t *testing.T) {
+	dir := newTestRepo(t)
+	m := newViewerModel(t, dir)
+	m.OpenFileViewer()
+	m.diff.files = []diffFileEntry{{path: "a", status: "M"}}
+	m.HandleFileViewerKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("c")})
+	m.UpdateCommentInput(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("draft")})
+	m.UpdateCommentInput(tea.KeyMsg{Type: tea.KeyEsc})
+	if m.InCommentInput() {
+		t.Error("esc should close the input")
+	}
+	if len(m.diff.comments) != 0 {
+		t.Error("esc should discard the in-progress comment")
+	}
+}
+
+func TestSendReviewViaClipboardWhenNoExecutor(t *testing.T) {
+	dir := newTestRepo(t)
+	m := newViewerModel(t, dir)
+	m.OpenFileViewer()
+	m.claudePaneID = "" // no live executor
+	m.diff.comments = []reviewComment{{file: "a.go", body: "fix it"}}
+
+	cmd := m.sendReviewCmd()
+	if cmd == nil {
+		t.Fatal("sendReviewCmd should return a command when comments exist")
+	}
+	msg, ok := cmd().(reviewSentMsg)
+	if !ok {
+		t.Fatalf("expected reviewSentMsg, got %T", msg)
+	}
+	// Clipboard may be unavailable in headless CI; accept either a clean
+	// clipboard send or a surfaced error, but never a pane send.
+	if msg.err == nil && !msg.viaClipboard {
+		t.Error("with no executor, a successful send must go via clipboard")
+	}
+	m.HandleReviewSent(msg)
+	if msg.err == nil && len(m.diff.comments) != 0 {
+		t.Error("a successful send should clear pending comments")
+	}
+	if m.diff.statusMsg == "" {
+		t.Error("send should set a status message")
+	}
+}
+
+func TestViewSignatureChangesWithReviewState(t *testing.T) {
+	m := newViewerModel(t, "")
+	m.diff = &diffViewer{active: true, files: []diffFileEntry{{path: "a"}}, rawLines: []string{"x", "y"}}
+	base := m.viewSignature("h", "help")
+
+	m.diff.cursor = 1
+	if m.viewSignature("h", "help") == base {
+		t.Error("signature should change when the line cursor moves")
+	}
+	sig2 := m.viewSignature("h", "help")
+
+	m.diff.comments = append(m.diff.comments, reviewComment{file: "a", body: "c"})
+	if m.viewSignature("h", "help") == sig2 {
+		t.Error("signature should change when a comment is added")
+	}
+}
+
 // lipglossWidth is a tiny wrapper so the helper test does not import lipgloss.
 func lipglossWidth(s string) int {
 	return len([]rune(s))

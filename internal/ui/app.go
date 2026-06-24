@@ -787,6 +787,18 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.updateDetail(msg)
 		}
 
+		// Diff viewer comment input: route all messages (keys + cursor blink) so the
+		// text input stays live, but exempt the viewer's own async result messages
+		// so they reach their top-level cases instead of being eaten here.
+		if m.currentView == ViewDetail && m.detailView != nil && m.detailView.InCommentInput() {
+			switch msg.(type) {
+			case diffContentLoadedMsg, diffFilesLoadedMsg, reviewSentMsg:
+				// fall through to the main switch / default detail routing
+			default:
+				return m.updateDetail(msg)
+			}
+		}
+
 		// Handle filter input mode (needs all message types for text input)
 		if m.currentView == ViewDashboard && m.filterActive {
 			return m.updateFilterMode(msg)
@@ -2470,6 +2482,14 @@ func (m *AppModel) updateDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if m.detailView != nil && m.detailView.InFeedbackMode() {
 		var cmd tea.Cmd
 		m.detailView, cmd = m.detailView.Update(msg)
+		return m, cmd
+	}
+
+	// While the diff viewer's comment input is open, route every key into it
+	// (bypassing the detail-view keybindings) so the user can type freely.
+	if m.detailView != nil && m.detailView.InCommentInput() {
+		var cmd tea.Cmd
+		m.detailView, cmd = m.detailView.UpdateCommentInput(msg)
 		return m, cmd
 	}
 

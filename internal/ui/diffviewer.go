@@ -20,6 +20,8 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/atotto/clipboard"
+	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/glamour"
 	"github.com/charmbracelet/lipgloss"
@@ -59,9 +61,27 @@ type diffViewer struct {
 
 	// Content pane state for the currently selected file.
 	contentLoading bool
-	contentPath    string // path the rendered content belongs to
-	contentMode    bool   // showRendered value the content was rendered for
-	rendered       string // final, ready-to-display content string
+	contentPath    string   // path the rendered content belongs to
+	contentMode    bool     // showRendered value the content was rendered for
+	rendered       string   // final, ready-to-display content string
+	rawLines       []string // raw (unhighlighted) content lines; set in diff mode for the line cursor
+	cursor         int      // cursor line index into rawLines (diff mode only)
+
+	// Interactive review: comments the user attaches to the diff, to be sent to
+	// the task's live executor (or copied to the clipboard when none is running).
+	comments    []reviewComment
+	commenting  bool            // true while the comment text input is open
+	input       textinput.Model // comment text input
+	statusMsg   string          // transient status line (e.g. "Sent 3 comments")
+	statusIsErr bool
+}
+
+// reviewComment is one piece of review feedback anchored to a file (and, in diff
+// mode, a specific line quoted from the diff).
+type reviewComment struct {
+	file string
+	line string // quoted diff line the comment anchors to ("" for file-level)
+	body string
 }
 
 // --- messages -------------------------------------------------------------
@@ -84,6 +104,13 @@ type diffContentLoadedMsg struct {
 	isMD  bool
 	err   error
 	empty bool // no changes / nothing to show
+}
+
+type reviewSentMsg struct {
+	taskID       int64
+	count        int
+	viaClipboard bool
+	err          error
 }
 
 type diffContentKind int
@@ -118,8 +145,14 @@ func (m *DetailModel) OpenFileViewer() tea.Cmd {
 	d.selected = 0
 	d.showRendered = false
 	d.rendered = ""
+	d.rawLines = nil
+	d.cursor = 0
 	d.contentPath = ""
 	d.contentLoading = false
+	d.commenting = false
+	d.statusMsg = ""
+	// Note: d.comments is intentionally preserved so reopening the viewer keeps
+	// any unsent review feedback.
 
 	// Narrow the viewport to the content column and reset scroll.
 	if m.ready {
@@ -185,14 +218,247 @@ func (m *DetailModel) HandleFileViewerKey(msg tea.KeyMsg) (bool, tea.Cmd) {
 			return true, m.loadSelectedFileContent()
 		}
 		return true, nil
-	case "tab", "enter", " ":
+	case "tab":
 		if len(d.files) > 0 {
 			d.showRendered = !d.showRendered
 			return true, m.loadSelectedFileContent()
 		}
 		return true, nil
+	case "j":
+		// Move the line cursor down in diff mode; otherwise fall through to scroll.
+		if d.cursorActive() {
+			m.moveCursor(1)
+			return true, nil
+		}
+		return false, nil
+	case "k":
+		if d.cursorActive() {
+			m.moveCursor(-1)
+			return true, nil
+		}
+		return false, nil
+	case "c":
+		// Start a review comment on the current file/line.
+		if len(d.files) > 0 {
+			return true, m.startComment()
+		}
+		return true, nil
+	case "s":
+		// Send the collected review to the executor (or clipboard).
+		if len(d.comments) > 0 {
+			return true, m.sendReviewCmd()
+		}
+		d.statusMsg = "No comments yet — press c to add one"
+		d.statusIsErr = true
+		m.setViewportContent()
+		return true, nil
 	}
 	return false, nil
+}
+
+// moveCursor moves the diff line cursor and keeps it visible in the viewport.
+func (m *DetailModel) moveCursor(delta int) {
+	d := m.diff
+	n := len(d.rawLines)
+	if n == 0 {
+		return
+	}
+	d.cursor += delta
+	if d.cursor < 0 {
+		d.cursor = 0
+	}
+	if d.cursor >= n {
+		d.cursor = n - 1
+	}
+	// Keep the cursor row (offset by the 2-line content header) on screen.
+	row := d.cursor + diffHeaderLines
+	if row < m.viewport.YOffset {
+		m.viewport.SetYOffset(row)
+	} else if row >= m.viewport.YOffset+m.viewport.Height {
+		m.viewport.SetYOffset(row - m.viewport.Height + 1)
+	}
+	m.setViewportContent()
+}
+
+// diffHeaderLines is the number of lines renderDiffContent prepends before the
+// actual diff/file body (title + blank). Used for cursor scroll math.
+const diffHeaderLines = 2
+
+// --- interactive review comments ------------------------------------------
+
+// InCommentInput reports whether the comment text input is currently open.
+func (m *DetailModel) InCommentInput() bool {
+	return m.diff != nil && m.diff.active && m.diff.commenting
+}
+
+// startComment opens the comment text input for the current file/line.
+func (m *DetailModel) startComment() tea.Cmd {
+	d := m.diff
+	ti := textinput.New()
+	ti.Placeholder = "comment for the agent…"
+	ti.Prompt = "› "
+	ti.CharLimit = 500
+	ti.Width = m.contentViewportWidth() - 6
+	ti.Focus()
+	d.input = ti
+	d.commenting = true
+	d.statusMsg = ""
+	d.statusIsErr = false
+	m.setViewportContent()
+	return textinput.Blink
+}
+
+// UpdateCommentInput feeds a message to the open comment input. Enter saves the
+// comment, Esc cancels; everything else edits the text.
+func (m *DetailModel) UpdateCommentInput(msg tea.Msg) (*DetailModel, tea.Cmd) {
+	d := m.diff
+	if d == nil || !d.commenting {
+		return m, nil
+	}
+	if key, ok := msg.(tea.KeyMsg); ok {
+		switch key.String() {
+		case "esc":
+			d.commenting = false
+			d.input.Blur()
+			m.setViewportContent()
+			return m, nil
+		case "enter":
+			body := strings.TrimSpace(d.input.Value())
+			if body != "" {
+				d.comments = append(d.comments, reviewComment{
+					file: d.selectedPath(),
+					line: d.cursorAnchor(),
+					body: body,
+				})
+				d.statusMsg = fmt.Sprintf("Added comment (%d pending)", len(d.comments))
+				d.statusIsErr = false
+			}
+			d.commenting = false
+			d.input.Blur()
+			m.setViewportContent()
+			return m, nil
+		}
+	}
+	var cmd tea.Cmd
+	d.input, cmd = d.input.Update(msg)
+	m.setViewportContent()
+	return m, cmd
+}
+
+// cursorAnchor returns the trimmed diff line the cursor is on (without the
+// leading +/-/space marker), or "" for file-level comments.
+func (d *diffViewer) cursorAnchor() string {
+	if !d.cursorActive() || d.cursor < 0 || d.cursor >= len(d.rawLines) {
+		return ""
+	}
+	line := d.rawLines[d.cursor]
+	if len(line) > 0 && (line[0] == '+' || line[0] == '-' || line[0] == ' ') {
+		line = line[1:]
+	}
+	return strings.TrimSpace(line)
+}
+
+// sendReviewCmd composes the collected comments and delivers them to the task's
+// live executor pane, or copies them to the clipboard when no agent is running.
+func (m *DetailModel) sendReviewCmd() tea.Cmd {
+	if m.task == nil || m.diff == nil || len(m.diff.comments) == 0 {
+		return nil
+	}
+	taskID := m.task.ID
+	pane := m.claudePaneID
+	count := len(m.diff.comments)
+	line := composeReviewLine(m.task.BranchName, m.diff.comments)
+	block := composeReviewBlock(m.task.BranchName, m.diff.comments)
+	return func() tea.Msg {
+		if pane != "" {
+			if err := sendLiteralToPane(pane, line); err != nil {
+				return reviewSentMsg{taskID: taskID, count: count, err: err}
+			}
+			return reviewSentMsg{taskID: taskID, count: count}
+		}
+		// No live executor — fall back to the clipboard so the review isn't lost.
+		if err := clipboard.WriteAll(block); err != nil {
+			return reviewSentMsg{taskID: taskID, count: count, err: err}
+		}
+		return reviewSentMsg{taskID: taskID, count: count, viaClipboard: true}
+	}
+}
+
+// HandleReviewSent applies the result of a send attempt.
+func (m *DetailModel) HandleReviewSent(msg reviewSentMsg) {
+	if m.diff == nil || m.task == nil || msg.taskID != m.task.ID {
+		return
+	}
+	d := m.diff
+	switch {
+	case msg.err != nil:
+		d.statusMsg = "Send failed: " + msg.err.Error()
+		d.statusIsErr = true
+	case msg.viaClipboard:
+		d.comments = nil
+		d.statusMsg = fmt.Sprintf("No live executor — copied %d comments to clipboard", msg.count)
+		d.statusIsErr = false
+	default:
+		d.comments = nil
+		d.statusMsg = fmt.Sprintf("Sent %d comments to the agent", msg.count)
+		d.statusIsErr = false
+	}
+	m.setViewportContent()
+}
+
+// sendLiteralToPane sends literal text + Enter to a specific tmux pane id. We
+// target the persisted pane id (not the daemon session) because the detail view
+// joins the executor pane into the UI session.
+func sendLiteralToPane(paneID, text string) error {
+	if err := osExec.Command("tmux", "send-keys", "-t", paneID, "-l", text).Run(); err != nil {
+		return err
+	}
+	return osExec.Command("tmux", "send-keys", "-t", paneID, "Enter").Run()
+}
+
+// composeReviewLine builds a single-line review message (safe to send to a TUI
+// agent without embedded newlines triggering an early submit).
+func composeReviewLine(branch string, comments []reviewComment) string {
+	var b strings.Builder
+	b.WriteString("Code review")
+	if branch != "" {
+		b.WriteString(" on " + branch)
+	}
+	b.WriteString(fmt.Sprintf(" (%d comments): ", len(comments)))
+	for i, c := range comments {
+		if i > 0 {
+			b.WriteString(" ")
+		}
+		b.WriteString(fmt.Sprintf("[%d] %s", i+1, c.file))
+		if c.line != "" {
+			b.WriteString(fmt.Sprintf(" @ `%s`", c.line))
+		}
+		b.WriteString(": " + c.body)
+		if !strings.HasSuffix(strings.TrimSpace(c.body), ".") {
+			b.WriteString(".")
+		}
+	}
+	b.WriteString(" Please address these in the worktree.")
+	return b.String()
+}
+
+// composeReviewBlock builds a readable multi-line version for the clipboard.
+func composeReviewBlock(branch string, comments []reviewComment) string {
+	var b strings.Builder
+	b.WriteString("Code review")
+	if branch != "" {
+		b.WriteString(" on " + branch)
+	}
+	b.WriteString(":\n\n")
+	for i, c := range comments {
+		b.WriteString(fmt.Sprintf("%d. %s", i+1, c.file))
+		if c.line != "" {
+			b.WriteString(fmt.Sprintf("\n   > %s", c.line))
+		}
+		b.WriteString("\n   " + c.body + "\n\n")
+	}
+	b.WriteString("Please address these in the worktree.")
+	return b.String()
 }
 
 // HandleDiffFilesLoaded applies an async file-list load result.
@@ -232,6 +498,8 @@ func (m *DetailModel) HandleDiffContentLoaded(msg diffContentLoadedMsg) {
 	d.contentLoading = false
 	d.contentPath = msg.path
 	d.contentMode = msg.showRendered
+	d.rawLines = nil
+	d.cursor = 0
 	switch {
 	case msg.err != nil:
 		d.rendered = lipgloss.NewStyle().Foreground(lipgloss.Color("#E06C75")).
@@ -242,11 +510,18 @@ func (m *DetailModel) HandleDiffContentLoaded(msg diffContentLoadedMsg) {
 		d.rendered = m.renderViewerMarkdown(msg.text)
 	case msg.kind == diffKindFile:
 		d.rendered = highlightSource(msg.text, msg.path)
-	default: // diff
+	default: // diff — keep the raw lines so the line cursor can anchor comments
 		d.rendered = highlightSource(msg.text, "diff.diff")
+		d.rawLines = strings.Split(strings.TrimRight(msg.text, "\n"), "\n")
 	}
 	m.viewport.GotoTop()
 	m.setViewportContent()
+}
+
+// cursorActive reports whether the line cursor (and line-anchored comments) apply
+// to the current content — i.e. we're viewing a unified diff with raw lines.
+func (d *diffViewer) cursorActive() bool {
+	return !d.showRendered && len(d.rawLines) > 0
 }
 
 // loadSelectedFileContent kicks off async loading of the selected file's content
@@ -343,9 +618,14 @@ func (m *DetailModel) renderDiffContent() string {
 	if d.baseLabel != "" {
 		title = "Diff vs " + d.baseLabel
 	}
+	// Keep the header exactly diffHeaderLines tall so the line-cursor scroll math
+	// stays correct: a single title line + one blank line.
 	b.WriteString(Bold.Render(title))
 	if len(d.files) > 0 && d.selected < len(d.files) {
 		b.WriteString(Dim.Render(fmt.Sprintf("  —  %s  [%s]", d.files[d.selected].path, mode)))
+	}
+	if n := len(d.comments); n > 0 {
+		b.WriteString(lipgloss.NewStyle().Foreground(ColorPrimary).Render(fmt.Sprintf("  · %d comment%s", n, plural(n))))
 	}
 	b.WriteString("\n\n")
 
@@ -362,10 +642,34 @@ func (m *DetailModel) renderDiffContent() string {
 			label = "base"
 		}
 		b.WriteString(Dim.Render("No changes vs " + label + "."))
+	case d.cursorActive():
+		b.WriteString(markCursorLine(d.rendered, d.cursor))
 	default:
 		b.WriteString(d.rendered)
 	}
 	return b.String()
+}
+
+// markCursorLine prefixes each line of rendered content with a gutter, drawing a
+// bar on the cursor line so the user can see which line a comment will anchor to.
+func markCursorLine(rendered string, cursor int) string {
+	lines := strings.Split(rendered, "\n")
+	bar := lipgloss.NewStyle().Foreground(ColorPrimary).Bold(true).Render("▌")
+	for i := range lines {
+		if i == cursor {
+			lines[i] = bar + " " + lines[i]
+		} else {
+			lines[i] = "  " + lines[i]
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
+func plural(n int) string {
+	if n == 1 {
+		return ""
+	}
+	return "s"
 }
 
 // renderDiffTree renders the file-tree column (left). It is rendered directly by

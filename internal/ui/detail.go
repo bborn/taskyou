@@ -870,6 +870,11 @@ func (m *DetailModel) Update(msg tea.Msg) (*DetailModel, tea.Cmd) {
 		// Selected file's diff/rendered content loaded.
 		m.HandleDiffContentLoaded(msg)
 		return m, nil
+
+	case reviewSentMsg:
+		// Review comments delivered to the executor (or clipboard).
+		m.HandleReviewSent(msg)
+		return m, nil
 	}
 
 	// Pass all messages to viewport for scrolling support
@@ -2489,6 +2494,13 @@ func (m *DetailModel) viewSignature(header, help string) uint64 {
 		h.int(len(m.diff.files))
 		h.boolean(m.diff.showRendered)
 		h.str(m.diff.loadErr)
+		// Interactive review state: the line cursor, comment input, and status
+		// all affect the rendered content/footer, so fold them in.
+		h.int(m.diff.cursor)
+		h.int(len(m.diff.comments))
+		h.boolean(m.diff.commenting)
+		h.str(m.diff.input.Value())
+		h.str(m.diff.statusMsg)
 	}
 	h.str(header)
 	h.str(help)
@@ -3071,10 +3083,25 @@ func (m *DetailModel) renderHelp() string {
 
 	// File/diff viewer has its own, focused help line.
 	if m.diff != nil && m.diff.active {
+		// While typing a comment, the footer is the input field.
+		if m.diff.commenting {
+			prompt := HelpKey.Render("comment") + " " + m.diff.input.View() +
+				"   " + HelpKey.Render("enter") + " " + HelpDesc.Render("save") +
+				"  " + HelpKey.Render("esc") + " " + HelpDesc.Render("cancel")
+			return HelpBar.Render(prompt)
+		}
+		noFiles := len(m.diff.files) == 0
+		cursorMode := m.diff.cursorActive()
+		scrollDesc := "scroll"
+		if cursorMode {
+			scrollDesc = "line"
+		}
 		viewerKeys := []helpKey{
-			{IconArrowUp() + "/" + IconArrowDown(), "file", len(m.diff.files) == 0},
-			{"j/k/wheel", "scroll", false},
-			{"tab", "diff/rendered", len(m.diff.files) == 0},
+			{IconArrowUp() + "/" + IconArrowDown(), "file", noFiles},
+			{"j/k", scrollDesc, false},
+			{"tab", "diff/rendered", noFiles},
+			{"c", "comment", noFiles},
+			{"s", "send", len(m.diff.comments) == 0},
 			{"esc", "close", false},
 		}
 		var vh string
@@ -3088,6 +3115,14 @@ func (m *DetailModel) renderHelp() string {
 			} else {
 				vh += HelpKey.Render(k.key) + " " + HelpDesc.Render(k.desc)
 			}
+		}
+		// Transient status (sent / copied / error) replaces the tail of the bar.
+		if m.diff.statusMsg != "" {
+			col := lipgloss.Color("#98C379")
+			if m.diff.statusIsErr {
+				col = lipgloss.Color("#E06C75")
+			}
+			vh += "    " + lipgloss.NewStyle().Foreground(col).Render(m.diff.statusMsg)
 		}
 		return HelpBar.Render(vh)
 	}
