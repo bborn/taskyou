@@ -107,10 +107,27 @@ async function loadCandidates() {
 
 // --- Executor console polling --------------------------------------------------
 
+// A 410 from the output endpoint usually means the executor pane is mid-move
+// between tmux windows (join-pane during a dock toggle or daemon restart), not
+// that it's actually gone. Ride out a few consecutive misses (~7.5s at the 2.5s
+// cadence) before declaring "pane gone" so a transient capture failure doesn't
+// flash, and re-fetch the task while gone so a recovered pane self-heals.
+let goneStreak = 0;
+const GONE_THRESHOLD = 3;
+
 function schedulePolling() {
   clearInterval(pollTimer);
+  goneStreak = 0;
   pollTimer = setInterval(poll, 2500);
   poll();
+}
+
+// Re-resolve the bound task so has_executor/status reflect reality after the
+// pane moved or the daemon rebuilt the window. Only refresh fields (never switch
+// task) so a manual pick isn't clobbered.
+async function refreshTaskState() {
+  const state = await send({ type: 'getState', tabId: activeTabId });
+  if (state?.task && state.task.id === currentTask?.id) currentTask = state.task;
 }
 
 // Turn a raw tmux pane capture into a readable activity feed: drop the
@@ -192,13 +209,29 @@ function trackExecutorActivity(raw) {
 }
 
 async function poll() {
-  if (document.visibilityState !== 'visible' || !currentTask?.has_executor) return;
+  // Poll whenever a task is bound — don't gate on the cached has_executor flag,
+  // which can be a stale false (captured while the pane id was briefly empty) and
+  // would otherwise freeze the panel on a stale state with no way to recover.
+  if (document.visibilityState !== 'visible' || !currentTask) return;
   const r = await send({ type: 'getOutput', taskId: currentTask.id, lines: 250 });
   const consoleEl = $('console');
-  if (r.gone) {
-    $('executor-state').textContent = 'pane gone';
+  if (r.noExecutor) {
+    // Stable fact (HTTP 400) — show it immediately, no debounce.
+    goneStreak = 0;
+    $('executor-state').textContent = 'no executor pane';
     return;
   }
+  if (r.gone) {
+    goneStreak++;
+    if (goneStreak >= GONE_THRESHOLD) {
+      $('executor-state').textContent = 'pane gone';
+      // While persistently gone, re-fetch the task so a relocated/recovered pane
+      // is picked up instead of staying frozen.
+      if (goneStreak % GONE_THRESHOLD === 0) refreshTaskState();
+    }
+    return;
+  }
+  goneStreak = 0;
   if (r.output != null) {
     const atBottom = consoleEl.scrollHeight - consoleEl.scrollTop - consoleEl.clientHeight < 30;
     renderExecutor(r.output, consoleEl);

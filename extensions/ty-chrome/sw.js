@@ -250,7 +250,12 @@ const handlers = {
       const r = await api(`/api/tasks/${taskId}/output?lines=${lines || 150}`);
       return { output: r.output };
     } catch (e) {
-      return e.status === 410 || e.status === 400 ? { gone: true } : { error: e.message };
+      // 400 = task has no executor pane (a stable fact); 410 = capture-pane failed
+      // (usually transient — the pane is mid-move between tmux windows). Keep them
+      // distinct so the panel can debounce 410s instead of flashing "pane gone".
+      if (e.status === 400) return { noExecutor: true };
+      if (e.status === 410) return { gone: true };
+      return { error: e.message };
     }
   },
 
