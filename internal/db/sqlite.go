@@ -297,6 +297,8 @@ func (db *DB) migrate() error {
 		`ALTER TABLE tasks ADD COLUMN effort_level TEXT DEFAULT ''`,
 
 		`ALTER TABLE tasks ADD COLUMN remote_control INTEGER DEFAULT 0`, // Whether to launch claude with --remote-control
+		// Per-task model profile name (Pi executor): selects provider+model+base_url from the model-profile config ("" = Pi default)
+		`ALTER TABLE tasks ADD COLUMN model_profile TEXT DEFAULT ''`,
 	}
 
 	for _, m := range alterMigrations {

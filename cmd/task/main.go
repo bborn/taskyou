@@ -600,6 +600,7 @@ Examples:
 			project, _ := cmd.Flags().GetString("project")
 			taskExecutor, _ := cmd.Flags().GetString("executor")
 			effortLevel, _ := cmd.Flags().GetString("effort")
+			modelProfile, _ := cmd.Flags().GetString("model-profile")
 			execute, _ := cmd.Flags().GetBool("execute")
 			createDangerous, _ := cmd.Flags().GetBool("dangerous")
 			permissionModeFlag, _ := cmd.Flags().GetString("permission-mode")
@@ -730,6 +731,7 @@ Examples:
 				Project:        project,
 				Executor:       taskExecutor,
 				EffortLevel:    effortLevel,
+				ModelProfile:   strings.TrimSpace(modelProfile),
 				Tags:           tags,
 				Pinned:         pinned,
 				SourceBranch:   branch,
@@ -757,6 +759,9 @@ Examples:
 				if task.EffortLevel != "" {
 					output["effort_level"] = task.EffortLevel
 				}
+				if task.ModelProfile != "" {
+					output["model_profile"] = task.ModelProfile
+				}
 				jsonBytes, _ := json.Marshal(output)
 				fmt.Println(string(jsonBytes))
 			} else {
@@ -780,6 +785,7 @@ Examples:
 	createCmd.Flags().StringP("project", "p", "", "Project name (auto-detected from cwd if not specified)")
 	createCmd.Flags().StringP("executor", "e", "", "Task executor: claude, codex, gemini, pi, opencode, openclaw (default: claude)")
 	createCmd.Flags().String("effort", "", "Per-task Claude effort override: low, medium, high, xhigh, max (default: Claude's global default)")
+	createCmd.Flags().String("model-profile", "", "Named model profile for the Pi executor (provider+model+base_url from ~/.config/taskyou/pi-models.json)")
 	createCmd.Flags().BoolP("execute", "x", false, "Queue task for immediate execution")
 	createCmd.Flags().Bool("dangerous", false, "Execute in dangerous mode (alias for --permission-mode dangerous)")
 	createCmd.Flags().String("permission-mode", "", "Permission mode: default (prompt), accept-edits (auto-accept file edits), auto (Claude Code auto mode: auto-approve safe actions, block risky ones), dangerous (skip all). Defaults to the project's setting")

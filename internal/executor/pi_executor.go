@@ -91,10 +91,23 @@ func (p *PiExecutor) BuildCommand(task *db.Task, sessionID, prompt string) strin
 	// Ensure session directory exists (for manual runs via BuildCommand)
 	os.MkdirAll(filepath.Dir(sessionPath), 0755)
 
+	// Model profile + completion self-reporting flags. piExtraFlags is shared with
+	// the daemon path (runPi/runPiResume) so both command builders stay in sync —
+	// see reference_executor_command_builder_divergence. For custom (base_url)
+	// providers, also register them in Pi's models.json before launch.
+	if task.ModelProfile != "" {
+		if prof, err := GetPiModelProfile(task.ModelProfile); err == nil && prof != nil {
+			if perr := EnsurePiCustomProvider(piModelsJSONPath(), prof); perr != nil {
+				p.logger.Warn("BuildCommand: failed to register pi provider", "profile", task.ModelProfile, "error", perr)
+			}
+		}
+	}
+	extraFlags := piExtraFlags(task)
+
 	// Build command - resume if we have a session ID, otherwise start fresh
 	if sessionID != "" {
-		return fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q pi --session %q --continue`,
-			task.ID, worktreeSessionID, task.Port, task.WorktreePath, sessionPath)
+		return fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q pi%s --session %q --continue`,
+			task.ID, worktreeSessionID, task.Port, task.WorktreePath, extraFlags, sessionPath)
 	}
 
 	// Start fresh - if prompt is provided, write to temp file and pass it
@@ -103,18 +116,18 @@ func (p *PiExecutor) BuildCommand(task *db.Task, sessionID, prompt string) strin
 		promptFile, err := os.CreateTemp("", "task-prompt-*.txt")
 		if err != nil {
 			p.logger.Error("BuildCommand: failed to create temp file", "error", err)
-			return fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q pi --session %q`,
-				task.ID, worktreeSessionID, task.Port, task.WorktreePath, sessionPath)
+			return fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q pi%s --session %q`,
+				task.ID, worktreeSessionID, task.Port, task.WorktreePath, extraFlags, sessionPath)
 		}
 		promptFile.WriteString(prompt)
 		promptFile.Close()
 
-		return fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q pi --session %q "$(cat %q)"; rm -f %q`,
-			task.ID, worktreeSessionID, task.Port, task.WorktreePath, sessionPath, promptFile.Name(), promptFile.Name())
+		return fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q pi%s --session %q "$(cat %q)"; rm -f %q`,
+			task.ID, worktreeSessionID, task.Port, task.WorktreePath, extraFlags, sessionPath, promptFile.Name(), promptFile.Name())
 	}
 
-	return fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q pi --session %q`,
-		task.ID, worktreeSessionID, task.Port, task.WorktreePath, sessionPath)
+	return fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q pi%s --session %q`,
+		task.ID, worktreeSessionID, task.Port, task.WorktreePath, extraFlags, sessionPath)
 }
 
 // ---- Session and Dangerous Mode Support ----
