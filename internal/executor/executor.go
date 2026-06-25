@@ -4126,6 +4126,34 @@ func DefaultClaudeConfigDir() string {
 	return filepath.Join(home, ".claude")
 }
 
+// NormalizeClaudeConfigEnv removes an inherited CLAUDE_CONFIG_DIR from this
+// process's environment so Claude config-dir resolution is driven solely by
+// per-project configuration (projects.claude_config_dir) with a fixed ~/.claude
+// default — identical across the daemon, the TUI, the MCP server, and every CLI
+// invocation regardless of the shell each was launched from. It returns the value
+// that was removed (or "" if none) so callers can log it. Every ty entrypoint must
+// call this before resolving any config dir or spawning Claude.
+//
+// Why this exists: a ty process inherits whatever CLAUDE_CONFIG_DIR its launching
+// shell had. When the daemon is started from inside a Claude Code session running
+// in a project with a custom config dir (e.g. CLAUDE_CONFIG_DIR=~/.claude-ik), the
+// daemon resolves the "default" config dir to ~/.claude-ik, writes task sessions and
+// worktree .envrc files there, and spawns Claude with that inherited dir. A separate
+// ty process launched from a clean shell (e.g. the TUI) resolves the same
+// default-config project to ~/.claude. The two disagree: the TUI's session-resume
+// existence check looks in ~/.claude, can't find the session that actually lives in
+// ~/.claude-ik, declares it gone, clears the stored session ID, and starts a fresh
+// Claude session — silently destroying an in-progress conversation. Projects that
+// need a non-default config dir must set it explicitly via projects.claude_config_dir,
+// which is honored independently of the ambient environment.
+func NormalizeClaudeConfigEnv() (removed string) {
+	if v := strings.TrimSpace(os.Getenv("CLAUDE_CONFIG_DIR")); v != "" {
+		os.Unsetenv("CLAUDE_CONFIG_DIR")
+		return v
+	}
+	return ""
+}
+
 // ResolveClaudeConfigDir resolves a custom CLAUDE_CONFIG_DIR override.
 // If custom is empty, the default directory (respecting CLAUDE_CONFIG_DIR env) is returned.
 func ResolveClaudeConfigDir(custom string) string {

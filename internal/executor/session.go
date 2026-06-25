@@ -64,7 +64,12 @@ func (e *Executor) EnsureTaskWindow(ctx context.Context, task *db.Task, sessionI
 	// the stale ID — the same recovery the daemon launch path already performs.
 	if sessionID != "" {
 		if v, ok := taskExecutor.(sessionValidator); ok && !v.SessionExists(task, sessionID) {
-			e.db.AppendTaskLog(task.ID, "system", fmt.Sprintf("Session %s no longer exists, starting fresh", sessionID))
+			// Record which config dir we checked. A mismatch here between processes
+			// used to silently destroy live sessions (see NormalizeClaudeConfigEnv);
+			// logging the dir makes any future divergence diagnosable, not invisible.
+			checkedDir := e.claudePathsForProject(task.Project).configDir
+			e.db.AppendTaskLog(task.ID, "system", fmt.Sprintf("Session %s no longer exists in %s, starting fresh", sessionID, checkedDir))
+			e.logger.Warn("stored session not found; starting fresh", "task", task.ID, "session", sessionID, "configDir", checkedDir, "project", task.Project)
 			if err := e.db.UpdateTaskClaudeSessionID(task.ID, ""); err != nil {
 				e.logger.Warn("failed to clear stale session ID", "task", task.ID, "error", err)
 			}

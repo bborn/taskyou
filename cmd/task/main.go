@@ -98,6 +98,15 @@ func waitForEventHooks() {
 }
 
 func main() {
+	// Strip any inherited CLAUDE_CONFIG_DIR so config-dir resolution is driven only
+	// by per-project config (DB) with a fixed ~/.claude default — consistent across
+	// the daemon, TUI, MCP server, and CLI no matter which shell launched each. An
+	// inherited value (e.g. a daemon started from inside a ~/.claude-ik Claude
+	// session) otherwise makes processes disagree about where a task's session lives,
+	// which silently destroys in-progress conversations on resume. Must run before
+	// any config-dir resolution or Claude spawn. See executor.NormalizeClaudeConfigEnv.
+	executor.NormalizeClaudeConfigEnv()
+
 	var dangerous bool
 
 	rootCmd := &cobra.Command{
