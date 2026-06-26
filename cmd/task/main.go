@@ -600,6 +600,7 @@ Examples:
 			project, _ := cmd.Flags().GetString("project")
 			taskExecutor, _ := cmd.Flags().GetString("executor")
 			effortLevel, _ := cmd.Flags().GetString("effort")
+			modelOverride, _ := cmd.Flags().GetString("model")
 			execute, _ := cmd.Flags().GetBool("execute")
 			createDangerous, _ := cmd.Flags().GetBool("dangerous")
 			permissionModeFlag, _ := cmd.Flags().GetString("permission-mode")
@@ -674,6 +675,10 @@ Examples:
 				os.Exit(1)
 			}
 
+			// Normalize model override (empty = use Claude's global default). Any
+			// non-empty value is accepted; the Claude CLI validates the model name.
+			modelOverride = strings.TrimSpace(modelOverride)
+
 			// If project not specified, try to detect from cwd
 			if project == "" {
 				if cwd, err := os.Getwd(); err == nil {
@@ -730,6 +735,7 @@ Examples:
 				Project:        project,
 				Executor:       taskExecutor,
 				EffortLevel:    effortLevel,
+				Model:          modelOverride,
 				Tags:           tags,
 				Pinned:         pinned,
 				SourceBranch:   branch,
@@ -757,6 +763,9 @@ Examples:
 				if task.EffortLevel != "" {
 					output["effort_level"] = task.EffortLevel
 				}
+				if task.Model != "" {
+					output["model"] = task.Model
+				}
 				jsonBytes, _ := json.Marshal(output)
 				fmt.Println(string(jsonBytes))
 			} else {
@@ -780,6 +789,7 @@ Examples:
 	createCmd.Flags().StringP("project", "p", "", "Project name (auto-detected from cwd if not specified)")
 	createCmd.Flags().StringP("executor", "e", "", "Task executor: claude, codex, gemini, pi, opencode, openclaw (default: claude)")
 	createCmd.Flags().String("effort", "", "Per-task Claude effort override: low, medium, high, xhigh, max (default: Claude's global default)")
+	createCmd.Flags().String("model", "", "Per-task Claude model override: opus, sonnet, haiku, or a full model name (default: Claude's global default)")
 	createCmd.Flags().BoolP("execute", "x", false, "Queue task for immediate execution")
 	createCmd.Flags().Bool("dangerous", false, "Execute in dangerous mode (alias for --permission-mode dangerous)")
 	createCmd.Flags().String("permission-mode", "", "Permission mode: default (prompt), accept-edits (auto-accept file edits), auto (Claude Code auto mode: auto-approve safe actions, block risky ones), dangerous (skip all). Defaults to the project's setting")
@@ -793,6 +803,9 @@ Examples:
 	createCmd.RegisterFlagCompletionFunc("executor", completeFlagExecutors)
 	createCmd.RegisterFlagCompletionFunc("effort", func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
 		return db.EffortLevels(), cobra.ShellCompDirectiveNoFileComp
+	})
+	createCmd.RegisterFlagCompletionFunc("model", func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		return db.ModelOptions(), cobra.ShellCompDirectiveNoFileComp
 	})
 	rootCmd.AddCommand(createCmd)
 

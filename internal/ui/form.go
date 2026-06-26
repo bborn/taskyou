@@ -30,6 +30,7 @@ const (
 	FieldType
 	FieldExecutor
 	FieldEffort
+	FieldModel
 	FieldPermission
 	FieldCount
 )
@@ -71,6 +72,10 @@ type FormModel struct {
 	effortIdx          int
 	effortLevels       []string // Selectable effort values; "" (first) means "default"
 	effortTouched      bool     // user picked an effort explicitly; stop following project default
+	model              string   // Per-task Claude model override ("" = use global/Claude default)
+	modelIdx           int
+	models             []string // Selectable model values; "" (first) means "default"
+	modelTouched       bool     // user picked a model explicitly; stop following project default
 	permissionMode     string   // Per-task permission mode ("default"/"auto"/"dangerous")
 	permissionIdx      int
 	permissionModes    []string // Selectable permission modes
@@ -168,6 +173,24 @@ func effortIndexFor(options []string, level string) int {
 	return 0
 }
 
+// modelOptions returns the selectable model values for the form. The first entry
+// is the empty string, which represents "default" (no per-task override — uses
+// Claude's global default).
+func modelOptions() []string {
+	return append([]string{""}, db.ModelOptions()...)
+}
+
+// modelIndexFor returns the index of the given model in the options list,
+// defaulting to 0 ("default") when not found.
+func modelIndexFor(options []string, model string) int {
+	for i, m := range options {
+		if m == model {
+			return i
+		}
+	}
+	return 0
+}
+
 // permissionModeOptions returns the selectable permission modes for the form, in
 // display order. "default" (prompt for each permission) comes first, then the
 // less-restrictive modes.
@@ -257,6 +280,10 @@ func NewEditFormModel(database *db.DB, task *db.Task, width, height int, availab
 		effortLevels:        effortLevelOptions(),
 		effortIdx:           effortIndexFor(effortLevelOptions(), task.EffortLevel),
 		effortTouched:       true, // editing: keep the task's existing effort unless changed
+		model:               task.Model,
+		models:              modelOptions(),
+		modelIdx:            modelIndexFor(modelOptions(), task.Model),
+		modelTouched:        true, // editing: keep the task's existing model unless changed
 		permissionMode:      task.EffectivePermissionMode(),
 		permissionModes:     permissionModeOptions(),
 		permissionIdx:       permissionIndexFor(permissionModeOptions(), task.EffectivePermissionMode()),
@@ -382,6 +409,7 @@ func NewFormModel(database *db.DB, width, height int, workingDir string, availab
 		taskRefAutocomplete: NewTaskRefAutocompleteModel(database, width-24),
 		attachmentCursor:    -1,
 		effortLevels:        effortLevelOptions(), // Defaults to "" (Claude's global default)
+		models:              modelOptions(),       // Defaults to "" (Claude's global default)
 		permissionModes:     permissionModeOptions(),
 		showAdvanced:        showAdvanced, // Load from user preference
 	}
@@ -460,6 +488,7 @@ func NewFormModel(database *db.DB, width, height int, workingDir string, availab
 	// previous task in that project.
 	m.refreshPermissionDefaultForProject()
 	m.refreshEffortDefaultForProject()
+	m.refreshModelDefaultForProject()
 
 	// Title input
 	m.titleInput = textinput.New()
@@ -806,6 +835,7 @@ func (m *FormModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.loadLastExecutorForProject()
 				m.refreshPermissionDefaultForProject()
 				m.refreshEffortDefaultForProject()
+				m.refreshModelDefaultForProject()
 				return m, nil
 			}
 			if m.focused == FieldType {
@@ -822,6 +852,12 @@ func (m *FormModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.effortIdx = (m.effortIdx - 1 + len(m.effortLevels)) % len(m.effortLevels)
 				m.effortLevel = m.effortLevels[m.effortIdx]
 				m.effortTouched = true
+				return m, nil
+			}
+			if m.focused == FieldModel && len(m.models) > 0 {
+				m.modelIdx = (m.modelIdx - 1 + len(m.models)) % len(m.models)
+				m.model = m.models[m.modelIdx]
+				m.modelTouched = true
 				return m, nil
 			}
 			if m.focused == FieldPermission && len(m.permissionModes) > 0 {
@@ -843,6 +879,7 @@ func (m *FormModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.loadLastExecutorForProject()
 				m.refreshPermissionDefaultForProject()
 				m.refreshEffortDefaultForProject()
+				m.refreshModelDefaultForProject()
 				return m, nil
 			}
 			if m.focused == FieldType {
@@ -859,6 +896,12 @@ func (m *FormModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.effortIdx = (m.effortIdx + 1) % len(m.effortLevels)
 				m.effortLevel = m.effortLevels[m.effortIdx]
 				m.effortTouched = true
+				return m, nil
+			}
+			if m.focused == FieldModel && len(m.models) > 0 {
+				m.modelIdx = (m.modelIdx + 1) % len(m.models)
+				m.model = m.models[m.modelIdx]
+				m.modelTouched = true
 				return m, nil
 			}
 			if m.focused == FieldPermission && len(m.permissionModes) > 0 {
@@ -920,7 +963,7 @@ func (m *FormModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 			// Type-to-select for other selector fields
-			if m.focused == FieldType || m.focused == FieldExecutor || m.focused == FieldEffort || m.focused == FieldPermission {
+			if m.focused == FieldType || m.focused == FieldExecutor || m.focused == FieldEffort || m.focused == FieldModel || m.focused == FieldPermission {
 				key := msg.String()
 				if len(key) == 1 && unicode.IsLetter(rune(key[0])) {
 					m.selectByPrefix(strings.ToLower(key))
@@ -1128,6 +1171,7 @@ func (m *FormModel) selectProjectFromSearch() {
 	m.loadLastExecutorForProject()
 	m.refreshPermissionDefaultForProject()
 	m.refreshEffortDefaultForProject()
+	m.refreshModelDefaultForProject()
 }
 
 // filterProjects updates the filtered project list based on the search query.
@@ -1199,6 +1243,19 @@ func (m *FormModel) selectByPrefix(prefix string) {
 				m.effortIdx = i
 				m.effortLevel = l
 				m.effortTouched = true
+				return
+			}
+		}
+	case FieldModel:
+		for i, l := range m.models {
+			label := l
+			if label == "" {
+				label = "default"
+			}
+			if strings.HasPrefix(strings.ToLower(label), prefix) {
+				m.modelIdx = i
+				m.model = l
+				m.modelTouched = true
 				return
 			}
 		}
@@ -1320,6 +1377,29 @@ func (m *FormModel) refreshEffortDefaultForProject() {
 	m.effortIdx = effortIndexFor(m.effortLevels, m.effortLevel)
 }
 
+// defaultModelForProject returns the model override a new task should start with
+// for the given project: the last model used in it (stickiness), or "" (the
+// global/Claude default) when none was recorded.
+func (m *FormModel) defaultModelForProject(project string) string {
+	if m.db != nil && project != "" {
+		if last, err := m.db.GetLastModelForProject(project); err == nil && db.IsValidModel(last) {
+			return last
+		}
+	}
+	return ""
+}
+
+// refreshModelDefaultForProject re-seeds the model selector from the current
+// project's last-used model, unless the user has explicitly chosen one. Called
+// when the selected project changes so the default follows the project.
+func (m *FormModel) refreshModelDefaultForProject() {
+	if m.modelTouched {
+		return
+	}
+	m.model = m.defaultModelForProject(m.project)
+	m.modelIdx = modelIndexFor(m.models, m.model)
+}
+
 // rebuildExecutorListForProject rebuilds the executor list sorted by usage for the current project.
 // This should be called when the project changes to re-sort executors by usage count.
 func (m *FormModel) rebuildExecutorListForProject() {
@@ -1358,9 +1438,9 @@ func (m *FormModel) rebuildExecutorListForProject() {
 // isFieldVisible returns whether a field should be shown in the current view.
 // When showAdvanced is false, only Title and Body are visible.
 func (m *FormModel) isFieldVisible(field FormField) bool {
-	if field == FieldEffort {
-		// Effort is a Claude-specific override (claude --effort), only shown in
-		// advanced mode and only when the Claude executor is selected.
+	if field == FieldEffort || field == FieldModel {
+		// Effort and model are Claude-specific overrides (claude --effort/--model),
+		// only shown in advanced mode and only when the Claude executor is selected.
 		return m.showAdvanced && m.executor == db.ExecutorClaude
 	}
 	if m.showAdvanced {
@@ -1918,6 +1998,25 @@ func (m *FormModel) View() string {
 			b.WriteString("\n")
 		}
 
+		// Model selector (Claude-specific; only shown for the Claude executor)
+		if m.isFieldVisible(FieldModel) {
+			cursor = " "
+			if m.focused == FieldModel {
+				cursor = cursorStyle.Render("▸")
+			}
+			// Build model labels (replace "" with "default")
+			modelLabels := make([]string, len(m.models))
+			for i, l := range m.models {
+				if l == "" {
+					modelLabels[i] = "default"
+				} else {
+					modelLabels[i] = l
+				}
+			}
+			b.WriteString(cursor + " " + labelStyle.Render("Model") + m.renderSelector(modelLabels, m.modelIdx, m.focused == FieldModel, selectedStyle, optionStyle, dimStyle))
+			b.WriteString("\n")
+		}
+
 		// Permission selector
 		if m.isFieldVisible(FieldPermission) {
 			cursor = " "
@@ -2073,6 +2172,13 @@ func (m *FormModel) ApplyTo(task *db.Task) {
 		task.EffortLevel = m.effortLevel
 	} else {
 		task.EffortLevel = ""
+	}
+
+	// Model is a Claude-specific override; only carry it for the Claude executor.
+	if m.executor == db.ExecutorClaude {
+		task.Model = m.model
+	} else {
+		task.Model = ""
 	}
 
 	// Permission mode is now an editable field on the form, so carry it onto the

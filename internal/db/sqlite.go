@@ -297,6 +297,9 @@ func (db *DB) migrate() error {
 		`ALTER TABLE tasks ADD COLUMN effort_level TEXT DEFAULT ''`,
 
 		`ALTER TABLE tasks ADD COLUMN remote_control INTEGER DEFAULT 0`, // Whether to launch claude with --remote-control
+
+		// Per-task Claude model override ("" = use global/Claude default, otherwise an alias like opus/sonnet/haiku or a full model name)
+		`ALTER TABLE tasks ADD COLUMN model TEXT DEFAULT ''`,
 	}
 
 	for _, m := range alterMigrations {

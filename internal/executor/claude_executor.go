@@ -81,6 +81,19 @@ func effortFlag(level string) string {
 	return fmt.Sprintf("--effort %s ", level)
 }
 
+// modelFlag returns the `--model <name> ` CLI flag (with a trailing space) for a
+// per-task model override, or an empty string when no override is set. An empty
+// override means the task uses Claude's global default, leaving the user's global
+// model setting untouched. The model name is shell-single-quoted because the
+// returned flag is concatenated into a script run via `sh -c` and may be an
+// arbitrary full model ID supplied via the CLI/MCP.
+func modelFlag(model string) string {
+	if model == "" {
+		return ""
+	}
+	return fmt.Sprintf("--model %s ", shellSingleQuote(model))
+}
+
 // rcFlag returns the `--remote-control <name> ` CLI flag (with a trailing
 // space) for a task that has Remote Control enabled, or an empty string
 // otherwise. The session name is the task title, falling back to `task-<id>`
@@ -162,6 +175,9 @@ func (c *ClaudeExecutor) BuildCommand(task *db.Task, sessionID, prompt string) s
 	// Build per-task effort override flag (empty = use Claude's global default)
 	effort := effortFlag(task.EffortLevel)
 
+	// Build per-task model override flag (empty = use Claude's global default)
+	model := modelFlag(task.Model)
+
 	// Get session ID for environment
 	worktreeSessionID := os.Getenv("WORKTREE_SESSION_ID")
 	if worktreeSessionID == "" {
@@ -177,8 +193,8 @@ func (c *ClaudeExecutor) BuildCommand(task *db.Task, sessionID, prompt string) s
 
 	// Build command - resume if we have a session ID, otherwise start fresh
 	if sessionID != "" {
-		return fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %sclaude %s%s--resume %s`,
-			task.ID, worktreeSessionID, task.Port, task.WorktreePath, configPrefix, dangerousFlag, effort, sessionID)
+		return fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %sclaude %s%s%s--resume %s`,
+			task.ID, worktreeSessionID, task.Port, task.WorktreePath, configPrefix, dangerousFlag, effort, model, sessionID)
 	}
 
 	// Start fresh - if prompt is provided, write to temp file and pass it
@@ -187,18 +203,18 @@ func (c *ClaudeExecutor) BuildCommand(task *db.Task, sessionID, prompt string) s
 		promptFile, err := os.CreateTemp("", "task-prompt-*.txt")
 		if err != nil {
 			c.logger.Error("BuildCommand: failed to create temp file", "error", err)
-			return fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %sclaude %s%s`,
-				task.ID, worktreeSessionID, task.Port, task.WorktreePath, configPrefix, dangerousFlag, effort)
+			return fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %sclaude %s%s%s`,
+				task.ID, worktreeSessionID, task.Port, task.WorktreePath, configPrefix, dangerousFlag, effort, model)
 		}
 		promptFile.WriteString(prompt)
 		promptFile.Close()
 
-		return fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %sclaude %s%s"$(cat %q)"; rm -f %q`,
-			task.ID, worktreeSessionID, task.Port, task.WorktreePath, configPrefix, dangerousFlag, effort, promptFile.Name(), promptFile.Name())
+		return fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %sclaude %s%s%s"$(cat %q)"; rm -f %q`,
+			task.ID, worktreeSessionID, task.Port, task.WorktreePath, configPrefix, dangerousFlag, effort, model, promptFile.Name(), promptFile.Name())
 	}
 
-	return fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %sclaude %s%s`,
-		task.ID, worktreeSessionID, task.Port, task.WorktreePath, configPrefix, dangerousFlag, effort)
+	return fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %sclaude %s%s%s`,
+		task.ID, worktreeSessionID, task.Port, task.WorktreePath, configPrefix, dangerousFlag, effort, model)
 }
 
 // configDirPrefix returns the `CLAUDE_CONFIG_DIR=<dir> ` shell prefix for the task's
