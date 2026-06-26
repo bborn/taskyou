@@ -1629,6 +1629,78 @@ func TestIsValidEffortLevel(t *testing.T) {
 	}
 }
 
+func TestModelPersistence(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	db, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer db.Close()
+	defer os.Remove(dbPath)
+
+	// Create a task without a model override (empty = global/Claude default)
+	task := &Task{
+		Title:   "Default model task",
+		Status:  StatusBacklog,
+		Type:    TypeCode,
+		Project: "personal",
+	}
+	if err := db.CreateTask(task); err != nil {
+		t.Fatalf("failed to create task: %v", err)
+	}
+
+	retrieved, err := db.GetTask(task.ID)
+	if err != nil {
+		t.Fatalf("failed to get task: %v", err)
+	}
+	if retrieved.Model != "" {
+		t.Errorf("expected empty model by default, got %q", retrieved.Model)
+	}
+
+	// Create a task with a per-task model override
+	override := &Task{
+		Title:   "Opus task",
+		Status:  StatusBacklog,
+		Type:    TypeCode,
+		Project: "personal",
+		Model:   ModelOpus,
+	}
+	if err := db.CreateTask(override); err != nil {
+		t.Fatalf("failed to create task: %v", err)
+	}
+	retrieved, err = db.GetTask(override.ID)
+	if err != nil {
+		t.Fatalf("failed to get task: %v", err)
+	}
+	if retrieved.Model != ModelOpus {
+		t.Errorf("expected model %q, got %q", ModelOpus, retrieved.Model)
+	}
+
+	// Update the model via UpdateTask (including a full model name)
+	retrieved.Model = "claude-opus-4-8"
+	if err := db.UpdateTask(retrieved); err != nil {
+		t.Fatalf("failed to update task: %v", err)
+	}
+	updated, err := db.GetTask(override.ID)
+	if err != nil {
+		t.Fatalf("failed to get task: %v", err)
+	}
+	if updated.Model != "claude-opus-4-8" {
+		t.Errorf("expected model %q after update, got %q", "claude-opus-4-8", updated.Model)
+	}
+
+	// The last-used model is stored per project for stickiness.
+	last, err := db.GetLastModelForProject("personal")
+	if err != nil {
+		t.Fatalf("failed to get last model: %v", err)
+	}
+	if last != ModelOpus {
+		t.Errorf("expected last model %q, got %q", ModelOpus, last)
+	}
+}
+
 func TestUpdateTaskPRInfo(t *testing.T) {
 	tmpDir := t.TempDir()
 	dbPath := filepath.Join(tmpDir, "test.db")

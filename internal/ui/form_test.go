@@ -1345,6 +1345,60 @@ func TestEffortFieldHiddenForNonClaude(t *testing.T) {
 	}
 }
 
+func TestModelFieldDefaultsToGlobal(t *testing.T) {
+	m := NewFormModel(nil, 100, 50, "", []string{db.ExecutorClaude})
+
+	// Model options start with "" (the global/Claude default).
+	if len(m.models) == 0 || m.models[0] != "" {
+		t.Fatalf("expected first model option to be the empty default, got %v", m.models)
+	}
+	if m.model != "" {
+		t.Errorf("expected default model to be empty, got %q", m.model)
+	}
+
+	// GetDBTask should not set an override when the user leaves the default.
+	if got := m.GetDBTask().Model; got != "" {
+		t.Errorf("expected GetDBTask to leave model empty by default, got %q", got)
+	}
+}
+
+func TestModelFieldCycleAndPersist(t *testing.T) {
+	m := NewFormModel(nil, 100, 50, "", []string{db.ExecutorClaude})
+	m.showAdvanced = true
+	m.focused = FieldModel
+
+	// Cycling right from the default lands on the first real model.
+	m.Update(tea.KeyMsg{Type: tea.KeyRight})
+	if m.model != db.ModelOpus {
+		t.Errorf("expected model to be %q after one right press, got %q", db.ModelOpus, m.model)
+	}
+
+	if got := m.GetDBTask().Model; got != db.ModelOpus {
+		t.Errorf("expected GetDBTask to carry model %q, got %q", db.ModelOpus, got)
+	}
+
+	// Cycling left returns to the default (empty) override.
+	m.Update(tea.KeyMsg{Type: tea.KeyLeft})
+	if m.model != "" {
+		t.Errorf("expected model to return to default, got %q", m.model)
+	}
+}
+
+func TestModelFieldHiddenForNonClaude(t *testing.T) {
+	m := NewFormModel(nil, 100, 50, "", []string{db.ExecutorClaude})
+	m.showAdvanced = true
+
+	m.executor = db.ExecutorClaude
+	if !m.isFieldVisible(FieldModel) {
+		t.Error("expected model field to be visible for the Claude executor")
+	}
+
+	m.executor = db.ExecutorCodex
+	if m.isFieldVisible(FieldModel) {
+		t.Error("expected model field to be hidden for non-Claude executors")
+	}
+}
+
 func TestPermissionFieldDefaultsToProjectDefault(t *testing.T) {
 	m := NewFormModel(nil, 100, 50, "", []string{db.ExecutorClaude})
 

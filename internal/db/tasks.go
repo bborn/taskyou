@@ -20,6 +20,7 @@ type Task struct {
 	Project         string
 	Executor        string // Task executor: "claude" (default), "codex", "gemini"
 	EffortLevel     string // Per-task Claude effort override ("" = use global/Claude default; otherwise low/medium/high/xhigh/max)
+	Model           string // Per-task Claude model override ("" = use global/Claude default; otherwise an alias like opus/sonnet/haiku or a full model name)
 	WorktreePath    string
 	BranchName      string
 	Port            int    // Unique port for running the application in this task's worktree
@@ -241,6 +242,32 @@ func IsValidEffortLevel(s string) bool {
 	}
 }
 
+// Model overrides are per-task selections for Claude's model (claude --model).
+// An empty value means "no override" — the task uses Claude's global default,
+// leaving the user's global setting untouched. The aliases below are accepted by
+// the Claude CLI's --model flag; a full model name (e.g. "claude-opus-4-8") is
+// also valid and passed through unchanged.
+const (
+	ModelOpus   = "opus"
+	ModelSonnet = "sonnet"
+	ModelHaiku  = "haiku"
+)
+
+// ModelOptions returns the suggested per-task model override values offered in
+// the UI, most-capable first. The Claude CLI also accepts full model names, so
+// this list is a convenience, not an exhaustive set.
+func ModelOptions() []string {
+	return []string{ModelOpus, ModelSonnet, ModelHaiku}
+}
+
+// IsValidModel reports whether s is an acceptable per-task model override. The
+// empty string is valid and means "use the global/Claude default" (no per-task
+// override). Any non-empty value is accepted because the Claude CLI validates
+// the model name itself and supports both aliases and full model IDs.
+func IsValidModel(s string) bool {
+	return true
+}
+
 // Port allocation constants
 const (
 	PortRangeStart = 3100 // First port in the allocation range
@@ -298,9 +325,9 @@ func (db *DB) CreateTask(t *Task) error {
 	t.DangerousMode = t.PermissionMode == PermissionModeDangerous
 
 	result, err := db.Exec(`
-		INSERT INTO tasks (title, body, status, type, project, executor, pinned, tags, source_branch, dangerous_mode, permission_mode, remote_control, effort_level)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, t.Title, t.Body, t.Status, t.Type, t.Project, t.Executor, t.Pinned, t.Tags, t.SourceBranch, t.DangerousMode, t.PermissionMode, t.RemoteControl, t.EffortLevel)
+		INSERT INTO tasks (title, body, status, type, project, executor, pinned, tags, source_branch, dangerous_mode, permission_mode, remote_control, effort_level, model)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, t.Title, t.Body, t.Status, t.Type, t.Project, t.Executor, t.Pinned, t.Tags, t.SourceBranch, t.DangerousMode, t.PermissionMode, t.RemoteControl, t.EffortLevel, t.Model)
 	if err != nil {
 		return fmt.Errorf("insert task: %w", err)
 	}
@@ -326,6 +353,7 @@ func (db *DB) CreateTask(t *Task) error {
 	// ("default") so switching back to the default sticks.
 	if t.Project != "" {
 		db.SetLastEffortForProject(t.Project, t.EffortLevel)
+		db.SetLastModelForProject(t.Project, t.Model)
 		db.SetLastPermissionForProject(t.Project, t.PermissionMode)
 	}
 
@@ -353,7 +381,7 @@ func (db *DB) GetTask(id int64) (*Task, error) {
 		       COALESCE(claude_pane_id, ''), COALESCE(shell_pane_id, ''),
 		       COALESCE(pr_url, ''), COALESCE(pr_number, 0), COALESCE(pr_info_json, ''),
 		       COALESCE(dangerous_mode, 0), COALESCE(permission_mode, ''), COALESCE(remote_control, 0), COALESCE(pinned, 0), COALESCE(tags, ''),
-		       COALESCE(source_branch, ''), COALESCE(summary, ''), COALESCE(effort_level, ''),
+		       COALESCE(source_branch, ''), COALESCE(summary, ''), COALESCE(effort_level, ''), COALESCE(model, ''),
 		       created_at, updated_at, started_at, completed_at,
 		       last_distilled_at, last_accessed_at,
 		       COALESCE(archive_ref, ''), COALESCE(archive_commit, ''),
@@ -365,7 +393,7 @@ func (db *DB) GetTask(id int64) (*Task, error) {
 		&t.DaemonSession, &t.TmuxWindowID, &t.ClaudePaneID, &t.ShellPaneID,
 		&t.PRURL, &t.PRNumber, &t.PRInfoJSON,
 		&t.DangerousMode, &t.PermissionMode, &t.RemoteControl, &t.Pinned, &t.Tags,
-		&t.SourceBranch, &t.Summary, &t.EffortLevel,
+		&t.SourceBranch, &t.Summary, &t.EffortLevel, &t.Model,
 		&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
 		&t.LastDistilledAt, &t.LastAccessedAt,
 		&t.ArchiveRef, &t.ArchiveCommit, &t.ArchiveWorktreePath, &t.ArchiveBranchName,
@@ -400,7 +428,7 @@ func (db *DB) ListTasks(opts ListTasksOptions) ([]*Task, error) {
 		       COALESCE(claude_pane_id, ''), COALESCE(shell_pane_id, ''),
 		       COALESCE(pr_url, ''), COALESCE(pr_number, 0), COALESCE(pr_info_json, ''),
 		       COALESCE(dangerous_mode, 0), COALESCE(permission_mode, ''), COALESCE(remote_control, 0), COALESCE(pinned, 0), COALESCE(tags, ''),
-		       COALESCE(source_branch, ''), COALESCE(summary, ''), COALESCE(effort_level, ''),
+		       COALESCE(source_branch, ''), COALESCE(summary, ''), COALESCE(effort_level, ''), COALESCE(model, ''),
 		       created_at, updated_at, started_at, completed_at,
 		       last_distilled_at, last_accessed_at,
 		       COALESCE(archive_ref, ''), COALESCE(archive_commit, ''),
@@ -482,7 +510,7 @@ func (db *DB) ListTasks(opts ListTasksOptions) ([]*Task, error) {
 			&t.DaemonSession, &t.TmuxWindowID, &t.ClaudePaneID, &t.ShellPaneID,
 			&t.PRURL, &t.PRNumber, &t.PRInfoJSON,
 			&t.DangerousMode, &t.PermissionMode, &t.RemoteControl, &t.Pinned, &t.Tags,
-			&t.SourceBranch, &t.Summary, &t.EffortLevel,
+			&t.SourceBranch, &t.Summary, &t.EffortLevel, &t.Model,
 			&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
 			&t.LastDistilledAt, &t.LastAccessedAt,
 			&t.ArchiveRef, &t.ArchiveCommit, &t.ArchiveWorktreePath, &t.ArchiveBranchName,
@@ -507,7 +535,7 @@ func (db *DB) GetMostRecentlyCreatedTask() (*Task, error) {
 		       COALESCE(claude_pane_id, ''), COALESCE(shell_pane_id, ''),
 		       COALESCE(pr_url, ''), COALESCE(pr_number, 0), COALESCE(pr_info_json, ''),
 		       COALESCE(dangerous_mode, 0), COALESCE(permission_mode, ''), COALESCE(remote_control, 0), COALESCE(pinned, 0), COALESCE(tags, ''),
-		       COALESCE(source_branch, ''), COALESCE(summary, ''), COALESCE(effort_level, ''),
+		       COALESCE(source_branch, ''), COALESCE(summary, ''), COALESCE(effort_level, ''), COALESCE(model, ''),
 		       created_at, updated_at, started_at, completed_at,
 		       last_distilled_at, last_accessed_at,
 		       COALESCE(archive_ref, ''), COALESCE(archive_commit, ''),
@@ -521,7 +549,7 @@ func (db *DB) GetMostRecentlyCreatedTask() (*Task, error) {
 		&t.DaemonSession, &t.TmuxWindowID, &t.ClaudePaneID, &t.ShellPaneID,
 		&t.PRURL, &t.PRNumber, &t.PRInfoJSON,
 		&t.DangerousMode, &t.PermissionMode, &t.RemoteControl, &t.Pinned, &t.Tags,
-		&t.SourceBranch, &t.Summary, &t.EffortLevel,
+		&t.SourceBranch, &t.Summary, &t.EffortLevel, &t.Model,
 		&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
 		&t.LastDistilledAt, &t.LastAccessedAt,
 		&t.ArchiveRef, &t.ArchiveCommit, &t.ArchiveWorktreePath, &t.ArchiveBranchName,
@@ -550,7 +578,7 @@ func (db *DB) SearchTasks(query string, limit int) ([]*Task, error) {
 		       COALESCE(claude_pane_id, ''), COALESCE(shell_pane_id, ''),
 		       COALESCE(pr_url, ''), COALESCE(pr_number, 0), COALESCE(pr_info_json, ''),
 		       COALESCE(dangerous_mode, 0), COALESCE(permission_mode, ''), COALESCE(remote_control, 0), COALESCE(pinned, 0), COALESCE(tags, ''),
-		       COALESCE(source_branch, ''), COALESCE(summary, ''), COALESCE(effort_level, ''),
+		       COALESCE(source_branch, ''), COALESCE(summary, ''), COALESCE(effort_level, ''), COALESCE(model, ''),
 		       created_at, updated_at, started_at, completed_at,
 		       last_distilled_at, last_accessed_at,
 		       COALESCE(archive_ref, ''), COALESCE(archive_commit, ''),
@@ -583,7 +611,7 @@ func (db *DB) SearchTasks(query string, limit int) ([]*Task, error) {
 			&t.DaemonSession, &t.TmuxWindowID, &t.ClaudePaneID, &t.ShellPaneID,
 			&t.PRURL, &t.PRNumber, &t.PRInfoJSON,
 			&t.DangerousMode, &t.PermissionMode, &t.RemoteControl, &t.Pinned, &t.Tags,
-			&t.SourceBranch, &t.Summary, &t.EffortLevel,
+			&t.SourceBranch, &t.Summary, &t.EffortLevel, &t.Model,
 			&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
 			&t.LastDistilledAt, &t.LastAccessedAt,
 			&t.ArchiveRef, &t.ArchiveCommit, &t.ArchiveWorktreePath, &t.ArchiveBranchName,
@@ -685,13 +713,13 @@ func (db *DB) UpdateTask(t *Task) error {
 			title = ?, body = ?, status = ?, type = ?, project = ?, executor = ?,
 			worktree_path = ?, branch_name = ?, port = ?, claude_session_id = ?,
 			daemon_session = ?, pr_url = ?, pr_number = ?, pr_info_json = ?, dangerous_mode = ?, permission_mode = ?, remote_control = ?,
-			pinned = ?, tags = ?, source_branch = ?, effort_level = ?,
+			pinned = ?, tags = ?, source_branch = ?, effort_level = ?, model = ?,
 			updated_at = CURRENT_TIMESTAMP
 		WHERE id = ?
 	`, t.Title, t.Body, t.Status, t.Type, t.Project, t.Executor,
 		t.WorktreePath, t.BranchName, t.Port, t.ClaudeSessionID,
 		t.DaemonSession, t.PRURL, t.PRNumber, t.PRInfoJSON, t.DangerousMode, t.PermissionMode, t.RemoteControl,
-		t.Pinned, t.Tags, t.SourceBranch, t.EffortLevel, t.ID)
+		t.Pinned, t.Tags, t.SourceBranch, t.EffortLevel, t.Model, t.ID)
 	if err != nil {
 		return fmt.Errorf("update task: %w", err)
 	}
@@ -1065,7 +1093,7 @@ func (db *DB) GetNextQueuedTask() (*Task, error) {
 		       COALESCE(claude_pane_id, ''), COALESCE(shell_pane_id, ''),
 		       COALESCE(pr_url, ''), COALESCE(pr_number, 0), COALESCE(pr_info_json, ''),
 		       COALESCE(dangerous_mode, 0), COALESCE(permission_mode, ''), COALESCE(remote_control, 0), COALESCE(pinned, 0), COALESCE(tags, ''),
-		       COALESCE(source_branch, ''), COALESCE(summary, ''), COALESCE(effort_level, ''),
+		       COALESCE(source_branch, ''), COALESCE(summary, ''), COALESCE(effort_level, ''), COALESCE(model, ''),
 		       created_at, updated_at, started_at, completed_at,
 		       last_distilled_at, last_accessed_at,
 		       COALESCE(archive_ref, ''), COALESCE(archive_commit, ''),
@@ -1080,7 +1108,7 @@ func (db *DB) GetNextQueuedTask() (*Task, error) {
 		&t.DaemonSession, &t.TmuxWindowID, &t.ClaudePaneID, &t.ShellPaneID,
 		&t.PRURL, &t.PRNumber, &t.PRInfoJSON,
 		&t.DangerousMode, &t.PermissionMode, &t.RemoteControl, &t.Pinned, &t.Tags,
-		&t.SourceBranch, &t.Summary, &t.EffortLevel,
+		&t.SourceBranch, &t.Summary, &t.EffortLevel, &t.Model,
 		&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
 		&t.LastDistilledAt, &t.LastAccessedAt,
 		&t.ArchiveRef, &t.ArchiveCommit, &t.ArchiveWorktreePath, &t.ArchiveBranchName,
@@ -1103,7 +1131,7 @@ func (db *DB) GetQueuedTasks() ([]*Task, error) {
 		       COALESCE(claude_pane_id, ''), COALESCE(shell_pane_id, ''),
 		       COALESCE(pr_url, ''), COALESCE(pr_number, 0), COALESCE(pr_info_json, ''),
 		       COALESCE(dangerous_mode, 0), COALESCE(permission_mode, ''), COALESCE(remote_control, 0), COALESCE(pinned, 0), COALESCE(tags, ''),
-		       COALESCE(source_branch, ''), COALESCE(summary, ''), COALESCE(effort_level, ''),
+		       COALESCE(source_branch, ''), COALESCE(summary, ''), COALESCE(effort_level, ''), COALESCE(model, ''),
 		       created_at, updated_at, started_at, completed_at,
 		       last_distilled_at, last_accessed_at,
 		       COALESCE(archive_ref, ''), COALESCE(archive_commit, ''),
@@ -1126,7 +1154,7 @@ func (db *DB) GetQueuedTasks() ([]*Task, error) {
 			&t.DaemonSession, &t.TmuxWindowID, &t.ClaudePaneID, &t.ShellPaneID,
 			&t.PRURL, &t.PRNumber, &t.PRInfoJSON,
 			&t.DangerousMode, &t.PermissionMode, &t.RemoteControl, &t.Pinned, &t.Tags,
-			&t.SourceBranch, &t.Summary, &t.EffortLevel,
+			&t.SourceBranch, &t.Summary, &t.EffortLevel, &t.Model,
 			&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
 			&t.LastDistilledAt, &t.LastAccessedAt,
 			&t.ArchiveRef, &t.ArchiveCommit, &t.ArchiveWorktreePath, &t.ArchiveBranchName,
@@ -1718,6 +1746,18 @@ func (db *DB) SetLastEffortForProject(project, effort string) error {
 	return db.SetSetting("last_effort_"+project, effort)
 }
 
+// GetLastModelForProject returns the last used Claude model override for a
+// project ("" means the global/Claude default was used).
+func (db *DB) GetLastModelForProject(project string) (string, error) {
+	return db.GetSetting("last_model_" + project)
+}
+
+// SetLastModelForProject saves the last used Claude model override for a project
+// so the next task in it defaults to the same choice.
+func (db *DB) SetLastModelForProject(project, model string) error {
+	return db.SetSetting("last_model_"+project, model)
+}
+
 // GetLastPermissionForProject returns the last used permission mode for a
 // project ("" means none recorded yet).
 func (db *DB) GetLastPermissionForProject(project string) (string, error) {
@@ -2069,7 +2109,7 @@ func (db *DB) GetStaleWorktreeTasks(maxAge time.Duration) ([]*Task, error) {
 		       COALESCE(claude_pane_id, ''), COALESCE(shell_pane_id, ''),
 		       COALESCE(pr_url, ''), COALESCE(pr_number, 0), COALESCE(pr_info_json, ''),
 		       COALESCE(dangerous_mode, 0), COALESCE(permission_mode, ''), COALESCE(remote_control, 0), COALESCE(pinned, 0), COALESCE(tags, ''),
-		       COALESCE(source_branch, ''), COALESCE(summary, ''), COALESCE(effort_level, ''),
+		       COALESCE(source_branch, ''), COALESCE(summary, ''), COALESCE(effort_level, ''), COALESCE(model, ''),
 		       created_at, updated_at, started_at, completed_at,
 		       last_distilled_at, last_accessed_at,
 		       COALESCE(archive_ref, ''), COALESCE(archive_commit, ''),
@@ -2096,7 +2136,7 @@ func (db *DB) GetStaleWorktreeTasks(maxAge time.Duration) ([]*Task, error) {
 			&t.DaemonSession, &t.TmuxWindowID, &t.ClaudePaneID, &t.ShellPaneID,
 			&t.PRURL, &t.PRNumber, &t.PRInfoJSON,
 			&t.DangerousMode, &t.PermissionMode, &t.RemoteControl, &t.Pinned, &t.Tags,
-			&t.SourceBranch, &t.Summary, &t.EffortLevel,
+			&t.SourceBranch, &t.Summary, &t.EffortLevel, &t.Model,
 			&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
 			&t.LastDistilledAt, &t.LastAccessedAt,
 			&t.ArchiveRef, &t.ArchiveCommit, &t.ArchiveWorktreePath, &t.ArchiveBranchName,

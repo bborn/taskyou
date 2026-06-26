@@ -216,6 +216,7 @@ type updateTaskRequest struct {
 	Pinned         *bool   `json:"pinned"`
 	PermissionMode *string `json:"permission_mode"`
 	EffortLevel    *string `json:"effort_level"`
+	Model          *string `json:"model"`
 }
 
 func (s *Server) handleUpdateTask(w http.ResponseWriter, r *http.Request) {
@@ -260,6 +261,9 @@ func (s *Server) handleUpdateTask(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.EffortLevel != nil {
 		task.EffortLevel = *req.EffortLevel
+	}
+	if req.Model != nil {
+		task.Model = *req.Model
 	}
 
 	if err := s.db.UpdateTask(task); err != nil {
@@ -1043,6 +1047,7 @@ type taskJSON struct {
 	WorktreePath   string        `json:"worktree_path,omitempty"`
 	HasExecutor    bool          `json:"has_executor"`
 	EffortLevel    string        `json:"effort_level,omitempty"`
+	Model          string        `json:"model,omitempty"`
 	SourceBranch   string        `json:"source_branch,omitempty"`
 	DaemonSession  string        `json:"daemon_session,omitempty"`
 	TmuxWindowID   string        `json:"tmux_window_id,omitempty"`
@@ -1096,6 +1101,7 @@ func toTaskJSON(t *db.Task) *taskJSON {
 		WorktreePath:   t.WorktreePath,
 		HasExecutor:    t.ClaudePaneID != "",
 		EffortLevel:    t.EffortLevel,
+		Model:          t.Model,
 		SourceBranch:   t.SourceBranch,
 		DaemonSession:  t.DaemonSession,
 		TmuxWindowID:   t.TmuxWindowID,
