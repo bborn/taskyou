@@ -2384,6 +2384,7 @@ Available settings:
   notify_target         ntfy topic URL (e.g. https://ntfy.sh/my-ty) or webhook URL
   notify_events         Comma list: blocked,auth_required,completed,failed (default)
   notify_url            Base URL for notification deep links (e.g. http://my-host:8080)
+  notify_reply          Canned reply the one-tap unblock action sends (default: continue)
   http_api_port         Port the daemon-hosted HTTP API listens on (default 8080)
   http_api_disabled     Stop the daemon from hosting the HTTP API (true/false)`,
 		Args: cobra.ExactArgs(2),
@@ -2418,7 +2419,7 @@ Available settings:
 					fmt.Println(errorStyle.Render("Value must be 'ntfy' or 'webhook'"))
 					return
 				}
-			case notify.SettingTarget, notify.SettingEvents, notify.SettingURL:
+			case notify.SettingTarget, notify.SettingEvents, notify.SettingURL, notify.SettingReply:
 				// Free-form strings; no validation.
 			case config.SettingHTTPAPIPort:
 				if p, err := strconv.Atoi(value); err != nil || p < 1 || p > 65535 {
@@ -2432,7 +2433,7 @@ Available settings:
 				}
 			default:
 				fmt.Println(errorStyle.Render("Unknown setting: " + key))
-				fmt.Println(dimStyle.Render("Available: anthropic_api_key, autocomplete_enabled, idle_suspend_timeout, notify_enabled, notify_provider, notify_target, notify_events, notify_url, http_api_port, http_api_disabled"))
+				fmt.Println(dimStyle.Render("Available: anthropic_api_key, autocomplete_enabled, idle_suspend_timeout, notify_enabled, notify_provider, notify_target, notify_events, notify_url, notify_reply, http_api_port, http_api_disabled"))
 				return
 			}
 

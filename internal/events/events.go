@@ -72,23 +72,32 @@ func (e *Emitter) Emit(event Event) {
 	if event.Timestamp.IsZero() {
 		event.Timestamp = time.Now()
 	}
+	// Build the notification synchronously, while the caller's DB handle is
+	// guaranteed open, and get back a closure that does only the network send.
+	// Short-lived CLI/MCP commands defer db.Close() the instant Run returns —
+	// before PersistentPostRun flushes this wait group — so reading settings
+	// inside the async goroutine would race the close and silently drop pushes.
+	deliver := e.prepareNotify(event)
 	e.wg.Add(1)
 	go func() {
 		defer e.wg.Done()
 		e.runHook(event)
-		e.runNotify(event)
+		if deliver != nil {
+			_ = deliver()
+		}
 	}()
 }
 
-// runNotify pushes the event to the user's phone if a notifier is configured.
-// Best-effort: delivery errors are swallowed, like hooks.
-func (e *Emitter) runNotify(event Event) {
+// prepareNotify maps an event to a notification and asks the notifier to read
+// its settings now (synchronously) and return a send closure, or nil if there's
+// nothing to send. The returned closure performs only network I/O.
+func (e *Emitter) prepareNotify(event Event) func() error {
 	if e.notifier == nil {
-		return
+		return nil
 	}
 	key := notify.EventKey(event.Type)
 	if key == "" {
-		return
+		return nil
 	}
 	note := notify.Notification{
 		Event:   key,
@@ -104,7 +113,7 @@ func (e *Emitter) runNotify(event Event) {
 			note.Message = event.Task.Summary
 		}
 	}
-	_ = e.notifier.Notify(note)
+	return e.notifier.Prepare(note)
 }
 
 // Wait blocks until all in-flight hooks have completed.

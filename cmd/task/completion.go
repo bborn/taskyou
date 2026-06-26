@@ -120,6 +120,7 @@ func completeSettingKeys(cmd *cobra.Command, args []string, toComplete string) (
 			"notify_target\tntfy topic URL or webhook URL",
 			"notify_events\tEvents to notify on (comma list)",
 			"notify_url\tBase URL for notification deep links",
+			"notify_reply\tCanned reply for the one-tap unblock action",
 			"http_api_port\tPort for the daemon-hosted HTTP API (default 8080)",
 			"http_api_disabled\tDisable the daemon-hosted HTTP API (true/false)",
 		}, cobra.ShellCompDirectiveNoFileComp

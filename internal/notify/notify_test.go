@@ -183,3 +183,66 @@ func TestUnknownProviderErrors(t *testing.T) {
 		t.Error("expected error for unknown provider")
 	}
 }
+
+func TestNtfyAttachesOneTapActionForBlocked(t *testing.T) {
+	var gotActions string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotActions = r.Header.Get("Actions")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	n := New(mapStore{
+		SettingEnabled: "true",
+		SettingTarget:  srv.URL,
+		SettingURL:     "http://host:8080",
+	})
+	if err := n.Notify(Notification{Event: "blocked", TaskID: 42, Title: "Fix bug"}); err != nil {
+		t.Fatalf("Notify error: %v", err)
+	}
+	// One-tap reply must POST the canned reply to the existing input endpoint,
+	// and a view action must deep-link into the console.
+	if !strings.Contains(gotActions, "http,") {
+		t.Errorf("missing http action: %q", gotActions)
+	}
+	if !strings.Contains(gotActions, "http://host:8080/api/tasks/42/input") {
+		t.Errorf("action does not target input API: %q", gotActions)
+	}
+	if !strings.Contains(gotActions, "method=POST") || !strings.Contains(gotActions, `{"message":"continue"}`) {
+		t.Errorf("action missing POST/body: %q", gotActions)
+	}
+	if !strings.Contains(gotActions, "http://host:8080/m?task=42") {
+		t.Errorf("missing view deep link: %q", gotActions)
+	}
+}
+
+func TestNtfyCustomReplyAndNoActionWhenNoBaseURL(t *testing.T) {
+	// Custom reply is honored.
+	var gotActions string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotActions = r.Header.Get("Actions")
+	}))
+	defer srv.Close()
+	n := New(mapStore{
+		SettingEnabled: "true",
+		SettingTarget:  srv.URL,
+		SettingURL:     "http://host",
+		SettingReply:   "yes go ahead",
+	})
+	_ = n.Notify(Notification{Event: "auth_required", TaskID: 7, Title: "sign in"})
+	if !strings.Contains(gotActions, `{"message":"yes go ahead"}`) {
+		t.Errorf("custom reply not honored: %q", gotActions)
+	}
+
+	// With no base URL configured, there's no reachable endpoint, so no action.
+	var gotActions2 string
+	srv2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotActions2 = r.Header.Get("Actions")
+	}))
+	defer srv2.Close()
+	n2 := New(mapStore{SettingEnabled: "true", SettingTarget: srv2.URL})
+	_ = n2.Notify(Notification{Event: "blocked", TaskID: 1, Title: "x"})
+	if gotActions2 != "" {
+		t.Errorf("expected no action without a base URL, got %q", gotActions2)
+	}
+}
