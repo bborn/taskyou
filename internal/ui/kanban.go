@@ -867,19 +867,10 @@ func (k *KanbanBoard) viewDesktop() string {
 
 		var taskViews []string
 
-		// Track shortcut number for the selected column (1-9)
-		shortcutNum := 0
-
 		// Render pinned tasks fixed at the top (when they fit)
 		for i := 0; i < lay.fixedPinned; i++ {
 			isSelected := isSelectedCol && i == k.selectedRow
-			// Only show shortcuts in the selected column
-			var hint string
-			if isSelectedCol {
-				shortcutNum++
-				hint = TaskShortcutHint(shortcutNum)
-			}
-			taskViews = append(taskViews, k.renderTaskCard(col.Tasks[i], colWidth, isSelected, hint))
+			taskViews = append(taskViews, k.renderTaskCard(col.Tasks[i], colWidth, isSelected))
 		}
 
 		// Show "more above" indicator for the scrolling region
@@ -895,13 +886,7 @@ func (k *KanbanBoard) viewDesktop() string {
 		// Render visible scrolling-region tasks
 		for i := regionStart; i < regionEnd; i++ {
 			isSelected := isSelectedCol && i == k.selectedRow
-			// Only show shortcuts in the selected column
-			var hint string
-			if isSelectedCol {
-				shortcutNum++
-				hint = TaskShortcutHint(shortcutNum)
-			}
-			taskViews = append(taskViews, k.renderTaskCard(col.Tasks[i], colWidth, isSelected, hint))
+			taskViews = append(taskViews, k.renderTaskCard(col.Tasks[i], colWidth, isSelected))
 		}
 
 		// Show "more below" indicator (combined with hidden done count for Done column)
@@ -1052,15 +1037,10 @@ func (k *KanbanBoard) viewMobile() string {
 
 	var taskViews []string
 
-	// Track shortcut number (1-9) for mobile view
-	shortcutNum := 0
-
 	// Render pinned tasks fixed at the top (when they fit)
 	for i := 0; i < lay.fixedPinned; i++ {
 		isSelected := i == k.selectedRow
-		shortcutNum++
-		hint := TaskShortcutHint(shortcutNum)
-		taskViews = append(taskViews, k.renderTaskCard(col.Tasks[i], colWidth, isSelected, hint))
+		taskViews = append(taskViews, k.renderTaskCard(col.Tasks[i], colWidth, isSelected))
 	}
 
 	// Show "more above" indicator for the scrolling region
@@ -1076,9 +1056,7 @@ func (k *KanbanBoard) viewMobile() string {
 	// Render visible scrolling-region tasks
 	for i := regionStart; i < regionEnd; i++ {
 		isSelected := i == k.selectedRow
-		shortcutNum++
-		hint := TaskShortcutHint(shortcutNum)
-		taskViews = append(taskViews, k.renderTaskCard(col.Tasks[i], colWidth, isSelected, hint))
+		taskViews = append(taskViews, k.renderTaskCard(col.Tasks[i], colWidth, isSelected))
 	}
 
 	// Show "more below" indicator (combined with hidden done count for Done column)
@@ -1202,8 +1180,7 @@ func (k *KanbanBoard) renderColumnTabs() string {
 }
 
 // renderTaskCard renders a single task card.
-// shortcutHint is an optional keyboard shortcut to display (e.g., "1", "2", etc.)
-func (k *KanbanBoard) renderTaskCard(task *db.Task, width int, isSelected bool, shortcutHint string) string {
+func (k *KanbanBoard) renderTaskCard(task *db.Task, width int, isSelected bool) string {
 	if width < 10 {
 		width = 10
 	}
@@ -1214,7 +1191,6 @@ func (k *KanbanBoard) renderTaskCard(task *db.Task, width int, isSelected bool, 
 	keyHasher := newSigHasher()
 	keyHasher.int(width)
 	keyHasher.boolean(isSelected)
-	keyHasher.str(shortcutHint)
 	keyHasher.u64(StyleGeneration())
 	k.hashTaskCard(&keyHasher, task)
 	cardKey := keyHasher.h
@@ -1318,15 +1294,6 @@ func (k *KanbanBoard) renderTaskCard(task *db.Task, width int, isSelected bool, 
 			indicators = append(indicators, FgStyle(ColorWarning).Render(IconPin()))
 		}
 	}
-	// Keyboard shortcut hint (shown at the end)
-	if shortcutHint != "" {
-		if isSelected {
-			indicators = append(indicators, shortcutHint)
-		} else {
-			indicators = append(indicators, FgStyle(ColorMuted).Render(shortcutHint))
-		}
-	}
-
 	// Dependency blocker indicator (lock icon)
 	blockerCount := k.GetOpenBlockerCount(task.ID)
 	if blockerCount > 0 {
@@ -1459,45 +1426,6 @@ func (k *KanbanBoard) HasNextTask() bool {
 		return false // Only one or no tasks, no next
 	}
 	return k.selectedRow < len(col.Tasks)-1
-}
-
-// SelectByShortcut selects the Nth visible task in the current column (1-18).
-// Returns the selected task, or nil if the shortcut doesn't correspond to a visible task.
-func (k *KanbanBoard) SelectByShortcut(num int) *db.Task {
-	if num < 1 || num > 18 {
-		return nil
-	}
-
-	col := k.columns[k.selectedCol]
-	if len(col.Tasks) == 0 {
-		return nil
-	}
-
-	lay := k.columnLayoutFor(k.selectedCol, k.maxVisibleCards())
-
-	// Build list of visible task indices in render order: fixed pinned first,
-	// then the visible slice of the scrolling region.
-	var visibleIndices []int
-	for i := 0; i < lay.fixedPinned; i++ {
-		visibleIndices = append(visibleIndices, i)
-	}
-	start := lay.fixedPinned + lay.scrollOffset
-	end := start + lay.scrollCapacity
-	if end > len(col.Tasks) {
-		end = len(col.Tasks)
-	}
-	for i := start; i < end; i++ {
-		visibleIndices = append(visibleIndices, i)
-	}
-
-	// Select the Nth visible task (1-indexed)
-	idx := num - 1
-	if idx >= len(visibleIndices) {
-		return nil
-	}
-
-	k.selectedRow = visibleIndices[idx]
-	return col.Tasks[k.selectedRow]
 }
 
 // HandleClick handles a mouse click at the given coordinates.

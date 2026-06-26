@@ -576,33 +576,3 @@ func formatDiffNum(n int, prefix string) string {
 	}
 	return prefix + fmt.Sprintf("%d", n)
 }
-
-// TaskShortcutHint returns the keyboard shortcut hint for a visible task.
-// Tasks 1-9 use single digits "1"-"9".
-// Tasks 10-18 use double digits "11", "22", "33", etc.
-// Returns empty string for tasks beyond 18.
-func TaskShortcutHint(visibleIndex int) string {
-	if visibleIndex < 1 || visibleIndex > 18 {
-		return ""
-	}
-	if visibleIndex <= 9 {
-		return fmt.Sprintf("%d", visibleIndex)
-	}
-	// Tasks 10-18: use doubled digits (11, 22, 33, ...)
-	// visibleIndex 10 → "11", 11 → "22", 12 → "33", etc.
-	doubleDigit := visibleIndex - 9 // 1-9 for tasks 10-18
-	return fmt.Sprintf("%d%d", doubleDigit, doubleDigit)
-}
-
-// TaskIndexFromShortcut converts a shortcut string to a 1-indexed visible task index.
-// Returns 0 if the shortcut is invalid.
-func TaskIndexFromShortcut(shortcut string) int {
-	if len(shortcut) == 1 && shortcut[0] >= '1' && shortcut[0] <= '9' {
-		return int(shortcut[0] - '0')
-	}
-	if len(shortcut) == 2 && shortcut[0] == shortcut[1] && shortcut[0] >= '1' && shortcut[0] <= '9' {
-		// "11" → 10, "22" → 11, "33" → 12, etc.
-		return int(shortcut[0]-'0') + 9
-	}
-	return 0
-}

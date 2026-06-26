@@ -181,20 +181,20 @@ func TestCardCacheRespectsWidthAndSelection(t *testing.T) {
 	k := benchBoard()
 	task := k.columns[0].Tasks[0]
 
-	narrow := k.renderTaskCard(task, 24, false, "")
-	wide := k.renderTaskCard(task, 48, false, "")
+	narrow := k.renderTaskCard(task, 24, false)
+	wide := k.renderTaskCard(task, 48, false)
 	if narrow == wide {
 		t.Error("card cache returned identical output for different widths")
 	}
 
-	unselected := k.renderTaskCard(task, 36, false, "1")
-	selected := k.renderTaskCard(task, 36, true, "1")
+	unselected := k.renderTaskCard(task, 36, false)
+	selected := k.renderTaskCard(task, 36, true)
 	if unselected == selected {
 		t.Error("card cache returned identical output for selected vs unselected")
 	}
 
 	// Same inputs must hit the cache and return identical bytes.
-	again := k.renderTaskCard(task, 36, false, "1")
+	again := k.renderTaskCard(task, 36, false)
 	if again != unselected {
 		t.Error("card cache returned different output for identical inputs")
 	}
