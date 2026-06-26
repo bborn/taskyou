@@ -125,7 +125,7 @@ func BenchmarkRenderTaskCardCold(b *testing.B) {
 	var sink string
 	for i := 0; i < b.N; i++ {
 		k.cardCache = nil
-		sink = k.renderTaskCard(task, 36, false, "1")
+		sink = k.renderTaskCard(task, 36, false)
 	}
 	_ = sink
 }
