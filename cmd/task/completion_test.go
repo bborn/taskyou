@@ -84,8 +84,8 @@ func TestCompleteSettingKeys(t *testing.T) {
 	if directive != cobra.ShellCompDirectiveNoFileComp {
 		t.Errorf("expected NoFileComp directive")
 	}
-	if len(completions) != 5 {
-		t.Errorf("expected 5 setting keys, got %d", len(completions))
+	if len(completions) != 10 {
+		t.Errorf("expected 10 setting keys, got %d", len(completions))
 	}
 
 	// After first arg, no more completions

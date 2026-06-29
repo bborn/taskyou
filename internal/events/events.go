@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/bborn/workflow/internal/db"
+	"github.com/bborn/workflow/internal/notify"
 )
 
 // Event types for task lifecycle
@@ -45,6 +46,7 @@ type Event struct {
 // Emitter handles event emission via hooks.
 type Emitter struct {
 	hooksDir string
+	notifier *notify.Notifier
 	wg       sync.WaitGroup
 }
 
@@ -53,21 +55,65 @@ func New(hooksDir string) *Emitter {
 	return &Emitter{hooksDir: hooksDir}
 }
 
+// SetNotifier attaches a push notifier so lifecycle events also fan out to the
+// user's phone (ntfy/webhook). Safe to pass nil to disable.
+func (e *Emitter) SetNotifier(n *notify.Notifier) {
+	e.notifier = n
+}
+
 // Emit triggers a hook script if it exists for the event type.
 // Hooks run in a background goroutine — short-lived CLI commands should
 // call Wait before exiting so the hook actually runs.
 func (e *Emitter) Emit(event Event) {
-	if e.hooksDir == "" {
+	// Nothing to dispatch to: no hook scripts and no push notifier.
+	if e.hooksDir == "" && e.notifier == nil {
 		return
 	}
 	if event.Timestamp.IsZero() {
 		event.Timestamp = time.Now()
 	}
+	// Build the notification synchronously, while the caller's DB handle is
+	// guaranteed open, and get back a closure that does only the network send.
+	// Short-lived CLI/MCP commands defer db.Close() the instant Run returns —
+	// before PersistentPostRun flushes this wait group — so reading settings
+	// inside the async goroutine would race the close and silently drop pushes.
+	deliver := e.prepareNotify(event)
 	e.wg.Add(1)
 	go func() {
 		defer e.wg.Done()
 		e.runHook(event)
+		if deliver != nil {
+			_ = deliver()
+		}
 	}()
+}
+
+// prepareNotify maps an event to a notification and asks the notifier to read
+// its settings now (synchronously) and return a send closure, or nil if there's
+// nothing to send. The returned closure performs only network I/O.
+func (e *Emitter) prepareNotify(event Event) func() error {
+	if e.notifier == nil {
+		return nil
+	}
+	key := notify.EventKey(event.Type)
+	if key == "" {
+		return nil
+	}
+	note := notify.Notification{
+		Event:   key,
+		TaskID:  event.TaskID,
+		Message: event.Message,
+	}
+	if event.Task != nil {
+		note.Title = event.Task.Title
+		note.Status = event.Task.Status
+		note.Project = event.Task.Project
+		// Prefer a distilled summary over a bare status for completed tasks.
+		if note.Message == "" && key == "completed" && event.Task.Summary != "" {
+			note.Message = event.Task.Summary
+		}
+	}
+	return e.notifier.Prepare(note)
 }
 
 // Wait blocks until all in-flight hooks have completed.
