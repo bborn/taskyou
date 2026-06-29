@@ -123,8 +123,16 @@ function setBadge(tabId, task) {
   chrome.action.setTitle({ tabId, title }).catch(() => {});
 }
 
+// Vendored Floating UI (core must load before dom; both expose isolated-world
+// globals consumed by content.js). Files run in array order in the same world.
+const OVERLAY_FILES = [
+  'vendor/floating-ui.core.umd.min.js',
+  'vendor/floating-ui.dom.umd.min.js',
+  'content.js',
+];
+
 async function ensureInjected(tabId) {
-  await chrome.scripting.executeScript({ target: { tabId }, files: ['content.js'] });
+  await chrome.scripting.executeScript({ target: { tabId }, files: OVERLAY_FILES });
   await chrome.scripting.executeScript({ target: { tabId }, files: ['console-tap.js'], world: 'MAIN' });
 }
 
@@ -231,7 +239,7 @@ const handlers = {
 
   async startAnnotate({ tabId }) {
     try {
-      await chrome.scripting.executeScript({ target: { tabId }, files: ['content.js'] });
+      await chrome.scripting.executeScript({ target: { tabId }, files: OVERLAY_FILES });
       await chrome.tabs.sendMessage(tabId, { type: 'ty-enter-select' });
       return { ok: true };
     } catch (e) {

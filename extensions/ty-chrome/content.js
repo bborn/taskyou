@@ -10,13 +10,50 @@
   let annotations = []; // {kind,label,selector,tag,text,html,rect,styles,comment,els:[]}
   let nextLabel = 1;
 
+  // Floating UI (vendored, injected before us into this isolated world). Used to
+  // anchor the comment popover so it flips/shifts to stay fully on-screen.
+  const FUI = globalThis.FloatingUIDOM || {};
+
   // --- Shadow host -----------------------------------------------------------
+  // We must paint above EVERYTHING on the page, including modals/overlays that
+  // already use the max 32-bit z-index (2147483647) — z-index alone can't win
+  // that tie, and it loses outright to elements in the browser's top layer
+  // (Fullscreen API, <dialog>, popovers). So we promote the host into the top
+  // layer via the Popover API when available; the top layer always paints above
+  // normal content. We keep z-index as a fallback for older Chrome.
   const host = document.createElement('div');
   host.id = 'ty-annotate-host';
-  host.style.cssText = 'position:absolute;top:0;left:0;width:0;height:0;z-index:2147483647;';
-  host.style.display = 'none'; // shown via ty-enter-select; bridge injection stays invisible
+  const TOP_LAYER = typeof host.showPopover === 'function';
+  // inset:auto + explicit 0/0 size overrides the centred-box popover UA styles;
+  // overflow:visible lets the fixed toolbar/markers escape the 0×0 host.
+  host.style.cssText =
+    'position:fixed;inset:auto;top:0;left:0;width:0;height:0;z-index:2147483647;' +
+    'border:0;margin:0;padding:0;background:transparent;color:inherit;overflow:visible;';
+  if (TOP_LAYER) host.setAttribute('popover', 'manual');
+  else host.style.display = 'none'; // shown via ty-enter-select; bridge injection stays invisible
   document.documentElement.appendChild(host);
   const root = host.attachShadow({ mode: 'open' });
+
+  // Visibility is message-driven. In top-layer mode show/hide via the Popover
+  // API (which controls `display` itself); otherwise fall back to display.
+  let visible = false;
+  function showHost() {
+    if (TOP_LAYER) {
+      try { host.showPopover(); } catch (_) { /* already open */ }
+    } else {
+      host.style.display = '';
+    }
+    visible = true;
+    syncScroll();
+  }
+  function hideHost() {
+    if (TOP_LAYER) {
+      try { host.hidePopover(); } catch (_) { /* already closed */ }
+    } else {
+      host.style.display = 'none';
+    }
+    visible = false;
+  }
 
   const style = document.createElement('style');
   style.textContent = `
@@ -50,10 +87,16 @@
     .region { position: absolute; border: 2px dashed ${TEAL}; background: rgba(208,80,16,.12); border-radius: 2px; touch-action: none; }
     .dragrect { position: fixed; border: 2px dashed ${TEAL}; background: rgba(208,80,16,.12); display: none; }
     .boxlayer { position: fixed; inset: 0; cursor: crosshair; touch-action: none; }
+    /* The comment editor is a <dialog> opened with showModal() so it joins the
+       top layer as the topmost modal — that makes any page-level modal dialog
+       (and its focus trap) inert instead of us, so our textarea stays typeable.
+       Reset the UA modal centring/border; Floating UI sets left/top. */
     .popover {
-      position: fixed; width: 260px; background: #fff; border-radius: 10px;
+      position: fixed; inset: auto; margin: 0; max-height: none; border: 0;
+      width: 260px; background: #fff; border-radius: 10px;
       box-shadow: 0 8px 30px rgba(0,0,0,.3); padding: 10px; font-size: 13px; color: #111827;
     }
+    .popover::backdrop { background: transparent; }
     .popover textarea {
       width: 100%; height: 64px; border: 1px solid #d1d5db; border-radius: 6px;
       padding: 6px; font-size: 13px; resize: vertical; outline-color: ${TEAL};
@@ -72,10 +115,19 @@
   `;
   root.appendChild(style);
 
-  // Page-coordinate layer for markers / region rectangles.
+  // Page-coordinate layer for markers / region rectangles. The host is now
+  // viewport-fixed (top layer), so this layer — which positions its children in
+  // document coordinates — is translated by the scroll offset to keep markers
+  // glued to their page elements.
   const layer = document.createElement('div');
-  layer.style.cssText = 'position:absolute;top:0;left:0;width:0;height:0;overflow:visible;';
+  layer.style.cssText = 'position:absolute;top:0;left:0;width:0;height:0;overflow:visible;will-change:transform;';
   root.appendChild(layer);
+
+  function syncScroll() {
+    layer.style.transform = `translate(${-scrollX}px, ${-scrollY}px)`;
+  }
+  window.addEventListener('scroll', syncScroll, { passive: true });
+  window.addEventListener('resize', syncScroll, { passive: true });
 
   const hl = el('div', 'hl');
   root.appendChild(hl);
@@ -128,7 +180,7 @@
       root.appendChild(dragRect);
     }
     if (m === 'note') {
-      openPopover({ kind: 'note', viewportX: innerWidth / 2 - 130, viewportY: innerHeight / 3 });
+      openPopover({ kind: 'note' });
       // popover handles the rest; drop back to neutral
       mode = 'none';
       btnNote.classList.remove('active');
@@ -158,8 +210,7 @@
     e.stopPropagation();
     hl.style.display = 'none';
     const snap = snapshotElement(t);
-    const r = t.getBoundingClientRect();
-    openPopover({ ...snap, viewportX: Math.min(r.right + 8, innerWidth - 280), viewportY: Math.max(r.top, 8) });
+    openPopover({ ...snap, anchorEl: t });
     setMode('none');
   }
   function realTarget(e) {
@@ -171,6 +222,22 @@
   document.addEventListener('pointerover', onPointerHover, true);
   document.addEventListener('click', onClick, true);
 
+  // Focus shield. Many pages run a focus trap (modal <dialog> controllers, etc.)
+  // that refocuses themselves whenever focus appears to leave them. Our UI lives
+  // in a shadow host, so focus landing in our comment textarea surfaces to the
+  // page as a focus event retargeted to the host — outside their dialog — and the
+  // trap yanks focus straight back, making the textarea un-typeable. We can't know
+  // what arbitrary pages do, so swallow focus events that originate inside our
+  // host at window-capture: that's earlier in the propagation path than any
+  // document-level listener, so the page never reacts to focus within our overlay.
+  // (Stopping a focus *notification* doesn't stop the focus itself.)
+  const swallowOwnFocus = (e) => {
+    if (e.composedPath().includes(host)) e.stopImmediatePropagation();
+  };
+  for (const type of ['focusin', 'focusout', 'focus', 'blur']) {
+    window.addEventListener(type, swallowOwnFocus, true);
+  }
+
   // Shortcuts while the overlay is up: S/B/N switch modes, Esc exits,
   // Cmd/Ctrl+Enter sends. Never fire while typing in any input.
   function isTyping(e) {
@@ -178,7 +245,7 @@
     return t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable);
   }
   document.addEventListener('keydown', (e) => {
-    if (host.style.display === 'none') return;
+    if (!visible) return;
     if (e.key === 'Escape' && mode !== 'none' && !isTyping(e)) {
       e.stopPropagation();
       setMode('none');
@@ -226,8 +293,6 @@
     openPopover({
       kind: 'region',
       rect: { x: r.x + scrollX, y: r.y + scrollY, w: r.w, h: r.h },
-      viewportX: Math.min(r.x + r.w + 8, innerWidth - 280),
-      viewportY: Math.max(r.y, 8),
     });
   });
   function sizeDragRect(e) {
@@ -362,16 +427,48 @@
   }
 
   let editingHidden = null; // annotation whose visuals are hidden while editing
+  let stopAutoPosition = null; // Floating UI autoUpdate cleanup
 
   function closePopover() {
-    popover?.remove();
+    stopAutoPosition?.();
+    stopAutoPosition = null;
+    const p = popover;
     popover = null;
+    if (p) {
+      if (p.open) try { p.close(); } catch (_) {} // release the top layer
+      p.remove();
+    }
     provisionalEl?.remove();
     provisionalEl = null;
     editingHidden?.els.forEach((e) => (e.style.display = ''));
     editingHidden = null;
   }
-  // draft: annotation fields (without label/comment) + viewportX/Y for placement.
+
+  // Anchor the popover to `reference` (a real element or a virtual {getBoundingClientRect})
+  // and keep it on-screen: offset off the anchor, flip to the opposite side near
+  // an edge, shift along the edge so it never clips. Falls back to a manual clamp
+  // if Floating UI didn't load.
+  function positionPopover(reference, placement) {
+    if (FUI.computePosition) {
+      const reposition = () =>
+        FUI.computePosition(reference, popover, {
+          strategy: 'fixed',
+          placement,
+          middleware: [FUI.offset(8), FUI.flip({ padding: 8 }), FUI.shift({ padding: 8 })],
+        }).then(({ x, y }) => Object.assign(popover.style, { left: `${x}px`, top: `${y}px` }));
+      stopAutoPosition = FUI.autoUpdate(reference, popover, reposition);
+      return;
+    }
+    const PAD = 8;
+    const a = reference.getBoundingClientRect();
+    const pr = popover.getBoundingClientRect();
+    const x = Math.max(PAD, Math.min(a.right + PAD, innerWidth - pr.width - PAD));
+    const y = Math.max(PAD, Math.min(a.top, innerHeight - pr.height - PAD));
+    Object.assign(popover.style, { left: `${x}px`, top: `${y}px` });
+  }
+
+  // draft: annotation fields (without label/comment) + an anchor — either
+  // `anchorEl` (a real element, tracked on scroll) or `anchorRect` (viewport-space).
   // existing: pass an annotation object to view/edit/delete it instead.
   function openPopover(draft, existing) {
     closePopover();
@@ -383,8 +480,10 @@
       editingHidden = existing;
       showProvisional({ kind: 'region', rect: existing.rect }, true);
     }
-    popover = el('div', 'popover');
-    Object.assign(popover.style, { left: draft.viewportX + 'px', top: draft.viewportY + 'px' });
+    popover = el('dialog', 'popover');
+    // Native close (Esc / backdrop) tears down our state too. Idempotent with
+    // the explicit close in closePopover (guarded on a null popover ref).
+    popover.addEventListener('close', () => closePopover());
 
     const meta = el('div', 'meta');
     const a = existing || draft;
@@ -424,6 +523,21 @@
     row.append(cancel, save);
     popover.append(meta, ta, row);
     root.appendChild(popover);
+    // showModal() promotes it to the top layer as the topmost modal, even nested
+    // in our (possibly page-inert) host — that's what frees the textarea to focus.
+    try { popover.showModal(); } catch (_) {}
+    // Region edits anchor to the live provisional box; element/marker edits to the
+    // anchor the caller passed; a note has no page anchor, so float it at center.
+    const reference =
+      (a.kind === 'region' && provisionalEl) ||
+      draft.anchorEl ||
+      (draft.anchorRect && { getBoundingClientRect: () => draft.anchorRect }) || {
+        getBoundingClientRect: () => {
+          const cx = innerWidth / 2, cy = innerHeight / 3;
+          return { x: cx, y: cy, top: cy, left: cx, right: cx, bottom: cy, width: 0, height: 0 };
+        },
+      };
+    positionPopover(reference, draft.kind === 'note' ? 'bottom' : 'right-start');
     ta.focus();
     ta.addEventListener('keydown', (e) => {
       if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) save.click();
@@ -455,8 +569,7 @@
     m.title = a.comment;
     Object.assign(m.style, { left: mx + 'px', top: Math.max(my, 0) + 'px' });
     m.addEventListener('click', (e) => {
-      const r = m.getBoundingClientRect();
-      openPopover({ viewportX: Math.min(r.right + 6, innerWidth - 280), viewportY: r.top, kind: a.kind, tag: a.tag, selector: a.selector }, a);
+      openPopover({ anchorEl: m, kind: a.kind, tag: a.tag, selector: a.selector }, a);
       e.stopPropagation();
     });
     layer.appendChild(m);
@@ -532,7 +645,7 @@
     clearAll();
     setMode('none');
     closePopover();
-    host.style.display = 'none';
+    hideHost();
   }
 
   // --- Browser bridge: console buffer + executor commands ----------------------
@@ -589,7 +702,7 @@
         }
         break;
       case 'ty-enter-select':
-        host.style.display = '';
+        showHost();
         setMode('select');
         sendResponse({ ok: true });
         break;
@@ -615,7 +728,7 @@
 
   window.__tyAnnotate = {
     show() {
-      host.style.display = '';
+      showHost();
       setMode('select');
     },
   };
