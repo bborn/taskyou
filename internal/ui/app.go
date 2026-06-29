@@ -101,6 +101,8 @@ type KeyMap struct {
 	// Spotlight mode
 	Spotlight     key.Binding
 	SpotlightSync key.Binding
+	// Read-only file/diff viewer in the detail view
+	ViewDiff key.Binding
 }
 
 // ShortHelp returns key bindings to show in the mini help.
@@ -280,6 +282,10 @@ func DefaultKeyMap() KeyMap {
 		SpotlightSync: key.NewBinding(
 			key.WithKeys("F"),
 			key.WithHelp("F", "spotlight sync"),
+		),
+		ViewDiff: key.NewBinding(
+			key.WithKeys("v"),
+			key.WithHelp("v", "review changes"),
 		),
 	}
 }
@@ -775,6 +781,18 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Handle detail view feedback mode (needs all message types for text input)
 		if m.currentView == ViewDetail && m.detailView != nil && m.detailView.InFeedbackMode() {
 			return m.updateDetail(msg)
+		}
+
+		// Diff viewer comment input: route all messages (keys + cursor blink) so the
+		// text input stays live, but exempt the viewer's own async result messages
+		// so they reach their top-level cases instead of being eaten here.
+		if m.currentView == ViewDetail && m.detailView != nil && m.detailView.InCommentInput() {
+			switch msg.(type) {
+			case diffContentLoadedMsg, diffFilesLoadedMsg, reviewSentMsg:
+				// fall through to the main switch / default detail routing
+			default:
+				return m.updateDetail(msg)
+			}
 		}
 
 		// Handle filter input mode (needs all message types for text input)
@@ -2413,6 +2431,14 @@ func (m *AppModel) updateDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, cmd
 	}
 
+	// While the diff viewer's comment input is open, route every key into it
+	// (bypassing the detail-view keybindings) so the user can type freely.
+	if m.detailView != nil && m.detailView.InCommentInput() {
+		var cmd tea.Cmd
+		m.detailView, cmd = m.detailView.UpdateCommentInput(msg)
+		return m, cmd
+	}
+
 	// Handle key messages
 	keyMsg, ok := msg.(tea.KeyMsg)
 	if !ok {
@@ -2423,6 +2449,15 @@ func (m *AppModel) updateDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, cmd
 		}
 		return m, nil
+	}
+
+	// When the read-only file/diff viewer is open, let it consume navigation
+	// keys (file up/down, mode toggle, esc to close) before the normal detail
+	// keybindings. Keys it doesn't consume (j/k scrolling, etc.) fall through.
+	if m.detailView != nil && m.detailView.FileViewerActive() {
+		if handled, vcmd := m.detailView.HandleFileViewerKey(keyMsg); handled {
+			return m, vcmd
+		}
 	}
 
 	if key.Matches(keyMsg, m.keys.Back) {
@@ -2555,6 +2590,9 @@ func (m *AppModel) updateDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if key.Matches(keyMsg, m.keys.ToggleShellPane) && m.detailView != nil {
 		m.detailView.ToggleShellPane()
 		return m, nil
+	}
+	if key.Matches(keyMsg, m.keys.ViewDiff) && m.detailView != nil && m.selectedTask != nil {
+		return m, m.detailView.OpenFileViewer()
 	}
 
 	// Arrow key navigation to prev/next task in the same column

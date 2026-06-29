@@ -1,3 +1,4 @@
 {
-  "SpotlightSync": "macOS Spotlight metadata export is a local-indexing concern; intentionally TUI/CLI-only."
+  "SpotlightSync": "macOS Spotlight metadata export is a local-indexing concern; intentionally TUI/CLI-only.",
+  "ViewDiff": "Read-only git diff/file review viewer rendered inline in the TUI pane (chroma syntax highlighting + glamour markdown); no native GUI/web-API equivalent yet, so intentionally TUI-only for now."
 }
