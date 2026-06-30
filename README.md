@@ -76,7 +76,7 @@ The same UI is also served in your browser at `http://localhost:8484` whenever `
 - **Kanban Board** - Visual task management with 4 columns (Backlog, In Progress, Blocked, Done)
 - **Git Worktrees** - Each task runs in an isolated worktree, no conflicts between parallel tasks
 - **Pluggable Executors** - Choose between Claude Code, OpenAI Codex, Gemini, Pi, OpenClaw, or OpenCode per task
-- **Event Hooks** - Run scripts when tasks change state (see [Event Hooks](#event-hooks))
+- **Event Hooks & Plugins** - Run scripts when tasks change state, or drop in self-contained plugins (see [Event Hooks](#event-hooks) and [Plugins](#plugins))
 - **Ghost Text Autocomplete** - LLM-powered suggestions for task titles and descriptions as you type
 - **VS Code-style Fuzzy Search** - Quick task navigation with smart matching (e.g., "dsno" matches "diseno website")
 - **Markdown Rendering** - Task descriptions render with proper formatting in the detail view
@@ -568,6 +568,22 @@ TASK_TIMESTAMP   # ISO 8601 timestamp
 ```
 
 See [examples/hooks/](examples/hooks/) for examples.
+
+### Plugins
+
+The hooks dir above holds **one script per event**, so two integrations that
+both want `task.done` collide. **Plugins** solve that: a plugin is a
+self-contained directory under `~/.config/task/plugins/` with a `plugin.yaml`
+manifest declaring which events it handles. Drop it in and it's live — any
+number of plugins can handle the same event, and all of them run.
+
+```bash
+cp -R examples/plugins/desktop-notify ~/.config/task/plugins/
+ty plugins list
+```
+
+See [docs/plugins.md](docs/plugins.md) for the manifest format and the authoring
+guide.
 
 ## Configuration
 

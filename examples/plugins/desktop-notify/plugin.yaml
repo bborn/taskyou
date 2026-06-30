@@ -1,0 +1,14 @@
+# A TaskYou plugin manifest.
+#
+# Copy this directory to ~/.config/task/plugins/desktop-notify/ and it is live —
+# no code changes, no collision with other plugins that also handle these events.
+name: desktop-notify
+version: 0.1.0
+description: Native desktop notifications when a task finishes or needs you.
+
+# event name -> script path (relative to this plugin directory).
+# Run `ty plugins list` to see what was discovered.
+hooks:
+  task.done: notify.sh
+  task.blocked: notify.sh
+  task.failed: notify.sh
