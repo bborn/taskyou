@@ -511,6 +511,9 @@ Examples:
 
 	rootCmd.AddCommand(sessionsCmd)
 
+	// Plugins subcommand - inspect installed task plugins
+	rootCmd.AddCommand(newPluginsCmd())
+
 	// Alias: claudes -> sessions (for backwards compatibility)
 	claudesCmd := &cobra.Command{
 		Use:    "claudes",
