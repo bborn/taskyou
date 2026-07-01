@@ -12,3 +12,10 @@ hooks:
   task.done: notify.sh
   task.blocked: notify.sh
   task.failed: notify.sh
+
+# user-invoked commands: `ty plugins run desktop-notify test`,
+# or from the detail-view picker / command palette.
+actions:
+  - id: test
+    label: Send a test notification
+    command: test-notify.sh

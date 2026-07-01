@@ -1,12 +1,15 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"sort"
+	"strconv"
 
 	"github.com/spf13/cobra"
 
+	"github.com/bborn/workflow/internal/db"
 	"github.com/bborn/workflow/internal/hooks"
 )
 
@@ -39,7 +42,64 @@ of plugins may handle the same event.`,
 		},
 	})
 
+	runCmd := &cobra.Command{
+		Use:          "run <plugin> <action> [task-id]",
+		Short:        "Run a plugin action, optionally in the context of a task",
+		Args:         cobra.RangeArgs(2, 3),
+		SilenceUsage: true,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			var taskID int64
+			if len(args) == 3 {
+				id, err := strconv.ParseInt(args[2], 10, 64)
+				if err != nil {
+					return fmt.Errorf("invalid task id %q: %w", args[2], err)
+				}
+				taskID = id
+			}
+			return runPluginAction(cmd.Context(), args[0], args[1], taskID)
+		},
+	}
+	pluginsCmd.AddCommand(runCmd)
+
 	return pluginsCmd
+}
+
+func runPluginAction(ctx context.Context, pluginName, actionID string, taskID int64) error {
+	plugins, warnings := hooks.LoadPlugins(hooks.DefaultPluginsDir())
+	for _, w := range warnings {
+		fmt.Fprintln(os.Stderr, "warning: "+w)
+	}
+
+	plugin, action, err := hooks.FindAction(plugins, pluginName, actionID)
+	if err != nil {
+		return err
+	}
+
+	// Load the task for context, if one was named.
+	var task *db.Task
+	if taskID != 0 {
+		database, dberr := openTaskDB(db.DefaultPath())
+		if dberr != nil {
+			return dberr
+		}
+		defer database.Close()
+		task, err = database.GetTask(taskID)
+		if err != nil {
+			return fmt.Errorf("task #%d: %w", taskID, err)
+		}
+	}
+
+	out, runErr := hooks.RunAction(ctx, plugin, action, task)
+	if len(out) > 0 {
+		fmt.Print(string(out))
+		if out[len(out)-1] != '\n' {
+			fmt.Println()
+		}
+	}
+	if runErr != nil {
+		return fmt.Errorf("action %s/%s failed: %w", pluginName, actionID, runErr)
+	}
+	return nil
 }
 
 func listPlugins() {
@@ -72,7 +132,10 @@ func listPlugins() {
 		}
 		sort.Strings(events)
 		for _, e := range events {
-			fmt.Printf("    %-22s → %s\n", e, p.Hooks[e])
+			fmt.Printf("    hook   %-18s → %s\n", e, p.Hooks[e])
+		}
+		for _, a := range p.Actions {
+			fmt.Printf("    action %-18s → %s  (ty plugins run %s %s)\n", a.DisplayLabel(), a.Command, p.Name, a.ID)
 		}
 		fmt.Println()
 	}

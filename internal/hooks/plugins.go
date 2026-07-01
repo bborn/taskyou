@@ -24,11 +24,29 @@ type Plugin struct {
 	Version     string `yaml:"version"`
 	Description string `yaml:"description"`
 	// Hooks maps a task event name (e.g. "task.done") to a script path,
-	// resolved relative to the plugin directory.
+	// resolved relative to the plugin directory. Hooks fire automatically.
 	Hooks map[string]string `yaml:"hooks"`
+	// Actions are user-invoked commands (from `ty plugins run`, the detail-view
+	// picker, or the command palette), each backed by a script in the plugin dir.
+	Actions []Action `yaml:"actions"`
 
 	// Dir is the absolute path to the plugin directory (not from the manifest).
 	Dir string `yaml:"-"`
+}
+
+// Action is a user-triggered plugin command.
+type Action struct {
+	ID      string `yaml:"id"`      // stable identifier, unique within the plugin
+	Label   string `yaml:"label"`   // human-facing label; defaults to ID if empty
+	Command string `yaml:"command"` // script path, relative to the plugin dir
+}
+
+// DisplayLabel returns the label, falling back to the ID.
+func (a Action) DisplayLabel() string {
+	if a.Label != "" {
+		return a.Label
+	}
+	return a.ID
 }
 
 // ScriptFor returns the absolute path to the script handling event, and whether
@@ -39,6 +57,16 @@ func (p Plugin) ScriptFor(event string) (string, bool) {
 		return "", false
 	}
 	return filepath.Join(p.Dir, rel), true
+}
+
+// Action returns the action with the given ID.
+func (p Plugin) Action(id string) (Action, bool) {
+	for _, a := range p.Actions {
+		if a.ID == id {
+			return a, true
+		}
+	}
+	return Action{}, false
 }
 
 // DefaultPluginsDir returns the default plugins directory path.
@@ -109,27 +137,44 @@ func loadPlugin(dir string) (*Plugin, string) {
 	if p.Name == "" {
 		return nil, fmt.Sprintf("plugin %s: manifest is missing a name", filepath.Base(dir))
 	}
-	if len(p.Hooks) == 0 {
-		return nil, fmt.Sprintf("plugin %q: manifest declares no hooks; skipping", p.Name)
+	if len(p.Hooks) == 0 && len(p.Actions) == 0 {
+		return nil, fmt.Sprintf("plugin %q: manifest declares no hooks or actions; skipping", p.Name)
 	}
 
-	// Drop hooks whose script is missing or not a regular file, keeping the
-	// rest of the plugin usable.
+	// Drop hooks and actions whose script is missing or not a regular file,
+	// keeping the rest of the plugin usable.
 	var dropped []string
 	for event, rel := range p.Hooks {
-		script := filepath.Join(dir, rel)
-		fi, statErr := os.Stat(script)
-		if statErr != nil || fi.IsDir() {
+		if !isExecutableFile(filepath.Join(dir, rel)) {
 			delete(p.Hooks, event)
-			dropped = append(dropped, event)
+			dropped = append(dropped, "hook:"+event)
 		}
 	}
-	if len(p.Hooks) == 0 {
-		return nil, fmt.Sprintf("plugin %q: no usable hook scripts found; skipping", p.Name)
+	kept := p.Actions[:0]
+	for _, a := range p.Actions {
+		switch {
+		case a.ID == "" || a.Command == "":
+			dropped = append(dropped, "action:<malformed>")
+		case !isExecutableFile(filepath.Join(dir, a.Command)):
+			dropped = append(dropped, "action:"+a.ID)
+		default:
+			kept = append(kept, a)
+		}
+	}
+	p.Actions = kept
+
+	if len(p.Hooks) == 0 && len(p.Actions) == 0 {
+		return nil, fmt.Sprintf("plugin %q: no usable hook or action scripts found; skipping", p.Name)
 	}
 	if len(dropped) > 0 {
 		sort.Strings(dropped)
-		return &p, fmt.Sprintf("plugin %q: ignored hooks with missing scripts: %v", p.Name, dropped)
+		return &p, fmt.Sprintf("plugin %q: ignored entries with missing/invalid scripts: %v", p.Name, dropped)
 	}
 	return &p, ""
+}
+
+// isExecutableFile reports whether path exists and is a regular file.
+func isExecutableFile(path string) bool {
+	fi, err := os.Stat(path)
+	return err == nil && !fi.IsDir()
 }

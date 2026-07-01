@@ -30,10 +30,14 @@ description: What it does.    # optional
 hooks:                       # event -> script path (relative to this dir)
   task.done: on-done.sh
   task.blocked: on-blocked.sh
+actions:                     # user-invoked commands (optional)
+  - id: sync
+    label: Sync to tracker
+    command: sync.sh
 ```
 
 Script paths are resolved relative to the plugin directory. Scripts must be
-executable (`chmod +x`).
+executable (`chmod +x`). A plugin needs at least one usable hook **or** action.
 
 ## Events
 
@@ -69,6 +73,27 @@ TASK_PLUGIN_DIR     # absolute path to this plugin's directory
 
 The script's working directory is set to the plugin directory, so it can read
 its own bundled files (config, templates, helper binaries) with relative paths.
+
+## Actions (user-invoked)
+
+Hooks fire automatically on events. **Actions** are commands the user triggers on
+demand. Each action has an `id`, an optional `label`, and a `command` (a script
+path relative to the plugin dir).
+
+Run one from the CLI, optionally against a task:
+
+```bash
+ty plugins run my-plugin sync          # no task context
+ty plugins run my-plugin sync 42       # with task #42's env
+```
+
+An action script receives `TASK_PLUGIN_NAME` / `TASK_PLUGIN_DIR` always, and the
+`TASK_*` variables (`TASK_ID`, `TASK_TITLE`, `TASK_STATUS`, `TASK_PROJECT`,
+`TASK_TYPE`, `WORKTREE_PATH`) when a task id is supplied. Unlike hooks, actions
+run synchronously (up to 60s) and their output is shown to the caller.
+
+> The in-TUI surfaces for actions — a detail-view picker and command-palette
+> entries — build on this same runner and are being added next.
 
 ## Behavior & guarantees
 
