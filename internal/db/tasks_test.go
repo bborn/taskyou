@@ -1701,6 +1701,56 @@ func TestModelPersistence(t *testing.T) {
 	}
 }
 
+// TestClearModelClaudeSlugMigration verifies the one-time repair that clears the
+// invalid "claude" model override (the executor slug an early DEFAULT baked into
+// every row) while leaving real overrides untouched, and only running once.
+func TestClearModelClaudeSlugMigration(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+	database, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer database.Close()
+	defer os.Remove(dbPath)
+
+	bad := &Task{Title: "bad", Status: StatusBacklog, Type: TypeCode, Project: "personal"}
+	good := &Task{Title: "good", Status: StatusBacklog, Type: TypeCode, Project: "personal", Model: ModelOpus}
+	if err := database.CreateTask(bad); err != nil {
+		t.Fatalf("create bad task: %v", err)
+	}
+	if err := database.CreateTask(good); err != nil {
+		t.Fatalf("create good task: %v", err)
+	}
+
+	// Simulate the legacy backfill: model set to the "claude" slug, guard cleared
+	// so the one-time migration runs on the next migrate().
+	database.Exec(`UPDATE tasks SET model = 'claude' WHERE id = ?`, bad.ID)
+	database.SetSetting(modelClaudeSlugMigrationKey, "")
+
+	if err := database.migrate(); err != nil {
+		t.Fatalf("re-run migrate: %v", err)
+	}
+
+	if got, _ := database.GetTask(bad.ID); got.Model != "" {
+		t.Errorf("expected invalid 'claude' model cleared to empty, got %q", got.Model)
+	}
+	if got, _ := database.GetTask(good.ID); got.Model != ModelOpus {
+		t.Errorf("expected real override %q preserved, got %q", ModelOpus, got.Model)
+	}
+
+	// Guard: a task legitimately set to "claude" AFTER the migration must not be
+	// rewritten on a later boot (the slug is invalid, but the guard makes it a
+	// one-time repair, not a permanent filter).
+	database.Exec(`UPDATE tasks SET model = 'claude' WHERE id = ?`, good.ID)
+	if err := database.migrate(); err != nil {
+		t.Fatalf("re-run migrate (guarded): %v", err)
+	}
+	if got, _ := database.GetTask(good.ID); got.Model != "claude" {
+		t.Errorf("guard should not re-run the repair, got %q", got.Model)
+	}
+}
+
 func TestUpdateTaskPRInfo(t *testing.T) {
 	tmpDir := t.TempDir()
 	dbPath := filepath.Join(tmpDir, "test.db")
