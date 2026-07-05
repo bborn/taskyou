@@ -3853,6 +3853,29 @@ func (m *AppModel) updateCommandPalette(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
+	// Check if user chose a plugin action (action mode, ">" prefix)
+	if act := m.commandPaletteView.SelectedAction(); act != nil {
+		item := *act
+		task := m.selectedTask // task context we were on, if any
+		returnView := m.commandPaletteReturnView
+		returnTaskID := m.commandPaletteReturnTaskID
+		if returnView == ViewDashboard && m.detailView != nil && m.selectedTask != nil {
+			returnView = ViewDetail
+			returnTaskID = m.selectedTask.ID
+		}
+		m.commandPaletteView = nil
+		m.commandPaletteReturnView = ViewDashboard
+		m.commandPaletteReturnTaskID = 0
+		m.currentView = returnView
+		m.notification = fmt.Sprintf("%s Running %s…", IconInProgress(), item.Action.DisplayLabel())
+		m.notifyUntil = time.Now().Add(hooks.ActionTimeout)
+		cmds := []tea.Cmd{runPluginActionCmd(item, task)}
+		if returnView == ViewDetail && m.detailView == nil && returnTaskID != 0 {
+			cmds = append(cmds, m.loadTask(returnTaskID))
+		}
+		return m, tea.Batch(cmds...)
+	}
+
 	// Check if user selected a task
 	if selectedTask := m.commandPaletteView.SelectedTask(); selectedTask != nil {
 		taskID := selectedTask.ID

@@ -89,11 +89,16 @@ ty plugins run my-plugin sync 42       # with task #42's env
 
 An action script receives `TASK_PLUGIN_NAME` / `TASK_PLUGIN_DIR` always, and the
 `TASK_*` variables (`TASK_ID`, `TASK_TITLE`, `TASK_STATUS`, `TASK_PROJECT`,
-`TASK_TYPE`, `WORKTREE_PATH`) when a task id is supplied. Unlike hooks, actions
-run synchronously (up to 60s) and their output is shown to the caller.
+`TASK_TYPE`, `WORKTREE_PATH`) when a task is in context. Unlike hooks, actions
+run synchronously (up to 60s) and their output is shown to the caller (the CLI
+prints it; the TUI shows the first line in the notification banner).
 
-> The in-TUI surfaces for actions — a detail-view picker and command-palette
-> entries — build on this same runner and are being added next.
+In the TUI, actions are reachable two ways, both running the same command:
+
+- **Detail view:** press `A` on a task to open a picker of that task's plugin
+  actions; the chosen one runs with the task's env.
+- **Command palette:** open it (`p` / `Ctrl+P`) and type a leading `>` to switch
+  from task search to action search.
 
 ## Behavior & guarantees
 
