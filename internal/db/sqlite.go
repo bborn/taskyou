@@ -120,6 +120,15 @@ func Open(path string) (*DB, error) {
 // "auto" denotes Claude Code's real auto mode.
 const permModeAutoMigrationKey = "migration:auto_means_accept_edits_v1"
 
+// modelClaudeSlugMigrationKey guards the one-time repair of tasks whose model
+// override is the literal "claude". That value is the executor slug, never a
+// valid Claude model alias: an early version of the model column shipped with
+// `DEFAULT 'claude'` (removed in a later release) and CreateTask did not write
+// the column for months, so every task inserted in that window fell through to
+// that default. Left in place it launches `claude --model claude`, which the CLI
+// rejects. Rewrite those rows to "" (no override / Claude's global default).
+const modelClaudeSlugMigrationKey = "migration:clear_model_claude_slug_v1"
+
 // migrate runs database migrations.
 func (db *DB) migrate() error {
 	migrations := []string{
@@ -331,6 +340,15 @@ func (db *DB) migrate() error {
 		db.Exec(`UPDATE tasks SET permission_mode = 'accept-edits' WHERE permission_mode = 'auto'`)
 		db.Exec(`UPDATE projects SET default_permission_mode = 'accept-edits' WHERE default_permission_mode = 'auto'`)
 		db.SetSetting(permModeAutoMigrationKey, "done")
+	}
+
+	// One-time: clear the invalid "claude" model override left by an early
+	// `DEFAULT 'claude'` on the model column (see modelClaudeSlugMigrationKey).
+	// "claude" is the executor slug, not a model alias, so no task should carry
+	// it; rewriting to "" restores Claude's global default.
+	if done, _ := db.GetSetting(modelClaudeSlugMigrationKey); done == "" {
+		db.Exec(`UPDATE tasks SET model = '' WHERE model = 'claude'`)
+		db.SetSetting(modelClaudeSlugMigrationKey, "done")
 	}
 
 	// Ensure 'personal' project exists
