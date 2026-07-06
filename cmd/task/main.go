@@ -379,6 +379,7 @@ Tasks will automatically reconnect to their agent sessions when viewed.`,
 		Use:   "logs",
 		Short: "Tail claude session logs for debugging",
 		Long:  "Streams all claude session logs across all projects in real-time.",
+		Args:  cobra.NoArgs, // takes no positional args; reject them instead of silently ignoring (e.g. `ty logs 4013`)
 		Run: func(cmd *cobra.Command, args []string) {
 			if err := tailClaudeLogs(); err != nil {
 				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
@@ -4757,8 +4758,22 @@ func tailClaudeLogs() error {
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 
+	// Exit if orphaned. If our parent goes away, the terminal that launched us
+	// is gone and nobody is reading this output -- but only SIGINT/SIGTERM are
+	// caught, and an orphan is reparented without either. Left alone a detached
+	// `ty logs` polls forever (exactly how one instance ran for ~a month burning
+	// CPU). Remember the starting parent PID and bail the moment it changes
+	// (reparented to init/launchd == parent died).
+	startPpid := os.Getppid()
+
 	ticker := time.NewTicker(200 * time.Millisecond)
 	defer ticker.Stop()
+
+	// Re-globbing the whole projects tree (hundreds of dirs) is comparatively
+	// expensive, so only do it every couple seconds to catch new sessions. The
+	// fast tick just streams growth of files we already know about.
+	const reglobEvery = 10 // 10 * 200ms ~= 2s
+	tick := 0
 
 	for {
 		select {
@@ -4766,15 +4781,31 @@ func tailClaudeLogs() error {
 			fmt.Println()
 			return nil
 		case <-ticker.C:
-			// Re-glob to catch new files
-			files, _ = filepath.Glob(pattern)
+			if os.Getppid() != startPpid {
+				// Parent died; don't linger as an orphan.
+				return nil
+			}
+
+			tick++
+			if tick%reglobEvery == 0 {
+				// Re-glob to catch new files.
+				files, _ = filepath.Glob(pattern)
+			}
 
 			for _, f := range files {
 				// Skip internal agent files (Claude Code sub-agents)
 				if strings.HasPrefix(filepath.Base(f), "agent-") {
 					continue
 				}
-				pos := positions[f]
+				// Cheap change-detection: a bare Stat is one syscall. Skip files
+				// that haven't grown so we don't Open+Seek+Scan thousands of
+				// unchanged session logs five times a second (the original hot
+				// path -- ~3.5k files re-opened at 5Hz = tens of thousands of
+				// syscalls/sec, continuously).
+				pos, seen := positions[f]
+				if info, err := os.Stat(f); err == nil && seen && info.Size() == pos {
+					continue
+				}
 				newPos, err := tailFile(f, pos)
 				if err == nil {
 					positions[f] = newPos
