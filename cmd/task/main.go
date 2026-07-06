@@ -3713,17 +3713,11 @@ func runLocal(dangerousMode bool, debugStatePath, cpuProfilePath, memProfilePath
 	stopProfiling := setupProfiling(cpuProfilePath, memProfilePath)
 	defer stopProfiling() // safety net for early-return error paths below
 
-	// Only one interactive TUI may run at a time. A second one fights the first
-	// over the executor tmux panes and traps every task in a "claude --resume"
-	// interrupt loop (see acquireTUILock). Refuse to start rather than corrupt
-	// the running sessions; the daemon, desktop app, and web viewer are
-	// unaffected (they don't borrow panes).
-	releaseTUILock, err := acquireTUILock()
-	if err != nil {
-		fmt.Fprintln(os.Stderr, dimStyle.Render("A ty session is already running on this machine — only one interactive TUI can manage the executor panes at a time. Close the other session first."))
-		return nil
-	}
-	defer releaseTUILock()
+	// Multiple interactive TUIs may now run at once. The old process-wide lock is
+	// gone; contention is handled at a finer grain instead — a TUI only refuses to
+	// borrow an *individual* executor pane when another instance already holds it
+	// (see acquireExecutorLock in internal/ui). Two boards can coexist; only the
+	// same live executor can't be joined twice.
 
 	// Ensure daemon is running
 	if err := ensureDaemonRunning(dangerousMode); err != nil {
@@ -3841,45 +3835,6 @@ func ensureDaemonRunning(dangerousMode bool) error {
 
 	fmt.Fprintln(os.Stderr, dimStyle.Render(fmt.Sprintf("Started daemon (pid %d, %s mode)", cmd.Process.Pid, modeStr)))
 	return nil
-}
-
-// acquireTUILock takes an exclusive, process-lifetime lock so only one
-// interactive TUI runs at a time. Two concurrent TUIs fight over the executor
-// tmux panes — each borrows the Claude pane into its own session via join-pane,
-// which leaves the daemon window looking empty, so EnsureTaskWindow recreates it
-// with `claude --resume`. That resume replays into the in-flight tool call and
-// Claude Code records "[Request interrupted by user for tool use]", producing an
-// endless "Interrupted" loop that makes no progress.
-//
-// flock is tied to the open file description, so the lock is released
-// automatically when the holding process exits — a crashed TUI never leaves a
-// stale lock (unlike a pidfile). The lock lives next to the database so isolated
-// instances (custom WORKTREE_DB_PATH, e.g. QA harnesses) don't contend with the
-// real one.
-//
-// It retries briefly so a `ty restart` that momentarily overlaps the outgoing
-// TUI doesn't spuriously fail. Returns a release func, or an error when another
-// TUI already holds the lock.
-func acquireTUILock() (func(), error) {
-	lockPath := filepath.Join(filepath.Dir(db.DefaultPath()), "tui.lock")
-	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0644)
-	if err != nil {
-		return nil, fmt.Errorf("open TUI lock file: %w", err)
-	}
-
-	const attempts = 10
-	for i := 0; i < attempts; i++ {
-		if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err == nil {
-			return func() {
-				_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
-				_ = f.Close()
-			}, nil
-		}
-		time.Sleep(150 * time.Millisecond)
-	}
-
-	_ = f.Close()
-	return nil, fmt.Errorf("another ty session is already running")
 }
 
 func getPidFilePath() string {

@@ -54,6 +54,11 @@ type DebugDetail struct {
 	Focused  bool   `json:"is_focused"`
 	Logs     int    `json:"log_count"`
 	HasPanes bool   `json:"has_panes"`
+	// PaneError is the user-visible pane message (empty when panes are healthy),
+	// e.g. the "running in another ty instance" notice. BusyElsewhere is true when
+	// this instance was refused the executor because another one holds its lock.
+	PaneError     string `json:"pane_error,omitempty"`
+	BusyElsewhere bool   `json:"busy_elsewhere,omitempty"`
 }
 
 type DebugForm struct {
@@ -124,13 +129,15 @@ func (m *AppModel) GenerateDebugState() DebugState {
 	// Detail State
 	if m.currentView == ViewDetail && m.detailView != nil && m.selectedTask != nil {
 		s.Detail = &DebugDetail{
-			TaskID:   m.selectedTask.ID,
-			Title:    m.selectedTask.Title,
-			Status:   m.selectedTask.Status,
-			Project:  m.selectedTask.Project,
-			Focused:  m.detailView.focused,
-			Logs:     len(m.detailView.logs),
-			HasPanes: m.detailView.hasActiveTmuxSession(),
+			TaskID:        m.selectedTask.ID,
+			Title:         m.selectedTask.Title,
+			Status:        m.selectedTask.Status,
+			Project:       m.selectedTask.Project,
+			Focused:       m.detailView.focused,
+			Logs:          len(m.detailView.logs),
+			HasPanes:      m.detailView.hasActiveTmuxSession(),
+			PaneError:     m.detailView.paneError,
+			BusyElsewhere: m.detailView.executorBusyElsewhere,
 		}
 	}
 
