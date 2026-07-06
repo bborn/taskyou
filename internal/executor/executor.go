@@ -3875,7 +3875,7 @@ func (e *Executor) setupWorktree(task *db.Task) (string, error) {
 
 	// Generate slug from title (e.g., "Add contact email" -> "add-contact-email")
 	slug := slugify(task.Title, 40)
-	branchName := fmt.Sprintf("task/%d-%s", task.ID, slug)
+	branchName := newWorktreeBranchName(task, slug)
 	dirName := fmt.Sprintf("%d-%s", task.ID, slug)
 	worktreePath := filepath.Join(worktreesDir, dirName)
 
@@ -5712,6 +5712,22 @@ func isValidWorkDir(workDir string, allowedProjectDir string) bool {
 	}
 	info, err := os.Stat(absWork)
 	return err == nil && info.IsDir()
+}
+
+// newWorktreeBranchName returns the branch name to create for a task's fresh
+// worktree. It normally derives a unique name from the task ID and title slug,
+// but honors a caller-pinned BranchName when one is set. Pinning lets a pipeline
+// route several phase tasks onto one shared branch (each phase after the first
+// checks it out via SourceBranch), so a plan → code → review chain hands work
+// forward on a single branch. A pinned name is only ever set deliberately at
+// creation time: by the point setupWorktree reaches here, an ordinary task with
+// no live worktree has already had BranchName cleared, so this never hijacks the
+// normal task/<id>-<slug> naming.
+func newWorktreeBranchName(task *db.Task, slug string) string {
+	if strings.TrimSpace(task.BranchName) != "" {
+		return task.BranchName
+	}
+	return fmt.Sprintf("task/%d-%s", task.ID, slug)
 }
 
 // slugify converts a string to a URL/branch-friendly slug.

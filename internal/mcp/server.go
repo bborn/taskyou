@@ -16,6 +16,7 @@ import (
 
 	"github.com/bborn/workflow/internal/db"
 	"github.com/bborn/workflow/internal/github"
+	"github.com/bborn/workflow/internal/pipeline"
 	"github.com/bborn/workflow/internal/spotlight"
 	"github.com/bborn/workflow/internal/tasksummary"
 )
@@ -255,6 +256,34 @@ func (s *Server) handleRequest(req *jsonRPCRequest) {
 							},
 						},
 						"required": []string{"title"},
+					},
+				},
+				{
+					Name:        "taskyou_create_pipeline",
+					Description: "Create a multi-model pipeline for a goal: one goal is split into an ordered chain of phase tasks (default 'plan-code-review': Opus plans → Sonnet codes → Codex reviews), each routed to its own executor/model, all on one shared git branch. Phases advance automatically — completing one queues the next. Use this instead of a single task when a goal benefits from a plan/code/review split across different models. The first phase is queued immediately. Requires a git-worktree project with a remote to push to.",
+					InputSchema: map[string]interface{}{
+						"type": "object",
+						"properties": map[string]interface{}{
+							"goal": map[string]interface{}{
+								"type":        "string",
+								"description": "The overall goal, threaded into every phase's prompt.",
+							},
+							"project": map[string]interface{}{
+								"type":        "string",
+								"description": "Project name (defaults to the current task's project).",
+							},
+							"definition": map[string]interface{}{
+								"type":        "string",
+								"description": "Pipeline definition name (defaults to 'plan-code-review').",
+								"enum":        pipeline.DefinitionNames(),
+							},
+							"permission_mode": map[string]interface{}{
+								"type":        "string",
+								"description": "Permission mode for every phase (default, accept-edits, auto, dangerous). Defaults to the project's configured default.",
+								"enum":        []string{"default", "accept-edits", "auto", "dangerous"},
+							},
+						},
+						"required": []string{"goal"},
 					},
 				},
 				{
@@ -561,6 +590,54 @@ func (s *Server) handleToolCall(id interface{}, params *toolCallParams) {
 		s.sendResult(id, toolCallResult{
 			Content: []contentBlock{
 				{Type: "text", Text: fmt.Sprintf("Created task #%d: %s", newTask.ID, newTask.Title)},
+			},
+		})
+
+	case "taskyou_create_pipeline":
+		goal, _ := params.Arguments["goal"].(string)
+		if strings.TrimSpace(goal) == "" {
+			s.sendError(id, -32602, "goal is required")
+			return
+		}
+		project, _ := params.Arguments["project"].(string)
+		definition, _ := params.Arguments["definition"].(string)
+		permissionMode, _ := params.Arguments["permission_mode"].(string)
+
+		// Default project to the current task's project.
+		if project == "" {
+			currentTask, err := s.db.GetTask(s.taskID)
+			if err == nil && currentTask != nil {
+				project = currentTask.Project
+			}
+		}
+
+		result, err := pipeline.Create(s.db, pipeline.Options{
+			Goal:           goal,
+			Project:        project,
+			Definition:     definition,
+			PermissionMode: db.NormalizePermissionMode(permissionMode),
+			Execute:        true,
+		})
+		if err != nil {
+			s.sendError(id, -32603, fmt.Sprintf("Failed to create pipeline: %v", err))
+			return
+		}
+
+		var sb strings.Builder
+		sb.WriteString(fmt.Sprintf("Created %s pipeline on branch %s:\n", result.Definition.Name, result.Branch))
+		for i, t := range result.Tasks {
+			ph := result.Definition.Phases[i]
+			model := ph.Model
+			if model == "" {
+				model = "default"
+			}
+			sb.WriteString(fmt.Sprintf("- #%d %s (%s/%s) — %s\n", t.ID, ph.Name, t.Executor, model, t.Status))
+		}
+		sb.WriteString("The first phase is running; each phase auto-starts the next when it completes.")
+
+		s.sendResult(id, toolCallResult{
+			Content: []contentBlock{
+				{Type: "text", Text: sb.String()},
 			},
 		})
 

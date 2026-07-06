@@ -32,6 +32,7 @@ import (
 	"github.com/bborn/workflow/internal/github"
 	"github.com/bborn/workflow/internal/hooks"
 	"github.com/bborn/workflow/internal/mcp"
+	"github.com/bborn/workflow/internal/pipeline"
 	"github.com/bborn/workflow/internal/ui"
 	"github.com/bborn/workflow/internal/web"
 )
@@ -809,6 +810,156 @@ Examples:
 		return db.ModelOptions(), cobra.ShellCompDirectiveNoFileComp
 	})
 	rootCmd.AddCommand(createCmd)
+
+	// Pipeline subcommand - create a multi-phase pipeline task
+	pipelineCmd := &cobra.Command{
+		Use:   "pipeline [goal]",
+		Short: "Create a multi-model plan → code → review pipeline for a goal",
+		Long: `Create a pipeline: one goal broken into a chain of phase tasks, each routed
+to its own executor and model, that hand work forward on a single shared branch
+and advance automatically as each phase finishes.
+
+The default 'plan-code-review' pipeline runs three phases on one branch:
+  Plan   (Claude / Opus)   — writes PLAN.md, no code
+  Code   (Claude / Sonnet) — implements the plan
+  Review (Codex)           — reviews with fresh eyes and opens the PR
+
+Each phase commits and pushes the shared branch, so the pipeline needs a project
+that uses git worktrees and has a remote to push to.
+
+Examples:
+  task pipeline "Add rate limiting to the API" --project myapp
+  task pipeline "Refactor the auth module" -p myapp --permission-mode dangerous
+  task pipeline --list  # show available pipeline definitions`,
+		Args: cobra.MaximumNArgs(1),
+		Run: func(cmd *cobra.Command, args []string) {
+			listDefs, _ := cmd.Flags().GetBool("list")
+			if listDefs {
+				for _, d := range pipeline.Definitions() {
+					phaseNames := make([]string, 0, len(d.Phases))
+					for _, p := range d.Phases {
+						label := p.Name + " (" + p.Executor
+						if p.Model != "" {
+							label += "/" + p.Model
+						}
+						label += ")"
+						phaseNames = append(phaseNames, label)
+					}
+					fmt.Printf("%s\n  %s\n  phases: %s\n", successStyle.Render(d.Name), d.Description, strings.Join(phaseNames, " → "))
+				}
+				return
+			}
+
+			var goal string
+			if len(args) > 0 {
+				goal = args[0]
+			}
+			body, _ := cmd.Flags().GetString("body")
+			body = unescapeNewlines(body)
+			if strings.TrimSpace(goal) == "" {
+				goal = body
+			}
+			if strings.TrimSpace(goal) == "" {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: a goal (positional argument or --body) is required"))
+				os.Exit(1)
+			}
+
+			project, _ := cmd.Flags().GetString("project")
+			definition, _ := cmd.Flags().GetString("definition")
+			permissionModeFlag, _ := cmd.Flags().GetString("permission-mode")
+			createDangerous, _ := cmd.Flags().GetBool("dangerous")
+			noExecute, _ := cmd.Flags().GetBool("no-execute")
+			outputJSON, _ := cmd.Flags().GetBool("json")
+
+			dbPath := db.DefaultPath()
+			database, err := openTaskDB(dbPath)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+			defer database.Close()
+
+			// Detect project from cwd if not specified.
+			if project == "" {
+				if cwd, err := os.Getwd(); err == nil {
+					if p, err := database.GetProjectByPath(cwd); err == nil && p != nil {
+						project = p.Name
+					}
+				}
+			}
+			if project == "" {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: could not determine project; pass --project"))
+				os.Exit(1)
+			}
+
+			permMode := db.NormalizePermissionMode(permissionModeFlag)
+			if permMode == "" && createDangerous {
+				permMode = db.PermissionModeDangerous
+			}
+
+			result, err := pipeline.Create(database, pipeline.Options{
+				Goal:           goal,
+				Project:        project,
+				Definition:     definition,
+				PermissionMode: permMode,
+				Execute:        !noExecute,
+			})
+			if err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+
+			if outputJSON {
+				phases := make([]map[string]interface{}, 0, len(result.Tasks))
+				for i, t := range result.Tasks {
+					phases = append(phases, map[string]interface{}{
+						"phase":    result.Definition.Phases[i].Name,
+						"id":       t.ID,
+						"executor": t.Executor,
+						"model":    t.Model,
+						"status":   t.Status,
+					})
+				}
+				out := map[string]interface{}{
+					"definition": result.Definition.Name,
+					"branch":     result.Branch,
+					"project":    project,
+					"phases":     phases,
+				}
+				jsonBytes, _ := json.Marshal(out)
+				fmt.Println(string(jsonBytes))
+				return
+			}
+
+			fmt.Println(successStyle.Render(fmt.Sprintf("Created %s pipeline on branch %s", result.Definition.Name, result.Branch)))
+			for i, t := range result.Tasks {
+				ph := result.Definition.Phases[i]
+				model := ph.Model
+				if model == "" {
+					model = "default"
+				}
+				fmt.Printf("  #%d  %-7s %s/%s  (%s)\n", t.ID, ph.Name, t.Executor, model, t.Status)
+			}
+			if noExecute {
+				fmt.Println(dimStyle.Render("Staged but not started — queue the first phase to run it."))
+			} else {
+				fmt.Println(dimStyle.Render("Running — each phase auto-starts the next when it completes."))
+			}
+		},
+	}
+	pipelineCmd.Flags().String("body", "", "Goal text (alternative to the positional argument)")
+	pipelineCmd.Flags().StringP("project", "p", "", "Project name (auto-detected from cwd if not specified)")
+	pipelineCmd.Flags().StringP("definition", "d", pipeline.DefaultDefinition, "Pipeline definition to use")
+	pipelineCmd.Flags().String("permission-mode", "", "Permission mode for every phase: default, accept-edits, auto, dangerous (defaults to the project's setting)")
+	pipelineCmd.Flags().Bool("dangerous", false, "Run every phase in dangerous mode (alias for --permission-mode dangerous)")
+	pipelineCmd.Flags().Bool("no-execute", false, "Stage the pipeline without queuing the first phase")
+	pipelineCmd.Flags().Bool("list", false, "List available pipeline definitions and exit")
+	pipelineCmd.Flags().Bool("json", false, "Output in JSON format")
+	pipelineCmd.RegisterFlagCompletionFunc("project", completeFlagProjects)
+	pipelineCmd.RegisterFlagCompletionFunc("definition", func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		return pipeline.DefinitionNames(), cobra.ShellCompDirectiveNoFileComp
+	})
+	rootCmd.AddCommand(pipelineCmd)
 
 	// List subcommand - list tasks
 	listCmd := &cobra.Command{
