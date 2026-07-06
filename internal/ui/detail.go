@@ -207,6 +207,12 @@ type DetailModel struct {
 	relatedTasksLoading bool              // true while loading related tasks
 	relatedTasksLoaded  bool              // true once loaded (even if empty)
 	lastRelatedSearch   string            // cache key for related task search
+
+	// Read-only git file & diff viewer (see diffviewer.go). When active, the
+	// detail box renders a changed-file tree plus the selected file's diff
+	// instead of the task body. All of its display state is folded into
+	// viewSignature so the View render cache stays correct.
+	diff *diffViewer
 }
 
 // Message types for async pane loading
@@ -768,7 +774,7 @@ func (m *DetailModel) initViewport() {
 		// Just use full height - the TUI pane will be resized by tmux
 	}
 
-	m.viewport = viewport.New(m.width-4, vpHeight)
+	m.viewport = viewport.New(m.contentViewportWidth(), vpHeight)
 	m.setViewportContent()
 	m.ready = true
 }
@@ -780,7 +786,7 @@ func (m *DetailModel) SetSize(width, height int) {
 	if m.ready {
 		headerHeight := 6
 		footerHeight := 2
-		m.viewport.Width = width - 4
+		m.viewport.Width = m.contentViewportWidth()
 		m.viewport.Height = height - headerHeight - footerHeight
 		m.setViewportContent()
 	}
@@ -855,6 +861,20 @@ func (m *DetailModel) Update(msg tea.Msg) (*DetailModel, tea.Cmd) {
 		log.Info("panesRefreshMsg: refreshing panes for task %d", m.task.ID)
 		// Re-start the async pane setup
 		return m, m.startPanesAsync()
+
+	case diffFilesLoadedMsg:
+		// Changed-file list for the file/diff viewer loaded.
+		return m, m.HandleDiffFilesLoaded(msg)
+
+	case diffContentLoadedMsg:
+		// Selected file's diff/rendered content loaded.
+		m.HandleDiffContentLoaded(msg)
+		return m, nil
+
+	case reviewSentMsg:
+		// Review comments delivered to the executor (or clipboard).
+		m.HandleReviewSent(msg)
+		return m, nil
 	}
 
 	// Pass all messages to viewport for scrolling support
@@ -2362,6 +2382,14 @@ func (m *DetailModel) View() string {
 
 	content := m.viewport.View()
 
+	// When the file/diff viewer is open, render the changed-file tree to the
+	// left of the (narrowed) content viewport.
+	if m.diff != nil && m.diff.active {
+		tree := m.renderDiffTree(m.viewport.Height)
+		gutter := lipgloss.NewStyle().Width(1).Height(m.viewport.Height).Render("")
+		content = lipgloss.JoinHorizontal(lipgloss.Top, tree, gutter, content)
+	}
+
 	// Use dimmed border when unfocused
 	borderColor := ColorPrimary
 	if !m.focused {
@@ -2457,6 +2485,23 @@ func (m *DetailModel) viewSignature(header, help string) uint64 {
 	h.int(m.viewport.Height)
 	h.int(m.viewport.TotalLineCount())
 	h.int(m.viewport.VisibleLineCount())
+	// File/diff viewer state drives the left tree column rendered in View();
+	// fold it in so selecting a file or toggling the viewer busts the cache.
+	if m.diff != nil {
+		h.boolean(m.diff.active)
+		h.boolean(m.diff.loading)
+		h.int(m.diff.selected)
+		h.int(len(m.diff.files))
+		h.boolean(m.diff.showRendered)
+		h.str(m.diff.loadErr)
+		// Interactive review state: the line cursor, comment input, and status
+		// all affect the rendered content/footer, so fold them in.
+		h.int(m.diff.cursor)
+		h.int(len(m.diff.comments))
+		h.boolean(m.diff.commenting)
+		h.str(m.diff.input.Value())
+		h.str(m.diff.statusMsg)
+	}
 	h.str(header)
 	h.str(help)
 	return h.h
@@ -2801,6 +2846,11 @@ func (m *DetailModel) computeLogHash() uint64 {
 func (m *DetailModel) renderContent() string {
 	t := m.task
 
+	// File/diff viewer takes over the content pane when open.
+	if m.diff != nil && m.diff.active {
+		return m.renderDiffContent()
+	}
+
 	// Check if we can use cached content
 	// Note: We don't cache when related tasks are loading/changing
 	logHash := m.computeLogHash()
@@ -3031,6 +3081,52 @@ func (m *DetailModel) renderHelp() string {
 		disabled bool // When disabled, always show grayed out
 	}
 
+	// File/diff viewer has its own, focused help line.
+	if m.diff != nil && m.diff.active {
+		// While typing a comment, the footer is the input field.
+		if m.diff.commenting {
+			prompt := HelpKey.Render("comment") + " " + m.diff.input.View() +
+				"   " + HelpKey.Render("enter") + " " + HelpDesc.Render("save") +
+				"  " + HelpKey.Render("esc") + " " + HelpDesc.Render("cancel")
+			return HelpBar.Render(prompt)
+		}
+		noFiles := len(m.diff.files) == 0
+		cursorMode := m.diff.cursorActive()
+		scrollDesc := "scroll"
+		if cursorMode {
+			scrollDesc = "line"
+		}
+		viewerKeys := []helpKey{
+			{IconArrowUp() + "/" + IconArrowDown(), "file", noFiles},
+			{"j/k", scrollDesc, false},
+			{"tab", "diff/rendered", noFiles},
+			{"c", "comment", noFiles},
+			{"s", "send", len(m.diff.comments) == 0},
+			{"esc", "close", false},
+		}
+		var vh string
+		for i, k := range viewerKeys {
+			if i > 0 {
+				vh += "  "
+			}
+			if k.disabled || !m.focused {
+				vh += lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280")).Render(k.key) + " " +
+					lipgloss.NewStyle().Foreground(lipgloss.Color("#4B5563")).Render(k.desc)
+			} else {
+				vh += HelpKey.Render(k.key) + " " + HelpDesc.Render(k.desc)
+			}
+		}
+		// Transient status (sent / copied / error) replaces the tail of the bar.
+		if m.diff.statusMsg != "" {
+			col := lipgloss.Color("#98C379")
+			if m.diff.statusIsErr {
+				col = lipgloss.Color("#E06C75")
+			}
+			vh += "    " + lipgloss.NewStyle().Foreground(col).Render(m.diff.statusMsg)
+		}
+		return HelpBar.Render(vh)
+	}
+
 	// Check if navigation is available (more than 1 task in column)
 	hasNavigation := m.totalInColumn > 1
 
@@ -3098,6 +3194,11 @@ func (m *DetailModel) renderHelp() string {
 		} else {
 			keys = append(keys, helpKey{"f", "spotlight", false})
 		}
+	}
+
+	// Review changes (file/diff viewer) when the task has a worktree
+	if m.task != nil && m.task.WorktreePath != "" {
+		keys = append(keys, helpKey{"v", "review changes", false})
 	}
 
 	// Open PR shortcut (only when task has a PR)
