@@ -2,11 +2,14 @@ package ui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	osExec "os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/charmbracelet/bubbles/viewport"
@@ -135,6 +138,14 @@ type DetailModel struct {
 
 	// Track if join-pane has failed (with cooldown to allow retries)
 	joinPaneFailedUntil time.Time
+
+	// Granular executor lock. Only one ty instance may borrow a given task's
+	// executor pane at a time; two doing so fight over the pane and trap the agent
+	// in a "claude --resume" interrupt loop. executorLockRelease holds the flock
+	// (nil when we don't own this executor); executorBusyElsewhere is set when a
+	// join was refused because another instance owns it, so the view can say so.
+	executorLockRelease   func()
+	executorBusyElsewhere bool
 
 	// Cached Glamour renderers (created once, reused)
 	glamourRendererFocused   *glamour.TermRenderer
@@ -410,6 +421,9 @@ func (m *DetailModel) restartForExecutorSwitch(prevExecutor string) tea.Cmd {
 		// Join panes — state flows back via panesJoinedMsg
 		m.cachedWindowTarget = windowTarget
 		m.joinTmuxPane()
+		if m.executorBusyElsewhere {
+			return panesJoinedMsg{err: errExecutorBusy, userMessage: executorBusyMessage}
+		}
 
 		log.Info("restartForExecutorSwitch: completed switch to %s, claudePaneID=%q", newExecutor, m.claudePaneID)
 
@@ -650,6 +664,9 @@ func (m *DetailModel) setupPanesAsync() tea.Cmd {
 		}
 		if m.cachedWindowTarget != "" {
 			m.joinTmuxPane()
+			if m.executorBusyElsewhere {
+				return panesJoinedMsg{err: errExecutorBusy, userMessage: executorBusyMessage}
+			}
 			log.Info("setupPanesAsync: joined existing window, claudePaneID=%q, workdirPaneID=%q",
 				m.claudePaneID, m.workdirPaneID)
 			return panesJoinedMsg{
@@ -718,6 +735,9 @@ func (m *DetailModel) startAndJoinSession(sessionID string) tea.Msg {
 	// Join the panes
 	m.cachedWindowTarget = windowTarget
 	m.joinTmuxPane()
+	if m.executorBusyElsewhere {
+		return panesJoinedMsg{err: errExecutorBusy, userMessage: executorBusyMessage}
+	}
 
 	log.Info("startAndJoinSession: completed, claudePaneID=%q, workdirPaneID=%q",
 		m.claudePaneID, m.workdirPaneID)
@@ -796,7 +816,11 @@ func (m *DetailModel) Update(msg tea.Msg) (*DetailModel, tea.Cmd) {
 		log := GetLogger()
 		m.paneLoading = false
 		m.waitingForExecutor = false
-		if msg.err != nil {
+		if errors.Is(msg.err, errExecutorBusy) {
+			// Not a failure — another ty instance owns this executor. Show why.
+			log.Info("panesJoinedMsg: executor owned by another ty instance")
+			m.paneError = msg.userMessage
+		} else if msg.err != nil {
 			log.Error("panesJoinedMsg: error=%v", msg.err)
 			m.paneError = msg.userMessage
 		} else {
@@ -873,6 +897,9 @@ func (m *DetailModel) Cleanup() {
 	if m.claudePaneID != "" || m.workdirPaneID != "" {
 		m.breakTmuxPanes(true, true) // saveHeight=true, resizeTUI=true
 	}
+	// Hand the executor back to other ty instances. Unconditional: we may hold the
+	// lock even when no pane got joined (e.g. join-pane failed after we locked).
+	m.releaseExecutorLock()
 }
 
 // CleanupWithoutSaving cleans up panes without saving the height.
@@ -882,6 +909,7 @@ func (m *DetailModel) CleanupWithoutSaving() {
 	if m.claudePaneID != "" || m.workdirPaneID != "" {
 		m.breakTmuxPanes(false, true) // saveHeight=false, resizeTUI=true
 	}
+	m.releaseExecutorLock()
 }
 
 // ClearPaneState clears the cached pane state without breaking panes.
@@ -1120,6 +1148,11 @@ func (m *DetailModel) ensureTmuxPanesJoined() {
 			m.paneLoading = false
 			m.waitingForExecutor = false
 			m.paneError = ""
+		} else if m.executorBusyElsewhere {
+			// Another ty instance owns this executor: stop spinning and show why.
+			m.paneLoading = false
+			m.waitingForExecutor = false
+			m.paneError = executorBusyMessage
 		}
 	}
 }
@@ -1374,6 +1407,52 @@ func (m *DetailModel) saveShellPaneWidth() {
 	}
 }
 
+// errExecutorBusy signals that another ty instance already owns a task's executor
+// pane, so this instance must not join it. It flows back through panesJoinedMsg as
+// a user-facing message rather than a hard failure.
+var errExecutorBusy = errors.New("executor busy in another instance")
+
+// executorBusyMessage is shown in the detail header when the executor is locked by
+// another running ty.
+const executorBusyMessage = "This executor is running in another ty instance. Close it there to view it here."
+
+// acquireExecutorLock takes an exclusive flock on a per-task lock file so only one
+// ty instance borrows a given executor's tmux pane at a time. Two instances joining
+// the same pane fight over it and trap the agent in a "claude --resume" interrupt
+// loop, so a second instance must refuse rather than steal it.
+//
+// The lock is tied to the open file description, so it is released automatically if
+// the holding process exits — a crashed TUI never leaves a stale lock. It lives
+// next to the database, so isolated instances (custom WORKTREE_DB_PATH, e.g. QA
+// harnesses) get their own lock namespace and don't contend with the real one.
+//
+// Returns a release func, or errExecutorBusy when another instance holds it.
+func acquireExecutorLock(taskID int64) (func(), error) {
+	lockPath := filepath.Join(filepath.Dir(db.DefaultPath()), fmt.Sprintf("executor-%d.lock", taskID))
+	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0644)
+	if err != nil {
+		return nil, fmt.Errorf("open executor lock file: %w", err)
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		_ = f.Close()
+		return nil, errExecutorBusy
+	}
+	return func() {
+		_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+		_ = f.Close()
+	}, nil
+}
+
+// releaseExecutorLock drops the executor lock if this model holds it. Safe to call
+// repeatedly; it no-ops once released.
+func (m *DetailModel) releaseExecutorLock() {
+	if m.executorLockRelease != nil {
+		m.executorLockRelease()
+		m.executorLockRelease = nil
+	}
+	m.executorBusyElsewhere = false
+}
+
 // joinTmuxPanes joins the task's Claude pane and creates a workdir shell pane.
 // Layout:
 //   - Top (configurable, default 20%): Task details (TUI)
@@ -1389,6 +1468,24 @@ func (m *DetailModel) joinTmuxPanes() {
 		return
 	}
 	log.Debug("joinTmuxPanes: windowTarget=%q", windowTarget)
+
+	// Granular executor lock: refuse to borrow this task's pane if another ty
+	// instance already owns it, rather than fighting over it and interrupt-looping
+	// the agent. We hold the lock for the life of this detail view (re-joins after
+	// a pane dies reuse it), so only acquire when we don't already hold it.
+	if m.executorLockRelease == nil {
+		release, err := acquireExecutorLock(m.task.ID)
+		if err != nil {
+			log.Info("joinTmuxPanes: executor for task %d is owned by another ty instance; not joining", m.task.ID)
+			m.executorBusyElsewhere = true
+			// Retry on the normal cooldown so the view recovers once the other
+			// instance releases the pane.
+			m.joinPaneFailedUntil = time.Now().Add(3 * time.Second)
+			return
+		}
+		m.executorLockRelease = release
+	}
+	m.executorBusyElsewhere = false
 
 	// Use timeout for all tmux operations to prevent blocking UI
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
