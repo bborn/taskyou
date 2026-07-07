@@ -93,6 +93,8 @@ type KeyMap struct {
 	// Detail-view pinned quick-nav (hop between focused/pinned tasks)
 	PrevPinnedTask key.Binding
 	NextPinnedTask key.Binding
+	// Detail-view: show/hide the pinned quick-nav row
+	TogglePinnedRow key.Binding
 	// Column collapse
 	CollapseBacklog key.Binding
 	CollapseDone    key.Binding
@@ -263,6 +265,10 @@ func DefaultKeyMap() KeyMap {
 		NextPinnedTask: key.NewBinding(
 			key.WithKeys("]"),
 			key.WithHelp("]", "next pinned"),
+		),
+		TogglePinnedRow: key.NewBinding(
+			key.WithKeys("T"),
+			key.WithHelp("T", "show/hide pinned"),
 		),
 		CollapseBacklog: key.NewBinding(
 			key.WithKeys("["),
@@ -2596,6 +2602,15 @@ func (m *AppModel) updateDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 	if key.Matches(keyMsg, m.keys.ToggleShellPane) && m.detailView != nil {
 		m.detailView.ToggleShellPane()
+		return m, nil
+	}
+	if key.Matches(keyMsg, m.keys.Help) && m.detailView != nil {
+		// Expand/collapse the detail footer help row.
+		m.detailView.ToggleHelpExpanded()
+		return m, nil
+	}
+	if key.Matches(keyMsg, m.keys.TogglePinnedRow) && m.detailView != nil {
+		m.detailView.TogglePinnedNav()
 		return m, nil
 	}
 

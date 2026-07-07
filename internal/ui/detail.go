@@ -123,6 +123,13 @@ type DetailModel struct {
 	// the task set changes.
 	pinnedNav      []PinnedNavItem
 	pinnedNavIndex int
+	// pinnedNavHidden lets the user collapse the pinned quick-nav row entirely
+	// (toggled with 'T'); persisted as a preference across tasks/sessions.
+	pinnedNavHidden bool
+
+	// helpExpanded controls the footer help row: collapsed shows only the
+	// high-frequency actions plus a '?' affordance; expanded reveals the rest.
+	helpExpanded bool
 
 	// Track joined tmux panes
 	claudePaneID    string // The Claude Code pane (middle-left)
@@ -597,6 +604,11 @@ func NewDetailModel(t *db.Task, database *db.DB, exec *executor.Executor, width,
 	// Load shell pane visibility preference from settings
 	if hiddenStr, err := database.GetSetting(config.SettingShellPaneHidden); err == nil && hiddenStr == "true" {
 		m.shellPaneHidden = true
+	}
+
+	// Load pinned quick-nav visibility preference from settings
+	if hiddenStr, err := database.GetSetting(config.SettingPinnedNavHidden); err == nil && hiddenStr == "true" {
+		m.pinnedNavHidden = true
 	}
 
 	// Load logs
@@ -3137,50 +3149,62 @@ func (m *DetailModel) renderHelp() string {
 		key      string
 		desc     string
 		disabled bool // When disabled, always show grayed out
+		primary  bool // Shown even when the help row is collapsed
 	}
 
 	// Check if navigation is available (more than 1 task in column)
 	hasNavigation := m.totalInColumn > 1
 
+	// Primary keys are the handful of high-frequency actions kept visible when
+	// the row is collapsed; everything else is tucked behind '?'.
 	keys := []helpKey{
-		{IconArrowUp() + "/" + IconArrowDown(), "prev/next task", !hasNavigation},
+		{IconArrowUp() + "/" + IconArrowDown(), "prev/next task", !hasNavigation, true},
 	}
 
 	// Pinned quick-nav hint (only when the bar is shown)
 	if m.showPinnedNav() {
-		keys = append(keys, helpKey{"[/]", "pinned", false})
+		keys = append(keys, helpKey{"[/]", "pinned", false, true})
 	}
 
 	// Show scroll hint when content is scrollable
 	if m.viewport.TotalLineCount() > m.viewport.VisibleLineCount() {
-		keys = append(keys, helpKey{"j/k/wheel", "scroll", false})
+		keys = append(keys, helpKey{"j/k/wheel", "scroll", false, false})
 	}
 
 	// Only show execute/retry when Claude is not running
 	claudeRunning := m.claudeMemoryMB > 0
 	if !claudeRunning {
-		keys = append(keys, helpKey{"x", "execute", false})
-		keys = append(keys, helpKey{"X", "execute dangerous", false})
+		keys = append(keys, helpKey{"x", "execute", false, true})
+		keys = append(keys, helpKey{"X", "execute dangerous", false, false})
 	}
 
 	hasPanes := m.claudePaneID != "" || m.workdirPaneID != ""
 
-	keys = append(keys, helpKey{"e", "edit", false})
+	keys = append(keys, helpKey{"e", "edit", false, true})
 
 	// Only show retry when Claude is not running
 	if !claudeRunning {
-		keys = append(keys, helpKey{"r", "retry", false})
+		keys = append(keys, helpKey{"r", "retry", false, false})
 	}
 
 	// Always show status change option
-	keys = append(keys, helpKey{"S", "status", false})
+	keys = append(keys, helpKey{"S", "status", false, true})
 
 	if m.task != nil {
 		pinDesc := "pin task"
 		if m.task.Pinned {
 			pinDesc = "unpin task"
 		}
-		keys = append(keys, helpKey{"t", pinDesc, false})
+		keys = append(keys, helpKey{"t", pinDesc, false, false})
+	}
+
+	// Toggle the pinned quick-nav row (only when there are pinned tasks to show).
+	if m.pinnedNavAvailable() {
+		toggleDesc := "hide pinned"
+		if m.pinnedNavHidden {
+			toggleDesc = "show pinned"
+		}
+		keys = append(keys, helpKey{"T", toggleDesc, false, false})
 	}
 
 	// Show dangerous mode toggle when task is processing or blocked
@@ -3189,23 +3213,23 @@ func (m *DetailModel) renderHelp() string {
 		if m.task.DangerousMode {
 			toggleDesc = "safe mode"
 		}
-		keys = append(keys, helpKey{"!", toggleDesc, false})
+		keys = append(keys, helpKey{"!", toggleDesc, false, false})
 	}
 
 	// Show pane navigation shortcut when panes are visible
 	if hasPanes && os.Getenv("TMUX") != "" {
-		keys = append(keys, helpKey{"shift+" + IconArrowUp() + IconArrowDown(), "switch pane", false})
+		keys = append(keys, helpKey{"shift+" + IconArrowUp() + IconArrowDown(), "switch pane", false, false})
 		// Show shell pane toggle shortcut
 		toggleDesc := "hide shell"
 		if m.shellPaneHidden {
 			toggleDesc = "show shell"
 		}
-		keys = append(keys, helpKey{"\\", toggleDesc, false})
+		keys = append(keys, helpKey{"\\", toggleDesc, false, false})
 	}
 
 	// Open PR shortcut (only when task has a PR)
 	if m.task != nil && m.task.PRURL != "" {
-		keys = append(keys, helpKey{"G", "open PR", false})
+		keys = append(keys, helpKey{"G", "open PR", false, false})
 	}
 
 	// Show contextual label for 'b' key based on whether process is running
@@ -3214,19 +3238,24 @@ func (m *DetailModel) renderHelp() string {
 		browserLabel = "browser"
 	}
 	keys = append(keys, []helpKey{
-		{"b", browserLabel, false},
-		{"c", "close", false},
-		{"a", "archive", false},
-		{"d", "delete", false},
-		{"esc", "back", false},
+		{"b", browserLabel, false, false},
+		{"c", "close", false, false},
+		{"a", "archive", false, false},
+		{"d", "delete", false, false},
+		{"esc", "back", false, true},
 	}...)
 
 	var help string
 	dimmedKeyStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280"))
 	dimmedDescStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#4B5563"))
 
-	for i, k := range keys {
-		if i > 0 {
+	rendered := 0
+	for _, k := range keys {
+		// When collapsed, only the primary keys are shown.
+		if !m.helpExpanded && !k.primary {
+			continue
+		}
+		if rendered > 0 {
 			help += "  "
 		}
 		// Disabled keys are always dimmed, regardless of focus
@@ -3235,7 +3264,18 @@ func (m *DetailModel) renderHelp() string {
 		} else {
 			help += HelpKey.Render(k.key) + " " + HelpDesc.Render(k.desc)
 		}
+		rendered++
 	}
+
+	// Trailing '?' affordance to expand/collapse the rest.
+	moreDesc := "more"
+	if m.helpExpanded {
+		moreDesc = "less"
+	}
+	if rendered > 0 {
+		help += "  "
+	}
+	help += dimmedKeyStyle.Render("?") + " " + dimmedDescStyle.Render(moreDesc)
 
 	return HelpBar.Render(help)
 }
