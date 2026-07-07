@@ -94,6 +94,12 @@ type Options struct {
 	Definition     string // Definition name; "" resolves to DefaultDefinition.
 	PermissionMode string // Permission mode for every phase ("" inherits project default).
 	Execute        bool   // If true, queue the first phase so the pipeline starts now.
+
+	// AvailableExecutors, when non-empty, lists the executor slugs installed on
+	// this host. Any phase whose executor is not in the list falls back to Claude
+	// (always the baseline) so a pipeline still runs end-to-end when, say, Codex
+	// isn't installed. An empty/nil list disables the check (assume all present).
+	AvailableExecutors []string
 }
 
 // Result describes a built pipeline.
@@ -101,6 +107,21 @@ type Result struct {
 	Definition Definition
 	Branch     string     // The shared branch all phases run on.
 	Tasks      []*db.Task // Phase tasks in order.
+	Fallbacks  []string   // Human-readable notes about executors remapped to Claude.
+}
+
+// executorAvailable reports whether slug is usable given the available set. An
+// empty set means "no information" — assume everything is available.
+func executorAvailable(slug string, available []string) bool {
+	if len(available) == 0 {
+		return true
+	}
+	for _, a := range available {
+		if a == slug {
+			return true
+		}
+	}
+	return false
 }
 
 // Create builds a pipeline: one phase task per Definition.Phase, wired into a
@@ -126,16 +147,28 @@ func Create(database *db.DB, opts Options) (*Result, error) {
 
 	slug := slugify(goal, 40)
 
+	var fallbacks []string
+	// resolvePhase picks the executor/model a phase actually runs with, downgrading
+	// an unavailable executor to Claude so the whole pipeline still runs.
+	resolvePhase := func(ph Phase) (executor, model string) {
+		if executorAvailable(ph.Executor, opts.AvailableExecutors) {
+			return ph.Executor, ph.Model
+		}
+		fallbacks = append(fallbacks, fmt.Sprintf("%s: %s not installed — using claude", ph.Name, ph.Executor))
+		return db.ExecutorClaude, "" // Drop the model; it belonged to the original executor.
+	}
+
 	// Phase 1 is created first so its ID can seed a unique, shared branch name.
 	first := def.Phases[0]
+	firstExec, firstModel := resolvePhase(first)
 	firstTask := &db.Task{
 		Title:          phaseTitle(first.Name, goal),
 		Body:           goal, // Placeholder; rewritten below once the branch is known.
 		Status:         db.StatusBacklog,
 		Type:           db.TypeCode,
 		Project:        opts.Project,
-		Executor:       first.Executor,
-		Model:          first.Model,
+		Executor:       firstExec,
+		Model:          firstModel,
 		PermissionMode: opts.PermissionMode,
 		Tags:           "pipeline",
 	}
@@ -158,14 +191,15 @@ func Create(database *db.DB, opts Options) (*Result, error) {
 	prevID := firstTask.ID
 
 	for _, ph := range def.Phases[1:] {
+		phExec, phModel := resolvePhase(ph)
 		task := &db.Task{
 			Title:          phaseTitle(ph.Name, goal),
 			Body:           render(ph.Instruction, goal, branch),
 			Status:         db.StatusBlocked, // Waits for its blocker; auto-queued on completion.
 			Type:           db.TypeCode,
 			Project:        opts.Project,
-			Executor:       ph.Executor,
-			Model:          ph.Model,
+			Executor:       phExec,
+			Model:          phModel,
 			PermissionMode: opts.PermissionMode,
 			SourceBranch:   branch,
 			Tags:           "pipeline",
@@ -189,7 +223,7 @@ func Create(database *db.DB, opts Options) (*Result, error) {
 		firstTask.Status = db.StatusQueued
 	}
 
-	return &Result{Definition: def, Branch: branch, Tasks: tasks}, nil
+	return &Result{Definition: def, Branch: branch, Tasks: tasks, Fallbacks: fallbacks}, nil
 }
 
 // phaseTitle builds a task title like "[Plan] <goal>", trimming a long goal so

@@ -897,12 +897,14 @@ Examples:
 				permMode = db.PermissionModeDangerous
 			}
 
+			available := executor.New(database, config.New(database)).AvailableExecutors()
 			result, err := pipeline.Create(database, pipeline.Options{
-				Goal:           goal,
-				Project:        project,
-				Definition:     definition,
-				PermissionMode: permMode,
-				Execute:        !noExecute,
+				Goal:               goal,
+				Project:            project,
+				Definition:         definition,
+				PermissionMode:     permMode,
+				Execute:            !noExecute,
+				AvailableExecutors: available,
 			})
 			if err != nil {
 				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
@@ -926,6 +928,9 @@ Examples:
 					"project":    project,
 					"phases":     phases,
 				}
+				if len(result.Fallbacks) > 0 {
+					out["fallbacks"] = result.Fallbacks
+				}
 				jsonBytes, _ := json.Marshal(out)
 				fmt.Println(string(jsonBytes))
 				return
@@ -939,6 +944,9 @@ Examples:
 					model = "default"
 				}
 				fmt.Printf("  #%d  %-7s %s/%s  (%s)\n", t.ID, ph.Name, t.Executor, model, t.Status)
+			}
+			for _, fb := range result.Fallbacks {
+				fmt.Println(dimStyle.Render("  ⚠ " + fb))
 			}
 			if noExecute {
 				fmt.Println(dimStyle.Render("Staged but not started — queue the first phase to run it."))

@@ -169,6 +169,47 @@ func TestCreatePermissionModeAppliesToEveryPhase(t *testing.T) {
 	}
 }
 
+func TestCreateFallsBackWhenExecutorUnavailable(t *testing.T) {
+	database := testDB(t)
+	// Codex not installed: only claude is available. The Review phase must fall
+	// back to claude rather than being wired to an executor that can't run.
+	res, err := Create(database, Options{
+		Goal:               "Do a thing",
+		Project:            "test",
+		Execute:            true,
+		AvailableExecutors: []string{db.ExecutorClaude},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	review := res.Tasks[2]
+	if review.Executor != db.ExecutorClaude {
+		t.Errorf("Review executor = %q, want claude fallback", review.Executor)
+	}
+	if len(res.Fallbacks) == 0 {
+		t.Error("expected a fallback note when codex is unavailable")
+	}
+}
+
+func TestCreateNoFallbackWhenAllAvailable(t *testing.T) {
+	database := testDB(t)
+	res, err := Create(database, Options{
+		Goal:               "Do a thing",
+		Project:            "test",
+		Execute:            true,
+		AvailableExecutors: []string{db.ExecutorClaude, db.ExecutorCodex},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if res.Tasks[2].Executor != db.ExecutorCodex {
+		t.Errorf("Review executor = %q, want codex", res.Tasks[2].Executor)
+	}
+	if len(res.Fallbacks) != 0 {
+		t.Errorf("unexpected fallbacks: %v", res.Fallbacks)
+	}
+}
+
 func TestCreateValidation(t *testing.T) {
 	database := testDB(t)
 	cases := []struct {
