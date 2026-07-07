@@ -53,8 +53,6 @@ type KeybindingsConfig struct {
 	CollapseDone       *KeybindingConfig `yaml:"collapse_done,omitempty"`
 	OpenBrowser        *KeybindingConfig `yaml:"open_browser,omitempty"`
 	OpenPR             *KeybindingConfig `yaml:"open_pr,omitempty"`
-	Spotlight          *KeybindingConfig `yaml:"spotlight,omitempty"`
-	SpotlightSync      *KeybindingConfig `yaml:"spotlight_sync,omitempty"`
 }
 
 // DefaultKeybindingsConfigPath returns the default path for the keybindings config file.
@@ -260,14 +258,5 @@ open_browser:
 open_pr:
   keys: ["G"]
   help: "open PR"
-
-# Spotlight mode
-spotlight:
-  keys: ["f"]
-  help: "spotlight"
-
-spotlight_sync:
-  keys: ["F"]
-  help: "spotlight sync"
 `
 }

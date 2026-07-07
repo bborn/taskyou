@@ -249,10 +249,6 @@ the worktree, not the executor inside it.
 - `taskyou_create_task` — Create a follow-up task.
 - `taskyou_list_tasks` — See other active tasks in this project.
 
-**Worktree sync:**
-- `taskyou_spotlight` — Sync worktree changes to the main repo so you can
-  exercise the running app against your changes (`start`/`stop`/`sync`/`status`).
-
 ## Best Practices
 
 1. **Always check the board first** — Understand context before acting

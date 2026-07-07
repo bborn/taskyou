@@ -16,7 +16,6 @@ import (
 
 	"github.com/bborn/workflow/internal/db"
 	"github.com/bborn/workflow/internal/github"
-	"github.com/bborn/workflow/internal/spotlight"
 	"github.com/bborn/workflow/internal/tasksummary"
 )
 
@@ -298,21 +297,6 @@ func (s *Server) handleRequest(req *jsonRPCRequest) {
 							},
 						},
 						"required": []string{"context"},
-					},
-				},
-				{
-					Name:        "taskyou_spotlight",
-					Description: "Enable spotlight mode to sync worktree changes back to the main repository for testing. This bridges the gap between isolated task development and application runtime by syncing git-tracked files to where your app runs. Use 'start' to enable, 'stop' to restore original state, 'sync' for manual sync, or 'status' to check current state.",
-					InputSchema: map[string]interface{}{
-						"type": "object",
-						"properties": map[string]interface{}{
-							"action": map[string]interface{}{
-								"type":        "string",
-								"enum":        []string{"start", "stop", "sync", "status"},
-								"description": "Action to perform: 'start' enables spotlight mode and syncs files, 'stop' disables and restores original state, 'sync' manually syncs files (while active), 'status' shows current spotlight state",
-							},
-						},
-						"required": []string{"action"},
 					},
 				},
 			},
@@ -712,72 +696,6 @@ This saves future tasks from re-exploring the codebase.`},
 		s.sendResult(id, toolCallResult{
 			Content: []contentBlock{
 				{Type: "text", Text: fmt.Sprintf("Project context saved for '%s'. Future tasks will use this context to skip codebase exploration.", currentTask.Project)},
-			},
-		})
-
-	case "taskyou_spotlight":
-		action, _ := params.Arguments["action"].(string)
-		if action == "" {
-			s.sendError(id, -32602, "action is required")
-			return
-		}
-
-		// Get current task
-		task, err := s.db.GetTask(s.taskID)
-		if err != nil || task == nil {
-			s.sendError(id, -32603, "Failed to get current task")
-			return
-		}
-
-		if task.WorktreePath == "" {
-			s.sendError(id, -32602, "Task has no worktree (spotlight requires a worktree)")
-			return
-		}
-
-		// Get the project directory (main repo)
-		project, err := s.db.GetProjectByName(task.Project)
-		if err != nil || project == nil {
-			s.sendError(id, -32603, "Failed to get project directory")
-			return
-		}
-		mainRepoDir := project.Path
-
-		// Spotlight requires worktree isolation - it syncs changes between a worktree and the main repo.
-		// For non-worktree projects, the task already runs in the project directory.
-		if !project.UsesWorktrees() {
-			s.sendError(id, -32602, "Spotlight is not available for non-worktree projects (task already runs in project directory)")
-			return
-		}
-
-		// Handle spotlight actions
-		var result string
-		switch action {
-		case "start":
-			result, err = spotlight.Start(task.WorktreePath, mainRepoDir)
-		case "stop":
-			result, err = spotlight.Stop(task.WorktreePath, mainRepoDir)
-		case "sync":
-			if !spotlight.IsActive(task.WorktreePath) {
-				s.sendError(id, -32602, "Spotlight mode is not active. Use 'start' to enable spotlight before syncing")
-				return
-			}
-			result, err = spotlight.Sync(task.WorktreePath, mainRepoDir)
-		case "status":
-			result, err = spotlight.Status(task.WorktreePath, mainRepoDir)
-		default:
-			s.sendError(id, -32602, fmt.Sprintf("Unknown spotlight action: %s", action))
-			return
-		}
-		if err != nil {
-			s.sendError(id, -32603, err.Error())
-			return
-		}
-
-		s.db.AppendTaskLog(s.taskID, "system", fmt.Sprintf("Spotlight %s: %s", action, result))
-
-		s.sendResult(id, toolCallResult{
-			Content: []contentBlock{
-				{Type: "text", Text: result},
 			},
 		})
 
