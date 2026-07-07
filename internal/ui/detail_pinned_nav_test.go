@@ -108,18 +108,23 @@ func TestPinnedNavIDAt(t *testing.T) {
 	}
 }
 
-func TestPinnedNavRendersInHeader(t *testing.T) {
+func TestPinnedNavRendersInView(t *testing.T) {
 	m := newNavDetailModel(t)
 	m.SetPinnedNav([]PinnedNavItem{
 		{ID: 1, Title: "Current"},
 		{ID: 42, Title: "Refactor login"},
 	}, 1)
 
-	header := m.renderHeader()
-	if !strings.Contains(header, "#42") {
-		t.Errorf("expected pinned nav bar to reference task #42 in header, got:\n%s", header)
+	// The bar renders at the bottom of the box (not the header), so it appears in
+	// the full view but not in the header block.
+	if strings.Contains(m.renderHeader(), "#42") {
+		t.Error("pinned nav should not be in the header block (it lives at the box bottom)")
 	}
-	// The bar adds a line, so headerHeight must grow to keep the viewport clear.
+	if !strings.Contains(m.View(), "#42") {
+		t.Errorf("expected pinned nav bar to reference task #42 in the view, got:\n%s", m.View())
+	}
+	// The bar adds a line, so the reserved chrome height must grow to keep the
+	// viewport clear.
 	if m.headerHeight() != 7 {
 		t.Errorf("headerHeight with nav = %d, want 7", m.headerHeight())
 	}

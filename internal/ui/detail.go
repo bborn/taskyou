@@ -786,9 +786,9 @@ func (m *DetailModel) spinnerTick() tea.Cmd {
 	})
 }
 
-// headerHeight is the vertical space reserved for the header above the viewport.
-// The pinned quick-nav bar, when shown, adds one line and must be accounted for
-// here or the viewport would paint over it.
+// headerHeight is the vertical space reserved for the box chrome around the
+// viewport. The pinned quick-nav bar (rendered at the bottom of the box) adds
+// one line and must be accounted for here or the viewport would overflow.
 func (m *DetailModel) headerHeight() int {
 	h := 6
 	if m.showPinnedNav() {
@@ -2461,8 +2461,9 @@ func (m *DetailModel) View() string {
 
 	header := m.renderHeader()
 	help := m.renderHelp()
+	nav := m.renderPinnedNav()
 
-	sig := m.viewSignature(header, help)
+	sig := m.viewSignature(header, help, nav)
 	if m.cachedViewOK && m.cachedViewSig == sig {
 		return m.cachedView
 	}
@@ -2515,6 +2516,13 @@ func (m *DetailModel) View() string {
 		boxContent = lipgloss.JoinVertical(lipgloss.Left, header, content, scrollIndicator)
 	}
 
+	// Pinned quick-nav bar sits at the bottom of the box, just above the help
+	// footer, so the top stays clean. headerHeight() already reserves a line for
+	// it, so the viewport shrinks to make room.
+	if nav != "" {
+		boxContent = lipgloss.JoinVertical(lipgloss.Left, boxContent, nav)
+	}
+
 	renderedBox := box.Render(boxContent)
 
 	// When shell pane is hidden, show a collapsed indicator on the right
@@ -2559,7 +2567,7 @@ func (m *DetailModel) View() string {
 // colours) without enumerating each one. The remaining inputs are the View-level
 // state the header/help don't cover: the dangerous-mode banner, the bordered box,
 // and the viewport's content/scroll geometry.
-func (m *DetailModel) viewSignature(header, help string) uint64 {
+func (m *DetailModel) viewSignature(header, help, nav string) uint64 {
 	h := newSigHasher()
 	h.u64(StyleGeneration()) // theme / project colour changes
 	h.int(m.width)
@@ -2578,6 +2586,7 @@ func (m *DetailModel) viewSignature(header, help string) uint64 {
 	h.int(m.viewport.VisibleLineCount())
 	h.str(header)
 	h.str(help)
+	h.str(nav) // pinned quick-nav bar (rendered at the box bottom)
 	return h.h
 }
 
@@ -2863,13 +2872,6 @@ func (m *DetailModel) renderHeader() string {
 		Width(m.width - 4).
 		Align(lipgloss.Right).
 		Render(rightBlock)
-
-	// Prepend the pinned quick-nav bar (when there's somewhere to hop to). It is
-	// part of the header string, so viewSignature captures it automatically and
-	// the render cache stays correct.
-	if nav := m.renderPinnedNav(); nav != "" {
-		return lipgloss.JoinVertical(lipgloss.Left, nav, headerLayout, "")
-	}
 
 	return lipgloss.JoinVertical(lipgloss.Left, headerLayout, "")
 }
