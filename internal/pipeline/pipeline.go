@@ -23,6 +23,7 @@ package pipeline
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 	"unicode"
 
@@ -36,7 +37,8 @@ type Step struct {
 	Name        string   // Unique label, e.g. "Plan", "Code", "Review A", "Collect".
 	Executor    string   // Executor slug (db.ExecutorClaude, db.ExecutorCodex, ...).
 	Model       string   // Per-task model override ("" = the executor's default).
-	Instruction string   // Body template with {{goal}} and {{branch}} placeholders.
+	Instruction string   // Full body template (built-in steps). Takes precedence over Prompt.
+	Prompt      string   // Custom-workflow body: what the step does; the git handoff is composed from the DAG (see compose.go).
 	Deps        []string // Names of steps that must complete before this one runs.
 }
 
@@ -45,6 +47,7 @@ type Definition struct {
 	Name        string
 	Description string
 	Steps       []Step
+	Custom      bool // true for workflows loaded from YAML files (vs the built-ins)
 }
 
 // DefaultDefinition is the definition used when none is named.
@@ -71,31 +74,67 @@ var planCodeReview = Definition{
 	},
 }
 
-var definitions = map[string]Definition{
+var builtins = map[string]Definition{
 	planCodeReview.Name: planCodeReview,
 }
 
-// Definitions returns all built-in workflow definitions.
-func Definitions() []Definition {
-	return []Definition{planCodeReview}
-}
-
-// DefinitionNames returns the names of all built-in definitions.
-func DefinitionNames() []string {
-	out := make([]string, 0, len(definitions))
-	for _, d := range Definitions() {
-		out = append(out, d.Name)
+// registry merges the built-in definitions with any custom YAML workflows found
+// in extraDirs (plus the global WorkflowsDir). Custom definitions shadow built-ins
+// of the same name.
+func registry(extraDirs ...string) map[string]Definition {
+	out := make(map[string]Definition, len(builtins)+2)
+	for name, def := range builtins {
+		out[name] = def
+	}
+	dirs := append([]string{WorkflowsDir()}, extraDirs...)
+	custom, _ := loadCustomDefinitions(dirs)
+	for name, def := range custom {
+		out[name] = def
 	}
 	return out
 }
 
-// Get returns the named definition. An empty name resolves to DefaultDefinition.
-func Get(name string) (Definition, bool) {
+// Definitions returns all workflow definitions — built-in plus custom YAML
+// workflows discovered in extraDirs and the global workflows dir.
+func Definitions(extraDirs ...string) []Definition {
+	reg := registry(extraDirs...)
+	names := make([]string, 0, len(reg))
+	for name := range reg {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	// Keep the default first for a stable, friendly listing.
+	out := make([]Definition, 0, len(names))
+	if def, ok := reg[DefaultDefinition]; ok {
+		out = append(out, def)
+	}
+	for _, name := range names {
+		if name == DefaultDefinition {
+			continue
+		}
+		out = append(out, reg[name])
+	}
+	return out
+}
+
+// DefinitionNames returns the names of all definitions (built-in + custom).
+func DefinitionNames(extraDirs ...string) []string {
+	defs := Definitions(extraDirs...)
+	out := make([]string, len(defs))
+	for i, d := range defs {
+		out[i] = d.Name
+	}
+	return out
+}
+
+// Get returns the named definition (built-in or custom). An empty name resolves
+// to DefaultDefinition.
+func Get(name string, extraDirs ...string) (Definition, bool) {
 	name = strings.TrimSpace(name)
 	if name == "" {
 		name = DefaultDefinition
 	}
-	def, ok := definitions[name]
+	def, ok := registry(extraDirs...)[name]
 	return def, ok
 }
 
@@ -199,9 +238,11 @@ func Create(database *db.DB, opts Options) (*Result, error) {
 	if strings.TrimSpace(opts.Project) == "" {
 		return nil, fmt.Errorf("workflow project is required")
 	}
-	def, ok := Get(opts.Definition)
+	projectDir := projectDirFor(database, opts.Project)
+	dirs := WorkflowDirs(projectDir)
+	def, ok := Get(opts.Definition, dirs...)
 	if !ok {
-		return nil, fmt.Errorf("unknown workflow definition %q (available: %s)", opts.Definition, strings.Join(DefinitionNames(), ", "))
+		return nil, fmt.Errorf("unknown workflow definition %q (available: %s)", opts.Definition, strings.Join(DefinitionNames(dirs...), ", "))
 	}
 	if err := def.validate(); err != nil {
 		return nil, err
@@ -243,7 +284,7 @@ func Create(database *db.DB, opts Options) (*Result, error) {
 	// every other step at it via SourceBranch.
 	for _, s := range steps {
 		task := byName[s.Name]
-		task.Body = render(s.Instruction, goal, branch, s.Name, reviewsList(s, branch))
+		task.Body = render(effectiveInstruction(def, s.Name), goal, branch, s.Name, reviewsList(s, branch))
 		if s.Name == rootName {
 			task.BranchName = branch // Pinned; the executor creates this branch.
 		} else {
@@ -282,6 +323,18 @@ func Create(database *db.DB, opts Options) (*Result, error) {
 	}
 
 	return &Result{Definition: def, Branch: branch, Tasks: tasks}, nil
+}
+
+// projectDirFor returns a project's on-disk path (used to find its
+// .taskyou/workflows dir), or "" if it can't be resolved.
+func projectDirFor(database *db.DB, project string) string {
+	if database == nil || project == "" {
+		return ""
+	}
+	if p, err := database.GetProjectByName(project); err == nil && p != nil {
+		return p.Path
+	}
+	return ""
 }
 
 // stepTitle builds a task title like "[Plan] <goal>", trimming a long goal so the

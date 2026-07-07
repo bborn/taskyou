@@ -856,8 +856,13 @@ Examples:
 						}
 						stepLabels = append(stepLabels, label)
 					}
-					fmt.Printf("%s\n  %s\n  steps: %s\n", successStyle.Render(d.Name), d.Description, strings.Join(stepLabels, " · "))
+					origin := "built-in"
+					if d.Custom {
+						origin = "custom"
+					}
+					fmt.Printf("%s %s\n  %s\n  steps: %s\n", successStyle.Render(d.Name), dimStyle.Render("("+origin+")"), d.Description, strings.Join(stepLabels, " · "))
 				}
+				fmt.Println(dimStyle.Render("Custom workflows: " + pipeline.WorkflowsDir() + "/*.yaml  ·  create with: task pipeline new \"<describe it>\""))
 				return
 			}
 
@@ -1101,6 +1106,95 @@ Examples:
 	pipelineConfigCmd.Flags().Bool("json", false, "Output in JSON format")
 	pipelineConfigCmd.RegisterFlagCompletionFunc("project", completeFlagProjects)
 	pipelineCmd.AddCommand(pipelineConfigCmd)
+
+	// Pipeline new subcommand - author a custom workflow from a free-text description
+	pipelineNewCmd := &cobra.Command{
+		Use:   "new [description]",
+		Short: "Create a custom workflow from a free-text description (LLM → YAML)",
+		Long: `Describe a workflow in plain English and get a ready-to-edit YAML file.
+The steps, dependencies (the DAG), and per-step prompts are generated; the git
+handoff between steps is added automatically at run time, so prompts describe
+only the work.
+
+Custom workflows live in ` + "`~/.config/task/workflows/*.yaml`" + ` (override with
+$TY_WORKFLOWS_DIR) and can also be dropped in a project's .taskyou/workflows/.
+Edit the file by hand any time — it's just YAML.
+
+Examples:
+  task pipeline new "spike three approaches, build the best, then write tests"
+  task pipeline new "plan, implement, security review, then QA in a browser" --name secure-flow
+  task pipeline new "..." --print        # print the YAML without saving`,
+		Args: cobra.MaximumNArgs(1),
+		Run: func(cmd *cobra.Command, args []string) {
+			desc, _ := cmd.Flags().GetString("body")
+			if len(args) > 0 {
+				desc = strings.TrimSpace(args[0] + " " + desc)
+			}
+			desc = strings.TrimSpace(unescapeNewlines(desc))
+			if desc == "" {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: describe the workflow (positional arg or --body)"))
+				os.Exit(1)
+			}
+			nameOverride, _ := cmd.Flags().GetString("name")
+			printOnly, _ := cmd.Flags().GetBool("print")
+
+			database, err := openTaskDB(db.DefaultPath())
+			if err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+			defer database.Close()
+			apiKey, _ := database.GetSetting("anthropic_api_key")
+
+			fmt.Fprintln(os.Stderr, dimStyle.Render("Designing workflow…"))
+			ctx, cancel := context.WithTimeout(context.Background(), 70*time.Second)
+			defer cancel()
+			def, yamlBytes, err := pipeline.GenerateDefinition(ctx, apiKey, desc)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+			if nameOverride != "" {
+				def.Name = nameOverride
+				yamlBytes, _ = pipeline.Marshal(def)
+			}
+
+			if printOnly {
+				fmt.Print(string(yamlBytes))
+				return
+			}
+
+			dir := pipeline.WorkflowsDir()
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+			path := filepath.Join(dir, def.Name+".yaml")
+			if err := os.WriteFile(path, yamlBytes, 0o644); err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+
+			fmt.Println(successStyle.Render("Created workflow '" + def.Name + "'"))
+			for _, s := range def.Steps {
+				dep := ""
+				if len(s.Deps) > 0 {
+					dep = "  ← " + strings.Join(s.Deps, "+")
+				}
+				model := s.Model
+				if model == "" {
+					model = "default"
+				}
+				fmt.Printf("  %-12s %s/%s%s\n", s.Name, s.Executor, model, dep)
+			}
+			fmt.Println(dimStyle.Render("Saved to " + path + " — edit it any time."))
+			fmt.Println(dimStyle.Render("Run it with: task pipeline \"<goal>\" --definition " + def.Name))
+		},
+	}
+	pipelineNewCmd.Flags().String("body", "", "Workflow description (alternative to the positional argument)")
+	pipelineNewCmd.Flags().String("name", "", "Override the generated workflow name")
+	pipelineNewCmd.Flags().Bool("print", false, "Print the YAML without saving")
+	pipelineCmd.AddCommand(pipelineNewCmd)
 
 	rootCmd.AddCommand(pipelineCmd)
 
