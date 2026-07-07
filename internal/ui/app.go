@@ -25,7 +25,6 @@ import (
 	"github.com/bborn/workflow/internal/db"
 	"github.com/bborn/workflow/internal/executor"
 	"github.com/bborn/workflow/internal/github"
-	"github.com/bborn/workflow/internal/spotlight"
 	"github.com/bborn/workflow/internal/tasksummary"
 )
 
@@ -101,9 +100,6 @@ type KeyMap struct {
 	OpenBrowser key.Binding
 	// Open PR
 	OpenPR key.Binding
-	// Spotlight mode
-	Spotlight     key.Binding
-	SpotlightSync key.Binding
 }
 
 // ShortHelp returns key bindings to show in the mini help.
@@ -118,7 +114,7 @@ func (k KeyMap) FullHelp() [][]key.Binding {
 		{k.JumpToPinned, k.JumpToUnpinned},
 		{k.FocusBacklog, k.FocusInProgress, k.FocusBlocked, k.FocusDone, k.CollapseBacklog, k.CollapseDone},
 		{k.Enter, k.New, k.Queue, k.QueueDangerous, k.Close},
-		{k.Retry, k.Archive, k.Delete, k.OpenWorktree, k.OpenBrowser, k.Spotlight},
+		{k.Retry, k.Archive, k.Delete, k.OpenWorktree, k.OpenBrowser},
 		{k.Filter, k.CommandPalette, k.Settings, k.Routines},
 		{k.ChangeStatus, k.TogglePin, k.Refresh, k.Help},
 		{k.Quit},
@@ -284,14 +280,6 @@ func DefaultKeyMap() KeyMap {
 			key.WithKeys("G"),
 			key.WithHelp("G", "open PR"),
 		),
-		Spotlight: key.NewBinding(
-			key.WithKeys("f"),
-			key.WithHelp("f", "spotlight"),
-		),
-		SpotlightSync: key.NewBinding(
-			key.WithKeys("F"),
-			key.WithHelp("F", "spotlight sync"),
-		),
 	}
 }
 
@@ -356,8 +344,6 @@ func ApplyKeybindingsConfig(km KeyMap, cfg *config.KeybindingsConfig) KeyMap {
 	km.CollapseDone = applyBinding(km.CollapseDone, cfg.CollapseDone)
 	km.OpenBrowser = applyBinding(km.OpenBrowser, cfg.OpenBrowser)
 	km.OpenPR = applyBinding(km.OpenPR, cfg.OpenPR)
-	km.Spotlight = applyBinding(km.Spotlight, cfg.Spotlight)
-	km.SpotlightSync = applyBinding(km.SpotlightSync, cfg.SpotlightSync)
 
 	return km
 }
@@ -1299,14 +1285,6 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.notifyUntil = time.Now().Add(3 * time.Second)
 		}
 
-	case spotlightMsg:
-		if msg.err != nil {
-			m.notification = fmt.Sprintf("%s Spotlight: %s", IconBlocked(), msg.err.Error())
-		} else {
-			m.notification = fmt.Sprintf("🔦 %s", msg.message)
-		}
-		m.notifyUntil = time.Now().Add(5 * time.Second)
-
 	case taskEventMsg:
 		// Real-time task update from executor
 		event := msg.event
@@ -2022,16 +2000,6 @@ func (m *AppModel) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, m.openTaskDirectory(task)
 		}
 
-	case key.Matches(msg, m.keys.Spotlight):
-		if task := m.kanban.SelectedTask(); task != nil && task.WorktreePath != "" {
-			return m, m.toggleSpotlight(task)
-		}
-
-	case key.Matches(msg, m.keys.SpotlightSync):
-		if task := m.kanban.SelectedTask(); task != nil && task.WorktreePath != "" {
-			return m, m.syncSpotlight(task)
-		}
-
 	case key.Matches(msg, m.keys.Settings):
 		m.settingsView = NewSettingsModel(m.db, m.width, m.height)
 		m.previousView = m.currentView
@@ -2625,12 +2593,6 @@ func (m *AppModel) updateDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 	if key.Matches(keyMsg, m.keys.OpenPR) && m.selectedTask != nil && m.selectedTask.PRURL != "" {
 		return m, m.openPR(m.selectedTask)
-	}
-	if key.Matches(keyMsg, m.keys.Spotlight) && m.selectedTask != nil && m.selectedTask.WorktreePath != "" {
-		return m, m.toggleSpotlight(m.selectedTask)
-	}
-	if key.Matches(keyMsg, m.keys.SpotlightSync) && m.selectedTask != nil && m.selectedTask.WorktreePath != "" {
-		return m, m.syncSpotlight(m.selectedTask)
 	}
 	if key.Matches(keyMsg, m.keys.ToggleShellPane) && m.detailView != nil {
 		m.detailView.ToggleShellPane()
@@ -4576,55 +4538,6 @@ func (m *AppModel) openPR(task *db.Task) tea.Cmd {
 		}
 
 		return browserOpenedMsg{message: fmt.Sprintf("Opened PR #%d", task.PRNumber)}
-	}
-}
-
-// spotlightMsg is returned after a spotlight action completes.
-type spotlightMsg struct {
-	action  string // "start", "stop", "sync"
-	message string
-	err     error
-}
-
-// toggleSpotlight starts or stops spotlight mode for the given task.
-func (m *AppModel) toggleSpotlight(task *db.Task) tea.Cmd {
-	return func() tea.Msg {
-		if task.WorktreePath == "" {
-			return spotlightMsg{err: fmt.Errorf("no worktree for task #%d", task.ID)}
-		}
-
-		project, err := m.db.GetProjectByName(task.Project)
-		if err != nil || project == nil {
-			return spotlightMsg{err: fmt.Errorf("failed to get project directory")}
-		}
-
-		if spotlight.IsActive(task.WorktreePath) {
-			result, err := spotlight.Stop(task.WorktreePath, project.Path)
-			return spotlightMsg{action: "stop", message: result, err: err}
-		}
-		result, err := spotlight.Start(task.WorktreePath, project.Path)
-		return spotlightMsg{action: "start", message: result, err: err}
-	}
-}
-
-// syncSpotlight syncs worktree changes to the main repo.
-func (m *AppModel) syncSpotlight(task *db.Task) tea.Cmd {
-	return func() tea.Msg {
-		if task.WorktreePath == "" {
-			return spotlightMsg{err: fmt.Errorf("no worktree for task #%d", task.ID)}
-		}
-
-		project, err := m.db.GetProjectByName(task.Project)
-		if err != nil || project == nil {
-			return spotlightMsg{err: fmt.Errorf("failed to get project directory")}
-		}
-
-		if !spotlight.IsActive(task.WorktreePath) {
-			return spotlightMsg{err: fmt.Errorf("spotlight not active — press f to start")}
-		}
-
-		result, err := spotlight.Sync(task.WorktreePath, project.Path)
-		return spotlightMsg{action: "sync", message: result, err: err}
 	}
 }
 
