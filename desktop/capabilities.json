@@ -134,9 +134,6 @@
     "Settings": {
       "note": "s, \u2318,, titlebar gear"
     },
-    "Spotlight": {
-      "note": "f opens the fuzzy task palette"
-    },
     "ToggleDangerous": {
       "note": "! cycles permission mode for new executions"
     },

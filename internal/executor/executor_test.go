@@ -1522,7 +1522,6 @@ func TestWriteWorkflowMCPConfig(t *testing.T) {
 			"taskyou_list_tasks",
 			"taskyou_get_project_context",
 			"taskyou_set_project_context",
-			"taskyou_spotlight",
 		}
 		if len(autoApprove) != len(expectedTools) {
 			t.Errorf("autoApprove has %d items, want %d", len(autoApprove), len(expectedTools))
@@ -1726,31 +1725,6 @@ func TestWriteWorkflowMCPConfig(t *testing.T) {
 
 		if args[2] != "200" {
 			t.Errorf("task ID = %v, want 200", args[2])
-		}
-	})
-
-	t.Run("auto-approves taskyou_spotlight", func(t *testing.T) {
-		configPath := setupTempConfigDir(t)
-		worktreePath := t.TempDir()
-
-		if err := writeWorkflowMCPConfig(worktreePath, 1, ""); err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-
-		taskyou := readWorkflowConfig(t, configPath, worktreePath)
-		autoApprove, ok := taskyou["autoApprove"].([]interface{})
-		if !ok {
-			t.Fatal("expected autoApprove array")
-		}
-		var found bool
-		for _, v := range autoApprove {
-			if v == "taskyou_spotlight" {
-				found = true
-				break
-			}
-		}
-		if !found {
-			t.Errorf("taskyou_spotlight missing from autoApprove list: %v", autoApprove)
 		}
 	})
 
