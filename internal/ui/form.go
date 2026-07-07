@@ -2071,10 +2071,10 @@ func (m *FormModel) View() string {
 					pipelineLabels[i] = l
 				}
 			}
-			b.WriteString(cursor + " " + labelStyle.Render("Pipeline") + m.renderSelector(pipelineLabels, m.pipelineIdx, m.focused == FieldPipeline, selectedStyle, optionStyle, dimStyle))
+			b.WriteString(cursor + " " + labelStyle.Render("Workflow") + m.renderSelector(pipelineLabels, m.pipelineIdx, m.focused == FieldPipeline, selectedStyle, optionStyle, dimStyle))
 			b.WriteString("\n")
 			if m.pipeline != "" {
-				hint := "  " + dimStyle.Render("runs as a phase chain on one branch — each phase picks its own model/executor")
+				hint := "  " + dimStyle.Render("runs as a workflow: plan → code → parallel review → collect, on one branch")
 				b.WriteString(hint + "\n")
 			}
 		}

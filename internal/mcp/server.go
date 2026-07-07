@@ -260,7 +260,7 @@ func (s *Server) handleRequest(req *jsonRPCRequest) {
 				},
 				{
 					Name:        "taskyou_create_pipeline",
-					Description: "Create a multi-model pipeline for a goal: one goal is split into an ordered chain of phase tasks (default 'plan-code-review': Opus plans → Sonnet codes → Opus reviews), each routed to its own executor/model, all on one shared git branch. Each phase's executor/model is configurable per project (via 'ty pipeline config') and defaults to those saved choices. Phases advance automatically — completing one queues the next. Use this instead of a single task when a goal benefits from a plan/code/review split across different models. The first phase is queued immediately. Requires a git-worktree project with a remote to push to.",
+					Description: "Create a multi-model pipeline for a goal: one goal is split into an ordered chain of phase tasks (default 'plan-code-review': Opus plans → Sonnet codes → two reviewers run in parallel → collect opens the PR), each routed to its own executor/model, all on one shared git branch. Each step is configurable per project (via `ty pipeline config`) and defaults to those saved choices. Steps advance automatically — sequential where they depend on each other, parallel where they don't. Use this instead of a single task when a goal benefits from a plan/code/review split across different models. The first phase is queued immediately. Requires a git-worktree project with a remote to push to.",
 					InputSchema: map[string]interface{}{
 						"type": "object",
 						"properties": map[string]interface{}{
@@ -624,16 +624,20 @@ func (s *Server) handleToolCall(id interface{}, params *toolCallParams) {
 		}
 
 		var sb strings.Builder
-		sb.WriteString(fmt.Sprintf("Created %s pipeline on branch %s:\n", result.Definition.Name, result.Branch))
+		sb.WriteString(fmt.Sprintf("Created %s workflow on branch %s:\n", result.Definition.Name, result.Branch))
 		for i, t := range result.Tasks {
-			ph := result.Definition.Phases[i]
-			model := ph.Model
+			s := result.Definition.Steps[i]
+			model := s.Model
 			if model == "" {
 				model = "default"
 			}
-			sb.WriteString(fmt.Sprintf("- #%d %s (%s/%s) — %s\n", t.ID, ph.Name, t.Executor, model, t.Status))
+			dep := ""
+			if len(s.Deps) > 0 {
+				dep = " ← " + strings.Join(s.Deps, "+")
+			}
+			sb.WriteString(fmt.Sprintf("- #%d %s (%s/%s) — %s%s\n", t.ID, s.Name, t.Executor, model, t.Status, dep))
 		}
-		sb.WriteString("The first phase is running; each phase auto-starts the next when it completes.")
+		sb.WriteString("The root step is running; steps advance automatically, with the two reviewers running in parallel.")
 
 		s.sendResult(id, toolCallResult{
 			Content: []contentBlock{

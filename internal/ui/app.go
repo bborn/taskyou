@@ -555,7 +555,31 @@ func (m *AppModel) updateTaskInList(task *db.Task) {
 			break
 		}
 	}
-	m.kanban.SetTasks(m.tasks)
+	m.kanban.SetTasks(m.collapseForBoard(m.tasks))
+}
+
+// collapseForBoard turns a task list into what the board should show: a workflow's
+// step tasks are folded into a single lead card (see pipeline.GroupWorkflows) so N
+// steps for one goal don't clutter the board as N cards. It also hands the kanban
+// the lead→group map so those cards can render workflow progress. Non-workflow
+// tasks pass through unchanged.
+func (m *AppModel) collapseForBoard(tasks []*db.Task) []*db.Task {
+	groups, rest := pipeline.GroupWorkflows(tasks)
+	leadMap := make(map[int64]*pipeline.Group, len(groups))
+	out := make([]*db.Task, 0, len(rest)+len(groups))
+	out = append(out, rest...)
+	for _, g := range groups {
+		lead := g.Lead()
+		if lead == nil {
+			continue
+		}
+		leadMap[lead.ID] = g
+		out = append(out, lead)
+	}
+	if m.kanban != nil {
+		m.kanban.SetWorkflowGroups(leadMap)
+	}
+	return out
 }
 
 // NewAppModel creates a new application model.
@@ -648,7 +672,7 @@ func NewAppModel(database *db.DB, exec *executor.Executor, workingDir string, ve
 func (m *AppModel) SetTasks(tasks []*db.Task) {
 	m.tasks = tasks
 	m.loading = false
-	m.kanban.SetTasks(tasks)
+	m.kanban.SetTasks(m.collapseForBoard(tasks))
 }
 
 // SetDebugStatePath sets the path for dumping debug state.
@@ -1145,7 +1169,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.newTaskForm = nil
 			m.showWelcome = false
 			n := len(msg.result.Tasks)
-			m.notification = fmt.Sprintf("%s Created %s pipeline (%d phases) on %s", IconDone(), msg.result.Definition.Name, n, msg.result.Branch)
+			m.notification = fmt.Sprintf("%s Created %s workflow (%d steps) on %s", IconDone(), msg.result.Definition.Name, n, msg.result.Branch)
 			m.notifyUntil = time.Now().Add(6 * time.Second)
 			cmds = append(cmds, m.loadTasks())
 		} else {
@@ -2274,8 +2298,8 @@ func (m *AppModel) resolveProjectAliases(query string) string {
 // Uses the same matching logic as the command palette (Ctrl+P) for consistency.
 func (m *AppModel) applyFilter() {
 	if m.filterText == "" {
-		// No filter, show all tasks
-		m.kanban.SetTasks(m.tasks)
+		// No filter, show all tasks (workflows collapsed to one card each)
+		m.kanban.SetTasks(m.collapseForBoard(m.tasks))
 		return
 	}
 
@@ -2305,7 +2329,7 @@ func (m *AppModel) applyFilter() {
 	for i, st := range scored {
 		filtered[i] = st.task
 	}
-	m.kanban.SetTasks(filtered)
+	m.kanban.SetTasks(m.collapseForBoard(filtered))
 }
 
 // parseFilterProjects extracts completed [project] tags, any trailing partial project,
@@ -2652,9 +2676,9 @@ func (m *AppModel) updateNewTaskForm(msg tea.Msg) (tea.Model, tea.Cmd) {
 			queueTitle := "Queue for execution?"
 			runOpt, stageOpt := "Yes — execute now", "No — save to backlog"
 			if m.pendingPipeline != "" {
-				queueTitle = "Start the pipeline now?"
-				runOpt = "Yes — run the first phase now"
-				stageOpt = "No — stage all phases"
+				queueTitle = "Start this workflow now?"
+				runOpt = "Yes — start now"
+				stageOpt = "No — save for later"
 			}
 			m.queueConfirm = huh.NewForm(
 				huh.NewGroup(

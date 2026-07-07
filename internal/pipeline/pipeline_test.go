@@ -22,172 +22,167 @@ func testDB(t *testing.T) *db.DB {
 	return database
 }
 
-func TestCreateBuildsChain(t *testing.T) {
-	database := testDB(t)
+// taskByStep finds a created step task by its step name.
+func taskByStep(res *Result, step string) *db.Task {
+	for i, s := range res.Definition.Steps {
+		if s.Name == step {
+			return res.Tasks[i]
+		}
+	}
+	return nil
+}
 
-	res, err := Create(database, Options{
-		Goal:    "Add rate limiting to the API",
-		Project: "test",
-		Execute: true,
-	})
+func TestDefaultDefinitionIsValidDAG(t *testing.T) {
+	def, ok := Get("")
+	if !ok {
+		t.Fatal("default definition missing")
+	}
+	if def.Name != DefaultDefinition {
+		t.Errorf("default = %q, want %q", def.Name, DefaultDefinition)
+	}
+	if err := def.validate(); err != nil {
+		t.Fatalf("default definition invalid: %v", err)
+	}
+	// It should be the plan → code → 2 parallel reviews → collect shape.
+	if len(def.Steps) != 5 {
+		t.Errorf("got %d steps, want 5", len(def.Steps))
+	}
+	if roots := def.Roots(); len(roots) != 1 || roots[0].Name != "Plan" {
+		t.Errorf("roots = %v, want [Plan]", roots)
+	}
+}
+
+func TestCreateBuildsDAG(t *testing.T) {
+	database := testDB(t)
+	res, err := Create(database, Options{Goal: "Add rate limiting to the API", Project: "test", Execute: true})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-
-	if res.Definition.Name != "plan-code-review" {
-		t.Errorf("definition = %q, want plan-code-review", res.Definition.Name)
-	}
-	if len(res.Tasks) != 3 {
-		t.Fatalf("got %d tasks, want 3", len(res.Tasks))
+	if len(res.Tasks) != 5 {
+		t.Fatalf("got %d tasks, want 5", len(res.Tasks))
 	}
 
-	// Branch is seeded from the first phase's ID and shared by every phase.
-	wantBranch := "pipeline/" + itoa(res.Tasks[0].ID) + "-add-rate-limiting-to-the-api"
+	wantBranch := "pipeline/" + itoa(taskByStep(res, "Plan").ID) + "-add-rate-limiting-to-the-api"
 	if res.Branch != wantBranch {
 		t.Errorf("branch = %q, want %q", res.Branch, wantBranch)
 	}
 
-	wantExec := []string{db.ExecutorClaude, db.ExecutorClaude, db.ExecutorClaude}
-	wantModel := []string{db.ModelOpus, db.ModelSonnet, db.ModelOpus}
-	wantPhase := []string{"Plan", "Code", "Review"}
-	for i, task := range res.Tasks {
-		if task.Executor != wantExec[i] {
-			t.Errorf("phase %d executor = %q, want %q", i, task.Executor, wantExec[i])
-		}
-		if task.Model != wantModel[i] {
-			t.Errorf("phase %d model = %q, want %q", i, task.Model, wantModel[i])
-		}
-		if !strings.HasPrefix(task.Title, "["+wantPhase[i]+"]") {
-			t.Errorf("phase %d title = %q, want prefix [%s]", i, task.Title, wantPhase[i])
-		}
-		if task.Tags != "pipeline" {
-			t.Errorf("phase %d tags = %q, want pipeline", i, task.Tags)
-		}
-		// Every phase's body carries the goal and the shared branch.
-		if !strings.Contains(task.Body, "Add rate limiting to the API") {
-			t.Errorf("phase %d body missing goal", i)
-		}
-		if !strings.Contains(task.Body, wantBranch) {
-			t.Errorf("phase %d body missing branch %q", i, wantBranch)
+	plan := taskByStep(res, "Plan")
+	code := taskByStep(res, "Code")
+	rvA := taskByStep(res, "Review A")
+	rvB := taskByStep(res, "Review B")
+	collect := taskByStep(res, "Collect")
+
+	// Root owns the branch; everyone else checks it out via SourceBranch.
+	if plan.BranchName != wantBranch || plan.SourceBranch != "" {
+		t.Errorf("Plan branch=%q source=%q, want branch pinned", plan.BranchName, plan.SourceBranch)
+	}
+	for _, tk := range []*db.Task{code, rvA, rvB, collect} {
+		if tk.SourceBranch != wantBranch {
+			t.Errorf("%s SourceBranch = %q, want %q", tk.Title, tk.SourceBranch, wantBranch)
 		}
 	}
 
-	// Phase 1 owns the branch (pinned BranchName); later phases check it out.
-	if res.Tasks[0].BranchName != wantBranch {
-		t.Errorf("phase 0 BranchName = %q, want %q", res.Tasks[0].BranchName, wantBranch)
+	// Root starts; everything else waits blocked.
+	if plan.Status != db.StatusQueued {
+		t.Errorf("Plan status = %q, want queued", plan.Status)
 	}
-	if res.Tasks[0].SourceBranch != "" {
-		t.Errorf("phase 0 SourceBranch = %q, want empty", res.Tasks[0].SourceBranch)
-	}
-	for i := 1; i < len(res.Tasks); i++ {
-		if res.Tasks[i].SourceBranch != wantBranch {
-			t.Errorf("phase %d SourceBranch = %q, want %q", i, res.Tasks[i].SourceBranch, wantBranch)
-		}
-	}
-
-	// Execute=true queues phase 1; the rest wait blocked on their predecessor.
-	if res.Tasks[0].Status != db.StatusQueued {
-		t.Errorf("phase 0 status = %q, want queued", res.Tasks[0].Status)
-	}
-	for i := 1; i < len(res.Tasks); i++ {
-		reloaded, _ := database.GetTask(res.Tasks[i].ID)
+	for _, tk := range []*db.Task{code, rvA, rvB, collect} {
+		reloaded, _ := database.GetTask(tk.ID)
 		if reloaded.Status != db.StatusBlocked {
-			t.Errorf("phase %d status = %q, want blocked", i, reloaded.Status)
+			t.Errorf("%s status = %q, want blocked", tk.Title, reloaded.Status)
 		}
 	}
 
-	// Dependencies form a linear chain with auto_queue enabled.
-	for i := 1; i < len(res.Tasks); i++ {
-		dep, err := database.GetDependency(res.Tasks[i-1].ID, res.Tasks[i].ID)
-		if err != nil {
-			t.Fatalf("GetDependency: %v", err)
+	// Dependency edges: Code←Plan, ReviewA←Code, ReviewB←Code, Collect←ReviewA+ReviewB.
+	assertDep(t, database, plan.ID, code.ID)
+	assertDep(t, database, code.ID, rvA.ID)
+	assertDep(t, database, code.ID, rvB.ID)
+	assertDep(t, database, rvA.ID, collect.ID)
+	assertDep(t, database, rvB.ID, collect.ID)
+
+	// Every step task is tagged for grouping and carries the goal + branch in its prompt.
+	for _, tk := range res.Tasks {
+		if tk.Tags != "pipeline" {
+			t.Errorf("%s tags = %q, want pipeline", tk.Title, tk.Tags)
 		}
-		if dep == nil {
-			t.Fatalf("missing dependency %d -> %d", res.Tasks[i-1].ID, res.Tasks[i].ID)
+		if !strings.Contains(tk.Body, "Add rate limiting to the API") || !strings.Contains(tk.Body, wantBranch) {
+			t.Errorf("%s body missing goal/branch", tk.Title)
 		}
-		if !dep.AutoQueue {
-			t.Errorf("dependency %d -> %d not auto-queue", res.Tasks[i-1].ID, res.Tasks[i].ID)
-		}
+	}
+	// Parallel reviewers write distinct review files and push to their OWN branch
+	// (not the shared branch) so a weak agent can't clobber the other reviewer.
+	if !strings.Contains(rvA.Body, "review-review-a.md") || !strings.Contains(rvA.Body, wantBranch+"-review-a") {
+		t.Errorf("Review A body missing its review file / own branch: %s", rvA.Body)
+	}
+	if !strings.Contains(rvB.Body, wantBranch+"-review-b") {
+		t.Errorf("Review B body missing its own review branch")
+	}
+	// Collect is told exactly which review branches to read.
+	if !strings.Contains(collect.Body, wantBranch+"-review-a") || !strings.Contains(collect.Body, wantBranch+"-review-b") {
+		t.Errorf("Collect body missing review branch references: %s", collect.Body)
 	}
 }
 
-func TestCreateAutoQueuesNextPhaseOnCompletion(t *testing.T) {
+func TestCreateAutoAdvancesDAGWithParallelJoin(t *testing.T) {
 	database := testDB(t)
-	res, err := Create(database, Options{Goal: "Refactor auth", Project: "test", Execute: true})
+	res, err := Create(database, Options{Goal: "Ship it", Project: "test", Execute: true})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	plan, code, review := res.Tasks[0], res.Tasks[1], res.Tasks[2]
+	plan := taskByStep(res, "Plan")
+	code := taskByStep(res, "Code")
+	rvA := taskByStep(res, "Review A")
+	rvB := taskByStep(res, "Review B")
+	collect := taskByStep(res, "Collect")
 
-	// Completing the Plan phase should auto-queue Code but leave Review blocked.
-	if err := database.UpdateTaskStatus(plan.ID, db.StatusDone); err != nil {
-		t.Fatalf("complete plan: %v", err)
-	}
-	if got := statusOf(t, database, code.ID); got != db.StatusQueued {
-		t.Errorf("Code status = %q, want queued after Plan done", got)
-	}
-	if got := statusOf(t, database, review.ID); got != db.StatusBlocked {
-		t.Errorf("Review status = %q, want still blocked after Plan done", got)
+	// Plan done → Code queues.
+	must(t, database.UpdateTaskStatus(plan.ID, db.StatusDone))
+	if s := statusOf(t, database, code.ID); s != db.StatusQueued {
+		t.Errorf("Code = %q after Plan done, want queued", s)
 	}
 
-	// Completing Code then auto-queues Review.
-	if err := database.UpdateTaskStatus(code.ID, db.StatusDone); err != nil {
-		t.Fatalf("complete code: %v", err)
+	// Code done → BOTH reviewers queue at once (fan-out).
+	must(t, database.UpdateTaskStatus(code.ID, db.StatusDone))
+	if s := statusOf(t, database, rvA.ID); s != db.StatusQueued {
+		t.Errorf("Review A = %q after Code done, want queued", s)
 	}
-	if got := statusOf(t, database, review.ID); got != db.StatusQueued {
-		t.Errorf("Review status = %q, want queued after Code done", got)
+	if s := statusOf(t, database, rvB.ID); s != db.StatusQueued {
+		t.Errorf("Review B = %q after Code done, want queued", s)
 	}
-}
+	// Collect still waits — both reviews outstanding.
+	if s := statusOf(t, database, collect.ID); s != db.StatusBlocked {
+		t.Errorf("Collect = %q with reviews pending, want blocked", s)
+	}
 
-func TestCreateNoExecuteLeavesFirstBacklog(t *testing.T) {
-	database := testDB(t)
-	res, err := Create(database, Options{Goal: "Do a thing", Project: "test", Execute: false})
-	if err != nil {
-		t.Fatalf("Create: %v", err)
+	// One reviewer done → Collect still blocked (join needs both).
+	must(t, database.UpdateTaskStatus(rvA.ID, db.StatusDone))
+	if s := statusOf(t, database, collect.ID); s != db.StatusBlocked {
+		t.Errorf("Collect = %q after one review, want still blocked", s)
 	}
-	if got := statusOf(t, database, res.Tasks[0].ID); got != db.StatusBacklog {
-		t.Errorf("phase 0 status = %q, want backlog when not executing", got)
-	}
-}
 
-func TestCreatePermissionModeAppliesToEveryPhase(t *testing.T) {
-	database := testDB(t)
-	res, err := Create(database, Options{
-		Goal:           "Tighten things",
-		Project:        "test",
-		PermissionMode: db.PermissionModeDangerous,
-		Execute:        true,
-	})
-	if err != nil {
-		t.Fatalf("Create: %v", err)
-	}
-	for i, task := range res.Tasks {
-		reloaded, _ := database.GetTask(task.ID)
-		if reloaded.EffectivePermissionMode() != db.PermissionModeDangerous {
-			t.Errorf("phase %d permission = %q, want dangerous", i, reloaded.EffectivePermissionMode())
-		}
+	// Second reviewer done → Collect queues (join satisfied).
+	must(t, database.UpdateTaskStatus(rvB.ID, db.StatusDone))
+	if s := statusOf(t, database, collect.ID); s != db.StatusQueued {
+		t.Errorf("Collect = %q after both reviews, want queued", s)
 	}
 }
 
 func TestCreateHonorsSavedConfig(t *testing.T) {
 	database := testDB(t)
-	// Configure this project's Review phase to run on codex, then build a pipeline
-	// and confirm the phase task picks up the saved choice.
-	if err := SaveConfig(database, "test", DefaultDefinition, []PhaseConfig{
-		{Name: "Review", Executor: db.ExecutorCodex, Model: ""},
-	}); err != nil {
-		t.Fatalf("SaveConfig: %v", err)
-	}
+	// Point one reviewer at codex for this project.
+	must(t, SaveConfig(database, "test", DefaultDefinition, []StepConfig{
+		{Name: "Review B", Executor: db.ExecutorCodex, Model: ""},
+	}))
 	res, err := Create(database, Options{Goal: "Do a thing", Project: "test", Execute: true})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if got := res.Tasks[2].Executor; got != db.ExecutorCodex {
-		t.Errorf("Review executor = %q, want codex from saved config", got)
+	if got := taskByStep(res, "Review B").Executor; got != db.ExecutorCodex {
+		t.Errorf("Review B executor = %q, want codex", got)
 	}
-	// Unconfigured phases keep their defaults.
-	if got := res.Tasks[0].Executor; got != db.ExecutorClaude {
-		t.Errorf("Plan executor = %q, want claude default", got)
+	if got := taskByStep(res, "Review A").Executor; got != db.ExecutorClaude {
+		t.Errorf("Review A executor = %q, want claude default", got)
 	}
 }
 
@@ -195,37 +190,30 @@ func TestConfigRoundTrip(t *testing.T) {
 	database := testDB(t)
 	def, _ := Get(DefaultDefinition)
 
-	// Unconfigured: effective config equals the built-in defaults.
 	if IsConfigured(database, "test", def.Name) {
 		t.Error("fresh project should not be configured")
 	}
 	got := EffectiveConfig(database, "test", def)
-	want := DefaultPhaseConfig(def)
-	if len(got) != len(want) || got[2].Executor != want[2].Executor {
-		t.Fatalf("default effective config = %+v, want %+v", got, want)
+	want := DefaultStepConfig(def)
+	if len(got) != len(want) || got[0].Executor != want[0].Executor {
+		t.Fatalf("default effective config mismatch")
 	}
 
-	// Save a partial override, reload, confirm it merged and persisted.
-	if err := SaveConfig(database, "test", def.Name, []PhaseConfig{{Name: "Review", Executor: db.ExecutorGemini, Model: ""}}); err != nil {
-		t.Fatalf("SaveConfig: %v", err)
-	}
+	must(t, SaveConfig(database, "test", def.Name, []StepConfig{{Name: "Review B", Executor: db.ExecutorGemini}}))
 	if !IsConfigured(database, "test", def.Name) {
-		t.Error("project should report configured after save")
+		t.Error("should report configured after save")
 	}
 	eff := EffectiveConfig(database, "test", def)
-	if eff[2].Executor != db.ExecutorGemini {
-		t.Errorf("Review executor = %q, want gemini", eff[2].Executor)
+	if eff[3].Executor != db.ExecutorGemini {
+		t.Errorf("Review B executor = %q, want gemini", eff[3].Executor)
 	}
 	if eff[0].Executor != db.ExecutorClaude {
-		t.Errorf("Plan executor = %q, want claude default (unchanged)", eff[0].Executor)
+		t.Errorf("Plan executor = %q, want claude default", eff[0].Executor)
 	}
 
-	// Clear reverts to defaults.
-	if err := ClearConfig(database, "test", def.Name); err != nil {
-		t.Fatalf("ClearConfig: %v", err)
-	}
+	must(t, ClearConfig(database, "test", def.Name))
 	if IsConfigured(database, "test", def.Name) {
-		t.Error("project should not be configured after clear")
+		t.Error("should not be configured after clear")
 	}
 }
 
@@ -248,16 +236,20 @@ func TestCreateValidation(t *testing.T) {
 	}
 }
 
-func TestGetDefaultsToPlanCodeReview(t *testing.T) {
-	def, ok := Get("")
-	if !ok {
-		t.Fatal("Get(\"\") not ok")
+func TestValidateRejectsMalformedDAGs(t *testing.T) {
+	cases := map[string]Definition{
+		"dup name":    {Name: "d", Steps: []Step{{Name: "A"}, {Name: "A"}}},
+		"unknown dep": {Name: "d", Steps: []Step{{Name: "A"}, {Name: "B", Deps: []string{"Z"}}}},
+		"no root":     {Name: "d", Steps: []Step{{Name: "A", Deps: []string{"B"}}, {Name: "B", Deps: []string{"A"}}}},
+		"two roots":   {Name: "d", Steps: []Step{{Name: "A"}, {Name: "B"}}},
+		"empty":       {Name: "d"},
 	}
-	if def.Name != DefaultDefinition {
-		t.Errorf("Get(\"\") = %q, want %q", def.Name, DefaultDefinition)
-	}
-	if _, ok := Get("bogus"); ok {
-		t.Error("Get(bogus) should not be ok")
+	for name, def := range cases {
+		t.Run(name, func(t *testing.T) {
+			if err := def.validate(); err == nil {
+				t.Errorf("expected validate() error for %s", name)
+			}
+		})
 	}
 }
 
@@ -266,15 +258,26 @@ func TestSlugify(t *testing.T) {
 		"Add rate limiting to the API": "add-rate-limiting-to-the-api",
 		"  Trim & symbols!! ":          "trim-symbols",
 		"":                             "pipeline",
-		"---":                          "pipeline",
+		"Review B":                     "review-b",
 	}
 	for in, want := range cases {
 		if got := slugify(in, 40); got != want {
 			t.Errorf("slugify(%q) = %q, want %q", in, got, want)
 		}
 	}
-	if got := slugify(strings.Repeat("a", 100), 40); len(got) != 40 {
-		t.Errorf("slugify truncation len = %d, want 40", len(got))
+}
+
+func assertDep(t *testing.T, database *db.DB, blocker, blocked int64) {
+	t.Helper()
+	dep, err := database.GetDependency(blocker, blocked)
+	if err != nil {
+		t.Fatalf("GetDependency(%d,%d): %v", blocker, blocked, err)
+	}
+	if dep == nil {
+		t.Fatalf("missing dependency %d → %d", blocker, blocked)
+	}
+	if !dep.AutoQueue {
+		t.Errorf("dependency %d → %d not auto-queue", blocker, blocked)
 	}
 }
 
@@ -285,6 +288,13 @@ func statusOf(t *testing.T, database *db.DB, id int64) string {
 		t.Fatalf("GetTask(%d): %v", id, err)
 	}
 	return task.Status
+}
+
+func must(t *testing.T, err error) {
+	t.Helper()
+	if err != nil {
+		t.Fatal(err)
+	}
 }
 
 // itoa avoids pulling strconv into the test just for one conversion.

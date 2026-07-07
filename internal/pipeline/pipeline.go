@@ -1,20 +1,24 @@
-// Package pipeline builds multi-phase "pipeline" tasks: a single goal is broken
-// into an ordered chain of phase tasks (e.g. plan → code → review), each routed
-// to its own executor and model, that hand work forward on one shared git branch
-// and advance automatically.
+// Package pipeline builds multi-step "workflow" tasks: a single goal is broken
+// into a small DAG of step tasks that run on one shared git branch and advance
+// automatically. Steps can be sequential (Code waits for Plan) or parallel (two
+// reviewers run at once), and a step can join several predecessors (Collect waits
+// for both reviews) — exactly the plan → code → parallel-review → collect shape
+// the herdr plugin popularized.
 //
-// The chain is assembled from primitives TaskYou already has:
+// It's assembled from primitives TaskYou already has, so there's no bespoke
+// execution engine — the normal daemon runs each step task:
 //
-//   - Per-task Executor + Model overrides give each phase a different agent (Opus
-//     plans, Sonnet codes, Codex reviews).
-//   - Task dependencies with auto_queue chain the phases: phase N blocks phase
-//     N+1, and completing N auto-queues N+1 (see db.ProcessCompletedBlocker).
-//   - A pinned BranchName on the first phase plus SourceBranch on the rest keeps
-//     every phase on one branch, so each phase sees the previous phase's commits.
+//   - Per-task Executor + Model overrides give each step its own agent.
+//   - Task dependencies with auto_queue encode the DAG: a step is 'blocked' until
+//     all its dependencies complete, then db.ProcessCompletedBlocker queues it.
+//     Fan-out (two steps depending on one) and join (one step depending on two)
+//     both fall out of the dependency graph for free.
+//   - The root step pins a shared BranchName; every other step checks that branch
+//     out via SourceBranch, so steps hand work forward through git.
 //
-// The result is a "staged pipeline task type" — different phases route to
-// different executors automatically — without a bespoke execution engine: the
-// normal daemon executor runs each phase task in turn.
+// The workflow advances with no human in the loop; it only pauses when a step
+// genuinely needs one — the terminal step opens a PR (landing in 'blocked' for a
+// human merge) or a step calls taskyou_needs_input.
 package pipeline
 
 import (
@@ -25,43 +29,45 @@ import (
 	"github.com/bborn/workflow/internal/db"
 )
 
-// Phase is one stage of a pipeline. Executor and Model pick the agent that runs
-// it; Instruction is the task body template, with {{goal}} and {{branch}}
-// placeholders substituted at build time.
-type Phase struct {
-	Name        string // Short label, e.g. "Plan", "Code", "Review".
-	Executor    string // Executor slug (db.ExecutorClaude, db.ExecutorCodex, ...).
-	Model       string // Per-task model override ("" = the executor's default).
-	Instruction string // Body template with {{goal}} and {{branch}} placeholders.
+// Step is one node of a workflow DAG. Executor and Model pick the agent that runs
+// it; Instruction is the task body template ({{goal}} and {{branch}} are
+// substituted at build time); Deps names the steps that must finish first.
+type Step struct {
+	Name        string   // Unique label, e.g. "Plan", "Code", "Review A", "Collect".
+	Executor    string   // Executor slug (db.ExecutorClaude, db.ExecutorCodex, ...).
+	Model       string   // Per-task model override ("" = the executor's default).
+	Instruction string   // Body template with {{goal}} and {{branch}} placeholders.
+	Deps        []string // Names of steps that must complete before this one runs.
 }
 
-// Definition is a named, ordered set of phases.
+// Definition is a named workflow DAG.
 type Definition struct {
 	Name        string
 	Description string
-	Phases      []Phase
+	Steps       []Step
 }
 
 // DefaultDefinition is the definition used when none is named.
 const DefaultDefinition = "plan-code-review"
 
-// planCodeReview is the herdr plan→code→review flow: three phases on one shared
-// branch, each with its own model. The built-in defaults are all Claude — Opus
-// plans, Sonnet codes, Opus reviews with fresh context — so the pipeline works
-// out of the box on any host with Claude and never silently swaps executors.
+// planCodeReview is the herdr flow as a DAG: Plan → Code → two independent
+// reviewers in parallel → Collect. The parallel reviewers are the point — two
+// agents with independent contexts catch different classes of issue and avoid
+// single-context self-review bias.
 //
-// The per-phase executor and model are configurable per project (see config.go):
-// set Review to codex/gemini/etc. once for a project and every pipeline there
-// defaults to your choices. Plan and Code stay chain-critical — whatever executor
-// runs them must call taskyou_complete to advance the pipeline — while Review is
-// the terminal phase and opens the PR.
+// Defaults are all Claude (so it runs anywhere with Claude and never silently
+// swaps executors), but each step's executor/model is configurable per project
+// (see config.go): point one reviewer at codex — `pipeline config --set
+// "Review B=codex"` — for the herdr-style cross-executor review, or add a QA step.
 var planCodeReview = Definition{
 	Name:        "plan-code-review",
-	Description: "Plan → code → review: three phases on one shared branch, auto-advancing, each with its own configurable model/executor.",
-	Phases: []Phase{
+	Description: "Plan → code → two parallel reviewers → collect, on one shared branch. Each step's model/executor is configurable per project.",
+	Steps: []Step{
 		{Name: "Plan", Executor: db.ExecutorClaude, Model: db.ModelOpus, Instruction: planInstruction},
-		{Name: "Code", Executor: db.ExecutorClaude, Model: db.ModelSonnet, Instruction: codeInstruction},
-		{Name: "Review", Executor: db.ExecutorClaude, Model: db.ModelOpus, Instruction: reviewInstruction},
+		{Name: "Code", Executor: db.ExecutorClaude, Model: db.ModelSonnet, Instruction: codeInstruction, Deps: []string{"Plan"}},
+		{Name: "Review A", Executor: db.ExecutorClaude, Model: db.ModelOpus, Instruction: reviewInstruction, Deps: []string{"Code"}},
+		{Name: "Review B", Executor: db.ExecutorClaude, Model: db.ModelSonnet, Instruction: reviewInstruction, Deps: []string{"Code"}},
+		{Name: "Collect", Executor: db.ExecutorClaude, Model: db.ModelSonnet, Instruction: collectInstruction, Deps: []string{"Review A", "Review B"}},
 	},
 }
 
@@ -69,7 +75,7 @@ var definitions = map[string]Definition{
 	planCodeReview.Name: planCodeReview,
 }
 
-// Definitions returns all built-in pipeline definitions.
+// Definitions returns all built-in workflow definitions.
 func Definitions() []Definition {
 	return []Definition{planCodeReview}
 }
@@ -93,135 +99,230 @@ func Get(name string) (Definition, bool) {
 	return def, ok
 }
 
-// Options configures a pipeline build.
-type Options struct {
-	Goal           string // The overall goal, threaded into every phase's prompt.
-	Project        string // Project the phase tasks belong to (must already exist).
-	Definition     string // Definition name; "" resolves to DefaultDefinition.
-	PermissionMode string // Permission mode for every phase ("" inherits project default).
-	Execute        bool   // If true, queue the first phase so the pipeline starts now.
+// Roots returns the steps with no dependencies (the entry points).
+func (d Definition) Roots() []Step {
+	var roots []Step
+	for _, s := range d.Steps {
+		if len(s.Deps) == 0 {
+			roots = append(roots, s)
+		}
+	}
+	return roots
 }
 
-// Result describes a built pipeline.
+// validate checks the DAG is well-formed: unique step names, deps that reference
+// real steps, exactly one root (the branch owner), and no cycles.
+func (d Definition) validate() error {
+	if len(d.Steps) == 0 {
+		return fmt.Errorf("workflow %q has no steps", d.Name)
+	}
+	byName := make(map[string]Step, len(d.Steps))
+	for _, s := range d.Steps {
+		if _, dup := byName[s.Name]; dup {
+			return fmt.Errorf("workflow %q has duplicate step %q", d.Name, s.Name)
+		}
+		byName[s.Name] = s
+	}
+	for _, s := range d.Steps {
+		for _, dep := range s.Deps {
+			if _, ok := byName[dep]; !ok {
+				return fmt.Errorf("step %q depends on unknown step %q", s.Name, dep)
+			}
+		}
+	}
+	if roots := d.Roots(); len(roots) != 1 {
+		return fmt.Errorf("workflow %q must have exactly one root step (found %d)", d.Name, len(roots))
+	}
+	if err := d.checkAcyclic(byName); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (d Definition) checkAcyclic(byName map[string]Step) error {
+	const (
+		white = 0
+		gray  = 1
+		black = 2
+	)
+	color := make(map[string]int, len(byName))
+	var visit func(name string) error
+	visit = func(name string) error {
+		switch color[name] {
+		case gray:
+			return fmt.Errorf("workflow %q has a dependency cycle at %q", d.Name, name)
+		case black:
+			return nil
+		}
+		color[name] = gray
+		for _, dep := range byName[name].Deps {
+			if err := visit(dep); err != nil {
+				return err
+			}
+		}
+		color[name] = black
+		return nil
+	}
+	for name := range byName {
+		if err := visit(name); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// Options configures a workflow build.
+type Options struct {
+	Goal           string // The overall goal, threaded into every step's prompt.
+	Project        string // Project the step tasks belong to (must already exist).
+	Definition     string // Definition name; "" resolves to DefaultDefinition.
+	PermissionMode string // Permission mode for every step ("" inherits project default).
+	Execute        bool   // If true, queue the root step so the workflow starts now.
+}
+
+// Result describes a built workflow.
 type Result struct {
 	Definition Definition
-	Branch     string     // The shared branch all phases run on.
-	Tasks      []*db.Task // Phase tasks in order.
+	Branch     string     // The shared branch every step runs on.
+	Tasks      []*db.Task // Step tasks, in definition order.
 }
 
-// Create builds a pipeline: one phase task per Definition.Phase, wired into a
-// dependency chain on a shared branch. The first phase is created (and, when
-// Execute is set, queued) as a normal task; each later phase is created 'blocked'
-// with a dependency on its predecessor so db.ProcessCompletedBlocker auto-queues
-// it the moment the previous phase completes.
+// Create builds a workflow: one task per step, wired into a dependency DAG on a
+// shared branch. The root step is created (and, with Execute, queued) as a normal
+// task; every other step is created 'blocked' with dependencies on its
+// predecessors, so db.ProcessCompletedBlocker queues it once they all complete.
 func Create(database *db.DB, opts Options) (*Result, error) {
 	goal := strings.TrimSpace(opts.Goal)
 	if goal == "" {
-		return nil, fmt.Errorf("pipeline goal is required")
+		return nil, fmt.Errorf("workflow goal is required")
 	}
 	if strings.TrimSpace(opts.Project) == "" {
-		return nil, fmt.Errorf("pipeline project is required")
+		return nil, fmt.Errorf("workflow project is required")
 	}
 	def, ok := Get(opts.Definition)
 	if !ok {
-		return nil, fmt.Errorf("unknown pipeline definition %q (available: %s)", opts.Definition, strings.Join(DefinitionNames(), ", "))
+		return nil, fmt.Errorf("unknown workflow definition %q (available: %s)", opts.Definition, strings.Join(DefinitionNames(), ", "))
 	}
-	if len(def.Phases) == 0 {
-		return nil, fmt.Errorf("pipeline definition %q has no phases", def.Name)
+	if err := def.validate(); err != nil {
+		return nil, err
 	}
 
+	// Apply the project's saved per-step executor/model choices.
+	steps := EffectiveSteps(database, opts.Project, def)
+	rootName := def.Roots()[0].Name
 	slug := slugify(goal, 40)
 
-	// Apply the project's saved per-phase executor/model choices (or the built-in
-	// defaults when unconfigured), so every pipeline in a project matches how the
-	// user configured it once.
-	phases := EffectivePhases(database, opts.Project, def)
-
-	// Phase 1 is created first so its ID can seed a unique, shared branch name.
-	first := phases[0]
-	firstTask := &db.Task{
-		Title:          phaseTitle(first.Name, goal),
-		Body:           goal, // Placeholder; rewritten below once the branch is known.
-		Status:         db.StatusBacklog,
-		Type:           db.TypeCode,
-		Project:        opts.Project,
-		Executor:       first.Executor,
-		Model:          first.Model,
-		PermissionMode: opts.PermissionMode,
-		Tags:           "pipeline",
-	}
-	if err := database.CreateTask(firstTask); err != nil {
-		return nil, fmt.Errorf("create %s phase: %w", first.Name, err)
-	}
-
-	branch := fmt.Sprintf("pipeline/%d-%s", firstTask.ID, slug)
-
-	// Pin the shared branch on phase 1 and render its real instructions. The
-	// executor honors a pre-set BranchName when it creates the fresh worktree, so
-	// phase 1 owns the branch; later phases check it out via SourceBranch.
-	firstTask.BranchName = branch
-	firstTask.Body = render(first.Instruction, goal, branch)
-	if err := database.UpdateTask(firstTask); err != nil {
-		return nil, fmt.Errorf("configure %s phase: %w", first.Name, err)
-	}
-
-	tasks := []*db.Task{firstTask}
-	prevID := firstTask.ID
-
-	for _, ph := range phases[1:] {
+	// Create every step task first (in 'backlog', so the daemon leaves them alone),
+	// recording name → task so we can wire dependencies and pin the branch.
+	byName := make(map[string]*db.Task, len(steps))
+	tasks := make([]*db.Task, 0, len(steps))
+	for _, s := range steps {
 		task := &db.Task{
-			Title:          phaseTitle(ph.Name, goal),
-			Body:           render(ph.Instruction, goal, branch),
-			Status:         db.StatusBlocked, // Waits for its blocker; auto-queued on completion.
+			Title:          stepTitle(s.Name, goal),
+			Body:           goal, // Placeholder; rewritten once the branch is known.
+			Status:         db.StatusBacklog,
 			Type:           db.TypeCode,
 			Project:        opts.Project,
-			Executor:       ph.Executor,
-			Model:          ph.Model,
+			Executor:       s.Executor,
+			Model:          s.Model,
 			PermissionMode: opts.PermissionMode,
-			SourceBranch:   branch,
 			Tags:           "pipeline",
 		}
 		if err := database.CreateTask(task); err != nil {
-			return nil, fmt.Errorf("create %s phase: %w", ph.Name, err)
+			return nil, fmt.Errorf("create %s step: %w", s.Name, err)
 		}
-		if err := database.AddDependency(prevID, task.ID, true); err != nil {
-			return nil, fmt.Errorf("chain %s phase: %w", ph.Name, err)
-		}
+		byName[s.Name] = task
 		tasks = append(tasks, task)
-		prevID = task.ID
 	}
 
-	// Start the pipeline by queueing phase 1. Everything downstream is already
-	// wired, so it advances on its own as each phase calls taskyou_complete.
-	if opts.Execute {
-		if err := database.UpdateTaskStatus(firstTask.ID, db.StatusQueued); err != nil {
-			return nil, fmt.Errorf("queue %s phase: %w", first.Name, err)
+	// Seed the shared branch from the root task's id so it's unique.
+	root := byName[rootName]
+	branch := fmt.Sprintf("pipeline/%d-%s", root.ID, slug)
+
+	// Configure each task: render its prompt, pin the branch on the root and point
+	// every other step at it via SourceBranch.
+	for _, s := range steps {
+		task := byName[s.Name]
+		task.Body = render(s.Instruction, goal, branch, s.Name, reviewsList(s, branch))
+		if s.Name == rootName {
+			task.BranchName = branch // Pinned; the executor creates this branch.
+		} else {
+			task.SourceBranch = branch // Checked out from the shared branch.
 		}
-		firstTask.Status = db.StatusQueued
+		if err := database.UpdateTask(task); err != nil {
+			return nil, fmt.Errorf("configure %s step: %w", s.Name, err)
+		}
+	}
+
+	// Wire the DAG: each dependency blocks the dependent, auto-queuing it on completion.
+	for _, s := range steps {
+		for _, dep := range s.Deps {
+			if err := database.AddDependency(byName[dep].ID, byName[s.Name].ID, true); err != nil {
+				return nil, fmt.Errorf("wire %s → %s: %w", dep, s.Name, err)
+			}
+		}
+	}
+
+	// Set statuses last, once the graph is fully wired: non-root steps wait
+	// 'blocked' on their deps; the root starts (queued) or stages (backlog).
+	for _, s := range steps {
+		if s.Name == rootName {
+			continue
+		}
+		if err := database.UpdateTaskStatus(byName[s.Name].ID, db.StatusBlocked); err != nil {
+			return nil, fmt.Errorf("block %s step: %w", s.Name, err)
+		}
+		byName[s.Name].Status = db.StatusBlocked
+	}
+	if opts.Execute {
+		if err := database.UpdateTaskStatus(root.ID, db.StatusQueued); err != nil {
+			return nil, fmt.Errorf("queue %s step: %w", rootName, err)
+		}
+		root.Status = db.StatusQueued
 	}
 
 	return &Result{Definition: def, Branch: branch, Tasks: tasks}, nil
 }
 
-// phaseTitle builds a task title like "[Plan] <goal>", trimming a long goal so
-// the board card stays readable.
-func phaseTitle(phase, goal string) string {
+// stepTitle builds a task title like "[Plan] <goal>", trimming a long goal so the
+// board card stays readable.
+func stepTitle(step, goal string) string {
 	const maxGoal = 60
 	g := strings.TrimSpace(goal)
 	if len(g) > maxGoal {
 		g = strings.TrimSpace(g[:maxGoal]) + "…"
 	}
-	return fmt.Sprintf("[%s] %s", phase, g)
+	return fmt.Sprintf("[%s] %s", step, g)
 }
 
-// render substitutes the {{goal}} and {{branch}} placeholders in a phase template.
-func render(tmpl, goal, branch string) string {
-	r := strings.NewReplacer("{{goal}}", goal, "{{branch}}", branch)
+// render substitutes the {{goal}}, {{branch}}, {{step}}, {{stepslug}} and
+// {{reviews}} placeholders in a step template.
+func render(tmpl, goal, branch, step, reviews string) string {
+	r := strings.NewReplacer(
+		"{{goal}}", goal,
+		"{{branch}}", branch,
+		"{{step}}", step,
+		"{{stepslug}}", slugify(step, 40),
+		"{{reviews}}", reviews,
+	)
 	return strings.TrimSpace(r.Replace(tmpl))
 }
 
+// reviewsList describes, for a step, where each of its dependency steps pushed its
+// review: one bullet per dep naming the review branch and file. It's substituted
+// into the Collect step's {{reviews}} placeholder so Collect reads exactly the
+// reviewers that fed it, regardless of how the workflow is configured.
+func reviewsList(step Step, branch string) string {
+	var b strings.Builder
+	for _, dep := range step.Deps {
+		s := slugify(dep, 40)
+		fmt.Fprintf(&b, "     - `%s-%s` → file `review-%s.md`\n", branch, s, s)
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
 // slugify converts a string into a lowercase, dash-separated slug, truncated to
-// maxLen. It mirrors the executor's worktree slug so pipeline branch names read
+// maxLen. It mirrors the executor's worktree slug so workflow branch names read
 // like ordinary task branches.
 func slugify(s string, maxLen int) string {
 	s = strings.ToLower(strings.TrimSpace(s))

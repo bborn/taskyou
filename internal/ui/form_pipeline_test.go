@@ -70,7 +70,7 @@ func TestFormPipelineFieldVisibility(t *testing.T) {
 func TestFormPipelineRendersSelector(t *testing.T) {
 	m := NewFormModel(nil, 120, 50, "", nil)
 	m.showAdvanced = true
-	if !strings.Contains(m.View(), "Pipeline") {
-		t.Error("advanced form View should render the Pipeline selector")
+	if !strings.Contains(m.View(), "Workflow") {
+		t.Error("advanced form View should render the Workflow selector")
 	}
 }

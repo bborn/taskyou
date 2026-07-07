@@ -815,42 +815,48 @@ Examples:
 	pipelineCmd := &cobra.Command{
 		Use:   "pipeline [goal]",
 		Short: "Create a multi-model plan → code → review pipeline for a goal",
-		Long: `Create a pipeline: one goal broken into a chain of phase tasks, each routed
+		Long: `Create a workflow: one goal broken into a small DAG of step tasks, each routed
 to its own executor and model, that hand work forward on a single shared branch
-and advance automatically as each phase finishes.
+and advance automatically — sequential where steps depend on each other, parallel
+where they don't.
 
-The default 'plan-code-review' pipeline runs three phases on one branch:
-  Plan   (Claude / Opus)   — writes PLAN.md, no code
-  Code   (Claude / Sonnet) — implements the plan
-  Review (Claude / Opus)   — reviews with fresh context and opens the PR
+The default 'plan-code-review' workflow runs five steps on one branch:
+  Plan     (Claude / Opus)   — writes PLAN.md, no code
+  Code     (Claude / Sonnet) — implements the plan
+  Review A (Claude / Opus)   \
+  Review B (Claude / Sonnet)  } two independent reviewers, in parallel
+  Collect  (Claude / Sonnet) — merges reviews, applies fixes, opens the PR
 
-Each phase's executor and model are configurable per project and persisted, so
-you set them once (e.g. "Review runs on codex here") and every pipeline in that
+Each step's executor and model are configurable per project and persisted, so you
+set them once (e.g. "Review B runs on codex here") and every workflow in that
 project uses your choices. See 'task pipeline config'.
 
-Each phase commits and pushes the shared branch, so the pipeline needs a project
+Each step commits and pushes the shared branch, so the workflow needs a project
 that uses git worktrees and has a remote to push to.
 
 Examples:
   task pipeline "Add rate limiting to the API" --project myapp
   task pipeline "Refactor the auth module" -p myapp --permission-mode dangerous
-  task pipeline config -p myapp --set "Review=codex"  # configure phases
+  task pipeline config -p myapp --set "Review B=codex"  # configure steps
   task pipeline --list  # show available pipeline definitions`,
 		Args: cobra.MaximumNArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
 			listDefs, _ := cmd.Flags().GetBool("list")
 			if listDefs {
 				for _, d := range pipeline.Definitions() {
-					phaseNames := make([]string, 0, len(d.Phases))
-					for _, p := range d.Phases {
-						label := p.Name + " (" + p.Executor
-						if p.Model != "" {
-							label += "/" + p.Model
+					stepLabels := make([]string, 0, len(d.Steps))
+					for _, s := range d.Steps {
+						label := s.Name + " (" + s.Executor
+						if s.Model != "" {
+							label += "/" + s.Model
 						}
 						label += ")"
-						phaseNames = append(phaseNames, label)
+						if len(s.Deps) > 0 {
+							label += " ← " + strings.Join(s.Deps, "+")
+						}
+						stepLabels = append(stepLabels, label)
 					}
-					fmt.Printf("%s\n  %s\n  phases: %s\n", successStyle.Render(d.Name), d.Description, strings.Join(phaseNames, " → "))
+					fmt.Printf("%s\n  %s\n  steps: %s\n", successStyle.Render(d.Name), d.Description, strings.Join(stepLabels, " · "))
 				}
 				return
 			}
@@ -915,10 +921,11 @@ Examples:
 			}
 
 			if outputJSON {
-				phases := make([]map[string]interface{}, 0, len(result.Tasks))
+				steps := make([]map[string]interface{}, 0, len(result.Tasks))
 				for i, t := range result.Tasks {
-					phases = append(phases, map[string]interface{}{
-						"phase":    result.Definition.Phases[i].Name,
+					steps = append(steps, map[string]interface{}{
+						"step":     result.Definition.Steps[i].Name,
+						"deps":     result.Definition.Steps[i].Deps,
 						"id":       t.ID,
 						"executor": t.Executor,
 						"model":    t.Model,
@@ -929,26 +936,30 @@ Examples:
 					"definition": result.Definition.Name,
 					"branch":     result.Branch,
 					"project":    project,
-					"phases":     phases,
+					"steps":      steps,
 				}
 				jsonBytes, _ := json.Marshal(out)
 				fmt.Println(string(jsonBytes))
 				return
 			}
 
-			fmt.Println(successStyle.Render(fmt.Sprintf("Created %s pipeline on branch %s", result.Definition.Name, result.Branch)))
+			fmt.Println(successStyle.Render(fmt.Sprintf("Created %s workflow on branch %s", result.Definition.Name, result.Branch)))
 			for i, t := range result.Tasks {
-				ph := result.Definition.Phases[i]
-				model := ph.Model
+				s := result.Definition.Steps[i]
+				model := s.Model
 				if model == "" {
 					model = "default"
 				}
-				fmt.Printf("  #%d  %-7s %s/%s  (%s)\n", t.ID, ph.Name, t.Executor, model, t.Status)
+				dep := ""
+				if len(s.Deps) > 0 {
+					dep = "  ← " + strings.Join(s.Deps, "+")
+				}
+				fmt.Printf("  #%d  %-9s %s/%s  (%s)%s\n", t.ID, s.Name, t.Executor, model, t.Status, dep)
 			}
 			if noExecute {
-				fmt.Println(dimStyle.Render("Staged but not started — queue the first phase to run it."))
+				fmt.Println(dimStyle.Render("Staged but not started — queue the root step to run it."))
 			} else {
-				fmt.Println(dimStyle.Render("Running — each phase auto-starts the next when it completes."))
+				fmt.Println(dimStyle.Render("Running — steps advance automatically; parallel reviewers run at once."))
 			}
 		},
 	}
@@ -957,28 +968,28 @@ Examples:
 	pipelineCmd.Flags().StringP("definition", "d", pipeline.DefaultDefinition, "Pipeline definition to use")
 	pipelineCmd.Flags().String("permission-mode", "", "Permission mode for every phase: default, accept-edits, auto, dangerous (defaults to the project's setting)")
 	pipelineCmd.Flags().Bool("dangerous", false, "Run every phase in dangerous mode (alias for --permission-mode dangerous)")
-	pipelineCmd.Flags().Bool("no-execute", false, "Stage the pipeline without queuing the first phase")
-	pipelineCmd.Flags().Bool("list", false, "List available pipeline definitions and exit")
+	pipelineCmd.Flags().Bool("no-execute", false, "Stage the workflow without queuing the root step")
+	pipelineCmd.Flags().Bool("list", false, "List available workflow definitions and exit")
 	pipelineCmd.Flags().Bool("json", false, "Output in JSON format")
 	pipelineCmd.RegisterFlagCompletionFunc("project", completeFlagProjects)
 	pipelineCmd.RegisterFlagCompletionFunc("definition", func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
 		return pipeline.DefinitionNames(), cobra.ShellCompDirectiveNoFileComp
 	})
 
-	// Pipeline config subcommand - view/set per-project phase executors & models
+	// Pipeline config subcommand - view/set per-project step executors & models
 	pipelineConfigCmd := &cobra.Command{
 		Use:   "config",
-		Short: "View or set the per-project executor/model for each pipeline phase",
-		Long: `Configure which executor and model each pipeline phase runs on, per project.
-Set it once for a project and every pipeline there defaults to your choices.
+		Short: "View or set the per-project executor/model for each workflow step",
+		Long: `Configure which executor and model each workflow step runs on, per project.
+Set it once for a project and every workflow there defaults to your choices.
 
 With no --set/--reset flags, prints the project's current configuration.
 
 Examples:
-  task pipeline config -p myapp                          # show current config
-  task pipeline config -p myapp --set "Review=codex"     # Review phase on codex
+  task pipeline config -p myapp                            # show current config
+  task pipeline config -p myapp --set "Review B=codex"     # cross-executor review
   task pipeline config -p myapp --set "Plan=claude/opus" --set "Code=claude/sonnet"
-  task pipeline config -p myapp --reset                  # revert to built-in defaults`,
+  task pipeline config -p myapp --reset                    # revert to built-in defaults`,
 		Run: func(cmd *cobra.Command, args []string) {
 			project, _ := cmd.Flags().GetString("project")
 			definition, _ := cmd.Flags().GetString("definition")
@@ -1007,7 +1018,7 @@ Examples:
 
 			def, ok := pipeline.Get(definition)
 			if !ok {
-				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: unknown pipeline definition "+definition))
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: unknown workflow definition "+definition))
 				os.Exit(1)
 			}
 
@@ -1016,7 +1027,7 @@ Examples:
 					fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
 					os.Exit(1)
 				}
-				fmt.Println(successStyle.Render(fmt.Sprintf("Reset %s pipeline config for %s to defaults", def.Name, project)))
+				fmt.Println(successStyle.Render(fmt.Sprintf("Reset %s workflow config for %s to defaults", def.Name, project)))
 			}
 
 			if len(sets) > 0 {
@@ -1031,14 +1042,14 @@ Examples:
 					db.ExecutorPi: true, db.ExecutorOpenCode: true, db.ExecutorOpenClaw: true,
 				}
 				for _, s := range sets {
-					name, exec, model, perr := parsePhaseSet(s)
+					name, exec, model, perr := parseStepSet(s)
 					if perr != nil {
 						fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+perr.Error()))
 						os.Exit(1)
 					}
 					idx, found := byName[strings.ToLower(name)]
 					if !found {
-						fmt.Fprintln(os.Stderr, errorStyle.Render(fmt.Sprintf("Error: no phase %q in %s (phases: %s)", name, def.Name, phaseNames(def))))
+						fmt.Fprintln(os.Stderr, errorStyle.Render(fmt.Sprintf("Error: no step %q in %s (steps: %s)", name, def.Name, stepNames(def))))
 						os.Exit(1)
 					}
 					if !validExecutors[exec] {
@@ -1062,7 +1073,7 @@ Examples:
 					"project":    project,
 					"definition": def.Name,
 					"configured": configured,
-					"phases":     cfg,
+					"steps":      cfg,
 				}
 				jsonBytes, _ := json.Marshal(out)
 				fmt.Println(string(jsonBytes))
@@ -1072,20 +1083,20 @@ Examples:
 			if configured {
 				origin = "configured"
 			}
-			fmt.Println(successStyle.Render(fmt.Sprintf("%s pipeline for %s (%s)", def.Name, project, origin)))
+			fmt.Println(successStyle.Render(fmt.Sprintf("%s workflow for %s (%s)", def.Name, project, origin)))
 			for _, c := range cfg {
 				model := c.Model
 				if model == "" {
 					model = "default"
 				}
-				fmt.Printf("  %-8s %s/%s\n", c.Name, c.Executor, model)
+				fmt.Printf("  %-9s %s/%s\n", c.Name, c.Executor, model)
 			}
-			fmt.Println(dimStyle.Render("Set with: task pipeline config -p " + project + " --set \"Review=codex\""))
+			fmt.Println(dimStyle.Render("Set with: task pipeline config -p " + project + " --set \"Review B=codex\""))
 		},
 	}
 	pipelineConfigCmd.Flags().StringP("project", "p", "", "Project name (auto-detected from cwd if not specified)")
-	pipelineConfigCmd.Flags().StringP("definition", "d", pipeline.DefaultDefinition, "Pipeline definition to configure")
-	pipelineConfigCmd.Flags().StringArray("set", nil, "Set a phase's executor/model, e.g. \"Review=codex\" or \"Plan=claude/opus\" (repeatable)")
+	pipelineConfigCmd.Flags().StringP("definition", "d", pipeline.DefaultDefinition, "Workflow definition to configure")
+	pipelineConfigCmd.Flags().StringArray("set", nil, "Set a step executor/model, e.g. \"Review B=codex\" or \"Plan=claude/opus\" (repeatable)")
 	pipelineConfigCmd.Flags().Bool("reset", false, "Clear saved config and revert to built-in defaults")
 	pipelineConfigCmd.Flags().Bool("json", false, "Output in JSON format")
 	pipelineConfigCmd.RegisterFlagCompletionFunc("project", completeFlagProjects)
@@ -5154,11 +5165,11 @@ func unescapeNewlines(s string) string {
 	return strings.ReplaceAll(s, "\\n", "\n")
 }
 
-// parsePhaseSet parses a "Phase=executor[/model]" pipeline-config assignment.
-func parsePhaseSet(s string) (name, executor, model string, err error) {
+// parseStepSet parses a "Step=executor[/model]" workflow-config assignment.
+func parseStepSet(s string) (name, executor, model string, err error) {
 	parts := strings.SplitN(s, "=", 2)
 	if len(parts) != 2 || strings.TrimSpace(parts[0]) == "" || strings.TrimSpace(parts[1]) == "" {
-		return "", "", "", fmt.Errorf("invalid --set %q (want \"Phase=executor[/model]\")", s)
+		return "", "", "", fmt.Errorf("invalid --set %q (want \"Step=executor[/model]\")", s)
 	}
 	name = strings.TrimSpace(parts[0])
 	em := strings.SplitN(strings.TrimSpace(parts[1]), "/", 2)
@@ -5169,11 +5180,11 @@ func parsePhaseSet(s string) (name, executor, model string, err error) {
 	return name, executor, model, nil
 }
 
-// phaseNames returns a definition's phase names joined for error messages.
-func phaseNames(def pipeline.Definition) string {
-	names := make([]string, len(def.Phases))
-	for i, p := range def.Phases {
-		names[i] = p.Name
+// stepNames returns a definition's step names joined for error messages.
+func stepNames(def pipeline.Definition) string {
+	names := make([]string, len(def.Steps))
+	for i, s := range def.Steps {
+		names[i] = s.Name
 	}
 	return strings.Join(names, ", ")
 }
