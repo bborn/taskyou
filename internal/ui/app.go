@@ -91,6 +91,9 @@ type KeyMap struct {
 	// Jump to pinned/unpinned tasks
 	JumpToPinned   key.Binding
 	JumpToUnpinned key.Binding
+	// Detail-view pinned quick-nav (hop between focused/pinned tasks)
+	PrevPinnedTask key.Binding
+	NextPinnedTask key.Binding
 	// Column collapse
 	CollapseBacklog key.Binding
 	CollapseDone    key.Binding
@@ -256,6 +259,14 @@ func DefaultKeyMap() KeyMap {
 		JumpToUnpinned: key.NewBinding(
 			key.WithKeys("shift+down"),
 			key.WithHelp(IconShiftDown(), "jump to unpinned"),
+		),
+		PrevPinnedTask: key.NewBinding(
+			key.WithKeys("["),
+			key.WithHelp("[", "prev pinned"),
+		),
+		NextPinnedTask: key.NewBinding(
+			key.WithKeys("]"),
+			key.WithHelp("]", "next pinned"),
 		),
 		CollapseBacklog: key.NewBinding(
 			key.WithKeys("["),
@@ -978,6 +989,9 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		// Reapply filter if one is active
 		m.applyFilter()
+		// Keep the detail view's pinned quick-nav in sync with the new task set
+		// (e.g. after a pin/unpin, which reloads tasks).
+		m.refreshDetailPinnedNav()
 		m.kanban.SetHiddenDoneCount(msg.hiddenDoneCount)
 		// Refresh running process indicators for all tasks
 		running := executor.GetTasksWithRunningShellProcess()
@@ -1058,6 +1072,8 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Set task position in column for display
 			pos, total := m.kanban.GetTaskPosition()
 			m.detailView.SetPosition(pos, total)
+			// Populate the pinned quick-nav bar (respects the active board filter)
+			m.refreshDetailPinnedNav()
 			m.previousView = m.currentView
 			m.currentView = ViewDetail
 			// Start async pane setup if needed
@@ -2255,6 +2271,70 @@ func (m *AppModel) resolveProjectAliases(query string) string {
 	return result.String()
 }
 
+// filteredPinnedTasks returns the pinned tasks that pass the board's currently
+// active filter, ordered by status column then ID for stability. This is the set
+// the detail view's quick-nav bar hops between — so a filtered board ("[projectX]")
+// only surfaces its own pinned tasks, not every pin across the board.
+func (m *AppModel) filteredPinnedTasks() []*db.Task {
+	queryLower := strings.ToLower(m.filterText)
+	if strings.Contains(queryLower, "[") {
+		queryLower = m.resolveProjectAliases(queryLower)
+	}
+
+	var pinned []*db.Task
+	for _, task := range m.tasks {
+		if !task.Pinned {
+			continue
+		}
+		if queryLower != "" && scoreTaskForFilter(task, queryLower) < 0 {
+			continue
+		}
+		pinned = append(pinned, task)
+	}
+
+	sort.SliceStable(pinned, func(i, j int) bool {
+		ri, rj := statusColumnRank(pinned[i].Status), statusColumnRank(pinned[j].Status)
+		if ri != rj {
+			return ri < rj
+		}
+		return pinned[i].ID < pinned[j].ID
+	})
+	return pinned
+}
+
+// statusColumnRank orders task statuses left-to-right the way the board columns
+// read, so the pinned nav bar lists tasks in a familiar order.
+func statusColumnRank(status string) int {
+	switch status {
+	case db.StatusBacklog:
+		return 0
+	case db.StatusQueued:
+		return 1
+	case db.StatusProcessing:
+		return 2
+	case db.StatusBlocked:
+		return 3
+	case db.StatusDone:
+		return 4
+	default:
+		return 5
+	}
+}
+
+// refreshDetailPinnedNav rebuilds the detail view's pinned quick-nav bar from the
+// current task set and filter. Safe to call when not in the detail view.
+func (m *AppModel) refreshDetailPinnedNav() {
+	if m.detailView == nil || m.selectedTask == nil {
+		return
+	}
+	pinned := m.filteredPinnedTasks()
+	items := make([]PinnedNavItem, len(pinned))
+	for i, t := range pinned {
+		items[i] = PinnedNavItem{ID: t.ID, Title: t.Title, Status: t.Status, Project: t.Project}
+	}
+	m.detailView.SetPinnedNav(items, m.selectedTask.ID)
+}
+
 // applyFilter filters the tasks based on current filter text using fuzzy matching.
 // Uses the same matching logic as the command palette (Ctrl+P) for consistency.
 func (m *AppModel) applyFilter() {
@@ -2608,6 +2688,22 @@ func (m *AppModel) updateDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
+	// Pinned quick-nav: hop between the pinned tasks shown in the detail view's
+	// top bar. [ / ] cycle prev/next; 1-9 jump to that pill directly.
+	if m.detailView != nil && m.detailView.HasPinnedNav() {
+		if key.Matches(keyMsg, m.keys.NextPinnedTask) {
+			return m.jumpToPinnedTask(m.detailView.PinnedNavNextID())
+		}
+		if key.Matches(keyMsg, m.keys.PrevPinnedTask) {
+			return m.jumpToPinnedTask(m.detailView.PinnedNavPrevID())
+		}
+		if s := keyMsg.String(); len(s) == 1 && s[0] >= '1' && s[0] <= '9' {
+			if id := m.detailView.PinnedNavIDAt(int(s[0] - '0')); id != 0 {
+				return m.jumpToPinnedTask(id)
+			}
+		}
+	}
+
 	if m.detailView != nil {
 		var cmd tea.Cmd
 		m.detailView, cmd = m.detailView.Update(msg)
@@ -2615,6 +2711,29 @@ func (m *AppModel) updateDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	return m, nil
+}
+
+// jumpToPinnedTask switches the detail view to the given task, reusing the same
+// cleanup/transition guard as prev/next navigation so we never fight over the
+// executor pane. It selects the task in the kanban first so position display and
+// subsequent arrow navigation stay consistent.
+func (m *AppModel) jumpToPinnedTask(id int64) (tea.Model, tea.Cmd) {
+	if id == 0 {
+		return m, nil
+	}
+	if m.selectedTask != nil && m.selectedTask.ID == id {
+		return m, nil // already here
+	}
+	if m.taskTransitionInProgress {
+		return m, nil
+	}
+	m.taskTransitionInProgress = true
+	if m.detailView != nil {
+		m.detailView.CleanupWithoutSaving()
+		m.detailView = nil
+	}
+	m.kanban.SelectTask(id)
+	return m, m.loadTask(id)
 }
 
 func (m *AppModel) updateNewTaskForm(msg tea.Msg) (tea.Model, tea.Cmd) {

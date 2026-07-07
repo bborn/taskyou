@@ -116,6 +116,15 @@ type DetailModel struct {
 	positionInColumn int
 	totalInColumn    int
 
+	// Pinned quick-nav: a compact pill bar at the top of the detail view for
+	// hopping between the tasks you're currently focused on (your pinned tasks,
+	// honouring the board's active filter). pinnedNavIndex is the position of the
+	// currently-viewed task within pinnedNav, or -1 when the current task isn't
+	// pinned. Populated by AppModel via SetPinnedNav whenever a task is opened or
+	// the task set changes.
+	pinnedNav      []PinnedNavItem
+	pinnedNavIndex int
+
 	// Track joined tmux panes
 	claudePaneID    string // The Claude Code pane (middle-left)
 	workdirPaneID   string // The workdir shell pane (middle-right)
@@ -777,16 +786,22 @@ func (m *DetailModel) spinnerTick() tea.Cmd {
 	})
 }
 
+// headerHeight is the vertical space reserved for the header above the viewport.
+// The pinned quick-nav bar, when shown, adds one line and must be accounted for
+// here or the viewport would paint over it.
+func (m *DetailModel) headerHeight() int {
+	h := 6
+	if m.showPinnedNav() {
+		h++
+	}
+	return h
+}
+
 func (m *DetailModel) initViewport() {
-	headerHeight := 6
 	footerHeight := 2
 
 	// If we have joined panes, we have less height (tmux split takes space)
-	vpHeight := m.height - headerHeight - footerHeight
-	if m.claudePaneID != "" || m.workdirPaneID != "" {
-		// The tmux split takes roughly half, but we don't control that here
-		// Just use full height - the TUI pane will be resized by tmux
-	}
+	vpHeight := m.height - m.headerHeight() - footerHeight
 
 	m.viewport = viewport.New(m.width-4, vpHeight)
 	m.setViewportContent()
@@ -797,13 +812,20 @@ func (m *DetailModel) initViewport() {
 func (m *DetailModel) SetSize(width, height int) {
 	m.width = width
 	m.height = height
-	if m.ready {
-		headerHeight := 6
-		footerHeight := 2
-		m.viewport.Width = width - 4
-		m.viewport.Height = height - headerHeight - footerHeight
-		m.setViewportContent()
+	m.reflowViewport()
+}
+
+// reflowViewport recomputes the viewport dimensions from the current width,
+// height, and header layout. Called on resize and whenever something that
+// changes the header height (like the pinned nav bar appearing) is updated.
+func (m *DetailModel) reflowViewport() {
+	if !m.ready {
+		return
 	}
+	footerHeight := 2
+	m.viewport.Width = m.width - 4
+	m.viewport.Height = m.height - m.headerHeight() - footerHeight
+	m.setViewportContent()
 }
 
 // Update handles messages.
@@ -2842,6 +2864,13 @@ func (m *DetailModel) renderHeader() string {
 		Align(lipgloss.Right).
 		Render(rightBlock)
 
+	// Prepend the pinned quick-nav bar (when there's somewhere to hop to). It is
+	// part of the header string, so viewSignature captures it automatically and
+	// the render cache stays correct.
+	if nav := m.renderPinnedNav(); nav != "" {
+		return lipgloss.JoinVertical(lipgloss.Left, nav, headerLayout, "")
+	}
+
 	return lipgloss.JoinVertical(lipgloss.Left, headerLayout, "")
 }
 
@@ -3133,6 +3162,11 @@ func (m *DetailModel) renderHelp() string {
 
 	keys := []helpKey{
 		{IconArrowUp() + "/" + IconArrowDown(), "prev/next task", !hasNavigation},
+	}
+
+	// Pinned quick-nav hint (only when the bar is shown)
+	if m.showPinnedNav() {
+		keys = append(keys, helpKey{"[/]", "pinned", false})
 	}
 
 	// Show scroll hint when content is scrollable
