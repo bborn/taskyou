@@ -44,8 +44,6 @@ coverage.html
 tmux-*.log
 .playwright-mcp/.mcp.json
 
-# Spotlight mode
-.spotlight-active
 .playwright-mcp/
 .mcp.json
 .gstack/
