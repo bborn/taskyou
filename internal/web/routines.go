@@ -10,6 +10,7 @@ import (
 	"github.com/bborn/workflow/internal/db"
 	"github.com/bborn/workflow/internal/events"
 	"github.com/bborn/workflow/internal/hooks"
+	"github.com/bborn/workflow/internal/notify"
 	"github.com/bborn/workflow/internal/routine"
 )
 
@@ -159,9 +160,11 @@ func (s *Server) handleRunRoutine(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	emitter := events.New(hooks.DefaultHooksDir())
+	emitter.SetNotifier(notify.New(s.db))
 	runner := &routine.Runner{
 		DB:      s.db,
-		Emitter: events.New(hooks.DefaultHooksDir()),
+		Emitter: emitter,
 	}
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), rt.Timeout+time.Minute)

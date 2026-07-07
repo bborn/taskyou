@@ -115,6 +115,12 @@ func completeSettingKeys(cmd *cobra.Command, args []string, toComplete string) (
 			"anthropic_api_key\tAPI key for ghost text autocomplete",
 			"autocomplete_enabled\tEnable/disable ghost text (true/false)",
 			"idle_suspend_timeout\tIdle timeout before suspending (e.g. 6h)",
+			"notify_enabled\tPush to your phone on task events (true/false)",
+			"notify_provider\tDelivery method: ntfy or webhook",
+			"notify_target\tntfy topic URL or webhook URL",
+			"notify_events\tEvents to notify on (comma list)",
+			"notify_url\tBase URL for notification deep links",
+			"notify_reply\tCanned reply for the one-tap unblock action",
 			"http_api_port\tPort for the daemon-hosted HTTP API (default 8080)",
 			"http_api_disabled\tDisable the daemon-hosted HTTP API (true/false)",
 		}, cobra.ShellCompDirectiveNoFileComp

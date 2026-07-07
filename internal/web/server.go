@@ -150,6 +150,11 @@ func New(cfg Config) *Server {
 	// Status
 	mux.HandleFunc("GET /api/status", s.handleStatus)
 
+	// Mobile console — a zero-build, phone-first page that always ships, so
+	// `ty serve` is usable from a phone over Tailscale without the React UI.
+	mux.HandleFunc("GET /m", s.handleMobile)
+	mux.HandleFunc("GET /m/", s.handleMobile)
+
 	// Embedded web UI (same React app as the desktop shell); /api/* patterns
 	// are more specific and keep precedence.
 	mux.Handle("GET /", ui.Handler())

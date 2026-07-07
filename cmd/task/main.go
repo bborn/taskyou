@@ -32,6 +32,7 @@ import (
 	"github.com/bborn/workflow/internal/github"
 	"github.com/bborn/workflow/internal/hooks"
 	"github.com/bborn/workflow/internal/mcp"
+	"github.com/bborn/workflow/internal/notify"
 	"github.com/bborn/workflow/internal/ui"
 	"github.com/bborn/workflow/internal/web"
 )
@@ -84,6 +85,7 @@ func openTaskDB(path string) (*db.DB, error) {
 	if taskEmitter == nil {
 		taskEmitter = events.New(hooks.DefaultHooksDir())
 	}
+	taskEmitter.SetNotifier(notify.New(database))
 	database.SetEventEmitter(taskEmitter)
 	return database, nil
 }
@@ -2365,6 +2367,28 @@ servers programmatically.`,
 			}
 			fmt.Printf("idle_suspend_timeout: %s\n", idleTimeout)
 
+			// Push notifications
+			notifyEnabled, _ := database.GetSetting(notify.SettingEnabled)
+			if notifyEnabled == "" {
+				notifyEnabled = "false"
+			}
+			fmt.Printf("notify_enabled: %s\n", notifyEnabled)
+			notifyProvider, _ := database.GetSetting(notify.SettingProvider)
+			if notifyProvider == "" {
+				notifyProvider = "ntfy (default)"
+			}
+			fmt.Printf("notify_provider: %s\n", notifyProvider)
+			notifyTarget, _ := database.GetSetting(notify.SettingTarget)
+			if notifyTarget == "" {
+				notifyTarget = dimStyle.Render("(not set)")
+			}
+			fmt.Printf("notify_target: %s\n", notifyTarget)
+			notifyEvents, _ := database.GetSetting(notify.SettingEvents)
+			if notifyEvents == "" {
+				notifyEvents = notify.DefaultEvents + " (default)"
+			}
+			fmt.Printf("notify_events: %s\n", notifyEvents)
+
 			fmt.Println()
 			fmt.Println(dimStyle.Render("Use 'task settings set <key> <value>' to change settings"))
 		},
@@ -2381,6 +2405,12 @@ Available settings:
                         directly for speed). Get yours at console.anthropic.com
   autocomplete_enabled  Enable/disable ghost text autocomplete (true/false)
   idle_suspend_timeout  How long blocked tasks wait before suspending (e.g. 6h, 30m, 24h)
+  notify_enabled        Push to your phone when a task blocks/finishes (true/false)
+  notify_provider       Delivery method: ntfy (default) or webhook
+  notify_target         ntfy topic URL (e.g. https://ntfy.sh/my-ty) or webhook URL
+  notify_events         Comma list: blocked,auth_required,completed,failed (default)
+  notify_url            Base URL for notification deep links (e.g. http://my-host:8080)
+  notify_reply          Canned reply the one-tap unblock action sends (default: continue)
   http_api_port         Port the daemon-hosted HTTP API listens on (default 8080)
   http_api_disabled     Stop the daemon from hosting the HTTP API (true/false)`,
 		Args: cobra.ExactArgs(2),
@@ -2405,6 +2435,18 @@ Available settings:
 					fmt.Println(errorStyle.Render("Invalid duration format. Examples: 6h, 30m, 24h, 1h30m"))
 					return
 				}
+			case notify.SettingEnabled:
+				if value != "true" && value != "false" {
+					fmt.Println(errorStyle.Render("Value must be 'true' or 'false'"))
+					return
+				}
+			case notify.SettingProvider:
+				if value != notify.ProviderNtfy && value != notify.ProviderWebhook {
+					fmt.Println(errorStyle.Render("Value must be 'ntfy' or 'webhook'"))
+					return
+				}
+			case notify.SettingTarget, notify.SettingEvents, notify.SettingURL, notify.SettingReply:
+				// Free-form strings; no validation.
 			case config.SettingHTTPAPIPort:
 				if p, err := strconv.Atoi(value); err != nil || p < 1 || p > 65535 {
 					fmt.Println(errorStyle.Render("Value must be a port number between 1 and 65535"))
@@ -2417,7 +2459,7 @@ Available settings:
 				}
 			default:
 				fmt.Println(errorStyle.Render("Unknown setting: " + key))
-				fmt.Println(dimStyle.Render("Available: anthropic_api_key, autocomplete_enabled, idle_suspend_timeout, http_api_port, http_api_disabled"))
+				fmt.Println(dimStyle.Render("Available: anthropic_api_key, autocomplete_enabled, idle_suspend_timeout, notify_enabled, notify_provider, notify_target, notify_events, notify_url, notify_reply, http_api_port, http_api_disabled"))
 				return
 			}
 
@@ -2439,6 +2481,54 @@ Available settings:
 
 	settingsCmd.AddCommand(settingsSetCmd)
 	rootCmd.AddCommand(settingsCmd)
+
+	// Notify command - configure & test push notifications
+	notifyCmd := &cobra.Command{
+		Use:   "notify",
+		Short: "Push notifications for task events (so you can walk away)",
+		Long: `Send a push to your phone when a task blocks, needs sign-in, finishes, or fails.
+
+Quick start with ntfy (free iOS/Android app, no account):
+  1. Install the ntfy app and subscribe to a hard-to-guess topic, e.g. ty-7f3k9.
+  2. Configure ty:
+       ty settings set notify_target https://ntfy.sh/ty-7f3k9
+       ty settings set notify_enabled true
+       ty settings set notify_url http://<your-tailscale-host>:8080
+  3. Verify:  ty notify test
+
+Notifications deep-link into the mobile console (ty serve, then open /m) so a tap
+opens the task and you can reply, approve, or retry right from your phone.`,
+		Run: func(cmd *cobra.Command, args []string) {
+			_ = cmd.Help()
+		},
+	}
+
+	notifyTestCmd := &cobra.Command{
+		Use:   "test",
+		Short: "Send a test notification",
+		Run: func(cmd *cobra.Command, args []string) {
+			database, err := openTaskDB(db.DefaultPath())
+			if err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+			defer database.Close()
+
+			n := notify.New(database)
+			if !n.Enabled() {
+				fmt.Println(errorStyle.Render("Notifications are not enabled."))
+				fmt.Println(dimStyle.Render("Set notify_target and run: ty settings set notify_enabled true"))
+				return
+			}
+			if err := n.Test(); err != nil {
+				fmt.Println(errorStyle.Render("Failed to send: " + err.Error()))
+				return
+			}
+			fmt.Println(successStyle.Render("Sent — check your phone."))
+		},
+	}
+	notifyCmd.AddCommand(notifyTestCmd)
+	rootCmd.AddCommand(notifyCmd)
 
 	// Events command - manage event hooks
 	eventsCmd := &cobra.Command{
