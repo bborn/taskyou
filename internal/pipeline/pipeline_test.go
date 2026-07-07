@@ -47,8 +47,8 @@ func TestCreateBuildsChain(t *testing.T) {
 		t.Errorf("branch = %q, want %q", res.Branch, wantBranch)
 	}
 
-	wantExec := []string{db.ExecutorClaude, db.ExecutorClaude, db.ExecutorCodex}
-	wantModel := []string{db.ModelOpus, db.ModelSonnet, ""}
+	wantExec := []string{db.ExecutorClaude, db.ExecutorClaude, db.ExecutorClaude}
+	wantModel := []string{db.ModelOpus, db.ModelSonnet, db.ModelOpus}
 	wantPhase := []string{"Plan", "Code", "Review"}
 	for i, task := range res.Tasks {
 		if task.Executor != wantExec[i] {
@@ -169,44 +169,63 @@ func TestCreatePermissionModeAppliesToEveryPhase(t *testing.T) {
 	}
 }
 
-func TestCreateFallsBackWhenExecutorUnavailable(t *testing.T) {
+func TestCreateHonorsSavedConfig(t *testing.T) {
 	database := testDB(t)
-	// Codex not installed: only claude is available. The Review phase must fall
-	// back to claude rather than being wired to an executor that can't run.
-	res, err := Create(database, Options{
-		Goal:               "Do a thing",
-		Project:            "test",
-		Execute:            true,
-		AvailableExecutors: []string{db.ExecutorClaude},
-	})
+	// Configure this project's Review phase to run on codex, then build a pipeline
+	// and confirm the phase task picks up the saved choice.
+	if err := SaveConfig(database, "test", DefaultDefinition, []PhaseConfig{
+		{Name: "Review", Executor: db.ExecutorCodex, Model: ""},
+	}); err != nil {
+		t.Fatalf("SaveConfig: %v", err)
+	}
+	res, err := Create(database, Options{Goal: "Do a thing", Project: "test", Execute: true})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	review := res.Tasks[2]
-	if review.Executor != db.ExecutorClaude {
-		t.Errorf("Review executor = %q, want claude fallback", review.Executor)
+	if got := res.Tasks[2].Executor; got != db.ExecutorCodex {
+		t.Errorf("Review executor = %q, want codex from saved config", got)
 	}
-	if len(res.Fallbacks) == 0 {
-		t.Error("expected a fallback note when codex is unavailable")
+	// Unconfigured phases keep their defaults.
+	if got := res.Tasks[0].Executor; got != db.ExecutorClaude {
+		t.Errorf("Plan executor = %q, want claude default", got)
 	}
 }
 
-func TestCreateNoFallbackWhenAllAvailable(t *testing.T) {
+func TestConfigRoundTrip(t *testing.T) {
 	database := testDB(t)
-	res, err := Create(database, Options{
-		Goal:               "Do a thing",
-		Project:            "test",
-		Execute:            true,
-		AvailableExecutors: []string{db.ExecutorClaude, db.ExecutorCodex},
-	})
-	if err != nil {
-		t.Fatalf("Create: %v", err)
+	def, _ := Get(DefaultDefinition)
+
+	// Unconfigured: effective config equals the built-in defaults.
+	if IsConfigured(database, "test", def.Name) {
+		t.Error("fresh project should not be configured")
 	}
-	if res.Tasks[2].Executor != db.ExecutorCodex {
-		t.Errorf("Review executor = %q, want codex", res.Tasks[2].Executor)
+	got := EffectiveConfig(database, "test", def)
+	want := DefaultPhaseConfig(def)
+	if len(got) != len(want) || got[2].Executor != want[2].Executor {
+		t.Fatalf("default effective config = %+v, want %+v", got, want)
 	}
-	if len(res.Fallbacks) != 0 {
-		t.Errorf("unexpected fallbacks: %v", res.Fallbacks)
+
+	// Save a partial override, reload, confirm it merged and persisted.
+	if err := SaveConfig(database, "test", def.Name, []PhaseConfig{{Name: "Review", Executor: db.ExecutorGemini, Model: ""}}); err != nil {
+		t.Fatalf("SaveConfig: %v", err)
+	}
+	if !IsConfigured(database, "test", def.Name) {
+		t.Error("project should report configured after save")
+	}
+	eff := EffectiveConfig(database, "test", def)
+	if eff[2].Executor != db.ExecutorGemini {
+		t.Errorf("Review executor = %q, want gemini", eff[2].Executor)
+	}
+	if eff[0].Executor != db.ExecutorClaude {
+		t.Errorf("Plan executor = %q, want claude default (unchanged)", eff[0].Executor)
+	}
+
+	// Clear reverts to defaults.
+	if err := ClearConfig(database, "test", def.Name); err != nil {
+		t.Fatalf("ClearConfig: %v", err)
+	}
+	if IsConfigured(database, "test", def.Name) {
+		t.Error("project should not be configured after clear")
 	}
 }
 

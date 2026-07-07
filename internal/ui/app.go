@@ -1146,9 +1146,6 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.showWelcome = false
 			n := len(msg.result.Tasks)
 			m.notification = fmt.Sprintf("%s Created %s pipeline (%d phases) on %s", IconDone(), msg.result.Definition.Name, n, msg.result.Branch)
-			if len(msg.result.Fallbacks) > 0 {
-				m.notification += " · " + strings.Join(msg.result.Fallbacks, "; ")
-			}
 			m.notifyUntil = time.Now().Add(6 * time.Second)
 			cmds = append(cmds, m.loadTasks())
 		} else {
@@ -4185,7 +4182,6 @@ func (m *AppModel) createTaskWithAttachments(t *db.Task, attachmentPaths []strin
 // task itself is not persisted — it is only the goal carrier.
 func (m *AppModel) createPipeline(t *db.Task, definition string, execute bool) tea.Cmd {
 	database := m.db
-	available := m.availableExecutors
 	return func() tea.Msg {
 		goal := strings.TrimSpace(t.Title)
 		if body := strings.TrimSpace(t.Body); body != "" {
@@ -4196,12 +4192,11 @@ func (m *AppModel) createPipeline(t *db.Task, definition string, execute bool) t
 			}
 		}
 		result, err := pipeline.Create(database, pipeline.Options{
-			Goal:               goal,
-			Project:            t.Project,
-			Definition:         definition,
-			PermissionMode:     t.PermissionMode,
-			Execute:            execute,
-			AvailableExecutors: available,
+			Goal:           goal,
+			Project:        t.Project,
+			Definition:     definition,
+			PermissionMode: t.PermissionMode,
+			Execute:        execute,
 		})
 		if err == nil {
 			database.CompleteOnboarding()

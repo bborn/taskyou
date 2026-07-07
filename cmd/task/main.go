@@ -822,7 +822,11 @@ and advance automatically as each phase finishes.
 The default 'plan-code-review' pipeline runs three phases on one branch:
   Plan   (Claude / Opus)   — writes PLAN.md, no code
   Code   (Claude / Sonnet) — implements the plan
-  Review (Codex)           — reviews with fresh eyes and opens the PR
+  Review (Claude / Opus)   — reviews with fresh context and opens the PR
+
+Each phase's executor and model are configurable per project and persisted, so
+you set them once (e.g. "Review runs on codex here") and every pipeline in that
+project uses your choices. See 'task pipeline config'.
 
 Each phase commits and pushes the shared branch, so the pipeline needs a project
 that uses git worktrees and has a remote to push to.
@@ -830,6 +834,7 @@ that uses git worktrees and has a remote to push to.
 Examples:
   task pipeline "Add rate limiting to the API" --project myapp
   task pipeline "Refactor the auth module" -p myapp --permission-mode dangerous
+  task pipeline config -p myapp --set "Review=codex"  # configure phases
   task pipeline --list  # show available pipeline definitions`,
 		Args: cobra.MaximumNArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
@@ -897,14 +902,12 @@ Examples:
 				permMode = db.PermissionModeDangerous
 			}
 
-			available := executor.New(database, config.New(database)).AvailableExecutors()
 			result, err := pipeline.Create(database, pipeline.Options{
-				Goal:               goal,
-				Project:            project,
-				Definition:         definition,
-				PermissionMode:     permMode,
-				Execute:            !noExecute,
-				AvailableExecutors: available,
+				Goal:           goal,
+				Project:        project,
+				Definition:     definition,
+				PermissionMode: permMode,
+				Execute:        !noExecute,
 			})
 			if err != nil {
 				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
@@ -928,9 +931,6 @@ Examples:
 					"project":    project,
 					"phases":     phases,
 				}
-				if len(result.Fallbacks) > 0 {
-					out["fallbacks"] = result.Fallbacks
-				}
 				jsonBytes, _ := json.Marshal(out)
 				fmt.Println(string(jsonBytes))
 				return
@@ -944,9 +944,6 @@ Examples:
 					model = "default"
 				}
 				fmt.Printf("  #%d  %-7s %s/%s  (%s)\n", t.ID, ph.Name, t.Executor, model, t.Status)
-			}
-			for _, fb := range result.Fallbacks {
-				fmt.Println(dimStyle.Render("  ⚠ " + fb))
 			}
 			if noExecute {
 				fmt.Println(dimStyle.Render("Staged but not started — queue the first phase to run it."))
@@ -967,6 +964,133 @@ Examples:
 	pipelineCmd.RegisterFlagCompletionFunc("definition", func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
 		return pipeline.DefinitionNames(), cobra.ShellCompDirectiveNoFileComp
 	})
+
+	// Pipeline config subcommand - view/set per-project phase executors & models
+	pipelineConfigCmd := &cobra.Command{
+		Use:   "config",
+		Short: "View or set the per-project executor/model for each pipeline phase",
+		Long: `Configure which executor and model each pipeline phase runs on, per project.
+Set it once for a project and every pipeline there defaults to your choices.
+
+With no --set/--reset flags, prints the project's current configuration.
+
+Examples:
+  task pipeline config -p myapp                          # show current config
+  task pipeline config -p myapp --set "Review=codex"     # Review phase on codex
+  task pipeline config -p myapp --set "Plan=claude/opus" --set "Code=claude/sonnet"
+  task pipeline config -p myapp --reset                  # revert to built-in defaults`,
+		Run: func(cmd *cobra.Command, args []string) {
+			project, _ := cmd.Flags().GetString("project")
+			definition, _ := cmd.Flags().GetString("definition")
+			sets, _ := cmd.Flags().GetStringArray("set")
+			reset, _ := cmd.Flags().GetBool("reset")
+			outputJSON, _ := cmd.Flags().GetBool("json")
+
+			database, err := openTaskDB(db.DefaultPath())
+			if err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+			defer database.Close()
+
+			if project == "" {
+				if cwd, err := os.Getwd(); err == nil {
+					if p, err := database.GetProjectByPath(cwd); err == nil && p != nil {
+						project = p.Name
+					}
+				}
+			}
+			if project == "" {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: could not determine project; pass --project"))
+				os.Exit(1)
+			}
+
+			def, ok := pipeline.Get(definition)
+			if !ok {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: unknown pipeline definition "+definition))
+				os.Exit(1)
+			}
+
+			if reset {
+				if err := pipeline.ClearConfig(database, project, def.Name); err != nil {
+					fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+					os.Exit(1)
+				}
+				fmt.Println(successStyle.Render(fmt.Sprintf("Reset %s pipeline config for %s to defaults", def.Name, project)))
+			}
+
+			if len(sets) > 0 {
+				// Start from the current effective config so partial --set edits merge.
+				cfg := pipeline.EffectiveConfig(database, project, def)
+				byName := map[string]int{}
+				for i, c := range cfg {
+					byName[strings.ToLower(c.Name)] = i
+				}
+				validExecutors := map[string]bool{
+					db.ExecutorClaude: true, db.ExecutorCodex: true, db.ExecutorGemini: true,
+					db.ExecutorPi: true, db.ExecutorOpenCode: true, db.ExecutorOpenClaw: true,
+				}
+				for _, s := range sets {
+					name, exec, model, perr := parsePhaseSet(s)
+					if perr != nil {
+						fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+perr.Error()))
+						os.Exit(1)
+					}
+					idx, found := byName[strings.ToLower(name)]
+					if !found {
+						fmt.Fprintln(os.Stderr, errorStyle.Render(fmt.Sprintf("Error: no phase %q in %s (phases: %s)", name, def.Name, phaseNames(def))))
+						os.Exit(1)
+					}
+					if !validExecutors[exec] {
+						fmt.Fprintln(os.Stderr, errorStyle.Render("Error: invalid executor "+exec))
+						os.Exit(1)
+					}
+					cfg[idx].Executor = exec
+					cfg[idx].Model = model
+				}
+				if err := pipeline.SaveConfig(database, project, def.Name, cfg); err != nil {
+					fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+					os.Exit(1)
+				}
+			}
+
+			// Print the resulting effective config.
+			cfg := pipeline.EffectiveConfig(database, project, def)
+			configured := pipeline.IsConfigured(database, project, def.Name)
+			if outputJSON {
+				out := map[string]interface{}{
+					"project":    project,
+					"definition": def.Name,
+					"configured": configured,
+					"phases":     cfg,
+				}
+				jsonBytes, _ := json.Marshal(out)
+				fmt.Println(string(jsonBytes))
+				return
+			}
+			origin := "defaults"
+			if configured {
+				origin = "configured"
+			}
+			fmt.Println(successStyle.Render(fmt.Sprintf("%s pipeline for %s (%s)", def.Name, project, origin)))
+			for _, c := range cfg {
+				model := c.Model
+				if model == "" {
+					model = "default"
+				}
+				fmt.Printf("  %-8s %s/%s\n", c.Name, c.Executor, model)
+			}
+			fmt.Println(dimStyle.Render("Set with: task pipeline config -p " + project + " --set \"Review=codex\""))
+		},
+	}
+	pipelineConfigCmd.Flags().StringP("project", "p", "", "Project name (auto-detected from cwd if not specified)")
+	pipelineConfigCmd.Flags().StringP("definition", "d", pipeline.DefaultDefinition, "Pipeline definition to configure")
+	pipelineConfigCmd.Flags().StringArray("set", nil, "Set a phase's executor/model, e.g. \"Review=codex\" or \"Plan=claude/opus\" (repeatable)")
+	pipelineConfigCmd.Flags().Bool("reset", false, "Clear saved config and revert to built-in defaults")
+	pipelineConfigCmd.Flags().Bool("json", false, "Output in JSON format")
+	pipelineConfigCmd.RegisterFlagCompletionFunc("project", completeFlagProjects)
+	pipelineCmd.AddCommand(pipelineConfigCmd)
+
 	rootCmd.AddCommand(pipelineCmd)
 
 	// List subcommand - list tasks
@@ -5028,6 +5152,30 @@ func formatLogEntry(entry map[string]interface{}) string {
 // in CLI input. This allows users to enter multi-line text from the command line.
 func unescapeNewlines(s string) string {
 	return strings.ReplaceAll(s, "\\n", "\n")
+}
+
+// parsePhaseSet parses a "Phase=executor[/model]" pipeline-config assignment.
+func parsePhaseSet(s string) (name, executor, model string, err error) {
+	parts := strings.SplitN(s, "=", 2)
+	if len(parts) != 2 || strings.TrimSpace(parts[0]) == "" || strings.TrimSpace(parts[1]) == "" {
+		return "", "", "", fmt.Errorf("invalid --set %q (want \"Phase=executor[/model]\")", s)
+	}
+	name = strings.TrimSpace(parts[0])
+	em := strings.SplitN(strings.TrimSpace(parts[1]), "/", 2)
+	executor = strings.ToLower(strings.TrimSpace(em[0]))
+	if len(em) == 2 {
+		model = strings.TrimSpace(em[1])
+	}
+	return name, executor, model, nil
+}
+
+// phaseNames returns a definition's phase names joined for error messages.
+func phaseNames(def pipeline.Definition) string {
+	names := make([]string, len(def.Phases))
+	for i, p := range def.Phases {
+		names[i] = p.Name
+	}
+	return strings.Join(names, ", ")
 }
 
 // truncate shortens a string to maxLen, adding ellipsis if needed.

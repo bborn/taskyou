@@ -45,17 +45,23 @@ type Definition struct {
 // DefaultDefinition is the definition used when none is named.
 const DefaultDefinition = "plan-code-review"
 
-// planCodeReview mirrors the herdr plan→code→review flow: Opus plans, Sonnet
-// codes, and a different executor (Codex) reviews with fresh eyes. Plan and Code
-// run on Claude because they are chain-critical — they must call taskyou_complete
-// to advance the pipeline — while Review is the terminal phase and opens the PR.
+// planCodeReview is the herdr plan→code→review flow: three phases on one shared
+// branch, each with its own model. The built-in defaults are all Claude — Opus
+// plans, Sonnet codes, Opus reviews with fresh context — so the pipeline works
+// out of the box on any host with Claude and never silently swaps executors.
+//
+// The per-phase executor and model are configurable per project (see config.go):
+// set Review to codex/gemini/etc. once for a project and every pipeline there
+// defaults to your choices. Plan and Code stay chain-critical — whatever executor
+// runs them must call taskyou_complete to advance the pipeline — while Review is
+// the terminal phase and opens the PR.
 var planCodeReview = Definition{
 	Name:        "plan-code-review",
-	Description: "Opus plans, Sonnet codes, Codex reviews — three phases on one shared branch, auto-advancing.",
+	Description: "Plan → code → review: three phases on one shared branch, auto-advancing, each with its own configurable model/executor.",
 	Phases: []Phase{
 		{Name: "Plan", Executor: db.ExecutorClaude, Model: db.ModelOpus, Instruction: planInstruction},
 		{Name: "Code", Executor: db.ExecutorClaude, Model: db.ModelSonnet, Instruction: codeInstruction},
-		{Name: "Review", Executor: db.ExecutorCodex, Model: "", Instruction: reviewInstruction},
+		{Name: "Review", Executor: db.ExecutorClaude, Model: db.ModelOpus, Instruction: reviewInstruction},
 	},
 }
 
@@ -94,12 +100,6 @@ type Options struct {
 	Definition     string // Definition name; "" resolves to DefaultDefinition.
 	PermissionMode string // Permission mode for every phase ("" inherits project default).
 	Execute        bool   // If true, queue the first phase so the pipeline starts now.
-
-	// AvailableExecutors, when non-empty, lists the executor slugs installed on
-	// this host. Any phase whose executor is not in the list falls back to Claude
-	// (always the baseline) so a pipeline still runs end-to-end when, say, Codex
-	// isn't installed. An empty/nil list disables the check (assume all present).
-	AvailableExecutors []string
 }
 
 // Result describes a built pipeline.
@@ -107,21 +107,6 @@ type Result struct {
 	Definition Definition
 	Branch     string     // The shared branch all phases run on.
 	Tasks      []*db.Task // Phase tasks in order.
-	Fallbacks  []string   // Human-readable notes about executors remapped to Claude.
-}
-
-// executorAvailable reports whether slug is usable given the available set. An
-// empty set means "no information" — assume everything is available.
-func executorAvailable(slug string, available []string) bool {
-	if len(available) == 0 {
-		return true
-	}
-	for _, a := range available {
-		if a == slug {
-			return true
-		}
-	}
-	return false
 }
 
 // Create builds a pipeline: one phase task per Definition.Phase, wired into a
@@ -147,28 +132,21 @@ func Create(database *db.DB, opts Options) (*Result, error) {
 
 	slug := slugify(goal, 40)
 
-	var fallbacks []string
-	// resolvePhase picks the executor/model a phase actually runs with, downgrading
-	// an unavailable executor to Claude so the whole pipeline still runs.
-	resolvePhase := func(ph Phase) (executor, model string) {
-		if executorAvailable(ph.Executor, opts.AvailableExecutors) {
-			return ph.Executor, ph.Model
-		}
-		fallbacks = append(fallbacks, fmt.Sprintf("%s: %s not installed — using claude", ph.Name, ph.Executor))
-		return db.ExecutorClaude, "" // Drop the model; it belonged to the original executor.
-	}
+	// Apply the project's saved per-phase executor/model choices (or the built-in
+	// defaults when unconfigured), so every pipeline in a project matches how the
+	// user configured it once.
+	phases := EffectivePhases(database, opts.Project, def)
 
 	// Phase 1 is created first so its ID can seed a unique, shared branch name.
-	first := def.Phases[0]
-	firstExec, firstModel := resolvePhase(first)
+	first := phases[0]
 	firstTask := &db.Task{
 		Title:          phaseTitle(first.Name, goal),
 		Body:           goal, // Placeholder; rewritten below once the branch is known.
 		Status:         db.StatusBacklog,
 		Type:           db.TypeCode,
 		Project:        opts.Project,
-		Executor:       firstExec,
-		Model:          firstModel,
+		Executor:       first.Executor,
+		Model:          first.Model,
 		PermissionMode: opts.PermissionMode,
 		Tags:           "pipeline",
 	}
@@ -190,16 +168,15 @@ func Create(database *db.DB, opts Options) (*Result, error) {
 	tasks := []*db.Task{firstTask}
 	prevID := firstTask.ID
 
-	for _, ph := range def.Phases[1:] {
-		phExec, phModel := resolvePhase(ph)
+	for _, ph := range phases[1:] {
 		task := &db.Task{
 			Title:          phaseTitle(ph.Name, goal),
 			Body:           render(ph.Instruction, goal, branch),
 			Status:         db.StatusBlocked, // Waits for its blocker; auto-queued on completion.
 			Type:           db.TypeCode,
 			Project:        opts.Project,
-			Executor:       phExec,
-			Model:          phModel,
+			Executor:       ph.Executor,
+			Model:          ph.Model,
 			PermissionMode: opts.PermissionMode,
 			SourceBranch:   branch,
 			Tags:           "pipeline",
@@ -223,7 +200,7 @@ func Create(database *db.DB, opts Options) (*Result, error) {
 		firstTask.Status = db.StatusQueued
 	}
 
-	return &Result{Definition: def, Branch: branch, Tasks: tasks, Fallbacks: fallbacks}, nil
+	return &Result{Definition: def, Branch: branch, Tasks: tasks}, nil
 }
 
 // phaseTitle builds a task title like "[Plan] <goal>", trimming a long goal so
