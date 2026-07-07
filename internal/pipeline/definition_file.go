@@ -27,6 +27,10 @@ type stepYAML struct {
 	Model    string   `yaml:"model,omitempty"`
 	Deps     []string `yaml:"deps,omitempty"`
 	Prompt   string   `yaml:"prompt"`
+	// Verbatim marks a step whose prompt IS the full instruction (no DAG-derived
+	// git handoff is added). It's set when `ty pipeline edit` ejects a built-in
+	// workflow, so the ejected file behaves identically to the built-in.
+	Verbatim bool `yaml:"verbatim,omitempty"`
 }
 
 // definitionYAML is the on-disk form of a workflow.
@@ -82,13 +86,20 @@ func ParseDefinition(data []byte) (Definition, error) {
 		if exec == "" {
 			exec = "claude"
 		}
-		def.Steps = append(def.Steps, Step{
+		step := Step{
 			Name:     name,
 			Executor: exec,
 			Model:    strings.TrimSpace(s.Model),
-			Prompt:   s.Prompt,
 			Deps:     s.Deps,
-		})
+		}
+		// A verbatim step's prompt is its full instruction; otherwise the prompt is
+		// the work and the git handoff is composed from the DAG.
+		if s.Verbatim {
+			step.Instruction = s.Prompt
+		} else {
+			step.Prompt = s.Prompt
+		}
+		def.Steps = append(def.Steps, step)
 	}
 	if err := def.validate(); err != nil {
 		return Definition{}, err
@@ -100,17 +111,20 @@ func ParseDefinition(data []byte) (Definition, error) {
 func Marshal(def Definition) ([]byte, error) {
 	doc := definitionYAML{Name: def.Name, Description: def.Description}
 	for _, s := range def.Steps {
-		prompt := s.Prompt
-		if prompt == "" {
-			prompt = s.Instruction
-		}
-		doc.Steps = append(doc.Steps, stepYAML{
+		out := stepYAML{
 			Name:     s.Name,
 			Executor: s.Executor,
 			Model:    s.Model,
 			Deps:     s.Deps,
-			Prompt:   prompt,
-		})
+			Prompt:   s.Prompt,
+		}
+		// A built-in step carries a full Instruction — write it as a verbatim
+		// prompt so the ejected file behaves identically when reloaded.
+		if s.Instruction != "" {
+			out.Prompt = s.Instruction
+			out.Verbatim = true
+		}
+		doc.Steps = append(doc.Steps, out)
 	}
 	return yaml.Marshal(doc)
 }

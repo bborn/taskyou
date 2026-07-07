@@ -260,7 +260,7 @@ func (s *Server) handleRequest(req *jsonRPCRequest) {
 				},
 				{
 					Name:        "taskyou_create_pipeline",
-					Description: "Create a multi-model pipeline for a goal: one goal is split into an ordered chain of phase tasks (default 'plan-code-review': Opus plans → Sonnet codes → two reviewers run in parallel → collect opens the PR), each routed to its own executor/model, all on one shared git branch. Each step is configurable per project (via `ty pipeline config`) and defaults to those saved choices. Steps advance automatically — sequential where they depend on each other, parallel where they don't. Use this instead of a single task when a goal benefits from a plan/code/review split across different models. The first phase is queued immediately. Requires a git-worktree project with a remote to push to.",
+					Description: "Create a multi-model pipeline for a goal: one goal is split into an ordered chain of phase tasks (default 'plan-code-review': Opus plans → Sonnet codes → two reviewers run in parallel → collect opens the PR), each routed to its own executor/model, all on one shared git branch. Each step runs on its own executor/model; define custom workflows as YAML (ty pipeline new). Steps advance automatically — sequential where they depend on each other, parallel where they don't. Use this instead of a single task when a goal benefits from a plan/code/review split across different models. The first phase is queued immediately. Requires a git-worktree project with a remote to push to.",
 					InputSchema: map[string]interface{}{
 						"type": "object",
 						"properties": map[string]interface{}{

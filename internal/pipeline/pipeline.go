@@ -23,6 +23,7 @@ package pipeline
 
 import (
 	"fmt"
+	"os/exec"
 	"sort"
 	"strings"
 	"unicode"
@@ -37,7 +38,7 @@ type Step struct {
 	Name        string   // Unique label, e.g. "Plan", "Code", "Review A", "Collect".
 	Executor    string   // Executor slug (db.ExecutorClaude, db.ExecutorCodex, ...).
 	Model       string   // Per-task model override ("" = the executor's default).
-	Instruction string   // Full body template (built-in steps). Takes precedence over Prompt.
+	Instruction string   // Full body template (built-in / verbatim steps). Takes precedence over Prompt.
 	Prompt      string   // Custom-workflow body: what the step does; the git handoff is composed from the DAG (see compose.go).
 	Deps        []string // Names of steps that must complete before this one runs.
 }
@@ -169,8 +170,8 @@ func (d Definition) validate() error {
 			}
 		}
 	}
-	if roots := d.Roots(); len(roots) != 1 {
-		return fmt.Errorf("workflow %q must have exactly one root step (found %d)", d.Name, len(roots))
+	if len(d.Roots()) == 0 {
+		return fmt.Errorf("workflow %q has no root step (every step depends on another)", d.Name)
 	}
 	if err := d.checkAcyclic(byName); err != nil {
 		return err
@@ -248,9 +249,13 @@ func Create(database *db.DB, opts Options) (*Result, error) {
 		return nil, err
 	}
 
-	// Apply the project's saved per-step executor/model choices.
-	steps := EffectiveSteps(database, opts.Project, def)
-	rootName := def.Roots()[0].Name
+	steps := def.Steps
+	roots := def.Roots()
+	rootNames := make(map[string]bool, len(roots))
+	for _, r := range roots {
+		rootNames[r.Name] = true
+	}
+	multiRoot := len(roots) > 1
 	slug := slugify(goal, 40)
 
 	// Create every step task first (in 'backlog', so the daemon leaves them alone),
@@ -276,17 +281,28 @@ func Create(database *db.DB, opts Options) (*Result, error) {
 		tasks = append(tasks, task)
 	}
 
-	// Seed the shared branch from the root task's id so it's unique.
-	root := byName[rootName]
-	branch := fmt.Sprintf("pipeline/%d-%s", root.ID, slug)
+	// Seed the shared branch from the first task's id so it's unique.
+	branch := fmt.Sprintf("pipeline/%d-%s", tasks[0].ID, slug)
 
-	// Configure each task: render its prompt, pin the branch on the root and point
-	// every other step at it via SourceBranch.
+	// Branch ownership. With a single root, that root creates the branch (pins
+	// BranchName) and everyone else checks it out via SourceBranch — the proven
+	// path. With MULTIPLE roots (true parallel entry points), no single step can
+	// own the branch, so we pre-create it on the remote and every step (roots
+	// included) checks it out; the parallel roots each push to their own branch.
+	if multiRoot {
+		if err := ensureSharedBranch(projectDir, branch); err != nil {
+			for _, t := range tasks {
+				_ = database.DeleteTask(t.ID)
+			}
+			return nil, fmt.Errorf("multi-root workflows need a git-worktree project with a remote: %w", err)
+		}
+	}
+
 	for _, s := range steps {
 		task := byName[s.Name]
 		task.Body = render(effectiveInstruction(def, s.Name), goal, branch, s.Name, reviewsList(s, branch))
-		if s.Name == rootName {
-			task.BranchName = branch // Pinned; the executor creates this branch.
+		if rootNames[s.Name] && !multiRoot {
+			task.BranchName = branch // Single root pins/creates the branch.
 		} else {
 			task.SourceBranch = branch // Checked out from the shared branch.
 		}
@@ -305,9 +321,9 @@ func Create(database *db.DB, opts Options) (*Result, error) {
 	}
 
 	// Set statuses last, once the graph is fully wired: non-root steps wait
-	// 'blocked' on their deps; the root starts (queued) or stages (backlog).
+	// 'blocked' on their deps; every root starts (queued) or stages (backlog).
 	for _, s := range steps {
-		if s.Name == rootName {
+		if rootNames[s.Name] {
 			continue
 		}
 		if err := database.UpdateTaskStatus(byName[s.Name].ID, db.StatusBlocked); err != nil {
@@ -316,13 +332,32 @@ func Create(database *db.DB, opts Options) (*Result, error) {
 		byName[s.Name].Status = db.StatusBlocked
 	}
 	if opts.Execute {
-		if err := database.UpdateTaskStatus(root.ID, db.StatusQueued); err != nil {
-			return nil, fmt.Errorf("queue %s step: %w", rootName, err)
+		for _, r := range roots {
+			if err := database.UpdateTaskStatus(byName[r.Name].ID, db.StatusQueued); err != nil {
+				return nil, fmt.Errorf("queue %s step: %w", r.Name, err)
+			}
+			byName[r.Name].Status = db.StatusQueued
 		}
-		root.Status = db.StatusQueued
 	}
 
 	return &Result{Definition: def, Branch: branch, Tasks: tasks}, nil
+}
+
+// ensureSharedBranch creates the workflow branch on the project's origin remote
+// (from the project's current HEAD) so that several parallel root steps can all
+// check it out at once. A branch that already exists is fine.
+func ensureSharedBranch(projectDir, branch string) error {
+	if strings.TrimSpace(projectDir) == "" {
+		return fmt.Errorf("project directory not found")
+	}
+	cmd := exec.Command("git", "-C", projectDir, "push", "origin", "HEAD:refs/heads/"+branch)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		if strings.Contains(string(out), "already exists") {
+			return nil
+		}
+		return fmt.Errorf("git push %s: %v: %s", branch, err, strings.TrimSpace(string(out)))
+	}
+	return nil
 }
 
 // projectDirFor returns a project's on-disk path (used to find its

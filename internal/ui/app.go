@@ -48,7 +48,6 @@ const (
 	ViewRetry
 	ViewAttachments
 	ViewChangeStatus
-	ViewWorkflowConfig
 	ViewCommandPalette
 	ViewProjectDetectConfirm // Offer to create a project for the current git repo
 	ViewWelcome              // first-run fork: set up a project vs start a task
@@ -77,7 +76,6 @@ type KeyMap struct {
 	Help               key.Binding
 	Quit               key.Binding
 	ChangeStatus       key.Binding
-	WorkflowConfig     key.Binding
 	CommandPalette     key.Binding
 	ToggleDangerous    key.Binding
 	QueueDangerous     key.Binding
@@ -203,10 +201,6 @@ func DefaultKeyMap() KeyMap {
 		ChangeStatus: key.NewBinding(
 			key.WithKeys("S"),
 			key.WithHelp("S", "status"),
-		),
-		WorkflowConfig: key.NewBinding(
-			key.WithKeys("W"),
-			key.WithHelp("W", "workflow config"),
 		),
 		CommandPalette: key.NewBinding(
 			key.WithKeys("p", "ctrl+p"),
@@ -487,7 +481,6 @@ type AppModel struct {
 
 	// Change status view state
 	changeStatusForm        *huh.Form
-	workflowConfigView      *WorkflowConfigModel
 	changeStatusValue       string
 	pendingChangeStatusTask *db.Task
 
@@ -801,9 +794,6 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if m.currentView == ViewChangeStatus && m.changeStatusForm != nil {
 			return m.updateChangeStatus(msg)
-		}
-		if m.currentView == ViewWorkflowConfig && m.workflowConfigView != nil {
-			return m.updateWorkflowConfig(msg)
 		}
 		if m.currentView == ViewCommandPalette && m.commandPaletteView != nil {
 			return m.updateCommandPalette(msg)
@@ -1615,8 +1605,6 @@ func (m *AppModel) View() string {
 		}
 	case ViewChangeStatus:
 		return m.viewChangeStatus()
-	case ViewWorkflowConfig:
-		return m.viewWorkflowConfig()
 	case ViewCommandPalette:
 		if m.commandPaletteView != nil {
 			return m.commandPaletteView.View()
@@ -2087,9 +2075,6 @@ func (m *AppModel) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if task := m.kanban.SelectedTask(); task != nil {
 			return m.showChangeStatus(task)
 		}
-
-	case key.Matches(msg, m.keys.WorkflowConfig):
-		return m.showWorkflowConfig()
 
 	case key.Matches(msg, m.keys.Help):
 		m.help.ShowAll = !m.help.ShowAll
@@ -2572,9 +2557,6 @@ func (m *AppModel) updateDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 	if key.Matches(keyMsg, m.keys.ChangeStatus) && m.selectedTask != nil {
 		return m.showChangeStatus(m.selectedTask)
-	}
-	if key.Matches(keyMsg, m.keys.WorkflowConfig) {
-		return m.showWorkflowConfig()
 	}
 	if key.Matches(keyMsg, m.keys.TogglePin) && m.selectedTask != nil {
 		return m, m.toggleTaskPinned(m.selectedTask.ID)
@@ -3697,64 +3679,6 @@ func (m *AppModel) viewChangeStatus() string {
 		Height(m.height).
 		Align(lipgloss.Center, lipgloss.Center).
 		Render(modalContent)
-}
-
-// showWorkflowConfig opens the per-project workflow configuration modal — one
-// row per step with an executor/model selector, prefilled with the project's
-// current effective config and saved back via pipeline.SaveConfig.
-func (m *AppModel) showWorkflowConfig() (tea.Model, tea.Cmd) {
-	project := ""
-	if m.kanban != nil {
-		if t := m.kanban.SelectedTask(); t != nil {
-			project = t.Project
-		}
-	}
-	if project == "" && m.selectedTask != nil {
-		project = m.selectedTask.Project
-	}
-	if project == "" {
-		project, _ = m.db.GetSetting("last_used_project")
-	}
-	if project == "" {
-		project = "personal"
-	}
-
-	m.workflowConfigView = NewWorkflowConfigModel(m.db, project, m.availableExecutors, m.width, m.height)
-	m.previousView = m.currentView
-	m.currentView = ViewWorkflowConfig
-	return m, m.workflowConfigView.Init()
-}
-
-func (m *AppModel) updateWorkflowConfig(msg tea.Msg) (tea.Model, tea.Cmd) {
-	view, cmd := m.workflowConfigView.Update(msg)
-	m.workflowConfigView = view
-
-	if m.workflowConfigView.cancelled {
-		m.currentView = m.previousView
-		m.workflowConfigView = nil
-		return m, nil
-	}
-	if m.workflowConfigView.saved {
-		def, _ := pipeline.Get(pipeline.DefaultDefinition)
-		project := m.workflowConfigView.project
-		if err := pipeline.SaveConfig(m.db, project, def.Name, m.workflowConfigView.Config()); err != nil {
-			m.err = err
-		} else {
-			m.notification = fmt.Sprintf("%s Saved workflow config for %s", IconDone(), project)
-			m.notifyUntil = time.Now().Add(5 * time.Second)
-		}
-		m.currentView = m.previousView
-		m.workflowConfigView = nil
-		return m, nil
-	}
-	return m, cmd
-}
-
-func (m *AppModel) viewWorkflowConfig() string {
-	if m.workflowConfigView == nil {
-		return ""
-	}
-	return m.workflowConfigView.View()
 }
 
 func (m *AppModel) updateChangeStatus(msg tea.Msg) (tea.Model, tea.Cmd) {

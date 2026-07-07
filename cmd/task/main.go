@@ -827,18 +827,17 @@ The default 'plan-code-review' workflow runs five steps on one branch:
   Review B (Claude / Sonnet)  } two independent reviewers, in parallel
   Collect  (Claude / Sonnet) — merges reviews, applies fixes, opens the PR
 
-Each step's executor and model are configurable per project and persisted, so you
-set them once (e.g. "Review B runs on codex here") and every workflow in that
-project uses your choices. See 'task pipeline config'.
+Workflows are defined in YAML files you can edit; define your own (add a QA step,
+a different shape) with 'task pipeline new "<describe it>"' or 'task pipeline edit'.
 
 Each step commits and pushes the shared branch, so the workflow needs a project
 that uses git worktrees and has a remote to push to.
 
 Examples:
   task pipeline "Add rate limiting to the API" --project myapp
-  task pipeline "Refactor the auth module" -p myapp --permission-mode dangerous
-  task pipeline config -p myapp --set "Review B=codex"  # configure steps
-  task pipeline --list  # show available pipeline definitions`,
+  task pipeline "Refactor the auth module" -p myapp --definition my-workflow
+  task pipeline new "plan, build, security review + QA in parallel, then finalize"
+  task pipeline --list  # show available workflows`,
 		Args: cobra.MaximumNArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
 			listDefs, _ := cmd.Flags().GetBool("list")
@@ -981,132 +980,6 @@ Examples:
 		return pipeline.DefinitionNames(), cobra.ShellCompDirectiveNoFileComp
 	})
 
-	// Pipeline config subcommand - view/set per-project step executors & models
-	pipelineConfigCmd := &cobra.Command{
-		Use:   "config",
-		Short: "View or set the per-project executor/model for each workflow step",
-		Long: `Configure which executor and model each workflow step runs on, per project.
-Set it once for a project and every workflow there defaults to your choices.
-
-With no --set/--reset flags, prints the project's current configuration.
-
-Examples:
-  task pipeline config -p myapp                            # show current config
-  task pipeline config -p myapp --set "Review B=codex"     # cross-executor review
-  task pipeline config -p myapp --set "Plan=claude/opus" --set "Code=claude/sonnet"
-  task pipeline config -p myapp --reset                    # revert to built-in defaults`,
-		Run: func(cmd *cobra.Command, args []string) {
-			project, _ := cmd.Flags().GetString("project")
-			definition, _ := cmd.Flags().GetString("definition")
-			sets, _ := cmd.Flags().GetStringArray("set")
-			reset, _ := cmd.Flags().GetBool("reset")
-			outputJSON, _ := cmd.Flags().GetBool("json")
-
-			database, err := openTaskDB(db.DefaultPath())
-			if err != nil {
-				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
-				os.Exit(1)
-			}
-			defer database.Close()
-
-			if project == "" {
-				if cwd, err := os.Getwd(); err == nil {
-					if p, err := database.GetProjectByPath(cwd); err == nil && p != nil {
-						project = p.Name
-					}
-				}
-			}
-			if project == "" {
-				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: could not determine project; pass --project"))
-				os.Exit(1)
-			}
-
-			def, ok := pipeline.Get(definition)
-			if !ok {
-				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: unknown workflow definition "+definition))
-				os.Exit(1)
-			}
-
-			if reset {
-				if err := pipeline.ClearConfig(database, project, def.Name); err != nil {
-					fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
-					os.Exit(1)
-				}
-				fmt.Println(successStyle.Render(fmt.Sprintf("Reset %s workflow config for %s to defaults", def.Name, project)))
-			}
-
-			if len(sets) > 0 {
-				// Start from the current effective config so partial --set edits merge.
-				cfg := pipeline.EffectiveConfig(database, project, def)
-				byName := map[string]int{}
-				for i, c := range cfg {
-					byName[strings.ToLower(c.Name)] = i
-				}
-				validExecutors := map[string]bool{
-					db.ExecutorClaude: true, db.ExecutorCodex: true, db.ExecutorGemini: true,
-					db.ExecutorPi: true, db.ExecutorOpenCode: true, db.ExecutorOpenClaw: true,
-				}
-				for _, s := range sets {
-					name, exec, model, perr := parseStepSet(s)
-					if perr != nil {
-						fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+perr.Error()))
-						os.Exit(1)
-					}
-					idx, found := byName[strings.ToLower(name)]
-					if !found {
-						fmt.Fprintln(os.Stderr, errorStyle.Render(fmt.Sprintf("Error: no step %q in %s (steps: %s)", name, def.Name, stepNames(def))))
-						os.Exit(1)
-					}
-					if !validExecutors[exec] {
-						fmt.Fprintln(os.Stderr, errorStyle.Render("Error: invalid executor "+exec))
-						os.Exit(1)
-					}
-					cfg[idx].Executor = exec
-					cfg[idx].Model = model
-				}
-				if err := pipeline.SaveConfig(database, project, def.Name, cfg); err != nil {
-					fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
-					os.Exit(1)
-				}
-			}
-
-			// Print the resulting effective config.
-			cfg := pipeline.EffectiveConfig(database, project, def)
-			configured := pipeline.IsConfigured(database, project, def.Name)
-			if outputJSON {
-				out := map[string]interface{}{
-					"project":    project,
-					"definition": def.Name,
-					"configured": configured,
-					"steps":      cfg,
-				}
-				jsonBytes, _ := json.Marshal(out)
-				fmt.Println(string(jsonBytes))
-				return
-			}
-			origin := "defaults"
-			if configured {
-				origin = "configured"
-			}
-			fmt.Println(successStyle.Render(fmt.Sprintf("%s workflow for %s (%s)", def.Name, project, origin)))
-			for _, c := range cfg {
-				model := c.Model
-				if model == "" {
-					model = "default"
-				}
-				fmt.Printf("  %-9s %s/%s\n", c.Name, c.Executor, model)
-			}
-			fmt.Println(dimStyle.Render("Set with: task pipeline config -p " + project + " --set \"Review B=codex\""))
-		},
-	}
-	pipelineConfigCmd.Flags().StringP("project", "p", "", "Project name (auto-detected from cwd if not specified)")
-	pipelineConfigCmd.Flags().StringP("definition", "d", pipeline.DefaultDefinition, "Workflow definition to configure")
-	pipelineConfigCmd.Flags().StringArray("set", nil, "Set a step executor/model, e.g. \"Review B=codex\" or \"Plan=claude/opus\" (repeatable)")
-	pipelineConfigCmd.Flags().Bool("reset", false, "Clear saved config and revert to built-in defaults")
-	pipelineConfigCmd.Flags().Bool("json", false, "Output in JSON format")
-	pipelineConfigCmd.RegisterFlagCompletionFunc("project", completeFlagProjects)
-	pipelineCmd.AddCommand(pipelineConfigCmd)
-
 	// Pipeline new subcommand - author a custom workflow from a free-text description
 	pipelineNewCmd := &cobra.Command{
 		Use:   "new [description]",
@@ -1195,6 +1068,62 @@ Examples:
 	pipelineNewCmd.Flags().String("name", "", "Override the generated workflow name")
 	pipelineNewCmd.Flags().Bool("print", false, "Print the YAML without saving")
 	pipelineCmd.AddCommand(pipelineNewCmd)
+
+	// Pipeline edit subcommand - write a workflow to a YAML file for editing
+	pipelineEditCmd := &cobra.Command{
+		Use:   "edit [name]",
+		Short: "Write a workflow to a YAML file you can edit (ejects the built-in)",
+		Long: `Workflows are configured by editing their YAML file. This writes the named
+workflow (default: ` + pipeline.DefaultDefinition + `) to the workflows directory so you can
+change models, prompts, or steps by hand. A custom file shadows the built-in of
+the same name.
+
+Examples:
+  task pipeline edit                       # eject the default workflow to edit
+  task pipeline edit plan-code-review      # same, explicit
+  task pipeline edit --print               # print the YAML instead of writing it`,
+		Args: cobra.MaximumNArgs(1),
+		Run: func(cmd *cobra.Command, args []string) {
+			name := pipeline.DefaultDefinition
+			if len(args) > 0 {
+				name = args[0]
+			}
+			printOnly, _ := cmd.Flags().GetBool("print")
+
+			def, ok := pipeline.Get(name)
+			if !ok {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: unknown workflow "+name))
+				os.Exit(1)
+			}
+			yamlBytes, err := pipeline.Marshal(def)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+			if printOnly {
+				fmt.Print(string(yamlBytes))
+				return
+			}
+			dir := pipeline.WorkflowsDir()
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+			path := filepath.Join(dir, def.Name+".yaml")
+			if _, statErr := os.Stat(path); statErr == nil {
+				fmt.Println(dimStyle.Render("Already exists — edit it: " + path))
+				return
+			}
+			if err := os.WriteFile(path, yamlBytes, 0o644); err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+			fmt.Println(successStyle.Render("Wrote " + def.Name + " to " + path))
+			fmt.Println(dimStyle.Render("Edit it, then run: task pipeline \"<goal>\" --definition " + def.Name))
+		},
+	}
+	pipelineEditCmd.Flags().Bool("print", false, "Print the YAML instead of writing a file")
+	pipelineCmd.AddCommand(pipelineEditCmd)
 
 	rootCmd.AddCommand(pipelineCmd)
 
@@ -5257,30 +5186,6 @@ func formatLogEntry(entry map[string]interface{}) string {
 // in CLI input. This allows users to enter multi-line text from the command line.
 func unescapeNewlines(s string) string {
 	return strings.ReplaceAll(s, "\\n", "\n")
-}
-
-// parseStepSet parses a "Step=executor[/model]" workflow-config assignment.
-func parseStepSet(s string) (name, executor, model string, err error) {
-	parts := strings.SplitN(s, "=", 2)
-	if len(parts) != 2 || strings.TrimSpace(parts[0]) == "" || strings.TrimSpace(parts[1]) == "" {
-		return "", "", "", fmt.Errorf("invalid --set %q (want \"Step=executor[/model]\")", s)
-	}
-	name = strings.TrimSpace(parts[0])
-	em := strings.SplitN(strings.TrimSpace(parts[1]), "/", 2)
-	executor = strings.ToLower(strings.TrimSpace(em[0]))
-	if len(em) == 2 {
-		model = strings.TrimSpace(em[1])
-	}
-	return name, executor, model, nil
-}
-
-// stepNames returns a definition's step names joined for error messages.
-func stepNames(def pipeline.Definition) string {
-	names := make([]string, len(def.Steps))
-	for i, s := range def.Steps {
-		names[i] = s.Name
-	}
-	return strings.Join(names, ", ")
 }
 
 // truncate shortens a string to maxLen, adding ellipsis if needed.

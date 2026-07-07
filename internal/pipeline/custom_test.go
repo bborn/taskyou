@@ -58,7 +58,6 @@ func TestParseDefinitionRejectsInvalid(t *testing.T) {
 	cases := map[string]string{
 		"no name":     "steps:\n  - name: A\n    prompt: x\n",
 		"no prompt":   "name: d\nsteps:\n  - name: A\n",
-		"two roots":   "name: d\nsteps:\n  - name: A\n    prompt: x\n  - name: B\n    prompt: y\n",
 		"unknown dep": "name: d\nsteps:\n  - name: A\n    prompt: x\n  - name: B\n    deps: [Z]\n    prompt: y\n",
 	}
 	for name, y := range cases {
@@ -161,6 +160,43 @@ func TestCreateHonorsCustomWorkflow(t *testing.T) {
 	// The QA step's configured executor (codex) flows through.
 	if got := taskByStep(res, "QA").Executor; got != db.ExecutorCodex {
 		t.Errorf("QA executor = %q, want codex", got)
+	}
+}
+
+const multiRootYAML = `
+name: three-spikes
+description: try three approaches at once, then pick and build
+steps:
+  - name: Spike A
+    prompt: Approach A to {{goal}}.
+  - name: Spike B
+    prompt: Approach B to {{goal}}.
+  - name: Spike C
+    prompt: Approach C to {{goal}}.
+  - name: Pick
+    deps: [Spike A, Spike B, Spike C]
+    prompt: Pick the best approach and build it.
+`
+
+func TestMultiRootWorkflow(t *testing.T) {
+	def, err := ParseDefinition([]byte(multiRootYAML))
+	if err != nil {
+		t.Fatalf("ParseDefinition (multi-root should be valid): %v", err)
+	}
+	if len(def.Roots()) != 3 {
+		t.Fatalf("got %d roots, want 3", len(def.Roots()))
+	}
+	// Each parallel root pushes to its own branch (they run at once).
+	spike := effectiveInstruction(def, "Spike A")
+	if !strings.Contains(spike, "{{branch}}-spike-a") || !strings.Contains(spike, "Do NOT open a pull request") {
+		t.Errorf("parallel root handoff wrong:\n%s", spike)
+	}
+	// The join reads all three root branches and (as sink) opens the PR.
+	pick := effectiveInstruction(def, "Pick")
+	for _, want := range []string{"{{branch}}-spike-a", "{{branch}}-spike-b", "{{branch}}-spike-c", "gh pr create"} {
+		if !strings.Contains(pick, want) {
+			t.Errorf("Pick handoff missing %q:\n%s", want, pick)
+		}
 	}
 }
 

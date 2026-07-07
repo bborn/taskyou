@@ -168,55 +168,6 @@ func TestCreateAutoAdvancesDAGWithParallelJoin(t *testing.T) {
 	}
 }
 
-func TestCreateHonorsSavedConfig(t *testing.T) {
-	database := testDB(t)
-	// Point one reviewer at codex for this project.
-	must(t, SaveConfig(database, "test", DefaultDefinition, []StepConfig{
-		{Name: "Review B", Executor: db.ExecutorCodex, Model: ""},
-	}))
-	res, err := Create(database, Options{Goal: "Do a thing", Project: "test", Execute: true})
-	if err != nil {
-		t.Fatalf("Create: %v", err)
-	}
-	if got := taskByStep(res, "Review B").Executor; got != db.ExecutorCodex {
-		t.Errorf("Review B executor = %q, want codex", got)
-	}
-	if got := taskByStep(res, "Review A").Executor; got != db.ExecutorClaude {
-		t.Errorf("Review A executor = %q, want claude default", got)
-	}
-}
-
-func TestConfigRoundTrip(t *testing.T) {
-	database := testDB(t)
-	def, _ := Get(DefaultDefinition)
-
-	if IsConfigured(database, "test", def.Name) {
-		t.Error("fresh project should not be configured")
-	}
-	got := EffectiveConfig(database, "test", def)
-	want := DefaultStepConfig(def)
-	if len(got) != len(want) || got[0].Executor != want[0].Executor {
-		t.Fatalf("default effective config mismatch")
-	}
-
-	must(t, SaveConfig(database, "test", def.Name, []StepConfig{{Name: "Review B", Executor: db.ExecutorGemini}}))
-	if !IsConfigured(database, "test", def.Name) {
-		t.Error("should report configured after save")
-	}
-	eff := EffectiveConfig(database, "test", def)
-	if eff[3].Executor != db.ExecutorGemini {
-		t.Errorf("Review B executor = %q, want gemini", eff[3].Executor)
-	}
-	if eff[0].Executor != db.ExecutorClaude {
-		t.Errorf("Plan executor = %q, want claude default", eff[0].Executor)
-	}
-
-	must(t, ClearConfig(database, "test", def.Name))
-	if IsConfigured(database, "test", def.Name) {
-		t.Error("should not be configured after clear")
-	}
-}
-
 func TestCreateValidation(t *testing.T) {
 	database := testDB(t)
 	cases := []struct {
@@ -241,7 +192,6 @@ func TestValidateRejectsMalformedDAGs(t *testing.T) {
 		"dup name":    {Name: "d", Steps: []Step{{Name: "A"}, {Name: "A"}}},
 		"unknown dep": {Name: "d", Steps: []Step{{Name: "A"}, {Name: "B", Deps: []string{"Z"}}}},
 		"no root":     {Name: "d", Steps: []Step{{Name: "A", Deps: []string{"B"}}, {Name: "B", Deps: []string{"A"}}}},
-		"two roots":   {Name: "d", Steps: []Step{{Name: "A"}, {Name: "B"}}},
 		"empty":       {Name: "d"},
 	}
 	for name, def := range cases {

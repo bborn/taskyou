@@ -44,10 +44,14 @@ func (d Definition) dependents(name string) []Step {
 	return out
 }
 
-// hasParallelPeer reports whether another step shares a dependency with this one
-// (i.e. they can run at the same time), so its output must go to its own branch
-// to avoid clobbering the peer.
+// hasParallelPeer reports whether the step runs at the same time as another step,
+// so its output must go to its own branch to avoid clobbering the peer. Two steps
+// are parallel if they share a dependency; multiple root steps (no deps) are all
+// parallel entry points.
 func (d Definition) hasParallelPeer(s Step) bool {
+	if len(s.Deps) == 0 {
+		return len(d.Roots()) > 1
+	}
 	depSet := make(map[string]bool, len(s.Deps))
 	for _, dep := range s.Deps {
 		depSet[dep] = true

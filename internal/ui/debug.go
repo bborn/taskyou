@@ -250,8 +250,6 @@ func viewName(v View) string {
 		return "attachments"
 	case ViewChangeStatus:
 		return "change_status"
-	case ViewWorkflowConfig:
-		return "workflow_config"
 	case ViewCommandPalette:
 		return "command_palette"
 	default:
