@@ -5,6 +5,8 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
+
+	"github.com/bborn/workflow/internal/config"
 )
 
 // PinnedNavItem is a single entry in the detail view's pinned quick-nav bar.
@@ -40,10 +42,10 @@ func (m *DetailModel) HasPinnedNav() bool {
 	return m.showPinnedNav()
 }
 
-// showPinnedNav decides whether the bar is worth showing. We hide it when there
-// is nowhere to hop to: no pinned tasks, or the only pinned task is the one
-// already open.
-func (m *DetailModel) showPinnedNav() bool {
+// pinnedNavAvailable reports whether there are pinned tasks worth showing a bar
+// for: at least one pinned task that isn't just the one already open. This
+// ignores the user's hide preference, so the 'T' toggle is still offered.
+func (m *DetailModel) pinnedNavAvailable() bool {
 	n := len(m.pinnedNav)
 	if n == 0 {
 		return false
@@ -52,6 +54,35 @@ func (m *DetailModel) showPinnedNav() bool {
 		return false
 	}
 	return true
+}
+
+// showPinnedNav decides whether the bar is actually rendered: there must be
+// somewhere to hop to, and the user must not have hidden it.
+func (m *DetailModel) showPinnedNav() bool {
+	return !m.pinnedNavHidden && m.pinnedNavAvailable()
+}
+
+// ToggleHelpExpanded flips the footer help row between the collapsed (primary
+// actions + '?') and expanded (all actions) states.
+func (m *DetailModel) ToggleHelpExpanded() {
+	m.helpExpanded = !m.helpExpanded
+	m.cachedViewOK = false
+}
+
+// TogglePinnedNav shows or hides the pinned quick-nav row and persists the
+// choice. Hiding/showing changes the reserved chrome height, so the viewport is
+// reflowed to match.
+func (m *DetailModel) TogglePinnedNav() {
+	m.pinnedNavHidden = !m.pinnedNavHidden
+	hidden := "false"
+	if m.pinnedNavHidden {
+		hidden = "true"
+	}
+	if m.database != nil {
+		m.database.SetSetting(config.SettingPinnedNavHidden, hidden)
+	}
+	m.reflowViewport()
+	m.cachedViewOK = false
 }
 
 // PinnedNavNextID returns the ID of the pinned task after the current one
@@ -101,16 +132,18 @@ func (m *DetailModel) renderPinnedNav() string {
 
 	label := lipgloss.NewStyle().Foreground(ColorMuted).Render(IconPin() + " ")
 
+	// The current pill used to be a saturated blue block, which read as too loud
+	// on an otherwise calm screen. Tone it down: a subtle neutral chip with a
+	// gentle accented (bold, primary-coloured) label marks "you are here", while
+	// the other pins are quiet unfilled text that recede.
 	currentStyle := lipgloss.NewStyle().
-		Background(ColorPrimary).
-		Foreground(lipgloss.Color("#FFFFFF")).
+		Background(lipgloss.Color("#2C313A")).
+		Foreground(ColorPrimary).
 		Bold(true)
 	restStyle := lipgloss.NewStyle().
-		Background(lipgloss.Color("#374151")).
-		Foreground(lipgloss.Color("#D1D5DB"))
+		Foreground(lipgloss.Color("#828997"))
 	dimStyle := lipgloss.NewStyle().
-		Background(lipgloss.Color("#374151")).
-		Foreground(lipgloss.Color("#6B7280"))
+		Foreground(ColorMuted)
 	moreStyle := lipgloss.NewStyle().Foreground(ColorMuted)
 
 	n := len(m.pinnedNav)

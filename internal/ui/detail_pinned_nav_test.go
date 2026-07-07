@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/bborn/workflow/internal/config"
 	"github.com/bborn/workflow/internal/db"
 )
 
@@ -127,5 +128,71 @@ func TestPinnedNavRendersInView(t *testing.T) {
 	// viewport clear.
 	if m.headerHeight() != 7 {
 		t.Errorf("headerHeight with nav = %d, want 7", m.headerHeight())
+	}
+}
+
+func TestTogglePinnedNavHidesAndPersists(t *testing.T) {
+	m := newNavDetailModel(t)
+	m.SetPinnedNav([]PinnedNavItem{{ID: 1, Title: "Current"}, {ID: 2, Title: "Other"}}, 1)
+
+	if !m.showPinnedNav() {
+		t.Fatal("precondition: bar should be visible")
+	}
+
+	m.TogglePinnedNav()
+	if m.showPinnedNav() {
+		t.Error("after toggle, the bar should be hidden")
+	}
+	// It's only hidden by preference — the content is still available, so the
+	// 'T' toggle remains offered.
+	if !m.pinnedNavAvailable() {
+		t.Error("pinnedNavAvailable should stay true while merely hidden")
+	}
+	// Hidden means it no longer reserves a chrome line.
+	if m.headerHeight() != 6 {
+		t.Errorf("headerHeight while hidden = %d, want 6", m.headerHeight())
+	}
+	// Preference persisted.
+	if v, _ := m.database.GetSetting(config.SettingPinnedNavHidden); v != "true" {
+		t.Errorf("expected persisted pinned_nav_hidden=true, got %q", v)
+	}
+
+	m.TogglePinnedNav()
+	if !m.showPinnedNav() {
+		t.Error("second toggle should show the bar again")
+	}
+	if v, _ := m.database.GetSetting(config.SettingPinnedNavHidden); v != "false" {
+		t.Errorf("expected persisted pinned_nav_hidden=false, got %q", v)
+	}
+}
+
+func TestHelpRowCollapsesBehindQuestionMark(t *testing.T) {
+	m := newNavDetailModel(t)
+	m.SetPinnedNav([]PinnedNavItem{{ID: 1, Title: "Current"}, {ID: 2, Title: "Other"}}, 1)
+	m.totalInColumn = 3 // enable prev/next hint
+
+	// Collapsed (default): primary actions + a "? more" affordance, but not the
+	// secondary ones like archive/delete or the pinned-row toggle.
+	collapsed := m.renderHelp()
+	if !strings.Contains(collapsed, "more") {
+		t.Errorf("collapsed help should advertise '? more', got:\n%s", collapsed)
+	}
+	for _, hidden := range []string{"archive", "delete", "hide pinned"} {
+		if strings.Contains(collapsed, hidden) {
+			t.Errorf("collapsed help should hide %q, got:\n%s", hidden, collapsed)
+		}
+	}
+	if !strings.Contains(collapsed, "edit") {
+		t.Errorf("collapsed help should keep primary action 'edit', got:\n%s", collapsed)
+	}
+
+	// Expanded: the secondary actions and the pinned-row toggle appear, and the
+	// affordance flips to "? less".
+	m.ToggleHelpExpanded()
+	expanded := m.renderHelp()
+	for _, shown := range []string{"archive", "delete", "hide pinned", "less"} {
+		if !strings.Contains(expanded, shown) {
+			t.Errorf("expanded help should include %q, got:\n%s", shown, expanded)
+		}
 	}
 }
