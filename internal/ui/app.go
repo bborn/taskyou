@@ -3177,30 +3177,13 @@ func (m *AppModel) buildProjectDetectForm() {
 		return
 	}
 
-	var desc strings.Builder
-	if m.detectedInferencePending {
-		desc.WriteString("✨ Inferring project details…\n\n")
-	}
-	desc.WriteString(fmt.Sprintf("This directory looks like a project.\n\nName: %s\n", project.Name))
-	if project.Aliases != "" {
-		desc.WriteString(fmt.Sprintf("Alias: %s\n", project.Aliases))
-	}
-	desc.WriteString(fmt.Sprintf("Path: %s\n", project.Path))
-	if m.detectedInstructionSource != "" {
-		desc.WriteString(fmt.Sprintf("Instructions: imported from %s\n", m.detectedInstructionSource))
-	} else if project.Instructions != "" {
-		desc.WriteString("Description: " + firstLine(project.Instructions) + "\n")
-	}
-	desc.WriteString(fmt.Sprintf("Worktrees: %v\n", project.UseWorktrees))
-	desc.WriteString("\nYou can edit any of this later in Settings.")
-
 	modalWidth := min(64, m.width-8)
 	m.projectDetectConfirm = huh.NewForm(
 		huh.NewGroup(
 			huh.NewConfirm().
 				Key("create_project").
-				Title("Create a TaskYou project for this repo?").
-				Description(desc.String()).
+				Title(projectDetectTitle(project.UseWorktrees)).
+				Description(projectDetectDescription(project, m.detectedInstructionSource, m.detectedInferencePending)).
 				Affirmative("Create Project").
 				Negative("Not Now").
 				Value(&m.projectDetectConfirmValue),
@@ -3328,10 +3311,17 @@ func (m *AppModel) createDetectedProject(project *db.Project) tea.Cmd {
 	// Refresh project color cache so the new project renders consistently.
 	LoadProjectColors(m.db)
 
-	m.notification = fmt.Sprintf("%s Created project \"%s\"", IconDone(), project.Name)
+	m.notification = fmt.Sprintf("%s Created project \"%s\" — describe your first task", IconDone(), project.Name)
 	m.notifyUntil = time.Now().Add(5 * time.Second)
 
-	return m.loadTasks()
+	// Momentum: setting up the project is only step one — the job is to run a
+	// task in it. Drop straight into the first-task form (pre-selected to this
+	// project via SetLastUsedProject above) instead of dead-ending on an empty
+	// board that just says "press n". esc from the form returns to the board.
+	m.newTaskForm = NewFormModel(m.db, m.width, m.height, project.Path, m.availableExecutors)
+	m.previousView = ViewDashboard
+	m.currentView = ViewNewTask
+	return tea.Batch(m.loadTasks(), m.newTaskForm.Init())
 }
 
 func (m *AppModel) showQuitConfirm() (tea.Model, tea.Cmd) {

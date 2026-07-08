@@ -121,4 +121,19 @@ func TestCreateDetectedProjectPersists(t *testing.T) {
 	if m.notification == "" {
 		t.Error("expected a success notification")
 	}
+
+	// Momentum: creating the project should carry the user straight into the
+	// first-task form (pre-selected to the new project), not a bare board.
+	if m.currentView != ViewNewTask {
+		t.Fatalf("expected ViewNewTask after creating project, got %v", m.currentView)
+	}
+	if m.newTaskForm == nil {
+		t.Fatal("expected a new-task form to be opened after project creation")
+	}
+	if m.newTaskForm.project != "myrepo" {
+		t.Errorf("expected first-task form pre-selected to myrepo, got %q", m.newTaskForm.project)
+	}
+	if m.previousView != ViewDashboard {
+		t.Errorf("expected esc from the form to return to the board, got previousView %v", m.previousView)
+	}
 }
