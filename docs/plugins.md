@@ -118,12 +118,19 @@ ty plugins list   # what's installed and which events each handles
 ty plugins dir    # the plugins directory path
 ```
 
-## Example
+## Examples
 
-A complete, copy-pasteable plugin lives at
-[`examples/plugins/desktop-notify/`](../examples/plugins/desktop-notify/):
+Complete, copy-pasteable plugins live in [`examples/plugins/`](../examples/plugins/):
+
+| Plugin | Kind | What it shows |
+|---|---|---|
+| [`desktop-notify`](../examples/plugins/desktop-notify/) | hooks + action | native notifications; a `test` action |
+| [`slack`](../examples/plugins/slack/) | hooks | webhook integration; bundled `config.env` |
+| [`worktree`](../examples/plugins/worktree/) | actions | task-scoped `diff` / `test` using `WORKTREE_PATH` |
 
 ```bash
 cp -R examples/plugins/desktop-notify ~/.config/task/plugins/
 ty plugins list
 ```
+
+For more, see the [plugin idea gallery](plugin-ideas.md).

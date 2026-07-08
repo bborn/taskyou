@@ -644,7 +644,9 @@ ty plugins list
 ```
 
 See [docs/plugins.md](docs/plugins.md) for the manifest format and the authoring
-guide.
+guide, [`examples/plugins/`](examples/plugins/) for ready-to-copy plugins
+(desktop-notify, slack, worktree), and [docs/plugin-ideas.md](docs/plugin-ideas.md)
+for a gallery of things to build.
 
 ## Configuration
 

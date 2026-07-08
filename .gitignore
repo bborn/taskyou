@@ -57,3 +57,6 @@ ty-chrome.zip
 .pr-body.md
 .pr-comment.md
 .qacfg/
+
+# Plugin user config (copied from *.example.env)
+examples/plugins/**/config.env
