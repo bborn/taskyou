@@ -369,7 +369,25 @@ func (s *Server) handleToolCall(id interface{}, params *toolCallParams) {
 		// questions) and the daemon promotes them to 'done' once the PR merges/closes
 		// (see reconcileReviewTasks). Tasks with no PR (e.g. "move file X to Y") are
 		// genuinely complete the moment the agent signals it.
-		prNumber, prURL := s.lookupPR(task)
+		// A non-terminal workflow step must ADVANCE the DAG, not park for human
+		// review — only the terminal step (the one nothing depends on) opens a PR.
+		// The root step in particular owns the shared branch (branch_name set), which
+		// lookupPR would otherwise treat as "this task produced a PR to merge": it
+		// shells out to `gh` and can even match an unrelated PR, wrongly moving the
+		// step to 'blocked' and stalling the whole workflow at step one. So a workflow
+		// step that still has dependents skips the PR path entirely and is just 'done'.
+		nonTerminalStep := false
+		if pipeline.IsWorkflowTask(task) {
+			if deps, err := s.db.GetBlockedBy(task.ID); err == nil && len(deps) > 0 {
+				nonTerminalStep = true
+			}
+		}
+
+		var prNumber int
+		var prURL string
+		if !nonTerminalStep {
+			prNumber, prURL = s.lookupPR(task)
+		}
 		if prNumber > 0 {
 			if err := s.db.UpdateTaskStatus(s.taskID, db.StatusBlocked); err != nil {
 				s.sendError(id, -32603, fmt.Sprintf("Failed to move task to review: %v", err))
