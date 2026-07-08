@@ -381,6 +381,44 @@ func (e *Executor) reconcileReadyTasks() {
 	}
 }
 
+// reconcileFinishedWorkflowSteps recovers workflow steps that finished their work
+// (committed + pushed) but got parked in 'blocked' — because the agent couldn't
+// call taskyou_complete (its MCP tool was deferred behind ToolSearch) and the Stop
+// hook's auto-complete fired at a transient moment (e.g. a temp file briefly
+// dirtying the worktree). Those steps stall the whole DAG. This sweep marks any
+// such step 'done' once its state has settled, then advances the workflow. It
+// skips steps that asked a question (genuine needs-input) so it never advances past
+// one waiting on a human.
+func (e *Executor) reconcileFinishedWorkflowSteps() {
+	tasks, err := e.db.ListTasks(db.ListTasksOptions{Status: db.StatusBlocked, Tag: "pipeline", Limit: 500})
+	if err != nil {
+		e.logger.Error("Failed to list blocked pipeline tasks", "error", err)
+		return
+	}
+	for _, task := range tasks {
+		// Only steps that actually ran; leave un-started (DAG-waiting) ones to
+		// reconcileReadyTasks.
+		if task.StartedAt == nil || task.WorktreePath == "" {
+			continue
+		}
+		// Don't advance past a genuine needs-input question.
+		if hasQ, err := e.db.HasQuestionLog(task.ID); err != nil || hasQ {
+			continue
+		}
+		if !WorkflowStepFinished(task.WorktreePath) {
+			continue
+		}
+		if err := e.updateStatus(task.ID, db.StatusDone); err != nil {
+			e.logger.Error("Failed to auto-complete finished workflow step", "id", task.ID, "error", err)
+			continue
+		}
+		e.logLine(task.ID, "system", "Finished (work committed + pushed) but never signalled — auto-completed by sweep to advance the workflow")
+		e.hooks.OnStatusChange(task, db.StatusDone, "Auto-completed: work pushed")
+		e.teardownWorkflowStepSession(task)
+		e.logger.Info("Auto-completed finished workflow step", "id", task.ID, "title", task.Title)
+	}
+}
+
 // tmuxWindowExistsForTask reports whether a live executor tmux window exists for
 // the task in any daemon session. The executor runs inside a window named
 // "task-<id>" within a "task-daemon-*" session; if that window is gone, the
@@ -689,6 +727,37 @@ func GetClaudePIDFromPane(paneID string) int {
 
 // KillClaudeProcess terminates the Claude process for a task to free up memory.
 // This is called when a task is completed, closed, or deleted.
+// WorkflowStepFinished reports whether a workflow step has committed AND pushed its
+// work: its worktree is clean and HEAD matches the pushed remote-tracking ref. That
+// is the signal a step completed its handoff (per the composed step instructions),
+// used both by the Stop hook (auto-complete a step that finished but didn't call
+// taskyou_complete) and by the daemon's reconcile sweep (recover a step that was
+// blocked because the hook fired at a transient moment). Conservative: any doubt
+// returns false. Compares to refs/remotes/origin/<branch> rather than @{u} because
+// non-root step worktrees check out the shared branch without upstream tracking.
+func WorkflowStepFinished(worktreePath string) bool {
+	if worktreePath == "" {
+		return false
+	}
+	if out, err := exec.Command("git", "-C", worktreePath, "status", "--porcelain").Output(); err != nil || len(strings.TrimSpace(string(out))) != 0 {
+		return false
+	}
+	head, errH := exec.Command("git", "-C", worktreePath, "rev-parse", "HEAD").Output()
+	if errH != nil {
+		return false
+	}
+	branch, errB := exec.Command("git", "-C", worktreePath, "rev-parse", "--abbrev-ref", "HEAD").Output()
+	br := strings.TrimSpace(string(branch))
+	if errB != nil || br == "" || br == "HEAD" {
+		return false
+	}
+	remote, errR := exec.Command("git", "-C", worktreePath, "rev-parse", "refs/remotes/origin/"+br).Output()
+	if errR != nil {
+		return false
+	}
+	return strings.TrimSpace(string(head)) == strings.TrimSpace(string(remote))
+}
+
 // teardownWorkflowStepSession kills the executor process and tmux window for a
 // completed workflow step. Ordinary tasks keep their window for human review (the
 // 30-minute janitor cleans them up); a workflow step is unattended and its next
@@ -932,6 +1001,13 @@ func (e *Executor) worker(ctx context.Context) {
 			// one-shot ProcessCompletedBlocker flip was dropped).
 			if tickCount%readyTasksInterval == 0 {
 				e.reconcileReadyTasks()
+			}
+
+			// Safety net for workflow steps that finished (committed + pushed) but
+			// couldn't signal completion (deferred taskyou_complete / transient Stop
+			// hook miss): complete them so the DAG advances instead of stalling.
+			if tickCount%readyTasksInterval == 0 {
+				e.reconcileFinishedWorkflowSteps()
 			}
 
 			// Periodically refresh cached PR state for actively-watched tasks so

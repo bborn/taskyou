@@ -1194,6 +1194,18 @@ func (db *DB) AppendTaskLog(taskID int64, lineType, content string) error {
 	return nil
 }
 
+// HasQuestionLog reports whether the task ever recorded a needs-input question
+// (line_type "question"). The workflow "finished but couldn't signal" sweep uses
+// this to avoid auto-completing a step that is genuinely waiting on a human answer.
+func (db *DB) HasQuestionLog(taskID int64) (bool, error) {
+	var n int
+	err := db.QueryRow(`SELECT COUNT(*) FROM task_logs WHERE task_id = ? AND line_type = 'question'`, taskID).Scan(&n)
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
 // GetTaskLogs retrieves logs for a task.
 func (db *DB) GetTaskLogs(taskID int64, limit int) ([]*TaskLog, error) {
 	if limit <= 0 {

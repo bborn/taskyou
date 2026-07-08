@@ -4633,39 +4633,12 @@ func handleStopHook(database *db.DB, taskID int64, input *ClaudeHookInput) error
 	return nil
 }
 
-// workflowStepFinished reports whether a workflow step has committed AND pushed
-// its work: its worktree is clean and HEAD matches the pushed remote-tracking ref.
-// That is the signal a step completed its handoff (per the composed step
-// instructions), used to distinguish "finished but forgot taskyou_complete"
-// (advance the DAG) from "stopped mid-work / to ask" (block). Conservative: any
-// doubt returns false.
+// workflowStepFinished reports whether a workflow step has committed AND pushed its
+// work (see executor.WorkflowStepFinished). Used by the Stop hook to advance a step
+// that finished but didn't call taskyou_complete; the daemon's sweep is the backstop
+// for when the hook fires at a transient moment.
 func workflowStepFinished(task *db.Task) bool {
-	wt := task.WorktreePath
-	if wt == "" {
-		return false
-	}
-	// Clean tree — everything committed.
-	if out, err := osexec.Command("git", "-C", wt, "status", "--porcelain").Output(); err != nil || len(strings.TrimSpace(string(out))) != 0 {
-		return false
-	}
-	head, errH := osexec.Command("git", "-C", wt, "rev-parse", "HEAD").Output()
-	if errH != nil {
-		return false
-	}
-	// Compare HEAD to the remote-tracking ref for this branch. `git push` updates
-	// refs/remotes/origin/<branch> even when the worktree branch has no upstream
-	// tracking configured — which non-root step worktrees don't, since they check
-	// out the shared branch without `-u`. (Using @{u} here would wrongly fail.)
-	branch, errB := osexec.Command("git", "-C", wt, "rev-parse", "--abbrev-ref", "HEAD").Output()
-	br := strings.TrimSpace(string(branch))
-	if errB != nil || br == "" || br == "HEAD" {
-		return false
-	}
-	remote, errR := osexec.Command("git", "-C", wt, "rev-parse", "refs/remotes/origin/"+br).Output()
-	if errR != nil {
-		return false
-	}
-	return strings.TrimSpace(string(head)) == strings.TrimSpace(string(remote))
+	return executor.WorkflowStepFinished(task.WorktreePath)
 }
 
 // handlePreToolUseHook handles PreToolUse hooks from Claude (before tool execution).

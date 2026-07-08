@@ -461,3 +461,28 @@ func statusOfTask(t *testing.T, db *DB, id int64) string {
 	}
 	return tk.Status
 }
+
+// TestHasQuestionLog: the needs-input guard for the finished-step sweep.
+func TestHasQuestionLog(t *testing.T) {
+	db, cleanup := setupDepsTestDB(t)
+	defer cleanup()
+	tk := &Task{Title: "step", Status: StatusBlocked}
+	if err := db.CreateTask(tk); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := db.HasQuestionLog(tk.ID); got {
+		t.Error("no question logged yet, want false")
+	}
+	if err := db.AppendTaskLog(tk.ID, "system", "did some work"); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := db.HasQuestionLog(tk.ID); got {
+		t.Error("only a system log, want false")
+	}
+	if err := db.AppendTaskLog(tk.ID, "question", "which approach?"); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := db.HasQuestionLog(tk.ID); !got {
+		t.Error("a question was logged, want true")
+	}
+}
