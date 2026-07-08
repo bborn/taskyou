@@ -101,7 +101,7 @@ func TestToolsList(t *testing.T) {
 		"taskyou_needs_input":         false,
 		"taskyou_show_task":           false,
 		"taskyou_create_task":         false,
-		"taskyou_create_pipeline":     false,
+		"taskyou_create_workflow":     false,
 		"taskyou_list_tasks":          false,
 		"taskyou_get_project_context": false,
 		"taskyou_set_project_context": false,
