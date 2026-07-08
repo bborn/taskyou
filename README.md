@@ -149,6 +149,32 @@ ty pipeline edit                   # writes ~/.config/task/workflows/plan-code-r
 
 Custom workflows appear in `ty pipeline --list`, the `--definition` flag, and the TUI new-task selector automatically. Configuration lives entirely in these files — edit them by hand any time.
 
+### Kinds: one thing, whether it fans out or not
+
+A workflow file and a **task type** are the same shape — a *kind*. A kind is one definition with `instructions` and/or `steps`:
+
+- **No `steps`** → a **single task**: its `instructions` are the prompt preset (exactly what a task type is).
+- **With `steps`** → a **workflow**: a DAG, as above.
+
+Picking a kind is one action; whether it expands is just the presence of `steps`. A step can also **run another kind** by name — and if that kind is itself a workflow, its steps are inlined at build time, so you compose big flows from small ones:
+
+```yaml
+# ~/.config/task/workflows/quickfix.yaml — a single-task kind (== a task type)
+name: quickfix
+instructions: Fix the thing in the goal. Keep the change minimal and focused.
+```
+
+```yaml
+# ~/.config/task/workflows/ship.yaml — composes other kinds
+name: ship
+steps:
+  - {name: Build,  kind: plan-code-review}          # a whole workflow, inlined
+  - {name: QA,     kind: quickfix, deps: [Build]}    # a single-task kind → sets the step's type
+  - {name: Deploy, prompt: "Deploy it.", deps: [QA]}
+```
+
+A step's `kind:` sets that step's task **type**, so the kind's instructions apply. Names resolve by convention: a YAML/built-in kind wins, otherwise a task type of that name is used — so `code`, `writing`, or any custom type is referenceable from a step with no extra wiring. Cycles and runaway nesting are rejected at build time.
+
 ## Project Context
 
 TaskYou implements **intelligent codebase caching** to make AI agents dramatically more efficient across multiple tasks in the same project.
