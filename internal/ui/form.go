@@ -21,10 +21,38 @@ import (
 )
 
 // pipelineOptions returns the selectable pipeline choices for the form. The
-// first entry is "" — an ordinary single task — followed by each built-in
-// pipeline definition (e.g. plan-code-review).
-func pipelineOptions() []string {
-	return append([]string{""}, pipeline.DefinitionNames()...)
+// buildKinds returns the one unified "kind" list for the form's selector: "" (no
+// type), then task types, then — for a new task — workflow kinds. Picking a type
+// makes a single task; picking a workflow kind fans it out. Editing an existing
+// task only offers types (a task can't become a workflow after the fact).
+func buildKinds(database *db.DB, includeWorkflows bool) []string {
+	kinds := []string{""}
+	seen := map[string]bool{"": true}
+	if database != nil {
+		if types, err := database.ListTaskTypes(); err == nil {
+			for _, t := range types {
+				if !seen[t.Name] {
+					kinds = append(kinds, t.Name)
+					seen[t.Name] = true
+				}
+			}
+		}
+	}
+	if len(kinds) == 1 { // no types loaded — fall back to the built-in three
+		for _, t := range []string{"code", "writing", "thinking"} {
+			kinds = append(kinds, t)
+			seen[t] = true
+		}
+	}
+	if includeWorkflows {
+		for _, name := range pipeline.DefinitionNames() {
+			if !seen[name] {
+				kinds = append(kinds, name)
+				seen[name] = true
+			}
+		}
+	}
+	return kinds
 }
 
 // FormField represents the currently focused field.
@@ -40,7 +68,6 @@ const (
 	FieldEffort
 	FieldModel
 	FieldPermission
-	FieldPipeline
 	FieldCount
 )
 
@@ -70,9 +97,9 @@ type FormModel struct {
 	projectSearchQuery string   // current search query
 	projectFiltered    []string // filtered project list (fuzzy matched)
 	projectFilteredIdx int      // selected index in filtered list
-	taskType           string
+	taskType           string   // Selected kind: a task type (single task) or a workflow name.
 	typeIdx            int
-	types              []string
+	types              []string // Unified kind list: "" (none), task types, then workflow kinds.
 	executor           string // "claude", "codex", "gemini"
 	executorIdx        int
 	executors          []string
@@ -89,9 +116,6 @@ type FormModel struct {
 	permissionIdx      int
 	permissionModes    []string // Selectable permission modes
 	permissionTouched  bool     // user picked a permission explicitly; stop following project default
-	pipeline           string   // Pipeline definition ("" = a single ordinary task)
-	pipelineIdx        int
-	pipelines          []string // Selectable pipeline options; "" (first) means "single task"
 	queue              bool
 	attachments        []string // Parsed file paths
 	attachmentCursor   int      // Index of the currently selected attachment chip
@@ -299,7 +323,6 @@ func NewEditFormModel(database *db.DB, task *db.Task, width, height int, availab
 		permissionMode:      task.EffectivePermissionMode(),
 		permissionModes:     permissionModeOptions(),
 		permissionIdx:       permissionIndexFor(permissionModeOptions(), task.EffectivePermissionMode()),
-		pipelines:           pipelineOptions(), // Field hidden while editing; kept non-nil for safety.
 		permissionTouched:   true,              // editing: keep the task's existing mode unless changed
 		isEdit:              true,
 		prURL:               task.PRURL,
@@ -312,21 +335,9 @@ func NewEditFormModel(database *db.DB, task *db.Task, width, height int, availab
 		modal:               true, // Edit form is shown as a centered modal
 	}
 
-	// Load task types from database
-	m.types = []string{""}
-	if database != nil {
-		if types, err := database.ListTaskTypes(); err == nil {
-			for _, t := range types {
-				m.types = append(m.types, t.Name)
-			}
-		}
-	}
-	// Fallback if no types loaded
-	if len(m.types) == 1 {
-		m.types = []string{"", "code", "writing", "thinking"}
-	}
-
-	// Set type index
+	// Editing offers types only — a task can't become a workflow after creation.
+	m.types = buildKinds(database, false)
+	// Set kind index to the task's current type.
 	for i, t := range m.types {
 		if t == task.Type {
 			m.typeIdx = i
@@ -424,23 +435,11 @@ func NewFormModel(database *db.DB, width, height int, workingDir string, availab
 		effortLevels:        effortLevelOptions(), // Defaults to "" (Claude's global default)
 		models:              modelOptions(),       // Defaults to "" (Claude's global default)
 		permissionModes:     permissionModeOptions(),
-		pipelines:           pipelineOptions(), // Defaults to "" (a single ordinary task)
-		showAdvanced:        showAdvanced,      // Load from user preference
+		showAdvanced:        showAdvanced, // Load from user preference
 	}
 
-	// Load task types from database
-	m.types = []string{""}
-	if database != nil {
-		if types, err := database.ListTaskTypes(); err == nil {
-			for _, t := range types {
-				m.types = append(m.types, t.Name)
-			}
-		}
-	}
-	// Fallback if no types loaded
-	if len(m.types) == 1 {
-		m.types = []string{"", "code", "writing", "thinking"}
-	}
+	// One unified "kind" list: types + workflow kinds (new tasks can pick either).
+	m.types = buildKinds(database, true)
 
 	// Load projects
 	m.projects = []string{}
@@ -880,11 +879,6 @@ func (m *FormModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.permissionTouched = true
 				return m, nil
 			}
-			if m.focused == FieldPipeline && len(m.pipelines) > 0 {
-				m.pipelineIdx = (m.pipelineIdx - 1 + len(m.pipelines)) % len(m.pipelines)
-				m.pipeline = m.pipelines[m.pipelineIdx]
-				return m, nil
-			}
 
 		case "right":
 			if m.handleAttachmentNavigation(1) {
@@ -927,11 +921,6 @@ func (m *FormModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.permissionIdx = (m.permissionIdx + 1) % len(m.permissionModes)
 				m.permissionMode = m.permissionModes[m.permissionIdx]
 				m.permissionTouched = true
-				return m, nil
-			}
-			if m.focused == FieldPipeline && len(m.pipelines) > 0 {
-				m.pipelineIdx = (m.pipelineIdx + 1) % len(m.pipelines)
-				m.pipeline = m.pipelines[m.pipelineIdx]
 				return m, nil
 			}
 
@@ -1467,11 +1456,6 @@ func (m *FormModel) isFieldVisible(field FormField) bool {
 		// only shown in advanced mode and only when the Claude executor is selected.
 		return m.showAdvanced && m.executor == db.ExecutorClaude
 	}
-	if field == FieldPipeline {
-		// A pipeline turns creation into a multi-phase chain; it only makes sense
-		// for a brand-new task, never when editing an existing one.
-		return m.showAdvanced && !m.isEdit
-	}
 	if m.showAdvanced {
 		return true
 	}
@@ -1983,12 +1967,12 @@ func (m *FormModel) View() string {
 		}
 		b.WriteString("\n")
 
-		// Type selector
+		// Kind selector: one list of types + workflow kinds. A type makes a single
+		// task; a workflow kind fans out.
 		cursor = " "
 		if m.focused == FieldType {
 			cursor = cursorStyle.Render("▸")
 		}
-		// Build type labels from m.types (replace empty string with "none")
 		typeLabels := make([]string, len(m.types))
 		for i, t := range m.types {
 			if t == "" {
@@ -1997,8 +1981,11 @@ func (m *FormModel) View() string {
 				typeLabels[i] = t
 			}
 		}
-		b.WriteString(cursor + " " + labelStyle.Render("Type") + m.renderSelector(typeLabels, m.typeIdx, m.focused == FieldType, selectedStyle, optionStyle, dimStyle))
+		b.WriteString(cursor + " " + labelStyle.Render("Kind") + m.renderSelector(typeLabels, m.typeIdx, m.focused == FieldType, selectedStyle, optionStyle, dimStyle))
 		b.WriteString("\n")
+		if wf := m.Pipeline(); wf != "" {
+			b.WriteString("  " + dimStyle.Render("runs as a workflow — steps advance automatically on one branch") + "\n")
+		}
 
 		// Executor selector
 		cursor = " "
@@ -2054,29 +2041,6 @@ func (m *FormModel) View() string {
 			}
 			b.WriteString(cursor + " " + labelStyle.Render("Permission") + m.renderSelector(m.permissionModes, m.permissionIdx, m.focused == FieldPermission, selectedStyle, optionStyle, dimStyle))
 			b.WriteString("\n")
-		}
-
-		// Pipeline selector: turn creation into a multi-phase plan → code → review
-		// chain routed across models/executors. Only shown for new tasks.
-		if m.isFieldVisible(FieldPipeline) {
-			cursor = " "
-			if m.focused == FieldPipeline {
-				cursor = cursorStyle.Render("▸")
-			}
-			pipelineLabels := make([]string, len(m.pipelines))
-			for i, l := range m.pipelines {
-				if l == "" {
-					pipelineLabels[i] = "single task"
-				} else {
-					pipelineLabels[i] = l
-				}
-			}
-			b.WriteString(cursor + " " + labelStyle.Render("Workflow") + m.renderSelector(pipelineLabels, m.pipelineIdx, m.focused == FieldPipeline, selectedStyle, optionStyle, dimStyle))
-			b.WriteString("\n")
-			if m.pipeline != "" {
-				hint := "  " + dimStyle.Render("runs as a workflow: plan → code → parallel review → collect, on one branch")
-				b.WriteString(hint + "\n")
-			}
 		}
 
 		// Trailing gap to separate the selector list from the help line.
@@ -2593,12 +2557,19 @@ func (m *FormModel) GetAttachments() []string {
 	return m.attachments
 }
 
-// Pipeline returns the selected pipeline definition name, or "" when the form is
-// creating an ordinary single task. When non-empty, the caller should build a
-// pipeline (see internal/pipeline) using the form's task as the goal carrier
-// rather than creating a single task.
+// Pipeline returns the selected kind's name when it is a workflow (has steps), or
+// "" when the selected kind is a plain type — i.e. an ordinary single task. When
+// non-empty, the caller builds a workflow (see internal/pipeline) using the form's
+// task as the goal carrier rather than creating a single task.
 func (m *FormModel) Pipeline() string {
-	return m.pipeline
+	name := strings.TrimSpace(m.taskType)
+	if name == "" {
+		return ""
+	}
+	if def, ok := pipeline.Get(name); ok && !def.IsSingle() {
+		return name
+	}
+	return ""
 }
 
 // GetAttachment returns the first attachment for backwards compatibility.

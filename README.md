@@ -117,7 +117,7 @@ ty pipeline "Add rate limiting to the API" --project myapp
 ty pipeline --list                 # show available workflows
 ty pipeline "..." --no-execute     # stage without starting
 
-# TUI: in the new-task form (n), pick a workflow in the "Workflow" selector.
+# TUI: in the new-task form (n), pick it in the "Kind" selector (types and workflows in one list).
 ```
 
 On the board, a workflow shows as a **single card** (`⇄ goal · Review ∥ · 3/5`) instead of one card per step. It needs a project that uses git worktrees and has a remote to push to.
