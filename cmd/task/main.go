@@ -855,11 +855,7 @@ Examples:
 						}
 						stepLabels = append(stepLabels, label)
 					}
-					origin := "built-in"
-					if d.Custom {
-						origin = "custom"
-					}
-					fmt.Printf("%s %s\n  %s\n  steps: %s\n", successStyle.Render(d.Name), dimStyle.Render("("+origin+")"), d.Description, strings.Join(stepLabels, " · "))
+					fmt.Printf("%s\n  %s\n  steps: %s\n", successStyle.Render(d.Name), d.Description, strings.Join(stepLabels, " · "))
 				}
 				fmt.Println(dimStyle.Render("Custom workflows: " + pipeline.WorkflowsDir() + "/*.yaml  ·  create with: task pipeline new \"<describe it>\""))
 				return
