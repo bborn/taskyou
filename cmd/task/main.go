@@ -4610,15 +4610,22 @@ func handleStopHook(database *db.DB, taskID int64, input *ClaudeHookInput) error
 		// Claude finished its turn and is waiting for user input
 		// This is the key transition: processing → blocked (needs input)
 		if task.Status == db.StatusProcessing {
-			// A workflow step is instructed to call taskyou_complete when done. If
-			// the agent ends its turn without it but has committed AND pushed its
-			// work (clean worktree, HEAD == upstream), parking it in 'blocked' would
-			// stall the whole DAG for a step that actually finished. Auto-complete it
-			// so the workflow advances. A step that stopped to ask a question or left
-			// work uncommitted/unpushed hasn't finished — block as before.
+			// A workflow step signals completion by committing AND pushing its work —
+			// the push is the handoff, ty advances the DAG on its own (there is no tool
+			// to call). If the agent ends its turn with a clean worktree and HEAD pushed
+			// to the shared branch, the step finished: the terminal step (which opened
+			// the PR) parks in 'blocked' for a human to merge, every other step goes
+			// 'done' so its dependents auto-queue. A step that stopped to ask a question
+			// or left work uncommitted/unpushed hasn't finished — block as before, and
+			// the daemon's sweep is the backstop for a Stop hook that fires mid-push.
 			if pipeline.IsWorkflowTask(task) && workflowStepFinished(task) {
-				database.UpdateTaskStatus(taskID, db.StatusDone)
-				database.AppendTaskLog(taskID, "system", "Workflow step pushed its work but didn't call taskyou_complete — auto-completed to advance the workflow")
+				if pipeline.IsTerminalStep(database, task) {
+					database.UpdateTaskStatus(taskID, db.StatusBlocked)
+					database.AppendTaskLog(taskID, "system", "Final step finished and opened its PR — parked in blocked for a human to review and merge")
+				} else {
+					database.UpdateTaskStatus(taskID, db.StatusDone)
+					database.AppendTaskLog(taskID, "system", "Work committed and pushed — workflow advances to the next step")
+				}
 			} else {
 				database.UpdateTaskStatus(taskID, db.StatusBlocked)
 				database.AppendTaskLog(taskID, "system", "Waiting for user input")

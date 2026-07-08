@@ -43,6 +43,22 @@ func hasPipelineTag(tags string) bool {
 	return false
 }
 
+// IsTerminalStep reports whether a workflow step is the sink — the step nothing
+// else depends on, which is the one that opens the PR (see composeInstruction).
+// A finished terminal step parks in 'blocked' awaiting a human merge review rather
+// than advancing to 'done'; every other step goes 'done' so its dependents
+// auto-queue. Non-workflow tasks are never terminal steps.
+func IsTerminalStep(database *db.DB, task *db.Task) bool {
+	if !IsWorkflowTask(task) {
+		return false
+	}
+	dependents, err := database.GetBlockedBy(task.ID)
+	if err != nil {
+		return false
+	}
+	return len(dependents) == 0
+}
+
 // GroupWorkflows partitions tasks into workflow groups (2+ members sharing a
 // branch) and the remaining ungrouped tasks, preserving input order for the rest.
 func GroupWorkflows(tasks []*db.Task) (groups []*Group, rest []*db.Task) {

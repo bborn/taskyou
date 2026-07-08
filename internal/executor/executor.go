@@ -382,13 +382,13 @@ func (e *Executor) reconcileReadyTasks() {
 }
 
 // reconcileFinishedWorkflowSteps recovers workflow steps that finished their work
-// (committed + pushed) but got parked in 'blocked' — because the agent couldn't
-// call taskyou_complete (its MCP tool was deferred behind ToolSearch) and the Stop
-// hook's auto-complete fired at a transient moment (e.g. a temp file briefly
-// dirtying the worktree). Those steps stall the whole DAG. This sweep marks any
-// such step 'done' once its state has settled, then advances the workflow. It
-// skips steps that asked a question (genuine needs-input) so it never advances past
-// one waiting on a human.
+// (committed + pushed) but got parked in 'blocked' — because the Stop hook's
+// git-state check fired at a transient moment (e.g. a temp file briefly dirtying
+// the worktree, or the push still settling). Those steps stall the whole DAG. This
+// sweep marks any such step 'done' once its state has settled, then advances the
+// workflow. It skips steps that asked a question (genuine needs-input) and the
+// terminal step (which parks in 'blocked' on purpose, awaiting a human merge), so
+// it never advances past one that's legitimately waiting.
 func (e *Executor) reconcileFinishedWorkflowSteps() {
 	tasks, err := e.db.ListTasks(db.ListTasksOptions{Status: db.StatusBlocked, Tag: "pipeline", Limit: 500})
 	if err != nil {
@@ -403,6 +403,11 @@ func (e *Executor) reconcileFinishedWorkflowSteps() {
 		}
 		// Don't advance past a genuine needs-input question.
 		if hasQ, err := e.db.HasQuestionLog(task.ID); err != nil || hasQ {
+			continue
+		}
+		// The terminal step is meant to stay 'blocked' once it finishes (its PR awaits
+		// a human merge), so never auto-complete it to 'done'.
+		if pipeline.IsTerminalStep(e.db, task) {
 			continue
 		}
 		if !WorkflowStepFinished(task.WorktreePath) {
@@ -2477,17 +2482,6 @@ func createTmuxWindow(daemonSession, windowName, workDir, script, allowedProject
 	return "", fmt.Errorf("new-window failed: %v (output: %s)", err, outputStr)
 }
 
-// setEnvSetting sets an env var in a Claude Code settings map's "env" block without
-// clobbering any env vars already present (merged from an existing settings.local.json).
-func setEnvSetting(settings map[string]interface{}, key, value string) {
-	env, ok := settings["env"].(map[string]interface{})
-	if !ok {
-		env = make(map[string]interface{})
-	}
-	env[key] = value
-	settings["env"] = env
-}
-
 // setupClaudeHooks creates a .claude/settings.local.json in workDir to configure hooks.
 // The hooks call back to `task claude-hook` to update task status.
 func (e *Executor) setupClaudeHooks(workDir string, taskID int64) (cleanup func(), err error) {
@@ -2599,17 +2593,6 @@ func (e *Executor) setupClaudeHooks(workDir string, taskID int64) (cleanup func(
 	} else {
 		finalConfig = hooksConfig
 	}
-
-	// Force MCP tools to load upfront instead of being deferred behind ToolSearch.
-	// With deferral on (Claude Code's default), the agent has to *search* for
-	// taskyou_complete before it can call it — and often burns its whole turn never
-	// finding it, so the task never signals done and the workflow stalls. The per-server
-	// `alwaysLoad` flag we set on taskyou is the more precise lever, but it isn't honored
-	// in the project-scoped ~/.claude.json location we're required to use (moving taskyou
-	// to .mcp.json would reintroduce approval prompts). Disabling tool-search for the
-	// session is the placement- and version-independent guarantee. These are lean,
-	// single-purpose executor sessions, so loading tools upfront is a fine trade.
-	setEnvSetting(finalConfig, "ENABLE_TOOL_SEARCH", "false")
 
 	data, err := json.MarshalIndent(finalConfig, "", "  ")
 	if err != nil {
@@ -4537,13 +4520,12 @@ func writeWorkflowMCPConfig(worktreePath string, taskID int64, configDir string)
 	// Auto-approve all TaskYou tools so users don't have to manually approve each call.
 	//
 	// alwaysLoad asks Claude Code to load taskyou's tools at session start rather than
-	// deferring them behind ToolSearch — so an agent can always reach taskyou_complete to
-	// signal done instead of burning its turn searching for it. It's the precise, per-server
-	// lever, but it isn't honored in this project-scoped ~/.claude.json location (and we
-	// can't move to .mcp.json without reintroducing approval prompts), so it's belt-and-
-	// suspenders: setupClaudeHooks disables tool-search for the whole session via
-	// ENABLE_TOOL_SEARCH=false, which is the actual guarantee. Fast local stdio server, so
-	// the connect-before-first-prompt wait is trivial either way.
+	// deferring them behind ToolSearch, so a task that wants them (e.g. taskyou_needs_input
+	// to ask a question) can reach them without a search step. Best-effort: it isn't honored
+	// in this project-scoped ~/.claude.json location on current Claude versions, and we can't
+	// move to .mcp.json without reintroducing approval prompts. Workflow *completion* does
+	// not depend on it — that's git-based (a step commits + pushes; ty advances the DAG) —
+	// so a deferred taskyou server never stalls a workflow.
 	taskyouServer := map[string]interface{}{
 		"type":       "stdio",
 		"command":    taskExecutable,
