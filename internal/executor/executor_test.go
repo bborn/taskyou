@@ -1501,8 +1501,9 @@ func TestWriteWorkflowMCPConfig(t *testing.T) {
 			t.Errorf("taskyou type = %v, want stdio", taskyou["type"])
 		}
 
-		// alwaysLoad keeps taskyou's tools (esp. taskyou_complete) out of Claude
-		// Code's tool-search deferral, so agents can always signal completion.
+		// alwaysLoad is the precise per-server opt-out of Claude Code's tool-search
+		// deferral (belt-and-suspenders alongside the session-wide ENABLE_TOOL_SEARCH=false
+		// set in setupClaudeHooks), so agents can always reach taskyou_complete.
 		if taskyou["alwaysLoad"] != true {
 			t.Errorf("taskyou alwaysLoad = %v, want true", taskyou["alwaysLoad"])
 		}
@@ -1536,6 +1537,38 @@ func TestWriteWorkflowMCPConfig(t *testing.T) {
 			if i < len(autoApprove) && autoApprove[i] != tool {
 				t.Errorf("autoApprove[%d] = %v, want %v", i, autoApprove[i], tool)
 			}
+		}
+	})
+
+	t.Run("pre-trusts the worktree so onboarding doesn't stall the step", func(t *testing.T) {
+		configPath := setupTempConfigDir(t)
+		worktreePath := t.TempDir()
+
+		if err := writeWorkflowMCPConfig(worktreePath, 123, ""); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		data, err := os.ReadFile(configPath)
+		if err != nil {
+			t.Fatalf("failed to read claude.json: %v", err)
+		}
+		var config map[string]interface{}
+		if err := json.Unmarshal(data, &config); err != nil {
+			t.Fatalf("failed to parse claude.json: %v", err)
+		}
+		projects := config["projects"].(map[string]interface{})
+		projectConfig, ok := projects[worktreePath].(map[string]interface{})
+		if !ok {
+			t.Fatalf("expected project config for %s", worktreePath)
+		}
+
+		// Without these, a fresh worktree blocks on the "trust this folder?" prompt
+		// with no human to answer, hanging the unattended workflow step.
+		if projectConfig["hasTrustDialogAccepted"] != true {
+			t.Errorf("hasTrustDialogAccepted = %v, want true", projectConfig["hasTrustDialogAccepted"])
+		}
+		if projectConfig["hasCompletedProjectOnboarding"] != true {
+			t.Errorf("hasCompletedProjectOnboarding = %v, want true", projectConfig["hasCompletedProjectOnboarding"])
 		}
 	})
 
@@ -2036,6 +2069,86 @@ func TestCleanupWorktreeNonWorktreeTask(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(projectDir, ".claude", "settings.local.json")); !os.IsNotExist(err) {
 		t.Error("expected settings.local.json to be removed")
 	}
+}
+
+// TestSetupClaudeHooksDisablesToolSearch verifies setupClaudeHooks writes
+// ENABLE_TOOL_SEARCH=false into the worktree settings' env block so taskyou's MCP tools
+// (esp. taskyou_complete) load upfront instead of being deferred behind ToolSearch — and
+// that it preserves any env vars already present in an existing settings.local.json.
+func TestSetupClaudeHooksDisablesToolSearch(t *testing.T) {
+	readEnv := func(t *testing.T, workDir string) map[string]interface{} {
+		t.Helper()
+		data, err := os.ReadFile(filepath.Join(workDir, ".claude", "settings.local.json"))
+		if err != nil {
+			t.Fatalf("read settings.local.json: %v", err)
+		}
+		var cfg map[string]interface{}
+		if err := json.Unmarshal(data, &cfg); err != nil {
+			t.Fatalf("parse settings.local.json: %v", err)
+		}
+		env, ok := cfg["env"].(map[string]interface{})
+		if !ok {
+			t.Fatal("expected env block in settings.local.json")
+		}
+		return env
+	}
+
+	newExec := func(t *testing.T) *Executor {
+		t.Helper()
+		tmpFile, err := os.CreateTemp("", "hooks-*.db")
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { os.Remove(tmpFile.Name()) })
+		tmpFile.Close()
+		database, err := db.Open(tmpFile.Name())
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { database.Close() })
+		return New(database, config.New(database))
+	}
+
+	t.Run("fresh settings", func(t *testing.T) {
+		exec := newExec(t)
+		workDir := t.TempDir()
+		cleanup, err := exec.setupClaudeHooks(workDir, 1)
+		if err != nil {
+			t.Fatalf("setupClaudeHooks: %v", err)
+		}
+		if cleanup != nil {
+			defer cleanup()
+		}
+		if env := readEnv(t, workDir); env["ENABLE_TOOL_SEARCH"] != "false" {
+			t.Errorf("ENABLE_TOOL_SEARCH = %v, want \"false\"", env["ENABLE_TOOL_SEARCH"])
+		}
+	})
+
+	t.Run("preserves existing env vars", func(t *testing.T) {
+		exec := newExec(t)
+		workDir := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(workDir, ".claude"), 0755); err != nil {
+			t.Fatal(err)
+		}
+		existing := `{"env":{"FOO":"bar"}}`
+		if err := os.WriteFile(filepath.Join(workDir, ".claude", "settings.local.json"), []byte(existing), 0644); err != nil {
+			t.Fatal(err)
+		}
+		cleanup, err := exec.setupClaudeHooks(workDir, 1)
+		if err != nil {
+			t.Fatalf("setupClaudeHooks: %v", err)
+		}
+		if cleanup != nil {
+			defer cleanup()
+		}
+		env := readEnv(t, workDir)
+		if env["ENABLE_TOOL_SEARCH"] != "false" {
+			t.Errorf("ENABLE_TOOL_SEARCH = %v, want \"false\"", env["ENABLE_TOOL_SEARCH"])
+		}
+		if env["FOO"] != "bar" {
+			t.Errorf("existing env var FOO = %v, want \"bar\" (must be preserved)", env["FOO"])
+		}
+	})
 }
 
 // TestBuildPromptUniversalGuidance verifies that the worktree-safety constraint and the

@@ -2477,6 +2477,17 @@ func createTmuxWindow(daemonSession, windowName, workDir, script, allowedProject
 	return "", fmt.Errorf("new-window failed: %v (output: %s)", err, outputStr)
 }
 
+// setEnvSetting sets an env var in a Claude Code settings map's "env" block without
+// clobbering any env vars already present (merged from an existing settings.local.json).
+func setEnvSetting(settings map[string]interface{}, key, value string) {
+	env, ok := settings["env"].(map[string]interface{})
+	if !ok {
+		env = make(map[string]interface{})
+	}
+	env[key] = value
+	settings["env"] = env
+}
+
 // setupClaudeHooks creates a .claude/settings.local.json in workDir to configure hooks.
 // The hooks call back to `task claude-hook` to update task status.
 func (e *Executor) setupClaudeHooks(workDir string, taskID int64) (cleanup func(), err error) {
@@ -2588,6 +2599,17 @@ func (e *Executor) setupClaudeHooks(workDir string, taskID int64) (cleanup func(
 	} else {
 		finalConfig = hooksConfig
 	}
+
+	// Force MCP tools to load upfront instead of being deferred behind ToolSearch.
+	// With deferral on (Claude Code's default), the agent has to *search* for
+	// taskyou_complete before it can call it — and often burns its whole turn never
+	// finding it, so the task never signals done and the workflow stalls. The per-server
+	// `alwaysLoad` flag we set on taskyou is the more precise lever, but it isn't honored
+	// in the project-scoped ~/.claude.json location we're required to use (moving taskyou
+	// to .mcp.json would reintroduce approval prompts). Disabling tool-search for the
+	// session is the placement- and version-independent guarantee. These are lean,
+	// single-purpose executor sessions, so loading tools upfront is a fine trade.
+	setEnvSetting(finalConfig, "ENABLE_TOOL_SEARCH", "false")
 
 	data, err := json.MarshalIndent(finalConfig, "", "  ")
 	if err != nil {
@@ -4514,12 +4536,14 @@ func writeWorkflowMCPConfig(worktreePath string, taskID int64, configDir string)
 	// Use "stdio" transport - Claude Code spawns the process and communicates via stdin/stdout
 	// Auto-approve all TaskYou tools so users don't have to manually approve each call.
 	//
-	// alwaysLoad: with many MCP servers configured (a user's global ~/.claude.json can
-	// have dozens), Claude Code defers MCP tools behind ToolSearch to save context — so
-	// an agent has to *search* for taskyou_complete before it can call it, and often
-	// burns its turn failing to, leaving the workflow step stalled. alwaysLoad forces
-	// taskyou's tools to load at session start so the agent can always signal completion.
-	// It's a fast local stdio server, so the connect-before-first-prompt wait is trivial.
+	// alwaysLoad asks Claude Code to load taskyou's tools at session start rather than
+	// deferring them behind ToolSearch — so an agent can always reach taskyou_complete to
+	// signal done instead of burning its turn searching for it. It's the precise, per-server
+	// lever, but it isn't honored in this project-scoped ~/.claude.json location (and we
+	// can't move to .mcp.json without reintroducing approval prompts), so it's belt-and-
+	// suspenders: setupClaudeHooks disables tool-search for the whole session via
+	// ENABLE_TOOL_SEARCH=false, which is the actual guarantee. Fast local stdio server, so
+	// the connect-before-first-prompt wait is trivial either way.
 	taskyouServer := map[string]interface{}{
 		"type":       "stdio",
 		"command":    taskExecutable,
@@ -4581,6 +4605,15 @@ func writeWorkflowMCPConfig(worktreePath string, taskID int64, configDir string)
 	delete(mcpServers, "workflow")
 	mcpServers["taskyou"] = taskyouServer
 	projectConfig["mcpServers"] = mcpServers
+
+	// Pre-trust the worktree. A fresh worktree path is unknown to Claude Code, so on
+	// first launch it blocks on the "Do you trust the files in this folder?" onboarding
+	// prompt — which stalls an unattended workflow step forever (no human to answer).
+	// ty created this worktree from the user's own already-trusted project, so trusting
+	// it is safe and matches intent. Setting these two flags skips the dialog entirely.
+	projectConfig["hasTrustDialogAccepted"] = true
+	projectConfig["hasCompletedProjectOnboarding"] = true
+
 	projects[worktreePath] = projectConfig
 	config["projects"] = projects
 
