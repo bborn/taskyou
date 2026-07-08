@@ -193,6 +193,64 @@ func TestWorkflowComplete(t *testing.T) {
 	}
 }
 
+// TestWorkflowNonTerminalStepAdvances is a regression test for the workflow
+// completion bug: a non-terminal workflow step (the root "Plan" step owns the
+// shared branch and can pick up a spurious PR match from lookupPR) used to be
+// parked in 'blocked' by taskyou_complete instead of advancing the DAG, stalling
+// the whole workflow at step one. A workflow step that still has dependents must
+// always complete to 'done'; only the terminal step opens a PR.
+func TestWorkflowNonTerminalStepAdvances(t *testing.T) {
+	database := testDB(t)
+	if err := database.CreateProject(&db.Project{Name: "test-project", Path: "/tmp/test-project"}); err != nil {
+		t.Fatalf("failed to create test-project: %v", err)
+	}
+
+	// Root step: tagged "pipeline", owns the shared branch, and carries a (spurious)
+	// PR number — exactly the state that used to send it to 'blocked'.
+	plan := &db.Task{Title: "[Plan] goal", Status: db.StatusProcessing, Project: "test-project", Tags: "pipeline"}
+	if err := database.CreateTask(plan); err != nil {
+		t.Fatalf("failed to create plan step: %v", err)
+	}
+	plan.BranchName = "pipeline/999-test-goal" // CreateTask doesn't persist branch_name.
+	if err := database.UpdateTask(plan); err != nil {
+		t.Fatalf("failed to set plan branch: %v", err)
+	}
+	if err := database.UpdateTaskPRInfo(plan.ID, "https://example.com/pull/385", 385, ""); err != nil {
+		t.Fatalf("failed to seed spurious PR: %v", err)
+	}
+
+	// A dependent step makes Plan non-terminal.
+	code := &db.Task{Title: "[Code] goal", Status: db.StatusBlocked, Project: "test-project", Tags: "pipeline", SourceBranch: "pipeline/999-test-goal"}
+	if err := database.CreateTask(code); err != nil {
+		t.Fatalf("failed to create code step: %v", err)
+	}
+	if err := database.AddDependency(plan.ID, code.ID, true); err != nil {
+		t.Fatalf("failed to wire dependency: %v", err)
+	}
+
+	request := map[string]interface{}{
+		"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+		"params": map[string]interface{}{
+			"name":      "taskyou_complete",
+			"arguments": map[string]interface{}{"summary": "planned it"},
+		},
+	}
+	reqBytes, _ := json.Marshal(request)
+	reqBytes = append(reqBytes, '\n')
+
+	server, _ := testServer(database, plan.ID, string(reqBytes))
+	server.SetCallbacks(func() {}, nil)
+	server.Run()
+
+	updated, err := database.GetTask(plan.ID)
+	if err != nil {
+		t.Fatalf("failed to get plan step: %v", err)
+	}
+	if updated.Status != db.StatusDone {
+		t.Fatalf("non-terminal workflow step must advance to 'done', got '%s' (root step wrongly parked for PR review, stalling the workflow)", updated.Status)
+	}
+}
+
 // TestCompleteEndToEnd is the smoke test the bug report calls for: simulate the
 // executor speaking JSON-RPC to the MCP server, call taskyou_complete, and assert
 // the task transitions to 'done' without external intervention.
