@@ -4155,8 +4155,11 @@ func ensureDaemonRunning(dangerousMode bool) error {
 }
 
 func getPidFilePath() string {
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".local", "share", "task", "daemon.pid")
+	// Key the daemon PID/lock file to the DB's directory so an isolated instance
+	// (WORKTREE_DB_PATH set, e.g. the QA harness) gets its own daemon lock and can
+	// run a full daemon alongside the live one. For the live instance this resolves
+	// to the historical ~/.local/share/task/daemon.pid — no behavior change.
+	return filepath.Join(filepath.Dir(db.DefaultPath()), "daemon.pid")
 }
 
 func readPidFile(path string) (int, error) {
