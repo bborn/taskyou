@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -697,9 +698,13 @@ func (db *DB) UpdateTaskStatus(id int64, status string) error {
 		}
 	}
 
-	// Process dependent tasks when a blocker is completed
+	// Process dependent tasks when a blocker is completed. Best-effort: a dropped
+	// write is recovered by the daemon's RequeueReadyTasks sweep, but log it so a
+	// stalled workflow isn't a silent mystery.
 	if status == StatusDone || status == StatusArchived {
-		db.ProcessCompletedBlocker(id)
+		if _, err := db.ProcessCompletedBlocker(id); err != nil {
+			log.Printf("ProcessCompletedBlocker(%d): %v", id, err)
+		}
 	}
 
 	return nil
@@ -1187,6 +1192,30 @@ func (db *DB) AppendTaskLog(taskID int64, lineType, content string) error {
 		return fmt.Errorf("insert task log: %w", err)
 	}
 	return nil
+}
+
+// HasQuestionLog reports whether the task ever recorded a needs-input question
+// (line_type "question"). The workflow "finished but couldn't signal" sweep uses
+// this to avoid auto-completing a step that is genuinely waiting on a human answer.
+func (db *DB) HasQuestionLog(taskID int64) (bool, error) {
+	var n int
+	err := db.QueryRow(`SELECT COUNT(*) FROM task_logs WHERE task_id = ? AND line_type = 'question'`, taskID).Scan(&n)
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
+// HasLogLineContaining reports whether the task has any log line whose content
+// contains substr. Used to make a periodic sweep idempotent — e.g. logging a
+// "parked for merge review" note exactly once for a terminal workflow step.
+func (db *DB) HasLogLineContaining(taskID int64, substr string) (bool, error) {
+	var n int
+	err := db.QueryRow(`SELECT COUNT(*) FROM task_logs WHERE task_id = ? AND content LIKE ?`, taskID, "%"+substr+"%").Scan(&n)
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
 }
 
 // GetTaskLogs retrieves logs for a task.

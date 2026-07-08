@@ -98,3 +98,34 @@ func TestIsWorkflowTaskRequiresTagAndBranch(t *testing.T) {
 		t.Error("tagged + branch → should be a workflow task")
 	}
 }
+
+func TestIsTerminalStep(t *testing.T) {
+	database := testDB(t)
+	branch := "pipeline/1-x"
+
+	// Two workflow steps on a shared branch, wired first → last (last depends on first).
+	first := &db.Task{Title: "[Plan] x", Status: db.StatusDone, Type: db.TypeCode, Project: "test", Tags: "pipeline", BranchName: branch}
+	must(t, database.CreateTask(first))
+	last := &db.Task{Title: "[Verify] x", Status: db.StatusProcessing, Type: db.TypeCode, Project: "test", Tags: "pipeline", SourceBranch: branch}
+	must(t, database.CreateTask(last))
+	must(t, database.AddDependency(first.ID, last.ID, true)) // first blocks last
+
+	first, _ = database.GetTask(first.ID)
+	last, _ = database.GetTask(last.ID)
+
+	// The sink (nothing depends on it) is the terminal step; the earlier step isn't.
+	if IsTerminalStep(database, first) {
+		t.Error("first step has a dependent (last) — should NOT be terminal")
+	}
+	if !IsTerminalStep(database, last) {
+		t.Error("last step has no dependents — should be terminal")
+	}
+
+	// A non-workflow task is never a terminal step, even with no dependents.
+	plain := &db.Task{Title: "plain", Status: db.StatusProcessing, Type: db.TypeCode, Project: "test"}
+	must(t, database.CreateTask(plain))
+	plain, _ = database.GetTask(plain.ID)
+	if IsTerminalStep(database, plain) {
+		t.Error("non-workflow task should never be a terminal step")
+	}
+}

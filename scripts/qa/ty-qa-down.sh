@@ -6,6 +6,11 @@
 set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
 
+# Stop the isolated full daemon (Tier 3), if running. Its PID file is keyed to the
+# instance DB dir (see getPidFilePath), so this never touches the live daemon.
+if [[ -f "$TY_QA_ROOT/daemon.pid" ]]; then
+  kill "$(cat "$TY_QA_ROOT/daemon.pid")" 2>/dev/null || true
+fi
 tmux kill-session -t "$TY_UI_SESSION" 2>/dev/null || true
 tmux kill-session -t "$TY_DAEMON_SESSION" 2>/dev/null || true
 

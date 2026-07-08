@@ -25,6 +25,7 @@ import (
 	"github.com/bborn/workflow/internal/events"
 	"github.com/bborn/workflow/internal/github"
 	"github.com/bborn/workflow/internal/hooks"
+	"github.com/bborn/workflow/internal/pipeline"
 )
 
 // TaskEvent represents a change to a task.
@@ -354,6 +355,85 @@ func (e *Executor) reconcileOrphanedTasks() {
 	}
 }
 
+// reconcileReadyTasks is the safety net for workflow DAG auto-advance: it
+// re-queues any step still 'blocked' + never-started whose blockers have all
+// completed, in case the one-shot ProcessCompletedBlocker flip was dropped (a
+// SQLITE_BUSY write, a crash between the done-write and the queue-write). Without
+// this, a single lost flip strands a workflow forever.
+func (e *Executor) reconcileReadyTasks() {
+	moved, err := e.db.RequeueReadyTasks()
+	if err != nil {
+		e.logger.Error("Failed to reconcile ready tasks", "error", err)
+		return
+	}
+	if len(moved) == 0 {
+		return
+	}
+	for _, task := range moved {
+		e.logLine(task.ID, "system", "Dependencies complete — re-queued by safety-net sweep")
+		e.hooks.OnStatusChange(task, task.Status, "Dependencies complete")
+		e.logger.Info("Re-queued ready task", "id", task.ID, "title", task.Title)
+	}
+	// Nudge the loop to pick up the newly-queued work immediately.
+	select {
+	case e.wakeupCh <- struct{}{}:
+	default:
+	}
+}
+
+// reconcileFinishedWorkflowSteps recovers workflow steps that finished their work
+// (committed + pushed) but got parked in 'blocked' — because the Stop hook's
+// git-state check fired at a transient moment (e.g. a temp file briefly dirtying
+// the worktree, or the push still settling). Those steps stall the whole DAG. This
+// sweep marks any such step 'done' once its state has settled, then advances the
+// workflow. It skips steps that asked a question (genuine needs-input) and the
+// terminal step (which parks in 'blocked' on purpose, awaiting a human merge), so
+// it never advances past one that's legitimately waiting.
+func (e *Executor) reconcileFinishedWorkflowSteps() {
+	tasks, err := e.db.ListTasks(db.ListTasksOptions{Status: db.StatusBlocked, Tag: "pipeline", Limit: 500})
+	if err != nil {
+		e.logger.Error("Failed to list blocked pipeline tasks", "error", err)
+		return
+	}
+	for _, task := range tasks {
+		// Only steps that actually ran; leave un-started (DAG-waiting) ones to
+		// reconcileReadyTasks.
+		if task.StartedAt == nil || task.WorktreePath == "" {
+			continue
+		}
+		// Don't advance past a genuine needs-input question.
+		if hasQ, err := e.db.HasQuestionLog(task.ID); err != nil || hasQ {
+			continue
+		}
+		// The terminal step is meant to stay 'blocked' once it finishes (its PR awaits
+		// a human merge), so never auto-complete it to 'done'. But if the Stop hook fired
+		// mid-push it left the generic "waiting for input" state; once the step has
+		// genuinely settled (committed + pushed), clarify it's parked for merge review
+		// (once) and tear down its now-idle session.
+		if pipeline.IsTerminalStep(e.db, task) {
+			if WorkflowStepFinished(task.WorktreePath) {
+				if logged, _ := e.db.HasLogLineContaining(task.ID, pipeline.TerminalStepParkedLog); !logged {
+					e.logLine(task.ID, "system", pipeline.TerminalStepParkedLog)
+					e.teardownWorkflowStepSession(task)
+					e.logger.Info("Terminal workflow step parked for merge review", "id", task.ID, "title", task.Title)
+				}
+			}
+			continue
+		}
+		if !WorkflowStepFinished(task.WorktreePath) {
+			continue
+		}
+		if err := e.updateStatus(task.ID, db.StatusDone); err != nil {
+			e.logger.Error("Failed to auto-complete finished workflow step", "id", task.ID, "error", err)
+			continue
+		}
+		e.logLine(task.ID, "system", "Finished (work committed + pushed) but never signalled — auto-completed by sweep to advance the workflow")
+		e.hooks.OnStatusChange(task, db.StatusDone, "Auto-completed: work pushed")
+		e.teardownWorkflowStepSession(task)
+		e.logger.Info("Auto-completed finished workflow step", "id", task.ID, "title", task.Title)
+	}
+}
+
 // tmuxWindowExistsForTask reports whether a live executor tmux window exists for
 // the task in any daemon session. The executor runs inside a window named
 // "task-<id>" within a "task-daemon-*" session; if that window is gone, the
@@ -662,6 +742,50 @@ func GetClaudePIDFromPane(paneID string) int {
 
 // KillClaudeProcess terminates the Claude process for a task to free up memory.
 // This is called when a task is completed, closed, or deleted.
+// WorkflowStepFinished reports whether a workflow step has committed AND pushed its
+// work: its worktree is clean and HEAD matches the pushed remote-tracking ref. That
+// is the signal a step completed its handoff (per the composed step instructions),
+// used both by the Stop hook (auto-complete a step that finished but didn't call
+// taskyou_complete) and by the daemon's reconcile sweep (recover a step that was
+// blocked because the hook fired at a transient moment). Conservative: any doubt
+// returns false. Compares to refs/remotes/origin/<branch> rather than @{u} because
+// non-root step worktrees check out the shared branch without upstream tracking.
+func WorkflowStepFinished(worktreePath string) bool {
+	if worktreePath == "" {
+		return false
+	}
+	if out, err := exec.Command("git", "-C", worktreePath, "status", "--porcelain").Output(); err != nil || len(strings.TrimSpace(string(out))) != 0 {
+		return false
+	}
+	head, errH := exec.Command("git", "-C", worktreePath, "rev-parse", "HEAD").Output()
+	if errH != nil {
+		return false
+	}
+	branch, errB := exec.Command("git", "-C", worktreePath, "rev-parse", "--abbrev-ref", "HEAD").Output()
+	br := strings.TrimSpace(string(branch))
+	if errB != nil || br == "" || br == "HEAD" {
+		return false
+	}
+	remote, errR := exec.Command("git", "-C", worktreePath, "rev-parse", "refs/remotes/origin/"+br).Output()
+	if errR != nil {
+		return false
+	}
+	return strings.TrimSpace(string(head)) == strings.TrimSpace(string(remote))
+}
+
+// teardownWorkflowStepSession kills the executor process and tmux window for a
+// completed workflow step. Ordinary tasks keep their window for human review (the
+// 30-minute janitor cleans them up); a workflow step is unattended and its next
+// step is waiting, so releasing its session promptly avoids a stale window
+// lingering across the handoff. No-op for non-workflow tasks.
+func (e *Executor) teardownWorkflowStepSession(task *db.Task) {
+	if !pipeline.IsWorkflowTask(task) {
+		return
+	}
+	e.KillClaudeProcess(task.ID)
+	KillAllWindowsByNameAllSessions(TmuxWindowName(task.ID))
+}
+
 // Exported for use by the UI when deleting tasks.
 func (e *Executor) KillClaudeProcess(taskID int64) bool {
 	pid := e.getClaudePID(taskID)
@@ -854,6 +978,7 @@ func (e *Executor) worker(ctx context.Context) {
 	const authCheckInterval = 15        // 30 seconds at 2 second ticks
 	const reviewReconcileInterval = 30  // 60 seconds at 2 second ticks
 	const prDisplayRefreshInterval = 45 // 90 seconds at 2 second ticks
+	const readyTasksInterval = 8        // 16 seconds at 2 second ticks
 
 	for {
 		select {
@@ -884,6 +1009,20 @@ func (e *Executor) worker(ctx context.Context) {
 			// once their PR has merged or closed.
 			if tickCount%reviewReconcileInterval == 0 {
 				e.reconcileReviewTasks()
+			}
+
+			// Safety net for the auto-advance of workflow DAGs: re-queue any step
+			// still waiting on dependencies that have all completed (in case the
+			// one-shot ProcessCompletedBlocker flip was dropped).
+			if tickCount%readyTasksInterval == 0 {
+				e.reconcileReadyTasks()
+			}
+
+			// Safety net for workflow steps that finished (committed + pushed) but
+			// couldn't signal completion (deferred taskyou_complete / transient Stop
+			// hook miss): complete them so the DAG advances instead of stalling.
+			if tickCount%readyTasksInterval == 0 {
+				e.reconcileFinishedWorkflowSteps()
 			}
 
 			// Periodically refresh cached PR state for actively-watched tasks so
@@ -1457,6 +1596,11 @@ func (e *Executor) executeTask(ctx context.Context, task *db.Task) {
 		// task.completed already fired via db.UpdateTaskStatus when the status was set.
 		e.logLine(task.ID, "system", "Task completed")
 		e.hooks.OnStatusChange(task, db.StatusDone, "Task completed")
+		// A finished workflow step's interactive session never exits on its own
+		// (it idles at the prompt after calling taskyou_complete). Left alone it
+		// lingers until the 30-minute janitor, holding a tmux window that can
+		// interfere with the next step's setup. Tear it down now.
+		e.teardownWorkflowStepSession(task)
 	} else if result.Success {
 		// Agent finished successfully - move to backlog for human review.
 		// Only humans should mark tasks as done, but agent-success is the
@@ -4383,11 +4527,20 @@ func writeWorkflowMCPConfig(worktreePath string, taskID int64, configDir string)
 
 	// Build the TaskYou MCP server config
 	// Use "stdio" transport - Claude Code spawns the process and communicates via stdin/stdout
-	// Auto-approve all TaskYou tools so users don't have to manually approve each call
+	// Auto-approve all TaskYou tools so users don't have to manually approve each call.
+	//
+	// alwaysLoad asks Claude Code to load taskyou's tools at session start rather than
+	// deferring them behind ToolSearch, so a task that wants them (e.g. taskyou_needs_input
+	// to ask a question) can reach them without a search step. Best-effort: it isn't honored
+	// in this project-scoped ~/.claude.json location on current Claude versions, and we can't
+	// move to .mcp.json without reintroducing approval prompts. Workflow *completion* does
+	// not depend on it — that's git-based (a step commits + pushes; ty advances the DAG) —
+	// so a deferred taskyou server never stalls a workflow.
 	taskyouServer := map[string]interface{}{
-		"type":    "stdio",
-		"command": taskExecutable,
-		"args":    []string{"mcp-server", "--task-id", fmt.Sprintf("%d", taskID)},
+		"type":       "stdio",
+		"command":    taskExecutable,
+		"args":       []string{"mcp-server", "--task-id", fmt.Sprintf("%d", taskID)},
+		"alwaysLoad": true,
 		"autoApprove": []string{
 			"taskyou_complete",
 			"taskyou_needs_input",
@@ -4444,6 +4597,15 @@ func writeWorkflowMCPConfig(worktreePath string, taskID int64, configDir string)
 	delete(mcpServers, "workflow")
 	mcpServers["taskyou"] = taskyouServer
 	projectConfig["mcpServers"] = mcpServers
+
+	// Pre-trust the worktree. A fresh worktree path is unknown to Claude Code, so on
+	// first launch it blocks on the "Do you trust the files in this folder?" onboarding
+	// prompt — which stalls an unattended workflow step forever (no human to answer).
+	// ty created this worktree from the user's own already-trusted project, so trusting
+	// it is safe and matches intent. Setting these two flags skips the dialog entirely.
+	projectConfig["hasTrustDialogAccepted"] = true
+	projectConfig["hasCompletedProjectOnboarding"] = true
+
 	projects[worktreePath] = projectConfig
 	config["projects"] = projects
 

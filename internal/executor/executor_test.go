@@ -1501,6 +1501,12 @@ func TestWriteWorkflowMCPConfig(t *testing.T) {
 			t.Errorf("taskyou type = %v, want stdio", taskyou["type"])
 		}
 
+		// alwaysLoad asks Claude Code to load taskyou's tools upfront (best-effort) so a
+		// task that wants them (e.g. taskyou_needs_input) can reach them without a search.
+		if taskyou["alwaysLoad"] != true {
+			t.Errorf("taskyou alwaysLoad = %v, want true", taskyou["alwaysLoad"])
+		}
+
 		args, ok := taskyou["args"].([]interface{})
 		if !ok {
 			t.Fatal("expected args array in taskyou config")
@@ -1530,6 +1536,38 @@ func TestWriteWorkflowMCPConfig(t *testing.T) {
 			if i < len(autoApprove) && autoApprove[i] != tool {
 				t.Errorf("autoApprove[%d] = %v, want %v", i, autoApprove[i], tool)
 			}
+		}
+	})
+
+	t.Run("pre-trusts the worktree so onboarding doesn't stall the step", func(t *testing.T) {
+		configPath := setupTempConfigDir(t)
+		worktreePath := t.TempDir()
+
+		if err := writeWorkflowMCPConfig(worktreePath, 123, ""); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		data, err := os.ReadFile(configPath)
+		if err != nil {
+			t.Fatalf("failed to read claude.json: %v", err)
+		}
+		var config map[string]interface{}
+		if err := json.Unmarshal(data, &config); err != nil {
+			t.Fatalf("failed to parse claude.json: %v", err)
+		}
+		projects := config["projects"].(map[string]interface{})
+		projectConfig, ok := projects[worktreePath].(map[string]interface{})
+		if !ok {
+			t.Fatalf("expected project config for %s", worktreePath)
+		}
+
+		// Without these, a fresh worktree blocks on the "trust this folder?" prompt
+		// with no human to answer, hanging the unattended workflow step.
+		if projectConfig["hasTrustDialogAccepted"] != true {
+			t.Errorf("hasTrustDialogAccepted = %v, want true", projectConfig["hasTrustDialogAccepted"])
+		}
+		if projectConfig["hasCompletedProjectOnboarding"] != true {
+			t.Errorf("hasCompletedProjectOnboarding = %v, want true", projectConfig["hasCompletedProjectOnboarding"])
 		}
 	})
 

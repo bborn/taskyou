@@ -119,7 +119,10 @@ func composeInstruction(def Definition, step Step) string {
 	} else {
 		b.WriteString("- Do NOT open a pull request — a later step does that.\n")
 	}
-	b.WriteString("- Then call `taskyou_complete` with a one-line summary. That advances the workflow.")
+	// The push IS the completion signal — ty detects a committed-and-pushed step and
+	// advances the DAG automatically. There is no tool to call and nothing to wait on;
+	// finishing your turn with the work pushed is what hands off to the next step.
+	b.WriteString("- That's it. Once your work is committed and pushed, the workflow advances on its own — don't wait, poll, or look for a tool to signal completion.")
 
 	return b.String()
 }

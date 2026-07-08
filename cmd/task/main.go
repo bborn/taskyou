@@ -4155,8 +4155,11 @@ func ensureDaemonRunning(dangerousMode bool) error {
 }
 
 func getPidFilePath() string {
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".local", "share", "task", "daemon.pid")
+	// Key the daemon PID/lock file to the DB's directory so an isolated instance
+	// (WORKTREE_DB_PATH set, e.g. the QA harness) gets its own daemon lock and can
+	// run a full daemon alongside the live one. For the live instance this resolves
+	// to the historical ~/.local/share/task/daemon.pid — no behavior change.
+	return filepath.Join(filepath.Dir(db.DefaultPath()), "daemon.pid")
 }
 
 func readPidFile(path string) (int, error) {
@@ -4607,8 +4610,26 @@ func handleStopHook(database *db.DB, taskID int64, input *ClaudeHookInput) error
 		// Claude finished its turn and is waiting for user input
 		// This is the key transition: processing → blocked (needs input)
 		if task.Status == db.StatusProcessing {
-			database.UpdateTaskStatus(taskID, db.StatusBlocked)
-			database.AppendTaskLog(taskID, "system", "Waiting for user input")
+			// A workflow step signals completion by committing AND pushing its work —
+			// the push is the handoff, ty advances the DAG on its own (there is no tool
+			// to call). If the agent ends its turn with a clean worktree and HEAD pushed
+			// to the shared branch, the step finished: the terminal step (which opened
+			// the PR) parks in 'blocked' for a human to merge, every other step goes
+			// 'done' so its dependents auto-queue. A step that stopped to ask a question
+			// or left work uncommitted/unpushed hasn't finished — block as before, and
+			// the daemon's sweep is the backstop for a Stop hook that fires mid-push.
+			if pipeline.IsWorkflowTask(task) && workflowStepFinished(task) {
+				if pipeline.IsTerminalStep(database, task) {
+					database.UpdateTaskStatus(taskID, db.StatusBlocked)
+					database.AppendTaskLog(taskID, "system", pipeline.TerminalStepParkedLog)
+				} else {
+					database.UpdateTaskStatus(taskID, db.StatusDone)
+					database.AppendTaskLog(taskID, "system", "Work committed and pushed — workflow advances to the next step")
+				}
+			} else {
+				database.UpdateTaskStatus(taskID, db.StatusBlocked)
+				database.AppendTaskLog(taskID, "system", "Waiting for user input")
+			}
 		}
 	case "tool_use":
 		// Claude stopped because it's about to execute a tool
@@ -4617,6 +4638,14 @@ func handleStopHook(database *db.DB, taskID int64, input *ClaudeHookInput) error
 	}
 
 	return nil
+}
+
+// workflowStepFinished reports whether a workflow step has committed AND pushed its
+// work (see executor.WorkflowStepFinished). Used by the Stop hook to advance a step
+// that finished but didn't call taskyou_complete; the daemon's sweep is the backstop
+// for when the hook fires at a transient moment.
+func workflowStepFinished(task *db.Task) bool {
+	return executor.WorkflowStepFinished(task.WorktreePath)
 }
 
 // handlePreToolUseHook handles PreToolUse hooks from Claude (before tool execution).
