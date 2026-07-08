@@ -100,7 +100,7 @@ type FormModel struct {
 	taskType           string   // Selected kind: a task type (single task) or a workflow name.
 	typeIdx            int
 	types              []string // Unified kind list: "" (none), task types, then workflow kinds.
-	executor           string // "claude", "codex", "gemini"
+	executor           string   // "claude", "codex", "gemini"
 	executorIdx        int
 	executors          []string
 	availableExecutors []string // Original list of available executors (for rebuilding when project changes)
@@ -323,7 +323,7 @@ func NewEditFormModel(database *db.DB, task *db.Task, width, height int, availab
 		permissionMode:      task.EffectivePermissionMode(),
 		permissionModes:     permissionModeOptions(),
 		permissionIdx:       permissionIndexFor(permissionModeOptions(), task.EffectivePermissionMode()),
-		permissionTouched:   true,              // editing: keep the task's existing mode unless changed
+		permissionTouched:   true, // editing: keep the task's existing mode unless changed
 		isEdit:              true,
 		prURL:               task.PRURL,
 		prNumber:            task.PRNumber,

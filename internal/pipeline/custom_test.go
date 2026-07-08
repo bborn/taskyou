@@ -132,7 +132,6 @@ func TestComposeDerivesHandoffFromDAG(t *testing.T) {
 	}
 }
 
-
 func TestCreateHonorsCustomWorkflow(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("TY_WORKFLOWS_DIR", dir)

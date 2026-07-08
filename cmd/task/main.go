@@ -933,7 +933,7 @@ Examples:
 					out := map[string]interface{}{
 						"definition": result.Definition.Name,
 						"project":    project,
-						"task":       map[string]interface{}{"id": t.ID, "type": t.Type, "status": string(t.Status)},
+						"task":       map[string]interface{}{"id": t.ID, "type": t.Type, "status": t.Status},
 					}
 					jsonBytes, _ := json.Marshal(out)
 					fmt.Println(string(jsonBytes))
