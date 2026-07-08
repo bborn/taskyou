@@ -1,12 +1,29 @@
 package pipeline
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/bborn/workflow/internal/db"
 )
+
+// TestMain isolates the whole package's tests from the developer's real workflows
+// dir (~/.config/task/workflows). registry() overlays custom YAML from WorkflowsDir()
+// onto the in-code built-ins, so a stray local workflow named like a built-in (e.g.
+// plan-code-review) would shadow it and break tests that assert the built-in shape.
+// Pointing TY_WORKFLOWS_DIR at an empty dir makes every test see built-ins only.
+func TestMain(m *testing.M) {
+	dir, err := os.MkdirTemp("", "pipeline-workflows-empty-*")
+	if err != nil {
+		panic(err)
+	}
+	os.Setenv("TY_WORKFLOWS_DIR", dir)
+	code := m.Run()
+	os.RemoveAll(dir)
+	os.Exit(code)
+}
 
 func testDB(t *testing.T) *db.DB {
 	t.Helper()
