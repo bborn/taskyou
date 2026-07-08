@@ -61,42 +61,15 @@ type Definition struct {
 // are the whole recipe. The steps-less, instructions-only case is exactly a task type.
 func (d Definition) IsSingle() bool { return len(d.Steps) == 0 }
 
-// DefaultDefinition is the definition used when none is named.
-const DefaultDefinition = "plan-code-review"
+// DefaultDefinition is empty: there is no built-in workflow. Kinds live in the DB
+// (task types); a kind runs as a workflow only when a same-named file adds steps.
+const DefaultDefinition = ""
 
-// planCodeReview is the herdr flow as a DAG: Plan → Code → two independent
-// reviewers in parallel → Collect. The parallel reviewers are the point — two
-// agents with independent contexts catch different classes of issue and avoid
-// single-context self-review bias.
-//
-// Defaults are all Claude (so it runs anywhere with Claude and never silently
-// swaps executors), but each step's executor/model is configurable per project
-// (see config.go): point one reviewer at codex — `pipeline config --set
-// "Review B=codex"` — for the herdr-style cross-executor review, or add a QA step.
-var planCodeReview = Definition{
-	Name:        "plan-code-review",
-	Description: "Plan → code → two parallel reviewers → collect, on one shared branch. Each step's model/executor is configurable per project.",
-	Steps: []Step{
-		{Name: "Plan", Executor: db.ExecutorClaude, Model: db.ModelOpus, Instruction: planInstruction},
-		{Name: "Code", Executor: db.ExecutorClaude, Model: db.ModelSonnet, Instruction: codeInstruction, Deps: []string{"Plan"}},
-		{Name: "Review A", Executor: db.ExecutorClaude, Model: db.ModelOpus, Instruction: reviewInstruction, Deps: []string{"Code"}},
-		{Name: "Review B", Executor: db.ExecutorClaude, Model: db.ModelSonnet, Instruction: reviewInstruction, Deps: []string{"Code"}},
-		{Name: "Collect", Executor: db.ExecutorClaude, Model: db.ModelSonnet, Instruction: collectInstruction, Deps: []string{"Review A", "Review B"}},
-	},
-}
-
-var builtins = map[string]Definition{
-	planCodeReview.Name: planCodeReview,
-}
-
-// registry merges the built-in definitions with any custom YAML workflows found
-// in extraDirs (plus the global WorkflowsDir). Custom definitions shadow built-ins
-// of the same name.
+// registry loads the workflow files — one per file — from the global workflows dir
+// plus extraDirs. There are NO built-in workflows: a workflow is just a same-named
+// file overlaying a DB kind (see KindResolver). Later dirs shadow earlier ones.
 func registry(extraDirs ...string) map[string]Definition {
-	out := make(map[string]Definition, len(builtins)+2)
-	for name, def := range builtins {
-		out[name] = def
-	}
+	out := make(map[string]Definition)
 	dirs := append([]string{WorkflowsDir()}, extraDirs...)
 	custom, _ := loadCustomDefinitions(dirs)
 	for name, def := range custom {
@@ -105,8 +78,7 @@ func registry(extraDirs ...string) map[string]Definition {
 	return out
 }
 
-// Definitions returns all workflow definitions — built-in plus custom YAML
-// workflows discovered in extraDirs and the global workflows dir.
+// Definitions returns the workflow definitions discovered as files.
 func Definitions(extraDirs ...string) []Definition {
 	reg := registry(extraDirs...)
 	names := make([]string, 0, len(reg))
@@ -114,21 +86,14 @@ func Definitions(extraDirs ...string) []Definition {
 		names = append(names, name)
 	}
 	sort.Strings(names)
-	// Keep the default first for a stable, friendly listing.
 	out := make([]Definition, 0, len(names))
-	if def, ok := reg[DefaultDefinition]; ok {
-		out = append(out, def)
-	}
 	for _, name := range names {
-		if name == DefaultDefinition {
-			continue
-		}
 		out = append(out, reg[name])
 	}
 	return out
 }
 
-// DefinitionNames returns the names of all definitions (built-in + custom).
+// DefinitionNames returns the names of the workflow files.
 func DefinitionNames(extraDirs ...string) []string {
 	defs := Definitions(extraDirs...)
 	out := make([]string, len(defs))
@@ -138,28 +103,28 @@ func DefinitionNames(extraDirs ...string) []string {
 	return out
 }
 
-// Get returns the named definition (built-in or custom). An empty name resolves
-// to DefaultDefinition.
+// Get returns the workflow definition for a name (a same-named file), if one
+// exists. Single-task kinds are DB task types and are not returned here — use
+// KindResolver when you need both.
 func Get(name string, extraDirs ...string) (Definition, bool) {
 	name = strings.TrimSpace(name)
 	if name == "" {
-		name = DefaultDefinition
+		return Definition{}, false
 	}
 	def, ok := registry(extraDirs...)[name]
 	return def, ok
 }
 
-// KindResolver resolves a kind name across the whole namespace, by convention:
-// a YAML/built-in kind wins, otherwise a DB task type is surfaced as a single-task
-// kind (its instructions). This is the one bridge that lets types and workflows be
-// the same thing — a step can reference either by name, and picking either is one
-// action. It never needs the two stores merged.
+// KindResolver resolves a kind name to its definition, by convention: if a
+// same-named workflow file exists it runs as a workflow; otherwise the kind is a
+// DB task type (a single task using its instructions). The DB is the single kind
+// store; a workflow is just a file that adds steps to a kind of the same name.
 func KindResolver(database *db.DB, extraDirs ...string) ResolveFunc {
 	reg := registry(extraDirs...)
 	return func(name string) (Definition, bool) {
 		name = strings.TrimSpace(name)
 		if name == "" {
-			name = DefaultDefinition
+			return Definition{}, false
 		}
 		if def, ok := reg[name]; ok {
 			return def, true

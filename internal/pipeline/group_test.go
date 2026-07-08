@@ -7,8 +7,9 @@ import (
 )
 
 func TestGroupWorkflowsCollapsesMembers(t *testing.T) {
+	installWorkflow(t, "pcr", pcrYAML)
 	database := testDB(t)
-	res, err := Create(database, Options{Goal: "Build a widget", Project: "test", Execute: true})
+	res, err := Create(database, Options{Goal: "Build a widget", Project: "test", Definition: "pcr", Execute: true})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
