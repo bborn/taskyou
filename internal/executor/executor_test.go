@@ -2131,3 +2131,41 @@ func TestBuildPromptUniversalGuidance(t *testing.T) {
 		}
 	})
 }
+
+// TestBuildPromptUsesFileKindInstructions proves the convention bridge at run
+// time: a task whose Type names a file-defined single-task kind (not a DB task
+// type) still gets that kind's instructions injected into the prompt.
+func TestBuildPromptUsesFileKindInstructions(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("TY_WORKFLOWS_DIR", dir)
+	if err := os.WriteFile(filepath.Join(dir, "polish.yaml"),
+		[]byte("name: polish\ninstructions: POLISH_MARKER — tighten the prose and fix typos.\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	tmpFile, err := os.CreateTemp("", "test-*.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(tmpFile.Name())
+	tmpFile.Close()
+	database, err := db.Open(tmpFile.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if err := database.CreateProject(&db.Project{Name: "test", Path: "/tmp/test"}); err != nil {
+		t.Fatal(err)
+	}
+
+	exec := New(database, &config.Config{})
+	task := &db.Task{Title: "polish the post", Body: "make it shine", Project: "test", Type: "polish"}
+	if err := database.CreateTask(task); err != nil {
+		t.Fatal(err)
+	}
+
+	prompt := exec.buildPrompt(task, nil)
+	if !strings.Contains(prompt, "POLISH_MARKER") {
+		t.Errorf("prompt should include the file kind's instructions; got:\n%s", prompt)
+	}
+}
