@@ -93,16 +93,13 @@ func TestRegistryMergesCustom(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "build-and-qa.yaml"), []byte(sampleYAML), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	// Custom appears alongside the built-in.
+	// A workflow file is discovered by Get; there are no built-ins.
 	if _, ok := Get("build-and-qa"); !ok {
 		t.Error("custom workflow not resolved by Get")
 	}
-	if _, ok := Get(DefaultDefinition); !ok {
-		t.Error("built-in should still resolve")
-	}
 	names := DefinitionNames()
-	if !contains(names, "build-and-qa") || !contains(names, DefaultDefinition) {
-		t.Errorf("DefinitionNames = %v, want built-in + custom", names)
+	if !contains(names, "build-and-qa") {
+		t.Errorf("DefinitionNames = %v, want the custom workflow", names)
 	}
 }
 
@@ -132,14 +129,6 @@ func TestComposeDerivesHandoffFromDAG(t *testing.T) {
 	// The author's prompt is carried through.
 	if !strings.Contains(build, "Build it.") {
 		t.Error("composed body should include the author's prompt")
-	}
-}
-
-func TestBuiltinUsesInstructionVerbatim(t *testing.T) {
-	def, _ := Get(DefaultDefinition)
-	got := effectiveInstruction(def, "Plan")
-	if got != planInstruction {
-		t.Error("built-in step should use its Instruction verbatim")
 	}
 }
 

@@ -1685,6 +1685,20 @@ func (e *Executor) getProjectInstructions(project string) string {
 	return p.Instructions
 }
 
+// lookupKindInstructions returns the instructions of a file-defined single-task
+// kind whose name matches task.Type (the convention bridge that lets a kind be
+// used as a task type), searching the global and project-local kind dirs.
+func (e *Executor) lookupKindInstructions(task *db.Task) string {
+	if task == nil || task.Type == "" {
+		return ""
+	}
+	var projectDir string
+	if p, err := e.db.GetProjectByName(task.Project); err == nil && p != nil {
+		projectDir = p.Path
+	}
+	return pipeline.LookupKindInstructions(task.Type, pipeline.WorkflowDirs(projectDir)...)
+}
+
 // prepareAttachments writes task attachments to .claude/attachments/ in the worktree.
 // This allows Claude to read them without permission prompts since .claude/ is trusted.
 // Returns a list of file paths and a cleanup function.
@@ -1785,6 +1799,12 @@ func (e *Executor) buildPrompt(task *db.Task, attachmentPaths []string) string {
 		if err == nil && taskType != nil {
 			// Apply template substitutions for type-specific instructions
 			instructions := e.applyTemplateSubstitutions(taskType.Instructions, task, projectInstructions, similarTasks, attachments, conversationHistory)
+			prompt.WriteString(instructions)
+			prompt.WriteString("\n")
+		} else if kindInstr := e.lookupKindInstructions(task); kindInstr != "" {
+			// Convention bridge: the Type names a file-defined single-task kind (not a
+			// DB type), so use that kind's instructions — a kind works as a type.
+			instructions := e.applyTemplateSubstitutions(kindInstr, task, projectInstructions, similarTasks, attachments, conversationHistory)
 			prompt.WriteString(instructions)
 			prompt.WriteString("\n")
 		} else {

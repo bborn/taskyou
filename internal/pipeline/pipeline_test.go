@@ -10,10 +10,11 @@ import (
 )
 
 // TestMain isolates the whole package's tests from the developer's real workflows
-// dir (~/.config/task/workflows). registry() overlays custom YAML from WorkflowsDir()
-// onto the in-code built-ins, so a stray local workflow named like a built-in (e.g.
-// plan-code-review) would shadow it and break tests that assert the built-in shape.
-// Pointing TY_WORKFLOWS_DIR at an empty dir makes every test see built-ins only.
+// dir (~/.config/task/workflows). With no built-in workflows (kinds live in the DB;
+// a workflow is a same-named file), a stray local workflow file is the only source
+// registry() would pick up — so pointing TY_WORKFLOWS_DIR at an empty dir keeps every
+// test deterministic. Tests that need a specific workflow install one (see
+// installWorkflow), which overrides this per-test via t.Setenv.
 func TestMain(m *testing.M) {
 	dir, err := os.MkdirTemp("", "pipeline-workflows-empty-*")
 	if err != nil {
@@ -23,6 +24,29 @@ func TestMain(m *testing.M) {
 	code := m.Run()
 	os.RemoveAll(dir)
 	os.Exit(code)
+}
+
+// pcrYAML is a plan → code → 2 parallel reviews → collect workflow, as a custom
+// file (there are no built-in workflows). Tests install it to exercise the DAG.
+const pcrYAML = `
+name: pcr
+description: plan, code, two parallel reviews, collect
+steps:
+  - {name: Plan, model: opus, prompt: "Plan {{goal}}."}
+  - {name: Code, deps: [Plan], prompt: "Implement it."}
+  - {name: Review A, deps: [Code], prompt: "Review it."}
+  - {name: Review B, deps: [Code], prompt: "Review it."}
+  - {name: Collect, deps: [Review A, Review B], prompt: "Collect and open a PR."}
+`
+
+// installWorkflow writes a workflow file to a fresh global kinds dir for the test.
+func installWorkflow(t *testing.T, name, yaml string) {
+	t.Helper()
+	dir := t.TempDir()
+	t.Setenv("TY_WORKFLOWS_DIR", dir)
+	if err := os.WriteFile(filepath.Join(dir, name+".yaml"), []byte(yaml), 0o644); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func testDB(t *testing.T) *db.DB {
@@ -49,29 +73,10 @@ func taskByStep(res *Result, step string) *db.Task {
 	return nil
 }
 
-func TestDefaultDefinitionIsValidDAG(t *testing.T) {
-	def, ok := Get("")
-	if !ok {
-		t.Fatal("default definition missing")
-	}
-	if def.Name != DefaultDefinition {
-		t.Errorf("default = %q, want %q", def.Name, DefaultDefinition)
-	}
-	if err := def.validate(); err != nil {
-		t.Fatalf("default definition invalid: %v", err)
-	}
-	// It should be the plan → code → 2 parallel reviews → collect shape.
-	if len(def.Steps) != 5 {
-		t.Errorf("got %d steps, want 5", len(def.Steps))
-	}
-	if roots := def.Roots(); len(roots) != 1 || roots[0].Name != "Plan" {
-		t.Errorf("roots = %v, want [Plan]", roots)
-	}
-}
-
 func TestCreateBuildsDAG(t *testing.T) {
+	installWorkflow(t, "pcr", pcrYAML)
 	database := testDB(t)
-	res, err := Create(database, Options{Goal: "Add rate limiting to the API", Project: "test", Execute: true})
+	res, err := Create(database, Options{Goal: "Add rate limiting to the API", Project: "test", Definition: "pcr", Execute: true})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -127,10 +132,10 @@ func TestCreateBuildsDAG(t *testing.T) {
 			t.Errorf("%s body missing goal/branch", tk.Title)
 		}
 	}
-	// Parallel reviewers write distinct review files and push to their OWN branch
-	// (not the shared branch) so a weak agent can't clobber the other reviewer.
-	if !strings.Contains(rvA.Body, "review-review-a.md") || !strings.Contains(rvA.Body, wantBranch+"-review-a") {
-		t.Errorf("Review A body missing its review file / own branch: %s", rvA.Body)
+	// Parallel reviewers push to their OWN branch (not the shared branch) so a weak
+	// agent can't clobber the other reviewer.
+	if !strings.Contains(rvA.Body, wantBranch+"-review-a") {
+		t.Errorf("Review A body missing its own branch: %s", rvA.Body)
 	}
 	if !strings.Contains(rvB.Body, wantBranch+"-review-b") {
 		t.Errorf("Review B body missing its own review branch")
@@ -142,8 +147,9 @@ func TestCreateBuildsDAG(t *testing.T) {
 }
 
 func TestCreateAutoAdvancesDAGWithParallelJoin(t *testing.T) {
+	installWorkflow(t, "pcr", pcrYAML)
 	database := testDB(t)
-	res, err := Create(database, Options{Goal: "Ship it", Project: "test", Execute: true})
+	res, err := Create(database, Options{Goal: "Ship it", Project: "test", Definition: "pcr", Execute: true})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}

@@ -93,38 +93,38 @@ The same UI is also served in your browser at `http://localhost:8484` whenever `
 
 A **workflow** turns a single goal into a small DAG of step tasks that run on one shared git branch, each routed to its own executor and model, advancing automatically. Steps are sequential where they depend on each other and **parallel** where they don't.
 
-The built-in `plan-code-review` workflow:
+There are **no built-in workflows** — a workflow is a YAML file you write. For example, a `plan-code-review.yaml`:
 
 ```
 Plan ──▶ Code ──▶ Review A ─┐
                   Review B ─┴─▶ Collect ──▶ PR
 ```
 
-| Step | Default | Job |
-|------|---------|-----|
-| **Plan** | Claude / Opus | Explore, write `PLAN.md`, push. No code. |
-| **Code** | Claude / Sonnet | Implement the plan, push. |
-| **Review A**, **Review B** | Claude / Opus, Claude / Sonnet | Two **independent** reviewers in parallel — different models + independent context catch different issues and avoid self-review bias. |
-| **Collect** | Claude / Sonnet | Read both reviews, apply the fixes worth applying, open the PR. |
+| Step | Model | Job |
+|------|-------|-----|
+| **Plan** | Opus | Explore, write `PLAN.md`, push. No code. |
+| **Code** | Sonnet | Implement the plan, push. |
+| **Review A**, **Review B** | Opus, Sonnet | Two **independent** reviewers in parallel — different models + independent context catch different issues and avoid self-review bias. |
+| **Collect** | Sonnet | Read both reviews, apply the fixes worth applying, open the PR. |
 
 Steps advance with no human in the loop; a workflow only pauses when a step genuinely needs one — the final step opens a PR (landing in `blocked` for a human merge) or a step asks for input.
 
 ### Running a workflow
 
 ```bash
-# CLI
-ty pipeline "Add rate limiting to the API" --project myapp
-ty pipeline --list                 # show available workflows
-ty pipeline "..." --no-execute     # stage without starting
+# CLI — pick the kind with -d (there is no default workflow)
+ty pipeline "Add rate limiting to the API" -p myapp -d plan-code-review
+ty pipeline --list                 # show available workflows (the YAML files)
+ty pipeline "..." -d <kind> --no-execute   # stage without starting
 
-# TUI: in the new-task form (n), pick a workflow in the "Workflow" selector.
+# TUI: in the new-task form (n), pick it in the "Kind" selector (types and workflows in one list).
 ```
 
 On the board, a workflow shows as a **single card** (`⇄ goal · Review ∥ · 3/5`) instead of one card per step. It needs a project that uses git worktrees and has a remote to push to.
 
-### Custom workflows
+### Authoring workflows
 
-Workflows are defined in plain **YAML files** — one per workflow — in `~/.config/task/workflows/*.yaml` (override with `$TY_WORKFLOWS_DIR`), or per-project in `.taskyou/workflows/`. A file shadows a built-in of the same name. You write only *what* each step does and its `deps`; the git handoff (which branch to push to, when to open the PR) is derived from the step's position in the DAG.
+Workflows are plain **YAML files** — one per workflow — in `~/.config/task/workflows/*.yaml` (override with `$TY_WORKFLOWS_DIR`), or per-project in `.taskyou/workflows/`. The file name is the kind name. You write only *what* each step does and its `deps`; the git handoff (which branch to push to, when to open the PR) is derived from the step's position in the DAG.
 
 ```yaml
 name: build-and-qa
@@ -148,6 +148,28 @@ ty pipeline edit                   # writes ~/.config/task/workflows/plan-code-r
 ```
 
 Custom workflows appear in `ty pipeline --list`, the `--definition` flag, and the TUI new-task selector automatically. Configuration lives entirely in these files — edit them by hand any time.
+
+### Kinds: types and workflows are one thing
+
+A **kind** is what you pick when you make a task. Kinds live in **one store — the DB** (they're the task types: `code`, `writing`, `thinking`, plus any you add). A kind **runs as a workflow purely by convention: when a same-named YAML file adds steps.** No file → a single task using the kind's instructions. There are no built-in workflows and no second store.
+
+```
+pick "code"          → single task   (DB kind, no file)
+pick "plan-code-review" → workflow    (DB kind + plan-code-review.yaml adds steps)
+```
+
+A workflow's steps can **run other kinds** by name — and if a referenced kind is itself a workflow (has a file), its steps are inlined at build time, so you compose big flows from small ones:
+
+```yaml
+# ~/.config/task/workflows/ship.yaml
+name: ship
+steps:
+  - {name: Build,  kind: plan-code-review}          # a whole workflow, inlined
+  - {name: QA,     kind: code, deps: [Build]}        # a DB kind → sets the step's type
+  - {name: Deploy, prompt: "Deploy it.", deps: [QA]}
+```
+
+A step's `kind:` sets that step's task **type**, so the kind's instructions apply — `code`, `writing`, or any kind is referenceable with no extra wiring. Cycles and runaway nesting are rejected at build time.
 
 ## Project Context
 

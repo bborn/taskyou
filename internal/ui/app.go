@@ -1177,7 +1177,11 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.newTaskForm = nil
 			m.showWelcome = false
 			n := len(msg.result.Tasks)
-			m.notification = fmt.Sprintf("%s Created %s workflow (%d steps) on %s", IconDone(), msg.result.Definition.Name, n, msg.result.Branch)
+			if msg.result.Definition.IsSingle() {
+				m.notification = fmt.Sprintf("%s Created %s task", IconDone(), msg.result.Definition.Name)
+			} else {
+				m.notification = fmt.Sprintf("%s Created %s workflow (%d steps) on %s", IconDone(), msg.result.Definition.Name, n, msg.result.Branch)
+			}
 			m.notifyUntil = time.Now().Add(6 * time.Second)
 			cmds = append(cmds, m.loadTasks())
 		} else {

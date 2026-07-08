@@ -820,22 +820,16 @@ to its own executor and model, that hand work forward on a single shared branch
 and advance automatically — sequential where steps depend on each other, parallel
 where they don't.
 
-The default 'plan-code-review' workflow runs five steps on one branch:
-  Plan     (Claude / Opus)   — writes PLAN.md, no code
-  Code     (Claude / Sonnet) — implements the plan
-  Review A (Claude / Opus)   \
-  Review B (Claude / Sonnet)  } two independent reviewers, in parallel
-  Collect  (Claude / Sonnet) — merges reviews, applies fixes, opens the PR
-
-Workflows are defined in YAML files you can edit; define your own (add a QA step,
-a different shape) with 'task pipeline new "<describe it>"' or 'task pipeline edit'.
+A kind runs as a workflow when a same-named YAML file adds steps (there are no
+built-in workflows). Pick the kind with -d; workflow files live in the workflows
+dir. Define your own (add a QA step, a different shape) with
+'task pipeline new "<describe it>"' or by editing the file.
 
 Each step commits and pushes the shared branch, so the workflow needs a project
 that uses git worktrees and has a remote to push to.
 
 Examples:
-  task pipeline "Add rate limiting to the API" --project myapp
-  task pipeline "Refactor the auth module" -p myapp --definition my-workflow
+  task pipeline "Add rate limiting" -p myapp -d plan-code-verify
   task pipeline new "plan, build, security review + QA in parallel, then finalize"
   task pipeline --list  # show available workflows`,
 		Args: cobra.MaximumNArgs(1),
@@ -859,7 +853,11 @@ Examples:
 					if d.Custom {
 						origin = "custom"
 					}
-					fmt.Printf("%s %s\n  %s\n  steps: %s\n", successStyle.Render(d.Name), dimStyle.Render("("+origin+")"), d.Description, strings.Join(stepLabels, " · "))
+					shape := "steps: " + strings.Join(stepLabels, " · ")
+					if d.IsSingle() {
+						shape = dimStyle.Render("single task")
+					}
+					fmt.Printf("%s %s\n  %s\n  %s\n", successStyle.Render(d.Name), dimStyle.Render("("+origin+")"), d.Description, shape)
 				}
 				fmt.Println(dimStyle.Render("Custom workflows: " + pipeline.WorkflowsDir() + "/*.yaml  ·  create with: task pipeline new \"<describe it>\""))
 				return
@@ -881,6 +879,10 @@ Examples:
 
 			project, _ := cmd.Flags().GetString("project")
 			definition, _ := cmd.Flags().GetString("definition")
+			if strings.TrimSpace(definition) == "" {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: pick a kind with -d (there is no default workflow). See 'ty pipeline --list'."))
+				os.Exit(1)
+			}
 			permissionModeFlag, _ := cmd.Flags().GetString("permission-mode")
 			createDangerous, _ := cmd.Flags().GetBool("dangerous")
 			noExecute, _ := cmd.Flags().GetBool("no-execute")
@@ -922,6 +924,26 @@ Examples:
 			if err != nil {
 				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
 				os.Exit(1)
+			}
+
+			// A single-task kind (no steps) produced one ordinary task, not a DAG.
+			if result.Definition.IsSingle() {
+				t := result.Tasks[0]
+				if outputJSON {
+					out := map[string]interface{}{
+						"definition": result.Definition.Name,
+						"project":    project,
+						"task":       map[string]interface{}{"id": t.ID, "type": t.Type, "status": t.Status},
+					}
+					jsonBytes, _ := json.Marshal(out)
+					fmt.Println(string(jsonBytes))
+					return
+				}
+				fmt.Println(successStyle.Render(fmt.Sprintf("Created %s task #%d (%s)", result.Definition.Name, t.ID, t.Status)))
+				if noExecute {
+					fmt.Println(dimStyle.Render("Staged but not started — queue it to run."))
+				}
+				return
 			}
 
 			if outputJSON {
@@ -1069,25 +1091,19 @@ Examples:
 	pipelineNewCmd.Flags().Bool("print", false, "Print the YAML without saving")
 	pipelineCmd.AddCommand(pipelineNewCmd)
 
-	// Pipeline edit subcommand - write a workflow to a YAML file for editing
+	// Pipeline edit subcommand - point at (or print) a workflow's YAML file
 	pipelineEditCmd := &cobra.Command{
-		Use:   "edit [name]",
-		Short: "Write a workflow to a YAML file you can edit (ejects the built-in)",
-		Long: `Workflows are configured by editing their YAML file. This writes the named
-workflow (default: ` + pipeline.DefaultDefinition + `) to the workflows directory so you can
-change models, prompts, or steps by hand. A custom file shadows the built-in of
-the same name.
+		Use:   "edit <name>",
+		Short: "Show the YAML file for a workflow kind so you can edit it",
+		Long: `A workflow is a YAML file named after a kind. This prints the file's path (or,
+with --print, its contents) so you can change models, prompts, or steps by hand.
 
 Examples:
-  task pipeline edit                       # eject the default workflow to edit
-  task pipeline edit plan-code-review      # same, explicit
-  task pipeline edit --print               # print the YAML instead of writing it`,
-		Args: cobra.MaximumNArgs(1),
+  task pipeline edit plan-code-verify      # show the file to edit
+  task pipeline edit plan-code-verify --print   # print the YAML`,
+		Args: cobra.ExactArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
-			name := pipeline.DefaultDefinition
-			if len(args) > 0 {
-				name = args[0]
-			}
+			name := args[0]
 			printOnly, _ := cmd.Flags().GetBool("print")
 
 			def, ok := pipeline.Get(name)
