@@ -8,6 +8,7 @@ import (
 
 	"github.com/bborn/workflow/internal/db"
 	"github.com/bborn/workflow/internal/github"
+	"github.com/bborn/workflow/internal/pipeline"
 )
 
 // emptyColumnMessage returns a contextual message for empty columns.
@@ -48,13 +49,14 @@ type KanbanBoard struct {
 	collapsedColumns  map[int]bool // Columns that are collapsed (show only header)
 	width             int
 	height            int
-	allTasks          []*db.Task               // All tasks
-	prInfo            map[int64]*github.PRInfo // PR info by task ID
-	runningProcesses  map[int64]bool           // Tasks with running shell processes
-	tasksNeedingInput map[int64]bool           // Tasks waiting for user input (active input notification)
-	blockedByDeps     map[int64]int            // Tasks blocked by dependencies (task ID -> open blocker count)
-	hiddenDoneCount   int                      // Number of done tasks not shown (older ones)
-	originColumn      int                      // Column where detail view navigation started (-1 = not set)
+	allTasks          []*db.Task                // All tasks
+	prInfo            map[int64]*github.PRInfo  // PR info by task ID
+	runningProcesses  map[int64]bool            // Tasks with running shell processes
+	tasksNeedingInput map[int64]bool            // Tasks waiting for user input (active input notification)
+	blockedByDeps     map[int64]int             // Tasks blocked by dependencies (task ID -> open blocker count)
+	workflowGroups    map[int64]*pipeline.Group // Lead task ID -> workflow group (collapsed workflow cards)
+	hiddenDoneCount   int                       // Number of done tasks not shown (older ones)
+	originColumn      int                       // Column where detail view navigation started (-1 = not set)
 
 	// Render cache. View() is called on every Bubble Tea Update (key, tick,
 	// mouse move, task event), but the board's pixels only change when one of
@@ -211,6 +213,20 @@ func (k *KanbanBoard) NeedsInput(taskID int64) bool {
 
 // SetBlockedByDeps updates the map of tasks blocked by dependencies.
 // The map contains task ID -> number of open blockers.
+// SetWorkflowGroups records the collapsed workflow groups, keyed by the lead task
+// whose card represents the whole workflow on the board.
+func (k *KanbanBoard) SetWorkflowGroups(groups map[int64]*pipeline.Group) {
+	k.workflowGroups = groups
+}
+
+// workflowGroup returns the workflow group a task leads, or nil.
+func (k *KanbanBoard) workflowGroup(taskID int64) *pipeline.Group {
+	if k.workflowGroups == nil {
+		return nil
+	}
+	return k.workflowGroups[taskID]
+}
+
 func (k *KanbanBoard) SetBlockedByDeps(blockedByDeps map[int64]int) {
 	k.blockedByDeps = blockedByDeps
 }
@@ -797,6 +813,18 @@ func (k *KanbanBoard) hashTaskCard(h *sigHasher, t *db.Task) {
 	if t.Status == db.StatusProcessing {
 		h.int(k.spinnerFrame)
 	}
+	// Workflow lead cards render the goal + step progress instead of the raw
+	// title/sub-line, so the workflow's shape must feed the signature or the card
+	// caches serve a stale badge as the workflow advances.
+	if g := k.workflowGroup(t.ID); g != nil {
+		h.boolean(true)
+		h.str(g.Goal())
+		h.str(g.StepLabel())
+		h.int(g.DoneCount())
+		h.int(g.Total())
+	} else {
+		h.boolean(false)
+	}
 }
 
 // collapsedColumnWidth is the fixed width for collapsed column strips.
@@ -1306,8 +1334,14 @@ func (k *KanbanBoard) renderTaskCard(task *db.Task, width int, isSelected bool) 
 		}
 	}
 
-	// Title (truncate if needed)
+	// Title (truncate if needed). Workflow lead cards show the goal with a "⇄"
+	// marker in place of the "[Step] goal" step title, so one card stands for the
+	// whole workflow.
+	wf := k.workflowGroup(task.ID)
 	title := task.Title
+	if wf != nil {
+		title = "⇄ " + wf.Goal()
+	}
 	maxTitleLen := width - 4
 	if maxTitleLen < 10 {
 		maxTitleLen = 10
@@ -1360,7 +1394,18 @@ func (k *KanbanBoard) renderTaskCard(task *db.Task, width int, isSelected bool) 
 		cardStyle = cardStyle.Foreground(ColorWarning)
 	}
 
-	content := idLine + "\n" + titleLine + "\n" + k.cardSubLine(task, width, isSelected)
+	subLine := k.cardSubLine(task, width, isSelected)
+	if wf != nil {
+		// Replace the per-task activity line with workflow progress: the current
+		// step (or "Review ∥" during the parallel fan-out) and steps completed.
+		badge := fmt.Sprintf("%s · %d/%d", wf.StepLabel(), wf.DoneCount(), wf.Total())
+		if isSelected {
+			subLine = badge
+		} else {
+			subLine = Dim.Render(badge)
+		}
+	}
+	content := idLine + "\n" + titleLine + "\n" + subLine
 	rendered := cardStyle.Render(content)
 
 	if k.cardCache == nil || len(k.cardCache) >= cardCacheMax {

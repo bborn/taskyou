@@ -32,6 +32,7 @@ import (
 	"github.com/bborn/workflow/internal/github"
 	"github.com/bborn/workflow/internal/hooks"
 	"github.com/bborn/workflow/internal/mcp"
+	"github.com/bborn/workflow/internal/pipeline"
 	"github.com/bborn/workflow/internal/ui"
 	"github.com/bborn/workflow/internal/web"
 )
@@ -809,6 +810,322 @@ Examples:
 		return db.ModelOptions(), cobra.ShellCompDirectiveNoFileComp
 	})
 	rootCmd.AddCommand(createCmd)
+
+	// Pipeline subcommand - create a multi-phase pipeline task
+	pipelineCmd := &cobra.Command{
+		Use:   "pipeline [goal]",
+		Short: "Create a multi-model plan → code → review pipeline for a goal",
+		Long: `Create a workflow: one goal broken into a small DAG of step tasks, each routed
+to its own executor and model, that hand work forward on a single shared branch
+and advance automatically — sequential where steps depend on each other, parallel
+where they don't.
+
+The default 'plan-code-review' workflow runs five steps on one branch:
+  Plan     (Claude / Opus)   — writes PLAN.md, no code
+  Code     (Claude / Sonnet) — implements the plan
+  Review A (Claude / Opus)   \
+  Review B (Claude / Sonnet)  } two independent reviewers, in parallel
+  Collect  (Claude / Sonnet) — merges reviews, applies fixes, opens the PR
+
+Workflows are defined in YAML files you can edit; define your own (add a QA step,
+a different shape) with 'task pipeline new "<describe it>"' or 'task pipeline edit'.
+
+Each step commits and pushes the shared branch, so the workflow needs a project
+that uses git worktrees and has a remote to push to.
+
+Examples:
+  task pipeline "Add rate limiting to the API" --project myapp
+  task pipeline "Refactor the auth module" -p myapp --definition my-workflow
+  task pipeline new "plan, build, security review + QA in parallel, then finalize"
+  task pipeline --list  # show available workflows`,
+		Args: cobra.MaximumNArgs(1),
+		Run: func(cmd *cobra.Command, args []string) {
+			listDefs, _ := cmd.Flags().GetBool("list")
+			if listDefs {
+				for _, d := range pipeline.Definitions() {
+					stepLabels := make([]string, 0, len(d.Steps))
+					for _, s := range d.Steps {
+						label := s.Name + " (" + s.Executor
+						if s.Model != "" {
+							label += "/" + s.Model
+						}
+						label += ")"
+						if len(s.Deps) > 0 {
+							label += " ← " + strings.Join(s.Deps, "+")
+						}
+						stepLabels = append(stepLabels, label)
+					}
+					origin := "built-in"
+					if d.Custom {
+						origin = "custom"
+					}
+					fmt.Printf("%s %s\n  %s\n  steps: %s\n", successStyle.Render(d.Name), dimStyle.Render("("+origin+")"), d.Description, strings.Join(stepLabels, " · "))
+				}
+				fmt.Println(dimStyle.Render("Custom workflows: " + pipeline.WorkflowsDir() + "/*.yaml  ·  create with: task pipeline new \"<describe it>\""))
+				return
+			}
+
+			var goal string
+			if len(args) > 0 {
+				goal = args[0]
+			}
+			body, _ := cmd.Flags().GetString("body")
+			body = unescapeNewlines(body)
+			if strings.TrimSpace(goal) == "" {
+				goal = body
+			}
+			if strings.TrimSpace(goal) == "" {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: a goal (positional argument or --body) is required"))
+				os.Exit(1)
+			}
+
+			project, _ := cmd.Flags().GetString("project")
+			definition, _ := cmd.Flags().GetString("definition")
+			permissionModeFlag, _ := cmd.Flags().GetString("permission-mode")
+			createDangerous, _ := cmd.Flags().GetBool("dangerous")
+			noExecute, _ := cmd.Flags().GetBool("no-execute")
+			outputJSON, _ := cmd.Flags().GetBool("json")
+
+			dbPath := db.DefaultPath()
+			database, err := openTaskDB(dbPath)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+			defer database.Close()
+
+			// Detect project from cwd if not specified.
+			if project == "" {
+				if cwd, err := os.Getwd(); err == nil {
+					if p, err := database.GetProjectByPath(cwd); err == nil && p != nil {
+						project = p.Name
+					}
+				}
+			}
+			if project == "" {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: could not determine project; pass --project"))
+				os.Exit(1)
+			}
+
+			permMode := db.NormalizePermissionMode(permissionModeFlag)
+			if permMode == "" && createDangerous {
+				permMode = db.PermissionModeDangerous
+			}
+
+			result, err := pipeline.Create(database, pipeline.Options{
+				Goal:           goal,
+				Project:        project,
+				Definition:     definition,
+				PermissionMode: permMode,
+				Execute:        !noExecute,
+			})
+			if err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+
+			if outputJSON {
+				steps := make([]map[string]interface{}, 0, len(result.Tasks))
+				for i, t := range result.Tasks {
+					steps = append(steps, map[string]interface{}{
+						"step":     result.Definition.Steps[i].Name,
+						"deps":     result.Definition.Steps[i].Deps,
+						"id":       t.ID,
+						"executor": t.Executor,
+						"model":    t.Model,
+						"status":   t.Status,
+					})
+				}
+				out := map[string]interface{}{
+					"definition": result.Definition.Name,
+					"branch":     result.Branch,
+					"project":    project,
+					"steps":      steps,
+				}
+				jsonBytes, _ := json.Marshal(out)
+				fmt.Println(string(jsonBytes))
+				return
+			}
+
+			fmt.Println(successStyle.Render(fmt.Sprintf("Created %s workflow on branch %s", result.Definition.Name, result.Branch)))
+			for i, t := range result.Tasks {
+				s := result.Definition.Steps[i]
+				model := s.Model
+				if model == "" {
+					model = "default"
+				}
+				dep := ""
+				if len(s.Deps) > 0 {
+					dep = "  ← " + strings.Join(s.Deps, "+")
+				}
+				fmt.Printf("  #%d  %-9s %s/%s  (%s)%s\n", t.ID, s.Name, t.Executor, model, t.Status, dep)
+			}
+			if noExecute {
+				fmt.Println(dimStyle.Render("Staged but not started — queue the root step to run it."))
+			} else {
+				fmt.Println(dimStyle.Render("Running — steps advance automatically; parallel reviewers run at once."))
+			}
+		},
+	}
+	pipelineCmd.Flags().String("body", "", "Goal text (alternative to the positional argument)")
+	pipelineCmd.Flags().StringP("project", "p", "", "Project name (auto-detected from cwd if not specified)")
+	pipelineCmd.Flags().StringP("definition", "d", pipeline.DefaultDefinition, "Pipeline definition to use")
+	pipelineCmd.Flags().String("permission-mode", "", "Permission mode for every phase: default, accept-edits, auto, dangerous (defaults to the project's setting)")
+	pipelineCmd.Flags().Bool("dangerous", false, "Run every phase in dangerous mode (alias for --permission-mode dangerous)")
+	pipelineCmd.Flags().Bool("no-execute", false, "Stage the workflow without queuing the root step")
+	pipelineCmd.Flags().Bool("list", false, "List available workflow definitions and exit")
+	pipelineCmd.Flags().Bool("json", false, "Output in JSON format")
+	pipelineCmd.RegisterFlagCompletionFunc("project", completeFlagProjects)
+	pipelineCmd.RegisterFlagCompletionFunc("definition", func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		return pipeline.DefinitionNames(), cobra.ShellCompDirectiveNoFileComp
+	})
+
+	// Pipeline new subcommand - author a custom workflow from a free-text description
+	pipelineNewCmd := &cobra.Command{
+		Use:   "new [description]",
+		Short: "Create a custom workflow from a free-text description (LLM → YAML)",
+		Long: `Describe a workflow in plain English and get a ready-to-edit YAML file.
+The steps, dependencies (the DAG), and per-step prompts are generated; the git
+handoff between steps is added automatically at run time, so prompts describe
+only the work.
+
+Custom workflows live in ` + "`~/.config/task/workflows/*.yaml`" + ` (override with
+$TY_WORKFLOWS_DIR) and can also be dropped in a project's .taskyou/workflows/.
+Edit the file by hand any time — it's just YAML.
+
+Examples:
+  task pipeline new "spike three approaches, build the best, then write tests"
+  task pipeline new "plan, implement, security review, then QA in a browser" --name secure-flow
+  task pipeline new "..." --print        # print the YAML without saving`,
+		Args: cobra.MaximumNArgs(1),
+		Run: func(cmd *cobra.Command, args []string) {
+			desc, _ := cmd.Flags().GetString("body")
+			if len(args) > 0 {
+				desc = strings.TrimSpace(args[0] + " " + desc)
+			}
+			desc = strings.TrimSpace(unescapeNewlines(desc))
+			if desc == "" {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: describe the workflow (positional arg or --body)"))
+				os.Exit(1)
+			}
+			nameOverride, _ := cmd.Flags().GetString("name")
+			printOnly, _ := cmd.Flags().GetBool("print")
+
+			database, err := openTaskDB(db.DefaultPath())
+			if err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+			defer database.Close()
+			apiKey, _ := database.GetSetting("anthropic_api_key")
+
+			fmt.Fprintln(os.Stderr, dimStyle.Render("Designing workflow…"))
+			ctx, cancel := context.WithTimeout(context.Background(), 70*time.Second)
+			defer cancel()
+			def, yamlBytes, err := pipeline.GenerateDefinition(ctx, apiKey, desc)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+			if nameOverride != "" {
+				def.Name = nameOverride
+				yamlBytes, _ = pipeline.Marshal(def)
+			}
+
+			if printOnly {
+				fmt.Print(string(yamlBytes))
+				return
+			}
+
+			dir := pipeline.WorkflowsDir()
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+			path := filepath.Join(dir, def.Name+".yaml")
+			if err := os.WriteFile(path, yamlBytes, 0o644); err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+
+			fmt.Println(successStyle.Render("Created workflow '" + def.Name + "'"))
+			for _, s := range def.Steps {
+				dep := ""
+				if len(s.Deps) > 0 {
+					dep = "  ← " + strings.Join(s.Deps, "+")
+				}
+				model := s.Model
+				if model == "" {
+					model = "default"
+				}
+				fmt.Printf("  %-12s %s/%s%s\n", s.Name, s.Executor, model, dep)
+			}
+			fmt.Println(dimStyle.Render("Saved to " + path + " — edit it any time."))
+			fmt.Println(dimStyle.Render("Run it with: task pipeline \"<goal>\" --definition " + def.Name))
+		},
+	}
+	pipelineNewCmd.Flags().String("body", "", "Workflow description (alternative to the positional argument)")
+	pipelineNewCmd.Flags().String("name", "", "Override the generated workflow name")
+	pipelineNewCmd.Flags().Bool("print", false, "Print the YAML without saving")
+	pipelineCmd.AddCommand(pipelineNewCmd)
+
+	// Pipeline edit subcommand - write a workflow to a YAML file for editing
+	pipelineEditCmd := &cobra.Command{
+		Use:   "edit [name]",
+		Short: "Write a workflow to a YAML file you can edit (ejects the built-in)",
+		Long: `Workflows are configured by editing their YAML file. This writes the named
+workflow (default: ` + pipeline.DefaultDefinition + `) to the workflows directory so you can
+change models, prompts, or steps by hand. A custom file shadows the built-in of
+the same name.
+
+Examples:
+  task pipeline edit                       # eject the default workflow to edit
+  task pipeline edit plan-code-review      # same, explicit
+  task pipeline edit --print               # print the YAML instead of writing it`,
+		Args: cobra.MaximumNArgs(1),
+		Run: func(cmd *cobra.Command, args []string) {
+			name := pipeline.DefaultDefinition
+			if len(args) > 0 {
+				name = args[0]
+			}
+			printOnly, _ := cmd.Flags().GetBool("print")
+
+			def, ok := pipeline.Get(name)
+			if !ok {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: unknown workflow "+name))
+				os.Exit(1)
+			}
+			yamlBytes, err := pipeline.Marshal(def)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+			if printOnly {
+				fmt.Print(string(yamlBytes))
+				return
+			}
+			dir := pipeline.WorkflowsDir()
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+			path := filepath.Join(dir, def.Name+".yaml")
+			if _, statErr := os.Stat(path); statErr == nil {
+				fmt.Println(dimStyle.Render("Already exists — edit it: " + path))
+				return
+			}
+			if err := os.WriteFile(path, yamlBytes, 0o644); err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+			fmt.Println(successStyle.Render("Wrote " + def.Name + " to " + path))
+			fmt.Println(dimStyle.Render("Edit it, then run: task pipeline \"<goal>\" --definition " + def.Name))
+		},
+	}
+	pipelineEditCmd.Flags().Bool("print", false, "Print the YAML instead of writing a file")
+	pipelineCmd.AddCommand(pipelineEditCmd)
+
+	rootCmd.AddCommand(pipelineCmd)
 
 	// List subcommand - list tasks
 	listCmd := &cobra.Command{

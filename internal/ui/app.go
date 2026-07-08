@@ -25,6 +25,7 @@ import (
 	"github.com/bborn/workflow/internal/db"
 	"github.com/bborn/workflow/internal/executor"
 	"github.com/bborn/workflow/internal/github"
+	"github.com/bborn/workflow/internal/pipeline"
 	"github.com/bborn/workflow/internal/tasksummary"
 )
 
@@ -426,6 +427,7 @@ type AppModel struct {
 	newTaskForm        *FormModel
 	pendingTask        *db.Task
 	pendingAttachments []string
+	pendingPipeline    string // non-empty when the pending submission is a pipeline definition
 	queueConfirm       *huh.Form
 	queueValue         string
 
@@ -556,7 +558,31 @@ func (m *AppModel) updateTaskInList(task *db.Task) {
 			break
 		}
 	}
-	m.kanban.SetTasks(m.tasks)
+	m.kanban.SetTasks(m.collapseForBoard(m.tasks))
+}
+
+// collapseForBoard turns a task list into what the board should show: a workflow's
+// step tasks are folded into a single lead card (see pipeline.GroupWorkflows) so N
+// steps for one goal don't clutter the board as N cards. It also hands the kanban
+// the lead→group map so those cards can render workflow progress. Non-workflow
+// tasks pass through unchanged.
+func (m *AppModel) collapseForBoard(tasks []*db.Task) []*db.Task {
+	groups, rest := pipeline.GroupWorkflows(tasks)
+	leadMap := make(map[int64]*pipeline.Group, len(groups))
+	out := make([]*db.Task, 0, len(rest)+len(groups))
+	out = append(out, rest...)
+	for _, g := range groups {
+		lead := g.Lead()
+		if lead == nil {
+			continue
+		}
+		leadMap[lead.ID] = g
+		out = append(out, lead)
+	}
+	if m.kanban != nil {
+		m.kanban.SetWorkflowGroups(leadMap)
+	}
+	return out
 }
 
 // NewAppModel creates a new application model.
@@ -649,7 +675,7 @@ func NewAppModel(database *db.DB, exec *executor.Executor, workingDir string, ve
 func (m *AppModel) SetTasks(tasks []*db.Task) {
 	m.tasks = tasks
 	m.loading = false
-	m.kanban.SetTasks(tasks)
+	m.kanban.SetTasks(m.collapseForBoard(tasks))
 }
 
 // SetDebugStatePath sets the path for dumping debug state.
@@ -1141,6 +1167,19 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			} else {
 				cmds = append(cmds, m.loadTasks())
 			}
+		} else {
+			m.err = msg.err
+		}
+
+	case pipelineCreatedMsg:
+		if msg.err == nil && msg.result != nil {
+			m.currentView = ViewDashboard
+			m.newTaskForm = nil
+			m.showWelcome = false
+			n := len(msg.result.Tasks)
+			m.notification = fmt.Sprintf("%s Created %s workflow (%d steps) on %s", IconDone(), msg.result.Definition.Name, n, msg.result.Branch)
+			m.notifyUntil = time.Now().Add(6 * time.Second)
+			cmds = append(cmds, m.loadTasks())
 		} else {
 			m.err = msg.err
 		}
@@ -2313,8 +2352,8 @@ func (m *AppModel) refreshDetailPinnedNav() {
 // Uses the same matching logic as the command palette (Ctrl+P) for consistency.
 func (m *AppModel) applyFilter() {
 	if m.filterText == "" {
-		// No filter, show all tasks
-		m.kanban.SetTasks(m.tasks)
+		// No filter, show all tasks (workflows collapsed to one card each)
+		m.kanban.SetTasks(m.collapseForBoard(m.tasks))
 		return
 	}
 
@@ -2344,7 +2383,7 @@ func (m *AppModel) applyFilter() {
 	for i, st := range scored {
 		filtered[i] = st.task
 	}
-	m.kanban.SetTasks(filtered)
+	m.kanban.SetTasks(m.collapseForBoard(filtered))
 }
 
 // parseFilterProjects extracts completed [project] tags, any trailing partial project,
@@ -2722,6 +2761,7 @@ func (m *AppModel) updateNewTaskForm(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Store pending task and create confirmation form
 			m.pendingTask = form.GetDBTask()
 			m.pendingAttachments = form.GetAttachments()
+			m.pendingPipeline = form.Pipeline()
 			// Default to last queue choice for this project. Permission mode now
 			// lives on the task form, so this is just execute-now vs backlog;
 			// fold any legacy "auto"/"dangerous" choices into "yes".
@@ -2729,14 +2769,21 @@ func (m *AppModel) updateNewTaskForm(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if last, err := m.db.GetSetting("last_queue_choice:" + m.pendingTask.Project); err == nil && last != "" && last != "no" {
 				m.queueValue = "yes"
 			}
+			queueTitle := "Queue for execution?"
+			runOpt, stageOpt := "Yes — execute now", "No — save to backlog"
+			if m.pendingPipeline != "" {
+				queueTitle = "Start this workflow now?"
+				runOpt = "Yes — start now"
+				stageOpt = "No — save for later"
+			}
 			m.queueConfirm = huh.NewForm(
 				huh.NewGroup(
 					huh.NewSelect[string]().
 						Key("queue").
-						Title("Queue for execution?").
+						Title(queueTitle).
 						Options(
-							huh.NewOption("Yes — execute now", "yes"),
-							huh.NewOption("No — save to backlog", "no"),
+							huh.NewOption(runOpt, "yes"),
+							huh.NewOption(stageOpt, "no"),
 						).
 						Value(&m.queueValue),
 				),
@@ -2749,6 +2796,7 @@ func (m *AppModel) updateNewTaskForm(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if form.cancelled {
 			m.currentView = ViewDashboard
 			m.newTaskForm = nil
+			m.pendingPipeline = ""
 			return m, nil
 		}
 	}
@@ -2782,6 +2830,22 @@ func (m *AppModel) updateNewTaskConfirm(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Remember the choice for this project
 			m.db.SetSetting("last_queue_choice:"+m.pendingTask.Project, m.queueValue)
 
+			// A pipeline selection turns the pending task into the goal for a
+			// multi-phase chain instead of a single task. The queue choice maps to
+			// whether the first phase runs now (Execute) or the chain is staged.
+			if m.pendingPipeline != "" {
+				task := m.pendingTask
+				definition := m.pendingPipeline
+				execute := m.queueValue == "yes"
+				m.pendingTask = nil
+				m.pendingAttachments = nil
+				m.pendingPipeline = ""
+				m.newTaskForm = nil
+				m.queueConfirm = nil
+				m.currentView = ViewDashboard
+				return m, m.createPipeline(task, definition, execute)
+			}
+
 			// Permission mode is already set on the task from the form; this
 			// choice only decides whether to run now or save to the backlog.
 			switch m.queueValue {
@@ -2794,6 +2858,7 @@ func (m *AppModel) updateNewTaskConfirm(msg tea.Msg) (tea.Model, tea.Cmd) {
 			attachments := m.pendingAttachments
 			m.pendingTask = nil
 			m.pendingAttachments = nil
+			m.pendingPipeline = ""
 			m.newTaskForm = nil
 			m.queueConfirm = nil
 			m.currentView = ViewDashboard
@@ -3988,6 +4053,11 @@ type taskCreatedMsg struct {
 	err  error
 }
 
+type pipelineCreatedMsg struct {
+	result *pipeline.Result
+	err    error
+}
+
 type taskUpdatedMsg struct {
 	task *db.Task
 	err  error
@@ -4224,6 +4294,34 @@ func (m *AppModel) createTaskWithAttachments(t *db.Task, attachmentPaths []strin
 
 		exec.NotifyTaskChange("created", t)
 		return taskCreatedMsg{task: t, err: nil}
+	}
+}
+
+// createPipeline builds a multi-phase pipeline from the form's task, using its
+// title/body as the goal and its project/permission mode for every phase. The
+// task itself is not persisted — it is only the goal carrier.
+func (m *AppModel) createPipeline(t *db.Task, definition string, execute bool) tea.Cmd {
+	database := m.db
+	return func() tea.Msg {
+		goal := strings.TrimSpace(t.Title)
+		if body := strings.TrimSpace(t.Body); body != "" {
+			if goal == "" {
+				goal = body
+			} else {
+				goal = goal + "\n\n" + body
+			}
+		}
+		result, err := pipeline.Create(database, pipeline.Options{
+			Goal:           goal,
+			Project:        t.Project,
+			Definition:     definition,
+			PermissionMode: t.PermissionMode,
+			Execute:        execute,
+		})
+		if err == nil {
+			database.CompleteOnboarding()
+		}
+		return pipelineCreatedMsg{result: result, err: err}
 	}
 }
 
