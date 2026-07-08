@@ -1501,6 +1501,12 @@ func TestWriteWorkflowMCPConfig(t *testing.T) {
 			t.Errorf("taskyou type = %v, want stdio", taskyou["type"])
 		}
 
+		// alwaysLoad keeps taskyou's tools (esp. taskyou_complete) out of Claude
+		// Code's tool-search deferral, so agents can always signal completion.
+		if taskyou["alwaysLoad"] != true {
+			t.Errorf("taskyou alwaysLoad = %v, want true", taskyou["alwaysLoad"])
+		}
+
 		args, ok := taskyou["args"].([]interface{})
 		if !ok {
 			t.Fatal("expected args array in taskyou config")

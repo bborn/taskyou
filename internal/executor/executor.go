@@ -4436,11 +4436,19 @@ func writeWorkflowMCPConfig(worktreePath string, taskID int64, configDir string)
 
 	// Build the TaskYou MCP server config
 	// Use "stdio" transport - Claude Code spawns the process and communicates via stdin/stdout
-	// Auto-approve all TaskYou tools so users don't have to manually approve each call
+	// Auto-approve all TaskYou tools so users don't have to manually approve each call.
+	//
+	// alwaysLoad: with many MCP servers configured (a user's global ~/.claude.json can
+	// have dozens), Claude Code defers MCP tools behind ToolSearch to save context — so
+	// an agent has to *search* for taskyou_complete before it can call it, and often
+	// burns its turn failing to, leaving the workflow step stalled. alwaysLoad forces
+	// taskyou's tools to load at session start so the agent can always signal completion.
+	// It's a fast local stdio server, so the connect-before-first-prompt wait is trivial.
 	taskyouServer := map[string]interface{}{
-		"type":    "stdio",
-		"command": taskExecutable,
-		"args":    []string{"mcp-server", "--task-id", fmt.Sprintf("%d", taskID)},
+		"type":       "stdio",
+		"command":    taskExecutable,
+		"args":       []string{"mcp-server", "--task-id", fmt.Sprintf("%d", taskID)},
+		"alwaysLoad": true,
 		"autoApprove": []string{
 			"taskyou_complete",
 			"taskyou_needs_input",
