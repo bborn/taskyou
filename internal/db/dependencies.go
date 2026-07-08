@@ -240,23 +240,92 @@ func (db *DB) ProcessCompletedBlocker(blockerID int64) ([]*Task, error) {
 				continue
 			}
 
-			// Only update if task is in blocked status
-			if task.Status == StatusBlocked {
+			// Only flip a task that is actually waiting in the DAG (blocked and
+			// never started). A blocked task that has already started is waiting on
+			// a human (needs-input / PR review), not on this dependency.
+			if task.Status == StatusBlocked && task.StartedAt == nil {
 				newStatus := StatusBacklog
 				if info.autoQueue {
 					newStatus = StatusQueued
 				}
 				if err := db.UpdateTaskStatus(info.taskID, newStatus); err != nil {
-					continue
+					// Best-effort: a lost write (e.g. SQLITE_BUSY) leaves the task
+					// blocked; RequeueReadyTasks sweeps it up later. Surface it.
+					return unblocked, fmt.Errorf("requeue unblocked task %d: %w", info.taskID, err)
 				}
 				task.Status = newStatus
+				unblocked = append(unblocked, task) // only report an actual flip
 			}
-
-			unblocked = append(unblocked, task)
 		}
 	}
 
 	return unblocked, nil
+}
+
+// RequeueReadyTasks is the eventually-consistent safety net for
+// ProcessCompletedBlocker. That runs once, best-effort, the instant a blocker
+// completes; a single dropped write (SQLITE_BUSY, a crash) would orphan the
+// dependent in 'blocked' forever, stalling a workflow. This sweep re-queues any
+// task still waiting in the DAG — blocked, never started — whose blockers have
+// all completed. Idempotent: it only touches tasks that are genuinely ready.
+// Returns the tasks it moved.
+func (db *DB) RequeueReadyTasks() ([]*Task, error) {
+	// Candidate = blocked, never-started task that has at least one dependency.
+	rows, err := db.Query(`
+		SELECT DISTINCT t.id
+		FROM tasks t
+		JOIN task_dependencies d ON d.blocked_id = t.id
+		WHERE t.status = ? AND t.started_at IS NULL
+	`, StatusBlocked)
+	if err != nil {
+		return nil, fmt.Errorf("find ready tasks: %w", err)
+	}
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("scan ready task: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	rows.Close()
+
+	var moved []*Task
+	for _, id := range ids {
+		openCount, err := db.GetOpenBlockerCount(id)
+		if err != nil || openCount != 0 {
+			continue
+		}
+		autoQueue, err := db.hasAutoQueueBlocker(id)
+		if err != nil {
+			continue
+		}
+		newStatus := StatusBacklog
+		if autoQueue {
+			newStatus = StatusQueued
+		}
+		if err := db.UpdateTaskStatus(id, newStatus); err != nil {
+			continue // try again on the next sweep
+		}
+		if task, err := db.GetTask(id); err == nil && task != nil {
+			moved = append(moved, task)
+		}
+	}
+	return moved, nil
+}
+
+// hasAutoQueueBlocker reports whether any of the task's dependencies has
+// auto_queue set (so an unblocked task is queued rather than dropped to backlog).
+func (db *DB) hasAutoQueueBlocker(taskID int64) (bool, error) {
+	var n int
+	err := db.QueryRow(`
+		SELECT COUNT(*) FROM task_dependencies WHERE blocked_id = ? AND auto_queue = 1
+	`, taskID).Scan(&n)
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
 }
 
 // GetAllDependencies returns all dependencies for a given task (both blockers and blocked).

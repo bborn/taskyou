@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -697,9 +698,13 @@ func (db *DB) UpdateTaskStatus(id int64, status string) error {
 		}
 	}
 
-	// Process dependent tasks when a blocker is completed
+	// Process dependent tasks when a blocker is completed. Best-effort: a dropped
+	// write is recovered by the daemon's RequeueReadyTasks sweep, but log it so a
+	// stalled workflow isn't a silent mystery.
 	if status == StatusDone || status == StatusArchived {
-		db.ProcessCompletedBlocker(id)
+		if _, err := db.ProcessCompletedBlocker(id); err != nil {
+			log.Printf("ProcessCompletedBlocker(%d): %v", id, err)
+		}
 	}
 
 	return nil

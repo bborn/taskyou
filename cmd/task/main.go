@@ -4607,8 +4607,19 @@ func handleStopHook(database *db.DB, taskID int64, input *ClaudeHookInput) error
 		// Claude finished its turn and is waiting for user input
 		// This is the key transition: processing → blocked (needs input)
 		if task.Status == db.StatusProcessing {
-			database.UpdateTaskStatus(taskID, db.StatusBlocked)
-			database.AppendTaskLog(taskID, "system", "Waiting for user input")
+			// A workflow step is instructed to call taskyou_complete when done. If
+			// the agent ends its turn without it but has committed AND pushed its
+			// work (clean worktree, HEAD == upstream), parking it in 'blocked' would
+			// stall the whole DAG for a step that actually finished. Auto-complete it
+			// so the workflow advances. A step that stopped to ask a question or left
+			// work uncommitted/unpushed hasn't finished — block as before.
+			if pipeline.IsWorkflowTask(task) && workflowStepFinished(task) {
+				database.UpdateTaskStatus(taskID, db.StatusDone)
+				database.AppendTaskLog(taskID, "system", "Workflow step pushed its work but didn't call taskyou_complete — auto-completed to advance the workflow")
+			} else {
+				database.UpdateTaskStatus(taskID, db.StatusBlocked)
+				database.AppendTaskLog(taskID, "system", "Waiting for user input")
+			}
 		}
 	case "tool_use":
 		// Claude stopped because it's about to execute a tool
@@ -4617,6 +4628,29 @@ func handleStopHook(database *db.DB, taskID int64, input *ClaudeHookInput) error
 	}
 
 	return nil
+}
+
+// workflowStepFinished reports whether a workflow step has committed AND pushed
+// its work: its worktree is clean and HEAD is at its upstream. That is the signal
+// a step completed its handoff (per the composed step instructions), used to
+// distinguish "finished but forgot taskyou_complete" (advance the DAG) from
+// "stopped mid-work / to ask" (block). Conservative: any doubt returns false.
+func workflowStepFinished(task *db.Task) bool {
+	wt := task.WorktreePath
+	if wt == "" {
+		return false
+	}
+	// Clean tree — everything committed.
+	if out, err := osexec.Command("git", "-C", wt, "status", "--porcelain").Output(); err != nil || len(strings.TrimSpace(string(out))) != 0 {
+		return false
+	}
+	// HEAD pushed to its upstream branch.
+	head, errH := osexec.Command("git", "-C", wt, "rev-parse", "HEAD").Output()
+	up, errU := osexec.Command("git", "-C", wt, "rev-parse", "@{u}").Output()
+	if errH != nil || errU != nil {
+		return false
+	}
+	return strings.TrimSpace(string(head)) == strings.TrimSpace(string(up))
 }
 
 // handlePreToolUseHook handles PreToolUse hooks from Claude (before tool execution).
