@@ -76,6 +76,7 @@ The same UI is also served in your browser at `http://localhost:8484` whenever `
 - **Kanban Board** - Visual task management with 4 columns (Backlog, In Progress, Blocked, Done)
 - **Git Worktrees** - Each task runs in an isolated worktree, no conflicts between parallel tasks
 - **Pluggable Executors** - Choose between Claude Code, OpenAI Codex, Gemini, Pi, OpenClaw, or OpenCode per task
+- **Workflows** - Turn one goal into a multi-step DAG (e.g. plan → code → parallel review → collect), each step on its own executor/model, advancing automatically (see [Workflows](#workflows))
 - **Event Hooks & Plugins** - Run scripts when tasks change state, or drop in self-contained plugins (see [Event Hooks](#event-hooks) and [Plugins](#plugins))
 - **Ghost Text Autocomplete** - LLM-powered suggestions for task titles and descriptions as you type
 - **VS Code-style Fuzzy Search** - Quick task navigation with smart matching (e.g., "dsno" matches "diseno website")
@@ -87,6 +88,66 @@ The same UI is also served in your browser at `http://localhost:8484` whenever `
 - **SSH Access** - Run as an SSH server to access your tasks from anywhere (see [SSH Access & Deployment](#ssh-access--deployment))
 - **Project Context Caching** - AI agents automatically cache codebase exploration results and reuse them across tasks, eliminating redundant exploration (see [Project Context](#project-context))
 - **Shell Completion** - Tab completion for commands, task IDs, projects, statuses, and flags in bash, zsh, fish, and PowerShell (see [Shell Completion](#shell-completion))
+
+## Workflows
+
+A **workflow** turns a single goal into a small DAG of step tasks that run on one shared git branch, each routed to its own executor and model, advancing automatically. Steps are sequential where they depend on each other and **parallel** where they don't.
+
+The built-in `plan-code-review` workflow:
+
+```
+Plan ──▶ Code ──▶ Review A ─┐
+                  Review B ─┴─▶ Collect ──▶ PR
+```
+
+| Step | Default | Job |
+|------|---------|-----|
+| **Plan** | Claude / Opus | Explore, write `PLAN.md`, push. No code. |
+| **Code** | Claude / Sonnet | Implement the plan, push. |
+| **Review A**, **Review B** | Claude / Opus, Claude / Sonnet | Two **independent** reviewers in parallel — different models + independent context catch different issues and avoid self-review bias. |
+| **Collect** | Claude / Sonnet | Read both reviews, apply the fixes worth applying, open the PR. |
+
+Steps advance with no human in the loop; a workflow only pauses when a step genuinely needs one — the final step opens a PR (landing in `blocked` for a human merge) or a step asks for input.
+
+### Running a workflow
+
+```bash
+# CLI
+ty pipeline "Add rate limiting to the API" --project myapp
+ty pipeline --list                 # show available workflows
+ty pipeline "..." --no-execute     # stage without starting
+
+# TUI: in the new-task form (n), pick a workflow in the "Workflow" selector.
+```
+
+On the board, a workflow shows as a **single card** (`⇄ goal · Review ∥ · 3/5`) instead of one card per step. It needs a project that uses git worktrees and has a remote to push to.
+
+### Custom workflows
+
+Workflows are defined in plain **YAML files** — one per workflow — in `~/.config/task/workflows/*.yaml` (override with `$TY_WORKFLOWS_DIR`), or per-project in `.taskyou/workflows/`. A file shadows a built-in of the same name. You write only *what* each step does and its `deps`; the git handoff (which branch to push to, when to open the PR) is derived from the step's position in the DAG.
+
+```yaml
+name: build-and-qa
+description: Plan, build, then security review and QA in parallel, then finalize.
+steps:
+  - {name: Plan,     model: opus,   prompt: "Design a plan for {{goal}}; write PLAN.md."}
+  - {name: Build,    deps: [Plan],  prompt: "Implement the plan."}
+  - {name: Security, deps: [Build], prompt: "Security review; write findings to security.md."}
+  - {name: QA,       deps: [Build], prompt: "Exercise the change; write results to qa.md."}
+  - {name: Finalize, deps: [Security, QA], prompt: "Address the findings and finalize."}
+```
+
+Two steps with the same `deps` run in parallel; a step depending on several joins them; multiple root steps (no `deps`) are parallel entry points (e.g. try 3 approaches at once).
+
+```bash
+# Author a workflow from a plain-English description (LLM → YAML you can edit)
+ty pipeline new "spike three approaches, pick the best, build it, review and test in parallel"
+
+# Eject the built-in to a YAML file to tweak its models / prompts / steps
+ty pipeline edit                   # writes ~/.config/task/workflows/plan-code-review.yaml
+```
+
+Custom workflows appear in `ty pipeline --list`, the `--definition` flag, and the TUI new-task selector automatically. Configuration lives entirely in these files — edit them by hand any time.
 
 ## Project Context
 

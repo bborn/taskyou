@@ -26,7 +26,7 @@ import (
 	"github.com/bborn/workflow/internal/executor"
 	"github.com/bborn/workflow/internal/github"
 	"github.com/bborn/workflow/internal/hooks"
-	"github.com/bborn/workflow/internal/spotlight"
+	"github.com/bborn/workflow/internal/pipeline"
 	"github.com/bborn/workflow/internal/tasksummary"
 )
 
@@ -94,6 +94,11 @@ type KeyMap struct {
 	// Jump to pinned/unpinned tasks
 	JumpToPinned   key.Binding
 	JumpToUnpinned key.Binding
+	// Detail-view pinned quick-nav (hop between focused/pinned tasks)
+	PrevPinnedTask key.Binding
+	NextPinnedTask key.Binding
+	// Detail-view: show/hide the pinned quick-nav row
+	TogglePinnedRow key.Binding
 	// Column collapse
 	CollapseBacklog key.Binding
 	CollapseDone    key.Binding
@@ -101,9 +106,6 @@ type KeyMap struct {
 	OpenBrowser key.Binding
 	// Open PR
 	OpenPR key.Binding
-	// Spotlight mode
-	Spotlight     key.Binding
-	SpotlightSync key.Binding
 }
 
 // ShortHelp returns key bindings to show in the mini help.
@@ -118,7 +120,7 @@ func (k KeyMap) FullHelp() [][]key.Binding {
 		{k.JumpToPinned, k.JumpToUnpinned},
 		{k.FocusBacklog, k.FocusInProgress, k.FocusBlocked, k.FocusDone, k.CollapseBacklog, k.CollapseDone},
 		{k.Enter, k.New, k.Queue, k.QueueDangerous, k.Close},
-		{k.Retry, k.Archive, k.Delete, k.OpenWorktree, k.OpenBrowser, k.Spotlight},
+		{k.Retry, k.Archive, k.Delete, k.OpenWorktree, k.OpenBrowser},
 		{k.Filter, k.CommandPalette, k.Settings, k.Routines},
 		{k.ChangeStatus, k.TogglePin, k.Refresh, k.Help},
 		{k.Quit},
@@ -264,6 +266,18 @@ func DefaultKeyMap() KeyMap {
 			key.WithKeys("shift+down"),
 			key.WithHelp(IconShiftDown(), "jump to unpinned"),
 		),
+		PrevPinnedTask: key.NewBinding(
+			key.WithKeys("["),
+			key.WithHelp("[", "prev pinned"),
+		),
+		NextPinnedTask: key.NewBinding(
+			key.WithKeys("]"),
+			key.WithHelp("]", "next pinned"),
+		),
+		TogglePinnedRow: key.NewBinding(
+			key.WithKeys("T"),
+			key.WithHelp("T", "show/hide pinned"),
+		),
 		CollapseBacklog: key.NewBinding(
 			key.WithKeys("["),
 			key.WithHelp("[", "collapse backlog"),
@@ -279,14 +293,6 @@ func DefaultKeyMap() KeyMap {
 		OpenPR: key.NewBinding(
 			key.WithKeys("G"),
 			key.WithHelp("G", "open PR"),
-		),
-		Spotlight: key.NewBinding(
-			key.WithKeys("f"),
-			key.WithHelp("f", "spotlight"),
-		),
-		SpotlightSync: key.NewBinding(
-			key.WithKeys("F"),
-			key.WithHelp("F", "spotlight sync"),
 		),
 	}
 }
@@ -352,8 +358,6 @@ func ApplyKeybindingsConfig(km KeyMap, cfg *config.KeybindingsConfig) KeyMap {
 	km.CollapseDone = applyBinding(km.CollapseDone, cfg.CollapseDone)
 	km.OpenBrowser = applyBinding(km.OpenBrowser, cfg.OpenBrowser)
 	km.OpenPR = applyBinding(km.OpenPR, cfg.OpenPR)
-	km.Spotlight = applyBinding(km.Spotlight, cfg.Spotlight)
-	km.SpotlightSync = applyBinding(km.SpotlightSync, cfg.SpotlightSync)
 
 	return km
 }
@@ -430,6 +434,7 @@ type AppModel struct {
 	newTaskForm        *FormModel
 	pendingTask        *db.Task
 	pendingAttachments []string
+	pendingPipeline    string // non-empty when the pending submission is a pipeline definition
 	queueConfirm       *huh.Form
 	queueValue         string
 
@@ -564,7 +569,31 @@ func (m *AppModel) updateTaskInList(task *db.Task) {
 			break
 		}
 	}
-	m.kanban.SetTasks(m.tasks)
+	m.kanban.SetTasks(m.collapseForBoard(m.tasks))
+}
+
+// collapseForBoard turns a task list into what the board should show: a workflow's
+// step tasks are folded into a single lead card (see pipeline.GroupWorkflows) so N
+// steps for one goal don't clutter the board as N cards. It also hands the kanban
+// the lead→group map so those cards can render workflow progress. Non-workflow
+// tasks pass through unchanged.
+func (m *AppModel) collapseForBoard(tasks []*db.Task) []*db.Task {
+	groups, rest := pipeline.GroupWorkflows(tasks)
+	leadMap := make(map[int64]*pipeline.Group, len(groups))
+	out := make([]*db.Task, 0, len(rest)+len(groups))
+	out = append(out, rest...)
+	for _, g := range groups {
+		lead := g.Lead()
+		if lead == nil {
+			continue
+		}
+		leadMap[lead.ID] = g
+		out = append(out, lead)
+	}
+	if m.kanban != nil {
+		m.kanban.SetWorkflowGroups(leadMap)
+	}
+	return out
 }
 
 // NewAppModel creates a new application model.
@@ -657,7 +686,7 @@ func NewAppModel(database *db.DB, exec *executor.Executor, workingDir string, ve
 func (m *AppModel) SetTasks(tasks []*db.Task) {
 	m.tasks = tasks
 	m.loading = false
-	m.kanban.SetTasks(tasks)
+	m.kanban.SetTasks(m.collapseForBoard(tasks))
 }
 
 // SetDebugStatePath sets the path for dumping debug state.
@@ -996,6 +1025,9 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		// Reapply filter if one is active
 		m.applyFilter()
+		// Keep the detail view's pinned quick-nav in sync with the new task set
+		// (e.g. after a pin/unpin, which reloads tasks).
+		m.refreshDetailPinnedNav()
 		m.kanban.SetHiddenDoneCount(msg.hiddenDoneCount)
 		// Refresh running process indicators for all tasks
 		running := executor.GetTasksWithRunningShellProcess()
@@ -1076,6 +1108,8 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Set task position in column for display
 			pos, total := m.kanban.GetTaskPosition()
 			m.detailView.SetPosition(pos, total)
+			// Populate the pinned quick-nav bar (respects the active board filter)
+			m.refreshDetailPinnedNav()
 			m.previousView = m.currentView
 			m.currentView = ViewDetail
 			// Start async pane setup if needed
@@ -1151,6 +1185,19 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			} else {
 				cmds = append(cmds, m.loadTasks())
 			}
+		} else {
+			m.err = msg.err
+		}
+
+	case pipelineCreatedMsg:
+		if msg.err == nil && msg.result != nil {
+			m.currentView = ViewDashboard
+			m.newTaskForm = nil
+			m.showWelcome = false
+			n := len(msg.result.Tasks)
+			m.notification = fmt.Sprintf("%s Created %s workflow (%d steps) on %s", IconDone(), msg.result.Definition.Name, n, msg.result.Branch)
+			m.notifyUntil = time.Now().Add(6 * time.Second)
+			cmds = append(cmds, m.loadTasks())
 		} else {
 			m.err = msg.err
 		}
@@ -1312,14 +1359,6 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.notification = fmt.Sprintf("🌐 %s", msg.message)
 			m.notifyUntil = time.Now().Add(3 * time.Second)
 		}
-
-	case spotlightMsg:
-		if msg.err != nil {
-			m.notification = fmt.Sprintf("%s Spotlight: %s", IconBlocked(), msg.err.Error())
-		} else {
-			m.notification = fmt.Sprintf("🔦 %s", msg.message)
-		}
-		m.notifyUntil = time.Now().Add(5 * time.Second)
 
 	case taskEventMsg:
 		// Real-time task update from executor
@@ -2043,16 +2082,6 @@ func (m *AppModel) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, m.openTaskDirectory(task)
 		}
 
-	case key.Matches(msg, m.keys.Spotlight):
-		if task := m.kanban.SelectedTask(); task != nil && task.WorktreePath != "" {
-			return m, m.toggleSpotlight(task)
-		}
-
-	case key.Matches(msg, m.keys.SpotlightSync):
-		if task := m.kanban.SelectedTask(); task != nil && task.WorktreePath != "" {
-			return m, m.syncSpotlight(task)
-		}
-
 	case key.Matches(msg, m.keys.Settings):
 		m.settingsView = NewSettingsModel(m.db, m.width, m.height)
 		m.previousView = m.currentView
@@ -2292,12 +2321,76 @@ func (m *AppModel) resolveProjectAliases(query string) string {
 	return result.String()
 }
 
+// filteredPinnedTasks returns the pinned tasks that pass the board's currently
+// active filter, ordered by status column then ID for stability. This is the set
+// the detail view's quick-nav bar hops between — so a filtered board ("[projectX]")
+// only surfaces its own pinned tasks, not every pin across the board.
+func (m *AppModel) filteredPinnedTasks() []*db.Task {
+	queryLower := strings.ToLower(m.filterText)
+	if strings.Contains(queryLower, "[") {
+		queryLower = m.resolveProjectAliases(queryLower)
+	}
+
+	var pinned []*db.Task
+	for _, task := range m.tasks {
+		if !task.Pinned {
+			continue
+		}
+		if queryLower != "" && scoreTaskForFilter(task, queryLower) < 0 {
+			continue
+		}
+		pinned = append(pinned, task)
+	}
+
+	sort.SliceStable(pinned, func(i, j int) bool {
+		ri, rj := statusColumnRank(pinned[i].Status), statusColumnRank(pinned[j].Status)
+		if ri != rj {
+			return ri < rj
+		}
+		return pinned[i].ID < pinned[j].ID
+	})
+	return pinned
+}
+
+// statusColumnRank orders task statuses left-to-right the way the board columns
+// read, so the pinned nav bar lists tasks in a familiar order.
+func statusColumnRank(status string) int {
+	switch status {
+	case db.StatusBacklog:
+		return 0
+	case db.StatusQueued:
+		return 1
+	case db.StatusProcessing:
+		return 2
+	case db.StatusBlocked:
+		return 3
+	case db.StatusDone:
+		return 4
+	default:
+		return 5
+	}
+}
+
+// refreshDetailPinnedNav rebuilds the detail view's pinned quick-nav bar from the
+// current task set and filter. Safe to call when not in the detail view.
+func (m *AppModel) refreshDetailPinnedNav() {
+	if m.detailView == nil || m.selectedTask == nil {
+		return
+	}
+	pinned := m.filteredPinnedTasks()
+	items := make([]PinnedNavItem, len(pinned))
+	for i, t := range pinned {
+		items[i] = PinnedNavItem{ID: t.ID, Title: t.Title, Status: t.Status, Project: t.Project}
+	}
+	m.detailView.SetPinnedNav(items, m.selectedTask.ID)
+}
+
 // applyFilter filters the tasks based on current filter text using fuzzy matching.
 // Uses the same matching logic as the command palette (Ctrl+P) for consistency.
 func (m *AppModel) applyFilter() {
 	if m.filterText == "" {
-		// No filter, show all tasks
-		m.kanban.SetTasks(m.tasks)
+		// No filter, show all tasks (workflows collapsed to one card each)
+		m.kanban.SetTasks(m.collapseForBoard(m.tasks))
 		return
 	}
 
@@ -2327,7 +2420,7 @@ func (m *AppModel) applyFilter() {
 	for i, st := range scored {
 		filtered[i] = st.task
 	}
-	m.kanban.SetTasks(filtered)
+	m.kanban.SetTasks(m.collapseForBoard(filtered))
 }
 
 // parseFilterProjects extracts completed [project] tags, any trailing partial project,
@@ -2583,18 +2676,21 @@ func (m *AppModel) updateDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if key.Matches(keyMsg, m.keys.OpenPR) && m.selectedTask != nil && m.selectedTask.PRURL != "" {
 		return m, m.openPR(m.selectedTask)
 	}
-	if key.Matches(keyMsg, m.keys.Spotlight) && m.selectedTask != nil && m.selectedTask.WorktreePath != "" {
-		return m, m.toggleSpotlight(m.selectedTask)
-	}
-	if key.Matches(keyMsg, m.keys.SpotlightSync) && m.selectedTask != nil && m.selectedTask.WorktreePath != "" {
-		return m, m.syncSpotlight(m.selectedTask)
-	}
 	if key.Matches(keyMsg, m.keys.ToggleShellPane) && m.detailView != nil {
 		m.detailView.ToggleShellPane()
 		return m, nil
 	}
 	if key.Matches(keyMsg, m.keys.Actions) && m.selectedTask != nil {
 		return m.openActionPicker()
+	}
+	if key.Matches(keyMsg, m.keys.Help) && m.detailView != nil {
+		// Expand/collapse the detail footer help row.
+		m.detailView.ToggleHelpExpanded()
+		return m, nil
+	}
+	if key.Matches(keyMsg, m.keys.TogglePinnedRow) && m.detailView != nil {
+		m.detailView.TogglePinnedNav()
+		return m, nil
 	}
 
 	// Arrow key navigation to prev/next task in the same column
@@ -2648,6 +2744,22 @@ func (m *AppModel) updateDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
+	// Pinned quick-nav: hop between the pinned tasks shown in the detail view's
+	// top bar. [ / ] cycle prev/next; 1-9 jump to that pill directly.
+	if m.detailView != nil && m.detailView.HasPinnedNav() {
+		if key.Matches(keyMsg, m.keys.NextPinnedTask) {
+			return m.jumpToPinnedTask(m.detailView.PinnedNavNextID())
+		}
+		if key.Matches(keyMsg, m.keys.PrevPinnedTask) {
+			return m.jumpToPinnedTask(m.detailView.PinnedNavPrevID())
+		}
+		if s := keyMsg.String(); len(s) == 1 && s[0] >= '1' && s[0] <= '9' {
+			if id := m.detailView.PinnedNavIDAt(int(s[0] - '0')); id != 0 {
+				return m.jumpToPinnedTask(id)
+			}
+		}
+	}
+
 	if m.detailView != nil {
 		var cmd tea.Cmd
 		m.detailView, cmd = m.detailView.Update(msg)
@@ -2655,6 +2767,29 @@ func (m *AppModel) updateDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	return m, nil
+}
+
+// jumpToPinnedTask switches the detail view to the given task, reusing the same
+// cleanup/transition guard as prev/next navigation so we never fight over the
+// executor pane. It selects the task in the kanban first so position display and
+// subsequent arrow navigation stay consistent.
+func (m *AppModel) jumpToPinnedTask(id int64) (tea.Model, tea.Cmd) {
+	if id == 0 {
+		return m, nil
+	}
+	if m.selectedTask != nil && m.selectedTask.ID == id {
+		return m, nil // already here
+	}
+	if m.taskTransitionInProgress {
+		return m, nil
+	}
+	m.taskTransitionInProgress = true
+	if m.detailView != nil {
+		m.detailView.CleanupWithoutSaving()
+		m.detailView = nil
+	}
+	m.kanban.SelectTask(id)
+	return m, m.loadTask(id)
 }
 
 func (m *AppModel) updateNewTaskForm(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -2666,6 +2801,7 @@ func (m *AppModel) updateNewTaskForm(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Store pending task and create confirmation form
 			m.pendingTask = form.GetDBTask()
 			m.pendingAttachments = form.GetAttachments()
+			m.pendingPipeline = form.Pipeline()
 			// Default to last queue choice for this project. Permission mode now
 			// lives on the task form, so this is just execute-now vs backlog;
 			// fold any legacy "auto"/"dangerous" choices into "yes".
@@ -2673,14 +2809,21 @@ func (m *AppModel) updateNewTaskForm(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if last, err := m.db.GetSetting("last_queue_choice:" + m.pendingTask.Project); err == nil && last != "" && last != "no" {
 				m.queueValue = "yes"
 			}
+			queueTitle := "Queue for execution?"
+			runOpt, stageOpt := "Yes — execute now", "No — save to backlog"
+			if m.pendingPipeline != "" {
+				queueTitle = "Start this workflow now?"
+				runOpt = "Yes — start now"
+				stageOpt = "No — save for later"
+			}
 			m.queueConfirm = huh.NewForm(
 				huh.NewGroup(
 					huh.NewSelect[string]().
 						Key("queue").
-						Title("Queue for execution?").
+						Title(queueTitle).
 						Options(
-							huh.NewOption("Yes — execute now", "yes"),
-							huh.NewOption("No — save to backlog", "no"),
+							huh.NewOption(runOpt, "yes"),
+							huh.NewOption(stageOpt, "no"),
 						).
 						Value(&m.queueValue),
 				),
@@ -2693,6 +2836,7 @@ func (m *AppModel) updateNewTaskForm(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if form.cancelled {
 			m.currentView = ViewDashboard
 			m.newTaskForm = nil
+			m.pendingPipeline = ""
 			return m, nil
 		}
 	}
@@ -2726,6 +2870,22 @@ func (m *AppModel) updateNewTaskConfirm(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Remember the choice for this project
 			m.db.SetSetting("last_queue_choice:"+m.pendingTask.Project, m.queueValue)
 
+			// A pipeline selection turns the pending task into the goal for a
+			// multi-phase chain instead of a single task. The queue choice maps to
+			// whether the first phase runs now (Execute) or the chain is staged.
+			if m.pendingPipeline != "" {
+				task := m.pendingTask
+				definition := m.pendingPipeline
+				execute := m.queueValue == "yes"
+				m.pendingTask = nil
+				m.pendingAttachments = nil
+				m.pendingPipeline = ""
+				m.newTaskForm = nil
+				m.queueConfirm = nil
+				m.currentView = ViewDashboard
+				return m, m.createPipeline(task, definition, execute)
+			}
+
 			// Permission mode is already set on the task from the form; this
 			// choice only decides whether to run now or save to the backlog.
 			switch m.queueValue {
@@ -2738,6 +2898,7 @@ func (m *AppModel) updateNewTaskConfirm(msg tea.Msg) (tea.Model, tea.Cmd) {
 			attachments := m.pendingAttachments
 			m.pendingTask = nil
 			m.pendingAttachments = nil
+			m.pendingPipeline = ""
 			m.newTaskForm = nil
 			m.queueConfirm = nil
 			m.currentView = ViewDashboard
@@ -4033,6 +4194,11 @@ type taskCreatedMsg struct {
 	err  error
 }
 
+type pipelineCreatedMsg struct {
+	result *pipeline.Result
+	err    error
+}
+
 type taskUpdatedMsg struct {
 	task *db.Task
 	err  error
@@ -4269,6 +4435,34 @@ func (m *AppModel) createTaskWithAttachments(t *db.Task, attachmentPaths []strin
 
 		exec.NotifyTaskChange("created", t)
 		return taskCreatedMsg{task: t, err: nil}
+	}
+}
+
+// createPipeline builds a multi-phase pipeline from the form's task, using its
+// title/body as the goal and its project/permission mode for every phase. The
+// task itself is not persisted — it is only the goal carrier.
+func (m *AppModel) createPipeline(t *db.Task, definition string, execute bool) tea.Cmd {
+	database := m.db
+	return func() tea.Msg {
+		goal := strings.TrimSpace(t.Title)
+		if body := strings.TrimSpace(t.Body); body != "" {
+			if goal == "" {
+				goal = body
+			} else {
+				goal = goal + "\n\n" + body
+			}
+		}
+		result, err := pipeline.Create(database, pipeline.Options{
+			Goal:           goal,
+			Project:        t.Project,
+			Definition:     definition,
+			PermissionMode: t.PermissionMode,
+			Execute:        execute,
+		})
+		if err == nil {
+			database.CompleteOnboarding()
+		}
+		return pipelineCreatedMsg{result: result, err: err}
 	}
 }
 
@@ -4598,55 +4792,6 @@ func (m *AppModel) openPR(task *db.Task) tea.Cmd {
 		}
 
 		return browserOpenedMsg{message: fmt.Sprintf("Opened PR #%d", task.PRNumber)}
-	}
-}
-
-// spotlightMsg is returned after a spotlight action completes.
-type spotlightMsg struct {
-	action  string // "start", "stop", "sync"
-	message string
-	err     error
-}
-
-// toggleSpotlight starts or stops spotlight mode for the given task.
-func (m *AppModel) toggleSpotlight(task *db.Task) tea.Cmd {
-	return func() tea.Msg {
-		if task.WorktreePath == "" {
-			return spotlightMsg{err: fmt.Errorf("no worktree for task #%d", task.ID)}
-		}
-
-		project, err := m.db.GetProjectByName(task.Project)
-		if err != nil || project == nil {
-			return spotlightMsg{err: fmt.Errorf("failed to get project directory")}
-		}
-
-		if spotlight.IsActive(task.WorktreePath) {
-			result, err := spotlight.Stop(task.WorktreePath, project.Path)
-			return spotlightMsg{action: "stop", message: result, err: err}
-		}
-		result, err := spotlight.Start(task.WorktreePath, project.Path)
-		return spotlightMsg{action: "start", message: result, err: err}
-	}
-}
-
-// syncSpotlight syncs worktree changes to the main repo.
-func (m *AppModel) syncSpotlight(task *db.Task) tea.Cmd {
-	return func() tea.Msg {
-		if task.WorktreePath == "" {
-			return spotlightMsg{err: fmt.Errorf("no worktree for task #%d", task.ID)}
-		}
-
-		project, err := m.db.GetProjectByName(task.Project)
-		if err != nil || project == nil {
-			return spotlightMsg{err: fmt.Errorf("failed to get project directory")}
-		}
-
-		if !spotlight.IsActive(task.WorktreePath) {
-			return spotlightMsg{err: fmt.Errorf("spotlight not active — press f to start")}
-		}
-
-		result, err := spotlight.Sync(task.WorktreePath, project.Path)
-		return spotlightMsg{action: "sync", message: result, err: err}
 	}
 }
 

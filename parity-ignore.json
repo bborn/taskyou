@@ -1,3 +1,5 @@
 {
-  "SpotlightSync": "macOS Spotlight metadata export is a local-indexing concern; intentionally TUI/CLI-only."
+  "PrevPinnedTask": "TUI-only keyboard affordance ('[') for cycling to the previous pinned task from the detail view's quick-nav bar; the desktop GUI switches tasks via its own list/click UI and honors the same board filter, so no bracket-key binding is needed there.",
+  "NextPinnedTask": "TUI-only keyboard affordance (']') for cycling to the next pinned task from the detail view's quick-nav bar; the desktop GUI switches tasks via its own list/click UI and honors the same board filter, so no bracket-key binding is needed there.",
+  "TogglePinnedRow": "TUI-only affordance ('T') to show/hide the detail view's pinned quick-nav row; the desktop GUI has no fixed pill row to collapse, so there's nothing to mirror."
 }

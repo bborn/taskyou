@@ -17,7 +17,15 @@ import (
 
 	"github.com/bborn/workflow/internal/autocomplete"
 	"github.com/bborn/workflow/internal/db"
+	"github.com/bborn/workflow/internal/pipeline"
 )
+
+// pipelineOptions returns the selectable pipeline choices for the form. The
+// first entry is "" — an ordinary single task — followed by each built-in
+// pipeline definition (e.g. plan-code-review).
+func pipelineOptions() []string {
+	return append([]string{""}, pipeline.DefinitionNames()...)
+}
 
 // FormField represents the currently focused field.
 type FormField int
@@ -32,6 +40,7 @@ const (
 	FieldEffort
 	FieldModel
 	FieldPermission
+	FieldPipeline
 	FieldCount
 )
 
@@ -80,6 +89,9 @@ type FormModel struct {
 	permissionIdx      int
 	permissionModes    []string // Selectable permission modes
 	permissionTouched  bool     // user picked a permission explicitly; stop following project default
+	pipeline           string   // Pipeline definition ("" = a single ordinary task)
+	pipelineIdx        int
+	pipelines          []string // Selectable pipeline options; "" (first) means "single task"
 	queue              bool
 	attachments        []string // Parsed file paths
 	attachmentCursor   int      // Index of the currently selected attachment chip
@@ -287,7 +299,8 @@ func NewEditFormModel(database *db.DB, task *db.Task, width, height int, availab
 		permissionMode:      task.EffectivePermissionMode(),
 		permissionModes:     permissionModeOptions(),
 		permissionIdx:       permissionIndexFor(permissionModeOptions(), task.EffectivePermissionMode()),
-		permissionTouched:   true, // editing: keep the task's existing mode unless changed
+		pipelines:           pipelineOptions(), // Field hidden while editing; kept non-nil for safety.
+		permissionTouched:   true,              // editing: keep the task's existing mode unless changed
 		isEdit:              true,
 		prURL:               task.PRURL,
 		prNumber:            task.PRNumber,
@@ -411,7 +424,8 @@ func NewFormModel(database *db.DB, width, height int, workingDir string, availab
 		effortLevels:        effortLevelOptions(), // Defaults to "" (Claude's global default)
 		models:              modelOptions(),       // Defaults to "" (Claude's global default)
 		permissionModes:     permissionModeOptions(),
-		showAdvanced:        showAdvanced, // Load from user preference
+		pipelines:           pipelineOptions(), // Defaults to "" (a single ordinary task)
+		showAdvanced:        showAdvanced,      // Load from user preference
 	}
 
 	// Load task types from database
@@ -866,6 +880,11 @@ func (m *FormModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.permissionTouched = true
 				return m, nil
 			}
+			if m.focused == FieldPipeline && len(m.pipelines) > 0 {
+				m.pipelineIdx = (m.pipelineIdx - 1 + len(m.pipelines)) % len(m.pipelines)
+				m.pipeline = m.pipelines[m.pipelineIdx]
+				return m, nil
+			}
 
 		case "right":
 			if m.handleAttachmentNavigation(1) {
@@ -908,6 +927,11 @@ func (m *FormModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.permissionIdx = (m.permissionIdx + 1) % len(m.permissionModes)
 				m.permissionMode = m.permissionModes[m.permissionIdx]
 				m.permissionTouched = true
+				return m, nil
+			}
+			if m.focused == FieldPipeline && len(m.pipelines) > 0 {
+				m.pipelineIdx = (m.pipelineIdx + 1) % len(m.pipelines)
+				m.pipeline = m.pipelines[m.pipelineIdx]
 				return m, nil
 			}
 
@@ -1442,6 +1466,11 @@ func (m *FormModel) isFieldVisible(field FormField) bool {
 		// Effort and model are Claude-specific overrides (claude --effort/--model),
 		// only shown in advanced mode and only when the Claude executor is selected.
 		return m.showAdvanced && m.executor == db.ExecutorClaude
+	}
+	if field == FieldPipeline {
+		// A pipeline turns creation into a multi-phase chain; it only makes sense
+		// for a brand-new task, never when editing an existing one.
+		return m.showAdvanced && !m.isEdit
 	}
 	if m.showAdvanced {
 		return true
@@ -2027,6 +2056,29 @@ func (m *FormModel) View() string {
 			b.WriteString("\n")
 		}
 
+		// Pipeline selector: turn creation into a multi-phase plan → code → review
+		// chain routed across models/executors. Only shown for new tasks.
+		if m.isFieldVisible(FieldPipeline) {
+			cursor = " "
+			if m.focused == FieldPipeline {
+				cursor = cursorStyle.Render("▸")
+			}
+			pipelineLabels := make([]string, len(m.pipelines))
+			for i, l := range m.pipelines {
+				if l == "" {
+					pipelineLabels[i] = "single task"
+				} else {
+					pipelineLabels[i] = l
+				}
+			}
+			b.WriteString(cursor + " " + labelStyle.Render("Workflow") + m.renderSelector(pipelineLabels, m.pipelineIdx, m.focused == FieldPipeline, selectedStyle, optionStyle, dimStyle))
+			b.WriteString("\n")
+			if m.pipeline != "" {
+				hint := "  " + dimStyle.Render("runs as a workflow: plan → code → parallel review → collect, on one branch")
+				b.WriteString(hint + "\n")
+			}
+		}
+
 		// Trailing gap to separate the selector list from the help line.
 		b.WriteString("\n")
 	} else {
@@ -2539,6 +2591,14 @@ func (m *FormModel) moveTitleCursorWordForward() {
 // GetAttachments returns the parsed attachment file paths.
 func (m *FormModel) GetAttachments() []string {
 	return m.attachments
+}
+
+// Pipeline returns the selected pipeline definition name, or "" when the form is
+// creating an ordinary single task. When non-empty, the caller should build a
+// pipeline (see internal/pipeline) using the form's task as the goal carrier
+// rather than creating a single task.
+func (m *FormModel) Pipeline() string {
+	return m.pipeline
 }
 
 // GetAttachment returns the first attachment for backwards compatibility.

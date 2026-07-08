@@ -16,7 +16,7 @@ import (
 
 	"github.com/bborn/workflow/internal/db"
 	"github.com/bborn/workflow/internal/github"
-	"github.com/bborn/workflow/internal/spotlight"
+	"github.com/bborn/workflow/internal/pipeline"
 	"github.com/bborn/workflow/internal/tasksummary"
 )
 
@@ -258,6 +258,34 @@ func (s *Server) handleRequest(req *jsonRPCRequest) {
 					},
 				},
 				{
+					Name:        "taskyou_create_pipeline",
+					Description: "Create a multi-model pipeline for a goal: one goal is split into an ordered chain of phase tasks (default 'plan-code-review': Opus plans → Sonnet codes → two reviewers run in parallel → collect opens the PR), each routed to its own executor/model, all on one shared git branch. Each step runs on its own executor/model; define custom workflows as YAML (ty pipeline new). Steps advance automatically — sequential where they depend on each other, parallel where they don't. Use this instead of a single task when a goal benefits from a plan/code/review split across different models. The first phase is queued immediately. Requires a git-worktree project with a remote to push to.",
+					InputSchema: map[string]interface{}{
+						"type": "object",
+						"properties": map[string]interface{}{
+							"goal": map[string]interface{}{
+								"type":        "string",
+								"description": "The overall goal, threaded into every phase's prompt.",
+							},
+							"project": map[string]interface{}{
+								"type":        "string",
+								"description": "Project name (defaults to the current task's project).",
+							},
+							"definition": map[string]interface{}{
+								"type":        "string",
+								"description": "Pipeline definition name (defaults to 'plan-code-review').",
+								"enum":        pipeline.DefinitionNames(),
+							},
+							"permission_mode": map[string]interface{}{
+								"type":        "string",
+								"description": "Permission mode for every phase (default, accept-edits, auto, dangerous). Defaults to the project's configured default.",
+								"enum":        []string{"default", "accept-edits", "auto", "dangerous"},
+							},
+						},
+						"required": []string{"goal"},
+					},
+				},
+				{
 					Name:        "taskyou_list_tasks",
 					Description: "List active tasks (queued, processing, blocked, backlog) in the project. Use this to see what work is pending or in progress.",
 					InputSchema: map[string]interface{}{
@@ -298,21 +326,6 @@ func (s *Server) handleRequest(req *jsonRPCRequest) {
 							},
 						},
 						"required": []string{"context"},
-					},
-				},
-				{
-					Name:        "taskyou_spotlight",
-					Description: "Enable spotlight mode to sync worktree changes back to the main repository for testing. This bridges the gap between isolated task development and application runtime by syncing git-tracked files to where your app runs. Use 'start' to enable, 'stop' to restore original state, 'sync' for manual sync, or 'status' to check current state.",
-					InputSchema: map[string]interface{}{
-						"type": "object",
-						"properties": map[string]interface{}{
-							"action": map[string]interface{}{
-								"type":        "string",
-								"enum":        []string{"start", "stop", "sync", "status"},
-								"description": "Action to perform: 'start' enables spotlight mode and syncs files, 'stop' disables and restores original state, 'sync' manually syncs files (while active), 'status' shows current spotlight state",
-							},
-						},
-						"required": []string{"action"},
 					},
 				},
 			},
@@ -564,6 +577,58 @@ func (s *Server) handleToolCall(id interface{}, params *toolCallParams) {
 			},
 		})
 
+	case "taskyou_create_pipeline":
+		goal, _ := params.Arguments["goal"].(string)
+		if strings.TrimSpace(goal) == "" {
+			s.sendError(id, -32602, "goal is required")
+			return
+		}
+		project, _ := params.Arguments["project"].(string)
+		definition, _ := params.Arguments["definition"].(string)
+		permissionMode, _ := params.Arguments["permission_mode"].(string)
+
+		// Default project to the current task's project.
+		if project == "" {
+			currentTask, err := s.db.GetTask(s.taskID)
+			if err == nil && currentTask != nil {
+				project = currentTask.Project
+			}
+		}
+
+		result, err := pipeline.Create(s.db, pipeline.Options{
+			Goal:           goal,
+			Project:        project,
+			Definition:     definition,
+			PermissionMode: db.NormalizePermissionMode(permissionMode),
+			Execute:        true,
+		})
+		if err != nil {
+			s.sendError(id, -32603, fmt.Sprintf("Failed to create pipeline: %v", err))
+			return
+		}
+
+		var sb strings.Builder
+		sb.WriteString(fmt.Sprintf("Created %s workflow on branch %s:\n", result.Definition.Name, result.Branch))
+		for i, t := range result.Tasks {
+			s := result.Definition.Steps[i]
+			model := s.Model
+			if model == "" {
+				model = "default"
+			}
+			dep := ""
+			if len(s.Deps) > 0 {
+				dep = " ← " + strings.Join(s.Deps, "+")
+			}
+			sb.WriteString(fmt.Sprintf("- #%d %s (%s/%s) — %s%s\n", t.ID, s.Name, t.Executor, model, t.Status, dep))
+		}
+		sb.WriteString("The root step is running; steps advance automatically, with the two reviewers running in parallel.")
+
+		s.sendResult(id, toolCallResult{
+			Content: []contentBlock{
+				{Type: "text", Text: sb.String()},
+			},
+		})
+
 	case "taskyou_list_tasks":
 		status, _ := params.Arguments["status"].(string)
 		project, _ := params.Arguments["project"].(string)
@@ -712,72 +777,6 @@ This saves future tasks from re-exploring the codebase.`},
 		s.sendResult(id, toolCallResult{
 			Content: []contentBlock{
 				{Type: "text", Text: fmt.Sprintf("Project context saved for '%s'. Future tasks will use this context to skip codebase exploration.", currentTask.Project)},
-			},
-		})
-
-	case "taskyou_spotlight":
-		action, _ := params.Arguments["action"].(string)
-		if action == "" {
-			s.sendError(id, -32602, "action is required")
-			return
-		}
-
-		// Get current task
-		task, err := s.db.GetTask(s.taskID)
-		if err != nil || task == nil {
-			s.sendError(id, -32603, "Failed to get current task")
-			return
-		}
-
-		if task.WorktreePath == "" {
-			s.sendError(id, -32602, "Task has no worktree (spotlight requires a worktree)")
-			return
-		}
-
-		// Get the project directory (main repo)
-		project, err := s.db.GetProjectByName(task.Project)
-		if err != nil || project == nil {
-			s.sendError(id, -32603, "Failed to get project directory")
-			return
-		}
-		mainRepoDir := project.Path
-
-		// Spotlight requires worktree isolation - it syncs changes between a worktree and the main repo.
-		// For non-worktree projects, the task already runs in the project directory.
-		if !project.UsesWorktrees() {
-			s.sendError(id, -32602, "Spotlight is not available for non-worktree projects (task already runs in project directory)")
-			return
-		}
-
-		// Handle spotlight actions
-		var result string
-		switch action {
-		case "start":
-			result, err = spotlight.Start(task.WorktreePath, mainRepoDir)
-		case "stop":
-			result, err = spotlight.Stop(task.WorktreePath, mainRepoDir)
-		case "sync":
-			if !spotlight.IsActive(task.WorktreePath) {
-				s.sendError(id, -32602, "Spotlight mode is not active. Use 'start' to enable spotlight before syncing")
-				return
-			}
-			result, err = spotlight.Sync(task.WorktreePath, mainRepoDir)
-		case "status":
-			result, err = spotlight.Status(task.WorktreePath, mainRepoDir)
-		default:
-			s.sendError(id, -32602, fmt.Sprintf("Unknown spotlight action: %s", action))
-			return
-		}
-		if err != nil {
-			s.sendError(id, -32603, err.Error())
-			return
-		}
-
-		s.db.AppendTaskLog(s.taskID, "system", fmt.Sprintf("Spotlight %s: %s", action, result))
-
-		s.sendResult(id, toolCallResult{
-			Content: []contentBlock{
-				{Type: "text", Text: result},
 			},
 		})
 

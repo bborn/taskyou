@@ -62,6 +62,8 @@ Use `ty` (short) or `taskyou` (full) — both work identically.
 | List by status | `ty list --status <status> --json` |
 | View task details | `ty show <id> --json --logs` |
 | Create task | `ty create "title" --body "description"` |
+| Create a workflow | `ty pipeline "goal" --project <name>` (plan → code → parallel review → collect) |
+| List / author workflows | `ty pipeline --list` · `ty pipeline new "<describe it>"` · `ty pipeline edit` |
 | Execute task | `ty execute <id>` |
 | Retry with feedback | `ty retry <id> --feedback "..."` |
 | Change status | `ty status <id> <status>` |
@@ -247,11 +249,9 @@ the worktree, not the executor inside it.
 **Task introspection:**
 - `taskyou_show_task` — Get details of any task in the current project.
 - `taskyou_create_task` — Create a follow-up task.
+- `taskyou_create_pipeline` — Spin up a multi-step workflow (plan → code →
+  parallel review → collect) for a goal, when it warrants more than one task.
 - `taskyou_list_tasks` — See other active tasks in this project.
-
-**Worktree sync:**
-- `taskyou_spotlight` — Sync worktree changes to the main repo so you can
-  exercise the running app against your changes (`start`/`stop`/`sync`/`status`).
 
 ## Best Practices
 

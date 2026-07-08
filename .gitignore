@@ -44,8 +44,6 @@ coverage.html
 tmux-*.log
 .playwright-mcp/.mcp.json
 
-# Spotlight mode
-.spotlight-active
 .playwright-mcp/
 .mcp.json
 .gstack/
@@ -54,3 +52,8 @@ internal/web/ui/dist/
 # goreleaser before-hook output (release.extra_files)
 ty-chrome.zip
 .superpowers/
+.qa-run/
+.qa-agents/
+.pr-body.md
+.pr-comment.md
+.qacfg/

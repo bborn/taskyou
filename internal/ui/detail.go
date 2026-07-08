@@ -2,11 +2,14 @@ package ui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	osExec "os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/charmbracelet/bubbles/viewport"
@@ -19,7 +22,6 @@ import (
 	"github.com/bborn/workflow/internal/executor"
 	"github.com/bborn/workflow/internal/github"
 	"github.com/bborn/workflow/internal/qmd"
-	"github.com/bborn/workflow/internal/spotlight"
 )
 
 // shouldSkipAutoExecutor returns true if the task should NOT automatically
@@ -113,6 +115,22 @@ type DetailModel struct {
 	positionInColumn int
 	totalInColumn    int
 
+	// Pinned quick-nav: a compact pill bar at the top of the detail view for
+	// hopping between the tasks you're currently focused on (your pinned tasks,
+	// honouring the board's active filter). pinnedNavIndex is the position of the
+	// currently-viewed task within pinnedNav, or -1 when the current task isn't
+	// pinned. Populated by AppModel via SetPinnedNav whenever a task is opened or
+	// the task set changes.
+	pinnedNav      []PinnedNavItem
+	pinnedNavIndex int
+	// pinnedNavHidden lets the user collapse the pinned quick-nav row entirely
+	// (toggled with 'T'); persisted as a preference across tasks/sessions.
+	pinnedNavHidden bool
+
+	// helpExpanded controls the footer help row: collapsed shows only the
+	// high-frequency actions plus a '?' affordance; expanded reveals the rest.
+	helpExpanded bool
+
 	// Track joined tmux panes
 	claudePaneID    string // The Claude Code pane (middle-left)
 	workdirPaneID   string // The workdir shell pane (middle-right)
@@ -135,6 +153,14 @@ type DetailModel struct {
 
 	// Track if join-pane has failed (with cooldown to allow retries)
 	joinPaneFailedUntil time.Time
+
+	// Granular executor lock. Only one ty instance may borrow a given task's
+	// executor pane at a time; two doing so fight over the pane and trap the agent
+	// in a "claude --resume" interrupt loop. executorLockRelease holds the flock
+	// (nil when we don't own this executor); executorBusyElsewhere is set when a
+	// join was refused because another instance owns it, so the view can say so.
+	executorLockRelease   func()
+	executorBusyElsewhere bool
 
 	// Cached Glamour renderers (created once, reused)
 	glamourRendererFocused   *glamour.TermRenderer
@@ -410,6 +436,9 @@ func (m *DetailModel) restartForExecutorSwitch(prevExecutor string) tea.Cmd {
 		// Join panes — state flows back via panesJoinedMsg
 		m.cachedWindowTarget = windowTarget
 		m.joinTmuxPane()
+		if m.executorBusyElsewhere {
+			return panesJoinedMsg{err: errExecutorBusy, userMessage: executorBusyMessage}
+		}
 
 		log.Info("restartForExecutorSwitch: completed switch to %s, claudePaneID=%q", newExecutor, m.claudePaneID)
 
@@ -577,6 +606,11 @@ func NewDetailModel(t *db.Task, database *db.DB, exec *executor.Executor, width,
 		m.shellPaneHidden = true
 	}
 
+	// Load pinned quick-nav visibility preference from settings
+	if hiddenStr, err := database.GetSetting(config.SettingPinnedNavHidden); err == nil && hiddenStr == "true" {
+		m.pinnedNavHidden = true
+	}
+
 	// Load logs
 	logs, _ := database.GetTaskLogs(t.ID, 100)
 	m.logs = logs
@@ -650,6 +684,9 @@ func (m *DetailModel) setupPanesAsync() tea.Cmd {
 		}
 		if m.cachedWindowTarget != "" {
 			m.joinTmuxPane()
+			if m.executorBusyElsewhere {
+				return panesJoinedMsg{err: errExecutorBusy, userMessage: executorBusyMessage}
+			}
 			log.Info("setupPanesAsync: joined existing window, claudePaneID=%q, workdirPaneID=%q",
 				m.claudePaneID, m.workdirPaneID)
 			return panesJoinedMsg{
@@ -718,6 +755,9 @@ func (m *DetailModel) startAndJoinSession(sessionID string) tea.Msg {
 	// Join the panes
 	m.cachedWindowTarget = windowTarget
 	m.joinTmuxPane()
+	if m.executorBusyElsewhere {
+		return panesJoinedMsg{err: errExecutorBusy, userMessage: executorBusyMessage}
+	}
 
 	log.Info("startAndJoinSession: completed, claudePaneID=%q, workdirPaneID=%q",
 		m.claudePaneID, m.workdirPaneID)
@@ -757,16 +797,22 @@ func (m *DetailModel) spinnerTick() tea.Cmd {
 	})
 }
 
+// headerHeight is the vertical space reserved for the box chrome around the
+// viewport. The pinned quick-nav bar (rendered at the bottom of the box) adds
+// one line and must be accounted for here or the viewport would overflow.
+func (m *DetailModel) headerHeight() int {
+	h := 6
+	if m.showPinnedNav() {
+		h++
+	}
+	return h
+}
+
 func (m *DetailModel) initViewport() {
-	headerHeight := 6
 	footerHeight := 2
 
 	// If we have joined panes, we have less height (tmux split takes space)
-	vpHeight := m.height - headerHeight - footerHeight
-	if m.claudePaneID != "" || m.workdirPaneID != "" {
-		// The tmux split takes roughly half, but we don't control that here
-		// Just use full height - the TUI pane will be resized by tmux
-	}
+	vpHeight := m.height - m.headerHeight() - footerHeight
 
 	m.viewport = viewport.New(m.width-4, vpHeight)
 	m.setViewportContent()
@@ -777,13 +823,20 @@ func (m *DetailModel) initViewport() {
 func (m *DetailModel) SetSize(width, height int) {
 	m.width = width
 	m.height = height
-	if m.ready {
-		headerHeight := 6
-		footerHeight := 2
-		m.viewport.Width = width - 4
-		m.viewport.Height = height - headerHeight - footerHeight
-		m.setViewportContent()
+	m.reflowViewport()
+}
+
+// reflowViewport recomputes the viewport dimensions from the current width,
+// height, and header layout. Called on resize and whenever something that
+// changes the header height (like the pinned nav bar appearing) is updated.
+func (m *DetailModel) reflowViewport() {
+	if !m.ready {
+		return
 	}
+	footerHeight := 2
+	m.viewport.Width = m.width - 4
+	m.viewport.Height = m.height - m.headerHeight() - footerHeight
+	m.setViewportContent()
 }
 
 // Update handles messages.
@@ -796,7 +849,11 @@ func (m *DetailModel) Update(msg tea.Msg) (*DetailModel, tea.Cmd) {
 		log := GetLogger()
 		m.paneLoading = false
 		m.waitingForExecutor = false
-		if msg.err != nil {
+		if errors.Is(msg.err, errExecutorBusy) {
+			// Not a failure — another ty instance owns this executor. Show why.
+			log.Info("panesJoinedMsg: executor owned by another ty instance")
+			m.paneError = msg.userMessage
+		} else if msg.err != nil {
 			log.Error("panesJoinedMsg: error=%v", msg.err)
 			m.paneError = msg.userMessage
 		} else {
@@ -873,6 +930,9 @@ func (m *DetailModel) Cleanup() {
 	if m.claudePaneID != "" || m.workdirPaneID != "" {
 		m.breakTmuxPanes(true, true) // saveHeight=true, resizeTUI=true
 	}
+	// Hand the executor back to other ty instances. Unconditional: we may hold the
+	// lock even when no pane got joined (e.g. join-pane failed after we locked).
+	m.releaseExecutorLock()
 }
 
 // CleanupWithoutSaving cleans up panes without saving the height.
@@ -882,6 +942,7 @@ func (m *DetailModel) CleanupWithoutSaving() {
 	if m.claudePaneID != "" || m.workdirPaneID != "" {
 		m.breakTmuxPanes(false, true) // saveHeight=false, resizeTUI=true
 	}
+	m.releaseExecutorLock()
 }
 
 // ClearPaneState clears the cached pane state without breaking panes.
@@ -1120,6 +1181,11 @@ func (m *DetailModel) ensureTmuxPanesJoined() {
 			m.paneLoading = false
 			m.waitingForExecutor = false
 			m.paneError = ""
+		} else if m.executorBusyElsewhere {
+			// Another ty instance owns this executor: stop spinning and show why.
+			m.paneLoading = false
+			m.waitingForExecutor = false
+			m.paneError = executorBusyMessage
 		}
 	}
 }
@@ -1374,6 +1440,52 @@ func (m *DetailModel) saveShellPaneWidth() {
 	}
 }
 
+// errExecutorBusy signals that another ty instance already owns a task's executor
+// pane, so this instance must not join it. It flows back through panesJoinedMsg as
+// a user-facing message rather than a hard failure.
+var errExecutorBusy = errors.New("executor busy in another instance")
+
+// executorBusyMessage is shown in the detail header when the executor is locked by
+// another running ty.
+const executorBusyMessage = "This executor is running in another ty instance. Close it there to view it here."
+
+// acquireExecutorLock takes an exclusive flock on a per-task lock file so only one
+// ty instance borrows a given executor's tmux pane at a time. Two instances joining
+// the same pane fight over it and trap the agent in a "claude --resume" interrupt
+// loop, so a second instance must refuse rather than steal it.
+//
+// The lock is tied to the open file description, so it is released automatically if
+// the holding process exits — a crashed TUI never leaves a stale lock. It lives
+// next to the database, so isolated instances (custom WORKTREE_DB_PATH, e.g. QA
+// harnesses) get their own lock namespace and don't contend with the real one.
+//
+// Returns a release func, or errExecutorBusy when another instance holds it.
+func acquireExecutorLock(taskID int64) (func(), error) {
+	lockPath := filepath.Join(filepath.Dir(db.DefaultPath()), fmt.Sprintf("executor-%d.lock", taskID))
+	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0644)
+	if err != nil {
+		return nil, fmt.Errorf("open executor lock file: %w", err)
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		_ = f.Close()
+		return nil, errExecutorBusy
+	}
+	return func() {
+		_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+		_ = f.Close()
+	}, nil
+}
+
+// releaseExecutorLock drops the executor lock if this model holds it. Safe to call
+// repeatedly; it no-ops once released.
+func (m *DetailModel) releaseExecutorLock() {
+	if m.executorLockRelease != nil {
+		m.executorLockRelease()
+		m.executorLockRelease = nil
+	}
+	m.executorBusyElsewhere = false
+}
+
 // joinTmuxPanes joins the task's Claude pane and creates a workdir shell pane.
 // Layout:
 //   - Top (configurable, default 20%): Task details (TUI)
@@ -1389,6 +1501,24 @@ func (m *DetailModel) joinTmuxPanes() {
 		return
 	}
 	log.Debug("joinTmuxPanes: windowTarget=%q", windowTarget)
+
+	// Granular executor lock: refuse to borrow this task's pane if another ty
+	// instance already owns it, rather than fighting over it and interrupt-looping
+	// the agent. We hold the lock for the life of this detail view (re-joins after
+	// a pane dies reuse it), so only acquire when we don't already hold it.
+	if m.executorLockRelease == nil {
+		release, err := acquireExecutorLock(m.task.ID)
+		if err != nil {
+			log.Info("joinTmuxPanes: executor for task %d is owned by another ty instance; not joining", m.task.ID)
+			m.executorBusyElsewhere = true
+			// Retry on the normal cooldown so the view recovers once the other
+			// instance releases the pane.
+			m.joinPaneFailedUntil = time.Now().Add(3 * time.Second)
+			return
+		}
+		m.executorLockRelease = release
+	}
+	m.executorBusyElsewhere = false
 
 	// Use timeout for all tmux operations to prevent blocking UI
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -2342,8 +2472,9 @@ func (m *DetailModel) View() string {
 
 	header := m.renderHeader()
 	help := m.renderHelp()
+	nav := m.renderPinnedNav()
 
-	sig := m.viewSignature(header, help)
+	sig := m.viewSignature(header, help, nav)
 	if m.cachedViewOK && m.cachedViewSig == sig {
 		return m.cachedView
 	}
@@ -2396,6 +2527,13 @@ func (m *DetailModel) View() string {
 		boxContent = lipgloss.JoinVertical(lipgloss.Left, header, content, scrollIndicator)
 	}
 
+	// Pinned quick-nav bar sits at the bottom of the box, just above the help
+	// footer, so the top stays clean. headerHeight() already reserves a line for
+	// it, so the viewport shrinks to make room.
+	if nav != "" {
+		boxContent = lipgloss.JoinVertical(lipgloss.Left, boxContent, nav)
+	}
+
 	renderedBox := box.Render(boxContent)
 
 	// When shell pane is hidden, show a collapsed indicator on the right
@@ -2440,7 +2578,7 @@ func (m *DetailModel) View() string {
 // colours) without enumerating each one. The remaining inputs are the View-level
 // state the header/help don't cover: the dangerous-mode banner, the bordered box,
 // and the viewport's content/scroll geometry.
-func (m *DetailModel) viewSignature(header, help string) uint64 {
+func (m *DetailModel) viewSignature(header, help, nav string) uint64 {
 	h := newSigHasher()
 	h.u64(StyleGeneration()) // theme / project colour changes
 	h.int(m.width)
@@ -2459,6 +2597,7 @@ func (m *DetailModel) viewSignature(header, help string) uint64 {
 	h.int(m.viewport.VisibleLineCount())
 	h.str(header)
 	h.str(help)
+	h.str(nav) // pinned quick-nav bar (rendered at the box bottom)
 	return h.h
 }
 
@@ -2556,25 +2695,6 @@ func (m *DetailModel) renderHeader() string {
 				Foreground(dimmedFg)
 		}
 		meta.WriteString(aeStyle.Render("ACCEPT EDITS"))
-		meta.WriteString("  ")
-	}
-
-	// Spotlight badge
-	if t.WorktreePath != "" && spotlight.IsActive(t.WorktreePath) {
-		var spotlightStyle lipgloss.Style
-		if m.focused {
-			spotlightStyle = lipgloss.NewStyle().
-				Padding(0, 1).
-				Background(lipgloss.Color("214")). // Amber/yellow
-				Foreground(lipgloss.Color("#000000")).
-				Bold(true)
-		} else {
-			spotlightStyle = lipgloss.NewStyle().
-				Padding(0, 1).
-				Background(dimmedBg).
-				Foreground(dimmedFg)
-		}
-		meta.WriteString(spotlightStyle.Render("🔦 SPOTLIGHT"))
 		meta.WriteString("  ")
 	}
 
@@ -3029,45 +3149,62 @@ func (m *DetailModel) renderHelp() string {
 		key      string
 		desc     string
 		disabled bool // When disabled, always show grayed out
+		primary  bool // Shown even when the help row is collapsed
 	}
 
 	// Check if navigation is available (more than 1 task in column)
 	hasNavigation := m.totalInColumn > 1
 
+	// Primary keys are the handful of high-frequency actions kept visible when
+	// the row is collapsed; everything else is tucked behind '?'.
 	keys := []helpKey{
-		{IconArrowUp() + "/" + IconArrowDown(), "prev/next task", !hasNavigation},
+		{IconArrowUp() + "/" + IconArrowDown(), "prev/next task", !hasNavigation, true},
+	}
+
+	// Pinned quick-nav hint (only when the bar is shown)
+	if m.showPinnedNav() {
+		keys = append(keys, helpKey{"[/]", "pinned", false, true})
 	}
 
 	// Show scroll hint when content is scrollable
 	if m.viewport.TotalLineCount() > m.viewport.VisibleLineCount() {
-		keys = append(keys, helpKey{"j/k/wheel", "scroll", false})
+		keys = append(keys, helpKey{"j/k/wheel", "scroll", false, false})
 	}
 
 	// Only show execute/retry when Claude is not running
 	claudeRunning := m.claudeMemoryMB > 0
 	if !claudeRunning {
-		keys = append(keys, helpKey{"x", "execute", false})
-		keys = append(keys, helpKey{"X", "execute dangerous", false})
+		keys = append(keys, helpKey{"x", "execute", false, true})
+		keys = append(keys, helpKey{"X", "execute dangerous", false, false})
 	}
 
 	hasPanes := m.claudePaneID != "" || m.workdirPaneID != ""
 
-	keys = append(keys, helpKey{"e", "edit", false})
+	keys = append(keys, helpKey{"e", "edit", false, true})
 
 	// Only show retry when Claude is not running
 	if !claudeRunning {
-		keys = append(keys, helpKey{"r", "retry", false})
+		keys = append(keys, helpKey{"r", "retry", false, false})
 	}
 
 	// Always show status change option
-	keys = append(keys, helpKey{"S", "status", false})
+	keys = append(keys, helpKey{"S", "status", false, true})
 
 	if m.task != nil {
 		pinDesc := "pin task"
 		if m.task.Pinned {
 			pinDesc = "unpin task"
 		}
-		keys = append(keys, helpKey{"t", pinDesc, false})
+		keys = append(keys, helpKey{"t", pinDesc, false, false})
+	}
+
+	// Toggle the pinned quick-nav row (only when there are pinned tasks to show).
+	if m.pinnedNavAvailable() {
+		toggleDesc := "hide pinned"
+		if m.pinnedNavHidden {
+			toggleDesc = "show pinned"
+		}
+		keys = append(keys, helpKey{"T", toggleDesc, false, false})
 	}
 
 	// Show dangerous mode toggle when task is processing or blocked
@@ -3076,33 +3213,23 @@ func (m *DetailModel) renderHelp() string {
 		if m.task.DangerousMode {
 			toggleDesc = "safe mode"
 		}
-		keys = append(keys, helpKey{"!", toggleDesc, false})
+		keys = append(keys, helpKey{"!", toggleDesc, false, false})
 	}
 
 	// Show pane navigation shortcut when panes are visible
 	if hasPanes && os.Getenv("TMUX") != "" {
-		keys = append(keys, helpKey{"shift+" + IconArrowUp() + IconArrowDown(), "switch pane", false})
+		keys = append(keys, helpKey{"shift+" + IconArrowUp() + IconArrowDown(), "switch pane", false, false})
 		// Show shell pane toggle shortcut
 		toggleDesc := "hide shell"
 		if m.shellPaneHidden {
 			toggleDesc = "show shell"
 		}
-		keys = append(keys, helpKey{"\\", toggleDesc, false})
-	}
-
-	// Spotlight mode
-	if m.task != nil && m.task.WorktreePath != "" {
-		if spotlight.IsActive(m.task.WorktreePath) {
-			keys = append(keys, helpKey{"f", "spotlight off", false})
-			keys = append(keys, helpKey{"F", "sync", false})
-		} else {
-			keys = append(keys, helpKey{"f", "spotlight", false})
-		}
+		keys = append(keys, helpKey{"\\", toggleDesc, false, false})
 	}
 
 	// Open PR shortcut (only when task has a PR)
 	if m.task != nil && m.task.PRURL != "" {
-		keys = append(keys, helpKey{"G", "open PR", false})
+		keys = append(keys, helpKey{"G", "open PR", false, false})
 	}
 
 	// Show contextual label for 'b' key based on whether process is running
@@ -3111,19 +3238,24 @@ func (m *DetailModel) renderHelp() string {
 		browserLabel = "browser"
 	}
 	keys = append(keys, []helpKey{
-		{"b", browserLabel, false},
-		{"c", "close", false},
-		{"a", "archive", false},
-		{"d", "delete", false},
-		{"esc", "back", false},
+		{"b", browserLabel, false, false},
+		{"c", "close", false, false},
+		{"a", "archive", false, false},
+		{"d", "delete", false, false},
+		{"esc", "back", false, true},
 	}...)
 
 	var help string
 	dimmedKeyStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280"))
 	dimmedDescStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#4B5563"))
 
-	for i, k := range keys {
-		if i > 0 {
+	rendered := 0
+	for _, k := range keys {
+		// When collapsed, only the primary keys are shown.
+		if !m.helpExpanded && !k.primary {
+			continue
+		}
+		if rendered > 0 {
 			help += "  "
 		}
 		// Disabled keys are always dimmed, regardless of focus
@@ -3132,7 +3264,18 @@ func (m *DetailModel) renderHelp() string {
 		} else {
 			help += HelpKey.Render(k.key) + " " + HelpDesc.Render(k.desc)
 		}
+		rendered++
 	}
+
+	// Trailing '?' affordance to expand/collapse the rest.
+	moreDesc := "more"
+	if m.helpExpanded {
+		moreDesc = "less"
+	}
+	if rendered > 0 {
+		help += "  "
+	}
+	help += dimmedKeyStyle.Render("?") + " " + dimmedDescStyle.Render(moreDesc)
 
 	return HelpBar.Render(help)
 }
