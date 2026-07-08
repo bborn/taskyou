@@ -406,8 +406,18 @@ func (e *Executor) reconcileFinishedWorkflowSteps() {
 			continue
 		}
 		// The terminal step is meant to stay 'blocked' once it finishes (its PR awaits
-		// a human merge), so never auto-complete it to 'done'.
+		// a human merge), so never auto-complete it to 'done'. But if the Stop hook fired
+		// mid-push it left the generic "waiting for input" state; once the step has
+		// genuinely settled (committed + pushed), clarify it's parked for merge review
+		// (once) and tear down its now-idle session.
 		if pipeline.IsTerminalStep(e.db, task) {
+			if WorkflowStepFinished(task.WorktreePath) {
+				if logged, _ := e.db.HasLogLineContaining(task.ID, pipeline.TerminalStepParkedLog); !logged {
+					e.logLine(task.ID, "system", pipeline.TerminalStepParkedLog)
+					e.teardownWorkflowStepSession(task)
+					e.logger.Info("Terminal workflow step parked for merge review", "id", task.ID, "title", task.Title)
+				}
+			}
 			continue
 		}
 		if !WorkflowStepFinished(task.WorktreePath) {

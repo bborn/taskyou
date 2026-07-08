@@ -486,3 +486,28 @@ func TestHasQuestionLog(t *testing.T) {
 		t.Error("a question was logged, want true")
 	}
 }
+
+func TestHasLogLineContaining(t *testing.T) {
+	db, cleanup := setupDepsTestDB(t)
+	defer cleanup()
+	tk := &Task{Title: "step", Status: StatusBlocked}
+	if err := db.CreateTask(tk); err != nil {
+		t.Fatal(err)
+	}
+	marker := "parked for merge review"
+	if got, _ := db.HasLogLineContaining(tk.ID, marker); got {
+		t.Error("marker not logged yet, want false")
+	}
+	if err := db.AppendTaskLog(tk.ID, "system", "some unrelated work happened"); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := db.HasLogLineContaining(tk.ID, marker); got {
+		t.Error("unrelated log only, want false")
+	}
+	if err := db.AppendTaskLog(tk.ID, "system", "step "+marker+" awaiting human"); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := db.HasLogLineContaining(tk.ID, marker); !got {
+		t.Error("marker substring is present, want true")
+	}
+}

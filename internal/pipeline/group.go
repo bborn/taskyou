@@ -43,6 +43,13 @@ func hasPipelineTag(tags string) bool {
 	return false
 }
 
+// TerminalStepParkedLog is the system-log line marking a finished terminal step as
+// parked in 'blocked' awaiting a human merge. The Stop hook writes it when it catches
+// the step finished; the daemon sweep writes it (once) when the Stop hook fired mid-
+// push and left the generic "waiting for input" state instead. Shared so both paths
+// use the same text and the sweep can dedupe against it.
+const TerminalStepParkedLog = "Final workflow step finished — parked in 'blocked' for a human to review and merge."
+
 // IsTerminalStep reports whether a workflow step is the sink — the step nothing
 // else depends on, which is the one that opens the PR (see composeInstruction).
 // A finished terminal step parks in 'blocked' awaiting a human merge review rather

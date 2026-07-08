@@ -4621,7 +4621,7 @@ func handleStopHook(database *db.DB, taskID int64, input *ClaudeHookInput) error
 			if pipeline.IsWorkflowTask(task) && workflowStepFinished(task) {
 				if pipeline.IsTerminalStep(database, task) {
 					database.UpdateTaskStatus(taskID, db.StatusBlocked)
-					database.AppendTaskLog(taskID, "system", "Final step finished and opened its PR — parked in blocked for a human to review and merge")
+					database.AppendTaskLog(taskID, "system", pipeline.TerminalStepParkedLog)
 				} else {
 					database.UpdateTaskStatus(taskID, db.StatusDone)
 					database.AppendTaskLog(taskID, "system", "Work committed and pushed — workflow advances to the next step")

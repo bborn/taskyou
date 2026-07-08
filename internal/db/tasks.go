@@ -1206,6 +1206,18 @@ func (db *DB) HasQuestionLog(taskID int64) (bool, error) {
 	return n > 0, nil
 }
 
+// HasLogLineContaining reports whether the task has any log line whose content
+// contains substr. Used to make a periodic sweep idempotent — e.g. logging a
+// "parked for merge review" note exactly once for a terminal workflow step.
+func (db *DB) HasLogLineContaining(taskID int64, substr string) (bool, error) {
+	var n int
+	err := db.QueryRow(`SELECT COUNT(*) FROM task_logs WHERE task_id = ? AND content LIKE ?`, taskID, "%"+substr+"%").Scan(&n)
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
 // GetTaskLogs retrieves logs for a task.
 func (db *DB) GetTaskLogs(taskID int64, limit int) ([]*TaskLog, error) {
 	if limit <= 0 {
