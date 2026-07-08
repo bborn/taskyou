@@ -23,21 +23,25 @@ import (
 // stepYAML is the on-disk form of a step.
 type stepYAML struct {
 	Name     string   `yaml:"name"`
+	Kind     string   `yaml:"kind,omitempty"` // Run another kind here (its instructions apply; if it has steps, they're inlined).
 	Executor string   `yaml:"executor,omitempty"`
 	Model    string   `yaml:"model,omitempty"`
 	Deps     []string `yaml:"deps,omitempty"`
-	Prompt   string   `yaml:"prompt"`
+	Prompt   string   `yaml:"prompt,omitempty"` // Optional when `kind` is set: the referenced kind supplies the instructions.
 	// Verbatim marks a step whose prompt IS the full instruction (no DAG-derived
 	// git handoff is added). It's set when `ty pipeline edit` ejects a built-in
 	// workflow, so the ejected file behaves identically to the built-in.
 	Verbatim bool `yaml:"verbatim,omitempty"`
 }
 
-// definitionYAML is the on-disk form of a workflow.
+// definitionYAML is the on-disk form of a kind. `steps` makes it a workflow;
+// `instructions` (with no steps) makes it a single-task kind — the same shape as a
+// task type. One file format, one differentiator: the presence of `steps`.
 type definitionYAML struct {
-	Name        string     `yaml:"name"`
-	Description string     `yaml:"description,omitempty"`
-	Steps       []stepYAML `yaml:"steps"`
+	Name         string     `yaml:"name"`
+	Description  string     `yaml:"description,omitempty"`
+	Instructions string     `yaml:"instructions,omitempty"`
+	Steps        []stepYAML `yaml:"steps,omitempty"`
 }
 
 // WorkflowsDir returns the global directory custom workflow files live in.
@@ -70,17 +74,20 @@ func ParseDefinition(data []byte) (Definition, error) {
 		return Definition{}, fmt.Errorf("workflow is missing a name")
 	}
 	def := Definition{
-		Name:        strings.TrimSpace(doc.Name),
-		Description: strings.TrimSpace(doc.Description),
-		Custom:      true,
+		Name:         strings.TrimSpace(doc.Name),
+		Description:  strings.TrimSpace(doc.Description),
+		Instructions: strings.TrimSpace(doc.Instructions),
+		Custom:       true,
 	}
 	for _, s := range doc.Steps {
 		name := strings.TrimSpace(s.Name)
 		if name == "" {
-			return Definition{}, fmt.Errorf("workflow %q has a step with no name", def.Name)
+			return Definition{}, fmt.Errorf("kind %q has a step with no name", def.Name)
 		}
-		if strings.TrimSpace(s.Prompt) == "" {
-			return Definition{}, fmt.Errorf("step %q has no prompt", name)
+		kind := strings.TrimSpace(s.Kind)
+		// A step must say what it does: either its own prompt, or a kind to run.
+		if strings.TrimSpace(s.Prompt) == "" && kind == "" {
+			return Definition{}, fmt.Errorf("step %q needs a prompt or a kind", name)
 		}
 		exec := strings.TrimSpace(s.Executor)
 		if exec == "" {
@@ -88,6 +95,7 @@ func ParseDefinition(data []byte) (Definition, error) {
 		}
 		step := Step{
 			Name:     name,
+			Kind:     kind,
 			Executor: exec,
 			Model:    strings.TrimSpace(s.Model),
 			Deps:     s.Deps,
@@ -100,6 +108,14 @@ func ParseDefinition(data []byte) (Definition, error) {
 			step.Prompt = s.Prompt
 		}
 		def.Steps = append(def.Steps, step)
+	}
+	// A steps-less kind must carry instructions (it's a single-task prompt preset);
+	// a kind with steps is a workflow and is validated as a DAG.
+	if def.IsSingle() {
+		if def.Instructions == "" {
+			return Definition{}, fmt.Errorf("kind %q has no steps and no instructions", def.Name)
+		}
+		return def, nil
 	}
 	if err := def.validate(); err != nil {
 		return Definition{}, err

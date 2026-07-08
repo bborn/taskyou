@@ -859,7 +859,11 @@ Examples:
 					if d.Custom {
 						origin = "custom"
 					}
-					fmt.Printf("%s %s\n  %s\n  steps: %s\n", successStyle.Render(d.Name), dimStyle.Render("("+origin+")"), d.Description, strings.Join(stepLabels, " · "))
+					shape := "steps: " + strings.Join(stepLabels, " · ")
+					if d.IsSingle() {
+						shape = dimStyle.Render("single task")
+					}
+					fmt.Printf("%s %s\n  %s\n  %s\n", successStyle.Render(d.Name), dimStyle.Render("("+origin+")"), d.Description, shape)
 				}
 				fmt.Println(dimStyle.Render("Custom workflows: " + pipeline.WorkflowsDir() + "/*.yaml  ·  create with: task pipeline new \"<describe it>\""))
 				return
@@ -922,6 +926,26 @@ Examples:
 			if err != nil {
 				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
 				os.Exit(1)
+			}
+
+			// A single-task kind (no steps) produced one ordinary task, not a DAG.
+			if result.Definition.IsSingle() {
+				t := result.Tasks[0]
+				if outputJSON {
+					out := map[string]interface{}{
+						"definition": result.Definition.Name,
+						"project":    project,
+						"task":       map[string]interface{}{"id": t.ID, "type": t.Type, "status": string(t.Status)},
+					}
+					jsonBytes, _ := json.Marshal(out)
+					fmt.Println(string(jsonBytes))
+					return
+				}
+				fmt.Println(successStyle.Render(fmt.Sprintf("Created %s task #%d (%s)", result.Definition.Name, t.ID, t.Status)))
+				if noExecute {
+					fmt.Println(dimStyle.Render("Staged but not started — queue it to run."))
+				}
+				return
 			}
 
 			if outputJSON {
