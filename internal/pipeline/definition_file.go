@@ -10,7 +10,7 @@ import (
 )
 
 // Custom workflows are authored as plain YAML files — one workflow per file —
-// so a user (or the LLM in `ty pipeline new`) can define a whole new flow (add a
+// so a user (or the LLM in `ty workflow new`) can define a whole new flow (add a
 // QA step, a different shape) without touching Go. Files live in a global dir
 // (~/.config/task/workflows) and an optional per-project dir
 // (<project>/.taskyou/workflows); a project file shadows a global one of the same
@@ -28,7 +28,7 @@ type stepYAML struct {
 	Deps     []string `yaml:"deps,omitempty"`
 	Prompt   string   `yaml:"prompt"`
 	// Verbatim marks a step whose prompt IS the full instruction (no DAG-derived
-	// git handoff is added). It's set when `ty pipeline edit` ejects a built-in
+	// git handoff is added). It's set when `ty workflow edit` ejects a built-in
 	// workflow, so the ejected file behaves identically to the built-in.
 	Verbatim bool `yaml:"verbatim,omitempty"`
 }
@@ -107,7 +107,7 @@ func ParseDefinition(data []byte) (Definition, error) {
 	return def, nil
 }
 
-// Marshal renders a Definition back to YAML (used by `ty pipeline new`).
+// Marshal renders a Definition back to YAML (used by `ty workflow new`).
 func Marshal(def Definition) ([]byte, error) {
 	doc := definitionYAML{Name: def.Name, Description: def.Description}
 	for _, s := range def.Steps {

@@ -14,7 +14,7 @@ import (
 
 // GenerateDefinition turns a free-text description of a workflow into a validated
 // Definition (and its YAML), using Claude. It's the engine behind
-// `ty pipeline new "<describe it>"`: the user describes the flow in English and
+// `ty workflow new "<describe it>"`: the user describes the flow in English and
 // gets a ready-to-edit workflow file, instead of authoring YAML by hand.
 func GenerateDefinition(ctx context.Context, apiKey, description string) (Definition, []byte, error) {
 	if strings.TrimSpace(apiKey) == "" {

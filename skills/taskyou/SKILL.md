@@ -62,8 +62,8 @@ Use `ty` (short) or `taskyou` (full) — both work identically.
 | List by status | `ty list --status <status> --json` |
 | View task details | `ty show <id> --json --logs` |
 | Create task | `ty create "title" --body "description"` |
-| Create a workflow | `ty pipeline "goal" --project <name>` (plan → code → parallel review → collect) |
-| List / author workflows | `ty pipeline --list` · `ty pipeline new "<describe it>"` · `ty pipeline edit` |
+| Create a workflow | `ty workflow "goal" --project <name>` (plan → code → parallel review → collect; `ty pipeline` still works as an alias) |
+| List / author workflows | `ty workflow --list` · `ty workflow new "<describe it>"` · `ty workflow edit` |
 | Execute task | `ty execute <id>` |
 | Retry with feedback | `ty retry <id> --feedback "..."` |
 | Change status | `ty status <id> <status>` |
@@ -249,8 +249,9 @@ the worktree, not the executor inside it.
 **Task introspection:**
 - `taskyou_show_task` — Get details of any task in the current project.
 - `taskyou_create_task` — Create a follow-up task.
-- `taskyou_create_pipeline` — Spin up a multi-step workflow (plan → code →
+- `taskyou_create_workflow` — Spin up a multi-step workflow (plan → code →
   parallel review → collect) for a goal, when it warrants more than one task.
+  (`taskyou_create_pipeline` still works as an alias.)
 - `taskyou_list_tasks` — See other active tasks in this project.
 
 ## Best Practices

@@ -811,14 +811,15 @@ Examples:
 	})
 	rootCmd.AddCommand(createCmd)
 
-	// Pipeline subcommand - create a multi-phase pipeline task
+	// Workflow subcommand - create a multi-phase workflow task
 	pipelineCmd := &cobra.Command{
-		Use:   "pipeline [goal]",
-		Short: "Create a multi-model plan → code → review pipeline for a goal",
+		Use:     "workflow [goal]",
+		Aliases: []string{"pipeline"},
+		Short:   "Create a multi-model plan → code → review workflow for a goal",
 		Long: `Create a workflow: one goal broken into a small DAG of step tasks, each routed
 to its own executor and model, that hand work forward on a single shared branch
 and advance automatically — sequential where steps depend on each other, parallel
-where they don't.
+where they don't. (the 'pipeline' command name still works as an alias)
 
 The default 'plan-code-review' workflow runs five steps on one branch:
   Plan     (Claude / Opus)   — writes PLAN.md, no code
@@ -828,16 +829,16 @@ The default 'plan-code-review' workflow runs five steps on one branch:
   Collect  (Claude / Sonnet) — merges reviews, applies fixes, opens the PR
 
 Workflows are defined in YAML files you can edit; define your own (add a QA step,
-a different shape) with 'task pipeline new "<describe it>"' or 'task pipeline edit'.
+a different shape) with 'ty workflow new "<describe it>"' or 'ty workflow edit'.
 
 Each step commits and pushes the shared branch, so the workflow needs a project
 that uses git worktrees and has a remote to push to.
 
 Examples:
-  task pipeline "Add rate limiting to the API" --project myapp
-  task pipeline "Refactor the auth module" -p myapp --definition my-workflow
-  task pipeline new "plan, build, security review + QA in parallel, then finalize"
-  task pipeline --list  # show available workflows`,
+  ty workflow "Add rate limiting to the API" --project myapp
+  ty workflow "Refactor the auth module" -p myapp --definition my-workflow
+  ty workflow new "plan, build, security review + QA in parallel, then finalize"
+  ty workflow --list  # show available workflows`,
 		Args: cobra.MaximumNArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
 			listDefs, _ := cmd.Flags().GetBool("list")
@@ -861,7 +862,7 @@ Examples:
 					}
 					fmt.Printf("%s %s\n  %s\n  steps: %s\n", successStyle.Render(d.Name), dimStyle.Render("("+origin+")"), d.Description, strings.Join(stepLabels, " · "))
 				}
-				fmt.Println(dimStyle.Render("Custom workflows: " + pipeline.WorkflowsDir() + "/*.yaml  ·  create with: task pipeline new \"<describe it>\""))
+				fmt.Println(dimStyle.Render("Custom workflows: " + pipeline.WorkflowsDir() + "/*.yaml  ·  create with: ty workflow new \"<describe it>\""))
 				return
 			}
 
@@ -969,7 +970,7 @@ Examples:
 	}
 	pipelineCmd.Flags().String("body", "", "Goal text (alternative to the positional argument)")
 	pipelineCmd.Flags().StringP("project", "p", "", "Project name (auto-detected from cwd if not specified)")
-	pipelineCmd.Flags().StringP("definition", "d", pipeline.DefaultDefinition, "Pipeline definition to use")
+	pipelineCmd.Flags().StringP("definition", "d", pipeline.DefaultDefinition, "Workflow definition to use")
 	pipelineCmd.Flags().String("permission-mode", "", "Permission mode for every phase: default, accept-edits, auto, dangerous (defaults to the project's setting)")
 	pipelineCmd.Flags().Bool("dangerous", false, "Run every phase in dangerous mode (alias for --permission-mode dangerous)")
 	pipelineCmd.Flags().Bool("no-execute", false, "Stage the workflow without queuing the root step")
@@ -980,7 +981,7 @@ Examples:
 		return pipeline.DefinitionNames(), cobra.ShellCompDirectiveNoFileComp
 	})
 
-	// Pipeline new subcommand - author a custom workflow from a free-text description
+	// Workflow new subcommand - author a custom workflow from a free-text description
 	pipelineNewCmd := &cobra.Command{
 		Use:   "new [description]",
 		Short: "Create a custom workflow from a free-text description (LLM → YAML)",
@@ -994,9 +995,9 @@ $TY_WORKFLOWS_DIR) and can also be dropped in a project's .taskyou/workflows/.
 Edit the file by hand any time — it's just YAML.
 
 Examples:
-  task pipeline new "spike three approaches, build the best, then write tests"
-  task pipeline new "plan, implement, security review, then QA in a browser" --name secure-flow
-  task pipeline new "..." --print        # print the YAML without saving`,
+  ty workflow new "spike three approaches, build the best, then write tests"
+  ty workflow new "plan, implement, security review, then QA in a browser" --name secure-flow
+  ty workflow new "..." --print        # print the YAML without saving`,
 		Args: cobra.MaximumNArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
 			desc, _ := cmd.Flags().GetString("body")
@@ -1061,7 +1062,7 @@ Examples:
 				fmt.Printf("  %-12s %s/%s%s\n", s.Name, s.Executor, model, dep)
 			}
 			fmt.Println(dimStyle.Render("Saved to " + path + " — edit it any time."))
-			fmt.Println(dimStyle.Render("Run it with: task pipeline \"<goal>\" --definition " + def.Name))
+			fmt.Println(dimStyle.Render("Run it with: ty workflow \"<goal>\" --definition " + def.Name))
 		},
 	}
 	pipelineNewCmd.Flags().String("body", "", "Workflow description (alternative to the positional argument)")
@@ -1069,7 +1070,7 @@ Examples:
 	pipelineNewCmd.Flags().Bool("print", false, "Print the YAML without saving")
 	pipelineCmd.AddCommand(pipelineNewCmd)
 
-	// Pipeline edit subcommand - write a workflow to a YAML file for editing
+	// Workflow edit subcommand - write a workflow to a YAML file for editing
 	pipelineEditCmd := &cobra.Command{
 		Use:   "edit [name]",
 		Short: "Write a workflow to a YAML file you can edit (ejects the built-in)",
@@ -1079,9 +1080,9 @@ change models, prompts, or steps by hand. A custom file shadows the built-in of
 the same name.
 
 Examples:
-  task pipeline edit                       # eject the default workflow to edit
-  task pipeline edit plan-code-review      # same, explicit
-  task pipeline edit --print               # print the YAML instead of writing it`,
+  ty workflow edit                       # eject the default workflow to edit
+  ty workflow edit plan-code-review      # same, explicit
+  ty workflow edit --print               # print the YAML instead of writing it`,
 		Args: cobra.MaximumNArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
 			name := pipeline.DefaultDefinition
@@ -1119,7 +1120,7 @@ Examples:
 				os.Exit(1)
 			}
 			fmt.Println(successStyle.Render("Wrote " + def.Name + " to " + path))
-			fmt.Println(dimStyle.Render("Edit it, then run: task pipeline \"<goal>\" --definition " + def.Name))
+			fmt.Println(dimStyle.Render("Edit it, then run: ty workflow \"<goal>\" --definition " + def.Name))
 		},
 	}
 	pipelineEditCmd.Flags().Bool("print", false, "Print the YAML instead of writing a file")

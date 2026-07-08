@@ -113,9 +113,10 @@ Steps advance with no human in the loop; a workflow only pauses when a step genu
 
 ```bash
 # CLI
-ty pipeline "Add rate limiting to the API" --project myapp
-ty pipeline --list                 # show available workflows
-ty pipeline "..." --no-execute     # stage without starting
+ty workflow "Add rate limiting to the API" --project myapp
+# 'ty pipeline' still works as an alias
+ty workflow --list                 # show available workflows
+ty workflow "..." --no-execute     # stage without starting
 
 # TUI: in the new-task form (n), pick a workflow in the "Workflow" selector.
 ```
@@ -141,13 +142,13 @@ Two steps with the same `deps` run in parallel; a step depending on several join
 
 ```bash
 # Author a workflow from a plain-English description (LLM → YAML you can edit)
-ty pipeline new "spike three approaches, pick the best, build it, review and test in parallel"
+ty workflow new "spike three approaches, pick the best, build it, review and test in parallel"
 
 # Eject the built-in to a YAML file to tweak its models / prompts / steps
-ty pipeline edit                   # writes ~/.config/task/workflows/plan-code-review.yaml
+ty workflow edit                   # writes ~/.config/task/workflows/plan-code-review.yaml
 ```
 
-Custom workflows appear in `ty pipeline --list`, the `--definition` flag, and the TUI new-task selector automatically. Configuration lives entirely in these files — edit them by hand any time.
+Custom workflows appear in `ty workflow --list`, the `--definition` flag, and the TUI new-task selector automatically. Configuration lives entirely in these files — edit them by hand any time.
 
 ## Project Context
 

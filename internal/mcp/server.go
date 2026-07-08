@@ -258,8 +258,8 @@ func (s *Server) handleRequest(req *jsonRPCRequest) {
 					},
 				},
 				{
-					Name:        "taskyou_create_pipeline",
-					Description: "Create a multi-model pipeline for a goal: one goal is split into an ordered chain of phase tasks (default 'plan-code-review': Opus plans → Sonnet codes → two reviewers run in parallel → collect opens the PR), each routed to its own executor/model, all on one shared git branch. Each step runs on its own executor/model; define custom workflows as YAML (ty pipeline new). Steps advance automatically — sequential where they depend on each other, parallel where they don't. Use this instead of a single task when a goal benefits from a plan/code/review split across different models. The first phase is queued immediately. Requires a git-worktree project with a remote to push to.",
+					Name:        "taskyou_create_workflow",
+					Description: "Create a multi-model workflow for a goal: one goal is split into an ordered chain of phase tasks (default 'plan-code-review': Opus plans → Sonnet codes → two reviewers run in parallel → collect opens the PR), each routed to its own executor/model, all on one shared git branch. Each step runs on its own executor/model; define custom workflows as YAML (ty workflow new). Steps advance automatically — sequential where they depend on each other, parallel where they don't. Use this instead of a single task when a goal benefits from a plan/code/review split across different models. The first phase is queued immediately. Requires a git-worktree project with a remote to push to.",
 					InputSchema: map[string]interface{}{
 						"type": "object",
 						"properties": map[string]interface{}{
@@ -273,7 +273,7 @@ func (s *Server) handleRequest(req *jsonRPCRequest) {
 							},
 							"definition": map[string]interface{}{
 								"type":        "string",
-								"description": "Pipeline definition name (defaults to 'plan-code-review').",
+								"description": "Workflow definition name (defaults to 'plan-code-review').",
 								"enum":        pipeline.DefinitionNames(),
 							},
 							"permission_mode": map[string]interface{}{
@@ -577,7 +577,7 @@ func (s *Server) handleToolCall(id interface{}, params *toolCallParams) {
 			},
 		})
 
-	case "taskyou_create_pipeline":
+	case "taskyou_create_workflow", "taskyou_create_pipeline":
 		goal, _ := params.Arguments["goal"].(string)
 		if strings.TrimSpace(goal) == "" {
 			s.sendError(id, -32602, "goal is required")
@@ -603,7 +603,7 @@ func (s *Server) handleToolCall(id interface{}, params *toolCallParams) {
 			Execute:        true,
 		})
 		if err != nil {
-			s.sendError(id, -32603, fmt.Sprintf("Failed to create pipeline: %v", err))
+			s.sendError(id, -32603, fmt.Sprintf("Failed to create workflow: %v", err))
 			return
 		}
 
