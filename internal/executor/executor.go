@@ -382,23 +382,41 @@ func (e *Executor) reconcileReadyTasks() {
 }
 
 // reconcileFinishedWorkflowSteps recovers workflow steps that finished their work
-// (committed + pushed) but got parked in 'blocked' — because the Stop hook's
-// git-state check fired at a transient moment (e.g. a temp file briefly dirtying
-// the worktree, or the push still settling). Those steps stall the whole DAG. This
-// sweep marks any such step 'done' once its state has settled, then advances the
-// workflow. It skips steps that asked a question (genuine needs-input) and the
-// terminal step (which parks in 'blocked' on purpose, awaiting a human merge), so
-// it never advances past one that's legitimately waiting.
+// (committed + pushed) but never reached 'done'. Two shapes: (1) parked in 'blocked'
+// because the Stop hook's git-state check fired at a transient moment (a temp file
+// briefly dirtying the worktree, or the push still settling); (2) stuck in
+// 'processing' because the executor session ended without signalling — a non-Claude
+// executor that fires no Stop hook, or a Claude agent that looped and was killed. Both
+// stall the whole DAG. This sweep marks any such settled step 'done' (or parks the
+// terminal step for merge review), then advances the workflow. It skips steps that
+// asked a question (genuine needs-input), the terminal step's own merge-park, and any
+// 'processing' step whose executor window is still live (genuinely working).
 func (e *Executor) reconcileFinishedWorkflowSteps() {
-	tasks, err := e.db.ListTasks(db.ListTasksOptions{Status: db.StatusBlocked, Tag: "pipeline", Limit: 500})
-	if err != nil {
-		e.logger.Error("Failed to list blocked pipeline tasks", "error", err)
-		return
+	// Steps that ended their turn ('blocked') OR are stuck 'processing' after their
+	// session ended without signalling done — e.g. a non-Claude executor that fires no
+	// Stop hook, or a Claude agent that looped and was killed. A 'processing' step is
+	// only touched once its executor window is GONE (see below), so one that's genuinely
+	// still working is never disturbed.
+	var tasks []*db.Task
+	for _, status := range []string{db.StatusBlocked, db.StatusProcessing} {
+		got, err := e.db.ListTasks(db.ListTasksOptions{Status: status, Tag: "pipeline", Limit: 500})
+		if err != nil {
+			e.logger.Error("Failed to list pipeline tasks", "status", status, "error", err)
+			continue
+		}
+		tasks = append(tasks, got...)
 	}
 	for _, task := range tasks {
 		// Only steps that actually ran; leave un-started (DAG-waiting) ones to
 		// reconcileReadyTasks.
 		if task.StartedAt == nil || task.WorktreePath == "" {
+			continue
+		}
+		// A 'processing' step is still owned by a live executor session — leave it be.
+		// Only once its window is gone (the session ended without moving the task off
+		// 'processing') is it a candidate for recovery. WorkflowStepFinished below is the
+		// real guard; this just avoids racing a running agent.
+		if task.Status == db.StatusProcessing && tmuxWindowExistsForTask(task.ID) {
 			continue
 		}
 		// Don't advance past a genuine needs-input question.

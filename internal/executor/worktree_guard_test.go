@@ -2,8 +2,36 @@ package executor
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"testing"
 )
+
+// TestPathWithinResolvesSymlinks guards the fix for the guard falsely denying writes
+// when the worktree lives under a symlinked path (macOS /tmp -> /private/tmp): the
+// worktree root is /tmp/… but a tool resolves a write to /private/tmp/…, which without
+// symlink resolution reads as an escape and traps the agent in a retry loop.
+func TestPathWithinResolvesSymlinks(t *testing.T) {
+	real := t.TempDir()
+	link := filepath.Join(t.TempDir(), "wtlink")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+
+	// Root is the symlink path; the write target is the resolved real path (and a
+	// not-yet-created file, as a real write target is).
+	if !pathWithin(link, filepath.Join(real, "REVIEW.md")) {
+		t.Error("a write to the resolved real path should be WITHIN a symlinked worktree root")
+	}
+	// And the reverse: root is the real path, the write goes through the symlink.
+	if !pathWithin(real, filepath.Join(link, "REVIEW.md")) {
+		t.Error("a write via the symlinked path should be WITHIN the real worktree root")
+	}
+	// A genuine escape is still outside.
+	if pathWithin(link, filepath.Join(t.TempDir(), "x")) {
+		t.Error("a path outside the worktree must NOT be reported within")
+	}
+}
 
 // wt is a representative managed-worktree root (contains the .task-worktrees segment).
 const wt = "/home/u/proj/.task-worktrees/4244-speed"
