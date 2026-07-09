@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"os/user"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -2681,7 +2682,7 @@ func (e *Executor) runClaude(ctx context.Context, task *db.Task, workDir, prompt
 		return execResult{Message: "tmux is not installed"}
 	}
 
-	paths := e.claudePathsForProject(task.Project)
+	paths := e.claudePathsForTask(task)
 
 	// Ensure task-daemon session exists
 	daemonSession, err := ensureTmuxDaemon()
@@ -2754,7 +2755,7 @@ func (e *Executor) runClaude(ctx context.Context, task *db.Task, workDir, prompt
 	// Validate session file exists before attempting resume
 	var script string
 	existingSessionID := task.ClaudeSessionID
-	envPrefix := claudeEnvPrefix(paths.configDir)
+	envPrefix := claudeEnvPrefix(paths.configDir) + taskEnvPrefix(task)
 	if existingSessionID != "" && ClaudeSessionExists(existingSessionID, workDir, paths.configDir) {
 		e.logLine(task.ID, "system", fmt.Sprintf("Resuming existing session %s", existingSessionID))
 		script = fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %sclaude %s%s%s%s--resume %s %s`,
@@ -2823,7 +2824,7 @@ func (e *Executor) runClaude(ctx context.Context, task *db.Task, workDir, prompt
 // runClaudeResume resumes a previous Claude session with feedback.
 // If no previous session exists, starts fresh with the full prompt + feedback.
 func (e *Executor) runClaudeResume(ctx context.Context, task *db.Task, workDir, prompt, feedback string) execResult {
-	paths := e.claudePathsForProject(task.Project)
+	paths := e.claudePathsForTask(task)
 
 	// Only use stored session ID - no file-based fallback to avoid cross-task contamination
 	// Validate session file exists before attempting resume
@@ -2914,7 +2915,7 @@ func (e *Executor) runClaudeResume(ctx context.Context, task *db.Task, workDir, 
 		promptArg = ""
 	}
 
-	envPrefix := claudeEnvPrefix(paths.configDir)
+	envPrefix := claudeEnvPrefix(paths.configDir) + taskEnvPrefix(task)
 	script := fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %sclaude %s%s%s%s--resume %s %s`,
 		task.ID, taskSessionID, task.Port, task.WorktreePath, envPrefix, dangerousFlag, rcFlag, effort, model, claudeSessionID, promptArg)
 
@@ -3011,7 +3012,7 @@ func (e *Executor) ResumeDangerous(taskID int64) bool {
 // resumeClaudeDangerous is the Claude-specific implementation of dangerous mode resume.
 // It kills the current Claude process and restarts with --dangerously-skip-permissions.
 func (e *Executor) resumeClaudeDangerous(task *db.Task, workDir string) bool {
-	paths := e.claudePathsForProject(task.Project)
+	paths := e.claudePathsForTask(task)
 	taskID := task.ID
 
 	claudeSessionID := task.ClaudeSessionID
@@ -3071,7 +3072,7 @@ func (e *Executor) resumeClaudeDangerous(task *db.Task, workDir string) bool {
 	}
 
 	// Force dangerous mode regardless of WORKTREE_DANGEROUS_MODE setting
-	envPrefix := claudeEnvPrefix(paths.configDir)
+	envPrefix := claudeEnvPrefix(paths.configDir) + taskEnvPrefix(task)
 	script := fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %sclaude --dangerously-skip-permissions --resume %s`,
 		taskID, taskSessionID, task.Port, task.WorktreePath, envPrefix, claudeSessionID)
 
@@ -3214,7 +3215,7 @@ func (e *Executor) ResumeWithMode(taskID int64, mode string) bool {
 // resumeClaudeSafe is the Claude-specific implementation of safe mode resume.
 // It kills the current Claude process and restarts without --dangerously-skip-permissions.
 func (e *Executor) resumeClaudeSafe(task *db.Task, workDir string) bool {
-	paths := e.claudePathsForProject(task.Project)
+	paths := e.claudePathsForTask(task)
 	taskID := task.ID
 
 	claudeSessionID := task.ClaudeSessionID
@@ -3277,7 +3278,7 @@ func (e *Executor) resumeClaudeSafe(task *db.Task, workDir string) bool {
 	// / default) instead of always dropping to prompt-for-everything. "Safe" must
 	// never mean bypass, so a still-dangerous task degrades to default.
 	safeMode := safePermissionMode(task.EffectivePermissionMode())
-	envPrefix := claudeEnvPrefix(paths.configDir)
+	envPrefix := claudeEnvPrefix(paths.configDir) + taskEnvPrefix(task)
 	script := fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %sclaude %s--resume %s`,
 		taskID, taskSessionID, task.Port, task.WorktreePath, envPrefix, permissionFlagForMode(safeMode), claudeSessionID)
 
@@ -3344,7 +3345,7 @@ func (e *Executor) resumeClaudeSafe(task *db.Task, workDir string) bool {
 // If dangerousMode is true, uses --dangerously-bypass-approvals-and-sandbox.
 func (e *Executor) resumeCodexWithMode(task *db.Task, workDir string, dangerousMode bool) bool {
 	taskID := task.ID
-	paths := e.claudePathsForProject(task.Project)
+	paths := e.claudePathsForTask(task)
 
 	sessionID := task.ClaudeSessionID
 	if sessionID == "" {
@@ -3397,7 +3398,7 @@ func (e *Executor) resumeCodexWithMode(task *db.Task, workDir string, dangerousM
 	}
 
 	// Build script with --resume flag
-	envPrefix := claudeEnvPrefix(paths.configDir)
+	envPrefix := claudeEnvPrefix(paths.configDir) + taskEnvPrefix(task)
 	script := fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %scodex %s--resume %s`,
 		taskID, taskSessionID, task.Port, task.WorktreePath, envPrefix, dangerousFlag, sessionID)
 
@@ -3448,7 +3449,7 @@ func (e *Executor) resumeCodexWithMode(task *db.Task, workDir string, dangerousM
 // If dangerousMode is true, uses --dangerously-allow-run.
 func (e *Executor) resumeGeminiWithMode(task *db.Task, workDir string, dangerousMode bool) bool {
 	taskID := task.ID
-	paths := e.claudePathsForProject(task.Project)
+	paths := e.claudePathsForTask(task)
 
 	sessionID := task.ClaudeSessionID
 	if sessionID == "" {
@@ -3505,7 +3506,7 @@ func (e *Executor) resumeGeminiWithMode(task *db.Task, workDir string, dangerous
 	}
 
 	// Build script with --resume flag
-	envPrefix := claudeEnvPrefix(paths.configDir)
+	envPrefix := claudeEnvPrefix(paths.configDir) + taskEnvPrefix(task)
 	script := fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %sgemini %s--resume %s`,
 		taskID, taskSessionID, task.Port, task.WorktreePath, envPrefix, dangerousFlag, sessionID)
 
@@ -3657,7 +3658,7 @@ func (e *Executor) RenameClaudeSessionForTask(task *db.Task, newName string) {
 		return
 	}
 
-	paths := e.claudePathsForProject(task.Project)
+	paths := e.claudePathsForTask(task)
 	if err := RenameClaudeSession(task.WorktreePath, newName, paths.configDir); err != nil {
 		e.logger.Debug("Could not rename Claude session", "taskID", task.ID, "error", err)
 	}
@@ -3953,7 +3954,7 @@ func (e *Executor) setupWorktree(task *db.Task) (string, error) {
 		e.db.UpdateTask(task)
 	}
 
-	paths := e.claudePathsForProject(task.Project)
+	paths := e.claudePathsForTask(task)
 
 	// Get project directory
 	projectDir := e.getProjectDir(task.Project)
@@ -4394,6 +4395,28 @@ func (e *Executor) claudePathsForProject(project string) claudePaths {
 	}
 }
 
+// claudePathsForTask resolves the Claude config dir for a task, honoring a
+// per-task ClaudeConfigDir override before falling back to the project's
+// configured dir (then the default). This lets a single task — e.g. one
+// workflow step — route through a different Claude config (an ollama-backed
+// one) without changing the project's setting. Only the Claude executor paths
+// use this; other executors stay on claudePathsForProject since
+// CLAUDE_CONFIG_DIR is a Claude-specific concept.
+func (e *Executor) claudePathsForTask(task *db.Task) claudePaths {
+	if task != nil && strings.TrimSpace(task.ClaudeConfigDir) != "" {
+		dir := ResolveClaudeConfigDir(task.ClaudeConfigDir)
+		return claudePaths{
+			configDir:  dir,
+			configFile: ClaudeConfigFilePath(dir),
+		}
+	}
+	project := ""
+	if task != nil {
+		project = task.Project
+	}
+	return e.claudePathsForProject(project)
+}
+
 // isDefaultClaudeConfigDir returns true if dir is the default Claude config directory (~/.claude).
 // Setting CLAUDE_CONFIG_DIR to the default breaks MCP discovery because Claude then looks for
 // config at ~/.claude/.claude.json instead of ~/.claude.json.
@@ -4413,6 +4436,40 @@ func claudeEnvPrefix(dir string) string {
 		return ""
 	}
 	return fmt.Sprintf("CLAUDE_CONFIG_DIR=%q ", dir)
+}
+
+// taskEnvPrefix renders a task's per-step env overrides (Task.EnvJSON, parsed
+// via Task.EnvMap) as a `KEY='VAL' KEY='VAL' ` shell prefix spliced into the
+// claude command right before `claude` — the same slot claudeEnvPrefix uses for
+// CLAUDE_CONFIG_DIR. This is how a single workflow step routes through a
+// non-Anthropic proxy like ollama: set ANTHROPIC_BASE_URL/AUTH_TOKEN (and
+// ANTHROPIC_API_KEY='') here and the spawned claude hits ollama instead of
+// Anthropic, WITHOUT swapping CLAUDE_CONFIG_DIR — so the default config dir
+// (plugins, MCP, TaskYou's trusted worktrees) stays intact and process env
+// wins over any stored creds. Keys are emitted in sorted order so the built
+// command is deterministic (and testable); values are shell-single-quoted to
+// neutralize metacharacters. No overrides → "".
+func taskEnvPrefix(task *db.Task) string {
+	if task == nil {
+		return ""
+	}
+	env := task.EnvMap()
+	if len(env) == 0 {
+		return ""
+	}
+	keys := make([]string, 0, len(env))
+	for k := range env {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	var b strings.Builder
+	for _, k := range keys {
+		b.WriteString(k)
+		b.WriteString("=")
+		b.WriteString(shellSingleQuote(env[k]))
+		b.WriteString(" ")
+	}
+	return b.String()
 }
 
 // ensureGitExclude adds an entry to .git/info/exclude if not already present.
@@ -5071,7 +5128,7 @@ func (e *Executor) CleanupWorktree(task *db.Task) error {
 	if projectDir == "" {
 		return nil
 	}
-	paths := e.claudePathsForProject(task.Project)
+	paths := e.claudePathsForTask(task)
 
 	// Skip worktree removal for non-worktree tasks where WorktreePath is the
 	// project root itself. Running "git worktree remove" on the main working
@@ -5147,7 +5204,7 @@ func (e *Executor) ArchiveWorktree(task *db.Task) error {
 	if projectDir == "" {
 		return nil
 	}
-	paths := e.claudePathsForProject(task.Project)
+	paths := e.claudePathsForTask(task)
 
 	// Get current HEAD commit
 	headCmd := exec.Command("git", "rev-parse", "HEAD")
@@ -5416,7 +5473,7 @@ func (e *Executor) UnarchiveWorktree(task *db.Task) error {
 	e.runWorktreeInitScript(projectDir, worktreePath, task)
 
 	// Write env file
-	paths := e.claudePathsForProject(task.Project)
+	paths := e.claudePathsForTask(task)
 	e.writeWorktreeEnvFile(projectDir, worktreePath, task, paths.configDir)
 
 	return nil

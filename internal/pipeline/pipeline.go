@@ -22,6 +22,7 @@
 package pipeline
 
 import (
+	"encoding/json"
 	"fmt"
 	"os/exec"
 	"sort"
@@ -39,6 +40,8 @@ type Step struct {
 	Kind        string   // Optional: another kind this step runs. Sets the task's Type (so that kind's instructions apply); if that kind has steps, it's a sub-workflow inlined at build (see flatten.go).
 	Executor    string   // Executor slug (db.ExecutorClaude, db.ExecutorCodex, ...).
 	Model       string   // Per-task model override ("" = the executor's default).
+	ConfigDir   string   // Per-task CLAUDE_CONFIG_DIR override ("" = use the project's/default config dir). Routes this step's Claude through a different config (e.g. ollama) without changing the project.
+	Env         map[string]string // Per-task env overrides injected as a process-env prefix on the claude command (e.g. ANTHROPIC_BASE_URL/AUTH_TOKEN to route through ollama). nil = no overrides. Kept distinct from ConfigDir: env injection keeps the default config dir (plugins, MCP, trusted worktrees) intact and process env wins over stored creds — the mechanism that actually reaches ollama.
 	Instruction string   // Full body template (built-in / verbatim steps). Takes precedence over Prompt.
 	Prompt      string   // Custom-workflow body: what the step does; the git handoff is composed from the DAG (see compose.go).
 	Deps        []string // Names of steps that must complete before this one runs.
@@ -287,6 +290,8 @@ func Create(database *db.DB, opts Options) (*Result, error) {
 			Project:        opts.Project,
 			Executor:       s.Executor,
 			Model:          s.Model,
+			ClaudeConfigDir: s.ConfigDir,
+			EnvJSON:         encodeStepEnv(s.Env),
 			PermissionMode: opts.PermissionMode,
 			Tags:           "pipeline",
 		}
@@ -461,6 +466,22 @@ func reviewsList(step Step, branch string) string {
 // slugify converts a string into a lowercase, dash-separated slug, truncated to
 // maxLen. It mirrors the executor's worktree slug so workflow branch names read
 // like ordinary task branches.
+// encodeStepEnv serializes a step's `env:` map into the JSON blob stored on the
+// task (Task.EnvJSON). nil/empty → "" (no override, no stored blob). The
+// executor's EnvMap parses it back. Errors are impossible for a
+// map[string]string and would only indicate a programming mistake, so on
+// failure we fall back to "" rather than blocking pipeline creation.
+func encodeStepEnv(env map[string]string) string {
+	if len(env) == 0 {
+		return ""
+	}
+	b, err := json.Marshal(env)
+	if err != nil {
+		return ""
+	}
+	return string(b)
+}
+
 func slugify(s string, maxLen int) string {
 	s = strings.ToLower(strings.TrimSpace(s))
 	var b strings.Builder

@@ -67,7 +67,7 @@ func (e *Executor) EnsureTaskWindow(ctx context.Context, task *db.Task, sessionI
 			// Record which config dir we checked. A mismatch here between processes
 			// used to silently destroy live sessions (see NormalizeClaudeConfigEnv);
 			// logging the dir makes any future divergence diagnosable, not invisible.
-			checkedDir := e.claudePathsForProject(task.Project).configDir
+			checkedDir := e.claudePathsForTask(task).configDir
 			e.db.AppendTaskLog(task.ID, "system", fmt.Sprintf("Session %s no longer exists in %s, starting fresh", sessionID, checkedDir))
 			e.logger.Warn("stored session not found; starting fresh", "task", task.ID, "session", sessionID, "configDir", checkedDir, "project", task.Project)
 			if err := e.db.UpdateTaskClaudeSessionID(task.ID, ""); err != nil {

@@ -309,6 +309,17 @@ func (db *DB) migrate() error {
 
 		// Per-task Claude model override ("" = use global/Claude default, otherwise an alias like opus/sonnet/haiku or a full model name)
 		`ALTER TABLE tasks ADD COLUMN model TEXT DEFAULT ''`,
+
+		// Per-task CLAUDE_CONFIG_DIR override ("" = use the project's/default config dir).
+		// Lets a single task (e.g. a workflow step) route through a different Claude config —
+		// e.g. an ollama-backed config — without changing the project's setting.
+		`ALTER TABLE tasks ADD COLUMN claude_config_dir TEXT DEFAULT ''`,
+
+		// Per-task env overrides for the spawned Claude, stored as a JSON object
+		// (see Task.EnvJSON / EnvMap). Injected as a process-env prefix on the
+		// claude command so a step can route through a non-Anthropic proxy (ollama)
+		// without swapping CLAUDE_CONFIG_DIR.
+		`ALTER TABLE tasks ADD COLUMN env TEXT DEFAULT ''`,
 	}
 
 	for _, m := range alterMigrations {

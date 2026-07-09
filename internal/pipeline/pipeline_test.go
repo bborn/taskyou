@@ -191,6 +191,159 @@ func TestCreateAutoAdvancesDAGWithParallelJoin(t *testing.T) {
 	}
 }
 
+// configDirYAML has a per-step config_dir override on Code and Review only,
+// exercising the route-some-steps-through-a-different-Claude-config feature
+// (e.g. ollama) without changing the project.
+const configDirYAML = `
+name: cfgdir
+description: plan on default claude, code+review on an ollama config
+steps:
+  - {name: Plan, model: opus, prompt: "Plan {{goal}}."}
+  - {name: Code, deps: [Plan], model: glm-5.2:cloud, config_dir: "~/.claude-ollama", prompt: "Implement it."}
+  - {name: Review, deps: [Code], model: glm-5.2:cloud, config_dir: "~/.claude-ollama", prompt: "Review it."}
+`
+
+// TestCreateConfigDirPropagation verifies a step's config_dir override lands on
+// the created task's ClaudeConfigDir (and that steps without it stay empty), so
+// the executor routes only those steps through the alternate Claude config.
+func TestCreateConfigDirPropagation(t *testing.T) {
+	installWorkflow(t, "cfgdir", configDirYAML)
+	database := testDB(t)
+	res, err := Create(database, Options{Goal: "ship the thing", Project: "test", Definition: "cfgdir"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	plan := taskByStep(res, "Plan")
+	code := taskByStep(res, "Code")
+	review := taskByStep(res, "Review")
+
+	if plan.ClaudeConfigDir != "" {
+		t.Errorf("Plan ClaudeConfigDir = %q, want empty (no override)", plan.ClaudeConfigDir)
+	}
+	for _, tk := range []*db.Task{code, review} {
+		if tk.ClaudeConfigDir != "~/.claude-ollama" {
+			t.Errorf("%s ClaudeConfigDir = %q, want ~/.claude-ollama", tk.Title, tk.ClaudeConfigDir)
+		}
+		if tk.Model != "glm-5.2:cloud" {
+			t.Errorf("%s Model = %q, want glm-5.2:cloud", tk.Title, tk.Model)
+		}
+	}
+
+	// The override persists across a reload (the column is saved, not just in-memory).
+	reloaded, _ := database.GetTask(code.ID)
+	if reloaded == nil || reloaded.ClaudeConfigDir != "~/.claude-ollama" {
+		got := ""
+		if reloaded != nil {
+			got = reloaded.ClaudeConfigDir
+		}
+		t.Errorf("reloaded Code ClaudeConfigDir = %q, want ~/.claude-ollama", got)
+	}
+}
+
+// TestParseConfigDirRoundtrip verifies config_dir survives the yaml parse +
+// Marshal roundtrip so `ty pipeline edit`/`new` preserve it.
+func TestParseConfigDirRoundtrip(t *testing.T) {
+	def, err := ParseDefinition([]byte(configDirYAML))
+	if err != nil {
+		t.Fatalf("ParseDefinition: %v", err)
+	}
+	if s, ok := stepByName(def.Steps, "Code"); !ok || s.ConfigDir != "~/.claude-ollama" {
+		t.Errorf("Code ConfigDir = %q, want ~/.claude-ollama", s.ConfigDir)
+	}
+	out, err := Marshal(def)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	def2, err := ParseDefinition(out)
+	if err != nil {
+		t.Fatalf("re-parse: %v", err)
+	}
+	if s, ok := stepByName(def2.Steps, "Review"); !ok || s.ConfigDir != "~/.claude-ollama" {
+		t.Errorf("Review ConfigDir after roundtrip = %q, want ~/.claude-ollama", s.ConfigDir)
+	}
+}
+
+// envYAML routes Code+Review through ollama via a per-step env map (the
+// mechanism that actually reaches a token-auth proxy), while Plan stays on the
+// default Anthropic backend.
+const envYAML = `
+name: envroute
+description: plan on default claude, code+review routed to ollama via env
+steps:
+  - {name: Plan, model: opus, prompt: "Plan {{goal}}."}
+  - {name: Code, deps: [Plan], model: glm-5.2:cloud, env: {ANTHROPIC_BASE_URL: "http://127.0.0.1:11434", ANTHROPIC_AUTH_TOKEN: ollama, ANTHROPIC_API_KEY: ""}, prompt: "Implement it."}
+  - {name: Review, deps: [Code], model: glm-5.2:cloud, env: {ANTHROPIC_BASE_URL: "http://127.0.0.1:11434", ANTHROPIC_AUTH_TOKEN: ollama}, prompt: "Review it."}
+`
+
+// TestCreateEnvPropagation verifies a step's env map is serialized into the
+// created task's EnvJSON (and steps without it stay empty), so the executor
+// injects those vars only on the routed steps.
+func TestCreateEnvPropagation(t *testing.T) {
+	installWorkflow(t, "envroute", envYAML)
+	database := testDB(t)
+	res, err := Create(database, Options{Goal: "ship the thing", Project: "test", Definition: "envroute"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	plan := taskByStep(res, "Plan")
+	code := taskByStep(res, "Code")
+	review := taskByStep(res, "Review")
+
+	if plan.EnvJSON != "" {
+		t.Errorf("Plan EnvJSON = %q, want empty (no override)", plan.EnvJSON)
+	}
+	for _, tk := range []*db.Task{code, review} {
+		if tk.EnvJSON == "" {
+			t.Errorf("%s EnvJSON empty, want a JSON blob", tk.Title)
+		}
+		if tk.Model != "glm-5.2:cloud" {
+			t.Errorf("%s Model = %q, want glm-5.2:cloud", tk.Title, tk.Model)
+		}
+	}
+	m := code.EnvMap()
+	if m["ANTHROPIC_BASE_URL"] != "http://127.0.0.1:11434" || m["ANTHROPIC_AUTH_TOKEN"] != "ollama" {
+		t.Errorf("Code EnvMap = %v, want ollama routing vars", m)
+	}
+	if _, ok := m["ANTHROPIC_API_KEY"]; !ok {
+		t.Errorf("Code EnvMap missing explicit empty ANTHROPIC_API_KEY (needed to clear inherited creds): %v", m)
+	}
+
+	// The override persists across a reload (the column is saved, not just in-memory).
+	reloaded, _ := database.GetTask(code.ID)
+	if reloaded == nil || reloaded.EnvMap()["ANTHROPIC_BASE_URL"] != "http://127.0.0.1:11434" {
+		got := ""
+		if reloaded != nil {
+			got = reloaded.EnvJSON
+		}
+		t.Errorf("reloaded Code EnvJSON = %q, want persisted ollama routing blob", got)
+	}
+}
+
+// TestParseEnvRoundtrip verifies the env map survives the yaml parse + Marshal
+// roundtrip so `ty pipeline edit`/`new` preserve it.
+func TestParseEnvRoundtrip(t *testing.T) {
+	def, err := ParseDefinition([]byte(envYAML))
+	if err != nil {
+		t.Fatalf("ParseDefinition: %v", err)
+	}
+	if s, ok := stepByName(def.Steps, "Code"); !ok || s.Env["ANTHROPIC_AUTH_TOKEN"] != "ollama" {
+		t.Errorf("Code Env = %v, want ANTHROPIC_AUTH_TOKEN=ollama", s.Env)
+	}
+	out, err := Marshal(def)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	def2, err := ParseDefinition(out)
+	if err != nil {
+		t.Fatalf("re-parse: %v", err)
+	}
+	if s, ok := stepByName(def2.Steps, "Review"); !ok || s.Env["ANTHROPIC_BASE_URL"] != "http://127.0.0.1:11434" {
+		t.Errorf("Review Env after roundtrip = %v, want ANTHROPIC_BASE_URL preserved", s.Env)
+	}
+}
+
 func TestCreateValidation(t *testing.T) {
 	database := testDB(t)
 	cases := []struct {
