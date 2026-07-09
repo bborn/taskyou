@@ -743,13 +743,20 @@ func GetClaudePIDFromPane(paneID string) int {
 // KillClaudeProcess terminates the Claude process for a task to free up memory.
 // This is called when a task is completed, closed, or deleted.
 // WorkflowStepFinished reports whether a workflow step has committed AND pushed its
-// work: its worktree is clean and HEAD matches the pushed remote-tracking ref. That
-// is the signal a step completed its handoff (per the composed step instructions),
-// used both by the Stop hook (auto-complete a step that finished but didn't call
+// work: its worktree is clean and HEAD has been pushed to some origin branch. That is
+// the signal a step completed its handoff (per the composed step instructions), used
+// both by the Stop hook (auto-complete a step that finished but didn't call
 // taskyou_complete) and by the daemon's reconcile sweep (recover a step that was
 // blocked because the hook fired at a transient moment). Conservative: any doubt
-// returns false. Compares to refs/remotes/origin/<branch> rather than @{u} because
-// non-root step worktrees check out the shared branch without upstream tracking.
+// returns false.
+//
+// It checks "HEAD is reachable from an origin ref" rather than "HEAD == origin/<branch
+// of --abbrev-ref>" because non-root steps share one branch and git will not attach two
+// worktrees to it — so those worktrees run on a DETACHED HEAD. Deriving the branch from
+// --abbrev-ref then yields "HEAD" and the old check wrongly reported the step unfinished
+// forever, stalling the whole DAG. Reachability-from-origin holds whether the worktree
+// is on the shared branch, on a parallel step's own branch, or detached — as long as the
+// push landed. (A push failure leaves HEAD on no origin ref, so it still reads unfinished.)
 func WorkflowStepFinished(worktreePath string) bool {
 	if worktreePath == "" {
 		return false
@@ -761,16 +768,18 @@ func WorkflowStepFinished(worktreePath string) bool {
 	if errH != nil {
 		return false
 	}
-	branch, errB := exec.Command("git", "-C", worktreePath, "rev-parse", "--abbrev-ref", "HEAD").Output()
-	br := strings.TrimSpace(string(branch))
-	if errB != nil || br == "" || br == "HEAD" {
-		return false
-	}
-	remote, errR := exec.Command("git", "-C", worktreePath, "rev-parse", "refs/remotes/origin/"+br).Output()
+	// Which origin branches contain HEAD? Non-empty means the step's commit was pushed.
+	refs, errR := exec.Command("git", "-C", worktreePath, "branch", "-r", "--contains",
+		strings.TrimSpace(string(head)), "--format=%(refname:short)").Output()
 	if errR != nil {
 		return false
 	}
-	return strings.TrimSpace(string(head)) == strings.TrimSpace(string(remote))
+	for _, line := range strings.Split(strings.TrimSpace(string(refs)), "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "origin/") {
+			return true
+		}
+	}
+	return false
 }
 
 // teardownWorkflowStepSession kills the executor process and tmux window for a

@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/bborn/workflow/internal/db"
@@ -55,6 +56,18 @@ func TestWorkflowStepFinished(t *testing.T) {
 	}
 	if !workflowStepFinished(task) {
 		t.Error("clean + pushed step (no upstream tracking) SHOULD be finished")
+	}
+
+	// DETACHED HEAD → still finished. Non-root steps share one branch and git won't
+	// attach two worktrees to it, so those worktrees run detached. HEAD is still the
+	// pushed commit, so the step IS finished — the old --abbrev-ref check saw "HEAD"
+	// and wrongly reported unfinished forever, stalling the whole DAG.
+	git(t, wt, "checkout", "--detach", "HEAD")
+	if out, err := exec.Command("git", "-C", wt, "rev-parse", "--abbrev-ref", "HEAD").Output(); err != nil || strings.TrimSpace(string(out)) != "HEAD" {
+		t.Fatalf("test precondition failed: expected a detached HEAD, got %q (%v)", strings.TrimSpace(string(out)), err)
+	}
+	if !workflowStepFinished(task) {
+		t.Error("clean + pushed step on a DETACHED HEAD SHOULD be finished")
 	}
 
 	// Uncommitted change → not finished.
