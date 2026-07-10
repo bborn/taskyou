@@ -74,6 +74,48 @@ pane · `Esc` close.
    then `WORKTREE_DB_PATH=… WORKTREE_SESSION_ID=qa "$TY_BIN" daemon`. Real end-to-end
    executor spawning. Heaviest; depends on Claude auth/trust.
 
+## Pipeline stress test — slow init + concurrency
+
+```
+scripts/qa/ty-qa-pipeline-stress.sh                      # PASS/FAIL, exits non-zero on a zombie
+scripts/qa/ty-qa-pipeline-stress.sh --binary /tmp/ty-old # reproduce against an older build
+scripts/qa/ty-qa-pipeline-stress.sh --pipelines 5 --init-delay 45
+```
+
+Run this after touching **anything** in the workflow completion path —
+`WorkflowStepFinished`, the `reconcileFinishedWorkflowSteps` sweep, the Stop hook, or
+worktree setup.
+
+It stands up an isolated instance whose project has a `bin/worktree-setup` that sleeps
+(default 30s, longer than the sweep's 16s tick), then launches several pipelines at once.
+Those two conditions — **slow worktree init** and **concurrency** — are what every real
+project has and what a throwaway git repo run one-at-a-time does not.
+
+It asserts one timing-robust invariant:
+
+> **A step cannot be completed before its session started.**
+
+Any `done` step whose `completed_at` precedes its session-start log — or that has no
+session at all — was never run, which means the DAG advanced past work that never
+happened. That is reported as a `ZOMBIE` and fails the run.
+
+### Why this exists
+
+A sweep meant to rescue finished-but-unsignalled steps was marking steps `done` ~10s in,
+before their agent ever started: a freshly-created worktree is clean and its HEAD is
+already on origin, and during init there is no tmux window either — so "hasn't started"
+was indistinguishable from "finished". On a 3-pipeline run it silently deleted every
+Build and review stage; each Verify then found nothing upstream, built the slice alone,
+and shipped an unreviewed PR.
+
+Two lessons are baked into this script:
+
+- **Never infer completion from absence** (no window, no diff against origin). Only from
+  positive evidence of work — a commit the step actually made.
+- **Harness fidelity beats harness convenience.** The bug was invisible to a fast, serial
+  QA project and unmissable in a slow, concurrent one. If a test can't be made to fail on
+  the broken code, it isn't testing anything.
+
 ## Worked example — the pane-routing regression
 
 Reproduces "executor stops working when the detail view is open": with the detail

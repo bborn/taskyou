@@ -326,6 +326,12 @@ func (db *DB) migrate() error {
 		// freshly-created worktree (clean, HEAD already on origin) from a completed step
 		// and will silently mark unstarted steps done.
 		`ALTER TABLE tasks ADD COLUMN base_commit TEXT DEFAULT ''`,
+		// The paths already dirty in the worktree when the step started. A project's
+		// worktree init (bundle, migrate) routinely rewrites tracked files — Rails'
+		// db/structure.sql is the classic — so "worktree is clean" is never true and can
+		// never be the completion signal. What matters is that the step left nothing
+		// uncommitted that wasn't already dirty before it ran.
+		`ALTER TABLE tasks ADD COLUMN base_dirty TEXT DEFAULT ''`,
 	}
 
 	for _, m := range alterMigrations {

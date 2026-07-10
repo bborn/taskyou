@@ -455,13 +455,18 @@ func (e *Executor) reconcileFinishedWorkflowSteps() {
 			e.logger.Error("Failed to read base commit", "id", task.ID, "error", err)
 			continue
 		}
+		baseDirty, err := e.db.GetTaskBaseDirty(task.ID)
+		if err != nil {
+			e.logger.Error("Failed to read base dirt", "id", task.ID, "error", err)
+			continue
+		}
 		// The terminal step is meant to stay 'blocked' once it finishes (its PR awaits
 		// a human merge), so never auto-complete it to 'done'. But if the Stop hook fired
 		// mid-push it left the generic "waiting for input" state; once the step has
 		// genuinely settled (committed + pushed), clarify it's parked for merge review
 		// (once) and tear down its now-idle session.
 		if pipeline.IsTerminalStep(e.db, task) {
-			if WorkflowStepFinished(task.WorktreePath, baseCommit) {
+			if WorkflowStepFinished(task.WorktreePath, baseCommit, baseDirty) {
 				if logged, _ := e.db.HasLogLineContaining(task.ID, pipeline.TerminalStepParkedLog); !logged {
 					e.logLine(task.ID, "system", pipeline.TerminalStepParkedLog)
 					e.teardownWorkflowStepSession(task)
@@ -470,7 +475,7 @@ func (e *Executor) reconcileFinishedWorkflowSteps() {
 			}
 			continue
 		}
-		if !WorkflowStepFinished(task.WorktreePath, baseCommit) {
+		if !WorkflowStepFinished(task.WorktreePath, baseCommit, baseDirty) {
 			continue
 		}
 		if err := e.updateStatus(task.ID, db.StatusDone); err != nil {
@@ -819,15 +824,55 @@ func gitHeadCommit(worktreePath string) string {
 	return strings.TrimSpace(string(out))
 }
 
-func WorkflowStepFinished(worktreePath, baseCommit string) bool {
+// gitDirtyPaths returns the worktree's uncommitted paths (sorted, one per line). The
+// porcelain status prefix is stripped so a path compares equal regardless of whether it
+// is " M", "MM", "??" etc.
+func gitDirtyPaths(worktreePath string) (string, bool) {
+	out, err := exec.Command("git", "-C", worktreePath, "status", "--porcelain").Output()
+	if err != nil {
+		return "", false
+	}
+	var paths []string
+	for _, line := range strings.Split(strings.TrimRight(string(out), "\n"), "\n") {
+		if len(line) < 4 {
+			continue
+		}
+		paths = append(paths, strings.TrimSpace(line[3:]))
+	}
+	sort.Strings(paths)
+	return strings.Join(paths, "\n"), true
+}
+
+func WorkflowStepFinished(worktreePath, baseCommit, baseDirty string) bool {
 	// No worktree, or no recorded starting point, means we have no evidence the step
 	// produced anything. Never auto-complete on no evidence.
 	if worktreePath == "" || baseCommit == "" {
 		return false
 	}
-	if out, err := exec.Command("git", "-C", worktreePath, "status", "--porcelain").Output(); err != nil || len(strings.TrimSpace(string(out))) != 0 {
+
+	// The step must not have left uncommitted work of its OWN. It is NOT enough to ask
+	// "is the worktree clean": a project's init (bundle, migrate) rewrites tracked files
+	// — Rails' db/structure.sql being the canonical case — so the worktree is dirty from
+	// the moment setup finishes and would never complete. Measure against the dirt that
+	// was already there when this step started.
+	cur, ok := gitDirtyPaths(worktreePath)
+	if !ok {
 		return false
 	}
+	if cur != "" {
+		base := make(map[string]bool)
+		for _, p := range strings.Split(baseDirty, "\n") {
+			if p != "" {
+				base[p] = true
+			}
+		}
+		for _, p := range strings.Split(cur, "\n") {
+			if !base[p] {
+				return false // the step left something uncommitted
+			}
+		}
+	}
+
 	headOut, errH := exec.Command("git", "-C", worktreePath, "rev-parse", "HEAD").Output()
 	if errH != nil {
 		return false
@@ -1607,6 +1652,13 @@ func (e *Executor) executeTask(ctx context.Context, task *db.Task) {
 	if base := gitHeadCommit(workDir); base != "" {
 		if err := e.db.SetTaskBaseCommit(task.ID, base); err != nil {
 			e.logger.Warn("could not record worktree base commit", "task", task.ID, "error", err)
+		}
+		// Also snapshot what init already dirtied (bundle/migrate rewriting tracked files),
+		// so completion is judged on what THIS step left behind, not on that noise.
+		if dirty, ok := gitDirtyPaths(workDir); ok {
+			if err := e.db.SetTaskBaseDirty(task.ID, dirty); err != nil {
+				e.logger.Warn("could not record worktree base dirt", "task", task.ID, "error", err)
+			}
 		}
 	}
 
@@ -4752,34 +4804,46 @@ func writeWorkflowMCPConfig(worktreePath string, taskID int64, configDir string)
 		projects = make(map[string]interface{})
 	}
 
-	// Get or create worktree project config
-	var projectConfig map[string]interface{}
-	if existing, ok := projects[worktreePath].(map[string]interface{}); ok {
-		projectConfig = existing
-	} else {
-		projectConfig = make(map[string]interface{})
+	// Claude Code keys its per-project config by its RESOLVED working directory. If the
+	// worktree lives under a symlinked path (macOS /tmp -> /private/tmp, a symlinked home,
+	// …) the entry we write under the raw path is never found: the step gets no taskyou
+	// MCP server, and — worse — stops dead on the "Do you trust this folder?" prompt,
+	// hanging an unattended workflow step forever. Write the config under both spellings.
+	keys := []string{worktreePath}
+	if resolved, err := filepath.EvalSymlinks(worktreePath); err == nil && resolved != worktreePath {
+		keys = append(keys, resolved)
 	}
 
-	// Get or create mcpServers map for this project
-	mcpServers, ok := projectConfig["mcpServers"].(map[string]interface{})
-	if !ok {
-		mcpServers = make(map[string]interface{})
+	for _, key := range keys {
+		// Get or create worktree project config
+		var projectConfig map[string]interface{}
+		if existing, ok := projects[key].(map[string]interface{}); ok {
+			projectConfig = existing
+		} else {
+			projectConfig = make(map[string]interface{})
+		}
+
+		// Get or create mcpServers map for this project
+		mcpServers, ok := projectConfig["mcpServers"].(map[string]interface{})
+		if !ok {
+			mcpServers = make(map[string]interface{})
+		}
+
+		// Add/update the taskyou server (and remove old "workflow" name if present)
+		delete(mcpServers, "workflow")
+		mcpServers["taskyou"] = taskyouServer
+		projectConfig["mcpServers"] = mcpServers
+
+		// Pre-trust the worktree. A fresh worktree path is unknown to Claude Code, so on
+		// first launch it blocks on the "Do you trust the files in this folder?" onboarding
+		// prompt — which stalls an unattended workflow step forever (no human to answer).
+		// ty created this worktree from the user's own already-trusted project, so trusting
+		// it is safe and matches intent. Setting these two flags skips the dialog entirely.
+		projectConfig["hasTrustDialogAccepted"] = true
+		projectConfig["hasCompletedProjectOnboarding"] = true
+
+		projects[key] = projectConfig
 	}
-
-	// Add/update the taskyou server (and remove old "workflow" name if present)
-	delete(mcpServers, "workflow")
-	mcpServers["taskyou"] = taskyouServer
-	projectConfig["mcpServers"] = mcpServers
-
-	// Pre-trust the worktree. A fresh worktree path is unknown to Claude Code, so on
-	// first launch it blocks on the "Do you trust the files in this folder?" onboarding
-	// prompt — which stalls an unattended workflow step forever (no human to answer).
-	// ty created this worktree from the user's own already-trusted project, so trusting
-	// it is safe and matches intent. Setting these two flags skips the dialog entirely.
-	projectConfig["hasTrustDialogAccepted"] = true
-	projectConfig["hasCompletedProjectOnboarding"] = true
-
-	projects[worktreePath] = projectConfig
 	config["projects"] = projects
 
 	// Marshal the updated config
