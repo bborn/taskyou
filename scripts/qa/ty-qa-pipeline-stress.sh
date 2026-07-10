@@ -110,6 +110,25 @@ echo "==> Starting isolated daemon"
 bash "$TY_QA_DIR/ty-qa-daemon.sh" >/dev/null
 sleep 1
 
+# Claude shows a first-run prompt in every fresh worktree whose .claude/settings.local.json
+# pre-approves a tool permission (ty's setupClaudeHooks writes Read(.claude/attachments/**)).
+# hasTrustDialogAccepted does NOT suppress it, and an unattended step waits on it forever.
+# Answer it, in the ISOLATED tmux server only.
+autotrust() {
+  local end=$(( $(date +%s) + WATCH + 120 ))
+  while [[ $(date +%s) -lt $end ]]; do
+    for w in $(tmux list-windows -a -F "#{session_name}:#{window_name}" 2>/dev/null | grep -E ":task-[0-9]+$" || true); do
+      if tmux capture-pane -t "$w" -p 2>/dev/null | grep -q "Yes, I trust this folder"; then
+        tmux send-keys -t "$w" "1" 2>/dev/null || true
+        tmux send-keys -t "$w" Enter 2>/dev/null || true
+      fi
+    done
+    sleep 3
+  done
+}
+autotrust & AUTOTRUST_PID=$!
+trap 'kill "$AUTOTRUST_PID" 2>/dev/null || true' EXIT
+
 echo "==> Launching $PIPELINES pipelines concurrently"
 for i in $(seq 1 "$PIPELINES"); do
   ty pipeline "stress run $i: add the files" --definition stress --project "$PROJECT" --dangerous >/dev/null 2>&1 &
