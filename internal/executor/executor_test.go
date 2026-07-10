@@ -1571,6 +1571,50 @@ func TestWriteWorkflowMCPConfig(t *testing.T) {
 		}
 	})
 
+	t.Run("writes config under the symlink-resolved path too", func(t *testing.T) {
+		configPath := setupTempConfigDir(t)
+		real := t.TempDir()
+		link := filepath.Join(t.TempDir(), "wtlink")
+		if err := os.Symlink(real, link); err != nil {
+			t.Fatal(err)
+		}
+
+		// ty is handed the symlinked path; Claude Code will look itself up by its
+		// RESOLVED cwd. If we only wrote the raw key, the step would find no taskyou MCP
+		// server and hang on the folder-trust prompt.
+		if err := writeWorkflowMCPConfig(link, 7, ""); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		data, err := os.ReadFile(configPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var cfg map[string]interface{}
+		if err := json.Unmarshal(data, &cfg); err != nil {
+			t.Fatal(err)
+		}
+		projects := cfg["projects"].(map[string]interface{})
+
+		resolved, err := filepath.EvalSymlinks(link)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, key := range []string{link, resolved} {
+			pc, ok := projects[key].(map[string]interface{})
+			if !ok {
+				t.Fatalf("no project config under %q", key)
+			}
+			if pc["hasTrustDialogAccepted"] != true {
+				t.Errorf("%q: hasTrustDialogAccepted = %v, want true", key, pc["hasTrustDialogAccepted"])
+			}
+			servers, ok := pc["mcpServers"].(map[string]interface{})
+			if !ok || servers["taskyou"] == nil {
+				t.Errorf("%q: missing taskyou MCP server", key)
+			}
+		}
+	})
+
 	t.Run("preserves existing MCP servers in project config", func(t *testing.T) {
 		configPath := setupTempConfigDir(t)
 		worktreePath := t.TempDir()

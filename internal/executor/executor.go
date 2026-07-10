@@ -4752,34 +4752,46 @@ func writeWorkflowMCPConfig(worktreePath string, taskID int64, configDir string)
 		projects = make(map[string]interface{})
 	}
 
-	// Get or create worktree project config
-	var projectConfig map[string]interface{}
-	if existing, ok := projects[worktreePath].(map[string]interface{}); ok {
-		projectConfig = existing
-	} else {
-		projectConfig = make(map[string]interface{})
+	// Claude Code keys its per-project config by its RESOLVED working directory. If the
+	// worktree lives under a symlinked path (macOS /tmp -> /private/tmp, a symlinked home,
+	// …) the entry we write under the raw path is never found: the step gets no taskyou
+	// MCP server, and — worse — stops dead on the "Do you trust this folder?" prompt,
+	// hanging an unattended workflow step forever. Write the config under both spellings.
+	keys := []string{worktreePath}
+	if resolved, err := filepath.EvalSymlinks(worktreePath); err == nil && resolved != worktreePath {
+		keys = append(keys, resolved)
 	}
 
-	// Get or create mcpServers map for this project
-	mcpServers, ok := projectConfig["mcpServers"].(map[string]interface{})
-	if !ok {
-		mcpServers = make(map[string]interface{})
+	for _, key := range keys {
+		// Get or create worktree project config
+		var projectConfig map[string]interface{}
+		if existing, ok := projects[key].(map[string]interface{}); ok {
+			projectConfig = existing
+		} else {
+			projectConfig = make(map[string]interface{})
+		}
+
+		// Get or create mcpServers map for this project
+		mcpServers, ok := projectConfig["mcpServers"].(map[string]interface{})
+		if !ok {
+			mcpServers = make(map[string]interface{})
+		}
+
+		// Add/update the taskyou server (and remove old "workflow" name if present)
+		delete(mcpServers, "workflow")
+		mcpServers["taskyou"] = taskyouServer
+		projectConfig["mcpServers"] = mcpServers
+
+		// Pre-trust the worktree. A fresh worktree path is unknown to Claude Code, so on
+		// first launch it blocks on the "Do you trust the files in this folder?" onboarding
+		// prompt — which stalls an unattended workflow step forever (no human to answer).
+		// ty created this worktree from the user's own already-trusted project, so trusting
+		// it is safe and matches intent. Setting these two flags skips the dialog entirely.
+		projectConfig["hasTrustDialogAccepted"] = true
+		projectConfig["hasCompletedProjectOnboarding"] = true
+
+		projects[key] = projectConfig
 	}
-
-	// Add/update the taskyou server (and remove old "workflow" name if present)
-	delete(mcpServers, "workflow")
-	mcpServers["taskyou"] = taskyouServer
-	projectConfig["mcpServers"] = mcpServers
-
-	// Pre-trust the worktree. A fresh worktree path is unknown to Claude Code, so on
-	// first launch it blocks on the "Do you trust the files in this folder?" onboarding
-	// prompt — which stalls an unattended workflow step forever (no human to answer).
-	// ty created this worktree from the user's own already-trusted project, so trusting
-	// it is safe and matches intent. Setting these two flags skips the dialog entirely.
-	projectConfig["hasTrustDialogAccepted"] = true
-	projectConfig["hasCompletedProjectOnboarding"] = true
-
-	projects[worktreePath] = projectConfig
 	config["projects"] = projects
 
 	// Marshal the updated config
