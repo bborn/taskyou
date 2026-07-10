@@ -4666,7 +4666,11 @@ func workflowStepFinished(database *db.DB, task *db.Task) bool {
 	if err != nil {
 		return false
 	}
-	return executor.WorkflowStepFinished(task.WorktreePath, baseCommit)
+	baseDirty, err := database.GetTaskBaseDirty(task.ID)
+	if err != nil {
+		return false
+	}
+	return executor.WorkflowStepFinished(task.WorktreePath, baseCommit, baseDirty)
 }
 
 // handlePreToolUseHook handles PreToolUse hooks from Claude (before tool execution).

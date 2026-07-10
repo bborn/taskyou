@@ -1254,6 +1254,24 @@ func (db *DB) GetTaskBaseCommit(taskID int64) (string, error) {
 	return sha, nil
 }
 
+// SetTaskBaseDirty records the paths already dirty in the task's worktree when it
+// started (newline-separated). Worktree init regularly rewrites tracked files, so this is
+// the baseline that "did the step leave uncommitted work?" is measured against.
+func (db *DB) SetTaskBaseDirty(taskID int64, paths string) error {
+	_, err := db.Exec(`UPDATE tasks SET base_dirty = ? WHERE id = ?`, paths, taskID)
+	return err
+}
+
+// GetTaskBaseDirty returns the paths dirty in the worktree when the task started.
+func (db *DB) GetTaskBaseDirty(taskID int64) (string, error) {
+	var s string
+	err := db.QueryRow(`SELECT COALESCE(base_dirty, '') FROM tasks WHERE id = ?`, taskID).Scan(&s)
+	if err != nil {
+		return "", err
+	}
+	return s, nil
+}
+
 // HasSessionStarted reports whether the task's executor session actually began. A task
 // flips to 'processing' and then spends tens of seconds on worktree setup (clone, bundle,
 // migrations) before any session exists — so this, not the absence of a tmux window, is
