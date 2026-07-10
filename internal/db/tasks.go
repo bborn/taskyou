@@ -1236,6 +1236,41 @@ func (db *DB) HasLogLineContaining(taskID int64, substr string) (bool, error) {
 	return n > 0, nil
 }
 
+// SetTaskBaseCommit records the commit a task's worktree was created at. Written once,
+// right after the worktree exists and before any agent session starts.
+func (db *DB) SetTaskBaseCommit(taskID int64, sha string) error {
+	_, err := db.Exec(`UPDATE tasks SET base_commit = ? WHERE id = ?`, sha, taskID)
+	return err
+}
+
+// GetTaskBaseCommit returns the commit a task's worktree was created at, or "" if it
+// was never recorded (a task from before the column existed).
+func (db *DB) GetTaskBaseCommit(taskID int64) (string, error) {
+	var sha string
+	err := db.QueryRow(`SELECT COALESCE(base_commit, '') FROM tasks WHERE id = ?`, taskID).Scan(&sha)
+	if err != nil {
+		return "", err
+	}
+	return sha, nil
+}
+
+// HasSessionStarted reports whether the task's executor session actually began. A task
+// flips to 'processing' and then spends tens of seconds on worktree setup (clone, bundle,
+// migrations) before any session exists — so this, not the absence of a tmux window, is
+// how to tell "hasn't started yet" from "ran and finished". Conflating the two let the
+// sweep complete steps before their agent ever launched.
+func (db *DB) HasSessionStarted(taskID int64) (bool, error) {
+	var n int
+	err := db.QueryRow(`
+		SELECT COUNT(*) FROM task_logs
+		WHERE task_id = ? AND (content LIKE 'Starting new session%' OR content LIKE 'Resuming%')
+	`, taskID).Scan(&n)
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
 // GetTaskLogs retrieves logs for a task.
 func (db *DB) GetTaskLogs(taskID int64, limit int) ([]*TaskLog, error) {
 	if limit <= 0 {

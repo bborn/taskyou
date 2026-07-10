@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/bborn/workflow/internal/db"
+	"github.com/bborn/workflow/internal/executor"
 )
 
 func git(t *testing.T, dir string, args ...string) {
@@ -20,10 +20,23 @@ func git(t *testing.T, dir string, args ...string) {
 	}
 }
 
-// TestWorkflowStepFinished: a step counts as finished only when its worktree is
-// clean AND its HEAD is pushed. Critically, non-root workflow steps check out the
-// shared branch WITHOUT upstream tracking (no `-u`), so the check must use the
-// remote-tracking ref, not @{u}.
+// headSHA returns the worktree's current HEAD commit.
+func headSHA(t *testing.T, dir string) string {
+	t.Helper()
+	out, err := exec.Command("git", "-C", dir, "rev-parse", "HEAD").Output()
+	if err != nil {
+		t.Fatalf("rev-parse HEAD: %v", err)
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// TestWorkflowStepFinished: a step counts as finished only when it PRODUCED A COMMIT
+// (HEAD moved off the worktree's base commit) and pushed it, with a clean worktree.
+//
+// The base-commit check is load-bearing: a freshly-created step worktree is clean and
+// its HEAD (the parent step's commit) is already reachable from origin. Reporting that
+// as "finished" let the daemon sweep mark steps done before their agent ever started,
+// silently dropping Build/Review stages and shipping unreviewed code.
 func TestWorkflowStepFinished(t *testing.T) {
 	root := t.TempDir()
 	remote := filepath.Join(root, "remote.git")
@@ -37,7 +50,21 @@ func TestWorkflowStepFinished(t *testing.T) {
 	// Mimic a workflow step: work on a shared branch, no upstream tracking.
 	git(t, wt, "checkout", "-b", "pipeline/shared")
 
-	task := &db.Task{WorktreePath: wt}
+	// The parent step's commit — already pushed. This is where a new step's worktree
+	// starts, and it is the step's base commit.
+	if err := os.WriteFile(filepath.Join(wt, "parent.txt"), []byte("parent"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	git(t, wt, "add", ".")
+	git(t, wt, "commit", "-m", "parent step work")
+	git(t, wt, "push", "origin", "HEAD:pipeline/shared")
+	base := headSHA(t, wt)
+
+	// THE REGRESSION: a step that has produced nothing sits at its base commit with a
+	// clean worktree, and that commit IS on origin. It must NOT read as finished.
+	if executor.WorkflowStepFinished(wt, base) {
+		t.Error("a step sitting at its base commit (no work) must NOT be finished — this silently drops unstarted steps")
+	}
 
 	// Committed but NOT pushed → not finished.
 	if err := os.WriteFile(filepath.Join(wt, "f.txt"), []byte("x"), 0o644); err != nil {
@@ -45,7 +72,7 @@ func TestWorkflowStepFinished(t *testing.T) {
 	}
 	git(t, wt, "add", ".")
 	git(t, wt, "commit", "-m", "work")
-	if workflowStepFinished(task) {
+	if executor.WorkflowStepFinished(wt, base) {
 		t.Error("committed but unpushed step should NOT be finished")
 	}
 
@@ -54,32 +81,34 @@ func TestWorkflowStepFinished(t *testing.T) {
 	if _, err := exec.Command("git", "-C", wt, "rev-parse", "@{u}").Output(); err == nil {
 		t.Fatal("test precondition failed: expected NO upstream tracking after push without -u")
 	}
-	if !workflowStepFinished(task) {
-		t.Error("clean + pushed step (no upstream tracking) SHOULD be finished")
+	if !executor.WorkflowStepFinished(wt, base) {
+		t.Error("clean + committed + pushed step SHOULD be finished")
 	}
 
 	// DETACHED HEAD → still finished. Non-root steps share one branch and git won't
-	// attach two worktrees to it, so those worktrees run detached. HEAD is still the
-	// pushed commit, so the step IS finished — the old --abbrev-ref check saw "HEAD"
-	// and wrongly reported unfinished forever, stalling the whole DAG.
+	// attach two worktrees to it, so those worktrees run detached.
 	git(t, wt, "checkout", "--detach", "HEAD")
 	if out, err := exec.Command("git", "-C", wt, "rev-parse", "--abbrev-ref", "HEAD").Output(); err != nil || strings.TrimSpace(string(out)) != "HEAD" {
 		t.Fatalf("test precondition failed: expected a detached HEAD, got %q (%v)", strings.TrimSpace(string(out)), err)
 	}
-	if !workflowStepFinished(task) {
-		t.Error("clean + pushed step on a DETACHED HEAD SHOULD be finished")
+	if !executor.WorkflowStepFinished(wt, base) {
+		t.Error("clean + committed + pushed step on a DETACHED HEAD SHOULD be finished")
 	}
 
 	// Uncommitted change → not finished.
 	if err := os.WriteFile(filepath.Join(wt, "f2.txt"), []byte("y"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if workflowStepFinished(task) {
+	if executor.WorkflowStepFinished(wt, base) {
 		t.Error("dirty worktree should NOT be finished")
 	}
 
+	// No recorded base commit → no evidence of work → never finished.
+	if executor.WorkflowStepFinished(wt, "") {
+		t.Error("a step with no recorded base commit must NOT be finished")
+	}
 	// Empty worktree path → not finished.
-	if workflowStepFinished(&db.Task{WorktreePath: ""}) {
+	if executor.WorkflowStepFinished("", base) {
 		t.Error("empty worktree path should NOT be finished")
 	}
 }

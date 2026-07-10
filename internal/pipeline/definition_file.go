@@ -22,14 +22,14 @@ import (
 
 // stepYAML is the on-disk form of a step.
 type stepYAML struct {
-	Name     string   `yaml:"name"`
-	Kind     string   `yaml:"kind,omitempty"` // Run another kind here (its instructions apply; if it has steps, they're inlined).
-	Executor string   `yaml:"executor,omitempty"`
-	Model    string   `yaml:"model,omitempty"`
-	ConfigDir string  `yaml:"config_dir,omitempty"` // Per-step CLAUDE_CONFIG_DIR override: route this step's Claude through a different config (e.g. an ollama-backed one) without changing the project. ~ is expanded.
-	Env      map[string]string `yaml:"env,omitempty"` // Per-step env overrides injected as a process-env prefix on the claude command (e.g. ANTHROPIC_BASE_URL/AUTH_TOKEN to route through ollama). Distinct from config_dir: env injection keeps the default config dir intact and is what actually reaches a token-auth proxy like ollama.
-	Deps     []string `yaml:"deps,omitempty"`
-	Prompt   string   `yaml:"prompt,omitempty"` // Optional when `kind` is set: the referenced kind supplies the instructions.
+	Name      string            `yaml:"name"`
+	Kind      string            `yaml:"kind,omitempty"` // Run another kind here (its instructions apply; if it has steps, they're inlined).
+	Executor  string            `yaml:"executor,omitempty"`
+	Model     string            `yaml:"model,omitempty"`
+	ConfigDir string            `yaml:"config_dir,omitempty"` // Per-step CLAUDE_CONFIG_DIR override: route this step's Claude through a different config (e.g. an ollama-backed one) without changing the project. ~ is expanded.
+	Env       map[string]string `yaml:"env,omitempty"`        // Per-step env overrides injected as a process-env prefix on the claude command (e.g. ANTHROPIC_BASE_URL/AUTH_TOKEN to route through ollama). Distinct from config_dir: env injection keeps the default config dir intact and is what actually reaches a token-auth proxy like ollama.
+	Deps      []string          `yaml:"deps,omitempty"`
+	Prompt    string            `yaml:"prompt,omitempty"` // Optional when `kind` is set: the referenced kind supplies the instructions.
 	// Verbatim marks a step whose prompt IS the full instruction (no DAG-derived
 	// git handoff is added). It's set when `ty pipeline edit` ejects a built-in
 	// workflow, so the ejected file behaves identically to the built-in.

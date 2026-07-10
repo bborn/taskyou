@@ -320,6 +320,12 @@ func (db *DB) migrate() error {
 		// claude command so a step can route through a non-Anthropic proxy (ollama)
 		// without swapping CLAUDE_CONFIG_DIR.
 		`ALTER TABLE tasks ADD COLUMN env TEXT DEFAULT ''`,
+		// The commit a task's worktree was created at. A workflow step that has done no
+		// work still sits at this commit, so it is what distinguishes "hasn't produced
+		// anything" from "finished" — without it the auto-complete sweep cannot tell a
+		// freshly-created worktree (clean, HEAD already on origin) from a completed step
+		// and will silently mark unstarted steps done.
+		`ALTER TABLE tasks ADD COLUMN base_commit TEXT DEFAULT ''`,
 	}
 
 	for _, m := range alterMigrations {
