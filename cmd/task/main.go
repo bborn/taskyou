@@ -4634,7 +4634,7 @@ func handleStopHook(database *db.DB, taskID int64, input *ClaudeHookInput) error
 			// 'done' so its dependents auto-queue. A step that stopped to ask a question
 			// or left work uncommitted/unpushed hasn't finished — block as before, and
 			// the daemon's sweep is the backstop for a Stop hook that fires mid-push.
-			if pipeline.IsWorkflowTask(task) && workflowStepFinished(task) {
+			if pipeline.IsWorkflowTask(task) && workflowStepFinished(database, task) {
 				if pipeline.IsTerminalStep(database, task) {
 					database.UpdateTaskStatus(taskID, db.StatusBlocked)
 					database.AppendTaskLog(taskID, "system", pipeline.TerminalStepParkedLog)
@@ -4656,12 +4656,17 @@ func handleStopHook(database *db.DB, taskID int64, input *ClaudeHookInput) error
 	return nil
 }
 
-// workflowStepFinished reports whether a workflow step has committed AND pushed its
-// work (see executor.WorkflowStepFinished). Used by the Stop hook to advance a step
-// that finished but didn't call taskyou_complete; the daemon's sweep is the backstop
-// for when the hook fires at a transient moment.
-func workflowStepFinished(task *db.Task) bool {
-	return executor.WorkflowStepFinished(task.WorktreePath)
+// workflowStepFinished reports whether a workflow step produced a commit and pushed it
+// (see executor.WorkflowStepFinished). Used by the Stop hook to advance a step whose
+// agent ended its turn; the daemon's sweep is the backstop for when the hook fires at a
+// transient moment. A step that ran but committed nothing is NOT finished — it stays
+// 'blocked' for a human rather than silently completing with no work.
+func workflowStepFinished(database *db.DB, task *db.Task) bool {
+	baseCommit, err := database.GetTaskBaseCommit(task.ID)
+	if err != nil {
+		return false
+	}
+	return executor.WorkflowStepFinished(task.WorktreePath, baseCommit)
 }
 
 // handlePreToolUseHook handles PreToolUse hooks from Claude (before tool execution).

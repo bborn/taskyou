@@ -36,15 +36,15 @@ import (
 // it; Instruction is the task body template ({{goal}} and {{branch}} are
 // substituted at build time); Deps names the steps that must finish first.
 type Step struct {
-	Name        string   // Unique label, e.g. "Plan", "Code", "Review A", "Collect".
-	Kind        string   // Optional: another kind this step runs. Sets the task's Type (so that kind's instructions apply); if that kind has steps, it's a sub-workflow inlined at build (see flatten.go).
-	Executor    string   // Executor slug (db.ExecutorClaude, db.ExecutorCodex, ...).
-	Model       string   // Per-task model override ("" = the executor's default).
-	ConfigDir   string   // Per-task CLAUDE_CONFIG_DIR override ("" = use the project's/default config dir). Routes this step's Claude through a different config (e.g. ollama) without changing the project.
+	Name        string            // Unique label, e.g. "Plan", "Code", "Review A", "Collect".
+	Kind        string            // Optional: another kind this step runs. Sets the task's Type (so that kind's instructions apply); if that kind has steps, it's a sub-workflow inlined at build (see flatten.go).
+	Executor    string            // Executor slug (db.ExecutorClaude, db.ExecutorCodex, ...).
+	Model       string            // Per-task model override ("" = the executor's default).
+	ConfigDir   string            // Per-task CLAUDE_CONFIG_DIR override ("" = use the project's/default config dir). Routes this step's Claude through a different config (e.g. ollama) without changing the project.
 	Env         map[string]string // Per-task env overrides injected as a process-env prefix on the claude command (e.g. ANTHROPIC_BASE_URL/AUTH_TOKEN to route through ollama). nil = no overrides. Kept distinct from ConfigDir: env injection keeps the default config dir (plugins, MCP, trusted worktrees) intact and process env wins over stored creds — the mechanism that actually reaches ollama.
-	Instruction string   // Full body template (built-in / verbatim steps). Takes precedence over Prompt.
-	Prompt      string   // Custom-workflow body: what the step does; the git handoff is composed from the DAG (see compose.go).
-	Deps        []string // Names of steps that must complete before this one runs.
+	Instruction string            // Full body template (built-in / verbatim steps). Takes precedence over Prompt.
+	Prompt      string            // Custom-workflow body: what the step does; the git handoff is composed from the DAG (see compose.go).
+	Deps        []string          // Names of steps that must complete before this one runs.
 }
 
 // Definition is a "kind": one authored recipe. With Steps it is a workflow (a DAG
@@ -283,17 +283,17 @@ func Create(database *db.DB, opts Options) (*Result, error) {
 	tasks := make([]*db.Task, 0, len(steps))
 	for _, s := range steps {
 		task := &db.Task{
-			Title:          stepTitle(s.Name, goal),
-			Body:           goal, // Placeholder; rewritten once the branch is known.
-			Status:         db.StatusBacklog,
-			Type:           stepType(s),
-			Project:        opts.Project,
-			Executor:       s.Executor,
-			Model:          s.Model,
+			Title:           stepTitle(s.Name, goal),
+			Body:            goal, // Placeholder; rewritten once the branch is known.
+			Status:          db.StatusBacklog,
+			Type:            stepType(s),
+			Project:         opts.Project,
+			Executor:        s.Executor,
+			Model:           s.Model,
 			ClaudeConfigDir: s.ConfigDir,
 			EnvJSON:         encodeStepEnv(s.Env),
-			PermissionMode: opts.PermissionMode,
-			Tags:           "pipeline",
+			PermissionMode:  opts.PermissionMode,
+			Tags:            "pipeline",
 		}
 		if err := database.CreateTask(task); err != nil {
 			return nil, fmt.Errorf("create %s step: %w", s.Name, err)

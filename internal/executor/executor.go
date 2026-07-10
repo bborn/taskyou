@@ -382,6 +382,11 @@ func (e *Executor) reconcileReadyTasks() {
 	}
 }
 
+// minWorkflowStepRuntime is how long a step's session must have been running before the
+// sweep will consider recovering it. A real step that clones, installs and builds takes
+// far longer; anything "completing" faster is almost certainly a step we caught mid-setup.
+const minWorkflowStepRuntime = 30 * time.Second
+
 // reconcileFinishedWorkflowSteps recovers workflow steps that finished their work
 // (committed + pushed) but never reached 'done'. Two shapes: (1) parked in 'blocked'
 // because the Stop hook's git-state check fired at a transient moment (a temp file
@@ -389,9 +394,16 @@ func (e *Executor) reconcileReadyTasks() {
 // 'processing' because the executor session ended without signalling — a non-Claude
 // executor that fires no Stop hook, or a Claude agent that looped and was killed. Both
 // stall the whole DAG. This sweep marks any such settled step 'done' (or parks the
-// terminal step for merge review), then advances the workflow. It skips steps that
-// asked a question (genuine needs-input), the terminal step's own merge-park, and any
-// 'processing' step whose executor window is still live (genuinely working).
+// terminal step for merge review), then advances the workflow.
+//
+// It is deliberately paranoid, because the failure mode of over-eagerness is silent and
+// severe: completing a step that never ran drops it from the DAG and lets downstream
+// steps proceed on unreviewed work. So a step is only ever completed when it PRODUCED A
+// COMMIT (WorkflowStepFinished compares HEAD against the worktree's recorded base
+// commit) and pushed it. On top of that it skips: steps that asked a question (genuine
+// needs-input), the terminal step's own merge-park, and any 'processing' step whose
+// session hasn't started, is younger than minWorkflowStepRuntime, or still owns a live
+// executor window.
 func (e *Executor) reconcileFinishedWorkflowSteps() {
 	// Steps that ended their turn ('blocked') OR are stuck 'processing' after their
 	// session ended without signalling done — e.g. a non-Claude executor that fires no
@@ -413,15 +425,34 @@ func (e *Executor) reconcileFinishedWorkflowSteps() {
 		if task.StartedAt == nil || task.WorktreePath == "" {
 			continue
 		}
-		// A 'processing' step is still owned by a live executor session — leave it be.
-		// Only once its window is gone (the session ended without moving the task off
-		// 'processing') is it a candidate for recovery. WorkflowStepFinished below is the
-		// real guard; this just avoids racing a running agent.
-		if task.Status == db.StatusProcessing && tmuxWindowExistsForTask(task.ID) {
-			continue
+		// A 'processing' step is only a recovery candidate once its session has actually
+		// STARTED and then gone away. A task flips to 'processing' before worktree setup
+		// (clone, bundle, migrations — tens of seconds), during which no session and no
+		// tmux window exist yet: "window gone" alone cannot tell "not started yet" from
+		// "finished", and treating the former as the latter silently marks unstarted
+		// steps done. Require real evidence the session ran, a minimum runtime, and only
+		// then an absent window.
+		if task.Status == db.StatusProcessing {
+			started, err := e.db.HasSessionStarted(task.ID)
+			if err != nil || !started {
+				continue // session never launched — nothing to recover
+			}
+			if time.Since(task.StartedAt.Time) < minWorkflowStepRuntime {
+				continue // too young to have meaningfully run and finished
+			}
+			if tmuxWindowExistsForTask(task.ID) {
+				continue // still owned by a live session
+			}
 		}
 		// Don't advance past a genuine needs-input question.
 		if hasQ, err := e.db.HasQuestionLog(task.ID); err != nil || hasQ {
+			continue
+		}
+		// The step's starting commit. Without it we cannot tell "produced work" from
+		// "sitting where it started", so WorkflowStepFinished refuses to complete.
+		baseCommit, err := e.db.GetTaskBaseCommit(task.ID)
+		if err != nil {
+			e.logger.Error("Failed to read base commit", "id", task.ID, "error", err)
 			continue
 		}
 		// The terminal step is meant to stay 'blocked' once it finishes (its PR awaits
@@ -430,7 +461,7 @@ func (e *Executor) reconcileFinishedWorkflowSteps() {
 		// genuinely settled (committed + pushed), clarify it's parked for merge review
 		// (once) and tear down its now-idle session.
 		if pipeline.IsTerminalStep(e.db, task) {
-			if WorkflowStepFinished(task.WorktreePath) {
+			if WorkflowStepFinished(task.WorktreePath, baseCommit) {
 				if logged, _ := e.db.HasLogLineContaining(task.ID, pipeline.TerminalStepParkedLog); !logged {
 					e.logLine(task.ID, "system", pipeline.TerminalStepParkedLog)
 					e.teardownWorkflowStepSession(task)
@@ -439,7 +470,7 @@ func (e *Executor) reconcileFinishedWorkflowSteps() {
 			}
 			continue
 		}
-		if !WorkflowStepFinished(task.WorktreePath) {
+		if !WorkflowStepFinished(task.WorktreePath, baseCommit) {
 			continue
 		}
 		if err := e.updateStatus(task.ID, db.StatusDone); err != nil {
@@ -776,20 +807,47 @@ func GetClaudePIDFromPane(paneID string) int {
 // forever, stalling the whole DAG. Reachability-from-origin holds whether the worktree
 // is on the shared branch, on a parallel step's own branch, or detached — as long as the
 // push landed. (A push failure leaves HEAD on no origin ref, so it still reads unfinished.)
-func WorkflowStepFinished(worktreePath string) bool {
+// gitHeadCommit returns the HEAD sha of a worktree, or "" if it can't be read.
+func gitHeadCommit(worktreePath string) string {
 	if worktreePath == "" {
+		return ""
+	}
+	out, err := exec.Command("git", "-C", worktreePath, "rev-parse", "HEAD").Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
+}
+
+func WorkflowStepFinished(worktreePath, baseCommit string) bool {
+	// No worktree, or no recorded starting point, means we have no evidence the step
+	// produced anything. Never auto-complete on no evidence.
+	if worktreePath == "" || baseCommit == "" {
 		return false
 	}
 	if out, err := exec.Command("git", "-C", worktreePath, "status", "--porcelain").Output(); err != nil || len(strings.TrimSpace(string(out))) != 0 {
 		return false
 	}
-	head, errH := exec.Command("git", "-C", worktreePath, "rev-parse", "HEAD").Output()
+	headOut, errH := exec.Command("git", "-C", worktreePath, "rev-parse", "HEAD").Output()
 	if errH != nil {
 		return false
 	}
-	// Which origin branches contain HEAD? Non-empty means the step's commit was pushed.
+	head := strings.TrimSpace(string(headOut))
+
+	// THE step must have produced a commit. A worktree that was just created — or whose
+	// agent ran and wrote nothing — is clean and sits at baseCommit, which is already
+	// reachable from origin. Without this check such a step reads as "finished" and the
+	// sweep silently marks it done before the agent has even started, dropping the step
+	// (and, worse, letting the DAG advance past unreviewed work).
+	if head == baseCommit {
+		return false
+	}
+
+	// And that commit must be pushed: HEAD reachable from an origin ref. Checked by
+	// reachability rather than "HEAD == origin/<--abbrev-ref>" because non-root steps
+	// share one branch and run on a DETACHED HEAD, where --abbrev-ref yields "HEAD".
 	refs, errR := exec.Command("git", "-C", worktreePath, "branch", "-r", "--contains",
-		strings.TrimSpace(string(head)), "--format=%(refname:short)").Output()
+		head, "--format=%(refname:short)").Output()
 	if errR != nil {
 		return false
 	}
@@ -1540,6 +1598,17 @@ func (e *Executor) executeTask(ctx context.Context, task *db.Task) {
 		return
 	}
 	e.events.EmitTaskWorktreeReady(task)
+
+	// Record the commit this worktree starts at, before anything can run in it. This is
+	// what lets WorkflowStepFinished tell "produced a commit" from "still sitting where
+	// it started" — worktree setup (clone, bundle, migrations) can run for tens of
+	// seconds while the task is already 'processing', and without this the sweep marks
+	// the step done before its agent ever starts.
+	if base := gitHeadCommit(workDir); base != "" {
+		if err := e.db.SetTaskBaseCommit(task.ID, base); err != nil {
+			e.logger.Warn("could not record worktree base commit", "task", task.ID, "error", err)
+		}
+	}
 
 	// Prepare attachments (write to .claude/attachments for seamless access)
 	attachmentPaths, cleanupAttachments := e.prepareAttachments(task.ID, workDir)
@@ -4443,7 +4512,7 @@ func claudeEnvPrefix(dir string) string {
 // claude command right before `claude` — the same slot claudeEnvPrefix uses for
 // CLAUDE_CONFIG_DIR. This is how a single workflow step routes through a
 // non-Anthropic proxy like ollama: set ANTHROPIC_BASE_URL/AUTH_TOKEN (and
-// ANTHROPIC_API_KEY='') here and the spawned claude hits ollama instead of
+// ANTHROPIC_API_KEY=”) here and the spawned claude hits ollama instead of
 // Anthropic, WITHOUT swapping CLAUDE_CONFIG_DIR — so the default config dir
 // (plugins, MCP, TaskYou's trusted worktrees) stays intact and process env
 // wins over any stored creds. Keys are emitted in sorted order so the built

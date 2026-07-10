@@ -487,6 +487,46 @@ func TestHasQuestionLog(t *testing.T) {
 	}
 }
 
+// TestBaseCommitAndSessionStartedAt covers the two signals that keep the sweep from
+// completing a step that never ran: the worktree's base commit, and whether an executor
+// session actually started (worktree setup alone must NOT count as a session).
+func TestBaseCommitAndSessionStartedAt(t *testing.T) {
+	db, cleanup := setupDepsTestDB(t)
+	defer cleanup()
+	tk := &Task{Title: "step", Status: StatusProcessing}
+	if err := db.CreateTask(tk); err != nil {
+		t.Fatal(err)
+	}
+
+	if sha, _ := db.GetTaskBaseCommit(tk.ID); sha != "" {
+		t.Errorf("base commit before recording = %q, want empty", sha)
+	}
+	if err := db.SetTaskBaseCommit(tk.ID, "abc123"); err != nil {
+		t.Fatal(err)
+	}
+	if sha, _ := db.GetTaskBaseCommit(tk.ID); sha != "abc123" {
+		t.Errorf("base commit = %q, want abc123", sha)
+	}
+
+	// A task flips to 'processing' and sets up its worktree long before any session.
+	if started, _ := db.HasSessionStarted(tk.ID); started {
+		t.Error("no session has started yet")
+	}
+	if err := db.AppendTaskLog(tk.ID, "system", "Created worktree at /x (branch: pipeline/1-y)"); err != nil {
+		t.Fatal(err)
+	}
+	if started, _ := db.HasSessionStarted(tk.ID); started {
+		t.Error("worktree setup is NOT a session start — conflating them let the sweep complete unstarted steps")
+	}
+
+	if err := db.AppendTaskLog(tk.ID, "system", "Starting new session (executor: claude)"); err != nil {
+		t.Fatal(err)
+	}
+	if started, _ := db.HasSessionStarted(tk.ID); !started {
+		t.Error("session start should be detected once the session begins")
+	}
+}
+
 func TestHasLogLineContaining(t *testing.T) {
 	db, cleanup := setupDepsTestDB(t)
 	defer cleanup()
