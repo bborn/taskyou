@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Drive the FIRST-RUN onboarding experience across folder types against an
 # isolated ty instance. Exercises the launch decision tree:
-#   - project candidate (git repo)      -> enriched "New Project Detected" card
-#   - project candidate (non-git marker)-> card with Worktrees: false (git optional)
+#   - project candidate (git repo)      -> enriched "…for this repo?" card, isolation on
+#   - project candidate (non-git marker)-> "…for this folder?" card, isolation off (git optional)
 #   - junk folder (no signals)          -> Welcome fork (set up a project / start a task)
 #
 # Each scenario uses a FRESH isolated DB so it's a true first run. The suggestion
@@ -47,7 +47,7 @@ cap() { tmux capture-pane -t "${SID}:tui" -p | sed 's/[[:space:]]*$//' | grep -v
 echo; echo "### Scenario A: git repo -> enriched suggestion card (inference, ~15s)"
 launch "$GITPROJ"; sleep 16; cap | head -22
 
-echo; echo "### Scenario B: non-git marker folder -> card with Worktrees: false (~15s)"
+echo; echo "### Scenario B: non-git marker folder -> \"…for this folder?\" card, isolation off (~15s)"
 launch "$MARKER"; sleep 16; cap | head -22
 
 echo; echo "### Scenario C: plain folder -> Welcome fork"

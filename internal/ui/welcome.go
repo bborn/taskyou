@@ -62,6 +62,16 @@ func missingPrereqNotices(tmuxFound bool, agents []string) []string {
 	return notices
 }
 
+// welcomeChoiceHint returns a one-line description of the currently highlighted
+// choice so a first-timer knows what each button does before pressing enter
+// (the labels alone don't say "picks a folder" vs "no setup needed").
+func welcomeChoiceHint(cursor int) string {
+	if cursor == 0 {
+		return "Point TaskYou at a folder — tasks run against that codebase"
+	}
+	return "Start a task now in your personal space — no project setup"
+}
+
 // MoveLeft/MoveRight/Choice drive selection; key handling lives in app.go so it
 // composes with the global update loop (mirrors viewProjectDetectConfirm).
 func (m *WelcomeModel) MoveLeft()  { m.cursor = 0 }
@@ -95,7 +105,8 @@ func (m *WelcomeModel) View() string {
 		HelpKey.Render("←/→") + " " + HelpDesc.Render("choose") + "  " +
 			HelpKey.Render("enter") + " " + HelpDesc.Render("select"))
 
-	parts := []string{title, "", body, "", buttons}
+	hint := lipgloss.NewStyle().Foreground(ColorMuted).Italic(true).Render(welcomeChoiceHint(m.cursor))
+	parts := []string{title, "", body, "", buttons, "", hint}
 	if agents := formatDetectedAgents(m.detectedAgents); agents != "" {
 		parts = append(parts, "", Success.Render(agents))
 	}
