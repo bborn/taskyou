@@ -136,6 +136,58 @@ async function ensureInjected(tabId) {
   await chrome.scripting.executeScript({ target: { tabId }, files: ['console-tap.js'], world: 'MAIN' });
 }
 
+// --- Browser bridge tab group ------------------------------------------------
+// The "group" the executor can drive is every tab in the matched tab's window:
+// the app tab plus any docs/issue-tracker tabs the executor opens. Deriving the
+// group from the window (rather than a stored set) keeps it correct even after
+// the MV3 service worker is torn down and restarted.
+
+// Resolve which tab a command targets: the optional params.tab (must be a live
+// tab in the primary tab's window), else the primary (matched) tab itself.
+async function resolveTargetTab(primaryTabId, params) {
+  const requested = params?.tab;
+  if (requested == null) return primaryTabId;
+  const target = Number(requested);
+  if (!Number.isInteger(target)) throw new Error(`invalid tab id: ${requested}`);
+  if (target === primaryTabId) return target;
+  const [primary, tab] = await Promise.all([
+    chrome.tabs.get(primaryTabId),
+    chrome.tabs.get(target).catch(() => null),
+  ]);
+  if (!tab) throw new Error(`tab ${target} not found`);
+  if (tab.windowId !== primary.windowId) {
+    throw new Error(`tab ${target} is not in this task's browser window`);
+  }
+  return target;
+}
+
+// Only http/https can be driven; block file:, chrome:, javascript:, etc.
+function normalizeNavUrl(raw) {
+  let u;
+  try {
+    u = new URL(raw);
+  } catch {
+    throw new Error(`invalid url: ${raw}`);
+  }
+  if (u.protocol !== 'http:' && u.protocol !== 'https:') {
+    throw new Error(`unsupported url scheme "${u.protocol}" — only http/https`);
+  }
+  return u.href;
+}
+
+async function captureTab(targetTabId) {
+  const tab = await chrome.tabs.get(targetTabId);
+  // captureVisibleTab only sees the window's foreground tab, so bring the
+  // target forward first (matches how the executor expects "look at tab X").
+  if (!tab.active) {
+    await chrome.tabs.update(targetTabId, { active: true });
+    await chrome.windows.update(tab.windowId, { focused: true }).catch(() => {});
+    await new Promise((r) => setTimeout(r, 250));
+  }
+  const win = (await chrome.tabs.get(targetTabId)).windowId;
+  return chrome.tabs.captureVisibleTab(win, { format: 'png' });
+}
+
 chrome.tabs.onActivated.addListener(async ({ tabId }) => {
   try {
     const tab = await chrome.tabs.get(tabId);
@@ -311,34 +363,77 @@ const handlers = {
   },
 
   async browserExec({ tabId, command }) {
+    const params = command.params || {};
     try {
       switch (command.action) {
         case 'screenshot': {
-          const tab = await chrome.tabs.get(tabId);
-          const data = await chrome.tabs.captureVisibleTab(tab.windowId, { format: 'png' });
-          return { data };
+          const target = await resolveTargetTab(tabId, params);
+          return { data: await captureTab(target) };
         }
-        case 'reload':
-          await chrome.tabs.reload(tabId);
-          return { ok: true };
+        case 'reload': {
+          const target = await resolveTargetTab(tabId, params);
+          await chrome.tabs.reload(target);
+          return { ok: true, tab: target };
+        }
         case 'navigate': {
-          const url = new URL(command.params?.url || '');
-          if (url.hostname !== 'localhost' && url.hostname !== '127.0.0.1') {
-            return { error: 'navigate is restricted to localhost' };
-          }
-          await chrome.tabs.update(tabId, { url: url.href });
-          return { ok: true, url: url.href };
+          const url = normalizeNavUrl(params.url || '');
+          const target = await resolveTargetTab(tabId, params);
+          await chrome.tabs.update(target, { url });
+          return { ok: true, url, tab: target };
         }
+
+        // --- Tab-group control (drive more than the matched tab) ---
+        case 'tabs': {
+          const primary = await chrome.tabs.get(tabId);
+          const list = await chrome.tabs.query({ windowId: primary.windowId });
+          return {
+            tabs: list.map((t) => ({
+              tab: t.id,
+              url: t.url,
+              title: t.title,
+              active: t.active,
+              primary: t.id === tabId,
+            })),
+          };
+        }
+        case 'open':
+        case 'open_tab': {
+          const url = normalizeNavUrl(params.url || '');
+          const primary = await chrome.tabs.get(tabId);
+          const tab = await chrome.tabs.create({
+            windowId: primary.windowId,
+            url,
+            active: params.activate !== false,
+          });
+          return { ok: true, tab: tab.id, url };
+        }
+        case 'activate':
+        case 'switch_tab': {
+          const target = await resolveTargetTab(tabId, params);
+          const tab = await chrome.tabs.get(target);
+          await chrome.tabs.update(target, { active: true });
+          await chrome.windows.update(tab.windowId, { focused: true }).catch(() => {});
+          return { ok: true, tab: target };
+        }
+        case 'close':
+        case 'close_tab': {
+          const target = await resolveTargetTab(tabId, params);
+          await chrome.tabs.remove(target);
+          return { ok: true, closed: target };
+        }
+
         case 'snapshot':
         case 'click':
         case 'type':
-        case 'console':
-          await ensureInjected(tabId);
-          return await chrome.tabs.sendMessage(tabId, {
+        case 'console': {
+          const target = await resolveTargetTab(tabId, params);
+          await ensureInjected(target);
+          return await chrome.tabs.sendMessage(target, {
             type: 'ty-cmd',
             action: command.action,
-            params: command.params || {},
+            params,
           });
+        }
         default:
           return { error: 'unknown action: ' + command.action };
       }
@@ -347,9 +442,19 @@ const handlers = {
     }
   },
 
-  async ensureBridge({ tabId }) {
+  // Inject the bridge into the matched tab and pin the tab→task match so the
+  // executor can navigate it to an external site without the port-based match
+  // dropping the task (which would tear the bridge down mid-session).
+  async ensureBridge({ tabId, taskId }) {
     try {
       await ensureInjected(tabId);
+      if (taskId != null) {
+        const task = (await candidateTasks().catch(() => [])).find((t) => t.id === taskId);
+        if (task) {
+          matches.set(tabId, { task, manual: true });
+          setBadge(tabId, task);
+        }
+      }
       return { ok: true };
     } catch (e) {
       return { error: e.message };

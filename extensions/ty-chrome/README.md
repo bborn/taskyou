@@ -65,19 +65,38 @@ Requires a `ty` build that has the `/api/tasks/{id}/annotations` and
 - On page while annotating: **S** select · **B** box · **N** note ·
   **Esc** exit mode · **⌘↩** send (also saves an open comment)
 
-## Browser bridge (executor → your browser)
+## Browser bridge (executor → your browser window)
 
 While the side panel is open on a matched task, the executor can see and drive
-your live tab instead of launching its own browser. On first connect the
-daemon drops `.taskyou/browser/HOWTO.md` into the worktree with ready-to-use
-curl commands, and annotation nudges mention the bridge — so the executor
-discovers it on its own:
+your live browser instead of launching its own — the same "control a group of
+tabs" model as the Claude in Chrome extension. On first connect the daemon
+drops `.taskyou/browser/HOWTO.md` into the worktree with ready-to-use curl
+commands, and annotation nudges mention the bridge — so the executor discovers
+it on its own:
 
 - `screenshot` / `snapshot` — written into the worktree as PNG/HTML files the
   executor can Read directly (the PNG is its "eyes")
 - `console` — real page console logs + uncaught JS errors (MAIN-world tap)
 - `click` / `type` — interact via CSS selectors
-- `navigate` (localhost-only) / `reload`
+- `navigate` (any http/https site) / `reload`
+
+**The tab group.** The executor isn't limited to the matched tab — it can drive
+every tab in that tab's window, plus tabs it opens itself, so it can pull up
+docs or an issue tracker alongside your app:
+
+- `tabs` — list the tabs in the window `[{tab,url,title,active,primary}]`
+- `open` — open a new tab at any URL (docs, external sites) → returns its `tab` id
+- `activate` — bring a tab to the foreground
+- `close` — close a tab
+
+Any see/act command takes an optional `"tab":<id>` to target a specific tab in
+the window (default: the matched app tab). Screenshotting a background tab
+brings it to the foreground first.
+
+The bridge pins to the (task, tab) it started on, so the executor navigating the
+app tab to an external site — or foregrounding another tab to screenshot it —
+won't tear the session down. It stops when you close the panel or the pinned
+tab.
 
 Transport: the panel long-polls `GET /api/tasks/{id}/browser/poll`; the
 executor POSTs to `/api/tasks/{id}/browser` and blocks until the result comes

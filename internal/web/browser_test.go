@@ -149,6 +149,31 @@ func TestBrowserRelay_ScreenshotWritesFile(t *testing.T) {
 	}
 }
 
+func TestBrowserHowto_DocumentsTabGroupActions(t *testing.T) {
+	srv, database, _ := setupServer(t)
+	task, wt := setupAnnotationTask(t, database, false)
+
+	srv.ensureBrowserHowto(task)
+
+	howto, err := os.ReadFile(filepath.Join(wt, ".taskyou", "browser", "HOWTO.md"))
+	if err != nil {
+		t.Fatalf("HOWTO.md not written: %v", err)
+	}
+	got := string(howto)
+	// The bridge now advertises tab-group control and external navigation.
+	for _, want := range []string{
+		`"action":"tabs"`,
+		`"action":"open"`,
+		`"action":"activate"`,
+		`"action":"close"`,
+		`https://`, // navigate is no longer localhost-only
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("HOWTO missing %q", want)
+		}
+	}
+}
+
 func TestAnnotationNudge_MentionsBrowserWhenConnected(t *testing.T) {
 	srv, database, runner := setupServer(t)
 	task, _ := setupAnnotationTask(t, database, true)
