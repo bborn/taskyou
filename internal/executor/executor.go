@@ -843,11 +843,27 @@ func gitDirtyPaths(worktreePath string) (string, bool) {
 	return strings.Join(paths, "\n"), true
 }
 
+// WorkflowStepFinished reports whether a workflow step completed its handoff:
+// produced a commit beyond its recorded baseline, pushed it, and left no
+// uncommitted work of its own. See WorkflowStepUnfinishedReason for the
+// individual checks.
 func WorkflowStepFinished(worktreePath, baseCommit, baseDirty string) bool {
+	return WorkflowStepUnfinishedReason(worktreePath, baseCommit, baseDirty) == ""
+}
+
+// WorkflowStepUnfinishedReason returns "" when the step's handoff is complete,
+// or a short human-readable reason why it is not. The reason is surfaced on the
+// task's activity log so a parked step says WHY it parked ("left uncommitted
+// files: …") instead of the generic "Waiting for user input" — which reads as
+// a question and sends a human hunting for one that was never asked.
+func WorkflowStepUnfinishedReason(worktreePath, baseCommit, baseDirty string) string {
 	// No worktree, or no recorded starting point, means we have no evidence the step
 	// produced anything. Never auto-complete on no evidence.
-	if worktreePath == "" || baseCommit == "" {
-		return false
+	if worktreePath == "" {
+		return "no worktree recorded for this step"
+	}
+	if baseCommit == "" {
+		return "no baseline commit recorded — cannot judge the step's output"
 	}
 
 	// The step must not have left uncommitted work of its OWN. It is NOT enough to ask
@@ -857,7 +873,7 @@ func WorkflowStepFinished(worktreePath, baseCommit, baseDirty string) bool {
 	// was already there when this step started.
 	cur, ok := gitDirtyPaths(worktreePath)
 	if !ok {
-		return false
+		return "could not read the worktree's git status"
 	}
 	if cur != "" {
 		base := make(map[string]bool)
@@ -866,26 +882,35 @@ func WorkflowStepFinished(worktreePath, baseCommit, baseDirty string) bool {
 				base[p] = true
 			}
 		}
+		var leftover []string
 		for _, p := range strings.Split(cur, "\n") {
 			if !base[p] {
-				return false // the step left something uncommitted
+				leftover = append(leftover, p)
 			}
+		}
+		if len(leftover) > 0 {
+			shown := leftover
+			if len(shown) > 5 {
+				shown = append(shown[:5:5], fmt.Sprintf("… (%d more)", len(leftover)-5))
+			}
+			return "left uncommitted files: " + strings.Join(shown, ", ") +
+				" — commit them (or delete them) and the step will advance"
 		}
 	}
 
 	headOut, errH := exec.Command("git", "-C", worktreePath, "rev-parse", "HEAD").Output()
 	if errH != nil {
-		return false
+		return "could not resolve the worktree's HEAD commit"
 	}
 	head := strings.TrimSpace(string(headOut))
 
-	// THE step must have produced a commit. A worktree that was just created — or whose
+	// The step must have produced a commit. A worktree that was just created — or whose
 	// agent ran and wrote nothing — is clean and sits at baseCommit, which is already
 	// reachable from origin. Without this check such a step reads as "finished" and the
 	// sweep silently marks it done before the agent has even started, dropping the step
 	// (and, worse, letting the DAG advance past unreviewed work).
 	if head == baseCommit {
-		return false
+		return fmt.Sprintf("no new commit since the step started (still at %.8s)", baseCommit)
 	}
 
 	// And that commit must be pushed: HEAD reachable from an origin ref. Checked by
@@ -894,14 +919,14 @@ func WorkflowStepFinished(worktreePath, baseCommit, baseDirty string) bool {
 	refs, errR := exec.Command("git", "-C", worktreePath, "branch", "-r", "--contains",
 		head, "--format=%(refname:short)").Output()
 	if errR != nil {
-		return false
+		return "could not check whether HEAD is pushed to origin"
 	}
 	for _, line := range strings.Split(strings.TrimSpace(string(refs)), "\n") {
 		if strings.HasPrefix(strings.TrimSpace(line), "origin/") {
-			return true
+			return ""
 		}
 	}
-	return false
+	return fmt.Sprintf("commit %.8s is not pushed to any origin branch", head)
 }
 
 // teardownWorkflowStepSession kills the executor process and tmux window for a
@@ -1634,7 +1659,7 @@ func (e *Executor) executeTask(ctx context.Context, task *db.Task) {
 	// Setup worktree for isolated execution (symlinks claude config from project)
 	// SECURITY: We must have a valid worktree - never fall back to project directory
 	// to prevent Claude from accidentally writing to the main repo
-	workDir, err := e.setupWorktree(task)
+	workDir, createdWorktree, err := e.setupWorktree(task)
 	if err != nil {
 		e.logger.Error("Failed to setup worktree", "error", err)
 		e.logLine(task.ID, "error", fmt.Sprintf("Failed to setup worktree: %v", err))
@@ -1649,15 +1674,24 @@ func (e *Executor) executeTask(ctx context.Context, task *db.Task) {
 	// it started" — worktree setup (clone, bundle, migrations) can run for tens of
 	// seconds while the task is already 'processing', and without this the sweep marks
 	// the step done before its agent ever starts.
+	//
+	// Record only for a freshly-created worktree (or when no baseline exists yet). A
+	// retry that reuses the worktree must keep the ORIGINAL baseline: re-recording
+	// after the step already committed re-baselines base_commit to that pushed HEAD,
+	// making "produced a commit" permanently false — the step can then never
+	// auto-complete and the DAG stalls behind it.
 	if base := gitHeadCommit(workDir); base != "" {
-		if err := e.db.SetTaskBaseCommit(task.ID, base); err != nil {
-			e.logger.Warn("could not record worktree base commit", "task", task.ID, "error", err)
-		}
-		// Also snapshot what init already dirtied (bundle/migrate rewriting tracked files),
-		// so completion is judged on what THIS step left behind, not on that noise.
-		if dirty, ok := gitDirtyPaths(workDir); ok {
-			if err := e.db.SetTaskBaseDirty(task.ID, dirty); err != nil {
-				e.logger.Warn("could not record worktree base dirt", "task", task.ID, "error", err)
+		prevBase, _ := e.db.GetTaskBaseCommit(task.ID)
+		if createdWorktree || prevBase == "" {
+			if err := e.db.SetTaskBaseCommit(task.ID, base); err != nil {
+				e.logger.Warn("could not record worktree base commit", "task", task.ID, "error", err)
+			}
+			// Also snapshot what init already dirtied (bundle/migrate rewriting tracked files),
+			// so completion is judged on what THIS step left behind, not on that noise.
+			if dirty, ok := gitDirtyPaths(workDir); ok {
+				if err := e.db.SetTaskBaseDirty(task.ID, dirty); err != nil {
+					e.logger.Warn("could not record worktree base dirt", "task", task.ID, "error", err)
+				}
 			}
 		}
 	}
@@ -4067,8 +4101,10 @@ func (e *Executor) getConversationHistory(taskID int64) string {
 }
 
 // setupWorktree creates a git worktree for the task if the project is a git repo.
-// Returns the working directory to use (worktree path or project path).
-func (e *Executor) setupWorktree(task *db.Task) (string, error) {
+// Returns the working directory to use (worktree path or project path) and whether
+// this call created the worktree fresh (false when an existing or restored worktree
+// was reused — callers use this to keep, not re-record, per-run git baselines).
+func (e *Executor) setupWorktree(task *db.Task) (string, bool, error) {
 	// Ensure task has a project (default to 'personal' if empty)
 	if task.Project == "" {
 		task.Project = "personal"
@@ -4081,12 +4117,13 @@ func (e *Executor) setupWorktree(task *db.Task) (string, error) {
 	projectDir := e.getProjectDir(task.Project)
 
 	if projectDir == "" {
-		return "", fmt.Errorf("project directory not found for project: %s", task.Project)
+		return "", false, fmt.Errorf("project directory not found for project: %s", task.Project)
 	}
 
 	// For non-worktree projects, all tasks share the project directory directly
 	if !e.config.ProjectUsesWorktrees(task.Project) {
-		return e.setupSharedWorkDir(task, projectDir, paths)
+		workDir, err := e.setupSharedWorkDir(task, projectDir, paths)
+		return workDir, false, err
 	}
 
 	// Check if project is a git repo, initialize one if not
@@ -4100,7 +4137,7 @@ func (e *Executor) setupWorktree(task *db.Task) (string, error) {
 		cmd := exec.Command("git", "init")
 		cmd.Dir = projectDir
 		if output, err := cmd.CombinedOutput(); err != nil {
-			return "", fmt.Errorf("failed to initialize git repo: %v\n%s", err, string(output))
+			return "", false, fmt.Errorf("failed to initialize git repo: %v\n%s", err, string(output))
 		}
 
 		// Create initial commit so we have a branch to create worktrees from
@@ -4111,7 +4148,7 @@ func (e *Executor) setupWorktree(task *db.Task) (string, error) {
 		cmd = exec.Command("git", "commit", "--allow-empty", "-m", "Initial commit for taskyou worktree support")
 		cmd.Dir = projectDir
 		if output, err := cmd.CombinedOutput(); err != nil {
-			return "", fmt.Errorf("failed to create initial commit: %v\n%s", err, string(output))
+			return "", false, fmt.Errorf("failed to create initial commit: %v\n%s", err, string(output))
 		}
 	} else {
 		// Git repo exists, but check if it has any commits
@@ -4129,7 +4166,7 @@ func (e *Executor) setupWorktree(task *db.Task) (string, error) {
 			cmd = exec.Command("git", "commit", "--allow-empty", "-m", "Initial commit for taskyou worktree support")
 			cmd.Dir = projectDir
 			if output, err := cmd.CombinedOutput(); err != nil {
-				return "", fmt.Errorf("failed to create initial commit: %v\n%s", err, string(output))
+				return "", false, fmt.Errorf("failed to create initial commit: %v\n%s", err, string(output))
 			}
 		}
 	}
@@ -4143,7 +4180,7 @@ func (e *Executor) setupWorktree(task *db.Task) (string, error) {
 			symlinkClaudeConfig(projectDir, task.WorktreePath)
 			symlinkMCPConfig(projectDir, task.WorktreePath)
 			copyMCPConfig(paths.configFile, projectDir, task.WorktreePath)
-			return task.WorktreePath, nil
+			return task.WorktreePath, false, nil
 		}
 		// Worktree path was set but directory doesn't exist, clear it and create fresh
 		task.WorktreePath = ""
@@ -4172,7 +4209,7 @@ func (e *Executor) setupWorktree(task *db.Task) (string, error) {
 			symlinkClaudeConfig(projectDir, task.WorktreePath)
 			symlinkMCPConfig(projectDir, task.WorktreePath)
 			copyMCPConfig(paths.configFile, projectDir, task.WorktreePath)
-			return task.WorktreePath, nil
+			return task.WorktreePath, false, nil
 		}
 	}
 
@@ -4180,7 +4217,7 @@ func (e *Executor) setupWorktree(task *db.Task) (string, error) {
 	// This allows Claude to inherit the project's MCP config and settings
 	worktreesDir := filepath.Join(projectDir, ".task-worktrees")
 	if err := os.MkdirAll(worktreesDir, 0755); err != nil {
-		return "", fmt.Errorf("create worktrees dir: %w", err)
+		return "", false, fmt.Errorf("create worktrees dir: %w", err)
 	}
 
 	// Ensure .task-worktrees is in .gitignore
@@ -4217,7 +4254,7 @@ func (e *Executor) setupWorktree(task *db.Task) (string, error) {
 		symlinkMCPConfig(projectDir, worktreePath)
 		copyMCPConfig(paths.configFile, projectDir, worktreePath)
 		e.runWorktreeInitScript(projectDir, worktreePath, task)
-		return worktreePath, nil
+		return worktreePath, false, nil
 	}
 
 	// Check if task specifies an existing source branch to checkout
@@ -4226,7 +4263,7 @@ func (e *Executor) setupWorktree(task *db.Task) (string, error) {
 		fetchCmd := exec.Command("git", "fetch", "origin")
 		fetchCmd.Dir = projectDir
 		if fetchOutput, fetchErr := fetchCmd.CombinedOutput(); fetchErr != nil {
-			return "", fmt.Errorf("fetch origin: %v\n%s", fetchErr, string(fetchOutput))
+			return "", false, fmt.Errorf("fetch origin: %v\n%s", fetchErr, string(fetchOutput))
 		}
 
 		// Create worktree from existing remote branch (no -b flag)
@@ -4235,7 +4272,7 @@ func (e *Executor) setupWorktree(task *db.Task) (string, error) {
 		cmd.Dir = projectDir
 		output, err := cmd.CombinedOutput()
 		if err != nil {
-			return "", fmt.Errorf("create worktree from branch %s: %v\n%s", task.SourceBranch, err, string(output))
+			return "", false, fmt.Errorf("create worktree from branch %s: %v\n%s", task.SourceBranch, err, string(output))
 		}
 
 		// Use the source branch name as the branch name for the task
@@ -4285,12 +4322,12 @@ func (e *Executor) setupWorktree(task *db.Task) (string, error) {
 						symlinkMCPConfig(projectDir, worktreePath)
 						copyMCPConfig(paths.configFile, projectDir, worktreePath)
 						e.runWorktreeInitScript(projectDir, worktreePath, task)
-						return worktreePath, nil
+						return worktreePath, false, nil
 					}
-					return "", fmt.Errorf("create worktree: %v\n%s\n%s", err, string(output), string(output2))
+					return "", false, fmt.Errorf("create worktree: %v\n%s\n%s", err, string(output), string(output2))
 				}
 			} else {
-				return "", fmt.Errorf("create worktree: %v\n%s", err, string(output))
+				return "", false, fmt.Errorf("create worktree: %v\n%s", err, string(output))
 			}
 		}
 
@@ -4326,7 +4363,7 @@ func (e *Executor) setupWorktree(task *db.Task) (string, error) {
 	// Run worktree init script if configured
 	e.runWorktreeInitScript(projectDir, worktreePath, task)
 
-	return worktreePath, nil
+	return worktreePath, true, nil
 }
 
 // setupSharedWorkDir sets up a task to use the project directory directly,

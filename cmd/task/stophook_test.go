@@ -176,3 +176,77 @@ func TestWorkflowStepFinishedIgnoresInitDirt(t *testing.T) {
 		t.Error("a step that left NEW uncommitted work must NOT be finished")
 	}
 }
+
+// TestWorkflowStepUnfinishedReason: when a step's handoff is incomplete, the reason
+// must say WHY — the generic "Waiting for user input" hid the actual blocker (e.g.
+// scratch files the agent fetched but never committed) and left DAGs stalled with a
+// board that looked like the agent had asked a question. The Verify-step incident:
+// an agent fetched four peer reports as untracked files, committed and pushed its own
+// output, and the step parked forever with no hint.
+func TestWorkflowStepUnfinishedReason(t *testing.T) {
+	root := t.TempDir()
+	remote := filepath.Join(root, "remote.git")
+	git(t, root, "init", "--bare", remote)
+	wt := filepath.Join(root, "wt")
+	if err := os.Mkdir(wt, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	git(t, wt, "init")
+	git(t, wt, "remote", "add", "origin", remote)
+	git(t, wt, "checkout", "-b", "pipeline/shared")
+	if err := os.WriteFile(filepath.Join(wt, "parent.txt"), []byte("parent"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	git(t, wt, "add", ".")
+	git(t, wt, "commit", "-m", "parent step work")
+	git(t, wt, "push", "origin", "HEAD:pipeline/shared")
+	base := headSHA(t, wt)
+
+	// Sitting at base: reason names the missing commit, not a question.
+	reason := executor.WorkflowStepUnfinishedReason(wt, base, "")
+	if !strings.Contains(reason, "no new commit") {
+		t.Errorf("expected a 'no new commit' reason, got %q", reason)
+	}
+
+	// Committed but not pushed.
+	if err := os.WriteFile(filepath.Join(wt, "out.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	git(t, wt, "add", ".")
+	git(t, wt, "commit", "-m", "work")
+	if reason := executor.WorkflowStepUnfinishedReason(wt, base, ""); !strings.Contains(reason, "not pushed") {
+		t.Errorf("expected a 'not pushed' reason, got %q", reason)
+	}
+	git(t, wt, "push", "origin", "HEAD:pipeline/shared")
+
+	// The incident shape: work committed AND pushed, but fetched scratch left
+	// untracked. The reason must name the offending files.
+	for _, f := range []string{"peer-a.md", "peer-b.md"} {
+		if err := os.WriteFile(filepath.Join(wt, f), []byte("scratch"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	reason = executor.WorkflowStepUnfinishedReason(wt, base, "")
+	if !strings.Contains(reason, "uncommitted files") || !strings.Contains(reason, "peer-a.md") {
+		t.Errorf("expected the reason to name the leftover files, got %q", reason)
+	}
+
+	// Baseline dirt is NOT the step's fault and must not block (nor be named).
+	reason = executor.WorkflowStepUnfinishedReason(wt, base, "peer-a.md\npeer-b.md")
+	if reason != "" {
+		t.Errorf("baseline dirt must not block the handoff, got %q", reason)
+	}
+
+	// Finished ⇔ empty reason, and the bool wrapper agrees.
+	for _, f := range []string{"peer-a.md", "peer-b.md"} {
+		if err := os.Remove(filepath.Join(wt, f)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if reason := executor.WorkflowStepUnfinishedReason(wt, base, ""); reason != "" {
+		t.Errorf("expected finished (empty reason), got %q", reason)
+	}
+	if !executor.WorkflowStepFinished(wt, base, "") {
+		t.Error("WorkflowStepFinished should agree with an empty reason")
+	}
+}

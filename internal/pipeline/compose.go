@@ -113,6 +113,12 @@ func composeInstruction(def Definition, step Step) string {
 		b.WriteString("  (If you are on a detached HEAD, run `git checkout -B {{branch}}` first.)\n")
 	}
 
+	// Leftover untracked files are the top cause of a step that did its work but
+	// never hands off: WorkflowStepFinished refuses to auto-complete a worktree
+	// with uncommitted files the step created (fail-closed — they might be
+	// forgotten work), so scratch must be committed or removed.
+	b.WriteString("- Commit or delete every file you create — including fetched inputs and scratch. Leftover untracked files block the automatic handoff and stall the workflow.\n")
+
 	// PR: only the sink step opens it.
 	if len(def.dependents(step.Name)) == 0 {
 		b.WriteString("- You are the final step: open a pull request with `gh pr create` summarizing the change. The workflow then parks in 'blocked' for a human to merge.\n")

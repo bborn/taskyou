@@ -986,6 +986,7 @@ Examples:
 				fmt.Println(dimStyle.Render("Staged but not started — queue the root step to run it."))
 			} else {
 				fmt.Println(dimStyle.Render("Running — steps advance automatically; parallel reviewers run at once."))
+				ensureDaemonForQueuedWork()
 			}
 		},
 	}
@@ -1994,6 +1995,7 @@ Examples:
 				msg += " (accept-edits mode)"
 			}
 			fmt.Println(successStyle.Render(msg))
+			ensureDaemonForQueuedWork()
 		},
 	}
 	executeCmd.Flags().Bool("dangerous", false, "Execute in dangerous mode (alias for --permission-mode dangerous)")
@@ -4111,6 +4113,22 @@ func runLocal(dangerousMode bool, debugStatePath, cpuProfilePath, memProfilePath
 	return nil
 }
 
+// ensureDaemonForQueuedWork makes sure work queued from the CLI will actually
+// run. The daemon is the only thing that picks up 'queued' tasks; without this,
+// `ty pipeline`/`ty execute` on a machine whose daemon died print a cheerful
+// success message and the task sits in 'queued' forever with no hint why.
+// Mirrors the TUI's startup behavior (runLocal): start it if we can, warn
+// loudly if we can't.
+func ensureDaemonForQueuedWork() {
+	// Per-task permission modes are already stored on the tasks themselves; the
+	// daemon-wide dangerous flag only comes from the environment here (the root
+	// --dangerous flag is scoped to the TUI/daemon commands).
+	if err := ensureDaemonRunning(os.Getenv("WORKTREE_DANGEROUS_MODE") == "1"); err != nil {
+		fmt.Fprintln(os.Stderr, errorStyle.Render("Warning: daemon is not running and could not be started: "+err.Error()))
+		fmt.Fprintln(os.Stderr, dimStyle.Render("Queued work will not execute until you run 'ty daemon' or 'ty restart'."))
+	}
+}
+
 // ensureDaemonRunning starts the daemon if it's not already running.
 // If dangerousMode is true, sets WORKTREE_DANGEROUS_MODE=1 for the daemon.
 // If the daemon is already running (even with a different mode), it is left as-is.
@@ -4634,13 +4652,22 @@ func handleStopHook(database *db.DB, taskID int64, input *ClaudeHookInput) error
 			// 'done' so its dependents auto-queue. A step that stopped to ask a question
 			// or left work uncommitted/unpushed hasn't finished — block as before, and
 			// the daemon's sweep is the backstop for a Stop hook that fires mid-push.
-			if pipeline.IsWorkflowTask(task) && workflowStepFinished(database, task) {
-				if pipeline.IsTerminalStep(database, task) {
-					database.UpdateTaskStatus(taskID, db.StatusBlocked)
-					database.AppendTaskLog(taskID, "system", pipeline.TerminalStepParkedLog)
+			if pipeline.IsWorkflowTask(task) {
+				if reason := workflowStepUnfinishedReason(database, task); reason == "" {
+					if pipeline.IsTerminalStep(database, task) {
+						database.UpdateTaskStatus(taskID, db.StatusBlocked)
+						database.AppendTaskLog(taskID, "system", pipeline.TerminalStepParkedLog)
+					} else {
+						database.UpdateTaskStatus(taskID, db.StatusDone)
+						database.AppendTaskLog(taskID, "system", "Work committed and pushed — workflow advances to the next step")
+					}
 				} else {
-					database.UpdateTaskStatus(taskID, db.StatusDone)
-					database.AppendTaskLog(taskID, "system", "Work committed and pushed — workflow advances to the next step")
+					// Park with the concrete reason. The generic "Waiting for user
+					// input" reads as a question the agent never asked and hides
+					// what actually blocked the handoff (e.g. leftover untracked
+					// files), leaving the DAG stalled with no clue on the board.
+					database.UpdateTaskStatus(taskID, db.StatusBlocked)
+					database.AppendTaskLog(taskID, "system", "Step ended its turn without completing the handoff — "+reason)
 				}
 			} else {
 				database.UpdateTaskStatus(taskID, db.StatusBlocked)
@@ -4662,15 +4689,21 @@ func handleStopHook(database *db.DB, taskID int64, input *ClaudeHookInput) error
 // transient moment. A step that ran but committed nothing is NOT finished — it stays
 // 'blocked' for a human rather than silently completing with no work.
 func workflowStepFinished(database *db.DB, task *db.Task) bool {
+	return workflowStepUnfinishedReason(database, task) == ""
+}
+
+// workflowStepUnfinishedReason returns "" when the step's handoff is complete, or
+// a short reason why not (see executor.WorkflowStepUnfinishedReason).
+func workflowStepUnfinishedReason(database *db.DB, task *db.Task) string {
 	baseCommit, err := database.GetTaskBaseCommit(task.ID)
 	if err != nil {
-		return false
+		return "could not load the step's baseline commit"
 	}
 	baseDirty, err := database.GetTaskBaseDirty(task.ID)
 	if err != nil {
-		return false
+		return "could not load the step's baseline dirt snapshot"
 	}
-	return executor.WorkflowStepFinished(task.WorktreePath, baseCommit, baseDirty)
+	return executor.WorkflowStepUnfinishedReason(task.WorktreePath, baseCommit, baseDirty)
 }
 
 // handlePreToolUseHook handles PreToolUse hooks from Claude (before tool execution).
