@@ -79,10 +79,24 @@ async function candidateTasks() {
   return [...processing, ...blocked];
 }
 
+// A hostname is "loopback" if it's localhost/127.0.0.1 or ends in a
+// TLD reserved for local use (.localhost, .test per RFC 6761 — these always
+// resolve to the loopback interface). Multi-tenant local dev setups serve each
+// tenant on its own subdomain (e.g. qa-brand-4801.influencekit.test:3143), so
+// port-based task matching must recognize those, not just bare localhost.
+function isLoopbackHost(hostname) {
+  return (
+    hostname === 'localhost' ||
+    hostname === '127.0.0.1' ||
+    hostname.endsWith('.localhost') ||
+    hostname.endsWith('.test')
+  );
+}
+
 function tabPort(url) {
   try {
     const u = new URL(url);
-    if (u.hostname !== 'localhost' && u.hostname !== '127.0.0.1') return null;
+    if (!isLoopbackHost(u.hostname)) return null;
     return u.port ? Number(u.port) : null;
   } catch {
     return null;

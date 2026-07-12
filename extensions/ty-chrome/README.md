@@ -23,8 +23,10 @@ annotate page ──► POST /api/tasks/{id}/annotations (ty serve)
 
 Tab→task matching is automatic: each taskyou task has a dedicated port
 (3100–4099, exposed as `$WORKTREE_PORT` in the task shell). If the tab's URL is
-`localhost:<port>`, the extension finds the processing/blocked task with that
-port. No match? Pick the task manually in the side panel.
+on a loopback host with that port — `localhost`, `127.0.0.1`, or any `.localhost`
+/ `.test` subdomain (e.g. `qa-brand.influencekit.test:<port>`) — the extension
+finds the processing/blocked task with that port. No match? Pick the task
+manually in the side panel.
 
 ## Install
 
@@ -145,6 +147,7 @@ Host permissions are `<all_urls>` because Chrome's `captureVisibleTab` (used
 to bake your markers into the screenshot) accepts only `<all_urls>` or
 `activeTab` — and `activeTab` grants die on every page reload, which would
 silently drop screenshots in the edit loop this tool exists for. Tab→task
-auto-matching still only ever targets `localhost`/`127.0.0.1` ports; other
-pages are annotatable only if you manually pick a task. This is a
+auto-matching still only ever targets loopback hosts (`localhost`, `127.0.0.1`,
+and RFC-reserved `.localhost` / `.test` subdomains) by port; other pages are
+annotatable only if you manually pick a task. This is a
 load-unpacked dev tool talking to your own machine.
