@@ -3,7 +3,7 @@
   "name": "TaskYou — Live Annotate",
   "version": "0.1.0",
   "description": "Point, click, and annotate pages served by a taskyou task; deliver context straight to the task's executor.",
-  "permissions": ["storage", "tabs", "sidePanel", "scripting"],
+  "permissions": ["storage", "tabs", "tabGroups", "sidePanel", "scripting"],
   "host_permissions": ["<all_urls>"],
   "background": { "service_worker": "sw.js" },
   "commands": {

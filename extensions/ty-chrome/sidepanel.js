@@ -57,7 +57,10 @@ async function refresh() {
   }
   $('no-connection').classList.toggle('hidden', !!state.connected);
 
-  currentTask = state.task || null;
+  // While the bridge is running it may foreground another tab (to screenshot a
+  // docs tab, say) whose URL doesn't port-match — keep showing the pinned task
+  // so the executor console doesn't blank out mid-session.
+  currentTask = state.task || (bridgeActive ? bridgeTask : null);
   renderTask();
   updateCount(state.annotationCount);
 
@@ -310,32 +313,69 @@ chrome.runtime.onMessage.addListener((msg) => {
 });
 
 // --- Browser bridge: while the panel is open and a task is matched, long-poll
-// ty serve for executor commands and run them against the live tab. This is
-// what lets the executor see/drive the page without its own browser.
+// ty serve for executor commands and run them against the live browser window.
+// This is what lets the executor see/drive the page — and any other tab in the
+// window it opens — without its own browser.
+//
+// The loop pins to the (task, tab) it started on. It deliberately does NOT
+// follow the panel's active tab: the executor can bring a docs tab or a newly
+// opened external tab to the foreground (e.g. to screenshot it) without the
+// active-tab change tearing the bridge down. It stops when the panel is hidden
+// or the pinned tab is closed.
 let bridgeActive = false;
+let bridgeTask = null; // the task the running bridge is pinned to
+
+async function updateBridgeStatus(active, primaryTabId) {
+  const el = $('bridge-status');
+  if (!el) return;
+  if (!active) {
+    el.classList.add('hidden');
+    el.textContent = '';
+    return;
+  }
+  let count = 1;
+  try {
+    const primary = await chrome.tabs.get(primaryTabId);
+    if (primary.groupId != null && primary.groupId !== -1) {
+      count = (await chrome.tabs.query({ groupId: primary.groupId })).length;
+    }
+  } catch {}
+  el.textContent = count > 1 ? `🔗 driving ${count} tabs` : '🔗 executor can drive this tab';
+  el.classList.remove('hidden');
+}
 
 async function bridgeLoop() {
   if (bridgeActive) return;
+  const task = currentTask;
+  const taskId = task?.id;
+  const primaryTabId = activeTabId;
+  if (taskId == null || primaryTabId == null) return;
   bridgeActive = true;
+  bridgeTask = task;
+  updateBridgeStatus(true, primaryTabId);
   try {
-    let injected = false;
-    while (document.visibilityState === 'visible' && currentTask && activeTabId != null) {
-      if (!injected) {
-        // Early console-tap injection so logs accumulate before the executor asks
-        await send({ type: 'ensureBridge', tabId: activeTabId });
-        injected = true;
+    // Early console-tap injection (so logs accumulate before the executor asks)
+    // and pin the tab→task match so external navigation doesn't drop the task.
+    await send({ type: 'ensureBridge', tabId: primaryTabId, taskId });
+    while (document.visibilityState === 'visible') {
+      try {
+        await chrome.tabs.get(primaryTabId); // pinned tab closed → stop
+      } catch {
+        break;
       }
-      const taskId = currentTask.id;
       const r = await send({ type: 'browserPoll', taskId });
       if (r?.command) {
-        const result = await send({ type: 'browserExec', tabId: activeTabId, command: r.command });
+        const result = await send({ type: 'browserExec', tabId: primaryTabId, command: r.command });
         await send({ type: 'browserResult', taskId, id: r.command.id, result: result ?? { error: 'no result' } });
+        updateBridgeStatus(true, primaryTabId);
       } else if (r?.error) {
         await new Promise((res) => setTimeout(res, 3000));
       }
     }
   } finally {
     bridgeActive = false;
+    bridgeTask = null;
+    updateBridgeStatus(false);
   }
 }
 

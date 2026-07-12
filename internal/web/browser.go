@@ -276,10 +276,13 @@ func (s *Server) ensureBrowserHowto(task *db.Task) {
 
 	base := s.baseURL
 	endpoint := fmt.Sprintf("%s/api/tasks/%d/browser", base, task.ID)
-	howto := fmt.Sprintf(`# Browser bridge — see and drive the user's live browser
+	howto := fmt.Sprintf(`# Browser bridge — see and drive the user's live browser window
 
 The ty-chrome extension is connected to this task. Use the user's real browser
-tab instead of launching your own. Every command is:
+instead of launching your own. You can drive the tabs in this task's tab group
+(labeled "ty #%d" in the tab strip): the matched app tab plus new tabs you open
+(including external sites like docs or issue trackers). Tabs outside the group
+are off-limits. Every command is:
 
     curl -s -X POST %s \
       -H 'Content-Type: application/json' -d '{"action":"...","params":{...}}'
@@ -287,19 +290,31 @@ tab instead of launching your own. Every command is:
 Responses are {"ok":true,"result":{...}}. If the side panel is closed you get
 a 503; ask the user to open it.
 
-## Actions
+## See the page (do this first and after every change)
 
-- **See the page** (most useful — do this first and after every change):
-  '{"action":"screenshot"}' → result.path is a PNG in this worktree; Read it.
+- **Screenshot**: '{"action":"screenshot"}' → result.path is a PNG in this worktree; Read it.
 - **DOM snapshot**: '{"action":"snapshot"}' → result.path (full HTML), result.title, result.url
 - **Console logs + JS errors**: '{"action":"console"}' → result.logs
+
+## Act on the page
+
 - **Click**: '{"action":"click","params":{"selector":"#buy-btn"}}'
 - **Type**: '{"action":"type","params":{"selector":"input[name=q]","text":"hello"}}'
-- **Navigate** (localhost only): '{"action":"navigate","params":{"url":"http://localhost:%d/"}}'
+- **Navigate** (any http/https site): '{"action":"navigate","params":{"url":"https://example.com/"}}'
 - **Reload**: '{"action":"reload"}'
 
-Screenshot after each interaction to verify what actually happened.
-`, endpoint, task.Port)
+## Control the group of tabs
+
+- **List tabs**: '{"action":"tabs"}' → result.tabs = [{tab,url,title,active,primary}]
+- **Open a tab**: '{"action":"open","params":{"url":"https://docs...","activate":true}}' → result.tab
+- **Focus a tab**: '{"action":"activate","params":{"tab":<id>}}'
+- **Close a tab**: '{"action":"close","params":{"tab":<id>}}'
+
+Any see/act command takes an optional '"tab":<id>' to target a specific tab in
+the group (default: the matched app tab, e.g. localhost:%d). Screenshotting a
+background tab brings it to the foreground first. Screenshot after each
+interaction to verify what actually happened.
+`, task.ID, endpoint, task.Port)
 
 	os.WriteFile(path, []byte(howto), 0o644)
 }

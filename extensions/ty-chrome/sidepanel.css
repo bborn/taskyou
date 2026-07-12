@@ -62,6 +62,12 @@ body {
   color: var(--muted);
 }
 
+.bridge-status {
+  font-size: 10px;
+  color: var(--accent);
+  white-space: nowrap;
+}
+
 .chip {
   background: var(--accent);
   color: #fff;
