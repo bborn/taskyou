@@ -4683,17 +4683,13 @@ func handleStopHook(database *db.DB, taskID int64, input *ClaudeHookInput) error
 	return nil
 }
 
-// workflowStepFinished reports whether a workflow step produced a commit and pushed it
-// (see executor.WorkflowStepFinished). Used by the Stop hook to advance a step whose
-// agent ended its turn; the daemon's sweep is the backstop for when the hook fires at a
-// transient moment. A step that ran but committed nothing is NOT finished — it stays
-// 'blocked' for a human rather than silently completing with no work.
-func workflowStepFinished(database *db.DB, task *db.Task) bool {
-	return workflowStepUnfinishedReason(database, task) == ""
-}
-
-// workflowStepUnfinishedReason returns "" when the step's handoff is complete, or
-// a short reason why not (see executor.WorkflowStepUnfinishedReason).
+// workflowStepUnfinishedReason returns "" when the step's handoff is complete
+// (produced a commit, pushed it, no leftover work of its own), or a short reason
+// why not (see executor.WorkflowStepUnfinishedReason). Used by the Stop hook to
+// advance a step whose agent ended its turn; the daemon's sweep is the backstop
+// for when the hook fires at a transient moment. A step that ran but committed
+// nothing is NOT finished — it stays 'blocked' for a human rather than silently
+// completing with no work.
 func workflowStepUnfinishedReason(database *db.DB, task *db.Task) string {
 	baseCommit, err := database.GetTaskBaseCommit(task.ID)
 	if err != nil {
