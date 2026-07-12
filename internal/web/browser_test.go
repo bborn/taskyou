@@ -166,7 +166,9 @@ func TestBrowserHowto_DocumentsTabGroupActions(t *testing.T) {
 		`"action":"open"`,
 		`"action":"activate"`,
 		`"action":"close"`,
-		`https://`, // navigate is no longer localhost-only
+		`https://`,   // navigate is no longer localhost-only
+		"tab group",  // the executor is scoped to a Chrome tab group
+		"ty #",       // ...labeled with the task id
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("HOWTO missing %q", want)

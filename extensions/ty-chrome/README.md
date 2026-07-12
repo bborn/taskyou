@@ -81,17 +81,20 @@ it on its own:
 - `navigate` (any http/https site) / `reload`
 
 **The tab group.** The executor isn't limited to the matched tab — it can drive
-every tab in that tab's window, plus tabs it opens itself, so it can pull up
-docs or an issue tracker alongside your app:
+every tab in this task's **tab group**, plus tabs it opens itself, so it can
+pull up docs or an issue tracker alongside your app:
 
-- `tabs` — list the tabs in the window `[{tab,url,title,active,primary}]`
+- `tabs` — list the tabs in the group `[{tab,url,title,active,primary}]`
 - `open` — open a new tab at any URL (docs, external sites) → returns its `tab` id
 - `activate` — bring a tab to the foreground
 - `close` — close a tab
 
-Any see/act command takes an optional `"tab":<id>` to target a specific tab in
-the window (default: the matched app tab). Screenshotting a background tab
-brings it to the foreground first.
+When the bridge connects, the matched tab is placed in a real Chrome tab group
+labeled **`ty #<id>`** (orange). That group *is* the boundary: the executor
+can't see or touch your other tabs, and you can drag a tab in or out of the
+group to grant or revoke access. Any see/act command takes an optional
+`"tab":<id>` to target a specific tab in the group (default: the matched app
+tab). Screenshotting a background tab brings it to the foreground first.
 
 The bridge pins to the (task, tab) it started on, so the executor navigating the
 app tab to an external site — or foregrounding another tab to screenshot it —

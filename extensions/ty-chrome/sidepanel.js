@@ -336,7 +336,9 @@ async function updateBridgeStatus(active, primaryTabId) {
   let count = 1;
   try {
     const primary = await chrome.tabs.get(primaryTabId);
-    count = (await chrome.tabs.query({ windowId: primary.windowId })).length;
+    if (primary.groupId != null && primary.groupId !== -1) {
+      count = (await chrome.tabs.query({ groupId: primary.groupId })).length;
+    }
   } catch {}
   el.textContent = count > 1 ? `🔗 driving ${count} tabs` : '🔗 executor can drive this tab';
   el.classList.remove('hidden');

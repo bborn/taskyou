@@ -279,9 +279,10 @@ func (s *Server) ensureBrowserHowto(task *db.Task) {
 	howto := fmt.Sprintf(`# Browser bridge — see and drive the user's live browser window
 
 The ty-chrome extension is connected to this task. Use the user's real browser
-instead of launching your own. You can drive the whole window your app is in:
-the matched app tab, any other tab in that window, and new tabs you open
-(including external sites like docs or issue trackers). Every command is:
+instead of launching your own. You can drive the tabs in this task's tab group
+(labeled "ty #%d" in the tab strip): the matched app tab plus new tabs you open
+(including external sites like docs or issue trackers). Tabs outside the group
+are off-limits. Every command is:
 
     curl -s -X POST %s \
       -H 'Content-Type: application/json' -d '{"action":"...","params":{...}}'
@@ -310,10 +311,10 @@ a 503; ask the user to open it.
 - **Close a tab**: '{"action":"close","params":{"tab":<id>}}'
 
 Any see/act command takes an optional '"tab":<id>' to target a specific tab in
-the window (default: the matched app tab, e.g. localhost:%d). Screenshotting a
+the group (default: the matched app tab, e.g. localhost:%d). Screenshotting a
 background tab brings it to the foreground first. Screenshot after each
 interaction to verify what actually happened.
-`, endpoint, task.Port)
+`, task.ID, endpoint, task.Port)
 
 	os.WriteFile(path, []byte(howto), 0o644)
 }

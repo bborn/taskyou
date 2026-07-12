@@ -137,13 +137,38 @@ async function ensureInjected(tabId) {
 }
 
 // --- Browser bridge tab group ------------------------------------------------
-// The "group" the executor can drive is every tab in the matched tab's window:
-// the app tab plus any docs/issue-tracker tabs the executor opens. Deriving the
-// group from the window (rather than a stored set) keeps it correct even after
-// the MV3 service worker is torn down and restarted.
+// The "group" the executor can drive is a real Chrome tab group (labeled
+// "ty #<id>", orange): the matched app tab plus any docs/issue-tracker tabs the
+// executor opens. This is a visible, user-revocable boundary — the executor
+// can't see or touch your other tabs, and you can drag a tab in/out of the
+// group to grant/revoke. The group id is read from Chrome per-command, so it
+// survives MV3 service-worker teardown; nothing is stored.
+
+const TAB_GROUP_NONE = -1; // chrome.tabGroups.TAB_GROUP_ID_NONE
+
+// Ensure the matched tab is in a ty tab group, creating one if it's ungrouped.
+// If the tab is already in a group (the user's or ours), we adopt it rather
+// than yanking the tab out of the user's grouping.
+async function ensureTaskGroup(primaryTabId, taskId) {
+  const tab = await chrome.tabs.get(primaryTabId);
+  if (tab.groupId != null && tab.groupId !== TAB_GROUP_NONE) return tab.groupId;
+  const groupId = await chrome.tabs.group({ tabIds: [primaryTabId] });
+  try {
+    await chrome.tabGroups.update(groupId, {
+      title: taskId != null ? `ty #${taskId}` : 'ty',
+      color: 'orange',
+    });
+  } catch {}
+  return groupId;
+}
+
+async function groupOf(primaryTabId) {
+  const tab = await chrome.tabs.get(primaryTabId);
+  return tab.groupId ?? TAB_GROUP_NONE;
+}
 
 // Resolve which tab a command targets: the optional params.tab (must be a live
-// tab in the primary tab's window), else the primary (matched) tab itself.
+// tab in the same tab group as the primary), else the primary (matched) tab.
 async function resolveTargetTab(primaryTabId, params) {
   const requested = params?.tab;
   if (requested == null) return primaryTabId;
@@ -155,8 +180,8 @@ async function resolveTargetTab(primaryTabId, params) {
     chrome.tabs.get(target).catch(() => null),
   ]);
   if (!tab) throw new Error(`tab ${target} not found`);
-  if (tab.windowId !== primary.windowId) {
-    throw new Error(`tab ${target} is not in this task's browser window`);
+  if (primary.groupId === TAB_GROUP_NONE || tab.groupId !== primary.groupId) {
+    throw new Error(`tab ${target} is not in this task's tab group`);
   }
   return target;
 }
@@ -385,9 +410,12 @@ const handlers = {
         // --- Tab-group control (drive more than the matched tab) ---
         case 'tabs': {
           const primary = await chrome.tabs.get(tabId);
-          const list = await chrome.tabs.query({ windowId: primary.windowId });
+          const members =
+            primary.groupId === TAB_GROUP_NONE
+              ? [primary]
+              : await chrome.tabs.query({ groupId: primary.groupId });
           return {
-            tabs: list.map((t) => ({
+            tabs: members.map((t) => ({
               tab: t.id,
               url: t.url,
               title: t.title,
@@ -405,6 +433,9 @@ const handlers = {
             url,
             active: params.activate !== false,
           });
+          // Add the new tab to the task's group so it's inside the boundary.
+          const groupId = await ensureTaskGroup(tabId);
+          await chrome.tabs.group({ groupId, tabIds: [tab.id] }).catch(() => {});
           return { ok: true, tab: tab.id, url };
         }
         case 'activate':
@@ -442,12 +473,14 @@ const handlers = {
     }
   },
 
-  // Inject the bridge into the matched tab and pin the tab→task match so the
-  // executor can navigate it to an external site without the port-based match
-  // dropping the task (which would tear the bridge down mid-session).
+  // Inject the bridge into the matched tab, put it in a visible "ty #<id>" tab
+  // group (the boundary the executor can drive), and pin the tab→task match so
+  // the executor can navigate it to an external site without the port-based
+  // match dropping the task (which would tear the bridge down mid-session).
   async ensureBridge({ tabId, taskId }) {
     try {
       await ensureInjected(tabId);
+      await ensureTaskGroup(tabId, taskId).catch(() => {});
       if (taskId != null) {
         const task = (await candidateTasks().catch(() => [])).find((t) => t.id === taskId);
         if (task) {
