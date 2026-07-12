@@ -294,6 +294,9 @@ Examples:
 			}
 
 			printBulkSummary("queue", succeeded, failed)
+			if succeeded > 0 {
+				ensureDaemonForQueuedWork()
+			}
 		},
 	}
 	bulkExecuteCmd.Flags().Bool("dangerous", false, "Execute in dangerous mode (skip permission prompts)")
