@@ -92,6 +92,14 @@ const DoneTaskCleanupTimeout = 30 * time.Minute
 // outputs like MP4s), so an aggressive default is important to prevent disk fill.
 const DefaultWorktreeCleanupMaxAge = 24 * time.Hour // 1 day
 
+// DefaultTrashRetention is how long a soft-deleted (trashed) task stays recoverable
+// before the daemon sweep hard-deletes it (removes the worktree + row; the Claude
+// transcript is always preserved). Chosen so an accidental delete has a comfortable
+// window to be noticed — the incident that motivated soft-delete went unnoticed for
+// well over a week. Override with the trash_retention setting ("0"/"disabled" = keep
+// trash forever).
+const DefaultTrashRetention = 14 * 24 * time.Hour // 14 days
+
 const (
 	defaultExecutorSlug = "claude"
 	defaultExecutorName = "Claude"
@@ -1196,6 +1204,12 @@ func (e *Executor) worker(ctx context.Context) {
 			if tickCount%staleWorktreeInterval == 0 {
 				e.cleanupStaleWorktrees()
 			}
+
+			// Periodically hard-delete trashed tasks whose retention has expired
+			// (keeps their transcript; reclaims the worktree + row).
+			if tickCount%staleWorktreeInterval == 0 {
+				e.sweepTrashedTasks()
+			}
 		}
 	}
 }
@@ -1490,6 +1504,70 @@ func (e *Executor) cleanupStaleWorktrees() {
 		e.logLine(task.ID, "system",
 			fmt.Sprintf("Worktree auto-archived after %s (use 'unarchive' to restore)", age.Round(time.Hour)))
 	}
+}
+
+// sweepTrashedTasks hard-deletes soft-deleted tasks whose retention window has
+// expired: it removes the worktree and the DB row. It deliberately does NOT remove
+// the Claude transcript — those .jsonl files are tiny and are the single most
+// valuable thing to recover after an accidental delete, so they always survive.
+// Running tasks and non-worktree projects are handled defensively.
+func (e *Executor) sweepTrashedTasks() {
+	retention := e.getTrashRetention()
+	if retention <= 0 {
+		return // Disabled: trash is kept forever.
+	}
+
+	tasks, err := e.db.GetSweepableTrashedTasks(retention)
+	if err != nil {
+		e.logger.Debug("Failed to list sweepable trashed tasks", "error", err)
+		return
+	}
+
+	for _, t := range tasks {
+		// Never sweep a task that is somehow still running.
+		e.mu.RLock()
+		running := e.runningTasks[t.ID]
+		e.mu.RUnlock()
+		if running {
+			continue
+		}
+
+		age := time.Since(t.DeletedAt).Round(time.Hour)
+		e.logger.Info("Sweeping expired trashed task",
+			"task", t.ID, "project", t.Project, "trashedAge", age)
+
+		// Remove the worktree if the project uses them and it still exists. Fetch
+		// the full task so CleanupWorktree has branch/base info; if it's gone,
+		// proceed straight to the row delete.
+		if t.WorktreePath != "" && e.config.ProjectUsesWorktrees(t.Project) {
+			if _, statErr := os.Stat(t.WorktreePath); statErr == nil {
+				if full, err := e.db.GetTask(t.ID); err == nil && full != nil {
+					if err := e.CleanupWorktree(full); err != nil {
+						e.logger.Warn("Failed to remove worktree while sweeping trash",
+							"task", t.ID, "error", err)
+					}
+				}
+			}
+		}
+
+		if err := e.db.DeleteTask(t.ID); err != nil {
+			e.logger.Warn("Failed to hard-delete trashed task", "task", t.ID, "error", err)
+		}
+	}
+}
+
+// getTrashRetention returns the configured retention before trashed tasks are
+// hard-deleted. Returns 0 to disable the sweep (keep trash forever).
+func (e *Executor) getTrashRetention() time.Duration {
+	if val, err := e.db.GetSetting(config.SettingTrashRetention); err == nil && val != "" {
+		if val == "0" || val == "disabled" {
+			return 0
+		}
+		if duration, err := time.ParseDuration(val); err == nil {
+			return duration
+		}
+	}
+	return DefaultTrashRetention
 }
 
 // getWorktreeCleanupMaxAge returns the configured max age before stale worktrees are cleaned up.

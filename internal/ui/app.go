@@ -4465,14 +4465,14 @@ func (m *AppModel) unarchiveTask(id int64) tea.Cmd {
 	}
 }
 
+// deleteTask trashes a task (soft delete): it stops the running agent so the task
+// stops consuming a session, but leaves the worktree and Claude transcript on disk
+// so the task is fully recoverable ('task restore' / the daemon sweep hard-deletes
+// it only after the retention window). This is the deliberate replacement for the
+// old one-shot destructive delete that made incidents like the lost Creator Commerce
+// session unrecoverable.
 func (m *AppModel) deleteTask(id int64) tea.Cmd {
 	return func() tea.Msg {
-		// Get task to check for worktree
-		task, err := m.db.GetTask(id)
-		if err != nil {
-			return taskDeletedMsg{err: err}
-		}
-
 		// Kill Claude process to free memory
 		m.executor.KillClaudeProcess(id)
 
@@ -4480,23 +4480,8 @@ func (m *AppModel) deleteTask(id int64) tea.Cmd {
 		windowTarget := executor.TmuxSessionName(id)
 		osExec.Command("tmux", "kill-window", "-t", windowTarget).Run()
 
-		// Clean up worktree and Claude sessions if they exist
-		if task != nil && task.WorktreePath != "" {
-			projectConfigDir := ""
-			if task.Project != "" {
-				if project, err := m.db.GetProjectByName(task.Project); err == nil && project != nil {
-					projectConfigDir = project.ClaudeConfigDir
-				}
-			}
-			// Clean up Claude session files first (before worktree is removed)
-			executor.CleanupClaudeSessions(task.WorktreePath, projectConfigDir)
-
-			// Clean up worktree
-			m.executor.CleanupWorktree(task)
-		}
-
-		// Delete from database
-		err = m.db.DeleteTask(id)
+		// Trash the task — worktree + transcript are preserved for recovery.
+		err := m.db.SoftDeleteTask(id)
 		return taskDeletedMsg{err: err}
 	}
 }
