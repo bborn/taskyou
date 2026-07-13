@@ -287,7 +287,9 @@ func (s *Server) handleDeleteTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := s.db.DeleteTask(id); err != nil {
+	// Soft-delete: trash the task (recoverable) rather than destroying it. The
+	// daemon sweep hard-deletes it after the retention window.
+	if err := s.db.SoftDeleteTask(id); err != nil {
 		jsonErr(w, "failed to delete task", http.StatusInternalServerError)
 		return
 	}

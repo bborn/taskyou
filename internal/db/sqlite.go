@@ -332,6 +332,12 @@ func (db *DB) migrate() error {
 		// never be the completion signal. What matters is that the step left nothing
 		// uncommitted that wasn't already dirty before it ran.
 		`ALTER TABLE tasks ADD COLUMN base_dirty TEXT DEFAULT ''`,
+		// Soft-delete timestamp. NULL = live task. Non-NULL = trashed (hidden from
+		// the board, still fully recoverable via 'task restore') until the daemon
+		// trash sweep hard-deletes it after the configured retention. Deleting a task
+		// no longer destroys its worktree or Claude transcript up front — that only
+		// happens when the sweep fires, and even then the transcript is preserved.
+		`ALTER TABLE tasks ADD COLUMN deleted_at DATETIME`,
 	}
 
 	for _, m := range alterMigrations {

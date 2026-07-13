@@ -524,10 +524,12 @@ Examples:
 	}
 	rootCmd.AddCommand(claudesCmd)
 
-	// Delete subcommand - delete a task, kill its agent session, and remove worktree
+	// Delete subcommand - trashes a task (soft delete) by default, keeping its
+	// worktree + Claude session recoverable until the daemon sweep hard-deletes it.
+	// --hard removes the worktree and row immediately (transcript is still kept).
 	deleteCmd := &cobra.Command{
 		Use:               "delete <task-id>",
-		Short:             "Delete a task, kill its agent session, and remove its worktree",
+		Short:             "Trash a task (recoverable with 'task restore'); --hard removes it now",
 		Args:              cobra.ExactArgs(1),
 		ValidArgsFunction: completeTaskIDs,
 		Run: func(cmd *cobra.Command, args []string) {
@@ -551,10 +553,16 @@ Examples:
 				os.Exit(1)
 			}
 
+			hard, _ := cmd.Flags().GetBool("hard")
+
 			// Confirm unless --force flag is set
 			force, _ := cmd.Flags().GetBool("force")
 			if !force {
-				fmt.Printf("Delete task #%d: %s? [y/N] ", taskID, task.Title)
+				verb := "Trash"
+				if hard {
+					verb = "PERMANENTLY delete"
+				}
+				fmt.Printf("%s task #%d: %s? [y/N] ", verb, taskID, task.Title)
 				reader := bufio.NewReader(os.Stdin)
 				response, _ := reader.ReadString('\n')
 				response = strings.TrimSpace(strings.ToLower(response))
@@ -564,15 +572,82 @@ Examples:
 				}
 			}
 
-			if err := deleteTask(taskID); err != nil {
+			if hard {
+				if err := hardDeleteTask(taskID); err != nil {
+					fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+					os.Exit(1)
+				}
+				fmt.Println(successStyle.Render(fmt.Sprintf("Permanently deleted task #%d", taskID)))
+				return
+			}
+
+			if err := softDeleteTask(taskID); err != nil {
 				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
 				os.Exit(1)
 			}
-			fmt.Println(successStyle.Render(fmt.Sprintf("Deleted task #%d", taskID)))
+			fmt.Println(successStyle.Render(fmt.Sprintf("Trashed task #%d — restore with 'task restore %d'", taskID, taskID)))
 		},
 	}
 	deleteCmd.Flags().BoolP("force", "f", false, "Skip confirmation prompt")
+	deleteCmd.Flags().Bool("hard", false, "Permanently delete now (remove worktree + row) instead of trashing")
 	rootCmd.AddCommand(deleteCmd)
+
+	// Restore subcommand - bring a trashed task back to the board.
+	restoreCmd := &cobra.Command{
+		Use:   "restore <task-id>",
+		Short: "Restore a trashed (soft-deleted) task",
+		Args:  cobra.ExactArgs(1),
+		Run: func(cmd *cobra.Command, args []string) {
+			var taskID int64
+			if _, err := fmt.Sscanf(args[0], "%d", &taskID); err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Invalid task ID: "+args[0]))
+				os.Exit(1)
+			}
+			dbPath := db.DefaultPath()
+			database, err := openTaskDB(dbPath)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+			defer database.Close()
+			if err := database.RestoreTask(taskID); err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+			fmt.Println(successStyle.Render(fmt.Sprintf("Restored task #%d", taskID)))
+		},
+	}
+	rootCmd.AddCommand(restoreCmd)
+
+	// Trash subcommand - list soft-deleted tasks awaiting the sweep.
+	trashCmd := &cobra.Command{
+		Use:   "trash",
+		Short: "List trashed (soft-deleted) tasks still recoverable with 'task restore'",
+		Args:  cobra.NoArgs,
+		Run: func(cmd *cobra.Command, args []string) {
+			dbPath := db.DefaultPath()
+			database, err := openTaskDB(dbPath)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+			defer database.Close()
+			trashed, err := database.ListTrashedTasks()
+			if err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+			if len(trashed) == 0 {
+				fmt.Println(dimStyle.Render("Trash is empty"))
+				return
+			}
+			for _, t := range trashed {
+				age := time.Since(t.DeletedAt).Round(time.Hour)
+				fmt.Printf("#%-5d %s  %s\n", t.ID, t.Title, dimStyle.Render(fmt.Sprintf("(trashed %s ago)", age)))
+			}
+		},
+	}
+	rootCmd.AddCommand(trashCmd)
 
 	// Create subcommand - create a new task from command line
 	createCmd := &cobra.Command{
@@ -6050,8 +6125,42 @@ func moveTask(database *db.DB, oldTask *db.Task, targetProject string) (int64, e
 }
 
 // deleteTask deletes a task, its agent session, and its worktree.
-func deleteTask(taskID int64) error {
-	// Open database
+// softDeleteTask trashes a task: it stops any running agent so the task no longer
+// consumes a session, but deliberately LEAVES the worktree and Claude transcript on
+// disk so the whole thing is recoverable with 'task restore'. The daemon trash
+// sweep hard-deletes it after the retention window (see Executor.sweepTrashedTasks).
+func softDeleteTask(taskID int64) error {
+	dbPath := db.DefaultPath()
+	database, err := openTaskDB(dbPath)
+	if err != nil {
+		return fmt.Errorf("open database: %w", err)
+	}
+	defer database.Close()
+
+	task, err := database.GetTask(taskID)
+	if err != nil {
+		return fmt.Errorf("get task: %w", err)
+	}
+	if task == nil {
+		return fmt.Errorf("task #%d not found", taskID)
+	}
+
+	// Stop the running agent so a trashed task isn't left executing, but keep the
+	// worktree + transcript intact. See killSessionAcrossDaemons note in hardDeleteTask.
+	killSessionAcrossDaemons(int(taskID))
+
+	if err := database.SoftDeleteTask(taskID); err != nil {
+		return fmt.Errorf("trash task: %w", err)
+	}
+	return nil
+}
+
+// hardDeleteTask permanently removes a task: it kills the agent, removes the
+// worktree, and deletes the row. It is invoked by 'delete --hard' and by the daemon
+// trash sweep once retention expires. It never removes the Claude transcript — those
+// .jsonl files are tiny and the single most valuable thing to recover, so they are
+// preserved even here (this is the deliberate change from the old destructive delete).
+func hardDeleteTask(taskID int64) error {
 	dbPath := db.DefaultPath()
 	database, err := openTaskDB(dbPath)
 	if err != nil {
@@ -6075,20 +6184,10 @@ func deleteTask(taskID int64) error {
 	// the window and leak the agent. See sessions_test.go for repro.
 	killSessionAcrossDaemons(int(taskID))
 
-	// Clean up worktree and agent sessions if they exist
+	// Clean up the worktree if it exists. Note: unlike the pre-soft-delete
+	// behaviour we do NOT call executor.CleanupClaudeSessions — the transcript is
+	// intentionally preserved so a conversation is never destroyed by a delete.
 	if task.WorktreePath != "" {
-		projectConfigDir := ""
-		if task.Project != "" {
-			if project, err := database.GetProjectByName(task.Project); err == nil && project != nil {
-				projectConfigDir = project.ClaudeConfigDir
-			}
-		}
-		// Clean up Claude session files first (before worktree is removed)
-		if err := executor.CleanupClaudeSessions(task.WorktreePath, projectConfigDir); err != nil {
-			fmt.Fprintln(os.Stderr, dimStyle.Render(fmt.Sprintf("Warning: could not remove Claude sessions: %v", err)))
-		}
-
-		// Clean up worktree
 		cfg := config.New(database)
 		exec := executor.New(database, cfg)
 		if err := exec.CleanupWorktree(task); err != nil {

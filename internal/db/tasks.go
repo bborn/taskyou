@@ -437,6 +437,7 @@ type ListTasksOptions struct {
 	Limit          int
 	Offset         int
 	IncludeClosed  bool // Include closed tasks even when Status is empty
+	IncludeTrashed bool // Include soft-deleted (trashed) tasks; by default they are hidden
 	OrderByRecency bool // Sort purely by recency, ignoring pinned-first ordering
 }
 
@@ -492,6 +493,13 @@ func (db *DB) ListTasks(opts ListTasksOptions) ([]*Task, error) {
 	// Exclude done and archived by default unless specifically querying for them or includeClosed is set
 	if opts.Status == "" && !opts.IncludeClosed {
 		query += " AND status NOT IN ('done', 'archived')"
+	}
+
+	// Soft-deleted (trashed) tasks are hidden everywhere by default — the board,
+	// CLI list, port allocation, review reconcile, etc. They only resurface via an
+	// explicit IncludeTrashed query ('task trash') or 'task restore'.
+	if !opts.IncludeTrashed {
+		query += " AND deleted_at IS NULL"
 	}
 
 	// Sort done/blocked tasks by completed_at (most recently closed first) and
@@ -649,7 +657,7 @@ func (db *DB) SearchTasks(query string, limit int) ([]*Task, error) {
 // CountTasksByStatus returns the count of tasks with a given status.
 func (db *DB) CountTasksByStatus(status string) (int, error) {
 	var count int
-	err := db.QueryRow("SELECT COUNT(*) FROM tasks WHERE status = ?", status).Scan(&count)
+	err := db.QueryRow("SELECT COUNT(*) FROM tasks WHERE status = ? AND deleted_at IS NULL", status).Scan(&count)
 	if err != nil {
 		return 0, fmt.Errorf("count tasks: %w", err)
 	}
@@ -1040,11 +1048,103 @@ func (db *DB) DeleteTask(id int64) error {
 	return nil
 }
 
+// SoftDeleteTask marks a task as trashed (deleted_at = now) instead of removing
+// it. The row, worktree and Claude transcript all stay intact and recoverable via
+// RestoreTask until the daemon trash sweep hard-deletes it after the retention
+// window (see Executor.sweepTrashedTasks). Trashed tasks are hidden from the board
+// and every default query. No-op if the task is already trashed.
+func (db *DB) SoftDeleteTask(id int64) error {
+	task, _ := db.GetTask(id)
+	title := ""
+	if task != nil {
+		title = task.Title
+	}
+
+	_, err := db.Exec("UPDATE tasks SET deleted_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND deleted_at IS NULL", id)
+	if err != nil {
+		return fmt.Errorf("soft-delete task: %w", err)
+	}
+
+	// Reuse the delete event so listeners (board, web SSE) drop the task from view;
+	// a restore re-emits a normal task-updated event.
+	db.emitTaskDeleted(id, title)
+
+	return nil
+}
+
+// RestoreTask clears the trashed flag, returning a soft-deleted task to the board
+// with its original status, worktree and session intact.
+func (db *DB) RestoreTask(id int64) error {
+	_, err := db.Exec("UPDATE tasks SET deleted_at = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?", id)
+	if err != nil {
+		return fmt.Errorf("restore task: %w", err)
+	}
+	if task, err := db.GetTask(id); err == nil && task != nil {
+		db.emitTaskUpdated(task, map[string]interface{}{"restored": true})
+	}
+	return nil
+}
+
+// TrashedTask is a lightweight view of a soft-deleted task for the trash listing
+// and the sweep — it deliberately avoids the full Task scan so new columns there
+// never need threading through here.
+type TrashedTask struct {
+	ID           int64
+	Title        string
+	Project      string
+	WorktreePath string
+	DeletedAt    time.Time
+}
+
+// ListTrashedTasks returns soft-deleted tasks, most recently trashed first.
+func (db *DB) ListTrashedTasks() ([]*TrashedTask, error) {
+	rows, err := db.Query(`
+		SELECT id, title, COALESCE(project, ''), COALESCE(worktree_path, ''), deleted_at
+		FROM tasks WHERE deleted_at IS NOT NULL
+		ORDER BY deleted_at DESC, id DESC
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("list trashed tasks: %w", err)
+	}
+	defer rows.Close()
+	return scanTrashedTasks(rows)
+}
+
+// GetSweepableTrashedTasks returns trashed tasks whose retention has expired —
+// i.e. deleted_at is older than maxAge — so the daemon can hard-delete them.
+func (db *DB) GetSweepableTrashedTasks(maxAge time.Duration) ([]*TrashedTask, error) {
+	cutoff := time.Now().Add(-maxAge).UTC()
+	rows, err := db.Query(`
+		SELECT id, title, COALESCE(project, ''), COALESCE(worktree_path, ''), deleted_at
+		FROM tasks WHERE deleted_at IS NOT NULL AND deleted_at < ?
+		ORDER BY deleted_at ASC, id ASC
+	`, cutoff)
+	if err != nil {
+		return nil, fmt.Errorf("list sweepable trashed tasks: %w", err)
+	}
+	defer rows.Close()
+	return scanTrashedTasks(rows)
+}
+
+func scanTrashedTasks(rows *sql.Rows) ([]*TrashedTask, error) {
+	var out []*TrashedTask
+	for rows.Next() {
+		var t TrashedTask
+		var deletedAt sql.NullTime
+		if err := rows.Scan(&t.ID, &t.Title, &t.Project, &t.WorktreePath, &deletedAt); err != nil {
+			return nil, fmt.Errorf("scan trashed task: %w", err)
+		}
+		t.DeletedAt = deletedAt.Time
+		out = append(out, &t)
+	}
+	return out, rows.Err()
+}
+
 // GetActiveTaskPorts returns all ports currently in use by active (non-done, non-archived) tasks.
 func (db *DB) GetActiveTaskPorts() (map[int]bool, error) {
 	rows, err := db.Query(`
 		SELECT port FROM tasks
-		WHERE port > 0 AND status NOT IN (?, ?)
+		WHERE port > 0 AND status NOT IN (?, ?) AND deleted_at IS NULL
 	`, StatusDone, StatusArchived)
 	if err != nil {
 		return nil, fmt.Errorf("query active ports: %w", err)
@@ -1124,7 +1224,7 @@ func (db *DB) GetNextQueuedTask() (*Task, error) {
 		       COALESCE(archive_ref, ''), COALESCE(archive_commit, ''),
 		       COALESCE(archive_worktree_path, ''), COALESCE(archive_branch_name, '')
 		FROM tasks
-		WHERE status = ?
+		WHERE status = ? AND deleted_at IS NULL
 		ORDER BY created_at ASC
 		LIMIT 1
 	`, StatusQueued).Scan(
@@ -1162,7 +1262,7 @@ func (db *DB) GetQueuedTasks() ([]*Task, error) {
 		       COALESCE(archive_ref, ''), COALESCE(archive_commit, ''),
 		       COALESCE(archive_worktree_path, ''), COALESCE(archive_branch_name, '')
 		FROM tasks
-		WHERE status = ?
+		WHERE status = ? AND deleted_at IS NULL
 		ORDER BY created_at ASC
 	`, StatusQueued)
 	if err != nil {
@@ -2219,6 +2319,7 @@ func (db *DB) GetStaleWorktreeTasks(maxAge time.Duration) ([]*Task, error) {
 		FROM tasks
 		WHERE worktree_path != ''
 		  AND status IN ('done', 'archived')
+		  AND deleted_at IS NULL
 		  AND completed_at IS NOT NULL
 		  AND completed_at < ?
 		ORDER BY completed_at ASC
