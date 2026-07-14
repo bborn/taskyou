@@ -5323,13 +5323,10 @@ func listSessions() {
 			}
 			titleStr = title
 		}
-		executorStr := s.executor
-		if executorStr == "" {
-			executorStr = "claude" // default
-		}
-		fmt.Printf("  %s  %-8s  %s  %s  %s\n",
+		executorStr := executorLabel(s.executor, s.model, s.effort)
+		fmt.Printf("  %s  %s  %s  %s  %s\n",
 			successStyle.Render(fmt.Sprintf("task-%d", s.taskID)),
-			dimStyle.Render(executorStr),
+			dimStyle.Render(fmt.Sprintf("%-18s", executorStr)),
 			dimStyle.Render(fmt.Sprintf("%-6s", memStr)),
 			dimStyle.Render(fmt.Sprintf("%-36s", titleStr)),
 			dimStyle.Render(s.info))
@@ -5340,8 +5337,34 @@ type agentSession struct {
 	taskID    int
 	taskTitle string
 	executor  string // Executor name (claude, codex, gemini, etc.)
+	model     string // Per-task model override ("" = executor default)
+	effort    string // Per-task reasoning effort override ("" = executor default)
 	memoryMB  int    // Memory usage in MB
 	info      string
+}
+
+// executorLabel renders the executor plus any per-task model/effort overrides,
+// e.g. "claude opus/high", "claude sonnet", "claude ·/high", or plain "claude".
+func executorLabel(executor, model, effort string) string {
+	if executor == "" {
+		executor = "claude" // default
+	}
+	// A model equal to the executor slug (e.g. model="claude") is a bogus
+	// leftover, not a real alias — treat it as no override.
+	if model == executor {
+		model = ""
+	}
+	if model == "" && effort == "" {
+		return executor
+	}
+	m := model
+	if m == "" {
+		m = "·" // model is default, but effort is overridden
+	}
+	if effort == "" {
+		return executor + " " + m
+	}
+	return executor + " " + m + "/" + effort
 }
 
 // getSessions returns all running task-* windows across all task-daemon-* sessions.
@@ -5427,13 +5450,17 @@ func getSessions() []agentSession {
 				}
 			}
 
-			// Get task title and executor from database
+			// Get task title and executor details from database
 			var taskTitle string
 			var taskExecutor string
+			var taskModel string
+			var taskEffort string
 			if database != nil {
 				if task, err := database.GetTask(int64(taskID)); err == nil && task != nil {
 					taskTitle = task.Title
 					taskExecutor = task.Executor
+					taskModel = task.Model
+					taskEffort = task.EffortLevel
 				}
 			}
 
@@ -5444,6 +5471,8 @@ func getSessions() []agentSession {
 				taskID:    taskID,
 				taskTitle: taskTitle,
 				executor:  taskExecutor,
+				model:     taskModel,
+				effort:    taskEffort,
 				memoryMB:  memoryMB,
 				info:      info,
 			})
