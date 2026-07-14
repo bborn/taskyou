@@ -2364,9 +2364,37 @@ func (m *AppModel) applyFilter() {
 		queryLower = m.resolveProjectAliases(queryLower)
 	}
 
-	// Score all tasks using fuzzy matching
-	var scored []scoredTask
+	// Build the candidate set. Start with the in-memory tasks, then — when the
+	// user typed a keyword — also pull matches straight from the database. The
+	// board only loads active tasks plus the most recent maxDoneTasksInKanban
+	// done tasks, so without this a keyword search silently misses the thousands
+	// of older done tasks (e.g. searching "demo functionality" finds nothing
+	// even though "Go to Task" locates the done task by id). This mirrors the
+	// command palette, which already supplements its list via SearchTasks. See #4705.
+	candidates := make(map[int64]*db.Task, len(m.tasks))
+	ordered := make([]*db.Task, 0, len(m.tasks))
 	for _, task := range m.tasks {
+		if _, ok := candidates[task.ID]; !ok {
+			candidates[task.ID] = task
+			ordered = append(ordered, task)
+		}
+	}
+	if m.db != nil {
+		if _, keyword, _ := parseFilterProjects(queryLower); keyword != "" {
+			if results, err := m.db.SearchTasks(keyword, boardFilterDBSearchLimit); err == nil {
+				for _, task := range results {
+					if _, ok := candidates[task.ID]; !ok {
+						candidates[task.ID] = task
+						ordered = append(ordered, task)
+					}
+				}
+			}
+		}
+	}
+
+	// Score all candidates using fuzzy matching
+	var scored []scoredTask
+	for _, task := range ordered {
 		score := scoreTaskForFilter(task, queryLower)
 		if score >= 0 {
 			scored = append(scored, scoredTask{task: task, score: score})
@@ -4133,6 +4161,12 @@ type versionCheckMsg struct {
 }
 
 const maxDoneTasksInKanban = 20
+
+// boardFilterDBSearchLimit caps how many extra tasks a board keyword filter
+// pulls from the database to surface older/done tasks not loaded on the board.
+// Matches the command palette's SearchTasks limit for consistency.
+const boardFilterDBSearchLimit = 100
+
 const summaryRefreshAfter = 5 * time.Minute
 
 // refreshLatestActivity loads the most recent log line for each active task and
