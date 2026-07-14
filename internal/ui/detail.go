@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -1486,6 +1487,64 @@ func (m *DetailModel) releaseExecutorLock() {
 	m.executorBusyElsewhere = false
 }
 
+// tmuxPaneOpMu serializes pane join/break operations across the whole process.
+//
+// join/break run a multi-step tmux sequence that mutates and reads global tmux
+// server state (the "current window", the set of panes in task-ui, the active
+// pane). Two of these interleaving — e.g. rapid task switching fires one task's
+// join concurrently with another's — corrupts that shared state: one join's
+// "kill leftover panes in task-ui" step can kill a pane a concurrent join just
+// moved in, and (before the source-id fix below) a `display-message` read of the
+// active pane could return the *other* task's pane. That is exactly how tasks
+// 4324 and 4822 ended up sharing pane %812. Serializing makes each sequence
+// atomic with respect to the others.
+var tmuxPaneOpMu sync.Mutex
+
+// paneCwdInWorktree reports whether the given tmux pane's current working
+// directory lives inside the task's worktree. It is the ownership check that
+// prevents a task from adopting another task's executor pane when a stored
+// pane ID is stale or has been reused by tmux for a different pane.
+//
+// Returns true when ownership can't be determined (no worktree recorded, or the
+// query fails) so we never reject a legitimate pane on a transient error — the
+// check only ever *rejects* on a definite worktree mismatch.
+func (m *DetailModel) paneCwdInWorktree(ctx context.Context, paneID string) bool {
+	if m.task == nil || m.task.WorktreePath == "" || paneID == "" {
+		return true
+	}
+	out, err := osExec.CommandContext(ctx, "tmux", "display-message",
+		"-t", paneID, "-p", "#{pane_current_path}").Output()
+	if err != nil {
+		return true // can't tell — don't reject
+	}
+	cwd := strings.TrimSpace(string(out))
+	if cwd == "" {
+		return true
+	}
+	return pathInsideDir(m.task.WorktreePath, cwd)
+}
+
+// pathInsideDir reports whether path is dir itself or nested within it, after
+// resolving symlinks on both sides so /tmp vs /private/tmp (and similar macOS
+// symlinked prefixes) don't produce false mismatches. Returns true when the
+// comparison can't be made, so callers only ever act on a definite mismatch.
+func pathInsideDir(dir, path string) bool {
+	if dir == "" || path == "" {
+		return true
+	}
+	if resolved, err := filepath.EvalSymlinks(dir); err == nil {
+		dir = resolved
+	}
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		path = resolved
+	}
+	rel, err := filepath.Rel(dir, path)
+	if err != nil {
+		return true // unrelated volumes / can't compare — don't reject
+	}
+	return rel == "." || !strings.HasPrefix(rel, "..")
+}
+
 // joinTmuxPanes joins the task's Claude pane and creates a workdir shell pane.
 // Layout:
 //   - Top (configurable, default 20%): Task details (TUI)
@@ -1501,6 +1560,11 @@ func (m *DetailModel) joinTmuxPanes() {
 		return
 	}
 	log.Debug("joinTmuxPanes: windowTarget=%q", windowTarget)
+
+	// Serialize with any concurrent join/break so the shared tmux state this
+	// sequence depends on can't be mutated mid-flight by another task's view.
+	tmuxPaneOpMu.Lock()
+	defer tmuxPaneOpMu.Unlock()
 
 	// Granular executor lock: refuse to borrow this task's pane if another ty
 	// instance already owns it, rather than fighting over it and interrupt-looping
@@ -1612,6 +1676,27 @@ func (m *DetailModel) joinTmuxPanes() {
 		log.Debug("joinTmuxPanes: falling back to first daemon pane ID %q for Claude", claudeSourcePaneID)
 	}
 
+	// Ownership guard: never adopt a pane whose working directory isn't inside
+	// this task's worktree. tmux recycles pane IDs after a pane dies, and a
+	// window named task-<id> can end up holding another task's pane, so a pane
+	// simply "existing in the window" is not proof it is ours. Adopting a foreign
+	// pane is what cross-wired 4324 onto 4822's session. On mismatch, drop the
+	// stale IDs so we stop persisting and re-displaying the wrong session, then
+	// bail on the normal cooldown; a retry rebuilds the executor cleanly.
+	if !m.paneCwdInWorktree(ctx, claudeSourcePaneID) {
+		log.Error("joinTmuxPanes: candidate Claude pane %q is not in task %d's worktree %q; refusing to adopt (self-healing stale IDs)",
+			claudeSourcePaneID, m.task.ID, m.task.WorktreePath)
+		if m.database != nil {
+			m.database.ClearTaskTmuxIDs(m.task.ID)
+		}
+		m.task.ClaudePaneID = ""
+		m.task.ShellPaneID = ""
+		m.task.TmuxWindowID = ""
+		m.cachedWindowTarget = ""
+		m.joinPaneFailedUntil = time.Now().Add(5 * time.Second)
+		return
+	}
+
 	// Step 1: Join the Claude pane below the TUI pane (vertical split)
 	log.Info("joinTmuxPanes: joining Claude pane %q", claudeSourcePaneID)
 	joinCmd := osExec.CommandContext(ctx, "tmux", "join-pane",
@@ -1625,14 +1710,12 @@ func (m *DetailModel) joinTmuxPanes() {
 	}
 	log.Debug("joinTmuxPanes: join-pane succeeded")
 
-	// Get the Claude pane ID (it's now the active pane after join)
-	claudePaneCmd := osExec.CommandContext(ctx, "tmux", "display-message", "-p", "#{pane_id}")
-	claudePaneOut, err := claudePaneCmd.Output()
-	if err != nil {
-		log.Error("joinTmuxPanes: failed to get Claude pane ID: %v", err)
-		return
-	}
-	m.claudePaneID = strings.TrimSpace(string(claudePaneOut))
+	// A pane keeps its ID when moved between windows/sessions, so the pane we
+	// just joined is still claudeSourcePaneID. Use it directly rather than
+	// re-reading the globally-active pane via `display-message` — that read is
+	// not concurrency-safe (a simultaneous join for another task can flip the
+	// active pane) and was how task 4324 latched onto task 4822's pane %812.
+	m.claudePaneID = claudeSourcePaneID
 	log.Info("joinTmuxPanes: claudePaneID=%q", m.claudePaneID)
 
 	// Set Claude pane title with memory info
@@ -1693,10 +1776,9 @@ func (m *DetailModel) joinTmuxPanes() {
 				log.Error("joinTmuxPanes: join shell pane failed: %v", err)
 				m.workdirPaneID = ""
 			} else {
-				// Get the joined shell pane ID
-				workdirPaneCmd := osExec.CommandContext(ctx, "tmux", "display-message", "-p", "#{pane_id}")
-				workdirPaneOut, _ := workdirPaneCmd.Output()
-				m.workdirPaneID = strings.TrimSpace(string(workdirPaneOut))
+				// The joined shell pane keeps its source ID; use it directly
+				// instead of the non-concurrency-safe active-pane read.
+				m.workdirPaneID = shellSourcePaneID
 				log.Debug("joinTmuxPanes: joined shell pane, workdirPaneID=%q", m.workdirPaneID)
 				osExec.CommandContext(ctx, "tmux", "select-pane", "-t", m.workdirPaneID, "-T", "Shell").Run()
 				// Set environment variables in the shell pane (they should already be set from daemon, but ensure they're fresh)
@@ -2093,6 +2175,12 @@ func (m *DetailModel) breakTmuxPanes(saveHeight bool, resizeTUI bool) {
 	log.Info("breakTmuxPanes: starting for task %d, saveHeight=%v", m.task.ID, saveHeight)
 	log.Debug("breakTmuxPanes: claudePaneID=%q, workdirPaneID=%q, tuiPaneID=%q, daemonSessionID=%q",
 		m.claudePaneID, m.workdirPaneID, m.tuiPaneID, m.daemonSessionID)
+
+	// Serialize with any concurrent join/break (see tmuxPaneOpMu). A break moving
+	// a pane back to the daemon must not interleave with a join that reads/kills
+	// panes in task-ui, or they clobber each other's view of the shared tmux state.
+	tmuxPaneOpMu.Lock()
+	defer tmuxPaneOpMu.Unlock()
 
 	// Use timeout for all tmux operations to prevent blocking UI
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)

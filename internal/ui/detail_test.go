@@ -580,3 +580,37 @@ func TestContainsSourceFiles(t *testing.T) {
 		})
 	}
 }
+
+// TestPathInsideDir covers the ownership check used to reject adopting another
+// task's executor pane. The bug it guards against: task A's stored pane ID
+// resolving to task B's live pane (cwd in B's worktree), which cross-wired
+// tasks 4324 and 4822 onto the same session.
+func TestPathInsideDir(t *testing.T) {
+	dir := t.TempDir() // real path, symlink-resolved by the helper
+	sub := filepath.Join(dir, "src", "pkg")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sibling := t.TempDir()
+
+	cases := []struct {
+		name string
+		dir  string
+		path string
+		want bool
+	}{
+		{"same dir", dir, dir, true},
+		{"nested path", dir, sub, true},
+		{"sibling worktree (foreign pane)", dir, sibling, false},
+		{"parent of worktree", sub, dir, false},
+		{"empty dir tolerated", "", sibling, true},
+		{"empty path tolerated", dir, "", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := pathInsideDir(tc.dir, tc.path); got != tc.want {
+				t.Errorf("pathInsideDir(%q, %q) = %v, want %v", tc.dir, tc.path, got, tc.want)
+			}
+		})
+	}
+}
