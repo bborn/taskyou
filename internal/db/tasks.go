@@ -700,6 +700,17 @@ func (db *DB) UpdateTaskStatus(id int64, status string) error {
 		return fmt.Errorf("update task status: %w", err)
 	}
 
+	// A finished task's executor pane is torn down; its tmux pane ID then becomes
+	// free for tmux to recycle onto another task. Drop the stale pane pointers so
+	// they can never resolve to a different task's live pane. Best-effort — the
+	// join-time ownership guard is the real safety net.
+	switch status {
+	case StatusDone, StatusArchived:
+		if clearErr := db.ClearTaskPaneIDs(id); clearErr != nil {
+			log.Printf("ClearTaskPaneIDs(%d): %v", id, clearErr)
+		}
+	}
+
 	// Emit status change event if status actually changed
 	if oldStatus != "" && oldStatus != status {
 		updatedTask, err := db.GetTask(id)
@@ -1024,6 +1035,23 @@ func (db *DB) ClearTaskTmuxIDs(taskID int64) error {
 	`, taskID)
 	if err != nil {
 		return fmt.Errorf("clear task tmux ids: %w", err)
+	}
+	return nil
+}
+
+// ClearTaskPaneIDs clears only the tmux pane IDs for a task, leaving the window
+// ID intact. Called when a task reaches a terminal state: its executor pane is
+// torn down, which frees the pane ID for tmux to recycle onto a *different*
+// task's pane. Leaving the stale ID in the DB is what let a finished task's
+// pane pointer resolve to another live task's pane. Window IDs are not recycled
+// as aggressively and are already staleness-checked on lookup, so we keep them.
+func (db *DB) ClearTaskPaneIDs(taskID int64) error {
+	_, err := db.Exec(`
+		UPDATE tasks SET claude_pane_id = '', shell_pane_id = '', updated_at = CURRENT_TIMESTAMP
+		WHERE id = ?
+	`, taskID)
+	if err != nil {
+		return fmt.Errorf("clear task pane ids: %w", err)
 	}
 	return nil
 }

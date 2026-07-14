@@ -2894,3 +2894,72 @@ func TestListTasksTagFilterEscapesLikeWildcards(t *testing.T) {
 		t.Errorf("tag filter %q must match only the literal tag, got %d tasks", "gm:a_b", len(undTasks))
 	}
 }
+
+// TestUpdateTaskStatus_ClearsPaneIDsOnTerminal verifies that finishing a task
+// drops its tmux pane IDs (which tmux is now free to recycle onto another task)
+// while leaving the window ID intact. Guards the pane-ID reuse vector behind the
+// 4324/4822 cross-wiring incident.
+func TestUpdateTaskStatus_ClearsPaneIDsOnTerminal(t *testing.T) {
+	tmpDir := t.TempDir()
+	db, err := Open(filepath.Join(tmpDir, "test.db"))
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer db.Close()
+
+	if err := db.CreateProject(&Project{Name: "test", Path: tmpDir}); err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+
+	assertCleared := func(t *testing.T, terminal string) {
+		task := &Task{Title: "t", Status: StatusProcessing, Type: TypeCode, Project: "test"}
+		if err := db.CreateTask(task); err != nil {
+			t.Fatalf("create task: %v", err)
+		}
+		if err := db.UpdateTaskWindowID(task.ID, "@42"); err != nil {
+			t.Fatalf("set window id: %v", err)
+		}
+		if err := db.UpdateTaskPaneIDs(task.ID, "%812", "%813"); err != nil {
+			t.Fatalf("set pane ids: %v", err)
+		}
+
+		if err := db.UpdateTaskStatus(task.ID, terminal); err != nil {
+			t.Fatalf("update status: %v", err)
+		}
+
+		got, err := db.GetTask(task.ID)
+		if err != nil {
+			t.Fatalf("get task: %v", err)
+		}
+		if got.ClaudePaneID != "" || got.ShellPaneID != "" {
+			t.Errorf("%s: pane IDs not cleared: claude=%q shell=%q", terminal, got.ClaudePaneID, got.ShellPaneID)
+		}
+		if got.TmuxWindowID != "@42" {
+			t.Errorf("%s: window ID should be preserved, got %q", terminal, got.TmuxWindowID)
+		}
+	}
+
+	t.Run("done", func(t *testing.T) { assertCleared(t, StatusDone) })
+	t.Run("archived", func(t *testing.T) { assertCleared(t, StatusArchived) })
+
+	// A non-terminal transition must NOT clear pane IDs (resume relies on them).
+	t.Run("blocked keeps pane ids", func(t *testing.T) {
+		task := &Task{Title: "t2", Status: StatusProcessing, Type: TypeCode, Project: "test"}
+		if err := db.CreateTask(task); err != nil {
+			t.Fatalf("create task: %v", err)
+		}
+		if err := db.UpdateTaskPaneIDs(task.ID, "%900", "%901"); err != nil {
+			t.Fatalf("set pane ids: %v", err)
+		}
+		if err := db.UpdateTaskStatus(task.ID, StatusBlocked); err != nil {
+			t.Fatalf("update status: %v", err)
+		}
+		got, err := db.GetTask(task.ID)
+		if err != nil {
+			t.Fatalf("get task: %v", err)
+		}
+		if got.ClaudePaneID != "%900" || got.ShellPaneID != "%901" {
+			t.Errorf("blocked should keep pane IDs, got claude=%q shell=%q", got.ClaudePaneID, got.ShellPaneID)
+		}
+	})
+}
