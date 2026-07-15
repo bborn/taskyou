@@ -30,16 +30,38 @@ async function getActiveTab() {
   return tab || null;
 }
 
+function currentCount() {
+  return Number($('annotation-count').textContent) || 0;
+}
+
+// The executor accepts either pinned annotations or a plain typed message (or
+// both), so Send is live whenever there's a task and at least one of them —
+// letting you fire off a quick "what happened here?" with no annotations.
+function refreshSendEnabled() {
+  const hasMsg = $('instruction').value.trim().length > 0;
+  $('send-btn').disabled = !currentTask || (currentCount() === 0 && !hasMsg);
+}
+
 function updateCount(count) {
   const chip = $('annotation-count');
   chip.textContent = count;
   chip.classList.toggle('zero', count === 0);
-  $('send-btn').disabled = count === 0 || !currentTask;
+  refreshSendEnabled();
 }
+
+let scopedOnce = false;
 
 async function refresh() {
   const tab = await getActiveTab();
   activeTabId = tab?.id ?? null;
+
+  // Once, on first open, pin the panel to the tab it opened on so it doesn't
+  // follow onto unrelated tabs. (Harmless if it re-fires: it re-scopes to an
+  // already-in-scope tab.)
+  if (!scopedOnce && activeTabId != null) {
+    scopedOnce = true;
+    send({ type: 'panelOpened', tabId: activeTabId });
+  }
   const state = await send({ type: 'getState', tabId: activeTabId });
 
   $('status-dot').classList.toggle('ok', !!state.connected);
@@ -89,6 +111,7 @@ function renderTask() {
     match.classList.add('hidden');
     picker.classList.remove('hidden');
   }
+  refreshSendEnabled();
 }
 
 async function loadCandidates() {
@@ -169,11 +192,12 @@ async function createTask(e) {
 
 // --- Embedded terminal ---------------------------------------------------------
 //
-// A real xterm.js terminal wired to the task's tmux pane over the daemon's
-// capture-pane WebSocket (GET /api/tasks/{id}/terminal[?pane=shell]). This is
-// the browser-fallback transport the desktop/web GUI also uses: keystrokes flow
-// out via tmux send-keys, the visible pane streams back on a 500ms tick. The
-// same rendering the TUI shows — Claude Code included — but inside Chrome.
+// A real xterm.js terminal mirroring the task's executor (Claude) tmux pane over
+// the daemon's capture-pane WebSocket (GET /api/tasks/{id}/terminal). This is the
+// browser-fallback transport the desktop/web GUI also uses: the visible pane
+// streams back on a 500ms tick. Read-only — input goes through the message box
+// above (tmux send-keys via /api/tasks/{id}/input) — the same rendering the TUI
+// shows, Claude Code included, but inside Chrome.
 
 const XTERM_THEME = {
   background: '#0b1220',
@@ -197,7 +221,6 @@ const Unicode11AddonCtor =
 let term = null; // xterm.js Terminal
 let fit = null; // FitAddon
 let ws = null; // active terminal WebSocket
-let termPane = 'agent'; // 'agent' | 'shell'
 let termBoundTaskId = null; // task the terminal is currently attached/attaching to
 let termWaitTimer = null; // retry timer while waiting for a session/pane
 let termResizeObs = null;
@@ -267,8 +290,10 @@ function buildTerm() {
     allowProposedApi: true,
     fontFamily: 'ui-monospace, "SF Mono", SFMono-Regular, Menlo, Monaco, "Cascadia Code", monospace',
     fontSize: 11.5,
-    cursorBlink: true,
-    macOptionIsMeta: true,
+    // Read-only mirror: input goes through the "Send to executor" box above, so
+    // the terminal is a live view only — no keystroke forwarding.
+    disableStdin: true,
+    cursorBlink: false,
     scrollback: 2000,
   });
   try {
@@ -291,8 +316,8 @@ function buildTerm() {
   return term;
 }
 
-// Attach the terminal to termBoundTaskId's current pane (agent/shell),
-// resolving session state first and offering to start one when missing.
+// Attach the terminal to termBoundTaskId's executor pane, resolving session
+// state first and offering to start one when missing.
 async function attachTerminal() {
   const taskId = termBoundTaskId;
   if (taskId == null) return;
@@ -311,12 +336,23 @@ async function attachTerminal() {
   const info = infoRes.info;
 
   if (!info.window_exists) {
-    // Pane borrowed by an open TUI detail view — it returns to a daemon window
-    // when released; poll until then.
-    if (info.pane_borrowed_by) {
-      showTermOverlay(`Executor is attached to the TUI (${info.pane_borrowed_by}). It appears here once released.`);
-      setTermState('● running elsewhere', 'busy');
-      termWaitTimer = setTimeout(() => { if (taskId === termBoundTaskId) attachTerminal(); }, 2500);
+    // Pane borrowed by an open TUI detail view. capture-pane works on the pane
+    // wherever it lives, and the mirror is read-only, so just show it live —
+    // in "borrowed" mode we don't resize the pane (that would reflow the TUI's
+    // view). Poll so we can re-attach with proper sizing once it's released.
+    if (info.pane_borrowed_by && info.claude_pane_id) {
+      openTerminalSocket(taskId, { borrowed: true });
+      const pollRelease = async () => {
+        if (taskId !== termBoundTaskId) return;
+        const r = await send({ type: 'terminalInfo', taskId });
+        if (taskId !== termBoundTaskId) return;
+        if (r.info && r.info.window_exists) {
+          attachTerminal(); // released → re-attach normally (with resize)
+        } else {
+          termWaitTimer = setTimeout(pollRelease, 3000);
+        }
+      };
+      termWaitTimer = setTimeout(pollRelease, 3000);
       return;
     }
     // A queued/processing task is still spinning up — wait for its executor.
@@ -327,34 +363,13 @@ async function attachTerminal() {
       return;
     }
     // Idle task with no session: offer to start one.
-    showTermOverlay(
-      termPane === 'shell'
-        ? 'No session running — the shell opens alongside the executor.'
-        : 'No executor session running for this task.',
-      'Start session',
-      startTermSession,
-    );
+    showTermOverlay('No executor session running for this task.', 'Start session', startTermSession);
     return;
   }
 
-  // Window is live. The Shell tab needs its workdir pane materialized first.
-  let resolved = info;
-  if (termPane === 'shell') {
-    const shellRes = await send({ type: 'ensureShellPane', taskId });
-    if (taskId !== termBoundTaskId) return;
-    if (shellRes.error) {
-      showTermOverlay(shellRes.error, 'Retry', attachTerminal);
-      return;
-    }
-    resolved = shellRes.info;
-  }
-  const paneId = termPane === 'shell' ? resolved.shell_pane_id : resolved.claude_pane_id;
-  if (!paneId) {
-    showTermOverlay(
-      termPane === 'shell' ? 'No shell pane available.' : 'No executor pane available.',
-      'Retry',
-      attachTerminal,
-    );
+  // Window is live.
+  if (!info.claude_pane_id) {
+    showTermOverlay('No executor pane available.', 'Retry', attachTerminal);
     return;
   }
   openTerminalSocket(taskId);
@@ -372,7 +387,8 @@ async function startTermSession() {
   attachTerminal();
 }
 
-async function openTerminalSocket(taskId) {
+async function openTerminalSocket(taskId, opts = {}) {
+  const borrowed = !!opts.borrowed;
   const { serverUrl, connected } = await send({ type: 'getServerUrl' });
   if (taskId !== termBoundTaskId) return;
   if (!connected || !serverUrl) {
@@ -389,8 +405,7 @@ async function openTerminalSocket(taskId) {
   if (!t) return;
 
   const wsBase = serverUrl.replace(/^http/, 'ws');
-  const paneQuery = termPane === 'shell' ? '?pane=shell' : '';
-  const socket = new WebSocket(`${wsBase}/api/tasks/${taskId}/terminal${paneQuery}`);
+  const socket = new WebSocket(`${wsBase}/api/tasks/${taskId}/terminal`);
   ws = socket;
 
   socket.onmessage = (event) => {
@@ -398,7 +413,7 @@ async function openTerminalSocket(taskId) {
     if (data[0] === '{') {
       try {
         const m = JSON.parse(data);
-        if (m.type === 'size') return; // we drive sizing via resize messages
+        if (m.type === 'size') return; // sizing handled via fit/resize below
       } catch {
         // fall through: screen content that happens to start with "{"
       }
@@ -416,16 +431,19 @@ async function openTerminalSocket(taskId) {
   socket.onerror = () => { /* onclose fires next; message shown there */ };
   socket.onopen = () => {
     showTermOverlay(null);
-    setTermState('● live', 'live');
-    try { socket.send(JSON.stringify({ type: 'resize', cols: t.cols, rows: t.rows })); } catch {}
-    t.focus();
+    setTermState(borrowed ? '● mirroring — open in TUI' : '● live', 'live');
+    // Borrowed panes are driven by the TUI; don't resize them from here.
+    if (!borrowed) {
+      try { socket.send(JSON.stringify({ type: 'resize', cols: t.cols, rows: t.rows })); } catch {}
+    }
   };
-  t.onData((d) => {
-    if (socket.readyState === WebSocket.OPEN) socket.send(d);
-  });
-  t.onResize(({ cols, rows }) => {
-    if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: 'resize', cols, rows }));
-  });
+  // Read-only: no keystroke forwarding. When we own the pane, sizing syncs so
+  // the mirror wraps to the panel width; borrowed panes are left untouched.
+  if (!borrowed) {
+    t.onResize(({ cols, rows }) => {
+      if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: 'resize', cols, rows }));
+    });
+  }
 }
 
 // Bind the terminal to the panel's current task. Only (re)attaches when the
@@ -462,7 +480,6 @@ function maybeAutoReload() {
 }
 
 function trackExecutorActivity(raw) {
-  if (termPane !== 'agent') return; // shell output has no busy/idle markers
   const busy = /esc to interrupt/.test(raw);
   const idleAtPrompt = /shift\+tab to cycle/.test(raw) && !busy;
   if (busy) {
@@ -477,22 +494,6 @@ function trackExecutorActivity(raw) {
     }
     if (!executorBusy) setTermState('● live', 'live');
   }
-}
-
-// Agent / Shell pane tabs.
-for (const btn of document.querySelectorAll('.term-tab')) {
-  btn.addEventListener('click', () => {
-    const pane = btn.dataset.pane;
-    if (pane === termPane) return;
-    termPane = pane;
-    document.querySelectorAll('.term-tab').forEach((b) => b.classList.toggle('active', b === btn));
-    executorBusy = false;
-    if (termBoundTaskId != null) {
-      attachTerminal();
-    } else {
-      showTermOverlay('Match a tab or pick a task to open its terminal.');
-    }
-  });
 }
 
 // --- Wiring --------------------------------------------------------------------
@@ -540,13 +541,42 @@ $('annotate-btn').addEventListener('click', async () => {
   $('send-result').textContent = r.error || 'Select mode on — click an element on the page.';
 });
 
+$('instruction').addEventListener('input', refreshSendEnabled);
+
+// Shift+Enter submits (plain Enter still inserts a newline for multi-line notes).
+$('instruction').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && e.shiftKey) {
+    e.preventDefault();
+    if (!$('send-btn').disabled) $('send-btn').click();
+  }
+});
+
 $('send-btn').addEventListener('click', async () => {
+  const instruction = $('instruction').value.trim();
+
+  // No annotations pinned → send the typed text straight to the executor as a
+  // message. Doesn't touch the page, so it works even where annotation can't
+  // (a crashed tab, chrome:// pages, cross-origin frames).
+  if (currentCount() === 0) {
+    if (!instruction || !currentTask) return;
+    $('send-btn').disabled = true;
+    const r = await send({ type: 'taskInput', taskId: currentTask.id, message: instruction });
+    if (r.ok) {
+      $('send-result').textContent = `Message sent to task #${currentTask.id} ✓`;
+      $('instruction').value = '';
+    } else {
+      $('send-result').textContent = r.error || 'Send failed';
+    }
+    refreshSendEnabled();
+    return;
+  }
+
   if (activeTabId == null) return;
   $('send-btn').disabled = true;
   const r = await send({
     type: 'sendAnnotations',
     tabId: activeTabId,
-    instruction: $('instruction').value.trim(),
+    instruction,
   });
   if (r.ok) {
     $('send-result').textContent = `Sent to task #${r.taskId}${r.nudged ? ' — executor nudged ✓' : ' (bundle saved; no live executor)'}`;

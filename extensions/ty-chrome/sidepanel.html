@@ -73,17 +73,14 @@
       <span id="annotation-count" class="chip zero">0</span>
     </div>
     <button id="annotate-btn" class="secondary">✏️ Annotate page <kbd>⌥A</kbd></button>
-    <textarea id="instruction" rows="2" placeholder="Overall instruction (optional)"></textarea>
-    <button id="send-btn" class="primary" disabled>Send to executor <kbd>⌥S</kbd></button>
+    <textarea id="instruction" rows="2" placeholder="Message the executor, or add context for annotations"></textarea>
+    <button id="send-btn" class="primary" disabled>Send to executor <kbd>⇧↩</kbd></button>
     <p id="send-result" class="muted"></p>
   </section>
 
   <section class="card executor">
     <div class="sec-head term-head">
-      <div class="term-tabs" role="tablist">
-        <button id="tab-agent" class="term-tab active" data-pane="agent" role="tab">Agent</button>
-        <button id="tab-shell" class="term-tab" data-pane="shell" role="tab">Shell</button>
-      </div>
+      <h2>Executor</h2>
       <span id="executor-state" class="muted term-state"></span>
       <span id="bridge-status" class="muted bridge-status hidden"></span>
       <label class="auto-reload" title="Reload the page when the executor finishes working">
@@ -97,7 +94,7 @@
         <button id="term-action" class="secondary hidden"></button>
       </div>
     </div>
-    <p class="term-hint muted">A live terminal into this task — run Claude Code, shell commands, anything.</p>
+    <p class="term-hint muted">A live, read-only view of the executor — send input with the box above.</p>
   </section>
 
   <footer>
