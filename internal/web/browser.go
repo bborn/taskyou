@@ -263,16 +263,6 @@ func (s *Server) ensureBrowserHowto(task *db.Task) {
 	}
 	dir := filepath.Join(root, ".taskyou", "browser")
 	path := filepath.Join(dir, "HOWTO.md")
-	if _, err := os.Stat(path); err == nil {
-		return
-	}
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return
-	}
-	gitignore := filepath.Join(dir, ".gitignore")
-	if _, err := os.Stat(gitignore); os.IsNotExist(err) {
-		os.WriteFile(gitignore, []byte("*\n"), 0o644)
-	}
 
 	base := s.baseURL
 	endpoint := fmt.Sprintf("%s/api/tasks/%d/browser", base, task.ID)
@@ -292,14 +282,22 @@ a 503; ask the user to open it.
 
 ## See the page (do this first and after every change)
 
-- **Screenshot**: '{"action":"screenshot"}' → result.path is a PNG in this worktree; Read it.
-- **DOM snapshot**: '{"action":"snapshot"}' → result.path (full HTML), result.title, result.url
+- **Elements** (preferred — compact + cheap): '{"action":"elements"}' → result.dom is a
+  numbered list of the page's interactive elements, e.g. '[12] <button> "Buy now"'.
+  result.count is how many. Prefer this over screenshots and raw HTML: it's typically
+  ~20-50x fewer tokens (result.chars vs result.htmlChars shows the ratio), and you click
+  by the [index] so you never guess a selector.
+- **Screenshot** (visual check when layout/rendering matters): '{"action":"screenshot"}' →
+  result.path is a PNG in this worktree; Read it. Don't screenshot every step.
+- **DOM snapshot** (raw HTML, last resort — large): '{"action":"snapshot"}' → result.path,
+  result.title, result.url
 - **Console logs + JS errors**: '{"action":"console"}' → result.logs
 
 ## Act on the page
 
-- **Click**: '{"action":"click","params":{"selector":"#buy-btn"}}'
-- **Type**: '{"action":"type","params":{"selector":"input[name=q]","text":"hello"}}'
+- **Click**: '{"action":"click","params":{"index":12}}' (index from an 'elements' snapshot;
+  a CSS '"selector":"#buy-btn"' still works too)
+- **Type**: '{"action":"type","params":{"index":5,"text":"hello"}}' (or a '"selector"')
 - **Navigate** (any http/https site): '{"action":"navigate","params":{"url":"https://example.com/"}}'
 - **Reload**: '{"action":"reload"}'
 
@@ -316,5 +314,18 @@ background tab brings it to the foreground first. Screenshot after each
 interaction to verify what actually happened.
 `, task.ID, endpoint, task.Port)
 
+	// Only (re)write when missing or stale, so the doc stays current as the
+	// bridge gains actions (e.g. the new 'elements' snapshot) without clobbering
+	// on every poll.
+	if existing, err := os.ReadFile(path); err == nil && string(existing) == howto {
+		return
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return
+	}
+	gitignore := filepath.Join(dir, ".gitignore")
+	if _, err := os.Stat(gitignore); os.IsNotExist(err) {
+		os.WriteFile(gitignore, []byte("*\n"), 0o644)
+	}
 	os.WriteFile(path, []byte(howto), 0o644)
 }

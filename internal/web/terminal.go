@@ -68,14 +68,22 @@ func (s *Server) handleTerminal(w http.ResponseWriter, r *http.Request) {
 	conn.WriteMessage(websocket.TextMessage, sizeMsg)
 
 	// Send initial full capture
-	output, err := capturePane(paneID)
+	output, err := paneFrame(paneID)
 	if err != nil {
 		conn.WriteMessage(websocket.TextMessage, []byte("Error: could not read executor pane\r\n"))
 		return
 	}
-	conn.WriteMessage(websocket.TextMessage, []byte(output))
+	conn.WriteMessage(websocket.TextMessage, []byte("\033[2J\033[H"+output))
 
 	done := make(chan struct{})
+	// Buffered so the reader never blocks; coalesces bursts into one redraw.
+	redraw := make(chan struct{}, 1)
+	triggerRedraw := func() {
+		select {
+		case redraw <- struct{}{}:
+		default:
+		}
+	}
 
 	// Read input from WebSocket → send to tmux
 	go func() {
@@ -101,6 +109,11 @@ func (s *Server) handleTerminal(w http.ResponseWriter, r *http.Request) {
 						exec.Command("tmux", "resize-pane", "-t", paneID,
 							"-x", strconv.Itoa(resizeMsg.Cols),
 							"-y", strconv.Itoa(resizeMsg.Rows)).Run()
+						// Push a fresh frame at the new size instead of waiting up
+						// to a full tick — otherwise the client renders the pane's
+						// old (wider) width and the content wraps/gaps until the
+						// next poll catches up.
+						triggerRedraw()
 					}
 					continue
 				}
@@ -117,22 +130,65 @@ func (s *Server) handleTerminal(w http.ResponseWriter, r *http.Request) {
 	defer ticker.Stop()
 
 	lastOutput := output
+	sendFrame := func() {
+		current, err := paneFrame(paneID)
+		if err != nil {
+			return
+		}
+		if current != lastOutput {
+			// Clear screen and rewrite
+			conn.WriteMessage(websocket.TextMessage, []byte("\033[2J\033[H"+current))
+			lastOutput = current
+		}
+	}
 	for {
 		select {
 		case <-done:
 			return
+		case <-redraw:
+			// Give the pane a beat to reflow after the SIGWINCH before capturing.
+			time.Sleep(80 * time.Millisecond)
+			sendFrame()
 		case <-ticker.C:
-			current, err := capturePane(paneID)
-			if err != nil {
-				continue
-			}
-			if current != lastOutput {
-				// Clear screen and rewrite
-				conn.WriteMessage(websocket.TextMessage, []byte("\033[2J\033[H"+current))
-				lastOutput = current
-			}
+			sendFrame()
 		}
 	}
+}
+
+// paneFrame captures the pane content and appends an absolute cursor move to
+// tmux's real caret position, so xterm's own (blinking) cursor lands where the
+// TUI's caret actually is — e.g. inside Claude Code's "> " input box — instead
+// of trailing the last line of captured text (the mode-line). capture-pane
+// discards cursor position, so without this every client parks the cursor on
+// the wrong row.
+func paneFrame(paneID string) (string, error) {
+	content, err := capturePane(paneID)
+	if err != nil {
+		return "", err
+	}
+	if x, y, ok := paneCursor(paneID); ok {
+		// tmux reports 0-based col/row; CUP (\033[row;colH) is 1-based.
+		content += fmt.Sprintf("\033[%d;%dH", y+1, x+1)
+	}
+	return content, nil
+}
+
+// paneCursor returns the tmux pane's current cursor position (0-based col, row).
+func paneCursor(paneID string) (x, y int, ok bool) {
+	out, err := exec.Command("tmux", "display-message", "-t", paneID, "-p", "#{cursor_x} #{cursor_y}").Output()
+	if err != nil {
+		return 0, 0, false
+	}
+	parts := strings.Fields(strings.TrimSpace(string(out)))
+	if len(parts) != 2 {
+		return 0, 0, false
+	}
+	cx, err1 := strconv.Atoi(parts[0])
+	cy, err2 := strconv.Atoi(parts[1])
+	if err1 != nil || err2 != nil {
+		return 0, 0, false
+	}
+	return cx, cy, true
 }
 
 // capturePane runs tmux capture-pane and returns the visible pane content

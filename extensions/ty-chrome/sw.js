@@ -7,7 +7,38 @@ const DEFAULT_SERVER = 'http://127.0.0.1:8080';
 // tabId -> { task, manual } (manual = user picked from dropdown, wins over port match)
 const matches = new Map();
 
+// Chrome opens the panel on toolbar click (never disable this — it's what keeps
+// the panel openable). We only *scope* it: after it opens on a tab we disable it
+// on that window's other tabs, so it doesn't trail you onto unrelated tabs.
+const PANEL_PATH = 'sidepanel.html';
 chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(() => {});
+
+const panelScope = new Map(); // windowId -> { groupId, tabId }
+
+function tabInScope(tab, scope) {
+  if (!scope || !tab) return false;
+  if (scope.groupId != null && scope.groupId !== -1 /* TAB_GROUP_NONE */) {
+    return tab.groupId === scope.groupId;
+  }
+  return tab.id === scope.tabId;
+}
+
+// Enable the panel only on in-scope tabs of this window, disable it on the rest.
+async function reconcileWindowPanel(windowId) {
+  const scope = panelScope.get(windowId);
+  if (!scope) return;
+  let tabs = [];
+  try {
+    tabs = await chrome.tabs.query({ windowId });
+  } catch {
+    return;
+  }
+  for (const t of tabs) {
+    chrome.sidePanel
+      .setOptions({ tabId: t.id, path: PANEL_PATH, enabled: tabInScope(t, scope) })
+      .catch(() => {});
+  }
+}
 
 async function getServerUrl() {
   const { serverUrl } = await chrome.storage.local.get('serverUrl');
@@ -240,6 +271,30 @@ chrome.tabs.onUpdated.addListener((tabId, info, tab) => {
 
 chrome.tabs.onRemoved.addListener((tabId) => matches.delete(tabId));
 
+// Switching tabs: show the panel only when the new tab is in scope.
+chrome.tabs.onActivated.addListener(async ({ tabId, windowId }) => {
+  const scope = panelScope.get(windowId);
+  if (!scope) return;
+  try {
+    const tab = await chrome.tabs.get(tabId);
+    chrome.sidePanel
+      .setOptions({ tabId, path: PANEL_PATH, enabled: tabInScope(tab, scope) })
+      .catch(() => {});
+  } catch {}
+});
+
+// If the scoped tab joins a group (e.g. the executor drops it into "ty #<id>"),
+// widen scope to that whole group so the panel follows it.
+chrome.tabs.onUpdated.addListener((tabId, info, tab) => {
+  if (info.groupId === undefined || !tab) return;
+  const scope = panelScope.get(tab.windowId);
+  if (!scope) return;
+  if (tabId === scope.tabId && info.groupId !== TAB_GROUP_NONE) scope.groupId = info.groupId;
+  reconcileWindowPanel(tab.windowId);
+});
+
+chrome.windows.onRemoved.addListener((windowId) => panelScope.delete(windowId));
+
 async function resolveTask(tabId) {
   const existing = matches.get(tabId);
   if (existing) return existing.task;
@@ -308,6 +363,18 @@ const handlers = {
   async setServerUrl({ url }) {
     await chrome.storage.local.set({ serverUrl: url.replace(/\/+$/, '') });
     matches.clear();
+    return { ok: true };
+  },
+
+  // The panel reports the tab it opened on; scope it to that tab (or its group)
+  // so it stops trailing onto unrelated tabs in the window.
+  async panelOpened({ tabId }) {
+    if (tabId == null) return { ok: false };
+    try {
+      const tab = await chrome.tabs.get(tabId);
+      panelScope.set(tab.windowId, { groupId: tab.groupId ?? TAB_GROUP_NONE, tabId: tab.id });
+      reconcileWindowPanel(tab.windowId);
+    } catch {}
     return { ok: true };
   },
 
@@ -503,6 +570,7 @@ const handlers = {
           return { ok: true, closed: target };
         }
 
+        case 'elements':
         case 'snapshot':
         case 'click':
         case 'type':
