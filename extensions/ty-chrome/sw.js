@@ -19,6 +19,7 @@ async function getServerUrl() {
 const CANDIDATE_SERVERS = [
   'http://127.0.0.1:8080',
   'http://localhost:8080',
+  'http://127.0.0.1:8484', // TaskYou desktop app default port
   'http://127.0.0.1:8765', // isolated demo instance
 ];
 let probePromise = null;
@@ -326,6 +327,36 @@ const handlers = {
     matches.set(tabId, { task, manual: true });
     setBadge(tabId, task);
     return { ok: true, task };
+  },
+
+  // Projects the daemon knows about, for the "New task" repo picker.
+  async listProjects() {
+    try {
+      return { projects: await api('/api/projects') };
+    } catch (e) {
+      return { error: e.message, projects: [] };
+    }
+  },
+
+  // Create a task via the daemon, then bind it to this tab so the panel and
+  // terminal attach immediately. A just-created task is queued (or backlog)
+  // with no port yet, so the port-based matcher can't find it — pin it manually,
+  // exactly like pickTask does for an existing task.
+  async createTask({ tabId, title, body, project, execute }) {
+    try {
+      const task = await api('/api/tasks', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title, body, project, execute: !!execute }),
+      });
+      if (tabId != null) {
+        matches.set(tabId, { task, manual: true });
+        setBadge(tabId, task);
+      }
+      return { task };
+    } catch (e) {
+      return { error: e.message };
+    }
   },
 
   async startAnnotate({ tabId }) {
