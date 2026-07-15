@@ -218,7 +218,8 @@ function buildTerm() {
     termResizeObs = new ResizeObserver(() => {
       try { fit && fit.fit(); } catch {}
     });
-    termResizeObs.observe($('term-wrap'));
+    // Observe the sized wrapper (the host is inset:0 within it).
+    termResizeObs.observe(host.parentElement || host);
   }
   return term;
 }
@@ -311,7 +312,13 @@ async function openTerminalSocket(taskId) {
     showTermOverlay('Waiting for ty serve…', 'Retry', attachTerminal);
     return;
   }
-  const t = buildTerm();
+  let t;
+  try {
+    t = buildTerm();
+  } catch (e) {
+    showTermOverlay('Terminal failed to initialize: ' + e.message, 'Retry', attachTerminal);
+    return;
+  }
   if (!t) return;
 
   const wsBase = serverUrl.replace(/^http/, 'ws');
