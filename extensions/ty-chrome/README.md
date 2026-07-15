@@ -1,14 +1,19 @@
-# ty-chrome — TaskYou Live Annotate
+# ty-chrome — TaskYou in Chrome
 
-Point, click, and annotate any page served by a taskyou task's dev server, and
-deliver that feedback — selectors, DOM excerpts, your comments, and a
-screenshot with numbered markers — straight into the task's executor pane.
-The side panel "teleports" the executor into Chrome: watch its output live and
-send follow-ups without leaving the page.
+Two things, both tied to a specific taskyou task, both in the Chrome side panel:
 
-| Annotate the live page | Side panel: task + live executor |
+1. **A full terminal.** A real xterm.js terminal wired straight into the task's
+   tmux session — the same Claude Code (Agent) pane the TUI/desktop app show,
+   plus a workdir **Shell** pane. Type into it, run commands, drive Claude Code,
+   do anything you want, without leaving the browser.
+2. **Live annotate.** Point, click, and annotate any page served by the task's
+   dev server, and deliver that feedback — selectors, DOM excerpts, your
+   comments, and a screenshot with numbered markers — straight into the task's
+   executor.
+
+| Annotate the live page | Side panel: task + embedded terminal |
 |---|---|
-| ![Annotating a page: numbered marker, draggable region box, comment popover](screenshots/annotate.png) | ![Side panel with matched task, annotation count, and live executor console](screenshots/sidepanel.png) |
+| ![Annotating a page: numbered marker, draggable region box, comment popover](screenshots/annotate.png) | ![Side panel with the matched task and an interactive Agent/Shell terminal](screenshots/sidepanel.png) |
 
 ## How it works
 
@@ -66,6 +71,33 @@ Requires a `ty` build that has the `/api/tasks/{id}/annotations` and
 - **⌥S** — send annotations to the executor (global)
 - On page while annotating: **S** select · **B** box · **N** note ·
   **Esc** exit mode · **⌘↩** send (also saves an open comment)
+
+## Terminal (Agent + Shell)
+
+The side panel embeds a real terminal into the matched task — not a read-only
+log, an interactive xterm.js terminal you can type into:
+
+- **Agent** — the task's Claude Code executor pane. Send follow-ups, answer
+  prompts, `/`-commands, interrupt with `Esc`, scroll history — exactly what you
+  see in the TUI.
+- **Shell** — the task's workdir shell (created on demand beside the executor),
+  for `git`, `rails c`, `ls`, running tests, whatever you need.
+
+If the task has no live session yet, the terminal offers a **Start session**
+button; queued/processing tasks attach automatically once their executor comes
+up. When the executor finishes a turn, **auto-reload** still reloads the app tab
+(unless you have unsent annotations pinned).
+
+Transport is the daemon's capture-pane WebSocket
+(`GET /api/tasks/{id}/terminal[?pane=shell]`) — the same browser-fallback bridge
+the desktop and web GUIs use: keystrokes flow out via tmux `send-keys`, the
+visible pane streams back. It works by pane ID, so it keeps rendering even while
+the TUI has the pane borrowed. `ty serve` must be localhost (the panel opens a
+`ws://` socket, which browsers only allow to loopback from a secure context).
+
+xterm.js is vendored under `vendor/` (`xterm.js`, `addon-fit.js`,
+`addon-unicode11.js`, `xterm.css`) — same pinned versions the desktop app uses;
+no build step.
 
 ## Browser bridge (executor → your browser window)
 
@@ -134,8 +166,10 @@ The gear icon in the side panel overrides it manually
 - `GET  /api/status` — connection check
 - `GET  /api/tasks?status=processing|blocked` — tab→task matching, task picker
 - `POST /api/tasks/{id}/annotations` — annotation bundle delivery
-- `GET  /api/tasks/{id}/output` — live executor console (polled)
-- `POST /api/tasks/{id}/input` — follow-up messages to the executor
+- `GET  /api/tasks/{id}/terminal-info` — resolve the task's tmux window/panes
+- `POST /api/tasks/{id}/session` — start an executor session on demand
+- `POST /api/tasks/{id}/shell` — materialize the workdir Shell pane
+- `GET  /api/tasks/{id}/terminal[?pane=shell]` — interactive terminal WebSocket
 
 ## Security
 

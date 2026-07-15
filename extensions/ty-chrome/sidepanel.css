@@ -158,9 +158,24 @@ button.primary:disabled kbd { background: rgba(15, 23, 42, 0.06); color: #94a3b8
 #send-result { margin: 8px 0 0; font-size: 12px; }
 #send-result:empty { display: none; }
 
-/* --- Executor ------------------------------------------------------------ */
+/* --- Terminal ------------------------------------------------------------ */
 
-.executor { flex: 1; display: flex; flex-direction: column; min-height: 160px; }
+.executor { flex: 1; display: flex; flex-direction: column; min-height: 220px; }
+
+.term-head { margin-bottom: 8px; }
+
+.term-tabs { display: flex; gap: 2px; }
+.term-tab {
+  border: 0; background: transparent; cursor: pointer;
+  font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em;
+  color: var(--muted); padding: 3px 8px; border-radius: 6px;
+}
+.term-tab:hover { color: var(--text); }
+.term-tab.active { color: #fff; background: var(--accent); }
+
+.term-state { font-size: 10px; white-space: nowrap; }
+.term-state.live { color: #22c55e; }
+.term-state.busy { color: var(--accent); }
 
 .auto-reload {
   margin-left: auto; display: flex; align-items: center; gap: 4px;
@@ -168,26 +183,24 @@ button.primary:disabled kbd { background: rgba(15, 23, 42, 0.06); color: #94a3b8
 }
 .auto-reload input { accent-color: var(--accent); margin: 0; }
 
-#console {
-  flex: 1; margin: 0; padding: 10px; overflow: auto;
-  background: #0b1220; color: #cbd5e1; border-radius: 8px;
-  font-family: ui-monospace, Menlo, monospace; font-size: 11px; line-height: 1.5;
+.term-wrap {
+  position: relative; flex: 1; min-height: 0;
+  background: #0b1220; border-radius: 8px; overflow: hidden;
 }
-.x-line { white-space: pre-wrap; word-break: break-word; min-height: 1em; }
-.x-add { color: #4ade80; }
-.x-del { color: #f87171; }
-.x-action { color: #f8fafc; font-weight: 600; }
-.x-meta { color: #64748b; }
-.x-status { color: #fdba74; font-style: italic; }
+.term-host { position: absolute; inset: 0; padding: 6px 4px 6px 8px; }
+.term-host .xterm { height: 100%; }
+.term-host .xterm-viewport { overflow-y: auto; }
 
-.input-row { display: flex; gap: 6px; margin-top: 8px; }
-.input-row input {
-  flex: 1; padding: 6px 8px; border: 1px solid var(--border); border-radius: 6px;
+.term-overlay {
+  position: absolute; inset: 0; display: flex;
+  flex-direction: column; align-items: center; justify-content: center; gap: 10px;
+  background: #0b1220; color: #94a3b8; text-align: center; padding: 16px;
 }
-.input-row button {
-  border: 0; background: var(--accent); color: #fff; border-radius: 6px;
-  width: 32px; cursor: pointer; font-size: 14px;
-}
+.term-overlay.hidden { display: none; }
+#term-msg { font-size: 12px; max-width: 90%; }
+#term-action { width: auto; padding: 6px 14px; }
+
+.term-hint { margin: 6px 0 0; font-size: 10px; }
 
 /* --- Settings + footer ---------------------------------------------------- */
 

@@ -371,6 +371,42 @@ const handlers = {
     }
   },
 
+  // --- Embedded terminal: resolve pane/window info, start a session, or make
+  // sure the workdir shell pane exists. The panel opens the WebSocket itself
+  // (ws://<serverUrl>/api/tasks/{id}/terminal); these just proxy the JSON
+  // endpoints through the SW so it stays the single owner of serverUrl. ---
+
+  async terminalInfo({ taskId }) {
+    try {
+      return { info: await api(`/api/tasks/${taskId}/terminal-info`) };
+    } catch (e) {
+      return { error: e.message, status: e.status };
+    }
+  },
+
+  async ensureSession({ taskId }) {
+    try {
+      return { info: await api(`/api/tasks/${taskId}/session`, { method: 'POST' }) };
+    } catch (e) {
+      return { error: e.message, status: e.status };
+    }
+  },
+
+  async ensureShellPane({ taskId }) {
+    try {
+      return { info: await api(`/api/tasks/${taskId}/shell`, { method: 'POST' }) };
+    } catch (e) {
+      return { error: e.message, status: e.status };
+    }
+  },
+
+  // The panel needs the resolved server URL to open the terminal WebSocket
+  // directly (WebSockets can't go through the SW message channel).
+  async getServerUrl() {
+    const { serverUrl, connected } = await ensureServer();
+    return { serverUrl, connected };
+  },
+
   // --- Browser bridge: the panel polls ty serve for executor commands and
   // executes them against the user's live tab. ---
 

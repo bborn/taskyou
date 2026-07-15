@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "TaskYou — Live Annotate",
-  "version": "0.1.0",
-  "description": "Point, click, and annotate pages served by a taskyou task; deliver context straight to the task's executor.",
+  "version": "0.2.0",
+  "description": "Annotate pages served by a taskyou task and drive a full Claude Code terminal, tied to that task, right inside Chrome.",
   "permissions": ["storage", "tabs", "tabGroups", "sidePanel", "scripting"],
   "host_permissions": ["<all_urls>"],
   "background": { "service_worker": "sw.js" },

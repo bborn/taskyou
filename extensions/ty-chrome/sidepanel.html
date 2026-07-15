@@ -2,6 +2,7 @@
 <html>
 <head>
   <meta charset="utf-8" />
+  <link rel="stylesheet" href="vendor/xterm.css" />
   <link rel="stylesheet" href="sidepanel.css" />
 </head>
 <body>
@@ -52,20 +53,25 @@
   </section>
 
   <section class="card executor">
-    <div class="sec-head">
-      <h2>Executor</h2>
-      <span id="executor-state" class="muted"></span>
+    <div class="sec-head term-head">
+      <div class="term-tabs" role="tablist">
+        <button id="tab-agent" class="term-tab active" data-pane="agent" role="tab">Agent</button>
+        <button id="tab-shell" class="term-tab" data-pane="shell" role="tab">Shell</button>
+      </div>
+      <span id="executor-state" class="muted term-state"></span>
       <span id="bridge-status" class="muted bridge-status hidden"></span>
       <label class="auto-reload" title="Reload the page when the executor finishes working">
         <input type="checkbox" id="auto-reload" checked /> auto-reload
       </label>
     </div>
-    <pre id="console"></pre>
-    <!-- Executor is read-only for now; unhide to re-enable follow-up input -->
-    <div class="input-row hidden">
-      <input id="followup" type="text" placeholder="Say something to the executor…" />
-      <button id="followup-send">↵</button>
+    <div class="term-wrap">
+      <div id="term-host" class="term-host"></div>
+      <div id="term-overlay" class="term-overlay">
+        <span id="term-msg" class="muted">Connecting…</span>
+        <button id="term-action" class="secondary hidden"></button>
+      </div>
     </div>
+    <p class="term-hint muted">A live terminal into this task — run Claude Code, shell commands, anything.</p>
   </section>
 
   <footer>
@@ -73,6 +79,9 @@
     <button id="settings-btn" title="Server settings">⚙ <span id="server-label"></span></button>
   </footer>
 
+  <script src="vendor/xterm.js"></script>
+  <script src="vendor/addon-fit.js"></script>
+  <script src="vendor/addon-unicode11.js"></script>
   <script src="sidepanel.js"></script>
 </body>
 </html>

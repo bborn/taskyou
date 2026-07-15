@@ -1,21 +1,16 @@
 // ty-chrome side panel: shows the task matched to the active tab, sends
-// annotations, and "teleports" the executor in — a live, polled view of the
-// task's Claude pane plus a follow-up input line.
+// annotations, and embeds a full interactive terminal into the task — a real
+// xterm.js terminal wired to the task's Claude (Agent) or workdir Shell tmux
+// pane over the daemon's capture-pane WebSocket. Run Claude Code, shell
+// commands, anything, without leaving Chrome.
 
 const $ = (id) => document.getElementById(id);
 
 let activeTabId = null;
 let currentTask = null;
-let pollTimer = null;
 let reconnectTimer = null;
 
 const send = (msg) => chrome.runtime.sendMessage(msg);
-
-const stripAnsi = (s) =>
-  s
-    .replace(/\x1b\[[0-9;?]*[ -\/]*[@-~]/g, '')
-    .replace(/\x1b\][^\x07]*(\x07|\x1b\\)/g, '')
-    .replace(/\x1b[=>]/g, '');
 
 // --- State refresh -----------------------------------------------------------
 
@@ -65,7 +60,7 @@ async function refresh() {
   updateCount(state.annotationCount);
 
   if (!currentTask && state.connected) loadCandidates();
-  schedulePolling();
+  syncTerminal(state.connected);
   if (state.connected && currentTask) bridgeLoop();
 
   // Self-heal: keep retrying while disconnected (auto-discovery runs in the SW)
@@ -87,12 +82,9 @@ function renderTask() {
     $('task-status').classList.toggle('blocked', currentTask.status === 'blocked');
     $('task-port').textContent = currentTask.port ? `:${currentTask.port}` : '';
     $('task-branch').textContent = currentTask.branch_name || '';
-    $('executor-state').textContent = currentTask.has_executor ? 'live' : 'no executor pane';
   } else {
     match.classList.add('hidden');
     picker.classList.remove('hidden');
-    $('executor-state').textContent = '';
-    $('console').textContent = '';
   }
 }
 
@@ -108,80 +100,290 @@ async function loadCandidates() {
   }
 }
 
-// --- Executor console polling --------------------------------------------------
+// --- Embedded terminal ---------------------------------------------------------
+//
+// A real xterm.js terminal wired to the task's tmux pane over the daemon's
+// capture-pane WebSocket (GET /api/tasks/{id}/terminal[?pane=shell]). This is
+// the browser-fallback transport the desktop/web GUI also uses: keystrokes flow
+// out via tmux send-keys, the visible pane streams back on a 500ms tick. The
+// same rendering the TUI shows — Claude Code included — but inside Chrome.
 
-// A 410 from the output endpoint usually means the executor pane is mid-move
-// between tmux windows (join-pane during a dock toggle or daemon restart), not
-// that it's actually gone. Ride out a few consecutive misses (~7.5s at the 2.5s
-// cadence) before declaring "pane gone" so a transient capture failure doesn't
-// flash, and re-fetch the task while gone so a recovered pane self-heals.
-let goneStreak = 0;
-const GONE_THRESHOLD = 3;
+const XTERM_THEME = {
+  background: '#0b1220',
+  foreground: '#cbd5e1',
+  cursor: '#cbd5e1',
+  selectionBackground: '#33467c',
+  black: '#15161e', red: '#f7768e', green: '#9ece6a', yellow: '#e0af68',
+  blue: '#7aa2f7', magenta: '#bb9af7', cyan: '#7dcfff', white: '#a9b1d6',
+  brightBlack: '#414868', brightRed: '#f7768e', brightGreen: '#9ece6a',
+  brightYellow: '#e0af68', brightBlue: '#7aa2f7', brightMagenta: '#bb9af7',
+  brightCyan: '#7dcfff', brightWhite: '#c0caf5',
+};
 
-function schedulePolling() {
-  clearInterval(pollTimer);
-  goneStreak = 0;
-  pollTimer = setInterval(poll, 2500);
-  poll();
+// The vendored addon UMD builds expose their class under a namespace object
+// (`window.FitAddon.FitAddon`, webpack library target), whereas xterm spreads
+// `Terminal` onto the global directly. Normalize both to a constructor.
+const FitAddonCtor = typeof FitAddon === 'function' ? FitAddon : FitAddon.FitAddon;
+const Unicode11AddonCtor =
+  typeof Unicode11Addon === 'function' ? Unicode11Addon : Unicode11Addon.Unicode11Addon;
+
+let term = null; // xterm.js Terminal
+let fit = null; // FitAddon
+let ws = null; // active terminal WebSocket
+let termPane = 'agent'; // 'agent' | 'shell'
+let termBoundTaskId = null; // task the terminal is currently attached/attaching to
+let termWaitTimer = null; // retry timer while waiting for a session/pane
+let termResizeObs = null;
+
+function setTermState(text, cls) {
+  const el = $('executor-state');
+  el.textContent = text || '';
+  el.classList.remove('live', 'busy');
+  if (cls) el.classList.add(cls);
 }
 
-// Re-resolve the bound task so has_executor/status reflect reality after the
-// pane moved or the daemon rebuilt the window. Only refresh fields (never switch
-// task) so a manual pick isn't clobbered.
-async function refreshTaskState() {
-  const state = await send({ type: 'getState', tabId: activeTabId });
-  if (state?.task && state.task.id === currentTask?.id) currentTask = state.task;
-}
-
-// Turn a raw tmux pane capture into a readable activity feed: drop the
-// input-box chrome, prompt, footers, and tips; colorize diffs and actions.
-function classifyLine(line) {
-  const t = line.trim();
-  if (/^\s*\d+\s*\+/.test(line) || /^\+/.test(t)) return 'x-add';
-  if (/^\s*\d+\s*-/.test(line)) return 'x-del';
-  if (/^⏺/.test(t)) return 'x-action';
-  if (/^⎿/.test(t)) return 'x-meta';
-  if (/^[✳✻✽✶✢✴✦∗*·]\s.*…/.test(t)) return 'x-status';
-  return '';
-}
-
-function renderExecutor(raw, consoleEl) {
-  const lines = stripAnsi(raw).split('\n');
-  const frag = document.createDocumentFragment();
-  let skipTip = false;
-  let blanks = 0;
-  for (const line of lines) {
-    const t = line.trim();
-    if (/^[─━]{6,}$/.test(t)) continue; // input box / separator rules
-    if (/^[╭╰│]/.test(t)) continue; // box borders
-    if (t === '❯' || /^❯\s*$/.test(t)) continue; // empty prompt
-    if (/^⏵⏵/.test(t) || /shift\+tab to cycle/.test(t)) continue; // mode footer
-    if (/Tip: /.test(t)) {
-      skipTip = true;
-      continue;
-    }
-    if (skipTip) {
-      if (t === '') skipTip = false;
-      continue;
-    }
-    if (t === '') {
-      if (++blanks > 1) continue;
-    } else {
-      blanks = 0;
-    }
-    const div = document.createElement('div');
-    div.className = 'x-line ' + classifyLine(line);
-    div.textContent = line || ' ';
-    frag.appendChild(div);
+// Show a centered message (and optional action button) over the terminal.
+// Pass msg === null to hide the overlay and reveal the live terminal.
+function showTermOverlay(msg, actionLabel, actionFn) {
+  const overlay = $('term-overlay');
+  const btn = $('term-action');
+  if (msg == null) {
+    overlay.classList.add('hidden');
+    return;
   }
-  // Trim trailing blank lines
-  while (frag.lastChild && frag.lastChild.textContent.trim() === '') frag.removeChild(frag.lastChild);
-  consoleEl.replaceChildren(frag);
+  overlay.classList.remove('hidden');
+  $('term-msg').textContent = msg;
+  if (actionLabel) {
+    btn.textContent = actionLabel;
+    btn.classList.remove('hidden');
+    btn.onclick = actionFn;
+  } else {
+    btn.classList.add('hidden');
+    btn.onclick = null;
+  }
 }
 
-// Auto-reload: when the executor transitions from working to idle, its batch
-// of edits is complete — reload the page so the user sees the result. Never
-// reload while annotations are still pinned (unsent work on the page).
+function teardownSocket() {
+  if (ws) {
+    ws.onclose = null;
+    ws.onmessage = null;
+    ws.onerror = null;
+    try { ws.close(); } catch {}
+    ws = null;
+  }
+}
+
+function detachTerminal() {
+  teardownSocket();
+  clearTimeout(termWaitTimer);
+  termWaitTimer = null;
+  if (termResizeObs) {
+    termResizeObs.disconnect();
+    termResizeObs = null;
+  }
+  if (term) {
+    term.dispose();
+    term = null;
+    fit = null;
+  }
+}
+
+function buildTerm() {
+  const host = $('term-host');
+  if (!host) return null;
+  if (term) {
+    term.dispose();
+    term = null;
+  }
+  term = new Terminal({
+    theme: XTERM_THEME,
+    allowProposedApi: true,
+    fontFamily: 'ui-monospace, "SF Mono", SFMono-Regular, Menlo, Monaco, "Cascadia Code", monospace',
+    fontSize: 11.5,
+    cursorBlink: true,
+    macOptionIsMeta: true,
+    scrollback: 2000,
+  });
+  try {
+    // Unicode 11 width tables so Claude Code's glyphs (⏺, ✶, spinners) don't
+    // overlap or leave gaps under xterm's legacy width handling.
+    term.loadAddon(new Unicode11AddonCtor());
+    term.unicode.activeVersion = '11';
+  } catch {}
+  fit = new FitAddonCtor();
+  term.loadAddon(fit);
+  term.open(host);
+  try { fit.fit(); } catch {}
+  if (!termResizeObs) {
+    termResizeObs = new ResizeObserver(() => {
+      try { fit && fit.fit(); } catch {}
+    });
+    // Observe the sized wrapper (the host is inset:0 within it).
+    termResizeObs.observe(host.parentElement || host);
+  }
+  return term;
+}
+
+// Attach the terminal to termBoundTaskId's current pane (agent/shell),
+// resolving session state first and offering to start one when missing.
+async function attachTerminal() {
+  const taskId = termBoundTaskId;
+  if (taskId == null) return;
+  teardownSocket();
+  clearTimeout(termWaitTimer);
+  termWaitTimer = null;
+  setTermState('', null);
+  showTermOverlay('Connecting…');
+
+  const infoRes = await send({ type: 'terminalInfo', taskId });
+  if (taskId !== termBoundTaskId) return; // task switched mid-await
+  if (infoRes.error) {
+    showTermOverlay(infoRes.error, 'Retry', attachTerminal);
+    return;
+  }
+  const info = infoRes.info;
+
+  if (!info.window_exists) {
+    // Pane borrowed by an open TUI detail view — it returns to a daemon window
+    // when released; poll until then.
+    if (info.pane_borrowed_by) {
+      showTermOverlay(`Executor is attached to the TUI (${info.pane_borrowed_by}). It appears here once released.`);
+      setTermState('● running elsewhere', 'busy');
+      termWaitTimer = setTimeout(() => { if (taskId === termBoundTaskId) attachTerminal(); }, 2500);
+      return;
+    }
+    // A queued/processing task is still spinning up — wait for its executor.
+    const status = currentTask?.status;
+    if (status === 'queued' || status === 'processing') {
+      showTermOverlay('Waiting for the executor to start…');
+      termWaitTimer = setTimeout(() => { if (taskId === termBoundTaskId) attachTerminal(); }, 2500);
+      return;
+    }
+    // Idle task with no session: offer to start one.
+    showTermOverlay(
+      termPane === 'shell'
+        ? 'No session running — the shell opens alongside the executor.'
+        : 'No executor session running for this task.',
+      'Start session',
+      startTermSession,
+    );
+    return;
+  }
+
+  // Window is live. The Shell tab needs its workdir pane materialized first.
+  let resolved = info;
+  if (termPane === 'shell') {
+    const shellRes = await send({ type: 'ensureShellPane', taskId });
+    if (taskId !== termBoundTaskId) return;
+    if (shellRes.error) {
+      showTermOverlay(shellRes.error, 'Retry', attachTerminal);
+      return;
+    }
+    resolved = shellRes.info;
+  }
+  const paneId = termPane === 'shell' ? resolved.shell_pane_id : resolved.claude_pane_id;
+  if (!paneId) {
+    showTermOverlay(
+      termPane === 'shell' ? 'No shell pane available.' : 'No executor pane available.',
+      'Retry',
+      attachTerminal,
+    );
+    return;
+  }
+  openTerminalSocket(taskId);
+}
+
+async function startTermSession() {
+  const taskId = termBoundTaskId;
+  showTermOverlay('Starting session…');
+  const r = await send({ type: 'ensureSession', taskId });
+  if (taskId !== termBoundTaskId) return;
+  if (r.error) {
+    showTermOverlay(r.error, 'Retry', startTermSession);
+    return;
+  }
+  attachTerminal();
+}
+
+async function openTerminalSocket(taskId) {
+  const { serverUrl, connected } = await send({ type: 'getServerUrl' });
+  if (taskId !== termBoundTaskId) return;
+  if (!connected || !serverUrl) {
+    showTermOverlay('Waiting for ty serve…', 'Retry', attachTerminal);
+    return;
+  }
+  let t;
+  try {
+    t = buildTerm();
+  } catch (e) {
+    showTermOverlay('Terminal failed to initialize: ' + e.message, 'Retry', attachTerminal);
+    return;
+  }
+  if (!t) return;
+
+  const wsBase = serverUrl.replace(/^http/, 'ws');
+  const paneQuery = termPane === 'shell' ? '?pane=shell' : '';
+  const socket = new WebSocket(`${wsBase}/api/tasks/${taskId}/terminal${paneQuery}`);
+  ws = socket;
+
+  socket.onmessage = (event) => {
+    const data = String(event.data);
+    if (data[0] === '{') {
+      try {
+        const m = JSON.parse(data);
+        if (m.type === 'size') return; // we drive sizing via resize messages
+      } catch {
+        // fall through: screen content that happens to start with "{"
+      }
+    }
+    t.write(data);
+    trackExecutorActivity(data);
+  };
+  socket.onclose = () => {
+    if (ws === socket) {
+      ws = null;
+      setTermState('', null);
+      showTermOverlay('Terminal disconnected', 'Reconnect', attachTerminal);
+    }
+  };
+  socket.onerror = () => { /* onclose fires next; message shown there */ };
+  socket.onopen = () => {
+    showTermOverlay(null);
+    setTermState('● live', 'live');
+    try { socket.send(JSON.stringify({ type: 'resize', cols: t.cols, rows: t.rows })); } catch {}
+    t.focus();
+  };
+  t.onData((d) => {
+    if (socket.readyState === WebSocket.OPEN) socket.send(d);
+  });
+  t.onResize(({ cols, rows }) => {
+    if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: 'resize', cols, rows }));
+  });
+}
+
+// Bind the terminal to the panel's current task. Only (re)attaches when the
+// bound task actually changes, so incidentally switching Chrome tabs (which can
+// momentarily resolve no task) never tears down a live session mid-command.
+function syncTerminal(connected) {
+  if (!connected) {
+    if (termBoundTaskId == null) showTermOverlay('Waiting for ty serve…');
+    return;
+  }
+  const taskId = currentTask?.id ?? null;
+  if (taskId == null) {
+    if (termBoundTaskId == null) showTermOverlay('Match a tab or pick a task to open its terminal.');
+    return;
+  }
+  if (taskId !== termBoundTaskId) {
+    termBoundTaskId = taskId;
+    attachTerminal();
+  }
+}
+
+// Auto-reload: when the Agent pane transitions working→idle, its batch of edits
+// is done — reload the app tab so the user sees the result. Never reload while
+// annotations are still pinned (unsent work on the page). Driven off the same
+// TUI footer markers the mirror streams back.
 let executorBusy = false;
 let idleStreak = 0;
 
@@ -189,58 +391,41 @@ function maybeAutoReload() {
   if (!$('auto-reload').checked || activeTabId == null) return;
   if (!$('annotation-count').classList.contains('zero')) return;
   chrome.tabs.reload(activeTabId);
-  $('executor-state').textContent = '↻ page reloaded';
+  setTermState('↻ page reloaded', 'live');
 }
 
 function trackExecutorActivity(raw) {
+  if (termPane !== 'agent') return; // shell output has no busy/idle markers
   const busy = /esc to interrupt/.test(raw);
   const idleAtPrompt = /shift\+tab to cycle/.test(raw) && !busy;
   if (busy) {
     executorBusy = true;
     idleStreak = 0;
-    $('executor-state').textContent = 'working…';
+    setTermState('● working…', 'busy');
   } else if (idleAtPrompt) {
     idleStreak++;
     if (executorBusy && idleStreak >= 2) {
       executorBusy = false;
       maybeAutoReload();
     }
-    if (!executorBusy && $('executor-state').textContent === 'working…') {
-      $('executor-state').textContent = 'live';
-    }
+    if (!executorBusy) setTermState('● live', 'live');
   }
 }
 
-async function poll() {
-  // Poll whenever a task is bound — don't gate on the cached has_executor flag,
-  // which can be a stale false (captured while the pane id was briefly empty) and
-  // would otherwise freeze the panel on a stale state with no way to recover.
-  if (document.visibilityState !== 'visible' || !currentTask) return;
-  const r = await send({ type: 'getOutput', taskId: currentTask.id, lines: 250 });
-  const consoleEl = $('console');
-  if (r.noExecutor) {
-    // Stable fact (HTTP 400) — show it immediately, no debounce.
-    goneStreak = 0;
-    $('executor-state').textContent = 'no executor pane';
-    return;
-  }
-  if (r.gone) {
-    goneStreak++;
-    if (goneStreak >= GONE_THRESHOLD) {
-      $('executor-state').textContent = 'pane gone';
-      // While persistently gone, re-fetch the task so a relocated/recovered pane
-      // is picked up instead of staying frozen.
-      if (goneStreak % GONE_THRESHOLD === 0) refreshTaskState();
+// Agent / Shell pane tabs.
+for (const btn of document.querySelectorAll('.term-tab')) {
+  btn.addEventListener('click', () => {
+    const pane = btn.dataset.pane;
+    if (pane === termPane) return;
+    termPane = pane;
+    document.querySelectorAll('.term-tab').forEach((b) => b.classList.toggle('active', b === btn));
+    executorBusy = false;
+    if (termBoundTaskId != null) {
+      attachTerminal();
+    } else {
+      showTermOverlay('Match a tab or pick a task to open its terminal.');
     }
-    return;
-  }
-  goneStreak = 0;
-  if (r.output != null) {
-    const atBottom = consoleEl.scrollHeight - consoleEl.scrollTop - consoleEl.clientHeight < 30;
-    renderExecutor(r.output, consoleEl);
-    if (atBottom) consoleEl.scrollTop = consoleEl.scrollHeight;
-    trackExecutorActivity(r.output);
-  }
+  });
 }
 
 // --- Wiring --------------------------------------------------------------------
@@ -263,6 +448,8 @@ $('task-select').addEventListener('change', async (e) => {
   if (r.ok) {
     currentTask = r.task;
     renderTask();
+    syncTerminal(true);
+    bridgeLoop();
   }
 });
 
@@ -288,22 +475,6 @@ $('send-btn').addEventListener('click', async () => {
     $('send-result').textContent = r.error || 'Send failed';
     $('send-btn').disabled = false;
   }
-});
-
-async function sendFollowup() {
-  const msg = $('followup').value.trim();
-  if (!msg || !currentTask) return;
-  const r = await send({ type: 'taskInput', taskId: currentTask.id, message: msg });
-  if (r.ok) {
-    $('followup').value = '';
-    setTimeout(poll, 600);
-  } else {
-    $('executor-state').textContent = r.error || 'input failed';
-  }
-}
-$('followup-send').addEventListener('click', sendFollowup);
-$('followup').addEventListener('keydown', (e) => {
-  if (e.key === 'Enter') sendFollowup();
 });
 
 chrome.runtime.onMessage.addListener((msg) => {
