@@ -57,3 +57,6 @@ ty-chrome.zip
 .pr-body.md
 .pr-comment.md
 .qacfg/
+
+# Riptide artifacts (cloud-synced)
+.humanlayer/tasks/

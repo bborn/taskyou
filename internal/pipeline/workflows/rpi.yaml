@@ -1,0 +1,17 @@
+name: rpi
+description: Research → Implement, TaskYou-native (no HumanLayer). Minimal bootstrap workflow.
+steps:
+  - name: research
+    prompt: |
+      Research the codebase to understand what is needed to accomplish the goal
+      below. Read the relevant files, trace how the affected code works today, and
+      write up a concise, factual research summary: which files/functions are
+      involved, how they fit together, and the constraints an implementation must
+      respect. Do not write any code in this step — this is analysis only. Hand
+      your findings forward for the implement step.
+  - name: implement
+    deps: [research]
+    prompt: |
+      Using the research handed forward from the previous step, implement the
+      goal below. Write the code, run the relevant build/tests, then commit and
+      push your work and open a PR.

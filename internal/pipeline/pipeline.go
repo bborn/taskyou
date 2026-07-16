@@ -68,11 +68,12 @@ func (d Definition) IsSingle() bool { return len(d.Steps) == 0 }
 // (task types); a kind runs as a workflow only when a same-named file adds steps.
 const DefaultDefinition = ""
 
-// registry loads the workflow files — one per file — from the global workflows dir
-// plus extraDirs. There are NO built-in workflows: a workflow is just a same-named
-// file overlaying a DB kind (see KindResolver). Later dirs shadow earlier ones.
+// registry loads the workflow definitions: the bundled built-ins compiled into the
+// binary (e.g. "rpi") first at lowest precedence, then the on-disk workflow files
+// from the global workflows dir plus extraDirs. A same-named on-disk file shadows a
+// bundled built-in, and later dirs shadow earlier ones (project shadows global).
 func registry(extraDirs ...string) map[string]Definition {
-	out := make(map[string]Definition)
+	out := loadBundledDefinitions() // built-ins, lowest precedence
 	dirs := append([]string{WorkflowsDir()}, extraDirs...)
 	custom, _ := loadCustomDefinitions(dirs)
 	for name, def := range custom {
