@@ -46,8 +46,9 @@ const (
 	paneActionStartExecutor paneAction = iota
 	// paneActionSkip: don't start anything (backlog/done/archived tasks).
 	paneActionSkip
-	// paneActionWaitForExecutor: a freshly queued task with no worktree yet — the
-	// daemon's executor will create the window shortly; keep polling for it.
+	// paneActionWaitForExecutor: a daemon-owned task (queued/processing) whose
+	// window doesn't exist yet — the daemon's executor will create it shortly;
+	// keep polling for it instead of starting our own.
 	paneActionWaitForExecutor
 )
 
@@ -58,13 +59,39 @@ func pendingPaneAction(task *db.Task) paneAction {
 	if shouldSkipAutoExecutor(task) {
 		return paneActionSkip
 	}
-	// Queued tasks without a worktree are handled by the daemon's executor, which
-	// creates the window. Starting panes here would race it (project dir vs worktree
-	// dir), so we wait and let ensureTmuxPanesJoined pick the panes up.
-	if task.Status == db.StatusQueued && task.WorktreePath == "" {
+	// Queued and processing tasks belong to the daemon's executor, which creates
+	// the window. If we reach here the window doesn't exist yet, meaning the daemon
+	// is still spinning it up. Starting our own executor now races the daemon and
+	// double-spawns — two Claude sessions in the same worktree with clobbered pane
+	// ids (the "executors mixed up" bug). Wait and let ensureTmuxPanesJoined join
+	// the daemon's panes once they appear.
+	//
+	// This must hold regardless of WorktreePath: the worktree is created early in
+	// the daemon's spin-up, so a queued/processing task frequently already has one
+	// while its executor window is still pending. Gating the wait on
+	// WorktreePath == "" (as this once did) let exactly that window slip through to
+	// the start path. A daemon that never creates the window (e.g. it died, leaving
+	// the task stuck "processing") is handled downstream by a bounded wait that
+	// falls back to offering "Start session".
+	if task.Status == db.StatusQueued || task.Status == db.StatusProcessing {
 		return paneActionWaitForExecutor
 	}
 	return paneActionStartExecutor
+}
+
+// waitForExecutorTimeout bounds how long the detail view waits for the daemon to
+// create a daemon-owned task's executor window before giving up and starting one
+// itself. The daemon normally creates it within seconds; if it never does (e.g.
+// it died, leaving the task stuck "processing"), we fall back to the start path
+// so the view isn't wedged forever. The fallback is race-safe: it starts through
+// EnsureTaskWindow's spawn lock, which re-checks for an existing window.
+const waitForExecutorTimeout = 60 * time.Second
+
+// shouldFallBackToStart reports whether a view that has been passively waiting for
+// the daemon's executor (paneActionWaitForExecutor) should give up and start one
+// itself. It gives up only once the timeout has elapsed with no panes joined.
+func shouldFallBackToStart(waitingForExecutor, panesJoined bool, waited, timeout time.Duration) bool {
+	return waitingForExecutor && !panesJoined && waited >= timeout
 }
 
 // liveExecutorInPaneCommands reports whether any of the given tmux pane
@@ -553,6 +580,18 @@ func (m *DetailModel) Refresh() tea.Cmd {
 		m.lastPaneCheck = time.Now()
 		// Ensure tmux panes are joined if available (handles external close/detach)
 		m.ensureTmuxPanesJoined()
+
+		// Bounded wait: if we've been waiting for the daemon's executor window to
+		// appear past waitForExecutorTimeout and it still hasn't, the daemon isn't
+		// going to create it (e.g. it died, leaving the task stuck "processing").
+		// Start the executor ourselves rather than spin forever. Safe from the
+		// double-spawn this whole change prevents: startPanesAsync goes through
+		// EnsureTaskWindow's spawn lock, which re-checks for an existing window.
+		if shouldFallBackToStart(m.waitingForExecutor, m.claudePaneID != "", time.Since(m.paneLoadingStart), waitForExecutorTimeout) {
+			GetLogger().Info("Refresh: waited %s for daemon executor on task %d with no window; starting it ourselves", waitForExecutorTimeout, m.task.ID)
+			m.waitingForExecutor = false
+			return tea.Batch(cmd, m.startPanesAsync())
+		}
 	}
 
 	return cmd
