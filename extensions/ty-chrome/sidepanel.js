@@ -81,7 +81,10 @@ async function refresh() {
   renderTask();
   updateCount(state.annotationCount);
 
-  if (!currentTask && state.connected) loadCandidates();
+  if (!currentTask && state.connected) {
+    loadCandidates();
+    loadProjects();
+  }
   syncTerminal(state.connected);
   if (state.connected && currentTask) bridgeLoop();
 
@@ -121,6 +124,70 @@ async function loadCandidates() {
     o.textContent = `#${t.id} ${t.title} (${t.status}${t.port ? `, :${t.port}` : ''})`;
     sel.appendChild(o);
   }
+}
+
+// --- New task ------------------------------------------------------------------
+//
+// Create a task straight from the panel: pick a project/repo, describe the work,
+// choose execute-now, POST it via the daemon (through the SW's api() plumbing),
+// then bind the new task to this tab so the terminal attaches to it right away.
+
+let projectsLoaded = false;
+
+async function loadProjects() {
+  if (projectsLoaded) return; // only fill the select once, so it survives typing
+  const { projects, error } = await send({ type: 'listProjects' });
+  if (error) return; // stay silent; the no-connection banner already explains
+  const sel = $('nt-project');
+  sel.innerHTML = '';
+  if (!projects || !projects.length) {
+    const o = document.createElement('option');
+    o.value = '';
+    o.textContent = 'Default project';
+    sel.appendChild(o);
+  } else {
+    for (const p of projects) {
+      const o = document.createElement('option');
+      o.value = p.name;
+      o.textContent = p.task_count ? `${p.name} (${p.task_count})` : p.name;
+      sel.appendChild(o);
+    }
+  }
+  projectsLoaded = true;
+}
+
+async function createTask(e) {
+  e?.preventDefault();
+  const title = $('nt-title').value.trim();
+  const body = $('nt-body').value.trim();
+  if (!title && !body) {
+    $('nt-result').textContent = 'Enter a title or a description.';
+    return;
+  }
+  $('nt-create').disabled = true;
+  $('nt-result').textContent = 'Creating…';
+  const r = await send({
+    type: 'createTask',
+    tabId: activeTabId,
+    title,
+    body,
+    project: $('nt-project').value,
+    execute: $('nt-execute').checked,
+  });
+  $('nt-create').disabled = false;
+  if (r.error || !r.task) {
+    $('nt-result').textContent = r.error || 'Create failed';
+    return;
+  }
+  // Bind + attach exactly like picking an existing task.
+  currentTask = r.task;
+  $('nt-title').value = '';
+  $('nt-body').value = '';
+  $('nt-result').textContent = '';
+  $('new-task-form').classList.add('hidden');
+  renderTask();
+  syncTerminal(true);
+  bridgeLoop();
 }
 
 // --- Embedded terminal ---------------------------------------------------------
@@ -440,7 +507,21 @@ $('server-url').addEventListener('keydown', async (e) => {
   refresh();
 });
 
-$('refresh-tasks').addEventListener('click', loadCandidates);
+$('refresh-tasks').addEventListener('click', () => {
+  projectsLoaded = false;
+  loadCandidates();
+  loadProjects();
+});
+
+$('new-task-toggle').addEventListener('click', () => {
+  const form = $('new-task-form');
+  form.classList.toggle('hidden');
+  if (!form.classList.contains('hidden')) {
+    loadProjects();
+    $('nt-title').focus();
+  }
+});
+$('new-task-form').addEventListener('submit', createTask);
 
 $('task-select').addEventListener('change', async (e) => {
   const taskId = Number(e.target.value);

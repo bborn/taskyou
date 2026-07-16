@@ -6,8 +6,23 @@
   <link rel="stylesheet" href="sidepanel.css" />
 </head>
 <body>
-  <div id="no-connection" class="banner hidden">
-    Can't reach <code>ty serve</code> — probing common ports, retrying…
+  <div id="no-connection" class="banner empty-state hidden">
+    <strong>No TaskYou daemon reachable</strong>
+    <p>
+      This extension is a thin client — it needs <code>ty serve</code> (the
+      TaskYou daemon) running locally to create and drive tasks.
+    </p>
+    <ul>
+      <li>Have <code>ty</code> already? Run <code>ty serve</code> in a terminal.</li>
+      <li>
+        No terminal? Install the <strong>TaskYou desktop app</strong> — it runs
+        the daemon for you in the background.
+      </li>
+    </ul>
+    <a href="https://github.com/bborn/taskyou#readme" target="_blank" rel="noopener">
+      Get TaskYou →
+    </a>
+    <p class="probing muted">Probing common ports, retrying…</p>
   </div>
 
   <div id="settings" class="card hidden">
@@ -38,6 +53,17 @@
         <select id="task-select"></select>
         <button id="refresh-tasks" title="Refresh">↻</button>
       </div>
+      <button id="new-task-toggle" class="link-btn">＋ New task</button>
+      <form id="new-task-form" class="new-task hidden">
+        <select id="nt-project" title="Project / repo"></select>
+        <input id="nt-title" type="text" placeholder="Task title" />
+        <textarea id="nt-body" rows="3" placeholder="What should the agent do?"></textarea>
+        <label class="nt-execute">
+          <input type="checkbox" id="nt-execute" checked /> Execute now
+        </label>
+        <button id="nt-create" type="submit" class="primary">Create task</button>
+        <p id="nt-result" class="muted"></p>
+      </form>
     </div>
   </section>
 

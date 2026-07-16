@@ -1,15 +1,22 @@
 # ty-chrome — TaskYou in Chrome
 
-Two things, both tied to a specific taskyou task, both in the Chrome side panel:
+Three things, all tied to a specific taskyou task, all in the Chrome side panel:
 
-1. **A full terminal.** A real xterm.js terminal wired straight into the task's
+1. **Create a task.** Pick a project/repo, describe the work, and hit
+   **New task** — the panel creates it via the daemon and binds the terminal to
+   it right away, execute-now optional. No terminal needed to get started.
+2. **A full terminal.** A real xterm.js terminal wired straight into the task's
    tmux session — the same Claude Code (Agent) pane the TUI/desktop app show,
    plus a workdir **Shell** pane. Type into it, run commands, drive Claude Code,
    do anything you want, without leaving the browser.
-2. **Live annotate.** Point, click, and annotate any page served by the task's
+3. **Live annotate.** Point, click, and annotate any page served by the task's
    dev server, and deliver that feedback — selectors, DOM excerpts, your
    comments, and a screenshot with numbered markers — straight into the task's
    executor.
+
+The extension is a thin client for a locally-running `ty serve` daemon; see
+[`docs/extension-first.md`](../../docs/extension-first.md) for the plan to make
+it a no-terminal primary entry point (and the Chrome Web Store checklist).
 
 | Annotate the live page | Side panel: task + embedded terminal |
 |---|---|
