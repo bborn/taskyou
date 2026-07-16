@@ -6,6 +6,9 @@
 set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
 
+# Remove any screenshot "freeze" decoy first (see ty_qa_freeze_daemon).
+ty_qa_unfreeze_daemon
+
 # Stop the isolated full daemon (Tier 3), if running. Its PID file is keyed to the
 # instance DB dir (see getPidFilePath), so this never touches the live daemon.
 if [[ -f "$TY_QA_ROOT/daemon.pid" ]]; then

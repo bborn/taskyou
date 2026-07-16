@@ -4,7 +4,29 @@ Drive the **real** ty TUI programmatically against a **throwaway, isolated** ins
 so we can QA real features (board, detail view, forms, executor panes) without
 touching the live daemon, DB, or tasks.
 
-It's a simple loop: **up → key → assert state → down**.
+It's a simple loop: **up → seed → key → assert state → down**.
+
+## Content standard: QA data must look real
+
+Every screenshot this harness produces is a potential **marketing and
+documentation asset**, so treat QA content as production copy. The board and
+detail views we render must look like a real team's real board — never `test 1`,
+`foo`, `asdf`, or lorem ipsum. Concretely:
+
+- **Seed with `scripts/qa/ty-qa-seed.sh`.** It populates a curated set of
+  believable tasks (real-sounding titles, a sentence or two of body, sensible
+  tags, a spread across every column, a couple pinned) across a few realistic
+  projects. Edit that file like copy that could ship on the website: evergreen,
+  no secrets, no real customer data, no dated references, no throwaway strings.
+- **Shoot with the seeded DB kept** (`TY_QA_SHOT_KEEP_DB=1`). The harness then
+  **freezes the daemon automatically** (see `ty-qa-freeze.sh`) so `queued` tasks
+  sit still in the In Progress column instead of being picked up, executed, and
+  demoted mid-shot.
+- **Frame it well.** Use dimensions wide enough that no column is clipped
+  (`TY_QA_SHOT_W` / `TY_QA_SHOT_H`), and prefer a tight crop over acres of empty
+  space.
+
+New QA screens and flows should hold to this bar, not just the two examples below.
 
 ## Why
 
@@ -28,13 +50,18 @@ Override location/id with `TY_QA_ROOT` and `TY_QA_SID`.
 
 ```bash
 scripts/qa/ty-qa-up.sh                 # build binary, fresh DB, register 'qa' project
+scripts/qa/ty-qa-seed.sh               # populate realistic tasks across a few projects
 scripts/qa/ty-qa-tui.sh                # launch the real TUI in tmux session task-ui-qa
-"$TY_BIN" create "hello" -p qa         # (or: scripts/qa/ty-qa-up.sh prints the binary path)
 scripts/qa/ty-qa-key.sh n              # drive it: open the new-task form
 scripts/qa/ty-qa-state.sh              # assert: view == "new_task", etc.
 scripts/qa/ty-qa-capture.sh            # or eyeball the rendered screen
 scripts/qa/ty-qa-down.sh               # stop (add --purge to delete the DB)
 ```
+
+Seeding is optional for pure state assertions, but **required for anything you
+screenshot** — see the content standard above. When you drive the TUI by hand
+against seeded data, run `scripts/qa/ty-qa-freeze.sh` first so the auto-started
+daemon doesn't execute your `queued` tasks (`--off` to undo).
 
 To watch live while scripting: `tmux attach -t task-ui-qa`.
 
@@ -181,25 +208,49 @@ go test ./internal/ui/ -run '^$' -bench 'BenchmarkDetail'     -benchmem
 ## Screenshots & PR evidence (VHS + R2)
 
 To attach real-TUI screenshots to a PR, render with **VHS** and publish to the
-public R2 evidence bucket — no manual uploads, no friction.
+public R2 evidence bucket — no manual uploads, no friction. These shots double as
+marketing/docs assets, so seed realistic data first (see the content standard at
+the top).
+
+**Board / detail shots (with seeded data — the common case):**
 
 ```bash
 scripts/qa/ty-qa-up.sh                                  # build + isolated instance
+scripts/qa/ty-qa-seed.sh                                # realistic tasks across a few projects
+mkdir -p "$TY_QA_ROOT/shots"
 
-# Render screens (VHS sizes the terminal correctly; ty renders in-pane via TMUX env).
-# A fresh DB per shot => true first-run. Extra args are VHS tape lines.
-mkdir -p /tmp/ty-qa/shots
-scripts/qa/ty-qa-shoot.sh "$TY_QA_PROJECTS/demo"  /tmp/ty-qa/shots/01-card.png    "Sleep 9s"   # git-repo card (waits for claude -p)
-scripts/qa/ty-qa-shoot.sh /tmp/ty-qa/plainfolder  /tmp/ty-qa/shots/02-welcome.png "Sleep 5s"   # welcome fork
-scripts/qa/ty-qa-shoot.sh /tmp/ty-qa/plainfolder  /tmp/ty-qa/shots/03-picker.png \
-  "Sleep 5s" "Enter" "Sleep 1s" 'Type "ty"' "Sleep 2s"                                          # fork -> picker -> filter
+# TY_QA_SHOT_KEEP_DB=1 keeps the seeded DB AND auto-freezes the daemon so queued
+# tasks don't execute mid-shot. Widen so no column is clipped. Extra args = VHS tape.
+TY_QA_SHOT_KEEP_DB=1 TY_QA_SHOT_W=1500 TY_QA_SHOT_H=760 \
+  scripts/qa/ty-qa-shoot.sh "$TY_QA_PROJECTS/storefront" "$TY_QA_ROOT/shots/board.png" "Sleep 3s"
 
-# Upload + get the markdown image block (prefix is usually the PR number).
-scripts/qa/ty-qa-publish.sh 555 /tmp/ty-qa/shots/*.png
-# -> ![01-card](https://pub-...r2.dev/taskyou-qa/<date>/555-01-card.png)  ...
+# Open a task's detail: focus In Progress (P), Enter, let it settle.
+TY_QA_SHOT_KEEP_DB=1 TY_QA_SHOT_W=1300 TY_QA_SHOT_H=720 \
+  scripts/qa/ty-qa-shoot.sh "$TY_QA_PROJECTS/storefront" "$TY_QA_ROOT/shots/detail.png" \
+  "Sleep 2s" 'Type "P"' "Sleep 500ms" "Enter" "Sleep 3s"
+```
+
+**First-run shots (fresh DB, no data):** omit `TY_QA_SHOT_KEEP_DB` — each shot
+starts from an empty DB so first-run detection fires. Extra args are VHS tape lines.
+
+```bash
+scripts/qa/ty-qa-shoot.sh /tmp/ty-qa/plainfolder  /tmp/ty-qa/shots/welcome.png "Sleep 5s"   # welcome fork
+scripts/qa/ty-qa-shoot.sh /tmp/ty-qa/plainfolder  /tmp/ty-qa/shots/picker.png \
+  "Sleep 5s" "Enter" "Sleep 1s" 'Type "ty"' "Sleep 2s"                                       # fork -> picker -> filter
+```
+
+**Publish** (prefix is usually the PR number):
+
+```bash
+scripts/qa/ty-qa-publish.sh 555 "$TY_QA_ROOT"/shots/*.png
+# -> ![board](https://pub-...r2.dev/taskyou-qa/<date>/555-board.png)  ...
 ```
 
 Then paste the printed markdown into a PR comment (or `gh pr comment <n> -F -`).
+
+**Before/after a UI change:** build the old binary from the base branch into a
+second path and point `TY_BIN` at it for the "before" shot, reusing the same
+seeded DB, e.g. `TY_BIN=/tmp/ty-before scripts/qa/ty-qa-shoot.sh …`.
 
 **Why VHS, not `tmux capture-pane`:** a detached tmux session mis-reports its
 width to bubbletea, so centred modals overflow and render corrupted. VHS runs
@@ -214,6 +265,10 @@ remote returns 403 on PutObject); override via `TY_QA_R2_REMOTE`/`TY_QA_R2_BUCKE
 
 ## Gotchas
 
+- **Launching the TUI always ensures a daemon**, which immediately executes any
+  `queued` tasks. For static/seeded screenshots that churn ruins the shot, so
+  `ty-qa-shoot.sh` freezes the daemon when `TY_QA_SHOT_KEEP_DB=1`; if you drive
+  the TUI by hand, run `ty-qa-freeze.sh` yourself. `ty-qa-down.sh` clears it.
 - The TUI must run **inside** `task-ui-<sid>` — `joinTmuxPane` attaches agent panes there.
 - An agent's `pane_current_command` shows as the Claude **version string** (e.g. `2.1.162`), not `claude`.
 - Claude's folder-trust prompt needs one `Enter` unless `~/.claude.json` already trusts the worktree (`ty-qa-agent.sh` sends it).
