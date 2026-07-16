@@ -29,6 +29,13 @@ CWD="$1"; OUT="$2"; shift 2
 command -v vhs   >/dev/null || { echo "ty-qa: vhs not installed (brew install vhs)" >&2; exit 1; }
 command -v magick >/dev/null || { echo "ty-qa: imagemagick not installed (brew install imagemagick)" >&2; exit 1; }
 
+# Data shots keep the seeded DB — freeze the daemon so the TUI we launch doesn't
+# start an executor and churn `queued` tasks mid-shot. (First-run shots use a
+# fresh DB with no tasks, so there's nothing to protect.)
+if [ -n "${TY_QA_SHOT_KEEP_DB:-}" ]; then
+  ty_qa_freeze_daemon
+fi
+
 W="${TY_QA_SHOT_W:-1180}"
 H="${TY_QA_SHOT_H:-900}"
 FS="${TY_QA_SHOT_FONTSIZE:-20}"
