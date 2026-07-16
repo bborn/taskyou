@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/bborn/workflow/internal/db"
 	"github.com/bborn/workflow/internal/github"
@@ -610,6 +611,70 @@ func TestPathInsideDir(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := pathInsideDir(tc.dir, tc.path); got != tc.want {
 				t.Errorf("pathInsideDir(%q, %q) = %v, want %v", tc.dir, tc.path, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestPendingPaneAction_DaemonOwnedTasksWaitRegardlessOfWorktree verifies that a
+// task the daemon owns (queued OR processing) waits for the daemon's executor
+// instead of starting its own — even when its worktree already exists. Starting
+// an executor here races the daemon and double-spawns two Claude sessions with
+// clobbered pane ids (the "executors mixed up" bug). Previously the view only
+// waited for queued tasks with no worktree, so a queued/processing task whose
+// worktree was already created would wrongly take the start path.
+func TestPendingPaneAction_DaemonOwnedTasksWaitRegardlessOfWorktree(t *testing.T) {
+	cases := []struct {
+		name     string
+		status   string
+		worktree string
+		want     paneAction
+	}{
+		{"queued without worktree", db.StatusQueued, "", paneActionWaitForExecutor},
+		{"queued with worktree", db.StatusQueued, "/wt/4847", paneActionWaitForExecutor},
+		{"processing without worktree", db.StatusProcessing, "", paneActionWaitForExecutor},
+		{"processing with worktree", db.StatusProcessing, "/wt/4847", paneActionWaitForExecutor},
+		{"blocked starts (user-driven resume, daemon does not run blocked)", db.StatusBlocked, "/wt/4847", paneActionStartExecutor},
+		{"backlog skips", db.StatusBacklog, "/wt/4847", paneActionSkip},
+		{"done skips", db.StatusDone, "/wt/4847", paneActionSkip},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			task := &db.Task{ID: 4847, Status: tc.status, WorktreePath: tc.worktree}
+			if got := pendingPaneAction(task); got != tc.want {
+				t.Errorf("pendingPaneAction(status=%s worktree=%q) = %v, want %v",
+					tc.status, tc.worktree, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestShouldFallBackToStart verifies the bounded-wait fallback: a detail view
+// passively waiting for the daemon's executor gives up and starts one itself only
+// after the timeout elapses with no panes joined. Without this, change A's "wait
+// for the daemon" would spin forever on a task stuck "processing" behind a dead
+// daemon. The fallback is race-safe because it starts through EnsureTaskWindow's
+// spawn lock.
+func TestShouldFallBackToStart(t *testing.T) {
+	const timeout = 60 * time.Second
+	cases := []struct {
+		name        string
+		waiting     bool
+		panesJoined bool
+		waited      time.Duration
+		want        bool
+	}{
+		{"waiting, no panes, past timeout -> start", true, false, 61 * time.Second, true},
+		{"waiting, no panes, before timeout -> keep waiting", true, false, 10 * time.Second, false},
+		{"waiting, panes joined -> no fallback", true, true, 120 * time.Second, false},
+		{"not waiting -> no fallback", false, false, 120 * time.Second, false},
+		{"waiting, no panes, exactly at timeout -> start", true, false, timeout, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := shouldFallBackToStart(tc.waiting, tc.panesJoined, tc.waited, timeout); got != tc.want {
+				t.Errorf("shouldFallBackToStart(waiting=%v panes=%v waited=%v) = %v, want %v",
+					tc.waiting, tc.panesJoined, tc.waited, got, tc.want)
 			}
 		})
 	}

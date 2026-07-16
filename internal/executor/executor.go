@@ -24,6 +24,7 @@ import (
 	"github.com/bborn/workflow/internal/config"
 	"github.com/bborn/workflow/internal/db"
 	"github.com/bborn/workflow/internal/events"
+	"github.com/bborn/workflow/internal/executorlock"
 	"github.com/bborn/workflow/internal/github"
 	"github.com/bborn/workflow/internal/hooks"
 	"github.com/bborn/workflow/internal/pipeline"
@@ -2733,11 +2734,32 @@ func ensureTmuxDaemon() (string, error) {
 
 // createTmuxWindow creates a new tmux window in the daemon session with retry logic.
 // If the session doesn't exist, it will re-create it and retry once.
+//
+// taskID keys the per-task spawn lock: this call serializes with EnsureTaskWindow
+// and any other spawner so two paths can't both create a window for the same task
+// (the double-spawn that leaves two executor sessions in one worktree with
+// clobbered pane ids). If a window for the task already exists when we acquire the
+// lock, we adopt it instead of creating a duplicate.
+//
 // SECURITY: workDir must be within a .task-worktrees directory, or match allowedProjectDir
 // for non-worktree projects. Pass empty allowedProjectDir to require worktree paths only.
-func createTmuxWindow(daemonSession, windowName, workDir, script, allowedProjectDir string) (string, error) {
+func createTmuxWindow(daemonSession, windowName, workDir, script, allowedProjectDir string, taskID int64) (string, error) {
 	if !isValidWorkDir(workDir, allowedProjectDir) {
 		return "", fmt.Errorf("security: refusing to create tmux window with invalid workDir: %s", workDir)
+	}
+
+	// Serialize check-then-create with the TUI/API spawn path (EnsureTaskWindow).
+	// Best-effort on timeout so a wedged holder can't block the daemon forever.
+	if release, lerr := executorlock.AcquireSpawn(executorSpawnLockDir(), taskID, spawnLockTimeout); lerr == nil {
+		defer release()
+	}
+	// Under the lock: adopt an existing window rather than spawning a second
+	// executor for this task.
+	checkCtx, checkCancel := context.WithTimeout(context.Background(), 3*time.Second)
+	existing := findExistingTaskWindow(checkCtx, windowName)
+	checkCancel()
+	if existing != "" {
+		return strings.SplitN(existing, ":", 2)[0], nil
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -3006,7 +3028,7 @@ func (e *Executor) runClaude(ctx context.Context, task *db.Task, workDir, prompt
 	}
 
 	// Create new window in task-daemon session (with retry logic for race conditions)
-	actualSession, tmuxErr := createTmuxWindow(daemonSession, windowName, workDir, script, e.getProjectDir(task.Project))
+	actualSession, tmuxErr := createTmuxWindow(daemonSession, windowName, workDir, script, e.getProjectDir(task.Project), task.ID)
 	if tmuxErr != nil {
 		e.logger.Error("tmux new-window failed", "error", tmuxErr, "session", daemonSession)
 		e.logLine(task.ID, "error", fmt.Sprintf("Failed to create tmux window: %s", tmuxErr.Error()))
@@ -3153,7 +3175,7 @@ func (e *Executor) runClaudeResume(ctx context.Context, task *db.Task, workDir, 
 		task.ID, taskSessionID, task.Port, task.WorktreePath, envPrefix, dangerousFlag, rcFlag, effort, model, claudeSessionID, promptArg)
 
 	// Create new window in task-daemon session (with retry logic for race conditions)
-	actualSession, tmuxErr := createTmuxWindow(daemonSession, windowName, workDir, script, e.getProjectDir(task.Project))
+	actualSession, tmuxErr := createTmuxWindow(daemonSession, windowName, workDir, script, e.getProjectDir(task.Project), task.ID)
 	if tmuxErr != nil {
 		e.logger.Error("tmux new-window failed", "error", tmuxErr, "session", daemonSession)
 		e.logLine(task.ID, "error", fmt.Sprintf("Failed to create tmux window: %s", tmuxErr.Error()))
@@ -3310,7 +3332,7 @@ func (e *Executor) resumeClaudeDangerous(task *db.Task, workDir string) bool {
 		taskID, taskSessionID, task.Port, task.WorktreePath, envPrefix, claudeSessionID)
 
 	// Create new window in task-daemon session (with retry logic for race conditions)
-	actualSession, tmuxErr := createTmuxWindow(daemonSession, windowName, workDir, script, e.getProjectDir(task.Project))
+	actualSession, tmuxErr := createTmuxWindow(daemonSession, windowName, workDir, script, e.getProjectDir(task.Project), task.ID)
 	if tmuxErr != nil {
 		e.logger.Warn("tmux failed to create window", "error", tmuxErr, "session", daemonSession)
 		if cleanupHooks != nil {
@@ -3516,7 +3538,7 @@ func (e *Executor) resumeClaudeSafe(task *db.Task, workDir string) bool {
 		taskID, taskSessionID, task.Port, task.WorktreePath, envPrefix, permissionFlagForMode(safeMode), claudeSessionID)
 
 	// Create new window in task-daemon session (with retry logic for race conditions)
-	actualSession, tmuxErr := createTmuxWindow(daemonSession, windowName, workDir, script, e.getProjectDir(task.Project))
+	actualSession, tmuxErr := createTmuxWindow(daemonSession, windowName, workDir, script, e.getProjectDir(task.Project), task.ID)
 	if tmuxErr != nil {
 		e.logger.Warn("tmux failed to create window", "error", tmuxErr, "session", daemonSession)
 		if cleanupHooks != nil {
@@ -3635,7 +3657,7 @@ func (e *Executor) resumeCodexWithMode(task *db.Task, workDir string, dangerousM
 	script := fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %scodex %s--resume %s`,
 		taskID, taskSessionID, task.Port, task.WorktreePath, envPrefix, dangerousFlag, sessionID)
 
-	actualSession, tmuxErr := createTmuxWindow(daemonSession, windowName, workDir, script, e.getProjectDir(task.Project))
+	actualSession, tmuxErr := createTmuxWindow(daemonSession, windowName, workDir, script, e.getProjectDir(task.Project), task.ID)
 	if tmuxErr != nil {
 		e.logger.Warn("tmux failed to create window", "error", tmuxErr, "session", daemonSession)
 		return false
@@ -3743,7 +3765,7 @@ func (e *Executor) resumeGeminiWithMode(task *db.Task, workDir string, dangerous
 	script := fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %sgemini %s--resume %s`,
 		taskID, taskSessionID, task.Port, task.WorktreePath, envPrefix, dangerousFlag, sessionID)
 
-	actualSession, tmuxErr := createTmuxWindow(daemonSession, windowName, workDir, script, e.getProjectDir(task.Project))
+	actualSession, tmuxErr := createTmuxWindow(daemonSession, windowName, workDir, script, e.getProjectDir(task.Project), task.ID)
 	if tmuxErr != nil {
 		e.logger.Warn("tmux failed to create window", "error", tmuxErr, "session", daemonSession)
 		return false
@@ -5950,7 +5972,7 @@ func (e *Executor) runPi(ctx context.Context, task *db.Task, workDir, prompt str
 	}
 
 	// Create new window in task-daemon session (with retry logic for race conditions)
-	actualSession, tmuxErr := createTmuxWindow(daemonSession, windowName, workDir, script, e.getProjectDir(task.Project))
+	actualSession, tmuxErr := createTmuxWindow(daemonSession, windowName, workDir, script, e.getProjectDir(task.Project), task.ID)
 	if tmuxErr != nil {
 		e.logger.Error("tmux new-window failed", "error", tmuxErr, "session", daemonSession)
 		e.logLine(task.ID, "error", fmt.Sprintf("Failed to create tmux window: %s", tmuxErr.Error()))
@@ -6058,7 +6080,7 @@ func (e *Executor) runPiResume(ctx context.Context, task *db.Task, workDir, prom
 		task.ID, taskSessionID, task.Port, task.WorktreePath, sessionPath, feedbackFile.Name())
 
 	// Create new window in task-daemon session (with retry logic for race conditions)
-	actualSession, tmuxErr := createTmuxWindow(daemonSession, windowName, workDir, script, e.getProjectDir(task.Project))
+	actualSession, tmuxErr := createTmuxWindow(daemonSession, windowName, workDir, script, e.getProjectDir(task.Project), task.ID)
 	if tmuxErr != nil {
 		e.logger.Error("tmux new-window failed", "error", tmuxErr, "session", daemonSession)
 		e.logLine(task.ID, "error", fmt.Sprintf("Failed to create tmux window: %s", tmuxErr.Error()))

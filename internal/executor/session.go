@@ -5,11 +5,27 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/bborn/workflow/internal/db"
+	"github.com/bborn/workflow/internal/executorlock"
 )
+
+// spawnLockTimeout bounds how long a spawner waits for the per-task executor
+// spawn lock before proceeding best-effort. The critical section it guards (an
+// existing-window check plus a single tmux new-window) is fast, so a holder
+// should release well within this; the timeout only preserves liveness if a
+// spawner wedges.
+const spawnLockTimeout = 15 * time.Second
+
+// executorSpawnLockDir is the directory the per-task spawn lock files live in.
+// Co-located with the task DB so isolated instances (custom DB path) get their
+// own lock namespace and don't contend with the real daemon.
+func executorSpawnLockDir() string {
+	return filepath.Dir(db.DefaultPath())
+}
 
 // sessionValidator is an optional capability for executors that can verify
 // whether a stored session still exists. EnsureTaskWindow uses it to avoid
@@ -42,6 +58,22 @@ func (e *Executor) EnsureTaskWindow(ctx context.Context, task *db.Task, sessionI
 	// Reuse an existing window in any task-daemon session to avoid duplicates.
 	if target := findExistingTaskWindow(ctx, windowName); target != "" {
 		return target, false, nil
+	}
+
+	// Serialize the check-then-create against the daemon executor and any other
+	// caller so two spawners can't both observe "no window yet" and each create
+	// one — the double-spawn that leaves two executor sessions in one worktree with
+	// clobbered pane ids. Held only around the spawn decision; released as soon as
+	// the window (or shell pane) is created. Best-effort: on timeout we proceed
+	// rather than wedge the UI, but re-check under whatever lock we did get.
+	if release, lerr := executorlock.AcquireSpawn(executorSpawnLockDir(), task.ID, spawnLockTimeout); lerr == nil {
+		defer release()
+		// Another spawner may have created the window while we waited for the lock.
+		if target := findExistingTaskWindow(ctx, windowName); target != "" {
+			return target, false, nil
+		}
+	} else {
+		e.logger.Warn("could not acquire executor spawn lock; proceeding best-effort", "task", task.ID, "error", lerr)
 	}
 
 	daemonSession, err := findOrCreateDaemonSession(ctx)
