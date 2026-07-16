@@ -7,6 +7,7 @@
 
   const TEAL = '#d05010'; // taskyou logo orange (accent)
   let mode = 'none'; // none | select | box | note
+  let selectDown = false; // a select-mode pointer press is in progress
   let annotations = []; // {kind,label,selector,tag,text,html,rect,styles,comment,els:[]}
   let nextLabel = 1;
 
@@ -86,7 +87,7 @@
     }
     .region { position: absolute; border: 2px dashed ${TEAL}; background: rgba(208,80,16,.12); border-radius: 2px; touch-action: none; }
     .dragrect { position: fixed; border: 2px dashed ${TEAL}; background: rgba(208,80,16,.12); display: none; }
-    .boxlayer { position: fixed; inset: 0; cursor: crosshair; touch-action: none; }
+    .boxlayer, .selectlayer { position: fixed; inset: 0; cursor: crosshair; touch-action: none; }
     /* The comment editor is a <dialog> opened with showModal() so it joins the
        top layer as the topmost modal — that makes any page-level modal dialog
        (and its focus trap) inert instead of us, so our textarea stays typeable.
@@ -166,6 +167,7 @@
   // --- Modes -----------------------------------------------------------------
   const boxLayer = el('div', 'boxlayer');
   const dragRect = el('div', 'dragrect');
+  const selectLayer = el('div', 'selectlayer');
 
   function setMode(m) {
     mode = m;
@@ -173,8 +175,11 @@
     btnBox.classList.toggle('active', m === 'box');
     btnNote.classList.toggle('active', m === 'note');
     hl.style.display = 'none';
+    selectDown = false;
     boxLayer.remove();
     dragRect.remove();
+    selectLayer.remove();
+    if (m === 'select') root.appendChild(selectLayer);
     if (m === 'box') {
       root.appendChild(boxLayer);
       root.appendChild(dragRect);
@@ -187,14 +192,27 @@
     }
   }
 
-  // Select mode: hover highlight + capture-phase click interception.
-  // Driven by pointer events so it also tracks under Chrome's mobile/touch
-  // emulation (where mouseover never fires). On touch the finger position is
-  // the "hover" target while pressed; a tap still resolves to a click below.
-  function onPointerHover(e) {
-    if (mode !== 'select') return;
-    const t = realTarget(e);
-    if (!t) return;
+  // Select mode runs on a full-viewport capture layer (like box mode) so one
+  // path serves both a mouse and Chrome's mobile/touch emulation. Touch only
+  // dispatches pointer events while pressed and never fires plain hover, so we
+  // preview on press-drag and commit on release; a mouse still previews on
+  // hover (pointermove fires with no button) and commits on click. The layer's
+  // touch-action:none stops the page from stealing the gesture to scroll, and
+  // it intercepts the click so the page never navigates.
+  //
+  // Hit-testing goes through elementsFromPoint (coordinate-based), not e.target:
+  // the layer is the event target, and on touch implicit pointer capture would
+  // otherwise pin e.target to the press element for the whole drag. We skip our
+  // own shadow host (surfaced by the shadow boundary) and take the topmost page
+  // element beneath it.
+  function pageElementAt(x, y) {
+    for (const node of document.elementsFromPoint(x, y)) {
+      if (node === host || host.contains(node)) continue;
+      return node.nodeType === 1 ? node : null;
+    }
+    return null;
+  }
+  function highlight(t) {
     const r = t.getBoundingClientRect();
     hl.style.display = 'block';
     hl.style.left = r.left - 2 + 'px';
@@ -202,25 +220,32 @@
     hl.style.width = r.width + 4 + 'px';
     hl.style.height = r.height + 4 + 'px';
   }
-  function onClick(e) {
-    if (mode !== 'select') return;
-    const t = realTarget(e);
-    if (!t) return;
+  selectLayer.addEventListener('pointermove', (e) => {
+    // Mouse previews on hover; touch only tracks while a finger is down.
+    if (e.pointerType !== 'mouse' && !selectDown) return;
+    const t = pageElementAt(e.clientX, e.clientY);
+    if (t) highlight(t);
+  });
+  selectLayer.addEventListener('pointerdown', (e) => {
     e.preventDefault();
-    e.stopPropagation();
+    selectLayer.setPointerCapture?.(e.pointerId);
+    selectDown = true;
+    const t = pageElementAt(e.clientX, e.clientY);
+    if (t) highlight(t);
+  });
+  selectLayer.addEventListener('pointerup', (e) => {
+    if (!selectDown) return;
+    selectDown = false;
+    const t = pageElementAt(e.clientX, e.clientY);
     hl.style.display = 'none';
+    if (!t) {
+      setMode('none');
+      return;
+    }
     const snap = snapshotElement(t);
     openPopover({ ...snap, anchorEl: t });
     setMode('none');
-  }
-  function realTarget(e) {
-    if (e.composedPath().includes(host)) return null;
-    const t = e.target;
-    return t && t.nodeType === 1 ? t : null;
-  }
-  document.addEventListener('pointermove', onPointerHover, true);
-  document.addEventListener('pointerover', onPointerHover, true);
-  document.addEventListener('click', onClick, true);
+  });
 
   // Focus shield. Many pages run a focus trap (modal <dialog> controllers, etc.)
   // that refocuses themselves whenever focus appears to leave them. Our UI lives
