@@ -669,6 +669,37 @@ $('auto-reload').addEventListener('change', (e) => {
   chrome.storage.local.set({ autoReload: e.target.checked });
 });
 
+// Collapsible executor panel. Collapsing hides the live terminal to give the
+// task/annotate cards more room; the header (with ● live state) stays visible.
+// The mirror keeps streaming while collapsed, so state stays current. Choice is
+// remembered like auto-reload.
+function setExecutorCollapsed(collapsed, persist = true) {
+  const section = document.querySelector('.executor');
+  if (!section) return;
+  section.classList.toggle('collapsed', collapsed);
+  const btn = $('term-toggle');
+  if (btn) {
+    btn.setAttribute('aria-expanded', String(!collapsed));
+    btn.setAttribute('aria-label', collapsed ? 'Expand executor' : 'Collapse executor');
+  }
+  // Re-fit once the terminal is visible again (belt-and-suspenders alongside the
+  // ResizeObserver, which also fires as the wrapper regains size).
+  if (!collapsed) requestAnimationFrame(() => { try { fit && fit.fit(); } catch {} });
+  if (persist) chrome.storage.local.set({ executorCollapsed: collapsed });
+}
+function toggleExecutor() {
+  const section = document.querySelector('.executor');
+  setExecutorCollapsed(!section.classList.contains('collapsed'));
+}
+$('term-head').addEventListener('click', (e) => {
+  // Let the auto-reload checkbox work without toggling the panel.
+  if (e.target.closest('.auto-reload')) return;
+  toggleExecutor();
+});
+chrome.storage.local.get('executorCollapsed').then(({ executorCollapsed }) => {
+  if (executorCollapsed) setExecutorCollapsed(true, false);
+});
+
 chrome.tabs.onActivated.addListener(refresh);
 chrome.tabs.onUpdated.addListener((tabId, info) => {
   if (tabId === activeTabId && info.status === 'complete') refresh();
