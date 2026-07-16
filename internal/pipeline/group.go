@@ -28,6 +28,11 @@ func groupKey(t *db.Task) string {
 	return strings.TrimSpace(t.BranchName)
 }
 
+// GroupKey exports groupKey so callers outside this package (e.g. the MCP
+// artifact handlers) can derive a workflow task's shared-branch key without
+// re-implementing the SourceBranch-else-BranchName rule.
+func GroupKey(t *db.Task) string { return groupKey(t) }
+
 // IsWorkflowTask reports whether a task belongs to a workflow (tagged "pipeline"
 // with a shared branch).
 func IsWorkflowTask(t *db.Task) bool {

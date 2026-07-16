@@ -4911,6 +4911,8 @@ func writeWorkflowMCPConfig(worktreePath string, taskID int64, configDir string)
 			"taskyou_list_tasks",
 			"taskyou_get_project_context",
 			"taskyou_set_project_context",
+			"taskyou_get_artifact",
+			"taskyou_set_artifact",
 		},
 	}
 

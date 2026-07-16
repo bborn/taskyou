@@ -237,6 +237,23 @@ func (db *DB) migrate() error {
 		)`,
 
 		`CREATE INDEX IF NOT EXISTS idx_routine_runs_routine ON routine_runs(routine, id)`,
+
+		// Pipeline artifacts: inter-phase document hand-off for workflows (e.g. the
+		// rpi workflow). Keyed by (branch, name) so a document phase can write a full
+		// markdown document that a later phase on the same shared branch reads back,
+		// without committing docs to git. Modeled on projects.context, but that is a
+		// 1:1 column and cannot carry a (branch, phase) key — hence a dedicated table.
+		`CREATE TABLE IF NOT EXISTS pipeline_artifacts (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			branch TEXT NOT NULL,
+			name   TEXT NOT NULL,
+			content TEXT NOT NULL DEFAULT '',
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			UNIQUE(branch, name)
+		)`,
+
+		`CREATE INDEX IF NOT EXISTS idx_pipeline_artifacts_branch ON pipeline_artifacts(branch)`,
 	}
 
 	for _, m := range migrations {

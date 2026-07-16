@@ -7,11 +7,16 @@ steps:
       below. Read the relevant files, trace how the affected code works today, and
       write up a concise, factual research summary: which files/functions are
       involved, how they fit together, and the constraints an implementation must
-      respect. Do not write any code in this step — this is analysis only. Hand
-      your findings forward for the implement step.
+      respect. Do not write any code in this step — this is analysis only.
+
+      Hand your findings forward by saving them to the workflow artifact store:
+      call taskyou_set_artifact with name "research" and content set to your full
+      research write-up (markdown). Do NOT commit anything to git in this step.
+      When the artifact is saved, call taskyou_complete.
   - name: implement
     deps: [research]
     prompt: |
-      Using the research handed forward from the previous step, implement the
-      goal below. Write the code, run the relevant build/tests, then commit and
-      push your work and open a PR.
+      Read the research handed forward from the previous step: call
+      taskyou_get_artifact with name "research" and use it to understand the
+      codebase before you start. Then implement the goal below. Write the code,
+      run the relevant build/tests, then commit and push your work and open a PR.

@@ -1528,6 +1528,8 @@ func TestWriteWorkflowMCPConfig(t *testing.T) {
 			"taskyou_list_tasks",
 			"taskyou_get_project_context",
 			"taskyou_set_project_context",
+			"taskyou_get_artifact",
+			"taskyou_set_artifact",
 		}
 		if len(autoApprove) != len(expectedTools) {
 			t.Errorf("autoApprove has %d items, want %d", len(autoApprove), len(expectedTools))
