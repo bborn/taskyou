@@ -2101,13 +2101,17 @@ func (e *Executor) buildPrompt(task *db.Task, attachmentPaths []string) string {
 func (e *Executor) buildUniversalGuidance(task *db.Task) string {
 	var b strings.Builder
 
-	b.WriteString(`Project context:
+	b.WriteString(`Your taskyou_* tools (via the "taskyou" MCP server) are connected to this session, but your harness may DEFER them behind tool search instead of loading them upfront. If you do not see a taskyou_* tool in your active toolset, it is deferred, NOT missing — load it before use (e.g. ToolSearch "select:taskyou_complete") and then call it. Never conclude "the taskyou server isn't connected" or skip a required taskyou_* call without first trying to load the tool; the server is always present for a task you are executing.`)
+
+	b.WriteString(`
+
+Project context:
 - Before exploring or starting work, call taskyou_get_project_context first via MCP. If it returns context, use it and skip exploration. If it is empty, explore once and save a summary via taskyou_set_project_context so future tasks in this project can reuse it.`)
 
 	b.WriteString(`
 
 Completion signaling (REQUIRED — nothing else watches for completion):
-- When your work is finished, call taskyou_complete with a one-paragraph summary (PR link, files touched, follow-ups). Do NOT just print a summary and stop — without this call the task stalls forever and a human has to close it by hand.
+- When your work is finished, call taskyou_complete with a one-paragraph summary (PR link, files touched, follow-ups). Do NOT just print a summary and stop — without this call the task stalls forever and a human has to close it by hand. If taskyou_complete isn't in your active toolset, it is deferred behind tool search (see above) — load it and call it; do not stop with an apology that the tool is unavailable.
   - If you opened a PR: the task moves to 'blocked' and waits for a human to review and merge it. It is promoted to 'done' automatically once the PR is merged or closed — so calling taskyou_complete does NOT mean the work shipped, you must NOT wait for the merge yourself, and you must NOT call taskyou_complete more than once.
   - If the task produced no PR (e.g. a quick config change or moving a file): it moves straight to 'done'.
 - When you need clarification, call taskyou_needs_input with the question. This moves the task to 'blocked' so a human is notified. Do not prompt in the terminal — the task system can't see TTY prompts.`)
