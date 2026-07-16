@@ -45,6 +45,7 @@ type Step struct {
 	Instruction string            // Full body template (built-in / verbatim steps). Takes precedence over Prompt.
 	Prompt      string            // Custom-workflow body: what the step does; the git handoff is composed from the DAG (see compose.go).
 	Deps        []string          // Names of steps that must complete before this one runs.
+	Gate        bool              // Human-in-the-loop: when this step finishes it parks 'blocked' for human review instead of advancing the DAG; a human releases it (and its dependents) with `ty close`. Persisted on the task as a "gate" tag token (see the Tags field in Create).
 }
 
 // Definition is a "kind": one authored recipe. With Steps it is a workflow (a DAG
@@ -283,6 +284,14 @@ func Create(database *db.DB, opts Options) (*Result, error) {
 	byName := make(map[string]*db.Task, len(steps))
 	tasks := make([]*db.Task, 0, len(steps))
 	for _, s := range steps {
+		// A gate step carries an extra "gate" tag token so the completion paths (the
+		// MCP taskyou_complete tool, the Stop hook, and the daemon sweep) can recognize
+		// it and park it 'blocked' for human review instead of advancing the DAG. Kept
+		// in Tags (not a new column) so no SELECT/Scan across the codebase has to change.
+		tags := "pipeline"
+		if s.Gate {
+			tags = "pipeline,gate"
+		}
 		task := &db.Task{
 			Title:           stepTitle(s.Name, goal),
 			Body:            goal, // Placeholder; rewritten once the branch is known.
@@ -294,7 +303,7 @@ func Create(database *db.DB, opts Options) (*Result, error) {
 			ClaudeConfigDir: s.ConfigDir,
 			EnvJSON:         encodeStepEnv(s.Env),
 			PermissionMode:  opts.PermissionMode,
-			Tags:            "pipeline",
+			Tags:            tags,
 		}
 		if err := database.CreateTask(task); err != nil {
 			return nil, fmt.Errorf("create %s step: %w", s.Name, err)

@@ -414,6 +414,35 @@ func (s *Server) handleToolCall(id interface{}, params *toolCallParams) {
 			}
 		}
 
+		// A gate step is a human-in-the-loop boundary: instead of advancing the DAG
+		// when it finishes, it parks 'blocked' for human review. Its dependents are
+		// already held ('blocked' with an open blocker), so leaving the step 'blocked'
+		// rather than 'done' keeps them held — a human releases the chain by closing
+		// this step (`ty close`), which runs UpdateTaskStatus(done) → the normal
+		// ProcessCompletedBlocker cascade. Only non-terminal gate steps park here; a
+		// terminal step already parks for PR review below.
+		if nonTerminalStep && pipeline.IsGateStep(task) {
+			if err := s.db.UpdateTaskStatus(s.taskID, db.StatusBlocked); err != nil {
+				s.sendError(id, -32603, fmt.Sprintf("Failed to park gate step for review: %v", err))
+				return
+			}
+			// Log as a "question" so it surfaces in the blocked/needs-input lane and the
+			// daemon sweep leaves it for the human rather than auto-completing it.
+			s.db.AppendTaskLog(s.taskID, "question", pipeline.GateStepParkedLog)
+
+			// The agent's turn is over; let the executor tear down the session.
+			if s.onComplete != nil {
+				s.onComplete()
+			}
+
+			s.sendResult(id, toolCallResult{
+				Content: []contentBlock{
+					{Type: "text", Text: "Output saved. This is a human-review gate — the step is now 'blocked' awaiting a human to approve it (`ty close`), which releases the next phase. Do not call taskyou_complete again." + contextReminder},
+				},
+			})
+			return
+		}
+
 		var prNumber int
 		var prURL string
 		if !nonTerminalStep {

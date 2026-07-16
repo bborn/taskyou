@@ -40,13 +40,32 @@ func IsWorkflowTask(t *db.Task) bool {
 }
 
 func hasPipelineTag(tags string) bool {
+	return hasTagToken(tags, "pipeline")
+}
+
+func hasTagToken(tags, want string) bool {
 	for _, tag := range strings.Split(tags, ",") {
-		if strings.EqualFold(strings.TrimSpace(tag), "pipeline") {
+		if strings.EqualFold(strings.TrimSpace(tag), want) {
 			return true
 		}
 	}
 	return false
 }
+
+// IsGateStep reports whether a workflow step is a human-in-the-loop gate — a step
+// that, once it produces its output, parks in 'blocked' for human review instead of
+// advancing the DAG. A human releases it (and its dependents) with `ty close`. The
+// gate is declared in the workflow YAML (stepYAML.Gate) and persisted as a "gate"
+// tag token on the step task (see pipeline.Create). Sibling to IsWorkflowTask /
+// IsTerminalStep. Non-workflow tasks are never gate steps.
+func IsGateStep(t *db.Task) bool {
+	return IsWorkflowTask(t) && hasTagToken(t.Tags, "gate")
+}
+
+// GateStepParkedLog is the system-log line marking a finished gate step as parked in
+// 'blocked' awaiting human review. Shared so the completion paths (taskyou_complete,
+// the Stop hook, the daemon sweep) use the same text and can dedupe against it.
+const GateStepParkedLog = "Gate step finished — parked in 'blocked' for human review. Approve it with `ty close <id>` to release the next phase."
 
 // TerminalStepParkedLog is the system-log line marking a finished terminal step as
 // parked in 'blocked' awaiting a human merge. The Stop hook writes it when it catches

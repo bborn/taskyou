@@ -484,6 +484,21 @@ func (e *Executor) reconcileFinishedWorkflowSteps() {
 			}
 			continue
 		}
+		// A gate step is a human-review boundary: never auto-complete it to 'done'.
+		// Like the terminal step, if it genuinely settled (committed + pushed) but the
+		// Stop hook fired mid-push and left the generic state, clarify (once) that it's
+		// parked for review and tear down its idle session; a human releases it with
+		// `ty close`.
+		if pipeline.IsGateStep(task) {
+			if WorkflowStepFinished(task.WorktreePath, baseCommit, baseDirty) {
+				if logged, _ := e.db.HasLogLineContaining(task.ID, pipeline.GateStepParkedLog); !logged {
+					e.logLine(task.ID, "system", pipeline.GateStepParkedLog)
+					e.teardownWorkflowStepSession(task)
+					e.logger.Info("Gate workflow step parked for human review", "id", task.ID, "title", task.Title)
+				}
+			}
+			continue
+		}
 		if !WorkflowStepFinished(task.WorktreePath, baseCommit, baseDirty) {
 			continue
 		}
