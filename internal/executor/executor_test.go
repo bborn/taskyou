@@ -2174,6 +2174,28 @@ func TestBuildPromptUniversalGuidance(t *testing.T) {
 			t.Error("worktree constraint should be omitted when project does not use worktrees")
 		}
 	})
+
+	// The taskyou_* tools are registered with alwaysLoad, but that flag is not
+	// honored in the project-scoped ~/.claude.json location on current Claude
+	// versions, so the harness defers them behind tool search. Without guidance,
+	// an executor sees no taskyou_complete in its active toolset and stops with an
+	// apology that "the taskyou server isn't connected" instead of loading and
+	// calling it — leaving the task uncompleted. The prompt must tell the agent the
+	// tools are deferred (not missing) and to load them before use.
+	t.Run("prompt warns taskyou tools may be deferred behind tool search", func(t *testing.T) {
+		exec, task := newExec(t, true)
+		task.Type = "code"
+		if err := exec.db.CreateTask(task); err != nil {
+			t.Fatal(err)
+		}
+		prompt := exec.buildPrompt(task, nil)
+		if !strings.Contains(prompt, "deferred") {
+			t.Error("prompt should tell the agent taskyou_* tools may be deferred behind tool search")
+		}
+		if !strings.Contains(prompt, "ToolSearch") {
+			t.Error("prompt should tell the agent how to load a deferred taskyou_* tool")
+		}
+	})
 }
 
 // TestBuildPromptUsesFileKindInstructions proves the convention bridge at run
