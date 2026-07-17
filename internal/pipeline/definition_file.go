@@ -34,6 +34,18 @@ type stepYAML struct {
 	// git handoff is added). It's set when `ty pipeline edit` ejects a built-in
 	// workflow, so the ejected file behaves identically to the built-in.
 	Verbatim bool `yaml:"verbatim,omitempty"`
+	// Gate marks a human-in-the-loop step: when it finishes producing its output it
+	// parks in 'blocked' for human review instead of advancing the DAG. A human
+	// releases it (and its dependents) with `ty close <id>`. Used for high-leverage
+	// boundaries (e.g. the RPI design/plan phases) where a bad phase should be caught
+	// before it poisons everything downstream.
+	Gate bool `yaml:"gate,omitempty"`
+	// Verify is an opt-in evidence gate: a shell command run in the step's worktree
+	// when the agent calls taskyou_complete. A non-zero exit rejects the completion
+	// (the step keeps running, the command output is handed back) instead of trusting
+	// the agent's say-so — the backstop for "agent called done but the build is red".
+	// "" = no gate. Distinct from Gate (a human boundary); the two compose.
+	Verify string `yaml:"verify,omitempty"`
 }
 
 // definitionYAML is the on-disk form of a kind. `steps` makes it a workflow;
@@ -103,6 +115,8 @@ func ParseDefinition(data []byte) (Definition, error) {
 			ConfigDir: strings.TrimSpace(s.ConfigDir),
 			Env:       s.Env,
 			Deps:      s.Deps,
+			Gate:      s.Gate,
+			Verify:    strings.TrimSpace(s.Verify),
 		}
 		// A verbatim step's prompt is its full instruction; otherwise the prompt is
 		// the work and the git handoff is composed from the DAG.
@@ -139,6 +153,8 @@ func Marshal(def Definition) ([]byte, error) {
 			Env:       s.Env,
 			Deps:      s.Deps,
 			Prompt:    s.Prompt,
+			Gate:      s.Gate,
+			Verify:    s.Verify,
 		}
 		// A built-in step carries a full Instruction — write it as a verbatim
 		// prompt so the ejected file behaves identically when reloaded.

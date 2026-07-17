@@ -328,6 +328,37 @@ func (s *Server) handleRequest(req *jsonRPCRequest) {
 						"required": []string{"context"},
 					},
 				},
+				{
+					Name:        "taskyou_set_artifact",
+					Description: "Save a workflow phase document (e.g. research, design, plan) so a later phase in the same workflow can read it. Artifacts are shared across the workflow's steps via the pipeline branch — this is how one phase hands its full output document to the next WITHOUT committing docs to git. Call this at the end of a document phase with the complete markdown you produced.",
+					InputSchema: map[string]interface{}{
+						"type": "object",
+						"properties": map[string]interface{}{
+							"name": map[string]interface{}{
+								"type":        "string",
+								"description": "A short kebab-case name identifying this artifact, typically the phase name (e.g. \"research-questions\", \"research\", \"design\", \"structure-outline\", \"plan\").",
+							},
+							"content": map[string]interface{}{
+								"type":        "string",
+								"description": "The full markdown document to store. Re-saving the same name overwrites the previous content.",
+							},
+						},
+						"required": []string{"name", "content"},
+					},
+				},
+				{
+					Name:        "taskyou_get_artifact",
+					Description: "Read a workflow phase document produced by an earlier phase in this workflow. Call this to pick up the previous phase's output (e.g. the research phase reads the research-questions artifact). Pass a name to fetch one artifact; omit name to list all artifacts for this workflow with their contents.",
+					InputSchema: map[string]interface{}{
+						"type": "object",
+						"properties": map[string]interface{}{
+							"name": map[string]interface{}{
+								"type":        "string",
+								"description": "The artifact name to fetch (e.g. \"research-questions\"). Omit to return all artifacts for this workflow.",
+							},
+						},
+					},
+				},
 			},
 		})
 
@@ -350,6 +381,34 @@ func (s *Server) handleToolCall(id interface{}, params *toolCallParams) {
 		summary, _ := params.Arguments["summary"].(string)
 
 		task, _ := s.db.GetTask(s.taskID)
+
+		// Evidence gate. If this step registered a `verify:` command, run it in the
+		// worktree BEFORE accepting completion. A non-zero exit means the agent called
+		// done on work that doesn't actually build/pass — reject the completion, hand
+		// the output back, and leave the step running so the agent fixes it and calls
+		// taskyou_complete again. This is the backstop for completion-by-assertion: the
+		// agent's say-so alone is not trusted. Non-workflow tasks and steps with no
+		// verify command have no row and fall straight through unchanged.
+		if task != nil {
+			if verifyCmd, _ := s.db.GetStepVerify(s.taskID); strings.TrimSpace(verifyCmd) != "" {
+				dir := strings.TrimSpace(task.WorktreePath)
+				if dir == "" {
+					if proj, err := s.db.GetProjectByName(task.Project); err == nil && proj != nil {
+						dir = proj.Path
+					}
+				}
+				if out, passed := pipeline.RunStepVerify(dir, verifyCmd); !passed {
+					s.db.AppendTaskLog(s.taskID, "system", "Verification failed — completion rejected; the step keeps running so the agent can fix it.")
+					s.sendResult(id, toolCallResult{
+						Content: []contentBlock{
+							{Type: "text", Text: fmt.Sprintf("❌ Verification failed — this step is NOT complete.\n\nThe configured check exited non-zero, so taskyou_complete was rejected:\n    %s\n\nFix the problem, then call taskyou_complete again.\n\n--- verify output (tail) ---\n%s", verifyCmd, out)},
+						},
+					})
+					return
+				}
+				s.db.AppendTaskLog(s.taskID, "system", "Verification passed: "+verifyCmd)
+			}
+		}
 
 		// Check if we should remind about saving project context
 		var contextReminder string
@@ -381,6 +440,35 @@ func (s *Server) handleToolCall(id interface{}, params *toolCallParams) {
 			if deps, err := s.db.GetBlockedBy(task.ID); err == nil && len(deps) > 0 {
 				nonTerminalStep = true
 			}
+		}
+
+		// A gate step is a human-in-the-loop boundary: instead of advancing the DAG
+		// when it finishes, it parks 'blocked' for human review. Its dependents are
+		// already held ('blocked' with an open blocker), so leaving the step 'blocked'
+		// rather than 'done' keeps them held — a human releases the chain by closing
+		// this step (`ty close`), which runs UpdateTaskStatus(done) → the normal
+		// ProcessCompletedBlocker cascade. Only non-terminal gate steps park here; a
+		// terminal step already parks for PR review below.
+		if nonTerminalStep && pipeline.IsGateStep(task) {
+			if err := s.db.UpdateTaskStatus(s.taskID, db.StatusBlocked); err != nil {
+				s.sendError(id, -32603, fmt.Sprintf("Failed to park gate step for review: %v", err))
+				return
+			}
+			// Log as a "question" so it surfaces in the blocked/needs-input lane and the
+			// daemon sweep leaves it for the human rather than auto-completing it.
+			s.db.AppendTaskLog(s.taskID, "question", pipeline.GateStepParkedLog)
+
+			// The agent's turn is over; let the executor tear down the session.
+			if s.onComplete != nil {
+				s.onComplete()
+			}
+
+			s.sendResult(id, toolCallResult{
+				Content: []contentBlock{
+					{Type: "text", Text: "Output saved. This is a human-review gate — the step is now 'blocked' awaiting a human to approve it (`ty close`), which releases the next phase. Do not call taskyou_complete again." + contextReminder},
+				},
+			})
+			return
 		}
 
 		var prNumber int
@@ -795,6 +883,110 @@ This saves future tasks from re-exploring the codebase.`},
 		s.sendResult(id, toolCallResult{
 			Content: []contentBlock{
 				{Type: "text", Text: fmt.Sprintf("Project context saved for '%s'. Future tasks will use this context to skip codebase exploration.", currentTask.Project)},
+			},
+		})
+
+	case "taskyou_set_artifact":
+		name, _ := params.Arguments["name"].(string)
+		name = strings.TrimSpace(name)
+		if name == "" {
+			s.sendError(id, -32602, "name is required")
+			return
+		}
+		content, _ := params.Arguments["content"].(string)
+		if content == "" {
+			s.sendError(id, -32602, "content is required")
+			return
+		}
+
+		currentTask, err := s.db.GetTask(s.taskID)
+		if err != nil || currentTask == nil {
+			s.sendError(id, -32603, "Failed to get current task")
+			return
+		}
+		// Derive the branch key from the task itself — never trust a client-supplied
+		// branch — so an artifact is always scoped to the workflow the caller runs in.
+		branch := pipeline.GroupKey(currentTask)
+		if branch == "" {
+			s.sendError(id, -32602, "This task is not part of a workflow — artifacts are only available inside a pipeline.")
+			return
+		}
+
+		if err := s.db.SetPipelineArtifact(branch, name, content); err != nil {
+			s.sendError(id, -32603, fmt.Sprintf("Failed to save artifact: %v", err))
+			return
+		}
+
+		s.db.AppendTaskLog(s.taskID, "system", fmt.Sprintf("Workflow artifact '%s' saved (%d bytes)", name, len(content)))
+
+		s.sendResult(id, toolCallResult{
+			Content: []contentBlock{
+				{Type: "text", Text: fmt.Sprintf("Artifact '%s' saved. Later phases in this workflow can read it with taskyou_get_artifact.", name)},
+			},
+		})
+
+	case "taskyou_get_artifact":
+		currentTask, err := s.db.GetTask(s.taskID)
+		if err != nil || currentTask == nil {
+			s.sendError(id, -32603, "Failed to get current task")
+			return
+		}
+		branch := pipeline.GroupKey(currentTask)
+		if branch == "" {
+			s.sendError(id, -32602, "This task is not part of a workflow — artifacts are only available inside a pipeline.")
+			return
+		}
+
+		name, _ := params.Arguments["name"].(string)
+		name = strings.TrimSpace(name)
+
+		if name != "" {
+			// Fetch one named artifact.
+			content, err := s.db.GetPipelineArtifact(branch, name)
+			if err != nil {
+				s.sendError(id, -32603, fmt.Sprintf("Failed to read artifact: %v", err))
+				return
+			}
+			if content == "" {
+				s.sendResult(id, toolCallResult{
+					Content: []contentBlock{
+						{Type: "text", Text: fmt.Sprintf("No artifact named '%s' has been produced by this workflow yet.", name)},
+					},
+				})
+				return
+			}
+			s.sendResult(id, toolCallResult{
+				Content: []contentBlock{
+					{Type: "text", Text: fmt.Sprintf("## Artifact: %s\n\n%s", name, content)},
+				},
+			})
+			return
+		}
+
+		// No name — list every artifact for this workflow with its contents.
+		artifacts, err := s.db.ListPipelineArtifacts(branch)
+		if err != nil {
+			s.sendError(id, -32603, fmt.Sprintf("Failed to list artifacts: %v", err))
+			return
+		}
+		if len(artifacts) == 0 {
+			s.sendResult(id, toolCallResult{
+				Content: []contentBlock{
+					{Type: "text", Text: "No artifacts have been produced by this workflow yet."},
+				},
+			})
+			return
+		}
+		var sb strings.Builder
+		for i, a := range artifacts {
+			if i > 0 {
+				sb.WriteString("\n\n")
+			}
+			sb.WriteString(fmt.Sprintf("## Artifact: %s\n\n%s", a.Name, a.Content))
+		}
+		s.sendResult(id, toolCallResult{
+			Content: []contentBlock{
+				{Type: "text", Text: sb.String()},
 			},
 		})
 

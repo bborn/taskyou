@@ -292,6 +292,48 @@ func TestProcessCompletedBlocker(t *testing.T) {
 	}
 }
 
+// TestGateStepCloseReleasesDependents models the human approving a workflow gate.
+// A gate step parks 'blocked' after producing its output (a started task in the
+// blocked lane, tagged "pipeline,gate"), holding its dependents. When a human
+// approves it — `ty close` → UpdateTaskStatus(done) — the standard
+// ProcessCompletedBlocker cascade fires and queues the next phase.
+func TestGateStepCloseReleasesDependents(t *testing.T) {
+	db, cleanup := setupDepsTestDB(t)
+	defer cleanup()
+
+	// The gate step already ran and is parked 'blocked' for review.
+	gate := &Task{Title: "[design] goal", Status: StatusBlocked, Tags: "pipeline,gate"}
+	if err := db.CreateTask(gate); err != nil {
+		t.Fatalf("Failed to create gate step: %v", err)
+	}
+	if err := db.MarkTaskStarted(gate.ID); err != nil {
+		t.Fatalf("Failed to mark gate started: %v", err)
+	}
+
+	// The next phase waits, blocked on the gate with auto-queue enabled.
+	next := &Task{Title: "[build] goal", Status: StatusBlocked, Tags: "pipeline"}
+	if err := db.CreateTask(next); err != nil {
+		t.Fatalf("Failed to create next step: %v", err)
+	}
+	if err := db.AddDependency(gate.ID, next.ID, true); err != nil {
+		t.Fatalf("Failed to add dependency: %v", err)
+	}
+
+	// The human approves the gate.
+	if err := db.UpdateTaskStatus(gate.ID, StatusDone); err != nil {
+		t.Fatalf("Failed to close gate step: %v", err)
+	}
+
+	// The next phase is released (queued) by the cascade.
+	nextUpdated, err := db.GetTask(next.ID)
+	if err != nil {
+		t.Fatalf("Failed to get next step: %v", err)
+	}
+	if nextUpdated.Status != StatusQueued {
+		t.Errorf("Expected next phase to be queued after closing the gate, got %s", nextUpdated.Status)
+	}
+}
+
 func TestProcessCompletedBlockerWithMultipleBlockers(t *testing.T) {
 	db, cleanup := setupDepsTestDB(t)
 	defer cleanup()

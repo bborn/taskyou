@@ -4751,6 +4751,11 @@ func handleStopHook(database *db.DB, taskID int64, input *ClaudeHookInput) error
 					if pipeline.IsTerminalStep(database, task) {
 						database.UpdateTaskStatus(taskID, db.StatusBlocked)
 						database.AppendTaskLog(taskID, "system", pipeline.TerminalStepParkedLog)
+					} else if pipeline.IsGateStep(task) {
+						// A gate step is a human-review boundary: park it 'blocked' rather
+						// than advancing, so the next phase waits until a human closes it.
+						database.UpdateTaskStatus(taskID, db.StatusBlocked)
+						database.AppendTaskLog(taskID, "system", pipeline.GateStepParkedLog)
 					} else {
 						database.UpdateTaskStatus(taskID, db.StatusDone)
 						database.AppendTaskLog(taskID, "system", "Work committed and pushed — workflow advances to the next step")

@@ -54,6 +54,83 @@ func TestParseDefinition(t *testing.T) {
 	}
 }
 
+func TestParseDefinitionVerify(t *testing.T) {
+	const y = `
+name: verify-flow
+steps:
+  - name: build
+    prompt: Build it.
+    verify: go build ./... && go test ./...
+  - name: ship
+    deps: [build]
+    prompt: Ship it.
+`
+	def, err := ParseDefinition([]byte(y))
+	if err != nil {
+		t.Fatalf("ParseDefinition: %v", err)
+	}
+	build, _ := def.step("build")
+	if build.Verify != "go build ./... && go test ./..." {
+		t.Errorf("build.Verify = %q, want the command", build.Verify)
+	}
+	ship, _ := def.step("ship")
+	if ship.Verify != "" {
+		t.Errorf("ship.Verify = %q, want empty (no verify)", ship.Verify)
+	}
+
+	// The verify command survives a Marshal → re-parse round trip.
+	out, err := Marshal(def)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	def2, err := ParseDefinition(out)
+	if err != nil {
+		t.Fatalf("re-parse: %v", err)
+	}
+	build2, _ := def2.step("build")
+	if build2.Verify != build.Verify {
+		t.Errorf("round-trip Verify = %q, want %q", build2.Verify, build.Verify)
+	}
+}
+
+func TestCreatePersistsStepVerify(t *testing.T) {
+	const y = `
+name: verify-create
+steps:
+  - name: build
+    prompt: Build it.
+    verify: go test ./...
+  - name: ship
+    deps: [build]
+    prompt: Ship it.
+`
+	installWorkflow(t, "verify-create", y)
+	database := testDB(t)
+	res, err := Create(database, Options{Goal: "do a thing", Project: "test", Definition: "verify-create", Execute: true})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	build := taskByStep(res, "build")
+	got, err := database.GetStepVerify(build.ID)
+	if err != nil {
+		t.Fatalf("GetStepVerify: %v", err)
+	}
+	if got != "go test ./..." {
+		t.Errorf("build step verify = %q, want %q", got, "go test ./...")
+	}
+
+	// A step with no verify has no gate row.
+	ship := taskByStep(res, "ship")
+	shipVerify, err := database.GetStepVerify(ship.ID)
+	if err != nil {
+		t.Fatalf("GetStepVerify ship: %v", err)
+	}
+	if shipVerify != "" {
+		t.Errorf("ship step verify = %q, want empty", shipVerify)
+	}
+}
+
 func TestParseDefinitionRejectsInvalid(t *testing.T) {
 	cases := map[string]string{
 		"no name":     "steps:\n  - name: A\n    prompt: x\n",

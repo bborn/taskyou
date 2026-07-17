@@ -45,6 +45,8 @@ type Step struct {
 	Instruction string            // Full body template (built-in / verbatim steps). Takes precedence over Prompt.
 	Prompt      string            // Custom-workflow body: what the step does; the git handoff is composed from the DAG (see compose.go).
 	Deps        []string          // Names of steps that must complete before this one runs.
+	Gate        bool              // Human-in-the-loop: when this step finishes it parks 'blocked' for human review instead of advancing the DAG; a human releases it (and its dependents) with `ty close`. Persisted on the task as a "gate" tag token (see the Tags field in Create).
+	Verify      string            // Opt-in evidence gate: a shell command run in the step's worktree when the agent calls taskyou_complete. Non-zero exit REJECTS the completion (the step stays running and the command output is handed back so the agent fixes it) instead of trusting the agent's say-so. "" = no gate (today's behavior). Persisted in the task-keyed pipeline_step_verify table (a command string can't ride a tag token like Gate does).
 }
 
 // Definition is a "kind": one authored recipe. With Steps it is a workflow (a DAG
@@ -70,16 +72,17 @@ func (d Definition) IsSingle() bool { return len(d.Steps) == 0 }
 // until the user installs a workflow, and Create says so.
 const DefaultDefinition = ""
 
-// registry loads workflow definitions from disk: installed-plugin workflows, the
-// global workflows dir, and any extraDirs (a project's .taskyou/workflows). There
-// are no built-in definitions — the plan-code-review flow that used to live here
-// now ships as an example plugin (examples/plugins/plan-code-review).
+// registry loads the workflow definitions: the bundled built-ins compiled into the
+// binary (e.g. "rpi") first at lowest precedence, then the on-disk workflow files —
+// installed-plugin workflows, the global workflows dir, and any extraDirs (a
+// project's .taskyou/workflows). A same-named on-disk file shadows a bundled
+// built-in, and later dirs shadow earlier ones (project shadows global shadows
+// plugin), so a user's own on-disk workflow wins over one shipped by a plugin.
 func registry(extraDirs ...string) map[string]Definition {
-	out := make(map[string]Definition)
+	out := loadBundledDefinitions() // built-ins, lowest precedence
 	// Search order, lowest precedence first: installed-plugin workflows, then the
 	// global workflows dir, then extraDirs (a project's .taskyou/workflows). Later
-	// dirs shadow earlier ones on a name collision, so a user's own on-disk workflow
-	// wins over one shipped by an installed plugin. dedupeKeepingLast collapses the
+	// dirs shadow earlier ones on a name collision. dedupeKeepingLast collapses the
 	// global dir that WorkflowDirs also re-includes, keeping precedence unambiguous.
 	var dirs []string
 	if PluginWorkflowDirs != nil {
@@ -326,6 +329,14 @@ func Create(database *db.DB, opts Options) (*Result, error) {
 	byName := make(map[string]*db.Task, len(steps))
 	tasks := make([]*db.Task, 0, len(steps))
 	for _, s := range steps {
+		// A gate step carries an extra "gate" tag token so the completion paths (the
+		// MCP taskyou_complete tool, the Stop hook, and the daemon sweep) can recognize
+		// it and park it 'blocked' for human review instead of advancing the DAG. Kept
+		// in Tags (not a new column) so no SELECT/Scan across the codebase has to change.
+		tags := "pipeline"
+		if s.Gate {
+			tags = "pipeline,gate"
+		}
 		task := &db.Task{
 			Title:           stepTitle(s.Name, goal),
 			Body:            goal, // Placeholder; rewritten once the branch is known.
@@ -337,10 +348,18 @@ func Create(database *db.DB, opts Options) (*Result, error) {
 			ClaudeConfigDir: s.ConfigDir,
 			EnvJSON:         encodeStepEnv(s.Env),
 			PermissionMode:  opts.PermissionMode,
-			Tags:            "pipeline",
+			Tags:            tags,
 		}
 		if err := database.CreateTask(task); err != nil {
 			return nil, fmt.Errorf("create %s step: %w", s.Name, err)
+		}
+		// An opt-in evidence gate rides a task-keyed side table (a command can't fit a
+		// tag token like Gate does). Recorded now that the task has an id; read back at
+		// completion time to gate taskyou_complete on a green build/test.
+		if v := strings.TrimSpace(s.Verify); v != "" {
+			if err := database.SetStepVerify(task.ID, v); err != nil {
+				return nil, fmt.Errorf("record %s verify: %w", s.Name, err)
+			}
 		}
 		byName[s.Name] = task
 		tasks = append(tasks, task)

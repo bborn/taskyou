@@ -251,6 +251,64 @@ func TestWorkflowNonTerminalStepAdvances(t *testing.T) {
 	}
 }
 
+func TestWorkflowGateStepParksForReview(t *testing.T) {
+	database := testDB(t)
+	if err := database.CreateProject(&db.Project{Name: "test-project", Path: "/tmp/test-project"}); err != nil {
+		t.Fatalf("failed to create test-project: %v", err)
+	}
+
+	// A non-terminal GATE step: tagged "pipeline,gate", owns the shared branch, and
+	// has a dependent (so it's non-terminal). taskyou_complete must park it 'blocked'
+	// for human review rather than advancing it to 'done'.
+	design := &db.Task{Title: "[design] goal", Status: db.StatusProcessing, Project: "test-project", Tags: "pipeline,gate"}
+	if err := database.CreateTask(design); err != nil {
+		t.Fatalf("failed to create design step: %v", err)
+	}
+	design.BranchName = "pipeline/999-test-goal" // CreateTask doesn't persist branch_name.
+	if err := database.UpdateTask(design); err != nil {
+		t.Fatalf("failed to set design branch: %v", err)
+	}
+
+	build := &db.Task{Title: "[build] goal", Status: db.StatusBlocked, Project: "test-project", Tags: "pipeline", SourceBranch: "pipeline/999-test-goal"}
+	if err := database.CreateTask(build); err != nil {
+		t.Fatalf("failed to create build step: %v", err)
+	}
+	if err := database.AddDependency(design.ID, build.ID, true); err != nil {
+		t.Fatalf("failed to wire dependency: %v", err)
+	}
+
+	request := map[string]interface{}{
+		"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+		"params": map[string]interface{}{
+			"name":      "taskyou_complete",
+			"arguments": map[string]interface{}{"summary": "designed it"},
+		},
+	}
+	reqBytes, _ := json.Marshal(request)
+	reqBytes = append(reqBytes, '\n')
+
+	server, _ := testServer(database, design.ID, string(reqBytes))
+	server.SetCallbacks(func() {}, nil)
+	server.Run()
+
+	updated, err := database.GetTask(design.ID)
+	if err != nil {
+		t.Fatalf("failed to get design step: %v", err)
+	}
+	if updated.Status != db.StatusBlocked {
+		t.Fatalf("gate step must park 'blocked' for human review, got '%s'", updated.Status)
+	}
+
+	// The dependent stays held (never queued) until a human closes the gate.
+	dep, err := database.GetTask(build.ID)
+	if err != nil {
+		t.Fatalf("failed to get build step: %v", err)
+	}
+	if dep.Status != db.StatusBlocked {
+		t.Errorf("dependent should stay 'blocked' while the gate is under review, got '%s'", dep.Status)
+	}
+}
+
 // TestCompleteEndToEnd is the smoke test the bug report calls for: simulate the
 // executor speaking JSON-RPC to the MCP server, call taskyou_complete, and assert
 // the task transitions to 'done' without external intervention.

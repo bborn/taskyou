@@ -58,5 +58,8 @@ ty-chrome.zip
 .pr-comment.md
 .qacfg/
 
+# Riptide artifacts (cloud-synced)
+.humanlayer/tasks/
+
 # Plugin user config (copied from *.example.env)
 examples/plugins/**/config.env

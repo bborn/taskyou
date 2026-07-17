@@ -168,6 +168,16 @@ func (c *ClaudeExecutor) ResumeProcess(taskID int64) bool {
 }
 
 // BuildCommand returns the shell command to start an interactive Claude session.
+// dbPathEnvPrefix returns "WORKTREE_DB_PATH=<path> " when the daemon runs against a
+// non-default DB (an isolated instance), so the agent and its mcp-server inherit it;
+// empty otherwise so normal commands are unchanged.
+func dbPathEnvPrefix() string {
+	if p := os.Getenv("WORKTREE_DB_PATH"); p != "" {
+		return fmt.Sprintf("WORKTREE_DB_PATH=%q ", p)
+	}
+	return ""
+}
+
 func (c *ClaudeExecutor) BuildCommand(task *db.Task, sessionID, prompt string) string {
 	// Build permission mode flag (dangerous, auto, accept-edits, or none)
 	dangerousFlag := claudePermissionFlag(task)
@@ -191,7 +201,11 @@ func (c *ClaudeExecutor) BuildCommand(task *db.Task, sessionID, prompt string) s
 	// session, and exits — leaving only a placeholder pane ("lost executor pane").
 	// taskEnvPrefix appends any per-step env overrides (e.g. ollama routing) so the
 	// interactive resume hits the same backend the daemon launch would.
-	configPrefix := c.configDirPrefix(task) + taskEnvPrefix(task)
+	// Carry WORKTREE_DB_PATH through to the agent so the taskyou mcp-server it spawns
+	// (`ty mcp-server --task-id N`) opens the SAME DB the daemon runs against. Without
+	// this, an isolated instance's agent talks to the default (live) DB. Empty in the
+	// normal case (default DB), so production commands are unchanged.
+	configPrefix := dbPathEnvPrefix() + c.configDirPrefix(task) + taskEnvPrefix(task)
 
 	// Build command - resume if we have a session ID, otherwise start fresh
 	if sessionID != "" {
