@@ -66,6 +66,39 @@ Closing the gate step to `done` fires the normal dependency cascade
 (`ProcessCompletedBlocker`), which auto-queues the next phase. To revise instead
 of approve, edit the phase's artifact / re-run the step before closing.
 
+## Verify gate (evidence before completion)
+
+A `gate` pauses for a *human*; a **verify** gate pauses for *reality*. By default a
+step is "done" the moment its agent calls `taskyou_complete` — the daemon takes the
+agent's word for it. That is completion-by-assertion, and a tired or cheap agent
+will happily call `done` on a red build. A step can opt into an evidence check
+instead:
+
+```yaml
+  - name: implement
+    deps: [plan]
+    verify: go build ./... && go test ./...
+    prompt: |
+      Implement the approved plan...
+```
+
+When that step calls `taskyou_complete`, the daemon runs the `verify:` command in
+the step's worktree **before** accepting the completion:
+
+- **exit 0** → the step completes normally and the DAG advances.
+- **non-zero** → the completion is **rejected**. The step keeps running, and the
+  command's output (tail) is handed back to the agent so it can fix the problem and
+  call `taskyou_complete` again. Nothing is marked done.
+
+The gate fails **closed**: a command that can't start or times out counts as a
+failure, so a broken environment can never rubber-stamp a step. `verify:` composes
+with `gate:` (evidence is checked first, then the human review parks) and is fully
+opt-in — a step with no `verify:` behaves exactly as before.
+
+Because the command is stack-specific, the **bundled** `rpi` ships without one;
+stack-specific community variants (e.g. `rpi-go`, `rpi-rails`) add the right
+`verify:` to their `implement` step.
+
 ## The artifact store
 
 Because each phase runs in its own worktree, phases can't share uncommitted files,
@@ -89,4 +122,11 @@ same-named file on the search path (`~/.config/task/workflows/rpi.yaml` or a
 project's `.taskyou/workflows/rpi.yaml`) shadows the built-in, so you can eject
 and tweak it with `ty pipeline edit rpi`. The intent is that workflows like this
 become shareable through a community **`taskyou/ty-workflows`** repo — `rpi` is
-the seed.
+the seed. Distribution is just a git repo of `.yaml` files cloned onto the search
+path; there is no registry.
+
+That community repo is the natural home for **stack-specific variants** — an
+`rpi-go` or `rpi-rails` that is identical to `rpi` but adds a `verify:` command to
+its `implement` step (`go build ./... && go test ./...`, `bin/rails test`, …) so a
+red build can't be marked done. The bundled `rpi` stays stack-agnostic; the
+variants carry the checks that only make sense once you know the toolchain.

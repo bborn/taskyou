@@ -254,6 +254,18 @@ func (db *DB) migrate() error {
 		)`,
 
 		`CREATE INDEX IF NOT EXISTS idx_pipeline_artifacts_branch ON pipeline_artifacts(branch)`,
+
+		// Pipeline step verify: the opt-in evidence-gate command for a workflow step,
+		// keyed by the step's task id. A workflow YAML step can set `verify: <command>`;
+		// when that step's agent calls taskyou_complete the daemon runs the command in
+		// the worktree and rejects the completion on a non-zero exit. Kept in its own
+		// task-keyed table (not a tasks column) because a shell command can't ride a
+		// tag token the way the boolean `gate` marker does, and to avoid touching the
+		// hand-duplicated tasks SELECT/Scan sites.
+		`CREATE TABLE IF NOT EXISTS pipeline_step_verify (
+			task_id INTEGER PRIMARY KEY,
+			command TEXT NOT NULL DEFAULT ''
+		)`,
 	}
 
 	for _, m := range migrations {

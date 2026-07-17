@@ -382,6 +382,34 @@ func (s *Server) handleToolCall(id interface{}, params *toolCallParams) {
 
 		task, _ := s.db.GetTask(s.taskID)
 
+		// Evidence gate. If this step registered a `verify:` command, run it in the
+		// worktree BEFORE accepting completion. A non-zero exit means the agent called
+		// done on work that doesn't actually build/pass — reject the completion, hand
+		// the output back, and leave the step running so the agent fixes it and calls
+		// taskyou_complete again. This is the backstop for completion-by-assertion: the
+		// agent's say-so alone is not trusted. Non-workflow tasks and steps with no
+		// verify command have no row and fall straight through unchanged.
+		if task != nil {
+			if verifyCmd, _ := s.db.GetStepVerify(s.taskID); strings.TrimSpace(verifyCmd) != "" {
+				dir := strings.TrimSpace(task.WorktreePath)
+				if dir == "" {
+					if proj, err := s.db.GetProjectByName(task.Project); err == nil && proj != nil {
+						dir = proj.Path
+					}
+				}
+				if out, passed := runStepVerify(dir, verifyCmd); !passed {
+					s.db.AppendTaskLog(s.taskID, "system", "Verification failed — completion rejected; the step keeps running so the agent can fix it.")
+					s.sendResult(id, toolCallResult{
+						Content: []contentBlock{
+							{Type: "text", Text: fmt.Sprintf("❌ Verification failed — this step is NOT complete.\n\nThe configured check exited non-zero, so taskyou_complete was rejected:\n    %s\n\nFix the problem, then call taskyou_complete again.\n\n--- verify output (tail) ---\n%s", verifyCmd, out)},
+						},
+					})
+					return
+				}
+				s.db.AppendTaskLog(s.taskID, "system", "Verification passed: "+verifyCmd)
+			}
+		}
+
 		// Check if we should remind about saving project context
 		var contextReminder string
 		if s.contextWasEmpty && task != nil && task.Project != "" {

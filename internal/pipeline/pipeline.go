@@ -46,6 +46,7 @@ type Step struct {
 	Prompt      string            // Custom-workflow body: what the step does; the git handoff is composed from the DAG (see compose.go).
 	Deps        []string          // Names of steps that must complete before this one runs.
 	Gate        bool              // Human-in-the-loop: when this step finishes it parks 'blocked' for human review instead of advancing the DAG; a human releases it (and its dependents) with `ty close`. Persisted on the task as a "gate" tag token (see the Tags field in Create).
+	Verify      string            // Opt-in evidence gate: a shell command run in the step's worktree when the agent calls taskyou_complete. Non-zero exit REJECTS the completion (the step stays running and the command output is handed back so the agent fixes it) instead of trusting the agent's say-so. "" = no gate (today's behavior). Persisted in the task-keyed pipeline_step_verify table (a command string can't ride a tag token like Gate does).
 }
 
 // Definition is a "kind": one authored recipe. With Steps it is a workflow (a DAG
@@ -307,6 +308,14 @@ func Create(database *db.DB, opts Options) (*Result, error) {
 		}
 		if err := database.CreateTask(task); err != nil {
 			return nil, fmt.Errorf("create %s step: %w", s.Name, err)
+		}
+		// An opt-in evidence gate rides a task-keyed side table (a command can't fit a
+		// tag token like Gate does). Recorded now that the task has an id; read back at
+		// completion time to gate taskyou_complete on a green build/test.
+		if v := strings.TrimSpace(s.Verify); v != "" {
+			if err := database.SetStepVerify(task.ID, v); err != nil {
+				return nil, fmt.Errorf("record %s verify: %w", s.Name, err)
+			}
 		}
 		byName[s.Name] = task
 		tasks = append(tasks, task)
