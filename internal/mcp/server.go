@@ -397,7 +397,7 @@ func (s *Server) handleToolCall(id interface{}, params *toolCallParams) {
 						dir = proj.Path
 					}
 				}
-				if out, passed := runStepVerify(dir, verifyCmd); !passed {
+				if out, passed := pipeline.RunStepVerify(dir, verifyCmd); !passed {
 					s.db.AppendTaskLog(s.taskID, "system", "Verification failed — completion rejected; the step keeps running so the agent can fix it.")
 					s.sendResult(id, toolCallResult{
 						Content: []contentBlock{

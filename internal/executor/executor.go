@@ -502,6 +502,20 @@ func (e *Executor) reconcileFinishedWorkflowSteps() {
 		if !WorkflowStepFinished(task.WorktreePath, baseCommit, baseDirty) {
 			continue
 		}
+		// Evidence gate on the git-completion path. A step can finish by committing +
+		// pushing without ever calling taskyou_complete (the synchronous gate) — the
+		// sweep then advances it. If that step declared a `verify:` command, it must
+		// pass here too, or committed-but-broken work would auto-complete unchecked.
+		// Run it OFF the sweep loop (a build/test suite must not block the daemon); a
+		// guard log launches it at most once per finished step.
+		if verifyCmd, _ := e.db.GetStepVerify(task.ID); strings.TrimSpace(verifyCmd) != "" {
+			if started, _ := e.db.HasLogLineContaining(task.ID, verifySweepStartedLog); started {
+				continue
+			}
+			e.logLine(task.ID, "system", verifySweepStartedLog)
+			go e.verifyThenAutoComplete(task, verifyCmd)
+			continue
+		}
 		if err := e.updateStatus(task.ID, db.StatusDone); err != nil {
 			e.logger.Error("Failed to auto-complete finished workflow step", "id", task.ID, "error", err)
 			continue
@@ -511,6 +525,32 @@ func (e *Executor) reconcileFinishedWorkflowSteps() {
 		e.teardownWorkflowStepSession(task)
 		e.logger.Info("Auto-completed finished workflow step", "id", task.ID, "title", task.Title)
 	}
+}
+
+// verifySweepStartedLog guards the sweep's evidence-gate check so it launches at
+// most once per finished step (the check runs in a goroutine).
+const verifySweepStartedLog = "Verify gate: checking committed work before auto-completing…"
+
+// verifyThenAutoComplete runs a finished workflow step's `verify:` command off the
+// reconcile loop and auto-completes the step ONLY if it passes. A failing gate
+// leaves the step un-completed (logged, session torn down) so unverified work never
+// advances the DAG — the git-completion counterpart of the taskyou_complete gate.
+func (e *Executor) verifyThenAutoComplete(task *db.Task, verifyCmd string) {
+	out, ok := pipeline.RunStepVerify(task.WorktreePath, verifyCmd)
+	if !ok {
+		e.logLine(task.ID, "system", "❌ Verify gate FAILED — this finished step was NOT auto-completed; its committed work does not pass `"+verifyCmd+"`:\n"+out)
+		e.teardownWorkflowStepSession(task)
+		e.logger.Info("Verify gate blocked auto-complete of finished workflow step", "id", task.ID, "title", task.Title)
+		return
+	}
+	if err := e.updateStatus(task.ID, db.StatusDone); err != nil {
+		e.logger.Error("Failed to auto-complete finished workflow step after verify", "id", task.ID, "error", err)
+		return
+	}
+	e.logLine(task.ID, "system", "Verify gate passed — finished step auto-completed by sweep to advance the workflow")
+	e.hooks.OnStatusChange(task, db.StatusDone, "Auto-completed: verify passed")
+	e.teardownWorkflowStepSession(task)
+	e.logger.Info("Auto-completed finished workflow step after verify", "id", task.ID, "title", task.Title)
 }
 
 // tmuxWindowExistsForTask reports whether a live executor tmux window exists for
@@ -2334,7 +2374,9 @@ const TmuxDaemonSession = "task-daemon"
 
 // findExistingDaemonSession searches for any existing task-daemon-* session.
 // Returns the session name if found, empty string otherwise.
-func findExistingDaemonSession() string {
+// findExistingDaemonSession is a var (not a plain func) so tests can stub the tmux
+// lookup deterministically.
+var findExistingDaemonSession = func() string {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
@@ -2352,17 +2394,19 @@ func findExistingDaemonSession() string {
 }
 
 // getDaemonSessionName returns the task-daemon session name for this instance.
-// It first checks for an existing session, then falls back to creating a new name.
 func getDaemonSessionName() string {
-	// First, check for any existing task-daemon-* session
-	if existing := findExistingDaemonSession(); existing != "" {
-		return existing
-	}
-	// Check if SESSION_ID is set (for child processes)
+	// An explicit WORKTREE_SESSION_ID (e.g. an isolated QA instance) wins FIRST.
+	// Adopting an arbitrary existing task-daemon-* session before checking it is what
+	// let a second daemon collide with the live instance's tmux session — an isolated
+	// daemon must land on its own task-daemon-<sid>, never the live one.
 	if sid := os.Getenv("WORKTREE_SESSION_ID"); sid != "" {
 		return fmt.Sprintf("task-daemon-%s", sid)
 	}
-	// Generate new session ID based on PID
+	// No explicit id: reuse an existing session if one is already up.
+	if existing := findExistingDaemonSession(); existing != "" {
+		return existing
+	}
+	// Otherwise a fresh, PID-based name.
 	return fmt.Sprintf("task-daemon-%d", os.Getpid())
 }
 
