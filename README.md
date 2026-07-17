@@ -93,7 +93,7 @@ The same UI is also served in your browser at `http://localhost:8484` whenever `
 
 A **workflow** turns a single goal into a small DAG of step tasks that run on one shared git branch, each routed to its own executor and model, advancing automatically. Steps are sequential where they depend on each other and **parallel** where they don't.
 
-Workflows come from a few places: a couple ship built into the `ty` binary (e.g. `rpi`), some you install from a plugin, and the rest are YAML files you write. For example, a `plan-code-review` workflow — shipped as an example plugin under `examples/plugins/`:
+Workflows come from a few places: a couple ship built into the `ty` binary (e.g. `rpi`), some you **install from a plugin** ([get battle-tested ones with `ty plugins add`](#plugins)), and the rest are YAML files you write. For example, a `plan-code-review` workflow — shipped as an example plugin under `examples/plugins/`:
 
 ```
 Plan ──▶ Code ──▶ Review A ─┐
@@ -148,6 +148,26 @@ ty pipeline edit rpi               # writes ~/.config/task/workflows/rpi.yaml (s
 ```
 
 Custom workflows appear in `ty pipeline --list`, the `--definition` flag, and the TUI new-task selector automatically. Configuration lives entirely in these files — edit them by hand any time.
+
+### Reality gates — bind a step to your build and tests
+
+By default a step is "done" when its agent says so. Add a `verify:` command and that
+claim has to survive contact with reality first: when the step tries to complete,
+TaskYou runs the command in the worktree and **only advances the workflow if it
+passes** (exit 0) — on the agent's own signal *and* on the daemon's git-completion
+sweep, so there's no path around it.
+
+```yaml
+steps:
+  - name: implement
+    verify: go build ./... && go test ./...   # must be green before the DAG advances
+    prompt: "Implement the plan."
+```
+
+A failing check keeps the step running and hands the command's output back to the
+agent, so it fixes the real problem instead of reporting a success it doesn't have.
+It's the antidote to an agent marking a step done on a red build — and it's what lets
+a `simplify` step cut a change down while the tests stay the safety net.
 
 ### Kinds: a task type and a workflow are the same thing
 
@@ -663,21 +683,45 @@ See [examples/hooks/](examples/hooks/) for examples.
 
 ### Plugins
 
-The hooks dir above holds **one script per event**, so two integrations that
-both want `task.done` collide. **Plugins** solve that: a plugin is a
-self-contained directory under `~/.config/task/plugins/` with a `plugin.yaml`
-manifest declaring which events it handles. Drop it in and it's live — any
-number of plugins can handle the same event, and all of them run.
+A **plugin** is a self-contained directory under `~/.config/task/plugins/` with a
+`plugin.yaml` manifest. It can carry any mix of three things:
+
+- **workflows** (`workflows/*.yaml`) — new `ty pipeline -d <name>` definitions
+- **hooks** — scripts that fire on task events. Unlike the one-script-per-event hooks
+  dir above, any number of plugins can handle the same event and **all of them run**
+- **actions** — user-invoked commands (`ty plugins run <plugin> <action>`)
+
+Install one — or a whole collection, since a single git repo can hold many plugins —
+with one command:
 
 ```bash
-cp -R examples/plugins/desktop-notify ~/.config/task/plugins/
-ty plugins list
+ty plugins add https://github.com/taskyou/plugins   # clone & install the collection
+ty plugins list                                     # see what they provide
 ```
 
-See [docs/plugins.md](docs/plugins.md) for the manifest format and the authoring
-guide, [`examples/plugins/`](examples/plugins/) for ready-to-copy plugins
-(desktop-notify, slack, worktree), and [docs/plugin-ideas.md](docs/plugin-ideas.md)
-for a gallery of things to build.
+Re-run the same command any time to update (it `git pull`s). Or drop a directory in
+by hand.
+
+#### Why you'd care: the community collection
+
+**[github.com/taskyou/plugins](https://github.com/taskyou/plugins)** is the fastest
+way to feel what workflows-as-plugins buys you — install it and these show up in
+`ty pipeline -d`:
+
+| Workflow | What it does |
+|----------|--------------|
+| **`rpi`** | Turns a goal into a PR: neutral research → goal-blind investigation → an approach you approve (**human gate**) → a plan you approve (**human gate**) → implement + simplify that must pass your build/tests (**reality gate**) → PR. A human okays the *approach*; the machine proves the *code*. |
+| **`plan-code-review`** | Plan → code → **two independent reviewers in parallel** → collect → PR. Different models with independent context catch different issues. |
+| **`arc-solve`** | An agent that **plays a live [ARC-AGI-3](https://arcprize.org/arc-agi/3) game and beats a level** — the verify gate replays its solution against the real game, so a win can't be faked. ([recorded run + GIF](https://github.com/taskyou/plugins/blob/main/arc-solve/example-run.md).) |
+
+That last one is the point in miniature: a workflow whose completion is bound to a
+result the gate re-checks against reality, packaged so anyone gets it with one
+command.
+
+See the [collection README](https://github.com/taskyou/plugins) to browse or
+contribute, [docs/plugins.md](docs/plugins.md) for the manifest format,
+[`examples/plugins/`](examples/plugins/) for more (desktop-notify, slack, worktree),
+and [docs/plugin-ideas.md](docs/plugin-ideas.md) for ideas.
 
 ## Configuration
 
