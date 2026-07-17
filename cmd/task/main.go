@@ -535,10 +535,12 @@ Examples:
 	}
 	rootCmd.AddCommand(claudesCmd)
 
-	// Delete subcommand - delete a task, kill its agent session, and remove worktree
+	// Delete subcommand - trashes a task (soft delete) by default, keeping its
+	// worktree + Claude session recoverable until the daemon sweep hard-deletes it.
+	// --hard removes the worktree and row immediately (transcript is still kept).
 	deleteCmd := &cobra.Command{
 		Use:               "delete <task-id>",
-		Short:             "Delete a task, kill its agent session, and remove its worktree",
+		Short:             "Trash a task (recoverable with 'task restore'); --hard removes it now",
 		Args:              cobra.ExactArgs(1),
 		ValidArgsFunction: completeTaskIDs,
 		Run: func(cmd *cobra.Command, args []string) {
@@ -562,10 +564,16 @@ Examples:
 				os.Exit(1)
 			}
 
+			hard, _ := cmd.Flags().GetBool("hard")
+
 			// Confirm unless --force flag is set
 			force, _ := cmd.Flags().GetBool("force")
 			if !force {
-				fmt.Printf("Delete task #%d: %s? [y/N] ", taskID, task.Title)
+				verb := "Trash"
+				if hard {
+					verb = "PERMANENTLY delete"
+				}
+				fmt.Printf("%s task #%d: %s? [y/N] ", verb, taskID, task.Title)
 				reader := bufio.NewReader(os.Stdin)
 				response, _ := reader.ReadString('\n')
 				response = strings.TrimSpace(strings.ToLower(response))
@@ -575,15 +583,82 @@ Examples:
 				}
 			}
 
-			if err := deleteTask(taskID); err != nil {
+			if hard {
+				if err := hardDeleteTask(taskID); err != nil {
+					fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+					os.Exit(1)
+				}
+				fmt.Println(successStyle.Render(fmt.Sprintf("Permanently deleted task #%d", taskID)))
+				return
+			}
+
+			if err := softDeleteTask(taskID); err != nil {
 				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
 				os.Exit(1)
 			}
-			fmt.Println(successStyle.Render(fmt.Sprintf("Deleted task #%d", taskID)))
+			fmt.Println(successStyle.Render(fmt.Sprintf("Trashed task #%d — restore with 'task restore %d'", taskID, taskID)))
 		},
 	}
 	deleteCmd.Flags().BoolP("force", "f", false, "Skip confirmation prompt")
+	deleteCmd.Flags().Bool("hard", false, "Permanently delete now (remove worktree + row) instead of trashing")
 	rootCmd.AddCommand(deleteCmd)
+
+	// Restore subcommand - bring a trashed task back to the board.
+	restoreCmd := &cobra.Command{
+		Use:   "restore <task-id>",
+		Short: "Restore a trashed (soft-deleted) task",
+		Args:  cobra.ExactArgs(1),
+		Run: func(cmd *cobra.Command, args []string) {
+			var taskID int64
+			if _, err := fmt.Sscanf(args[0], "%d", &taskID); err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Invalid task ID: "+args[0]))
+				os.Exit(1)
+			}
+			dbPath := db.DefaultPath()
+			database, err := openTaskDB(dbPath)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+			defer database.Close()
+			if err := database.RestoreTask(taskID); err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+			fmt.Println(successStyle.Render(fmt.Sprintf("Restored task #%d", taskID)))
+		},
+	}
+	rootCmd.AddCommand(restoreCmd)
+
+	// Trash subcommand - list soft-deleted tasks awaiting the sweep.
+	trashCmd := &cobra.Command{
+		Use:   "trash",
+		Short: "List trashed (soft-deleted) tasks still recoverable with 'task restore'",
+		Args:  cobra.NoArgs,
+		Run: func(cmd *cobra.Command, args []string) {
+			dbPath := db.DefaultPath()
+			database, err := openTaskDB(dbPath)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+			defer database.Close()
+			trashed, err := database.ListTrashedTasks()
+			if err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
+			if len(trashed) == 0 {
+				fmt.Println(dimStyle.Render("Trash is empty"))
+				return
+			}
+			for _, t := range trashed {
+				age := time.Since(t.DeletedAt).Round(time.Hour)
+				fmt.Printf("#%-5d %s  %s\n", t.ID, t.Title, dimStyle.Render(fmt.Sprintf("(trashed %s ago)", age)))
+			}
+		},
+	}
+	rootCmd.AddCommand(trashCmd)
 
 	// Create subcommand - create a new task from command line
 	createCmd := &cobra.Command{
@@ -831,22 +906,16 @@ to its own executor and model, that hand work forward on a single shared branch
 and advance automatically — sequential where steps depend on each other, parallel
 where they don't.
 
-The default 'plan-code-review' workflow runs five steps on one branch:
-  Plan     (Claude / Opus)   — writes PLAN.md, no code
-  Code     (Claude / Sonnet) — implements the plan
-  Review A (Claude / Opus)   \
-  Review B (Claude / Sonnet)  } two independent reviewers, in parallel
-  Collect  (Claude / Sonnet) — merges reviews, applies fixes, opens the PR
-
-Workflows are defined in YAML files you can edit; define your own (add a QA step,
-a different shape) with 'task pipeline new "<describe it>"' or 'task pipeline edit'.
+A kind runs as a workflow when a same-named YAML file adds steps (there are no
+built-in workflows). Pick the kind with -d; workflow files live in the workflows
+dir. Define your own (add a QA step, a different shape) with
+'task pipeline new "<describe it>"' or by editing the file.
 
 Each step commits and pushes the shared branch, so the workflow needs a project
 that uses git worktrees and has a remote to push to.
 
 Examples:
-  task pipeline "Add rate limiting to the API" --project myapp
-  task pipeline "Refactor the auth module" -p myapp --definition my-workflow
+  task pipeline "Add rate limiting" -p myapp -d plan-code-verify
   task pipeline new "plan, build, security review + QA in parallel, then finalize"
   task pipeline --list  # show available workflows`,
 		Args: cobra.MaximumNArgs(1),
@@ -870,7 +939,11 @@ Examples:
 					if d.Custom {
 						origin = "custom"
 					}
-					fmt.Printf("%s %s\n  %s\n  steps: %s\n", successStyle.Render(d.Name), dimStyle.Render("("+origin+")"), d.Description, strings.Join(stepLabels, " · "))
+					shape := "steps: " + strings.Join(stepLabels, " · ")
+					if d.IsSingle() {
+						shape = dimStyle.Render("single task")
+					}
+					fmt.Printf("%s %s\n  %s\n  %s\n", successStyle.Render(d.Name), dimStyle.Render("("+origin+")"), d.Description, shape)
 				}
 				fmt.Println(dimStyle.Render("Custom workflows: " + pipeline.WorkflowsDir() + "/*.yaml  ·  create with: task pipeline new \"<describe it>\""))
 				return
@@ -892,6 +965,10 @@ Examples:
 
 			project, _ := cmd.Flags().GetString("project")
 			definition, _ := cmd.Flags().GetString("definition")
+			if strings.TrimSpace(definition) == "" {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: pick a kind with -d (there is no default workflow). See 'ty pipeline --list'."))
+				os.Exit(1)
+			}
 			permissionModeFlag, _ := cmd.Flags().GetString("permission-mode")
 			createDangerous, _ := cmd.Flags().GetBool("dangerous")
 			noExecute, _ := cmd.Flags().GetBool("no-execute")
@@ -935,6 +1012,26 @@ Examples:
 				os.Exit(1)
 			}
 
+			// A single-task kind (no steps) produced one ordinary task, not a DAG.
+			if result.Definition.IsSingle() {
+				t := result.Tasks[0]
+				if outputJSON {
+					out := map[string]interface{}{
+						"definition": result.Definition.Name,
+						"project":    project,
+						"task":       map[string]interface{}{"id": t.ID, "type": t.Type, "status": t.Status},
+					}
+					jsonBytes, _ := json.Marshal(out)
+					fmt.Println(string(jsonBytes))
+					return
+				}
+				fmt.Println(successStyle.Render(fmt.Sprintf("Created %s task #%d (%s)", result.Definition.Name, t.ID, t.Status)))
+				if noExecute {
+					fmt.Println(dimStyle.Render("Staged but not started — queue it to run."))
+				}
+				return
+			}
+
 			if outputJSON {
 				steps := make([]map[string]interface{}, 0, len(result.Tasks))
 				for i, t := range result.Tasks {
@@ -975,6 +1072,7 @@ Examples:
 				fmt.Println(dimStyle.Render("Staged but not started — queue the root step to run it."))
 			} else {
 				fmt.Println(dimStyle.Render("Running — steps advance automatically; parallel reviewers run at once."))
+				ensureDaemonForQueuedWork()
 			}
 		},
 	}
@@ -1080,7 +1178,7 @@ Examples:
 	pipelineNewCmd.Flags().Bool("print", false, "Print the YAML without saving")
 	pipelineCmd.AddCommand(pipelineNewCmd)
 
-	// Pipeline edit subcommand - write a workflow to a YAML file for editing
+	// Pipeline edit subcommand - point at (or print) a workflow's YAML file
 	pipelineEditCmd := &cobra.Command{
 		Use:   "edit <name>",
 		Short: "Write a workflow to a YAML file you can edit",
@@ -1991,6 +2089,7 @@ Examples:
 				msg += " (accept-edits mode)"
 			}
 			fmt.Println(successStyle.Render(msg))
+			ensureDaemonForQueuedWork()
 		},
 	}
 	executeCmd.Flags().Bool("dangerous", false, "Execute in dangerous mode (alias for --permission-mode dangerous)")
@@ -4108,6 +4207,22 @@ func runLocal(dangerousMode bool, debugStatePath, cpuProfilePath, memProfilePath
 	return nil
 }
 
+// ensureDaemonForQueuedWork makes sure work queued from the CLI will actually
+// run. The daemon is the only thing that picks up 'queued' tasks; without this,
+// `ty pipeline`/`ty execute` on a machine whose daemon died print a cheerful
+// success message and the task sits in 'queued' forever with no hint why.
+// Mirrors the TUI's startup behavior (runLocal): start it if we can, warn
+// loudly if we can't.
+func ensureDaemonForQueuedWork() {
+	// Per-task permission modes are already stored on the tasks themselves; the
+	// daemon-wide dangerous flag only comes from the environment here (the root
+	// --dangerous flag is scoped to the TUI/daemon commands).
+	if err := ensureDaemonRunning(os.Getenv("WORKTREE_DANGEROUS_MODE") == "1"); err != nil {
+		fmt.Fprintln(os.Stderr, errorStyle.Render("Warning: daemon is not running and could not be started: "+err.Error()))
+		fmt.Fprintln(os.Stderr, dimStyle.Render("Queued work will not execute until you run 'ty daemon' or 'ty restart'."))
+	}
+}
+
 // ensureDaemonRunning starts the daemon if it's not already running.
 // If dangerousMode is true, sets WORKTREE_DANGEROUS_MODE=1 for the daemon.
 // If the daemon is already running (even with a different mode), it is left as-is.
@@ -4168,8 +4283,11 @@ func ensureDaemonRunning(dangerousMode bool) error {
 }
 
 func getPidFilePath() string {
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".local", "share", "task", "daemon.pid")
+	// Key the daemon PID/lock file to the DB's directory so an isolated instance
+	// (WORKTREE_DB_PATH set, e.g. the QA harness) gets its own daemon lock and can
+	// run a full daemon alongside the live one. For the live instance this resolves
+	// to the historical ~/.local/share/task/daemon.pid — no behavior change.
+	return filepath.Join(filepath.Dir(db.DefaultPath()), "daemon.pid")
 }
 
 func readPidFile(path string) (int, error) {
@@ -4620,8 +4738,35 @@ func handleStopHook(database *db.DB, taskID int64, input *ClaudeHookInput) error
 		// Claude finished its turn and is waiting for user input
 		// This is the key transition: processing → blocked (needs input)
 		if task.Status == db.StatusProcessing {
-			database.UpdateTaskStatus(taskID, db.StatusBlocked)
-			database.AppendTaskLog(taskID, "system", "Waiting for user input")
+			// A workflow step signals completion by committing AND pushing its work —
+			// the push is the handoff, ty advances the DAG on its own (there is no tool
+			// to call). If the agent ends its turn with a clean worktree and HEAD pushed
+			// to the shared branch, the step finished: the terminal step (which opened
+			// the PR) parks in 'blocked' for a human to merge, every other step goes
+			// 'done' so its dependents auto-queue. A step that stopped to ask a question
+			// or left work uncommitted/unpushed hasn't finished — block as before, and
+			// the daemon's sweep is the backstop for a Stop hook that fires mid-push.
+			if pipeline.IsWorkflowTask(task) {
+				if reason := workflowStepUnfinishedReason(database, task); reason == "" {
+					if pipeline.IsTerminalStep(database, task) {
+						database.UpdateTaskStatus(taskID, db.StatusBlocked)
+						database.AppendTaskLog(taskID, "system", pipeline.TerminalStepParkedLog)
+					} else {
+						database.UpdateTaskStatus(taskID, db.StatusDone)
+						database.AppendTaskLog(taskID, "system", "Work committed and pushed — workflow advances to the next step")
+					}
+				} else {
+					// Park with the concrete reason. The generic "Waiting for user
+					// input" reads as a question the agent never asked and hides
+					// what actually blocked the handoff (e.g. leftover untracked
+					// files), leaving the DAG stalled with no clue on the board.
+					database.UpdateTaskStatus(taskID, db.StatusBlocked)
+					database.AppendTaskLog(taskID, "system", "Step ended its turn without completing the handoff — "+reason)
+				}
+			} else {
+				database.UpdateTaskStatus(taskID, db.StatusBlocked)
+				database.AppendTaskLog(taskID, "system", "Waiting for user input")
+			}
 		}
 	case "tool_use":
 		// Claude stopped because it's about to execute a tool
@@ -4630,6 +4775,25 @@ func handleStopHook(database *db.DB, taskID int64, input *ClaudeHookInput) error
 	}
 
 	return nil
+}
+
+// workflowStepUnfinishedReason returns "" when the step's handoff is complete
+// (produced a commit, pushed it, no leftover work of its own), or a short reason
+// why not (see executor.WorkflowStepUnfinishedReason). Used by the Stop hook to
+// advance a step whose agent ended its turn; the daemon's sweep is the backstop
+// for when the hook fires at a transient moment. A step that ran but committed
+// nothing is NOT finished — it stays 'blocked' for a human rather than silently
+// completing with no work.
+func workflowStepUnfinishedReason(database *db.DB, task *db.Task) string {
+	baseCommit, err := database.GetTaskBaseCommit(task.ID)
+	if err != nil {
+		return "could not load the step's baseline commit"
+	}
+	baseDirty, err := database.GetTaskBaseDirty(task.ID)
+	if err != nil {
+		return "could not load the step's baseline dirt snapshot"
+	}
+	return executor.WorkflowStepUnfinishedReason(task.WorktreePath, baseCommit, baseDirty)
 }
 
 // handlePreToolUseHook handles PreToolUse hooks from Claude (before tool execution).
@@ -5253,13 +5417,10 @@ func listSessions() {
 			}
 			titleStr = title
 		}
-		executorStr := s.executor
-		if executorStr == "" {
-			executorStr = "claude" // default
-		}
-		fmt.Printf("  %s  %-8s  %s  %s  %s\n",
+		executorStr := executorLabel(s.executor, s.model, s.effort)
+		fmt.Printf("  %s  %s  %s  %s  %s\n",
 			successStyle.Render(fmt.Sprintf("task-%d", s.taskID)),
-			dimStyle.Render(executorStr),
+			dimStyle.Render(fmt.Sprintf("%-18s", executorStr)),
 			dimStyle.Render(fmt.Sprintf("%-6s", memStr)),
 			dimStyle.Render(fmt.Sprintf("%-36s", titleStr)),
 			dimStyle.Render(s.info))
@@ -5270,8 +5431,34 @@ type agentSession struct {
 	taskID    int
 	taskTitle string
 	executor  string // Executor name (claude, codex, gemini, etc.)
+	model     string // Per-task model override ("" = executor default)
+	effort    string // Per-task reasoning effort override ("" = executor default)
 	memoryMB  int    // Memory usage in MB
 	info      string
+}
+
+// executorLabel renders the executor plus any per-task model/effort overrides,
+// e.g. "claude opus/high", "claude sonnet", "claude ·/high", or plain "claude".
+func executorLabel(executor, model, effort string) string {
+	if executor == "" {
+		executor = "claude" // default
+	}
+	// A model equal to the executor slug (e.g. model="claude") is a bogus
+	// leftover, not a real alias — treat it as no override.
+	if model == executor {
+		model = ""
+	}
+	if model == "" && effort == "" {
+		return executor
+	}
+	m := model
+	if m == "" {
+		m = "·" // model is default, but effort is overridden
+	}
+	if effort == "" {
+		return executor + " " + m
+	}
+	return executor + " " + m + "/" + effort
 }
 
 // getSessions returns all running task-* windows across all task-daemon-* sessions.
@@ -5357,13 +5544,17 @@ func getSessions() []agentSession {
 				}
 			}
 
-			// Get task title and executor from database
+			// Get task title and executor details from database
 			var taskTitle string
 			var taskExecutor string
+			var taskModel string
+			var taskEffort string
 			if database != nil {
 				if task, err := database.GetTask(int64(taskID)); err == nil && task != nil {
 					taskTitle = task.Title
 					taskExecutor = task.Executor
+					taskModel = task.Model
+					taskEffort = task.EffortLevel
 				}
 			}
 
@@ -5374,6 +5565,8 @@ func getSessions() []agentSession {
 				taskID:    taskID,
 				taskTitle: taskTitle,
 				executor:  taskExecutor,
+				model:     taskModel,
+				effort:    taskEffort,
 				memoryMB:  memoryMB,
 				info:      info,
 			})
@@ -5980,8 +6173,42 @@ func moveTask(database *db.DB, oldTask *db.Task, targetProject string) (int64, e
 }
 
 // deleteTask deletes a task, its agent session, and its worktree.
-func deleteTask(taskID int64) error {
-	// Open database
+// softDeleteTask trashes a task: it stops any running agent so the task no longer
+// consumes a session, but deliberately LEAVES the worktree and Claude transcript on
+// disk so the whole thing is recoverable with 'task restore'. The daemon trash
+// sweep hard-deletes it after the retention window (see Executor.sweepTrashedTasks).
+func softDeleteTask(taskID int64) error {
+	dbPath := db.DefaultPath()
+	database, err := openTaskDB(dbPath)
+	if err != nil {
+		return fmt.Errorf("open database: %w", err)
+	}
+	defer database.Close()
+
+	task, err := database.GetTask(taskID)
+	if err != nil {
+		return fmt.Errorf("get task: %w", err)
+	}
+	if task == nil {
+		return fmt.Errorf("task #%d not found", taskID)
+	}
+
+	// Stop the running agent so a trashed task isn't left executing, but keep the
+	// worktree + transcript intact. See killSessionAcrossDaemons note in hardDeleteTask.
+	killSessionAcrossDaemons(int(taskID))
+
+	if err := database.SoftDeleteTask(taskID); err != nil {
+		return fmt.Errorf("trash task: %w", err)
+	}
+	return nil
+}
+
+// hardDeleteTask permanently removes a task: it kills the agent, removes the
+// worktree, and deletes the row. It is invoked by 'delete --hard' and by the daemon
+// trash sweep once retention expires. It never removes the Claude transcript — those
+// .jsonl files are tiny and the single most valuable thing to recover, so they are
+// preserved even here (this is the deliberate change from the old destructive delete).
+func hardDeleteTask(taskID int64) error {
 	dbPath := db.DefaultPath()
 	database, err := openTaskDB(dbPath)
 	if err != nil {
@@ -6005,20 +6232,10 @@ func deleteTask(taskID int64) error {
 	// the window and leak the agent. See sessions_test.go for repro.
 	killSessionAcrossDaemons(int(taskID))
 
-	// Clean up worktree and agent sessions if they exist
+	// Clean up the worktree if it exists. Note: unlike the pre-soft-delete
+	// behaviour we do NOT call executor.CleanupClaudeSessions — the transcript is
+	// intentionally preserved so a conversation is never destroyed by a delete.
 	if task.WorktreePath != "" {
-		projectConfigDir := ""
-		if task.Project != "" {
-			if project, err := database.GetProjectByName(task.Project); err == nil && project != nil {
-				projectConfigDir = project.ClaudeConfigDir
-			}
-		}
-		// Clean up Claude session files first (before worktree is removed)
-		if err := executor.CleanupClaudeSessions(task.WorktreePath, projectConfigDir); err != nil {
-			fmt.Fprintln(os.Stderr, dimStyle.Render(fmt.Sprintf("Warning: could not remove Claude sessions: %v", err)))
-		}
-
-		// Clean up worktree
 		cfg := config.New(database)
 		exec := executor.New(database, cfg)
 		if err := exec.CleanupWorktree(task); err != nil {

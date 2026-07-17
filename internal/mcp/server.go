@@ -259,7 +259,7 @@ func (s *Server) handleRequest(req *jsonRPCRequest) {
 				},
 				{
 					Name:        "taskyou_create_pipeline",
-					Description: "Create a multi-model pipeline for a goal: one goal is split into an ordered chain of phase tasks (default 'plan-code-review': Opus plans → Sonnet codes → two reviewers run in parallel → collect opens the PR), each routed to its own executor/model, all on one shared git branch. Each step runs on its own executor/model; define custom workflows as YAML (ty pipeline new). Steps advance automatically — sequential where they depend on each other, parallel where they don't. Use this instead of a single task when a goal benefits from a plan/code/review split across different models. The first phase is queued immediately. Requires a git-worktree project with a remote to push to.",
+					Description: "Create a multi-model workflow for a goal: one goal is split into an ordered chain of phase tasks, each routed to its own executor/model, all on one shared git branch. There are no built-in workflows — pass a 'definition' naming a workflow kind (a YAML file; see the enum, or define one with ty pipeline new). Steps advance automatically — sequential where they depend on each other, parallel where they don't. Use this instead of a single task when a goal benefits from a plan/code/review split across different models. The first phase is queued immediately. Requires a git-worktree project with a remote to push to.",
 					InputSchema: map[string]interface{}{
 						"type": "object",
 						"properties": map[string]interface{}{
@@ -273,7 +273,7 @@ func (s *Server) handleRequest(req *jsonRPCRequest) {
 							},
 							"definition": map[string]interface{}{
 								"type":        "string",
-								"description": "Pipeline definition name (defaults to 'plan-code-review').",
+								"description": "Workflow kind name — a YAML file of the same name (required; there is no default workflow).",
 								"enum":        pipeline.DefinitionNames(),
 							},
 							"permission_mode": map[string]interface{}{
@@ -369,7 +369,25 @@ func (s *Server) handleToolCall(id interface{}, params *toolCallParams) {
 		// questions) and the daemon promotes them to 'done' once the PR merges/closes
 		// (see reconcileReviewTasks). Tasks with no PR (e.g. "move file X to Y") are
 		// genuinely complete the moment the agent signals it.
-		prNumber, prURL := s.lookupPR(task)
+		// A non-terminal workflow step must ADVANCE the DAG, not park for human
+		// review — only the terminal step (the one nothing depends on) opens a PR.
+		// The root step in particular owns the shared branch (branch_name set), which
+		// lookupPR would otherwise treat as "this task produced a PR to merge": it
+		// shells out to `gh` and can even match an unrelated PR, wrongly moving the
+		// step to 'blocked' and stalling the whole workflow at step one. So a workflow
+		// step that still has dependents skips the PR path entirely and is just 'done'.
+		nonTerminalStep := false
+		if pipeline.IsWorkflowTask(task) {
+			if deps, err := s.db.GetBlockedBy(task.ID); err == nil && len(deps) > 0 {
+				nonTerminalStep = true
+			}
+		}
+
+		var prNumber int
+		var prURL string
+		if !nonTerminalStep {
+			prNumber, prURL = s.lookupPR(task)
+		}
 		if prNumber > 0 {
 			if err := s.db.UpdateTaskStatus(s.taskID, db.StatusBlocked); err != nil {
 				s.sendError(id, -32603, fmt.Sprintf("Failed to move task to review: %v", err))

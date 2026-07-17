@@ -7,7 +7,38 @@ const DEFAULT_SERVER = 'http://127.0.0.1:8080';
 // tabId -> { task, manual } (manual = user picked from dropdown, wins over port match)
 const matches = new Map();
 
+// Chrome opens the panel on toolbar click (never disable this — it's what keeps
+// the panel openable). We only *scope* it: after it opens on a tab we disable it
+// on that window's other tabs, so it doesn't trail you onto unrelated tabs.
+const PANEL_PATH = 'sidepanel.html';
 chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(() => {});
+
+const panelScope = new Map(); // windowId -> { groupId, tabId }
+
+function tabInScope(tab, scope) {
+  if (!scope || !tab) return false;
+  if (scope.groupId != null && scope.groupId !== -1 /* TAB_GROUP_NONE */) {
+    return tab.groupId === scope.groupId;
+  }
+  return tab.id === scope.tabId;
+}
+
+// Enable the panel only on in-scope tabs of this window, disable it on the rest.
+async function reconcileWindowPanel(windowId) {
+  const scope = panelScope.get(windowId);
+  if (!scope) return;
+  let tabs = [];
+  try {
+    tabs = await chrome.tabs.query({ windowId });
+  } catch {
+    return;
+  }
+  for (const t of tabs) {
+    chrome.sidePanel
+      .setOptions({ tabId: t.id, path: PANEL_PATH, enabled: tabInScope(t, scope) })
+      .catch(() => {});
+  }
+}
 
 async function getServerUrl() {
   const { serverUrl } = await chrome.storage.local.get('serverUrl');
@@ -19,6 +50,7 @@ async function getServerUrl() {
 const CANDIDATE_SERVERS = [
   'http://127.0.0.1:8080',
   'http://localhost:8080',
+  'http://127.0.0.1:8484', // TaskYou desktop app default port
   'http://127.0.0.1:8765', // isolated demo instance
 ];
 let probePromise = null;
@@ -79,10 +111,24 @@ async function candidateTasks() {
   return [...processing, ...blocked];
 }
 
+// A hostname is "loopback" if it's localhost/127.0.0.1 or ends in a
+// TLD reserved for local use (.localhost, .test per RFC 6761 — these always
+// resolve to the loopback interface). Multi-tenant local dev setups serve each
+// tenant on its own subdomain (e.g. qa-brand-4801.influencekit.test:3143), so
+// port-based task matching must recognize those, not just bare localhost.
+function isLoopbackHost(hostname) {
+  return (
+    hostname === 'localhost' ||
+    hostname === '127.0.0.1' ||
+    hostname.endsWith('.localhost') ||
+    hostname.endsWith('.test')
+  );
+}
+
 function tabPort(url) {
   try {
     const u = new URL(url);
-    if (u.hostname !== 'localhost' && u.hostname !== '127.0.0.1') return null;
+    if (!isLoopbackHost(u.hostname)) return null;
     return u.port ? Number(u.port) : null;
   } catch {
     return null;
@@ -136,6 +182,83 @@ async function ensureInjected(tabId) {
   await chrome.scripting.executeScript({ target: { tabId }, files: ['console-tap.js'], world: 'MAIN' });
 }
 
+// --- Browser bridge tab group ------------------------------------------------
+// The "group" the executor can drive is a real Chrome tab group (labeled
+// "ty #<id>", orange): the matched app tab plus any docs/issue-tracker tabs the
+// executor opens. This is a visible, user-revocable boundary — the executor
+// can't see or touch your other tabs, and you can drag a tab in/out of the
+// group to grant/revoke. The group id is read from Chrome per-command, so it
+// survives MV3 service-worker teardown; nothing is stored.
+
+const TAB_GROUP_NONE = -1; // chrome.tabGroups.TAB_GROUP_ID_NONE
+
+// Ensure the matched tab is in a ty tab group, creating one if it's ungrouped.
+// If the tab is already in a group (the user's or ours), we adopt it rather
+// than yanking the tab out of the user's grouping.
+async function ensureTaskGroup(primaryTabId, taskId) {
+  const tab = await chrome.tabs.get(primaryTabId);
+  if (tab.groupId != null && tab.groupId !== TAB_GROUP_NONE) return tab.groupId;
+  const groupId = await chrome.tabs.group({ tabIds: [primaryTabId] });
+  try {
+    await chrome.tabGroups.update(groupId, {
+      title: taskId != null ? `ty #${taskId}` : 'ty',
+      color: 'orange',
+    });
+  } catch {}
+  return groupId;
+}
+
+async function groupOf(primaryTabId) {
+  const tab = await chrome.tabs.get(primaryTabId);
+  return tab.groupId ?? TAB_GROUP_NONE;
+}
+
+// Resolve which tab a command targets: the optional params.tab (must be a live
+// tab in the same tab group as the primary), else the primary (matched) tab.
+async function resolveTargetTab(primaryTabId, params) {
+  const requested = params?.tab;
+  if (requested == null) return primaryTabId;
+  const target = Number(requested);
+  if (!Number.isInteger(target)) throw new Error(`invalid tab id: ${requested}`);
+  if (target === primaryTabId) return target;
+  const [primary, tab] = await Promise.all([
+    chrome.tabs.get(primaryTabId),
+    chrome.tabs.get(target).catch(() => null),
+  ]);
+  if (!tab) throw new Error(`tab ${target} not found`);
+  if (primary.groupId === TAB_GROUP_NONE || tab.groupId !== primary.groupId) {
+    throw new Error(`tab ${target} is not in this task's tab group`);
+  }
+  return target;
+}
+
+// Only http/https can be driven; block file:, chrome:, javascript:, etc.
+function normalizeNavUrl(raw) {
+  let u;
+  try {
+    u = new URL(raw);
+  } catch {
+    throw new Error(`invalid url: ${raw}`);
+  }
+  if (u.protocol !== 'http:' && u.protocol !== 'https:') {
+    throw new Error(`unsupported url scheme "${u.protocol}" — only http/https`);
+  }
+  return u.href;
+}
+
+async function captureTab(targetTabId) {
+  const tab = await chrome.tabs.get(targetTabId);
+  // captureVisibleTab only sees the window's foreground tab, so bring the
+  // target forward first (matches how the executor expects "look at tab X").
+  if (!tab.active) {
+    await chrome.tabs.update(targetTabId, { active: true });
+    await chrome.windows.update(tab.windowId, { focused: true }).catch(() => {});
+    await new Promise((r) => setTimeout(r, 250));
+  }
+  const win = (await chrome.tabs.get(targetTabId)).windowId;
+  return chrome.tabs.captureVisibleTab(win, { format: 'png' });
+}
+
 chrome.tabs.onActivated.addListener(async ({ tabId }) => {
   try {
     const tab = await chrome.tabs.get(tabId);
@@ -148,6 +271,30 @@ chrome.tabs.onUpdated.addListener((tabId, info, tab) => {
 });
 
 chrome.tabs.onRemoved.addListener((tabId) => matches.delete(tabId));
+
+// Switching tabs: show the panel only when the new tab is in scope.
+chrome.tabs.onActivated.addListener(async ({ tabId, windowId }) => {
+  const scope = panelScope.get(windowId);
+  if (!scope) return;
+  try {
+    const tab = await chrome.tabs.get(tabId);
+    chrome.sidePanel
+      .setOptions({ tabId, path: PANEL_PATH, enabled: tabInScope(tab, scope) })
+      .catch(() => {});
+  } catch {}
+});
+
+// If the scoped tab joins a group (e.g. the executor drops it into "ty #<id>"),
+// widen scope to that whole group so the panel follows it.
+chrome.tabs.onUpdated.addListener((tabId, info, tab) => {
+  if (info.groupId === undefined || !tab) return;
+  const scope = panelScope.get(tab.windowId);
+  if (!scope) return;
+  if (tabId === scope.tabId && info.groupId !== TAB_GROUP_NONE) scope.groupId = info.groupId;
+  reconcileWindowPanel(tab.windowId);
+});
+
+chrome.windows.onRemoved.addListener((windowId) => panelScope.delete(windowId));
 
 async function resolveTask(tabId) {
   const existing = matches.get(tabId);
@@ -220,6 +367,18 @@ const handlers = {
     return { ok: true };
   },
 
+  // The panel reports the tab it opened on; scope it to that tab (or its group)
+  // so it stops trailing onto unrelated tabs in the window.
+  async panelOpened({ tabId }) {
+    if (tabId == null) return { ok: false };
+    try {
+      const tab = await chrome.tabs.get(tabId);
+      panelScope.set(tab.windowId, { groupId: tab.groupId ?? TAB_GROUP_NONE, tabId: tab.id });
+      reconcileWindowPanel(tab.windowId);
+    } catch {}
+    return { ok: true };
+  },
+
   async listCandidateTasks() {
     try {
       return { tasks: await candidateTasks() };
@@ -235,6 +394,36 @@ const handlers = {
     matches.set(tabId, { task, manual: true });
     setBadge(tabId, task);
     return { ok: true, task };
+  },
+
+  // Projects the daemon knows about, for the "New task" repo picker.
+  async listProjects() {
+    try {
+      return { projects: await api('/api/projects') };
+    } catch (e) {
+      return { error: e.message, projects: [] };
+    }
+  },
+
+  // Create a task via the daemon, then bind it to this tab so the panel and
+  // terminal attach immediately. A just-created task is queued (or backlog)
+  // with no port yet, so the port-based matcher can't find it — pin it manually,
+  // exactly like pickTask does for an existing task.
+  async createTask({ tabId, title, body, project, execute }) {
+    try {
+      const task = await api('/api/tasks', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title, body, project, execute: !!execute }),
+      });
+      if (tabId != null) {
+        matches.set(tabId, { task, manual: true });
+        setBadge(tabId, task);
+      }
+      return { task };
+    } catch (e) {
+      return { error: e.message };
+    }
   },
 
   async startAnnotate({ tabId }) {
@@ -280,6 +469,42 @@ const handlers = {
     }
   },
 
+  // --- Embedded terminal: resolve pane/window info, start a session, or make
+  // sure the workdir shell pane exists. The panel opens the WebSocket itself
+  // (ws://<serverUrl>/api/tasks/{id}/terminal); these just proxy the JSON
+  // endpoints through the SW so it stays the single owner of serverUrl. ---
+
+  async terminalInfo({ taskId }) {
+    try {
+      return { info: await api(`/api/tasks/${taskId}/terminal-info`) };
+    } catch (e) {
+      return { error: e.message, status: e.status };
+    }
+  },
+
+  async ensureSession({ taskId }) {
+    try {
+      return { info: await api(`/api/tasks/${taskId}/session`, { method: 'POST' }) };
+    } catch (e) {
+      return { error: e.message, status: e.status };
+    }
+  },
+
+  async ensureShellPane({ taskId }) {
+    try {
+      return { info: await api(`/api/tasks/${taskId}/shell`, { method: 'POST' }) };
+    } catch (e) {
+      return { error: e.message, status: e.status };
+    }
+  },
+
+  // The panel needs the resolved server URL to open the terminal WebSocket
+  // directly (WebSockets can't go through the SW message channel).
+  async getServerUrl() {
+    const { serverUrl, connected } = await ensureServer();
+    return { serverUrl, connected };
+  },
+
   // --- Browser bridge: the panel polls ty serve for executor commands and
   // executes them against the user's live tab. ---
 
@@ -311,34 +536,84 @@ const handlers = {
   },
 
   async browserExec({ tabId, command }) {
+    const params = command.params || {};
     try {
       switch (command.action) {
         case 'screenshot': {
-          const tab = await chrome.tabs.get(tabId);
-          const data = await chrome.tabs.captureVisibleTab(tab.windowId, { format: 'png' });
-          return { data };
+          const target = await resolveTargetTab(tabId, params);
+          return { data: await captureTab(target) };
         }
-        case 'reload':
-          await chrome.tabs.reload(tabId);
-          return { ok: true };
+        case 'reload': {
+          const target = await resolveTargetTab(tabId, params);
+          await chrome.tabs.reload(target);
+          return { ok: true, tab: target };
+        }
         case 'navigate': {
-          const url = new URL(command.params?.url || '');
-          if (url.hostname !== 'localhost' && url.hostname !== '127.0.0.1') {
-            return { error: 'navigate is restricted to localhost' };
-          }
-          await chrome.tabs.update(tabId, { url: url.href });
-          return { ok: true, url: url.href };
+          const url = normalizeNavUrl(params.url || '');
+          const target = await resolveTargetTab(tabId, params);
+          await chrome.tabs.update(target, { url });
+          return { ok: true, url, tab: target };
         }
+
+        // --- Tab-group control (drive more than the matched tab) ---
+        case 'tabs': {
+          const primary = await chrome.tabs.get(tabId);
+          const members =
+            primary.groupId === TAB_GROUP_NONE
+              ? [primary]
+              : await chrome.tabs.query({ groupId: primary.groupId });
+          return {
+            tabs: members.map((t) => ({
+              tab: t.id,
+              url: t.url,
+              title: t.title,
+              active: t.active,
+              primary: t.id === tabId,
+            })),
+          };
+        }
+        case 'open':
+        case 'open_tab': {
+          const url = normalizeNavUrl(params.url || '');
+          const primary = await chrome.tabs.get(tabId);
+          const tab = await chrome.tabs.create({
+            windowId: primary.windowId,
+            url,
+            active: params.activate !== false,
+          });
+          // Add the new tab to the task's group so it's inside the boundary.
+          const groupId = await ensureTaskGroup(tabId);
+          await chrome.tabs.group({ groupId, tabIds: [tab.id] }).catch(() => {});
+          return { ok: true, tab: tab.id, url };
+        }
+        case 'activate':
+        case 'switch_tab': {
+          const target = await resolveTargetTab(tabId, params);
+          const tab = await chrome.tabs.get(target);
+          await chrome.tabs.update(target, { active: true });
+          await chrome.windows.update(tab.windowId, { focused: true }).catch(() => {});
+          return { ok: true, tab: target };
+        }
+        case 'close':
+        case 'close_tab': {
+          const target = await resolveTargetTab(tabId, params);
+          await chrome.tabs.remove(target);
+          return { ok: true, closed: target };
+        }
+
+        case 'elements':
         case 'snapshot':
         case 'click':
         case 'type':
-        case 'console':
-          await ensureInjected(tabId);
-          return await chrome.tabs.sendMessage(tabId, {
+        case 'console': {
+          const target = await resolveTargetTab(tabId, params);
+          await ensureInjected(target);
+          return await chrome.tabs.sendMessage(target, {
             type: 'ty-cmd',
             action: command.action,
-            params: command.params || {},
+            params,
           });
+        }
         default:
           return { error: 'unknown action: ' + command.action };
       }
@@ -347,9 +622,21 @@ const handlers = {
     }
   },
 
-  async ensureBridge({ tabId }) {
+  // Inject the bridge into the matched tab, put it in a visible "ty #<id>" tab
+  // group (the boundary the executor can drive), and pin the tab→task match so
+  // the executor can navigate it to an external site without the port-based
+  // match dropping the task (which would tear the bridge down mid-session).
+  async ensureBridge({ tabId, taskId }) {
     try {
       await ensureInjected(tabId);
+      await ensureTaskGroup(tabId, taskId).catch(() => {});
+      if (taskId != null) {
+        const task = (await candidateTasks().catch(() => [])).find((t) => t.id === taskId);
+        if (task) {
+          matches.set(tabId, { task, manual: true });
+          setBadge(tabId, task);
+        }
+      }
       return { ok: true };
     } catch (e) {
       return { error: e.message };

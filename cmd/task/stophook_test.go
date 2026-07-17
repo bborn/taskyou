@@ -1,0 +1,252 @@
+package main
+
+import (
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/bborn/workflow/internal/executor"
+)
+
+func git(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), "GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@t", "GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@t")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git %v: %v\n%s", args, err, out)
+	}
+}
+
+// headSHA returns the worktree's current HEAD commit.
+func headSHA(t *testing.T, dir string) string {
+	t.Helper()
+	out, err := exec.Command("git", "-C", dir, "rev-parse", "HEAD").Output()
+	if err != nil {
+		t.Fatalf("rev-parse HEAD: %v", err)
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// TestWorkflowStepFinished: a step counts as finished only when it PRODUCED A COMMIT
+// (HEAD moved off the worktree's base commit) and pushed it, with a clean worktree.
+//
+// The base-commit check is load-bearing: a freshly-created step worktree is clean and
+// its HEAD (the parent step's commit) is already reachable from origin. Reporting that
+// as "finished" let the daemon sweep mark steps done before their agent ever started,
+// silently dropping Build/Review stages and shipping unreviewed code.
+func TestWorkflowStepFinished(t *testing.T) {
+	root := t.TempDir()
+	remote := filepath.Join(root, "remote.git")
+	git(t, root, "init", "--bare", remote)
+	wt := filepath.Join(root, "wt")
+	if err := os.Mkdir(wt, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	git(t, wt, "init")
+	git(t, wt, "remote", "add", "origin", remote)
+	// Mimic a workflow step: work on a shared branch, no upstream tracking.
+	git(t, wt, "checkout", "-b", "pipeline/shared")
+
+	// The parent step's commit — already pushed. This is where a new step's worktree
+	// starts, and it is the step's base commit.
+	if err := os.WriteFile(filepath.Join(wt, "parent.txt"), []byte("parent"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	git(t, wt, "add", ".")
+	git(t, wt, "commit", "-m", "parent step work")
+	git(t, wt, "push", "origin", "HEAD:pipeline/shared")
+	base := headSHA(t, wt)
+
+	// THE REGRESSION: a step that has produced nothing sits at its base commit with a
+	// clean worktree, and that commit IS on origin. It must NOT read as finished.
+	if executor.WorkflowStepFinished(wt, base, "") {
+		t.Error("a step sitting at its base commit (no work) must NOT be finished — this silently drops unstarted steps")
+	}
+
+	// Committed but NOT pushed → not finished.
+	if err := os.WriteFile(filepath.Join(wt, "f.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	git(t, wt, "add", ".")
+	git(t, wt, "commit", "-m", "work")
+	if executor.WorkflowStepFinished(wt, base, "") {
+		t.Error("committed but unpushed step should NOT be finished")
+	}
+
+	// Pushed WITHOUT -u (no upstream tracking, like a real step) → finished.
+	git(t, wt, "push", "origin", "HEAD:pipeline/shared")
+	if _, err := exec.Command("git", "-C", wt, "rev-parse", "@{u}").Output(); err == nil {
+		t.Fatal("test precondition failed: expected NO upstream tracking after push without -u")
+	}
+	if !executor.WorkflowStepFinished(wt, base, "") {
+		t.Error("clean + committed + pushed step SHOULD be finished")
+	}
+
+	// DETACHED HEAD → still finished. Non-root steps share one branch and git won't
+	// attach two worktrees to it, so those worktrees run detached.
+	git(t, wt, "checkout", "--detach", "HEAD")
+	if out, err := exec.Command("git", "-C", wt, "rev-parse", "--abbrev-ref", "HEAD").Output(); err != nil || strings.TrimSpace(string(out)) != "HEAD" {
+		t.Fatalf("test precondition failed: expected a detached HEAD, got %q (%v)", strings.TrimSpace(string(out)), err)
+	}
+	if !executor.WorkflowStepFinished(wt, base, "") {
+		t.Error("clean + committed + pushed step on a DETACHED HEAD SHOULD be finished")
+	}
+
+	// Uncommitted change → not finished.
+	if err := os.WriteFile(filepath.Join(wt, "f2.txt"), []byte("y"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if executor.WorkflowStepFinished(wt, base, "") {
+		t.Error("dirty worktree should NOT be finished")
+	}
+
+	// No recorded base commit → no evidence of work → never finished.
+	if executor.WorkflowStepFinished(wt, "", "") {
+		t.Error("a step with no recorded base commit must NOT be finished")
+	}
+	// Empty worktree path → not finished.
+	if executor.WorkflowStepFinished("", base, "") {
+		t.Error("empty worktree path should NOT be finished")
+	}
+}
+
+// TestWorkflowStepFinishedIgnoresInitDirt pins the influencekit stall: a project's
+// worktree init (bundle, migrate) rewrites a TRACKED file — Rails' db/structure.sql — so
+// the worktree is dirty from the moment setup finishes. Requiring a clean worktree meant
+// such a step could never complete and every pipeline stalled. Completion must be judged
+// against the dirt that was already there when the step started; only NEW uncommitted
+// work disqualifies it.
+func TestWorkflowStepFinishedIgnoresInitDirt(t *testing.T) {
+	root := t.TempDir()
+	remote := filepath.Join(root, "remote.git")
+	git(t, root, "init", "--bare", remote)
+	wt := filepath.Join(root, "wt")
+	if err := os.Mkdir(wt, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	git(t, wt, "init")
+	git(t, wt, "remote", "add", "origin", remote)
+	git(t, wt, "checkout", "-b", "pipeline/shared")
+
+	// A tracked schema dump, committed and pushed. This is the step's base commit.
+	if err := os.WriteFile(filepath.Join(wt, "structure.sql"), []byte("v1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	git(t, wt, "add", ".")
+	git(t, wt, "commit", "-m", "parent")
+	git(t, wt, "push", "origin", "HEAD:pipeline/shared")
+	base := headSHA(t, wt)
+
+	// Worktree init runs migrations and rewrites it. This is the baseline dirt.
+	if err := os.WriteFile(filepath.Join(wt, "structure.sql"), []byte("v2 (regenerated by migrate)\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	baseDirty := "structure.sql"
+
+	// Still no commit of its own -> not finished (regardless of the dirt).
+	if executor.WorkflowStepFinished(wt, base, baseDirty) {
+		t.Error("a step that produced no commit must NOT be finished")
+	}
+
+	// The step writes its own output and pushes it, committing ONLY that file — exactly
+	// what a parallel review step's handoff does. structure.sql stays dirty from init.
+	if err := os.WriteFile(filepath.Join(wt, "REVIEW.md"), []byte("findings\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	git(t, wt, "add", "REVIEW.md")
+	git(t, wt, "commit", "-m", "review")
+	git(t, wt, "push", "origin", "HEAD:pipeline/shared")
+
+	if !executor.WorkflowStepFinished(wt, base, baseDirty) {
+		t.Error("init-generated dirt must not block completion — this is what stalled every pipeline")
+	}
+	// Without the baseline, the same worktree reads as unfinished (the old behaviour).
+	if executor.WorkflowStepFinished(wt, base, "") {
+		t.Error("with no recorded baseline, leftover dirt should still disqualify")
+	}
+
+	// NEW uncommitted work by the step DOES disqualify it.
+	if err := os.WriteFile(filepath.Join(wt, "scratch.txt"), []byte("wip\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if executor.WorkflowStepFinished(wt, base, baseDirty) {
+		t.Error("a step that left NEW uncommitted work must NOT be finished")
+	}
+}
+
+// TestWorkflowStepUnfinishedReason: when a step's handoff is incomplete, the reason
+// must say WHY — the generic "Waiting for user input" hid the actual blocker (e.g.
+// scratch files the agent fetched but never committed) and left DAGs stalled with a
+// board that looked like the agent had asked a question. The Verify-step incident:
+// an agent fetched four peer reports as untracked files, committed and pushed its own
+// output, and the step parked forever with no hint.
+func TestWorkflowStepUnfinishedReason(t *testing.T) {
+	root := t.TempDir()
+	remote := filepath.Join(root, "remote.git")
+	git(t, root, "init", "--bare", remote)
+	wt := filepath.Join(root, "wt")
+	if err := os.Mkdir(wt, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	git(t, wt, "init")
+	git(t, wt, "remote", "add", "origin", remote)
+	git(t, wt, "checkout", "-b", "pipeline/shared")
+	if err := os.WriteFile(filepath.Join(wt, "parent.txt"), []byte("parent"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	git(t, wt, "add", ".")
+	git(t, wt, "commit", "-m", "parent step work")
+	git(t, wt, "push", "origin", "HEAD:pipeline/shared")
+	base := headSHA(t, wt)
+
+	// Sitting at base: reason names the missing commit, not a question.
+	reason := executor.WorkflowStepUnfinishedReason(wt, base, "")
+	if !strings.Contains(reason, "no new commit") {
+		t.Errorf("expected a 'no new commit' reason, got %q", reason)
+	}
+
+	// Committed but not pushed.
+	if err := os.WriteFile(filepath.Join(wt, "out.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	git(t, wt, "add", ".")
+	git(t, wt, "commit", "-m", "work")
+	if reason := executor.WorkflowStepUnfinishedReason(wt, base, ""); !strings.Contains(reason, "not pushed") {
+		t.Errorf("expected a 'not pushed' reason, got %q", reason)
+	}
+	git(t, wt, "push", "origin", "HEAD:pipeline/shared")
+
+	// The incident shape: work committed AND pushed, but fetched scratch left
+	// untracked. The reason must name the offending files.
+	for _, f := range []string{"peer-a.md", "peer-b.md"} {
+		if err := os.WriteFile(filepath.Join(wt, f), []byte("scratch"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	reason = executor.WorkflowStepUnfinishedReason(wt, base, "")
+	if !strings.Contains(reason, "uncommitted files") || !strings.Contains(reason, "peer-a.md") {
+		t.Errorf("expected the reason to name the leftover files, got %q", reason)
+	}
+
+	// Baseline dirt is NOT the step's fault and must not block (nor be named).
+	reason = executor.WorkflowStepUnfinishedReason(wt, base, "peer-a.md\npeer-b.md")
+	if reason != "" {
+		t.Errorf("baseline dirt must not block the handoff, got %q", reason)
+	}
+
+	// Finished ⇔ empty reason, and the bool wrapper agrees.
+	for _, f := range []string{"peer-a.md", "peer-b.md"} {
+		if err := os.Remove(filepath.Join(wt, f)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if reason := executor.WorkflowStepUnfinishedReason(wt, base, ""); reason != "" {
+		t.Errorf("expected finished (empty reason), got %q", reason)
+	}
+	if !executor.WorkflowStepFinished(wt, base, "") {
+		t.Error("WorkflowStepFinished should agree with an empty reason")
+	}
+}

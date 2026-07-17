@@ -171,7 +171,7 @@ func (c *CodexExecutor) runCodex(ctx context.Context, task *db.Task, workDir, pr
 		task.ID, sessionID, task.Port, task.WorktreePath, envPrefix, dangerousFlag, resumeFlag, promptFile.Name())
 
 	// Create new window in task-daemon session
-	actualSession, tmuxErr := createTmuxWindow(daemonSession, windowName, workDir, script, c.executor.getProjectDir(task.Project))
+	actualSession, tmuxErr := createTmuxWindow(daemonSession, windowName, workDir, script, c.executor.getProjectDir(task.Project), task.ID)
 	if tmuxErr != nil {
 		c.logger.Error("tmux new-window failed", "error", tmuxErr, "session", daemonSession)
 		c.executor.logLine(task.ID, "error", fmt.Sprintf("Failed to create tmux window: %s", tmuxErr.Error()))

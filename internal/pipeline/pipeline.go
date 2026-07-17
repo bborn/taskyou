@@ -22,6 +22,7 @@
 package pipeline
 
 import (
+	"encoding/json"
 	"fmt"
 	"os/exec"
 	"sort"
@@ -35,21 +36,33 @@ import (
 // it; Instruction is the task body template ({{goal}} and {{branch}} are
 // substituted at build time); Deps names the steps that must finish first.
 type Step struct {
-	Name        string   // Unique label, e.g. "Plan", "Code", "Review A", "Collect".
-	Executor    string   // Executor slug (db.ExecutorClaude, db.ExecutorCodex, ...).
-	Model       string   // Per-task model override ("" = the executor's default).
-	Instruction string   // Full body template (built-in / verbatim steps). Takes precedence over Prompt.
-	Prompt      string   // Custom-workflow body: what the step does; the git handoff is composed from the DAG (see compose.go).
-	Deps        []string // Names of steps that must complete before this one runs.
+	Name        string            // Unique label, e.g. "Plan", "Code", "Review A", "Collect".
+	Kind        string            // Optional: another kind this step runs. Sets the task's Type (so that kind's instructions apply); if that kind has steps, it's a sub-workflow inlined at build (see flatten.go).
+	Executor    string            // Executor slug (db.ExecutorClaude, db.ExecutorCodex, ...).
+	Model       string            // Per-task model override ("" = the executor's default).
+	ConfigDir   string            // Per-task CLAUDE_CONFIG_DIR override ("" = use the project's/default config dir). Routes this step's Claude through a different config (e.g. ollama) without changing the project.
+	Env         map[string]string // Per-task env overrides injected as a process-env prefix on the claude command (e.g. ANTHROPIC_BASE_URL/AUTH_TOKEN to route through ollama). nil = no overrides. Kept distinct from ConfigDir: env injection keeps the default config dir (plugins, MCP, trusted worktrees) intact and process env wins over stored creds — the mechanism that actually reaches ollama.
+	Instruction string            // Full body template (built-in / verbatim steps). Takes precedence over Prompt.
+	Prompt      string            // Custom-workflow body: what the step does; the git handoff is composed from the DAG (see compose.go).
+	Deps        []string          // Names of steps that must complete before this one runs.
 }
 
-// Definition is a named workflow DAG.
+// Definition is a "kind": one authored recipe. With Steps it is a workflow (a DAG
+// of steps); without Steps it is a single-task kind whose Instructions become the
+// task's prompt preset — the same thing a DB task type is. A step may reference
+// another kind by name (Step.Kind), so a workflow composes kinds, and picking a
+// kind is one action whether it fans out or not.
 type Definition struct {
-	Name        string
-	Description string
-	Steps       []Step
-	Custom      bool // true for workflows loaded from YAML files (vs the built-ins)
+	Name         string
+	Description  string
+	Instructions string // Single-task kind's prompt preset (used when Steps is empty). Mirrors db.TaskType.Instructions.
+	Steps        []Step
+	Custom       bool // true for kinds loaded from YAML files (vs the built-ins)
 }
+
+// IsSingle reports whether this kind is a single task (no DAG) — its Instructions
+// are the whole recipe. The steps-less, instructions-only case is exactly a task type.
+func (d Definition) IsSingle() bool { return len(d.Steps) == 0 }
 
 // DefaultDefinition is the definition used when none is named. It is empty: there
 // are no built-in workflows — every workflow is installed from a plugin (or dropped
@@ -104,8 +117,7 @@ func dedupeKeepingLast(dirs []string) []string {
 	return out
 }
 
-// Definitions returns all workflow definitions — built-in plus custom YAML
-// workflows discovered in extraDirs and the global workflows dir.
+// Definitions returns the workflow definitions discovered as files.
 func Definitions(extraDirs ...string) []Definition {
 	reg := registry(extraDirs...)
 	names := make([]string, 0, len(reg))
@@ -113,21 +125,14 @@ func Definitions(extraDirs ...string) []Definition {
 		names = append(names, name)
 	}
 	sort.Strings(names)
-	// Keep the default first for a stable, friendly listing.
 	out := make([]Definition, 0, len(names))
-	if def, ok := reg[DefaultDefinition]; ok {
-		out = append(out, def)
-	}
 	for _, name := range names {
-		if name == DefaultDefinition {
-			continue
-		}
 		out = append(out, reg[name])
 	}
 	return out
 }
 
-// DefinitionNames returns the names of all definitions (built-in + custom).
+// DefinitionNames returns the names of the workflow files.
 func DefinitionNames(extraDirs ...string) []string {
 	defs := Definitions(extraDirs...)
 	out := make([]string, len(defs))
@@ -137,15 +142,49 @@ func DefinitionNames(extraDirs ...string) []string {
 	return out
 }
 
-// Get returns the named definition (built-in or custom). An empty name resolves
-// to DefaultDefinition.
+// Get returns the workflow definition for a name (a same-named file), if one
+// exists. Single-task kinds are DB task types and are not returned here — use
+// KindResolver when you need both.
 func Get(name string, extraDirs ...string) (Definition, bool) {
 	name = strings.TrimSpace(name)
 	if name == "" {
-		name = DefaultDefinition
+		return Definition{}, false
 	}
 	def, ok := registry(extraDirs...)[name]
 	return def, ok
+}
+
+// KindResolver resolves a kind name to its definition, by convention: if a
+// same-named workflow file exists it runs as a workflow; otherwise the kind is a
+// DB task type (a single task using its instructions). The DB is the single kind
+// store; a workflow is just a file that adds steps to a kind of the same name.
+func KindResolver(database *db.DB, extraDirs ...string) ResolveFunc {
+	reg := registry(extraDirs...)
+	return func(name string) (Definition, bool) {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			return Definition{}, false
+		}
+		if def, ok := reg[name]; ok {
+			return def, true
+		}
+		if database != nil {
+			if tt, err := database.GetTaskTypeByName(name); err == nil && tt != nil {
+				return Definition{Name: tt.Name, Description: tt.Label, Instructions: tt.Instructions}, true
+			}
+		}
+		return Definition{}, false
+	}
+}
+
+// LookupKindInstructions returns the instructions of a single-task kind defined in
+// a YAML/built-in file (not a DB task type), or "" if there is no such kind. The
+// executor uses it so a file-defined kind works as a task Type just like a DB type.
+func LookupKindInstructions(name string, extraDirs ...string) string {
+	if def, ok := Get(name, extraDirs...); ok && def.IsSingle() {
+		return def.Instructions
+	}
+	return ""
 }
 
 // Roots returns the steps with no dependencies (the entry points).
@@ -250,7 +289,8 @@ func Create(database *db.DB, opts Options) (*Result, error) {
 	}
 	projectDir := projectDirFor(database, opts.Project)
 	dirs := WorkflowDirs(projectDir)
-	def, ok := Get(opts.Definition, dirs...)
+	resolve := KindResolver(database, dirs...)
+	def, ok := resolve(opts.Definition)
 	if !ok {
 		avail := DefinitionNames(dirs...)
 		if strings.TrimSpace(opts.Definition) == "" {
@@ -262,8 +302,14 @@ func Create(database *db.DB, opts Options) (*Result, error) {
 		}
 		return nil, fmt.Errorf("unknown workflow definition %q (available: %s)", opts.Definition, strings.Join(avail, ", "))
 	}
-	if err := def.validate(); err != nil {
+	// Compose kinds: inline any step that runs a multi-step kind (nesting) into one
+	// flat DAG. A single-task kind (no steps) is just one ordinary task.
+	def, err := Flatten(def, resolve)
+	if err != nil {
 		return nil, err
+	}
+	if def.IsSingle() {
+		return createSingleTask(database, def, opts)
 	}
 
 	steps := def.Steps
@@ -281,15 +327,17 @@ func Create(database *db.DB, opts Options) (*Result, error) {
 	tasks := make([]*db.Task, 0, len(steps))
 	for _, s := range steps {
 		task := &db.Task{
-			Title:          stepTitle(s.Name, goal),
-			Body:           goal, // Placeholder; rewritten once the branch is known.
-			Status:         db.StatusBacklog,
-			Type:           db.TypeCode,
-			Project:        opts.Project,
-			Executor:       s.Executor,
-			Model:          s.Model,
-			PermissionMode: opts.PermissionMode,
-			Tags:           "pipeline",
+			Title:           stepTitle(s.Name, goal),
+			Body:            goal, // Placeholder; rewritten once the branch is known.
+			Status:          db.StatusBacklog,
+			Type:            stepType(s),
+			Project:         opts.Project,
+			Executor:        s.Executor,
+			Model:           s.Model,
+			ClaudeConfigDir: s.ConfigDir,
+			EnvJSON:         encodeStepEnv(s.Env),
+			PermissionMode:  opts.PermissionMode,
+			Tags:            "pipeline",
 		}
 		if err := database.CreateTask(task); err != nil {
 			return nil, fmt.Errorf("create %s step: %w", s.Name, err)
@@ -389,6 +437,39 @@ func projectDirFor(database *db.DB, project string) string {
 	return ""
 }
 
+// stepType is the task Type for a step: the kind it runs (so that kind's
+// instructions apply at execution), or "code" for a plain inline-prompt step.
+func stepType(s Step) string {
+	if k := strings.TrimSpace(s.Kind); k != "" {
+		return k
+	}
+	return db.TypeCode
+}
+
+// createSingleTask handles a single-task kind (no steps): it's just one ordinary
+// task typed with the kind, so the executor applies the kind's instructions — the
+// same thing as creating a task of that type. No branch, no PR machinery.
+func createSingleTask(database *db.DB, def Definition, opts Options) (*Result, error) {
+	task := &db.Task{
+		Title:          stepTitle(def.Name, opts.Goal),
+		Body:           strings.TrimSpace(opts.Goal),
+		Status:         db.StatusBacklog,
+		Type:           def.Name,
+		Project:        opts.Project,
+		PermissionMode: opts.PermissionMode,
+	}
+	if err := database.CreateTask(task); err != nil {
+		return nil, fmt.Errorf("create %s task: %w", def.Name, err)
+	}
+	if opts.Execute {
+		if err := database.UpdateTaskStatus(task.ID, db.StatusQueued); err != nil {
+			return nil, fmt.Errorf("queue %s task: %w", def.Name, err)
+		}
+		task.Status = db.StatusQueued
+	}
+	return &Result{Definition: def, Tasks: []*db.Task{task}}, nil
+}
+
 // stepTitle builds a task title like "[Plan] <goal>", trimming a long goal so the
 // board card stays readable.
 func stepTitle(step, goal string) string {
@@ -429,6 +510,22 @@ func reviewsList(step Step, branch string) string {
 // slugify converts a string into a lowercase, dash-separated slug, truncated to
 // maxLen. It mirrors the executor's worktree slug so workflow branch names read
 // like ordinary task branches.
+// encodeStepEnv serializes a step's `env:` map into the JSON blob stored on the
+// task (Task.EnvJSON). nil/empty → "" (no override, no stored blob). The
+// executor's EnvMap parses it back. Errors are impossible for a
+// map[string]string and would only indicate a programming mistake, so on
+// failure we fall back to "" rather than blocking pipeline creation.
+func encodeStepEnv(env map[string]string) string {
+	if len(env) == 0 {
+		return ""
+	}
+	b, err := json.Marshal(env)
+	if err != nil {
+		return ""
+	}
+	return string(b)
+}
+
 func slugify(s string, maxLen int) string {
 	s = strings.ToLower(strings.TrimSpace(s))
 	var b strings.Builder

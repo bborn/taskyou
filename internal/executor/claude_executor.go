@@ -189,7 +189,9 @@ func (c *ClaudeExecutor) BuildCommand(task *db.Task, sessionID, prompt string) s
 	// (DetailModel.startResumableSession) must too, or `claude --resume <id>` for a
 	// project with a custom config dir looks in the default ~/.claude, can't find the
 	// session, and exits — leaving only a placeholder pane ("lost executor pane").
-	configPrefix := c.configDirPrefix(task)
+	// taskEnvPrefix appends any per-step env overrides (e.g. ollama routing) so the
+	// interactive resume hits the same backend the daemon launch would.
+	configPrefix := c.configDirPrefix(task) + taskEnvPrefix(task)
 
 	// Build command - resume if we have a session ID, otherwise start fresh
 	if sessionID != "" {
@@ -226,7 +228,7 @@ func (c *ClaudeExecutor) configDirPrefix(task *db.Task) string {
 	if c.executor == nil {
 		return ""
 	}
-	return claudeEnvPrefix(c.executor.claudePathsForProject(task.Project).configDir)
+	return claudeEnvPrefix(c.executor.claudePathsForTask(task).configDir)
 }
 
 // ---- Session and Dangerous Mode Support ----
@@ -257,7 +259,7 @@ func (c *ClaudeExecutor) SessionExists(task *db.Task, sessionID string) bool {
 		return false
 	}
 	workDir := c.executor.taskWorkdir(task)
-	configDir := c.executor.claudePathsForProject(task.Project).configDir
+	configDir := c.executor.claudePathsForTask(task).configDir
 	return ClaudeSessionExists(sessionID, workDir, configDir)
 }
 

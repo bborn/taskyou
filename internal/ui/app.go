@@ -94,11 +94,6 @@ type KeyMap struct {
 	// Jump to pinned/unpinned tasks
 	JumpToPinned   key.Binding
 	JumpToUnpinned key.Binding
-	// Detail-view pinned quick-nav (hop between focused/pinned tasks)
-	PrevPinnedTask key.Binding
-	NextPinnedTask key.Binding
-	// Detail-view: show/hide the pinned quick-nav row
-	TogglePinnedRow key.Binding
 	// Column collapse
 	CollapseBacklog key.Binding
 	CollapseDone    key.Binding
@@ -265,18 +260,6 @@ func DefaultKeyMap() KeyMap {
 		JumpToUnpinned: key.NewBinding(
 			key.WithKeys("shift+down"),
 			key.WithHelp(IconShiftDown(), "jump to unpinned"),
-		),
-		PrevPinnedTask: key.NewBinding(
-			key.WithKeys("["),
-			key.WithHelp("[", "prev pinned"),
-		),
-		NextPinnedTask: key.NewBinding(
-			key.WithKeys("]"),
-			key.WithHelp("]", "next pinned"),
-		),
-		TogglePinnedRow: key.NewBinding(
-			key.WithKeys("T"),
-			key.WithHelp("T", "show/hide pinned"),
 		),
 		CollapseBacklog: key.NewBinding(
 			key.WithKeys("["),
@@ -1025,9 +1008,6 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		// Reapply filter if one is active
 		m.applyFilter()
-		// Keep the detail view's pinned quick-nav in sync with the new task set
-		// (e.g. after a pin/unpin, which reloads tasks).
-		m.refreshDetailPinnedNav()
 		m.kanban.SetHiddenDoneCount(msg.hiddenDoneCount)
 		// Refresh running process indicators for all tasks
 		running := executor.GetTasksWithRunningShellProcess()
@@ -1108,8 +1088,6 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Set task position in column for display
 			pos, total := m.kanban.GetTaskPosition()
 			m.detailView.SetPosition(pos, total)
-			// Populate the pinned quick-nav bar (respects the active board filter)
-			m.refreshDetailPinnedNav()
 			m.previousView = m.currentView
 			m.currentView = ViewDetail
 			// Start async pane setup if needed
@@ -1195,7 +1173,11 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.newTaskForm = nil
 			m.showWelcome = false
 			n := len(msg.result.Tasks)
-			m.notification = fmt.Sprintf("%s Created %s workflow (%d steps) on %s", IconDone(), msg.result.Definition.Name, n, msg.result.Branch)
+			if msg.result.Definition.IsSingle() {
+				m.notification = fmt.Sprintf("%s Created %s task", IconDone(), msg.result.Definition.Name)
+			} else {
+				m.notification = fmt.Sprintf("%s Created %s workflow (%d steps) on %s", IconDone(), msg.result.Definition.Name, n, msg.result.Branch)
+			}
 			m.notifyUntil = time.Now().Add(6 * time.Second)
 			cmds = append(cmds, m.loadTasks())
 		} else {
@@ -2321,70 +2303,6 @@ func (m *AppModel) resolveProjectAliases(query string) string {
 	return result.String()
 }
 
-// filteredPinnedTasks returns the pinned tasks that pass the board's currently
-// active filter, ordered by status column then ID for stability. This is the set
-// the detail view's quick-nav bar hops between — so a filtered board ("[projectX]")
-// only surfaces its own pinned tasks, not every pin across the board.
-func (m *AppModel) filteredPinnedTasks() []*db.Task {
-	queryLower := strings.ToLower(m.filterText)
-	if strings.Contains(queryLower, "[") {
-		queryLower = m.resolveProjectAliases(queryLower)
-	}
-
-	var pinned []*db.Task
-	for _, task := range m.tasks {
-		if !task.Pinned {
-			continue
-		}
-		if queryLower != "" && scoreTaskForFilter(task, queryLower) < 0 {
-			continue
-		}
-		pinned = append(pinned, task)
-	}
-
-	sort.SliceStable(pinned, func(i, j int) bool {
-		ri, rj := statusColumnRank(pinned[i].Status), statusColumnRank(pinned[j].Status)
-		if ri != rj {
-			return ri < rj
-		}
-		return pinned[i].ID < pinned[j].ID
-	})
-	return pinned
-}
-
-// statusColumnRank orders task statuses left-to-right the way the board columns
-// read, so the pinned nav bar lists tasks in a familiar order.
-func statusColumnRank(status string) int {
-	switch status {
-	case db.StatusBacklog:
-		return 0
-	case db.StatusQueued:
-		return 1
-	case db.StatusProcessing:
-		return 2
-	case db.StatusBlocked:
-		return 3
-	case db.StatusDone:
-		return 4
-	default:
-		return 5
-	}
-}
-
-// refreshDetailPinnedNav rebuilds the detail view's pinned quick-nav bar from the
-// current task set and filter. Safe to call when not in the detail view.
-func (m *AppModel) refreshDetailPinnedNav() {
-	if m.detailView == nil || m.selectedTask == nil {
-		return
-	}
-	pinned := m.filteredPinnedTasks()
-	items := make([]PinnedNavItem, len(pinned))
-	for i, t := range pinned {
-		items[i] = PinnedNavItem{ID: t.ID, Title: t.Title, Status: t.Status, Project: t.Project}
-	}
-	m.detailView.SetPinnedNav(items, m.selectedTask.ID)
-}
-
 // applyFilter filters the tasks based on current filter text using fuzzy matching.
 // Uses the same matching logic as the command palette (Ctrl+P) for consistency.
 func (m *AppModel) applyFilter() {
@@ -2401,9 +2319,37 @@ func (m *AppModel) applyFilter() {
 		queryLower = m.resolveProjectAliases(queryLower)
 	}
 
-	// Score all tasks using fuzzy matching
-	var scored []scoredTask
+	// Build the candidate set. Start with the in-memory tasks, then — when the
+	// user typed a keyword — also pull matches straight from the database. The
+	// board only loads active tasks plus the most recent maxDoneTasksInKanban
+	// done tasks, so without this a keyword search silently misses the thousands
+	// of older done tasks (e.g. searching "demo functionality" finds nothing
+	// even though "Go to Task" locates the done task by id). This mirrors the
+	// command palette, which already supplements its list via SearchTasks. See #4705.
+	candidates := make(map[int64]*db.Task, len(m.tasks))
+	ordered := make([]*db.Task, 0, len(m.tasks))
 	for _, task := range m.tasks {
+		if _, ok := candidates[task.ID]; !ok {
+			candidates[task.ID] = task
+			ordered = append(ordered, task)
+		}
+	}
+	if m.db != nil {
+		if _, keyword, _ := parseFilterProjects(queryLower); keyword != "" {
+			if results, err := m.db.SearchTasks(keyword, boardFilterDBSearchLimit); err == nil {
+				for _, task := range results {
+					if _, ok := candidates[task.ID]; !ok {
+						candidates[task.ID] = task
+						ordered = append(ordered, task)
+					}
+				}
+			}
+		}
+	}
+
+	// Score all candidates using fuzzy matching
+	var scored []scoredTask
+	for _, task := range ordered {
 		score := scoreTaskForFilter(task, queryLower)
 		if score >= 0 {
 			scored = append(scored, scoredTask{task: task, score: score})
@@ -2688,11 +2634,6 @@ func (m *AppModel) updateDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.detailView.ToggleHelpExpanded()
 		return m, nil
 	}
-	if key.Matches(keyMsg, m.keys.TogglePinnedRow) && m.detailView != nil {
-		m.detailView.TogglePinnedNav()
-		return m, nil
-	}
-
 	// Arrow key navigation to prev/next task in the same column
 	// j/k keys are passed through to the viewport for scrolling
 	if key.Matches(keyMsg, m.keys.Up) {
@@ -2744,22 +2685,6 @@ func (m *AppModel) updateDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	// Pinned quick-nav: hop between the pinned tasks shown in the detail view's
-	// top bar. [ / ] cycle prev/next; 1-9 jump to that pill directly.
-	if m.detailView != nil && m.detailView.HasPinnedNav() {
-		if key.Matches(keyMsg, m.keys.NextPinnedTask) {
-			return m.jumpToPinnedTask(m.detailView.PinnedNavNextID())
-		}
-		if key.Matches(keyMsg, m.keys.PrevPinnedTask) {
-			return m.jumpToPinnedTask(m.detailView.PinnedNavPrevID())
-		}
-		if s := keyMsg.String(); len(s) == 1 && s[0] >= '1' && s[0] <= '9' {
-			if id := m.detailView.PinnedNavIDAt(int(s[0] - '0')); id != 0 {
-				return m.jumpToPinnedTask(id)
-			}
-		}
-	}
-
 	if m.detailView != nil {
 		var cmd tea.Cmd
 		m.detailView, cmd = m.detailView.Update(msg)
@@ -2767,29 +2692,6 @@ func (m *AppModel) updateDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	return m, nil
-}
-
-// jumpToPinnedTask switches the detail view to the given task, reusing the same
-// cleanup/transition guard as prev/next navigation so we never fight over the
-// executor pane. It selects the task in the kanban first so position display and
-// subsequent arrow navigation stay consistent.
-func (m *AppModel) jumpToPinnedTask(id int64) (tea.Model, tea.Cmd) {
-	if id == 0 {
-		return m, nil
-	}
-	if m.selectedTask != nil && m.selectedTask.ID == id {
-		return m, nil // already here
-	}
-	if m.taskTransitionInProgress {
-		return m, nil
-	}
-	m.taskTransitionInProgress = true
-	if m.detailView != nil {
-		m.detailView.CleanupWithoutSaving()
-		m.detailView = nil
-	}
-	m.kanban.SelectTask(id)
-	return m, m.loadTask(id)
 }
 
 func (m *AppModel) updateNewTaskForm(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -3282,30 +3184,13 @@ func (m *AppModel) buildProjectDetectForm() {
 		return
 	}
 
-	var desc strings.Builder
-	if m.detectedInferencePending {
-		desc.WriteString("✨ Inferring project details…\n\n")
-	}
-	desc.WriteString(fmt.Sprintf("This directory looks like a project.\n\nName: %s\n", project.Name))
-	if project.Aliases != "" {
-		desc.WriteString(fmt.Sprintf("Alias: %s\n", project.Aliases))
-	}
-	desc.WriteString(fmt.Sprintf("Path: %s\n", project.Path))
-	if m.detectedInstructionSource != "" {
-		desc.WriteString(fmt.Sprintf("Instructions: imported from %s\n", m.detectedInstructionSource))
-	} else if project.Instructions != "" {
-		desc.WriteString("Description: " + firstLine(project.Instructions) + "\n")
-	}
-	desc.WriteString(fmt.Sprintf("Worktrees: %v\n", project.UseWorktrees))
-	desc.WriteString("\nYou can edit any of this later in Settings.")
-
 	modalWidth := min(64, m.width-8)
 	m.projectDetectConfirm = huh.NewForm(
 		huh.NewGroup(
 			huh.NewConfirm().
 				Key("create_project").
-				Title("Create a TaskYou project for this repo?").
-				Description(desc.String()).
+				Title(projectDetectTitle(project.UseWorktrees)).
+				Description(projectDetectDescription(project, m.detectedInstructionSource, m.detectedInferencePending)).
 				Affirmative("Create Project").
 				Negative("Not Now").
 				Value(&m.projectDetectConfirmValue),
@@ -3433,10 +3318,17 @@ func (m *AppModel) createDetectedProject(project *db.Project) tea.Cmd {
 	// Refresh project color cache so the new project renders consistently.
 	LoadProjectColors(m.db)
 
-	m.notification = fmt.Sprintf("%s Created project \"%s\"", IconDone(), project.Name)
+	m.notification = fmt.Sprintf("%s Created project \"%s\" — describe your first task", IconDone(), project.Name)
 	m.notifyUntil = time.Now().Add(5 * time.Second)
 
-	return m.loadTasks()
+	// Momentum: setting up the project is only step one — the job is to run a
+	// task in it. Drop straight into the first-task form (pre-selected to this
+	// project via SetLastUsedProject above) instead of dead-ending on an empty
+	// board that just says "press n". esc from the form returns to the board.
+	m.newTaskForm = NewFormModel(m.db, m.width, m.height, project.Path, m.availableExecutors)
+	m.previousView = ViewDashboard
+	m.currentView = ViewNewTask
+	return tea.Batch(m.loadTasks(), m.newTaskForm.Init())
 }
 
 func (m *AppModel) showQuitConfirm() (tea.Model, tea.Cmd) {
@@ -4274,6 +4166,12 @@ type versionCheckMsg struct {
 }
 
 const maxDoneTasksInKanban = 20
+
+// boardFilterDBSearchLimit caps how many extra tasks a board keyword filter
+// pulls from the database to surface older/done tasks not loaded on the board.
+// Matches the command palette's SearchTasks limit for consistency.
+const boardFilterDBSearchLimit = 100
+
 const summaryRefreshAfter = 5 * time.Minute
 
 // refreshLatestActivity loads the most recent log line for each active task and
@@ -4612,14 +4510,14 @@ func (m *AppModel) unarchiveTask(id int64) tea.Cmd {
 	}
 }
 
+// deleteTask trashes a task (soft delete): it stops the running agent so the task
+// stops consuming a session, but leaves the worktree and Claude transcript on disk
+// so the task is fully recoverable ('task restore' / the daemon sweep hard-deletes
+// it only after the retention window). This is the deliberate replacement for the
+// old one-shot destructive delete that made incidents like the lost Creator Commerce
+// session unrecoverable.
 func (m *AppModel) deleteTask(id int64) tea.Cmd {
 	return func() tea.Msg {
-		// Get task to check for worktree
-		task, err := m.db.GetTask(id)
-		if err != nil {
-			return taskDeletedMsg{err: err}
-		}
-
 		// Kill Claude process to free memory
 		m.executor.KillClaudeProcess(id)
 
@@ -4627,23 +4525,8 @@ func (m *AppModel) deleteTask(id int64) tea.Cmd {
 		windowTarget := executor.TmuxSessionName(id)
 		osExec.Command("tmux", "kill-window", "-t", windowTarget).Run()
 
-		// Clean up worktree and Claude sessions if they exist
-		if task != nil && task.WorktreePath != "" {
-			projectConfigDir := ""
-			if task.Project != "" {
-				if project, err := m.db.GetProjectByName(task.Project); err == nil && project != nil {
-					projectConfigDir = project.ClaudeConfigDir
-				}
-			}
-			// Clean up Claude session files first (before worktree is removed)
-			executor.CleanupClaudeSessions(task.WorktreePath, projectConfigDir)
-
-			// Clean up worktree
-			m.executor.CleanupWorktree(task)
-		}
-
-		// Delete from database
-		err = m.db.DeleteTask(id)
+		// Trash the task — worktree + transcript are preserved for recovery.
+		err := m.db.SoftDeleteTask(id)
 		return taskDeletedMsg{err: err}
 	}
 }

@@ -159,16 +159,16 @@ Examples:
 
 			var succeeded, failed int
 			for _, id := range ids {
-				if err := deleteTask(id); err != nil {
-					fmt.Fprintln(os.Stderr, errorStyle.Render(fmt.Sprintf("Error deleting task #%d: %v", id, err)))
+				if err := softDeleteTask(id); err != nil {
+					fmt.Fprintln(os.Stderr, errorStyle.Render(fmt.Sprintf("Error trashing task #%d: %v", id, err)))
 					failed++
 					continue
 				}
-				fmt.Println(successStyle.Render(fmt.Sprintf("Deleted task #%d", id)))
+				fmt.Println(successStyle.Render(fmt.Sprintf("Trashed task #%d", id)))
 				succeeded++
 			}
 
-			printBulkSummary("deletion", succeeded, failed)
+			printBulkSummary("trash", succeeded, failed)
 		},
 	}
 	bulkDeleteCmd.Flags().BoolP("force", "f", false, "Skip confirmation prompt")
@@ -294,6 +294,9 @@ Examples:
 			}
 
 			printBulkSummary("queue", succeeded, failed)
+			if succeeded > 0 {
+				ensureDaemonForQueuedWork()
+			}
 		},
 	}
 	bulkExecuteCmd.Flags().Bool("dangerous", false, "Execute in dangerous mode (skip permission prompts)")

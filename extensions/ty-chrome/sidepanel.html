@@ -2,11 +2,27 @@
 <html>
 <head>
   <meta charset="utf-8" />
+  <link rel="stylesheet" href="vendor/xterm.css" />
   <link rel="stylesheet" href="sidepanel.css" />
 </head>
 <body>
-  <div id="no-connection" class="banner hidden">
-    Can't reach <code>ty serve</code> — probing common ports, retrying…
+  <div id="no-connection" class="banner empty-state hidden">
+    <strong>No TaskYou daemon reachable</strong>
+    <p>
+      This extension is a thin client — it needs <code>ty serve</code> (the
+      TaskYou daemon) running locally to create and drive tasks.
+    </p>
+    <ul>
+      <li>Have <code>ty</code> already? Run <code>ty serve</code> in a terminal.</li>
+      <li>
+        No terminal? Install the <strong>TaskYou desktop app</strong> — it runs
+        the daemon for you in the background.
+      </li>
+    </ul>
+    <a href="https://github.com/bborn/taskyou#readme" target="_blank" rel="noopener">
+      Get TaskYou →
+    </a>
+    <p class="probing muted">Probing common ports, retrying…</p>
   </div>
 
   <div id="settings" class="card hidden">
@@ -37,6 +53,17 @@
         <select id="task-select"></select>
         <button id="refresh-tasks" title="Refresh">↻</button>
       </div>
+      <button id="new-task-toggle" class="link-btn">＋ New task</button>
+      <form id="new-task-form" class="new-task hidden">
+        <select id="nt-project" title="Project / repo"></select>
+        <input id="nt-title" type="text" placeholder="Task title" />
+        <textarea id="nt-body" rows="3" placeholder="What should the agent do?"></textarea>
+        <label class="nt-execute">
+          <input type="checkbox" id="nt-execute" checked /> Execute now
+        </label>
+        <button id="nt-create" type="submit" class="primary">Create task</button>
+        <p id="nt-result" class="muted"></p>
+      </form>
     </div>
   </section>
 
@@ -46,25 +73,29 @@
       <span id="annotation-count" class="chip zero">0</span>
     </div>
     <button id="annotate-btn" class="secondary">✏️ Annotate page <kbd>⌥A</kbd></button>
-    <textarea id="instruction" rows="2" placeholder="Overall instruction (optional)"></textarea>
-    <button id="send-btn" class="primary" disabled>Send to executor <kbd>⌥S</kbd></button>
+    <textarea id="instruction" rows="2" placeholder="Message the executor, or add context for annotations"></textarea>
+    <button id="send-btn" class="primary" disabled>Send to executor <kbd>⇧↩</kbd></button>
     <p id="send-result" class="muted"></p>
   </section>
 
   <section class="card executor">
-    <div class="sec-head">
+    <div class="sec-head term-head" id="term-head" title="Collapse / expand executor">
+      <button id="term-toggle" class="term-toggle" aria-expanded="true" aria-label="Collapse executor">▾</button>
       <h2>Executor</h2>
-      <span id="executor-state" class="muted"></span>
+      <span id="executor-state" class="muted term-state"></span>
+      <span id="bridge-status" class="muted bridge-status hidden"></span>
       <label class="auto-reload" title="Reload the page when the executor finishes working">
         <input type="checkbox" id="auto-reload" checked /> auto-reload
       </label>
     </div>
-    <pre id="console"></pre>
-    <!-- Executor is read-only for now; unhide to re-enable follow-up input -->
-    <div class="input-row hidden">
-      <input id="followup" type="text" placeholder="Say something to the executor…" />
-      <button id="followup-send">↵</button>
+    <div class="term-wrap">
+      <div id="term-host" class="term-host"></div>
+      <div id="term-overlay" class="term-overlay">
+        <span id="term-msg" class="muted">Connecting…</span>
+        <button id="term-action" class="secondary hidden"></button>
+      </div>
     </div>
+    <p class="term-hint muted">A live, read-only view of the executor — send input with the box above.</p>
   </section>
 
   <footer>
@@ -72,6 +103,9 @@
     <button id="settings-btn" title="Server settings">⚙ <span id="server-label"></span></button>
   </footer>
 
+  <script src="vendor/xterm.js"></script>
+  <script src="vendor/addon-fit.js"></script>
+  <script src="vendor/addon-unicode11.js"></script>
   <script src="sidepanel.js"></script>
 </body>
 </html>

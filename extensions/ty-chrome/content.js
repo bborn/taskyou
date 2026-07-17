@@ -7,6 +7,7 @@
 
   const TEAL = '#d05010'; // taskyou logo orange (accent)
   let mode = 'none'; // none | select | box | note
+  let selectDown = false; // a select-mode pointer press is in progress
   let annotations = []; // {kind,label,selector,tag,text,html,rect,styles,comment,els:[]}
   let nextLabel = 1;
 
@@ -86,7 +87,7 @@
     }
     .region { position: absolute; border: 2px dashed ${TEAL}; background: rgba(208,80,16,.12); border-radius: 2px; touch-action: none; }
     .dragrect { position: fixed; border: 2px dashed ${TEAL}; background: rgba(208,80,16,.12); display: none; }
-    .boxlayer { position: fixed; inset: 0; cursor: crosshair; touch-action: none; }
+    .boxlayer, .selectlayer { position: fixed; inset: 0; cursor: crosshair; touch-action: none; }
     /* The comment editor is a <dialog> opened with showModal() so it joins the
        top layer as the topmost modal — that makes any page-level modal dialog
        (and its focus trap) inert instead of us, so our textarea stays typeable.
@@ -166,6 +167,7 @@
   // --- Modes -----------------------------------------------------------------
   const boxLayer = el('div', 'boxlayer');
   const dragRect = el('div', 'dragrect');
+  const selectLayer = el('div', 'selectlayer');
 
   function setMode(m) {
     mode = m;
@@ -173,8 +175,11 @@
     btnBox.classList.toggle('active', m === 'box');
     btnNote.classList.toggle('active', m === 'note');
     hl.style.display = 'none';
+    selectDown = false;
     boxLayer.remove();
     dragRect.remove();
+    selectLayer.remove();
+    if (m === 'select') root.appendChild(selectLayer);
     if (m === 'box') {
       root.appendChild(boxLayer);
       root.appendChild(dragRect);
@@ -187,14 +192,27 @@
     }
   }
 
-  // Select mode: hover highlight + capture-phase click interception.
-  // Driven by pointer events so it also tracks under Chrome's mobile/touch
-  // emulation (where mouseover never fires). On touch the finger position is
-  // the "hover" target while pressed; a tap still resolves to a click below.
-  function onPointerHover(e) {
-    if (mode !== 'select') return;
-    const t = realTarget(e);
-    if (!t) return;
+  // Select mode runs on a full-viewport capture layer (like box mode) so one
+  // path serves both a mouse and Chrome's mobile/touch emulation. Touch only
+  // dispatches pointer events while pressed and never fires plain hover, so we
+  // preview on press-drag and commit on release; a mouse still previews on
+  // hover (pointermove fires with no button) and commits on click. The layer's
+  // touch-action:none stops the page from stealing the gesture to scroll, and
+  // it intercepts the click so the page never navigates.
+  //
+  // Hit-testing goes through elementsFromPoint (coordinate-based), not e.target:
+  // the layer is the event target, and on touch implicit pointer capture would
+  // otherwise pin e.target to the press element for the whole drag. We skip our
+  // own shadow host (surfaced by the shadow boundary) and take the topmost page
+  // element beneath it.
+  function pageElementAt(x, y) {
+    for (const node of document.elementsFromPoint(x, y)) {
+      if (node === host || host.contains(node)) continue;
+      return node.nodeType === 1 ? node : null;
+    }
+    return null;
+  }
+  function highlight(t) {
     const r = t.getBoundingClientRect();
     hl.style.display = 'block';
     hl.style.left = r.left - 2 + 'px';
@@ -202,25 +220,32 @@
     hl.style.width = r.width + 4 + 'px';
     hl.style.height = r.height + 4 + 'px';
   }
-  function onClick(e) {
-    if (mode !== 'select') return;
-    const t = realTarget(e);
-    if (!t) return;
+  selectLayer.addEventListener('pointermove', (e) => {
+    // Mouse previews on hover; touch only tracks while a finger is down.
+    if (e.pointerType !== 'mouse' && !selectDown) return;
+    const t = pageElementAt(e.clientX, e.clientY);
+    if (t) highlight(t);
+  });
+  selectLayer.addEventListener('pointerdown', (e) => {
     e.preventDefault();
-    e.stopPropagation();
+    selectLayer.setPointerCapture?.(e.pointerId);
+    selectDown = true;
+    const t = pageElementAt(e.clientX, e.clientY);
+    if (t) highlight(t);
+  });
+  selectLayer.addEventListener('pointerup', (e) => {
+    if (!selectDown) return;
+    selectDown = false;
+    const t = pageElementAt(e.clientX, e.clientY);
     hl.style.display = 'none';
+    if (!t) {
+      setMode('none');
+      return;
+    }
     const snap = snapshotElement(t);
     openPopover({ ...snap, anchorEl: t });
     setMode('none');
-  }
-  function realTarget(e) {
-    if (e.composedPath().includes(host)) return null;
-    const t = e.target;
-    return t && t.nodeType === 1 ? t : null;
-  }
-  document.addEventListener('pointermove', onPointerHover, true);
-  document.addEventListener('pointerover', onPointerHover, true);
-  document.addEventListener('click', onClick, true);
+  });
 
   // Focus shield. Many pages run a focus trap (modal <dialog> controllers, etc.)
   // that refocuses themselves whenever focus appears to leave them. Our UI lives
@@ -657,23 +682,234 @@
     }
   });
 
+  // --- Agent cursor: a visible pointer showing where the executor is acting.
+  // The bridge drives the page by selector (no real pointer), so nothing is
+  // normally visible when the agent clicks or types. This paints a little
+  // labeled cursor that flies to the target and ripples on click, so you can
+  // watch what the executor is doing in your tab.
+  let agentCursorEl = null;
+  let agentCursorHideTimer = null;
+
+  function ensureAgentCursor() {
+    if (agentCursorEl && document.documentElement.contains(agentCursorEl)) return agentCursorEl;
+    const c = document.createElement('div');
+    c.setAttribute('data-ty-agent-cursor', '');
+    c.style.cssText =
+      'position:fixed;left:0;top:0;z-index:2147483647;pointer-events:none;' +
+      'width:0;height:0;opacity:0;' +
+      'transition:transform .28s cubic-bezier(.22,.61,.36,1),opacity .2s ease;' +
+      'will-change:transform,opacity;';
+    c.innerHTML =
+      '<svg width="26" height="26" viewBox="0 0 26 26" style="position:absolute;left:-3px;top:-3px;' +
+      'filter:drop-shadow(0 1px 2px rgba(0,0,0,.45))">' +
+      '<path d="M4 2 L4 20 L9 15 L12.5 22 L15.5 20.5 L12 13.5 L19 13 Z" ' +
+      'fill="#d05010" stroke="#fff" stroke-width="1.5" stroke-linejoin="round"/></svg>' +
+      '<span style="position:absolute;left:19px;top:13px;white-space:nowrap;' +
+      "font:600 11px/1.4 -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;color:#fff;" +
+      'background:#d05010;padding:1px 6px;border-radius:6px;box-shadow:0 1px 3px rgba(0,0,0,.35)">agent</span>';
+    document.documentElement.appendChild(c);
+    agentCursorEl = c;
+    return c;
+  }
+
+  function showAgentCursor(x, y) {
+    const c = ensureAgentCursor();
+    c.style.opacity = '1';
+    c.style.transform = `translate(${Math.round(x)}px, ${Math.round(y)}px)`;
+    clearTimeout(agentCursorHideTimer);
+    agentCursorHideTimer = setTimeout(() => { c.style.opacity = '0'; }, 2600);
+  }
+
+  function spawnClickRipple(x, y) {
+    const ring = document.createElement('div');
+    ring.style.cssText =
+      `position:fixed;left:${Math.round(x)}px;top:${Math.round(y)}px;z-index:2147483646;` +
+      'pointer-events:none;width:16px;height:16px;margin:-8px 0 0 -8px;' +
+      'border:2px solid #d05010;border-radius:50%;opacity:.9;' +
+      'transition:transform .5s ease-out,opacity .5s ease-out;';
+    document.documentElement.appendChild(ring);
+    requestAnimationFrame(() => {
+      ring.style.transform = 'scale(3)';
+      ring.style.opacity = '0';
+    });
+    setTimeout(() => ring.remove(), 560);
+  }
+
+  // Center of an element in viewport coords (for the fixed-position cursor).
+  function elementCenter(el) {
+    const r = el.getBoundingClientRect();
+    return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+  }
+
+  // --- Indexed DOM snapshot ----------------------------------------------------
+  // A compact, numbered list of the page's *interactive* elements — the
+  // browser-use-style representation. Typically ~20-50x smaller than the raw
+  // outerHTML dump, and each element gets a stable index the executor can
+  // click/type by, so it never has to guess a selector (and can't ambiguously
+  // match two links like the old a[href="/marketplace"] bug). The result reports
+  // both its own size and the outerHTML size so you can compare token cost.
+  let domIndex = []; // index -> element, rebuilt on each buildDomSnapshot()
+
+  const INTERACTIVE_TAGS = new Set([
+    'a', 'button', 'input', 'select', 'textarea', 'summary', 'label', 'option',
+  ]);
+  const INTERACTIVE_ROLES = new Set([
+    'button', 'link', 'checkbox', 'radio', 'tab', 'menuitem', 'menuitemcheckbox',
+    'menuitemradio', 'switch', 'option', 'combobox', 'textbox', 'searchbox',
+    'slider', 'spinbutton',
+  ]);
+
+  function isVisible(el) {
+    if (!el || el.nodeType !== 1) return false;
+    if (typeof el.checkVisibility === 'function' &&
+        !el.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true })) {
+      return false;
+    }
+    const r = el.getBoundingClientRect();
+    if (r.width > 0 || r.height > 0) return true;
+    // Zero-size but maybe a display:contents wrapper whose children are real —
+    // descend into those rather than dropping the subtree. (getComputedStyle is
+    // only paid on the rare zero-box element, not every node.)
+    return getComputedStyle(el).display === 'contents';
+  }
+
+  function isInteractive(el) {
+    const tag = el.localName;
+    if (INTERACTIVE_TAGS.has(tag)) {
+      if (tag === 'input' && el.type === 'hidden') return false;
+      return true;
+    }
+    const role = el.getAttribute('role');
+    if (role && INTERACTIVE_ROLES.has(role)) return true;
+    if (el.hasAttribute('onclick')) return true;
+    if (el.isContentEditable) return true;
+    const ti = el.getAttribute('tabindex');
+    return ti !== null && ti !== '-1';
+  }
+
+  function accessibleName(el) {
+    const label = el.getAttribute('aria-label');
+    if (label) return label.trim();
+    const labelledby = el.getAttribute('aria-labelledby');
+    if (labelledby) {
+      const names = labelledby
+        .split(/\s+/)
+        .map((id) => document.getElementById(id)?.innerText || '')
+        .join(' ')
+        .trim();
+      if (names) return names;
+    }
+    if (el.localName === 'img') return (el.getAttribute('alt') || '').trim();
+    if (el.localName === 'input') {
+      if (el.type === 'submit' || el.type === 'button') return (el.value || '').trim();
+      return (el.getAttribute('placeholder') || el.getAttribute('name') || '').trim();
+    }
+    const text = (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim();
+    if (text) return text.slice(0, 120);
+    return (el.getAttribute('title') || el.getAttribute('name') || '').trim();
+  }
+
+  function descriptor(el, idx, depth) {
+    const role = el.getAttribute('role') || el.localName;
+    const name = accessibleName(el);
+    const bits = [];
+    if (el.localName === 'input' && el.type) bits.push(`type=${el.type}`);
+    const href = el.getAttribute && el.getAttribute('href');
+    if (href) bits.push(`href=${href.slice(0, 60)}`);
+    if (el.disabled) bits.push('disabled');
+    if (el.checked) bits.push('checked');
+    const attrs = bits.length ? ` {${bits.join(' ')}}` : '';
+    const indent = '  '.repeat(Math.min(depth, 8));
+    return `${indent}[${idx}] <${role}>${name ? ` "${name}"` : ''}${attrs}`;
+  }
+
+  function walkDom(node, out, depth) {
+    for (const el of node.children || []) {
+      if (!isVisible(el)) continue;
+      let indexed = false;
+      if (isInteractive(el)) {
+        const idx = domIndex.length;
+        domIndex.push(el);
+        out.push(descriptor(el, idx, depth));
+        indexed = true;
+      }
+      const childDepth = depth + (indexed ? 1 : 0);
+      if (el.shadowRoot) walkDom(el.shadowRoot, out, childDepth + 1);
+      walkDom(el, out, childDepth);
+      if (el.localName === 'iframe') {
+        try {
+          const doc = el.contentDocument;
+          if (doc && doc.body) walkDom(doc.body, out, childDepth + 1);
+        } catch { /* cross-origin frame: not accessible */ }
+      }
+    }
+  }
+
+  function buildDomSnapshot() {
+    domIndex = [];
+    const out = [];
+    walkDom(document.body, out, 0);
+    let text = out.join('\n');
+    let truncated = false;
+    if (text.length > 40_000) {
+      text = text.slice(0, 40_000) + '\n… (truncated)';
+      truncated = true;
+    }
+    return {
+      dom: text,
+      title: document.title,
+      url: location.href,
+      count: domIndex.length,
+      chars: text.length,
+      htmlChars: document.documentElement.outerHTML.length, // for token-cost comparison
+      truncated,
+    };
+  }
+
+  // Resolve a click/type target by index (preferred) or CSS selector (fallback).
+  function resolveTarget(params) {
+    if (params.index != null) {
+      const el = domIndex[Number(params.index)];
+      if (!el) return { error: `no element at index ${params.index} — take an 'elements' snapshot first` };
+      if (!el.isConnected) return { error: `element [${params.index}] is stale — re-snapshot with 'elements'` };
+      return { el };
+    }
+    if (params.selector) {
+      const el = document.querySelector(params.selector);
+      if (!el) return { error: `no element matches ${params.selector}` };
+      return { el };
+    }
+    return { error: 'click/type needs an "index" (from an elements snapshot) or a "selector"' };
+  }
+
   function runBridgeCommand(action, params) {
     switch (action) {
+      case 'elements':
+        return buildDomSnapshot();
       case 'snapshot': {
         let html = document.documentElement.outerHTML;
         if (html.length > 800_000) html = html.slice(0, 800_000) + '\n<!-- …truncated -->';
         return { html, title: document.title, url: location.href };
       }
       case 'click': {
-        const el = document.querySelector(params.selector || '');
-        if (!el) return { error: `no element matches ${params.selector}` };
+        const r = resolveTarget(params);
+        if (r.error) return r;
+        const el = r.el;
         el.scrollIntoView({ block: 'center', behavior: 'instant' });
+        const { x, y } = elementCenter(el);
+        showAgentCursor(x, y);
+        // Let the cursor visibly land before the ripple fires.
+        setTimeout(() => spawnClickRipple(x, y), 260);
         el.click();
         return { ok: true, tag: el.localName, text: (el.innerText || '').trim().slice(0, 80) };
       }
       case 'type': {
-        const el = document.querySelector(params.selector || '');
-        if (!el) return { error: `no element matches ${params.selector}` };
+        const r = resolveTarget(params);
+        if (r.error) return r;
+        const el = r.el;
+        el.scrollIntoView({ block: 'center', behavior: 'instant' });
+        const { x, y } = elementCenter(el);
+        showAgentCursor(x, y);
         el.focus();
         if (el.isContentEditable) {
           el.textContent = params.text ?? '';

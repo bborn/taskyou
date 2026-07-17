@@ -245,10 +245,21 @@ func TestHandleDeleteTask(t *testing.T) {
 		t.Fatalf("expected 200, got %d", w.Code)
 	}
 
-	// Verify deleted
+	// Soft-delete: the row survives (recoverable) but is trashed and hidden from
+	// the default listing.
 	got, _ := database.GetTask(task.ID)
-	if got != nil {
-		t.Error("task should be deleted")
+	if got == nil {
+		t.Fatal("task row should survive a soft delete")
+	}
+	active, _ := database.ListTasks(db.ListTasksOptions{})
+	for _, tk := range active {
+		if tk.ID == task.ID {
+			t.Error("trashed task should not appear in default listing")
+		}
+	}
+	trashed, _ := database.ListTrashedTasks()
+	if len(trashed) != 1 || trashed[0].ID != task.ID {
+		t.Errorf("expected task in trash, got %+v", trashed)
 	}
 }
 

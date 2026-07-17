@@ -93,13 +93,13 @@ func TestRegistryMergesCustom(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "build-and-qa.yaml"), []byte(sampleYAML), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	// A custom workflow on the search path is resolved by name.
+	// A workflow file is discovered by Get; there are no built-ins.
 	if _, ok := Get("build-and-qa"); !ok {
 		t.Error("custom workflow not resolved by Get")
 	}
 	names := DefinitionNames()
 	if !contains(names, "build-and-qa") {
-		t.Errorf("DefinitionNames = %v, want to include build-and-qa", names)
+		t.Errorf("DefinitionNames = %v, want the custom workflow", names)
 	}
 }
 

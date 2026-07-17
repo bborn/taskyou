@@ -263,7 +263,61 @@ func (s *Server) ensureBrowserHowto(task *db.Task) {
 	}
 	dir := filepath.Join(root, ".taskyou", "browser")
 	path := filepath.Join(dir, "HOWTO.md")
-	if _, err := os.Stat(path); err == nil {
+
+	base := s.baseURL
+	endpoint := fmt.Sprintf("%s/api/tasks/%d/browser", base, task.ID)
+	howto := fmt.Sprintf(`# Browser bridge — see and drive the user's live browser window
+
+The ty-chrome extension is connected to this task. Use the user's real browser
+instead of launching your own. You can drive the tabs in this task's tab group
+(labeled "ty #%d" in the tab strip): the matched app tab plus new tabs you open
+(including external sites like docs or issue trackers). Tabs outside the group
+are off-limits. Every command is:
+
+    curl -s -X POST %s \
+      -H 'Content-Type: application/json' -d '{"action":"...","params":{...}}'
+
+Responses are {"ok":true,"result":{...}}. If the side panel is closed you get
+a 503; ask the user to open it.
+
+## See the page (do this first and after every change)
+
+- **Elements** (preferred — compact + cheap): '{"action":"elements"}' → result.dom is a
+  numbered list of the page's interactive elements, e.g. '[12] <button> "Buy now"'.
+  result.count is how many. Prefer this over screenshots and raw HTML: it's typically
+  ~20-50x fewer tokens (result.chars vs result.htmlChars shows the ratio), and you click
+  by the [index] so you never guess a selector.
+- **Screenshot** (visual check when layout/rendering matters): '{"action":"screenshot"}' →
+  result.path is a PNG in this worktree; Read it. Don't screenshot every step.
+- **DOM snapshot** (raw HTML, last resort — large): '{"action":"snapshot"}' → result.path,
+  result.title, result.url
+- **Console logs + JS errors**: '{"action":"console"}' → result.logs
+
+## Act on the page
+
+- **Click**: '{"action":"click","params":{"index":12}}' (index from an 'elements' snapshot;
+  a CSS '"selector":"#buy-btn"' still works too)
+- **Type**: '{"action":"type","params":{"index":5,"text":"hello"}}' (or a '"selector"')
+- **Navigate** (any http/https site): '{"action":"navigate","params":{"url":"https://example.com/"}}'
+- **Reload**: '{"action":"reload"}'
+
+## Control the group of tabs
+
+- **List tabs**: '{"action":"tabs"}' → result.tabs = [{tab,url,title,active,primary}]
+- **Open a tab**: '{"action":"open","params":{"url":"https://docs...","activate":true}}' → result.tab
+- **Focus a tab**: '{"action":"activate","params":{"tab":<id>}}'
+- **Close a tab**: '{"action":"close","params":{"tab":<id>}}'
+
+Any see/act command takes an optional '"tab":<id>' to target a specific tab in
+the group (default: the matched app tab, e.g. localhost:%d). Screenshotting a
+background tab brings it to the foreground first. Screenshot after each
+interaction to verify what actually happened.
+`, task.ID, endpoint, task.Port)
+
+	// Only (re)write when missing or stale, so the doc stays current as the
+	// bridge gains actions (e.g. the new 'elements' snapshot) without clobbering
+	// on every poll.
+	if existing, err := os.ReadFile(path); err == nil && string(existing) == howto {
 		return
 	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -273,33 +327,5 @@ func (s *Server) ensureBrowserHowto(task *db.Task) {
 	if _, err := os.Stat(gitignore); os.IsNotExist(err) {
 		os.WriteFile(gitignore, []byte("*\n"), 0o644)
 	}
-
-	base := s.baseURL
-	endpoint := fmt.Sprintf("%s/api/tasks/%d/browser", base, task.ID)
-	howto := fmt.Sprintf(`# Browser bridge — see and drive the user's live browser
-
-The ty-chrome extension is connected to this task. Use the user's real browser
-tab instead of launching your own. Every command is:
-
-    curl -s -X POST %s \
-      -H 'Content-Type: application/json' -d '{"action":"...","params":{...}}'
-
-Responses are {"ok":true,"result":{...}}. If the side panel is closed you get
-a 503; ask the user to open it.
-
-## Actions
-
-- **See the page** (most useful — do this first and after every change):
-  '{"action":"screenshot"}' → result.path is a PNG in this worktree; Read it.
-- **DOM snapshot**: '{"action":"snapshot"}' → result.path (full HTML), result.title, result.url
-- **Console logs + JS errors**: '{"action":"console"}' → result.logs
-- **Click**: '{"action":"click","params":{"selector":"#buy-btn"}}'
-- **Type**: '{"action":"type","params":{"selector":"input[name=q]","text":"hello"}}'
-- **Navigate** (localhost only): '{"action":"navigate","params":{"url":"http://localhost:%d/"}}'
-- **Reload**: '{"action":"reload"}'
-
-Screenshot after each interaction to verify what actually happened.
-`, endpoint, task.Port)
-
 	os.WriteFile(path, []byte(howto), 0o644)
 }

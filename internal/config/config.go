@@ -21,10 +21,14 @@ const (
 	SettingDetailPaneHeight      = "detail_pane_height"
 	SettingShellPaneWidth        = "shell_pane_width"
 	SettingShellPaneHidden       = "shell_pane_hidden"
-	SettingPinnedNavHidden       = "pinned_nav_hidden"
 	SettingIdleSuspendTimeout    = "idle_suspend_timeout"
 	SettingServerURL             = "server_url"
 	SettingWorktreeCleanupMaxAge = "worktree_cleanup_max_age"
+	// SettingTrashRetention is how long a soft-deleted (trashed) task stays
+	// recoverable before the daemon sweep hard-deletes it. Value is a Go duration
+	// string (e.g. "336h"); "0" or "disabled" turns the sweep off (trash kept
+	// forever). See DefaultTrashRetention.
+	SettingTrashRetention = "trash_retention"
 	// SettingHTTPAPIPort is the port the daemon-hosted HTTP API listens on.
 	SettingHTTPAPIPort = "http_api_port"
 	// SettingHTTPAPIDisabled, when "true", stops the daemon from hosting the

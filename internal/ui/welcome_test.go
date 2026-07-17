@@ -45,6 +45,31 @@ func TestMissingPrereqNotices(t *testing.T) {
 	}
 }
 
+func TestWelcomeChoiceHint(t *testing.T) {
+	setup := welcomeChoiceHint(0)
+	task := welcomeChoiceHint(1)
+	if setup == task {
+		t.Fatal("each choice should have a distinct hint")
+	}
+	if !strings.Contains(setup, "folder") {
+		t.Errorf("set-up-project hint should mention pointing at a folder, got %q", setup)
+	}
+	if !strings.Contains(task, "personal") {
+		t.Errorf("start-task hint should mention the personal space, got %q", task)
+	}
+}
+
+func TestWelcomeViewShowsChoiceHint(t *testing.T) {
+	m := NewWelcomeModel(100, 40, []string{"claude"}, true)
+	if !strings.Contains(m.View(), welcomeChoiceHint(0)) {
+		t.Error("welcome view should show the hint for the highlighted choice")
+	}
+	m.MoveRight()
+	if !strings.Contains(m.View(), welcomeChoiceHint(1)) {
+		t.Error("welcome view should update the hint when the highlight moves")
+	}
+}
+
 func TestWelcomeViewShowsEnvironmentStatus(t *testing.T) {
 	// Agents detected, tmux missing: confidence beat + visible, non-blocking notice.
 	m := NewWelcomeModel(100, 40, []string{"claude", "codex"}, false)

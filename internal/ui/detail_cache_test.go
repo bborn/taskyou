@@ -123,9 +123,13 @@ func TestPendingPaneAction(t *testing.T) {
 		{"backlog skips", &db.Task{Status: db.StatusBacklog}, paneActionSkip},
 		{"done skips", &db.Task{Status: db.StatusDone}, paneActionSkip},
 		{"archived skips", &db.Task{Status: db.StatusArchived}, paneActionSkip},
+		// Daemon-owned tasks (queued/processing) wait for the daemon's executor
+		// instead of starting their own — regardless of worktree. Starting here
+		// races the daemon and double-spawns two sessions with clobbered pane ids.
 		{"queued without worktree waits", &db.Task{Status: db.StatusQueued}, paneActionWaitForExecutor},
-		{"queued with worktree starts", &db.Task{Status: db.StatusQueued, WorktreePath: "/tmp/wt"}, paneActionStartExecutor},
-		{"processing starts", &db.Task{Status: db.StatusProcessing}, paneActionStartExecutor},
+		{"queued with worktree waits", &db.Task{Status: db.StatusQueued, WorktreePath: "/tmp/wt"}, paneActionWaitForExecutor},
+		{"processing waits", &db.Task{Status: db.StatusProcessing}, paneActionWaitForExecutor},
+		{"processing with worktree waits", &db.Task{Status: db.StatusProcessing, WorktreePath: "/tmp/wt"}, paneActionWaitForExecutor},
 		{"blocked starts", &db.Task{Status: db.StatusBlocked}, paneActionStartExecutor},
 	}
 

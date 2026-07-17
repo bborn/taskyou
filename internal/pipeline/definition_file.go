@@ -22,22 +22,28 @@ import (
 
 // stepYAML is the on-disk form of a step.
 type stepYAML struct {
-	Name     string   `yaml:"name"`
-	Executor string   `yaml:"executor,omitempty"`
-	Model    string   `yaml:"model,omitempty"`
-	Deps     []string `yaml:"deps,omitempty"`
-	Prompt   string   `yaml:"prompt"`
+	Name      string            `yaml:"name"`
+	Kind      string            `yaml:"kind,omitempty"` // Run another kind here (its instructions apply; if it has steps, they're inlined).
+	Executor  string            `yaml:"executor,omitempty"`
+	Model     string            `yaml:"model,omitempty"`
+	ConfigDir string            `yaml:"config_dir,omitempty"` // Per-step CLAUDE_CONFIG_DIR override: route this step's Claude through a different config (e.g. an ollama-backed one) without changing the project. ~ is expanded.
+	Env       map[string]string `yaml:"env,omitempty"`        // Per-step env overrides injected as a process-env prefix on the claude command (e.g. ANTHROPIC_BASE_URL/AUTH_TOKEN to route through ollama). Distinct from config_dir: env injection keeps the default config dir intact and is what actually reaches a token-auth proxy like ollama.
+	Deps      []string          `yaml:"deps,omitempty"`
+	Prompt    string            `yaml:"prompt,omitempty"` // Optional when `kind` is set: the referenced kind supplies the instructions.
 	// Verbatim marks a step whose prompt IS the full instruction (no DAG-derived
 	// git handoff is added). It's set when `ty pipeline edit` ejects a built-in
 	// workflow, so the ejected file behaves identically to the built-in.
 	Verbatim bool `yaml:"verbatim,omitempty"`
 }
 
-// definitionYAML is the on-disk form of a workflow.
+// definitionYAML is the on-disk form of a kind. `steps` makes it a workflow;
+// `instructions` (with no steps) makes it a single-task kind — the same shape as a
+// task type. One file format, one differentiator: the presence of `steps`.
 type definitionYAML struct {
-	Name        string     `yaml:"name"`
-	Description string     `yaml:"description,omitempty"`
-	Steps       []stepYAML `yaml:"steps"`
+	Name         string     `yaml:"name"`
+	Description  string     `yaml:"description,omitempty"`
+	Instructions string     `yaml:"instructions,omitempty"`
+	Steps        []stepYAML `yaml:"steps,omitempty"`
 }
 
 // WorkflowsDir returns the global directory custom workflow files live in.
@@ -70,27 +76,33 @@ func ParseDefinition(data []byte) (Definition, error) {
 		return Definition{}, fmt.Errorf("workflow is missing a name")
 	}
 	def := Definition{
-		Name:        strings.TrimSpace(doc.Name),
-		Description: strings.TrimSpace(doc.Description),
-		Custom:      true,
+		Name:         strings.TrimSpace(doc.Name),
+		Description:  strings.TrimSpace(doc.Description),
+		Instructions: strings.TrimSpace(doc.Instructions),
+		Custom:       true,
 	}
 	for _, s := range doc.Steps {
 		name := strings.TrimSpace(s.Name)
 		if name == "" {
-			return Definition{}, fmt.Errorf("workflow %q has a step with no name", def.Name)
+			return Definition{}, fmt.Errorf("kind %q has a step with no name", def.Name)
 		}
-		if strings.TrimSpace(s.Prompt) == "" {
-			return Definition{}, fmt.Errorf("step %q has no prompt", name)
+		kind := strings.TrimSpace(s.Kind)
+		// A step must say what it does: either its own prompt, or a kind to run.
+		if strings.TrimSpace(s.Prompt) == "" && kind == "" {
+			return Definition{}, fmt.Errorf("step %q needs a prompt or a kind", name)
 		}
 		exec := strings.TrimSpace(s.Executor)
 		if exec == "" {
 			exec = "claude"
 		}
 		step := Step{
-			Name:     name,
-			Executor: exec,
-			Model:    strings.TrimSpace(s.Model),
-			Deps:     s.Deps,
+			Name:      name,
+			Kind:      kind,
+			Executor:  exec,
+			Model:     strings.TrimSpace(s.Model),
+			ConfigDir: strings.TrimSpace(s.ConfigDir),
+			Env:       s.Env,
+			Deps:      s.Deps,
 		}
 		// A verbatim step's prompt is its full instruction; otherwise the prompt is
 		// the work and the git handoff is composed from the DAG.
@@ -100,6 +112,14 @@ func ParseDefinition(data []byte) (Definition, error) {
 			step.Prompt = s.Prompt
 		}
 		def.Steps = append(def.Steps, step)
+	}
+	// A steps-less kind must carry instructions (it's a single-task prompt preset);
+	// a kind with steps is a workflow and is validated as a DAG.
+	if def.IsSingle() {
+		if def.Instructions == "" {
+			return Definition{}, fmt.Errorf("kind %q has no steps and no instructions", def.Name)
+		}
+		return def, nil
 	}
 	if err := def.validate(); err != nil {
 		return Definition{}, err
@@ -112,11 +132,13 @@ func Marshal(def Definition) ([]byte, error) {
 	doc := definitionYAML{Name: def.Name, Description: def.Description}
 	for _, s := range def.Steps {
 		out := stepYAML{
-			Name:     s.Name,
-			Executor: s.Executor,
-			Model:    s.Model,
-			Deps:     s.Deps,
-			Prompt:   s.Prompt,
+			Name:      s.Name,
+			Executor:  s.Executor,
+			Model:     s.Model,
+			ConfigDir: s.ConfigDir,
+			Env:       s.Env,
+			Deps:      s.Deps,
+			Prompt:    s.Prompt,
 		}
 		// A built-in step carries a full Instruction — write it as a verbatim
 		// prompt so the ejected file behaves identically when reloaded.

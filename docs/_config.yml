@@ -1,0 +1,10 @@
+# GitHub Pages / Jekyll config for the TaskYou docs site.
+#
+# The public site is the install/landing page plus the reference docs at the
+# top level. Internal engineering artifacts (implementation plans, QA reports)
+# live under docs/ for convenience but are NOT part of the published site — and
+# they contain Go source with `{{ ... }}` struct/template literals that Jekyll's
+# Liquid parser chokes on. Exclude them from the build.
+exclude:
+  - superpowers
+  - qa

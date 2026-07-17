@@ -17,6 +17,50 @@ func mkGitRepo(t *testing.T, dir string) {
 	}
 }
 
+func TestProjectDetectTitle(t *testing.T) {
+	if got := projectDetectTitle(true); !strings.Contains(got, "repo") {
+		t.Errorf("git project title should say repo, got %q", got)
+	}
+	// A non-git folder must not be called a "repo".
+	got := projectDetectTitle(false)
+	if strings.Contains(got, "repo") {
+		t.Errorf("non-git title should not say repo, got %q", got)
+	}
+	if !strings.Contains(got, "folder") {
+		t.Errorf("non-git title should say folder, got %q", got)
+	}
+}
+
+func TestProjectDetectDescription(t *testing.T) {
+	git := projectDetectDescription(&db.Project{Name: "acme", Path: "/x", UseWorktrees: true}, "README.md", false)
+	if !strings.Contains(git, "This git repo looks like a project") {
+		t.Errorf("git description wording: %q", git)
+	}
+	if !strings.Contains(git, "imported from README.md") {
+		t.Errorf("git description should note imported instructions: %q", git)
+	}
+	if !strings.Contains(git, "own git worktree") {
+		t.Errorf("git description should explain worktree isolation: %q", git)
+	}
+
+	nonGit := projectDetectDescription(&db.Project{Name: "acme", Path: "/x", UseWorktrees: false}, "", false)
+	if strings.Contains(nonGit, "git repo looks like") {
+		t.Errorf("non-git description should not call the folder a git repo: %q", nonGit)
+	}
+	if !strings.Contains(nonGit, "This folder looks like a project") {
+		t.Errorf("non-git description wording: %q", nonGit)
+	}
+	if !strings.Contains(nonGit, "Isolation: off") {
+		t.Errorf("non-git description should explain isolation is off: %q", nonGit)
+	}
+
+	// Pending inference prepends the spinner beat.
+	pending := projectDetectDescription(&db.Project{Name: "acme", Path: "/x", UseWorktrees: true}, "", true)
+	if !strings.Contains(pending, "Inferring project details") {
+		t.Errorf("pending description should show inference beat: %q", pending)
+	}
+}
+
 func TestDirIsGitRepo(t *testing.T) {
 	tmp := t.TempDir()
 

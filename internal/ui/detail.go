@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -45,8 +46,9 @@ const (
 	paneActionStartExecutor paneAction = iota
 	// paneActionSkip: don't start anything (backlog/done/archived tasks).
 	paneActionSkip
-	// paneActionWaitForExecutor: a freshly queued task with no worktree yet — the
-	// daemon's executor will create the window shortly; keep polling for it.
+	// paneActionWaitForExecutor: a daemon-owned task (queued/processing) whose
+	// window doesn't exist yet — the daemon's executor will create it shortly;
+	// keep polling for it instead of starting our own.
 	paneActionWaitForExecutor
 )
 
@@ -57,13 +59,39 @@ func pendingPaneAction(task *db.Task) paneAction {
 	if shouldSkipAutoExecutor(task) {
 		return paneActionSkip
 	}
-	// Queued tasks without a worktree are handled by the daemon's executor, which
-	// creates the window. Starting panes here would race it (project dir vs worktree
-	// dir), so we wait and let ensureTmuxPanesJoined pick the panes up.
-	if task.Status == db.StatusQueued && task.WorktreePath == "" {
+	// Queued and processing tasks belong to the daemon's executor, which creates
+	// the window. If we reach here the window doesn't exist yet, meaning the daemon
+	// is still spinning it up. Starting our own executor now races the daemon and
+	// double-spawns — two Claude sessions in the same worktree with clobbered pane
+	// ids (the "executors mixed up" bug). Wait and let ensureTmuxPanesJoined join
+	// the daemon's panes once they appear.
+	//
+	// This must hold regardless of WorktreePath: the worktree is created early in
+	// the daemon's spin-up, so a queued/processing task frequently already has one
+	// while its executor window is still pending. Gating the wait on
+	// WorktreePath == "" (as this once did) let exactly that window slip through to
+	// the start path. A daemon that never creates the window (e.g. it died, leaving
+	// the task stuck "processing") is handled downstream by a bounded wait that
+	// falls back to offering "Start session".
+	if task.Status == db.StatusQueued || task.Status == db.StatusProcessing {
 		return paneActionWaitForExecutor
 	}
 	return paneActionStartExecutor
+}
+
+// waitForExecutorTimeout bounds how long the detail view waits for the daemon to
+// create a daemon-owned task's executor window before giving up and starting one
+// itself. The daemon normally creates it within seconds; if it never does (e.g.
+// it died, leaving the task stuck "processing"), we fall back to the start path
+// so the view isn't wedged forever. The fallback is race-safe: it starts through
+// EnsureTaskWindow's spawn lock, which re-checks for an existing window.
+const waitForExecutorTimeout = 60 * time.Second
+
+// shouldFallBackToStart reports whether a view that has been passively waiting for
+// the daemon's executor (paneActionWaitForExecutor) should give up and start one
+// itself. It gives up only once the timeout has elapsed with no panes joined.
+func shouldFallBackToStart(waitingForExecutor, panesJoined bool, waited, timeout time.Duration) bool {
+	return waitingForExecutor && !panesJoined && waited >= timeout
 }
 
 // liveExecutorInPaneCommands reports whether any of the given tmux pane
@@ -114,18 +142,6 @@ type DetailModel struct {
 	// Task position in column (1-indexed)
 	positionInColumn int
 	totalInColumn    int
-
-	// Pinned quick-nav: a compact pill bar at the top of the detail view for
-	// hopping between the tasks you're currently focused on (your pinned tasks,
-	// honouring the board's active filter). pinnedNavIndex is the position of the
-	// currently-viewed task within pinnedNav, or -1 when the current task isn't
-	// pinned. Populated by AppModel via SetPinnedNav whenever a task is opened or
-	// the task set changes.
-	pinnedNav      []PinnedNavItem
-	pinnedNavIndex int
-	// pinnedNavHidden lets the user collapse the pinned quick-nav row entirely
-	// (toggled with 'T'); persisted as a preference across tasks/sessions.
-	pinnedNavHidden bool
 
 	// helpExpanded controls the footer help row: collapsed shows only the
 	// high-frequency actions plus a '?' affordance; expanded reveals the rest.
@@ -552,6 +568,18 @@ func (m *DetailModel) Refresh() tea.Cmd {
 		m.lastPaneCheck = time.Now()
 		// Ensure tmux panes are joined if available (handles external close/detach)
 		m.ensureTmuxPanesJoined()
+
+		// Bounded wait: if we've been waiting for the daemon's executor window to
+		// appear past waitForExecutorTimeout and it still hasn't, the daemon isn't
+		// going to create it (e.g. it died, leaving the task stuck "processing").
+		// Start the executor ourselves rather than spin forever. Safe from the
+		// double-spawn this whole change prevents: startPanesAsync goes through
+		// EnsureTaskWindow's spawn lock, which re-checks for an existing window.
+		if shouldFallBackToStart(m.waitingForExecutor, m.claudePaneID != "", time.Since(m.paneLoadingStart), waitForExecutorTimeout) {
+			GetLogger().Info("Refresh: waited %s for daemon executor on task %d with no window; starting it ourselves", waitForExecutorTimeout, m.task.ID)
+			m.waitingForExecutor = false
+			return tea.Batch(cmd, m.startPanesAsync())
+		}
 	}
 
 	return cmd
@@ -604,11 +632,6 @@ func NewDetailModel(t *db.Task, database *db.DB, exec *executor.Executor, width,
 	// Load shell pane visibility preference from settings
 	if hiddenStr, err := database.GetSetting(config.SettingShellPaneHidden); err == nil && hiddenStr == "true" {
 		m.shellPaneHidden = true
-	}
-
-	// Load pinned quick-nav visibility preference from settings
-	if hiddenStr, err := database.GetSetting(config.SettingPinnedNavHidden); err == nil && hiddenStr == "true" {
-		m.pinnedNavHidden = true
 	}
 
 	// Load logs
@@ -798,14 +821,9 @@ func (m *DetailModel) spinnerTick() tea.Cmd {
 }
 
 // headerHeight is the vertical space reserved for the box chrome around the
-// viewport. The pinned quick-nav bar (rendered at the bottom of the box) adds
-// one line and must be accounted for here or the viewport would overflow.
+// viewport.
 func (m *DetailModel) headerHeight() int {
-	h := 6
-	if m.showPinnedNav() {
-		h++
-	}
-	return h
+	return 6
 }
 
 func (m *DetailModel) initViewport() {
@@ -828,7 +846,7 @@ func (m *DetailModel) SetSize(width, height int) {
 
 // reflowViewport recomputes the viewport dimensions from the current width,
 // height, and header layout. Called on resize and whenever something that
-// changes the header height (like the pinned nav bar appearing) is updated.
+// changes the header height is updated.
 func (m *DetailModel) reflowViewport() {
 	if !m.ready {
 		return
@@ -837,6 +855,13 @@ func (m *DetailModel) reflowViewport() {
 	m.viewport.Width = m.width - 4
 	m.viewport.Height = m.height - m.headerHeight() - footerHeight
 	m.setViewportContent()
+}
+
+// ToggleHelpExpanded flips the footer help row between the collapsed (primary
+// actions + '?') and expanded (all actions) states.
+func (m *DetailModel) ToggleHelpExpanded() {
+	m.helpExpanded = !m.helpExpanded
+	m.cachedViewOK = false
 }
 
 // Update handles messages.
@@ -1486,6 +1511,64 @@ func (m *DetailModel) releaseExecutorLock() {
 	m.executorBusyElsewhere = false
 }
 
+// tmuxPaneOpMu serializes pane join/break operations across the whole process.
+//
+// join/break run a multi-step tmux sequence that mutates and reads global tmux
+// server state (the "current window", the set of panes in task-ui, the active
+// pane). Two of these interleaving — e.g. rapid task switching fires one task's
+// join concurrently with another's — corrupts that shared state: one join's
+// "kill leftover panes in task-ui" step can kill a pane a concurrent join just
+// moved in, and (before the source-id fix below) a `display-message` read of the
+// active pane could return the *other* task's pane. That is exactly how tasks
+// 4324 and 4822 ended up sharing pane %812. Serializing makes each sequence
+// atomic with respect to the others.
+var tmuxPaneOpMu sync.Mutex
+
+// paneCwdInWorktree reports whether the given tmux pane's current working
+// directory lives inside the task's worktree. It is the ownership check that
+// prevents a task from adopting another task's executor pane when a stored
+// pane ID is stale or has been reused by tmux for a different pane.
+//
+// Returns true when ownership can't be determined (no worktree recorded, or the
+// query fails) so we never reject a legitimate pane on a transient error — the
+// check only ever *rejects* on a definite worktree mismatch.
+func (m *DetailModel) paneCwdInWorktree(ctx context.Context, paneID string) bool {
+	if m.task == nil || m.task.WorktreePath == "" || paneID == "" {
+		return true
+	}
+	out, err := osExec.CommandContext(ctx, "tmux", "display-message",
+		"-t", paneID, "-p", "#{pane_current_path}").Output()
+	if err != nil {
+		return true // can't tell — don't reject
+	}
+	cwd := strings.TrimSpace(string(out))
+	if cwd == "" {
+		return true
+	}
+	return pathInsideDir(m.task.WorktreePath, cwd)
+}
+
+// pathInsideDir reports whether path is dir itself or nested within it, after
+// resolving symlinks on both sides so /tmp vs /private/tmp (and similar macOS
+// symlinked prefixes) don't produce false mismatches. Returns true when the
+// comparison can't be made, so callers only ever act on a definite mismatch.
+func pathInsideDir(dir, path string) bool {
+	if dir == "" || path == "" {
+		return true
+	}
+	if resolved, err := filepath.EvalSymlinks(dir); err == nil {
+		dir = resolved
+	}
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		path = resolved
+	}
+	rel, err := filepath.Rel(dir, path)
+	if err != nil {
+		return true // unrelated volumes / can't compare — don't reject
+	}
+	return rel == "." || !strings.HasPrefix(rel, "..")
+}
+
 // joinTmuxPanes joins the task's Claude pane and creates a workdir shell pane.
 // Layout:
 //   - Top (configurable, default 20%): Task details (TUI)
@@ -1501,6 +1584,11 @@ func (m *DetailModel) joinTmuxPanes() {
 		return
 	}
 	log.Debug("joinTmuxPanes: windowTarget=%q", windowTarget)
+
+	// Serialize with any concurrent join/break so the shared tmux state this
+	// sequence depends on can't be mutated mid-flight by another task's view.
+	tmuxPaneOpMu.Lock()
+	defer tmuxPaneOpMu.Unlock()
 
 	// Granular executor lock: refuse to borrow this task's pane if another ty
 	// instance already owns it, rather than fighting over it and interrupt-looping
@@ -1612,6 +1700,27 @@ func (m *DetailModel) joinTmuxPanes() {
 		log.Debug("joinTmuxPanes: falling back to first daemon pane ID %q for Claude", claudeSourcePaneID)
 	}
 
+	// Ownership guard: never adopt a pane whose working directory isn't inside
+	// this task's worktree. tmux recycles pane IDs after a pane dies, and a
+	// window named task-<id> can end up holding another task's pane, so a pane
+	// simply "existing in the window" is not proof it is ours. Adopting a foreign
+	// pane is what cross-wired 4324 onto 4822's session. On mismatch, drop the
+	// stale IDs so we stop persisting and re-displaying the wrong session, then
+	// bail on the normal cooldown; a retry rebuilds the executor cleanly.
+	if !m.paneCwdInWorktree(ctx, claudeSourcePaneID) {
+		log.Error("joinTmuxPanes: candidate Claude pane %q is not in task %d's worktree %q; refusing to adopt (self-healing stale IDs)",
+			claudeSourcePaneID, m.task.ID, m.task.WorktreePath)
+		if m.database != nil {
+			m.database.ClearTaskTmuxIDs(m.task.ID)
+		}
+		m.task.ClaudePaneID = ""
+		m.task.ShellPaneID = ""
+		m.task.TmuxWindowID = ""
+		m.cachedWindowTarget = ""
+		m.joinPaneFailedUntil = time.Now().Add(5 * time.Second)
+		return
+	}
+
 	// Step 1: Join the Claude pane below the TUI pane (vertical split)
 	log.Info("joinTmuxPanes: joining Claude pane %q", claudeSourcePaneID)
 	joinCmd := osExec.CommandContext(ctx, "tmux", "join-pane",
@@ -1625,14 +1734,12 @@ func (m *DetailModel) joinTmuxPanes() {
 	}
 	log.Debug("joinTmuxPanes: join-pane succeeded")
 
-	// Get the Claude pane ID (it's now the active pane after join)
-	claudePaneCmd := osExec.CommandContext(ctx, "tmux", "display-message", "-p", "#{pane_id}")
-	claudePaneOut, err := claudePaneCmd.Output()
-	if err != nil {
-		log.Error("joinTmuxPanes: failed to get Claude pane ID: %v", err)
-		return
-	}
-	m.claudePaneID = strings.TrimSpace(string(claudePaneOut))
+	// A pane keeps its ID when moved between windows/sessions, so the pane we
+	// just joined is still claudeSourcePaneID. Use it directly rather than
+	// re-reading the globally-active pane via `display-message` — that read is
+	// not concurrency-safe (a simultaneous join for another task can flip the
+	// active pane) and was how task 4324 latched onto task 4822's pane %812.
+	m.claudePaneID = claudeSourcePaneID
 	log.Info("joinTmuxPanes: claudePaneID=%q", m.claudePaneID)
 
 	// Set Claude pane title with memory info
@@ -1693,10 +1800,9 @@ func (m *DetailModel) joinTmuxPanes() {
 				log.Error("joinTmuxPanes: join shell pane failed: %v", err)
 				m.workdirPaneID = ""
 			} else {
-				// Get the joined shell pane ID
-				workdirPaneCmd := osExec.CommandContext(ctx, "tmux", "display-message", "-p", "#{pane_id}")
-				workdirPaneOut, _ := workdirPaneCmd.Output()
-				m.workdirPaneID = strings.TrimSpace(string(workdirPaneOut))
+				// The joined shell pane keeps its source ID; use it directly
+				// instead of the non-concurrency-safe active-pane read.
+				m.workdirPaneID = shellSourcePaneID
 				log.Debug("joinTmuxPanes: joined shell pane, workdirPaneID=%q", m.workdirPaneID)
 				osExec.CommandContext(ctx, "tmux", "select-pane", "-t", m.workdirPaneID, "-T", "Shell").Run()
 				// Set environment variables in the shell pane (they should already be set from daemon, but ensure they're fresh)
@@ -2094,6 +2200,12 @@ func (m *DetailModel) breakTmuxPanes(saveHeight bool, resizeTUI bool) {
 	log.Debug("breakTmuxPanes: claudePaneID=%q, workdirPaneID=%q, tuiPaneID=%q, daemonSessionID=%q",
 		m.claudePaneID, m.workdirPaneID, m.tuiPaneID, m.daemonSessionID)
 
+	// Serialize with any concurrent join/break (see tmuxPaneOpMu). A break moving
+	// a pane back to the daemon must not interleave with a join that reads/kills
+	// panes in task-ui, or they clobber each other's view of the shared tmux state.
+	tmuxPaneOpMu.Lock()
+	defer tmuxPaneOpMu.Unlock()
+
 	// Use timeout for all tmux operations to prevent blocking UI
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -2472,9 +2584,8 @@ func (m *DetailModel) View() string {
 
 	header := m.renderHeader()
 	help := m.renderHelp()
-	nav := m.renderPinnedNav()
 
-	sig := m.viewSignature(header, help, nav)
+	sig := m.viewSignature(header, help)
 	if m.cachedViewOK && m.cachedViewSig == sig {
 		return m.cachedView
 	}
@@ -2527,13 +2638,6 @@ func (m *DetailModel) View() string {
 		boxContent = lipgloss.JoinVertical(lipgloss.Left, header, content, scrollIndicator)
 	}
 
-	// Pinned quick-nav bar sits at the bottom of the box, just above the help
-	// footer, so the top stays clean. headerHeight() already reserves a line for
-	// it, so the viewport shrinks to make room.
-	if nav != "" {
-		boxContent = lipgloss.JoinVertical(lipgloss.Left, boxContent, nav)
-	}
-
 	renderedBox := box.Render(boxContent)
 
 	// When shell pane is hidden, show a collapsed indicator on the right
@@ -2578,7 +2682,7 @@ func (m *DetailModel) View() string {
 // colours) without enumerating each one. The remaining inputs are the View-level
 // state the header/help don't cover: the dangerous-mode banner, the bordered box,
 // and the viewport's content/scroll geometry.
-func (m *DetailModel) viewSignature(header, help, nav string) uint64 {
+func (m *DetailModel) viewSignature(header, help string) uint64 {
 	h := newSigHasher()
 	h.u64(StyleGeneration()) // theme / project colour changes
 	h.int(m.width)
@@ -2597,7 +2701,6 @@ func (m *DetailModel) viewSignature(header, help, nav string) uint64 {
 	h.int(m.viewport.VisibleLineCount())
 	h.str(header)
 	h.str(help)
-	h.str(nav) // pinned quick-nav bar (rendered at the box bottom)
 	return h.h
 }
 
@@ -3161,11 +3264,6 @@ func (m *DetailModel) renderHelp() string {
 		{IconArrowUp() + "/" + IconArrowDown(), "prev/next task", !hasNavigation, true},
 	}
 
-	// Pinned quick-nav hint (only when the bar is shown)
-	if m.showPinnedNav() {
-		keys = append(keys, helpKey{"[/]", "pinned", false, true})
-	}
-
 	// Show scroll hint when content is scrollable
 	if m.viewport.TotalLineCount() > m.viewport.VisibleLineCount() {
 		keys = append(keys, helpKey{"j/k/wheel", "scroll", false, false})
@@ -3196,15 +3294,6 @@ func (m *DetailModel) renderHelp() string {
 			pinDesc = "unpin task"
 		}
 		keys = append(keys, helpKey{"t", pinDesc, false, false})
-	}
-
-	// Toggle the pinned quick-nav row (only when there are pinned tasks to show).
-	if m.pinnedNavAvailable() {
-		toggleDesc := "hide pinned"
-		if m.pinnedNavHidden {
-			toggleDesc = "show pinned"
-		}
-		keys = append(keys, helpKey{"T", toggleDesc, false, false})
 	}
 
 	// Show dangerous mode toggle when task is processing or blocked

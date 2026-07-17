@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -135,6 +136,47 @@ func detectProjectFromDir(dir string) (project *db.Project, instructionSource st
 		Instructions: instructions,
 		UseWorktrees: dirIsGitRepo(dir),
 	}, source
+}
+
+// projectDetectTitle returns the confirm-modal title, git-aware so we never call
+// a non-git folder a "repo".
+func projectDetectTitle(useWorktrees bool) string {
+	if useWorktrees {
+		return "Create a TaskYou project for this repo?"
+	}
+	return "Create a TaskYou project for this folder?"
+}
+
+// projectDetectDescription renders the body of the "New Project Detected" confirm
+// card. Kept pure (no huh/AppModel deps) so the first-run copy is unit-testable,
+// and phrased for a first-timer: git-aware ("repo" vs "folder") with the worktree
+// jargon spelled out as what it actually means for their tasks.
+func projectDetectDescription(project *db.Project, instructionSource string, inferencePending bool) string {
+	var desc strings.Builder
+	if inferencePending {
+		desc.WriteString("✨ Inferring project details…\n\n")
+	}
+	kind := "folder"
+	if project.UseWorktrees {
+		kind = "git repo"
+	}
+	desc.WriteString(fmt.Sprintf("This %s looks like a project.\n\nName: %s\n", kind, project.Name))
+	if project.Aliases != "" {
+		desc.WriteString(fmt.Sprintf("Alias: %s\n", project.Aliases))
+	}
+	desc.WriteString(fmt.Sprintf("Path: %s\n", project.Path))
+	if instructionSource != "" {
+		desc.WriteString(fmt.Sprintf("Instructions: imported from %s\n", instructionSource))
+	} else if project.Instructions != "" {
+		desc.WriteString("Description: " + firstLine(project.Instructions) + "\n")
+	}
+	if project.UseWorktrees {
+		desc.WriteString("Isolation: each task runs in its own git worktree\n")
+	} else {
+		desc.WriteString("Isolation: off — not a git repo, so tasks run in the folder directly\n")
+	}
+	desc.WriteString("\nYou can edit any of this later in Settings.")
+	return desc.String()
 }
 
 // uniqueProjectName ensures the inferred name doesn't collide with an existing

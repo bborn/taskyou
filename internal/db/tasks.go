@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -21,6 +22,8 @@ type Task struct {
 	Executor        string // Task executor: "claude" (default), "codex", "gemini"
 	EffortLevel     string // Per-task Claude effort override ("" = use global/Claude default; otherwise low/medium/high/xhigh/max)
 	Model           string // Per-task Claude model override ("" = use global/Claude default; otherwise an alias like opus/sonnet/haiku or a full model name)
+	ClaudeConfigDir string // Per-task CLAUDE_CONFIG_DIR override ("" = use the project's/default config dir). Lets a single step route through a different Claude config (e.g. an ollama-backed one) without changing the project.
+	EnvJSON         string // Per-task env overrides for the spawned Claude, stored as a JSON object (e.g. {"ANTHROPIC_BASE_URL":"http://127.0.0.1:11434","ANTHROPIC_AUTH_TOKEN":"ollama"}). Injected as a process-env prefix on the claude command so a step can route through a non-Anthropic proxy (ollama) WITHOUT swapping CLAUDE_CONFIG_DIR — the default config dir (plugins, MCP, trusted worktrees) stays intact and process env wins over stored creds. "" = no overrides.
 	WorktreePath    string
 	BranchName      string
 	Port            int    // Unique port for running the application in this task's worktree
@@ -242,6 +245,22 @@ func IsValidEffortLevel(s string) bool {
 	}
 }
 
+// EnvMap parses a task's EnvJSON override blob into a map. A malformed or
+// empty blob yields an empty (never nil) map, so callers can range over it
+// without a nil check. This is the read side of the per-step env feature: the
+// pipeline stores a step's `env:` map as JSON in EnvJSON, and the executor
+// renders it into a process-env prefix on the claude command.
+func (t *Task) EnvMap() map[string]string {
+	out := map[string]string{}
+	if strings.TrimSpace(t.EnvJSON) == "" {
+		return out
+	}
+	if err := json.Unmarshal([]byte(t.EnvJSON), &out); err != nil {
+		return map[string]string{}
+	}
+	return out
+}
+
 // Model overrides are per-task selections for Claude's model (claude --model).
 // An empty value means "no override" — the task uses Claude's global default,
 // leaving the user's global setting untouched. The aliases below are accepted by
@@ -327,9 +346,9 @@ func (db *DB) CreateTask(t *Task) error {
 	t.DangerousMode = t.PermissionMode == PermissionModeDangerous
 
 	result, err := db.Exec(`
-		INSERT INTO tasks (title, body, status, type, project, executor, pinned, tags, source_branch, dangerous_mode, permission_mode, remote_control, effort_level, model)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, t.Title, t.Body, t.Status, t.Type, t.Project, t.Executor, t.Pinned, t.Tags, t.SourceBranch, t.DangerousMode, t.PermissionMode, t.RemoteControl, t.EffortLevel, t.Model)
+		INSERT INTO tasks (title, body, status, type, project, executor, pinned, tags, source_branch, dangerous_mode, permission_mode, remote_control, effort_level, model, claude_config_dir, env)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, t.Title, t.Body, t.Status, t.Type, t.Project, t.Executor, t.Pinned, t.Tags, t.SourceBranch, t.DangerousMode, t.PermissionMode, t.RemoteControl, t.EffortLevel, t.Model, t.ClaudeConfigDir, t.EnvJSON)
 	if err != nil {
 		return fmt.Errorf("insert task: %w", err)
 	}
@@ -383,7 +402,7 @@ func (db *DB) GetTask(id int64) (*Task, error) {
 		       COALESCE(claude_pane_id, ''), COALESCE(shell_pane_id, ''),
 		       COALESCE(pr_url, ''), COALESCE(pr_number, 0), COALESCE(pr_info_json, ''),
 		       COALESCE(dangerous_mode, 0), COALESCE(permission_mode, ''), COALESCE(remote_control, 0), COALESCE(pinned, 0), COALESCE(tags, ''),
-		       COALESCE(source_branch, ''), COALESCE(summary, ''), COALESCE(effort_level, ''), COALESCE(model, ''),
+		       COALESCE(source_branch, ''), COALESCE(summary, ''), COALESCE(effort_level, ''), COALESCE(model, ''), COALESCE(claude_config_dir, ''), COALESCE(env, ''),
 		       created_at, updated_at, started_at, completed_at,
 		       last_distilled_at, last_accessed_at,
 		       COALESCE(archive_ref, ''), COALESCE(archive_commit, ''),
@@ -395,7 +414,7 @@ func (db *DB) GetTask(id int64) (*Task, error) {
 		&t.DaemonSession, &t.TmuxWindowID, &t.ClaudePaneID, &t.ShellPaneID,
 		&t.PRURL, &t.PRNumber, &t.PRInfoJSON,
 		&t.DangerousMode, &t.PermissionMode, &t.RemoteControl, &t.Pinned, &t.Tags,
-		&t.SourceBranch, &t.Summary, &t.EffortLevel, &t.Model,
+		&t.SourceBranch, &t.Summary, &t.EffortLevel, &t.Model, &t.ClaudeConfigDir, &t.EnvJSON,
 		&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
 		&t.LastDistilledAt, &t.LastAccessedAt,
 		&t.ArchiveRef, &t.ArchiveCommit, &t.ArchiveWorktreePath, &t.ArchiveBranchName,
@@ -418,6 +437,7 @@ type ListTasksOptions struct {
 	Limit          int
 	Offset         int
 	IncludeClosed  bool // Include closed tasks even when Status is empty
+	IncludeTrashed bool // Include soft-deleted (trashed) tasks; by default they are hidden
 	OrderByRecency bool // Sort purely by recency, ignoring pinned-first ordering
 }
 
@@ -430,7 +450,7 @@ func (db *DB) ListTasks(opts ListTasksOptions) ([]*Task, error) {
 		       COALESCE(claude_pane_id, ''), COALESCE(shell_pane_id, ''),
 		       COALESCE(pr_url, ''), COALESCE(pr_number, 0), COALESCE(pr_info_json, ''),
 		       COALESCE(dangerous_mode, 0), COALESCE(permission_mode, ''), COALESCE(remote_control, 0), COALESCE(pinned, 0), COALESCE(tags, ''),
-		       COALESCE(source_branch, ''), COALESCE(summary, ''), COALESCE(effort_level, ''), COALESCE(model, ''),
+		       COALESCE(source_branch, ''), COALESCE(summary, ''), COALESCE(effort_level, ''), COALESCE(model, ''), COALESCE(claude_config_dir, ''), COALESCE(env, ''),
 		       created_at, updated_at, started_at, completed_at,
 		       last_distilled_at, last_accessed_at,
 		       COALESCE(archive_ref, ''), COALESCE(archive_commit, ''),
@@ -475,6 +495,13 @@ func (db *DB) ListTasks(opts ListTasksOptions) ([]*Task, error) {
 		query += " AND status NOT IN ('done', 'archived')"
 	}
 
+	// Soft-deleted (trashed) tasks are hidden everywhere by default — the board,
+	// CLI list, port allocation, review reconcile, etc. They only resurface via an
+	// explicit IncludeTrashed query ('task trash') or 'task restore'.
+	if !opts.IncludeTrashed {
+		query += " AND deleted_at IS NULL"
+	}
+
 	// Sort done/blocked tasks by completed_at (most recently closed first) and
 	// other tasks by created_at (newest first). Use id DESC as secondary sort for
 	// consistency. Pinning takes precedence unless OrderByRecency is set: a capped
@@ -512,7 +539,7 @@ func (db *DB) ListTasks(opts ListTasksOptions) ([]*Task, error) {
 			&t.DaemonSession, &t.TmuxWindowID, &t.ClaudePaneID, &t.ShellPaneID,
 			&t.PRURL, &t.PRNumber, &t.PRInfoJSON,
 			&t.DangerousMode, &t.PermissionMode, &t.RemoteControl, &t.Pinned, &t.Tags,
-			&t.SourceBranch, &t.Summary, &t.EffortLevel, &t.Model,
+			&t.SourceBranch, &t.Summary, &t.EffortLevel, &t.Model, &t.ClaudeConfigDir, &t.EnvJSON,
 			&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
 			&t.LastDistilledAt, &t.LastAccessedAt,
 			&t.ArchiveRef, &t.ArchiveCommit, &t.ArchiveWorktreePath, &t.ArchiveBranchName,
@@ -537,7 +564,7 @@ func (db *DB) GetMostRecentlyCreatedTask() (*Task, error) {
 		       COALESCE(claude_pane_id, ''), COALESCE(shell_pane_id, ''),
 		       COALESCE(pr_url, ''), COALESCE(pr_number, 0), COALESCE(pr_info_json, ''),
 		       COALESCE(dangerous_mode, 0), COALESCE(permission_mode, ''), COALESCE(remote_control, 0), COALESCE(pinned, 0), COALESCE(tags, ''),
-		       COALESCE(source_branch, ''), COALESCE(summary, ''), COALESCE(effort_level, ''), COALESCE(model, ''),
+		       COALESCE(source_branch, ''), COALESCE(summary, ''), COALESCE(effort_level, ''), COALESCE(model, ''), COALESCE(claude_config_dir, ''), COALESCE(env, ''),
 		       created_at, updated_at, started_at, completed_at,
 		       last_distilled_at, last_accessed_at,
 		       COALESCE(archive_ref, ''), COALESCE(archive_commit, ''),
@@ -551,7 +578,7 @@ func (db *DB) GetMostRecentlyCreatedTask() (*Task, error) {
 		&t.DaemonSession, &t.TmuxWindowID, &t.ClaudePaneID, &t.ShellPaneID,
 		&t.PRURL, &t.PRNumber, &t.PRInfoJSON,
 		&t.DangerousMode, &t.PermissionMode, &t.RemoteControl, &t.Pinned, &t.Tags,
-		&t.SourceBranch, &t.Summary, &t.EffortLevel, &t.Model,
+		&t.SourceBranch, &t.Summary, &t.EffortLevel, &t.Model, &t.ClaudeConfigDir, &t.EnvJSON,
 		&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
 		&t.LastDistilledAt, &t.LastAccessedAt,
 		&t.ArchiveRef, &t.ArchiveCommit, &t.ArchiveWorktreePath, &t.ArchiveBranchName,
@@ -580,7 +607,7 @@ func (db *DB) SearchTasks(query string, limit int) ([]*Task, error) {
 		       COALESCE(claude_pane_id, ''), COALESCE(shell_pane_id, ''),
 		       COALESCE(pr_url, ''), COALESCE(pr_number, 0), COALESCE(pr_info_json, ''),
 		       COALESCE(dangerous_mode, 0), COALESCE(permission_mode, ''), COALESCE(remote_control, 0), COALESCE(pinned, 0), COALESCE(tags, ''),
-		       COALESCE(source_branch, ''), COALESCE(summary, ''), COALESCE(effort_level, ''), COALESCE(model, ''),
+		       COALESCE(source_branch, ''), COALESCE(summary, ''), COALESCE(effort_level, ''), COALESCE(model, ''), COALESCE(claude_config_dir, ''), COALESCE(env, ''),
 		       created_at, updated_at, started_at, completed_at,
 		       last_distilled_at, last_accessed_at,
 		       COALESCE(archive_ref, ''), COALESCE(archive_commit, ''),
@@ -613,7 +640,7 @@ func (db *DB) SearchTasks(query string, limit int) ([]*Task, error) {
 			&t.DaemonSession, &t.TmuxWindowID, &t.ClaudePaneID, &t.ShellPaneID,
 			&t.PRURL, &t.PRNumber, &t.PRInfoJSON,
 			&t.DangerousMode, &t.PermissionMode, &t.RemoteControl, &t.Pinned, &t.Tags,
-			&t.SourceBranch, &t.Summary, &t.EffortLevel, &t.Model,
+			&t.SourceBranch, &t.Summary, &t.EffortLevel, &t.Model, &t.ClaudeConfigDir, &t.EnvJSON,
 			&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
 			&t.LastDistilledAt, &t.LastAccessedAt,
 			&t.ArchiveRef, &t.ArchiveCommit, &t.ArchiveWorktreePath, &t.ArchiveBranchName,
@@ -630,7 +657,7 @@ func (db *DB) SearchTasks(query string, limit int) ([]*Task, error) {
 // CountTasksByStatus returns the count of tasks with a given status.
 func (db *DB) CountTasksByStatus(status string) (int, error) {
 	var count int
-	err := db.QueryRow("SELECT COUNT(*) FROM tasks WHERE status = ?", status).Scan(&count)
+	err := db.QueryRow("SELECT COUNT(*) FROM tasks WHERE status = ? AND deleted_at IS NULL", status).Scan(&count)
 	if err != nil {
 		return 0, fmt.Errorf("count tasks: %w", err)
 	}
@@ -661,8 +688,18 @@ func (db *DB) UpdateTaskStatus(id int64, status string) error {
 	switch status {
 	case StatusProcessing:
 		query += ", started_at = CURRENT_TIMESTAMP"
-	case StatusDone, StatusBlocked, StatusArchived:
+	case StatusDone, StatusArchived:
 		query += ", completed_at = CURRENT_TIMESTAMP"
+	case StatusBlocked:
+		// 'blocked' covers two very different cases: a step waiting in a DAG (a
+		// pipeline step staged behind its dependencies — never started) and a task
+		// that actually ran and is now parked awaiting human review. Only the latter
+		// has completed a turn. Stamping a never-started step makes it look finished
+		// on the board and feeds false "done" signals to the workflow sweeps that key
+		// off completed_at, so only stamp when the task has genuinely started.
+		if oldTask != nil && oldTask.StartedAt != nil {
+			query += ", completed_at = CURRENT_TIMESTAMP"
+		}
 	}
 
 	query += " WHERE id = ?"
@@ -671,6 +708,17 @@ func (db *DB) UpdateTaskStatus(id int64, status string) error {
 	_, err := db.Exec(query, args...)
 	if err != nil {
 		return fmt.Errorf("update task status: %w", err)
+	}
+
+	// A finished task's executor pane is torn down; its tmux pane ID then becomes
+	// free for tmux to recycle onto another task. Drop the stale pane pointers so
+	// they can never resolve to a different task's live pane. Best-effort — the
+	// join-time ownership guard is the real safety net.
+	switch status {
+	case StatusDone, StatusArchived:
+		if clearErr := db.ClearTaskPaneIDs(id); clearErr != nil {
+			log.Printf("ClearTaskPaneIDs(%d): %v", id, clearErr)
+		}
 	}
 
 	// Emit status change event if status actually changed
@@ -697,9 +745,13 @@ func (db *DB) UpdateTaskStatus(id int64, status string) error {
 		}
 	}
 
-	// Process dependent tasks when a blocker is completed
+	// Process dependent tasks when a blocker is completed. Best-effort: a dropped
+	// write is recovered by the daemon's RequeueReadyTasks sweep, but log it so a
+	// stalled workflow isn't a silent mystery.
 	if status == StatusDone || status == StatusArchived {
-		db.ProcessCompletedBlocker(id)
+		if _, err := db.ProcessCompletedBlocker(id); err != nil {
+			log.Printf("ProcessCompletedBlocker(%d): %v", id, err)
+		}
 	}
 
 	return nil
@@ -997,6 +1049,23 @@ func (db *DB) ClearTaskTmuxIDs(taskID int64) error {
 	return nil
 }
 
+// ClearTaskPaneIDs clears only the tmux pane IDs for a task, leaving the window
+// ID intact. Called when a task reaches a terminal state: its executor pane is
+// torn down, which frees the pane ID for tmux to recycle onto a *different*
+// task's pane. Leaving the stale ID in the DB is what let a finished task's
+// pane pointer resolve to another live task's pane. Window IDs are not recycled
+// as aggressively and are already staleness-checked on lookup, so we keep them.
+func (db *DB) ClearTaskPaneIDs(taskID int64) error {
+	_, err := db.Exec(`
+		UPDATE tasks SET claude_pane_id = '', shell_pane_id = '', updated_at = CURRENT_TIMESTAMP
+		WHERE id = ?
+	`, taskID)
+	if err != nil {
+		return fmt.Errorf("clear task pane ids: %w", err)
+	}
+	return nil
+}
+
 // DeleteTask deletes a task.
 func (db *DB) DeleteTask(id int64) error {
 	// Get task before deleting for event emission
@@ -1017,11 +1086,103 @@ func (db *DB) DeleteTask(id int64) error {
 	return nil
 }
 
+// SoftDeleteTask marks a task as trashed (deleted_at = now) instead of removing
+// it. The row, worktree and Claude transcript all stay intact and recoverable via
+// RestoreTask until the daemon trash sweep hard-deletes it after the retention
+// window (see Executor.sweepTrashedTasks). Trashed tasks are hidden from the board
+// and every default query. No-op if the task is already trashed.
+func (db *DB) SoftDeleteTask(id int64) error {
+	task, _ := db.GetTask(id)
+	title := ""
+	if task != nil {
+		title = task.Title
+	}
+
+	_, err := db.Exec("UPDATE tasks SET deleted_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND deleted_at IS NULL", id)
+	if err != nil {
+		return fmt.Errorf("soft-delete task: %w", err)
+	}
+
+	// Reuse the delete event so listeners (board, web SSE) drop the task from view;
+	// a restore re-emits a normal task-updated event.
+	db.emitTaskDeleted(id, title)
+
+	return nil
+}
+
+// RestoreTask clears the trashed flag, returning a soft-deleted task to the board
+// with its original status, worktree and session intact.
+func (db *DB) RestoreTask(id int64) error {
+	_, err := db.Exec("UPDATE tasks SET deleted_at = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?", id)
+	if err != nil {
+		return fmt.Errorf("restore task: %w", err)
+	}
+	if task, err := db.GetTask(id); err == nil && task != nil {
+		db.emitTaskUpdated(task, map[string]interface{}{"restored": true})
+	}
+	return nil
+}
+
+// TrashedTask is a lightweight view of a soft-deleted task for the trash listing
+// and the sweep — it deliberately avoids the full Task scan so new columns there
+// never need threading through here.
+type TrashedTask struct {
+	ID           int64
+	Title        string
+	Project      string
+	WorktreePath string
+	DeletedAt    time.Time
+}
+
+// ListTrashedTasks returns soft-deleted tasks, most recently trashed first.
+func (db *DB) ListTrashedTasks() ([]*TrashedTask, error) {
+	rows, err := db.Query(`
+		SELECT id, title, COALESCE(project, ''), COALESCE(worktree_path, ''), deleted_at
+		FROM tasks WHERE deleted_at IS NOT NULL
+		ORDER BY deleted_at DESC, id DESC
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("list trashed tasks: %w", err)
+	}
+	defer rows.Close()
+	return scanTrashedTasks(rows)
+}
+
+// GetSweepableTrashedTasks returns trashed tasks whose retention has expired —
+// i.e. deleted_at is older than maxAge — so the daemon can hard-delete them.
+func (db *DB) GetSweepableTrashedTasks(maxAge time.Duration) ([]*TrashedTask, error) {
+	cutoff := time.Now().Add(-maxAge).UTC()
+	rows, err := db.Query(`
+		SELECT id, title, COALESCE(project, ''), COALESCE(worktree_path, ''), deleted_at
+		FROM tasks WHERE deleted_at IS NOT NULL AND deleted_at < ?
+		ORDER BY deleted_at ASC, id ASC
+	`, cutoff)
+	if err != nil {
+		return nil, fmt.Errorf("list sweepable trashed tasks: %w", err)
+	}
+	defer rows.Close()
+	return scanTrashedTasks(rows)
+}
+
+func scanTrashedTasks(rows *sql.Rows) ([]*TrashedTask, error) {
+	var out []*TrashedTask
+	for rows.Next() {
+		var t TrashedTask
+		var deletedAt sql.NullTime
+		if err := rows.Scan(&t.ID, &t.Title, &t.Project, &t.WorktreePath, &deletedAt); err != nil {
+			return nil, fmt.Errorf("scan trashed task: %w", err)
+		}
+		t.DeletedAt = deletedAt.Time
+		out = append(out, &t)
+	}
+	return out, rows.Err()
+}
+
 // GetActiveTaskPorts returns all ports currently in use by active (non-done, non-archived) tasks.
 func (db *DB) GetActiveTaskPorts() (map[int]bool, error) {
 	rows, err := db.Query(`
 		SELECT port FROM tasks
-		WHERE port > 0 AND status NOT IN (?, ?)
+		WHERE port > 0 AND status NOT IN (?, ?) AND deleted_at IS NULL
 	`, StatusDone, StatusArchived)
 	if err != nil {
 		return nil, fmt.Errorf("query active ports: %w", err)
@@ -1095,13 +1256,13 @@ func (db *DB) GetNextQueuedTask() (*Task, error) {
 		       COALESCE(claude_pane_id, ''), COALESCE(shell_pane_id, ''),
 		       COALESCE(pr_url, ''), COALESCE(pr_number, 0), COALESCE(pr_info_json, ''),
 		       COALESCE(dangerous_mode, 0), COALESCE(permission_mode, ''), COALESCE(remote_control, 0), COALESCE(pinned, 0), COALESCE(tags, ''),
-		       COALESCE(source_branch, ''), COALESCE(summary, ''), COALESCE(effort_level, ''), COALESCE(model, ''),
+		       COALESCE(source_branch, ''), COALESCE(summary, ''), COALESCE(effort_level, ''), COALESCE(model, ''), COALESCE(claude_config_dir, ''), COALESCE(env, ''),
 		       created_at, updated_at, started_at, completed_at,
 		       last_distilled_at, last_accessed_at,
 		       COALESCE(archive_ref, ''), COALESCE(archive_commit, ''),
 		       COALESCE(archive_worktree_path, ''), COALESCE(archive_branch_name, '')
 		FROM tasks
-		WHERE status = ?
+		WHERE status = ? AND deleted_at IS NULL
 		ORDER BY created_at ASC
 		LIMIT 1
 	`, StatusQueued).Scan(
@@ -1110,7 +1271,7 @@ func (db *DB) GetNextQueuedTask() (*Task, error) {
 		&t.DaemonSession, &t.TmuxWindowID, &t.ClaudePaneID, &t.ShellPaneID,
 		&t.PRURL, &t.PRNumber, &t.PRInfoJSON,
 		&t.DangerousMode, &t.PermissionMode, &t.RemoteControl, &t.Pinned, &t.Tags,
-		&t.SourceBranch, &t.Summary, &t.EffortLevel, &t.Model,
+		&t.SourceBranch, &t.Summary, &t.EffortLevel, &t.Model, &t.ClaudeConfigDir, &t.EnvJSON,
 		&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
 		&t.LastDistilledAt, &t.LastAccessedAt,
 		&t.ArchiveRef, &t.ArchiveCommit, &t.ArchiveWorktreePath, &t.ArchiveBranchName,
@@ -1133,13 +1294,13 @@ func (db *DB) GetQueuedTasks() ([]*Task, error) {
 		       COALESCE(claude_pane_id, ''), COALESCE(shell_pane_id, ''),
 		       COALESCE(pr_url, ''), COALESCE(pr_number, 0), COALESCE(pr_info_json, ''),
 		       COALESCE(dangerous_mode, 0), COALESCE(permission_mode, ''), COALESCE(remote_control, 0), COALESCE(pinned, 0), COALESCE(tags, ''),
-		       COALESCE(source_branch, ''), COALESCE(summary, ''), COALESCE(effort_level, ''), COALESCE(model, ''),
+		       COALESCE(source_branch, ''), COALESCE(summary, ''), COALESCE(effort_level, ''), COALESCE(model, ''), COALESCE(claude_config_dir, ''), COALESCE(env, ''),
 		       created_at, updated_at, started_at, completed_at,
 		       last_distilled_at, last_accessed_at,
 		       COALESCE(archive_ref, ''), COALESCE(archive_commit, ''),
 		       COALESCE(archive_worktree_path, ''), COALESCE(archive_branch_name, '')
 		FROM tasks
-		WHERE status = ?
+		WHERE status = ? AND deleted_at IS NULL
 		ORDER BY created_at ASC
 	`, StatusQueued)
 	if err != nil {
@@ -1156,7 +1317,7 @@ func (db *DB) GetQueuedTasks() ([]*Task, error) {
 			&t.DaemonSession, &t.TmuxWindowID, &t.ClaudePaneID, &t.ShellPaneID,
 			&t.PRURL, &t.PRNumber, &t.PRInfoJSON,
 			&t.DangerousMode, &t.PermissionMode, &t.RemoteControl, &t.Pinned, &t.Tags,
-			&t.SourceBranch, &t.Summary, &t.EffortLevel, &t.Model,
+			&t.SourceBranch, &t.Summary, &t.EffortLevel, &t.Model, &t.ClaudeConfigDir, &t.EnvJSON,
 			&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
 			&t.LastDistilledAt, &t.LastAccessedAt,
 			&t.ArchiveRef, &t.ArchiveCommit, &t.ArchiveWorktreePath, &t.ArchiveBranchName,
@@ -1187,6 +1348,83 @@ func (db *DB) AppendTaskLog(taskID int64, lineType, content string) error {
 		return fmt.Errorf("insert task log: %w", err)
 	}
 	return nil
+}
+
+// HasQuestionLog reports whether the task ever recorded a needs-input question
+// (line_type "question"). The workflow "finished but couldn't signal" sweep uses
+// this to avoid auto-completing a step that is genuinely waiting on a human answer.
+func (db *DB) HasQuestionLog(taskID int64) (bool, error) {
+	var n int
+	err := db.QueryRow(`SELECT COUNT(*) FROM task_logs WHERE task_id = ? AND line_type = 'question'`, taskID).Scan(&n)
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
+// HasLogLineContaining reports whether the task has any log line whose content
+// contains substr. Used to make a periodic sweep idempotent — e.g. logging a
+// "parked for merge review" note exactly once for a terminal workflow step.
+func (db *DB) HasLogLineContaining(taskID int64, substr string) (bool, error) {
+	var n int
+	err := db.QueryRow(`SELECT COUNT(*) FROM task_logs WHERE task_id = ? AND content LIKE ?`, taskID, "%"+substr+"%").Scan(&n)
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
+// SetTaskBaseCommit records the commit a task's worktree was created at. Written once,
+// right after the worktree exists and before any agent session starts.
+func (db *DB) SetTaskBaseCommit(taskID int64, sha string) error {
+	_, err := db.Exec(`UPDATE tasks SET base_commit = ? WHERE id = ?`, sha, taskID)
+	return err
+}
+
+// GetTaskBaseCommit returns the commit a task's worktree was created at, or "" if it
+// was never recorded (a task from before the column existed).
+func (db *DB) GetTaskBaseCommit(taskID int64) (string, error) {
+	var sha string
+	err := db.QueryRow(`SELECT COALESCE(base_commit, '') FROM tasks WHERE id = ?`, taskID).Scan(&sha)
+	if err != nil {
+		return "", err
+	}
+	return sha, nil
+}
+
+// SetTaskBaseDirty records the paths already dirty in the task's worktree when it
+// started (newline-separated). Worktree init regularly rewrites tracked files, so this is
+// the baseline that "did the step leave uncommitted work?" is measured against.
+func (db *DB) SetTaskBaseDirty(taskID int64, paths string) error {
+	_, err := db.Exec(`UPDATE tasks SET base_dirty = ? WHERE id = ?`, paths, taskID)
+	return err
+}
+
+// GetTaskBaseDirty returns the paths dirty in the worktree when the task started.
+func (db *DB) GetTaskBaseDirty(taskID int64) (string, error) {
+	var s string
+	err := db.QueryRow(`SELECT COALESCE(base_dirty, '') FROM tasks WHERE id = ?`, taskID).Scan(&s)
+	if err != nil {
+		return "", err
+	}
+	return s, nil
+}
+
+// HasSessionStarted reports whether the task's executor session actually began. A task
+// flips to 'processing' and then spends tens of seconds on worktree setup (clone, bundle,
+// migrations) before any session exists — so this, not the absence of a tmux window, is
+// how to tell "hasn't started yet" from "ran and finished". Conflating the two let the
+// sweep complete steps before their agent ever launched.
+func (db *DB) HasSessionStarted(taskID int64) (bool, error) {
+	var n int
+	err := db.QueryRow(`
+		SELECT COUNT(*) FROM task_logs
+		WHERE task_id = ? AND (content LIKE 'Starting new session%' OR content LIKE 'Resuming%')
+	`, taskID).Scan(&n)
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
 }
 
 // GetTaskLogs retrieves logs for a task.
@@ -2111,7 +2349,7 @@ func (db *DB) GetStaleWorktreeTasks(maxAge time.Duration) ([]*Task, error) {
 		       COALESCE(claude_pane_id, ''), COALESCE(shell_pane_id, ''),
 		       COALESCE(pr_url, ''), COALESCE(pr_number, 0), COALESCE(pr_info_json, ''),
 		       COALESCE(dangerous_mode, 0), COALESCE(permission_mode, ''), COALESCE(remote_control, 0), COALESCE(pinned, 0), COALESCE(tags, ''),
-		       COALESCE(source_branch, ''), COALESCE(summary, ''), COALESCE(effort_level, ''), COALESCE(model, ''),
+		       COALESCE(source_branch, ''), COALESCE(summary, ''), COALESCE(effort_level, ''), COALESCE(model, ''), COALESCE(claude_config_dir, ''), COALESCE(env, ''),
 		       created_at, updated_at, started_at, completed_at,
 		       last_distilled_at, last_accessed_at,
 		       COALESCE(archive_ref, ''), COALESCE(archive_commit, ''),
@@ -2119,6 +2357,7 @@ func (db *DB) GetStaleWorktreeTasks(maxAge time.Duration) ([]*Task, error) {
 		FROM tasks
 		WHERE worktree_path != ''
 		  AND status IN ('done', 'archived')
+		  AND deleted_at IS NULL
 		  AND completed_at IS NOT NULL
 		  AND completed_at < ?
 		ORDER BY completed_at ASC
@@ -2138,7 +2377,7 @@ func (db *DB) GetStaleWorktreeTasks(maxAge time.Duration) ([]*Task, error) {
 			&t.DaemonSession, &t.TmuxWindowID, &t.ClaudePaneID, &t.ShellPaneID,
 			&t.PRURL, &t.PRNumber, &t.PRInfoJSON,
 			&t.DangerousMode, &t.PermissionMode, &t.RemoteControl, &t.Pinned, &t.Tags,
-			&t.SourceBranch, &t.Summary, &t.EffortLevel, &t.Model,
+			&t.SourceBranch, &t.Summary, &t.EffortLevel, &t.Model, &t.ClaudeConfigDir, &t.EnvJSON,
 			&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
 			&t.LastDistilledAt, &t.LastAccessedAt,
 			&t.ArchiveRef, &t.ArchiveCommit, &t.ArchiveWorktreePath, &t.ArchiveBranchName,

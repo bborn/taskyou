@@ -2,8 +2,36 @@ package executor
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"testing"
 )
+
+// TestPathWithinResolvesSymlinks guards the fix for the guard falsely denying writes
+// when the worktree lives under a symlinked path (macOS /tmp -> /private/tmp): the
+// worktree root is /tmp/… but a tool resolves a write to /private/tmp/…, which without
+// symlink resolution reads as an escape and traps the agent in a retry loop.
+func TestPathWithinResolvesSymlinks(t *testing.T) {
+	real := t.TempDir()
+	link := filepath.Join(t.TempDir(), "wtlink")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+
+	// Root is the symlink path; the write target is the resolved real path (and a
+	// not-yet-created file, as a real write target is).
+	if !pathWithin(link, filepath.Join(real, "REVIEW.md")) {
+		t.Error("a write to the resolved real path should be WITHIN a symlinked worktree root")
+	}
+	// And the reverse: root is the real path, the write goes through the symlink.
+	if !pathWithin(real, filepath.Join(link, "REVIEW.md")) {
+		t.Error("a write via the symlinked path should be WITHIN the real worktree root")
+	}
+	// A genuine escape is still outside.
+	if pathWithin(link, filepath.Join(t.TempDir(), "x")) {
+		t.Error("a path outside the worktree must NOT be reported within")
+	}
+}
 
 // wt is a representative managed-worktree root (contains the .task-worktrees segment).
 const wt = "/home/u/proj/.task-worktrees/4244-speed"
@@ -180,7 +208,9 @@ func TestWorktreeWriteGuardBash(t *testing.T) {
 	}{
 		{"read-only grep allowed", "grep -r foo .", ""},
 		{"read-only cat allowed", "cat /etc/hosts", ""},
-		{"redirect to /tmp asks", "echo data > /tmp/scratch", "ask"},
+		{"redirect to /tmp allowed", "echo data > /tmp/scratch", ""},
+		{"redirect to /private/tmp allowed", "echo data > /private/tmp/scratch", ""},
+		{"redirect to /var/tmp allowed", "echo data > /var/tmp/scratch", ""},
 		{"redirect to /dev/null allowed", "ls -la > /dev/null", ""},
 		{"stderr to /dev/null allowed", "rails test 2>/dev/null", ""},
 		{"redirect inside worktree allowed", "echo hi > out.txt", ""},
@@ -203,6 +233,34 @@ func TestWorktreeWriteGuardBash(t *testing.T) {
 			}
 			if gotDecision != c.want {
 				t.Errorf("command %q: decision = %q, want %q", c.command, gotDecision, c.want)
+			}
+		})
+	}
+}
+
+// System temp directories are shared, ephemeral scratch space — writing there
+// can't corrupt the main checkout or a sibling worktree (the boundary the guard
+// exists to protect), and agents legitimately stage temp files there. So writes
+// under /tmp, /private/tmp, /var/tmp, and the OS temp dir are always allowed,
+// like /dev/null — never a permission prompt.
+func TestWorktreeWriteGuardAllowsTempDirs(t *testing.T) {
+	tmpFile := filepath.Join(os.TempDir(), "review_a.md")
+	cases := []struct {
+		name string
+		in   WorktreeGuardInput
+	}{
+		{"Write to /tmp", WorktreeGuardInput{ToolName: "Write", Cwd: wt,
+			ToolInput: toolInput(t, map[string]any{"file_path": "/tmp/review_a.md"})}},
+		{"Write to os.TempDir", WorktreeGuardInput{ToolName: "Write", Cwd: wt,
+			ToolInput: toolInput(t, map[string]any{"file_path": tmpFile})}},
+		{"Bash redirect to /tmp in bypass mode", WorktreeGuardInput{ToolName: "Bash", Cwd: wt,
+			PermissionMode: "bypassPermissions",
+			ToolInput:      toolInput(t, map[string]any{"command": "echo x > /tmp/scratch"})}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := EvaluateWorktreeWriteGuard(wt, nil, c.in); got != nil {
+				t.Errorf("temp-dir write should be allowed, got %q (%s)", got.Decision, got.Reason)
 			}
 		})
 	}

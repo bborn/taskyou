@@ -176,12 +176,12 @@ func TestDeleteTask_KillsAgentInForeignDaemonSession(t *testing.T) {
 
 	t.Setenv("WORKTREE_SESSION_ID", "")
 
-	if err := deleteTask(task.ID); err != nil {
-		t.Fatalf("deleteTask returned error: %v", err)
+	if err := hardDeleteTask(task.ID); err != nil {
+		t.Fatalf("hardDeleteTask returned error: %v", err)
 	}
 
 	if windowExists("task-daemon-"+otherSessionID, fmt.Sprintf("task-%d", task.ID)) {
-		t.Error("agent window still alive after deleteTask; agent leaked into orphan state")
+		t.Error("agent window still alive after hardDeleteTask; agent leaked into orphan state")
 	}
 
 	// And the DB row should be gone too.

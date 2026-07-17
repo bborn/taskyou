@@ -1109,8 +1109,8 @@ func TestFormProgressiveDisclosure(t *testing.T) {
 		if !strings.Contains(view, "Attachments") {
 			t.Error("expected advanced mode view to show Attachments field")
 		}
-		if !strings.Contains(view, "Type") {
-			t.Error("expected advanced mode view to show Type field")
+		if !strings.Contains(view, "Kind") {
+			t.Error("expected advanced mode view to show Kind field")
 		}
 		if !strings.Contains(view, "Executor") {
 			t.Error("expected advanced mode view to show Executor field")

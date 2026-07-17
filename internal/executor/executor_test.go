@@ -1501,6 +1501,12 @@ func TestWriteWorkflowMCPConfig(t *testing.T) {
 			t.Errorf("taskyou type = %v, want stdio", taskyou["type"])
 		}
 
+		// alwaysLoad asks Claude Code to load taskyou's tools upfront (best-effort) so a
+		// task that wants them (e.g. taskyou_needs_input) can reach them without a search.
+		if taskyou["alwaysLoad"] != true {
+			t.Errorf("taskyou alwaysLoad = %v, want true", taskyou["alwaysLoad"])
+		}
+
 		args, ok := taskyou["args"].([]interface{})
 		if !ok {
 			t.Fatal("expected args array in taskyou config")
@@ -1529,6 +1535,82 @@ func TestWriteWorkflowMCPConfig(t *testing.T) {
 		for i, tool := range expectedTools {
 			if i < len(autoApprove) && autoApprove[i] != tool {
 				t.Errorf("autoApprove[%d] = %v, want %v", i, autoApprove[i], tool)
+			}
+		}
+	})
+
+	t.Run("pre-trusts the worktree so onboarding doesn't stall the step", func(t *testing.T) {
+		configPath := setupTempConfigDir(t)
+		worktreePath := t.TempDir()
+
+		if err := writeWorkflowMCPConfig(worktreePath, 123, ""); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		data, err := os.ReadFile(configPath)
+		if err != nil {
+			t.Fatalf("failed to read claude.json: %v", err)
+		}
+		var config map[string]interface{}
+		if err := json.Unmarshal(data, &config); err != nil {
+			t.Fatalf("failed to parse claude.json: %v", err)
+		}
+		projects := config["projects"].(map[string]interface{})
+		projectConfig, ok := projects[worktreePath].(map[string]interface{})
+		if !ok {
+			t.Fatalf("expected project config for %s", worktreePath)
+		}
+
+		// Without these, a fresh worktree blocks on the "trust this folder?" prompt
+		// with no human to answer, hanging the unattended workflow step.
+		if projectConfig["hasTrustDialogAccepted"] != true {
+			t.Errorf("hasTrustDialogAccepted = %v, want true", projectConfig["hasTrustDialogAccepted"])
+		}
+		if projectConfig["hasCompletedProjectOnboarding"] != true {
+			t.Errorf("hasCompletedProjectOnboarding = %v, want true", projectConfig["hasCompletedProjectOnboarding"])
+		}
+	})
+
+	t.Run("writes config under the symlink-resolved path too", func(t *testing.T) {
+		configPath := setupTempConfigDir(t)
+		real := t.TempDir()
+		link := filepath.Join(t.TempDir(), "wtlink")
+		if err := os.Symlink(real, link); err != nil {
+			t.Fatal(err)
+		}
+
+		// ty is handed the symlinked path; Claude Code will look itself up by its
+		// RESOLVED cwd. If we only wrote the raw key, the step would find no taskyou MCP
+		// server and hang on the folder-trust prompt.
+		if err := writeWorkflowMCPConfig(link, 7, ""); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		data, err := os.ReadFile(configPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var cfg map[string]interface{}
+		if err := json.Unmarshal(data, &cfg); err != nil {
+			t.Fatal(err)
+		}
+		projects := cfg["projects"].(map[string]interface{})
+
+		resolved, err := filepath.EvalSymlinks(link)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, key := range []string{link, resolved} {
+			pc, ok := projects[key].(map[string]interface{})
+			if !ok {
+				t.Fatalf("no project config under %q", key)
+			}
+			if pc["hasTrustDialogAccepted"] != true {
+				t.Errorf("%q: hasTrustDialogAccepted = %v, want true", key, pc["hasTrustDialogAccepted"])
+			}
+			servers, ok := pc["mcpServers"].(map[string]interface{})
+			if !ok || servers["taskyou"] == nil {
+				t.Errorf("%q: missing taskyou MCP server", key)
 			}
 		}
 	})
@@ -2092,4 +2174,64 @@ func TestBuildPromptUniversalGuidance(t *testing.T) {
 			t.Error("worktree constraint should be omitted when project does not use worktrees")
 		}
 	})
+
+	// The taskyou_* tools are registered with alwaysLoad, but that flag is not
+	// honored in the project-scoped ~/.claude.json location on current Claude
+	// versions, so the harness defers them behind tool search. Without guidance,
+	// an executor sees no taskyou_complete in its active toolset and stops with an
+	// apology that "the taskyou server isn't connected" instead of loading and
+	// calling it — leaving the task uncompleted. The prompt must tell the agent the
+	// tools are deferred (not missing) and to load them before use.
+	t.Run("prompt warns taskyou tools may be deferred behind tool search", func(t *testing.T) {
+		exec, task := newExec(t, true)
+		task.Type = "code"
+		if err := exec.db.CreateTask(task); err != nil {
+			t.Fatal(err)
+		}
+		prompt := exec.buildPrompt(task, nil)
+		if !strings.Contains(prompt, "deferred") {
+			t.Error("prompt should tell the agent taskyou_* tools may be deferred behind tool search")
+		}
+		if !strings.Contains(prompt, "ToolSearch") {
+			t.Error("prompt should tell the agent how to load a deferred taskyou_* tool")
+		}
+	})
+}
+
+// TestBuildPromptUsesFileKindInstructions proves the convention bridge at run
+// time: a task whose Type names a file-defined single-task kind (not a DB task
+// type) still gets that kind's instructions injected into the prompt.
+func TestBuildPromptUsesFileKindInstructions(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("TY_WORKFLOWS_DIR", dir)
+	if err := os.WriteFile(filepath.Join(dir, "polish.yaml"),
+		[]byte("name: polish\ninstructions: POLISH_MARKER — tighten the prose and fix typos.\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	tmpFile, err := os.CreateTemp("", "test-*.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(tmpFile.Name())
+	tmpFile.Close()
+	database, err := db.Open(tmpFile.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if err := database.CreateProject(&db.Project{Name: "test", Path: "/tmp/test"}); err != nil {
+		t.Fatal(err)
+	}
+
+	exec := New(database, &config.Config{})
+	task := &db.Task{Title: "polish the post", Body: "make it shine", Project: "test", Type: "polish"}
+	if err := database.CreateTask(task); err != nil {
+		t.Fatal(err)
+	}
+
+	prompt := exec.buildPrompt(task, nil)
+	if !strings.Contains(prompt, "POLISH_MARKER") {
+		t.Errorf("prompt should include the file kind's instructions; got:\n%s", prompt)
+	}
 }

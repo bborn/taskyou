@@ -267,28 +267,28 @@ func TestProcessCompletedBlocker(t *testing.T) {
 		t.Fatalf("Failed to add dependency: %v", err)
 	}
 
-	// Complete task1
+	// Complete task1 — UpdateTaskStatus runs ProcessCompletedBlocker, which queues task2.
 	if err := db.UpdateTaskStatus(task1.ID, StatusDone); err != nil {
 		t.Fatalf("Failed to update task1 status: %v", err)
 	}
 
-	// Process completion (this is normally called by UpdateTaskStatus)
-	unblocked, err := db.ProcessCompletedBlocker(task1.ID)
-	if err != nil {
-		t.Fatalf("Failed to process completed blocker: %v", err)
-	}
-
-	if len(unblocked) != 1 {
-		t.Errorf("Expected 1 unblocked task, got %d", len(unblocked))
-	}
-
-	// Check that task2 was queued (auto-queue was enabled)
+	// task2 was queued (auto-queue was enabled).
 	task2Updated, err := db.GetTask(task2.ID)
 	if err != nil {
 		t.Fatalf("Failed to get task2: %v", err)
 	}
 	if task2Updated.Status != StatusQueued {
 		t.Errorf("Expected task2 status to be queued, got %s", task2Updated.Status)
+	}
+
+	// ProcessCompletedBlocker is idempotent: a second call reports no flips because
+	// task2 is already queued (only genuine blocked→queued transitions are reported).
+	unblocked, err := db.ProcessCompletedBlocker(task1.ID)
+	if err != nil {
+		t.Fatalf("Failed to process completed blocker: %v", err)
+	}
+	if len(unblocked) != 0 {
+		t.Errorf("second ProcessCompletedBlocker should be a no-op, got %d unblocked", len(unblocked))
 	}
 }
 
@@ -382,5 +382,172 @@ func TestIsBlocked(t *testing.T) {
 	}
 	if !blocked {
 		t.Error("Task should be blocked after adding dependency")
+	}
+}
+
+// TestRequeueReadyTasks covers the safety-net sweep that recovers workflow DAG
+// advances when the one-shot ProcessCompletedBlocker flip is dropped.
+func TestRequeueReadyTasks(t *testing.T) {
+	db, cleanup := setupDepsTestDB(t)
+	defer cleanup()
+
+	// A: ready — blocker already done, dependent blocked+never-started, auto_queue.
+	// Created with the blocker pre-done and the dep added after, so nothing flipped
+	// the dependent — exactly the "dropped flip" the sweep must recover.
+	aBlk := &Task{Title: "A blocker", Status: StatusDone}
+	aDep := &Task{Title: "A dep", Status: StatusBlocked}
+	mustCreate(t, db, aBlk, aDep)
+	if err := db.AddDependency(aBlk.ID, aDep.ID, true); err != nil {
+		t.Fatal(err)
+	}
+
+	// B: not ready — blocker still open.
+	bBlk := &Task{Title: "B blocker", Status: StatusProcessing}
+	bDep := &Task{Title: "B dep", Status: StatusBlocked}
+	mustCreate(t, db, bBlk, bDep)
+	if err := db.AddDependency(bBlk.ID, bDep.ID, true); err != nil {
+		t.Fatal(err)
+	}
+
+	// C: blocker done but dependent already STARTED (ran, now needs input) — must
+	// NOT be re-queued; it's waiting on a human, not on the DAG.
+	cBlk := &Task{Title: "C blocker", Status: StatusDone}
+	cDep := &Task{Title: "C dep", Status: StatusBlocked}
+	mustCreate(t, db, cBlk, cDep)
+	if err := db.AddDependency(cBlk.ID, cDep.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	// Mark cDep started (processing sets started_at), then blocked (needs-input).
+	if err := db.UpdateTaskStatus(cDep.ID, StatusProcessing); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.UpdateTaskStatus(cDep.ID, StatusBlocked); err != nil {
+		t.Fatal(err)
+	}
+
+	moved, err := db.RequeueReadyTasks()
+	if err != nil {
+		t.Fatalf("RequeueReadyTasks: %v", err)
+	}
+
+	if got := statusOfTask(t, db, aDep.ID); got != StatusQueued {
+		t.Errorf("A dep = %s, want queued (ready → swept)", got)
+	}
+	if got := statusOfTask(t, db, bDep.ID); got != StatusBlocked {
+		t.Errorf("B dep = %s, want blocked (open blocker)", got)
+	}
+	if got := statusOfTask(t, db, cDep.ID); got != StatusBlocked {
+		t.Errorf("C dep = %s, want blocked (already started → needs input, not swept)", got)
+	}
+	if len(moved) != 1 || moved[0].ID != aDep.ID {
+		t.Errorf("moved = %d tasks, want just the A dep", len(moved))
+	}
+}
+
+func mustCreate(t *testing.T, db *DB, tasks ...*Task) {
+	t.Helper()
+	for _, tk := range tasks {
+		if err := db.CreateTask(tk); err != nil {
+			t.Fatalf("create %q: %v", tk.Title, err)
+		}
+	}
+}
+
+func statusOfTask(t *testing.T, db *DB, id int64) string {
+	t.Helper()
+	tk, err := db.GetTask(id)
+	if err != nil || tk == nil {
+		t.Fatalf("get task %d: %v", id, err)
+	}
+	return tk.Status
+}
+
+// TestHasQuestionLog: the needs-input guard for the finished-step sweep.
+func TestHasQuestionLog(t *testing.T) {
+	db, cleanup := setupDepsTestDB(t)
+	defer cleanup()
+	tk := &Task{Title: "step", Status: StatusBlocked}
+	if err := db.CreateTask(tk); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := db.HasQuestionLog(tk.ID); got {
+		t.Error("no question logged yet, want false")
+	}
+	if err := db.AppendTaskLog(tk.ID, "system", "did some work"); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := db.HasQuestionLog(tk.ID); got {
+		t.Error("only a system log, want false")
+	}
+	if err := db.AppendTaskLog(tk.ID, "question", "which approach?"); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := db.HasQuestionLog(tk.ID); !got {
+		t.Error("a question was logged, want true")
+	}
+}
+
+// TestBaseCommitAndSessionStartedAt covers the two signals that keep the sweep from
+// completing a step that never ran: the worktree's base commit, and whether an executor
+// session actually started (worktree setup alone must NOT count as a session).
+func TestBaseCommitAndSessionStartedAt(t *testing.T) {
+	db, cleanup := setupDepsTestDB(t)
+	defer cleanup()
+	tk := &Task{Title: "step", Status: StatusProcessing}
+	if err := db.CreateTask(tk); err != nil {
+		t.Fatal(err)
+	}
+
+	if sha, _ := db.GetTaskBaseCommit(tk.ID); sha != "" {
+		t.Errorf("base commit before recording = %q, want empty", sha)
+	}
+	if err := db.SetTaskBaseCommit(tk.ID, "abc123"); err != nil {
+		t.Fatal(err)
+	}
+	if sha, _ := db.GetTaskBaseCommit(tk.ID); sha != "abc123" {
+		t.Errorf("base commit = %q, want abc123", sha)
+	}
+
+	// A task flips to 'processing' and sets up its worktree long before any session.
+	if started, _ := db.HasSessionStarted(tk.ID); started {
+		t.Error("no session has started yet")
+	}
+	if err := db.AppendTaskLog(tk.ID, "system", "Created worktree at /x (branch: pipeline/1-y)"); err != nil {
+		t.Fatal(err)
+	}
+	if started, _ := db.HasSessionStarted(tk.ID); started {
+		t.Error("worktree setup is NOT a session start — conflating them let the sweep complete unstarted steps")
+	}
+
+	if err := db.AppendTaskLog(tk.ID, "system", "Starting new session (executor: claude)"); err != nil {
+		t.Fatal(err)
+	}
+	if started, _ := db.HasSessionStarted(tk.ID); !started {
+		t.Error("session start should be detected once the session begins")
+	}
+}
+
+func TestHasLogLineContaining(t *testing.T) {
+	db, cleanup := setupDepsTestDB(t)
+	defer cleanup()
+	tk := &Task{Title: "step", Status: StatusBlocked}
+	if err := db.CreateTask(tk); err != nil {
+		t.Fatal(err)
+	}
+	marker := "parked for merge review"
+	if got, _ := db.HasLogLineContaining(tk.ID, marker); got {
+		t.Error("marker not logged yet, want false")
+	}
+	if err := db.AppendTaskLog(tk.ID, "system", "some unrelated work happened"); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := db.HasLogLineContaining(tk.ID, marker); got {
+		t.Error("unrelated log only, want false")
+	}
+	if err := db.AppendTaskLog(tk.ID, "system", "step "+marker+" awaiting human"); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := db.HasLogLineContaining(tk.ID, marker); !got {
+		t.Error("marker substring is present, want true")
 	}
 }

@@ -9,19 +9,43 @@ import (
 	"github.com/bborn/workflow/internal/db"
 )
 
-// installPCR installs the plan-code-review workflow (the former in-code built-in,
-// now shipped as a plugin) from testdata into the workflows dir, so tests that
-// exercise its plan→code→2-reviewers→collect shape can request it by name.
-func installPCR(t *testing.T) {
-	t.Helper()
-	b, err := os.ReadFile("testdata/plan-code-review.yaml")
+// TestMain isolates the whole package's tests from the developer's real workflows
+// dir (~/.config/task/workflows). With no built-in workflows (kinds live in the DB;
+// a workflow is a same-named file), a stray local workflow file is the only source
+// registry() would pick up — so pointing TY_WORKFLOWS_DIR at an empty dir keeps every
+// test deterministic. Tests that need a specific workflow install one (see
+// installWorkflow), which overrides this per-test via t.Setenv.
+func TestMain(m *testing.M) {
+	dir, err := os.MkdirTemp("", "pipeline-workflows-empty-*")
 	if err != nil {
-		t.Fatalf("read pcr testdata: %v", err)
+		panic(err)
 	}
+	os.Setenv("TY_WORKFLOWS_DIR", dir)
+	code := m.Run()
+	os.RemoveAll(dir)
+	os.Exit(code)
+}
+
+// pcrYAML is a plan → code → 2 parallel reviews → collect workflow, as a custom
+// file (there are no built-in workflows). Tests install it to exercise the DAG.
+const pcrYAML = `
+name: pcr
+description: plan, code, two parallel reviews, collect
+steps:
+  - {name: Plan, model: opus, prompt: "Plan {{goal}}."}
+  - {name: Code, deps: [Plan], prompt: "Implement it."}
+  - {name: Review A, deps: [Code], prompt: "Review it."}
+  - {name: Review B, deps: [Code], prompt: "Review it."}
+  - {name: Collect, deps: [Review A, Review B], prompt: "Collect and open a PR."}
+`
+
+// installWorkflow writes a workflow file to a fresh global kinds dir for the test.
+func installWorkflow(t *testing.T, name, yaml string) {
+	t.Helper()
 	dir := t.TempDir()
 	t.Setenv("TY_WORKFLOWS_DIR", dir)
-	if err := os.WriteFile(filepath.Join(dir, "plan-code-review.yaml"), b, 0o644); err != nil {
-		t.Fatalf("install pcr: %v", err)
+	if err := os.WriteFile(filepath.Join(dir, name+".yaml"), []byte(yaml), 0o644); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -61,9 +85,9 @@ func TestNoDefaultWorkflow(t *testing.T) {
 }
 
 func TestCreateBuildsDAG(t *testing.T) {
-	installPCR(t)
+	installWorkflow(t, "pcr", pcrYAML)
 	database := testDB(t)
-	res, err := Create(database, Options{Goal: "Add rate limiting to the API", Project: "test", Definition: "plan-code-review", Execute: true})
+	res, err := Create(database, Options{Goal: "Add rate limiting to the API", Project: "test", Definition: "pcr", Execute: true})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -119,10 +143,10 @@ func TestCreateBuildsDAG(t *testing.T) {
 			t.Errorf("%s body missing goal/branch", tk.Title)
 		}
 	}
-	// Parallel reviewers write distinct review files and push to their OWN branch
-	// (not the shared branch) so a weak agent can't clobber the other reviewer.
-	if !strings.Contains(rvA.Body, "review-review-a.md") || !strings.Contains(rvA.Body, wantBranch+"-review-a") {
-		t.Errorf("Review A body missing its review file / own branch: %s", rvA.Body)
+	// Parallel reviewers push to their OWN branch (not the shared branch) so a weak
+	// agent can't clobber the other reviewer.
+	if !strings.Contains(rvA.Body, wantBranch+"-review-a") {
+		t.Errorf("Review A body missing its own branch: %s", rvA.Body)
 	}
 	if !strings.Contains(rvB.Body, wantBranch+"-review-b") {
 		t.Errorf("Review B body missing its own review branch")
@@ -134,9 +158,9 @@ func TestCreateBuildsDAG(t *testing.T) {
 }
 
 func TestCreateAutoAdvancesDAGWithParallelJoin(t *testing.T) {
-	installPCR(t)
+	installWorkflow(t, "pcr", pcrYAML)
 	database := testDB(t)
-	res, err := Create(database, Options{Goal: "Ship it", Project: "test", Definition: "plan-code-review", Execute: true})
+	res, err := Create(database, Options{Goal: "Ship it", Project: "test", Definition: "pcr", Execute: true})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -175,6 +199,159 @@ func TestCreateAutoAdvancesDAGWithParallelJoin(t *testing.T) {
 	must(t, database.UpdateTaskStatus(rvB.ID, db.StatusDone))
 	if s := statusOf(t, database, collect.ID); s != db.StatusQueued {
 		t.Errorf("Collect = %q after both reviews, want queued", s)
+	}
+}
+
+// configDirYAML has a per-step config_dir override on Code and Review only,
+// exercising the route-some-steps-through-a-different-Claude-config feature
+// (e.g. ollama) without changing the project.
+const configDirYAML = `
+name: cfgdir
+description: plan on default claude, code+review on an ollama config
+steps:
+  - {name: Plan, model: opus, prompt: "Plan {{goal}}."}
+  - {name: Code, deps: [Plan], model: glm-5.2:cloud, config_dir: "~/.claude-ollama", prompt: "Implement it."}
+  - {name: Review, deps: [Code], model: glm-5.2:cloud, config_dir: "~/.claude-ollama", prompt: "Review it."}
+`
+
+// TestCreateConfigDirPropagation verifies a step's config_dir override lands on
+// the created task's ClaudeConfigDir (and that steps without it stay empty), so
+// the executor routes only those steps through the alternate Claude config.
+func TestCreateConfigDirPropagation(t *testing.T) {
+	installWorkflow(t, "cfgdir", configDirYAML)
+	database := testDB(t)
+	res, err := Create(database, Options{Goal: "ship the thing", Project: "test", Definition: "cfgdir"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	plan := taskByStep(res, "Plan")
+	code := taskByStep(res, "Code")
+	review := taskByStep(res, "Review")
+
+	if plan.ClaudeConfigDir != "" {
+		t.Errorf("Plan ClaudeConfigDir = %q, want empty (no override)", plan.ClaudeConfigDir)
+	}
+	for _, tk := range []*db.Task{code, review} {
+		if tk.ClaudeConfigDir != "~/.claude-ollama" {
+			t.Errorf("%s ClaudeConfigDir = %q, want ~/.claude-ollama", tk.Title, tk.ClaudeConfigDir)
+		}
+		if tk.Model != "glm-5.2:cloud" {
+			t.Errorf("%s Model = %q, want glm-5.2:cloud", tk.Title, tk.Model)
+		}
+	}
+
+	// The override persists across a reload (the column is saved, not just in-memory).
+	reloaded, _ := database.GetTask(code.ID)
+	if reloaded == nil || reloaded.ClaudeConfigDir != "~/.claude-ollama" {
+		got := ""
+		if reloaded != nil {
+			got = reloaded.ClaudeConfigDir
+		}
+		t.Errorf("reloaded Code ClaudeConfigDir = %q, want ~/.claude-ollama", got)
+	}
+}
+
+// TestParseConfigDirRoundtrip verifies config_dir survives the yaml parse +
+// Marshal roundtrip so `ty pipeline edit`/`new` preserve it.
+func TestParseConfigDirRoundtrip(t *testing.T) {
+	def, err := ParseDefinition([]byte(configDirYAML))
+	if err != nil {
+		t.Fatalf("ParseDefinition: %v", err)
+	}
+	if s, ok := stepByName(def.Steps, "Code"); !ok || s.ConfigDir != "~/.claude-ollama" {
+		t.Errorf("Code ConfigDir = %q, want ~/.claude-ollama", s.ConfigDir)
+	}
+	out, err := Marshal(def)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	def2, err := ParseDefinition(out)
+	if err != nil {
+		t.Fatalf("re-parse: %v", err)
+	}
+	if s, ok := stepByName(def2.Steps, "Review"); !ok || s.ConfigDir != "~/.claude-ollama" {
+		t.Errorf("Review ConfigDir after roundtrip = %q, want ~/.claude-ollama", s.ConfigDir)
+	}
+}
+
+// envYAML routes Code+Review through ollama via a per-step env map (the
+// mechanism that actually reaches a token-auth proxy), while Plan stays on the
+// default Anthropic backend.
+const envYAML = `
+name: envroute
+description: plan on default claude, code+review routed to ollama via env
+steps:
+  - {name: Plan, model: opus, prompt: "Plan {{goal}}."}
+  - {name: Code, deps: [Plan], model: glm-5.2:cloud, env: {ANTHROPIC_BASE_URL: "http://127.0.0.1:11434", ANTHROPIC_AUTH_TOKEN: ollama, ANTHROPIC_API_KEY: ""}, prompt: "Implement it."}
+  - {name: Review, deps: [Code], model: glm-5.2:cloud, env: {ANTHROPIC_BASE_URL: "http://127.0.0.1:11434", ANTHROPIC_AUTH_TOKEN: ollama}, prompt: "Review it."}
+`
+
+// TestCreateEnvPropagation verifies a step's env map is serialized into the
+// created task's EnvJSON (and steps without it stay empty), so the executor
+// injects those vars only on the routed steps.
+func TestCreateEnvPropagation(t *testing.T) {
+	installWorkflow(t, "envroute", envYAML)
+	database := testDB(t)
+	res, err := Create(database, Options{Goal: "ship the thing", Project: "test", Definition: "envroute"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	plan := taskByStep(res, "Plan")
+	code := taskByStep(res, "Code")
+	review := taskByStep(res, "Review")
+
+	if plan.EnvJSON != "" {
+		t.Errorf("Plan EnvJSON = %q, want empty (no override)", plan.EnvJSON)
+	}
+	for _, tk := range []*db.Task{code, review} {
+		if tk.EnvJSON == "" {
+			t.Errorf("%s EnvJSON empty, want a JSON blob", tk.Title)
+		}
+		if tk.Model != "glm-5.2:cloud" {
+			t.Errorf("%s Model = %q, want glm-5.2:cloud", tk.Title, tk.Model)
+		}
+	}
+	m := code.EnvMap()
+	if m["ANTHROPIC_BASE_URL"] != "http://127.0.0.1:11434" || m["ANTHROPIC_AUTH_TOKEN"] != "ollama" {
+		t.Errorf("Code EnvMap = %v, want ollama routing vars", m)
+	}
+	if _, ok := m["ANTHROPIC_API_KEY"]; !ok {
+		t.Errorf("Code EnvMap missing explicit empty ANTHROPIC_API_KEY (needed to clear inherited creds): %v", m)
+	}
+
+	// The override persists across a reload (the column is saved, not just in-memory).
+	reloaded, _ := database.GetTask(code.ID)
+	if reloaded == nil || reloaded.EnvMap()["ANTHROPIC_BASE_URL"] != "http://127.0.0.1:11434" {
+		got := ""
+		if reloaded != nil {
+			got = reloaded.EnvJSON
+		}
+		t.Errorf("reloaded Code EnvJSON = %q, want persisted ollama routing blob", got)
+	}
+}
+
+// TestParseEnvRoundtrip verifies the env map survives the yaml parse + Marshal
+// roundtrip so `ty pipeline edit`/`new` preserve it.
+func TestParseEnvRoundtrip(t *testing.T) {
+	def, err := ParseDefinition([]byte(envYAML))
+	if err != nil {
+		t.Fatalf("ParseDefinition: %v", err)
+	}
+	if s, ok := stepByName(def.Steps, "Code"); !ok || s.Env["ANTHROPIC_AUTH_TOKEN"] != "ollama" {
+		t.Errorf("Code Env = %v, want ANTHROPIC_AUTH_TOKEN=ollama", s.Env)
+	}
+	out, err := Marshal(def)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	def2, err := ParseDefinition(out)
+	if err != nil {
+		t.Fatalf("re-parse: %v", err)
+	}
+	if s, ok := stepByName(def2.Steps, "Review"); !ok || s.Env["ANTHROPIC_BASE_URL"] != "http://127.0.0.1:11434" {
+		t.Errorf("Review Env after roundtrip = %v, want ANTHROPIC_BASE_URL preserved", s.Env)
 	}
 }
 

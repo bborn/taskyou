@@ -309,6 +309,35 @@ func (db *DB) migrate() error {
 
 		// Per-task Claude model override ("" = use global/Claude default, otherwise an alias like opus/sonnet/haiku or a full model name)
 		`ALTER TABLE tasks ADD COLUMN model TEXT DEFAULT ''`,
+
+		// Per-task CLAUDE_CONFIG_DIR override ("" = use the project's/default config dir).
+		// Lets a single task (e.g. a workflow step) route through a different Claude config —
+		// e.g. an ollama-backed config — without changing the project's setting.
+		`ALTER TABLE tasks ADD COLUMN claude_config_dir TEXT DEFAULT ''`,
+
+		// Per-task env overrides for the spawned Claude, stored as a JSON object
+		// (see Task.EnvJSON / EnvMap). Injected as a process-env prefix on the
+		// claude command so a step can route through a non-Anthropic proxy (ollama)
+		// without swapping CLAUDE_CONFIG_DIR.
+		`ALTER TABLE tasks ADD COLUMN env TEXT DEFAULT ''`,
+		// The commit a task's worktree was created at. A workflow step that has done no
+		// work still sits at this commit, so it is what distinguishes "hasn't produced
+		// anything" from "finished" — without it the auto-complete sweep cannot tell a
+		// freshly-created worktree (clean, HEAD already on origin) from a completed step
+		// and will silently mark unstarted steps done.
+		`ALTER TABLE tasks ADD COLUMN base_commit TEXT DEFAULT ''`,
+		// The paths already dirty in the worktree when the step started. A project's
+		// worktree init (bundle, migrate) routinely rewrites tracked files — Rails'
+		// db/structure.sql is the classic — so "worktree is clean" is never true and can
+		// never be the completion signal. What matters is that the step left nothing
+		// uncommitted that wasn't already dirty before it ran.
+		`ALTER TABLE tasks ADD COLUMN base_dirty TEXT DEFAULT ''`,
+		// Soft-delete timestamp. NULL = live task. Non-NULL = trashed (hidden from
+		// the board, still fully recoverable via 'task restore') until the daemon
+		// trash sweep hard-deletes it after the configured retention. Deleting a task
+		// no longer destroys its worktree or Claude transcript up front — that only
+		// happens when the sweep fires, and even then the transcript is preserved.
+		`ALTER TABLE tasks ADD COLUMN deleted_at DATETIME`,
 	}
 
 	for _, m := range alterMigrations {
