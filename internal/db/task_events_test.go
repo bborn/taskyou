@@ -274,6 +274,61 @@ func TestUpdateTaskStatusTimestamps(t *testing.T) {
 	}
 }
 
+func TestUpdateTaskStatusBlockedTimestamps(t *testing.T) {
+	// A never-started task flipped to 'blocked' is waiting in a DAG (a pipeline
+	// step staged behind its dependencies). It has NOT completed, so completed_at
+	// must stay nil — otherwise a freshly-created, never-run step looks finished.
+	t.Run("DAG-waiting step (never started) leaves completed_at nil", func(t *testing.T) {
+		database := setupTestDB(t)
+		defer database.Close()
+
+		task := &Task{Title: "Waiting step", Status: StatusBacklog, Project: "personal"}
+		if err := database.CreateTask(task); err != nil {
+			t.Fatalf("create: %v", err)
+		}
+
+		if err := database.UpdateTaskStatus(task.ID, StatusBlocked); err != nil {
+			t.Fatalf("block: %v", err)
+		}
+
+		updated, err := database.GetTask(task.ID)
+		if err != nil {
+			t.Fatalf("get: %v", err)
+		}
+		if updated.CompletedAt != nil {
+			t.Errorf("never-started blocked task should have nil completed_at, got %v", updated.CompletedAt.Time)
+		}
+	})
+
+	// A task that actually ran and is then parked in 'blocked' (agent finished its
+	// turn, awaiting human review) IS settled — the board orders these by
+	// completed_at, so it must be stamped.
+	t.Run("review-parked step (started) sets completed_at", func(t *testing.T) {
+		database := setupTestDB(t)
+		defer database.Close()
+
+		task := &Task{Title: "Ran then parked", Status: StatusBacklog, Project: "personal"}
+		if err := database.CreateTask(task); err != nil {
+			t.Fatalf("create: %v", err)
+		}
+		if err := database.UpdateTaskStatus(task.ID, StatusProcessing); err != nil {
+			t.Fatalf("process: %v", err)
+		}
+
+		if err := database.UpdateTaskStatus(task.ID, StatusBlocked); err != nil {
+			t.Fatalf("block: %v", err)
+		}
+
+		updated, err := database.GetTask(task.ID)
+		if err != nil {
+			t.Fatalf("get: %v", err)
+		}
+		if updated.CompletedAt == nil {
+			t.Error("started-then-blocked task should have completed_at set (board sorts by it)")
+		}
+	})
+}
+
 func TestCreateTaskEmitsEvent(t *testing.T) {
 	database := setupTestDB(t)
 	defer database.Close()
