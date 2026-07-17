@@ -81,8 +81,13 @@ func (p Plugin) Action(id string) (Action, bool) {
 	return Action{}, false
 }
 
-// DefaultPluginsDir returns the default plugins directory path.
+// DefaultPluginsDir returns the plugins directory path. The TY_PLUGINS_DIR
+// environment variable overrides the default (~/.config/task/plugins), which is
+// handy for relocating plugins and for test isolation.
 func DefaultPluginsDir() string {
+	if dir := os.Getenv("TY_PLUGINS_DIR"); dir != "" {
+		return dir
+	}
 	configDir, err := os.UserConfigDir()
 	if err != nil {
 		return ""

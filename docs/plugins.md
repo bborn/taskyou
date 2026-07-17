@@ -93,12 +93,16 @@ An action script receives `TASK_PLUGIN_NAME` / `TASK_PLUGIN_DIR` always, and the
 run synchronously (up to 60s) and their output is shown to the caller (the CLI
 prints it; the TUI shows the first line in the notification banner).
 
-In the TUI, actions are reachable two ways, both running the same command:
+Actions are reachable from every surface, all running the same command:
 
-- **Detail view:** press `A` on a task to open a picker of that task's plugin
-  actions; the chosen one runs with the task's env.
-- **Command palette:** open it (`p` / `Ctrl+P`) and type a leading `>` to switch
-  from task search to action search.
+- **CLI:** `ty plugins run <plugin> <action> [task-id]`.
+- **TUI — detail view:** press `A` on a task to open a picker of that task's
+  plugin actions; the chosen one runs with the task's env.
+- **TUI — command palette:** open it (`p` / `Ctrl+P`) and type a leading `>` to
+  switch from task search to action search.
+- **GUI / API:** `GET /api/plugins/actions` lists them; `POST
+  /api/plugins/actions/run` (`{plugin, action, task_id?}`) runs one. The desktop
+  app and any agent use these.
 
 ## Behavior & guarantees
 
@@ -117,6 +121,8 @@ In the TUI, actions are reachable two ways, both running the same command:
 ty plugins list   # what's installed and which events each handles
 ty plugins dir    # the plugins directory path
 ```
+
+Set `TY_PLUGINS_DIR` to use a directory other than `~/.config/task/plugins/`.
 
 ## Examples
 

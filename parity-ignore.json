@@ -1,6 +1,5 @@
 {
   "PrevPinnedTask": "TUI-only keyboard affordance ('[') for cycling to the previous pinned task from the detail view's quick-nav bar; the desktop GUI switches tasks via its own list/click UI and honors the same board filter, so no bracket-key binding is needed there.",
   "NextPinnedTask": "TUI-only keyboard affordance (']') for cycling to the next pinned task from the detail view's quick-nav bar; the desktop GUI switches tasks via its own list/click UI and honors the same board filter, so no bracket-key binding is needed there.",
-  "TogglePinnedRow": "TUI-only affordance ('T') to show/hide the detail view's pinned quick-nav row; the desktop GUI has no fixed pill row to collapse, so there's nothing to mirror.",
-  "Actions": "TUI affordance ('A') to run a plugin's action on the selected task. Plugin actions are already cross-surface via the CLI ('ty plugins run <plugin> <action> [task-id]'), which agents and scripts use; the desktop GUI does not yet render a plugin-action menu — surfacing it there is a tracked follow-up."
+  "TogglePinnedRow": "TUI-only affordance ('T') to show/hide the detail view's pinned quick-nav row; the desktop GUI has no fixed pill row to collapse, so there's nothing to mirror."
 }
