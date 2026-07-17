@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -32,6 +33,17 @@ type Plugin struct {
 
 	// Dir is the absolute path to the plugin directory (not from the manifest).
 	Dir string `yaml:"-"`
+	// Workflows holds the names (filename stems) of the workflow definitions this
+	// plugin ships in its workflows/ subdir. Discovered by convention at load time,
+	// not declared in the manifest — a plugin is workflow cargo the moment it has a
+	// workflows/*.yaml. Populated for display; the definitions themselves are loaded
+	// by the pipeline registry via PluginWorkflowDirs.
+	Workflows []string `yaml:"-"`
+}
+
+// WorkflowsDir returns the plugin's workflows subdir, whether or not it exists.
+func (p Plugin) WorkflowsDir() string {
+	return filepath.Join(p.Dir, "workflows")
 }
 
 // Action is a user-triggered plugin command.
@@ -88,30 +100,54 @@ func LoadPlugins(pluginsDir string) (plugins []Plugin, warnings []string) {
 	if pluginsDir == "" {
 		return nil, nil
 	}
-	entries, err := os.ReadDir(pluginsDir)
+	plugins, warnings = discoverPluginsIn(pluginsDir, 0)
+	// Deterministic order so fan-out and `plugins list` are stable.
+	sort.Slice(plugins, func(i, j int) bool { return plugins[i].Name < plugins[j].Name })
+	return plugins, warnings
+}
+
+// maxPluginDepth bounds how deep discovery descends into non-plugin directories,
+// so a single community repo can nest plugins (repo/plugin, repo/category/plugin)
+// without discovery walking an unbounded tree.
+const maxPluginDepth = 4
+
+// discoverPluginsIn finds plugins under dir. A subdirectory that contains a
+// plugin.yaml IS a plugin (loaded, not descended into); a subdirectory that does
+// not is treated as a collection and recursed into. This lets `ty plugins add`
+// clone a whole monorepo of plugins as one directory and have every plugin inside
+// become active.
+func discoverPluginsIn(dir string, depth int) (plugins []Plugin, warnings []string) {
+	if depth > maxPluginDepth {
+		return nil, nil
+	}
+	entries, err := os.ReadDir(dir)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil
 		}
-		return nil, []string{fmt.Sprintf("read plugins dir %s: %v", pluginsDir, err)}
+		return nil, []string{fmt.Sprintf("read plugins dir %s: %v", dir, err)}
 	}
-
 	for _, entry := range entries {
 		if !entry.IsDir() {
 			continue
 		}
-		dir := filepath.Join(pluginsDir, entry.Name())
-		p, warn := loadPlugin(dir)
-		if warn != "" {
-			warnings = append(warnings, warn)
+		sub := filepath.Join(dir, entry.Name())
+		if _, err := os.Stat(filepath.Join(sub, ManifestName)); err == nil {
+			// It's a plugin; load it and do not descend into its own subdirs.
+			p, warn := loadPlugin(sub)
+			if warn != "" {
+				warnings = append(warnings, warn)
+			}
+			if p != nil {
+				plugins = append(plugins, *p)
+			}
+			continue
 		}
-		if p != nil {
-			plugins = append(plugins, *p)
-		}
+		// No manifest here — treat as a collection and look one level deeper.
+		nested, nwarn := discoverPluginsIn(sub, depth+1)
+		plugins = append(plugins, nested...)
+		warnings = append(warnings, nwarn...)
 	}
-
-	// Deterministic order so fan-out and `plugins list` are stable.
-	sort.Slice(plugins, func(i, j int) bool { return plugins[i].Name < plugins[j].Name })
 	return plugins, warnings
 }
 
@@ -137,8 +173,11 @@ func loadPlugin(dir string) (*Plugin, string) {
 	if p.Name == "" {
 		return nil, fmt.Sprintf("plugin %s: manifest is missing a name", filepath.Base(dir))
 	}
-	if len(p.Hooks) == 0 && len(p.Actions) == 0 {
-		return nil, fmt.Sprintf("plugin %q: manifest declares no hooks or actions; skipping", p.Name)
+	// Workflows are discovered by convention: any workflows/*.yaml makes the plugin
+	// workflow cargo, no manifest declaration needed.
+	p.Workflows = discoverPluginWorkflows(dir)
+	if len(p.Hooks) == 0 && len(p.Actions) == 0 && len(p.Workflows) == 0 {
+		return nil, fmt.Sprintf("plugin %q: manifest declares no hooks, actions, or workflows; skipping", p.Name)
 	}
 
 	// Drop hooks and actions whose script is missing or not a regular file,
@@ -163,8 +202,8 @@ func loadPlugin(dir string) (*Plugin, string) {
 	}
 	p.Actions = kept
 
-	if len(p.Hooks) == 0 && len(p.Actions) == 0 {
-		return nil, fmt.Sprintf("plugin %q: no usable hook or action scripts found; skipping", p.Name)
+	if len(p.Hooks) == 0 && len(p.Actions) == 0 && len(p.Workflows) == 0 {
+		return nil, fmt.Sprintf("plugin %q: no usable hook, action, or workflow found; skipping", p.Name)
 	}
 	if len(dropped) > 0 {
 		sort.Strings(dropped)
@@ -177,4 +216,40 @@ func loadPlugin(dir string) (*Plugin, string) {
 func isExecutableFile(path string) bool {
 	fi, err := os.Stat(path)
 	return err == nil && !fi.IsDir()
+}
+
+// discoverPluginWorkflows returns the filename stems of every workflow definition
+// (workflows/*.yaml or *.yml) a plugin ships, sorted for deterministic display.
+func discoverPluginWorkflows(dir string) []string {
+	wdir := filepath.Join(dir, "workflows")
+	entries, err := os.ReadDir(wdir)
+	if err != nil {
+		return nil
+	}
+	var names []string
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		ext := filepath.Ext(e.Name())
+		if ext == ".yaml" || ext == ".yml" {
+			names = append(names, strings.TrimSuffix(e.Name(), ext))
+		}
+	}
+	sort.Strings(names)
+	return names
+}
+
+// PluginWorkflowDirs returns the workflows/ subdir of every installed plugin that
+// actually ships one. The pipeline registry feeds these into its workflow search
+// path, so an installed plugin's workflows become resolvable by `ty pipeline -d`.
+func PluginWorkflowDirs(pluginsDir string) []string {
+	plugins, _ := LoadPlugins(pluginsDir)
+	var dirs []string
+	for _, p := range plugins {
+		if len(p.Workflows) > 0 {
+			dirs = append(dirs, p.WorkflowsDir())
+		}
+	}
+	return dirs
 }

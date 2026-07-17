@@ -51,46 +51,55 @@ type Definition struct {
 	Custom      bool // true for workflows loaded from YAML files (vs the built-ins)
 }
 
-// DefaultDefinition is the definition used when none is named.
-const DefaultDefinition = "plan-code-review"
+// DefaultDefinition is the definition used when none is named. It is empty: there
+// are no built-in workflows — every workflow is installed from a plugin (or dropped
+// into the workflows dir). `ty pipeline` with no -d therefore has nothing to run
+// until the user installs a workflow, and Create says so.
+const DefaultDefinition = ""
 
-// planCodeReview is the herdr flow as a DAG: Plan → Code → two independent
-// reviewers in parallel → Collect. The parallel reviewers are the point — two
-// agents with independent contexts catch different classes of issue and avoid
-// single-context self-review bias.
-//
-// Defaults are all Claude (so it runs anywhere with Claude and never silently
-// swaps executors), but each step's executor/model is configurable per project
-// (see config.go): point one reviewer at codex — `pipeline config --set
-// "Review B=codex"` — for the herdr-style cross-executor review, or add a QA step.
-var planCodeReview = Definition{
-	Name:        "plan-code-review",
-	Description: "Plan → code → two parallel reviewers → collect, on one shared branch. Each step's model/executor is configurable per project.",
-	Steps: []Step{
-		{Name: "Plan", Executor: db.ExecutorClaude, Model: db.ModelOpus, Instruction: planInstruction},
-		{Name: "Code", Executor: db.ExecutorClaude, Model: db.ModelSonnet, Instruction: codeInstruction, Deps: []string{"Plan"}},
-		{Name: "Review A", Executor: db.ExecutorClaude, Model: db.ModelOpus, Instruction: reviewInstruction, Deps: []string{"Code"}},
-		{Name: "Review B", Executor: db.ExecutorClaude, Model: db.ModelSonnet, Instruction: reviewInstruction, Deps: []string{"Code"}},
-		{Name: "Collect", Executor: db.ExecutorClaude, Model: db.ModelSonnet, Instruction: collectInstruction, Deps: []string{"Review A", "Review B"}},
-	},
-}
-
-var builtins = map[string]Definition{
-	planCodeReview.Name: planCodeReview,
-}
-
-// registry merges the built-in definitions with any custom YAML workflows found
-// in extraDirs (plus the global WorkflowsDir). Custom definitions shadow built-ins
-// of the same name.
+// registry loads workflow definitions from disk: installed-plugin workflows, the
+// global workflows dir, and any extraDirs (a project's .taskyou/workflows). There
+// are no built-in definitions — the plan-code-review flow that used to live here
+// now ships as an example plugin (examples/plugins/plan-code-review).
 func registry(extraDirs ...string) map[string]Definition {
-	out := make(map[string]Definition, len(builtins)+2)
-	for name, def := range builtins {
-		out[name] = def
+	out := make(map[string]Definition)
+	// Search order, lowest precedence first: installed-plugin workflows, then the
+	// global workflows dir, then extraDirs (a project's .taskyou/workflows). Later
+	// dirs shadow earlier ones on a name collision, so a user's own on-disk workflow
+	// wins over one shipped by an installed plugin. dedupeKeepingLast collapses the
+	// global dir that WorkflowDirs also re-includes, keeping precedence unambiguous.
+	var dirs []string
+	if PluginWorkflowDirs != nil {
+		dirs = append(dirs, PluginWorkflowDirs()...)
 	}
-	dirs := append([]string{WorkflowsDir()}, extraDirs...)
-	custom, _ := loadCustomDefinitions(dirs)
+	dirs = append(dirs, WorkflowsDir())
+	dirs = append(dirs, extraDirs...)
+	custom, _ := loadCustomDefinitions(dedupeKeepingLast(dirs))
 	for name, def := range custom {
 		out[name] = def
+	}
+	return out
+}
+
+// PluginWorkflowDirs, when set, returns extra directories to search for workflow
+// definitions — the workflows/ subdir of every installed plugin. It is a seam so
+// the pipeline package needn't import internal/hooks (which would cycle); main
+// wires it at startup. nil = no plugin workflows.
+var PluginWorkflowDirs func() []string
+
+// dedupeKeepingLast returns dirs with duplicates removed, keeping each dir at its
+// LAST position — so the highest-precedence occurrence (later dirs shadow earlier)
+// is the one that survives.
+func dedupeKeepingLast(dirs []string) []string {
+	lastAt := make(map[string]int, len(dirs))
+	for i, d := range dirs {
+		lastAt[d] = i
+	}
+	out := make([]string, 0, len(dirs))
+	for i, d := range dirs {
+		if lastAt[d] == i {
+			out = append(out, d)
+		}
 	}
 	return out
 }
@@ -243,7 +252,15 @@ func Create(database *db.DB, opts Options) (*Result, error) {
 	dirs := WorkflowDirs(projectDir)
 	def, ok := Get(opts.Definition, dirs...)
 	if !ok {
-		return nil, fmt.Errorf("unknown workflow definition %q (available: %s)", opts.Definition, strings.Join(DefinitionNames(dirs...), ", "))
+		avail := DefinitionNames(dirs...)
+		if strings.TrimSpace(opts.Definition) == "" {
+			hint := "install one with `ty plugins add <repo>`"
+			if len(avail) > 0 {
+				hint = "pass -d <name>; available: " + strings.Join(avail, ", ")
+			}
+			return nil, fmt.Errorf("no workflow specified and there is no default — %s", hint)
+		}
+		return nil, fmt.Errorf("unknown workflow definition %q (available: %s)", opts.Definition, strings.Join(avail, ", "))
 	}
 	if err := def.validate(); err != nil {
 		return nil, err

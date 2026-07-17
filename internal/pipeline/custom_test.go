@@ -93,16 +93,13 @@ func TestRegistryMergesCustom(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "build-and-qa.yaml"), []byte(sampleYAML), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	// Custom appears alongside the built-in.
+	// A custom workflow on the search path is resolved by name.
 	if _, ok := Get("build-and-qa"); !ok {
 		t.Error("custom workflow not resolved by Get")
 	}
-	if _, ok := Get(DefaultDefinition); !ok {
-		t.Error("built-in should still resolve")
-	}
 	names := DefinitionNames()
-	if !contains(names, "build-and-qa") || !contains(names, DefaultDefinition) {
-		t.Errorf("DefinitionNames = %v, want built-in + custom", names)
+	if !contains(names, "build-and-qa") {
+		t.Errorf("DefinitionNames = %v, want to include build-and-qa", names)
 	}
 }
 
@@ -135,11 +132,23 @@ func TestComposeDerivesHandoffFromDAG(t *testing.T) {
 	}
 }
 
-func TestBuiltinUsesInstructionVerbatim(t *testing.T) {
-	def, _ := Get(DefaultDefinition)
-	got := effectiveInstruction(def, "Plan")
-	if got != planInstruction {
-		t.Error("built-in step should use its Instruction verbatim")
+func TestVerbatimStepUsesInstructionAsIs(t *testing.T) {
+	const y = `
+name: verb
+steps:
+  - name: Solo
+    verbatim: true
+    prompt: |-
+      Do exactly this for {{goal}}.
+`
+	def, err := ParseDefinition([]byte(y))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A verbatim step's body is its prompt as-is — no DAG-derived git handoff added.
+	got := effectiveInstruction(def, "Solo")
+	if got != "Do exactly this for {{goal}}." {
+		t.Errorf("verbatim instruction = %q, want the prompt as-is", got)
 	}
 }
 

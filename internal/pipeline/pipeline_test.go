@@ -1,12 +1,29 @@
 package pipeline
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/bborn/workflow/internal/db"
 )
+
+// installPCR installs the plan-code-review workflow (the former in-code built-in,
+// now shipped as a plugin) from testdata into the workflows dir, so tests that
+// exercise its plan→code→2-reviewers→collect shape can request it by name.
+func installPCR(t *testing.T) {
+	t.Helper()
+	b, err := os.ReadFile("testdata/plan-code-review.yaml")
+	if err != nil {
+		t.Fatalf("read pcr testdata: %v", err)
+	}
+	dir := t.TempDir()
+	t.Setenv("TY_WORKFLOWS_DIR", dir)
+	if err := os.WriteFile(filepath.Join(dir, "plan-code-review.yaml"), b, 0o644); err != nil {
+		t.Fatalf("install pcr: %v", err)
+	}
+}
 
 func testDB(t *testing.T) *db.DB {
 	t.Helper()
@@ -32,29 +49,21 @@ func taskByStep(res *Result, step string) *db.Task {
 	return nil
 }
 
-func TestDefaultDefinitionIsValidDAG(t *testing.T) {
-	def, ok := Get("")
-	if !ok {
-		t.Fatal("default definition missing")
+func TestNoDefaultWorkflow(t *testing.T) {
+	// There is no built-in default: an empty definition name resolves to nothing.
+	if _, ok := Get(""); ok {
+		t.Error("Get(\"\") resolved a definition; want none (no built-in default)")
 	}
-	if def.Name != DefaultDefinition {
-		t.Errorf("default = %q, want %q", def.Name, DefaultDefinition)
-	}
-	if err := def.validate(); err != nil {
-		t.Fatalf("default definition invalid: %v", err)
-	}
-	// It should be the plan → code → 2 parallel reviews → collect shape.
-	if len(def.Steps) != 5 {
-		t.Errorf("got %d steps, want 5", len(def.Steps))
-	}
-	if roots := def.Roots(); len(roots) != 1 || roots[0].Name != "Plan" {
-		t.Errorf("roots = %v, want [Plan]", roots)
+	database := testDB(t)
+	if _, err := Create(database, Options{Goal: "x", Project: "test"}); err == nil {
+		t.Error("Create with no definition should error (no default workflow)")
 	}
 }
 
 func TestCreateBuildsDAG(t *testing.T) {
+	installPCR(t)
 	database := testDB(t)
-	res, err := Create(database, Options{Goal: "Add rate limiting to the API", Project: "test", Execute: true})
+	res, err := Create(database, Options{Goal: "Add rate limiting to the API", Project: "test", Definition: "plan-code-review", Execute: true})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -125,8 +134,9 @@ func TestCreateBuildsDAG(t *testing.T) {
 }
 
 func TestCreateAutoAdvancesDAGWithParallelJoin(t *testing.T) {
+	installPCR(t)
 	database := testDB(t)
-	res, err := Create(database, Options{Goal: "Ship it", Project: "test", Execute: true})
+	res, err := Create(database, Options{Goal: "Ship it", Project: "test", Definition: "plan-code-review", Execute: true})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}

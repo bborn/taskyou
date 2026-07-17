@@ -108,6 +108,14 @@ func main() {
 	// any config-dir resolution or Claude spawn. See executor.NormalizeClaudeConfigEnv.
 	executor.NormalizeClaudeConfigEnv()
 
+	// Make installed plugins' workflows resolvable by the pipeline registry. Wired
+	// here (not inside pipeline) so pipeline needn't import hooks. Runs for every ty
+	// subcommand — list, pipeline, completion, and the mcp-server process — so plugin
+	// workflows surface everywhere built-in and on-disk workflows do.
+	pipeline.PluginWorkflowDirs = func() []string {
+		return hooks.PluginWorkflowDirs(hooks.DefaultPluginsDir())
+	}
+
 	var dangerous bool
 
 	rootCmd := &cobra.Command{
@@ -1074,22 +1082,24 @@ Examples:
 
 	// Pipeline edit subcommand - write a workflow to a YAML file for editing
 	pipelineEditCmd := &cobra.Command{
-		Use:   "edit [name]",
-		Short: "Write a workflow to a YAML file you can edit (ejects the built-in)",
+		Use:   "edit <name>",
+		Short: "Write a workflow to a YAML file you can edit",
 		Long: `Workflows are configured by editing their YAML file. This writes the named
-workflow (default: ` + pipeline.DefaultDefinition + `) to the workflows directory so you can
-change models, prompts, or steps by hand. A custom file shadows the built-in of
-the same name.
+workflow to the workflows directory so you can change models, prompts, or steps by
+hand. A file on the search path shadows a plugin-provided workflow of the same name.
 
 Examples:
-  task pipeline edit                       # eject the default workflow to edit
-  task pipeline edit plan-code-review      # same, explicit
-  task pipeline edit --print               # print the YAML instead of writing it`,
+  task pipeline edit plan-code-review      # eject a workflow to edit
+  task pipeline edit rpi-go --print        # print the YAML instead of writing it`,
 		Args: cobra.MaximumNArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
 			name := pipeline.DefaultDefinition
 			if len(args) > 0 {
 				name = args[0]
+			}
+			if name == "" {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: specify a workflow name (e.g. `ty pipeline edit plan-code-review`)"))
+				os.Exit(1)
 			}
 			printOnly, _ := cmd.Flags().GetBool("print")
 

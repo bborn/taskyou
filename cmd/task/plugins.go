@@ -4,8 +4,11 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"sort"
 	"strconv"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -42,6 +45,32 @@ of plugins may handle the same event.`,
 		},
 	})
 
+	addCmd := &cobra.Command{
+		Use:   "add <git-url|path> [--name N]",
+		Short: "Install a plugin from a git repo (or update it if already installed)",
+		Long: `Clone a plugin repository into the plugins dir. The repo root must be a
+plugin (a plugin.yaml, optionally with a workflows/ subdir). Re-running add on the
+same plugin updates it in place with git pull.`,
+		Args:         cobra.ExactArgs(1),
+		SilenceUsage: true,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			name, _ := cmd.Flags().GetString("name")
+			installed, updated, err := addPlugin(args[0], hooks.DefaultPluginsDir(), name)
+			if err != nil {
+				return err
+			}
+			verb := "Installed"
+			if updated {
+				verb = "Updated"
+			}
+			fmt.Printf("%s %d plugin(s): %s. Run `ty plugins list` to see what they provide.\n",
+				verb, len(installed), strings.Join(installed, ", "))
+			return nil
+		},
+	}
+	addCmd.Flags().String("name", "", "Install under this directory name (default: derived from the source)")
+	pluginsCmd.AddCommand(addCmd)
+
 	runCmd := &cobra.Command{
 		Use:          "run <plugin> <action> [task-id]",
 		Short:        "Run a plugin action, optionally in the context of a task",
@@ -62,6 +91,86 @@ of plugins may handle the same event.`,
 	pluginsCmd.AddCommand(runCmd)
 
 	return pluginsCmd
+}
+
+// addPlugin installs (or updates) a plugin from a git source into pluginsDir. A
+// fresh install is a shallow clone into pluginsDir/<name>; an existing install of
+// the same name is updated in place with `git pull`. It returns the installed
+// directory name, whether it was an update, and validates that what landed is a
+// real plugin (rolling back a bad fresh clone so no stray dir is left behind).
+func addPlugin(source, pluginsDir, name string) (installed []string, updated bool, err error) {
+	if name == "" {
+		name = derivePluginName(source)
+	}
+	if name == "" {
+		return nil, false, fmt.Errorf("could not derive a plugin name from %q; pass --name", source)
+	}
+	if err := os.MkdirAll(pluginsDir, 0o755); err != nil {
+		return nil, false, fmt.Errorf("create plugins dir: %w", err)
+	}
+	target := filepath.Join(pluginsDir, name)
+
+	switch {
+	case isGitCheckout(target):
+		if out, err := runGit(target, "pull", "--ff-only"); err != nil {
+			return nil, false, fmt.Errorf("update %s: %w\n%s", name, err, out)
+		}
+		updated = true
+	case dirExists(target):
+		return nil, false, fmt.Errorf("%s already exists and is not a git checkout; remove it or use --name", target)
+	default:
+		if out, err := runGit("", "clone", "--depth", "1", source, target); err != nil {
+			return nil, false, fmt.Errorf("clone %s: %w\n%s", source, err, out)
+		}
+	}
+
+	// Validate what landed contains at least one usable plugin — a single plugin at
+	// the root, or several nested in a collection. Roll back a bad FRESH clone so no
+	// stray dir is left behind.
+	installed = installedPluginNames(pluginsDir, target)
+	if len(installed) == 0 {
+		if !updated {
+			os.RemoveAll(target)
+		}
+		return nil, false, fmt.Errorf("%s contains no usable plugins (need a plugin.yaml with a hook, action, or workflow)", source)
+	}
+	return installed, updated, nil
+}
+
+// derivePluginName turns a git URL or path into a plugin directory name.
+func derivePluginName(source string) string {
+	s := strings.TrimSuffix(strings.TrimRight(source, "/"), ".git")
+	return filepath.Base(s)
+}
+
+func isGitCheckout(dir string) bool { return dirExists(filepath.Join(dir, ".git")) }
+
+func dirExists(path string) bool {
+	fi, err := os.Stat(path)
+	return err == nil && fi.IsDir()
+}
+
+func runGit(dir string, args ...string) ([]byte, error) {
+	cmd := exec.Command("git", args...)
+	if dir != "" {
+		cmd.Dir = dir
+	}
+	return cmd.CombinedOutput()
+}
+
+// installedPluginNames returns the names of every plugin LoadPlugins discovers at
+// or under target — one for a single-plugin repo, several for a collection repo.
+// Matched by Dir prefix since a plugin's manifest name may differ from its dir.
+func installedPluginNames(pluginsDir, target string) []string {
+	plugins, _ := hooks.LoadPlugins(pluginsDir)
+	var names []string
+	for _, p := range plugins {
+		if p.Dir == target || strings.HasPrefix(p.Dir, target+string(os.PathSeparator)) {
+			names = append(names, p.Name)
+		}
+	}
+	sort.Strings(names)
+	return names
 }
 
 func runPluginAction(ctx context.Context, pluginName, actionID string, taskID int64) error {
@@ -136,6 +245,9 @@ func listPlugins() {
 		}
 		for _, a := range p.Actions {
 			fmt.Printf("    action %-18s → %s  (ty plugins run %s %s)\n", a.DisplayLabel(), a.Command, p.Name, a.ID)
+		}
+		for _, w := range p.Workflows {
+			fmt.Printf("    workflow %-16s (ty pipeline -d %s \"<goal>\")\n", w, w)
 		}
 		fmt.Println()
 	}

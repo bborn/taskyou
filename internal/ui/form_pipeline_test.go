@@ -1,15 +1,31 @@
 package ui
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
 
+// installFormWorkflow isolates the workflows dir and drops in one known workflow,
+// so the pipeline selector tests don't depend on whatever is installed on the dev
+// machine (there are no built-in workflows anymore).
+func installFormWorkflow(t *testing.T, name string) {
+	t.Helper()
+	dir := t.TempDir()
+	t.Setenv("TY_WORKFLOWS_DIR", dir)
+	yaml := "name: " + name + "\nsteps:\n  - name: Solo\n    prompt: Do {{goal}}.\n"
+	if err := os.WriteFile(filepath.Join(dir, name+".yaml"), []byte(yaml), 0o644); err != nil {
+		t.Fatalf("install workflow: %v", err)
+	}
+}
+
 // TestFormPipelineFieldDefaultsToSingleTask verifies a fresh form creates an
 // ordinary task (no pipeline) until the user selects one.
 func TestFormPipelineFieldDefaultsToSingleTask(t *testing.T) {
+	installFormWorkflow(t, "plan-code-review")
 	m := NewFormModel(nil, 100, 50, "", nil)
 	if m.Pipeline() != "" {
 		t.Errorf("default Pipeline() = %q, want empty", m.Pipeline())
@@ -22,6 +38,7 @@ func TestFormPipelineFieldDefaultsToSingleTask(t *testing.T) {
 // TestFormPipelineFieldCycles verifies the pipeline selector advances to a real
 // definition and the getter reflects it.
 func TestFormPipelineFieldCycles(t *testing.T) {
+	installFormWorkflow(t, "plan-code-review")
 	m := NewFormModel(nil, 100, 50, "", nil)
 	m.showAdvanced = true
 	m.focused = FieldPipeline
