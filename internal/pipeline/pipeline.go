@@ -64,19 +64,55 @@ type Definition struct {
 // are the whole recipe. The steps-less, instructions-only case is exactly a task type.
 func (d Definition) IsSingle() bool { return len(d.Steps) == 0 }
 
-// DefaultDefinition is empty: there is no built-in workflow. Kinds live in the DB
-// (task types); a kind runs as a workflow only when a same-named file adds steps.
+// DefaultDefinition is the definition used when none is named. It is empty: there
+// are no built-in workflows — every workflow is installed from a plugin (or dropped
+// into the workflows dir). `ty pipeline` with no -d therefore has nothing to run
+// until the user installs a workflow, and Create says so.
 const DefaultDefinition = ""
 
-// registry loads the workflow files — one per file — from the global workflows dir
-// plus extraDirs. There are NO built-in workflows: a workflow is just a same-named
-// file overlaying a DB kind (see KindResolver). Later dirs shadow earlier ones.
+// registry loads workflow definitions from disk: installed-plugin workflows, the
+// global workflows dir, and any extraDirs (a project's .taskyou/workflows). There
+// are no built-in definitions — the plan-code-review flow that used to live here
+// now ships as an example plugin (examples/plugins/plan-code-review).
 func registry(extraDirs ...string) map[string]Definition {
 	out := make(map[string]Definition)
-	dirs := append([]string{WorkflowsDir()}, extraDirs...)
-	custom, _ := loadCustomDefinitions(dirs)
+	// Search order, lowest precedence first: installed-plugin workflows, then the
+	// global workflows dir, then extraDirs (a project's .taskyou/workflows). Later
+	// dirs shadow earlier ones on a name collision, so a user's own on-disk workflow
+	// wins over one shipped by an installed plugin. dedupeKeepingLast collapses the
+	// global dir that WorkflowDirs also re-includes, keeping precedence unambiguous.
+	var dirs []string
+	if PluginWorkflowDirs != nil {
+		dirs = append(dirs, PluginWorkflowDirs()...)
+	}
+	dirs = append(dirs, WorkflowsDir())
+	dirs = append(dirs, extraDirs...)
+	custom, _ := loadCustomDefinitions(dedupeKeepingLast(dirs))
 	for name, def := range custom {
 		out[name] = def
+	}
+	return out
+}
+
+// PluginWorkflowDirs, when set, returns extra directories to search for workflow
+// definitions — the workflows/ subdir of every installed plugin. It is a seam so
+// the pipeline package needn't import internal/hooks (which would cycle); main
+// wires it at startup. nil = no plugin workflows.
+var PluginWorkflowDirs func() []string
+
+// dedupeKeepingLast returns dirs with duplicates removed, keeping each dir at its
+// LAST position — so the highest-precedence occurrence (later dirs shadow earlier)
+// is the one that survives.
+func dedupeKeepingLast(dirs []string) []string {
+	lastAt := make(map[string]int, len(dirs))
+	for i, d := range dirs {
+		lastAt[d] = i
+	}
+	out := make([]string, 0, len(dirs))
+	for i, d := range dirs {
+		if lastAt[d] == i {
+			out = append(out, d)
+		}
 	}
 	return out
 }
@@ -256,7 +292,15 @@ func Create(database *db.DB, opts Options) (*Result, error) {
 	resolve := KindResolver(database, dirs...)
 	def, ok := resolve(opts.Definition)
 	if !ok {
-		return nil, fmt.Errorf("unknown kind %q (available: %s)", opts.Definition, strings.Join(DefinitionNames(dirs...), ", "))
+		avail := DefinitionNames(dirs...)
+		if strings.TrimSpace(opts.Definition) == "" {
+			hint := "install one with `ty plugins add <repo>`"
+			if len(avail) > 0 {
+				hint = "pass -d <name>; available: " + strings.Join(avail, ", ")
+			}
+			return nil, fmt.Errorf("no workflow specified and there is no default — %s", hint)
+		}
+		return nil, fmt.Errorf("unknown workflow definition %q (available: %s)", opts.Definition, strings.Join(avail, ", "))
 	}
 	// Compose kinds: inline any step that runs a multi-step kind (nesting) into one
 	// flat DAG. A single-task kind (no steps) is just one ordinary task.

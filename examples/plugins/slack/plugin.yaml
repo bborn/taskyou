@@ -1,0 +1,14 @@
+# Slack notifications for task events.
+#
+# Setup:
+#   cp -R examples/plugins/slack ~/.config/task/plugins/
+#   cp ~/.config/task/plugins/slack/config.example.env \
+#      ~/.config/task/plugins/slack/config.env
+#   # edit config.env and paste your Slack incoming-webhook URL
+name: slack
+version: 0.1.0
+description: Post task updates to a Slack channel via an incoming webhook.
+hooks:
+  task.done: notify.sh
+  task.blocked: notify.sh
+  task.failed: notify.sh

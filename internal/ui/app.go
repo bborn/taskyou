@@ -25,6 +25,7 @@ import (
 	"github.com/bborn/workflow/internal/db"
 	"github.com/bborn/workflow/internal/executor"
 	"github.com/bborn/workflow/internal/github"
+	"github.com/bborn/workflow/internal/hooks"
 	"github.com/bborn/workflow/internal/pipeline"
 	"github.com/bborn/workflow/internal/tasksummary"
 )
@@ -52,6 +53,7 @@ const (
 	ViewWelcome              // first-run fork: set up a project vs start a task
 	ViewFolderPicker         // fuzzy folder picker for "set up a project"
 	ViewRoutines             // global routines fleet-health view
+	ViewActionPicker         // modal list of plugin actions for the current task
 )
 
 // KeyMap defines key bindings.
@@ -83,6 +85,7 @@ type KeyMap struct {
 	OpenWorktree       key.Binding
 	ToggleShellPane    key.Binding
 	JumpToNotification key.Binding
+	Actions            key.Binding
 	// Column focus shortcuts
 	FocusBacklog    key.Binding
 	FocusInProgress key.Binding
@@ -229,6 +232,10 @@ func DefaultKeyMap() KeyMap {
 		JumpToNotification: key.NewBinding(
 			key.WithKeys("g"),
 			key.WithHelp("g", "go to notification"),
+		),
+		Actions: key.NewBinding(
+			key.WithKeys("A"),
+			key.WithHelp("A", "plugin actions"),
 		),
 		FocusBacklog: key.NewBinding(
 			key.WithKeys("B"),
@@ -476,6 +483,10 @@ type AppModel struct {
 	commandPaletteReturnView   View
 	commandPaletteReturnTaskID int64
 
+	// Plugin action picker state (opened from the detail view)
+	actionPickerView *ActionPickerModel
+	actionPickerTask *db.Task
+
 	// AI command service for natural language command interpretation
 	aiCommandService *ai.CommandService
 
@@ -716,6 +727,10 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg.(type) {
 	case tickMsg, focusTickMsg, dbChangeMsg, taskEventMsg, tasksLoadedMsg, prRefreshTickMsg, liveSpinnerTickMsg:
 		isSystemMsg = true
+	case actionFinishedMsg:
+		// A plugin action completed off the UI loop; its result must reach the
+		// main switch to update the notification banner, not be routed to a view.
+		isSystemMsg = true
 	}
 
 	if !isSystemMsg {
@@ -783,6 +798,9 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if m.currentView == ViewCommandPalette && m.commandPaletteView != nil {
 			return m.updateCommandPalette(msg)
+		}
+		if m.currentView == ViewActionPicker && m.actionPickerView != nil {
+			return m.updateActionPicker(msg)
 		}
 		// Handle detail view feedback mode (needs all message types for text input)
 		if m.currentView == ViewDetail && m.detailView != nil && m.detailView.InFeedbackMode() {
@@ -1238,6 +1256,18 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, m.handleAICommand(msg.cmd))
 		}
 
+	case actionFinishedMsg:
+		if msg.err != nil {
+			m.notification = fmt.Sprintf("%s %s failed: %s", IconBlocked(), msg.label, msg.err.Error())
+		} else {
+			summary := actionResultSummary(msg.output)
+			if summary == "" {
+				summary = "done"
+			}
+			m.notification = fmt.Sprintf("%s %s: %s", IconDone(), msg.label, summary)
+		}
+		m.notifyUntil = time.Now().Add(6 * time.Second)
+
 	case taskPermissionModeCycledMsg:
 		cmds = append(cmds, m.loadTasks())
 		// Refresh the detail view panes since the executor window was recreated
@@ -1503,6 +1533,9 @@ func (m *AppModel) applyWindowSize(width, height int) {
 	if m.commandPaletteView != nil {
 		m.commandPaletteView.SetSize(width, height)
 	}
+	if m.actionPickerView != nil {
+		m.actionPickerView.SetSize(width, height)
+	}
 	if m.newTaskForm != nil {
 		m.newTaskForm.SetSize(width, height)
 	}
@@ -1590,6 +1623,10 @@ func (m *AppModel) View() string {
 	case ViewCommandPalette:
 		if m.commandPaletteView != nil {
 			return m.commandPaletteView.View()
+		}
+	case ViewActionPicker:
+		if m.actionPickerView != nil {
+			return m.actionPickerView.View()
 		}
 	}
 
@@ -2588,6 +2625,9 @@ func (m *AppModel) updateDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if key.Matches(keyMsg, m.keys.ToggleShellPane) && m.detailView != nil {
 		m.detailView.ToggleShellPane()
 		return m, nil
+	}
+	if key.Matches(keyMsg, m.keys.Actions) && m.selectedTask != nil {
+		return m.openActionPicker()
 	}
 	if key.Matches(keyMsg, m.keys.Help) && m.detailView != nil {
 		// Expand/collapse the detail footer help row.
@@ -3866,6 +3906,29 @@ func (m *AppModel) updateCommandPalette(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
+	// Check if user chose a plugin action (action mode, ">" prefix)
+	if act := m.commandPaletteView.SelectedAction(); act != nil {
+		item := *act
+		task := m.selectedTask // task context we were on, if any
+		returnView := m.commandPaletteReturnView
+		returnTaskID := m.commandPaletteReturnTaskID
+		if returnView == ViewDashboard && m.detailView != nil && m.selectedTask != nil {
+			returnView = ViewDetail
+			returnTaskID = m.selectedTask.ID
+		}
+		m.commandPaletteView = nil
+		m.commandPaletteReturnView = ViewDashboard
+		m.commandPaletteReturnTaskID = 0
+		m.currentView = returnView
+		m.notification = fmt.Sprintf("%s Running %s…", IconInProgress(), item.Action.DisplayLabel())
+		m.notifyUntil = time.Now().Add(hooks.ActionTimeout)
+		cmds := []tea.Cmd{runPluginActionCmd(item, task)}
+		if returnView == ViewDetail && m.detailView == nil && returnTaskID != 0 {
+			cmds = append(cmds, m.loadTask(returnTaskID))
+		}
+		return m, tea.Batch(cmds...)
+	}
+
 	// Check if user selected a task
 	if selectedTask := m.commandPaletteView.SelectedTask(); selectedTask != nil {
 		taskID := selectedTask.ID
@@ -3908,6 +3971,84 @@ func (m *AppModel) updateCommandPalette(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	return m, cmd
+}
+
+// actionFinishedMsg carries the result of a plugin action that ran off the UI
+// loop. It is exempted from the view routers (see isSystemMsg) so it always
+// reaches the main switch to update the notification banner.
+type actionFinishedMsg struct {
+	label  string
+	output string
+	err    error
+}
+
+// openActionPicker gathers plugin actions and opens the modal picker, or shows a
+// notification when no actions are installed.
+func (m *AppModel) openActionPicker() (tea.Model, tea.Cmd) {
+	items := gatherPluginActions()
+	if len(items) == 0 {
+		m.notification = fmt.Sprintf("%s No plugin actions installed (see docs/plugins.md)", IconBlocked())
+		m.notifyUntil = time.Now().Add(4 * time.Second)
+		return m, nil
+	}
+	title := ""
+	if m.selectedTask != nil {
+		title = m.selectedTask.Title
+	}
+	m.actionPickerTask = m.selectedTask
+	m.actionPickerView = NewActionPickerModel(title, items, m.width, m.height)
+	m.currentView = ViewActionPicker
+	return m, m.actionPickerView.Init()
+}
+
+// updateActionPicker drives the picker sub-model and acts on its result.
+func (m *AppModel) updateActionPicker(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if m.actionPickerView == nil {
+		return m, nil
+	}
+	var cmd tea.Cmd
+	m.actionPickerView, cmd = m.actionPickerView.Update(msg)
+
+	if m.actionPickerView.IsCancelled() {
+		m.actionPickerView = nil
+		m.currentView = ViewDetail
+		return m, nil
+	}
+	if sel := m.actionPickerView.Selected(); sel != nil {
+		item := *sel
+		task := m.actionPickerTask
+		m.actionPickerView = nil
+		m.actionPickerTask = nil
+		m.currentView = ViewDetail
+		m.notification = fmt.Sprintf("%s Running %s…", IconInProgress(), item.Action.DisplayLabel())
+		m.notifyUntil = time.Now().Add(hooks.ActionTimeout)
+		return m, runPluginActionCmd(item, task)
+	}
+	return m, cmd
+}
+
+// runPluginActionCmd runs a plugin action off the UI loop and reports the result.
+func runPluginActionCmd(item PluginActionItem, task *db.Task) tea.Cmd {
+	return func() tea.Msg {
+		out, err := hooks.RunAction(context.Background(), item.Plugin, item.Action, task)
+		return actionFinishedMsg{label: item.Action.DisplayLabel(), output: string(out), err: err}
+	}
+}
+
+// actionResultSummary reduces an action's output to a single, length-capped
+// line for the notification banner.
+func actionResultSummary(output string) string {
+	for _, line := range strings.Split(output, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if len(line) > 80 {
+			return line[:79] + "…"
+		}
+		return line
+	}
+	return ""
 }
 
 // projectInferredMsg carries the result of an async claude -p inference for the

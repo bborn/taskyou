@@ -1,0 +1,7 @@
+name: plan-code-review
+version: 0.1.0
+description: >-
+  Plan → code → two parallel reviewers → collect, on one shared branch. The
+  original built-in TaskYou workflow, now shipped as a plugin. Install with
+  `ty plugins add <this-repo>` (or copy this dir into your plugins dir), then
+  run `ty pipeline -d plan-code-review "<goal>"`.

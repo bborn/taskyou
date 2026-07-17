@@ -144,6 +144,10 @@ func New(cfg Config) *Server {
 	mux.HandleFunc("GET /api/routines/{name}/runs/{run}/log", s.handleRoutineRunLog)
 	mux.HandleFunc("POST /api/routines/{name}/run", s.handleRunRoutine)
 
+	// Plugins (community extensions: user-invoked actions)
+	mux.HandleFunc("GET /api/plugins/actions", s.handleListPluginActions)
+	mux.HandleFunc("POST /api/plugins/actions/run", s.handleRunPluginAction)
+
 	// Events
 	mux.HandleFunc("GET /api/events", s.handleListEvents)
 

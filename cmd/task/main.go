@@ -108,6 +108,14 @@ func main() {
 	// any config-dir resolution or Claude spawn. See executor.NormalizeClaudeConfigEnv.
 	executor.NormalizeClaudeConfigEnv()
 
+	// Make installed plugins' workflows resolvable by the pipeline registry. Wired
+	// here (not inside pipeline) so pipeline needn't import hooks. Runs for every ty
+	// subcommand — list, pipeline, completion, and the mcp-server process — so plugin
+	// workflows surface everywhere built-in and on-disk workflows do.
+	pipeline.PluginWorkflowDirs = func() []string {
+		return hooks.PluginWorkflowDirs(hooks.DefaultPluginsDir())
+	}
+
 	var dangerous bool
 
 	rootCmd := &cobra.Command{
@@ -512,6 +520,9 @@ Examples:
 	sessionsCmd.AddCommand(sessionsSuspendCmd)
 
 	rootCmd.AddCommand(sessionsCmd)
+
+	// Plugins subcommand - inspect installed task plugins
+	rootCmd.AddCommand(newPluginsCmd())
 
 	// Alias: claudes -> sessions (for backwards compatibility)
 	claudesCmd := &cobra.Command{
@@ -1170,16 +1181,24 @@ Examples:
 	// Pipeline edit subcommand - point at (or print) a workflow's YAML file
 	pipelineEditCmd := &cobra.Command{
 		Use:   "edit <name>",
-		Short: "Show the YAML file for a workflow kind so you can edit it",
-		Long: `A workflow is a YAML file named after a kind. This prints the file's path (or,
-with --print, its contents) so you can change models, prompts, or steps by hand.
+		Short: "Write a workflow to a YAML file you can edit",
+		Long: `Workflows are configured by editing their YAML file. This writes the named
+workflow to the workflows directory so you can change models, prompts, or steps by
+hand. A file on the search path shadows a plugin-provided workflow of the same name.
 
 Examples:
-  task pipeline edit plan-code-verify      # show the file to edit
-  task pipeline edit plan-code-verify --print   # print the YAML`,
-		Args: cobra.ExactArgs(1),
+  task pipeline edit plan-code-review      # eject a workflow to edit
+  task pipeline edit rpi-go --print        # print the YAML instead of writing it`,
+		Args: cobra.MaximumNArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
-			name := args[0]
+			name := pipeline.DefaultDefinition
+			if len(args) > 0 {
+				name = args[0]
+			}
+			if name == "" {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: specify a workflow name (e.g. `ty pipeline edit plan-code-review`)"))
+				os.Exit(1)
+			}
 			printOnly, _ := cmd.Flags().GetBool("print")
 
 			def, ok := pipeline.Get(name)

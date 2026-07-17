@@ -1,5 +1,12 @@
 {
   "covers": {
+    "Actions": {
+      "api": [
+        "GET /api/plugins/actions",
+        "POST /api/plugins/actions/run"
+      ],
+      "note": "A / detail action picker — list and run plugin actions on a task; same runner as the CLI and command palette"
+    },
     "Archive": {
       "api": [
         "POST /api/tasks/{id}/status"
