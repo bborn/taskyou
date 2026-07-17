@@ -688,8 +688,18 @@ func (db *DB) UpdateTaskStatus(id int64, status string) error {
 	switch status {
 	case StatusProcessing:
 		query += ", started_at = CURRENT_TIMESTAMP"
-	case StatusDone, StatusBlocked, StatusArchived:
+	case StatusDone, StatusArchived:
 		query += ", completed_at = CURRENT_TIMESTAMP"
+	case StatusBlocked:
+		// 'blocked' covers two very different cases: a step waiting in a DAG (a
+		// pipeline step staged behind its dependencies — never started) and a task
+		// that actually ran and is now parked awaiting human review. Only the latter
+		// has completed a turn. Stamping a never-started step makes it look finished
+		// on the board and feeds false "done" signals to the workflow sweeps that key
+		// off completed_at, so only stamp when the task has genuinely started.
+		if oldTask != nil && oldTask.StartedAt != nil {
+			query += ", completed_at = CURRENT_TIMESTAMP"
+		}
 	}
 
 	query += " WHERE id = ?"

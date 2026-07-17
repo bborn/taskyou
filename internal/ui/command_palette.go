@@ -34,8 +34,15 @@ type CommandPaletteModel struct {
 	height        int
 	maxVisible    int
 
+	// Action mode: entered by typing a leading ">". Filters plugin actions
+	// instead of tasks. Task-switching behavior is unchanged when not in it.
+	allActions      []PluginActionItem
+	filteredActions []PluginActionItem
+	actionMode      bool
+
 	// Result
 	selectedTask     *db.Task
+	selectedAction   *PluginActionItem
 	cancelled        bool
 	aiCommandRequest bool   // True when user pressed Enter with text that should go to AI
 	rawInput         string // The raw input text for AI command processing
@@ -44,7 +51,7 @@ type CommandPaletteModel struct {
 // NewCommandPaletteModel creates a new command palette model.
 func NewCommandPaletteModel(database *db.DB, tasks []*db.Task, width, height int) *CommandPaletteModel {
 	searchInput := textinput.New()
-	searchInput.Placeholder = "Search tasks or type a command..."
+	searchInput.Placeholder = "Search tasks — or > for plugin actions"
 	searchInput.Focus()
 	searchInput.CharLimit = 200
 	searchInput.Width = min(70, width-10)
@@ -56,13 +63,51 @@ func NewCommandPaletteModel(database *db.DB, tasks []*db.Task, width, height int
 		db:          database,
 		allTasks:    tasks,
 		projects:    projects,
+		allActions:  gatherPluginActions(),
 		searchInput: searchInput,
 		width:       width,
 		height:      height,
 		maxVisible:  10,
 	}
-	m.filterTasks()
+	m.filter()
 	return m
+}
+
+// filter dispatches to task or action filtering based on the ">" prefix.
+func (m *CommandPaletteModel) filter() {
+	q := strings.TrimSpace(m.searchInput.Value())
+	if strings.HasPrefix(q, ">") {
+		m.actionMode = true
+		m.filterActions(strings.TrimSpace(strings.TrimPrefix(q, ">")))
+		return
+	}
+	m.actionMode = false
+	m.filterTasks()
+}
+
+// filterActions selects plugin actions matching query (by label, plugin, or id).
+func (m *CommandPaletteModel) filterActions(query string) {
+	ql := strings.ToLower(query)
+	m.filteredActions = m.filteredActions[:0]
+	for _, it := range m.allActions {
+		if ql == "" ||
+			strings.Contains(strings.ToLower(it.Action.DisplayLabel()), ql) ||
+			strings.Contains(strings.ToLower(it.Plugin.Name), ql) ||
+			strings.Contains(strings.ToLower(it.Action.ID), ql) {
+			m.filteredActions = append(m.filteredActions, it)
+		}
+	}
+	if m.selectedIndex >= len(m.filteredActions) {
+		m.selectedIndex = max(0, len(m.filteredActions)-1)
+	}
+}
+
+// activeLen returns the length of the list the user is currently navigating.
+func (m *CommandPaletteModel) activeLen() int {
+	if m.actionMode {
+		return len(m.filteredActions)
+	}
+	return len(m.filteredTasks)
 }
 
 // Init initializes the command palette.
@@ -79,6 +124,13 @@ func (m *CommandPaletteModel) Update(msg tea.Msg) (*CommandPaletteModel, tea.Cmd
 			m.cancelled = true
 			return m, nil
 		case "enter":
+			if m.actionMode {
+				if len(m.filteredActions) > 0 && m.selectedIndex < len(m.filteredActions) {
+					sel := m.filteredActions[m.selectedIndex]
+					m.selectedAction = &sel
+				}
+				return m, nil
+			}
 			query := strings.TrimSpace(m.searchInput.Value())
 			if len(m.filteredTasks) > 0 && m.selectedIndex < len(m.filteredTasks) {
 				// If there are matching tasks and we have a selection, select that task
@@ -92,13 +144,13 @@ func (m *CommandPaletteModel) Update(msg tea.Msg) (*CommandPaletteModel, tea.Cmd
 		case "up", "ctrl+p", "ctrl+k":
 			if m.selectedIndex > 0 {
 				m.selectedIndex--
-			} else if len(m.filteredTasks) > 0 {
+			} else if m.activeLen() > 0 {
 				// Wrap to bottom
-				m.selectedIndex = len(m.filteredTasks) - 1
+				m.selectedIndex = m.activeLen() - 1
 			}
 			return m, nil
 		case "down", "ctrl+n", "ctrl+j":
-			if m.selectedIndex < len(m.filteredTasks)-1 {
+			if m.selectedIndex < m.activeLen()-1 {
 				m.selectedIndex++
 			} else {
 				// Wrap to top
@@ -113,8 +165,8 @@ func (m *CommandPaletteModel) Update(msg tea.Msg) (*CommandPaletteModel, tea.Cmd
 			return m, nil
 		case "pgdown":
 			m.selectedIndex += m.maxVisible
-			if m.selectedIndex >= len(m.filteredTasks) {
-				m.selectedIndex = len(m.filteredTasks) - 1
+			if m.selectedIndex >= m.activeLen() {
+				m.selectedIndex = m.activeLen() - 1
 			}
 			if m.selectedIndex < 0 {
 				m.selectedIndex = 0
@@ -125,7 +177,7 @@ func (m *CommandPaletteModel) Update(msg tea.Msg) (*CommandPaletteModel, tea.Cmd
 		// Update search input
 		var cmd tea.Cmd
 		m.searchInput, cmd = m.searchInput.Update(msg)
-		m.filterTasks()
+		m.filter()
 		return m, cmd
 	}
 
@@ -595,9 +647,11 @@ func (m *CommandPaletteModel) View() string {
 	modalWidth := min(80, m.width-4)
 	query := strings.TrimSpace(m.searchInput.Value())
 
-	// Header - changes based on whether we have matching tasks
+	// Header - changes based on mode / whether we have matching tasks
 	headerText := "Go to Task"
-	if len(m.filteredTasks) == 0 && query != "" {
+	if m.actionMode {
+		headerText = "Run Plugin Action"
+	} else if len(m.filteredTasks) == 0 && query != "" {
 		headerText = "AI Command"
 	}
 	header := lipgloss.NewStyle().
@@ -614,9 +668,11 @@ func (m *CommandPaletteModel) View() string {
 		Width(modalWidth - 6)
 	searchBox := inputStyle.Render(m.searchInput.View())
 
-	// Task list
+	// Task list (or plugin-action list in action mode)
 	var taskList strings.Builder
-	if len(m.filteredTasks) == 0 {
+	if m.actionMode {
+		m.renderActionList(&taskList, modalWidth-6)
+	} else if len(m.filteredTasks) == 0 {
 		emptyStyle := lipgloss.NewStyle().
 			Foreground(ColorMuted).
 			Italic(true).
@@ -684,9 +740,12 @@ func (m *CommandPaletteModel) View() string {
 		Foreground(ColorMuted).
 		MarginTop(1)
 	var helpText string
-	if len(m.filteredTasks) == 0 && query != "" {
+	switch {
+	case m.actionMode:
+		helpText = "Enter: run  Esc: cancel  " + IconArrowUp() + "/" + IconArrowDown() + ": navigate"
+	case len(m.filteredTasks) == 0 && query != "":
 		helpText = "Enter: run command  Esc: cancel"
-	} else {
+	default:
 		helpText = "Enter: select  Esc: cancel  " + IconArrowUp() + "/" + IconArrowDown() + ": navigate"
 	}
 	help := helpStyle.Render(helpText)
@@ -715,6 +774,41 @@ func (m *CommandPaletteModel) View() string {
 		Height(m.height).
 		Align(lipgloss.Center, lipgloss.Center).
 		Render(modalContent)
+}
+
+// renderActionList renders the plugin-action list (action mode).
+func (m *CommandPaletteModel) renderActionList(b *strings.Builder, width int) {
+	if len(m.filteredActions) == 0 {
+		b.WriteString(lipgloss.NewStyle().
+			Foreground(ColorMuted).
+			Italic(true).
+			Padding(1, 0).
+			Render("No matching plugin actions. See docs/plugins.md."))
+		return
+	}
+	for i, it := range m.filteredActions {
+		b.WriteString(m.renderActionRow(it, i == m.selectedIndex, width))
+		if i < len(m.filteredActions)-1 {
+			b.WriteString("\n")
+		}
+	}
+}
+
+// renderActionRow renders a single "label · plugin" action row.
+func (m *CommandPaletteModel) renderActionRow(it PluginActionItem, selected bool, width int) string {
+	var line strings.Builder
+	if selected {
+		line.WriteString(lipgloss.NewStyle().Foreground(ColorPrimary).Bold(true).Render("> "))
+	} else {
+		line.WriteString("  ")
+	}
+	labelStyle := lipgloss.NewStyle()
+	if selected {
+		labelStyle = labelStyle.Bold(true).Foreground(ColorPrimary)
+	}
+	line.WriteString(labelStyle.Render(it.Action.DisplayLabel()))
+	line.WriteString(lipgloss.NewStyle().Foreground(ColorMuted).Render("  · " + it.Plugin.Name))
+	return line.String()
 }
 
 // renderTaskItem renders a single task in the list.
@@ -779,6 +873,11 @@ func (m *CommandPaletteModel) renderTaskItem(task *db.Task, isSelected bool, wid
 // SelectedTask returns the selected task, or nil if cancelled.
 func (m *CommandPaletteModel) SelectedTask() *db.Task {
 	return m.selectedTask
+}
+
+// SelectedAction returns the chosen plugin action (action mode), or nil.
+func (m *CommandPaletteModel) SelectedAction() *PluginActionItem {
+	return m.selectedAction
 }
 
 // IsCancelled returns true if the user cancelled the palette.

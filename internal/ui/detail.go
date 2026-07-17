@@ -143,18 +143,6 @@ type DetailModel struct {
 	positionInColumn int
 	totalInColumn    int
 
-	// Pinned quick-nav: a compact pill bar at the top of the detail view for
-	// hopping between the tasks you're currently focused on (your pinned tasks,
-	// honouring the board's active filter). pinnedNavIndex is the position of the
-	// currently-viewed task within pinnedNav, or -1 when the current task isn't
-	// pinned. Populated by AppModel via SetPinnedNav whenever a task is opened or
-	// the task set changes.
-	pinnedNav      []PinnedNavItem
-	pinnedNavIndex int
-	// pinnedNavHidden lets the user collapse the pinned quick-nav row entirely
-	// (toggled with 'T'); persisted as a preference across tasks/sessions.
-	pinnedNavHidden bool
-
 	// helpExpanded controls the footer help row: collapsed shows only the
 	// high-frequency actions plus a '?' affordance; expanded reveals the rest.
 	helpExpanded bool
@@ -646,11 +634,6 @@ func NewDetailModel(t *db.Task, database *db.DB, exec *executor.Executor, width,
 		m.shellPaneHidden = true
 	}
 
-	// Load pinned quick-nav visibility preference from settings
-	if hiddenStr, err := database.GetSetting(config.SettingPinnedNavHidden); err == nil && hiddenStr == "true" {
-		m.pinnedNavHidden = true
-	}
-
 	// Load logs
 	logs, _ := database.GetTaskLogs(t.ID, 100)
 	m.logs = logs
@@ -838,14 +821,9 @@ func (m *DetailModel) spinnerTick() tea.Cmd {
 }
 
 // headerHeight is the vertical space reserved for the box chrome around the
-// viewport. The pinned quick-nav bar (rendered at the bottom of the box) adds
-// one line and must be accounted for here or the viewport would overflow.
+// viewport.
 func (m *DetailModel) headerHeight() int {
-	h := 6
-	if m.showPinnedNav() {
-		h++
-	}
-	return h
+	return 6
 }
 
 func (m *DetailModel) initViewport() {
@@ -868,7 +846,7 @@ func (m *DetailModel) SetSize(width, height int) {
 
 // reflowViewport recomputes the viewport dimensions from the current width,
 // height, and header layout. Called on resize and whenever something that
-// changes the header height (like the pinned nav bar appearing) is updated.
+// changes the header height is updated.
 func (m *DetailModel) reflowViewport() {
 	if !m.ready {
 		return
@@ -877,6 +855,13 @@ func (m *DetailModel) reflowViewport() {
 	m.viewport.Width = m.width - 4
 	m.viewport.Height = m.height - m.headerHeight() - footerHeight
 	m.setViewportContent()
+}
+
+// ToggleHelpExpanded flips the footer help row between the collapsed (primary
+// actions + '?') and expanded (all actions) states.
+func (m *DetailModel) ToggleHelpExpanded() {
+	m.helpExpanded = !m.helpExpanded
+	m.cachedViewOK = false
 }
 
 // Update handles messages.
@@ -2599,9 +2584,8 @@ func (m *DetailModel) View() string {
 
 	header := m.renderHeader()
 	help := m.renderHelp()
-	nav := m.renderPinnedNav()
 
-	sig := m.viewSignature(header, help, nav)
+	sig := m.viewSignature(header, help)
 	if m.cachedViewOK && m.cachedViewSig == sig {
 		return m.cachedView
 	}
@@ -2654,13 +2638,6 @@ func (m *DetailModel) View() string {
 		boxContent = lipgloss.JoinVertical(lipgloss.Left, header, content, scrollIndicator)
 	}
 
-	// Pinned quick-nav bar sits at the bottom of the box, just above the help
-	// footer, so the top stays clean. headerHeight() already reserves a line for
-	// it, so the viewport shrinks to make room.
-	if nav != "" {
-		boxContent = lipgloss.JoinVertical(lipgloss.Left, boxContent, nav)
-	}
-
 	renderedBox := box.Render(boxContent)
 
 	// When shell pane is hidden, show a collapsed indicator on the right
@@ -2705,7 +2682,7 @@ func (m *DetailModel) View() string {
 // colours) without enumerating each one. The remaining inputs are the View-level
 // state the header/help don't cover: the dangerous-mode banner, the bordered box,
 // and the viewport's content/scroll geometry.
-func (m *DetailModel) viewSignature(header, help, nav string) uint64 {
+func (m *DetailModel) viewSignature(header, help string) uint64 {
 	h := newSigHasher()
 	h.u64(StyleGeneration()) // theme / project colour changes
 	h.int(m.width)
@@ -2724,7 +2701,6 @@ func (m *DetailModel) viewSignature(header, help, nav string) uint64 {
 	h.int(m.viewport.VisibleLineCount())
 	h.str(header)
 	h.str(help)
-	h.str(nav) // pinned quick-nav bar (rendered at the box bottom)
 	return h.h
 }
 
@@ -3288,11 +3264,6 @@ func (m *DetailModel) renderHelp() string {
 		{IconArrowUp() + "/" + IconArrowDown(), "prev/next task", !hasNavigation, true},
 	}
 
-	// Pinned quick-nav hint (only when the bar is shown)
-	if m.showPinnedNav() {
-		keys = append(keys, helpKey{"[/]", "pinned", false, true})
-	}
-
 	// Show scroll hint when content is scrollable
 	if m.viewport.TotalLineCount() > m.viewport.VisibleLineCount() {
 		keys = append(keys, helpKey{"j/k/wheel", "scroll", false, false})
@@ -3323,15 +3294,6 @@ func (m *DetailModel) renderHelp() string {
 			pinDesc = "unpin task"
 		}
 		keys = append(keys, helpKey{"t", pinDesc, false, false})
-	}
-
-	// Toggle the pinned quick-nav row (only when there are pinned tasks to show).
-	if m.pinnedNavAvailable() {
-		toggleDesc := "hide pinned"
-		if m.pinnedNavHidden {
-			toggleDesc = "show pinned"
-		}
-		keys = append(keys, helpKey{"T", toggleDesc, false, false})
 	}
 
 	// Show dangerous mode toggle when task is processing or blocked

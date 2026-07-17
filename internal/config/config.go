@@ -21,7 +21,6 @@ const (
 	SettingDetailPaneHeight      = "detail_pane_height"
 	SettingShellPaneWidth        = "shell_pane_width"
 	SettingShellPaneHidden       = "shell_pane_hidden"
-	SettingPinnedNavHidden       = "pinned_nav_hidden"
 	SettingIdleSuspendTimeout    = "idle_suspend_timeout"
 	SettingServerURL             = "server_url"
 	SettingWorktreeCleanupMaxAge = "worktree_cleanup_max_age"

@@ -208,7 +208,9 @@ func TestWorktreeWriteGuardBash(t *testing.T) {
 	}{
 		{"read-only grep allowed", "grep -r foo .", ""},
 		{"read-only cat allowed", "cat /etc/hosts", ""},
-		{"redirect to /tmp asks", "echo data > /tmp/scratch", "ask"},
+		{"redirect to /tmp allowed", "echo data > /tmp/scratch", ""},
+		{"redirect to /private/tmp allowed", "echo data > /private/tmp/scratch", ""},
+		{"redirect to /var/tmp allowed", "echo data > /var/tmp/scratch", ""},
 		{"redirect to /dev/null allowed", "ls -la > /dev/null", ""},
 		{"stderr to /dev/null allowed", "rails test 2>/dev/null", ""},
 		{"redirect inside worktree allowed", "echo hi > out.txt", ""},
@@ -231,6 +233,34 @@ func TestWorktreeWriteGuardBash(t *testing.T) {
 			}
 			if gotDecision != c.want {
 				t.Errorf("command %q: decision = %q, want %q", c.command, gotDecision, c.want)
+			}
+		})
+	}
+}
+
+// System temp directories are shared, ephemeral scratch space — writing there
+// can't corrupt the main checkout or a sibling worktree (the boundary the guard
+// exists to protect), and agents legitimately stage temp files there. So writes
+// under /tmp, /private/tmp, /var/tmp, and the OS temp dir are always allowed,
+// like /dev/null — never a permission prompt.
+func TestWorktreeWriteGuardAllowsTempDirs(t *testing.T) {
+	tmpFile := filepath.Join(os.TempDir(), "review_a.md")
+	cases := []struct {
+		name string
+		in   WorktreeGuardInput
+	}{
+		{"Write to /tmp", WorktreeGuardInput{ToolName: "Write", Cwd: wt,
+			ToolInput: toolInput(t, map[string]any{"file_path": "/tmp/review_a.md"})}},
+		{"Write to os.TempDir", WorktreeGuardInput{ToolName: "Write", Cwd: wt,
+			ToolInput: toolInput(t, map[string]any{"file_path": tmpFile})}},
+		{"Bash redirect to /tmp in bypass mode", WorktreeGuardInput{ToolName: "Bash", Cwd: wt,
+			PermissionMode: "bypassPermissions",
+			ToolInput:      toolInput(t, map[string]any{"command": "echo x > /tmp/scratch"})}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := EvaluateWorktreeWriteGuard(wt, nil, c.in); got != nil {
+				t.Errorf("temp-dir write should be allowed, got %q (%s)", got.Decision, got.Reason)
 			}
 		})
 	}

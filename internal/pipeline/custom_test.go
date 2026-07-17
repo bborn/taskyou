@@ -209,6 +209,26 @@ func TestComposeDerivesHandoffFromDAG(t *testing.T) {
 	}
 }
 
+func TestVerbatimStepUsesInstructionAsIs(t *testing.T) {
+	const y = `
+name: verb
+steps:
+  - name: Solo
+    verbatim: true
+    prompt: |-
+      Do exactly this for {{goal}}.
+`
+	def, err := ParseDefinition([]byte(y))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A verbatim step's body is its prompt as-is — no DAG-derived git handoff added.
+	got := effectiveInstruction(def, "Solo")
+	if got != "Do exactly this for {{goal}}." {
+		t.Errorf("verbatim instruction = %q, want the prompt as-is", got)
+	}
+}
+
 func TestCreateHonorsCustomWorkflow(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("TY_WORKFLOWS_DIR", dir)

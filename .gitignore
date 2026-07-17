@@ -60,3 +60,6 @@ ty-chrome.zip
 
 # Riptide artifacts (cloud-synced)
 .humanlayer/tasks/
+
+# Plugin user config (copied from *.example.env)
+examples/plugins/**/config.env

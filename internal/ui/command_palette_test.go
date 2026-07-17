@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/bborn/workflow/internal/db"
+	"github.com/bborn/workflow/internal/hooks"
 )
 
 func TestFuzzyMatch(t *testing.T) {
@@ -153,6 +154,55 @@ func TestCommandPaletteFiltering(t *testing.T) {
 				t.Errorf("query %q: got %d results, want %d", tt.query, len(m.filteredTasks), tt.expected)
 			}
 		})
+	}
+}
+
+func TestCommandPalette_ActionModePrefixAndFilter(t *testing.T) {
+	actions := []PluginActionItem{
+		{Plugin: hooks.Plugin{Name: "notify"}, Action: hooks.Action{ID: "test", Label: "Send test"}},
+		{Plugin: hooks.Plugin{Name: "sync"}, Action: hooks.Action{ID: "push", Label: "Push to tracker"}},
+	}
+
+	cases := []struct {
+		name       string
+		query      string
+		wantAction bool
+		wantCount  int
+	}{
+		{"no prefix stays task mode", "notify", false, 0},
+		{"bare prefix lists all actions", ">", true, 2},
+		{"prefix filters by label", ">push", true, 1},
+		{"prefix filters by plugin", ">notify", true, 1},
+		{"prefix no match", ">zzz", true, 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := &CommandPaletteModel{allActions: actions}
+			m.searchInput.SetValue(tc.query)
+			m.filter()
+			if m.actionMode != tc.wantAction {
+				t.Fatalf("actionMode = %v, want %v", m.actionMode, tc.wantAction)
+			}
+			if tc.wantAction && len(m.filteredActions) != tc.wantCount {
+				t.Errorf("filteredActions = %d, want %d", len(m.filteredActions), tc.wantCount)
+			}
+		})
+	}
+}
+
+func TestCommandPalette_ActionModeEnterSelects(t *testing.T) {
+	m := &CommandPaletteModel{allActions: []PluginActionItem{
+		{Plugin: hooks.Plugin{Name: "notify"}, Action: hooks.Action{ID: "test", Label: "Send test"}},
+	}}
+	m.searchInput.SetValue(">")
+	m.filter()
+	m, _ = m.Update(keyFor("enter"))
+	if m.SelectedAction() == nil || m.SelectedAction().Action.ID != "test" {
+		t.Fatalf("SelectedAction = %v, want action test", m.SelectedAction())
+	}
+	// Task selection must remain untouched in action mode.
+	if m.SelectedTask() != nil {
+		t.Error("SelectedTask should be nil in action mode")
 	}
 }
 

@@ -1715,6 +1715,14 @@ func (e *Executor) processNextTask(ctx context.Context) {
 	}
 
 	for _, task := range tasks {
+		// DAG invariant, last line of defense: never start a task that still has
+		// an incomplete blocker. A queued task should already be ready, but a race
+		// or a stray flip can mis-queue a blocked step; admitQueuedTask reverts any
+		// such task to 'blocked' and logs it, instead of running work out of order.
+		if !e.admitQueuedTask(task) {
+			continue
+		}
+
 		// Atomically check-and-set to prevent race where two ticks
 		// both see the task as not-running and spawn duplicate goroutines
 		e.mu.Lock()
@@ -1727,6 +1735,36 @@ func (e *Executor) processNextTask(ctx context.Context) {
 
 		go e.executeTask(ctx, task)
 	}
+}
+
+// admitQueuedTask enforces the workflow DAG invariant at the point of spawn: a
+// task may only run once all its blockers have completed. GetQueuedTasks should
+// only ever return genuinely-ready tasks, but this is the last line of defense —
+// if a race or a stray status flip left a step 'queued' while a blocker is still
+// incomplete, running it would advance the DAG past work that never happened
+// (exactly the premature-spawn we saw a parked pipeline hit). Rather than run it,
+// revert it to 'blocked' and log loudly, so the safety-net sweep re-queues it in
+// order once the blocker really finishes — and so the anomaly is captured if it
+// recurs. Returns true only when the task is clear to run.
+func (e *Executor) admitQueuedTask(task *db.Task) bool {
+	open, err := e.db.GetOpenBlockerCount(task.ID)
+	if err != nil {
+		// Fail safe: if we can't confirm the task is ready, don't run it.
+		e.logger.Error("Blocker check failed; refusing to run task", "id", task.ID, "error", err)
+		return false
+	}
+	if open == 0 {
+		return true
+	}
+
+	e.logger.Warn("Refusing to run queued task with open blockers — reverting to blocked",
+		"id", task.ID, "title", task.Title, "open_blockers", open)
+	e.logLine(task.ID, "system", fmt.Sprintf(
+		"Refused to start: %d blocker(s) not yet complete. Reverted to blocked; will re-queue when dependencies finish.", open))
+	if err := e.updateStatus(task.ID, db.StatusBlocked); err != nil {
+		e.logger.Error("Failed to revert mis-queued task to blocked", "id", task.ID, "error", err)
+	}
+	return false
 }
 
 // ExecuteNow runs a task immediately (blocking).
@@ -2156,13 +2194,17 @@ func (e *Executor) buildPrompt(task *db.Task, attachmentPaths []string) string {
 func (e *Executor) buildUniversalGuidance(task *db.Task) string {
 	var b strings.Builder
 
-	b.WriteString(`Project context:
+	b.WriteString(`Your taskyou_* tools (via the "taskyou" MCP server) are connected to this session, but your harness may DEFER them behind tool search instead of loading them upfront. If you do not see a taskyou_* tool in your active toolset, it is deferred, NOT missing — load it before use (e.g. ToolSearch "select:taskyou_complete") and then call it. Never conclude "the taskyou server isn't connected" or skip a required taskyou_* call without first trying to load the tool; the server is always present for a task you are executing.`)
+
+	b.WriteString(`
+
+Project context:
 - Before exploring or starting work, call taskyou_get_project_context first via MCP. If it returns context, use it and skip exploration. If it is empty, explore once and save a summary via taskyou_set_project_context so future tasks in this project can reuse it.`)
 
 	b.WriteString(`
 
 Completion signaling (REQUIRED — nothing else watches for completion):
-- When your work is finished, call taskyou_complete with a one-paragraph summary (PR link, files touched, follow-ups). Do NOT just print a summary and stop — without this call the task stalls forever and a human has to close it by hand.
+- When your work is finished, call taskyou_complete with a one-paragraph summary (PR link, files touched, follow-ups). Do NOT just print a summary and stop — without this call the task stalls forever and a human has to close it by hand. If taskyou_complete isn't in your active toolset, it is deferred behind tool search (see above) — load it and call it; do not stop with an apology that the tool is unavailable.
   - If you opened a PR: the task moves to 'blocked' and waits for a human to review and merge it. It is promoted to 'done' automatically once the PR is merged or closed — so calling taskyou_complete does NOT mean the work shipped, you must NOT wait for the merge yourself, and you must NOT call taskyou_complete more than once.
   - If the task produced no PR (e.g. a quick config change or moving a file): it moves straight to 'done'.
 - When you need clarification, call taskyou_needs_input with the question. This moves the task to 'blocked' so a human is notified. Do not prompt in the terminal — the task system can't see TTY prompts.`)

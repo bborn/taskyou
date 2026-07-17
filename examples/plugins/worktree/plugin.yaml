@@ -1,0 +1,14 @@
+# Task-scoped worktree helpers, invoked on demand:
+#   - detail view: press A, pick one
+#   - palette: type ">" then search
+#   - CLI: ty plugins run worktree diff <task-id>
+name: worktree
+version: 0.1.0
+description: Inspect a task's worktree — show its diff, or run its tests.
+actions:
+  - id: diff
+    label: Show worktree diff
+    command: diff.sh
+  - id: test
+    label: Run tests in worktree
+    command: test.sh

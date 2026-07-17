@@ -73,6 +73,17 @@ func taskByStep(res *Result, step string) *db.Task {
 	return nil
 }
 
+func TestNoDefaultWorkflow(t *testing.T) {
+	// There is no built-in default: an empty definition name resolves to nothing.
+	if _, ok := Get(""); ok {
+		t.Error("Get(\"\") resolved a definition; want none (no built-in default)")
+	}
+	database := testDB(t)
+	if _, err := Create(database, Options{Goal: "x", Project: "test"}); err == nil {
+		t.Error("Create with no definition should error (no default workflow)")
+	}
+}
+
 func TestCreateBuildsDAG(t *testing.T) {
 	installWorkflow(t, "pcr", pcrYAML)
 	database := testDB(t)

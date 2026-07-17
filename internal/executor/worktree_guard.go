@@ -20,7 +20,12 @@ import (
 //   - Reads are always allowed — legitimate cross-tree access (reference code in
 //     main, prod over ssh, shared configs) is overwhelmingly reads.
 //   - ANY write whose destination resolves outside the worktree asks the user
-//     (main repo, sibling worktrees, $HOME, /tmp — all the same rule).
+//     (main repo, sibling worktrees, $HOME — all the same rule), EXCEPT the system
+//     temp dirs (/tmp, /private/tmp, /var/tmp, $TMPDIR), which are always allowed.
+//     Temp dirs are shared, ephemeral scratch space; a write there can't corrupt
+//     the main checkout or a sibling worktree (the boundary this guard protects),
+//     and agents legitimately stage scratch files there — prompting on every /tmp
+//     write is pure friction that stalls otherwise-fine work.
 //   - In bypassPermissions mode (--dangerously-skip-permissions) there is no human
 //     to answer, so the guard fails closed and denies instead of asking.
 //   - Only taskyou-managed worktrees are guarded. "Shared dir" projects opted out
@@ -130,7 +135,7 @@ func externalWriteTargets(in WorktreeGuardInput, root string, allowExternal []st
 	var escapes []string
 	for _, p := range raw {
 		abs := cleanPath(p, in.Cwd)
-		if abs == "" || isIgnorableSink(abs) {
+		if abs == "" || isIgnorableSink(abs) || isAllowedTempDir(abs) {
 			continue
 		}
 		if pathWithin(root, abs) || allowlisted(abs, allowExternal) {
@@ -311,6 +316,31 @@ func allowlisted(abs string, allow []string) bool {
 	}
 	return false
 }
+
+// isAllowedTempDir reports whether abs is inside a system temp directory. Writes
+// there are always allowed: temp dirs are shared, ephemeral scratch and can't
+// corrupt the main checkout or a sibling worktree, which is all this guard exists
+// to protect. Symlinks are resolved (macOS /tmp → /private/tmp) so both spellings
+// match.
+func isAllowedTempDir(abs string) bool {
+	for _, root := range tempWriteRoots {
+		if pathWithin(root, abs) {
+			return true
+		}
+	}
+	return false
+}
+
+// tempWriteRoots is the set of system temp directories writes are exempted into.
+// os.TempDir() covers $TMPDIR (macOS per-user /var/folders/.../T); the fixed roots
+// cover the conventional locations agents reach for directly.
+var tempWriteRoots = func() []string {
+	roots := []string{"/tmp", "/private/tmp", "/var/tmp"}
+	if td := strings.TrimSpace(os.TempDir()); td != "" {
+		roots = append(roots, td)
+	}
+	return roots
+}()
 
 // isIgnorableSink reports whether abs is a non-file write sink (e.g. /dev/null)
 // that should never count as escaping the worktree.

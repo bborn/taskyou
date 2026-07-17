@@ -51,3 +51,47 @@ ty_qa_require_built() {
     exit 1
   fi
 }
+
+# --- Daemon freeze (for stable, presentation-clean screenshots) --------------
+# Launching the ty TUI always ensures a daemon (ensureDaemonRunning in the TUI
+# path). That daemon immediately picks up `queued` tasks and executes them —
+# spawning worktrees and, in a throwaway env with no working agent, demoting them
+# to `blocked`. That churn ruins seeded board/detail screenshots.
+#
+# `ty_qa_freeze_daemon` parks a harmless decoy process in the daemon pidfile
+# (keyed to the DB dir, see getPidFilePath). ensureDaemonRunning sees a live pid
+# and becomes a no-op, so no real executor ever starts and seeded `queued` tasks
+# sit still in the In Progress column exactly as authored. Idempotent; the decoy
+# is an orphaned `sleep` that outlives the short-lived shoot processes and is
+# reaped by ty_qa_unfreeze_daemon / ty-qa-down.sh.
+TY_QA_DAEMON_PID_FILE="$TY_QA_ROOT/daemon.pid"
+TY_QA_DECOY_PID_FILE="$TY_QA_ROOT/.qa-decoy-daemon.pid"
+
+ty_qa_freeze_daemon() {
+  # Already frozen with a live decoy? Nothing to do.
+  if [[ -f "$TY_QA_DECOY_PID_FILE" ]]; then
+    local d; d="$(cat "$TY_QA_DECOY_PID_FILE" 2>/dev/null || true)"
+    if [[ -n "${d:-}" ]] && kill -0 "$d" 2>/dev/null; then return 0; fi
+  fi
+  # Stop any real daemon bound to this instance before parking the decoy.
+  if [[ -f "$TY_QA_DAEMON_PID_FILE" ]]; then
+    local p; p="$(cat "$TY_QA_DAEMON_PID_FILE" 2>/dev/null || true)"
+    [[ -n "${p:-}" ]] && kill "$p" 2>/dev/null || true
+  fi
+  mkdir -p "$TY_QA_ROOT"
+  sleep 100000 &
+  local decoy=$!
+  disown "$decoy" 2>/dev/null || true
+  echo "$decoy" > "$TY_QA_DAEMON_PID_FILE"
+  echo "$decoy" > "$TY_QA_DECOY_PID_FILE"
+  echo "ty-qa: daemon frozen (decoy pid $decoy) — queued tasks will not execute"
+}
+
+ty_qa_unfreeze_daemon() {
+  if [[ -f "$TY_QA_DECOY_PID_FILE" ]]; then
+    local d; d="$(cat "$TY_QA_DECOY_PID_FILE" 2>/dev/null || true)"
+    [[ -n "${d:-}" ]] && kill "$d" 2>/dev/null || true
+    rm -f "$TY_QA_DECOY_PID_FILE" "$TY_QA_DAEMON_PID_FILE"
+    echo "ty-qa: daemon unfrozen"
+  fi
+}

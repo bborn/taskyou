@@ -193,8 +193,21 @@ button.primary:disabled kbd { background: rgba(15, 23, 42, 0.06); color: #94a3b8
 /* --- Terminal ------------------------------------------------------------ */
 
 .executor { flex: 1; display: flex; flex-direction: column; min-height: 220px; }
+/* Collapsed: shrink to the header, hide the live view + hint. State stays visible. */
+.executor.collapsed { flex: 0 0 auto; min-height: 0; }
+.executor.collapsed .term-wrap,
+.executor.collapsed .term-hint { display: none; }
 
-.term-head { margin-bottom: 8px; }
+.term-head { margin-bottom: 8px; cursor: pointer; }
+.term-head:has(.term-toggle) h2 { cursor: pointer; }
+.executor.collapsed .term-head { margin-bottom: 0; }
+
+.term-toggle {
+  background: none; border: 0; padding: 0 2px; margin: 0;
+  color: var(--muted); font-size: 12px; line-height: 1; cursor: pointer;
+  transition: transform 0.12s ease;
+}
+.executor.collapsed .term-toggle { transform: rotate(-90deg); }
 
 .term-state { font-size: 10px; white-space: nowrap; }
 .term-state.live { color: #22c55e; }
