@@ -93,7 +93,7 @@ The same UI is also served in your browser at `http://localhost:8484` whenever `
 
 A **workflow** turns a single goal into a small DAG of step tasks that run on one shared git branch, each routed to its own executor and model, advancing automatically. Steps are sequential where they depend on each other and **parallel** where they don't.
 
-There are **no built-in workflows** — a workflow is a YAML file you write. For example, a `plan-code-review.yaml`:
+Workflows come from a few places: a couple ship built into the `ty` binary (e.g. `rpi`), some you install from a plugin, and the rest are YAML files you write. For example, a `plan-code-review` workflow — shipped as an example plugin under `examples/plugins/`:
 
 ```
 Plan ──▶ Code ──▶ Review A ─┐
@@ -143,20 +143,29 @@ Two steps with the same `deps` run in parallel; a step depending on several join
 # Author a workflow from a plain-English description (LLM → YAML you can edit)
 ty pipeline new "spike three approaches, pick the best, build it, review and test in parallel"
 
-# Eject the built-in to a YAML file to tweak its models / prompts / steps
-ty pipeline edit                   # writes ~/.config/task/workflows/plan-code-review.yaml
+# Eject any workflow — built-in, plugin, or installed — to a local YAML file to tweak its models / prompts / steps
+ty pipeline edit rpi               # writes ~/.config/task/workflows/rpi.yaml (shadows the built-in)
 ```
 
 Custom workflows appear in `ty pipeline --list`, the `--definition` flag, and the TUI new-task selector automatically. Configuration lives entirely in these files — edit them by hand any time.
 
-### Kinds: types and workflows are one thing
+### Kinds: a task type and a workflow are the same thing
 
-A **kind** is what you pick when you make a task. Kinds live in **one store — the DB** (they're the task types: `code`, `writing`, `thinking`, plus any you add). A kind **runs as a workflow purely by convention: when a same-named YAML file adds steps.** No file → a single task using the kind's instructions. There are no built-in workflows and no second store.
+A **kind** is what you pick when you make a task — `code`, `writing`, `thinking`, `plan-code-review`, `rpi`, or any you add. There is no separate "workflow" you choose instead: the same pick runs as a **single task** when nothing defines steps for that name, and as a **multi-step workflow** when a definition with `steps` exists for it.
 
 ```
-pick "code"          → single task   (DB kind, no file)
-pick "plan-code-review" → workflow    (DB kind + plan-code-review.yaml adds steps)
+pick "code"             → single task   (a kind with instructions, no steps)
+pick "plan-code-review" → workflow      (a kind whose definition adds steps)
 ```
+
+Picking a kind resolves by name, and two sources answer to that name — a **definition** wins over a **DB task type**:
+
+| Source | Where it lives | What it gives the kind |
+|--------|----------------|------------------------|
+| **Definition** | built-in (compiled into the `ty` binary, e.g. `rpi`) → plugin `workflows/` → global `~/.config/task/workflows/` → project `.taskyou/workflows/` | `steps` (→ workflow), or just instructions (→ single task) |
+| **DB task type** | the tasks database (`code`, `writing`, `thinking`, plus any you add) | instructions (→ single task) |
+
+Definitions are layered lowest-to-highest and a later layer shadows an earlier one by name, so your own `~/.config/task/workflows/rpi.yaml` overrides the built-in `rpi`, and a project file overrides everything. `ty pipeline --list` shows them all, labelled **built-in** or **custom**. Adding `steps` is the only thing that makes a kind a workflow: drop a `code.yaml` with steps beside the `code` type and that same pick upgrades from a single task to a DAG.
 
 A workflow's steps can **run other kinds** by name — and if a referenced kind is itself a workflow (has a file), its steps are inlined at build time, so you compose big flows from small ones:
 
