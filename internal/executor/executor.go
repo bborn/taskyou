@@ -1660,6 +1660,14 @@ func (e *Executor) processNextTask(ctx context.Context) {
 	}
 
 	for _, task := range tasks {
+		// DAG invariant, last line of defense: never start a task that still has
+		// an incomplete blocker. A queued task should already be ready, but a race
+		// or a stray flip can mis-queue a blocked step; admitQueuedTask reverts any
+		// such task to 'blocked' and logs it, instead of running work out of order.
+		if !e.admitQueuedTask(task) {
+			continue
+		}
+
 		// Atomically check-and-set to prevent race where two ticks
 		// both see the task as not-running and spawn duplicate goroutines
 		e.mu.Lock()
@@ -1672,6 +1680,36 @@ func (e *Executor) processNextTask(ctx context.Context) {
 
 		go e.executeTask(ctx, task)
 	}
+}
+
+// admitQueuedTask enforces the workflow DAG invariant at the point of spawn: a
+// task may only run once all its blockers have completed. GetQueuedTasks should
+// only ever return genuinely-ready tasks, but this is the last line of defense —
+// if a race or a stray status flip left a step 'queued' while a blocker is still
+// incomplete, running it would advance the DAG past work that never happened
+// (exactly the premature-spawn we saw a parked pipeline hit). Rather than run it,
+// revert it to 'blocked' and log loudly, so the safety-net sweep re-queues it in
+// order once the blocker really finishes — and so the anomaly is captured if it
+// recurs. Returns true only when the task is clear to run.
+func (e *Executor) admitQueuedTask(task *db.Task) bool {
+	open, err := e.db.GetOpenBlockerCount(task.ID)
+	if err != nil {
+		// Fail safe: if we can't confirm the task is ready, don't run it.
+		e.logger.Error("Blocker check failed; refusing to run task", "id", task.ID, "error", err)
+		return false
+	}
+	if open == 0 {
+		return true
+	}
+
+	e.logger.Warn("Refusing to run queued task with open blockers — reverting to blocked",
+		"id", task.ID, "title", task.Title, "open_blockers", open)
+	e.logLine(task.ID, "system", fmt.Sprintf(
+		"Refused to start: %d blocker(s) not yet complete. Reverted to blocked; will re-queue when dependencies finish.", open))
+	if err := e.updateStatus(task.ID, db.StatusBlocked); err != nil {
+		e.logger.Error("Failed to revert mis-queued task to blocked", "id", task.ID, "error", err)
+	}
+	return false
 }
 
 // ExecuteNow runs a task immediately (blocking).
