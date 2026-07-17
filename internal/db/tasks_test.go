@@ -564,9 +564,11 @@ func TestUpdateTaskStatus(t *testing.T) {
 	if retrieved.Status != StatusBlocked {
 		t.Errorf("expected status %q, got %q", StatusBlocked, retrieved.Status)
 	}
-	// Blocked sets completed_at
-	if retrieved.CompletedAt == nil {
-		t.Error("expected completed_at to be set for blocked status")
+	// Blocking a task that never started (never went through 'processing') must
+	// NOT stamp completed_at — it's waiting, not finished. Only a task that
+	// actually ran and is then parked in 'blocked' gets completed_at.
+	if retrieved.CompletedAt != nil {
+		t.Error("expected completed_at to stay nil for a never-started blocked task")
 	}
 
 	// Change back to backlog
