@@ -4890,6 +4890,13 @@ func symlinkClaudeConfig(projectDir, worktreePath string) error {
 		return fmt.Errorf("projectDir and worktreePath must be different (both resolve to %s)", mainClaudeDir)
 	}
 
+	// Preserve .claude content tracked in the worktree's branch.
+	cmd := exec.Command("git", "ls-files", "--", ".claude")
+	cmd.Dir = worktreePath
+	if output, err := cmd.Output(); err == nil && len(output) > 0 {
+		return nil
+	}
+
 	// If mainClaudeDir exists as a symlink (possibly broken/circular), remove it
 	// The main project's .claude should always be a real directory, never a symlink
 	if info, err := os.Lstat(mainClaudeDir); err == nil && info.Mode()&os.ModeSymlink != 0 {
