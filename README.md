@@ -93,7 +93,7 @@ The same UI is also served in your browser at `http://localhost:8484` whenever `
 
 A **workflow** turns a single goal into a small DAG of step tasks that run on one shared git branch, each routed to its own executor and model, advancing automatically. Steps are sequential where they depend on each other and **parallel** where they don't.
 
-Workflows come from a few places: a couple ship built into the `ty` binary (e.g. `rpi`), some you **install from a plugin** ([get battle-tested ones with `ty plugins add`](#plugins)), and the rest are YAML files you write. For example, a `plan-code-review` workflow — shipped as an example plugin under `examples/plugins/`:
+Workflows come from two places: ones you **install from a plugin** ([grab battle-tested ones like `rpi` with `ty plugins add`](#plugins)) and YAML files you write yourself. Nothing is compiled into the binary. For example, a `plan-code-review` workflow — shipped as an example plugin under `examples/plugins/`:
 
 ```
 Plan ──▶ Code ──▶ Review A ─┐
@@ -182,7 +182,7 @@ Picking a kind resolves by name, and two sources answer to that name — a **def
 
 | Source | Where it lives | What it gives the kind |
 |--------|----------------|------------------------|
-| **Definition** | built-in (compiled into the `ty` binary, e.g. `rpi`) → plugin `workflows/` → global `~/.config/task/workflows/` → project `.taskyou/workflows/` | `steps` (→ workflow), or just instructions (→ single task) |
+| **Definition** | plugin `workflows/` → global `~/.config/task/workflows/` → project `.taskyou/workflows/` (nothing is compiled into the binary) | `steps` (→ workflow), or just instructions (→ single task) |
 | **DB task type** | the tasks database (`code`, `writing`, `thinking`, plus any you add) | instructions (→ single task) |
 
 Definitions are layered lowest-to-highest and a later layer shadows an earlier one by name, so your own `~/.config/task/workflows/rpi.yaml` overrides the built-in `rpi`, and a project file overrides everything. `ty pipeline --list` shows them all, labelled **built-in** or **custom**. Adding `steps` is the only thing that makes a kind a workflow: drop a `code.yaml` with steps beside the `code` type and that same pick upgrades from a single task to a DAG.
