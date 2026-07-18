@@ -207,10 +207,19 @@ func (c *ClaudeExecutor) BuildCommand(task *db.Task, sessionID, prompt string) s
 	// normal case (default DB), so production commands are unchanged.
 	configPrefix := dbPathEnvPrefix() + c.configDirPrefix(task) + taskEnvPrefix(task)
 
+	// mcpFlag wires the taskyou stdio server in explicitly via --mcp-config. Claude 2.1+
+	// keys a worktree's project config to the MAIN repo root, so the ~/.claude.json
+	// worktree-key injection is ignored; this keeps the interactive/TUI launch in sync
+	// with the daemon launch path (see ensureWorktreeMCPConfig in executor.go).
+	mcpFlag := ""
+	if p, err := ensureWorktreeMCPConfig(task.ID); err == nil && p != "" {
+		mcpFlag = fmt.Sprintf("--mcp-config %q ", p)
+	}
+
 	// Build command - resume if we have a session ID, otherwise start fresh
 	if sessionID != "" {
-		return fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %sclaude %s%s%s--resume %s`,
-			task.ID, worktreeSessionID, task.Port, task.WorktreePath, configPrefix, dangerousFlag, effort, model, sessionID)
+		return fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %sclaude %s%s%s%s--resume %s`,
+			task.ID, worktreeSessionID, task.Port, task.WorktreePath, configPrefix, mcpFlag, dangerousFlag, effort, model, sessionID)
 	}
 
 	// Start fresh - if prompt is provided, write to temp file and pass it
@@ -219,18 +228,18 @@ func (c *ClaudeExecutor) BuildCommand(task *db.Task, sessionID, prompt string) s
 		promptFile, err := os.CreateTemp("", "task-prompt-*.txt")
 		if err != nil {
 			c.logger.Error("BuildCommand: failed to create temp file", "error", err)
-			return fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %sclaude %s%s%s`,
-				task.ID, worktreeSessionID, task.Port, task.WorktreePath, configPrefix, dangerousFlag, effort, model)
+			return fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %sclaude %s%s%s%s`,
+				task.ID, worktreeSessionID, task.Port, task.WorktreePath, configPrefix, mcpFlag, dangerousFlag, effort, model)
 		}
 		promptFile.WriteString(prompt)
 		promptFile.Close()
 
-		return fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %sclaude %s%s%s"$(cat %q)"; rm -f %q`,
-			task.ID, worktreeSessionID, task.Port, task.WorktreePath, configPrefix, dangerousFlag, effort, model, promptFile.Name(), promptFile.Name())
+		return fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %sclaude %s%s%s%s"$(cat %q)"; rm -f %q`,
+			task.ID, worktreeSessionID, task.Port, task.WorktreePath, configPrefix, mcpFlag, dangerousFlag, effort, model, promptFile.Name(), promptFile.Name())
 	}
 
-	return fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %sclaude %s%s%s`,
-		task.ID, worktreeSessionID, task.Port, task.WorktreePath, configPrefix, dangerousFlag, effort, model)
+	return fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %sclaude %s%s%s%s`,
+		task.ID, worktreeSessionID, task.Port, task.WorktreePath, configPrefix, mcpFlag, dangerousFlag, effort, model)
 }
 
 // configDirPrefix returns the `CLAUDE_CONFIG_DIR=<dir> ` shell prefix for the task's
