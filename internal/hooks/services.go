@@ -29,7 +29,12 @@ type ServiceSet struct {
 // (or Cwd, resolved relative to it), in its own process group so Stop can signal the
 // whole tree. This is how a plugin folds a former "extension" sidecar under the
 // daemon's lifecycle: it comes up with the daemon and goes down with it.
-func StartServices(pluginsDir string, logger *log.Logger) *ServiceSet {
+//
+// injectEnv is prepended to every service's environment (after the daemon's own
+// environment, before the service's declared Env) — the daemon uses it to hand each
+// service a stable way to find ty (TY_DB_PATH, TY_API_URL) without hardcoding paths
+// or ports.
+func StartServices(pluginsDir string, injectEnv []string, logger *log.Logger) *ServiceSet {
 	set := &ServiceSet{logger: logger}
 	plugins, _ := LoadPlugins(pluginsDir)
 	for _, p := range plugins {
@@ -40,7 +45,7 @@ func StartServices(pluginsDir string, logger *log.Logger) *ServiceSet {
 			}
 			cmd := exec.Command("sh", "-c", s.Command)
 			cmd.Dir = dir
-			cmd.Env = append(os.Environ(), s.Env...)
+			cmd.Env = append(append(os.Environ(), injectEnv...), s.Env...)
 			// Own process group so Stop can signal the service and its children.
 			cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 			if err := cmd.Start(); err != nil {

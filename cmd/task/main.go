@@ -4509,8 +4509,14 @@ func runDaemon() error {
 
 	// Start any long-running services declared by installed plugins (a sidecar an
 	// extension used to run on its own). They live for the daemon's lifetime and are
-	// stopped on shutdown.
-	services := hooks.StartServices(hooks.DefaultPluginsDir(), logger)
+	// stopped on shutdown. Hand each service a stable way to find ty: TY_DB_PATH (the
+	// SQLite file, respecting WORKTREE_DB_PATH) and, when the HTTP API is up, TY_API_URL
+	// — so a sidecar reads ty over the API instead of hardcoding a port.
+	svcEnv := []string{"TY_DB_PATH=" + db.DefaultPath()}
+	if httpSrv != nil {
+		svcEnv = append(svcEnv, fmt.Sprintf("TY_API_URL=http://127.0.0.1:%d", httpAPIPort(database)))
+	}
+	services := hooks.StartServices(hooks.DefaultPluginsDir(), svcEnv, logger)
 	if n := services.Count(); n > 0 {
 		logger.Info("Started plugin services", "count", n)
 	}
@@ -4538,20 +4544,26 @@ func runDaemon() error {
 // returns the server so the caller can shut it down gracefully, or nil if the
 // API is disabled. A bind failure is logged and tolerated — it must never stop
 // the daemon from executing tasks.
+// httpAPIPort resolves the port the daemon HTTP API binds to: the configured
+// override setting if valid, else the default. Kept in one place so the address
+// the server binds and the TY_API_URL handed to plugin services never drift.
+func httpAPIPort(database *db.DB) int {
+	port := config.DefaultHTTPAPIPort
+	if v, _ := database.GetSetting(config.SettingHTTPAPIPort); v != "" {
+		if p, err := strconv.Atoi(v); err == nil && p > 0 {
+			port = p
+		}
+	}
+	return port
+}
+
 func startDaemonHTTPAPI(database *db.DB, exec *executor.Executor, logger *log.Logger) *web.Server {
 	if disabled, _ := database.GetSetting(config.SettingHTTPAPIDisabled); disabled == "true" {
 		logger.Info("HTTP API disabled via setting", "key", config.SettingHTTPAPIDisabled)
 		return nil
 	}
 
-	port := config.DefaultHTTPAPIPort
-	if v, _ := database.GetSetting(config.SettingHTTPAPIPort); v != "" {
-		if p, err := strconv.Atoi(v); err == nil && p > 0 {
-			port = p
-		} else {
-			logger.Warn("Invalid HTTP API port setting, using default", "value", v, "default", port)
-		}
-	}
+	port := httpAPIPort(database)
 
 	srv := web.New(web.Config{
 		Addr:      fmt.Sprintf(":%d", port),

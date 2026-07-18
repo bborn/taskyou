@@ -48,7 +48,7 @@ func TestServices_StartAndStop(t *testing.T) {
 	manifest := "name: svc\nservices:\n  - name: beat\n    command: \"echo $$ > " + pidfile + "; sleep 30\"\n"
 	writePlugin(t, root, "svc", manifest, nil)
 
-	set := StartServices(root, nil)
+	set := StartServices(root, nil, nil)
 	t.Cleanup(set.Stop)
 	if set.Count() != 1 {
 		t.Fatalf("Count = %d, want 1 running service", set.Count())
@@ -83,5 +83,28 @@ func TestServices_StartAndStop(t *testing.T) {
 	}
 	if !gone {
 		t.Errorf("service pid %d still alive after Stop", pid)
+	}
+}
+
+// injectEnv passed to StartServices reaches the service process.
+func TestServices_InjectEnv(t *testing.T) {
+	root := t.TempDir()
+	out := filepath.Join(t.TempDir(), "env.out")
+	manifest := "name: svc\nservices:\n  - name: echo\n    command: \"printf %s \\\"$TY_API_URL\\\" > " + out + "; sleep 30\"\n"
+	writePlugin(t, root, "svc", manifest, nil)
+
+	set := StartServices(root, []string{"TY_API_URL=http://127.0.0.1:8080"}, nil)
+	t.Cleanup(set.Stop)
+
+	var got string
+	for i := 0; i < 100; i++ {
+		if b, err := os.ReadFile(out); err == nil && len(b) > 0 {
+			got = string(b)
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if got != "http://127.0.0.1:8080" {
+		t.Errorf("TY_API_URL in service = %q, want the injected value", got)
 	}
 }

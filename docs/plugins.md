@@ -48,13 +48,63 @@ workflow (`workflows/*.yaml`), **or** service.
 ### Services (long-running processes)
 
 A **service** is a process the daemon supervises for its whole lifetime: it starts
-when the daemon comes up and is stopped (SIGTERM, then SIGKILL) when it exits. This
-lets a plugin ship a sidecar — an MCP proxy, a sync loop, a webhook listener — and
-have it share the daemon's lifecycle instead of being run and babysat separately. In
-other words, a plugin can now bundle the kind of long-running helper that used to be
-a standalone "extension." Each service runs as `sh -c <command>` from the plugin dir
-(or `cwd`), in its own process group. See
-[`examples/plugins/heartbeat/`](../examples/plugins/heartbeat/) for a runnable example.
+when the daemon comes up and is stopped (SIGTERM, then SIGKILL) when the daemon exits.
+Each service runs as `sh -c <command>` from the plugin dir (or `cwd`), in its own
+process group. See [`examples/plugins/heartbeat/`](../examples/plugins/heartbeat/) for
+a runnable example.
+
+#### Why a service instead of a hook?
+
+A **hook** is fired *by* the daemon on one discrete event (`task.done`), runs, and
+exits — it's stateless and short-lived, and it can only ever react to a single event
+in isolation. A **service** is the opposite: it owns its own loop, and it's for the
+work a hook structurally can't do:
+
+- **Hold a persistent connection** — a Slack socket-mode client, an IMAP IDLE
+  connection, an MCP stdio server other tools attach to.
+- **Run on its own schedule** — poll an inbox every 30s, reindex every 5min — rather
+  than waiting for a ty event to fire it.
+- **Serve a port** — a metrics endpoint, a small web dashboard, a search server.
+- **Batch or debounce across many events** — a hook fires once per event and keeps no
+  state between fires; a service can accumulate and flush.
+- **Watch an external source and create tasks** — turn emails, GitHub webhooks, or a
+  file watcher into ty tasks.
+
+Rule of thumb: *react to one ty event → hook. Hold state, a connection, a schedule, or
+a port → service.*
+
+#### How a service reaches ty
+
+A service is just a process — it has no special in-process access to ty. The daemon
+hands it, via the environment, a stable way to find the running instance:
+
+| env var | value | use it for |
+| --- | --- | --- |
+| `TY_API_URL` | `http://127.0.0.1:8080` (the daemon's HTTP API; absent if the API is disabled) | Read/write tasks over HTTP — the decoupled, recommended path. |
+| `TY_DB_PATH` | the SQLite file (respects `WORKTREE_DB_PATH`) | Open the DB read-only for queries the API doesn't expose yet. Couples you to the schema — prefer the API. |
+
+Beyond those, a service can subscribe to ty's **event feed** (the SSE stream on the
+HTTP API) to react to task changes in real time, or simply shell out to the **`ty`
+CLI**, which is often the least-effort option for a small shell service.
+
+#### Example use cases
+
+- **Email/chat bridge** — hold an IMAP IDLE or Slack socket connection; turn incoming
+  messages into tasks and post task updates back out. (This is the shape of the
+  existing `ty-email` extension — the kind of thing that used to run and be babysat on
+  its own.)
+- **Semantic search / index server** — keep an embeddings index warm and answer
+  queries over a port or via MCP. (The shape of `ty-qmd`.)
+- **Webhook listener** — bind a port, accept GitHub/Linear webhooks, and create tasks
+  from them.
+- **Metrics / dashboard** — serve board stats read from `TY_API_URL` on a small HTTP
+  endpoint for a status display.
+- **Reactive reindexer / cache warmer** — subscribe to the event feed and rebuild a
+  derived view whenever tasks change.
+
+> Note: declaring a service does **not** migrate any of the existing in-repo
+> extensions — they stay where they are. This is simply the capability so a *new*
+> plugin can ship a long-running helper if it wants one.
 
 ## Events
 
