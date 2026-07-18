@@ -30,6 +30,10 @@ type Plugin struct {
 	// Actions are user-invoked commands (from `ty plugins run`, the detail-view
 	// picker, or the command palette), each backed by a script in the plugin dir.
 	Actions []Action `yaml:"actions"`
+	// Services are long-running processes the daemon supervises for the plugin's
+	// lifetime — a sidecar/service an extension used to run on its own (e.g. an MCP
+	// proxy, a sync loop). Started when the daemon comes up, stopped when it exits.
+	Services []Service `yaml:"services"`
 
 	// Dir is the absolute path to the plugin directory (not from the manifest).
 	Dir string `yaml:"-"`
@@ -71,6 +75,17 @@ func (a Action) DisplayLabel() string {
 		return a.Label
 	}
 	return a.ID
+}
+
+// Service is a long-running process a plugin ships and the daemon supervises. It's
+// how an "extension" (a sidecar that used to run itself) folds into the plugin model:
+// declare it here and the daemon starts/stops it. Command is run via `sh -c` from the
+// plugin dir (or Cwd if set), so it can reference the plugin's own files.
+type Service struct {
+	Name    string   `yaml:"name"`    // stable label, unique within the plugin
+	Command string   `yaml:"command"` // shell command to run (sh -c); the long-running process
+	Cwd     string   `yaml:"cwd"`     // working dir relative to the plugin dir ("" = the plugin dir)
+	Env     []string `yaml:"env"`     // extra KEY=VALUE env entries for the process
 }
 
 // ScriptFor returns the absolute path to the script handling event, and whether
@@ -195,8 +210,8 @@ func loadPlugin(dir string) (*Plugin, string) {
 	// declaration needed.
 	p.Workflows = discoverPluginWorkflows(dir)
 	p.Routines = discoverPluginRoutines(dir)
-	if len(p.Hooks) == 0 && len(p.Actions) == 0 && len(p.Workflows) == 0 && len(p.Routines) == 0 {
-		return nil, fmt.Sprintf("plugin %q: manifest declares no hooks, actions, workflows, or routines; skipping", p.Name)
+	if len(p.Hooks) == 0 && len(p.Actions) == 0 && len(p.Workflows) == 0 && len(p.Services) == 0 && len(p.Routines) == 0 {
+		return nil, fmt.Sprintf("plugin %q: manifest declares no hooks, actions, workflows, services, or routines; skipping", p.Name)
 	}
 
 	// Drop hooks and actions whose script is missing or not a regular file,
@@ -221,8 +236,19 @@ func loadPlugin(dir string) (*Plugin, string) {
 	}
 	p.Actions = kept
 
-	if len(p.Hooks) == 0 && len(p.Actions) == 0 && len(p.Workflows) == 0 && len(p.Routines) == 0 {
-		return nil, fmt.Sprintf("plugin %q: no usable hook, action, workflow, or routine found; skipping", p.Name)
+	// Drop services missing a name or command; keep the valid ones.
+	keptSvc := p.Services[:0]
+	for _, s := range p.Services {
+		if s.Name == "" || s.Command == "" {
+			dropped = append(dropped, "service:<malformed>")
+			continue
+		}
+		keptSvc = append(keptSvc, s)
+	}
+	p.Services = keptSvc
+
+	if len(p.Hooks) == 0 && len(p.Actions) == 0 && len(p.Workflows) == 0 && len(p.Services) == 0 && len(p.Routines) == 0 {
+		return nil, fmt.Sprintf("plugin %q: no usable hook, action, workflow, service, or routine found; skipping", p.Name)
 	}
 	if len(dropped) > 0 {
 		sort.Strings(dropped)
