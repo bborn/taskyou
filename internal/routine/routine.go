@@ -67,6 +67,36 @@ func StateDir(name string) string {
 	return filepath.Join(home, ".local", "share", "task", "routines", name)
 }
 
+// PluginRoutineDirs, when set, returns extra directories that hold routine
+// definitions contributed by installed plugins (each a routines/ subdir whose
+// children are <name>/prompt.md). Wired up in main so this package needn't
+// import the hooks/plugins package. Read paths (Load, Exists, List) search the
+// user's RoutinesDir first, then these — so a user routine shadows a plugin one
+// of the same name, and plugins extend the set the same way they do workflows.
+var PluginRoutineDirs func() []string
+
+// searchDirs returns every base directory routine definitions may live in: the
+// user's dir first (it wins on name collisions), then plugin-contributed dirs.
+func searchDirs() []string {
+	dirs := []string{RoutinesDir()}
+	if PluginRoutineDirs != nil {
+		dirs = append(dirs, PluginRoutineDirs()...)
+	}
+	return dirs
+}
+
+// resolveDir returns the directory holding routine <name> — the first base dir
+// (user first, then plugins) that contains <name>/prompt.md — or "" if none does.
+func resolveDir(name string) string {
+	for _, base := range searchDirs() {
+		dir := filepath.Join(base, name)
+		if _, err := os.Stat(filepath.Join(dir, promptFile)); err == nil {
+			return dir
+		}
+	}
+	return ""
+}
+
 // ValidateName rejects names that aren't safe as path components.
 func ValidateName(name string) error {
 	if !nameRe.MatchString(name) {
@@ -75,13 +105,12 @@ func ValidateName(name string) error {
 	return nil
 }
 
-// Exists reports whether a routine directory with a prompt.md exists.
+// Exists reports whether a routine with a prompt.md exists in any search dir.
 func Exists(name string) bool {
 	if ValidateName(name) != nil {
 		return false
 	}
-	_, err := os.Stat(filepath.Join(RoutinesDir(), name, promptFile))
-	return err == nil
+	return resolveDir(name) != ""
 }
 
 // Load reads a routine definition from disk.
@@ -89,12 +118,12 @@ func Load(name string) (*Routine, error) {
 	if err := ValidateName(name); err != nil {
 		return nil, err
 	}
-	dir := filepath.Join(RoutinesDir(), name)
+	dir := resolveDir(name)
+	if dir == "" {
+		return nil, fmt.Errorf("routine %q not found (expected %s)", name, filepath.Join(RoutinesDir(), name, promptFile))
+	}
 	raw, err := os.ReadFile(filepath.Join(dir, promptFile))
 	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, fmt.Errorf("routine %q not found (expected %s)", name, filepath.Join(dir, promptFile))
-		}
 		return nil, fmt.Errorf("read routine %q: %w", name, err)
 	}
 
@@ -149,27 +178,41 @@ func Load(name string) (*Routine, error) {
 // without a prompt.md are skipped; unparseable routines are returned as an
 // error so a typo doesn't silently hide a routine from the list.
 func List() ([]*Routine, error) {
-	entries, err := os.ReadDir(RoutinesDir())
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("read routines dir: %w", err)
-	}
-
+	seen := map[string]bool{}
 	var routines []*Routine
-	for _, entry := range entries {
-		if !entry.IsDir() || ValidateName(entry.Name()) != nil {
-			continue
-		}
-		if _, err := os.Stat(filepath.Join(RoutinesDir(), entry.Name(), promptFile)); err != nil {
-			continue
-		}
-		r, err := Load(entry.Name())
+	// User dir first (index 0): a parse error there is fatal so a typo can't
+	// silently hide a routine. Plugin dirs are forgiving — one broken plugin
+	// routine must not break `ty routines` — matching how plugins load.
+	for i, base := range searchDirs() {
+		userDir := i == 0
+		entries, err := os.ReadDir(base)
 		if err != nil {
-			return nil, err
+			if os.IsNotExist(err) {
+				continue
+			}
+			if userDir {
+				return nil, fmt.Errorf("read routines dir: %w", err)
+			}
+			continue
 		}
-		routines = append(routines, r)
+		for _, entry := range entries {
+			name := entry.Name()
+			if !entry.IsDir() || ValidateName(name) != nil || seen[name] {
+				continue
+			}
+			if _, err := os.Stat(filepath.Join(base, name, promptFile)); err != nil {
+				continue
+			}
+			r, err := Load(name)
+			if err != nil {
+				if userDir {
+					return nil, err
+				}
+				continue
+			}
+			seen[name] = true
+			routines = append(routines, r)
+		}
 	}
 	sort.Slice(routines, func(i, j int) bool { return routines[i].Name < routines[j].Name })
 	return routines, nil

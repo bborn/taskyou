@@ -39,11 +39,23 @@ type Plugin struct {
 	// workflows/*.yaml. Populated for display; the definitions themselves are loaded
 	// by the pipeline registry via PluginWorkflowDirs.
 	Workflows []string `yaml:"-"`
+	// Routines holds the names of the routine definitions this plugin ships in its
+	// routines/ subdir (each a <name>/prompt.md). Discovered by convention, like
+	// workflows. Populated for display; the routine package resolves the definitions
+	// via PluginRoutineDirs. A routine is the right home for a plugin's periodic job
+	// (a poller, a digest): the daemon-supervised alternative, a service, is for
+	// processes that must stay up, not run-to-completion on a schedule.
+	Routines []string `yaml:"-"`
 }
 
 // WorkflowsDir returns the plugin's workflows subdir, whether or not it exists.
 func (p Plugin) WorkflowsDir() string {
 	return filepath.Join(p.Dir, "workflows")
+}
+
+// RoutinesDir returns the plugin's routines subdir, whether or not it exists.
+func (p Plugin) RoutinesDir() string {
+	return filepath.Join(p.Dir, "routines")
 }
 
 // Action is a user-triggered plugin command.
@@ -178,11 +190,13 @@ func loadPlugin(dir string) (*Plugin, string) {
 	if p.Name == "" {
 		return nil, fmt.Sprintf("plugin %s: manifest is missing a name", filepath.Base(dir))
 	}
-	// Workflows are discovered by convention: any workflows/*.yaml makes the plugin
-	// workflow cargo, no manifest declaration needed.
+	// Workflows and routines are discovered by convention: any workflows/*.yaml or
+	// routines/<name>/prompt.md makes the plugin cargo for them, no manifest
+	// declaration needed.
 	p.Workflows = discoverPluginWorkflows(dir)
-	if len(p.Hooks) == 0 && len(p.Actions) == 0 && len(p.Workflows) == 0 {
-		return nil, fmt.Sprintf("plugin %q: manifest declares no hooks, actions, or workflows; skipping", p.Name)
+	p.Routines = discoverPluginRoutines(dir)
+	if len(p.Hooks) == 0 && len(p.Actions) == 0 && len(p.Workflows) == 0 && len(p.Routines) == 0 {
+		return nil, fmt.Sprintf("plugin %q: manifest declares no hooks, actions, workflows, or routines; skipping", p.Name)
 	}
 
 	// Drop hooks and actions whose script is missing or not a regular file,
@@ -207,8 +221,8 @@ func loadPlugin(dir string) (*Plugin, string) {
 	}
 	p.Actions = kept
 
-	if len(p.Hooks) == 0 && len(p.Actions) == 0 && len(p.Workflows) == 0 {
-		return nil, fmt.Sprintf("plugin %q: no usable hook, action, or workflow found; skipping", p.Name)
+	if len(p.Hooks) == 0 && len(p.Actions) == 0 && len(p.Workflows) == 0 && len(p.Routines) == 0 {
+		return nil, fmt.Sprintf("plugin %q: no usable hook, action, workflow, or routine found; skipping", p.Name)
 	}
 	if len(dropped) > 0 {
 		sort.Strings(dropped)
@@ -254,6 +268,43 @@ func PluginWorkflowDirs(pluginsDir string) []string {
 	for _, p := range plugins {
 		if len(p.Workflows) > 0 {
 			dirs = append(dirs, p.WorkflowsDir())
+		}
+	}
+	return dirs
+}
+
+// discoverPluginRoutines returns the names of every routine a plugin ships in its
+// routines/ subdir — a subdirectory is a routine when it contains a prompt.md (the
+// same shape a routine has under ~/.config/task/routines/). Sorted for stable display.
+func discoverPluginRoutines(dir string) []string {
+	rdir := filepath.Join(dir, "routines")
+	entries, err := os.ReadDir(rdir)
+	if err != nil {
+		return nil
+	}
+	var names []string
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		if _, err := os.Stat(filepath.Join(rdir, e.Name(), "prompt.md")); err != nil {
+			continue
+		}
+		names = append(names, e.Name())
+	}
+	sort.Strings(names)
+	return names
+}
+
+// PluginRoutineDirs returns the routines/ subdir of every installed plugin that
+// ships one. The routine package folds these into its search path, so a plugin's
+// routines become resolvable by `ty run <name>` and visible in `ty routines`.
+func PluginRoutineDirs(pluginsDir string) []string {
+	plugins, _ := LoadPlugins(pluginsDir)
+	var dirs []string
+	for _, p := range plugins {
+		if len(p.Routines) > 0 {
+			dirs = append(dirs, p.RoutinesDir())
 		}
 	}
 	return dirs

@@ -249,6 +249,9 @@ func listPlugins() {
 		for _, w := range p.Workflows {
 			fmt.Printf("    workflow %-16s (ty pipeline -d %s \"<goal>\")\n", w, w)
 		}
+		for _, r := range p.Routines {
+			fmt.Printf("    routine  %-16s (ty run %s)\n", r, r)
+		}
 		fmt.Println()
 	}
 }
