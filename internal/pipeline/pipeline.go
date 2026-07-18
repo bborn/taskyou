@@ -72,14 +72,14 @@ func (d Definition) IsSingle() bool { return len(d.Steps) == 0 }
 // until the user installs a workflow, and Create says so.
 const DefaultDefinition = ""
 
-// registry loads the workflow definitions: the bundled built-ins compiled into the
-// binary (e.g. "rpi") first at lowest precedence, then the on-disk workflow files —
-// installed-plugin workflows, the global workflows dir, and any extraDirs (a
-// project's .taskyou/workflows). A same-named on-disk file shadows a bundled
-// built-in, and later dirs shadow earlier ones (project shadows global shadows
+// registry loads the workflow definitions from disk. There are NO workflows compiled
+// into the binary — every workflow is installed from a plugin (see PluginWorkflowDirs)
+// or dropped into a workflows dir. Search order, lowest precedence first:
+// installed-plugin workflows, the global workflows dir, then extraDirs (a project's
+// .taskyou/workflows). Later dirs shadow earlier ones (project shadows global shadows
 // plugin), so a user's own on-disk workflow wins over one shipped by a plugin.
 func registry(extraDirs ...string) map[string]Definition {
-	out := loadBundledDefinitions() // built-ins, lowest precedence
+	out := make(map[string]Definition)
 	// Search order, lowest precedence first: installed-plugin workflows, then the
 	// global workflows dir, then extraDirs (a project's .taskyou/workflows). Later
 	// dirs shadow earlier ones on a name collision. dedupeKeepingLast collapses the
