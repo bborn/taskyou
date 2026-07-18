@@ -4507,6 +4507,14 @@ func runDaemon() error {
 	// down the executor; the daemon's job is running tasks first and foremost.
 	httpSrv := startDaemonHTTPAPI(database, exec, logger)
 
+	// Start any long-running services declared by installed plugins (a sidecar an
+	// extension used to run on its own). They live for the daemon's lifetime and are
+	// stopped on shutdown.
+	services := hooks.StartServices(hooks.DefaultPluginsDir(), logger)
+	if n := services.Count(); n > 0 {
+		logger.Info("Started plugin services", "count", n)
+	}
+
 	// Handle signals
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
@@ -4514,6 +4522,7 @@ func runDaemon() error {
 	// Wait for signal
 	sig := <-sigCh
 	logger.Info("Received signal, shutting down", "signal", sig)
+	services.Stop()
 	if httpSrv != nil {
 		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		httpSrv.Shutdown(shutdownCtx)

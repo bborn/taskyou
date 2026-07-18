@@ -1,0 +1,12 @@
+name: ty-qmd
+version: 0.1.0
+description: >-
+  QMD semantic search for TaskYou, as a plugin. `ty-qmd serve` (the MCP proxy over the
+  QMD index) is a long-running service the daemon supervises. Build the binary first —
+  `go build -o ty-qmd ./cmd` in this directory — then install this directory as a
+  plugin; the daemon starts `ty-qmd serve` on startup and stops it on shutdown. This is
+  the "extension → plugin" migration: a sidecar that used to run on its own now folds
+  into the daemon's lifecycle.
+services:
+  - name: serve
+    command: ./ty-qmd serve

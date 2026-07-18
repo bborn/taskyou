@@ -1,0 +1,10 @@
+name: heartbeat
+version: 0.1.0
+description: >-
+  Example of a plugin *service* — a long-running process the daemon supervises for its
+  whole lifetime (started when the daemon comes up, stopped when it exits). This one
+  just appends a heartbeat line to ~/.cache/ty-heartbeat.log every few seconds; swap
+  the command for a real sidecar (an MCP proxy, a sync loop, a webhook listener).
+services:
+  - name: beat
+    command: ./beat.sh

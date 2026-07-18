@@ -34,10 +34,26 @@ actions:                     # user-invoked commands (optional)
   - id: sync
     label: Sync to tracker
     command: sync.sh
+services:                    # long-running processes (optional)
+  - name: index
+    command: ./ty-qmd serve  # sh -c, run from the plugin dir
+    cwd: ""                  # optional, relative to the plugin dir
+    env: ["FOO=bar"]         # optional extra env
 ```
 
 Script paths are resolved relative to the plugin directory. Scripts must be
-executable (`chmod +x`). A plugin needs at least one usable hook **or** action.
+executable (`chmod +x`). A plugin needs at least one usable hook, action,
+workflow (`workflows/*.yaml`), **or** service.
+
+### Services (long-running processes)
+
+A **service** is a process the daemon supervises for its whole lifetime: it starts
+when the daemon comes up and is stopped (SIGTERM, then SIGKILL) when it exits. This
+is how a former "extension" — a sidecar that used to run on its own (an MCP proxy, a
+sync loop, a webhook listener) — folds into the plugin model. Each service runs as
+`sh -c <command>` from the plugin dir (or `cwd`), in its own process group. See
+[`examples/plugins/heartbeat/`](../examples/plugins/heartbeat/) for a runnable
+example, and `extensions/ty-qmd/plugin.yaml` for a real migration (`ty-qmd serve`).
 
 ## Events
 
