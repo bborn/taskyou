@@ -36,7 +36,7 @@ actions:                     # user-invoked commands (optional)
     command: sync.sh
 services:                    # long-running processes (optional)
   - name: index
-    command: ./ty-qmd serve  # sh -c, run from the plugin dir
+    command: ./search-server  # sh -c, run from the plugin dir
     cwd: ""                  # optional, relative to the plugin dir
     env: ["FOO=bar"]         # optional extra env
 ```
@@ -49,11 +49,12 @@ workflow (`workflows/*.yaml`), **or** service.
 
 A **service** is a process the daemon supervises for its whole lifetime: it starts
 when the daemon comes up and is stopped (SIGTERM, then SIGKILL) when it exits. This
-is how a former "extension" — a sidecar that used to run on its own (an MCP proxy, a
-sync loop, a webhook listener) — folds into the plugin model. Each service runs as
-`sh -c <command>` from the plugin dir (or `cwd`), in its own process group. See
-[`examples/plugins/heartbeat/`](../examples/plugins/heartbeat/) for a runnable
-example, and `extensions/ty-qmd/plugin.yaml` for a real migration (`ty-qmd serve`).
+lets a plugin ship a sidecar — an MCP proxy, a sync loop, a webhook listener — and
+have it share the daemon's lifecycle instead of being run and babysat separately. In
+other words, a plugin can now bundle the kind of long-running helper that used to be
+a standalone "extension." Each service runs as `sh -c <command>` from the plugin dir
+(or `cwd`), in its own process group. See
+[`examples/plugins/heartbeat/`](../examples/plugins/heartbeat/) for a runnable example.
 
 ## Events
 
