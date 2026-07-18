@@ -1439,8 +1439,7 @@ func TestClaudeEnvPrefix(t *testing.T) {
 	}
 }
 
-func TestWriteWorkflowMCPConfig(t *testing.T) {
-	// Helper to set up a temp CLAUDE_CONFIG_DIR and return the config file path
+func TestEnsureProjectTrusted(t *testing.T) {
 	setupTempConfigDir := func(t *testing.T) string {
 		t.Helper()
 		tempDir := t.TempDir()
@@ -1449,247 +1448,82 @@ func TestWriteWorkflowMCPConfig(t *testing.T) {
 		return configDir + ".json" // ClaudeConfigFilePath returns dir + ".json"
 	}
 
-	// Helper to read workflow config from claude.json for a given worktree path
-	readWorkflowConfig := func(t *testing.T, configPath, worktreePath string) map[string]interface{} {
+	readProject := func(t *testing.T, configPath, key string) map[string]interface{} {
 		t.Helper()
 		data, err := os.ReadFile(configPath)
 		if err != nil {
 			t.Fatalf("failed to read claude.json: %v", err)
 		}
-
 		var config map[string]interface{}
 		if err := json.Unmarshal(data, &config); err != nil {
 			t.Fatalf("failed to parse claude.json: %v", err)
 		}
-
 		projects, ok := config["projects"].(map[string]interface{})
 		if !ok {
 			t.Fatal("expected projects key in config")
 		}
-
-		projectConfig, ok := projects[worktreePath].(map[string]interface{})
+		pc, ok := projects[key].(map[string]interface{})
 		if !ok {
-			t.Fatalf("expected project config for %s", worktreePath)
+			t.Fatalf("expected project config for %s", key)
 		}
-
-		mcpServers, ok := projectConfig["mcpServers"].(map[string]interface{})
-		if !ok {
-			t.Fatal("expected mcpServers key in project config")
-		}
-
-		taskyou, ok := mcpServers["taskyou"].(map[string]interface{})
-		if !ok {
-			t.Fatal("expected taskyou key in mcpServers")
-		}
-
-		return taskyou
+		return pc
 	}
 
-	t.Run("creates taskyou config in claude.json", func(t *testing.T) {
+	t.Run("pre-trusts the project so onboarding doesn't stall the step", func(t *testing.T) {
 		configPath := setupTempConfigDir(t)
-		worktreePath := t.TempDir()
-		taskID := int64(123)
+		projectDir := t.TempDir()
 
-		err := writeWorkflowMCPConfig(worktreePath, taskID, "")
-		if err != nil {
+		if err := ensureProjectTrusted(projectDir, ""); err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
 
-		taskyou := readWorkflowConfig(t, configPath, worktreePath)
-
-		if taskyou["type"] != "stdio" {
-			t.Errorf("taskyou type = %v, want stdio", taskyou["type"])
+		pc := readProject(t, configPath, projectDir)
+		if pc["hasTrustDialogAccepted"] != true {
+			t.Errorf("hasTrustDialogAccepted = %v, want true", pc["hasTrustDialogAccepted"])
 		}
-
-		// alwaysLoad asks Claude Code to load taskyou's tools upfront (best-effort) so a
-		// task that wants them (e.g. taskyou_needs_input) can reach them without a search.
-		if taskyou["alwaysLoad"] != true {
-			t.Errorf("taskyou alwaysLoad = %v, want true", taskyou["alwaysLoad"])
+		if pc["hasCompletedProjectOnboarding"] != true {
+			t.Errorf("hasCompletedProjectOnboarding = %v, want true", pc["hasCompletedProjectOnboarding"])
 		}
-
-		args, ok := taskyou["args"].([]interface{})
-		if !ok {
-			t.Fatal("expected args array in taskyou config")
-		}
-		if len(args) != 3 || args[0] != "mcp-server" || args[1] != "--task-id" || args[2] != "123" {
-			t.Errorf("taskyou args = %v, want [mcp-server --task-id 123]", args)
-		}
-
-		// Verify autoApprove list is present with all taskyou tools
-		autoApprove, ok := taskyou["autoApprove"].([]interface{})
-		if !ok {
-			t.Fatal("expected autoApprove array in taskyou config")
-		}
-		expectedTools := []string{
-			"taskyou_complete",
-			"taskyou_needs_input",
-			"taskyou_show_task",
-			"taskyou_create_task",
-			"taskyou_list_tasks",
-			"taskyou_get_project_context",
-			"taskyou_set_project_context",
-			"taskyou_get_artifact",
-			"taskyou_set_artifact",
-		}
-		if len(autoApprove) != len(expectedTools) {
-			t.Errorf("autoApprove has %d items, want %d", len(autoApprove), len(expectedTools))
-		}
-		for i, tool := range expectedTools {
-			if i < len(autoApprove) && autoApprove[i] != tool {
-				t.Errorf("autoApprove[%d] = %v, want %v", i, autoApprove[i], tool)
-			}
+		// The taskyou MCP server is wired via `claude --mcp-config` now, not written here.
+		if _, ok := pc["mcpServers"]; ok {
+			t.Errorf("did not expect mcpServers under the project key: %v", pc["mcpServers"])
 		}
 	})
 
-	t.Run("pre-trusts the worktree so onboarding doesn't stall the step", func(t *testing.T) {
-		configPath := setupTempConfigDir(t)
-		worktreePath := t.TempDir()
-
-		if err := writeWorkflowMCPConfig(worktreePath, 123, ""); err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-
-		data, err := os.ReadFile(configPath)
-		if err != nil {
-			t.Fatalf("failed to read claude.json: %v", err)
-		}
-		var config map[string]interface{}
-		if err := json.Unmarshal(data, &config); err != nil {
-			t.Fatalf("failed to parse claude.json: %v", err)
-		}
-		projects := config["projects"].(map[string]interface{})
-		projectConfig, ok := projects[worktreePath].(map[string]interface{})
-		if !ok {
-			t.Fatalf("expected project config for %s", worktreePath)
-		}
-
-		// Without these, a fresh worktree blocks on the "trust this folder?" prompt
-		// with no human to answer, hanging the unattended workflow step.
-		if projectConfig["hasTrustDialogAccepted"] != true {
-			t.Errorf("hasTrustDialogAccepted = %v, want true", projectConfig["hasTrustDialogAccepted"])
-		}
-		if projectConfig["hasCompletedProjectOnboarding"] != true {
-			t.Errorf("hasCompletedProjectOnboarding = %v, want true", projectConfig["hasCompletedProjectOnboarding"])
-		}
-	})
-
-	t.Run("writes config under the symlink-resolved path too", func(t *testing.T) {
+	t.Run("trusts both raw and symlink-resolved project paths", func(t *testing.T) {
 		configPath := setupTempConfigDir(t)
 		real := t.TempDir()
-		link := filepath.Join(t.TempDir(), "wtlink")
+		link := filepath.Join(t.TempDir(), "projlink")
 		if err := os.Symlink(real, link); err != nil {
 			t.Fatal(err)
 		}
 
-		// ty is handed the symlinked path; Claude Code will look itself up by its
-		// RESOLVED cwd. If we only wrote the raw key, the step would find no taskyou MCP
-		// server and hang on the folder-trust prompt.
-		if err := writeWorkflowMCPConfig(link, 7, ""); err != nil {
+		// Claude keys by its resolved cwd; a raw-only key would re-hit the trust prompt.
+		if err := ensureProjectTrusted(link, ""); err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-
-		data, err := os.ReadFile(configPath)
-		if err != nil {
-			t.Fatal(err)
-		}
-		var cfg map[string]interface{}
-		if err := json.Unmarshal(data, &cfg); err != nil {
-			t.Fatal(err)
-		}
-		projects := cfg["projects"].(map[string]interface{})
-
 		resolved, err := filepath.EvalSymlinks(link)
 		if err != nil {
 			t.Fatal(err)
 		}
 		for _, key := range []string{link, resolved} {
-			pc, ok := projects[key].(map[string]interface{})
-			if !ok {
-				t.Fatalf("no project config under %q", key)
-			}
+			pc := readProject(t, configPath, key)
 			if pc["hasTrustDialogAccepted"] != true {
 				t.Errorf("%q: hasTrustDialogAccepted = %v, want true", key, pc["hasTrustDialogAccepted"])
 			}
-			servers, ok := pc["mcpServers"].(map[string]interface{})
-			if !ok || servers["taskyou"] == nil {
-				t.Errorf("%q: missing taskyou MCP server", key)
-			}
-		}
-	})
-
-	t.Run("preserves existing MCP servers in project config", func(t *testing.T) {
-		configPath := setupTempConfigDir(t)
-		worktreePath := t.TempDir()
-		taskID := int64(456)
-
-		// Create existing claude.json with other servers for this project
-		existingConfig := map[string]interface{}{
-			"projects": map[string]interface{}{
-				worktreePath: map[string]interface{}{
-					"mcpServers": map[string]interface{}{
-						"github": map[string]interface{}{
-							"type":    "stdio",
-							"command": "gh-mcp",
-						},
-					},
-				},
-			},
-		}
-		existingData, _ := json.MarshalIndent(existingConfig, "", "  ")
-		if err := os.WriteFile(configPath, existingData, 0644); err != nil {
-			t.Fatal(err)
-		}
-
-		err := writeWorkflowMCPConfig(worktreePath, taskID, "")
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-
-		// Read and verify both servers exist
-		data, err := os.ReadFile(configPath)
-		if err != nil {
-			t.Fatalf("failed to read claude.json: %v", err)
-		}
-
-		var config map[string]interface{}
-		if err := json.Unmarshal(data, &config); err != nil {
-			t.Fatalf("failed to parse claude.json: %v", err)
-		}
-
-		projects := config["projects"].(map[string]interface{})
-		projectConfig := projects[worktreePath].(map[string]interface{})
-		mcpServers := projectConfig["mcpServers"].(map[string]interface{})
-
-		// Check github server preserved
-		github, ok := mcpServers["github"].(map[string]interface{})
-		if !ok {
-			t.Fatal("expected github key in mcpServers - existing server not preserved")
-		}
-		if github["command"] != "gh-mcp" {
-			t.Errorf("github command = %v, want gh-mcp", github["command"])
-		}
-
-		// Check taskyou server added
-		if _, ok := mcpServers["taskyou"].(map[string]interface{}); !ok {
-			t.Fatal("expected taskyou key in mcpServers")
 		}
 	})
 
 	t.Run("preserves other project configs", func(t *testing.T) {
 		configPath := setupTempConfigDir(t)
-		worktreePath := t.TempDir()
+		projectDir := t.TempDir()
 		otherProjectPath := "/some/other/project"
-		taskID := int64(789)
 
-		// Create existing claude.json with another project
 		existingConfig := map[string]interface{}{
 			"projects": map[string]interface{}{
 				otherProjectPath: map[string]interface{}{
 					"mcpServers": map[string]interface{}{
-						"other-server": map[string]interface{}{
-							"type":    "stdio",
-							"command": "other-cmd",
-						},
+						"other-server": map[string]interface{}{"type": "stdio", "command": "other-cmd"},
 					},
 				},
 			},
@@ -1699,173 +1533,38 @@ func TestWriteWorkflowMCPConfig(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		err := writeWorkflowMCPConfig(worktreePath, taskID, "")
-		if err != nil {
+		if err := ensureProjectTrusted(projectDir, ""); err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
 
-		// Verify other project config was preserved
-		data, err := os.ReadFile(configPath)
-		if err != nil {
-			t.Fatalf("failed to read claude.json: %v", err)
+		other := readProject(t, configPath, otherProjectPath)
+		servers, ok := other["mcpServers"].(map[string]interface{})
+		if !ok || servers["other-server"] == nil {
+			t.Fatal("expected other project's mcpServers to be preserved")
 		}
-
-		var config map[string]interface{}
-		if err := json.Unmarshal(data, &config); err != nil {
-			t.Fatalf("failed to parse claude.json: %v", err)
-		}
-
-		projects := config["projects"].(map[string]interface{})
-
-		// Check other project preserved
-		otherProject, ok := projects[otherProjectPath].(map[string]interface{})
-		if !ok {
-			t.Fatal("expected other project config to be preserved")
-		}
-		otherServers := otherProject["mcpServers"].(map[string]interface{})
-		if _, ok := otherServers["other-server"]; !ok {
-			t.Fatal("expected other-server to be preserved")
-		}
-
-		// Check worktree project added
-		if _, ok := projects[worktreePath]; !ok {
-			t.Fatal("expected worktree project config to be added")
-		}
-	})
-
-	t.Run("removes old workflow entry and replaces with taskyou", func(t *testing.T) {
-		configPath := setupTempConfigDir(t)
-		worktreePath := t.TempDir()
-		taskID := int64(456)
-
-		// Create existing config with old "workflow" entry
-		existingConfig := map[string]interface{}{
-			"projects": map[string]interface{}{
-				worktreePath: map[string]interface{}{
-					"mcpServers": map[string]interface{}{
-						"workflow": map[string]interface{}{
-							"type":    "stdio",
-							"command": "/old/path/to/ty",
-							"args":    []string{"mcp-server", "--task-id", "99"},
-						},
-					},
-				},
-			},
-		}
-		existingData, _ := json.MarshalIndent(existingConfig, "", "  ")
-		if err := os.WriteFile(configPath, existingData, 0644); err != nil {
-			t.Fatal(err)
-		}
-
-		err := writeWorkflowMCPConfig(worktreePath, taskID, "")
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-
-		// Read back and verify
-		data, err := os.ReadFile(configPath)
-		if err != nil {
-			t.Fatalf("failed to read claude.json: %v", err)
-		}
-
-		var config map[string]interface{}
-		if err := json.Unmarshal(data, &config); err != nil {
-			t.Fatalf("failed to parse claude.json: %v", err)
-		}
-
-		projects := config["projects"].(map[string]interface{})
-		projectConfig := projects[worktreePath].(map[string]interface{})
-		mcpServers := projectConfig["mcpServers"].(map[string]interface{})
-
-		// Old "workflow" entry should be gone
-		if _, ok := mcpServers["workflow"]; ok {
-			t.Error("expected old 'workflow' entry to be removed, but it still exists")
-		}
-
-		// New "taskyou" entry should exist
-		if _, ok := mcpServers["taskyou"]; !ok {
-			t.Fatal("expected 'taskyou' entry to be present")
-		}
-	})
-
-	t.Run("updates task ID on subsequent calls", func(t *testing.T) {
-		configPath := setupTempConfigDir(t)
-		worktreePath := t.TempDir()
-
-		// First call with task ID 100
-		err := writeWorkflowMCPConfig(worktreePath, 100, "")
-		if err != nil {
-			t.Fatalf("first call failed: %v", err)
-		}
-
-		// Second call with task ID 200
-		err = writeWorkflowMCPConfig(worktreePath, 200, "")
-		if err != nil {
-			t.Fatalf("second call failed: %v", err)
-		}
-
-		workflow := readWorkflowConfig(t, configPath, worktreePath)
-		args := workflow["args"].([]interface{})
-
-		if args[2] != "200" {
-			t.Errorf("task ID = %v, want 200", args[2])
+		if readProject(t, configPath, projectDir)["hasTrustDialogAccepted"] != true {
+			t.Fatal("expected the target project to be trusted")
 		}
 	})
 
 	t.Run("honors per-project CLAUDE_CONFIG_DIR override", func(t *testing.T) {
-		// Project with a custom claude config dir must get its MCP config
-		// written there, not to the default ~/.claude.json. Otherwise Claude
-		// Code reads the wrong file and the taskyou MCP server is invisible.
 		defaultConfigPath := setupTempConfigDir(t)
 		customDir := filepath.Join(t.TempDir(), "custom-claude")
 		customConfigPath := ClaudeConfigFilePath(customDir)
-		worktreePath := t.TempDir()
+		projectDir := t.TempDir()
 
-		if err := writeWorkflowMCPConfig(worktreePath, 42, customDir); err != nil {
+		if err := ensureProjectTrusted(projectDir, customDir); err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-
-		// Custom file should exist with the config.
 		if _, err := os.Stat(customConfigPath); err != nil {
 			t.Fatalf("expected config written to custom dir: %v", err)
 		}
-		data, _ := os.ReadFile(customConfigPath)
-		if !strings.Contains(string(data), "taskyou") {
-			t.Errorf("expected taskyou entry in custom config file:\n%s", data)
-		}
-
-		// Default file should NOT have been touched.
 		if _, err := os.Stat(defaultConfigPath); !os.IsNotExist(err) {
-			t.Errorf("expected default claude.json to remain untouched, but it exists at %s", defaultConfigPath)
-		}
-	})
-
-	t.Run("resolves symlinked ty binary", func(t *testing.T) {
-		// Claude Code spawns the configured command directly. If we record a
-		// symlinked PATH entry that points back into ty's install dir, an
-		// upgrade or PATH change can leave the MCP server pointing at a stale
-		// binary. Resolve the symlink at config-write time.
-		setupTempConfigDir(t)
-		worktreePath := t.TempDir()
-
-		if err := writeWorkflowMCPConfig(worktreePath, 1, ""); err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		taskyou := readWorkflowConfig(t, ClaudeConfigFilePath(""), worktreePath)
-		cmd, _ := taskyou["command"].(string)
-		if cmd == "" {
-			t.Fatal("expected command to be set")
-		}
-		// Whatever path we record should already be symlink-free.
-		if resolved, err := filepath.EvalSymlinks(cmd); err == nil && resolved != cmd {
-			t.Errorf("expected command to be symlink-resolved: stored %q resolves to %q", cmd, resolved)
+			t.Errorf("expected default claude.json untouched, but it exists at %s", defaultConfigPath)
 		}
 	})
 
 	t.Run("concurrent writes do not lose entries", func(t *testing.T) {
-		// Two task starts hitting the same claude.json must not clobber each
-		// other. Before the fix, the read-modify-write race lost entries —
-		// which is one plausible cause of an executor seeing no MCP tools.
 		setupTempConfigDir(t)
 
 		const n = 10
@@ -1880,7 +1579,7 @@ func TestWriteWorkflowMCPConfig(t *testing.T) {
 			wg.Add(1)
 			go func(i int) {
 				defer wg.Done()
-				if err := writeWorkflowMCPConfig(paths[i], int64(1000+i), ""); err != nil {
+				if err := ensureProjectTrusted(paths[i], ""); err != nil {
 					errCh <- err
 				}
 			}(i)
@@ -1905,7 +1604,7 @@ func TestWriteWorkflowMCPConfig(t *testing.T) {
 		}
 		for i, p := range paths {
 			if _, ok := projects[p]; !ok {
-				t.Errorf("worktree %d (%s) missing from final config — concurrent write was lost", i, p)
+				t.Errorf("project %d (%s) missing — concurrent write was lost", i, p)
 			}
 		}
 	})
