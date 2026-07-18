@@ -12,6 +12,22 @@ namespaces its scripts in its own directory and declares what it handles in a
 manifest, so **any number of plugins can handle the same event** and all of them
 run.
 
+## Installing
+
+The community collection lives at
+**[github.com/taskyou/plugins](https://github.com/taskyou/plugins)** — browse it,
+review a plugin, then install the whole collection (or a single plugin) with:
+
+```bash
+ty plugins add https://github.com/taskyou/plugins   # clone & install the collection
+ty plugins list                                     # see what it provides
+```
+
+`ty plugins add` clones a repo into your plugins dir; a repo can hold one plugin at
+its root or many nested in subdirectories, and every plugin inside becomes active.
+Re-running `add` on the same source updates it in place (`git pull`). You can also
+just drop a directory into `~/.config/task/plugins/` by hand — see [Examples](#examples).
+
 ## Anatomy
 
 ```
@@ -200,10 +216,14 @@ Complete, copy-pasteable plugins live in [`examples/plugins/`](../examples/plugi
 | [`desktop-notify`](../examples/plugins/desktop-notify/) | hooks + action | native notifications; a `test` action |
 | [`slack`](../examples/plugins/slack/) | hooks | webhook integration; bundled `config.env` |
 | [`worktree`](../examples/plugins/worktree/) | actions | task-scoped `diff` / `test` using `WORKTREE_PATH` |
+| [`heartbeat`](../examples/plugins/heartbeat/) | service | a daemon-supervised long-running process |
 
 ```bash
 cp -R examples/plugins/desktop-notify ~/.config/task/plugins/
 ty plugins list
 ```
 
-For more, see the [plugin idea gallery](plugin-ideas.md).
+For ready-made, reviewable plugins, see the community collection at
+[github.com/taskyou/plugins](https://github.com/taskyou/plugins) (see
+[Installing](#installing)). For more ideas, see the
+[plugin idea gallery](plugin-ideas.md).
