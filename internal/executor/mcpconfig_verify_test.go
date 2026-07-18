@@ -3,6 +3,7 @@ package executor
 import (
 	"encoding/json"
 	"os"
+	"reflect"
 	"testing"
 )
 
@@ -34,7 +35,7 @@ func TestEnsureWorktreeMCPConfig_Shape(t *testing.T) {
 		t.Errorf("type = %q, want stdio", s.Type)
 	}
 	want := []string{"mcp-server", "--task-id", "999999"}
-	if len(s.Args) != 3 || s.Args[0] != want[0] || s.Args[1] != want[1] || s.Args[2] != want[2] {
+	if !reflect.DeepEqual(s.Args, want) {
 		t.Errorf("args = %v, want %v", s.Args, want)
 	}
 	t.Logf("wrote %s -> command=%s args=%v", path, s.Command, s.Args)
