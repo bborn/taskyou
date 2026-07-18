@@ -3061,9 +3061,11 @@ func (e *Executor) runClaude(ctx context.Context, task *db.Task, workDir, prompt
 	}
 	// Note: we don't clean up hooks config immediately - it needs to persist for the session
 
-	// Setup TaskYou MCP server in ~/.claude.json so Claude can use taskyou_* tools
-	if err := writeWorkflowMCPConfig(workDir, task.ID, paths.configDir); err != nil {
-		e.logger.Warn("could not setup TaskYou MCP config", "error", err)
+	// Pre-trust the project so an unattended worktree session doesn't hang on Claude's
+	// "Do you trust this folder?" prompt. The taskyou MCP server is wired in separately
+	// via `claude --mcp-config` (see ensureWorktreeMCPConfig / claudeMCPConfigFlag).
+	if err := ensureProjectTrusted(e.getProjectDir(task.Project), paths.configDir); err != nil {
+		e.logger.Warn("could not pre-trust project in Claude config", "error", err)
 	}
 
 	// Create a temp file for the prompt (avoids quoting issues)
@@ -3112,10 +3114,14 @@ func (e *Executor) runClaude(ctx context.Context, task *db.Task, workDir, prompt
 	var script string
 	existingSessionID := task.ClaudeSessionID
 	envPrefix := claudeEnvPrefix(paths.configDir) + taskEnvPrefix(task)
+	// mcpFlag wires the taskyou stdio server in explicitly; the ~/.claude.json worktree-key
+	// injection is ignored by Claude 2.1+ (it keys worktrees to the main repo). See
+	// ensureWorktreeMCPConfig.
+	mcpFlag := e.claudeMCPConfigFlag(task.ID)
 	if existingSessionID != "" && ClaudeSessionExists(existingSessionID, workDir, paths.configDir) {
 		e.logLine(task.ID, "system", fmt.Sprintf("Resuming existing session %s", existingSessionID))
-		script = fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %sclaude %s%s%s%s--resume %s %s`,
-			task.ID, sessionID, task.Port, task.WorktreePath, envPrefix, dangerousFlag, rcFlag, effort, model, existingSessionID, promptArg)
+		script = fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %sclaude %s%s%s%s%s--resume %s %s`,
+			task.ID, sessionID, task.Port, task.WorktreePath, envPrefix, mcpFlag, dangerousFlag, rcFlag, effort, model, existingSessionID, promptArg)
 	} else {
 		if existingSessionID != "" {
 			e.logLine(task.ID, "system", fmt.Sprintf("Session %s no longer exists, starting fresh", existingSessionID))
@@ -3124,8 +3130,8 @@ func (e *Executor) runClaude(ctx context.Context, task *db.Task, workDir, prompt
 				e.logger.Warn("failed to clear stale session ID", "task", task.ID, "error", err)
 			}
 		}
-		script = fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %sclaude %s%s%s%s%s`,
-			task.ID, sessionID, task.Port, task.WorktreePath, envPrefix, dangerousFlag, rcFlag, effort, model, promptArg)
+		script = fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %sclaude %s%s%s%s%s%s`,
+			task.ID, sessionID, task.Port, task.WorktreePath, envPrefix, mcpFlag, dangerousFlag, rcFlag, effort, model, promptArg)
 	}
 
 	// Create new window in task-daemon session (with retry logic for race conditions)
@@ -3228,9 +3234,11 @@ func (e *Executor) runClaudeResume(ctx context.Context, task *db.Task, workDir, 
 		e.logger.Warn("could not setup Claude hooks", "error", err)
 	}
 
-	// Setup TaskYou MCP server in ~/.claude.json so Claude can use taskyou_* tools
-	if err := writeWorkflowMCPConfig(workDir, task.ID, paths.configDir); err != nil {
-		e.logger.Warn("could not setup TaskYou MCP config", "error", err)
+	// Pre-trust the project so an unattended worktree session doesn't hang on Claude's
+	// "Do you trust this folder?" prompt. The taskyou MCP server is wired in separately
+	// via `claude --mcp-config` (see ensureWorktreeMCPConfig / claudeMCPConfigFlag).
+	if err := ensureProjectTrusted(e.getProjectDir(task.Project), paths.configDir); err != nil {
+		e.logger.Warn("could not pre-trust project in Claude config", "error", err)
 	}
 
 	// Create a temp file for the feedback (avoids quoting issues)
@@ -3272,8 +3280,9 @@ func (e *Executor) runClaudeResume(ctx context.Context, task *db.Task, workDir, 
 	}
 
 	envPrefix := claudeEnvPrefix(paths.configDir) + taskEnvPrefix(task)
-	script := fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %sclaude %s%s%s%s--resume %s %s`,
-		task.ID, taskSessionID, task.Port, task.WorktreePath, envPrefix, dangerousFlag, rcFlag, effort, model, claudeSessionID, promptArg)
+	mcpFlag := e.claudeMCPConfigFlag(task.ID)
+	script := fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %sclaude %s%s%s%s%s--resume %s %s`,
+		task.ID, taskSessionID, task.Port, task.WorktreePath, envPrefix, mcpFlag, dangerousFlag, rcFlag, effort, model, claudeSessionID, promptArg)
 
 	// Create new window in task-daemon session (with retry logic for race conditions)
 	actualSession, tmuxErr := createTmuxWindow(daemonSession, windowName, workDir, script, e.getProjectDir(task.Project), task.ID)
@@ -3429,8 +3438,9 @@ func (e *Executor) resumeClaudeDangerous(task *db.Task, workDir string) bool {
 
 	// Force dangerous mode regardless of WORKTREE_DANGEROUS_MODE setting
 	envPrefix := claudeEnvPrefix(paths.configDir) + taskEnvPrefix(task)
-	script := fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %sclaude --dangerously-skip-permissions --resume %s`,
-		taskID, taskSessionID, task.Port, task.WorktreePath, envPrefix, claudeSessionID)
+	mcpFlag := e.claudeMCPConfigFlag(taskID)
+	script := fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %sclaude %s--dangerously-skip-permissions --resume %s`,
+		taskID, taskSessionID, task.Port, task.WorktreePath, envPrefix, mcpFlag, claudeSessionID)
 
 	// Create new window in task-daemon session (with retry logic for race conditions)
 	actualSession, tmuxErr := createTmuxWindow(daemonSession, windowName, workDir, script, e.getProjectDir(task.Project), task.ID)
@@ -3635,8 +3645,9 @@ func (e *Executor) resumeClaudeSafe(task *db.Task, workDir string) bool {
 	// never mean bypass, so a still-dangerous task degrades to default.
 	safeMode := safePermissionMode(task.EffectivePermissionMode())
 	envPrefix := claudeEnvPrefix(paths.configDir) + taskEnvPrefix(task)
-	script := fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %sclaude %s--resume %s`,
-		taskID, taskSessionID, task.Port, task.WorktreePath, envPrefix, permissionFlagForMode(safeMode), claudeSessionID)
+	mcpFlag := e.claudeMCPConfigFlag(taskID)
+	script := fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %sclaude %s%s--resume %s`,
+		taskID, taskSessionID, task.Port, task.WorktreePath, envPrefix, mcpFlag, permissionFlagForMode(safeMode), claudeSessionID)
 
 	// Create new window in task-daemon session (with retry logic for race conditions)
 	actualSession, tmuxErr := createTmuxWindow(daemonSession, windowName, workDir, script, e.getProjectDir(task.Project), task.ID)
@@ -4966,44 +4977,57 @@ func symlinkMCPConfig(projectDir, worktreePath string) error {
 // serialization will silently drop entries. The flock below covers cross-process safety.
 var claudeJSONMu sync.Mutex
 
-// writeWorkflowMCPConfig writes the TaskYou MCP server configuration to the project's
-// claude.json under the worktree's project path. This makes it a "local-scoped" server
-// that doesn't require approval prompts (unlike project-scoped servers in .mcp.json
-// which require user approval). This enables Claude Code to use TaskYou tools
-// (taskyou_complete, taskyou_needs_input, etc.).
-//
-// configDir lets callers target a project-specific CLAUDE_CONFIG_DIR — passing "" falls
-// back to the user's default (~/.claude.json). Without this, projects with a custom
-// claude_config_dir end up with their MCP config written to the wrong file and the
-// executor session never sees the taskyou_* tools.
-func writeWorkflowMCPConfig(worktreePath string, taskID int64, configDir string) error {
-	configPath := ClaudeConfigFilePath(configDir)
-
-	// Get the path to the ty executable. We resolve symlinks so Claude Code spawns the
-	// real binary on disk, not whatever symlink the user happens to have in PATH today.
-	taskExecutable, err := os.Executable()
+// resolveTaskExecutable returns the absolute, symlink-resolved path to the running ty
+// binary so Claude Code spawns the real binary on disk (not whatever symlink the user
+// happens to have in PATH). Falls back to "ty" if resolution fails.
+func resolveTaskExecutable() string {
+	exe, err := os.Executable()
 	if err != nil {
-		taskExecutable = "ty"
-	} else if resolved, err := filepath.EvalSymlinks(taskExecutable); err == nil {
-		taskExecutable = resolved
+		return "ty"
 	}
+	if resolved, err := filepath.EvalSymlinks(exe); err == nil {
+		return resolved
+	}
+	return exe
+}
 
-	// Build the TaskYou MCP server config
-	// Use "stdio" transport - Claude Code spawns the process and communicates via stdin/stdout
-	// Auto-approve all TaskYou tools so users don't have to manually approve each call.
-	//
-	// alwaysLoad asks Claude Code to load taskyou's tools at session start rather than
-	// deferring them behind ToolSearch, so a task that wants them (e.g. taskyou_needs_input
-	// to ask a question) can reach them without a search step. Best-effort: it isn't honored
-	// in this project-scoped ~/.claude.json location on current Claude versions, and we can't
-	// move to .mcp.json without reintroducing approval prompts. Workflow *completion* does
-	// not depend on it — that's git-based (a step commits + pushes; ty advances the DAG) —
-	// so a deferred taskyou server never stalls a workflow.
+// worktreeMCPConfigPath is the deterministic path of the per-task MCP config file that
+// wires the taskyou stdio server into the executor's Claude session via `claude
+// --mcp-config`. Keyed by task ID under ty's data dir so any launch/resume/restart site
+// can recompute it without threading state through the call chain.
+func worktreeMCPConfigPath(taskID int64) string {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		home = os.Getenv("HOME")
+	}
+	return filepath.Join(home, ".local", "share", "task", "mcp", fmt.Sprintf("taskyou-%d.json", taskID))
+}
+
+// ensureWorktreeMCPConfig writes (idempotently) the per-task MCP config file and returns
+// its path.
+//
+// Why this exists: Claude Code 2.1+ resolves a git worktree's project key to the MAIN
+// repository root (git-common-dir's parent), not the worktree cwd. A taskyou server written
+// under the worktree key in ~/.claude.json is therefore silently ignored — the executor
+// session never sees the taskyou_* tools and artifact-handoff workflow phases (which hand
+// off via taskyou_set_artifact rather than git) stall or hack
+// around ty's DB. Passing the server explicitly with `--mcp-config <file>` bypasses the
+// project-key resolution entirely and, unlike writing it under the shared main-repo key,
+// does NOT leak the taskyou server into the user's own interactive sessions in that repo.
+//
+// The server inherits the Claude process env when spawned, so WORKTREE_DB_PATH (isolated
+// instances) still targets the right DB without an explicit env block, matching the old
+// ~/.claude.json entry.
+func ensureWorktreeMCPConfig(taskID int64) (string, error) {
+	path := worktreeMCPConfigPath(taskID)
+
 	taskyouServer := map[string]interface{}{
-		"type":       "stdio",
-		"command":    taskExecutable,
-		"args":       []string{"mcp-server", "--task-id", fmt.Sprintf("%d", taskID)},
-		"alwaysLoad": true,
+		"type":    "stdio",
+		"command": resolveTaskExecutable(),
+		"args":    []string{"mcp-server", "--task-id", fmt.Sprintf("%d", taskID)},
+		// autoApprove keeps the taskyou_* tools from prompting in non-dangerous modes,
+		// matching the old ~/.claude.json injection. Best-effort in a --mcp-config file;
+		// unattended workflow steps typically run in dangerous/auto mode anyway.
 		"autoApprove": []string{
 			"taskyou_complete",
 			"taskyou_needs_input",
@@ -5016,6 +5040,56 @@ func writeWorkflowMCPConfig(worktreePath string, taskID int64, configDir string)
 			"taskyou_set_artifact",
 		},
 	}
+	config := map[string]interface{}{
+		"mcpServers": map[string]interface{}{"taskyou": taskyouServer},
+	}
+
+	data, err := json.MarshalIndent(config, "", "  ")
+	if err != nil {
+		return "", fmt.Errorf("marshal taskyou mcp-config: %w", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		return "", fmt.Errorf("mkdir taskyou mcp-config dir: %w", err)
+	}
+	if err := os.WriteFile(path, data, 0644); err != nil {
+		return "", fmt.Errorf("write taskyou mcp-config: %w", err)
+	}
+	return path, nil
+}
+
+// claudeMCPConfigFlag ensures the per-task MCP config file exists and returns the
+// `--mcp-config <path> ` flag (with trailing space) to splice into the claude command.
+// Returns "" on failure so a config-write hiccup degrades to "no taskyou tools" rather
+// than a broken command line.
+func (e *Executor) claudeMCPConfigFlag(taskID int64) string {
+	path, err := ensureWorktreeMCPConfig(taskID)
+	if err != nil || path == "" {
+		if e != nil && e.logger != nil {
+			e.logger.Warn("failed to write taskyou mcp-config; taskyou tools will be unavailable", "task", taskID, "error", err)
+		}
+		return ""
+	}
+	return fmt.Sprintf("--mcp-config %q ", path)
+}
+
+// ensureProjectTrusted pre-trusts a project in Claude Code's config so an unattended
+// worktree task never hangs on the "Do you trust the files in this folder?" onboarding
+// prompt — no human is present to answer it.
+//
+// It writes under the MAIN repo path, not the worktree path: Claude Code 2.1+ resolves a
+// git worktree's project config (trust and onboarding included) to the main repo root
+// (git-common-dir's parent), so a worktree of a trusted repo inherits that trust. This
+// replaces the old per-worktree write, which current Claude no longer reads.
+//
+// The taskyou MCP server is wired in separately, per-session, via `claude --mcp-config`
+// (see ensureWorktreeMCPConfig) — it is deliberately NOT written here anymore.
+//
+// configDir targets a project-specific CLAUDE_CONFIG_DIR — "" falls back to ~/.claude.json.
+func ensureProjectTrusted(projectDir, configDir string) error {
+	if strings.TrimSpace(projectDir) == "" {
+		return nil
+	}
+	configPath := ClaudeConfigFilePath(configDir)
 
 	claudeJSONMu.Lock()
 	defer claudeJSONMu.Unlock()
@@ -5044,44 +5118,21 @@ func writeWorkflowMCPConfig(worktreePath string, taskID int64, configDir string)
 		projects = make(map[string]interface{})
 	}
 
-	// Claude Code keys its per-project config by its RESOLVED working directory. If the
-	// worktree lives under a symlinked path (macOS /tmp -> /private/tmp, a symlinked home,
-	// …) the entry we write under the raw path is never found: the step gets no taskyou
-	// MCP server, and — worse — stops dead on the "Do you trust this folder?" prompt,
-	// hanging an unattended workflow step forever. Write the config under both spellings.
-	keys := []string{worktreePath}
-	if resolved, err := filepath.EvalSymlinks(worktreePath); err == nil && resolved != worktreePath {
+	// Claude keys by its resolved working directory, so pre-trust both the raw and
+	// symlink-resolved spellings of the main repo path (e.g. /tmp -> /private/tmp) or a
+	// symlinked project would miss the entry and re-prompt.
+	keys := []string{projectDir}
+	if resolved, err := filepath.EvalSymlinks(projectDir); err == nil && resolved != projectDir {
 		keys = append(keys, resolved)
 	}
 
 	for _, key := range keys {
-		// Get or create worktree project config
-		var projectConfig map[string]interface{}
-		if existing, ok := projects[key].(map[string]interface{}); ok {
-			projectConfig = existing
-		} else {
+		projectConfig, ok := projects[key].(map[string]interface{})
+		if !ok {
 			projectConfig = make(map[string]interface{})
 		}
-
-		// Get or create mcpServers map for this project
-		mcpServers, ok := projectConfig["mcpServers"].(map[string]interface{})
-		if !ok {
-			mcpServers = make(map[string]interface{})
-		}
-
-		// Add/update the taskyou server (and remove old "workflow" name if present)
-		delete(mcpServers, "workflow")
-		mcpServers["taskyou"] = taskyouServer
-		projectConfig["mcpServers"] = mcpServers
-
-		// Pre-trust the worktree. A fresh worktree path is unknown to Claude Code, so on
-		// first launch it blocks on the "Do you trust the files in this folder?" onboarding
-		// prompt — which stalls an unattended workflow step forever (no human to answer).
-		// ty created this worktree from the user's own already-trusted project, so trusting
-		// it is safe and matches intent. Setting these two flags skips the dialog entirely.
 		projectConfig["hasTrustDialogAccepted"] = true
 		projectConfig["hasCompletedProjectOnboarding"] = true
-
 		projects[key] = projectConfig
 	}
 	config["projects"] = projects

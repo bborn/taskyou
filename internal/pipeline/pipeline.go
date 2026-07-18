@@ -24,6 +24,7 @@ package pipeline
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"os/exec"
 	"sort"
 	"strings"
@@ -373,12 +374,34 @@ func Create(database *db.DB, opts Options) (*Result, error) {
 	// path. With MULTIPLE roots (true parallel entry points), no single step can
 	// own the branch, so we pre-create it on the remote and every step (roots
 	// included) checks it out; the parallel roots each push to their own branch.
+	//
+	// We pre-seed origin/<branch> for single-root pipelines too, whenever there is a
+	// downstream step: a *document* root (e.g. rpi's research-questions) hands off via
+	// the artifact store and is told NOT to push, so the shared branch would stay
+	// local-only and the next step's `git worktree add origin/<branch>` fails with
+	// "Spawn blocked by pipeline infra gap". Pre-seeding from HEAD is idempotent — a
+	// code root simply pushes its commits on top of the seeded ref.
+	hasDownstreamStep := false
+	for _, s := range steps {
+		if !rootNames[s.Name] {
+			hasDownstreamStep = true
+			break
+		}
+	}
 	if multiRoot {
+		// Parallel roots can't own the branch; the remote ref is mandatory.
 		if err := ensureSharedBranch(projectDir, branch); err != nil {
 			for _, t := range tasks {
 				_ = database.DeleteTask(t.ID)
 			}
 			return nil, fmt.Errorf("multi-root workflows need a git-worktree project with a remote: %w", err)
+		}
+	} else if hasDownstreamStep {
+		// Single root, but a downstream step will `git worktree add origin/<branch>`.
+		// Best-effort: a repo without a remote can't run a multi-step pipeline anyway
+		// (that checkout would fail regardless), so don't block creation — just warn.
+		if err := ensureSharedBranch(projectDir, branch); err != nil {
+			log.Printf("pipeline: could not pre-seed shared branch %q on origin; a downstream step's worktree setup will fail without it: %v", branch, err)
 		}
 	}
 
@@ -430,11 +453,17 @@ func Create(database *db.DB, opts Options) (*Result, error) {
 // ensureSharedBranch creates the workflow branch on the project's origin remote
 // (from the project's current HEAD) so that several parallel root steps can all
 // check it out at once. A branch that already exists is fine.
+//
+// --no-verify skips pre-push hooks: this seed points the new ref at HEAD (already on
+// origin — no new commits), so running a repo's pre-push test/lint suite on it is both
+// pointless and, in practice, flaky enough to abort pipeline creation (e.g. a Rails
+// pre-push hook that boots the full test suite). The steps' own commits push normally,
+// hooks and all.
 func ensureSharedBranch(projectDir, branch string) error {
 	if strings.TrimSpace(projectDir) == "" {
 		return fmt.Errorf("project directory not found")
 	}
-	cmd := exec.Command("git", "-C", projectDir, "push", "origin", "HEAD:refs/heads/"+branch)
+	cmd := exec.Command("git", "-C", projectDir, "push", "--no-verify", "origin", "HEAD:refs/heads/"+branch)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		if strings.Contains(string(out), "already exists") {
 			return nil
