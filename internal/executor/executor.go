@@ -4471,20 +4471,35 @@ func (e *Executor) setupWorktree(task *db.Task) (string, bool, error) {
 
 	// Check if task specifies an existing source branch to checkout
 	if task.SourceBranch != "" {
-		// Fetch the latest from origin to ensure we have the branch
+		// Best-effort fetch so we pick up any pushed updates to the branch. A
+		// fetch failure must NOT be fatal: repos with no remote (or an offline
+		// remote) can still resolve the branch locally, and pipelines whose
+		// early steps are document phases build the shared branch locally and
+		// never push it.
 		fetchCmd := exec.Command("git", "fetch", "origin")
 		fetchCmd.Dir = projectDir
 		if fetchOutput, fetchErr := fetchCmd.CombinedOutput(); fetchErr != nil {
-			return "", false, fmt.Errorf("fetch origin: %v\n%s", fetchErr, string(fetchOutput))
+			e.logger.Warn("git fetch origin failed; will resolve source branch locally",
+				"task", task.ID, "branch", task.SourceBranch, "error", fetchErr, "output", string(fetchOutput))
 		}
 
-		// Create worktree from existing remote branch (no -b flag)
-		remoteBranch := "origin/" + task.SourceBranch
-		cmd := exec.Command("git", "worktree", "add", worktreePath, remoteBranch)
+		// Resolve the source branch to a checkout-able ref. Prefer the
+		// remote-tracking ref (origin/<branch>) so pushed updates win, but fall
+		// back to a local branch of the same name. Without the local fallback, a
+		// pipeline whose first steps are document phases fails here on the first
+		// code step with `fatal: invalid reference: origin/<branch>` (the shared
+		// branch exists only locally), and the task loops on spawn forever.
+		ref, resolveErr := e.resolveSourceBranchRef(projectDir, task.SourceBranch)
+		if resolveErr != nil {
+			return "", false, resolveErr
+		}
+
+		// Create worktree from the resolved branch ref (no -b flag).
+		cmd := exec.Command("git", "worktree", "add", worktreePath, ref)
 		cmd.Dir = projectDir
 		output, err := cmd.CombinedOutput()
 		if err != nil {
-			return "", false, fmt.Errorf("create worktree from branch %s: %v\n%s", task.SourceBranch, err, string(output))
+			return "", false, fmt.Errorf("create worktree from branch %s (ref %s): %v\n%s", task.SourceBranch, ref, err, string(output))
 		}
 
 		// Use the source branch name as the branch name for the task
@@ -5486,6 +5501,30 @@ func (e *Executor) ensureGitignore(projectDir, entry string) {
 		f.WriteString("\n")
 	}
 	f.WriteString(entry + "\n")
+}
+
+// resolveSourceBranchRef returns a git ref for an existing source branch that a
+// worktree can be created from. It prefers the remote-tracking ref
+// (origin/<branch>) so pushed updates win, then falls back to a local branch of
+// the same name. This local fallback is what keeps document-first pipelines
+// working: their early steps create the shared branch locally and never push
+// it, so origin/<branch> does not exist when the first code step sets up its
+// worktree. Returns an error only when the branch exists in neither place.
+func (e *Executor) resolveSourceBranchRef(projectDir, sourceBranch string) (string, error) {
+	refExists := func(ref string) bool {
+		cmd := exec.Command("git", "rev-parse", "--verify", "--quiet", ref)
+		cmd.Dir = projectDir
+		return cmd.Run() == nil
+	}
+
+	remoteRef := "origin/" + sourceBranch
+	if refExists("refs/remotes/" + remoteRef) {
+		return remoteRef, nil
+	}
+	if refExists("refs/heads/" + sourceBranch) {
+		return sourceBranch, nil
+	}
+	return "", fmt.Errorf("source branch %s not found on origin or locally", sourceBranch)
 }
 
 // getDefaultBranch returns the default branch name for a git repo.
