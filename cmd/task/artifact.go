@@ -7,9 +7,10 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/spf13/cobra"
+
 	"github.com/bborn/workflow/internal/db"
 	"github.com/bborn/workflow/internal/pipeline"
-	"github.com/spf13/cobra"
 )
 
 // Workflow phases hand documents to each other through the pipeline artifact
