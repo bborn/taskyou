@@ -1,0 +1,28 @@
+# AI summaries of a task's work, via lumen (https://github.com/jnsahaj/lumen).
+#
+# Install:
+#   brew install jnsahaj/lumen/lumen
+#   cp -R examples/plugins/lumen ~/.config/task/plugins/
+#   cp ~/.config/task/plugins/lumen/config.example.env \
+#      ~/.config/task/plugins/lumen/config.env   # then set a provider
+#
+# Invoked on demand:
+#   - detail view: press A, pick one
+#   - palette: type ">" then search
+#   - CLI: ty plugins run lumen explain <task-id>
+#
+# Every action calls a model, which costs money and sends the diff to your
+# provider — unless you point it at Ollama. See README.md.
+name: lumen
+version: 0.1.0
+description: Explain a task's diff and draft its commit message with lumen (AI).
+actions:
+  - id: explain
+    label: Explain changes
+    command: explain.sh
+  - id: draft
+    label: Draft commit message
+    command: draft.sh
+  - id: review
+    label: Review branch vs base
+    command: review.sh
