@@ -1933,7 +1933,18 @@ func (e *Executor) executeTask(ctx context.Context, task *db.Task) {
 
 	// Update final status and trigger hooks
 	// Respect status set by hooks - don't override blocked with done
-	if result.Interrupted {
+	if result.Requeued {
+		// The task was deliberately re-queued while its session was parked (e.g. a
+		// human moved a blocked task back to In Progress). Preserve the queued
+		// status the requeue set — do NOT write backlog — kill the stale session so
+		// the fresh run starts clean, and let the worker pick it up. Releasing the
+		// running-task slot happens in this goroutine's defer, which the worker's
+		// admission gate waits on, so the handoff is sequential (no double-session).
+		e.logLine(task.ID, "system", "Re-queued by user — starting a fresh run")
+		taskExecutor.Kill(task.ID)
+		e.TriggerProcessing() // wake the worker immediately instead of waiting for the next tick
+		return
+	} else if result.Interrupted {
 		// Explicitly set to backlog - don't assume Interrupt() already did it,
 		// as the interruption may have come from pollTmuxSession detecting a
 		// stale status or context cancellation.
@@ -2415,6 +2426,7 @@ type execResult struct {
 	NeedsInput  bool
 	Interrupted bool
 	Message     string
+	Requeued    bool
 }
 
 // TmuxDaemonSession is the default session name that holds all Claude task windows.
@@ -4094,9 +4106,12 @@ func (e *Executor) pollTmuxSession(ctx context.Context, taskID int64, sessionNam
 					return execResult{Success: true}
 				}
 				if task.Status == db.StatusQueued {
-					// Task was re-queued (e.g. retry) - stop polling so the
-					// worker can pick it up fresh without a duplicate session
-					return execResult{Interrupted: true}
+					// Task was re-queued (e.g. retry, or a human moving a blocked
+					// task back to In Progress) - stop polling so the worker can
+					// pick it up fresh without a duplicate session. Signal the
+					// requeue distinctly (Requeued) so the caller preserves the
+					// queued status instead of clobbering it with backlog.
+					return execResult{Interrupted: true, Requeued: true}
 				}
 			}
 
