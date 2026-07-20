@@ -1875,7 +1875,9 @@ func (m *AppModel) renderFilterBar() string {
 			parts = append(parts, helpStyle.Render("  (Tab: select project, ↑↓: navigate)"))
 		} else {
 			navHelp := fmt.Sprintf("%s%s%s%s", IconArrowUp(), IconArrowDown(), IconArrowLeft(), IconArrowRight())
-			parts = append(parts, helpStyle.Render(fmt.Sprintf("  (backspace: clear, Enter: done, %s: navigate, [: project, is:workflow)", navHelp)))
+			// Keep this hint on ONE line — the filter bar doesn't wrap gracefully,
+			// so advertise the short alias (is:wf) rather than the full token.
+			parts = append(parts, helpStyle.Render(fmt.Sprintf("  (backspace: clear, Enter: done, %s: navigate, [: project, is:wf)", navHelp)))
 		}
 	} else if m.filterText != "" {
 		parts = append(parts, helpStyle.Render("  (/: edit, Esc: clear)"))
