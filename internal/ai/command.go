@@ -274,8 +274,15 @@ func (s *CommandService) parseResponse(response, originalInput string) (*Command
 			// Try to extract task ID from original input
 			cmd.TaskID = extractTaskID(originalInput)
 		}
+		// No default. This used to fall back to StatusDone, which meant any
+		// utterance the model classified as "update status" but couldn't pin a
+		// status to silently became "mark it done" — the most destructive of the
+		// six statuses chosen as the guess for the most ambiguous input.
 		if cmd.Status == "" {
-			cmd.Status = db.StatusDone
+			return &Command{
+				Type:    CommandUnknown,
+				Message: "I couldn't tell which status you meant — say e.g. \"move #42 to blocked\".",
+			}, nil
 		}
 		if cmd.Message == "" {
 			cmd.Message = fmt.Sprintf("Updating task #%d to %s", cmd.TaskID, cmd.Status)
