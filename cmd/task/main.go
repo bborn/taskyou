@@ -524,6 +524,10 @@ Examples:
 	// Plugins subcommand - inspect installed task plugins
 	rootCmd.AddCommand(newPluginsCmd())
 
+	// Workflow inspection — render a pipeline run as the DAG it is, so its shape
+	// and current position are readable without querying the DB by hand.
+	rootCmd.AddCommand(newWorkflowCmd())
+
 	// Alias: claudes -> sessions (for backwards compatibility)
 	claudesCmd := &cobra.Command{
 		Use:    "claudes",
@@ -1269,6 +1273,9 @@ Examples:
 			}
 			defer database.Close()
 
+			onlyWorkflows, _ := cmd.Flags().GetBool("workflows")
+			noWorkflows, _ := cmd.Flags().GetBool("no-workflows")
+
 			opts := db.ListTasksOptions{
 				Status:        status,
 				Project:       project,
@@ -1277,11 +1284,34 @@ Examples:
 				Limit:         limit,
 				IncludeClosed: all,
 			}
+			// The workflow split is applied in Go, after the query. Keeping the SQL
+			// LIMIT here would cap the rows BEFORE filtering and silently return far
+			// fewer than asked for, so widen the fetch and re-apply the limit below.
+			if onlyWorkflows || noWorkflows {
+				opts.Limit = 5000
+			}
 
 			tasks, err := database.ListTasks(opts)
 			if err != nil {
 				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
 				os.Exit(1)
+			}
+
+			// Workflow steps and standalone tasks interleave in one flat list, which
+			// makes it hard to see either clearly: N steps of one run drown out real
+			// tasks, and vice versa. These filters separate the two populations.
+			// (`ty workflow list` is the grouped view of the same steps.)
+			if onlyWorkflows || noWorkflows {
+				filtered := make([]*db.Task, 0, len(tasks))
+				for _, t := range tasks {
+					if pipeline.IsWorkflowTask(t) == onlyWorkflows {
+						filtered = append(filtered, t)
+					}
+				}
+				if limit > 0 && len(filtered) > limit {
+					filtered = filtered[:limit]
+				}
+				tasks = filtered
 			}
 
 			// Fetch PR info if requested
@@ -1417,6 +1447,9 @@ Examples:
 	listCmd.Flags().IntP("limit", "n", 50, "Maximum number of tasks to return")
 	listCmd.Flags().Bool("json", false, "Output in JSON format")
 	listCmd.Flags().Bool("pr", false, "Show PR/CI status (requires network)")
+	listCmd.Flags().Bool("workflows", false, "Only workflow (pipeline) step tasks")
+	listCmd.Flags().Bool("no-workflows", false, "Exclude workflow step tasks (only standalone tasks)")
+	listCmd.MarkFlagsMutuallyExclusive("workflows", "no-workflows")
 	listCmd.RegisterFlagCompletionFunc("status", completeFlagStatuses)
 	listCmd.RegisterFlagCompletionFunc("project", completeFlagProjects)
 	listCmd.RegisterFlagCompletionFunc("type", completeFlagTypes)

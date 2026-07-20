@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"os"
 	osExec "os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -22,6 +24,7 @@ import (
 	"github.com/bborn/workflow/internal/db"
 	"github.com/bborn/workflow/internal/executor"
 	"github.com/bborn/workflow/internal/github"
+	"github.com/bborn/workflow/internal/pipeline"
 	"github.com/bborn/workflow/internal/qmd"
 )
 
@@ -184,11 +187,16 @@ type DetailModel struct {
 	glamourWidth             int // Width the renderers were created for
 
 	// Content caching to avoid unnecessary re-renders
-	lastRenderedBody    string
-	lastRenderedSummary string
-	lastRenderedLogHash uint64
-	lastRenderedFocused bool
-	cachedContent       string
+	// Sibling steps of this task's workflow (empty for standalone tasks), loaded
+	// when the task changes rather than per-render so View() stays cheap.
+	workflowSteps []*db.Task
+
+	lastRenderedBody     string
+	lastRenderedSummary  string
+	lastRenderedLogHash  uint64
+	lastRenderedFocused  bool
+	lastRenderedWorkflow uint64
+	cachedContent        string
 
 	// View render cache. View() runs on every Bubble Tea update while the detail
 	// view is open (focus ticks, polls, pane events), but its pixels only change
@@ -374,6 +382,7 @@ func (m *DetailModel) UpdateTask(t *db.Task) tea.Cmd {
 	}
 
 	m.task = t
+	m.loadWorkflowSteps()
 	if m.ready {
 		m.setViewportContent()
 	}
@@ -384,6 +393,137 @@ func (m *DetailModel) UpdateTask(t *db.Task) tea.Cmd {
 	}
 
 	return nil
+}
+
+// loadWorkflowSteps caches the sibling steps of this task's workflow so the
+// detail view can show where the task sits in its flow. Opening a workflow step
+// otherwise gave no hint that it was part of a run at all, let alone which
+// phase came before it or what is still pending. Standalone tasks clear the
+// slice, so the section simply doesn't render for them.
+func (m *DetailModel) loadWorkflowSteps() {
+	m.workflowSteps = nil
+	if m.task == nil || m.database == nil || !pipeline.IsWorkflowTask(m.task) {
+		return
+	}
+	branch := pipeline.GroupKey(m.task)
+	if branch == "" {
+		return
+	}
+	// The board only holds active tasks; a workflow is illegible without its
+	// finished steps, so query directly and include closed ones.
+	tasks, err := m.database.ListTasks(db.ListTasksOptions{IncludeClosed: true, Limit: 5000})
+	if err != nil {
+		return
+	}
+	var steps []*db.Task
+	for _, t := range tasks {
+		if pipeline.GroupKey(t) == branch && pipeline.IsWorkflowTask(t) {
+			steps = append(steps, t)
+		}
+	}
+	sort.Slice(steps, func(i, j int) bool { return steps[i].ID < steps[j].ID })
+	if len(steps) < 2 {
+		// A lone member isn't a flow worth drawing.
+		return
+	}
+	m.workflowSteps = steps
+}
+
+// workflowStepsHash fingerprints the flow's rendered inputs (ids + statuses) so
+// renderContent's cache invalidates when a sibling step advances. Without this
+// the panel would freeze at whatever the flow looked like when first drawn.
+func (m *DetailModel) workflowStepsHash() uint64 {
+	if len(m.workflowSteps) == 0 {
+		return 0
+	}
+	h := fnv.New64a()
+	for _, s := range m.workflowSteps {
+		fmt.Fprintf(h, "%d:%s;", s.ID, s.Status)
+	}
+	return h.Sum64()
+}
+
+// renderWorkflowFlow draws the run as a compact vertical flow, marking the step
+// you're looking at so "where am I in this pipeline?" is answerable at a glance.
+func (m *DetailModel) renderWorkflowFlow(dimmed bool) string {
+	if len(m.workflowSteps) == 0 {
+		return ""
+	}
+	dimStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280"))
+
+	done := 0
+	for _, s := range m.workflowSteps {
+		if s.Status == db.StatusDone {
+			done++
+		}
+	}
+
+	var b strings.Builder
+	b.WriteString("\n")
+	b.WriteString(Bold.Render("Workflow"))
+	b.WriteString("\n\n")
+
+	header := fmt.Sprintf("  %d/%d steps complete", done, len(m.workflowSteps))
+	b.WriteString(dimStyle.Render(header))
+	b.WriteString("\n")
+
+	for _, s := range m.workflowSteps {
+		mark := "·"
+		switch s.Status {
+		case db.StatusDone:
+			mark = "✓"
+		case db.StatusProcessing:
+			mark = "▶"
+		case db.StatusQueued:
+			mark = "»"
+		case db.StatusBlocked:
+			mark = "⏸"
+		}
+
+		role := ""
+		if pipeline.IsGateStep(s) {
+			role = " (gate)"
+		}
+
+		name := workflowStepLabel(s.Title)
+		line := fmt.Sprintf("  %s %-22s %s%s", mark, name, s.Status, role)
+		if m.task != nil && s.ID == m.task.ID {
+			line += "   ← you are here"
+		}
+
+		switch {
+		case dimmed:
+			b.WriteString(dimStyle.Render(line))
+		case m.task != nil && s.ID == m.task.ID:
+			b.WriteString(Bold.Render(line))
+		case s.Status == db.StatusDone:
+			b.WriteString(dimStyle.Render(line))
+		default:
+			b.WriteString(line)
+		}
+		b.WriteString("\n")
+	}
+
+	if m.task != nil && pipeline.IsGateStep(m.task) && m.task.Status == db.StatusBlocked {
+		b.WriteString(dimStyle.Render(fmt.Sprintf("\n  ⏸ Human gate — approve with: ty close %d\n", m.task.ID)))
+	}
+	return b.String()
+}
+
+// workflowStepLabel pulls "design" out of a "[design] goal" title.
+func workflowStepLabel(title string) string {
+	title = strings.TrimSpace(title)
+	if strings.HasPrefix(title, "[") {
+		if end := strings.Index(title, "]"); end > 1 {
+			return title[1:end]
+		}
+	}
+	// Slice by runes, not bytes: a byte slice would corrupt a multi-byte character
+	// mid-sequence and mis-measure the visible width.
+	if r := []rune(title); len(r) > 22 {
+		return string(r[:21]) + "…"
+	}
+	return title
 }
 
 // restartForExecutorSwitch handles switching from one executor to another.
@@ -3027,11 +3167,15 @@ func (m *DetailModel) renderContent() string {
 	// Check if we can use cached content
 	// Note: We don't cache when related tasks are loading/changing
 	logHash := m.computeLogHash()
+	// The workflow panel reflects sibling step statuses, which change while this
+	// view is open — fold it into the cache key or the flow freezes mid-run.
+	workflowHash := m.workflowStepsHash()
 	if m.cachedContent != "" &&
 		m.lastRenderedBody == t.Body &&
 		m.lastRenderedSummary == t.Summary &&
 		m.lastRenderedLogHash == logHash &&
 		m.lastRenderedFocused == m.focused &&
+		m.lastRenderedWorkflow == workflowHash &&
 		!m.relatedTasksLoading {
 		return m.cachedContent
 	}
@@ -3072,6 +3216,12 @@ func (m *DetailModel) renderContent() string {
 			}
 		}
 		b.WriteString("\n")
+	}
+
+	// Workflow flow — placed directly under the description so the run's shape and
+	// this step's position in it are visible without scrolling past logs.
+	if flow := m.renderWorkflowFlow(!m.focused); flow != "" {
+		b.WriteString(flow)
 	}
 
 	// Related Tasks section (from QMD semantic search)
@@ -3242,6 +3392,7 @@ func (m *DetailModel) renderContent() string {
 	m.lastRenderedSummary = t.Summary
 	m.lastRenderedLogHash = logHash
 	m.lastRenderedFocused = m.focused
+	m.lastRenderedWorkflow = workflowHash
 	m.cachedContent = content
 
 	return content

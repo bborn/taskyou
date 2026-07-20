@@ -1875,7 +1875,9 @@ func (m *AppModel) renderFilterBar() string {
 			parts = append(parts, helpStyle.Render("  (Tab: select project, ↑↓: navigate)"))
 		} else {
 			navHelp := fmt.Sprintf("%s%s%s%s", IconArrowUp(), IconArrowDown(), IconArrowLeft(), IconArrowRight())
-			parts = append(parts, helpStyle.Render(fmt.Sprintf("  (backspace: clear, Enter: done, %s: navigate, [: project)", navHelp)))
+			// Keep this hint on ONE line — the filter bar doesn't wrap gracefully,
+			// so advertise the short alias (is:wf) rather than the full token.
+			parts = append(parts, helpStyle.Render(fmt.Sprintf("  (backspace: clear, Enter: done, %s: navigate, [: project, is:wf)", navHelp)))
 		}
 	} else if m.filterText != "" {
 		parts = append(parts, helpStyle.Render("  (/: edit, Esc: clear)"))
@@ -2306,13 +2308,18 @@ func (m *AppModel) resolveProjectAliases(query string) string {
 // applyFilter filters the tasks based on current filter text using fuzzy matching.
 // Uses the same matching logic as the command palette (Ctrl+P) for consistency.
 func (m *AppModel) applyFilter() {
-	if m.filterText == "" {
-		// No filter, show all tasks (workflows collapsed to one card each)
-		m.kanban.SetTasks(m.collapseForBoard(m.tasks))
+	// A board mixes workflow steps and standalone tasks, and there was no way to
+	// look at just one population. `is:workflow` / `is:task` splits them, and is
+	// stripped from the query before fuzzy matching so it never pollutes scoring.
+	kind, filterText := parseFilterKind(m.filterText)
+
+	if filterText == "" {
+		// No keyword left: show everything, or just the requested kind.
+		m.kanban.SetTasks(m.collapseForBoard(filterTasksByKind(m.tasks, kind)))
 		return
 	}
 
-	queryLower := strings.ToLower(m.filterText)
+	queryLower := strings.ToLower(filterText)
 
 	// Resolve project aliases in "[project]" filter syntax (supports multiple tags)
 	if strings.Contains(queryLower, "[") {
@@ -2366,7 +2373,49 @@ func (m *AppModel) applyFilter() {
 	for i, st := range scored {
 		filtered[i] = st.task
 	}
-	m.kanban.SetTasks(m.collapseForBoard(filtered))
+	m.kanban.SetTasks(m.collapseForBoard(filterTasksByKind(filtered, kind)))
+}
+
+// filterKind values for the `is:` filter token.
+const (
+	filterKindWorkflow = "workflow"
+	filterKindTask     = "task"
+)
+
+// parseFilterKind extracts an `is:workflow` / `is:task` token from the filter
+// query and returns it along with the query minus that token. Aliases: `is:wf`,
+// `is:pipeline` for workflows; `is:normal` for standalone tasks. Returns an
+// empty kind when no token is present.
+func parseFilterKind(query string) (kind, rest string) {
+	fields := strings.Fields(query)
+	kept := make([]string, 0, len(fields))
+	for _, f := range fields {
+		switch strings.ToLower(f) {
+		case "is:workflow", "is:wf", "is:pipeline":
+			kind = filterKindWorkflow
+		case "is:task", "is:normal":
+			kind = filterKindTask
+		default:
+			kept = append(kept, f)
+		}
+	}
+	return kind, strings.TrimSpace(strings.Join(kept, " "))
+}
+
+// filterTasksByKind keeps only workflow steps or only standalone tasks. An empty
+// kind is a no-op so callers can pass it through unconditionally.
+func filterTasksByKind(tasks []*db.Task, kind string) []*db.Task {
+	if kind == "" {
+		return tasks
+	}
+	want := kind == filterKindWorkflow
+	out := make([]*db.Task, 0, len(tasks))
+	for _, t := range tasks {
+		if pipeline.IsWorkflowTask(t) == want {
+			out = append(out, t)
+		}
+	}
+	return out
 }
 
 // parseFilterProjects extracts completed [project] tags, any trailing partial project,

@@ -120,6 +120,58 @@ seed data-pipeline done 0 "performance" \
   "Cache geocoding responses for 24 hours" \
   "Address lookups repeated the same provider calls all day. Caching cut geocoding spend by roughly 70% with no accuracy loss."
 
+# --- A workflow run ----------------------------------------------------------
+# A workflow is N step tasks sharing one branch (carried as source_branch) and
+# tagged "pipeline"; gate steps additionally carry "gate". `ty create` has no
+# flags for those, so the step is created normally and then stamped. Without a
+# workflow in the seed there is no way to QA the board's collapsed workflow card,
+# the detail view's flow panel, or the `is:workflow` filter against real data.
+WORKFLOW_BRANCH="pipeline/idempotency-keys-payments-api"
+
+WORKFLOW_PREV_ID=""
+
+seed_step() {
+  local status="$1" gate="$2" step="$3" body="$4"
+  local tags="pipeline"
+  [[ "$gate" == "1" ]] && tags="pipeline,gate"
+  local id
+  id="$(ty create "[$step] Add idempotency keys to the payments API" \
+        --project payments-api --tags "$tags" --body "$body" --json | jq -r '.id')"
+  if [[ -z "$id" || "$id" == "null" ]]; then
+    echo "ty-qa-seed: failed to create workflow step: $step" >&2
+    exit 1
+  fi
+  sqlite3 "$WORKTREE_DB_PATH" \
+    "UPDATE tasks SET source_branch='$WORKFLOW_BRANCH' WHERE id=$id;"
+  # Chain each step to the previous one. Real workflows carry these dependencies,
+  # and they are what makes a step "terminal" (the sink nothing depends on) — an
+  # unchained seed makes EVERY step look terminal, so the run renders wrong.
+  if [[ -n "$WORKFLOW_PREV_ID" ]]; then
+    ty block "$id" --by "$WORKFLOW_PREV_ID" >/dev/null
+  fi
+  WORKFLOW_PREV_ID="$id"
+  ty status "$id" "$status" >/dev/null
+  printf '    #%-3s %-13s %-9s [%s]\n' "$id" payments-api "$status" "$step"
+}
+
+echo "==> Seeding a workflow run (payments-api)"
+# Reads as a real mid-flight run: research and design settled, parked at the
+# plan gate for human approval, implementation still queued behind it.
+seed_step done 0 research-questions \
+  "What does the client actually need to retry safely, and where do duplicate charges come from today?"
+seed_step done 0 research \
+  "Surveyed Stripe, Adyen and Square. All key off a client-supplied Idempotency-Key header with a 24h replay window and a stored response body."
+seed_step done 1 design \
+  "Store the key, request fingerprint and serialized response. Replay returns the stored response; a mismatched fingerprint on the same key is a 422."
+seed_step done 0 structure-outline \
+  "Phase 1 migration and model, phase 2 middleware, phase 3 replay semantics, phase 4 sweeper for expired keys."
+seed_step blocked 1 plan \
+  "Per-phase file changes and the automated checks that prove each one. Awaiting human approval before implementation starts."
+seed_step blocked 0 implement \
+  "Build the phases in order, committing on the shared branch so each step hands forward."
+seed_step blocked 0 describe-pr \
+  "Open the pull request with the design rationale and the verification output."
+
 cat <<EOF
 
 ==> Seeded $(sqlite3 "$WORKTREE_DB_PATH" "select count(*) from tasks where status != 'archived'" 2>/dev/null || echo '?') realistic tasks across ${#PROJECTS[@]} projects.
