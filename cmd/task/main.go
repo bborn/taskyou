@@ -533,6 +533,11 @@ Examples:
 	// and current position are readable without querying the DB by hand.
 	rootCmd.AddCommand(newWorkflowCmd())
 
+	// Completion over the CLI — runs the SAME decision as taskyou_complete
+	// (verify gate, human gate parking, PR routing), unlike `ty close` which is a
+	// plain status write that skips all of it.
+	rootCmd.AddCommand(newCompleteCmd())
+
 	// Alias: claudes -> sessions (for backwards compatibility)
 	claudesCmd := &cobra.Command{
 		Use:    "claudes",
@@ -2251,8 +2256,14 @@ Valid statuses: backlog, queued, processing, blocked, done, archived.`,
 	closeCmd := &cobra.Command{
 		Use:               "close <task-id>",
 		ValidArgsFunction: completeTaskIDs,
-		Aliases:           []string{"done", "complete"},
-		Short:             "Mark a task as done",
+		// "complete" is deliberately NOT an alias here: it belongs to the `ty
+		// complete` command, which runs the real completion decision (verify gate,
+		// human-gate parking, PR routing). Aliasing it onto this plain status write
+		// is precisely the trap that let finished-but-unverified work be marked done
+		// and human gates be skipped. Leaving both would also make resolution depend
+		// on registration order, since cobra returns the first name-or-alias match.
+		Aliases: []string{"done"},
+		Short:   "Mark a task as done",
 		Long: `Mark a task as completed.
 
 Examples:

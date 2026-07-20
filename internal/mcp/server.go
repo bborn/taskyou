@@ -5,19 +5,16 @@ package mcp
 
 import (
 	"bufio"
-	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"os"
 	"strings"
 	"sync"
-	"time"
 
+	"github.com/bborn/workflow/internal/completion"
 	"github.com/bborn/workflow/internal/db"
-	"github.com/bborn/workflow/internal/github"
 	"github.com/bborn/workflow/internal/pipeline"
-	"github.com/bborn/workflow/internal/tasksummary"
 )
 
 // Server is an MCP server that provides workflow tools to Claude.
@@ -52,27 +49,8 @@ func (s *Server) SetCallbacks(onComplete func(), onNeedsInput func(question stri
 	s.onNeedsInput = onNeedsInput
 }
 
-// lookupPR returns the PR number and URL associated with the task's branch, or
-// (0, "") if the task has no PR. It prefers a live `gh` lookup — the agent often
-// opens the PR moments before calling taskyou_complete, so the DB copy is stale —
-// and persists any fresh result so the board and the daemon reconciler both see
-// it. Falls back to whatever PR info is already stored on the task.
-func (s *Server) lookupPR(task *db.Task) (int, string) {
-	if task == nil {
-		return 0, ""
-	}
-	if task.BranchName != "" {
-		repoDir := task.WorktreePath
-		if repoDir == "" {
-			repoDir, _ = os.Getwd()
-		}
-		if info := github.NewPRCache().GetPRForBranch(repoDir, task.BranchName); info != nil {
-			_ = s.db.UpdateTaskPRInfo(task.ID, info.URL, info.Number, github.MarshalPRInfo(info))
-			return info.Number, info.URL
-		}
-	}
-	return task.PRNumber, task.PRURL
-}
+// PR lookup moved to internal/completion.LookupPR so the CLI completion path
+// resolves PRs identically (see completion.Complete).
 
 // JSON-RPC types
 type jsonRPCRequest struct {
@@ -382,35 +360,9 @@ func (s *Server) handleToolCall(id interface{}, params *toolCallParams) {
 
 		task, _ := s.db.GetTask(s.taskID)
 
-		// Evidence gate. If this step registered a `verify:` command, run it in the
-		// worktree BEFORE accepting completion. A non-zero exit means the agent called
-		// done on work that doesn't actually build/pass — reject the completion, hand
-		// the output back, and leave the step running so the agent fixes it and calls
-		// taskyou_complete again. This is the backstop for completion-by-assertion: the
-		// agent's say-so alone is not trusted. Non-workflow tasks and steps with no
-		// verify command have no row and fall straight through unchanged.
-		if task != nil {
-			if verifyCmd, _ := s.db.GetStepVerify(s.taskID); strings.TrimSpace(verifyCmd) != "" {
-				dir := strings.TrimSpace(task.WorktreePath)
-				if dir == "" {
-					if proj, err := s.db.GetProjectByName(task.Project); err == nil && proj != nil {
-						dir = proj.Path
-					}
-				}
-				if out, passed := pipeline.RunStepVerify(dir, verifyCmd); !passed {
-					s.db.AppendTaskLog(s.taskID, "system", "Verification failed — completion rejected; the step keeps running so the agent can fix it.")
-					s.sendResult(id, toolCallResult{
-						Content: []contentBlock{
-							{Type: "text", Text: fmt.Sprintf("❌ Verification failed — this step is NOT complete.\n\nThe configured check exited non-zero, so taskyou_complete was rejected:\n    %s\n\nFix the problem, then call taskyou_complete again.\n\n--- verify output (tail) ---\n%s", verifyCmd, out)},
-						},
-					})
-					return
-				}
-				s.db.AppendTaskLog(s.taskID, "system", "Verification passed: "+verifyCmd)
-			}
-		}
-
-		// Check if we should remind about saving project context
+		// Check if we should remind about saving project context. This is
+		// MCP-specific (it keys off session state), so it stays here and is appended
+		// to whatever the shared completion decision produces.
 		var contextReminder string
 		if s.contextWasEmpty && task != nil && task.Project != "" {
 			if ctx, err := s.db.GetProjectContext(task.Project); err == nil && ctx == "" {
@@ -418,111 +370,44 @@ func (s *Server) handleToolCall(id interface{}, params *toolCallParams) {
 			}
 		}
 
-		// Log the completion summary
-		s.db.AppendTaskLog(s.taskID, "system", fmt.Sprintf("Task completed: %s", summary))
-
-		// Decide where the finished task lands. A task that produced a PR is NOT
-		// truly done until a human merges/closes that PR — auto-marking it 'done'
-		// buries an open PR in the Done column where it gets overlooked. So PR-bearing
-		// tasks park in 'blocked' (the "human's turn" lane, alongside needs-input
-		// questions) and the daemon promotes them to 'done' once the PR merges/closes
-		// (see reconcileReviewTasks). Tasks with no PR (e.g. "move file X to Y") are
-		// genuinely complete the moment the agent signals it.
-		// A non-terminal workflow step must ADVANCE the DAG, not park for human
-		// review — only the terminal step (the one nothing depends on) opens a PR.
-		// The root step in particular owns the shared branch (branch_name set), which
-		// lookupPR would otherwise treat as "this task produced a PR to merge": it
-		// shells out to `gh` and can even match an unrelated PR, wrongly moving the
-		// step to 'blocked' and stalling the whole workflow at step one. So a workflow
-		// step that still has dependents skips the PR path entirely and is just 'done'.
-		nonTerminalStep := false
-		if pipeline.IsWorkflowTask(task) {
-			if deps, err := s.db.GetBlockedBy(task.ID); err == nil && len(deps) > 0 {
-				nonTerminalStep = true
-			}
+		// The whole decision — evidence gate, human gate, PR routing, done — lives in
+		// internal/completion so `ty complete` takes the identical path. Only the
+		// agent-facing wording and the session-teardown callback are MCP's job.
+		outcome, err := completion.Complete(s.db, s.taskID, summary, completion.Options{AsyncSummary: true})
+		if err != nil {
+			s.sendError(id, -32603, err.Error())
+			return
 		}
 
-		// A gate step is a human-in-the-loop boundary: instead of advancing the DAG
-		// when it finishes, it parks 'blocked' for human review. Its dependents are
-		// already held ('blocked' with an open blocker), so leaving the step 'blocked'
-		// rather than 'done' keeps them held — a human releases the chain by closing
-		// this step (`ty close`), which runs UpdateTaskStatus(done) → the normal
-		// ProcessCompletedBlocker cascade. Only non-terminal gate steps park here; a
-		// terminal step already parks for PR review below.
-		if nonTerminalStep && pipeline.IsGateStep(task) {
-			if err := s.db.UpdateTaskStatus(s.taskID, db.StatusBlocked); err != nil {
-				s.sendError(id, -32603, fmt.Sprintf("Failed to park gate step for review: %v", err))
-				return
-			}
-			// Log as a "question" so it surfaces in the blocked/needs-input lane and the
-			// daemon sweep leaves it for the human rather than auto-completing it.
-			s.db.AppendTaskLog(s.taskID, "question", pipeline.GateStepParkedLog)
-
-			// The agent's turn is over; let the executor tear down the session.
-			if s.onComplete != nil {
-				s.onComplete()
-			}
-
+		if outcome.Kind == completion.KindVerifyFailed {
+			// Completion was rejected: the step stays running so the agent can fix it.
+			// No teardown callback — the agent's turn is NOT over.
 			s.sendResult(id, toolCallResult{
 				Content: []contentBlock{
-					{Type: "text", Text: "Output saved. This is a human-review gate — the step is now 'blocked' awaiting a human to approve it (`ty close`), which releases the next phase. Do not call taskyou_complete again." + contextReminder},
+					{Type: "text", Text: fmt.Sprintf("❌ Verification failed — this step is NOT complete.\n\nThe configured check exited non-zero, so taskyou_complete was rejected:\n    %s\n\nFix the problem, then call taskyou_complete again.\n\n--- verify output (tail) ---\n%s", outcome.VerifyCommand, outcome.VerifyOutput)},
 				},
 			})
 			return
 		}
 
-		var prNumber int
-		var prURL string
-		if !nonTerminalStep {
-			prNumber, prURL = s.lookupPR(task)
-		}
-		if prNumber > 0 {
-			if err := s.db.UpdateTaskStatus(s.taskID, db.StatusBlocked); err != nil {
-				s.sendError(id, -32603, fmt.Sprintf("Failed to move task to review: %v", err))
-				return
-			}
-			// Surface it in the blocked lane like a needs-input item so it's easy to spot.
-			reviewMsg := fmt.Sprintf("✅ PR #%d ready for review — merge or close it to complete this task.", prNumber)
-			if prURL != "" {
-				reviewMsg += " " + prURL
-			}
-			s.db.AppendTaskLog(s.taskID, "question", reviewMsg)
-
-			// The agent's turn is over; let the executor tear down the session.
-			if s.onComplete != nil {
-				s.onComplete()
-			}
-
-			resultText := fmt.Sprintf("Work finished. PR #%d is up for review — the task is now 'blocked' awaiting a human merge, and will move to 'done' automatically once the PR is merged or closed. Do not call taskyou_complete again.", prNumber)
-			s.sendResult(id, toolCallResult{
-				Content: []contentBlock{
-					{Type: "text", Text: resultText + contextReminder},
-				},
-			})
-			return
-		}
-
-		// No PR — the task is genuinely done.
-		if err := s.db.UpdateTaskStatus(s.taskID, db.StatusDone); err != nil {
-			s.sendError(id, -32603, fmt.Sprintf("Failed to mark task done: %v", err))
-			return
-		}
-
-		// Generate a concise activity summary in the background (if possible)
-		go func(taskID int64) {
-			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-			defer cancel()
-			_, _ = tasksummary.GenerateAndStore(ctx, s.db, taskID)
-		}(s.taskID)
-
-		// Trigger callback so the executor can shut down the session
+		// The agent's turn is over; let the executor tear down the session.
 		if s.onComplete != nil {
 			s.onComplete()
 		}
 
+		var resultText string
+		switch outcome.Kind {
+		case completion.KindGateParked:
+			resultText = "Output saved. This is a human-review gate — the step is now 'blocked' awaiting a human to approve it (`ty close`), which releases the next phase. Do not call taskyou_complete again."
+		case completion.KindPRReview:
+			resultText = fmt.Sprintf("Work finished. PR #%d is up for review — the task is now 'blocked' awaiting a human merge, and will move to 'done' automatically once the PR is merged or closed. Do not call taskyou_complete again.", outcome.PRNumber)
+		default:
+			resultText = "Task marked done."
+		}
+
 		s.sendResult(id, toolCallResult{
 			Content: []contentBlock{
-				{Type: "text", Text: "Task marked done." + contextReminder},
+				{Type: "text", Text: resultText + contextReminder},
 			},
 		})
 
