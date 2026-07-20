@@ -178,7 +178,9 @@ lumen_run() {
   set -e
 
   if [[ $rc -ne 0 ]]; then
-    msg=$(sed -e $'s/\033\\[[0-9;]*m//g' -e 's/^error: *//' "$errf" |
+    # lumen writes `<colour><CR>error:<reset> <message>` — strip the colour
+    # codes and the stray CR before the `error:` prefix can be matched.
+    msg=$(sed -e $'s/\033\\[[0-9;]*m//g' -e $'s/\r//g' -e 's/^error: *//' "$errf" |
       grep -v '^[[:space:]]*$' | head -n1)
     rm -f "$errf"
     echo "lumen failed: ${msg:-exit $rc}"
@@ -198,6 +200,10 @@ lumen_run() {
 # line 1 of what the user sees is real content.
 lumen_strip_preamble() {
   awk '
+    # start must be initialised: an uninitialised awk variable used as an index
+    # yields line[""], not line[0], which silently swallows spinner-free output
+    # such as every `draft` result.
+    BEGIN { n = 0; start = 0 }
     { line[n++] = $0; if (index($0, "\r") > 0) start = n }
     END {
       for (i = start; i < n; i++) {

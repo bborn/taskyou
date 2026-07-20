@@ -166,3 +166,54 @@ func readFile(t *testing.T, path string) string {
 	}
 	return string(b)
 }
+
+// TestLoadPlugins_ShippedExamplesLoadCleanly guards the plugins in
+// examples/plugins/. Every other test here builds fixtures in a t.TempDir(), so
+// nothing catches a typo in an example we actually ship.
+//
+// The executable-bit loop is the point of this test. Despite its name,
+// isExecutableFile only checks that the path exists and is not a directory, so
+// a script committed without +x loads cleanly, shows up in `ty plugins list`,
+// and then fails at run time with "permission denied" on first press. Asserting
+// the mode here is the only thing that catches it before a user does.
+func TestLoadPlugins_ShippedExamplesLoadCleanly(t *testing.T) {
+	dir := filepath.Join("..", "..", "examples", "plugins")
+	if _, err := os.Stat(dir); err != nil {
+		t.Skipf("examples/plugins not present: %v", err)
+	}
+
+	plugins, warnings := LoadPlugins(dir)
+	if len(warnings) != 0 {
+		t.Errorf("shipped examples produced warnings: %v", warnings)
+	}
+
+	byName := make(map[string]Plugin, len(plugins))
+	for _, p := range plugins {
+		byName[p.Name] = p
+	}
+	for _, want := range []string{"desktop-notify", "plan-code-review", "slack", "worktree", "lumen"} {
+		if _, ok := byName[want]; !ok {
+			t.Errorf("example plugin %q did not load", want)
+		}
+	}
+
+	for _, p := range plugins {
+		scripts := make(map[string]string) // relative path -> what references it
+		for event, rel := range p.Hooks {
+			scripts[rel] = "hook " + event
+		}
+		for _, a := range p.Actions {
+			scripts[a.Command] = "action " + a.ID
+		}
+		for rel, ref := range scripts {
+			fi, err := os.Stat(filepath.Join(p.Dir, rel))
+			if err != nil {
+				t.Errorf("%s: %s: %v", p.Name, ref, err)
+				continue
+			}
+			if fi.Mode()&0o111 == 0 {
+				t.Errorf("%s: %s: %s is not executable (chmod +x it)", p.Name, ref, rel)
+			}
+		}
+	}
+}

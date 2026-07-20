@@ -133,6 +133,7 @@ Complete, copy-pasteable plugins live in [`examples/plugins/`](../examples/plugi
 | [`desktop-notify`](../examples/plugins/desktop-notify/) | hooks + action | native notifications; a `test` action |
 | [`slack`](../examples/plugins/slack/) | hooks | webhook integration; bundled `config.env` |
 | [`worktree`](../examples/plugins/worktree/) | actions | task-scoped `diff` / `test` using `WORKTREE_PATH` |
+| [`lumen`](../examples/plugins/lumen/) | actions | wrapping an external CLI: preflight, graceful degrade, bundled config |
 
 ```bash
 cp -R examples/plugins/desktop-notify ~/.config/task/plugins/

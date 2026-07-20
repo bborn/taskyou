@@ -31,8 +31,11 @@ can be any language and can bundle its own config/binaries.
 ## Worktree & quality (actions)
 
 - ✅ **worktree** — show the task's diff; run its tests.
-- **lint** — run the project linter in the worktree, surface pass/fail.
-- **format** — run the formatter and report what changed.
+- ✅ **lumen** — AI explanation of a task's diff; drafts its commit message.
+- **lint** — run the project linter in the worktree, surface pass/fail. See
+  `lumen` for the external-binary preflight pattern this needs.
+- **format** — run the formatter and report what changed. Same preflight
+  pattern as `lint` and `lumen`.
 - **branch-copy** — copy the task's branch name / PR URL to the clipboard.
 
 ## Integrations (hooks + actions)

@@ -14,7 +14,14 @@ source "${TASK_PLUGIN_DIR:-$(dirname "$0")}/lib.sh"
 lumen_preflight
 
 if ! lumen_diff_target; then
-  echo "no changes"
+  # git diff never sees untracked files, and a task whose whole output is new
+  # files is common — say so rather than the misleading bare "no changes".
+  untracked=$(git ls-files --others --exclude-standard | wc -l | tr -d ' ')
+  if [[ "$untracked" != "0" ]]; then
+    echo "no changes ($untracked untracked file(s) — git add to include them)"
+  else
+    echo "no changes"
+  fi
   exit 0
 fi
 
