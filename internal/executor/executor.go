@@ -259,8 +259,9 @@ func (e *Executor) Start(ctx context.Context) {
 
 	// Reconcile tasks left in 'processing' with no live executor (e.g. after a
 	// daemon restart killed the executor panes). Without this they stay stuck in
-	// 'processing' forever and the board lies about them still running.
-	e.reconcileOrphanedTasks()
+	// 'processing' forever and the board lies about them still running. The
+	// worker loop repeats this periodically to catch executors that die later.
+	e.reconcileOrphanedTasks(true)
 
 	// Run stale worktree cleanup on startup (and then periodically in worker loop)
 	go e.cleanupStaleWorktrees()
@@ -312,16 +313,28 @@ func (e *Executor) recoverStaleTmuxRefs() {
 	}
 }
 
+// orphanSpawnGrace is how long a task is left alone after it starts before the
+// periodic sweep will consider it orphaned. A freshly spawned executor needs a
+// moment before its tmux window is visible, and tasks started by the TUI never
+// enter this executor's runningTasks set - without this grace period the sweep
+// would blocked-out a task that is in the middle of coming up.
+const orphanSpawnGrace = 90 * time.Second
+
 // reconcileOrphanedTasks moves tasks that are stuck in 'processing' but have no
 // live executor window back to 'blocked' so the board reflects reality. This
-// happens when the daemon is restarted (or crashes) while tasks are executing:
-// the executor tmux windows/processes are killed, but nothing transitions the
-// task out of 'processing', so it appears to be running forever.
+// happens when the daemon is restarted (or crashes) while tasks are executing,
+// and also when an executor dies mid-run under a healthy daemon: the executor
+// tmux window/process is gone, but nothing transitions the task out of
+// 'processing', so it appears to be running forever.
+//
+// It runs both at startup (startup=true, when every executor pane is known dead)
+// and periodically from the worker loop, which is what catches an executor that
+// dies while the daemon keeps running.
 //
 // Tasks are moved to 'blocked' (rather than silently re-queued) so the failure
 // is visible and the user can retry, which resumes the saved Claude session.
 // Uncommitted work in the worktree is left untouched.
-func (e *Executor) reconcileOrphanedTasks() {
+func (e *Executor) reconcileOrphanedTasks(startup bool) {
 	tasks, err := e.db.ListTasks(db.ListTasksOptions{Status: db.StatusProcessing, Limit: 1000})
 	if err != nil {
 		e.logger.Error("Failed to list processing tasks for orphan reconciliation", "error", err)
@@ -339,6 +352,13 @@ func (e *Executor) reconcileOrphanedTasks() {
 			continue
 		}
 
+		// Give a just-started task time to bring its window up before declaring
+		// it dead. Only on the periodic pass: at startup the panes really are
+		// gone no matter how recently the task started.
+		if !startup && task.StartedAt != nil && time.Since(task.StartedAt.Time) < orphanSpawnGrace {
+			continue
+		}
+
 		// A processing task with a live executor window is genuinely still
 		// running (e.g. the tmux server survived a daemon restart) - leave it.
 		windowExists := tmuxWindowExistsForTask
@@ -350,18 +370,21 @@ func (e *Executor) reconcileOrphanedTasks() {
 		}
 
 		msg := "Executor terminated (daemon restart) - task was 'processing' with no live executor. Moved to blocked; retry to resume."
+		if !startup {
+			msg = "Executor died - task was 'processing' with no live executor. Moved to blocked; retry to resume."
+		}
 		if err := e.updateStatus(task.ID, db.StatusBlocked); err != nil {
 			e.logger.Error("Failed to reconcile orphaned task", "id", task.ID, "error", err)
 			continue
 		}
 		e.logLine(task.ID, "error", msg)
 		e.hooks.OnStatusChange(task, db.StatusBlocked, msg)
-		e.logger.Info("Reconciled orphaned processing task", "id", task.ID, "title", task.Title)
+		e.logger.Info("Reconciled orphaned processing task", "id", task.ID, "title", task.Title, "startup", startup)
 		reconciled++
 	}
 
 	if reconciled > 0 {
-		e.logger.Info("Reconciled orphaned processing tasks", "count", reconciled)
+		e.logger.Info("Reconciled orphaned processing tasks", "count", reconciled, "startup", startup)
 	}
 }
 
@@ -1199,6 +1222,7 @@ func (e *Executor) worker(ctx context.Context) {
 	const reviewReconcileInterval = 30  // 60 seconds at 2 second ticks
 	const prDisplayRefreshInterval = 45 // 90 seconds at 2 second ticks
 	const readyTasksInterval = 8        // 16 seconds at 2 second ticks
+	const orphanReconcileInterval = 30  // 60 seconds at 2 second ticks
 
 	for {
 		select {
@@ -1229,6 +1253,13 @@ func (e *Executor) worker(ctx context.Context) {
 			// once their PR has merged or closed.
 			if tickCount%reviewReconcileInterval == 0 {
 				e.reconcileReviewTasks()
+			}
+
+			// Safety net for executors that die mid-run while the daemon stays up:
+			// without this the task sits in 'processing' with no pane until the
+			// next daemon restart, and the board lies about it still running.
+			if tickCount%orphanReconcileInterval == 0 {
+				e.reconcileOrphanedTasks(false)
 			}
 
 			// Safety net for the auto-advance of workflow DAGs: re-queue any step
