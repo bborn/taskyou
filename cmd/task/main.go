@@ -33,6 +33,7 @@ import (
 	"github.com/bborn/workflow/internal/hooks"
 	"github.com/bborn/workflow/internal/mcp"
 	"github.com/bborn/workflow/internal/pipeline"
+	"github.com/bborn/workflow/internal/routine"
 	"github.com/bborn/workflow/internal/ui"
 	"github.com/bborn/workflow/internal/web"
 )
@@ -114,6 +115,13 @@ func main() {
 	// workflows surface everywhere built-in and on-disk workflows do.
 	pipeline.PluginWorkflowDirs = func() []string {
 		return hooks.PluginWorkflowDirs(hooks.DefaultPluginsDir())
+	}
+
+	// Same, for routines: an installed plugin's routines/ become resolvable by
+	// `ty run <name>` and visible in `ty routines`. Wired here so the routine
+	// package needn't import hooks.
+	routine.PluginRoutineDirs = func() []string {
+		return hooks.PluginRoutineDirs(hooks.DefaultPluginsDir())
 	}
 
 	var dangerous bool

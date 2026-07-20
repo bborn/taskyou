@@ -187,6 +187,38 @@ Actions are reachable from every surface, all running the same command:
   /api/plugins/actions/run` (`{plugin, action, task_id?}`) runs one. The desktop
   app and any agent use these.
 
+## Workflows and routines (by convention)
+
+Two capabilities need no manifest entry — a plugin ships them by *convention*, just
+by having the right subdirectory:
+
+- **`workflows/*.yaml`** — each file is a workflow definition, resolvable by
+  `ty pipeline -d <name>` once the plugin is installed.
+- **`routines/<name>/prompt.md`** — each subdirectory is a routine: a
+  named, unattended agent run, resolvable by `ty run <name>` and listed by
+  `ty routines` (frontmatter for `model`/`project`/`timeout`/… works exactly as it
+  does for a user routine under `~/.config/task/routines/`).
+
+```
+my-plugin/
+├── plugin.yaml
+├── workflows/
+│   └── review.yaml            # ty pipeline -d review "<goal>"
+└── routines/
+    └── linear-poll/
+        └── prompt.md          # ty run linear-poll   (+ ty routine schedule --every 2m)
+```
+
+A user routine of the same name **shadows** a plugin's (your
+`~/.config/task/routines/` wins), so a plugin routine is a sensible default you can
+override. Scheduling stays a separate step (`ty routine schedule <name> --every … |
+--cron …`) — the plugin ships the *what*, you choose the cadence.
+
+**Routine vs. service:** ship a **routine** for periodic, run-to-completion work (a
+poller, a digest, a nightly sweep) — the daemon records each run, enforces a timeout,
+and keeps cross-run state in `ROUTINE_STATE_DIR`. Ship a **service** (where available)
+only for a process that must stay *up* (a socket connection, a listening port).
+
 ## Behavior & guarantees
 
 - **Fan-out**: for each event, the legacy single-script hook *and* every plugin

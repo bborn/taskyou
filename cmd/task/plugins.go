@@ -252,6 +252,9 @@ func listPlugins() {
 		for _, s := range p.Services {
 			fmt.Printf("    service  %-16s → %s  (supervised while the daemon runs)\n", s.Name, s.Command)
 		}
+		for _, r := range p.Routines {
+			fmt.Printf("    routine  %-16s (ty run %s)\n", r, r)
+		}
 		fmt.Println()
 	}
 }
