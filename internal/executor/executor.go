@@ -1933,7 +1933,16 @@ func (e *Executor) executeTask(ctx context.Context, task *db.Task) {
 
 	// Update final status and trigger hooks
 	// Respect status set by hooks - don't override blocked with done
-	if result.Interrupted {
+	if result.Requeued {
+		// The poller exited because the task was re-queued (e.g. the user flipped a
+		// blocked task back to "In Progress"), NOT because it was cancelled. Leave the
+		// task in 'queued' and let the worker pick it up for a fresh run — do NOT write
+		// backlog. Releasing this run's slot (via the deferred runningTasks cleanup)
+		// plus the worker's poll is enough; the fresh run's KillAllWindowsByNameAllSessions
+		// tears down the stale window, so no duplicate session lingers.
+		e.logLine(task.ID, "system", "Task re-queued - starting a fresh run")
+		e.TriggerProcessing()
+	} else if result.Interrupted {
 		// Explicitly set to backlog - don't assume Interrupt() already did it,
 		// as the interruption may have come from pollTmuxSession detecting a
 		// stale status or context cancellation.
@@ -2414,6 +2423,7 @@ type execResult struct {
 	Success     bool
 	NeedsInput  bool
 	Interrupted bool
+	Requeued    bool
 	Message     string
 }
 
@@ -4094,9 +4104,12 @@ func (e *Executor) pollTmuxSession(ctx context.Context, taskID int64, sessionNam
 					return execResult{Success: true}
 				}
 				if task.Status == db.StatusQueued {
-					// Task was re-queued (e.g. retry) - stop polling so the
-					// worker can pick it up fresh without a duplicate session
-					return execResult{Interrupted: true}
+					// Task was re-queued (e.g. retry, or the user manually flipped a
+					// blocked task back to "In Progress") - stop polling so the worker
+					// can pick it up fresh without a duplicate session. Report this as
+					// Requeued, NOT Interrupted: an interrupt is finalized to backlog
+					// (a cancellation), which would immediately undo the requeue.
+					return execResult{Requeued: true}
 				}
 			}
 

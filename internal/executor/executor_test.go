@@ -1936,3 +1936,50 @@ func TestBuildPromptUsesFileKindInstructions(t *testing.T) {
 		t.Errorf("prompt should include the file kind's instructions; got:\n%s", prompt)
 	}
 }
+
+// TestPollTmuxSessionRequeuesOnQueuedStatus verifies that when a task's status
+// flips to "queued" while its poller is still alive (e.g. the user manually
+// changes a blocked task back to "In Progress"), pollTmuxSession reports the
+// exit as Requeued — NOT Interrupted. Reporting Interrupted would cause
+// executeTask to finalize the task to backlog, immediately undoing the requeue
+// (github.com/bborn/taskyou/issues/674).
+func TestPollTmuxSessionRequeuesOnQueuedStatus(t *testing.T) {
+	tmpFile, err := os.CreateTemp("", "test-*.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(tmpFile.Name())
+	tmpFile.Close()
+
+	database, err := db.Open(tmpFile.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+
+	if err := database.CreateProject(&db.Project{Name: "test", Path: "/tmp/test"}); err != nil {
+		t.Fatal(err)
+	}
+
+	exec := New(database, &config.Config{})
+
+	// Task is queued (as showChangeStatus writes when mapping "In Progress").
+	task := &db.Task{Title: "Test task", Status: db.StatusQueued, Project: "test"}
+	if err := database.CreateTask(task); err != nil {
+		t.Fatal(err)
+	}
+
+	// The DB-status check is the first thing pollTmuxSession does each tick, so it
+	// returns before touching tmux. Give it enough headroom for one tick.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	result := exec.pollTmuxSession(ctx, task.ID, "nonexistent-session")
+
+	if !result.Requeued {
+		t.Errorf("expected Requeued=true for a re-queued task, got %+v", result)
+	}
+	if result.Interrupted {
+		t.Error("expected Interrupted=false for a re-queued task; a re-queue must not be finalized to backlog")
+	}
+}
