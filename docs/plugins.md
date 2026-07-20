@@ -28,6 +28,18 @@ its root or many nested in subdirectories, and every plugin inside becomes activ
 Re-running `add` on the same source updates it in place (`git pull`). You can also
 just drop a directory into `~/.config/task/plugins/` by hand — see [Examples](#examples).
 
+## Removing
+
+```bash
+ty plugins remove <name>   # aliases: rm, uninstall
+```
+
+`remove` deletes the named plugin's directory (the name is the one from
+`ty plugins list`, even if it differs from the directory name). If the plugin was
+installed as part of a multi-plugin collection checkout, only its own subdirectory
+is removed — the shared checkout and its sibling plugins stay, and re-running
+`ty plugins add` on the collection source may restore it.
+
 ## Anatomy
 
 ```
