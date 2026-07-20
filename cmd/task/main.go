@@ -524,6 +524,11 @@ Examples:
 	// Plugins subcommand - inspect installed task plugins
 	rootCmd.AddCommand(newPluginsCmd())
 
+	// Workflow artifact store over the CLI — the transport-independent twin of the
+	// taskyou_get_artifact/taskyou_set_artifact MCP tools, so a workflow phase can
+	// always hand off even when the MCP server didn't attach to its session.
+	rootCmd.AddCommand(newArtifactCmd())
+
 	// Alias: claudes -> sessions (for backwards compatibility)
 	claudesCmd := &cobra.Command{
 		Use:    "claudes",

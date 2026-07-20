@@ -2194,7 +2194,13 @@ func (e *Executor) buildPrompt(task *db.Task, attachmentPaths []string) string {
 func (e *Executor) buildUniversalGuidance(task *db.Task) string {
 	var b strings.Builder
 
-	b.WriteString(`Your taskyou_* tools (via the "taskyou" MCP server) are connected to this session, but your harness may DEFER them behind tool search instead of loading them upfront. If you do not see a taskyou_* tool in your active toolset, it is deferred, NOT missing — load it before use (e.g. ToolSearch "select:taskyou_complete") and then call it. Never conclude "the taskyou server isn't connected" or skip a required taskyou_* call without first trying to load the tool; the server is always present for a task you are executing.`)
+	b.WriteString(`Your taskyou_* tools (via the "taskyou" MCP server) are connected to this session, but your harness may DEFER them behind tool search instead of loading them upfront. If you do not see a taskyou_* tool in your active toolset, it is deferred, NOT missing — load it before use (e.g. ToolSearch "select:taskyou_complete") and then call it. Never skip a required taskyou_* call without first trying to load the tool.
+
+If a taskyou_* tool still is not callable after you tried to load it, the MCP transport is genuinely down — do NOT stall, do NOT wait for a human, and do NOT hand-edit ty's database. Fall back to the ` + "`ty`" + ` CLI, which is always on PATH and needs no MCP session:
+- Read a workflow document:  ty artifact get <name>
+- List them:                 ty artifact list
+- Save your phase's output:  ty artifact set <name> --file <path>   (or pipe the document to stdin)
+These are exact equivalents of taskyou_get_artifact / taskyou_set_artifact and write the same store, so a later phase reads your work normally. They resolve the task from WORKTREE_TASK_ID in your worktree, so no --task-id is needed.`)
 
 	b.WriteString(`
 
