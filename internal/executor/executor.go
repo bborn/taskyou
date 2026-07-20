@@ -4490,23 +4490,16 @@ func (e *Executor) setupWorktree(task *db.Task) (string, bool, error) {
 				"task", task.ID, "branch", task.SourceBranch, "error", fetchErr, "output", string(fetchOutput))
 		}
 
-		// Resolve the source branch to a checkout-able ref. Prefer the
-		// remote-tracking ref (origin/<branch>) so pushed updates win, but fall
-		// back to a local branch of the same name. Without the local fallback, a
-		// pipeline whose first steps are document phases fails here on the first
-		// code step with `fatal: invalid reference: origin/<branch>` (the shared
-		// branch exists only locally), and the task loops on spawn forever.
-		ref, resolveErr := e.resolveSourceBranchRef(projectDir, task.SourceBranch)
-		if resolveErr != nil {
-			return "", false, resolveErr
-		}
-
-		// Create worktree from the resolved branch ref (no -b flag).
-		cmd := exec.Command("git", "worktree", "add", worktreePath, ref)
-		cmd.Dir = projectDir
-		output, err := cmd.CombinedOutput()
-		if err != nil {
-			return "", false, fmt.Errorf("create worktree from branch %s (ref %s): %v\n%s", task.SourceBranch, ref, err, string(output))
+		// Create the worktree ATTACHED to the shared branch. This must not be a
+		// plain `git worktree add <path> <ref>`: when <ref> is origin/<branch> and a
+		// local branch of that name already exists, git cannot create the branch and
+		// silently checks out a DETACHED HEAD instead. A detached step still runs and
+		// still commits, but its commits never land on the shared branch — so the
+		// next step's worktree, built from that branch, sees none of the work and the
+		// whole phase is silently lost. addSourceBranchWorktree picks the form of the
+		// command that guarantees attachment.
+		if err := e.addSourceBranchWorktree(projectDir, worktreePath, task.SourceBranch); err != nil {
+			return "", false, err
 		}
 
 		// Use the source branch name as the branch name for the task
@@ -5510,28 +5503,87 @@ func (e *Executor) ensureGitignore(projectDir, entry string) {
 	f.WriteString(entry + "\n")
 }
 
-// resolveSourceBranchRef returns a git ref for an existing source branch that a
-// worktree can be created from. It prefers the remote-tracking ref
-// (origin/<branch>) so pushed updates win, then falls back to a local branch of
-// the same name. This local fallback is what keeps document-first pipelines
-// working: their early steps create the shared branch locally and never push
-// it, so origin/<branch> does not exist when the first code step sets up its
-// worktree. Returns an error only when the branch exists in neither place.
-func (e *Executor) resolveSourceBranchRef(projectDir, sourceBranch string) (string, error) {
-	refExists := func(ref string) bool {
-		cmd := exec.Command("git", "rev-parse", "--verify", "--quiet", ref)
-		cmd.Dir = projectDir
-		return cmd.Run() == nil
+// addSourceBranchWorktree creates a worktree that is ATTACHED to sourceBranch.
+//
+// Why this is not one command: `git worktree add <path> origin/<branch>` only
+// creates and attaches the local branch when one does not already exist. If it
+// does, git falls back to a DETACHED checkout of the remote ref — silently. A
+// detached step commits into nothing the pipeline can see: the shared branch
+// never advances, and the next step's worktree (built from that branch) starts
+// from the base commit as if the phase never ran.
+//
+// So the branch state decides the form:
+//   - local branch exists  -> `worktree add <path> <branch>` attaches to it.
+//     If origin is strictly ahead, fast-forward it first so the step still
+//     starts from the newest pushed work (the old prefer-origin behaviour).
+//   - only origin exists   -> `worktree add -b <branch> <path> origin/<branch>`
+//     creates the local branch attached and tracking the remote.
+//   - neither              -> error.
+func (e *Executor) addSourceBranchWorktree(projectDir, worktreePath, sourceBranch string) error {
+	localExists := gitRefExists(projectDir, "refs/heads/"+sourceBranch)
+	remoteRef := "origin/" + sourceBranch
+	remoteExists := gitRefExists(projectDir, "refs/remotes/"+remoteRef)
+
+	var args []string
+	switch {
+	case localExists:
+		// Only fast-forward when the local branch is strictly behind — never when
+		// the two have diverged, since the local side carries this workflow's own
+		// commits and force-moving it would discard them.
+		if remoteExists && gitIsAncestor(projectDir, sourceBranch, remoteRef) &&
+			!gitIsAncestor(projectDir, remoteRef, sourceBranch) {
+			ff := exec.Command("git", "update-ref", "refs/heads/"+sourceBranch, remoteRef)
+			ff.Dir = projectDir
+			if out, err := ff.CombinedOutput(); err != nil {
+				// Not fatal: worst case the step starts from slightly older local work.
+				e.logger.Warn("could not fast-forward source branch to origin",
+					"branch", sourceBranch, "error", err, "output", string(out))
+			}
+		}
+		args = []string{"worktree", "add", worktreePath, sourceBranch}
+	case remoteExists:
+		args = []string{"worktree", "add", "-b", sourceBranch, worktreePath, remoteRef}
+	default:
+		return fmt.Errorf("source branch %s not found on origin or locally", sourceBranch)
 	}
 
-	remoteRef := "origin/" + sourceBranch
-	if refExists("refs/remotes/" + remoteRef) {
-		return remoteRef, nil
+	cmd := exec.Command("git", args...)
+	cmd.Dir = projectDir
+	if output, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("create worktree on branch %s: %v\n%s", sourceBranch, err, string(output))
 	}
-	if refExists("refs/heads/" + sourceBranch) {
-		return sourceBranch, nil
+
+	// Belt and braces: if git still handed back a detached HEAD, fail loudly here
+	// rather than letting a step run and quietly throw its commits away.
+	if head, err := gitCurrentBranch(worktreePath); err == nil && head != sourceBranch {
+		return fmt.Errorf("worktree for branch %s came up detached (HEAD=%q); refusing to run a step whose commits would not land on the shared branch", sourceBranch, head)
 	}
-	return "", fmt.Errorf("source branch %s not found on origin or locally", sourceBranch)
+	return nil
+}
+
+// gitRefExists reports whether a fully-qualified ref resolves in projectDir.
+func gitRefExists(projectDir, ref string) bool {
+	cmd := exec.Command("git", "rev-parse", "--verify", "--quiet", ref)
+	cmd.Dir = projectDir
+	return cmd.Run() == nil
+}
+
+// gitIsAncestor reports whether ancestor is reachable from descendant.
+func gitIsAncestor(projectDir, ancestor, descendant string) bool {
+	cmd := exec.Command("git", "merge-base", "--is-ancestor", ancestor, descendant)
+	cmd.Dir = projectDir
+	return cmd.Run() == nil
+}
+
+// gitCurrentBranch returns the checked-out branch name, or "HEAD" when detached.
+func gitCurrentBranch(dir string) (string, error) {
+	cmd := exec.Command("git", "rev-parse", "--abbrev-ref", "HEAD")
+	cmd.Dir = dir
+	out, err := cmd.Output()
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(out)), nil
 }
 
 // getDefaultBranch returns the default branch name for a git repo.
