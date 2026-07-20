@@ -70,7 +70,7 @@ func TestCheckDoneWrite(t *testing.T) {
 			if got := guard != nil; got != tt.blocked {
 				t.Fatalf("CheckDoneWrite() blocked = %v, want %v", got, tt.blocked)
 			}
-			if guard != nil && guard.Error() == "" {
+			if guard != nil && guard.Reason() == "" {
 				t.Error("guard returned an empty explanation")
 			}
 		})
@@ -83,6 +83,6 @@ func TestCheckDoneWrite(t *testing.T) {
 func TestCheckDoneWriteAllowsGateStepRelease(t *testing.T) {
 	gateStep := &db.Task{ID: 7, Tags: "pipeline,gate"}
 	if guard := CheckDoneWrite(gateStep); guard != nil {
-		t.Fatalf("gate step release was refused: %s", guard.Error())
+		t.Fatalf("gate step release was refused: %s", guard.Reason())
 	}
 }

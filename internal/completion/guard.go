@@ -27,8 +27,10 @@ type OpenPRGuard struct {
 	Draft  bool
 }
 
-// Error renders the refusal shown to whoever tried the write.
-func (g *OpenPRGuard) Error() string {
+// Reason renders the refusal shown to whoever tried the write. This is
+// deliberately not an Error() method: OpenPRGuard is a verdict, not an error
+// value, and is never returned through the error interface.
+func (g *OpenPRGuard) Reason() string {
 	kind := "open"
 	if g.Draft {
 		kind = "draft"

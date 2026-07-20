@@ -2189,7 +2189,7 @@ Valid statuses: backlog, queued, processing, blocked, done, archived.`,
 			// reach 'done', so it must not become the way around the guard.
 			if status == db.StatusDone {
 				if guard := completion.CheckDoneWrite(task); guard != nil {
-					fmt.Fprintln(os.Stderr, errorStyle.Render(fmt.Sprintf("Refusing to mark task #%d done: %s", taskID, guard.Error())))
+					fmt.Fprintln(os.Stderr, errorStyle.Render(fmt.Sprintf("Refusing to mark task #%d done: %s", taskID, guard.Reason())))
 					fmt.Fprintln(os.Stderr, dimStyle.Render("  Merge or close the PR to complete it automatically, or use `ty close --force`."))
 					os.Exit(1)
 				}
@@ -2326,7 +2326,7 @@ and the daemon completes it automatically once the PR is merged or closed. Use
 			// widely known to agents: `ty close` is the one completion-shaped verb
 			// that skips every rule, so it must not be able to bury live work.
 			if guard := completion.CheckDoneWrite(task); guard != nil && !closeForce {
-				fmt.Fprintln(os.Stderr, errorStyle.Render(fmt.Sprintf("Refusing to close task #%d: %s", taskID, guard.Error())))
+				fmt.Fprintln(os.Stderr, errorStyle.Render(fmt.Sprintf("Refusing to close task #%d: %s", taskID, guard.Reason())))
 				fmt.Fprintln(os.Stderr, dimStyle.Render("  Merge or close the PR to complete it automatically, or re-run with --force."))
 				os.Exit(1)
 			}
