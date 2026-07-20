@@ -159,7 +159,7 @@ func renderWorkflow(database *db.DB, g *pipeline.Group) {
 	// so say plainly what releases it.
 	if lead != nil && lead.Status == db.StatusBlocked && pipeline.IsGateStep(lead) {
 		fmt.Println()
-		fmt.Println(fmt.Sprintf("⏸  Parked at a human gate. Approve with: ty close %d", lead.ID))
+		fmt.Printf("⏸  Parked at a human gate. Approve with: ty close %d\n", lead.ID)
 	}
 }
 
