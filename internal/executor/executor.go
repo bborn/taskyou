@@ -2213,6 +2213,7 @@ Completion signaling (REQUIRED — nothing else watches for completion):
 - When your work is finished, call taskyou_complete with a one-paragraph summary (PR link, files touched, follow-ups). Do NOT just print a summary and stop — without this call the task stalls forever and a human has to close it by hand. If taskyou_complete isn't in your active toolset, it is deferred behind tool search (see above) — load it and call it; do not stop with an apology that the tool is unavailable.
   - If you opened a PR: the task moves to 'blocked' and waits for a human to review and merge it. It is promoted to 'done' automatically once the PR is merged or closed — so calling taskyou_complete does NOT mean the work shipped, you must NOT wait for the merge yourself, and you must NOT call taskyou_complete more than once.
   - If the task produced no PR (e.g. a quick config change or moving a file): it moves straight to 'done'.
+  - If taskyou_complete is genuinely uncallable after you tried to load it, finish with the CLI instead: ty complete --summary "<your summary>". It runs the IDENTICAL logic (same verify gate, same gate parking, same PR routing). Do NOT substitute 'ty close' — that is a plain status write which skips those rules and can mark work done that never passed its checks.
 - When you need clarification, call taskyou_needs_input with the question. This moves the task to 'blocked' so a human is notified. Do not prompt in the terminal — the task system can't see TTY prompts.`)
 
 	if e.taskUsesWorktrees(task) {

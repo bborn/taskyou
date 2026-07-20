@@ -533,6 +533,11 @@ Examples:
 	// and current position are readable without querying the DB by hand.
 	rootCmd.AddCommand(newWorkflowCmd())
 
+	// Completion over the CLI — runs the SAME decision as taskyou_complete
+	// (verify gate, human gate parking, PR routing), unlike `ty close` which is a
+	// plain status write that skips all of it.
+	rootCmd.AddCommand(newCompleteCmd())
+
 	// Alias: claudes -> sessions (for backwards compatibility)
 	claudesCmd := &cobra.Command{
 		Use:    "claudes",
