@@ -4947,6 +4947,13 @@ func symlinkClaudeConfig(projectDir, worktreePath string) error {
 		return fmt.Errorf("create main .claude dir: %w", err)
 	}
 
+	// If the worktree's branch tracks content under .claude, the checkout owns that
+	// directory: replacing it with a symlink would show every tracked file as deleted.
+	// Merge the project's local-only config into it instead of swapping it out.
+	if claudeIsTracked(worktreePath) {
+		return mergeClaudeConfig(projectDir, worktreePath)
+	}
+
 	// Check if worktree .claude is already a symlink to the right place
 	if target, err := os.Readlink(worktreeClaudeDir); err == nil {
 		if target == mainClaudeDir {
@@ -4966,6 +4973,87 @@ func symlinkClaudeConfig(projectDir, worktreePath string) error {
 	// The .gitignore entry ".claude/" (with trailing slash) only matches directories, not symlinks.
 	// Use projectDir because worktree .git is a file pointing to the main repo's git dir.
 	ensureGitExclude(projectDir, ".claude")
+
+	return nil
+}
+
+// claudeIsTracked reports whether the worktree's branch tracks any content under
+// .claude. It reads the index rather than the working tree, so it still answers
+// true for a worktree whose .claude was already replaced by a symlink.
+func claudeIsTracked(worktreePath string) bool {
+	cmd := exec.Command("git", "ls-files", "--", ".claude")
+	cmd.Dir = worktreePath
+	output, err := cmd.Output()
+	return err == nil && len(output) > 0
+}
+
+// mergeClaudeConfig wires the project's .claude into a worktree that tracks .claude
+// content of its own. The checked-out files stay exactly as git left them; anything
+// present only in the main project (settings.local.json, local hooks, unshared
+// skills and agents) is symlinked in alongside them, so the executor still sees the
+// full config. Without this, a project that commits even one file under .claude
+// would silently lose all of its local-only configuration inside worktrees.
+func mergeClaudeConfig(projectDir, worktreePath string) error {
+	mainClaudeDir := filepath.Join(projectDir, ".claude")
+	worktreeClaudeDir := filepath.Join(worktreePath, ".claude")
+
+	// Heal a worktree left behind by the previous symlink-always behavior: the
+	// tracked files are still in the index but missing from the working tree.
+	if _, err := os.Readlink(worktreeClaudeDir); err == nil {
+		if err := os.Remove(worktreeClaudeDir); err != nil {
+			return fmt.Errorf("remove stale .claude symlink: %w", err)
+		}
+		restore := exec.Command("git", "checkout", "--", ".claude")
+		restore.Dir = worktreePath
+		if out, err := restore.CombinedOutput(); err != nil {
+			return fmt.Errorf("restore tracked .claude: %w: %s", err, strings.TrimSpace(string(out)))
+		}
+	}
+
+	if err := os.MkdirAll(worktreeClaudeDir, 0755); err != nil {
+		return fmt.Errorf("create worktree .claude dir: %w", err)
+	}
+
+	return linkMissingClaudeEntries(projectDir, mainClaudeDir, worktreeClaudeDir, ".claude")
+}
+
+// linkMissingClaudeEntries symlinks every entry of mainDir that the worktree does not
+// already have into wtDir, recursing into directories the two share so local files can
+// sit beside tracked ones (a tracked .claude/skills/ still gets the local skills).
+// Whatever the worktree checked out always wins; only gaps are filled.
+func linkMissingClaudeEntries(projectDir, mainDir, wtDir, relDir string) error {
+	entries, err := os.ReadDir(mainDir)
+	if err != nil {
+		return fmt.Errorf("read %s: %w", mainDir, err)
+	}
+
+	for _, entry := range entries {
+		mainEntry := filepath.Join(mainDir, entry.Name())
+		wtEntry := filepath.Join(wtDir, entry.Name())
+		rel := relDir + "/" + entry.Name()
+
+		info, statErr := os.Lstat(wtEntry)
+		if statErr == nil {
+			// Both sides have a real directory: recurse so local-only children still land.
+			if info.IsDir() && entry.IsDir() {
+				if err := linkMissingClaudeEntries(projectDir, mainEntry, wtEntry, rel); err != nil {
+					return err
+				}
+			}
+			// Anything else already present in the worktree is left untouched.
+			continue
+		}
+		if !os.IsNotExist(statErr) {
+			return fmt.Errorf("stat %s: %w", wtEntry, statErr)
+		}
+
+		if err := os.Symlink(mainEntry, wtEntry); err != nil {
+			return fmt.Errorf("link %s: %w", rel, err)
+		}
+		// Exclude just this path, not all of .claude, so new files an agent adds
+		// under a tracked .claude are still visible to git.
+		ensureGitExclude(projectDir, "/"+rel)
+	}
 
 	return nil
 }
