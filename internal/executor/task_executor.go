@@ -13,6 +13,7 @@ type ExecResult struct {
 	NeedsInput  bool   // Task is waiting for user input
 	Interrupted bool   // Task was interrupted by user
 	Message     string // Status message or error
+	Requeued    bool   // Task was deliberately re-queued while running; caller must preserve queued, not write backlog
 }
 
 // toInternal converts ExecResult to the internal execResult type.
