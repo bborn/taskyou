@@ -71,6 +71,33 @@ same plugin updates it in place with git pull.`,
 	addCmd.Flags().String("name", "", "Install under this directory name (default: derived from the source)")
 	pluginsCmd.AddCommand(addCmd)
 
+	removeCmd := &cobra.Command{
+		Use:     "remove <name>",
+		Aliases: []string{"rm", "uninstall"},
+		Short:   "Uninstall a plugin by deleting its directory",
+		Long: `Delete an installed plugin's directory. The name is the one shown by
+` + "`ty plugins list`" + ` (the manifest name), even when it differs from the
+directory name. When the plugin lives inside a multi-plugin collection checkout,
+only its own subdirectory is removed; the shared git checkout and its sibling
+plugins are left in place (and re-running ` + "`ty plugins add`" + ` on the
+source may restore it).`,
+		Args:         cobra.ExactArgs(1),
+		SilenceUsage: true,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			dir, inCheckout, err := removePlugin(args[0], hooks.DefaultPluginsDir())
+			if err != nil {
+				return err
+			}
+			fmt.Printf("Removed plugin %q (%s).\n", args[0], dir)
+			if inCheckout {
+				fmt.Println("Note: it was part of a shared git checkout; its sibling plugins remain, " +
+					"and re-adding that source may restore it.")
+			}
+			return nil
+		},
+	}
+	pluginsCmd.AddCommand(removeCmd)
+
 	runCmd := &cobra.Command{
 		Use:          "run <plugin> <action> [task-id]",
 		Short:        "Run a plugin action, optionally in the context of a task",
@@ -135,6 +162,63 @@ func addPlugin(source, pluginsDir, name string) (installed []string, updated boo
 		return nil, false, fmt.Errorf("%s contains no usable plugins (need a plugin.yaml with a hook, action, or workflow)", source)
 	}
 	return installed, updated, nil
+}
+
+// removePlugin uninstalls the plugin named name by deleting its directory. The
+// name is matched against the loaded plugins' manifest names (what `plugins list`
+// shows), falling back to the directory's base name, so it works even when a
+// plugin's directory name differs from its manifest name.
+//
+// It returns the removed directory and whether that directory sat inside a
+// multi-plugin collection checkout — in which case only the plugin's own subdir is
+// deleted (leaving the shared git checkout and its siblings), and a later `add` of
+// the source may restore it. The plugin dir is verified to live strictly inside
+// pluginsDir before anything is deleted, so a corrupt manifest can't point removal
+// at an arbitrary path.
+func removePlugin(name, pluginsDir string) (dir string, inCheckout bool, err error) {
+	if pluginsDir == "" {
+		return "", false, fmt.Errorf("no plugins directory configured")
+	}
+	plugins, _ := hooks.LoadPlugins(pluginsDir)
+	var match *hooks.Plugin
+	for i := range plugins {
+		if plugins[i].Name == name || filepath.Base(plugins[i].Dir) == name {
+			match = &plugins[i]
+			break
+		}
+	}
+	if match == nil {
+		return "", false, fmt.Errorf("no plugin named %q installed in %s; run `ty plugins list` to see what's installed", name, pluginsDir)
+	}
+
+	dir = match.Dir
+	// Safety: refuse to delete anything that is not strictly under pluginsDir.
+	rel, relErr := filepath.Rel(pluginsDir, dir)
+	if relErr != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+		return "", false, fmt.Errorf("refusing to remove %s: not inside plugins dir %s", dir, pluginsDir)
+	}
+
+	inCheckout = insideCollectionCheckout(dir, pluginsDir)
+	if err := os.RemoveAll(dir); err != nil {
+		return "", false, fmt.Errorf("remove %s: %w", dir, err)
+	}
+	return dir, inCheckout, nil
+}
+
+// insideCollectionCheckout reports whether dir is a plugin nested inside a shared
+// git checkout (a collection repo cloned by `plugins add`), rather than being its
+// own checkout. It's true when dir itself is not a git checkout but an ancestor
+// strictly between it and pluginsDir is.
+func insideCollectionCheckout(dir, pluginsDir string) bool {
+	if isGitCheckout(dir) {
+		return false
+	}
+	for parent := filepath.Dir(dir); len(parent) > len(pluginsDir); parent = filepath.Dir(parent) {
+		if isGitCheckout(parent) {
+			return true
+		}
+	}
+	return false
 }
 
 // derivePluginName turns a git URL or path into a plugin directory name.
