@@ -4108,10 +4108,12 @@ func (e *Executor) pollTmuxSession(ctx context.Context, taskID int64, sessionNam
 				if task.Status == db.StatusQueued {
 					// Task was re-queued (e.g. retry, or a human moving a blocked
 					// task back to In Progress) - stop polling so the worker can
-					// pick it up fresh without a duplicate session. Signal the
-					// requeue distinctly (Requeued) so the caller preserves the
-					// queued status instead of clobbering it with backlog.
-					return execResult{Interrupted: true, Requeued: true}
+					// pick it up fresh without a duplicate session. Report this as
+					// Requeued, NOT Interrupted: a requeue is not a cancellation, and
+					// the finalizer must preserve the queued status rather than
+					// clobber it with backlog. (The only reader of Interrupted is the
+					// finalizer's else-if, which the Requeued branch short-circuits.)
+					return execResult{Requeued: true}
 				}
 			}
 

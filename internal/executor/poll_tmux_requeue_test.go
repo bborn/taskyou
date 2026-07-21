@@ -32,19 +32,24 @@ import (
 // behavior that was broken.
 func TestPollTmuxSessionRequeueVsBacklog(t *testing.T) {
 	tests := []struct {
-		name         string
-		status       string
-		wantRequeued bool
+		name            string
+		status          string
+		wantRequeued    bool
+		wantInterrupted bool
 	}{
 		{
-			name:         "re-queued task signals Requeued so caller preserves queued",
-			status:       db.StatusQueued,
-			wantRequeued: true,
+			// A requeue is NOT a cancellation: Requeued only, never Interrupted, so
+			// the finalizer preserves 'queued' instead of writing backlog.
+			name:            "re-queued task signals Requeued (not Interrupted)",
+			status:          db.StatusQueued,
+			wantRequeued:    true,
+			wantInterrupted: false,
 		},
 		{
-			name:         "backlog task is a genuine interrupt without Requeued",
-			status:       db.StatusBacklog,
-			wantRequeued: false,
+			name:            "backlog task is a genuine interrupt without Requeued",
+			status:          db.StatusBacklog,
+			wantRequeued:    false,
+			wantInterrupted: true,
 		},
 	}
 
@@ -78,17 +83,17 @@ func TestPollTmuxSessionRequeueVsBacklog(t *testing.T) {
 				t.Fatalf("pollTmuxSession did not return for status %q within timeout", tt.status)
 			}
 
-			if !result.Interrupted {
-				t.Errorf("status %q: Interrupted = false, want true", tt.status)
-			}
 			if result.Requeued != tt.wantRequeued {
 				t.Errorf("status %q: Requeued = %v, want %v", tt.status, result.Requeued, tt.wantRequeued)
 			}
-			// A genuine interrupt must never masquerade as a requeue and a requeue
-			// must always still be flagged interrupted (the caller's if/else chain
-			// checks Requeued first, then Interrupted).
-			if result.Requeued && !result.Interrupted {
-				t.Errorf("status %q: Requeued set without Interrupted", tt.status)
+			if result.Interrupted != tt.wantInterrupted {
+				t.Errorf("status %q: Interrupted = %v, want %v", tt.status, result.Interrupted, tt.wantInterrupted)
+			}
+			// The two signals are mutually exclusive: a requeue must never also be
+			// flagged as an interrupt, or the finalizer's else-if could finalize it
+			// to backlog and undo the requeue.
+			if result.Requeued && result.Interrupted {
+				t.Errorf("status %q: both Requeued and Interrupted set", tt.status)
 			}
 		})
 	}
