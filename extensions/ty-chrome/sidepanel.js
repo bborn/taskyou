@@ -14,8 +14,10 @@ const send = (msg) => chrome.runtime.sendMessage(msg);
 
 // --- State refresh -----------------------------------------------------------
 
-// ?tab=<id> pins the panel to a specific tab — used when opening
-// sidepanel.html as a regular tab (debugging / scripted demos).
+// ?tab=<id> pins this panel to one tab. The service worker always opens the
+// panel at this path, so each tab holds its own independent panel instead of a
+// single panel that re-targets whatever tab you happen to be looking at. (Also
+// how sidepanel.html gets pinned when opened as a regular tab for demos.)
 const forcedTabId = new URLSearchParams(location.search).get('tab');
 
 async function getActiveTab() {

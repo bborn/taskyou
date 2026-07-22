@@ -7,38 +7,78 @@ const DEFAULT_SERVER = 'http://127.0.0.1:8080';
 // tabId -> { task, manual } (manual = user picked from dropdown, wins over port match)
 const matches = new Map();
 
-// Chrome opens the panel on toolbar click (never disable this — it's what keeps
-// the panel openable). We only *scope* it: after it opens on a tab we disable it
-// on that window's other tabs, so it doesn't trail you onto unrelated tabs.
+// --- Panel scope -------------------------------------------------------------
+// The panel is OFF everywhere by default: manifest.json deliberately has no
+// `side_panel` key, so Chrome never enables a global panel that we'd then have
+// to un-show tab by tab. We only ever *add* tabs. A tab shows the panel iff it
+// belongs to a scoped ty tab group — the same orange "ty #<id>" group the
+// browser bridge already uses.
+//
+// The tab group is the scope on purpose: group membership is state *Chrome*
+// keeps, so it survives MV3 service-worker teardown (which is what defeated the
+// previous in-memory approach), and it's visible and revocable — drag a tab out
+// of the group and it loses the panel.
 const PANEL_PATH = 'sidepanel.html';
-chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(() => {});
 
-const panelScope = new Map(); // windowId -> { groupId, tabId }
+// Each tab gets its own pinned panel document, so two tabs can hold two
+// independent panels (Chrome still only *displays* one per window at a time).
+const panelPath = (tabId) => `${PANEL_PATH}?tab=${tabId}`;
 
-function tabInScope(tab, scope) {
-  if (!scope || !tab) return false;
-  if (scope.groupId != null && scope.groupId !== -1 /* TAB_GROUP_NONE */) {
-    return tab.groupId === scope.groupId;
-  }
-  return tab.id === scope.tabId;
+// Chrome must NOT auto-open the panel on action click: that opens a global
+// panel, which is the leak we're fixing. We open it ourselves, scoped.
+chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: false }).catch(() => {});
+
+// Scoped group ids live in session storage rather than a plain Map so they
+// outlive service-worker teardown. Group titles are the belt-and-braces
+// recovery path after a browser restart, when session storage is cleared.
+const SCOPE_KEY = 'panelGroups';
+const TY_GROUP_TITLE = /^ty #\d+$/;
+
+async function scopedGroups() {
+  const { [SCOPE_KEY]: ids } = await chrome.storage.session.get(SCOPE_KEY);
+  return new Set(ids || []);
 }
 
-// Enable the panel only on in-scope tabs of this window, disable it on the rest.
-async function reconcileWindowPanel(windowId) {
-  const scope = panelScope.get(windowId);
-  if (!scope) return;
-  let tabs = [];
+async function addScopedGroup(groupId) {
+  const ids = await scopedGroups();
+  ids.add(groupId);
+  await chrome.storage.session.set({ [SCOPE_KEY]: [...ids] });
+}
+
+// In scope if we recorded the group, or if it still carries a ty title (which
+// survives session-storage loss).
+async function groupInScope(groupId, ids) {
+  if (groupId == null || groupId === -1 /* TAB_GROUP_NONE */) return false;
+  if ((ids || (await scopedGroups())).has(groupId)) return true;
   try {
-    tabs = await chrome.tabs.query({ windowId });
+    return TY_GROUP_TITLE.test((await chrome.tabGroups.get(groupId)).title || '');
   } catch {
-    return;
-  }
-  for (const t of tabs) {
-    chrome.sidePanel
-      .setOptions({ tabId: t.id, path: PANEL_PATH, enabled: tabInScope(t, scope) })
-      .catch(() => {});
+    return false;
   }
 }
+
+// Turn the panel on or off for one tab to match its group membership. This is
+// the only place panel enablement changes after the initial open.
+async function syncPanelForTab(tab, ids) {
+  if (!tab?.id) return;
+  const enabled = await groupInScope(tab.groupId, ids);
+  chrome.sidePanel
+    .setOptions(
+      enabled
+        ? { tabId: tab.id, path: panelPath(tab.id), enabled: true }
+        : { tabId: tab.id, enabled: false },
+    )
+    .catch(() => {});
+}
+
+// After a service-worker restart, re-assert enablement from the group truth.
+async function reconcileAllPanels() {
+  try {
+    const [tabs, ids] = await Promise.all([chrome.tabs.query({}), scopedGroups()]);
+    for (const t of tabs) syncPanelForTab(t, ids);
+  } catch {}
+}
+reconcileAllPanels();
 
 async function getServerUrl() {
   const { serverUrl } = await chrome.storage.local.get('serverUrl');
@@ -272,36 +312,66 @@ chrome.tabs.onUpdated.addListener((tabId, info, tab) => {
 
 chrome.tabs.onRemoved.addListener((tabId) => matches.delete(tabId));
 
-// Switching tabs: show the panel only when the new tab is in scope.
-chrome.tabs.onActivated.addListener(async ({ tabId, windowId }) => {
-  const scope = panelScope.get(windowId);
-  if (!scope) return;
-  try {
-    const tab = await chrome.tabs.get(tabId);
-    chrome.sidePanel
-      .setOptions({ tabId, path: PANEL_PATH, enabled: tabInScope(tab, scope) })
-      .catch(() => {});
-  } catch {}
+// Toolbar click is the only thing that grants a tab the panel. Order matters:
+// setOptions and open must both be issued synchronously in the click turn —
+// awaiting in between spends the user gesture and open() then throws
+// (crbug 355266358). Grouping happens after, off the gesture path.
+chrome.action.onClicked.addListener((tab) => {
+  if (!tab?.id) return;
+  chrome.sidePanel.setOptions({ tabId: tab.id, path: panelPath(tab.id), enabled: true });
+  chrome.sidePanel.open({ tabId: tab.id }).catch(() => {});
+  scopeTabToGroup(tab.id).catch(() => {});
 });
 
-// If the scoped tab joins a group (e.g. the executor drops it into "ty #<id>"),
-// widen scope to that whole group so the panel follows it.
+// Put the tab in a ty group and record that group as panel scope, so the panel
+// survives worker teardown and extends to the tabs the executor opens.
+async function scopeTabToGroup(tabId) {
+  const task = await resolveTask(tabId).catch(() => null);
+  const groupId = await ensureTaskGroup(tabId, task?.id);
+  if (groupId == null || groupId === TAB_GROUP_NONE) return;
+  await addScopedGroup(groupId);
+  const tabs = await chrome.tabs.query({ groupId });
+  const ids = await scopedGroups();
+  for (const t of tabs) syncPanelForTab(t, ids);
+}
+
+// Group membership is the scope, so every way a tab can enter or leave one
+// has to re-sync: joining/leaving a group, and tabs created inside a group.
 chrome.tabs.onUpdated.addListener((tabId, info, tab) => {
   if (info.groupId === undefined || !tab) return;
-  const scope = panelScope.get(tab.windowId);
-  if (!scope) return;
-  if (tabId === scope.tabId && info.groupId !== TAB_GROUP_NONE) scope.groupId = info.groupId;
-  reconcileWindowPanel(tab.windowId);
+  syncPanelForTab(tab);
 });
 
-chrome.windows.onRemoved.addListener((windowId) => panelScope.delete(windowId));
+chrome.tabs.onCreated.addListener((tab) => syncPanelForTab(tab));
+chrome.tabs.onAttached.addListener(async (tabId) => {
+  try {
+    syncPanelForTab(await chrome.tabs.get(tabId));
+  } catch {}
+});
 
 async function resolveTask(tabId) {
   const existing = matches.get(tabId);
   if (existing) return existing.task;
   try {
     const tab = await chrome.tabs.get(tabId);
-    return tab.url ? await matchTab(tabId, tab.url) : null;
+    const matched = tab.url ? await matchTab(tabId, tab.url) : null;
+    // A docs or issue tab the executor opened into "ty #<id>" has no dev-server
+    // port to match on — inherit the task from the group it sits in.
+    return matched || (await taskFromGroup(tab.groupId));
+  } catch {
+    return null;
+  }
+}
+
+// Task id carried by the group's own title, so a group member resolves to the
+// same task after a worker restart with nothing cached.
+async function taskFromGroup(groupId) {
+  if (groupId == null || groupId === TAB_GROUP_NONE) return null;
+  try {
+    const title = (await chrome.tabGroups.get(groupId)).title || '';
+    const id = TY_GROUP_TITLE.test(title) ? Number(title.slice(4)) : NaN;
+    if (!Number.isInteger(id)) return null;
+    return (await candidateTasks()).find((t) => t.id === id) || null;
   } catch {
     return null;
   }
@@ -367,15 +437,12 @@ const handlers = {
     return { ok: true };
   },
 
-  // The panel reports the tab it opened on; scope it to that tab (or its group)
-  // so it stops trailing onto unrelated tabs in the window.
+  // The panel reports the tab it opened on. Scope is normally established by the
+  // toolbar click; this covers panels restored by Chrome after a restart, whose
+  // group may no longer be recorded in session storage.
   async panelOpened({ tabId }) {
     if (tabId == null) return { ok: false };
-    try {
-      const tab = await chrome.tabs.get(tabId);
-      panelScope.set(tab.windowId, { groupId: tab.groupId ?? TAB_GROUP_NONE, tabId: tab.id });
-      reconcileWindowPanel(tab.windowId);
-    } catch {}
+    await scopeTabToGroup(tabId).catch(() => {});
     return { ok: true };
   },
 

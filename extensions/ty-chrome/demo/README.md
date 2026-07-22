@@ -17,3 +17,16 @@ Setup (one-time per demo run):
 
 For the live-executor finale, run `claude` inside the demo task pane first; the
 nudge arrives at its prompt and it applies the annotated changes.
+
+## panel-scope-test.js
+
+Regression test for side-panel scoping: asserts the panel is enabled *only* on
+the tab you opened it on (and its ty tab group), by reading Chrome's own state
+via `chrome.sidePanel.getOptions()`. Needs no taskyou server:
+
+    NODE_PATH=<dir-with-playwright> node panel-scope-test.js ..
+
+It covers the two ways scoping historically leaked — a second browser window,
+and a tab created after the MV3 service worker lost its in-memory state. Set
+`HEADED=1` to watch it; by default it runs in Chrome's *new* headless (MV3
+extensions don't load under Playwright's `headless: true`, which is the old one).
