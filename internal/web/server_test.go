@@ -8,13 +8,17 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/bborn/workflow/internal/db"
 )
 
-// mockRunner records commands instead of executing them.
+// mockRunner records commands instead of executing them. Guarded by a mutex
+// because deferred work (the annotation nudge) runs on a timer goroutine.
 type mockRunner struct {
+	mu        sync.Mutex
 	calls     [][]string
 	err       error
 	outputVal []byte
@@ -22,15 +26,49 @@ type mockRunner struct {
 	// outputByCmd, when set, selects output by the first argument
 	// (e.g. "list-windows", "list-panes"); falls back to outputVal.
 	outputByCmd map[string][]byte
+	// delay simulates the real cost of shelling out, so tests can expose races
+	// that a zero-cost mock would hide.
+	delay time.Duration
+}
+
+// snapshot returns a copy of the calls recorded so far.
+func (m *mockRunner) snapshot() [][]string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([][]string(nil), m.calls...)
+}
+
+// waitForCalls polls until at least n commands have been recorded, so tests can
+// assert on work that completes asynchronously.
+func (m *mockRunner) waitForCalls(t *testing.T, n int) [][]string {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if got := m.snapshot(); len(got) >= n {
+			return got
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %d tmux calls, got %v", n, m.snapshot())
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
 }
 
 func (m *mockRunner) Run(name string, args ...string) error {
+	m.mu.Lock()
 	m.calls = append(m.calls, append([]string{name}, args...))
-	return m.err
+	delay, err := m.delay, m.err
+	m.mu.Unlock()
+	if delay > 0 {
+		time.Sleep(delay)
+	}
+	return err
 }
 
 func (m *mockRunner) Output(name string, args ...string) ([]byte, error) {
+	m.mu.Lock()
 	m.calls = append(m.calls, append([]string{name}, args...))
+	m.mu.Unlock()
 	if m.outputErr != nil {
 		return nil, m.outputErr
 	}

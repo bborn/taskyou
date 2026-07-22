@@ -476,7 +476,23 @@ async function collectFromTab(tabId) {
   }
 }
 
+// One send per tab at a time. The panel disables its own button while a send is
+// in flight, but ⌥S goes straight through the command handler and would happily
+// fire a second one — which then races the first all the way to the executor.
+// (Sends from *different* tabs are coalesced by the daemon instead.)
+const sendsInFlight = new Set();
+
 async function sendAnnotations(tabId, payload, instruction) {
+  if (sendsInFlight.has(tabId)) return { error: 'Already sending…' };
+  sendsInFlight.add(tabId);
+  try {
+    return await sendAnnotationsLocked(tabId, payload, instruction);
+  } finally {
+    sendsInFlight.delete(tabId);
+  }
+}
+
+async function sendAnnotationsLocked(tabId, payload, instruction) {
   const task = await resolveTask(tabId);
   if (!task) return { error: 'No task matches this tab. Pick one in the side panel.' };
 

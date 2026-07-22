@@ -177,7 +177,7 @@ func TestBrowserHowto_DocumentsTabGroupActions(t *testing.T) {
 }
 
 func TestAnnotationNudge_MentionsBrowserWhenConnected(t *testing.T) {
-	srv, database, runner := setupServer(t)
+	srv, database, runner := setupAnnotationServer(t)
 	task, _ := setupAnnotationTask(t, database, true)
 
 	srv.relay.touch(task.ID) // simulate connected extension
@@ -186,7 +186,7 @@ func TestAnnotationNudge_MentionsBrowserWhenConnected(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", w.Code)
 	}
-	nudge := runner.calls[0][5]
+	nudge := runner.waitForCalls(t, 2)[0][5]
 	if !strings.Contains(nudge, "HOWTO.md") {
 		t.Errorf("nudge should mention browser HOWTO when connected: %q", nudge)
 	}

@@ -43,6 +43,17 @@ type Server struct {
 
 	autocompleteMu sync.Mutex
 	autocomplete   *autocomplete.Service
+
+	// Annotation bundles waiting to be flushed, keyed by task id. See
+	// annotations.go: submissions landing close together merge into one bundle
+	// so the executor gets one prompt instead of several racing ones.
+	annoMu      sync.Mutex
+	annoPending map[int64]*pendingAnnotationBundle
+	annoWindow  time.Duration // 0 uses annotationCoalesceWindow; tests shrink it
+
+	// Serializes the two-call `send-keys -l <text>` + `send-keys Enter` pair.
+	// Without it, concurrent nudges interleave into one garbled prompt line.
+	nudgeMu sync.Mutex
 }
 
 // cors wraps a handler with permissive CORS headers for local development.
