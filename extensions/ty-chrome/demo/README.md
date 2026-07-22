@@ -30,3 +30,17 @@ It covers the two ways scoping historically leaked — a second browser window,
 and a tab created after the MV3 service worker lost its in-memory state. Set
 `HEADED=1` to watch it; by default it runs in Chrome's *new* headless (MV3
 extensions don't load under Playwright's `headless: true`, which is the old one).
+
+## reload-guard-test.js
+
+Asserts nothing reloads or navigates a tab the user is working in: the bridge's
+`reload`/`navigate` must refuse while they're typing, have a dirty form field or
+are mid-annotation, and must go through once they're idle. Checks real page
+state (a marker that only survives if the page was never reloaded), not just the
+guard's return value:
+
+    NODE_PATH=<dir-with-playwright> node reload-guard-test.js ..
+
+It serves its fixture over http on purpose — host permissions don't cover
+`data:` URLs, so the probe can't inject there and the guard fails open. A
+`data:` fixture passes for the wrong reason.

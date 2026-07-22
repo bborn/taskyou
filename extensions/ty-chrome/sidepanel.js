@@ -469,17 +469,42 @@ function syncTerminal(connected) {
 
 // Auto-reload: when the Agent pane transitions working→idle, its batch of edits
 // is done — reload the app tab so the user sees the result. Never reload while
-// annotations are still pinned (unsent work on the page). Driven off the same
-// TUI footer markers the mirror streams back.
+// the user is working in the page (typing, annotating, half-filled form): the
+// reload is withheld and offered as a button instead. Driven off the same TUI
+// footer markers the mirror streams back.
 let executorBusy = false;
 let idleStreak = 0;
 
-function maybeAutoReload() {
+async function maybeAutoReload() {
   if (!$('auto-reload').checked || activeTabId == null) return;
-  if (!$('annotation-count').classList.contains('zero')) return;
+  const { busy, reasons } = await send({ type: 'checkActivity', tabId: activeTabId });
+  if (busy) {
+    offerReload(reasons);
+    return;
+  }
   chrome.tabs.reload(activeTabId);
   setTermState('↻ page reloaded', 'live');
 }
+
+// A reload was withheld — surface it as something the user can take when ready,
+// rather than reloading behind their back or dropping it silently.
+function offerReload(reasons) {
+  const bar = $('reload-offer');
+  $('reload-reason').textContent = reasons?.length
+    ? `Page not reloaded — ${reasons.join(', ')}.`
+    : 'Page not reloaded.';
+  bar.classList.remove('hidden');
+  setTermState('↻ reload waiting', 'live');
+}
+
+$('reload-now').addEventListener('click', async () => {
+  if (activeTabId == null) return;
+  await send({ type: 'forceReload', tabId: activeTabId });
+  $('reload-offer').classList.add('hidden');
+  setTermState('↻ page reloaded', 'live');
+});
+
+$('reload-dismiss').addEventListener('click', () => $('reload-offer').classList.add('hidden'));
 
 function trackExecutorActivity(raw) {
   const busy = /esc to interrupt/.test(raw);
@@ -593,6 +618,10 @@ $('send-btn').addEventListener('click', async () => {
 chrome.runtime.onMessage.addListener((msg) => {
   if (msg?.type === 'ty-annotations-count') {
     updateCount(msg.count);
+  }
+  // The executor tried to reload/navigate and was refused — offer it to the user.
+  if (msg?.type === 'ty-reload-blocked' && msg.tabId === activeTabId) {
+    offerReload(msg.reasons);
   }
 });
 

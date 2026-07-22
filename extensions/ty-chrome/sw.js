@@ -222,6 +222,97 @@ async function ensureInjected(tabId) {
   await chrome.scripting.executeScript({ target: { tabId }, files: ['console-tap.js'], world: 'MAIN' });
 }
 
+// --- Reload guard ------------------------------------------------------------
+// Reloading a tab throws away whatever the user was in the middle of. Nothing
+// may reload or navigate a tab while they are working in it: not the executor
+// over the bridge, not the panel's auto-reload. Only the user's own "Reload
+// now" button overrides this.
+//
+// This runs as an injected probe rather than a message to content.js, because
+// the overlay is only injected on demand — most tabs have no content script.
+
+// Serialized into the page, so it must be self-contained.
+function tyActivityProbe() {
+  const reasons = [];
+
+  const editable = (el) =>
+    !!el &&
+    (el.isContentEditable ||
+      el.tagName === 'TEXTAREA' ||
+      el.tagName === 'SELECT' ||
+      (el.tagName === 'INPUT' &&
+        !['button', 'submit', 'reset', 'checkbox', 'radio', 'file', 'image'].includes(
+          (el.type || 'text').toLowerCase(),
+        )));
+
+  // activeElement stops at a shadow host, so descend to the real focus.
+  let focused = document.activeElement;
+  while (focused?.shadowRoot?.activeElement) focused = focused.shadowRoot.activeElement;
+  if (editable(focused)) reasons.push('typing in an input');
+
+  const a = window.__tyAnnotate?.activity?.();
+  if (a) {
+    if (a.mode && a.mode !== 'none') reasons.push(`annotating (${a.mode} mode)`);
+    else if (a.popoverOpen) reasons.push('writing an annotation comment');
+    if (a.pinned > 0) reasons.push(`${a.pinned} unsent annotation${a.pinned === 1 ? '' : 's'}`);
+  }
+
+  // Half-filled forms count even when unfocused. Capped so a pathological DOM
+  // can't stall the probe.
+  let dirty = 0;
+  const fields = document.querySelectorAll('input, textarea, select');
+  for (let i = 0; i < fields.length && i < 1000; i++) {
+    const f = fields[i];
+    if (f.disabled || f.readOnly) continue;
+    const type = (f.type || '').toLowerCase();
+    if (type === 'checkbox' || type === 'radio') {
+      if (f.checked !== f.defaultChecked) dirty++;
+    } else if (f.tagName === 'SELECT') {
+      if ([...f.options].some((o) => o.selected !== o.defaultSelected)) dirty++;
+    } else if (['button', 'submit', 'reset', 'hidden', 'image'].includes(type)) {
+      continue;
+    } else if (f.value !== f.defaultValue) {
+      dirty++;
+    }
+  }
+  if (dirty > 0) reasons.push(`${dirty} unsaved form field${dirty === 1 ? '' : 's'}`);
+
+  return { busy: reasons.length > 0, reasons };
+}
+
+// Fails open: if the page can't be probed (chrome://, no host access) we can't
+// see activity, and refusing forever would strand the executor with no way to
+// know why.
+async function probeActivity(tabId) {
+  try {
+    const [res] = await chrome.scripting.executeScript({ target: { tabId }, func: tyActivityProbe });
+    return res?.result || { busy: false, reasons: [] };
+  } catch {
+    return { busy: false, reasons: [], unprobeable: true };
+  }
+}
+
+// Tell the panel a reload was withheld so it can offer the user the button.
+function announceBlockedReload(tabId, reasons, action) {
+  chrome.runtime.sendMessage({ type: 'ty-reload-blocked', tabId, reasons, action }).catch(() => {});
+}
+
+// Returns a refusal to hand straight back to the executor, or null to proceed.
+// The message is written for the agent: it says why, and what to do instead.
+async function guardReload(tabId, action) {
+  const { busy, reasons } = await probeActivity(tabId);
+  if (!busy) return null;
+  announceBlockedReload(tabId, reasons, action);
+  return {
+    error:
+      `${action} refused: the user is working in this tab (${reasons.join(', ')}). ` +
+      `Their unsaved state would be lost. Do not retry — say what you changed and ` +
+      `let them reload when ready; the side panel is offering them a Reload button.`,
+    blocked: true,
+    reasons,
+  };
+}
+
 // --- Browser bridge tab group ------------------------------------------------
 // The "group" the executor can drive is a real Chrome tab group (labeled
 // "ty #<id>", orange): the matched app tab plus any docs/issue-tracker tabs the
@@ -446,6 +537,24 @@ const handlers = {
     return { ok: true };
   },
 
+  // Panel asks before its own auto-reload, so the same rules apply there.
+  async checkActivity({ tabId }) {
+    if (tabId == null) return { busy: false, reasons: [] };
+    return probeActivity(tabId);
+  },
+
+  // The user's own "Reload now" button — the one path allowed to reload a tab
+  // the user is active in, because they asked for it.
+  async forceReload({ tabId }) {
+    if (tabId == null) return { error: 'no tab' };
+    try {
+      await chrome.tabs.reload(tabId);
+      return { ok: true };
+    } catch (e) {
+      return { error: e.message };
+    }
+  },
+
   async listCandidateTasks() {
     try {
       return { tasks: await candidateTasks() };
@@ -612,12 +721,16 @@ const handlers = {
         }
         case 'reload': {
           const target = await resolveTargetTab(tabId, params);
+          const busy = await guardReload(target, 'reload');
+          if (busy) return busy;
           await chrome.tabs.reload(target);
           return { ok: true, tab: target };
         }
         case 'navigate': {
           const url = normalizeNavUrl(params.url || '');
           const target = await resolveTargetTab(tabId, params);
+          const busy = await guardReload(target, 'navigate');
+          if (busy) return busy;
           await chrome.tabs.update(target, { url });
           return { ok: true, url, tab: target };
         }

@@ -102,6 +102,22 @@ body {
 .picker-row select { flex: 1; padding: 5px; border: 1px solid var(--border); border-radius: 6px; }
 .picker-row button { border: 1px solid var(--border); background: var(--card); border-radius: 6px; cursor: pointer; }
 
+/* --- Withheld reload ----------------------------------------------------- */
+/* Shown when a reload was refused because the user was working in the page. */
+
+.reload-offer {
+  display: flex; align-items: center; gap: 8px;
+  padding: 6px 8px; margin-top: 6px;
+  border: 1px solid var(--border); border-left: 3px solid var(--accent);
+  border-radius: 6px; background: #fff7ed;
+}
+.reload-offer > span { flex: 1; min-width: 0; font-size: 12px; line-height: 1.35; }
+/* Buttons here sit in a row, so they opt out of the full-width button rule. */
+.reload-offer button.secondary {
+  width: auto; flex: 0 0 auto; white-space: nowrap; padding: 5px 10px; font-size: 12px;
+}
+.reload-offer .link-btn { margin-top: 0; padding: 0 2px; color: var(--muted); }
+
 /* --- New task form ------------------------------------------------------ */
 
 .link-btn {

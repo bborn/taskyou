@@ -967,5 +967,15 @@
       showHost();
       setMode('select');
     },
+    // Read by the reload guard (sw.js probeActivity). The overlay's own state
+    // lives in this closure, so it has to be published deliberately — an
+    // injected probe shares the isolated world but not the scope.
+    activity() {
+      return {
+        mode,
+        popoverOpen: !!popover,
+        pinned: annotations.length,
+      };
+    },
   };
 })();
