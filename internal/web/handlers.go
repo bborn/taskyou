@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/bborn/workflow/internal/completion"
 	"github.com/bborn/workflow/internal/db"
 	"github.com/bborn/workflow/internal/github"
 )
@@ -360,6 +361,12 @@ func (s *Server) handleSetStatus(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, "failed to update status", http.StatusInternalServerError)
 		return
 	}
+	// The board is a human surface, so this write is allowed even with an open PR
+	// — dragging a card to Done is a deliberate human decision. It is still
+	// recorded, so "who marked this done?" stays answerable.
+	if req.Status == db.StatusDone {
+		completion.RecordStatusWrite(s.db, id, req.Status, "the web board (PATCH status)")
+	}
 
 	jsonOK(w, map[string]bool{"ok": true})
 }
@@ -398,6 +405,7 @@ func (s *Server) handleCloseTask(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, "failed to close task", http.StatusInternalServerError)
 		return
 	}
+	completion.RecordStatusWrite(s.db, task.ID, db.StatusDone, "the web board (close)")
 
 	jsonOK(w, map[string]bool{"ok": true})
 }

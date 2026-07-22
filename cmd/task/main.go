@@ -25,6 +25,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/bborn/workflow/internal/autocomplete"
+	"github.com/bborn/workflow/internal/completion"
 	"github.com/bborn/workflow/internal/config"
 	"github.com/bborn/workflow/internal/db"
 	"github.com/bborn/workflow/internal/events"
@@ -2192,9 +2193,22 @@ Valid statuses: backlog, queued, processing, blocked, done, archived.`,
 				os.Exit(1)
 			}
 
+			// Same protection as `ty close`: this is the other plain write that can
+			// reach 'done', so it must not become the way around the guard.
+			if status == db.StatusDone {
+				if guard := completion.CheckDoneWrite(task); guard != nil {
+					fmt.Fprintln(os.Stderr, errorStyle.Render(fmt.Sprintf("Refusing to mark task #%d done: %s", taskID, guard.Reason())))
+					fmt.Fprintln(os.Stderr, dimStyle.Render("  Merge or close the PR to complete it automatically, or use `ty close --force`."))
+					os.Exit(1)
+				}
+			}
+
 			if err := database.UpdateTaskStatus(taskID, status); err != nil {
 				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
 				os.Exit(1)
+			}
+			if status == db.StatusDone {
+				completion.RecordStatusWrite(database, taskID, status, "`ty status`")
 			}
 
 			fmt.Println(successStyle.Render(fmt.Sprintf("Task #%d moved to %s", taskID, status)))
@@ -2261,6 +2275,7 @@ Valid statuses: backlog, queued, processing, blocked, done, archived.`,
 	rootCmd.AddCommand(pinCmd)
 
 	// Close subcommand - mark a task as done
+	var closeForce bool
 	closeCmd := &cobra.Command{
 		Use:               "close <task-id>",
 		ValidArgsFunction: completeTaskIDs,
@@ -2277,7 +2292,11 @@ Valid statuses: backlog, queued, processing, blocked, done, archived.`,
 Examples:
   task close 42
   task done 42
-  task complete 42`,
+  task complete 42
+
+A task whose pull request is still open is refused: it is awaiting human review,
+and the daemon completes it automatically once the PR is merged or closed. Use
+--force to override.`,
 		Args: cobra.ExactArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
 			var taskID int64
@@ -2310,6 +2329,16 @@ Examples:
 				return
 			}
 
+			// A task whose PR is still open is waiting on a human, not finished.
+			// Refusing here is the whole point of the command's existence being
+			// widely known to agents: `ty close` is the one completion-shaped verb
+			// that skips every rule, so it must not be able to bury live work.
+			if guard := completion.CheckDoneWrite(task); guard != nil && !closeForce {
+				fmt.Fprintln(os.Stderr, errorStyle.Render(fmt.Sprintf("Refusing to close task #%d: %s", taskID, guard.Reason())))
+				fmt.Fprintln(os.Stderr, dimStyle.Render("  Merge or close the PR to complete it automatically, or re-run with --force."))
+				os.Exit(1)
+			}
+
 			// Note: We intentionally do NOT kill the agent session when closing a task.
 			// The tmux window is kept around so users can review the agent's work.
 			// Use 'task sessions cleanup' or 'task delete <id>' to clean up windows.
@@ -2318,10 +2347,16 @@ Examples:
 				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
 				os.Exit(1)
 			}
+			source := "`ty close`"
+			if closeForce {
+				source = "`ty close --force`"
+			}
+			completion.RecordStatusWrite(database, taskID, db.StatusDone, source)
 
 			fmt.Println(successStyle.Render(fmt.Sprintf("Closed task #%d: %s", taskID, task.Title)))
 		},
 	}
+	closeCmd.Flags().BoolVar(&closeForce, "force", false, "Close even if the task's PR is still open")
 	rootCmd.AddCommand(closeCmd)
 
 	// Retry subcommand - retry a blocked/failed task
