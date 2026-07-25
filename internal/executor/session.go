@@ -60,6 +60,14 @@ func (e *Executor) EnsureTaskWindow(ctx context.Context, task *db.Task, sessionI
 		return target, false, nil
 	}
 
+	// Consult system memory pressure before adding another agent session. Warns by
+	// default and only defers when TY_MEMORY_GUARD=block (see memoryguard.go).
+	if note, err := guardMemoryForSpawn(task.ID); err != nil {
+		return "", false, err
+	} else if note != "" {
+		e.logger.Warn("memory guard: "+note, "task", task.ID)
+	}
+
 	// Serialize the check-then-create against the daemon executor and any other
 	// caller so two spawners can't both observe "no window yet" and each create
 	// one — the double-spawn that leaves two executor sessions in one worktree with
