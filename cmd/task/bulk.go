@@ -8,6 +8,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/bborn/workflow/internal/completion"
 	"github.com/bborn/workflow/internal/db"
 )
 
@@ -94,10 +95,22 @@ Examples:
 					failed++
 					continue
 				}
+				// `ty bulk status done` reaches the same buried-with-an-open-PR outcome
+				// as `ty bulk close`, so it gets the same guard.
+				if status == db.StatusDone {
+					if guard := completion.CheckDoneWrite(task); guard != nil {
+						fmt.Fprintln(os.Stderr, errorStyle.Render(fmt.Sprintf("Skipping task #%d: %s", id, guard.Reason())))
+						failed++
+						continue
+					}
+				}
 				if err := database.UpdateTaskStatus(id, status); err != nil {
 					fmt.Fprintln(os.Stderr, errorStyle.Render(fmt.Sprintf("Error updating task #%d: %v", id, err)))
 					failed++
 					continue
+				}
+				if status == db.StatusDone {
+					completion.RecordStatusWrite(database, id, db.StatusDone, "`ty bulk status done`")
 				}
 				fmt.Println(successStyle.Render(fmt.Sprintf("Task #%d moved to %s", id, status)))
 				succeeded++
@@ -212,11 +225,19 @@ Examples:
 					fmt.Println(dimStyle.Render(fmt.Sprintf("Task #%d is already done, skipping", id)))
 					continue
 				}
+				// Bulk is where an unguarded write does the most damage: one command
+				// can bury a dozen tasks that were each waiting on a human.
+				if guard := completion.CheckDoneWrite(task); guard != nil {
+					fmt.Fprintln(os.Stderr, errorStyle.Render(fmt.Sprintf("Skipping task #%d: %s", id, guard.Reason())))
+					failed++
+					continue
+				}
 				if err := database.UpdateTaskStatus(id, db.StatusDone); err != nil {
 					fmt.Fprintln(os.Stderr, errorStyle.Render(fmt.Sprintf("Error closing task #%d: %v", id, err)))
 					failed++
 					continue
 				}
+				completion.RecordStatusWrite(database, id, db.StatusDone, "`ty bulk close`")
 				fmt.Println(successStyle.Render(fmt.Sprintf("Closed task #%d: %s", id, task.Title)))
 				succeeded++
 			}
