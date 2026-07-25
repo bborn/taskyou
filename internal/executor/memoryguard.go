@@ -23,21 +23,21 @@ package executor
 //	TY_MEMORY_GUARD=off|warn|block        (default: warn)
 //	TY_MEMORY_GUARD_MIN_FREE_PCT=<0-100>  (default: 20)
 //
-// The signal is Darwin's kern.memorystatus_level — the same free-memory percentage
-// Activity Monitor's pressure graph is derived from. Activity Monitor's zones are
-// green 100-50, yellow 50-30, red 30-0, so the default threshold of 20 is well into
-// the red: this fires when the machine is already hurting, not merely busy. On any
-// platform where the signal is unavailable the guard is inert.
+// The signal is "percent of memory still available", read per-platform by
+// systemFreeMemoryPct (see memoryguard_darwin.go / memoryguard_linux.go). On any
+// platform where it can't be read the guard is inert.
+//
+// Threshold semantics are the same everywhere: the fraction of memory still
+// available, 0-100. On macOS that maps to Activity Monitor's pressure zones (green
+// 100-50, yellow 50-30, red 30-0), so the default of 20 fires only well into the
+// red — when the machine is already hurting, not merely busy.
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"strconv"
 	"strings"
-	"time"
 )
 
 type memoryGuardMode int
@@ -52,10 +52,6 @@ const (
 // considers the machine to be under real pressure. 20 sits inside Activity Monitor's
 // red zone (30-0).
 const defaultMemoryGuardMinFreePct = 20
-
-// memoryGuardSysctlTimeout bounds the sysctl call so a wedged exec can never delay
-// a spawn. On timeout the guard reports "unknown" and stays out of the way.
-const memoryGuardSysctlTimeout = 2 * time.Second
 
 // ErrMemoryPressure is returned by guardMemoryForSpawn in block mode when the
 // machine is below the free-memory threshold. Callers should treat it as "try this
@@ -86,22 +82,9 @@ func memoryGuardMinFreePct() int {
 	return n
 }
 
-// systemFreeMemoryPct returns the kernel's free-memory percentage, or ok=false when
-// the signal isn't available (non-Darwin, sysctl missing, unparseable, timeout).
-func systemFreeMemoryPct() (pct int, ok bool) {
-	ctx, cancel := context.WithTimeout(context.Background(), memoryGuardSysctlTimeout)
-	defer cancel()
-
-	out, err := exec.CommandContext(ctx, "sysctl", "-n", "kern.memorystatus_level").Output()
-	if err != nil {
-		return 0, false
-	}
-	n, err := strconv.Atoi(strings.TrimSpace(string(out)))
-	if err != nil || n < 0 || n > 100 {
-		return 0, false
-	}
-	return n, true
-}
+// systemFreeMemoryPct is implemented per platform; see memoryguard_darwin.go,
+// memoryguard_linux.go and memoryguard_unsupported.go. It returns ok=false whenever
+// the signal can't be read, which makes the guard inert rather than guessing.
 
 // guardMemoryForSpawn consults system memory pressure before an executor spawn.
 //
