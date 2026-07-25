@@ -2899,6 +2899,14 @@ func createTmuxWindow(daemonSession, windowName, workDir, script, allowedProject
 		return "", fmt.Errorf("security: refusing to create tmux window with invalid workDir: %s", workDir)
 	}
 
+	// Consult system memory pressure before adding another agent session. Warns by
+	// default and only defers when TY_MEMORY_GUARD=block (see memoryguard.go).
+	if note, gerr := guardMemoryForSpawn(taskID); gerr != nil {
+		return "", gerr
+	} else if note != "" {
+		log.Warn("memory guard: "+note, "task", taskID)
+	}
+
 	// Serialize check-then-create with the TUI/API spawn path (EnsureTaskWindow).
 	// Best-effort on timeout so a wedged holder can't block the daemon forever.
 	if release, lerr := executorlock.AcquireSpawn(executorSpawnLockDir(), taskID, spawnLockTimeout); lerr == nil {
