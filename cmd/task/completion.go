@@ -144,6 +144,7 @@ func completeFlagExecutors(cmd *cobra.Command, args []string, toComplete string)
 		"pi\tInflection Pi",
 		"opencode\tOpenCode",
 		"openclaw\tOpenClaw",
+		"warp\tWarp Agent CLI",
 	}, cobra.ShellCompDirectiveNoFileComp
 }
 
