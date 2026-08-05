@@ -186,6 +186,7 @@ func New(database *db.DB, cfg *config.Config) *Executor {
 	e.executorFactory.Register(NewOpenClawExecutor(e))
 	e.executorFactory.Register(NewOpenCodeExecutor(e))
 	e.executorFactory.Register(NewPiExecutor(e))
+	e.executorFactory.Register(NewWarpExecutor(e))
 
 	return e
 }
@@ -224,6 +225,7 @@ func NewWithLogging(database *db.DB, cfg *config.Config, w io.Writer) *Executor 
 	e.executorFactory.Register(NewOpenClawExecutor(e))
 	e.executorFactory.Register(NewOpenCodeExecutor(e))
 	e.executorFactory.Register(NewPiExecutor(e))
+	e.executorFactory.Register(NewWarpExecutor(e))
 
 	return e
 }

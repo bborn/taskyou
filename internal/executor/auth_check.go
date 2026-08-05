@@ -14,11 +14,15 @@ type authPattern struct {
 	reason string // human-readable explanation surfaced to the user
 }
 
-// authRequiredPatterns are phrases Claude Code prints when its login/cloud
+// authRequiredPatterns are phrases an executor prints when its login/cloud
 // session has expired or is otherwise unauthenticated. Multi-word phrases are
 // used deliberately to avoid false positives from ordinary task output (e.g. a
 // diff that happens to mention "login").
 var authRequiredPatterns = []authPattern{
+	// Warp Agent CLI shows a device-code login screen instead of the agent when
+	// it has no credentials, and otherwise sits there indefinitely.
+	{"log in with warp", "Warp is not logged in — run warp and complete the device login"},
+	{"waiting for login...", "Warp is waiting for a device login to complete"},
 	{"please run /login", "Claude session expired — run /login to re-authenticate"},
 	{"run `/login`", "Claude session expired — run /login to re-authenticate"},
 	{"oauth token has expired", "Claude OAuth token expired — run /login to re-authenticate"},

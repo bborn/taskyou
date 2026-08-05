@@ -763,7 +763,7 @@ Examples:
 			}
 
 			// Validate executor if provided
-			validExecutors := []string{db.ExecutorClaude, db.ExecutorCodex, db.ExecutorGemini, db.ExecutorPi, db.ExecutorOpenCode, db.ExecutorOpenClaw}
+			validExecutors := []string{db.ExecutorClaude, db.ExecutorCodex, db.ExecutorGemini, db.ExecutorPi, db.ExecutorOpenCode, db.ExecutorOpenClaw, db.ExecutorWarp}
 			if taskExecutor != "" {
 				validExecutor := false
 				for _, e := range validExecutors {
@@ -897,7 +897,7 @@ Examples:
 	createCmd.Flags().String("body", "", "Task body/description (if no title, AI generates from body)")
 	createCmd.Flags().StringP("type", "t", "", "Task type: code, writing, thinking (default: code)")
 	createCmd.Flags().StringP("project", "p", "", "Project name (auto-detected from cwd if not specified)")
-	createCmd.Flags().StringP("executor", "e", "", "Task executor: claude, codex, gemini, pi, opencode, openclaw (default: claude)")
+	createCmd.Flags().StringP("executor", "e", "", "Task executor: claude, codex, gemini, pi, opencode, openclaw, warp (default: claude)")
 	createCmd.Flags().String("effort", "", "Per-task Claude effort override: low, medium, high, xhigh, max (default: Claude's global default)")
 	createCmd.Flags().String("model", "", "Per-task Claude model override: opus, sonnet, haiku, or a full model name (default: Claude's global default)")
 	createCmd.Flags().BoolP("execute", "x", false, "Queue task for immediate execution")
@@ -1873,7 +1873,7 @@ Examples:
 
 			// Validate executor if provided
 			if taskExecutor != "" {
-				validExecutors := []string{db.ExecutorClaude, db.ExecutorCodex, db.ExecutorGemini, db.ExecutorPi, db.ExecutorOpenCode, db.ExecutorOpenClaw}
+				validExecutors := []string{db.ExecutorClaude, db.ExecutorCodex, db.ExecutorGemini, db.ExecutorPi, db.ExecutorOpenCode, db.ExecutorOpenClaw, db.ExecutorWarp}
 				validExecutor := false
 				for _, e := range validExecutors {
 					if e == taskExecutor {
@@ -1932,7 +1932,7 @@ Examples:
 	updateCmd.Flags().String("body", "", "Update task body/description")
 	updateCmd.Flags().StringP("type", "t", "", "Update task type: code, writing, thinking")
 	updateCmd.Flags().StringP("project", "p", "", "Update project name")
-	updateCmd.Flags().StringP("executor", "e", "", "Update task executor: claude, codex, gemini, pi, opencode, openclaw")
+	updateCmd.Flags().StringP("executor", "e", "", "Update task executor: claude, codex, gemini, pi, opencode, openclaw, warp")
 	updateCmd.Flags().String("tags", "", "Update task tags (comma-separated)")
 	updateCmd.Flags().Bool("pinned", false, "Pin or unpin the task")
 	updateCmd.RegisterFlagCompletionFunc("project", completeFlagProjects)
@@ -5661,12 +5661,12 @@ func getSessions() []agentSession {
 
 // getAgentMemoryByTaskID returns a map of task ID -> memory (MB) for all agent processes.
 // It identifies task IDs by examining each agent process's working directory.
-// Supports all executors: claude, codex, gemini, openclaw, opencode, pi.
+// Supports all executors: claude, codex, gemini, openclaw, opencode, pi, warp.
 func getAgentMemoryByTaskID() map[int]int {
 	result := make(map[int]int)
 
 	// Find processes for all supported executors
-	executorNames := []string{"claude", "codex", "gemini", "openclaw", "opencode", "pi"}
+	executorNames := []string{"claude", "codex", "gemini", "openclaw", "opencode", "pi", "warp"}
 
 	for _, executorName := range executorNames {
 		pgrepOut, err := osexec.Command("pgrep", "-f", executorName).Output()

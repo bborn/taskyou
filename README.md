@@ -4,7 +4,7 @@
 
 # Task You
 
-A personal task management system with background task execution via pluggable AI agents (Claude Code, OpenAI Codex, Gemini, Pi, OpenClaw, or OpenCode). Tasks live in SQLite, run in isolated git worktrees, and are tracked on a Kanban board.
+A personal task management system with background task execution via pluggable AI agents (Claude Code, OpenAI Codex, Gemini, Pi, OpenClaw, OpenCode, or Warp). Tasks live in SQLite, run in isolated git worktrees, and are tracked on a Kanban board.
 
 One engine — `ty` — three interfaces:
 
@@ -75,7 +75,7 @@ The same UI is also served in your browser at `http://localhost:8484` whenever `
 
 - **Kanban Board** - Visual task management with 4 columns (Backlog, In Progress, Blocked, Done)
 - **Git Worktrees** - Each task runs in an isolated worktree, no conflicts between parallel tasks
-- **Pluggable Executors** - Choose between Claude Code, OpenAI Codex, Gemini, Pi, OpenClaw, or OpenCode per task
+- **Pluggable Executors** - Choose between Claude Code, OpenAI Codex, Gemini, Pi, OpenClaw, OpenCode, or Warp per task
 - **Workflows** - Turn one goal into a multi-step DAG (e.g. plan → code → parallel review → collect), each step on its own executor/model, advancing automatically (see [Workflows](#workflows))
 - **Event Hooks & Plugins** - Run scripts when tasks change state, or drop in self-contained plugins (see [Event Hooks](#event-hooks) and [Plugins](#plugins))
 - **Ghost Text Autocomplete** - LLM-powered suggestions for task titles and descriptions as you type
@@ -455,12 +455,14 @@ Task You supports multiple AI executors for processing tasks. You can choose the
 | Pi | `pi` | [Pi Coding Agent](https://github.com/mariozechner/pi-coding-agent) - Multi-provider AI coding agent with session continuity |
 | OpenCode | `opencode` | [OpenCode](https://opencode.ai) - Open-source AI coding assistant with multi-LLM support |
 | OpenClaw | `openclaw` | [OpenClaw](https://openclaw.ai) - Open-source personal AI assistant with session resumption |
+| Warp | `warp` | [Warp Agent CLI](https://www.warp.dev/agent-cli) - Warp's terminal coding agent, driven as a TUI |
 
 All executors run in tmux windows with the same worktree isolation and environment variables. The main differences:
 
 - **Claude Code**, **Pi**, and **OpenClaw** support session resumption - when you retry a task, they continue with full conversation history
 - **Codex** and **Gemini** start fresh on each execution but receive the full prompt with any feedback
 - **OpenCode** does not support session resumption
+- **Warp** takes no prompt argument, so ty pastes the prompt into its TUI and submits it; retries start a fresh conversation. `--auto-approve` backs dangerous mode. The taskyou MCP server is not wired into Warp, so its prompt points it at the `ty` CLI (`ty complete`, `ty artifact ...`) instead of the `taskyou_*` tools
 
 ### Installing Executors
 
@@ -482,6 +484,10 @@ npm install -g @mariozechner/pi-coding-agent
 # OpenClaw
 npm install -g openclaw@latest
 openclaw onboard  # Run setup wizard
+
+# Warp Agent CLI
+curl -fsSL https://app.warp.dev/download/agent-cli | bash
+warp  # Complete the device login once, then quit
 ```
 
 ### How Task Executors Work
@@ -578,7 +584,7 @@ Claude Code supports **session resumption** - when you retry a task or press `R`
 
 This means when you retry a blocked task with feedback, Claude doesn't start over—it continues the conversation with full awareness of what it already tried.
 
-**Note:** Codex and Gemini do not support session resumption. When retrying these tasks, they receive the full prompt including any feedback, but start a fresh session. Claude Code and OpenClaw support full session resumption.
+**Note:** Codex, Gemini and Warp do not support session resumption. When retrying these tasks, they receive the full prompt including any feedback, but start a fresh session. Claude Code and OpenClaw support full session resumption.
 
 #### Lifecycle & Cleanup
 
