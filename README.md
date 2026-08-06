@@ -586,7 +586,9 @@ This means when you retry a blocked task with feedback, Claude doesn't start ove
 |-------|----------|
 | Task completes | Process stays alive for 30 minutes, then auto-killed |
 | Task blocked | Process suspends after 6 hours of idle time |
-| Task deleted | Window killed, worktree removed, teardown script runs |
+| Task deleted (`d`) | Window killed, task trashed — worktree kept on disk so it can be restored |
+| Trash retention expires | Worktree removed, [teardown script](#worktree-teardown-script) runs (default 14 days) |
+| Task archived, or stale-worktree sweep | Worktree archived to a git ref and removed, [teardown script](#worktree-teardown-script) runs (sweep default: 24h after completion) |
 | Daemon restart | Orphaned windows are cleaned up on next poll |
 
 ## Routines
@@ -787,7 +789,7 @@ worktree:
 | Field | Description | Example |
 |-------|-------------|---------|
 | `worktree.init_script` | Path to script that runs after worktree creation (relative or absolute) | `bin/worktree-setup` |
-| `worktree.teardown_script` | Path to script that runs before worktree deletion (relative or absolute) | `bin/worktree-teardown` |
+| `worktree.teardown_script` | Path to script that runs before a worktree is removed — on archive as well as delete (relative or absolute) | `bin/worktree-teardown` |
 
 ### Projects
 
@@ -836,18 +838,32 @@ The script runs in the worktree directory and has access to all worktree environ
 
 #### Worktree Teardown Script
 
-You can configure a script to run automatically before a worktree is deleted.
-
-**Important:** The teardown script **only runs when a task is deleted** (via the `d` key in the TUI or `task delete` command). It does **not** run when:
-- A task completes (moves to `done` status)
-- A task is archived or closed
-- You manually remove the worktree via `git worktree remove` or `rm -rf`
-
-This is useful for:
+You can configure a script to run automatically just before a worktree is removed. This is useful for releasing per-worktree resources:
 - Dropping task-specific databases
-- Stopping background services
-- Cleaning up docker containers
+- Freeing an allocated Redis DB, S3 prefix, or dev-server symlink
+- Stopping background services and docker containers
 - Removing temporary files
+
+TaskYou removes a worktree in one of two ways — **archive** (worktree state, including uncommitted changes, is first saved to a git ref so the task can be unarchived later with everything restored) and **delete** — and the teardown script runs on **both**.
+
+**When it runs:**
+
+| Trigger | How the worktree goes away |
+|---------|---------------------------|
+| **Automatic stale-worktree sweep** — the daemon archives and removes worktrees for `done`/`archived` tasks whose completion is older than the cleanup max age (default **24h**, setting `worktree_cleanup_max_age`; set to `0`/`disabled` to turn off) | archive |
+| `ty worktrees cleanup` (`--max-age 0` sweeps every done/archived worktree now, `--dry-run` previews) | archive |
+| Archiving a task in the TUI (`a`) | archive |
+| **Trash sweep** — a trashed task's worktree is removed once the retention window expires (default **14 days**, setting `trash_retention`) | delete |
+| `ty delete --hard` | delete |
+| Moving a task to another project (`ty move`, or the TUI move action) — the old worktree is removed | delete |
+
+So a finished task releases its resources on its own: by default the sweep archives and tears down its worktree ~24 hours after it completes. You do not need to build a separate reaper.
+
+Note that `d` in the TUI and plain `ty delete` **trash** a task rather than destroying it — the worktree is deliberately left on disk so `ty restore` works. Teardown for those runs later, when the trash sweep hard-deletes the task (or immediately if you pass `--hard`).
+
+**When it does not run:**
+- You remove the worktree yourself, outside TaskYou (`git worktree remove`, `rm -rf`) — TaskYou never sees it happen.
+- Projects that don't use worktrees (the task runs in the project directory itself). Nothing per-task was created, so nothing is torn down.
 
 **Two ways to configure:**
 
@@ -864,7 +880,11 @@ worktree:
   teardown_script: scripts/my-teardown.sh
 ```
 
-**Note:** If you want automated cleanup when tasks complete (not just when deleted), use [Event Hooks](#event-hooks) to trigger your teardown script on the `task.completed` event.
+The script is resolved from the project root but executed with the worktree as its working directory, with the same environment variables as the setup script (`WORKTREE_TASK_ID`, `WORKTREE_PORT`, `WORKTREE_PATH`). Its output is streamed into the task log, prefixed with `[teardown]`.
+
+**Your teardown script must not refuse to run.** A non-zero exit is logged as a warning and TaskYou removes the worktree anyway — cleanup never fails on your script. A script that guards itself (bailing out when the worktree is dirty, for example) will therefore leak whatever it was supposed to release, silently. Write it to be unconditional and idempotent. TaskYou also waits for the script to finish with no timeout, so keep it quick.
+
+**Note:** Teardown is tied to worktree removal, not to task status, so it happens after the max-age delay rather than the moment a task finishes. If you need cleanup at the exact moment a task completes, use [Event Hooks](#event-hooks) on the `task.completed` event — but be aware the worktree is still live at that point (the agent's changes may not be merged yet), and the teardown script will still run later when the worktree is actually removed.
 
 ### Running Applications in Worktrees
 
