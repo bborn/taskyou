@@ -428,6 +428,31 @@ func (db *DB) GetTask(id int64) (*Task, error) {
 	return t, nil
 }
 
+// GetTaskByWorktreePath returns the task that owns a worktree directory, or nil.
+//
+// Used when a branch turns out to be checked out somewhere: git names the
+// worktree holding it, and the only way to decide whether that branch can be
+// reclaimed is to ask what the owning task is doing. Trashed tasks are excluded
+// — a deleted task's worktree is nobody's live work.
+func (db *DB) GetTaskByWorktreePath(path string) (*Task, error) {
+	if strings.TrimSpace(path) == "" {
+		return nil, nil
+	}
+	var id int64
+	err := db.QueryRow(`
+		SELECT id FROM tasks
+		WHERE worktree_path = ? AND deleted_at IS NULL
+		ORDER BY id DESC LIMIT 1
+	`, path).Scan(&id)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("query task by worktree: %w", err)
+	}
+	return db.GetTask(id)
+}
+
 // ListTasksOptions defines options for listing tasks.
 type ListTasksOptions struct {
 	Status         string
@@ -1712,6 +1737,7 @@ func boolToInt(b bool) int {
 
 // CreateProject creates a new project.
 func (db *DB) CreateProject(p *Project) error {
+	p.normalizePath()
 	actionsJSON, _ := json.Marshal(p.Actions)
 	result, err := db.Exec(`
 		INSERT INTO projects (name, path, aliases, instructions, actions, color, claude_config_dir, use_worktrees, default_permission_mode)
@@ -1727,6 +1753,7 @@ func (db *DB) CreateProject(p *Project) error {
 
 // UpdateProject updates a project.
 func (db *DB) UpdateProject(p *Project) error {
+	p.normalizePath()
 	actionsJSON, _ := json.Marshal(p.Actions)
 	_, err := db.Exec(`
 		UPDATE projects SET name = ?, path = ?, aliases = ?, instructions = ?, actions = ?, color = ?, claude_config_dir = ?, use_worktrees = ?, default_permission_mode = ?
@@ -1790,6 +1817,7 @@ func (db *DB) ListProjects() ([]*Project, error) {
 		}
 		json.Unmarshal([]byte(actionsJSON), &p.Actions)
 		p.UseWorktrees = useWorktrees != 0
+		p.normalizePath()
 		projects = append(projects, p)
 	}
 	return projects, nil
@@ -1808,6 +1836,7 @@ func (db *DB) GetProjectByName(name string) (*Project, error) {
 	if err == nil {
 		json.Unmarshal([]byte(actionsJSON), &p.Actions)
 		p.UseWorktrees = useWorktrees != 0
+		p.normalizePath()
 		return p, nil
 	}
 	if err != sql.ErrNoRows {
@@ -1828,6 +1857,7 @@ func (db *DB) GetProjectByName(name string) (*Project, error) {
 		}
 		json.Unmarshal([]byte(actionsJSON), &p.Actions)
 		p.UseWorktrees = useWorktrees != 0
+		p.normalizePath()
 		for _, alias := range splitAliases(p.Aliases) {
 			if alias == name {
 				return p, nil
