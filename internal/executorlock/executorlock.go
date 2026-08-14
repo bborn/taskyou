@@ -14,6 +14,7 @@
 package executorlock
 
 import (
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"os"
@@ -25,6 +26,10 @@ import (
 // ErrSpawnLockTimeout is returned by AcquireSpawn when the lock could not be
 // taken before the timeout elapsed (another spawner is holding it).
 var ErrSpawnLockTimeout = errors.New("executorlock: timed out waiting for spawn lock")
+
+// ErrRepoLockTimeout is returned by AcquireRepo when the repository lock could
+// not be taken before the timeout elapsed.
+var ErrRepoLockTimeout = errors.New("executorlock: timed out waiting for repo worktree lock")
 
 // spawnPollInterval is how often AcquireSpawn retries the non-blocking flock
 // while waiting for a concurrent holder to release.
@@ -64,6 +69,50 @@ func AcquireSpawn(lockDir string, taskID int64, timeout time.Duration) (func(), 
 		if !time.Now().Before(deadline) {
 			_ = f.Close()
 			return nil, ErrSpawnLockTimeout
+		}
+		time.Sleep(spawnPollInterval)
+	}
+}
+
+// RepoLockPath returns the lock-file path serializing worktree creation in one
+// repository. The repo path is hashed so the file name is filesystem-safe and
+// bounded regardless of how deep the repo lives.
+func RepoLockPath(lockDir, repoPath string) string {
+	sum := sha256.Sum256([]byte(filepath.Clean(repoPath)))
+	return filepath.Join(lockDir, fmt.Sprintf("git-worktree-%x.lock", sum[:8]))
+}
+
+// AcquireRepo takes an exclusive, cross-process lock for a repository, blocking
+// up to timeout, and returns a release func.
+//
+// `git worktree add` is not safe to run concurrently in the same repository: it
+// writes .git/config (to record the new worktree's upstream) under a lock file
+// of git's own, and the loser does not retry — it fails outright with
+//
+//	error: could not lock config file .git/config: File exists
+//
+// Nothing serialized this before because nothing could reach it concurrently:
+// steps sharing one branch were forced to run one at a time by git itself. Once
+// a workflow's parallel steps each got their own branch they spawn together, and
+// two `worktree add` calls land in the same repo in the same instant.
+func AcquireRepo(lockDir, repoPath string, timeout time.Duration) (func(), error) {
+	path := RepoLockPath(lockDir, repoPath)
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0644)
+	if err != nil {
+		return nil, fmt.Errorf("open repo lock file: %w", err)
+	}
+
+	deadline := time.Now().Add(timeout)
+	for {
+		if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err == nil {
+			return func() {
+				_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+				_ = f.Close()
+			}, nil
+		}
+		if !time.Now().Before(deadline) {
+			_ = f.Close()
+			return nil, fmt.Errorf("%w: %s", ErrRepoLockTimeout, repoPath)
 		}
 		time.Sleep(spawnPollInterval)
 	}

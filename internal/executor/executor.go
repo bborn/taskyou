@@ -4582,17 +4582,15 @@ func (e *Executor) setupWorktree(task *db.Task) (string, bool, error) {
 		// Get default branch name
 		defaultBranch := e.getDefaultBranch(projectDir)
 
-		// Create new branch and worktree
-		cmd := exec.Command("git", "worktree", "add", "-b", branchName, worktreePath, defaultBranch)
-		cmd.Dir = projectDir
-		output, err := cmd.CombinedOutput()
+		// Create new branch and worktree. Serialized per repo: two ordinary tasks
+		// starting at the same moment would otherwise race on .git/config, and
+		// the loser fails outright rather than retrying.
+		output, err := runGitWorktreeAddOutput(projectDir, "worktree", "add", "-b", branchName, worktreePath, defaultBranch)
 		if err != nil {
 			// Check if branch already exists
 			if strings.Contains(string(output), "already exists") {
 				// Try using existing branch
-				cmd = exec.Command("git", "worktree", "add", worktreePath, branchName)
-				cmd.Dir = projectDir
-				output2, err2 := cmd.CombinedOutput()
+				output2, err2 := runGitWorktreeAddOutput(projectDir, "worktree", "add", worktreePath, branchName)
 				if err2 != nil {
 					// Check if worktree was created by another process
 					if strings.Contains(string(output2), "already checked out") {
@@ -5718,10 +5716,8 @@ func (e *Executor) addSourceBranchWorktree(projectDir, worktreePath, sourceBranc
 		return fmt.Errorf("source branch %s not found on origin or locally", sourceBranch)
 	}
 
-	cmd := exec.Command("git", args...)
-	cmd.Dir = projectDir
-	if output, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("create worktree on branch %s: %v\n%s", sourceBranch, err, string(output))
+	if err := runGitWorktreeAdd(projectDir, sourceBranch, args...); err != nil {
+		return err
 	}
 
 	// Belt and braces: if git still handed back a detached HEAD, fail loudly here

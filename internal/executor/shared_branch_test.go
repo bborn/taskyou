@@ -2,6 +2,7 @@ package executor
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -186,5 +187,82 @@ func writeAndCommit(t *testing.T, dir, name, content string) {
 		if out, err := cmd.CombinedOutput(); err != nil {
 			t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
 		}
+	}
+}
+
+// Fan-out siblings spawn in the same instant, and `git worktree add` is not safe
+// to run concurrently in one repository: it writes .git/config under a lock of
+// git's own and the loser fails outright with "could not lock config file
+// .git/config: File exists". Creating every sibling's worktree at once must
+// still produce every worktree.
+func TestConcurrentStepBranchWorktreesAllSucceed(t *testing.T) {
+	repo, branch := sharedBranchRepo(t)
+	e, _ := sharedBranchExecutor(t, repo)
+
+	const siblings = 6
+	base := t.TempDir()
+	errs := make(chan error, siblings)
+	start := make(chan struct{})
+	for i := 0; i < siblings; i++ {
+		go func(i int) {
+			<-start // release them together
+			name := fmt.Sprintf("review%d", i)
+			errs <- e.addStepBranchWorktree(repo, filepath.Join(base, name), branch+"-"+name, branch)
+		}(i)
+	}
+	close(start)
+	for i := 0; i < siblings; i++ {
+		if err := <-errs; err != nil {
+			t.Errorf("concurrent worktree add failed: %v", err)
+		}
+	}
+
+	for i := 0; i < siblings; i++ {
+		name := fmt.Sprintf("review%d", i)
+		got, err := gitCurrentBranch(filepath.Join(base, name))
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if want := branch + "-" + name; got != want {
+			t.Errorf("%s is on %q, want %q", name, got, want)
+		}
+	}
+}
+
+// A fan-out step's branch must NOT track the shared branch: `worktree add -b X
+// <path> origin/<shared>` sets that upstream by default, so a later bare
+// `git push` would land the step's commits on the branch its instructions
+// explicitly tell it not to touch.
+func TestStepBranchDoesNotTrackTheSharedBranch(t *testing.T) {
+	repo, branch := sharedBranchRepo(t)
+	e, _ := sharedBranchExecutor(t, repo)
+
+	// Give the repo an "origin" so the remote-ref path is the one exercised.
+	remote := t.TempDir()
+	mustGit(t, remote, "init", "--bare")
+	mustGit(t, repo, "remote", "add", "origin", remote)
+	mustGit(t, repo, "push", "origin", branch)
+	mustGit(t, repo, "fetch", "origin")
+
+	path := filepath.Join(t.TempDir(), "reviewa")
+	stepBranch := branch + "-reviewa"
+	if err := e.addStepBranchWorktree(repo, path, stepBranch, branch); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := exec.Command("git", "-C", repo, "config", "--get", "branch."+stepBranch+".merge").Output()
+	if upstream := strings.TrimSpace(string(out)); err == nil && upstream != "" {
+		t.Errorf("%s tracks %q; a bare `git push` would clobber the shared branch", stepBranch, upstream)
+	}
+}
+
+func mustGit(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(),
+		"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@t", "GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@t")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
 	}
 }

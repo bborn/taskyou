@@ -6,8 +6,12 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
+
+	"github.com/charmbracelet/log"
 
 	"github.com/bborn/workflow/internal/db"
+	"github.com/bborn/workflow/internal/executorlock"
 )
 
 // ErrBranchBusy means a step could not start because the branch it needs is
@@ -209,16 +213,47 @@ func (e *Executor) addStepBranchWorktree(projectDir, worktreePath, stepBranch, s
 			return fmt.Errorf("shared branch %s not found on origin or locally", sharedBranch)
 		}
 	}
-	return runGitWorktreeAdd(projectDir, stepBranch, "worktree", "add", "-b", stepBranch, worktreePath, base)
+	// --no-track: `worktree add -b X <path> origin/<shared>` would set X's
+	// upstream to the SHARED branch, so a later bare `git push` from the step
+	// would push its commits onto the branch its instructions explicitly tell it
+	// not to touch.
+	return runGitWorktreeAdd(projectDir, stepBranch, "worktree", "add", "--no-track", "-b", stepBranch, worktreePath, base)
 }
 
-// runGitWorktreeAdd runs a `git worktree add` and reports a failure with the
-// git output, which is the only thing that explains what actually went wrong.
+// runGitWorktreeAdd runs a `git worktree add`, serialized against any other
+// worktree creation in the same repository, and reports a failure with the git
+// output — the only thing that explains what actually went wrong.
+//
+// The lock matters because `git worktree add` writes .git/config and fails
+// outright rather than retrying when a concurrent add holds git's own config
+// lock. Fan-out steps spawn in the same instant, so without this the second
+// sibling dies with "could not lock config file .git/config: File exists".
 func runGitWorktreeAdd(projectDir, branch string, args ...string) error {
-	cmd := exec.Command("git", args...)
-	cmd.Dir = projectDir
-	if out, err := cmd.CombinedOutput(); err != nil {
+	out, err := runGitWorktreeAddOutput(projectDir, args...)
+	if err != nil {
 		return fmt.Errorf("create worktree on branch %s: %v\n%s", branch, err, string(out))
 	}
 	return nil
 }
+
+// runGitWorktreeAddOutput is runGitWorktreeAdd for callers that need to inspect
+// git's output themselves (the ordinary-task path branches on "already exists"
+// and "already checked out").
+func runGitWorktreeAddOutput(projectDir string, args ...string) ([]byte, error) {
+	if release, err := executorlock.AcquireRepo(executorSpawnLockDir(), projectDir, repoLockTimeout); err == nil {
+		defer release()
+	} else {
+		// Liveness over safety: a wedged holder must not stall every task
+		// forever. Worst case we are back to the unserialized behaviour, which
+		// fails loudly and is retried.
+		log.Warn("proceeding without the repo worktree lock", "repo", projectDir, "error", err)
+	}
+	cmd := exec.Command("git", args...)
+	cmd.Dir = projectDir
+	return cmd.CombinedOutput()
+}
+
+// repoLockTimeout bounds the wait for another worktree creation in the same
+// repo. A `git worktree add` on a large repo (checkout of every tracked file)
+// can take a while, so this is generous compared with the spawn lock.
+const repoLockTimeout = 120 * time.Second
