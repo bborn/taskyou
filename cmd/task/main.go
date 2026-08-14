@@ -4770,6 +4770,7 @@ func handleNotificationHook(database *db.DB, taskID int64, input *ClaudeHookInpu
 				}
 			}
 			database.AppendTaskLog(taskID, "system", msg)
+			noteProviderError(database, taskID, input)
 		}
 	}
 	return nil
@@ -4789,6 +4790,33 @@ func runMCPServer(taskID int64) error {
 	// Create and run MCP server
 	server := mcp.NewServer(database, taskID)
 	return server.Run()
+}
+
+// noteProviderError records, on the task's activity log, the provider-side error
+// a session ended on — a rate limit, an auth rejection, an overloaded upstream.
+//
+// Without this a step killed by the provider is indistinguishable on the board
+// from one genuinely waiting on a human: both say "Waiting for user input", and
+// the actual cause exists only inside the session transcript. A workflow step
+// once ran three times, committed nothing, and looked like a bad prompt; it had
+// been rejected with a 429 every time.
+//
+// Logged as "error" so it lands with the other failures rather than reading as
+// narration, and only when the session really ended on it (LastAPIError ignores
+// failures the session recovered from).
+func noteProviderError(database *db.DB, taskID int64, input *ClaudeHookInput) {
+	if input == nil {
+		return
+	}
+	apiErr := executor.LastAPIError(input.TranscriptPath)
+	if apiErr == nil {
+		return
+	}
+	msg := "Executor stopped on a provider error: " + apiErr.String()
+	if apiErr.Transient {
+		msg += " (provider says this may be transient — retrying the task may work)"
+	}
+	database.AppendTaskLog(taskID, "error", msg)
 }
 
 // handleStopHook handles Stop hooks from Claude (agent finished responding).
@@ -4845,10 +4873,12 @@ func handleStopHook(database *db.DB, taskID int64, input *ClaudeHookInput) error
 					// files), leaving the DAG stalled with no clue on the board.
 					database.UpdateTaskStatus(taskID, db.StatusBlocked)
 					database.AppendTaskLog(taskID, "system", "Step ended its turn without completing the handoff — "+reason)
+					noteProviderError(database, taskID, input)
 				}
 			} else {
 				database.UpdateTaskStatus(taskID, db.StatusBlocked)
 				database.AppendTaskLog(taskID, "system", "Waiting for user input")
+				noteProviderError(database, taskID, input)
 			}
 		}
 	case "tool_use":
