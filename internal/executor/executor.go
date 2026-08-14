@@ -5,6 +5,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -1863,6 +1864,18 @@ func (e *Executor) executeTask(ctx context.Context, task *db.Task) {
 	// SECURITY: We must have a valid worktree - never fall back to project directory
 	// to prevent Claude from accidentally writing to the main repo
 	workDir, createdWorktree, err := e.setupWorktree(task)
+	if errors.Is(err, ErrBranchBusy) {
+		// Not a failure: the branch this step needs is held by a sibling that is
+		// still running. Leave the task QUEUED so the next tick retries it, and
+		// leave no completion timestamps behind — a step parked 'blocked' with a
+		// started_at/completed_at pair reads as a step that ran, which is how a
+		// pipeline silently loses a phase.
+		e.logger.Info("Deferring step until the branch it needs is free", "id", task.ID, "error", err)
+		if err := e.db.UpdateTaskStatus(task.ID, db.StatusQueued); err != nil {
+			e.logger.Error("Failed to requeue deferred step", "id", task.ID, "error", err)
+		}
+		return
+	}
 	if err != nil {
 		e.logger.Error("Failed to setup worktree", "error", err)
 		e.logLine(task.ID, "error", fmt.Sprintf("Failed to setup worktree: %v", err))
@@ -4546,12 +4559,21 @@ func (e *Executor) setupWorktree(task *db.Task) (string, bool, error) {
 		// next step's worktree, built from that branch, sees none of the work and the
 		// whole phase is silently lost. addSourceBranchWorktree picks the form of the
 		// command that guarantees attachment.
-		if err := e.addSourceBranchWorktree(projectDir, worktreePath, task.SourceBranch); err != nil {
-			return "", false, err
+		// A FAN-OUT step arrives with its own branch already pinned (BranchName),
+		// cut from the shared branch (SourceBranch), because siblings that run at
+		// the same time cannot all attach to one branch. A sequential step has no
+		// branch of its own and attaches to the shared branch itself.
+		if stepBranch := task.BranchName; stepBranch != "" && stepBranch != task.SourceBranch {
+			if err := e.addStepBranchWorktree(projectDir, worktreePath, stepBranch, task.SourceBranch); err != nil {
+				return "", false, err
+			}
+			branchName = stepBranch
+		} else {
+			if err := e.addSourceBranchWorktree(projectDir, worktreePath, task.SourceBranch); err != nil {
+				return "", false, err
+			}
+			branchName = task.SourceBranch
 		}
-
-		// Use the source branch name as the branch name for the task
-		branchName = task.SourceBranch
 
 		// Update task with worktree info
 		task.WorktreePath = worktreePath
@@ -5659,6 +5681,19 @@ func (e *Executor) addSourceBranchWorktree(projectDir, worktreePath, sourceBranc
 	localExists := gitRefExists(projectDir, "refs/heads/"+sourceBranch)
 	remoteRef := "origin/" + sourceBranch
 	remoteExists := gitRefExists(projectDir, "refs/remotes/"+remoteRef)
+
+	// The shared branch is sequential by nature, and a finished step's worktree
+	// keeps holding it. Reclaim it from a step that is done; wait (retryably) for
+	// one that is still working.
+	if holder := gitWorktreeHolder(projectDir, sourceBranch); holder != "" {
+		freed, err := e.releaseBranchFromFinishedHolder(projectDir, sourceBranch)
+		if err != nil {
+			return err
+		}
+		if !freed {
+			return fmt.Errorf("%w: %s is checked out at %s", ErrBranchBusy, sourceBranch, holder)
+		}
+	}
 
 	var args []string
 	switch {
