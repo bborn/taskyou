@@ -408,10 +408,23 @@ func Create(database *db.DB, opts Options) (*Result, error) {
 	for _, s := range steps {
 		task := byName[s.Name]
 		task.Body = render(effectiveInstruction(def, s.Name), goal, branch, s.Name, reviewsList(s, branch))
-		if rootNames[s.Name] && !multiRoot {
+		switch {
+		case rootNames[s.Name] && !multiRoot:
 			task.BranchName = branch // Single root pins/creates the branch.
-		} else {
-			task.SourceBranch = branch // Checked out from the shared branch.
+		case def.hasParallelPeer(s):
+			// Fan-out. Git allows exactly ONE worktree per branch, so siblings that
+			// run at the same time cannot all sit on the shared branch — the second
+			// one's `git worktree add` dies with "is already checked out at ...".
+			// They therefore each get their own branch, cut from the shared branch:
+			// exactly what the composed handoff already tells them to push to (see
+			// composeInstruction). Pinning it here is what finally gives the step a
+			// worktree ON that branch; before this, the instructions named a branch
+			// the executor never created, and the whole fan-out failed at spawn.
+			// The dependent step reads its siblings' output off those branches.
+			task.SourceBranch = branch
+			task.BranchName = StepBranch(branch, s.Name)
+		default:
+			task.SourceBranch = branch // Sequential: checked out from the shared branch.
 		}
 		if err := database.UpdateTask(task); err != nil {
 			return nil, fmt.Errorf("configure %s step: %w", s.Name, err)

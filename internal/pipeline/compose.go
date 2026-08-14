@@ -44,6 +44,23 @@ func (d Definition) dependents(name string) []Step {
 	return out
 }
 
+// StepBranch is the branch a fan-out step publishes to: the shared branch plus
+// the step's slug. Create pins it on the task (so the step gets a worktree
+// attached to it) and composeInstruction names it in the handoff (so the agent
+// pushes there, and so the dependent step knows where to read its inputs). Both
+// go through this one function: a step whose worktree and whose instructions
+// disagreed about its branch is exactly how the fan-out broke before.
+func StepBranch(shared, stepName string) string {
+	return shared + stepBranchSuffix(stepName)
+}
+
+// stepBranchSuffix is the "-<slug>" tail of a fan-out step's branch. Kept
+// separate because composeInstruction builds the name against the "{{branch}}"
+// placeholder, before the shared branch is known.
+func stepBranchSuffix(stepName string) string {
+	return "-" + slugify(stepName, 40)
+}
+
 // hasParallelPeer reports whether the step runs at the same time as another step,
 // so its output must go to its own branch to avoid clobbering the peer. Two steps
 // are parallel if they share a dependency; multiple root steps (no deps) are all
@@ -96,16 +113,17 @@ func composeInstruction(def Definition, step Step) string {
 	if len(parallelDeps) > 0 {
 		b.WriteString("- Your inputs were produced in parallel and pushed to their own branches; read each:\n")
 		for _, dep := range parallelDeps {
-			slug := slugify(dep.Name, 40)
-			fmt.Fprintf(&b, "    - **%s** → `git fetch origin && git show origin/{{branch}}-%s:<its output file>` (branch `{{branch}}-%s`)\n", dep.Name, slug, slug)
+			depBranch := StepBranch("{{branch}}", dep.Name)
+			fmt.Fprintf(&b, "    - **%s** → `git fetch origin && git show origin/%s:<its output file>` (branch `%s`)\n", dep.Name, depBranch, depBranch)
 		}
 	}
 
 	// Output: own branch when parallel, shared branch otherwise.
 	if def.hasParallelPeer(step) {
 		slug := slugify(step.Name, 40)
-		b.WriteString("- You run in parallel with a sibling step, so push your output to YOUR OWN branch (one commit, one push — no rebase, no clobber):\n")
-		fmt.Fprintf(&b, "    `git add <your output file> && git commit -m \"%s\" && git push origin HEAD:{{branch}}-%s`\n", slug, slug)
+		ownBranch := StepBranch("{{branch}}", step.Name)
+		b.WriteString("- You run in parallel with a sibling step, so your worktree is on YOUR OWN branch; push your output there (one commit, one push — no rebase, no clobber):\n")
+		fmt.Fprintf(&b, "    `git add <your output file> && git commit -m \"%s\" && git push origin HEAD:%s`\n", slug, ownBranch)
 		b.WriteString("  Do NOT push to `{{branch}}` itself.\n")
 	} else {
 		b.WriteString("- Commit your work and push the shared branch:\n")
