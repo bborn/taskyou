@@ -25,6 +25,95 @@ import (
 // the holder is done.
 var ErrBranchBusy = errors.New("branch is checked out by a running step")
 
+// Branch-contention retry policy.
+//
+// Re-queueing a contended step is correct, but on its own it is a hot loop: the
+// worker ticks every 2s, and each pass re-enters executeTask, re-logs "Starting
+// task #N" and re-queues. One branch that never freed produced ~1,100 such
+// passes in 38 minutes and flushed the task's entire history out of the log ring
+// buffer — so the one record of what the step had actually done was destroyed by
+// the retries.
+//
+// A deferred step therefore backs off geometrically, and if the branch still has
+// not freed after branchWaitGiveUp it parks in 'blocked' where a human can see
+// it. Parking sets a started_at with no real run behind it, which this file
+// otherwise avoids — but a step that has genuinely waited half an hour is a
+// stall someone needs to look at, and silence is the worse failure.
+const (
+	branchWaitInitialBackoff = 5 * time.Second
+	branchWaitMaxBackoff     = 2 * time.Minute
+	branchWaitGiveUp         = 30 * time.Minute
+	// branchWaitMaxShift caps the exponent so the shift below cannot overflow
+	// on a long-lived wait; the backoff is clamped to branchWaitMaxBackoff well
+	// before this matters.
+	branchWaitMaxShift = 8
+)
+
+// branchWait records how long a step has been waiting for a contended branch.
+type branchWait struct {
+	first     time.Time
+	nextRetry time.Time
+	attempts  int
+}
+
+// deferForBusyBranch records one branch-contention deferral for a task and
+// reports how long to wait before the next attempt. keepWaiting is false once
+// the step has been waiting longer than branchWaitGiveUp, meaning the caller
+// should park it rather than re-queue it again.
+func (e *Executor) deferForBusyBranch(taskID int64) (retryIn time.Duration, keepWaiting bool) {
+	e.branchWaitMu.Lock()
+	defer e.branchWaitMu.Unlock()
+
+	if e.branchWaits == nil {
+		e.branchWaits = make(map[int64]*branchWait)
+	}
+	now := time.Now()
+	wait := e.branchWaits[taskID]
+	if wait == nil {
+		wait = &branchWait{first: now}
+		e.branchWaits[taskID] = wait
+	}
+	wait.attempts++
+
+	if now.Sub(wait.first) >= branchWaitGiveUp {
+		delete(e.branchWaits, taskID)
+		return 0, false
+	}
+
+	shift := wait.attempts - 1
+	if shift > branchWaitMaxShift {
+		shift = branchWaitMaxShift
+	}
+	backoff := branchWaitInitialBackoff << shift
+	if backoff > branchWaitMaxBackoff {
+		backoff = branchWaitMaxBackoff
+	}
+	wait.nextRetry = now.Add(backoff)
+	return backoff, true
+}
+
+// branchWaitDue reports whether a step deferred for branch contention has served
+// its backoff and may be attempted again. A task with no recorded wait is always
+// due, so this gate is invisible to everything except a contended step.
+func (e *Executor) branchWaitDue(taskID int64) bool {
+	e.branchWaitMu.Lock()
+	defer e.branchWaitMu.Unlock()
+
+	wait := e.branchWaits[taskID]
+	if wait == nil {
+		return true
+	}
+	return !time.Now().Before(wait.nextRetry)
+}
+
+// clearBranchWait forgets a step's contention history, so a step that waited
+// once and then ran starts from a fresh backoff if it ever contends again.
+func (e *Executor) clearBranchWait(taskID int64) {
+	e.branchWaitMu.Lock()
+	defer e.branchWaitMu.Unlock()
+	delete(e.branchWaits, taskID)
+}
+
 // gitWorktreeHolder returns the path of the worktree that currently has branch
 // checked out, or "" if no worktree holds it.
 //
@@ -164,6 +253,17 @@ func worktreePathForms(path string) []string {
 // taskIsLive reports whether a task is actively executing right now: mid-flight
 // in this daemon, in a running status, or still owning a tmux window. Any of the
 // three means "hands off".
+//
+// A task in a TERMINAL status is never live, whatever tmux still shows. An
+// executor window routinely outlives the step that opened it: when the agent
+// exits, the pane falls back to a plain shell and the window lingers until
+// something reaps it. Trusting that stale window is what let a finished step pin
+// its shared branch indefinitely — releaseBranchFromFinishedHolder read the
+// leftover window as "still working", refused to reclaim, and the next step
+// re-queued itself on ErrBranchBusy every tick until a human intervened. Once a
+// status is terminal it is the authority; the window is only a tiebreaker for a
+// task that has not reached one (a 'blocked' step, for instance, may still have
+// a live agent sitting on a question).
 func (e *Executor) taskIsLive(task *db.Task) bool {
 	if task == nil {
 		return false
@@ -177,7 +277,10 @@ func (e *Executor) taskIsLive(task *db.Task) bool {
 	if task.Status == db.StatusProcessing || task.Status == db.StatusQueued {
 		return true
 	}
-	return tmuxWindowExistsForTask(task.ID)
+	if task.Status == db.StatusDone || task.Status == db.StatusArchived {
+		return false
+	}
+	return e.windowExists(task.ID)
 }
 
 // addStepBranchWorktree creates a worktree for a FAN-OUT step on its own branch,
