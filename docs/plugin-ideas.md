@@ -28,6 +28,19 @@ can be any language and can bundle its own config/binaries.
 - **status-file** — maintain a tiny JSON of live counts for a tmux statusline or
   menubar widget.
 
+## Routing (the `task.route` hook)
+
+Fires before a task spawns and its stdout is read back as a decision — the one
+hook that changes how a task runs rather than reporting on it. See
+[Routing](plugins.md#routing-pre-spawn).
+
+- ✅ **claude-profile-router** — send each task to whichever Claude account has
+  the most rate-limit headroom; hold the task when both are spent.
+- **quiet-hours** — `HOLD=1` outside working hours, so overnight queueing doesn't
+  spend your weekly limit while you sleep.
+- **cheap-account-first** — route routine task types (docs, chores) to a Pro
+  account and keep the Max one for the heavy work.
+
 ## Worktree & quality (actions)
 
 - ✅ **worktree** — show the task's diff; run its tests.
@@ -51,8 +64,8 @@ can be any language and can bundle its own config/binaries.
 ## Where should plugins live? (in-repo vs. own repo)
 
 - **In-repo `examples/plugins/`** — small, canonical, copy-paste starting points
-  that ship with TaskYou and are covered by the loader's tests. The three above
-  live here. Best for anything short enough to read in one sitting.
+  that ship with TaskYou and are covered by the loader's tests. The ✅ entries
+  above live here. Best for anything short enough to read in one sitting.
 - **Its own repo** — when a plugin grows an independent release cadence, ships a
   compiled binary or heavier dependencies, or has a real surface of its own
   (config, docs, versioning). Install by dropping (or symlinking) its directory

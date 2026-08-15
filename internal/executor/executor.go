@@ -1755,6 +1755,15 @@ func (e *Executor) processNextTask(ctx context.Context) {
 			continue
 		}
 
+		// Last decision before the spawn: which Claude profile does this run
+		// under? A routing plugin may pick one (stamping task.ClaudeConfigDir,
+		// which both command builders already honor) or ask to hold the task
+		// when every account is out of headroom. With no router installed this
+		// is a no-op. See routing.go.
+		if !e.routeTask(ctx, task, true) {
+			continue
+		}
+
 		// Atomically check-and-set to prevent race where two ticks
 		// both see the task as not-running and spawn duplicate goroutines
 		e.mu.Lock()
@@ -1817,6 +1826,11 @@ func (e *Executor) ExecuteNow(ctx context.Context, taskID int64) error {
 	}
 	e.runningTasks[taskID] = true
 	e.mu.Unlock()
+
+	// Route this run to a Claude profile too, so a manually started task lands
+	// on the same account the queue would have chosen. A hold is not honored
+	// here: the user asked for this task to run now.
+	e.routeTask(ctx, task, false)
 
 	e.executeTask(ctx, task)
 	return nil
