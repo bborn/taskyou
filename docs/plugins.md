@@ -203,10 +203,16 @@ Extra environment on a routing hook, beyond the standard `TASK_*` and
 `TASK_PLUGIN_*` variables: `TASK_EXECUTOR` and `TASK_CLAUDE_CONFIG_DIR` (the
 task's current config dir, empty when unset).
 
-The worked example is
-[`examples/plugins/claude-profile-router/`](../examples/plugins/claude-profile-router/),
-which routes each task to whichever of your Claude accounts has the most
-rate-limit headroom — see also [`ty usage`](#inspecting).
+The worked example is **claude-profile-router** in the
+[community collection](https://github.com/taskyou/plugins), which routes each task
+to whichever of your Claude accounts has the most rate-limit headroom and holds a
+task when every account is spent:
+
+```bash
+ty plugins add https://github.com/taskyou/plugins
+```
+
+It runs on [`ty usage`](#inspecting), which reports the same numbers directly.
 
 ## Environment
 
@@ -320,7 +326,6 @@ Complete, copy-pasteable plugins live in [`examples/plugins/`](../examples/plugi
 | [`slack`](../examples/plugins/slack/) | hooks | webhook integration; bundled `config.env` |
 | [`worktree`](../examples/plugins/worktree/) | actions | task-scoped `diff` / `test` using `WORKTREE_PATH` |
 | [`heartbeat`](../examples/plugins/heartbeat/) | service | a daemon-supervised long-running process |
-| [`claude-profile-router`](../examples/plugins/claude-profile-router/) | route hook + action | picking a Claude account per task from live usage |
 
 ```bash
 cp -R examples/plugins/desktop-notify ~/.config/task/plugins/
