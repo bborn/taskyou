@@ -661,20 +661,26 @@ func TestShouldFallBackToStart(t *testing.T) {
 		name        string
 		waiting     bool
 		panesJoined bool
+		hasWorktree bool
 		waited      time.Duration
 		want        bool
 	}{
-		{"waiting, no panes, past timeout -> start", true, false, 61 * time.Second, true},
-		{"waiting, no panes, before timeout -> keep waiting", true, false, 10 * time.Second, false},
-		{"waiting, panes joined -> no fallback", true, true, 120 * time.Second, false},
-		{"not waiting -> no fallback", false, false, 120 * time.Second, false},
-		{"waiting, no panes, exactly at timeout -> start", true, false, timeout, true},
+		{"waiting, no panes, past timeout -> start", true, false, true, 61 * time.Second, true},
+		{"waiting, no panes, before timeout -> keep waiting", true, false, true, 10 * time.Second, false},
+		{"waiting, panes joined -> no fallback", true, true, true, 120 * time.Second, false},
+		{"not waiting -> no fallback", false, false, true, 120 * time.Second, false},
+		{"waiting, no panes, exactly at timeout -> start", true, false, true, timeout, true},
+		// The daemon never provisioned this task. There is no isolated directory to
+		// start in, so starting it would run the agent in the primary clone — the
+		// stall that let a pipeline verify step work 42 minutes in the main repo.
+		{"no worktree, past timeout -> keep waiting", true, false, false, 120 * time.Second, false},
+		{"no worktree, way past timeout -> still no fallback", true, false, false, time.Hour, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := shouldFallBackToStart(tc.waiting, tc.panesJoined, tc.waited, timeout); got != tc.want {
-				t.Errorf("shouldFallBackToStart(waiting=%v panes=%v waited=%v) = %v, want %v",
-					tc.waiting, tc.panesJoined, tc.waited, got, tc.want)
+			if got := shouldFallBackToStart(tc.waiting, tc.panesJoined, tc.hasWorktree, tc.waited, timeout); got != tc.want {
+				t.Errorf("shouldFallBackToStart(waiting=%v panes=%v worktree=%v waited=%v) = %v, want %v",
+					tc.waiting, tc.panesJoined, tc.hasWorktree, tc.waited, got, tc.want)
 			}
 		})
 	}

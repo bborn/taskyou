@@ -430,6 +430,11 @@ func (e *Executor) reconcileReadyTasks() {
 // far longer; anything "completing" faster is almost certainly a step we caught mid-setup.
 const minWorkflowStepRuntime = 30 * time.Second
 
+// stepMissingWorktreeLog is written (once) to a pipeline step that has started but
+// has no worktree recorded, so a workflow that cannot advance says why on the task
+// instead of stalling in silence.
+const stepMissingWorktreeLog = "This step started without a recorded worktree, so the workflow cannot verify it finished or advance past it. Its work (if any) is not where the pipeline expects it. Re-queue the step to have the daemon provision it properly."
+
 // reconcileFinishedWorkflowSteps recovers workflow steps that finished their work
 // (committed + pushed) but never reached 'done'. Two shapes: (1) parked in 'blocked'
 // because the Stop hook's git-state check fired at a transient moment (a temp file
@@ -465,7 +470,22 @@ func (e *Executor) reconcileFinishedWorkflowSteps() {
 	for _, task := range tasks {
 		// Only steps that actually ran; leave un-started (DAG-waiting) ones to
 		// reconcileReadyTasks.
-		if task.StartedAt == nil || task.WorktreePath == "" {
+		if task.StartedAt == nil {
+			continue
+		}
+		// A step with no recorded worktree cannot be assessed: WorkflowStepFinished
+		// needs a worktree and a base commit to tell "produced work" from "sat
+		// still", so this sweep can only skip it. Skipping is right — but skipping
+		// SILENTLY is how a finished pipeline stalls with nothing to look at. A step
+		// that has started and still has no worktree is an anomaly (its executor was
+		// launched outside the daemon's provisioning, or provisioning never
+		// completed), so say so once, on the task, where the stall is visible.
+		if task.WorktreePath == "" {
+			if logged, _ := e.db.HasLogLineContaining(task.ID, stepMissingWorktreeLog); !logged {
+				e.logLine(task.ID, "error", stepMissingWorktreeLog)
+				e.logger.Warn("Pipeline step has started but has no worktree; cannot auto-complete it",
+					"id", task.ID, "title", task.Title, "status", task.Status)
+			}
 			continue
 		}
 		// A 'processing' step is only a recovery candidate once its session has actually
