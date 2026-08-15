@@ -2,6 +2,7 @@ package executor
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -89,7 +90,10 @@ func (e *Executor) EnsureTaskWindow(ctx context.Context, task *db.Task, sessionI
 		return "", false, err
 	}
 
-	workDir := e.taskWorkdir(task)
+	workDir, err := e.launchWorkdir(task)
+	if err != nil {
+		return "", false, err
+	}
 
 	taskExecutor := e.GetTaskExecutor(task)
 	if taskExecutor == nil {
@@ -182,8 +186,12 @@ func (e *Executor) EnsureTaskWindow(ctx context.Context, task *db.Task, sessionI
 	return windowTarget, true, nil
 }
 
-// taskWorkdir returns the directory an interactive session should start in:
-// the task worktree when present, then the project directory, then home.
+// taskWorkdir returns the directory associated with a task: its worktree when
+// present, then the project directory, then home.
+//
+// This is for READ-ONLY uses (probing for a session file on disk, displaying a
+// path). Anything that LAUNCHES an agent must use launchWorkdir, which refuses
+// the fallbacks.
 func (e *Executor) taskWorkdir(task *db.Task) string {
 	if task.WorktreePath != "" {
 		return task.WorktreePath
@@ -195,6 +203,43 @@ func (e *Executor) taskWorkdir(task *db.Task) string {
 	}
 	home, _ := os.UserHomeDir()
 	return home
+}
+
+// ErrNoWorktree means a task in a worktree-isolated project has no worktree yet,
+// so there is nowhere safe to start an agent.
+var ErrNoWorktree = errors.New("task has no worktree yet")
+
+// launchWorkdir returns the directory to START AN AGENT in, or an error when no
+// isolated directory exists.
+//
+// The daemon's setupWorktree already refuses to fall back to the project
+// directory ("never fall back to project directory to prevent Claude from
+// accidentally writing to the main repo"). taskWorkdir did exactly that, and
+// EnsureTaskWindow — reachable from the TUI, the GUI and the HTTP API — used it,
+// so any task the daemon had not yet provisioned could be started by hand
+// straight into the primary clone, or into $HOME if the project had no directory
+// at all.
+//
+// That is not hypothetical. A pipeline's verify step whose daemon spin-up was
+// blocked on a contended branch was launched this way: it ran 42 minutes in the
+// main repo, and because no worktree was ever recorded for it, it stayed
+// invisible to reconcileFinishedWorkflowSteps and never parked for merge review.
+// An unprovisioned task must fail loudly here instead.
+func (e *Executor) launchWorkdir(task *db.Task) (string, error) {
+	if task == nil {
+		return "", ErrNoWorktree
+	}
+	if task.WorktreePath != "" {
+		return task.WorktreePath, nil
+	}
+	// A project that does not use worktrees shares the project directory by
+	// design; that is its normal, isolated-enough working directory.
+	if task.Project != "" && !e.config.ProjectUsesWorktrees(task.Project) {
+		if dir := e.GetProjectDir(task.Project); dir != "" {
+			return dir, nil
+		}
+	}
+	return "", fmt.Errorf("%w: refusing to start task %d outside an isolated worktree", ErrNoWorktree, task.ID)
 }
 
 // findExistingTaskWindow looks for windowName in any task-daemon session and
