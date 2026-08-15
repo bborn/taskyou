@@ -79,6 +79,20 @@ type Executor struct {
 	// windowExistsFn reports whether a live executor tmux window exists for a
 	// task. Overridable in tests; nil means use tmuxWindowExistsForTask.
 	windowExistsFn func(taskID int64) bool
+
+	// branchWaits tracks steps deferred by ErrBranchBusy so their retries back
+	// off instead of spinning at the worker tick. Keyed by task ID.
+	branchWaitMu sync.Mutex
+	branchWaits  map[int64]*branchWait
+}
+
+// windowExists reports whether a live executor tmux window exists for a task,
+// honouring the test override.
+func (e *Executor) windowExists(taskID int64) bool {
+	if e.windowExistsFn != nil {
+		return e.windowExistsFn(taskID)
+	}
+	return tmuxWindowExistsForTask(taskID)
 }
 
 // DefaultSuspendIdleTimeout is the default time a blocked task must be idle before being suspended.
@@ -362,11 +376,7 @@ func (e *Executor) reconcileOrphanedTasks(startup bool) {
 
 		// A processing task with a live executor window is genuinely still
 		// running (e.g. the tmux server survived a daemon restart) - leave it.
-		windowExists := tmuxWindowExistsForTask
-		if e.windowExistsFn != nil {
-			windowExists = e.windowExistsFn
-		}
-		if windowExists(task.ID) {
+		if e.windowExists(task.ID) {
 			continue
 		}
 
@@ -420,6 +430,11 @@ func (e *Executor) reconcileReadyTasks() {
 // far longer; anything "completing" faster is almost certainly a step we caught mid-setup.
 const minWorkflowStepRuntime = 30 * time.Second
 
+// stepMissingWorktreeLog is written (once) to a pipeline step that has started but
+// has no worktree recorded, so a workflow that cannot advance says why on the task
+// instead of stalling in silence.
+const stepMissingWorktreeLog = "This step started without a recorded worktree, so the workflow cannot verify it finished or advance past it. Its work (if any) is not where the pipeline expects it. Re-queue the step to have the daemon provision it properly."
+
 // reconcileFinishedWorkflowSteps recovers workflow steps that finished their work
 // (committed + pushed) but never reached 'done'. Two shapes: (1) parked in 'blocked'
 // because the Stop hook's git-state check fired at a transient moment (a temp file
@@ -455,7 +470,22 @@ func (e *Executor) reconcileFinishedWorkflowSteps() {
 	for _, task := range tasks {
 		// Only steps that actually ran; leave un-started (DAG-waiting) ones to
 		// reconcileReadyTasks.
-		if task.StartedAt == nil || task.WorktreePath == "" {
+		if task.StartedAt == nil {
+			continue
+		}
+		// A step with no recorded worktree cannot be assessed: WorkflowStepFinished
+		// needs a worktree and a base commit to tell "produced work" from "sat
+		// still", so this sweep can only skip it. Skipping is right — but skipping
+		// SILENTLY is how a finished pipeline stalls with nothing to look at. A step
+		// that has started and still has no worktree is an anomaly (its executor was
+		// launched outside the daemon's provisioning, or provisioning never
+		// completed), so say so once, on the task, where the stall is visible.
+		if task.WorktreePath == "" {
+			if logged, _ := e.db.HasLogLineContaining(task.ID, stepMissingWorktreeLog); !logged {
+				e.logLine(task.ID, "error", stepMissingWorktreeLog)
+				e.logger.Warn("Pipeline step has started but has no worktree; cannot auto-complete it",
+					"id", task.ID, "title", task.Title, "status", task.Status)
+			}
 			continue
 		}
 		// A 'processing' step is only a recovery candidate once its session has actually
@@ -1755,6 +1785,17 @@ func (e *Executor) processNextTask(ctx context.Context) {
 			continue
 		}
 
+		// A step deferred for branch contention serves its backoff here. Without
+		// this gate the task is re-entered on every 2s tick, and each pass writes
+		// a fresh "Starting task #N" line for a step that cannot start.
+		//
+		// This gate goes before routing deliberately: it is a map lookup, while
+		// routing may shell out to a plugin. A task sitting out a branch backoff
+		// shouldn't pay for a usage probe on every tick to learn it still can't run.
+		if !e.branchWaitDue(task.ID) {
+			continue
+		}
+
 		// Last decision before the spawn: which Claude profile does this run
 		// under? A routing plugin may pick one (stamping task.ClaudeConfigDir,
 		// which both command builders already honor) or ask to hold the task
@@ -1880,16 +1921,33 @@ func (e *Executor) executeTask(ctx context.Context, task *db.Task) {
 	workDir, createdWorktree, err := e.setupWorktree(task)
 	if errors.Is(err, ErrBranchBusy) {
 		// Not a failure: the branch this step needs is held by a sibling that is
-		// still running. Leave the task QUEUED so the next tick retries it, and
+		// still running. Leave the task QUEUED so a later tick retries it, and
 		// leave no completion timestamps behind — a step parked 'blocked' with a
 		// started_at/completed_at pair reads as a step that ran, which is how a
 		// pipeline silently loses a phase.
-		e.logger.Info("Deferring step until the branch it needs is free", "id", task.ID, "error", err)
+		//
+		// The retry backs off (see branchWaitDue in processNextTask); without that
+		// this return is a 2s spin that re-logs the start line every pass.
+		retryIn, keepWaiting := e.deferForBusyBranch(task.ID)
+		if !keepWaiting {
+			e.logger.Warn("Giving up on a contended branch", "id", task.ID, "waited", branchWaitGiveUp, "error", err)
+			e.logLine(task.ID, "error", fmt.Sprintf(
+				"Could not start: %v. Waited %s without that branch being freed, so this step is parked instead of retrying forever. Free the branch (detach the worktree named above) and re-queue this task.",
+				err, branchWaitGiveUp))
+			_ = e.db.UpdateTaskStatus(task.ID, db.StatusBlocked)
+			e.hooks.OnStatusChange(task, db.StatusBlocked, "Blocked: the branch this step needs never became free")
+			return
+		}
+		e.logger.Info("Deferring step until the branch it needs is free",
+			"id", task.ID, "retry_in", retryIn, "error", err)
 		if err := e.db.UpdateTaskStatus(task.ID, db.StatusQueued); err != nil {
 			e.logger.Error("Failed to requeue deferred step", "id", task.ID, "error", err)
 		}
 		return
 	}
+	// Past worktree setup: whatever contention this step saw is over, so it
+	// starts from a fresh backoff the next time it contends.
+	e.clearBranchWait(task.ID)
 	if err != nil {
 		e.logger.Error("Failed to setup worktree", "error", err)
 		e.logLine(task.ID, "error", fmt.Sprintf("Failed to setup worktree: %v", err))

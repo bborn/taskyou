@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/bborn/workflow/internal/config"
 	"github.com/bborn/workflow/internal/db"
@@ -264,5 +265,121 @@ func mustGit(t *testing.T, dir string, args ...string) {
 		"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@t", "GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@t")
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
+	}
+}
+
+// The stall this fix exists for: the holder is DONE, but its executor tmux
+// window was never reaped. taskIsLive used to read that leftover window as
+// "still working", so the branch was never reclaimed and every downstream step
+// re-queued itself on ErrBranchBusy forever. A terminal status wins over tmux.
+func TestSourceBranchWorktreeReclaimsFromDoneHolderWithStaleTmuxWindow(t *testing.T) {
+	repo, branch := sharedBranchRepo(t)
+	e, database := sharedBranchExecutor(t, repo)
+	holder := holdBranch(t, e, database, repo, branch, db.StatusDone)
+
+	// The window outlives the agent: the pane falls back to a shell and nothing
+	// reaps the window.
+	e.windowExistsFn = func(taskID int64) bool { return taskID == holder.ID }
+
+	next := filepath.Join(t.TempDir(), "next")
+	if err := e.addSourceBranchWorktree(repo, next, branch); err != nil {
+		t.Fatalf("a done holder's stale tmux window still pins the branch: %v", err)
+	}
+	got, err := gitCurrentBranch(next)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != branch {
+		t.Fatalf("next step worktree is on %q, want %q", got, branch)
+	}
+}
+
+// The correction must not go too far: a step that has not reached a terminal
+// status may still have a live agent behind that window (a 'blocked' step
+// sitting on a question), and its branch stays put.
+func TestSourceBranchWorktreeKeepsBranchForBlockedHolderWithLiveWindow(t *testing.T) {
+	repo, branch := sharedBranchRepo(t)
+	e, database := sharedBranchExecutor(t, repo)
+	holder := holdBranch(t, e, database, repo, branch, db.StatusBlocked)
+	e.windowExistsFn = func(taskID int64) bool { return taskID == holder.ID }
+
+	err := e.addSourceBranchWorktree(repo, filepath.Join(t.TempDir(), "next"), branch)
+	if !errors.Is(err, ErrBranchBusy) {
+		t.Fatalf("want ErrBranchBusy while a blocked holder still owns its window, got %v", err)
+	}
+}
+
+// A blocked holder whose window is gone is finished for our purposes — nothing
+// is going to come back and use that worktree.
+func TestSourceBranchWorktreeReclaimsFromBlockedHolderWithNoWindow(t *testing.T) {
+	repo, branch := sharedBranchRepo(t)
+	e, database := sharedBranchExecutor(t, repo)
+	holdBranch(t, e, database, repo, branch, db.StatusBlocked)
+	e.windowExistsFn = func(int64) bool { return false }
+
+	if err := e.addSourceBranchWorktree(repo, filepath.Join(t.TempDir(), "next"), branch); err != nil {
+		t.Fatalf("abandoned blocked holder should release the branch: %v", err)
+	}
+}
+
+// Re-queueing a contended step every 2s tick is what flushed a task's whole log
+// history out of the ring buffer. Deferrals must back off, and the gate must
+// actually hold the step back between attempts.
+func TestBranchWaitBacksOff(t *testing.T) {
+	e := &Executor{}
+
+	first, keepWaiting := e.deferForBusyBranch(7)
+	if !keepWaiting {
+		t.Fatal("first deferral should keep waiting")
+	}
+	if first != branchWaitInitialBackoff {
+		t.Fatalf("first backoff = %s, want %s", first, branchWaitInitialBackoff)
+	}
+	if e.branchWaitDue(7) {
+		t.Fatal("step is due again immediately; the 2s spin is still possible")
+	}
+	// An unrelated task is never gated by someone else's contention.
+	if !e.branchWaitDue(8) {
+		t.Fatal("a task with no recorded wait must always be due")
+	}
+
+	second, _ := e.deferForBusyBranch(7)
+	if second <= first {
+		t.Fatalf("backoff did not grow: %s then %s", first, second)
+	}
+
+	for i := 0; i < 20; i++ {
+		got, keep := e.deferForBusyBranch(7)
+		if !keep {
+			t.Fatal("give-up fired on elapsed attempts rather than elapsed time")
+		}
+		if got > branchWaitMaxBackoff {
+			t.Fatalf("backoff %s exceeded the %s cap", got, branchWaitMaxBackoff)
+		}
+	}
+
+	e.clearBranchWait(7)
+	if !e.branchWaitDue(7) {
+		t.Fatal("cleared wait should leave the task due")
+	}
+}
+
+// A branch that never frees must not be retried forever in silence: past the
+// give-up window the step is parked so a human sees the stall.
+func TestBranchWaitGivesUpAfterDeadline(t *testing.T) {
+	e := &Executor{}
+	if _, keepWaiting := e.deferForBusyBranch(9); !keepWaiting {
+		t.Fatal("should still be waiting on the first deferral")
+	}
+
+	e.branchWaitMu.Lock()
+	e.branchWaits[9].first = time.Now().Add(-branchWaitGiveUp - time.Second)
+	e.branchWaitMu.Unlock()
+
+	if _, keepWaiting := e.deferForBusyBranch(9); keepWaiting {
+		t.Fatalf("still waiting after %s; the step would spin indefinitely", branchWaitGiveUp)
+	}
+	if !e.branchWaitDue(9) {
+		t.Fatal("giving up should drop the wait record")
 	}
 }

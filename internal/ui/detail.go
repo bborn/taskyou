@@ -93,8 +93,21 @@ const waitForExecutorTimeout = 60 * time.Second
 // shouldFallBackToStart reports whether a view that has been passively waiting for
 // the daemon's executor (paneActionWaitForExecutor) should give up and start one
 // itself. It gives up only once the timeout has elapsed with no panes joined.
-func shouldFallBackToStart(waitingForExecutor, panesJoined bool, waited, timeout time.Duration) bool {
-	return waitingForExecutor && !panesJoined && waited >= timeout
+//
+// hasWorktree gates the whole fallback. The wait times out for two very
+// different reasons, and only one of them is safe to recover from here:
+//
+//   - The daemon provisioned the task (worktree exists) but its window never
+//     appeared — it died mid-spin-up. Starting the session ourselves lands in
+//     that worktree, and is the recovery this fallback was written for.
+//   - The daemon never provisioned the task at all (no worktree). Starting it
+//     now has nowhere isolated to run: EnsureTaskWindow used to fall back to the
+//     primary clone, which is how a pipeline verify step ran 42 minutes in the
+//     main repo and — having no recorded worktree — stayed invisible to
+//     reconcileFinishedWorkflowSteps and never parked for merge review. Nothing
+//     here can fix an unprovisioned task, so keep waiting for the daemon.
+func shouldFallBackToStart(waitingForExecutor, panesJoined, hasWorktree bool, waited, timeout time.Duration) bool {
+	return waitingForExecutor && !panesJoined && hasWorktree && waited >= timeout
 }
 
 // liveExecutorInPaneCommands reports whether any of the given tmux pane
@@ -715,7 +728,9 @@ func (m *DetailModel) Refresh() tea.Cmd {
 		// Start the executor ourselves rather than spin forever. Safe from the
 		// double-spawn this whole change prevents: startPanesAsync goes through
 		// EnsureTaskWindow's spawn lock, which re-checks for an existing window.
-		if shouldFallBackToStart(m.waitingForExecutor, m.claudePaneID != "", time.Since(m.paneLoadingStart), waitForExecutorTimeout) {
+		// Only when the task actually has a worktree to start in — see
+		// shouldFallBackToStart.
+		if shouldFallBackToStart(m.waitingForExecutor, m.claudePaneID != "", m.task.WorktreePath != "", time.Since(m.paneLoadingStart), waitForExecutorTimeout) {
 			GetLogger().Info("Refresh: waited %s for daemon executor on task %d with no window; starting it ourselves", waitForExecutorTimeout, m.task.ID)
 			m.waitingForExecutor = false
 			return tea.Batch(cmd, m.startPanesAsync())
