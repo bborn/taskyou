@@ -212,7 +212,8 @@ task when every account is spent:
 ty plugins add https://github.com/taskyou/plugins
 ```
 
-It runs on [`ty usage`](#inspecting), which reports the same numbers directly.
+It reads each account's remaining limits itself — ty supplies the hook, the
+plugin supplies the policy and the data it routes on.
 
 ## Environment
 
@@ -311,7 +312,6 @@ only for a process that must stay *up* (a socket connection, a listening port).
 ```bash
 ty plugins list   # what's installed and which events each handles
 ty plugins dir    # the plugins directory path
-ty usage          # rate-limit usage per Claude profile — what a router routes on
 ```
 
 Set `TY_PLUGINS_DIR` to use a directory other than `~/.config/task/plugins/`.

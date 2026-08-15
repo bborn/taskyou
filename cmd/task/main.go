@@ -531,7 +531,6 @@ Examples:
 
 	// Plugins subcommand - inspect installed task plugins
 	rootCmd.AddCommand(newPluginsCmd())
-	rootCmd.AddCommand(newUsageCmd())
 
 	// Workflow artifact store over the CLI — the transport-independent twin of the
 	// taskyou_get_artifact/taskyou_set_artifact MCP tools, so a workflow phase can
