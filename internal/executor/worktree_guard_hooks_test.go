@@ -37,6 +37,14 @@ func TestSetupWorktreeGuardHooks(t *testing.T) {
 			jsonHook:   true,
 		},
 		{
+			name:       "grok",
+			setup:      func(e *Executor, wd string) (func(), error) { return e.setupGrokWorktreeGuard(wd, "") },
+			relPath:    ".grok/hooks/taskyou-worktree-guard.json",
+			wantEvent:  "PreToolUse",
+			wantFormat: "grok",
+			jsonHook:   true,
+		},
+		{
 			name:       "opencode",
 			setup:      func(e *Executor, wd string) (func(), error) { return e.setupOpenCodeWorktreeGuard(wd, "") },
 			relPath:    ".opencode/plugins/taskyou-worktree-guard.js",

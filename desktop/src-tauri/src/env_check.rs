@@ -10,7 +10,7 @@ use serde::Serialize;
 use std::process::Command;
 
 /// Executor CLIs taskyou knows how to drive, in display order.
-const EXECUTOR_CLIS: &[&str] = &["claude", "codex", "gemini", "opencode", "pi", "openclaw"];
+const EXECUTOR_CLIS: &[&str] = &["claude", "codex", "gemini", "grok", "opencode", "pi", "openclaw"];
 
 /// Replace this process's PATH with the login shell's PATH so child processes
 /// (ty → tmux → executors) resolve tools the way the user's terminal does.

@@ -60,6 +60,13 @@ func TestExecutorInterfaceImplementation(t *testing.T) {
 			dangerousFlag:         "--dangerously-allow-run",
 		},
 		{
+			name:                  "Grok executor",
+			executorName:          db.ExecutorGrok,
+			supportsSessionResume: true,
+			supportsDangerousMode: true,
+			dangerousFlag:         "--always-approve",
+		},
+		{
 			name:                  "OpenClaw executor",
 			executorName:          db.ExecutorOpenClaw,
 			supportsSessionResume: true,
@@ -175,6 +182,19 @@ func TestBuildCommandDangerousMode(t *testing.T) {
 			dangerousMode: false,
 			wantFlag:      "",
 		},
+		// Grok tests
+		{
+			name:          "Grok with dangerous mode enabled",
+			executorName:  db.ExecutorGrok,
+			dangerousMode: true,
+			wantFlag:      "--always-approve",
+		},
+		{
+			name:          "Grok with dangerous mode disabled",
+			executorName:  db.ExecutorGrok,
+			dangerousMode: false,
+			wantFlag:      "",
+		},
 	}
 
 	for _, tt := range tests {
@@ -199,6 +219,7 @@ func TestBuildCommandDangerousMode(t *testing.T) {
 					"--dangerously-skip-permissions",
 					"--dangerously-bypass-approvals-and-sandbox",
 					"--dangerously-allow-run",
+					"--always-approve",
 				}
 				for _, flag := range dangerousFlags {
 					if strings.Contains(cmd, flag) {
@@ -248,6 +269,7 @@ func TestBuildCommandDangerousModeEnvVar(t *testing.T) {
 		{db.ExecutorClaude, "--dangerously-skip-permissions"},
 		{db.ExecutorCodex, "--dangerously-bypass-approvals-and-sandbox"},
 		{db.ExecutorGemini, "--dangerously-allow-run"},
+		{db.ExecutorGrok, "--always-approve"},
 	}
 
 	for _, tt := range tests {
@@ -549,6 +571,12 @@ func TestBuildCommandWithSessionResume(t *testing.T) {
 			sessionID:    "gemini-session-789",
 			wantContains: "--resume gemini-session-789",
 		},
+		{
+			name:         "Grok with session ID",
+			executorName: db.ExecutorGrok,
+			sessionID:    "grok-session-012",
+			wantContains: "--resume grok-session-012",
+		},
 	}
 
 	for _, tt := range tests {
@@ -606,6 +634,7 @@ func TestBuildCommandWithDangerousAndResume(t *testing.T) {
 		{db.ExecutorClaude, "--dangerously-skip-permissions"},
 		{db.ExecutorCodex, "--dangerously-bypass-approvals-and-sandbox"},
 		{db.ExecutorGemini, "--dangerously-allow-run"},
+		{db.ExecutorGrok, "--always-approve"},
 	}
 
 	sessionID := "test-session-combined"
@@ -994,7 +1023,7 @@ func TestBuildCommandIncludesEnvironmentVariables(t *testing.T) {
 		WorktreePath: "/home/user/projects/myapp/.task-worktrees/42-fix-bug",
 	}
 
-	executors := []string{db.ExecutorClaude, db.ExecutorCodex, db.ExecutorGemini, db.ExecutorOpenClaw, db.ExecutorOpenCode}
+	executors := []string{db.ExecutorClaude, db.ExecutorCodex, db.ExecutorGemini, db.ExecutorGrok, db.ExecutorOpenClaw, db.ExecutorOpenCode}
 
 	for _, name := range executors {
 		t.Run(name, func(t *testing.T) {

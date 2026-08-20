@@ -33,13 +33,14 @@ import (
 
 // WorktreeGuardInput is the canonical, executor-agnostic slice of a pre-tool-use
 // payload the guard needs. Every supported agent CLI (Claude, Codex, Gemini,
-// OpenCode) normalizes its native hook payload into this shape before evaluating
+// Grok, OpenCode) normalizes its native hook payload into this shape before evaluating
 // the guard, so the policy below has a single source of truth. It is also
 // decoupled from any hook JSON struct so the guard can be unit-tested without
 // constructing full hook payloads.
 //
 // ToolName uses each executor's real tool vocabulary (e.g. Claude "Write",
-// Codex "apply_patch", Gemini "write_file"/"run_shell_command"); externalWriteTargets
+// Codex "apply_patch", Gemini "write_file"/"run_shell_command",
+// Grok "search_replace"/"run_terminal_command"); externalWriteTargets
 // knows how to read the write destinations out of each.
 type WorktreeGuardInput struct {
 	ToolName       string
@@ -115,14 +116,15 @@ func externalWriteTargets(in WorktreeGuardInput, root string, allowExternal []st
 	switch in.ToolName {
 	// File-edit tools whose target lives in a "file_path" field.
 	//   Claude: Edit / Write / MultiEdit   ·   Gemini: write_file / replace
+	//   Grok: search_replace / write
 	// (The OpenCode plugin normalizes its write/edit tools to "Write" + file_path.)
-	case "Edit", "Write", "MultiEdit", "write_file", "replace":
+	case "Edit", "Write", "MultiEdit", "write_file", "replace", "search_replace", "write":
 		raw = stringField(in.ToolInput, "file_path")
 	case "NotebookEdit":
 		raw = stringField(in.ToolInput, "notebook_path")
 	// Shell tools whose command lives in a "command" field.
-	//   Claude: Bash   ·   Gemini: run_shell_command
-	case "Bash", "run_shell_command":
+	//   Claude: Bash   ·   Gemini: run_shell_command   ·   Grok: run_terminal_command
+	case "Bash", "run_shell_command", "run_terminal_command":
 		raw = bashWriteTargets(in.ToolInput)
 	// Codex (and the OpenCode plugin) edit files through apply_patch; the write
 	// targets live as marker lines inside the patch envelope carried in "command".

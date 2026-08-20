@@ -533,6 +533,8 @@ func taskExecutorDisplayName(task *db.Task) string {
 		return "Claude"
 	case db.ExecutorGemini:
 		return "Gemini"
+	case db.ExecutorGrok:
+		return "Grok"
 	case db.ExecutorOpenClaw:
 		return "OpenClaw"
 	default:
@@ -1819,7 +1821,7 @@ func (m *AppModel) renderWelcomeMessage(height int) string {
 		warningStyle := lipgloss.NewStyle().
 			Foreground(ColorWarning)
 		lines = append(lines, warningStyle.Render(IconBlocked()+" No AI executor found"))
-		lines = append(lines, descStyle.Render("   Install one: claude, codex, or gemini"))
+		lines = append(lines, descStyle.Render("   Install one: claude, codex, gemini, or grok"))
 	} else {
 		readyStyle := lipgloss.NewStyle().
 			Foreground(ColorDone)

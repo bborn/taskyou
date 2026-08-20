@@ -143,6 +143,8 @@ func formatExecutorDisplayName(slug, raw string) string {
 		return defaultExecutorName
 	case "gemini":
 		return "Gemini"
+	case "grok":
+		return "Grok"
 	case "pi":
 		return "Pi"
 	}
@@ -194,13 +196,7 @@ func New(database *db.DB, cfg *config.Config) *Executor {
 	// Register the events emitter with the database for event emission
 	database.SetEventEmitter(eventsEmitter)
 
-	// Register available executors
-	e.executorFactory.Register(NewClaudeExecutor(e))
-	e.executorFactory.Register(NewCodexExecutor(e))
-	e.executorFactory.Register(NewGeminiExecutor(e))
-	e.executorFactory.Register(NewOpenClawExecutor(e))
-	e.executorFactory.Register(NewOpenCodeExecutor(e))
-	e.executorFactory.Register(NewPiExecutor(e))
+	e.registerBuiltinExecutors()
 
 	return e
 }
@@ -232,15 +228,19 @@ func NewWithLogging(database *db.DB, cfg *config.Config, w io.Writer) *Executor 
 	// Register the events emitter with the database for event emission
 	database.SetEventEmitter(eventsEmitter)
 
-	// Register available executors
+	e.registerBuiltinExecutors()
+
+	return e
+}
+
+func (e *Executor) registerBuiltinExecutors() {
 	e.executorFactory.Register(NewClaudeExecutor(e))
 	e.executorFactory.Register(NewCodexExecutor(e))
 	e.executorFactory.Register(NewGeminiExecutor(e))
+	e.executorFactory.Register(NewGrokExecutor(e))
 	e.executorFactory.Register(NewOpenClawExecutor(e))
 	e.executorFactory.Register(NewOpenCodeExecutor(e))
 	e.executorFactory.Register(NewPiExecutor(e))
-
-	return e
 }
 
 // DisplayName returns the configured executor display name.
