@@ -1790,7 +1790,20 @@ func (e *Executor) processNextTask(ctx context.Context) {
 		// A step deferred for branch contention serves its backoff here. Without
 		// this gate the task is re-entered on every 2s tick, and each pass writes
 		// a fresh "Starting task #N" line for a step that cannot start.
+		//
+		// This gate goes before routing deliberately: it is a map lookup, while
+		// routing may shell out to a plugin. A task sitting out a branch backoff
+		// shouldn't pay for a usage probe on every tick to learn it still can't run.
 		if !e.branchWaitDue(task.ID) {
+			continue
+		}
+
+		// Last decision before the spawn: which Claude profile does this run
+		// under? A routing plugin may pick one (stamping task.ClaudeConfigDir,
+		// which both command builders already honor) or ask to hold the task
+		// when every account is out of headroom. With no router installed this
+		// is a no-op. See routing.go.
+		if !e.routeTask(ctx, task, true) {
 			continue
 		}
 
@@ -1856,6 +1869,11 @@ func (e *Executor) ExecuteNow(ctx context.Context, taskID int64) error {
 	}
 	e.runningTasks[taskID] = true
 	e.mu.Unlock()
+
+	// Route this run to a Claude profile too, so a manually started task lands
+	// on the same account the queue would have chosen. A hold is not honored
+	// here: the user asked for this task to run now.
+	e.routeTask(ctx, task, false)
 
 	e.executeTask(ctx, task)
 	return nil
