@@ -590,6 +590,32 @@ func TestTaskJSONIncludesTerminalFields(t *testing.T) {
 	}
 }
 
+func TestTaskJSONStand(t *testing.T) {
+	stand := "Merge email ingest PR"
+	tj := toTaskJSON(&db.Task{ID: 1, Title: "email", Status: db.StatusBlocked, Summary: stand})
+	if tj.Stand != stand {
+		t.Errorf("stand = %q, want %q", tj.Stand, stand)
+	}
+	long := toTaskJSON(&db.Task{
+		ID: 3, Title: "email", Status: db.StatusBlocked,
+		Summary: "Waiting on the APNs key before we can test pushes",
+	})
+	if long.Stand != "Waiting on the APNs key" {
+		t.Errorf("long stand should clamp to five words, got %q", long.Stand)
+	}
+
+	fossil := toTaskJSON(&db.Task{
+		ID: 2, Title: "email", Status: db.StatusBlocked,
+		Summary: "- Built the IMAP poller\n- Opened a PR",
+	})
+	if fossil.Stand != "" {
+		t.Errorf("fossil recap must not be stand, got %q", fossil.Stand)
+	}
+	if fossil.Summary == "" {
+		t.Error("raw summary should still be present for fossils")
+	}
+}
+
 func TestHandleUpdateTask_PermissionAndEffort(t *testing.T) {
 	srv, database, _ := setupServer(t)
 	task := createTestTask(t, database, &db.Task{Title: "perm", Status: db.StatusBacklog})

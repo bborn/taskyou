@@ -36,6 +36,76 @@ func TestKanbanBoard_ShowsAgeHint(t *testing.T) {
 	}
 }
 
+func TestKanbanBoard_BlockedShowsStand(t *testing.T) {
+	board := NewKanbanBoard(120, 50)
+	stand := "Merge email ingest PR"
+	board.SetTasks([]*db.Task{
+		{ID: 11, Title: "Email ingest", Status: db.StatusBlocked, Summary: stand},
+	})
+	board.SetTasksNeedingInput(map[int64]bool{11: true})
+	board.SetLatestActivity(map[int64]*db.TaskLog{
+		11: {TaskID: 11, LineType: "system", Content: "Reconnecting to claude session abc"},
+	})
+
+	out := board.View()
+	if !strings.Contains(out, "Merge email ingest PR") {
+		t.Errorf("blocked card should show stand, got:\n%s", out)
+	}
+	if strings.Contains(out, "needs your input") {
+		t.Errorf("stand should replace the needs-input prompt, got:\n%s", out)
+	}
+	if strings.Contains(out, "Reconnecting") {
+		t.Errorf("reconnect log must not appear on the card, got:\n%s", out)
+	}
+}
+
+func TestKanbanBoard_BlockedIgnoresFossilRecap(t *testing.T) {
+	board := NewKanbanBoard(120, 50)
+	board.SetTasks([]*db.Task{
+		{ID: 12, Title: "Email ingest", Status: db.StatusBlocked,
+			Summary: "- Built the IMAP poller\n- Opened a PR\n- Waiting on merge"},
+	})
+	board.SetTasksNeedingInput(map[int64]bool{12: true})
+
+	out := board.View()
+	if strings.Contains(out, "Built the IMAP poller") {
+		t.Errorf("fossil recap must not render as the stand, got:\n%s", out)
+	}
+	if !strings.Contains(out, "needs your input") {
+		t.Errorf("without a stand, blocked+needs-input should fall back to the prompt, got:\n%s", out)
+	}
+}
+
+func TestKanbanBoard_BlockedFallsBackToQuestion(t *testing.T) {
+	board := NewKanbanBoard(120, 50)
+	board.SetTasks([]*db.Task{
+		{ID: 13, Title: "Webhooks", Status: db.StatusBlocked},
+	})
+	board.SetLatestActivity(map[int64]*db.TaskLog{
+		13: {TaskID: 13, LineType: "question", Content: "Which auth scheme should the webhook use?"},
+	})
+
+	out := board.View()
+	if !strings.Contains(out, "Which auth scheme") {
+		t.Errorf("blocked card should fall back to the question, got:\n%s", out)
+	}
+}
+
+func TestKanbanBoard_ProcessingIgnoresReconnect(t *testing.T) {
+	board := NewKanbanBoard(120, 50)
+	board.SetTasks([]*db.Task{
+		{ID: 14, Title: "Refactor auth", Status: db.StatusProcessing},
+	})
+	board.SetLatestActivity(map[int64]*db.TaskLog{
+		14: {TaskID: 14, LineType: "system", Content: "Reconnecting to claude session abc"},
+	})
+
+	out := board.View()
+	if strings.Contains(out, "Reconnecting") {
+		t.Errorf("processing card must not show reconnect logs, got:\n%s", out)
+	}
+}
+
 func TestKanbanBoard_NeedsInputPrompt(t *testing.T) {
 	board := NewKanbanBoard(120, 50)
 	board.SetTasks([]*db.Task{

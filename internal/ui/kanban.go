@@ -74,9 +74,9 @@ type KanbanBoard struct {
 	cardCache map[uint64]string
 
 	// Each card carries a live sub-line: what the running agent is doing right
-	// now (from latestActivity), the question it's blocked on, or an age hint
-	// for idle statuses. spinnerFrame drives the animated braille glyph on
-	// processing tasks.
+	// now (from latestActivity), the stand / waiting question when blocked, or
+	// an age hint for idle statuses. spinnerFrame drives the animated braille
+	// glyph on processing tasks.
 	latestActivity map[int64]*db.TaskLog
 	spinnerFrame   int
 }
@@ -782,6 +782,7 @@ func (k *KanbanBoard) hashTaskCard(h *sigHasher, t *db.Task) {
 	h.str(t.Status)
 	h.str(t.Project)
 	h.str(t.Title)
+	h.str(t.Summary)
 	h.boolean(t.Pinned)
 	h.boolean(t.IsDangerous())
 	h.boolean(t.IsAutoPermission())

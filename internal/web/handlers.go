@@ -8,6 +8,7 @@ import (
 
 	"github.com/bborn/workflow/internal/db"
 	"github.com/bborn/workflow/internal/github"
+	"github.com/bborn/workflow/internal/tasksummary"
 )
 
 // --- JSON helpers ---
@@ -200,6 +201,14 @@ func (s *Server) handleTaskDetail(w http.ResponseWriter, r *http.Request) {
 		logs[i], logs[j] = logs[j], logs[i]
 	}
 
+	var latest *db.TaskLog
+	if len(logs) > 0 {
+		latest = logs[len(logs)-1]
+	}
+	if tasksummary.NeedsRefresh(task, latest) {
+		tasksummary.KickoffRewrite(s.db, task.ID)
+	}
+
 	jsonOK(w, map[string]interface{}{
 		"task": toTaskJSON(task),
 		"logs": toLogJSONSlice(logs),
@@ -356,10 +365,16 @@ func (s *Server) handleSetStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	oldStatus := ""
+	if existing, _ := s.db.GetTask(id); existing != nil {
+		oldStatus = existing.Status
+	}
+
 	if err := s.db.UpdateTaskStatus(id, req.Status); err != nil {
 		jsonErr(w, "failed to update status", http.StatusInternalServerError)
 		return
 	}
+	tasksummary.KickoffOnStatusChange(s.db, oldStatus, req.Status, id)
 
 	jsonOK(w, map[string]bool{"ok": true})
 }
@@ -398,6 +413,9 @@ func (s *Server) handleCloseTask(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, "failed to close task", http.StatusInternalServerError)
 		return
 	}
+	// Skip-if-exists: freeze a stand that was written on block; fill one in
+	// if the task never blocked.
+	tasksummary.KickoffGenerate(s.db, task.ID)
 
 	jsonOK(w, map[string]bool{"ok": true})
 }
@@ -1059,6 +1077,7 @@ type taskJSON struct {
 	PRNumber       int           `json:"pr_number,omitempty"`
 	PR             *prStatusJSON `json:"pr,omitempty"`
 	Summary        string        `json:"summary,omitempty"`
+	Stand          string        `json:"stand,omitempty"`
 	CreatedAt      string        `json:"created_at"`
 	UpdatedAt      string        `json:"updated_at"`
 	StartedAt      string        `json:"started_at,omitempty"`
@@ -1113,6 +1132,7 @@ func toTaskJSON(t *db.Task) *taskJSON {
 		PRNumber:       t.PRNumber,
 		PR:             toPRStatusJSON(t.PRInfoJSON),
 		Summary:        t.Summary,
+		Stand:          tasksummary.DisplayStand(t.Summary),
 		CreatedAt:      apiTime(t.CreatedAt.Time),
 		UpdatedAt:      apiTime(t.UpdatedAt.Time),
 	}
