@@ -202,7 +202,7 @@ func TestGrokBuildCommand(t *testing.T) {
 	task := &db.Task{
 		ID:             42,
 		Port:           3100,
-		WorktreePath:   "/tmp/.task-worktrees/42-fix",
+		WorktreePath:   t.TempDir(),
 		PermissionMode: db.PermissionModeDangerous,
 	}
 	cmd := grokExec.BuildCommand(task, "sess-id", "")
@@ -238,5 +238,135 @@ func TestDetectExecutorIdentityGrok(t *testing.T) {
 	}
 	if display != "Grok" {
 		t.Fatalf("expected display Grok, got %q", display)
+	}
+}
+
+func newTestGrokExecutor(t *testing.T) TaskExecutor {
+	t.Helper()
+	database, err := db.Open(filepath.Join(t.TempDir(), "tasks.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { database.Close() })
+	ex := New(database, &config.Config{})
+	grokExec := ex.GetExecutor(db.ExecutorGrok)
+	if grokExec == nil {
+		t.Fatal("grok executor not registered")
+	}
+	return grokExec
+}
+
+// TestGrokBuildCommand_ResumeOnlyWithSessionID drives the shipped BuildCommand:
+// --resume must appear only when a session id is supplied.
+func TestGrokBuildCommand_ResumeOnlyWithSessionID(t *testing.T) {
+	t.Setenv("WORKTREE_DANGEROUS_MODE", "")
+	grokExec := newTestGrokExecutor(t)
+	task := &db.Task{ID: 9, Port: 3100, WorktreePath: t.TempDir()}
+
+	fresh := grokExec.BuildCommand(task, "", "")
+	if strings.Contains(fresh, "--resume") {
+		t.Errorf("BuildCommand with empty sessionID must not pass --resume; got:\n  %s", fresh)
+	}
+
+	resumed := grokExec.BuildCommand(task, "01abc-session", "")
+	if !strings.Contains(resumed, "--resume 01abc-session") {
+		t.Errorf("BuildCommand with sessionID must pass --resume 01abc-session; got:\n  %s", resumed)
+	}
+}
+
+// TestGrokBuildCommand_EffortAndDBPath asserts Claude-parity env/flags on the
+// shipped grok BuildCommand (not a reimplementation).
+func TestGrokBuildCommand_EffortAndDBPath(t *testing.T) {
+	t.Setenv("WORKTREE_DANGEROUS_MODE", "")
+	grokExec := newTestGrokExecutor(t)
+	task := &db.Task{
+		ID:           11,
+		Port:         3100,
+		WorktreePath: t.TempDir(),
+		EffortLevel:  db.EffortHigh,
+		Model:        "grok-4",
+	}
+
+	t.Setenv("WORKTREE_DB_PATH", "/tmp/iso/tasks.db")
+	cmd := grokExec.BuildCommand(task, "", "")
+	if !strings.Contains(cmd, `WORKTREE_DB_PATH="/tmp/iso/tasks.db"`) {
+		t.Errorf("BuildCommand must carry WORKTREE_DB_PATH; got:\n  %s", cmd)
+	}
+	if di, gi := strings.Index(cmd, "WORKTREE_DB_PATH="), strings.Index(cmd, "grok "); di < 0 || gi < 0 || di > gi {
+		t.Errorf("WORKTREE_DB_PATH must precede `grok`; got:\n  %s", cmd)
+	}
+	if !strings.Contains(cmd, "--effort high") {
+		t.Errorf("BuildCommand with EffortLevel=high must contain --effort high; got:\n  %s", cmd)
+	}
+	if !strings.Contains(cmd, "--model 'grok-4'") && !strings.Contains(cmd, `--model "grok-4"`) {
+		t.Errorf("BuildCommand with Model=grok-4 must contain --model grok-4; got:\n  %s", cmd)
+	}
+
+	t.Setenv("WORKTREE_DB_PATH", "")
+	task.EffortLevel = ""
+	task.Model = ""
+	def := grokExec.BuildCommand(task, "", "")
+	if strings.Contains(def, "WORKTREE_DB_PATH=") {
+		t.Errorf("default instance: BuildCommand must NOT set WORKTREE_DB_PATH; got:\n  %s", def)
+	}
+	if strings.Contains(def, "--effort") {
+		t.Errorf("BuildCommand with no effort override must not contain --effort; got:\n  %s", def)
+	}
+}
+
+// TestGrokBuildCommand_WritesTaskyouMCPConfig verifies BuildCommand writes a
+// grok-native project MCP config that points at `ty mcp-server --task-id <id>`
+// — the same stdio server Claude gets via --mcp-config.
+func TestGrokBuildCommand_WritesTaskyouMCPConfig(t *testing.T) {
+	t.Setenv("WORKTREE_DANGEROUS_MODE", "")
+	grokExec := newTestGrokExecutor(t)
+	workDir := t.TempDir()
+	task := &db.Task{ID: 77, Port: 3100, WorktreePath: workDir}
+
+	cmd := grokExec.BuildCommand(task, "", "")
+	if !strings.Contains(cmd, "grok") {
+		t.Fatalf("BuildCommand must invoke grok; got:\n  %s", cmd)
+	}
+
+	cfgPath := filepath.Join(workDir, ".grok", "config.toml")
+	data, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatalf("expected grok MCP config at %s: %v", cfgPath, err)
+	}
+	body := string(data)
+	if !strings.Contains(body, "[mcp_servers.taskyou]") {
+		t.Errorf("config missing [mcp_servers.taskyou]:\n%s", body)
+	}
+	if !strings.Contains(body, "mcp-server") {
+		t.Errorf("config must invoke mcp-server:\n%s", body)
+	}
+	if !strings.Contains(body, "--task-id") || !strings.Contains(body, "77") {
+		t.Errorf("config must pass --task-id 77:\n%s", body)
+	}
+}
+
+// TestGrokResumeModeFlags covers ResumeDangerous / ResumeSafe: bypass on,
+// bypass off. Uses the shared flag helper those methods call.
+func TestGrokResumeModeFlags(t *testing.T) {
+	t.Setenv("WORKTREE_DANGEROUS_MODE", "")
+	t.Setenv("GROK_DANGEROUS_ARGS", "")
+	task := &db.Task{ID: 3, Port: 3100, WorktreePath: "/tmp/wt", EffortLevel: db.EffortLow}
+
+	dangerous := true
+	got := grokCLIFlags(task, "sess-1", &dangerous)
+	if !strings.Contains(got, "--always-approve") {
+		t.Errorf("ResumeDangerous flags must include --always-approve; got %q", got)
+	}
+	if !strings.Contains(got, "--resume sess-1") {
+		t.Errorf("ResumeDangerous flags must include --resume sess-1; got %q", got)
+	}
+
+	safe := false
+	got = grokCLIFlags(task, "sess-1", &safe)
+	if strings.Contains(got, "--always-approve") {
+		t.Errorf("ResumeSafe flags must not include --always-approve; got %q", got)
+	}
+	if !strings.Contains(got, "--resume sess-1") {
+		t.Errorf("ResumeSafe flags must still include --resume; got %q", got)
 	}
 }

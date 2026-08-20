@@ -126,14 +126,14 @@ func (g *GrokExecutor) runGrok(ctx context.Context, task *db.Task, workDir, prom
 		sessionID = fmt.Sprintf("%d", os.Getpid())
 	}
 
-	resumeFlag := ""
+	resumeSessionID := ""
 	existingSessionID := task.ClaudeSessionID
 	if existingSessionID == "" && isResume {
 		existingSessionID = findGrokSessionID(workDir)
 	}
 	if existingSessionID != "" && isResume {
 		if grokSessionExists(existingSessionID) {
-			resumeFlag = fmt.Sprintf("--resume %s ", existingSessionID)
+			resumeSessionID = existingSessionID
 			g.executor.logLine(task.ID, "system", fmt.Sprintf("Resuming Grok session %s", existingSessionID))
 		} else {
 			g.executor.logLine(task.ID, "system", fmt.Sprintf("Session %s no longer exists, starting fresh", existingSessionID))
@@ -143,11 +143,11 @@ func (g *GrokExecutor) runGrok(ctx context.Context, task *db.Task, workDir, prom
 		}
 	}
 
-	envPrefix := grokEnvPrefix() + taskEnvPrefix(task)
-	permFlag := grokLaunchFlags(task)
-	modelFlag := grokModelFlag(task)
-	script := fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %sgrok %s%s%s"$(cat %q)"`,
-		task.ID, sessionID, task.Port, task.WorktreePath, envPrefix, permFlag, modelFlag, resumeFlag, promptFile.Name())
+	if err := ensureGrokWorktreeMCPConfig(workDir, task.ID); err != nil {
+		g.logger.Warn("could not write grok taskyou MCP config", "error", err)
+	}
+
+	script := grokLaunchScript(task, sessionID, resumeSessionID, nil, fmt.Sprintf(`"$(cat %q)"`, promptFile.Name()))
 
 	actualSession, tmuxErr := createTmuxWindow(daemonSession, windowName, workDir, script, g.executor.getProjectDir(task.Project), task.ID)
 	if tmuxErr != nil {
@@ -305,35 +305,27 @@ func (g *GrokExecutor) ResumeProcess(taskID int64) bool {
 
 // BuildCommand returns the shell command to start an interactive Grok session.
 func (g *GrokExecutor) BuildCommand(task *db.Task, sessionID, prompt string) string {
+	if err := ensureGrokWorktreeMCPConfig(task.WorktreePath, task.ID); err != nil {
+		g.logger.Error("BuildCommand: failed to write grok MCP config", "error", err)
+	}
+
 	worktreeSessionID := os.Getenv("WORKTREE_SESSION_ID")
 	if worktreeSessionID == "" {
 		worktreeSessionID = fmt.Sprintf("%d", os.Getpid())
-	}
-
-	envPrefix := grokEnvPrefix() + taskEnvPrefix(task)
-	permFlag := grokLaunchFlags(task)
-	modelFlag := grokModelFlag(task)
-
-	resumeFlag := ""
-	if sessionID != "" {
-		resumeFlag = fmt.Sprintf("--resume %s ", sessionID)
 	}
 
 	if prompt != "" {
 		promptFile, err := os.CreateTemp("", "task-prompt-*.txt")
 		if err != nil {
 			g.logger.Error("BuildCommand: failed to create temp file", "error", err)
-			return fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %sgrok %s%s%s`,
-				task.ID, worktreeSessionID, task.Port, task.WorktreePath, envPrefix, permFlag, modelFlag, resumeFlag)
+			return grokLaunchScript(task, worktreeSessionID, sessionID, nil, "")
 		}
 		promptFile.WriteString(prompt)
 		promptFile.Close()
-		return fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %sgrok %s%s%s"$(cat %q)"; rm -f %q`,
-			task.ID, worktreeSessionID, task.Port, task.WorktreePath, envPrefix, permFlag, modelFlag, resumeFlag, promptFile.Name(), promptFile.Name())
+		return grokLaunchScript(task, worktreeSessionID, sessionID, nil, fmt.Sprintf(`"$(cat %q)"; rm -f %q`, promptFile.Name(), promptFile.Name()))
 	}
 
-	return fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %sgrok %s%s%s`,
-		task.ID, worktreeSessionID, task.Port, task.WorktreePath, envPrefix, permFlag, modelFlag, resumeFlag)
+	return grokLaunchScript(task, worktreeSessionID, sessionID, nil, "")
 }
 
 // grokEnvPrefix disables folder-trust so worktree-local PreToolUse hooks (the
@@ -381,15 +373,80 @@ func buildGrokDangerousFlag(enabled bool) string {
 	return flag
 }
 
-func grokModelFlag(task *db.Task) string {
+// grokLaunchEnv is the env prefix shared by daemon launch and BuildCommand.
+func grokLaunchEnv(task *db.Task) string {
+	return grokEnvPrefix() + dbPathEnvPrefix() + taskEnvPrefix(task)
+}
+
+// grokCLIFlags returns grok CLI flags (each with a trailing space). dangerousOverride
+// is used by ResumeDangerous/ResumeSafe to force bypass on or off; nil honors the task.
+func grokCLIFlags(task *db.Task, sessionID string, dangerousOverride *bool) string {
+	var perm string
+	if dangerousOverride != nil {
+		if *dangerousOverride {
+			perm = buildGrokDangerousFlag(true)
+		}
+	} else {
+		perm = grokLaunchFlags(task)
+	}
+	effort := ""
+	model := ""
+	if task != nil {
+		effort = effortFlag(task.EffortLevel)
+		model = modelFlag(task.Model)
+	}
+	resume := ""
+	if sessionID != "" {
+		resume = fmt.Sprintf("--resume %s ", sessionID)
+	}
+	return perm + effort + model + resume
+}
+
+func grokLaunchScript(task *db.Task, worktreeSessionID, resumeSessionID string, dangerousOverride *bool, promptArg string) string {
 	if task == nil {
-		return ""
+		return "grok"
 	}
-	model := strings.TrimSpace(task.Model)
-	if model == "" {
-		return ""
+	if worktreeSessionID == "" {
+		worktreeSessionID = fmt.Sprintf("%d", os.Getpid())
 	}
-	return fmt.Sprintf("--model %s ", shellSingleQuote(model))
+	flags := grokCLIFlags(task, resumeSessionID, dangerousOverride)
+	script := fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %sgrok %s%s`,
+		task.ID, worktreeSessionID, task.Port, task.WorktreePath, grokLaunchEnv(task), flags, promptArg)
+	return strings.TrimSpace(script)
+}
+
+func tomlQuote(s string) string {
+	return `"` + strings.ReplaceAll(strings.ReplaceAll(s, `\`, `\\`), `"`, `\"`) + `"`
+}
+
+// ensureGrokWorktreeMCPConfig writes a grok-native project MCP config so the
+// taskyou stdio server (the same `ty mcp-server --task-id` Claude gets via
+// --mcp-config) is loaded from the worktree. Grok has no --mcp-config flag;
+// it reads `<cwd>/.grok/config.toml`. GROK_FOLDER_TRUST=0 ungates project MCP.
+func ensureGrokWorktreeMCPConfig(workDir string, taskID int64) error {
+	if strings.TrimSpace(workDir) == "" || taskID == 0 {
+		return nil
+	}
+	dir := filepath.Join(workDir, ".grok")
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return err
+	}
+	body := fmt.Sprintf(
+		"# Auto-generated by TaskYou — taskyou MCP stdio server for task %d.\n"+
+			"[mcp_servers.taskyou]\n"+
+			"command = %s\n"+
+			"args = [\"mcp-server\", \"--task-id\", %s]\n"+
+			"enabled = true\n"+
+			"\n"+
+			"[permission]\n"+
+			"allow = [\n"+
+			"  \"MCPTool(taskyou__*)\",\n"+
+			"]\n",
+		taskID,
+		tomlQuote(resolveTaskExecutable()),
+		tomlQuote(fmt.Sprintf("%d", taskID)),
+	)
+	return os.WriteFile(filepath.Join(dir, "config.toml"), []byte(body), 0644)
 }
 
 // ---- Session and Dangerous Mode Support ----
@@ -463,14 +520,11 @@ func (g *GrokExecutor) resumeWithMode(task *db.Task, workDir string, dangerousMo
 		taskSessionID = fmt.Sprintf("%d", os.Getpid())
 	}
 
-	dangerousFlag := ""
-	if dangerousMode {
-		dangerousFlag = buildGrokDangerousFlag(true)
+	if err := ensureGrokWorktreeMCPConfig(workDir, taskID); err != nil {
+		g.logger.Warn("could not write grok taskyou MCP config", "error", err)
 	}
-
-	envPrefix := grokEnvPrefix() + taskEnvPrefix(task)
-	script := fmt.Sprintf(`WORKTREE_TASK_ID=%d WORKTREE_SESSION_ID=%s WORKTREE_PORT=%d WORKTREE_PATH=%q %sgrok %s--resume %s`,
-		taskID, taskSessionID, task.Port, task.WorktreePath, envPrefix, dangerousFlag, sessionID)
+	override := dangerousMode
+	script := grokLaunchScript(task, taskSessionID, sessionID, &override, "")
 
 	actualSession, tmuxErr := createTmuxWindow(daemonSession, windowName, workDir, script, g.executor.getProjectDir(task.Project), task.ID)
 	if tmuxErr != nil {
