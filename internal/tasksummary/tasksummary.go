@@ -15,7 +15,7 @@ import (
 
 const (
 	summaryModel     = "claude-haiku-4-5-20251001"
-	summaryMaxTokens = 180
+	summaryMaxTokens = 40
 	maxLogLines      = 160
 	maxLogChars      = 12000
 	maxLineChars     = 300
@@ -66,6 +66,8 @@ func generateAndStore(ctx context.Context, database *db.DB, taskID int64, force 
 	if task == nil {
 		return "", fmt.Errorf("task not found")
 	}
+	// Skip-if-exists is the freeze: done tasks keep the stand written on the
+	// last block. Fossils stay until the next blocked rewrite (Force).
 	if !force && strings.TrimSpace(task.Summary) != "" {
 		return task.Summary, nil
 	}
@@ -82,7 +84,7 @@ func generateAndStore(ctx context.Context, database *db.DB, taskID int64, force 
 		return "", err
 	}
 
-	summary = strings.TrimSpace(summary)
+	summary = NormalizeStand(summary)
 	if summary == "" {
 		return "", fmt.Errorf("summary was empty")
 	}
@@ -182,10 +184,11 @@ func (s *Service) callAPI(ctx context.Context, prompt string) (string, error) {
 
 func buildSummaryPrompt(task *db.Task, logs []*db.TaskLog) string {
 	var sb strings.Builder
-	sb.WriteString("Summarize the task activity for a user who is context switching.\n")
-	sb.WriteString("Output 2-4 short bullet points starting with '-'.\n")
-	sb.WriteString("Include: the user's request (from title/body), key actions by the agent, and outcome/next step if visible.\n")
-	sb.WriteString("Be concise, avoid speculation, and output ONLY the bullets.\n\n")
+	sb.WriteString("Write FIVE WORDS that queue the user's brain for this task.\n")
+	sb.WriteString("A sticky note, not a sentence. Not a recap. Not bullets.\n")
+	sb.WriteString("The current ask or the next decision.\n")
+	sb.WriteString("Examples: \"Waiting on APNs key\" / \"Merge email ingest PR\" / \"Which webhook auth?\"\n")
+	sb.WriteString("No quotes, no prefix. Output ONLY the five words.\n\n")
 
 	sb.WriteString("Task:\n")
 	sb.WriteString(fmt.Sprintf("Title: %s\n", task.Title))
