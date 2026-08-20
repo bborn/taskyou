@@ -68,7 +68,8 @@ Use `ty` (short) or `taskyou` (full) — both work identically.
 | Retry with feedback | `ty retry <id> --feedback "..."` |
 | Change status | `ty status <id> <status>` |
 | Pin/prioritize | `ty pin <id>` |
-| Close/complete | `ty close <id>` |
+| Finish your own task | `ty complete --summary "..."` (routes a PR-bearing task to review) |
+| Close someone else's task (human action) | `ty close <id>` — refused while its PR is open |
 | Delete | `ty delete <id>` |
 | See executor output | `ty output <id>` |
 | Send input to executor | `ty input <id> "message"` |
@@ -167,13 +168,18 @@ Move tasks between columns:
 ```bash
 ty status <id> backlog     # Move to backlog
 ty status <id> queued      # Queue for execution
-ty status <id> done        # Mark complete
+ty status <id> blocked     # Park for human review
 ```
+
+`ty status <id> done` and `ty close <id>` are refused while the task's PR is still
+open — that task is waiting on a human, and the daemon completes it automatically
+once the PR is merged or closed. To finish your *own* task, call `taskyou_complete`
+(or `ty complete`), which routes a PR-bearing task to review instead of Done.
 
 ### 8. Close and Cleanup
 
 ```bash
-ty close <id>    # Mark as done
+ty close <id>    # Mark as done (human action; refused while the PR is open)
 ty delete <id>   # Permanently remove
 ```
 
