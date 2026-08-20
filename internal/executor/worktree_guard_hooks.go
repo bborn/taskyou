@@ -26,13 +26,20 @@ import (
 //     hook protocol is allow/deny only (no interactive "ask"), so ask→deny as well.
 //     Write tools are write_file/replace; shell is run_shell_command.
 //
+//   - Grok CLI   — PreToolUse lifecycle hook (`<worktree>/.grok/hooks/*.json`).
+//     Grok's hook JSON is the same shape as Claude/Codex. Native Grok tools are
+//     search_replace / write / run_terminal_command; Claude aliases also match.
+//     Output is {decision, reason}. Ask is not supported, so ask→deny.
+//     Project hooks require folder trust; the executor launches with
+//     GROK_FOLDER_TRUST=0 so the guard actually runs in daemon-driven sessions.
+//
 //   - OpenCode   — `tool.execute.before` plugin hook (a generated JS plugin in
 //     `<worktree>/.opencode/plugins/`). The plugin normalizes the tool call and
 //     shells back into `worktree-guard`; a non-zero exit makes it throw, which
 //     OpenCode treats as a denial. OpenCode has no human-prompt path here either,
 //     so ask→deny.
 //
-// Known gap / OS-level fallback: none of the three expose an interactive "ask" in
+// Known gap / OS-level fallback: none of these CLIs expose an interactive "ask" in
 // their pre-tool hook, so an external write that Claude would prompt on is instead
 // hard-denied (the user's escape hatch is worktree.allow_external_writes in
 // .taskyou.yml). Additionally, in each CLI's fully-bypassed/dangerous mode the
@@ -73,6 +80,17 @@ func (e *Executor) setupGeminiWorktreeGuard(workDir, projectDir string) (func(),
 	cleanup, err := writeMergedCommandHook(filepath.Join(workDir, ".gemini", "settings.json"), "BeforeTool", cmd)
 	if err == nil && projectDir != "" {
 		ensureGitExclude(projectDir, ".gemini")
+	}
+	return cleanup, err
+}
+
+// setupGrokWorktreeGuard writes a Grok PreToolUse hook into the worktree that
+// enforces the write-guard. Returns a cleanup that restores the prior state.
+func (e *Executor) setupGrokWorktreeGuard(workDir, projectDir string) (func(), error) {
+	cmd := fmt.Sprintf("%q worktree-guard --format grok", resolveTaskBin())
+	cleanup, err := writeMergedCommandHook(filepath.Join(workDir, ".grok", "hooks", "taskyou-worktree-guard.json"), "PreToolUse", cmd)
+	if err == nil && projectDir != "" {
+		ensureGitExclude(projectDir, ".grok")
 	}
 	return cleanup, err
 }

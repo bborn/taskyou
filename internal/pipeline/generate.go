@@ -63,7 +63,7 @@ name: <kebab-case-id>
 description: <one line>
 steps:
   - name: <Step Name>
-    executor: <claude|codex|gemini|pi|opencode|openclaw>   # optional, default claude
+    executor: <claude|codex|gemini|grok|pi|opencode|openclaw>   # optional, default claude
     model: <opus|sonnet|haiku>                             # optional, only meaningful for claude
     deps: [<earlier step names>]                           # omit for the first step
     prompt: |

@@ -19,7 +19,7 @@ type Task struct {
 	Status          string
 	Type            string
 	Project         string
-	Executor        string // Task executor: "claude" (default), "codex", "gemini"
+	Executor        string // Task executor: "claude" (default), "codex", "gemini", "grok"
 	EffortLevel     string // Per-task Claude effort override ("" = use global/Claude default; otherwise low/medium/high/xhigh/max)
 	Model           string // Per-task Claude model override ("" = use global/Claude default; otherwise an alias like opus/sonnet/haiku or a full model name)
 	ClaudeConfigDir string // Per-task CLAUDE_CONFIG_DIR override ("" = use the project's/default config dir). Lets a single step route through a different Claude config (e.g. an ollama-backed one) without changing the project.
@@ -208,10 +208,34 @@ const (
 	ExecutorClaude   = "claude"   // Claude Code CLI (default)
 	ExecutorCodex    = "codex"    // OpenAI Codex CLI
 	ExecutorGemini   = "gemini"   // Google Gemini CLI
+	ExecutorGrok     = "grok"     // Grok CLI (https://x.ai/cli)
 	ExecutorOpenClaw = "openclaw" // OpenClaw AI assistant (https://openclaw.ai)
 	ExecutorOpenCode = "opencode" // OpenCode AI assistant (https://opencode.ai)
 	ExecutorPi       = "pi"       // Pi coding agent (https://github.com/mariozechner/pi-coding-agent)
 )
+
+// KnownExecutors returns the built-in executor slugs in display order.
+func KnownExecutors() []string {
+	return []string{
+		ExecutorClaude,
+		ExecutorCodex,
+		ExecutorGemini,
+		ExecutorGrok,
+		ExecutorPi,
+		ExecutorOpenCode,
+		ExecutorOpenClaw,
+	}
+}
+
+// IsKnownExecutor reports whether name is a built-in executor slug.
+func IsKnownExecutor(name string) bool {
+	for _, e := range KnownExecutors() {
+		if e == name {
+			return true
+		}
+	}
+	return false
+}
 
 // DefaultExecutor returns the default executor if none is specified.
 func DefaultExecutor() string {

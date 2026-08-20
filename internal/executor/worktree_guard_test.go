@@ -145,6 +145,23 @@ func TestEvaluateWorktreeWriteGuard(t *testing.T) {
 			want: "ask",
 		},
 		{
+			name: "grok search_replace outside asks",
+			root: wt,
+			in:   WorktreeGuardInput{ToolName: "search_replace", Cwd: wt},
+			want: "ask",
+		},
+		{
+			name: "grok search_replace inside worktree allowed",
+			root: wt,
+			in:   WorktreeGuardInput{ToolName: "search_replace", Cwd: wt},
+		},
+		{
+			name: "grok run_terminal_command redirect outside asks",
+			root: wt,
+			in:   WorktreeGuardInput{ToolName: "run_terminal_command", Cwd: wt},
+			want: "ask",
+		},
+		{
 			name: "codex apply_patch update outside asks",
 			root: wt,
 			in:   WorktreeGuardInput{ToolName: "apply_patch", Cwd: wt},
@@ -179,6 +196,9 @@ func TestEvaluateWorktreeWriteGuard(t *testing.T) {
 		"gemini write_file inside worktree allowed":           {"file_path": wt + "/config.yaml"},
 		"gemini replace outside asks":                         {"file_path": "/home/u/proj/app/models/event.rb"},
 		"gemini run_shell_command redirect outside asks":      {"command": "echo data > /home/u/proj/out.txt"},
+		"grok search_replace outside asks":                    {"file_path": "/home/u/proj/config.yaml"},
+		"grok search_replace inside worktree allowed":         {"file_path": wt + "/config.yaml"},
+		"grok run_terminal_command redirect outside asks":     {"command": "echo data > /home/u/proj/out.txt"},
 		"codex apply_patch update outside asks":               {"command": applyPatch("*** Update File: /home/u/proj/app/models/event.rb")},
 		"codex apply_patch update inside worktree allowed":    {"command": applyPatch("*** Update File: app/models/event.rb")},
 		"codex apply_patch outside in bypass mode denies":     {"command": applyPatch("*** Add File: /home/u/proj/new.rb")},

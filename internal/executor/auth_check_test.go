@@ -54,6 +54,16 @@ func TestDetectAuthPrompt(t *testing.T) {
 			content: "func handleLogin() {\n  // redirect to /login on failure\n}",
 			want:    false,
 		},
+		{
+			name:    "grok login prompt",
+			content: "Your Grok credentials expired.\nPlease run grok login to continue.",
+			want:    true,
+		},
+		{
+			name:    "grok sign-in screen",
+			content: "Sign in to Grok to continue this session.",
+			want:    true,
+		},
 	}
 
 	for _, tt := range tests {

@@ -429,7 +429,7 @@ Tasks will automatically reconnect to their agent sessions when viewed.`,
 	worktreeGuardCmd := &cobra.Command{
 		Use:    "worktree-guard",
 		Short:  "Evaluate the worktree write-guard for a pre-tool hook",
-		Hidden: true, // Internal use only - invoked by codex/gemini/opencode hooks
+		Hidden: true, // Internal use only - invoked by codex/gemini/grok/opencode hooks
 		Run: func(cmd *cobra.Command, args []string) {
 			format, _ := cmd.Flags().GetString("format")
 			// Never block the agent on our own failure: handle errors by allowing.
@@ -438,7 +438,7 @@ Tasks will automatically reconnect to their agent sessions when viewed.`,
 			}
 		},
 	}
-	worktreeGuardCmd.Flags().String("format", "", "Output format: codex | gemini | opencode")
+	worktreeGuardCmd.Flags().String("format", "", "Output format: codex | gemini | grok | opencode")
 	rootCmd.AddCommand(worktreeGuardCmd)
 
 	// MCP server subcommand - runs the workflow MCP server for a task (internal use)
@@ -763,19 +763,9 @@ Examples:
 			}
 
 			// Validate executor if provided
-			validExecutors := []string{db.ExecutorClaude, db.ExecutorCodex, db.ExecutorGemini, db.ExecutorPi, db.ExecutorOpenCode, db.ExecutorOpenClaw}
-			if taskExecutor != "" {
-				validExecutor := false
-				for _, e := range validExecutors {
-					if e == taskExecutor {
-						validExecutor = true
-						break
-					}
-				}
-				if !validExecutor {
-					fmt.Fprintln(os.Stderr, errorStyle.Render("Invalid executor. Must be one of: "+strings.Join(validExecutors, ", ")))
-					os.Exit(1)
-				}
+			if taskExecutor != "" && !db.IsKnownExecutor(taskExecutor) {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Invalid executor. Must be one of: "+strings.Join(db.KnownExecutors(), ", ")))
+				os.Exit(1)
 			}
 
 			// Validate effort level if provided (empty = use Claude's global default)
@@ -897,7 +887,7 @@ Examples:
 	createCmd.Flags().String("body", "", "Task body/description (if no title, AI generates from body)")
 	createCmd.Flags().StringP("type", "t", "", "Task type: code, writing, thinking (default: code)")
 	createCmd.Flags().StringP("project", "p", "", "Project name (auto-detected from cwd if not specified)")
-	createCmd.Flags().StringP("executor", "e", "", "Task executor: claude, codex, gemini, pi, opencode, openclaw (default: claude)")
+	createCmd.Flags().StringP("executor", "e", "", "Task executor: claude, codex, gemini, grok, pi, opencode, openclaw (default: claude)")
 	createCmd.Flags().String("effort", "", "Per-task Claude effort override: low, medium, high, xhigh, max (default: Claude's global default)")
 	createCmd.Flags().String("model", "", "Per-task Claude model override: opus, sonnet, haiku, or a full model name (default: Claude's global default)")
 	createCmd.Flags().BoolP("execute", "x", false, "Queue task for immediate execution")
@@ -1872,19 +1862,9 @@ Examples:
 			}
 
 			// Validate executor if provided
-			if taskExecutor != "" {
-				validExecutors := []string{db.ExecutorClaude, db.ExecutorCodex, db.ExecutorGemini, db.ExecutorPi, db.ExecutorOpenCode, db.ExecutorOpenClaw}
-				validExecutor := false
-				for _, e := range validExecutors {
-					if e == taskExecutor {
-						validExecutor = true
-						break
-					}
-				}
-				if !validExecutor {
-					fmt.Fprintln(os.Stderr, errorStyle.Render("Invalid executor. Must be one of: "+strings.Join(validExecutors, ", ")))
-					os.Exit(1)
-				}
+			if taskExecutor != "" && !db.IsKnownExecutor(taskExecutor) {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Invalid executor. Must be one of: "+strings.Join(db.KnownExecutors(), ", ")))
+				os.Exit(1)
 			}
 
 			task, err := database.GetTask(taskID)
@@ -1932,7 +1912,7 @@ Examples:
 	updateCmd.Flags().String("body", "", "Update task body/description")
 	updateCmd.Flags().StringP("type", "t", "", "Update task type: code, writing, thinking")
 	updateCmd.Flags().StringP("project", "p", "", "Update project name")
-	updateCmd.Flags().StringP("executor", "e", "", "Update task executor: claude, codex, gemini, pi, opencode, openclaw")
+	updateCmd.Flags().StringP("executor", "e", "", "Update task executor: claude, codex, gemini, grok, pi, opencode, openclaw")
 	updateCmd.Flags().String("tags", "", "Update task tags (comma-separated)")
 	updateCmd.Flags().Bool("pinned", false, "Pin or unpin the task")
 	updateCmd.RegisterFlagCompletionFunc("project", completeFlagProjects)
@@ -4999,10 +4979,26 @@ type worktreeGuardHookInput struct {
 	ToolInput      json.RawMessage `json:"tool_input"`
 	Cwd            string          `json:"cwd"`
 	PermissionMode string          `json:"permission_mode"`
+	// Grok (and Claude-compat) emit camelCase field names on stdin.
+	ToolNameCamel       string          `json:"toolName"`
+	ToolInputCamel      json.RawMessage `json:"toolInput"`
+	PermissionModeCamel string          `json:"permissionMode"`
+}
+
+func (in *worktreeGuardHookInput) normalize() {
+	if in.ToolName == "" {
+		in.ToolName = in.ToolNameCamel
+	}
+	if len(in.ToolInput) == 0 {
+		in.ToolInput = in.ToolInputCamel
+	}
+	if in.PermissionMode == "" {
+		in.PermissionMode = in.PermissionModeCamel
+	}
 }
 
 // handleWorktreeGuardHook is the executor-agnostic transport for the worktree
-// write-guard, shared by the codex/gemini/opencode pre-tool hooks. It reads the
+// write-guard, shared by the codex/gemini/grok/opencode pre-tool hooks. It reads the
 // worktree root from WORKTREE_PATH (set by every executor when launching the CLI),
 // evaluates the single shared policy (EvaluateWorktreeWriteGuard), and renders the
 // decision in the requested executor's wire format. It fails open on any error so a
@@ -5017,6 +5013,7 @@ func handleWorktreeGuardHook(format string) error {
 	if err := json.NewDecoder(os.Stdin).Decode(&in); err != nil {
 		return nil // unparseable payload — allow rather than block
 	}
+	in.normalize()
 
 	var allow []string
 	if projectDir := executor.ManagedWorktreeProjectDir(worktreePath); projectDir != "" {
@@ -5035,7 +5032,7 @@ func handleWorktreeGuardHook(format string) error {
 }
 
 // renderWorktreeGuardDecision writes a guard decision in the wire format the given
-// executor's hook expects. None of codex/gemini/opencode support an interactive
+// executor's hook expects. None of codex/gemini/grok/opencode support an interactive
 // "ask" in their pre-tool hook, so an "ask" is downgraded to a hard deny to fail
 // safe (the escape hatch is worktree.allow_external_writes in .taskyou.yml). When
 // the guard allows the call, nothing is emitted (and exit stays 0) so the CLI's own
@@ -5061,6 +5058,12 @@ func renderWorktreeGuardDecision(format string, decision *executor.WorktreeGuard
 			"decision":      "deny",
 			"reason":        decision.Reason,
 			"systemMessage": "Worktree write-guard blocked an out-of-worktree write",
+		})
+	case "grok":
+		// Grok PreToolUse contract: {decision: allow|deny, reason}.
+		emitJSONLine(map[string]any{
+			"decision": "deny",
+			"reason":   decision.Reason,
 		})
 	case "opencode":
 		// The OpenCode plugin reads the reason from stdout and treats exit code 1 as
@@ -5691,12 +5694,12 @@ func getSessions() []agentSession {
 
 // getAgentMemoryByTaskID returns a map of task ID -> memory (MB) for all agent processes.
 // It identifies task IDs by examining each agent process's working directory.
-// Supports all executors: claude, codex, gemini, openclaw, opencode, pi.
+// Supports all executors: claude, codex, gemini, grok, openclaw, opencode, pi.
 func getAgentMemoryByTaskID() map[int]int {
 	result := make(map[int]int)
 
 	// Find processes for all supported executors
-	executorNames := []string{"claude", "codex", "gemini", "openclaw", "opencode", "pi"}
+	executorNames := []string{"claude", "codex", "gemini", "grok", "openclaw", "opencode", "pi"}
 
 	for _, executorName := range executorNames {
 		pgrepOut, err := osexec.Command("pgrep", "-f", executorName).Output()
