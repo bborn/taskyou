@@ -120,6 +120,14 @@ type FormModel struct {
 	attachments        []string // Parsed file paths
 	attachmentCursor   int      // Index of the currently selected attachment chip
 
+	// Type-to-select buffer for selector fields (executor, kind, effort, …).
+	// Letters typed within selectorJumpTTL append; after the TTL (or a field
+	// change / left-right cycle) the next letter starts a new query. Without
+	// this, "gr" is two independent searches ("g" → gemini, "r" → no match).
+	selectorJump      string
+	selectorJumpAt    time.Time
+	selectorJumpField FormField
+
 	// Magic paste fields (populated when pasting URLs)
 	prURL    string // GitHub PR URL if pasted
 	prNumber int    // GitHub PR number if pasted
@@ -837,6 +845,7 @@ func (m *FormModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 
 		case "left":
+			m.clearSelectorJump()
 			if m.handleAttachmentNavigation(-1) {
 				return m, nil
 			}
@@ -881,6 +890,7 @@ func (m *FormModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 
 		case "right":
+			m.clearSelectorJump()
 			if m.handleAttachmentNavigation(1) {
 				return m, nil
 			}
@@ -979,7 +989,7 @@ func (m *FormModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.focused == FieldType || m.focused == FieldExecutor || m.focused == FieldEffort || m.focused == FieldModel || m.focused == FieldPermission {
 				key := msg.String()
 				if len(key) == 1 && unicode.IsLetter(rune(key[0])) {
-					m.selectByPrefix(strings.ToLower(key))
+					m.typeSelectorLetter(strings.ToLower(key))
 					return m, nil
 				}
 			}
@@ -1222,6 +1232,26 @@ func (m *FormModel) filterProjects() {
 		m.projectFiltered[i] = r.name
 	}
 	m.projectFilteredIdx = 0
+}
+
+// selectorJumpTTL is how long consecutive letters count as one type-to-select
+// query. Matches typical desktop list jump-to-letter behavior.
+const selectorJumpTTL = time.Second
+
+func (m *FormModel) typeSelectorLetter(letter string) {
+	now := time.Now()
+	if m.focused != m.selectorJumpField || now.Sub(m.selectorJumpAt) > selectorJumpTTL {
+		m.selectorJump = ""
+	}
+	m.selectorJumpField = m.focused
+	m.selectorJumpAt = now
+	m.selectorJump += letter
+	m.selectByPrefix(m.selectorJump)
+}
+
+func (m *FormModel) clearSelectorJump() {
+	m.selectorJump = ""
+	m.selectorJumpAt = time.Time{}
 }
 
 func (m *FormModel) selectByPrefix(prefix string) {
@@ -1473,6 +1503,7 @@ func (m *FormModel) isLastVisibleField() bool {
 }
 
 func (m *FormModel) focusNext() {
+	m.clearSelectorJump()
 	m.blurAll()
 	m.cancelAutocomplete()
 	for i := 0; i < int(FieldCount); i++ {
@@ -1485,6 +1516,7 @@ func (m *FormModel) focusNext() {
 }
 
 func (m *FormModel) focusPrev() {
+	m.clearSelectorJump()
 	m.blurAll()
 	m.cancelAutocomplete()
 	for i := 0; i < int(FieldCount); i++ {
