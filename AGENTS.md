@@ -9,7 +9,7 @@ Guide for AI agents working in this repository.
 This is **Task You** - a personal task management system with:
 - **SQLite storage** for tasks and projects
 - **SSH-accessible TUI** via Wish
-- **Background executor** with support for multiple AI coding agents (Claude, Codex, Gemini, Pi, OpenClaw, OpenCode)
+- **Background executor** with support for multiple AI coding agents (Claude, Codex, Gemini, Pi, OpenClaw, OpenCode, Warp)
 - **Beautiful terminal UI** built with Charm libraries (Kanban board)
 - **Git worktree isolation** for parallel task execution
 - **Task lifecycle hooks** for real-time task state tracking
@@ -306,6 +306,7 @@ TaskYou supports multiple AI coding agent backends:
 - **pi** - Pi coding agent with session continuity
 - **openclaw** - OpenClaw AI assistant
 - **opencode** - OpenCode AI assistant
+- **warp** - Warp Agent CLI (prompt delivered by tmux paste; `--auto-approve` for dangerous mode)
 
 Each task can specify its executor in the task form. The executor runs in an isolated git worktree with environment variables for task context.
 

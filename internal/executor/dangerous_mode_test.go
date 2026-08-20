@@ -80,6 +80,13 @@ func TestExecutorInterfaceImplementation(t *testing.T) {
 			supportsDangerousMode: false, // Pi does not support dangerous mode
 			dangerousFlag:         "",
 		},
+		{
+			name:                  "Warp executor",
+			executorName:          db.ExecutorWarp,
+			supportsSessionResume: false, // Warp resume tokens are not discoverable
+			supportsDangerousMode: true,
+			dangerousFlag:         "--auto-approve",
+		},
 	}
 
 	for _, tt := range tests {
@@ -994,7 +1001,7 @@ func TestBuildCommandIncludesEnvironmentVariables(t *testing.T) {
 		WorktreePath: "/home/user/projects/myapp/.task-worktrees/42-fix-bug",
 	}
 
-	executors := []string{db.ExecutorClaude, db.ExecutorCodex, db.ExecutorGemini, db.ExecutorOpenClaw, db.ExecutorOpenCode}
+	executors := []string{db.ExecutorClaude, db.ExecutorCodex, db.ExecutorGemini, db.ExecutorOpenClaw, db.ExecutorOpenCode, db.ExecutorWarp}
 
 	for _, name := range executors {
 		t.Run(name, func(t *testing.T) {

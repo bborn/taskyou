@@ -2,9 +2,12 @@ package main
 
 import (
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/spf13/cobra"
+
+	"github.com/bborn/workflow/internal/db"
 )
 
 func TestNewCompletionCmd(t *testing.T) {
@@ -100,8 +103,22 @@ func TestCompleteFlagExecutors(t *testing.T) {
 	if directive != cobra.ShellCompDirectiveNoFileComp {
 		t.Errorf("expected NoFileComp directive")
 	}
-	if len(completions) != 6 {
-		t.Errorf("expected 6 executors, got %d", len(completions))
+	// Every executor ty can drive should be offered, so a new backend can't ship
+	// without its completion entry.
+	for _, want := range []string{
+		db.ExecutorClaude, db.ExecutorCodex, db.ExecutorGemini,
+		db.ExecutorPi, db.ExecutorOpenCode, db.ExecutorOpenClaw, db.ExecutorWarp,
+	} {
+		found := false
+		for _, c := range completions {
+			if strings.HasPrefix(c, want+"\t") {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("executor %q missing from completions %v", want, completions)
+		}
 	}
 }
 
