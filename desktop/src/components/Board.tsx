@@ -159,8 +159,40 @@ function cardPropsEqual(prev: CardProps, next: CardProps): boolean {
     a.pr?.deletions === b.pr?.deletions &&
     a.executor === b.executor &&
     a.project === b.project &&
-    a.updated_at === b.updated_at
+    a.updated_at === b.updated_at &&
+    a.stand === b.stand &&
+    a.summary === b.summary
   );
+}
+
+function isNoiseLog(content?: string): boolean {
+  if (!content) return true;
+  const s = content.trim().toLowerCase();
+  return s.includes("reconnecting to") || s.startsWith("---");
+}
+
+function clampStand(s: string): string {
+  return s.trim().split(/\s+/).filter(Boolean).slice(0, 5).join(" ");
+}
+
+function fallbackStand(log?: LogLine): string {
+  if (!log || isNoiseLog(log.content)) return "";
+  const line = log.content.split("\n")[0]?.trim() ?? "";
+  if (log.line_type === "question" || line.endsWith("?")) return clampStand(line);
+  return "";
+}
+
+function cardSubLine(task: Task, latest?: LogLine): { text: string; title?: string } {
+  if (task.status === "processing") {
+    const crumb = latest && !isNoiseLog(latest.content) ? latest.content.split("\n")[0]?.trim() : "";
+    return crumb ? { text: crumb, title: crumb } : { text: ageHint(task) };
+  }
+  if (task.status === "blocked") {
+    if (task.stand) return { text: task.stand, title: task.stand };
+    const fb = fallbackStand(latest);
+    if (fb) return { text: fb, title: fb };
+  }
+  return { text: ageHint(task) };
 }
 
 const CardSlot = memo(function CardSlot({ task, selected, projectColor, latest }: CardProps) {
@@ -173,6 +205,7 @@ const CardSlot = memo(function CardSlot({ task, selected, projectColor, latest }
 
   const isQueued = task.status === "queued";
   const needsInput = task.status === "blocked";
+  const subLine = cardSubLine(task, latest);
 
   return (
     <motion.div
@@ -210,11 +243,7 @@ const CardSlot = memo(function CardSlot({ task, selected, projectColor, latest }
           </span>
         </div>
         <div className="truncate text-[11px] text-muted-foreground">
-          {latest && (task.status === "processing" || task.status === "blocked") ? (
-            <span title={latest.content}>{latest.content}</span>
-          ) : (
-            <span>{ageHint(task)}</span>
-          )}
+          <span title={subLine.title}>{subLine.text}</span>
         </div>
         <div className="flex flex-wrap items-center gap-1.5">
           {task.pinned && <Pin className="size-3 text-amber-500 dark:text-amber-300" />}

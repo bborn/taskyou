@@ -29,6 +29,7 @@ import (
 	"github.com/bborn/workflow/internal/github"
 	"github.com/bborn/workflow/internal/hooks"
 	"github.com/bborn/workflow/internal/pipeline"
+	"github.com/bborn/workflow/internal/tasksummary"
 )
 
 // TaskEvent represents a change to a task.
@@ -1207,6 +1208,7 @@ func (e *Executor) updateStatus(taskID int64, status string) error {
 	if err := e.db.UpdateTaskStatus(taskID, status); err != nil {
 		return err
 	}
+	tasksummary.KickoffOnStatusChange(e.db, oldStatus, status, taskID)
 
 	// Fetch updated task and broadcast
 	task, err := e.db.GetTask(taskID)

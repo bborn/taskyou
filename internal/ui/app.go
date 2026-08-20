@@ -381,8 +381,6 @@ type AppModel struct {
 	notification string    // Notification banner text
 	notifyUntil  time.Time // When to hide notification
 	notifyTaskID int64     // Task ID that triggered the notification (for jumping to it)
-	lastViewedAt map[int64]time.Time
-
 	// Track task statuses to detect changes
 	prevStatuses map[int64]string
 	// Track tasks with active input notifications (for UI highlighting)
@@ -644,7 +642,6 @@ func NewAppModel(database *db.DB, exec *executor.Executor, workingDir string, ve
 		prevStatuses:       make(map[int64]string),
 		tasksNeedingInput:  make(map[int64]bool),
 		questionPrompts:    make(map[int64]bool),
-		lastViewedAt:       make(map[int64]time.Time),
 		executorPrompts:    make(map[int64]string),
 		userClosedTaskIDs:  make(map[int64]bool),
 		watcher:            watcher,
@@ -1072,8 +1069,6 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					break
 				}
 			}
-			lastViewed, hasLast := m.lastViewedAt[msg.task.ID]
-			m.lastViewedAt[msg.task.ID] = now
 			// Clean up any duplicate tmux windows for this task before switching
 			m.executor.CleanupDuplicateWindows(msg.task.ID)
 			// Resume task if it was suspended (blocked idle tasks get suspended to save memory)
@@ -1110,9 +1105,11 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if relatedCmd := m.detailView.StartRelatedTasksLoad(); relatedCmd != nil {
 				cmds = append(cmds, relatedCmd)
 			}
-			if hasLast && now.Sub(lastViewed) > summaryRefreshAfter {
-				m.notification = fmt.Sprintf("%s Refreshing activity summary...", IconInProgress())
-				m.notifyUntil = time.Now().Add(5 * time.Second)
+			var latest *db.TaskLog
+			if m.kanban != nil && m.kanban.latestActivity != nil {
+				latest = m.kanban.latestActivity[msg.task.ID]
+			}
+			if tasksummary.NeedsRefresh(msg.task, latest) {
 				cmds = append(cmds, m.summarizeTask(msg.task.ID, true))
 			}
 		} else {
@@ -1320,7 +1317,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.notifyUntil = time.Now().Add(5 * time.Second)
 		} else {
-			m.notification = fmt.Sprintf("%s Activity summary updated", IconDone())
+			m.notification = fmt.Sprintf("%s Stand updated", IconDone())
 			m.notifyUntil = time.Now().Add(3 * time.Second)
 		}
 		if m.selectedTask != nil && m.selectedTask.ID == msg.taskID {
@@ -1434,9 +1431,6 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		// Refresh detail view if active (for logs which may update frequently)
 		if m.currentView == ViewDetail && m.detailView != nil {
-			if m.selectedTask != nil {
-				m.lastViewedAt[m.selectedTask.ID] = time.Time(msg)
-			}
 			if cmd := m.detailView.Refresh(); cmd != nil {
 				cmds = append(cmds, cmd)
 			}
@@ -3821,11 +3815,16 @@ func (m *AppModel) changeTaskStatus(id int64, status string) tea.Cmd {
 		// Just set the requested status directly. Don't auto-queue to avoid
 		// restarting the executor. Users can explicitly retry/requeue if they
 		// want to restart execution.
+		oldStatus := ""
+		if existing, _ := database.GetTask(id); existing != nil {
+			oldStatus = existing.Status
+		}
 		err := database.UpdateTaskStatus(id, status)
 		if err == nil {
 			if task, _ := database.GetTask(id); task != nil {
 				exec.NotifyTaskChange("status_changed", task)
 			}
+			tasksummary.KickoffOnStatusChange(database, oldStatus, status, id)
 		}
 		return taskStatusChangedMsg{err: err}
 	}
@@ -4222,8 +4221,6 @@ const maxDoneTasksInKanban = 20
 // pulls from the database to surface older/done tasks not loaded on the board.
 // Matches the command palette's SearchTasks limit for consistency.
 const boardFilterDBSearchLimit = 100
-
-const summaryRefreshAfter = 5 * time.Minute
 
 // refreshLatestActivity loads the most recent log line for each active task and
 // feeds it to the board for the per-card activity sub-line.

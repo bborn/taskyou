@@ -140,6 +140,7 @@ func Complete(database *db.DB, taskID int64, summary string, opts Options) (*Out
 		// Logged as a "question" so it lands in the blocked/needs-input lane and the
 		// daemon sweep leaves it for the human instead of auto-completing it.
 		database.AppendTaskLog(taskID, "question", pipeline.GateStepParkedLog)
+		tasksummary.KickoffRewrite(database, taskID)
 		return &Outcome{Kind: KindGateParked}, nil
 	}
 
@@ -158,6 +159,7 @@ func Complete(database *db.DB, taskID int64, summary string, opts Options) (*Out
 			reviewMsg += " " + prURL
 		}
 		database.AppendTaskLog(taskID, "question", reviewMsg)
+		tasksummary.KickoffRewrite(database, taskID)
 		return &Outcome{Kind: KindPRReview, PRNumber: prNumber, PRURL: prURL}, nil
 	}
 

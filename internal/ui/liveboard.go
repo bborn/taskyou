@@ -8,12 +8,14 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/bborn/workflow/internal/db"
+	"github.com/bborn/workflow/internal/tasksummary"
 )
 
-// The board renders a live sub-line on every card: an activity line for
-// running agents, an attention prompt for tasks needing input, or a concise
-// age hint otherwise. Running tasks get an animated braille spinner driven by
-// a 200 ms tick gated on whether any task is processing.
+// The board renders a live sub-line on every card: an activity crumb for
+// running agents, a one-line stand (or the waiting question) for blocked
+// tasks, or a concise age hint otherwise. Running tasks get an animated
+// braille spinner driven by a 200 ms tick gated on whether any task is
+// processing.
 
 // SetLatestActivity updates the most-recent-log-per-task map used to render
 // activity lines.
@@ -86,7 +88,7 @@ func (k *KanbanBoard) subLineContent(task *db.Task) (string, lipgloss.Color) {
 	switch task.Status {
 	case db.StatusProcessing:
 		activity := ""
-		if log := k.latestActivity[task.ID]; log != nil {
+		if log := k.latestActivity[task.ID]; log != nil && !tasksummary.IsNoiseLog(log.Content) {
 			activity = cleanActivityContent(log.Content)
 		}
 		elapsed := taskElapsedShort(task)
@@ -99,6 +101,12 @@ func (k *KanbanBoard) subLineContent(task *db.Task) (string, lipgloss.Color) {
 			return taskAgeHint(task), ColorMuted
 		}
 	case db.StatusBlocked:
+		if stand := tasksummary.DisplayStand(task.Summary); stand != "" {
+			return stand, ColorWarning
+		}
+		if fb := tasksummary.FallbackStand(k.latestActivity[task.ID]); fb != "" {
+			return fb, ColorWarning
+		}
 		if k.NeedsInput(task.ID) {
 			return IconBlocked() + " needs your input", ColorWarning
 		}

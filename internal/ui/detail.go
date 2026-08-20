@@ -26,6 +26,7 @@ import (
 	"github.com/bborn/workflow/internal/github"
 	"github.com/bborn/workflow/internal/pipeline"
 	"github.com/bborn/workflow/internal/qmd"
+	"github.com/bborn/workflow/internal/tasksummary"
 )
 
 // shouldSkipAutoExecutor returns true if the task should NOT automatically
@@ -3125,7 +3126,22 @@ func (m *DetailModel) renderHeader() string {
 		Align(lipgloss.Right).
 		Render(rightBlock)
 
-	return lipgloss.JoinVertical(lipgloss.Left, headerLayout, "")
+	stand := tasksummary.DisplayStand(t.Summary)
+	if stand == "" {
+		return lipgloss.JoinVertical(lipgloss.Left, headerLayout, "")
+	}
+	maxW := m.width - 4
+	if maxW < 8 {
+		maxW = 8
+	}
+	stand = truncateRunes(stand, maxW)
+	standColor := ColorMuted
+	if m.focused && t.Status == db.StatusBlocked {
+		standColor = ColorWarning
+	} else if !m.focused {
+		standColor = dimmedTextFg
+	}
+	return lipgloss.JoinVertical(lipgloss.Left, headerLayout, FgStyle(standColor).Render(stand), "")
 }
 
 // getGlamourRenderer returns a cached Glamour renderer, creating it if needed.
@@ -3274,8 +3290,9 @@ func (m *DetailModel) renderContent() string {
 		}
 	}
 
-	// Activity summary
-	if t.Summary != "" && strings.TrimSpace(t.Summary) != "" {
+	// Fossil recaps stay in the body until rewritten. A one-line stand already
+	// lives in the header — don't duplicate it here.
+	if t.Summary != "" && !tasksummary.IsStandLine(t.Summary) {
 		if b.Len() > 0 {
 			b.WriteString("\n")
 		}

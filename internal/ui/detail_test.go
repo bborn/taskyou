@@ -323,6 +323,44 @@ func TestDetailModel_GetServerURL(t *testing.T) {
 	}
 }
 
+func TestDetailModel_RenderHeaderStand(t *testing.T) {
+	stand := "Merge email ingest PR"
+	m := &DetailModel{
+		task: &db.Task{
+			ID:      1,
+			Title:   "Email ingest",
+			Status:  db.StatusBlocked,
+			Summary: stand,
+		},
+		focused: true,
+		width:   100,
+		height:  24,
+	}
+	header := m.renderHeader()
+	if !strings.Contains(header, stand) {
+		t.Errorf("detail header should show the stand, got: %q", header)
+	}
+	if strings.Contains(m.renderContent(), "Activity Summary") {
+		t.Error("a stand line must not be duplicated as Activity Summary in the body")
+	}
+
+	fossil := &DetailModel{
+		task: &db.Task{
+			ID:      2,
+			Title:   "Email ingest",
+			Status:  db.StatusBlocked,
+			Summary: "- Built the IMAP poller\n- Opened a PR",
+		},
+		focused: true,
+		width:   100,
+		height:  24,
+	}
+	out := fossil.renderHeader()
+	if strings.Contains(out, "Built the IMAP poller") {
+		t.Errorf("fossil recap must not appear in the header, got: %q", out)
+	}
+}
+
 // TestDetailModel_RenderHeaderWithDiffStats verifies that diff stats are
 // displayed in the header when a PR has additions/deletions.
 func TestDetailModel_RenderHeaderWithDiffStats(t *testing.T) {
