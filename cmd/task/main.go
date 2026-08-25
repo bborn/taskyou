@@ -3066,39 +3066,7 @@ Examples:
 	projectsCmd.AddCommand(projectsShowCmd)
 
 	// Projects create subcommand
-	projectsCreateCmd := &cobra.Command{
-		Use:   "create <name>",
-		Short: "Create a new project",
-		Long: `Create a new project with the specified name.
-
-Examples:
-  ty projects create myapp --path ~/Projects/myapp
-  ty projects create myapp --path ~/Projects/myapp --instructions "Use TypeScript"
-  ty projects create myapp --path ~/Projects/myapp --color "#61AFEF"`,
-		Args: cobra.ExactArgs(1),
-		Run: func(cmd *cobra.Command, args []string) {
-			path, _ := cmd.Flags().GetString("path")
-			instructions, _ := cmd.Flags().GetString("instructions")
-			color, _ := cmd.Flags().GetString("color")
-			aliases, _ := cmd.Flags().GetString("aliases")
-			claudeConfigDir, _ := cmd.Flags().GetString("claude-config-dir")
-			permissionMode, _ := cmd.Flags().GetString("permission-mode")
-			noGit, _ := cmd.Flags().GetBool("no-git")
-			outputJSON, _ := cmd.Flags().GetBool("json")
-
-			createProjectCLI(args[0], path, instructions, color, aliases, claudeConfigDir, permissionMode, noGit, outputJSON)
-		},
-	}
-	projectsCreateCmd.Flags().StringP("path", "p", "", "Project directory path (required)")
-	projectsCreateCmd.Flags().StringP("instructions", "i", "", "Project-specific AI instructions")
-	projectsCreateCmd.Flags().StringP("color", "c", "", "Hex color for display (e.g., #61AFEF)")
-	projectsCreateCmd.Flags().StringP("aliases", "a", "", "Comma-separated aliases for lookup")
-	projectsCreateCmd.Flags().String("claude-config-dir", "", "Override CLAUDE_CONFIG_DIR for this project")
-	projectsCreateCmd.Flags().String("permission-mode", "", "Default permission mode for tasks: default (prompt), accept-edits (auto-accept file edits), auto (Claude Code auto mode), dangerous (skip all)")
-	projectsCreateCmd.Flags().Bool("no-git", false, "Disable git worktrees (for non-git projects)")
-	projectsCreateCmd.Flags().Bool("json", false, "Output in JSON format")
-	projectsCreateCmd.MarkFlagRequired("path")
-	projectsCmd.AddCommand(projectsCreateCmd)
+	projectsCmd.AddCommand(newProjectsCreateCmd())
 
 	// Projects update subcommand
 	projectsUpdateCmd := &cobra.Command{
@@ -6596,17 +6564,111 @@ func showProjectCLI(name string, outputJSON bool) {
 	}
 }
 
+// newProjectsCreateCmd builds `ty projects create`. It lives in its own
+// function so the flag rules (--path xor --repo) are testable.
+func newProjectsCreateCmd() *cobra.Command {
+	projectsCreateCmd := &cobra.Command{
+		Use:   "create <name>",
+		Short: "Create a new project",
+		Long: `Create a new project with the specified name.
+
+Point the project at a folder you already have (--path), or at a GitHub repo
+to clone first (--repo). The two are mutually exclusive; a cloned repo lands in
+~/Projects/<repo> and becomes an ordinary path-based project.
+
+Examples:
+  ty projects create myapp --path ~/Projects/myapp
+  ty projects create myapp --repo https://github.com/owner/myapp
+  ty projects create myapp --repo owner/myapp
+  ty projects create myapp --path ~/Projects/myapp --instructions "Use TypeScript"
+  ty projects create myapp --path ~/Projects/myapp --color "#61AFEF"`,
+		Args: cobra.ExactArgs(1),
+		Run: func(cmd *cobra.Command, args []string) {
+			path, _ := cmd.Flags().GetString("path")
+			repo, _ := cmd.Flags().GetString("repo")
+			instructions, _ := cmd.Flags().GetString("instructions")
+			color, _ := cmd.Flags().GetString("color")
+			aliases, _ := cmd.Flags().GetString("aliases")
+			claudeConfigDir, _ := cmd.Flags().GetString("claude-config-dir")
+			permissionMode, _ := cmd.Flags().GetString("permission-mode")
+			noGit, _ := cmd.Flags().GetBool("no-git")
+			outputJSON, _ := cmd.Flags().GetBool("json")
+
+			createProjectCLI(args[0], path, repo, instructions, color, aliases, claudeConfigDir, permissionMode, noGit, outputJSON)
+		},
+	}
+	projectsCreateCmd.Flags().StringP("path", "p", "", "Project directory path")
+	projectsCreateCmd.Flags().StringP("repo", "r", "", "GitHub repo to clone (URL or owner/repo) — mutually exclusive with --path")
+	projectsCreateCmd.Flags().StringP("instructions", "i", "", "Project-specific AI instructions")
+	projectsCreateCmd.Flags().StringP("color", "c", "", "Hex color for display (e.g., #61AFEF)")
+	projectsCreateCmd.Flags().StringP("aliases", "a", "", "Comma-separated aliases for lookup")
+	projectsCreateCmd.Flags().String("claude-config-dir", "", "Override CLAUDE_CONFIG_DIR for this project")
+	projectsCreateCmd.Flags().String("permission-mode", "", "Default permission mode for tasks: default (prompt), accept-edits (auto-accept file edits), auto (Claude Code auto mode), dangerous (skip all)")
+	projectsCreateCmd.Flags().Bool("no-git", false, "Disable git worktrees (for non-git projects)")
+	projectsCreateCmd.Flags().Bool("json", false, "Output in JSON format")
+	projectsCreateCmd.MarkFlagsMutuallyExclusive("path", "repo")
+	projectsCreateCmd.MarkFlagsOneRequired("path", "repo")
+	return projectsCreateCmd
+}
+
+// cloneRepoForCLI turns a repo URL into a local checkout and returns its path.
+// It is the CLI half of the TUI's clone view: same parsing, same destination
+// rules, same cleanup on failure.
+func cloneRepoForCLI(repo string) string {
+	// Progress goes to stderr so --json keeps a clean stdout.
+	progress := os.Stderr
+
+	ref, err := github.ParseRepoRef(repo)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+		os.Exit(1)
+	}
+
+	cloner := github.Cloner{}
+	dest, err := cloner.Resolve(ref)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+		os.Exit(1)
+	}
+	if dest.Reuse {
+		fmt.Fprintln(progress, dimStyle.Render(fmt.Sprintf("Using existing clone of %s at %s", ref.Slug(), dest.Path)))
+		return dest.Path
+	}
+	if dest.Renamed {
+		fmt.Fprintln(progress, dimStyle.Render(fmt.Sprintf("%s is taken by something else — cloning to %s",
+			filepath.Join(filepath.Dir(dest.Path), ref.Name), dest.Path)))
+	}
+
+	fmt.Fprintln(progress, dimStyle.Render(fmt.Sprintf("Cloning %s into %s...", ref.Slug(), dest.Path)))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := cloner.Clone(ctx, ref, dest.Path); err != nil {
+		fmt.Fprintln(os.Stderr, errorStyle.Render("Error: clone failed"))
+		fmt.Fprintln(os.Stderr, err.Error())
+		os.Exit(1)
+	}
+	return dest.Path
+}
+
 // createProjectCLI creates a new project.
-func createProjectCLI(name, path, instructions, color, aliases, claudeConfigDir, permissionMode string, noGit bool, outputJSON bool) {
+func createProjectCLI(name, path, repo, instructions, color, aliases, claudeConfigDir, permissionMode string, noGit bool, outputJSON bool) {
 	// Validate name
 	if strings.TrimSpace(name) == "" {
 		fmt.Fprintln(os.Stderr, errorStyle.Render("Error: project name cannot be empty"))
 		os.Exit(1)
 	}
 
+	if repo != "" && path != "" {
+		fmt.Fprintln(os.Stderr, errorStyle.Render("Error: use --path or --repo, not both"))
+		os.Exit(1)
+	}
+	if repo != "" {
+		path = cloneRepoForCLI(repo)
+	}
+
 	// Expand path
 	if path == "" {
-		fmt.Fprintln(os.Stderr, errorStyle.Render("Error: --path is required"))
+		fmt.Fprintln(os.Stderr, errorStyle.Render("Error: --path or --repo is required"))
 		os.Exit(1)
 	}
 	expandedPath := path

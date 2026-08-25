@@ -12,6 +12,8 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+
+	"github.com/bborn/workflow/internal/github"
 )
 
 // folderEntry is one selectable folder in the picker.
@@ -22,6 +24,10 @@ type folderEntry struct {
 
 // folderPickedMsg is emitted when the user picks a folder (enter).
 type folderPickedMsg struct{ path string }
+
+// repoRequestedMsg is emitted when the text typed into the picker is a repo
+// URL rather than a filter term, and the user pressed enter on it.
+type repoRequestedMsg struct{ ref github.RepoRef }
 
 // folderItem adapts a folderEntry to bubbles/list: the title is the folder
 // basename and the description is the ~-collapsed parent directory.
@@ -59,12 +65,18 @@ type FolderPickerModel struct {
 	height int
 	home   string
 	root   string // non-empty once the user has descended into a folder
+
+	// repoRef is set while the typed text parses as a repo URL: enter clones
+	// it instead of picking a folder. repoErr holds the inline complaint when
+	// the text looks like a URL but isn't one we can clone.
+	repoRef *github.RepoRef
+	repoErr string
 }
 
 // NewFolderPickerModel seeds the picker from common project roots.
 func NewFolderPickerModel(width, height int) *FolderPickerModel {
 	ti := textinput.New()
-	ti.Placeholder = "type to filter…"
+	ti.Placeholder = "type to filter, or paste a repo URL…"
 	ti.Focus()
 	ti.Prompt = Icon("❯ ", "> ")
 	ti.PromptStyle = lipgloss.NewStyle().Foreground(ColorPrimary).Bold(true)
@@ -174,6 +186,12 @@ func (m *FolderPickerModel) Update(msg tea.Msg) (*FolderPickerModel, tea.Cmd) {
 			}
 			return m, nil
 		case "enter":
+			// A pasted repo URL takes precedence: there is no folder to pick
+			// yet, we have to clone it first.
+			if m.repoRef != nil {
+				ref := *m.repoRef
+				return m, func() tea.Msg { return repoRequestedMsg{ref: ref} }
+			}
 			if it, ok := m.list.SelectedItem().(folderItem); ok {
 				picked := it.path
 				return m, func() tea.Msg { return folderPickedMsg{path: picked} }
@@ -185,6 +203,7 @@ func (m *FolderPickerModel) Update(msg tea.Msg) (*FolderPickerModel, tea.Cmd) {
 	before := m.input.Value()
 	m.input, cmd = m.input.Update(msg)
 	if q := m.input.Value(); q != before {
+		m.classifyInput(q)
 		if strings.TrimSpace(q) == "" {
 			m.list.ResetFilter()
 			m.list.ResetSelected()
@@ -193,6 +212,35 @@ func (m *FolderPickerModel) Update(msg tea.Msg) (*FolderPickerModel, tea.Cmd) {
 		}
 	}
 	return m, cmd
+}
+
+// classifyInput decides whether what's been typed is a repo URL to clone or an
+// ordinary filter term. Text that merely looks like a URL but doesn't parse
+// gets an inline complaint rather than silently filtering to nothing.
+func (m *FolderPickerModel) classifyInput(q string) {
+	m.repoRef, m.repoErr = nil, ""
+	q = strings.TrimSpace(q)
+	if q == "" || isExistingDir(q, m.home) {
+		return
+	}
+	ref, err := github.ParseRepoRef(q)
+	if err == nil {
+		m.repoRef = &ref
+		return
+	}
+	if github.LooksLikeRepoRef(q) {
+		m.repoErr = err.Error()
+	}
+}
+
+// isExistingDir reports whether the typed text is already a directory on this
+// machine — if it is, it's a path, not a repo to clone.
+func isExistingDir(p, home string) bool {
+	if strings.HasPrefix(p, "~") && home != "" {
+		p = filepath.Join(home, strings.TrimPrefix(p, "~"))
+	}
+	info, err := os.Stat(p)
+	return err == nil && info.IsDir()
 }
 
 // descend repopulates the list with the candidate children of dir. If dir has
@@ -217,21 +265,26 @@ func (m *FolderPickerModel) descend(dir string) {
 	sortFolderEntries(children)
 	m.root = dir
 	m.input.SetValue("")
+	m.classifyInput("")
 	m.setEntries(children)
 }
 
 func (m *FolderPickerModel) View() string {
 	w := m.contentWidth()
 
-	subtitle := "Pick the folder where your code lives"
+	subtitle := "Pick a folder, or paste a GitHub repo URL"
 	if m.root != "" {
 		subtitle = "In " + collapseHomePath(m.root, m.home) + " — pick a folder"
 	}
 
+	enterDesc := "pick"
+	if m.repoRef != nil {
+		enterDesc = "clone"
+	}
 	help := HelpBar.Render(
 		HelpKey.Render("↑↓") + " " + HelpDesc.Render("select") + "  " +
 			HelpKey.Render("→") + " " + HelpDesc.Render("open") + "  " +
-			HelpKey.Render("enter") + " " + HelpDesc.Render("pick") + "  " +
+			HelpKey.Render("enter") + " " + HelpDesc.Render(enterDesc) + "  " +
 			HelpKey.Render("esc") + " " + HelpDesc.Render("back"))
 
 	content := lipgloss.JoinVertical(lipgloss.Left,
@@ -257,6 +310,12 @@ func (m *FolderPickerModel) View() string {
 // countLine summarises what the list is showing, e.g. "18 folders · git repos
 // first", or "3 of 18 folders match" while a filter is active.
 func (m *FolderPickerModel) countLine() string {
+	if m.repoRef != nil {
+		return Success.Render("  " + Icon("⏺", "*") + " enter to clone " + m.repoRef.String())
+	}
+	if m.repoErr != "" {
+		return Error.Render("  " + truncateRunes(m.repoErr, m.contentWidth()-2))
+	}
 	total := len(m.list.Items())
 	noun := "folders"
 	if total == 1 {
