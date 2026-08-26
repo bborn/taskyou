@@ -256,10 +256,17 @@ func (m *RepoCloneModel) View() string {
 			"",
 		)
 		if m.errText != "" {
-			for _, line := range strings.Split(m.errText, "\n") {
-				parts = append(parts, Error.Render(Icon(IconWarningUnicode, IconWarningASCII)+" "+truncateRunes(line, w-2)))
+			// Wrapped, not truncated: git's reason and the fix that follows it
+			// are both long, and the tail is the part that tells you what to do.
+			for i, line := range strings.Split(m.errText, "\n") {
+				// Only the first line is flagged; the rest wrap flush, since an
+				// indent under the icon falls apart the moment a line wraps.
+				if i == 0 {
+					line = Icon(IconWarningUnicode, IconWarningASCII) + " " + line
+				}
+				parts = append(parts, Error.Width(w).Render(line))
 			}
-			parts = append(parts, "", Dim.Render("Fix the path above and press enter to try again."))
+			parts = append(parts, "", Dim.Width(w).Render("Fix the path above and press enter to try again."))
 		} else if m.notice != "" {
 			style := Dim
 			if m.reuse {
@@ -294,8 +301,8 @@ func wrapNotice(style lipgloss.Style, text string, width int) string {
 
 func (m *RepoCloneModel) contentWidth() int {
 	w := m.width - 10
-	if w > 60 {
-		w = 60
+	if w > 72 {
+		w = 72
 	}
 	if w < 24 {
 		w = 24

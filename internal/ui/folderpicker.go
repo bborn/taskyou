@@ -204,7 +204,10 @@ func (m *FolderPickerModel) Update(msg tea.Msg) (*FolderPickerModel, tea.Cmd) {
 	m.input, cmd = m.input.Update(msg)
 	if q := m.input.Value(); q != before {
 		m.classifyInput(q)
-		if strings.TrimSpace(q) == "" {
+		// A repo URL isn't a filter term: filtering on one empties the list and
+		// the panel reads "No folders", which is both useless and untrue. Leave
+		// the folder shelf alone and let the clone line below do the talking.
+		if strings.TrimSpace(q) == "" || m.repoRef != nil || m.repoErr != "" {
 			m.list.ResetFilter()
 			m.list.ResetSelected()
 		} else {
@@ -310,11 +313,14 @@ func (m *FolderPickerModel) View() string {
 // countLine summarises what the list is showing, e.g. "18 folders · git repos
 // first", or "3 of 18 folders match" while a filter is active.
 func (m *FolderPickerModel) countLine() string {
+	w := m.contentWidth()
 	if m.repoRef != nil {
-		return Success.Render("  " + Icon("⏺", "*") + " enter to clone " + m.repoRef.String())
+		return Success.Width(w).PaddingLeft(2).Render("enter to clone " + m.repoRef.String())
 	}
 	if m.repoErr != "" {
-		return Error.Render("  " + truncateRunes(m.repoErr, m.contentWidth()-2))
+		// Wrapped, never truncated: the tail of these messages is the example
+		// URL, which is the whole point of showing them.
+		return Error.Width(w).PaddingLeft(2).Render(m.repoErr)
 	}
 	total := len(m.list.Items())
 	noun := "folders"
