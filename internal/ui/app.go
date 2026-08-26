@@ -490,10 +490,6 @@ type AppModel struct {
 	// AI command service for natural language command interpretation
 	aiCommandService *ai.CommandService
 
-	// liveSpinnerRunning guards the live-mode spinner animation loop so only one
-	// tick chain runs at a time.
-	liveSpinnerRunning bool
-
 	// Filter state
 	filterInput        textinput.Model
 	filterActive       bool   // Whether filter mode is active (typing in filter)
@@ -726,7 +722,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// the chain breaks permanently — polling stops, DB watcher stops, etc.
 	isSystemMsg := false
 	switch msg.(type) {
-	case tickMsg, focusTickMsg, dbChangeMsg, taskEventMsg, tasksLoadedMsg, prRefreshTickMsg, liveSpinnerTickMsg:
+	case tickMsg, focusTickMsg, dbChangeMsg, taskEventMsg, tasksLoadedMsg, prRefreshTickMsg:
 		isSystemMsg = true
 	case actionFinishedMsg:
 		// A plugin action completed off the UI loop; its result must reach the
@@ -1476,21 +1472,8 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				running[m.selectedTask.ID] = true
 			}
 			m.kanban.SetRunningProcesses(running)
-			// Resume the live-mode spinner if work appeared while it was idle.
-			cmds = append(cmds, m.startLiveSpinner())
 		}
 		cmds = append(cmds, m.tick())
-
-	case liveSpinnerTickMsg:
-		// Advance the running-task spinner and reschedule while the board is
-		// visible and has work to animate. When no tasks are running, the chain
-		// stops; the 1s tick restarts it once running tasks reappear.
-		if m.currentView == ViewDashboard && m.kanban.RunningTaskCount() > 0 {
-			m.kanban.AdvanceSpinner()
-			cmds = append(cmds, m.liveSpinnerTick())
-		} else {
-			m.liveSpinnerRunning = false
-		}
 
 	case focusTickMsg:
 		// Fast tick for responsive focus state changes in detail view
@@ -4235,9 +4218,6 @@ type focusTickMsg time.Time
 
 type prRefreshTickMsg time.Time
 
-// liveSpinnerTickMsg drives the running-task spinner animation on the board.
-type liveSpinnerTickMsg time.Time
-
 type dbChangeMsg struct{}
 
 type prInfoMsg struct {
@@ -5030,27 +5010,6 @@ func (m *AppModel) prRefreshTick() tea.Cmd {
 	return tea.Tick(4*time.Minute, func(t time.Time) tea.Msg {
 		return prRefreshTickMsg(t)
 	})
-}
-
-// liveSpinnerTick schedules the next frame of the live-mode spinner animation.
-func (m *AppModel) liveSpinnerTick() tea.Cmd {
-	return tea.Tick(200*time.Millisecond, func(t time.Time) tea.Msg {
-		return liveSpinnerTickMsg(t)
-	})
-}
-
-// startLiveSpinner kicks off the spinner animation loop if it isn't already
-// running and there is running work to animate. Returns nil if no tick is
-// needed, so callers can append it unconditionally.
-func (m *AppModel) startLiveSpinner() tea.Cmd {
-	if m.liveSpinnerRunning {
-		return nil
-	}
-	if m.kanban.RunningTaskCount() == 0 {
-		return nil
-	}
-	m.liveSpinnerRunning = true
-	return m.liveSpinnerTick()
 }
 
 // checkVersion fetches the latest release from GitHub and compares with current version.

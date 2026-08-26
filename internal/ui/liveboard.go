@@ -23,20 +23,6 @@ func (k *KanbanBoard) SetLatestActivity(activity map[int64]*db.TaskLog) {
 	k.latestActivity = activity
 }
 
-// AdvanceSpinner moves the running-task spinner to its next animation frame.
-func (k *KanbanBoard) AdvanceSpinner() {
-	k.spinnerFrame++
-}
-
-// liveSpinner returns the current spinner glyph (reusing the detail view's
-// braille frames for visual consistency).
-func (k *KanbanBoard) liveSpinner() string {
-	if len(spinnerFrames) == 0 {
-		return IconProcessing()
-	}
-	return spinnerFrames[k.spinnerFrame%len(spinnerFrames)]
-}
-
 // RunningTaskCount returns how many tasks are currently processing.
 func (k *KanbanBoard) RunningTaskCount() int {
 	n := 0

@@ -75,10 +75,8 @@ type KanbanBoard struct {
 
 	// Each card carries a live sub-line: what the running agent is doing right
 	// now (from latestActivity), the stand / waiting question when blocked, or
-	// an age hint for idle statuses. spinnerFrame drives the animated braille
-	// glyph on processing tasks.
+	// an age hint for idle statuses.
 	latestActivity map[int64]*db.TaskLog
-	spinnerFrame   int
 }
 
 // cardHeight is the number of vertical lines a task card occupies, including
@@ -752,9 +750,6 @@ func (k *KanbanBoard) renderSignature() uint64 {
 	h.int(k.selectedRow)
 	h.int(k.hiddenDoneCount)
 	h.boolean(IsGlobalDangerousMode())
-	// The running-task spinner advances on its own tick; invalidate the board
-	// cache whenever the frame changes so the new glyph reaches the screen.
-	h.int(k.spinnerFrame)
 
 	for _, off := range k.scrollOffsets {
 		h.int(off)
@@ -800,10 +795,8 @@ func (k *KanbanBoard) hashTaskCard(h *sigHasher, t *db.Task) {
 	} else {
 		h.boolean(false)
 	}
-	// Per-card sub-line inputs: the agent's latest activity, an elapsed bucket
-	// that ticks the age hint each minute, and (for processing tasks) the
-	// spinner frame — without this last bit cardCache serves a stale glyph
-	// even though renderSignature already invalidates the board-level cache.
+	// Per-card sub-line inputs: the agent's latest activity and an elapsed
+	// bucket that ticks the age hint each minute.
 	if log := k.latestActivity[t.ID]; log != nil {
 		h.boolean(true)
 		h.str(log.Content)
@@ -811,9 +804,6 @@ func (k *KanbanBoard) hashTaskCard(h *sigHasher, t *db.Task) {
 		h.boolean(false)
 	}
 	h.int(taskElapsedMinutes(t))
-	if t.Status == db.StatusProcessing {
-		h.int(k.spinnerFrame)
-	}
 	// Workflow lead cards render the goal + step progress instead of the raw
 	// title/sub-line, so the workflow's shape must feed the signature or the card
 	// caches serve a stale badge as the workflow advances.
@@ -1229,12 +1219,8 @@ func (k *KanbanBoard) renderTaskCard(task *db.Task, width int, isSelected bool) 
 
 	var b strings.Builder
 
-	// Task ID with status indicator. Running tasks get an animated braille
-	// spinner instead of the static processing glyph.
+	// Task ID with status indicator.
 	statusIcon := StatusIcon(task.Status)
-	if task.Status == db.StatusProcessing {
-		statusIcon = k.liveSpinner()
-	}
 	if isSelected {
 		b.WriteString(statusIcon)
 		b.WriteString(" ")
