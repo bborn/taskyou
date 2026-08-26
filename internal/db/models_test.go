@@ -1,6 +1,7 @@
 package db
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -187,4 +188,94 @@ func TestIsValidModel(t *testing.T) {
 			t.Errorf("IsValidModel(%q) = true, want false", m)
 		}
 	}
+}
+
+// TestValidateTaskModel covers the write-path entry point: the same rules as
+// ValidateModel, but with the proxy escape hatch resolved from the task's own
+// config, its project's config, and the ambient environment.
+func TestValidateTaskModel(t *testing.T) {
+	tmpDir := t.TempDir()
+	database, err := Open(filepath.Join(tmpDir, "test.db"))
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer database.Close()
+
+	if err := database.CreateProject(&Project{Name: "stock", Path: filepath.Join(tmpDir, "stock")}); err != nil {
+		t.Fatalf("create stock project: %v", err)
+	}
+	if err := database.CreateProject(&Project{
+		Name:            "ollama",
+		Path:            filepath.Join(tmpDir, "ollama"),
+		ClaudeConfigDir: "~/.claude-ollama",
+	}); err != nil {
+		t.Fatalf("create ollama project: %v", err)
+	}
+
+	t.Setenv("ANTHROPIC_BASE_URL", "")
+
+	t.Run("nil and empty are no-ops", func(t *testing.T) {
+		if err := database.ValidateTaskModel(nil); err != nil {
+			t.Errorf("nil task: %v", err)
+		}
+		if err := database.ValidateTaskModel(&Task{Project: "stock"}); err != nil {
+			t.Errorf("no override: %v", err)
+		}
+		if err := database.ValidateTaskModel(&Task{Project: "stock", Model: "   "}); err != nil {
+			t.Errorf("blank override: %v", err)
+		}
+	})
+
+	t.Run("stock backend is validated", func(t *testing.T) {
+		if err := database.ValidateTaskModel(&Task{Project: "stock", Model: "opuss"}); err == nil {
+			t.Error("expected a typo'd model to be rejected")
+		}
+		if err := database.ValidateTaskModel(&Task{Project: "stock", Model: ModelOpus}); err != nil {
+			t.Errorf("a valid alias should pass: %v", err)
+		}
+		if err := database.ValidateTaskModel(&Task{Project: "stock", Executor: ExecutorCodex, Model: ModelOpus}); err == nil {
+			t.Error("a modelless executor should be rejected")
+		}
+	})
+
+	t.Run("per-task config dir skips validation", func(t *testing.T) {
+		task := &Task{Project: "stock", Model: "glm-5.2:cloud", ClaudeConfigDir: "~/.claude-ollama"}
+		if err := database.ValidateTaskModel(task); err != nil {
+			t.Errorf("a task-level config dir should skip validation: %v", err)
+		}
+	})
+
+	t.Run("per-task env skips validation", func(t *testing.T) {
+		task := &Task{
+			Project: "stock",
+			Model:   "glm-5.2:cloud",
+			EnvJSON: `{"ANTHROPIC_BASE_URL":"http://127.0.0.1:11434"}`,
+		}
+		if err := database.ValidateTaskModel(task); err != nil {
+			t.Errorf("a task-level ANTHROPIC_BASE_URL should skip validation: %v", err)
+		}
+	})
+
+	t.Run("project config dir skips validation", func(t *testing.T) {
+		if err := database.ValidateTaskModel(&Task{Project: "ollama", Model: "glm-5.2:cloud"}); err != nil {
+			t.Errorf("a project-level config dir should skip validation: %v", err)
+		}
+		// Same model, stock project: still rejected.
+		if err := database.ValidateTaskModel(&Task{Project: "stock", Model: "glm-5.2:cloud"}); err == nil {
+			t.Error("the escape hatch must not leak across projects")
+		}
+	})
+
+	t.Run("unknown project is not a custom backend", func(t *testing.T) {
+		if err := database.ValidateTaskModel(&Task{Project: "nope", Model: "opuss"}); err == nil {
+			t.Error("an unresolvable project must not disable validation")
+		}
+	})
+
+	t.Run("ambient base url skips validation", func(t *testing.T) {
+		t.Setenv("ANTHROPIC_BASE_URL", "http://127.0.0.1:11434")
+		if err := database.ValidateTaskModel(&Task{Project: "stock", Model: "glm-5.2:cloud"}); err != nil {
+			t.Errorf("an ambient ANTHROPIC_BASE_URL should skip validation: %v", err)
+		}
+	})
 }

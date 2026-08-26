@@ -2,6 +2,7 @@ package db
 
 import (
 	"fmt"
+	"os"
 	"regexp"
 	"strings"
 )
@@ -123,6 +124,42 @@ func ValidateModel(executor, model string) error {
 	}
 	return fmt.Errorf("unknown %s model %q — known models: %s (or any %s* model ID)",
 		executor, model, strings.Join(ModelsForExecutor(executor), ", "), prefix)
+}
+
+// ValidateTaskModel checks a task's model override against the executor that
+// will run it, skipping the check when the task is routed at a non-stock
+// backend. This is the entry point every write path should use — it resolves
+// the escape hatch (per-task config dir or env, the project's config dir, an
+// ambient ANTHROPIC_BASE_URL) that a bare ValidateModel call cannot see.
+func (db *DB) ValidateTaskModel(t *Task) error {
+	if t == nil || strings.TrimSpace(t.Model) == "" {
+		return nil
+	}
+	if db.taskModelBackendIsCustom(t) {
+		return nil
+	}
+	return ValidateModel(t.Executor, t.Model)
+}
+
+// taskModelBackendIsCustom reports whether anything in a task's resolved
+// configuration points Claude away from Anthropic's API: the task's own config
+// dir or env, the project's config dir, or ANTHROPIC_BASE_URL in the
+// environment ty itself is running in.
+func (db *DB) taskModelBackendIsCustom(t *Task) bool {
+	if ModelBackendIsCustom(t.ClaudeConfigDir, t.EnvMap()) {
+		return true
+	}
+	if strings.TrimSpace(os.Getenv("ANTHROPIC_BASE_URL")) != "" {
+		return true
+	}
+	if t.Project == "" {
+		return false
+	}
+	p, err := db.GetProjectByName(t.Project)
+	if err != nil || p == nil {
+		return false
+	}
+	return ModelBackendIsCustom(p.ClaudeConfigDir, nil)
 }
 
 // ModelBackendIsCustom reports whether a Claude run is pointed at something

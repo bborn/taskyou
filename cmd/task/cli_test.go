@@ -1834,11 +1834,11 @@ func TestShouldSubmitInput(t *testing.T) {
 	}
 }
 
-// TestProjectUsesCustomModelBackend covers the escape hatch that keeps
+// TestCreateModelBackendEscapeHatch covers the escape hatch that keeps
 // `ty create --model` validation from breaking proxy-routed setups: when a
 // project's Claude is pointed at ollama (or any other non-Anthropic backend),
 // the model names are the proxy's and must not be checked against Anthropic's.
-func TestProjectUsesCustomModelBackend(t *testing.T) {
+func TestCreateModelBackendEscapeHatch(t *testing.T) {
 	tmpDir := t.TempDir()
 	dbPath := filepath.Join(tmpDir, "test.db")
 
@@ -1861,23 +1861,28 @@ func TestProjectUsesCustomModelBackend(t *testing.T) {
 
 	t.Setenv("ANTHROPIC_BASE_URL", "")
 
-	if projectUsesCustomModelBackend(database, "stock") {
-		t.Error("a project with no config-dir override uses the stock backend")
+	// This is the shape `ty create` builds to validate the --model flag.
+	probe := func(project, model string) error {
+		return database.ValidateTaskModel(&db.Task{Project: project, Model: model})
 	}
-	if projectUsesCustomModelBackend(database, "") {
-		t.Error("no project means no per-project override")
+
+	if err := probe("stock", "glm-5.2:cloud"); err == nil {
+		t.Error("a proxy-only model on a stock-backend project should be rejected")
 	}
-	if projectUsesCustomModelBackend(database, "does-not-exist") {
-		t.Error("an unknown project must not be treated as custom")
+	if err := probe("ollama", "glm-5.2:cloud"); err != nil {
+		t.Errorf("a project with a CLAUDE_CONFIG_DIR override should skip validation: %v", err)
 	}
-	if !projectUsesCustomModelBackend(database, "ollama") {
-		t.Error("a project with a CLAUDE_CONFIG_DIR override is a custom backend")
+	if err := probe("does-not-exist", "opuss"); err == nil {
+		t.Error("an unknown project must not be treated as a custom backend")
+	}
+	if err := probe("", "opuss"); err == nil {
+		t.Error("no project means no override, so validation still applies")
 	}
 
 	// An ambient ANTHROPIC_BASE_URL routes every project at a proxy.
 	t.Setenv("ANTHROPIC_BASE_URL", "http://127.0.0.1:11434")
-	if !projectUsesCustomModelBackend(database, "stock") {
-		t.Error("ANTHROPIC_BASE_URL in the environment is a custom backend")
+	if err := probe("stock", "glm-5.2:cloud"); err != nil {
+		t.Errorf("ANTHROPIC_BASE_URL in the environment should skip validation: %v", err)
 	}
 }
 

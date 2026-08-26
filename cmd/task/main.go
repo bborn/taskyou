@@ -90,25 +90,6 @@ func openTaskDB(path string) (*db.DB, error) {
 	return database, nil
 }
 
-// projectUsesCustomModelBackend reports whether the project (or the ambient
-// environment) points Claude at something other than Anthropic's API — a
-// per-project CLAUDE_CONFIG_DIR override, or ANTHROPIC_BASE_URL aimed at a
-// proxy like ollama. Model names are the proxy's there ("glm-5.2:cloud"), so a
-// --model override must not be checked against Anthropic's model list.
-func projectUsesCustomModelBackend(database *db.DB, project string) bool {
-	if db.ModelBackendIsCustom("", map[string]string{"ANTHROPIC_BASE_URL": os.Getenv("ANTHROPIC_BASE_URL")}) {
-		return true
-	}
-	if project == "" {
-		return false
-	}
-	p, err := database.GetProjectByName(project)
-	if err != nil || p == nil {
-		return false
-	}
-	return db.ModelBackendIsCustom(p.ClaudeConfigDir, nil)
-}
-
 // waitForEventHooks blocks until any in-flight hook scripts have completed.
 // CLI commands that mutate task state must defer this before exit, otherwise
 // the Go process terminates before the hook goroutine runs its subprocess.
@@ -808,14 +789,16 @@ Examples:
 
 			// Reject a model the executor's CLI would not accept. A bad override is
 			// otherwise invisible: the task launches, the agent rejects the flag
-			// inside tmux, and the card sits there looking busy. Skipped when the
-			// project routes Claude at a proxy (ollama and friends), where the model
-			// names belong to the proxy, not Anthropic.
-			if !projectUsesCustomModelBackend(database, project) {
-				if err := db.ValidateModel(taskExecutor, modelOverride); err != nil {
-					fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
-					os.Exit(1)
-				}
+			// inside tmux, and the card sits there looking busy. ValidateTaskModel
+			// skips the check when this task would be routed at a proxy (ollama and
+			// friends), where the model names belong to the proxy, not Anthropic.
+			if err := database.ValidateTaskModel(&db.Task{
+				Project:  project,
+				Executor: taskExecutor,
+				Model:    modelOverride,
+			}); err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
 			}
 
 			// Generate title from body if title is empty
