@@ -54,6 +54,7 @@ const (
 	ViewFolderPicker         // fuzzy folder picker for "set up a project"
 	ViewRoutines             // global routines fleet-health view
 	ViewActionPicker         // modal list of plugin actions for the current task
+	ViewRepoClone            // clone a pasted repo URL, then continue as a folder
 )
 
 // KeyMap defines key bindings.
@@ -440,6 +441,7 @@ type AppModel struct {
 	// First-run onboarding views
 	welcomeView  *WelcomeModel
 	folderPicker *FolderPickerModel
+	repoClone    *RepoCloneModel
 
 	// Delete confirmation state
 	deleteConfirm      *huh.Form
@@ -761,6 +763,12 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if picked, ok := msg.(folderPickedMsg); ok {
 				return m.handleFolderPicked(picked.path)
 			}
+			if req, ok := msg.(repoRequestedMsg); ok {
+				m.folderPicker = nil
+				m.repoClone = NewRepoCloneModel(req.ref, m.width, m.height)
+				m.currentView = ViewRepoClone
+				return m, m.repoClone.Init()
+			}
 			if key, ok := msg.(tea.KeyMsg); ok && (key.String() == "esc" || key.String() == "ctrl+c") {
 				m.folderPicker = nil
 				m.welcomeView = NewWelcomeModel(m.width, m.height, m.availableExecutors, tmuxAvailable())
@@ -769,6 +777,29 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			var cmd tea.Cmd
 			m.folderPicker, cmd = m.folderPicker.Update(msg)
+			return m, cmd
+		}
+		// Repo clone: same deal as the folder picker — every message reaches it
+		// so the destination input and the clone spinner stay live. It hands
+		// back a local path (repoClonedMsg), which rejoins the folder-picked
+		// path so project creation isn't forked.
+		if m.currentView == ViewRepoClone && m.repoClone != nil {
+			if done, ok := msg.(repoClonedMsg); ok {
+				m.repoClone = nil
+				return m.handleFolderPicked(done.path)
+			}
+			if key, ok := msg.(tea.KeyMsg); ok && (key.String() == "esc" || key.String() == "ctrl+c") {
+				// esc stops a running clone first; a second esc goes back.
+				if m.repoClone.Cancel() {
+					return m, nil
+				}
+				m.repoClone = nil
+				m.folderPicker = NewFolderPickerModel(m.width, m.height)
+				m.currentView = ViewFolderPicker
+				return m, m.folderPicker.Init()
+			}
+			var cmd tea.Cmd
+			m.repoClone, cmd = m.repoClone.Update(msg)
 			return m, cmd
 		}
 		if m.currentView == ViewDeleteConfirm && m.deleteConfirm != nil {
@@ -1544,6 +1575,9 @@ func (m *AppModel) applyWindowSize(width, height int) {
 	if m.folderPicker != nil {
 		m.folderPicker.SetSize(m.width, m.height)
 	}
+	if m.repoClone != nil {
+		m.repoClone.SetSize(m.width, m.height)
+	}
 }
 
 // View renders the current view.
@@ -1589,6 +1623,10 @@ func (m *AppModel) View() string {
 	case ViewFolderPicker:
 		if m.folderPicker != nil {
 			return m.folderPicker.View()
+		}
+	case ViewRepoClone:
+		if m.repoClone != nil {
+			return m.repoClone.View()
 		}
 	case ViewDeleteConfirm:
 		return m.viewDeleteConfirm()
@@ -3146,6 +3184,7 @@ func (m *AppModel) onlyPersonalProject() bool {
 // confirm card used for auto-detected projects. Metadata inference runs
 // asynchronously (see showProjectDetectConfirm) so the card appears instantly.
 func (m *AppModel) handleFolderPicked(path string) (tea.Model, tea.Cmd) {
+	m.repoClone = nil
 	if proj, err := m.db.GetProjectByPath(path); err == nil && proj != nil {
 		m.folderPicker = nil
 		m.notification = fmt.Sprintf("%s \"%s\" already covers that folder", IconDone(), proj.Name)
