@@ -294,3 +294,90 @@ func contains(ss []string, want string) bool {
 	}
 	return false
 }
+
+// TestParseDefinitionRejectsUnknownModel covers the workflow-file half of model
+// validation. A step whose model its CLI won't accept fails silently at launch
+// — the agent rejects the flag inside tmux and the step stalls looking busy —
+// so the file must be rejected while it is being read.
+func TestParseDefinitionRejectsUnknownModel(t *testing.T) {
+	tests := []struct {
+		name string
+		yaml string
+		want string // substring the error must carry
+	}{
+		{
+			name: "typo in a claude alias",
+			yaml: "name: k\nsteps:\n  - {name: Plan, model: opuss, prompt: Plan it.}\n",
+			want: "opuss",
+		},
+		{
+			name: "executor slug used as a model",
+			yaml: "name: k\nsteps:\n  - {name: Plan, model: claude, prompt: Plan it.}\n",
+			want: "claude",
+		},
+		{
+			name: "model on an executor with no --model flag",
+			yaml: "name: k\nsteps:\n  - {name: QA, executor: codex, model: gpt-5-codex, prompt: QA it.}\n",
+			want: "codex",
+		},
+		{
+			name: "claude model on a grok step",
+			yaml: "name: k\nsteps:\n  - {name: Plan, executor: grok, model: opus, prompt: Plan it.}\n",
+			want: "grok",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := ParseDefinition([]byte(tt.yaml))
+			if err == nil {
+				t.Fatal("ParseDefinition accepted a step with an unusable model")
+			}
+			if !strings.Contains(err.Error(), tt.want) {
+				t.Errorf("error %q should mention %q", err, tt.want)
+			}
+			// The step name locates the problem in a multi-step file.
+			if !strings.Contains(err.Error(), "step ") {
+				t.Errorf("error %q should name the offending step", err)
+			}
+		})
+	}
+}
+
+// TestParseDefinitionAllowsProxyModels is the escape hatch: a step routed at a
+// proxy (a config_dir or an ANTHROPIC_BASE_URL env override — the ollama shape)
+// names the proxy's models, which ty has no way to check.
+func TestParseDefinitionAllowsProxyModels(t *testing.T) {
+	viaConfigDir := "name: k\nsteps:\n  - {name: Code, model: glm-5.2:cloud, config_dir: \"~/.claude-ollama\", prompt: Do it.}\n"
+	if _, err := ParseDefinition([]byte(viaConfigDir)); err != nil {
+		t.Errorf("config_dir-routed step should skip model validation: %v", err)
+	}
+
+	viaEnv := "name: k\nsteps:\n  - {name: Code, model: glm-5.2:cloud, env: {ANTHROPIC_BASE_URL: \"http://127.0.0.1:11434\"}, prompt: Do it.}\n"
+	if _, err := ParseDefinition([]byte(viaEnv)); err != nil {
+		t.Errorf("ANTHROPIC_BASE_URL-routed step should skip model validation: %v", err)
+	}
+
+	// Same model with no routing override is still a hard error.
+	bare := "name: k\nsteps:\n  - {name: Code, model: glm-5.2:cloud, prompt: Do it.}\n"
+	if _, err := ParseDefinition([]byte(bare)); err == nil {
+		t.Error("an unrouted step with a proxy-only model should be rejected")
+	}
+}
+
+// TestParseDefinitionAcceptsRealModels guards against the check being too
+// strict: full model IDs, including ones newer than this code, must pass.
+func TestParseDefinitionAcceptsRealModels(t *testing.T) {
+	for _, model := range []string{"opus", "sonnet", "haiku", "fable", "claude-opus-5", "claude-opus-5[1m]", "claude-opus-9"} {
+		// Quoted: a bracketed variant like claude-opus-5[1m] is a YAML flow
+		// sequence otherwise.
+		yaml := "name: k\nsteps:\n  - {name: Plan, model: \"" + model + "\", prompt: Plan it.}\n"
+		if _, err := ParseDefinition([]byte(yaml)); err != nil {
+			t.Errorf("ParseDefinition rejected valid model %q: %v", model, err)
+		}
+	}
+	// db is imported by the sample above; keep the executor-specific case honest.
+	yaml := "name: k\nsteps:\n  - {name: Plan, executor: " + db.ExecutorGrok + ", model: grok-4, prompt: Plan it.}\n"
+	if _, err := ParseDefinition([]byte(yaml)); err != nil {
+		t.Errorf("ParseDefinition rejected a valid grok model: %v", err)
+	}
+}

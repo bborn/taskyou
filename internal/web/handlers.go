@@ -273,6 +273,13 @@ func (s *Server) handleUpdateTask(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Model != nil {
 		task.Model = *req.Model
+		// Validated only when the request is actually setting a model, and against
+		// the executor as it stands after this update. Updates that leave the model
+		// alone must keep working even if the stored value predates this check.
+		if err := s.db.ValidateTaskModel(task); err != nil {
+			jsonErr(w, err.Error(), http.StatusBadRequest)
+			return
+		}
 	}
 
 	if err := s.db.UpdateTask(task); err != nil {

@@ -775,8 +775,7 @@ Examples:
 				os.Exit(1)
 			}
 
-			// Normalize model override (empty = use Claude's global default). Any
-			// non-empty value is accepted; the Claude CLI validates the model name.
+			// Normalize model override (empty = use the agent's own default).
 			modelOverride = strings.TrimSpace(modelOverride)
 
 			// If project not specified, try to detect from cwd
@@ -786,6 +785,20 @@ Examples:
 						project = p.Name
 					}
 				}
+			}
+
+			// Reject a model the executor's CLI would not accept. A bad override is
+			// otherwise invisible: the task launches, the agent rejects the flag
+			// inside tmux, and the card sits there looking busy. ValidateTaskModel
+			// skips the check when this task would be routed at a proxy (ollama and
+			// friends), where the model names belong to the proxy, not Anthropic.
+			if err := database.ValidateTaskModel(&db.Task{
+				Project:  project,
+				Executor: taskExecutor,
+				Model:    modelOverride,
+			}); err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
 			}
 
 			// Generate title from body if title is empty
@@ -889,7 +902,7 @@ Examples:
 	createCmd.Flags().StringP("project", "p", "", "Project name (auto-detected from cwd if not specified)")
 	createCmd.Flags().StringP("executor", "e", "", "Task executor: claude, codex, gemini, grok, pi, opencode, openclaw (default: claude)")
 	createCmd.Flags().String("effort", "", "Per-task Claude effort override: low, medium, high, xhigh, max (default: Claude's global default)")
-	createCmd.Flags().String("model", "", "Per-task Claude model override: opus, sonnet, haiku, or a full model name (default: Claude's global default)")
+	createCmd.Flags().String("model", "", "Per-task model override: opus, sonnet, haiku, fable, or a full model ID like claude-opus-5 (default: the agent's own default). Claude and grok only")
 	createCmd.Flags().BoolP("execute", "x", false, "Queue task for immediate execution")
 	createCmd.Flags().Bool("dangerous", false, "Execute in dangerous mode (alias for --permission-mode dangerous)")
 	createCmd.Flags().String("permission-mode", "", "Permission mode: default (prompt), accept-edits (auto-accept file edits), auto (Claude Code auto mode: auto-approve safe actions, block risky ones), dangerous (skip all). Defaults to the project's setting")
@@ -905,7 +918,10 @@ Examples:
 		return db.EffortLevels(), cobra.ShellCompDirectiveNoFileComp
 	})
 	createCmd.RegisterFlagCompletionFunc("model", func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
-		return db.ModelOptions(), cobra.ShellCompDirectiveNoFileComp
+		// Complete against the models the chosen executor actually accepts, so
+		// `-e grok --model <tab>` doesn't offer Claude aliases.
+		executor, _ := cmd.Flags().GetString("executor")
+		return db.ModelsForExecutor(executor), cobra.ShellCompDirectiveNoFileComp
 	})
 	rootCmd.AddCommand(createCmd)
 

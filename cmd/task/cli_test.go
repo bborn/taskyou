@@ -1833,3 +1833,95 @@ func TestShouldSubmitInput(t *testing.T) {
 		})
 	}
 }
+
+// TestCreateModelBackendEscapeHatch covers the escape hatch that keeps
+// `ty create --model` validation from breaking proxy-routed setups: when a
+// project's Claude is pointed at ollama (or any other non-Anthropic backend),
+// the model names are the proxy's and must not be checked against Anthropic's.
+func TestCreateModelBackendEscapeHatch(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	database, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer database.Close()
+
+	if err := database.CreateProject(&db.Project{Name: "stock", Path: filepath.Join(tmpDir, "stock")}); err != nil {
+		t.Fatalf("create stock project: %v", err)
+	}
+	if err := database.CreateProject(&db.Project{
+		Name:            "ollama",
+		Path:            filepath.Join(tmpDir, "ollama"),
+		ClaudeConfigDir: "~/.claude-ollama",
+	}); err != nil {
+		t.Fatalf("create ollama project: %v", err)
+	}
+
+	t.Setenv("ANTHROPIC_BASE_URL", "")
+
+	// This is the shape `ty create` builds to validate the --model flag.
+	probe := func(project, model string) error {
+		return database.ValidateTaskModel(&db.Task{Project: project, Model: model})
+	}
+
+	if err := probe("stock", "glm-5.2:cloud"); err == nil {
+		t.Error("a proxy-only model on a stock-backend project should be rejected")
+	}
+	if err := probe("ollama", "glm-5.2:cloud"); err != nil {
+		t.Errorf("a project with a CLAUDE_CONFIG_DIR override should skip validation: %v", err)
+	}
+	if err := probe("does-not-exist", "opuss"); err == nil {
+		t.Error("an unknown project must not be treated as a custom backend")
+	}
+	if err := probe("", "opuss"); err == nil {
+		t.Error("no project means no override, so validation still applies")
+	}
+
+	// An ambient ANTHROPIC_BASE_URL routes every project at a proxy.
+	t.Setenv("ANTHROPIC_BASE_URL", "http://127.0.0.1:11434")
+	if err := probe("stock", "glm-5.2:cloud"); err != nil {
+		t.Errorf("ANTHROPIC_BASE_URL in the environment should skip validation: %v", err)
+	}
+}
+
+// TestCreateModelValidation pins the rules `ty create --model` enforces: reject
+// what the agent's CLI would reject, accept model IDs newer than this code, and
+// never reject anything the UI picker offers.
+func TestCreateModelValidation(t *testing.T) {
+	rejected := []struct {
+		executor string
+		model    string
+	}{
+		{db.ExecutorClaude, "opuss"},      // typo
+		{db.ExecutorClaude, "claude"},     // the executor slug, not a model
+		{db.ExecutorClaude, "gpt-5"},      // another vendor
+		{db.ExecutorGrok, "opus"},         // claude alias on grok
+		{db.ExecutorCodex, "gpt-5-codex"}, // executor has no --model flag
+		{"", "sonnet-4"},                  // default executor, bad alias
+	}
+	for _, tt := range rejected {
+		if err := db.ValidateModel(tt.executor, tt.model); err == nil {
+			t.Errorf("--model %q with executor %q should be rejected", tt.model, tt.executor)
+		}
+	}
+
+	accepted := []struct {
+		executor string
+		model    string
+	}{
+		{db.ExecutorClaude, ""}, // no override
+		{"", ""},
+		{db.ExecutorClaude, "opus"},
+		{db.ExecutorClaude, "claude-opus-5"},
+		{db.ExecutorClaude, "claude-opus-9"}, // released after this code
+		{db.ExecutorGrok, "grok-4"},
+		{db.ExecutorCodex, ""}, // modelless executor, no override
+	}
+	for _, tt := range accepted {
+		if err := db.ValidateModel(tt.executor, tt.model); err != nil {
+			t.Errorf("--model %q with executor %q should be accepted: %v", tt.model, tt.executor, err)
+		}
+	}
+}
