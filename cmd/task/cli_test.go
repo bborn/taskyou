@@ -1833,3 +1833,90 @@ func TestShouldSubmitInput(t *testing.T) {
 		})
 	}
 }
+
+// TestProjectUsesCustomModelBackend covers the escape hatch that keeps
+// `ty create --model` validation from breaking proxy-routed setups: when a
+// project's Claude is pointed at ollama (or any other non-Anthropic backend),
+// the model names are the proxy's and must not be checked against Anthropic's.
+func TestProjectUsesCustomModelBackend(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	database, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer database.Close()
+
+	if err := database.CreateProject(&db.Project{Name: "stock", Path: filepath.Join(tmpDir, "stock")}); err != nil {
+		t.Fatalf("create stock project: %v", err)
+	}
+	if err := database.CreateProject(&db.Project{
+		Name:            "ollama",
+		Path:            filepath.Join(tmpDir, "ollama"),
+		ClaudeConfigDir: "~/.claude-ollama",
+	}); err != nil {
+		t.Fatalf("create ollama project: %v", err)
+	}
+
+	t.Setenv("ANTHROPIC_BASE_URL", "")
+
+	if projectUsesCustomModelBackend(database, "stock") {
+		t.Error("a project with no config-dir override uses the stock backend")
+	}
+	if projectUsesCustomModelBackend(database, "") {
+		t.Error("no project means no per-project override")
+	}
+	if projectUsesCustomModelBackend(database, "does-not-exist") {
+		t.Error("an unknown project must not be treated as custom")
+	}
+	if !projectUsesCustomModelBackend(database, "ollama") {
+		t.Error("a project with a CLAUDE_CONFIG_DIR override is a custom backend")
+	}
+
+	// An ambient ANTHROPIC_BASE_URL routes every project at a proxy.
+	t.Setenv("ANTHROPIC_BASE_URL", "http://127.0.0.1:11434")
+	if !projectUsesCustomModelBackend(database, "stock") {
+		t.Error("ANTHROPIC_BASE_URL in the environment is a custom backend")
+	}
+}
+
+// TestCreateModelValidation pins the rules `ty create --model` enforces: reject
+// what the agent's CLI would reject, accept model IDs newer than this code, and
+// never reject anything the UI picker offers.
+func TestCreateModelValidation(t *testing.T) {
+	rejected := []struct {
+		executor string
+		model    string
+	}{
+		{db.ExecutorClaude, "opuss"},      // typo
+		{db.ExecutorClaude, "claude"},     // the executor slug, not a model
+		{db.ExecutorClaude, "gpt-5"},      // another vendor
+		{db.ExecutorGrok, "opus"},         // claude alias on grok
+		{db.ExecutorCodex, "gpt-5-codex"}, // executor has no --model flag
+		{"", "sonnet-4"},                  // default executor, bad alias
+	}
+	for _, tt := range rejected {
+		if err := db.ValidateModel(tt.executor, tt.model); err == nil {
+			t.Errorf("--model %q with executor %q should be rejected", tt.model, tt.executor)
+		}
+	}
+
+	accepted := []struct {
+		executor string
+		model    string
+	}{
+		{db.ExecutorClaude, ""}, // no override
+		{"", ""},
+		{db.ExecutorClaude, "opus"},
+		{db.ExecutorClaude, "claude-opus-5"},
+		{db.ExecutorClaude, "claude-opus-9"}, // released after this code
+		{db.ExecutorGrok, "grok-4"},
+		{db.ExecutorCodex, ""}, // modelless executor, no override
+	}
+	for _, tt := range accepted {
+		if err := db.ValidateModel(tt.executor, tt.model); err != nil {
+			t.Errorf("--model %q with executor %q should be accepted: %v", tt.model, tt.executor, err)
+		}
+	}
+}

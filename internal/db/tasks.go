@@ -285,33 +285,7 @@ func (t *Task) EnvMap() map[string]string {
 	return out
 }
 
-// Model overrides are per-task selections for Claude's model (claude --model).
-// An empty value means "no override" — the task uses Claude's global default,
-// leaving the user's global setting untouched. The aliases below are accepted by
-// the Claude CLI's --model flag; a full model name (e.g. "claude-opus-4-8") is
-// also valid and passed through unchanged.
-const (
-	ModelFable  = "fable"
-	ModelOpus   = "opus"
-	ModelSonnet = "sonnet"
-	ModelHaiku  = "haiku"
-)
-
-// ModelOptions returns the per-task model override aliases offered in the UI.
-// The Claude CLI also accepts full model names, so this is a convenience list,
-// not an exhaustive set. Keep it in sync with the aliases the Claude CLI supports
-// as new models ship (e.g. "fable" was added alongside opus/sonnet/haiku).
-func ModelOptions() []string {
-	return []string{ModelOpus, ModelSonnet, ModelHaiku, ModelFable}
-}
-
-// IsValidModel reports whether s is an acceptable per-task model override. The
-// empty string is valid and means "use the global/Claude default" (no per-task
-// override). Any non-empty value is accepted because the Claude CLI validates
-// the model name itself and supports both aliases and full model IDs.
-func IsValidModel(s string) bool {
-	return true
-}
+// Per-task model overrides (constants, options and validation) live in models.go.
 
 // Port allocation constants
 const (
