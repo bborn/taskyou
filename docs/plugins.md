@@ -153,67 +153,38 @@ emits, so unknown events are harmless.
 
 ## Routing (pre-spawn)
 
-Every hook above is a notification: it fires after the fact, runs detached, and
-nothing waits for it. `task.route` is the exception. It fires *before* a task is
-spawned, TaskYou waits for it, and it reads your script's **stdout back as a
-decision** — which is the only way a plugin can influence how a task runs rather
-than just react to it having run.
-
-The decision format is KEY=VALUE, one per line:
+Every other hook is a notification — it fires after the fact and nothing waits for
+it. `task.route` fires *before* a task spawns, TaskYou waits for it, and reads the
+script's **stdout back as a decision**. Stdout is the decision channel; put
+diagnostics on stderr.
 
 ```sh
 #!/bin/sh
-echo "CLAUDE_CONFIG_DIR=$HOME/.claude-work"   # run this task under that Claude profile
-echo "REASON=7% of its limits used"           # optional note for the task log
+echo "CLAUDE_CONFIG_DIR=$HOME/.claude-work"   # run this task under that profile
+echo "REASON=7% of its limits used"           # optional, for the task log
 ```
 
 | Key | Effect |
 |-----|--------|
 | `CLAUDE_CONFIG_DIR` | Run the task under that Claude profile (config dir) |
-| `HOLD=1` | Don't start this task yet; leave it queued and reconsider next tick |
-| `REASON=…` | Free text, written to the task log alongside the decision |
+| `HOLD=1` | Don't start yet; leave it queued and reconsider next tick |
+| `REASON=…` | Free text for the task log |
 
-Everything else on stdout is ignored, so unknown keys and stray output are
-harmless — but keep diagnostics on **stderr** (which goes to the daemon log),
-since stdout is the decision channel.
+Unrecognized lines are ignored. Timeout is 15s. Plugins are consulted in name
+order and the first non-empty decision wins.
 
-**Guarantees.** Printing nothing is always safe, and so is failing:
+Failing is safe: no router, a script that errors or prints nothing, or a timeout
+all spawn the task exactly as it would have. A config dir already set by hand or
+by a workflow step is never overruled, and a routed task keeps its profile on
+resume (its Claude session lives in that config dir). `HOLD` leaves a task
+**queued**, never blocked, and is ignored for a manually started task. Only
+Claude tasks are routed — `CLAUDE_CONFIG_DIR` means nothing to the other
+executors.
 
-- **Silence means carry on.** No router installed, a script that errors, exceeds
-  the 15s timeout, or prints nothing usable — the task spawns exactly as it would
-  have. Routing is an optimization; failing to optimize never blocks work.
-- **An explicit choice wins.** A task that already names a config dir (set by
-  hand, or by a workflow step's `config_dir:`) is left alone.
-- **A routed task stays put.** The decision is written to the task, so a task
-  resumed later runs under the same profile it started on. This is required, not
-  merely tidy: a Claude session lives inside one config dir, and resuming under a
-  different one would find no session and quietly start a fresh conversation. The
-  cost is that a long-lived task pinned to a profile waits for *that* profile's
-  limits to reset — it cannot be migrated mid-conversation.
-- **First answer stands.** Plugins are consulted in name order and the first
-  non-empty decision is used, so two installed routers give a deterministic
-  result.
-- **`HOLD` keeps a task queued**, never blocked — it starts by itself once a
-  later tick gets a different answer. A hold is honored for queued tasks; a task
-  you started by hand (`ty run`, "start now") runs regardless.
-- **Claude only.** `CLAUDE_CONFIG_DIR` means nothing to the codex or gemini
-  executors, so tasks using them are not routed.
+Routing hooks also get `TASK_EXECUTOR` and `TASK_CLAUDE_CONFIG_DIR`.
 
-Extra environment on a routing hook, beyond the standard `TASK_*` and
-`TASK_PLUGIN_*` variables: `TASK_EXECUTOR` and `TASK_CLAUDE_CONFIG_DIR` (the
-task's current config dir, empty when unset).
-
-The worked example is **claude-profile-router** in the
-[community collection](https://github.com/taskyou/plugins), which routes each task
-to whichever of your Claude accounts has the most rate-limit headroom and holds a
-task when every account is spent:
-
-```bash
-ty plugins add https://github.com/taskyou/plugins
-```
-
-It reads each account's remaining limits itself — ty supplies the hook, the
-plugin supplies the policy and the data it routes on.
+Worked example: **claude-profile-router** in the
+[community collection](https://github.com/taskyou/plugins).
 
 ## Environment
 

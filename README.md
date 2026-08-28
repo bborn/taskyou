@@ -698,9 +698,7 @@ A **plugin** is a self-contained directory under `~/.config/task/plugins/` with 
 
 - **workflows** (`workflows/*.yaml`) — new `ty pipeline -d <name>` definitions
 - **hooks** — scripts that fire on task events. Unlike the one-script-per-event hooks
-  dir above, any number of plugins can handle the same event and **all of them run**.
-  One of them, `task.route`, fires *before* a task spawns and lets the plugin pick
-  which Claude account it runs under — see [Routing](docs/plugins.md#routing-pre-spawn)
+  dir above, any number of plugins can handle the same event and **all of them run**
 - **actions** — user-invoked commands (`ty plugins run <plugin> <action>`)
 
 Install one — or a whole collection, since a single git repo can hold many plugins —
