@@ -429,7 +429,7 @@ Tasks will automatically reconnect to their agent sessions when viewed.`,
 	worktreeGuardCmd := &cobra.Command{
 		Use:    "worktree-guard",
 		Short:  "Evaluate the worktree write-guard for a pre-tool hook",
-		Hidden: true, // Internal use only - invoked by codex/gemini/grok/opencode hooks
+		Hidden: true, // Internal use only - invoked by codex/gemini/grok/cursor/opencode hooks
 		Run: func(cmd *cobra.Command, args []string) {
 			format, _ := cmd.Flags().GetString("format")
 			// Never block the agent on our own failure: handle errors by allowing.
@@ -438,7 +438,7 @@ Tasks will automatically reconnect to their agent sessions when viewed.`,
 			}
 		},
 	}
-	worktreeGuardCmd.Flags().String("format", "", "Output format: codex | gemini | grok | opencode")
+	worktreeGuardCmd.Flags().String("format", "", "Output format: codex | gemini | grok | cursor | opencode")
 	rootCmd.AddCommand(worktreeGuardCmd)
 
 	// MCP server subcommand - runs the workflow MCP server for a task (internal use)
@@ -900,9 +900,9 @@ Examples:
 	createCmd.Flags().String("body", "", "Task body/description (if no title, AI generates from body)")
 	createCmd.Flags().StringP("type", "t", "", "Task type: code, writing, thinking (default: code)")
 	createCmd.Flags().StringP("project", "p", "", "Project name (auto-detected from cwd if not specified)")
-	createCmd.Flags().StringP("executor", "e", "", "Task executor: claude, codex, gemini, grok, pi, opencode, openclaw (default: claude)")
+	createCmd.Flags().StringP("executor", "e", "", "Task executor: claude, codex, gemini, grok, cursor, pi, opencode, openclaw (default: claude)")
 	createCmd.Flags().String("effort", "", "Per-task Claude effort override: low, medium, high, xhigh, max (default: Claude's global default)")
-	createCmd.Flags().String("model", "", "Per-task model override: opus, sonnet, haiku, fable, or a full model ID like claude-opus-5 (default: the agent's own default). Claude and grok only")
+	createCmd.Flags().String("model", "", "Per-task model override: opus, sonnet, haiku, fable, or a full model ID like claude-opus-5 (default: the agent's own default). Claude, grok, and cursor only")
 	createCmd.Flags().BoolP("execute", "x", false, "Queue task for immediate execution")
 	createCmd.Flags().Bool("dangerous", false, "Execute in dangerous mode (alias for --permission-mode dangerous)")
 	createCmd.Flags().String("permission-mode", "", "Permission mode: default (prompt), accept-edits (auto-accept file edits), auto (Claude Code auto mode: auto-approve safe actions, block risky ones), dangerous (skip all). Defaults to the project's setting")
@@ -1928,7 +1928,7 @@ Examples:
 	updateCmd.Flags().String("body", "", "Update task body/description")
 	updateCmd.Flags().StringP("type", "t", "", "Update task type: code, writing, thinking")
 	updateCmd.Flags().StringP("project", "p", "", "Update project name")
-	updateCmd.Flags().StringP("executor", "e", "", "Update task executor: claude, codex, gemini, grok, pi, opencode, openclaw")
+	updateCmd.Flags().StringP("executor", "e", "", "Update task executor: claude, codex, gemini, grok, cursor, pi, opencode, openclaw")
 	updateCmd.Flags().String("tags", "", "Update task tags (comma-separated)")
 	updateCmd.Flags().Bool("pinned", false, "Pin or unpin the task")
 	updateCmd.RegisterFlagCompletionFunc("project", completeFlagProjects)
@@ -4967,6 +4967,8 @@ type worktreeGuardHookInput struct {
 	ToolNameCamel       string          `json:"toolName"`
 	ToolInputCamel      json.RawMessage `json:"toolInput"`
 	PermissionModeCamel string          `json:"permissionMode"`
+	// Cursor beforeShellExecution puts the command at the top level.
+	Command string `json:"command"`
 }
 
 func (in *worktreeGuardHookInput) normalize() {
@@ -4979,10 +4981,16 @@ func (in *worktreeGuardHookInput) normalize() {
 	if in.PermissionMode == "" {
 		in.PermissionMode = in.PermissionModeCamel
 	}
+	if in.ToolName == "" && in.Command != "" {
+		in.ToolName = "Bash"
+		if raw, err := json.Marshal(map[string]string{"command": in.Command}); err == nil {
+			in.ToolInput = raw
+		}
+	}
 }
 
 // handleWorktreeGuardHook is the executor-agnostic transport for the worktree
-// write-guard, shared by the codex/gemini/grok/opencode pre-tool hooks. It reads the
+// write-guard, shared by the codex/gemini/grok/cursor/opencode pre-tool hooks. It reads the
 // worktree root from WORKTREE_PATH (set by every executor when launching the CLI),
 // evaluates the single shared policy (EvaluateWorktreeWriteGuard), and renders the
 // decision in the requested executor's wire format. It fails open on any error so a
@@ -5016,7 +5024,7 @@ func handleWorktreeGuardHook(format string) error {
 }
 
 // renderWorktreeGuardDecision writes a guard decision in the wire format the given
-// executor's hook expects. None of codex/gemini/grok/opencode support an interactive
+// executor's hook expects. None of codex/gemini/grok/cursor/opencode support an interactive
 // "ask" in their pre-tool hook, so an "ask" is downgraded to a hard deny to fail
 // safe (the escape hatch is worktree.allow_external_writes in .taskyou.yml). When
 // the guard allows the call, nothing is emitted (and exit stays 0) so the CLI's own
@@ -5049,6 +5057,15 @@ func renderWorktreeGuardDecision(format string, decision *executor.WorktreeGuard
 			"decision": "deny",
 			"reason":   decision.Reason,
 		})
+	case "cursor":
+		// Cursor preToolUse / beforeShellExecution: JSON permission deny, plus
+		// exit 2 which Cursor documents as blocking the tool (Claude-compatible).
+		emitJSONLine(map[string]any{
+			"permission":    "deny",
+			"user_message":  decision.Reason,
+			"agent_message": decision.Reason,
+		})
+		os.Exit(2)
 	case "opencode":
 		// The OpenCode plugin reads the reason from stdout and treats exit code 1 as
 		// a denial (which it surfaces by throwing, aborting the tool call).
@@ -5678,12 +5695,13 @@ func getSessions() []agentSession {
 
 // getAgentMemoryByTaskID returns a map of task ID -> memory (MB) for all agent processes.
 // It identifies task IDs by examining each agent process's working directory.
-// Supports all executors: claude, codex, gemini, grok, openclaw, opencode, pi.
+// Supports all executors: claude, codex, gemini, grok, cursor, openclaw, opencode, pi.
 func getAgentMemoryByTaskID() map[int]int {
 	result := make(map[int]int)
 
-	// Find processes for all supported executors
-	executorNames := []string{"claude", "codex", "gemini", "grok", "openclaw", "opencode", "pi"}
+	// Find processes for all supported executors. "cursor-agent" is the
+	// specific binary; skip the generic "agent" name (too many false positives).
+	executorNames := []string{"claude", "codex", "gemini", "grok", "cursor-agent", "openclaw", "opencode", "pi"}
 
 	for _, executorName := range executorNames {
 		pgrepOut, err := osexec.Command("pgrep", "-f", executorName).Output()

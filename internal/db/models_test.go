@@ -52,6 +52,19 @@ func TestValidateModel(t *testing.T) {
 		{"claude alias on grok", ExecutorGrok, ModelOpus, true},
 		{"claude id on grok", ExecutorGrok, "claude-opus-5", true},
 
+		// Cursor is multi-vendor: aliases, other vendors' IDs, and any
+		// well-formed ID are accepted. Shell-unsafe names are still rejected.
+		{"cursor auto alias", ExecutorCursor, "auto", false},
+		{"cursor composer alias", ExecutorCursor, "composer-1", false},
+		{"cursor gpt-5", ExecutorCursor, "gpt-5", false},
+		{"cursor claude id", ExecutorCursor, "claude-4-sonnet", false},
+		{"cursor grok id", ExecutorCursor, "grok-4", false},
+		{"cursor unreleased id", ExecutorCursor, "composer-9", false},
+		{"cursor executor slug is not a model", ExecutorCursor, "cursor", true},
+		{"cursor typo alias", ExecutorCursor, "opuss", true},
+		{"cursor whitespace", ExecutorCursor, "gpt 5", true},
+		{"cursor shell metacharacters", ExecutorCursor, "gpt-5; rm -rf /", true},
+
 		// Executors with no --model flag: an override there is dead config.
 		{"codex takes no model", ExecutorCodex, "gpt-5-codex", true},
 		{"gemini takes no model", ExecutorGemini, "gemini-2.5-pro", true},
@@ -89,7 +102,7 @@ func TestValidateModelErrorNamesAlternatives(t *testing.T) {
 		t.Fatal("expected an error setting a model on a modelless executor")
 	}
 	// It must name the executors that DO take a model, or the user is stuck.
-	for _, want := range []string{ExecutorCodex, ExecutorClaude, ExecutorGrok} {
+	for _, want := range []string{ExecutorCodex, ExecutorClaude, ExecutorGrok, ExecutorCursor} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error %q should mention %q", err, want)
 		}
@@ -100,7 +113,7 @@ func TestValidateModelErrorNamesAlternatives(t *testing.T) {
 // Adding a --model flag to another executor must update executorModelPrefix,
 // or overrides for it stay silently ignored.
 func TestExecutorSupportsModel(t *testing.T) {
-	supported := map[string]bool{ExecutorClaude: true, ExecutorGrok: true}
+	supported := map[string]bool{ExecutorClaude: true, ExecutorGrok: true, ExecutorCursor: true}
 	for _, e := range KnownExecutors() {
 		if got := ExecutorSupportsModel(e); got != supported[e] {
 			t.Errorf("ExecutorSupportsModel(%q) = %v, want %v", e, got, supported[e])
@@ -109,8 +122,8 @@ func TestExecutorSupportsModel(t *testing.T) {
 	if !ExecutorSupportsModel("") {
 		t.Error("empty executor should resolve to the default (claude), which supports models")
 	}
-	if got := ModelCapableExecutors(); len(got) != 2 || got[0] != ExecutorClaude || got[1] != ExecutorGrok {
-		t.Errorf("ModelCapableExecutors() = %v, want [claude grok]", got)
+	if got := ModelCapableExecutors(); len(got) != 3 || got[0] != ExecutorClaude || got[1] != ExecutorGrok || got[2] != ExecutorCursor {
+		t.Errorf("ModelCapableExecutors() = %v, want [claude grok cursor]", got)
 	}
 }
 
@@ -174,7 +187,7 @@ func TestModelBackendIsCustom(t *testing.T) {
 // TestIsValidModel covers the looser executor-less form used by the new-task
 // form's remembered per-project default.
 func TestIsValidModel(t *testing.T) {
-	valid := []string{"", ModelOpus, "claude-opus-5", "grok-4"}
+	valid := []string{"", ModelOpus, "claude-opus-5", "grok-4", "gpt-5", "composer-1"}
 	for _, m := range valid {
 		if !IsValidModel(m) {
 			t.Errorf("IsValidModel(%q) = false, want true", m)
@@ -182,7 +195,7 @@ func TestIsValidModel(t *testing.T) {
 	}
 	// "claude" is the executor slug an early default baked into every row; it is
 	// not a model and must not survive as a remembered default.
-	invalid := []string{"claude", "opuss", "gpt-5"}
+	invalid := []string{"claude", "opuss", "cursor"}
 	for _, m := range invalid {
 		if IsValidModel(m) {
 			t.Errorf("IsValidModel(%q) = true, want false", m)

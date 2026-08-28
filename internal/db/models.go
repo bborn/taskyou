@@ -26,13 +26,15 @@ const (
 	ModelOpusPlan = "opusplan"
 )
 
-// executorModelPrefix maps an executor to the ID prefix its models carry. Only
-// executors listed here pass a --model flag to their CLI at all; for the rest
-// (codex, gemini, pi, opencode, openclaw) a model override is dead config —
-// the launch command never mentions it.
-var executorModelPrefix = map[string]string{
-	ExecutorClaude: "claude-",
-	ExecutorGrok:   "grok-",
+// executorModelPrefix maps an executor to the ID prefixes its models carry.
+// Only executors listed here pass a --model flag to their CLI at all; for the
+// rest (codex, gemini, pi, opencode, openclaw) a model override is dead config
+// — the launch command never mentions it. Cursor is multi-vendor, so it has
+// several prefixes rather than one.
+var executorModelPrefix = map[string][]string{
+	ExecutorClaude: {"claude-"},
+	ExecutorGrok:   {"grok-"},
+	ExecutorCursor: {"gpt-", "composer-", "claude-", "grok-", "gemini-", "sonnet-", "opus-"},
 }
 
 // executorModelAliases lists the short names an executor's CLI accepts in place
@@ -44,6 +46,9 @@ var executorModelAliases = map[string][]string{
 	// The grok CLI takes full IDs only; these are examples for help text and
 	// shell completion, not a closed set (any grok-* ID is accepted).
 	ExecutorGrok: {"grok-4", "grok-4-fast", "grok-code-fast-1"},
+	// Cursor is multi-vendor; these are examples for help text and shell
+	// completion. Any well-formed model ID is also accepted.
+	ExecutorCursor: {"auto", "composer-1", "gpt-5", "sonnet-4", "grok"},
 }
 
 // modelIDShape matches the shape of a vendor model ID: dash-separated
@@ -118,12 +123,18 @@ func ValidateModel(executor, model string) error {
 			return nil
 		}
 	}
-	prefix := executorModelPrefix[executor]
-	if strings.HasPrefix(lower, prefix) && modelIDShape.MatchString(lower) {
-		return nil
+	prefixes := executorModelPrefix[executor]
+	for _, prefix := range prefixes {
+		if strings.HasPrefix(lower, prefix) && modelIDShape.MatchString(lower) {
+			return nil
+		}
 	}
-	return fmt.Errorf("unknown %s model %q — known models: %s (or any %s* model ID)",
-		executor, model, strings.Join(ModelsForExecutor(executor), ", "), prefix)
+	prefixHint := strings.Join(prefixes, "* / ") + "*"
+	if len(prefixes) == 1 {
+		prefixHint = prefixes[0] + "*"
+	}
+	return fmt.Errorf("unknown %s model %q — known models: %s (or any %s model ID)",
+		executor, model, strings.Join(ModelsForExecutor(executor), ", "), prefixHint)
 }
 
 // ValidateTaskModel checks a task's model override against the executor that

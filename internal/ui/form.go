@@ -100,7 +100,7 @@ type FormModel struct {
 	taskType           string   // Selected kind: a task type (single task) or a workflow name.
 	typeIdx            int
 	types              []string // Unified kind list: "" (none), task types, then workflow kinds.
-	executor           string   // "claude", "codex", "gemini", "grok"
+	executor           string   // "claude", "codex", "gemini", "grok", "cursor"
 	executorIdx        int
 	executors          []string
 	availableExecutors []string // Original list of available executors (for rebuilding when project changes)

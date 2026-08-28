@@ -64,6 +64,16 @@ func TestDetectAuthPrompt(t *testing.T) {
 			content: "Sign in to Grok to continue this session.",
 			want:    true,
 		},
+		{
+			name:    "cursor agent login prompt",
+			content: "Your Cursor credentials expired.\nPlease run agent login to continue.",
+			want:    true,
+		},
+		{
+			name:    "cursor sign-in screen",
+			content: "Sign in to Cursor to continue this session.",
+			want:    true,
+		},
 	}
 
 	for _, tt := range tests {

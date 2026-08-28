@@ -33,6 +33,14 @@ import (
 //     Project hooks require folder trust; the executor launches with
 //     GROK_FOLDER_TRUST=0 so the guard actually runs in daemon-driven sessions.
 //
+//   - Cursor CLI — preToolUse + beforeShellExecution hooks
+//     (`<worktree>/.cursor/hooks.json`). Cursor's project hook file is
+//     `{version, hooks: {preToolUse: [{command}]}}` (flat command entries, not
+//     Codex's nested hooks array). Native tools include Write / StrReplace /
+//     Shell with a `path` field; ask is not supported, so ask→deny. A deny is
+//     signalled with `{permission: deny}` JSON (and exit 2 as a belt-and-braces
+//     match for Cursor's documented "exit 2 blocks" contract).
+//
 //   - OpenCode   — `tool.execute.before` plugin hook (a generated JS plugin in
 //     `<worktree>/.opencode/plugins/`). The plugin normalizes the tool call and
 //     shells back into `worktree-guard`; a non-zero exit makes it throw, which
@@ -93,6 +101,54 @@ func (e *Executor) setupGrokWorktreeGuard(workDir, projectDir string) (func(), e
 		ensureGitExclude(projectDir, ".grok")
 	}
 	return cleanup, err
+}
+
+// setupCursorWorktreeGuard writes Cursor preToolUse and beforeShellExecution
+// hooks into the worktree that enforce the write-guard. Returns a cleanup that
+// restores the prior hooks.json (or removes it if we created it).
+func (e *Executor) setupCursorWorktreeGuard(workDir, projectDir string) (func(), error) {
+	path := filepath.Join(workDir, ".cursor", "hooks.json")
+	cmd := fmt.Sprintf("%q worktree-guard --format cursor", resolveTaskBin())
+
+	existingData, existingErr := os.ReadFile(path)
+
+	cfg := map[string]any{"version": 1}
+	if existingErr == nil {
+		if err := json.Unmarshal(existingData, &cfg); err != nil {
+			cfg = map[string]any{"version": 1}
+		}
+	}
+
+	hooks, _ := cfg["hooks"].(map[string]any)
+	if hooks == nil {
+		hooks = map[string]any{}
+	}
+	entry := map[string]any{"command": cmd}
+	for _, event := range []string{"preToolUse", "beforeShellExecution"} {
+		events, _ := hooks[event].([]any)
+		hooks[event] = append(events, entry)
+	}
+	cfg["hooks"] = hooks
+
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		return nil, err
+	}
+	data, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return nil, err
+	}
+	if err := os.WriteFile(path, data, 0644); err != nil {
+		return nil, err
+	}
+
+	cleanup := func() {
+		if existingErr == nil {
+			_ = os.WriteFile(path, existingData, 0644)
+		} else {
+			_ = os.Remove(path)
+		}
+	}
+	return cleanup, nil
 }
 
 // writeMergedCommandHook appends a {"type":"command","command":cmd} hook under
