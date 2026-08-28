@@ -115,6 +115,42 @@ func TestRouteTask_ExplicitConfigDirIsNotOverridden(t *testing.T) {
 	}
 }
 
+func TestRouteTask_ProjectPinnedProfileIsNotOverridden(t *testing.T) {
+	// A project's config dir is a real choice, not a default: it carries that
+	// account's MCP connectors and their per-profile OAuth logins. Routing an
+	// influencekit task onto a personal profile wouldn't error, it would just
+	// silently run without the servers it needs.
+	e, database := newRoutingExecutor(t, "#!/bin/sh\necho CLAUDE_CONFIG_DIR=/tmp/router-choice\n")
+	if err := database.CreateProject(&db.Project{Name: "pinned", Path: "/tmp/pinned", ClaudeConfigDir: "~/.claude-work"}); err != nil {
+		t.Fatal(err)
+	}
+	task := &db.Task{Title: "t", Type: "task", Project: "pinned", Executor: db.ExecutorClaude}
+	if err := database.CreateTask(task); err != nil {
+		t.Fatal(err)
+	}
+
+	if ok := e.routeTask(context.Background(), task, true); !ok {
+		t.Fatal("routeTask returned false")
+	}
+	if task.ClaudeConfigDir != "" {
+		t.Errorf("router overrode a project-pinned profile: %q", task.ClaudeConfigDir)
+	}
+}
+
+func TestRouteTask_UnpinnedProjectStillRoutes(t *testing.T) {
+	// The flip side: pinning is opt-out, so a project that hasn't chosen still
+	// gets routed. Otherwise the fix above would quietly disable the feature.
+	e, database := newRoutingExecutor(t, "#!/bin/sh\necho CLAUDE_CONFIG_DIR=/tmp/router-choice\n")
+	task := newRoutingTask(t, database, db.ExecutorClaude) // project "test", no config dir
+
+	if ok := e.routeTask(context.Background(), task, true); !ok {
+		t.Fatal("routeTask returned false")
+	}
+	if task.ClaudeConfigDir != "/tmp/router-choice" {
+		t.Errorf("unpinned project was not routed: %q", task.ClaudeConfigDir)
+	}
+}
+
 func TestRouteTask_ResumedTaskStaysOnItsProfile(t *testing.T) {
 	// Session affinity, and it is not optional: a Claude session lives inside
 	// one config dir, so a task resumed under a different profile would find no

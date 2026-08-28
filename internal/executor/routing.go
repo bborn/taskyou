@@ -54,6 +54,16 @@ func (e *Executor) routeTask(ctx context.Context, task *db.Task, allowHold bool)
 	if strings.TrimSpace(task.ClaudeConfigDir) != "" {
 		return true
 	}
+	// A project that names its own config dir has already chosen a profile, and
+	// that choice is load-bearing: a config dir carries the account's MCP
+	// connectors and their OAuth logins, which are per-profile and cannot be
+	// shared. Routing an influencekit task onto a personal profile doesn't error
+	// — it silently runs without the Linear/InfluenceKit servers it needs, and
+	// the agent works around the gap. So pinning a project is also how you opt it
+	// out of routing.
+	if project := e.projectConfigDir(task.Project); project != "" {
+		return true
+	}
 	if !e.hooks.HandlesRoute() {
 		return true
 	}
@@ -110,4 +120,18 @@ func (e *Executor) noteRouteHold(task *db.Task, decision hooks.RouteDecision) {
 	}
 	routeHoldLog.Store(task.ID, reason)
 	e.logLine(task.ID, "system", fmt.Sprintf("Waiting to start — %s (plugin %q). Will retry automatically.", reason, decision.Plugin))
+}
+
+// projectConfigDir returns the config dir a project pins, or "" when it uses the
+// default. Errors read as "not pinned": the caller's next step is to route, and
+// a DB hiccup shouldn't be the thing that decides a profile.
+func (e *Executor) projectConfigDir(project string) string {
+	if project == "" {
+		return ""
+	}
+	p, err := e.db.GetProjectByName(project)
+	if err != nil || p == nil {
+		return ""
+	}
+	return strings.TrimSpace(p.ClaudeConfigDir)
 }
