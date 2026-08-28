@@ -146,9 +146,45 @@ system. The ones dispatched today:
 | `task.blocked` | Task needs input |
 | `task.failed` | Agent execution failed |
 | `task.auth_required` | Executor session needs re-authentication |
+| `task.route` | **Before** a task spawns — the one event you *answer*. See [Routing](#routing-pre-spawn) |
 
 A plugin may declare any event string; it only runs for events TaskYou actually
 emits, so unknown events are harmless.
+
+## Routing (pre-spawn)
+
+Every other hook is a notification — it fires after the fact and nothing waits for
+it. `task.route` fires *before* a task spawns, TaskYou waits for it, and reads the
+script's **stdout back as a decision**. Stdout is the decision channel; put
+diagnostics on stderr.
+
+```sh
+#!/bin/sh
+echo "CLAUDE_CONFIG_DIR=$HOME/.claude-work"   # run this task under that profile
+echo "REASON=7% of its limits used"           # optional, for the task log
+```
+
+| Key | Effect |
+|-----|--------|
+| `CLAUDE_CONFIG_DIR` | Run the task under that Claude profile (config dir) |
+| `HOLD=1` | Don't start yet; leave it queued and reconsider next tick |
+| `REASON=…` | Free text for the task log |
+
+Unrecognized lines are ignored. Timeout is 15s. Plugins are consulted in name
+order and the first non-empty decision wins.
+
+Failing is safe: no router, a script that errors or prints nothing, or a timeout
+all spawn the task exactly as it would have. A config dir already set by hand or
+by a workflow step is never overruled, and a routed task keeps its profile on
+resume (its Claude session lives in that config dir). `HOLD` leaves a task
+**queued**, never blocked, and is ignored for a manually started task. Only
+Claude tasks are routed — `CLAUDE_CONFIG_DIR` means nothing to the other
+executors.
+
+Routing hooks also get `TASK_EXECUTOR` and `TASK_CLAUDE_CONFIG_DIR`.
+
+Worked example: **claude-profile-router** in the
+[community collection](https://github.com/taskyou/plugins).
 
 ## Environment
 
