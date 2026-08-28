@@ -157,6 +157,29 @@ func TestRouteTask_NonClaudeExecutorIsUntouched(t *testing.T) {
 	}
 }
 
+func TestRouteTask_EveryNonClaudeExecutorIsUntouched(t *testing.T) {
+	// The guard is an allowlist (claude only), not a denylist, so an executor
+	// added later is skipped without anyone remembering to update routing. This
+	// walks the full set so that stays true rather than being merely intended —
+	// grok and cursor both landed after this guard was written.
+	for _, name := range []string{
+		db.ExecutorCodex, db.ExecutorGemini, db.ExecutorGrok, db.ExecutorCursor,
+		db.ExecutorOpenClaw, db.ExecutorOpenCode, db.ExecutorPi,
+	} {
+		t.Run(name, func(t *testing.T) {
+			e, database := newRoutingExecutor(t, "#!/bin/sh\necho CLAUDE_CONFIG_DIR=/tmp/nope\n")
+			task := newRoutingTask(t, database, name)
+
+			if ok := e.routeTask(context.Background(), task, true); !ok {
+				t.Fatal("routeTask returned false")
+			}
+			if task.ClaudeConfigDir != "" {
+				t.Errorf("%s task was routed: %q", name, task.ClaudeConfigDir)
+			}
+		})
+	}
+}
+
 func TestRouteTask_HoldKeepsTaskQueued(t *testing.T) {
 	e, database := newRoutingExecutor(t, "#!/bin/sh\necho HOLD=1\necho 'REASON=every profile above 90%'\n")
 	task := newRoutingTask(t, database, db.ExecutorClaude)
