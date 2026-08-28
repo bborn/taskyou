@@ -29,3 +29,15 @@ Task executors live in `internal/executor` and implement the `TaskExecutor` inte
 The Gemini executor follows the same pattern as Codex: it starts a fresh CLI process for every run and replays the full prompt with appended feedback during retries. Gemini's dangerous-mode flag defaults to `--dangerously-allow-run` but can be overridden via the `GEMINI_DANGEROUS_ARGS` environment variable if Google updates the CLI syntax.
 
 Review `internal/executor/gemini_executor.go` for a reference implementation that satisfies all of the above requirements.
+
+## Grok CLI Notes
+
+The Grok executor launches the interactive TUI (`grok "prompt"`) inside tmux, the same pattern as Gemini. Dangerous mode maps to `--always-approve` (overridable via `GROK_DANGEROUS_ARGS`). Other permission modes pass through as `--permission-mode acceptEdits|auto`. Per-task `--effort` and `--model` match Claude. Session resume uses `--resume <session-id>`; Grok stores sessions under `~/.grok/sessions/<urlencoded-cwd>/<id>/`. Do **not** pass Grok's own `--worktree` flag — Task You already isolates each task in a git worktree. Project-local PreToolUse hooks (the write-guard) require folder trust, so the executor sets `GROK_FOLDER_TRUST=0` when launching. The taskyou MCP stdio server is written to `<worktree>/.grok/config.toml` (`mcp_servers.taskyou` → `ty mcp-server --task-id`), because Grok has no `--mcp-config` flag.
+
+Review `internal/executor/grok_executor.go` for the implementation.
+
+## Cursor CLI Notes
+
+The Cursor executor launches the interactive Agent CLI (`agent "prompt"`, or `cursor-agent` when that binary is on PATH) inside tmux. Dangerous mode maps to `--force` (overridable via `CURSOR_DANGEROUS_ARGS`; `--yolo` is an alias). Cursor has no Claude-style `--permission-mode`, so accept-edits/auto launch without extra flags. Per-task `--model` is supported (Cursor is multi-vendor, so any well-formed model ID is accepted). Session resume uses `--resume <chat-id>`; Cursor stores CLI chats under `~/.cursor/chats/<md5-cwd>/<id>/`. `--approve-mcps` is always passed so the worktree-local taskyou MCP server is not blocked on a TUI prompt. Do **not** pass Cursor's own `--worktree` flag — Task You already isolates each task in a git worktree. The taskyou MCP stdio server is merged into `<worktree>/.cursor/mcp.json` (`mcpServers.taskyou` → `ty mcp-server --task-id`), because Cursor has no `--mcp-config` flag. The write-guard is wired via `<worktree>/.cursor/hooks.json` (`preToolUse` and `beforeShellExecution`).
+
+Review `internal/executor/cursor_executor.go` for the implementation.

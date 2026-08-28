@@ -258,6 +258,16 @@ export function DetailView({ taskId }: { taskId: number }) {
           Status
         </Button>
       </div>
+      {task.stand && (
+        <div
+          className={`shrink-0 truncate border-b bg-surface-1 px-4 py-1.5 text-[12.5px] ${
+            blocked ? "text-status-blocked" : "text-muted-foreground"
+          }`}
+          title={task.stand}
+        >
+          {task.stand}
+        </div>
+      )}
 
       <div ref={splitRef} className="flex min-h-0 flex-1 flex-col">
         <div className="min-h-[140px] flex-1 overflow-y-auto px-5 py-3.5 select-text">
@@ -267,7 +277,7 @@ export function DetailView({ taskId }: { taskId: number }) {
             <span className="text-xs text-muted-foreground">No description</span>
           )}
 
-          {task.summary && (
+          {task.summary && !task.stand && (
             <>
               <SectionTitle>Summary</SectionTitle>
               <Markdown source={task.summary} />

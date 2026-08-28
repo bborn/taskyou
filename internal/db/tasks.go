@@ -19,7 +19,7 @@ type Task struct {
 	Status          string
 	Type            string
 	Project         string
-	Executor        string // Task executor: "claude" (default), "codex", "gemini"
+	Executor        string // Task executor: "claude" (default), "codex", "gemini", "grok", "cursor"
 	EffortLevel     string // Per-task Claude effort override ("" = use global/Claude default; otherwise low/medium/high/xhigh/max)
 	Model           string // Per-task Claude model override ("" = use global/Claude default; otherwise an alias like opus/sonnet/haiku or a full model name)
 	ClaudeConfigDir string // Per-task CLAUDE_CONFIG_DIR override ("" = use the project's/default config dir). Lets a single step route through a different Claude config (e.g. an ollama-backed one) without changing the project.
@@ -208,10 +208,36 @@ const (
 	ExecutorClaude   = "claude"   // Claude Code CLI (default)
 	ExecutorCodex    = "codex"    // OpenAI Codex CLI
 	ExecutorGemini   = "gemini"   // Google Gemini CLI
+	ExecutorGrok     = "grok"     // Grok CLI (https://x.ai/cli)
+	ExecutorCursor   = "cursor"   // Cursor CLI (https://cursor.com/docs/cli)
 	ExecutorOpenClaw = "openclaw" // OpenClaw AI assistant (https://openclaw.ai)
 	ExecutorOpenCode = "opencode" // OpenCode AI assistant (https://opencode.ai)
 	ExecutorPi       = "pi"       // Pi coding agent (https://github.com/mariozechner/pi-coding-agent)
 )
+
+// KnownExecutors returns the built-in executor slugs in display order.
+func KnownExecutors() []string {
+	return []string{
+		ExecutorClaude,
+		ExecutorCodex,
+		ExecutorGemini,
+		ExecutorGrok,
+		ExecutorCursor,
+		ExecutorPi,
+		ExecutorOpenCode,
+		ExecutorOpenClaw,
+	}
+}
+
+// IsKnownExecutor reports whether name is a built-in executor slug.
+func IsKnownExecutor(name string) bool {
+	for _, e := range KnownExecutors() {
+		if e == name {
+			return true
+		}
+	}
+	return false
+}
 
 // DefaultExecutor returns the default executor if none is specified.
 func DefaultExecutor() string {
@@ -261,33 +287,7 @@ func (t *Task) EnvMap() map[string]string {
 	return out
 }
 
-// Model overrides are per-task selections for Claude's model (claude --model).
-// An empty value means "no override" — the task uses Claude's global default,
-// leaving the user's global setting untouched. The aliases below are accepted by
-// the Claude CLI's --model flag; a full model name (e.g. "claude-opus-4-8") is
-// also valid and passed through unchanged.
-const (
-	ModelFable  = "fable"
-	ModelOpus   = "opus"
-	ModelSonnet = "sonnet"
-	ModelHaiku  = "haiku"
-)
-
-// ModelOptions returns the per-task model override aliases offered in the UI.
-// The Claude CLI also accepts full model names, so this is a convenience list,
-// not an exhaustive set. Keep it in sync with the aliases the Claude CLI supports
-// as new models ship (e.g. "fable" was added alongside opus/sonnet/haiku).
-func ModelOptions() []string {
-	return []string{ModelOpus, ModelSonnet, ModelHaiku, ModelFable}
-}
-
-// IsValidModel reports whether s is an acceptable per-task model override. The
-// empty string is valid and means "use the global/Claude default" (no per-task
-// override). Any non-empty value is accepted because the Claude CLI validates
-// the model name itself and supports both aliases and full model IDs.
-func IsValidModel(s string) bool {
-	return true
-}
+// Per-task model overrides (constants, options and validation) live in models.go.
 
 // Port allocation constants
 const (

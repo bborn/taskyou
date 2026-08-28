@@ -31,6 +31,7 @@ export interface Task {
   pr_number?: number;
   pr?: PRStatus;
   summary?: string;
+  stand?: string;
   created_at: string;
   updated_at: string;
   started_at?: string;

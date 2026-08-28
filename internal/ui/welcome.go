@@ -67,7 +67,7 @@ func missingPrereqNotices(tmuxFound bool, agents []string) []string {
 // (the labels alone don't say "picks a folder" vs "no setup needed").
 func welcomeChoiceHint(cursor int) string {
 	if cursor == 0 {
-		return "Point TaskYou at a folder — tasks run against that codebase"
+		return "Point at a folder, or paste a GitHub URL to clone the repo first"
 	}
 	return "Start a task now in your personal space — no project setup"
 }

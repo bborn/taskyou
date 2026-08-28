@@ -9,7 +9,7 @@ Guide for AI agents working in this repository.
 This is **Task You** - a personal task management system with:
 - **SQLite storage** for tasks and projects
 - **SSH-accessible TUI** via Wish
-- **Background executor** with support for multiple AI coding agents (Claude, Codex, Gemini, Pi, OpenClaw, OpenCode)
+- **Background executor** with support for multiple AI coding agents (Claude, Codex, Gemini, Grok, Cursor, Pi, OpenClaw, OpenCode)
 - **Beautiful terminal UI** built with Charm libraries (Kanban board)
 - **Git worktree isolation** for parallel task execution
 - **Task lifecycle hooks** for real-time task state tracking
@@ -303,6 +303,8 @@ TaskYou supports multiple AI coding agent backends:
 - **claude** (default) - Claude Code CLI with hooks and session resume
 - **codex** - OpenAI Codex CLI with dangerous mode support
 - **gemini** - Google Gemini CLI with configurable dangerous mode flags
+- **grok** - Grok CLI with session resume and `--always-approve` dangerous mode
+- **cursor** - Cursor Agent CLI with session resume and `--force` dangerous mode
 - **pi** - Pi coding agent with session continuity
 - **openclaw** - OpenClaw AI assistant
 - **opencode** - OpenCode AI assistant
@@ -432,6 +434,8 @@ wish.WithPublicKeyAuth(func(ctx ssh.Context, key ssh.PublicKey) bool {
 | `WORKTREE_DANGEROUS_MODE` | Skip Claude permissions | - |
 | `WORKTREE_CWD` | Working directory for project detection | - |
 | `GEMINI_DANGEROUS_ARGS` | Overrides the Gemini CLI flags used when dangerous mode is enabled | `--dangerously-allow-run` |
+| `GROK_DANGEROUS_ARGS` | Overrides the Grok CLI flags used when dangerous mode is enabled | `--always-approve` |
+| `CURSOR_DANGEROUS_ARGS` | Overrides the Cursor CLI flags used when dangerous mode is enabled | `--force` |
 
 Set `TASK_EXECUTOR` before launching `task -l`/`task daemon` to change the executor label shown in the UI (e.g., `TASK_EXECUTOR=codex`). For compatibility, `WORKFLOW_EXECUTOR`, `TASKYOU_EXECUTOR`, and `WORKTREE_EXECUTOR` are also recognized.
 

@@ -37,6 +37,22 @@ func TestSetupWorktreeGuardHooks(t *testing.T) {
 			jsonHook:   true,
 		},
 		{
+			name:       "grok",
+			setup:      func(e *Executor, wd string) (func(), error) { return e.setupGrokWorktreeGuard(wd, "") },
+			relPath:    ".grok/hooks/taskyou-worktree-guard.json",
+			wantEvent:  "PreToolUse",
+			wantFormat: "grok",
+			jsonHook:   true,
+		},
+		{
+			name:       "cursor",
+			setup:      func(e *Executor, wd string) (func(), error) { return e.setupCursorWorktreeGuard(wd, "") },
+			relPath:    ".cursor/hooks.json",
+			wantEvent:  "preToolUse",
+			wantFormat: "cursor",
+			jsonHook:   false,
+		},
+		{
 			name:       "opencode",
 			setup:      func(e *Executor, wd string) (func(), error) { return e.setupOpenCodeWorktreeGuard(wd, "") },
 			relPath:    ".opencode/plugins/taskyou-worktree-guard.js",
@@ -69,6 +85,14 @@ func TestSetupWorktreeGuardHooks(t *testing.T) {
 				command := jsonHookCommand(t, data, c.wantEvent)
 				if !strings.Contains(command, "worktree-guard --format "+c.wantFormat) {
 					t.Errorf("hook command = %q, want it to invoke worktree-guard --format %s", command, c.wantFormat)
+				}
+			} else if c.name == "cursor" {
+				body := string(data)
+				if !strings.Contains(body, `"preToolUse"`) || !strings.Contains(body, `"beforeShellExecution"`) {
+					t.Errorf("cursor hooks.json missing preToolUse/beforeShellExecution:\n%s", body)
+				}
+				if !strings.Contains(body, "worktree-guard --format cursor") {
+					t.Errorf("cursor hooks.json must invoke worktree-guard --format cursor:\n%s", body)
 				}
 			} else {
 				// OpenCode plugin: must register the tool.execute.before hook.

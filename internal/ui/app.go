@@ -54,6 +54,7 @@ const (
 	ViewFolderPicker         // fuzzy folder picker for "set up a project"
 	ViewRoutines             // global routines fleet-health view
 	ViewActionPicker         // modal list of plugin actions for the current task
+	ViewRepoClone            // clone a pasted repo URL, then continue as a folder
 )
 
 // KeyMap defines key bindings.
@@ -381,8 +382,6 @@ type AppModel struct {
 	notification string    // Notification banner text
 	notifyUntil  time.Time // When to hide notification
 	notifyTaskID int64     // Task ID that triggered the notification (for jumping to it)
-	lastViewedAt map[int64]time.Time
-
 	// Track task statuses to detect changes
 	prevStatuses map[int64]string
 	// Track tasks with active input notifications (for UI highlighting)
@@ -442,6 +441,7 @@ type AppModel struct {
 	// First-run onboarding views
 	welcomeView  *WelcomeModel
 	folderPicker *FolderPickerModel
+	repoClone    *RepoCloneModel
 
 	// Delete confirmation state
 	deleteConfirm      *huh.Form
@@ -490,10 +490,6 @@ type AppModel struct {
 	// AI command service for natural language command interpretation
 	aiCommandService *ai.CommandService
 
-	// liveSpinnerRunning guards the live-mode spinner animation loop so only one
-	// tick chain runs at a time.
-	liveSpinnerRunning bool
-
 	// Filter state
 	filterInput        textinput.Model
 	filterActive       bool   // Whether filter mode is active (typing in filter)
@@ -533,6 +529,10 @@ func taskExecutorDisplayName(task *db.Task) string {
 		return "Claude"
 	case db.ExecutorGemini:
 		return "Gemini"
+	case db.ExecutorGrok:
+		return "Grok"
+	case db.ExecutorCursor:
+		return "Cursor"
 	case db.ExecutorOpenClaw:
 		return "OpenClaw"
 	default:
@@ -642,7 +642,6 @@ func NewAppModel(database *db.DB, exec *executor.Executor, workingDir string, ve
 		prevStatuses:       make(map[int64]string),
 		tasksNeedingInput:  make(map[int64]bool),
 		questionPrompts:    make(map[int64]bool),
-		lastViewedAt:       make(map[int64]time.Time),
 		executorPrompts:    make(map[int64]string),
 		userClosedTaskIDs:  make(map[int64]bool),
 		watcher:            watcher,
@@ -725,7 +724,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// the chain breaks permanently — polling stops, DB watcher stops, etc.
 	isSystemMsg := false
 	switch msg.(type) {
-	case tickMsg, focusTickMsg, dbChangeMsg, taskEventMsg, tasksLoadedMsg, prRefreshTickMsg, liveSpinnerTickMsg:
+	case tickMsg, focusTickMsg, dbChangeMsg, taskEventMsg, tasksLoadedMsg, prRefreshTickMsg:
 		isSystemMsg = true
 	case actionFinishedMsg:
 		// A plugin action completed off the UI loop; its result must reach the
@@ -762,6 +761,12 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if picked, ok := msg.(folderPickedMsg); ok {
 				return m.handleFolderPicked(picked.path)
 			}
+			if req, ok := msg.(repoRequestedMsg); ok {
+				m.folderPicker = nil
+				m.repoClone = NewRepoCloneModel(req.ref, m.width, m.height)
+				m.currentView = ViewRepoClone
+				return m, m.repoClone.Init()
+			}
 			if key, ok := msg.(tea.KeyMsg); ok && (key.String() == "esc" || key.String() == "ctrl+c") {
 				m.folderPicker = nil
 				m.welcomeView = NewWelcomeModel(m.width, m.height, m.availableExecutors, tmuxAvailable())
@@ -770,6 +775,29 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			var cmd tea.Cmd
 			m.folderPicker, cmd = m.folderPicker.Update(msg)
+			return m, cmd
+		}
+		// Repo clone: same deal as the folder picker — every message reaches it
+		// so the destination input and the clone spinner stay live. It hands
+		// back a local path (repoClonedMsg), which rejoins the folder-picked
+		// path so project creation isn't forked.
+		if m.currentView == ViewRepoClone && m.repoClone != nil {
+			if done, ok := msg.(repoClonedMsg); ok {
+				m.repoClone = nil
+				return m.handleFolderPicked(done.path)
+			}
+			if key, ok := msg.(tea.KeyMsg); ok && (key.String() == "esc" || key.String() == "ctrl+c") {
+				// esc stops a running clone first; a second esc goes back.
+				if m.repoClone.Cancel() {
+					return m, nil
+				}
+				m.repoClone = nil
+				m.folderPicker = NewFolderPickerModel(m.width, m.height)
+				m.currentView = ViewFolderPicker
+				return m, m.folderPicker.Init()
+			}
+			var cmd tea.Cmd
+			m.repoClone, cmd = m.repoClone.Update(msg)
 			return m, cmd
 		}
 		if m.currentView == ViewDeleteConfirm && m.deleteConfirm != nil {
@@ -1070,8 +1098,6 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					break
 				}
 			}
-			lastViewed, hasLast := m.lastViewedAt[msg.task.ID]
-			m.lastViewedAt[msg.task.ID] = now
 			// Clean up any duplicate tmux windows for this task before switching
 			m.executor.CleanupDuplicateWindows(msg.task.ID)
 			// Resume task if it was suspended (blocked idle tasks get suspended to save memory)
@@ -1108,9 +1134,11 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if relatedCmd := m.detailView.StartRelatedTasksLoad(); relatedCmd != nil {
 				cmds = append(cmds, relatedCmd)
 			}
-			if hasLast && now.Sub(lastViewed) > summaryRefreshAfter {
-				m.notification = fmt.Sprintf("%s Refreshing activity summary...", IconInProgress())
-				m.notifyUntil = time.Now().Add(5 * time.Second)
+			var latest *db.TaskLog
+			if m.kanban != nil && m.kanban.latestActivity != nil {
+				latest = m.kanban.latestActivity[msg.task.ID]
+			}
+			if tasksummary.NeedsRefresh(msg.task, latest) {
 				cmds = append(cmds, m.summarizeTask(msg.task.ID, true))
 			}
 		} else {
@@ -1318,7 +1346,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.notifyUntil = time.Now().Add(5 * time.Second)
 		} else {
-			m.notification = fmt.Sprintf("%s Activity summary updated", IconDone())
+			m.notification = fmt.Sprintf("%s Stand updated", IconDone())
 			m.notifyUntil = time.Now().Add(3 * time.Second)
 		}
 		if m.selectedTask != nil && m.selectedTask.ID == msg.taskID {
@@ -1432,9 +1460,6 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		// Refresh detail view if active (for logs which may update frequently)
 		if m.currentView == ViewDetail && m.detailView != nil {
-			if m.selectedTask != nil {
-				m.lastViewedAt[m.selectedTask.ID] = time.Time(msg)
-			}
 			if cmd := m.detailView.Refresh(); cmd != nil {
 				cmds = append(cmds, cmd)
 			}
@@ -1449,21 +1474,8 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				running[m.selectedTask.ID] = true
 			}
 			m.kanban.SetRunningProcesses(running)
-			// Resume the live-mode spinner if work appeared while it was idle.
-			cmds = append(cmds, m.startLiveSpinner())
 		}
 		cmds = append(cmds, m.tick())
-
-	case liveSpinnerTickMsg:
-		// Advance the running-task spinner and reschedule while the board is
-		// visible and has work to animate. When no tasks are running, the chain
-		// stops; the 1s tick restarts it once running tasks reappear.
-		if m.currentView == ViewDashboard && m.kanban.RunningTaskCount() > 0 {
-			m.kanban.AdvanceSpinner()
-			cmds = append(cmds, m.liveSpinnerTick())
-		} else {
-			m.liveSpinnerRunning = false
-		}
 
 	case focusTickMsg:
 		// Fast tick for responsive focus state changes in detail view
@@ -1548,6 +1560,9 @@ func (m *AppModel) applyWindowSize(width, height int) {
 	if m.folderPicker != nil {
 		m.folderPicker.SetSize(m.width, m.height)
 	}
+	if m.repoClone != nil {
+		m.repoClone.SetSize(m.width, m.height)
+	}
 }
 
 // View renders the current view.
@@ -1593,6 +1608,10 @@ func (m *AppModel) View() string {
 	case ViewFolderPicker:
 		if m.folderPicker != nil {
 			return m.folderPicker.View()
+		}
+	case ViewRepoClone:
+		if m.repoClone != nil {
+			return m.repoClone.View()
 		}
 	case ViewDeleteConfirm:
 		return m.viewDeleteConfirm()
@@ -1819,7 +1838,7 @@ func (m *AppModel) renderWelcomeMessage(height int) string {
 		warningStyle := lipgloss.NewStyle().
 			Foreground(ColorWarning)
 		lines = append(lines, warningStyle.Render(IconBlocked()+" No AI executor found"))
-		lines = append(lines, descStyle.Render("   Install one: claude, codex, or gemini"))
+		lines = append(lines, descStyle.Render("   Install one: claude, codex, gemini, grok, or cursor"))
 	} else {
 		readyStyle := lipgloss.NewStyle().
 			Foreground(ColorDone)
@@ -3150,6 +3169,7 @@ func (m *AppModel) onlyPersonalProject() bool {
 // confirm card used for auto-detected projects. Metadata inference runs
 // asynchronously (see showProjectDetectConfirm) so the card appears instantly.
 func (m *AppModel) handleFolderPicked(path string) (tea.Model, tea.Cmd) {
+	m.repoClone = nil
 	if proj, err := m.db.GetProjectByPath(path); err == nil && proj != nil {
 		m.folderPicker = nil
 		m.notification = fmt.Sprintf("%s \"%s\" already covers that folder", IconDone(), proj.Name)
@@ -3819,11 +3839,16 @@ func (m *AppModel) changeTaskStatus(id int64, status string) tea.Cmd {
 		// Just set the requested status directly. Don't auto-queue to avoid
 		// restarting the executor. Users can explicitly retry/requeue if they
 		// want to restart execution.
+		oldStatus := ""
+		if existing, _ := database.GetTask(id); existing != nil {
+			oldStatus = existing.Status
+		}
 		err := database.UpdateTaskStatus(id, status)
 		if err == nil {
 			if task, _ := database.GetTask(id); task != nil {
 				exec.NotifyTaskChange("status_changed", task)
 			}
+			tasksummary.KickoffOnStatusChange(database, oldStatus, status, id)
 		}
 		return taskStatusChangedMsg{err: err}
 	}
@@ -4195,9 +4220,6 @@ type focusTickMsg time.Time
 
 type prRefreshTickMsg time.Time
 
-// liveSpinnerTickMsg drives the running-task spinner animation on the board.
-type liveSpinnerTickMsg time.Time
-
 type dbChangeMsg struct{}
 
 type prInfoMsg struct {
@@ -4220,8 +4242,6 @@ const maxDoneTasksInKanban = 20
 // pulls from the database to surface older/done tasks not loaded on the board.
 // Matches the command palette's SearchTasks limit for consistency.
 const boardFilterDBSearchLimit = 100
-
-const summaryRefreshAfter = 5 * time.Minute
 
 // refreshLatestActivity loads the most recent log line for each active task and
 // feeds it to the board for the per-card activity sub-line.
@@ -4992,27 +5012,6 @@ func (m *AppModel) prRefreshTick() tea.Cmd {
 	return tea.Tick(4*time.Minute, func(t time.Time) tea.Msg {
 		return prRefreshTickMsg(t)
 	})
-}
-
-// liveSpinnerTick schedules the next frame of the live-mode spinner animation.
-func (m *AppModel) liveSpinnerTick() tea.Cmd {
-	return tea.Tick(200*time.Millisecond, func(t time.Time) tea.Msg {
-		return liveSpinnerTickMsg(t)
-	})
-}
-
-// startLiveSpinner kicks off the spinner animation loop if it isn't already
-// running and there is running work to animate. Returns nil if no tick is
-// needed, so callers can append it unconditionally.
-func (m *AppModel) startLiveSpinner() tea.Cmd {
-	if m.liveSpinnerRunning {
-		return nil
-	}
-	if m.kanban.RunningTaskCount() == 0 {
-		return nil
-	}
-	m.liveSpinnerRunning = true
-	return m.liveSpinnerTick()
 }
 
 // checkVersion fetches the latest release from GitHub and compares with current version.

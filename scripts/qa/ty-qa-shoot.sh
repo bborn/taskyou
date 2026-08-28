@@ -15,6 +15,9 @@
 #               "Sleep 5s"  "Enter"  'Type "ty"'  "Sleep 2s"
 #               (when omitted, the script waits 6s and screenshots)
 #
+#   TY_QA_SHOT_ENV="VAR1 VAR2" forwards those vars into the VHS terminal — for a
+#   scenario that must not touch the real machine (e.g. HOME).
+#
 # Examples:
 #   ty-qa-shoot.sh "$TY_QA_PROJECTS/demo" /tmp/card.png "Sleep 9s"   # git-repo card (waits for claude -p inference)
 #   ty-qa-shoot.sh /tmp/plain /tmp/welcome.png "Sleep 5s"            # welcome fork
@@ -63,6 +66,13 @@ GIF="${OUT%.png}.gif"
   if [ -n "${TY_ROUTINES_LAUNCHD_DIR:-}" ]; then
     echo "Env TY_ROUTINES_LAUNCHD_DIR \"$TY_ROUTINES_LAUNCHD_DIR\""
   fi
+  # Anything else the scenario needs inside the headless terminal. VHS inherits
+  # the caller's environment, so a shot that must not touch the real machine
+  # (e.g. one that clones into $HOME/Projects) names the vars to override here:
+  #   TY_QA_SHOT_ENV="HOME" HOME=/tmp/ty-qa/home ty-qa-shoot.sh …
+  for var in ${TY_QA_SHOT_ENV:-}; do
+    echo "Env $var \"${!var}\""
+  done
   echo 'Hide'
   if [ -n "${TY_QA_SHOT_KEEP_DB:-}" ]; then
     # Keep the (seeded) DB — for board/detail shots with data.

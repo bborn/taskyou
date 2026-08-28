@@ -99,7 +99,7 @@ Queue a task for execution:
 ty execute <id>
 ```
 
-The executor (Claude Code, Codex, or Gemini) runs in an isolated git worktree. Monitor progress:
+The executor (Claude Code, Codex, Gemini, or Grok) runs in an isolated git worktree. Monitor progress:
 
 ```bash
 ty show <id> --json --logs

@@ -3,6 +3,7 @@ package ui
 import (
 	"strings"
 	"testing"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -1599,3 +1600,46 @@ func TestUnfocusedSelectorEmptyOptionShowsNone(t *testing.T) {
 }
 
 func dummyStyle() lipgloss.Style { return lipgloss.NewStyle() }
+
+func letterKey(r rune) tea.KeyMsg {
+	return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}}
+}
+
+func TestExecutorTypeToSelectAccumulatesPrefix(t *testing.T) {
+	m := NewFormModel(nil, 100, 50, "", []string{"claude", "codex", "gemini", "grok", "opencode", "pi"})
+	m.showAdvanced = true
+	m.focused = FieldExecutor
+	m.executors = []string{"claude", "codex", "gemini", "grok", "opencode", "pi"}
+	m.executorIdx = 0
+	m.executor = "claude"
+
+	m.Update(letterKey('g'))
+	if m.executor != "gemini" {
+		t.Fatalf("first 'g' should land on gemini (first g* name), got %q", m.executor)
+	}
+
+	m.Update(letterKey('r'))
+	if m.executor != "grok" {
+		t.Fatalf("'g' then 'r' should select grok, got %q", m.executor)
+	}
+}
+
+func TestExecutorTypeToSelectTimeoutStartsNewQuery(t *testing.T) {
+	m := NewFormModel(nil, 100, 50, "", []string{"claude", "codex", "gemini", "grok"})
+	m.showAdvanced = true
+	m.focused = FieldExecutor
+	m.executors = []string{"claude", "codex", "gemini", "grok"}
+	m.executorIdx = 0
+	m.executor = "claude"
+
+	m.Update(letterKey('g'))
+	if m.executor != "gemini" {
+		t.Fatalf("got %q, want gemini", m.executor)
+	}
+
+	m.selectorJumpAt = time.Now().Add(-2 * selectorJumpTTL)
+	m.Update(letterKey('r'))
+	if m.executor != "gemini" {
+		t.Fatalf("after timeout, 'r' is a new query and should not match grok; stayed %q, want gemini", m.executor)
+	}
+}

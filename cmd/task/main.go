@@ -429,7 +429,7 @@ Tasks will automatically reconnect to their agent sessions when viewed.`,
 	worktreeGuardCmd := &cobra.Command{
 		Use:    "worktree-guard",
 		Short:  "Evaluate the worktree write-guard for a pre-tool hook",
-		Hidden: true, // Internal use only - invoked by codex/gemini/opencode hooks
+		Hidden: true, // Internal use only - invoked by codex/gemini/grok/cursor/opencode hooks
 		Run: func(cmd *cobra.Command, args []string) {
 			format, _ := cmd.Flags().GetString("format")
 			// Never block the agent on our own failure: handle errors by allowing.
@@ -438,7 +438,7 @@ Tasks will automatically reconnect to their agent sessions when viewed.`,
 			}
 		},
 	}
-	worktreeGuardCmd.Flags().String("format", "", "Output format: codex | gemini | opencode")
+	worktreeGuardCmd.Flags().String("format", "", "Output format: codex | gemini | grok | cursor | opencode")
 	rootCmd.AddCommand(worktreeGuardCmd)
 
 	// MCP server subcommand - runs the workflow MCP server for a task (internal use)
@@ -763,19 +763,9 @@ Examples:
 			}
 
 			// Validate executor if provided
-			validExecutors := []string{db.ExecutorClaude, db.ExecutorCodex, db.ExecutorGemini, db.ExecutorPi, db.ExecutorOpenCode, db.ExecutorOpenClaw}
-			if taskExecutor != "" {
-				validExecutor := false
-				for _, e := range validExecutors {
-					if e == taskExecutor {
-						validExecutor = true
-						break
-					}
-				}
-				if !validExecutor {
-					fmt.Fprintln(os.Stderr, errorStyle.Render("Invalid executor. Must be one of: "+strings.Join(validExecutors, ", ")))
-					os.Exit(1)
-				}
+			if taskExecutor != "" && !db.IsKnownExecutor(taskExecutor) {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Invalid executor. Must be one of: "+strings.Join(db.KnownExecutors(), ", ")))
+				os.Exit(1)
 			}
 
 			// Validate effort level if provided (empty = use Claude's global default)
@@ -785,8 +775,7 @@ Examples:
 				os.Exit(1)
 			}
 
-			// Normalize model override (empty = use Claude's global default). Any
-			// non-empty value is accepted; the Claude CLI validates the model name.
+			// Normalize model override (empty = use the agent's own default).
 			modelOverride = strings.TrimSpace(modelOverride)
 
 			// If project not specified, try to detect from cwd
@@ -796,6 +785,20 @@ Examples:
 						project = p.Name
 					}
 				}
+			}
+
+			// Reject a model the executor's CLI would not accept. A bad override is
+			// otherwise invisible: the task launches, the agent rejects the flag
+			// inside tmux, and the card sits there looking busy. ValidateTaskModel
+			// skips the check when this task would be routed at a proxy (ollama and
+			// friends), where the model names belong to the proxy, not Anthropic.
+			if err := database.ValidateTaskModel(&db.Task{
+				Project:  project,
+				Executor: taskExecutor,
+				Model:    modelOverride,
+			}); err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
 			}
 
 			// Generate title from body if title is empty
@@ -897,9 +900,9 @@ Examples:
 	createCmd.Flags().String("body", "", "Task body/description (if no title, AI generates from body)")
 	createCmd.Flags().StringP("type", "t", "", "Task type: code, writing, thinking (default: code)")
 	createCmd.Flags().StringP("project", "p", "", "Project name (auto-detected from cwd if not specified)")
-	createCmd.Flags().StringP("executor", "e", "", "Task executor: claude, codex, gemini, pi, opencode, openclaw (default: claude)")
+	createCmd.Flags().StringP("executor", "e", "", "Task executor: claude, codex, gemini, grok, cursor, pi, opencode, openclaw (default: claude)")
 	createCmd.Flags().String("effort", "", "Per-task Claude effort override: low, medium, high, xhigh, max (default: Claude's global default)")
-	createCmd.Flags().String("model", "", "Per-task Claude model override: opus, sonnet, haiku, or a full model name (default: Claude's global default)")
+	createCmd.Flags().String("model", "", "Per-task model override: opus, sonnet, haiku, fable, or a full model ID like claude-opus-5 (default: the agent's own default). Claude, grok, and cursor only")
 	createCmd.Flags().BoolP("execute", "x", false, "Queue task for immediate execution")
 	createCmd.Flags().Bool("dangerous", false, "Execute in dangerous mode (alias for --permission-mode dangerous)")
 	createCmd.Flags().String("permission-mode", "", "Permission mode: default (prompt), accept-edits (auto-accept file edits), auto (Claude Code auto mode: auto-approve safe actions, block risky ones), dangerous (skip all). Defaults to the project's setting")
@@ -915,7 +918,10 @@ Examples:
 		return db.EffortLevels(), cobra.ShellCompDirectiveNoFileComp
 	})
 	createCmd.RegisterFlagCompletionFunc("model", func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
-		return db.ModelOptions(), cobra.ShellCompDirectiveNoFileComp
+		// Complete against the models the chosen executor actually accepts, so
+		// `-e grok --model <tab>` doesn't offer Claude aliases.
+		executor, _ := cmd.Flags().GetString("executor")
+		return db.ModelsForExecutor(executor), cobra.ShellCompDirectiveNoFileComp
 	})
 	rootCmd.AddCommand(createCmd)
 
@@ -1872,19 +1878,9 @@ Examples:
 			}
 
 			// Validate executor if provided
-			if taskExecutor != "" {
-				validExecutors := []string{db.ExecutorClaude, db.ExecutorCodex, db.ExecutorGemini, db.ExecutorPi, db.ExecutorOpenCode, db.ExecutorOpenClaw}
-				validExecutor := false
-				for _, e := range validExecutors {
-					if e == taskExecutor {
-						validExecutor = true
-						break
-					}
-				}
-				if !validExecutor {
-					fmt.Fprintln(os.Stderr, errorStyle.Render("Invalid executor. Must be one of: "+strings.Join(validExecutors, ", ")))
-					os.Exit(1)
-				}
+			if taskExecutor != "" && !db.IsKnownExecutor(taskExecutor) {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Invalid executor. Must be one of: "+strings.Join(db.KnownExecutors(), ", ")))
+				os.Exit(1)
 			}
 
 			task, err := database.GetTask(taskID)
@@ -1932,7 +1928,7 @@ Examples:
 	updateCmd.Flags().String("body", "", "Update task body/description")
 	updateCmd.Flags().StringP("type", "t", "", "Update task type: code, writing, thinking")
 	updateCmd.Flags().StringP("project", "p", "", "Update project name")
-	updateCmd.Flags().StringP("executor", "e", "", "Update task executor: claude, codex, gemini, pi, opencode, openclaw")
+	updateCmd.Flags().StringP("executor", "e", "", "Update task executor: claude, codex, gemini, grok, cursor, pi, opencode, openclaw")
 	updateCmd.Flags().String("tags", "", "Update task tags (comma-separated)")
 	updateCmd.Flags().Bool("pinned", false, "Pin or unpin the task")
 	updateCmd.RegisterFlagCompletionFunc("project", completeFlagProjects)
@@ -3086,39 +3082,7 @@ Examples:
 	projectsCmd.AddCommand(projectsShowCmd)
 
 	// Projects create subcommand
-	projectsCreateCmd := &cobra.Command{
-		Use:   "create <name>",
-		Short: "Create a new project",
-		Long: `Create a new project with the specified name.
-
-Examples:
-  ty projects create myapp --path ~/Projects/myapp
-  ty projects create myapp --path ~/Projects/myapp --instructions "Use TypeScript"
-  ty projects create myapp --path ~/Projects/myapp --color "#61AFEF"`,
-		Args: cobra.ExactArgs(1),
-		Run: func(cmd *cobra.Command, args []string) {
-			path, _ := cmd.Flags().GetString("path")
-			instructions, _ := cmd.Flags().GetString("instructions")
-			color, _ := cmd.Flags().GetString("color")
-			aliases, _ := cmd.Flags().GetString("aliases")
-			claudeConfigDir, _ := cmd.Flags().GetString("claude-config-dir")
-			permissionMode, _ := cmd.Flags().GetString("permission-mode")
-			noGit, _ := cmd.Flags().GetBool("no-git")
-			outputJSON, _ := cmd.Flags().GetBool("json")
-
-			createProjectCLI(args[0], path, instructions, color, aliases, claudeConfigDir, permissionMode, noGit, outputJSON)
-		},
-	}
-	projectsCreateCmd.Flags().StringP("path", "p", "", "Project directory path (required)")
-	projectsCreateCmd.Flags().StringP("instructions", "i", "", "Project-specific AI instructions")
-	projectsCreateCmd.Flags().StringP("color", "c", "", "Hex color for display (e.g., #61AFEF)")
-	projectsCreateCmd.Flags().StringP("aliases", "a", "", "Comma-separated aliases for lookup")
-	projectsCreateCmd.Flags().String("claude-config-dir", "", "Override CLAUDE_CONFIG_DIR for this project")
-	projectsCreateCmd.Flags().String("permission-mode", "", "Default permission mode for tasks: default (prompt), accept-edits (auto-accept file edits), auto (Claude Code auto mode), dangerous (skip all)")
-	projectsCreateCmd.Flags().Bool("no-git", false, "Disable git worktrees (for non-git projects)")
-	projectsCreateCmd.Flags().Bool("json", false, "Output in JSON format")
-	projectsCreateCmd.MarkFlagRequired("path")
-	projectsCmd.AddCommand(projectsCreateCmd)
+	projectsCmd.AddCommand(newProjectsCreateCmd())
 
 	// Projects update subcommand
 	projectsUpdateCmd := &cobra.Command{
@@ -4999,10 +4963,34 @@ type worktreeGuardHookInput struct {
 	ToolInput      json.RawMessage `json:"tool_input"`
 	Cwd            string          `json:"cwd"`
 	PermissionMode string          `json:"permission_mode"`
+	// Grok (and Claude-compat) emit camelCase field names on stdin.
+	ToolNameCamel       string          `json:"toolName"`
+	ToolInputCamel      json.RawMessage `json:"toolInput"`
+	PermissionModeCamel string          `json:"permissionMode"`
+	// Cursor beforeShellExecution puts the command at the top level.
+	Command string `json:"command"`
+}
+
+func (in *worktreeGuardHookInput) normalize() {
+	if in.ToolName == "" {
+		in.ToolName = in.ToolNameCamel
+	}
+	if len(in.ToolInput) == 0 {
+		in.ToolInput = in.ToolInputCamel
+	}
+	if in.PermissionMode == "" {
+		in.PermissionMode = in.PermissionModeCamel
+	}
+	if in.ToolName == "" && in.Command != "" {
+		in.ToolName = "Bash"
+		if raw, err := json.Marshal(map[string]string{"command": in.Command}); err == nil {
+			in.ToolInput = raw
+		}
+	}
 }
 
 // handleWorktreeGuardHook is the executor-agnostic transport for the worktree
-// write-guard, shared by the codex/gemini/opencode pre-tool hooks. It reads the
+// write-guard, shared by the codex/gemini/grok/cursor/opencode pre-tool hooks. It reads the
 // worktree root from WORKTREE_PATH (set by every executor when launching the CLI),
 // evaluates the single shared policy (EvaluateWorktreeWriteGuard), and renders the
 // decision in the requested executor's wire format. It fails open on any error so a
@@ -5017,6 +5005,7 @@ func handleWorktreeGuardHook(format string) error {
 	if err := json.NewDecoder(os.Stdin).Decode(&in); err != nil {
 		return nil // unparseable payload — allow rather than block
 	}
+	in.normalize()
 
 	var allow []string
 	if projectDir := executor.ManagedWorktreeProjectDir(worktreePath); projectDir != "" {
@@ -5035,7 +5024,7 @@ func handleWorktreeGuardHook(format string) error {
 }
 
 // renderWorktreeGuardDecision writes a guard decision in the wire format the given
-// executor's hook expects. None of codex/gemini/opencode support an interactive
+// executor's hook expects. None of codex/gemini/grok/cursor/opencode support an interactive
 // "ask" in their pre-tool hook, so an "ask" is downgraded to a hard deny to fail
 // safe (the escape hatch is worktree.allow_external_writes in .taskyou.yml). When
 // the guard allows the call, nothing is emitted (and exit stays 0) so the CLI's own
@@ -5062,6 +5051,21 @@ func renderWorktreeGuardDecision(format string, decision *executor.WorktreeGuard
 			"reason":        decision.Reason,
 			"systemMessage": "Worktree write-guard blocked an out-of-worktree write",
 		})
+	case "grok":
+		// Grok PreToolUse contract: {decision: allow|deny, reason}.
+		emitJSONLine(map[string]any{
+			"decision": "deny",
+			"reason":   decision.Reason,
+		})
+	case "cursor":
+		// Cursor preToolUse / beforeShellExecution: JSON permission deny, plus
+		// exit 2 which Cursor documents as blocking the tool (Claude-compatible).
+		emitJSONLine(map[string]any{
+			"permission":    "deny",
+			"user_message":  decision.Reason,
+			"agent_message": decision.Reason,
+		})
+		os.Exit(2)
 	case "opencode":
 		// The OpenCode plugin reads the reason from stdout and treats exit code 1 as
 		// a denial (which it surfaces by throwing, aborting the tool call).
@@ -5691,12 +5695,13 @@ func getSessions() []agentSession {
 
 // getAgentMemoryByTaskID returns a map of task ID -> memory (MB) for all agent processes.
 // It identifies task IDs by examining each agent process's working directory.
-// Supports all executors: claude, codex, gemini, openclaw, opencode, pi.
+// Supports all executors: claude, codex, gemini, grok, cursor, openclaw, opencode, pi.
 func getAgentMemoryByTaskID() map[int]int {
 	result := make(map[int]int)
 
-	// Find processes for all supported executors
-	executorNames := []string{"claude", "codex", "gemini", "openclaw", "opencode", "pi"}
+	// Find processes for all supported executors. "cursor-agent" is the
+	// specific binary; skip the generic "agent" name (too many false positives).
+	executorNames := []string{"claude", "codex", "gemini", "grok", "cursor-agent", "openclaw", "opencode", "pi"}
 
 	for _, executorName := range executorNames {
 		pgrepOut, err := osexec.Command("pgrep", "-f", executorName).Output()
@@ -6593,17 +6598,111 @@ func showProjectCLI(name string, outputJSON bool) {
 	}
 }
 
+// newProjectsCreateCmd builds `ty projects create`. It lives in its own
+// function so the flag rules (--path xor --repo) are testable.
+func newProjectsCreateCmd() *cobra.Command {
+	projectsCreateCmd := &cobra.Command{
+		Use:   "create <name>",
+		Short: "Create a new project",
+		Long: `Create a new project with the specified name.
+
+Point the project at a folder you already have (--path), or at a GitHub repo
+to clone first (--repo). The two are mutually exclusive; a cloned repo lands in
+~/Projects/<repo> and becomes an ordinary path-based project.
+
+Examples:
+  ty projects create myapp --path ~/Projects/myapp
+  ty projects create myapp --repo https://github.com/owner/myapp
+  ty projects create myapp --repo owner/myapp
+  ty projects create myapp --path ~/Projects/myapp --instructions "Use TypeScript"
+  ty projects create myapp --path ~/Projects/myapp --color "#61AFEF"`,
+		Args: cobra.ExactArgs(1),
+		Run: func(cmd *cobra.Command, args []string) {
+			path, _ := cmd.Flags().GetString("path")
+			repo, _ := cmd.Flags().GetString("repo")
+			instructions, _ := cmd.Flags().GetString("instructions")
+			color, _ := cmd.Flags().GetString("color")
+			aliases, _ := cmd.Flags().GetString("aliases")
+			claudeConfigDir, _ := cmd.Flags().GetString("claude-config-dir")
+			permissionMode, _ := cmd.Flags().GetString("permission-mode")
+			noGit, _ := cmd.Flags().GetBool("no-git")
+			outputJSON, _ := cmd.Flags().GetBool("json")
+
+			createProjectCLI(args[0], path, repo, instructions, color, aliases, claudeConfigDir, permissionMode, noGit, outputJSON)
+		},
+	}
+	projectsCreateCmd.Flags().StringP("path", "p", "", "Project directory path")
+	projectsCreateCmd.Flags().StringP("repo", "r", "", "GitHub repo to clone (URL or owner/repo) — mutually exclusive with --path")
+	projectsCreateCmd.Flags().StringP("instructions", "i", "", "Project-specific AI instructions")
+	projectsCreateCmd.Flags().StringP("color", "c", "", "Hex color for display (e.g., #61AFEF)")
+	projectsCreateCmd.Flags().StringP("aliases", "a", "", "Comma-separated aliases for lookup")
+	projectsCreateCmd.Flags().String("claude-config-dir", "", "Override CLAUDE_CONFIG_DIR for this project")
+	projectsCreateCmd.Flags().String("permission-mode", "", "Default permission mode for tasks: default (prompt), accept-edits (auto-accept file edits), auto (Claude Code auto mode), dangerous (skip all)")
+	projectsCreateCmd.Flags().Bool("no-git", false, "Disable git worktrees (for non-git projects)")
+	projectsCreateCmd.Flags().Bool("json", false, "Output in JSON format")
+	projectsCreateCmd.MarkFlagsMutuallyExclusive("path", "repo")
+	projectsCreateCmd.MarkFlagsOneRequired("path", "repo")
+	return projectsCreateCmd
+}
+
+// cloneRepoForCLI turns a repo URL into a local checkout and returns its path.
+// It is the CLI half of the TUI's clone view: same parsing, same destination
+// rules, same cleanup on failure.
+func cloneRepoForCLI(repo string) string {
+	// Progress goes to stderr so --json keeps a clean stdout.
+	progress := os.Stderr
+
+	ref, err := github.ParseRepoRef(repo)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+		os.Exit(1)
+	}
+
+	cloner := github.Cloner{}
+	dest, err := cloner.Resolve(ref)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+		os.Exit(1)
+	}
+	if dest.Reuse {
+		fmt.Fprintln(progress, dimStyle.Render(fmt.Sprintf("Using existing clone of %s at %s", ref.Slug(), dest.Path)))
+		return dest.Path
+	}
+	if dest.Renamed {
+		fmt.Fprintln(progress, dimStyle.Render(fmt.Sprintf("%s is taken by something else — cloning to %s",
+			filepath.Join(filepath.Dir(dest.Path), ref.Name), dest.Path)))
+	}
+
+	fmt.Fprintln(progress, dimStyle.Render(fmt.Sprintf("Cloning %s into %s...", ref.Slug(), dest.Path)))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := cloner.Clone(ctx, ref, dest.Path); err != nil {
+		fmt.Fprintln(os.Stderr, errorStyle.Render("Error: clone failed"))
+		fmt.Fprintln(os.Stderr, err.Error())
+		os.Exit(1)
+	}
+	return dest.Path
+}
+
 // createProjectCLI creates a new project.
-func createProjectCLI(name, path, instructions, color, aliases, claudeConfigDir, permissionMode string, noGit bool, outputJSON bool) {
+func createProjectCLI(name, path, repo, instructions, color, aliases, claudeConfigDir, permissionMode string, noGit bool, outputJSON bool) {
 	// Validate name
 	if strings.TrimSpace(name) == "" {
 		fmt.Fprintln(os.Stderr, errorStyle.Render("Error: project name cannot be empty"))
 		os.Exit(1)
 	}
 
+	if repo != "" && path != "" {
+		fmt.Fprintln(os.Stderr, errorStyle.Render("Error: use --path or --repo, not both"))
+		os.Exit(1)
+	}
+	if repo != "" {
+		path = cloneRepoForCLI(repo)
+	}
+
 	// Expand path
 	if path == "" {
-		fmt.Fprintln(os.Stderr, errorStyle.Render("Error: --path is required"))
+		fmt.Fprintln(os.Stderr, errorStyle.Render("Error: --path or --repo is required"))
 		os.Exit(1)
 	}
 	expandedPath := path

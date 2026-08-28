@@ -29,6 +29,7 @@ import (
 	"github.com/bborn/workflow/internal/github"
 	"github.com/bborn/workflow/internal/hooks"
 	"github.com/bborn/workflow/internal/pipeline"
+	"github.com/bborn/workflow/internal/tasksummary"
 )
 
 // TaskEvent represents a change to a task.
@@ -143,6 +144,10 @@ func formatExecutorDisplayName(slug, raw string) string {
 		return defaultExecutorName
 	case "gemini":
 		return "Gemini"
+	case "grok":
+		return "Grok"
+	case "cursor":
+		return "Cursor"
 	case "pi":
 		return "Pi"
 	}
@@ -194,13 +199,7 @@ func New(database *db.DB, cfg *config.Config) *Executor {
 	// Register the events emitter with the database for event emission
 	database.SetEventEmitter(eventsEmitter)
 
-	// Register available executors
-	e.executorFactory.Register(NewClaudeExecutor(e))
-	e.executorFactory.Register(NewCodexExecutor(e))
-	e.executorFactory.Register(NewGeminiExecutor(e))
-	e.executorFactory.Register(NewOpenClawExecutor(e))
-	e.executorFactory.Register(NewOpenCodeExecutor(e))
-	e.executorFactory.Register(NewPiExecutor(e))
+	e.registerBuiltinExecutors()
 
 	return e
 }
@@ -232,15 +231,20 @@ func NewWithLogging(database *db.DB, cfg *config.Config, w io.Writer) *Executor 
 	// Register the events emitter with the database for event emission
 	database.SetEventEmitter(eventsEmitter)
 
-	// Register available executors
+	e.registerBuiltinExecutors()
+
+	return e
+}
+
+func (e *Executor) registerBuiltinExecutors() {
 	e.executorFactory.Register(NewClaudeExecutor(e))
 	e.executorFactory.Register(NewCodexExecutor(e))
 	e.executorFactory.Register(NewGeminiExecutor(e))
+	e.executorFactory.Register(NewGrokExecutor(e))
+	e.executorFactory.Register(NewCursorExecutor(e))
 	e.executorFactory.Register(NewOpenClawExecutor(e))
 	e.executorFactory.Register(NewOpenCodeExecutor(e))
 	e.executorFactory.Register(NewPiExecutor(e))
-
-	return e
 }
 
 // DisplayName returns the configured executor display name.
@@ -1207,6 +1211,7 @@ func (e *Executor) updateStatus(taskID int64, status string) error {
 	if err := e.db.UpdateTaskStatus(taskID, status); err != nil {
 		return err
 	}
+	tasksummary.KickoffOnStatusChange(e.db, oldStatus, status, taskID)
 
 	// Fetch updated task and broadcast
 	task, err := e.db.GetTask(taskID)
