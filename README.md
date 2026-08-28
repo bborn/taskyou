@@ -453,13 +453,14 @@ Task You supports multiple AI executors for processing tasks. You can choose the
 | Codex | `codex` | [OpenAI Codex CLI](https://github.com/openai/codex) - OpenAI's coding assistant |
 | Gemini | `gemini` | [Gemini CLI](https://ai.google.dev/gemini-api/docs/cli) - Google's Gemini-based coding assistant |
 | Grok | `grok` | [Grok CLI](https://x.ai/cli) - xAI's coding assistant with session resumption |
+| Cursor | `agent` / `cursor-agent` | [Cursor CLI](https://cursor.com/docs/cli) - Cursor's coding agent with session resumption |
 | Pi | `pi` | [Pi Coding Agent](https://github.com/mariozechner/pi-coding-agent) - Multi-provider AI coding agent with session continuity |
 | OpenCode | `opencode` | [OpenCode](https://opencode.ai) - Open-source AI coding assistant with multi-LLM support |
 | OpenClaw | `openclaw` | [OpenClaw](https://openclaw.ai) - Open-source personal AI assistant with session resumption |
 
 All executors run in tmux windows with the same worktree isolation and environment variables. The main differences:
 
-- **Claude Code**, **Grok**, **Pi**, and **OpenClaw** support session resumption - when you retry a task, they continue with full conversation history
+- **Claude Code**, **Grok**, **Cursor**, **Pi**, and **OpenClaw** support session resumption - when you retry a task, they continue with full conversation history
 - **Codex** and **Gemini** start fresh on each execution but receive the full prompt with any feedback
 - **OpenCode** does not support session resumption
 
@@ -479,6 +480,9 @@ npm install -g @openai/codex
 
 # Grok CLI
 curl -fsSL https://x.ai/cli/install.sh | bash
+
+# Cursor Agent CLI
+curl https://cursor.com/install -fsS | bash
 
 # Pi Coding Agent
 npm install -g @mariozechner/pi-coding-agent

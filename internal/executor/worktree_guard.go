@@ -33,7 +33,7 @@ import (
 
 // WorktreeGuardInput is the canonical, executor-agnostic slice of a pre-tool-use
 // payload the guard needs. Every supported agent CLI (Claude, Codex, Gemini,
-// Grok, OpenCode) normalizes its native hook payload into this shape before evaluating
+// Grok, Cursor, OpenCode) normalizes its native hook payload into this shape before evaluating
 // the guard, so the policy below has a single source of truth. It is also
 // decoupled from any hook JSON struct so the guard can be unit-tested without
 // constructing full hook payloads.
@@ -114,17 +114,22 @@ func IsManagedWorktree(path string) bool {
 func externalWriteTargets(in WorktreeGuardInput, root string, allowExternal []string) []string {
 	var raw []string
 	switch in.ToolName {
-	// File-edit tools whose target lives in a "file_path" field.
+	// File-edit tools whose target lives in a "file_path" (or Cursor "path") field.
 	//   Claude: Edit / Write / MultiEdit   ·   Gemini: write_file / replace
-	//   Grok: search_replace / write
+	//   Grok: search_replace / write   ·   Cursor: Write / StrReplace / Delete
 	// (The OpenCode plugin normalizes its write/edit tools to "Write" + file_path.)
-	case "Edit", "Write", "MultiEdit", "write_file", "replace", "search_replace", "write":
+	case "Edit", "Write", "MultiEdit", "write_file", "replace", "search_replace", "write",
+		"StrReplace", "SearchReplace", "Delete":
 		raw = stringField(in.ToolInput, "file_path")
+		if len(raw) == 0 {
+			raw = stringField(in.ToolInput, "path")
+		}
 	case "NotebookEdit":
 		raw = stringField(in.ToolInput, "notebook_path")
 	// Shell tools whose command lives in a "command" field.
 	//   Claude: Bash   ·   Gemini: run_shell_command   ·   Grok: run_terminal_command
-	case "Bash", "run_shell_command", "run_terminal_command":
+	//   Cursor: Shell
+	case "Bash", "run_shell_command", "run_terminal_command", "Shell", "shell":
 		raw = bashWriteTargets(in.ToolInput)
 	// Codex (and the OpenCode plugin) edit files through apply_patch; the write
 	// targets live as marker lines inside the patch envelope carried in "command".

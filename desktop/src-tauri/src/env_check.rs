@@ -10,7 +10,17 @@ use serde::Serialize;
 use std::process::Command;
 
 /// Executor CLIs taskyou knows how to drive, in display order.
-const EXECUTOR_CLIS: &[&str] = &["claude", "codex", "gemini", "grok", "opencode", "pi", "openclaw"];
+/// Cursor ships as `cursor-agent` (preferred) or `agent`; see check_environment.
+const EXECUTOR_CLIS: &[&str] = &[
+    "claude",
+    "codex",
+    "gemini",
+    "grok",
+    "cursor",
+    "opencode",
+    "pi",
+    "openclaw",
+];
 
 /// Replace this process's PATH with the login shell's PATH so child processes
 /// (ty → tmux → executors) resolve tools the way the user's terminal does.
@@ -84,10 +94,17 @@ pub fn check_environment() -> EnvironmentReport {
             .iter()
             .map(|name| ToolCheck {
                 name: (*name).to_string(),
-                path: which(name),
+                path: which_executor(name),
             })
             .collect(),
     }
+}
+
+fn which_executor(name: &str) -> Option<String> {
+    if name == "cursor" {
+        return which("cursor-agent").or_else(|| which("agent"));
+    }
+    which(name)
 }
 
 #[cfg(test)]

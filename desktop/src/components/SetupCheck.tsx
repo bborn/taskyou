@@ -78,7 +78,7 @@ export function SetupCheck({
             detail={
               executorOk
                 ? foundExecutors.map((e) => e.name).join(", ")
-                : "none found (claude, codex, gemini, grok, …)"
+                : "none found (claude, codex, gemini, grok, cursor, …)"
             }
           />
           {!executorOk && <InstallHint>npm install -g @anthropic-ai/claude-code</InstallHint>}

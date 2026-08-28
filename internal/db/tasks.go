@@ -19,7 +19,7 @@ type Task struct {
 	Status          string
 	Type            string
 	Project         string
-	Executor        string // Task executor: "claude" (default), "codex", "gemini", "grok"
+	Executor        string // Task executor: "claude" (default), "codex", "gemini", "grok", "cursor"
 	EffortLevel     string // Per-task Claude effort override ("" = use global/Claude default; otherwise low/medium/high/xhigh/max)
 	Model           string // Per-task Claude model override ("" = use global/Claude default; otherwise an alias like opus/sonnet/haiku or a full model name)
 	ClaudeConfigDir string // Per-task CLAUDE_CONFIG_DIR override ("" = use the project's/default config dir). Lets a single step route through a different Claude config (e.g. an ollama-backed one) without changing the project.
@@ -209,6 +209,7 @@ const (
 	ExecutorCodex    = "codex"    // OpenAI Codex CLI
 	ExecutorGemini   = "gemini"   // Google Gemini CLI
 	ExecutorGrok     = "grok"     // Grok CLI (https://x.ai/cli)
+	ExecutorCursor   = "cursor"   // Cursor CLI (https://cursor.com/docs/cli)
 	ExecutorOpenClaw = "openclaw" // OpenClaw AI assistant (https://openclaw.ai)
 	ExecutorOpenCode = "opencode" // OpenCode AI assistant (https://opencode.ai)
 	ExecutorPi       = "pi"       // Pi coding agent (https://github.com/mariozechner/pi-coding-agent)
@@ -221,6 +222,7 @@ func KnownExecutors() []string {
 		ExecutorCodex,
 		ExecutorGemini,
 		ExecutorGrok,
+		ExecutorCursor,
 		ExecutorPi,
 		ExecutorOpenCode,
 		ExecutorOpenClaw,

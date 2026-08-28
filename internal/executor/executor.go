@@ -146,6 +146,8 @@ func formatExecutorDisplayName(slug, raw string) string {
 		return "Gemini"
 	case "grok":
 		return "Grok"
+	case "cursor":
+		return "Cursor"
 	case "pi":
 		return "Pi"
 	}
@@ -239,6 +241,7 @@ func (e *Executor) registerBuiltinExecutors() {
 	e.executorFactory.Register(NewCodexExecutor(e))
 	e.executorFactory.Register(NewGeminiExecutor(e))
 	e.executorFactory.Register(NewGrokExecutor(e))
+	e.executorFactory.Register(NewCursorExecutor(e))
 	e.executorFactory.Register(NewOpenClawExecutor(e))
 	e.executorFactory.Register(NewOpenCodeExecutor(e))
 	e.executorFactory.Register(NewPiExecutor(e))

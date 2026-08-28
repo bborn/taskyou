@@ -343,6 +343,8 @@ func (m *DetailModel) executorDisplayName() string {
 			return "Gemini"
 		case db.ExecutorGrok:
 			return "Grok"
+		case db.ExecutorCursor:
+			return "Cursor"
 		case db.ExecutorOpenClaw:
 			return "OpenClaw"
 		default:

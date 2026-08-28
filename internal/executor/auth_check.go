@@ -32,6 +32,10 @@ var authRequiredPatterns = []authPattern{
 	{"please run grok login", "Grok session expired — run grok login to re-authenticate"},
 	{"run `grok login`", "Grok session expired — run grok login to re-authenticate"},
 	{"sign in to grok", "Grok is showing the login screen — re-authentication required"},
+	{"please run agent login", "Cursor session expired — run agent login to re-authenticate"},
+	{"run `agent login`", "Cursor session expired — run agent login to re-authenticate"},
+	{"run cursor-agent login", "Cursor session expired — run agent login to re-authenticate"},
+	{"sign in to cursor", "Cursor is showing the login screen — re-authentication required"},
 }
 
 // DetectAuthPrompt scans captured pane content for signs that the executor's

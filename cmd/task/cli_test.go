@@ -1917,6 +1917,8 @@ func TestCreateModelValidation(t *testing.T) {
 		{db.ExecutorClaude, "claude-opus-5"},
 		{db.ExecutorClaude, "claude-opus-9"}, // released after this code
 		{db.ExecutorGrok, "grok-4"},
+		{db.ExecutorCursor, "gpt-5"},
+		{db.ExecutorCursor, "composer-1"},
 		{db.ExecutorCodex, ""}, // modelless executor, no override
 	}
 	for _, tt := range accepted {
