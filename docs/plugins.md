@@ -174,8 +174,10 @@ Unrecognized lines are ignored. Timeout is 15s. Plugins are consulted in name
 order and the first non-empty decision wins.
 
 Failing is safe: no router, a script that errors or prints nothing, or a timeout
-all spawn the task exactly as it would have. A config dir already set by hand or
-by a workflow step is never overruled, and a routed task keeps its profile on
+all spawn the task exactly as it would have. A config dir already set by hand, by
+a workflow step, or on the **project** is never overruled — pinning a project's
+config dir is how you opt it out of routing, which matters because a config dir
+carries that account's MCP connectors and their per-profile OAuth logins, and a routed task keeps its profile on
 resume (its Claude session lives in that config dir). `HOLD` leaves a task
 **queued**, never blocked, and is ignored for a manually started task. Only
 Claude tasks are routed — `CLAUDE_CONFIG_DIR` means nothing to the other
