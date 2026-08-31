@@ -1,0 +1,6 @@
+# Binary
+ty-on
+
+# Test artifacts
+*.test
+coverage.out
