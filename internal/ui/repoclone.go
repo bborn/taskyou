@@ -12,6 +12,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
+	"github.com/bborn/workflow/internal/executor"
 	"github.com/bborn/workflow/internal/github"
 )
 
@@ -69,7 +70,7 @@ type RepoCloneModel struct {
 
 // NewRepoCloneModel prepares a clone of ref into the default clone root.
 func NewRepoCloneModel(ref github.RepoRef, width, height int) *RepoCloneModel {
-	return newRepoCloneModel(ref, github.Cloner{}, width, height)
+	return newRepoCloneModel(ref, github.Cloner{Command: executor.DefaultRunner().Command}, width, height)
 }
 
 // newRepoCloneModel is the seam the tests use to substitute a fake cloner.

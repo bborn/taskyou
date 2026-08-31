@@ -295,7 +295,7 @@ func (e *Executor) Start(ctx context.Context) {
 func (e *Executor) recoverStaleTmuxRefs() {
 	// Step 1: Find all active daemon sessions
 	activeSessions := make(map[string]bool)
-	sessionsOut, err := exec.Command("tmux", "list-sessions", "-F", "#{session_name}").Output()
+	sessionsOut, err := tmuxCmd(context.Background(), "list-sessions", "-F", "#{session_name}").Output()
 	if err == nil {
 		for _, session := range strings.Split(strings.TrimSpace(string(sessionsOut)), "\n") {
 			if strings.HasPrefix(session, "task-daemon-") {
@@ -307,7 +307,7 @@ func (e *Executor) recoverStaleTmuxRefs() {
 	// Step 2: Find all valid window IDs across all daemon sessions
 	validWindowIDs := make(map[string]bool)
 	for session := range activeSessions {
-		windowsOut, err := exec.Command("tmux", "list-windows", "-t", session, "-F", "#{window_id}").Output()
+		windowsOut, err := tmuxCmd(context.Background(), "list-windows", "-t", session, "-F", "#{window_id}").Output()
 		if err == nil {
 			for _, windowID := range strings.Split(strings.TrimSpace(string(windowsOut)), "\n") {
 				if windowID != "" {
@@ -619,7 +619,7 @@ func tmuxWindowExistsForTask(taskID int64) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
-	out, err := exec.CommandContext(ctx, "tmux", "list-windows",
+	out, err := tmuxCmd(ctx, "list-windows",
 		"-a", "-F", "#{session_name}:#{window_name}").Output()
 	if err != nil {
 		// tmux not running / no server => no windows exist.
@@ -939,7 +939,7 @@ func gitHeadCommit(worktreePath string) string {
 	if worktreePath == "" {
 		return ""
 	}
-	out, err := exec.Command("git", "-C", worktreePath, "rev-parse", "HEAD").Output()
+	out, err := gitCmd(context.Background(), worktreePath, "rev-parse", "HEAD").Output()
 	if err != nil {
 		return ""
 	}
@@ -950,7 +950,7 @@ func gitHeadCommit(worktreePath string) string {
 // porcelain status prefix is stripped so a path compares equal regardless of whether it
 // is " M", "MM", "??" etc.
 func gitDirtyPaths(worktreePath string) (string, bool) {
-	out, err := exec.Command("git", "-C", worktreePath, "status", "--porcelain").Output()
+	out, err := gitCmd(context.Background(), worktreePath, "status", "--porcelain").Output()
 	if err != nil {
 		return "", false
 	}
@@ -1020,7 +1020,7 @@ func WorkflowStepUnfinishedReason(worktreePath, baseCommit, baseDirty string) st
 		}
 	}
 
-	headOut, errH := exec.Command("git", "-C", worktreePath, "rev-parse", "HEAD").Output()
+	headOut, errH := gitCmd(context.Background(), worktreePath, "rev-parse", "HEAD").Output()
 	if errH != nil {
 		return "could not resolve the worktree's HEAD commit"
 	}
@@ -1038,7 +1038,7 @@ func WorkflowStepUnfinishedReason(worktreePath, baseCommit, baseDirty string) st
 	// And that commit must be pushed: HEAD reachable from an origin ref. Checked by
 	// reachability rather than "HEAD == origin/<--abbrev-ref>" because non-root steps
 	// share one branch and run on a DETACHED HEAD, where --abbrev-ref yields "HEAD".
-	refs, errR := exec.Command("git", "-C", worktreePath, "branch", "-r", "--contains",
+	refs, errR := gitCmd(context.Background(), worktreePath, "branch", "-r", "--contains",
 		head, "--format=%(refname:short)").Output()
 	if errR != nil {
 		return "could not check whether HEAD is pushed to origin"
@@ -1767,8 +1767,7 @@ func (e *Executor) pruneAllProjectWorktrees() {
 		if dir == "" {
 			continue
 		}
-		cmd := exec.Command("git", "worktree", "prune")
-		cmd.Dir = dir
+		cmd := gitCmd(context.Background(), dir, "worktree", "prune")
 		cmd.Run() // Ignore errors
 	}
 }
@@ -2544,7 +2543,7 @@ var findExistingDaemonSession = func() string {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
-	out, err := exec.CommandContext(ctx, "tmux", "list-sessions", "-F", "#{session_name}").Output()
+	out, err := tmuxCmd(ctx, "list-sessions", "-F", "#{session_name}").Output()
 	if err != nil {
 		return ""
 	}
@@ -2602,7 +2601,7 @@ func CapturePaneContent(windowTarget string, lines int) string {
 	// Try capture with a 3-second timeout and one retry
 	for attempt := 0; attempt < 2; attempt++ {
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-		out, err := exec.CommandContext(ctx, "tmux", "capture-pane", "-t", target, "-p", "-S", fmt.Sprintf("-%d", lines)).Output()
+		out, err := tmuxCmd(ctx, "capture-pane", "-t", target, "-p", "-S", fmt.Sprintf("-%d", lines)).Output()
 		cancel()
 
 		if err == nil {
@@ -2644,19 +2643,19 @@ func SendLiteralTextToPane(taskID int64, text string) error {
 	sessionName := TmuxSessionName(taskID)
 
 	// Check if session exists first
-	if err := exec.Command("tmux", "has-session", "-t", sessionName).Run(); err != nil {
+	if err := tmuxCmd(context.Background(), "has-session", "-t", sessionName).Run(); err != nil {
 		return fmt.Errorf("session not found: %w", err)
 	}
 
 	target := sessionName + ".0"
 
 	// Send text literally (won't interpret key names)
-	if err := exec.Command("tmux", "send-keys", "-t", target, "-l", text).Run(); err != nil {
+	if err := tmuxCmd(context.Background(), "send-keys", "-t", target, "-l", text).Run(); err != nil {
 		return err
 	}
 
 	// Send Enter as a key press
-	return exec.Command("tmux", "send-keys", "-t", target, "Enter").Run()
+	return tmuxCmd(context.Background(), "send-keys", "-t", target, "Enter").Run()
 }
 
 // KillAllWindowsByNameAllSessions kills ALL windows with a given name across all daemon sessions.
@@ -2666,7 +2665,7 @@ func KillAllWindowsByNameAllSessions(windowName string) {
 	defer cancel()
 
 	// List all windows across all sessions
-	out, err := exec.CommandContext(ctx, "tmux", "list-windows",
+	out, err := tmuxCmd(ctx, "list-windows",
 		"-a", "-F", "#{session_name}:#{window_id}:#{window_name}").Output()
 	if err != nil {
 		return
@@ -2694,7 +2693,7 @@ func KillAllWindowsByNameAllSessions(windowName string) {
 
 		// Kill if name matches (including -shell variant)
 		if name == windowName || name == shellWindowName {
-			exec.CommandContext(ctx, "tmux", "kill-window", "-t", windowID).Run()
+			tmuxCmd(ctx, "kill-window", "-t", windowID).Run()
 		}
 	}
 }
@@ -2706,7 +2705,7 @@ func getWindowID(session, windowName string) string {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	out, err := exec.CommandContext(ctx, "tmux", "list-windows",
+	out, err := tmuxCmd(ctx, "list-windows",
 		"-t", session, "-F", "#{window_id}:#{window_name}").Output()
 	if err != nil {
 		return ""
@@ -2741,7 +2740,7 @@ func (e *Executor) CleanupDuplicateWindows(taskID int64) {
 	defer cancel()
 
 	// List all windows across all sessions
-	out, err := exec.CommandContext(ctx, "tmux", "list-windows",
+	out, err := tmuxCmd(ctx, "list-windows",
 		"-a", "-F", "#{session_name}:#{window_id}:#{window_name}").Output()
 	if err != nil {
 		return
@@ -2793,7 +2792,7 @@ func (e *Executor) CleanupDuplicateWindows(taskID int64) {
 	// Kill duplicates
 	for _, windowID := range windowsToKill {
 		e.logger.Debug("Cleaning up duplicate window", "task", taskID, "windowID", windowID)
-		exec.CommandContext(ctx, "tmux", "kill-window", "-t", windowID).Run()
+		tmuxCmd(ctx, "kill-window", "-t", windowID).Run()
 	}
 }
 
@@ -2808,7 +2807,7 @@ func GetTasksWithRunningShellProcess() map[int64]bool {
 
 	// List all panes across all sessions with their command and window name
 	// Format: session:window:pane_index pane_current_command
-	out, err := exec.CommandContext(ctx, "tmux", "list-panes", "-a", "-F", "#{session_name}:#{window_name}:#{pane_index} #{pane_current_command}").Output()
+	out, err := tmuxCmd(ctx, "list-panes", "-a", "-F", "#{session_name}:#{window_name}:#{pane_index} #{pane_current_command}").Output()
 	if err != nil {
 		return result
 	}
@@ -2881,7 +2880,7 @@ func HasRunningProcessInTaskUI() bool {
 	defer cancel()
 
 	// Find task-ui session
-	out, err := exec.CommandContext(ctx, "tmux", "list-panes", "-a", "-F", "#{session_name}:#{pane_index} #{pane_current_command}").Output()
+	out, err := tmuxCmd(ctx, "list-panes", "-a", "-F", "#{session_name}:#{pane_index} #{pane_current_command}").Output()
 	if err != nil {
 		return false
 	}
@@ -2937,7 +2936,7 @@ func ensureTmuxDaemon() (string, error) {
 	daemonSession := getDaemonSessionName()
 
 	// Create it with a placeholder window that stays alive (empty windows exit immediately)
-	cmd := exec.CommandContext(ctx, "tmux", "new-session", "-d", "-s", daemonSession, "-n", "_placeholder", "tail", "-f", "/dev/null")
+	cmd := tmuxCmd(ctx, "new-session", "-d", "-s", daemonSession, "-n", "_placeholder", "tail", "-f", "/dev/null")
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		// Check if it failed because session already exists (race condition with another process)
@@ -2948,7 +2947,7 @@ func ensureTmuxDaemon() (string, error) {
 	}
 
 	// Verify the session was actually created
-	if exec.CommandContext(ctx, "tmux", "has-session", "-t", daemonSession).Run() != nil {
+	if tmuxCmd(ctx, "has-session", "-t", daemonSession).Run() != nil {
 		return "", fmt.Errorf("session %s not found after creation", daemonSession)
 	}
 
@@ -2996,7 +2995,7 @@ func createTmuxWindow(daemonSession, windowName, workDir, script, allowedProject
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "tmux", "new-window", "-d", "-t", daemonSession, "-n", windowName, "-c", workDir, "sh", "-c", script)
+	cmd := tmuxCmd(ctx, "new-window", "-d", "-t", daemonSession, "-n", windowName, "-c", workDir, "sh", "-c", script)
 	output, err := cmd.CombinedOutput()
 	if err == nil {
 		return daemonSession, nil
@@ -3015,7 +3014,7 @@ func createTmuxWindow(daemonSession, windowName, workDir, script, allowedProject
 		retryCtx, retryCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer retryCancel()
 
-		retryCmd := exec.CommandContext(retryCtx, "tmux", "new-window", "-d", "-t", newSession, "-n", windowName, "-c", workDir, "sh", "-c", script)
+		retryCmd := tmuxCmd(retryCtx, "new-window", "-d", "-t", newSession, "-n", windowName, "-c", workDir, "sh", "-c", script)
 		retryOutput, retryErr := retryCmd.CombinedOutput()
 		if retryErr != nil {
 			return "", fmt.Errorf("new-window retry failed: %v (output: %s)", retryErr, string(retryOutput))
@@ -3622,7 +3621,7 @@ func (e *Executor) resumeClaudeDangerous(task *db.Task, workDir string) bool {
 
 	// Automatically send "continue working" to resume the task
 	// This tells Claude to continue where it left off after the mode switch
-	exec.Command("tmux", "send-keys", "-t", e.agentSendTarget(task.ID, windowTarget), "continue working", "Enter").Run()
+	tmuxCmd(context.Background(), "send-keys", "-t", e.agentSendTarget(task.ID, windowTarget), "continue working", "Enter").Run()
 	e.logLine(taskID, "system", "Sent 'continue working' to resume task")
 
 	// Don't poll for completion here - the process will continue running in tmux
@@ -3830,7 +3829,7 @@ func (e *Executor) resumeClaudeSafe(task *db.Task, workDir string) bool {
 
 	// Automatically send "continue working" to resume the task
 	// This tells Claude to continue where it left off after the mode switch
-	exec.Command("tmux", "send-keys", "-t", e.agentSendTarget(task.ID, windowTarget), "continue working", "Enter").Run()
+	tmuxCmd(context.Background(), "send-keys", "-t", e.agentSendTarget(task.ID, windowTarget), "continue working", "Enter").Run()
 	e.logLine(taskID, "system", "Sent 'continue working' to resume task")
 
 	// Don't poll for completion here - the process will continue running in tmux
@@ -3936,7 +3935,7 @@ func (e *Executor) resumeCodexWithMode(task *db.Task, workDir string, dangerousM
 
 	// Automatically send "continue working" to resume the task
 	// This tells Codex to continue where it left off after the mode switch
-	exec.Command("tmux", "send-keys", "-t", e.agentSendTarget(task.ID, windowTarget), "continue working", "Enter").Run()
+	tmuxCmd(context.Background(), "send-keys", "-t", e.agentSendTarget(task.ID, windowTarget), "continue working", "Enter").Run()
 	e.logLine(taskID, "system", "Sent 'continue working' to resume task")
 
 	return true
@@ -4044,7 +4043,7 @@ func (e *Executor) resumeGeminiWithMode(task *db.Task, workDir string, dangerous
 
 	// Automatically send "continue working" to resume the task
 	// This tells Gemini to continue where it left off after the mode switch
-	exec.Command("tmux", "send-keys", "-t", e.agentSendTarget(task.ID, windowTarget), "continue working", "Enter").Run()
+	tmuxCmd(context.Background(), "send-keys", "-t", e.agentSendTarget(task.ID, windowTarget), "continue working", "Enter").Run()
 	e.logLine(taskID, "system", "Sent 'continue working' to resume task")
 
 	return true
@@ -4230,13 +4229,13 @@ func (e *Executor) pollTmuxSession(ctx context.Context, taskID int64, sessionNam
 
 			// Check if tmux window still exists (with timeout to prevent blocking)
 			tmuxCtx, tmuxCancel := context.WithTimeout(context.Background(), 3*time.Second)
-			windowExists := exec.CommandContext(tmuxCtx, "tmux", "list-panes", "-t", sessionName).Run() == nil
+			windowExists := tmuxCmd(tmuxCtx, "list-panes", "-t", sessionName).Run() == nil
 			tmuxCancel()
 
 			// Also check task-ui (pane might be joined there)
 			if !windowExists {
 				checkCtx, checkCancel := context.WithTimeout(context.Background(), 3*time.Second)
-				checkCmd := exec.CommandContext(checkCtx, "tmux", "list-panes", "-t", "task-ui", "-F", "#{pane_current_command}")
+				checkCmd := tmuxCmd(checkCtx, "list-panes", "-t", "task-ui", "-F", "#{pane_current_command}")
 				if out, err := checkCmd.Output(); err == nil {
 					if strings.Contains(string(out), "claude") {
 						windowExists = true
@@ -4282,19 +4281,19 @@ func (e *Executor) ensureShellPane(windowTarget, workDir string, taskID int64, p
 	// Check if pane .1 already exists by counting panes (shell might already be there from previous session)
 	// IMPORTANT: We can't just try to access .1 because tmux returns success even if .1 doesn't exist!
 	// It just returns the ID of pane .0 instead. We must check window_panes count.
-	countCmd := exec.CommandContext(ctx, "tmux", "display-message", "-t", windowTarget, "-p", "#{window_panes}")
+	countCmd := tmuxCmd(ctx, "display-message", "-t", windowTarget, "-p", "#{window_panes}")
 	countOut, err := countCmd.Output()
 	if err == nil && strings.TrimSpace(string(countOut)) == "2" {
 		// Pane .1 already exists, just ensure it's in the right directory and has env vars set
-		exec.CommandContext(ctx, "tmux", "send-keys", "-t", windowTarget+".1", fmt.Sprintf("cd %q", workDir), "Enter").Run()
+		tmuxCmd(ctx, "send-keys", "-t", windowTarget+".1", fmt.Sprintf("cd %q", workDir), "Enter").Run()
 		// Set environment variables in the existing shell pane
 		envCmd := fmt.Sprintf("export WORKTREE_TASK_ID=%d WORKTREE_PORT=%d WORKTREE_PATH=%q", taskID, port, worktreePath)
 		if claudeConfigDir != "" && !isDefaultClaudeConfigDir(claudeConfigDir) {
 			envCmd += fmt.Sprintf(" CLAUDE_CONFIG_DIR=%q", claudeConfigDir)
 		}
-		exec.CommandContext(ctx, "tmux", "send-keys", "-t", windowTarget+".1", envCmd, "Enter").Run()
-		exec.CommandContext(ctx, "tmux", "send-keys", "-t", windowTarget+".1", "clear", "Enter").Run()
-		exec.CommandContext(ctx, "tmux", "select-pane", "-t", windowTarget+".1", "-T", "Shell").Run()
+		tmuxCmd(ctx, "send-keys", "-t", windowTarget+".1", envCmd, "Enter").Run()
+		tmuxCmd(ctx, "send-keys", "-t", windowTarget+".1", "clear", "Enter").Run()
+		tmuxCmd(ctx, "select-pane", "-t", windowTarget+".1", "-T", "Shell").Run()
 		// Save pane IDs to database for deterministic identification
 		e.savePaneIDs(ctx, windowTarget, taskID)
 		return
@@ -4306,7 +4305,7 @@ func (e *Executor) ensureShellPane(windowTarget, workDir string, taskID int64, p
 	if shell == "" {
 		shell = "/bin/zsh"
 	}
-	splitCmd := exec.CommandContext(ctx, "tmux", "split-window",
+	splitCmd := tmuxCmd(ctx, "split-window",
 		"-h",                    // horizontal split (side by side)
 		"-t", windowTarget+".0", // split from Claude pane
 		"-c", workDir, // start in task workdir
@@ -4319,7 +4318,7 @@ func (e *Executor) ensureShellPane(windowTarget, workDir string, taskID int64, p
 	}
 
 	// Verify the split actually created a second pane
-	verifyCmd := exec.CommandContext(ctx, "tmux", "display-message", "-t", windowTarget, "-p", "#{window_panes}")
+	verifyCmd := tmuxCmd(ctx, "display-message", "-t", windowTarget, "-p", "#{window_panes}")
 	verifyOut, _ := verifyCmd.Output()
 	if strings.TrimSpace(string(verifyOut)) != "2" {
 		e.logger.Warn("split-window did not create a second pane", "windowTarget", windowTarget)
@@ -4327,8 +4326,8 @@ func (e *Executor) ensureShellPane(windowTarget, workDir string, taskID int64, p
 	}
 
 	// Set pane titles
-	exec.CommandContext(ctx, "tmux", "select-pane", "-t", windowTarget+".0", "-T", "Claude").Run()
-	exec.CommandContext(ctx, "tmux", "select-pane", "-t", windowTarget+".1", "-T", "Shell").Run()
+	tmuxCmd(ctx, "select-pane", "-t", windowTarget+".0", "-T", "Claude").Run()
+	tmuxCmd(ctx, "select-pane", "-t", windowTarget+".1", "-T", "Shell").Run()
 
 	// Set environment variables in the shell pane
 	// Use export commands so they persist for all commands in the shell
@@ -4336,12 +4335,12 @@ func (e *Executor) ensureShellPane(windowTarget, workDir string, taskID int64, p
 	if claudeConfigDir != "" && !isDefaultClaudeConfigDir(claudeConfigDir) {
 		envCmd += fmt.Sprintf(" CLAUDE_CONFIG_DIR=%q", claudeConfigDir)
 	}
-	exec.CommandContext(ctx, "tmux", "send-keys", "-t", windowTarget+".1", envCmd, "Enter").Run()
+	tmuxCmd(ctx, "send-keys", "-t", windowTarget+".1", envCmd, "Enter").Run()
 	// Clear the screen so the export command doesn't clutter the shell
-	exec.CommandContext(ctx, "tmux", "send-keys", "-t", windowTarget+".1", "clear", "Enter").Run()
+	tmuxCmd(ctx, "send-keys", "-t", windowTarget+".1", "clear", "Enter").Run()
 
 	// Select Claude pane so it's active (user sees Claude output)
-	exec.CommandContext(ctx, "tmux", "select-pane", "-t", windowTarget+".0").Run()
+	tmuxCmd(ctx, "select-pane", "-t", windowTarget+".0").Run()
 
 	// Save pane IDs to database for deterministic identification
 	e.savePaneIDs(ctx, windowTarget, taskID)
@@ -4353,7 +4352,7 @@ func (e *Executor) ensureShellPane(windowTarget, workDir string, taskID int64, p
 // This enables deterministic pane identification when joining/breaking panes.
 func (e *Executor) savePaneIDs(ctx context.Context, windowTarget string, taskID int64) {
 	// Get Claude pane ID (pane .0)
-	claudePaneCmd := exec.CommandContext(ctx, "tmux", "display-message", "-t", windowTarget+".0", "-p", "#{pane_id}")
+	claudePaneCmd := tmuxCmd(ctx, "display-message", "-t", windowTarget+".0", "-p", "#{pane_id}")
 	claudePaneOut, err := claudePaneCmd.Output()
 	if err != nil {
 		e.logger.Warn("failed to get Claude pane ID", "window", windowTarget, "error", err)
@@ -4362,7 +4361,7 @@ func (e *Executor) savePaneIDs(ctx context.Context, windowTarget string, taskID 
 	claudePaneID := strings.TrimSpace(string(claudePaneOut))
 
 	// Get Shell pane ID (pane .1)
-	shellPaneCmd := exec.CommandContext(ctx, "tmux", "display-message", "-t", windowTarget+".1", "-p", "#{pane_id}")
+	shellPaneCmd := tmuxCmd(ctx, "display-message", "-t", windowTarget+".1", "-p", "#{pane_id}")
 	shellPaneOut, err := shellPaneCmd.Output()
 	if err != nil {
 		e.logger.Warn("failed to get Shell pane ID", "window", windowTarget, "error", err)
@@ -4387,11 +4386,11 @@ func (e *Executor) configureTmuxWindow(windowTarget string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	daemonSession := getDaemonSessionName()
-	exec.CommandContext(ctx, "tmux", "set-option", "-t", daemonSession, "status", "on").Run()
-	exec.CommandContext(ctx, "tmux", "set-option", "-t", daemonSession, "status-style", "bg=#f59e0b,fg=black").Run()
-	exec.CommandContext(ctx, "tmux", "set-option", "-t", daemonSession, "status-left", " TASK DAEMON ").Run()
-	exec.CommandContext(ctx, "tmux", "set-option", "-t", daemonSession, "status-right", " Ctrl+C kills Claude ").Run()
-	exec.CommandContext(ctx, "tmux", "set-option", "-t", daemonSession, "status-right-length", "30").Run()
+	tmuxCmd(ctx, "set-option", "-t", daemonSession, "status", "on").Run()
+	tmuxCmd(ctx, "set-option", "-t", daemonSession, "status-style", "bg=#f59e0b,fg=black").Run()
+	tmuxCmd(ctx, "set-option", "-t", daemonSession, "status-left", " TASK DAEMON ").Run()
+	tmuxCmd(ctx, "set-option", "-t", daemonSession, "status-right", " Ctrl+C kills Claude ").Run()
+	tmuxCmd(ctx, "set-option", "-t", daemonSession, "status-right-length", "30").Run()
 }
 
 func (e *Executor) logLine(taskID int64, lineType, content string) {
@@ -4481,37 +4480,31 @@ func (e *Executor) setupWorktree(task *db.Task) (string, bool, error) {
 	if _, err := os.Stat(gitDir); os.IsNotExist(err) {
 		// Initialize git repo so we can create worktrees
 		e.logger.Warn("Project missing git repo - initializing (legacy project?)", "project", task.Project, "path", projectDir)
-		cmd := exec.Command("git", "init")
-		cmd.Dir = projectDir
+		cmd := gitCmd(context.Background(), projectDir, "init")
 		if output, err := cmd.CombinedOutput(); err != nil {
 			return "", false, fmt.Errorf("failed to initialize git repo: %v\n%s", err, string(output))
 		}
 
 		// Create initial commit so we have a branch to create worktrees from
-		cmd = exec.Command("git", "add", "-A")
-		cmd.Dir = projectDir
+		cmd = gitCmd(context.Background(), projectDir, "add", "-A")
 		cmd.Run() // Ignore errors - might be empty repo
 
-		cmd = exec.Command("git", "commit", "--allow-empty", "-m", "Initial commit for taskyou worktree support")
-		cmd.Dir = projectDir
+		cmd = gitCmd(context.Background(), projectDir, "commit", "--allow-empty", "-m", "Initial commit for taskyou worktree support")
 		if output, err := cmd.CombinedOutput(); err != nil {
 			return "", false, fmt.Errorf("failed to create initial commit: %v\n%s", err, string(output))
 		}
 	} else {
 		// Git repo exists, but check if it has any commits
 		// Worktrees require at least one commit to have a base branch
-		cmd := exec.Command("git", "rev-parse", "HEAD")
-		cmd.Dir = projectDir
+		cmd := gitCmd(context.Background(), projectDir, "rev-parse", "HEAD")
 		if err := cmd.Run(); err != nil {
 			// No commits exist - create an initial commit
 			e.logger.Warn("Git repo has no commits - creating initial commit", "project", task.Project, "path", projectDir)
 
-			cmd = exec.Command("git", "add", "-A")
-			cmd.Dir = projectDir
+			cmd = gitCmd(context.Background(), projectDir, "add", "-A")
 			cmd.Run() // Ignore errors - might be empty repo
 
-			cmd = exec.Command("git", "commit", "--allow-empty", "-m", "Initial commit for taskyou worktree support")
-			cmd.Dir = projectDir
+			cmd = gitCmd(context.Background(), projectDir, "commit", "--allow-empty", "-m", "Initial commit for taskyou worktree support")
 			if output, err := cmd.CombinedOutput(); err != nil {
 				return "", false, fmt.Errorf("failed to create initial commit: %v\n%s", err, string(output))
 			}
@@ -4611,8 +4604,7 @@ func (e *Executor) setupWorktree(task *db.Task) (string, bool, error) {
 		// remote) can still resolve the branch locally, and pipelines whose
 		// early steps are document phases build the shared branch locally and
 		// never push it.
-		fetchCmd := exec.Command("git", "fetch", "origin")
-		fetchCmd.Dir = projectDir
+		fetchCmd := gitCmd(context.Background(), projectDir, "fetch", "origin")
 		if fetchOutput, fetchErr := fetchCmd.CombinedOutput(); fetchErr != nil {
 			e.logger.Warn("git fetch origin failed; will resolve source branch locally",
 				"task", task.ID, "branch", task.SourceBranch, "error", fetchErr, "output", string(fetchOutput))
@@ -4821,7 +4813,7 @@ export WORKTREE_PATH=%q
 // trustMiseConfig trusts mise config files in a directory (no-op if mise not installed).
 func trustMiseConfig(dir string) {
 	if _, err := exec.LookPath("mise"); err == nil {
-		exec.Command("mise", "trust", dir).Run()
+		command(context.Background(), "", "mise", "trust", dir).Run()
 	}
 }
 
@@ -5085,8 +5077,7 @@ func symlinkClaudeConfig(projectDir, worktreePath string) error {
 // .claude. It reads the index rather than the working tree, so it still answers
 // true for a worktree whose .claude was already replaced by a symlink.
 func claudeIsTracked(worktreePath string) bool {
-	cmd := exec.Command("git", "ls-files", "--", ".claude")
-	cmd.Dir = worktreePath
+	cmd := gitCmd(context.Background(), worktreePath, "ls-files", "--", ".claude")
 	output, err := cmd.Output()
 	return err == nil && len(output) > 0
 }
@@ -5107,8 +5098,7 @@ func mergeClaudeConfig(projectDir, worktreePath string) error {
 		if err := os.Remove(worktreeClaudeDir); err != nil {
 			return fmt.Errorf("remove stale .claude symlink: %w", err)
 		}
-		restore := exec.Command("git", "checkout", "--", ".claude")
-		restore.Dir = worktreePath
+		restore := gitCmd(context.Background(), worktreePath, "checkout", "--", ".claude")
 		if out, err := restore.CombinedOutput(); err != nil {
 			return fmt.Errorf("restore tracked .claude: %w: %s", err, strings.TrimSpace(string(out)))
 		}
@@ -5181,8 +5171,7 @@ func symlinkMCPConfig(projectDir, worktreePath string) error {
 
 	// Check if .mcp.json is tracked by git - if so, don't create symlink
 	// The worktree already has the file from checkout
-	cmd := exec.Command("git", "ls-files", ".mcp.json")
-	cmd.Dir = projectDir
+	cmd := gitCmd(context.Background(), projectDir, "ls-files", ".mcp.json")
 	if output, err := cmd.Output(); err == nil && len(output) > 0 {
 		return nil // File is tracked by git, don't replace with symlink
 	}
@@ -5538,8 +5527,7 @@ func (e *Executor) runWorktreeInitScript(projectDir, worktreePath string, task *
 			shell = userShell
 		}
 	}
-	cmd := exec.Command(shell, "-l", "-i", "-c", scriptPath)
-	cmd.Dir = worktreePath
+	cmd := command(context.Background(), worktreePath, shell, "-l", "-i", "-c", scriptPath)
 
 	// Set environment variables as specified in the feature request
 	cmd.Env = append(os.Environ(),
@@ -5622,8 +5610,7 @@ func (e *Executor) runWorktreeTeardownScript(projectDir, worktreePath string, ta
 
 	e.logLine(task.ID, "system", fmt.Sprintf("Running worktree teardown script: %s", scriptPath))
 
-	cmd := exec.Command(scriptPath)
-	cmd.Dir = worktreePath
+	cmd := command(context.Background(), worktreePath, scriptPath)
 
 	// Set environment variables
 	cmd.Env = append(os.Environ(),
@@ -5768,8 +5755,7 @@ func (e *Executor) addSourceBranchWorktree(projectDir, worktreePath, sourceBranc
 		// commits and force-moving it would discard them.
 		if remoteExists && gitIsAncestor(projectDir, sourceBranch, remoteRef) &&
 			!gitIsAncestor(projectDir, remoteRef, sourceBranch) {
-			ff := exec.Command("git", "update-ref", "refs/heads/"+sourceBranch, remoteRef)
-			ff.Dir = projectDir
+			ff := gitCmd(context.Background(), projectDir, "update-ref", "refs/heads/"+sourceBranch, remoteRef)
 			if out, err := ff.CombinedOutput(); err != nil {
 				// Not fatal: worst case the step starts from slightly older local work.
 				e.logger.Warn("could not fast-forward source branch to origin",
@@ -5797,22 +5783,19 @@ func (e *Executor) addSourceBranchWorktree(projectDir, worktreePath, sourceBranc
 
 // gitRefExists reports whether a fully-qualified ref resolves in projectDir.
 func gitRefExists(projectDir, ref string) bool {
-	cmd := exec.Command("git", "rev-parse", "--verify", "--quiet", ref)
-	cmd.Dir = projectDir
+	cmd := gitCmd(context.Background(), projectDir, "rev-parse", "--verify", "--quiet", ref)
 	return cmd.Run() == nil
 }
 
 // gitIsAncestor reports whether ancestor is reachable from descendant.
 func gitIsAncestor(projectDir, ancestor, descendant string) bool {
-	cmd := exec.Command("git", "merge-base", "--is-ancestor", ancestor, descendant)
-	cmd.Dir = projectDir
+	cmd := gitCmd(context.Background(), projectDir, "merge-base", "--is-ancestor", ancestor, descendant)
 	return cmd.Run() == nil
 }
 
 // gitCurrentBranch returns the checked-out branch name, or "HEAD" when detached.
 func gitCurrentBranch(dir string) (string, error) {
-	cmd := exec.Command("git", "rev-parse", "--abbrev-ref", "HEAD")
-	cmd.Dir = dir
+	cmd := gitCmd(context.Background(), dir, "rev-parse", "--abbrev-ref", "HEAD")
 	out, err := cmd.Output()
 	if err != nil {
 		return "", err
@@ -5823,8 +5806,7 @@ func gitCurrentBranch(dir string) (string, error) {
 // getDefaultBranch returns the default branch name for a git repo.
 func (e *Executor) getDefaultBranch(projectDir string) string {
 	// Try to get default branch from remote
-	cmd := exec.Command("git", "symbolic-ref", "refs/remotes/origin/HEAD")
-	cmd.Dir = projectDir
+	cmd := gitCmd(context.Background(), projectDir, "symbolic-ref", "refs/remotes/origin/HEAD")
 	if output, err := cmd.Output(); err == nil {
 		ref := strings.TrimSpace(string(output))
 		// refs/remotes/origin/main -> main
@@ -5836,16 +5818,14 @@ func (e *Executor) getDefaultBranch(projectDir string) string {
 
 	// Fallback: check if main or master exists
 	for _, branch := range []string{"main", "master"} {
-		cmd := exec.Command("git", "rev-parse", "--verify", branch)
-		cmd.Dir = projectDir
+		cmd := gitCmd(context.Background(), projectDir, "rev-parse", "--verify", branch)
 		if err := cmd.Run(); err == nil {
 			return branch
 		}
 	}
 
 	// Fallback: get current branch name (whatever branch HEAD points to)
-	cmd = exec.Command("git", "rev-parse", "--abbrev-ref", "HEAD")
-	cmd.Dir = projectDir
+	cmd = gitCmd(context.Background(), projectDir, "rev-parse", "--abbrev-ref", "HEAD")
 	if output, err := cmd.Output(); err == nil {
 		branch := strings.TrimSpace(string(output))
 		if branch != "" && branch != "HEAD" {
@@ -5905,16 +5885,14 @@ func (e *Executor) CleanupWorktree(task *db.Task) error {
 	e.runWorktreeTeardownScript(projectDir, task.WorktreePath, task)
 
 	// Remove worktree
-	cmd := exec.Command("git", "worktree", "remove", "--force", task.WorktreePath)
-	cmd.Dir = projectDir
+	cmd := gitCmd(context.Background(), projectDir, "worktree", "remove", "--force", task.WorktreePath)
 	if output, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("remove worktree: %v\n%s", err, string(output))
 	}
 
 	// Optionally delete the branch too
 	if task.BranchName != "" {
-		cmd = exec.Command("git", "branch", "-D", task.BranchName)
-		cmd.Dir = projectDir
+		cmd = gitCmd(context.Background(), projectDir, "branch", "-D", task.BranchName)
 		cmd.Run() // Ignore errors - branch might have been merged/deleted
 	}
 
@@ -5963,8 +5941,7 @@ func (e *Executor) ArchiveWorktree(task *db.Task) error {
 	paths := e.claudePathsForTask(task)
 
 	// Get current HEAD commit
-	headCmd := exec.Command("git", "rev-parse", "HEAD")
-	headCmd.Dir = task.WorktreePath
+	headCmd := gitCmd(context.Background(), task.WorktreePath, "rev-parse", "HEAD")
 	headOutput, err := headCmd.Output()
 	if err != nil {
 		return fmt.Errorf("get HEAD commit: %w", err)
@@ -5975,22 +5952,19 @@ func (e *Executor) ArchiveWorktree(task *db.Task) error {
 	archiveRef := fmt.Sprintf("refs/task-archive/%d", task.ID)
 
 	// Check if there are any changes to save (staged, unstaged, or untracked)
-	statusCmd := exec.Command("git", "status", "--porcelain")
-	statusCmd.Dir = task.WorktreePath
+	statusCmd := gitCmd(context.Background(), task.WorktreePath, "status", "--porcelain")
 	statusOutput, _ := statusCmd.Output()
 	hasChanges := len(strings.TrimSpace(string(statusOutput))) > 0
 
 	if hasChanges {
 		// Add all files including untracked ones to the index
-		addCmd := exec.Command("git", "add", "-A")
-		addCmd.Dir = task.WorktreePath
+		addCmd := gitCmd(context.Background(), task.WorktreePath, "add", "-A")
 		if output, err := addCmd.CombinedOutput(); err != nil {
 			return fmt.Errorf("add all files: %v\n%s", err, string(output))
 		}
 
 		// Create a tree from the index
-		writeTreeCmd := exec.Command("git", "write-tree")
-		writeTreeCmd.Dir = task.WorktreePath
+		writeTreeCmd := gitCmd(context.Background(), task.WorktreePath, "write-tree")
 		treeOutput, err := writeTreeCmd.Output()
 		if err != nil {
 			return fmt.Errorf("write tree: %w", err)
@@ -5998,9 +5972,8 @@ func (e *Executor) ArchiveWorktree(task *db.Task) error {
 		tree := strings.TrimSpace(string(treeOutput))
 
 		// Create a commit object with the tree (this doesn't advance any branch)
-		commitTreeCmd := exec.Command("git", "commit-tree", tree, "-p", headCommit, "-m",
+		commitTreeCmd := gitCmd(context.Background(), task.WorktreePath, "commit-tree", tree, "-p", headCommit, "-m",
 			fmt.Sprintf("Task archive: #%d - %s", task.ID, task.Title))
-		commitTreeCmd.Dir = task.WorktreePath
 		commitOutput, err := commitTreeCmd.Output()
 		if err != nil {
 			return fmt.Errorf("commit tree: %w", err)
@@ -6008,15 +5981,13 @@ func (e *Executor) ArchiveWorktree(task *db.Task) error {
 		archiveCommit := strings.TrimSpace(string(commitOutput))
 
 		// Create a ref pointing to this commit
-		updateRefCmd := exec.Command("git", "update-ref", archiveRef, archiveCommit)
-		updateRefCmd.Dir = task.WorktreePath
+		updateRefCmd := gitCmd(context.Background(), task.WorktreePath, "update-ref", archiveRef, archiveCommit)
 		if output, err := updateRefCmd.CombinedOutput(); err != nil {
 			return fmt.Errorf("update ref: %v\n%s", err, string(output))
 		}
 
 		// Reset the index (undo the add -A) so the worktree is clean for removal
-		resetCmd := exec.Command("git", "reset", "HEAD")
-		resetCmd.Dir = task.WorktreePath
+		resetCmd := gitCmd(context.Background(), task.WorktreePath, "reset", "HEAD")
 		resetCmd.Run() // Ignore errors
 
 		// Save archive state to database
@@ -6026,8 +5997,7 @@ func (e *Executor) ArchiveWorktree(task *db.Task) error {
 	} else {
 		// No changes, just save the current state for reference
 		// Create a ref pointing to HEAD
-		updateRefCmd := exec.Command("git", "update-ref", archiveRef, headCommit)
-		updateRefCmd.Dir = task.WorktreePath
+		updateRefCmd := gitCmd(context.Background(), task.WorktreePath, "update-ref", archiveRef, headCommit)
 		if output, err := updateRefCmd.CombinedOutput(); err != nil {
 			return fmt.Errorf("update ref: %v\n%s", err, string(output))
 		}
@@ -6042,8 +6012,7 @@ func (e *Executor) ArchiveWorktree(task *db.Task) error {
 	e.runWorktreeTeardownScript(projectDir, task.WorktreePath, task)
 
 	// Remove worktree
-	cmd := exec.Command("git", "worktree", "remove", "--force", task.WorktreePath)
-	cmd.Dir = projectDir
+	cmd := gitCmd(context.Background(), projectDir, "worktree", "remove", "--force", task.WorktreePath)
 	if output, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("remove worktree: %v\n%s", err, string(output))
 	}
@@ -6122,8 +6091,7 @@ func (e *Executor) UnarchiveWorktree(task *db.Task) error {
 	// Check if branch still exists locally
 	branchExists := false
 	if branchName != "" {
-		checkBranchCmd := exec.Command("git", "rev-parse", "--verify", branchName)
-		checkBranchCmd.Dir = projectDir
+		checkBranchCmd := gitCmd(context.Background(), projectDir, "rev-parse", "--verify", branchName)
 		if err := checkBranchCmd.Run(); err == nil {
 			branchExists = true
 		}
@@ -6132,8 +6100,7 @@ func (e *Executor) UnarchiveWorktree(task *db.Task) error {
 	// Check if another worktree is using this branch
 	branchInUse := false
 	if branchExists && branchName != "" {
-		listCmd := exec.Command("git", "worktree", "list", "--porcelain")
-		listCmd.Dir = projectDir
+		listCmd := gitCmd(context.Background(), projectDir, "worktree", "list", "--porcelain")
 		if output, err := listCmd.Output(); err == nil {
 			// Check if any worktree has this branch
 			for _, line := range strings.Split(string(output), "\n") {
@@ -6149,69 +6116,60 @@ func (e *Executor) UnarchiveWorktree(task *db.Task) error {
 
 	if branchExists && !branchInUse {
 		// Branch exists and is available - use it
-		addCmd = exec.Command("git", "worktree", "add", worktreePath, branchName)
+		addCmd = gitCmd(context.Background(), projectDir, "worktree", "add", worktreePath, branchName)
 	} else if branchInUse {
 		// Branch is in use by another worktree - create detached worktree from archive commit
-		addCmd = exec.Command("git", "worktree", "add", "--detach", worktreePath, task.ArchiveCommit)
+		addCmd = gitCmd(context.Background(), projectDir, "worktree", "add", "--detach", worktreePath, task.ArchiveCommit)
 	} else {
 		// Branch doesn't exist - create new branch from archive commit
 		if branchName == "" {
 			branchName = fmt.Sprintf("task/%d-restored", task.ID)
 		}
-		addCmd = exec.Command("git", "worktree", "add", "-b", branchName, worktreePath, task.ArchiveCommit)
+		addCmd = gitCmd(context.Background(), projectDir, "worktree", "add", "-b", branchName, worktreePath, task.ArchiveCommit)
 	}
 
-	addCmd.Dir = projectDir
 	if output, err := addCmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("create worktree: %v\n%s", err, string(output))
 	}
 
 	// If the archive commit differs from the current HEAD (meaning there were uncommitted changes),
 	// we need to restore those changes without committing
-	headCmd := exec.Command("git", "rev-parse", "HEAD")
-	headCmd.Dir = worktreePath
+	headCmd := gitCmd(context.Background(), worktreePath, "rev-parse", "HEAD")
 	headOutput, _ := headCmd.Output()
 	currentHead := strings.TrimSpace(string(headOutput))
 
 	if currentHead == task.ArchiveCommit {
 		// We're at the archive commit which includes the uncommitted changes as a commit
 		// We need to "soft reset" to the parent to get those changes back as uncommitted
-		parentCmd := exec.Command("git", "rev-parse", task.ArchiveCommit+"^")
-		parentCmd.Dir = worktreePath
+		parentCmd := gitCmd(context.Background(), worktreePath, "rev-parse", task.ArchiveCommit+"^")
 		parentOutput, err := parentCmd.Output()
 		if err == nil {
 			parentCommit := strings.TrimSpace(string(parentOutput))
 			// Soft reset to parent - this keeps the changes from the archive commit as staged changes
-			resetCmd := exec.Command("git", "reset", "--soft", parentCommit)
-			resetCmd.Dir = worktreePath
+			resetCmd := gitCmd(context.Background(), worktreePath, "reset", "--soft", parentCommit)
 			resetCmd.Run()
 
 			// Unstage the changes (so they're just modified files, not staged)
-			unstageCmd := exec.Command("git", "reset", "HEAD")
-			unstageCmd.Dir = worktreePath
+			unstageCmd := gitCmd(context.Background(), worktreePath, "reset", "HEAD")
 			unstageCmd.Run()
 		}
 	} else {
 		// The branch has new commits since archiving
 		// Cherry-pick the changes from the archive commit
 		// First, check if there's a diff between the archive commit and its parent
-		diffCmd := exec.Command("git", "diff", "--quiet", task.ArchiveCommit+"^", task.ArchiveCommit)
-		diffCmd.Dir = worktreePath
+		diffCmd := gitCmd(context.Background(), worktreePath, "diff", "--quiet", task.ArchiveCommit+"^", task.ArchiveCommit)
 		if err := diffCmd.Run(); err != nil {
 			// There are differences - apply them
 			// Use format-patch and apply to get the changes without committing
-			patchCmd := exec.Command("git", "format-patch", "-1", "--stdout", task.ArchiveCommit)
-			patchCmd.Dir = worktreePath
+			patchCmd := gitCmd(context.Background(), worktreePath, "format-patch", "-1", "--stdout", task.ArchiveCommit)
 			patch, err := patchCmd.Output()
 			if err == nil && len(patch) > 0 {
-				applyCmd := exec.Command("git", "apply", "--index")
-				applyCmd.Dir = worktreePath
+				applyCmd := gitCmd(context.Background(), worktreePath, "apply", "--index")
 				applyCmd.Stdin = strings.NewReader(string(patch))
 				applyCmd.Run() // Ignore errors - patch may not apply cleanly if branch diverged
 
 				// Unstage the changes
-				unstageCmd := exec.Command("git", "reset", "HEAD")
-				unstageCmd.Dir = worktreePath
+				unstageCmd := gitCmd(context.Background(), worktreePath, "reset", "HEAD")
 				unstageCmd.Run()
 			}
 		}

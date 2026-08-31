@@ -54,7 +54,7 @@ func (c *CodexExecutor) ensureAuthenticated() bool {
 	defer cancel()
 
 	// Running 'codex login status' checks auth and may trigger token refresh
-	cmd := exec.CommandContext(ctx, "codex", "login", "status")
+	cmd := command(ctx, "", "codex", "login", "status")
 	err := cmd.Run()
 	return err == nil
 }
