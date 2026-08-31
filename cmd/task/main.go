@@ -3777,7 +3777,12 @@ External frontends (like ty-web) can build on top of this API.
 The server shares the same SQLite database the daemon writes to (WAL mode).`,
 		Run: func(cmd *cobra.Command, args []string) {
 			port, _ := cmd.Flags().GetInt("port")
-			addr := fmt.Sprintf(":%d", port)
+			host, _ := cmd.Flags().GetString("host")
+			addr, err := serveListenAddr(host, port)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+				os.Exit(1)
+			}
 
 			dbPath := db.DefaultPath()
 			database, err := openTaskDB(dbPath)
@@ -3810,6 +3815,12 @@ The server shares the same SQLite database the daemon writes to (WAL mode).`,
 				srv.Shutdown(ctx)
 			}()
 
+			if host == "" {
+				fmt.Printf("Binding %s (all interfaces - reachable from your local network)\n", addr)
+			} else {
+				fmt.Printf("Binding %s\n", addr)
+			}
+
 			if err := srv.Start(); err != nil {
 				fmt.Fprintln(os.Stderr, errorStyle.Render("Server error: "+err.Error()))
 				os.Exit(1)
@@ -3817,6 +3828,7 @@ The server shares the same SQLite database the daemon writes to (WAL mode).`,
 		},
 	}
 	serveCmd.Flags().Int("port", 8080, "Port to listen on")
+	serveCmd.Flags().String("host", "", "Address to bind to (e.g. 127.0.0.1 or a Tailscale IP). Empty binds all interfaces")
 	rootCmd.AddCommand(serveCmd)
 
 	// Bulk operations
