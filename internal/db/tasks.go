@@ -952,6 +952,23 @@ func (db *DB) UpdateTaskPermissionMode(taskID int64, mode string) error {
 	return nil
 }
 
+// UpdateTaskClaudeConfigDir sets the per-task CLAUDE_CONFIG_DIR override,
+// which is how a task is pinned to one Claude profile (account). Writing it as
+// its own column update — rather than through UpdateTask — matters at spawn
+// time: the routing decision is made from a task struct the daemon has been
+// holding, and a full-row write would stomp any field another surface (the TUI,
+// a hook) changed in the meantime.
+func (db *DB) UpdateTaskClaudeConfigDir(taskID int64, configDir string) error {
+	_, err := db.Exec(`
+		UPDATE tasks SET claude_config_dir = ?, updated_at = CURRENT_TIMESTAMP
+		WHERE id = ?
+	`, configDir, taskID)
+	if err != nil {
+		return fmt.Errorf("update task claude config dir: %w", err)
+	}
+	return nil
+}
+
 // UpdateTaskPinned updates only the pinned flag for a task.
 func (db *DB) UpdateTaskPinned(taskID int64, pinned bool) error {
 	_, err := db.Exec(`
