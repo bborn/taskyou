@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -146,7 +145,7 @@ func (e *Executor) EnsureTaskWindow(ctx context.Context, task *db.Task, sessionI
 		e.db.AppendTaskLog(task.ID, "system", fmt.Sprintf("Starting new %s session", executorName))
 	}
 
-	err = exec.CommandContext(ctx, "tmux", "new-window", "-d",
+	err = tmuxCmd(ctx, "new-window", "-d",
 		"-t", daemonSession,
 		"-n", windowName,
 		"-c", workDir,
@@ -166,7 +165,7 @@ func (e *Executor) EnsureTaskWindow(ctx context.Context, task *db.Task, sessionI
 	if shell == "" {
 		shell = "/bin/zsh"
 	}
-	if err := exec.CommandContext(ctx, "tmux", "split-window",
+	if err := tmuxCmd(ctx, "split-window",
 		"-h",
 		"-t", windowTarget+".0",
 		"-c", workDir,
@@ -174,8 +173,8 @@ func (e *Executor) EnsureTaskWindow(ctx context.Context, task *db.Task, sessionI
 		e.logger.Warn("split-window for shell pane failed", "window", windowTarget, "error", err)
 	}
 
-	exec.CommandContext(ctx, "tmux", "select-pane", "-t", windowTarget+".0", "-T", formatExecutorDisplayName(executorName, executorName)).Run()
-	exec.CommandContext(ctx, "tmux", "select-pane", "-t", windowTarget+".1", "-T", "Shell").Run()
+	tmuxCmd(ctx, "select-pane", "-t", windowTarget+".0", "-T", formatExecutorDisplayName(executorName, executorName)).Run()
+	tmuxCmd(ctx, "select-pane", "-t", windowTarget+".1", "-T", "Shell").Run()
 
 	// Persist pane IDs so other clients (HTTP API, TUI) can target the panes.
 	e.savePaneIDs(ctx, windowTarget, task.ID)
@@ -245,7 +244,7 @@ func (e *Executor) launchWorkdir(task *db.Task) (string, error) {
 // findExistingTaskWindow looks for windowName in any task-daemon session and
 // returns its "session:index" target, or "" when absent.
 func findExistingTaskWindow(ctx context.Context, windowName string) string {
-	out, err := exec.CommandContext(ctx, "tmux", "list-windows", "-a", "-F", "#{session_name}:#{window_index}:#{window_name}").Output()
+	out, err := tmuxCmd(ctx, "list-windows", "-a", "-F", "#{session_name}:#{window_index}:#{window_name}").Output()
 	if err != nil {
 		return ""
 	}
@@ -261,7 +260,7 @@ func findExistingTaskWindow(ctx context.Context, windowName string) string {
 // findOrCreateDaemonSession returns the name of an existing task-daemon
 // session, creating one (with a placeholder window) when none exists.
 func findOrCreateDaemonSession(ctx context.Context) (string, error) {
-	out, err := exec.CommandContext(ctx, "tmux", "list-sessions", "-F", "#{session_name}").Output()
+	out, err := tmuxCmd(ctx, "list-sessions", "-F", "#{session_name}").Output()
 	if err == nil {
 		for _, session := range strings.Split(strings.TrimSpace(string(out)), "\n") {
 			if strings.HasPrefix(session, "task-daemon-") {
@@ -272,7 +271,7 @@ func findOrCreateDaemonSession(ctx context.Context) (string, error) {
 
 	daemonSession := fmt.Sprintf("task-daemon-%d", os.Getpid())
 	// "tail -f /dev/null" keeps the placeholder window alive (empty windows exit immediately).
-	if err := exec.CommandContext(ctx, "tmux", "new-session", "-d", "-s", daemonSession, "-n", "_placeholder", "tail", "-f", "/dev/null").Run(); err != nil {
+	if err := tmuxCmd(ctx, "new-session", "-d", "-s", daemonSession, "-n", "_placeholder", "tail", "-f", "/dev/null").Run(); err != nil {
 		return "", fmt.Errorf("tmux new-session failed: %w", err)
 	}
 	return daemonSession, nil

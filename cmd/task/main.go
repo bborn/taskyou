@@ -6670,7 +6670,7 @@ func cloneRepoForCLI(repo string) string {
 		os.Exit(1)
 	}
 
-	cloner := github.Cloner{}
+	cloner := github.Cloner{Command: executor.DefaultRunner().Command}
 	dest, err := cloner.Resolve(ref)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
