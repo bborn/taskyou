@@ -1934,16 +1934,45 @@ func (e *Executor) executeTask(ctx context.Context, task *db.Task) {
 	// SECURITY: We must have a valid worktree - never fall back to project directory
 	// to prevent Claude from accidentally writing to the main repo
 	//
-	// A remotely-placed task has no local workspace: it runs in the checkout the
-	// placement handler named, on the host it named. Provisioning one here would
-	// leave an unopened worktree behind after every remote run.
+	// A remotely-placed task has no LOCAL workspace — provisioning one here would
+	// leave an unopened worktree behind after every remote run — but it gets the
+	// same isolation on the host that placed it: its own git worktree, on its own
+	// branch, inside that host's checkout. Running in the checkout itself (which
+	// is what this path used to do) writes straight into the host's primary clone,
+	// which is exactly what the local path has always refused to do.
 	var (
 		workDir         string
 		createdWorktree bool
 		err             error
 	)
 	if placedRemote {
-		workDir = remotePlacement.WorkDir
+		var wt remoteWorktree
+		wt, err = e.setupRemoteWorktree(taskCtx, task, remotePlacement)
+		if err != nil {
+			msg := fmt.Sprintf("Could not prepare an isolated worktree on %s: %v", remotePlacement.Host, err)
+			e.logger.Error("remote worktree setup failed", "task", task.ID, "host", remotePlacement.Host, "error", err)
+			e.logLine(task.ID, "error", msg)
+			_ = e.updateStatus(task.ID, db.StatusBlocked)
+			e.hooks.OnStatusChange(task, db.StatusBlocked, msg)
+			e.events.EmitTaskFailed(task, msg)
+			return
+		}
+		workDir = wt.Path
+		createdWorktree = wt.Created
+		// The runner's default directory becomes the task's worktree, so every
+		// command built from this placement — the tmux window, the agent, any git
+		// call — lands there rather than in the host's main checkout.
+		remotePlacement.WorkDir = wt.Path
+		if err := e.db.SetTaskRemoteWorktree(task.ID, wt.Path, wt.Branch); err != nil {
+			e.logger.Warn("could not record remote worktree", "task", task.ID, "error", err)
+		}
+		verb := "Reusing"
+		if wt.Created {
+			verb = "Created"
+		}
+		e.logLine(task.ID, "system", fmt.Sprintf("%s worktree %s on %s (branch: %s)",
+			verb, wt.Path, remotePlacement.Host, wt.Branch))
+		err = nil
 	} else {
 		workDir, createdWorktree, err = e.setupWorktree(task)
 	}

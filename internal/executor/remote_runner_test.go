@@ -12,6 +12,19 @@ func remoteArgs(t *testing.T, r RemoteRunner, workDir, name string, args ...stri
 	return r.Command(context.Background(), workDir, name, args...).Args
 }
 
+// unwrapLoginShell returns the script inside the "sh -lc '...'" wrapper every
+// remote command carries, with the wrapper's quoting undone — i.e. exactly the
+// line the remote LOGIN shell ends up parsing.
+func unwrapLoginShell(t *testing.T, line string) string {
+	t.Helper()
+	const prefix = "sh -lc '"
+	if !strings.HasPrefix(line, prefix) || !strings.HasSuffix(line, "'") {
+		t.Fatalf("remote command %q is not wrapped in a login shell; a non-login shell never reads ~/.profile, so version-managed tools are invisible", line)
+	}
+	body := strings.TrimSuffix(strings.TrimPrefix(line, prefix), "'")
+	return strings.ReplaceAll(body, `'\''`, "'")
+}
+
 func TestRemoteRunnerRunsOverSSHAgainstTheNamedHost(t *testing.T) {
 	r := RemoteRunner{Host: "ol-agents", WorkDir: "~/projects/engineering"}
 
@@ -28,7 +41,7 @@ func TestRemoteRunnerRunsOverSSHAgainstTheNamedHost(t *testing.T) {
 	if !strings.Contains(joined, "BatchMode=yes") {
 		t.Errorf("ssh invocation is not batch-mode: %v", got)
 	}
-	remote := got[len(got)-1]
+	remote := unwrapLoginShell(t, got[len(got)-1])
 	if !strings.Contains(remote, "tmux") || !strings.Contains(remote, "new-window") {
 		t.Errorf("remote command = %q, want the tmux command", remote)
 	}
@@ -43,7 +56,7 @@ func TestRemoteRunnerCdsOnTheRemoteAndNeverSetsLocalDir(t *testing.T) {
 	if cmd.Dir != "" {
 		t.Errorf("cmd.Dir = %q, want empty: a remote workdir is not a local one", cmd.Dir)
 	}
-	remote := cmd.Args[len(cmd.Args)-1]
+	remote := unwrapLoginShell(t, cmd.Args[len(cmd.Args)-1])
 	if !strings.HasPrefix(remote, "cd ~/") {
 		t.Errorf("remote command = %q, want a cd into the remote workdir with the ~ left for the remote shell", remote)
 	}
@@ -55,7 +68,7 @@ func TestRemoteRunnerCdsOnTheRemoteAndNeverSetsLocalDir(t *testing.T) {
 func TestRemoteRunnerPerCommandWorkDirWinsOverTheDefault(t *testing.T) {
 	r := RemoteRunner{Host: "mona", WorkDir: "/home/bruno/Projects/taskyou"}
 	remote := remoteArgs(t, r, "/srv/other", "git", "status")
-	line := remote[len(remote)-1]
+	line := unwrapLoginShell(t, remote[len(remote)-1])
 	if !strings.Contains(line, "cd '/srv/other'") {
 		t.Errorf("remote command = %q, want the per-command workdir", line)
 	}
@@ -68,18 +81,19 @@ func TestRemoteRunnerPerCommandWorkDirWinsOverTheDefault(t *testing.T) {
 // the command or the runner there must be no cd at all.
 func TestRemoteRunnerOmitsCdWhenThereIsNoWorkDir(t *testing.T) {
 	r := RemoteRunner{Host: "mona"}
-	line := remoteArgs(t, r, "", "tmux", "list-sessions")[6:]
-	if strings.Contains(strings.Join(line, " "), "cd ") {
-		t.Errorf("remote command = %v, want no cd", line)
+	args := remoteArgs(t, r, "", "tmux", "list-sessions")
+	line := unwrapLoginShell(t, args[len(args)-1])
+	if strings.Contains(line, "cd ") {
+		t.Errorf("remote command = %q, want no cd", line)
 	}
 }
 
 func TestRemoteRunnerQuotesArguments(t *testing.T) {
 	r := RemoteRunner{Host: "mona"}
-	remote := remoteArgs(t, r, "", "tmux", "new-window", "-n", "task-5228", "sh", "-c", "echo 'hi there'; rm -rf /tmp/x")
-	line := remote[len(remote)-1]
+	remote := remoteArgs(t, r, "", "tmux", "new-window", "-n", "task-5228", "sh", "-c", "echo 'hi there'; cat /tmp/x")
+	line := unwrapLoginShell(t, remote[len(remote)-1])
 	// The nested single quotes must survive as data, not become shell syntax.
-	if !strings.Contains(line, `'echo '\''hi there'\''; rm -rf /tmp/x'`) {
+	if !strings.Contains(line, `'echo '\''hi there'\''; cat /tmp/x'`) {
 		t.Errorf("remote command = %q, want the script passed as one quoted argument", line)
 	}
 }

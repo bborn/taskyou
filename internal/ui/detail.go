@@ -248,6 +248,10 @@ type DetailModel struct {
 	paneLoading      bool      // true while panes are being set up asynchronously
 	paneLoadingStart time.Time // when loading started (for spinner animation)
 	paneError        string    // user-visible error when panes fail to open
+	// paneNotice explains, without blaming anything, why there are no panes to
+	// show — today only "this task is running on another machine". It is styled
+	// as information, not as a failure, because nothing failed.
+	paneNotice string
 
 	// waitingForExecutor is true when we're passively waiting for the daemon's
 	// executor to create the tmux window (e.g. a freshly created+queued task with
@@ -288,6 +292,12 @@ type panesJoinedMsg struct {
 // showing the loading spinner and let ensureTmuxPanesJoined poll the executor's
 // panes in once the daemon creates them.
 type paneWaitForExecutorMsg struct{}
+
+// paneRemoteMsg is returned by the pane setup when the task was placed on
+// another machine. The detail view's pane machinery is entirely local — there is
+// no pane here to join, and starting one would be a second agent on a second
+// machine — so the view says where the task is and how to reach it instead.
+type paneRemoteMsg struct{ message string }
 
 // logsLoadedMsg is sent when async log loading completes.
 type logsLoadedMsg struct {
@@ -572,6 +582,7 @@ func (m *DetailModel) restartForExecutorSwitch(prevExecutor string) tea.Cmd {
 	m.paneLoading = true
 	m.paneLoadingStart = time.Now()
 	m.paneError = ""
+	m.paneNotice = ""
 
 	// Clear stale session ID (belongs to old executor)
 	m.database.UpdateTaskClaudeSessionID(m.task.ID, "")
@@ -821,6 +832,7 @@ func NewDetailModel(t *db.Task, database *db.DB, exec *executor.Executor, width,
 	// paneWaitForExecutorMsg.
 	m.paneLoading = true
 	m.paneError = ""
+	m.paneNotice = ""
 	m.paneLoadingStart = time.Now()
 	log.Info("NewDetailModel: completed for task %d (async pane setup pending)", t.ID)
 	return m, tea.Batch(m.setupPanesAsync(), m.spinnerTick())
@@ -836,10 +848,19 @@ func (m *DetailModel) setupPanesAsync() tea.Cmd {
 	taskID := m.task.ID
 	sessionID := m.task.ClaudeSessionID
 	action := pendingPaneAction(m.task)
+	remoteNotice := m.remoteTaskNotice()
 
 	return func() tea.Msg {
 		log := GetLogger()
 		log.Info("setupPanesAsync: starting for task %d", taskID)
+
+		// Placed on another machine: there is nothing local to join, and every
+		// tmux call below would search this machine's server for a window that only
+		// exists on the host the task runs on.
+		if remoteNotice != "" {
+			log.Info("setupPanesAsync: task %d is placed remotely; showing its location", taskID)
+			return paneRemoteMsg{message: remoteNotice}
+		}
 
 		// Resolve the actual UI session name (avoid prefix-matching the wrong session).
 		if out, err := osExec.Command("tmux", "display-message", "-p", "#{session_name}").Output(); err == nil {
@@ -903,9 +924,28 @@ func (m *DetailModel) setupPanesAsync() tea.Cmd {
 // startPanesAsync returns a command that starts the Claude session and joins panes in the background.
 func (m *DetailModel) startPanesAsync() tea.Cmd {
 	sessionID := m.task.ClaudeSessionID
+	remoteNotice := m.remoteTaskNotice()
 	return func() tea.Msg {
+		// Never start a second agent here for a task that is already running
+		// somewhere else.
+		if remoteNotice != "" {
+			return paneRemoteMsg{message: remoteNotice}
+		}
 		return m.startAndJoinSession(sessionID)
 	}
+}
+
+// remoteTaskNotice returns the line to show in place of panes when this task was
+// placed on another machine, or "" for an ordinary local task.
+func (m *DetailModel) remoteTaskNotice() string {
+	if m.task == nil || m.executor == nil {
+		return ""
+	}
+	loc, ok := m.executor.RemoteLocation(m.task)
+	if !ok {
+		return ""
+	}
+	return executor.RemoteTaskMessage(loc)
 }
 
 // startAndJoinSession starts the task's executor session, locates its window, and
@@ -1049,11 +1089,22 @@ func (m *DetailModel) Update(msg tea.Msg) (*DetailModel, tea.Cmd) {
 			m.daemonSessionID = msg.daemonSessionID
 			m.cachedWindowTarget = msg.windowTarget
 			m.paneError = ""
+			m.paneNotice = ""
 			// Focus executor pane if requested (e.g., when jumping from notification)
 			if m.focusExecutorOnJoin && m.claudePaneID != "" {
 				m.focusExecutorPane()
 			}
 		}
+		m.setViewportContent()
+		return m, nil
+
+	case paneRemoteMsg:
+		// Not a failure: the task is running, just not here. Stop the spinner, show
+		// where it is, and leave the pane state empty.
+		m.paneLoading = false
+		m.waitingForExecutor = false
+		m.paneError = ""
+		m.paneNotice = msg.message
 		m.setViewportContent()
 		return m, nil
 
@@ -1063,6 +1114,7 @@ func (m *DetailModel) Update(msg tea.Msg) (*DetailModel, tea.Cmd) {
 		m.paneLoading = true
 		m.waitingForExecutor = true
 		m.paneError = ""
+		m.paneNotice = ""
 		m.setViewportContent()
 		return m, m.spinnerTick()
 
@@ -1366,6 +1418,7 @@ func (m *DetailModel) ensureTmuxPanesJoined() {
 			m.paneLoading = false
 			m.waitingForExecutor = false
 			m.paneError = ""
+			m.paneNotice = ""
 		} else if m.executorBusyElsewhere {
 			// Another ty instance owns this executor: stop spinning and show why.
 			m.paneLoading = false
@@ -3075,6 +3128,16 @@ func (m *DetailModel) renderHeader() string {
 		}
 		loadingText := fmt.Sprintf("%s Starting %s...", spinner, m.executorDisplayName())
 		meta.WriteString(loadingStyle.Render(loadingText))
+	}
+
+	// Where a remotely placed task actually is. Informational, not an error.
+	if m.paneNotice != "" {
+		meta.WriteString("  ")
+		noticeStyle := lipgloss.NewStyle().Foreground(dimmedFg)
+		if m.focused {
+			noticeStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("39"))
+		}
+		meta.WriteString(noticeStyle.Render("⇄ " + m.paneNotice))
 	}
 
 	// Executor failure indicator
