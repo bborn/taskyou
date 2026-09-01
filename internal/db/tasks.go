@@ -1479,6 +1479,80 @@ func (db *DB) GetTaskPlacement(taskID int64) (target, reason string, err error) 
 	return target, reason, nil
 }
 
+// TaskPlacement is a task's recorded placement decision: where it runs, why,
+// and the checkout it was given on that host.
+//
+// Decided is the state placement_target alone cannot express. An empty target is
+// a real answer meaning "run here", so without a separate marker "the resolver
+// chose local" and "the resolver was never asked" read identically — and a task
+// that had been deliberately placed locally would be re-asked on every retry.
+type TaskPlacement struct {
+	Target  string // Host the task runs on ("" = this machine)
+	Reason  string // The resolver's explanation
+	WorkDir string // The checkout on that host ("" for local)
+	Decided bool   // Whether placement has been decided at all
+}
+
+// SetTaskPlacementDecision records a placement decision, stamping the time it
+// was made. Called once, at the first spawn; every later spawn reads it back
+// with GetTaskPlacementDecision instead of asking the resolver again.
+func (db *DB) SetTaskPlacementDecision(taskID int64, target, reason, workDir string) error {
+	_, err := db.Exec(`UPDATE tasks
+		SET placement_target = ?, placement_reason = ?, placement_workdir = ?,
+		    placement_decided_at = CURRENT_TIMESTAMP
+		WHERE id = ?`, target, reason, workDir, taskID)
+	return err
+}
+
+// GetTaskPlacementDecision returns the placement already decided for a task.
+func (db *DB) GetTaskPlacementDecision(taskID int64) (TaskPlacement, error) {
+	var (
+		p         TaskPlacement
+		decidedAt sql.NullString
+	)
+	err := db.QueryRow(`SELECT COALESCE(placement_target, ''), COALESCE(placement_reason, ''),
+		       COALESCE(placement_workdir, ''), placement_decided_at
+		FROM tasks WHERE id = ?`, taskID).Scan(&p.Target, &p.Reason, &p.WorkDir, &decidedAt)
+	if err != nil {
+		return TaskPlacement{}, err
+	}
+	p.Decided = decidedAt.Valid && decidedAt.String != ""
+	return p, nil
+}
+
+// ClearTaskPlacement forgets a task's placement decision so the next spawn asks
+// the resolver again. This is what `ty retry --replace` does, and it is the ONLY
+// way a placed task moves hosts: a host that has gone away fails the task
+// visibly rather than silently re-placing it, because a silent move orphans the
+// worktree, branch and executor session the first attempt left behind.
+func (db *DB) ClearTaskPlacement(taskID int64) error {
+	_, err := db.Exec(`UPDATE tasks
+		SET placement_target = '', placement_reason = '', placement_workdir = '',
+		    placement_decided_at = NULL, remote_worktree_path = '', remote_branch = ''
+		WHERE id = ?`, taskID)
+	return err
+}
+
+// SetTaskRemoteWorktree records the isolated worktree a remotely placed task was
+// given on its host, so the TUI can say where the task actually is and a retry
+// can find the same directory.
+func (db *DB) SetTaskRemoteWorktree(taskID int64, path, branch string) error {
+	_, err := db.Exec(`UPDATE tasks SET remote_worktree_path = ?, remote_branch = ? WHERE id = ?`,
+		path, branch, taskID)
+	return err
+}
+
+// GetTaskRemoteWorktree returns the remote worktree path and branch, both empty
+// for a task that has never run remotely.
+func (db *DB) GetTaskRemoteWorktree(taskID int64) (path, branch string, err error) {
+	err = db.QueryRow(`SELECT COALESCE(remote_worktree_path, ''), COALESCE(remote_branch, '')
+		FROM tasks WHERE id = ?`, taskID).Scan(&path, &branch)
+	if err != nil {
+		return "", "", err
+	}
+	return path, branch, nil
+}
+
 // HasSessionStarted reports whether the task's executor session actually began. A task
 // flips to 'processing' and then spends tens of seconds on worktree setup (clone, bundle,
 // migrations) before any session exists — so this, not the absence of a tmux window, is

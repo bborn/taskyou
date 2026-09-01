@@ -208,6 +208,62 @@ func (e *Executor) taskWorkdir(task *db.Task) string {
 // so there is nowhere safe to start an agent.
 var ErrNoWorktree = errors.New("task has no worktree yet")
 
+// ErrPlacedRemotely means the task is running on another machine, so this
+// process has no workspace to launch it in and no pane to show.
+//
+// It is NOT the same failure as ErrNoWorktree, and saying so matters: a
+// remotely-placed task opened in the TUI used to report "task has no worktree
+// yet: refusing to start ... Check your executor configuration", which reads as
+// a broken local setup when the truth is that the task is alive and well on
+// another host.
+var ErrPlacedRemotely = errors.New("task is running on another machine")
+
+// RemoteTaskLocation describes where a remotely placed task actually lives, for
+// surfaces (the TUI, `ty show`) that can only say so rather than show it.
+type RemoteTaskLocation struct {
+	Host    string // the placed host
+	WorkDir string // the task's worktree on it
+	Branch  string // the branch checked out there
+	Attach  string // the ssh+tmux command that attaches to its session
+}
+
+// RemoteLocation returns where a task is running when it was placed on another
+// host, and false when it is an ordinary local task.
+func (e *Executor) RemoteLocation(task *db.Task) (RemoteTaskLocation, bool) {
+	if task == nil || task.PlacementTarget == "" {
+		return RemoteTaskLocation{}, false
+	}
+	loc := RemoteTaskLocation{Host: task.PlacementTarget}
+	if e.db != nil {
+		if path, branch, err := e.db.GetTaskRemoteWorktree(task.ID); err == nil {
+			loc.WorkDir, loc.Branch = path, branch
+		}
+	}
+	if task.DaemonSession != "" {
+		loc.Attach = fmt.Sprintf("ssh %s -t tmux attach -t %s:%s",
+			task.PlacementTarget, task.DaemonSession, TmuxWindowName(task.ID))
+	}
+	return loc, true
+}
+
+// RemoteTaskMessage is the one-line explanation a local surface shows instead of
+// panes for a remotely placed task. It never blames the local configuration,
+// because nothing local is wrong.
+func RemoteTaskMessage(loc RemoteTaskLocation) string {
+	msg := fmt.Sprintf("Running on %s", loc.Host)
+	if loc.WorkDir != "" {
+		msg += " in " + loc.WorkDir
+	}
+	if loc.Branch != "" {
+		msg += " (" + loc.Branch + ")"
+	}
+	msg += " — no local pane to show."
+	if loc.Attach != "" {
+		msg += " Attach with: " + loc.Attach
+	}
+	return msg
+}
+
 // launchWorkdir returns the directory to START AN AGENT in, or an error when no
 // isolated directory exists.
 //
@@ -227,6 +283,12 @@ var ErrNoWorktree = errors.New("task has no worktree yet")
 func (e *Executor) launchWorkdir(task *db.Task) (string, error) {
 	if task == nil {
 		return "", ErrNoWorktree
+	}
+	// A task placed on another machine has no local workspace by design. Say that,
+	// instead of reporting the local "no worktree" failure and telling the user to
+	// check an executor configuration that is not the problem.
+	if task.PlacementTarget != "" {
+		return "", fmt.Errorf("%w: task %d was placed on %s", ErrPlacedRemotely, task.ID, task.PlacementTarget)
 	}
 	if task.WorktreePath != "" {
 		return task.WorktreePath, nil

@@ -375,6 +375,26 @@ func (db *DB) migrate() error {
 		// a real bug unless the result can be traced to the machine that produced it.
 		`ALTER TABLE tasks ADD COLUMN placement_target TEXT DEFAULT ''`,
 		`ALTER TABLE tasks ADD COLUMN placement_reason TEXT DEFAULT ''`,
+		// When placement was DECIDED, which is the third state placement_target
+		// alone cannot express: an empty target means "run here", and without a
+		// timestamp that is indistinguishable from "never asked". Placement is
+		// decided once, at the first spawn, and reused for every retry, restart and
+		// resume — a resolver that picks by free memory would otherwise move a
+		// retried task to a different host, orphaning the worktree, branch and
+		// session the first attempt left on the old one.
+		`ALTER TABLE tasks ADD COLUMN placement_decided_at DATETIME`,
+		// The checkout on the placed host, as the resolver named it and Preflight
+		// resolved it. Stored so a retry can reach the same directory without
+		// asking the resolver again.
+		`ALTER TABLE tasks ADD COLUMN placement_workdir TEXT DEFAULT ''`,
+		// The task's OWN worktree on the placed host, and its branch. A remote run
+		// gets the same isolation a local one does: it never runs in the host's
+		// primary checkout. Kept out of worktree_path deliberately — that column
+		// names a directory on THIS machine, and everything that reads it (the
+		// detail view, worktree cleanup, dirty-tree checks) would stat a path that
+		// does not exist here.
+		`ALTER TABLE tasks ADD COLUMN remote_worktree_path TEXT DEFAULT ''`,
+		`ALTER TABLE tasks ADD COLUMN remote_branch TEXT DEFAULT ''`,
 	}
 
 	for _, m := range alterMigrations {

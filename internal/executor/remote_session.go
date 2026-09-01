@@ -55,7 +55,12 @@ func (e *Executor) runRemoteSession(ctx context.Context, task *db.Task, r Remote
 		"-t", daemonSession,
 		"-n", windowName,
 		"-c", r.WorkDir,
-		"sh", "-c", script).CombinedOutput()
+		// A LOGIN shell: tmux execs this directly on the remote host, so nothing
+		// else would read ~/.profile and the agent binary (claude lives in
+		// ~/.local/bin on ol-agents) would simply not be on PATH. The window then
+		// runs "claude: not found", exits in under a second, and the task parks as
+		// "needs review" with nothing to explain it.
+		"sh", "-lc", script).CombinedOutput()
 	if err != nil {
 		msg := fmt.Sprintf("Could not start the session on %s: %v (%s)", r.Host, err, strings.TrimSpace(string(out)))
 		e.logLine(task.ID, "error", msg)

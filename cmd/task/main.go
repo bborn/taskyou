@@ -1733,6 +1733,21 @@ Examples:
 				if task.PlacementReason != "" {
 					fmt.Printf("Because:  %s\n", dimStyle.Render(task.PlacementReason))
 				}
+				// A remotely placed task's worktree is on that host, not in
+				// worktree_path — which names a directory on THIS machine.
+				if task.PlacementTarget != "" {
+					if rpath, rbranch, err := database.GetTaskRemoteWorktree(taskID); err == nil && rpath != "" {
+						fmt.Printf("Remote worktree: %s\n", rpath)
+						if rbranch != "" {
+							fmt.Printf("Remote branch:   %s\n", rbranch)
+						}
+						if task.DaemonSession != "" {
+							fmt.Printf("Attach:   %s\n", dimStyle.Render(fmt.Sprintf(
+								"ssh %s -t tmux attach -t %s:task-%d",
+								task.PlacementTarget, task.DaemonSession, task.ID)))
+						}
+					}
+				}
 
 				// Worktree info
 				if task.WorktreePath != "" {
@@ -2341,10 +2356,16 @@ Examples:
 		ValidArgsFunction: completeTaskIDs,
 		Long: `Retry a task that is blocked or failed, optionally with feedback.
 
+A task that was placed on another machine stays on it: the worktree, branch and
+executor session from the first attempt all live there. --replace forgets that
+decision so the placement resolver is asked again, which is the only way a task
+moves hosts.
+
 Examples:
   task retry 42
   task retry 42 --feedback "Try a different approach"
-  task retry 42 -m "Focus on the error handling"`,
+  task retry 42 -m "Focus on the error handling"
+  task retry 42 --replace   # ask the placement resolver again`,
 		Args: cobra.ExactArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
 			var taskID int64
@@ -2374,6 +2395,20 @@ Examples:
 				os.Exit(1)
 			}
 
+			if replace, _ := cmd.Flags().GetBool("replace"); replace {
+				placement, perr := database.GetTaskPlacementDecision(taskID)
+				if err := database.ClearTaskPlacement(taskID); err != nil {
+					fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+					os.Exit(1)
+				}
+				if perr == nil && placement.Decided && placement.Target != "" {
+					fmt.Println(dimStyle.Render(fmt.Sprintf(
+						"Forgot the placement on %s; the resolver will be asked again.", placement.Target)))
+				} else {
+					fmt.Println(dimStyle.Render("Forgot this task's placement; the resolver will be asked again."))
+				}
+			}
+
 			if err := database.RetryTask(taskID, feedback); err != nil {
 				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
 				os.Exit(1)
@@ -2383,6 +2418,7 @@ Examples:
 		},
 	}
 	retryCmd.Flags().StringP("feedback", "m", "", "Feedback for the retry")
+	retryCmd.Flags().Bool("replace", false, "Forget where this task was placed and ask the placement resolver again")
 	rootCmd.AddCommand(retryCmd)
 
 	// Input subcommand - send input directly to a running task's executor

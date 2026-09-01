@@ -48,7 +48,24 @@ func (r RemoteRunner) Command(ctx context.Context, workDir, name string, args ..
 	if workDir == "" {
 		workDir = r.WorkDir
 	}
-	return exec.CommandContext(ctx, r.ssh(), append(r.sshArgs(), r.remoteScript(workDir, name, args...))...)
+	return exec.CommandContext(ctx, r.ssh(), append(r.sshArgs(), loginShell(r.remoteScript(workDir, name, args...)))...)
+}
+
+// loginShell wraps a remote shell line so the host runs it in a LOGIN shell.
+//
+// ssh with a command runs a NON-login, NON-interactive shell, so ~/.profile
+// never runs. Everything a fleet host installs per-user is invisible in that
+// shell: on ol-agents `sh -c 'command -v claude'` finds nothing while
+// `sh -lc 'command -v claude'` finds /home/olgm/.local/bin/claude. The first
+// task ty ever placed remotely died on exactly this — the window ran
+// "claude: not found", exited within a second, and the task parked as "needs
+// review" with no trace of why.
+//
+// It is applied to EVERY remote command, not just the agent launch: git, tmux
+// and the worktree provisioning script are all just as likely to be
+// version-managed (mise, asdf, rbenv, nvm) or to live in ~/.local/bin.
+func loginShell(script string) string {
+	return "sh -lc " + shellQuote(script)
 }
 
 // remoteScript renders the shell line the remote host will run.
@@ -124,13 +141,14 @@ func (r RemoteRunner) Preflight(ctx context.Context) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, r.connectTimeout()+5*time.Second)
 	defer cancel()
 
-	probe := "command -v tmux >/dev/null || { echo 'tmux is not installed there' >&2; exit 1; }; "
+	probe := "command -v tmux >/dev/null || { echo 'tmux is not installed there' >&2; exit 1; }; " +
+		"command -v git >/dev/null || { echo 'git is not installed there' >&2; exit 1; }; "
 	if r.WorkDir != "" {
 		probe += fmt.Sprintf("cd %s || exit 1; ", shellQuoteRemotePath(r.WorkDir))
 	}
 	probe += "pwd"
 
-	cmd := exec.CommandContext(ctx, r.ssh(), append(r.sshArgs(), probe)...)
+	cmd := exec.CommandContext(ctx, r.ssh(), append(r.sshArgs(), loginShell(probe))...)
 	cmd.WaitDelay = 2 * time.Second
 
 	var stderr strings.Builder
