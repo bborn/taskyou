@@ -253,6 +253,12 @@ type DetailModel struct {
 	// as information, not as a failure, because nothing failed.
 	paneNotice string
 
+	// remotePaneID is the LOCAL pane holding an ssh client attached to a remotely
+	// placed task's tmux session. It is not a joined daemon pane and must never be
+	// broken back to one: nothing on this machine owns it, so it is created and
+	// killed outright. Empty for every local task.
+	remotePaneID string
+
 	// waitingForExecutor is true when we're passively waiting for the daemon's
 	// executor to create the tmux window (e.g. a freshly created+queued task with
 	// no worktree yet). In this mode we still show the loading spinner, but unlike
@@ -298,6 +304,14 @@ type paneWaitForExecutorMsg struct{}
 // no pane here to join, and starting one would be a second agent on a second
 // machine — so the view says where the task is and how to reach it instead.
 type paneRemoteMsg struct{ message string }
+
+// paneRemoteAttachedMsg is returned when a remotely placed task's live tmux
+// session was rendered into a LOCAL pane. paneID is that pane; notice is the
+// line shown beside it, which documents the nested-tmux prefix.
+type paneRemoteAttachedMsg struct {
+	paneID string
+	notice string
+}
 
 // logsLoadedMsg is sent when async log loading completes.
 type logsLoadedMsg struct {
@@ -848,18 +862,19 @@ func (m *DetailModel) setupPanesAsync() tea.Cmd {
 	taskID := m.task.ID
 	sessionID := m.task.ClaudeSessionID
 	action := pendingPaneAction(m.task)
-	remoteNotice := m.remoteTaskNotice()
+	remoteLoc, isRemote := m.remoteTaskLocation()
 
 	return func() tea.Msg {
 		log := GetLogger()
 		log.Info("setupPanesAsync: starting for task %d", taskID)
 
-		// Placed on another machine: there is nothing local to join, and every
-		// tmux call below would search this machine's server for a window that only
-		// exists on the host the task runs on.
-		if remoteNotice != "" {
-			log.Info("setupPanesAsync: task %d is placed remotely; showing its location", taskID)
-			return paneRemoteMsg{message: remoteNotice}
+		// Placed on another machine: there is no local window to join, and every
+		// tmux call below would search this machine's server for one that only
+		// exists on the host the task runs on. Its session is shown by attaching to
+		// THAT host's tmux inside a local pane instead.
+		if isRemote {
+			log.Info("setupPanesAsync: task %d is placed on %s; attaching to its session", taskID, remoteLoc.Host)
+			return m.setupRemotePane(remoteLoc)
 		}
 
 		// Resolve the actual UI session name (avoid prefix-matching the wrong session).
@@ -924,28 +939,180 @@ func (m *DetailModel) setupPanesAsync() tea.Cmd {
 // startPanesAsync returns a command that starts the Claude session and joins panes in the background.
 func (m *DetailModel) startPanesAsync() tea.Cmd {
 	sessionID := m.task.ClaudeSessionID
-	remoteNotice := m.remoteTaskNotice()
+	remoteLoc, isRemote := m.remoteTaskLocation()
 	return func() tea.Msg {
 		// Never start a second agent here for a task that is already running
-		// somewhere else.
-		if remoteNotice != "" {
-			return paneRemoteMsg{message: remoteNotice}
+		// somewhere else — show the one that is running there.
+		if isRemote {
+			return m.setupRemotePane(remoteLoc)
 		}
 		return m.startAndJoinSession(sessionID)
 	}
 }
 
-// remoteTaskNotice returns the line to show in place of panes when this task was
-// placed on another machine, or "" for an ordinary local task.
-func (m *DetailModel) remoteTaskNotice() string {
+// remoteTaskLocation returns where a remotely placed task is running, and false
+// for an ordinary local task.
+func (m *DetailModel) remoteTaskLocation() (executor.RemoteTaskLocation, bool) {
 	if m.task == nil || m.executor == nil {
+		return executor.RemoteTaskLocation{}, false
+	}
+	return m.executor.RemoteLocation(m.task)
+}
+
+// setupRemotePane shows a remotely placed task's session where a local task's
+// pane would be.
+//
+// ty already knows the exact ssh+tmux command that reaches the agent; printing
+// it for the user to copy was never the best it could do. tmux nests, so
+// attaching that session inside a local pane renders it live and takes keystrokes
+// like any other pane.
+//
+// The three answers a probe can give are all handled, and none of them blanks the
+// pane: live attaches, ended says so and keeps the manual command visible, and
+// unreachable says the host cannot be seen — which is emphatically NOT the same
+// as the task being over.
+//
+// Runs in the pane-setup goroutine: every branch here makes an ssh round trip.
+func (m *DetailModel) setupRemotePane(loc executor.RemoteTaskLocation) tea.Msg {
+	log := GetLogger()
+	if m.task == nil || m.executor == nil {
+		return paneRemoteMsg{message: executor.RemoteTaskMessage(loc)}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	switch m.executor.RemoteSessionState(ctx, m.task) {
+	case executor.RemoteSessionLive:
+		if paneID := m.attachRemotePane(loc); paneID != "" {
+			return paneRemoteAttachedMsg{paneID: paneID, notice: executor.RemoteAttachNotice(loc)}
+		}
+		// Attaching failed locally (no tmux, split refused). Never leave the user
+		// with nothing: fall back to the text that tells them how to get there.
+		log.Error("setupRemotePane: could not create an attach pane for task %d", m.task.ID)
+		return paneRemoteMsg{message: executor.RemoteTaskMessage(loc)}
+	case executor.RemoteSessionUnreachable:
+		return paneRemoteMsg{message: executor.RemoteUnreachableMessage(loc)}
+	default:
+		return paneRemoteMsg{message: executor.RemoteEndedMessage(loc)}
+	}
+}
+
+// attachRemotePane creates the local pane that runs the ssh attach, and returns
+// its pane id ("" if it could not be created).
+//
+// It is deliberately much smaller than joinTmuxPanes. There is no daemon pane to
+// borrow, no ownership guard to run and nothing to break back afterwards: the
+// pane holds an ssh client this view started, so it is created here and killed
+// in closeRemotePane.
+func (m *DetailModel) attachRemotePane(loc executor.RemoteTaskLocation) string {
+	log := GetLogger()
+	if os.Getenv("TMUX") == "" {
 		return ""
 	}
-	loc, ok := m.executor.RemoteLocation(m.task)
-	if !ok {
+
+	// Same serialization as a local join: these commands mutate the shared
+	// task-ui layout.
+	tmuxPaneOpMu.Lock()
+	defer tmuxPaneOpMu.Unlock()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	if m.uiSessionName == "" {
+		if out, err := osExec.CommandContext(ctx, "tmux", "display-message", "-p", "#{session_name}").Output(); err == nil {
+			m.uiSessionName = strings.TrimSpace(string(out))
+		} else {
+			m.uiSessionName = "task-ui"
+		}
+	}
+
+	tuiPaneOut, err := osExec.CommandContext(ctx, "tmux", "display-message", "-p", "#{pane_id}").Output()
+	if err != nil {
+		log.Error("attachRemotePane: could not read the TUI pane id: %v", err)
 		return ""
 	}
-	return executor.RemoteTaskMessage(loc)
+	tuiPaneID := strings.TrimSpace(string(tuiPaneOut))
+	m.tuiPaneID = tuiPaneID
+
+	// Clear any panes left behind by the previously viewed task, exactly as the
+	// local join path does, so the remote pane is not stacked under them.
+	if paneList, err := osExec.CommandContext(ctx, "tmux", "list-panes", "-t", m.uiSessionName, "-F", "#{pane_id}").Output(); err == nil {
+		for _, paneID := range strings.Split(strings.TrimSpace(string(paneList)), "\n") {
+			if paneID != "" && paneID != tuiPaneID {
+				m.killPaneWithProcess(ctx, paneID)
+			}
+		}
+		osExec.CommandContext(ctx, "tmux", "resize-pane", "-t", tuiPaneID, "-y", "100%").Run()
+	}
+
+	script := executor.RemoteAttachScript(m.task, loc)
+	out, err := osExec.CommandContext(ctx, "tmux", "split-window",
+		"-v", "-d",
+		"-t", tuiPaneID,
+		"-P", "-F", "#{pane_id}",
+		script).Output()
+	if err != nil {
+		log.Error("attachRemotePane: split-window failed: %v", err)
+		return ""
+	}
+	paneID := strings.TrimSpace(string(out))
+	if paneID == "" {
+		return ""
+	}
+	log.Info("attachRemotePane: attached task %d to %s in pane %s", m.task.ID, loc.Host, paneID)
+
+	// Say where the pane goes and which prefix reaches its tmux, in the two places
+	// a user actually looks: the pane's own border title and the status bar.
+	osExec.CommandContext(ctx, "tmux", "select-pane", "-t", paneID, "-T",
+		fmt.Sprintf("%s (remote) — prefix %s", loc.Host, executor.RemoteInnerPrefixHuman)).Run()
+	osExec.CommandContext(ctx, "tmux", "set-option", "-t", m.uiSessionName, "status", "on").Run()
+	osExec.CommandContext(ctx, "tmux", "set-option", "-t", m.uiSessionName, "status-right-length", "80").Run()
+	osExec.CommandContext(ctx, "tmux", "set-option", "-t", m.uiSessionName, "status-right",
+		fmt.Sprintf(" remote pane: %s is its tmux prefix ", executor.RemoteInnerPrefixHuman)).Run()
+	osExec.CommandContext(ctx, "tmux", "set-option", "-t", m.uiSessionName, "pane-border-lines", "heavy").Run()
+	osExec.CommandContext(ctx, "tmux", "set-option", "-t", m.uiSessionName, "pane-border-indicators", "arrows").Run()
+
+	// Give the TUI its configured share of the window and keep the keyboard,
+	// matching what a local join leaves behind.
+	osExec.CommandContext(ctx, "tmux", "resize-pane", "-t", tuiPaneID, "-y", m.getDetailPaneHeight()).Run()
+	osExec.CommandContext(ctx, "tmux", "select-pane", "-t", tuiPaneID, "-T", m.getPaneTitle()).Run()
+	osExec.CommandContext(ctx, "tmux", "select-pane", "-t", tuiPaneID).Run()
+	return paneID
+}
+
+// closeRemotePane kills the attach pane, which drops the ssh client, which
+// detaches the grouped view session on the host — where destroy-unattached then
+// disposes of it. Nothing is left running on either machine.
+func (m *DetailModel) closeRemotePane(resizeTUI bool) {
+	if m.remotePaneID == "" {
+		return
+	}
+	tmuxPaneOpMu.Lock()
+	defer tmuxPaneOpMu.Unlock()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	m.killPaneWithProcess(ctx, m.remotePaneID)
+	m.remotePaneID = ""
+
+	if m.uiSessionName != "" {
+		osExec.CommandContext(ctx, "tmux", "set-option", "-t", m.uiSessionName, "status-right", " ").Run()
+	}
+	if resizeTUI {
+		osExec.CommandContext(ctx, "tmux", "resize-pane", "-t", "task-ui:.0", "-y", "100%").Run()
+	}
+}
+
+// remotePaneAlive reports whether the attach pane is still there. It dies when
+// the user closes it after reading why the session ended.
+func (m *DetailModel) remotePaneAlive() bool {
+	if m.remotePaneID == "" {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	return osExec.CommandContext(ctx, "tmux", "display-message", "-t", m.remotePaneID, "-p", "#{pane_id}").Run() == nil
 }
 
 // startAndJoinSession starts the task's executor session, locates its window, and
@@ -1108,6 +1275,18 @@ func (m *DetailModel) Update(msg tea.Msg) (*DetailModel, tea.Cmd) {
 		m.setViewportContent()
 		return m, nil
 
+	case paneRemoteAttachedMsg:
+		// The remote session is rendering in a local pane. It is not a joined
+		// daemon pane, so claudePaneID stays empty and none of the join/break
+		// machinery touches it.
+		m.paneLoading = false
+		m.waitingForExecutor = false
+		m.paneError = ""
+		m.remotePaneID = msg.paneID
+		m.paneNotice = msg.notice
+		m.setViewportContent()
+		return m, nil
+
 	case paneWaitForExecutorMsg:
 		// A freshly queued task with no worktree yet: keep the spinner up and let
 		// the Refresh() poll join the executor's panes once the daemon creates them.
@@ -1164,6 +1343,7 @@ func (m *DetailModel) Update(msg tea.Msg) (*DetailModel, tea.Cmd) {
 // Cleanup should be called when leaving detail view.
 // It saves the current pane height before breaking the panes.
 func (m *DetailModel) Cleanup() {
+	m.closeRemotePane(true)
 	if m.claudePaneID != "" || m.workdirPaneID != "" {
 		m.breakTmuxPanes(true, true) // saveHeight=true, resizeTUI=true
 	}
@@ -1176,6 +1356,7 @@ func (m *DetailModel) Cleanup() {
 // Use this during task transitions (prev/next) to avoid rounding errors
 // that accumulate with each transition and cause the pane to shrink.
 func (m *DetailModel) CleanupWithoutSaving() {
+	m.closeRemotePane(true)
 	if m.claudePaneID != "" || m.workdirPaneID != "" {
 		m.breakTmuxPanes(false, true) // saveHeight=false, resizeTUI=true
 	}
@@ -1185,6 +1366,7 @@ func (m *DetailModel) CleanupWithoutSaving() {
 // ClearPaneState clears the cached pane state without breaking panes.
 // Use this when the tmux window has been recreated externally (e.g., dangerous mode toggle).
 func (m *DetailModel) ClearPaneState() {
+	m.closeRemotePane(false)
 	m.claudePaneID = ""
 	m.workdirPaneID = ""
 	m.daemonSessionID = ""
@@ -1372,6 +1554,17 @@ func (m *DetailModel) paneJoinBlockedByLoad() bool {
 // This handles cases where panes were externally closed or a session was created after opening the view.
 func (m *DetailModel) ensureTmuxPanesJoined() {
 	if os.Getenv("TMUX") == "" {
+		return
+	}
+
+	// A remotely placed task has no local window to join. Its pane is an ssh
+	// client this view created; the only upkeep is noticing when the user closes
+	// it. Falling through would search this machine's tmux for a window that
+	// exists on another one, every tick, forever.
+	if m.task != nil && m.task.PlacementTarget != "" {
+		if m.remotePaneID != "" && !m.remotePaneAlive() {
+			m.remotePaneID = ""
+		}
 		return
 	}
 

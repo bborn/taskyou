@@ -3,8 +3,11 @@ package executor
 import (
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -106,11 +109,63 @@ func (r RemoteRunner) ssh() string {
 // whose passphrase is not cached drops ssh into an interactive prompt inside the
 // daemon, where nobody can answer it, and the task hangs instead of failing.
 func (r RemoteRunner) sshArgs() []string {
-	return []string{
+	args := []string{
 		"-o", "BatchMode=yes",
 		"-o", fmt.Sprintf("ConnectTimeout=%d", int(r.connectTimeout().Seconds())),
-		r.Host,
 	}
+	args = append(args, sshMultiplexArgs()...)
+	return append(args, r.Host)
+}
+
+// sshMultiplexArgs reuse ONE ssh connection per host across every command ty
+// sends there.
+//
+// Polling made this necessary. A placed task's window is checked on a timer for
+// as long as it runs, and without multiplexing every check pays a fresh TCP
+// connect, key exchange and authentication — a few hundred milliseconds and a
+// new sshd process on the far side, per task, forever. With a shared master the
+// checks after the first are a write down an existing socket.
+//
+// ControlPersist keeps the master alive a little longer than the poll interval,
+// so consecutive polls of the same task reuse it rather than re-handshaking in
+// the gap. If the socket is stale or unusable ssh silently opens a normal
+// connection, so the worst case is today's behaviour.
+func sshMultiplexArgs() []string {
+	dir := sshControlDir()
+	if dir == "" {
+		return nil
+	}
+	return []string{
+		"-o", "ControlMaster=auto",
+		// %C is a hash of (host, port, user, proxy) — one master per destination.
+		"-o", "ControlPath=" + filepath.Join(dir, "%C"),
+		"-o", "ControlPersist=60s",
+	}
+}
+
+// sshControlDir returns the private directory the control sockets live in, or ""
+// when one cannot be prepared (in which case ty simply does not multiplex).
+//
+// It is deliberately NOT under os.TempDir(): on macOS that is a long
+// per-user path under /var/folders, and a unix socket path is capped at ~104
+// bytes — %C alone is 64 hex characters, so the socket would silently fail to
+// bind. The directory is per-uid and 0700 so another user cannot plant a socket
+// ty would then connect through.
+func sshControlDir() string {
+	dir := filepath.Join("/tmp", fmt.Sprintf("ty-ssh-%d", os.Getuid()))
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return ""
+	}
+	// A pre-existing directory owned by someone else, or left group/world
+	// writable, is not somewhere to keep a control socket.
+	info, err := os.Stat(dir)
+	if err != nil || !info.IsDir() || info.Mode().Perm() != 0o700 {
+		return ""
+	}
+	if st, ok := info.Sys().(*syscall.Stat_t); ok && int(st.Uid) != os.Getuid() {
+		return ""
+	}
+	return dir
 }
 
 func (r RemoteRunner) connectTimeout() time.Duration {
