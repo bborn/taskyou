@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"strings"
 	"time"
 )
@@ -120,71 +119,56 @@ func (r *Runner) ResolvePlacement(ctx context.Context, info PlacementTaskInfo) P
 	}
 
 	var answered Placement
-	for _, p := range r.plugins {
-		script, ok := p.ScriptFor(EventTaskPlacement)
-		if !ok {
-			continue
-		}
-		got, err := r.runPlacementHandler(ctx, p, script, req)
-		if err != nil {
-			r.logger.Error("placement handler failed; running locally",
-				"task", info.ID, "plugin", p.Name, "error", err)
-			continue
-		}
-		got.Handler = p.Name
-		if !got.IsLocal() {
-			r.logger.Info("placement decided", "task", info.ID, "plugin", p.Name,
-				"target", got.Target, "workdir", got.WorkDir, "reason", got.Reason)
-			return got
-		}
-		// A deliberate "local" from a handler still counts as an answer: it is
-		// what ty reports, and it stops the search only if nobody else decides.
-		if !answered.Consulted() {
-			answered = got
-		}
-	}
+	r.consult(ctx, EventTaskPlacement, r.placementTimeout(), req,
+		func(p Plugin) []string {
+			return append(os.Environ(),
+				"TASK_EVENT="+EventTaskPlacement,
+				"TASK_PLUGIN_NAME="+p.Name,
+				"TASK_PLUGIN_DIR="+p.Dir,
+			)
+		},
+		func(a handlerAnswer) bool {
+			got, err := parsePlacementOutput(a.Stdout)
+			if err != nil {
+				r.logger.Error("placement handler answered unusably; running locally",
+					"task", info.ID, "plugin", a.Plugin, "error", err)
+				return false
+			}
+			got.Handler = a.Plugin
+
+			if !got.IsLocal() {
+				r.logger.Info("placement decided", "task", info.ID, "plugin", a.Plugin,
+					"target", got.Target, "workdir", got.WorkDir, "reason", got.Reason)
+				answered = got
+				return true
+			}
+
+			// A deliberate "local" from a handler still counts as an answer: it is
+			// what ty reports. But it does not stop the search, so a later handler
+			// with an opinion about a host still gets asked.
+			if !answered.Consulted() {
+				answered = got
+			}
+			return false
+		})
 	return answered
 }
 
-// runPlacementHandler runs one handler to completion, bounded by the placement
-// timeout, and parses its stdout.
-func (r *Runner) runPlacementHandler(ctx context.Context, p Plugin, script string, req []byte) (Placement, error) {
-	ctx, cancel := context.WithTimeout(ctx, r.placementTimeout())
-	defer cancel()
-
-	cmd := exec.CommandContext(ctx, script)
-	cmd.Dir = p.Dir
-	cmd.Stdin = bytes.NewReader(req)
-	cmd.Env = append(os.Environ(),
-		"TASK_EVENT="+EventTaskPlacement,
-		"TASK_PLUGIN_NAME="+p.Name,
-		"TASK_PLUGIN_DIR="+p.Dir,
-	)
-
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	cmd.WaitDelay = placementWaitDelay
-
-	err := cmd.Run()
-	if stderr.Len() > 0 {
-		r.logger.Debug("placement handler stderr", "plugin", p.Name, "output", strings.TrimSpace(stderr.String()))
-	}
-	if ctxErr := ctx.Err(); ctxErr != nil {
-		return Placement{}, fmt.Errorf("handler did not answer within %s: %w", r.placementTimeout(), ctxErr)
-	}
-	if err != nil {
-		return Placement{}, fmt.Errorf("handler exited with error: %w (stderr: %s)", err, strings.TrimSpace(stderr.String()))
-	}
-
-	out := bytes.TrimSpace(stdout.Bytes())
+// parsePlacementOutput reads a placement handler's stdout.
+//
+// Silence is a valid answer — "no opinion", an empty target by another
+// spelling — so it is not an error. Malformed JSON is, because a handler that
+// meant to answer and got the format wrong should be visible to whoever wrote
+// it rather than silently treated as indifference.
+func parsePlacementOutput(stdout string) (Placement, error) {
+	out := bytes.TrimSpace([]byte(stdout))
 	if len(out) == 0 {
-		// Silence is a valid "no opinion" — an empty target by another spelling.
 		return Placement{}, nil
 	}
 	var placement Placement
 	if err := json.Unmarshal(out, &placement); err != nil {
-		return Placement{}, fmt.Errorf("handler wrote malformed JSON: %w (output: %s)", err, truncateForLog(string(out)))
+		return Placement{}, fmt.Errorf("handler wrote malformed JSON: %w (output: %s)",
+			err, truncateForLog(string(out)))
 	}
 	placement.Target = strings.TrimSpace(placement.Target)
 	placement.WorkDir = strings.TrimSpace(placement.WorkDir)

@@ -3,6 +3,8 @@ package hooks
 import (
 	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -201,4 +203,55 @@ func TestResolvePlacement_TrimsTarget(t *testing.T) {
 	if strings.Contains(got.WorkDir, " ") {
 		t.Errorf("WorkDir = %q, want trimmed", got.WorkDir)
 	}
+}
+
+// Both consulted hooks now share one driver, so the rules they must agree on
+// are asserted once, here, rather than drifting apart again.
+func TestConsultedHooksShareTheirRules(t *testing.T) {
+	place := func(script string) map[string]string {
+		return map[string]string{"resolve.sh": script}
+	}
+	manifest := "hooks:\n  task.placement: resolve.sh\n"
+
+	t.Run("first decisive answer wins and later handlers are not run", func(t *testing.T) {
+		root := t.TempDir()
+		marker := filepath.Join(root, "b-ran")
+		// Plugin name decides order, so "a" is asked before "b".
+		writePlugin(t, root, "a", "name: a\n"+manifest,
+			place("#!/bin/sh\necho '{\"target\":\"host-a\",\"reason\":\"first\"}'\n"))
+		writePlugin(t, root, "b", "name: b\n"+manifest,
+			place("#!/bin/sh\ntouch "+marker+"\necho '{\"target\":\"host-b\"}'\n"))
+
+		got := placementRunner(t, root).ResolvePlacement(context.Background(), placementTask())
+		if got.Target != "host-a" {
+			t.Errorf("target = %q, want the first handler's answer", got.Target)
+		}
+		if _, err := os.Stat(marker); err == nil {
+			t.Error("second handler ran after the question was already settled")
+		}
+	})
+
+	t.Run("a failing handler is skipped, not fatal", func(t *testing.T) {
+		root := t.TempDir()
+		writePlugin(t, root, "a", "name: a\n"+manifest,
+			place("#!/bin/sh\necho 'something broke' >&2\nexit 1\n"))
+		writePlugin(t, root, "b", "name: b\n"+manifest,
+			place("#!/bin/sh\necho '{\"target\":\"host-b\",\"reason\":\"survivor\"}'\n"))
+
+		got := placementRunner(t, root).ResolvePlacement(context.Background(), placementTask())
+		if got.Target != "host-b" {
+			t.Errorf("target = %q; a broken handler must not stop the search", got.Target)
+		}
+	})
+
+	t.Run("stderr is not parsed as the answer", func(t *testing.T) {
+		root := t.TempDir()
+		writePlugin(t, root, "a", "name: a\n"+manifest,
+			place("#!/bin/sh\necho 'checking hosts...' >&2\necho '{\"target\":\"host-a\"}'\n"))
+
+		got := placementRunner(t, root).ResolvePlacement(context.Background(), placementTask())
+		if got.Target != "host-a" {
+			t.Errorf("target = %q, want the stdout answer with stderr ignored", got.Target)
+		}
+	})
 }

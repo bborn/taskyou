@@ -2,10 +2,7 @@ package hooks
 
 import (
 	"bufio"
-	"bytes"
 	"context"
-	"fmt"
-	"os/exec"
 	"strings"
 	"time"
 
@@ -80,52 +77,28 @@ func (r *Runner) Route(ctx context.Context, task *db.Task) RouteDecision {
 	if task == nil {
 		return RouteDecision{}
 	}
-	for _, p := range r.plugins {
-		script, ok := p.ScriptFor(EventTaskRoute)
-		if !ok {
-			continue
-		}
-		env := append(taskEnv(EventTaskRoute, task, ""),
-			"TASK_PLUGIN_NAME="+p.Name,
-			"TASK_PLUGIN_DIR="+p.Dir,
-			"TASK_EXECUTOR="+task.Executor,
-			"TASK_CLAUDE_CONFIG_DIR="+task.ClaudeConfigDir,
-		)
 
-		decision, err := runRouteScript(ctx, script, p.Dir, env)
-		if err != nil {
-			r.logger.Warn("route hook failed", "plugin", p.Name, "task", task.ID, "error", err)
-			continue
-		}
-		if decision.Empty() {
-			continue
-		}
-		decision.Plugin = p.Name
-		return decision
-	}
-	return RouteDecision{}
-}
-
-// runRouteScript executes one routing script and parses its verdict.
-func runRouteScript(ctx context.Context, script, workDir string, env []string) (RouteDecision, error) {
-	ctx, cancel := context.WithTimeout(ctx, RouteTimeout)
-	defer cancel()
-
-	cmd := exec.CommandContext(ctx, script)
-	cmd.Dir = workDir
-	cmd.Env = env
-
-	// stdout is the decision channel and stderr is free for the script to log
-	// on, so they are captured separately — otherwise an `echo "checking..." >&2`
-	// in a router would be parsed as part of its answer.
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
-	if err := cmd.Run(); err != nil {
-		return RouteDecision{}, fmt.Errorf("%w: %s", err, strings.TrimSpace(stderr.String()))
-	}
-	return ParseRouteOutput(stdout.String()), nil
+	var decision RouteDecision
+	r.consult(ctx, EventTaskRoute, RouteTimeout, nil,
+		func(p Plugin) []string {
+			return append(taskEnv(EventTaskRoute, task, ""),
+				"TASK_PLUGIN_NAME="+p.Name,
+				"TASK_PLUGIN_DIR="+p.Dir,
+				"TASK_EXECUTOR="+task.Executor,
+				"TASK_CLAUDE_CONFIG_DIR="+task.ClaudeConfigDir,
+			)
+		},
+		func(a handlerAnswer) bool {
+			d := ParseRouteOutput(a.Stdout)
+			if d.Empty() {
+				// Printed nothing usable: not an answer, keep looking.
+				return false
+			}
+			d.Plugin = a.Plugin
+			decision = d
+			return true
+		})
+	return decision
 }
 
 // ParseRouteOutput reads a routing script's stdout.
