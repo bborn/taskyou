@@ -2417,6 +2417,12 @@ func (e *Executor) buildPrompt(task *db.Task, attachmentPaths []string) string {
 func (e *Executor) buildUniversalGuidance(task *db.Task) string {
 	var b strings.Builder
 
+	// A task placed on another machine gets different instructions, because the
+	// ones below are all false there. See remoteUniversalGuidance.
+	if task != nil && task.PlacementTarget != "" {
+		return remoteUniversalGuidance(task, e.taskUsesWorktrees(task))
+	}
+
 	b.WriteString(`Your taskyou_* tools (via the "taskyou" MCP server) are connected to this session, but your harness may DEFER them behind tool search instead of loading them upfront. If you do not see a taskyou_* tool in your active toolset, it is deferred, NOT missing — load it before use (e.g. ToolSearch "select:taskyou_complete") and then call it. Never skip a required taskyou_* call without first trying to load the tool.
 
 If a taskyou_* tool still is not callable after you tried to load it, the MCP transport is genuinely down — do NOT stall, do NOT wait for a human, and do NOT hand-edit ty's database. Fall back to the ` + "`ty`" + ` CLI, which is always on PATH and needs no MCP session:
@@ -2445,6 +2451,45 @@ Completion signaling (REQUIRED — nothing else watches for completion):
 Working directory constraint (isolated git worktree):
 - You are running in an isolated git worktree. This worktree IS your project - it is NOT a copy. NEVER access the original project directory or any path outside your current working directory.
 - ONLY use paths within your current working directory. Always use relative paths (e.g., "." or "./src") when searching or navigating - never absolute paths. The parent repo does not exist for you; only this worktree does.`)
+	}
+
+	return b.String()
+}
+
+// remoteUniversalGuidance is the execution guidance for an agent running on a
+// PLACED HOST rather than on this machine.
+//
+// Everything the local guidance says about signalling completion is not merely
+// unhelpful there — it is wrong. A remote session is launched with plain
+// `claude`: no taskyou MCP server, and the `ty` on that host (if there is one)
+// talks to THAT machine's task store, where this task does not exist. Task 5245
+// spent its last turns calling `ty complete` and `ty artifact list` and getting
+// "task not found" back, because ty had told it to.
+//
+// What replaces it is the truth about how a remote run finishes: the local
+// daemon watches this host's tmux window, and when the session ends it parks the
+// task for a human to review. The agent's job is to leave its work somewhere
+// visible — a pushed branch and a PR — and then stop.
+func remoteUniversalGuidance(task *db.Task, usesWorktrees bool) string {
+	var b strings.Builder
+
+	b.WriteString(fmt.Sprintf(`Where you are running:
+- You are running on %s, which is NOT the machine that scheduled this task. Its task store does not contain this task.
+- There is therefore NO taskyou MCP server here and NO usable `+"`ty`"+` CLI for this task. Do not call taskyou_complete, taskyou_needs_input, taskyou_get_artifact/taskyou_set_artifact, `+"`ty complete`"+`, `+"`ty artifact`"+` or `+"`ty close`"+`: they will fail with "task not found", and a failed call is not a completion signal.`, task.PlacementTarget))
+
+	b.WriteString(`
+
+Completion signaling (REQUIRED — and it is not a command you run):
+- Do your work, commit it, push the branch, and open a PR with the ` + "`gh`" + ` CLI. Put the PR link in your final message.
+- Then STOP and let your session end. The machine that scheduled this task is watching this session; when it ends, the task is parked for a human to review. That is the completion signal — there is nothing to call, and nothing marks itself done.
+- If you cannot finish (a question only a human can answer, a missing credential, a blocked dependency): say so plainly in your final message and stop. The same review step picks it up. Do not idle waiting for a reply — nobody can see this terminal.`)
+
+	if usesWorktrees {
+		b.WriteString(`
+
+Working directory constraint (isolated git worktree):
+- You are running in an isolated git worktree on this host. This worktree IS your project - it is NOT a copy. NEVER access the original checkout or any path outside your current working directory.
+- ONLY use paths within your current working directory. Always use relative paths (e.g., "." or "./src") when searching or navigating - never absolute paths.`)
 	}
 
 	return b.String()
@@ -4301,7 +4346,18 @@ func (w *windowMissTracker) record(windowExists bool) (gone bool) {
 // NOTE: We intentionally do NOT kill tmux windows here - they're kept around so
 // users can review Claude's work. Windows are only killed on task deletion.
 func (e *Executor) pollTmuxSession(ctx context.Context, taskID int64, sessionName string) execResult {
-	ticker := time.NewTicker(1 * time.Second)
+	// Where this task's tmux server is. "" is every task on an install with no
+	// placement handler, and every locally-placed task: the interval, the probe
+	// timeout and the probe's own classification below are then exactly what they
+	// have always been.
+	remoteHost := RunnerFrom(ctx).Target()
+	interval, probeTimeout := 1*time.Second, 3*time.Second
+	if remoteHost != "" {
+		interval, probeTimeout = remotePollInterval, remoteProbeTimeout
+	}
+	reach := hostReachability{host: remoteHost}
+
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
 	const missingThreshold = 3
@@ -4341,12 +4397,31 @@ func (e *Executor) pollTmuxSession(ctx context.Context, taskID int64, sessionNam
 			// The probe gets its own deadline rather than the task's, but must keep
 			// the task's runner: a remotely-placed task lives in a tmux server on
 			// another host, and probing this machine's would say it had vanished.
-			tmuxCtx, tmuxCancel := context.WithTimeout(detachedRunnerCtx(ctx), 3*time.Second)
-			windowExists := tmuxCmd(tmuxCtx, "list-panes", "-t", sessionName).Run() == nil
+			tmuxCtx, tmuxCancel := context.WithTimeout(detachedRunnerCtx(ctx), probeTimeout)
+			probe := probeWindow(tmuxCtx, sessionName, remoteHost != "")
 			tmuxCancel()
 
-			// Also check task-ui (pane might be joined there)
-			if !windowExists {
+			// A host we could not reach says nothing about the task. Do NOT feed it
+			// to the miss tracker: three network blips in a row would park a task
+			// whose agent is still working, on a machine we merely cannot see. Say so
+			// where the user will find it, and keep checking.
+			if probe == windowUnreachable {
+				if line := reach.unreachable(time.Now()); line != "" {
+					e.logLine(taskID, "system", line)
+					e.logger.Warn("cannot reach the host a task was placed on",
+						"taskID", taskID, "host", remoteHost)
+				}
+				continue
+			}
+			if line := reach.reachable(time.Now()); line != "" {
+				e.logLine(taskID, "system", line)
+			}
+			windowExists := probe == windowLive
+
+			// Also check task-ui (pane might be joined there). Local only: task-ui is
+			// THIS machine's TUI session, and asking a placed host about it is an ssh
+			// round trip that can only ever answer "no such session".
+			if !windowExists && remoteHost == "" {
 				checkCtx, checkCancel := context.WithTimeout(detachedRunnerCtx(ctx), 3*time.Second)
 				checkCmd := tmuxCmd(checkCtx, "list-panes", "-t", "task-ui", "-F", "#{pane_current_command}")
 				if out, err := checkCmd.Output(); err == nil {
