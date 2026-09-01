@@ -55,6 +55,13 @@ type Task struct {
 	ArchiveCommit       string // Commit hash at time of archiving
 	ArchiveWorktreePath string // Original worktree path before archiving
 	ArchiveBranchName   string // Original branch name before archiving
+	// Where this task ran, as decided by the task.placement hook. An empty target
+	// means this machine, which is every task unless a placement plugin is
+	// installed. Recorded so a result can be traced back to the machine that
+	// produced it: once tasks run on four hosts, a suite that only fails on one of
+	// them is indistinguishable from a real bug without it.
+	PlacementTarget string // Host the task ran on ("" = local)
+	PlacementReason string // The resolver's explanation for that choice
 }
 
 // Task statuses
@@ -406,7 +413,8 @@ func (db *DB) GetTask(id int64) (*Task, error) {
 		       created_at, updated_at, started_at, completed_at,
 		       last_distilled_at, last_accessed_at,
 		       COALESCE(archive_ref, ''), COALESCE(archive_commit, ''),
-		       COALESCE(archive_worktree_path, ''), COALESCE(archive_branch_name, '')
+		       COALESCE(archive_worktree_path, ''), COALESCE(archive_branch_name, ''),
+		       COALESCE(placement_target, ''), COALESCE(placement_reason, '')
 		FROM tasks WHERE id = ?
 	`, id).Scan(
 		&t.ID, &t.Title, &t.Body, &t.Status, &t.Type, &t.Project, &t.Executor,
@@ -418,6 +426,7 @@ func (db *DB) GetTask(id int64) (*Task, error) {
 		&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
 		&t.LastDistilledAt, &t.LastAccessedAt,
 		&t.ArchiveRef, &t.ArchiveCommit, &t.ArchiveWorktreePath, &t.ArchiveBranchName,
+		&t.PlacementTarget, &t.PlacementReason,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -479,7 +488,8 @@ func (db *DB) ListTasks(opts ListTasksOptions) ([]*Task, error) {
 		       created_at, updated_at, started_at, completed_at,
 		       last_distilled_at, last_accessed_at,
 		       COALESCE(archive_ref, ''), COALESCE(archive_commit, ''),
-		       COALESCE(archive_worktree_path, ''), COALESCE(archive_branch_name, '')
+		       COALESCE(archive_worktree_path, ''), COALESCE(archive_branch_name, ''),
+		       COALESCE(placement_target, ''), COALESCE(placement_reason, '')
 		FROM tasks WHERE 1=1
 	`
 	args := []interface{}{}
@@ -568,6 +578,7 @@ func (db *DB) ListTasks(opts ListTasksOptions) ([]*Task, error) {
 			&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
 			&t.LastDistilledAt, &t.LastAccessedAt,
 			&t.ArchiveRef, &t.ArchiveCommit, &t.ArchiveWorktreePath, &t.ArchiveBranchName,
+			&t.PlacementTarget, &t.PlacementReason,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("scan task: %w", err)
@@ -593,7 +604,8 @@ func (db *DB) GetMostRecentlyCreatedTask() (*Task, error) {
 		       created_at, updated_at, started_at, completed_at,
 		       last_distilled_at, last_accessed_at,
 		       COALESCE(archive_ref, ''), COALESCE(archive_commit, ''),
-		       COALESCE(archive_worktree_path, ''), COALESCE(archive_branch_name, '')
+		       COALESCE(archive_worktree_path, ''), COALESCE(archive_branch_name, ''),
+		       COALESCE(placement_target, ''), COALESCE(placement_reason, '')
 		FROM tasks
 		ORDER BY created_at DESC, id DESC
 		LIMIT 1
@@ -607,6 +619,7 @@ func (db *DB) GetMostRecentlyCreatedTask() (*Task, error) {
 		&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
 		&t.LastDistilledAt, &t.LastAccessedAt,
 		&t.ArchiveRef, &t.ArchiveCommit, &t.ArchiveWorktreePath, &t.ArchiveBranchName,
+		&t.PlacementTarget, &t.PlacementReason,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -636,7 +649,8 @@ func (db *DB) SearchTasks(query string, limit int) ([]*Task, error) {
 		       created_at, updated_at, started_at, completed_at,
 		       last_distilled_at, last_accessed_at,
 		       COALESCE(archive_ref, ''), COALESCE(archive_commit, ''),
-		       COALESCE(archive_worktree_path, ''), COALESCE(archive_branch_name, '')
+		       COALESCE(archive_worktree_path, ''), COALESCE(archive_branch_name, ''),
+		       COALESCE(placement_target, ''), COALESCE(placement_reason, '')
 		FROM tasks
 		WHERE (
 			title LIKE ? COLLATE NOCASE
@@ -669,6 +683,7 @@ func (db *DB) SearchTasks(query string, limit int) ([]*Task, error) {
 			&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
 			&t.LastDistilledAt, &t.LastAccessedAt,
 			&t.ArchiveRef, &t.ArchiveCommit, &t.ArchiveWorktreePath, &t.ArchiveBranchName,
+			&t.PlacementTarget, &t.PlacementReason,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("scan task: %w", err)
@@ -1285,7 +1300,8 @@ func (db *DB) GetNextQueuedTask() (*Task, error) {
 		       created_at, updated_at, started_at, completed_at,
 		       last_distilled_at, last_accessed_at,
 		       COALESCE(archive_ref, ''), COALESCE(archive_commit, ''),
-		       COALESCE(archive_worktree_path, ''), COALESCE(archive_branch_name, '')
+		       COALESCE(archive_worktree_path, ''), COALESCE(archive_branch_name, ''),
+		       COALESCE(placement_target, ''), COALESCE(placement_reason, '')
 		FROM tasks
 		WHERE status = ? AND deleted_at IS NULL
 		ORDER BY created_at ASC
@@ -1300,6 +1316,7 @@ func (db *DB) GetNextQueuedTask() (*Task, error) {
 		&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
 		&t.LastDistilledAt, &t.LastAccessedAt,
 		&t.ArchiveRef, &t.ArchiveCommit, &t.ArchiveWorktreePath, &t.ArchiveBranchName,
+		&t.PlacementTarget, &t.PlacementReason,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -1323,7 +1340,8 @@ func (db *DB) GetQueuedTasks() ([]*Task, error) {
 		       created_at, updated_at, started_at, completed_at,
 		       last_distilled_at, last_accessed_at,
 		       COALESCE(archive_ref, ''), COALESCE(archive_commit, ''),
-		       COALESCE(archive_worktree_path, ''), COALESCE(archive_branch_name, '')
+		       COALESCE(archive_worktree_path, ''), COALESCE(archive_branch_name, ''),
+		       COALESCE(placement_target, ''), COALESCE(placement_reason, '')
 		FROM tasks
 		WHERE status = ? AND deleted_at IS NULL
 		ORDER BY created_at ASC
@@ -1346,6 +1364,7 @@ func (db *DB) GetQueuedTasks() ([]*Task, error) {
 			&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
 			&t.LastDistilledAt, &t.LastAccessedAt,
 			&t.ArchiveRef, &t.ArchiveCommit, &t.ArchiveWorktreePath, &t.ArchiveBranchName,
+			&t.PlacementTarget, &t.PlacementReason,
 		); err != nil {
 			return nil, fmt.Errorf("scan task: %w", err)
 		}
@@ -1433,6 +1452,31 @@ func (db *DB) GetTaskBaseDirty(taskID int64) (string, error) {
 		return "", err
 	}
 	return s, nil
+}
+
+// SetTaskPlacement records where a task ran: the host the task.placement hook
+// named and the reason it gave. Written once, just before the executor spawns.
+//
+// An empty target is a real answer, not a missing one — it means the resolver
+// chose this machine — so it is stored alongside its reason rather than skipped.
+// Tasks that were never consulted (no placement plugin installed) keep both
+// fields empty and read exactly as they always have.
+func (db *DB) SetTaskPlacement(taskID int64, target, reason string) error {
+	_, err := db.Exec(`UPDATE tasks SET placement_target = ?, placement_reason = ? WHERE id = ?`,
+		target, reason, taskID)
+	return err
+}
+
+// GetTaskPlacement returns the host a task ran on and why, both empty when the
+// task ran locally or predates the placement hook.
+func (db *DB) GetTaskPlacement(taskID int64) (target, reason string, err error) {
+	err = db.QueryRow(
+		`SELECT COALESCE(placement_target, ''), COALESCE(placement_reason, '') FROM tasks WHERE id = ?`,
+		taskID).Scan(&target, &reason)
+	if err != nil {
+		return "", "", err
+	}
+	return target, reason, nil
 }
 
 // HasSessionStarted reports whether the task's executor session actually began. A task
@@ -2383,7 +2427,8 @@ func (db *DB) GetStaleWorktreeTasks(maxAge time.Duration) ([]*Task, error) {
 		       created_at, updated_at, started_at, completed_at,
 		       last_distilled_at, last_accessed_at,
 		       COALESCE(archive_ref, ''), COALESCE(archive_commit, ''),
-		       COALESCE(archive_worktree_path, ''), COALESCE(archive_branch_name, '')
+		       COALESCE(archive_worktree_path, ''), COALESCE(archive_branch_name, ''),
+		       COALESCE(placement_target, ''), COALESCE(placement_reason, '')
 		FROM tasks
 		WHERE worktree_path != ''
 		  AND status IN ('done', 'archived')
@@ -2411,6 +2456,7 @@ func (db *DB) GetStaleWorktreeTasks(maxAge time.Duration) ([]*Task, error) {
 			&t.CreatedAt, &t.UpdatedAt, &t.StartedAt, &t.CompletedAt,
 			&t.LastDistilledAt, &t.LastAccessedAt,
 			&t.ArchiveRef, &t.ArchiveCommit, &t.ArchiveWorktreePath, &t.ArchiveBranchName,
+			&t.PlacementTarget, &t.PlacementReason,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("scan task: %w", err)

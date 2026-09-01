@@ -22,6 +22,8 @@ const (
 	EventTaskFailed   = "task.failed"
 	EventTaskStarted  = "task.started"
 	EventAuthRequired = "task.auth_required" // Executor session needs re-authentication
+	// EventTaskPlacement lives in placement.go: it is the one event ty consults
+	// (synchronously, parsing the handler's stdout) rather than merely notifies.
 )
 
 // Runner executes hooks for task events.
@@ -30,6 +32,10 @@ type Runner struct {
 	pluginsDir string
 	plugins    []Plugin
 	logger     *log.Logger
+
+	// placementTimeoutOverride shortens the task.placement handler budget in
+	// tests. Zero means DefaultPlacementTimeout; nothing user-facing sets it.
+	placementTimeoutOverride time.Duration
 }
 
 // New creates a new hook runner.

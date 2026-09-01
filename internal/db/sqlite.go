@@ -367,6 +367,14 @@ func (db *DB) migrate() error {
 		// no longer destroys its worktree or Claude transcript up front — that only
 		// happens when the sweep fires, and even then the transcript is preserved.
 		`ALTER TABLE tasks ADD COLUMN deleted_at DATETIME`,
+		// Where the task ran, as answered by the task.placement hook: the host and
+		// the resolver's reason for choosing it. Both empty for every task that ran
+		// on this machine, which is every task unless a placement plugin is
+		// installed. This is traceability, not decoration — once tasks run on four
+		// machines, a suite that only fails on one of them is indistinguishable from
+		// a real bug unless the result can be traced to the machine that produced it.
+		`ALTER TABLE tasks ADD COLUMN placement_target TEXT DEFAULT ''`,
+		`ALTER TABLE tasks ADD COLUMN placement_reason TEXT DEFAULT ''`,
 	}
 
 	for _, m := range alterMigrations {

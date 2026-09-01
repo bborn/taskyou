@@ -1901,10 +1901,52 @@ func (e *Executor) executeTask(ctx context.Context, task *db.Task) {
 	e.logLine(task.ID, "system", startMsg)
 	e.hooks.OnStatusChange(task, db.StatusProcessing, startMsg)
 
+	// Ask where this task should run, before anything is provisioned for it.
+	//
+	// The hook's contract calls this "just before the executor spawns", and this
+	// IS the spawn path — but it comes ahead of worktree setup deliberately.
+	// Provisioning a workspace here for a task that will run on another machine
+	// (a git worktree, then the project's init script: bundle, migrate, install)
+	// is precisely the local resource pressure placement exists to relieve, and it
+	// would all be spent on a directory the task never opens.
+	//
+	// With no placement handler installed this asks nothing, writes nothing, logs
+	// nothing and returns the local runner — every line below is then exactly what
+	// it has always been.
+	runner, placement, placementErr := e.resolvePlacement(taskCtx, task)
+	if placementErr != nil {
+		// A handler named a host we cannot run on. Fail loudly rather than quietly
+		// running here: a silent local fallback would reintroduce exactly the local
+		// resource pressure placement exists to relieve, on the days it is least
+		// likely to be noticed. Failing to DECIDE where to run falls back to local;
+		// failing to RUN where you were told does not.
+		msg := fmt.Sprintf("Placement failed: %v", placementErr)
+		e.logger.Error("placement failed; not falling back to local", "task", task.ID, "error", placementErr)
+		e.logLine(task.ID, "error", msg)
+		_ = e.updateStatus(task.ID, db.StatusBlocked)
+		e.hooks.OnStatusChange(task, db.StatusBlocked, msg)
+		e.events.EmitTaskFailed(task, msg)
+		return
+	}
+	remotePlacement, placedRemote := placedRemotely(runner)
+
 	// Setup worktree for isolated execution (symlinks claude config from project)
 	// SECURITY: We must have a valid worktree - never fall back to project directory
 	// to prevent Claude from accidentally writing to the main repo
-	workDir, createdWorktree, err := e.setupWorktree(task)
+	//
+	// A remotely-placed task has no local workspace: it runs in the checkout the
+	// placement handler named, on the host it named. Provisioning one here would
+	// leave an unopened worktree behind after every remote run.
+	var (
+		workDir         string
+		createdWorktree bool
+		err             error
+	)
+	if placedRemote {
+		workDir = remotePlacement.WorkDir
+	} else {
+		workDir, createdWorktree, err = e.setupWorktree(task)
+	}
 	if errors.Is(err, ErrBranchBusy) {
 		// Not a failure: the branch this step needs is held by a sibling that is
 		// still running. Leave the task QUEUED so a later tick retries it, and
@@ -1941,7 +1983,9 @@ func (e *Executor) executeTask(ctx context.Context, task *db.Task) {
 		e.hooks.OnStatusChange(task, db.StatusBlocked, "Worktree setup failed - cannot execute task safely")
 		return
 	}
-	e.events.EmitTaskWorktreeReady(task)
+	if !placedRemote {
+		e.events.EmitTaskWorktreeReady(task)
+	}
 
 	// Record the commit this worktree starts at, before anything can run in it. This is
 	// what lets WorkflowStepFinished tell "produced a commit" from "still sitting where
@@ -1954,7 +1998,9 @@ func (e *Executor) executeTask(ctx context.Context, task *db.Task) {
 	// after the step already committed re-baselines base_commit to that pushed HEAD,
 	// making "produced a commit" permanently false — the step can then never
 	// auto-complete and the DAG stalls behind it.
-	if base := gitHeadCommit(workDir); base != "" {
+	// (workDir is a path on another machine when the task is placed remotely, so
+	// there is no local HEAD to read and no local worktree to baseline.)
+	if base := localHeadCommit(placedRemote, workDir); base != "" {
 		prevBase, _ := e.db.GetTaskBaseCommit(task.ID)
 		if createdWorktree || prevBase == "" {
 			if err := e.db.SetTaskBaseCommit(task.ID, base); err != nil {
@@ -1970,9 +2016,16 @@ func (e *Executor) executeTask(ctx context.Context, task *db.Task) {
 		}
 	}
 
-	// Prepare attachments (write to .claude/attachments for seamless access)
-	attachmentPaths, cleanupAttachments := e.prepareAttachments(task.ID, workDir)
-	defer cleanupAttachments()
+	// Prepare attachments (write to .claude/attachments for seamless access).
+	// Attachments are staged inside the workspace on THIS machine; a remotely
+	// placed task's workspace is on another one, so there is nowhere here to put
+	// them.
+	var attachmentPaths []string
+	if !placedRemote {
+		var cleanupAttachments func()
+		attachmentPaths, cleanupAttachments = e.prepareAttachments(task.ID, workDir)
+		defer cleanupAttachments()
+	}
 	if len(attachmentPaths) > 0 {
 		e.logLine(task.ID, "system", fmt.Sprintf("Task has %d attachment(s)", len(attachmentPaths)))
 	}
@@ -2008,9 +2061,19 @@ func (e *Executor) executeTask(ctx context.Context, task *db.Task) {
 		return
 	}
 
-	// Run the executor
+	// Run the executor, wherever placement decided that is.
 	var result execResult
-	if isRetry {
+	if placedRemote {
+		e.logLine(task.ID, "system", fmt.Sprintf("Placed on %s by the %s plugin: %s",
+			remotePlacement.Host, placement.Handler, placement.Reason))
+		remotePrompt := prompt
+		if isRetry {
+			// A remote session has no stored executor session to resume, so the
+			// feedback has to travel in the prompt or it is simply lost.
+			remotePrompt = prompt + "\n\n" + retryFeedback
+		}
+		result = e.runRemoteSession(taskCtx, task, remotePlacement, executorName, remotePrompt)
+	} else if isRetry {
 		// Include attachments info in retry feedback so Claude knows about them
 		// This is important when attachments are added after the initial run or when resuming
 		feedbackWithAttachments := retryFeedback
@@ -4227,14 +4290,17 @@ func (e *Executor) pollTmuxSession(ctx context.Context, taskID int64, sessionNam
 				}
 			}
 
-			// Check if tmux window still exists (with timeout to prevent blocking)
-			tmuxCtx, tmuxCancel := context.WithTimeout(context.Background(), 3*time.Second)
+			// Check if tmux window still exists (with timeout to prevent blocking).
+			// The probe gets its own deadline rather than the task's, but must keep
+			// the task's runner: a remotely-placed task lives in a tmux server on
+			// another host, and probing this machine's would say it had vanished.
+			tmuxCtx, tmuxCancel := context.WithTimeout(detachedRunnerCtx(ctx), 3*time.Second)
 			windowExists := tmuxCmd(tmuxCtx, "list-panes", "-t", sessionName).Run() == nil
 			tmuxCancel()
 
 			// Also check task-ui (pane might be joined there)
 			if !windowExists {
-				checkCtx, checkCancel := context.WithTimeout(context.Background(), 3*time.Second)
+				checkCtx, checkCancel := context.WithTimeout(detachedRunnerCtx(ctx), 3*time.Second)
 				checkCmd := tmuxCmd(checkCtx, "list-panes", "-t", "task-ui", "-F", "#{pane_current_command}")
 				if out, err := checkCmd.Output(); err == nil {
 					if strings.Contains(string(out), "claude") {

@@ -1654,6 +1654,8 @@ Examples:
 					"claude_pane_id": task.ClaudePaneID,
 					"shell_pane_id":  task.ShellPaneID,
 					"summary":        task.Summary,
+					"ran_on":         task.PlacementTarget,
+					"ran_on_reason":  task.PlacementReason,
 					"created_at":     task.CreatedAt.Time.Format(time.RFC3339),
 					"updated_at":     task.UpdatedAt.Time.Format(time.RFC3339),
 				}
@@ -1718,6 +1720,18 @@ Examples:
 				}
 				if task.CompletedAt != nil {
 					fmt.Printf("Completed: %s\n", task.CompletedAt.Time.Format("2006-01-02 15:04:05"))
+				}
+
+				// Where it ran. Only shown once a placement handler has answered for
+				// this task — a locally-run task on a machine with no placement
+				// plugin prints exactly what it always has.
+				if task.PlacementTarget != "" {
+					fmt.Printf("Ran on:   %s\n", task.PlacementTarget)
+				} else if task.PlacementReason != "" {
+					fmt.Printf("Ran on:   %s\n", dimStyle.Render("local"))
+				}
+				if task.PlacementReason != "" {
+					fmt.Printf("Because:  %s\n", dimStyle.Render(task.PlacementReason))
 				}
 
 				// Worktree info
