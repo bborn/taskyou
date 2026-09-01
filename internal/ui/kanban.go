@@ -779,6 +779,7 @@ func (k *KanbanBoard) hashTaskCard(h *sigHasher, t *db.Task) {
 	h.str(t.Title)
 	h.str(t.Summary)
 	h.boolean(t.Pinned)
+	h.str(t.PlacementTarget)
 	h.boolean(t.IsDangerous())
 	h.boolean(t.IsAutoPermission())
 	h.boolean(t.IsAcceptEdits())
@@ -1300,6 +1301,18 @@ func (k *KanbanBoard) renderTaskCard(task *db.Task, width int, isSelected bool) 
 			indicators = append(indicators, "●")
 		} else {
 			indicators = append(indicators, FgStyle(ColorCode).Render("●"))
+		}
+	}
+	// Host badge for a task a placement handler sent elsewhere. Absent — and so
+	// invisible — for every task that ran on this machine. Once tasks run on four
+	// machines, a suite that only fails on one of them is indistinguishable from a
+	// real bug unless the card says which machine produced the result.
+	if host := task.PlacementTarget; host != "" {
+		badge := "@" + host
+		if isSelected {
+			indicators = append(indicators, badge)
+		} else {
+			indicators = append(indicators, FgStyle(ColorCode).Render(badge))
 		}
 	}
 	if task.Pinned {

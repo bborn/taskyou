@@ -146,9 +146,87 @@ system. The ones dispatched today:
 | `task.blocked` | Task needs input |
 | `task.failed` | Agent execution failed |
 | `task.auth_required` | Executor session needs re-authentication |
+| `task.placement` | **Consulted**, not notified — see below |
 
 A plugin may declare any event string; it only runs for events TaskYou actually
 emits, so unknown events are harmless.
+
+## `task.placement` — the one hook ty asks a question of
+
+Every event above is fire-and-forget: the script runs in the background and
+nothing waits for it or reads what it says. `task.placement` is the exception.
+Where a task runs has to be decided **before** the executor spawns, and the
+answer has to come back — so this hook is synchronous, bounded by a short
+timeout, and its stdout is parsed.
+
+ty writes the request to the handler's **stdin**:
+
+```json
+{"event":"task.placement",
+ "task":{"id":5228,"title":"Add a consulted task.placement hook",
+         "project":"taskyou","repo_path":"/Users/you/Projects/workflow",
+         "executor":"claude"}}
+```
+
+and reads the answer from its **stdout**:
+
+```json
+{"target":"ol-agents","workdir":"~/projects/engineering",
+ "reason":"most free memory of 2 hosts serving offerlab"}
+```
+
+- **`target`** — the ssh destination to run on. **Empty means run locally.**
+- **`workdir`** — the task's directory *on that host*. A remote path, so a
+  leading `~` is passed through for the remote shell to expand.
+- **`reason`** — why. Always shown to the user (`ty show`, the task log), so
+  write it to explain a surprising placement without further digging.
+
+ty never learns what a host *is*. It asks the question, and runs the answer:
+an empty target uses the local runner — byte for byte what ty has always done —
+and a named target starts the task's tmux session on that host over ssh, in that
+directory. Where it ran is recorded on the task and shown by `ty show` and on the
+board, so a result can be traced back to the machine that produced it.
+
+### Failure behaviour
+
+Failing to *decide* where to run falls back to local. Failing to *run* where you
+were told does not.
+
+| Situation | What ty does |
+|-----------|--------------|
+| No `task.placement` plugin installed | Local. Silent. Nothing is asked, logged or recorded. |
+| Handler answers with an empty target | Local, and the reason is recorded so you can see why. |
+| Handler is slow (over 5s), crashes, exits non-zero, or writes malformed JSON | Local, logged loudly. A hook in the spawn path must never hang a task. |
+| Handler names a host ty cannot reach | **The task fails, visibly.** It is *not* quietly run locally — that would put the load straight back on the machine placement exists to unload, on the days you are least likely to notice. |
+
+If several plugins declare `task.placement` they are consulted in name order and
+the first to name a host wins; a handler that answers "local" lets the next one
+try.
+
+### The reference handler
+
+[`extensions/ty-on`](../extensions/ty-on/README.md) is a working resolver: it
+reads the [`on`](https://github.com/bborn/on) CLI's host inventory and answers
+with the host that serves the task's project (picking the one with the most free
+memory when several do). Build and install it with:
+
+```bash
+make install-ty-on     # builds the binary and installs it as a plugin
+make uninstall-ty-on   # every task goes back to running locally
+```
+
+### Current boundaries
+
+- Only the `claude` executor can be launched remotely so far. A task using
+  another executor fails visibly rather than quietly running here.
+- A remotely-placed task runs in the checkout the handler named — ty does not
+  create a worktree, sync, or provision anything on that host. Arranging the
+  workspace there is the fleet's job (that is what `on` is for).
+- Attachments are staged in the local workspace, so they are not available to a
+  remotely-placed task.
+- A remote session does not survive a daemon restart: the orphan sweep probes
+  this machine's tmux server, so the task is parked as blocked and can be
+  retried.
 
 ## Environment
 

@@ -1,0 +1,16 @@
+# ty-on: the placement resolver, as a plugin.
+#
+# ty consults this on task.placement — the one hook ty asks a question of rather
+# than merely notifying — just before it spawns a task's executor. ty-on reads
+# the request on stdin and answers with a host, a workdir on that host, and its
+# reason. An empty target means "run locally", which is its answer to every
+# question it cannot confidently answer.
+#
+# Install with `make install-ty-on` from the repo root, which builds the binary
+# and drops it here alongside this manifest. Remove it with `ty plugins remove
+# ty-on` (or `make uninstall-ty-on`) and every task goes back to running locally.
+name: ty-on
+version: 0.1.0
+description: Decide which machine a task should run on, from the "on" host inventory.
+hooks:
+  task.placement: ty-on

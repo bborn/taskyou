@@ -91,7 +91,28 @@ way. Rules 1–3 are a single file read. Rule 4 costs one `on ls` (an SSH round
 trip per host, in parallel), bounded by `TY_ON_TIMEOUT` — past that budget ty-on
 prefers a local placement to a late answer.
 
+## Installing
+
+ty-on is a **plugin**: ty consults it on `task.placement` (see
+[docs/plugins.md](../../docs/plugins.md#taskplacement--the-one-hook-ty-asks-a-question-of)),
+so it has to live in the plugins dir alongside its `plugin.yaml` manifest. From
+the repo root:
+
+```console
+$ make install-ty-on     # builds the binary and installs it as a plugin
+$ ty plugins list        # ty-on ... hook task.placement → ty-on
+```
+
+From then on every task ty starts asks this resolver where to run, and the
+answer is used. To go back to running everything locally:
+
+```console
+$ make uninstall-ty-on   # or: ty plugins remove ty-on
+```
+
 ## Usage
+
+It is a plain stdin/stdout filter, so it is easy to try by hand:
 
 ```console
 $ go build -o ty-on ./cmd

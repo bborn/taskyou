@@ -59,9 +59,48 @@ var defaultRunner Runner = LocalRunner{}
 // different Runner from here.
 func DefaultRunner() Runner { return defaultRunner }
 
-// command builds a command in workDir through the default runner.
+// runnerKey scopes a Runner to a context.
+type runnerKey struct{}
+
+// WithRunner returns a context whose commands are built through r.
+//
+// This is how a per-task placement decision reaches the ~90 call sites that build
+// commands without any of them growing a parameter: the spawn path attaches the
+// runner it chose to the task's context, and every command built from that context
+// (or one derived from it) lands wherever the runner points. A context with no
+// runner attached — which is every context in ty today — resolves to the local
+// runner, so nothing changes for anyone who has not installed a placement handler.
+func WithRunner(ctx context.Context, r Runner) context.Context {
+	if r == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, runnerKey{}, r)
+}
+
+// RunnerFrom returns the Runner attached to ctx, or the default (local) runner.
+func RunnerFrom(ctx context.Context) Runner {
+	if ctx != nil {
+		if r, ok := ctx.Value(runnerKey{}).(Runner); ok && r != nil {
+			return r
+		}
+	}
+	return DefaultRunner()
+}
+
+// detachedRunnerCtx returns a background context carrying ctx's runner.
+//
+// Several call sites deliberately give a tmux probe its own short timeout instead
+// of inheriting the task's context, so that cancelling the task doesn't race the
+// probe. Those contexts must still know WHERE to run, or a remotely-placed task
+// would be polled against the local tmux server and look like it had vanished.
+func detachedRunnerCtx(ctx context.Context) context.Context {
+	return WithRunner(context.Background(), RunnerFrom(ctx))
+}
+
+// command builds a command in workDir through the context's runner, which is the
+// local one unless a placement decision put another there.
 func command(ctx context.Context, workDir, name string, args ...string) *exec.Cmd {
-	return DefaultRunner().Command(ctx, workDir, name, args...)
+	return RunnerFrom(ctx).Command(ctx, workDir, name, args...)
 }
 
 // gitCmd builds `git <args>` to run in dir. An empty dir inherits the caller's

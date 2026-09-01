@@ -701,6 +701,14 @@ A **plugin** is a self-contained directory under `~/.config/task/plugins/` with 
   dir above, any number of plugins can handle the same event and **all of them run**
 - **actions** — user-invoked commands (`ty plugins run <plugin> <action>`)
 
+One event is different: `task.placement` is **consulted**, not merely notified.
+Just before an executor spawns, ty asks any installed placement handler where the
+task should run — request on stdin, answer on stdout — and runs it there. An empty
+answer (and every way a handler can fail) means "run locally", which is what
+happens for everyone who has no placement plugin installed: nothing is asked, and
+nothing changes. See [docs/plugins.md](docs/plugins.md#taskplacement--the-one-hook-ty-asks-a-question-of)
+and the reference resolver in [extensions/ty-on](extensions/ty-on/README.md).
+
 Install one — or a whole collection, since a single git repo can hold many plugins —
 with one command:
 
