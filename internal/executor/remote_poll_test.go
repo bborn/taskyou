@@ -193,3 +193,51 @@ func TestRemoteCommandsShareOneSSHConnection(t *testing.T) {
 		}
 	}
 }
+
+func TestIdleTrackerNeedsSustainedStillness(t *testing.T) {
+	tr := idleTracker{threshold: 3}
+
+	// A changing screen is an agent still working, however long we watch.
+	for i, sum := range []string{"a", "b", "c", "d", "e"} {
+		if tr.record(sum, true) {
+			t.Fatalf("changing pane reported idle at step %d", i)
+		}
+	}
+
+	// Stillness only counts once it is sustained.
+	if tr.record("x", true) {
+		t.Error("first sighting of a new state is not stillness")
+	}
+	if tr.record("x", true) {
+		t.Error("two identical captures is below the threshold")
+	}
+	if !tr.record("x", true) {
+		t.Error("threshold consecutive identical captures should read as idle")
+	}
+}
+
+func TestIdleTrackerResetsWhenTheAgentMovesAgain(t *testing.T) {
+	tr := idleTracker{threshold: 3}
+	tr.record("x", true)
+	tr.record("x", true)
+	// An agent that was thinking and starts printing again is not finished.
+	if tr.record("y", true) {
+		t.Fatal("a changed pane must reset the run")
+	}
+	if tr.record("y", true) {
+		t.Error("run should have restarted from the change")
+	}
+}
+
+func TestIdleTrackerTreatsAnUnreadablePaneAsNotIdle(t *testing.T) {
+	tr := idleTracker{threshold: 2}
+	tr.record("x", true)
+	// A failed capture teaches us nothing, and nothing is not stillness —
+	// the same rule the window probe follows for an unreachable host.
+	if tr.record("", false) {
+		t.Fatal("an unreadable pane must not count toward idleness")
+	}
+	if tr.record("x", true) {
+		t.Error("the run should have restarted after the failed read")
+	}
+}

@@ -3,6 +3,8 @@ package executor
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os/exec"
@@ -137,4 +139,71 @@ func (h *hostReachability) reachable(now time.Time) string {
 	outage := now.Sub(h.since).Round(time.Second)
 	h.since, h.lastLog = time.Time{}, time.Time{}
 	return fmt.Sprintf("Reached %s again after %s.", h.host, outage)
+}
+
+// How long a remotely placed agent's screen must sit completely unchanged
+// before the task is treated as finished and parked for review.
+//
+// A local agent signals completion itself: it calls taskyou_complete over the
+// stdio MCP server ty hands it, and the task reaches "needs review" the moment
+// it does. A remotely placed agent cannot. That MCP server is stdio, so it runs
+// on the host the agent runs on and talks to THAT machine's ty database, which
+// has never heard of this task — the agent on task 5245 discovered this itself
+// and reported `ty complete` failing with "task not found".
+//
+// Wiring the real channel back (an ssh from the agent host into this one, or
+// MCP over the tailnet) means granting agent hosts inbound access here, which
+// is a trust decision that belongs to the operator, not to a poller. So until
+// someone makes it, completion is inferred by watching instead: an agent that
+// has stopped working stops repainting its pane.
+//
+// The threshold is deliberately unhurried. An agent thinking hard, waiting on a
+// slow tool, or streaming nothing for a while must not be mistaken for a
+// finished one — being late to notice costs a few minutes, being wrong parks
+// live work as "needs review".
+var (
+	remoteIdleChecks = 8 // consecutive identical captures (8 * 15s = 2m)
+)
+
+// idleTracker decides when a remote agent's screen has genuinely stopped moving.
+//
+// It compares a hash rather than the text so a long pane costs nothing to hold,
+// and it treats an unreadable capture as "not idle" — a failed look is not a
+// finished agent, the same rule the window probe follows.
+type idleTracker struct {
+	last        string
+	consecutive int
+	threshold   int
+}
+
+// record feeds one capture. ok is false when the pane could not be read at all,
+// which resets the run: we learned nothing, and nothing is not stillness.
+func (t *idleTracker) record(sum string, ok bool) (idle bool) {
+	if !ok || sum == "" {
+		t.consecutive = 0
+		return false
+	}
+	if sum != t.last {
+		t.last = sum
+		t.consecutive = 1
+		return false
+	}
+	t.consecutive++
+	return t.consecutive >= t.threshold
+}
+
+// capturePaneSum returns a cheap fingerprint of what a task's window is
+// currently showing, and whether it could be read at all.
+func capturePaneSum(ctx context.Context, target, host string) (string, bool) {
+	ctx, cancel := context.WithTimeout(ctx, remoteProbeTimeout)
+	defer cancel()
+
+	r := RemoteRunner{Host: host}
+	cmd := r.Command(ctx, "", "tmux", "capture-pane", "-p", "-t", target)
+	out, err := cmd.Output()
+	if err != nil {
+		return "", false
+	}
+	sum := sha256.Sum256(bytes.TrimRight(out, "\n \t"))
+	return hex.EncodeToString(sum[:8]), true
 }

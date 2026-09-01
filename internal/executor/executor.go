@@ -4363,6 +4363,12 @@ func (e *Executor) pollTmuxSession(ctx context.Context, taskID int64, sessionNam
 	const missingThreshold = 3
 	misses := windowMissTracker{threshold: missingThreshold}
 
+	// A remotely placed agent cannot signal completion — its MCP server is stdio
+	// and so talks to its own host's database, not this one. Infer it from the
+	// screen instead: an agent that has stopped working stops repainting.
+	// Local tasks never consult this; they get the real signal.
+	idle := idleTracker{threshold: remoteIdleChecks}
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -4417,6 +4423,20 @@ func (e *Executor) pollTmuxSession(ctx context.Context, taskID int64, sessionNam
 				e.logLine(taskID, "system", line)
 			}
 			windowExists := probe == windowLive
+
+			// Remote only: a live window whose pane has not changed in a long
+			// while is a finished agent sitting at its prompt. Park it for review
+			// exactly as a vanished window would, since to the user those are the
+			// same event — the work is over and nobody has looked at it yet.
+			if windowExists && remoteHost != "" {
+				sum, ok := capturePaneSum(detachedRunnerCtx(ctx), sessionName, remoteHost)
+				if idle.record(sum, ok) {
+					e.logLine(taskID, "system", fmt.Sprintf(
+						"Agent on %s has been idle for %s — parking for review.",
+						remoteHost, (time.Duration(remoteIdleChecks)*remotePollInterval).String()))
+					return execResult{NeedsInput: true, Message: "Task needs review"}
+				}
+			}
 
 			// Also check task-ui (pane might be joined there). Local only: task-ui is
 			// THIS machine's TUI session, and asking a placed host about it is an ssh
