@@ -770,9 +770,21 @@ func DefaultPath() string {
 	return filepath.Join(home, ".local", "share", "task", "tasks.db")
 }
 
+// placedElsewhere excludes remotely placed tasks from the stale-reference sweep.
+//
+// The sessions and window ids handed to RecoverStaleTmuxRefs come from the tmux
+// server on THIS machine. A task placed on another host records the session and
+// window it was given THERE, and those names are never in a local listing — so
+// without this the sweep reads every remotely placed task as stale and erases
+// the only pointer ty has to its running agent. Task 5271 was mid-run on
+// ik-agents when a daemon restart did exactly that.
+const placedElsewhere = ` AND COALESCE(placement_target, '') = '' `
+
 // RecoverStaleTmuxRefs clears stale daemon_session and tmux_window_id references
 // from tasks. Called automatically on daemon startup to recover from crashes.
 // Returns (staleDaemonCount, staleWindowCount) of cleaned references.
+//
+// Only LOCAL references are swept: see placedElsewhere.
 func (db *DB) RecoverStaleTmuxRefs(activeSessions map[string]bool, validWindowIDs map[string]bool) (int, int, error) {
 	var staleDaemonCount, staleWindowCount int
 
@@ -784,7 +796,7 @@ func (db *DB) RecoverStaleTmuxRefs(activeSessions map[string]bool, validWindowID
 			WHERE daemon_session IS NOT NULL
 			AND daemon_session != ''
 			AND daemon_session NOT IN (` + sessionList + `)
-		`)
+			` + placedElsewhere)
 		row.Scan(&staleDaemonCount)
 
 		if staleDaemonCount > 0 {
@@ -793,17 +805,17 @@ func (db *DB) RecoverStaleTmuxRefs(activeSessions map[string]bool, validWindowID
 				WHERE daemon_session IS NOT NULL
 				AND daemon_session != ''
 				AND daemon_session NOT IN (` + sessionList + `)
-			`)
+			` + placedElsewhere)
 			if err != nil {
 				return 0, 0, fmt.Errorf("clear stale daemon sessions: %w", err)
 			}
 		}
 	} else {
 		// No active sessions - clear all daemon_session refs
-		row := db.QueryRow(`SELECT COUNT(*) FROM tasks WHERE daemon_session IS NOT NULL AND daemon_session != ''`)
+		row := db.QueryRow(`SELECT COUNT(*) FROM tasks WHERE daemon_session IS NOT NULL AND daemon_session != ''` + placedElsewhere)
 		row.Scan(&staleDaemonCount)
 		if staleDaemonCount > 0 {
-			_, err := db.Exec(`UPDATE tasks SET daemon_session = NULL WHERE daemon_session IS NOT NULL AND daemon_session != ''`)
+			_, err := db.Exec(`UPDATE tasks SET daemon_session = NULL WHERE daemon_session IS NOT NULL AND daemon_session != ''` + placedElsewhere)
 			if err != nil {
 				return 0, 0, fmt.Errorf("clear all daemon sessions: %w", err)
 			}
@@ -818,7 +830,7 @@ func (db *DB) RecoverStaleTmuxRefs(activeSessions map[string]bool, validWindowID
 			WHERE tmux_window_id IS NOT NULL
 			AND tmux_window_id != ''
 			AND tmux_window_id NOT IN (` + windowList + `)
-		`)
+			` + placedElsewhere)
 		row.Scan(&staleWindowCount)
 
 		if staleWindowCount > 0 {
@@ -827,17 +839,17 @@ func (db *DB) RecoverStaleTmuxRefs(activeSessions map[string]bool, validWindowID
 				WHERE tmux_window_id IS NOT NULL
 				AND tmux_window_id != ''
 				AND tmux_window_id NOT IN (` + windowList + `)
-			`)
+			` + placedElsewhere)
 			if err != nil {
 				return staleDaemonCount, 0, fmt.Errorf("clear stale window IDs: %w", err)
 			}
 		}
 	} else {
 		// No valid windows - clear all tmux_window_id refs
-		row := db.QueryRow(`SELECT COUNT(*) FROM tasks WHERE tmux_window_id IS NOT NULL AND tmux_window_id != ''`)
+		row := db.QueryRow(`SELECT COUNT(*) FROM tasks WHERE tmux_window_id IS NOT NULL AND tmux_window_id != ''` + placedElsewhere)
 		row.Scan(&staleWindowCount)
 		if staleWindowCount > 0 {
-			_, err := db.Exec(`UPDATE tasks SET tmux_window_id = NULL WHERE tmux_window_id IS NOT NULL AND tmux_window_id != ''`)
+			_, err := db.Exec(`UPDATE tasks SET tmux_window_id = NULL WHERE tmux_window_id IS NOT NULL AND tmux_window_id != ''` + placedElsewhere)
 			if err != nil {
 				return staleDaemonCount, 0, fmt.Errorf("clear all window IDs: %w", err)
 			}

@@ -339,6 +339,45 @@ func (e *Executor) recoverStaleTmuxRefs() {
 // would blocked-out a task that is in the middle of coming up.
 const orphanSpawnGrace = 90 * time.Second
 
+// executorWindowLives reports whether a task's executor window is still there,
+// asking the machine the task was actually placed on.
+//
+// The plain local check is wrong for a placed task in the most damaging possible
+// way: its window is on another host, so a local tmux server always answers "not
+// here", and the reconciler blocks a task whose agent is working perfectly well.
+// Task 5271 was eight minutes into a run on ik-agents — it had just pushed its
+// branch — when a daemon restart parked it for this reason.
+//
+// Only a definite "gone" counts as dead. An unreachable host means we could not
+// LOOK, which is not the same as the task having finished; treating the two
+// alike is what windowProbe's third state exists to prevent, and blocking a task
+// because a VPN blipped would be the same bug wearing a different hat.
+func (e *Executor) executorWindowLives(task *db.Task) bool {
+	if task == nil {
+		return false
+	}
+	placement, err := e.db.GetTaskPlacementDecision(task.ID)
+	if err != nil || placement.Target == "" {
+		return e.windowExists(task.ID)
+	}
+	// A placed task with no recorded session was never given a window on its
+	// host, so there is nothing there to be alive.
+	if task.DaemonSession == "" {
+		return false
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), remoteProbeTimeout)
+	defer cancel()
+	ctx = WithRunner(ctx, RemoteRunner{Host: placement.Target, WorkDir: placement.WorkDir})
+
+	probe := probeWindow(ctx, remoteWindowTarget(task), true)
+	if probe == windowUnreachable {
+		e.logger.Warn("could not reach a placed task's host to check on it; leaving it alone",
+			"task", task.ID, "host", placement.Target)
+	}
+	return probe != windowGone
+}
+
 // reconcileOrphanedTasks moves tasks that are stuck in 'processing' but have no
 // live executor window back to 'blocked' so the board reflects reality. This
 // happens when the daemon is restarted (or crashes) while tasks are executing,
@@ -380,7 +419,9 @@ func (e *Executor) reconcileOrphanedTasks(startup bool) {
 
 		// A processing task with a live executor window is genuinely still
 		// running (e.g. the tmux server survived a daemon restart) - leave it.
-		if e.windowExists(task.ID) {
+		// For a placed task that window is on another machine, so this asks the
+		// machine the task actually runs on.
+		if e.executorWindowLives(task) {
 			continue
 		}
 
