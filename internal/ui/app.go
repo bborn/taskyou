@@ -514,6 +514,10 @@ type AppModel struct {
 	// Version upgrade notification
 	currentVersion string                // Current binary version (e.g. "v0.1.0" or "dev")
 	latestRelease  *github.LatestRelease // Latest release from GitHub (nil if not checked yet or same version)
+
+	// pendingFocusTaskID is a task to select once the board has loaded, set by
+	// --task. Zero means no request.
+	pendingFocusTaskID int64
 }
 
 // taskExecutorDisplayName returns the display name for a task's executor.
@@ -1036,6 +1040,17 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		// Reapply filter if one is active
 		m.applyFilter()
+
+		// A task named with --task is selected here rather than at construction:
+		// the board holds no tasks until applyFilter has run, so selecting any
+		// earlier is a silent no-op and the user lands on whatever sorts first.
+		// Attempted once and then cleared, so a task that is filtered out or no
+		// longer exists cannot keep grabbing the selection on later refreshes.
+		if m.pendingFocusTaskID > 0 {
+			m.kanban.SelectTask(m.pendingFocusTaskID)
+			m.pendingFocusTaskID = 0
+		}
+
 		m.kanban.SetHiddenDoneCount(msg.hiddenDoneCount)
 		// Refresh running process indicators for all tasks
 		running := executor.GetTasksWithRunningShellProcess()
@@ -5305,4 +5320,12 @@ func (m *AppModel) handleAICommand(cmd *ai.Command) tea.Cmd {
 func (m *AppModel) getProjects() []*db.Project {
 	projects, _ := m.db.ListProjects()
 	return projects
+}
+
+// FocusTaskOnLoad selects taskID once the board finishes loading.
+//
+// Used by `ty --task <id>` so a session can be reopened where it left off,
+// rather than on whatever the board happens to sort first.
+func (m *AppModel) FocusTaskOnLoad(taskID int64) {
+	m.pendingFocusTaskID = taskID
 }

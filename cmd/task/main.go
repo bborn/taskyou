@@ -141,12 +141,13 @@ func main() {
 				return
 			}
 
+			focusTaskID, _ := cmd.Flags().GetInt64("task")
 			debugStatePath, _ := cmd.Flags().GetString("debug-state-file")
 			cpuProfilePath, _ := cmd.Flags().GetString("cpuprofile")
 			memProfilePath, _ := cmd.Flags().GetString("memprofile")
 
 			// Run locally
-			if err := runLocal(dangerous, debugStatePath, cpuProfilePath, memProfilePath); err != nil {
+			if err := runLocal(dangerous, debugStatePath, cpuProfilePath, memProfilePath, focusTaskID); err != nil {
 				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
 				os.Exit(1)
 			}
@@ -157,6 +158,9 @@ func main() {
 `)
 
 	rootCmd.PersistentFlags().BoolVar(&dangerous, "dangerous", false, "Run Claude with --dangerously-skip-permissions (for sandboxed environments)")
+	// Not persistent: subcommands have their own meaning for a task argument, and
+	// this only affects the TUI's initial selection.
+	rootCmd.Flags().Int64("task", 0, "Open the TUI with this task selected")
 	rootCmd.PersistentFlags().String("debug-state-file", "", "Path to write debug state JSON on update")
 	rootCmd.PersistentFlags().String("cpuprofile", "", "Write a CPU profile here while the TUI runs (analyze with: go tool pprof)")
 	rootCmd.PersistentFlags().String("memprofile", "", "Write a heap profile here when the TUI exits")
@@ -4218,7 +4222,7 @@ func setupProfiling(cpuPath, memPath string) func() {
 }
 
 // runLocal runs the TUI locally with a local SQLite database.
-func runLocal(dangerousMode bool, debugStatePath, cpuProfilePath, memProfilePath string) error {
+func runLocal(dangerousMode bool, debugStatePath, cpuProfilePath, memProfilePath string, focusTaskID int64) error {
 	// Optional performance profiling. The CPU profile captures the whole
 	// interactive session (including every render); the heap profile is written
 	// on exit. Analyze with `go tool pprof <binary> <profile>`.
@@ -4258,6 +4262,9 @@ func runLocal(dangerousMode bool, debugStatePath, cpuProfilePath, memProfilePath
 
 	// Create and run TUI
 	model := ui.NewAppModel(database, exec, cwd, version)
+	if focusTaskID > 0 {
+		model.FocusTaskOnLoad(focusTaskID)
+	}
 	if debugStatePath != "" {
 		model.SetDebugStatePath(debugStatePath)
 	}
