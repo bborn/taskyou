@@ -3,6 +3,8 @@ package executor
 import (
 	"context"
 	"fmt"
+	"os"
+	"strings"
 
 	"github.com/bborn/workflow/internal/db"
 	"github.com/bborn/workflow/internal/hooks"
@@ -104,6 +106,30 @@ func (e *Executor) resolvePlacement(ctx context.Context, task *db.Task) (Runner,
 		return LocalRunner{}, hooks.Placement{}, nil
 	}
 
+	// A task that has already run on THIS machine stays on it, and the decision is
+	// recorded so it is only ever made once.
+	//
+	// Task 5206 is the bug report. It ran locally for six days across five resumes,
+	// then a continuation reached this function — and because it predates placement
+	// it had no recorded decision, so the resolver was asked for the first time and
+	// shipped it to another host. There it branched from main, saw none of the six
+	// days of work sitting on the local branch, and parked idle. The local worktree,
+	// branch and Claude session were all orphaned in one spawn.
+	//
+	// The recorded-decision check above is what normally prevents this, but it can
+	// only protect tasks that HAVE a decision. Every task created before placement
+	// existed has none, so its first retry is free to teleport it. Local state is
+	// the missing evidence: a worktree on this disk, or a session file that only
+	// exists here, both say "the first attempt ran here" just as loudly as a row in
+	// the placement columns would have.
+	if what, ok := HasLocalState(task); ok {
+		reason := what + " is on this machine"
+		e.logLine(task.ID, "system", "Staying here: "+reason+
+			fmt.Sprintf(" (use `ty place %d <host>` to move it deliberately)", task.ID))
+		e.recordPlacement(task, "", reason, "")
+		return LocalRunner{}, hooks.Placement{Reason: reason, Handler: stickyPlacementHandler}, nil
+	}
+
 	executorName := task.Executor
 	if executorName == "" {
 		executorName = db.DefaultExecutor()
@@ -145,6 +171,43 @@ func (e *Executor) resolvePlacement(ctx context.Context, task *db.Task) (Runner,
 		e.recordPlacement(task, placement.Target, placement.Reason, remote.WorkDir)
 	}
 	return runner, placement, nil
+}
+
+// HasLocalState reports whether a task has already done work on THIS machine,
+// and names that work as a noun phrase ("the first attempt's worktree") for
+// callers to compose into their own sentence — "Staying here: X is on this
+// machine", "moving it would strand X on this machine".
+//
+// Two things count, and both are unfakeable evidence of a local first attempt:
+//
+//   - A worktree directory that exists on this disk. Its branch holds the
+//     commits, and no other host can see them.
+//   - A recorded executor session. A Claude session file lives only on the
+//     machine that created it, so resuming one anywhere else silently starts a
+//     new, empty conversation.
+//
+// The worktree is checked with a stat rather than trusted from the row: a task
+// whose worktree was cleaned up has nothing left here to strand, and pinning it
+// local for that would be pinning it to a path that no longer exists.
+func HasLocalState(task *db.Task) (string, bool) {
+	if task == nil {
+		return "", false
+	}
+	// A task already sent to a host has its state THERE; that is the recorded
+	// decision's business, not this guard's. (A decided placement has already
+	// returned above; this catches the legacy target-only rows that predate it.)
+	if task.PlacementTarget != "" {
+		return "", false
+	}
+	if path := strings.TrimSpace(task.WorktreePath); path != "" {
+		if info, err := os.Stat(path); err == nil && info.IsDir() {
+			return "the first attempt's worktree", true
+		}
+	}
+	if strings.TrimSpace(task.ClaudeSessionID) != "" {
+		return "the first attempt's executor session", true
+	}
+	return "", false
 }
 
 // recordPlacement writes a placement decision and keeps the in-memory task in

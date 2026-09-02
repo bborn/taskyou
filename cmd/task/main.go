@@ -549,6 +549,7 @@ Examples:
 	// (verify gate, human gate parking, PR routing), unlike `ty close` which is a
 	// plain status write that skips all of it.
 	rootCmd.AddCommand(newCompleteCmd())
+	rootCmd.AddCommand(newPlaceCmd())
 
 	// Alias: claudes -> sessions (for backwards compatibility)
 	claudesCmd := &cobra.Command{
@@ -2362,14 +2363,16 @@ Examples:
 
 A task that was placed on another machine stays on it: the worktree, branch and
 executor session from the first attempt all live there. --replace forgets that
-decision so the placement resolver is asked again, which is the only way a task
-moves hosts.
+decision so the placement resolver is asked again; --on names the host yourself
+and is the same thing "ty place" writes, applied on the way into the retry.
 
 Examples:
   task retry 42
   task retry 42 --feedback "Try a different approach"
   task retry 42 -m "Focus on the error handling"
-  task retry 42 --replace   # ask the placement resolver again`,
+  task retry 42 --replace          # ask the placement resolver again
+  task retry 42 --on local         # bring it back to this machine and retry
+  task retry 42 --on ol-agents --dir ~/projects/engineering`,
 		Args: cobra.ExactArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
 			var taskID int64
@@ -2399,7 +2402,28 @@ Examples:
 				os.Exit(1)
 			}
 
-			if replace, _ := cmd.Flags().GetBool("replace"); replace {
+			on, _ := cmd.Flags().GetString("on")
+			replace, _ := cmd.Flags().GetBool("replace")
+			if on != "" && replace {
+				fmt.Fprintln(os.Stderr, errorStyle.Render(
+					"--on names a host and --replace asks for one; use one or the other"))
+				os.Exit(1)
+			}
+			if on != "" {
+				current, perr := database.GetTaskPlacementDecision(taskID)
+				if perr != nil {
+					fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+perr.Error()))
+					os.Exit(1)
+				}
+				dir, _ := cmd.Flags().GetString("dir")
+				force, _ := cmd.Flags().GetBool("force")
+				if err := placeTask(cmd.Context(), database, task, current, on, dir, force); err != nil {
+					fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+					os.Exit(1)
+				}
+			}
+
+			if replace {
 				placement, perr := database.GetTaskPlacementDecision(taskID)
 				if err := database.ClearTaskPlacement(taskID); err != nil {
 					fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
@@ -2423,6 +2447,9 @@ Examples:
 	}
 	retryCmd.Flags().StringP("feedback", "m", "", "Feedback for the retry")
 	retryCmd.Flags().Bool("replace", false, "Forget where this task was placed and ask the placement resolver again")
+	retryCmd.Flags().String("on", "", "Run this retry on the named host (\"local\" for this machine) — same as ty place")
+	retryCmd.Flags().String("dir", "", "With --on, the task's directory on that host")
+	retryCmd.Flags().Bool("force", false, "With --on, move even though it strands a worktree or session on the current host")
 	rootCmd.AddCommand(retryCmd)
 
 	// Input subcommand - send input directly to a running task's executor
