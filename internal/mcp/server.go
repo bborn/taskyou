@@ -373,7 +373,7 @@ func (s *Server) handleToolCall(id interface{}, params *toolCallParams) {
 		// The whole decision — evidence gate, human gate, PR routing, done — lives in
 		// internal/completion so `ty complete` takes the identical path. Only the
 		// agent-facing wording and the session-teardown callback are MCP's job.
-		outcome, err := completion.Complete(s.db, s.taskID, summary, completion.Options{AsyncSummary: true})
+		outcome, err := completion.Complete(s.db, s.taskID, summary, completion.Options{AsyncSummary: true, Actor: db.ActorMCP})
 		if err != nil {
 			s.sendError(id, -32603, err.Error())
 			return
@@ -418,7 +418,9 @@ func (s *Server) handleToolCall(id interface{}, params *toolCallParams) {
 		s.db.AppendTaskLog(s.taskID, "question", question)
 
 		// Update task status to blocked
-		s.db.UpdateTaskStatus(s.taskID, db.StatusBlocked)
+		s.db.SetTaskStatus(s.taskID, db.StatusBlocked, db.ActorMCP,
+			"the agent called taskyou_needs_input and is waiting on a human",
+			db.Observedf("agent question: %s", truncateForEvidence(question)))
 
 		// Trigger callback
 		if s.onNeedsInput != nil {
@@ -906,4 +908,14 @@ func (s *Server) send(resp jsonRPCResponse) {
 	}
 	s.writer.Write(data)
 	s.writer.Write([]byte("\n"))
+}
+
+// truncateForEvidence keeps an agent's own words in the status log without
+// letting a runaway question become the log entry.
+func truncateForEvidence(s string) string {
+	s = strings.TrimSpace(s)
+	if len(s) > 300 {
+		return s[:300] + "…"
+	}
+	return s
 }

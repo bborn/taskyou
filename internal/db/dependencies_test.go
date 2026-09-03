@@ -268,7 +268,7 @@ func TestProcessCompletedBlocker(t *testing.T) {
 	}
 
 	// Complete task1 — UpdateTaskStatus runs ProcessCompletedBlocker, which queues task2.
-	if err := db.UpdateTaskStatus(task1.ID, StatusDone); err != nil {
+	if err := db.SetTaskStatus(task1.ID, StatusDone, ActorCLI, "test fixture", ByHuman("test fixture")); err != nil {
 		t.Fatalf("Failed to update task1 status: %v", err)
 	}
 
@@ -320,7 +320,7 @@ func TestGateStepCloseReleasesDependents(t *testing.T) {
 	}
 
 	// The human approves the gate.
-	if err := db.UpdateTaskStatus(gate.ID, StatusDone); err != nil {
+	if err := db.SetTaskStatus(gate.ID, StatusDone, ActorCLI, "test fixture", ByHuman("test fixture")); err != nil {
 		t.Fatalf("Failed to close gate step: %v", err)
 	}
 
@@ -361,7 +361,7 @@ func TestProcessCompletedBlockerWithMultipleBlockers(t *testing.T) {
 	}
 
 	// Complete only task1
-	if err := db.UpdateTaskStatus(task1.ID, StatusDone); err != nil {
+	if err := db.SetTaskStatus(task1.ID, StatusDone, ActorCLI, "test fixture", ByHuman("test fixture")); err != nil {
 		t.Fatalf("Failed to update task1 status: %v", err)
 	}
 
@@ -375,7 +375,7 @@ func TestProcessCompletedBlockerWithMultipleBlockers(t *testing.T) {
 	}
 
 	// Now complete task2
-	if err := db.UpdateTaskStatus(task2.ID, StatusDone); err != nil {
+	if err := db.SetTaskStatus(task2.ID, StatusDone, ActorCLI, "test fixture", ByHuman("test fixture")); err != nil {
 		t.Fatalf("Failed to update task2 status: %v", err)
 	}
 
@@ -460,10 +460,10 @@ func TestRequeueReadyTasks(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Mark cDep started (processing sets started_at), then blocked (needs-input).
-	if err := db.UpdateTaskStatus(cDep.ID, StatusProcessing); err != nil {
+	if err := db.SetTaskStatus(cDep.ID, StatusProcessing, ActorCLI, "test fixture", ByHuman("test fixture")); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.UpdateTaskStatus(cDep.ID, StatusBlocked); err != nil {
+	if err := db.SetTaskStatus(cDep.ID, StatusBlocked, ActorCLI, "test fixture", ByHuman("test fixture")); err != nil {
 		t.Fatal(err)
 	}
 

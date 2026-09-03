@@ -4,7 +4,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -393,6 +392,10 @@ func (db *DB) CreateTask(t *Task) error {
 	// Fetch the complete task and emit created event
 	createdTask, err := db.GetTask(id)
 	if err == nil && createdTask != nil {
+		// Genesis event: the first fact in this task's status log, so the fold
+		// over that log equals the cached row from the moment the task exists.
+		// Without it every new task would fail CheckStatusConsistency.
+		db.appendGenesisEvent(id, createdTask.Status, ActorSystem, "task created", nil)
 		db.emitTaskCreated(createdTask)
 	}
 
@@ -543,7 +546,11 @@ func (db *DB) ListTasks(opts ListTasksOptions) ([]*Task, error) {
 	// slice (e.g. the kanban's Done column) must select the most recent tasks, and
 	// pinned-first selection would let old pinned tasks crowd newer ones out of the
 	// limit entirely.
-	recency := " CASE WHEN status IN ('done', 'blocked') THEN completed_at ELSE created_at END DESC, id DESC"
+	// COALESCE: completed_at is only stamped on a task that actually STARTED
+	// (see applyTransition), so a human-closed backlog item has none. Without the
+	// fallback those tasks sort to the very bottom of Done, which reads as them
+	// having vanished.
+	recency := " CASE WHEN status IN ('done', 'blocked') THEN COALESCE(completed_at, updated_at) ELSE created_at END DESC, id DESC"
 	if opts.OrderByRecency {
 		query += " ORDER BY" + recency
 	} else {
@@ -659,7 +666,7 @@ func (db *DB) SearchTasks(query string, limit int) ([]*Task, error) {
 			OR CAST(pr_number AS TEXT) LIKE ?
 			OR pr_url LIKE ? COLLATE NOCASE
 		)
-		ORDER BY pinned DESC, CASE WHEN status IN ('done', 'blocked') THEN completed_at ELSE created_at END DESC, id DESC
+		ORDER BY pinned DESC, CASE WHEN status IN ('done', 'blocked') THEN COALESCE(completed_at, updated_at) ELSE created_at END DESC, id DESC
 		LIMIT ?
 	`
 
@@ -713,104 +720,41 @@ func (db *DB) MarkTaskStarted(id int64) error {
 	return err
 }
 
-// UpdateTaskStatus updates a task's status.
-func (db *DB) UpdateTaskStatus(id int64, status string) error {
-	// Get old task to track status change
-	oldTask, _ := db.GetTask(id)
-	oldStatus := ""
-	if oldTask != nil {
-		oldStatus = oldTask.Status
-	}
+// UpdateTaskStatus is gone on purpose.
+//
+// It took (id, status) and nothing else, which meant a status change could be
+// made from anywhere while answering none of the questions that matter after
+// the fact: who changed it, from what, why, and on what evidence. Every caller
+// now goes through SetTaskStatus (internal/db/status.go), whose signature
+// cannot be satisfied without an actor, a reason and evidence — so the
+// shortcut no longer type-checks, and the completion gates live in one place
+// nothing can route around.
 
-	query := "UPDATE tasks SET status = ?, updated_at = CURRENT_TIMESTAMP"
-	args := []interface{}{status}
-
-	switch status {
-	case StatusProcessing:
-		query += ", started_at = CURRENT_TIMESTAMP"
-	case StatusDone, StatusArchived:
-		query += ", completed_at = CURRENT_TIMESTAMP"
-	case StatusBlocked:
-		// 'blocked' covers two very different cases: a step waiting in a DAG (a
-		// pipeline step staged behind its dependencies — never started) and a task
-		// that actually ran and is now parked awaiting human review. Only the latter
-		// has completed a turn. Stamping a never-started step makes it look finished
-		// on the board and feeds false "done" signals to the workflow sweeps that key
-		// off completed_at, so only stamp when the task has genuinely started.
-		if oldTask != nil && oldTask.StartedAt != nil {
-			query += ", completed_at = CURRENT_TIMESTAMP"
-		}
-	}
-
-	query += " WHERE id = ?"
-	args = append(args, id)
-
-	_, err := db.Exec(query, args...)
-	if err != nil {
-		return fmt.Errorf("update task status: %w", err)
-	}
-
-	// A finished task's executor pane is torn down; its tmux pane ID then becomes
-	// free for tmux to recycle onto another task. Drop the stale pane pointers so
-	// they can never resolve to a different task's live pane. Best-effort — the
-	// join-time ownership guard is the real safety net.
-	switch status {
-	case StatusDone, StatusArchived:
-		if clearErr := db.ClearTaskPaneIDs(id); clearErr != nil {
-			log.Printf("ClearTaskPaneIDs(%d): %v", id, clearErr)
-		}
-	}
-
-	// Emit status change event if status actually changed
-	if oldStatus != "" && oldStatus != status {
-		updatedTask, err := db.GetTask(id)
-		if err == nil && updatedTask != nil {
-			changes := map[string]interface{}{
-				"status": map[string]string{
-					"old": oldStatus,
-					"new": status,
-				},
-			}
-			db.emitTaskUpdated(updatedTask, changes)
-			// Also emit lifecycle events so external watchers can react
-			// to blocked/completed transitions without parsing update metadata.
-			// These fire for every caller of UpdateTaskStatus — Claude hooks,
-			// MCP, CLI, TUI, and the executor — as long as an emitter is registered.
-			switch status {
-			case StatusBlocked:
-				db.emitTaskBlocked(updatedTask, "status change")
-			case StatusDone:
-				db.emitTaskCompleted(updatedTask)
-			}
-		}
-	}
-
-	// Process dependent tasks when a blocker is completed. Best-effort: a dropped
-	// write is recovered by the daemon's RequeueReadyTasks sweep, but log it so a
-	// stalled workflow isn't a silent mystery.
-	if status == StatusDone || status == StatusArchived {
-		if _, err := db.ProcessCompletedBlocker(id); err != nil {
-			log.Printf("ProcessCompletedBlocker(%d): %v", id, err)
-		}
-	}
-
-	return nil
-}
-
-// UpdateTask updates a task's fields.
+// UpdateTask updates a task's editable fields.
+//
+// It deliberately does NOT write status. Status is append-only: it changes only
+// through SetTaskStatus, which records who and why. This method was the second
+// back door into the status column — a caller could load a task, assign
+// t.Status and save, producing a status change with no transition behind it and
+// a cached row the log could not explain. Assigning t.Status and calling this
+// is now a loud error rather than a silent bypass.
 func (db *DB) UpdateTask(t *Task) error {
 	// Get old task to track changes
 	oldTask, _ := db.GetTask(t.ID)
+	if oldTask != nil && t.Status != "" && t.Status != oldTask.Status {
+		return fmt.Errorf("UpdateTask cannot change status (%s → %s) for task #%d: status is append-only, use SetTaskStatus",
+			oldTask.Status, t.Status, t.ID)
+	}
 
 	_, err := db.Exec(`
 		UPDATE tasks SET
-			title = ?, body = ?, status = ?, type = ?, project = ?, executor = ?,
+			title = ?, body = ?, type = ?, project = ?, executor = ?,
 			worktree_path = ?, branch_name = ?, port = ?, claude_session_id = ?,
 			daemon_session = ?, pr_url = ?, pr_number = ?, pr_info_json = ?, dangerous_mode = ?, permission_mode = ?, remote_control = ?,
 			pinned = ?, tags = ?, source_branch = ?, effort_level = ?, model = ?,
 			updated_at = CURRENT_TIMESTAMP
 		WHERE id = ?
-	`, t.Title, t.Body, t.Status, t.Type, t.Project, t.Executor,
+	`, t.Title, t.Body, t.Type, t.Project, t.Executor,
 		t.WorktreePath, t.BranchName, t.Port, t.ClaudeSessionID,
 		t.DaemonSession, t.PRURL, t.PRNumber, t.PRInfoJSON, t.DangerousMode, t.PermissionMode, t.RemoteControl,
 		t.Pinned, t.Tags, t.SourceBranch, t.EffortLevel, t.Model, t.ID)
@@ -1300,7 +1244,8 @@ func (db *DB) RetryTask(id int64, feedback string) error {
 	}
 
 	// Re-queue the task
-	return db.UpdateTaskStatus(id, StatusQueued)
+	return db.SetTaskStatus(id, StatusQueued, ActorSystem, "retried: logs cleared and feedback appended",
+		Observedf("retry requested for task #%d", id))
 }
 
 // GetNextQueuedTask returns the next task to process.

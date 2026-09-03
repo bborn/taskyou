@@ -432,7 +432,7 @@ func TestCLIExecuteTask(t *testing.T) {
 	}
 
 	// Queue the task (simulate execute command)
-	if err := database.UpdateTaskStatus(task.ID, db.StatusQueued); err != nil {
+	if err := database.SetTaskStatus(task.ID, db.StatusQueued, db.ActorCLI, "test fixture", db.ByHuman("test fixture")); err != nil {
 		t.Fatalf("UpdateTaskStatus() error = %v", err)
 	}
 
@@ -472,7 +472,7 @@ func TestCLIExecuteTaskDangerous(t *testing.T) {
 	if err := database.UpdateTaskDangerousMode(task.ID, true); err != nil {
 		t.Fatalf("UpdateTaskDangerousMode() error = %v", err)
 	}
-	if err := database.UpdateTaskStatus(task.ID, db.StatusQueued); err != nil {
+	if err := database.SetTaskStatus(task.ID, db.StatusQueued, db.ActorCLI, "test fixture", db.ByHuman("test fixture")); err != nil {
 		t.Fatalf("UpdateTaskStatus() error = %v", err)
 	}
 
@@ -580,7 +580,7 @@ func TestCLICloseTask(t *testing.T) {
 	}
 
 	// Close the task
-	if err := database.UpdateTaskStatus(task.ID, db.StatusDone); err != nil {
+	if err := database.SetTaskStatus(task.ID, db.StatusDone, db.ActorCLI, "test fixture", db.ByHuman("test fixture")); err != nil {
 		t.Fatalf("UpdateTaskStatus() error = %v", err)
 	}
 
@@ -1119,7 +1119,7 @@ func TestClaudeHookStatusHandling(t *testing.T) {
 			t.Fatalf("MarkTaskStarted() error = %v", err)
 		}
 		// Set status back to blocked to simulate waiting for input
-		if err := database.UpdateTaskStatus(task.ID, db.StatusBlocked); err != nil {
+		if err := database.SetTaskStatus(task.ID, db.StatusBlocked, db.ActorCLI, "test fixture", db.ByHuman("test fixture")); err != nil {
 			t.Fatalf("UpdateTaskStatus() error = %v", err)
 		}
 

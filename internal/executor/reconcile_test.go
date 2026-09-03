@@ -40,7 +40,7 @@ func createProcessingTask(t *testing.T, database *db.DB, title string) *db.Task 
 	if err := database.CreateTask(task); err != nil {
 		t.Fatal(err)
 	}
-	if err := database.UpdateTaskStatus(task.ID, db.StatusProcessing); err != nil {
+	if err := database.SetTaskStatus(task.ID, db.StatusProcessing, db.ActorCLI, "test fixture", db.ByHuman("test fixture")); err != nil {
 		t.Fatal(err)
 	}
 	return task
@@ -138,7 +138,7 @@ func TestReconcileOrphanedTasksOnlyTouchesProcessing(t *testing.T) {
 	if err := database.CreateTask(queued); err != nil {
 		t.Fatal(err)
 	}
-	if err := database.UpdateTaskStatus(queued.ID, db.StatusQueued); err != nil {
+	if err := database.SetTaskStatus(queued.ID, db.StatusQueued, db.ActorCLI, "test fixture", db.ByHuman("test fixture")); err != nil {
 		t.Fatal(err)
 	}
 

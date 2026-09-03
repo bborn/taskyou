@@ -175,7 +175,7 @@ func TestHasOpenTaskWithTitle(t *testing.T) {
 	}
 
 	// Done tasks don't count — the alert can fire again after Bruno closes it.
-	if err := database.UpdateTaskStatus(task.ID, StatusDone); err != nil {
+	if err := database.SetTaskStatus(task.ID, StatusDone, ActorCLI, "test fixture", ByHuman("test fixture")); err != nil {
 		t.Fatalf("update status: %v", err)
 	}
 	exists, err = database.HasOpenTaskWithTitle("Routine failed: scout")

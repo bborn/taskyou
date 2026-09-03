@@ -103,7 +103,7 @@ func TestBulkStatusChange(t *testing.T) {
 
 	// Change all to done
 	for _, id := range ids {
-		if err := database.UpdateTaskStatus(id, db.StatusDone); err != nil {
+		if err := database.SetTaskStatus(id, db.StatusDone, db.ActorCLI, "test fixture", db.ByHuman("test fixture")); err != nil {
 			t.Fatalf("failed to update task %d: %v", id, err)
 		}
 	}
@@ -153,7 +153,7 @@ func TestBulkArchiveTasks(t *testing.T) {
 
 	// Archive all
 	for _, id := range ids {
-		if err := database.UpdateTaskStatus(id, db.StatusArchived); err != nil {
+		if err := database.SetTaskStatus(id, db.StatusArchived, db.ActorCLI, "test fixture", db.ByHuman("test fixture")); err != nil {
 			t.Fatalf("failed to archive task %d: %v", id, err)
 		}
 	}
@@ -178,7 +178,7 @@ func TestBulkCloseTasks(t *testing.T) {
 
 	// Close all
 	for _, id := range ids {
-		if err := database.UpdateTaskStatus(id, db.StatusDone); err != nil {
+		if err := database.SetTaskStatus(id, db.StatusDone, db.ActorCLI, "test fixture", db.ByHuman("test fixture")); err != nil {
 			t.Fatalf("failed to close task %d: %v", id, err)
 		}
 	}
@@ -203,7 +203,7 @@ func TestBulkQueueTasks(t *testing.T) {
 
 	// Queue all
 	for _, id := range ids {
-		if err := database.UpdateTaskStatus(id, db.StatusQueued); err != nil {
+		if err := database.SetTaskStatus(id, db.StatusQueued, db.ActorCLI, "test fixture", db.ByHuman("test fixture")); err != nil {
 			t.Fatalf("failed to queue task %d: %v", id, err)
 		}
 	}
@@ -227,7 +227,7 @@ func TestBulkSkipsAlreadyDone(t *testing.T) {
 	ids := createTestTasks(t, database, 2)
 
 	// Set first task to done already
-	if err := database.UpdateTaskStatus(ids[0], db.StatusDone); err != nil {
+	if err := database.SetTaskStatus(ids[0], db.StatusDone, db.ActorCLI, "test fixture", db.ByHuman("test fixture")); err != nil {
 		t.Fatalf("failed to set task done: %v", err)
 	}
 

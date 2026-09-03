@@ -94,7 +94,9 @@ Examples:
 					failed++
 					continue
 				}
-				if err := database.UpdateTaskStatus(id, status); err != nil {
+				if err := database.SetTaskStatus(id, status, db.ActorCLI,
+					"status set by `ty bulk status`",
+					db.ByHuman("ran `ty bulk status` moving task #%d to %s", id, status)); err != nil {
 					fmt.Fprintln(os.Stderr, errorStyle.Render(fmt.Sprintf("Error updating task #%d: %v", id, err)))
 					failed++
 					continue
@@ -212,7 +214,9 @@ Examples:
 					fmt.Println(dimStyle.Render(fmt.Sprintf("Task #%d is already done, skipping", id)))
 					continue
 				}
-				if err := database.UpdateTaskStatus(id, db.StatusDone); err != nil {
+				if err := database.SetTaskStatus(id, db.StatusDone, db.ActorCLI,
+					"closed by `ty bulk close`",
+					db.ByHuman("ran `ty bulk close` including task #%d", id)); err != nil {
 					fmt.Fprintln(os.Stderr, errorStyle.Render(fmt.Sprintf("Error closing task #%d: %v", id, err)))
 					failed++
 					continue
@@ -280,7 +284,9 @@ Examples:
 					}
 				}
 
-				if err := database.UpdateTaskStatus(id, db.StatusQueued); err != nil {
+				if err := database.SetTaskStatus(id, db.StatusQueued, db.ActorCLI,
+					"queued by `ty bulk execute`",
+					db.ByHuman("ran `ty bulk execute` including task #%d", id)); err != nil {
 					fmt.Fprintln(os.Stderr, errorStyle.Render(fmt.Sprintf("Error queueing task #%d: %v", id, err)))
 					failed++
 					continue
@@ -338,7 +344,9 @@ Examples:
 					fmt.Println(dimStyle.Render(fmt.Sprintf("Task #%d is already archived, skipping", id)))
 					continue
 				}
-				if err := database.UpdateTaskStatus(id, db.StatusArchived); err != nil {
+				if err := database.SetTaskStatus(id, db.StatusArchived, db.ActorCLI,
+					"archived by `ty bulk archive`",
+					db.ByHuman("ran `ty bulk archive` including task #%d", id)); err != nil {
 					fmt.Fprintln(os.Stderr, errorStyle.Render(fmt.Sprintf("Error archiving task #%d: %v", id, err)))
 					failed++
 					continue

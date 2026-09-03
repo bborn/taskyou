@@ -73,7 +73,7 @@ func newCompleteCmd() *cobra.Command {
 
 			// A short-lived CLI process must generate the activity summary inline —
 			// a background goroutine would be killed when the process exits.
-			outcome, err := completion.Complete(database, taskID, summary, completion.Options{AsyncSummary: false})
+			outcome, err := completion.Complete(database, taskID, summary, completion.Options{AsyncSummary: false, Actor: db.ActorCLI})
 			if err != nil {
 				return err
 			}

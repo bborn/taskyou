@@ -125,7 +125,9 @@ func (e *Executor) reportAuthRequired(task *db.Task, reason string) {
 	e.logLine(task.ID, "error", reason)
 
 	// Move to blocked so it surfaces on the board and fires task.blocked.
-	if err := e.updateStatus(task.ID, db.StatusBlocked); err != nil {
+	if err := e.updateStatus(task.ID, db.StatusBlocked, db.ActorSweep,
+		"the executor session is logged out and cannot make progress",
+		db.Observedf("%s", reason)); err != nil {
 		e.logger.Error("Failed to block auth-stuck task", "task", task.ID, "error", err)
 	}
 

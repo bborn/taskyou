@@ -57,11 +57,39 @@ type Outcome struct {
 
 // Options tunes side effects that differ between callers.
 type Options struct {
+	// Actor is who is completing the task — an agent through the MCP tool, or a
+	// human running `ty complete`. It rides into the status log, where "the
+	// agent said it was done" and "a person said it was done" are different
+	// facts about the same transition.
+	Actor db.Actor
+
 	// AsyncSummary runs activity-summary generation in a background goroutine.
 	// The long-lived MCP server wants this (it must not block the agent); a
 	// short-lived CLI process must NOT, because the process exits and kills the
 	// goroutine before it can store anything.
 	AsyncSummary bool
+}
+
+// actorFor resolves the caller's actor, defaulting to the MCP tool — the
+// original and still the most common caller.
+func actorFor(opts Options) db.Actor {
+	if opts.Actor == "" {
+		return db.ActorMCP
+	}
+	return opts.Actor
+}
+
+// doneEvidence records what was actually observed when a task completed: the
+// agent's own summary of the work, plus the verify gate it had to pass.
+func doneEvidence(summary, gate string) db.Evidence {
+	observed := strings.TrimSpace(summary)
+	if observed == "" {
+		observed = "completion signalled with no summary"
+	}
+	if len(observed) > 400 {
+		observed = observed[:400] + "…"
+	}
+	return db.Evidence{Observed: observed, Gate: gate}
 }
 
 // LookupPR returns the PR number and URL for a task's branch, or (0, "").
@@ -104,6 +132,7 @@ func Complete(database *db.DB, taskID int64, summary string, opts Options) (*Out
 	// 1. Evidence gate. A step that registered a `verify:` command must pass it
 	// before completion is accepted — the agent's say-so alone is not trusted.
 	// Tasks with no verify row fall straight through.
+	verifiedGate := ""
 	if verifyCmd, _ := database.GetStepVerify(taskID); strings.TrimSpace(verifyCmd) != "" {
 		dir := strings.TrimSpace(task.WorktreePath)
 		if dir == "" {
@@ -116,6 +145,7 @@ func Complete(database *db.DB, taskID int64, summary string, opts Options) (*Out
 			return &Outcome{Kind: KindVerifyFailed, VerifyCommand: verifyCmd, VerifyOutput: out}, nil
 		}
 		database.AppendTaskLog(taskID, "system", "Verification passed: "+verifyCmd)
+		verifiedGate = verifyCmd
 	}
 
 	database.AppendTaskLog(taskID, "system", fmt.Sprintf("Task completed: %s", summary))
@@ -134,7 +164,9 @@ func Complete(database *db.DB, taskID int64, summary string, opts Options) (*Out
 	// 2. Human-review gate: park rather than advance. Leaving it 'blocked' (not
 	// 'done') keeps its dependents held until a human releases the chain.
 	if nonTerminalStep && pipeline.IsGateStep(task) {
-		if err := database.UpdateTaskStatus(taskID, db.StatusBlocked); err != nil {
+		if err := database.SetTaskStatus(taskID, db.StatusBlocked, actorFor(opts),
+			"human-review gate finished — parked for approval, holding its dependents",
+			db.Evidence{Observed: "the step signalled completion and is a gate step with dependents", Gate: "human-review-gate"}); err != nil {
 			return nil, fmt.Errorf("failed to park gate step for review: %w", err)
 		}
 		// Logged as a "question" so it lands in the blocked/needs-input lane and the
@@ -151,7 +183,9 @@ func Complete(database *db.DB, taskID int64, summary string, opts Options) (*Out
 		prNumber, prURL = LookupPR(database, task)
 	}
 	if prNumber > 0 {
-		if err := database.UpdateTaskStatus(taskID, db.StatusBlocked); err != nil {
+		if err := database.SetTaskStatus(taskID, db.StatusBlocked, actorFor(opts),
+			"work finished and a PR is open — parked for a human merge",
+			db.Evidence{Observed: "the agent signalled completion", PRNumber: prNumber, PRState: "OPEN"}); err != nil {
 			return nil, fmt.Errorf("failed to move task to review: %w", err)
 		}
 		reviewMsg := fmt.Sprintf("✅ PR #%d ready for review — merge or close it to complete this task.", prNumber)
@@ -164,7 +198,9 @@ func Complete(database *db.DB, taskID int64, summary string, opts Options) (*Out
 	}
 
 	// 4. No PR — genuinely done.
-	if err := database.UpdateTaskStatus(taskID, db.StatusDone); err != nil {
+	if err := database.SetTaskStatus(taskID, db.StatusDone, actorFor(opts),
+		"completion signalled and every gate passed, with no PR awaiting review",
+		doneEvidence(summary, verifiedGate)); err != nil {
 		return nil, fmt.Errorf("failed to mark task done: %w", err)
 	}
 

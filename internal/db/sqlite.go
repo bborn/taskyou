@@ -266,6 +266,41 @@ func (db *DB) migrate() error {
 			task_id INTEGER PRIMARY KEY,
 			command TEXT NOT NULL DEFAULT ''
 		)`,
+
+		// Task status transitions — the append-only source of truth for what a
+		// task's status is and how it got there (see internal/db/status.go).
+		//
+		// This is a dedicated table rather than a shape squeezed into
+		// event_log.metadata, for three reasons:
+		//
+		//  1. event_log is a CHANGE FEED, not a ledger. Readers poll MAX(id) to
+		//     learn "the board moved"; it carries every kind of task mutation and
+		//     is a candidate for trimming precisely because nothing depends on old
+		//     rows. Making the source of truth a subset of rows in a feed designed
+		//     to be disposable is how you lose it.
+		//  2. metadata is an unconstrained TEXT blob. The whole point of this
+		//     change is that a transition CANNOT be written without an actor and a
+		//     reason — NOT NULL columns enforce that at the storage layer, a JSON
+		//     blob enforces nothing.
+		//  3. The projection is a per-task ordered fold. It wants (task_id, id) to
+		//     be an index, not a LIKE over serialized JSON.
+		//
+		// event_log keeps working exactly as before; this table sits beside it.
+		`CREATE TABLE IF NOT EXISTS task_status_events (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			task_id INTEGER NOT NULL,
+			from_status TEXT NOT NULL DEFAULT '',
+			to_status TEXT NOT NULL,
+			actor TEXT NOT NULL,
+			reason TEXT NOT NULL,
+			evidence TEXT NOT NULL DEFAULT '{}',
+			outcome TEXT NOT NULL DEFAULT 'applied',
+			gate TEXT NOT NULL DEFAULT '',
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+		)`,
+
+		`CREATE INDEX IF NOT EXISTS idx_task_status_events_task ON task_status_events(task_id, id)`,
+		`CREATE INDEX IF NOT EXISTS idx_task_status_events_outcome ON task_status_events(outcome)`,
 	}
 
 	for _, m := range migrations {
@@ -461,6 +496,13 @@ func (db *DB) migrate() error {
 	// Resolve any task project aliases to canonical project names
 	if err := db.migrateProjectAliases(); err != nil {
 		return fmt.Errorf("migrate project aliases: %w", err)
+	}
+
+	// Give every pre-log task a synthetic genesis event, so the cached status
+	// column folds from the status log on a real database and not just a fresh
+	// one. Insert-only, so it cannot lose or reorder existing history.
+	if err := db.backfillStatusEvents(); err != nil {
+		return fmt.Errorf("backfill status events: %w", err)
 	}
 
 	return nil

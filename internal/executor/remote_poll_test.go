@@ -91,7 +91,7 @@ func TestPollTmuxSessionDoesNotTransitionAnUnreachableHost(t *testing.T) {
 	if err := database.CreateTask(task); err != nil {
 		t.Fatal(err)
 	}
-	if err := database.UpdateTaskStatus(task.ID, db.StatusProcessing); err != nil {
+	if err := database.SetTaskStatus(task.ID, db.StatusProcessing, db.ActorCLI, "test fixture", db.ByHuman("test fixture")); err != nil {
 		t.Fatal(err)
 	}
 
@@ -137,7 +137,7 @@ func TestPollTmuxSessionParksARemoteTaskWhenItsWindowIsGone(t *testing.T) {
 	if err := database.CreateTask(task); err != nil {
 		t.Fatal(err)
 	}
-	if err := database.UpdateTaskStatus(task.ID, db.StatusProcessing); err != nil {
+	if err := database.SetTaskStatus(task.ID, db.StatusProcessing, db.ActorCLI, "test fixture", db.ByHuman("test fixture")); err != nil {
 		t.Fatal(err)
 	}
 

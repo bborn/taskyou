@@ -526,7 +526,7 @@ func TestUpdateTaskStatus(t *testing.T) {
 	}
 
 	// Change status to backlog (the feature we're implementing)
-	if err := db.UpdateTaskStatus(task.ID, StatusBacklog); err != nil {
+	if err := db.SetTaskStatus(task.ID, StatusBacklog, ActorCLI, "test fixture", ByHuman("test fixture")); err != nil {
 		t.Fatalf("failed to update task status: %v", err)
 	}
 
@@ -540,7 +540,7 @@ func TestUpdateTaskStatus(t *testing.T) {
 	}
 
 	// Change status to queued
-	if err := db.UpdateTaskStatus(task.ID, StatusQueued); err != nil {
+	if err := db.SetTaskStatus(task.ID, StatusQueued, ActorCLI, "test fixture", ByHuman("test fixture")); err != nil {
 		t.Fatalf("failed to update task status: %v", err)
 	}
 
@@ -553,7 +553,7 @@ func TestUpdateTaskStatus(t *testing.T) {
 	}
 
 	// Change status to blocked
-	if err := db.UpdateTaskStatus(task.ID, StatusBlocked); err != nil {
+	if err := db.SetTaskStatus(task.ID, StatusBlocked, ActorCLI, "test fixture", ByHuman("test fixture")); err != nil {
 		t.Fatalf("failed to update task status: %v", err)
 	}
 
@@ -572,7 +572,7 @@ func TestUpdateTaskStatus(t *testing.T) {
 	}
 
 	// Change back to backlog
-	if err := db.UpdateTaskStatus(task.ID, StatusBacklog); err != nil {
+	if err := db.SetTaskStatus(task.ID, StatusBacklog, ActorCLI, "test fixture", ByHuman("test fixture")); err != nil {
 		t.Fatalf("failed to update task status: %v", err)
 	}
 
@@ -634,12 +634,12 @@ func TestListTasksClosedSortedByCompletedAt(t *testing.T) {
 	}
 
 	// Close task1 first
-	if err := database.UpdateTaskStatus(task1.ID, StatusDone); err != nil {
+	if err := database.SetTaskStatus(task1.ID, StatusDone, ActorCLI, "test fixture", ByHuman("test fixture")); err != nil {
 		t.Fatalf("failed to close task1: %v", err)
 	}
 
 	// Then close task2 (so task2 has later completed_at)
-	if err := database.UpdateTaskStatus(task2.ID, StatusDone); err != nil {
+	if err := database.SetTaskStatus(task2.ID, StatusDone, ActorCLI, "test fixture", ByHuman("test fixture")); err != nil {
 		t.Fatalf("failed to close task2: %v", err)
 	}
 
@@ -705,13 +705,13 @@ func TestListTasksPinnedFirst(t *testing.T) {
 	}
 
 	// Complete tasks in order so pinned has the oldest completed_at
-	if err := database.UpdateTaskStatus(pinned.ID, StatusDone); err != nil {
+	if err := database.SetTaskStatus(pinned.ID, StatusDone, ActorCLI, "test fixture", ByHuman("test fixture")); err != nil {
 		t.Fatalf("failed to complete pinned task: %v", err)
 	}
-	if err := database.UpdateTaskStatus(recent.ID, StatusDone); err != nil {
+	if err := database.SetTaskStatus(recent.ID, StatusDone, ActorCLI, "test fixture", ByHuman("test fixture")); err != nil {
 		t.Fatalf("failed to complete recent task: %v", err)
 	}
-	if err := database.UpdateTaskStatus(third.ID, StatusDone); err != nil {
+	if err := database.SetTaskStatus(third.ID, StatusDone, ActorCLI, "test fixture", ByHuman("test fixture")); err != nil {
 		t.Fatalf("failed to complete third task: %v", err)
 	}
 
@@ -769,7 +769,7 @@ func TestListTasksOrderByRecencyIgnoresPinned(t *testing.T) {
 		if err := database.CreateTask(task); err != nil {
 			t.Fatalf("failed to create task %q: %v", task.Title, err)
 		}
-		if err := database.UpdateTaskStatus(task.ID, StatusDone); err != nil {
+		if err := database.SetTaskStatus(task.ID, StatusDone, ActorCLI, "test fixture", ByHuman("test fixture")); err != nil {
 			t.Fatalf("failed to complete task %q: %v", task.Title, err)
 		}
 	}
@@ -1098,7 +1098,7 @@ func TestPortAllocationReusesFreedPorts(t *testing.T) {
 	}
 
 	// Mark task1 as done - this frees its port
-	if err := db.UpdateTaskStatus(task1.ID, StatusDone); err != nil {
+	if err := db.SetTaskStatus(task1.ID, StatusDone, ActorCLI, "test fixture", ByHuman("test fixture")); err != nil {
 		t.Fatalf("failed to update task status: %v", err)
 	}
 
@@ -2059,7 +2059,7 @@ func TestGetMostRecentlyCreatedTask(t *testing.T) {
 
 	// Mark second task as done - should still be most recently created
 	task2.Status = StatusDone
-	if err := db.UpdateTaskStatus(task2.ID, StatusDone); err != nil {
+	if err := db.SetTaskStatus(task2.ID, StatusDone, ActorCLI, "test fixture", ByHuman("test fixture")); err != nil {
 		t.Fatalf("failed to update task status: %v", err)
 	}
 
@@ -2925,7 +2925,7 @@ func TestUpdateTaskStatus_ClearsPaneIDsOnTerminal(t *testing.T) {
 			t.Fatalf("set pane ids: %v", err)
 		}
 
-		if err := db.UpdateTaskStatus(task.ID, terminal); err != nil {
+		if err := db.SetTaskStatus(task.ID, terminal, ActorCLI, "test fixture", ByHuman("test fixture")); err != nil {
 			t.Fatalf("update status: %v", err)
 		}
 
@@ -2953,7 +2953,7 @@ func TestUpdateTaskStatus_ClearsPaneIDsOnTerminal(t *testing.T) {
 		if err := db.UpdateTaskPaneIDs(task.ID, "%900", "%901"); err != nil {
 			t.Fatalf("set pane ids: %v", err)
 		}
-		if err := db.UpdateTaskStatus(task.ID, StatusBlocked); err != nil {
+		if err := db.SetTaskStatus(task.ID, StatusBlocked, ActorCLI, "test fixture", ByHuman("test fixture")); err != nil {
 			t.Fatalf("update status: %v", err)
 		}
 		got, err := db.GetTask(task.ID)

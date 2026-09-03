@@ -171,13 +171,13 @@ func TestCreateAutoAdvancesDAGWithParallelJoin(t *testing.T) {
 	collect := taskByStep(res, "Collect")
 
 	// Plan done → Code queues.
-	must(t, database.UpdateTaskStatus(plan.ID, db.StatusDone))
+	must(t, database.SetTaskStatus(plan.ID, db.StatusDone, db.ActorCLI, "test fixture", db.ByHuman("test fixture")))
 	if s := statusOf(t, database, code.ID); s != db.StatusQueued {
 		t.Errorf("Code = %q after Plan done, want queued", s)
 	}
 
 	// Code done → BOTH reviewers queue at once (fan-out).
-	must(t, database.UpdateTaskStatus(code.ID, db.StatusDone))
+	must(t, database.SetTaskStatus(code.ID, db.StatusDone, db.ActorCLI, "test fixture", db.ByHuman("test fixture")))
 	if s := statusOf(t, database, rvA.ID); s != db.StatusQueued {
 		t.Errorf("Review A = %q after Code done, want queued", s)
 	}
@@ -190,13 +190,13 @@ func TestCreateAutoAdvancesDAGWithParallelJoin(t *testing.T) {
 	}
 
 	// One reviewer done → Collect still blocked (join needs both).
-	must(t, database.UpdateTaskStatus(rvA.ID, db.StatusDone))
+	must(t, database.SetTaskStatus(rvA.ID, db.StatusDone, db.ActorCLI, "test fixture", db.ByHuman("test fixture")))
 	if s := statusOf(t, database, collect.ID); s != db.StatusBlocked {
 		t.Errorf("Collect = %q after one review, want still blocked", s)
 	}
 
 	// Second reviewer done → Collect queues (join satisfied).
-	must(t, database.UpdateTaskStatus(rvB.ID, db.StatusDone))
+	must(t, database.SetTaskStatus(rvB.ID, db.StatusDone, db.ActorCLI, "test fixture", db.ByHuman("test fixture")))
 	if s := statusOf(t, database, collect.ID); s != db.StatusQueued {
 		t.Errorf("Collect = %q after both reviews, want queued", s)
 	}

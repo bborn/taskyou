@@ -95,7 +95,7 @@ func TestUpdateTaskStatusEmitsEvents(t *testing.T) {
 	mockEmitter.Changes = nil
 
 	// Update status
-	if err := database.UpdateTaskStatus(task.ID, StatusQueued); err != nil {
+	if err := database.SetTaskStatus(task.ID, StatusQueued, ActorCLI, "test fixture", ByHuman("test fixture")); err != nil {
 		t.Fatalf("Failed to update task status: %v", err)
 	}
 
@@ -148,7 +148,7 @@ func TestUpdateTaskStatusNoEventOnSameStatus(t *testing.T) {
 	mockEmitter.Changes = nil
 
 	// Update to same status
-	if err := database.UpdateTaskStatus(task.ID, StatusQueued); err != nil {
+	if err := database.SetTaskStatus(task.ID, StatusQueued, ActorCLI, "test fixture", ByHuman("test fixture")); err != nil {
 		t.Fatalf("Failed to update task status: %v", err)
 	}
 
@@ -194,7 +194,7 @@ func TestUpdateTaskStatusMultipleTransitions(t *testing.T) {
 	}
 
 	for i, transition := range transitions {
-		if err := database.UpdateTaskStatus(task.ID, transition.to); err != nil {
+		if err := database.SetTaskStatus(task.ID, transition.to, ActorCLI, "test fixture", ByHuman("test fixture")); err != nil {
 			t.Fatalf("Failed to update task status on transition %d: %v", i, err)
 		}
 
@@ -246,7 +246,7 @@ func TestUpdateTaskStatusTimestamps(t *testing.T) {
 	}
 
 	// Update to processing (should set started_at)
-	if err := database.UpdateTaskStatus(task.ID, StatusProcessing); err != nil {
+	if err := database.SetTaskStatus(task.ID, StatusProcessing, ActorCLI, "test fixture", ByHuman("test fixture")); err != nil {
 		t.Fatalf("Failed to update to processing: %v", err)
 	}
 
@@ -260,7 +260,7 @@ func TestUpdateTaskStatusTimestamps(t *testing.T) {
 	}
 
 	// Update to done (should set completed_at)
-	if err := database.UpdateTaskStatus(task.ID, StatusDone); err != nil {
+	if err := database.SetTaskStatus(task.ID, StatusDone, ActorCLI, "test fixture", ByHuman("test fixture")); err != nil {
 		t.Fatalf("Failed to update to done: %v", err)
 	}
 
@@ -287,7 +287,7 @@ func TestUpdateTaskStatusBlockedTimestamps(t *testing.T) {
 			t.Fatalf("create: %v", err)
 		}
 
-		if err := database.UpdateTaskStatus(task.ID, StatusBlocked); err != nil {
+		if err := database.SetTaskStatus(task.ID, StatusBlocked, ActorCLI, "test fixture", ByHuman("test fixture")); err != nil {
 			t.Fatalf("block: %v", err)
 		}
 
@@ -311,11 +311,11 @@ func TestUpdateTaskStatusBlockedTimestamps(t *testing.T) {
 		if err := database.CreateTask(task); err != nil {
 			t.Fatalf("create: %v", err)
 		}
-		if err := database.UpdateTaskStatus(task.ID, StatusProcessing); err != nil {
+		if err := database.SetTaskStatus(task.ID, StatusProcessing, ActorCLI, "test fixture", ByHuman("test fixture")); err != nil {
 			t.Fatalf("process: %v", err)
 		}
 
-		if err := database.UpdateTaskStatus(task.ID, StatusBlocked); err != nil {
+		if err := database.SetTaskStatus(task.ID, StatusBlocked, ActorCLI, "test fixture", ByHuman("test fixture")); err != nil {
 			t.Fatalf("block: %v", err)
 		}
 
@@ -531,7 +531,7 @@ func TestUpdateTaskStatusEmitsLifecycleEvents(t *testing.T) {
 	}
 
 	// Processing → Blocked should emit task.blocked (plus task.updated)
-	if err := database.UpdateTaskStatus(task.ID, StatusBlocked); err != nil {
+	if err := database.SetTaskStatus(task.ID, StatusBlocked, ActorCLI, "test fixture", ByHuman("test fixture")); err != nil {
 		t.Fatalf("update blocked: %v", err)
 	}
 	if got := len(mockEmitter.BlockedTasks); got != 1 {
@@ -542,7 +542,7 @@ func TestUpdateTaskStatusEmitsLifecycleEvents(t *testing.T) {
 	}
 
 	// Blocked → Done should emit task.completed
-	if err := database.UpdateTaskStatus(task.ID, StatusDone); err != nil {
+	if err := database.SetTaskStatus(task.ID, StatusDone, ActorCLI, "test fixture", ByHuman("test fixture")); err != nil {
 		t.Fatalf("update done: %v", err)
 	}
 	if got := len(mockEmitter.CompletedTasks); got != 1 {
@@ -552,7 +552,7 @@ func TestUpdateTaskStatusEmitsLifecycleEvents(t *testing.T) {
 	// Same-status update should not re-fire.
 	mockEmitter.CompletedTasks = nil
 	mockEmitter.BlockedTasks = nil
-	if err := database.UpdateTaskStatus(task.ID, StatusDone); err != nil {
+	if err := database.SetTaskStatus(task.ID, StatusDone, ActorCLI, "test fixture", ByHuman("test fixture")); err != nil {
 		t.Fatalf("no-op update: %v", err)
 	}
 	if got := len(mockEmitter.CompletedTasks); got != 0 {

@@ -2072,7 +2072,9 @@ Examples:
 						os.Exit(1)
 					}
 				}
-				if err := database.UpdateTaskStatus(newTaskID, db.StatusQueued); err != nil {
+				if err := database.SetTaskStatus(newTaskID, db.StatusQueued, db.ActorCLI,
+					"queued by `ty move --execute`",
+					db.ByHuman("ran `ty move %d` with --execute", taskID)); err != nil {
 					fmt.Fprintln(os.Stderr, errorStyle.Render("Error queueing task: "+err.Error()))
 					os.Exit(1)
 				}
@@ -2155,7 +2157,9 @@ Examples:
 				task.PermissionMode = executePermMode
 			}
 
-			if err := database.UpdateTaskStatus(taskID, db.StatusQueued); err != nil {
+			if err := database.SetTaskStatus(taskID, db.StatusQueued, db.ActorCLI,
+				"queued by `ty execute`",
+				db.ByHuman("ran `ty execute %d`", taskID)); err != nil {
 				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
 				os.Exit(1)
 			}
@@ -2222,7 +2226,9 @@ Valid statuses: backlog, queued, processing, blocked, done, archived.`,
 				os.Exit(1)
 			}
 
-			if err := database.UpdateTaskStatus(taskID, status); err != nil {
+			if err := database.SetTaskStatus(taskID, status, db.ActorCLI,
+				"status set by `ty status`",
+				db.ByHuman("ran `ty status %d %s`", taskID, status)); err != nil {
 				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
 				os.Exit(1)
 			}
@@ -2344,7 +2350,9 @@ Examples:
 			// The tmux window is kept around so users can review the agent's work.
 			// Use 'task sessions cleanup' or 'task delete <id>' to clean up windows.
 
-			if err := database.UpdateTaskStatus(taskID, db.StatusDone); err != nil {
+			if err := database.SetTaskStatus(taskID, db.StatusDone, db.ActorCLI,
+				"closed by `ty close`",
+				db.ByHuman("ran `ty close %d`", taskID)); err != nil {
 				fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
 				os.Exit(1)
 			}
@@ -4815,7 +4823,9 @@ func handleNotificationHook(database *db.DB, taskID int64, input *ClaudeHookInpu
 		// 1. Task has actually started (StartedAt is set)
 		// 2. Currently processing (avoid overwriting other states)
 		if task != nil && task.StartedAt != nil && task.Status == db.StatusProcessing {
-			database.UpdateTaskStatus(taskID, db.StatusBlocked)
+			database.SetTaskStatus(taskID, db.StatusBlocked, db.ActorHook,
+				"Claude's Notification hook reported the agent is waiting on a human",
+				db.Observedf("notification type %q", input.NotificationType))
 			msg := "Waiting for user input"
 			if input.NotificationType == "permission_prompt" {
 				msg = "Waiting for permission"
@@ -4915,15 +4925,26 @@ func handleStopHook(database *db.DB, taskID int64, input *ClaudeHookInput) error
 			if pipeline.IsWorkflowTask(task) {
 				if reason := workflowStepUnfinishedReason(database, task); reason == "" {
 					if pipeline.IsTerminalStep(database, task) {
-						database.UpdateTaskStatus(taskID, db.StatusBlocked)
+						database.SetTaskStatus(taskID, db.StatusBlocked, db.ActorHook,
+							"terminal workflow step finished its handoff — parked for a human merge",
+							db.Evidence{Observed: "the agent ended its turn with work committed and pushed"})
 						database.AppendTaskLog(taskID, "system", pipeline.TerminalStepParkedLog)
 					} else if pipeline.IsGateStep(task) {
 						// A gate step is a human-review boundary: park it 'blocked' rather
 						// than advancing, so the next phase waits until a human closes it.
-						database.UpdateTaskStatus(taskID, db.StatusBlocked)
+						database.SetTaskStatus(taskID, db.StatusBlocked, db.ActorHook,
+							"human-review gate finished its handoff — parked for approval",
+							db.Evidence{Observed: "the agent ended its turn with work committed and pushed", Gate: "human-review-gate"})
 						database.AppendTaskLog(taskID, "system", pipeline.GateStepParkedLog)
 					} else {
-						database.UpdateTaskStatus(taskID, db.StatusDone)
+						// The evidence is the commit the step made and pushed, checked by
+						// workflowStepUnfinishedReason above — never "the window is gone".
+						database.SetTaskStatus(taskID, db.StatusDone, db.ActorHook,
+							"workflow step ended its turn with the handoff complete",
+							db.Evidence{
+								Observed:   "the agent ended its turn with no uncommitted work of its own and HEAD pushed past the recorded base commit",
+								BaseCommit: baseCommitFor(database, taskID),
+							})
 						database.AppendTaskLog(taskID, "system", "Work committed and pushed — workflow advances to the next step")
 					}
 				} else {
@@ -4931,12 +4952,16 @@ func handleStopHook(database *db.DB, taskID int64, input *ClaudeHookInput) error
 					// input" reads as a question the agent never asked and hides
 					// what actually blocked the handoff (e.g. leftover untracked
 					// files), leaving the DAG stalled with no clue on the board.
-					database.UpdateTaskStatus(taskID, db.StatusBlocked)
+					database.SetTaskStatus(taskID, db.StatusBlocked, db.ActorHook,
+						"workflow step ended its turn without completing the handoff",
+						db.Observedf("%s", reason))
 					database.AppendTaskLog(taskID, "system", "Step ended its turn without completing the handoff — "+reason)
 					noteProviderError(database, taskID, input)
 				}
 			} else {
-				database.UpdateTaskStatus(taskID, db.StatusBlocked)
+				database.SetTaskStatus(taskID, db.StatusBlocked, db.ActorHook,
+					"the agent ended its turn, so it is waiting on a human",
+					db.Observedf("Claude Stop hook reported stop reason %q", input.StopReason))
 				database.AppendTaskLog(taskID, "system", "Waiting for user input")
 				noteProviderError(database, taskID, input)
 			}
@@ -4991,7 +5016,9 @@ func handlePreToolUseHook(database *db.DB, taskID int64, input *ClaudeHookInput)
 	// 1. Task was blocked (waiting for input) and user responded
 	// 2. Task was in any other state but executor is now actively working
 	if task.Status == db.StatusBlocked {
-		database.UpdateTaskStatus(taskID, db.StatusProcessing)
+		database.SetTaskStatus(taskID, db.StatusProcessing, db.ActorHook,
+			"the agent is about to run a tool, so it is working again",
+			db.NoEvidence)
 		database.AppendTaskLog(taskID, "system", "Agent resumed working")
 	}
 
@@ -5223,7 +5250,9 @@ func handlePostToolUseHook(database *db.DB, taskID int64, input *ClaudeHookInput
 			}
 		}
 		if !hasQuestion {
-			database.UpdateTaskStatus(taskID, db.StatusProcessing)
+			database.SetTaskStatus(taskID, db.StatusProcessing, db.ActorHook,
+				"the agent produced output with no outstanding question, so it is working again",
+				db.NoEvidence)
 			database.AppendTaskLog(taskID, "system", "Agent resumed working")
 		}
 	}
@@ -7108,4 +7137,12 @@ func parseKeyEvents(input string) []tea.Msg {
 		msgs = append(msgs, msg)
 	}
 	return msgs
+}
+
+// baseCommitFor reads the commit a task's worktree started at, for the status
+// log's evidence field. Empty when nothing was recorded — which is itself
+// meaningful: without a baseline, nothing can prove the step produced work.
+func baseCommitFor(database *db.DB, taskID int64) string {
+	sha, _ := database.GetTaskBaseCommit(taskID)
+	return sha
 }

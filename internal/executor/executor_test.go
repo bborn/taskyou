@@ -1735,7 +1735,7 @@ func TestUpdateTaskDoesNotResetStatus(t *testing.T) {
 
 	// Simulate what executeTask does:
 	// 1. Update DB status to processing
-	if err := database.UpdateTaskStatus(task.ID, db.StatusProcessing); err != nil {
+	if err := database.SetTaskStatus(task.ID, db.StatusProcessing, db.ActorCLI, "test fixture", db.ByHuman("test fixture")); err != nil {
 		t.Fatal(err)
 	}
 	// 2. Keep the struct in sync (this is the fix)

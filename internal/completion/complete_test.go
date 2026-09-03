@@ -199,7 +199,7 @@ func TestCompleteDoesNotBypassGateTheWayAStatusWriteDoes(t *testing.T) {
 	if err := database.AddDependency(ctlGate.ID, ctlNext.ID, true); err != nil {
 		t.Fatal(err)
 	}
-	if err := database.UpdateTaskStatus(ctlGate.ID, db.StatusDone); err != nil {
+	if err := database.SetTaskStatus(ctlGate.ID, db.StatusDone, db.ActorCLI, "test fixture", db.ByHuman("test fixture")); err != nil {
 		t.Fatal(err)
 	}
 	if got := statusOf(t, database, ctlGate.ID); got != db.StatusDone {

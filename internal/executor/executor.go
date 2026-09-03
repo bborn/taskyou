@@ -492,7 +492,9 @@ func (e *Executor) reconcileOrphanedTasks(startup bool) {
 		if !startup {
 			msg = "Executor died - task was 'processing' with no live executor. Moved to blocked; retry to resume."
 		}
-		if err := e.updateStatus(task.ID, db.StatusBlocked); err != nil {
+		if err := e.updateStatus(task.ID, db.StatusBlocked, db.ActorSweep,
+			"orphaned: the task was 'processing' with no live executor",
+			db.Observedf("%s", msg)); err != nil {
 			e.logger.Error("Failed to reconcile orphaned task", "id", task.ID, "error", err)
 			continue
 		}
@@ -678,7 +680,17 @@ func (e *Executor) reconcileFinishedWorkflowSteps() {
 			go e.verifyThenAutoComplete(task, verifyCmd)
 			continue
 		}
-		if err := e.updateStatus(task.ID, db.StatusDone); err != nil {
+		// The evidence is a COMMIT the step actually made, never the absence of a
+		// tmux window. WorkflowStepFinished has already compared HEAD against the
+		// recorded base commit; naming both here is what lets a reader check the
+		// sweep's arithmetic months later.
+		if err := e.updateStatus(task.ID, db.StatusDone, db.ActorSweep,
+			"workflow step committed and pushed its work but never signalled done",
+			db.Evidence{
+				Observed:   "HEAD moved past the recorded base commit and is pushed; no uncommitted work of its own remains",
+				BaseCommit: baseCommit,
+				HeadCommit: gitHeadCommit(task.WorktreePath),
+			}); err != nil {
 			e.logger.Error("Failed to auto-complete finished workflow step", "id", task.ID, "error", err)
 			continue
 		}
@@ -705,7 +717,13 @@ func (e *Executor) verifyThenAutoComplete(task *db.Task, verifyCmd string) {
 		e.logger.Info("Verify gate blocked auto-complete of finished workflow step", "id", task.ID, "title", task.Title)
 		return
 	}
-	if err := e.updateStatus(task.ID, db.StatusDone); err != nil {
+	if err := e.updateStatus(task.ID, db.StatusDone, db.ActorSweep,
+		"workflow step committed and pushed its work, and its verify gate passed",
+		db.Evidence{
+			Observed:   "HEAD moved past the recorded base commit and is pushed",
+			HeadCommit: gitHeadCommit(task.WorktreePath),
+			Gate:       verifyCmd,
+		}); err != nil {
 		e.logger.Error("Failed to auto-complete finished workflow step after verify", "id", task.ID, "error", err)
 		return
 	}
@@ -791,7 +809,8 @@ func (e *Executor) Interrupt(taskID int64) bool {
 	task, _ := e.db.GetTask(taskID)
 
 	// Mark as backlog in database (for cross-process communication)
-	e.updateStatus(taskID, db.StatusBacklog)
+	e.updateStatus(taskID, db.StatusBacklog, db.ActorDaemon, "interrupted by the user",
+		db.ByHuman("interrupt requested for task #%d", taskID))
 	e.logLine(taskID, "system", "Task interrupted by user")
 
 	// Emit interrupt event
@@ -1308,8 +1327,13 @@ func (e *Executor) TriggerProcessing() {
 	}
 }
 
-// updateStatus updates task status in DB and broadcasts the change.
-func (e *Executor) updateStatus(taskID int64, status string) error {
+// updateStatus moves a task and broadcasts the change.
+//
+// It takes actor/reason/evidence and passes them straight through to
+// db.SetTaskStatus rather than inventing its own, so the daemon's own status
+// changes land in the same audit trail as everyone else's — the absence of
+// which used to mean debugging the daemon meant reading task_logs and guessing.
+func (e *Executor) updateStatus(taskID int64, status string, actor db.Actor, reason string, evidence db.Evidence) error {
 	// Get old status for event
 	oldTask, _ := e.db.GetTask(taskID)
 	oldStatus := ""
@@ -1317,7 +1341,7 @@ func (e *Executor) updateStatus(taskID int64, status string) error {
 		oldStatus = oldTask.Status
 	}
 
-	if err := e.db.UpdateTaskStatus(taskID, status); err != nil {
+	if err := e.db.SetTaskStatus(taskID, status, actor, reason, evidence); err != nil {
 		return err
 	}
 	tasksummary.KickoffOnStatusChange(e.db, oldStatus, status, taskID)
@@ -1519,7 +1543,16 @@ func (e *Executor) reconcileReviewTasks() {
 				e.logger.Warn("reconcileReviewTasks: failed to record auto-done marker", "task", task.ID, "error", err)
 			}
 			e.db.AppendTaskLog(task.ID, "system", fmt.Sprintf("PR #%d %s — task auto-completed.", info.Number, verb))
-			if err := e.db.UpdateTaskStatus(task.ID, db.StatusDone); err != nil {
+			// The PR reaching a terminal state is the ONLY evidence that gets a
+			// done-write past the open-PR gate — and this reconciler is the only
+			// caller that has actually looked at GitHub to obtain it.
+			if err := e.db.SetTaskStatus(task.ID, db.StatusDone, db.ActorDaemon,
+				fmt.Sprintf("PR #%d was %s by a human, which finishes this task", info.Number, verb),
+				db.Evidence{
+					Observed: fmt.Sprintf("gh reports PR #%d in state %s", info.Number, info.State),
+					PRNumber: info.Number,
+					PRState:  string(info.State),
+				}); err != nil {
 				e.logger.Error("reconcileReviewTasks: failed to mark task done", "task", task.ID, "error", err)
 				continue
 			}
@@ -1956,7 +1989,9 @@ func (e *Executor) admitQueuedTask(task *db.Task) bool {
 		"id", task.ID, "title", task.Title, "open_blockers", open)
 	e.logLine(task.ID, "system", fmt.Sprintf(
 		"Refused to start: %d blocker(s) not yet complete. Reverted to blocked; will re-queue when dependencies finish.", open))
-	if err := e.updateStatus(task.ID, db.StatusBlocked); err != nil {
+	if err := e.updateStatus(task.ID, db.StatusBlocked, db.ActorDaemon,
+		"refused to start: the task was queued while blockers were still open",
+		db.Observedf("%d blocker(s) not yet complete", open)); err != nil {
 		e.logger.Error("Failed to revert mis-queued task to blocked", "id", task.ID, "error", err)
 	}
 	return false
@@ -2013,7 +2048,8 @@ func (e *Executor) executeTask(ctx context.Context, task *db.Task) {
 	e.db.MarkTaskStarted(task.ID)
 
 	// Update status to processing
-	if err := e.updateStatus(task.ID, db.StatusProcessing); err != nil {
+	if err := e.updateStatus(task.ID, db.StatusProcessing, db.ActorDaemon,
+		"picked up for execution", db.NoEvidence); err != nil {
 		e.logger.Error("Failed to update status", "error", err)
 		return
 	}
@@ -2050,7 +2086,9 @@ func (e *Executor) executeTask(ctx context.Context, task *db.Task) {
 		msg := fmt.Sprintf("Placement failed: %v", placementErr)
 		e.logger.Error("placement failed; not falling back to local", "task", task.ID, "error", placementErr)
 		e.logLine(task.ID, "error", msg)
-		_ = e.updateStatus(task.ID, db.StatusBlocked)
+		_ = e.updateStatus(task.ID, db.StatusBlocked, db.ActorDaemon,
+			"placement failed, and running somewhere other than where you were told is not a safe fallback",
+			db.Observedf("%s", msg))
 		e.hooks.OnStatusChange(task, db.StatusBlocked, msg)
 		e.events.EmitTaskFailed(task, msg)
 		return
@@ -2097,7 +2135,9 @@ func (e *Executor) executeTask(ctx context.Context, task *db.Task) {
 			msg := fmt.Sprintf("Could not prepare an isolated worktree on %s: %v", remotePlacement.Host, err)
 			e.logger.Error("remote worktree setup failed", "task", task.ID, "host", remotePlacement.Host, "error", err)
 			e.logLine(task.ID, "error", msg)
-			_ = e.updateStatus(task.ID, db.StatusBlocked)
+			_ = e.updateStatus(task.ID, db.StatusBlocked, db.ActorDaemon,
+				"could not prepare an isolated worktree on the placed host",
+				db.Observedf("%s", msg))
 			e.hooks.OnStatusChange(task, db.StatusBlocked, msg)
 			e.events.EmitTaskFailed(task, msg)
 			return
@@ -2136,13 +2176,17 @@ func (e *Executor) executeTask(ctx context.Context, task *db.Task) {
 			e.logLine(task.ID, "error", fmt.Sprintf(
 				"Could not start: %v. Waited %s without that branch being freed, so this step is parked instead of retrying forever. Free the branch (detach the worktree named above) and re-queue this task.",
 				err, branchWaitGiveUp))
-			_ = e.db.UpdateTaskStatus(task.ID, db.StatusBlocked)
+			_ = e.db.SetTaskStatus(task.ID, db.StatusBlocked, db.ActorDaemon,
+				"gave up waiting for a contended branch to be freed",
+				db.Observedf("waited %s for the branch this step needs without it being released", branchWaitGiveUp))
 			e.hooks.OnStatusChange(task, db.StatusBlocked, "Blocked: the branch this step needs never became free")
 			return
 		}
 		e.logger.Info("Deferring step until the branch it needs is free",
 			"id", task.ID, "retry_in", retryIn, "error", err)
-		if err := e.db.UpdateTaskStatus(task.ID, db.StatusQueued); err != nil {
+		if err := e.db.SetTaskStatus(task.ID, db.StatusQueued, db.ActorDaemon,
+			"deferred: the branch this step needs is held by a sibling that is still running",
+			db.NoEvidence); err != nil {
 			e.logger.Error("Failed to requeue deferred step", "id", task.ID, "error", err)
 		}
 		return
@@ -2153,7 +2197,9 @@ func (e *Executor) executeTask(ctx context.Context, task *db.Task) {
 	if err != nil {
 		e.logger.Error("Failed to setup worktree", "error", err)
 		e.logLine(task.ID, "error", fmt.Sprintf("Failed to setup worktree: %v", err))
-		_ = e.db.UpdateTaskStatus(task.ID, db.StatusBlocked)
+		_ = e.db.SetTaskStatus(task.ID, db.StatusBlocked, db.ActorDaemon,
+			"worktree setup failed, so the task cannot run in isolation",
+			db.Observedf("setup worktree: %v", err))
 		e.hooks.OnStatusChange(task, db.StatusBlocked, "Worktree setup failed - cannot execute task safely")
 		return
 	}
@@ -2221,14 +2267,18 @@ func (e *Executor) executeTask(ctx context.Context, task *db.Task) {
 	}
 	if taskExecutor == nil {
 		e.logLine(task.ID, "error", "No executor available")
-		e.updateStatus(task.ID, db.StatusBlocked)
+		e.updateStatus(task.ID, db.StatusBlocked, db.ActorDaemon,
+			"no executor is available to run this task",
+			db.Observedf("executor %q could not be resolved and there is no fallback", executorName))
 		return
 	}
 
 	// Check if the executor is available
 	if !taskExecutor.IsAvailable() {
 		e.logLine(task.ID, "error", fmt.Sprintf("Executor '%s' is not installed", executorName))
-		e.updateStatus(task.ID, db.StatusBlocked)
+		e.updateStatus(task.ID, db.StatusBlocked, db.ActorDaemon,
+			"the executor this task needs is not installed on this machine",
+			db.Observedf("executor %q reported itself unavailable", executorName))
 		return
 	}
 
@@ -2284,7 +2334,9 @@ func (e *Executor) executeTask(ctx context.Context, task *db.Task) {
 		// Explicitly set to backlog - don't assume Interrupt() already did it,
 		// as the interruption may have come from pollTmuxSession detecting a
 		// stale status or context cancellation.
-		e.updateStatus(task.ID, db.StatusBacklog)
+		e.updateStatus(task.ID, db.StatusBacklog, db.ActorDaemon,
+			"the executor session was interrupted",
+			db.Observedf("executor run for task #%d reported Interrupted", task.ID))
 		e.hooks.OnStatusChange(task, db.StatusBacklog, "Task interrupted by user")
 		// Kill executor process to free memory when task is interrupted
 		taskExecutor.Kill(task.ID)
@@ -2308,18 +2360,24 @@ func (e *Executor) executeTask(ctx context.Context, task *db.Task) {
 		// Only humans should mark tasks as done, but agent-success is the
 		// completion signal external watchers care about. StatusBacklog
 		// doesn't fire task.completed via the db emitter, so fire it here.
-		e.updateStatus(task.ID, db.StatusBacklog)
+		e.updateStatus(task.ID, db.StatusBacklog, db.ActorDaemon,
+			"the agent finished its run — parked for a human to review and close",
+			db.Observedf("executor run for task #%d exited successfully", task.ID))
 		e.logLine(task.ID, "system", "Agent finished - awaiting human review to close")
 		e.hooks.OnStatusChange(task, db.StatusBacklog, "Agent finished - awaiting human review to close")
 		e.events.EmitTaskCompleted(task)
 	} else if result.NeedsInput {
-		e.updateStatus(task.ID, db.StatusBlocked)
+		e.updateStatus(task.ID, db.StatusBlocked, db.ActorDaemon,
+			"the agent asked a question and is waiting on a human",
+			db.Observedf("executor run for task #%d reported NeedsInput", task.ID))
 		// Log the question with special type so UI can display it
 		e.logLine(task.ID, "question", result.Message)
 		e.logLine(task.ID, "system", "Task needs input - use 'r' to retry with your answer")
 		e.hooks.OnStatusChange(task, db.StatusBlocked, result.Message)
 	} else {
-		e.updateStatus(task.ID, db.StatusBlocked)
+		e.updateStatus(task.ID, db.StatusBlocked, db.ActorDaemon,
+			"the executor run failed",
+			db.Observedf("executor run for task #%d failed: %s", task.ID, result.Message))
 		msg := fmt.Sprintf("Task failed: %s", result.Message)
 		e.logLine(task.ID, "error", msg)
 		e.hooks.OnStatusChange(task, db.StatusBlocked, msg)
