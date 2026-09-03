@@ -73,6 +73,10 @@ type hostChannel struct {
 
 	mu   sync.RWMutex
 	snap hostSnapshot
+	// events holds the latest signal each task sent, until a poller takes it.
+	// Keyed by task, not queued, because only the most recent one can be true:
+	// an agent that said "needs-input" and then "done" is done.
+	events map[int64]hostEvent
 
 	stop context.CancelFunc
 	done chan struct{}
@@ -100,6 +104,8 @@ type hostChannel struct {
 const hostAgentScript = `
 set -u
 tick=${TY_HOST_TICK:-5}
+spool=@@SPOOL@@
+mkdir -p "$spool" 2>/dev/null || true
 state=${TMPDIR:-/tmp}/ty-hostagent-$$
 mkdir -p "$state" 2>/dev/null || exit 1
 trap 'rm -rf "$state"' EXIT INT TERM
@@ -127,6 +133,14 @@ while :; do
       printf 'W %s %s %s\n' "$w" "$h" "$(printf '%s' "$c" | base64 | tr -d '\n')"
     fi
   done
+  for f in "$spool"/*.evt; do
+    [ -f "$f" ] || continue
+    id=${f##*/}; id=${id%%.*}
+    while IFS=' ' read -r kind detail || [ -n "$kind" ]; do
+      [ -n "$kind" ] && printf 'E %s %s %s\n' "$id" "$kind" "$detail"
+    done <"$f"
+    rm -f "$f"
+  done
   printf '.\n'
   sleep "$tick"
 done
@@ -135,7 +149,8 @@ done
 // hostAgentProgram is the script with ty's tick baked in, so the interval has one
 // definition on this side rather than a default hidden in the shell.
 func hostAgentProgram() string {
-	return fmt.Sprintf("TY_HOST_TICK=%d\n%s", int(hostAgentTick.Seconds()), hostAgentScript)
+	return fmt.Sprintf("TY_HOST_TICK=%d\n", int(hostAgentTick.Seconds())) +
+		strings.ReplaceAll(hostAgentScript, spoolToken, remoteSpoolDir)
 }
 
 // Window reports what the host last said about a target ("session:window").
@@ -178,6 +193,19 @@ func (c *hostChannel) consume(r io.Reader, carry map[string]string) {
 			target, win := parseHostWindow(line, carry)
 			if target != "" {
 				pending[target] = win
+			}
+		case strings.HasPrefix(line, "E "):
+			// Signals are published as they arrive rather than held for the end of
+			// the tick. A window snapshot is only meaningful complete; a signal is
+			// meaningful on its own, and holding it back would add a tick of delay
+			// to the one thing this exists to make immediate.
+			if ev, ok := parseHostEvent(line); ok {
+				c.mu.Lock()
+				if c.events == nil {
+					c.events = map[int64]hostEvent{}
+				}
+				c.events[ev.TaskID] = ev
+				c.mu.Unlock()
 			}
 		}
 	}

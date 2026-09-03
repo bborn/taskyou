@@ -391,6 +391,29 @@ func (e *Executor) executorWindowLives(task *db.Task) bool {
 	return probe != windowGone
 }
 
+// applyHostSignal turns a remote agent's own account of itself into a result.
+//
+// The detail is logged whatever the kind, because the sentence the agent wrote is
+// usually the only explanation anyone will ever have for why a task on another
+// machine ended the way it did.
+func (e *Executor) applyHostSignal(taskID int64, ev hostEvent) execResult {
+	detail := ev.Detail
+	if detail == "" {
+		detail = "(no detail given)"
+	}
+	switch ev.Kind {
+	case eventNeedsInput:
+		e.logLine(taskID, "system", "The agent asked for input: "+detail)
+		return execResult{NeedsInput: true, Message: detail}
+	case eventFailed:
+		e.logLine(taskID, "error", "The agent stopped: "+detail)
+		return execResult{Message: detail}
+	default:
+		e.logLine(taskID, "system", "The agent reported it finished: "+detail)
+		return execResult{Success: true, Message: detail}
+	}
+}
+
 // channelProbe answers the poll's two questions — is the window there, and what
 // is on its screen — from the host's standing connection.
 //
@@ -4504,6 +4527,13 @@ func (e *Executor) pollTmuxSession(ctx context.Context, taskID int64, sessionNam
 			// The probe gets its own deadline rather than the task's, but must keep
 			// the task's runner: a remotely-placed task lives in a tmux server on
 			// another host, and probing this machine's would say it had vanished.
+			// A signal beats every inference below it. An agent that said what
+			// happened is the only source here that is not a guess, so it is read
+			// first and returns immediately — no waiting for the idle timer to agree.
+			if ev, ok := e.taskSignal(remoteHost, taskID); ok {
+				return e.applyHostSignal(taskID, ev)
+			}
+
 			// A placed host answers for all of its tasks at once over one standing
 			// connection; only fall back to a per-task round trip when that channel
 			// has nothing fresh to say. See hostchannel.go.

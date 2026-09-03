@@ -22,6 +22,19 @@ func (e *Executor) runRemoteSession(ctx context.Context, task *db.Task, r Remote
 	// Every command built from this context lands on the placed host.
 	ctx = WithRunner(ctx, r)
 
+	// The agent gets a way to say it has finished, and its prompt gets told about
+	// it. Without both halves the remote path is back to inferring completion from
+	// a silent screen. A failure to install is not fatal — the idle heuristic is
+	// still there underneath — but it is worth saying out loud, because the task
+	// will then finish two minutes late for a reason nothing else would explain.
+	if err := e.installSignalScript(ctx, r.WorkDir); err != nil {
+		e.logLine(task.ID, "system", fmt.Sprintf(
+			"Could not install the completion signal on %s (%v); falling back to idle detection, "+
+				"so this task will park a couple of minutes after it actually finishes.", r.Host, err))
+	} else {
+		prompt += signalInstructions()
+	}
+
 	script, err := remoteLaunchScript(task, executorName, r.WorkDir, prompt)
 	if err != nil {
 		e.logLine(task.ID, "error", err.Error())
