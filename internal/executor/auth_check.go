@@ -73,15 +73,51 @@ func (e *Executor) checkAuthStuckTasks() {
 			continue
 		}
 		reason, stuck := DetectAuthPrompt(content)
-		if !stuck {
+		if stuck {
+			if task.PlacementTarget != "" {
+				reason = fmt.Sprintf("%s (on %s)", reason, task.PlacementTarget)
+			}
+			e.reportAuthRequired(task, reason)
 			continue
 		}
-		if task.PlacementTarget != "" {
-			reason = fmt.Sprintf("%s (on %s)", reason, task.PlacementTarget)
-		}
 
-		e.reportAuthRequired(task, reason)
+		// A dialog waiting on a keystroke stalls a task exactly as a login
+		// prompt does, and this sweep is the only thing that looks at a LOCAL
+		// task's screen — the idle poll that would eventually park it is
+		// remote-only by design. Without this, a local task sitting at an
+		// onboarding or trust prompt stays "processing" until somebody thinks
+		// to attach to the pane and look.
+		if reason, blocked := DetectBlockingPrompt(content); blocked {
+			if task.PlacementTarget != "" {
+				reason = fmt.Sprintf("%s (on %s)", reason, task.PlacementTarget)
+			}
+			e.reportBlockingPrompt(task, reason)
+		}
 	}
+}
+
+// reportBlockingPrompt parks a task whose executor is waiting on a question and
+// puts the question itself where a human will see it.
+//
+// This deliberately does not fire task.auth_required: nothing is wrong with the
+// credentials, and an operator with a re-authentication routine wired to that
+// hook should not have it woken by an onboarding dialog. It is ordinary blocked
+// work that needs an answer, so it fires task.blocked and says what to answer.
+func (e *Executor) reportBlockingPrompt(task *db.Task, reason string) {
+	e.logger.Info("Detected executor waiting on a dialog",
+		"task", task.ID, "host", task.PlacementTarget, "reason", reason)
+	e.logLine(task.ID, "error", reason)
+
+	if err := e.updateStatus(task.ID, db.StatusBlocked); err != nil {
+		e.logger.Error("Failed to block prompt-stuck task", "task", task.ID, "error", err)
+	}
+
+	updated, gerr := e.db.GetTask(task.ID)
+	if gerr != nil || updated == nil {
+		updated = task
+	}
+	e.events.EmitTaskBlocked(updated, reason)
+	e.hooks.Run(hooks.EventTaskBlocked, updated, reason)
 }
 
 // captureExecutorPane reads what a task's executor is currently showing,

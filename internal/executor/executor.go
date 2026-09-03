@@ -4593,11 +4593,39 @@ func (e *Executor) pollTmuxSession(ctx context.Context, taskID int64, sessionNam
 					}
 				}
 
+				// A dialog waiting on a keystroke is not a finished agent and must
+				// not wait out the idle window to be noticed: no work is happening
+				// behind it and none will, so the remaining ticks would only
+				// re-confirm that. Say what it is asking, so the answer is obvious
+				// without attaching to the pane to look.
+				if reason, blocked := DetectBlockingPrompt(content); ok && blocked {
+					e.logLine(taskID, "system", fmt.Sprintf("%s (on %s)", reason, remoteHost))
+					return execResult{NeedsInput: true, Message: reason}
+				}
+
+				// A still screen is not always a stopped agent. A provider retry
+				// loop repaints the same frame between attempts and a long tool
+				// call may not repaint at all, so the idle run is reset rather than
+				// advanced while the screen says a turn is in flight.
+				if DetectBusy(content) {
+					idle.reset()
+					continue
+				}
+
 				if idle.record(paneSum(content), ok) {
+					// The agent really has stopped, so parking it is right — but the
+					// screen usually says why, and "Task needs review" throws that
+					// away. Carry the reason through to the board.
+					message := "Task needs review"
+					detail := ""
+					if reason, stalled := DetectStallNotice(content); stalled {
+						message = "Task stopped: " + reason
+						detail = " Last screen says: " + reason + "."
+					}
 					e.logLine(taskID, "system", fmt.Sprintf(
-						"Agent on %s has been idle for %s — parking for review.",
-						remoteHost, (time.Duration(remoteIdleChecks)*remotePollInterval).String()))
-					return execResult{NeedsInput: true, Message: "Task needs review"}
+						"Agent on %s has been idle for %s — parking for review.%s",
+						remoteHost, (time.Duration(remoteIdleChecks)*remotePollInterval).String(), detail))
+					return execResult{NeedsInput: true, Message: message}
 				}
 			}
 
