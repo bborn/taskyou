@@ -36,6 +36,8 @@ const placePreflightTimeout = 30 * time.Second
 func newPlaceCmd() *cobra.Command {
 	var dir string
 	var force bool
+	var carry bool
+	var noHandoff bool
 
 	cmd := &cobra.Command{
 		Use:               "place <task-id> [host|local]",
@@ -49,15 +51,22 @@ With a target, it records that placement by hand. The decision is sticky: every
 later retry, restart and resume reuses it, and the resolver is not asked again.
 Use "local" (or "here") to pin a task to this machine.
 
-Moving a task does NOT carry its work across. The worktree, the branch and the
-executor session all live on the host that made them, so a move leaves them
+By default this moves the DECISION only. The worktree, the branch and the
+executor session all live on the host that made them, so a bare move leaves them
 behind and the task starts fresh on the far side. When there is something to
 strand, this refuses unless you pass --force.
+
+Pass --carry to bring the work with it: everything tracked in the task's
+worktree, committed or not, is committed and pushed to its branch before the
+placement changes, and the outgoing agent is asked to write a handoff for the
+one that takes over. The placement is only rewritten once that push is verified,
+so a --carry move either brings the work or does not happen.
 
 Examples:
   task place 5206                        # where does it run, and why
   task place 5206 local                  # pin it to this machine
   task place 5206 ol-agents --dir ~/projects/engineering
+  task place 5206 local --carry          # bring it here, work and all
   task place 5206 ol-agents --force      # move it, stranding local work`,
 		Args:          cobra.RangeArgs(1, 2),
 		SilenceUsage:  true,
@@ -92,6 +101,9 @@ Examples:
 				return nil
 			}
 
+			if carry {
+				return carryAndPlace(cmd.Context(), database, task, current, args[1], dir, force, noHandoff)
+			}
 			return placeTask(cmd.Context(), database, task, current, args[1], dir, force)
 		},
 	}
@@ -99,6 +111,10 @@ Examples:
 		"The task's directory on the target host (required the first time a host is named)")
 	cmd.Flags().BoolVar(&force, "force", false,
 		"Move the task even though it strands a worktree or session on its current host")
+	cmd.Flags().BoolVar(&carry, "carry", false,
+		"Bring the task's work along: commit and push its worktree before moving the placement")
+	cmd.Flags().BoolVar(&noHandoff, "no-handoff", false,
+		"With --carry, do not interrupt the running agent to ask for a handoff")
 	return cmd
 }
 
@@ -151,9 +167,9 @@ func placeTask(ctx context.Context, database *db.DB, task *db.Task, current db.T
 
 	if stranded := strandedBy(task, current); stranded != "" && !force {
 		return fmt.Errorf("moving task #%d %s would strand %s\n"+
-			"That work does not travel: the branch and the executor session exist only on the\n"+
-			"machine that made them, so the task would start over on the far side.\n"+
-			"Pass --force if that is what you want",
+			"That work does not travel by itself: the branch and the executor session exist only\n"+
+			"on the machine that made them, so the task would start over on the far side.\n"+
+			"Pass --carry to bring the work with it, or --force to move without it",
 			task.ID, placeDestination(target), stranded)
 	}
 	if task.Status == db.StatusProcessing && !force {

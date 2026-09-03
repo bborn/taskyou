@@ -2483,6 +2483,14 @@ func (e *Executor) buildPrompt(task *db.Task, attachmentPaths []string) string {
 	// Get attachments section (use relative paths to match permission patterns)
 	attachments := e.getAttachmentsSection(task.ID, attachmentPaths, task.WorktreePath)
 
+	// A handoff from a moved session comes first, before the task's own
+	// description. The task body says what was originally asked for; the handoff
+	// says what already happened, and an agent that reads them the other way
+	// round starts by redoing work that is already on its branch.
+	if handoff := e.handoffSection(task); handoff != "" {
+		prompt.WriteString(handoff)
+	}
+
 	// Always include the core task information first - title and body
 	prompt.WriteString(fmt.Sprintf("# Task: %s\n\n", task.Title))
 	if task.Body != "" {
