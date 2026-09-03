@@ -365,6 +365,16 @@ func (db *DB) CreateTask(t *Task) error {
 	}
 	t.ID = id
 
+	// A task created directly into 'processing' has, by construction, started —
+	// nothing else could have put it there. Keep started_at faithful to that, so
+	// the never-started completion gate (see status.go) reads a true record
+	// rather than refusing a task that genuinely ran.
+	if t.Status == StatusProcessing {
+		if _, err := db.Exec(`UPDATE tasks SET started_at = CURRENT_TIMESTAMP WHERE id = ? AND started_at IS NULL`, id); err != nil {
+			return fmt.Errorf("stamp started_at on task created as processing: %w", err)
+		}
+	}
+
 	// Save the last used task type for this project
 	if t.Type != "" {
 		db.SetLastTaskTypeForProject(t.Project, t.Type)

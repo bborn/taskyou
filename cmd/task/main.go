@@ -4944,7 +4944,7 @@ func handleStopHook(database *db.DB, taskID int64, input *ClaudeHookInput) error
 							db.Evidence{
 								Observed:   "the agent ended its turn with no uncommitted work of its own and HEAD pushed past the recorded base commit",
 								BaseCommit: baseCommitFor(database, taskID),
-							})
+							}.DisownSharedBranchPR(task.PRNumber, task.BranchName))
 						database.AppendTaskLog(taskID, "system", "Work committed and pushed — workflow advances to the next step")
 					}
 				} else {

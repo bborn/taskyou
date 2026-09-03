@@ -197,10 +197,19 @@ func Complete(database *db.DB, taskID int64, summary string, opts Options) (*Out
 		return &Outcome{Kind: KindPRReview, PRNumber: prNumber, PRURL: prURL}, nil
 	}
 
-	// 4. No PR — genuinely done.
+	// 4. No PR of its own — genuinely done.
+	//
+	// A non-terminal step can still carry a PR NUMBER: the steps of a workflow
+	// share one branch, so the terminal step's PR matches all of them. That is
+	// the one case where a done-write happens with an open PR on the row, and
+	// the evidence has to say so out loud rather than the gate guessing.
+	ev := doneEvidence(summary, verifiedGate)
+	if nonTerminalStep {
+		ev = ev.DisownSharedBranchPR(task.PRNumber, task.BranchName)
+	}
 	if err := database.SetTaskStatus(taskID, db.StatusDone, actorFor(opts),
-		"completion signalled and every gate passed, with no PR awaiting review",
-		doneEvidence(summary, verifiedGate)); err != nil {
+		"completion signalled and every gate passed, with no PR of its own awaiting review",
+		ev); err != nil {
 		return nil, fmt.Errorf("failed to mark task done: %w", err)
 	}
 

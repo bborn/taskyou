@@ -690,7 +690,7 @@ func (e *Executor) reconcileFinishedWorkflowSteps() {
 				Observed:   "HEAD moved past the recorded base commit and is pushed; no uncommitted work of its own remains",
 				BaseCommit: baseCommit,
 				HeadCommit: gitHeadCommit(task.WorktreePath),
-			}); err != nil {
+			}.DisownSharedBranchPR(task.PRNumber, task.BranchName)); err != nil {
 			e.logger.Error("Failed to auto-complete finished workflow step", "id", task.ID, "error", err)
 			continue
 		}
@@ -723,7 +723,7 @@ func (e *Executor) verifyThenAutoComplete(task *db.Task, verifyCmd string) {
 			Observed:   "HEAD moved past the recorded base commit and is pushed",
 			HeadCommit: gitHeadCommit(task.WorktreePath),
 			Gate:       verifyCmd,
-		}); err != nil {
+		}.DisownSharedBranchPR(task.PRNumber, task.BranchName)); err != nil {
 		e.logger.Error("Failed to auto-complete finished workflow step after verify", "id", task.ID, "error", err)
 		return
 	}

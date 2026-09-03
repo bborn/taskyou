@@ -111,9 +111,36 @@ type Evidence struct {
 	// PRState of MERGED or CLOSED is what lets a done-write past the open-PR gate.
 	PRNumber int    `json:"pr_number,omitempty"`
 	PRState  string `json:"pr_state,omitempty"`
+	// PRDisowned is the other way past the open-PR gate: the caller says, in
+	// its own words, why the PR recorded against this task is not this task's
+	// work. A workflow's steps share one branch, so every step matches the
+	// terminal step's PR; without this the gate would stall every DAG at step
+	// one. It is a positive claim a caller has to make and defend in the log,
+	// not an absence the gate can be talked into.
+	PRDisowned string `json:"pr_disowned,omitempty"`
 	// Gate names the completion gate that was run and passed (e.g. a step's
 	// `verify:` command).
 	Gate string `json:"gate,omitempty"`
+}
+
+// DisownSharedBranchPR marks evidence as belonging to a workflow step that
+// carries a PR number it did not open.
+//
+// Every step of a workflow shares one branch, so a PR lookup on any of them
+// finds the terminal step's PR. A non-terminal step completing is therefore a
+// legitimate done-write with an open PR on the row — the one case the open-PR
+// gate must let through. It is let through because the caller SAYS it is not
+// its PR and the log keeps that claim, not because the gate inferred anything.
+// A no-op when the task has no PR number.
+func (e Evidence) DisownSharedBranchPR(prNumber int, branch string) Evidence {
+	if prNumber <= 0 {
+		return e
+	}
+	e.PRNumber = prNumber
+	e.PRDisowned = fmt.Sprintf(
+		"PR #%d belongs to this workflow's shared branch %q, not to this step: the step still has dependents, so it is not the one that opens the PR",
+		prNumber, branch)
+	return e
 }
 
 // NoEvidence is the explicit "nothing observed" value. It is fine for ordinary
@@ -137,7 +164,8 @@ func (e Evidence) IsEmpty() bool {
 		strings.TrimSpace(e.HeadCommit) == "" &&
 		strings.TrimSpace(e.Gate) == "" &&
 		e.PRNumber == 0 &&
-		strings.TrimSpace(e.PRState) == ""
+		strings.TrimSpace(e.PRState) == "" &&
+		strings.TrimSpace(e.PRDisowned) == ""
 }
 
 // String renders evidence for a human reading the audit trail.
@@ -170,6 +198,9 @@ func (e Evidence) String() string {
 			pr += " " + e.PRState
 		}
 		parts = append(parts, pr)
+	}
+	if e.PRDisowned != "" {
+		parts = append(parts, "PR disowned: "+e.PRDisowned)
 	}
 	if e.Gate != "" {
 		parts = append(parts, "gate: "+e.Gate)
@@ -387,8 +418,10 @@ func (db *DB) gate(task *Task, to string, ev Evidence) *RefusedError {
 	// The way past this gate is to observe the PR reaching a terminal state
 	// (which is what the daemon's review reconciler does), not to assert it.
 	if open, number := db.prIsOpen(task); open {
-		switch strings.ToUpper(strings.TrimSpace(ev.PRState)) {
-		case "MERGED", "CLOSED":
+		switch {
+		case strings.TrimSpace(ev.PRDisowned) != "":
+			// The caller says this PR is not this task's work, and said why.
+		case isTerminalPRState(ev.PRState):
 			// The caller looked at the PR and saw it finish. Allowed.
 		default:
 			return &RefusedError{TaskID: task.ID, To: to, Gate: GateOpenPR,
@@ -397,6 +430,16 @@ func (db *DB) gate(task *Task, to string, ev Evidence) *RefusedError {
 	}
 
 	return nil
+}
+
+// isTerminalPRState reports whether an observed PR state means the human is
+// done with it.
+func isTerminalPRState(state string) bool {
+	switch strings.ToUpper(strings.TrimSpace(state)) {
+	case "MERGED", "CLOSED":
+		return true
+	}
+	return false
 }
 
 // prIsOpen reports whether the task's pull request is still awaiting a human.
