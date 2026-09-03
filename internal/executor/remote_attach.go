@@ -155,17 +155,21 @@ func localSSHInvocation() string {
 	return strings.Join(parts, " ")
 }
 
-// RemoteAttachNotice is the line shown beside an attached remote pane. It names
-// the host, so nobody mistakes the pane for a local agent, and documents the
-// inner prefix, which is the one thing about a nested session a user cannot
-// guess.
+// RemoteAttachNotice is the badge shown beside an attached remote pane. It names
+// the host, so nobody mistakes the pane for a local agent, and the branch, so it
+// is clear which worktree over there is being watched.
+//
+// It is a badge and not a sentence on purpose: it shares one right-aligned
+// header line with the status, project, type and PR badges, and prose there
+// wraps and strands its own tail on a line of its own. The inner tmux prefix —
+// the one thing about a nested session a user cannot guess — is documented
+// where the keys actually go instead: on the remote pane's border title and in
+// the tmux status bar (see attachRemotePane).
 func RemoteAttachNotice(loc RemoteTaskLocation) string {
-	msg := fmt.Sprintf("Live session on %s", loc.Host)
 	if loc.Branch != "" {
-		msg += " (" + loc.Branch + ")"
+		return loc.Host + " (" + loc.Branch + ")"
 	}
-	return msg + fmt.Sprintf(" — type into the pane as usual; its tmux prefix is %s (%s d detaches, %s [ scrolls).",
-		RemoteInnerPrefixHuman, RemoteInnerPrefixHuman, RemoteInnerPrefixHuman)
+	return loc.Host
 }
 
 // RemoteEndedMessage is what a local surface says when the host answered and the

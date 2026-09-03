@@ -9,6 +9,7 @@ import (
 
 	"github.com/bborn/workflow/internal/db"
 	"github.com/bborn/workflow/internal/github"
+	"github.com/charmbracelet/lipgloss"
 )
 
 // TestNewDetailModel_BacklogTaskDoesNotStartExecutor verifies that when a task
@@ -721,5 +722,42 @@ func TestShouldFallBackToStart(t *testing.T) {
 					tc.waiting, tc.panesJoined, tc.hasWorktree, tc.waited, got, tc.want)
 			}
 		})
+	}
+}
+
+// A long paneNotice used to word-wrap the right-aligned meta line, leaving its
+// last few words stranded on a right-aligned row of their own — the header read
+// as a fragment ("…detaches, Ctrl-a [ scrolls).") with nothing in front of it.
+// The meta line is one line: anything wider is truncated.
+func TestDetailModel_RenderHeaderMetaStaysOnOneLine(t *testing.T) {
+	newModel := func(notice string) *DetailModel {
+		return &DetailModel{
+			task: &db.Task{
+				ID:      1,
+				Title:   "AI Search: export results as PDF",
+				Status:  db.StatusProcessing,
+				Project: "influencekit",
+				Type:    "feature",
+			},
+			focused:    true,
+			width:      80,
+			height:     24,
+			paneNotice: notice,
+		}
+	}
+
+	baseline := lipgloss.Height(newModel("").renderHeader())
+	header := newModel("ol-agents (task/5267-ai-search-export-results-as-pdf-and-csv) — type into the pane as usual; its tmux prefix is Ctrl-a").renderHeader()
+
+	if got := lipgloss.Height(header); got != baseline {
+		t.Errorf("a long notice grew the header from %d to %d lines; the meta line wrapped instead of truncating:\n%s", baseline, got, header)
+	}
+	for i, line := range strings.Split(header, "\n") {
+		if w := lipgloss.Width(line); w > 80-4 {
+			t.Errorf("header line %d is %d wide, over the %d-column header", i, w, 80-4)
+		}
+	}
+	if !strings.Contains(header, "ol-agents") {
+		t.Errorf("truncation ate the host name, which is the point of the notice:\n%s", header)
 	}
 }

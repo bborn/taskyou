@@ -102,14 +102,23 @@ func TestRemoteAttachScriptRunsSSHNonInteractively(t *testing.T) {
 	}
 }
 
-// The prefix is documented where the user is looking, not in a commit message.
-func TestRemoteAttachNoticeDocumentsTheKeybinding(t *testing.T) {
+// The notice shares one right-aligned header line with the status, project and
+// PR badges. It says where the pane is, and it stays a badge: prose there wraps
+// and leaves its own tail stranded on a line by itself. The inner tmux prefix is
+// documented on the pane border and status bar instead, where the keys go.
+func TestRemoteAttachNoticeNamesWhereThePaneIsAndStaysShort(t *testing.T) {
 	notice := RemoteAttachNotice(RemoteTaskLocation{Host: "ol-agents", Branch: "task/5250-x"})
-	if !strings.Contains(notice, RemoteInnerPrefixHuman) {
-		t.Errorf("notice does not name the inner prefix: %q", notice)
-	}
 	if !strings.Contains(notice, "ol-agents") {
 		t.Errorf("notice does not name the host: %q", notice)
+	}
+	if !strings.Contains(notice, "task/5250-x") {
+		t.Errorf("notice does not name the branch: %q", notice)
+	}
+	if len([]rune(notice)) > 60 {
+		t.Errorf("notice is prose, not a badge, and will wrap the header line: %q", notice)
+	}
+	if strings.Contains(notice, RemoteInnerPrefixHuman) {
+		t.Errorf("the prefix belongs on the pane border and status bar, not in the header badge: %q", notice)
 	}
 }
 

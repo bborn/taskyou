@@ -19,6 +19,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/glamour"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/bborn/workflow/internal/config"
 	"github.com/bborn/workflow/internal/db"
@@ -3365,8 +3366,19 @@ func (m *DetailModel) renderHeader() string {
 		}
 	}
 
-	// Build the first line
+	// Build the first line. The meta line is one line by contract: it is
+	// right-aligned as a block below, and lipgloss word-wraps anything wider than
+	// the header, which strands the last few words alone on their own
+	// right-aligned row. Truncate instead — ANSI-aware, so the badges' colour
+	// escapes are not cut in half.
 	metaStr := meta.String()
+	metaWidth := m.width - 4
+	if metaWidth < 1 {
+		metaWidth = 1
+	}
+	if lipgloss.Width(metaStr) > metaWidth {
+		metaStr = ansi.Truncate(metaStr, metaWidth, "…")
+	}
 
 	// Create a block for the right-aligned content
 	rightContent := []string{metaStr}
