@@ -2005,6 +2005,24 @@ func (e *Executor) executeTask(ctx context.Context, task *db.Task) {
 		err             error
 	)
 	if placedRemote {
+		// Ask the host whether the agent can even log in there, BEFORE cutting a
+		// worktree on it and opening a window. A host whose login has lapsed
+		// otherwise takes the whole spawn: a branch, a checkout, a tmux window,
+		// and an agent that paints a login screen and waits forever — which is
+		// how mona's expired session turned into a task that hung and then parked
+		// as "needs review" with nothing saying why.
+		//
+		// Only a DEFINITE no stops the spawn. An executor with no probe, an older
+		// CLI, an unreadable answer: all fall through and run exactly as before,
+		// with the screen-scraping detector as the backstop it has always been.
+		executorSlug := taskExecutorName(task)
+		if state, hint := checkExecutorAuth(WithRunner(taskCtx, remotePlacement), executorSlug); state == authLoggedOut {
+			msg := remoteAuthFailure(executorSlug, remotePlacement.Host, hint)
+			e.logger.Warn("placed host is not logged in", "task", task.ID, "host", remotePlacement.Host, "executor", executorSlug)
+			e.reportAuthRequired(task, msg)
+			return
+		}
+
 		var wt remoteWorktree
 		wt, err = e.setupRemoteWorktree(taskCtx, task, remotePlacement)
 		if err != nil {
@@ -2126,10 +2144,7 @@ func (e *Executor) executeTask(ctx context.Context, task *db.Task) {
 	prompt := e.buildPrompt(task, attachmentPaths)
 
 	// Get the appropriate executor for this task
-	executorName := task.Executor
-	if executorName == "" {
-		executorName = db.DefaultExecutor()
-	}
+	executorName := taskExecutorName(task)
 	taskExecutor := e.executorFactory.Get(executorName)
 	if taskExecutor == nil {
 		// Fall back to default executor if specified executor not found
