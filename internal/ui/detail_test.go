@@ -7,9 +7,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/charmbracelet/lipgloss"
+
 	"github.com/bborn/workflow/internal/db"
 	"github.com/bborn/workflow/internal/github"
-	"github.com/charmbracelet/lipgloss"
 )
 
 // TestNewDetailModel_BacklogTaskDoesNotStartExecutor verifies that when a task

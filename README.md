@@ -706,7 +706,16 @@ Just before an executor spawns, ty asks any installed placement handler where th
 task should run — request on stdin, answer on stdout — and runs it there. An empty
 answer (and every way a handler can fail) means "run locally", which is what
 happens for everyone who has no placement plugin installed: nothing is asked, and
-nothing changes. See [docs/plugins.md](docs/plugins.md#taskplacement--the-one-hook-ty-asks-a-question-of)
+nothing changes.
+
+A placed task is watched over **one standing connection per host** rather than one
+poller per task, so a fleet of hundreds costs a handful of connections. ty holds
+that connection outbound — nothing listens on your machine and no port is opened.
+The agent reports its own outcome through it (`.ty/signal done "…"`), so a remote
+task finishes when it says it has finished, rather than when it has been quiet
+long enough to look finished.
+
+See [docs/plugins.md](docs/plugins.md#taskplacement--the-one-hook-ty-asks-a-question-of)
 and the reference resolver in [extensions/ty-on](extensions/ty-on/README.md).
 
 Install one — or a whole collection, since a single git repo can hold many plugins —

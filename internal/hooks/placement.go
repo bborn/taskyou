@@ -37,15 +37,6 @@ const EventTaskPlacement = "task.placement"
 // waiting, logs loudly, and runs the task locally.
 const DefaultPlacementTimeout = 5 * time.Second
 
-// placementWaitDelay is how long ty waits, after killing a handler that blew its
-// deadline, for the pipes it inherited to close before force-closing them.
-//
-// Without it "bounded" is a lie: exec.Cmd.Wait blocks until every writer of the
-// captured stdout is gone, and a handler that spawned a child (an `on ls` probe,
-// say) leaves that child holding the pipe open long after the handler itself is
-// dead. The spawn path would hang for exactly as long as the runaway child ran.
-const placementWaitDelay = 500 * time.Millisecond
-
 // PlacementTaskInfo is the task half of the placement request — the facts a
 // resolver needs to pick a host, and nothing more.
 type PlacementTaskInfo struct {

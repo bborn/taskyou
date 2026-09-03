@@ -143,9 +143,10 @@ against real output.
 
 ## Not in scope
 
-ty-on decides *where*; it does not move anything. Syncing the working tree,
-creating worktrees, and opening SSH sessions are all `on`'s job, and invoking
-this resolver is ty's.
+ty-on decides *where*; it does not move anything. Once it has answered, ty owns
+the rest — creating the task's worktree on that host, starting the session, and
+watching it over the single standing connection it keeps per host. Syncing a
+working tree for interactive use is still `on`'s job.
 
 Host `capabilities` are parsed but not yet used for filtering — the rules above
 are deliberately the whole policy. Matching an executor against a host's

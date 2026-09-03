@@ -255,18 +255,63 @@ make install-ty-on     # builds the binary and installs it as a plugin
 make uninstall-ty-on   # every task goes back to running locally
 ```
 
+### How ty watches a placed task
+
+ty holds **one standing connection per host**, not one per task. A small POSIX
+shell agent runs on the host, walks every ty window each tick, and streams back a
+single snapshot covering all of them, so the cost of watching a fleet is
+`O(hosts)` rather than `O(tasks)`. Before this, each task cost two ssh round
+trips per tick — one for its window, one to capture its pane — which is a
+thousand ssh spawns every fifteen seconds at a few hundred agents.
+
+The agent is a shell script rather than a ty binary on purpose: it needs no
+install, no cross-compilation for the host's architecture, and no version
+agreement between the two ends. It requires only `tmux`.
+
+The direction matters as much as the cost. **ty holds the connection outbound**,
+exactly as it does for every other remote command. Nothing listens on your
+machine, no port is opened, no reverse tunnel exists, and no host is given a way
+to reach back on its own initiative — the agent speaks only by writing to the
+stdout of a process ty started.
+
+If the channel cannot speak for a host — none started yet, or its last snapshot
+is stale — it reports "I don't know" and ty falls back to probing that task
+directly. It can make watching cheaper, never wrong.
+
+### How a remote agent reports it finished
+
+The `taskyou_*` MCP tools are stdio, so a remotely placed agent's MCP server
+would talk to its own host's database rather than to ty. Instead, ty installs
+`.ty/signal` in the task's worktree and tells the agent about it in the prompt:
+
+```bash
+.ty/signal done        "<one line saying what you did>"
+.ty/signal needs-input "<the question you need answered>"
+.ty/signal failed      "<what stopped you>"
+```
+
+The script drops a file in a spool directory; the host agent drains it onto the
+connection ty already holds open. The sentence the agent writes reaches the board
+as the task's message — usually the only explanation of how a task on another
+machine ended.
+
+Without this ty had to infer completion from the screen: an agent that stopped
+repainting for two minutes was called finished. That is wrong in both directions
+— an agent pausing to think looks done, and an agent that finished in six seconds
+is parked two minutes later labelled "needs input" when nothing was asked. The
+idle heuristic is still there underneath, for a host where the script could not
+be installed, and ty says so when it falls back.
+
 ### Current boundaries
 
 - Only the `claude` executor can be launched remotely so far. A task using
   another executor fails visibly rather than quietly running here.
-- A remotely-placed task runs in the checkout the handler named — ty does not
-  create a worktree, sync, or provision anything on that host. Arranging the
-  workspace there is the fleet's job (that is what `on` is for).
 - Attachments are staged in the local workspace, so they are not available to a
-  remotely-placed task.
-- A remote session does not survive a daemon restart: the orphan sweep probes
-  this machine's tmux server, so the task is parked as blocked and can be
-  retried.
+  remotely-placed task. A file you drop into a remote agent's pane is a path on
+  *your* machine, and the agent cannot open it.
+- A host must already have a checkout of the project, mapped in the resolver's
+  inventory. ty creates the task's worktree there, but does not clone a project
+  the host has never seen.
 
 ## Environment
 
