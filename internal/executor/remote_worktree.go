@@ -56,22 +56,49 @@ func (e *Executor) setupRemoteWorktree(ctx context.Context, task *db.Task, r Rem
 	// Every git call in the script names the repo explicitly, so the shell's own
 	// working directory cannot change what it operates on.
 	cmd := r.Command(ctx, repo, "sh", "-c", remoteWorktreeScript(repo, dirName, branch))
-	out, err := cmd.CombinedOutput()
-	text := strings.TrimSpace(string(out))
+
+	// The two streams are captured SEPARATELY. The script says what it did on
+	// stdout and leaves git's chatter on stderr, but ssh delivers those as two
+	// channels and os/exec copies them with two goroutines, so a merged capture
+	// puts them in whatever order the copies happened to win — for a worktree
+	// that provisions in well under a second, routinely the answer first and
+	// "HEAD is now at ..." after it. Reading the answer out of a merged stream
+	// therefore failed the FIRST run of every remotely placed task (the retry
+	// then found the directory and reported "reused", which is why this looked
+	// intermittent).
+	var stdout, stderr strings.Builder
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	chatter := strings.TrimSpace(stderr.String())
 	if err != nil {
-		return remoteWorktree{}, fmt.Errorf("could not create a worktree on %s: %v (%s)", r.Host, err, text)
+		return remoteWorktree{}, fmt.Errorf("could not create a worktree on %s: %v (%s)", r.Host, err, chatter)
 	}
 
-	// The script's last line is "created <path>" or "reused <path>"; anything
-	// before it is git's own chatter, which we keep for the log.
-	lines := strings.Split(text, "\n")
-	last := strings.TrimSpace(lines[len(lines)-1])
-	state, path, ok := strings.Cut(last, " ")
-	if !ok || (state != "created" && state != "reused") {
-		return remoteWorktree{}, fmt.Errorf("could not create a worktree on %s: unexpected output %q", r.Host, text)
+	state, path, ok := parseRemoteWorktreeAnswer(stdout.String())
+	if !ok {
+		return remoteWorktree{}, fmt.Errorf("could not create a worktree on %s: unexpected output %q (%s)", r.Host, strings.TrimSpace(stdout.String()), chatter)
 	}
 
 	return remoteWorktree{Path: path, Branch: branch, Created: state == "created"}, nil
+}
+
+// parseRemoteWorktreeAnswer pulls the script's answer — "created <path>" or
+// "reused <path>" — out of its stdout.
+//
+// It scans for the line rather than taking the last one: a login shell is free
+// to print on stdout before the script runs (a ~/.profile that echoes, a
+// version manager announcing itself), and none of that should read as a failure
+// to provision.
+func parseRemoteWorktreeAnswer(out string) (state, path string, ok bool) {
+	for _, line := range strings.Split(out, "\n") {
+		s, p, found := strings.Cut(strings.TrimSpace(line), " ")
+		if !found || (s != "created" && s != "reused") || strings.TrimSpace(p) == "" {
+			continue
+		}
+		state, path, ok = s, strings.TrimSpace(p), true
+	}
+	return state, path, ok
 }
 
 // remoteWorktreeScript renders the provisioning script.
