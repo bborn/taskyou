@@ -4470,8 +4470,27 @@ func (e *Executor) pollTmuxSession(ctx context.Context, taskID int64, sessionNam
 			// exactly as a vanished window would, since to the user those are the
 			// same event — the work is over and nobody has looked at it yet.
 			if windowExists && remoteHost != "" {
-				sum, ok := capturePaneSum(detachedRunnerCtx(ctx), sessionName, remoteHost)
-				if idle.record(sum, ok) {
+				content, ok := capturePaneRemote(detachedRunnerCtx(ctx), sessionName, remoteHost)
+
+				// An executor whose login has expired paints a login screen and
+				// then never repaints again, so the idle tracker below would
+				// eventually park it as "needs review" — two minutes late and with
+				// the wrong reason, which is how a logged-out host looks like a
+				// mysteriously unfinished task. The screen says exactly what is
+				// wrong; read it. This costs nothing extra: it is the capture the
+				// idle check already paid for, and the patterns it matches belong
+				// to whichever executor is running, not to Claude.
+				if reason, stuck := DetectAuthPrompt(content); ok && stuck {
+					task, gerr := e.db.GetTask(taskID)
+					if gerr == nil && task != nil {
+						e.reportAuthRequired(task, fmt.Sprintf("%s (on %s)", reason, remoteHost))
+						// The status is already blocked; the finalizer's blocked
+						// branch respects it rather than writing over it.
+						return execResult{}
+					}
+				}
+
+				if idle.record(paneSum(content), ok) {
 					e.logLine(taskID, "system", fmt.Sprintf(
 						"Agent on %s has been idle for %s — parking for review.",
 						remoteHost, (time.Duration(remoteIdleChecks)*remotePollInterval).String()))

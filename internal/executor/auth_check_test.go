@@ -1,6 +1,11 @@
 package executor
 
-import "testing"
+import (
+	"strings"
+	"testing"
+
+	"github.com/bborn/workflow/internal/db"
+)
 
 func TestDetectAuthPrompt(t *testing.T) {
 	tests := []struct {
@@ -86,5 +91,73 @@ func TestDetectAuthPrompt(t *testing.T) {
 				t.Errorf("DetectAuthPrompt() returned match with empty reason")
 			}
 		})
+	}
+}
+
+// A remotely placed task's window lives in a tmux server on another machine.
+// Before this, the sweep captured LOCAL tmux for it, got nothing back, and
+// concluded there was no login prompt — so a logged-out fleet host produced a
+// task that hung and then parked with no reason attached.
+func TestCheckAuthStuckTasksReadsARemotelyPlacedPane(t *testing.T) {
+	exec, database := newTestExecutor(t)
+	task := createProcessingTask(t, database, "a placed task")
+	if err := database.SetTaskPlacement(task.ID, "mona", "fleet host"); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.UpdateTaskDaemonSession(task.ID, "ty-daemon"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Stand in for ssh: whatever ty asks mona, the screen shows a login prompt.
+	stubSSH(t, "#!/bin/sh\necho 'Please run /login to authenticate'\n")
+
+	exec.checkAuthStuckTasks()
+
+	got, err := database.GetTask(task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != db.StatusBlocked {
+		t.Errorf("status = %q, want %q", got.Status, db.StatusBlocked)
+	}
+	logs, err := database.GetTaskLogs(task.ID, 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found string
+	for _, l := range logs {
+		if l.LineType == "error" && strings.Contains(l.Content, "/login") {
+			found = l.Content
+		}
+	}
+	if found == "" {
+		t.Fatal("no error log explaining the block")
+	}
+	// Which host to go and log into is the whole actionable part.
+	if !strings.Contains(found, "mona") {
+		t.Errorf("log %q does not name the host", found)
+	}
+}
+
+// The same sweep must keep leaving healthy placed tasks alone.
+func TestCheckAuthStuckTasksLeavesAWorkingRemoteTaskAlone(t *testing.T) {
+	exec, database := newTestExecutor(t)
+	task := createProcessingTask(t, database, "a working placed task")
+	if err := database.SetTaskPlacement(task.ID, "mona", "fleet host"); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.UpdateTaskDaemonSession(task.ID, "ty-daemon"); err != nil {
+		t.Fatal(err)
+	}
+	stubSSH(t, "#!/bin/sh\necho 'Editing remote_poll.go'\necho 'Running tests...'\n")
+
+	exec.checkAuthStuckTasks()
+
+	got, err := database.GetTask(task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != db.StatusProcessing {
+		t.Errorf("status = %q, want it left in %q", got.Status, db.StatusProcessing)
 	}
 }

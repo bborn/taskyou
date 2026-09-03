@@ -192,9 +192,14 @@ func (t *idleTracker) record(sum string, ok bool) (idle bool) {
 	return t.consecutive >= t.threshold
 }
 
-// capturePaneSum returns a cheap fingerprint of what a task's window is
-// currently showing, and whether it could be read at all.
-func capturePaneSum(ctx context.Context, target, host string) (string, bool) {
+// capturePaneRemote returns what a task's window on host is currently showing,
+// and whether it could be read at all.
+//
+// The poll wants two different things from this one screenful — a fingerprint,
+// to tell a working agent from a finished one, and the text itself, to tell
+// either from an executor sitting at a login prompt — and an ssh round trip is
+// too expensive to make twice for the same pixels.
+func capturePaneRemote(ctx context.Context, target, host string) (string, bool) {
 	ctx, cancel := context.WithTimeout(ctx, remoteProbeTimeout)
 	defer cancel()
 
@@ -204,6 +209,11 @@ func capturePaneSum(ctx context.Context, target, host string) (string, bool) {
 	if err != nil {
 		return "", false
 	}
-	sum := sha256.Sum256(bytes.TrimRight(out, "\n \t"))
-	return hex.EncodeToString(sum[:8]), true
+	return string(bytes.TrimRight(out, "\n \t")), true
+}
+
+// paneSum is the cheap fingerprint the idle tracker compares between polls.
+func paneSum(content string) string {
+	sum := sha256.Sum256([]byte(content))
+	return hex.EncodeToString(sum[:8])
 }
