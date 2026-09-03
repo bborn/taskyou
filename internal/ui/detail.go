@@ -1649,13 +1649,37 @@ func (m *DetailModel) getPaneTitle() string {
 }
 
 // updateTmuxPaneTitle updates the tmux pane title to show task info.
+//
+// m.tuiPaneID is only filled in by a successful pane join or remote attach, and
+// switching tasks builds a fresh DetailModel — so on every switch this ran with
+// an empty id and returned without doing anything, leaving the pane border
+// advertising the PREVIOUS task. A task whose panes never arrive (placed on a
+// host whose session has ended, say) never corrected it, so the border named one
+// task while the body showed another.
+//
+// $TMUX_PANE is the pane this process is running in, by definition. It needs no
+// tmux round trip and cannot name somebody else's pane the way asking tmux for
+// the "current" one can.
 func (m *DetailModel) updateTmuxPaneTitle() {
-	if m.tuiPaneID == "" || os.Getenv("TMUX") == "" {
+	if os.Getenv("TMUX") == "" {
+		return
+	}
+	paneID := m.titlePaneID()
+	if paneID == "" {
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
-	osExec.CommandContext(ctx, "tmux", "select-pane", "-t", m.tuiPaneID, "-T", m.getPaneTitle()).Run()
+	osExec.CommandContext(ctx, "tmux", "select-pane", "-t", paneID, "-T", m.getPaneTitle()).Run()
+}
+
+// titlePaneID is the pane whose border title names the task on screen: the one
+// the join/attach path found, or failing that the pane this process runs in.
+func (m *DetailModel) titlePaneID() string {
+	if m.tuiPaneID != "" {
+		return m.tuiPaneID
+	}
+	return os.Getenv("TMUX_PANE")
 }
 
 // getDetailPaneHeight returns the configured detail pane height percentage.
@@ -3324,27 +3348,12 @@ func (m *DetailModel) renderHeader() string {
 		meta.WriteString(loadingStyle.Render(loadingText))
 	}
 
-	// Where a remotely placed task actually is. Informational, not an error.
-	if m.paneNotice != "" {
-		meta.WriteString("  ")
-		noticeStyle := lipgloss.NewStyle().Foreground(dimmedFg)
-		if m.focused {
-			noticeStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("39"))
-		}
-		meta.WriteString(noticeStyle.Render("⇄ " + m.paneNotice))
-	}
-
-	// Executor failure indicator
-	if m.paneError != "" {
-		meta.WriteString("  ")
-		var errorStyle lipgloss.Style
-		if m.focused {
-			errorStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Bold(true)
-		} else {
-			errorStyle = lipgloss.NewStyle().Foreground(dimmedFg)
-		}
-		meta.WriteString(errorStyle.Render("⚠ " + m.paneError))
-	}
+	// The pane notice and the executor failure are NOT badges. They are prose —
+	// a host, a worktree path, an ssh command to copy, a reason a spawn failed —
+	// and they get their own full-width lines below, built after maxW is known.
+	// Putting them on the meta line meant competing with the badges for a
+	// right-aligned row, where the only outcomes are wrapping (which strands the
+	// tail on a line of its own) or truncating a path away to an ellipsis.
 
 	// PR link if available
 	var prLine string
@@ -3396,22 +3405,45 @@ func (m *DetailModel) renderHeader() string {
 		Align(lipgloss.Right).
 		Render(rightBlock)
 
-	stand := tasksummary.DisplayStand(t.Summary)
-	if stand == "" {
-		return lipgloss.JoinVertical(lipgloss.Left, headerLayout, "")
-	}
 	maxW := m.width - 4
 	if maxW < 8 {
 		maxW = 8
 	}
-	stand = truncateRunes(stand, maxW)
-	standColor := ColorMuted
-	if m.focused && t.Status == db.StatusBlocked {
-		standColor = ColorWarning
-	} else if !m.focused {
-		standColor = dimmedTextFg
+
+	lines := []string{headerLayout}
+
+	// Where a remotely placed task actually is. Informational, not an error, and
+	// left-aligned on its own line so a worktree path or an ssh command survives
+	// long enough to be read and copied.
+	if m.paneNotice != "" {
+		noticeStyle := lipgloss.NewStyle().Foreground(dimmedFg)
+		if m.focused {
+			noticeStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("39"))
+		}
+		lines = append(lines, noticeStyle.Render(truncateRunes("⇄ "+m.paneNotice, maxW)))
 	}
-	return lipgloss.JoinVertical(lipgloss.Left, headerLayout, FgStyle(standColor).Render(stand), "")
+
+	// Executor failure. Same treatment: the reason a spawn failed is the whole
+	// value of the line, so it does not go in a badge slot.
+	if m.paneError != "" {
+		errorStyle := lipgloss.NewStyle().Foreground(dimmedFg)
+		if m.focused {
+			errorStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Bold(true)
+		}
+		lines = append(lines, errorStyle.Render(truncateRunes("⚠ "+m.paneError, maxW)))
+	}
+
+	if stand := tasksummary.DisplayStand(t.Summary); stand != "" {
+		standColor := ColorMuted
+		if m.focused && t.Status == db.StatusBlocked {
+			standColor = ColorWarning
+		} else if !m.focused {
+			standColor = dimmedTextFg
+		}
+		lines = append(lines, FgStyle(standColor).Render(truncateRunes(stand, maxW)))
+	}
+
+	return lipgloss.JoinVertical(lipgloss.Left, append(lines, "")...)
 }
 
 // getGlamourRenderer returns a cached Glamour renderer, creating it if needed.

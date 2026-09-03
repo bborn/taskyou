@@ -749,8 +749,9 @@ func TestDetailModel_RenderHeaderMetaStaysOnOneLine(t *testing.T) {
 	baseline := lipgloss.Height(newModel("").renderHeader())
 	header := newModel("ol-agents (task/5267-ai-search-export-results-as-pdf-and-csv) — type into the pane as usual; its tmux prefix is Ctrl-a").renderHeader()
 
-	if got := lipgloss.Height(header); got != baseline {
-		t.Errorf("a long notice grew the header from %d to %d lines; the meta line wrapped instead of truncating:\n%s", baseline, got, header)
+	// The notice takes one line of its own, and only one.
+	if got := lipgloss.Height(header); got != baseline+1 {
+		t.Errorf("a long notice grew the header from %d to %d lines; it wrapped instead of occupying one line:\n%s", baseline, got, header)
 	}
 	for i, line := range strings.Split(header, "\n") {
 		if w := lipgloss.Width(line); w > 80-4 {
@@ -759,5 +760,70 @@ func TestDetailModel_RenderHeaderMetaStaysOnOneLine(t *testing.T) {
 	}
 	if !strings.Contains(header, "ol-agents") {
 		t.Errorf("truncation ate the host name, which is the point of the notice:\n%s", header)
+	}
+}
+
+// The notice carries a worktree path and an ssh command to copy. On the
+// right-aligned meta line it competed with the badges and lost: the head of the
+// message survived and everything worth reading became an ellipsis. It gets a
+// full-width line of its own, so the badges cannot crowd it.
+func TestDetailModel_RenderHeaderNoticeIsNotCrowdedByBadges(t *testing.T) {
+	notice := "The session on mona has ended (worktree /home/bruno/Projects/taskyou/.task-worktrees/5277-build-pr-review-tool is still there). Nothing to attach to."
+	m := &DetailModel{
+		task: &db.Task{
+			ID:      5277,
+			Title:   "Build PR review tool",
+			Status:  db.StatusProcessing,
+			Project: "taskyou",
+			Type:    "code",
+		},
+		focused:    true,
+		width:      200,
+		height:     24,
+		paneNotice: notice,
+	}
+
+	header := m.renderHeader()
+	// The badges are on their own line, so the notice gets the full width and the
+	// end of the sentence survives.
+	if !strings.Contains(header, "Nothing to attach to.") {
+		t.Errorf("the end of the notice was truncated away even at 200 columns:\n%s", header)
+	}
+	for _, line := range strings.Split(header, "\n") {
+		if strings.Contains(line, "mona") && strings.Contains(line, "taskyou") {
+			// "taskyou" appears in the worktree path too; only fail if the project
+			// BADGE shares the line, which is what padding it out reveals.
+			if strings.Contains(line, "processing") {
+				t.Errorf("the notice is still sharing the badge line:\n%s", line)
+			}
+		}
+	}
+}
+
+// A fresh DetailModel has no tuiPaneID — it is only filled in by a pane join or
+// remote attach — so the title update must not silently give up, or the pane
+// border keeps naming the task you were looking at before.
+func TestDetailModel_PaneTitleUsesTmuxPaneEnvBeforePanesExist(t *testing.T) {
+	t.Setenv("TMUX", "/tmp/tmux-501/default,1,0")
+	t.Setenv("TMUX_PANE", "%42")
+
+	m := &DetailModel{task: &db.Task{ID: 5277, Title: "Build PR review tool"}}
+	if m.tuiPaneID != "" {
+		t.Fatalf("precondition: a fresh model should have no tuiPaneID, got %q", m.tuiPaneID)
+	}
+
+	// getPaneTitle must name THIS task, and the update path must have a pane to
+	// address without a tmux round trip.
+	if title := m.getPaneTitle(); !strings.Contains(title, "5277") {
+		t.Errorf("pane title does not name the task being shown: %q", title)
+	}
+	if got := m.titlePaneID(); got != "%42" {
+		t.Errorf("titlePaneID() = %q, want the pane this process runs in (%%42); the title update gives up and the border keeps the previous task", got)
+	}
+
+	// Once a join or attach has found the real pane, that wins.
+	m.tuiPaneID = "%7"
+	if got := m.titlePaneID(); got != "%7" {
+		t.Errorf("titlePaneID() = %q, want the joined pane %%7", got)
 	}
 }
