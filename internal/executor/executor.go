@@ -85,6 +85,10 @@ type Executor struct {
 	// off instead of spinning at the worker tick. Keyed by task ID.
 	branchWaitMu sync.Mutex
 	branchWaits  map[int64]*branchWait
+
+	// hostChans holds one long-lived connection per placed host, so polling costs
+	// O(hosts) rather than O(tasks). See hostchannel.go.
+	hostChans hostChannels
 }
 
 // windowExists reports whether a live executor tmux window exists for a task,
@@ -376,6 +380,33 @@ func (e *Executor) executorWindowLives(task *db.Task) bool {
 			"task", task.ID, "host", placement.Target)
 	}
 	return probe != windowGone
+}
+
+// channelProbe answers the poll's two questions — is the window there, and what
+// is on its screen — from the host's standing connection.
+//
+// ok is false whenever the channel cannot speak for the host right now: a local
+// task, no channel yet, or a snapshot too old to trust. The caller then does what
+// it always did, one round trip at a time. That fallback is what makes this safe
+// to switch on: the channel can only ever make polling cheaper, never wrong, and
+// a host agent that dies degrades to the previous behaviour rather than freezing
+// every task's view of itself.
+func (e *Executor) channelProbe(host, target string) (windowProbe, hostWindow, bool) {
+	if host == "" {
+		return windowUnreachable, hostWindow{}, false
+	}
+	channel := e.hostChannelFor(host)
+	if channel == nil {
+		return windowUnreachable, hostWindow{}, false
+	}
+	win, live, known := channel.Window(target)
+	if !known {
+		return windowUnreachable, hostWindow{}, false
+	}
+	if !live {
+		return windowGone, hostWindow{}, true
+	}
+	return windowLive, win, true
 }
 
 // reconcileOrphanedTasks moves tasks that are stuck in 'processing' but have no
@@ -694,6 +725,11 @@ func (e *Executor) Stop() {
 	e.running = false
 	close(e.stopCh)
 	e.mu.Unlock()
+
+	// Each of these owns an ssh to a host. Nothing else reaps them, so a daemon
+	// that stops without closing them leaves one process per placed host alive
+	// until the machine reboots.
+	e.hostChans.Close()
 
 	e.logger.Info("Background executor stopped")
 }
@@ -4459,9 +4495,15 @@ func (e *Executor) pollTmuxSession(ctx context.Context, taskID int64, sessionNam
 			// The probe gets its own deadline rather than the task's, but must keep
 			// the task's runner: a remotely-placed task lives in a tmux server on
 			// another host, and probing this machine's would say it had vanished.
-			tmuxCtx, tmuxCancel := context.WithTimeout(detachedRunnerCtx(ctx), probeTimeout)
-			probe := probeWindow(tmuxCtx, sessionName, remoteHost != "")
-			tmuxCancel()
+			// A placed host answers for all of its tasks at once over one standing
+			// connection; only fall back to a per-task round trip when that channel
+			// has nothing fresh to say. See hostchannel.go.
+			probe, hostView, viaChannel := e.channelProbe(remoteHost, sessionName)
+			if !viaChannel {
+				tmuxCtx, tmuxCancel := context.WithTimeout(detachedRunnerCtx(ctx), probeTimeout)
+				probe = probeWindow(tmuxCtx, sessionName, remoteHost != "")
+				tmuxCancel()
+			}
 
 			// A host we could not reach says nothing about the task. Do NOT feed it
 			// to the miss tracker: three network blips in a row would park a task
@@ -4485,7 +4527,14 @@ func (e *Executor) pollTmuxSession(ctx context.Context, taskID int64, sessionNam
 			// exactly as a vanished window would, since to the user those are the
 			// same event — the work is over and nobody has looked at it yet.
 			if windowExists && remoteHost != "" {
-				content, ok := capturePaneRemote(detachedRunnerCtx(ctx), sessionName, remoteHost)
+				// An empty pane read off the channel means the text has not arrived
+				// yet, not that the screen is blank and still. Feeding "" to the idle
+				// tracker would be a perfectly stable fingerprint, and would park a
+				// working agent after remoteIdleChecks ticks of knowing nothing.
+				content, ok := hostView.Content, viaChannel && hostView.Content != ""
+				if !viaChannel {
+					content, ok = capturePaneRemote(detachedRunnerCtx(ctx), sessionName, remoteHost)
+				}
 
 				// An executor whose login has expired paints a login screen and
 				// then never repaints again, so the idle tracker below would
