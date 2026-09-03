@@ -89,12 +89,29 @@ type hostChannel struct {
 // The pane text is sent only when its fingerprint changes. An agent sitting idle
 // at its prompt — the common case, and the one that used to cost the most — then
 // costs one short line per tick instead of a screenful.
+//
+// How it dies matters as much as what it does, because nothing on a fleet host
+// reaps a stray loop. Closing the channel kills the local ssh, which closes this
+// shell's stdout; the next tick's printf then takes SIGPIPE and the agent exits
+// on its own, within one tick and without ty having to reach over and clean up.
+// That death is abrupt enough that the EXIT trap does not run, so each agent also
+// sweeps the leftovers of its dead predecessors on the way in — which bounds the
+// mess at one stale directory per host rather than one per redial, forever.
 const hostAgentScript = `
 set -u
 tick=${TY_HOST_TICK:-5}
 state=${TMPDIR:-/tmp}/ty-hostagent-$$
 mkdir -p "$state" 2>/dev/null || exit 1
 trap 'rm -rf "$state"' EXIT INT TERM
+# Sweep the state of previous agents whose process is gone. The trap above only
+# runs when this shell exits cleanly, and it usually does not: ty closing the
+# channel kills the ssh, which drops the remote shell without giving it a chance.
+# Redialling every few seconds then leaves one directory per attempt, forever.
+for d in ${TMPDIR:-/tmp}/ty-hostagent-*; do
+  [ -d "$d" ] || continue
+  p=${d##*-}
+  [ "$d" = "$state" ] || kill -0 "$p" 2>/dev/null || rm -rf "$d"
+done
 sum() { if command -v sha256sum >/dev/null 2>&1; then sha256sum | cut -c1-16; else cksum | cut -d" " -f1; fi; }
 while :; do
   printf 'S\n'

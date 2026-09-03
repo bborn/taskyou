@@ -370,11 +370,20 @@ func (e *Executor) executorWindowLives(task *db.Task) bool {
 		return false
 	}
 
+	// The host's standing connection already knows about every task on it, and
+	// the reconciler is the one path that runs for tasks this daemon did not
+	// spawn — a restart's adopted tasks are checked here and nowhere else. Asking
+	// the channel first is what keeps that O(hosts) too.
+	target := remoteWindowTarget(task)
+	if probe, _, ok := e.channelProbe(placement.Target, target); ok {
+		return probe != windowGone
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), remoteProbeTimeout)
 	defer cancel()
 	ctx = WithRunner(ctx, RemoteRunner{Host: placement.Target, WorkDir: placement.WorkDir})
 
-	probe := probeWindow(ctx, remoteWindowTarget(task), true)
+	probe := probeWindow(ctx, target, true)
 	if probe == windowUnreachable {
 		e.logger.Warn("could not reach a placed task's host to check on it; leaving it alone",
 			"task", task.ID, "host", placement.Target)
