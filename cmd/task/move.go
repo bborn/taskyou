@@ -78,7 +78,8 @@ func carryAndPlace(ctx context.Context, database *db.DB, task *db.Task, current 
 	fmt.Println(dimStyle.Render("Carrying the work..."))
 	rep, err := executor.CarryWork(ctx, src, handoff, moveDestinationName(target))
 	if err != nil {
-		return fmt.Errorf("the work could not be carried, so task #%d has NOT been moved: %w", task.ID, err)
+		fmt.Println(dimStyle.Render("  " + strings.ReplaceAll(err.Error(), "\n", "\n  ")))
+		return fmt.Errorf("the work could not be carried, so task #%d has NOT been moved", task.ID)
 	}
 	if rep.WIPCommit {
 		fmt.Println(dimStyle.Render("  Committed uncommitted work as a wip: commit."))
@@ -86,10 +87,15 @@ func carryAndPlace(ctx context.Context, database *db.DB, task *db.Task, current 
 	fmt.Println(successStyle.Render(fmt.Sprintf("  %s is on origin at %s.", rep.Branch, shortSHA(rep.Commit))))
 
 	if len(rep.LeftBehind) > 0 && !force {
-		return fmt.Errorf("task #%d has NOT been moved: %d git-ignored file(s) would be left behind on %s:\n%s\n"+
-			"These do not travel — if the task needs them on the far side, put them there first.\n"+
-			"The work is already committed and pushed, so re-running with --force carries nothing extra",
-			task.ID, len(rep.LeftBehind), src.Where(), formatLeftBehind(rep.LeftBehind))
+		// The detail is printed rather than folded into the error: lipgloss pads a
+		// multi-line block out to its widest line, so a multi-line error renders as
+		// a ragged box. The "Error:" line stays short and scannable.
+		fmt.Println(warnStyle.Render(fmt.Sprintf("  %d git-ignored file(s) would be left behind on %s:",
+			len(rep.LeftBehind), src.Where())))
+		fmt.Println(warnStyle.Render("    " + formatLeftBehind(rep.LeftBehind)))
+		fmt.Println(dimStyle.Render("  These do not travel. If the task needs them on the far side, put them there first."))
+		fmt.Println(dimStyle.Render("  The work is already committed and pushed, so re-running with --force carries nothing extra."))
+		return fmt.Errorf("task #%d has NOT been moved (pass --force to move without those files)", task.ID)
 	}
 
 	if err := database.ClearTaskPlacement(task.ID); err != nil {
