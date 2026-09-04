@@ -110,7 +110,8 @@ func CarryWork(ctx context.Context, src WorkSource, handoff, destination string)
 		if destination == "" {
 			msg = "wip: carry work"
 		}
-		if _, err := src.git(ctx, "commit", "--no-verify", "-m", msg); err != nil {
+		args := append(src.commitIdentity(ctx), "commit", "--no-verify", "-m", msg)
+		if _, err := src.git(ctx, args...); err != nil {
 			return rep, fmt.Errorf("could not commit the work on %s: %w", src.Where(), err)
 		}
 		rep.WIPCommit = true
@@ -182,6 +183,22 @@ func (s WorkSource) ignoredFiles(ctx context.Context) []string {
 }
 
 // git runs a git command in the worktree and returns its stdout.
+// commitIdentity returns the `-c user.name=... -c user.email=...` flags the WIP
+// carry commit needs, or nothing when the machine already has an identity.
+//
+// The carry commit is ty's, not the author's: it exists so uncommitted work can
+// travel to another host. Wherever a real identity is configured we use it, so
+// the commit is attributed to the person whose work it is. Where none is — a CI
+// runner, a fresh host, a container — git refuses with "Author identity unknown"
+// and the work is stranded on a machine the task is leaving. A carry must not
+// depend on ambient config that a placed host has no reason to have.
+func (s WorkSource) commitIdentity(ctx context.Context) []string {
+	if email, err := s.git(ctx, "config", "user.email"); err == nil && strings.TrimSpace(email) != "" {
+		return nil
+	}
+	return []string{"-c", "user.name=ty", "-c", "user.email=ty@localhost"}
+}
+
 func (s WorkSource) git(ctx context.Context, args ...string) (string, error) {
 	cmd := s.Runner.Command(ctx, s.WorkDir, "git", args...)
 	return runCapturingStdout(cmd)
