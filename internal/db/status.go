@@ -330,6 +330,20 @@ func FoldStatusAt(events []StatusEvent, throughID int64) string {
 // the web API, the MCP tool and the TUI all get them without each remembering
 // to ask.
 func (db *DB) SetTaskStatus(id int64, to string, actor Actor, reason string, evidence Evidence) error {
+	// Serialize transitions within this process. The gates read the task and
+	// then write it; two callers interleaving between the read and the write
+	// would each move the task from the same starting point, and the second
+	// event's `from` would name a status the first had already left — a gap in
+	// the chain, and a log that no longer explains the row. staleTransition
+	// below catches the same race BETWEEN processes, where a mutex cannot
+	// reach.
+	//
+	// Held only across read → gate → write. The side effects in
+	// afterTransition re-enter SetTaskStatus (a finished blocker releases its
+	// dependents), so they must run outside it.
+	db.statusMu.Lock()
+	defer db.statusMu.Unlock()
+
 	reason = strings.TrimSpace(reason)
 	if !validActor(actor) {
 		return &RefusedError{TaskID: id, To: to, Gate: GateMissingActor,
@@ -372,7 +386,12 @@ func (db *DB) SetTaskStatus(id int64, to string, actor Actor, reason string, evi
 	if err := db.applyTransition(task, to, actor, reason, evidence); err != nil {
 		return err
 	}
+
+	// Side effects run with the lock released: ProcessCompletedBlocker recurses
+	// back into SetTaskStatus to release this task's dependents.
+	db.statusMu.Unlock()
 	db.afterTransition(task, from, to)
+	db.statusMu.Lock()
 	return nil
 }
 
@@ -486,8 +505,14 @@ func (db *DB) applyTransition(task *Task, to string, actor Actor, reason string,
 			query += ", completed_at = CURRENT_TIMESTAMP"
 		}
 	}
-	query += " WHERE id = ?"
-	args = append(args, task.ID)
+	// Compare-and-swap on the status we gated against. ty is several processes
+	// against one file — the daemon, the TUI, `ty` in a shell — so the
+	// in-process lock is not the whole story. If another process moved the task
+	// between our read and this write, the row no longer matches and the update
+	// affects nothing; we fail loudly rather than appending an event whose
+	// `from` names a status the task had already left.
+	query += " WHERE id = ? AND status = ?"
+	args = append(args, task.ID, task.Status)
 
 	tx, err := db.Begin()
 	if err != nil {
@@ -495,8 +520,13 @@ func (db *DB) applyTransition(task *Task, to string, actor Actor, reason string,
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	if _, err := tx.Exec(query, args...); err != nil {
+	res, err := tx.Exec(query, args...)
+	if err != nil {
 		return fmt.Errorf("update task status: %w", err)
+	}
+	if n, err := res.RowsAffected(); err == nil && n == 0 {
+		return fmt.Errorf("task #%d moved out of %q while this transition was being gated; nothing was written",
+			task.ID, task.Status)
 	}
 	if _, err := tx.Exec(`
 		INSERT INTO task_status_events (task_id, from_status, to_status, actor, reason, evidence, outcome, gate)
@@ -726,10 +756,14 @@ func (db *DB) backfillStatusEvents() error {
 	if err != nil {
 		return fmt.Errorf("find tasks needing a genesis event: %w", err)
 	}
+	// LocalTime, not sql.NullTime: SQLite hands these columns back as strings
+	// in several formats, and LocalTime is the project's existing parser for
+	// them. A NULL scans to the zero time, which is how "no clock to use" is
+	// spelled below.
 	type seed struct {
 		id     int64
 		status string
-		at     sql.NullTime
+		at     LocalTime
 	}
 	var seeds []seed
 	for rows.Next() {
@@ -747,7 +781,7 @@ func (db *DB) backfillStatusEvents() error {
 
 	for _, s := range seeds {
 		var at *time.Time
-		if s.at.Valid {
+		if !s.at.IsZero() {
 			t := s.at.Time
 			at = &t
 		}

@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -62,6 +63,11 @@ type DB struct {
 	*sql.DB
 	path         string
 	eventEmitter EventEmitter
+
+	// statusMu serializes status transitions within this process. See
+	// SetTaskStatus in status.go for why a status change cannot be a bare
+	// UPDATE, and why the read-gate-write must not interleave.
+	statusMu sync.Mutex
 }
 
 // Path returns the path to the database file.
