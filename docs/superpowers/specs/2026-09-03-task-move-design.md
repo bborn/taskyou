@@ -29,7 +29,11 @@ from it.
 
 ## Flow
 
-`ty move <task-id> <host|local> [--dir <path>]`
+`ty place <task-id> <host|local> [--dir <path>]`
+
+There is no flag. Moving a task moves its work; that is what the word means.
+`--force` is the single opt-out and means "move without the work" — for a source
+host that cannot be reached, or a wrong turn worth abandoning.
 
 1. **Handoff.** If the agent is alive, ask it to write `.taskyou/handoff.md` — what it
    was doing, what is done, what is next, what is half-finished and why — and wait,
@@ -43,8 +47,8 @@ from it.
    not performed.
 4. **Report what does not travel.** `git status --porcelain --ignored` lists files git
    is ignoring — `.env`, local databases, build output. These do not move. They are
-   listed, and a substantive set refuses without `--force`, rather than being discovered
-   as an absence on the far side.
+   named in the output so their absence is not a surprise on the far side. They do not
+   block the move: leaving them on the old host destroys nothing.
 5. **Place.** Clear the old placement, write the new decision, after the usual
    `preflightHost` check on the target.
 6. **Land.** End the source session and free its worktree. The task's next spawn on the
@@ -66,3 +70,10 @@ are reused, not reimplemented.
 - Moving the session transcript verbatim.
 - Carrying git-ignored files.
 - A TUI key. That follows once the command is proven; it will call the same function.
+
+## Correction
+
+An earlier draft made carrying opt-in, on the reasoning that most placements happen to
+tasks that have never run and so have nothing to carry. That reasoning was invented, not
+measured. Counting a real board: 31 of 31 placement decisions were on tasks that had
+already run; none on a task that never had. Carrying is the default.

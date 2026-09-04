@@ -2417,7 +2417,9 @@ Examples:
 				}
 				dir, _ := cmd.Flags().GetString("dir")
 				force, _ := cmd.Flags().GetBool("force")
-				if err := placeTask(cmd.Context(), database, task, current, on, dir, force); err != nil {
+				// Same path as `ty place`: a retry on another host carries the work
+				// there, rather than restarting from whatever reached origin.
+				if err := carryAndPlace(cmd.Context(), database, task, current, on, dir, force); err != nil {
 					fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
 					os.Exit(1)
 				}
@@ -6202,9 +6204,20 @@ func cleanupOrphanedSessions(force bool) {
 	}
 
 	var allWindows []windowRef
+	var foreignSessions []string
+	localOwner := executor.LocalOwnerTag()
 	for _, session := range strings.Split(string(sessionsOut), "\n") {
 		session = strings.TrimSpace(session)
 		if !strings.HasPrefix(session, "task-daemon-") {
+			continue
+		}
+		// A session another machine owns holds ITS tasks, which are absent from
+		// OUR database by definition. Judging them here says "deleted" about
+		// every one of them and kills live agents: a placed host running this
+		// (directly, or through the test suite) tore down the very window the
+		// running agent lived in. Not ours, not our call.
+		if owner := tmuxSessionOwner(session); owner != "" && owner != localOwner {
+			foreignSessions = append(foreignSessions, session+" (owned by "+owner+")")
 			continue
 		}
 		windowsOut, err := osexec.Command("tmux", "list-windows", "-t", session, "-F", "#{window_name}").Output()
@@ -6243,7 +6256,13 @@ func cleanupOrphanedSessions(force bool) {
 			}
 		}
 	} else {
-		fmt.Fprintln(os.Stderr, dimStyle.Render(fmt.Sprintf("Warning: could not open database (%v); falling back to tmux-only orphan check", err)))
+		// Without the database every task ID looks missing, and the loop below
+		// reads missing as deleted — so the old "tmux-only orphan check" fallback
+		// was a kill-everything path that fired precisely when we knew least.
+		// Refuse instead: absence of evidence is not evidence of an orphan.
+		fmt.Fprintln(os.Stderr, errorStyle.Render(fmt.Sprintf(
+			"Could not open the database (%v) — refusing to judge any window orphaned without it.", err)))
+		return
 	}
 
 	var deletedWindows, oldDoneWindows []windowRef
@@ -6258,6 +6277,11 @@ func cleanupOrphanedSessions(force bool) {
 	}
 
 	totalToKill := len(deletedWindows) + len(oldDoneWindows)
+	if len(foreignSessions) > 0 {
+		fmt.Println(dimStyle.Render(fmt.Sprintf(
+			"Skipped %d session(s) owned by another machine: %s",
+			len(foreignSessions), strings.Join(foreignSessions, ", "))))
+	}
 	if totalToKill == 0 {
 		fmt.Println(successStyle.Render("No orphaned agent windows found"))
 		return
@@ -7108,4 +7132,18 @@ func parseKeyEvents(input string) []tea.Msg {
 		msgs = append(msgs, msg)
 	}
 	return msgs
+}
+
+// tmuxSessionOwner reads the machine tag ty writes on the daemon sessions it
+// creates, or "" when the session predates the tag or tmux cannot be asked.
+//
+// An empty answer deliberately does NOT mean "mine": it means unknown, and the
+// caller treats unknown the same as its own only for windows whose task it can
+// actually see in the database.
+func tmuxSessionOwner(session string) string {
+	out, err := osexec.Command("tmux", "show-options", "-qv", "-t", session, executor.TmuxOwnerOption).Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
 }

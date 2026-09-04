@@ -36,8 +36,8 @@ func TestPlaceTaskPinsLocal(t *testing.T) {
 	database := placeTestDB(t)
 	task := placeTestTask(t, database)
 
-	if err := placeTask(context.Background(), database, task, db.TaskPlacement{}, "local", "", false); err != nil {
-		t.Fatalf("placeTask: %v", err)
+	if err := carryAndPlace(context.Background(), database, task, db.TaskPlacement{}, "local", "", false); err != nil {
+		t.Fatalf("carryAndPlace: %v", err)
 	}
 
 	got, err := database.GetTaskPlacementDecision(task.ID)
@@ -59,8 +59,8 @@ func TestPlaceTaskAcceptsEveryNameForLocal(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			database := placeTestDB(t)
 			task := placeTestTask(t, database)
-			if err := placeTask(context.Background(), database, task, db.TaskPlacement{}, name, "", false); err != nil {
-				t.Fatalf("placeTask(%q): %v", name, err)
+			if err := carryAndPlace(context.Background(), database, task, db.TaskPlacement{}, name, "", false); err != nil {
+				t.Fatalf("carryAndPlace(%q): %v", name, err)
 			}
 			got, _ := database.GetTaskPlacementDecision(task.ID)
 			if !got.Decided || got.Target != "" {
@@ -70,24 +70,41 @@ func TestPlaceTaskAcceptsEveryNameForLocal(t *testing.T) {
 	}
 }
 
-// The whole point of the force gate: a task with work on this machine does not
-// silently move, because the branch and session cannot follow it.
-func TestPlaceTaskRefusesToStrandLocalWork(t *testing.T) {
+// Work that cannot be carried blocks the move. This used to be a refusal to
+// move a task that HAD work, which was backwards: carrying it is the point. What
+// must never happen is a move that reports success while the work stays behind,
+// so an uncarryable worktree stops the placement and says how to proceed anyway.
+func TestPlaceTaskWillNotMoveWorkItCannotCarry(t *testing.T) {
 	database := placeTestDB(t)
 	task := placeTestTask(t, database)
-	task.WorktreePath = t.TempDir()
+	task.WorktreePath = t.TempDir() // a directory, but not a git repo
 
-	err := placeTask(context.Background(), database, task, db.TaskPlacement{}, "far-host", "/srv/repo", false)
+	err := carryAndPlace(context.Background(), database, task, db.TaskPlacement{}, "local", "", false)
 	if err == nil {
-		t.Fatal("placeTask moved a task away from its own worktree without --force")
+		t.Fatal("moved a task whose work could not be carried")
 	}
-	if !strings.Contains(err.Error(), "--force") {
-		t.Errorf("error does not say how to proceed: %v", err)
+	if !strings.Contains(err.Error(), "NOT been moved") {
+		t.Errorf("error does not say the task stayed put: %v", err)
 	}
 
 	got, _ := database.GetTaskPlacementDecision(task.ID)
 	if got.Decided {
-		t.Error("a refused move still wrote a placement")
+		t.Error("a failed carry still wrote a placement, leaving the task half-moved")
+	}
+}
+
+// --force is the escape hatch, and it means one thing: move without the work.
+func TestPlaceTaskForceMovesWithoutTheWork(t *testing.T) {
+	database := placeTestDB(t)
+	task := placeTestTask(t, database)
+	task.WorktreePath = t.TempDir()
+
+	if err := carryAndPlace(context.Background(), database, task, db.TaskPlacement{}, "local", "", true); err != nil {
+		t.Fatalf("--force did not move the task: %v", err)
+	}
+	got, _ := database.GetTaskPlacementDecision(task.ID)
+	if !got.Decided {
+		t.Error("--force did not record the placement")
 	}
 }
 
@@ -104,8 +121,8 @@ func TestPlaceTaskForgetsTheOldHostsWorktree(t *testing.T) {
 	}
 	current, _ := database.GetTaskPlacementDecision(task.ID)
 
-	if err := placeTask(context.Background(), database, task, current, "local", "", true); err != nil {
-		t.Fatalf("placeTask: %v", err)
+	if err := carryAndPlace(context.Background(), database, task, current, "local", "", true); err != nil {
+		t.Fatalf("carryAndPlace: %v", err)
 	}
 
 	var path, branch string
@@ -125,7 +142,7 @@ func TestPlaceTaskRequiresADirectoryForANewHost(t *testing.T) {
 	database := placeTestDB(t)
 	task := placeTestTask(t, database)
 
-	err := placeTask(context.Background(), database, task, db.TaskPlacement{}, "far-host", "", false)
+	err := carryAndPlace(context.Background(), database, task, db.TaskPlacement{}, "far-host", "", false)
 	if err == nil || !strings.Contains(err.Error(), "--dir") {
 		t.Fatalf("error = %v, want a request for --dir", err)
 	}
@@ -141,8 +158,8 @@ func TestPlaceTaskIsANoOpOnTheSameHost(t *testing.T) {
 	}
 	current, _ := database.GetTaskPlacementDecision(task.ID)
 
-	if err := placeTask(context.Background(), database, task, current, "local", "", false); err != nil {
-		t.Fatalf("placeTask: %v", err)
+	if err := carryAndPlace(context.Background(), database, task, current, "local", "", false); err != nil {
+		t.Fatalf("carryAndPlace: %v", err)
 	}
 	got, _ := database.GetTaskPlacementDecision(task.ID)
 	if got.Reason != "resolver said here" {
@@ -150,14 +167,19 @@ func TestPlaceTaskIsANoOpOnTheSameHost(t *testing.T) {
 	}
 }
 
-func TestPlaceTaskRefusesToMoveARunningTask(t *testing.T) {
+// A running task is the one you most want to move — "it is on mona and I want to
+// browser-test it here" — so this must not be refused.
+func TestPlaceTaskMovesARunningTask(t *testing.T) {
 	database := placeTestDB(t)
 	task := placeTestTask(t, database)
 	task.Status = db.StatusProcessing
 
-	err := placeTask(context.Background(), database, task, db.TaskPlacement{}, "local", "", false)
-	if err == nil || !strings.Contains(err.Error(), "running right now") {
-		t.Fatalf("error = %v, want a refusal to move a running task", err)
+	if err := carryAndPlace(context.Background(), database, task, db.TaskPlacement{}, "local", "", false); err != nil {
+		t.Fatalf("refused to move a running task: %v", err)
+	}
+	got, _ := database.GetTaskPlacementDecision(task.ID)
+	if !got.Decided {
+		t.Error("a running task's move did not record the placement")
 	}
 }
 
