@@ -22,6 +22,7 @@ import (
 
 	"github.com/charmbracelet/log"
 
+	"github.com/bborn/workflow/internal/completion"
 	"github.com/bborn/workflow/internal/config"
 	"github.com/bborn/workflow/internal/db"
 	"github.com/bborn/workflow/internal/events"
@@ -410,8 +411,46 @@ func (e *Executor) applyHostSignal(taskID int64, ev hostEvent) execResult {
 		return execResult{Message: detail}
 	default:
 		e.logLine(taskID, "system", "The agent reported it finished: "+detail)
+		return e.completeFromSignal(taskID, detail)
+	}
+}
+
+// completeFromSignal finishes a remotely placed task the same way taskyou_complete
+// finishes a local one.
+//
+// A placed agent has no MCP, so this signal is the only thing it can send. Left as
+// a bare success it fell through to the executor's generic "agent finished" branch,
+// which writes backlog — skipping the evidence gate, the human gate, and the
+// PR-review park. A task that had just opened a PR went to backlog instead of
+// blocked, so the one state that means "your turn" never got set and the work was
+// invisible on the board.
+//
+// Complete writes the status itself; the finalizer re-reads it and respects done
+// and blocked ahead of result.Success, which is the same contract the MCP path
+// relies on.
+func (e *Executor) completeFromSignal(taskID int64, detail string) execResult {
+	outcome, err := completion.Complete(e.db, taskID, detail, completion.Options{AsyncSummary: true})
+	if err != nil {
+		// Fall back to the old behaviour rather than dropping the signal: a task
+		// parked in backlog is wrong, but losing the agent's report is worse.
+		e.logLine(taskID, "error", "Could not run the completion checks: "+err.Error())
 		return execResult{Success: true, Message: detail}
 	}
+
+	// A rejected completion cannot "keep running" here the way it does locally —
+	// the remote agent has already stopped. Park it visibly with the reason.
+	if outcome.Kind == completion.KindVerifyFailed {
+		msg := fmt.Sprintf("Verification failed, so this is not complete: %s\n%s",
+			outcome.VerifyCommand, outcome.VerifyOutput)
+		e.logLine(taskID, "error", msg)
+		return execResult{NeedsInput: true, Message: msg}
+	}
+
+	if outcome.Kind == completion.KindPRReview {
+		e.logLine(taskID, "system", fmt.Sprintf(
+			"PR #%d is open — parked for your review.", outcome.PRNumber))
+	}
+	return execResult{Success: true, Message: detail}
 }
 
 // channelProbe answers the poll's two questions — is the window there, and what

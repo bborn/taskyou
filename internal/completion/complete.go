@@ -73,17 +73,57 @@ func LookupPR(database *db.DB, task *db.Task) (int, string) {
 	if task == nil {
 		return 0, ""
 	}
-	if task.BranchName != "" {
-		repoDir := task.WorktreePath
-		if repoDir == "" {
-			repoDir, _ = os.Getwd()
-		}
-		if info := github.NewPRCache().GetPRForBranch(repoDir, task.BranchName); info != nil {
+	repoDir, branch := prLookupTarget(database, task)
+	if branch != "" {
+		if info := github.NewPRCache().GetPRForBranch(repoDir, branch); info != nil {
 			_ = database.UpdateTaskPRInfo(task.ID, info.URL, info.Number, github.MarshalPRInfo(info))
 			return info.Number, info.URL
 		}
 	}
 	return task.PRNumber, task.PRURL
+}
+
+// prLookupTarget resolves WHERE to ask about a PR and WHICH branch to ask about.
+//
+// A remotely placed task records its branch in remote_branch and its worktree on
+// another machine, leaving branch_name and worktree_path empty. Reading only the
+// local fields meant the query was skipped entirely and every placed task looked
+// PR-less, which routes finished work to done instead of parking it in blocked
+// where a human can see it. The branch was pushed to the shared origin, so the
+// project checkout on this machine can answer for it.
+//
+// A worktree path that is not a directory here is another machine's path, not a
+// usable one — checking rather than assuming is what keeps a remote path from
+// being handed to git as if it were local.
+func prLookupTarget(database *db.DB, task *db.Task) (repoDir, branch string) {
+	branch = task.BranchName
+	repoDir = task.WorktreePath
+	if !isDir(repoDir) {
+		repoDir = ""
+	}
+	if branch == "" {
+		if _, remoteBranch, err := database.GetTaskRemoteWorktree(task.ID); err == nil {
+			branch = remoteBranch
+		}
+	}
+	if repoDir == "" {
+		if proj, err := database.GetProjectByName(task.Project); err == nil && proj != nil {
+			repoDir = proj.Path
+		}
+	}
+	if repoDir == "" {
+		repoDir, _ = os.Getwd()
+	}
+	return repoDir, branch
+}
+
+// isDir reports whether path names a directory on THIS machine.
+func isDir(path string) bool {
+	if path == "" {
+		return false
+	}
+	info, err := os.Stat(path)
+	return err == nil && info.IsDir()
 }
 
 // Complete runs the full completion decision for a task and applies its effects.

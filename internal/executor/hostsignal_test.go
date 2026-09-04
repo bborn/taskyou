@@ -3,6 +3,8 @@ package executor
 import (
 	"context"
 	"encoding/base64"
+
+	"github.com/bborn/workflow/internal/db"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -178,5 +180,80 @@ func TestSignalInstructionsNameTheScriptAndTheMissingTools(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Errorf("instructions do not mention %q:\n%s", want, got)
 		}
+	}
+}
+
+// A remote agent's "done" is the only completion signal a placed task can send.
+// It must run the same decision tree taskyou_complete runs, so a task that opened
+// a PR parks in 'blocked' where a human sees it. The bug this guards: the signal
+// returned a bare success, the finalizer's generic success branch wrote 'backlog',
+// and finished remote work sat invisible.
+func TestDoneSignalParksAPRBearingTaskForReview(t *testing.T) {
+	e, database := reconcileTestExecutor(t)
+
+	task := &db.Task{Title: "placed ship", Status: db.StatusProcessing, Project: "test"}
+	if err := database.CreateTask(task); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.SetTaskRemoteWorktree(task.ID, "/home/olgm/wt/x", "task/x"); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.UpdateTaskPRInfo(task.ID, "https://example.com/pull/3598", 3598, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	e.applyHostSignal(task.ID, hostEvent{TaskID: task.ID, Kind: eventDone, Detail: "opened PR 3598"})
+
+	got, err := database.GetTask(task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status == db.StatusBacklog {
+		t.Fatalf("status = backlog — the finished task is invisible; want blocked")
+	}
+	if got.Status != db.StatusBlocked {
+		t.Errorf("status = %q, want blocked awaiting the human merge", got.Status)
+	}
+}
+
+// With no PR, a placed task that reports done is genuinely finished.
+func TestDoneSignalWithoutAPRCompletesTheTask(t *testing.T) {
+	e, database := reconcileTestExecutor(t)
+
+	task := &db.Task{Title: "placed chore", Status: db.StatusProcessing, Project: "test"}
+	if err := database.CreateTask(task); err != nil {
+		t.Fatal(err)
+	}
+
+	e.applyHostSignal(task.ID, hostEvent{TaskID: task.ID, Kind: eventDone, Detail: "moved a file"})
+
+	got, err := database.GetTask(task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != db.StatusDone {
+		t.Errorf("status = %q, want done", got.Status)
+	}
+}
+
+// A failing evidence gate must not read as success. The remote agent has already
+// stopped, so the task parks for a human instead of silently passing.
+func TestDoneSignalRespectsAFailingVerifyGate(t *testing.T) {
+	e, database := reconcileTestExecutor(t)
+
+	task := &db.Task{Title: "placed build", Status: db.StatusProcessing, Project: "test"}
+	if err := database.CreateTask(task); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.SetStepVerify(task.ID, "exit 1"); err != nil {
+		t.Fatal(err)
+	}
+
+	res := e.applyHostSignal(task.ID, hostEvent{TaskID: task.ID, Kind: eventDone, Detail: "claimed done"})
+	if res.Success {
+		t.Fatal("a rejected completion reported success")
+	}
+	if !res.NeedsInput {
+		t.Errorf("want the task parked for input, got %+v", res)
 	}
 }
