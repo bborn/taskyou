@@ -1289,6 +1289,13 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, m.loadTasks())
 
 	case taskClosedMsg, taskArchivedMsg, taskUnarchivedMsg, taskDeletedMsg, taskRetriedMsg, taskStatusChangedMsg:
+		// A status gate can refuse the move (an open PR, work that never ran).
+		// Show the gate's own words: silently reloading the board looks like the
+		// keypress was lost, which is how people learned to hit close twice.
+		if err := statusActionError(msg); err != nil {
+			m.notification = fmt.Sprintf("%s %s", IconBlocked(), refusalNotice(err))
+			m.notifyUntil = time.Now().Add(10 * time.Second)
+		}
 		cmds = append(cmds, m.loadTasks())
 
 	case aiCommandMsg:
@@ -3873,6 +3880,35 @@ func (m *AppModel) changeTaskStatus(id int64, status string) tea.Cmd {
 
 type taskStatusChangedMsg struct {
 	err error
+}
+
+// statusActionError pulls the error out of the status-changing messages that
+// share one update case, so a refusal is not swallowed by the group.
+func statusActionError(msg tea.Msg) error {
+	switch m := msg.(type) {
+	case taskClosedMsg:
+		return m.err
+	case taskArchivedMsg:
+		return m.err
+	case taskUnarchivedMsg:
+		return m.err
+	case taskRetriedMsg:
+		return m.err
+	case taskStatusChangedMsg:
+		return m.err
+	}
+	return nil
+}
+
+// refusalNotice turns a gate refusal into the one line the board has room for.
+// A refusal is a decision the user needs to act on ("merge the PR"), so it
+// keeps the gate's explanation; anything else is a plain failure.
+func refusalNotice(err error) string {
+	if !db.IsRefused(err) {
+		return err.Error()
+	}
+	r := err.(*db.RefusedError)
+	return fmt.Sprintf("Refused: %s", r.Detail)
 }
 
 func (m *AppModel) updateSettings(msg tea.Msg) (tea.Model, tea.Cmd) {

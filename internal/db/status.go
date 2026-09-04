@@ -760,3 +760,15 @@ func (db *DB) backfillStatusEvents() error {
 	}
 	return db.SetSetting(statusEventBackfillKey, "1")
 }
+
+// CountStatusEvents returns the total number of rows in the status log. Used
+// by `ty debug status-consistency` to say how much it actually checked — "0
+// mismatches" over an empty table is not the same claim as over a full one.
+func (db *DB) CountStatusEvents() (int, error) {
+	var n int
+	err := db.QueryRow(`SELECT COUNT(*) FROM task_status_events`).Scan(&n)
+	if err != nil {
+		return 0, fmt.Errorf("count status events: %w", err)
+	}
+	return n, nil
+}

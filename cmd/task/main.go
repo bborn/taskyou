@@ -253,6 +253,9 @@ Examples:
 	debugStateCmd.Flags().String("keys", "", "Comma-separated list of keys to simulate (e.g., 'Down,Enter,n')")
 	debugCmd.AddCommand(debugStateCmd)
 
+	// Status-log tools: the consistency check and the audit trail (debug_status.go).
+	addStatusDebugCommands(debugCmd)
+
 	// Daemon subcommand - runs executor in background
 	daemonCmd := &cobra.Command{
 		Use:   "daemon",
