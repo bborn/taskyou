@@ -72,3 +72,21 @@ func TestCleanupOrphanedSessions_StillKillsOurOwnOrphan(t *testing.T) {
 		t.Error("our own orphan window survived cleanup")
 	}
 }
+
+// The tag is new; every session created before it is untagged — including the
+// long-lived daemon session on a placed host, which is the exact one whose live
+// agent window kept being killed. An untagged session must therefore be treated
+// as unknown, not as ours, or the ownership guard protects only sessions that
+// were never in danger.
+func TestCleanupOrphanedSessions_SparesAnUntaggedSession(t *testing.T) {
+	session := setupCleanupTest(t, "untagged")
+	const foreignTaskID = 5289
+	makeDaemonSessionWithName(t, session, foreignTaskID)
+	// Deliberately NO @ty_owner option set.
+
+	cleanupOrphanedSessions(false)
+
+	if !windowExists(session, fmt.Sprintf("task-%d", foreignTaskID)) {
+		t.Fatal("cleanup killed a window in an untagged session; untagged means unknown, not ours")
+	}
+}
