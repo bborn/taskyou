@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/bborn/workflow/internal/db"
+	"github.com/bborn/workflow/internal/executor"
 )
 
 // requireTmux skips the test if tmux is not available.
@@ -255,6 +256,13 @@ func TestCleanupOrphanedSessions_KillsWindowForDeletedTask(t *testing.T) {
 	// Task ID has no row in the (empty) DB — pure orphan.
 	const orphanID = 992001
 	makeDaemonSessionWithName(t, sessionName, orphanID)
+	// Killing a window for a task we cannot see is only defensible on a session
+	// we can prove is ours, so the session has to say so. Untagged is unknown,
+	// and unknown windows are left alone — see the untagged case in
+	// cleanup_ownership_test.go.
+	if err := osexec.Command("tmux", "set-option", "-t", sessionName, executor.TmuxOwnerOption, executor.LocalOwnerTag()).Run(); err != nil {
+		t.Fatalf("tag session as ours: %v", err)
+	}
 
 	cleanupOrphanedSessions(false)
 

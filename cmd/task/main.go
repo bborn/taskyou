@@ -6192,9 +6192,10 @@ func quotedWindowList(windows map[string]bool) string {
 // being visible to ps / pgrep.
 func cleanupOrphanedSessions(force bool) {
 	type windowRef struct {
-		session string
-		window  string
-		taskID  int
+		session   string
+		window    string
+		taskID    int
+		ownedByUs bool
 	}
 
 	sessionsOut, err := osexec.Command("tmux", "list-sessions", "-F", "#{session_name}").Output()
@@ -6216,10 +6217,19 @@ func cleanupOrphanedSessions(force bool) {
 		// every one of them and kills live agents: a placed host running this
 		// (directly, or through the test suite) tore down the very window the
 		// running agent lived in. Not ours, not our call.
-		if owner := tmuxSessionOwner(session); owner != "" && owner != localOwner {
+		owner := tmuxSessionOwner(session)
+		if owner != "" && owner != localOwner {
 			foreignSessions = append(foreignSessions, session+" (owned by "+owner+")")
 			continue
 		}
+		// An UNTAGGED session is unknown, not ours. Every session created before
+		// the tag existed is untagged, including the long-lived daemon session on
+		// a placed host — which is precisely the one that kept getting its live
+		// agent window killed. Unknown sessions are still scanned, because a
+		// window whose task we can see is provably ours to clean, but they are
+		// never allowed to have a window killed merely for being ABSENT from the
+		// database: absence is what a foreign task looks like.
+		ownedByUs := owner == localOwner
 		windowsOut, err := osexec.Command("tmux", "list-windows", "-t", session, "-F", "#{window_name}").Output()
 		if err != nil {
 			continue
@@ -6233,7 +6243,7 @@ func cleanupOrphanedSessions(force bool) {
 			if _, err := fmt.Sscanf(window, "task-%d", &taskID); err != nil {
 				continue
 			}
-			allWindows = append(allWindows, windowRef{session: session, window: window, taskID: taskID})
+			allWindows = append(allWindows, windowRef{session: session, window: window, taskID: taskID, ownedByUs: ownedByUs})
 		}
 	}
 
@@ -6266,9 +6276,16 @@ func cleanupOrphanedSessions(force bool) {
 	}
 
 	var deletedWindows, oldDoneWindows []windowRef
+	var unknownWindows []string
 	for _, w := range allWindows {
 		if !existingTaskIDs[w.taskID] {
-			deletedWindows = append(deletedWindows, w)
+			// Only a session we can prove is ours may have a window killed for a
+			// task we cannot see. Anywhere else that reasoning is backwards.
+			if w.ownedByUs {
+				deletedWindows = append(deletedWindows, w)
+			} else {
+				unknownWindows = append(unknownWindows, w.session+":"+w.window)
+			}
 			continue
 		}
 		if oldDoneTaskIDs[w.taskID] {
@@ -6277,6 +6294,11 @@ func cleanupOrphanedSessions(force bool) {
 	}
 
 	totalToKill := len(deletedWindows) + len(oldDoneWindows)
+	if len(unknownWindows) > 0 {
+		fmt.Println(dimStyle.Render(fmt.Sprintf(
+			"Left %d window(s) alone: their task is not in this database and their session is not tagged as this machine's (%s)",
+			len(unknownWindows), strings.Join(unknownWindows, ", "))))
+	}
 	if len(foreignSessions) > 0 {
 		fmt.Println(dimStyle.Render(fmt.Sprintf(
 			"Skipped %d session(s) owned by another machine: %s",
