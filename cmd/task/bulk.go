@@ -363,14 +363,21 @@ Examples:
 	return bulkCmd
 }
 
-// printBulkSummary prints a summary line for bulk operations.
+// printBulkSummary prints a summary line for bulk operations, and exits
+// non-zero if any item failed.
+//
+// The exit status is the part a script can read. A bulk close that every task
+// refused — say because each still has an open PR — used to print its failures
+// to stderr and then exit 0, so a caller chaining `ty bulk close ... && ...`
+// carried on as though the tasks were closed.
 func printBulkSummary(operation string, succeeded, failed int) {
 	if succeeded+failed == 0 {
 		return
 	}
 	if failed == 0 {
 		fmt.Println(successStyle.Render(fmt.Sprintf("\nBulk %s complete: %d succeeded", operation, succeeded)))
-	} else {
-		fmt.Println(dimStyle.Render(fmt.Sprintf("\nBulk %s complete: %d succeeded, %d failed", operation, succeeded, failed)))
+		return
 	}
+	fmt.Println(dimStyle.Render(fmt.Sprintf("\nBulk %s complete: %d succeeded, %d failed", operation, succeeded, failed)))
+	os.Exit(1)
 }
