@@ -149,14 +149,6 @@ func placeWhere(target string) string {
 	return "on " + target
 }
 
-// placeDestination names a target for a sentence about a task MOVING.
-func placeDestination(target string) string {
-	if target == "" {
-		return "back to this machine"
-	}
-	return "to " + target
-}
-
 // preflightHost checks the host can actually run a task before a placement that
 // names it is written, and returns the absolute directory it resolved to.
 //
