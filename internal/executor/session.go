@@ -326,6 +326,7 @@ func findOrCreateDaemonSession(ctx context.Context) (string, error) {
 	if err == nil {
 		for _, session := range strings.Split(strings.TrimSpace(string(out)), "\n") {
 			if strings.HasPrefix(session, "task-daemon-") {
+				tagSessionOwner(ctx, session)
 				return session, nil
 			}
 		}
@@ -336,5 +337,32 @@ func findOrCreateDaemonSession(ctx context.Context) (string, error) {
 	if err := tmuxCmd(ctx, "new-session", "-d", "-s", daemonSession, "-n", "_placeholder", "tail", "-f", "/dev/null").Run(); err != nil {
 		return "", fmt.Errorf("tmux new-session failed: %w", err)
 	}
+	tagSessionOwner(ctx, daemonSession)
 	return daemonSession, nil
+}
+
+// TmuxOwnerOption is the tmux user option naming the machine whose database owns
+// the tasks in a task-daemon session.
+//
+// It exists because a session's name says nothing about who owns it. A placed
+// task's window lives in a task-daemon session on the REMOTE host, but the task
+// row lives in the database of the machine that placed it. Orphan cleanup asks
+// "is this window's task in my database?", and on the remote host the honest
+// answer for someone else's task is "no" — which used to read as "deleted, kill
+// it" and tore down live agents mid-run.
+const TmuxOwnerOption = "@ty_owner"
+
+// LocalOwnerTag identifies this machine as the owner of the sessions it creates.
+func LocalOwnerTag() string {
+	host, err := os.Hostname()
+	if err != nil || strings.TrimSpace(host) == "" {
+		return "unknown-host"
+	}
+	return strings.TrimSpace(host)
+}
+
+// tagSessionOwner records which machine's database owns this session's tasks.
+// Best-effort: an untagged session is treated as "unknown", never as "mine".
+func tagSessionOwner(ctx context.Context, session string) {
+	_ = tmuxCmd(ctx, "set-option", "-t", session, TmuxOwnerOption, LocalOwnerTag()).Run()
 }

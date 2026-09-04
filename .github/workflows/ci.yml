@@ -20,7 +20,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v6
         with:
-          go-version: '1.25'
+          go-version: '1.26'
 
       - name: Run tests
         run: go test -v -race -p 1 -count=1 -coverprofile=coverage.out ./...
@@ -35,12 +35,12 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v6
         with:
-          go-version: '1.25'
+          go-version: '1.26'
 
       - name: Run golangci-lint
         uses: golangci/golangci-lint-action@v9
         with:
-          version: v2.8.0  # built with Go 1.25; v2.1.6 (Go 1.24) refuses go.mod targeting 1.25
+          version: v2.13.2  # built with Go 1.27; v2.8.0 (Go 1.25) refuses go.mod targeting 1.26
 
   vulncheck:
     name: Vulnerability Check
@@ -53,8 +53,8 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v6
         with:
-          go-version: '1.25'
-          check-latest: true  # use the newest released 1.25.x, not a stale cached patch, so stdlib CVE fixes (e.g. 1.25.11) are present
+          go-version: '1.26'
+          check-latest: true  # use the newest released 1.26.x, not a stale cached patch, so stdlib CVE fixes are present
 
       - name: Install govulncheck
         # Pinned: v1.4.0 (2026-06-17) bundles golang.org/x/tools@v0.46.0, whose SSA
@@ -76,7 +76,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v6
         with:
-          go-version: '1.25'
+          go-version: '1.26'
 
       - name: Build binaries
         run: |

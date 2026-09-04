@@ -54,6 +54,16 @@ func (e *Executor) routeTask(ctx context.Context, task *db.Task, allowHold bool)
 	if strings.TrimSpace(task.ClaudeConfigDir) != "" {
 		return true
 	}
+	// A profile is a directory on THIS machine. A task placed on another host
+	// runs against that host's own login, and a local path means nothing there —
+	// at best it is ignored, at worst it names a directory that does not exist
+	// and the agent starts unauthenticated. The same argument the comment below
+	// makes for pinned projects applies harder across a machine boundary: a
+	// config dir carries per-profile OAuth logins, which cannot be shared, least
+	// of all by pointing at a path on a different computer.
+	if isRemotePlacement(task.PlacementTarget) {
+		return true
+	}
 	// A project that names its own config dir has already chosen a profile, and
 	// that choice is load-bearing: a config dir carries the account's MCP
 	// connectors and their OAuth logins, which are per-profile and cannot be

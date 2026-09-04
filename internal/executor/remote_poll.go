@@ -176,6 +176,13 @@ type idleTracker struct {
 	threshold   int
 }
 
+// reset clears the run of identical captures. The poll calls this when the
+// screen says a turn is still in flight, so a retry loop that repaints the same
+// frame is not mistaken for an agent that has stopped.
+func (t *idleTracker) reset() {
+	t.consecutive = 0
+}
+
 // record feeds one capture. ok is false when the pane could not be read at all,
 // which resets the run: we learned nothing, and nothing is not stillness.
 func (t *idleTracker) record(sum string, ok bool) (idle bool) {

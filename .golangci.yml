@@ -16,6 +16,10 @@ linters:
         - -QF1008
         - -S1017
         - -SA9003
+        # Added by the staticcheck bundled with golangci-lint v2.13.2. `checks:
+        # all` opts in automatically, so the Go 1.26 bump surfaced 48 of these
+        # at once in code this change does not touch. Deferred, not judged fine.
+        - -QF1012
   exclusions:
     generated: lax
     presets:
@@ -30,6 +34,17 @@ linters:
         text: "G115:"
       - linters: [gosec]
         text: "G306:"
+      # G702/G703/G122 arrived with the gosec in golangci-lint v2.13.2. They are
+      # the same categories already excluded above, re-found by taint analysis:
+      # argv-form tmux invocations (no shell involved), and writes into worktrees
+      # this tool creates and owns. Excluded to keep the Go 1.26 bump's ruleset
+      # equivalent to v2.8.0's — adopting them is its own piece of work.
+      - linters: [gosec]
+        text: "G702:"
+      - linters: [gosec]
+        text: "G703:"
+      - linters: [gosec]
+        text: "G122:"
       - linters: [staticcheck]
         text: "SA5011"
         path: "_test\\.go"

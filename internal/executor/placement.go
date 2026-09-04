@@ -81,6 +81,11 @@ func (e *Executor) resolvePlacement(ctx context.Context, task *db.Task) (Runner,
 		}
 		task.PlacementTarget = recorded.Target
 		task.PlacementReason = recorded.Reason
+		// A decision recorded before this guard existed can still be carrying a
+		// local profile, and reusing a decision does not go through
+		// recordPlacement — so clear it here too, or an already-poisoned task
+		// stays poisoned across every retry.
+		e.dropLocalProfileForRemote(task)
 		if placement.IsLocal() {
 			e.logger.Debug("placement: reusing recorded local placement", "task", task.ID)
 			return LocalRunner{}, placement, nil
@@ -218,6 +223,39 @@ func (e *Executor) recordPlacement(task *db.Task, target, reason, workDir string
 	}
 	task.PlacementTarget = target
 	task.PlacementReason = reason
+	e.dropLocalProfileForRemote(task)
+}
+
+// isRemotePlacement reports whether a placement target names another machine.
+func isRemotePlacement(target string) bool {
+	t := strings.TrimSpace(target)
+	return t != "" && t != "local"
+}
+
+// dropLocalProfileForRemote clears a Claude profile that was chosen for this
+// machine once the task turns out to be running on a different one.
+//
+// Routing happens before placement is resolved, so on a first run the profile
+// router has already picked a local CLAUDE_CONFIG_DIR by the time anyone knows
+// the task is leaving this computer. That path does not exist on the host, and
+// a retry then reuses the recorded value forever. The host has its own login;
+// the right profile there is its default, which is what an empty value selects.
+func (e *Executor) dropLocalProfileForRemote(task *db.Task) {
+	if task == nil || !isRemotePlacement(task.PlacementTarget) {
+		return
+	}
+	if strings.TrimSpace(task.ClaudeConfigDir) == "" {
+		return
+	}
+	stale := task.ClaudeConfigDir
+	task.ClaudeConfigDir = ""
+	if err := e.db.UpdateTaskClaudeConfigDir(task.ID, ""); err != nil {
+		e.logger.Warn("could not clear a local Claude profile from a placed task",
+			"task", task.ID, "host", task.PlacementTarget, "error", err)
+		return
+	}
+	e.logLine(task.ID, "system", fmt.Sprintf(
+		"Cleared the local Claude profile %s: %s runs against its own login.", stale, task.PlacementTarget))
 }
 
 // remoteRunnerFor builds the runner for a non-local placement and checks the

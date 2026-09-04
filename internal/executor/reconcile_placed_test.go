@@ -18,7 +18,14 @@ func reconcileTestExecutor(t *testing.T) (*Executor, *db.DB) {
 	if err := database.CreateProject(&db.Project{Name: "test", Path: t.TempDir()}); err != nil {
 		t.Fatal(err)
 	}
-	return New(database, config.New(database)), database
+	e := New(database, config.New(database))
+	// Probing a placed host opens a standing channel whose goroutine reads the
+	// ssh command factory that stubSSH swaps. Without this the goroutine outlives
+	// its test and races the NEXT test's stub — a genuine -race failure that only
+	// appears when scheduling happens to overlap the two, so it surfaces as a
+	// flake in whichever test was unlucky rather than in the one that leaked.
+	t.Cleanup(func() { e.hostChans.Close() })
+	return e, database
 }
 
 func reconcileTestTask(t *testing.T, database *db.DB, host string) *db.Task {
