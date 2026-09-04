@@ -3,14 +3,14 @@ package executor
 import (
 	"context"
 	"encoding/base64"
-
-	"github.com/bborn/workflow/internal/db"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/bborn/workflow/internal/db"
 )
 
 func TestParseHostEvent(t *testing.T) {
