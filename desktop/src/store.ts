@@ -169,7 +169,7 @@ class Store {
             body: task.title,
             kind: "warning",
           });
-          void notify(`Task #${task.id} needs input`, task.title);
+          notify(`Task #${task.id} needs input`, task.title);
           this.set({ lastNotificationTaskId: task.id });
         } else if (task.status === "done") {
           this.toast({
@@ -178,7 +178,7 @@ class Store {
             body: task.title,
             kind: "success",
           });
-          void notify(`Task #${task.id} done`, task.title);
+          notify(`Task #${task.id} done`, task.title);
           this.set({ lastNotificationTaskId: task.id });
         }
       }

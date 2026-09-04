@@ -94,11 +94,19 @@ export async function openInEditor(path: string): Promise<void> {
   return invoke("open_in_editor", { path });
 }
 
-export async function notify(title: string, body: string): Promise<void> {
-  if (!inTauri()) return;
-  // Native-app etiquette: when the window is focused the in-app toast is
-  // enough; only notify the system when the user is elsewhere.
-  if (document.hasFocus()) return;
+/**
+ * Quiet period used to coalesce native notifications. Task transitions arrive
+ * in bursts — one poll can surface several at once — and firing an OS
+ * notification (with its OS sound) per task turns that into a pile-up. Each
+ * call restarts the window, so only the last event of a burst is delivered.
+ * Mirrors the TUI's BellDebounce.
+ */
+const NOTIFY_DEBOUNCE_MS = 500;
+
+let pendingNotification: { title: string; body: string } | null = null;
+let notifyTimer: ReturnType<typeof setTimeout> | null = null;
+
+async function sendNative(title: string, body: string): Promise<void> {
   try {
     const { isPermissionGranted, requestPermission, sendNotification } = await import(
       "@tauri-apps/plugin-notification"
@@ -111,6 +119,24 @@ export async function notify(title: string, body: string): Promise<void> {
   } catch {
     // notifications are best-effort
   }
+}
+
+export function notify(title: string, body: string): void {
+  if (!inTauri()) return;
+  // Native-app etiquette: when the window is focused the in-app toast is
+  // enough; only notify the system when the user is elsewhere.
+  if (document.hasFocus()) return;
+
+  pendingNotification = { title, body };
+  if (notifyTimer !== null) clearTimeout(notifyTimer);
+  notifyTimer = setTimeout(() => {
+    notifyTimer = null;
+    const next = pendingNotification;
+    pendingNotification = null;
+    // Re-check focus: the user may have come back to the app during the
+    // debounce window, in which case the toast has already told them.
+    if (next && !document.hasFocus()) void sendNative(next.title, next.body);
+  }, NOTIFY_DEBOUNCE_MS);
 }
 
 export async function checkEnvironment(): Promise<EnvironmentReport> {
