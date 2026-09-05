@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/bborn/workflow/internal/config"
 	"github.com/bborn/workflow/internal/db"
 	"github.com/bborn/workflow/internal/executor"
 )
@@ -45,6 +46,19 @@ func carryAndPlace(ctx context.Context, database *db.DB, task *db.Task, current 
 	// must not overwrite the reason the task is there.
 	if current.Decided && current.Target == target {
 		fmt.Println(dimStyle.Render(fmt.Sprintf("Task #%d already runs %s.", task.ID, placeWhere(target))))
+		// "Already runs here" with no worktree here is not a no-op, it is the
+		// stuck state an earlier move left behind: the placement was written, the
+		// worktree never was, and every start refuses with "task has no worktree
+		// yet". Running the command again is exactly how someone asks for that to
+		// be fixed, so fix it.
+		if target == "" && strings.TrimSpace(task.WorktreePath) == "" {
+			fmt.Println(dimStyle.Render("  It has no worktree here yet, so this is making one."))
+			if err := landLocally(database, task); err != nil {
+				fmt.Println(warnStyle.Render("  Could not create the worktree here: " + err.Error()))
+				return nil
+			}
+			fmt.Println(successStyle.Render("  Worktree: " + task.WorktreePath))
+		}
 		return nil
 	}
 
@@ -111,6 +125,26 @@ func carryAndPlace(ctx context.Context, database *db.DB, task *db.Task, current 
 		return err
 	}
 
+	// Land it. Everything from here is best effort: the carry has been proven and
+	// the placement is written, so the task HAS moved. A failure below is a task
+	// that starts a little later, not a task that did not move — and reporting it
+	// as a failed move would be a lie about where the work is.
+	if rep.Branch != "" {
+		if err := recordCarriedBranch(database, task, rep.Branch); err != nil {
+			fmt.Println(warnStyle.Render("  Could not record the carried branch: " + err.Error()))
+		}
+	}
+	// A placement alone is a promise about where the task will run; the worktree
+	// is what makes that promise keepable, and nothing used to keep it on this
+	// side of the move. Remote targets provision at spawn, over ssh, which is the
+	// only moment that host can be reached.
+	if target == "" {
+		if err := landLocally(database, task); err != nil {
+			fmt.Println(warnStyle.Render("  Could not create the worktree here: " + err.Error()))
+			fmt.Println(dimStyle.Render("  The task is still moved; its next run will try again."))
+		}
+	}
+
 	moved := fmt.Sprintf("Task #%d now runs %s.", task.ID, placeWhere(target))
 	if rep.Branch != "" {
 		moved = fmt.Sprintf("Task #%d now runs %s, with its work.", task.ID, placeWhere(target))
@@ -129,6 +163,43 @@ func carryAndPlace(ctx context.Context, database *db.DB, task *db.Task, current 
 	if rep.Branch != "" {
 		fmt.Println(dimStyle.Render("  Its next run starts from " + rep.Branch + " and opens with " + executor.HandoffPath + "."))
 	}
+	return nil
+}
+
+// recordCarriedBranch writes the branch the work travelled on onto the task, so
+// the machine that picks it up can FIND that work.
+//
+// This is the half that is easy to skip and impossible to do without. A move
+// used to leave the branch name only in the placement REASON — "moved here by
+// hand, carrying task/5286-..." — which is prose. Worktree setup reads fields,
+// not sentences, so it saw a task with no branch of its own and did what that
+// means: cut a brand new branch from the default one. Both landings then looked
+// perfect and contained none of the work, immediately after the carry gate had
+// finished proving that work was safe.
+//
+// SourceBranch routes local setup through addSourceBranchWorktree, which
+// attaches to origin/<branch> and fails loudly when the branch is nowhere rather
+// than inventing an empty one. BranchName is what newWorktreeBranchName reads,
+// so the remote host asks for the carried branch by name instead of rebuilding a
+// name from the task's title — which a rename would have quietly changed.
+func recordCarriedBranch(database *db.DB, task *db.Task, branch string) error {
+	if strings.TrimSpace(branch) == "" {
+		return nil
+	}
+	task.SourceBranch = branch
+	task.BranchName = branch
+	return database.UpdateTask(task)
+}
+
+// landLocally gives a task that has just arrived here the worktree its next run
+// needs. Every start path but the daemon's refuses a task without one, so a move
+// that stops at the placement leaves the task un-startable by hand.
+func landLocally(database *db.DB, task *db.Task) error {
+	path, _, err := executor.New(database, config.New(database)).EnsureLocalWorktree(task)
+	if err != nil {
+		return err
+	}
+	task.WorktreePath = path
 	return nil
 }
 

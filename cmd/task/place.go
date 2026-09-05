@@ -58,6 +58,10 @@ not happen.
 Files git ignores — .env, local databases, build output — stay on the old host.
 They are named so their absence is not a surprise on the far side.
 
+Placing a task here also gives it its worktree, checked out on the branch its
+work was carried to, so it is ready to start. Re-running this on a task that is
+already here but has no worktree repairs it.
+
 Pass --force to move WITHOUT the work: for a host that cannot be reached at all,
 or a wrong turn you want to abandon.
 

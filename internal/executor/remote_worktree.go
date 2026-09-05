@@ -135,8 +135,18 @@ func remoteWorktreeScript(repo, dirName, branch string) string {
 		`[ -n "$base" ] || base=$(git -C "$repo" rev-parse --abbrev-ref HEAD)`,
 		// An existing branch is checked out rather than recreated: that is a task
 		// that ran here before and whose branch outlived its worktree.
+		//
+		// origin/$branch is the SECOND case and it is the one a move depends on. A
+		// task carried onto this host has its work on origin and no local ref for
+		// it, so a check for refs/heads alone falls through to "cut a new branch
+		// from main" — which provisions cleanly, starts cleanly, and contains none
+		// of the work the carry gate had just finished proving was safe. Attaching
+		// to origin/$branch is what makes step 6 of the move design ("the next
+		// spawn clones the pushed branch") actually true.
 		`if git -C "$repo" show-ref --verify --quiet "refs/heads/$branch"; then`,
 		`  git -C "$repo" worktree add "$wt" "$branch" >&2`,
+		`elif git -C "$repo" show-ref --verify --quiet "refs/remotes/origin/$branch"; then`,
+		`  git -C "$repo" worktree add -b "$branch" "$wt" "origin/$branch" >&2`,
 		`else`,
 		`  git -C "$repo" worktree add -b "$branch" "$wt" "$base" >&2`,
 		`fi`,

@@ -4892,6 +4892,80 @@ func (e *Executor) getConversationHistory(taskID int64) string {
 	return sb.String()
 }
 
+// EnsureLocalWorktree gives a task its isolated worktree on THIS machine,
+// returning the directory and whether this call created it.
+//
+// It exists so a task can be prepared at the moment it is placed here rather
+// than only at the moment the daemon happens to start it. `ty place <id> local`
+// used to write a placement and stop: the task arrived with an empty
+// worktree_path, and every start path that is not the daemon — the TUI, the
+// GUI, the HTTP API — refused it with "task has no worktree yet: refusing to
+// start outside an isolated worktree". The guard was right; nothing had done
+// the provisioning it was guarding.
+func (e *Executor) EnsureLocalWorktree(task *db.Task) (string, bool, error) {
+	e.adoptCarriedBranch(task)
+	return e.setupWorktree(task)
+}
+
+// adoptCarriedBranch points a task with no recorded branch at its own branch on
+// origin, when origin has one.
+//
+// A task's branch name is derived from its id, so a branch by that name on
+// origin is not a coincidence — it is this task's own work, pushed from wherever
+// it last ran. Without this, worktree setup sees no branch to attach to and does
+// the only other thing it can: cut a fresh one from the default branch. That
+// looks completely correct (right name, clean checkout) and contains none of the
+// work, which is how a carried task arrives empty.
+//
+// It fetches, because the whole premise is work that lives on another machine
+// and cannot be seen from here until it is fetched. That cost is why this hangs
+// off EnsureLocalWorktree — the landing path, walked once when a task arrives —
+// and not off setupWorktree, which every ordinary task start goes through.
+func (e *Executor) adoptCarriedBranch(task *db.Task) {
+	if task == nil || strings.TrimSpace(task.SourceBranch) != "" {
+		return
+	}
+	// An existing worktree is the work; there is nothing to go and find.
+	if strings.TrimSpace(task.WorktreePath) != "" {
+		return
+	}
+	if !e.config.ProjectUsesWorktrees(task.Project) {
+		return
+	}
+	projectDir := e.getProjectDir(task.Project)
+	if projectDir == "" {
+		return
+	}
+
+	branch := newWorktreeBranchName(task, slugify(task.Title, 40))
+	// A local branch is already found by setupWorktree, which checks it out
+	// rather than recreating it. Leaving that path alone keeps this to the one
+	// case it is for.
+	if gitRefExists(projectDir, "refs/heads/"+branch) {
+		return
+	}
+
+	// The explicit refspec is deliberate: a bare `git fetch origin <branch>`
+	// leaves the answer in FETCH_HEAD, and what the check below needs is the
+	// remote-tracking ref itself.
+	ref := "refs/remotes/origin/" + branch
+	fetch := gitCmd(context.Background(), projectDir, "fetch", "origin",
+		"refs/heads/"+branch+":"+ref)
+	if out, err := fetch.CombinedOutput(); err != nil {
+		// Not an error worth surfacing: the overwhelmingly common case is a task
+		// that has simply never run anywhere, so origin has no such branch.
+		e.logger.Debug("no carried branch on origin", "task", task.ID, "branch", branch,
+			"error", err, "output", string(out))
+		return
+	}
+	if !gitRefExists(projectDir, ref) {
+		return
+	}
+
+	task.SourceBranch = branch
+	e.logLine(task.ID, "system", fmt.Sprintf("Found this task's work on origin at %s; checking it out here", branch))
+}
+
 // setupWorktree creates a git worktree for the task if the project is a git repo.
 // Returns the working directory to use (worktree path or project path) and whether
 // this call created the worktree fresh (false when an existing or restored worktree
