@@ -149,7 +149,7 @@ func remoteAttachChain(task *db.Task, view string) string {
 // because this one needs a TTY and runs in the foreground of a pane rather than
 // being collected by the daemon.
 func localSSHInvocation() string {
-	parts := []string{sshBinary, "-o", "BatchMode=yes",
+	parts := []string{sshBin(), "-o", "BatchMode=yes",
 		"-o", fmt.Sprintf("ConnectTimeout=%d", int(DefaultRemoteConnectTimeout.Seconds()))}
 	parts = append(parts, sshMultiplexArgs()...)
 	return strings.Join(parts, " ")

@@ -53,9 +53,7 @@ func stubSSH(t *testing.T, body string) string {
 	if err := os.WriteFile(path, []byte(body), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	prev := sshBinary
-	sshBinary = path
-	t.Cleanup(func() { sshBinary = prev })
+	t.Cleanup(setSSHBinary(path))
 	return path
 }
 
