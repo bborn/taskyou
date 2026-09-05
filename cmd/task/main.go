@@ -4307,6 +4307,10 @@ func runLocal(dangerousMode bool, debugStatePath, cpuProfilePath, memProfilePath
 		return fmt.Errorf("run TUI: %w", err)
 	}
 
+	// Bells are debounced, so one may still be scheduled when the user quits.
+	// Deliver it instead of dropping it on the floor.
+	ui.FlushBell()
+
 	// Flush profiles now, before the tmux cleanup below may kill our own session
 	// (which would SIGKILL this process and skip the deferred flush).
 	stopProfiling()
