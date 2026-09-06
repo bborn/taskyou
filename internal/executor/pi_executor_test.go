@@ -228,12 +228,10 @@ func TestFindPiSessionID(t *testing.T) {
 	// 2. Test fallback to legacy path (when explicit doesn't exist)
 	os.Remove(explicitSessionPath)
 
-	home := os.Getenv("HOME")
-	defer os.Setenv("HOME", home)
-	os.Setenv("HOME", tmpDir)
+	legacyRoot := filepath.Join(tmpDir, ".pi", "agent", "sessions")
 
 	escapedPath := "--" + strings.ReplaceAll(workDir, "/", "-") + "--"
-	legacySessionDir := filepath.Join(tmpDir, ".pi", "agent", "sessions", escapedPath)
+	legacySessionDir := filepath.Join(legacyRoot, escapedPath)
 	if err := os.MkdirAll(legacySessionDir, 0755); err != nil {
 		t.Fatalf("failed to create legacy session dir: %v", err)
 	}
@@ -243,7 +241,7 @@ func TestFindPiSessionID(t *testing.T) {
 		t.Fatalf("failed to write legacy session file: %v", err)
 	}
 
-	foundLegacySession := findPiSessionID(workDir)
+	foundLegacySession := findPiLegacySessionID(workDir, legacyRoot)
 	if foundLegacySession != legacySessionPath {
 		t.Errorf("expected legacy session %q, got %q", legacySessionPath, foundLegacySession)
 	}

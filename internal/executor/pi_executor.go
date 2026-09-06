@@ -174,9 +174,14 @@ func findPiSessionID(workDir string) string {
 		return ""
 	}
 
+	return findPiLegacySessionID(workDir, filepath.Join(home, ".pi", "agent", "sessions"))
+}
+
+// findPiLegacySessionID scans an explicit root without changing the process's home directory.
+func findPiLegacySessionID(workDir, sessionsDir string) string {
 	// Pi escapes the path similar to Claude: /Users/bruno/foo -> --Users-bruno-foo--
 	escapedPath := "--" + strings.ReplaceAll(workDir, "/", "-") + "--"
-	sessionDir := filepath.Join(home, ".pi", "agent", "sessions", escapedPath)
+	sessionDir := filepath.Join(sessionsDir, escapedPath)
 
 	// Find the most recent .jsonl file
 	entries, err := os.ReadDir(sessionDir)

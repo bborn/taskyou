@@ -94,6 +94,15 @@ internal/
 
 ## Testing Requirements
 
+### Filesystem isolation
+
+Tests must create writable fixtures under `t.TempDir()` and let Go clean them
+up. Never create or remove fixtures in the user's real home directory, agent
+configuration directories, or installed packages. Pass explicit fixture paths
+to session-discovery and cleanup helpers instead of changing `HOME`.
+
+When testing cleanup, also assert that sibling data and configuration survive.
+
 ### When to Write Tests
 
 - **Database operations**: All CRUD functions need tests

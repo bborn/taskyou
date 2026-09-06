@@ -363,28 +363,24 @@ func TestBuildGeminiDangerousFlag(t *testing.T) {
 
 // TestFindCodexSessionID tests the Codex session discovery function.
 func TestFindCodexSessionID(t *testing.T) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		t.Skip("Could not get home directory")
-	}
-
 	// Create a unique test work directory
-	testWorkDir := "/tmp/test-codex-session-" + time.Now().Format("20060102150405")
+	testWorkDir := t.TempDir()
 
 	t.Run("returns empty for non-existent sessions directory", func(t *testing.T) {
-		result := findCodexSessionID(testWorkDir)
+		home := t.TempDir()
+		result := findCodexSessionIDInDir(testWorkDir, filepath.Join(home, ".codex", "sessions"))
 		if result != "" {
 			t.Errorf("expected empty string for non-existent directory, got %q", result)
 		}
 	})
 
 	t.Run("finds session matching workDir", func(t *testing.T) {
+		home := t.TempDir()
 		// Create the sessions directory
 		sessionsDir := filepath.Join(home, ".codex", "sessions")
 		if err := os.MkdirAll(sessionsDir, 0755); err != nil {
 			t.Fatalf("Could not create sessions directory: %v", err)
 		}
-		defer os.RemoveAll(filepath.Join(home, ".codex"))
 
 		// Create a session file that contains the workDir
 		sessionFile := filepath.Join(sessionsDir, "test-session-12345.json")
@@ -393,18 +389,18 @@ func TestFindCodexSessionID(t *testing.T) {
 			t.Fatalf("Could not create session file: %v", err)
 		}
 
-		result := findCodexSessionID(testWorkDir)
+		result := findCodexSessionIDInDir(testWorkDir, filepath.Join(home, ".codex", "sessions"))
 		if result != "test-session-12345" {
 			t.Errorf("expected 'test-session-12345', got %q", result)
 		}
 	})
 
 	t.Run("returns most recent matching session", func(t *testing.T) {
+		home := t.TempDir()
 		sessionsDir := filepath.Join(home, ".codex", "sessions")
 		if err := os.MkdirAll(sessionsDir, 0755); err != nil {
 			t.Fatalf("Could not create sessions directory: %v", err)
 		}
-		defer os.RemoveAll(filepath.Join(home, ".codex"))
 
 		// Create older session
 		olderSession := filepath.Join(sessionsDir, "older-session.json")
@@ -420,18 +416,18 @@ func TestFindCodexSessionID(t *testing.T) {
 			t.Fatalf("Could not create session file: %v", err)
 		}
 
-		result := findCodexSessionID(testWorkDir)
+		result := findCodexSessionIDInDir(testWorkDir, filepath.Join(home, ".codex", "sessions"))
 		if result != "newer-session" {
 			t.Errorf("expected 'newer-session' (most recent), got %q", result)
 		}
 	})
 
 	t.Run("ignores sessions for other workDirs", func(t *testing.T) {
+		home := t.TempDir()
 		sessionsDir := filepath.Join(home, ".codex", "sessions")
 		if err := os.MkdirAll(sessionsDir, 0755); err != nil {
 			t.Fatalf("Could not create sessions directory: %v", err)
 		}
-		defer os.RemoveAll(filepath.Join(home, ".codex"))
 
 		// Create session for different workDir
 		otherSession := filepath.Join(sessionsDir, "other-session.json")
@@ -439,7 +435,7 @@ func TestFindCodexSessionID(t *testing.T) {
 			t.Fatalf("Could not create session file: %v", err)
 		}
 
-		result := findCodexSessionID(testWorkDir)
+		result := findCodexSessionIDInDir(testWorkDir, filepath.Join(home, ".codex", "sessions"))
 		if result != "" {
 			t.Errorf("expected empty string for non-matching workDir, got %q", result)
 		}
@@ -448,28 +444,24 @@ func TestFindCodexSessionID(t *testing.T) {
 
 // TestFindGeminiSessionID tests the Gemini session discovery function.
 func TestFindGeminiSessionID(t *testing.T) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		t.Skip("Could not get home directory")
-	}
-
 	// Create a unique test work directory
-	testWorkDir := "/tmp/test-gemini-session-" + time.Now().Format("20060102150405")
+	testWorkDir := t.TempDir()
 
 	t.Run("returns empty for non-existent tmp directory", func(t *testing.T) {
-		result := findGeminiSessionID(testWorkDir)
+		home := t.TempDir()
+		result := findGeminiSessionIDInDir(testWorkDir, filepath.Join(home, ".gemini", "tmp"))
 		if result != "" {
 			t.Errorf("expected empty string for non-existent directory, got %q", result)
 		}
 	})
 
 	t.Run("finds session in chats subdirectory", func(t *testing.T) {
+		home := t.TempDir()
 		// Create the Gemini tmp/chats directory structure
 		geminiChatsDir := filepath.Join(home, ".gemini", "tmp", "project-hash", "chats")
 		if err := os.MkdirAll(geminiChatsDir, 0755); err != nil {
 			t.Fatalf("Could not create chats directory: %v", err)
 		}
-		defer os.RemoveAll(filepath.Join(home, ".gemini", "tmp"))
 
 		// Create a session file that contains the workDir
 		sessionFile := filepath.Join(geminiChatsDir, "gemini-session-abc.json")
@@ -478,19 +470,19 @@ func TestFindGeminiSessionID(t *testing.T) {
 			t.Fatalf("Could not create session file: %v", err)
 		}
 
-		result := findGeminiSessionID(testWorkDir)
+		result := findGeminiSessionIDInDir(testWorkDir, filepath.Join(home, ".gemini", "tmp"))
 		if result != "gemini-session-abc" {
 			t.Errorf("expected 'gemini-session-abc', got %q", result)
 		}
 	})
 
 	t.Run("ignores files not in chats directory", func(t *testing.T) {
+		home := t.TempDir()
 		// Create the Gemini tmp directory with a file NOT in chats
 		geminiTmpDir := filepath.Join(home, ".gemini", "tmp", "project-hash")
 		if err := os.MkdirAll(geminiTmpDir, 0755); err != nil {
 			t.Fatalf("Could not create tmp directory: %v", err)
 		}
-		defer os.RemoveAll(filepath.Join(home, ".gemini", "tmp"))
 
 		// Create a session file NOT in chats subdirectory
 		sessionFile := filepath.Join(geminiTmpDir, "not-in-chats.json")
@@ -499,18 +491,18 @@ func TestFindGeminiSessionID(t *testing.T) {
 			t.Fatalf("Could not create session file: %v", err)
 		}
 
-		result := findGeminiSessionID(testWorkDir)
+		result := findGeminiSessionIDInDir(testWorkDir, filepath.Join(home, ".gemini", "tmp"))
 		if result != "" {
 			t.Errorf("expected empty string for file not in chats directory, got %q", result)
 		}
 	})
 
 	t.Run("returns most recent matching session", func(t *testing.T) {
+		home := t.TempDir()
 		geminiChatsDir := filepath.Join(home, ".gemini", "tmp", "project-hash2", "chats")
 		if err := os.MkdirAll(geminiChatsDir, 0755); err != nil {
 			t.Fatalf("Could not create chats directory: %v", err)
 		}
-		defer os.RemoveAll(filepath.Join(home, ".gemini", "tmp"))
 
 		// Create older session
 		olderSession := filepath.Join(geminiChatsDir, "older-gemini.json")
@@ -526,7 +518,7 @@ func TestFindGeminiSessionID(t *testing.T) {
 			t.Fatalf("Could not create session file: %v", err)
 		}
 
-		result := findGeminiSessionID(testWorkDir)
+		result := findGeminiSessionIDInDir(testWorkDir, filepath.Join(home, ".gemini", "tmp"))
 		if result != "newer-gemini" {
 			t.Errorf("expected 'newer-gemini' (most recent), got %q", result)
 		}

@@ -427,7 +427,11 @@ func findCodexSessionID(workDir string) string {
 		return ""
 	}
 
-	sessionsDir := filepath.Join(home, ".codex", "sessions")
+	return findCodexSessionIDInDir(workDir, filepath.Join(home, ".codex", "sessions"))
+}
+
+// findCodexSessionIDInDir scans an explicit directory so tests never touch the user's installation.
+func findCodexSessionIDInDir(workDir, sessionsDir string) string {
 	if _, err := os.Stat(sessionsDir); os.IsNotExist(err) {
 		return ""
 	}
