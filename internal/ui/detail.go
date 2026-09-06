@@ -878,6 +878,15 @@ func (m *DetailModel) setupPanesAsync() tea.Cmd {
 			return m.setupRemotePane(remoteLoc)
 		}
 
+		// Cleanup and resume can invoke tmux/process checks. Keep them with the
+		// asynchronous pane setup so the detail view can paint immediately.
+		if m.executor != nil {
+			m.executor.CleanupDuplicateWindows(taskID)
+			if m.executor.IsSuspended(taskID) {
+				m.executor.ResumeTask(taskID)
+			}
+		}
+
 		// Resolve the actual UI session name (avoid prefix-matching the wrong session).
 		if out, err := osExec.Command("tmux", "display-message", "-p", "#{session_name}").Output(); err == nil {
 			m.uiSessionName = strings.TrimSpace(string(out))

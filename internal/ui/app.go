@@ -375,13 +375,15 @@ type AppModel struct {
 	previousView View
 
 	// Dashboard state
-	tasks        []*db.Task
-	kanban       *KanbanBoard
-	loading      bool
-	err          error
-	notification string    // Notification banner text
-	notifyUntil  time.Time // When to hide notification
-	notifyTaskID int64     // Task ID that triggered the notification (for jumping to it)
+	tasks             []*db.Task
+	kanban            *KanbanBoard
+	loading           bool
+	tasksLoadInFlight bool
+	tasksLoadPending  bool
+	err               error
+	notification      string    // Notification banner text
+	notifyUntil       time.Time // When to hide notification
+	notifyTaskID      int64     // Task ID that triggered the notification (for jumping to it)
 	// Track task statuses to detect changes
 	prevStatuses map[int64]string
 	// Track tasks with active input notifications (for UI highlighting)
@@ -924,6 +926,13 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case tasksLoadedMsg:
+		m.tasksLoadInFlight = false
+		var nextLoad tea.Cmd
+		if m.tasksLoadPending {
+			m.tasksLoadPending = false
+			nextLoad = m.loadTasks()
+			cmds = append(cmds, nextLoad)
+		}
 		m.loading = false
 		m.tasks = msg.tasks
 		m.err = msg.err
@@ -936,7 +945,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// 1. In a real project folder we don't yet track? Offer to set it up
 			//    (LLM-enriched). Works on every launch, until dismissed per-path.
 			if model, cmd, offered := m.maybeOfferProjectCreation(); offered {
-				return model, cmd
+				return model, tea.Batch(cmd, nextLoad)
 			}
 
 			// 2. No real projects yet (only "personal") and we're in a junk folder:
@@ -945,7 +954,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.welcomeView = NewWelcomeModel(m.width, m.height, m.availableExecutors, tmuxAvailable())
 				m.previousView = m.currentView
 				m.currentView = ViewWelcome
-				return m, nil
+				return m, nextLoad
 			}
 		}
 
@@ -973,7 +982,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// Handles external approval (e.g. from tmux) where PreToolUse
 				// logs "Agent resumed working" and transitions to processing.
 				if m.tasksNeedingInput[t.ID] {
-					if prompt, isQ := m.latestChoicePrompt(t.ID); prompt == "" {
+					if prompt, isQ := msg.latestChoicePrompt(t.ID); prompt == "" {
 						delete(m.tasksNeedingInput, t.ID)
 						delete(m.questionPrompts, t.ID)
 						delete(m.executorPrompts, t.ID)
@@ -1009,7 +1018,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.tasksNeedingInput[t.ID] {
 				// Re-validate: if task is no longer blocked, the user provided input
 				// (e.g., from the detail view tmux pane). Also re-check permission prompts.
-				if prompt, isQ := m.latestChoicePrompt(t.ID); t.Status != db.StatusBlocked && prompt == "" {
+				if prompt, isQ := msg.latestChoicePrompt(t.ID); t.Status != db.StatusBlocked && prompt == "" {
 					delete(m.tasksNeedingInput, t.ID)
 					delete(m.questionPrompts, t.ID)
 					delete(m.executorPrompts, t.ID)
@@ -1018,13 +1027,13 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				continue
 			}
-			if prompt, isQ := m.latestChoicePrompt(t.ID); prompt != "" {
+			if prompt, isQ := msg.latestChoicePrompt(t.ID); prompt != "" {
 				m.tasksNeedingInput[t.ID] = true
 				m.questionPrompts[t.ID] = isQ
 				// Capture the tmux pane content for richer display of the prompt.
 				// This shows the actual executor output (including multiple choice options)
 				// rather than just the hook log summary.
-				paneContent := executor.CapturePaneContent(executor.TmuxSessionName(t.ID), 15)
+				paneContent := msg.choicePrompts[t.ID].paneContent
 				if paneContent != "" {
 					m.executorPrompts[t.ID] = paneContent
 				} else {
@@ -1052,18 +1061,16 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		m.kanban.SetHiddenDoneCount(msg.hiddenDoneCount)
-		// Refresh running process indicators for all tasks
-		running := executor.GetTasksWithRunningShellProcess()
-		// Also check currently viewed task (its panes are in task-ui, not daemon)
-		if m.selectedTask != nil && executor.HasRunningProcessInTaskUI() {
-			running[m.selectedTask.ID] = true
+		if msg.runningUITaskID != 0 && m.selectedTask != nil && m.selectedTask.ID == msg.runningUITaskID {
+			msg.runningProcesses[msg.runningUITaskID] = true
 		}
-		m.kanban.SetRunningProcesses(running)
+		m.kanban.SetRunningProcesses(msg.runningProcesses)
 		m.kanban.SetTasksNeedingInput(m.tasksNeedingInput)
 		m.kanban.SetBlockedByDeps(msg.blockedByDeps)
 
-		// Refresh per-agent activity lines for live mode (cheap no-op when off).
-		m.refreshLatestActivity()
+		if msg.activityErr == nil {
+			m.kanban.SetLatestActivity(msg.latestActivity)
+		}
 
 		// Load cached PR info from database for instant display
 		for _, t := range m.tasks {
@@ -1112,12 +1119,6 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.tasks[i].LastAccessedAt = &nowLocal
 					break
 				}
-			}
-			// Clean up any duplicate tmux windows for this task before switching
-			m.executor.CleanupDuplicateWindows(msg.task.ID)
-			// Resume task if it was suspended (blocked idle tasks get suspended to save memory)
-			if m.executor.IsSuspended(msg.task.ID) {
-				m.executor.ResumeTask(msg.task.ID)
 			}
 			var initCmd tea.Cmd
 			m.detailView, initCmd = NewDetailModel(msg.task, m.db, m.executor, m.width, m.height, msg.focusExecutor)
@@ -1482,13 +1483,6 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Poll database for task changes (hooks run in separate process)
 		if m.currentView == ViewDashboard && !m.loading {
 			cmds = append(cmds, m.loadTasks())
-			// Refresh running process indicators
-			running := executor.GetTasksWithRunningShellProcess()
-			// Also check currently viewed task (its panes are in task-ui, not daemon)
-			if m.selectedTask != nil && executor.HasRunningProcessInTaskUI() {
-				running[m.selectedTask.ID] = true
-			}
-			m.kanban.SetRunningProcesses(running)
 		}
 		cmds = append(cmds, m.tick())
 
@@ -4157,11 +4151,27 @@ func inferProjectCmd(path, configDir string) tea.Cmd {
 }
 
 // Messages
+type taskChoicePrompt struct {
+	text        string
+	isQuestion  bool
+	paneContent string
+}
+
 type tasksLoadedMsg struct {
-	tasks           []*db.Task
-	err             error
-	hiddenDoneCount int           // Number of done tasks not shown in kanban (older ones)
-	blockedByDeps   map[int64]int // Tasks blocked by dependencies (task ID -> open blocker count)
+	choicePrompts    map[int64]taskChoicePrompt
+	latestActivity   map[int64]*db.TaskLog
+	activityErr      error
+	runningProcesses map[int64]bool
+	runningUITaskID  int64
+	tasks            []*db.Task
+	err              error
+	hiddenDoneCount  int           // Number of done tasks not shown in kanban (older ones)
+	blockedByDeps    map[int64]int // Tasks blocked by dependencies (task ID -> open blocker count)
+}
+
+func (msg tasksLoadedMsg) latestChoicePrompt(taskID int64) (string, bool) {
+	prompt := msg.choicePrompts[taskID]
+	return prompt.text, prompt.isQuestion
 }
 
 type taskLoadedMsg struct {
@@ -4258,33 +4268,26 @@ const maxDoneTasksInKanban = 20
 // Matches the command palette's SearchTasks limit for consistency.
 const boardFilterDBSearchLimit = 100
 
-// refreshLatestActivity loads the most recent log line for each active task and
-// feeds it to the board for the per-card activity sub-line.
-func (m *AppModel) refreshLatestActivity() {
-	if m.db == nil {
-		return
-	}
-	var ids []int64
-	for _, t := range m.tasks {
-		if t.Status == db.StatusProcessing || t.Status == db.StatusBlocked {
-			ids = append(ids, t.ID)
-		}
-	}
-	if len(ids) == 0 {
-		m.kanban.SetLatestActivity(nil)
-		return
-	}
-	activity, err := m.db.GetLatestLogPerTask(ids)
-	if err != nil {
-		return
-	}
-	m.kanban.SetLatestActivity(activity)
-}
-
 func (m *AppModel) loadTasks() tea.Cmd {
+	// Coalesce filesystem notifications and polling while a refresh is running.
+	// Keep one follow-up so a mutation during the query is not lost.
+	if m.tasksLoadInFlight {
+		m.tasksLoadPending = true
+		return nil
+	}
+	m.tasksLoadInFlight = true
+	database := m.db
+	cachedInput := make(map[int64]bool, len(m.tasksNeedingInput))
+	for id, needsInput := range m.tasksNeedingInput {
+		cachedInput[id] = needsInput
+	}
+	var selectedTaskID int64
+	if m.selectedTask != nil {
+		selectedTaskID = m.selectedTask.ID
+	}
 	return func() tea.Msg {
 		// Load all non-done tasks (no limit)
-		activeTasks, err := m.db.ListTasks(db.ListTasksOptions{Limit: 0, IncludeClosed: false})
+		activeTasks, err := database.ListTasks(db.ListTasksOptions{Limit: 0, IncludeClosed: false})
 		if err != nil {
 			return tasksLoadedMsg{err: err}
 		}
@@ -4292,13 +4295,13 @@ func (m *AppModel) loadTasks() tea.Cmd {
 		// Load limited done tasks (most recently completed). OrderByRecency keeps
 		// old pinned tasks from crowding newer ones out of the capped slice; the
 		// kanban still floats pinned tasks to the top of the visible column.
-		doneTasks, err := m.db.ListTasks(db.ListTasksOptions{Status: db.StatusDone, Limit: maxDoneTasksInKanban, OrderByRecency: true})
+		doneTasks, err := database.ListTasks(db.ListTasksOptions{Status: db.StatusDone, Limit: maxDoneTasksInKanban, OrderByRecency: true})
 		if err != nil {
 			return tasksLoadedMsg{err: err}
 		}
 
 		// Count total done tasks to show "more" message
-		totalDone, err := m.db.CountTasksByStatus(db.StatusDone)
+		totalDone, err := database.CountTasksByStatus(db.StatusDone)
 		if err != nil {
 			return tasksLoadedMsg{err: err}
 		}
@@ -4313,7 +4316,7 @@ func (m *AppModel) loadTasks() tea.Cmd {
 		// Load dependency blocker counts for each task
 		blockedByDeps := make(map[int64]int)
 		for _, task := range tasks {
-			count, err := m.db.GetOpenBlockerCount(task.ID)
+			count, err := database.GetOpenBlockerCount(task.ID)
 			if err == nil && count > 0 {
 				blockedByDeps[task.ID] = count
 			}
@@ -4321,7 +4324,35 @@ func (m *AppModel) loadTasks() tea.Cmd {
 
 		// Note: PR/merge status is now checked via batch refresh (prRefreshTick)
 		// to avoid spawning processes for every task on every tick
-		return tasksLoadedMsg{tasks: tasks, err: err, hiddenDoneCount: hiddenDone, blockedByDeps: blockedByDeps}
+		prompts := make(map[int64]taskChoicePrompt)
+		for _, task := range tasks {
+			if task.Status == db.StatusDone || task.Status == db.StatusBacklog {
+				continue
+			}
+			text, isQuestion := loadChoicePrompt(database, task.ID)
+			prompt := taskChoicePrompt{text: text, isQuestion: isQuestion}
+			if text != "" && !cachedInput[task.ID] {
+				prompt.paneContent = executor.CapturePaneContent(executor.TmuxSessionName(task.ID), 15)
+			}
+			prompts[task.ID] = prompt
+		}
+		var activityIDs []int64
+		for _, task := range tasks {
+			if task.Status == db.StatusProcessing || task.Status == db.StatusBlocked {
+				activityIDs = append(activityIDs, task.ID)
+			}
+		}
+		activity, activityErr := database.GetLatestLogPerTask(activityIDs)
+		// External process checks must run here, never on the input loop.
+		running := executor.GetTasksWithRunningShellProcess()
+		var runningUITaskID int64
+		if selectedTaskID != 0 && executor.HasRunningProcessInTaskUI() {
+			runningUITaskID = selectedTaskID
+		}
+		return tasksLoadedMsg{
+			tasks: tasks, choicePrompts: prompts, err: err, hiddenDoneCount: hiddenDone, blockedByDeps: blockedByDeps,
+			latestActivity: activity, activityErr: activityErr, runningProcesses: running, runningUITaskID: runningUITaskID,
+		}
 	}
 }
 
@@ -4772,7 +4803,11 @@ func (m *AppModel) openPR(task *db.Task) tea.Cmd {
 // Only matches "Waiting for permission" and "question" entries, NOT
 // "Waiting for user input" (generic idle/end_turn scenarios).
 func (m *AppModel) latestChoicePrompt(taskID int64) (string, bool) {
-	logs, err := m.db.GetTaskLogs(taskID, 10)
+	return loadChoicePrompt(m.db, taskID)
+}
+
+func loadChoicePrompt(database *db.DB, taskID int64) (string, bool) {
+	logs, err := database.GetTaskLogs(taskID, 10)
 	if err != nil {
 		return "", false
 	}

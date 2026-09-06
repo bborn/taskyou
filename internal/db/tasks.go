@@ -1619,7 +1619,8 @@ func (db *DB) GetTaskLogs(taskID int64, limit int) ([]*TaskLog, error) {
 }
 
 // GetLatestLogPerTask returns the most recent log entry for each of the given task IDs.
-// Returns a map of taskID -> latest TaskLog. Uses a single efficient query.
+// Returns a map of taskID -> latest TaskLog. Seek to the last indexed row per
+// task instead of scanning its entire history with GROUP BY / MAX(id).
 func (db *DB) GetLatestLogPerTask(taskIDs []int64) (map[int64]*TaskLog, error) {
 	if len(taskIDs) == 0 {
 		return nil, nil
@@ -1635,13 +1636,11 @@ func (db *DB) GetLatestLogPerTask(taskIDs []int64) (map[int64]*TaskLog, error) {
 
 	query := fmt.Sprintf(`
 		SELECT tl.id, tl.task_id, tl.line_type, tl.content, tl.created_at
-		FROM task_logs tl
-		INNER JOIN (
-			SELECT task_id, MAX(id) as max_id
-			FROM task_logs
-			WHERE task_id IN (%s)
-			GROUP BY task_id
-		) latest ON tl.id = latest.max_id
+		FROM tasks t
+		JOIN task_logs tl ON tl.id = (
+			SELECT id FROM task_logs WHERE task_id = t.id ORDER BY id DESC LIMIT 1
+		)
+		WHERE t.id IN (%s)
 	`, strings.Join(placeholders, ","))
 
 	rows, err := db.Query(query, args...)
