@@ -24,15 +24,18 @@ var (
 
 // CommandPaletteModel represents the Command+P task switcher and AI command input.
 type CommandPaletteModel struct {
-	db            *db.DB
-	allTasks      []*db.Task
-	filteredTasks []*db.Task
-	projects      []*db.Project
-	searchInput   textinput.Model
-	selectedIndex int
-	width         int
-	height        int
-	maxVisible    int
+	db             *db.DB
+	allTasks       []*db.Task
+	filteredTasks  []*db.Task
+	projects       []*db.Project
+	searchInput    textinput.Model
+	selectedIndex  int
+	width          int
+	height         int
+	maxVisible     int
+	searchInFlight bool
+	searchPending  bool
+	enterPending   bool
 
 	// Action mode: entered by typing a leading ">". Filters plugin actions
 	// instead of tasks. Task-switching behavior is unchanged when not in it.
@@ -118,6 +121,22 @@ func (m *CommandPaletteModel) Init() tea.Cmd {
 // Update handles messages.
 func (m *CommandPaletteModel) Update(msg tea.Msg) (*CommandPaletteModel, tea.Cmd) {
 	switch msg := msg.(type) {
+	case paletteSearchMsg:
+		if msg.owner != m {
+			return m, nil
+		}
+		m.searchInFlight = false
+		if msg.query != m.searchInput.Value() {
+			return m, m.searchAsync()
+		}
+		m.searchPending = false
+		m.filteredTasks = msg.tasks
+		m.selectedIndex = min(m.selectedIndex, max(0, len(msg.tasks)-1))
+		if m.enterPending {
+			m.enterPending = false
+			return m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+		}
+		return m, nil
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "esc":
@@ -129,6 +148,10 @@ func (m *CommandPaletteModel) Update(msg tea.Msg) (*CommandPaletteModel, tea.Cmd
 					sel := m.filteredActions[m.selectedIndex]
 					m.selectedAction = &sel
 				}
+				return m, nil
+			}
+			if m.searchPending {
+				m.enterPending = true
 				return m, nil
 			}
 			query := strings.TrimSpace(m.searchInput.Value())
@@ -176,12 +199,57 @@ func (m *CommandPaletteModel) Update(msg tea.Msg) (*CommandPaletteModel, tea.Cmd
 
 		// Update search input
 		var cmd tea.Cmd
+		oldQuery := m.searchInput.Value()
 		m.searchInput, cmd = m.searchInput.Update(msg)
-		m.filter()
+		if oldQuery != m.searchInput.Value() {
+			m.enterPending = false
+			cmd = tea.Batch(cmd, m.searchAsync())
+		}
 		return m, cmd
 	}
 
 	return m, nil
+}
+
+// Search uses a private snapshot and one worker. Closing/reopening the palette
+// cannot apply an old worker's results to a different palette instance.
+type paletteSearchMsg struct {
+	owner *CommandPaletteModel
+	query string
+	tasks []*db.Task
+}
+
+func (m *CommandPaletteModel) searchAsync() tea.Cmd {
+	query := m.searchInput.Value()
+	if strings.TrimSpace(query) == "" || strings.HasPrefix(strings.TrimSpace(query), ">") {
+		m.searchPending = false
+		m.filter()
+		return nil
+	}
+	m.actionMode = false
+	m.searchPending = true
+	if m.searchInFlight {
+		return nil
+	}
+	m.searchInFlight = true
+	worker := &CommandPaletteModel{db: m.db, projects: m.projects, allTasks: snapshotSearchTasks(m.allTasks), searchInput: textinput.New()}
+	worker.searchInput.SetValue(query)
+	return func() tea.Msg {
+		worker.filterTasks()
+		return paletteSearchMsg{owner: m, query: query, tasks: worker.filteredTasks}
+	}
+}
+
+// Keep task values stable while search workers read them. One backing array
+// avoids an allocation per task when a large board starts a search.
+func snapshotSearchTasks(tasks []*db.Task) []*db.Task {
+	values := make([]db.Task, len(tasks))
+	out := make([]*db.Task, len(tasks))
+	for i, task := range tasks {
+		values[i] = *task
+		out[i] = &values[i]
+	}
+	return out
 }
 
 // scoredTask holds a task with its fuzzy match score for sorting
@@ -651,6 +719,8 @@ func (m *CommandPaletteModel) View() string {
 	headerText := "Go to Task"
 	if m.actionMode {
 		headerText = "Run Plugin Action"
+	} else if m.searchPending {
+		headerText = "Searching…"
 	} else if len(m.filteredTasks) == 0 && query != "" {
 		headerText = "AI Command"
 	}
@@ -677,7 +747,9 @@ func (m *CommandPaletteModel) View() string {
 			Foreground(ColorMuted).
 			Italic(true).
 			Padding(1, 0)
-		if query != "" {
+		if m.searchPending {
+			taskList.WriteString(emptyStyle.Render("Searching tasks…"))
+		} else if query != "" {
 			// Show AI command hint when there's input but no matching tasks
 			taskList.WriteString(emptyStyle.Render("Press Enter to run as AI command"))
 		} else {

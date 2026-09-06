@@ -499,6 +499,8 @@ type AppModel struct {
 	filterInput        textinput.Model
 	filterActive       bool   // Whether filter mode is active (typing in filter)
 	filterText         string // Current filter text (persists when not typing)
+	filterRevision     uint64
+	filterInFlight     bool
 	filterAutocomplete *FilterAutocompleteModel
 	showFilterDropdown bool // Whether to show the project autocomplete dropdown
 
@@ -733,7 +735,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// the chain breaks permanently — polling stops, DB watcher stops, etc.
 	isSystemMsg := false
 	switch msg.(type) {
-	case tickMsg, focusTickMsg, dbChangeMsg, taskEventMsg, tasksLoadedMsg, prRefreshTickMsg, boardTerminalsMsg, eventPromptMsg, focusStateMsg:
+	case tickMsg, focusTickMsg, dbChangeMsg, taskEventMsg, tasksLoadedMsg, prRefreshTickMsg, boardTerminalsMsg, eventPromptMsg, focusStateMsg, boardFilterMsg:
 		isSystemMsg = true
 	case actionFinishedMsg:
 		// A plugin action completed off the UI loop; its result must reach the
@@ -1059,7 +1061,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		// Reapply filter if one is active
-		m.applyFilter()
+		cmds = append(cmds, m.applyFilter())
 
 		// A task named with --task is selected here rather than at construction:
 		// the board holds no tasks until applyFilter has run, so selecting any
@@ -1093,6 +1095,9 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.initialPRRefreshDone = true
 			cmds = append(cmds, m.refreshAllPRs())
 		}
+
+	case boardFilterMsg:
+		cmds = append(cmds, m.finishBoardFilter(msg))
 
 	case boardTerminalsMsg:
 		m.terminalLoadInFlight = false
@@ -1472,7 +1477,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// tasks — otherwise a real-time event repopulates the board with the
 			// full task list while a filter is active, making the filtered column
 			// jump under the user mid-navigation.
-			m.applyFilter()
+			cmds = append(cmds, m.applyFilter())
 			m.kanban.SetTasksNeedingInput(m.tasksNeedingInput)
 
 			// Update detail view if showing this task
@@ -2211,10 +2216,10 @@ func (m *AppModel) updateFilterMode(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.filterInput.SetValue(newValue)
 				m.filterInput.SetCursor(openBracket)
 				m.filterText = newValue
-				m.applyFilter()
+				cmd := m.applyFilter()
 				m.showFilterDropdown = false
 				m.filterAutocomplete.Reset()
-				return m, nil
+				return m, cmd
 			}
 		}
 
@@ -2234,10 +2239,10 @@ func (m *AppModel) updateFilterMode(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.filterInput.SetValue(prefix + "[" + name + "] ")
 				m.filterInput.SetCursor(len(m.filterInput.Value()))
 				m.filterText = m.filterInput.Value()
-				m.applyFilter()
+				cmd := m.applyFilter()
 				m.showFilterDropdown = false
 				m.filterAutocomplete.Reset()
-				return m, nil
+				return m, cmd
 			}
 		}
 		if keyMsg.String() == "tab" {
@@ -2293,7 +2298,7 @@ func (m *AppModel) handleFilterInput(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	if newText := m.filterInput.Value(); newText != m.filterText {
 		m.filterText = newText
-		m.applyFilter()
+		cmd = tea.Batch(cmd, m.applyFilter())
 
 		// Update autocomplete: show when the last "[" is unclosed (no matching "]")
 		if lastBracket := strings.LastIndex(newText, "["); lastBracket >= 0 {
@@ -2356,7 +2361,42 @@ func (m *AppModel) resolveProjectAliases(query string) string {
 
 // applyFilter filters the tasks based on current filter text using fuzzy matching.
 // Uses the same matching logic as the command palette (Ctrl+P) for consistency.
-func (m *AppModel) applyFilter() {
+func (m *AppModel) applyFilter() tea.Cmd {
+	m.filterRevision++
+	kind, text := parseFilterKind(m.filterText)
+	if text == "" {
+		m.kanban.SetTasks(m.collapseForBoard(filterTasksByKind(m.tasks, kind)))
+		return nil
+	}
+	if m.filterInFlight {
+		return nil
+	}
+	m.filterInFlight = true
+	// Copy task values before leaving the input loop; events can mutate the
+	// live task objects while a database search is running.
+	snapshot := &AppModel{db: m.db, filterText: m.filterText, tasks: snapshotSearchTasks(m.tasks)}
+	revision := m.filterRevision
+	return func() tea.Msg {
+		return boardFilterMsg{revision: revision, query: snapshot.filterText, tasks: snapshot.filteredBoardTasks()}
+	}
+}
+
+type boardFilterMsg struct {
+	revision uint64
+	query    string
+	tasks    []*db.Task
+}
+
+func (m *AppModel) finishBoardFilter(msg boardFilterMsg) tea.Cmd {
+	m.filterInFlight = false
+	if msg.revision != m.filterRevision || msg.query != m.filterText {
+		return m.applyFilter()
+	}
+	m.kanban.SetTasks(m.collapseForBoard(msg.tasks))
+	return nil
+}
+
+func (m *AppModel) filteredBoardTasks() []*db.Task {
 	// A board mixes workflow steps and standalone tasks, and there was no way to
 	// look at just one population. `is:workflow` / `is:task` splits them, and is
 	// stripped from the query before fuzzy matching so it never pollutes scoring.
@@ -2364,14 +2404,13 @@ func (m *AppModel) applyFilter() {
 
 	if filterText == "" {
 		// No keyword left: show everything, or just the requested kind.
-		m.kanban.SetTasks(m.collapseForBoard(filterTasksByKind(m.tasks, kind)))
-		return
+		return filterTasksByKind(m.tasks, kind)
 	}
 
 	queryLower := strings.ToLower(filterText)
 
 	// Resolve project aliases in "[project]" filter syntax (supports multiple tags)
-	if strings.Contains(queryLower, "[") {
+	if m.db != nil && strings.Contains(queryLower, "[") {
 		queryLower = m.resolveProjectAliases(queryLower)
 	}
 
@@ -2422,7 +2461,7 @@ func (m *AppModel) applyFilter() {
 	for i, st := range scored {
 		filtered[i] = st.task
 	}
-	m.kanban.SetTasks(m.collapseForBoard(filterTasksByKind(filtered, kind)))
+	return filterTasksByKind(filtered, kind)
 }
 
 // filterKind values for the `is:` filter token.

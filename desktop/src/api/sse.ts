@@ -2,10 +2,10 @@ import { apiBase } from "./client";
 import type { LogLine } from "./types";
 
 /// Subscribe to board-change notifications. The server pushes a snapshot on
-/// every event_log change; we use it purely as a change signal and let the
+/// every event_log change; request only a change signal and let the
 /// store refetch the richer /api/tasks payload.
 export function subscribeBoard(onChange: () => void): () => void {
-  const source = new EventSource(`${apiBase()}/api/board/stream`);
+  const source = new EventSource(`${apiBase()}/api/board/stream?signal=true`);
   source.addEventListener("board", onChange);
   source.onerror = () => {
     // EventSource auto-reconnects; nothing to do.

@@ -78,7 +78,40 @@ mouse-wheel behavior. Raw measurements and synthetic fixtures remain under
 
 ## Remaining performance work
 
-The broader audit is still active: asynchronous detail refresh/cleanup, asynchronous
-search, eliminating duplicate desktop board fetches, and separating daemon
-maintenance from queue dispatch remain to implement and verify. The scrolling
+The broader audit is still active: asynchronous detail refresh/cleanup and
+separating daemon maintenance from queue dispatch remain to implement and verify.
+Board/palette search and duplicate desktop board snapshots were addressed in the
+follow-up below. The scrolling
 results above do not claim those unrelated paths are complete.
+
+
+## Search and desktop refresh follow-up
+
+Board filtering and command-palette keyword searches now run as Bubble Tea
+commands. Each has at most one search in flight and retains only the latest query.
+Searches read copies of task values; stale results cannot repaint a newer query.
+Palette Enter waits for the current search, and old palette instances cannot
+publish results into a reopened palette. Keyword matching, project aliases,
+workflow filters, and historical-task database supplementation are preserved.
+
+A 10,000-task search setup benchmark measures **0.366 ms**, 5 allocations. This
+is input-loop setup only: it excludes database search, scoring, and rendering.
+Those operations execute in the background. One actual QA search smoke test found
+board task #1234 in **36.9 ms** and palette task #9999 in **33.82 ms**, measured
+from completed text injection to captured result. These are individual checks,
+not latency distributions.
+
+A fresh 120 Down / 120 Up scroll run at 60 keys/sec with the synthetic log writer
+measured **13.82 / 12.55 ms median**, **20.68 / 19.30 ms p95**, and **22.80 / 21.04
+ms worst**. Both final IDs were correct; 238 of 240 intermediate selections were
+observed. Raw results: `/private/tmp/ty-qa-scroll/async-search.json` and
+`search-smoke.json`.
+
+The desktop subscribes to a signal-only board stream instead of requesting a
+snapshot it discards. The default SSE snapshot contract is retained. Desktop
+refreshes coalesce overlapping requests and serialize task/activity updates.
+Full task data remains available for body searches and editing.
+
+Validation: UI, DB, parity, server and web Go suites; targeted search race tests;
+Node refresh/log tests; desktop typecheck/production build; private seeded TUI
+scroll/search checks. Tests use temporary data, and the QA executor stays frozen.

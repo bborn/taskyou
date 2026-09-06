@@ -1,5 +1,6 @@
 import { useSyncExternalStore } from "react";
 import { toast as sonnerToast } from "sonner";
+import { CoalescedRefresh } from "./lib/refresh";
 import { api } from "./api/client";
 import { subscribeBoard } from "./api/sse";
 import type { ExecutorInfo, LogLine, Project, Task, TaskType } from "./api/types";
@@ -83,6 +84,12 @@ class Store {
   private prevStatuses = new Map<number, string>();
   private refreshTimer: ReturnType<typeof setTimeout> | null = null;
   private unsubscribeBoard: (() => void) | null = null;
+  private taskRefresh = new CoalescedRefresh(async () => {
+    const tasks = await api.listTasks({ all: true });
+    this.detectTransitions(tasks);
+    this.set({ tasks });
+    await this.refreshActivity(tasks);
+  });
 
   getState = (): AppState => this.state;
 
@@ -119,7 +126,7 @@ class Store {
     ]);
     this.detectTransitions(tasks);
     this.set({ tasks, projects, types, executors });
-    void this.refreshActivity(tasks);
+    await this.refreshActivity(tasks);
   }
 
   /** Debounced refresh used by the SSE change signal. */
@@ -135,11 +142,8 @@ class Store {
     }, 200);
   }
 
-  async refreshTasks() {
-    const tasks = await api.listTasks({ all: true });
-    this.detectTransitions(tasks);
-    this.set({ tasks });
-    void this.refreshActivity(tasks);
+  refreshTasks() {
+    return this.taskRefresh.request();
   }
 
   private async refreshActivity(tasks: Task[]) {
