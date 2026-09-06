@@ -43,8 +43,12 @@ func TestDashboardRefreshRunsProcessChecksInCommand(t *testing.T) {
 	if msg.err != nil {
 		t.Fatal(msg.err)
 	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("first board load waited for process check: %v", err)
+	}
+	terminalMsg := m.loadBoardTerminals(msg.choicePrompts)().(boardTerminalsMsg)
 	if _, err := os.Stat(marker); err != nil {
-		t.Fatalf("background command did not run process check: %v", err)
+		t.Fatalf("terminal enrichment did not run process check: %v", err)
 	}
 	if err := os.Remove(marker); err != nil {
 		t.Fatal(err)
@@ -52,6 +56,7 @@ func TestDashboardRefreshRunsProcessChecksInCommand(t *testing.T) {
 	// Applying the completed snapshot must not need another database read.
 	m.db = nil
 	m.Update(msg)
+	m.Update(terminalMsg)
 	if log := m.kanban.latestActivity[task.ID]; log == nil || log.Content != "Checking retry coverage" {
 		t.Fatalf("activity not delivered: %+v", log)
 	}
@@ -98,8 +103,8 @@ func TestDashboardRefreshAppliesPromptSnapshot(t *testing.T) {
 	if msg.err != nil {
 		t.Fatal(msg.err)
 	}
-	if err := os.Remove(marker); err != nil {
-		t.Fatal(err)
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("prompt snapshot waited for terminal capture: %v", err)
 	}
 	m.db = nil
 	m.Update(msg)
@@ -108,5 +113,52 @@ func TestDashboardRefreshAppliesPromptSnapshot(t *testing.T) {
 	}
 	if _, err := os.Stat(marker); !os.IsNotExist(err) {
 		t.Fatalf("applying a prompt captured a pane synchronously: %v", err)
+	}
+}
+
+func TestStartupShowsBoardBeforeTerminalEnrichment(t *testing.T) {
+	m, marker := refreshTestModel(t)
+	m.loading = true
+	for i := 0; i < 80; i++ {
+		task := &db.Task{Title: "Pending startup question", Status: db.StatusBlocked}
+		if err := m.db.CreateTask(task); err != nil {
+			t.Fatal(err)
+		}
+		if err := m.db.AppendTaskLog(task.ID, "question", "Choose a policy?"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	msg := m.loadTasks()().(tasksLoadedMsg)
+	if msg.err != nil {
+		t.Fatal(msg.err)
+	}
+	m.Update(msg)
+	if m.loading || len(m.tasks) != 80 || !m.terminalLoadInFlight {
+		t.Fatal("board did not become usable before terminal enrichment")
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("startup waited for terminal processes: %v", err)
+	}
+	// A late terminal result must not resurrect a question resolved meanwhile.
+	id := m.tasks[0].ID
+	delete(m.tasksNeedingInput, id)
+	delete(m.executorPrompts, id)
+	m.Update(boardTerminalsMsg{prompts: map[int64]taskChoicePrompt{id: {text: "Choose a policy?", paneContent: "stale options"}}})
+	if m.executorPrompts[id] != "" || m.terminalLoadInFlight {
+		t.Fatal("late enrichment resurrected resolved prompt or kept its slot")
+	}
+}
+
+func TestTerminalEnrichmentKeepsCurrentPrompt(t *testing.T) {
+	m, _ := refreshTestModel(t)
+	m.tasksNeedingInput[1] = true
+	m.executorPrompts[1] = "Current question"
+	m.Update(boardTerminalsMsg{prompts: map[int64]taskChoicePrompt{1: {text: "Old question", paneContent: "Old options"}}})
+	if m.executorPrompts[1] != "Current question" {
+		t.Fatal("old capture replaced current question")
+	}
+	m.Update(boardTerminalsMsg{prompts: map[int64]taskChoicePrompt{1: {text: "Current question", paneContent: "Current options"}}})
+	if m.executorPrompts[1] != "Current options" {
+		t.Fatal("current capture was not applied")
 	}
 }

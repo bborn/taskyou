@@ -2917,33 +2917,35 @@ func CapturePaneContent(windowTarget string, lines int) string {
 	if windowTarget == "" {
 		return ""
 	}
-
-	// If it's already a pane ID (starts with %), use directly; otherwise append .0
-	target := windowTarget
-	if !strings.HasPrefix(windowTarget, "%") {
-		target = windowTarget + ".0"
-	}
-
-	// Try capture with a 3-second timeout and one retry
 	for attempt := 0; attempt < 2; attempt++ {
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-		out, err := tmuxCmd(ctx, "capture-pane", "-t", target, "-p", "-S", fmt.Sprintf("-%d", lines)).Output()
+		content := CapturePaneContentContext(ctx, windowTarget, lines)
 		cancel()
-
-		if err == nil {
-			content := strings.TrimRight(string(out), " \t\n\r")
-			if content != "" {
-				return content
-			}
+		if content != "" {
+			return content
 		}
-
-		// Only retry once after a short delay
 		if attempt == 0 {
 			time.Sleep(200 * time.Millisecond)
 		}
 	}
-
 	return ""
+}
+
+// CapturePaneContentContext makes one best-effort capture without retrying.
+// Callers doing optional UI enrichment can share a deadline across all panes.
+func CapturePaneContentContext(ctx context.Context, windowTarget string, lines int) string {
+	if windowTarget == "" {
+		return ""
+	}
+	target := windowTarget
+	if !strings.HasPrefix(windowTarget, "%") {
+		target += ".0"
+	}
+	out, err := tmuxCmd(ctx, "capture-pane", "-t", target, "-p", "-S", fmt.Sprintf("-%d", lines)).Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimRight(string(out), " \t\n\r")
 }
 
 // FormatSessionHandoff formats captured pane content into a handoff prompt for the new executor.

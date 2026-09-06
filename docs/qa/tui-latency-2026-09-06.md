@@ -46,3 +46,28 @@ pane teardown.
 
 The local `bin/ty` was rebuilt. Existing TUI processes must be reopened to run
 the new binary.
+
+## Startup follow-up
+
+The first patch still gated the loading screen on terminal enrichment. Pending
+questions with missing tmux panes incurred a 200 ms retry each, sequentially.
+The original navigation measurements had no pending-question logs and started
+after a fixed warmup, so they missed this startup case.
+
+Added pending-question logs to 80 blocked tasks in the same isolated synthetic
+fixture. Timed tmux session creation through the first captured board containing
+both Backlog and In Progress, with the executor frozen. The previous binary took
+8,971 ms. The final rebuilt binary took **130.9, 75.9, and 72.1 ms** on three
+launches. These are warm local database measurements, including tmux IPC, and
+do not measure physical iTerm rendering or a stopped production daemon's startup.
+
+Task data, hook prompt summaries, and activity now arrive before terminal checks.
+Terminal enrichment runs separately, with only one command in flight. Optional
+pane captures do not retry and share a two-second deadline. Late captures cannot
+overwrite a replaced or resolved prompt. Existing retry behavior remains for
+callers that need reliable pane capture (such as session handoff).
+
+Regression coverage loads 80 pending questions, verifies the board is usable
+before any tmux command, and checks stale and current enrichment results.
+Database/UI/parity tests and race-enabled refresh/startup tests passed. The final
+binary was rebuilt locally; reopen the TUI to use it.

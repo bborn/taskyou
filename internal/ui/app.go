@@ -375,15 +375,16 @@ type AppModel struct {
 	previousView View
 
 	// Dashboard state
-	tasks             []*db.Task
-	kanban            *KanbanBoard
-	loading           bool
-	tasksLoadInFlight bool
-	tasksLoadPending  bool
-	err               error
-	notification      string    // Notification banner text
-	notifyUntil       time.Time // When to hide notification
-	notifyTaskID      int64     // Task ID that triggered the notification (for jumping to it)
+	tasks                []*db.Task
+	kanban               *KanbanBoard
+	loading              bool
+	tasksLoadInFlight    bool
+	terminalLoadInFlight bool
+	tasksLoadPending     bool
+	err                  error
+	notification         string    // Notification banner text
+	notifyUntil          time.Time // When to hide notification
+	notifyTaskID         int64     // Task ID that triggered the notification (for jumping to it)
 	// Track task statuses to detect changes
 	prevStatuses map[int64]string
 	// Track tasks with active input notifications (for UI highlighting)
@@ -933,6 +934,10 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			nextLoad = m.loadTasks()
 			cmds = append(cmds, nextLoad)
 		}
+		if msg.err == nil && !m.terminalLoadInFlight {
+			m.terminalLoadInFlight = true
+			cmds = append(cmds, m.loadBoardTerminals(msg.choicePrompts))
+		}
 		m.loading = false
 		m.tasks = msg.tasks
 		m.err = msg.err
@@ -945,7 +950,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// 1. In a real project folder we don't yet track? Offer to set it up
 			//    (LLM-enriched). Works on every launch, until dismissed per-path.
 			if model, cmd, offered := m.maybeOfferProjectCreation(); offered {
-				return model, tea.Batch(cmd, nextLoad)
+				return model, tea.Batch(append(cmds, cmd)...)
 			}
 
 			// 2. No real projects yet (only "personal") and we're in a junk folder:
@@ -954,7 +959,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.welcomeView = NewWelcomeModel(m.width, m.height, m.availableExecutors, tmuxAvailable())
 				m.previousView = m.currentView
 				m.currentView = ViewWelcome
-				return m, nextLoad
+				return m, tea.Batch(cmds...)
 			}
 		}
 
@@ -1061,10 +1066,6 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		m.kanban.SetHiddenDoneCount(msg.hiddenDoneCount)
-		if msg.runningUITaskID != 0 && m.selectedTask != nil && m.selectedTask.ID == msg.runningUITaskID {
-			msg.runningProcesses[msg.runningUITaskID] = true
-		}
-		m.kanban.SetRunningProcesses(msg.runningProcesses)
 		m.kanban.SetTasksNeedingInput(m.tasksNeedingInput)
 		m.kanban.SetBlockedByDeps(msg.blockedByDeps)
 
@@ -1085,6 +1086,19 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if !m.initialPRRefreshDone {
 			m.initialPRRefreshDone = true
 			cmds = append(cmds, m.refreshAllPRs())
+		}
+
+	case boardTerminalsMsg:
+		m.terminalLoadInFlight = false
+		if msg.runningUITaskID != 0 && m.selectedTask != nil && m.selectedTask.ID == msg.runningUITaskID {
+			msg.runningProcesses[msg.runningUITaskID] = true
+		}
+		m.kanban.SetRunningProcesses(msg.runningProcesses)
+		for id, prompt := range msg.prompts {
+			// A hook or refresh may have resolved/replaced the prompt meanwhile.
+			if m.tasksNeedingInput[id] && m.executorPrompts[id] == prompt.text && prompt.paneContent != "" {
+				m.executorPrompts[id] = prompt.paneContent
+			}
 		}
 
 	case projectInferredMsg:
@@ -4158,15 +4172,13 @@ type taskChoicePrompt struct {
 }
 
 type tasksLoadedMsg struct {
-	choicePrompts    map[int64]taskChoicePrompt
-	latestActivity   map[int64]*db.TaskLog
-	activityErr      error
-	runningProcesses map[int64]bool
-	runningUITaskID  int64
-	tasks            []*db.Task
-	err              error
-	hiddenDoneCount  int           // Number of done tasks not shown in kanban (older ones)
-	blockedByDeps    map[int64]int // Tasks blocked by dependencies (task ID -> open blocker count)
+	choicePrompts   map[int64]taskChoicePrompt
+	latestActivity  map[int64]*db.TaskLog
+	activityErr     error
+	tasks           []*db.Task
+	err             error
+	hiddenDoneCount int           // Number of done tasks not shown in kanban (older ones)
+	blockedByDeps   map[int64]int // Tasks blocked by dependencies (task ID -> open blocker count)
 }
 
 func (msg tasksLoadedMsg) latestChoicePrompt(taskID int64) (string, bool) {
@@ -4277,14 +4289,6 @@ func (m *AppModel) loadTasks() tea.Cmd {
 	}
 	m.tasksLoadInFlight = true
 	database := m.db
-	cachedInput := make(map[int64]bool, len(m.tasksNeedingInput))
-	for id, needsInput := range m.tasksNeedingInput {
-		cachedInput[id] = needsInput
-	}
-	var selectedTaskID int64
-	if m.selectedTask != nil {
-		selectedTaskID = m.selectedTask.ID
-	}
 	return func() tea.Msg {
 		// Load all non-done tasks (no limit)
 		activeTasks, err := database.ListTasks(db.ListTasksOptions{Limit: 0, IncludeClosed: false})
@@ -4331,9 +4335,6 @@ func (m *AppModel) loadTasks() tea.Cmd {
 			}
 			text, isQuestion := loadChoicePrompt(database, task.ID)
 			prompt := taskChoicePrompt{text: text, isQuestion: isQuestion}
-			if text != "" && !cachedInput[task.ID] {
-				prompt.paneContent = executor.CapturePaneContent(executor.TmuxSessionName(task.ID), 15)
-			}
 			prompts[task.ID] = prompt
 		}
 		var activityIDs []int64
@@ -4343,16 +4344,53 @@ func (m *AppModel) loadTasks() tea.Cmd {
 			}
 		}
 		activity, activityErr := database.GetLatestLogPerTask(activityIDs)
-		// External process checks must run here, never on the input loop.
-		running := executor.GetTasksWithRunningShellProcess()
-		var runningUITaskID int64
-		if selectedTaskID != 0 && executor.HasRunningProcessInTaskUI() {
-			runningUITaskID = selectedTaskID
-		}
 		return tasksLoadedMsg{
 			tasks: tasks, choicePrompts: prompts, err: err, hiddenDoneCount: hiddenDone, blockedByDeps: blockedByDeps,
-			latestActivity: activity, activityErr: activityErr, runningProcesses: running, runningUITaskID: runningUITaskID,
+			latestActivity: activity, activityErr: activityErr,
 		}
+	}
+}
+
+// Terminal enrichment must never delay the first board paint or database refreshes.
+// Only one check runs at a time; missing sessions use the hook summary immediately.
+type boardTerminalsMsg struct {
+	runningProcesses map[int64]bool
+	runningUITaskID  int64
+	prompts          map[int64]taskChoicePrompt
+}
+
+func (m *AppModel) loadBoardTerminals(prompts map[int64]taskChoicePrompt) tea.Cmd {
+	// Capture newly detected prompts once, as before; cached prompts need no process.
+	pending := make(map[int64]taskChoicePrompt)
+	for id, prompt := range prompts {
+		if prompt.text != "" && !m.tasksNeedingInput[id] {
+			pending[id] = prompt
+		}
+	}
+	var selectedTaskID int64
+	if m.selectedTask != nil {
+		selectedTaskID = m.selectedTask.ID
+	}
+	return func() tea.Msg {
+		running := executor.GetTasksWithRunningShellProcess()
+		msg := boardTerminalsMsg{runningProcesses: running, prompts: make(map[int64]taskChoicePrompt)}
+		if selectedTaskID != 0 && executor.HasRunningProcessInTaskUI() {
+			msg.runningUITaskID = selectedTaskID
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		for id, prompt := range pending {
+			if ctx.Err() != nil {
+				break
+			}
+			if prompt.text == "" {
+				continue
+			}
+			prompt.paneContent = executor.CapturePaneContentContext(ctx, executor.TmuxSessionName(id), 15)
+			prompt.text = strings.TrimPrefix(prompt.text, "Waiting for permission: ")
+			msg.prompts[id] = prompt
+		}
+		return msg
 	}
 }
 
